@@ -250,14 +250,18 @@ func upsertItem(ctx context.Context, tx *sql.Tx, item model.PlayableItem, now in
 
 func upsertTrack(ctx context.Context, tx *sql.Tx, itemID int64, tr model.Track) error {
 	_, err := tx.ExecContext(ctx, `INSERT INTO track
-		(item_id, artist, artist_sort, album, album_artist, track_no, disc_no, year, genre, mbid)
-		VALUES (?,?,?,?,?,?,?,?,?,?)
+		(item_id, artist, artist_sort, album, album_artist, composer, comment,
+		 track_no, track_total, disc_no, disc_total, year, genre, compilation, isrc, mbid)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(item_id) DO UPDATE SET
 			artist=excluded.artist, artist_sort=excluded.artist_sort, album=excluded.album,
-			album_artist=excluded.album_artist, track_no=excluded.track_no, disc_no=excluded.disc_no,
-			year=excluded.year, genre=excluded.genre, mbid=excluded.mbid`,
-		itemID, tr.Artist, tr.ArtistSort, tr.Album, tr.AlbumArtist,
-		nullInt(tr.TrackNo), nullInt(tr.DiscNo), nullInt(tr.Year), tr.Genre, nullStr(tr.MBID))
+			album_artist=excluded.album_artist, composer=excluded.composer, comment=excluded.comment,
+			track_no=excluded.track_no, track_total=excluded.track_total, disc_no=excluded.disc_no,
+			disc_total=excluded.disc_total, year=excluded.year, genre=excluded.genre,
+			compilation=excluded.compilation, isrc=excluded.isrc, mbid=excluded.mbid`,
+		itemID, tr.Artist, tr.ArtistSort, tr.Album, tr.AlbumArtist, tr.Composer, tr.Comment,
+		nullInt(tr.TrackNo), nullInt(tr.TrackTotal), nullInt(tr.DiscNo), nullInt(tr.DiscTotal),
+		nullInt(tr.Year), tr.Genre, boolInt(tr.Compilation), tr.ISRC, nullStr(tr.MBID))
 	return err
 }
 
@@ -344,6 +348,13 @@ func nullInt64(n int64) any {
 		return nil
 	}
 	return n
+}
+
+func boolInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 func scanStateOr(s model.ScanState) string {

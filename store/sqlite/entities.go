@@ -17,17 +17,17 @@ import (
 // the change_log so delta consumers can update browse/facet caches. It runs
 // inside the PutScannedTrack write transaction.
 func resolveAndLinkEntities(ctx context.Context, tx *sql.Tx, itemID int64, tr model.Track, filePath []byte) error {
-	artistID, err := resolveArtist(ctx, tx, tr.Artist)
+	artistID, err := resolveArtist(ctx, tx, tr.Artist, tr.MBArtistID)
 	if err != nil {
 		return err
 	}
 	// The album-artist anchors the release group; fall back to the track artist
 	// when a track carries no explicit album-artist (the common single-artist case).
-	albumArtistName := tr.AlbumArtist
+	albumArtistName, albumArtistMBID := tr.AlbumArtist, tr.MBAlbumArtistID
 	if strings.TrimSpace(albumArtistName) == "" {
-		albumArtistName = tr.Artist
+		albumArtistName, albumArtistMBID = tr.Artist, tr.MBArtistID
 	}
-	albumArtistID, err := resolveArtist(ctx, tx, albumArtistName)
+	albumArtistID, err := resolveArtist(ctx, tx, albumArtistName, albumArtistMBID)
 	if err != nil {
 		return err
 	}
@@ -43,7 +43,7 @@ func resolveAndLinkEntities(ctx context.Context, tx *sql.Tx, itemID int64, tr mo
 		return err
 	}
 
-	if err := syncItemGenres(ctx, tx, itemID, tr.Genre); err != nil {
+	if err := syncItemGenres(ctx, tx, itemID, tr.Genres, tr.Genre); err != nil {
 		return err
 	}
 	return syncSearchFTS(ctx, tx, itemID, tr)
@@ -51,31 +51,40 @@ func resolveAndLinkEntities(ctx context.Context, tx *sql.Tx, itemID int64, tr mo
 
 // resolveAlbumChain resolves the release_group and album for a track, returning
 // the album id (0 when the track has no album title, or no artist to anchor the
-// group on).
+// group on). MusicBrainz ids, when present, key the group/release directly
+// (MBID-first), so two heuristic guesses for one release unify on the same id.
 func resolveAlbumChain(ctx context.Context, tx *sql.Tx, tr model.Track, albumArtistName string, albumArtistID int64, filePath []byte) (int64, error) {
 	artistMatchKey := identity.MatchKey(albumArtistName)
-	if artistMatchKey == "" {
-		// No artist at all (fully untagged): do not group. A title-only release
-		// group would collide unrelated untagged albums (e.g. two different
-		// "Greatest Hits"), so the track stays ungrouped until an artist is known.
+	if artistMatchKey == "" && tr.MBReleaseGroupID == "" {
+		// No artist and no MBID (fully untagged): do not group. A title-only
+		// release group would collide unrelated untagged albums (e.g. two
+		// different "Greatest Hits"), so the track stays ungrouped until an
+		// artist or MBID is known.
 		return 0, nil
 	}
-	rgKey := identity.ReleaseGroupKey("", artistMatchKey, tr.Album)
+	rgKey := identity.ReleaseGroupKey(tr.MBReleaseGroupID, artistMatchKey, tr.Album)
 	if rgKey == "" {
 		return 0, nil // non-album single: not grouped
 	}
-	rgID, err := resolveReleaseGroup(ctx, tx, rgKey, tr.Album, albumArtistID)
+	rgID, err := resolveReleaseGroup(ctx, tx, rgKey, tr.Album, albumArtistID, tr.MBReleaseGroupID)
 	if err != nil {
 		return 0, err
 	}
 	folder := filepath.Dir(string(filePath))
-	albumKey := identity.AlbumKey("", rgKey, tr.Year, 0, folder)
+	// Key the album by release group, year, and folder, not disc total. Multi-disc
+	// albums are often tagged inconsistently, and including disc_total would split
+	// one edition into separate album rows. The folder already disambiguates
+	// editions; disc_total is still recorded for display. A MusicBrainz release id
+	// keys the album directly when present.
+	albumKey := identity.AlbumKey(tr.MBReleaseID, rgKey, tr.Year, 0, folder)
 	return resolveAlbum(ctx, tx, albumKey, rgID, tr)
 }
 
 // resolveArtist finds-or-creates an artist by normalized match key, returning
-// its id (0 when name is blank). A newly created artist is logged to change_log.
-func resolveArtist(ctx context.Context, tx *sql.Tx, name string) (int64, error) {
+// its id (0 when name is blank). Artists dedup by name (MBID-first unification of
+// same-named artists is enrichment's job); a known MBID is recorded on the new
+// row so enrichment and Subsonic artist info have it. A new artist is logged.
+func resolveArtist(ctx context.Context, tx *sql.Tx, name, mbid string) (int64, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return 0, nil
@@ -94,8 +103,8 @@ func resolveArtist(ctx context.Context, tx *sql.Tx, name string) (int64, error) 
 	}
 	pid := model.NewPID()
 	r, err := tx.ExecContext(ctx,
-		"INSERT INTO artist(pid, name, sort_key, match_key) VALUES (?,?,?,?)",
-		string(pid), name, model.SortKey(name), mk)
+		"INSERT INTO artist(pid, name, sort_key, match_key, mbid) VALUES (?,?,?,?,?)",
+		string(pid), name, model.SortKey(name), mk, nullStr(strings.TrimSpace(mbid)))
 	if err != nil {
 		return 0, err
 	}
@@ -107,7 +116,7 @@ func resolveArtist(ctx context.Context, tx *sql.Tx, name string) (int64, error) 
 }
 
 // resolveReleaseGroup finds-or-creates a release group by its identity key.
-func resolveReleaseGroup(ctx context.Context, tx *sql.Tx, key, title string, primaryArtistID int64) (int64, error) {
+func resolveReleaseGroup(ctx context.Context, tx *sql.Tx, key, title string, primaryArtistID int64, mbid string) (int64, error) {
 	var id int64
 	err := tx.QueryRowContext(ctx, "SELECT id FROM release_group WHERE match_key = ?", key).Scan(&id)
 	if err == nil {
@@ -118,8 +127,8 @@ func resolveReleaseGroup(ctx context.Context, tx *sql.Tx, key, title string, pri
 	}
 	pid := model.NewPID()
 	r, err := tx.ExecContext(ctx,
-		"INSERT INTO release_group(pid, title, sort_key, primary_artist_id, type, match_key) VALUES (?,?,?,?,?,?)",
-		string(pid), title, model.SortKey(title), nullInt64(primaryArtistID), "album", key)
+		"INSERT INTO release_group(pid, title, sort_key, primary_artist_id, type, match_key, mbid) VALUES (?,?,?,?,?,?,?)",
+		string(pid), title, model.SortKey(title), nullInt64(primaryArtistID), "album", key, nullStr(strings.TrimSpace(mbid)))
 	if err != nil {
 		return 0, err
 	}
@@ -130,7 +139,8 @@ func resolveReleaseGroup(ctx context.Context, tx *sql.Tx, key, title string, pri
 	return id, appendChange(ctx, tx, "release_group", pid, model.OpCreate)
 }
 
-// resolveAlbum finds-or-creates a specific release/edition by its identity key.
+// resolveAlbum finds-or-creates a specific release/edition by its identity key,
+// recording its disc total and MusicBrainz release id when known.
 func resolveAlbum(ctx context.Context, tx *sql.Tx, key string, releaseGroupID int64, tr model.Track) (int64, error) {
 	if key == "" {
 		return 0, nil
@@ -145,8 +155,9 @@ func resolveAlbum(ctx context.Context, tx *sql.Tx, key string, releaseGroupID in
 	}
 	pid := model.NewPID()
 	r, err := tx.ExecContext(ctx,
-		"INSERT INTO album(pid, release_group_id, title, sort_key, year, match_key) VALUES (?,?,?,?,?,?)",
-		string(pid), nullInt64(releaseGroupID), tr.Album, model.SortKey(tr.Album), nullInt(tr.Year), key)
+		"INSERT INTO album(pid, release_group_id, title, sort_key, year, disc_total, mbid, match_key) VALUES (?,?,?,?,?,?,?,?)",
+		string(pid), nullInt64(releaseGroupID), tr.Album, model.SortKey(tr.Album), nullInt(tr.Year),
+		nullInt(tr.DiscTotal), nullStr(strings.TrimSpace(tr.MBReleaseID)), key)
 	if err != nil {
 		return 0, err
 	}
@@ -186,13 +197,19 @@ func resolveGenre(ctx context.Context, tx *sql.Tx, facet model.GenreFacet, name 
 	return id, appendChange(ctx, tx, "genre", pid, model.OpCreate)
 }
 
-// syncItemGenres replaces an item's genre set from a raw (possibly multi-valued)
-// genre tag. Replace semantics so a retag that drops a genre updates the links.
-func syncItemGenres(ctx context.Context, tx *sql.Tx, itemID int64, rawGenre string) error {
+// syncItemGenres replaces an item's genre set. The adapter usually supplies
+// already-split genres; rawGenre is re-split as a fallback (e.g. a single tag
+// holding "Rock; Pop"). Replace semantics so a retag that drops a genre updates
+// the links. Duplicates are removed by match key, preserving first-seen casing.
+func syncItemGenres(ctx context.Context, tx *sql.Tx, itemID int64, genres []string, rawGenre string) error {
 	if _, err := tx.ExecContext(ctx, "DELETE FROM item_genre WHERE item_id = ?", itemID); err != nil {
 		return err
 	}
-	for _, name := range identity.SplitGenres(rawGenre) {
+	names := dedupGenres(genres)
+	if len(names) == 0 {
+		names = identity.SplitGenres(rawGenre)
+	}
+	for _, name := range names {
 		gid, err := resolveGenre(ctx, tx, model.FacetGenre, name)
 		if err != nil {
 			return err
@@ -206,6 +223,25 @@ func syncItemGenres(ctx context.Context, tx *sql.Tx, itemID int64, rawGenre stri
 		}
 	}
 	return nil
+}
+
+// dedupGenres splits any residual separators in already-listed genres and
+// removes duplicates by match key, preserving first-seen display casing. A
+// provider that returns one "Rock/Pop" element is still normalized to two.
+func dedupGenres(genres []string) []string {
+	var out []string
+	seen := make(map[string]bool, len(genres))
+	for _, g := range genres {
+		for _, name := range identity.SplitGenres(g) {
+			mk := identity.MatchKey(name)
+			if mk == "" || seen[mk] {
+				continue
+			}
+			seen[mk] = true
+			out = append(out, name)
+		}
+	}
+	return out
 }
 
 // syncSearchFTS rebuilds the item's metadata FTS row (rowid == item id). The
@@ -225,76 +261,3 @@ func syncSearchFTS(ctx context.Context, tx *sql.Tx, itemID int64, tr model.Track
 		itemID, string(model.KindTrack), title, "", artist, tr.Album, tr.Genre)
 	return err
 }
-
-// RefreshRollups recomputes every maintained rollup from the base tables in one
-// transaction. The derived-data consistency check compares the stored rows
-// against the same recompute.
-func (s *Store) RefreshRollups(ctx context.Context) error {
-	return s.writeTx(ctx, func(tx *sql.Tx) error {
-		return rebuildRollups(ctx, tx, nowNS())
-	})
-}
-
-func rebuildRollups(ctx context.Context, tx *sql.Tx, now int64) error {
-	stmts := []string{
-		"DELETE FROM artist_rollup",
-		"DELETE FROM release_group_rollup",
-		"DELETE FROM genre_rollup",
-	}
-	for _, q := range stmts {
-		if _, err := tx.ExecContext(ctx, q); err != nil {
-			return err
-		}
-	}
-	if _, err := tx.ExecContext(ctx, artistRollupRebuild, now); err != nil {
-		return err
-	}
-	if _, err := tx.ExecContext(ctx, releaseGroupRollupRebuild, now); err != nil {
-		return err
-	}
-	if _, err := tx.ExecContext(ctx, genreRollupRebuild, now); err != nil {
-		return err
-	}
-	return nil
-}
-
-// The rebuild statements join each entity to its tracks and the tracks' primary
-// files so durations sum from the real audio rows. COUNT(DISTINCT item) tolerates
-// the LEFT JOINs (an entity with no tracks rolls up to zero, not one).
-const artistRollupRebuild = `
-INSERT INTO artist_rollup(artist_id, release_group_count, track_count, total_duration_ms, updated_at)
-SELECT a.id,
-       (SELECT COUNT(*) FROM release_group rg WHERE rg.primary_artist_id = a.id),
-       COUNT(DISTINCT t.item_id),
-       COALESCE(SUM(f.duration_ms), 0),
-       ?
-FROM artist a
-LEFT JOIN track t      ON t.artist_id = a.id
-LEFT JOIN item_file pf ON pf.item_id = t.item_id AND pf.role = 'primary'
-LEFT JOIN file f       ON f.id = pf.file_id
-GROUP BY a.id`
-
-const releaseGroupRollupRebuild = `
-INSERT INTO release_group_rollup(release_group_id, track_count, total_duration_ms, updated_at)
-SELECT rg.id,
-       COUNT(DISTINCT t.item_id),
-       COALESCE(SUM(f.duration_ms), 0),
-       ?
-FROM release_group rg
-LEFT JOIN album al     ON al.release_group_id = rg.id
-LEFT JOIN track t      ON t.album_id = al.id
-LEFT JOIN item_file pf ON pf.item_id = t.item_id AND pf.role = 'primary'
-LEFT JOIN file f       ON f.id = pf.file_id
-GROUP BY rg.id`
-
-const genreRollupRebuild = `
-INSERT INTO genre_rollup(genre_id, track_count, total_duration_ms, updated_at)
-SELECT g.id,
-       COUNT(DISTINCT ig.item_id),
-       COALESCE(SUM(f.duration_ms), 0),
-       ?
-FROM genre g
-LEFT JOIN item_genre ig ON ig.genre_id = g.id
-LEFT JOIN item_file pf  ON pf.item_id = ig.item_id AND pf.role = 'primary'
-LEFT JOIN file f        ON f.id = pf.file_id
-GROUP BY g.id`

@@ -13,6 +13,7 @@ import (
 	"github.com/colespringer/waxbin/meta"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/organize"
+	"github.com/colespringer/waxbin/playback"
 	"github.com/colespringer/waxbin/query"
 	"github.com/colespringer/waxbin/read"
 	"github.com/colespringer/waxbin/scan"
@@ -28,6 +29,7 @@ type Library struct {
 	scanner   *scan.Scanner
 	organizer *organize.Organizer
 	analyzer  *analyze.Analyzer
+	playback  *playback.Service
 	decoders  *decode.Registry
 	log       *slog.Logger
 	opts      Options
@@ -77,6 +79,7 @@ func Open(ctx context.Context, opts Options) (*Library, error) {
 		scanner:   scan.New(st, meta.NewReader(), log),
 		organizer: organize.New(st, log),
 		analyzer:  analyze.New(st, decoders, log),
+		playback:  playback.New(st),
 		decoders:  decoders,
 		log:       log,
 		opts:      opts,
@@ -91,8 +94,15 @@ func Open(ctx context.Context, opts Options) (*Library, error) {
 	return l, nil
 }
 
-// Close releases the catalog and the write lock.
-func (l *Library) Close() error { return l.store.Close() }
+// Close flushes buffered playback progress, then releases the catalog and write
+// lock. The flush is best effort: shutdown should save resume positions, but a
+// flush error should not block release. Read-only handles skip the flush.
+func (l *Library) Close() error {
+	if l.playback != nil && !l.ReadOnly() {
+		_ = l.playback.Flush(context.Background())
+	}
+	return l.store.Close()
+}
 
 // ReadOnly reports whether the library was opened read-only.
 func (l *Library) ReadOnly() bool { return l.store.ReadOnly() }
@@ -145,9 +155,45 @@ func (l *Library) Get(ctx context.Context, pid model.PID) (*model.ItemView, erro
 	return l.store.ItemByPID(ctx, pid)
 }
 
+// Stats returns a library summary using the same Facet grouping as browse plus
+// per-user playback state. An empty userPID selects the default user; topN caps
+// the ranked lists.
+func (l *Library) Stats(ctx context.Context, userPID model.PID, topN int) (*read.Stats, error) {
+	return l.store.Stats(ctx, userPID, topN)
+}
+
 // Changes returns change_log rows after seq.
 func (l *Library) Changes(ctx context.Context, sinceSeq int64) ([]model.Change, error) {
 	return l.store.ChangesSince(ctx, sinceSeq)
+}
+
+// Subscribe registers an in-process listener for change_log rows after each
+// mutating commit. The cancel func unsubscribes. Cross-process consumers should
+// poll DataVersion and then call Changes.
+func (l *Library) Subscribe() (<-chan model.Change, func()) { return l.store.Subscribe() }
+
+// DataVersion returns SQLite's data_version, which moves whenever any connection
+// commits. A consumer in another process polls it and pulls Changes when it
+// changes.
+func (l *Library) DataVersion(ctx context.Context) (int64, error) {
+	return l.store.DataVersion(ctx)
+}
+
+// Playback returns the playback-state service for progress, played status,
+// ratings, stars, bookmarks, queue, and play sessions.
+func (l *Library) Playback() *playback.Service { return l.playback }
+
+// Users lists the playback users (the default first).
+func (l *Library) Users(ctx context.Context) ([]*model.User, error) { return l.store.Users(ctx) }
+
+// CreateUser adds a playback user.
+func (l *Library) CreateUser(ctx context.Context, name string) (*model.User, error) {
+	return l.store.CreateUser(ctx, name)
+}
+
+// DefaultUser returns the seeded default user.
+func (l *Library) DefaultUser(ctx context.Context) (*model.User, error) {
+	return l.store.DefaultUser(ctx)
 }
 
 // Jobs lists recent jobs, newest first.
@@ -188,12 +234,9 @@ func (l *Library) Scan(ctx context.Context, req ScanRequest) (*ScanResult, error
 			out.Runs = append(out.Runs, *r)
 			addResult(&out.Total, r)
 		}
-		// Refresh maintained rollups only when the scan changed the catalog. A
-		// no-op rescan leaves every entity's counts and durations unchanged, so
-		// the full recompute is unnecessary.
-		if out.Total.ItemsCreated > 0 || out.Total.ItemsUpdated > 0 || out.Total.Relinked > 0 {
-			return l.store.RefreshRollups(ctx)
-		}
+		// Rollups are maintained transactionally for the entities touched by each
+		// scanned track. No whole-catalog refresh is needed here; RefreshRollups is
+		// the repair path for drift reported by `db verify`.
 		return nil
 	})
 	if job != nil {
@@ -219,7 +262,13 @@ func (l *Library) Analyze(ctx context.Context) (*AnalyzeResult, error) {
 		if r != nil {
 			out.Result = *r
 		}
-		return err
+		if err != nil {
+			return err
+		}
+		// Album ReplayGain depends on per-file loudness and album membership.
+		// Membership can change in a tag-only scan, so reconcile it after every
+		// analyze pass. Catalogs with no loudness return immediately.
+		return l.store.RefreshAlbumGain(ctx)
 	})
 	if job != nil {
 		out.JobPID = job.PID
@@ -227,9 +276,8 @@ func (l *Library) Analyze(ctx context.Context) (*AnalyzeResult, error) {
 	return out, runErr
 }
 
-// AltEncoding is one verified alt-encoding of a query item: a different item
-// (a different lossy encoding of the same recording) whose fingerprint matches
-// above the similarity threshold.
+// AltEncoding is one verified alternate encoding of a query item: a different
+// file whose fingerprint matches above the similarity threshold.
 type AltEncoding struct {
 	ItemPID    model.PID
 	FilePID    model.PID
@@ -283,6 +331,23 @@ func (l *Library) FindAltEncodings(ctx context.Context, itemPID model.PID) ([]Al
 	return out, nil
 }
 
+// Loudness returns an item's measured ReplayGain (track and album gain/peak), or
+// CodeNotFound when it has not been analyzed for loudness.
+func (l *Library) Loudness(ctx context.Context, itemPID model.PID) (*model.Loudness, error) {
+	return l.store.LoudnessByItem(ctx, itemPID)
+}
+
+// Peaks returns an item's stored waveform overview, or CodeNotFound.
+func (l *Library) Peaks(ctx context.Context, itemPID model.PID) (*model.PeaksData, error) {
+	return l.store.LoadPeaks(ctx, itemPID)
+}
+
+// RefreshAlbumGain recomputes album-aware ReplayGain from the per-file loudness.
+// Analyze runs it automatically; it is exposed for repair after a manual import.
+func (l *Library) RefreshAlbumGain(ctx context.Context) error {
+	return l.store.RefreshAlbumGain(ctx)
+}
+
 // Coverage reports per-codec analysis decode support for doctor.
 func (l *Library) Coverage() []decode.FormatSupport { return l.decoders.Coverage() }
 
@@ -299,6 +364,34 @@ func (l *Library) RefreshRollups(ctx context.Context) error {
 	return l.store.RefreshRollups(ctx)
 }
 
+// Lock marks item fields as protected from enrichment and organize tag
+// write-back. Unknown fields are rejected.
+func (l *Library) Lock(ctx context.Context, pid model.PID, fields ...string) error {
+	for _, f := range fields {
+		if err := l.store.LockField(ctx, pid, f); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Unlock clears the lock on each field, dropping rows that no longer carry any
+// curated state so provenance stays sparse.
+func (l *Library) Unlock(ctx context.Context, pid model.PID, fields ...string) error {
+	for _, f := range fields {
+		if err := l.store.UnlockField(ctx, pid, f); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Provenance returns an item's field provenance. Only non-default fields have
+// rows, so a tag-only item returns an empty slice.
+func (l *Library) Provenance(ctx context.Context, pid model.PID) ([]model.FieldProvenance, error) {
+	return l.store.FieldProvenance(ctx, pid)
+}
+
 // PlanOrganize computes a dry-run move plan for the selected items under a
 // profile. This build organizes one managed library at a time.
 func (l *Library) PlanOrganize(ctx context.Context, q query.Query, profileName string) (*organize.Plan, error) {
@@ -307,7 +400,7 @@ func (l *Library) PlanOrganize(ctx context.Context, q query.Query, profileName s
 		return nil, err
 	}
 	// Default to the library's configured profile so a root registered
-	// `:managed:plex-music` lays out as plex-music without repeating --profile.
+	// `:managed:waxbin-native` lays out as waxbin-native without repeating --profile.
 	if profileName == "" {
 		profileName = lib.Profile
 	}

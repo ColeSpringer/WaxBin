@@ -1,115 +1,93 @@
-// Package meta reads catalog metadata and cheap audio properties without
-// decoding PCM. The default reader parses ID3v2 for MP3 and Vorbis comments plus
-// STREAMINFO for FLAC. Other formats still get a filename-derived title so
-// scanning can catalog them deterministically.
+// Package meta reads catalog metadata, cheap audio properties, and the
+// tag-independent audio-essence hash without decoding PCM. It adapts WaxLabel,
+// which parses tags, artwork, chapters, lyrics, and essence digests for supported
+// containers. PCM decoding belongs to the analyze pass.
 package meta
 
 import (
-	"path/filepath"
+	"context"
 	"strings"
 
 	"github.com/colespringer/waxbin/model"
 )
 
-// TagReader reads tags and cheap audio properties from a file. It must never
+// FileMeta is everything the scanner needs from one parse: the tag/property set
+// plus the tag-independent essence hash. EssenceHash is empty when the container
+// carries no hashable audio essence (e.g. a malformed file); the scanner then
+// falls back to the content hash so the file is still cataloged.
+type FileMeta struct {
+	Tags        model.Tags
+	EssenceHash string
+}
+
+// Reader reads tags, properties, and the essence hash from a file. It must never
 // decode PCM (scanning is I/O-bound by contract).
-type TagReader interface {
-	ReadTags(path string) (*model.Tags, error)
+type Reader interface {
+	Read(ctx context.Context, path string) (*FileMeta, error)
 }
 
-// DefaultReader is the built-in pure-Go reader.
-type DefaultReader struct{}
-
-// NewReader returns the default metadata reader.
-func NewReader() *DefaultReader { return &DefaultReader{} }
-
-// ReadTags dispatches on file extension, always returning a usable *Tags (a
-// filename-derived title at minimum) even when no tags are present.
-func (DefaultReader) ReadTags(path string) (*model.Tags, error) {
-	ext := strings.ToLower(filepath.Ext(path))
-	t := &model.Tags{Container: containerForExt(ext), Codec: codecForExt(ext)}
-
-	switch ext {
-	case ".mp3":
-		_ = readID3v2(path, t) // best-effort; absent/garbled tags just leave fields empty
-	case ".flac":
-		_ = readFLAC(path, t)
-	case ".wav", ".wave":
-		_ = readWAV(path, t) // header-only: audio properties + duration, no PCM
-	}
-
-	if strings.TrimSpace(t.Title) == "" {
-		t.Title = titleFromPath(path)
-	}
-	return t, nil
-}
-
-// titleFromPath derives a display title from the filename (extension stripped).
-func titleFromPath(path string) string {
-	base := filepath.Base(path)
-	if ext := filepath.Ext(base); ext != "" {
-		base = base[:len(base)-len(ext)]
-	}
-	base = strings.TrimSpace(base)
-	if base == "" {
-		return "Untitled"
-	}
-	return base
-}
-
-func containerForExt(ext string) string {
-	switch ext {
-	case ".mp3":
-		return "mpeg"
-	case ".flac":
-		return "flac"
-	case ".wav":
-		return "wav"
-	case ".ogg", ".oga":
-		return "ogg"
-	case ".m4a", ".m4b", ".mp4", ".aac":
-		return "mp4"
-	case ".opus":
-		return "ogg"
-	default:
-		return strings.TrimPrefix(ext, ".")
-	}
-}
-
-func codecForExt(ext string) string {
-	switch ext {
-	case ".mp3":
+// normalizeCodec folds WaxLabel's canonical codec name to WaxBin's lowercase
+// registry key. WaxLabel reports names such as "PCM", "MP3", and "Vorbis"; the
+// analyze registry binds "pcm", "mp3", and "vorbis".
+//
+// container disambiguates PCM. The pure-Go "pcm" decoder reads RIFF/WAVE only.
+// PCM in another container, notably AIFF, must use its container key so analysis
+// routes to ffmpeg or skips it cleanly when ffmpeg is absent.
+func normalizeCodec(c, container string) string {
+	s := strings.ToLower(strings.TrimSpace(c))
+	switch s {
+	case "mpeg audio", "mpeg", "mp2": // pre-frame-sync fallback labeling
 		return "mp3"
-	case ".flac":
-		return "flac"
-	case ".wav":
-		return "pcm"
-	case ".ogg", ".oga":
-		return "vorbis"
-	case ".opus":
-		return "opus"
-	case ".m4a", ".m4b", ".mp4", ".aac":
-		return "aac"
+	case "pcm":
+		switch strings.ToLower(strings.TrimSpace(container)) {
+		case "", "wav", "wave", "riff":
+			return "pcm"
+		default:
+			return strings.ToLower(strings.TrimSpace(container)) // e.g. "aiff" -> ffmpeg path
+		}
 	default:
-		return strings.TrimPrefix(ext, ".")
+		return s
 	}
 }
 
-// parseLeadingInt parses the leading integer of values like "3", "3/12", or
-// "2024-05" and returns 0 when there is no leading digit.
-func parseLeadingInt(s string) int {
-	s = strings.TrimSpace(s)
-	n := 0
-	got := false
-	for _, r := range s {
-		if r < '0' || r > '9' {
-			break
+// firstYear returns the leading 4-digit year of the first non-empty date string,
+// or 0 when none parse. WaxLabel dates are ISO-8601 partials ("2024",
+// "2024-05", "2024-05-03").
+func firstYear(dates ...string) int {
+	for _, d := range dates {
+		if y := leadingYear(d); y > 0 {
+			return y
 		}
-		n = n*10 + int(r-'0')
-		got = true
 	}
-	if !got {
+	return 0
+}
+
+// leadingYear parses a 4-digit year prefix, requiring exactly four digits before
+// any separator so a bare "24" is not misread as the year 24.
+func leadingYear(s string) int {
+	s = strings.TrimSpace(s)
+	if len(s) < 4 {
 		return 0
 	}
-	return n
+	y := 0
+	for i := 0; i < 4; i++ {
+		c := s[i]
+		if c < '0' || c > '9' {
+			return 0
+		}
+		y = y*10 + int(c-'0')
+	}
+	// A fifth digit means this is not a year (e.g. a raw timestamp).
+	if len(s) > 4 && s[4] >= '0' && s[4] <= '9' {
+		return 0
+	}
+	return y
+}
+
+// first returns the first element of s, or "" when empty.
+func first(s []string) string {
+	if len(s) == 0 {
+		return ""
+	}
+	return s[0]
 }

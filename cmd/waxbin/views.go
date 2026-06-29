@@ -60,6 +60,68 @@ func itemViews(items []*model.ItemView) []itemView {
 	return out
 }
 
+// loudnessView is the JSON shape for an item's ReplayGain, omitted when absent.
+type loudnessJSON struct {
+	IntegratedLUFS float64  `json:"integratedLufs"`
+	TrackGainDB    float64  `json:"trackGainDb"`
+	TrackPeak      float64  `json:"trackPeak"`
+	AlbumGainDB    *float64 `json:"albumGainDb,omitempty"`
+	AlbumPeak      *float64 `json:"albumPeak,omitempty"`
+}
+
+func loudnessView(l *model.Loudness) *loudnessJSON {
+	if l == nil {
+		return nil
+	}
+	v := &loudnessJSON{IntegratedLUFS: l.IntegratedLUFS, TrackGainDB: l.TrackGainDB, TrackPeak: l.TrackPeak}
+	if l.HasAlbum {
+		v.AlbumGainDB, v.AlbumPeak = &l.AlbumGainDB, &l.AlbumPeak
+	}
+	return v
+}
+
+// showView is the JSON shape for `show`: the item plus optional ReplayGain.
+type showView struct {
+	Item       itemView      `json:"item"`
+	ReplayGain *loudnessJSON `json:"replayGain,omitempty"`
+}
+
+type userView struct {
+	PID       string `json:"pid"`
+	Name      string `json:"name"`
+	IsDefault bool   `json:"isDefault"`
+}
+
+func userViews(users []*model.User) []userView {
+	out := make([]userView, 0, len(users))
+	for _, u := range users {
+		out = append(out, userView{PID: string(u.PID), Name: u.Name, IsDefault: u.IsDefault})
+	}
+	return out
+}
+
+type playStateView struct {
+	ItemPID    string `json:"itemPid"`
+	PositionMS int64  `json:"positionMs"`
+	Played     bool   `json:"played"`
+	Finished   bool   `json:"finished"`
+	PlayCount  int    `json:"playCount"`
+	Rating     *int   `json:"rating,omitempty"`
+	Starred    bool   `json:"starred"`
+}
+
+func toPlayStateView(st *model.PlayState) playStateView {
+	v := playStateView{
+		ItemPID: string(st.ItemPID), PositionMS: st.PositionMS, Played: st.Played,
+		Finished: st.Finished, PlayCount: st.PlayCount, Starred: st.Starred,
+	}
+	if st.HasRating {
+		r := st.Rating
+		v.Rating = &r
+	}
+	return v
+}
+
 type bucketView struct {
 	Key       string `json:"key,omitempty"`
 	Display   string `json:"display"`
@@ -74,14 +136,7 @@ type facetView struct {
 }
 
 func toFacetView(r *read.FacetResult) facetView {
-	out := facetView{GroupBy: string(r.GroupBy), Buckets: make([]bucketView, 0, len(r.Buckets))}
-	for _, b := range r.Buckets {
-		out.Buckets = append(out.Buckets, bucketView{
-			Key: b.Key, Display: b.Display, Count: b.Count,
-			Unknown: b.IsUnknown, EntityPID: string(b.EntityPID),
-		})
-	}
-	return out
+	return facetView{GroupBy: string(r.GroupBy), Buckets: bucketViews(r.Buckets)}
 }
 
 // pageView is the JSON shape for a keyset-paginated item window.
@@ -93,6 +148,61 @@ type pageView struct {
 
 func toPageView(p *read.Page) pageView {
 	return pageView{Items: itemViews(p.Items), NextCursor: string(p.Next), HasMore: p.HasMore}
+}
+
+type statsView struct {
+	Items         int           `json:"items"`
+	Artists       int           `json:"artists"`
+	ReleaseGroups int           `json:"releaseGroups"`
+	Albums        int           `json:"albums"`
+	Genres        int           `json:"genres"`
+	TotalDuration int64         `json:"totalDurationMs"`
+	TopGenres     []bucketView  `json:"topGenres"`
+	TopArtists    []bucketView  `json:"topArtists"`
+	ByYear        []bucketView  `json:"byYear"`
+	Play          playStatsJSON `json:"play"`
+}
+
+type playStatsJSON struct {
+	User       string           `json:"user"`
+	TotalPlays int              `json:"totalPlays"`
+	Finished   int              `json:"finished"`
+	Starred    int              `json:"starred"`
+	MostPlayed []playedItemJSON `json:"mostPlayed"`
+}
+
+type playedItemJSON struct {
+	PID       string `json:"pid"`
+	Title     string `json:"title"`
+	Artist    string `json:"artist,omitempty"`
+	PlayCount int    `json:"playCount"`
+}
+
+func toStatsView(s *read.Stats) statsView {
+	v := statsView{
+		Items: s.Items, Artists: s.Artists, ReleaseGroups: s.ReleaseGroups, Albums: s.Albums,
+		Genres: s.Genres, TotalDuration: s.TotalDuration,
+		TopGenres: bucketViews(s.TopGenres), TopArtists: bucketViews(s.TopArtists), ByYear: bucketViews(s.ByYear),
+		Play: playStatsJSON{
+			User: s.Play.User, TotalPlays: s.Play.TotalPlays, Finished: s.Play.Finished, Starred: s.Play.Starred,
+		},
+	}
+	for _, p := range s.Play.MostPlayed {
+		v.Play.MostPlayed = append(v.Play.MostPlayed, playedItemJSON{
+			PID: string(p.PID), Title: p.Title, Artist: p.Artist, PlayCount: p.PlayCount,
+		})
+	}
+	return v
+}
+
+func bucketViews(buckets []read.Bucket) []bucketView {
+	out := make([]bucketView, 0, len(buckets))
+	for _, b := range buckets {
+		out = append(out, bucketView{
+			Key: b.Key, Display: b.Display, Count: b.Count, Unknown: b.IsUnknown, EntityPID: string(b.EntityPID),
+		})
+	}
+	return out
 }
 
 type jobView struct {
@@ -126,16 +236,17 @@ func toDerivedView(r *sqlite.DerivedReport) derivedView {
 }
 
 type analyzeView struct {
-	Analyzed int    `json:"analyzed"`
-	Skipped  int    `json:"skipped"`
-	Errored  int    `json:"errored"`
-	JobPID   string `json:"jobPid,omitempty"`
+	Analyzed         int    `json:"analyzed"`
+	LoudnessMeasured int    `json:"loudnessMeasured"`
+	Skipped          int    `json:"skipped"`
+	Errored          int    `json:"errored"`
+	JobPID           string `json:"jobPid,omitempty"`
 }
 
 func toAnalyzeView(r *waxbin.AnalyzeResult) analyzeView {
 	return analyzeView{
-		Analyzed: r.Result.Analyzed, Skipped: r.Result.Skipped,
-		Errored: r.Result.Errored, JobPID: string(r.JobPID),
+		Analyzed: r.Result.Analyzed, LoudnessMeasured: r.Result.LoudnessMeasured,
+		Skipped: r.Result.Skipped, Errored: r.Result.Errored, JobPID: string(r.JobPID),
 	}
 }
 

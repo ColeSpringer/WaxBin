@@ -80,11 +80,11 @@ func TestLoadPrecedenceFlagOverEnv(t *testing.T) {
 }
 
 func TestParseRootSpec(t *testing.T) {
-	r, err := config.ParseRootSpec("/music:managed:plex-music")
+	r, err := config.ParseRootSpec("/music:managed:waxbin-native")
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
-	if r.Path != "/music" || r.Mode != model.ModeManaged || r.Profile != "plex-music" {
+	if r.Path != "/music" || r.Mode != model.ModeManaged || r.Profile != "waxbin-native" {
 		t.Fatalf("parsed = %+v", r)
 	}
 
@@ -116,7 +116,7 @@ func TestParseRootSpecWindowsDrive(t *testing.T) {
 	}{
 		{`C:\Music`, `C:\Music`, "", ""},
 		{`C:\Music:managed`, `C:\Music`, model.ModeManaged, ""},
-		{`D:/Audio:managed:plex-music`, `D:/Audio`, model.ModeManaged, "plex-music"},
+		{`D:/Audio:managed:waxbin-native`, `D:/Audio`, model.ModeManaged, "waxbin-native"},
 	}
 	for _, tc := range cases {
 		r, err := config.ParseRootSpec(tc.spec)

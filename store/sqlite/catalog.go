@@ -101,11 +101,20 @@ func (s *Store) PutScannedTrack(ctx context.Context, in model.PutScannedTrackInp
 	err := s.writeTx(ctx, func(tx *sql.Tx) error {
 		now := nowNS()
 
-		fileID, filePID, err := s.resolveFile(ctx, tx, in, now, res)
+		fileID, filePID, priorEssence, err := s.resolveFile(ctx, tx, in, now, res)
 		if err != nil {
 			return err
 		}
 		res.FilePID = filePID
+
+		// Unchanged bytes with a different essence hash mean the essence algorithm
+		// changed. A real re-encode would change content_hash too. Re-key the item
+		// in place so its pid, play_state, and provenance survive the upgrade.
+		if !res.ContentChanged && priorEssence != "" && priorEssence != in.File.EssenceHash {
+			if err := preserveItemIdentityForFile(ctx, tx, fileID, in.Item.Kind, in.Item.IdentityKey); err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+		}
 
 		itemID, itemPID, created, err := upsertItem(ctx, tx, in.Item, now)
 		if err != nil {
@@ -117,15 +126,23 @@ func (s *Store) PutScannedTrack(ctx context.Context, in model.PutScannedTrackInp
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 
-		// Resolve and link the normalized entities (artist/release_group/album/
-		// genre) and refresh the item's FTS row, emitting change_log rows for any
-		// newly created entity so delta consumers can update browse/facet caches.
-		// Tags (and the album folder) only change when the file is new, its content
-		// changed, or it was relinked to a new path, so a byte-identical no-op
-		// rescan skips this entirely, avoiding redundant FTS tokenization and
-		// genre rewrites.
+		// Track the entities whose maintained rollups this write touches, then
+		// recompute only those rows inside this transaction.
+		affected := newAffectedRollups()
+
+		// Resolve normalized entities and refresh the item's FTS row when the scan
+		// actually changed catalog inputs. A byte-identical rescan skips this work
+		// and emits no entity-side deltas.
 		if created || res.FileCreated || res.ContentChanged || res.Relinked {
+			// The entities the item leaves (on a retag) lose the track, so collect
+			// them before relinking, and the entities it joins after.
+			if err := affected.collect(ctx, tx, itemID); err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
 			if err := resolveAndLinkEntities(ctx, tx, itemID, in.Track, in.File.Path); err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+			if err := affected.collect(ctx, tx, itemID); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 		}
@@ -144,11 +161,23 @@ func (s *Store) PutScannedTrack(ctx context.Context, in model.PutScannedTrackInp
 			if has {
 				continue
 			}
+			// The orphaned item's entities lose it; collect them before the delete.
+			if err := affected.collect(ctx, tx, oid); err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
 			opid, err := deleteItemCascade(ctx, tx, oid)
 			if err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 			if err := appendChange(ctx, tx, "item", opid, model.OpDelete); err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+		}
+
+		// Recompute touched rollups from the final base tables, keeping browse
+		// counts current without a whole-catalog rebuild.
+		if !affected.empty() {
+			if err := maintainRollupsTx(ctx, tx, affected, now); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 		}
@@ -174,16 +203,18 @@ func (s *Store) PutScannedTrack(ctx context.Context, in model.PutScannedTrackInp
 }
 
 // resolveFile finds-or-creates the file row, preserving the pid on a path match
-// (rescan/retag) or an essence match (re-link after a move).
-func (s *Store) resolveFile(ctx context.Context, tx *sql.Tx, in model.PutScannedTrackInput, now int64, res *model.ScanItemResult) (int64, model.PID, error) {
+// (rescan/retag) or an essence match (re-link after a move). For a path match it
+// also returns the file's prior essence hash, so the caller can detect an
+// essence-algorithm change over unchanged bytes and preserve item identity.
+func (s *Store) resolveFile(ctx context.Context, tx *sql.Tx, in model.PutScannedTrackInput, now int64, res *model.ScanItemResult) (int64, model.PID, string, error) {
 	if existing, err := fileByPathTx(ctx, tx, in.File.Path); err != nil {
-		return 0, "", err
+		return 0, "", "", err
 	} else if existing != nil {
 		res.ContentChanged = existing.ContentHash != in.File.ContentHash
 		if err := updateFileRow(ctx, tx, existing.ID, in.File, now); err != nil {
-			return 0, "", err
+			return 0, "", "", err
 		}
-		return existing.ID, existing.PID, nil
+		return existing.ID, existing.PID, existing.EssenceHash, nil
 	}
 
 	// No path match: re-link an existing row with identical essence only when
@@ -193,15 +224,15 @@ func (s *Store) resolveFile(ctx context.Context, tx *sql.Tx, in model.PutScanned
 	if in.File.EssenceHash != "" {
 		relink, err := fileByEssenceSingleTx(ctx, tx, in.File.EssenceHash, in.LibraryID)
 		if err != nil {
-			return 0, "", err
+			return 0, "", "", err
 		}
 		if relink != nil && !pathExists(relink.Path) {
 			res.Relinked = true
 			res.ContentChanged = relink.ContentHash != in.File.ContentHash
 			if err := updateFileRow(ctx, tx, relink.ID, in.File, now); err != nil {
-				return 0, "", err
+				return 0, "", "", err
 			}
-			return relink.ID, relink.PID, nil
+			return relink.ID, relink.PID, relink.EssenceHash, nil
 		}
 	}
 
@@ -209,9 +240,48 @@ func (s *Store) resolveFile(ctx context.Context, tx *sql.Tx, in model.PutScanned
 	pid := model.NewPID()
 	id, err := insertFileRow(ctx, tx, in.LibraryID, pid, in.File, now)
 	if err != nil {
-		return 0, "", err
+		return 0, "", "", err
 	}
-	return id, pid, nil
+	return id, pid, "", nil
+}
+
+// preserveItemIdentityForFile re-keys the item backing fileID to newKey. It is
+// used only when a file's bytes are unchanged but a new essence algorithm
+// produced a different digest, letting the same audio keep its item identity. It
+// is a no-op when there is no backing item, the key is already current, or another
+// item already owns newKey.
+func preserveItemIdentityForFile(ctx context.Context, tx *sql.Tx, fileID int64, kind model.Kind, newKey string) error {
+	if newKey == "" {
+		return nil
+	}
+	var itemID int64
+	var curKey sql.NullString
+	err := tx.QueryRowContext(ctx,
+		`SELECT pi.id, pi.identity_key FROM item_file itf
+		 JOIN playable_item pi ON pi.id = itf.item_id
+		 WHERE itf.file_id = ? AND itf.role = 'primary'`, fileID).Scan(&itemID, &curKey)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if curKey.String == newKey {
+		return nil
+	}
+	// Do not collide with a different item that already owns newKey; the normal
+	// upsert/orphan path handles that real dedup case.
+	var other int64
+	switch err := tx.QueryRowContext(ctx,
+		"SELECT id FROM playable_item WHERE kind = ? AND identity_key = ? AND id <> ?",
+		string(kind), newKey, itemID).Scan(&other); {
+	case err == nil:
+		return nil
+	case !errors.Is(err, sql.ErrNoRows):
+		return err
+	}
+	_, err = tx.ExecContext(ctx, "UPDATE playable_item SET identity_key = ? WHERE id = ?", newKey, itemID)
+	return err
 }
 
 // QueryItems compiles q against the item field whitelist and returns the

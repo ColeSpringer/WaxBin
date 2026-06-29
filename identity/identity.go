@@ -1,19 +1,20 @@
-// Package identity computes the hashes and keys that keep public ids stable
-// across rescans, retags, and moves.
+// Package identity computes the content hash and the entity-identity keys that
+// keep public ids stable across rescans, retags, and moves.
 //
 // Two hashes back file identity:
 //
-//   - content_hash covers the whole file and changes on any byte change.
+//   - content_hash covers the whole file and changes on any byte change
+//     (computed here, by ContentHash).
 //   - essence_hash covers only the decoder-independent audio essence (tags
-//     stripped), so retagging a file leaves it stable.
+//     stripped), so retagging a file leaves it stable. It is computed by the
+//     meta adapter via WaxLabel's HashAudioEssence, which makes it real for
+//     every format (not just MP3/FLAC); the scanner falls back to the content
+//     hash when a file carries no hashable essence.
 //
 // The store uses essence-first change detection: if essence_hash is unchanged
 // but content_hash changed, the file can be treated as a tag-only update. When
 // the same essence appears at a new path, the existing file row is relinked
 // while preserving its pid.
-//
-// MP3 and FLAC get tag-stripped essence hashes. Other formats currently fall
-// back to the content hash.
 package identity
 
 import (

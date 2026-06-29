@@ -3,6 +3,7 @@ module github.com/colespringer/waxbin
 go 1.26
 
 require (
+	github.com/colespringer/waxlabel v0.0.0-20260629094436-9b68ee971607
 	github.com/gofrs/flock v0.13.0
 	github.com/oklog/ulid/v2 v2.1.1
 	github.com/spf13/cobra v1.10.2

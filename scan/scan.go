@@ -23,12 +23,12 @@ import (
 // Scanner indexes files into the catalog.
 type Scanner struct {
 	cat    model.Catalog
-	reader meta.TagReader
+	reader meta.Reader
 	log    *slog.Logger
 }
 
-// New builds a scanner over a catalog and tag reader.
-func New(cat model.Catalog, reader meta.TagReader, log *slog.Logger) *Scanner {
+// New builds a scanner over a catalog and metadata reader.
+func New(cat model.Catalog, reader meta.Reader, log *slog.Logger) *Scanner {
 	if reader == nil {
 		reader = meta.NewReader()
 	}
@@ -138,13 +138,17 @@ func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, p
 	if err != nil {
 		return err
 	}
-	essenceHash, err := identity.EssenceHash(path, contentHash)
+	fm, err := s.reader.Read(ctx, path)
 	if err != nil {
 		return err
 	}
-	tags, err := s.reader.ReadTags(path)
-	if err != nil {
-		return err
+	tags := fm.Tags
+	// essence_hash anchors file identity independently of tags. Files with no
+	// hashable essence fall back to the content hash, so they are still cataloged
+	// but re-key on any byte change.
+	essenceHash := fm.EssenceHash
+	if essenceHash == "" {
+		essenceHash = contentHash
 	}
 
 	rel, err := filepath.Rel(root, path)
@@ -171,11 +175,6 @@ func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, p
 		ScanState:   model.ScanIndexed,
 	}
 
-	artistForSort := tags.Artist
-	if artistForSort == "" {
-		artistForSort = tags.AlbumArtist
-	}
-
 	in := model.PutScannedTrackInput{
 		LibraryID: lib.ID,
 		File:      file,
@@ -186,17 +185,7 @@ func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, p
 			SortKey:     model.SortKey(tags.Title),
 			IdentityKey: identity.TrackKey(tags.MBID, essenceHash),
 		},
-		Track: model.Track{
-			Artist:      tags.Artist,
-			ArtistSort:  model.SortKey(artistForSort),
-			Album:       tags.Album,
-			AlbumArtist: tags.AlbumArtist,
-			TrackNo:     tags.TrackNo,
-			DiscNo:      tags.DiscNo,
-			Year:        tags.Year,
-			Genre:       tags.Genre,
-			MBID:        tags.MBID,
-		},
+		Track: trackFromTags(tags),
 	}
 
 	out, err := s.cat.PutScannedTrack(ctx, in)
@@ -215,6 +204,47 @@ func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, p
 		res.Relinked++
 	}
 	return nil
+}
+
+// trackFromTags builds the track subtype from the parsed tags. ArtistSort
+// prefers the tagged sort name and falls back to a generated key over the
+// primary (or album) artist, so collation is correct even when a file carries no
+// ARTISTSORT tag.
+func trackFromTags(tags model.Tags) model.Track {
+	artistForSort := tags.Artist
+	if artistForSort == "" {
+		artistForSort = tags.AlbumArtist
+	}
+	// Generate every stored sort key through model.SortKey. A tagged ARTISTSORT is
+	// honored as input, but storing it raw would bypass normalization and sort
+	// inconsistently against generated keys.
+	sortInput := tags.ArtistSort
+	if sortInput == "" {
+		sortInput = artistForSort
+	}
+	artistSort := model.SortKey(sortInput)
+	return model.Track{
+		Artist:           tags.Artist,
+		ArtistSort:       artistSort,
+		Album:            tags.Album,
+		AlbumArtist:      tags.AlbumArtist,
+		Composer:         tags.Composer,
+		Comment:          tags.Comment,
+		TrackNo:          tags.TrackNo,
+		TrackTotal:       tags.TrackTotal,
+		DiscNo:           tags.DiscNo,
+		DiscTotal:        tags.DiscTotal,
+		Year:             tags.Year,
+		Genre:            tags.Genre,
+		Genres:           tags.Genres,
+		Compilation:      tags.Compilation,
+		ISRC:             tags.ISRC,
+		MBID:             tags.MBID,
+		MBReleaseID:      tags.MBReleaseID,
+		MBReleaseGroupID: tags.MBReleaseGroupID,
+		MBArtistID:       tags.MBArtistID,
+		MBAlbumArtistID:  tags.MBAlbumArtistID,
+	}
 }
 
 var audioExts = map[string]bool{

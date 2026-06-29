@@ -9,13 +9,10 @@ import (
 	"github.com/colespringer/waxbin/waxerr"
 )
 
-// FilesNeedingAnalysis returns the next batch of audio files whose fingerprint is
-// missing or stale (essence changed, or the algorithm version advanced), ordered
-// by (rel_path, id) so album tracks analyze adjacently. It is a keyset page: the
-// caller passes the last (rel_path, id) it saw to advance past files that were
-// skipped (no decoder) without re-fetching them, so undecodable files in one
-// batch can never strand decodable files in a later batch. A file is "stale" when
-// its analyzed_essence != essence_hash OR its analysis_version != algoVersion.
+// FilesNeedingAnalysis returns the next keyset page of audio files whose analysis
+// is missing or stale. Ordering by (rel_path, id) keeps album tracks adjacent and
+// lets the caller advance past skipped files without fetching them again. A file
+// is stale when its analyzed_essence or analysis_version no longer matches.
 func (s *Store) FilesNeedingAnalysis(ctx context.Context, algoVersion int, afterRelPath []byte, afterID int64, limit int) ([]*model.File, error) {
 	const op = "store.FilesNeedingAnalysis"
 	if limit <= 0 {
@@ -64,51 +61,109 @@ func (s *Store) CountFilesNeedingAnalysis(ctx context.Context, algoVersion int) 
 	return n, nil
 }
 
-// PutFingerprint persists a file's fingerprint and min-hash terms and stamps the
-// file's analyzed_essence/analysis_version, all in one transaction, so a crash
-// mid-analyze leaves the file unanalyzed rather than half written. A re-analyze
-// replaces the prior fingerprint and terms.
-func (s *Store) PutFingerprint(ctx context.Context, in model.FingerprintInput) error {
-	const op = "store.PutFingerprint"
+// PutAnalysis persists a file's analysis result in one transaction: fingerprint
+// and min-hash terms, optional loudness and peaks, and the file's analysis stamp.
+// A crash mid-analysis leaves the file stale instead of half updated. A later
+// analysis replaces the prior rows.
+func (s *Store) PutAnalysis(ctx context.Context, in model.AnalysisInput) error {
+	const op = "store.PutAnalysis"
+	fp := in.Fingerprint
 	return s.writeTx(ctx, func(tx *sql.Tx) error {
-		fileID, err := fileIDByPID(ctx, tx, in.FilePID, op)
+		fileID, err := fileIDByPID(ctx, tx, fp.FilePID, op)
 		if err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, "DELETE FROM fingerprint WHERE file_id = ?", fileID); err != nil {
+		// If the file's essence changed since the last analysis, any prior loudness
+		// or peaks that this run cannot re-measure are stale and must be cleared.
+		// A version-only re-analysis over the same essence can keep them.
+		var prior sql.NullString
+		if err := tx.QueryRowContext(ctx, "SELECT analyzed_essence FROM file WHERE id = ?", fileID).Scan(&prior); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
-		if _, err := tx.ExecContext(ctx, "DELETE FROM fingerprint_term WHERE file_id = ?", fileID); err != nil {
-			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		essenceChanged := prior.String != fp.EssenceHash
+
+		for _, del := range []string{
+			"DELETE FROM fingerprint WHERE file_id = ?",
+			"DELETE FROM fingerprint_term WHERE file_id = ?",
+		} {
+			if _, err := tx.ExecContext(ctx, del, fileID); err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
 		}
 		if _, err := tx.ExecContext(ctx,
 			"INSERT INTO fingerprint(file_id, essence_hash, algo_version, duration_bucket, fp) VALUES (?,?,?,?,?)",
-			fileID, in.EssenceHash, in.AlgoVersion, in.DurationBucket, in.FP); err != nil {
+			fileID, fp.EssenceHash, fp.AlgoVersion, fp.DurationBucket, fp.FP); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
-		for _, term := range in.Terms {
+		for _, term := range fp.Terms {
 			if _, err := tx.ExecContext(ctx,
 				"INSERT OR IGNORE INTO fingerprint_term(term, file_id) VALUES (?, ?)", term, fileID); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 		}
+		if err := putLoudnessTx(ctx, tx, fileID, fp.EssenceHash, in.Loudness, essenceChanged); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		if err := putPeaksTx(ctx, tx, fileID, fp.EssenceHash, in.Peaks, essenceChanged); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
 		if _, err := tx.ExecContext(ctx,
 			"UPDATE file SET analyzed_essence = ?, analysis_version = ? WHERE id = ?",
-			in.EssenceHash, in.AlgoVersion, fileID); err != nil {
+			fp.EssenceHash, in.AnalysisVersion, fileID); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		// The file's analysis state changed; emit a delta so consumers can react.
-		return appendChange(ctx, tx, "file", in.FilePID, model.OpUpdate)
+		return appendChange(ctx, tx, "file", fp.FilePID, model.OpUpdate)
 	})
 }
 
-// FingerprintCandidates returns files that share at least minShared min-hash
-// terms with the given file and fall within one duration bucket of it. This is
-// the inverted-index lookup that finds alt-encoding candidates without a
-// pairwise scan. The +/-1 bucket window tolerates two encodings whose durations straddle a
-// bucket boundary (e.g. 119990ms vs 120010ms). The query file is excluded, and
-// each candidate carries the item it backs plus its packed fingerprint vector so
-// the caller can verify similarity without a second round trip per candidate.
+// putLoudnessTx upserts per-file loudness while preserving album_gain/album_peak,
+// which are maintained by RefreshAlbumGain. A nil measurement keeps a prior row
+// for the same essence, but clears it after an essence change.
+func putLoudnessTx(ctx context.Context, tx *sql.Tx, fileID int64, essence string, ld *model.LoudnessData, essenceChanged bool) error {
+	if ld == nil {
+		if essenceChanged {
+			_, err := tx.ExecContext(ctx, "DELETE FROM loudness WHERE file_id = ?", fileID)
+			return err
+		}
+		return nil
+	}
+	_, err := tx.ExecContext(ctx,
+		`INSERT INTO loudness(file_id, essence_hash, integrated_lufs, track_gain_db, track_peak, updated_at)
+		 VALUES (?,?,?,?,?,?)
+		 ON CONFLICT(file_id) DO UPDATE SET
+		   essence_hash=excluded.essence_hash, integrated_lufs=excluded.integrated_lufs,
+		   track_gain_db=excluded.track_gain_db, track_peak=excluded.track_peak, updated_at=excluded.updated_at`,
+		fileID, essence, ld.IntegratedLUFS, ld.TrackGainDB, ld.TrackPeak, nowNS())
+	return err
+}
+
+// putPeaksTx upserts a file's waveform, stamped with the essence it was computed
+// from. A nil result keeps a prior waveform when the essence is unchanged, but
+// clears it on an essence change (the old waveform is for different audio).
+func putPeaksTx(ctx context.Context, tx *sql.Tx, fileID int64, essence string, pk *model.PeaksData, essenceChanged bool) error {
+	if pk == nil {
+		if essenceChanged {
+			_, err := tx.ExecContext(ctx, "DELETE FROM peaks WHERE file_id = ?", fileID)
+			return err
+		}
+		return nil
+	}
+	_, err := tx.ExecContext(ctx,
+		`INSERT INTO peaks(file_id, version, bucket_count, data, essence_hash, updated_at) VALUES (?,?,?,?,?,?)
+		 ON CONFLICT(file_id) DO UPDATE SET
+		   version=excluded.version, bucket_count=excluded.bucket_count, data=excluded.data,
+		   essence_hash=excluded.essence_hash, updated_at=excluded.updated_at`,
+		fileID, pk.Version, pk.Buckets, pk.Data, essence, nowNS())
+	return err
+}
+
+// FingerprintCandidates returns files that share enough min-hash terms with the
+// query file and fall within one duration bucket. This inverted-index lookup
+// finds alternate-encoding candidates without a pairwise scan. The +/-1 bucket
+// window handles encodings that straddle a bucket boundary, and each candidate
+// carries its packed fingerprint so the caller can verify it without another
+// query.
 func (s *Store) FingerprintCandidates(ctx context.Context, filePID model.PID, minShared int) ([]model.FingerprintCandidate, error) {
 	const op = "store.FingerprintCandidates"
 	if minShared < 1 {

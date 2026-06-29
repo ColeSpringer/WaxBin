@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/waxerr"
 	_ "modernc.org/sqlite"
 )
@@ -49,6 +50,12 @@ type Store struct {
 	readOnly bool
 	owner    string
 	log      *slog.Logger
+
+	subMu sync.Mutex                     // guards subs
+	subs  map[chan model.Change]struct{} // in-process change_log listeners
+
+	dvMu   sync.Mutex // guards dvConn
+	dvConn *sql.Conn  // pinned connection for PRAGMA data_version polling
 }
 
 // Open opens (creating if needed) the catalog at opt.Path. A read-write open
@@ -128,12 +135,18 @@ func Open(ctx context.Context, opt OpenOptions) (*Store, error) {
 		log.Info("reclaimed orphaned jobs on open", "count", n)
 	}
 
+	// Seed the default playback user so single-user setups need no configuration.
+	if err := s.ensureDefaultUser(ctx); err != nil {
+		_ = s.Close()
+		return nil, err
+	}
+
 	return s, nil
 }
 
 // Close releases the read/write connections and the advisory lock. It first
-// checkpoints the WAL (best-effort) so the main DB file is self-contained for
-// backups and read-only consumers.
+// attempts a WAL checkpoint so the main DB file is self-contained for backups and
+// read-only consumers.
 func (s *Store) Close() error {
 	// Mark closed under wmu so an in-flight writeTx (which holds wmu for its whole
 	// duration and checks closed) cannot be mid-transaction here; checkpoint while
@@ -149,6 +162,10 @@ func (s *Store) Close() error {
 		_, _ = s.write.ExecContext(context.Background(), "PRAGMA wal_checkpoint(TRUNCATE)")
 	}
 	s.wmu.Unlock()
+
+	// Close in-process change listeners so their range loops terminate.
+	s.closeSubscribers()
+	s.closeDataVersionConn()
 
 	var errs []error
 	if s.write != nil {
@@ -184,6 +201,15 @@ func (s *Store) writeTx(ctx context.Context, fn func(*sql.Tx) error) error {
 		return waxerr.New(waxerr.CodeUnsupported, "store.writeTx", "store is closed")
 	}
 
+	// With in-process listeners, snapshot the change_log head so rows appended by
+	// this transaction can be published after commit. The common CLI path has no
+	// subscribers and pays no publish cost.
+	notify := s.hasSubscribers()
+	var preSeq int64
+	if notify {
+		preSeq = s.maxChangeSeq(ctx)
+	}
+
 	tx, err := s.write.BeginTx(ctx, nil)
 	if err != nil {
 		return waxerr.Wrap(waxerr.CodeIO, "store.writeTx", err)
@@ -194,6 +220,12 @@ func (s *Store) writeTx(ctx context.Context, fn func(*sql.Tx) error) error {
 	}
 	if err := tx.Commit(); err != nil {
 		return waxerr.Wrap(waxerr.CodeIO, "store.writeTx", err)
+	}
+	if notify {
+		// Publish committed rows from a background context. If the caller's context
+		// is canceled just after commit, in-process listeners should still receive
+		// the deltas instead of waiting for a later DataVersion poll.
+		s.publishSince(context.Background(), preSeq)
 	}
 	return nil
 }

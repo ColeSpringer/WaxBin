@@ -22,10 +22,6 @@ var builtins = map[string]Profile{
 		Name:          "waxbin-native",
 		TrackTemplate: "{albumartist}/{album}/{track:02} - {title}.{ext}",
 	},
-	"plex-music": {
-		Name:          "plex-music",
-		TrackTemplate: "{albumartist}/{album} ({year})/{track:02} - {title}.{ext}",
-	},
 }
 
 // ProfileByName returns a built-in profile.

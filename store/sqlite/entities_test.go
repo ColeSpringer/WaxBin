@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/colespringer/waxbin/identity"
 	"github.com/colespringer/waxbin/model"
 )
 
@@ -31,12 +32,22 @@ type trackSpec struct {
 	path, essence, content  string
 	title, artist, albumArt string
 	album, genre            string
+	composer                string
 	year                    int
+	discTotal               int
 	durationMS              int64
+	compilation             bool
+	mbRecording             string
+	mbReleaseGroup          string
+	mbRelease               string
 }
 
 func putTrack(t *testing.T, st *Store, libID int64, s trackSpec) *model.ScanItemResult {
 	t.Helper()
+	idKey := "essence:" + s.essence
+	if s.mbRecording != "" {
+		idKey = "mbid:" + s.mbRecording
+	}
 	in := model.PutScannedTrackInput{
 		LibraryID: libID,
 		File: model.File{
@@ -47,11 +58,18 @@ func putTrack(t *testing.T, st *Store, libID int64, s trackSpec) *model.ScanItem
 		},
 		Item: model.PlayableItem{
 			Kind: model.KindTrack, State: model.StatePresent, Title: s.title,
-			SortKey: model.SortKey(s.title), IdentityKey: "essence:" + s.essence,
+			SortKey: model.SortKey(s.title), IdentityKey: idKey,
 		},
 		Track: model.Track{
 			Artist: s.artist, ArtistSort: model.SortKey(s.artist), Album: s.album,
-			AlbumArtist: s.albumArt, Genre: s.genre, Year: s.year,
+			AlbumArtist: s.albumArt, Composer: s.composer, Genre: s.genre,
+			Genres:           identity.SplitGenres(s.genre),
+			Year:             s.year,
+			DiscTotal:        s.discTotal,
+			Compilation:      s.compilation,
+			MBID:             s.mbRecording,
+			MBReleaseGroupID: s.mbReleaseGroup,
+			MBReleaseID:      s.mbRelease,
 		},
 	}
 	res, err := st.PutScannedTrack(context.Background(), in)
@@ -99,6 +117,133 @@ func TestEntityResolutionDedupes(t *testing.T) {
 	}
 	if n := scalarInt(t, st, "SELECT COUNT(*) FROM item_genre"); n != 3 {
 		t.Errorf("item_genre links = %d, want 3 (2+1)", n)
+	}
+}
+
+// TestMBIDFirstReleaseGroupUnifies verifies that a shared MusicBrainz
+// release-group id unifies two releases the heuristic key would have split
+// (different titles/folders), while a different id keeps them separate.
+func TestMBIDFirstReleaseGroupUnifies(t *testing.T) {
+	st, lib := entityFixture(t)
+	putTrack(t, st, lib.ID, trackSpec{
+		path: "/lib/a/1.flac", essence: "e1", content: "c1", title: "A", artist: "Band",
+		album: "Deluxe Edition", mbReleaseGroup: "rg-100", mbRelease: "rel-1",
+	})
+	putTrack(t, st, lib.ID, trackSpec{
+		path: "/lib/b/2.flac", essence: "e2", content: "c2", title: "B", artist: "Band",
+		album: "Original Pressing", mbReleaseGroup: "rg-100", mbRelease: "rel-2",
+	})
+	putTrack(t, st, lib.ID, trackSpec{
+		path: "/lib/c/3.flac", essence: "e3", content: "c3", title: "C", artist: "Band",
+		album: "Other Work", mbReleaseGroup: "rg-200", mbRelease: "rel-3",
+	})
+	if n := scalarInt(t, st, "SELECT COUNT(*) FROM release_group"); n != 2 {
+		t.Errorf("release_group count = %d, want 2 (rg-100 unifies two, rg-200 separate)", n)
+	}
+	// The two MBID releases under rg-100 stay distinct albums; rg-200 is its own.
+	if n := scalarInt(t, st, "SELECT COUNT(*) FROM album"); n != 3 {
+		t.Errorf("album count = %d, want 3 (each MB release id is its own edition)", n)
+	}
+	if n := scalarInt(t, st, "SELECT COUNT(*) FROM release_group WHERE mbid='rg-100'"); n != 1 {
+		t.Errorf("rg-100 rows = %d, want 1 (mbid recorded)", n)
+	}
+}
+
+// TestMusicColumnsPersist verifies the Gate B track columns round-trip.
+// TestInconsistentDiscTotalNotFragmented verifies an album whose tracks carry
+// inconsistent disc-total tags (some missing) is not split into multiple albums.
+func TestInconsistentDiscTotalNotFragmented(t *testing.T) {
+	st, lib := entityFixture(t)
+	putTrack(t, st, lib.ID, trackSpec{
+		path: "/lib/Band/Set/d1t1.flac", essence: "e1", content: "c1", title: "One",
+		artist: "Band", album: "Box Set", discTotal: 2,
+	})
+	putTrack(t, st, lib.ID, trackSpec{
+		path: "/lib/Band/Set/d2t1.flac", essence: "e2", content: "c2", title: "Two",
+		artist: "Band", album: "Box Set", discTotal: 0, // missing disctotal tag
+	})
+	if n := scalarInt(t, st, "SELECT COUNT(*) FROM album"); n != 1 {
+		t.Errorf("album count = %d, want 1 (inconsistent disc_total must not fragment)", n)
+	}
+}
+
+func TestMusicColumnsPersist(t *testing.T) {
+	st, lib := entityFixture(t)
+	putTrack(t, st, lib.ID, trackSpec{
+		path: "/lib/v/1.flac", essence: "e1", content: "c1", title: "Aria",
+		artist: "Various Artists", album: "Now That's Music", composer: "J.S. Bach",
+		genre: "Classical", year: 1999, compilation: true,
+	})
+	var composer string
+	var compilation int
+	if err := st.read.QueryRowContext(context.Background(),
+		"SELECT composer, compilation FROM track LIMIT 1").Scan(&composer, &compilation); err != nil {
+		t.Fatalf("read track columns: %v", err)
+	}
+	if composer != "J.S. Bach" {
+		t.Errorf("composer = %q, want J.S. Bach", composer)
+	}
+	if compilation != 1 {
+		t.Errorf("compilation = %d, want 1", compilation)
+	}
+}
+
+// TestEssenceAlgoUpgradePreservesItem verifies that re-scanning a byte-identical
+// file whose essence hash changed by algorithm upgrade keeps the same item,
+// preserving its pid and per-user play state.
+func TestEssenceAlgoUpgradePreservesItem(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	spec := trackSpec{
+		path: "/lib/a/1.wav", essence: "old-essence", content: "c1", title: "Song",
+		artist: "X", album: "Al",
+	}
+	r1 := putTrack(t, st, lib.ID, spec)
+
+	// User state on the item (the thing that must survive the upgrade).
+	if err := st.SetStar(ctx, "", r1.ItemPID, true); err != nil {
+		t.Fatalf("star: %v", err)
+	}
+
+	// Re-scan: identical bytes (same content hash) but a new essence digest, as if
+	// the essence algorithm changed. Identity key follows the new essence.
+	spec.essence = "new-essence" // content "c1" unchanged
+	r2 := putTrack(t, st, lib.ID, spec)
+
+	if r2.ItemPID != r1.ItemPID {
+		t.Errorf("item pid changed across an essence-algo upgrade: %s -> %s", r1.ItemPID, r2.ItemPID)
+	}
+	if r2.ItemCreated {
+		t.Error("a new item was created; the existing one should have been re-keyed in place")
+	}
+	if n := scalarInt(t, st, "SELECT COUNT(*) FROM playable_item"); n != 1 {
+		t.Errorf("item count = %d, want 1 (no orphan/duplicate)", n)
+	}
+	// The star (play_state) survived because the item was preserved.
+	stt, err := st.PlayStateFor(ctx, "", r1.ItemPID)
+	if err != nil || !stt.Starred {
+		t.Errorf("play state lost across the upgrade: %+v (err %v)", stt, err)
+	}
+	// The item is now keyed by the new essence, so a future scan matches it.
+	if n := scalarInt(t, st, "SELECT COUNT(*) FROM playable_item WHERE identity_key = 'essence:new-essence'"); n != 1 {
+		t.Error("item was not re-keyed to the new essence")
+	}
+}
+
+// TestReencodeStillRekeys verifies the upgrade-preservation path does not apply
+// to a real re-encode, where the content hash changes.
+func TestReencodeStillRekeys(t *testing.T) {
+	st, lib := entityFixture(t)
+	spec := trackSpec{path: "/lib/a/1.mp3", essence: "e1", content: "c1", title: "First", artist: "A", album: "Al"}
+	r1 := putTrack(t, st, lib.ID, spec)
+	// A re-encode changes both content and essence.
+	spec.content, spec.essence, spec.title = "c2", "e2", "Second"
+	r2 := putTrack(t, st, lib.ID, spec)
+	if r2.ItemPID == r1.ItemPID {
+		t.Error("a genuine re-encode (content changed) should re-key to a new item")
+	}
+	if n := scalarInt(t, st, "SELECT COUNT(*) FROM playable_item"); n != 1 {
+		t.Errorf("item count = %d, want 1 (old orphan deleted)", n)
 	}
 }
 
@@ -277,8 +422,8 @@ func TestNoopRescanSkipsEntityWork(t *testing.T) {
 
 func TestUntaggedAlbumNotGrouped(t *testing.T) {
 	st, lib := entityFixture(t)
-	// Two fully artist-less albums sharing a title must NOT merge into one
-	// release_group (a title-only key would collide them).
+	// Two fully artist-less albums sharing a title must stay separate; a title-only
+	// release-group key would collide them.
 	putTrack(t, st, lib.ID, trackSpec{
 		path: "/lib/x/1.mp3", essence: "e1", content: "c1", title: "T1",
 		artist: "", albumArt: "", album: "Greatest Hits",

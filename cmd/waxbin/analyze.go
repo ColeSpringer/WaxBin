@@ -28,10 +28,11 @@ func newAnalyzeCmd(g *globals) *cobra.Command {
 				return printJSON(cmd, toAnalyzeView(res))
 			}
 			w := out(cmd)
-			fmt.Fprintf(w, "analyzed: %d\n", res.Result.Analyzed)
-			fmt.Fprintf(w, "skipped:  %d (no decoder for codec)\n", res.Result.Skipped)
-			fmt.Fprintf(w, "errored:  %d\n", res.Result.Errored)
-			fmt.Fprintf(w, "job:      %s\n", res.JobPID)
+			fmt.Fprintf(w, "analyzed:   %d\n", res.Result.Analyzed)
+			fmt.Fprintf(w, "replaygain: %d\n", res.Result.LoudnessMeasured)
+			fmt.Fprintf(w, "skipped:    %d (no decoder for codec)\n", res.Result.Skipped)
+			fmt.Fprintf(w, "errored:    %d\n", res.Result.Errored)
+			fmt.Fprintf(w, "job:        %s\n", res.JobPID)
 			return nil
 		},
 	}

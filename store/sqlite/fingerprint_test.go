@@ -41,10 +41,10 @@ func TestFingerprintCandidatesSharedTerms(t *testing.T) {
 	bucketAB := int64(200000 / 2000)
 	bucketC := int64(999000 / 2000)
 	mustPut := func(pid model.PID, bucket int64, terms []int64) {
-		if err := st.PutFingerprint(ctx, model.FingerprintInput{
+		if err := st.PutAnalysis(ctx, model.AnalysisInput{AnalysisVersion: 1, Fingerprint: model.FingerprintInput{
 			FilePID: pid, EssenceHash: string(pid), AlgoVersion: 1,
 			DurationBucket: bucket, FP: []byte{1, 2, 3, 4}, Terms: terms,
-		}); err != nil {
+		}}); err != nil {
 			t.Fatalf("put fingerprint: %v", err)
 		}
 	}
@@ -85,10 +85,10 @@ func TestFingerprintCandidatesNeighborBucket(t *testing.T) {
 
 	terms := []int64{1, 2, 3, 4, 5}
 	put := func(pid model.PID, bucket int64) {
-		if err := st.PutFingerprint(ctx, model.FingerprintInput{
+		if err := st.PutAnalysis(ctx, model.AnalysisInput{AnalysisVersion: 1, Fingerprint: model.FingerprintInput{
 			FilePID: pid, EssenceHash: string(pid), AlgoVersion: 1,
 			DurationBucket: bucket, FP: []byte{9}, Terms: terms,
-		}); err != nil {
+		}}); err != nil {
 			t.Fatalf("put: %v", err)
 		}
 	}
@@ -118,9 +118,9 @@ func TestFilesNeedingAnalysisLifecycle(t *testing.T) {
 		t.Fatalf("a fresh file should need analysis, got %d", len(need))
 	}
 
-	if err := st.PutFingerprint(ctx, model.FingerprintInput{
+	if err := st.PutAnalysis(ctx, model.AnalysisInput{AnalysisVersion: 1, Fingerprint: model.FingerprintInput{
 		FilePID: a, EssenceHash: "ea", AlgoVersion: 1, DurationBucket: 1, FP: []byte{1}, Terms: []int64{1},
-	}); err != nil {
+	}}); err != nil {
 		t.Fatalf("put: %v", err)
 	}
 	if need, _ := st.FilesNeedingAnalysis(ctx, 1, nil, 0, 100); len(need) != 0 {

@@ -37,8 +37,19 @@ func TestVerifyDetectsStaleRollups(t *testing.T) {
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	seedTwoTracks(t, st, lib.ID)
-	// No RefreshRollups: the artist/genre/release-group rollup rows are missing,
-	// which the check must flag as drift (a missed maintenance path).
+	// Rollups are maintained transactionally per write, so the catalog is
+	// consistent right after seeding, with no manual RefreshRollups.
+	if rep, err := st.VerifyDerived(ctx); err != nil || !rep.Consistent() {
+		t.Fatalf("rollups should be maintained on write: %+v (err %v)", rep, err)
+	}
+
+	// Simulate a missed maintenance path by deleting the rollup rows directly; the
+	// check must flag the now-missing rows as drift.
+	for _, tbl := range []string{"artist_rollup", "genre_rollup", "release_group_rollup"} {
+		if _, err := st.write.ExecContext(ctx, "DELETE FROM "+tbl); err != nil {
+			t.Fatalf("delete %s: %v", tbl, err)
+		}
+	}
 	rep, err := st.VerifyDerived(ctx)
 	if err != nil {
 		t.Fatalf("verify: %v", err)

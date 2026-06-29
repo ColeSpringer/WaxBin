@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/colespringer/waxbin/model"
+	"github.com/colespringer/waxbin/waxerr"
 	"github.com/spf13/cobra"
 )
 
@@ -24,8 +25,15 @@ func newShowCmd(g *globals) *cobra.Command {
 				return err
 			}
 
+			// ReplayGain is optional (only after analyze); absent loudness is not an
+			// error, so a NotFound is simply omitted.
+			ld, ldErr := lib.Loudness(ctx(cmd), v.PID)
+			if ldErr != nil && !waxerr.Is(ldErr, waxerr.CodeNotFound) {
+				return ldErr
+			}
+
 			if g.jsonOut {
-				return printJSON(cmd, toItemView(v))
+				return printJSON(cmd, showView{Item: toItemView(v), ReplayGain: loudnessView(ld)})
 			}
 			w := out(cmd)
 			fmt.Fprintf(w, "pid:          %s\n", v.PID)
@@ -39,6 +47,13 @@ func newShowCmd(g *globals) *cobra.Command {
 			fmt.Fprintf(w, "genre:        %s\n", v.Genre)
 			fmt.Fprintf(w, "codec:        %s\n", v.Codec)
 			fmt.Fprintf(w, "duration(ms): %d\n", v.DurationMS)
+			if ld != nil {
+				fmt.Fprintf(w, "replaygain:   track %+.2f dB (peak %.3f)", ld.TrackGainDB, ld.TrackPeak)
+				if ld.HasAlbum {
+					fmt.Fprintf(w, ", album %+.2f dB (peak %.3f)", ld.AlbumGainDB, ld.AlbumPeak)
+				}
+				fmt.Fprintln(w)
+			}
 			fmt.Fprintf(w, "file pid:     %s\n", v.FilePID)
 			fmt.Fprintf(w, "path:         %s\n", v.DisplayPath)
 			return nil

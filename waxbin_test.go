@@ -4,8 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/colespringer/waxbin"
 	"github.com/colespringer/waxbin/config"
@@ -185,6 +187,54 @@ func TestAnalyzeAndGroupAltEncodings(t *testing.T) {
 	}
 }
 
+// TestAnalyzeMeasuresLoudness verifies the analyze pass computes and stores
+// ReplayGain for decodable files (WAV loudness works whether via ffmpeg's
+// ebur128 or the pure-Go R128 fallback, so the assertion is host-independent).
+func TestAnalyzeMeasuresLoudness(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	const rate = 22050
+	writeFile(t, filepath.Join(root, "a.wav"), testaudio.EncodeWAV16(rate, testaudio.RichSignal(rate, 5, testaudio.MusicalPartials, 1)))
+	writeFile(t, filepath.Join(root, "b.wav"), testaudio.EncodeWAV16(rate, testaudio.RichSignal(rate, 5, testaudio.AltPartials, 2)))
+
+	lib := openManaged(t, ctx, db, root)
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	ares, err := lib.Analyze(ctx)
+	if err != nil {
+		t.Fatalf("analyze: %v", err)
+	}
+	if ares.Result.LoudnessMeasured != 2 {
+		t.Fatalf("loudness measured = %d, want 2", ares.Result.LoudnessMeasured)
+	}
+
+	rep, _ := lib.Doctor(ctx)
+	if rep.LoudnessCount != 2 {
+		t.Errorf("doctor loudness count = %d, want 2", rep.LoudnessCount)
+	}
+
+	pid := itemPIDByTitle(t, ctx, lib, "a")
+	ld, err := lib.Loudness(ctx, pid)
+	if err != nil {
+		t.Fatalf("read loudness: %v", err)
+	}
+	// A real measurement has a finite integrated loudness and a sane track peak.
+	if ld.IntegratedLUFS >= 0 || ld.TrackPeak <= 0 || ld.TrackPeak > 1.01 {
+		t.Errorf("implausible loudness: %+v", ld)
+	}
+
+	// The waveform was stored and unpacks to the requested resolution.
+	pk, err := lib.Peaks(ctx, pid)
+	if err != nil {
+		t.Fatalf("read peaks: %v", err)
+	}
+	if pk.Buckets <= 0 || len(pk.Data) != pk.Buckets*2 {
+		t.Errorf("peaks shape wrong: buckets=%d dataLen=%d", pk.Buckets, len(pk.Data))
+	}
+}
+
 func itemPIDByTitle(t *testing.T, ctx context.Context, lib *waxbin.Library, title string) model.PID {
 	t.Helper()
 	items, err := lib.Query(ctx, query.New(query.EntityItems).Where("title", query.OpIs, title).Build())
@@ -197,9 +247,162 @@ func itemPIDByTitle(t *testing.T, ctx context.Context, lib *waxbin.Library, titl
 	return items[0].PID
 }
 
-// TestDoctorToleratesOlderCatalog verifies doctor reports honestly against a
-// catalog written by an older binary (behind this build), rather than failing on
-// a table a not-yet-applied migration would add.
+// TestPlaybackAndChangeBus verifies the playback service and the in-process
+// change bus wired through the facade: a star/rating round-trips for the default
+// user, and a subscriber sees the play_state delta.
+func TestPlaybackAndChangeBus(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	writeFile(t, filepath.Join(root, "a.mp3"), testaudio.BuildMP3("Song", "Artist", "Album", 1))
+
+	lib := openManaged(t, ctx, db, root)
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	items, _ := lib.Query(ctx, query.New(query.EntityItems).Build())
+	if len(items) != 1 {
+		t.Fatalf("want 1 item, got %d", len(items))
+	}
+	item := items[0].PID
+
+	ch, cancel := lib.Subscribe()
+	defer cancel()
+
+	pb := lib.Playback()
+	if err := pb.SetStar(ctx, "", item, true); err != nil {
+		t.Fatalf("star: %v", err)
+	}
+	r := 90
+	if err := pb.SetRating(ctx, "", item, &r); err != nil {
+		t.Fatalf("rate: %v", err)
+	}
+	if err := pb.MarkPlayed(ctx, "", item, true); err != nil {
+		t.Fatalf("played: %v", err)
+	}
+
+	st, err := pb.State(ctx, "", item)
+	if err != nil {
+		t.Fatalf("state: %v", err)
+	}
+	if !st.Starred || !st.HasRating || st.Rating != 90 || !st.Finished || st.PlayCount != 1 {
+		t.Fatalf("round-trip state wrong: %+v", st)
+	}
+
+	// The subscriber observed play_state deltas for the item.
+	var saw bool
+	timeout := time.After(time.Second)
+collect:
+	for {
+		select {
+		case c := <-ch:
+			if c.EntityType == "play_state" && c.EntityPID == item {
+				saw = true
+				break collect
+			}
+		case <-timeout:
+			break collect
+		}
+	}
+	if !saw {
+		t.Error("subscriber did not observe a play_state delta")
+	}
+}
+
+// TestAnalyzeAIFFNotErrored verifies an AIFF file (which WaxLabel reports as PCM)
+// is decoded via ffmpeg rather than routed to the RIFF/WAVE-only pure-Go decoder
+// and erroring. ffmpeg is required to synthesize and decode it, so skip without it.
+func TestAnalyzeAIFFNotErrored(t *testing.T) {
+	bin, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		t.Skip("ffmpeg not installed")
+	}
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	aiff := filepath.Join(root, "tone.aiff")
+	if out, err := exec.Command(bin, "-hide_banner", "-loglevel", "error",
+		"-f", "lavfi", "-i", "sine=frequency=440:duration=2", "-y", aiff).CombinedOutput(); err != nil {
+		t.Skipf("could not synthesize AIFF: %v (%s)", err, out)
+	}
+
+	lib := openManaged(t, ctx, db, root)
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	// The AIFF cataloged with the container-keyed codec, not "pcm".
+	items, _ := lib.Query(ctx, query.New(query.EntityItems).Build())
+	if len(items) != 1 || items[0].Codec != "aiff" {
+		t.Fatalf("AIFF codec = %v, want one item keyed 'aiff'", items)
+	}
+	res, err := lib.Analyze(ctx)
+	if err != nil {
+		t.Fatalf("analyze: %v", err)
+	}
+	if res.Result.Errored != 0 {
+		t.Errorf("AIFF analysis errored (%d); it should decode via ffmpeg", res.Result.Errored)
+	}
+	if res.Result.Analyzed != 1 {
+		t.Errorf("AIFF analyzed = %d, want 1 (ffmpeg path)", res.Result.Analyzed)
+	}
+}
+
+// TestStatsOnFacet verifies the stats summary: structural counts and the
+// Facet-built top genres/artists, plus per-user play stats from play_state.
+func TestStatsOnFacet(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	// Distinct audio per file so essence differs (three separate items).
+	write := func(name string, s testaudio.MP3Spec, seed byte) {
+		s.Audio = testaudio.AudioWithSeed(seed)
+		writeFile(t, filepath.Join(root, name), testaudio.BuildMP3FromSpec(s))
+	}
+	write("a.mp3", testaudio.MP3Spec{Title: "A", Artist: "Alpha", Album: "One", Genre: "Rock"}, 1)
+	write("b.mp3", testaudio.MP3Spec{Title: "B", Artist: "Beta", Album: "Two", Genre: "Rock"}, 2)
+	write("c.mp3", testaudio.MP3Spec{Title: "C", Artist: "Alpha", Album: "Three", Genre: "Jazz"}, 3)
+
+	lib := openManaged(t, ctx, db, root)
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+
+	// Record some plays on the first item.
+	items, _ := lib.Query(ctx, query.New(query.EntityItems).Where("title", query.OpIs, "A").Build())
+	if len(items) != 1 {
+		t.Fatalf("want item A, got %d", len(items))
+	}
+	pb := lib.Playback()
+	for i := 0; i < 3; i++ {
+		if err := pb.MarkPlayed(ctx, "", items[0].PID, i == 2); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = pb.SetStar(ctx, "", items[0].PID, true)
+
+	st, err := lib.Stats(ctx, "", 5)
+	if err != nil {
+		t.Fatalf("stats: %v", err)
+	}
+	if st.Items != 3 || st.Artists != 2 || st.Genres != 2 {
+		t.Errorf("counts wrong: items=%d artists=%d genres=%d, want 3/2/2", st.Items, st.Artists, st.Genres)
+	}
+	if len(st.TopGenres) == 0 || st.TopGenres[0].Display != "Rock" || st.TopGenres[0].Count != 2 {
+		t.Errorf("top genre = %+v, want Rock with 2", st.TopGenres)
+	}
+	if len(st.TopArtists) == 0 || st.TopArtists[0].Display != "Alpha" || st.TopArtists[0].Count != 2 {
+		t.Errorf("top artist = %+v, want Alpha with 2", st.TopArtists)
+	}
+	if st.Play.TotalPlays != 3 || st.Play.Finished != 1 || st.Play.Starred != 1 {
+		t.Errorf("play stats = %+v, want plays=3 finished=1 starred=1", st.Play)
+	}
+	if len(st.Play.MostPlayed) == 0 || st.Play.MostPlayed[0].Title != "A" || st.Play.MostPlayed[0].PlayCount != 3 {
+		t.Errorf("most played = %+v, want A with 3", st.Play.MostPlayed)
+	}
+}
+
+// TestDoctorToleratesOlderCatalog verifies doctor can inspect a catalog written
+// by an older binary without querying tables added by later migrations.
 func TestDoctorToleratesOlderCatalog(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
@@ -392,8 +595,8 @@ func TestScanRelativeSubPath(t *testing.T) {
 	}
 }
 
-// TestOpenRejectsOverlappingRoots verifies an embedder gets the same
-// non-overlapping-roots guarantee as the CLI (config.Validate runs in Open).
+// TestOpenRejectsOverlappingRoots verifies embedders get the same root isolation
+// as the CLI because Open runs config validation.
 func TestOpenRejectsOverlappingRoots(t *testing.T) {
 	ctx := context.Background()
 	base := t.TempDir()

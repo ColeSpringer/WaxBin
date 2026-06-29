@@ -13,6 +13,10 @@ import (
 // table; doctor skips the fingerprint count on a catalog older than this.
 const fingerprintSchemaVersion = 3
 
+// loudnessSchemaVersion is the migration that introduced the loudness table;
+// doctor skips the ReplayGain count on a catalog older than this.
+const loudnessSchemaVersion = 7
+
 // DoctorReport summarizes catalog health and detected capabilities.
 type DoctorReport struct {
 	DBPath string
@@ -26,6 +30,7 @@ type DoctorReport struct {
 	LibraryCount       int
 	ItemCount          int
 	FingerprintCount   int
+	LoudnessCount      int // files with a stored ReplayGain measurement
 
 	// Detected optional helpers (never required for core use).
 	FFmpeg bool
@@ -82,6 +87,15 @@ func (l *Library) Doctor(ctx context.Context) (*DoctorReport, error) {
 			return nil, err
 		}
 		rep.FingerprintCount = fps
+	}
+
+	// The loudness table only exists from v7 on; skip its count on older catalogs.
+	if version >= loudnessSchemaVersion {
+		n, err := l.store.CountLoudness(ctx)
+		if err != nil {
+			return nil, err
+		}
+		rep.LoudnessCount = n
 	}
 
 	// The lockfile is read without taking the lock, so even a read-only doctor

@@ -6,7 +6,7 @@ type Library struct {
 	ID          int64
 	PID         PID
 	Root        []byte // raw OS path bytes (non-UTF8 safe)
-	DisplayRoot string // best-effort UTF-8 rendering for humans/logs
+	DisplayRoot string // fallback UTF-8 rendering for humans/logs
 	Mode        Mode
 	Profile     string // organization profile name
 	CreatedAt   int64  // unix nanoseconds
@@ -64,18 +64,35 @@ type PlayableItem struct {
 	UpdatedAt   int64 // unix nanoseconds
 }
 
-// Track is the music subtype of a playable_item (shares its ID).
+// Track is the music subtype of a playable_item (shares its ID). It carries the
+// denormalized display columns; normalized artist/album/genre entities are
+// resolved and linked alongside during persistence.
 type Track struct {
 	ItemID      int64
 	Artist      string
 	ArtistSort  string
 	Album       string
 	AlbumArtist string
+	Composer    string
+	Comment     string
 	TrackNo     int
+	TrackTotal  int
 	DiscNo      int
+	DiscTotal   int
 	Year        int
-	Genre       string
-	MBID        string
+	Genre       string   // joined display of Genres (the denormalized column)
+	Genres      []string // individual genres, resolved into item_genre links
+	Compilation bool     // a multi-artist compilation (drives Various Artists interop)
+	ISRC        string
+
+	// External identifiers anchor MBID-first entity identity and the future
+	// enrichment fast-path. MBID is the recording id (kept for back-compat);
+	// the release/release-group/artist ids populate the matching entity rows.
+	MBID             string // MusicBrainz recording id
+	MBReleaseID      string
+	MBReleaseGroupID string
+	MBArtistID       string
+	MBAlbumArtistID  string
 }
 
 // ItemFile is an edge from a logical item to a backing file. Offsets support a
@@ -91,19 +108,39 @@ type ItemFile struct {
 
 // Tags is metadata read from a file's tags, with filename-derived values as a
 // fallback. It is the boundary type between metadata readers and the rest of the
-// engine.
+// engine. The WaxLabel adapter populates it for every format without decoding
+// PCM.
 type Tags struct {
 	Title       string
-	Artist      string
+	Artist      string   // primary credited artist (display)
+	Artists     []string // all credited artists, primary first
 	AlbumArtist string
 	Album       string
+	Composer    string
+	Comment     string
 	TrackNo     int
+	TrackTotal  int
 	DiscNo      int
+	DiscTotal   int
 	Year        int
-	Genre       string
-	MBID        string
+	Genre       string   // joined display of Genres
+	Genres      []string // split genres, normalized into entities downstream
+	Compilation bool
+	ISRC        string
 
-	// Audio properties, where cheaply available without decoding PCM.
+	// Sort names from tags, used to seed collation sort keys when present.
+	ArtistSort      string
+	AlbumSort       string
+	AlbumArtistSort string
+
+	// External identifiers (MBID-first identity + enrichment fast-path).
+	MBID             string // MusicBrainz recording id
+	MBReleaseID      string
+	MBReleaseGroupID string
+	MBArtistID       string
+	MBAlbumArtistID  string
+
+	// Audio properties, read from the container without decoding PCM.
 	Container  string
 	Codec      string
 	DurationMS int64
