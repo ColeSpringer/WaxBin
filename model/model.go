@@ -1,0 +1,147 @@
+package model
+
+// Library is a registered root and its handling policy. A file belongs to
+// exactly one library (roots are validated non-overlapping at config time).
+type Library struct {
+	ID          int64
+	PID         PID
+	Root        []byte // raw OS path bytes (non-UTF8 safe)
+	DisplayRoot string // best-effort UTF-8 rendering for humans/logs
+	Mode        Mode
+	Profile     string // organization profile name
+	CreatedAt   int64  // unix nanoseconds
+}
+
+// File is one file on disk: an audio file or a sidecar. Paths are stored as raw
+// bytes (BLOB) to survive non-UTF8 filesystems, with a display string alongside.
+type File struct {
+	ID          int64
+	PID         PID
+	LibraryID   int64
+	Path        []byte // absolute path, raw bytes
+	DisplayPath string
+	RelPath     []byte // path relative to the library root, raw bytes
+	Kind        FileKind
+	Size        int64
+	MTimeNS     int64 // modification time, nanosecond precision
+
+	ContentHash string // hash of the whole file (changes on any byte change)
+	EssenceHash string // hash of decoder-independent audio essence (tag-stable)
+
+	// AnalyzedEssence and AnalysisVersion decide when analysis must rerun: a
+	// changed essence or algorithm version invalidates prior analysis.
+	AnalyzedEssence string
+	AnalysisVersion int
+
+	Container  string
+	Codec      string
+	DurationMS int64
+	Bitrate    int
+	SampleRate int
+	Channels   int
+	BitDepth   int
+
+	ScanState ScanState
+	FirstSeen int64 // unix nanoseconds
+	LastSeen  int64 // unix nanoseconds
+}
+
+// PlayableItem is the logical supertype shared by track/book/episode. Its PK is
+// shared with the subtype row.
+type PlayableItem struct {
+	ID    int64
+	PID   PID
+	Kind  Kind
+	State ItemState
+	Title string
+	// SortKey is WaxBin-generated (Unicode-fold + "The"-strip + numeric-pad) so
+	// a BINARY sort is collation-correct and portable.
+	SortKey string
+	// IdentityKey is the entity-identity key (see package identity) used to
+	// dedup and re-link the item across re-scans. Unique per (Kind, IdentityKey).
+	IdentityKey string
+	CreatedAt   int64 // unix nanoseconds
+	UpdatedAt   int64 // unix nanoseconds
+}
+
+// Track is the music subtype of a playable_item (shares its ID).
+type Track struct {
+	ItemID      int64
+	Artist      string
+	ArtistSort  string
+	Album       string
+	AlbumArtist string
+	TrackNo     int
+	DiscNo      int
+	Year        int
+	Genre       string
+	MBID        string
+}
+
+// ItemFile is an edge from a logical item to a backing file. Offsets support a
+// single file holding multiple items, such as a chapterized audiobook.
+type ItemFile struct {
+	ItemID   int64
+	FileID   int64
+	Role     string // "primary" for the main audio file
+	Position int
+	StartMS  int64
+	EndMS    int64
+}
+
+// Tags is metadata read from a file's tags, with filename-derived values as a
+// fallback. It is the boundary type between metadata readers and the rest of the
+// engine.
+type Tags struct {
+	Title       string
+	Artist      string
+	AlbumArtist string
+	Album       string
+	TrackNo     int
+	DiscNo      int
+	Year        int
+	Genre       string
+	MBID        string
+
+	// Audio properties, where cheaply available without decoding PCM.
+	Container  string
+	Codec      string
+	DurationMS int64
+	Bitrate    int
+	SampleRate int
+	Channels   int
+	BitDepth   int
+}
+
+// ItemView is the denormalized read shape returned by queries: a playable_item
+// joined with its subtype and primary file. It is what consumers render.
+type ItemView struct {
+	PID         PID
+	Kind        Kind
+	State       ItemState
+	Title       string
+	Artist      string
+	AlbumArtist string
+	Album       string
+	TrackNo     int
+	DiscNo      int
+	Year        int
+	Genre       string
+	DurationMS  int64
+
+	FilePID     PID
+	Path        []byte // raw bytes of the primary file path
+	DisplayPath string
+	Container   string
+	Codec       string
+}
+
+// Change is one row of the change_log: the single delta vocabulary consumers
+// tail to keep their caches current.
+type Change struct {
+	Seq        int64
+	TS         int64 // unix nanoseconds
+	EntityType string
+	EntityPID  PID
+	Op         ChangeOp
+}
