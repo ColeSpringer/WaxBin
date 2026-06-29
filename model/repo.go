@@ -68,6 +68,11 @@ type Catalog interface {
 
 	ChangesSince(ctx context.Context, seq int64) ([]Change, error)
 	LatestChangeSeq(ctx context.Context) (int64, error)
+
+	// RefreshRollups recomputes the maintained catalog-structural rollups
+	// (per artist/release_group/genre) from the base tables. It is invoked after
+	// a scan so browse counts reflect the new catalog state.
+	RefreshRollups(ctx context.Context) error
 }
 
 // JobStore is the persistence port for jobs and leases.

@@ -5,45 +5,31 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/colespringer/waxbin/envelope"
 	"github.com/colespringer/waxbin/waxerr"
 )
 
-// RuleVersion is the current rule-document schema version. It is an envelope
-// version independent of the CLI's schemaVersion, so persisted rule docs can
-// evolve on their own cadence.
-const RuleVersion = 1
+const (
+	// RuleKind is the version-envelope kind for a persisted query rule document.
+	RuleKind = "waxbin.rule"
+	// RuleVersion is the current rule-document version, independent of the CLI's
+	// schemaVersion, so persisted rule docs evolve on their own cadence.
+	RuleVersion = 1
+)
 
-// RuleDoc is the on-disk/JSON form of a Query, wrapped in a version envelope.
-type RuleDoc struct {
-	Version int   `json:"version"`
-	Query   Query `json:"query"`
-}
-
-// ParseRule decodes a versioned JSON rule document into a Query.
+// ParseRule decodes a versioned JSON rule document (a query wrapped in a
+// version envelope) into a Query, rejecting an unknown kind or a future version.
 func ParseRule(data []byte) (Query, error) {
-	var doc RuleDoc
-	if err := json.Unmarshal(data, &doc); err != nil {
-		return Query{}, waxerr.Wrap(waxerr.CodeInvalid, "query.ParseRule", err)
+	q, _, err := envelope.Decode[Query](data, RuleKind, RuleVersion)
+	if err != nil {
+		return Query{}, err
 	}
-	if doc.Version == 0 {
-		return Query{}, waxerr.New(waxerr.CodeInvalid, "query.ParseRule",
-			"missing rule document version")
-	}
-	if doc.Version > RuleVersion {
-		return Query{}, waxerr.New(waxerr.CodeInvalid, "query.ParseRule",
-			fmt.Sprintf("rule document version %d is newer than supported version %d",
-				doc.Version, RuleVersion))
-	}
-	return doc.Query, nil
+	return q, nil
 }
 
 // MarshalRule encodes a Query as a versioned JSON rule document.
 func MarshalRule(q Query) ([]byte, error) {
-	data, err := json.Marshal(RuleDoc{Version: RuleVersion, Query: q})
-	if err != nil {
-		return nil, waxerr.Wrap(waxerr.CodeInternal, "query.MarshalRule", err)
-	}
-	return data, nil
+	return envelope.Wrap(RuleKind, RuleVersion, q)
 }
 
 // nodeEnvelope is the wire shape for the Node union. The "type" discriminator

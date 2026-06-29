@@ -34,6 +34,8 @@ func (DefaultReader) ReadTags(path string) (*model.Tags, error) {
 		_ = readID3v2(path, t) // best-effort; absent/garbled tags just leave fields empty
 	case ".flac":
 		_ = readFLAC(path, t)
+	case ".wav", ".wave":
+		_ = readWAV(path, t) // header-only: audio properties + duration, no PCM
 	}
 
 	if strings.TrimSpace(t.Title) == "" {

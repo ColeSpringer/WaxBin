@@ -5,12 +5,16 @@ import (
 	"io"
 	"log/slog"
 
+	"github.com/colespringer/waxbin/analyze"
 	"github.com/colespringer/waxbin/config"
+	"github.com/colespringer/waxbin/decode"
+	"github.com/colespringer/waxbin/fingerprint"
 	"github.com/colespringer/waxbin/jobs"
 	"github.com/colespringer/waxbin/meta"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/organize"
 	"github.com/colespringer/waxbin/query"
+	"github.com/colespringer/waxbin/read"
 	"github.com/colespringer/waxbin/scan"
 	"github.com/colespringer/waxbin/store/sqlite"
 	"github.com/colespringer/waxbin/waxerr"
@@ -23,6 +27,8 @@ type Library struct {
 	jobs      *jobs.Manager
 	scanner   *scan.Scanner
 	organizer *organize.Organizer
+	analyzer  *analyze.Analyzer
+	decoders  *decode.Registry
 	log       *slog.Logger
 	opts      Options
 }
@@ -64,11 +70,14 @@ func Open(ctx context.Context, opts Options) (*Library, error) {
 		return nil, err
 	}
 
+	decoders := decode.Default()
 	l := &Library{
 		store:     st,
 		jobs:      jobs.NewManager(st, owner, log),
 		scanner:   scan.New(st, meta.NewReader(), log),
 		organizer: organize.New(st, log),
+		analyzer:  analyze.New(st, decoders, log),
+		decoders:  decoders,
 		log:       log,
 		opts:      opts,
 	}
@@ -115,6 +124,20 @@ func (l *Library) Query(ctx context.Context, q query.Query) ([]*model.ItemView, 
 // Count returns the number of items matching q.
 func (l *Library) Count(ctx context.Context, q query.Query) (int, error) {
 	return l.store.CountItems(ctx, q)
+}
+
+// Facet groups the items matching q by a dimension and counts each bucket. The
+// CLI, OpenSubsonic adapters, and stats code use this same API, so they share
+// one canonical grouping result.
+func (l *Library) Facet(ctx context.Context, q query.Query, g read.GroupBy) (*read.FacetResult, error) {
+	return l.store.Facet(ctx, q, g)
+}
+
+// QueryPage returns one keyset-paginated, collation-correct window of items.
+// Pass an empty cursor for the first page and the returned Next cursor for each
+// subsequent page; pagination is stable under concurrent mutation.
+func (l *Library) QueryPage(ctx context.Context, q query.Query, cursor read.Cursor, limit int, desc bool) (*read.Page, error) {
+	return l.store.QueryPage(ctx, q, cursor, limit, desc)
 }
 
 // Get returns a single item by public id.
@@ -165,12 +188,115 @@ func (l *Library) Scan(ctx context.Context, req ScanRequest) (*ScanResult, error
 			out.Runs = append(out.Runs, *r)
 			addResult(&out.Total, r)
 		}
+		// Refresh maintained rollups only when the scan changed the catalog. A
+		// no-op rescan leaves every entity's counts and durations unchanged, so
+		// the full recompute is unnecessary.
+		if out.Total.ItemsCreated > 0 || out.Total.ItemsUpdated > 0 || out.Total.Relinked > 0 {
+			return l.store.RefreshRollups(ctx)
+		}
 		return nil
 	})
 	if job != nil {
 		out.JobPID = job.PID
 	}
 	return out, runErr
+}
+
+// AnalyzeResult reports an analyze run and the job it ran under.
+type AnalyzeResult struct {
+	JobPID model.PID
+	Result analyze.Result
+}
+
+// Analyze runs the resumable analyze pass: it decodes (the only PCM-decoding
+// stage), fingerprints, and indexes every audio file whose fingerprint is
+// missing or stale, under an "analyze"-scoped job. Files whose codec this build
+// cannot decode are reported as skipped, not failed.
+func (l *Library) Analyze(ctx context.Context) (*AnalyzeResult, error) {
+	out := &AnalyzeResult{}
+	job, runErr := l.jobs.Run(ctx, "analyze", "analyze", func(ctx context.Context, h *jobs.Handle) error {
+		r, err := l.analyzer.Run(ctx, func(p float64, msg string) error { return h.Heartbeat(ctx, p, msg) })
+		if r != nil {
+			out.Result = *r
+		}
+		return err
+	})
+	if job != nil {
+		out.JobPID = job.PID
+	}
+	return out, runErr
+}
+
+// AltEncoding is one verified alt-encoding of a query item: a different item
+// (a different lossy encoding of the same recording) whose fingerprint matches
+// above the similarity threshold.
+type AltEncoding struct {
+	ItemPID    model.PID
+	FilePID    model.PID
+	Similarity float64
+}
+
+const (
+	// altMinSharedTerms is the inverted-index candidate threshold. It is
+	// deliberately low: the index needs high recall, while full-fingerprint
+	// similarity below is the precision filter. The 30-bit shingle terms are
+	// selective enough that an unrelated track in the same duration bucket
+	// usually shares none, so the low threshold does not flood verification.
+	altMinSharedTerms  = 2
+	altSimilarityFloor = 0.7 // full-vector bit-agreement threshold
+)
+
+// FindAltEncodings returns other catalog items that are alt encodings of the
+// given item: the inverted index proposes candidates (shared terms within the
+// duration bucket), then each is verified by full-fingerprint similarity. The
+// item must already be analyzed; an unanalyzed item yields no matches.
+func (l *Library) FindAltEncodings(ctx context.Context, itemPID model.PID) ([]AltEncoding, error) {
+	item, err := l.store.ItemByPID(ctx, itemPID)
+	if err != nil {
+		return nil, err
+	}
+	if item.FilePID == "" {
+		return nil, nil
+	}
+	queryFP, err := l.store.LoadFingerprint(ctx, item.FilePID)
+	if err != nil {
+		if waxerr.Is(err, waxerr.CodeNotFound) {
+			return nil, nil // not analyzed yet: nothing to group on
+		}
+		return nil, err
+	}
+	candidates, err := l.store.FingerprintCandidates(ctx, item.FilePID, altMinSharedTerms)
+	if err != nil {
+		return nil, err
+	}
+
+	// FingerprintCandidates already returned each candidate's fingerprint vector,
+	// so verification is an in-memory comparison with no per-candidate query.
+	qSub := fingerprint.Unpack(queryFP)
+	var out []AltEncoding
+	for _, c := range candidates {
+		sim := fingerprint.Similar(qSub, fingerprint.Unpack(c.FP))
+		if sim >= altSimilarityFloor {
+			out = append(out, AltEncoding{ItemPID: c.ItemPID, FilePID: c.FilePID, Similarity: sim})
+		}
+	}
+	return out, nil
+}
+
+// Coverage reports per-codec analysis decode support for doctor.
+func (l *Library) Coverage() []decode.FormatSupport { return l.decoders.Coverage() }
+
+// VerifyDerived runs the derived-data consistency check (FTS, rollups, and
+// generated sort keys versus the source rows). It is read-only; it reports drift
+// rather than repairing it.
+func (l *Library) VerifyDerived(ctx context.Context) (*sqlite.DerivedReport, error) {
+	return l.store.VerifyDerived(ctx)
+}
+
+// RefreshRollups recomputes the maintained rollups, the repair for the rollup
+// drift that VerifyDerived can report.
+func (l *Library) RefreshRollups(ctx context.Context) error {
+	return l.store.RefreshRollups(ctx)
 }
 
 // PlanOrganize computes a dry-run move plan for the selected items under a

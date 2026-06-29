@@ -6,6 +6,7 @@ require (
 	github.com/gofrs/flock v0.13.0
 	github.com/oklog/ulid/v2 v2.1.1
 	github.com/spf13/cobra v1.10.2
+	golang.org/x/text v0.38.0
 	modernc.org/sqlite v1.53.0
 )
 

@@ -117,6 +117,19 @@ func (s *Store) PutScannedTrack(ctx context.Context, in model.PutScannedTrackInp
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 
+		// Resolve and link the normalized entities (artist/release_group/album/
+		// genre) and refresh the item's FTS row, emitting change_log rows for any
+		// newly created entity so delta consumers can update browse/facet caches.
+		// Tags (and the album folder) only change when the file is new, its content
+		// changed, or it was relinked to a new path, so a byte-identical no-op
+		// rescan skips this entirely, avoiding redundant FTS tokenization and
+		// genre rewrites.
+		if created || res.FileCreated || res.ContentChanged || res.Relinked {
+			if err := resolveAndLinkEntities(ctx, tx, itemID, in.Track, in.File.Path); err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+		}
+
 		// Re-home the file onto this item, detaching it from any prior item (the
 		// case when an in-place essence change re-keys the file to a new identity).
 		orphans, err := linkPrimaryFile(ctx, tx, itemID, fileID)

@@ -23,9 +23,17 @@ const itemJoins = ` FROM playable_item pi
 	LEFT JOIN item_file pf ON pf.item_id = pi.id AND pf.role = 'primary'
 	LEFT JOIN file f ON f.id = pf.file_id`
 
-const itemSelect = `SELECT pi.pid, pi.kind, pi.state, pi.title,
+// itemViewCols is the column list for an item read-view, shared by the plain
+// select and the keyset-paginated select (which prepends pi.sort_key).
+const itemViewCols = `pi.pid, pi.kind, pi.state, pi.title,
 	t.artist, t.album_artist, t.album, t.track_no, t.disc_no, t.year, t.genre,
-	f.pid, f.path, f.display_path, f.duration_ms, f.container, f.codec` + itemJoins
+	f.pid, f.path, f.display_path, f.duration_ms, f.container, f.codec`
+
+const itemSelect = `SELECT ` + itemViewCols + itemJoins
+
+// pageItemSelect prepends the item's sort key so keyset pagination can build the
+// next cursor from the last row without a second lookup.
+const pageItemSelect = `SELECT pi.sort_key, ` + itemViewCols + itemJoins
 
 const itemCountSelect = `SELECT COUNT(*)` + itemJoins
 
@@ -34,28 +42,56 @@ const fileSelect = `SELECT id, pid, library_id, path, display_path, rel_path, ki
 	container, codec, duration_ms, bitrate, sample_rate, channels, bit_depth,
 	scan_state, first_seen, last_seen FROM file`
 
+// itemViewNulls holds the nullable columns of an item view during a scan.
+type itemViewNulls struct {
+	trackNo, discNo, year, dur    sql.NullInt64
+	fpid, fdisp, container, codec sql.NullString
+	fpath                         []byte
+}
+
+// itemViewDests returns the scan destinations for an item view, in itemViewCols
+// order, so every reader scans the same row shape.
+func itemViewDests(v *model.ItemView, n *itemViewNulls) []any {
+	return []any{
+		&v.PID, &v.Kind, &v.State, &v.Title,
+		&v.Artist, &v.AlbumArtist, &v.Album, &n.trackNo, &n.discNo, &n.year, &v.Genre,
+		&n.fpid, &n.fpath, &n.fdisp, &n.dur, &n.container, &n.codec,
+	}
+}
+
+func (n *itemViewNulls) apply(v *model.ItemView) {
+	v.TrackNo = int(n.trackNo.Int64)
+	v.DiscNo = int(n.discNo.Int64)
+	v.Year = int(n.year.Int64)
+	v.DurationMS = n.dur.Int64
+	v.FilePID = model.PID(n.fpid.String)
+	v.Path = n.fpath
+	v.DisplayPath = n.fdisp.String
+	v.Container = n.container.String
+	v.Codec = n.codec.String
+}
+
 func scanItemView(sc rowScanner) (*model.ItemView, error) {
 	var v model.ItemView
-	var trackNo, discNo, year, dur sql.NullInt64
-	var fpid, fdisp, container, codec sql.NullString
-	var fpath []byte
-	if err := sc.Scan(
-		&v.PID, &v.Kind, &v.State, &v.Title,
-		&v.Artist, &v.AlbumArtist, &v.Album, &trackNo, &discNo, &year, &v.Genre,
-		&fpid, &fpath, &fdisp, &dur, &container, &codec,
-	); err != nil {
+	var n itemViewNulls
+	if err := sc.Scan(itemViewDests(&v, &n)...); err != nil {
 		return nil, err
 	}
-	v.TrackNo = int(trackNo.Int64)
-	v.DiscNo = int(discNo.Int64)
-	v.Year = int(year.Int64)
-	v.DurationMS = dur.Int64
-	v.FilePID = model.PID(fpid.String)
-	v.Path = fpath
-	v.DisplayPath = fdisp.String
-	v.Container = container.String
-	v.Codec = codec.String
+	n.apply(&v)
 	return &v, nil
+}
+
+// scanPageItem scans a page row: the leading sort key followed by the item view.
+func scanPageItem(sc rowScanner) (*model.ItemView, string, error) {
+	var v model.ItemView
+	var n itemViewNulls
+	var sortKey string
+	dests := append([]any{&sortKey}, itemViewDests(&v, &n)...)
+	if err := sc.Scan(dests...); err != nil {
+		return nil, "", err
+	}
+	n.apply(&v)
+	return &v, sortKey, nil
 }
 
 func scanFile(sc rowScanner) (*model.File, error) {
@@ -271,11 +307,16 @@ func itemHasAnyFile(ctx context.Context, tx *sql.Tx, itemID int64) (bool, error)
 	return exists == 1, err
 }
 
-// deleteItemCascade removes an item (and, via FK cascade, its track + edges),
-// returning its pid for the change_log.
+// deleteItemCascade removes an item (and, via FK cascade, its track, edges, and
+// item_genre links), returning its pid for the change_log. The FTS row is keyed
+// by rowid with no foreign key, so it is removed explicitly to avoid a stale
+// search hit pointing at a deleted item.
 func deleteItemCascade(ctx context.Context, tx *sql.Tx, itemID int64) (model.PID, error) {
 	var pid model.PID
 	if err := tx.QueryRowContext(ctx, "SELECT pid FROM playable_item WHERE id = ?", itemID).Scan(&pid); err != nil {
+		return "", err
+	}
+	if _, err := tx.ExecContext(ctx, "DELETE FROM search_fts WHERE rowid = ?", itemID); err != nil {
 		return "", err
 	}
 	if _, err := tx.ExecContext(ctx, "DELETE FROM playable_item WHERE id = ?", itemID); err != nil {

@@ -18,7 +18,7 @@ var migrationsFS embed.FS
 
 // SchemaVersion is the highest migration version this build ships. A read-only
 // open against a newer DB is refused (it may rely on schema the binary lacks).
-const SchemaVersion = 1
+const SchemaVersion = 4
 
 type migration struct {
 	version int
@@ -111,6 +111,24 @@ func (s *Store) verifyReadable(ctx context.Context) error {
 			fmt.Sprintf("catalog schema v%d is newer than this build supports (v%d)", v, SchemaVersion))
 	}
 	return nil
+}
+
+// CatalogVersion returns the catalog's current applied migration version using
+// the read pool, so it is safe on a read-only open (which never migrates).
+// Returns 0 for an uninitialized catalog. doctor reports the catalog's actual
+// version, distinct from this build's SchemaVersion, so a read-only diagnostic
+// against an older catalog does not fail on a table from a pending migration.
+func (s *Store) CatalogVersion(ctx context.Context) (int, error) {
+	var v int
+	err := s.read.QueryRowContext(ctx,
+		"SELECT COALESCE(MAX(version), 0) FROM schema_migrations").Scan(&v)
+	if err != nil {
+		if strings.Contains(err.Error(), "no such table") {
+			return 0, nil
+		}
+		return 0, waxerr.Wrap(waxerr.CodeIO, "store.CatalogVersion", err)
+	}
+	return v, nil
 }
 
 func (s *Store) currentVersion(ctx context.Context) (int, error) {

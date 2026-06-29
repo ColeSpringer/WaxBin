@@ -2,6 +2,7 @@ package waxbin_test
 
 import (
 	"context"
+	"database/sql"
 	"os"
 	"path/filepath"
 	"testing"
@@ -12,6 +13,7 @@ import (
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/query"
 	"github.com/colespringer/waxbin/waxerr"
+	_ "modernc.org/sqlite"
 )
 
 // TestEndToEndSingleFile verifies the core flow from scan to store to query to
@@ -105,6 +107,151 @@ func TestEndToEndSingleFile(t *testing.T) {
 	}
 	if len(changes) == 0 {
 		t.Fatal("expected change_log rows")
+	}
+}
+
+// TestAnalyzeAndGroupAltEncodings verifies the scan/analyze boundary end to end:
+// scanning catalogs WAVs without decoding; the analyze pass decodes + fingerprints
+// them; and the fingerprint index groups two encodings of one recording while
+// excluding an unrelated track.
+func TestAnalyzeAndGroupAltEncodings(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+
+	const rate = 22050
+	orig := testaudio.RichSignal(rate, 20, testaudio.MusicalPartials, 1)
+	transcoded := testaudio.Reencode(orig, 0.85, 42) // same recording, different bytes
+	other := testaudio.RichSignal(rate, 20, testaudio.AltPartials, 7)
+
+	writeFile(t, filepath.Join(root, "alpha.wav"), testaudio.EncodeWAV16(rate, orig))
+	writeFile(t, filepath.Join(root, "beta.wav"), testaudio.EncodeWAV16(rate, transcoded))
+	writeFile(t, filepath.Join(root, "gamma.wav"), testaudio.EncodeWAV16(rate, other))
+
+	lib := openManaged(t, ctx, db, root)
+
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	// Scanning must not have produced fingerprints (it never decodes PCM).
+	if rep, _ := lib.Doctor(ctx); rep.FingerprintCount != 0 {
+		t.Fatalf("scan produced %d fingerprints; scan must not analyze", rep.FingerprintCount)
+	}
+	// The derived data (FTS, rollups, sort keys) is consistent right after a scan,
+	// since scan refreshes the rollups and maintains the FTS in the write txn.
+	if dr, err := lib.VerifyDerived(ctx); err != nil || !dr.Consistent() {
+		t.Fatalf("derived data inconsistent after scan: %+v (err %v)", dr, err)
+	}
+
+	ares, err := lib.Analyze(ctx)
+	if err != nil {
+		t.Fatalf("analyze: %v", err)
+	}
+	if ares.Result.Analyzed != 3 || ares.Result.Skipped != 0 || ares.Result.Errored != 0 {
+		t.Fatalf("analyze result = %+v, want 3 analyzed / 0 skipped / 0 errored", ares.Result)
+	}
+
+	rep, err := lib.Doctor(ctx)
+	if err != nil || rep.FingerprintCount != 3 {
+		t.Fatalf("after analyze: fingerprints=%d err=%v, want 3", rep.FingerprintCount, err)
+	}
+
+	// A second analyze is a no-op: nothing is stale (essence + version unchanged).
+	again, err := lib.Analyze(ctx)
+	if err != nil {
+		t.Fatalf("re-analyze: %v", err)
+	}
+	if again.Result.Analyzed != 0 {
+		t.Fatalf("re-analyze re-did %d files; analysis is essence-keyed and should skip", again.Result.Analyzed)
+	}
+
+	alphaPID := itemPIDByTitle(t, ctx, lib, "alpha")
+	betaPID := itemPIDByTitle(t, ctx, lib, "beta")
+	gammaPID := itemPIDByTitle(t, ctx, lib, "gamma")
+
+	alts, err := lib.FindAltEncodings(ctx, alphaPID)
+	if err != nil {
+		t.Fatalf("find alt encodings: %v", err)
+	}
+	matched := map[model.PID]float64{}
+	for _, a := range alts {
+		matched[a.ItemPID] = a.Similarity
+	}
+	if _, ok := matched[betaPID]; !ok {
+		t.Errorf("beta (a transcode of alpha) was not grouped as an alt encoding; got %+v", alts)
+	}
+	if _, ok := matched[gammaPID]; ok {
+		t.Errorf("gamma (an unrelated track) was wrongly grouped with alpha")
+	}
+}
+
+func itemPIDByTitle(t *testing.T, ctx context.Context, lib *waxbin.Library, title string) model.PID {
+	t.Helper()
+	items, err := lib.Query(ctx, query.New(query.EntityItems).Where("title", query.OpIs, title).Build())
+	if err != nil {
+		t.Fatalf("query %q: %v", title, err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("query %q returned %d items, want 1", title, len(items))
+	}
+	return items[0].PID
+}
+
+// TestDoctorToleratesOlderCatalog verifies doctor reports honestly against a
+// catalog written by an older binary (behind this build), rather than failing on
+// a table a not-yet-applied migration would add.
+func TestDoctorToleratesOlderCatalog(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	writeFile(t, filepath.Join(root, "a.mp3"), testaudio.BuildMP3("A", "Ar", "Al", 1))
+
+	rw := openManaged(t, ctx, db, root)
+	if _, err := rw.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("seed scan: %v", err)
+	}
+	if err := rw.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	// Simulate a catalog from an older binary: drop the v3 fingerprint tables and
+	// roll the recorded schema version back to 2.
+	raw, err := sql.Open("sqlite", "file:"+db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, stmt := range []string{
+		"DROP TABLE fingerprint_term",
+		"DROP TABLE fingerprint",
+		"DELETE FROM schema_migrations WHERE version >= 3",
+	} {
+		if _, err := raw.ExecContext(ctx, stmt); err != nil {
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+	_ = raw.Close()
+
+	ro, err := waxbin.Open(ctx, waxbin.Options{DBPath: db, ReadOnly: true})
+	if err != nil {
+		t.Fatalf("read-only open of an older catalog: %v", err)
+	}
+	defer ro.Close()
+
+	rep, err := ro.Doctor(ctx)
+	if err != nil {
+		t.Fatalf("doctor on an older catalog should not fail: %v", err)
+	}
+	if rep.SchemaVersion != 2 {
+		t.Errorf("reported schema v%d, want 2 (the catalog's actual version)", rep.SchemaVersion)
+	}
+	if !rep.NeedsMigration() {
+		t.Error("an older catalog should report NeedsMigration")
+	}
+	if rep.FingerprintCount != 0 {
+		t.Errorf("fingerprint count = %d, want 0 (skipped on a pre-v3 catalog)", rep.FingerprintCount)
+	}
+	if rep.ItemCount != 1 {
+		t.Errorf("item count = %d, want 1 (works on the v1 tables)", rep.ItemCount)
 	}
 }
 

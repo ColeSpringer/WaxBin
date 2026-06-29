@@ -135,7 +135,7 @@ func TestRuleRoundTrip(t *testing.T) {
 func TestRuleInt64Precision(t *testing.T) {
 	const ns int64 = 1_700_000_000_123_456_789 // a nanosecond timestamp > 2^53
 	doc := fmt.Sprintf(
-		`{"version":1,"query":{"entity":"items","where":{"type":"cond","field":"added","op":"after","value":%d}}}`, ns)
+		`{"kind":"waxbin.rule","version":1,"payload":{"entity":"items","where":{"type":"cond","field":"added","op":"after","value":%d}}}`, ns)
 
 	q, err := query.ParseRule([]byte(doc))
 	if err != nil {
@@ -155,8 +155,15 @@ func TestRuleInt64Precision(t *testing.T) {
 }
 
 func TestParseRuleRejectsFutureVersion(t *testing.T) {
-	_, err := query.ParseRule([]byte(`{"version":999,"query":{"entity":"items"}}`))
+	_, err := query.ParseRule([]byte(`{"kind":"waxbin.rule","version":999,"payload":{"entity":"items"}}`))
 	if !waxerr.Is(err, waxerr.CodeInvalid) {
 		t.Fatalf("want CodeInvalid for newer version, got %v", err)
+	}
+}
+
+func TestParseRuleRejectsWrongKind(t *testing.T) {
+	_, err := query.ParseRule([]byte(`{"kind":"something.else","version":1,"payload":{"entity":"items"}}`))
+	if !waxerr.Is(err, waxerr.CodeInvalid) {
+		t.Fatalf("want CodeInvalid for a mismatched artifact kind, got %v", err)
 	}
 }
