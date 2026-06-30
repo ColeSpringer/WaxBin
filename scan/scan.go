@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -203,22 +204,30 @@ func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, p
 		ScanState:   model.ScanIndexed,
 	}
 
-	in := model.PutScannedTrackInput{
-		LibraryID: lib.ID,
-		File:      file,
-		Item: model.PlayableItem{
-			Kind:        model.KindTrack,
-			State:       model.StatePresent,
-			Title:       tags.Title,
-			SortKey:     model.SortKey(tags.Title),
-			IdentityKey: identity.TrackKey(tags.MBID, essenceHash),
-		},
-		Track:    trackFromTags(tags),
-		Lyrics:   sidecarLyrics(path, fm.Lyrics),
-		CoverArt: resolveCover(path, fm.CoverArt, cache),
-	}
+	cover := resolveCover(path, fm.CoverArt, cache)
 
-	out, err := s.cat.PutScannedTrack(ctx, in)
+	// An audiobook takes the book path: it groups by book identity (so a multi-file
+	// book collapses its parts into one item) and carries contributors and chapters.
+	// Everything else is a music track.
+	var out *model.ScanItemResult
+	if tags.IsAudiobook {
+		out, err = s.cat.PutScannedBook(ctx, bookInput(lib.ID, file, tags, essenceHash, cover))
+	} else {
+		out, err = s.cat.PutScannedTrack(ctx, model.PutScannedTrackInput{
+			LibraryID: lib.ID,
+			File:      file,
+			Item: model.PlayableItem{
+				Kind:        model.KindTrack,
+				State:       model.StatePresent,
+				Title:       tags.Title,
+				SortKey:     model.SortKey(tags.Title),
+				IdentityKey: identity.TrackKey(tags.MBID, essenceHash),
+			},
+			Track:    trackFromTags(tags),
+			Lyrics:   sidecarLyrics(path, fm.Lyrics),
+			CoverArt: cover,
+		})
+	}
 	if err != nil {
 		return err
 	}
@@ -234,6 +243,97 @@ func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, p
 		res.Relinked++
 	}
 	return nil
+}
+
+// bookInput composes one audiobook file into a book persistence input. The book
+// title and author are the album/album-artist (the file title/artist hold a
+// chapter or part name in multi-file books); the book key groups the parts of one
+// work, falling back to the essence hash for an untitled book so a rescan still
+// dedups to one item. A file with no embedded chapters contributes a single
+// whole-file chapter so a multi-file book still navigates by part.
+func bookInput(libraryID int64, file model.File, tags model.Tags, essenceHash string, cover *model.ArtImage) model.PutScannedBookInput {
+	title := cleanBookTitle(firstNonEmpty(tags.Album, tags.Title))
+	author := firstNonEmpty(tags.AlbumArtist, tags.Artist)
+	key := identity.BookKey(tags.ASIN, tags.ISBN, author, title, tags.Edition)
+	if key == "" {
+		key = identity.TrackKey("", essenceHash)
+	}
+
+	chapters := tags.Chapters
+	if len(chapters) == 0 {
+		// No embedded chapters: one whole-file chapter (open-ended) titled by the
+		// file, so a multi-file book navigates part-by-part and a single-file book
+		// still has one entry.
+		chapters = []model.Chapter{{Position: 0, Title: tags.Title}}
+	}
+
+	position := tags.TrackNo
+	if tags.DiscNo > 0 {
+		position = tags.DiscNo*100000 + tags.TrackNo
+	}
+
+	authorSort := model.SortKey(firstNonEmpty(tags.AlbumArtistSort, tags.ArtistSort, author))
+	return model.PutScannedBookInput{
+		LibraryID: libraryID,
+		File:      file,
+		Item: model.PlayableItem{
+			Kind:        model.KindBook,
+			State:       model.StatePresent,
+			Title:       title,
+			SortKey:     model.SortKey(title),
+			IdentityKey: key,
+		},
+		Book: model.Book{
+			Subtitle:    tags.Subtitle,
+			Author:      author,
+			AuthorSort:  authorSort,
+			Authors:     meta.SplitCredits(author),
+			Narrators:   tags.Narrators,
+			Narrator:    strings.Join(tags.Narrators, ", "),
+			Series:      tags.Series,
+			SeriesSeq:   tags.SeriesSeq,
+			Year:        tags.Year,
+			Publisher:   tags.Publisher,
+			ASIN:        tags.ASIN,
+			ISBN:        tags.ISBN,
+			Edition:     tags.Edition,
+			Abridged:    tags.Abridged,
+			Description: tags.Description,
+			Genres:      tags.Genres,
+			Genre:       tags.Genre,
+		},
+		Position: position,
+		Chapters: chapters,
+		CoverArt: cover,
+	}
+}
+
+// abridgedMarkerRe matches a trailing BRACKETED "(Unabridged)"/"[Abridged]" marker
+// that audiobook taggers append to the title or album. parseAbridged in the meta
+// adapter reads the flag; this strips it so the stored book title is clean. It
+// requires the brackets (mirroring parseAbridged) so a title that genuinely ends in
+// the word is not truncated, which would also shift the identity key.
+var abridgedMarkerRe = regexp.MustCompile(`(?i)\s*[\(\[]\s*(?:un)?abridged\s*[\)\]]\s*$`)
+
+// cleanBookTitle removes a trailing bracketed abridged/unabridged marker from a
+// book title.
+func cleanBookTitle(s string) string {
+	cleaned := strings.TrimSpace(abridgedMarkerRe.ReplaceAllString(s, ""))
+	if cleaned == "" {
+		return strings.TrimSpace(s) // never strip the whole title away
+	}
+	return cleaned
+}
+
+// firstNonEmpty returns the first argument that is non-empty after trimming, with
+// surrounding whitespace removed, so it does not leak into stored display columns.
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if t := strings.TrimSpace(v); t != "" {
+			return t
+		}
+	}
+	return ""
 }
 
 // trackFromTags builds the track subtype from the parsed tags. ArtistSort

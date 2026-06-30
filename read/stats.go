@@ -6,12 +6,13 @@ import "github.com/colespringer/waxbin/model"
 // plus maintained rollups and per-user play_state. Catalog-structural figures are
 // global; play figures are for one user.
 type Stats struct {
-	Items         int   // playable items (tracks)
-	Artists       int   // distinct artist entities
+	Items         int   // music tracks
+	Books         int   // audiobooks
+	Artists       int   // distinct artist entities (track artists + book contributors)
 	ReleaseGroups int   // distinct release groups
 	Albums        int   // distinct albums
 	Genres        int   // distinct genre entities
-	TotalDuration int64 // summed primary-file duration, ms
+	TotalDuration int64 // summed item-file duration across all parts, ms
 
 	TopGenres  []Bucket // Facet(genre), most items first
 	TopArtists []Bucket // Facet(artist), most items first

@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"fmt"
 
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/waxerr"
@@ -19,6 +20,7 @@ type DerivedReport struct {
 	GenreRollupDrift        int
 	ReleaseGroupRollupDrift int
 	SortKeyDrift            int // entities whose stored sort_key != regenerated
+	BookDurationDrift       int // books whose stored total_duration_ms != summed parts
 	OrphanArtSources        int // art_source images with no live art_map references
 	OrphanThumbnails        int // thumb_cache rows whose source is unreferenced
 }
@@ -31,7 +33,8 @@ type DerivedReport struct {
 func (r DerivedReport) Consistent() bool {
 	return r.ItemsMissingFTS == 0 && r.OrphanFTSRows == 0 &&
 		r.ArtistRollupDrift == 0 && r.GenreRollupDrift == 0 &&
-		r.ReleaseGroupRollupDrift == 0 && r.SortKeyDrift == 0
+		r.ReleaseGroupRollupDrift == 0 && r.SortKeyDrift == 0 &&
+		r.BookDurationDrift == 0
 }
 
 // Reclaimable reports whether `db verify --fix` (GCArt) would reclaim space:
@@ -62,6 +65,10 @@ func (s *Store) VerifyDerived(ctx context.Context) (*DerivedReport, error) {
 		{&rep.ArtistRollupDrift, artistRollupDriftQ},
 		{&rep.GenreRollupDrift, genreRollupDriftQ},
 		{&rep.ReleaseGroupRollupDrift, releaseGroupRollupDriftQ},
+		// A book's denormalized total duration must equal the sum of its parts'
+		// effective durations (the same definition refreshBookDuration writes).
+		{&rep.BookDurationDrift, "SELECT COUNT(*) FROM book b WHERE b.total_duration_ms <> " +
+			fmt.Sprintf(bookEffectiveDurationSum, "b.item_id")},
 		// An art source with no live entity reference, or a thumbnail whose source
 		// has none, is reclaimable derived state. A map row pointing at a deleted
 		// entity is ignored here; GCArt removes that stale map before deleting the
@@ -102,6 +109,7 @@ func (s *Store) sortKeyDrift(ctx context.Context) (int, error) {
 		{"name", "genre"},
 		{"title", "release_group"},
 		{"title", "album"},
+		{"name", "series"},
 	}
 	total := 0
 	for _, src := range sources {
@@ -156,7 +164,7 @@ WHERE COALESCE(gr.track_count, -1) <>
         (SELECT COUNT(DISTINCT ig.item_id) FROM item_genre ig WHERE ig.genre_id = g.id)
    OR COALESCE(gr.total_duration_ms, -1) <>
         (SELECT COALESCE(SUM(f.duration_ms), 0) FROM item_genre ig
-           LEFT JOIN item_file pf ON pf.item_id = ig.item_id AND pf.role = 'primary'
+           LEFT JOIN item_file pf ON pf.item_id = ig.item_id
            LEFT JOIN file f ON f.id = pf.file_id
          WHERE ig.genre_id = g.id)`
 

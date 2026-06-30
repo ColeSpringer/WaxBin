@@ -54,6 +54,8 @@ func newRootCmd() *cobra.Command {
 		newLyricsCmd(g),
 		newArtCmd(g),
 		newShowCmd(g),
+		newBookCmd(g),
+		newChaptersCmd(g),
 		newOrganizeCmd(g),
 		newRmCmd(g),
 		newTrashCmd(g),

@@ -148,6 +148,26 @@ type Tags struct {
 	SampleRate int
 	Channels   int
 	BitDepth   int
+
+	// Audiobook / spoken-word fields, populated by the WaxLabel adapter from
+	// spoken-word tags. IsAudiobook drives the scanner's book-vs-track branch;
+	// Edition disambiguates an abridged release from the same title's unabridged
+	// one. Abridged is nil when the tags do not say.
+	IsAudiobook bool
+	Subtitle    string
+	Narrators   []string
+	Series      string
+	SeriesSeq   string
+	Publisher   string
+	ASIN        string
+	ISBN        string
+	Edition     string
+	Abridged    *bool
+	Description string
+
+	// Chapters are the file's embedded navigation chapters (M4B Nero/QuickTime,
+	// Matroska, MP3 CHAP), file-relative, in file order. Empty for music.
+	Chapters []Chapter
 }
 
 // ItemView is the denormalized read shape returned by queries: a playable_item
@@ -166,6 +186,16 @@ type ItemView struct {
 	Genre       string
 	Compilation bool // a multi-artist compilation (drives Various Artists layout)
 	DurationMS  int64
+
+	// Audiobook fields, populated for book items (empty for tracks). Author maps
+	// onto Artist for the shared read/organize paths; these carry the extras the
+	// audiobook layout and detail view need.
+	AuthorSort string
+	Narrator   string
+	Series     string
+	SeriesSeq  string
+	Subtitle   string
+	ASIN       string
 
 	FilePID     PID
 	Path        []byte // raw bytes of the primary file path

@@ -86,6 +86,75 @@ type showView struct {
 	ReplayGain *loudnessJSON `json:"replayGain,omitempty"`
 }
 
+// chapterView is the JSON shape for one book chapter, with book-timeline offsets.
+type chapterView struct {
+	Position int    `json:"position"`
+	Title    string `json:"title"`
+	StartMS  int64  `json:"startMs"`
+	EndMS    int64  `json:"endMs"`
+	FilePID  string `json:"filePid,omitempty"`
+}
+
+func chapterViews(chs []model.Chapter) []chapterView {
+	out := make([]chapterView, 0, len(chs))
+	for _, c := range chs {
+		out = append(out, chapterView{
+			Position: c.Position, Title: c.Title, StartMS: c.StartMS, EndMS: c.EndMS,
+			FilePID: string(c.FilePID),
+		})
+	}
+	return out
+}
+
+// bookPartView is the JSON shape for one backing file of a (possibly multi-file) book.
+type bookPartView struct {
+	FilePID    string `json:"filePid"`
+	Path       string `json:"path"`
+	Position   int    `json:"position"`
+	DurationMS int64  `json:"durationMs"`
+}
+
+// bookView is the JSON shape for `book`: the full audiobook detail.
+type bookView struct {
+	PID             string         `json:"pid"`
+	Title           string         `json:"title"`
+	Subtitle        string         `json:"subtitle,omitempty"`
+	Authors         []string       `json:"authors,omitempty"`
+	Narrators       []string       `json:"narrators,omitempty"`
+	Translators     []string       `json:"translators,omitempty"`
+	Editors         []string       `json:"editors,omitempty"`
+	Series          string         `json:"series,omitempty"`
+	SeriesPID       string         `json:"seriesPid,omitempty"`
+	SeriesSeq       string         `json:"seriesSeq,omitempty"`
+	Year            int            `json:"year,omitempty"`
+	Publisher       string         `json:"publisher,omitempty"`
+	ASIN            string         `json:"asin,omitempty"`
+	ISBN            string         `json:"isbn,omitempty"`
+	Edition         string         `json:"edition,omitempty"`
+	Abridged        *bool          `json:"abridged,omitempty"`
+	Description     string         `json:"description,omitempty"`
+	TotalDurationMS int64          `json:"totalDurationMs"`
+	Parts           []bookPartView `json:"parts"`
+	Chapters        []chapterView  `json:"chapters"`
+}
+
+func toBookView(d *model.BookDetail) bookView {
+	v := bookView{
+		PID: string(d.Item.PID), Title: d.Item.Title, Subtitle: d.Subtitle,
+		Authors: d.Authors, Narrators: d.Narrators, Translators: d.Translators, Editors: d.Editors,
+		Series: d.Series, SeriesPID: string(d.SeriesPID), SeriesSeq: d.SeriesSeq,
+		Year: d.Item.Year, Publisher: d.Publisher, ASIN: d.ASIN, ISBN: d.ISBN, Edition: d.Edition,
+		Abridged: d.Abridged, Description: d.Description, TotalDurationMS: d.TotalDurationMS,
+		Chapters: chapterViews(d.Chapters),
+	}
+	for _, p := range d.Files {
+		v.Parts = append(v.Parts, bookPartView{
+			FilePID: string(p.FilePID), Path: p.DisplayPath, Position: p.Position, DurationMS: p.DurationMS,
+		})
+	}
+	return v
+}
+
 type userView struct {
 	PID       string `json:"pid"`
 	Name      string `json:"name"`
@@ -152,6 +221,7 @@ func toPageView(p *read.Page) pageView {
 
 type statsView struct {
 	Items         int           `json:"items"`
+	Books         int           `json:"books"`
 	Artists       int           `json:"artists"`
 	ReleaseGroups int           `json:"releaseGroups"`
 	Albums        int           `json:"albums"`
@@ -180,7 +250,7 @@ type playedItemJSON struct {
 
 func toStatsView(s *read.Stats) statsView {
 	v := statsView{
-		Items: s.Items, Artists: s.Artists, ReleaseGroups: s.ReleaseGroups, Albums: s.Albums,
+		Items: s.Items, Books: s.Books, Artists: s.Artists, ReleaseGroups: s.ReleaseGroups, Albums: s.Albums,
 		Genres: s.Genres, TotalDuration: s.TotalDuration,
 		TopGenres: bucketViews(s.TopGenres), TopArtists: bucketViews(s.TopArtists), ByYear: bucketViews(s.ByYear),
 		Play: playStatsJSON{
@@ -255,6 +325,7 @@ type searchView struct {
 	Artists   []searchHitView `json:"artists"`
 	Albums    []searchHitView `json:"albums"`
 	Tracks    []searchHitView `json:"tracks"`
+	Books     []searchHitView `json:"books"`
 	Episodes  []searchHitView `json:"episodes"`
 	Truncated bool            `json:"truncated,omitempty"`
 }
@@ -263,7 +334,8 @@ func toSearchView(r *read.SearchResult) searchView {
 	return searchView{
 		Query:   r.Query,
 		Artists: hitViews(r.Artists), Albums: hitViews(r.Albums),
-		Tracks: hitViews(r.Tracks), Episodes: hitViews(r.Episodes), Truncated: r.Truncated,
+		Tracks: hitViews(r.Tracks), Books: hitViews(r.Books),
+		Episodes: hitViews(r.Episodes), Truncated: r.Truncated,
 	}
 }
 
@@ -305,6 +377,7 @@ type derivedView struct {
 	GenreRollupDrift        int  `json:"genreRollupDrift"`
 	ReleaseGroupRollupDrift int  `json:"releaseGroupRollupDrift"`
 	SortKeyDrift            int  `json:"sortKeyDrift"`
+	BookDurationDrift       int  `json:"bookDurationDrift"`
 	OrphanArtSources        int  `json:"orphanArtSources"`
 	OrphanThumbnails        int  `json:"orphanThumbnails"`
 	Consistent              bool `json:"consistent"`
@@ -315,7 +388,8 @@ func toDerivedView(r *sqlite.DerivedReport) derivedView {
 		ItemsMissingFTS: r.ItemsMissingFTS, OrphanFTSRows: r.OrphanFTSRows,
 		ArtistRollupDrift: r.ArtistRollupDrift, GenreRollupDrift: r.GenreRollupDrift,
 		ReleaseGroupRollupDrift: r.ReleaseGroupRollupDrift, SortKeyDrift: r.SortKeyDrift,
-		OrphanArtSources: r.OrphanArtSources, OrphanThumbnails: r.OrphanThumbnails,
+		BookDurationDrift: r.BookDurationDrift,
+		OrphanArtSources:  r.OrphanArtSources, OrphanThumbnails: r.OrphanThumbnails,
 		Consistent: r.Consistent(),
 	}
 }

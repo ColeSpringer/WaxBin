@@ -99,3 +99,15 @@ func first(s []string) string {
 	}
 	return s[0]
 }
+
+// firstNonEmpty returns the first argument that is non-empty after trimming, with
+// surrounding whitespace removed so it does not leak into stored values. It matches
+// the same helper in scan and organize.
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if t := strings.TrimSpace(v); t != "" {
+			return t
+		}
+	}
+	return ""
+}

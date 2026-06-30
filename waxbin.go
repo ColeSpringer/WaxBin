@@ -222,6 +222,47 @@ func (l *Library) Get(ctx context.Context, pid model.PID) (*model.ItemView, erro
 	return l.store.ItemByPID(ctx, pid)
 }
 
+// Book returns the full detail for an audiobook: subtitle, series placement,
+// role-tagged contributors (author/narrator/...), backing parts in reading order,
+// and chapters resolved to book-timeline offsets with the total duration.
+// CodeInvalid when pid is not a book.
+func (l *Library) Book(ctx context.Context, pid model.PID) (*model.BookDetail, error) {
+	return l.store.BookByPID(ctx, pid)
+}
+
+// Chapters returns a book's chapters in book-timeline order. CodeInvalid when pid
+// is not a book.
+func (l *Library) Chapters(ctx context.Context, pid model.PID) ([]model.Chapter, error) {
+	return l.store.Chapters(ctx, pid)
+}
+
+// CurrentChapter resolves the chapter a resume position falls in (the nearest
+// preceding chapter when between spans). It returns nil when the book has no
+// chapters.
+func (l *Library) CurrentChapter(ctx context.Context, pid model.PID, positionMS int64) (*model.Chapter, error) {
+	return l.store.CurrentChapter(ctx, pid, positionMS)
+}
+
+// BookResume returns a user's play state for a book together with the chapter their
+// resume position falls in, the chapter-level resume answer. An empty userPID
+// selects the default user.
+func (l *Library) BookResume(ctx context.Context, userPID, bookPID model.PID) (*model.PlayState, *model.Chapter, error) {
+	st, err := l.playback.State(ctx, userPID, bookPID)
+	if err != nil {
+		return nil, nil, err
+	}
+	ch, err := l.store.CurrentChapter(ctx, bookPID, st.PositionMS)
+	if err != nil {
+		return nil, nil, err
+	}
+	return st, ch, nil
+}
+
+// BooksInSeries lists a series' books in sequence order (decimal/string aware).
+func (l *Library) BooksInSeries(ctx context.Context, seriesPID model.PID) ([]*model.ItemView, error) {
+	return l.store.BooksInSeries(ctx, seriesPID)
+}
+
 // Stats returns a library summary using the same Facet grouping as browse plus
 // per-user playback state. An empty userPID selects the default user; topN caps
 // the ranked lists.
@@ -483,7 +524,7 @@ func (l *Library) PlanOrganize(ctx context.Context, q query.Query, profileName s
 	if err != nil {
 		return nil, err
 	}
-	return l.organizer.Plan(lib, prof, items)
+	return l.organizer.Plan(ctx, lib, prof, items)
 }
 
 // Profiles lists the organization profile names available to this library
@@ -531,7 +572,7 @@ func (l *Library) PlanDelete(ctx context.Context, q query.Query, mode model.Dele
 	if err != nil {
 		return nil, err
 	}
-	return l.trasher.Plan(libs, items, mode)
+	return l.trasher.Plan(ctx, libs, items, mode)
 }
 
 // PlanDeletePIDs computes a deletion plan for explicit item pids. It is the
@@ -549,7 +590,7 @@ func (l *Library) PlanDeletePIDs(ctx context.Context, pids []model.PID, mode mod
 		}
 		items = append(items, it)
 	}
-	return l.trasher.Plan(libs, items, mode)
+	return l.trasher.Plan(ctx, libs, items, mode)
 }
 
 // ApplyDelete executes a deletion plan under a "delete"-scoped job.

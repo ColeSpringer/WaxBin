@@ -14,8 +14,8 @@ package query
 type Entity string
 
 const (
-	EntityItems  Entity = "items"  // playable_item (+ track) rows
-	EntityTracks Entity = "tracks" // alias for music items
+	EntityItems  Entity = "items"  // every playable_item (track, book, ...)
+	EntityTracks Entity = "tracks" // music tracks only (excludes books)
 	EntityFiles  Entity = "files"  // file rows
 )
 

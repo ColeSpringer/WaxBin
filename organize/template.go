@@ -140,6 +140,17 @@ func itemFields(item *model.ItemView) map[string]fieldVal {
 	f["track"] = fieldVal{n: item.TrackNo, isNum: true}
 	f["disc"] = fieldVal{n: item.DiscNo, isNum: true}
 	f["year"] = fieldVal{n: item.Year, isNum: true}
+
+	// Audiobook tokens. For a book the view's Artist is the author (COALESCE'd in
+	// the read view), so author/authorsort derive from it; the rest map directly.
+	// These stay empty for a track, dropping their optional groups in any layout.
+	f["author"] = fieldVal{s: foldField(firstNonEmpty(item.Artist, item.AlbumArtist))}
+	f["authorsort"] = fieldVal{s: foldField(firstNonEmpty(item.AuthorSort, model.SortKey(item.Artist)))}
+	f["series"] = fieldVal{s: foldField(item.Series)}
+	f["seq"] = fieldVal{s: foldField(item.SeriesSeq)}
+	f["narrator"] = fieldVal{s: foldField(item.Narrator)}
+	f["subtitle"] = fieldVal{s: foldField(item.Subtitle)}
+	f["asin"] = fieldVal{s: foldField(item.ASIN)}
 	return f
 }
 
@@ -252,8 +263,8 @@ func renderField(tmpl string, i int, inGroup bool, fields map[string]fieldVal) (
 
 func firstNonEmpty(vals ...string) string {
 	for _, v := range vals {
-		if strings.TrimSpace(v) != "" {
-			return v
+		if t := strings.TrimSpace(v); t != "" {
+			return t
 		}
 	}
 	return ""

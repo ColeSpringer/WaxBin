@@ -34,20 +34,23 @@ func facetSpecFor(g read.GroupBy) (facetSpec, bool) {
 			entity: true, unknown: read.NoGenre,
 		}, true
 	case read.GroupArtist:
+		// COALESCE the book author so an audiobook groups under its author in the
+		// same artist facet a track groups under its artist (itemJoins provides bk).
 		return facetSpec{
-			join:    " LEFT JOIN artist fa ON fa.id = t.artist_id",
-			groupBy: "t.artist_id", keyExpr: "fa.pid", display: "fa.name", sortExpr: "fa.sort_key",
+			join:    " LEFT JOIN artist fa ON fa.id = COALESCE(t.artist_id, bk.author_id)",
+			groupBy: "COALESCE(t.artist_id, bk.author_id)", keyExpr: "fa.pid", display: "fa.name", sortExpr: "fa.sort_key",
 			entity: true, unknown: read.UnknownArtist,
 		}, true
 	case read.GroupAlbumArtist:
 		return facetSpec{
-			join:    " LEFT JOIN artist faa ON faa.id = t.album_artist_id",
-			groupBy: "t.album_artist_id", keyExpr: "faa.pid", display: "faa.name", sortExpr: "faa.sort_key",
+			join:    " LEFT JOIN artist faa ON faa.id = COALESCE(t.album_artist_id, bk.author_id)",
+			groupBy: "COALESCE(t.album_artist_id, bk.author_id)", keyExpr: "faa.pid", display: "faa.name", sortExpr: "faa.sort_key",
 			entity: true, unknown: read.UnknownArtist,
 		}, true
 	case read.GroupYear:
 		return facetSpec{
-			groupBy: "t.year", keyExpr: "CAST(t.year AS TEXT)", display: "CAST(t.year AS TEXT)", sortExpr: "t.year",
+			groupBy: "COALESCE(t.year, bk.year)", keyExpr: "CAST(COALESCE(t.year, bk.year) AS TEXT)",
+			display: "CAST(COALESCE(t.year, bk.year) AS TEXT)", sortExpr: "COALESCE(t.year, bk.year)",
 			unknown: read.UnknownYear,
 		}, true
 	case read.GroupKind:
@@ -76,7 +79,7 @@ func (s *Store) Facet(ctx context.Context, q query.Query, g read.GroupBy) (*read
 	if err != nil {
 		return nil, err
 	}
-	where := c.Where
+	where := andWhere(c.Where, entityPredicate(q.Entity))
 	if where == "" {
 		where = "1=1"
 	}
@@ -138,7 +141,7 @@ func (s *Store) QueryPage(ctx context.Context, q query.Query, cursor read.Cursor
 	}
 
 	args := append([]any(nil), c.Args...)
-	where := c.Where
+	where := andWhere(c.Where, entityPredicate(q.Entity))
 	cmp := ">"
 	order := "ASC"
 	if desc {

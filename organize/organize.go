@@ -3,6 +3,7 @@ package organize
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"path/filepath"
 	"strconv"
@@ -78,8 +79,10 @@ func New(cat model.Catalog, log *slog.Logger) *Organizer {
 }
 
 // Plan computes the destination for each item under the profile. Items with no
-// backing file are skipped; items already at their destination are marked Skip.
-func (o *Organizer) Plan(lib *model.Library, p Profile, items []*model.ItemView) (*Plan, error) {
+// backing file are skipped; items already at their destination are marked Skip. A
+// multi-file audiobook expands into one move per part so the whole book is
+// relocated together rather than split.
+func (o *Organizer) Plan(ctx context.Context, lib *model.Library, p Profile, items []*model.ItemView) (*Plan, error) {
 	root := string(lib.Root)
 	plan := &Plan{Profile: p.Name, LibraryPID: lib.PID, Root: root}
 	for _, it := range items {
@@ -97,6 +100,19 @@ func (o *Organizer) Plan(lib *model.Library, p Profile, items []*model.ItemView)
 		if err != nil {
 			return nil, err
 		}
+		// A book may be backed by several part files. The item view carries only the
+		// representative primary, so moving just that would strand the other parts;
+		// fetch them all and move every part into the rendered book folder.
+		if it.Kind == model.KindBook {
+			files, err := o.cat.ItemFiles(ctx, it.PID)
+			if err != nil {
+				return nil, err
+			}
+			if len(files) > 1 {
+				o.planBookParts(plan, root, rel, it.PID, files)
+				continue
+			}
+		}
 		dst := filepath.Join(root, rel)
 		a := Action{
 			ItemPID: it.PID, FilePID: it.FilePID,
@@ -109,6 +125,48 @@ func (o *Organizer) Plan(lib *model.Library, p Profile, items []*model.ItemView)
 	}
 	markCollisions(plan)
 	return plan, nil
+}
+
+// planBookParts plans a move for every part of a multi-file book into the rendered
+// book folder (the directory of the template output). The audiobook template names
+// a single file, so a multi-file book names each part "{book title} - NN.ext" using
+// the part's 1-based reading-order index (files arrive in reading order). The index
+// is a deterministic, unique disambiguator, so two source parts that happen to share
+// a basename across folders no longer render to the same destination and get
+// silently dropped by collision detection — the split this function exists to
+// prevent.
+func (o *Organizer) planBookParts(plan *Plan, root, rel string, itemPID model.PID, files []model.ItemFileRef) {
+	// All-or-nothing: if any part cannot be placed (no path, or outside this managed
+	// root), leave the WHOLE book where it is rather than moving some parts and
+	// stranding others — the split this function exists to prevent. Roots are
+	// validated non-overlapping, so a legitimately-scanned book's parts are all under
+	// one root; this guards a stray/cross-root edge.
+	for _, fl := range files {
+		if fl.DisplayPath == "" || !pathx.UnderRoot(root, fl.DisplayPath) {
+			o.log.Warn("skipping multi-file book organize: a part is not placeable",
+				"item", itemPID, "part", fl.DisplayPath)
+			return
+		}
+	}
+	folder := filepath.Dir(rel)
+	stem := strings.TrimSuffix(filepath.Base(rel), filepath.Ext(rel))
+	width := len(strconv.Itoa(len(files)))
+	if width < 2 {
+		width = 2 // at least two digits ("01") so a small set still sorts on disk
+	}
+	for i, fl := range files {
+		name := fmt.Sprintf("%s - %0*d%s", stem, width, i+1, strings.ToLower(filepath.Ext(fl.DisplayPath)))
+		partRel := filepath.Join(folder, sanitizeSegment(name))
+		dst := filepath.Join(root, partRel)
+		a := Action{
+			ItemPID: itemPID, FilePID: fl.FilePID,
+			Src: fl.DisplayPath, SrcBytes: fl.Path, Dst: dst, RelDst: partRel,
+		}
+		if filepath.Clean(a.Src) == filepath.Clean(dst) {
+			a.Skip, a.Reason = true, "already in place"
+		}
+		plan.Actions = append(plan.Actions, a)
+	}
 }
 
 // markCollisions skips any action whose destination collides with an

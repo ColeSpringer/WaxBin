@@ -140,3 +140,52 @@ func numOrEmpty(n int) string {
 	}
 	return strconv.Itoa(n)
 }
+
+// BookKey is the entity-identity key for an audiobook: ASIN when known, else
+// ISBN, else (primary-author match key, normalized title, normalized edition).
+// The edition segment keeps an abridged release distinct from the same title's
+// unabridged one. It returns "" when there is no id and no title to key on, so a
+// fully untitled book stays ungrouped (its files would otherwise all collapse
+// together). Files sharing the key are the parts of one book.
+func BookKey(asin, isbn, author, title, edition string) string {
+	if a := strings.TrimSpace(asin); a != "" {
+		return "asin:" + strings.ToLower(a)
+	}
+	if i := normalizeISBN(isbn); i != "" {
+		return "isbn:" + i
+	}
+	t := MatchKey(title)
+	if t == "" {
+		return ""
+	}
+	return "book:" + MatchKey(author) + "\x1f" + t + "\x1f" + MatchKey(edition)
+}
+
+// SeriesKey is the entity-identity key for a series: MBID when known, else the
+// normalized name. Returns "" when there is no name.
+func SeriesKey(mbid, name string) string {
+	if m := strings.TrimSpace(mbid); m != "" {
+		return "mbid:" + strings.ToLower(m)
+	}
+	n := MatchKey(name)
+	if n == "" {
+		return ""
+	}
+	return "series:" + n
+}
+
+// normalizeISBN keeps only the digits and the ISBN-10 check character 'X' (folded
+// to lowercase), so "978-0-13-468599-1" and "9780134685991" key the same. It
+// returns "" for a value with no usable characters.
+func normalizeISBN(isbn string) string {
+	var b strings.Builder
+	for _, r := range isbn {
+		switch {
+		case r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == 'x' || r == 'X':
+			b.WriteByte('x')
+		}
+	}
+	return b.String()
+}

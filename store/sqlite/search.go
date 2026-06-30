@@ -57,11 +57,13 @@ func (s *Store) Search(ctx context.Context, queryStr string, opt read.SearchOpti
 		limit = 20
 	}
 
-	stmt := `SELECT pi.pid, pi.title, COALESCE(t.artist,''), COALESCE(t.album_artist,''),
+	stmt := `SELECT pi.pid, pi.kind, pi.title,
+		COALESCE(NULLIF(t.artist,''), bk.author, ''), COALESCE(t.album_artist,''),
 		COALESCE(t.album,''), COALESCE(art.pid,''), COALESCE(al.pid,''), ` + searchBM25 + ` AS score
 		FROM search_fts
 		JOIN playable_item pi ON pi.id = search_fts.rowid
-		JOIN track t ON t.item_id = pi.id
+		LEFT JOIN track t ON t.item_id = pi.id
+		LEFT JOIN book bk ON bk.item_id = pi.id
 		LEFT JOIN artist art ON art.id = t.artist_id
 		LEFT JOIN album al ON al.id = t.album_id
 		WHERE search_fts MATCH ?
@@ -87,11 +89,21 @@ func (s *Store) Search(ctx context.Context, queryStr string, opt read.SearchOpti
 			res.Truncated = true
 			break
 		}
-		var pid, title, artist, albumArtist, album string
+		var pid, kind, title, artist, albumArtist, album string
 		var artistPID, albumPID model.PID
 		var score float64
-		if err := rows.Scan(&pid, &title, &artist, &albumArtist, &album, &artistPID, &albumPID, &score); err != nil {
+		if err := rows.Scan(&pid, &kind, &title, &artist, &albumArtist, &album, &artistPID, &albumPID, &score); err != nil {
 			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		// A book has no track/artist/album entities, so it forms its own group keyed
+		// by title with its author as the subtitle, rather than the Tracks group.
+		if kind == string(model.KindBook) {
+			if len(res.Books) < limit {
+				res.Books = append(res.Books, read.SearchHit{
+					PID: model.PID(pid), Kind: "book", Title: title, Subtitle: artist, Score: score,
+				})
+			}
+			continue
 		}
 		if len(res.Tracks) < limit {
 			res.Tracks = append(res.Tracks, read.SearchHit{

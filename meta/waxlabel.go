@@ -5,12 +5,14 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/waxerr"
 	waxlabel "github.com/colespringer/waxlabel"
+	"github.com/colespringer/waxlabel/tag"
 	wlerr "github.com/colespringer/waxlabel/waxerr"
 )
 
@@ -68,6 +70,8 @@ func (a *Adapter) Read(ctx context.Context, path string) (*FileMeta, error) {
 	if fm.Tags.Title == "" {
 		fm.Tags.Title = titleFromPath(path)
 	}
+	fm.Tags.Chapters = chaptersFromDoc(doc)
+	applyBookFields(&fm.Tags, doc, path)
 
 	// HashAudioEssence covers encoded packets plus decoder-critical config, making
 	// it stable across retags. Files with no audio frames fall back to the content
@@ -219,6 +223,129 @@ func ParseLRC(text string) []model.SyncedLine {
 		out = append(out, model.SyncedLine{TimeMS: ln.Time.Milliseconds(), Text: ln.Text})
 	}
 	return out
+}
+
+// chaptersFromDoc projects a Document's embedded navigation chapters (M4B Nero/
+// QuickTime, Matroska, MP3 CHAP, read by WaxLabel) into WaxBin's model in file
+// order, as file-relative offsets. The scanner persists them only for books; a
+// music file with stray chapters keeps them unused. It returns nil for none.
+func chaptersFromDoc(doc *waxlabel.Document) []model.Chapter {
+	chs := doc.Chapters()
+	if len(chs) == 0 {
+		return nil
+	}
+	out := make([]model.Chapter, 0, len(chs))
+	for i, c := range chs {
+		out = append(out, model.Chapter{
+			Position:    i,
+			Title:       strings.TrimSpace(c.Title),
+			FileStartMS: c.Start.Milliseconds(),
+			FileEndMS:   c.End.Milliseconds(),
+		})
+	}
+	return out
+}
+
+// applyBookFields classifies a file as an audiobook and, when it is, fills the
+// spoken-word fields on t from the canonical tag set (which carries the keys the
+// typed projection omits: NARRATOR, DESCRIPTION, MEDIATYPE). A file is a book when
+// its container is .m4b, its iTunes media kind is audiobook (stik=2), or it
+// carries a narrator credit. Series/sequence, abridged/edition come from
+// conventional tag patterns; ASIN/ISBN/subtitle/publisher are enrichment-populated
+// (the schema and layout carry them, tags rarely do).
+func applyBookFields(t *model.Tags, doc *waxlabel.Document, path string) {
+	ts := doc.Tags()
+	narrator := firstTag(ts, tag.Narrator)
+	mediaType := firstTag(ts, tag.MediaType)
+	isBook := strings.EqualFold(filepath.Ext(path), ".m4b") || mediaType == "2" || narrator != ""
+	if !isBook {
+		return
+	}
+	t.IsAudiobook = true
+	// A common m4b/Audiobookshelf convention stores the narrator in COMPOSER when
+	// there is no dedicated NARRATOR tag.
+	if narrator == "" {
+		narrator = t.Composer
+	}
+	t.Narrators = SplitCredits(narrator)
+	t.Description = firstNonEmpty(firstTag(ts, tag.Description), firstTag(ts, tag.LongDescription))
+	t.Series, t.SeriesSeq = parseSeries(firstTag(ts, tag.Grouping))
+	t.Abridged, t.Edition = parseAbridged(t.Album, t.Title, t.Comment)
+}
+
+// firstTag returns the first value of a canonical key, trimmed, or "".
+func firstTag(ts tag.TagSet, key tag.Key) string {
+	if v, ok := ts.First(key); ok {
+		return strings.TrimSpace(v)
+	}
+	return ""
+}
+
+// creditSplitRe are the UNAMBIGUOUS separators between credited people in one tag
+// value: a semicolon, slash, or ampersand ("Gaiman & Pratchett", "A; B", "A / B").
+// It deliberately does NOT split on a bare comma (which is also the "Last, First"
+// name format) or the word "and" (common inside a single entity, e.g. a publisher),
+// so a single credited person is not shattered into bogus contributor entities.
+var creditSplitRe = regexp.MustCompile(`\s*[;/&]\s*`)
+
+// SplitCredits splits a combined credit string (authors or narrators) into trimmed
+// individual names, dropping empties. It is shared by the adapter (narrators) and
+// the scanner (authors) so both split a credit the same way.
+func SplitCredits(s string) []string {
+	if strings.TrimSpace(s) == "" {
+		return nil
+	}
+	parts := creditSplitRe.Split(s, -1)
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// seriesSeqRe pulls a trailing sequence off a series/grouping value, but only when
+// a clear marker precedes the number ('#' or book/part/vol[ume]), so a series name
+// that simply ends in a number ("Area 51") is not split. The number may be decimal
+// ("#1.5") for in-between entries.
+var seriesSeqRe = regexp.MustCompile(`(?i)^(.+?)\s*(?:#|,?\s*(?:book|bk|part|vol\.?|volume)\s+)\s*([0-9]+(?:\.[0-9]+)?)\s*$`)
+
+// parseSeries splits a grouping tag into a series name and an optional sequence.
+// With no recognizable sequence marker the whole value is the series name.
+func parseSeries(grouping string) (name, seq string) {
+	grouping = strings.TrimSpace(grouping)
+	if grouping == "" {
+		return "", ""
+	}
+	if m := seriesSeqRe.FindStringSubmatch(grouping); m != nil {
+		return strings.TrimSpace(m[1]), m[2]
+	}
+	return grouping, ""
+}
+
+// abridgedRe matches the conventional bracketed marker "(Unabridged)"/"[Abridged]".
+// Requiring the brackets (not a bare word anywhere) keeps a real title that merely
+// contains the word — "An Abridged History of Time" — from getting a spurious
+// Abridged flag and Edition, which would also pollute the identity key. The optional
+// "un" capture decides the flag without depending on match order.
+var abridgedRe = regexp.MustCompile(`(?i)[\(\[]\s*(un)?abridged\s*[\)\]]`)
+
+// parseAbridged reads the conventional "(Unabridged)"/"(Abridged)" marker that
+// audiobook taggers put in the album or title. It returns the abridged flag (nil
+// when unmarked) and a matching edition label so the layout's {edition} and the
+// abridged/unabridged distinction are real from tags alone.
+func parseAbridged(texts ...string) (*bool, string) {
+	m := abridgedRe.FindStringSubmatch(strings.Join(texts, " "))
+	if m == nil {
+		return nil, ""
+	}
+	if m[1] != "" { // the "un" prefix is present
+		no := false
+		return &no, "Unabridged"
+	}
+	yes := true
+	return &yes, "Abridged"
 }
 
 // trimAll trims each element and drops the empties, preserving order.

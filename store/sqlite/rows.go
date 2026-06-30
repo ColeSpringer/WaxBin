@@ -18,16 +18,36 @@ type rowScanner interface {
 	Scan(dest ...any) error
 }
 
+// itemJoins LEFT JOINs both subtypes (track and book) plus the book's series so a
+// book item, which has no track row, still reads back. The book's author/series/
+// year stand in for the music artist/album/year columns via COALESCE in
+// itemViewCols, and the primary file is the representative backing file (the first
+// part of a multi-file book).
 const itemJoins = ` FROM playable_item pi
-	JOIN track t ON t.item_id = pi.id
+	LEFT JOIN track t ON t.item_id = pi.id
+	LEFT JOIN book bk ON bk.item_id = pi.id
+	LEFT JOIN series srs ON srs.id = bk.series_id
 	LEFT JOIN item_file pf ON pf.item_id = pi.id AND pf.role = 'primary'
 	LEFT JOIN file f ON f.id = pf.file_id`
 
 // itemViewCols is the column list for an item read-view, shared by the plain
-// select and the keyset-paginated select (which prepends pi.sort_key).
+// select and the keyset-paginated select (which prepends pi.sort_key). The shared
+// artist/album_artist/album/year/genre columns COALESCE the track values with the
+// book's author/series/year so one view shape serves both kinds; the six audiobook
+// columns after compilation are empty for tracks. The duration is the book's
+// denormalized total_duration_ms (the sum of its parts, so a multi-file book
+// reports its whole running time, matching BookDetail.TotalDurationMS and Stats),
+// falling back to the single primary file's duration for a track.
 const itemViewCols = `pi.pid, pi.kind, pi.state, pi.title,
-	t.artist, t.album_artist, t.album, t.track_no, t.disc_no, t.year, t.genre, t.compilation,
-	f.pid, f.path, f.display_path, f.duration_ms, f.container, f.codec`
+	COALESCE(NULLIF(t.artist,''), bk.author, ''),
+	COALESCE(NULLIF(t.album_artist,''), bk.author, ''),
+	COALESCE(NULLIF(t.album,''), srs.name, ''),
+	t.track_no, t.disc_no, COALESCE(t.year, bk.year),
+	COALESCE(NULLIF(t.genre,''), bk.genre, ''), t.compilation,
+	COALESCE(bk.author_sort,''), COALESCE(bk.narrator,''), COALESCE(srs.name,''),
+	COALESCE(bk.series_seq,''), COALESCE(bk.subtitle,''), COALESCE(bk.asin,''),
+	f.pid, f.path, f.display_path, COALESCE(bk.total_duration_ms, f.duration_ms),
+	f.container, f.codec`
 
 const itemSelect = `SELECT ` + itemViewCols + itemJoins
 
@@ -56,6 +76,7 @@ func itemViewDests(v *model.ItemView, n *itemViewNulls) []any {
 	return []any{
 		&v.PID, &v.Kind, &v.State, &v.Title,
 		&v.Artist, &v.AlbumArtist, &v.Album, &n.trackNo, &n.discNo, &n.year, &v.Genre, &n.compilation,
+		&v.AuthorSort, &v.Narrator, &v.Series, &v.SeriesSeq, &v.Subtitle, &v.ASIN,
 		&n.fpid, &n.fpath, &n.fdisp, &n.dur, &n.container, &n.codec,
 	}
 }
@@ -268,11 +289,14 @@ func upsertTrack(ctx context.Context, tx *sql.Tx, itemID int64, tr model.Track) 
 }
 
 // linkPrimaryFile makes fileID the primary file of itemID and detaches it from
-// any other item. It returns the ids of items that previously held this file as
-// primary, other than itemID, so the caller can delete items left with no files.
+// any other item, in ANY role. It returns the ids of items that previously held
+// this file (other than itemID), so the caller can delete items left with no files
+// or promote a new primary. Detaching every role matters because a file can be a
+// multi-file book's 'part' edge; re-keying it to a track must not leave that edge
+// dangling (the file attached to both the book and the track).
 func linkPrimaryFile(ctx context.Context, tx *sql.Tx, itemID, fileID int64) ([]int64, error) {
 	rows, err := tx.QueryContext(ctx,
-		"SELECT item_id FROM item_file WHERE file_id = ? AND role = 'primary' AND item_id <> ?",
+		"SELECT DISTINCT item_id FROM item_file WHERE file_id = ? AND item_id <> ?",
 		fileID, itemID)
 	if err != nil {
 		return nil, err
@@ -292,8 +316,10 @@ func linkPrimaryFile(ctx context.Context, tx *sql.Tx, itemID, fileID int64) ([]i
 	}
 	rows.Close()
 
+	// Drop every edge of this file (anywhere it is attached) plus this item's own
+	// existing primary, then re-insert it as this item's primary.
 	if _, err := tx.ExecContext(ctx,
-		"DELETE FROM item_file WHERE role = 'primary' AND (file_id = ? OR item_id = ?)",
+		"DELETE FROM item_file WHERE file_id = ? OR (item_id = ? AND role = 'primary')",
 		fileID, itemID); err != nil {
 		return nil, err
 	}

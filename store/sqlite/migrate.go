@@ -18,7 +18,7 @@ var migrationsFS embed.FS
 
 // SchemaVersion is the highest migration version this build ships. A read-only
 // open against a newer DB is refused (it may rely on schema the binary lacks).
-const SchemaVersion = 15
+const SchemaVersion = 17
 
 type migration struct {
 	version int

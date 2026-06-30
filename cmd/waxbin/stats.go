@@ -43,6 +43,7 @@ func newStatsCmd(g *globals) *cobra.Command {
 func printStats(cmd *cobra.Command, st *read.Stats) error {
 	w := out(cmd)
 	fmt.Fprintf(w, "items:          %d\n", st.Items)
+	fmt.Fprintf(w, "books:          %d\n", st.Books)
 	fmt.Fprintf(w, "artists:        %d\n", st.Artists)
 	fmt.Fprintf(w, "release groups: %d\n", st.ReleaseGroups)
 	fmt.Fprintf(w, "albums:         %d\n", st.Albums)

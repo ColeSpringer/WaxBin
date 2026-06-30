@@ -113,3 +113,75 @@ func TestReadWAVEssence(t *testing.T) {
 		t.Error("WAV essence hash empty")
 	}
 }
+
+func TestParseSeries(t *testing.T) {
+	cases := []struct {
+		in, name, seq string
+	}{
+		{"Stormlight Archive #2", "Stormlight Archive", "2"},
+		{"Wheel of Time, Book 3", "Wheel of Time", "3"},
+		{"Discworld #1.5", "Discworld", "1.5"},
+		{"The Expanse, Volume 4", "The Expanse", "4"},
+		{"Area 51", "Area 51", ""}, // a trailing number with no marker stays in the name
+		{"Just A Series", "Just A Series", ""},
+		{"", "", ""},
+	}
+	for _, c := range cases {
+		name, seq := parseSeries(c.in)
+		if name != c.name || seq != c.seq {
+			t.Errorf("parseSeries(%q) = (%q,%q), want (%q,%q)", c.in, name, seq, c.name, c.seq)
+		}
+	}
+}
+
+func TestParseAbridged(t *testing.T) {
+	if a, ed := parseAbridged("The Hobbit (Unabridged)", "", ""); a == nil || *a || ed != "Unabridged" {
+		t.Errorf("unabridged: got (%v,%q), want (false,Unabridged)", a, ed)
+	}
+	if a, ed := parseAbridged("Some Book [Abridged]", "", ""); a == nil || !*a || ed != "Abridged" {
+		t.Errorf("abridged: got (%v,%q), want (true,Abridged)", a, ed)
+	}
+	if a, ed := parseAbridged("Plain Title", "", ""); a != nil || ed != "" {
+		t.Errorf("unmarked: got (%v,%q), want (nil,\"\")", a, ed)
+	}
+}
+
+func TestSplitCredits(t *testing.T) {
+	// Splits on the unambiguous delimiters ; / &.
+	got := SplitCredits("Neil Gaiman & Terry Pratchett")
+	if len(got) != 2 || got[0] != "Neil Gaiman" || got[1] != "Terry Pratchett" {
+		t.Errorf("SplitCredits(&) = %v", got)
+	}
+	if got := SplitCredits("A; B / C"); len(got) != 3 {
+		t.Errorf("SplitCredits(;/) = %v, want 3", got)
+	}
+	// Does NOT split a "Last, First" name on the comma, nor an entity containing "and".
+	if got := SplitCredits("Tolkien, J.R.R."); len(got) != 1 {
+		t.Errorf("SplitCredits(Last, First) = %v, want 1 (comma is not a split)", got)
+	}
+	if got := SplitCredits("Simon and Schuster"); len(got) != 1 {
+		t.Errorf("SplitCredits(and) = %v, want 1 (\"and\" is not a split)", got)
+	}
+	if SplitCredits("  ") != nil {
+		t.Error("blank should split to nil")
+	}
+}
+
+func TestParseAbridgedBracketedOnly(t *testing.T) {
+	// The bracketed marker is detected...
+	if a, _ := parseAbridged("The Hobbit (Unabridged)", "", ""); a == nil || *a {
+		t.Error("(Unabridged) should yield abridged=false")
+	}
+	if a, _ := parseAbridged("Dune [Abridged]", "", ""); a == nil || !*a {
+		t.Error("[Abridged] should yield abridged=true")
+	}
+	// ...but a bare word in real prose is NOT (no false positive, no key pollution).
+	for _, s := range []string{
+		"An Abridged History of Time", // a genuine title containing the word
+		"unabridgedness study", "Bridged Worlds",
+	} {
+		if a, ed := parseAbridged(s, "", ""); a != nil || ed != "" {
+			t.Errorf("parseAbridged(%q) = (%v,%q), want no match", s, a, ed)
+		}
+	}
+}

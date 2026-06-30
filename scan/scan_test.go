@@ -95,3 +95,64 @@ func TestSidecarLyricsFallbackToEmbedded(t *testing.T) {
 		t.Errorf("with no sidecar and no embedded, expected nil, got %+v", got)
 	}
 }
+
+func TestBookInput(t *testing.T) {
+	tags := model.Tags{
+		Title: "Chapter 1", Album: "The Way of Kings (Unabridged)",
+		AlbumArtist: "Brandon Sanderson", Artist: "Brandon Sanderson, Narrator",
+		Series: "Stormlight Archive", SeriesSeq: "1", ASIN: "B00ABC", Year: 2010,
+		IsAudiobook: true, Narrators: []string{"Kate Reading", "Michael Kramer"},
+		TrackNo: 2, DiscNo: 1,
+		Genres: []string{"Fantasy"}, Genre: "Fantasy",
+	}
+	file := model.File{Path: []byte("/lib/x.m4b"), DurationMS: 5000}
+	in := bookInput(7, file, tags, "ess1", nil)
+
+	if in.Item.Kind != model.KindBook {
+		t.Errorf("kind = %s, want book", in.Item.Kind)
+	}
+	// Book title is the album, with the abridged marker stripped.
+	if in.Item.Title != "The Way of Kings" {
+		t.Errorf("title = %q, want The Way of Kings", in.Item.Title)
+	}
+	// Author is the album artist; the book key is the ASIN.
+	if in.Book.Author != "Brandon Sanderson" {
+		t.Errorf("author = %q, want Brandon Sanderson", in.Book.Author)
+	}
+	if in.Item.IdentityKey != "asin:b00abc" {
+		t.Errorf("key = %q, want asin:b00abc", in.Item.IdentityKey)
+	}
+	if len(in.Book.Narrators) != 2 {
+		t.Errorf("narrators = %v, want 2", in.Book.Narrators)
+	}
+	// Disc/track drive the part position.
+	if in.Position != 100002 {
+		t.Errorf("position = %d, want 100002 (disc 1, track 2)", in.Position)
+	}
+	// No embedded chapters: a single whole-file chapter is synthesized.
+	if len(in.Chapters) != 1 || in.Chapters[0].Title != "Chapter 1" {
+		t.Errorf("synthesized chapters = %v, want one titled by the file", in.Chapters)
+	}
+}
+
+func TestBookInputUntitledFallsBackToEssence(t *testing.T) {
+	tags := model.Tags{IsAudiobook: true} // no album, title, or ids
+	in := bookInput(1, model.File{}, tags, "essX", nil)
+	if in.Item.IdentityKey != "essence:essX" {
+		t.Errorf("untitled book key = %q, want essence fallback", in.Item.IdentityKey)
+	}
+}
+
+func TestCleanBookTitle(t *testing.T) {
+	cases := map[string]string{
+		"The Hobbit (Unabridged)": "The Hobbit",
+		"Dune [Abridged]":         "Dune",
+		"Plain Title":             "Plain Title",
+		"Unabridged":              "Unabridged", // never strip the whole title away
+	}
+	for in, want := range cases {
+		if got := cleanBookTitle(in); got != want {
+			t.Errorf("cleanBookTitle(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

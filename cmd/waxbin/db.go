@@ -60,6 +60,7 @@ func newDBVerifyCmd(g *globals) *cobra.Command {
 				fmt.Fprintf(w, "genre rollup drift:       %d\n", rep.GenreRollupDrift)
 				fmt.Fprintf(w, "release-group drift:      %d\n", rep.ReleaseGroupRollupDrift)
 				fmt.Fprintf(w, "sort-key drift:           %d\n", rep.SortKeyDrift)
+				fmt.Fprintf(w, "book-duration drift:      %d\n", rep.BookDurationDrift)
 				fmt.Fprintf(w, "orphan art sources:       %d\n", rep.OrphanArtSources)
 				fmt.Fprintf(w, "orphan thumbnails:        %d\n", rep.OrphanThumbnails)
 				fmt.Fprintf(w, "consistent:               %t\n", rep.Consistent())

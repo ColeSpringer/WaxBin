@@ -41,6 +41,7 @@ func newSearchCmd(g *globals) *cobra.Command {
 			printHits(cmd, "ARTISTS", res.Artists)
 			printHits(cmd, "ALBUMS", res.Albums)
 			printHits(cmd, "TRACKS", res.Tracks)
+			printHits(cmd, "BOOKS", res.Books)
 			return nil
 		},
 	}

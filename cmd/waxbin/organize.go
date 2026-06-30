@@ -26,7 +26,10 @@ func newOrganizeCmd(g *globals) *cobra.Command {
 			}
 			defer lib.Close()
 
-			b := query.New(query.EntityItems).Where("kind", query.OpIs, "track")
+			// Organize every item; the template engine picks the per-kind layout
+			// (music vs audiobook), so books are laid out by the audiobook template
+			// alongside tracks rather than being excluded.
+			b := query.New(query.EntityItems)
 			if limit > 0 {
 				b.Limit(limit)
 			}

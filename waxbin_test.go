@@ -17,6 +17,7 @@ import (
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/port"
 	"github.com/colespringer/waxbin/query"
+	"github.com/colespringer/waxbin/read"
 	"github.com/colespringer/waxbin/waxerr"
 	_ "modernc.org/sqlite"
 )
@@ -1241,4 +1242,233 @@ func hasDoneJob(jobs []*model.Job, kind string) bool {
 		}
 	}
 	return false
+}
+
+// TestEndToEndAudiobook drives the full pipeline for an audiobook: a .m4b file
+// (valid MP3 bytes, so WaxLabel parses it and the extension classifies it as a
+// book) is scanned, read back as a book with chapters, laid out by the audiobook
+// template, found by search, and leaves the derived data consistent.
+func TestEndToEndAudiobook(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+
+	// Album is the book title; the album artist is the author. The .m4b extension
+	// is the audiobook signal.
+	src := filepath.Join(root, "incoming", "the-hobbit.m4b")
+	writeFile(t, src, testaudio.BuildMP3("The Hobbit", "J.R.R. Tolkien", "The Hobbit", 1))
+
+	lib := openManaged(t, ctx, db, root)
+
+	scanRes, err := lib.Scan(ctx, waxbin.ScanRequest{})
+	if err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if scanRes.Total.AudioFiles != 1 || scanRes.Total.ItemsCreated != 1 {
+		t.Fatalf("scan tally = %+v, want 1 audio / 1 created", scanRes.Total)
+	}
+
+	books, err := lib.Query(ctx, query.New(query.EntityItems).Where("kind", query.OpIs, "book").Build())
+	if err != nil {
+		t.Fatalf("query books: %v", err)
+	}
+	if len(books) != 1 {
+		t.Fatalf("kind=book query returned %d, want 1", len(books))
+	}
+	bookPID := books[0].PID
+	if books[0].Kind != model.KindBook || books[0].Title != "The Hobbit" || books[0].Artist != "J.R.R. Tolkien" {
+		t.Fatalf("book view wrong: %+v", books[0])
+	}
+
+	// Full detail: author contributor and a synthesized whole-file chapter.
+	d, err := lib.Book(ctx, bookPID)
+	if err != nil {
+		t.Fatalf("Book: %v", err)
+	}
+	if len(d.Authors) != 1 || d.Authors[0] != "J.R.R. Tolkien" {
+		t.Errorf("authors = %v, want [J.R.R. Tolkien]", d.Authors)
+	}
+	if len(d.Chapters) != 1 {
+		t.Errorf("chapters = %d, want 1 (synthesized whole-file)", len(d.Chapters))
+	}
+
+	// Chapter-level resume: a recorded position resolves to a chapter.
+	if err := lib.Playback().Checkpoint(ctx, "", bookPID, 10); err != nil {
+		t.Fatalf("checkpoint: %v", err)
+	}
+	st, ch, err := lib.BookResume(ctx, "", bookPID)
+	if err != nil {
+		t.Fatalf("BookResume: %v", err)
+	}
+	if st.PositionMS != 10 || ch == nil {
+		t.Errorf("resume = pos %d chapter %v, want pos 10 and a chapter", st.PositionMS, ch)
+	}
+
+	// Organize lays the book out under the audiobook template (author/book/file).
+	plan, err := lib.PlanOrganize(ctx, query.New(query.EntityItems).Build(), "waxbin-native")
+	if err != nil {
+		t.Fatalf("plan organize: %v", err)
+	}
+	var bookAction bool
+	for _, a := range plan.Actions {
+		if a.ItemPID == bookPID {
+			bookAction = true
+			want := filepath.Join("j.r.r. tolkien", "The Hobbit", "The Hobbit.m4b")
+			if a.RelDst != want {
+				t.Errorf("audiobook dst = %q, want %q", a.RelDst, want)
+			}
+		}
+	}
+	if !bookAction {
+		t.Error("organize plan did not include the book")
+	}
+
+	// Search surfaces the book in its own group.
+	res, err := lib.Search(ctx, "hobbit", read.SearchOptions{})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if len(res.Books) != 1 || res.Books[0].PID != bookPID {
+		t.Fatalf("search books = %+v, want the hobbit", res.Books)
+	}
+
+	if rep, err := lib.VerifyDerived(ctx); err != nil {
+		t.Fatalf("verify: %v", err)
+	} else if !rep.Consistent() {
+		t.Errorf("derived data inconsistent after audiobook flow: %+v", rep)
+	}
+}
+
+// TestEndToEndMultiFileAudiobookOrganize verifies organize moves EVERY part of a
+// multi-file audiobook into one book folder rather than relocating only the
+// representative file and splitting the book.
+func TestEndToEndMultiFileAudiobookOrganize(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+
+	// Two .m4b parts of one book (same album + album-artist groups them), with
+	// distinct audio so they are two real files.
+	writeFile(t, filepath.Join(root, "in", "p1.m4b"),
+		testaudio.BuildMP3WithAudio("Part 1", "Sanderson", "Mistborn", 1, testaudio.DefaultAudio()))
+	writeFile(t, filepath.Join(root, "in", "p2.m4b"),
+		testaudio.BuildMP3WithAudio("Part 2", "Sanderson", "Mistborn", 2, testaudio.AudioWithSeed(0x55)))
+
+	lib := openManaged(t, ctx, db, root)
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+
+	books, err := lib.Query(ctx, query.New(query.EntityItems).Where("kind", query.OpIs, "book").Build())
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if len(books) != 1 {
+		t.Fatalf("books = %d, want 1 (two parts grouped)", len(books))
+	}
+
+	plan, err := lib.PlanOrganize(ctx, query.New(query.EntityItems).Build(), "waxbin-native")
+	if err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	if plan.Pending() != 2 {
+		t.Fatalf("planned moves = %d, want 2 (every part)", plan.Pending())
+	}
+	rep, err := lib.ApplyOrganize(ctx, plan)
+	if err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if rep.Moved != 2 {
+		t.Fatalf("moved = %d, want 2", rep.Moved)
+	}
+
+	// Both parts now live together in the author/book folder; none left behind.
+	inFolder, _ := filepath.Glob(filepath.Join(root, "sanderson", "Mistborn", "*.m4b"))
+	if len(inFolder) != 2 {
+		t.Errorf("parts in book folder = %v, want 2 co-located", inFolder)
+	}
+	leftover, _ := filepath.Glob(filepath.Join(root, "in", "*.m4b"))
+	if len(leftover) != 0 {
+		t.Errorf("parts left behind in incoming: %v", leftover)
+	}
+}
+
+// TestMultiFileBookSameBasenameOrganize verifies the multi-file organize fix: two
+// parts that share a basename across source folders are renamed to unique,
+// reading-ordered names in the book folder rather than colliding (which would skip
+// all but one and split the book).
+func TestMultiFileBookSameBasenameOrganize(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+
+	// Same basename "track.m4b" in two different source folders; same album+author
+	// groups them into one book; distinct audio makes them two real files.
+	writeFile(t, filepath.Join(root, "a", "track.m4b"),
+		testaudio.BuildMP3WithAudio("Part 1", "Auth", "OneBook", 1, testaudio.DefaultAudio()))
+	writeFile(t, filepath.Join(root, "b", "track.m4b"),
+		testaudio.BuildMP3WithAudio("Part 2", "Auth", "OneBook", 2, testaudio.AudioWithSeed(0x77)))
+
+	lib := openManaged(t, ctx, db, root)
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	books, _ := lib.Query(ctx, query.New(query.EntityItems).Where("kind", query.OpIs, "book").Build())
+	if len(books) != 1 {
+		t.Fatalf("books = %d, want 1 grouped book", len(books))
+	}
+
+	plan, err := lib.PlanOrganize(ctx, query.New(query.EntityItems).Build(), "waxbin-native")
+	if err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	if plan.Pending() != 2 {
+		t.Fatalf("planned moves = %d, want 2 (no basename collision)", plan.Pending())
+	}
+	if _, err := lib.ApplyOrganize(ctx, plan); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	parts, _ := filepath.Glob(filepath.Join(root, "auth", "OneBook", "*.m4b"))
+	if len(parts) != 2 {
+		t.Errorf("parts in book folder = %v, want 2 uniquely-named", parts)
+	}
+}
+
+// TestTrashExpandsMultiFileBook verifies deleting a multi-file audiobook plans a
+// removal for EVERY part, not just the representative primary (which would strand
+// the rest on disk).
+func TestTrashExpandsMultiFileBook(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+
+	writeFile(t, filepath.Join(root, "a", "p1.m4b"),
+		testaudio.BuildMP3WithAudio("Part 1", "Auth", "OneBook", 1, testaudio.DefaultAudio()))
+	writeFile(t, filepath.Join(root, "a", "p2.m4b"),
+		testaudio.BuildMP3WithAudio("Part 2", "Auth", "OneBook", 2, testaudio.AudioWithSeed(0x91)))
+
+	lib := openManaged(t, ctx, db, root)
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	books, _ := lib.Query(ctx, query.New(query.EntityItems).Where("kind", query.OpIs, "book").Build())
+	if len(books) != 1 {
+		t.Fatalf("books = %d, want 1", len(books))
+	}
+
+	plan, err := lib.PlanDeletePIDs(ctx, []model.PID{books[0].PID}, model.DeleteTrash)
+	if err != nil {
+		t.Fatalf("plan delete: %v", err)
+	}
+	if plan.Pending() != 2 {
+		t.Fatalf("planned deletions = %d, want 2 (both parts)", plan.Pending())
+	}
+	if _, err := lib.ApplyDelete(ctx, plan); err != nil {
+		t.Fatalf("apply delete: %v", err)
+	}
+	// Both parts are gone from their original location (moved to the trash).
+	left, _ := filepath.Glob(filepath.Join(root, "a", "*.m4b"))
+	if len(left) != 0 {
+		t.Errorf("parts left on disk after delete: %v", left)
+	}
 }

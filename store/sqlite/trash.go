@@ -114,6 +114,24 @@ func detachFileTx(ctx context.Context, tx *sql.Tx, filePID model.PID, op string)
 			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		if has {
+			// A surviving multi-file book that lost a part must promote a primary (or
+			// it reads back headless), refresh its denormalized total duration, and
+			// emit an item update — its part count/duration/chapters changed, so a
+			// change_log consumer must refresh it (symmetric with the attach side). Its
+			// rollups were already recomputed above.
+			if err := ensurePrimary(ctx, tx, iid); err != nil {
+				return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+			if err := refreshBookDuration(ctx, tx, iid); err != nil {
+				return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+			var pid model.PID
+			if err := tx.QueryRowContext(ctx, "SELECT pid FROM playable_item WHERE id=?", iid).Scan(&pid); err != nil {
+				return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+			if err := appendChange(ctx, tx, "item", pid, model.OpUpdate); err != nil {
+				return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
 			continue
 		}
 		var pid model.PID

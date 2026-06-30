@@ -65,3 +65,55 @@ func splitAll(p string) []string {
 	}
 	return parts
 }
+
+// TestRenderRelPathAudiobook renders a book through the native audiobook template,
+// exercising the author/series/sequence/narrator/asin tokens and their optional
+// groups.
+func TestRenderRelPathAudiobook(t *testing.T) {
+	p, err := organize.ProfileByName("waxbin-native")
+	if err != nil {
+		t.Fatal(err)
+	}
+	book := &model.ItemView{
+		Kind:        model.KindBook,
+		Title:       "The Way of Kings",
+		Artist:      "Brandon Sanderson", // author maps onto Artist in the read view
+		AuthorSort:  "sanderson, brandon",
+		Series:      "Stormlight Archive",
+		SeriesSeq:   "1",
+		Narrator:    "Kate Reading",
+		Subtitle:    "Book One",
+		ASIN:        "B003ZWFB8C",
+		Year:        2010,
+		DisplayPath: "/incoming/kings.m4b",
+	}
+	rel, err := organize.RenderRelPath(p, book)
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	want := filepath.Join(
+		"sanderson, brandon", "Stormlight Archive",
+		"1 - 2010 - The Way of Kings - Book One {Kate Reading} [B003ZWFB8C]",
+		"The Way of Kings.m4b")
+	if rel != want {
+		t.Fatalf("audiobook rel =\n  %q\nwant\n  %q", rel, want)
+	}
+}
+
+// TestRenderRelPathAudiobookSparse drops the optional series/narrator/asin groups
+// when those fields are empty.
+func TestRenderRelPathAudiobookSparse(t *testing.T) {
+	p, _ := organize.ProfileByName("waxbin-native")
+	book := &model.ItemView{
+		Kind: model.KindBook, Title: "Standalone", Artist: "Solo Author",
+		AuthorSort: "solo author", DisplayPath: "/in/x.m4b",
+	}
+	rel, err := organize.RenderRelPath(p, book)
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	want := filepath.Join("solo author", "Standalone", "Standalone.m4b")
+	if rel != want {
+		t.Fatalf("sparse audiobook rel = %q, want %q", rel, want)
+	}
+}

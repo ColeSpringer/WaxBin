@@ -136,13 +136,14 @@ func (s *Store) browseSpecFor(ctx context.Context, list read.DiscoveryList, opt 
 	case read.ListNewest:
 		// Newest release first; an untagged year coalesces to 0 so it sorts last
 		// under DESC and the order column is never NULL (keyset stays well defined).
-		return browseSpec{orderExpr: "COALESCE(t.year, 0)", orderInt: true, desc: true}, nil
+		// The book's year stands in for a track's, matching the field map and facets.
+		return browseSpec{orderExpr: "COALESCE(t.year, bk.year, 0)", orderInt: true, desc: true}, nil
 	case read.ListByYear:
 		if opt.Year <= 0 {
 			return browseSpec{}, waxerr.New(waxerr.CodeInvalid, op, "by-year browse requires a year")
 		}
 		return browseSpec{
-			where: "t.year = ?", whereArgs: []any{opt.Year}, orderExpr: "pi.sort_key",
+			where: "COALESCE(t.year, bk.year) = ?", whereArgs: []any{opt.Year}, orderExpr: "pi.sort_key",
 		}, nil
 	case read.ListByGenre:
 		gid, err := s.genreIDByPID(ctx, opt.GenrePID, op)

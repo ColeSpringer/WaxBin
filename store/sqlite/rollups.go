@@ -171,6 +171,10 @@ LEFT JOIN file f       ON f.id = pf.file_id
 WHERE rg.id /*FILTER*/
 GROUP BY rg.id`
 
+// The genre duration sums ALL of an item's files, not just the primary, so a
+// multi-file audiobook contributes its whole running time (the artist and
+// release-group rollups join through track, which books never have, so they stay
+// single-file by construction and need no such change).
 const genreRollupSelect = `
 INSERT INTO genre_rollup(genre_id, track_count, total_duration_ms, updated_at)
 SELECT g.id,
@@ -179,7 +183,7 @@ SELECT g.id,
        ?
 FROM genre g
 LEFT JOIN item_genre ig ON ig.genre_id = g.id
-LEFT JOIN item_file pf  ON pf.item_id = ig.item_id AND pf.role = 'primary'
+LEFT JOIN item_file pf  ON pf.item_id = ig.item_id
 LEFT JOIN file f        ON f.id = pf.file_id
 WHERE g.id /*FILTER*/
 GROUP BY g.id`

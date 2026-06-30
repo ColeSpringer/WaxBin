@@ -174,6 +174,18 @@ func (s *Store) PutScannedTrack(ctx context.Context, in model.PutScannedTrackInp
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 			if has {
+				// A surviving item (a multi-file book) that just lost a file must keep a
+				// primary (or it reads back headless) AND have its rollups recomputed,
+				// since its summed duration/genre rollup shrank with the detached part.
+				if err := affected.collect(ctx, tx, oid); err != nil {
+					return waxerr.Wrap(waxerr.CodeIO, op, err)
+				}
+				if err := ensurePrimary(ctx, tx, oid); err != nil {
+					return waxerr.Wrap(waxerr.CodeIO, op, err)
+				}
+				if err := refreshBookDuration(ctx, tx, oid); err != nil {
+					return waxerr.Wrap(waxerr.CodeIO, op, err)
+				}
 				continue
 			}
 			// The orphaned item's entities lose it; collect them before the delete.
@@ -315,9 +327,10 @@ func (s *Store) QueryItems(ctx context.Context, q query.Query) ([]*model.ItemVie
 	var sb strings.Builder
 	sb.WriteString(itemSelect)
 	args := append([]any(nil), c.Args...)
-	if c.Where != "" {
+	where := andWhere(c.Where, entityPredicate(q.Entity))
+	if where != "" {
 		sb.WriteString(" WHERE ")
-		sb.WriteString(c.Where)
+		sb.WriteString(where)
 	}
 	if c.OrderBy != "" {
 		sb.WriteString(" ORDER BY " + c.OrderBy + ", pi.pid")
@@ -363,8 +376,8 @@ func (s *Store) CountItems(ctx context.Context, q query.Query) (int, error) {
 		return 0, err
 	}
 	stmt := itemCountSelect
-	if c.Where != "" {
-		stmt += " WHERE " + c.Where
+	if where := andWhere(c.Where, entityPredicate(q.Entity)); where != "" {
+		stmt += " WHERE " + where
 	}
 	var n int
 	if err := s.read.QueryRowContext(ctx, stmt, c.Args...).Scan(&n); err != nil {

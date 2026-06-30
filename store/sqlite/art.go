@@ -243,19 +243,37 @@ func (s *Store) artChain(ctx context.Context, ref model.EntityRef) ([]artLevel, 
 func (s *Store) trackArtChain(ctx context.Context, pid model.PID) ([]artLevel, error) {
 	const op = "store.ResolveArt"
 	var itemID int64
+	var kind string
 	var albumID, albumArtistID, artistID sql.NullInt64
 	err := s.read.QueryRowContext(ctx,
-		`SELECT pi.id, t.album_id, t.album_artist_id, t.artist_id
-		 FROM playable_item pi JOIN track t ON t.item_id = pi.id WHERE pi.pid = ?`, string(pid)).
-		Scan(&itemID, &albumID, &albumArtistID, &artistID)
+		`SELECT pi.id, pi.kind, t.album_id, t.album_artist_id, t.artist_id
+		 FROM playable_item pi LEFT JOIN track t ON t.item_id = pi.id WHERE pi.pid = ?`, string(pid)).
+		Scan(&itemID, &kind, &albumID, &albumArtistID, &artistID)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, waxerr.New(waxerr.CodeNotFound, op, "no such track: "+string(pid))
+		return nil, waxerr.New(waxerr.CodeNotFound, op, "no such item: "+string(pid))
 	}
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
 
 	chain := []artLevel{{string(model.ArtTrack), itemID}}
+	// A book stores its cover at the item level (the 'track' art_map slot, keyed by
+	// the item id), then falls back to its author artist and first genre. It has no
+	// album/release-group rungs, so resolve it directly and return.
+	if kind == string(model.KindBook) {
+		var authorID sql.NullInt64
+		if err := s.read.QueryRowContext(ctx,
+			"SELECT author_id FROM book WHERE item_id = ?", itemID).Scan(&authorID); err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		if authorID.Valid {
+			chain = append(chain, artLevel{string(model.ArtArtist), authorID.Int64})
+		}
+		if gid := s.firstItemGenre(ctx, itemID); gid != 0 {
+			chain = append(chain, artLevel{string(model.ArtGenre), gid})
+		}
+		return chain, nil
+	}
 	var rgID, primaryArtistID int64
 	if albumID.Valid {
 		chain = append(chain, artLevel{string(model.ArtAlbum), albumID.Int64})

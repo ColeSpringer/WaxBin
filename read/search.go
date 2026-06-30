@@ -12,9 +12,9 @@ type SearchOptions struct {
 // negative) score is a better match; consumers order ascending.
 type SearchHit struct {
 	PID      model.PID
-	Kind     string  // artist|album|track|episode
-	Title    string  // primary display (track/album title, or artist name)
-	Subtitle string  // secondary display (artist for a track/album; empty for an artist)
+	Kind     string  // artist|album|track|book|episode
+	Title    string  // primary display (track/album/book title, or artist name)
+	Subtitle string  // secondary display (artist for a track/album, author for a book; empty for an artist)
 	Score    float64 // bm25; lower is a better match
 }
 
@@ -27,6 +27,7 @@ type SearchResult struct {
 	Artists  []SearchHit
 	Albums   []SearchHit
 	Tracks   []SearchHit
+	Books    []SearchHit
 	Episodes []SearchHit
 	// Truncated is set when the search hit its internal ranked-row scan cap, so the
 	// groups may omit lower-ranked albums/artists. A consumer wanting fuller coverage
@@ -36,5 +37,6 @@ type SearchResult struct {
 
 // Empty reports whether the search produced no hits in any group.
 func (r *SearchResult) Empty() bool {
-	return len(r.Artists) == 0 && len(r.Albums) == 0 && len(r.Tracks) == 0 && len(r.Episodes) == 0
+	return len(r.Artists) == 0 && len(r.Albums) == 0 && len(r.Tracks) == 0 &&
+		len(r.Books) == 0 && len(r.Episodes) == 0
 }

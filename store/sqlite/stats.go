@@ -29,8 +29,15 @@ func (s *Store) Stats(ctx context.Context, userPID model.PID, topN int) (*read.S
 		q   string
 	}{
 		{&out.Items, "SELECT COUNT(*) FROM playable_item WHERE kind = 'track'"},
-		{&out.Artists, `SELECT COUNT(*) FROM artist a WHERE EXISTS
-			(SELECT 1 FROM track t WHERE t.artist_id = a.id OR t.album_artist_id = a.id)`},
+		{&out.Books, "SELECT COUNT(*) FROM playable_item WHERE kind = 'book'"},
+		// An artist counts if it backs a track OR is a book's author. This mirrors the
+		// GroupArtist facet exactly (COALESCE(t.artist_id, bk.author_id)), so the
+		// headline count matches the facet's bucket set. A narrator/translator/editor
+		// that is never also an author or track artist is intentionally not counted,
+		// because the facet does not surface them.
+		{&out.Artists, `SELECT COUNT(*) FROM artist a WHERE
+			EXISTS (SELECT 1 FROM track t WHERE t.artist_id = a.id OR t.album_artist_id = a.id)
+			OR EXISTS (SELECT 1 FROM book b WHERE b.author_id = a.id)`},
 		{&out.ReleaseGroups, `SELECT COUNT(*) FROM release_group rg WHERE EXISTS
 			(SELECT 1 FROM album al JOIN track t ON t.album_id = al.id WHERE al.release_group_id = rg.id)`},
 		{&out.Albums, "SELECT COUNT(*) FROM album al WHERE EXISTS (SELECT 1 FROM track t WHERE t.album_id = al.id)"},
@@ -42,9 +49,11 @@ func (s *Store) Stats(ctx context.Context, userPID model.PID, topN int) (*read.S
 			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 	}
+	// Sum every item's files (all parts of a multi-file audiobook, the single file
+	// of a track), so the library total reflects full running times.
 	if err := s.read.QueryRowContext(ctx,
 		`SELECT COALESCE(SUM(f.duration_ms), 0) FROM item_file pf
-		 JOIN file f ON f.id = pf.file_id WHERE pf.role = 'primary'`).Scan(&out.TotalDuration); err != nil {
+		 JOIN file f ON f.id = pf.file_id`).Scan(&out.TotalDuration); err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
 
@@ -97,12 +106,14 @@ func (s *Store) playStats(ctx context.Context, userPID model.PID, topN int) (rea
 		return ps, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
 
-	// COALESCE the LEFT JOINed artist. Future playable types such as books or
-	// episodes will not have track rows, so t.artist may be NULL.
-	rows, err := s.read.QueryContext(ctx, `SELECT pi.pid, pi.title, COALESCE(t.artist, ''), p.play_count
+	// COALESCE the LEFT JOINed artist with the book author, so a played audiobook
+	// shows its author rather than a blank artist (a book has no track row).
+	rows, err := s.read.QueryContext(ctx, `SELECT pi.pid, pi.title,
+		COALESCE(NULLIF(t.artist,''), bk.author, ''), p.play_count
 		FROM play_state p
 		JOIN playable_item pi ON pi.id = p.item_id
 		LEFT JOIN track t ON t.item_id = pi.id
+		LEFT JOIN book bk ON bk.item_id = pi.id
 		WHERE p.user_id = ? AND p.play_count > 0
 		ORDER BY p.play_count DESC, pi.sort_key LIMIT ?`, userID, topN)
 	if err != nil {

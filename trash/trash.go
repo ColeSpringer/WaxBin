@@ -22,6 +22,9 @@ import (
 type Store interface {
 	TrashFile(ctx context.Context, in model.TrashFileInput) (model.PID, error)
 	DetachFile(ctx context.Context, filePID model.PID) error
+	// ItemFiles returns every file backing an item, so a multi-file book's parts are
+	// all planned for deletion, not just the representative primary.
+	ItemFiles(ctx context.Context, itemPID model.PID) ([]model.ItemFileRef, error)
 }
 
 // Service plans and applies deletions.
@@ -84,30 +87,37 @@ type Failure struct {
 	Err     string
 }
 
-// Plan computes the deletion for each item under the mode. An item with no
-// backing file is skipped; a trashed file's destination is placed in its
-// library's trash directory under a unique sub-directory so same-named files
-// never collide.
-func (s *Service) Plan(libs []*model.Library, items []*model.ItemView, mode model.DeleteMode) (*Plan, error) {
+// Plan computes the deletion for each item under the mode. Every backing file is
+// planned, so a multi-file book is removed in full rather than losing only its
+// primary part. An item with no backing file is skipped; a trashed file's
+// destination is placed in its library's trash directory under a unique
+// sub-directory so same-named files never collide.
+func (s *Service) Plan(ctx context.Context, libs []*model.Library, items []*model.ItemView, mode model.DeleteMode) (*Plan, error) {
 	if !mode.Valid() {
 		return nil, waxerr.New(waxerr.CodeInvalid, "trash.Plan", "invalid delete mode: "+string(mode))
 	}
 	plan := &Plan{Mode: mode}
 	for _, it := range items {
-		if it.FilePID == "" || it.DisplayPath == "" {
-			continue
+		files, err := s.store.ItemFiles(ctx, it.PID)
+		if err != nil {
+			return nil, err
 		}
-		a := Action{ItemPID: it.PID, FilePID: it.FilePID, Src: it.DisplayPath, SrcBytes: it.Path}
-		root, ok := rootFor(libs, it.DisplayPath)
-		if !ok {
-			a.Skip, a.Reason = true, "file is not under a known library root"
+		for _, fl := range files {
+			if fl.FilePID == "" || fl.DisplayPath == "" {
+				continue
+			}
+			a := Action{ItemPID: it.PID, FilePID: fl.FilePID, Src: fl.DisplayPath, SrcBytes: fl.Path}
+			root, ok := rootFor(libs, fl.DisplayPath)
+			if !ok {
+				a.Skip, a.Reason = true, "file is not under a known library root"
+				plan.Actions = append(plan.Actions, a)
+				continue
+			}
+			if !mode.BypassesTrash() {
+				a.TrashDst = filepath.Join(root, model.TrashDirName, model.NewPID().String(), filepath.Base(fl.DisplayPath))
+			}
 			plan.Actions = append(plan.Actions, a)
-			continue
 		}
-		if !mode.BypassesTrash() {
-			a.TrashDst = filepath.Join(root, model.TrashDirName, model.NewPID().String(), filepath.Base(it.DisplayPath))
-		}
-		plan.Actions = append(plan.Actions, a)
 	}
 	return plan, nil
 }

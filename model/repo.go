@@ -24,6 +24,28 @@ type PutScannedTrackInput struct {
 	CoverArt *ArtImage
 }
 
+// PutScannedBookInput carries one scanned audiobook file for atomic persistence.
+// A book groups one or many files by Item.IdentityKey (the book key); each file is
+// attached as a part in reading order, the first becoming the representative
+// primary. The store owns PID assignment (PIDs on input are ignored). Book.Authors
+// and Book.Narrators drive the role-tagged contributor links and their artist
+// entities.
+type PutScannedBookInput struct {
+	LibraryID int64
+	File      File
+	Item      PlayableItem // Kind=KindBook, IdentityKey=identity.BookKey(...)
+	Book      Book         // subtype fields
+	// Position orders this file among the book's parts (from disc/track tags, else
+	// 0; the read path falls back to rel-path order for unnumbered parts).
+	Position int
+	// Chapters are this file's navigation chapters, file-relative (Title/StartMS/
+	// EndMS). The scanner may synthesize a single whole-file chapter for a part with
+	// none so multi-file books still navigate by part.
+	Chapters []Chapter
+	// CoverArt is the book's cover image (embedded or directory), or nil.
+	CoverArt *ArtImage
+}
+
 // ScanItemResult reports what the store did for a PutScannedTrack call, enough
 // for the scanner to log and for tests to assert identity behavior.
 type ScanItemResult struct {
@@ -33,6 +55,16 @@ type ScanItemResult struct {
 	FileCreated    bool // a new file row was created
 	Relinked       bool // an existing file (matched by essence) moved to a new path
 	ContentChanged bool // content_hash changed; if essence is stable this is a tag-only update
+}
+
+// ItemFileRef is one backing file of an item, in reading order. organize uses it
+// to move every part of a multi-file book, not just the representative primary,
+// so a book is never split across folders.
+type ItemFileRef struct {
+	FilePID     PID
+	Path        []byte // raw bytes of the current path
+	DisplayPath string
+	Position    int
 }
 
 // RelocateInput records a completed filesystem move so the store can update the
@@ -57,12 +89,16 @@ type Catalog interface {
 	Libraries(ctx context.Context) ([]*Library, error)
 
 	PutScannedTrack(ctx context.Context, in PutScannedTrackInput) (*ScanItemResult, error)
+	PutScannedBook(ctx context.Context, in PutScannedBookInput) (*ScanItemResult, error)
 	FileByPath(ctx context.Context, path []byte) (*File, error)
 	FileByEssence(ctx context.Context, essence string) (*File, error)
 
 	QueryItems(ctx context.Context, q query.Query) ([]*ItemView, error)
 	CountItems(ctx context.Context, q query.Query) (int, error)
 	ItemByPID(ctx context.Context, pid PID) (*ItemView, error)
+	// ItemFiles returns every file backing an item in reading order (one for a
+	// track or single-file book, all parts for a multi-file book).
+	ItemFiles(ctx context.Context, pid PID) ([]ItemFileRef, error)
 
 	// Two-phase organize journaling: PlanMove records a 'planned' organize_journal
 	// row before the on-disk move (returning its journal pid); CommitMove updates

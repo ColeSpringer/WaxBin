@@ -110,3 +110,39 @@ func TestAlbumKeyDisambiguatesByFolder(t *testing.T) {
 		t.Error("an album with no release-group key should not be keyed")
 	}
 }
+
+func TestBookKey(t *testing.T) {
+	// ASIN wins over everything; ISBN next; then author+title+edition.
+	if got := BookKey("B00X", "978-0-13-468599-1", "Tolkien", "The Hobbit", "Unabridged"); got != "asin:b00x" {
+		t.Errorf("ASIN key = %q, want asin:b00x", got)
+	}
+	if got := BookKey("", "978-0-13-468599-1", "Tolkien", "The Hobbit", ""); got != "isbn:9780134685991" {
+		t.Errorf("ISBN key = %q, want isbn:9780134685991 (separators stripped)", got)
+	}
+	// Edition distinguishes an abridged release from the unabridged one.
+	un := BookKey("", "", "Tolkien", "The Hobbit", "Unabridged")
+	ab := BookKey("", "", "Tolkien", "The Hobbit", "Abridged")
+	if un == ab {
+		t.Errorf("abridged and unabridged keyed the same: %q", un)
+	}
+	// Same author+title with no edition is stable across calls.
+	if BookKey("", "", "Tolkien", "The Hobbit", "") != BookKey("", "", "tolkien", "the  hobbit", "") {
+		t.Error("author/title key is not normalization-stable")
+	}
+	// No id and no title: ungrouped.
+	if got := BookKey("", "", "Tolkien", "", ""); got != "" {
+		t.Errorf("titleless book key = %q, want empty", got)
+	}
+}
+
+func TestSeriesKey(t *testing.T) {
+	if got := SeriesKey("mb-1", "Anything"); got != "mbid:mb-1" {
+		t.Errorf("series MBID key = %q, want mbid:mb-1", got)
+	}
+	if SeriesKey("", "The Stormlight Archive") != SeriesKey("", "the stormlight archive") {
+		t.Error("series name key is not normalization-stable")
+	}
+	if got := SeriesKey("", ""); got != "" {
+		t.Errorf("empty series key = %q, want empty", got)
+	}
+}
