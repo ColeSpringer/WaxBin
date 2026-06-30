@@ -72,15 +72,16 @@ func emitPlan(cmd *cobra.Command, g *globals, plan *organize.Plan) error {
 func emitReport(cmd *cobra.Command, g *globals, plan *organize.Plan, rep *organize.Report) error {
 	if g.jsonOut {
 		return printJSON(cmd, struct {
-			Profile  string             `json:"profile"`
-			Moved    int                `json:"moved"`
-			Skipped  int                `json:"skipped"`
-			Errored  int                `json:"errored"`
-			Failures []organize.Failure `json:"failures,omitempty"`
-		}{plan.Profile, rep.Moved, rep.Skipped, rep.Errored, rep.Failures})
+			Profile       string             `json:"profile"`
+			Moved         int                `json:"moved"`
+			Skipped       int                `json:"skipped"`
+			Errored       int                `json:"errored"`
+			SidecarsMoved int                `json:"sidecarsMoved"`
+			Failures      []organize.Failure `json:"failures,omitempty"`
+		}{plan.Profile, rep.Moved, rep.Skipped, rep.Errored, rep.SidecarsMoved, rep.Failures})
 	}
-	fmt.Fprintf(out(cmd), "Organized (profile %s): moved %d, skipped %d, errored %d\n",
-		plan.Profile, rep.Moved, rep.Skipped, rep.Errored)
+	fmt.Fprintf(out(cmd), "Organized (profile %s): moved %d, skipped %d, errored %d, sidecars %d\n",
+		plan.Profile, rep.Moved, rep.Skipped, rep.Errored, rep.SidecarsMoved)
 	for _, f := range rep.Failures {
 		fmt.Fprintf(out(cmd), "  FAIL %s -> %s: %s\n", f.Src, f.Dst, f.Err)
 	}

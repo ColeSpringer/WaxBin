@@ -93,6 +93,11 @@ func (s *Scanner) Scan(ctx context.Context, req Request, hb Heartbeat) (*Result,
 			return ctx.Err()
 		}
 		if d.IsDir() {
+			// Never descend into the library's trash: those files were deleted, and
+			// re-cataloging them would resurrect the items they backed.
+			if d.Name() == model.TrashDirName {
+				return fs.SkipDir
+			}
 			return nil
 		}
 		if d.Type()&fs.ModeSymlink != 0 {
@@ -123,6 +128,27 @@ func (s *Scanner) Scan(ctx context.Context, req Request, hb Heartbeat) (*Result,
 	}
 	if hb != nil {
 		_ = hb(1, "scanned "+strconv.Itoa(res.FilesSeen)+" files")
+	}
+	return res, nil
+}
+
+// ScanFile catalogs a single audio file under its library. It is the entry point
+// for re-cataloging one restored or freshly-imported file without walking the
+// whole root; it shares the per-file path with the full scan, so identity,
+// essence-relink, and change detection behave identically. A non-audio path is a
+// no-op.
+func (s *Scanner) ScanFile(ctx context.Context, lib *model.Library, path string) (*Result, error) {
+	if lib == nil {
+		return nil, waxerr.New(waxerr.CodeInvalid, "scan.ScanFile", "scan request has no library")
+	}
+	res := &Result{}
+	if !isAudio(path) {
+		return res, nil
+	}
+	res.FilesSeen++
+	if err := s.scanAudioFile(ctx, lib, string(lib.Root), path, res); err != nil {
+		res.Errored++
+		return res, err
 	}
 	return res, nil
 }
@@ -254,3 +280,7 @@ var audioExts = map[string]bool{
 }
 
 func isAudio(path string) bool { return audioExts[strings.ToLower(filepath.Ext(path))] }
+
+// IsAudio reports whether a path has a recognized audio extension. It is the one
+// source of truth for the audio-file set, shared with the importer.
+func IsAudio(path string) bool { return isAudio(path) }

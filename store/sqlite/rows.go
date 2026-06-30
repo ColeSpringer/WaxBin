@@ -26,7 +26,7 @@ const itemJoins = ` FROM playable_item pi
 // itemViewCols is the column list for an item read-view, shared by the plain
 // select and the keyset-paginated select (which prepends pi.sort_key).
 const itemViewCols = `pi.pid, pi.kind, pi.state, pi.title,
-	t.artist, t.album_artist, t.album, t.track_no, t.disc_no, t.year, t.genre,
+	t.artist, t.album_artist, t.album, t.track_no, t.disc_no, t.year, t.genre, t.compilation,
 	f.pid, f.path, f.display_path, f.duration_ms, f.container, f.codec`
 
 const itemSelect = `SELECT ` + itemViewCols + itemJoins
@@ -45,6 +45,7 @@ const fileSelect = `SELECT id, pid, library_id, path, display_path, rel_path, ki
 // itemViewNulls holds the nullable columns of an item view during a scan.
 type itemViewNulls struct {
 	trackNo, discNo, year, dur    sql.NullInt64
+	compilation                   sql.NullInt64
 	fpid, fdisp, container, codec sql.NullString
 	fpath                         []byte
 }
@@ -54,7 +55,7 @@ type itemViewNulls struct {
 func itemViewDests(v *model.ItemView, n *itemViewNulls) []any {
 	return []any{
 		&v.PID, &v.Kind, &v.State, &v.Title,
-		&v.Artist, &v.AlbumArtist, &v.Album, &n.trackNo, &n.discNo, &n.year, &v.Genre,
+		&v.Artist, &v.AlbumArtist, &v.Album, &n.trackNo, &n.discNo, &n.year, &v.Genre, &n.compilation,
 		&n.fpid, &n.fpath, &n.fdisp, &n.dur, &n.container, &n.codec,
 	}
 }
@@ -63,6 +64,7 @@ func (n *itemViewNulls) apply(v *model.ItemView) {
 	v.TrackNo = int(n.trackNo.Int64)
 	v.DiscNo = int(n.discNo.Int64)
 	v.Year = int(n.year.Int64)
+	v.Compilation = n.compilation.Int64 != 0
 	v.DurationMS = n.dur.Int64
 	v.FilePID = model.PID(n.fpid.String)
 	v.Path = n.fpath

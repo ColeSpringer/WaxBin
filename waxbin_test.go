@@ -1,11 +1,13 @@
 package waxbin_test
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -13,6 +15,7 @@ import (
 	"github.com/colespringer/waxbin/config"
 	"github.com/colespringer/waxbin/internal/testaudio"
 	"github.com/colespringer/waxbin/model"
+	"github.com/colespringer/waxbin/port"
 	"github.com/colespringer/waxbin/query"
 	"github.com/colespringer/waxbin/waxerr"
 	_ "modernc.org/sqlite"
@@ -670,6 +673,536 @@ func TestOrganizeMoveFailureRollsBack(t *testing.T) {
 	}
 	if !fileExists(src) {
 		t.Fatal("source should remain after a failed move")
+	}
+}
+
+// TestOrganizeRelocatesSidecars verifies that organizing an audio file carries
+// its same-basename sidecars (renamed to the new basename) and the directory
+// cover art along with it.
+func TestOrganizeRelocatesSidecars(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	src := filepath.Join(root, "song.mp3")
+	writeFile(t, src, testaudio.BuildMP3("Midnight Drive", "The Foobars", "Night Moves", 3))
+	writeFile(t, filepath.Join(root, "song.lrc"), []byte("[00:00.00]lyric"))
+	writeFile(t, filepath.Join(root, "cover.jpg"), []byte("jpegdata"))
+
+	lib := openManaged(t, ctx, db, root)
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	plan, err := lib.PlanOrganize(ctx, query.New(query.EntityItems).Build(), "waxbin-native")
+	if err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	rep, err := lib.ApplyOrganize(ctx, plan)
+	if err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if rep.Moved != 1 {
+		t.Fatalf("audio not moved: %+v", rep)
+	}
+	if rep.SidecarsMoved != 2 {
+		t.Fatalf("sidecars moved = %d, want 2 (lrc + cover)", rep.SidecarsMoved)
+	}
+
+	dstDir := filepath.Join(root, "The Foobars", "Night Moves")
+	if !fileExists(filepath.Join(dstDir, "03 - Midnight Drive.lrc")) {
+		t.Error("lyrics sidecar was not renamed and moved with the audio")
+	}
+	if !fileExists(filepath.Join(dstDir, "cover.jpg")) {
+		t.Error("directory cover art was not moved with the audio")
+	}
+	if fileExists(filepath.Join(root, "song.lrc")) {
+		t.Error("lyrics sidecar left behind at source")
+	}
+}
+
+// TestDeleteTrashRestoreRoundTrip verifies a user delete moves the file to the
+// trash and archives its item, a re-scan does not resurrect it, and restore
+// brings both the file and the item back.
+func TestDeleteTrashRestoreRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	src := filepath.Join(root, "song.mp3")
+	writeFile(t, src, testaudio.BuildMP3("Song", "Artist", "Album", 1))
+
+	lib := openManaged(t, ctx, db, root)
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	items, _ := lib.Query(ctx, query.New(query.EntityItems).Build())
+	if len(items) != 1 {
+		t.Fatalf("want 1 item, got %d", len(items))
+	}
+	itemPID := items[0].PID
+
+	// TRASH
+	plan, err := lib.PlanDeletePIDs(ctx, []model.PID{itemPID}, model.DeleteTrash)
+	if err != nil {
+		t.Fatalf("plan delete: %v", err)
+	}
+	if plan.Pending() != 1 {
+		t.Fatalf("delete plan pending = %d, want 1", plan.Pending())
+	}
+	rep, err := lib.ApplyDelete(ctx, plan)
+	if err != nil {
+		t.Fatalf("apply delete: %v", err)
+	}
+	if rep.Trashed != 1 {
+		t.Fatalf("delete report = %+v, want trashed 1", rep)
+	}
+	if fileExists(src) {
+		t.Fatal("source file should be gone after trashing")
+	}
+	got, err := lib.Get(ctx, itemPID)
+	if err != nil {
+		t.Fatalf("item should be preserved (archived) after trash: %v", err)
+	}
+	if got.State != model.StateArchived {
+		t.Fatalf("item state = %s, want archived", got.State)
+	}
+	// Trashing the file must keep the derived data consistent (the rollups'
+	// duration sums from the now-absent file, so they are recomputed on delete).
+	if dr, err := lib.VerifyDerived(ctx); err != nil || !dr.Consistent() {
+		t.Fatalf("derived data inconsistent after trash: %+v (err %v)", dr, err)
+	}
+
+	entries, err := lib.Trash(ctx, false, 0)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("trash list: err=%v len=%d, want 1", err, len(entries))
+	}
+
+	// A re-scan must not resurrect the trashed file (the trash dir is skipped).
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("re-scan: %v", err)
+	}
+	if again, _ := lib.Get(ctx, itemPID); again.State != model.StateArchived {
+		t.Fatal("re-scan resurrected a trashed item; the trash dir must be skipped")
+	}
+
+	// RESTORE
+	if err := lib.RestoreTrash(ctx, entries[0].PID); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	if !fileExists(src) {
+		t.Fatal("restore did not return the file to its original path")
+	}
+	restored, err := lib.Get(ctx, itemPID)
+	if err != nil {
+		t.Fatalf("get after restore: %v", err)
+	}
+	if restored.State != model.StatePresent {
+		t.Fatalf("item state after restore = %s, want present", restored.State)
+	}
+	if restored.FilePID == "" {
+		t.Fatal("restored item has no backing file")
+	}
+	if dr, err := lib.VerifyDerived(ctx); err != nil || !dr.Consistent() {
+		t.Fatalf("derived data inconsistent after restore: %+v (err %v)", dr, err)
+	}
+	// The trash entry is now marked restored.
+	if active, _ := lib.Trash(ctx, false, 0); len(active) != 0 {
+		t.Fatalf("restored entry should leave the active trash empty, got %d", len(active))
+	}
+}
+
+// TestPruneBypassesTrash verifies pruning deletes from disk immediately, records
+// no undo entry, and still preserves the logical item.
+func TestPruneBypassesTrash(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	src := filepath.Join(root, "song.mp3")
+	writeFile(t, src, testaudio.BuildMP3("Song", "Artist", "Album", 1))
+
+	lib := openManaged(t, ctx, db, root)
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	items, _ := lib.Query(ctx, query.New(query.EntityItems).Build())
+	itemPID := items[0].PID
+
+	plan, err := lib.PlanDeletePIDs(ctx, []model.PID{itemPID}, model.DeletePrune)
+	if err != nil {
+		t.Fatalf("plan prune: %v", err)
+	}
+	rep, err := lib.ApplyDelete(ctx, plan)
+	if err != nil {
+		t.Fatalf("apply prune: %v", err)
+	}
+	if rep.Deleted != 1 || rep.Trashed != 0 {
+		t.Fatalf("prune report = %+v, want deleted 1 trashed 0", rep)
+	}
+	if rep.ReclaimedBytes <= 0 {
+		t.Errorf("prune should report reclaimed bytes, got %d", rep.ReclaimedBytes)
+	}
+	if fileExists(src) {
+		t.Fatal("prune should remove the file from disk")
+	}
+	if entries, _ := lib.Trash(ctx, false, 0); len(entries) != 0 {
+		t.Fatalf("prune must not write a trash entry, got %d", len(entries))
+	}
+	if got, _ := lib.Get(ctx, itemPID); got.State != model.StateArchived {
+		t.Fatal("pruned item should be preserved as archived")
+	}
+}
+
+// TestInboxImportAndDedup verifies importing a staging folder places and catalogs
+// the file under the profile, records an import batch, and skips a duplicate.
+func TestInboxImportAndDedup(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	inboxDir := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+
+	staged := filepath.Join(inboxDir, "incoming.mp3")
+	writeFile(t, staged, testaudio.BuildMP3("Song", "Artist", "Album", 1))
+
+	lib := openManaged(t, ctx, db, root)
+
+	plan, err := lib.PlanImport(ctx, waxbin.ImportRequest{Source: inboxDir})
+	if err != nil {
+		t.Fatalf("plan import: %v", err)
+	}
+	if plan.Importable() != 1 {
+		t.Fatalf("import plan importable = %d, want 1", plan.Importable())
+	}
+	rep, err := lib.ApplyImport(ctx, plan)
+	if err != nil {
+		t.Fatalf("apply import: %v", err)
+	}
+	if rep.Imported != 1 || rep.Duplicates != 0 {
+		t.Fatalf("import report = %+v, want imported 1", rep)
+	}
+
+	// The file landed under the profile and is cataloged; the staged copy is gone.
+	wantPath := filepath.Join(root, "Artist", "Album", "01 - Song.mp3")
+	if !fileExists(wantPath) {
+		t.Fatalf("imported file not at %s", wantPath)
+	}
+	if fileExists(staged) {
+		t.Fatal("staged file should be moved out of the inbox")
+	}
+	items, _ := lib.Query(ctx, query.New(query.EntityItems).Build())
+	if len(items) != 1 || items[0].Title != "Song" {
+		t.Fatalf("imported item not cataloged: %+v", items)
+	}
+
+	// An import batch was recorded.
+	batches, err := lib.ImportBatches(ctx, 10)
+	if err != nil || len(batches) != 1 || batches[0].Imported != 1 {
+		t.Fatalf("import batch not recorded: err=%v batches=%+v", err, batches)
+	}
+
+	// Re-staging the same audio is detected as a duplicate and not imported again.
+	writeFile(t, filepath.Join(inboxDir, "again.mp3"), testaudio.BuildMP3("Song", "Artist", "Album", 1))
+	plan2, err := lib.PlanImport(ctx, waxbin.ImportRequest{Source: inboxDir})
+	if err != nil {
+		t.Fatalf("plan import 2: %v", err)
+	}
+	if plan2.Importable() != 0 {
+		t.Fatalf("duplicate should not be importable, got %d importable", plan2.Importable())
+	}
+	rep2, err := lib.ApplyImport(ctx, plan2)
+	if err != nil {
+		t.Fatalf("apply import 2: %v", err)
+	}
+	if rep2.Duplicates != 1 || rep2.Imported != 0 {
+		t.Fatalf("second import = %+v, want 1 duplicate 0 imported", rep2)
+	}
+}
+
+// TestBackupRedactAndRestore verifies a full backup contains the secret table, a
+// redacted backup does not, and a restored backup re-opens with its catalog and
+// secrets intact.
+func TestBackupRedactAndRestore(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	writeFile(t, filepath.Join(root, "a.mp3"), testaudio.BuildMP3("Song", "Artist", "Album", 1))
+
+	lib := openManaged(t, ctx, db, root)
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if err := lib.SetSecret(ctx, "musicbrainz", "token-123"); err != nil {
+		t.Fatalf("set secret: %v", err)
+	}
+
+	plain := filepath.Join(t.TempDir(), "plain.db")
+	redacted := filepath.Join(t.TempDir(), "redacted.db")
+	if err := lib.Backup(ctx, plain, false); err != nil {
+		t.Fatalf("backup: %v", err)
+	}
+	if err := lib.Backup(ctx, redacted, true); err != nil {
+		t.Fatalf("redacted backup: %v", err)
+	}
+	if n := secretCount(t, plain); n != 1 {
+		t.Fatalf("plain backup secret count = %d, want 1", n)
+	}
+	if n := secretCount(t, redacted); n != 0 {
+		t.Fatalf("redacted backup secret count = %d, want 0", n)
+	}
+
+	if err := lib.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	// Restore the full backup to a fresh path and re-open read-write.
+	restored := filepath.Join(t.TempDir(), "restored.db")
+	if err := port.Restore(ctx, plain, restored, false); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	rlib, err := waxbin.Open(ctx, waxbin.Options{DBPath: restored})
+	if err != nil {
+		t.Fatalf("open restored: %v", err)
+	}
+	defer rlib.Close()
+	items, err := rlib.Query(ctx, query.New(query.EntityItems).Build())
+	if err != nil || len(items) != 1 {
+		t.Fatalf("restored query: err=%v len=%d, want 1", err, len(items))
+	}
+	if sec, err := rlib.GetSecret(ctx, "musicbrainz"); err != nil || sec != "token-123" {
+		t.Fatalf("restored secret = %q (err %v), want token-123", sec, err)
+	}
+
+	// Portable relocate: re-point the single library at a new root and confirm the
+	// cataloged paths follow.
+	newRoot := t.TempDir()
+	libs, _ := rlib.Libraries(ctx)
+	if err := rlib.RelocateRoot(ctx, libs[0].PID, newRoot); err != nil {
+		t.Fatalf("relocate: %v", err)
+	}
+	moved, _ := rlib.Query(ctx, query.New(query.EntityItems).Build())
+	if len(moved) != 1 || !strings.HasPrefix(moved[0].DisplayPath, newRoot) {
+		t.Fatalf("relocate did not re-point file paths: %q (want prefix %q)", moved[0].DisplayPath, newRoot)
+	}
+}
+
+// TestLogicalExport verifies the JSON export carries metadata and user state, a
+// versioned manifest, and never secrets.
+func TestLogicalExport(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	writeFile(t, filepath.Join(root, "a.mp3"), testaudio.BuildMP3("Song", "Artist", "Album", 1))
+
+	lib := openManaged(t, ctx, db, root)
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	items, _ := lib.Query(ctx, query.New(query.EntityItems).Build())
+	if err := lib.Playback().SetStar(ctx, "", items[0].PID, true); err != nil {
+		t.Fatalf("star: %v", err)
+	}
+	if err := lib.SetSecret(ctx, "musicbrainz", "token-xyz"); err != nil {
+		t.Fatalf("secret: %v", err)
+	}
+
+	var buf bytes.Buffer
+	man, err := lib.Export(ctx, &buf)
+	if err != nil {
+		t.Fatalf("export: %v", err)
+	}
+	if man.Format != port.ExportFormat || man.Items != 1 || man.PlayStates < 1 {
+		t.Fatalf("manifest = %+v, want 1 item / >=1 play state", man)
+	}
+	if strings.Contains(buf.String(), "token-xyz") {
+		t.Fatal("logical export must never contain secrets")
+	}
+
+	snap, err := port.ReadSnapshot(&buf)
+	if err != nil {
+		t.Fatalf("read snapshot: %v", err)
+	}
+	if len(snap.Items) != 1 || snap.Items[0].Title != "Song" {
+		t.Fatalf("exported item wrong: %+v", snap.Items)
+	}
+	if len(snap.PlayState) < 1 || !snap.PlayState[0].Starred {
+		t.Fatalf("exported play state should carry the star: %+v", snap.PlayState)
+	}
+}
+
+// TestRestoreReplacesAtomically verifies a forced restore over an existing
+// catalog swaps in the backup content, leaves no temp file, and that a no-force
+// restore is refused without disturbing the target.
+func TestRestoreReplacesAtomically(t *testing.T) {
+	ctx := context.Background()
+
+	// Backup A: a catalog whose single item is titled "FromBackup".
+	rootA := t.TempDir()
+	dbA := filepath.Join(t.TempDir(), "a.db")
+	writeFile(t, filepath.Join(rootA, "a.mp3"), testaudio.BuildMP3("FromBackup", "Artist", "Album", 1))
+	libA := openManaged(t, ctx, dbA, rootA)
+	if _, err := libA.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("scan A: %v", err)
+	}
+	backup := filepath.Join(t.TempDir(), "backup.db")
+	if err := libA.Backup(ctx, backup, false); err != nil {
+		t.Fatalf("backup: %v", err)
+	}
+	_ = libA.Close()
+
+	// Target: a different existing catalog (item titled "Original").
+	rootB := t.TempDir()
+	target := filepath.Join(t.TempDir(), "target.db")
+	writeFile(t, filepath.Join(rootB, "b.mp3"), testaudio.BuildMP3("Original", "Artist", "Album", 2))
+	libB := openManaged(t, ctx, target, rootB)
+	if _, err := libB.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("scan B: %v", err)
+	}
+	_ = libB.Close()
+
+	// No-force restore over an existing catalog is refused, target untouched.
+	if err := port.Restore(ctx, backup, target, false); !waxerr.Is(err, waxerr.CodeConflict) {
+		t.Fatalf("no-force restore over existing: want CodeConflict, got %v", err)
+	}
+
+	// Forced restore swaps in the backup content.
+	if err := port.Restore(ctx, backup, target, true); err != nil {
+		t.Fatalf("forced restore: %v", err)
+	}
+	if fileExists(target + ".restore-tmp") {
+		t.Fatal("restore left its temp file behind")
+	}
+	ro, err := waxbin.Open(ctx, waxbin.Options{DBPath: target, ReadOnly: true})
+	if err != nil {
+		t.Fatalf("open restored: %v", err)
+	}
+	defer ro.Close()
+	items, err := ro.Query(ctx, query.New(query.EntityItems).Build())
+	if err != nil || len(items) != 1 || items[0].Title != "FromBackup" {
+		t.Fatalf("restored content wrong: err=%v items=%+v", err, items)
+	}
+}
+
+// TestInboxQuarantinesCaseCollision verifies that importing a file whose
+// destination differs only by case from an already-cataloged file is quarantined
+// (it would coexist on Linux but collide on a case-insensitive filesystem).
+func TestInboxQuarantinesCaseCollision(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	inboxDir := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+
+	lib := openManaged(t, ctx, db, root)
+
+	// Import "Song" first; it lands at Artist/Album/01 - Song.mp3 and is cataloged.
+	writeFile(t, filepath.Join(inboxDir, "a.mp3"),
+		testaudio.BuildMP3WithAudio("Song", "Artist", "Album", 1, testaudio.AudioWithSeed(1)))
+	planA, err := lib.PlanImport(ctx, waxbin.ImportRequest{Source: inboxDir})
+	if err != nil {
+		t.Fatalf("plan A: %v", err)
+	}
+	if _, err := lib.ApplyImport(ctx, planA); err != nil {
+		t.Fatalf("apply A: %v", err)
+	}
+
+	// Stage "song" (distinct essence, so it is not an essence duplicate) which
+	// renders to 01 - song.mp3, a case collision with the cataloged 01 - Song.mp3.
+	writeFile(t, filepath.Join(inboxDir, "b.mp3"),
+		testaudio.BuildMP3WithAudio("song", "Artist", "Album", 1, testaudio.AudioWithSeed(2)))
+	planB, err := lib.PlanImport(ctx, waxbin.ImportRequest{Source: inboxDir})
+	if err != nil {
+		t.Fatalf("plan B: %v", err)
+	}
+	if planB.Importable() != 0 {
+		t.Fatalf("case-colliding file should not be importable, got %d importable", planB.Importable())
+	}
+	rep, err := lib.ApplyImport(ctx, planB)
+	if err != nil {
+		t.Fatalf("apply B: %v", err)
+	}
+	if rep.Quarantined != 1 || rep.Imported != 0 {
+		t.Fatalf("import B = %+v, want quarantined 1 imported 0", rep)
+	}
+}
+
+// secretCount reads the number of rows in a backup's secret table.
+func secretCount(t *testing.T, dbPath string) int {
+	t.Helper()
+	raw, err := sql.Open("sqlite", "file:"+dbPath+"?mode=ro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	var n int
+	if err := raw.QueryRow("SELECT COUNT(*) FROM secret").Scan(&n); err != nil {
+		t.Fatalf("count secrets in %s: %v", dbPath, err)
+	}
+	return n
+}
+
+// TestInboxImportCarriesSidecars verifies an import brings a file's sidecars
+// (same-basename lyrics renamed to the new basename, plus directory cover art)
+// into the managed tree alongside the audio, so importing does not leave them
+// behind.
+func TestInboxImportCarriesSidecars(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	inboxDir := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+
+	writeFile(t, filepath.Join(inboxDir, "track.mp3"), testaudio.BuildMP3("Song", "Artist", "Album", 1))
+	writeFile(t, filepath.Join(inboxDir, "track.lrc"), []byte("[00:00.00]hi"))
+	writeFile(t, filepath.Join(inboxDir, "cover.jpg"), []byte("img"))
+
+	lib := openManaged(t, ctx, db, root)
+	plan, err := lib.PlanImport(ctx, waxbin.ImportRequest{Source: inboxDir})
+	if err != nil {
+		t.Fatalf("plan import: %v", err)
+	}
+	rep, err := lib.ApplyImport(ctx, plan)
+	if err != nil {
+		t.Fatalf("apply import: %v", err)
+	}
+	if rep.Imported != 1 || rep.Sidecars != 2 {
+		t.Fatalf("import report = %+v, want imported 1 sidecars 2", rep)
+	}
+
+	dstDir := filepath.Join(root, "Artist", "Album")
+	if !fileExists(filepath.Join(dstDir, "01 - Song.lrc")) {
+		t.Error("lyrics sidecar not carried/renamed into the managed tree")
+	}
+	if !fileExists(filepath.Join(dstDir, "cover.jpg")) {
+		t.Error("directory cover art not carried into the managed tree")
+	}
+	if fileExists(filepath.Join(inboxDir, "track.lrc")) {
+		t.Error("lyrics sidecar left behind in the inbox")
+	}
+}
+
+// TestInboxSkipsWithinBatchDuplicate verifies that under the skip policy, two
+// staged copies of the same recording (same audio essence, different tags, hence
+// different destinations) do not both import. The second is a duplicate of the
+// first within the same batch, not just of the prior catalog.
+func TestInboxSkipsWithinBatchDuplicate(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	inboxDir := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	// Same default audio (so identical essence), different titles (so different
+	// rendered destinations).
+	writeFile(t, filepath.Join(inboxDir, "a.mp3"), testaudio.BuildMP3("Song A", "Artist", "Album", 1))
+	writeFile(t, filepath.Join(inboxDir, "b.mp3"), testaudio.BuildMP3("Song B", "Artist", "Album", 2))
+
+	lib := openManaged(t, ctx, db, root)
+	plan, err := lib.PlanImport(ctx, waxbin.ImportRequest{Source: inboxDir, DupPolicy: model.DupSkip})
+	if err != nil {
+		t.Fatalf("plan import: %v", err)
+	}
+	if plan.Importable() != 1 {
+		t.Fatalf("within-batch duplicate not detected: %d importable, want 1", plan.Importable())
+	}
+	rep, err := lib.ApplyImport(ctx, plan)
+	if err != nil {
+		t.Fatalf("apply import: %v", err)
+	}
+	if rep.Imported != 1 || rep.Duplicates != 1 {
+		t.Fatalf("import report = %+v, want imported 1 duplicate 1", rep)
 	}
 }
 

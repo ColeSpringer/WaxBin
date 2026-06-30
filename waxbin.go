@@ -4,20 +4,27 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"path/filepath"
+	"strings"
+	"time"
 
 	"github.com/colespringer/waxbin/analyze"
 	"github.com/colespringer/waxbin/config"
 	"github.com/colespringer/waxbin/decode"
 	"github.com/colespringer/waxbin/fingerprint"
+	"github.com/colespringer/waxbin/inbox"
+	"github.com/colespringer/waxbin/internal/pathx"
 	"github.com/colespringer/waxbin/jobs"
 	"github.com/colespringer/waxbin/meta"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/organize"
 	"github.com/colespringer/waxbin/playback"
+	"github.com/colespringer/waxbin/port"
 	"github.com/colespringer/waxbin/query"
 	"github.com/colespringer/waxbin/read"
 	"github.com/colespringer/waxbin/scan"
 	"github.com/colespringer/waxbin/store/sqlite"
+	"github.com/colespringer/waxbin/trash"
 	"github.com/colespringer/waxbin/waxerr"
 )
 
@@ -28,6 +35,9 @@ type Library struct {
 	jobs      *jobs.Manager
 	scanner   *scan.Scanner
 	organizer *organize.Organizer
+	profiles  *organize.ProfileSet
+	trasher   *trash.Service
+	importer  *inbox.Service
 	analyzer  *analyze.Analyzer
 	playback  *playback.Service
 	decoders  *decode.Registry
@@ -72,18 +82,29 @@ func Open(ctx context.Context, opts Options) (*Library, error) {
 		return nil, err
 	}
 
+	profiles, err := organize.NewProfileSet(toOrganizeProfiles(opts.Profiles))
+	if err != nil {
+		_ = st.Close()
+		return nil, err
+	}
+
 	decoders := decode.Default()
 	l := &Library{
 		store:     st,
 		jobs:      jobs.NewManager(st, owner, log),
 		scanner:   scan.New(st, meta.NewReader(), log),
 		organizer: organize.New(st, log),
+		profiles:  profiles,
+		trasher:   trash.New(st, log),
 		analyzer:  analyze.New(st, decoders, log),
 		playback:  playback.New(st),
 		decoders:  decoders,
 		log:       log,
 		opts:      opts,
 	}
+	// The importer catalogs each placed file through the scanner, so it is wired
+	// after the struct is built and shares that scanner.
+	l.importer = inbox.New(st, meta.NewReader(), l.scanner, log)
 
 	if !opts.ReadOnly {
 		if err := l.ensureRoots(ctx); err != nil {
@@ -404,7 +425,7 @@ func (l *Library) PlanOrganize(ctx context.Context, q query.Query, profileName s
 	if profileName == "" {
 		profileName = lib.Profile
 	}
-	prof, err := organize.ProfileByName(profileName)
+	prof, err := l.profiles.ByName(profileName)
 	if err != nil {
 		return nil, err
 	}
@@ -413,6 +434,26 @@ func (l *Library) PlanOrganize(ctx context.Context, q query.Query, profileName s
 		return nil, err
 	}
 	return l.organizer.Plan(lib, prof, items)
+}
+
+// Profiles lists the organization profile names available to this library
+// (built-ins plus any configured custom profiles), sorted.
+func (l *Library) Profiles() []string { return l.profiles.Names() }
+
+// toOrganizeProfiles converts config profile defs to organize profiles. The
+// organize package validates the templates when building the set.
+func toOrganizeProfiles(defs []config.ProfileDef) []organize.Profile {
+	if len(defs) == 0 {
+		return nil
+	}
+	out := make([]organize.Profile, 0, len(defs))
+	for _, d := range defs {
+		out = append(out, organize.Profile{
+			Name: d.Name, Music: d.Music, Audiobook: d.Audiobook,
+			Podcast: d.Podcast, TagWrite: d.TagWrite,
+		})
+	}
+	return out
 }
 
 // ApplyOrganize executes a plan under an "organize"-scoped job.
@@ -425,6 +466,306 @@ func (l *Library) ApplyOrganize(ctx context.Context, plan *organize.Plan) (*orga
 		return err
 	})
 	return rep, err
+}
+
+// PlanDelete computes a dry-run deletion plan for the items matching q under a
+// mode (trash|prune|permanent). DeleteTrash moves files to the reversible
+// per-library trash; the other modes bypass it to reclaim space. Every mode keeps
+// the logical item (archived when it loses its last file).
+func (l *Library) PlanDelete(ctx context.Context, q query.Query, mode model.DeleteMode) (*trash.Plan, error) {
+	libs, err := l.store.Libraries(ctx)
+	if err != nil {
+		return nil, err
+	}
+	items, err := l.store.QueryItems(ctx, q)
+	if err != nil {
+		return nil, err
+	}
+	return l.trasher.Plan(libs, items, mode)
+}
+
+// PlanDeletePIDs computes a deletion plan for explicit item pids. It is the
+// `rm <pid>` path; PlanDelete is the query-driven path used by retention/dedup.
+func (l *Library) PlanDeletePIDs(ctx context.Context, pids []model.PID, mode model.DeleteMode) (*trash.Plan, error) {
+	libs, err := l.store.Libraries(ctx)
+	if err != nil {
+		return nil, err
+	}
+	items := make([]*model.ItemView, 0, len(pids))
+	for _, pid := range pids {
+		it, err := l.store.ItemByPID(ctx, pid)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, it)
+	}
+	return l.trasher.Plan(libs, items, mode)
+}
+
+// ApplyDelete executes a deletion plan under a "delete"-scoped job.
+func (l *Library) ApplyDelete(ctx context.Context, plan *trash.Plan) (*trash.Report, error) {
+	var rep *trash.Report
+	_, err := l.jobs.Run(ctx, "delete", "delete", func(ctx context.Context, h *jobs.Handle) error {
+		r, err := l.trasher.Execute(ctx, plan)
+		rep = r
+		return err
+	})
+	return rep, err
+}
+
+// Trash lists trash journal entries, newest first. includeRestored controls
+// whether already-restored rows are shown; limit 0 returns all.
+func (l *Library) Trash(ctx context.Context, includeRestored bool, limit int) ([]model.TrashEntry, error) {
+	return l.store.TrashEntries(ctx, includeRestored, limit)
+}
+
+// RestoreTrash undoes a delete: it moves the trashed file back to its original
+// path and re-scans it so the catalog re-links it (un-archiving its item). It
+// refuses if the original path is occupied.
+func (l *Library) RestoreTrash(ctx context.Context, trashPID model.PID) error {
+	entry, err := l.store.ActiveTrashByPID(ctx, trashPID)
+	if err != nil {
+		return err
+	}
+	libs, err := l.store.Libraries(ctx)
+	if err != nil {
+		return err
+	}
+	lib := libraryContaining(libs, entry.OrigDisplay)
+	if lib == nil {
+		return waxerr.New(waxerr.CodeInvalid, "Library.RestoreTrash",
+			"restore target is not under a known library root")
+	}
+	_, err = l.jobs.Run(ctx, "restore", "delete", func(ctx context.Context, h *jobs.Handle) error {
+		// Move the file back (idempotent: a retry after a failed re-scan is a no-op).
+		if err := l.trasher.Restore(*entry); err != nil {
+			return err
+		}
+		// Re-catalog before marking the entry restored, so a re-scan failure leaves
+		// the entry active and the restore retryable rather than flagging it done
+		// while the item is still archived.
+		if _, err := l.scanner.Scan(ctx, scan.Request{Library: lib, SubPath: entry.OrigDisplay}, nil); err != nil {
+			return err
+		}
+		return l.store.MarkTrashRestored(ctx, trashPID)
+	})
+	return err
+}
+
+// EmptyReport summarizes an empty-trash pass.
+type EmptyReport struct {
+	Purged         int
+	Errored        int
+	ReclaimedBytes int64
+}
+
+// EmptyTrash permanently removes every active trashed file from disk and drops
+// its journal row, reclaiming space. It runs under a "delete"-scoped job.
+func (l *Library) EmptyTrash(ctx context.Context) (*EmptyReport, error) {
+	rep := &EmptyReport{}
+	_, err := l.jobs.Run(ctx, "empty-trash", "delete", func(ctx context.Context, h *jobs.Handle) error {
+		entries, err := l.store.TrashEntries(ctx, false, 0)
+		if err != nil {
+			return err
+		}
+		for i := range entries {
+			if ctx.Err() != nil {
+				return waxerr.FromContext("Library.EmptyTrash", ctx.Err(), waxerr.CodeIO)
+			}
+			size, perr := l.trasher.Purge(entries[i])
+			if perr != nil {
+				rep.Errored++
+				l.log.Warn("purging trashed file", "trash", entries[i].TrashDisplay, "err", perr)
+				continue
+			}
+			// Don't abort the whole pass on a row-delete failure: that would strand an
+			// active journal row whose file is already gone (un-restorable). Tally it
+			// and move on; a later empty-trash re-run drops the row (Purge tolerates the
+			// already-missing file).
+			if err := l.store.DeleteTrashRow(ctx, entries[i].PID); err != nil {
+				rep.Errored++
+				l.log.Warn("dropping trash journal row", "trash", entries[i].PID, "err", err)
+				continue
+			}
+			rep.Purged++
+			rep.ReclaimedBytes += size
+		}
+		return nil
+	})
+	return rep, err
+}
+
+// ImportRequest selects a staging folder and how to import it.
+type ImportRequest struct {
+	Source     string          // staging folder to import (required)
+	LibraryPID model.PID       // target managed library; empty uses the single managed one
+	Profile    string          // layout; empty uses the library's configured profile
+	DupPolicy  model.DupPolicy // how to treat catalog duplicates (default skip)
+	Copy       bool            // copy (keep originals) instead of move
+}
+
+// PlanImport computes a reviewable import plan for a staging folder: which files
+// would be imported (with destinations), which are catalog duplicates, and which
+// are quarantined. It is read-only.
+func (l *Library) PlanImport(ctx context.Context, req ImportRequest) (*inbox.Plan, error) {
+	if strings.TrimSpace(req.Source) == "" {
+		return nil, waxerr.New(waxerr.CodeInvalid, "Library.PlanImport", "no import source folder")
+	}
+	lib, err := l.resolveManagedLibrary(ctx, req.LibraryPID)
+	if err != nil {
+		return nil, err
+	}
+	profileName := req.Profile
+	if profileName == "" {
+		profileName = lib.Profile
+	}
+	prof, err := l.profiles.ByName(profileName)
+	if err != nil {
+		return nil, err
+	}
+	return l.importer.Plan(ctx, inbox.Request{
+		Source: req.Source, Library: lib, Profile: prof, DupPolicy: req.DupPolicy,
+		Copy: req.Copy, ReserveBytes: l.opts.FreeSpaceReserveBytes,
+	})
+}
+
+// ApplyImport executes an import plan under an "import"-scoped job.
+func (l *Library) ApplyImport(ctx context.Context, plan *inbox.Plan) (*inbox.Report, error) {
+	var rep *inbox.Report
+	_, err := l.jobs.Run(ctx, "import", "import", func(ctx context.Context, h *jobs.Handle) error {
+		r, err := l.importer.Execute(ctx, plan)
+		rep = r
+		return err
+	})
+	return rep, err
+}
+
+// ImportBatches lists recorded import batches, newest first (limit 0 = all).
+func (l *Library) ImportBatches(ctx context.Context, limit int) ([]*model.ImportBatch, error) {
+	return l.store.ImportBatches(ctx, limit)
+}
+
+// Backup writes a self-contained byte copy of the catalog to dest. The copy
+// contains every table, including the secret table; with redact, secrets are
+// stripped from the copy while the live catalog is untouched. A full backup is
+// the disaster-recovery artifact.
+func (l *Library) Backup(ctx context.Context, dest string, redact bool) error {
+	if err := l.store.BackupTo(ctx, dest); err != nil {
+		return err
+	}
+	if redact {
+		return port.RedactBackupFile(ctx, dest)
+	}
+	return nil
+}
+
+// Export writes a versioned logical JSON export of catalog metadata plus critical
+// per-user playback state. It never contains secrets and is for inspection and
+// cross-tool portability; a byte Backup is the disaster-recovery path. It
+// returns the export manifest.
+func (l *Library) Export(ctx context.Context, w io.Writer) (*port.Manifest, error) {
+	libs, err := l.store.Libraries(ctx)
+	if err != nil {
+		return nil, err
+	}
+	items, err := l.store.QueryItems(ctx, query.New(query.EntityItems).Build())
+	if err != nil {
+		return nil, err
+	}
+	plays, err := l.store.AllPlayStates(ctx)
+	if err != nil {
+		return nil, err
+	}
+	schema, err := l.store.CatalogVersion(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	// Capture each item's path relative to its library root, so the export carries
+	// a portable rel path rather than a machine-specific absolute one.
+	relByPID := make(map[model.PID]string, len(items))
+	for _, it := range items {
+		if it.DisplayPath == "" {
+			continue
+		}
+		if lib := libraryContaining(libs, it.DisplayPath); lib != nil {
+			root := lib.DisplayRoot
+			if root == "" {
+				root = string(lib.Root)
+			}
+			if rel, err := filepath.Rel(root, it.DisplayPath); err == nil {
+				relByPID[it.PID] = rel
+			}
+		}
+	}
+	relOf := func(pid model.PID) string { return relByPID[pid] }
+
+	snap := port.BuildSnapshot(schema, time.Now().UnixNano(), libs, items, plays, relOf)
+	if err := port.WriteSnapshot(w, snap); err != nil {
+		return nil, err
+	}
+	return &snap.Manifest, nil
+}
+
+// RelocateRoot re-points a library and every file under it at a new root path,
+// for a portable restore onto a different machine or mount.
+func (l *Library) RelocateRoot(ctx context.Context, libPID model.PID, newRoot string) error {
+	return l.store.RelocateLibraryRoot(ctx, libPID, newRoot)
+}
+
+// SetSecret stores a named credential in the secret table. Values are never
+// logged or written to a logical export, but a full byte Backup contains them
+// unless redacted.
+func (l *Library) SetSecret(ctx context.Context, key, value string) error {
+	return l.store.SetSecret(ctx, key, value)
+}
+
+// GetSecret returns a stored credential, or CodeNotFound.
+func (l *Library) GetSecret(ctx context.Context, key string) (string, error) {
+	return l.store.GetSecret(ctx, key)
+}
+
+// DeleteSecret removes a stored credential.
+func (l *Library) DeleteSecret(ctx context.Context, key string) error {
+	return l.store.DeleteSecret(ctx, key)
+}
+
+// InboxFolders returns the configured staging folders.
+func (l *Library) InboxFolders() []string { return l.opts.Inbox }
+
+// resolveManagedLibrary returns the managed library identified by pid, or the
+// single managed library when pid is empty.
+func (l *Library) resolveManagedLibrary(ctx context.Context, pid model.PID) (*model.Library, error) {
+	if pid == "" {
+		return l.singleManagedLibrary(ctx)
+	}
+	libs, err := l.store.Libraries(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, lib := range libs {
+		if lib.PID == pid {
+			if lib.Mode != model.ModeManaged {
+				return nil, waxerr.New(waxerr.CodeInvalid, "Library.import", "target library is not managed")
+			}
+			return lib, nil
+		}
+	}
+	return nil, waxerr.New(waxerr.CodeNotFound, "Library.import", "no such library: "+string(pid))
+}
+
+// libraryContaining returns the library whose root contains path, or nil.
+func libraryContaining(libs []*model.Library, path string) *model.Library {
+	for _, lib := range libs {
+		root := lib.DisplayRoot
+		if root == "" {
+			root = string(lib.Root)
+		}
+		if pathx.UnderRoot(root, path) {
+			return lib
+		}
+	}
+	return nil
 }
 
 func (l *Library) resolveLibraries(ctx context.Context, pid model.PID) ([]*model.Library, error) {

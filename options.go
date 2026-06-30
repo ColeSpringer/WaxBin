@@ -24,6 +24,13 @@ type Options struct {
 	// IPCSocket, if set, is advertised in the lockfile for local proxy support.
 	IPCSocket string
 
+	// Profiles defines additional organization profiles and built-in overrides.
+	Profiles []config.ProfileDef
+	// Inbox folders are staging directories importable into a managed library.
+	Inbox []string
+	// FreeSpaceReserveBytes is headroom an import preflight keeps free.
+	FreeSpaceReserveBytes int64
+
 	// Storage tuning; zero values fall back to library defaults.
 	BusyTimeoutMS int
 	CacheSizeKB   int
@@ -34,13 +41,16 @@ type Options struct {
 // OptionsFromConfig derives Options from a resolved Config.
 func OptionsFromConfig(cfg *config.Config, log *slog.Logger) Options {
 	return Options{
-		DBPath:        cfg.DBPath,
-		Roots:         cfg.Roots,
-		Logger:        log,
-		BusyTimeoutMS: cfg.BusyTimeoutMS,
-		CacheSizeKB:   cfg.CacheSizeKB,
-		MmapSizeBytes: cfg.MmapSizeBytes,
-		ReadPoolSize:  cfg.ReadPoolSize,
+		DBPath:                cfg.DBPath,
+		Roots:                 cfg.Roots,
+		Profiles:              cfg.Profiles,
+		Inbox:                 cfg.Inbox,
+		FreeSpaceReserveBytes: cfg.FreeSpaceReserveBytes,
+		Logger:                log,
+		BusyTimeoutMS:         cfg.BusyTimeoutMS,
+		CacheSizeKB:           cfg.CacheSizeKB,
+		MmapSizeBytes:         cfg.MmapSizeBytes,
+		ReadPoolSize:          cfg.ReadPoolSize,
 	}
 }
 

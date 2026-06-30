@@ -3,13 +3,12 @@ package organize
 import (
 	"context"
 	"errors"
-	"io"
 	"log/slog"
-	"os"
 	"path/filepath"
 	"strconv"
-	"syscall"
+	"strings"
 
+	"github.com/colespringer/waxbin/internal/fsx"
 	"github.com/colespringer/waxbin/internal/pathx"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/waxerr"
@@ -49,10 +48,11 @@ func (p *Plan) Pending() int {
 
 // Report summarizes an applied plan.
 type Report struct {
-	Moved    int
-	Skipped  int
-	Errored  int
-	Failures []Failure
+	Moved         int
+	Skipped       int
+	Errored       int
+	SidecarsMoved int
+	Failures      []Failure
 }
 
 // Failure records one action that could not be applied.
@@ -107,7 +107,31 @@ func (o *Organizer) Plan(lib *model.Library, p Profile, items []*model.ItemView)
 		}
 		plan.Actions = append(plan.Actions, a)
 	}
+	markCollisions(plan)
 	return plan, nil
+}
+
+// markCollisions skips any action whose destination collides with an
+// earlier-planned one. Two items rendering to the same path (or to paths that
+// differ only by case, which collide on a case-insensitive filesystem) cannot
+// both be moved there, so all but the first are held back with a reason rather
+// than silently overwriting. The key is cleaned and case-folded so a managed tree
+// remains portable across case-sensitive and case-insensitive filesystems.
+func markCollisions(plan *Plan) {
+	seen := make(map[string]int, len(plan.Actions))
+	for i := range plan.Actions {
+		a := &plan.Actions[i]
+		if a.Skip {
+			continue
+		}
+		key := strings.ToLower(filepath.Clean(a.Dst))
+		if j, ok := seen[key]; ok {
+			a.Skip = true
+			a.Reason = "destination collides with " + plan.Actions[j].Src
+			continue
+		}
+		seen[key] = i
+	}
 }
 
 // Execute applies the plan: each move happens on disk, then the catalog records
@@ -131,6 +155,11 @@ func (o *Organizer) Execute(ctx context.Context, plan *Plan, jobPID model.PID, h
 			o.log.Warn("organize action failed", "src", a.Src, "dst", a.Dst, "err", err)
 		} else {
 			rep.Moved++
+			// The audio is moved and recorded; now carry its sidecars (same-basename
+			// lyrics/cue/art plus directory cover art) so a move does not leave them
+			// behind.
+			// Sidecars are not cataloged, so a failure here is logged, not fatal.
+			rep.SidecarsMoved += o.moveSidecars(a.Src, a.Dst)
 		}
 		if hb != nil {
 			_ = hb(float64(i+1)/float64(max(total, 1)), "organized "+strconv.Itoa(i+1)+"/"+strconv.Itoa(total))
@@ -162,75 +191,19 @@ func (o *Organizer) apply(ctx context.Context, a *Action, jobPID model.PID) erro
 	return o.cat.CommitMove(ctx, jpid, in)
 }
 
-// moveFile moves src to dst, creating parent dirs, refusing to overwrite an
-// existing destination, and falling back to copy+remove across filesystems.
+// moveFile moves src to dst via the shared long-path-safe mover (create parent,
+// no-clobber, cross-device fallback), translating fsx's sentinel into WaxBin's
+// typed conflict so a colliding destination is reported, not silently overwritten.
 func moveFile(src, dst string) error {
 	const op = "organize.move"
 	if src == dst {
 		return nil
 	}
-	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-		return waxerr.Wrap(waxerr.CodeIO, op, err)
-	}
-	// The Lstat-then-rename guard is best-effort: os.Rename overwrites on POSIX,
-	// so a file appearing at dst in the race window would be clobbered. Organize
-	// runs single-writer under a scoped lease, which bounds this to an external
-	// process racing the managed tree. A fully atomic no-clobber rename needs
-	// platform-specific support such as renameat2/RENAME_NOREPLACE.
-	if _, err := os.Lstat(dst); err == nil {
-		return waxerr.New(waxerr.CodeConflict, op, "destination already exists: "+dst)
-	} else if !os.IsNotExist(err) {
-		return waxerr.Wrap(waxerr.CodeIO, op, err)
-	}
-
-	if err := os.Rename(src, dst); err != nil {
-		if errors.Is(err, syscall.EXDEV) {
-			return copyAndRemove(src, dst)
+	if err := fsx.Move(src, dst); err != nil {
+		if errors.Is(err, fsx.ErrExist) {
+			return waxerr.New(waxerr.CodeConflict, op, "destination already exists: "+dst)
 		}
 		return waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
-	return nil
-}
-
-// copyAndRemove implements a cross-device move: copy bytes, fsync, then delete
-// the source. On any failure a single deferred cleanup removes the partial
-// destination, so the tree is left as it was (source intact, no stray copy).
-func copyAndRemove(src, dst string) error {
-	const op = "organize.move"
-	in, err := os.Open(src)
-	if err != nil {
-		return waxerr.Wrap(waxerr.CodeIO, op, err)
-	}
-	defer in.Close()
-
-	info, err := in.Stat()
-	if err != nil {
-		return waxerr.Wrap(waxerr.CodeIO, op, err)
-	}
-	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, info.Mode().Perm())
-	if err != nil {
-		return waxerr.Wrap(waxerr.CodeIO, op, err)
-	}
-	var success bool
-	defer func() {
-		if !success {
-			_ = out.Close() // harmless if already closed below
-			_ = os.Remove(dst)
-		}
-	}()
-
-	if _, err := io.Copy(out, in); err != nil {
-		return waxerr.Wrap(waxerr.CodeIO, op, err)
-	}
-	if err := out.Sync(); err != nil {
-		return waxerr.Wrap(waxerr.CodeIO, op, err)
-	}
-	if err := out.Close(); err != nil {
-		return waxerr.Wrap(waxerr.CodeIO, op, err)
-	}
-	if err := os.Remove(src); err != nil {
-		return waxerr.Wrap(waxerr.CodeIO, op, err)
-	}
-	success = true
 	return nil
 }

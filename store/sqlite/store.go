@@ -135,6 +135,15 @@ func Open(ctx context.Context, opt OpenOptions) (*Store, error) {
 		log.Info("reclaimed orphaned jobs on open", "count", n)
 	}
 
+	// Finish or roll back any move a prior owner crashed mid-flight (planned but
+	// never committed/aborted). Same flock-liveness reasoning as job reclaim.
+	if n, err := s.recoverOrganize(ctx); err != nil {
+		_ = s.Close()
+		return nil, err
+	} else if n > 0 {
+		log.Info("recovered interrupted organize moves on open", "count", n)
+	}
+
 	// Seed the default playback user so single-user setups need no configuration.
 	if err := s.ensureDefaultUser(ctx); err != nil {
 		_ = s.Close()

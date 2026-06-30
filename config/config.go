@@ -22,11 +22,31 @@ type Root struct {
 	Profile string     `json:"profile"`
 }
 
+// ProfileDef describes a layout profile from configuration. A profile with the
+// same name as a built-in overrides it; empty template fields inherit from the
+// built-in or native defaults. The facade converts this config-only shape into
+// organize.Profile, keeping config independent of organize.
+type ProfileDef struct {
+	Name      string `json:"name"`
+	Music     string `json:"music,omitempty"`
+	Audiobook string `json:"audiobook,omitempty"`
+	Podcast   string `json:"podcast,omitempty"`
+	TagWrite  bool   `json:"tag_write,omitempty"`
+}
+
 // Config is the resolved configuration.
 type Config struct {
 	DBPath   string `json:"db"`
 	Roots    []Root `json:"roots"`
 	LogLevel string `json:"log_level"` // debug | info | warn | error
+
+	// Profiles defines additional organization profiles and built-in overrides.
+	Profiles []ProfileDef `json:"profiles,omitempty"`
+	// Inbox folders are staging directories imported into a managed library.
+	Inbox []string `json:"inbox,omitempty"`
+	// FreeSpaceReserveBytes is the headroom an import preflight keeps free on the
+	// destination volume (0 disables the check).
+	FreeSpaceReserveBytes int64 `json:"free_space_reserve_bytes,omitempty"`
 
 	// Storage tuning (applied as SQLite pragmas by store/sqlite).
 	BusyTimeoutMS int   `json:"busy_timeout_ms"`
@@ -138,6 +158,26 @@ func (c *Config) Validate() error {
 			if pathsOverlap(c.Roots[i].Path, c.Roots[j].Path) {
 				return waxerr.New(waxerr.CodeInvalid, "config.Validate",
 					fmt.Sprintf("library roots overlap: %q and %q", c.Roots[i].Path, c.Roots[j].Path))
+			}
+		}
+	}
+
+	// Normalize inbox staging folders to absolute, cleaned paths and reject any
+	// nested inside a library root: a file belongs to exactly one place, and an
+	// inbox under a root would be re-imported on every scan.
+	for i := range c.Inbox {
+		if strings.TrimSpace(c.Inbox[i]) == "" {
+			return waxerr.New(waxerr.CodeInvalid, "config.Validate", "inbox folder path is empty")
+		}
+		abs, err := filepath.Abs(c.Inbox[i])
+		if err != nil {
+			return waxerr.Wrapf(waxerr.CodeInvalid, "config.Validate", err, "resolving inbox %q", c.Inbox[i])
+		}
+		c.Inbox[i] = filepath.Clean(abs)
+		for _, r := range c.Roots {
+			if pathx.UnderRoot(r.Path, c.Inbox[i]) || pathx.UnderRoot(c.Inbox[i], r.Path) {
+				return waxerr.New(waxerr.CodeInvalid, "config.Validate",
+					fmt.Sprintf("inbox %q overlaps library root %q", c.Inbox[i], r.Path))
 			}
 		}
 	}

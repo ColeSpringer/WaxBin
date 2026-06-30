@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/colespringer/waxbin/internal/pathx"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/query"
 	"github.com/colespringer/waxbin/waxerr"
@@ -514,8 +515,11 @@ func opFor(created bool) model.ChangeOp {
 
 // pathExists reports whether the file at the given raw path is still present on
 // disk. It distinguishes a move (old path gone) from a duplicate copy (old path
-// still present) when deciding whether to re-link by essence.
+// still present) when deciding whether to re-link by essence, and backs
+// organize-journal recovery, so a Windows long path must be probed with the
+// extended-length prefix or a present file would read as absent (mis-classifying a
+// move, or rolling back a completed move during recovery).
 func pathExists(path []byte) bool {
-	_, err := os.Stat(string(path))
+	_, err := os.Stat(pathx.Long(string(path)))
 	return err == nil
 }

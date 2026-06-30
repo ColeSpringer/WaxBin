@@ -82,12 +82,12 @@ type Track struct {
 	Year        int
 	Genre       string   // joined display of Genres (the denormalized column)
 	Genres      []string // individual genres, resolved into item_genre links
-	Compilation bool     // a multi-artist compilation (drives Various Artists interop)
+	Compilation bool     // multi-artist release; uses the Various Artists layout
 	ISRC        string
 
-	// External identifiers anchor MBID-first entity identity and the future
-	// enrichment fast-path. MBID is the recording id (kept for back-compat);
-	// the release/release-group/artist ids populate the matching entity rows.
+	// External identifiers anchor MBID-first entity identity and enrichment
+	// lookups. MBID is the recording id (kept for back-compat); the
+	// release/release-group/artist ids populate the matching entity rows.
 	MBID             string // MusicBrainz recording id
 	MBReleaseID      string
 	MBReleaseGroupID string
@@ -164,6 +164,7 @@ type ItemView struct {
 	DiscNo      int
 	Year        int
 	Genre       string
+	Compilation bool // a multi-artist compilation (drives Various Artists layout)
 	DurationMS  int64
 
 	FilePID     PID
