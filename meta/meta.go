@@ -18,6 +18,14 @@ import (
 type FileMeta struct {
 	Tags        model.Tags
 	EssenceHash string
+	// Lyrics is the file's embedded lyrics (unsynced USLT and/or synced SYLT), or
+	// nil when it carries none. A sibling .lrc sidecar, parsed by the scanner, takes
+	// precedence over this.
+	Lyrics *model.Lyrics
+	// CoverArt is the file's embedded front-cover image (raw bytes + format), or nil
+	// when it embeds none. The scanner finalizes its hash and dimensions and falls
+	// back to a directory cover image when this is absent.
+	CoverArt *model.ArtImage
 }
 
 // Reader reads tags, properties, and the essence hash from a file. It must never

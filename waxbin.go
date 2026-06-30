@@ -19,6 +19,7 @@ import (
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/organize"
 	"github.com/colespringer/waxbin/playback"
+	"github.com/colespringer/waxbin/playlist"
 	"github.com/colespringer/waxbin/port"
 	"github.com/colespringer/waxbin/query"
 	"github.com/colespringer/waxbin/read"
@@ -40,6 +41,7 @@ type Library struct {
 	importer  *inbox.Service
 	analyzer  *analyze.Analyzer
 	playback  *playback.Service
+	playlists *playlist.Service
 	decoders  *decode.Registry
 	log       *slog.Logger
 	opts      Options
@@ -98,6 +100,7 @@ func Open(ctx context.Context, opts Options) (*Library, error) {
 		trasher:   trash.New(st, log),
 		analyzer:  analyze.New(st, decoders, log),
 		playback:  playback.New(st),
+		playlists: playlist.New(st),
 		decoders:  decoders,
 		log:       log,
 		opts:      opts,
@@ -171,6 +174,49 @@ func (l *Library) QueryPage(ctx context.Context, q query.Query, cursor read.Curs
 	return l.store.QueryPage(ctx, q, cursor, limit, desc)
 }
 
+// Browse returns one keyset-paginated window for a discovery list such as newest,
+// recently-added, most-played, recently-played, random, starred, by-year,
+// by-genre, or alphabetical. Play-derived lists read opt.UserPID's play_state
+// (empty selects the default user). The by-year, by-genre, and random lists use
+// opt.Year, opt.GenrePID, and opt.Seed respectively. Pagination is stable under
+// concurrent mutation.
+func (l *Library) Browse(ctx context.Context, list read.DiscoveryList, opt read.BrowseOptions) (*read.Page, error) {
+	return l.store.BrowsePage(ctx, list, opt)
+}
+
+// Search runs a grouped, BM25-ranked metadata search across artists, albums, and
+// tracks. Field weighting puts title hits above artist and album hits. The
+// Episodes group is reserved for transcript-backed podcast search and stays empty
+// until transcripts are indexed.
+func (l *Library) Search(ctx context.Context, q string, opt read.SearchOptions) (*read.SearchResult, error) {
+	return l.store.Search(ctx, q, opt)
+}
+
+// ResolveArt resolves cover art for an entity, walking the fallback chain (track
+// -> album -> release_group -> artist -> genre) to the first level that has art. A
+// non-positive size returns the original image; a positive size returns a
+// thumbnail scaled to fit a square box with that maximum side (generated once and
+// cached). CodeNotFound means no level in the chain has art.
+func (l *Library) ResolveArt(ctx context.Context, ref model.EntityRef, size int) (*model.ArtBlob, error) {
+	return l.store.ResolveArt(ctx, ref, size)
+}
+
+// GCArt reclaims orphaned art: map rows whose entity is gone, then source images
+// without live map references and their cached thumbnails. It returns the source
+// and thumbnail counts removed. It is the repair for the orphan counts
+// VerifyDerived reports.
+func (l *Library) GCArt(ctx context.Context) (sources, thumbnails int, err error) {
+	return l.store.GCArt(ctx)
+}
+
+// Lyrics returns an item's structured lyrics (synced timed lines and/or an
+// unsynchronized block), or CodeNotFound when it has none. Lyrics come from a
+// sibling .lrc sidecar or embedded USLT/SYLT tags, captured at scan time; the
+// catalog row is authoritative for reads.
+func (l *Library) Lyrics(ctx context.Context, pid model.PID) (*model.Lyrics, error) {
+	return l.store.LyricsByItem(ctx, pid)
+}
+
 // Get returns a single item by public id.
 func (l *Library) Get(ctx context.Context, pid model.PID) (*model.ItemView, error) {
 	return l.store.ItemByPID(ctx, pid)
@@ -203,6 +249,10 @@ func (l *Library) DataVersion(ctx context.Context) (int64, error) {
 // Playback returns the playback-state service for progress, played status,
 // ratings, stars, bookmarks, queue, and play sessions.
 func (l *Library) Playback() *playback.Service { return l.playback }
+
+// Playlists returns the playlist service for static and smart playlists plus
+// M3U8 import/export.
+func (l *Library) Playlists() *playlist.Service { return l.playlists }
 
 // Users lists the playback users (the default first).
 func (l *Library) Users(ctx context.Context) ([]*model.User, error) { return l.store.Users(ctx) }

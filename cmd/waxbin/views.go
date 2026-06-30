@@ -195,6 +195,88 @@ func toStatsView(s *read.Stats) statsView {
 	return v
 }
 
+// playlistView is the JSON shape for a playlist's metadata.
+type playlistView struct {
+	PID        string `json:"pid"`
+	Name       string `json:"name"`
+	Owner      string `json:"owner"`
+	Kind       string `json:"kind"`
+	Visibility string `json:"visibility"`
+	ItemCount  int    `json:"itemCount"`
+}
+
+func toPlaylistView(p *model.Playlist) playlistView {
+	return playlistView{
+		PID: string(p.PID), Name: p.Name, Owner: p.OwnerName, Kind: string(p.Kind),
+		Visibility: string(p.Visibility), ItemCount: p.ItemCount,
+	}
+}
+
+func playlistViews(pls []*model.Playlist) []playlistView {
+	out := make([]playlistView, 0, len(pls))
+	for _, p := range pls {
+		out = append(out, toPlaylistView(p))
+	}
+	return out
+}
+
+// lyricsView is the JSON shape for an item's structured lyrics.
+type lyricsView struct {
+	Source   string           `json:"source"`
+	Synced   bool             `json:"synced"`
+	Lines    []syncedLineView `json:"lines,omitempty"`
+	Unsynced string           `json:"unsynced,omitempty"`
+}
+
+type syncedLineView struct {
+	MS   int64  `json:"ms"`
+	Text string `json:"text"`
+}
+
+func toLyricsView(ly *model.Lyrics) lyricsView {
+	v := lyricsView{Source: ly.Source, Synced: len(ly.Synced) > 0, Unsynced: ly.Unsynced}
+	for _, l := range ly.Synced {
+		v.Lines = append(v.Lines, syncedLineView{MS: l.TimeMS, Text: l.Text})
+	}
+	return v
+}
+
+// searchHitView is the JSON shape for one ranked search hit.
+type searchHitView struct {
+	PID      string  `json:"pid"`
+	Kind     string  `json:"kind"`
+	Title    string  `json:"title"`
+	Subtitle string  `json:"subtitle,omitempty"`
+	Score    float64 `json:"score"`
+}
+
+type searchView struct {
+	Query     string          `json:"query"`
+	Artists   []searchHitView `json:"artists"`
+	Albums    []searchHitView `json:"albums"`
+	Tracks    []searchHitView `json:"tracks"`
+	Episodes  []searchHitView `json:"episodes"`
+	Truncated bool            `json:"truncated,omitempty"`
+}
+
+func toSearchView(r *read.SearchResult) searchView {
+	return searchView{
+		Query:   r.Query,
+		Artists: hitViews(r.Artists), Albums: hitViews(r.Albums),
+		Tracks: hitViews(r.Tracks), Episodes: hitViews(r.Episodes), Truncated: r.Truncated,
+	}
+}
+
+func hitViews(hits []read.SearchHit) []searchHitView {
+	out := make([]searchHitView, 0, len(hits))
+	for _, h := range hits {
+		out = append(out, searchHitView{
+			PID: string(h.PID), Kind: h.Kind, Title: h.Title, Subtitle: h.Subtitle, Score: h.Score,
+		})
+	}
+	return out
+}
+
 func bucketViews(buckets []read.Bucket) []bucketView {
 	out := make([]bucketView, 0, len(buckets))
 	for _, b := range buckets {
@@ -223,6 +305,8 @@ type derivedView struct {
 	GenreRollupDrift        int  `json:"genreRollupDrift"`
 	ReleaseGroupRollupDrift int  `json:"releaseGroupRollupDrift"`
 	SortKeyDrift            int  `json:"sortKeyDrift"`
+	OrphanArtSources        int  `json:"orphanArtSources"`
+	OrphanThumbnails        int  `json:"orphanThumbnails"`
 	Consistent              bool `json:"consistent"`
 }
 
@@ -231,6 +315,7 @@ func toDerivedView(r *sqlite.DerivedReport) derivedView {
 		ItemsMissingFTS: r.ItemsMissingFTS, OrphanFTSRows: r.OrphanFTSRows,
 		ArtistRollupDrift: r.ArtistRollupDrift, GenreRollupDrift: r.GenreRollupDrift,
 		ReleaseGroupRollupDrift: r.ReleaseGroupRollupDrift, SortKeyDrift: r.SortKeyDrift,
+		OrphanArtSources: r.OrphanArtSources, OrphanThumbnails: r.OrphanThumbnails,
 		Consistent: r.Consistent(),
 	}
 }

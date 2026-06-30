@@ -15,6 +15,13 @@ type PutScannedTrackInput struct {
 	File      File
 	Item      PlayableItem
 	Track     Track
+	// Lyrics is the track's structured lyrics (sidecar .lrc or embedded), or nil.
+	// The store writes them alongside the item; a nil value clears any prior row.
+	Lyrics *Lyrics
+	// CoverArt is the track's front-cover image (embedded or directory), or nil.
+	// The store dedups it into the content-addressed art store and maps it onto the
+	// track. Album art is derived from current track covers at read time.
+	CoverArt *ArtImage
 }
 
 // ScanItemResult reports what the store did for a PutScannedTrack call, enough
@@ -70,8 +77,8 @@ type Catalog interface {
 	LatestChangeSeq(ctx context.Context) (int64, error)
 
 	// RefreshRollups recomputes the maintained catalog-structural rollups
-	// (per artist/release_group/genre) from the base tables. It is invoked after
-	// a scan so browse counts reflect the new catalog state.
+	// (per artist/release_group/genre) from the base tables. Normal scans maintain
+	// touched rows transactionally; this is the repair path for db verify drift.
 	RefreshRollups(ctx context.Context) error
 }
 

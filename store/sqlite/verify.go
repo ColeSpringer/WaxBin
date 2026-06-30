@@ -19,11 +19,26 @@ type DerivedReport struct {
 	GenreRollupDrift        int
 	ReleaseGroupRollupDrift int
 	SortKeyDrift            int // entities whose stored sort_key != regenerated
+	OrphanArtSources        int // art_source images with no live art_map references
+	OrphanThumbnails        int // thumb_cache rows whose source is unreferenced
 }
 
-// Consistent reports whether every derived-data check passed.
+// Consistent reports whether the writer-maintained derived data is correct: FTS
+// coverage, rollups, and generated sort keys. Orphan-art counts are excluded
+// because cover swaps and item deletion can leave reclaimable sources for GCArt;
+// those leftovers are not consistency drift. Call Reclaimable to report art
+// garbage separately.
 func (r DerivedReport) Consistent() bool {
-	return r == DerivedReport{}
+	return r.ItemsMissingFTS == 0 && r.OrphanFTSRows == 0 &&
+		r.ArtistRollupDrift == 0 && r.GenreRollupDrift == 0 &&
+		r.ReleaseGroupRollupDrift == 0 && r.SortKeyDrift == 0
+}
+
+// Reclaimable reports whether `db verify --fix` (GCArt) would reclaim space:
+// orphaned art sources or thumbnails with no live entity references. It is
+// informational and independent of Consistent.
+func (r DerivedReport) Reclaimable() bool {
+	return r.OrphanArtSources > 0 || r.OrphanThumbnails > 0
 }
 
 // VerifyDerived runs the derived-data consistency check read-only: FTS coverage
@@ -47,6 +62,12 @@ func (s *Store) VerifyDerived(ctx context.Context) (*DerivedReport, error) {
 		{&rep.ArtistRollupDrift, artistRollupDriftQ},
 		{&rep.GenreRollupDrift, genreRollupDriftQ},
 		{&rep.ReleaseGroupRollupDrift, releaseGroupRollupDriftQ},
+		// An art source with no live entity reference, or a thumbnail whose source
+		// has none, is reclaimable derived state. A map row pointing at a deleted
+		// entity is ignored here; GCArt removes that stale map before deleting the
+		// source.
+		{&rep.OrphanArtSources, "SELECT COUNT(*) FROM art_source WHERE hash NOT IN (" + liveArtSourceQ + ")"},
+		{&rep.OrphanThumbnails, "SELECT COUNT(*) FROM thumb_cache WHERE source_hash NOT IN (" + liveArtSourceQ + ")"},
 	}
 	for _, c := range checks {
 		if err := s.read.QueryRowContext(ctx, c.stmt).Scan(c.dst); err != nil {
@@ -68,10 +89,11 @@ func (s *Store) VerifyDerived(ctx context.Context) (*DerivedReport, error) {
 // from the display text. It covers every table that carries a generated sort key.
 //
 // Sort keys are generated in Go, so this streams every entity row (O(n) time,
-// O(1) memory because it never buffers the result set) and recomputes model.SortKey per
-// row. That is acceptable for `db verify`, a deliberate maintenance operation; if
-// it ever needs to run hot, model.SortKey can be registered as a deterministic
-// SQLite scalar function so the comparison runs entirely in SQL.
+// O(1) memory because it never buffers the result set) and recomputes
+// model.SortKey per row. That is acceptable for `db verify`, a deliberate
+// maintenance operation; if it ever needs to run hot, model.SortKey can be
+// registered as a deterministic SQLite scalar function so the comparison runs
+// entirely in SQL.
 func (s *Store) sortKeyDrift(ctx context.Context) (int, error) {
 	const op = "store.VerifyDerived"
 	sources := []struct{ text, table string }{
@@ -137,6 +159,17 @@ WHERE COALESCE(gr.track_count, -1) <>
            LEFT JOIN item_file pf ON pf.item_id = ig.item_id AND pf.role = 'primary'
            LEFT JOIN file f ON f.id = pf.file_id
          WHERE ig.genre_id = g.id)`
+
+// liveArtSourceQ selects the source hashes still reachable from a live entity: an
+// art_map row whose (entity_type, entity_id) exists in its table. A source not in
+// this set is referenced only by dead-entity map rows, or none, so it and its
+// thumbnails are reclaimable.
+const liveArtSourceQ = `SELECT source_hash FROM art_map m WHERE
+    (m.entity_type='track'         AND EXISTS (SELECT 1 FROM playable_item e WHERE e.id = m.entity_id))
+ OR (m.entity_type='album'         AND EXISTS (SELECT 1 FROM album e         WHERE e.id = m.entity_id))
+ OR (m.entity_type='release_group' AND EXISTS (SELECT 1 FROM release_group e WHERE e.id = m.entity_id))
+ OR (m.entity_type='artist'        AND EXISTS (SELECT 1 FROM artist e        WHERE e.id = m.entity_id))
+ OR (m.entity_type='genre'         AND EXISTS (SELECT 1 FROM genre e         WHERE e.id = m.entity_id))`
 
 const releaseGroupRollupDriftQ = `
 SELECT COUNT(*) FROM release_group rg

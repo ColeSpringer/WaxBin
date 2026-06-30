@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/colespringer/waxbin/art"
 	"github.com/colespringer/waxbin/identity"
 	"github.com/colespringer/waxbin/internal/pathx"
 	"github.com/colespringer/waxbin/meta"
@@ -83,6 +84,7 @@ func (s *Scanner) Scan(ctx context.Context, req Request, hb Heartbeat) (*Result,
 	}
 
 	res := &Result{}
+	cache := newArtCache()
 	walkErr := filepath.WalkDir(walkRoot, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			s.log.Warn("walk entry", "path", path, "err", err)
@@ -112,7 +114,7 @@ func (s *Scanner) Scan(ctx context.Context, req Request, hb Heartbeat) (*Result,
 			res.Skipped++
 			return nil
 		}
-		if err := s.scanAudioFile(ctx, req.Library, root, path, res); err != nil {
+		if err := s.scanAudioFile(ctx, req.Library, root, path, res, cache); err != nil {
 			s.log.Warn("scanning file", "path", path, "err", err)
 			res.Errored++
 		}
@@ -146,7 +148,7 @@ func (s *Scanner) ScanFile(ctx context.Context, lib *model.Library, path string)
 		return res, nil
 	}
 	res.FilesSeen++
-	if err := s.scanAudioFile(ctx, lib, string(lib.Root), path, res); err != nil {
+	if err := s.scanAudioFile(ctx, lib, string(lib.Root), path, res, newArtCache()); err != nil {
 		res.Errored++
 		return res, err
 	}
@@ -154,7 +156,7 @@ func (s *Scanner) ScanFile(ctx context.Context, lib *model.Library, path string)
 }
 
 // scanAudioFile hashes, reads tags, and persists one audio file.
-func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, path string, res *Result) error {
+func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, path string, res *Result, cache *artCache) error {
 	info, err := os.Stat(path)
 	if err != nil {
 		return waxerr.Wrap(waxerr.CodeIO, "scan.file", err)
@@ -211,7 +213,9 @@ func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, p
 			SortKey:     model.SortKey(tags.Title),
 			IdentityKey: identity.TrackKey(tags.MBID, essenceHash),
 		},
-		Track: trackFromTags(tags),
+		Track:    trackFromTags(tags),
+		Lyrics:   sidecarLyrics(path, fm.Lyrics),
+		CoverArt: resolveCover(path, fm.CoverArt, cache),
 	}
 
 	out, err := s.cat.PutScannedTrack(ctx, in)
@@ -271,6 +275,123 @@ func trackFromTags(tags model.Tags) model.Track {
 		MBArtistID:       tags.MBArtistID,
 		MBAlbumArtistID:  tags.MBAlbumArtistID,
 	}
+}
+
+// sidecarLyrics resolves an audio file's structured lyrics. A sibling .lrc
+// sidecar (read directly and parsed) is authoritative when present and carries
+// timed lines; it supersedes the file's embedded lyrics but keeps the embedded
+// unsynchronized block when the sidecar has only synced lines. With no usable
+// sidecar, the embedded lyrics stand.
+func sidecarLyrics(audioPath string, embedded *model.Lyrics) *model.Lyrics {
+	lrcPath := strings.TrimSuffix(audioPath, filepath.Ext(audioPath)) + ".lrc"
+	data, err := os.ReadFile(lrcPath)
+	if err != nil {
+		return embedded // no sidecar (or unreadable): fall back to embedded
+	}
+	synced := meta.ParseLRC(string(data))
+	if len(synced) == 0 {
+		return embedded
+	}
+	ly := &model.Lyrics{Source: "lrc", Synced: synced}
+	if embedded != nil {
+		ly.Unsynced = embedded.Unsynced
+	}
+	return ly
+}
+
+// artCache memoizes per-directory cover-image lookups for one scan run, so an
+// album's directory cover is read and hashed once rather than for every track.
+type artCache struct {
+	dirs map[string]*model.ArtImage // resolved cover per directory (nil = none)
+}
+
+func newArtCache() *artCache { return &artCache{dirs: map[string]*model.ArtImage{}} }
+
+// dirCover returns the directory's cover image, probing the directory once and
+// caching the (possibly nil) result.
+func (c *artCache) dirCover(dir string) *model.ArtImage {
+	if img, ok := c.dirs[dir]; ok {
+		return img
+	}
+	img := findDirCover(dir)
+	c.dirs[dir] = img
+	return img
+}
+
+// coverCandidates are the directory cover-image filenames WaxBin recognizes, in
+// priority order. The match is case-insensitive against the directory listing.
+var coverCandidates = []string{
+	"cover.jpg", "cover.jpeg", "cover.png", "cover.webp",
+	"folder.jpg", "folder.jpeg", "folder.png",
+	"front.jpg", "front.jpeg", "front.png",
+	"album.jpg", "albumart.jpg",
+}
+
+// resolveCover chooses a track's cover, preferring a decodable embedded image,
+// then the directory cover image, and only then a non-decodable embedded image as
+// a last resort. That keeps an embedded format without a registered decoder
+// available to serve, while a corrupt or placeholder embedded picture does not
+// shadow a valid cover.jpg next to the file.
+func resolveCover(path string, embedded *model.ArtImage, cache *artCache) *model.ArtImage {
+	if embedded != nil && finalizeArt(embedded) {
+		return embedded // decodable embedded cover
+	}
+	if dir := cache.dirCover(filepath.Dir(path)); dir != nil {
+		return dir // a valid (decodable) directory cover
+	}
+	// No usable directory cover: keep the embedded bytes even if they did not decode,
+	// so a format without a local decoder is not dropped (finalizeArt set its hash).
+	if embedded != nil && len(embedded.Data) > 0 && embedded.Hash != "" {
+		return embedded
+	}
+	return nil
+}
+
+// findDirCover returns the first recognized cover image in dir (case-insensitive,
+// in coverCandidates priority order), finalized, or nil when there is none.
+func findDirCover(dir string) *model.ArtImage {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	byLower := make(map[string]string, len(entries))
+	for _, e := range entries {
+		if !e.IsDir() {
+			byLower[strings.ToLower(e.Name())] = e.Name()
+		}
+	}
+	for _, cand := range coverCandidates {
+		name, ok := byLower[cand]
+		if !ok {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			continue
+		}
+		img := &model.ArtImage{Data: data}
+		if finalizeArt(img) {
+			return img
+		}
+	}
+	return nil
+}
+
+// finalizeArt fills an image's content hash and, when the bytes decode, its
+// format and pixel dimensions. It reports whether decoding succeeded. The hash is
+// always set, so undecodable bytes can still be stored as a last resort, but a
+// decodable cover is preferred over one that is not. Empty bytes return false.
+func finalizeArt(img *model.ArtImage) bool {
+	if img == nil || len(img.Data) == 0 {
+		return false
+	}
+	img.Hash = art.Hash(img.Data)
+	format, w, h, err := art.Probe(img.Data)
+	if err != nil {
+		return false
+	}
+	img.Format, img.Width, img.Height = format, w, h
+	return true
 }
 
 var audioExts = map[string]bool{

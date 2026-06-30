@@ -26,8 +26,8 @@ func newDBVerifyCmd(g *globals) *cobra.Command {
 			"the source rows. Reports drift; --fix recomputes the maintained rollups first. " +
 			"Exits non-zero when any drift remains.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			// --fix recomputes rollups, so it needs the write lock; a plain verify is
-			// read-only and runs alongside a writer.
+			// --fix recomputes rollups and reclaims orphaned art, so it needs the
+			// write lock; a plain verify is read-only and runs alongside a writer.
 			lib, _, err := g.openLib(cmd, !fix)
 			if err != nil {
 				return err
@@ -36,6 +36,9 @@ func newDBVerifyCmd(g *globals) *cobra.Command {
 
 			if fix {
 				if err := lib.RefreshRollups(ctx(cmd)); err != nil {
+					return err
+				}
+				if _, _, err := lib.GCArt(ctx(cmd)); err != nil {
 					return err
 				}
 			}
@@ -57,7 +60,14 @@ func newDBVerifyCmd(g *globals) *cobra.Command {
 				fmt.Fprintf(w, "genre rollup drift:       %d\n", rep.GenreRollupDrift)
 				fmt.Fprintf(w, "release-group drift:      %d\n", rep.ReleaseGroupRollupDrift)
 				fmt.Fprintf(w, "sort-key drift:           %d\n", rep.SortKeyDrift)
+				fmt.Fprintf(w, "orphan art sources:       %d\n", rep.OrphanArtSources)
+				fmt.Fprintf(w, "orphan thumbnails:        %d\n", rep.OrphanThumbnails)
 				fmt.Fprintf(w, "consistent:               %t\n", rep.Consistent())
+				// Orphaned art is reclaimable garbage, not corruption, so it does
+				// not fail the check; point the operator at --fix to reclaim it.
+				if rep.Reclaimable() && !fix {
+					fmt.Fprintln(w, "note: orphaned art can be reclaimed with `db verify --fix`")
+				}
 			}
 			if !rep.Consistent() {
 				return waxerr.New(waxerr.CodeInvalid, "db verify",
@@ -66,6 +76,6 @@ func newDBVerifyCmd(g *globals) *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().BoolVar(&fix, "fix", false, "recompute maintained rollups before verifying (takes the write lock)")
+	cmd.Flags().BoolVar(&fix, "fix", false, "recompute rollups and reclaim orphaned art before verifying (takes the write lock)")
 	return cmd
 }

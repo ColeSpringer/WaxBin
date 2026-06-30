@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/colespringer/waxbin/model"
@@ -63,7 +64,7 @@ func (a *Adapter) Read(ctx context.Context, path string) (*FileMeta, error) {
 		return nil, waxerr.Wrapf(waxerr.CodeInvalid, op, err, "parsing %s", path)
 	}
 
-	fm := &FileMeta{Tags: tagsFromDoc(doc)}
+	fm := &FileMeta{Tags: tagsFromDoc(doc), Lyrics: lyricsFromDoc(doc), CoverArt: coverFromDoc(doc)}
 	if fm.Tags.Title == "" {
 		fm.Tags.Title = titleFromPath(path)
 	}
@@ -126,6 +127,98 @@ func tagsFromDoc(doc *waxlabel.Document) model.Tags {
 		t.Bitrate = at.Bitrate / 1000 // bits/sec -> kbps for display
 	}
 	return t
+}
+
+// lyricsFromDoc projects a Document's embedded lyrics into WaxBin's model: the
+// unsynchronized USLT block plus the first non-empty synced (SYLT) set, each timed
+// line reduced to a millisecond offset. It returns nil when the file carries no
+// lyric content. A sibling .lrc sidecar, read by the scanner, supersedes this.
+func lyricsFromDoc(doc *waxlabel.Document) *model.Lyrics {
+	unsynced := strings.TrimSpace(doc.Fields().Lyrics)
+	var synced []model.SyncedLine
+	for _, set := range doc.SyncedLyrics() {
+		if len(set.Lines) == 0 {
+			continue
+		}
+		synced = make([]model.SyncedLine, 0, len(set.Lines))
+		for _, ln := range set.Lines {
+			synced = append(synced, model.SyncedLine{TimeMS: ln.Time.Milliseconds(), Text: ln.Text})
+		}
+		break // first non-empty set; alternate-language sets are ignored
+	}
+	// model.Lyrics.Synced promises time order; a SYLT frame may arrive out of order,
+	// so sort defensively (the .lrc path is already sorted by ParseLRC). Stable, so
+	// equal-timestamp lines keep their authored order.
+	sort.SliceStable(synced, func(i, j int) bool { return synced[i].TimeMS < synced[j].TimeMS })
+	if len(synced) == 0 && unsynced == "" {
+		return nil
+	}
+	return &model.Lyrics{Source: "embedded", Synced: synced, Unsynced: unsynced}
+}
+
+// coverFromDoc extracts the embedded front-cover image from a Document: it prefers
+// an explicit front-cover picture and otherwise takes the first picture. It returns
+// the raw bytes plus a format derived from the picture MIME; the scanner finalizes
+// the content hash and dimensions. It returns nil when the file embeds no usable
+// picture.
+func coverFromDoc(doc *waxlabel.Document) *model.ArtImage {
+	pics := doc.Pictures()
+	// Prefer a non-empty front cover; otherwise the first picture with bytes. A
+	// zero-length entry (e.g. an empty front-cover frame) must not shadow a real one.
+	var best *waxlabel.Picture
+	for i := range pics {
+		if pics[i].Type == waxlabel.PicFrontCover && len(pics[i].Data) > 0 {
+			best = &pics[i]
+			break
+		}
+	}
+	if best == nil {
+		for i := range pics {
+			if len(pics[i].Data) > 0 {
+				best = &pics[i]
+				break
+			}
+		}
+	}
+	if best == nil {
+		return nil
+	}
+	return &model.ArtImage{Data: best.Data, Format: formatFromMIME(best.MIME)}
+}
+
+// formatFromMIME maps an image MIME type to WaxBin's short format token, falling
+// back to the MIME subtype for anything unrecognized.
+func formatFromMIME(mime string) string {
+	switch strings.ToLower(strings.TrimSpace(mime)) {
+	case "image/jpeg", "image/jpg":
+		return "jpeg"
+	case "image/png":
+		return "png"
+	case "image/webp":
+		return "webp"
+	case "image/gif":
+		return "gif"
+	}
+	if i := strings.LastIndex(mime, "/"); i >= 0 {
+		return strings.ToLower(strings.TrimSpace(mime[i+1:]))
+	}
+	return ""
+}
+
+// ParseLRC parses .lrc sidecar text into WaxBin synced lines (millisecond
+// offsets, time-ordered). WaxBin reads .lrc sidecars directly; this wraps
+// WaxLabel's canonical LRC parser and projects it into the model type. It returns
+// nil for text with no timed lines.
+func ParseLRC(text string) []model.SyncedLine {
+	lines := waxlabel.ParseLRC(text)
+	if len(lines) == 0 {
+		return nil
+	}
+	out := make([]model.SyncedLine, 0, len(lines))
+	for _, ln := range lines {
+		out = append(out, model.SyncedLine{TimeMS: ln.Time.Milliseconds(), Text: ln.Text})
+	}
+	return out
 }
 
 // trimAll trims each element and drops the empties, preserving order.

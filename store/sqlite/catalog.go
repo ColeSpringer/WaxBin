@@ -148,6 +148,20 @@ func (s *Store) PutScannedTrack(ctx context.Context, in model.PutScannedTrackInp
 			}
 		}
 
+		// Lyrics and cover art are re-evaluated on every scan, outside the
+		// audio-change gate, so an added or edited .lrc sidecar or directory cover
+		// image is picked up even when the audio bytes are unchanged. Both writes are
+		// idempotent (they compare against the stored value and do nothing when it is
+		// unchanged), so a no-op rescan stays silent. They run after entity resolution
+		// so a freshly resolved album_id is available to map art onto; an unchanged
+		// rescan reuses the album_id persisted by a prior scan.
+		if err := putLyricsTx(ctx, tx, itemID, in.Lyrics); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		if err := attachArtTx(ctx, tx, itemID, in.CoverArt); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+
 		// Re-home the file onto this item, detaching it from any prior item (the
 		// case when an in-place essence change re-keys the file to a new identity).
 		orphans, err := linkPrimaryFile(ctx, tx, itemID, fileID)
