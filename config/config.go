@@ -17,9 +17,12 @@ import (
 
 // Root is a registered library root and its handling policy.
 type Root struct {
-	Path    string     `json:"path"`
-	Mode    model.Mode `json:"mode"`
-	Profile string     `json:"profile"`
+	Path string     `json:"path"`
+	Mode model.Mode `json:"mode"`
+	// Media is the content class a managed root holds (music/audiobook/mixed).
+	// Empty defaults to mixed, allowing one root to hold both tracks and books.
+	Media   model.MediaType `json:"media,omitempty"`
+	Profile string          `json:"profile"`
 }
 
 // ProfileDef describes a layout profile from configuration. A profile with the
@@ -166,6 +169,13 @@ func (c *Config) Validate() error {
 			return waxerr.New(waxerr.CodeInvalid, "config.Validate",
 				fmt.Sprintf("root %q has invalid mode %q", r.Path, r.Mode))
 		}
+		if r.Media == "" {
+			r.Media = model.MediaMixed // default: one content-classified tree
+		}
+		if !r.Media.Valid() {
+			return waxerr.New(waxerr.CodeInvalid, "config.Validate",
+				fmt.Sprintf("root %q has invalid media type %q", r.Path, r.Media))
+		}
 		if r.Profile == "" {
 			r.Profile = "waxbin-native"
 		}
@@ -224,12 +234,14 @@ func (c *Config) Validate() error {
 	return nil
 }
 
-// ParseRootSpec parses a CLI root spec "path[:mode[:profile]]" into a Root. The
-// mode/profile suffix is recognized only when a colon-delimited field exactly
-// matches a known mode keyword (managed|in-place); otherwise the whole spec is
-// treated as the path. This handles Windows drive letters ("C:\Music") and
-// Unix paths that legitimately contain a colon ("/data/My:Music") without a
-// special case.
+// ParseRootSpec parses a CLI root spec "path[:mode[:media[:profile]]]" into a Root.
+// The suffix is recognized only when a colon-delimited field exactly matches a known
+// mode keyword (managed|in-place). If the following slot is a known media keyword
+// (music|audiobook|mixed), it is parsed as media; otherwise the whole spec is treated
+// as the path. This handles Windows drive letters ("C:\Music") and Unix paths that
+// legitimately contain a colon ("/data/My:Music") without a special case.
+// A profile literally named after a media keyword must be written with an explicit
+// media slot ("path:managed:mixed:mixed").
 func ParseRootSpec(spec string) (Root, error) {
 	if strings.TrimSpace(spec) == "" {
 		return Root{}, waxerr.New(waxerr.CodeInvalid, "config.ParseRootSpec", "empty root spec")
@@ -237,15 +249,26 @@ func ParseRootSpec(spec string) (Root, error) {
 
 	parts := strings.Split(spec, ":")
 	n := len(parts)
+	isMode := func(i int) bool { return model.Mode(parts[i]).Valid() }
+	isMedia := func(i int) bool { return model.MediaType(parts[i]).Valid() }
 	r := Root{Path: spec}
 	switch {
-	case n >= 2 && model.Mode(parts[n-1]).Valid(): // path:mode
-		r.Mode = model.Mode(parts[n-1])
-		r.Path = strings.Join(parts[:n-1], ":")
-	case n >= 3 && model.Mode(parts[n-2]).Valid(): // path:mode:profile
+	case n >= 4 && isMode(n-3) && isMedia(n-2): // path:mode:media:profile
+		r.Mode = model.Mode(parts[n-3])
+		r.Media = model.MediaType(parts[n-2])
+		r.Profile = parts[n-1]
+		r.Path = strings.Join(parts[:n-3], ":")
+	case n >= 3 && isMode(n-2) && isMedia(n-1): // path:mode:media
+		r.Mode = model.Mode(parts[n-2])
+		r.Media = model.MediaType(parts[n-1])
+		r.Path = strings.Join(parts[:n-2], ":")
+	case n >= 3 && isMode(n-2): // path:mode:profile
 		r.Mode = model.Mode(parts[n-2])
 		r.Profile = parts[n-1]
 		r.Path = strings.Join(parts[:n-2], ":")
+	case n >= 2 && isMode(n-1): // path:mode
+		r.Mode = model.Mode(parts[n-1])
+		r.Path = strings.Join(parts[:n-1], ":")
 	}
 	return r, nil
 }

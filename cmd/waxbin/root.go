@@ -60,6 +60,7 @@ func newRootCmd() *cobra.Command {
 		newRmCmd(g),
 		newTrashCmd(g),
 		newInboxCmd(g),
+		newImportCmd(g),
 		newLockCmd(g),
 		newUnlockCmd(g),
 		newProvenanceCmd(g),

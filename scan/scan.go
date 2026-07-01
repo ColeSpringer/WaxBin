@@ -115,7 +115,7 @@ func (s *Scanner) Scan(ctx context.Context, req Request, hb Heartbeat) (*Result,
 			res.Skipped++
 			return nil
 		}
-		if err := s.scanAudioFile(ctx, req.Library, root, path, res, cache); err != nil {
+		if err := s.scanAudioFile(ctx, req.Library, root, path, res, cache, ""); err != nil {
 			s.log.Warn("scanning file", "path", path, "err", err)
 			res.Errored++
 		}
@@ -135,12 +135,23 @@ func (s *Scanner) Scan(ctx context.Context, req Request, hb Heartbeat) (*Result,
 	return res, nil
 }
 
-// ScanFile catalogs a single audio file under its library. It is the entry point
-// for re-cataloging one restored or freshly-imported file without walking the
-// whole root; it shares the per-file path with the full scan, so identity,
-// essence-relink, and change detection behave identically. A non-audio path is a
-// no-op.
+// ScanFile catalogs a single audio file under its library, classifying its kind from
+// tags. It is the entry point for re-cataloging one restored or freshly-imported file
+// without walking the whole root; it shares the per-file path with the full scan, so
+// identity, essence-relink, and change detection behave identically. A non-audio path
+// is a no-op.
 func (s *Scanner) ScanFile(ctx context.Context, lib *model.Library, path string) (*Result, error) {
+	return s.scanFileForced(ctx, lib, path, "")
+}
+
+// ScanFileAs catalogs a single audio file, forcing its media kind rather than
+// classifying it from tags. Use it when the caller already knows the kind, such as an
+// audiobook whose tags do not identify it as one. An empty kind classifies from tags.
+func (s *Scanner) ScanFileAs(ctx context.Context, lib *model.Library, path string, kind model.Kind) (*Result, error) {
+	return s.scanFileForced(ctx, lib, path, kind)
+}
+
+func (s *Scanner) scanFileForced(ctx context.Context, lib *model.Library, path string, kind model.Kind) (*Result, error) {
 	if lib == nil {
 		return nil, waxerr.New(waxerr.CodeInvalid, "scan.ScanFile", "scan request has no library")
 	}
@@ -149,15 +160,16 @@ func (s *Scanner) ScanFile(ctx context.Context, lib *model.Library, path string)
 		return res, nil
 	}
 	res.FilesSeen++
-	if err := s.scanAudioFile(ctx, lib, string(lib.Root), path, res, newArtCache()); err != nil {
+	if err := s.scanAudioFile(ctx, lib, string(lib.Root), path, res, newArtCache(), kind); err != nil {
 		res.Errored++
 		return res, err
 	}
 	return res, nil
 }
 
-// scanAudioFile hashes, reads tags, and persists one audio file.
-func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, path string, res *Result, cache *artCache) error {
+// scanAudioFile hashes, reads tags, and persists one audio file. forceKind overrides
+// the tag-based track/book classification when non-empty.
+func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, path string, res *Result, cache *artCache, forceKind model.Kind) error {
 	info, err := os.Stat(path)
 	if err != nil {
 		return waxerr.Wrap(waxerr.CodeIO, "scan.file", err)
@@ -208,9 +220,17 @@ func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, p
 
 	// An audiobook takes the book path: it groups by book identity (so a multi-file
 	// book collapses its parts into one item) and carries contributors and chapters.
-	// Everything else is a music track.
+	// Everything else is a music track. A forced kind from the caller wins over the
+	// tag heuristic.
+	isBook := tags.IsAudiobook
+	switch forceKind {
+	case model.KindBook:
+		isBook = true
+	case model.KindTrack:
+		isBook = false
+	}
 	var out *model.ScanItemResult
-	if tags.IsAudiobook {
+	if isBook {
 		out, err = s.cat.PutScannedBook(ctx, bookInput(lib.ID, file, tags, essenceHash, cover))
 	} else {
 		out, err = s.cat.PutScannedTrack(ctx, model.PutScannedTrackInput{

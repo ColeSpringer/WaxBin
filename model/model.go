@@ -8,8 +8,20 @@ type Library struct {
 	Root        []byte // raw OS path bytes (non-UTF8 safe)
 	DisplayRoot string // fallback UTF-8 rendering for humans/logs
 	Mode        Mode
-	Profile     string // organization profile name
-	CreatedAt   int64  // unix nanoseconds
+	// Media is the content class a managed root holds (music/audiobook/mixed).
+	// Empty is treated as mixed. The internal podcast library ignores it.
+	Media     MediaType
+	Profile   string // organization profile name
+	CreatedAt int64  // unix nanoseconds
+}
+
+// MediaType returns the library's media type, defaulting to mixed when unset so an
+// older catalog routes as a single content-classified tree.
+func (l *Library) MediaType() MediaType {
+	if l.Media == "" {
+		return MediaMixed
+	}
+	return l.Media
 }
 
 // File is one file on disk: an audio file or a sidecar. Paths are stored as raw
@@ -202,6 +214,11 @@ type ItemView struct {
 	// episode-specific values used by layouts and detail views.
 	Season    int
 	PubDateNS int64 // publication time, unix nanoseconds (0 when undated)
+
+	// Source is the item's acquisition origin (local/rss/youtube/manual). A locally
+	// scanned item has no acquisition row and reads back as "local"; an acquired item
+	// carries the source type used at ingest. Queries can filter on this field.
+	Source SourceType
 
 	FilePID     PID
 	Path        []byte // raw bytes of the primary file path

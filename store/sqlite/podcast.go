@@ -77,7 +77,7 @@ func (s *Store) UpsertFeed(ctx context.Context, in model.UpsertFeedInput) (*mode
 			if key == "" {
 				continue // nothing to key on: skip rather than collapse untitled items
 			}
-			added, changed, err := upsertEpisode(ctx, tx, podcastID, in.Feed.Title, key, fe, now, titleChanged)
+			added, changed, err := upsertEpisode(ctx, tx, podcastID, in.Feed.Title, key, fe, false, false, now, titleChanged)
 			if err != nil {
 				return err
 			}
@@ -101,6 +101,89 @@ func (s *Store) UpsertFeed(ctx context.Context, in model.UpsertFeedInput) (*mode
 	return res, nil
 }
 
+// UpsertShow creates or updates a show without enumerating a feed: a manual show, or
+// a provider-backed channel added before its first enumeration. Episodes are added
+// separately via UpsertEpisode. It returns the show pid and whether it was created.
+func (s *Store) UpsertShow(ctx context.Context, in model.UpsertShowInput) (model.PID, bool, error) {
+	const op = "store.UpsertShow"
+	if in.IdentityKey == "" {
+		return "", false, waxerr.New(waxerr.CodeInvalid, op, "show has no identity key")
+	}
+	if in.SourceType != "" && !in.SourceType.ValidShowSource() {
+		return "", false, waxerr.New(waxerr.CodeInvalid, op, "invalid show source type: "+string(in.SourceType))
+	}
+	var pid model.PID
+	var created bool
+	err := s.writeTx(ctx, func(tx *sql.Tx) error {
+		now := nowNS()
+		fi := model.UpsertFeedInput{
+			FeedURL: in.FeedURL, IdentityKey: in.IdentityKey, SourceType: in.SourceType,
+			Feed: model.Feed{
+				Title: in.Title, Author: in.Author, Description: in.Description,
+				Link: in.Link, ImageURL: in.ImageURL,
+			},
+		}
+		id, ppid, cr, _, err := upsertPodcast(ctx, tx, fi, now)
+		if err != nil {
+			return err
+		}
+		pid, created = ppid, cr
+		if err := attachEntityArtTx(ctx, tx, "podcast", id, in.Image); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		return appendChange(ctx, tx, "podcast", ppid, opFor(cr))
+	})
+	return pid, created, err
+}
+
+// UpsertEpisode adds or updates a single episode under an existing show, bypassing a
+// feed sync. Pinned keeps the episode out of retention pruning. The episode is keyed
+// within its show with the same rule used for feed episodes, so a later feed sync of
+// the same show updates it rather than forking it.
+func (s *Store) UpsertEpisode(ctx context.Context, in model.UpsertEpisodeInput) (*model.UpsertEpisodeResult, error) {
+	const op = "store.UpsertEpisode"
+	res := &model.UpsertEpisodeResult{}
+	err := s.writeTx(ctx, func(tx *sql.Tx) error {
+		var podcastID int64
+		var podKey, podTitle string
+		err := tx.QueryRowContext(ctx,
+			"SELECT id, identity_key, title FROM podcast WHERE pid = ?", string(in.PodcastPID)).
+			Scan(&podcastID, &podKey, &podTitle)
+		if errors.Is(err, sql.ErrNoRows) {
+			return waxerr.New(waxerr.CodeNotFound, op, "no such podcast: "+string(in.PodcastPID))
+		}
+		if err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		key := identity.EpisodeKey(podKey, in.Episode.GUID, in.Episode.EnclosureURL, in.Episode.Title)
+		if key == "" {
+			return waxerr.New(waxerr.CodeInvalid, op, "episode has no usable identity (guid, enclosure, or title)")
+		}
+		now := nowNS()
+		added, changed, err := upsertEpisode(ctx, tx, podcastID, podTitle, key, in.Episode, in.Pinned, true, now, false)
+		if err != nil {
+			return err
+		}
+		res.Created = added
+		// Resolve the (possibly pre-existing) episode pid to return it.
+		if err := tx.QueryRowContext(ctx,
+			"SELECT pid FROM playable_item WHERE kind='episode' AND identity_key=?", key).
+			Scan(&res.EpisodePID); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		// Emit the show delta only when the episode actually changed, so a no-op re-upsert
+		// stays change_log-silent (the episode's own item delta is emitted by upsertEpisode).
+		if added || changed {
+			return appendChange(ctx, tx, "podcast", in.PodcastPID, model.OpUpdate)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return res, nil
+}
+
 // upsertPodcast inserts or updates a podcast row by identity_key, preserving its
 // pid/created_at and (when the feed omits a value) prior metadata. Returns the row
 // id, pid, whether it was newly created, and whether its title changed (which
@@ -108,27 +191,40 @@ func (s *Store) UpsertFeed(ctx context.Context, in model.UpsertFeedInput) (*mode
 func upsertPodcast(ctx context.Context, tx *sql.Tx, in model.UpsertFeedInput, now int64) (int64, model.PID, bool, bool, error) {
 	const op = "store.UpsertFeed"
 	f := in.Feed
+	st := in.SourceType
+	if st == "" {
+		st = model.SourceRSS // older or unspecified feeds are rss subscriptions
+	}
 	var id int64
-	var pid, oldTitle string
+	var pid, oldTitle, oldKey string
 	err := tx.QueryRowContext(ctx,
-		"SELECT id, pid, title FROM podcast WHERE identity_key = ?", in.IdentityKey).Scan(&id, &pid, &oldTitle)
+		"SELECT id, pid, title, identity_key FROM podcast WHERE identity_key = ?", in.IdentityKey).Scan(&id, &pid, &oldTitle, &oldKey)
 	if errors.Is(err, sql.ErrNoRows) {
 		// The identity key can flip when a feed that was subscribed without a
 		// <podcast:guid> later publishes one (feed:URL -> pguid:...). Fall back to the
 		// feed URL so a re-add/OPML-reimport updates the existing row (and adopts the new
 		// key) instead of hitting UNIQUE(feed_url) on a blind INSERT.
 		err = tx.QueryRowContext(ctx,
-			"SELECT id, pid, title FROM podcast WHERE feed_url = ?", in.FeedURL).Scan(&id, &pid, &oldTitle)
+			"SELECT id, pid, title, identity_key FROM podcast WHERE feed_url = ?", in.FeedURL).Scan(&id, &pid, &oldTitle, &oldKey)
 	}
 	switch {
 	case err == nil:
+		// When the show's identity key changes (the feed_url-matched flip above), re-key
+		// its existing episodes to the new show prefix in the same tx. Otherwise the feed
+		// loop that follows keys every episode under the NEW ep: prefix, finds no match,
+		// and re-inserts the whole catalog as duplicates (orphaning the downloaded rows).
+		if oldKey != in.IdentityKey {
+			if err := rekeyEpisodes(ctx, tx, id, oldKey, in.IdentityKey); err != nil {
+				return 0, "", false, false, waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+		}
 		if _, err := tx.ExecContext(ctx, `UPDATE podcast SET
 			identity_key=?, feed_url=?, title=?, sort_key=?, author=?, description=?, link=?, language=?,
-			category=?, explicit=?, image_url=?, guid=?, etag=?, last_modified=?,
+			category=?, explicit=?, image_url=?, guid=?, etag=?, last_modified=?, source_type=?,
 			last_fetched_at=?, updated_at=? WHERE id=?`,
 			in.IdentityKey, in.FeedURL, f.Title, model.SortKey(f.Title), f.Author, f.Description, f.Link, f.Language,
 			f.Category, boolInt(f.Explicit), f.ImageURL, f.GUID, in.ETag, in.LastModified,
-			in.FetchedAtNS, now, id); err != nil {
+			string(st), in.FetchedAtNS, now, id); err != nil {
 			return 0, "", false, false, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		return id, model.PID(pid), false, oldTitle != f.Title, nil
@@ -138,11 +234,12 @@ func upsertPodcast(ctx context.Context, tx *sql.Tx, in model.UpsertFeedInput, no
 	newPID := model.NewPID()
 	r, err := tx.ExecContext(ctx, `INSERT INTO podcast
 		(pid, feed_url, identity_key, title, sort_key, author, description, link, language,
-		 category, explicit, image_url, guid, etag, last_modified, last_fetched_at, created_at, updated_at)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		 category, explicit, image_url, guid, etag, last_modified, source_type,
+		 last_fetched_at, created_at, updated_at)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		string(newPID), in.FeedURL, in.IdentityKey, f.Title, model.SortKey(f.Title), f.Author,
 		f.Description, f.Link, f.Language, f.Category, boolInt(f.Explicit), f.ImageURL, f.GUID,
-		in.ETag, in.LastModified, in.FetchedAtNS, now, now)
+		in.ETag, in.LastModified, string(st), in.FetchedAtNS, now, now)
 	if err != nil {
 		return 0, "", false, false, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
@@ -153,12 +250,12 @@ func upsertPodcast(ctx context.Context, tx *sql.Tx, in model.UpsertFeedInput, no
 // upsertEpisode inserts or updates one episode item and subtype. It reads the
 // stored row first so identical feed items do not rewrite the database or FTS, and
 // it never moves a downloaded episode back to remote.
-func upsertEpisode(ctx context.Context, tx *sql.Tx, podcastID int64, podcastTitle, key string, fe model.FeedEpisode, now int64, forceWrite bool) (added, changed bool, err error) {
+func upsertEpisode(ctx context.Context, tx *sql.Tx, podcastID int64, podcastTitle, key string, fe model.FeedEpisode, pinned, managePinned bool, now int64, forceWrite bool) (added, changed bool, err error) {
 	const op = "store.UpsertFeed"
 	var itemID int64
 	var itemPID string
 	var stored storedEpisode
-	var explicitInt int64
+	var explicitInt, pinnedInt int64
 	// One query fetches existence, pid, and every stored field used for the change
 	// check. Unchanged episodes cost one point lookup; changed ones need no extra
 	// pid select before emitting a delta.
@@ -168,23 +265,28 @@ func upsertEpisode(ctx context.Context, tx *sql.Tx, podcastID int64, podcastTitl
 		COALESCE(e.episode_type,''), COALESCE(e.duration_ms,0), COALESCE(e.explicit,0),
 		COALESCE(e.enclosure_url,''), COALESCE(e.enclosure_type,''), COALESCE(e.enclosure_size,0),
 		COALESCE(e.transcript_url,''), COALESCE(e.transcript_type,''), COALESCE(e.chapters_url,''),
-		COALESCE(e.image_url,'')
+		COALESCE(e.image_url,''), COALESCE(e.pinned,0)
 		FROM playable_item pi LEFT JOIN episode e ON e.item_id = pi.id
 		WHERE pi.kind='episode' AND pi.identity_key=?`, key).Scan(&itemID, &itemPID, &stored.title,
 		&stored.guid, &stored.description, &stored.link, &stored.pubDate, &stored.year, &stored.season,
 		&stored.episodeNo, &stored.episodeType, &stored.durationMS, &explicitInt,
 		&stored.enclosureURL, &stored.enclosureType, &stored.enclosureSize,
-		&stored.transcriptURL, &stored.transcriptType, &stored.chaptersURL, &stored.imageURL)
+		&stored.transcriptURL, &stored.transcriptType, &stored.chaptersURL, &stored.imageURL, &pinnedInt)
 	exists := scanErr == nil
 	if scanErr != nil && !errors.Is(scanErr, sql.ErrNoRows) {
 		return false, false, waxerr.Wrap(waxerr.CodeIO, op, scanErr)
 	}
 	stored.explicit = explicitInt != 0
+	stored.pinned = pinnedInt != 0
 
 	if exists {
 		// Unchanged: write nothing and emit no delta (state, which may be present for a
-		// downloaded episode, is untouched throughout).
-		if !forceWrite && stored.equals(fe) {
+		// downloaded episode, is untouched throughout). pinned participates in the change
+		// check only when the caller manages it (managePinned): a feed re-sync passes
+		// pinned=false but does NOT manage pinning, so it never un-pins nor churns a
+		// user-pinned episode; the explicit UpsertEpisode path DOES manage it, so it can
+		// pin or un-pin an existing episode.
+		if !forceWrite && stored.equals(fe) && (!managePinned || stored.pinned == pinned) {
 			return false, false, nil
 		}
 		// The update never writes playable_item.state, so a downloaded (present) episode
@@ -194,7 +296,7 @@ func upsertEpisode(ctx context.Context, tx *sql.Tx, podcastID int64, podcastTitl
 			fe.Title, model.SortKey(fe.Title), now, itemID); err != nil {
 			return false, false, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
-		if err := writeEpisodeRow(ctx, tx, itemID, podcastID, fe, now); err != nil {
+		if err := writeEpisodeRow(ctx, tx, itemID, podcastID, fe, pinned, managePinned, now); err != nil {
 			return false, false, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		if err := syncEpisodeSearchFTS(ctx, tx, itemID, fe, podcastTitle); err != nil {
@@ -217,7 +319,7 @@ func upsertEpisode(ctx context.Context, tx *sql.Tx, podcastID int64, podcastTitl
 		return false, false, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
 	itemID, _ = r.LastInsertId()
-	if err := writeEpisodeRow(ctx, tx, itemID, podcastID, fe, now); err != nil {
+	if err := writeEpisodeRow(ctx, tx, itemID, podcastID, fe, pinned, managePinned, now); err != nil {
 		return false, false, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
 	if err := syncEpisodeSearchFTS(ctx, tx, itemID, fe, podcastTitle); err != nil {
@@ -229,13 +331,34 @@ func upsertEpisode(ctx context.Context, tx *sql.Tx, podcastID int64, podcastTitl
 	return true, true, nil
 }
 
+// rekeyEpisodes rewrites the per-show prefix of every episode identity_key when a
+// show's own identity_key changes (e.g. feed:URL -> pguid:...), so the episodes stay
+// matched to their show rather than re-inserting as duplicates on the next upsert. An
+// episode key is "ep:<showKey>\x1f<id>"; only the <showKey> prefix changes. SQLite
+// length()/substr() operate on characters, so the rewrite is correct for a multibyte
+// key. The <id> parts are unchanged, so the re-keyed rows stay unique.
+func rekeyEpisodes(ctx context.Context, tx *sql.Tx, podcastID int64, oldKey, newKey string) error {
+	if oldKey == "" || oldKey == newKey {
+		return nil
+	}
+	oldPrefix := "ep:" + oldKey + "\x1f"
+	newPrefix := "ep:" + newKey + "\x1f"
+	_, err := tx.ExecContext(ctx, `UPDATE playable_item
+		SET identity_key = ? || substr(identity_key, length(?) + 1)
+		WHERE kind = 'episode'
+		  AND id IN (SELECT item_id FROM episode WHERE podcast_id = ?)
+		  AND substr(identity_key, 1, length(?)) = ?`,
+		newPrefix, oldPrefix, podcastID, oldPrefix, oldPrefix)
+	return err
+}
+
 // storedEpisode holds the persisted episode fields used to detect whether an
 // incoming feed item actually changed, so an unchanged re-sync writes nothing.
 type storedEpisode struct {
 	title, guid, description, link, episodeType          string
 	pubDate, year, season, episodeNo, durationMS         int64
 	enclosureSize                                        int64
-	explicit                                             bool
+	explicit, pinned                                     bool
 	enclosureURL, enclosureType                          string
 	transcriptURL, transcriptType, chaptersURL, imageURL string
 }
@@ -264,14 +387,17 @@ func (e storedEpisode) equals(fe model.FeedEpisode) bool {
 }
 
 // writeEpisodeRow upserts the episode subtype row (shared by the create and update
-// paths). It never touches playable_item.state, so a downloaded episode stays
-// present across a metadata re-sync.
-func writeEpisodeRow(ctx context.Context, tx *sql.Tx, itemID, podcastID int64, fe model.FeedEpisode, now int64) error {
+// paths). It never touches playable_item.state, so a downloaded episode stays present
+// across a metadata re-sync. On the conflict update, pinned is rewritten only when the
+// caller manages it (managePinned): a feed re-sync passes managePinned=false and so
+// never un-pins a user-pinned episode, while the explicit UpsertEpisode path passes
+// true and can pin/un-pin. A new episode always inserts with the given pinned value.
+func writeEpisodeRow(ctx context.Context, tx *sql.Tx, itemID, podcastID int64, fe model.FeedEpisode, pinned, managePinned bool, now int64) error {
 	_, err := tx.ExecContext(ctx, `INSERT INTO episode
 		(item_id, podcast_id, guid, description, link, pub_date, year, season, episode_no,
 		 episode_type, duration_ms, explicit, enclosure_url, enclosure_type, enclosure_size,
-		 transcript_url, transcript_type, chapters_url, image_url, created_at, updated_at)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		 transcript_url, transcript_type, chapters_url, image_url, pinned, created_at, updated_at)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(item_id) DO UPDATE SET
 			podcast_id=excluded.podcast_id, guid=excluded.guid, description=excluded.description,
 			link=excluded.link, pub_date=excluded.pub_date, year=excluded.year, season=excluded.season,
@@ -280,12 +406,14 @@ func writeEpisodeRow(ctx context.Context, tx *sql.Tx, itemID, podcastID int64, f
 			enclosure_url=excluded.enclosure_url, enclosure_type=excluded.enclosure_type,
 			enclosure_size=excluded.enclosure_size, transcript_url=excluded.transcript_url,
 			transcript_type=excluded.transcript_type, chapters_url=excluded.chapters_url,
-			image_url=excluded.image_url, updated_at=excluded.updated_at`,
+			image_url=excluded.image_url,
+			pinned=CASE WHEN ? THEN excluded.pinned ELSE pinned END,
+			updated_at=excluded.updated_at`,
 		itemID, podcastID, fe.GUID, fe.Description, fe.Link, nullInt64(fe.PubDateNS), nullInt(fe.Year),
 		nullInt(fe.Season), nullInt(fe.EpisodeNo), string(episodeTypeOr(fe.EpisodeType)),
 		nullInt64(fe.DurationMS), boolInt(fe.Explicit), fe.EnclosureURL, fe.EnclosureType,
 		fe.EnclosureSize, fe.TranscriptURL, fe.TranscriptType, fe.ChaptersURL, fe.ImageURL,
-		now, now)
+		boolInt(pinned), now, now, boolInt(managePinned))
 	return err
 }
 

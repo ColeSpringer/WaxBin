@@ -24,8 +24,13 @@ type Podcast struct {
 	RetentionKeep int
 	AuthUser      string // basic-auth user; the password lives in the secret table
 	ImageURL      string // current feed image (ingested into the art store on sync)
-	CreatedAt     int64
-	UpdatedAt     int64
+	// SourceType selects the acquisition provider and sync behavior: rss (an HTTP
+	// feed), youtube (an injected provider, feed_url is a channel/playlist URL), or
+	// manual (no feed to sync; episodes arrive via UpsertEpisode). Empty reads as
+	// rss for older subscriptions.
+	SourceType SourceType
+	CreatedAt  int64
+	UpdatedAt  int64
 	// EpisodeCount and DownloadedCount are populated by list/detail reads, not stored.
 	EpisodeCount    int
 	DownloadedCount int
@@ -67,6 +72,9 @@ type Episode struct {
 	TranscriptType string
 	ChaptersURL    string
 	ImageURL       string // episode artwork (ingested into the art store)
+	// Pinned marks an explicitly kept episode that retention never reclaims, so its
+	// download outlives a keep-newest-N sweep.
+	Pinned bool
 
 	// Downloaded reports whether the episode currently has a local file; FilePID and
 	// DisplayPath name it when present.
@@ -143,6 +151,41 @@ type UpsertFeedInput struct {
 	LastModified string
 	FetchedAtNS  int64
 	Image        *ArtImage // feed cover, or nil
+	// SourceType selects the show's provider (rss|youtube|manual); empty defaults to
+	// rss. A youtube channel/playlist id lives in the identity key and feed_url, not a
+	// separate column.
+	SourceType SourceType
+}
+
+// UpsertShowInput creates or updates a show that has no feed sync in this call:
+// a manual show, or a youtube channel added before its first enumeration. Episodes
+// are added separately via UpsertEpisode. FeedURL is empty for a manual show and the
+// channel/playlist URL for a youtube show.
+type UpsertShowInput struct {
+	IdentityKey string
+	FeedURL     string
+	SourceType  SourceType
+	Title       string
+	Author      string
+	Description string
+	Link        string
+	ImageURL    string
+	Image       *ArtImage
+}
+
+// UpsertEpisodeInput adds or updates a single episode under an existing show,
+// bypassing a feed sync. Pinned keeps the episode out of retention pruning. It
+// returns the episode's pid and whether it was newly created.
+type UpsertEpisodeInput struct {
+	PodcastPID PID
+	Episode    FeedEpisode
+	Pinned     bool
+}
+
+// UpsertEpisodeResult reports a single-episode upsert.
+type UpsertEpisodeResult struct {
+	EpisodePID PID
+	Created    bool
 }
 
 // UpsertFeedResult reports what an UpsertFeed changed.

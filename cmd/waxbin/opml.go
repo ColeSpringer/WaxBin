@@ -68,9 +68,14 @@ func newOPMLExportCmd(g *globals) *cobra.Command {
 				if err != nil {
 					return waxerr.Wrapf(waxerr.CodeIO, "opml.export", err, "creating %s", args[0])
 				}
-				defer f.Close()
 				if err := lib.Podcasts().ExportOPML(ctx(cmd), f); err != nil {
+					_ = f.Close()
 					return err
+				}
+				// Close explicitly so late write or flush errors, such as ENOSPC, are
+				// reported instead of calling a truncated file exported.
+				if err := f.Close(); err != nil {
+					return waxerr.Wrapf(waxerr.CodeIO, "opml.export", err, "closing %s", args[0])
 				}
 				fmt.Fprintf(out(cmd), "Exported subscriptions to %s\n", args[0])
 				return nil

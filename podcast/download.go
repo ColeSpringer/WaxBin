@@ -11,9 +11,11 @@ import (
 
 	"github.com/colespringer/waxbin/identity"
 	"github.com/colespringer/waxbin/internal/diskfree"
+	"github.com/colespringer/waxbin/internal/fsx"
 	"github.com/colespringer/waxbin/internal/netsafe"
 	"github.com/colespringer/waxbin/internal/pathx"
 	"github.com/colespringer/waxbin/model"
+	"github.com/colespringer/waxbin/source"
 	"github.com/colespringer/waxbin/waxerr"
 )
 
@@ -27,7 +29,7 @@ type DownloadResult struct {
 }
 
 // Download fetches an episode's enclosure into the podcast directory, catalogs it
-// as the episode's file (flipping the episode to present), and best-effort fetches
+// as the episode's file (flipping the episode to present), and opportunistically fetches
 // its transcript and artwork. It enforces a free-space preflight and the configured
 // size cap. Re-downloading an episode replaces the prior file.
 func (s *Service) Download(ctx context.Context, episodePID model.PID) (*DownloadResult, error) {
@@ -68,8 +70,17 @@ func (s *Service) Download(ctx context.Context, episodePID model.PID) (*Download
 
 	// Stream to a temp file then rename, so an interrupted download never leaves a
 	// truncated file masquerading as a complete episode. The content hash is computed
-	// as the bytes stream past, avoiding a second full read of the finished file.
-	n, contentHash, err := s.streamTo(ctx, tmp, ep.EnclosureURL, user, pass)
+	// as the bytes stream past, avoiding a second full read of the finished file. The
+	// provider is selected by the show's source type, falling back to the built-in
+	// HTTP provider for a manual episode's plain enclosure (and erroring for an absent
+	// platform provider).
+	prov, err := s.fetchProvider(pod.SourceType)
+	if err != nil {
+		return nil, err
+	}
+	n, contentHash, err := s.fetchTo(ctx, prov, tmp, source.FetchRequest{
+		URL: ep.EnclosureURL, User: user, Pass: pass, MaxBytes: s.cfg.MaxEnclosureBytes,
+	})
 	if err != nil {
 		_ = os.Remove(pathx.Long(tmp))
 		return nil, err
@@ -90,9 +101,13 @@ func (s *Service) Download(ctx context.Context, episodePID model.PID) (*Download
 		Image:      s.fetchImage(ctx, ep.ImageURL),
 	})
 	if err != nil {
-		// The catalog write failed after the file landed on disk; remove the orphan so
-		// it does not accumulate (the episode stays remote, retryable).
-		_ = os.Remove(pathx.Long(dst))
+		// The catalog write failed after bytes landed at dst. Remove the new file only
+		// when the catalog cannot still reference it. A first download, or a re-download
+		// with a different name, leaves dst orphaned; a same-path re-download leaves dst
+		// as the live file still referenced by the existing episode row.
+		if ep.DisplayPath != dst {
+			_ = os.Remove(pathx.Long(dst))
+		}
 		return nil, err
 	}
 	// A re-download whose filename changed leaves the prior file uncataloged after
@@ -113,31 +128,98 @@ func (s *Service) Download(ctx context.Context, episodePID model.PID) (*Download
 	return res, nil
 }
 
-// streamTo downloads url to path, returning the byte count and the tagged content
-// hash computed from the streamed bytes (no second read of the finished file).
-func (s *Service) streamTo(ctx context.Context, path, url, user, pass string) (int64, string, error) {
+// fetchTo downloads an item through the provider into a temp file, returning the byte
+// count and tagged content hash (computed from the streamed bytes, no second read).
+// It creates and closes the file; the caller renames it into place on success.
+func (s *Service) fetchTo(ctx context.Context, prov source.Provider, path string, req source.FetchRequest) (int64, string, error) {
 	const op = "podcast.Download"
 	f, err := os.Create(pathx.Long(path))
 	if err != nil {
 		return 0, "", waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
-	hasher, finalize := identity.StreamHasher()
-	_, n, err := s.client.Stream(ctx, netsafe.Request{
-		URL: url, AcceptMIME: enclosureMIME, RequireContentType: true, BasicUser: user, BasicPass: pass,
-	}, io.MultiWriter(f, hasher), s.cfg.MaxEnclosureBytes)
-	if cerr := f.Close(); cerr != nil && err == nil {
-		err = waxerr.Wrap(waxerr.CodeIO, op, cerr)
+	res, ferr := prov.Fetch(ctx, req, f)
+	if cerr := f.Close(); cerr != nil && ferr == nil {
+		ferr = waxerr.Wrap(waxerr.CodeIO, op, cerr)
 	}
+	if ferr != nil {
+		return 0, "", ferr
+	}
+	// An injected provider could return (nil, nil); guard rather than nil-deref.
+	if res == nil {
+		return 0, "", waxerr.New(waxerr.CodeInternal, op, "provider returned no fetch result")
+	}
+	return res.Bytes, res.ContentHash, nil
+}
+
+// ImportEpisodeFile places an already-acquired local media file as an episode's
+// downloaded file: it moves (or copies) the file into the podcast directory, records
+// it as the episode's primary file, and flips the episode to present. It is the
+// acquired-episode ingest path, for example a file another provider already fetched,
+// distinct from Download, which fetches from a remote URL.
+func (s *Service) ImportEpisodeFile(ctx context.Context, episodePID model.PID, srcPath string, keepOriginal bool) (*DownloadResult, error) {
+	const op = "podcast.ImportEpisodeFile"
+	if strings.TrimSpace(s.cfg.Dir) == "" {
+		return nil, waxerr.New(waxerr.CodeInvalid, op, "no podcast download directory configured")
+	}
+	d, err := s.store.EpisodeByPID(ctx, episodePID)
 	if err != nil {
-		return n, "", err
+		return nil, err
 	}
-	return n, finalize(), nil
+	pod, err := s.store.PodcastByPID(ctx, d.Episode.PodcastPID)
+	if err != nil {
+		return nil, err
+	}
+	libID, err := s.podcastLibrary(ctx)
+	if err != nil {
+		return nil, err
+	}
+	info, err := os.Stat(pathx.Long(srcPath))
+	if err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	contentHash, err := identity.ContentHash(srcPath)
+	if err != nil {
+		return nil, err
+	}
+
+	folder := filepath.Join(s.cfg.Dir, folderName(pod))
+	if err := os.MkdirAll(pathx.Long(folder), 0o755); err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	// Cap the basename (like Download's downloadFilename) so a pathological source name
+	// stays within the filesystem segment limit rather than failing with ENAMETOOLONG.
+	dst := filepath.Join(folder, string(episodePID)+"-"+capFilename(netsafe.SafeFilename(filepath.Base(srcPath), "episode"), 120))
+	if err := fsx.MoveOrCopy(srcPath, dst, keepOriginal); err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+
+	file, err := s.fileRow(ctx, dst, info.Size(), contentHash)
+	if err != nil {
+		return nil, err
+	}
+	filePID, err := s.store.AttachEpisodeFile(ctx, model.AttachEpisodeFileInput{
+		EpisodePID: episodePID, LibraryID: libID, File: file, Image: s.fetchImage(ctx, d.Episode.ImageURL),
+	})
+	if err != nil {
+		// The catalog write failed after the file landed at dst. If it was copied, the
+		// original at srcPath survives, so remove the orphan. If it was moved, dst is the
+		// user's only copy; restore it to srcPath rather than deleting it. If restore
+		// fails, leave the file at dst.
+		if keepOriginal {
+			_ = os.Remove(pathx.Long(dst))
+		} else if rerr := fsx.Move(dst, srcPath); rerr != nil {
+			s.log.Warn("could not restore acquired episode file after a catalog failure; left in place",
+				"dst", dst, "src", srcPath, "err", rerr)
+		}
+		return nil, err
+	}
+	return &DownloadResult{EpisodePID: episodePID, FilePID: filePID, Path: dst, Bytes: info.Size()}, nil
 }
 
 // fileRow builds the catalog file row for a downloaded enclosure, given the content
 // hash already computed during streaming. Codec and duration are read from the file
-// best-effort (a podcast's metadata comes from the feed, not the file's tags, so a
-// read failure is non-fatal).
+// opportunistically. Podcast metadata comes from the feed, not the file's tags, so a
+// read failure is non-fatal.
 func (s *Service) fileRow(ctx context.Context, dst string, size int64, contentHash string) (model.File, error) {
 	const op = "podcast.Download"
 	info, err := os.Stat(pathx.Long(dst))
@@ -173,7 +255,7 @@ func (s *Service) fileRow(ctx context.Context, dst string, size int64, contentHa
 	return file, nil
 }
 
-// fetchTranscript downloads and stores an episode transcript, best effort. It
+// fetchTranscript downloads and stores an episode transcript when possible. It
 // returns whether a transcript was stored.
 func (s *Service) fetchTranscript(ctx context.Context, episodePID model.PID, url, mimeType string) bool {
 	resp, err := s.client.Do(ctx, netsafe.Request{URL: url, AcceptMIME: transcriptMIME, MaxBytes: s.cfg.MaxFeedBytes})
@@ -338,6 +420,12 @@ func (s *Service) ExportOPML(ctx context.Context, w io.Writer) error {
 	}
 	entries := make([]model.OPMLEntry, 0, len(pods))
 	for _, p := range pods {
+		// OPML lists re-subscribable RSS feeds. A manual show's synthetic feed_url and a
+		// youtube channel URL are not RSS, and netsafe rejects a non-http(s) xmlUrl on
+		// re-import, so skip non-rss shows rather than emit a broken round-trip entry.
+		if p.SourceType == model.SourceManual || p.SourceType == model.SourceYouTube {
+			continue
+		}
 		entries = append(entries, model.OPMLEntry{Title: p.Title, FeedURL: p.FeedURL})
 	}
 	return WriteOPML(w, "WaxBin podcast subscriptions", entries)
@@ -426,7 +514,13 @@ func sanitizeSegment(s string) string {
 	out := strings.Join(strings.Fields(b.String()), " ")
 	out = strings.Trim(out, ". ")
 	if len(out) > 80 {
-		out = strings.TrimRight(out[:80], " ")
+		// Back up to a UTF-8 rune boundary so the cap never splits a multibyte rune into
+		// an invalid directory name.
+		keep := 80
+		for keep > 0 && !utf8.RuneStart(out[keep]) {
+			keep--
+		}
+		out = strings.TrimRight(out[:keep], " ")
 	}
 	// Escape a Windows reserved device name (CON, NUL, COM1, ...) so a podcast whose
 	// title sanitizes to one can still be a directory cross-platform.
@@ -471,7 +565,7 @@ func transcriptFormat(mimeType, url string) string {
 	switch {
 	case strings.Contains(t, "json"):
 		return "json"
-	case strings.Contains(t, "srt"), strings.HasSuffix(strings.ToLower(url), ".srt"):
+	case strings.Contains(t, "srt"), strings.Contains(t, "subrip"), strings.HasSuffix(strings.ToLower(url), ".srt"):
 		return "srt"
 	case strings.Contains(t, "vtt"), strings.HasSuffix(strings.ToLower(url), ".vtt"):
 		return "vtt"

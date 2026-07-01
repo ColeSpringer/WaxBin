@@ -112,6 +112,7 @@ func Open(ctx context.Context, opts Options) (*Library, error) {
 			MaxEnclosureBytes: opts.Podcasts.MaxEnclosureBytes,
 			ReserveBytes:      opts.FreeSpaceReserveBytes,
 			DefaultRetention:  opts.Podcasts.DefaultRetention,
+			Providers:         opts.SourceProviders,
 		}, log),
 		decoders: decoders,
 		log:      log,
@@ -149,6 +150,7 @@ func (l *Library) ensureRoots(ctx context.Context) error {
 			Root:        []byte(r.Path),
 			DisplayRoot: r.Path,
 			Mode:        r.Mode,
+			Media:       r.Media,
 			Profile:     r.Profile,
 		}); err != nil {
 			return err
@@ -520,19 +522,13 @@ func (l *Library) Provenance(ctx context.Context, pid model.PID) ([]model.FieldP
 	return l.store.FieldProvenance(ctx, pid)
 }
 
-// PlanOrganize computes a dry-run move plan for the selected items under a
-// profile. This build organizes one managed library at a time.
+// PlanOrganize computes a dry-run move plan for the selected items across every
+// managed library, routing each item to the library whose root already contains it.
+// Roots are non-overlapping, so kind routing is implicit in the current file path.
+// A single managed library behaves exactly as before. profileName overrides each
+// library's configured profile when non-empty.
 func (l *Library) PlanOrganize(ctx context.Context, q query.Query, profileName string) (*organize.Plan, error) {
-	lib, err := l.singleManagedLibrary(ctx)
-	if err != nil {
-		return nil, err
-	}
-	// Default to the library's configured profile so a root registered
-	// `:managed:waxbin-native` lays out as waxbin-native without repeating --profile.
-	if profileName == "" {
-		profileName = lib.Profile
-	}
-	prof, err := l.profiles.ByName(profileName)
+	managed, err := l.managedLibraries(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -540,7 +536,31 @@ func (l *Library) PlanOrganize(ctx context.Context, q query.Query, profileName s
 	if err != nil {
 		return nil, err
 	}
-	return l.organizer.Plan(ctx, lib, prof, items)
+	merged := &organize.Plan{Profile: profileName}
+	for _, lib := range managed {
+		// Default to the library's configured profile so a root registered
+		// `:managed:...:waxbin-native` lays out as waxbin-native without repeating
+		// --profile; an explicit profileName overrides it for every library.
+		pname := profileName
+		if pname == "" {
+			pname = lib.Profile
+		}
+		prof, err := l.profiles.ByName(pname)
+		if err != nil {
+			return nil, err
+		}
+		// organize.Plan filters items to those under this library's root, so passing the
+		// full item set to each library partitions the work by current location.
+		p, err := l.organizer.Plan(ctx, lib, prof, items)
+		if err != nil {
+			return nil, err
+		}
+		merged.Actions = append(merged.Actions, p.Actions...)
+		if len(managed) == 1 {
+			merged.Root, merged.LibraryPID, merged.Profile = p.Root, p.LibraryPID, p.Profile
+		}
+	}
+	return merged, nil
 }
 
 // Profiles lists the organization profile names available to this library
@@ -718,22 +738,71 @@ func (l *Library) PlanImport(ctx context.Context, req ImportRequest) (*inbox.Pla
 	if strings.TrimSpace(req.Source) == "" {
 		return nil, waxerr.New(waxerr.CodeInvalid, "Library.PlanImport", "no import source folder")
 	}
-	lib, err := l.resolveManagedLibrary(ctx, req.LibraryPID)
-	if err != nil {
-		return nil, err
+	// Resolve the target and, for multiple media-typed managed roots, a per-file
+	// router so a staging folder splits its books into the audiobook root and its
+	// tracks into the music root. A named target (LibraryPID) or a single managed
+	// library imports everything into that one library (today's behavior).
+	var defaultLib *model.Library
+	var route func(model.Kind) *model.Library
+	if req.LibraryPID != "" {
+		lib, err := l.resolveManagedLibrary(ctx, req.LibraryPID)
+		if err != nil {
+			return nil, err
+		}
+		defaultLib = lib
+	} else {
+		managed, err := l.managedLibraries(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if len(managed) == 1 {
+			defaultLib = managed[0]
+		} else {
+			defaultLib = firstMixedOrFirst(managed)
+			route = func(kind model.Kind) *model.Library { return routeManaged(managed, kind) }
+		}
 	}
 	profileName := req.Profile
 	if profileName == "" {
-		profileName = lib.Profile
+		profileName = defaultLib.Profile
 	}
 	prof, err := l.profiles.ByName(profileName)
 	if err != nil {
 		return nil, err
 	}
+	// When routing across managed roots, lay each file out under its target library's own
+	// configured profile (or the explicit --profile override when given), so a book sent
+	// to the audiobook root uses that root's profile, not the default library's.
+	var profileFor func(*model.Library) organize.Profile
+	if route != nil {
+		override := req.Profile
+		profileFor = func(lib *model.Library) organize.Profile {
+			name := override
+			if name == "" {
+				name = lib.Profile
+			}
+			p, perr := l.profiles.ByName(name)
+			if perr != nil {
+				return prof // config-validated names don't error; fall back to the default
+			}
+			return p
+		}
+	}
 	return l.importer.Plan(ctx, inbox.Request{
-		Source: req.Source, Library: lib, Profile: prof, DupPolicy: req.DupPolicy,
-		Copy: req.Copy, ReserveBytes: l.opts.FreeSpaceReserveBytes,
+		Source: req.Source, Library: defaultLib, Route: route, Profile: prof, ProfileFor: profileFor,
+		DupPolicy: req.DupPolicy, Copy: req.Copy, ReserveBytes: l.opts.FreeSpaceReserveBytes,
 	})
+}
+
+// firstMixedOrFirst returns a mixed managed library if any, else the first managed
+// library. The caller still uses routeManaged to quarantine ambiguous typed routes.
+func firstMixedOrFirst(managed []*model.Library) *model.Library {
+	for _, lib := range managed {
+		if lib.MediaType() == model.MediaMixed {
+			return lib
+		}
+	}
+	return managed[0]
 }
 
 // ApplyImport executes an import plan under an "import"-scoped job.
@@ -750,6 +819,167 @@ func (l *Library) ApplyImport(ctx context.Context, plan *inbox.Plan) (*inbox.Rep
 // ImportBatches lists recorded import batches, newest first (limit 0 = all).
 func (l *Library) ImportBatches(ctx context.Context, limit int) ([]*model.ImportBatch, error) {
 	return l.store.ImportBatches(ctx, limit)
+}
+
+// AcquiredFile is a local media file to ingest as externally-acquired media (for
+// example one a source provider already fetched to disk). Path is required for a
+// track/book and optional for an episode (an episode may be ingested remote, to be
+// downloaded later from meta.SourceURL).
+type AcquiredFile struct {
+	Path string
+}
+
+// AcquiredMeta carries the origin provenance recorded against an acquired item plus
+// the per-kind ingest options.
+type AcquiredMeta struct {
+	// Origin provenance recorded in the acquisition table. SourceType defaults to
+	// manual when empty; an explicitly acquired item is never plain local. Local is
+	// the read-side default for an item with no acquisition row.
+	SourceType      model.SourceType
+	SourceURL       string
+	SourceID        string
+	Provider        string
+	ProviderVersion string
+	OptionsJSON     string
+
+	// Track/book placement.
+	Profile   string          // organization profile override (empty = the target library's)
+	Copy      bool            // copy instead of move the source file
+	DupPolicy model.DupPolicy // catalog-duplicate policy (default skip)
+
+	// Episode ingest.
+	ShowPID   model.PID // existing show to add the episode under; empty creates a manual show
+	ShowTitle string    // manual show title when ShowPID is empty (default "Acquired")
+	Title     string    // episode title (default the file base name)
+	Pinned    *bool     // pinned episode; default true for acquired episodes
+}
+
+// AcquiredResult reports an ImportAcquired. For a track/book it carries a reviewable
+// import Plan (apply it with ApplyImport); for an episode the ingest is immediate and
+// EpisodePID/FilePID/Path name the result.
+type AcquiredResult struct {
+	Kind       model.Kind
+	Plan       *inbox.Plan // track/book: review, then ApplyImport
+	EpisodePID model.PID   // episode: the ingested episode
+	FilePID    model.PID   // episode: its attached file, when a local file was provided
+	Path       string      // episode: the placed file path, when attached
+}
+
+// ImportAcquired routes an acquired or manual file by kind. Tracks and books go
+// through the import planner for the matching managed library, including duplicate
+// checks, destination rendering, free-space checks, and acquisition provenance.
+// Episodes go into the internal podcast library under an existing or manual show and
+// are pinned by default. WaxBin never performs platform extraction itself; callers
+// hand it an already acquired file or a remote enclosure URL.
+func (l *Library) ImportAcquired(ctx context.Context, file AcquiredFile, kind model.Kind, meta AcquiredMeta) (*AcquiredResult, error) {
+	switch kind {
+	case model.KindTrack, model.KindBook:
+		return l.importAcquiredMedia(ctx, file, kind, meta)
+	case model.KindEpisode:
+		return l.importAcquiredEpisode(ctx, file, meta)
+	default:
+		return nil, waxerr.New(waxerr.CodeInvalid, "Library.ImportAcquired", "unsupported acquired kind: "+string(kind))
+	}
+}
+
+// importAcquiredMedia plans one acquired track or book into the matching managed
+// library. The returned plan is still dry-run; ApplyImport performs the move/copy and
+// records the acquisition row.
+func (l *Library) importAcquiredMedia(ctx context.Context, file AcquiredFile, kind model.Kind, meta AcquiredMeta) (*AcquiredResult, error) {
+	const op = "Library.ImportAcquired"
+	if strings.TrimSpace(file.Path) == "" {
+		return nil, waxerr.New(waxerr.CodeInvalid, op, "no acquired file path")
+	}
+	lib, err := l.managedLibraryForKind(ctx, kind)
+	if err != nil {
+		return nil, err
+	}
+	profileName := meta.Profile
+	if profileName == "" {
+		profileName = lib.Profile
+	}
+	prof, err := l.profiles.ByName(profileName)
+	if err != nil {
+		return nil, err
+	}
+	plan, err := l.importer.PlanFile(ctx, inbox.Request{
+		Library: lib, Profile: prof, DupPolicy: meta.DupPolicy, Copy: meta.Copy,
+		ReserveBytes: l.opts.FreeSpaceReserveBytes, Acquisition: acquisitionInput(meta),
+	}, file.Path, kind)
+	if err != nil {
+		return nil, err
+	}
+	return &AcquiredResult{Kind: kind, Plan: plan}, nil
+}
+
+// importAcquiredEpisode ingests an acquired episode into the internal podcast
+// library: it resolves or creates the target show, upserts the episode (pinned), and
+// attaches the local file when one is provided (else the episode stays remote for a
+// later download). It records the origin provenance on the episode item.
+func (l *Library) importAcquiredEpisode(ctx context.Context, file AcquiredFile, meta AcquiredMeta) (*AcquiredResult, error) {
+	const op = "Library.ImportAcquired"
+	showPID := meta.ShowPID
+	if showPID == "" {
+		title := strings.TrimSpace(meta.ShowTitle)
+		if title == "" {
+			title = "Acquired"
+		}
+		pod, err := l.podcasts.AddManual(ctx, title, podcast.ManualOptions{})
+		if err != nil {
+			return nil, err
+		}
+		showPID = pod.PID
+	}
+	epTitle := strings.TrimSpace(meta.Title)
+	if epTitle == "" && file.Path != "" {
+		epTitle = filepath.Base(file.Path)
+	}
+	if epTitle == "" && meta.SourceURL == "" {
+		return nil, waxerr.New(waxerr.CodeInvalid, op, "acquired episode needs a title, file, or source url")
+	}
+	pinned := true
+	if meta.Pinned != nil {
+		pinned = *meta.Pinned
+	}
+	res, err := l.podcasts.AddEpisode(ctx, showPID, model.FeedEpisode{
+		Title: epTitle, EnclosureURL: meta.SourceURL,
+	}, pinned)
+	if err != nil {
+		return nil, err
+	}
+	out := &AcquiredResult{Kind: model.KindEpisode, EpisodePID: res.EpisodePID}
+	if strings.TrimSpace(file.Path) != "" {
+		dr, err := l.podcasts.ImportEpisodeFile(ctx, res.EpisodePID, file.Path, meta.Copy)
+		if err != nil {
+			return nil, err
+		}
+		out.FilePID, out.Path = dr.FilePID, dr.Path
+	}
+	// Record origin provenance on the episode item, so reads and queries can report
+	// where it came from.
+	if err := l.store.PutAcquisition(ctx, res.EpisodePID, *acquisitionInput(meta)); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// acquisitionInput builds the provenance row input from acquired metadata, defaulting
+// the source type to manual (an explicitly acquired item is never plain local).
+func acquisitionInput(meta AcquiredMeta) *model.AcquisitionInput {
+	st := meta.SourceType
+	if st == "" {
+		st = model.SourceManual
+	}
+	return &model.AcquisitionInput{
+		SourceType: st, SourceURL: meta.SourceURL, SourceID: meta.SourceID,
+		Provider: meta.Provider, ProviderVersion: meta.ProviderVersion, OptionsJSON: meta.OptionsJSON,
+	}
+}
+
+// Acquisition returns an item's origin provenance, or CodeNotFound when it was
+// locally scanned (no acquisition row).
+func (l *Library) Acquisition(ctx context.Context, pid model.PID) (*model.Acquisition, error) {
+	return l.store.AcquisitionByItem(ctx, pid)
 }
 
 // Backup writes a self-contained byte copy of the catalog to dest. The copy
@@ -788,14 +1018,24 @@ func (l *Library) Export(ctx context.Context, w io.Writer) (*port.Manifest, erro
 		return nil, err
 	}
 	items := make([]*model.ItemView, 0, len(allItems))
+	exported := make(map[model.PID]bool, len(allItems))
 	for _, it := range allItems {
 		if it.Kind != model.KindEpisode {
 			items = append(items, it)
+			exported[it.PID] = true
 		}
 	}
-	plays, err := l.store.AllPlayStates(ctx)
+	allPlays, err := l.store.AllPlayStates(ctx)
 	if err != nil {
 		return nil, err
+	}
+	// Drop play states for items the export omits (episodes), so the manifest never
+	// carries a play state referencing an item that is not in it.
+	plays := make([]model.PlayState, 0, len(allPlays))
+	for _, ps := range allPlays {
+		if exported[ps.ItemPID] {
+			plays = append(plays, ps)
+		}
 	}
 	schema, err := l.store.CatalogVersion(ctx)
 	if err != nil {
@@ -922,7 +1162,8 @@ func (l *Library) resolveLibraries(ctx context.Context, pid model.PID) ([]*model
 	return nil, waxerr.New(waxerr.CodeNotFound, "Library.Scan", "no such library: "+string(pid))
 }
 
-func (l *Library) singleManagedLibrary(ctx context.Context) (*model.Library, error) {
+// managedLibraries returns every managed library, or an error when none exist.
+func (l *Library) managedLibraries(ctx context.Context) ([]*model.Library, error) {
 	libs, err := l.store.Libraries(ctx)
 	if err != nil {
 		return nil, err
@@ -933,14 +1174,60 @@ func (l *Library) singleManagedLibrary(ctx context.Context) (*model.Library, err
 			managed = append(managed, lib)
 		}
 	}
-	switch len(managed) {
-	case 1:
-		return managed[0], nil
-	case 0:
-		return nil, waxerr.New(waxerr.CodeInvalid, "Library.Organize", "no managed library to organize")
+	if len(managed) == 0 {
+		return nil, waxerr.New(waxerr.CodeInvalid, "Library.managed", "no managed library configured")
+	}
+	return managed, nil
+}
+
+func (l *Library) singleManagedLibrary(ctx context.Context) (*model.Library, error) {
+	managed, err := l.managedLibraries(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if len(managed) != 1 {
+		return nil, waxerr.New(waxerr.CodeInvalid, "Library.managed",
+			"multiple managed libraries configured; select one by kind or pid")
+	}
+	return managed[0], nil
+}
+
+// managedLibraryForKind picks the managed library for an item kind. A single
+// type-specific library (music/audiobook) that accepts the kind wins over a mixed
+// root. The choice errors when no library accepts the kind or more than one does.
+func (l *Library) managedLibraryForKind(ctx context.Context, kind model.Kind) (*model.Library, error) {
+	managed, err := l.managedLibraries(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if lib := routeManaged(managed, kind); lib != nil {
+		return lib, nil
+	}
+	return nil, waxerr.New(waxerr.CodeInvalid, "Library.import",
+		"no managed library holds "+string(kind)+" media (or the choice is ambiguous); configure a media-typed root")
+}
+
+// routeManaged returns the managed library a kind routes to, or nil when there is no
+// clear match. A single type-specific library wins; if none exists, a single mixed
+// library wins. Any other case is ambiguous.
+func routeManaged(managed []*model.Library, kind model.Kind) *model.Library {
+	var typed, mixed *model.Library
+	typedN, mixedN := 0, 0
+	for _, lib := range managed {
+		switch {
+		case lib.MediaType() == model.MediaMixed:
+			mixed, mixedN = lib, mixedN+1
+		case lib.MediaType().Accepts(kind):
+			typed, typedN = lib, typedN+1
+		}
+	}
+	switch {
+	case typedN == 1:
+		return typed
+	case typedN == 0 && mixedN == 1:
+		return mixed
 	default:
-		return nil, waxerr.New(waxerr.CodeInvalid, "Library.Organize",
-			"this build organizes a single managed library; multiple are configured")
+		return nil
 	}
 }
 

@@ -12,7 +12,7 @@ import (
 // podcastSelect reads a podcast row plus its episode and downloaded counts.
 const podcastSelect = `SELECT p.id, p.pid, p.feed_url, p.identity_key, p.title, p.sort_key, p.author,
 	p.description, p.link, p.language, p.category, p.explicit, p.image_url, p.guid, p.etag,
-	p.last_modified, p.last_fetched_at, p.retention_keep, p.auth_user, p.created_at, p.updated_at,
+	p.last_modified, p.last_fetched_at, p.retention_keep, p.auth_user, p.source_type, p.created_at, p.updated_at,
 	(SELECT COUNT(*) FROM episode e WHERE e.podcast_id = p.id) AS ep_count,
 	(SELECT COUNT(*) FROM episode e JOIN playable_item pi ON pi.id = e.item_id
 	   WHERE e.podcast_id = p.id AND pi.state = 'present') AS dl_count
@@ -23,7 +23,7 @@ func scanPodcast(sc rowScanner) (*model.Podcast, error) {
 	var lastFetched sql.NullInt64
 	if err := sc.Scan(&p.ID, &p.PID, &p.FeedURL, &p.IdentityKey, &p.Title, &p.SortKey, &p.Author,
 		&p.Description, &p.Link, &p.Language, &p.Category, &p.Explicit, &p.ImageURL, &p.GUID, &p.ETag,
-		&p.LastModified, &lastFetched, &p.RetentionKeep, &p.AuthUser, &p.CreatedAt, &p.UpdatedAt,
+		&p.LastModified, &lastFetched, &p.RetentionKeep, &p.AuthUser, &p.SourceType, &p.CreatedAt, &p.UpdatedAt,
 		&p.EpisodeCount, &p.DownloadedCount); err != nil {
 		return nil, err
 	}
@@ -83,7 +83,7 @@ func (s *Store) PodcastByIdentity(ctx context.Context, key string) (*model.Podca
 const episodeSelect = `SELECT pi.pid, pi.title, pi.state, p.pid, p.title,
 	e.guid, e.description, e.link, e.pub_date, e.year, e.season, e.episode_no, e.episode_type,
 	e.duration_ms, e.explicit, e.enclosure_url, e.enclosure_type, e.enclosure_size,
-	e.transcript_url, e.transcript_type, e.chapters_url, e.image_url, e.created_at, e.updated_at,
+	e.transcript_url, e.transcript_type, e.chapters_url, e.image_url, e.pinned, e.created_at, e.updated_at,
 	f.pid, f.display_path, f.duration_ms,
 	EXISTS(SELECT 1 FROM episode_transcript et WHERE et.item_id = pi.id) AS has_transcript
 	FROM episode e
@@ -101,7 +101,7 @@ func scanEpisode(sc rowScanner) (*model.Episode, bool, error) {
 	if err := sc.Scan(&e.PID, &e.Title, &state, &e.PodcastPID, &e.PodcastTitle,
 		&e.GUID, &e.Description, &e.Link, &pubDate, &year, &season, &episodeNo, &epType,
 		&durMS, &e.Explicit, &e.EnclosureURL, &e.EnclosureType, &e.EnclosureSize,
-		&e.TranscriptURL, &e.TranscriptType, &e.ChaptersURL, &e.ImageURL, &e.CreatedAt, &e.UpdatedAt,
+		&e.TranscriptURL, &e.TranscriptType, &e.ChaptersURL, &e.ImageURL, &e.Pinned, &e.CreatedAt, &e.UpdatedAt,
 		&fpid, &fdisp, &fileDurMS, &hasTranscript); err != nil {
 		return nil, false, err
 	}
@@ -126,7 +126,10 @@ func scanEpisode(sc rowScanner) (*model.Episode, bool, error) {
 // last). limit 0 returns all.
 func (s *Store) EpisodesByPodcast(ctx context.Context, podcastPID model.PID, limit int) ([]*model.Episode, error) {
 	const op = "store.EpisodesByPodcast"
-	stmt := episodeSelect + " WHERE p.pid = ? ORDER BY COALESCE(e.pub_date, 0) DESC, pi.pid DESC"
+	// Tie-break pi.pid ASC (like DownloadedEpisodes): a feed lists newest-first and is
+	// ingested in that order, so within a same-pubdate batch the newest episode holds the
+	// lowest ULID; ASC lists it first, honoring the newest-first contract.
+	stmt := episodeSelect + " WHERE p.pid = ? ORDER BY COALESCE(e.pub_date, 0) DESC, pi.pid ASC"
 	args := []any{string(podcastPID)}
 	if limit > 0 {
 		stmt += " LIMIT ?"
@@ -161,9 +164,10 @@ func (s *Store) EpisodeByPID(ctx context.Context, pid model.PID) (*model.Episode
 	return &model.EpisodeDetail{Episode: e, HasTranscript: hasTranscript}, nil
 }
 
-// DownloadedEpisodes lists a podcast's currently-downloaded episodes, newest first,
-// so retention can keep the newest N and drop the rest. Each carries its file's
-// display path for on-disk removal.
+// DownloadedEpisodes lists a podcast's currently-downloaded episodes eligible for
+// retention, newest first, so retention can keep the newest N and drop the rest.
+// Each carries its file's display path for on-disk removal. Pinned episodes are
+// excluded entirely: retention never counts them toward N nor reclaims them.
 //
 // The pub_date tie-break is pid ASC, not DESC: a feed lists newest-first and the
 // upsert loop ingests in that order, so within a same-date batch the newest episode
@@ -172,7 +176,8 @@ func (s *Store) EpisodeByPID(ctx context.Context, pid model.PID) (*model.Episode
 func (s *Store) DownloadedEpisodes(ctx context.Context, podcastPID model.PID) ([]*model.Episode, error) {
 	const op = "store.DownloadedEpisodes"
 	rows, err := s.read.QueryContext(ctx,
-		episodeSelect+" WHERE p.pid = ? AND pi.state = 'present' ORDER BY COALESCE(e.pub_date, 0) DESC, pi.pid ASC",
+		episodeSelect+" WHERE p.pid = ? AND pi.state = 'present' AND COALESCE(e.pinned,0) = 0"+
+			" ORDER BY COALESCE(e.pub_date, 0) DESC, pi.pid ASC",
 		string(podcastPID))
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)

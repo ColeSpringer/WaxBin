@@ -31,6 +31,7 @@ const itemJoins = ` FROM playable_item pi
 	LEFT JOIN series srs ON srs.id = bk.series_id
 	LEFT JOIN episode ep ON ep.item_id = pi.id
 	LEFT JOIN podcast pod ON pod.id = ep.podcast_id
+	LEFT JOIN acquisition acq ON acq.item_id = pi.id
 	LEFT JOIN item_file pf ON pf.item_id = pi.id AND pf.role = 'primary'
 	LEFT JOIN file f ON f.id = pf.file_id`
 
@@ -52,6 +53,7 @@ const itemViewCols = `pi.pid, pi.kind, pi.state, pi.title,
 	COALESCE(bk.author_sort,''), COALESCE(bk.narrator,''), COALESCE(srs.name,''),
 	COALESCE(bk.series_seq,''), COALESCE(bk.subtitle,''), COALESCE(bk.asin,''),
 	ep.season, ep.pub_date,
+	COALESCE(acq.source_type, pod.source_type, 'local'),
 	f.pid, f.path, f.display_path,
 	COALESCE(bk.total_duration_ms, f.duration_ms, ep.duration_ms),
 	f.container, f.codec`
@@ -85,7 +87,7 @@ func itemViewDests(v *model.ItemView, n *itemViewNulls) []any {
 		&v.PID, &v.Kind, &v.State, &v.Title,
 		&v.Artist, &v.AlbumArtist, &v.Album, &n.trackNo, &n.discNo, &n.year, &v.Genre, &n.compilation,
 		&v.AuthorSort, &v.Narrator, &v.Series, &v.SeriesSeq, &v.Subtitle, &v.ASIN,
-		&n.season, &n.pubDate,
+		&n.season, &n.pubDate, &v.Source,
 		&n.fpid, &n.fpath, &n.fdisp, &n.dur, &n.container, &n.codec,
 	}
 }
@@ -155,15 +157,16 @@ func scanFile(sc rowScanner) (*model.File, error) {
 
 func scanLibrary(sc rowScanner) (*model.Library, error) {
 	var lib model.Library
-	var mode string
-	if err := sc.Scan(&lib.ID, &lib.PID, &lib.Root, &lib.DisplayRoot, &mode, &lib.Profile, &lib.CreatedAt); err != nil {
+	var mode, media string
+	if err := sc.Scan(&lib.ID, &lib.PID, &lib.Root, &lib.DisplayRoot, &mode, &media, &lib.Profile, &lib.CreatedAt); err != nil {
 		return nil, err
 	}
 	lib.Mode = model.Mode(mode)
+	lib.Media = model.MediaType(media)
 	return &lib, nil
 }
 
-const librarySelect = "SELECT id, pid, root, display_root, mode, profile, created_at FROM library"
+const librarySelect = "SELECT id, pid, root, display_root, mode, media, profile, created_at FROM library"
 
 func libraryByRootTx(ctx context.Context, q queryer, root []byte) (*model.Library, error) {
 	return libraryByRootDB(ctx, q, root)

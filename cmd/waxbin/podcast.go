@@ -14,6 +14,8 @@ func newPodcastCmd(g *globals) *cobra.Command {
 	cmd := &cobra.Command{Use: "podcast", Short: "Subscribe to and manage podcast feeds"}
 	cmd.AddCommand(
 		newPodcastAddCmd(g),
+		newPodcastAddManualCmd(g),
+		newPodcastAddEpisodeCmd(g),
 		newPodcastListCmd(g),
 		newPodcastShowCmd(g),
 		newPodcastSyncCmd(g),
@@ -22,6 +24,75 @@ func newPodcastCmd(g *globals) *cobra.Command {
 		newPodcastRetentionCmd(g),
 		newPodcastRemoveCmd(g),
 	)
+	return cmd
+}
+
+func newPodcastAddManualCmd(g *globals) *cobra.Command {
+	var author, description, link string
+	cmd := &cobra.Command{
+		Use:   "add-manual <title>",
+		Short: "Create a manual (curated) show with no feed to sync",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			lib, _, err := g.open(cmd)
+			if err != nil {
+				return err
+			}
+			defer lib.Close()
+			pod, err := lib.Podcasts().AddManual(ctx(cmd), args[0], podcast.ManualOptions{
+				Author: author, Description: description, Link: link,
+			})
+			if err != nil {
+				return err
+			}
+			if g.jsonOut {
+				return printJSON(cmd, toPodcastView(pod))
+			}
+			fmt.Fprintf(out(cmd), "Created manual show: %s (%s)\n", pod.Title, pod.PID)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&author, "author", "", "show author")
+	cmd.Flags().StringVar(&description, "description", "", "show description")
+	cmd.Flags().StringVar(&link, "link", "", "show website")
+	return cmd
+}
+
+func newPodcastAddEpisodeCmd(g *globals) *cobra.Command {
+	var title, url string
+	var noPin bool
+	cmd := &cobra.Command{
+		Use:   "add-episode <show-pid>",
+		Short: "Add a single episode to a show (pinned by default)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			lib, _, err := g.open(cmd)
+			if err != nil {
+				return err
+			}
+			defer lib.Close()
+			res, err := lib.Podcasts().AddEpisode(ctx(cmd), model.PID(args[0]),
+				model.FeedEpisode{Title: title, EnclosureURL: url}, !noPin)
+			if err != nil {
+				return err
+			}
+			if g.jsonOut {
+				return printJSON(cmd, struct {
+					Episode string `json:"episode"`
+					Created bool   `json:"created"`
+				}{string(res.EpisodePID), res.Created})
+			}
+			verb := "Updated"
+			if res.Created {
+				verb = "Added"
+			}
+			fmt.Fprintf(out(cmd), "%s episode %s\n", verb, res.EpisodePID)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&title, "title", "", "episode title")
+	cmd.Flags().StringVar(&url, "url", "", "episode enclosure (media) URL to download later")
+	cmd.Flags().BoolVar(&noPin, "no-pin", false, "do not pin the episode (retention may reclaim it)")
 	return cmd
 }
 
@@ -75,10 +146,10 @@ func newPodcastListCmd(g *globals) *cobra.Command {
 				return printJSON(cmd, views)
 			}
 			tw := tabwriter.NewWriter(out(cmd), 0, 2, 2, ' ', 0)
-			fmt.Fprintln(tw, "PID\tTITLE\tEPISODES\tDOWNLOADED\tKEEP")
+			fmt.Fprintln(tw, "PID\tTITLE\tSOURCE\tEPISODES\tDOWNLOADED\tKEEP")
 			for _, p := range pods {
-				fmt.Fprintf(tw, "%s\t%s\t%d\t%d\t%s\n",
-					p.PID, p.Title, p.EpisodeCount, p.DownloadedCount, keepLabel(p.RetentionKeep))
+				fmt.Fprintf(tw, "%s\t%s\t%s\t%d\t%d\t%s\n",
+					p.PID, p.Title, sourceLabel(p.SourceType), p.EpisodeCount, p.DownloadedCount, keepLabel(p.RetentionKeep))
 			}
 			return tw.Flush()
 		},
@@ -118,6 +189,7 @@ func newPodcastShowCmd(g *globals) *cobra.Command {
 			if pod.Author != "" {
 				fmt.Fprintf(w, "author:     %s\n", pod.Author)
 			}
+			fmt.Fprintf(w, "source:     %s\n", sourceLabel(pod.SourceType))
 			fmt.Fprintf(w, "feed:       %s\n", pod.FeedURL)
 			if pod.Link != "" {
 				fmt.Fprintf(w, "website:    %s\n", pod.Link)
@@ -309,6 +381,7 @@ type podcastView struct {
 	Title       string    `json:"title"`
 	Author      string    `json:"author,omitempty"`
 	FeedURL     string    `json:"feedUrl"`
+	Source      string    `json:"source"`
 	Description string    `json:"description,omitempty"`
 	Link        string    `json:"link,omitempty"`
 	Language    string    `json:"language,omitempty"`
@@ -322,11 +395,20 @@ type podcastView struct {
 
 func toPodcastView(p *model.Podcast) podcastView {
 	return podcastView{
-		PID: p.PID, Title: p.Title, Author: p.Author, FeedURL: p.FeedURL,
+		PID: p.PID, Title: p.Title, Author: p.Author, FeedURL: p.FeedURL, Source: sourceLabel(p.SourceType),
 		Description: p.Description, Link: p.Link, Language: p.Language, Category: p.Category,
 		Explicit: p.Explicit, Episodes: p.EpisodeCount, Downloaded: p.DownloadedCount,
 		Keep: p.RetentionKeep, AuthUser: p.AuthUser,
 	}
+}
+
+// sourceLabel renders a show's source type, defaulting an unset value to rss for
+// catalogs written before source_type was stored.
+func sourceLabel(st model.SourceType) string {
+	if st == "" {
+		return string(model.SourceRSS)
+	}
+	return string(st)
 }
 
 type episodeView struct {

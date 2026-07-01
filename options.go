@@ -6,6 +6,7 @@ import (
 	"os"
 
 	"github.com/colespringer/waxbin/config"
+	"github.com/colespringer/waxbin/source"
 )
 
 // Options configures opening a Library.
@@ -32,6 +33,11 @@ type Options struct {
 	FreeSpaceReserveBytes int64
 	// Podcasts configures the podcast engine (download dir + network policy).
 	Podcasts config.PodcastConfig
+	// SourceProviders are injected acquisition providers, such as a youtube provider
+	// supplied by another module. The built-in netsafe rss provider is always
+	// registered; these register under their own source types. The default CLI build
+	// does not ship extra providers.
+	SourceProviders []source.Provider
 
 	// Storage tuning; zero values fall back to library defaults.
 	BusyTimeoutMS int

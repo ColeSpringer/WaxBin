@@ -36,6 +36,7 @@ var itemFields = query.FieldMap{
 	"disc_no":      {Expr: "t.disc_no", Kind: query.KindInt},
 	"season":       {Expr: "ep.season", Kind: query.KindInt},
 	"published":    {Expr: "ep.pub_date", Kind: query.KindTime},
+	"source":       {Expr: "COALESCE(acq.source_type, pod.source_type, 'local')", Kind: query.KindText},
 	"duration_ms":  {Expr: "COALESCE(bk.total_duration_ms, f.duration_ms, ep.duration_ms)", Kind: query.KindInt},
 	"codec":        {Expr: "f.codec", Kind: query.KindText},
 	"container":    {Expr: "f.container", Kind: query.KindText},

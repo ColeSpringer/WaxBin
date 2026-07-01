@@ -17,9 +17,11 @@ const fingerprintSchemaVersion = 3
 // doctor skips the ReplayGain count on a catalog older than this.
 const loudnessSchemaVersion = 7
 
-// podcastSchemaVersion is the migration that introduced the podcast tables;
-// doctor skips the subscription count on a catalog older than this.
-const podcastSchemaVersion = 18
+// podcastSchemaVersion is the lowest schema at which a podcast read succeeds: the
+// podcast tables landed in v18, but Podcasts() reads the v19 source_type column, so
+// doctor skips the subscription count on a catalog older than v19 to avoid a
+// no-such-column error on a read-only catalog that has not been migrated yet.
+const podcastSchemaVersion = 19
 
 // DoctorReport summarizes catalog health and detected capabilities.
 type DoctorReport struct {

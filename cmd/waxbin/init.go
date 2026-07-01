@@ -39,10 +39,10 @@ func newInitCmd(g *globals) *cobra.Command {
 
 			fmt.Fprintf(out(cmd), "Initialized catalog at %s (schema v%d)\n", cfg.DBPath, sqlite.SchemaVersion)
 			if len(libs) == 0 {
-				fmt.Fprintln(out(cmd), "No library roots registered (pass --root path[:mode[:profile]]).")
+				fmt.Fprintln(out(cmd), "No library roots registered (pass --root path[:mode[:media[:profile]]]).")
 			}
 			for _, l := range libs {
-				fmt.Fprintf(out(cmd), "  %s  %s  [%s, %s]\n", l.PID, l.DisplayRoot, l.Mode, l.Profile)
+				fmt.Fprintf(out(cmd), "  %s  %s  [%s, %s, %s]\n", l.PID, l.DisplayRoot, l.Mode, l.MediaType(), l.Profile)
 			}
 			return nil
 		},

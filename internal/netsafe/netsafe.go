@@ -384,16 +384,38 @@ func guardDialAddr(address string) error {
 	return nil
 }
 
+// extraBlockedNets are SSRF-relevant special-use ranges net.IP's classifiers miss:
+// RFC 6598 CGNAT (100.64.0.0/10), which can reach cloud metadata endpoints such
+// as Alibaba's 100.100.100.200 and Tailscale hosts, plus RFC 6890 IETF protocol
+// assignments (192.0.0.0/24). Parsed once at init.
+var extraBlockedNets = func() []*net.IPNet {
+	var out []*net.IPNet
+	for _, c := range []string{"100.64.0.0/10", "192.0.0.0/24"} {
+		if _, n, err := net.ParseCIDR(c); err == nil {
+			out = append(out, n)
+		}
+	}
+	return out
+}()
+
 // isBlockedIP reports whether ip is in a range the SSRF guard refuses: loopback,
-// RFC1918 private + ULA (IsPrivate), link-local uni/multicast, unspecified, and
-// IPv4-mapped forms of any of those.
+// RFC1918 private + ULA (IsPrivate), link-local uni/multicast, unspecified, CGNAT/IETF
+// special-use, and IPv4-mapped forms of any of those.
 func isBlockedIP(ip net.IP) bool {
 	if v4 := ip.To4(); v4 != nil {
 		ip = v4
 	}
-	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
+	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
 		ip.IsLinkLocalMulticast() || ip.IsUnspecified() ||
-		ip.IsInterfaceLocalMulticast()
+		ip.IsInterfaceLocalMulticast() {
+		return true
+	}
+	for _, n := range extraBlockedNets {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 // SafeFilename derives a safe local filename from a remote URL or

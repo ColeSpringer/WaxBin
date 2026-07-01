@@ -14,13 +14,13 @@ import (
 
 func newQueryCmd(g *globals) *cobra.Command {
 	var (
-		title, artist, album, genre, kind string
-		year, limit                       int
-		sortField                         string
-		desc                              bool
-		rulePath                          string
-		pageSize                          int
-		cursor                            string
+		title, artist, album, genre, kind, source string
+		year, limit                               int
+		sortField                                 string
+		desc                                      bool
+		rulePath                                  string
+		pageSize                                  int
+		cursor                                    string
 	)
 	cmd := &cobra.Command{
 		Use:     "query",
@@ -31,7 +31,7 @@ func newQueryCmd(g *globals) *cobra.Command {
 			"With --page-size, results are paged in collation-correct order using a keyset --cursor.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			q, err := buildQuery(cmd, rulePath, queryFlags{
-				title: title, artist: artist, album: album, genre: genre, kind: kind,
+				title: title, artist: artist, album: album, genre: genre, kind: kind, source: source,
 				year: year, limit: limit, sortField: sortField, desc: desc,
 			})
 			if err != nil {
@@ -77,6 +77,7 @@ func newQueryCmd(g *globals) *cobra.Command {
 	f.StringVar(&album, "album", "", "match album (substring)")
 	f.StringVar(&genre, "genre", "", "match genre (exact)")
 	f.StringVar(&kind, "kind", "", "match kind: track|book|episode (exact)")
+	f.StringVar(&source, "source", "", "match acquisition source: local|rss|youtube|manual (exact)")
 	f.IntVar(&year, "year", 0, "match year (exact)")
 	f.IntVar(&limit, "limit", 0, "limit results (0 = no limit)")
 	f.StringVar(&sortField, "sort", "", "sort field (e.g. title, artist, year)")
@@ -118,10 +119,10 @@ type pager interface {
 }
 
 type queryFlags struct {
-	title, artist, album, genre, kind string
-	year, limit                       int
-	sortField                         string
-	desc                              bool
+	title, artist, album, genre, kind, source string
+	year, limit                               int
+	sortField                                 string
+	desc                                      bool
 }
 
 // buildQuery constructs a query from a --rule file (if given) or from flags.
@@ -149,6 +150,9 @@ func buildQuery(cmd *cobra.Command, rulePath string, qf queryFlags) (query.Query
 	}
 	if qf.kind != "" {
 		b.Where("kind", query.OpIs, qf.kind)
+	}
+	if qf.source != "" {
+		b.Where("source", query.OpIs, qf.source)
 	}
 	if cmd.Flags().Changed("year") {
 		b.Where("year", query.OpIs, qf.year)

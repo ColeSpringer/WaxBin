@@ -14,13 +14,17 @@ type libView struct {
 	PID     string `json:"pid"`
 	Root    string `json:"root"`
 	Mode    string `json:"mode"`
+	Media   string `json:"media,omitempty"`
 	Profile string `json:"profile"`
 }
 
 func libViews(libs []*model.Library) []libView {
 	out := make([]libView, 0, len(libs))
 	for _, l := range libs {
-		out = append(out, libView{PID: string(l.PID), Root: l.DisplayRoot, Mode: string(l.Mode), Profile: l.Profile})
+		out = append(out, libView{
+			PID: string(l.PID), Root: l.DisplayRoot, Mode: string(l.Mode),
+			Media: string(l.MediaType()), Profile: l.Profile,
+		})
 	}
 	return out
 }
@@ -37,6 +41,7 @@ type itemView struct {
 	Disc        int    `json:"disc,omitempty"`
 	Year        int    `json:"year,omitempty"`
 	Genre       string `json:"genre,omitempty"`
+	Source      string `json:"source,omitempty"`
 	DurationMS  int64  `json:"durationMs,omitempty"`
 	Codec       string `json:"codec,omitempty"`
 	Path        string `json:"path,omitempty"`
@@ -47,8 +52,8 @@ func toItemView(v *model.ItemView) itemView {
 	return itemView{
 		PID: string(v.PID), Kind: string(v.Kind), State: string(v.State), Title: v.Title,
 		Artist: v.Artist, AlbumArtist: v.AlbumArtist, Album: v.Album, Track: v.TrackNo,
-		Disc: v.DiscNo, Year: v.Year, Genre: v.Genre, DurationMS: v.DurationMS,
-		Codec: v.Codec, Path: v.DisplayPath, FilePID: string(v.FilePID),
+		Disc: v.DiscNo, Year: v.Year, Genre: v.Genre, Source: string(v.Source),
+		DurationMS: v.DurationMS, Codec: v.Codec, Path: v.DisplayPath, FilePID: string(v.FilePID),
 	}
 }
 

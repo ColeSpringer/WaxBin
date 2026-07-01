@@ -27,32 +27,35 @@ func (s *Store) EnsureLibrary(ctx context.Context, lib *model.Library) (*model.L
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
+		media := string(lib.MediaType()) // "" normalizes to mixed
 		if existing != nil {
 			// No-op when nothing changed, so re-opening a library each session
 			// doesn't emit a spurious change_log delta.
-			if existing.DisplayRoot == lib.DisplayRoot && existing.Mode == lib.Mode && existing.Profile == lib.Profile {
+			if existing.DisplayRoot == lib.DisplayRoot && existing.Mode == lib.Mode &&
+				existing.MediaType() == lib.MediaType() && existing.Profile == lib.Profile {
 				out = existing
 				return nil
 			}
 			if _, err := tx.ExecContext(ctx,
-				"UPDATE library SET display_root=?, mode=?, profile=? WHERE id=?",
-				lib.DisplayRoot, string(lib.Mode), lib.Profile, existing.ID); err != nil {
+				"UPDATE library SET display_root=?, mode=?, media=?, profile=? WHERE id=?",
+				lib.DisplayRoot, string(lib.Mode), media, lib.Profile, existing.ID); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
-			existing.DisplayRoot, existing.Mode, existing.Profile = lib.DisplayRoot, lib.Mode, lib.Profile
+			existing.DisplayRoot, existing.Mode, existing.Media, existing.Profile =
+				lib.DisplayRoot, lib.Mode, model.MediaType(media), lib.Profile
 			out = existing
 			return appendChange(ctx, tx, "library", existing.PID, model.OpUpdate)
 		}
 		pid := model.NewPID()
 		r, err := tx.ExecContext(ctx,
-			"INSERT INTO library(pid, root, display_root, mode, profile, created_at) VALUES (?,?,?,?,?,?)",
-			string(pid), lib.Root, lib.DisplayRoot, string(lib.Mode), lib.Profile, now)
+			"INSERT INTO library(pid, root, display_root, mode, media, profile, created_at) VALUES (?,?,?,?,?,?,?)",
+			string(pid), lib.Root, lib.DisplayRoot, string(lib.Mode), media, lib.Profile, now)
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		id, _ := r.LastInsertId()
 		out = &model.Library{ID: id, PID: pid, Root: lib.Root, DisplayRoot: lib.DisplayRoot,
-			Mode: lib.Mode, Profile: lib.Profile, CreatedAt: now}
+			Mode: lib.Mode, Media: model.MediaType(media), Profile: lib.Profile, CreatedAt: now}
 		return appendChange(ctx, tx, "library", pid, model.OpCreate)
 	})
 	if err != nil {
@@ -75,8 +78,7 @@ func (s *Store) LibraryByRoot(ctx context.Context, root []byte) (*model.Library,
 
 // Libraries lists all registered libraries.
 func (s *Store) Libraries(ctx context.Context) ([]*model.Library, error) {
-	rows, err := s.read.QueryContext(ctx,
-		"SELECT id, pid, root, display_root, mode, profile, created_at FROM library ORDER BY id")
+	rows, err := s.read.QueryContext(ctx, librarySelect+" ORDER BY id")
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, "store.Libraries", err)
 	}
