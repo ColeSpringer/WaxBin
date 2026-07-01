@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/waxerr"
@@ -151,7 +152,24 @@ func itemFields(item *model.ItemView) map[string]fieldVal {
 	f["narrator"] = fieldVal{s: foldField(item.Narrator)}
 	f["subtitle"] = fieldVal{s: foldField(item.Subtitle)}
 	f["asin"] = fieldVal{s: foldField(item.ASIN)}
+
+	// Podcast tokens. For an episode, Album is the podcast title in the shared item
+	// view and Title is the episode title. These stay empty for non-episodes, which
+	// drops their optional groups.
+	f["podcast"] = fieldVal{s: foldField(item.Album)}
+	f["episode"] = fieldVal{s: foldField(item.Title)}
+	f["season"] = fieldVal{n: item.Season, isNum: true}
+	f["pubdate"] = fieldVal{s: pubDateField(item.PubDateNS)}
 	return f
+}
+
+// pubDateField formats an episode publication time as YYYY-MM-DD for a path
+// segment, or "" when undated (its optional group then drops).
+func pubDateField(ns int64) string {
+	if ns == 0 {
+		return ""
+	}
+	return time.Unix(0, ns).UTC().Format("2006-01-02")
 }
 
 // renderTemplate renders a template string against a field set. The grammar:

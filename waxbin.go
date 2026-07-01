@@ -20,6 +20,7 @@ import (
 	"github.com/colespringer/waxbin/organize"
 	"github.com/colespringer/waxbin/playback"
 	"github.com/colespringer/waxbin/playlist"
+	"github.com/colespringer/waxbin/podcast"
 	"github.com/colespringer/waxbin/port"
 	"github.com/colespringer/waxbin/query"
 	"github.com/colespringer/waxbin/read"
@@ -42,6 +43,7 @@ type Library struct {
 	analyzer  *analyze.Analyzer
 	playback  *playback.Service
 	playlists *playlist.Service
+	podcasts  *podcast.Service
 	decoders  *decode.Registry
 	log       *slog.Logger
 	opts      Options
@@ -101,9 +103,19 @@ func Open(ctx context.Context, opts Options) (*Library, error) {
 		analyzer:  analyze.New(st, decoders, log),
 		playback:  playback.New(st),
 		playlists: playlist.New(st),
-		decoders:  decoders,
-		log:       log,
-		opts:      opts,
+		podcasts: podcast.New(st, meta.NewReader(), podcast.Config{
+			Dir:               opts.Podcasts.Dir,
+			UserAgent:         opts.Podcasts.UserAgent,
+			BlockPrivateIPs:   opts.Podcasts.BlockPrivateIPs,
+			Timeout:           time.Duration(opts.Podcasts.TimeoutSeconds) * time.Second,
+			MaxFeedBytes:      opts.Podcasts.MaxFeedBytes,
+			MaxEnclosureBytes: opts.Podcasts.MaxEnclosureBytes,
+			ReserveBytes:      opts.FreeSpaceReserveBytes,
+			DefaultRetention:  opts.Podcasts.DefaultRetention,
+		}, log),
+		decoders: decoders,
+		log:      log,
+		opts:     opts,
 	}
 	// The importer catalogs each placed file through the scanner, so it is wired
 	// after the struct is built and shares that scanner.
@@ -294,6 +306,10 @@ func (l *Library) Playback() *playback.Service { return l.playback }
 // Playlists returns the playlist service for static and smart playlists plus
 // M3U8 import/export.
 func (l *Library) Playlists() *playlist.Service { return l.playlists }
+
+// Podcasts returns the podcast service: subscribe/sync feeds, download episodes,
+// store transcripts/artwork, OPML import/export, and retention.
+func (l *Library) Podcasts() *podcast.Service { return l.podcasts }
 
 // Users lists the playback users (the default first).
 func (l *Library) Users(ctx context.Context) ([]*model.User, error) { return l.store.Users(ctx) }
@@ -755,13 +771,27 @@ func (l *Library) Backup(ctx context.Context, dest string, redact bool) error {
 // cross-tool portability; a byte Backup is the disaster-recovery path. It
 // returns the export manifest.
 func (l *Library) Export(ctx context.Context, w io.Writer) (*port.Manifest, error) {
-	libs, err := l.store.Libraries(ctx)
+	allLibs, err := l.store.Libraries(ctx)
 	if err != nil {
 		return nil, err
 	}
-	items, err := l.store.QueryItems(ctx, query.New(query.EntityItems).Build())
+	// Podcast downloads are local cache. The portable record is the subscription
+	// list, exported through OPML, not the internal library or remote episode rows.
+	libs := make([]*model.Library, 0, len(allLibs))
+	for _, lib := range allLibs {
+		if lib.Mode != model.ModePodcast {
+			libs = append(libs, lib)
+		}
+	}
+	allItems, err := l.store.QueryItems(ctx, query.New(query.EntityItems).Build())
 	if err != nil {
 		return nil, err
+	}
+	items := make([]*model.ItemView, 0, len(allItems))
+	for _, it := range allItems {
+		if it.Kind != model.KindEpisode {
+			items = append(items, it)
+		}
 	}
 	plays, err := l.store.AllPlayStates(ctx)
 	if err != nil {
@@ -865,13 +895,27 @@ func (l *Library) resolveLibraries(ctx context.Context, pid model.PID) ([]*model
 		return nil, err
 	}
 	if pid == "" {
-		if len(libs) == 0 {
+		// Exclude the internal podcast library. scan/rebuild walk user roots; podcast
+		// downloads are cataloged by the podcast engine.
+		var userLibs []*model.Library
+		for _, lib := range libs {
+			if lib.Mode != model.ModePodcast {
+				userLibs = append(userLibs, lib)
+			}
+		}
+		if len(userLibs) == 0 {
 			return nil, waxerr.New(waxerr.CodeInvalid, "Library.Scan", "no library roots configured")
 		}
-		return libs, nil
+		return userLibs, nil
 	}
 	for _, lib := range libs {
 		if lib.PID == pid {
+			// A generic scan would catalog downloaded episodes as tracks, so refuse the
+			// internal podcast library even when named directly.
+			if lib.Mode == model.ModePodcast {
+				return nil, waxerr.New(waxerr.CodeInvalid, "Library.Scan",
+					"cannot scan the internal podcast library")
+			}
 			return []*model.Library{lib}, nil
 		}
 	}

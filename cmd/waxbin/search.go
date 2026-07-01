@@ -13,10 +13,11 @@ func newSearchCmd(g *globals) *cobra.Command {
 	var limit int
 	cmd := &cobra.Command{
 		Use:   "search QUERY",
-		Short: "Grouped, BM25-ranked search across artists, albums, and tracks",
-		Long: "Searches catalog metadata and returns grouped, relevance-ranked results " +
-			"(artists, albums, tracks). Field weighting makes a title match outrank an " +
-			"artist/album match. Multiple words narrow the result (implicit AND, prefix-matched).",
+		Short: "Grouped, BM25-ranked search across artists, albums, tracks, books, and episodes",
+		Long: "Searches catalog metadata (and podcast transcripts) and returns grouped, " +
+			"relevance-ranked results (artists, albums, tracks, books, episodes). Field " +
+			"weighting makes a title match outrank an artist/album match, which outranks a " +
+			"transcript-body match. Multiple words narrow the result (implicit AND, prefix-matched).",
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			q := strings.Join(args, " ")
@@ -42,6 +43,7 @@ func newSearchCmd(g *globals) *cobra.Command {
 			printHits(cmd, "ALBUMS", res.Albums)
 			printHits(cmd, "TRACKS", res.Tracks)
 			printHits(cmd, "BOOKS", res.Books)
+			printHits(cmd, "EPISODES", res.Episodes)
 			return nil
 		},
 	}

@@ -49,11 +49,15 @@ func (s *Store) Stats(ctx context.Context, userPID model.PID, topN int) (*read.S
 			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 	}
-	// Sum every item's files (all parts of a multi-file audiobook, the single file
-	// of a track), so the library total reflects full running times.
+	// Sum every music/audiobook item's files (all parts of a multi-file audiobook,
+	// the single file of a track), so the library total reflects full running times.
+	// Podcast episodes are excluded to match the track/book item counts above (they
+	// are a separate medium surfaced via the podcast commands, not the music totals).
 	if err := s.read.QueryRowContext(ctx,
 		`SELECT COALESCE(SUM(f.duration_ms), 0) FROM item_file pf
-		 JOIN file f ON f.id = pf.file_id`).Scan(&out.TotalDuration); err != nil {
+		 JOIN file f ON f.id = pf.file_id
+		 JOIN playable_item pi ON pi.id = pf.item_id
+		 WHERE pi.kind <> 'episode'`).Scan(&out.TotalDuration); err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
 

@@ -34,6 +34,18 @@ type ProfileDef struct {
 	TagWrite  bool   `json:"tag_write,omitempty"`
 }
 
+// PodcastConfig controls podcast downloads and remote fetch limits. Dir is an
+// internal library root, validated so it cannot overlap a user root or inbox.
+type PodcastConfig struct {
+	Dir               string `json:"dir,omitempty"`                 // download directory (downloads require it)
+	UserAgent         string `json:"user_agent,omitempty"`          // HTTP User-Agent
+	BlockPrivateIPs   bool   `json:"block_private_ips,omitempty"`   // SSRF guard (refuse private/loopback)
+	TimeoutSeconds    int    `json:"timeout_seconds,omitempty"`     // per-request timeout (0 = default)
+	MaxFeedBytes      int64  `json:"max_feed_bytes,omitempty"`      // cap on a feed/transcript body
+	MaxEnclosureBytes int64  `json:"max_enclosure_bytes,omitempty"` // cap on an episode download
+	DefaultRetention  int    `json:"default_retention,omitempty"`   // keep newest N per feed (0 = keep all)
+}
+
 // Config is the resolved configuration.
 type Config struct {
 	DBPath   string `json:"db"`
@@ -47,6 +59,9 @@ type Config struct {
 	// FreeSpaceReserveBytes is the headroom an import preflight keeps free on the
 	// destination volume (0 disables the check).
 	FreeSpaceReserveBytes int64 `json:"free_space_reserve_bytes,omitempty"`
+
+	// Podcasts configures the podcast engine: download directory and network policy.
+	Podcasts PodcastConfig `json:"podcasts,omitempty"`
 
 	// Storage tuning (applied as SQLite pragmas by store/sqlite).
 	BusyTimeoutMS int   `json:"busy_timeout_ms"`
@@ -93,6 +108,9 @@ func Load(ov Overrides, getenv func(string) string) (*Config, error) {
 	}
 	if v := getenv("WAXBIN_LOG_LEVEL"); v != "" {
 		cfg.LogLevel = v
+	}
+	if v := getenv("WAXBIN_PODCAST_DIR"); v != "" {
+		cfg.Podcasts.Dir = v
 	}
 
 	// flag overrides (highest precedence)
@@ -178,6 +196,28 @@ func (c *Config) Validate() error {
 			if pathx.UnderRoot(r.Path, c.Inbox[i]) || pathx.UnderRoot(c.Inbox[i], r.Path) {
 				return waxerr.New(waxerr.CodeInvalid, "config.Validate",
 					fmt.Sprintf("inbox %q overlaps library root %q", c.Inbox[i], r.Path))
+			}
+		}
+	}
+
+	// Keep podcast downloads outside user roots and inboxes. Scan should never see
+	// the podcast cache as ordinary music.
+	if strings.TrimSpace(c.Podcasts.Dir) != "" {
+		abs, err := filepath.Abs(c.Podcasts.Dir)
+		if err != nil {
+			return waxerr.Wrapf(waxerr.CodeInvalid, "config.Validate", err, "resolving podcast dir %q", c.Podcasts.Dir)
+		}
+		c.Podcasts.Dir = filepath.Clean(abs)
+		for _, r := range c.Roots {
+			if pathsOverlap(r.Path, c.Podcasts.Dir) {
+				return waxerr.New(waxerr.CodeInvalid, "config.Validate",
+					fmt.Sprintf("podcast dir %q overlaps library root %q", c.Podcasts.Dir, r.Path))
+			}
+		}
+		for _, in := range c.Inbox {
+			if pathsOverlap(in, c.Podcasts.Dir) {
+				return waxerr.New(waxerr.CodeInvalid, "config.Validate",
+					fmt.Sprintf("podcast dir %q overlaps inbox %q", c.Podcasts.Dir, in))
 			}
 		}
 	}

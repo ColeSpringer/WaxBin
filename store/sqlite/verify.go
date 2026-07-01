@@ -110,6 +110,7 @@ func (s *Store) sortKeyDrift(ctx context.Context) (int, error) {
 		{"title", "release_group"},
 		{"title", "album"},
 		{"name", "series"},
+		{"title", "podcast"},
 	}
 	total := 0
 	for _, src := range sources {

@@ -2,7 +2,8 @@ package model
 
 // ArtEntity is one level of the art fallback chain. The resolver starts at the
 // requested level and walks up toward the root (track -> album -> release_group
-// -> artist -> genre), returning the first level that has art.
+// -> artist -> genre for music; episode -> podcast for podcasts), returning the
+// first level that has art.
 type ArtEntity string
 
 const (
@@ -11,12 +12,16 @@ const (
 	ArtReleaseGroup ArtEntity = "release_group"
 	ArtArtist       ArtEntity = "artist"
 	ArtGenre        ArtEntity = "genre"
+	// ArtEpisode and ArtPodcast form the podcast art chain: an episode falls back to
+	// its podcast's feed image.
+	ArtEpisode ArtEntity = "episode"
+	ArtPodcast ArtEntity = "podcast"
 )
 
 // Valid reports whether e is a known art entity level.
 func (e ArtEntity) Valid() bool {
 	switch e {
-	case ArtTrack, ArtAlbum, ArtReleaseGroup, ArtArtist, ArtGenre:
+	case ArtTrack, ArtAlbum, ArtReleaseGroup, ArtArtist, ArtGenre, ArtEpisode, ArtPodcast:
 		return true
 	default:
 		return false

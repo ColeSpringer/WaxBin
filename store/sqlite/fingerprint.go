@@ -45,7 +45,11 @@ func (s *Store) FilesNeedingAnalysis(ctx context.Context, algoVersion int, after
 
 // needsAnalysisPredicate selects audio files whose fingerprint is missing or
 // stale; shared by the list and count queries so they never drift apart.
-const needsAnalysisPredicate = `kind = 'audio' AND essence_hash IS NOT NULL AND (
+// Downloaded podcast episodes (in the internal ModePodcast library) are excluded:
+// fingerprinting hours of speech is wasteful and, worse, would index episodes into
+// the alt-encoding min-hash so dedup could false-match one against a real track.
+const needsAnalysisPredicate = `kind = 'audio' AND essence_hash IS NOT NULL AND
+	library_id NOT IN (SELECT id FROM library WHERE mode = 'podcast') AND (
 	analyzed_essence IS NULL OR analyzed_essence <> essence_hash OR
 	analysis_version IS NULL OR analysis_version <> ?)`
 

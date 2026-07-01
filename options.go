@@ -30,6 +30,8 @@ type Options struct {
 	Inbox []string
 	// FreeSpaceReserveBytes is headroom an import preflight keeps free.
 	FreeSpaceReserveBytes int64
+	// Podcasts configures the podcast engine (download dir + network policy).
+	Podcasts config.PodcastConfig
 
 	// Storage tuning; zero values fall back to library defaults.
 	BusyTimeoutMS int
@@ -46,6 +48,7 @@ func OptionsFromConfig(cfg *config.Config, log *slog.Logger) Options {
 		Profiles:              cfg.Profiles,
 		Inbox:                 cfg.Inbox,
 		FreeSpaceReserveBytes: cfg.FreeSpaceReserveBytes,
+		Podcasts:              cfg.Podcasts,
 		Logger:                log,
 		BusyTimeoutMS:         cfg.BusyTimeoutMS,
 		CacheSizeKB:           cfg.CacheSizeKB,

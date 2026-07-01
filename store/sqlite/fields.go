@@ -8,11 +8,12 @@ import "github.com/colespringer/waxbin/query"
 // here is rejected by the compiler, which is what keeps untrusted names out of SQL.
 //
 // The artist/album_artist/album/genre/year columns COALESCE the track values with
-// the book's author/series/year, mirroring itemViewCols, so a filter or sort over
-// the items entity matches a book by the same values the row displays (e.g.
-// `--artist Tolkien` or `--year 1937` finds an audiobook). The track-only entity
-// excludes books via entityPredicate, so for it these still resolve to the track
-// columns.
+// the book's author/series/year and the podcast's title, mirroring itemViewCols, so
+// a filter or sort over the items entity matches a book or episode by the same
+// values the row displays (e.g. `--artist Tolkien` or `--year 1937` finds an
+// audiobook; `--album "My Show"` finds its episodes). The track-only entity
+// excludes books/episodes via entityPredicate, so for it these still resolve to the
+// track columns.
 var itemFields = query.FieldMap{
 	"pid":          {Expr: "pi.pid", Kind: query.KindText},
 	"kind":         {Expr: "pi.kind", Kind: query.KindText},
@@ -22,17 +23,20 @@ var itemFields = query.FieldMap{
 	"added":        {Expr: "pi.created_at", Kind: query.KindTime},
 	"created_at":   {Expr: "pi.created_at", Kind: query.KindTime},
 	"updated_at":   {Expr: "pi.updated_at", Kind: query.KindTime},
-	"artist":       {Expr: "COALESCE(NULLIF(t.artist,''), bk.author, '')", Kind: query.KindText},
-	"album_artist": {Expr: "COALESCE(NULLIF(t.album_artist,''), bk.author, '')", Kind: query.KindText},
-	"albumartist":  {Expr: "COALESCE(NULLIF(t.album_artist,''), bk.author, '')", Kind: query.KindText},
-	"album":        {Expr: "COALESCE(NULLIF(t.album,''), srs.name, '')", Kind: query.KindText},
+	"artist":       {Expr: "COALESCE(NULLIF(t.artist,''), bk.author, pod.title, '')", Kind: query.KindText},
+	"album_artist": {Expr: "COALESCE(NULLIF(t.album_artist,''), bk.author, pod.title, '')", Kind: query.KindText},
+	"albumartist":  {Expr: "COALESCE(NULLIF(t.album_artist,''), bk.author, pod.title, '')", Kind: query.KindText},
+	"album":        {Expr: "COALESCE(NULLIF(t.album,''), srs.name, pod.title, '')", Kind: query.KindText},
+	"podcast":      {Expr: "COALESCE(pod.title, '')", Kind: query.KindText},
 	"genre":        {Expr: "COALESCE(NULLIF(t.genre,''), bk.genre, '')", Kind: query.KindText},
-	"year":         {Expr: "COALESCE(t.year, bk.year)", Kind: query.KindInt},
+	"year":         {Expr: "COALESCE(t.year, bk.year, ep.year)", Kind: query.KindInt},
 	"track":        {Expr: "t.track_no", Kind: query.KindInt},
 	"track_no":     {Expr: "t.track_no", Kind: query.KindInt},
 	"disc":         {Expr: "t.disc_no", Kind: query.KindInt},
 	"disc_no":      {Expr: "t.disc_no", Kind: query.KindInt},
-	"duration_ms":  {Expr: "COALESCE(bk.total_duration_ms, f.duration_ms)", Kind: query.KindInt},
+	"season":       {Expr: "ep.season", Kind: query.KindInt},
+	"published":    {Expr: "ep.pub_date", Kind: query.KindTime},
+	"duration_ms":  {Expr: "COALESCE(bk.total_duration_ms, f.duration_ms, ep.duration_ms)", Kind: query.KindInt},
 	"codec":        {Expr: "f.codec", Kind: query.KindText},
 	"container":    {Expr: "f.container", Kind: query.KindText},
 	"path":         {Expr: "f.display_path", Kind: query.KindText},

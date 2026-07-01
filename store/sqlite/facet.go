@@ -23,6 +23,11 @@ type facetSpec struct {
 	sortExpr string // ORDER BY expression (NULLs sort last)
 	entity   bool   // keyExpr is an entity pid (drilldown target)
 	unknown  string // sentinel display when the dimension is absent
+	// noEpisodes excludes podcast episodes from this dimension: they carry no
+	// artist/album/genre/year in the music sense, so including them would pile every
+	// episode into a single Unknown bucket. The kind facet keeps them (it groups them
+	// correctly under 'episode').
+	noEpisodes bool
 }
 
 func facetSpecFor(g read.GroupBy) (facetSpec, bool) {
@@ -31,7 +36,7 @@ func facetSpecFor(g read.GroupBy) (facetSpec, bool) {
 		return facetSpec{
 			join:    " LEFT JOIN item_genre fig ON fig.item_id = pi.id LEFT JOIN genre fg ON fg.id = fig.genre_id",
 			groupBy: "fg.id", keyExpr: "fg.pid", display: "fg.name", sortExpr: "fg.sort_key",
-			entity: true, unknown: read.NoGenre,
+			entity: true, unknown: read.NoGenre, noEpisodes: true,
 		}, true
 	case read.GroupArtist:
 		// COALESCE the book author so an audiobook groups under its author in the
@@ -39,19 +44,19 @@ func facetSpecFor(g read.GroupBy) (facetSpec, bool) {
 		return facetSpec{
 			join:    " LEFT JOIN artist fa ON fa.id = COALESCE(t.artist_id, bk.author_id)",
 			groupBy: "COALESCE(t.artist_id, bk.author_id)", keyExpr: "fa.pid", display: "fa.name", sortExpr: "fa.sort_key",
-			entity: true, unknown: read.UnknownArtist,
+			entity: true, unknown: read.UnknownArtist, noEpisodes: true,
 		}, true
 	case read.GroupAlbumArtist:
 		return facetSpec{
 			join:    " LEFT JOIN artist faa ON faa.id = COALESCE(t.album_artist_id, bk.author_id)",
 			groupBy: "COALESCE(t.album_artist_id, bk.author_id)", keyExpr: "faa.pid", display: "faa.name", sortExpr: "faa.sort_key",
-			entity: true, unknown: read.UnknownArtist,
+			entity: true, unknown: read.UnknownArtist, noEpisodes: true,
 		}, true
 	case read.GroupYear:
 		return facetSpec{
 			groupBy: "COALESCE(t.year, bk.year)", keyExpr: "CAST(COALESCE(t.year, bk.year) AS TEXT)",
 			display: "CAST(COALESCE(t.year, bk.year) AS TEXT)", sortExpr: "COALESCE(t.year, bk.year)",
-			unknown: read.UnknownYear,
+			unknown: read.UnknownYear, noEpisodes: true,
 		}, true
 	case read.GroupKind:
 		return facetSpec{
@@ -80,6 +85,9 @@ func (s *Store) Facet(ctx context.Context, q query.Query, g read.GroupBy) (*read
 		return nil, err
 	}
 	where := andWhere(c.Where, entityPredicate(q.Entity))
+	if spec.noEpisodes {
+		where = andWhere(where, "pi.kind <> 'episode'")
+	}
 	if where == "" {
 		where = "1=1"
 	}

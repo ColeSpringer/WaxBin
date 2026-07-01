@@ -49,6 +49,33 @@ func TestValidateAllowsSiblingRoots(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsPodcastDirUnderRoot(t *testing.T) {
+	base := t.TempDir()
+	cfg := &config.Config{
+		DBPath:   filepath.Join(base, "c.db"),
+		Roots:    []config.Root{{Path: filepath.Join(base, "music"), Mode: model.ModeManaged}},
+		Podcasts: config.PodcastConfig{Dir: filepath.Join(base, "music", "podcasts")}, // nested in a root
+	}
+	if err := cfg.Validate(); !waxerr.Is(err, waxerr.CodeInvalid) {
+		t.Fatalf("want CodeInvalid for podcast dir under a root, got %v", err)
+	}
+}
+
+func TestValidateAllowsSeparatePodcastDir(t *testing.T) {
+	base := t.TempDir()
+	cfg := &config.Config{
+		DBPath:   filepath.Join(base, "c.db"),
+		Roots:    []config.Root{{Path: filepath.Join(base, "music"), Mode: model.ModeManaged}},
+		Podcasts: config.PodcastConfig{Dir: filepath.Join(base, "podcasts")},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("separate podcast dir should validate: %v", err)
+	}
+	if !filepath.IsAbs(cfg.Podcasts.Dir) {
+		t.Fatalf("podcast dir not absolutized: %q", cfg.Podcasts.Dir)
+	}
+}
+
 func TestValidateRequiresDBPath(t *testing.T) {
 	cfg := &config.Config{}
 	if err := cfg.Validate(); !waxerr.Is(err, waxerr.CodeInvalid) {

@@ -58,12 +58,14 @@ func (s *Store) Search(ctx context.Context, queryStr string, opt read.SearchOpti
 	}
 
 	stmt := `SELECT pi.pid, pi.kind, pi.title,
-		COALESCE(NULLIF(t.artist,''), bk.author, ''), COALESCE(t.album_artist,''),
+		COALESCE(NULLIF(t.artist,''), bk.author, pod.title, ''), COALESCE(t.album_artist,''),
 		COALESCE(t.album,''), COALESCE(art.pid,''), COALESCE(al.pid,''), ` + searchBM25 + ` AS score
 		FROM search_fts
 		JOIN playable_item pi ON pi.id = search_fts.rowid
 		LEFT JOIN track t ON t.item_id = pi.id
 		LEFT JOIN book bk ON bk.item_id = pi.id
+		LEFT JOIN episode ep ON ep.item_id = pi.id
+		LEFT JOIN podcast pod ON pod.id = ep.podcast_id
 		LEFT JOIN artist art ON art.id = t.artist_id
 		LEFT JOIN album al ON al.id = t.album_id
 		WHERE search_fts MATCH ?
@@ -82,6 +84,7 @@ func (s *Store) Search(ctx context.Context, queryStr string, opt read.SearchOpti
 
 	albumSeen := map[model.PID]bool{}
 	artistSeen := map[model.PID]bool{}
+	episodeSeen := map[model.PID]bool{}
 	scanned := 0
 	for rows.Next() {
 		scanned++
@@ -101,6 +104,18 @@ func (s *Store) Search(ctx context.Context, queryStr string, opt read.SearchOpti
 			if len(res.Books) < limit {
 				res.Books = append(res.Books, read.SearchHit{
 					PID: model.PID(pid), Kind: "book", Title: title, Subtitle: artist, Score: score,
+				})
+			}
+			continue
+		}
+		// An episode forms the Episodes group, keyed by title with its podcast as the
+		// subtitle. These are the title/metadata hits; transcript-body hits are appended
+		// after, so a title match always outranks a body match.
+		if kind == string(model.KindEpisode) {
+			episodeSeen[model.PID(pid)] = true
+			if len(res.Episodes) < limit {
+				res.Episodes = append(res.Episodes, read.SearchHit{
+					PID: model.PID(pid), Kind: "episode", Title: title, Subtitle: artist, Score: score,
 				})
 			}
 			continue
@@ -130,7 +145,56 @@ func (s *Store) Search(ctx context.Context, queryStr string, opt read.SearchOpti
 	if err := rows.Err(); err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
+
+	// Append transcript-body hits to the Episodes group, after the metadata hits, so
+	// a title match outranks a body match. Episodes already surfaced by metadata are
+	// skipped to avoid duplicates.
+	if len(res.Episodes) < limit {
+		if err := s.searchTranscripts(ctx, match, limit, episodeSeen, res); err != nil {
+			return nil, err
+		}
+	}
 	return res, nil
+}
+
+// searchTranscripts adds episodes whose stored transcript matches, ranked by the
+// transcript FTS, skipping episodes already in the Episodes group. It over-fetches
+// by the already-seen count so that when a term also matches many episode titles,
+// the top transcript rows being already-seen does not starve transcript-only hits
+// that have room in the group.
+func (s *Store) searchTranscripts(ctx context.Context, match string, limit int, seen map[model.PID]bool, res *read.SearchResult) error {
+	const op = "store.Search"
+	rows, err := s.read.QueryContext(ctx,
+		`SELECT pi.pid, pi.title, p.title, bm25(transcript_fts) AS score
+		 FROM transcript_fts
+		 JOIN playable_item pi ON pi.id = transcript_fts.episode_id
+		 JOIN episode e ON e.item_id = pi.id
+		 JOIN podcast p ON p.id = e.podcast_id
+		 WHERE transcript_fts MATCH ?
+		 ORDER BY score, pi.pid
+		 LIMIT ?`, match, limit+len(seen))
+	if err != nil {
+		return waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		if len(res.Episodes) >= limit {
+			break
+		}
+		var pid, title, podcast string
+		var score float64
+		if err := rows.Scan(&pid, &title, &podcast, &score); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		if seen[model.PID(pid)] {
+			continue
+		}
+		seen[model.PID(pid)] = true
+		res.Episodes = append(res.Episodes, read.SearchHit{
+			PID: model.PID(pid), Kind: "episode", Title: title, Subtitle: podcast, Score: score,
+		})
+	}
+	return rows.Err()
 }
 
 // ftsMatchQuery turns a user search string into a safe FTS5 MATCH expression: it

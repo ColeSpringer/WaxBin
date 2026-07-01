@@ -12,9 +12,14 @@ const (
 	ModeManaged Mode = "managed"
 	// ModeInPlace means WaxBin only indexes/watches; it never moves files.
 	ModeInPlace Mode = "in-place"
+	// ModePodcast marks the internal library for downloaded podcast episode files.
+	// Podcast code creates it, scan/organize skip it, and Mode.Valid rejects it so
+	// users cannot configure it as a normal root.
+	ModePodcast Mode = "podcast"
 )
 
-// Valid reports whether m is a known mode.
+// Valid reports whether m is a user-settable library mode. ModePodcast is internal
+// and intentionally excluded.
 func (m Mode) Valid() bool { return m == ModeManaged || m == ModeInPlace }
 
 // FileKind classifies a file on disk. Audio is the only decodable kind; the

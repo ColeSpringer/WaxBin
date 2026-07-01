@@ -40,6 +40,7 @@ func newDoctorCmd(g *globals) *cobra.Command {
 			fmt.Fprintf(w, "items:          %d\n", rep.ItemCount)
 			fmt.Fprintf(w, "fingerprints:   %d\n", rep.FingerprintCount)
 			fmt.Fprintf(w, "replaygain:     %d\n", rep.LoudnessCount)
+			fmt.Fprintf(w, "podcasts:       %d\n", rep.PodcastCount)
 			fmt.Fprintf(w, "ffmpeg:         %s\n", presentLabel(rep.FFmpeg))
 			fmt.Fprintf(w, "fpcalc:         %s\n", presentLabel(rep.Fpcalc))
 			fmt.Fprintln(w, "analyze decode coverage:")

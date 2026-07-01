@@ -10,24 +10,29 @@ import (
 	"github.com/colespringer/waxbin/waxerr"
 )
 
-// attachArtTx dedups an item's cover image into the content-addressed art store
-// and maps it to the track. Album art is derived on read from current track maps,
-// so a re-cover, retag, or delete cannot leave a stale album mapping behind. The
-// write is idempotent: when the track already maps this exact cover it does
-// nothing, so it can run on every scan (catching a directory cover added after the
-// audio was first indexed) without churn. A nil/empty image is a no-op; a missing
-// read does not mean the art was removed.
+// attachArtTx maps a track/book item's cover onto the 'track' art slot (keyed by
+// the item id). It is the music/audiobook entry point; see attachEntityArtTx for
+// the shared body.
 func attachArtTx(ctx context.Context, tx *sql.Tx, itemID int64, img *model.ArtImage) error {
+	return attachEntityArtTx(ctx, tx, "track", itemID, img)
+}
+
+// attachEntityArtTx dedups a front-cover image into the content-addressed art
+// store and maps it to one entity (entity_type, entity_id). It backs every cover
+// ingest: a track/book item ('track'), a podcast feed ('podcast'), and an episode
+// ('episode'). Album art is derived on read from current track maps, so a re-cover,
+// retag, or delete cannot leave a stale album mapping behind. The write is
+// idempotent: when the entity already maps this exact cover it does nothing, so it
+// can run on every scan/sync without churn. A nil/empty image is a no-op; a missing
+// read does not mean the art was removed.
+func attachEntityArtTx(ctx context.Context, tx *sql.Tx, entityType string, entityID int64, img *model.ArtImage) error {
 	if img == nil || len(img.Data) == 0 || img.Hash == "" {
 		return nil
 	}
-	// Idempotence: an unchanged cover writes nothing, so this is safe to run on every
-	// scan (catching a directory cover added after the audio was first indexed)
-	// without churning a no-op rescan.
 	var curHash sql.NullString
 	if err := tx.QueryRowContext(ctx,
-		"SELECT source_hash FROM art_map WHERE entity_type = 'track' AND entity_id = ? AND role = 'front' LIMIT 1",
-		itemID).Scan(&curHash); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		"SELECT source_hash FROM art_map WHERE entity_type = ? AND entity_id = ? AND role = 'front' LIMIT 1",
+		entityType, entityID).Scan(&curHash); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
 	if curHash.Valid && curHash.String == img.Hash {
@@ -40,17 +45,15 @@ func attachArtTx(ctx context.Context, tx *sql.Tx, itemID int64, img *model.ArtIm
 		img.Hash, img.Format, img.Width, img.Height, len(img.Data), img.Data, nowNS()); err != nil {
 		return err
 	}
-	// Re-point this track's cover; a track has exactly one front cover. Album art is
-	// derived on read from the album's current track covers (see artInChain), so a
-	// re-cover, retag, or delete cannot leave a stale album map. When the old cover
-	// loses its last referencing track it becomes an orphaned source for GCArt.
+	// Re-point this entity's front cover; an entity has exactly one. When the old
+	// cover loses its last referencing map row it becomes an orphaned source for GCArt.
 	if _, err := tx.ExecContext(ctx,
-		"DELETE FROM art_map WHERE entity_type = 'track' AND entity_id = ?", itemID); err != nil {
+		"DELETE FROM art_map WHERE entity_type = ? AND entity_id = ?", entityType, entityID); err != nil {
 		return err
 	}
 	_, err := tx.ExecContext(ctx,
 		`INSERT OR IGNORE INTO art_map(entity_type, entity_id, source_hash, role, priority)
-		 VALUES ('track', ?, ?, 'front', 0)`, itemID, img.Hash)
+		 VALUES (?, ?, ?, 'front', 0)`, entityType, entityID, img.Hash)
 	return err
 }
 
@@ -232,8 +235,37 @@ func (s *Store) artChain(ctx context.Context, ref model.EntityRef) ([]artLevel, 
 			return nil, err
 		}
 		return []artLevel{{string(model.ArtGenre), genreID}}, nil
+	case model.ArtEpisode:
+		return s.episodeArtChain(ctx, ref.PID)
+	case model.ArtPodcast:
+		podID, err := s.idByPID(ctx, "podcast", ref.PID, op)
+		if err != nil {
+			return nil, err
+		}
+		return []artLevel{{string(model.ArtPodcast), podID}}, nil
 	}
 	return nil, waxerr.New(waxerr.CodeInvalid, op, "unknown art entity type: "+string(ref.Type))
+}
+
+// episodeArtChain resolves a podcast episode's chain: episode -> podcast. The
+// episode's own artwork wins; a feed image is the fallback for an episode without
+// one.
+func (s *Store) episodeArtChain(ctx context.Context, pid model.PID) ([]artLevel, error) {
+	const op = "store.ResolveArt"
+	var itemID, podcastID int64
+	err := s.read.QueryRowContext(ctx,
+		`SELECT pi.id, ep.podcast_id FROM playable_item pi
+		 JOIN episode ep ON ep.item_id = pi.id WHERE pi.pid = ?`, string(pid)).Scan(&itemID, &podcastID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, waxerr.New(waxerr.CodeNotFound, op, "no such episode: "+string(pid))
+	}
+	if err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	return []artLevel{
+		{string(model.ArtEpisode), itemID},
+		{string(model.ArtPodcast), podcastID},
+	}, nil
 }
 
 // trackArtChain resolves a track's full chain: track -> album -> release_group ->
@@ -388,6 +420,7 @@ func (s *Store) GCArt(ctx context.Context) (sources, thumbnails int, err error) 
 		for _, m := range []struct{ typ, table string }{
 			{"track", "playable_item"}, {"album", "album"},
 			{"release_group", "release_group"}, {"artist", "artist"}, {"genre", "genre"},
+			{"episode", "playable_item"}, {"podcast", "podcast"},
 		} {
 			if _, e := tx.ExecContext(ctx,
 				"DELETE FROM art_map WHERE entity_type = ? AND entity_id NOT IN (SELECT id FROM "+m.table+")",

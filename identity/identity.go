@@ -21,6 +21,7 @@ import (
 	"bufio"
 	"crypto/sha256"
 	"encoding/hex"
+	"hash"
 	"io"
 	"os"
 	"strings"
@@ -29,6 +30,14 @@ import (
 )
 
 const hashReadBuf = 1 << 20 // 1 MiB streaming buffer
+
+// StreamHasher returns a hash.Hash plus a finalize func that renders the same
+// tagged hash format as ContentHash. Use it when bytes are already streaming, for
+// example through io.MultiWriter, so the finished file does not need a second read.
+func StreamHasher() (hash.Hash, func() string) {
+	h := sha256.New()
+	return h, func() string { return tag(h) }
+}
 
 // ContentHash returns a stable, algorithm-tagged hash of the whole file.
 func ContentHash(path string) (string, error) {

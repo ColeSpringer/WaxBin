@@ -197,6 +197,12 @@ type ItemView struct {
 	Subtitle   string
 	ASIN       string
 
+	// Podcast/episode fields, populated only for episode items. Album and Artist
+	// carry the podcast title through the shared view; these fields hold the
+	// episode-specific values used by layouts and detail views.
+	Season    int
+	PubDateNS int64 // publication time, unix nanoseconds (0 when undated)
+
 	FilePID     PID
 	Path        []byte // raw bytes of the primary file path
 	DisplayPath string

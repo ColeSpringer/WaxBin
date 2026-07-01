@@ -68,6 +68,8 @@ func newRootCmd() *cobra.Command {
 		newStatsCmd(g),
 		newPlaylistCmd(g),
 		newSmartPlaylistCmd(g),
+		newPodcastCmd(g),
+		newOPMLCmd(g),
 		newBackupCmd(g),
 		newRestoreCmd(g),
 		newExportCmd(g),

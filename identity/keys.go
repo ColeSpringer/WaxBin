@@ -174,6 +174,80 @@ func SeriesKey(mbid, name string) string {
 	return "series:" + n
 }
 
+// PodcastKey is the entity-identity key for a podcast feed: Podcasting 2.0
+// <podcast:guid> when present, otherwise the normalized feed URL. The title is not
+// part of identity, so a retitled show keeps its pid and episodes. Returns "" when
+// neither input is usable.
+func PodcastKey(guid, feedURL string) string {
+	if g := strings.TrimSpace(guid); g != "" {
+		return "pguid:" + strings.ToLower(g)
+	}
+	u := normalizeFeedURL(feedURL)
+	if u == "" {
+		return ""
+	}
+	return "feed:" + u
+}
+
+// EpisodeKey is the entity-identity key for one episode, scoped to its podcast so
+// reused bare GUIDs cannot collide across feeds. Within a feed it prefers GUID,
+// then enclosure URL, then title. Scoping by podcastKey keeps episode identity
+// stable when a feed URL changes. Returns "" when there is nothing to key on.
+func EpisodeKey(podcastKey, guid, enclosureURL, title string) string {
+	if podcastKey == "" {
+		return ""
+	}
+	var id string
+	switch {
+	case strings.TrimSpace(guid) != "":
+		// A feed <guid> is opaque and case-sensitive per the RSS spec, so it is only
+		// trimmed, not lowercased: two distinct case-differing guids must not merge.
+		id = "g:" + strings.TrimSpace(guid)
+	case normalizeFeedURL(enclosureURL) != "":
+		id = "e:" + normalizeFeedURL(enclosureURL)
+	default:
+		t := MatchKey(title)
+		if t == "" {
+			return ""
+		}
+		id = "t:" + t
+	}
+	return "ep:" + podcastKey + "\x1f" + id
+}
+
+// normalizeFeedURL lowercases the scheme/host and trims a trailing slash so http
+// and https, or a present/absent trailing slash, key the same. It preserves path
+// and query case because paths can be case-sensitive and private-feed tokens can
+// live in the query. Returns "" for a value with no usable characters.
+func normalizeFeedURL(raw string) string {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return ""
+	}
+	scheme := ""
+	if i := strings.Index(s, "://"); i >= 0 {
+		scheme = strings.ToLower(s[:i])
+		s = s[i+3:]
+	}
+	// Lowercase the authority (host[:port]) up to the first path/query/fragment.
+	rest := ""
+	if j := strings.IndexAny(s, "/?#"); j >= 0 {
+		s, rest = strings.ToLower(s[:j]), s[j:]
+	} else {
+		s = strings.ToLower(s)
+	}
+	// http and https share an identity (a feed served over both is one feed); other
+	// schemes keep theirs.
+	if scheme == "https" {
+		scheme = "http"
+	}
+	out := s + rest
+	if scheme != "" {
+		out = scheme + "://" + out
+	}
+	return strings.TrimRight(out, "/")
+}
+
 // normalizeISBN keeps only the digits and the ISBN-10 check character 'X' (folded
 // to lowercase), so "978-0-13-468599-1" and "9780134685991" key the same. It
 // returns "" for a value with no usable characters.

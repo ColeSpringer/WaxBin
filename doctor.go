@@ -17,6 +17,10 @@ const fingerprintSchemaVersion = 3
 // doctor skips the ReplayGain count on a catalog older than this.
 const loudnessSchemaVersion = 7
 
+// podcastSchemaVersion is the migration that introduced the podcast tables;
+// doctor skips the subscription count on a catalog older than this.
+const podcastSchemaVersion = 18
+
 // DoctorReport summarizes catalog health and detected capabilities.
 type DoctorReport struct {
 	DBPath string
@@ -31,6 +35,7 @@ type DoctorReport struct {
 	ItemCount          int
 	FingerprintCount   int
 	LoudnessCount      int // files with a stored ReplayGain measurement
+	PodcastCount       int // subscribed feeds
 
 	// Detected optional helpers (never required for core use).
 	FFmpeg bool
@@ -96,6 +101,15 @@ func (l *Library) Doctor(ctx context.Context) (*DoctorReport, error) {
 			return nil, err
 		}
 		rep.LoudnessCount = n
+	}
+
+	// The podcast tables only exist from v18 on; skip on older catalogs.
+	if version >= podcastSchemaVersion {
+		pods, err := l.store.Podcasts(ctx)
+		if err != nil {
+			return nil, err
+		}
+		rep.PodcastCount = len(pods)
 	}
 
 	// The lockfile is read without taking the lock, so even a read-only doctor

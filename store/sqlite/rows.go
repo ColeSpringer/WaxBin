@@ -18,35 +18,42 @@ type rowScanner interface {
 	Scan(dest ...any) error
 }
 
-// itemJoins LEFT JOINs both subtypes (track and book) plus the book's series so a
-// book item, which has no track row, still reads back. The book's author/series/
-// year stand in for the music artist/album/year columns via COALESCE in
-// itemViewCols, and the primary file is the representative backing file (the first
-// part of a multi-file book).
+// itemJoins LEFT JOINs all three subtypes (track, book, episode) plus the book's
+// series and the episode's podcast, so a book or episode item, which has no track
+// row, still reads back. The book's author/series/year and the podcast's title
+// stand in for the music artist/album/year columns via COALESCE in itemViewCols,
+// and the primary file is the representative backing file (the first part of a
+// multi-file book, or the downloaded enclosure of an episode; NULL for a not-yet-
+// downloaded episode).
 const itemJoins = ` FROM playable_item pi
 	LEFT JOIN track t ON t.item_id = pi.id
 	LEFT JOIN book bk ON bk.item_id = pi.id
 	LEFT JOIN series srs ON srs.id = bk.series_id
+	LEFT JOIN episode ep ON ep.item_id = pi.id
+	LEFT JOIN podcast pod ON pod.id = ep.podcast_id
 	LEFT JOIN item_file pf ON pf.item_id = pi.id AND pf.role = 'primary'
 	LEFT JOIN file f ON f.id = pf.file_id`
 
 // itemViewCols is the column list for an item read-view, shared by the plain
 // select and the keyset-paginated select (which prepends pi.sort_key). The shared
 // artist/album_artist/album/year/genre columns COALESCE the track values with the
-// book's author/series/year so one view shape serves both kinds; the six audiobook
-// columns after compilation are empty for tracks. The duration is the book's
-// denormalized total_duration_ms (the sum of its parts, so a multi-file book
-// reports its whole running time, matching BookDetail.TotalDurationMS and Stats),
-// falling back to the single primary file's duration for a track.
+// book's author/series/year and the podcast's title so one view shape serves all
+// three kinds; the audiobook columns are empty for tracks/episodes and the
+// podcast columns (season, pub_date) are empty otherwise. The duration is the
+// book's denormalized total_duration_ms (the sum of its parts), then the primary
+// file's duration (a downloaded episode or a track), then the feed-declared
+// episode duration (an undownloaded episode).
 const itemViewCols = `pi.pid, pi.kind, pi.state, pi.title,
-	COALESCE(NULLIF(t.artist,''), bk.author, ''),
-	COALESCE(NULLIF(t.album_artist,''), bk.author, ''),
-	COALESCE(NULLIF(t.album,''), srs.name, ''),
-	t.track_no, t.disc_no, COALESCE(t.year, bk.year),
+	COALESCE(NULLIF(t.artist,''), bk.author, pod.title, ''),
+	COALESCE(NULLIF(t.album_artist,''), bk.author, pod.title, ''),
+	COALESCE(NULLIF(t.album,''), srs.name, pod.title, ''),
+	t.track_no, t.disc_no, COALESCE(t.year, bk.year, ep.year),
 	COALESCE(NULLIF(t.genre,''), bk.genre, ''), t.compilation,
 	COALESCE(bk.author_sort,''), COALESCE(bk.narrator,''), COALESCE(srs.name,''),
 	COALESCE(bk.series_seq,''), COALESCE(bk.subtitle,''), COALESCE(bk.asin,''),
-	f.pid, f.path, f.display_path, COALESCE(bk.total_duration_ms, f.duration_ms),
+	ep.season, ep.pub_date,
+	f.pid, f.path, f.display_path,
+	COALESCE(bk.total_duration_ms, f.duration_ms, ep.duration_ms),
 	f.container, f.codec`
 
 const itemSelect = `SELECT ` + itemViewCols + itemJoins
@@ -66,6 +73,7 @@ const fileSelect = `SELECT id, pid, library_id, path, display_path, rel_path, ki
 type itemViewNulls struct {
 	trackNo, discNo, year, dur    sql.NullInt64
 	compilation                   sql.NullInt64
+	season, pubDate               sql.NullInt64
 	fpid, fdisp, container, codec sql.NullString
 	fpath                         []byte
 }
@@ -77,6 +85,7 @@ func itemViewDests(v *model.ItemView, n *itemViewNulls) []any {
 		&v.PID, &v.Kind, &v.State, &v.Title,
 		&v.Artist, &v.AlbumArtist, &v.Album, &n.trackNo, &n.discNo, &n.year, &v.Genre, &n.compilation,
 		&v.AuthorSort, &v.Narrator, &v.Series, &v.SeriesSeq, &v.Subtitle, &v.ASIN,
+		&n.season, &n.pubDate,
 		&n.fpid, &n.fpath, &n.fdisp, &n.dur, &n.container, &n.codec,
 	}
 }
@@ -86,6 +95,8 @@ func (n *itemViewNulls) apply(v *model.ItemView) {
 	v.DiscNo = int(n.discNo.Int64)
 	v.Year = int(n.year.Int64)
 	v.Compilation = n.compilation.Int64 != 0
+	v.Season = int(n.season.Int64)
+	v.PubDateNS = n.pubDate.Int64
 	v.DurationMS = n.dur.Int64
 	v.FilePID = model.PID(n.fpid.String)
 	v.Path = n.fpath
