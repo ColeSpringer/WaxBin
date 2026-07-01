@@ -8,6 +8,7 @@
 package netsafe
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -78,6 +79,12 @@ type Request struct {
 	RequireContentType bool
 	// MaxBytes overrides the policy body cap for this request (0 = policy default).
 	MaxBytes int64
+	// Body, when non-empty, is sent as the request body; Method then defaults to POST.
+	// It is for requests whose parameters are too large for the URL, such as an
+	// AcoustID lookup carrying a multi-kilobyte fingerprint. ContentType sets its media
+	// type (e.g. application/x-www-form-urlencoded).
+	Body        []byte
+	ContentType string
 }
 
 // Response is the result of a buffered fetch. Body is nil for a 304 (NotModified).
@@ -137,6 +144,13 @@ func New(p Policy) *Client {
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if p.MaxRedirects < 0 || len(via) > p.MaxRedirects {
 				return fmt.Errorf("stopped after %d redirects", len(via))
+			}
+			// net/http converts a POST to GET and drops the body on a 301/302/303. For
+			// a body-carrying request (an AcoustID lookup) that would send a body-less
+			// GET, so refuse the method-downgrading redirect rather than silently
+			// mangling it (307/308 keep the method and resend the body via GetBody).
+			if prev := via[len(via)-1]; prev.Method == http.MethodPost && req.Method != http.MethodPost {
+				return fmt.Errorf("refusing redirect that downgrades POST to %s (request body would be dropped)", req.Method)
 			}
 			return nil
 		},
@@ -233,11 +247,22 @@ func (c *Client) do(ctx context.Context, r Request, op string) (*http.Response, 
 
 	method := r.Method
 	if method == "" {
-		method = http.MethodGet
+		if len(r.Body) > 0 {
+			method = http.MethodPost
+		} else {
+			method = http.MethodGet
+		}
 	}
-	req, err := http.NewRequestWithContext(ctx, method, r.URL, nil)
+	var body io.Reader
+	if len(r.Body) > 0 {
+		body = bytes.NewReader(r.Body)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, r.URL, body)
 	if err != nil {
 		return nil, nil, waxerr.Wrap(waxerr.CodeInvalid, op, err)
+	}
+	if r.ContentType != "" {
+		req.Header.Set("Content-Type", r.ContentType)
 	}
 	if c.policy.UserAgent != "" {
 		req.Header.Set("User-Agent", c.policy.UserAgent)

@@ -49,6 +49,24 @@ type PodcastConfig struct {
 	DefaultRetention  int    `json:"default_retention,omitempty"`   // keep newest N per feed (0 = keep all)
 }
 
+// EnrichConfig controls the metadata enrichment pass (MusicBrainz + Cover Art
+// Archive + optional AcoustID). MusicBrainz requires an identifying contact, so
+// enrichment is disabled unless Contact (or an explicit UserAgent) is set. The
+// base-URL fields default to the public services and exist mainly for tests and
+// private mirrors.
+type EnrichConfig struct {
+	Contact         string `json:"contact,omitempty"`           // MB contact (email/URL); enables enrichment
+	UserAgent       string `json:"user_agent,omitempty"`        // overrides the built User-Agent
+	AcoustIDKey     string `json:"acoustid_key,omitempty"`      // enables the AcoustID fallback (needs fpcalc)
+	CoverArt        *bool  `json:"cover_art,omitempty"`         // fetch release-group covers (default on)
+	BlockPrivateIPs bool   `json:"block_private_ips,omitempty"` // SSRF guard for provider requests
+	TimeoutSeconds  int    `json:"timeout_seconds,omitempty"`   // per-request timeout (0 = default)
+
+	MusicBrainzBaseURL string `json:"musicbrainz_base_url,omitempty"`
+	CoverArtBaseURL    string `json:"cover_art_base_url,omitempty"`
+	AcoustIDBaseURL    string `json:"acoustid_base_url,omitempty"`
+}
+
 // Config is the resolved configuration.
 type Config struct {
 	DBPath   string `json:"db"`
@@ -65,6 +83,9 @@ type Config struct {
 
 	// Podcasts configures the podcast engine: download directory and network policy.
 	Podcasts PodcastConfig `json:"podcasts,omitempty"`
+
+	// Enrichment configures the metadata enrichment pass (MusicBrainz/CAA/AcoustID).
+	Enrichment EnrichConfig `json:"enrichment,omitempty"`
 
 	// Storage tuning (applied as SQLite pragmas by store/sqlite).
 	BusyTimeoutMS int   `json:"busy_timeout_ms"`
@@ -114,6 +135,12 @@ func Load(ov Overrides, getenv func(string) string) (*Config, error) {
 	}
 	if v := getenv("WAXBIN_PODCAST_DIR"); v != "" {
 		cfg.Podcasts.Dir = v
+	}
+	if v := getenv("WAXBIN_ENRICH_CONTACT"); v != "" {
+		cfg.Enrichment.Contact = v
+	}
+	if v := getenv("WAXBIN_ACOUSTID_KEY"); v != "" {
+		cfg.Enrichment.AcoustIDKey = v
 	}
 
 	// flag overrides (highest precedence)

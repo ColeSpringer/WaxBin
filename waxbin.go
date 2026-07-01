@@ -11,6 +11,7 @@ import (
 	"github.com/colespringer/waxbin/analyze"
 	"github.com/colespringer/waxbin/config"
 	"github.com/colespringer/waxbin/decode"
+	"github.com/colespringer/waxbin/enrich"
 	"github.com/colespringer/waxbin/fingerprint"
 	"github.com/colespringer/waxbin/inbox"
 	"github.com/colespringer/waxbin/internal/pathx"
@@ -30,6 +31,26 @@ import (
 	"github.com/colespringer/waxbin/waxerr"
 )
 
+// The SQLite store implements the enrichment persistence port. Asserted here so a
+// port/store drift is a compile error at the wiring seam.
+var _ enrich.Store = (*sqlite.Store)(nil)
+
+// enrichConfig converts the config-only EnrichConfig into the enrich package's
+// Config, resolving the cover-art default (on unless explicitly disabled).
+func enrichConfig(c config.EnrichConfig) enrich.Config {
+	return enrich.Config{
+		Contact:            c.Contact,
+		UserAgent:          c.UserAgent,
+		AcoustIDKey:        c.AcoustIDKey,
+		FetchCoverArt:      c.CoverArt == nil || *c.CoverArt,
+		BlockPrivateIPs:    c.BlockPrivateIPs,
+		Timeout:            time.Duration(c.TimeoutSeconds) * time.Second,
+		MusicBrainzBaseURL: c.MusicBrainzBaseURL,
+		CoverArtBaseURL:    c.CoverArtBaseURL,
+		AcoustIDBaseURL:    c.AcoustIDBaseURL,
+	}
+}
+
 // Library is the public handle to a WaxBin catalog. It is safe for concurrent
 // use. A read-only Library refuses mutating operations.
 type Library struct {
@@ -44,6 +65,7 @@ type Library struct {
 	playback  *playback.Service
 	playlists *playlist.Service
 	podcasts  *podcast.Service
+	enricher  *enrich.Service
 	decoders  *decode.Registry
 	log       *slog.Logger
 	opts      Options
@@ -114,6 +136,7 @@ func Open(ctx context.Context, opts Options) (*Library, error) {
 			DefaultRetention:  opts.Podcasts.DefaultRetention,
 			Providers:         opts.SourceProviders,
 		}, log),
+		enricher: enrich.New(st, enrichConfig(opts.Enrichment), log),
 		decoders: decoders,
 		log:      log,
 		opts:     opts,
@@ -406,6 +429,50 @@ func (l *Library) Analyze(ctx context.Context) (*AnalyzeResult, error) {
 	return out, runErr
 }
 
+// EnrichOptions controls a metadata enrichment run.
+type EnrichOptions struct {
+	Force bool // re-enrich already-enriched entities
+	Limit int  // cap on entities processed (0 = all needing enrichment)
+}
+
+// EnrichResult reports an enrichment run and the job it ran under.
+type EnrichResult struct {
+	JobPID model.PID
+	Result enrich.Result
+}
+
+// Enrich runs the metadata enrichment pass under an "enrich"-scoped job:
+// MusicBrainz release-group/artist/genre resolution (MBID-first), Cover Art Archive
+// covers, and the optional AcoustID fingerprint fallback. It is resumable and
+// lock-respecting (never overwriting a tagged or user-locked field), caches
+// provider responses, and degrades gracefully offline. Enrichment requires a
+// MusicBrainz contact (Options.Enrichment.Contact); without one it returns
+// CodeUnsupported.
+func (l *Library) Enrich(ctx context.Context, opts EnrichOptions) (*EnrichResult, error) {
+	out := &EnrichResult{}
+	if !l.enricher.Enabled() {
+		return out, waxerr.New(waxerr.CodeUnsupported, "waxbin.Enrich",
+			"enrichment needs a MusicBrainz contact (set enrichment.contact / WAXBIN_ENRICH_CONTACT)")
+	}
+	job, runErr := l.jobs.Run(ctx, "enrich", "enrich", func(ctx context.Context, h *jobs.Handle) error {
+		r, err := l.enricher.Run(ctx, enrich.RunOptions{Force: opts.Force, Limit: opts.Limit},
+			func(p float64, msg string) error { return h.Heartbeat(ctx, p, msg) })
+		if r != nil {
+			out.Result = *r
+		}
+		return err
+	})
+	if job != nil {
+		out.JobPID = job.PID
+	}
+	return out, runErr
+}
+
+// EnrichmentCoverage reports how many entities have been enriched, for doctor.
+func (l *Library) EnrichmentCoverage(ctx context.Context) (model.EnrichmentCoverage, error) {
+	return l.enricher.Coverage(ctx)
+}
+
 // AltEncoding is one verified alternate encoding of a query item: a different
 // file whose fingerprint matches above the similarity threshold.
 type AltEncoding struct {
@@ -453,7 +520,10 @@ func (l *Library) FindAltEncodings(ctx context.Context, itemPID model.PID) ([]Al
 	qSub := fingerprint.Unpack(queryFP)
 	var out []AltEncoding
 	for _, c := range candidates {
-		sim := fingerprint.Similar(qSub, fingerprint.Unpack(c.FP))
+		// The candidate query guarantees c shares the query file's fingerprint
+		// algorithm, so dispatching on the candidate's algo is safe and picks the
+		// matching (pure-Go vs Chromaprint) similarity function.
+		sim := fingerprint.SimilarByAlgo(c.AlgoVersion, qSub, fingerprint.Unpack(c.FP))
 		if sim >= altSimilarityFloor {
 			out = append(out, AltEncoding{ItemPID: c.ItemPID, FilePID: c.FilePID, Similarity: sim})
 		}

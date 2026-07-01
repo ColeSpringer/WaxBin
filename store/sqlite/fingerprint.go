@@ -173,12 +173,18 @@ func (s *Store) FingerprintCandidates(ctx context.Context, filePID model.PID, mi
 	if minShared < 1 {
 		minShared = 1
 	}
+	// Only compare fingerprints computed by the same algorithm. The pure-Go
+	// fingerprint and Chromaprint (fpcalc) produce incomparable vectors, and a
+	// catalog can hold both mid-migration when fpcalc appears or disappears; the
+	// algo_version match keeps a pure-Go vector from ever scoring against a
+	// Chromaprint one (their bit layouts and Similar functions differ).
 	stmt := `
-SELECT f.pid, COALESCE(pi.pid, ''), cf.fp, COUNT(*) AS shared
+SELECT f.pid, COALESCE(pi.pid, ''), cf.fp, cf.algo_version, COUNT(*) AS shared
 FROM fingerprint_term qt
 JOIN fingerprint qf       ON qf.file_id = qt.file_id
 JOIN fingerprint_term ct  ON ct.term = qt.term AND ct.file_id <> qt.file_id
 JOIN fingerprint cf       ON cf.file_id = ct.file_id
+                         AND cf.algo_version = qf.algo_version
                          AND cf.duration_bucket BETWEEN qf.duration_bucket - 1 AND qf.duration_bucket + 1
 JOIN file f               ON f.id = ct.file_id
 LEFT JOIN item_file pf    ON pf.file_id = f.id AND pf.role = 'primary'
@@ -196,7 +202,7 @@ ORDER BY shared DESC`
 	for rows.Next() {
 		var c model.FingerprintCandidate
 		var fpid, ipid string
-		if err := rows.Scan(&fpid, &ipid, &c.FP, &c.SharedTerms); err != nil {
+		if err := rows.Scan(&fpid, &ipid, &c.FP, &c.AlgoVersion, &c.SharedTerms); err != nil {
 			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		c.FilePID, c.ItemPID = model.PID(fpid), model.PID(ipid)

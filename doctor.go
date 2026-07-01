@@ -23,6 +23,10 @@ const loudnessSchemaVersion = 7
 // no-such-column error on a read-only catalog that has not been migrated yet.
 const podcastSchemaVersion = 19
 
+// enrichmentSchemaVersion is the migration that introduced the entity_enrichment
+// table; doctor skips the enrichment coverage on an older, un-migrated catalog.
+const enrichmentSchemaVersion = 20
+
 // DoctorReport summarizes catalog health and detected capabilities.
 type DoctorReport struct {
 	DBPath string
@@ -38,6 +42,12 @@ type DoctorReport struct {
 	FingerprintCount   int
 	LoudnessCount      int // files with a stored ReplayGain measurement
 	PodcastCount       int // subscribed feeds
+
+	// Enrichment coverage: entities looked up, and how many a provider matched.
+	EnrichedEntities int
+	EnrichedMatched  int
+	// EnrichmentEnabled reports whether a MusicBrainz contact is configured.
+	EnrichmentEnabled bool
 
 	// Detected optional helpers (never required for core use).
 	FFmpeg bool
@@ -112,6 +122,17 @@ func (l *Library) Doctor(ctx context.Context) (*DoctorReport, error) {
 			return nil, err
 		}
 		rep.PodcastCount = len(pods)
+	}
+
+	// The enrichment tables only exist from v20 on; skip on older catalogs.
+	rep.EnrichmentEnabled = l.enricher.Enabled()
+	if version >= enrichmentSchemaVersion {
+		cov, err := l.EnrichmentCoverage(ctx)
+		if err != nil {
+			return nil, err
+		}
+		rep.EnrichedEntities = cov.Artists + cov.ReleaseGroups + cov.Books
+		rep.EnrichedMatched = cov.Matched
 	}
 
 	// The lockfile is read without taking the lock, so even a read-only doctor

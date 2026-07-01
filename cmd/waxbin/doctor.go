@@ -41,6 +41,8 @@ func newDoctorCmd(g *globals) *cobra.Command {
 			fmt.Fprintf(w, "fingerprints:   %d\n", rep.FingerprintCount)
 			fmt.Fprintf(w, "replaygain:     %d\n", rep.LoudnessCount)
 			fmt.Fprintf(w, "podcasts:       %d\n", rep.PodcastCount)
+			fmt.Fprintf(w, "enrichment:     %s (%d entities, %d matched)\n",
+				enabledLabel(rep.EnrichmentEnabled), rep.EnrichedEntities, rep.EnrichedMatched)
 			fmt.Fprintf(w, "ffmpeg:         %s\n", presentLabel(rep.FFmpeg))
 			fmt.Fprintf(w, "fpcalc:         %s\n", presentLabel(rep.Fpcalc))
 			fmt.Fprintln(w, "analyze decode coverage:")
@@ -66,6 +68,13 @@ func presentLabel(ok bool) string {
 		return "detected"
 	}
 	return "not found (pure-Go baseline only)"
+}
+
+func enabledLabel(ok bool) string {
+	if ok {
+		return "enabled"
+	}
+	return "disabled (set enrichment.contact)"
 }
 
 func yesNo(ok bool) string {

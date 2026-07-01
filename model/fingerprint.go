@@ -23,6 +23,7 @@ type FingerprintCandidate struct {
 	ItemPID     PID // the item this file backs (so grouping yields items)
 	SharedTerms int
 	FP          []byte // packed sub-fingerprint vector for full verification
+	AlgoVersion int    // the fingerprint algorithm (pure-Go vs Chromaprint); matches the query file's
 }
 
 // LoudnessData is a file's measured EBU R128 loudness and the ReplayGain track

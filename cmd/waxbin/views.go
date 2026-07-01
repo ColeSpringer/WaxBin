@@ -414,6 +414,26 @@ func toAnalyzeView(r *waxbin.AnalyzeResult) analyzeView {
 	}
 }
 
+type enrichView struct {
+	ArtistsEnriched       int    `json:"artistsEnriched"`
+	ArtistsMatched        int    `json:"artistsMatched"`
+	ReleaseGroupsEnriched int    `json:"releaseGroupsEnriched"`
+	ReleaseGroupsMatched  int    `json:"releaseGroupsMatched"`
+	BooksEnriched         int    `json:"booksEnriched"`
+	BooksMatched          int    `json:"booksMatched"`
+	ArtFetched            int    `json:"artFetched"`
+	JobPID                string `json:"jobPid,omitempty"`
+}
+
+func toEnrichView(r *waxbin.EnrichResult) enrichView {
+	return enrichView{
+		ArtistsEnriched: r.Result.ArtistsEnriched, ArtistsMatched: r.Result.ArtistsMatched,
+		ReleaseGroupsEnriched: r.Result.ReleaseGroupsEnriched, ReleaseGroupsMatched: r.Result.ReleaseGroupsMatched,
+		BooksEnriched: r.Result.BooksEnriched, BooksMatched: r.Result.BooksMatched,
+		ArtFetched: r.Result.ArtFetched, JobPID: string(r.JobPID),
+	}
+}
+
 func jobViews(jobs []*model.Job) []jobView {
 	out := make([]jobView, 0, len(jobs))
 	for _, j := range jobs {

@@ -33,6 +33,8 @@ type Options struct {
 	FreeSpaceReserveBytes int64
 	// Podcasts configures the podcast engine (download dir + network policy).
 	Podcasts config.PodcastConfig
+	// Enrichment configures the metadata enrichment pass (MusicBrainz/CAA/AcoustID).
+	Enrichment config.EnrichConfig
 	// SourceProviders are injected acquisition providers, such as a youtube provider
 	// supplied by another module. The built-in netsafe rss provider is always
 	// registered; these register under their own source types. The default CLI build
@@ -55,6 +57,7 @@ func OptionsFromConfig(cfg *config.Config, log *slog.Logger) Options {
 		Inbox:                 cfg.Inbox,
 		FreeSpaceReserveBytes: cfg.FreeSpaceReserveBytes,
 		Podcasts:              cfg.Podcasts,
+		Enrichment:            cfg.Enrichment,
 		Logger:                log,
 		BusyTimeoutMS:         cfg.BusyTimeoutMS,
 		CacheSizeKB:           cfg.CacheSizeKB,

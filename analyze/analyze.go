@@ -20,10 +20,20 @@ import (
 	"github.com/colespringer/waxbin/peaks"
 )
 
-// Version is the combined analysis version stored on each file. It includes the
-// fingerprint, loudness, and peaks versions; changing any component makes prior
-// analysis stale. Each component gets three decimal digits (0-999).
-const Version = fingerprint.AlgoVersion*1_000_000 + loudness.AnalysisVersion*1_000 + peaks.Version
+// effectiveVersion combines a fingerprint algorithm with the loudness and peaks
+// versions into the single value stamped on a file. Changing any component makes
+// prior analysis stale. Each non-fingerprint component gets three decimal digits
+// (0-999); the fingerprint algorithm occupies the millions place, so the pure-Go
+// (1) and Chromaprint (100) backends yield distinct numbers and never collide.
+func effectiveVersion(fpAlgo int) int {
+	return fpAlgo*1_000_000 + loudness.AnalysisVersion*1_000 + peaks.Version
+}
+
+// Version is the combined analysis version for the pure-Go fingerprint backend,
+// the baseline when fpcalc is absent. The analyzer stamps effectiveVersion(algo)
+// per file, swapping in the Chromaprint algorithm when fpcalc is present, so this
+// is a single derived definition rather than a re-encoded formula.
+var Version = effectiveVersion(fingerprint.AlgoVersion)
 
 // loudnessMaxDecode bounds the pure-Go fallback so a long file cannot exhaust
 // memory. Longer tracks use a prefix for loudness. The ffmpeg path streams the
@@ -40,14 +50,17 @@ type Store interface {
 
 // Analyzer runs the analyze pass over a catalog.
 type Analyzer struct {
-	store Store
-	dec   *decode.Registry
-	caps  caps.Caps
-	log   *slog.Logger
+	store   Store
+	dec     *decode.Registry
+	caps    caps.Caps
+	log     *slog.Logger
+	fpAlgo  int // fingerprint backend: pure-Go, or Chromaprint when fpcalc is present
+	version int // combined analysis version stamped on each file this run
 }
 
 // New builds an Analyzer. A nil registry uses decode.Default() (pure-Go WAV plus
-// ffmpeg when present).
+// ffmpeg when present). The fingerprint backend is chosen from detected
+// capabilities: fpcalc (Chromaprint) when present, else the pure-Go fingerprint.
 func New(store Store, dec *decode.Registry, log *slog.Logger) *Analyzer {
 	if dec == nil {
 		dec = decode.Default()
@@ -55,7 +68,12 @@ func New(store Store, dec *decode.Registry, log *slog.Logger) *Analyzer {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Analyzer{store: store, dec: dec, caps: caps.Detect(), log: log}
+	c := caps.Detect()
+	fpAlgo := fingerprint.AlgoVersion
+	if c.Fpcalc {
+		fpAlgo = fingerprint.ChromaprintAlgoVersion
+	}
+	return &Analyzer{store: store, dec: dec, caps: c, log: log, fpAlgo: fpAlgo, version: effectiveVersion(fpAlgo)}
 }
 
 // Result tallies an analyze run.
@@ -81,7 +99,7 @@ func (a *Analyzer) Run(ctx context.Context, hb Heartbeat) (*Result, error) {
 	// A one-shot total taken up front lets the heartbeat report a real ratio.
 	// The single-writer model means the needing-analysis set only shrinks during
 	// the run (analyzed files drop out), so processed/total stays monotonic.
-	total, err := a.store.CountFilesNeedingAnalysis(ctx, Version)
+	total, err := a.store.CountFilesNeedingAnalysis(ctx, a.version)
 	if err != nil {
 		return res, err
 	}
@@ -100,7 +118,7 @@ func (a *Analyzer) Run(ctx context.Context, hb Heartbeat) (*Result, error) {
 	var afterRelPath []byte
 	var afterID int64
 	for {
-		files, err := a.store.FilesNeedingAnalysis(ctx, Version, afterRelPath, afterID, batchSize)
+		files, err := a.store.FilesNeedingAnalysis(ctx, a.version, afterRelPath, afterID, batchSize)
 		if err != nil {
 			return res, err
 		}
@@ -135,35 +153,53 @@ func (a *Analyzer) Run(ctx context.Context, hb Heartbeat) (*Result, error) {
 // without ffmpeg still analyzes the formats it can decode. Loudness and peaks are
 // optional; a failure there should not prevent the fingerprint from being stored.
 func (a *Analyzer) analyzeFile(ctx context.Context, f *model.File, res *Result) error {
-	dec, ok := a.dec.For(f.Codec)
-	if !ok {
+	dec, hasDec := a.dec.For(f.Codec)
+	// fpcalc (the Chromaprint backend) reads the file itself, so it can fingerprint a
+	// codec this build cannot decode; only the pure-Go backend needs a decoder to
+	// fingerprint. A file with neither an available decoder nor the fpcalc backend is
+	// skipped (and retried on a future run, e.g. once ffmpeg is installed).
+	chroma := a.fpAlgo == fingerprint.ChromaprintAlgoVersion
+	if !hasDec && !chroma {
 		res.Skipped++
 		return nil
 	}
-	pcm, err := dec.Decode(ctx, string(f.Path), fingerprint.MaxAnalyze)
+
+	sub, algo, fpDurationMS, err := a.fingerprintFile(ctx, f, dec, hasDec)
 	if err != nil {
 		return err
 	}
-	fp := fingerprint.Compute(pcm)
+	if algo == 0 {
+		// fpcalc could not fingerprint this file and there is no decoder for the
+		// pure-Go fallback: nothing to store; skipped and retried later. (A short file
+		// that produces an empty-but-valid fingerprint keeps its real algo and is
+		// stored as before, not skipped.)
+		res.Skipped++
+		return nil
+	}
 
 	// Bucket by the full track length from tags; fall back to the (possibly
 	// capped) analyzed length only when the tag duration is unknown.
 	durForBucket := f.DurationMS
 	if durForBucket <= 0 {
-		durForBucket = fp.DurationMS
+		durForBucket = fpDurationMS
 	}
 	in := model.AnalysisInput{
-		AnalysisVersion: Version,
+		// Stamp the version for the algorithm actually used, not the run's preferred
+		// backend. A file that fell back to pure-Go (fpcalc failed on it) then reads as
+		// stale on the next run and is retried once fpcalc can handle it, instead of
+		// being frozen with a version claiming Chromaprint while it carries an algo-1
+		// vector (which the candidate join would never group and never re-analyze).
+		AnalysisVersion: effectiveVersion(algo),
 		Fingerprint: model.FingerprintInput{
 			FilePID:        f.PID,
 			EssenceHash:    f.EssenceHash,
-			AlgoVersion:    fingerprint.AlgoVersion,
+			AlgoVersion:    algo,
 			DurationBucket: fingerprint.DurationBucket(durForBucket),
-			FP:             fingerprint.Pack(fp.Sub),
-			Terms:          fingerprint.IndexTerms(fp.Sub, fingerprint.DefaultIndexTerms),
+			FP:             fingerprint.Pack(sub),
+			Terms:          indexTerms(algo, sub),
 		},
 	}
-	in.Loudness, in.Peaks = a.measure(ctx, f, dec)
+	in.Loudness, in.Peaks = a.measure(ctx, f, dec, hasDec)
 
 	if err := a.store.PutAnalysis(ctx, in); err != nil {
 		return err
@@ -175,10 +211,49 @@ func (a *Analyzer) analyzeFile(ctx context.Context, f *model.File, res *Result) 
 	return nil
 }
 
+// fingerprintFile computes a file's grouping fingerprint, preferring fpcalc
+// (Chromaprint) when present and falling back to the pure-Go fingerprint. It
+// returns the sub-fingerprint vector, the algorithm that produced it (stored so
+// grouping never compares incomparable layouts), and the analyzed duration. An
+// fpcalc failure on one file is not fatal: it logs and, when a decoder is available,
+// falls back to the pure-Go path for that file. When neither fpcalc nor a decoder
+// can read the file it returns a nil vector (the caller skips and retries it).
+func (a *Analyzer) fingerprintFile(ctx context.Context, f *model.File, dec decode.Decoder, hasDec bool) ([]uint32, int, int64, error) {
+	if a.fpAlgo == fingerprint.ChromaprintAlgoVersion {
+		sub, durSec, err := fingerprint.ChromaprintRaw(ctx, a.caps.FpcalcPath, string(f.Path), fingerprint.MaxAnalyze)
+		if err == nil {
+			return sub, fingerprint.ChromaprintAlgoVersion, int64(durSec) * 1000, nil
+		}
+		if ctx.Err() != nil {
+			return nil, 0, 0, ctx.Err()
+		}
+		a.log.Warn("fpcalc fingerprint failed", "path", f.DisplayPath, "err", err)
+		if !hasDec {
+			return nil, 0, 0, nil // no decoder for the pure-Go fallback
+		}
+	}
+	pcm, err := dec.Decode(ctx, string(f.Path), fingerprint.MaxAnalyze)
+	if err != nil {
+		return nil, 0, 0, err
+	}
+	fp := fingerprint.Compute(pcm)
+	return fp.Sub, fingerprint.AlgoVersion, fp.DurationMS, nil
+}
+
+// indexTerms builds the inverted-index min-hash terms for the chosen fingerprint
+// backend (Chromaprint hashes its wider sub-values; the pure-Go fingerprint packs
+// its 15-bit ones).
+func indexTerms(algo int, sub []uint32) []int64 {
+	if algo == fingerprint.ChromaprintAlgoVersion {
+		return fingerprint.ChromaprintTerms(sub, fingerprint.DefaultIndexTerms)
+	}
+	return fingerprint.IndexTerms(sub, fingerprint.DefaultIndexTerms)
+}
+
 // measure computes loudness and peaks, preferring ffmpeg's whole-file ebur128
 // path and falling back to a bounded pure-Go BS.1770 pass. Either result may be
 // nil after a transient failure.
-func (a *Analyzer) measure(ctx context.Context, f *model.File, dec decode.Decoder) (*model.LoudnessData, *model.PeaksData) {
+func (a *Analyzer) measure(ctx context.Context, f *model.File, dec decode.Decoder, hasDec bool) (*model.LoudnessData, *model.PeaksData) {
 	path := string(f.Path)
 	if a.caps.FFmpeg {
 		var ld *model.LoudnessData
@@ -196,7 +271,13 @@ func (a *Analyzer) measure(ctx context.Context, f *model.File, dec decode.Decode
 		return ld, pk
 	}
 
-	// Pure-Go fallback: one bounded decode feeds both R128 and the waveform.
+	// The pure-Go fallback needs a decoder. Without one (an fpcalc-fingerprinted file
+	// whose codec this build cannot decode, and no ffmpeg) loudness and peaks are
+	// unavailable. The fingerprint still stands.
+	if !hasDec {
+		return nil, nil
+	}
+	// One bounded decode feeds both R128 and the waveform.
 	pcm, err := dec.Decode(ctx, path, loudnessMaxDecode)
 	if err != nil {
 		a.log.Warn("loudness decode", "path", f.DisplayPath, "err", err)
