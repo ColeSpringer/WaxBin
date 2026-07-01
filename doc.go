@@ -17,9 +17,13 @@
 // in their own packages: model (domain types + repository interfaces), query
 // (the shared selection engine), identity (entity identity + essence hashing),
 // store/sqlite (the SQLite DataStore, write coordinator, and flock ownership),
-// scan, organize, jobs, meta, and config; the CLI lives under cmd/waxbin.
+// read (facet/browse/search/pagination), art (CAS + thumbnails), decode and
+// analyze (the PCM analysis pass), scan, organize, inbox, trash, playback,
+// playlist, podcast, source (the acquisition port), enrich (metadata brain),
+// audit (quality/repair), jobs, meta, and config; the CLI lives under cmd/waxbin.
 //
-// The current build covers the core local-file loop: scan -> store -> query ->
-// organize -> read back. Analysis, enrichment, podcasts, and audiobooks build on
-// the same package boundaries.
+// The engine covers the full lifecycle: scan, analyze, organize, read/browse,
+// playback state, podcasts, audiobooks, enrichment, and audit/quality/repair, all
+// on the same package boundaries. The merge primitive and the maintenance commands
+// (db verify/vacuum/migrate) close the loop.
 package waxbin

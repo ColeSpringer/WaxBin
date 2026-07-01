@@ -12,9 +12,13 @@ import (
 func newStatsCmd(g *globals) *cobra.Command {
 	var user string
 	var topN int
+	var year int
 	cmd := &cobra.Command{
 		Use:   "stats",
 		Short: "Summarize the library (totals, top genres/artists, play stats)",
+		Long: "Summarizes the library totals, top genres/artists, and per-user play stats. " +
+			"With --year N, prints a listening year-in-review instead: minutes played, top " +
+			"artists/genres/tracks that calendar year (UTC), and catalog additions.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			lib, _, err := g.openRead(cmd)
 			if err != nil {
@@ -24,6 +28,16 @@ func newStatsCmd(g *globals) *cobra.Command {
 			uPID, err := resolveUser(cmd, lib, user)
 			if err != nil {
 				return err
+			}
+			if year > 0 {
+				yr, err := lib.YearInReview(ctx(cmd), uPID, year, topN)
+				if err != nil {
+					return err
+				}
+				if g.jsonOut {
+					return printJSON(cmd, toYearReviewView(yr))
+				}
+				return printYearReview(cmd, yr)
 			}
 			st, err := lib.Stats(ctx(cmd), uPID, topN)
 			if err != nil {
@@ -37,7 +51,28 @@ func newStatsCmd(g *globals) *cobra.Command {
 	}
 	cmd.Flags().StringVar(&user, "user", "", "user name for play stats (default user when omitted)")
 	cmd.Flags().IntVar(&topN, "top", 10, "size of the top-genres/artists/most-played lists")
+	cmd.Flags().IntVar(&year, "year", 0, "print a listening year-in-review for this calendar year")
 	return cmd
+}
+
+func printYearReview(cmd *cobra.Command, yr *read.YearReview) error {
+	w := out(cmd)
+	fmt.Fprintf(w, "%d in review (%s):\n", yr.Year, yr.User)
+	fmt.Fprintf(w, "  minutes played: %d\n", yr.MinutesPlayed)
+	fmt.Fprintf(w, "  sessions:       %d\n", yr.Sessions)
+	fmt.Fprintf(w, "  tracks played:  %d\n", yr.TracksPlayed)
+	fmt.Fprintf(w, "  added to library: %d\n", yr.NewInLibrary)
+	printBuckets(w, "top artists", yr.TopArtists)
+	printBuckets(w, "top genres", yr.TopGenres)
+	if len(yr.TopTracks) > 0 {
+		tw := tabwriter.NewWriter(w, 0, 2, 2, ' ', 0)
+		fmt.Fprintln(tw, "\ntop tracks:\tPLAYS\tTITLE\tARTIST")
+		for _, p := range yr.TopTracks {
+			fmt.Fprintf(tw, "\t%d\t%s\t%s\n", p.PlayCount, p.Title, p.Artist)
+		}
+		_ = tw.Flush()
+	}
+	return nil
 }
 
 func printStats(cmd *cobra.Command, st *read.Stats) error {

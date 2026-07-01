@@ -1,0 +1,68 @@
+# GoReleaser configuration for WaxBin. WaxBin is strictly no-CGO, so every build
+# sets CGO_ENABLED=0 and cross-compiles cleanly to all targets. Cut a release by
+# tagging (e.g. `git tag v1.0.0 && git push --tags`) and running `goreleaser release`.
+version: 2
+
+project_name: waxbin
+
+before:
+  hooks:
+    - go mod tidy
+    - go vet ./...
+
+builds:
+  - id: waxbin
+    main: ./cmd/waxbin
+    binary: waxbin
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    # The version string is stamped into the binary; make builds reproducible.
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+archives:
+  - id: waxbin
+    ids:
+      - waxbin
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    formats:
+      - tar.gz
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+    files:
+      - README.md
+      - CHANGELOG.md
+      - LICENSE
+
+checksum:
+  name_template: "checksums.txt"
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  use: github
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^ci:"
+      - "^chore:"
+
+release:
+  draft: false
+  prerelease: auto

@@ -414,6 +414,50 @@ func (s *Store) FileByPath(ctx context.Context, path []byte) (*model.File, error
 	return f, nil
 }
 
+// FileByPID returns a file (with its quality fields) by public id, or CodeNotFound.
+func (s *Store) FileByPID(ctx context.Context, pid model.PID) (*model.File, error) {
+	row := s.read.QueryRowContext(ctx, fileSelect+" WHERE pid = ?", string(pid))
+	f, err := scanFile(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, waxerr.New(waxerr.CodeNotFound, "store.FileByPID", "no file with that pid")
+	}
+	if err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeIO, "store.FileByPID", err)
+	}
+	return f, nil
+}
+
+// FileQualitiesByItem returns the primary backing file's quality (codec, bitrate,
+// sample rate, bit depth) for every present track/book item, keyed by item PID, in
+// one query. A catalog-wide quality scan (the upgrade policy) loads all quality up
+// front with this instead of one file lookup per item.
+func (s *Store) FileQualitiesByItem(ctx context.Context) (map[model.PID]model.File, error) {
+	const op = "store.FileQualitiesByItem"
+	rows, err := s.read.QueryContext(ctx, `SELECT pi.pid, f.codec, f.bitrate, f.sample_rate, f.bit_depth
+		FROM playable_item pi
+		JOIN item_file if2 ON if2.item_id = pi.id AND if2.role = 'primary'
+		JOIN file f ON f.id = if2.file_id
+		WHERE pi.kind IN ('track','book') AND pi.state = 'present'`)
+	if err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	defer rows.Close()
+	out := make(map[model.PID]model.File)
+	for rows.Next() {
+		var pid string
+		var codec sql.NullString
+		var bitrate, sampleRate, bitDepth sql.NullInt64
+		if err := rows.Scan(&pid, &codec, &bitrate, &sampleRate, &bitDepth); err != nil {
+			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		out[model.PID(pid)] = model.File{
+			Codec: codec.String, Bitrate: int(bitrate.Int64),
+			SampleRate: int(sampleRate.Int64), BitDepth: int(bitDepth.Int64),
+		}
+	}
+	return out, rows.Err()
+}
+
 // FileByEssence returns a file by essence hash (first match), or CodeNotFound.
 func (s *Store) FileByEssence(ctx context.Context, essence string) (*model.File, error) {
 	row := s.read.QueryRowContext(ctx, fileSelect+" WHERE essence_hash = ? LIMIT 1", essence)

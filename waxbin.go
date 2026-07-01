@@ -9,10 +9,12 @@ import (
 	"time"
 
 	"github.com/colespringer/waxbin/analyze"
+	"github.com/colespringer/waxbin/audit"
 	"github.com/colespringer/waxbin/config"
 	"github.com/colespringer/waxbin/decode"
 	"github.com/colespringer/waxbin/enrich"
 	"github.com/colespringer/waxbin/fingerprint"
+	"github.com/colespringer/waxbin/identity"
 	"github.com/colespringer/waxbin/inbox"
 	"github.com/colespringer/waxbin/internal/pathx"
 	"github.com/colespringer/waxbin/jobs"
@@ -34,6 +36,9 @@ import (
 // The SQLite store implements the enrichment persistence port. Asserted here so a
 // port/store drift is a compile error at the wiring seam.
 var _ enrich.Store = (*sqlite.Store)(nil)
+
+// The SQLite store also implements the audit persistence port.
+var _ audit.Store = (*sqlite.Store)(nil)
 
 // enrichConfig converts the config-only EnrichConfig into the enrich package's
 // Config, resolving the cover-art default (on unless explicitly disabled).
@@ -66,6 +71,7 @@ type Library struct {
 	playlists *playlist.Service
 	podcasts  *podcast.Service
 	enricher  *enrich.Service
+	auditor   *audit.Auditor
 	decoders  *decode.Registry
 	log       *slog.Logger
 	opts      Options
@@ -144,6 +150,14 @@ func Open(ctx context.Context, opts Options) (*Library, error) {
 	// The importer catalogs each placed file through the scanner, so it is wired
 	// after the struct is built and shares that scanner.
 	l.importer = inbox.New(st, meta.NewReader(), l.scanner, log)
+
+	// The auditor's integrity check re-hashes files (identity.ContentHash) and its
+	// corrupt-audio check parses essence through a WaxLabel reader.
+	auditReader := meta.NewReader()
+	l.auditor = audit.New(st, identity.ContentHash, func(ctx context.Context, p string) error {
+		_, err := auditReader.Read(ctx, p)
+		return err
+	}, log)
 
 	if !opts.ReadOnly {
 		if err := l.ensureRoots(ctx); err != nil {
@@ -562,6 +576,84 @@ func (l *Library) VerifyDerived(ctx context.Context) (*sqlite.DerivedReport, err
 // drift that VerifyDerived can report.
 func (l *Library) RefreshRollups(ctx context.Context) error {
 	return l.store.RefreshRollups(ctx)
+}
+
+// AuditOptions selects which audit checks run.
+type AuditOptions struct {
+	// Only, when non-empty, restricts the run to these checks.
+	Only []model.AuditCheck
+	// Integrity re-reads every audio file to detect bitrot, missing files, and
+	// corrupt audio. Off by default (I/O heavy).
+	Integrity bool
+	// Sample caps the per-check finding sample (0 uses a default).
+	Sample int
+}
+
+// Audit runs the quality/integrity checks and returns their findings. It is
+// read-only. The default run covers the catalog checks (duplicates, split albums,
+// inconsistent metadata, missing art/ReplayGain, bad filenames, orphan sidecars,
+// path conflicts, invalid feeds, derived-data drift); Integrity adds the on-disk
+// bitrot and corrupt-audio passes.
+func (l *Library) Audit(ctx context.Context, opts AuditOptions) (*audit.Report, error) {
+	return l.auditor.Run(ctx, audit.Config{Only: opts.Only, Integrity: opts.Integrity, Sample: opts.Sample})
+}
+
+// VacuumReport summarizes a vacuum: the derived garbage reclaimed before the
+// on-disk compaction.
+type VacuumReport struct {
+	ArtSourcesReclaimed int
+	ThumbnailsReclaimed int
+}
+
+// Vacuum reclaims orphaned art (GC) and then compacts the database file,
+// returning what the GC reclaimed. It takes the write lock.
+func (l *Library) Vacuum(ctx context.Context) (*VacuumReport, error) {
+	srcs, thumbs, err := l.store.GCArt(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if err := l.store.Vacuum(ctx); err != nil {
+		return nil, err
+	}
+	return &VacuumReport{ArtSourcesReclaimed: srcs, ThumbnailsReclaimed: thumbs}, nil
+}
+
+// IntegrityCheck runs SQLite's PRAGMA integrity_check and returns the problems it
+// reports (a healthy database returns a single "ok"). It is read-only.
+func (l *Library) IntegrityCheck(ctx context.Context) ([]string, error) {
+	return l.store.IntegrityCheck(ctx)
+}
+
+// PruneChangeLog trims the change_log to its newest keep rows, returning how many
+// were deleted. A consumer that has fallen behind the retained horizon must
+// full-resync (the documented delta-sync contract).
+func (l *Library) PruneChangeLog(ctx context.Context, keep int) (int, error) {
+	return l.store.PruneChangeLog(ctx, keep)
+}
+
+// YearInReview returns a per-user listening recap for one calendar year (UTC):
+// session/minute/track totals, catalog additions that year, and the top
+// artists/genres/tracks by play count. An empty userPID uses the default user.
+func (l *Library) YearInReview(ctx context.Context, userPID model.PID, year, topN int) (*read.YearReview, error) {
+	return l.store.YearInReview(ctx, userPID, year, topN)
+}
+
+// Merge collapses the loser entity onto the survivor: children (tracks, albums,
+// genre links, contributor credits) are re-pointed onto the survivor, its MBID
+// and enrichment marker are unioned when it lacks one, rollups are recomputed,
+// and the loser is deleted. The survivor keeps its PID. This is the first-class
+// entity-merge primitive for artists, release groups, albums, and genres. It
+// repairs the duplicate-entity findings audit reports, and is the seam late
+// enrichment uses to unify two heuristic rows that resolve to one MBID.
+func (l *Library) Merge(ctx context.Context, entityType model.MergeEntity, survivorPID, loserPID model.PID) (*model.MergeReport, error) {
+	return l.store.MergeEntity(ctx, entityType, survivorPID, loserPID)
+}
+
+// MergeMany collapses several loser entities onto the survivor in one atomic
+// transaction: if any loser fails (e.g. an unknown PID), the whole batch rolls
+// back, so a partial merge can never be left behind. Returns one report per loser.
+func (l *Library) MergeMany(ctx context.Context, entityType model.MergeEntity, survivorPID model.PID, loserPIDs []model.PID) ([]*model.MergeReport, error) {
+	return l.store.MergeEntities(ctx, entityType, survivorPID, loserPIDs)
 }
 
 // Lock marks item fields as protected from enrichment and organize tag

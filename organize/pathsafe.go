@@ -23,19 +23,74 @@ var reservedDeviceNames = map[string]bool{
 	"lpt6": true, "lpt7": true, "lpt8": true, "lpt9": true,
 }
 
+// illegalSegmentChars is the cross-platform-illegal character set for a single
+// path segment: path separators, the drive colon, and the Windows wildcard/
+// redirect characters. Shared by the sanitizer and the audit's UnsafeSegmentReason
+// so detection and rewriting stay in lockstep.
+const illegalSegmentChars = `/\:*?"<>|`
+
 // illegalToUnderscore folds a path-hostile rune to '_': control characters and
-// the cross-platform-illegal set (path separators, drive colon, the Windows
-// wildcard/redirect characters). Shared by segment and field sanitizing so both
+// the illegal set above. Shared by segment and field sanitizing so both
 // neutralize the same characters.
 func illegalToUnderscore(r rune) rune {
 	switch {
 	case r < 0x20: // control characters
 		return '_'
-	case strings.ContainsRune(`/\:*?"<>|`, r):
+	case strings.ContainsRune(illegalSegmentChars, r):
 		return '_'
 	default:
 		return r
 	}
+}
+
+// segmentStem returns the part of a segment before its first dot, the portion the
+// Windows reserved-device-name rule applies to ("con.mp3" -> "con").
+func segmentStem(seg string) string {
+	if dot := strings.IndexByte(seg, '.'); dot >= 0 {
+		return seg[:dot]
+	}
+	return seg
+}
+
+// isReservedName reports whether a segment's stem is a Windows reserved device name.
+func isReservedName(seg string) bool {
+	return reservedDeviceNames[strings.ToLower(segmentStem(seg))]
+}
+
+// UnsafeSegmentReason reports why a single on-disk path segment is not portable,
+// or "" when it is safe. It applies the same portability rules sanitizeSegment
+// enforces when organizing (control and illegal characters, Windows reserved
+// device names, a leading or trailing space, a trailing dot, and the 255-byte
+// segment cap), so audit can flag on-disk names organize would have to rewrite.
+// NFC/NFD differences are not flagged, since both forms are valid on disk; only
+// true portability hazards are. An empty segment is safe (callers filter those).
+func UnsafeSegmentReason(seg string) string {
+	if seg == "" {
+		return ""
+	}
+	for _, r := range seg {
+		if r < 0x20 {
+			return "control character"
+		}
+		if strings.ContainsRune(illegalSegmentChars, r) {
+			return "illegal character " + string(r)
+		}
+	}
+	if isReservedName(seg) {
+		return "Windows reserved device name"
+	}
+	// sanitizeSegment trims leading and trailing spaces and trailing dots, so flag
+	// any of those. A leading-space name is rewritten by organize, so it is not safe.
+	if strings.TrimLeft(seg, " ") != seg {
+		return "leading space"
+	}
+	if strings.TrimRight(seg, " .") != seg {
+		return "trailing space or dot"
+	}
+	if len(seg) > maxSegmentBytes {
+		return "segment exceeds 255 bytes"
+	}
+	return ""
 }
 
 // sanitizeSegment makes one path segment filesystem-safe and portable:
@@ -83,14 +138,11 @@ func foldField(s string) string {
 // any extension intact: "con.mp3" -> "con_.mp3", "NUL" -> "NUL_". Every other name
 // is returned unchanged.
 func escapeReservedName(seg string) string {
-	stem, ext := seg, ""
-	if dot := strings.IndexByte(seg, '.'); dot >= 0 {
-		stem, ext = seg[:dot], seg[dot:]
+	if !isReservedName(seg) {
+		return seg
 	}
-	if reservedDeviceNames[strings.ToLower(stem)] {
-		return stem + "_" + ext
-	}
-	return seg
+	stem := segmentStem(seg)
+	return stem + "_" + seg[len(stem):]
 }
 
 // capSegmentBytes truncates seg to maxSegmentBytes, preferring to keep the file

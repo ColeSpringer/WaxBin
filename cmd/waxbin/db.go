@@ -12,8 +12,121 @@ func newDBCmd(g *globals) *cobra.Command {
 		Use:   "db",
 		Short: "Database maintenance",
 	}
-	db.AddCommand(newDBVerifyCmd(g))
+	db.AddCommand(newDBVerifyCmd(g), newDBVacuumCmd(g), newDBMigrateCmd(g))
 	return db
+}
+
+func newDBVacuumCmd(g *globals) *cobra.Command {
+	var (
+		integrity bool
+		prune     int
+	)
+	cmd := &cobra.Command{
+		Use:   "vacuum",
+		Short: "Reclaim space and compact the database",
+		Long: "Garbage-collects orphaned art, compacts the database file (VACUUM), and " +
+			"optionally runs SQLite's integrity check and trims the change_log. Takes the " +
+			"write lock.",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			lib, _, err := g.open(cmd)
+			if err != nil {
+				return err
+			}
+			defer lib.Close()
+
+			var pruned int
+			if prune > 0 {
+				if pruned, err = lib.PruneChangeLog(ctx(cmd), prune); err != nil {
+					return err
+				}
+			}
+			rep, err := lib.Vacuum(ctx(cmd))
+			if err != nil {
+				return err
+			}
+			var problems []string
+			if integrity {
+				if problems, err = lib.IntegrityCheck(ctx(cmd)); err != nil {
+					return err
+				}
+			}
+			ok := !integrity || (len(problems) == 1 && problems[0] == "ok")
+
+			if g.jsonOut {
+				// Only report integrity fields when the check actually ran, so a
+				// consumer can tell "verified healthy" from "never checked".
+				data := map[string]any{
+					"artSourcesReclaimed": rep.ArtSourcesReclaimed,
+					"thumbnailsReclaimed": rep.ThumbnailsReclaimed,
+					"changeLogPruned":     pruned,
+					"integrityChecked":    integrity,
+				}
+				if integrity {
+					data["integrityOK"] = ok
+					data["integrityProblems"] = problems
+				}
+				if err := printJSON(cmd, data); err != nil {
+					return err
+				}
+			} else {
+				w := out(cmd)
+				fmt.Fprintf(w, "reclaimed art sources: %d\n", rep.ArtSourcesReclaimed)
+				fmt.Fprintf(w, "reclaimed thumbnails:  %d\n", rep.ThumbnailsReclaimed)
+				if prune > 0 {
+					fmt.Fprintf(w, "change_log pruned:     %d\n", pruned)
+				}
+				fmt.Fprintln(w, "database compacted")
+				if integrity {
+					if ok {
+						fmt.Fprintln(w, "integrity check:       ok")
+					} else {
+						fmt.Fprintf(w, "integrity check:       %d problem(s)\n", len(problems))
+						for _, p := range problems {
+							fmt.Fprintf(w, "  %s\n", p)
+						}
+					}
+				}
+			}
+			if !ok {
+				return waxerr.New(waxerr.CodeInternal, "db vacuum", "integrity check failed")
+			}
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&integrity, "integrity", false, "also run SQLite's integrity check")
+	cmd.Flags().IntVar(&prune, "prune-changelog", 0, "trim the change_log to its newest N rows (0 = keep all)")
+	return cmd
+}
+
+func newDBMigrateCmd(g *globals) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "migrate",
+		Short: "Upgrade the catalog schema to this build",
+		Long: "Opens the catalog read-write, which applies any pending migrations (backing " +
+			"up the database first), and reports the resulting schema version.",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			// A read-write open migrates as a side effect; report the resulting version.
+			lib, _, err := g.open(cmd)
+			if err != nil {
+				return err
+			}
+			defer lib.Close()
+			rep, err := lib.Doctor(ctx(cmd))
+			if err != nil {
+				return err
+			}
+			if g.jsonOut {
+				return printJSON(cmd, map[string]any{
+					"schemaVersion": rep.SchemaVersion,
+					"buildVersion":  rep.BuildSchemaVersion,
+				})
+			}
+			fmt.Fprintf(out(cmd), "catalog schema is at v%d (build supports v%d)\n",
+				rep.SchemaVersion, rep.BuildSchemaVersion)
+			return nil
+		},
+	}
+	return cmd
 }
 
 func newDBVerifyCmd(g *globals) *cobra.Command {

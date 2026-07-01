@@ -270,6 +270,35 @@ func toStatsView(s *read.Stats) statsView {
 	return v
 }
 
+// yearReviewView is the camelCase JSON shape for a listening year-in-review, so
+// `stats --year --json` matches the stable schema of every other --json path
+// instead of leaking the untagged read.YearReview/read.Bucket fields.
+type yearReviewView struct {
+	Year          int              `json:"year"`
+	User          string           `json:"user"`
+	Sessions      int              `json:"sessions"`
+	MinutesPlayed int64            `json:"minutesPlayed"`
+	TracksPlayed  int              `json:"tracksPlayed"`
+	NewInLibrary  int              `json:"newInLibrary"`
+	TopArtists    []bucketView     `json:"topArtists"`
+	TopGenres     []bucketView     `json:"topGenres"`
+	TopTracks     []playedItemJSON `json:"topTracks"`
+}
+
+func toYearReviewView(yr *read.YearReview) yearReviewView {
+	v := yearReviewView{
+		Year: yr.Year, User: yr.User, Sessions: yr.Sessions, MinutesPlayed: yr.MinutesPlayed,
+		TracksPlayed: yr.TracksPlayed, NewInLibrary: yr.NewInLibrary,
+		TopArtists: bucketViews(yr.TopArtists), TopGenres: bucketViews(yr.TopGenres),
+	}
+	for _, p := range yr.TopTracks {
+		v.TopTracks = append(v.TopTracks, playedItemJSON{
+			PID: string(p.PID), Title: p.Title, Artist: p.Artist, PlayCount: p.PlayCount,
+		})
+	}
+	return v
+}
+
 // playlistView is the JSON shape for a playlist's metadata.
 type playlistView struct {
 	PID        string `json:"pid"`

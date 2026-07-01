@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"sort"
+	"time"
 
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/query"
@@ -132,6 +133,115 @@ func (s *Store) playStats(ctx context.Context, userPID model.PID, topN int) (rea
 		ps.MostPlayed = append(ps.MostPlayed, it)
 	}
 	return ps, rows.Err()
+}
+
+// YearInReview builds a per-user listening recap for one calendar year (UTC
+// boundaries) from play_session history: session/minute/track totals, the tracks
+// added that year, and the top artists/genres/tracks by play count. topN bounds
+// each top list. An empty userPID uses the default user. Read-only.
+func (s *Store) YearInReview(ctx context.Context, userPID model.PID, year, topN int) (*read.YearReview, error) {
+	const op = "store.YearInReview"
+	// Unix-nanosecond timestamps only span ~1678..2262, so a year outside that range
+	// yields wrapped/garbage bounds. Reject it rather than return a silently bogus recap.
+	if year < 1678 || year > 2261 {
+		return nil, waxerr.New(waxerr.CodeInvalid, op, "year out of range (1678-2261)")
+	}
+	if topN <= 0 {
+		topN = 10
+	}
+	userID, err := userIDByPID(ctx, s.read, userPID, op)
+	if err != nil {
+		return nil, err
+	}
+	var name string
+	if err := s.read.QueryRowContext(ctx, "SELECT name FROM user WHERE id = ?", userID).Scan(&name); err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	lo := time.Date(year, 1, 1, 0, 0, 0, 0, time.UTC).UnixNano()
+	hi := time.Date(year+1, 1, 1, 0, 0, 0, 0, time.UTC).UnixNano()
+	yr := &read.YearReview{Year: year, User: name}
+
+	// The recap covers the music/audiobook library, excluding podcast episodes, so
+	// every figure (totals AND the top lists, which key on the artist/genre entities
+	// episodes lack) is consistent with the catalog Stats, which also excludes episodes.
+	var msPlayed int64
+	if err := s.read.QueryRowContext(ctx,
+		`SELECT COUNT(*), COALESCE(SUM(ps.ms_played),0), COUNT(DISTINCT ps.item_id)
+		 FROM play_session ps JOIN playable_item pi ON pi.id = ps.item_id
+		 WHERE ps.user_id = ? AND ps.started_at >= ? AND ps.started_at < ? AND pi.kind IN ('track','book')`,
+		userID, lo, hi).Scan(&yr.Sessions, &msPlayed, &yr.TracksPlayed); err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	yr.MinutesPlayed = msPlayed / 60000
+
+	if err := s.read.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM playable_item WHERE kind IN ('track','book')
+		 AND created_at >= ? AND created_at < ?`, lo, hi).Scan(&yr.NewInLibrary); err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+
+	yr.TopArtists, err = s.yearBuckets(ctx, `SELECT a.pid, a.name, COUNT(*)
+		FROM play_session ps
+		JOIN playable_item pi ON pi.id = ps.item_id
+		LEFT JOIN track t ON t.item_id = pi.id
+		LEFT JOIN book bk ON bk.item_id = pi.id
+		JOIN artist a ON a.id = COALESCE(t.artist_id, bk.author_id)
+		WHERE ps.user_id = ? AND ps.started_at >= ? AND ps.started_at < ? AND pi.kind IN ('track','book')
+		GROUP BY a.id ORDER BY COUNT(*) DESC, a.sort_key LIMIT ?`, userID, lo, hi, topN)
+	if err != nil {
+		return nil, err
+	}
+	yr.TopGenres, err = s.yearBuckets(ctx, `SELECT g.pid, g.name, COUNT(*)
+		FROM play_session ps
+		JOIN playable_item pi ON pi.id = ps.item_id
+		JOIN item_genre ig ON ig.item_id = ps.item_id
+		JOIN genre g ON g.id = ig.genre_id
+		WHERE ps.user_id = ? AND ps.started_at >= ? AND ps.started_at < ?
+		  AND pi.kind IN ('track','book') AND g.facet = 'genre'
+		GROUP BY g.id ORDER BY COUNT(*) DESC, g.sort_key LIMIT ?`, userID, lo, hi, topN)
+	if err != nil {
+		return nil, err
+	}
+
+	rows, err := s.read.QueryContext(ctx, `SELECT pi.pid, pi.title,
+		COALESCE(NULLIF(t.artist,''), bk.author, ''), COUNT(*)
+		FROM play_session ps
+		JOIN playable_item pi ON pi.id = ps.item_id
+		LEFT JOIN track t ON t.item_id = pi.id
+		LEFT JOIN book bk ON bk.item_id = pi.id
+		WHERE ps.user_id = ? AND ps.started_at >= ? AND ps.started_at < ? AND pi.kind IN ('track','book')
+		GROUP BY pi.id ORDER BY COUNT(*) DESC, pi.sort_key LIMIT ?`, userID, lo, hi, topN)
+	if err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var it read.PlayedItem
+		if err := rows.Scan(&it.PID, &it.Title, &it.Artist, &it.PlayCount); err != nil {
+			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		yr.TopTracks = append(yr.TopTracks, it)
+	}
+	return yr, rows.Err()
+}
+
+// yearBuckets runs a (pid, name, count) aggregation and returns display buckets.
+func (s *Store) yearBuckets(ctx context.Context, q string, args ...any) ([]read.Bucket, error) {
+	rows, err := s.read.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeIO, "store.YearInReview", err)
+	}
+	defer rows.Close()
+	var out []read.Bucket
+	for rows.Next() {
+		var pid, disp string
+		var count int
+		if err := rows.Scan(&pid, &disp, &count); err != nil {
+			return nil, waxerr.Wrap(waxerr.CodeIO, "store.YearInReview", err)
+		}
+		out = append(out, read.Bucket{Key: pid, Display: disp, Count: count, EntityPID: model.PID(pid)})
+	}
+	return out, rows.Err()
 }
 
 // topBuckets returns the n highest-count buckets, ties broken by display so the

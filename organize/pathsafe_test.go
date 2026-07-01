@@ -7,6 +7,33 @@ import (
 	"golang.org/x/text/unicode/norm"
 )
 
+func TestUnsafeSegmentReasonMatchesSanitizer(t *testing.T) {
+	// The audit detector must agree with the sanitizer: a name organize would
+	// rewrite is flagged unsafe, and a name it leaves alone is reported safe. This
+	// locks the two together (they drifted on leading spaces — sanitizeSegment trims
+	// both sides while the detector only checked trailing). NFC/diacritic folding is
+	// excluded: sanitizeSegment NFC-normalizes but both forms are valid on disk, so
+	// the seeds below are all already-NFC to keep the comparison about portability.
+	segs := []string{
+		"Normal Title.mp3", // safe
+		"track 02.flac",    // safe
+		" leading.mp3",     // rewritten: leading space
+		"trailing .mp3",    // safe: the space is mid-name (before the extension dot)
+		"trailing. ",       // rewritten: trailing space/dot
+		"what?.flac",       // rewritten: illegal character
+		"con.mp3",          // rewritten: reserved device name
+		"a/b.flac",         // rewritten: separator
+	}
+	for _, seg := range segs {
+		safe := UnsafeSegmentReason(seg) == ""
+		rewritten := sanitizeSegment(seg) != seg
+		if safe == rewritten {
+			t.Errorf("detector/sanitizer disagree for %q: safe=%v, sanitizeSegment=%q",
+				seg, safe, sanitizeSegment(seg))
+		}
+	}
+}
+
 func TestSanitizeSegmentReservedDeviceNames(t *testing.T) {
 	cases := map[string]string{
 		"CON":       "CON_",

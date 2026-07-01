@@ -39,3 +39,19 @@ type PlayedItem struct {
 	Artist    string
 	PlayCount int
 }
+
+// YearReview is a per-user listening recap for one calendar year (UTC), derived
+// from play_session history. The top lists rank by play count within the year;
+// NewInLibrary counts items catalogued that year (catalog-structural). It
+// complements the Facet-based catalog Stats with a time-scoped listening view.
+type YearReview struct {
+	Year          int
+	User          string
+	Sessions      int
+	MinutesPlayed int64
+	TracksPlayed  int      // distinct items played that year
+	NewInLibrary  int      // tracks/books added to the catalog that year
+	TopArtists    []Bucket // Count = plays that year
+	TopGenres     []Bucket // Count = plays that year
+	TopTracks     []PlayedItem
+}
