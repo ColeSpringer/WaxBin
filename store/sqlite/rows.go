@@ -250,39 +250,58 @@ func updateFileRow(ctx context.Context, tx *sql.Tx, id int64, f model.File, now 
 	return err
 }
 
-func upsertItem(ctx context.Context, tx *sql.Tx, item model.PlayableItem, now int64) (int64, model.PID, bool, error) {
+// upsertItem finds-or-creates the logical item, returning its id, pid, whether it
+// was created, and whether an existing item's state transitioned (e.g. missing ->
+// present when a file is restored) so the caller can emit a change_log delta for the
+// transition even when the audio content is unchanged.
+func upsertItem(ctx context.Context, tx *sql.Tx, item model.PlayableItem, now int64, preferredPID model.PID) (id int64, pid model.PID, created, stateChanged bool, err error) {
 	if item.IdentityKey != "" {
-		var id int64
-		var pid string
-		err := tx.QueryRowContext(ctx,
-			"SELECT id, pid FROM playable_item WHERE kind = ? AND identity_key = ?",
-			string(item.Kind), item.IdentityKey).Scan(&id, &pid)
+		var rid int64
+		var rpid, curState string
+		qerr := tx.QueryRowContext(ctx,
+			"SELECT id, pid, state FROM playable_item WHERE kind = ? AND identity_key = ?",
+			string(item.Kind), item.IdentityKey).Scan(&rid, &rpid, &curState)
 		switch {
-		case err == nil:
-			if _, err := tx.ExecContext(ctx,
+		case qerr == nil:
+			if _, uerr := tx.ExecContext(ctx,
 				"UPDATE playable_item SET title=?, sort_key=?, state=?, updated_at=? WHERE id=?",
-				item.Title, item.SortKey, string(item.State), now, id); err != nil {
-				return 0, "", false, err
+				item.Title, item.SortKey, string(item.State), now, rid); uerr != nil {
+				return 0, "", false, false, uerr
 			}
-			return id, model.PID(pid), false, nil
-		case err != sql.ErrNoRows:
-			return 0, "", false, err
+			return rid, model.PID(rpid), false, curState != string(item.State), nil
+		case qerr != sql.ErrNoRows:
+			return 0, "", false, false, qerr
 		}
 	}
-	pid := model.NewPID()
-	r, err := tx.ExecContext(ctx, `INSERT INTO playable_item
+	// A new item mints a fresh PID, unless a rebuild supplied a valid, unclaimed
+	// preferred PID (from a WAXBIN_ITEM_PID tag) to restore the original identity.
+	// Identity stays essence-first: the tag is only a hint, so any conflict (invalid,
+	// or already taken by another item, e.g. a copied file or a wrong-kind or stale tag)
+	// falls back to a fresh PID.
+	newPID := model.NewPID()
+	if preferredPID != "" && preferredPID.Valid() {
+		var taken int
+		if terr := tx.QueryRowContext(ctx,
+			"SELECT EXISTS(SELECT 1 FROM playable_item WHERE pid = ?)", string(preferredPID)).Scan(&taken); terr != nil {
+			return 0, "", false, false, terr
+		}
+		if taken == 0 {
+			newPID = preferredPID
+		}
+	}
+	r, ierr := tx.ExecContext(ctx, `INSERT INTO playable_item
 		(pid, kind, state, title, sort_key, identity_key, created_at, updated_at)
 		VALUES (?,?,?,?,?,?,?,?)`,
-		string(pid), string(item.Kind), string(item.State), item.Title, item.SortKey,
+		string(newPID), string(item.Kind), string(item.State), item.Title, item.SortKey,
 		nullStr(item.IdentityKey), now, now)
-	if err != nil {
-		return 0, "", false, err
+	if ierr != nil {
+		return 0, "", false, false, ierr
 	}
-	id, err := r.LastInsertId()
-	if err != nil {
-		return 0, "", false, err
+	rid, ierr := r.LastInsertId()
+	if ierr != nil {
+		return 0, "", false, false, ierr
 	}
-	return id, pid, true, nil
+	return rid, newPID, true, false, nil
 }
 
 func upsertTrack(ctx context.Context, tx *sql.Tx, itemID int64, tr model.Track) error {

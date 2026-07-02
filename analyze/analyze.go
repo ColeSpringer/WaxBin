@@ -82,6 +82,9 @@ type Result struct {
 	LoudnessMeasured int // files that also got a ReplayGain measurement
 	Skipped          int // no decoder for the file's codec (doctor reports coverage)
 	Errored          int // decode/store failures (logged, not fatal)
+	// ReplayGainTagsWritten counts files whose computed ReplayGain was written back
+	// to disk (only when the write-back toggle is on; the facade fills this).
+	ReplayGainTagsWritten int
 }
 
 // Heartbeat reports progress; it may be nil.

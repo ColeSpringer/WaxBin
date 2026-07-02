@@ -149,7 +149,7 @@ func TestAnalyzeAndGroupAltEncodings(t *testing.T) {
 		t.Fatalf("derived data inconsistent after scan: %+v (err %v)", dr, err)
 	}
 
-	ares, err := lib.Analyze(ctx)
+	ares, err := lib.Analyze(ctx, waxbin.AnalyzeOptions{})
 	if err != nil {
 		t.Fatalf("analyze: %v", err)
 	}
@@ -163,7 +163,7 @@ func TestAnalyzeAndGroupAltEncodings(t *testing.T) {
 	}
 
 	// A second analyze is a no-op: nothing is stale (essence + version unchanged).
-	again, err := lib.Analyze(ctx)
+	again, err := lib.Analyze(ctx, waxbin.AnalyzeOptions{})
 	if err != nil {
 		t.Fatalf("re-analyze: %v", err)
 	}
@@ -206,7 +206,7 @@ func TestAnalyzeMeasuresLoudness(t *testing.T) {
 	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
 		t.Fatalf("scan: %v", err)
 	}
-	ares, err := lib.Analyze(ctx)
+	ares, err := lib.Analyze(ctx, waxbin.AnalyzeOptions{})
 	if err != nil {
 		t.Fatalf("analyze: %v", err)
 	}
@@ -339,7 +339,7 @@ func TestAnalyzeAIFFNotErrored(t *testing.T) {
 	if len(items) != 1 || items[0].Codec != "aiff" {
 		t.Fatalf("AIFF codec = %v, want one item keyed 'aiff'", items)
 	}
-	res, err := lib.Analyze(ctx)
+	res, err := lib.Analyze(ctx, waxbin.AnalyzeOptions{})
 	if err != nil {
 		t.Fatalf("analyze: %v", err)
 	}

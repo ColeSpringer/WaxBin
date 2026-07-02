@@ -58,6 +58,8 @@ func newDBVacuumCmd(g *globals) *cobra.Command {
 				data := map[string]any{
 					"artSourcesReclaimed": rep.ArtSourcesReclaimed,
 					"thumbnailsReclaimed": rep.ThumbnailsReclaimed,
+					"orphansDeleted":      rep.OrphansDeleted,
+					"orphansPending":      rep.OrphansPending,
 					"changeLogPruned":     pruned,
 					"integrityChecked":    integrity,
 				}
@@ -72,6 +74,10 @@ func newDBVacuumCmd(g *globals) *cobra.Command {
 				w := out(cmd)
 				fmt.Fprintf(w, "reclaimed art sources: %d\n", rep.ArtSourcesReclaimed)
 				fmt.Fprintf(w, "reclaimed thumbnails:  %d\n", rep.ThumbnailsReclaimed)
+				fmt.Fprintf(w, "orphan entities gc'd:  %d\n", rep.OrphansDeleted)
+				if rep.OrphansPending > 0 {
+					fmt.Fprintf(w, "orphans pending:       %d (within grace window)\n", rep.OrphansPending)
+				}
 				if prune > 0 {
 					fmt.Fprintf(w, "change_log pruned:     %d\n", pruned)
 				}
@@ -149,6 +155,11 @@ func newDBVerifyCmd(g *globals) *cobra.Command {
 
 			if fix {
 				if err := lib.RefreshRollups(ctx(cmd)); err != nil {
+					return err
+				}
+				// Sweep entities that have stayed childless past the grace window, then
+				// reclaim any art their removal orphaned.
+				if _, err := lib.GCOrphans(ctx(cmd)); err != nil {
 					return err
 				}
 				if _, _, err := lib.GCArt(ctx(cmd)); err != nil {

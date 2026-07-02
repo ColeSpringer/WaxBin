@@ -429,17 +429,19 @@ func toDerivedView(r *sqlite.DerivedReport) derivedView {
 }
 
 type analyzeView struct {
-	Analyzed         int    `json:"analyzed"`
-	LoudnessMeasured int    `json:"loudnessMeasured"`
-	Skipped          int    `json:"skipped"`
-	Errored          int    `json:"errored"`
-	JobPID           string `json:"jobPid,omitempty"`
+	Analyzed              int    `json:"analyzed"`
+	LoudnessMeasured      int    `json:"loudnessMeasured"`
+	ReplayGainTagsWritten int    `json:"replayGainTagsWritten,omitempty"`
+	Skipped               int    `json:"skipped"`
+	Errored               int    `json:"errored"`
+	JobPID                string `json:"jobPid,omitempty"`
 }
 
 func toAnalyzeView(r *waxbin.AnalyzeResult) analyzeView {
 	return analyzeView{
 		Analyzed: r.Result.Analyzed, LoudnessMeasured: r.Result.LoudnessMeasured,
-		Skipped: r.Result.Skipped, Errored: r.Result.Errored, JobPID: string(r.JobPID),
+		ReplayGainTagsWritten: r.Result.ReplayGainTagsWritten,
+		Skipped:               r.Result.Skipped, Errored: r.Result.Errored, JobPID: string(r.JobPID),
 	}
 }
 

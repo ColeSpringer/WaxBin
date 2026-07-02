@@ -30,6 +30,7 @@ import (
 	"github.com/colespringer/waxbin/scan"
 	"github.com/colespringer/waxbin/store/sqlite"
 	"github.com/colespringer/waxbin/trash"
+	"github.com/colespringer/waxbin/watch"
 	"github.com/colespringer/waxbin/waxerr"
 )
 
@@ -125,7 +126,7 @@ func Open(ctx context.Context, opts Options) (*Library, error) {
 		store:     st,
 		jobs:      jobs.NewManager(st, owner, log),
 		scanner:   scan.New(st, meta.NewReader(), log),
-		organizer: organize.New(st, log),
+		organizer: organize.New(st, meta.NewWriter(), log),
 		profiles:  profiles,
 		trasher:   trash.New(st, log),
 		analyzer:  analyze.New(st, decoders, log),
@@ -375,7 +376,25 @@ func (l *Library) OwnerInfo() (sqlite.OwnerInfo, error) { return l.store.OwnerIn
 type ScanRequest struct {
 	LibraryPID model.PID // empty scans every library
 	SubPath    string    // optional sub-path under a single library's root
+	// Force bypasses the incremental fast-path, re-hashing and re-parsing every file
+	// even when its size and mtime are unchanged (repair, or after an essence bump).
+	Force bool
+	// AdoptStampedPIDs restores item PIDs from WAXBIN_ITEM_PID tags during a rebuild
+	// (essence-first, adopted only when unambiguous). Off for a normal scan.
+	AdoptStampedPIDs bool
+	// ForceReconcile bypasses the survival-gate floor so a deliberate large deletion
+	// is reconciled to missing (the recovery path). An explicit operator action; the
+	// watcher never sets it.
+	ForceReconcile bool
 }
+
+// fsMutateScope is the shared lease scope held by every job that mutates files on
+// disk (scan, organize, import, and trash moves), so at most one filesystem
+// mutator runs at a time. Leases are per-scope, and scan and organize would
+// otherwise use different scopes and not exclude each other, letting a watch rescan
+// race an in-flight organize. Read-only passes (analyze, enrich) keep their own
+// scopes so they can still overlap a scan.
+const fsMutateScope = "fs-mutate"
 
 // ScanResult reports a scan, including the job it ran under.
 type ScanResult struct {
@@ -391,10 +410,12 @@ func (l *Library) Scan(ctx context.Context, req ScanRequest) (*ScanResult, error
 		return nil, err
 	}
 	out := &ScanResult{}
-	job, runErr := l.jobs.Run(ctx, "scan", "scan", func(ctx context.Context, h *jobs.Handle) error {
+	job, runErr := l.jobs.Run(ctx, "scan", fsMutateScope, func(ctx context.Context, h *jobs.Handle) error {
 		for _, lib := range libs {
-			r, err := l.scanner.Scan(ctx, scan.Request{Library: lib, SubPath: req.SubPath},
-				func(p float64, msg string) error { return h.Heartbeat(ctx, p, msg) })
+			r, err := l.scanner.Scan(ctx, scan.Request{
+				Library: lib, SubPath: req.SubPath, Force: req.Force,
+				AdoptStampedPIDs: req.AdoptStampedPIDs, ForceReconcile: req.ForceReconcile,
+			}, func(p float64, msg string) error { return h.Heartbeat(ctx, p, msg) })
 			if err != nil {
 				return err
 			}
@@ -418,12 +439,21 @@ type AnalyzeResult struct {
 	Result analyze.Result
 }
 
+// AnalyzeOptions controls one analyze run.
+type AnalyzeOptions struct {
+	// WriteReplayGainTags mirrors computed ReplayGain into files after aggregation,
+	// for this run. It is OR-ed with the library's configured toggle, so a run enables
+	// write-back if either the config or this flag asks for it.
+	WriteReplayGainTags bool
+}
+
 // Analyze runs the resumable analyze pass: it decodes (the only PCM-decoding
 // stage), fingerprints, and indexes every audio file whose fingerprint is
 // missing or stale, under an "analyze"-scoped job. Files whose codec this build
 // cannot decode are reported as skipped, not failed.
-func (l *Library) Analyze(ctx context.Context) (*AnalyzeResult, error) {
+func (l *Library) Analyze(ctx context.Context, opts AnalyzeOptions) (*AnalyzeResult, error) {
 	out := &AnalyzeResult{}
+	writeRG := l.opts.WriteReplayGainTags || opts.WriteReplayGainTags
 	job, runErr := l.jobs.Run(ctx, "analyze", "analyze", func(ctx context.Context, h *jobs.Handle) error {
 		r, err := l.analyzer.Run(ctx, func(p float64, msg string) error { return h.Heartbeat(ctx, p, msg) })
 		if r != nil {
@@ -435,12 +465,133 @@ func (l *Library) Analyze(ctx context.Context) (*AnalyzeResult, error) {
 		// Album ReplayGain depends on per-file loudness and album membership.
 		// Membership can change in a tag-only scan, so reconcile it after every
 		// analyze pass. Catalogs with no loudness return immediately.
-		return l.store.RefreshAlbumGain(ctx)
+		if err := l.store.RefreshAlbumGain(ctx); err != nil {
+			return err
+		}
+		// Optionally mirror the (now album-aggregated) ReplayGain into files on disk,
+		// in one pass. Off by default; failures are logged, not fatal to the analyze.
+		if writeRG {
+			n, err := l.writeReplayGainTags(ctx)
+			if err != nil {
+				return err
+			}
+			out.Result.ReplayGainTagsWritten = n
+		}
+		return nil
 	})
 	if job != nil {
 		out.JobPID = job.PID
 	}
 	return out, runErr
+}
+
+// WatchActivity summarizes one watch cycle for a heartbeat consumer.
+type WatchActivity struct {
+	Trigger string // initial | scheduled | full | live
+	Changed bool
+}
+
+// WatchOptions configures a foreground watch (see watch.Options).
+type WatchOptions struct {
+	LibraryPID         model.PID // empty watches every user library root
+	Interval           time.Duration
+	FullRescanInterval time.Duration
+	Live               bool
+	WriteSettle        time.Duration
+	MaxWatchDirs       int // 0 = unlimited; caps live fsnotify watches (see watch.Options)
+	Analyze            bool
+	SyncSources        bool
+	// OnActivity, when set, is called after each cycle for a CLI heartbeat.
+	OnActivity func(WatchActivity)
+}
+
+// Watch runs a foreground watcher that keeps the catalog in sync with the
+// filesystem until ctx is canceled (returning a CodeCanceled error on a clean
+// shutdown). It refuses on a read-only library.
+//
+// WATCH IS A FOREGROUND MODE. A read-write WaxBin holds an exclusive advisory lock
+// on the catalog for the whole process lifetime, so while watch runs, every OTHER
+// mutating command in another terminal (organize, analyze, enrich, import, scan
+// --force) is refused (read-only queries are always allowed). Stop the watcher to
+// do manual mutation. Idle lock release and a socket proxy are deliberately post-1.0.
+func (l *Library) Watch(ctx context.Context, opts WatchOptions) error {
+	if l.ReadOnly() {
+		return waxerr.New(waxerr.CodeUnsupported, "Library.Watch", "watch requires a read-write library")
+	}
+	libs, err := l.resolveLibraries(ctx, opts.LibraryPID)
+	if err != nil {
+		return err
+	}
+	roots := make([]watch.Root, 0, len(libs))
+	for _, lib := range libs {
+		roots = append(roots, watch.Root{LibraryPID: lib.PID, Path: string(lib.Root)})
+	}
+	var notify func(watch.Activity)
+	if opts.OnActivity != nil {
+		notify = func(a watch.Activity) { opts.OnActivity(WatchActivity{Trigger: a.Trigger, Changed: a.Changed}) }
+	}
+	w := watch.New(&watchEngine{lib: l}, roots, watch.Options{
+		Interval:           opts.Interval,
+		FullRescanInterval: opts.FullRescanInterval,
+		Live:               opts.Live,
+		WriteSettle:        opts.WriteSettle,
+		MaxWatchDirs:       opts.MaxWatchDirs,
+		Analyze:            opts.Analyze,
+		SyncSources:        opts.SyncSources,
+		Notify:             notify,
+	}, l.log)
+	return w.Run(ctx)
+}
+
+// watchEngine adapts the facade to the watch.Engine port, so the watch package need
+// not import waxbin.
+type watchEngine struct{ lib *Library }
+
+func (e *watchEngine) Rescan(ctx context.Context, libPID model.PID, subPath string, force bool) (bool, error) {
+	res, err := e.lib.Scan(ctx, ScanRequest{LibraryPID: libPID, SubPath: subPath, Force: force})
+	if err != nil {
+		return false, err
+	}
+	t := res.Total
+	// A live .lrc/.cue edit mutates the catalog via the fast-path (bumping
+	// SidecarsUpdated, not ItemsUpdated), so include it; otherwise a sidecar-only
+	// change reports changed=false and downstream schedulers are skipped.
+	changed := t.ItemsCreated > 0 || t.ItemsUpdated > 0 || t.Relinked > 0 || t.Missing > 0 || t.SidecarsUpdated > 0
+	return changed, nil
+}
+
+func (e *watchEngine) Analyze(ctx context.Context) error {
+	_, err := e.lib.Analyze(ctx, AnalyzeOptions{})
+	return err
+}
+
+// SyncSources drives the layered background acquisition on top of the watcher:
+// podcast feed sync + retention, and auto-import of any configured inbox staging
+// folders. All are thin callers of existing primitives; each is best-effort so one
+// failing source (an unreachable feed) does not stop the others or the watcher.
+func (e *watchEngine) SyncSources(ctx context.Context) error {
+	if _, err := e.lib.Podcasts().SyncAll(ctx); err != nil {
+		e.lib.log.Warn("watch: podcast sync", "err", err)
+	}
+	if _, err := e.lib.Podcasts().ApplyRetentionAll(ctx); err != nil {
+		e.lib.log.Warn("watch: podcast retention", "err", err)
+	}
+	// Live inbox import: plan then apply each configured staging folder, so a file
+	// dropped into the inbox is imported into a managed root and cataloged.
+	for _, folder := range e.lib.InboxFolders() {
+		plan, err := e.lib.PlanImport(ctx, ImportRequest{Source: folder})
+		if err != nil {
+			e.lib.log.Warn("watch: inbox plan", "folder", folder, "err", err)
+			continue
+		}
+		if plan.Importable() == 0 {
+			continue
+		}
+		if _, err := e.lib.ApplyImport(ctx, plan); err != nil {
+			e.lib.log.Warn("watch: inbox import", "folder", folder, "err", err)
+		}
+	}
+	return nil
 }
 
 // EnrichOptions controls a metadata enrichment run.
@@ -598,16 +749,36 @@ func (l *Library) Audit(ctx context.Context, opts AuditOptions) (*audit.Report, 
 	return l.auditor.Run(ctx, audit.Config{Only: opts.Only, Integrity: opts.Integrity, Sample: opts.Sample})
 }
 
+// OrphanGraceWindow is how long an entity must stay childless before the manual
+// orphan GC sweeps it. It is the safety backstop to the scanner's survival gate: a
+// transient reconciliation blip that briefly orphans an entity will not delete it
+// unless it is still orphaned a full window (and a second manual run) later.
+const OrphanGraceWindow = 24 * time.Hour
+
 // VacuumReport summarizes a vacuum: the derived garbage reclaimed before the
 // on-disk compaction.
 type VacuumReport struct {
 	ArtSourcesReclaimed int
 	ThumbnailsReclaimed int
+	OrphansDeleted      int
+	OrphansPending      int
 }
 
-// Vacuum reclaims orphaned art (GC) and then compacts the database file,
-// returning what the GC reclaimed. It takes the write lock.
+// GCOrphans deletes childless artist/release_group/album/genre/series rows that have
+// stayed orphaned past the grace window, recording the rest for a later sweep. It is
+// manual-only (invoked by Vacuum and db verify --fix), never the watch loop.
+func (l *Library) GCOrphans(ctx context.Context) (*model.OrphanGCReport, error) {
+	return l.store.GCOrphans(ctx, OrphanGraceWindow.Nanoseconds())
+}
+
+// Vacuum GCs orphaned entities and art, then compacts the database file, returning
+// what was reclaimed. It takes the write lock. Orphan entities are swept before art
+// so their freed art-map rows are reclaimed in the same pass.
 func (l *Library) Vacuum(ctx context.Context) (*VacuumReport, error) {
+	orphans, err := l.store.GCOrphans(ctx, OrphanGraceWindow.Nanoseconds())
+	if err != nil {
+		return nil, err
+	}
 	srcs, thumbs, err := l.store.GCArt(ctx)
 	if err != nil {
 		return nil, err
@@ -615,7 +786,10 @@ func (l *Library) Vacuum(ctx context.Context) (*VacuumReport, error) {
 	if err := l.store.Vacuum(ctx); err != nil {
 		return nil, err
 	}
-	return &VacuumReport{ArtSourcesReclaimed: srcs, ThumbnailsReclaimed: thumbs}, nil
+	return &VacuumReport{
+		ArtSourcesReclaimed: srcs, ThumbnailsReclaimed: thumbs,
+		OrphansDeleted: orphans.Total(), OrphansPending: orphans.Pending,
+	}, nil
 }
 
 // IntegrityCheck runs SQLite's PRAGMA integrity_check and returns the problems it
@@ -718,10 +892,17 @@ func (l *Library) PlanOrganize(ctx context.Context, q query.Query, profileName s
 			return nil, err
 		}
 		merged.Actions = append(merged.Actions, p.Actions...)
+		// Enable tag-write on the merged plan if any library's profile enabled it; each
+		// action already carries its own (possibly empty) TagFields, so the executor
+		// writes tags only where the source library asked for them.
+		merged.TagWrite = merged.TagWrite || p.TagWrite
 		if len(managed) == 1 {
 			merged.Root, merged.LibraryPID, merged.Profile = p.Root, p.LibraryPID, p.Profile
 		}
 	}
+	// PID stamping is a library-wide, managed-only identity feature; organize only
+	// ever plans managed-root files, so it is safe to enable across the merged plan.
+	merged.StampPID = l.opts.StampItemPID
 	return merged, nil
 }
 
@@ -748,7 +929,7 @@ func toOrganizeProfiles(defs []config.ProfileDef) []organize.Profile {
 // ApplyOrganize executes a plan under an "organize"-scoped job.
 func (l *Library) ApplyOrganize(ctx context.Context, plan *organize.Plan) (*organize.Report, error) {
 	var rep *organize.Report
-	_, err := l.jobs.Run(ctx, "organize", "organize", func(ctx context.Context, h *jobs.Handle) error {
+	_, err := l.jobs.Run(ctx, "organize", fsMutateScope, func(ctx context.Context, h *jobs.Handle) error {
 		r, err := l.organizer.Execute(ctx, plan, h.JobPID(),
 			func(p float64, msg string) error { return h.Heartbeat(ctx, p, msg) })
 		rep = r
@@ -794,7 +975,7 @@ func (l *Library) PlanDeletePIDs(ctx context.Context, pids []model.PID, mode mod
 // ApplyDelete executes a deletion plan under a "delete"-scoped job.
 func (l *Library) ApplyDelete(ctx context.Context, plan *trash.Plan) (*trash.Report, error) {
 	var rep *trash.Report
-	_, err := l.jobs.Run(ctx, "delete", "delete", func(ctx context.Context, h *jobs.Handle) error {
+	_, err := l.jobs.Run(ctx, "delete", fsMutateScope, func(ctx context.Context, h *jobs.Handle) error {
 		r, err := l.trasher.Execute(ctx, plan)
 		rep = r
 		return err
@@ -825,7 +1006,7 @@ func (l *Library) RestoreTrash(ctx context.Context, trashPID model.PID) error {
 		return waxerr.New(waxerr.CodeInvalid, "Library.RestoreTrash",
 			"restore target is not under a known library root")
 	}
-	_, err = l.jobs.Run(ctx, "restore", "delete", func(ctx context.Context, h *jobs.Handle) error {
+	_, err = l.jobs.Run(ctx, "restore", fsMutateScope, func(ctx context.Context, h *jobs.Handle) error {
 		// Move the file back (idempotent: a retry after a failed re-scan is a no-op).
 		if err := l.trasher.Restore(*entry); err != nil {
 			return err
@@ -852,7 +1033,7 @@ type EmptyReport struct {
 // its journal row, reclaiming space. It runs under a "delete"-scoped job.
 func (l *Library) EmptyTrash(ctx context.Context) (*EmptyReport, error) {
 	rep := &EmptyReport{}
-	_, err := l.jobs.Run(ctx, "empty-trash", "delete", func(ctx context.Context, h *jobs.Handle) error {
+	_, err := l.jobs.Run(ctx, "empty-trash", fsMutateScope, func(ctx context.Context, h *jobs.Handle) error {
 		entries, err := l.store.TrashEntries(ctx, false, 0)
 		if err != nil {
 			return err
@@ -970,7 +1151,7 @@ func firstMixedOrFirst(managed []*model.Library) *model.Library {
 // ApplyImport executes an import plan under an "import"-scoped job.
 func (l *Library) ApplyImport(ctx context.Context, plan *inbox.Plan) (*inbox.Report, error) {
 	var rep *inbox.Report
-	_, err := l.jobs.Run(ctx, "import", "import", func(ctx context.Context, h *jobs.Handle) error {
+	_, err := l.jobs.Run(ctx, "import", fsMutateScope, func(ctx context.Context, h *jobs.Handle) error {
 		r, err := l.importer.Execute(ctx, plan)
 		rep = r
 		return err
@@ -1399,6 +1580,9 @@ func addResult(dst *scan.Result, src *scan.Result) {
 	dst.ItemsCreated += src.ItemsCreated
 	dst.ItemsUpdated += src.ItemsUpdated
 	dst.Relinked += src.Relinked
+	dst.Unchanged += src.Unchanged
+	dst.SidecarsUpdated += src.SidecarsUpdated
+	dst.Missing += src.Missing
 	dst.Skipped += src.Skipped
 	dst.Errored += src.Errored
 }

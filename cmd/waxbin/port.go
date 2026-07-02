@@ -199,7 +199,9 @@ func newRebuildCmd(g *globals) *cobra.Command {
 				return err
 			}
 			defer lib.Close()
-			res, err := lib.Scan(ctx(cmd), waxbin.ScanRequest{})
+			// A rebuild adopts WAXBIN_ITEM_PID tags to restore original item identities
+			// where they were stamped (essence-first; unstamped items mint fresh).
+			res, err := lib.Scan(ctx(cmd), waxbin.ScanRequest{AdoptStampedPIDs: true})
 			if err != nil {
 				return err
 			}

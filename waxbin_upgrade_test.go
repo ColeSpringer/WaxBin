@@ -31,7 +31,7 @@ func TestFindUpgradesGroupsAltEncodings(t *testing.T) {
 	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
 		t.Fatalf("scan: %v", err)
 	}
-	if _, err := lib.Analyze(ctx); err != nil {
+	if _, err := lib.Analyze(ctx, waxbin.AnalyzeOptions{}); err != nil {
 		t.Fatalf("analyze: %v", err)
 	}
 

@@ -110,6 +110,14 @@ func (s *Store) PutScannedTrack(ctx context.Context, in model.PutScannedTrackInp
 		}
 		res.FilePID = filePID
 
+		// Record this file's sidecar observations (replacing the prior set) so the next
+		// scan can stat-compare them and re-parse only a changed sidecar, and so a
+		// since-deleted sidecar's observation is pruned rather than forcing a full
+		// re-hash forever.
+		if err := replaceFileAuxTx(ctx, tx, fileID, in.AuxObservations); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+
 		// Unchanged bytes with a different essence hash mean the essence algorithm
 		// changed. A real re-encode would change content_hash too. Re-key the item
 		// in place so its pid, play_state, and provenance survive the upgrade.
@@ -119,7 +127,7 @@ func (s *Store) PutScannedTrack(ctx context.Context, in model.PutScannedTrackInp
 			}
 		}
 
-		itemID, itemPID, created, err := upsertItem(ctx, tx, in.Item, now)
+		itemID, itemPID, created, stateChanged, err := upsertItem(ctx, tx, in.Item, now, in.PreferredItemPID)
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
@@ -156,11 +164,14 @@ func (s *Store) PutScannedTrack(ctx context.Context, in model.PutScannedTrackInp
 		// idempotent (they compare against the stored value and do nothing when it is
 		// unchanged), so a no-op rescan stays silent. They run after entity resolution
 		// so a freshly resolved album_id is available to map art onto; an unchanged
-		// rescan reuses the album_id persisted by a prior scan.
-		if err := putLyricsTx(ctx, tx, itemID, in.Lyrics); err != nil {
+		// rescan reuses the album_id persisted by a prior scan. Their changed flags feed
+		// the item delta below so a lyrics/cover-only change is not silent to consumers.
+		lyricsChanged, err := putLyricsTx(ctx, tx, itemID, in.Lyrics)
+		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
-		if err := attachArtTx(ctx, tx, itemID, in.CoverArt); err != nil {
+		artChanged, err := attachArtTxChanged(ctx, tx, itemID, in.CoverArt)
+		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 
@@ -218,7 +229,10 @@ func (s *Store) PutScannedTrack(ctx context.Context, in model.PutScannedTrackInp
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 		}
-		if created || res.ContentChanged {
+		// Emit an item delta on create, a content change, a state transition (a restored
+		// file flipping missing -> present), OR a lyrics/cover-only change, so a delta
+		// consumer never serves stale metadata/art after any real change.
+		if created || res.ContentChanged || stateChanged || lyricsChanged || artChanged {
 			if err := appendChange(ctx, tx, "item", itemPID, opFor(created)); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}

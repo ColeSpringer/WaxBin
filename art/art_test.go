@@ -100,3 +100,23 @@ func TestThumbnailNeverUpscales(t *testing.T) {
 		t.Errorf("thumb dims = %dx%d, want the original 30x20 (no upscaling)", w, h)
 	}
 }
+
+func TestSniffExotic(t *testing.T) {
+	avif := append([]byte{0, 0, 0, 0x20}, []byte("ftypavif")...)
+	if f, ok := SniffExotic(avif); !ok || f != "avif" {
+		t.Errorf("avif sniff = %q,%v, want avif,true", f, ok)
+	}
+	heic := append([]byte{0, 0, 0, 0x18}, []byte("ftypheic")...)
+	if f, ok := SniffExotic(heic); !ok || f != "heic" {
+		t.Errorf("heic sniff = %q,%v, want heic,true", f, ok)
+	}
+	if _, ok := SniffExotic([]byte("\xff\xd8\xff\xe0 jpeg")); ok {
+		t.Error("jpeg bytes should not sniff as exotic")
+	}
+	if _, ok := SniffExotic([]byte("short")); ok {
+		t.Error("short input should not sniff as exotic")
+	}
+	if !IsExoticFormat("avif") || !IsExoticFormat("heic") || IsExoticFormat("jpeg") {
+		t.Error("IsExoticFormat classification wrong")
+	}
+}

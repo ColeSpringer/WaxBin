@@ -43,6 +43,34 @@ func Probe(data []byte) (format string, width, height int, err error) {
 	return format, cfg.Width, cfg.Height, nil
 }
 
+// SniffExotic recognizes an ISOBMFF-based image WaxBin has no pure-Go decoder for
+// (AVIF, HEIC/HEIF) by its `ftyp` brand, returning the short format token. Such an
+// image is still stored and served (and thumbnailed via an external helper when one
+// is available), but its dimensions are unknown until decoded. It reports false for
+// anything the standard decoders already handle or do not recognize.
+func SniffExotic(data []byte) (format string, ok bool) {
+	if len(data) < 12 || string(data[4:8]) != "ftyp" {
+		return "", false
+	}
+	switch string(data[8:12]) {
+	case "avif", "avis":
+		return "avif", true
+	case "heic", "heix", "heim", "heis", "hevc", "hevx", "mif1", "msf1":
+		return "heic", true
+	}
+	return "", false
+}
+
+// IsExoticFormat reports whether a short format token names an image WaxBin decodes
+// only via an external helper (AVIF or HEIC/HEIF).
+func IsExoticFormat(format string) bool {
+	switch format {
+	case "avif", "heic", "heif":
+		return true
+	}
+	return false
+}
+
 // Thumbnail decodes src and produces a thumbnail scaled to fit within a
 // maxDim x maxDim box, preserving aspect ratio. It never upscales: a source
 // already within the box is returned re-encoded at its own size. The output is

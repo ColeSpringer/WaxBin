@@ -22,7 +22,22 @@ type PutScannedTrackInput struct {
 	// The store dedups it into the content-addressed art store and maps it onto the
 	// track. Album art is derived from current track covers at read time.
 	CoverArt *ArtImage
+	// AuxObservations records the on-disk state of this file's sidecars (a sibling
+	// .lrc, the directory cover) so a later rescan can stat-compare them and re-parse
+	// only a changed one instead of re-reading every sidecar every scan.
+	AuxObservations []AuxObservation
+	// PreferredItemPID is a HINT read from the file's WAXBIN_ITEM_PID tag, used only
+	// during a rebuild to restore the backing item's original PID. It is adopted only
+	// when creating a new item and only when the PID is valid and not already taken
+	// (essence-first, PID-as-hint); on any conflict the store mints a fresh PID. It is
+	// ignored on a normal scan, where the store owns PID assignment.
+	PreferredItemPID PID
 }
+
+// TagWaxbinItemPID is the custom tag key that carries a backing item's stable WaxBin
+// PID (stamped by organize when configured). It is a hint for rebuild only; identity
+// is essence-first and the tag is copyable, so it is never authoritative.
+const TagWaxbinItemPID = "WAXBIN_ITEM_PID"
 
 // PutScannedBookInput carries one scanned audiobook file for atomic persistence.
 // A book groups one or many files by Item.IdentityKey (the book key); each file is
@@ -42,8 +57,22 @@ type PutScannedBookInput struct {
 	// EndMS). The scanner may synthesize a single whole-file chapter for a part with
 	// none so multi-file books still navigate by part.
 	Chapters []Chapter
+	// ChapterSource records where Chapters came from: "embedded" (audio tags), "cue"
+	// (a sibling .cue sidecar), or "synthetic" (a synthesized single chapter). It sets
+	// the chapter rows' source so embedded chapters stay authoritative over cue ones.
+	// Empty defaults to "embedded".
+	ChapterSource string
 	// CoverArt is the book's cover image (embedded or directory), or nil.
 	CoverArt *ArtImage
+	// AuxObservations records the on-disk state of this file's sidecars for the scan
+	// fast-path (see PutScannedTrackInput.AuxObservations).
+	AuxObservations []AuxObservation
+	// PreferredItemPID is a HINT read from the file's WAXBIN_ITEM_PID tag (see
+	// PutScannedTrackInput.PreferredItemPID). organize stamps books too, so rebuild
+	// restores a book item's original PID when the hint is valid and unclaimed; any
+	// conflict falls back to a fresh PID. Parts of one book share the same stamp, so
+	// whichever part first creates the item adopts it and the rest join by book key.
+	PreferredItemPID PID
 }
 
 // ScanItemResult reports what the store did for a PutScannedTrack call, enough
@@ -79,6 +108,104 @@ type RelocateInput struct {
 	NewRelPath     []byte
 }
 
+// Sidecar-observation kinds recorded in file_aux_state. They are the file kinds the
+// scanner stat-compares beside an audio file to decide whether to re-parse a sidecar.
+const (
+	AuxLyrics   = "lrc"      // a sibling .lrc lyrics sidecar
+	AuxCover    = "cover"    // the directory cover image
+	AuxCue      = "cue"      // an external .cue / chapter sidecar
+	AuxChapters = "chapters" // a JSON/other external chapter file
+)
+
+// AuxObservation records the on-disk state of one sidecar (a .lrc/.cue/chapter file
+// or a directory cover) beside an audio file. The scanner os.Stat-compares size and
+// mtime against the stored observation and re-parses only on a difference, so an
+// untouched file and its sidecars cost one stat each and no hashing or parsing.
+type AuxObservation struct {
+	Kind    string // one of the Aux* constants
+	Path    []byte
+	Size    int64
+	MTimeNS int64
+	Hash    string
+	Missing bool // observed before but now absent from disk
+}
+
+// ScopedFile is one present file in a library scope, preloaded so the scanner can
+// fast-path an unchanged file (size+mtime match) entirely in memory and reconcile a
+// vanished one at end-of-walk, without a per-file SELECT. It carries the item the
+// file backs so a sidecar-only change can be applied without re-resolving identity,
+// and its known sidecar observations so a sidecar re-parse is stat-gated.
+type ScopedFile struct {
+	FilePID PID
+	ItemPID PID
+	Size    int64
+	MTimeNS int64
+	Aux     []AuxObservation
+}
+
+// SidecarUpdate carries an item's freshly re-parsed sidecar data plus the on-disk
+// observations to record, applied outside the audio-change gate in one transaction.
+// Nil Lyrics/CoverArt leave those untouched (a scan never clears art on a failed
+// read); ReplaceChapters replaces the file's cue/chapter-file-sourced chapters.
+type SidecarUpdate struct {
+	ItemPID         PID
+	FilePID         PID
+	Lyrics          *Lyrics
+	CoverArt        *ArtImage
+	Chapters        []Chapter
+	ReplaceChapters bool             // when true, Chapters replace FilePID's cue-sourced chapters
+	ChapterSource   string           // the chapter source tag to write (e.g. "cue"); defaults to "cue"
+	Observations    []AuxObservation // sidecar observations to persist for FilePID
+}
+
+// ReplayGainRow is one file's current ReplayGain measurement plus the on-disk file
+// state, for the post-analysis tag write-back pass. HasAlbum reports whether an
+// album aggregate exists (a standalone track has none).
+type ReplayGainRow struct {
+	FilePID     PID
+	Path        []byte
+	Container   string
+	Codec       string
+	Size        int64
+	MTimeNS     int64
+	TrackGainDB float64
+	TrackPeak   float64
+	HasAlbum    bool
+	AlbumGainDB float64
+	AlbumPeak   float64
+}
+
+// OrphanGCReport tallies an orphan-entity sweep: how many childless entities of each
+// kind were deleted, and how many are newly recorded as candidates still within the
+// grace window (not yet swept).
+type OrphanGCReport struct {
+	Albums        int
+	ReleaseGroups int
+	Artists       int
+	Genres        int
+	Series        int
+	Pending       int // candidates recorded but still within the grace window
+}
+
+// Total returns the number of entities deleted across all kinds.
+func (r OrphanGCReport) Total() int {
+	return r.Albums + r.ReleaseGroups + r.Artists + r.Genres + r.Series
+}
+
+// FileStateUpdate records the result of an on-disk tag write so the catalog's file
+// row matches the bytes now on disk. It is applied only when the stored size and
+// mtime still match ExpectedSize/ExpectedMTimeNS (optimistic concurrency): a match
+// means the writer's read is still current, a mismatch means a concurrent scan/move
+// touched the file and the update is skipped, to be reconciled by the next scan.
+type FileStateUpdate struct {
+	FilePID         PID
+	ExpectedSize    int64
+	ExpectedMTimeNS int64
+	NewSize         int64
+	NewMTimeNS      int64
+	NewContentHash  string
+}
+
 // Catalog is the persistence port for the catalog. store/sqlite implements it;
 // scan, organize, and the facade depend on it rather than on SQLite directly.
 // Each method is individually atomic (it manages its own write transaction,
@@ -92,6 +219,37 @@ type Catalog interface {
 	PutScannedBook(ctx context.Context, in PutScannedBookInput) (*ScanItemResult, error)
 	FileByPath(ctx context.Context, path []byte) (*File, error)
 	FileByEssence(ctx context.Context, essence string) (*File, error)
+
+	// LoadScopedFileIndex bulk-loads the present files under a library scope (a raw
+	// path prefix; nil/empty spans the whole library) into path->ScopedFile, so the
+	// scanner fast-paths unchanged files and reconciles vanished ones without a
+	// per-file query.
+	LoadScopedFileIndex(ctx context.Context, libraryID int64, scopePrefix []byte) (map[string]ScopedFile, error)
+	// MarkFilesMissing marks the items backing the given files as missing, but only
+	// when every file of an item is in the set (so a multi-file book that lost one
+	// part stays present). Rows are preserved, so a rescan restores present state.
+	// Returns the number of items newly marked missing.
+	MarkFilesMissing(ctx context.Context, filePIDs []PID) (int, error)
+	// UpdateItemSidecars refreshes an item's sidecar-sourced lyrics/art/chapters
+	// outside the audio-change gate and records the new sidecar observations, in one
+	// transaction. It returns whether anything changed and emits an item change_log
+	// delta when it does. It never touches the audio file row or entity resolution.
+	UpdateItemSidecars(ctx context.Context, in SidecarUpdate) (bool, error)
+	// UpdateFileStateIfUnchanged updates a file's size/mtime/content_hash only when
+	// its stored size and mtime still match the expected values (optimistic
+	// concurrency), so an on-disk tag write can record its own result without
+	// clobbering a concurrent scan/move. Returns whether the row was updated.
+	UpdateFileStateIfUnchanged(ctx context.Context, in FileStateUpdate) (bool, error)
+
+	// IsFieldLocked reports whether a metadata field is locked, so a writer (organize
+	// tag write-back, enrichment) skips it and curated data survives.
+	IsFieldLocked(ctx context.Context, itemPID PID, field string) (bool, error)
+	// LockedFields returns an item's locked fields in one query, so a writer checking
+	// several fields avoids a per-field round trip.
+	LockedFields(ctx context.Context, itemPID PID) (map[string]bool, error)
+	// SetFieldProvenance records that a field was set by a non-tag source (e.g.
+	// organize). It refuses a locked field unless force is set.
+	SetFieldProvenance(ctx context.Context, itemPID PID, field string, source ProvenanceSource, value string, force bool) error
 
 	QueryItems(ctx context.Context, q query.Query) ([]*ItemView, error)
 	CountItems(ctx context.Context, q query.Query) (int, error)

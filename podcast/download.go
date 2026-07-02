@@ -2,10 +2,12 @@ package podcast
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"unicode/utf8"
 
@@ -26,6 +28,7 @@ type DownloadResult struct {
 	Path       string
 	Bytes      int64
 	Transcript bool // a transcript was fetched and stored
+	Chapters   bool // podcast:chapters JSON was fetched and stored
 }
 
 // Download fetches an episode's enclosure into the podcast directory, catalogs it
@@ -125,7 +128,69 @@ func (s *Service) Download(ctx context.Context, episodePID model.PID) (*Download
 			res.Transcript = true
 		}
 	}
+	if ep.ChaptersURL != "" {
+		if s.fetchChapters(ctx, episodePID, ep.ChaptersURL) {
+			res.Chapters = true
+		}
+	}
 	return res, nil
+}
+
+// fetchChapters fetches and parses an episode's Podcasting-2.0 chapters JSON,
+// storing it as URL-sourced chapters. It is best-effort (a fetch/parse failure is
+// logged, not fatal to the download) and hardened through netsafe (redirect/size/
+// MIME/SSRF guards). Chapter startTime is in seconds.
+func (s *Service) fetchChapters(ctx context.Context, episodePID model.PID, url string) bool {
+	resp, err := s.client.Do(ctx, netsafe.Request{URL: url, AcceptMIME: chaptersMIME, MaxBytes: s.cfg.MaxFeedBytes})
+	if err != nil {
+		s.log.Debug("chapters fetch failed", "url", url, "err", err)
+		return false
+	}
+	chapters, err := parseChapterDoc(resp.Body)
+	if err != nil {
+		s.log.Debug("chapters parse failed", "url", url, "err", err)
+		return false
+	}
+	if len(chapters) == 0 {
+		return false
+	}
+	if err := s.store.PutEpisodeChapters(ctx, episodePID, chapters); err != nil {
+		s.log.Warn("storing episode chapters", "episode", episodePID, "err", err)
+		return false
+	}
+	return true
+}
+
+// parseChapterDoc decodes a Podcasting-2.0 chapters JSON body into ordered chapters.
+// A feed may list chapters out of time order, which the spec permits, so it sorts by
+// start time. That keeps Position tracking the timeline, and it keeps the read path
+// (which fills each chapter's end from the next one's start) from ever producing an
+// inverted span. A malformed entry with a negative start is skipped rather than stored
+// as a negative offset, and Positions are assigned contiguously after that filtering.
+// A decode error is returned unchanged so the caller can log it.
+func parseChapterDoc(body []byte) ([]model.Chapter, error) {
+	var doc struct {
+		Chapters []struct {
+			StartTime float64 `json:"startTime"`
+			Title     string  `json:"title"`
+		} `json:"chapters"`
+	}
+	if err := json.Unmarshal(body, &doc); err != nil {
+		return nil, err
+	}
+	sort.SliceStable(doc.Chapters, func(i, j int) bool { return doc.Chapters[i].StartTime < doc.Chapters[j].StartTime })
+	chapters := make([]model.Chapter, 0, len(doc.Chapters))
+	for _, c := range doc.Chapters {
+		if c.StartTime < 0 {
+			continue // malformed: a negative start would become a negative offset
+		}
+		chapters = append(chapters, model.Chapter{
+			Position:    len(chapters),
+			Title:       strings.TrimSpace(c.Title),
+			FileStartMS: int64(c.StartTime * 1000),
+		})
+	}
+	return chapters, nil
 }
 
 // fetchTo downloads an item through the provider into a temp file, returning the byte

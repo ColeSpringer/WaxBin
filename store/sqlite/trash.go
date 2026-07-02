@@ -116,7 +116,7 @@ func detachFileTx(ctx context.Context, tx *sql.Tx, filePID model.PID, op string)
 		if has {
 			// A surviving multi-file book that lost a part must promote a primary (or
 			// it reads back headless), refresh its denormalized total duration, and
-			// emit an item update — its part count/duration/chapters changed, so a
+			// emit an item update because its part count/duration/chapters changed, so a
 			// change_log consumer must refresh it (symmetric with the attach side). Its
 			// rollups were already recomputed above.
 			if err := ensurePrimary(ctx, tx, iid); err != nil {

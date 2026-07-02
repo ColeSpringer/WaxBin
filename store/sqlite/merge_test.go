@@ -353,7 +353,7 @@ func TestMergeEmitsPerItemChangeLog(t *testing.T) {
 		entityPID(t, st, "artist", "The Beatles"), entityPID(t, st, "artist", "Beatles")); err != nil {
 		t.Fatalf("merge: %v", err)
 	}
-	// The re-pointed track's item→artist association changed, so a delta-sync
+	// The re-pointed track's item-to-artist association changed, so a delta-sync
 	// consumer must see a per-item update.
 	var n int
 	if err := st.read.QueryRowContext(ctx,

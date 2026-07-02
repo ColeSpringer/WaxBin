@@ -69,7 +69,7 @@ func TestSidecarLyricsPrecedence(t *testing.T) {
 	}
 
 	embedded := &model.Lyrics{Source: "embedded", Unsynced: "embedded block", Synced: []model.SyncedLine{{TimeMS: 99, Text: "old"}}}
-	got := sidecarLyrics(audio, embedded)
+	got, _ := scanSidecars(audio, embedded, newArtCache())
 	if got.Source != "lrc" {
 		t.Fatalf("source = %q, want lrc (sidecar is authoritative)", got.Source)
 	}
@@ -87,11 +87,11 @@ func TestSidecarLyricsFallbackToEmbedded(t *testing.T) {
 	dir := t.TempDir()
 	audio := filepath.Join(dir, "song.flac") // no .lrc next to it
 	embedded := &model.Lyrics{Source: "embedded", Unsynced: "just text"}
-	if got := sidecarLyrics(audio, embedded); got != embedded {
+	if got, _ := scanSidecars(audio, embedded, newArtCache()); got != embedded {
 		t.Errorf("with no sidecar, expected the embedded lyrics unchanged, got %+v", got)
 	}
 	// And no lyrics at all stays nil.
-	if got := sidecarLyrics(audio, nil); got != nil {
+	if got, _ := scanSidecars(audio, nil, newArtCache()); got != nil {
 		t.Errorf("with no sidecar and no embedded, expected nil, got %+v", got)
 	}
 }
@@ -154,5 +154,110 @@ func TestCleanBookTitle(t *testing.T) {
 		if got := cleanBookTitle(in); got != want {
 			t.Errorf("cleanBookTitle(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// exoticAVIF returns minimal AVIF-branded ISOBMFF bytes: recognized by SniffExotic
+// but not decodable by the pure-Go decoders, so finalizeArt leaves Width/Height 0.
+func exoticAVIF() []byte {
+	b := append([]byte{0, 0, 0, 0x20}, []byte("ftypavif")...)
+	return append(b, make([]byte, 16)...)
+}
+
+func TestResolveCoverExoticEmbeddedYieldsToDirCover(t *testing.T) {
+	dir := t.TempDir()
+	writeJPEG(t, filepath.Join(dir, "cover.jpg"), 64, 64)
+	audio := filepath.Join(dir, "song.m4a")
+	// An exotic embedded cover is recognized but has unknown dimensions (no pure-Go
+	// decoder). It must NOT shadow the genuinely-decodable directory cover.jpg.
+	got := resolveCover(audio, &model.ArtImage{Data: exoticAVIF()}, newArtCache())
+	if got == nil {
+		t.Fatal("resolveCover returned nil; want the directory cover")
+	}
+	if got.Format != "jpeg" || got.Width != 64 {
+		t.Errorf("resolved = %s %dx%d, want the 64x64 jpeg dir cover (exotic embedded with unknown dims must yield)", got.Format, got.Width, got.Height)
+	}
+}
+
+func TestResolveCoverExoticEmbeddedKeptWithoutDirCover(t *testing.T) {
+	dir := t.TempDir() // no directory cover
+	audio := filepath.Join(dir, "song.m4a")
+	got := resolveCover(audio, &model.ArtImage{Data: exoticAVIF()}, newArtCache())
+	if got == nil || got.Format != "avif" {
+		t.Fatalf("with no dir cover, the exotic embedded cover should be kept as last resort, got %v", got)
+	}
+	if got.Hash == "" {
+		t.Error("last-resort exotic embedded art must carry a content hash for storage")
+	}
+}
+
+func TestScanSidecarsRecordsUndecodableCoverObs(t *testing.T) {
+	dir := t.TempDir()
+	audio := filepath.Join(dir, "song.flac")
+	// A cover file present on disk but neither decodable nor a recognized exotic.
+	if err := os.WriteFile(filepath.Join(dir, "cover.jpg"), []byte("not really a jpeg"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, aux := scanSidecars(audio, nil, newArtCache())
+	var cover *model.AuxObservation
+	for i := range aux {
+		if aux[i].Kind == model.AuxCover {
+			cover = &aux[i]
+		}
+	}
+	// Without an existence-based fallback the full scan records nothing, and the
+	// fast-path (which detects covers by existence) would see it as newly-appeared and
+	// force a full reprocess on every scan.
+	if cover == nil {
+		t.Fatal("no cover observation recorded for a present-but-undecodable cover")
+	}
+	if want := filepath.Join(dir, "cover.jpg"); string(cover.Path) != want {
+		t.Errorf("cover obs path = %q, want %q", cover.Path, want)
+	}
+	if cover.Size == 0 {
+		t.Error("cover obs should carry the stat size so the fast-path can compare it")
+	}
+}
+
+func TestScanCueSidecarReadableButEmpty(t *testing.T) {
+	dir := t.TempDir()
+	audio := filepath.Join(dir, "book.m4b")
+	// A readable .cue that yields no chapters (no TRACK/INDEX entries).
+	if err := os.WriteFile(filepath.Join(dir, "book.cue"), []byte("REM just a comment\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	chapters, obs, ok := scanCueSidecar(audio)
+	if !ok {
+		t.Fatal("scanCueSidecar reported not-readable for a readable .cue; its observation must be recorded so the fast-path does not re-parse it forever")
+	}
+	if len(chapters) != 0 {
+		t.Errorf("chapters = %v, want none from a chapterless cue", chapters)
+	}
+	if obs.Kind != model.AuxCue || string(obs.Path) != filepath.Join(dir, "book.cue") || obs.Size == 0 {
+		t.Errorf("obs = %+v, want a populated AuxCue observation", obs)
+	}
+	// A truly-missing .cue still reports not-readable.
+	if _, _, ok := scanCueSidecar(filepath.Join(dir, "missing.m4b")); ok {
+		t.Error("scanCueSidecar should report ok=false when there is no .cue")
+	}
+}
+
+func TestFindDirCoverAVIF(t *testing.T) {
+	dir := t.TempDir()
+	// A minimal AVIF-branded ISOBMFF header (undecodable by pure-Go, but recognized).
+	avif := append([]byte{0, 0, 0, 0x20}, []byte("ftypavif")...)
+	avif = append(avif, make([]byte, 16)...)
+	if err := os.WriteFile(filepath.Join(dir, "cover.avif"), avif, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	img, path := findDirCover(dir)
+	if img == nil {
+		t.Fatal("cover.avif not found (exotic covers must still be discovered)")
+	}
+	if img.Format != "avif" || img.Hash == "" {
+		t.Errorf("avif cover: format=%q hash=%q, want avif + a hash", img.Format, img.Hash)
+	}
+	if filepath.Base(path) != "cover.avif" {
+		t.Errorf("cover path = %q, want cover.avif", path)
 	}
 }

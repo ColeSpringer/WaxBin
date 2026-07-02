@@ -67,6 +67,7 @@ func (a *Adapter) Read(ctx context.Context, path string) (*FileMeta, error) {
 	}
 
 	fm := &FileMeta{Tags: tagsFromDoc(doc), Lyrics: lyricsFromDoc(doc), CoverArt: coverFromDoc(doc)}
+	fm.ItemPIDHint = firstTag(doc.Tags(), tag.Key(model.TagWaxbinItemPID))
 	if fm.Tags.Title == "" {
 		fm.Tags.Title = titleFromPath(path)
 	}
@@ -202,6 +203,10 @@ func formatFromMIME(mime string) string {
 		return "webp"
 	case "image/gif":
 		return "gif"
+	case "image/avif":
+		return "avif"
+	case "image/heic", "image/heif":
+		return "heic"
 	}
 	if i := strings.LastIndex(mime, "/"); i >= 0 {
 		return strings.ToLower(strings.TrimSpace(mime[i+1:]))
@@ -326,7 +331,7 @@ func parseSeries(grouping string) (name, seq string) {
 
 // abridgedRe matches the conventional bracketed marker "(Unabridged)"/"[Abridged]".
 // Requiring the brackets (not a bare word anywhere) keeps a real title that merely
-// contains the word — "An Abridged History of Time" — from getting a spurious
+// contains the word, like "An Abridged History of Time", from getting a spurious
 // Abridged flag and Edition, which would also pollute the identity key. The optional
 // "un" capture decides the flag without depending on match order.
 var abridgedRe = regexp.MustCompile(`(?i)[\(\[]\s*(un)?abridged\s*[\)\]]`)

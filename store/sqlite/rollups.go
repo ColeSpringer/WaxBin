@@ -138,6 +138,29 @@ func placeholders(n int) string {
 	return "(" + strings.Repeat("?,", n-1) + "?)"
 }
 
+// idBatchSize bounds an IN(...) / multi-row VALUES batch to stay well under the
+// SQLite bound-parameter limit.
+const idBatchSize = 500
+
+// chunkSlice invokes fn for each successive slice of s no longer than size, so a
+// large id/pid set is processed in bounded batches. It is the shared batching
+// skeleton for the chunked IN/VALUES queries.
+func chunkSlice[T any](s []T, size int, fn func([]T) error) error {
+	if size <= 0 {
+		size = idBatchSize
+	}
+	for i := 0; i < len(s); i += size {
+		end := i + size
+		if end > len(s) {
+			end = len(s)
+		}
+		if err := fn(s[i:end]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // The rollup aggregations join each entity to its tracks and the tracks' primary
 // files so durations sum from the real audio rows. COUNT(DISTINCT item) tolerates
 // the LEFT JOINs (an entity with no tracks rolls up to zero, not one). The

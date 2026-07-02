@@ -26,6 +26,10 @@ type FileMeta struct {
 	// when it embeds none. The scanner finalizes its hash and dimensions and falls
 	// back to a directory cover image when this is absent.
 	CoverArt *model.ArtImage
+	// ItemPIDHint is the value of the file's WAXBIN_ITEM_PID tag, if present. It is a
+	// rebuild-only hint for restoring the backing item's original PID; identity stays
+	// essence-first (the tag is copyable), so the store adopts it only when unambiguous.
+	ItemPIDHint string
 }
 
 // Reader reads tags, properties, and the essence hash from a file. It must never

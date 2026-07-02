@@ -20,8 +20,10 @@ type lyricLineJSON struct {
 // compares the desired lyrics against the stored row and writes only on a
 // difference, so it can run on every scan (catching an added/edited .lrc sidecar)
 // without churning a no-op rescan. Empty/nil lyrics delete any existing row so the
-// table stays sparse; synced lines are stored as a JSON array in time order.
-func putLyricsTx(ctx context.Context, tx *sql.Tx, itemID int64, ly *model.Lyrics) error {
+// table stays sparse; synced lines are stored as a JSON array in time order. It
+// reports whether it changed the stored row, so the sidecar-update seam can emit a
+// delta only on a real change.
+func putLyricsTx(ctx context.Context, tx *sql.Tx, itemID int64, ly *model.Lyrics) (bool, error) {
 	// Desired row (empty source means "no lyrics row").
 	var wantSource, wantUnsynced, wantLines string
 	wantSynced := 0
@@ -35,7 +37,7 @@ func putLyricsTx(ctx context.Context, tx *sql.Tx, itemID int64, ly *model.Lyrics
 			}
 			b, err := json.Marshal(arr)
 			if err != nil {
-				return err
+				return false, err
 			}
 			wantLines = string(b)
 		}
@@ -49,19 +51,19 @@ func putLyricsTx(ctx context.Context, tx *sql.Tx, itemID int64, ly *model.Lyrics
 		Scan(&curSource, &curSynced, &curUnsynced, &curLines)
 	exists := !errors.Is(err, sql.ErrNoRows)
 	if err != nil && exists {
-		return err
+		return false, err
 	}
 
 	if wantSource == "" { // no lyrics desired
 		if exists {
 			_, derr := tx.ExecContext(ctx, "DELETE FROM lyrics WHERE item_id = ?", itemID)
-			return derr
+			return derr == nil, derr
 		}
-		return nil
+		return false, nil
 	}
 	if exists && curSource.String == wantSource && int(curSynced.Int64) == wantSynced &&
 		curUnsynced.String == wantUnsynced && curLines.String == wantLines {
-		return nil // unchanged
+		return false, nil // unchanged
 	}
 
 	var linesArg any
@@ -74,7 +76,10 @@ func putLyricsTx(ctx context.Context, tx *sql.Tx, itemID int64, ly *model.Lyrics
 		   source=excluded.source, synced=excluded.synced, unsynced=excluded.unsynced,
 		   lines=excluded.lines, updated_at=excluded.updated_at`,
 		itemID, wantSource, wantSynced, nullStr(wantUnsynced), linesArg, nowNS())
-	return err
+	if err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // LyricsByItem returns an item's stored lyrics, or CodeNotFound when it has none.

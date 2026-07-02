@@ -94,7 +94,7 @@ func TestPutScannedBookSingleFile(t *testing.T) {
 	}
 	if v.Narrator != "" { // joined narrator display only set from the denormalized column
 		// narrator column is set via Book.Narrator (joined); putBook left it empty, so
-		// the view narrator is empty — contributors carry the narrator instead.
+		// the view narrator is empty; contributors carry the narrator instead.
 	}
 
 	d, err := st.BookByPID(ctx, res.ItemPID)

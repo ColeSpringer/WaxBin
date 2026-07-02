@@ -45,6 +45,8 @@ func newDoctorCmd(g *globals) *cobra.Command {
 				enabledLabel(rep.EnrichmentEnabled), rep.EnrichedEntities, rep.EnrichedMatched)
 			fmt.Fprintf(w, "ffmpeg:         %s\n", presentLabel(rep.FFmpeg))
 			fmt.Fprintf(w, "fpcalc:         %s\n", presentLabel(rep.Fpcalc))
+			fmt.Fprintf(w, "avif thumbs:    %s\n", presentLabel(rep.AVIFThumbnails))
+			fmt.Fprintf(w, "heic thumbs:    %s\n", presentLabel(rep.HEICThumbnails))
 			fmt.Fprintln(w, "analyze decode coverage:")
 			tw := tabwriter.NewWriter(w, 0, 2, 2, ' ', 0)
 			fmt.Fprintln(tw, "  CODEC\tDECODER\tANALYSIS")

@@ -193,3 +193,33 @@ func TestCheckpointWritesImmediately(t *testing.T) {
 		t.Errorf("flush re-wrote a superseded tick (%d writes)", fake.writes())
 	}
 }
+
+func TestPlayStateImporterDefaultNoop(t *testing.T) {
+	s := New(&fakeStore{})
+	// The default importer is a no-op: it imports nothing and reports every record skipped.
+	res, err := s.Importer().ImportPlayState(context.Background(), []PlayStateRecord{
+		{ItemPID: "i1", PositionMS: 1000}, {ItemPID: "i2", Played: true},
+	})
+	if err != nil {
+		t.Fatalf("default import: %v", err)
+	}
+	if res.Imported != 0 || res.Skipped != 2 {
+		t.Errorf("default importer result = %+v, want 0 imported / 2 skipped", res)
+	}
+
+	// A concrete adapter can be installed; SetImporter(nil) restores the no-op.
+	s.SetImporter(recordingImporter{})
+	if _, ok := s.Importer().(recordingImporter); !ok {
+		t.Fatal("SetImporter did not install the adapter")
+	}
+	s.SetImporter(nil)
+	if _, ok := s.Importer().(noopImporter); !ok {
+		t.Fatal("SetImporter(nil) did not restore the no-op default")
+	}
+}
+
+type recordingImporter struct{}
+
+func (recordingImporter) ImportPlayState(_ context.Context, r []PlayStateRecord) (PlayStateImportResult, error) {
+	return PlayStateImportResult{Imported: len(r)}, nil
+}

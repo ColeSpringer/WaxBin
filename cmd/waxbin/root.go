@@ -46,6 +46,7 @@ func newRootCmd() *cobra.Command {
 	root.AddCommand(
 		newInitCmd(g),
 		newScanCmd(g),
+		newWatchCmd(g),
 		newAnalyzeCmd(g),
 		newEnrichCmd(g),
 		newQueryCmd(g),

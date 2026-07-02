@@ -11,9 +11,17 @@ import (
 
 	"github.com/colespringer/waxbin/internal/fsx"
 	"github.com/colespringer/waxbin/internal/pathx"
+	"github.com/colespringer/waxbin/meta"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/waxerr"
 )
+
+// WaxbinItemPIDKey is the tag key organize stamps with a backing item's stable
+// WaxBin PID (a custom key, round-tripped as a native custom field), so a rebuild
+// from tags can restore item identity. It is only a HINT: identity is essence-first
+// and the tag is copyable, so rebuild adopts it only when a single essence-group
+// unambiguously claims it.
+const WaxbinItemPIDKey = model.TagWaxbinItemPID
 
 // Action is one planned file move.
 type Action struct {
@@ -25,6 +33,20 @@ type Action struct {
 	RelDst   string // destination relative to the library root
 	Skip     bool   // already in place / nothing to do
 	Reason   string
+	// TagFields are the metadata fields to write into this file before the move
+	// (album artist, track/disc numbers), computed lock-respectingly at plan time.
+	// Empty unless the profile enables tag-write. Carried in the plan so a re-validated
+	// executor writes exactly what was planned without re-reading the profile or item.
+	TagFields []TagField
+}
+
+// TagField is one metadata field the organize tag-write will set on disk and stamp
+// with organize provenance. Field is the model metadata-field key (for lock and
+// provenance); Key is the on-disk tag key; Value is the value to write.
+type TagField struct {
+	Field string
+	Key   string
+	Value string
 }
 
 // Plan is a serializable set of moves for one library + profile. It is produced
@@ -34,6 +56,12 @@ type Plan struct {
 	LibraryPID model.PID
 	Root       string
 	Actions    []Action
+	// TagWrite records whether the profile enabled lock-respecting tag write-back, so
+	// the executor (which sees only the plan) knows to apply each action's TagFields.
+	TagWrite bool
+	// StampPID records whether to also stamp the backing item's WaxBin PID into a tag
+	// before the move (managed-only; organize plans only managed-root files).
+	StampPID bool
 }
 
 // Pending returns the actions that would actually move.
@@ -64,18 +92,26 @@ type Failure struct {
 	Err     string
 }
 
-// Organizer plans and applies moves against a catalog.
-type Organizer struct {
-	cat model.Catalog
-	log *slog.Logger
+// TagWriter applies tag edits to a file on disk and returns its new state. It is
+// satisfied by *meta.Writer; injected so organize does not hard-depend on a
+// concrete writer and stays testable.
+type TagWriter interface {
+	Apply(ctx context.Context, path string, edits []meta.TagEdit) (*meta.WriteResult, error)
 }
 
-// New builds an organizer.
-func New(cat model.Catalog, log *slog.Logger) *Organizer {
+// Organizer plans and applies moves against a catalog.
+type Organizer struct {
+	cat    model.Catalog
+	writer TagWriter
+	log    *slog.Logger
+}
+
+// New builds an organizer. writer may be nil when tag write-back is never used.
+func New(cat model.Catalog, writer TagWriter, log *slog.Logger) *Organizer {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Organizer{cat: cat, log: log}
+	return &Organizer{cat: cat, writer: writer, log: log}
 }
 
 // Plan computes the destination for each item under the profile. Items with no
@@ -84,7 +120,7 @@ func New(cat model.Catalog, log *slog.Logger) *Organizer {
 // relocated together rather than split.
 func (o *Organizer) Plan(ctx context.Context, lib *model.Library, p Profile, items []*model.ItemView) (*Plan, error) {
 	root := string(lib.Root)
-	plan := &Plan{Profile: p.Name, LibraryPID: lib.PID, Root: root}
+	plan := &Plan{Profile: p.Name, LibraryPID: lib.PID, Root: root, TagWrite: p.TagWrite}
 	for _, it := range items {
 		if it.FilePID == "" || it.DisplayPath == "" {
 			continue
@@ -121,10 +157,50 @@ func (o *Organizer) Plan(ctx context.Context, lib *model.Library, p Profile, ite
 		if filepath.Clean(a.Src) == filepath.Clean(dst) {
 			a.Skip, a.Reason = true, "already in place"
 		}
+		// Tag write-back applies to music tracks (albumArtist / Various Artists /
+		// disc-track numbering); a book's tag model is different and is left alone.
+		if p.TagWrite && it.Kind == model.KindTrack {
+			fields, err := o.tagFields(ctx, it)
+			if err != nil {
+				return nil, err
+			}
+			a.TagFields = fields
+		}
 		plan.Actions = append(plan.Actions, a)
 	}
 	markCollisions(plan)
 	return plan, nil
+}
+
+// tagFields computes the lock-respecting metadata edits organize will write into a
+// track's file: the album artist (literal "Various Artists" for a compilation) and
+// the disc/track numbers. A locked field is skipped so curated data survives.
+func (o *Organizer) tagFields(ctx context.Context, it *model.ItemView) ([]TagField, error) {
+	// Load the item's locked fields once rather than one SELECT per candidate field.
+	locked, err := o.cat.LockedFields(ctx, it.PID)
+	if err != nil {
+		return nil, err
+	}
+	var out []TagField
+	add := func(field, key, value string) {
+		if value == "" || locked[field] {
+			return
+		}
+		out = append(out, TagField{Field: field, Key: key, Value: value})
+	}
+
+	albumArtist := it.AlbumArtist
+	if it.Compilation {
+		albumArtist = "Various Artists"
+	}
+	add("album_artist", "ALBUMARTIST", albumArtist)
+	if it.TrackNo > 0 {
+		add("track_no", "TRACKNUMBER", strconv.Itoa(it.TrackNo))
+	}
+	if it.DiscNo > 0 {
+		add("disc_no", "DISCNUMBER", strconv.Itoa(it.DiscNo))
+	}
+	return out, nil
 }
 
 // planBookParts plans a move for every part of a multi-file book into the rendered
@@ -133,12 +209,12 @@ func (o *Organizer) Plan(ctx context.Context, lib *model.Library, p Profile, ite
 // the part's 1-based reading-order index (files arrive in reading order). The index
 // is a deterministic, unique disambiguator, so two source parts that happen to share
 // a basename across folders no longer render to the same destination and get
-// silently dropped by collision detection — the split this function exists to
+// silently dropped by collision detection, the split this function exists to
 // prevent.
 func (o *Organizer) planBookParts(plan *Plan, root, rel string, itemPID model.PID, files []model.ItemFileRef) {
 	// All-or-nothing: if any part cannot be placed (no path, or outside this managed
 	// root), leave the WHOLE book where it is rather than moving some parts and
-	// stranding others — the split this function exists to prevent. Roots are
+	// stranding others, the split this function exists to prevent. Roots are
 	// validated non-overlapping, so a legitimately-scanned book's parts are all under
 	// one root; this guards a stray/cross-root edge.
 	for _, fl := range files {
@@ -207,7 +283,7 @@ func (o *Organizer) Execute(ctx context.Context, plan *Plan, jobPID model.PID, h
 			rep.Skipped++
 			continue
 		}
-		if err := o.apply(ctx, a, jobPID); err != nil {
+		if err := o.apply(ctx, plan, a, jobPID); err != nil {
 			rep.Errored++
 			rep.Failures = append(rep.Failures, Failure{FilePID: a.FilePID, Src: a.Src, Dst: a.Dst, Err: err.Error()})
 			o.log.Warn("organize action failed", "src", a.Src, "dst", a.Dst, "err", err)
@@ -226,10 +302,13 @@ func (o *Organizer) Execute(ctx context.Context, plan *Plan, jobPID model.PID, h
 	return rep, nil
 }
 
-// apply journals the move as 'planned', performs it on disk, then commits the
-// catalog update as 'committed'. If the move fails, it marks the journal row
-// 'rolled_back'.
-func (o *Organizer) apply(ctx context.Context, a *Action, jobPID model.PID) error {
+// apply optionally re-tags the source (before the move, so a tag-write failure
+// aborts the action cleanly with the file still in place), journals the move as
+// 'planned', performs it on disk, then commits the catalog update as 'committed'
+// plus a paired file-state update recording the re-tag's new hash/mtime. If the
+// move fails, it marks the journal row 'rolled_back' (and records the re-tag at the
+// un-moved source so the catalog reflects the bytes on disk).
+func (o *Organizer) apply(ctx context.Context, plan *Plan, a *Action, jobPID model.PID) error {
 	in := model.RelocateInput{
 		FilePID:        a.FilePID,
 		JobPID:         jobPID,
@@ -238,15 +317,90 @@ func (o *Organizer) apply(ctx context.Context, a *Action, jobPID model.PID) erro
 		NewDisplayPath: a.Dst,
 		NewRelPath:     []byte(a.RelDst),
 	}
+
+	// Re-tag the source first. The write is essence-preserving, so item identity is
+	// unchanged; a failure leaves the file untouched (atomic) and aborts the move.
+	edits := o.buildEdits(plan, a)
+	var retag *meta.WriteResult
+	var prevSize, prevMtime int64
+	if len(edits) > 0 && o.writer != nil {
+		// The file's current size/mtime anchor the post-retag optimistic update. If it
+		// cannot be read, abort BEFORE touching the file rather than proceed with a
+		// zero anchor (which would silently match no row and never record the new hash).
+		f, ferr := o.cat.FileByPath(ctx, a.SrcBytes)
+		if ferr != nil {
+			return ferr
+		}
+		prevSize, prevMtime = f.Size, f.MTimeNS
+		res, err := o.writer.Apply(ctx, a.Src, edits)
+		if err != nil {
+			return err
+		}
+		retag = res
+	}
+
 	jpid, err := o.cat.PlanMove(ctx, in)
 	if err != nil {
 		return err
 	}
 	if err := moveFile(a.Src, a.Dst); err != nil {
 		_ = o.cat.AbortMove(ctx, jpid)
+		// The retag succeeded but the move did not: record the new bytes at the
+		// un-moved source so the next scan does not re-hash it, then surface the move error.
+		o.recordRetag(ctx, a.FilePID, prevSize, prevMtime, retag)
 		return err
 	}
-	return o.cat.CommitMove(ctx, jpid, in)
+	if err := o.cat.CommitMove(ctx, jpid, in); err != nil {
+		return err
+	}
+	// CommitMove updated only the path; record the re-tag's new size/mtime/hash and
+	// stamp organize provenance for the fields we wrote.
+	o.recordRetag(ctx, a.FilePID, prevSize, prevMtime, retag)
+	if retag != nil && retag.Changed {
+		for _, tf := range a.TagFields {
+			if err := o.cat.SetFieldProvenance(ctx, a.ItemPID, tf.Field, model.SourceOrganize, tf.Value, false); err != nil {
+				o.log.Warn("organize provenance stamp", "item", a.ItemPID, "field", tf.Field, "err", err)
+			}
+		}
+	}
+	return nil
+}
+
+// buildEdits assembles the on-disk tag edits for an action: the planned metadata
+// fields plus, when PID stamping is enabled, the item's WaxBin PID.
+func (o *Organizer) buildEdits(plan *Plan, a *Action) []meta.TagEdit {
+	if !plan.TagWrite && !plan.StampPID {
+		return nil
+	}
+	var edits []meta.TagEdit
+	if plan.TagWrite {
+		for _, tf := range a.TagFields {
+			edits = append(edits, meta.TagEdit{Key: tf.Key, Values: []string{tf.Value}})
+		}
+	}
+	if plan.StampPID && a.ItemPID != "" {
+		edits = append(edits, meta.TagEdit{Key: WaxbinItemPIDKey, Values: []string{string(a.ItemPID)}})
+	}
+	return edits
+}
+
+// recordRetag updates the file row's size/mtime/content_hash to the re-tagged
+// values, only if the stored size/mtime still match what we read before the write
+// (optimistic concurrency). A no-op or absent re-tag does nothing.
+func (o *Organizer) recordRetag(ctx context.Context, filePID model.PID, prevSize, prevMtime int64, retag *meta.WriteResult) {
+	if retag == nil || !retag.Changed {
+		return
+	}
+	if _, err := o.cat.UpdateFileStateIfUnchanged(ctx, model.FileStateUpdate{
+		FilePID:         filePID,
+		ExpectedSize:    prevSize,
+		ExpectedMTimeNS: prevMtime,
+		NewSize:         retag.Size,
+		NewMTimeNS:      retag.MTimeNS,
+		NewContentHash:  retag.ContentHash,
+	}); err != nil {
+		o.log.Warn("organize file-state update after retag", "file", filePID, "err", err)
+	}
 }
 
 // moveFile moves src to dst via the shared long-path-safe mover (create parent,

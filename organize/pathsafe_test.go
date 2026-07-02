@@ -10,7 +10,7 @@ import (
 func TestUnsafeSegmentReasonMatchesSanitizer(t *testing.T) {
 	// The audit detector must agree with the sanitizer: a name organize would
 	// rewrite is flagged unsafe, and a name it leaves alone is reported safe. This
-	// locks the two together (they drifted on leading spaces — sanitizeSegment trims
+	// locks the two together (they drifted on leading spaces, since sanitizeSegment trims
 	// both sides while the detector only checked trailing). NFC/diacritic folding is
 	// excluded: sanitizeSegment NFC-normalizes but both forms are valid on disk, so
 	// the seeds below are all already-NFC to keep the comparison about portability.

@@ -460,6 +460,35 @@ func stripHTML(s string) string {
 // podcast library, makes it the episode's primary file, flips the episode to
 // present, and ingests any episode artwork. A prior download for the same episode
 // is replaced (its file row removed) so a re-download does not leak a row.
+// PutEpisodeChapters stores an episode's Podcasting-2.0 chapters (source
+// 'podcast_url') against its downloaded file, replacing only the URL-sourced rows so
+// a re-sync cannot clobber richer chapters with poorer embedded ones. It emits an
+// item delta on a real change. The episode must be downloaded (have a primary file).
+func (s *Store) PutEpisodeChapters(ctx context.Context, episodePID model.PID, chapters []model.Chapter) error {
+	const op = "store.PutEpisodeChapters"
+	return s.writeTx(ctx, func(tx *sql.Tx) error {
+		var itemID, fileID int64
+		err := tx.QueryRowContext(ctx, `SELECT pi.id, f.id FROM playable_item pi
+			JOIN item_file pf ON pf.item_id = pi.id AND pf.role = 'primary'
+			JOIN file f ON f.id = pf.file_id
+			WHERE pi.pid = ? AND pi.kind = 'episode'`, string(episodePID)).Scan(&itemID, &fileID)
+		if errors.Is(err, sql.ErrNoRows) {
+			return waxerr.New(waxerr.CodeNotFound, op, "episode not downloaded: "+string(episodePID))
+		}
+		if err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		changed, err := syncChaptersForFileSource(ctx, tx, itemID, fileID, "podcast_url", chapters)
+		if err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		if changed {
+			return appendChange(ctx, tx, "item", episodePID, model.OpUpdate)
+		}
+		return nil
+	})
+}
+
 func (s *Store) AttachEpisodeFile(ctx context.Context, in model.AttachEpisodeFileInput) (model.PID, error) {
 	const op = "store.AttachEpisodeFile"
 	var filePID model.PID

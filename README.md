@@ -63,6 +63,28 @@ exit codes (`waxbin exit-codes`).
 | **Enrichment** | `enrich` (MusicBrainz + Cover Art Archive; optional AcoustID) |
 | **Maintenance** | `db verify [--fix]`, `db vacuum [--integrity]`, `db migrate`, `user`, `state` |
 
+### Watching for changes
+
+- `waxbin scan` is incremental: an unchanged file (same size + mtime) is skipped
+  without re-hashing or re-parsing, and a file deleted on disk is reconciled to
+  `missing`, behind a survival gate that refuses to act on a transiently
+  unavailable root, so a momentary mount loss cannot mark a whole library missing.
+  `scan --force` (alias `--full`) re-hashes and re-parses everything. A deliberate
+  large deletion (more than half a library) is held back by the survival gate; run
+  `scan --reconcile-deletions` to reconcile it once you have confirmed the files are
+  really gone.
+- `waxbin watch` keeps the catalog in sync on a schedule (and, with `--live`, on
+  filesystem events). Scheduled rescans are the primary mechanism because
+  filesystem events are unreliable on WSL2, NFS, SMB, and bind mounts; a periodic
+  full-content rescan (`--full-interval`) catches same-size/mtime-preserved edits
+  the fast-path misses.
+- **`watch` is a foreground mode.** A read-write WaxBin holds an exclusive advisory
+  lock on the catalog for its whole lifetime, so while `watch` runs, every other
+  *mutating* command in another terminal (`organize`, `analyze`, `enrich`,
+  `import`, `scan --force`) is refused with an ownership conflict (read-only
+  queries always work). Stop the watcher (Ctrl-C) to do manual mutation. Idle lock
+  release and a socket proxy are deliberately post-1.0.
+
 ### Quality, repair, and maintenance
 
 - `waxbin audit` reports quality and integrity problems: duplicate/split entities,
@@ -78,6 +100,23 @@ exit codes (`waxbin exit-codes`).
 - `waxbin db verify --fix` repairs derived-data drift (FTS, rollups, sort keys)
   and reclaims orphaned art. `waxbin db vacuum` GCs and compacts the database.
 - `waxbin stats --year 2025` prints a per-user listening year-in-review.
+
+### On-disk tag write-back (opt-in)
+
+The catalog is always authoritative; these opt-in features mirror it back into files
+for external players, always preserving audio essence (an essence-verified write
+never alters the audio):
+- `waxbin analyze --write-replaygain` (or `write_replaygain_tags` in config) writes
+  computed track and album ReplayGain into files after album aggregation
+  (`REPLAYGAIN_*`, or Opus `R128_*`).
+- An organize profile with `tag_write` corrects `albumArtist` (literal
+  `Various Artists` for compilations) and disc/track numbering on disk as it moves
+  files, skipping locked fields and re-tagging before the move so a failure aborts
+  cleanly.
+- `stamp_item_pid` additionally stamps a `WAXBIN_ITEM_PID` tag during organize, so
+  `rebuild` can restore original item identities from tags (essence-first: adopted
+  only when unambiguous, minted fresh on any conflict). A full DB backup remains the
+  real disaster-recovery artifact.
 
 ## Library API
 

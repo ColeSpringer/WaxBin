@@ -71,7 +71,7 @@ func TestSidecarMovesEnumeration(t *testing.T) {
 }
 
 func TestMoveSidecarOnDiskAndCollision(t *testing.T) {
-	o := New(nil, nil)
+	o := New(nil, nil, nil)
 	dir := t.TempDir()
 	srcDir := filepath.Join(dir, "src")
 	dstDir := filepath.Join(dir, "dst")

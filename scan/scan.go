@@ -6,6 +6,7 @@ package scan
 
 import (
 	"context"
+	"errors"
 	"io/fs"
 	"log/slog"
 	"os"
@@ -44,17 +45,37 @@ func New(cat model.Catalog, reader meta.Reader, log *slog.Logger) *Scanner {
 type Request struct {
 	Library *model.Library // target library (provides root + id)
 	SubPath string         // optional sub-path under the root; empty scans the whole root
+	// Force bypasses the incremental fast-path: every file is re-hashed, re-parsed,
+	// and re-upserted even when its size and mtime are unchanged. Use it to repair a
+	// catalog or after an essence-algorithm change. It does not affect analysis,
+	// which re-runs on its own analysis_version.
+	Force bool
+	// AdoptStampedPIDs makes the scan pass each file's WAXBIN_ITEM_PID tag to the
+	// store as a preferred item PID, so a rebuild restores original identities. The
+	// store adopts it only when creating a new item and only when unambiguous. Off for
+	// a normal scan (the store owns PID assignment).
+	AdoptStampedPIDs bool
+	// ForceReconcile bypasses the survival gate's ">=50% of known files must be seen"
+	// floor, so a deliberate large deletion is reconciled (deleted items become missing)
+	// instead of latching present forever. It still requires the root to be readable
+	// (a genuinely unreadable/errored root is never reconciled). It is an explicit
+	// operator action; the watcher never sets it, so a transient mount loss during a
+	// scheduled/forced watch rescan can never wipe the catalog.
+	ForceReconcile bool
 }
 
 // Result tallies what a scan did.
 type Result struct {
-	FilesSeen    int
-	AudioFiles   int
-	ItemsCreated int
-	ItemsUpdated int
-	Relinked     int
-	Skipped      int // non-audio files
-	Errored      int
+	FilesSeen       int
+	AudioFiles      int
+	ItemsCreated    int
+	ItemsUpdated    int
+	Relinked        int
+	Unchanged       int // fast-pathed: size+mtime matched, no hashing/parsing/upsert
+	SidecarsUpdated int // fast-pathed files whose .lrc/.cue changed and was applied
+	Missing         int // items reconciled to 'missing' (backing files gone from disk)
+	Skipped         int // non-audio files
+	Errored         int
 }
 
 // Heartbeat is the progress callback invoked periodically during a scan.
@@ -85,7 +106,23 @@ func (s *Scanner) Scan(ctx context.Context, req Request, hb Heartbeat) (*Result,
 	}
 
 	res := &Result{}
-	cache := newArtCache()
+	sc := &scanCtx{cache: newArtCache(), force: req.Force, adopt: req.AdoptStampedPIDs}
+
+	// Preload the scope's file index once, so the walk fast-paths an unchanged file
+	// (size+mtime match) in memory and reconciles vanished ones at end-of-walk, with
+	// no per-file SELECT. A load failure degrades to a full scan with no
+	// reconciliation rather than aborting.
+	var scopePrefix []byte
+	if req.SubPath != "" {
+		scopePrefix = append([]byte(walkRoot), filepath.Separator)
+	}
+	if idx, err := s.cat.LoadScopedFileIndex(ctx, req.Library.ID, scopePrefix); err != nil {
+		s.log.Warn("scan fast-path disabled: could not preload file index", "err", err)
+	} else {
+		sc.index = idx
+	}
+	knownCount := len(sc.index)
+
 	walkErr := filepath.WalkDir(walkRoot, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			s.log.Warn("walk entry", "path", path, "err", err)
@@ -115,7 +152,7 @@ func (s *Scanner) Scan(ctx context.Context, req Request, hb Heartbeat) (*Result,
 			res.Skipped++
 			return nil
 		}
-		if err := s.scanAudioFile(ctx, req.Library, root, path, res, cache, ""); err != nil {
+		if err := s.scanAudioFile(ctx, req.Library, root, path, res, sc, ""); err != nil {
 			s.log.Warn("scanning file", "path", path, "err", err)
 			res.Errored++
 		}
@@ -129,10 +166,84 @@ func (s *Scanner) Scan(ctx context.Context, req Request, hb Heartbeat) (*Result,
 	if walkErr != nil {
 		return res, waxerr.FromContext(op, walkErr, waxerr.CodeIO)
 	}
+
+	// Reconcile deletions: entries still in the index were never walked, so their
+	// files are gone from disk. The survival gate refuses to act on a transiently
+	// unavailable root, so a momentary mount loss cannot mark the whole library
+	// missing.
+	s.reconcileMissing(ctx, walkRoot, sc.index, knownCount, req.ForceReconcile, res)
+
 	if hb != nil {
 		_ = hb(1, "scanned "+strconv.Itoa(res.FilesSeen)+" files")
 	}
 	return res, nil
+}
+
+// scanCtx carries the per-scan fast-path state through the walk. The walk is
+// single-goroutine (WalkDir invokes its callback sequentially), so the index map
+// needs no locking.
+type scanCtx struct {
+	index map[string]model.ScopedFile // path -> known file; entries deleted as visited
+	force bool                        // bypass the fast-path (re-hash everything)
+	adopt bool                        // pass WAXBIN_ITEM_PID hints to the store (rebuild)
+	cache *artCache
+}
+
+// reconcileMissing marks the items behind the index's residual (unwalked) files as
+// missing, behind a survival gate. The gate distinguishes a genuine removal (root
+// absent, or a healthy scan that simply saw fewer files) from a transient failure
+// (root exists but is empty/unreadable, or a partial walk saw far fewer files than
+// known), and skips reconciliation entirely on the transient cases, logging a
+// degraded warning and keeping every row, so a momentary mount loss cannot wipe the
+// catalog (which Phase 4's orphan GC could then compound).
+func (s *Scanner) reconcileMissing(ctx context.Context, walkRoot string, index map[string]model.ScopedFile, knownCount int, forceReconcile bool, res *Result) {
+	if len(index) == 0 {
+		return // every known file was seen; nothing vanished
+	}
+	if ctx.Err() != nil {
+		return // a canceled scan is incomplete; do not treat unwalked files as missing
+	}
+
+	info, statErr := os.Stat(walkRoot)
+	switch {
+	case errors.Is(statErr, fs.ErrNotExist):
+		// The root is genuinely gone: a real full removal, reconcile everything.
+	case statErr != nil:
+		s.log.Warn("watch degraded: scan root unreadable, skipping deletion reconciliation",
+			"root", walkRoot, "err", statErr)
+		return
+	case !info.IsDir():
+		s.log.Warn("watch degraded: scan root is not a directory, skipping deletion reconciliation",
+			"root", walkRoot)
+		return
+	case forceReconcile:
+		// The operator explicitly asked to reconcile deletions (the root is readable),
+		// so bypass the floor. This is the recovery path for a genuine >50% deletion that the
+		// survival gate would otherwise never reconcile.
+	default:
+		// Root exists: require a floor. Seeing zero files, or fewer than half of what
+		// we previously knew, reads as a transient empty/unreadable mount rather than a
+		// real mass deletion, so keep the rows. A genuine large deletion is not
+		// reconciled here (the survival gate protects against a mount blip); the operator
+		// runs `scan --reconcile-deletions` to force it.
+		if res.AudioFiles == 0 || res.AudioFiles*2 < knownCount {
+			s.log.Warn("scan: skipping deletion reconciliation (survival gate): fewer than half of known files were seen; "+
+				"rows kept in case the root is only transiently unavailable; run `scan --reconcile-deletions` to force",
+				"root", walkRoot, "seen", res.AudioFiles, "known", knownCount, "would_mark_missing", len(index))
+			return
+		}
+	}
+
+	pids := make([]model.PID, 0, len(index))
+	for _, e := range index {
+		pids = append(pids, e.FilePID)
+	}
+	n, err := s.cat.MarkFilesMissing(ctx, pids)
+	if err != nil {
+		s.log.Warn("reconciling missing files", "root", walkRoot, "err", err)
+		return
+	}
+	res.Missing = n
 }
 
 // ScanFile catalogs a single audio file under its library, classifying its kind from
@@ -160,7 +271,8 @@ func (s *Scanner) scanFileForced(ctx context.Context, lib *model.Library, path s
 		return res, nil
 	}
 	res.FilesSeen++
-	if err := s.scanAudioFile(ctx, lib, string(lib.Root), path, res, newArtCache(), kind); err != nil {
+	// A single-file scan has no preloaded index, so it always takes the full path.
+	if err := s.scanAudioFile(ctx, lib, string(lib.Root), path, res, &scanCtx{cache: newArtCache()}, kind); err != nil {
 		res.Errored++
 		return res, err
 	}
@@ -168,11 +280,41 @@ func (s *Scanner) scanFileForced(ctx context.Context, lib *model.Library, path s
 }
 
 // scanAudioFile hashes, reads tags, and persists one audio file. forceKind overrides
-// the tag-based track/book classification when non-empty.
-func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, path string, res *Result, cache *artCache, forceKind model.Kind) error {
+// the tag-based track/book classification when non-empty. When the scan context
+// carries a preloaded index and the file's size and mtime match its known entry, it
+// takes the fast-path: no content/essence hashing, no tag parse, no upsert, just a
+// cheap sidecar re-check, and the file is dropped from the index (marking it seen).
+func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, path string, res *Result, sc *scanCtx, forceKind model.Kind) error {
 	info, err := os.Stat(path)
 	if err != nil {
 		return waxerr.Wrap(waxerr.CodeIO, "scan.file", err)
+	}
+
+	// Fast-path: an unchanged file (size+mtime match a preloaded entry) skips all
+	// hashing, tag parsing, and the full upsert. Whether or not it matches, a known
+	// file is removed from the index so it is never treated as a missing deletion.
+	//
+	// Trust model / blind spot: size+mtime (git's default heuristic) misses a
+	// same-size, mtime-preserving change (rsync --times, cp -p, an in-place external
+	// tag edit that keeps the byte length, or bit-rot), and exFAT/FAT round mtime to
+	// 2 s, so two same-size edits inside one window can collide. That is the accepted
+	// cost of a cheap rescan; the watcher's periodic full-content rescan (Force) and
+	// an explicit `scan --force` are the backstops that re-hash everything.
+	if sc.index != nil {
+		if known, ok := sc.index[path]; ok {
+			delete(sc.index, path)
+			if !sc.force && known.Size == info.Size() && known.MTimeNS == info.ModTime().UnixNano() {
+				// Size+mtime match. Reconcile sidecars: cheap changes (.lrc/.cue) apply in
+				// place; a change that needs the audio (a sidecar vanished or became
+				// unusable, so revert to embedded; a directory cover changed, so resolveCover
+				// precedence) returns needsFull and falls through to the full path.
+				if !s.reconcileFastPathSidecars(ctx, path, known, sc.cache, res) {
+					res.AudioFiles++
+					res.Unchanged++
+					return nil
+				}
+			}
+		}
 	}
 
 	contentHash, err := identity.ContentHash(path)
@@ -216,7 +358,8 @@ func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, p
 		ScanState:   model.ScanIndexed,
 	}
 
-	cover := resolveCover(path, fm.CoverArt, cache)
+	cover := resolveCover(path, fm.CoverArt, sc.cache)
+	lyrics, aux := scanSidecars(path, fm.Lyrics, sc.cache)
 
 	// An audiobook takes the book path: it groups by book identity (so a multi-file
 	// book collapses its parts into one item) and carries contributors and chapters.
@@ -231,7 +374,23 @@ func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, p
 	}
 	var out *model.ScanItemResult
 	if isBook {
-		out, err = s.cat.PutScannedBook(ctx, bookInput(lib.ID, file, tags, essenceHash, cover))
+		bin := bookInput(lib.ID, file, tags, essenceHash, cover)
+		// With no embedded chapters, a sibling .cue fills them (marked source='cue' so
+		// embedded chapters still win). Record its observation whenever the .cue is
+		// readable, even when it parses to no chapters, so the fast-path can stat-compare
+		// it instead of forcing a full reprocess every scan. Apply chapters only when the
+		// .cue actually yielded some.
+		if len(tags.Chapters) == 0 {
+			if cueChapters, cueObs, ok := scanCueSidecar(path); ok {
+				aux = append(aux, cueObs)
+				if len(cueChapters) > 0 {
+					bin.Chapters, bin.ChapterSource = cueChapters, "cue"
+				}
+			}
+		}
+		bin.AuxObservations = aux
+		bin.PreferredItemPID = adoptedPID(sc, fm)
+		out, err = s.cat.PutScannedBook(ctx, bin)
 	} else {
 		out, err = s.cat.PutScannedTrack(ctx, model.PutScannedTrackInput{
 			LibraryID: lib.ID,
@@ -243,9 +402,11 @@ func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, p
 				SortKey:     model.SortKey(tags.Title),
 				IdentityKey: identity.TrackKey(tags.MBID, essenceHash),
 			},
-			Track:    trackFromTags(tags),
-			Lyrics:   sidecarLyrics(path, fm.Lyrics),
-			CoverArt: cover,
+			Track:            trackFromTags(tags),
+			Lyrics:           lyrics,
+			CoverArt:         cover,
+			AuxObservations:  aux,
+			PreferredItemPID: adoptedPID(sc, fm),
 		})
 	}
 	if err != nil {
@@ -265,6 +426,15 @@ func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, p
 	return nil
 }
 
+// adoptedPID returns the file's WAXBIN_ITEM_PID hint when the scan is in adopt mode
+// (rebuild), else empty. The store decides whether to actually adopt it.
+func adoptedPID(sc *scanCtx, fm *meta.FileMeta) model.PID {
+	if !sc.adopt {
+		return ""
+	}
+	return model.PID(fm.ItemPIDHint)
+}
+
 // bookInput composes one audiobook file into a book persistence input. The book
 // title and author are the album/album-artist (the file title/artist hold a
 // chapter or part name in multi-file books); the book key groups the parts of one
@@ -280,11 +450,13 @@ func bookInput(libraryID int64, file model.File, tags model.Tags, essenceHash st
 	}
 
 	chapters := tags.Chapters
+	chapterSource := "embedded"
 	if len(chapters) == 0 {
 		// No embedded chapters: one whole-file chapter (open-ended) titled by the
 		// file, so a multi-file book navigates part-by-part and a single-file book
-		// still has one entry.
+		// still has one entry. Marked 'synthetic' so an external .cue outranks it.
 		chapters = []model.Chapter{{Position: 0, Title: tags.Title}}
+		chapterSource = "synthetic"
 	}
 
 	position := tags.TrackNo
@@ -322,9 +494,10 @@ func bookInput(libraryID int64, file model.File, tags model.Tags, essenceHash st
 			Genres:      tags.Genres,
 			Genre:       tags.Genre,
 		},
-		Position: position,
-		Chapters: chapters,
-		CoverArt: cover,
+		Position:      position,
+		Chapters:      chapters,
+		ChapterSource: chapterSource,
+		CoverArt:      cover,
 	}
 }
 
@@ -397,55 +570,254 @@ func trackFromTags(tags model.Tags) model.Track {
 	}
 }
 
-// sidecarLyrics resolves an audio file's structured lyrics. A sibling .lrc
-// sidecar (read directly and parsed) is authoritative when present and carries
-// timed lines; it supersedes the file's embedded lyrics but keeps the embedded
-// unsynchronized block when the sidecar has only synced lines. With no usable
-// sidecar, the embedded lyrics stand.
-func sidecarLyrics(audioPath string, embedded *model.Lyrics) *model.Lyrics {
+// scanSidecars resolves an audio file's structured lyrics and records the on-disk
+// observations of its sidecars (the sibling .lrc and the directory cover), so a
+// later scan can stat-compare them and re-parse only a changed one.
+//
+// A sibling .lrc sidecar (read directly and parsed) is authoritative when present
+// and carries timed lines; it supersedes the file's embedded lyrics but keeps the
+// embedded unsynchronized block when the sidecar has only synced lines. With no
+// usable sidecar, the embedded lyrics stand.
+func scanSidecars(audioPath string, embedded *model.Lyrics, cache *artCache) (*model.Lyrics, []model.AuxObservation) {
+	lyrics := embedded
+	var aux []model.AuxObservation
+
 	lrcPath := strings.TrimSuffix(audioPath, filepath.Ext(audioPath)) + ".lrc"
-	data, err := os.ReadFile(lrcPath)
+	if data, err := os.ReadFile(lrcPath); err == nil {
+		if synced := meta.ParseLRC(string(data)); len(synced) > 0 {
+			ly := &model.Lyrics{Source: "lrc", Synced: synced}
+			if embedded != nil {
+				ly.Unsynced = embedded.Unsynced
+			}
+			lyrics = ly
+		}
+		if info, err := os.Stat(lrcPath); err == nil {
+			aux = append(aux, model.AuxObservation{
+				Kind: model.AuxLyrics, Path: []byte(lrcPath),
+				Size: info.Size(), MTimeNS: info.ModTime().UnixNano(), Hash: art.Hash(data),
+			})
+		}
+	}
+	// Record the directory cover observation so the fast-path can stat-compare it next
+	// time. Prefer the resolved (decodable) cover's hashed observation; otherwise fall
+	// back to a stat-only observation of a present-but-undecodable cover file. Without
+	// that fallback the fast-path (which detects covers by existence, not decodability)
+	// would treat the undecodable file as newly-appeared on every scan and force a full
+	// reprocess forever.
+	dir := filepath.Dir(audioPath)
+	if obs := cache.dirCoverObs(dir); obs != nil {
+		aux = append(aux, *obs)
+	} else if obs := cache.dirCoverStat(dir); obs != nil {
+		aux = append(aux, *obs)
+	}
+	return lyrics, aux
+}
+
+// scanCueSidecar reads a sibling .cue for an audio file, parsing it into chapters and
+// returning its on-disk observation. The bool reports whether the .cue was READABLE,
+// meaning the observation is valid; it does not report whether the .cue yielded
+// chapters. A readable .cue that parses to zero chapters still returns true with an
+// empty chapter slice so the caller can record its observation. Recording it either
+// way is what keeps the fast-path, which only stat-compares recorded sidecars, from
+// treating a chapterless .cue as new on every scan and forcing a full reprocess.
+// WaxBin keeps the .cue on disk as an uncatalogued sidecar (it is already in
+// organize's set); only the parsed chapters land in the catalog.
+func scanCueSidecar(audioPath string) ([]model.Chapter, model.AuxObservation, bool) {
+	cuePath := strings.TrimSuffix(audioPath, filepath.Ext(audioPath)) + ".cue"
+	data, err := os.ReadFile(cuePath)
 	if err != nil {
-		return embedded // no sidecar (or unreadable): fall back to embedded
+		return nil, model.AuxObservation{}, false
 	}
-	synced := meta.ParseLRC(string(data))
-	if len(synced) == 0 {
-		return embedded
+	obs := model.AuxObservation{Kind: model.AuxCue, Path: []byte(cuePath), Hash: art.Hash(data)}
+	if info, err := os.Stat(cuePath); err == nil {
+		obs.Size, obs.MTimeNS = info.Size(), info.ModTime().UnixNano()
 	}
-	ly := &model.Lyrics{Source: "lrc", Synced: synced}
-	if embedded != nil {
-		ly.Unsynced = embedded.Unsynced
+	return meta.ParseCue(string(data)), obs, true
+}
+
+// reconcileFastPathSidecars re-checks an unchanged audio file's sidecars in one pass.
+// It applies changes that do NOT need the audio (a .lrc yielding synced lyrics, a
+// .cue yielding chapters) cheaply through the standalone UpdateItemSidecars seam, and
+// returns needsFull=true when a change requires re-reading the audio: a sidecar
+// vanished or became unusable (revert lyrics/chapters to embedded), or the directory
+// cover changed/appeared/vanished (resolveCover must re-decide embedded-vs-directory
+// precedence). Each sidecar is stat'd once; only a changed one is read.
+func (s *Scanner) reconcileFastPathSidecars(ctx context.Context, path string, known model.ScopedFile, cache *artCache, res *Result) (needsFull bool) {
+	stored := make(map[string]model.AuxObservation, len(known.Aux))
+	for _, o := range known.Aux {
+		stored[o.Kind] = o
 	}
-	return ly
+
+	// The directory cover is stat-gated (no per-scan read+hash of an unchanged cover);
+	// any change routes through the full path so resolveCover keeps embedded precedence.
+	if coverChangedFast(path, stored, cache) {
+		return true
+	}
+
+	upd := model.SidecarUpdate{ItemPID: known.ItemPID, FilePID: known.FilePID}
+	dirty := false
+
+	// .lrc, authoritative when it yields synced lines; a vanish or an unusable edit
+	// (no synced lines) must revert to embedded, which needs the audio (full path).
+	lrcPath := strings.TrimSuffix(path, filepath.Ext(path)) + ".lrc"
+	switch state, data, obs := checkSidecarFile(lrcPath, model.AuxLyrics, stored); state {
+	case sidecarVanished:
+		return true
+	case sidecarChanged:
+		synced := meta.ParseLRC(string(data))
+		if len(synced) == 0 {
+			return true // edited to nothing usable, so revert to embedded via the full path
+		}
+		upd.Lyrics = &model.Lyrics{Source: "lrc", Synced: synced}
+		upd.Observations = append(upd.Observations, obs)
+		dirty = true
+	}
+
+	// .cue, a book's chapters when it yields any; a vanish or empty cue reverts to
+	// embedded/synthetic (full path). The store applies chapters only to a book item.
+	cuePath := strings.TrimSuffix(path, filepath.Ext(path)) + ".cue"
+	switch state, data, obs := checkSidecarFile(cuePath, model.AuxCue, stored); state {
+	case sidecarVanished:
+		return true
+	case sidecarChanged:
+		chapters := meta.ParseCue(string(data))
+		if len(chapters) == 0 {
+			return true
+		}
+		upd.ReplaceChapters, upd.Chapters, upd.ChapterSource = true, chapters, "cue"
+		upd.Observations = append(upd.Observations, obs)
+		dirty = true
+	}
+
+	if !dirty {
+		return false
+	}
+	changed, err := s.cat.UpdateItemSidecars(ctx, upd)
+	if err != nil {
+		s.log.Warn("updating sidecars on fast-path", "path", path, "err", err)
+	} else if changed {
+		res.SidecarsUpdated++
+	}
+	return false
+}
+
+// sidecarState is the result of stat-comparing one sidecar to its last observation.
+type sidecarState int
+
+const (
+	sidecarUnchanged sidecarState = iota // present and size+mtime match the observation
+	sidecarChanged                       // present but changed/new; data + obs are returned
+	sidecarVanished                      // was observed before but is now gone from disk
+	sidecarAbsent                        // never observed and not present now
+)
+
+// checkSidecarFile stat-compares a sidecar against its stored observation, reading it
+// only when it changed. It is the shared core of the per-extension fast-path checks
+// (one stat per sidecar; no read when unchanged).
+func checkSidecarFile(sidecarPath, kind string, stored map[string]model.AuxObservation) (sidecarState, []byte, model.AuxObservation) {
+	prev, had := stored[kind]
+	info, err := os.Stat(sidecarPath)
+	if err != nil {
+		if had {
+			return sidecarVanished, nil, model.AuxObservation{}
+		}
+		return sidecarAbsent, nil, model.AuxObservation{}
+	}
+	if had && prev.Size == info.Size() && prev.MTimeNS == info.ModTime().UnixNano() {
+		return sidecarUnchanged, nil, model.AuxObservation{}
+	}
+	data, rerr := os.ReadFile(sidecarPath)
+	if rerr != nil {
+		// Unreadable right now: leave it as-is rather than churn on a transient error.
+		return sidecarUnchanged, nil, model.AuxObservation{}
+	}
+	obs := model.AuxObservation{
+		Kind: kind, Path: []byte(sidecarPath),
+		Size: info.Size(), MTimeNS: info.ModTime().UnixNano(), Hash: art.Hash(data),
+	}
+	return sidecarChanged, data, obs
+}
+
+// coverChangedFast reports whether the directory cover changed relative to the stored
+// observation, using a cheap stat (no read+hash of an unchanged cover). It stats the
+// previously-observed cover file when there was one; otherwise it checks whether a
+// cover newly appeared. A newly-added HIGHER-priority candidate beside an existing
+// cover is missed until a full rescan (accepted; the periodic full rescan backstops).
+func coverChangedFast(path string, stored map[string]model.AuxObservation, cache *artCache) bool {
+	prev, had := stored[model.AuxCover]
+	if had {
+		info, err := os.Stat(string(prev.Path))
+		if err != nil {
+			return true // the observed cover vanished
+		}
+		return info.Size() != prev.Size || info.ModTime().UnixNano() != prev.MTimeNS
+	}
+	// No prior cover: a cover newly appearing is a change. dirCoverStat lists the
+	// directory once (cached), without reading/hashing the image.
+	return cache.dirCoverStat(filepath.Dir(path)) != nil
 }
 
 // artCache memoizes per-directory cover-image lookups for one scan run, so an
-// album's directory cover is read and hashed once rather than for every track.
+// album's directory cover is read and hashed once rather than for every track. It
+// caches both the resolved image and the cover file's on-disk observation (path,
+// size, mtime, hash) for the sidecar fast-path.
+type dirCoverEntry struct {
+	img *model.ArtImage       // resolved cover (nil = none)
+	obs *model.AuxObservation // the cover FILE observation (nil = none)
+}
+
 type artCache struct {
-	dirs map[string]*model.ArtImage // resolved cover per directory (nil = none)
+	dirs     map[string]dirCoverEntry         // full resolve (image + hashed obs)
+	statObs  map[string]*model.AuxObservation // stat-only cover obs (no read/hash)
+	statDone map[string]bool                  // whether statObs[dir] has been computed
 }
 
-func newArtCache() *artCache { return &artCache{dirs: map[string]*model.ArtImage{}} }
-
-// dirCover returns the directory's cover image, probing the directory once and
-// caching the (possibly nil) result.
-func (c *artCache) dirCover(dir string) *model.ArtImage {
-	if img, ok := c.dirs[dir]; ok {
-		return img
+func newArtCache() *artCache {
+	return &artCache{
+		dirs:     map[string]dirCoverEntry{},
+		statObs:  map[string]*model.AuxObservation{},
+		statDone: map[string]bool{},
 	}
-	img := findDirCover(dir)
-	c.dirs[dir] = img
-	return img
 }
 
-// coverCandidates are the directory cover-image filenames WaxBin recognizes, in
-// priority order. The match is case-insensitive against the directory listing.
-var coverCandidates = []string{
-	"cover.jpg", "cover.jpeg", "cover.png", "cover.webp",
-	"folder.jpg", "folder.jpeg", "folder.png",
-	"front.jpg", "front.jpeg", "front.png",
-	"album.jpg", "albumart.jpg",
+// dirCoverStat returns the directory cover file's observation from a cheap stat (no
+// read or hash), for the fast-path change check. It lists the directory once (cached)
+// and stats the highest-priority existing candidate. nil means no cover file exists.
+func (c *artCache) dirCoverStat(dir string) *model.AuxObservation {
+	if c.statDone[dir] {
+		return c.statObs[dir]
+	}
+	obs := coverStat(dir)
+	c.statObs[dir] = obs
+	c.statDone[dir] = true
+	return obs
 }
+
+// resolve probes a directory's cover once, caching the image and its observation.
+func (c *artCache) resolve(dir string) dirCoverEntry {
+	if e, ok := c.dirs[dir]; ok {
+		return e
+	}
+	img, coverPath := findDirCover(dir)
+	var obs *model.AuxObservation
+	if img != nil && coverPath != "" {
+		if info, err := os.Stat(coverPath); err == nil {
+			obs = &model.AuxObservation{
+				Kind: model.AuxCover, Path: []byte(coverPath),
+				Size: info.Size(), MTimeNS: info.ModTime().UnixNano(), Hash: img.Hash,
+			}
+		}
+	}
+	e := dirCoverEntry{img: img, obs: obs}
+	c.dirs[dir] = e
+	return e
+}
+
+// dirCover returns the directory's cover image (nil when there is none).
+func (c *artCache) dirCover(dir string) *model.ArtImage { return c.resolve(dir).img }
+
+// dirCoverObs returns the directory cover file's on-disk observation (nil none).
+func (c *artCache) dirCoverObs(dir string) *model.AuxObservation { return c.resolve(dir).obs }
 
 // resolveCover chooses a track's cover, preferring a decodable embedded image,
 // then the directory cover image, and only then a non-decodable embedded image as
@@ -453,8 +825,13 @@ var coverCandidates = []string{
 // available to serve, while a corrupt or placeholder embedded picture does not
 // shadow a valid cover.jpg next to the file.
 func resolveCover(path string, embedded *model.ArtImage, cache *artCache) *model.ArtImage {
-	if embedded != nil && finalizeArt(embedded) {
-		return embedded // decodable embedded cover
+	// finalizeArt also returns true for an exotic (AVIF/HEIC) embedded image that was
+	// only recognized by its magic bytes, not decoded, so its dimensions stay 0 until an
+	// external decoder runs. Require real decoded dimensions (Width > 0) here so such an
+	// image does not shadow a decodable cover.jpg beside the file. It is still kept by
+	// the last-resort branch below.
+	if embedded != nil && finalizeArt(embedded) && embedded.Width > 0 {
+		return embedded // decodable embedded cover with known dimensions
 	}
 	if dir := cache.dirCover(filepath.Dir(path)); dir != nil {
 		return dir // a valid (decodable) directory cover
@@ -467,9 +844,10 @@ func resolveCover(path string, embedded *model.ArtImage, cache *artCache) *model
 	return nil
 }
 
-// findDirCover returns the first recognized cover image in dir (case-insensitive,
-// in coverCandidates priority order), finalized, or nil when there is none.
-func findDirCover(dir string) *model.ArtImage {
+// coverFilesByLower lists dir once and returns a lowercase-name -> actual-name map of
+// its regular files, so cover-candidate matching is case-insensitive (a "Cover.JPG"
+// matches "cover.jpg"). It returns nil when the directory cannot be read.
+func coverFilesByLower(dir string) map[string]string {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil
@@ -480,18 +858,50 @@ func findDirCover(dir string) *model.ArtImage {
 			byLower[strings.ToLower(e.Name())] = e.Name()
 		}
 	}
-	for _, cand := range coverCandidates {
+	return byLower
+}
+
+// findDirCover returns the first recognized cover image in dir (case-insensitive,
+// in CoverArtNames priority order), finalized, plus its full path, or (nil, "")
+// when there is none.
+func findDirCover(dir string) (*model.ArtImage, string) {
+	byLower := coverFilesByLower(dir)
+	for _, cand := range model.CoverArtNames {
 		name, ok := byLower[cand]
 		if !ok {
 			continue
 		}
-		data, err := os.ReadFile(filepath.Join(dir, name))
+		full := filepath.Join(dir, name)
+		data, err := os.ReadFile(full)
 		if err != nil {
 			continue
 		}
 		img := &model.ArtImage{Data: data}
 		if finalizeArt(img) {
-			return img
+			return img, full
+		}
+	}
+	return nil, ""
+}
+
+// coverStat finds the highest-priority existing cover-candidate file in dir and
+// stats it (no read/hash), returning its observation, or nil when none exists. It is
+// the cheap fast-path check for a newly-appeared cover.
+func coverStat(dir string) *model.AuxObservation {
+	byLower := coverFilesByLower(dir)
+	for _, cand := range model.CoverArtNames {
+		name, ok := byLower[cand]
+		if !ok {
+			continue
+		}
+		full := filepath.Join(dir, name)
+		info, err := os.Stat(full)
+		if err != nil {
+			continue
+		}
+		return &model.AuxObservation{
+			Kind: model.AuxCover, Path: []byte(full),
+			Size: info.Size(), MTimeNS: info.ModTime().UnixNano(),
 		}
 	}
 	return nil
@@ -508,6 +918,13 @@ func finalizeArt(img *model.ArtImage) bool {
 	img.Hash = art.Hash(img.Data)
 	format, w, h, err := art.Probe(img.Data)
 	if err != nil {
+		// An AVIF/HEIC cover has no pure-Go decoder: recognize it by magic so it is
+		// still found and stored (dimensions unknown until an external helper decodes
+		// it). This keeps a cover.avif from being skipped as unreadable.
+		if f, ok := art.SniffExotic(img.Data); ok {
+			img.Format = f
+			return true
+		}
 		return false
 	}
 	img.Format, img.Width, img.Height = format, w, h

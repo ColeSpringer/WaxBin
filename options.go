@@ -31,6 +31,12 @@ type Options struct {
 	Inbox []string
 	// FreeSpaceReserveBytes is headroom an import preflight keeps free.
 	FreeSpaceReserveBytes int64
+	// WriteReplayGainTags mirrors computed ReplayGain into files after analyze (off
+	// by default; the catalog stays authoritative).
+	WriteReplayGainTags bool
+	// StampItemPID stamps the backing item's WaxBin PID into a tag during organize's
+	// tag write-back on managed roots (off by default).
+	StampItemPID bool
 	// Podcasts configures the podcast engine (download dir + network policy).
 	Podcasts config.PodcastConfig
 	// Enrichment configures the metadata enrichment pass (MusicBrainz/CAA/AcoustID).
@@ -56,6 +62,8 @@ func OptionsFromConfig(cfg *config.Config, log *slog.Logger) Options {
 		Profiles:              cfg.Profiles,
 		Inbox:                 cfg.Inbox,
 		FreeSpaceReserveBytes: cfg.FreeSpaceReserveBytes,
+		WriteReplayGainTags:   cfg.WriteReplayGainTags,
+		StampItemPID:          cfg.StampItemPID,
 		Podcasts:              cfg.Podcasts,
 		Enrichment:            cfg.Enrichment,
 		Logger:                log,

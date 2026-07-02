@@ -32,7 +32,17 @@ func (s *Store) PutScannedBook(ctx context.Context, in model.PutScannedBookInput
 		}
 		res.FilePID = filePID
 
-		itemID, itemPID, created, err := upsertItem(ctx, tx, in.Item, now)
+		// Replace the file's sidecar observations (prunes a since-deleted .cue/.lrc so it
+		// does not force a full re-hash forever).
+		if err := replaceFileAuxTx(ctx, tx, fileID, in.AuxObservations); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+
+		// A rebuild adopts the file's WAXBIN_ITEM_PID stamp (organize stamps books too) to
+		// restore the book's original identity; identity stays essence-first, so a taken or
+		// invalid hint falls back to a fresh PID. Parts of one book share the stamp: the
+		// first to create the item adopts it, the rest join it by book key.
+		itemID, itemPID, created, stateChanged, err := upsertItem(ctx, tx, in.Item, now, in.PreferredItemPID)
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
@@ -79,8 +89,8 @@ func (s *Store) PutScannedBook(ctx context.Context, in model.PutScannedBookInput
 			}
 		}
 
-		// On a real change, resolve the book's chapters (per file) and — only for the
-		// primary part — its metadata/series/contributors/genres/FTS. Gating the
+		// On a real change, resolve the book's chapters (per file) and, only for the
+		// primary part, its metadata/series/contributors/genres/FTS. Gating the
 		// metadata on the primary makes one part the owner, so an asymmetrically-tagged
 		// later part can't clobber the book's narrator/series/etc. by scan order. The
 		// genres are still collected for every changed part so the genre rollup's
@@ -98,11 +108,18 @@ func (s *Store) PutScannedBook(ctx context.Context, in model.PutScannedBookInput
 					return waxerr.Wrap(waxerr.CodeIO, op, err)
 				}
 			}
-			if err := syncChaptersForFile(ctx, tx, itemID, fileID, in.Chapters); err != nil {
-				return waxerr.Wrap(waxerr.CodeIO, op, err)
-			}
+		}
+		// Chapters sync OUTSIDE the audio-change gate (idempotent): an external .cue can
+		// change independently of the audio, and a forced rescan must re-import chapters
+		// even when the content is unchanged. It no-ops when the stored chapters already
+		// match, so a true no-op rescan stays silent.
+		chaptersChanged, err := syncChaptersForFile(ctx, tx, itemID, fileID, in.ChapterSource, in.Chapters)
+		if err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		if changed || chaptersChanged {
 			// The book row exists now (the primary created it); refresh its denormalized
-			// total duration so a newly attached part is reflected in the read view.
+			// total duration so a new part or a changed chapter span is reflected.
 			if err := refreshBookDuration(ctx, tx, itemID); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
@@ -110,11 +127,15 @@ func (s *Store) PutScannedBook(ctx context.Context, in model.PutScannedBookInput
 
 		// Cover art comes from the primary part (like the rest of the book's metadata),
 		// so a later, differently-covered part can't replace it. It runs every scan of
-		// the primary (idempotent) to still catch a directory cover added later.
+		// the primary (idempotent) to still catch a directory cover added later. Its
+		// changed flag feeds the item delta so a cover-only change is not silent.
+		artChanged := false
 		if created || role == bookPrimaryRole {
-			if err := attachArtTx(ctx, tx, itemID, in.CoverArt); err != nil {
+			c, err := attachArtTxChanged(ctx, tx, itemID, in.CoverArt)
+			if err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
+			artChanged = c
 		}
 
 		if !affected.empty() {
@@ -132,8 +153,9 @@ func (s *Store) PutScannedBook(ctx context.Context, in model.PutScannedBookInput
 		// part list, chapters, and total duration move), not only when it is created or
 		// a part's bytes change. Attaching the second file of a multi-file book has
 		// created=false and ContentChanged=false, so without FileCreated/Relinked here a
-		// change_log tailer would never refresh the existing book.
-		if created || res.ContentChanged || res.FileCreated || res.Relinked {
+		// change_log tailer would never refresh the existing book. An externally-changed
+		// .cue (chaptersChanged with unchanged audio) also warrants a delta.
+		if created || res.ContentChanged || res.FileCreated || res.Relinked || chaptersChanged || stateChanged || artChanged {
 			if err := appendChange(ctx, tx, "item", itemPID, opFor(created)); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
@@ -446,7 +468,7 @@ func ensurePrimary(ctx context.Context, tx *sql.Tx, itemID int64) error {
 }
 
 // bookEffectiveDurationSum is the SQL subquery for a book's total running time: the
-// sum over its parts of each part's EFFECTIVE duration — the larger of the file's
+// sum over its parts of each part's EFFECTIVE duration, the larger of the file's
 // own duration and its furthest chapter offset. Using the chapter extent as a floor
 // means a part with an unknown file duration but real chapters still contributes,
 // and the stored total never falls short of the chapter timeline that bookChapters
@@ -470,23 +492,134 @@ func refreshBookDuration(ctx context.Context, tx *sql.Tx, itemID int64) error {
 	return err
 }
 
-// syncChaptersForFile replaces the chapters a single file contributes to a book.
-// Chapters are stored file-relative (start_ms/end_ms within file_id); the read path
-// orders them across parts into a book timeline. Scoping the delete to (book, file)
-// keeps a multi-file book's other parts' chapters intact.
-func syncChaptersForFile(ctx context.Context, tx *sql.Tx, bookItemID, fileID int64, chapters []model.Chapter) error {
-	if _, err := tx.ExecContext(ctx,
-		"DELETE FROM chapter WHERE book_item_id = ? AND file_id = ?", bookItemID, fileID); err != nil {
-		return err
+// chapterSourceRank orders chapter sources by precedence (lower wins). A remote
+// podcast:chapters JSON is richest and outranks embedded chapters (the documented
+// episode contract); for books (which never carry podcast_url) embedded chapters are
+// authoritative over an external .cue, and a synthesized single chapter ranks below
+// a real source. One ordering serves both kinds because their source sets are
+// disjoint (books: embedded/cue/synthetic; episodes: podcast_url).
+func chapterSourceRank(source string) int {
+	switch source {
+	case "podcast_url":
+		return 0
+	case "embedded":
+		return 1
+	case "cue":
+		return 2
+	case "synthetic":
+		return 3
+	default:
+		return 4
+	}
+}
+
+// preferredChapters returns the chapters of the single highest-precedence source
+// present for a file (embedded over cue), so a file that briefly carries both does
+// not read back a merged, doubled chapter list.
+func preferredChapters(bySource map[string][]model.Chapter) []model.Chapter {
+	best, bestRank := "", 1<<30
+	for source := range bySource {
+		if r := chapterSourceRank(source); r < bestRank {
+			best, bestRank = source, r
+		}
+	}
+	return bySource[best]
+}
+
+// syncChaptersForFile is the authoritative book-scan chapter write: it replaces ALL
+// of a file's chapters (every source) with the scanned set, tagged with source, so a
+// source that no longer applies (a synthetic single chapter superseded by embedded
+// chapters, or vice versa) is cleared. It is idempotent, so the book scan can call it
+// unconditionally (a forced rescan or an externally-changed .cue re-imports chapters
+// even when the audio is unchanged) without churning a true no-op rescan.
+func syncChaptersForFile(ctx context.Context, tx *sql.Tx, bookItemID, fileID int64, source string, chapters []model.Chapter) (bool, error) {
+	if source == "" {
+		source = "embedded"
+	}
+	return syncChapters(ctx, tx, bookItemID, fileID, source, chapters, false)
+}
+
+// syncChaptersForFileSource replaces only ONE source's chapters for a file, leaving a
+// multi-file book's other parts (and this part's chapters from a richer source)
+// intact. It is the fast-path seam that updates .lrc/.cue/podcast chapters without
+// re-reading the audio.
+func syncChaptersForFileSource(ctx context.Context, tx *sql.Tx, bookItemID, fileID int64, source string, chapters []model.Chapter) (bool, error) {
+	return syncChapters(ctx, tx, bookItemID, fileID, source, chapters, true)
+}
+
+// syncChapters replaces a file's chapters with the desired set tagged with source,
+// reporting whether it changed anything. scopeToSource limits the replace (and the
+// no-op comparison) to rows of that source; otherwise it replaces every source's
+// rows for the file. It no-ops (no write, no change) when the stored rows already
+// match, so a no-op rescan stays change_log-silent.
+func syncChapters(ctx context.Context, tx *sql.Tx, bookItemID, fileID int64, source string, chapters []model.Chapter, scopeToSource bool) (bool, error) {
+	if same, err := chaptersInSync(ctx, tx, bookItemID, fileID, source, chapters, scopeToSource); err != nil {
+		return false, err
+	} else if same {
+		return false, nil
+	}
+	del := "DELETE FROM chapter WHERE book_item_id = ? AND file_id = ?"
+	args := []any{bookItemID, fileID}
+	if scopeToSource {
+		del += " AND source = ?"
+		args = append(args, source)
+	}
+	if _, err := tx.ExecContext(ctx, del, args...); err != nil {
+		return false, err
 	}
 	for _, c := range chapters {
 		if _, err := tx.ExecContext(ctx,
-			"INSERT INTO chapter(book_item_id, file_id, position, title, start_ms, end_ms) VALUES (?,?,?,?,?,?)",
-			bookItemID, fileID, c.Position, c.Title, c.FileStartMS, c.FileEndMS); err != nil {
-			return err
+			"INSERT INTO chapter(book_item_id, file_id, position, title, start_ms, end_ms, source) VALUES (?,?,?,?,?,?,?)",
+			bookItemID, fileID, c.Position, c.Title, c.FileStartMS, c.FileEndMS, source); err != nil {
+			return false, err
 		}
 	}
-	return nil
+	return true, nil
+}
+
+// chaptersInSync reports whether the stored chapters already equal want (count,
+// order, title, offsets), all under source. scopeToSource compares only that
+// source's rows; otherwise it compares every row for the file and requires each to
+// carry source (so an all-source replace no-ops only when nothing at all differs).
+func chaptersInSync(ctx context.Context, tx *sql.Tx, bookItemID, fileID int64, source string, want []model.Chapter, scopeToSource bool) (bool, error) {
+	q := "SELECT position, title, start_ms, end_ms, source FROM chapter WHERE book_item_id = ? AND file_id = ?"
+	args := []any{bookItemID, fileID}
+	if scopeToSource {
+		q += " AND source = ?"
+		args = append(args, source)
+	}
+	q += " ORDER BY position"
+	rows, err := tx.QueryContext(ctx, q, args...)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	type have struct {
+		c   model.Chapter
+		src string
+	}
+	var stored []have
+	for rows.Next() {
+		var h have
+		if err := rows.Scan(&h.c.Position, &h.c.Title, &h.c.FileStartMS, &h.c.FileEndMS, &h.src); err != nil {
+			return false, err
+		}
+		stored = append(stored, h)
+	}
+	if err := rows.Err(); err != nil {
+		return false, err
+	}
+	if len(stored) != len(want) {
+		return false, nil
+	}
+	for i, w := range want {
+		h := stored[i]
+		if h.src != source || h.c.Position != w.Position || h.c.Title != w.Title ||
+			h.c.FileStartMS != w.FileStartMS || h.c.FileEndMS != w.FileEndMS {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 // syncBookSearchFTS rebuilds a book's metadata FTS row (rowid == item id). Title
@@ -683,23 +816,34 @@ func (s *Store) bookChapters(ctx context.Context, bookItemID int64, parts []book
 	// lets a part with no chapters still advance the cumulative book-timeline offset,
 	// and it avoids a per-part round trip on a heavily split book.
 	rows, err := s.read.QueryContext(ctx,
-		`SELECT file_id, title, start_ms, end_ms FROM chapter
+		`SELECT file_id, title, start_ms, end_ms, source FROM chapter
 		 WHERE book_item_id = ? ORDER BY position, start_ms`, bookItemID)
 	if err != nil {
 		return nil, 0, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
 	defer rows.Close()
-	byFile := map[int64][]model.Chapter{}
+	// Group per file AND per source; a file may briefly carry chapters from more than
+	// one source (e.g. the fast-path added .cue chapters beside embedded ones), so
+	// pick the single highest-precedence source per file: embedded beats cue.
+	bySource := map[int64]map[string][]model.Chapter{}
 	for rows.Next() {
 		var fid int64
+		var source string
 		var c model.Chapter
-		if err := rows.Scan(&fid, &c.Title, &c.FileStartMS, &c.FileEndMS); err != nil {
+		if err := rows.Scan(&fid, &c.Title, &c.FileStartMS, &c.FileEndMS, &source); err != nil {
 			return nil, 0, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
-		byFile[fid] = append(byFile[fid], c)
+		if bySource[fid] == nil {
+			bySource[fid] = map[string][]model.Chapter{}
+		}
+		bySource[fid][source] = append(bySource[fid][source], c)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, 0, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	byFile := make(map[int64][]model.Chapter, len(bySource))
+	for fid, srcs := range bySource {
+		byFile[fid] = preferredChapters(srcs)
 	}
 
 	var out []model.Chapter
@@ -726,7 +870,7 @@ func (s *Store) bookChapters(ctx context.Context, bookItemID int64, parts []book
 		// Advance the timeline by the part's EFFECTIVE duration: the larger of its
 		// file duration and its furthest chapter offset. This both keeps later parts
 		// from stacking when a file duration is unknown AND keeps the running total
-		// (cum) from falling short of any chapter span — so the reported total and the
+		// (cum) from falling short of any chapter span, so the reported total and the
 		// chapter timeline always agree (the same definition refreshBookDuration and
 		// db verify use).
 		eff := part.DurationMS

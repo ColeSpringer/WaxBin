@@ -131,6 +131,28 @@ func (s *Store) FieldProvenance(ctx context.Context, itemPID model.PID) ([]model
 	return out, rows.Err()
 }
 
+// LockedFields returns the set of an item's locked fields in one query, so a writer
+// checking several fields (organize tag write-back) does not issue one SELECT per
+// field. An item with no locks returns an empty (non-nil) map.
+func (s *Store) LockedFields(ctx context.Context, itemPID model.PID) (map[string]bool, error) {
+	rows, err := s.read.QueryContext(ctx, `SELECT fp.field
+		FROM field_provenance fp JOIN playable_item pi ON pi.id = fp.item_id
+		WHERE pi.pid = ? AND fp.locked = 1`, string(itemPID))
+	if err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeIO, "store.LockedFields", err)
+	}
+	defer rows.Close()
+	out := map[string]bool{}
+	for rows.Next() {
+		var field string
+		if err := rows.Scan(&field); err != nil {
+			return nil, waxerr.Wrap(waxerr.CodeIO, "store.LockedFields", err)
+		}
+		out[field] = true
+	}
+	return out, rows.Err()
+}
+
 // IsFieldLocked reports whether an item field is locked. It is the guard a writer
 // (organize tag write-back, enrichment) calls before overwriting a field, so
 // curated data survives. A missing row means unlocked.

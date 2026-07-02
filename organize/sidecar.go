@@ -8,6 +8,7 @@ import (
 
 	"github.com/colespringer/waxbin/internal/fsx"
 	"github.com/colespringer/waxbin/internal/pathx"
+	"github.com/colespringer/waxbin/model"
 )
 
 // sidecarExts are the per-track companion files moved and renamed alongside their
@@ -16,13 +17,7 @@ import (
 // track in the directory is never swept up as a sidecar.
 var sidecarExts = []string{
 	".lrc", ".cue", ".srt", ".vtt", ".nfo", ".opf", ".txt", ".json",
-	".jpg", ".jpeg", ".png", ".webp",
-}
-
-// dirArtNames are directory-level cover images carried (keeping their name) when
-// the audio leaves the directory.
-var dirArtNames = []string{
-	"cover.jpg", "cover.jpeg", "cover.png", "folder.jpg", "folder.png",
+	".jpg", ".jpeg", ".png", ".webp", ".avif", ".heic", ".heif",
 }
 
 // moveSidecars relocates the sidecars of one moved audio file. Same-basename
@@ -67,9 +62,27 @@ func SidecarMoves(srcAudio, dstAudio string) []SidecarMove {
 		}
 	}
 	// Directory art moves only when the audio actually changes directory; within
-	// the same directory it stays put for the other tracks.
+	// the same directory it stays put for the other tracks. Matching is
+	// case-insensitive (via the source dir listing) against the SAME shared cover-name
+	// registry the scanner uses, so a cover the scan recognized (including a
+	// mixed-case name on a case-sensitive filesystem) is carried, not stranded.
+	//
+	// Known limitation: when organize routes the tracks of one source directory into
+	// more than one destination directory, say a compilation split per track artist, the
+	// first track's move carries the single cover file and the later destinations get
+	// none. This is inherent to move (rather than copy) semantics at per-file
+	// granularity. Organize has no directory-level plan here to tell that a copy is
+	// wanted, and copying unconditionally would strand an orphan cover in every
+	// fully-relocated album's old directory, which is the common case. Re-running scan on
+	// the split destinations repopulates their covers from any embedded art; a shared
+	// external cover for a split album is the case that stays uncovered.
 	if !sameDir(srcDir, dstDir) {
-		for _, name := range dirArtNames {
+		byLower := dirFilesByLower(srcDir)
+		for _, cand := range model.CoverArtNames {
+			name, ok := byLower[cand]
+			if !ok {
+				continue
+			}
 			s := filepath.Join(srcDir, name)
 			if isRegularFile(s) {
 				moves = append(moves, SidecarMove{s, filepath.Join(dstDir, name)})
@@ -77,6 +90,22 @@ func SidecarMoves(srcAudio, dstAudio string) []SidecarMove {
 		}
 	}
 	return moves
+}
+
+// dirFilesByLower lists dir once and maps each regular file's lowercased name to its
+// actual name, for case-insensitive cover matching. Returns nil when unreadable.
+func dirFilesByLower(dir string) map[string]string {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	byLower := make(map[string]string, len(entries))
+	for _, e := range entries {
+		if !e.IsDir() {
+			byLower[strings.ToLower(e.Name())] = e.Name()
+		}
+	}
+	return byLower
 }
 
 var errSidecarExists = errors.New("sidecar destination exists")

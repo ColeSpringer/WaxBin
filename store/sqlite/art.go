@@ -1,60 +1,162 @@
 package sqlite
 
 import (
+	"container/list"
 	"context"
 	"database/sql"
 	"errors"
+	"sync"
 
 	"github.com/colespringer/waxbin/art"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/waxerr"
 )
 
+// thumbCacheMax bounds the in-process thumbnail cache by entry count. Generated
+// thumbnails are small (a few KB to tens of KB at typical box sizes), so a few
+// hundred entries is a modest, predictable memory footprint.
+const thumbCacheMax = 256
+
+// thumbCache is a bounded in-process LRU of generated thumbnails keyed by (source
+// hash, size). It sits in front of the thumb_cache table: it serves a read-only store,
+// which cannot persist to the table and would otherwise regenerate on every request,
+// and it saves a read-write store a SQL round-trip and re-decode for a hot cover. It
+// is safe for concurrent use.
+type thumbCache struct {
+	mu    sync.Mutex
+	max   int
+	ll    *list.List // front = most recently used; values are *thumbEntry
+	items map[thumbKey]*list.Element
+}
+
+type thumbKey struct {
+	hash string
+	size int
+}
+
+type thumbEntry struct {
+	key  thumbKey
+	blob model.ArtBlob // Bytes is treated as immutable once cached
+}
+
+func newThumbCache(max int) *thumbCache {
+	return &thumbCache{max: max, ll: list.New(), items: map[thumbKey]*list.Element{}}
+}
+
+// get returns a cached thumbnail blob and marks it most-recently-used. A nil cache
+// (defensive) is a permanent miss. The returned blob's Bytes is a private copy: the
+// cache shares no backing array with callers, so a caller that mutates the bytes
+// cannot corrupt the cached entry (or another caller's view of it).
+func (c *thumbCache) get(hash string, size int) (model.ArtBlob, bool) {
+	if c == nil {
+		return model.ArtBlob{}, false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if el, ok := c.items[thumbKey{hash, size}]; ok {
+		c.ll.MoveToFront(el)
+		return cloneArtBlob(el.Value.(*thumbEntry).blob), true
+	}
+	return model.ArtBlob{}, false
+}
+
+// cloneArtBlob returns a copy of b whose Bytes shares no backing array with the
+// original, so the cache and its callers cannot mutate each other's bytes.
+func cloneArtBlob(b model.ArtBlob) model.ArtBlob {
+	if b.Bytes != nil {
+		b.Bytes = append([]byte(nil), b.Bytes...)
+	}
+	return b
+}
+
+// put inserts or refreshes a thumbnail, evicting the least-recently-used entries
+// past the bound. It stores a private copy of the blob's bytes so a later mutation of
+// the caller's slice cannot reach the cache.
+func (c *thumbCache) put(hash string, size int, blob model.ArtBlob) {
+	if c == nil {
+		return
+	}
+	stored := cloneArtBlob(blob)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	key := thumbKey{hash, size}
+	if el, ok := c.items[key]; ok {
+		el.Value.(*thumbEntry).blob = stored
+		c.ll.MoveToFront(el)
+		return
+	}
+	c.items[key] = c.ll.PushFront(&thumbEntry{key: key, blob: stored})
+	for c.ll.Len() > c.max {
+		oldest := c.ll.Back()
+		if oldest == nil {
+			break
+		}
+		c.ll.Remove(oldest)
+		delete(c.items, oldest.Value.(*thumbEntry).key)
+	}
+}
+
 // attachArtTx maps a track/book item's cover onto the 'track' art slot (keyed by
 // the item id). It is the music/audiobook entry point; see attachEntityArtTx for
 // the shared body.
 func attachArtTx(ctx context.Context, tx *sql.Tx, itemID int64, img *model.ArtImage) error {
-	return attachEntityArtTx(ctx, tx, "track", itemID, img)
+	_, err := attachEntityArtTxChanged(ctx, tx, "track", itemID, img)
+	return err
 }
 
-// attachEntityArtTx dedups a front-cover image into the content-addressed art
+// attachArtTxChanged is attachArtTx but reports whether the mapping changed, for the
+// sidecar-update seam that emits a delta only on a real change.
+func attachArtTxChanged(ctx context.Context, tx *sql.Tx, itemID int64, img *model.ArtImage) (bool, error) {
+	return attachEntityArtTxChanged(ctx, tx, "track", itemID, img)
+}
+
+// attachEntityArtTx is the error-only wrapper over attachEntityArtTxChanged for the
+// callers that do not need the changed signal.
+func attachEntityArtTx(ctx context.Context, tx *sql.Tx, entityType string, entityID int64, img *model.ArtImage) error {
+	_, err := attachEntityArtTxChanged(ctx, tx, entityType, entityID, img)
+	return err
+}
+
+// attachEntityArtTxChanged dedups a front-cover image into the content-addressed art
 // store and maps it to one entity (entity_type, entity_id). It backs every cover
 // ingest: a track/book item ('track'), a podcast feed ('podcast'), and an episode
 // ('episode'). Album art is derived on read from current track maps, so a re-cover,
 // retag, or delete cannot leave a stale album mapping behind. The write is
-// idempotent: when the entity already maps this exact cover it does nothing, so it
-// can run on every scan/sync without churn. A nil/empty image is a no-op; a missing
-// read does not mean the art was removed.
-func attachEntityArtTx(ctx context.Context, tx *sql.Tx, entityType string, entityID int64, img *model.ArtImage) error {
+// idempotent: when the entity already maps this exact cover it does nothing (and
+// reports false), so it can run on every scan/sync without churn. A nil/empty image
+// is a no-op; a missing read does not mean the art was removed.
+func attachEntityArtTxChanged(ctx context.Context, tx *sql.Tx, entityType string, entityID int64, img *model.ArtImage) (bool, error) {
 	if img == nil || len(img.Data) == 0 || img.Hash == "" {
-		return nil
+		return false, nil
 	}
 	var curHash sql.NullString
 	if err := tx.QueryRowContext(ctx,
 		"SELECT source_hash FROM art_map WHERE entity_type = ? AND entity_id = ? AND role = 'front' LIMIT 1",
 		entityType, entityID).Scan(&curHash); err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return err
+		return false, err
 	}
 	if curHash.Valid && curHash.String == img.Hash {
-		return nil
+		return false, nil
 	}
 
 	if _, err := tx.ExecContext(ctx,
 		`INSERT OR IGNORE INTO art_source(hash, format, width, height, size, data, created_at)
 		 VALUES (?,?,?,?,?,?,?)`,
 		img.Hash, img.Format, img.Width, img.Height, len(img.Data), img.Data, nowNS()); err != nil {
-		return err
+		return false, err
 	}
 	// Re-point this entity's front cover; an entity has exactly one. When the old
 	// cover loses its last referencing map row it becomes an orphaned source for GCArt.
 	if _, err := tx.ExecContext(ctx,
 		"DELETE FROM art_map WHERE entity_type = ? AND entity_id = ?", entityType, entityID); err != nil {
-		return err
+		return false, err
 	}
-	_, err := tx.ExecContext(ctx,
+	if _, err := tx.ExecContext(ctx,
 		`INSERT OR IGNORE INTO art_map(entity_type, entity_id, source_hash, role, priority)
-		 VALUES (?, ?, ?, 'front', 0)`, entityType, entityID, img.Hash)
-	return err
+		 VALUES (?, ?, ?, 'front', 0)`, entityType, entityID, img.Hash); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // artLevel is one rung of the resolution fallback chain: an entity type and its
@@ -94,13 +196,18 @@ func (s *Store) ResolveArt(ctx context.Context, ref model.EntityRef, size int) (
 	}
 	blob := &model.ArtBlob{Bytes: srcData, Format: srcFormat, Width: srcW, Height: srcH, SourceHash: hash}
 
-	// Original requested, or a source already within the box (or undecodable, hence
-	// zero-sized): serve the source.
+	// Original requested, or a source already within the box: serve the source.
 	longest := srcW
 	if srcH > srcW {
 		longest = srcH
 	}
-	if size <= 0 || longest == 0 || longest <= size {
+	if size <= 0 || (longest > 0 && longest <= size) {
+		return blob, nil
+	}
+	// Dimensions unknown (an undecodable/exotic source): serve the original UNLESS an
+	// external helper can thumbnail this exotic format. That path decodes it, so it
+	// must not take the serve-original shortcut.
+	if longest == 0 && !exoticSupported(srcFormat) {
 		return blob, nil
 	}
 	return s.thumbnail(ctx, hash, srcData, srcFormat, srcW, srcH, size)
@@ -112,6 +219,14 @@ func (s *Store) ResolveArt(ctx context.Context, ref model.EntityRef, size int) (
 // loaded (no re-fetch).
 func (s *Store) thumbnail(ctx context.Context, hash string, srcData []byte, srcFormat string, srcW, srcH, size int) (*model.ArtBlob, error) {
 	const op = "store.ResolveArt"
+	// Check the in-process cache first. This serves a read-only store, which cannot
+	// persist to thumb_cache and would otherwise regenerate on every request, and it
+	// saves a read-write store the SQL round-trip and re-decode for a hot cover.
+	if blob, ok := s.thumbMem.get(hash, size); ok {
+		b := blob
+		return &b, nil
+	}
+
 	var data []byte
 	var format string
 	var w, h int
@@ -119,7 +234,10 @@ func (s *Store) thumbnail(ctx context.Context, hash string, srcData []byte, srcF
 		"SELECT data, format, width, height FROM thumb_cache WHERE source_hash = ? AND size = ?",
 		hash, size).Scan(&data, &format, &w, &h)
 	if err == nil {
-		return &model.ArtBlob{Bytes: data, Format: format, Width: w, Height: h, SourceHash: hash, Thumbnail: true}, nil
+		blob := model.ArtBlob{Bytes: data, Format: format, Width: w, Height: h, SourceHash: hash, Thumbnail: true}
+		s.thumbMem.put(hash, size, blob)
+		b := blob
+		return &b, nil
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
@@ -127,14 +245,27 @@ func (s *Store) thumbnail(ctx context.Context, hash string, srcData []byte, srcF
 
 	thumb, tFormat, tw, th, gerr := art.Thumbnail(srcData, size)
 	if gerr != nil {
-		// Undecodable source: serve the original unscaled rather than failing, reusing
-		// the bytes and metadata already in hand.
-		s.log.Warn("art thumbnail generation failed; serving original", "hash", hash, "size", size, "err", gerr)
-		return &model.ArtBlob{Bytes: srcData, Format: srcFormat, Width: srcW, Height: srcH, SourceHash: hash}, nil
+		// The pure-Go decoders cannot handle this source. If it is an exotic format an
+		// external helper supports (AVIF/HEIC), shell the helper once and cache the
+		// result; otherwise serve the original unscaled rather than failing.
+		if exoticSupported(srcFormat) {
+			if et, ef, ew, eh, eerr := s.exoticThumbnail(ctx, srcData, size); eerr == nil {
+				thumb, tFormat, tw, th = et, ef, ew, eh
+			} else {
+				s.log.Warn("exotic art thumbnail failed; serving original", "hash", hash, "size", size, "err", eerr)
+				return &model.ArtBlob{Bytes: srcData, Format: srcFormat, Width: srcW, Height: srcH, SourceHash: hash}, nil
+			}
+		} else {
+			s.log.Warn("art thumbnail generation failed; serving original", "hash", hash, "size", size, "err", gerr)
+			return &model.ArtBlob{Bytes: srcData, Format: srcFormat, Width: srcW, Height: srcH, SourceHash: hash}, nil
+		}
 	}
 
-	// Best-effort cache write: a read-only library still serves the generated
-	// thumbnail, just without persisting it.
+	blob := model.ArtBlob{Bytes: thumb, Format: tFormat, Width: tw, Height: th, SourceHash: hash, Thumbnail: true}
+	s.thumbMem.put(hash, size, blob)
+
+	// Best-effort cache write: a read-only library still serves the generated thumbnail
+	// from the in-process cache above, just without persisting it to disk.
 	if !s.readOnly {
 		if err := s.writeTx(ctx, func(tx *sql.Tx) error {
 			_, e := tx.ExecContext(ctx,
@@ -145,7 +276,8 @@ func (s *Store) thumbnail(ctx context.Context, hash string, srcData []byte, srcF
 			s.log.Warn("caching thumbnail", "hash", hash, "size", size, "err", err)
 		}
 	}
-	return &model.ArtBlob{Bytes: thumb, Format: tFormat, Width: tw, Height: th, SourceHash: hash, Thumbnail: true}, nil
+	b := blob
+	return &b, nil
 }
 
 // artSource loads a source image's bytes and metadata by hash.

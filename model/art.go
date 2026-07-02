@@ -1,5 +1,18 @@
 package model
 
+// CoverArtNames are the directory cover-image filenames WaxBin recognizes, in
+// priority order. It is the single registry shared by the scanner (which discovers
+// covers) and organize (which carries them with a relocated album), so the two
+// cannot drift. Matching is case-insensitive against the directory listing, so a
+// mixed-case name like "Cover.JPG" is recognized on a case-sensitive filesystem.
+var CoverArtNames = []string{
+	"cover.jpg", "cover.jpeg", "cover.png", "cover.webp",
+	"cover.avif", "cover.heic", "cover.heif",
+	"folder.jpg", "folder.jpeg", "folder.png",
+	"front.jpg", "front.jpeg", "front.png",
+	"album.jpg", "albumart.jpg",
+}
+
 // ArtEntity is one level of the art fallback chain. The resolver starts at the
 // requested level and walks up toward the root (track -> album -> release_group
 // -> artist -> genre for music; episode -> podcast for podcasts), returning the

@@ -152,6 +152,30 @@ func (s *Store) EpisodesByPodcast(ctx context.Context, podcastPID model.PID, lim
 }
 
 // EpisodeByPID returns one episode by public id, with HasTranscript set.
+// EpisodeChapters returns a downloaded episode's chapters in timeline order,
+// preferring the podcast:chapters JSON source over any embedded chapters. It reuses
+// the book chapter timeline over the episode's single backing file. An episode with
+// no downloaded file or no chapters returns an empty slice.
+func (s *Store) EpisodeChapters(ctx context.Context, pid model.PID) ([]model.Chapter, error) {
+	const op = "store.EpisodeChapters"
+	var itemID, fileID, dur int64
+	var fpid string
+	err := s.read.QueryRowContext(ctx, `SELECT pi.id, f.id, f.pid, COALESCE(f.duration_ms, 0)
+		FROM playable_item pi
+		JOIN item_file pf ON pf.item_id = pi.id AND pf.role = 'primary'
+		JOIN file f ON f.id = pf.file_id
+		WHERE pi.pid = ? AND pi.kind = 'episode'`, string(pid)).Scan(&itemID, &fileID, &fpid, &dur)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil // not downloaded (no primary file), so no chapters
+	}
+	if err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	part := bookPart{BookPart: model.BookPart{FilePID: model.PID(fpid), DurationMS: dur}, fileID: fileID}
+	chs, _, err := s.bookChapters(ctx, itemID, []bookPart{part})
+	return chs, err
+}
+
 func (s *Store) EpisodeByPID(ctx context.Context, pid model.PID) (*model.EpisodeDetail, error) {
 	const op = "store.EpisodeByPID"
 	e, hasTranscript, err := scanEpisode(s.read.QueryRowContext(ctx, episodeSelect+" WHERE pi.pid = ?", string(pid)))
@@ -161,7 +185,11 @@ func (s *Store) EpisodeByPID(ctx context.Context, pid model.PID) (*model.Episode
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
-	return &model.EpisodeDetail{Episode: e, HasTranscript: hasTranscript}, nil
+	chapters, err := s.EpisodeChapters(ctx, pid)
+	if err != nil {
+		return nil, err
+	}
+	return &model.EpisodeDetail{Episode: e, HasTranscript: hasTranscript, Chapters: chapters}, nil
 }
 
 // DownloadedEpisodes lists a podcast's currently-downloaded episodes eligible for

@@ -51,6 +51,8 @@ type Store struct {
 	owner    string
 	log      *slog.Logger
 
+	thumbMem *thumbCache // in-process cache of generated thumbnails (see art.go)
+
 	subMu sync.Mutex                     // guards subs
 	subs  map[chan model.Change]struct{} // in-process change_log listeners
 
@@ -83,7 +85,10 @@ func Open(ctx context.Context, opt OpenOptions) (*Store, error) {
 		log = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
 
-	s := &Store{path: opt.Path, readOnly: opt.ReadOnly, owner: opt.Owner, log: log}
+	s := &Store{
+		path: opt.Path, readOnly: opt.ReadOnly, owner: opt.Owner, log: log,
+		thumbMem: newThumbCache(thumbCacheMax),
+	}
 
 	if opt.ReadOnly {
 		if _, err := os.Stat(opt.Path); err != nil {

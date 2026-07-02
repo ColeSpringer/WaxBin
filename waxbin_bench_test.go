@@ -94,7 +94,7 @@ func BenchmarkAnalyze(b *testing.B) {
 		}
 		b.StartTimer()
 
-		if _, err := lib.Analyze(ctx); err != nil {
+		if _, err := lib.Analyze(ctx, waxbin.AnalyzeOptions{}); err != nil {
 			b.Fatal(err)
 		}
 

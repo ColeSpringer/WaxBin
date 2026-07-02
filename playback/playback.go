@@ -30,10 +30,11 @@ type Store interface {
 // Service buffers playback progress and delegates the rest of playback state to
 // the store.
 type Service struct {
-	store   Store
-	mu      sync.Mutex
-	pending map[progressKey]int64 // buffered resume positions awaiting a flush (mu)
-	flushMu sync.Mutex            // serializes the actual DB writes across flushes
+	store    Store
+	mu       sync.Mutex
+	pending  map[progressKey]int64 // buffered resume positions awaiting a flush (mu)
+	flushMu  sync.Mutex            // serializes the actual DB writes across flushes
+	importer PlayStateImporter     // external play-state import seam (no-op default)
 }
 
 type progressKey struct {
@@ -43,7 +44,7 @@ type progressKey struct {
 
 // New builds a playback service over a store.
 func New(store Store) *Service {
-	return &Service{store: store, pending: map[progressKey]int64{}}
+	return &Service{store: store, pending: map[progressKey]int64{}, importer: noopImporter{}}
 }
 
 // Progress buffers a resume position without writing it. Call it on every tick;

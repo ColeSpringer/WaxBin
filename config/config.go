@@ -81,6 +81,17 @@ type Config struct {
 	// destination volume (0 disables the check).
 	FreeSpaceReserveBytes int64 `json:"free_space_reserve_bytes,omitempty"`
 
+	// WriteReplayGainTags, when true, makes the analyze pass write computed
+	// ReplayGain (track + album) back into files on disk after album aggregation. Off
+	// by default: the catalog is always authoritative; this only mirrors it to tags
+	// for external players. Never writes a locked-format's audio (essence-verified).
+	WriteReplayGainTags bool `json:"write_replaygain_tags,omitempty"`
+	// StampItemPID, when true, makes organize's tag write-back also stamp the backing
+	// item's stable WaxBin PID into a WAXBIN_ITEM_PID tag on managed-root files, so a
+	// rebuild-from-tags can restore item identity. Off by default and managed-only;
+	// identity is never derived from the tag (it is essence-first, PID-as-hint).
+	StampItemPID bool `json:"stamp_item_pid,omitempty"`
+
 	// Podcasts configures the podcast engine: download directory and network policy.
 	Podcasts PodcastConfig `json:"podcasts,omitempty"`
 
