@@ -82,6 +82,9 @@ type Report struct {
 	Errored       int
 	SidecarsMoved int
 	Failures      []Failure
+	// Warnings records moves that succeeded but whose tag write-back did not fully
+	// land. They are not failures and do not affect the exit code.
+	Warnings []Warning
 }
 
 // Failure records one action that could not be applied.
@@ -90,6 +93,15 @@ type Failure struct {
 	Src     string
 	Dst     string
 	Err     string
+}
+
+// Warning records a non-fatal condition from an action that otherwise succeeded:
+// a tag value the destination format could not store as asked. The file moved and
+// the catalog is correct; the on-disk tag simply does not hold the planned value.
+type Warning struct {
+	FilePID model.PID
+	Path    string
+	Message string
 }
 
 // TagWriter applies tag edits to a file on disk and returns its new state. It is
@@ -283,7 +295,7 @@ func (o *Organizer) Execute(ctx context.Context, plan *Plan, jobPID model.PID, h
 			rep.Skipped++
 			continue
 		}
-		if err := o.apply(ctx, plan, a, jobPID); err != nil {
+		if err := o.apply(ctx, plan, a, jobPID, rep); err != nil {
 			rep.Errored++
 			rep.Failures = append(rep.Failures, Failure{FilePID: a.FilePID, Src: a.Src, Dst: a.Dst, Err: err.Error()})
 			o.log.Warn("organize action failed", "src", a.Src, "dst", a.Dst, "err", err)
@@ -308,7 +320,7 @@ func (o *Organizer) Execute(ctx context.Context, plan *Plan, jobPID model.PID, h
 // plus a paired file-state update recording the re-tag's new hash/mtime. If the
 // move fails, it marks the journal row 'rolled_back' (and records the re-tag at the
 // un-moved source so the catalog reflects the bytes on disk).
-func (o *Organizer) apply(ctx context.Context, plan *Plan, a *Action, jobPID model.PID) error {
+func (o *Organizer) apply(ctx context.Context, plan *Plan, a *Action, jobPID model.PID, rep *Report) error {
 	in := model.RelocateInput{
 		FilePID:        a.FilePID,
 		JobPID:         jobPID,
@@ -356,14 +368,74 @@ func (o *Organizer) apply(ctx context.Context, plan *Plan, a *Action, jobPID mod
 	// CommitMove updated only the path; record the re-tag's new size/mtime/hash and
 	// stamp organize provenance for the fields we wrote.
 	o.recordRetag(ctx, a.FilePID, prevSize, prevMtime, retag)
+	// Collected before the Changed gate. A write whose only effect was a value the
+	// format could not store leaves the bytes unchanged, so it reports Changed=false
+	// while being the case most worth surfacing.
+	lost := o.noteUnrepresented(ctx, a, retag, rep)
 	if retag != nil && retag.Changed {
 		for _, tf := range a.TagFields {
+			if lost[tf.Key] {
+				// The value did not land, so stamping organize provenance would name
+				// organize as the source of a value the file does not hold. That source is
+				// read by `waxbin provenance <pid>`, and skipping the stamp keeps the
+				// display truthful. It gates nothing else, since enrichment never reads
+				// source and never writes these fields.
+				continue
+			}
 			if err := o.cat.SetFieldProvenance(ctx, a.ItemPID, tf.Field, model.SourceOrganize, tf.Value, false); err != nil {
 				o.log.Warn("organize provenance stamp", "item", a.ItemPID, "field", tf.Field, "err", err)
 			}
 		}
 	}
 	return nil
+}
+
+// noteUnrepresented appends a report warning for every tag value the write-back
+// reported as not landing, and returns the set of affected on-disk tag keys so the
+// caller can withhold their provenance stamp.
+//
+// It records a warning even when the warning matches no TagField. WAXBIN_ITEM_PID is
+// not a TagField and a keyless warning matches nothing, so filtering to the planned
+// fields would let a dropped PID stamp fail in silence, and rebuild-by-PID depends on
+// that stamp. The writer carries benign warnings through, but they gate nothing here.
+func (o *Organizer) noteUnrepresented(ctx context.Context, a *Action, retag *meta.WriteResult, rep *Report) map[string]bool {
+	var lost map[string]bool
+	var diags []model.FileDiagnostic
+	// retag is nil when the profile writes no tags. That is a reason to reach the
+	// replace below with an empty set, not a reason to skip it.
+	if retag != nil {
+		for _, w := range retag.Warnings {
+			if !w.Unrepresented {
+				continue
+			}
+			if w.Key != "" {
+				if lost == nil {
+					lost = make(map[string]bool, len(retag.Warnings))
+				}
+				lost[w.Key] = true
+			}
+			// The file has moved by now, so report where it actually lives: that is the
+			// path the user would act on.
+			rep.Warnings = append(rep.Warnings, Warning{FilePID: a.FilePID, Path: a.Dst, Message: w.Message})
+			o.log.Warn("organize tag value unrepresented", "path", a.Dst, "key", w.Key, "warning", w.Message)
+			diags = append(diags, model.FileDiagnostic{
+				Code: model.DiagTagWriteLost, Severity: model.SeverityWarn,
+				TagKey: w.Key, Detail: w.Message,
+			})
+		}
+	}
+	// Called on every applied action, including one that wrote no tags. This writer
+	// replaces its own rows wholesale, so an organize that finds nothing has to clear
+	// what a prior organize left. Skipping the call when the profile has tag-write
+	// turned off would strand a tag_write_lost finding that describes a write no longer
+	// being attempted. A replace with nothing to do costs a read, not a transaction.
+	//
+	// Keyed by FilePID rather than path, since the file has just moved and
+	// file_diagnostic is keyed by file_id, which follows the move on its own.
+	if err := o.cat.PutFileDiagnostics(ctx, a.FilePID, model.OriginOrganize, diags); err != nil {
+		o.log.Warn("organize diagnostics", "file", a.FilePID, "err", err)
+	}
+	return lost
 }
 
 // buildEdits assembles the on-disk tag edits for an action: the planned metadata

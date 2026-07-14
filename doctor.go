@@ -27,6 +27,16 @@ const podcastSchemaVersion = 19
 // table; doctor skips the enrichment coverage on an older, un-migrated catalog.
 const enrichmentSchemaVersion = 20
 
+// diagnosticsSchemaVersion is the migration that introduced file_diagnostic and
+// file.diag_version; doctor skips the diagnostic counts on an older catalog so it
+// degrades to zero rather than failing with a no-such-table error.
+//
+// The store guards these reads too (the audit reaches them through a port that
+// carries no schema knowledge), so this gate is the local early-out that matches the
+// per-feature convention above rather than the only thing standing between an
+// un-migrated catalog and a no-such-table error.
+const diagnosticsSchemaVersion = sqlite.SchemaVersionFileDiagnostics
+
 // DoctorReport summarizes catalog health and detected capabilities.
 type DoctorReport struct {
 	DBPath string
@@ -46,6 +56,12 @@ type DoctorReport struct {
 	// Enrichment coverage: entities looked up, and how many a provider matched.
 	EnrichedEntities int
 	EnrichedMatched  int
+
+	// Diagnostic coverage: how many persisted file diagnostics exist, and how many
+	// audio files have not had diagnostics derived under the current rule set. A
+	// non-zero DiagnosticsStale is why "no diagnostics" must not be read as "clean".
+	DiagnosticCount  int
+	DiagnosticsStale int
 	// EnrichmentEnabled reports whether a MusicBrainz contact is configured.
 	EnrichmentEnabled bool
 
@@ -140,6 +156,21 @@ func (l *Library) Doctor(ctx context.Context) (*DoctorReport, error) {
 		}
 		rep.EnrichedEntities = cov.Artists + cov.ReleaseGroups + cov.Books
 		rep.EnrichedMatched = cov.Matched
+	}
+
+	// file_diagnostic and file.diag_version only exist from v25 on; skip on older
+	// catalogs so an un-upgraded one reports zero instead of erroring.
+	if version >= diagnosticsSchemaVersion {
+		n, err := l.store.CountFileDiagnostics(ctx)
+		if err != nil {
+			return nil, err
+		}
+		rep.DiagnosticCount = n
+		stale, _, err := l.store.DiagnosticCoverage(ctx)
+		if err != nil {
+			return nil, err
+		}
+		rep.DiagnosticsStale = stale
 	}
 
 	// The lockfile is read without taking the lock, so even a read-only doctor

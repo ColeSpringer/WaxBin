@@ -69,7 +69,7 @@ func TestSidecarLyricsPrecedence(t *testing.T) {
 	}
 
 	embedded := &model.Lyrics{Source: "embedded", Unsynced: "embedded block", Synced: []model.SyncedLine{{TimeMS: 99, Text: "old"}}}
-	got, _ := scanSidecars(audio, embedded, newArtCache())
+	got, _, _ := scanSidecars(audio, embedded, newArtCache())
 	if got.Source != "lrc" {
 		t.Fatalf("source = %q, want lrc (sidecar is authoritative)", got.Source)
 	}
@@ -87,11 +87,11 @@ func TestSidecarLyricsFallbackToEmbedded(t *testing.T) {
 	dir := t.TempDir()
 	audio := filepath.Join(dir, "song.flac") // no .lrc next to it
 	embedded := &model.Lyrics{Source: "embedded", Unsynced: "just text"}
-	if got, _ := scanSidecars(audio, embedded, newArtCache()); got != embedded {
+	if got, _, _ := scanSidecars(audio, embedded, newArtCache()); got != embedded {
 		t.Errorf("with no sidecar, expected the embedded lyrics unchanged, got %+v", got)
 	}
 	// And no lyrics at all stays nil.
-	if got, _ := scanSidecars(audio, nil, newArtCache()); got != nil {
+	if got, _, _ := scanSidecars(audio, nil, newArtCache()); got != nil {
 		t.Errorf("with no sidecar and no embedded, expected nil, got %+v", got)
 	}
 }
@@ -198,7 +198,7 @@ func TestScanSidecarsRecordsUndecodableCoverObs(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "cover.jpg"), []byte("not really a jpeg"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	_, aux := scanSidecars(audio, nil, newArtCache())
+	_, aux, _ := scanSidecars(audio, nil, newArtCache())
 	var cover *model.AuxObservation
 	for i := range aux {
 		if aux[i].Kind == model.AuxCover {
@@ -226,7 +226,7 @@ func TestScanCueSidecarReadableButEmpty(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "book.cue"), []byte("REM just a comment\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	chapters, obs, ok := scanCueSidecar(audio)
+	chapters, obs, _, ok := scanCueSidecar(audio)
 	if !ok {
 		t.Fatal("scanCueSidecar reported not-readable for a readable .cue; its observation must be recorded so the fast-path does not re-parse it forever")
 	}
@@ -237,7 +237,7 @@ func TestScanCueSidecarReadableButEmpty(t *testing.T) {
 		t.Errorf("obs = %+v, want a populated AuxCue observation", obs)
 	}
 	// A truly-missing .cue still reports not-readable.
-	if _, _, ok := scanCueSidecar(filepath.Join(dir, "missing.m4b")); ok {
+	if _, _, _, ok := scanCueSidecar(filepath.Join(dir, "missing.m4b")); ok {
 		t.Error("scanCueSidecar should report ok=false when there is no .cue")
 	}
 }

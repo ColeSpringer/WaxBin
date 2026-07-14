@@ -429,19 +429,26 @@ func toDerivedView(r *sqlite.DerivedReport) derivedView {
 }
 
 type analyzeView struct {
-	Analyzed              int    `json:"analyzed"`
-	LoudnessMeasured      int    `json:"loudnessMeasured"`
-	ReplayGainTagsWritten int    `json:"replayGainTagsWritten,omitempty"`
-	Skipped               int    `json:"skipped"`
-	Errored               int    `json:"errored"`
-	JobPID                string `json:"jobPid,omitempty"`
+	Analyzed         int `json:"analyzed"`
+	LoudnessMeasured int `json:"loudnessMeasured"`
+	// The three rg-tag counters are omitempty as a set: a write-back pass that was
+	// never asked for reports none of them, while a pass that ran reports whichever
+	// are non-zero.
+	ReplayGainTagsWritten       int    `json:"replayGainTagsWritten,omitempty"`
+	ReplayGainTagsFailed        int    `json:"replayGainTagsFailed,omitempty"`
+	ReplayGainTagsUnrepresented int    `json:"replayGainTagsUnrepresented,omitempty"`
+	Skipped                     int    `json:"skipped"`
+	Errored                     int    `json:"errored"`
+	JobPID                      string `json:"jobPid,omitempty"`
 }
 
 func toAnalyzeView(r *waxbin.AnalyzeResult) analyzeView {
 	return analyzeView{
 		Analyzed: r.Result.Analyzed, LoudnessMeasured: r.Result.LoudnessMeasured,
-		ReplayGainTagsWritten: r.Result.ReplayGainTagsWritten,
-		Skipped:               r.Result.Skipped, Errored: r.Result.Errored, JobPID: string(r.JobPID),
+		ReplayGainTagsWritten:       r.Result.ReplayGainTagsWritten,
+		ReplayGainTagsFailed:        r.Result.ReplayGainTagsFailed,
+		ReplayGainTagsUnrepresented: r.Result.ReplayGainTagsUnrepresented,
+		Skipped:                     r.Result.Skipped, Errored: r.Result.Errored, JobPID: string(r.JobPID),
 	}
 }
 

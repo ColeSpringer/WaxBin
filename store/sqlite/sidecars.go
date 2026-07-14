@@ -38,12 +38,19 @@ func (s *Store) UpdateItemSidecars(ctx context.Context, in model.SidecarUpdate) 
 			haveFile = true
 		}
 
+		// A nil Lyrics leaves the stored lyrics alone; this seam never clears them.
+		//
+		// The scan fast path no longer supplies Lyrics: a changed .lrc routes to the full
+		// path so its diagnostics are re-derived there, so today only .cue chapters reach
+		// this seam. The lyrics handling stays because SidecarUpdate.Lyrics is part of the
+		// Catalog port's contract and is covered by its own store test (as CoverArt has
+		// been all along), but no production caller exercises it right now.
 		if in.Lyrics != nil {
 			ly := in.Lyrics
-			// A fast-path .lrc update carries only synced lines (it never re-reads the
-			// audio), so preserve the stored unsynchronized block, which came from the
-			// file's embedded USLT on the last full scan, rather than clobbering it to
-			// NULL. The full path already merges embedded unsynced with .lrc synced.
+			// A caller supplying only synced lines has not read the audio, so preserve the
+			// stored unsynchronized block, which came from the file's embedded USLT on the
+			// last full scan, rather than clobbering it to NULL. The full scan path already
+			// merges embedded unsynced with .lrc synced before it writes.
 			if len(ly.Synced) > 0 && ly.Unsynced == "" {
 				if stored, err := currentUnsynced(ctx, tx, itemID); err != nil {
 					return waxerr.Wrap(waxerr.CodeIO, op, err)

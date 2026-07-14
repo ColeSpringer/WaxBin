@@ -30,6 +30,14 @@ type FileMeta struct {
 	// rebuild-only hint for restoring the backing item's original PID; identity stays
 	// essence-first (the tag is copyable), so the store adopts it only when unambiguous.
 	ItemPIDHint string
+	// Diagnostics are observations about the file worth persisting (an unsupported
+	// container, truncated audio, a legacy-only tag fallback). They are born here,
+	// like Lyrics, rather than in the scanner from an os.Stat like an AuxObservation,
+	// so they share only the model-input-to-store leg of the route with those.
+	//
+	// FilePID and DisplayPath are left unset: the reader is given a path, not a
+	// catalog identity. The store fills them.
+	Diagnostics []model.FileDiagnostic
 }
 
 // Reader reads tags, properties, and the essence hash from a file. It must never

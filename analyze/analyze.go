@@ -85,6 +85,14 @@ type Result struct {
 	// ReplayGainTagsWritten counts files whose computed ReplayGain was written back
 	// to disk (only when the write-back toggle is on; the facade fills this).
 	ReplayGainTagsWritten int
+	// ReplayGainTagsFailed counts files whose write-back errored (a read-only file, a
+	// vanished path). It is not fatal, since the measurement is in the catalog either
+	// way, but a run where every write failed must not read as one with nothing to write.
+	ReplayGainTagsFailed int
+	// ReplayGainTagsUnrepresented counts files where the write succeeded but a gain
+	// value did not land as asked (the format could not store it). Such a write can
+	// report as a no-op, so it is counted separately from a failure.
+	ReplayGainTagsUnrepresented int
 }
 
 // Heartbeat reports progress; it may be nil.

@@ -18,6 +18,11 @@ const (
 	CheckDerivedData       AuditCheck = "derived_data"
 	CheckIntegrity         AuditCheck = "integrity"
 	CheckCorruptAudio      AuditCheck = "corrupt_audio"
+	// CheckFileDiagnostic reports the diagnostics the scan and tag writers persisted
+	// (unsupported containers, legacy-only tag fallbacks, partial lyrics, lost tag
+	// writes). Corrupt-audio diagnostics belong to CheckCorruptAudio instead, so that
+	// one concept keeps one --check name.
+	CheckFileDiagnostic AuditCheck = "file_diagnostic"
 )
 
 // AuditChecks returns every known audit check, for validation and help text.
@@ -26,7 +31,7 @@ func AuditChecks() []AuditCheck {
 		CheckDuplicateArtist, CheckDuplicateGenre, CheckDuplicateAlbum, CheckSplitAlbum,
 		CheckInconsistentMeta, CheckMissingArt, CheckMissingReplayGain, CheckBadFilename,
 		CheckOrphanSidecar, CheckPathConflict, CheckInvalidFeed, CheckDerivedData,
-		CheckIntegrity, CheckCorruptAudio,
+		CheckIntegrity, CheckCorruptAudio, CheckFileDiagnostic,
 	}
 }
 

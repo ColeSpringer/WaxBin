@@ -70,6 +70,12 @@ func BuildMP3WithAudio(title, artist, album string, track int, audio []byte) []b
 	return out
 }
 
+// TXXXFrame is one ID3v2 user-defined text frame. WaxLabel canonicalizes a TXXX
+// description to a tag key, so this is how a fixture sets a key with no dedicated
+// ID3 frame (NARRATOR, MEDIATYPE, SOURCE_URL). The description is normalized on
+// read but the value is not, which is what makes an untrimmed value testable.
+type TXXXFrame struct{ Desc, Value string }
+
 // MP3Spec describes the tags to stamp into a richer fixture for exercising the
 // full music model (composer, genre, disc, year, compilation). Zero-valued
 // fields are omitted so the resulting file carries only the frames a test sets.
@@ -78,7 +84,8 @@ type MP3Spec struct {
 	Genre, Composer                   string
 	Track, Disc, Year                 int
 	Compilation                       bool
-	Audio                             []byte // nil uses DefaultAudio
+	TXXX                              []TXXXFrame // user-defined frames, in order
+	Audio                             []byte      // nil uses DefaultAudio
 }
 
 // BuildMP3FromSpec builds an ID3v2.3-tagged MP3 from spec over valid MPEG frames.
@@ -111,6 +118,9 @@ func BuildMP3FromSpec(s MP3Spec) []byte {
 	if s.Compilation {
 		add("TCMP", "1") // iTunes compilation flag
 	}
+	for _, x := range s.TXXX {
+		frames = append(frames, id3v23TXXXFrame(x.Desc, x.Value)...)
+	}
 
 	size := len(frames)
 	out := []byte{'I', 'D', '3', 3, 0, 0,
@@ -129,4 +139,43 @@ func id3v23TextFrame(id, text string) []byte {
 		byte(size>>24), byte(size>>16), byte(size>>8), byte(size),
 		0, 0) // flags
 	return append(frame, body...)
+}
+
+// id3v23TXXXFrame builds a user-defined text frame: encoding byte, then a
+// NUL-terminated description followed by the value.
+func id3v23TXXXFrame(desc, value string) []byte {
+	body := []byte{0x03} // 0x03 == UTF-8
+	body = append(body, []byte(desc)...)
+	body = append(body, 0x00)
+	body = append(body, []byte(value)...)
+	size := len(body)
+	frame := append([]byte("TXXX"),
+		byte(size>>24), byte(size>>16), byte(size>>8), byte(size),
+		0, 0) // flags
+	return append(frame, body...)
+}
+
+// id3v1Field renders s into an ID3v1 fixed-width slot, truncating to n bytes and
+// NUL-padding. The silent truncation is inherent to the format and is why WaxBin
+// ranks ID3v1 last among legacy containers.
+func id3v1Field(s string, n int) []byte {
+	b := make([]byte, n)
+	copy(b, s)
+	return b
+}
+
+// AppendID3v1 appends a 128-byte ID3v1 trailer to an MP3 payload. Pass a bare
+// audio payload (DefaultAudio) to build the ID3v1-only file that has no
+// authoritative tag set at all, which is the case where every canonical value has to
+// come from the legacy container.
+func AppendID3v1(mp3 []byte, title, artist, album string) []byte {
+	out := append([]byte(nil), mp3...)
+	out = append(out, 'T', 'A', 'G')
+	out = append(out, id3v1Field(title, 30)...)
+	out = append(out, id3v1Field(artist, 30)...)
+	out = append(out, id3v1Field(album, 30)...)
+	out = append(out, id3v1Field("", 4)...)  // year
+	out = append(out, id3v1Field("", 30)...) // comment
+	out = append(out, 0xFF)                  // genre: 0xFF == unset
+	return out
 }

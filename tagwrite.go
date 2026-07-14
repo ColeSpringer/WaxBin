@@ -18,28 +18,63 @@ import (
 // update records the new size/mtime/hash only if a concurrent scan/move has not
 // touched the file (else it is skipped and the next scan reconciles). Because a tag
 // edit preserves audio essence, the item's identity is unchanged and the scanner's
-// fast-path recognizes WaxBin's own write instead of re-hashing it. Returns how many
-// files were written.
-func (l *Library) writeReplayGainTags(ctx context.Context) (int, error) {
+// fast-path recognizes WaxBin's own write instead of re-hashing it.
+//
+// It returns per-file counts rather than a bare written total: a write-back failure
+// is non-fatal (the measurement is in the catalog either way), but a run where every
+// write failed must not be indistinguishable from a run with nothing to write.
+func (l *Library) writeReplayGainTags(ctx context.Context) (rgWriteCounts, error) {
+	var c rgWriteCounts
 	rows, err := l.store.ReplayGainWriteback(ctx)
 	if err != nil {
-		return 0, err
+		return c, err
 	}
 	w := meta.NewWriter()
-	written := 0
 	for _, r := range rows {
 		if ctx.Err() != nil {
-			return written, ctx.Err()
+			return c, ctx.Err()
 		}
 		edits := replayGainEdits(r)
 		res, err := w.Apply(ctx, string(r.Path), edits)
 		if err != nil {
 			l.log.Warn("replaygain tag write", "path", string(r.Path), "err", err)
+			c.failed++
 			continue
+		}
+		// Recorded before the Changed gate: a value the format could not store leaves
+		// the bytes unchanged, so it reports as a no-op while being precisely the case
+		// the caller needs to hear about. This is also why the diagnostics go through
+		// their own entry point, since a no-op never reaches UpdateFileStateIfUnchanged.
+		var diags []model.FileDiagnostic
+		lost := false
+		for _, wn := range res.Warnings {
+			if wn.Unrepresented {
+				l.log.Warn("replaygain tag unrepresented", "path", string(r.Path), "key", wn.Key, "warning", wn.Message)
+				lost = true
+				diags = append(diags, model.FileDiagnostic{
+					Code: model.DiagTagWriteLost, Severity: model.SeverityWarn,
+					TagKey: wn.Key, Detail: wn.Message,
+				})
+			}
+		}
+		// Once per FILE, not once per warning, so it means the same thing as the written
+		// and failed counters it is printed beside. A warning is fanned out one entry per
+		// key, and a single file's edit sets up to four keys (track/album gain and peak),
+		// so counting warnings would report one bad file as four.
+		if lost {
+			c.unrepresented++
+		}
+		// Always called, even with no diagnostics: this writer replaces its own rows
+		// wholesale, so a run that comes back clean clears its own stale ones.
+		if err := l.store.PutFileDiagnostics(ctx, r.FilePID, model.OriginReplayGain, diags); err != nil {
+			l.log.Warn("replaygain diagnostics", "path", string(r.Path), "err", err)
 		}
 		if !res.Changed {
 			continue
 		}
+		// The tags are on disk from here on, so this file is written no matter what the
+		// catalog bookkeeping below does.
+		c.written++
 		if _, err := l.store.UpdateFileStateIfUnchanged(ctx, model.FileStateUpdate{
 			FilePID:         r.FilePID,
 			ExpectedSize:    r.Size,
@@ -48,12 +83,21 @@ func (l *Library) writeReplayGainTags(ctx context.Context) (int, error) {
 			NewMTimeNS:      res.MTimeNS,
 			NewContentHash:  res.ContentHash,
 		}); err != nil {
+			// This is not a write failure. The tags landed; only the file row's
+			// size/mtime/hash did not follow. Counting it under failed would tell the user
+			// their write failed when it succeeded. The stale row heals itself, since the
+			// next scan sees the changed bytes and re-hashes.
 			l.log.Warn("replaygain file-state update", "path", string(r.Path), "err", err)
-			continue
 		}
-		written++
 	}
-	return written, nil
+	return c, nil
+}
+
+// rgWriteCounts tallies one ReplayGain write-back pass.
+type rgWriteCounts struct {
+	written       int
+	failed        int
+	unrepresented int
 }
 
 // replayGainEdits builds the format-aware ReplayGain tag edits for one file. Opus

@@ -25,6 +25,9 @@ type fakeStore struct {
 	files      []model.AuditFileInfo
 	pods       []*model.Podcast
 	drift      model.DerivedDrift
+	diags      []model.FileDiagnostic
+	diagStale  int
+	diagTotal  int
 }
 
 func (f *fakeStore) DuplicateArtists(context.Context) ([]model.DuplicateSet, error) {
@@ -52,6 +55,12 @@ func (f *fakeStore) CountItemsMissingReplayGain(context.Context) (int, error) {
 func (f *fakeStore) AuditFiles(context.Context) ([]model.AuditFileInfo, error) { return f.files, nil }
 func (f *fakeStore) Podcasts(context.Context) ([]*model.Podcast, error)        { return f.pods, nil }
 func (f *fakeStore) DerivedDrift(context.Context) (model.DerivedDrift, error)  { return f.drift, nil }
+func (f *fakeStore) FileDiagnostics(context.Context) ([]model.FileDiagnostic, error) {
+	return f.diags, nil
+}
+func (f *fakeStore) DiagnosticCoverage(context.Context) (int, int, error) {
+	return f.diagStale, f.diagTotal, nil
+}
 
 func findingsFor(rep *Report, check model.AuditCheck) []model.AuditFinding {
 	var out []model.AuditFinding

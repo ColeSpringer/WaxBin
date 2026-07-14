@@ -143,3 +143,91 @@ func waitFor(t *testing.T, timeout time.Duration, cond func() bool) {
 		}
 	}
 }
+
+// TestSidecarEditReportsChanged is the watch-mode regression guard for every route a
+// .lrc change can take. No pre-existing test referenced SidecarsUpdated, so nothing
+// else catches this.
+//
+// The failure it guards is silent: a .lrc edit changes no audio bytes, so
+// ContentChanged is false and ItemCreated is false. Without ScanItemResult
+// .SidecarsChanged feeding the full path's counter switch, every counter stays zero,
+// the scan reports changed=false, and watch mode's downstream schedulers (analyze,
+// enrich, source sync) simply stop firing on sidecar edits, with no error anywhere.
+func TestSidecarEditReportsChanged(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	lib := openManaged(t, ctx, db, root)
+
+	audio := filepath.Join(root, "a.mp3")
+	if err := os.WriteFile(audio, testaudio.BuildMP3("A", "Band", "One", 1), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	lrc := filepath.Join(root, "a.lrc")
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("initial scan: %v", err)
+	}
+
+	writeLRC := func(body string) {
+		t.Helper()
+		if err := os.WriteFile(lrc, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Each destructive case starts from a known-good, already-ingested .lrc, so the
+	// step under test is the only thing the catalog has left to change. (Chaining two
+	// destructive steps would make the second a real no-op, since the lyrics would
+	// already be gone, leaving the assertion vacuous.)
+	restoreGood := func() {
+		t.Helper()
+		writeLRC("[00:00.00]hi\n[00:01.00]there\n")
+		if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Each step edits only the .lrc; the audio bytes never change.
+	steps := []struct {
+		name  string
+		setup func()
+		mut   func()
+	}{
+		{"added", nil, func() { writeLRC("[00:00.00]hi\n[00:01.00]there\n") }},
+		{"edited", nil, func() { writeLRC("[00:00.00]hi\n[00:02.50]changed\n[00:04.00]more\n") }},
+		// The two holes that already existed before the .lrc routing change: both
+		// already reached the full path and already reported changed=false.
+		{"edited to nothing usable", restoreGood, func() { writeLRC("just plain text, no timestamps\n") }},
+		{"vanished", restoreGood, func() {
+			if err := os.Remove(lrc); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	}
+	for _, s := range steps {
+		t.Run(s.name, func(t *testing.T) {
+			if s.setup != nil {
+				s.setup()
+			}
+			s.mut()
+			res, err := lib.Scan(ctx, waxbin.ScanRequest{})
+			if err != nil {
+				t.Fatalf("scan: %v", err)
+			}
+			tot := res.Total
+			if tot.SidecarsUpdated != 1 {
+				t.Errorf("SidecarsUpdated = %d, want 1", tot.SidecarsUpdated)
+			}
+			if tot.ItemsUpdated != 0 || tot.ItemsCreated != 0 {
+				t.Errorf("ItemsUpdated=%d ItemsCreated=%d, want 0/0: the audio bytes did not change",
+					tot.ItemsUpdated, tot.ItemsCreated)
+			}
+			// Exactly the expression watch mode's Rescan uses to decide whether to run
+			// the downstream schedulers.
+			changed := tot.ItemsCreated > 0 || tot.ItemsUpdated > 0 || tot.Relinked > 0 ||
+				tot.Missing > 0 || tot.SidecarsUpdated > 0
+			if !changed {
+				t.Error("scan reports changed=false for a sidecar edit; watch mode's downstream schedulers would be silently skipped")
+			}
+		})
+	}
+}

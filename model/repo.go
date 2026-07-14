@@ -32,6 +32,13 @@ type PutScannedTrackInput struct {
 	// (essence-first, PID-as-hint); on any conflict the store mints a fresh PID. It is
 	// ignored on a normal scan, where the store owns PID assignment.
 	PreferredItemPID PID
+	// Acquisition is origin provenance from the file's own tags. The store records it
+	// only when the item has no acquisition row yet, so an event-recorded origin (a
+	// podcast download) is never clobbered by a re-derived tag.
+	Acquisition TagAcquisition
+	// Diagnostics are this file's scan-origin observations. The store replaces the
+	// scan's whole set, so a file that comes back clean clears its own stale rows.
+	Diagnostics []FileDiagnostic
 }
 
 // TagWaxbinItemPID is the custom tag key that carries a backing item's stable WaxBin
@@ -73,6 +80,15 @@ type PutScannedBookInput struct {
 	// conflict falls back to a fresh PID. Parts of one book share the same stamp, so
 	// whichever part first creates the item adopts it and the rest join by book key.
 	PreferredItemPID PID
+	// Acquisition is origin provenance from this file's own tags (see
+	// PutScannedTrackInput.Acquisition). acquisition is item-level while tags are
+	// file-level, so for a multi-file book the first part scanned supplies the row and
+	// later parts leave it alone.
+	Acquisition TagAcquisition
+	// Diagnostics are this part's scan-origin observations (see
+	// PutScannedTrackInput.Diagnostics). They are per-FILE, so each part carries its
+	// own rather than the book carrying a merged set.
+	Diagnostics []FileDiagnostic
 }
 
 // ScanItemResult reports what the store did for a PutScannedTrack call, enough
@@ -84,6 +100,14 @@ type ScanItemResult struct {
 	FileCreated    bool // a new file row was created
 	Relinked       bool // an existing file (matched by essence) moved to a new path
 	ContentChanged bool // content_hash changed; if essence is stable this is a tag-only update
+	// SidecarsChanged reports that the write changed the item's lyrics or cover art
+	// without changing the audio bytes.
+	//
+	// It exists because ContentChanged cannot stand in for it: a .lrc or cover edit
+	// does not touch the audio, so a sidecar-only change routed through the full path
+	// would otherwise report every counter zero, and the scan would report
+	// changed=false, silently skipping watch mode's downstream schedulers.
+	SidecarsChanged bool
 }
 
 // ItemFileRef is one backing file of an item, in reading order. organize uses it
@@ -240,6 +264,12 @@ type Catalog interface {
 	// concurrency), so an on-disk tag write can record its own result without
 	// clobbering a concurrent scan/move. Returns whether the row was updated.
 	UpdateFileStateIfUnchanged(ctx context.Context, in FileStateUpdate) (bool, error)
+	// PutFileDiagnostics replaces one writer's diagnostics for a file. Each writer
+	// owns its own origin's rows, so writers never clear each other's findings and a
+	// clean re-run clears the writer's own stale rows. It is keyed by FilePID because
+	// a path-keyed call would be order-sensitive against organize's retag-then-move
+	// window, while file_diagnostic is keyed by file_id and follows a move for free.
+	PutFileDiagnostics(ctx context.Context, filePID PID, origin DiagnosticOrigin, ds []FileDiagnostic) error
 
 	// IsFieldLocked reports whether a metadata field is locked, so a writer (organize
 	// tag write-back, enrichment) skips it and curated data survives.

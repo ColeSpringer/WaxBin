@@ -81,12 +81,17 @@ func emitReport(cmd *cobra.Command, g *globals, plan *organize.Plan, rep *organi
 			Errored       int                `json:"errored"`
 			SidecarsMoved int                `json:"sidecarsMoved"`
 			Failures      []organize.Failure `json:"failures,omitempty"`
-		}{plan.Profile, rep.Moved, rep.Skipped, rep.Errored, rep.SidecarsMoved, rep.Failures})
+			Warnings      []organize.Warning `json:"warnings,omitempty"`
+		}{plan.Profile, rep.Moved, rep.Skipped, rep.Errored, rep.SidecarsMoved, rep.Failures, rep.Warnings})
 	}
 	fmt.Fprintf(out(cmd), "Organized (profile %s): moved %d, skipped %d, errored %d, sidecars %d\n",
 		plan.Profile, rep.Moved, rep.Skipped, rep.Errored, rep.SidecarsMoved)
 	for _, f := range rep.Failures {
 		fmt.Fprintf(out(cmd), "  FAIL %s -> %s: %s\n", f.Src, f.Dst, f.Err)
+	}
+	// A warning is not a failure: the move succeeded, so the exit code is unchanged.
+	for _, w := range rep.Warnings {
+		fmt.Fprintf(out(cmd), "  WARN %s: %s\n", w.Path, w.Message)
 	}
 	return nil
 }

@@ -7,6 +7,7 @@ package scan
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 	"log/slog"
 	"os"
@@ -359,7 +360,29 @@ func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, p
 	}
 
 	cover := resolveCover(path, fm.CoverArt, sc.cache)
-	lyrics, aux := scanSidecars(path, fm.Lyrics, sc.cache)
+	lyrics, aux, sidecarDiags := scanSidecars(path, fm.Lyrics, sc.cache)
+
+	// The reader's own observations (unsupported container, legacy-tag fallback,
+	// corrupt audio) plus the sidecar scan's. The store replaces this scan's whole set
+	// for the file, so one that comes back clean clears its own stale rows.
+	diags := append(fm.Diagnostics, sidecarDiags...)
+
+	// A sibling .cue is examined for both kinds when the file carries no embedded
+	// chapters, though only a book applies its chapters.
+	//
+	// The observation has to be recorded either way. The fast path stat-compares only
+	// the sidecars it holds an observation for, so a track with a .cue that yields no
+	// chapters would read as new on every scan, route to the full path, and re-hash
+	// the audio each time. It is the same trap the directory-cover stat fallback
+	// already avoids.
+	var cueChapters []model.Chapter
+	if len(tags.Chapters) == 0 {
+		if ch, cueObs, cueDiags, ok := scanCueSidecar(path); ok {
+			aux = append(aux, cueObs)
+			diags = append(diags, cueDiags...)
+			cueChapters = ch
+		}
+	}
 
 	// An audiobook takes the book path: it groups by book identity (so a multi-file
 	// book collapses its parts into one item) and carries contributors and chapters.
@@ -376,20 +399,14 @@ func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, p
 	if isBook {
 		bin := bookInput(lib.ID, file, tags, essenceHash, cover)
 		// With no embedded chapters, a sibling .cue fills them (marked source='cue' so
-		// embedded chapters still win). Record its observation whenever the .cue is
-		// readable, even when it parses to no chapters, so the fast-path can stat-compare
-		// it instead of forcing a full reprocess every scan. Apply chapters only when the
-		// .cue actually yielded some.
-		if len(tags.Chapters) == 0 {
-			if cueChapters, cueObs, ok := scanCueSidecar(path); ok {
-				aux = append(aux, cueObs)
-				if len(cueChapters) > 0 {
-					bin.Chapters, bin.ChapterSource = cueChapters, "cue"
-				}
-			}
+		// embedded chapters still win). Its observation was recorded above whether or not
+		// it yielded any; apply the chapters only when it did.
+		if len(cueChapters) > 0 {
+			bin.Chapters, bin.ChapterSource = cueChapters, "cue"
 		}
 		bin.AuxObservations = aux
 		bin.PreferredItemPID = adoptedPID(sc, fm)
+		bin.Diagnostics = diags
 		out, err = s.cat.PutScannedBook(ctx, bin)
 	} else {
 		out, err = s.cat.PutScannedTrack(ctx, model.PutScannedTrackInput{
@@ -407,6 +424,8 @@ func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, p
 			CoverArt:         cover,
 			AuxObservations:  aux,
 			PreferredItemPID: adoptedPID(sc, fm),
+			Acquisition:      tags.Acquisition,
+			Diagnostics:      diags,
 		})
 	}
 	if err != nil {
@@ -419,6 +438,14 @@ func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, p
 		res.ItemsCreated++
 	case out.ContentChanged:
 		res.ItemsUpdated++
+	case out.SidecarsChanged:
+		// A sidecar-only change (an edited .lrc, a new cover) reaches the full path but
+		// changes no audio bytes, so ItemCreated and ContentChanged are both false.
+		// Without this case every counter stays zero, the scan reports changed=false, and
+		// watch mode's downstream schedulers are silently skipped. It also keeps
+		// SidecarsUpdated meaning what its doc says instead of quietly becoming
+		// fast-path-only.
+		res.SidecarsUpdated++
 	}
 	if out.Relinked {
 		res.Relinked++
@@ -498,6 +525,7 @@ func bookInput(libraryID int64, file model.File, tags model.Tags, essenceHash st
 		Chapters:      chapters,
 		ChapterSource: chapterSource,
 		CoverArt:      cover,
+		Acquisition:   tags.Acquisition,
 	}
 }
 
@@ -578,24 +606,49 @@ func trackFromTags(tags model.Tags) model.Track {
 // and carries timed lines; it supersedes the file's embedded lyrics but keeps the
 // embedded unsynchronized block when the sidecar has only synced lines. With no
 // usable sidecar, the embedded lyrics stand.
-func scanSidecars(audioPath string, embedded *model.Lyrics, cache *artCache) (*model.Lyrics, []model.AuxObservation) {
+//
+// It also returns any diagnostics the sidecars warrant (a partly-timed .lrc).
+func scanSidecars(audioPath string, embedded *model.Lyrics, cache *artCache) (*model.Lyrics, []model.AuxObservation, []model.FileDiagnostic) {
 	lyrics := embedded
 	var aux []model.AuxObservation
+	var diags []model.FileDiagnostic
 
+	// Stat before reading. The stat bounds the read (maxSidecarBytes) and supplies the
+	// observation, so an oversized or vanished .lrc is never pulled into memory.
 	lrcPath := strings.TrimSuffix(audioPath, filepath.Ext(audioPath)) + ".lrc"
-	if data, err := os.ReadFile(lrcPath); err == nil {
-		if synced := meta.ParseLRC(string(data)); len(synced) > 0 {
-			ly := &model.Lyrics{Source: "lrc", Synced: synced}
-			if embedded != nil {
-				ly.Unsynced = embedded.Unsynced
-			}
-			lyrics = ly
-		}
-		if info, err := os.Stat(lrcPath); err == nil {
-			aux = append(aux, model.AuxObservation{
-				Kind: model.AuxLyrics, Path: []byte(lrcPath),
-				Size: info.Size(), MTimeNS: info.ModTime().UnixNano(), Hash: art.Hash(data),
+	if info, serr := os.Stat(lrcPath); serr == nil {
+		switch {
+		case info.Size() > maxSidecarBytes:
+			// Skipped, but not in silence: record the skip so it is visible, and a
+			// stat-only observation so the fast path does not route here every scan. The
+			// embedded lyrics stand, which is the truthful result, since the sidecar that
+			// would have superseded them was never read.
+			diags = append(diags, model.FileDiagnostic{
+				Code: model.DiagSidecarSkipped, Severity: model.SeverityWarn,
+				Detail: sidecarSkippedDetail(model.AuxLyrics, info.Size()),
 			})
+			aux = append(aux, statOnlyObs(model.AuxLyrics, lrcPath, info))
+		default:
+			if data, err := os.ReadFile(lrcPath); err == nil {
+				synced, dropped := meta.ParseLRC(string(data))
+				if len(synced) > 0 {
+					ly := &model.Lyrics{Source: "lrc", Synced: synced}
+					if embedded != nil {
+						ly.Unsynced = embedded.Unsynced
+					}
+					lyrics = ly
+				}
+				if meta.LRCPartial(synced, dropped) {
+					diags = append(diags, model.FileDiagnostic{
+						Code: model.DiagLyricsPartial, Severity: model.SeverityWarn,
+						Detail: lrcPartialDetail(synced, dropped),
+					})
+				}
+				aux = append(aux, model.AuxObservation{
+					Kind: model.AuxLyrics, Path: []byte(lrcPath),
+					Size: info.Size(), MTimeNS: info.ModTime().UnixNano(), Hash: art.Hash(data),
+				})
+			}
 		}
 	}
 	// Record the directory cover observation so the fast-path can stat-compare it next
@@ -610,7 +663,58 @@ func scanSidecars(audioPath string, embedded *model.Lyrics, cache *artCache) (*m
 	} else if obs := cache.dirCoverStat(dir); obs != nil {
 		aux = append(aux, *obs)
 	}
-	return lyrics, aux
+	return lyrics, aux, diags
+}
+
+// maxSidecarBytes bounds a sidecar read. A .lrc/.cue is a few KiB of text, so a file
+// orders of magnitude larger is corrupt or hostile and should not be pulled whole
+// into memory during a scan. It guards memory, and is not a limit on content.
+//
+// The bound belongs on the read rather than the parse. WaxBin pulls the whole sidecar
+// in with os.ReadFile before any parser sees it, so a parser-side line cap never
+// protected anything.
+const maxSidecarBytes = 8 << 20
+
+// statOnlyObs builds a sidecar observation from a stat alone, with no content hash,
+// for a file that is on disk but was not read.
+//
+// Recording one is what keeps a skip from repeating. The fast path stat-compares
+// against the stored observation, so without it an oversized sidecar reads as newly
+// appeared on every scan, routes to the full path, and re-hashes the audio each time.
+// With it, the size and mtime match and the scan short-circuits, while a user who
+// shrinks the file changes its size and has it picked up normally. It mirrors the
+// stat-only fallback the directory cover uses for an image it cannot decode, for the
+// same reason.
+func statOnlyObs(kind, path string, info os.FileInfo) model.AuxObservation {
+	return model.AuxObservation{
+		Kind: kind, Path: []byte(path),
+		Size: info.Size(), MTimeNS: info.ModTime().UnixNano(),
+	}
+}
+
+// sidecarSkippedDetail explains a skipped sidecar in terms the user can act on: its
+// size against the bound that rejected it.
+func sidecarSkippedDetail(kind string, size int64) string {
+	return fmt.Sprintf("%s sidecar is %d bytes, past the %d-byte read limit; not applied",
+		kind, size, int64(maxSidecarBytes))
+}
+
+// lrcPartialDetail summarizes a partly-timed .lrc as a count plus the first offending
+// line. It leaves the dropped list unserialized: the message needs to stay bounded
+// and actionable, and a mostly-untimed file would otherwise carry thousands of
+// numbers.
+//
+// It reports the dropped count and the timed count separately rather than as "N of M
+// lines", because the two do not share a denominator. Dropped counts input lines,
+// while one input line carrying several leading timestamps yields a timed entry per
+// tag, so adding them would state a line total the file does not have.
+func lrcPartialDetail(lines []model.SyncedLine, dropped []int) string {
+	first := 0
+	if len(dropped) > 0 {
+		first = dropped[0]
+	}
+	return fmt.Sprintf("%d line(s) had no usable timestamp (first at line %d); %d timed lyric(s) parsed",
+		len(dropped), first, len(lines))
 }
 
 // scanCueSidecar reads a sibling .cue for an audio file, parsing it into chapters and
@@ -622,17 +726,34 @@ func scanSidecars(audioPath string, embedded *model.Lyrics, cache *artCache) (*m
 // treating a chapterless .cue as new on every scan and forcing a full reprocess.
 // WaxBin keeps the .cue on disk as an uncatalogued sidecar (it is already in
 // organize's set); only the parsed chapters land in the catalog.
-func scanCueSidecar(audioPath string) ([]model.Chapter, model.AuxObservation, bool) {
+// An oversized .cue yields no chapters but still reports readable, with a stat-only
+// observation and a skip diagnostic: the caller records the observation (so the
+// fast path stops re-routing here) and applies no chapters, while the diagnostic
+// keeps the skip from being invisible.
+func scanCueSidecar(audioPath string) ([]model.Chapter, model.AuxObservation, []model.FileDiagnostic, bool) {
 	cuePath := strings.TrimSuffix(audioPath, filepath.Ext(audioPath)) + ".cue"
+	// Stat before reading, so the same memory guard the .lrc read and the fast path
+	// apply also covers the .cue.
+	info, serr := os.Stat(cuePath)
+	if serr != nil {
+		return nil, model.AuxObservation{}, nil, false
+	}
+	if info.Size() > maxSidecarBytes {
+		diags := []model.FileDiagnostic{{
+			Code: model.DiagSidecarSkipped, Severity: model.SeverityWarn,
+			Detail: sidecarSkippedDetail(model.AuxCue, info.Size()),
+		}}
+		return nil, statOnlyObs(model.AuxCue, cuePath, info), diags, true
+	}
 	data, err := os.ReadFile(cuePath)
 	if err != nil {
-		return nil, model.AuxObservation{}, false
+		return nil, model.AuxObservation{}, nil, false
 	}
-	obs := model.AuxObservation{Kind: model.AuxCue, Path: []byte(cuePath), Hash: art.Hash(data)}
-	if info, err := os.Stat(cuePath); err == nil {
-		obs.Size, obs.MTimeNS = info.Size(), info.ModTime().UnixNano()
+	obs := model.AuxObservation{
+		Kind: model.AuxCue, Path: []byte(cuePath), Hash: art.Hash(data),
+		Size: info.Size(), MTimeNS: info.ModTime().UnixNano(),
 	}
-	return meta.ParseCue(string(data)), obs, true
+	return meta.ParseCue(string(data)), obs, nil, true
 }
 
 // reconcileFastPathSidecars re-checks an unchanged audio file's sidecars in one pass.
@@ -657,27 +778,34 @@ func (s *Scanner) reconcileFastPathSidecars(ctx context.Context, path string, kn
 	upd := model.SidecarUpdate{ItemPID: known.ItemPID, FilePID: known.FilePID}
 	dirty := false
 
-	// .lrc, authoritative when it yields synced lines; a vanish or an unusable edit
-	// (no synced lines) must revert to embedded, which needs the audio (full path).
+	// Any .lrc change routes to the full path, whatever the change is.
+	//
+	// That matters most in the repair direction. Re-deriving the lyrics_partial
+	// diagnostic is full-path work, since the store replaces the scan's whole
+	// diagnostic set there. Routing only a break would cover half the story: a .lrc
+	// edited from partial back to clean would take the fast path, UpdateItemSidecars
+	// would run, and the now-false lyrics_partial row would survive indefinitely,
+	// which is the staleness the diagnostics design exists to prevent.
+	//
+	// The cost is bounded. The .lrc just changed, so one re-parse is cheap, and the
+	// stat comparison short-circuits every later scan before touching the file again.
+	// An oversized .lrc routes here too, once: the full path records its skip and a
+	// stat-only observation, and that observation makes the next scan's size and mtime
+	// comparison match.
+	//
+	// The check stats without reading. This branch needs no content, and reading here
+	// would mean reading and hashing the file twice, since the full path reads it too.
 	lrcPath := strings.TrimSuffix(path, filepath.Ext(path)) + ".lrc"
-	switch state, data, obs := checkSidecarFile(lrcPath, model.AuxLyrics, stored); state {
-	case sidecarVanished:
+	switch statSidecar(lrcPath, model.AuxLyrics, stored) {
+	case sidecarVanished, sidecarChanged, sidecarOversized:
 		return true
-	case sidecarChanged:
-		synced := meta.ParseLRC(string(data))
-		if len(synced) == 0 {
-			return true // edited to nothing usable, so revert to embedded via the full path
-		}
-		upd.Lyrics = &model.Lyrics{Source: "lrc", Synced: synced}
-		upd.Observations = append(upd.Observations, obs)
-		dirty = true
 	}
 
 	// .cue, a book's chapters when it yields any; a vanish or empty cue reverts to
 	// embedded/synthetic (full path). The store applies chapters only to a book item.
 	cuePath := strings.TrimSuffix(path, filepath.Ext(path)) + ".cue"
 	switch state, data, obs := checkSidecarFile(cuePath, model.AuxCue, stored); state {
-	case sidecarVanished:
+	case sidecarVanished, sidecarOversized:
 		return true
 	case sidecarChanged:
 		chapters := meta.ParseCue(string(data))
@@ -709,22 +837,29 @@ const (
 	sidecarChanged                       // present but changed/new; data + obs are returned
 	sidecarVanished                      // was observed before but is now gone from disk
 	sidecarAbsent                        // never observed and not present now
+	// sidecarOversized: present, new or changed, and past maxSidecarBytes, so it went
+	// unread. It is kept apart from sidecarUnchanged so the caller routes it to the
+	// full path once, where the skip picks up its stat-only observation and its
+	// diagnostic. An already-observed oversized file that has not moved never reaches
+	// this state, because the size and mtime match wins first, and that is what keeps
+	// the file from routing to the full path on every later scan.
+	sidecarOversized
 )
 
 // checkSidecarFile stat-compares a sidecar against its stored observation, reading it
 // only when it changed. It is the shared core of the per-extension fast-path checks
 // (one stat per sidecar; no read when unchanged).
 func checkSidecarFile(sidecarPath, kind string, stored map[string]model.AuxObservation) (sidecarState, []byte, model.AuxObservation) {
-	prev, had := stored[kind]
+	state := statSidecar(sidecarPath, kind, stored)
+	if state != sidecarChanged {
+		// Only sidecarChanged has data to return. The oversized case builds no
+		// observation here; the full path it routes to records that one, so building a
+		// second for the caller to discard would be waste.
+		return state, nil, model.AuxObservation{}
+	}
 	info, err := os.Stat(sidecarPath)
 	if err != nil {
-		if had {
-			return sidecarVanished, nil, model.AuxObservation{}
-		}
-		return sidecarAbsent, nil, model.AuxObservation{}
-	}
-	if had && prev.Size == info.Size() && prev.MTimeNS == info.ModTime().UnixNano() {
-		return sidecarUnchanged, nil, model.AuxObservation{}
+		return sidecarVanished, nil, model.AuxObservation{}
 	}
 	data, rerr := os.ReadFile(sidecarPath)
 	if rerr != nil {
@@ -736,6 +871,33 @@ func checkSidecarFile(sidecarPath, kind string, stored map[string]model.AuxObser
 		Size: info.Size(), MTimeNS: info.ModTime().UnixNano(), Hash: art.Hash(data),
 	}
 	return sidecarChanged, data, obs
+}
+
+// statSidecar stat-compares a sidecar against its stored observation without reading
+// it. It is the shared core of the fast-path checks, and the whole answer for a
+// caller that needs only to know whether the sidecar changed. Reading and hashing a
+// file whose contents the caller discards is wasted work, and the .lrc caller would
+// do exactly that: any change routes it to the full path, which reads the file again.
+func statSidecar(sidecarPath, kind string, stored map[string]model.AuxObservation) sidecarState {
+	prev, had := stored[kind]
+	info, err := os.Stat(sidecarPath)
+	if err != nil {
+		if had {
+			return sidecarVanished
+		}
+		return sidecarAbsent
+	}
+	if had && prev.Size == info.Size() && prev.MTimeNS == info.ModTime().UnixNano() {
+		return sidecarUnchanged
+	}
+	// The stat is already in hand, so bounding the read is free here. Reported as its
+	// own state rather than folded into unchanged: the full path is where the skip is
+	// recorded and surfaced, and a silently-ignored sidecar is the failure this whole
+	// diagnostic vocabulary exists to prevent.
+	if info.Size() > maxSidecarBytes {
+		return sidecarOversized
+	}
+	return sidecarChanged
 }
 
 // coverChangedFast reports whether the directory cover changed relative to the stored

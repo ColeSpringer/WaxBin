@@ -38,6 +38,15 @@ func newAnalyzeCmd(g *globals) *cobra.Command {
 			if res.Result.ReplayGainTagsWritten > 0 {
 				fmt.Fprintf(w, "rg tags:    %d written to disk\n", res.Result.ReplayGainTagsWritten)
 			}
+			// Printed whenever non-zero, independent of the written count: a pass where
+			// every write failed writes nothing, and must not look like a pass with
+			// nothing to write.
+			if res.Result.ReplayGainTagsFailed > 0 {
+				fmt.Fprintf(w, "rg tags:    %d failed to write\n", res.Result.ReplayGainTagsFailed)
+			}
+			if res.Result.ReplayGainTagsUnrepresented > 0 {
+				fmt.Fprintf(w, "rg tags:    %d files with a value the format could not store\n", res.Result.ReplayGainTagsUnrepresented)
+			}
 			fmt.Fprintf(w, "skipped:    %d (no decoder for codec)\n", res.Result.Skipped)
 			fmt.Fprintf(w, "errored:    %d\n", res.Result.Errored)
 			fmt.Fprintf(w, "job:        %s\n", res.JobPID)

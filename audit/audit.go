@@ -31,6 +31,13 @@ type Store interface {
 	AuditFiles(ctx context.Context) ([]model.AuditFileInfo, error)
 	Podcasts(ctx context.Context) ([]*model.Podcast, error)
 	DerivedDrift(ctx context.Context) (model.DerivedDrift, error)
+	// FileDiagnostics returns the diagnostics the scan and the tag writers persisted.
+	// It is on the port (rather than audit reaching for waxlabel itself) for the same
+	// reason AudioProbe is: the audit stays free of the tag library.
+	FileDiagnostics(ctx context.Context) ([]model.FileDiagnostic, error)
+	// DiagnosticCoverage reports how many audio files have not had diagnostics
+	// derived under the current rule set, and the total.
+	DiagnosticCoverage(ctx context.Context) (stale, total int, err error)
 }
 
 // Hasher recomputes a file's content hash for the integrity (bitrot) check.
@@ -154,9 +161,30 @@ func (a *Auditor) Run(ctx context.Context, cfg Config) (*Report, error) {
 		}
 	}
 
+	// Both diagnostic-backed checks read the same persisted set, so fetch it once.
+	// corruptSeen carries corrupt_audio's cheap half into its probe half, so a file
+	// both halves flag reports once rather than twice.
+	var corruptSeen map[string]bool
+	runDiag, runCorrupt := a.runs(cfg, model.CheckFileDiagnostic), a.runs(cfg, model.CheckCorruptAudio)
+	if runDiag || runCorrupt {
+		ds, err := a.store.FileDiagnostics(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if runDiag {
+			a.reportFileDiagnostics(ds, sample, add)
+			if err := a.reportDiagnosticCoverage(ctx, add); err != nil {
+				return nil, err
+			}
+		}
+		if runCorrupt {
+			corruptSeen = a.reportCorruptDiagnostics(ds, sample, add)
+		}
+	}
+
 	// The filesystem-facing checks all iterate the file list, so fetch it once.
 	if a.needsFiles(cfg) {
-		if err := a.checkFiles(ctx, cfg, sample, rep, add); err != nil {
+		if err := a.checkFiles(ctx, cfg, sample, rep, add, corruptSeen); err != nil {
 			return nil, err
 		}
 	}
@@ -177,7 +205,12 @@ func (a *Auditor) runs(cfg Config, c model.AuditCheck) bool {
 	}
 	// With no explicit selection, run everything except the heavy file-read checks,
 	// which only run when Integrity is requested.
-	if c == model.CheckIntegrity || c == model.CheckCorruptAudio {
+	//
+	// CheckCorruptAudio is not gated here, unlike CheckIntegrity, because it has two
+	// halves. The cheap half reads the corrupt-audio diagnostics the scan already
+	// derived, which is one indexed query, so it defaults on and that free visibility is
+	// the point. The heavy decode-probe half is gated on cfg.Integrity inside the check.
+	if c == model.CheckIntegrity {
 		return cfg.Integrity
 	}
 	return true
@@ -189,7 +222,10 @@ func (a *Auditor) needsFiles(cfg Config) bool {
 		a.runs(cfg, model.CheckOrphanSidecar) ||
 		a.runs(cfg, model.CheckPathConflict) ||
 		(a.runs(cfg, model.CheckIntegrity) && a.hash != nil) ||
-		(a.runs(cfg, model.CheckCorruptAudio) && a.probe != nil)
+		// The corrupt-audio probe keys off cfg.Integrity directly rather than runs(),
+		// which is now unconditionally true for this check: only the probe half reads
+		// files, and the diagnostic half is a single indexed query.
+		(a.runs(cfg, model.CheckCorruptAudio) && cfg.Integrity && a.probe != nil)
 }
 
 // checkDuplicates turns duplicate sets into merge-candidate findings, deduping

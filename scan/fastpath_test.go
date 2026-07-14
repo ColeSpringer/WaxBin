@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -136,14 +137,19 @@ func TestFastPathForce(t *testing.T) {
 }
 
 // TestFastPathPicksUpLyricSidecar confirms an added .lrc over unchanged audio is
-// ingested (and emits a delta) without re-parsing the audio.
+// ingested and emits a delta.
+//
+// A changed .lrc routes to the full path on purpose. Re-deriving its lyrics_partial
+// diagnostic is full-path work, and routing only a break there would strand a stale
+// diagnostic once the .lrc was repaired. The price is one re-parse of a file whose
+// sidecar just changed, and it stops there: the stat gate short-circuits the next
+// scan, which this test pins below.
 func TestFastPathPicksUpLyricSidecar(t *testing.T) {
 	st, lib, sc, cr, root := fastPathFixture(t)
 	a := filepath.Join(root, "a.mp3")
 	writeMP3(t, a, "A", 1)
-	r1 := scanAll(t, sc, lib, false)
+	scanAll(t, sc, lib, false)
 	itemPID := currentItemPID(t, st, "A")
-	_ = r1
 
 	// Add a .lrc beside the audio; the audio bytes are untouched.
 	if err := os.WriteFile(filepath.Join(root, "a.lrc"), []byte("[00:00.00]hi\n[00:01.00]there\n"), 0o644); err != nil {
@@ -152,27 +158,45 @@ func TestFastPathPicksUpLyricSidecar(t *testing.T) {
 	seqBefore, _ := st.LatestChangeSeq(context.Background())
 	readsBefore := cr.reads
 	r2 := scanAll(t, sc, lib, false)
-	if cr.reads != readsBefore {
-		t.Errorf("lyric-sidecar rescan parsed %d audio files, want 0", cr.reads-readsBefore)
+	if cr.reads-readsBefore != 1 {
+		t.Errorf("lyric-sidecar rescan parsed %d audio files, want 1 (the changed .lrc routes to the full path)",
+			cr.reads-readsBefore)
 	}
-	if r2.Unchanged != 1 {
-		t.Errorf("lyric-sidecar rescan Unchanged = %d, want 1", r2.Unchanged)
+	// The counter that keeps watch mode alive: the audio did not change, so neither
+	// ItemsCreated nor ItemsUpdated moves, and only SidecarsUpdated makes the scan
+	// report changed=true.
+	if r2.SidecarsUpdated != 1 {
+		t.Errorf("SidecarsUpdated = %d, want 1: a sidecar-only change must report as a change",
+			r2.SidecarsUpdated)
+	}
+	if r2.ItemsUpdated != 0 {
+		t.Errorf("ItemsUpdated = %d, want 0: the audio bytes did not change", r2.ItemsUpdated)
 	}
 	ly, err := st.LyricsByItem(context.Background(), itemPID)
 	if err != nil || len(ly.Synced) != 2 {
-		t.Fatalf("lyrics not ingested on fast-path: %v %+v", err, ly)
+		t.Fatalf("lyrics not ingested: %v %+v", err, ly)
 	}
 	seqAfter, _ := st.LatestChangeSeq(context.Background())
 	if seqAfter <= seqBefore {
 		t.Error("lyric-sidecar change emitted no change_log delta")
 	}
 
-	// A third scan with no change stays silent (no delta) and re-parses nothing.
+	// A third scan with no change stays silent and re-parses nothing. The stat gate
+	// short-circuits before the .lrc is read, which is what keeps routing every .lrc
+	// change to the full path from becoming a permanent per-scan cost.
 	seqBefore2, _ := st.LatestChangeSeq(context.Background())
-	scanAll(t, sc, lib, false)
+	readsBefore2 := cr.reads
+	r3 := scanAll(t, sc, lib, false)
 	seqAfter2, _ := st.LatestChangeSeq(context.Background())
 	if seqAfter2 != seqBefore2 {
 		t.Error("no-op rescan emitted a change_log delta")
+	}
+	if cr.reads != readsBefore2 {
+		t.Errorf("no-op rescan re-parsed %d audio files, want 0: the stat gate must short-circuit",
+			cr.reads-readsBefore2)
+	}
+	if r3.Unchanged != 1 {
+		t.Errorf("no-op rescan Unchanged = %d, want 1", r3.Unchanged)
 	}
 }
 
@@ -507,4 +531,224 @@ func itemStateByPID(t *testing.T, st *sqlite.Store, pid model.PID) string {
 		t.Fatalf("item by pid %s: %v", pid, err)
 	}
 	return string(v.State)
+}
+
+// TestLyricsPartialDiagnosticClearsOnRepair is the repair direction, and the reason a
+// changed .lrc routes to the full path UNCONDITIONALLY.
+//
+// Routing only a break to the full path handles only half the story. Trace the
+// repair: a .lrc fixed from partial back to clean would take the fast path,
+// UpdateItemSidecars would run, PutScannedTrack would never run, the scan-origin
+// diagnostic replace would never run, and the stale lyrics_partial row would live
+// on, which is the staleness the diagnostics design exists to prevent.
+func TestLyricsPartialDiagnosticClearsOnRepair(t *testing.T) {
+	st, lib, sc, _, root := fastPathFixture(t)
+	a := filepath.Join(root, "a.mp3")
+	writeMP3(t, a, "A", 1)
+	scanAll(t, sc, lib, false)
+
+	lrc := filepath.Join(root, "a.lrc")
+	partial := func() []model.FileDiagnostic {
+		t.Helper()
+		ds, err := st.FileDiagnostics(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out []model.FileDiagnostic
+		for _, d := range ds {
+			if d.Code == model.DiagLyricsPartial {
+				out = append(out, d)
+			}
+		}
+		return out
+	}
+
+	// Break it: one good line, one bad timestamp, one untimed line.
+	if err := os.WriteFile(lrc, []byte("[00:00.00]good\n[bogus]bad\nuntimed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	scanAll(t, sc, lib, false)
+	got := partial()
+	if len(got) != 1 {
+		t.Fatalf("lyrics_partial diagnostics = %d, want 1: %+v", len(got), got)
+	}
+	if got[0].Severity != model.SeverityWarn {
+		t.Errorf("severity = %q, want warn", got[0].Severity)
+	}
+	// The detail is a bounded summary, never the serialized dropped list.
+	if !strings.Contains(got[0].Detail, "first at line 2") {
+		t.Errorf("detail = %q, want a count plus the first offending line", got[0].Detail)
+	}
+
+	// Repair it. The diagnostic must go.
+	if err := os.WriteFile(lrc, []byte("[00:00.00]good\n[00:01.00]also good\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	scanAll(t, sc, lib, false)
+	if got := partial(); len(got) != 0 {
+		t.Fatalf("stale lyrics_partial survived the repair: %+v", got)
+	}
+}
+
+// TestOversizedSidecarSkipped verifies the read is bounded. WaxBin pulls a sidecar
+// whole into memory before any parser sees it, so the bound must be on the read, not
+// the parse, since a parser-side line cap never protected anything.
+func TestOversizedSidecarSkipped(t *testing.T) {
+	st, lib, sc, _, root := fastPathFixture(t)
+	a := filepath.Join(root, "a.mp3")
+	writeMP3(t, a, "A", 1)
+	scanAll(t, sc, lib, false)
+	itemPID := currentItemPID(t, st, "A")
+
+	// A .lrc orders of magnitude larger than any real one: valid LRC, but far past the
+	// memory guard.
+	var big strings.Builder
+	big.WriteString("[00:00.00]first\n")
+	for big.Len() <= maxSidecarBytes {
+		big.WriteString("[00:01.00]padding line to grow the file\n")
+	}
+	if err := os.WriteFile(filepath.Join(root, "a.lrc"), []byte(big.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	scanAll(t, sc, lib, true)
+
+	// It must be skipped, not ingested: no lyrics row was created from it.
+	if ly, err := st.LyricsByItem(context.Background(), itemPID); err == nil && ly != nil && len(ly.Synced) > 0 {
+		t.Errorf("oversized .lrc was read and ingested (%d synced lines); it must be skipped", len(ly.Synced))
+	}
+
+	// And the skip must be visible. A sidecar sitting beside the audio doing nothing,
+	// with nothing anywhere explaining why, is the exact failure this vocabulary exists
+	// to prevent.
+	ds, err := st.FileDiagnostics(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var skipped []model.FileDiagnostic
+	for _, d := range ds {
+		if d.Code == model.DiagSidecarSkipped {
+			skipped = append(skipped, d)
+		}
+	}
+	if len(skipped) != 1 {
+		t.Fatalf("sidecar_skipped diagnostics = %d, want 1: %+v", len(skipped), ds)
+	}
+	if !strings.Contains(skipped[0].Detail, "read limit") {
+		t.Errorf("detail = %q, want it to name the limit that rejected the file", skipped[0].Detail)
+	}
+}
+
+// TestOversizedSidecarDoesNotChurn is the other half of the skip: an oversized
+// sidecar must cost one full-path pass, not one on every scan forever.
+//
+// A skipped file records a stat-only observation precisely so the fast path's
+// size+mtime comparison matches on the next scan. Without it there is no
+// observation to compare against, the sidecar reads as newly-appeared every time,
+// and every scan re-routes to the full path and re-hashes the audio. It is the same
+// trap the directory-cover stat fallback already exists to avoid.
+func TestOversizedSidecarDoesNotChurn(t *testing.T) {
+	_, lib, sc, cr, root := fastPathFixture(t)
+	writeMP3(t, filepath.Join(root, "a.mp3"), "A", 1)
+	scanAll(t, sc, lib, false)
+
+	var big strings.Builder
+	for big.Len() <= maxSidecarBytes {
+		big.WriteString("[00:01.00]padding line to grow the file\n")
+	}
+	if err := os.WriteFile(filepath.Join(root, "a.lrc"), []byte(big.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// First scan after it appears: one full-path pass, to record the skip.
+	readsBefore := cr.reads
+	scanAll(t, sc, lib, false)
+	if cr.reads-readsBefore != 1 {
+		t.Fatalf("oversized .lrc appearing parsed %d audio files, want 1", cr.reads-readsBefore)
+	}
+
+	// Every scan after: nothing. The stat-only observation short-circuits it.
+	readsBefore = cr.reads
+	r := scanAll(t, sc, lib, false)
+	if cr.reads != readsBefore {
+		t.Errorf("re-parsed %d audio files with an unchanged oversized .lrc, want 0: it must not churn every scan",
+			cr.reads-readsBefore)
+	}
+	if r.Unchanged != 1 {
+		t.Errorf("Unchanged = %d, want 1", r.Unchanged)
+	}
+}
+
+// TestOversizedCueSidecarSkipped pins the memory guard on the OTHER sidecar. The
+// .cue read is the one that stats after reading, so it is the one that would slip
+// past a guard applied only to the .lrc.
+//
+// A skipped sidecar must not look like an absent one. It reports readable, with a
+// stat-only observation so the fast path stops re-routing to the full path and a
+// diagnostic so the skip stays visible, but it contributes no chapters.
+func TestOversizedCueSidecarSkipped(t *testing.T) {
+	dir := t.TempDir()
+	audio := filepath.Join(dir, "book.m4b")
+
+	var big strings.Builder
+	big.WriteString("FILE \"book.m4b\" WAVE\n")
+	for big.Len() <= maxSidecarBytes {
+		big.WriteString("  TRACK 01 AUDIO\n    INDEX 01 00:00:00\n")
+	}
+	if err := os.WriteFile(filepath.Join(dir, "book.cue"), []byte(big.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	chapters, obs, diags, ok := scanCueSidecar(audio)
+	if !ok {
+		t.Fatal("oversized .cue reported not-readable; it must report its skip, not vanish")
+	}
+	if len(chapters) != 0 {
+		t.Errorf("chapters = %d, want 0: the file was never read", len(chapters))
+	}
+	if obs.Size == 0 || len(obs.Hash) != 0 {
+		t.Errorf("obs = %+v, want a stat-only observation (size set, no content hash)", obs)
+	}
+	if len(diags) != 1 || diags[0].Code != model.DiagSidecarSkipped {
+		t.Fatalf("diagnostics = %+v, want one sidecar_skipped", diags)
+	}
+
+	// A normal .cue is still read, so the guard bounds rather than disables.
+	small := filepath.Join(dir, "ok.m4b")
+	if err := os.WriteFile(filepath.Join(dir, "ok.cue"),
+		[]byte("FILE \"ok.m4b\" WAVE\n  TRACK 01 AUDIO\n    INDEX 01 00:00:00\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, obs, diags, ok := scanCueSidecar(small); !ok || obs.Size == 0 || len(diags) != 0 {
+		t.Errorf("normal .cue not read cleanly: ok=%v obs=%+v diags=%+v", ok, obs, diags)
+	}
+
+	// A truly-absent .cue still reports not-readable, and records nothing.
+	if _, _, _, ok := scanCueSidecar(filepath.Join(dir, "missing.m4b")); ok {
+		t.Error("absent .cue reported readable")
+	}
+}
+
+// TestChapterlessCueOnTrackDoesNotChurn covers the sidecar the book branch used to
+// own exclusively. A .cue beside a music track is ordinary (a whole-album rip), and
+// a chapterless one routes to the full path, so if its observation is recorded only
+// for books, the track re-parses and re-hashes its audio on every scan.
+func TestChapterlessCueOnTrackDoesNotChurn(t *testing.T) {
+	_, lib, sc, cr, root := fastPathFixture(t)
+	a := filepath.Join(root, "a.mp3")
+	writeMP3(t, a, "A", 1)
+	// A .cue with no TRACK/INDEX entries: readable, but it yields no chapters.
+	if err := os.WriteFile(filepath.Join(root, "a.cue"), []byte("REM just a comment\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	scanAll(t, sc, lib, false) // full path: creates the item, records the .cue observation
+	readsBefore := cr.reads
+	r := scanAll(t, sc, lib, false)
+	if cr.reads != readsBefore {
+		t.Errorf("re-parsed %d audio files with an unchanged chapterless .cue, want 0: "+
+			"the observation must be recorded for a track too, not only inside the book branch",
+			cr.reads-readsBefore)
+	}
+	if r.Unchanged != 1 {
+		t.Errorf("Unchanged = %d, want 1", r.Unchanged)
+	}
 }

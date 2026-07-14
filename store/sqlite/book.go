@@ -38,6 +38,15 @@ func (s *Store) PutScannedBook(ctx context.Context, in model.PutScannedBookInput
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 
+		// This scan's own diagnostics, plus the derived-under-current-rules stamp (see
+		// PutScannedTrack: the stamp is scan-only and must not live in the helper).
+		if err := replaceFileDiagnosticsTx(ctx, tx, fileID, model.OriginScan, in.Diagnostics); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		if err := stampDiagVersionTx(ctx, tx, fileID); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+
 		// A rebuild adopts the file's WAXBIN_ITEM_PID stamp (organize stamps books too) to
 		// restore the book's original identity; identity stays essence-first, so a taken or
 		// invalid hint falls back to a fresh PID. Parts of one book share the stamp: the
@@ -137,6 +146,18 @@ func (s *Store) PutScannedBook(ctx context.Context, in model.PutScannedBookInput
 			}
 			artChanged = c
 		}
+		// A book's .cue-sourced chapters are the sidecar analogue of a track's lyrics:
+		// both change without the audio bytes changing, so both must reach the scanner's
+		// counters rather than reporting as no change at all.
+		res.SidecarsChanged = artChanged || chaptersChanged
+
+		// Origin evidence from this part's own tags, recorded only when the book has no
+		// acquisition row yet. acquisition is item-level while tags are file-level, so
+		// for a multi-file book whichever part is scanned first supplies the row.
+		acqAdded, err := insertAcquisitionIfAbsentTx(ctx, tx, itemID, in.Acquisition)
+		if err != nil {
+			return err
+		}
 
 		if !affected.empty() {
 			if err := maintainRollupsTx(ctx, tx, affected, now); err != nil {
@@ -155,7 +176,7 @@ func (s *Store) PutScannedBook(ctx context.Context, in model.PutScannedBookInput
 		// created=false and ContentChanged=false, so without FileCreated/Relinked here a
 		// change_log tailer would never refresh the existing book. An externally-changed
 		// .cue (chaptersChanged with unchanged audio) also warrants a delta.
-		if created || res.ContentChanged || res.FileCreated || res.Relinked || chaptersChanged || stateChanged || artChanged {
+		if created || res.ContentChanged || res.FileCreated || res.Relinked || chaptersChanged || stateChanged || artChanged || acqAdded {
 			if err := appendChange(ctx, tx, "item", itemPID, opFor(created)); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}

@@ -56,7 +56,7 @@ func (a *Auditor) checkInvalidFeeds(ctx context.Context, add func(model.AuditFin
 // checkFiles runs the file-list-driven checks in one pass: bad filenames, orphaned
 // sidecars, case-insensitive path conflicts, and (opt-in) on-disk integrity and
 // corrupt-audio detection.
-func (a *Auditor) checkFiles(ctx context.Context, cfg Config, sample int, rep *Report, add func(model.AuditFinding)) error {
+func (a *Auditor) checkFiles(ctx context.Context, cfg Config, sample int, rep *Report, add func(model.AuditFinding), corruptSeen map[string]bool) error {
 	files, err := a.store.AuditFiles(ctx)
 	if err != nil {
 		return err
@@ -116,8 +116,10 @@ func (a *Auditor) checkFiles(ctx context.Context, cfg Config, sample int, rep *R
 			return err
 		}
 	}
-	if a.runs(cfg, model.CheckCorruptAudio) && a.probe != nil {
-		if err := a.checkCorrupt(ctx, files, sample, add); err != nil {
+	// The probe half only: the cheap diagnostic half runs outside checkFiles, since it
+	// reads no files.
+	if a.runs(cfg, model.CheckCorruptAudio) && cfg.Integrity && a.probe != nil {
+		if err := a.checkCorrupt(ctx, files, sample, add, corruptSeen); err != nil {
 			return err
 		}
 	}
@@ -192,10 +194,15 @@ func (a *Auditor) checkIntegrity(ctx context.Context, files []model.AuditFileInf
 }
 
 // checkCorrupt probes each audio file's essence and flags one that fails to parse.
-func (a *Auditor) checkCorrupt(ctx context.Context, files []model.AuditFileInfo, sample int, add func(model.AuditFinding)) error {
+func (a *Auditor) checkCorrupt(ctx context.Context, files []model.AuditFileInfo, sample int, add func(model.AuditFinding), seen map[string]bool) error {
 	c := &capped{limit: sample, check: model.CheckCorruptAudio, sev: model.SeverityError, add: add}
 	for _, f := range files {
 		if f.Kind != model.FileAudio {
+			continue
+		}
+		// Already reported by this check's cheap half, which read the diagnostic the
+		// scan derived. Both halves flagging one file must still be one finding.
+		if seen[f.DisplayPath] {
 			continue
 		}
 		if err := ctx.Err(); err != nil {

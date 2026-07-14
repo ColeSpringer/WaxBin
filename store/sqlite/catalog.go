@@ -118,6 +118,17 @@ func (s *Store) PutScannedTrack(ctx context.Context, in model.PutScannedTrackInp
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 
+		// Replace this scan's own diagnostics and record that they were derived under
+		// the current rule set. The stamp lives here, at the scan call site, rather than
+		// inside the shared helper: an organize-origin write must never mark a
+		// never-scanned file as derived.
+		if err := replaceFileDiagnosticsTx(ctx, tx, fileID, model.OriginScan, in.Diagnostics); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		if err := stampDiagVersionTx(ctx, tx, fileID); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+
 		// Unchanged bytes with a different essence hash mean the essence algorithm
 		// changed. A real re-encode would change content_hash too. Re-key the item
 		// in place so its pid, play_state, and provenance survive the upgrade.
@@ -173,6 +184,17 @@ func (s *Store) PutScannedTrack(ctx context.Context, in model.PutScannedTrackInp
 		artChanged, err := attachArtTxChanged(ctx, tx, itemID, in.CoverArt)
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		// Surfaced to the caller, not just used for the delta below: a sidecar-only
+		// change leaves the audio bytes (and so ContentChanged) untouched, so without
+		// this the scanner's counters would all read zero for it.
+		res.SidecarsChanged = lyricsChanged || artChanged
+
+		// Origin evidence carried by the file's own tags, recorded only when the item
+		// has no acquisition row yet (an event-recorded origin always wins).
+		acqAdded, err := insertAcquisitionIfAbsentTx(ctx, tx, itemID, in.Acquisition)
+		if err != nil {
+			return err
 		}
 
 		// Re-home the file onto this item, detaching it from any prior item (the
@@ -230,9 +252,11 @@ func (s *Store) PutScannedTrack(ctx context.Context, in model.PutScannedTrackInp
 			}
 		}
 		// Emit an item delta on create, a content change, a state transition (a restored
-		// file flipping missing -> present), OR a lyrics/cover-only change, so a delta
-		// consumer never serves stale metadata/art after any real change.
-		if created || res.ContentChanged || stateChanged || lyricsChanged || artChanged {
+		// file flipping missing -> present), a lyrics/cover-only change, OR a newly
+		// attributed origin, so a delta consumer never serves stale metadata/art after
+		// any real change. acqAdded is true only when a row was actually inserted, so a
+		// rescan of an already-attributed item stays silent.
+		if created || res.ContentChanged || stateChanged || lyricsChanged || artChanged || acqAdded {
 			if err := appendChange(ctx, tx, "item", itemPID, opFor(created)); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}

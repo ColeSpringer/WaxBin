@@ -1,0 +1,20 @@
+# Binaries
+/waxbin
+/dist/
+*.exe
+*.test
+*.out
+
+# Catalog databases and SQLite sidecar files
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
+*.pre-migrate-*.bak
+
+# Write-ownership lockfile
+*.waxlock
+
+# Editor / OS cruft
+.DS_Store
+*.swp

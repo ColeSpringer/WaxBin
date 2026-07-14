@@ -471,11 +471,13 @@ func (l *Library) Analyze(ctx context.Context, opts AnalyzeOptions) (*AnalyzeRes
 		// Optionally mirror the (now album-aggregated) ReplayGain into files on disk,
 		// in one pass. Off by default; failures are logged, not fatal to the analyze.
 		if writeRG {
-			n, err := l.writeReplayGainTags(ctx)
+			c, err := l.writeReplayGainTags(ctx)
 			if err != nil {
 				return err
 			}
-			out.Result.ReplayGainTagsWritten = n
+			out.Result.ReplayGainTagsWritten = c.written
+			out.Result.ReplayGainTagsFailed = c.failed
+			out.Result.ReplayGainTagsUnrepresented = c.unrepresented
 		}
 		return nil
 	})
@@ -553,9 +555,10 @@ func (e *watchEngine) Rescan(ctx context.Context, libPID model.PID, subPath stri
 		return false, err
 	}
 	t := res.Total
-	// A live .lrc/.cue edit mutates the catalog via the fast-path (bumping
-	// SidecarsUpdated, not ItemsUpdated), so include it; otherwise a sidecar-only
-	// change reports changed=false and downstream schedulers are skipped.
+	// A live .lrc/.cue edit mutates the catalog without touching the audio bytes, so it
+	// bumps SidecarsUpdated and NOT ItemsUpdated (ContentChanged is false either way,
+	// on the fast path and the full path alike). Include it, or a sidecar-only change
+	// reports changed=false and every downstream scheduler is silently skipped.
 	changed := t.ItemsCreated > 0 || t.ItemsUpdated > 0 || t.Relinked > 0 || t.Missing > 0 || t.SidecarsUpdated > 0
 	return changed, nil
 }

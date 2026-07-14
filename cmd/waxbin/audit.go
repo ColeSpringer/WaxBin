@@ -28,9 +28,15 @@ func newAuditCmd(g *globals) *cobra.Command {
 		Short: "Report catalog quality and integrity problems",
 		Long: "Runs quality checks over the catalog: duplicate/split entities, inconsistent " +
 			"metadata, missing art/ReplayGain, unportable filenames, orphaned sidecars, " +
-			"case-insensitive path conflicts, invalid feeds, and derived-data drift. " +
-			"--integrity adds on-disk bitrot (content-hash) and corrupt-audio passes, which " +
-			"re-read every audio file. --check <name> (repeatable) restricts the run; valid " +
+			"case-insensitive path conflicts, invalid feeds, derived-data drift, and the " +
+			"diagnostics recorded during scanning and tag write-back. " +
+			"Corrupt-audio reporting comes in two halves. The free half reads signals the " +
+			"scan already derived, and covers MP3, AAC, AIFF, MP4, and WAV only. It is a " +
+			"true positive when it fires and proves nothing when it does not, so a quiet " +
+			"run is not a clean bill of health; FLAC, Opus, Vorbis, and Matroska need the " +
+			"decode probe. --integrity adds that probe plus an on-disk bitrot " +
+			"(content-hash) pass, both of which re-read every audio file. " +
+			"--check <name> (repeatable) restricts the run; valid " +
 			"names: " + strings.Join(names, ", ") + ". Exits non-zero when any error-severity " +
 			"finding is reported.",
 		RunE: func(cmd *cobra.Command, _ []string) error {

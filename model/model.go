@@ -180,6 +180,48 @@ type Tags struct {
 	// Chapters are the file's embedded navigation chapters (M4B Nero/QuickTime,
 	// Matroska, MP3 CHAP), file-relative, in file order. Empty for music.
 	Chapters []Chapter
+
+	// Acquisition is origin provenance carried by the file's own tags, when it has
+	// any. It does not feed Year; see TagAcquisition for why.
+	Acquisition TagAcquisition
+}
+
+// TagAcquisition is origin provenance read from a file's own tags, meaning the
+// acquisition keys a downloader stamps into what it writes. It is evidence of
+// external origin carried by the file itself, as distinct from an acquisition event
+// WaxBin performed and recorded.
+//
+// AcquiredAt does not feed Tags.Year, and must not. Year is the release year of the
+// work: it drives the year: query field, the year facet, sort keys, and organize's
+// {year} path token. Folding an acquisition date in would catalog a 1975 album
+// downloaded in 2019 as year=2019, corrupting the facet and the on-disk layout with it.
+type TagAcquisition struct {
+	SourceURL  string
+	SourceID   string
+	AcquiredAt int64 // unix nanoseconds; 0 when absent or unparseable
+}
+
+// Present reports whether the tags claim an external origin. It requires a URL or an
+// ID. A bare ACQUISITION_DATE is not such a claim, since a local rip can carry one,
+// so on its own it must never flip an item off source:local.
+func (a TagAcquisition) Present() bool {
+	return a.SourceURL != "" || a.SourceID != ""
+}
+
+// TagWriteWarning is one non-fatal condition reported by an on-disk tag write,
+// projected out of the tag library's own warning vocabulary so the model stays
+// independent of it. Key is the canonical tag key the warning concerns, or "" for a
+// warning that names no specific key. Message is pre-sanitized for display.
+//
+// Unrepresented marks the subset that means the value did not land: the write itself
+// succeeded, but the key does not hold what the caller asked for. It is the only
+// field a consumer should branch on. An advisory warning, such as a benign format
+// note, carries Unrepresented=false and must not gate anything.
+type TagWriteWarning struct {
+	Key           string
+	Code          string
+	Message       string
+	Unrepresented bool
 }
 
 // ItemView is the denormalized read shape returned by queries: a playable_item

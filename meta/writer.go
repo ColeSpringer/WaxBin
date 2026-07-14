@@ -5,6 +5,7 @@ import (
 	"os"
 
 	"github.com/colespringer/waxbin/identity"
+	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/waxerr"
 	waxlabel "github.com/colespringer/waxlabel"
 	"github.com/colespringer/waxlabel/tag"
@@ -33,11 +34,72 @@ type TagEdit struct {
 // WriteResult reports the file's on-disk state after a write. When Changed is false
 // the edits were a no-op and the file was not rewritten (Size/MTimeNS/ContentHash
 // are left zero, since the caller already holds the current values).
+//
+// Warnings is independent of Changed: a no-op can still carry a warning, so a
+// caller that branches on Changed alone would miss exactly the case where the edit
+// had no effect because the format could not store the value.
 type WriteResult struct {
 	Changed     bool
 	Size        int64
 	MTimeNS     int64
 	ContentHash string
+	Warnings    []model.TagWriteWarning
+}
+
+// unrepresentedCodes are the WaxLabel warning codes that mean the value did not
+// land, so the key does not hold what was asked for. These three are the ones
+// WaxLabel's own CLI escalates under --strict. The rest of its vocabulary is
+// documented as advisory (a number/total conflict, an MP4 multi-value note) and
+// carries no loss.
+//
+// It is an allowlist rather than a denylist for a reason: an unclassified future code
+// falls back to today's silence instead of raising a false alarm about a value that
+// was written correctly.
+var unrepresentedCodes = map[waxlabel.WarningCode]bool{
+	waxlabel.WarnValueDropped: true,
+	waxlabel.WarnValueCoerced: true,
+	waxlabel.WarnValueReduced: true,
+}
+
+// writeWarnings projects a write plan's warnings into the model. It is the one place
+// WaxLabel's warning vocabulary is interpreted, which keeps waxlabel types out of
+// model and gives the allowlist a single home.
+//
+// A warning naming several keys fans out to one entry per key, so a consumer can
+// match a warning to a field without parsing prose. Warning.Keys is documented as
+// empty for a warning that names no specific key. All three allowlisted codes are
+// documented as keyed, but this cannot rely on that, so a keyless warning is carried
+// with an empty Key rather than indexed into or dropped.
+func writeWarnings(ws []waxlabel.Warning) []model.TagWriteWarning {
+	if len(ws) == 0 {
+		return nil
+	}
+	out := make([]model.TagWriteWarning, 0, len(ws))
+	for _, w := range ws {
+		// Warning.String renders "[code] message" through tag.SanitizeLine. The raw
+		// Message is not sanitized, and it can embed a file-derived snippet.
+		//
+		// The cap goes here, at the seam where waxlabel's vocabulary becomes the model,
+		// rather than at each consumer. SanitizeLine escapes the terminal-hijack and
+		// newline classes but leaves the length alone, and the writers persist this
+		// Message verbatim as a tag_write_lost detail. Capping once at the seam bounds
+		// every consumer, including any added later.
+		mw := model.TagWriteWarning{
+			Code:          w.Code.String(),
+			Message:       capDetail(w.String()),
+			Unrepresented: unrepresentedCodes[w.Code],
+		}
+		if len(w.Keys) == 0 {
+			out = append(out, mw)
+			continue
+		}
+		for _, k := range w.Keys {
+			e := mw
+			e.Key = string(k)
+			out = append(out, e)
+		}
+	}
+	return out
 }
 
 // Apply writes edits to the file at path atomically and in place, preserving the
@@ -70,8 +132,13 @@ func (w *Writer) Apply(ctx context.Context, path string, edits []TagEdit) (*Writ
 	if err != nil {
 		return nil, waxerr.Wrapf(waxerr.CodeInvalid, op, err, "preparing tag write for %s", path)
 	}
+	// Read the report before the no-op gate. WaxLabel documents that a no-op can still
+	// carry a warning the consumer needs to see: an edit whose only effect was a value
+	// the format could not store leaves the bytes unchanged, yet is not what was asked
+	// for. Gating on IsNoOp first would report that worst case as the cleanest one.
+	warnings := writeWarnings(plan.Report().Warnings)
 	if plan.IsNoOp() {
-		return &WriteResult{Changed: false}, nil
+		return &WriteResult{Changed: false, Warnings: warnings}, nil
 	}
 
 	if _, _, err := plan.Execute(ctx, waxlabel.SaveBack()); err != nil {
@@ -91,5 +158,6 @@ func (w *Writer) Apply(ctx context.Context, path string, edits []TagEdit) (*Writ
 		Size:        info.Size(),
 		MTimeNS:     info.ModTime().UnixNano(),
 		ContentHash: ch,
+		Warnings:    warnings,
 	}, nil
 }

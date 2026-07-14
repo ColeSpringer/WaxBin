@@ -104,12 +104,15 @@ func TestReplayGainWriteBackAlbum(t *testing.T) {
 		t.Fatalf("album gain: %v", err)
 	}
 
-	n, err := lib.writeReplayGainTags(ctx)
+	c, err := lib.writeReplayGainTags(ctx)
 	if err != nil {
 		t.Fatalf("write rg tags: %v", err)
 	}
-	if n != 2 {
-		t.Fatalf("wrote %d rg tags, want 2", n)
+	if c.written != 2 {
+		t.Fatalf("wrote %d rg tags, want 2", c.written)
+	}
+	if c.failed != 0 || c.unrepresented != 0 {
+		t.Fatalf("clean run reported failed=%d unrepresented=%d, want 0/0", c.failed, c.unrepresented)
 	}
 
 	// Each file now carries track + album ReplayGain, and its catalog row's content
@@ -138,6 +141,65 @@ func TestReplayGainWriteBackAlbum(t *testing.T) {
 			t.Errorf("catalog file state not updated after RG write: db(%d,%d) disk(%d,%d)",
 				f.Size, f.MTimeNS, info.Size(), info.ModTime().UnixNano())
 		}
+	}
+}
+
+// TestReplayGainWriteBackCountsFailures is the regression test for the defect this
+// counter exists to fix: writeReplayGainTags used to log-and-continue on a write
+// error, so a run against a read-only library reported success with nothing
+// written, which is indistinguishable from a run with nothing to write.
+func TestReplayGainWriteBackCountsFailures(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores the read-only bit, so the write would succeed")
+	}
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	lib, err := Open(ctx, Options{
+		DBPath: db, WriteReplayGainTags: true,
+		Roots: []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}},
+	})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer lib.Close()
+
+	writeRaw(t, filepath.Join(root, "a.mp3"), testaudio.BuildMP3WithAudio("A", "The Band", "One", 1, testaudio.AudioWithSeed(1)))
+	if _, err := lib.Scan(ctx, ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	items, err := lib.Query(ctx, query.New(query.EntityItems).Build())
+	if err != nil || len(items) != 1 {
+		t.Fatalf("query items: %v (n=%d)", err, len(items))
+	}
+	f, err := lib.store.FileByPID(ctx, items[0].FilePID)
+	if err != nil {
+		t.Fatalf("file by pid: %v", err)
+	}
+	if err := lib.store.PutAnalysis(ctx, model.AnalysisInput{
+		AnalysisVersion: 1,
+		Fingerprint:     model.FingerprintInput{FilePID: items[0].FilePID, EssenceHash: f.EssenceHash, AlgoVersion: 1, FP: []byte{}},
+		Loudness:        &model.LoudnessData{IntegratedLUFS: -12, TrackGainDB: -6, TrackPeak: 0.9},
+	}); err != nil {
+		t.Fatalf("put analysis: %v", err)
+	}
+
+	// The write is atomic (a rewrite into the directory), so removing the directory's
+	// write bit is what makes it fail.
+	if err := os.Chmod(root, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(root, 0o755) })
+
+	c, err := lib.writeReplayGainTags(ctx)
+	if err != nil {
+		t.Fatalf("write rg tags: %v", err)
+	}
+	if c.written != 0 {
+		t.Fatalf("wrote %d rg tags into a read-only library, want 0", c.written)
+	}
+	if c.failed != 1 {
+		t.Fatalf("failed = %d, want 1: a write-back that errored must not report as nothing-to-write", c.failed)
 	}
 }
 
