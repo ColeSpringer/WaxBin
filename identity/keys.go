@@ -1,6 +1,7 @@
 package identity
 
 import (
+	"regexp"
 	"strconv"
 	"strings"
 	"unicode"
@@ -82,6 +83,31 @@ func SplitGenres(raw string) []string {
 		}
 		seen[mk] = true
 		out = append(out, name)
+	}
+	return out
+}
+
+// creditSplitRe are the UNAMBIGUOUS separators between credited people in one tag
+// value: a semicolon, slash, or ampersand ("Gaiman & Pratchett", "A; B", "A / B").
+// It deliberately does NOT split on a bare comma (also the "Last, First" name
+// format) or the word "and" (common inside a single entity, e.g. a publisher), so a
+// single credited person is not shattered into bogus contributor entities.
+var creditSplitRe = regexp.MustCompile(`\s*[;/&]\s*`)
+
+// SplitCredits splits a combined credit string (authors or narrators) into trimmed
+// individual names, dropping empties. It is the canonical splitter shared by the
+// metadata adapter, the scanner, and the field-edit path, so every path that turns a
+// credit string into contributor entities splits it the same way.
+func SplitCredits(s string) []string {
+	if strings.TrimSpace(s) == "" {
+		return nil
+	}
+	parts := creditSplitRe.Split(s, -1)
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
 	}
 	return out
 }

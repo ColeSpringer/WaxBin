@@ -321,7 +321,7 @@ func TestMeasureCanceled(t *testing.T) {
 	if err == nil {
 		t.Fatal("want an error for a canceled measure")
 	}
-	// Cancellation must not read as "this build cannot decode this" — that would
+	// Cancellation must not read as "this build cannot decode this", which would
 	// stamp the file skipped rather than retrying it.
 	if errors.Is(err, ErrUnsupported) {
 		t.Errorf("err = %v, want a canceled error, not ErrUnsupported", err)
@@ -350,7 +350,7 @@ func TestCoverageIsHonest(t *testing.T) {
 		seen[fs.Codec] = true
 	}
 	// The codecs the migration exists to cover. aac-lc is WaxFlow's ID for what
-	// WaxLabel calls "AAC" — the exact vocabulary gap that makes a codec
+	// WaxLabel calls "AAC", the exact vocabulary gap that makes a codec
 	// pre-filter a trap, and why this table is display-only.
 	for _, want := range []string{"pcm", "flac", "mp3", "alac", "aac-lc", "vorbis", "opus"} {
 		if !seen[want] {

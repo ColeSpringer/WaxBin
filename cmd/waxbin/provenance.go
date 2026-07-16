@@ -65,11 +65,12 @@ func newProvenanceCmd(g *globals) *cobra.Command {
 }
 
 type provRow struct {
-	Field   string `json:"field"`
-	Source  string `json:"source"`
-	Locked  bool   `json:"locked"`
-	Value   string `json:"value,omitempty"`
-	Updated int64  `json:"updatedAt"`
+	Field    string `json:"field"`
+	Source   string `json:"source"`
+	Locked   bool   `json:"locked"`
+	Value    string `json:"value,omitempty"`
+	Provider string `json:"provider,omitempty"`
+	Updated  int64  `json:"updatedAt"`
 }
 
 // reportProvenance prints an item's provenance rows. An item with no curated or
@@ -82,7 +83,7 @@ func reportProvenance(cmd *cobra.Command, g *globals, lib *waxbin.Library, pid m
 	if g.jsonOut {
 		out := make([]provRow, 0, len(rows))
 		for _, r := range rows {
-			out = append(out, provRow{r.Field, string(r.Source), r.Locked, r.Value, r.UpdatedAt})
+			out = append(out, provRow{r.Field, string(r.Source), r.Locked, r.Value, r.Provider, r.UpdatedAt})
 		}
 		return printJSON(cmd, struct {
 			PID  model.PID `json:"pid"`

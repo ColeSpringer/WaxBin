@@ -32,6 +32,13 @@ const (
 	DiagSidecarSkipped DiagnosticCode = "sidecar_skipped"
 	// DiagTagWriteLost marks an on-disk tag write that did not land a value as asked.
 	DiagTagWriteLost DiagnosticCode = "tag_write_lost"
+	// DiagTagWriteUnsynced marks a catalog field edit whose on-disk tag write-back did
+	// not apply, leaving the file's tags out of sync with the catalog until they are
+	// re-written. It fires when write-back is refused, as for a file shared by several
+	// items, or when it fails, as on a read-only mount or a permission error. This is
+	// not DiagTagWriteLost, which is for a write that ran but hit a value the format
+	// could not store.
+	DiagTagWriteUnsynced DiagnosticCode = "tag_write_unsynced"
 	// DiagCorruptAudio marks a parse that found truncated audio or no audio frames.
 	//
 	// Its coverage is format-partial, and callers must present it that way. The
@@ -60,6 +67,7 @@ const (
 	OriginScan       DiagnosticOrigin = "scan"
 	OriginOrganize   DiagnosticOrigin = "organize"
 	OriginReplayGain DiagnosticOrigin = "replaygain"
+	OriginEdit       DiagnosticOrigin = "edit"
 )
 
 // FileDiagnostic is one persisted observation about a file. Severity reuses

@@ -5,6 +5,7 @@ import (
 	"io"
 	"log/slog"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -879,6 +880,281 @@ func (l *Library) Unlock(ctx context.Context, pid model.PID, fields ...string) e
 // rows, so a tag-only item returns an empty slice.
 func (l *Library) Provenance(ctx context.Context, pid model.PID) ([]model.FieldProvenance, error) {
 	return l.store.FieldProvenance(ctx, pid)
+}
+
+// EditOptions controls a catalog field edit.
+type EditOptions struct {
+	// WriteBack also writes the new value into each backing file's on-disk tags. It is
+	// off by default, so an edit is catalog-only unless the caller opts in.
+	WriteBack bool
+	// Lock locks each edited field against enrichment and organize overwrites. A user
+	// edit is authoritative, so the CLI sets this by default. Pass false to leave the
+	// field unlocked.
+	Lock bool
+	// Force overrides a lock. Without it, editing a locked field returns CodeLocked.
+	Force bool
+}
+
+// EditField edits one metadata field on a track or book item. See EditFields.
+func (l *Library) EditField(ctx context.Context, itemPID model.PID, field, value string, opts EditOptions) error {
+	return l.EditFields(ctx, itemPID, map[string]string{field: value}, opts)
+}
+
+// EditFields applies metadata-field edits to a track or book item. It records the
+// edit as user provenance and, unless told otherwise, locks each field so enrichment
+// and organize leave it alone. The catalog write is atomic and runs first. Which
+// fields are editable depends on the kind (a track has artist, album, and the rest; a
+// book has author, narrator, series), and a field that does not apply to the item's
+// kind is rejected.
+//
+// With opts.WriteBack set, the new values are also written into the backing files'
+// on-disk tags through the WaxLabel writer seam. Write-back covers track items only. A
+// book edit lands in the catalog, but its on-disk tags are left for a later
+// audiobook-tag design and reported through a *WriteBackError.
+//
+// Write-back is a separate step, not part of the atomic catalog edit. The edit has
+// already committed by the time it runs, so a file that cannot be written does not
+// roll the edit back. That covers a read-only mount, a permission error, a value the
+// format cannot store, and a file shared by several items whose tags must not be
+// clobbered per item. In those cases EditFields returns a *WriteBackError naming the
+// failed files and records a per-file drift diagnostic, while the catalog edit stands.
+// Callers should surface that as "catalog updated, on-disk tag sync failed" rather
+// than a failed edit.
+func (l *Library) EditFields(ctx context.Context, itemPID model.PID, edits map[string]string, opts EditOptions) error {
+	if err := l.store.EditItemFields(ctx, itemPID, edits, model.SourceUser, opts.Lock, opts.Force); err != nil {
+		return err
+	}
+	if !opts.WriteBack {
+		return nil
+	}
+	return l.writeBackFields(ctx, itemPID, edits)
+}
+
+// WriteBackFailure records one backing file whose on-disk tag write-back did not
+// apply, with a human-readable reason.
+type WriteBackFailure struct {
+	FilePID model.PID
+	Path    string
+	Reason  string
+}
+
+// WriteBackError reports that a catalog edit committed but its on-disk tag write-back
+// did not fully apply. The catalog holds the new values. The named files' tags stay
+// out of sync until they are re-written, which is also recorded as a per-file
+// diagnostic.
+type WriteBackError struct {
+	ItemPID  model.PID
+	Edits    map[string]string
+	Failures []WriteBackFailure
+}
+
+func (e *WriteBackError) Error() string {
+	paths := make([]string, 0, len(e.Failures))
+	for _, f := range e.Failures {
+		paths = append(paths, f.Path)
+	}
+	return "catalog updated, but on-disk tag write-back failed for " +
+		strconv.Itoa(len(e.Failures)) + " file(s): " + strings.Join(paths, ", ")
+}
+
+// writeBackFields mirrors committed catalog edits into the backing files' tags. Each
+// file is written on its own. A refusal (a shared file) or a failure (an I/O error)
+// records a drift diagnostic and joins a WriteBackError rather than aborting the rest
+// of the files. A clean write clears any drift diagnostic that file carried before.
+//
+// Only track write-back is supported. Audiobook on-disk tags follow their own
+// conventions (a book's title is the ALBUM tag, series and sequence are packed into
+// one GROUPING tag, and subtitle is not read back by a scan at all), so a naive
+// per-field mapping would silently drop data. A book edit is refused for write-back
+// and left to a later audiobook-tag design. The catalog edit still stands.
+func (l *Library) writeBackFields(ctx context.Context, itemPID model.PID, edits map[string]string) error {
+	// Everything below runs after the catalog edit committed. A setup-lookup error is
+	// therefore a write-back failure to report, not a hard error that would make the CLI
+	// hide the committed catalog change.
+	item, err := l.store.ItemByPID(ctx, itemPID)
+	if err != nil {
+		return writeBackSetupFailure(itemPID, edits, err)
+	}
+	if item.Kind != model.KindTrack {
+		return l.refuseWriteBack(ctx, itemPID, edits,
+			"on-disk tag write-back is not yet supported for "+string(item.Kind)+" items; the catalog edit was applied")
+	}
+
+	tagEdits, err := tagEditsForFields(edits)
+	if err != nil {
+		return err
+	}
+	files, err := l.store.ItemFiles(ctx, itemPID)
+	if err != nil {
+		return writeBackSetupFailure(itemPID, edits, err)
+	}
+	wbErr := &WriteBackError{ItemPID: itemPID, Edits: edits}
+	// A write-back on an item with no backing files, such as an archived track, has
+	// nothing to write, and the catalog edit already committed. Report a skipped
+	// write-back rather than a silent success, the same way refuseWriteBack does.
+	if len(files) == 0 {
+		wbErr.Failures = append(wbErr.Failures, WriteBackFailure{Reason: "no backing files present to write"})
+		return wbErr
+	}
+	w := meta.NewWriter()
+	for _, ref := range files {
+		// A canceled context aborts the whole write-back rather than being recorded as a
+		// per-file failure, so a genuine cancellation is not masked as a soft warning.
+		if err := ctx.Err(); err != nil {
+			return waxerr.FromContext("waxbin.EditFields", err, waxerr.CodeCanceled)
+		}
+		// The catalog edit is already committed, so a per-file store lookup failure is one
+		// more write-back failure to record and move past, not a reason to report the
+		// whole edit as failed and hide the committed catalog change.
+		file, err := l.store.FileByPID(ctx, ref.FilePID)
+		if err != nil {
+			l.log.Warn("edit write-back file lookup", "file", ref.FilePID, "err", err)
+			l.recordWriteBackDrift(ctx, ref.FilePID, err.Error())
+			wbErr.Failures = append(wbErr.Failures, WriteBackFailure{FilePID: ref.FilePID, Path: string(ref.Path), Reason: err.Error()})
+			continue
+		}
+		path := string(file.Path)
+
+		// A file shared by several items, or one carrying offset windows, must not be
+		// rewritten for one item, since its tags belong to the whole file. Refuse it,
+		// record the drift, and move on.
+		shared, err := l.store.FileSharedOrVirtual(ctx, ref.FilePID)
+		if err != nil {
+			l.log.Warn("edit write-back share check", "path", path, "err", err)
+			l.recordWriteBackDrift(ctx, ref.FilePID, err.Error())
+			wbErr.Failures = append(wbErr.Failures, WriteBackFailure{FilePID: ref.FilePID, Path: path, Reason: err.Error()})
+			continue
+		}
+		if shared {
+			const reason = "on-disk tag write-back is unavailable for a file shared by multiple items"
+			l.recordWriteBackDrift(ctx, ref.FilePID, reason)
+			wbErr.Failures = append(wbErr.Failures, WriteBackFailure{FilePID: ref.FilePID, Path: path, Reason: reason})
+			continue
+		}
+
+		res, err := w.Apply(ctx, path, tagEdits)
+		if err != nil {
+			l.log.Warn("edit tag write-back", "path", path, "err", err)
+			l.recordWriteBackDrift(ctx, ref.FilePID, err.Error())
+			wbErr.Failures = append(wbErr.Failures, WriteBackFailure{FilePID: ref.FilePID, Path: path, Reason: err.Error()})
+			continue
+		}
+		// A value the on-disk format cannot store leaves the bytes unchanged but is still
+		// a real loss, and WaxLabel reports it as an unrepresented warning even on a
+		// no-op. Read the warnings before the no-op gate below so a lost value is recorded
+		// as a drift diagnostic and a write-back failure instead of cleared as a clean sync.
+		var lost []model.FileDiagnostic
+		for _, wn := range res.Warnings {
+			if wn.Unrepresented {
+				lost = append(lost, model.FileDiagnostic{
+					Code: model.DiagTagWriteLost, Severity: model.SeverityWarn,
+					TagKey: wn.Key, Detail: wn.Message,
+				})
+			}
+		}
+		if len(lost) > 0 {
+			l.log.Warn("edit tag value unrepresented", "path", path)
+			if derr := l.store.PutFileDiagnostics(ctx, ref.FilePID, model.OriginEdit, lost); derr != nil {
+				l.log.Warn("edit diagnostics", "path", path, "err", derr)
+			}
+			wbErr.Failures = append(wbErr.Failures, WriteBackFailure{FilePID: ref.FilePID, Path: path,
+				Reason: "some values could not be stored in this file's tag format"})
+		} else if derr := l.store.PutFileDiagnostics(ctx, ref.FilePID, model.OriginEdit, nil); derr != nil {
+			// The tags now match the catalog: clear any drift this file's edit left before.
+			l.log.Warn("edit diagnostics clear", "path", path, "err", derr)
+		}
+		if !res.Changed {
+			continue
+		}
+		// Record the re-tagged size/mtime/hash only when a concurrent scan or move has
+		// not touched the file since we read it. A stale row heals on the next scan.
+		if _, err := l.store.UpdateFileStateIfUnchanged(ctx, model.FileStateUpdate{
+			FilePID:         ref.FilePID,
+			ExpectedSize:    file.Size,
+			ExpectedMTimeNS: file.MTimeNS,
+			NewSize:         res.Size,
+			NewMTimeNS:      res.MTimeNS,
+			NewContentHash:  res.ContentHash,
+		}); err != nil {
+			l.log.Warn("edit file-state update", "path", path, "err", err)
+		}
+	}
+	if len(wbErr.Failures) > 0 {
+		return wbErr
+	}
+	return nil
+}
+
+// refuseWriteBack reports that write-back was not attempted for an item, such as a
+// book whose on-disk tag conventions need their own design. The catalog edit already
+// committed, so it records a drift diagnostic on each backing file and returns a
+// WriteBackError, the same shape the per-file refusal path returns.
+func (l *Library) refuseWriteBack(ctx context.Context, itemPID model.PID, edits map[string]string, reason string) error {
+	wbErr := &WriteBackError{ItemPID: itemPID, Edits: edits}
+	files, err := l.store.ItemFiles(ctx, itemPID)
+	if err != nil {
+		// The catalog edit already committed, so report the refusal as a setup failure
+		// rather than a hard error that would mask it.
+		return writeBackSetupFailure(itemPID, edits, err)
+	}
+	for _, ref := range files {
+		l.recordWriteBackDrift(ctx, ref.FilePID, reason)
+		wbErr.Failures = append(wbErr.Failures, WriteBackFailure{FilePID: ref.FilePID, Path: string(ref.Path), Reason: reason})
+	}
+	if len(wbErr.Failures) == 0 {
+		// An archived item has no backing files. Still report the refusal so the caller
+		// does not read a silent success.
+		wbErr.Failures = append(wbErr.Failures, WriteBackFailure{Reason: reason})
+	}
+	return wbErr
+}
+
+// recordWriteBackDrift stamps a queryable diagnostic that a file's on-disk tags are
+// out of sync with the catalog because write-back did not apply, so WaxDeck's review
+// queue can find it. It is best-effort, and a diagnostic write failure is logged
+// rather than surfaced.
+func (l *Library) recordWriteBackDrift(ctx context.Context, filePID model.PID, detail string) {
+	diags := []model.FileDiagnostic{{
+		Code:     model.DiagTagWriteUnsynced,
+		Severity: model.SeverityWarn,
+		Detail:   detail,
+	}}
+	if err := l.store.PutFileDiagnostics(ctx, filePID, model.OriginEdit, diags); err != nil {
+		l.log.Warn("edit drift diagnostic", "file", filePID, "err", err)
+	}
+}
+
+// tagEditsForFields turns committed field edits into on-disk tag edits. Each tag key
+// comes from meta.TagKeyForField, the field-to-tag-key source of truth shared with
+// organize. Values are trimmed to match what the store persisted, since the store
+// trims every edited value, so surrounding whitespace can never put the on-disk tag
+// out of step with the catalog. A value that is empty after trimming clears the tag.
+// An unmapped field is a programming error and returns CodeInternal, since the store
+// has already checked the field is a real metadata field.
+func tagEditsForFields(edits map[string]string) ([]meta.TagEdit, error) {
+	out := make([]meta.TagEdit, 0, len(edits))
+	for field, value := range edits {
+		key, ok := meta.TagKeyForField(field)
+		if !ok {
+			return nil, waxerr.New(waxerr.CodeInternal, "waxbin.EditFields", "no tag key for field: "+field)
+		}
+		e := meta.TagEdit{Key: key}
+		if v := strings.TrimSpace(value); v != "" {
+			e.Values = []string{v}
+		}
+		out = append(out, e)
+	}
+	return out, nil
+}
+
+// writeBackSetupFailure wraps a store-lookup error hit while preparing a write-back
+// into a WriteBackError. The catalog edit already committed, so the caller needs to
+// learn that the edit stands and only the on-disk sync could not run.
+func writeBackSetupFailure(itemPID model.PID, edits map[string]string, err error) *WriteBackError {
+	return &WriteBackError{
+		ItemPID: itemPID, Edits: edits,
+		Failures: []WriteBackFailure{{Reason: "write-back could not run: " + err.Error()}},
+	}
 }
 
 // PlanOrganize computes a dry-run move plan for the selected items across every

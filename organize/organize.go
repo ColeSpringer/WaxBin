@@ -194,8 +194,14 @@ func (o *Organizer) tagFields(ctx context.Context, it *model.ItemView) ([]TagFie
 		return nil, err
 	}
 	var out []TagField
-	add := func(field, key, value string) {
+	// The tag key comes from meta.TagKeyForField, the one place the field-to-tag-key
+	// mapping lives, shared with the catalog field-edit write-back.
+	add := func(field, value string) {
 		if value == "" || locked[field] {
+			return
+		}
+		key, ok := meta.TagKeyForField(field)
+		if !ok {
 			return
 		}
 		out = append(out, TagField{Field: field, Key: key, Value: value})
@@ -205,12 +211,12 @@ func (o *Organizer) tagFields(ctx context.Context, it *model.ItemView) ([]TagFie
 	if it.Compilation {
 		albumArtist = "Various Artists"
 	}
-	add("album_artist", "ALBUMARTIST", albumArtist)
+	add("album_artist", albumArtist)
 	if it.TrackNo > 0 {
-		add("track_no", "TRACKNUMBER", strconv.Itoa(it.TrackNo))
+		add("track_no", strconv.Itoa(it.TrackNo))
 	}
 	if it.DiscNo > 0 {
-		add("disc_no", "DISCNUMBER", strconv.Itoa(it.DiscNo))
+		add("disc_no", strconv.Itoa(it.DiscNo))
 	}
 	return out, nil
 }

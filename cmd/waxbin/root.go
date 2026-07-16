@@ -63,6 +63,7 @@ func newRootCmd() *cobra.Command {
 		newTrashCmd(g),
 		newInboxCmd(g),
 		newImportCmd(g),
+		newEditCmd(g),
 		newLockCmd(g),
 		newUnlockCmd(g),
 		newProvenanceCmd(g),
@@ -195,3 +196,6 @@ func printJSON(cmd *cobra.Command, data any) error {
 }
 
 func out(cmd *cobra.Command) io.Writer { return cmd.OutOrStdout() }
+
+// errOut is the stream for advisory warnings that must not pollute --json stdout.
+func errOut(cmd *cobra.Command) io.Writer { return cmd.ErrOrStderr() }

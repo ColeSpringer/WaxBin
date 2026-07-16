@@ -11,6 +11,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/colespringer/waxbin/identity"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/waxerr"
 	waxlabel "github.com/colespringer/waxlabel"
@@ -653,29 +654,11 @@ func firstTag(doc *waxlabel.Document, key tag.Key) string {
 	return strings.TrimSpace(v[0])
 }
 
-// creditSplitRe are the UNAMBIGUOUS separators between credited people in one tag
-// value: a semicolon, slash, or ampersand ("Gaiman & Pratchett", "A; B", "A / B").
-// It deliberately does NOT split on a bare comma (which is also the "Last, First"
-// name format) or the word "and" (common inside a single entity, e.g. a publisher),
-// so a single credited person is not shattered into bogus contributor entities.
-var creditSplitRe = regexp.MustCompile(`\s*[;/&]\s*`)
-
 // SplitCredits splits a combined credit string (authors or narrators) into trimmed
-// individual names, dropping empties. It is shared by the adapter (narrators) and
-// the scanner (authors) so both split a credit the same way.
-func SplitCredits(s string) []string {
-	if strings.TrimSpace(s) == "" {
-		return nil
-	}
-	parts := creditSplitRe.Split(s, -1)
-	out := make([]string, 0, len(parts))
-	for _, p := range parts {
-		if p = strings.TrimSpace(p); p != "" {
-			out = append(out, p)
-		}
-	}
-	return out
-}
+// individual names. It delegates to identity.SplitCredits, the canonical shared
+// splitter, and stays here for the adapter/scanner callers that reference
+// meta.SplitCredits.
+func SplitCredits(s string) []string { return identity.SplitCredits(s) }
 
 // seriesSeqRe pulls a trailing sequence off a series/grouping value, but only when
 // a clear marker precedes the number ('#' or book/part/vol[ume]), so a series name

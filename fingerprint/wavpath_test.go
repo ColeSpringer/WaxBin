@@ -14,7 +14,7 @@ import (
 // analyze pass uses (WAV -> Engine.Mono at InternalRate -> Compute): a transcode
 // of one recording both scores high and shares index terms, while an unrelated
 // track does neither. This is the regression guard for the end-to-end grouping,
-// so it must track the route the pass actually takes — decoding straight to
+// so it must track the route the pass actually takes, decoding straight to
 // InternalRate, which makes Compute's own resample a no-op.
 func TestFingerprintThroughWAVPath(t *testing.T) {
 	const rate = 22050

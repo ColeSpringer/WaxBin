@@ -9,6 +9,27 @@ import (
 	"github.com/colespringer/waxbin/internal/testaudio"
 )
 
+// TestTagKeyForField pins the canonical field-to-tag-key map that both the organize
+// tag-write and the catalog field-edit write-back share, so the two never drift.
+func TestTagKeyForField(t *testing.T) {
+	want := map[string]string{
+		"title": "TITLE", "artist": "ARTIST", "album": "ALBUM", "album_artist": "ALBUMARTIST",
+		"composer": "COMPOSER", "comment": "COMMENT", "genre": "GENRE", "year": "DATE",
+		"track_no": "TRACKNUMBER", "disc_no": "DISCNUMBER",
+	}
+	for field, wantKey := range want {
+		if got, ok := TagKeyForField(field); !ok || got != wantKey {
+			t.Errorf("TagKeyForField(%q) = %q, %v; want %q, true", field, got, ok, wantKey)
+		}
+	}
+	// A field with no on-disk tag correspondence (a book-only field, or a bogus name).
+	for _, f := range []string{"author", "narrator", "series", "subtitle", "nope"} {
+		if _, ok := TagKeyForField(f); ok {
+			t.Errorf("TagKeyForField(%q): want no mapping", f)
+		}
+	}
+}
+
 // TestWriterRoundTripPreservesEssence writes a tag and confirms it reads back while
 // the audio essence hash is unchanged (a tag edit must never alter audio).
 func TestWriterRoundTripPreservesEssence(t *testing.T) {

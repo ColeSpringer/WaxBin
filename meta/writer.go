@@ -31,6 +31,30 @@ type TagEdit struct {
 	Values []string
 }
 
+// fieldTagKeys maps a catalog metadata field name to its canonical WaxLabel tag key.
+// It is the one place that correspondence lives. Both the organize tag-write and the
+// catalog field-edit write-back look up their keys through TagKeyForField, so the two
+// cannot drift apart.
+var fieldTagKeys = map[string]string{
+	"title":        "TITLE",
+	"artist":       "ARTIST",
+	"album":        "ALBUM",
+	"album_artist": "ALBUMARTIST",
+	"composer":     "COMPOSER",
+	"comment":      "COMMENT",
+	"genre":        "GENRE",
+	"year":         "DATE",
+	"track_no":     "TRACKNUMBER",
+	"disc_no":      "DISCNUMBER",
+}
+
+// TagKeyForField returns the canonical WaxLabel tag key an on-disk write uses for a
+// catalog field name, and whether the field has one.
+func TagKeyForField(field string) (string, bool) {
+	k, ok := fieldTagKeys[field]
+	return k, ok
+}
+
 // WriteResult reports the file's on-disk state after a write. When Changed is false
 // the edits were a no-op and the file was not rewritten (Size/MTimeNS/ContentHash
 // are left zero, since the caller already holds the current values).

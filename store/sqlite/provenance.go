@@ -29,9 +29,16 @@ func (s *Store) setLock(ctx context.Context, itemPID model.PID, field string, lo
 		return waxerr.New(waxerr.CodeInvalid, op, "not a lockable metadata field: "+field)
 	}
 	return s.writeTx(ctx, func(tx *sql.Tx) error {
-		itemID, err := itemIDByPID(ctx, tx, itemPID, op)
+		itemID, kind, err := itemIDKindByPIDTx(ctx, tx, itemPID, op)
 		if err != nil {
 			return err
+		}
+		// Which fields are lockable depends on the kind. MetadataFields is the union of
+		// the track and book vocabularies, so guard against locking a field that does not
+		// apply to this item's kind, such as author on a track. That would leave an inert
+		// junk provenance row, the very thing the whitelist exists to prevent.
+		if allowed := editableFieldsForKind(kind); allowed == nil || !allowed[field] {
+			return waxerr.New(waxerr.CodeInvalid, op, "field "+field+" is not valid for a "+kind+" item")
 		}
 		// Idempotent: if the field is already in the desired lock state, do nothing
 		// and emit no delta. Without this, unlocking a field with no row would
@@ -108,7 +115,8 @@ func (s *Store) FieldProvenance(ctx context.Context, itemPID model.PID) ([]model
 	if _, err := itemIDByPIDRead(ctx, s.read, itemPID, op); err != nil {
 		return nil, err
 	}
-	rows, err := s.read.QueryContext(ctx, `SELECT fp.field, fp.source, fp.locked, COALESCE(fp.value,''), fp.updated_at
+	rows, err := s.read.QueryContext(ctx, `SELECT fp.field, fp.source, fp.locked,
+		COALESCE(fp.value,''), COALESCE(fp.provider,''), fp.updated_at
 		FROM field_provenance fp JOIN playable_item pi ON pi.id = fp.item_id
 		WHERE pi.pid = ? ORDER BY fp.field`, string(itemPID))
 	if err != nil {
@@ -120,7 +128,7 @@ func (s *Store) FieldProvenance(ctx context.Context, itemPID model.PID) ([]model
 		var fp model.FieldProvenance
 		var source string
 		var locked int
-		if err := rows.Scan(&fp.Field, &source, &locked, &fp.Value, &fp.UpdatedAt); err != nil {
+		if err := rows.Scan(&fp.Field, &source, &locked, &fp.Value, &fp.Provider, &fp.UpdatedAt); err != nil {
 			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		fp.ItemPID = itemPID

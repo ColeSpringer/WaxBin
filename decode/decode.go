@@ -5,7 +5,7 @@
 //
 // Decoding is unconditional and universal: every container WaxBin can tag-read,
 // it can decode, on every host, with no external binaries and no CGO. There is
-// therefore no decoder registry and no per-codec capability gate — the questions
+// therefore no decoder registry and no per-codec capability gate. The questions
 // those answered ("is ffmpeg here", "which codecs does this build cover") no
 // longer have interesting answers. What remains is an adapter: PCM, the two
 // decode entry points the analyze pass needs, and Coverage for doctor.

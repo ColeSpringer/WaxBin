@@ -22,11 +22,15 @@ func (s ProvenanceSource) Valid() bool {
 	}
 }
 
-// MetadataFields enumerates the curatable, lockable item fields. It is the
-// whitelist behind lock/unlock and provenance edits, mirroring the query field
-// whitelist: a field outside this set is rejected rather than stored, so callers
-// cannot create junk provenance rows.
+// MetadataFields enumerates the curatable, lockable item fields across both the
+// music/track and audiobook vocabularies. It is the whitelist behind lock/unlock and
+// provenance edits, and works like the query field whitelist: a field outside this set
+// is rejected rather than stored, so callers cannot create junk provenance rows. Which
+// fields actually apply to a given item is kind-specific, and the editor enforces that.
+// This set is the union of both kinds, so a book's author and a track's composer can
+// each be locked.
 var MetadataFields = map[string]bool{
+	// Shared and track fields.
 	"title":        true,
 	"artist":       true,
 	"album_artist": true,
@@ -37,18 +41,24 @@ var MetadataFields = map[string]bool{
 	"track_no":     true,
 	"disc_no":      true,
 	"comment":      true,
+	// Audiobook fields.
+	"author":   true,
+	"narrator": true,
+	"series":   true,
+	"subtitle": true,
 }
 
 // IsMetadataField reports whether field is a curatable/lockable metadata field.
 func IsMetadataField(field string) bool { return MetadataFields[field] }
 
-// FieldProvenance is one provenance row: a field's source, lock state, and the
-// curated value when a user set one.
+// FieldProvenance is one provenance row: a field's source, lock state, the curated
+// value when a user set one, and the provider that supplied an enrichment value.
 type FieldProvenance struct {
 	ItemPID   PID
 	Field     string
 	Source    ProvenanceSource
 	Locked    bool
 	Value     string
-	UpdatedAt int64 // unix nanoseconds
+	Provider  string // enrichment provider id (empty for tag/user/organize rows)
+	UpdatedAt int64  // unix nanoseconds
 }
