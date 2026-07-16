@@ -153,7 +153,7 @@ WHERE COALESCE(ar.track_count, -1) <>
    OR COALESCE(ar.release_group_count, -1) <>
         (SELECT COUNT(*) FROM release_group rg WHERE rg.primary_artist_id = a.id)
    OR COALESCE(ar.total_duration_ms, -1) <>
-        (SELECT COALESCE(SUM(f.duration_ms), 0) FROM track t
+        (SELECT COALESCE(SUM(` + itemEffectiveDurationExpr + `), 0) FROM track t
            LEFT JOIN item_file pf ON pf.item_id = t.item_id AND pf.role = 'primary'
            LEFT JOIN file f ON f.id = pf.file_id
          WHERE t.artist_id = a.id)`
@@ -164,7 +164,7 @@ LEFT JOIN genre_rollup gr ON gr.genre_id = g.id
 WHERE COALESCE(gr.track_count, -1) <>
         (SELECT COUNT(DISTINCT ig.item_id) FROM item_genre ig WHERE ig.genre_id = g.id)
    OR COALESCE(gr.total_duration_ms, -1) <>
-        (SELECT COALESCE(SUM(f.duration_ms), 0) FROM item_genre ig
+        (SELECT COALESCE(SUM(` + itemEffectiveDurationExpr + `), 0) FROM item_genre ig
            LEFT JOIN item_file pf ON pf.item_id = ig.item_id
            LEFT JOIN file f ON f.id = pf.file_id
          WHERE ig.genre_id = g.id)`
@@ -187,7 +187,7 @@ WHERE COALESCE(rr.track_count, -1) <>
         (SELECT COUNT(DISTINCT t.item_id) FROM track t
            JOIN album al ON al.id = t.album_id WHERE al.release_group_id = rg.id)
    OR COALESCE(rr.total_duration_ms, -1) <>
-        (SELECT COALESCE(SUM(f.duration_ms), 0) FROM track t
+        (SELECT COALESCE(SUM(` + itemEffectiveDurationExpr + `), 0) FROM track t
            JOIN album al ON al.id = t.album_id
            LEFT JOIN item_file pf ON pf.item_id = t.item_id AND pf.role = 'primary'
            LEFT JOIN file f ON f.id = pf.file_id

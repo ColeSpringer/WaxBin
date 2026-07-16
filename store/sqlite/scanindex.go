@@ -25,7 +25,7 @@ func (s *Store) LoadScopedFileIndex(ctx context.Context, libraryID int64, scopeP
 	// fast-pathed: a restored file with the same size+mtime must go through the full
 	// path to flip its item back to present (a fast-path skip would leave it missing).
 	// Such a file, if still gone, simply is not re-reconciled (it is already missing).
-	fq := `SELECT f.id, f.pid, f.path, f.size, f.mtime_ns, COALESCE(pi.pid,'')
+	fq := `SELECT f.id, f.pid, f.path, f.size, f.mtime_ns, COALESCE(pi.pid,''), COALESCE(pi.kind,'')
 		FROM file f
 		LEFT JOIN item_file itf ON itf.file_id = f.id
 		LEFT JOIN playable_item pi ON pi.id = itf.item_id
@@ -39,6 +39,12 @@ func (s *Store) LoadScopedFileIndex(ctx context.Context, libraryID int64, scopeP
 			args = append(args, hi)
 		}
 	}
+	// One row per file. A single-file rip backs N virtual tracks through N item_file
+	// edges, so without the GROUP BY that file would return N identical rows; the
+	// pid/kind of an arbitrary backing item is picked, which is all the fast-path needs
+	// (every virtual track is a present 'track'). A normal track or book part has one
+	// edge, so the grouping is a no-op for them.
+	fq += " GROUP BY f.id"
 
 	rows, err := s.read.QueryContext(ctx, fq, args...)
 	if err != nil {
@@ -48,14 +54,17 @@ func (s *Store) LoadScopedFileIndex(ctx context.Context, libraryID int64, scopeP
 	pathByID := make(map[int64]string)
 	for rows.Next() {
 		var id int64
-		var fpid, ipid string
+		var fpid, ipid, ikind string
 		var path []byte
 		var size, mtime int64
-		if err := rows.Scan(&id, &fpid, &path, &size, &mtime, &ipid); err != nil {
+		if err := rows.Scan(&id, &fpid, &path, &size, &mtime, &ipid, &ikind); err != nil {
 			rows.Close()
 			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
-		byID[id] = &model.ScopedFile{FilePID: model.PID(fpid), ItemPID: model.PID(ipid), Size: size, MTimeNS: mtime}
+		byID[id] = &model.ScopedFile{
+			FilePID: model.PID(fpid), ItemPID: model.PID(ipid), ItemKind: model.Kind(ikind),
+			Size: size, MTimeNS: mtime,
+		}
 		pathByID[id] = string(path)
 	}
 	if err := rows.Err(); err != nil {

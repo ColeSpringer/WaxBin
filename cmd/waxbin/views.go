@@ -46,6 +46,11 @@ type itemView struct {
 	Codec       string `json:"codec,omitempty"`
 	Path        string `json:"path,omitempty"`
 	FilePID     string `json:"filePid,omitempty"`
+	// A virtual track (a cue TRACK of a single-file rip) plays only [startMs, endMs)
+	// within the shared file. Present only for such an item, so a player knows to seek.
+	Virtual bool  `json:"virtual,omitempty"`
+	StartMS int64 `json:"startMs,omitempty"`
+	EndMS   int64 `json:"endMs,omitempty"`
 }
 
 func toItemView(v *model.ItemView) itemView {
@@ -54,6 +59,7 @@ func toItemView(v *model.ItemView) itemView {
 		Artist: v.Artist, AlbumArtist: v.AlbumArtist, Album: v.Album, Track: v.TrackNo,
 		Disc: v.DiscNo, Year: v.Year, Genre: v.Genre, Source: string(v.Source),
 		DurationMS: v.DurationMS, Codec: v.Codec, Path: v.DisplayPath, FilePID: string(v.FilePID),
+		Virtual: v.Virtual, StartMS: v.StartMS, EndMS: v.EndMS,
 	}
 }
 

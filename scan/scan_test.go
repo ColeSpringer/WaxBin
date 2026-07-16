@@ -226,12 +226,12 @@ func TestScanCueSidecarReadableButEmpty(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "book.cue"), []byte("REM just a comment\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	chapters, obs, _, ok := scanCueSidecar(audio)
+	sheet, obs, _, ok := scanCueSidecar(audio)
 	if !ok {
 		t.Fatal("scanCueSidecar reported not-readable for a readable .cue; its observation must be recorded so the fast-path does not re-parse it forever")
 	}
-	if len(chapters) != 0 {
-		t.Errorf("chapters = %v, want none from a chapterless cue", chapters)
+	if sheet != nil {
+		t.Errorf("sheet = %v, want nil from a trackless cue", sheet)
 	}
 	if obs.Kind != model.AuxCue || string(obs.Path) != filepath.Join(dir, "book.cue") || obs.Size == 0 {
 		t.Errorf("obs = %+v, want a populated AuxCue observation", obs)

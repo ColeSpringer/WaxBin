@@ -697,12 +697,12 @@ func TestOversizedCueSidecarSkipped(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "book.cue"), []byte(big.String()), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	chapters, obs, diags, ok := scanCueSidecar(audio)
+	sheet, obs, diags, ok := scanCueSidecar(audio)
 	if !ok {
 		t.Fatal("oversized .cue reported not-readable; it must report its skip, not vanish")
 	}
-	if len(chapters) != 0 {
-		t.Errorf("chapters = %d, want 0: the file was never read", len(chapters))
+	if sheet != nil {
+		t.Errorf("sheet = %+v, want nil: the file was never read", sheet)
 	}
 	if obs.Size == 0 || len(obs.Hash) != 0 {
 		t.Errorf("obs = %+v, want a stat-only observation (size set, no content hash)", obs)

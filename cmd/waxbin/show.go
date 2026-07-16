@@ -47,6 +47,10 @@ func newShowCmd(g *globals) *cobra.Command {
 			fmt.Fprintf(w, "genre:        %s\n", v.Genre)
 			fmt.Fprintf(w, "codec:        %s\n", v.Codec)
 			fmt.Fprintf(w, "duration(ms): %d\n", v.DurationMS)
+			if v.Virtual {
+				// A cue-carved virtual track plays only this window of the shared file.
+				fmt.Fprintf(w, "window(ms):   [%d, %d) of a shared file\n", v.StartMS, v.EndMS)
+			}
 			if ld != nil {
 				fmt.Fprintf(w, "replaygain:   track %+.2f dB (peak %.3f)", ld.TrackGainDB, ld.TrackPeak)
 				if ld.HasAlbum {

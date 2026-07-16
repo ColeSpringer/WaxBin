@@ -171,7 +171,7 @@ INSERT INTO artist_rollup(artist_id, release_group_count, track_count, total_dur
 SELECT a.id,
        (SELECT COUNT(*) FROM release_group rg WHERE rg.primary_artist_id = a.id),
        COUNT(DISTINCT t.item_id),
-       COALESCE(SUM(f.duration_ms), 0),
+       COALESCE(SUM(` + itemEffectiveDurationExpr + `), 0),
        ?
 FROM artist a
 LEFT JOIN track t      ON t.artist_id = a.id
@@ -184,7 +184,7 @@ const releaseGroupRollupSelect = `
 INSERT INTO release_group_rollup(release_group_id, track_count, total_duration_ms, updated_at)
 SELECT rg.id,
        COUNT(DISTINCT t.item_id),
-       COALESCE(SUM(f.duration_ms), 0),
+       COALESCE(SUM(` + itemEffectiveDurationExpr + `), 0),
        ?
 FROM release_group rg
 LEFT JOIN album al     ON al.release_group_id = rg.id
@@ -197,12 +197,14 @@ GROUP BY rg.id`
 // The genre duration sums ALL of an item's files, not just the primary, so a
 // multi-file audiobook contributes its whole running time (the artist and
 // release-group rollups join through track, which books never have, so they stay
-// single-file by construction and need no such change).
+// single-file by construction and need no such change). A virtual track has a single
+// primary edge carrying its window, which the effective-duration expression scopes to
+// that window rather than the whole shared file.
 const genreRollupSelect = `
 INSERT INTO genre_rollup(genre_id, track_count, total_duration_ms, updated_at)
 SELECT g.id,
        COUNT(DISTINCT ig.item_id),
-       COALESCE(SUM(f.duration_ms), 0),
+       COALESCE(SUM(` + itemEffectiveDurationExpr + `), 0),
        ?
 FROM genre g
 LEFT JOIN item_genre ig ON ig.genre_id = g.id

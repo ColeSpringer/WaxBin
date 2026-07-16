@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -367,20 +368,21 @@ func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, p
 	// for the file, so one that comes back clean clears its own stale rows.
 	diags := append(fm.Diagnostics, sidecarDiags...)
 
-	// A sibling .cue is examined for both kinds when the file carries no embedded
-	// chapters, though only a book applies its chapters.
+	// A sibling .cue is examined when the file carries no embedded chapters. A book
+	// applies its tracks as chapters; a non-book single file with a multi-track .cue is
+	// an album rip whose tracks become virtual tracks.
 	//
 	// The observation has to be recorded either way. The fast path stat-compares only
 	// the sidecars it holds an observation for, so a track with a .cue that yields no
 	// chapters would read as new on every scan, route to the full path, and re-hash
 	// the audio each time. It is the same trap the directory-cover stat fallback
 	// already avoids.
-	var cueChapters []model.Chapter
+	var cueSheet *meta.CueSheet
 	if len(tags.Chapters) == 0 {
-		if ch, cueObs, cueDiags, ok := scanCueSidecar(path); ok {
+		if sheet, cueObs, cueDiags, ok := scanCueSidecar(path); ok {
 			aux = append(aux, cueObs)
 			diags = append(diags, cueDiags...)
-			cueChapters = ch
+			cueSheet = sheet
 		}
 	}
 
@@ -396,19 +398,26 @@ func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, p
 		isBook = false
 	}
 	var out *model.ScanItemResult
-	if isBook {
+	switch {
+	case !isBook && cueSheet != nil && len(cueSheet.Tracks) >= 2:
+		// A single file with a multi-track .cue is a single-file album rip: carve each
+		// cue TRACK into its own virtual track with an offset window, rather than
+		// cataloguing the whole file as one track.
+		out, err = s.cat.PutScannedVirtualTracks(ctx,
+			virtualTracksInput(lib.ID, file, tags, essenceHash, cueSheet, cover, aux, diags))
+	case isBook:
 		bin := bookInput(lib.ID, file, tags, essenceHash, cover)
 		// With no embedded chapters, a sibling .cue fills them (marked source='cue' so
 		// embedded chapters still win). Its observation was recorded above whether or not
 		// it yielded any; apply the chapters only when it did.
-		if len(cueChapters) > 0 {
-			bin.Chapters, bin.ChapterSource = cueChapters, "cue"
+		if cueSheet != nil {
+			bin.Chapters, bin.ChapterSource = cueSheet.Chapters(), "cue"
 		}
 		bin.AuxObservations = aux
 		bin.PreferredItemPID = adoptedPID(sc, fm)
 		bin.Diagnostics = diags
 		out, err = s.cat.PutScannedBook(ctx, bin)
-	} else {
+	default:
 		out, err = s.cat.PutScannedTrack(ctx, model.PutScannedTrackInput{
 			LibraryID: lib.ID,
 			File:      file,
@@ -526,6 +535,76 @@ func bookInput(libraryID int64, file model.File, tags model.Tags, essenceHash st
 		ChapterSource: chapterSource,
 		CoverArt:      cover,
 		Acquisition:   tags.Acquisition,
+	}
+}
+
+// virtualTracksInput composes a single-file album rip and its .cue sheet into a
+// virtual-track persistence input. Album-level fields prefer the cue header and fall
+// back to the file's own tags. Each cue TRACK becomes a virtual track whose start is
+// its INDEX 01 offset and whose end is the next track's start (the final track runs
+// to the file's probed duration, or open when that is unknown), and whose per-track
+// performer falls back to the album artist. Identity is offset-anchored via
+// VirtualTrackKey, so a rescan re-keys the same tracks and a per-track title retag
+// does not fork identity.
+func virtualTracksInput(libraryID int64, file model.File, tags model.Tags, essenceHash string, sheet *meta.CueSheet, cover *model.ArtImage, aux []model.AuxObservation, diags []model.FileDiagnostic) model.PutScannedVirtualTracksInput {
+	album := firstNonEmpty(sheet.Title, tags.Album, tags.Title)
+	albumArtist := firstNonEmpty(sheet.Performer, tags.AlbumArtist, tags.Artist)
+	genre := firstNonEmpty(sheet.Genre, tags.Genre)
+	year := sheet.Year
+	if year == 0 {
+		year = tags.Year
+	}
+
+	// Sort by start so each track's end can be read off the next track's start; a
+	// well-formed cue is already ordered, but a malformed one must not yield a negative
+	// window.
+	cts := append([]meta.CueTrack(nil), sheet.Tracks...)
+	sort.SliceStable(cts, func(i, j int) bool { return cts[i].StartMS < cts[j].StartMS })
+
+	tracks := make([]model.VirtualTrack, 0, len(cts))
+	for i, ct := range cts {
+		start := ct.StartMS
+		var end int64
+		if i+1 < len(cts) {
+			end = cts[i+1].StartMS
+		} else if file.DurationMS > start {
+			end = file.DurationMS // the final track runs to the end of the file
+		}
+		artist := firstNonEmpty(ct.Performer, albumArtist)
+		title := ct.Title
+		if title == "" {
+			title = fmt.Sprintf("Track %02d", ct.Number)
+		}
+		tracks = append(tracks, model.VirtualTrack{
+			Item: model.PlayableItem{
+				Kind:        model.KindTrack,
+				State:       model.StatePresent,
+				Title:       title,
+				SortKey:     model.SortKey(title),
+				IdentityKey: identity.VirtualTrackKey(essenceHash, ct.Number, start),
+			},
+			Track: model.Track{
+				Artist:      artist,
+				ArtistSort:  model.SortKey(artist),
+				Album:       album,
+				AlbumArtist: albumArtist,
+				TrackNo:     ct.Number,
+				Year:        year,
+				Genre:       genre,
+				Genres:      identity.SplitGenres(genre),
+			},
+			StartMS: start,
+			EndMS:   end,
+		})
+	}
+	return model.PutScannedVirtualTracksInput{
+		LibraryID:       libraryID,
+		File:            file,
+		Tracks:          tracks,
+		CoverArt:        cover,
+		AuxObservations: aux,
+		Acquisition:     tags.Acquisition,
+		Diagnostics:     diags,
 	}
 }
 
@@ -717,20 +796,20 @@ func lrcPartialDetail(lines []model.SyncedLine, dropped []int) string {
 		len(dropped), first, len(lines))
 }
 
-// scanCueSidecar reads a sibling .cue for an audio file, parsing it into chapters and
-// returning its on-disk observation. The bool reports whether the .cue was READABLE,
-// meaning the observation is valid; it does not report whether the .cue yielded
-// chapters. A readable .cue that parses to zero chapters still returns true with an
-// empty chapter slice so the caller can record its observation. Recording it either
-// way is what keeps the fast-path, which only stat-compares recorded sidecars, from
-// treating a chapterless .cue as new on every scan and forcing a full reprocess.
+// scanCueSidecar reads a sibling .cue for an audio file, parsing it into a cue sheet
+// and returning its on-disk observation. The bool reports whether the .cue was
+// READABLE, meaning the observation is valid; it does not report whether the .cue
+// yielded any tracks. A readable .cue that parses to zero tracks still returns true
+// with a nil sheet so the caller can record its observation. Recording it either way
+// is what keeps the fast-path, which only stat-compares recorded sidecars, from
+// treating a trackless .cue as new on every scan and forcing a full reprocess.
 // WaxBin keeps the .cue on disk as an uncatalogued sidecar (it is already in
-// organize's set); only the parsed chapters land in the catalog.
-// An oversized .cue yields no chapters but still reports readable, with a stat-only
+// organize's set); only the parsed tracks/chapters land in the catalog.
+// An oversized .cue yields no sheet but still reports readable, with a stat-only
 // observation and a skip diagnostic: the caller records the observation (so the
-// fast path stops re-routing here) and applies no chapters, while the diagnostic
-// keeps the skip from being invisible.
-func scanCueSidecar(audioPath string) ([]model.Chapter, model.AuxObservation, []model.FileDiagnostic, bool) {
+// fast path stops re-routing here) and applies nothing, while the diagnostic keeps
+// the skip from being invisible.
+func scanCueSidecar(audioPath string) (*meta.CueSheet, model.AuxObservation, []model.FileDiagnostic, bool) {
 	cuePath := strings.TrimSuffix(audioPath, filepath.Ext(audioPath)) + ".cue"
 	// Stat before reading, so the same memory guard the .lrc read and the fast path
 	// apply also covers the .cue.
@@ -753,7 +832,7 @@ func scanCueSidecar(audioPath string) ([]model.Chapter, model.AuxObservation, []
 		Kind: model.AuxCue, Path: []byte(cuePath), Hash: art.Hash(data),
 		Size: info.Size(), MTimeNS: info.ModTime().UnixNano(),
 	}
-	return meta.ParseCue(string(data)), obs, nil, true
+	return meta.ParseCueSheet(string(data)), obs, nil, true
 }
 
 // reconcileFastPathSidecars re-checks an unchanged audio file's sidecars in one pass.
@@ -801,20 +880,31 @@ func (s *Scanner) reconcileFastPathSidecars(ctx context.Context, path string, kn
 		return true
 	}
 
-	// .cue, a book's chapters when it yields any; a vanish or empty cue reverts to
-	// embedded/synthetic (full path). The store applies chapters only to a book item.
+	// .cue. A book applies its chapters cheaply in place. A track (or a virtual-track
+	// container) routes ANY .cue change to the full path instead: the full-path
+	// discriminator owns creating, reconciling, and tearing down the virtual-track set,
+	// and the fast path has no seam for it. A book with a changed/vanished cue keeps its
+	// cheap chapter update; a non-book only needs to detect the change (statSidecar), not
+	// read the file, since it re-reads on the full path anyway.
 	cuePath := strings.TrimSuffix(path, filepath.Ext(path)) + ".cue"
-	switch state, data, obs := checkSidecarFile(cuePath, model.AuxCue, stored); state {
-	case sidecarVanished, sidecarOversized:
-		return true
-	case sidecarChanged:
-		chapters := meta.ParseCue(string(data))
-		if len(chapters) == 0 {
+	if known.ItemKind == model.KindBook {
+		switch state, data, obs := checkSidecarFile(cuePath, model.AuxCue, stored); state {
+		case sidecarVanished, sidecarOversized:
+			return true
+		case sidecarChanged:
+			chapters := meta.ParseCue(string(data))
+			if len(chapters) == 0 {
+				return true
+			}
+			upd.ReplaceChapters, upd.Chapters, upd.ChapterSource = true, chapters, "cue"
+			upd.Observations = append(upd.Observations, obs)
+			dirty = true
+		}
+	} else {
+		switch statSidecar(cuePath, model.AuxCue, stored) {
+		case sidecarChanged, sidecarVanished, sidecarOversized:
 			return true
 		}
-		upd.ReplaceChapters, upd.Chapters, upd.ChapterSource = true, chapters, "cue"
-		upd.Observations = append(upd.Observations, obs)
-		dirty = true
 	}
 
 	if !dirty {

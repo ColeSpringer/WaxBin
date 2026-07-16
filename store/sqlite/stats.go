@@ -55,7 +55,7 @@ func (s *Store) Stats(ctx context.Context, userPID model.PID, topN int) (*read.S
 	// Podcast episodes are excluded to match the track/book item counts above (they
 	// are a separate medium surfaced via the podcast commands, not the music totals).
 	if err := s.read.QueryRowContext(ctx,
-		`SELECT COALESCE(SUM(f.duration_ms), 0) FROM item_file pf
+		`SELECT COALESCE(SUM(`+itemEffectiveDurationExpr+`), 0) FROM item_file pf
 		 JOIN file f ON f.id = pf.file_id
 		 JOIN playable_item pi ON pi.id = pf.item_id
 		 WHERE pi.kind <> 'episode'`).Scan(&out.TotalDuration); err != nil {

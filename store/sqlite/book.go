@@ -26,7 +26,7 @@ func (s *Store) PutScannedBook(ctx context.Context, in model.PutScannedBookInput
 	err := s.writeTx(ctx, func(tx *sql.Tx) error {
 		now := nowNS()
 
-		fileID, filePID, err := s.resolveBookFile(ctx, tx, in.LibraryID, in.File, now, res)
+		fileID, filePID, err := s.resolveScannedFile(ctx, tx, in.LibraryID, in.File, now, res)
 		if err != nil {
 			return err
 		}
@@ -189,12 +189,18 @@ func (s *Store) PutScannedBook(ctx context.Context, in model.PutScannedBookInput
 	return res, nil
 }
 
-// resolveBookFile finds-or-creates the file row for a book part, preserving the
-// pid on a path match (rescan/retag) or an essence match whose old path is gone (a
-// move). It mirrors resolveFile but needs no prior-essence return: a book's
-// identity is its book key, not the file essence, so an essence-algorithm change
-// over unchanged bytes does not threaten item identity.
-func (s *Store) resolveBookFile(ctx context.Context, tx *sql.Tx, libraryID int64, file model.File, now int64, res *model.ScanItemResult) (int64, model.PID, error) {
+// resolveScannedFile finds-or-creates the file row for a scanned audio file,
+// preserving the pid on a path match (rescan/retag) or an essence match whose old
+// path is gone (a move). The book and virtual-track paths share it. Unlike resolveFile
+// it returns no prior-essence hash, because neither caller does the in-place identity
+// preservation PutScannedTrack runs when an essence-algorithm change leaves the bytes
+// untouched. A book keys on its book key (ASIN/ISBN/title), so it is
+// essence-independent. A virtual track's key embeds the file essence, so an
+// essence-algorithm change re-keys the whole set and forks the tracks, the way a
+// whole-file track without an MBID would if PutScannedTrack did not preserve it in
+// place. That is a known limitation, unreachable before 1.0 (the essence version is
+// frozen); a real re-encode changes the bytes and reconciles normally.
+func (s *Store) resolveScannedFile(ctx context.Context, tx *sql.Tx, libraryID int64, file model.File, now int64, res *model.ScanItemResult) (int64, model.PID, error) {
 	if existing, err := fileByPathTx(ctx, tx, file.Path); err != nil {
 		return 0, "", err
 	} else if existing != nil {

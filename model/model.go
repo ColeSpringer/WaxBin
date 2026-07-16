@@ -262,6 +262,16 @@ type ItemView struct {
 	// carries the source type used at ingest. Queries can filter on this field.
 	Source SourceType
 
+	// Virtual reports that this item is a virtual track carved out of a shared
+	// single-file album rip by a .cue sheet: it plays only the window [StartMS, EndMS)
+	// within the backing file rather than the whole file. A player seeks to StartMS and
+	// stops at EndMS. StartMS/EndMS are the file-relative offsets of that window and are
+	// 0 for a whole-file item (Virtual is false). EndMS is 0 when the window runs to the
+	// end of the file and the file's own duration is unknown.
+	Virtual bool
+	StartMS int64
+	EndMS   int64
+
 	FilePID     PID
 	Path        []byte // raw bytes of the primary file path
 	DisplayPath string

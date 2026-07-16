@@ -134,6 +134,12 @@ func (s *Store) RefreshAlbumGain(ctx context.Context) error {
 	defer rows.Close()
 	var all []albumEntry
 	byAlbum := map[int64][]albumEntry{}
+	// A single-file rip backs N virtual tracks through N primary edges, so the join
+	// above returns the file's one loudness row N times. Each row must still drive the
+	// per-item write and delta below (all of `all`), but the album-gain WEIGHTING has to
+	// count that file (one audio stream, one measurement) exactly once, or the rip is
+	// over-weighted N times in a mixed album. Deduplicate the aggregation input by file.
+	seenFileInAlbum := map[[2]int64]bool{}
 	for rows.Next() {
 		var e albumEntry
 		if err := rows.Scan(&e.fileID, &e.itemPID, &e.albumID, &e.gainDB, &e.peak, &e.duration,
@@ -142,7 +148,11 @@ func (s *Store) RefreshAlbumGain(ctx context.Context) error {
 		}
 		all = append(all, e)
 		if e.albumID.Valid {
-			byAlbum[e.albumID.Int64] = append(byAlbum[e.albumID.Int64], e)
+			key := [2]int64{e.albumID.Int64, e.fileID}
+			if !seenFileInAlbum[key] {
+				seenFileInAlbum[key] = true
+				byAlbum[e.albumID.Int64] = append(byAlbum[e.albumID.Int64], e)
+			}
 		}
 	}
 	if err := rows.Err(); err != nil {

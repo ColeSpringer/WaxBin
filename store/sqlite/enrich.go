@@ -458,11 +458,17 @@ const lyricsNeededPredicate = `pi.kind = 'track' AND pi.state = 'present' AND pi
 // track from the set, so the walk still advances and terminates.
 func (s *Store) ItemsNeedingLyrics(ctx context.Context, force bool, afterID int64, limit int) ([]model.EnrichTarget, error) {
 	const op = "store.ItemsNeedingLyrics"
-	stmt := `SELECT pi.id, pi.pid, pi.title, COALESCE(t.artist,''), COALESCE(t.album,''), COALESCE(f.duration_ms,0)
+	// A virtual track plays only its window of the shared file, so the duration a lyrics
+	// provider keys on must be that window (itemEffectiveDurationExpr), not the whole
+	// file. Otherwise a 3-minute cue track carved from an hour-long rip is looked up as
+	// 3600s and never matches. The primary edge is aliased pf so the shared expression
+	// applies.
+	stmt := `SELECT pi.id, pi.pid, pi.title, COALESCE(t.artist,''), COALESCE(t.album,''),
+			COALESCE(` + itemEffectiveDurationExpr + `, 0)
 		FROM playable_item pi
 		JOIN track t ON t.item_id = pi.id
-		LEFT JOIN item_file itf ON itf.item_id = pi.id AND itf.role = 'primary'
-		LEFT JOIN file f ON f.id = itf.file_id
+		LEFT JOIN item_file pf ON pf.item_id = pi.id AND pf.role = 'primary'
+		LEFT JOIN file f ON f.id = pf.file_id
 		WHERE pi.id > ? AND ` + lyricsNeededPredicate + `
 		  AND ` + notEnriched(enrichEntityLyrics, "pi.id", force) + `
 		ORDER BY pi.id LIMIT ?`

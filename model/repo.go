@@ -91,6 +91,43 @@ type PutScannedBookInput struct {
 	Diagnostics []FileDiagnostic
 }
 
+// PutScannedVirtualTracksInput carries a single-file album rip and the virtual
+// tracks a .cue sheet carves out of it. Every track shares the one backing File
+// through its own primary item_file edge, which carries the track's [StartMS, EndMS)
+// offset window; the tracks are reconciled as a SET, so a rescan adds, updates, and
+// removes the whole set against the file at once, without the single-owner detach
+// that PutScannedTrack applies to a file. The store owns PID assignment.
+type PutScannedVirtualTracksInput struct {
+	LibraryID int64
+	File      File
+	// Tracks are the virtual tracks to represent, each carved from File. An entry's
+	// Item.IdentityKey is identity.VirtualTrackKey(...) and its Track carries the cue's
+	// per-track and album-level display metadata.
+	Tracks []VirtualTrack
+	// CoverArt is the rip's cover image (embedded or directory), mapped onto each
+	// virtual track, or nil.
+	CoverArt *ArtImage
+	// AuxObservations records this file's sidecar state (the .cue, a directory cover)
+	// for the scan fast-path, exactly as the track/book inputs do.
+	AuxObservations []AuxObservation
+	// Acquisition is origin provenance from the file's own tags, recorded on each
+	// virtual track when it has no acquisition row yet.
+	Acquisition TagAcquisition
+	// Diagnostics are this file's scan-origin observations, replacing the file's whole
+	// scan-origin set.
+	Diagnostics []FileDiagnostic
+}
+
+// VirtualTrack is one cue TRACK of a single-file rip: a full track item plus the
+// [StartMS, EndMS) window it plays within the shared file. EndMS is 0 for the final
+// track when the file's own duration is unknown (it plays to the end of the file).
+type VirtualTrack struct {
+	Item    PlayableItem // Kind=KindTrack, IdentityKey=identity.VirtualTrackKey(...)
+	Track   Track
+	StartMS int64
+	EndMS   int64
+}
+
 // ScanItemResult reports what the store did for a PutScannedTrack call, enough
 // for the scanner to log and for tests to assert identity behavior.
 type ScanItemResult struct {
@@ -162,9 +199,14 @@ type AuxObservation struct {
 type ScopedFile struct {
 	FilePID PID
 	ItemPID PID
-	Size    int64
-	MTimeNS int64
-	Aux     []AuxObservation
+	// ItemKind is the kind of the item the file backs (track/book/episode), or empty
+	// for an edge-less file. The fast-path routes a changed .cue by kind: a book
+	// applies chapters cheaply in place, while a track (or a virtual-track container)
+	// falls through to the full path, which owns the virtual-track set reconcile.
+	ItemKind Kind
+	Size     int64
+	MTimeNS  int64
+	Aux      []AuxObservation
 }
 
 // SidecarUpdate carries an item's freshly re-parsed sidecar data plus the on-disk
@@ -241,6 +283,11 @@ type Catalog interface {
 
 	PutScannedTrack(ctx context.Context, in PutScannedTrackInput) (*ScanItemResult, error)
 	PutScannedBook(ctx context.Context, in PutScannedBookInput) (*ScanItemResult, error)
+	// PutScannedVirtualTracks persists the virtual tracks a .cue sheet carves out of
+	// one single-file album rip, reconciling them as a set against the shared file
+	// (add/update/remove), each with its own offset window. The result summarizes the
+	// file-level outcome; ItemCreated reports whether any virtual track was created.
+	PutScannedVirtualTracks(ctx context.Context, in PutScannedVirtualTracksInput) (*ScanItemResult, error)
 	FileByPath(ctx context.Context, path []byte) (*File, error)
 	FileByEssence(ctx context.Context, essence string) (*File, error)
 
