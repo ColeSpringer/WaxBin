@@ -28,13 +28,13 @@ func TestAlbumGainDedupsSharedRipFile(t *testing.T) {
 		},
 		Tracks: []model.VirtualTrack{
 			{
-				Item:  model.PlayableItem{Kind: model.KindTrack, State: model.StatePresent, Title: "R1", SortKey: model.SortKey("R1"), IdentityKey: identity.VirtualTrackKey("eripA", 1, 0)},
-				Track: model.Track{Artist: "Band", ArtistSort: model.SortKey("Band"), AlbumArtist: "Band", Album: "Album", TrackNo: 1},
+				Item:    model.PlayableItem{Kind: model.KindTrack, State: model.StatePresent, Title: "R1", SortKey: model.SortKey("R1"), IdentityKey: identity.VirtualTrackKey("eripA", 1, 0)},
+				Track:   model.Track{Artist: "Band", ArtistSort: model.SortKey("Band"), AlbumArtist: "Band", Album: "Album", TrackNo: 1},
 				StartMS: 0, EndMS: 100,
 			},
 			{
-				Item:  model.PlayableItem{Kind: model.KindTrack, State: model.StatePresent, Title: "R2", SortKey: model.SortKey("R2"), IdentityKey: identity.VirtualTrackKey("eripA", 2, 100)},
-				Track: model.Track{Artist: "Band", ArtistSort: model.SortKey("Band"), AlbumArtist: "Band", Album: "Album", TrackNo: 2},
+				Item:    model.PlayableItem{Kind: model.KindTrack, State: model.StatePresent, Title: "R2", SortKey: model.SortKey("R2"), IdentityKey: identity.VirtualTrackKey("eripA", 2, 100)},
+				Track:   model.Track{Artist: "Band", ArtistSort: model.SortKey("Band"), AlbumArtist: "Band", Album: "Album", TrackNo: 2},
 				StartMS: 100, EndMS: 200,
 			},
 		},
