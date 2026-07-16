@@ -1,17 +1,12 @@
--- WaxBin schema v2: the load-bearing read-side model.
--- Normalized entities (artist, release_group, album, genre) sit alongside the
--- denormalized text columns on `track` (which the item read-view still uses).
--- The writer resolves and links these entities during scan persistence; their
--- counts/durations feed the maintained rollups, and metadata feeds the FTS.
-
 -- Artist entity. Artists are resolved by normalized match_key unless stronger
--- external identifiers are available.
+-- external identifiers are available. Audiobook credits (author, narrator)
+-- point at the same rows through item_contributor.
 CREATE TABLE artist (
   id        INTEGER PRIMARY KEY,
   pid       TEXT    NOT NULL UNIQUE,
   name      TEXT    NOT NULL,            -- canonical display casing
-  sort_key  TEXT    NOT NULL,           -- WaxBin-generated, BINARY-sortable
-  match_key TEXT    NOT NULL UNIQUE,    -- normalized dedup key
+  sort_key  TEXT    NOT NULL,            -- WaxBin-generated, BINARY-sortable
+  match_key TEXT    NOT NULL UNIQUE,     -- normalized dedup key
   mbid      TEXT
 );
 CREATE INDEX artist_sort ON artist(sort_key);
@@ -34,6 +29,10 @@ CREATE TABLE artist_relation (
   kind   TEXT    NOT NULL,
   PRIMARY KEY (src_id, dst_id, kind)
 );
+-- src_id cascades ride the primary key; dst_id needs its own index so orphan
+-- GC and merges, which delete artists in batches, do not rescan the relation
+-- table once per swept artist.
+CREATE INDEX artist_relation_dst ON artist_relation(dst_id);
 
 -- The "album" abstraction for browse: groups the editions/releases of one work.
 CREATE TABLE release_group (
@@ -85,45 +84,14 @@ CREATE TABLE item_genre (
 );
 CREATE INDEX item_genre_genre ON item_genre(genre_id);
 
--- Entity links on the music subtype (denormalized text columns stay for reads).
-ALTER TABLE track ADD COLUMN artist_id       INTEGER REFERENCES artist(id) ON DELETE SET NULL;
-ALTER TABLE track ADD COLUMN album_artist_id INTEGER REFERENCES artist(id) ON DELETE SET NULL;
-ALTER TABLE track ADD COLUMN album_id        INTEGER REFERENCES album(id) ON DELETE SET NULL;
-CREATE INDEX track_artist_id ON track(artist_id);
-CREATE INDEX track_album_id  ON track(album_id);
-
--- Maintained rollups: catalog-structural counts/durations only. RefreshRollups
--- recomputes them in bulk from the base tables. Play-derived lists are never
--- rolled up.
-CREATE TABLE artist_rollup (
-  artist_id           INTEGER PRIMARY KEY REFERENCES artist(id) ON DELETE CASCADE,
-  release_group_count INTEGER NOT NULL DEFAULT 0,
-  track_count         INTEGER NOT NULL DEFAULT 0,
-  total_duration_ms   INTEGER NOT NULL DEFAULT 0,
-  updated_at          INTEGER NOT NULL
+-- Role-tagged contributor relation: a person (artist entity) credited on an
+-- item with a role, shared by music and audiobooks; position preserves credit
+-- order.
+CREATE TABLE item_contributor (
+  item_id   INTEGER NOT NULL REFERENCES playable_item(id) ON DELETE CASCADE,
+  artist_id INTEGER NOT NULL REFERENCES artist(id) ON DELETE CASCADE,
+  role      TEXT    NOT NULL,                     -- author|narrator|translator|editor
+  position  INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (item_id, role, artist_id)
 );
-CREATE TABLE release_group_rollup (
-  release_group_id  INTEGER PRIMARY KEY REFERENCES release_group(id) ON DELETE CASCADE,
-  track_count       INTEGER NOT NULL DEFAULT 0,
-  total_duration_ms INTEGER NOT NULL DEFAULT 0,
-  updated_at        INTEGER NOT NULL
-);
-CREATE TABLE genre_rollup (
-  genre_id          INTEGER PRIMARY KEY REFERENCES genre(id) ON DELETE CASCADE,
-  track_count       INTEGER NOT NULL DEFAULT 0,
-  total_duration_ms INTEGER NOT NULL DEFAULT 0,
-  updated_at        INTEGER NOT NULL
-);
-
--- Writer-maintained metadata FTS (no triggers): rowid == playable_item.id, kept
--- in sync inside the same write transaction that mutates the item.
-CREATE VIRTUAL TABLE search_fts USING fts5(
-  kind, title, subtitle, artist, album, extra,
-  tokenize = 'unicode61 remove_diacritics 2');
-
--- Transcript text lives in its own FTS so a metadata hit can outrank a body hit.
--- The table is present before transcript production so the schema contract is
--- stable.
-CREATE VIRTUAL TABLE transcript_fts USING fts5(
-  episode_id UNINDEXED, body,
-  tokenize = 'unicode61 remove_diacritics 2');
+CREATE INDEX item_contributor_artist ON item_contributor(artist_id);

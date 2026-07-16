@@ -14,11 +14,7 @@ import (
 )
 
 // Version identifies the peaks format/algorithm; a bump forces re-analysis.
-//
-// Bumped 1->2 with the WaxFlow migration: the waveform is now streamed over the
-// whole file through one Accumulator algorithm, with no 15-minute cap and no
-// separate ffmpeg path.
-const Version = 2
+const Version = 1
 
 // DefaultBuckets is the waveform resolution stored per track.
 const DefaultBuckets = 1000

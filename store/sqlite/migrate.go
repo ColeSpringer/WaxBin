@@ -6,6 +6,7 @@ import (
 	"embed"
 	"fmt"
 	"io/fs"
+	"path"
 	"sort"
 	"strconv"
 	"strings"
@@ -13,12 +14,12 @@ import (
 	"github.com/colespringer/waxbin/waxerr"
 )
 
-//go:embed migrations/*.sql
+//go:embed migrations
 var migrationsFS embed.FS
 
 // SchemaVersion is the highest migration version this build ships. A read-only
 // open against a newer DB is refused (it may rely on schema the binary lacks).
-const SchemaVersion = 26
+const SchemaVersion = 1
 
 type migration struct {
 	version int
@@ -48,7 +49,7 @@ func (s *Store) migrate(ctx context.Context) error {
 			fmt.Sprintf("catalog schema v%d is newer than this build supports (v%d)", current, SchemaVersion))
 	}
 
-	all, err := loadMigrations()
+	all, err := loadMigrations(migrationsFS)
 	if err != nil {
 		return err
 	}
@@ -140,42 +141,101 @@ func (s *Store) currentVersion(ctx context.Context) (int, error) {
 	return v, nil
 }
 
-func loadMigrations() ([]migration, error) {
-	entries, err := fs.ReadDir(migrationsFS, "migrations")
+// loadMigrations reads the migration stream from fsys (the embedded FS outside
+// of tests). A migration is either a single "NNNN_name.sql" file or an
+// "NNNN_name" directory of .sql files split by purpose. A directory is one
+// migration all the same: its files run in filename order inside the same
+// transaction and record a single schema_migrations row. The v1 baseline uses
+// the directory shape; post-1.0 changes are expected to be single files.
+func loadMigrations(fsys fs.FS) ([]migration, error) {
+	entries, err := fs.ReadDir(fsys, "migrations")
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeInternal, "store.migrate", err)
 	}
 	var ms []migration
 	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".sql") {
+		var ver int
+		var name, sql string
+		switch {
+		case e.IsDir():
+			var err error
+			if ver, name, err = parseMigrationName(e.Name()); err != nil {
+				return nil, err
+			}
+			if sql, err = readMigrationDir(fsys, path.Join("migrations", e.Name())); err != nil {
+				return nil, err
+			}
+		case strings.HasSuffix(e.Name(), ".sql"):
+			var err error
+			if ver, name, err = parseMigrationName(strings.TrimSuffix(e.Name(), ".sql")); err != nil {
+				return nil, err
+			}
+			data, err := fs.ReadFile(fsys, path.Join("migrations", e.Name()))
+			if err != nil {
+				return nil, waxerr.Wrap(waxerr.CodeInternal, "store.migrate", err)
+			}
+			sql = string(data)
+		default:
 			continue
 		}
-		ver, name, err := parseMigrationName(e.Name())
-		if err != nil {
-			return nil, err
-		}
-		data, err := migrationsFS.ReadFile("migrations/" + e.Name())
-		if err != nil {
-			return nil, waxerr.Wrap(waxerr.CodeInternal, "store.migrate", err)
-		}
-		ms = append(ms, migration{version: ver, name: name, sql: string(data)})
+		ms = append(ms, migration{version: ver, name: name, sql: sql})
 	}
 	sort.Slice(ms, func(i, j int) bool { return ms[i].version < ms[j].version })
+	for i := 1; i < len(ms); i++ {
+		if ms[i].version == ms[i-1].version {
+			return nil, waxerr.New(waxerr.CodeInternal, "store.migrate",
+				fmt.Sprintf("duplicate migration version %d (%s, %s)",
+					ms[i].version, ms[i-1].name, ms[i].name))
+		}
+	}
 	return ms, nil
 }
 
-// parseMigrationName splits "0001_init.sql" into (1, "init").
-func parseMigrationName(filename string) (int, string, error) {
-	base := strings.TrimSuffix(filename, ".sql")
+// readMigrationDir concatenates a directory migration's .sql files in filename
+// order (fs.ReadDir sorts), so the numeric prefix inside the directory controls
+// table-creation order without carrying version meaning.
+//
+// Files are joined with "\n;\n" so a file boundary is always a statement
+// boundary: a final statement missing its ';' ends at its own file instead of
+// merging into the next one, and no statement can span two files. The newline
+// keeps the ';' out of a trailing line comment, and the extra ';' after a
+// well-terminated file is an empty statement SQLite skips.
+func readMigrationDir(fsys fs.FS, dir string) (string, error) {
+	entries, err := fs.ReadDir(fsys, dir)
+	if err != nil {
+		return "", waxerr.Wrap(waxerr.CodeInternal, "store.migrate", err)
+	}
+	var b strings.Builder
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".sql") {
+			continue
+		}
+		data, err := fs.ReadFile(fsys, path.Join(dir, e.Name()))
+		if err != nil {
+			return "", waxerr.Wrap(waxerr.CodeInternal, "store.migrate", err)
+		}
+		b.Write(data)
+		b.WriteString("\n;\n")
+	}
+	if b.Len() == 0 {
+		return "", waxerr.New(waxerr.CodeInternal, "store.migrate",
+			"migration directory holds no .sql files: "+dir)
+	}
+	return b.String(), nil
+}
+
+// parseMigrationName splits "0001_init" into (1, "init"). The caller strips any
+// ".sql" suffix first.
+func parseMigrationName(base string) (int, string, error) {
 	i := strings.IndexByte(base, '_')
 	if i <= 0 {
 		return 0, "", waxerr.New(waxerr.CodeInternal, "store.migrate",
-			"bad migration filename: "+filename)
+			"bad migration name: "+base)
 	}
 	ver, err := strconv.Atoi(base[:i])
 	if err != nil {
 		return 0, "", waxerr.Wrapf(waxerr.CodeInternal, "store.migrate", err,
-			"bad migration version in %s", filename)
+			"bad migration version in %s", base)
 	}
 	return ver, base[i+1:], nil
 }

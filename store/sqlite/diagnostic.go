@@ -94,36 +94,10 @@ func (s *Store) PutFileDiagnostics(ctx context.Context, filePID model.PID, origi
 	})
 }
 
-// SchemaVersionFileDiagnostics is the migration that introduced file_diagnostic and
-// file.diag_version. It is exported so doctor's gate and this store's own guard
-// cannot drift apart.
-const SchemaVersionFileDiagnostics = 25
-
-// diagnosticsReady reports whether the catalog has the v25 diagnostic schema.
-//
-// The read-only commands (audit, doctor) never migrate, so they can run against a
-// catalog no read-write command has upgraded yet. Without the gate they fail with
-// "no such table: file_diagnostic" instead of reporting nothing recorded yet. It
-// lives here rather than in each caller because the audit reaches the store through
-// a port that carries no schema knowledge, and should not have to.
-func (s *Store) diagnosticsReady(ctx context.Context) (bool, error) {
-	v, err := s.CatalogVersion(ctx)
-	if err != nil {
-		return false, err
-	}
-	return v >= SchemaVersionFileDiagnostics, nil
-}
-
 // FileDiagnostics returns every persisted diagnostic joined to its file's display
-// path, for the audit. Ordering is deterministic so capped output is stable. It
-// returns nothing on a catalog older than v25 rather than erroring.
+// path, for the audit. Ordering is deterministic so capped output is stable.
 func (s *Store) FileDiagnostics(ctx context.Context) ([]model.FileDiagnostic, error) {
 	const op = "store.FileDiagnostics"
-	if ok, err := s.diagnosticsReady(ctx); err != nil {
-		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
-	} else if !ok {
-		return nil, nil
-	}
 	rows, err := s.read.QueryContext(ctx, `SELECT f.pid, f.display_path, d.origin, d.code,
 		d.severity, d.tag_key, d.detail, d.seen_at
 		FROM file_diagnostic d JOIN file f ON f.id = d.file_id
@@ -169,11 +143,6 @@ func (s *Store) hasFileDiagnostics(ctx context.Context, filePID model.PID, origi
 // problems a library has.
 func (s *Store) CountFileDiagnostics(ctx context.Context) (int, error) {
 	const op = "store.CountFileDiagnostics"
-	if ok, err := s.diagnosticsReady(ctx); err != nil {
-		return 0, waxerr.Wrap(waxerr.CodeIO, op, err)
-	} else if !ok {
-		return 0, nil
-	}
 	var n int
 	if err := s.read.QueryRowContext(ctx, "SELECT COUNT(*) FROM file_diagnostic").Scan(&n); err != nil {
 		return 0, waxerr.Wrap(waxerr.CodeIO, op, err)
@@ -190,16 +159,8 @@ func (s *Store) CountFileDiagnostics(ctx context.Context) (int, error) {
 // covers diag_version, and adding one would tax every scan's writes to speed up a
 // count that runs once per audit. The cost worth comparing against is the one it
 // replaces, re-reading and re-hashing every file on disk.
-//
-// It reports zero on a catalog older than v25, where the column does not exist yet,
-// since a read-only audit has to degrade rather than error.
 func (s *Store) DiagnosticCoverage(ctx context.Context) (stale, total int, err error) {
 	const op = "store.DiagnosticCoverage"
-	if ok, rerr := s.diagnosticsReady(ctx); rerr != nil {
-		return 0, 0, waxerr.Wrap(waxerr.CodeIO, op, rerr)
-	} else if !ok {
-		return 0, 0, nil
-	}
 	err = s.read.QueryRowContext(ctx, `SELECT
 		COUNT(*) FILTER (WHERE diag_version < ?), COUNT(*)
 		FROM file WHERE kind = ?`, currentDiagVersion, string(model.FileAudio)).Scan(&stale, &total)

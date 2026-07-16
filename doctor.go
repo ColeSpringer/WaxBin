@@ -9,34 +9,6 @@ import (
 	"github.com/colespringer/waxbin/store/sqlite"
 )
 
-// fingerprintSchemaVersion is the migration that introduced the fingerprint
-// table; doctor skips the fingerprint count on a catalog older than this.
-const fingerprintSchemaVersion = 3
-
-// loudnessSchemaVersion is the migration that introduced the loudness table;
-// doctor skips the ReplayGain count on a catalog older than this.
-const loudnessSchemaVersion = 7
-
-// podcastSchemaVersion is the lowest schema at which a podcast read succeeds: the
-// podcast tables landed in v18, but Podcasts() reads the v19 source_type column, so
-// doctor skips the subscription count on a catalog older than v19 to avoid a
-// no-such-column error on a read-only catalog that has not been migrated yet.
-const podcastSchemaVersion = 19
-
-// enrichmentSchemaVersion is the migration that introduced the entity_enrichment
-// table; doctor skips the enrichment coverage on an older, un-migrated catalog.
-const enrichmentSchemaVersion = 20
-
-// diagnosticsSchemaVersion is the migration that introduced file_diagnostic and
-// file.diag_version; doctor skips the diagnostic counts on an older catalog so it
-// degrades to zero rather than failing with a no-such-table error.
-//
-// The store guards these reads too (the audit reaches them through a port that
-// carries no schema knowledge), so this gate is the local early-out that matches the
-// per-feature convention above rather than the only thing standing between an
-// un-migrated catalog and a no-such-table error.
-const diagnosticsSchemaVersion = sqlite.SchemaVersionFileDiagnostics
-
 // DoctorReport summarizes catalog health and detected capabilities.
 type DoctorReport struct {
 	DBPath string
@@ -81,10 +53,9 @@ func (r *DoctorReport) NeedsMigration() bool {
 	return r.SchemaVersion > 0 && r.SchemaVersion < r.BuildSchemaVersion
 }
 
-// Doctor reports catalog stats and capability coverage. It is read-only, and
-// tolerates a catalog older than this build (it reports the actual version and
-// skips checks that depend on not-yet-applied migrations) so the diagnostic
-// never fails on an un-upgraded catalog.
+// Doctor reports catalog stats and capability coverage. It is read-only: it
+// never migrates, and it reports the catalog's applied schema version next to
+// the build's so an operator can see when a read-write command would upgrade.
 func (l *Library) Doctor(ctx context.Context) (*DoctorReport, error) {
 	c := caps.Detect()
 	rep := &DoctorReport{
@@ -113,59 +84,47 @@ func (l *Library) Doctor(ctx context.Context) (*DoctorReport, error) {
 	}
 	rep.ItemCount = n
 
-	// The fingerprint table only exists from v3 on; querying it against an older
-	// catalog would error, so skip the count there (it reports as 0).
-	if version >= fingerprintSchemaVersion {
-		fps, err := l.store.CountFingerprints(ctx)
-		if err != nil {
-			return nil, err
-		}
-		rep.FingerprintCount = fps
+	// Every initialized catalog carries the full v1 baseline, so these counts
+	// need no per-feature schema gates. The first post-1.0 migration that adds
+	// a table changes that: doctor never migrates, so a count that reads the
+	// new table must check rep.SchemaVersion first or it breaks with "no such
+	// table" against a catalog no read-write command has upgraded yet.
+	fps, err := l.store.CountFingerprints(ctx)
+	if err != nil {
+		return nil, err
 	}
+	rep.FingerprintCount = fps
 
-	// The loudness table only exists from v7 on; skip its count on older catalogs.
-	if version >= loudnessSchemaVersion {
-		n, err := l.store.CountLoudness(ctx)
-		if err != nil {
-			return nil, err
-		}
-		rep.LoudnessCount = n
+	loud, err := l.store.CountLoudness(ctx)
+	if err != nil {
+		return nil, err
 	}
+	rep.LoudnessCount = loud
 
-	// The podcast tables only exist from v18 on; skip on older catalogs.
-	if version >= podcastSchemaVersion {
-		pods, err := l.store.Podcasts(ctx)
-		if err != nil {
-			return nil, err
-		}
-		rep.PodcastCount = len(pods)
+	pods, err := l.store.Podcasts(ctx)
+	if err != nil {
+		return nil, err
 	}
+	rep.PodcastCount = len(pods)
 
-	// The enrichment tables only exist from v20 on; skip on older catalogs.
 	rep.EnrichmentEnabled = l.enricher.Enabled()
-	if version >= enrichmentSchemaVersion {
-		cov, err := l.EnrichmentCoverage(ctx)
-		if err != nil {
-			return nil, err
-		}
-		rep.EnrichedEntities = cov.Artists + cov.ReleaseGroups + cov.Books
-		rep.EnrichedMatched = cov.Matched
+	cov, err := l.EnrichmentCoverage(ctx)
+	if err != nil {
+		return nil, err
 	}
+	rep.EnrichedEntities = cov.Artists + cov.ReleaseGroups + cov.Books
+	rep.EnrichedMatched = cov.Matched
 
-	// file_diagnostic and file.diag_version only exist from v25 on; skip on older
-	// catalogs so an un-upgraded one reports zero instead of erroring.
-	if version >= diagnosticsSchemaVersion {
-		n, err := l.store.CountFileDiagnostics(ctx)
-		if err != nil {
-			return nil, err
-		}
-		rep.DiagnosticCount = n
-		stale, _, err := l.store.DiagnosticCoverage(ctx)
-		if err != nil {
-			return nil, err
-		}
-		rep.DiagnosticsStale = stale
+	diags, err := l.store.CountFileDiagnostics(ctx)
+	if err != nil {
+		return nil, err
 	}
+	rep.DiagnosticCount = diags
+	stale, _, err := l.store.DiagnosticCoverage(ctx)
+	if err != nil {
+		return nil, err
+	}
+	rep.DiagnosticsStale = stale
 
 	// The lockfile is read without taking the lock, so even a read-only doctor
 	// can report who currently owns the catalog (empty when no one holds it).

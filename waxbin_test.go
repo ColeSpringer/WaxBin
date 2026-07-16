@@ -17,6 +17,7 @@ import (
 	"github.com/colespringer/waxbin/port"
 	"github.com/colespringer/waxbin/query"
 	"github.com/colespringer/waxbin/read"
+	"github.com/colespringer/waxbin/store/sqlite"
 	"github.com/colespringer/waxbin/waxerr"
 	_ "modernc.org/sqlite"
 )
@@ -461,9 +462,9 @@ func TestStatsOnFacet(t *testing.T) {
 	}
 }
 
-// TestDoctorToleratesOlderCatalog verifies doctor can inspect a catalog written
-// by an older binary without querying tables added by later migrations.
-func TestDoctorToleratesOlderCatalog(t *testing.T) {
+// TestDoctorReadOnly verifies doctor works over a read-only open (which never
+// migrates) and reports the catalog's actual applied version.
+func TestDoctorReadOnly(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -477,44 +478,25 @@ func TestDoctorToleratesOlderCatalog(t *testing.T) {
 		t.Fatalf("close: %v", err)
 	}
 
-	// Simulate a catalog from an older binary: drop the v3 fingerprint tables and
-	// roll the recorded schema version back to 2.
-	raw, err := sql.Open("sqlite", "file:"+db)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, stmt := range []string{
-		"DROP TABLE fingerprint_term",
-		"DROP TABLE fingerprint",
-		"DELETE FROM schema_migrations WHERE version >= 3",
-	} {
-		if _, err := raw.ExecContext(ctx, stmt); err != nil {
-			t.Fatalf("%s: %v", stmt, err)
-		}
-	}
-	_ = raw.Close()
-
 	ro, err := waxbin.Open(ctx, waxbin.Options{DBPath: db, ReadOnly: true})
 	if err != nil {
-		t.Fatalf("read-only open of an older catalog: %v", err)
+		t.Fatalf("read-only open: %v", err)
 	}
 	defer ro.Close()
 
 	rep, err := ro.Doctor(ctx)
 	if err != nil {
-		t.Fatalf("doctor on an older catalog should not fail: %v", err)
+		t.Fatalf("read-only doctor: %v", err)
 	}
-	if rep.SchemaVersion != 2 {
-		t.Errorf("reported schema v%d, want 2 (the catalog's actual version)", rep.SchemaVersion)
+	if rep.SchemaVersion != sqlite.SchemaVersion {
+		t.Errorf("reported schema v%d, want v%d (the catalog's applied version)",
+			rep.SchemaVersion, sqlite.SchemaVersion)
 	}
-	if !rep.NeedsMigration() {
-		t.Error("an older catalog should report NeedsMigration")
-	}
-	if rep.FingerprintCount != 0 {
-		t.Errorf("fingerprint count = %d, want 0 (skipped on a pre-v3 catalog)", rep.FingerprintCount)
+	if rep.NeedsMigration() {
+		t.Error("a current catalog must not report NeedsMigration")
 	}
 	if rep.ItemCount != 1 {
-		t.Errorf("item count = %d, want 1 (works on the v1 tables)", rep.ItemCount)
+		t.Errorf("item count = %d, want 1", rep.ItemCount)
 	}
 }
 

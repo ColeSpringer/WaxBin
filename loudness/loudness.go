@@ -18,10 +18,7 @@ const ReferenceLUFS = -18.0
 // AnalysisVersion identifies the loudness algorithm. The analyze pass keys its
 // per-file stamp on the combined analyze version; bumping this is one reason to
 // force re-analysis.
-//
-// Bumped 1->2 with the WaxFlow migration: the measurement source changed from the
-// ffmpeg/pure-Go split to WaxFlow's conformance-tested whole-file BS.1770 meter.
-const AnalysisVersion = 2
+const AnalysisVersion = 1
 
 // Result is a track's measured loudness.
 type Result struct {

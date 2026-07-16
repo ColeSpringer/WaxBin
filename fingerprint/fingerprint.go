@@ -25,11 +25,7 @@ import (
 // AlgoVersion identifies the fingerprint algorithm. Bumping it forces the
 // analyze pass to recompute fingerprints. Analysis is keyed by both essence and
 // algorithm version, so a better algorithm supersedes stored fingerprints.
-//
-// Bumped 1->2 with the WaxFlow migration: the decode now resamples to InternalRate
-// through the decoder's high-quality polyphase resampler instead of the box
-// averager below, which aliased HF energy into the fingerprint's bands.
-const AlgoVersion = 2
+const AlgoVersion = 1
 
 // InternalRate is the mono rate the fingerprint frames at. It is exported
 // because the analyze pass decodes straight to it: the decoder's own high-
