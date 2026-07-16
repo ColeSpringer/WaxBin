@@ -181,6 +181,9 @@ func TestMergeAlbumsAcrossReleaseGroups(t *testing.T) {
 		}
 		pids = append(pids, p)
 	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
 	rows.Close()
 	if len(pids) != 2 {
 		t.Fatalf("want 2 albums, got %d", len(pids))
@@ -249,6 +252,9 @@ func artHashes(t *testing.T, st *Store, entityType string, entityID int64) []str
 			t.Fatal(err)
 		}
 		out = append(out, h)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
 	}
 	return out
 }

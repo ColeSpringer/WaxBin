@@ -373,7 +373,9 @@ func (s *Store) QueryItems(ctx context.Context, q query.Query) ([]*model.ItemVie
 		sb.WriteString(where)
 	}
 	if c.OrderBy != "" {
-		sb.WriteString(" ORDER BY " + c.OrderBy + ", pi.pid")
+		sb.WriteString(" ORDER BY ")
+		sb.WriteString(c.OrderBy)
+		sb.WriteString(", pi.pid")
 	} else {
 		sb.WriteString(" ORDER BY pi.sort_key, pi.pid")
 	}
@@ -438,6 +440,66 @@ func (s *Store) ItemByPID(ctx context.Context, pid model.PID) (*model.ItemView, 
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
 	return v, nil
+}
+
+// ItemsByPIDs returns item views for the given pids in input order, skipping any
+// pid with no matching item and collapsing a repeated pid to its first position.
+// The lookup is chunked to stay well under SQLite's bound-parameter limit, so a
+// pid array longer than idBatchSize spans multiple SELECTs and is NOT an atomic
+// snapshot: a concurrent write between chunks can produce a mixed view. A
+// UI-feeding read can tolerate that; a caller that needs a consistent snapshot
+// cannot.
+func (s *Store) ItemsByPIDs(ctx context.Context, pids []model.PID) ([]*model.ItemView, error) {
+	const op = "store.ItemsByPIDs"
+	if len(pids) == 0 {
+		return nil, nil
+	}
+	// Deduplicate up front, preserving first-seen order, so a repeated pid never
+	// bloats an IN(...) chunk or straddles a chunk boundary, and the rebuild below
+	// needs no second pass to collapse duplicates.
+	unique := make([]model.PID, 0, len(pids))
+	seen := make(map[model.PID]struct{}, len(pids))
+	for _, pid := range pids {
+		if _, ok := seen[pid]; ok {
+			continue
+		}
+		seen[pid] = struct{}{}
+		unique = append(unique, pid)
+	}
+
+	byPID := make(map[model.PID]*model.ItemView, len(unique))
+	err := chunkSlice(unique, idBatchSize, func(chunk []model.PID) error {
+		args := make([]any, len(chunk))
+		for i, pid := range chunk {
+			args[i] = string(pid)
+		}
+		rows, err := s.read.QueryContext(ctx, itemSelect+" WHERE pi.pid IN "+placeholders(len(chunk)), args...)
+		if err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			v, err := scanItemView(rows)
+			if err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+			byPID[v.PID] = v
+		}
+		if err := rows.Err(); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*model.ItemView, 0, len(unique))
+	for _, pid := range unique {
+		if v, ok := byPID[pid]; ok {
+			out = append(out, v)
+		}
+	}
+	return out, nil
 }
 
 // FileByPath returns the file at the given raw path, or CodeNotFound.

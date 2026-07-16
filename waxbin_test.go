@@ -250,6 +250,66 @@ func itemPIDByTitle(t *testing.T, ctx context.Context, lib *waxbin.Library, titl
 	return items[0].PID
 }
 
+// TestFileAndGetMany covers the batch and file accessors: File pins a backing
+// file's identity by pid, and GetMany returns item views in request order,
+// skipping an unknown pid.
+func TestFileAndGetMany(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	// Distinct audio essence per file so they are distinct items (a shared essence
+	// would collapse to one item).
+	writeFile(t, filepath.Join(root, "a.mp3"), testaudio.BuildMP3WithAudio("A", "Artist", "Album", 1, testaudio.AudioWithSeed(1)))
+	writeFile(t, filepath.Join(root, "b.mp3"), testaudio.BuildMP3WithAudio("B", "Artist", "Album", 2, testaudio.AudioWithSeed(2)))
+	writeFile(t, filepath.Join(root, "c.mp3"), testaudio.BuildMP3WithAudio("C", "Artist", "Album", 3, testaudio.AudioWithSeed(3)))
+
+	lib := openManaged(t, ctx, db, root)
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+
+	pidA := itemPIDByTitle(t, ctx, lib, "A")
+	pidB := itemPIDByTitle(t, ctx, lib, "B")
+	pidC := itemPIDByTitle(t, ctx, lib, "C")
+
+	// GetMany preserves request order and skips an unknown pid.
+	got, err := lib.GetMany(ctx, []model.PID{pidC, model.NewPID(), pidA, pidB})
+	if err != nil {
+		t.Fatalf("GetMany: %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("GetMany returned %d items, want 3 (unknown pid skipped)", len(got))
+	}
+	if got[0].PID != pidC || got[1].PID != pidA || got[2].PID != pidB {
+		t.Fatalf("GetMany order = [%s %s %s], want [%s %s %s]",
+			got[0].PID, got[1].PID, got[2].PID, pidC, pidA, pidB)
+	}
+
+	// File pins the backing file identity for item A.
+	itemA, err := lib.Get(ctx, pidA)
+	if err != nil {
+		t.Fatalf("Get A: %v", err)
+	}
+	f, err := lib.File(ctx, itemA.FilePID)
+	if err != nil {
+		t.Fatalf("File: %v", err)
+	}
+	if f.PID != itemA.FilePID {
+		t.Fatalf("File returned pid %s, want %s", f.PID, itemA.FilePID)
+	}
+	if !bytes.Equal(f.Path, itemA.Path) {
+		t.Fatalf("File path %q, want %q", f.Path, itemA.Path)
+	}
+	if f.EssenceHash == "" {
+		t.Fatal("File should carry the backing file's essence hash")
+	}
+
+	// File on an unknown pid is CodeNotFound.
+	if _, err := lib.File(ctx, model.NewPID()); !waxerr.Is(err, waxerr.CodeNotFound) {
+		t.Fatalf("File(unknown) err = %v, want CodeNotFound", err)
+	}
+}
+
 // TestPlaybackAndChangeBus verifies the playback service and the in-process
 // change bus wired through the facade: a star/rating round-trips for the default
 // user, and a subscriber sees the play_state delta.

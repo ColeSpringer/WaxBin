@@ -274,6 +274,26 @@ func (l *Library) Get(ctx context.Context, pid model.PID) (*model.ItemView, erro
 	return l.store.ItemByPID(ctx, pid)
 }
 
+// File returns a backing file's identity and quality by its public id: size,
+// mtime, content and essence hashes, the analyzed-essence stamp, and the audio
+// quality fields (codec, bitrate, sample rate, bit depth), or CodeNotFound. It is
+// the file-level companion to Get, so an embedder can pin an item's file identity
+// without re-scanning.
+func (l *Library) File(ctx context.Context, filePID model.PID) (*model.File, error) {
+	return l.store.FileByPID(ctx, filePID)
+}
+
+// GetMany returns item views for the given pids in input order, skipping any pid
+// with no matching item and collapsing a duplicate pid to its first position.
+//
+// It is NOT an atomic snapshot: a pid array longer than the internal batch size is
+// read across multiple SELECTs, so a concurrent write between batches can yield a
+// mixed view. A UI list can feed from it; a caller that needs a consistent view of
+// every pid at one instant cannot.
+func (l *Library) GetMany(ctx context.Context, pids []model.PID) ([]*model.ItemView, error) {
+	return l.store.ItemsByPIDs(ctx, pids)
+}
+
 // Book returns the full detail for an audiobook: subtitle, series placement,
 // role-tagged contributors (author/narrator/...), backing parts in reading order,
 // and chapters resolved to book-timeline offsets with the total duration.

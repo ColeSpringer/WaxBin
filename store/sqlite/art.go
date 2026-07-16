@@ -96,16 +96,10 @@ func (c *thumbCache) put(hash string, size int, blob model.ArtBlob) {
 	}
 }
 
-// attachArtTx maps a track/book item's cover onto the 'track' art slot (keyed by
-// the item id). It is the music/audiobook entry point; see attachEntityArtTx for
-// the shared body.
-func attachArtTx(ctx context.Context, tx *sql.Tx, itemID int64, img *model.ArtImage) error {
-	_, err := attachEntityArtTxChanged(ctx, tx, "track", itemID, img)
-	return err
-}
-
-// attachArtTxChanged is attachArtTx but reports whether the mapping changed, for the
-// sidecar-update seam that emits a delta only on a real change.
+// attachArtTxChanged maps a track/book item's cover onto the 'track' art slot
+// (keyed by the item id) and reports whether the mapping changed, for the
+// music/audiobook write paths that emit a delta only on a real change. See
+// attachEntityArtTxChanged for the shared body.
 func attachArtTxChanged(ctx context.Context, tx *sql.Tx, itemID int64, img *model.ArtImage) (bool, error) {
 	return attachEntityArtTxChanged(ctx, tx, "track", itemID, img)
 }
@@ -197,10 +191,7 @@ func (s *Store) ResolveArt(ctx context.Context, ref model.EntityRef, size int) (
 	blob := &model.ArtBlob{Bytes: srcData, Format: srcFormat, Width: srcW, Height: srcH, SourceHash: hash}
 
 	// Original requested, or a source already within the box: serve the source.
-	longest := srcW
-	if srcH > srcW {
-		longest = srcH
-	}
+	longest := max(srcW, srcH)
 	if size <= 0 || (longest > 0 && longest <= size) {
 		return blob, nil
 	}

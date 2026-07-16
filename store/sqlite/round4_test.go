@@ -188,6 +188,9 @@ func TestMigration0024ReclassifiesChapters(t *testing.T) {
 			}
 			out = append(out, s)
 		}
+		if err := rows.Err(); err != nil {
+			t.Fatal(err)
+		}
 		return out
 	}
 

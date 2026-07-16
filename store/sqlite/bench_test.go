@@ -41,7 +41,7 @@ func benchInsert(tb testing.TB, st *Store, libID int64, i int) {
 	in := model.PutScannedTrackInput{
 		LibraryID: libID,
 		File: model.File{
-			Path: []byte(path), DisplayPath: path, RelPath: []byte(fmt.Sprintf("%d.flac", i)),
+			Path: []byte(path), DisplayPath: path, RelPath: fmt.Appendf(nil, "%d.flac", i),
 			Kind: model.FileAudio, ContentHash: fmt.Sprintf("c%d", i), EssenceHash: fmt.Sprintf("e%d", i),
 			DurationMS: 200000, ScanState: model.ScanIndexed,
 		},
@@ -61,7 +61,7 @@ func benchInsert(tb testing.TB, st *Store, libID int64, i int) {
 
 func populate(tb testing.TB, st *Store, libID int64, n int) {
 	tb.Helper()
-	for i := 0; i < n; i++ {
+	for i := range n {
 		benchInsert(tb, st, libID, i)
 	}
 }
@@ -72,9 +72,12 @@ const benchScale = 5000
 // txn per track, including entity resolution, FTS, and maintained rollups).
 func BenchmarkPutScannedTrack(b *testing.B) {
 	st, lib := benchStore(b)
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	// Each iteration must insert a distinct track (distinct essence and identity),
+	// so a manual counter supplies the per-iteration index that b.Loop does not.
+	i := 0
+	for b.Loop() {
 		benchInsert(b, st, lib.ID, i)
+		i++
 	}
 }
 
@@ -84,8 +87,7 @@ func BenchmarkQueryPageAtScale(b *testing.B) {
 	st, lib := benchStore(b)
 	populate(b, st, lib.ID, benchScale)
 	q := query.New(query.EntityItems).Build()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		if _, err := st.QueryPage(context.Background(), q, "", 50, false); err != nil {
 			b.Fatal(err)
 		}
@@ -97,8 +99,7 @@ func BenchmarkFacetGenreAtScale(b *testing.B) {
 	st, lib := benchStore(b)
 	populate(b, st, lib.ID, benchScale)
 	q := query.New(query.EntityItems).Build()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		if _, err := st.Facet(context.Background(), q, read.GroupGenre); err != nil {
 			b.Fatal(err)
 		}
@@ -109,8 +110,7 @@ func BenchmarkFacetGenreAtScale(b *testing.B) {
 func BenchmarkBrowseNewestAtScale(b *testing.B) {
 	st, lib := benchStore(b)
 	populate(b, st, lib.ID, benchScale)
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		if _, err := st.BrowsePage(context.Background(), read.ListNewest, read.BrowseOptions{Limit: 50}); err != nil {
 			b.Fatal(err)
 		}
@@ -121,8 +121,7 @@ func BenchmarkBrowseNewestAtScale(b *testing.B) {
 func BenchmarkSearchAtScale(b *testing.B) {
 	st, lib := benchStore(b)
 	populate(b, st, lib.ID, benchScale)
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		if _, err := st.Search(context.Background(), "track", read.SearchOptions{Limit: 20}); err != nil {
 			b.Fatal(err)
 		}
