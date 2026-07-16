@@ -60,7 +60,7 @@ type PeaksData struct {
 // fingerprint, optional loudness and peaks, and the combined AnalysisVersion
 // stamped onto the file so the work is not repeated until the essence or an
 // analysis algorithm changes. Nil loudness or peaks means that part was not
-// measured this run, for example after a transient ffmpeg error.
+// measured this run, for example after a transient decode error.
 type AnalysisInput struct {
 	Fingerprint     FingerprintInput
 	AnalysisVersion int

@@ -13,8 +13,11 @@ WaxDeck.
 
 ## Design tenets
 
-- **No CGO.** Pure-Go cataloging for every format via [WaxLabel]. `ffmpeg` and
-  `fpcalc` are optional subprocesses used only by the (separate) analysis pass.
+- **No CGO, no external binaries.** Cataloging is pure Go for every format via
+  [WaxLabel], and so is the analysis pass (decode, loudness, fingerprint, and
+  waveforms) via [WaxFlow]. The two libraries cover the same eight containers, so
+  WaxBin can decode every format it can tag-read, on every host. `fpcalc` is the
+  sole remaining optional subprocess, used only for AcoustID lookups in enrichment.
 - **Hard scan/analyze boundary.** Scanning is I/O-bound and never decodes PCM;
   loudness, fingerprinting, and peaks live only in a resumable analyze pass.
 - **Source of truth.** Consumers read the catalog through WaxBin's canonical

@@ -34,6 +34,15 @@ jobs:
       - name: Build
         run: go build ./...
 
+      - name: No-CGO invariant
+        # The shipped binaries must never link cgo. CGO_ENABLED=0 is the job
+        # default, so this asserts no package pulled runtime/cgo into the graph.
+        run: |
+          go build ./...
+          if go list -deps ./... | grep -qx runtime/cgo; then
+            echo "runtime/cgo is linked into a CGO_ENABLED=0 build"; exit 1
+          fi
+
       - name: Test (race)
         # The race detector needs cgo; scope it to the test toolchain only so the
         # shipped binaries stay pure no-CGO.

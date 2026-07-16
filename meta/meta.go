@@ -47,24 +47,21 @@ type Reader interface {
 }
 
 // normalizeCodec folds WaxLabel's canonical codec name to WaxBin's lowercase
-// registry key. WaxLabel reports names such as "PCM", "MP3", and "Vorbis"; the
-// analyze registry binds "pcm", "mp3", and "vorbis".
+// catalog key. WaxLabel reports names such as "PCM", "MP3", and "Vorbis"; the
+// catalog stores "pcm", "mp3", and "vorbis".
 //
-// container disambiguates PCM. The pure-Go "pcm" decoder reads RIFF/WAVE only.
-// PCM in another container, notably AIFF, must use its container key so analysis
-// routes to ffmpeg or skips it cleanly when ffmpeg is absent.
-func normalizeCodec(c, container string) string {
+// PCM keeps the plain "pcm" key regardless of container. Nothing routes on the
+// codec any more (WaxFlow sniffs the container's content and decodes it directly),
+// so PCM in AIFF or MP4 is "pcm" and decodes like any other input. Non-WAV PCM was
+// previously keyed by container to steer it to the ffmpeg subprocess; that, and the
+// bug where PCM-in-MP4 keyed to an un-analyzable "mp4", are both gone.
+func normalizeCodec(c string) string {
 	s := strings.ToLower(strings.TrimSpace(c))
 	switch s {
 	case "mpeg audio", "mpeg", "mp2": // pre-frame-sync fallback labeling
 		return "mp3"
 	case "pcm":
-		switch strings.ToLower(strings.TrimSpace(container)) {
-		case "", "wav", "wave", "riff":
-			return "pcm"
-		default:
-			return strings.ToLower(strings.TrimSpace(container)) // e.g. "aiff" -> ffmpeg path
-		}
+		return "pcm"
 	default:
 		return s
 	}

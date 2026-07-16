@@ -116,7 +116,4 @@ func TestSniffExotic(t *testing.T) {
 	if _, ok := SniffExotic([]byte("short")); ok {
 		t.Error("short input should not sniff as exotic")
 	}
-	if !IsExoticFormat("avif") || !IsExoticFormat("heic") || IsExoticFormat("jpeg") {
-		t.Error("IsExoticFormat classification wrong")
-	}
 }

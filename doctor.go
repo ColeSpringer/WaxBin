@@ -65,13 +65,11 @@ type DoctorReport struct {
 	// EnrichmentEnabled reports whether a MusicBrainz contact is configured.
 	EnrichmentEnabled bool
 
-	// Detected optional helpers (never required for core use).
-	FFmpeg bool
+	// Fpcalc is the sole remaining optional helper (Chromaprint for AcoustID); it is
+	// never required for core use. Decoding is pure-Go via WaxFlow, so there is no
+	// ffmpeg capability to report. Coverage below is the honest "what can this build
+	// decode" answer.
 	Fpcalc bool
-	// Exotic-image thumbnail support, detected per-format (an AVIF/HEIC cover is
-	// otherwise found and served unscaled).
-	AVIFThumbnails bool
-	HEICThumbnails bool
 
 	// Coverage reports, per codec, how the analyze pass decodes it in this build.
 	Coverage []decode.FormatSupport
@@ -89,15 +87,11 @@ func (r *DoctorReport) NeedsMigration() bool {
 // never fails on an un-upgraded catalog.
 func (l *Library) Doctor(ctx context.Context) (*DoctorReport, error) {
 	c := caps.Detect()
-	ic := caps.ImageSupport()
 	rep := &DoctorReport{
 		DBPath:             l.opts.DBPath,
 		BuildSchemaVersion: sqlite.SchemaVersion,
 		ReadOnly:           l.ReadOnly(),
-		FFmpeg:             c.FFmpeg,
 		Fpcalc:             c.Fpcalc,
-		AVIFThumbnails:     ic.AVIF,
-		HEICThumbnails:     ic.HEIC,
 		Coverage:           l.Coverage(),
 	}
 

@@ -11,9 +11,11 @@ import (
 )
 
 // TestFingerprintThroughWAVPath locks in the match through the exact path the
-// analyze pass uses (22050 Hz WAV -> WAVDecoder -> Compute): a transcode of one
-// recording both scores high and shares index terms, while an unrelated track
-// does neither. This is the regression guard for the end-to-end grouping.
+// analyze pass uses (WAV -> Engine.Mono at InternalRate -> Compute): a transcode
+// of one recording both scores high and shares index terms, while an unrelated
+// track does neither. This is the regression guard for the end-to-end grouping,
+// so it must track the route the pass actually takes — decoding straight to
+// InternalRate, which makes Compute's own resample a no-op.
 func TestFingerprintThroughWAVPath(t *testing.T) {
 	const rate = 22050
 	dir := t.TempDir()
@@ -26,9 +28,13 @@ func TestFingerprintThroughWAVPath(t *testing.T) {
 		if err := os.WriteFile(p, testaudio.EncodeWAV16(rate, samples), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		pcm, err := (decode.WAVDecoder{}).Decode(context.Background(), p, MaxAnalyze)
+		pcm, err := decode.New(nil).Mono(context.Background(), p, InternalRate, MaxAnalyze)
 		if err != nil {
 			t.Fatal(err)
+		}
+		if pcm.SampleRate != InternalRate || pcm.Channels != 1 {
+			t.Fatalf("decoded %d Hz / %d ch, want %d / 1 (Compute's resample must be a no-op here)",
+				pcm.SampleRate, pcm.Channels, InternalRate)
 		}
 		return Compute(pcm)
 	}

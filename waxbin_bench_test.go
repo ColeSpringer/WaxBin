@@ -69,9 +69,11 @@ func BenchmarkScan(b *testing.B) {
 }
 
 // BenchmarkAnalyze measures the analyze pass (decode to PCM + fingerprint +
-// loudness + peaks) over a set of WAVs. WAV decodes pure-Go, so this benchmark is
-// host-independent (no ffmpeg needed). Each iteration analyzes a freshly scanned
-// catalog, since analysis is essence-keyed and would otherwise no-op.
+// loudness + peaks) over a mix of formats. Post-migration every format decodes
+// pure-Go via WaxFlow, so the old "WAV only to stay host-independent" constraint
+// is gone: the mix (wav/flac/mp3/opus) is the honest cross-codec decode-throughput
+// signal, and it is still host-independent. Each iteration analyzes a freshly
+// scanned catalog, since analysis is essence-keyed and would otherwise no-op.
 func BenchmarkAnalyze(b *testing.B) {
 	ctx := context.Background()
 	root := b.TempDir()
@@ -79,9 +81,58 @@ func BenchmarkAnalyze(b *testing.B) {
 		n    = 40
 		rate = 22050
 	)
+	formats := []string{"wav", "flac", "mp3", "opus"}
 	for i := 0; i < n; i++ {
 		sig := testaudio.RichSignal(rate, 4, testaudio.MusicalPartials, int64(i+1))
-		writeBench(b, filepath.Join(root, fmt.Sprintf("t%d.wav", i)), testaudio.EncodeWAV16(rate, sig))
+		f := formats[i%len(formats)]
+		writeBench(b, filepath.Join(root, fmt.Sprintf("t%d.%s", i, f)),
+			testaudio.EncodeAs(b, f, "", rate, sig))
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		b.StopTimer()
+		db := filepath.Join(b.TempDir(), "c.db")
+		lib := openBench(b, ctx, db, root)
+		if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+			b.Fatal(err)
+		}
+		b.StartTimer()
+
+		if _, err := lib.Analyze(ctx, waxbin.AnalyzeOptions{}); err != nil {
+			b.Fatal(err)
+		}
+
+		b.StopTimer()
+		_ = lib.Close()
+		b.StartTimer()
+	}
+}
+
+// BenchmarkAnalyzeTwoPass prices the analyze pass's two decodes (a whole-file
+// loudness/waveform stream plus a bounded fingerprint decode) on wide channel
+// layouts. The fingerprint decodes to a mono rate through a per-channel HQ
+// resampler, so a 5.1 file pays 6x the resample work of mono: a stereo-only
+// benchmark under-prices it by half. The mix here is mono/stereo/5.1 WAV.
+func BenchmarkAnalyzeTwoPass(b *testing.B) {
+	ctx := context.Background()
+	root := b.TempDir()
+	const (
+		n    = 24
+		rate = 44100
+	)
+	layouts := []int{1, 2, 6}
+	for i := 0; i < n; i++ {
+		ch := layouts[i%len(layouts)]
+		sig := testaudio.RichSignal(rate, 4, testaudio.MusicalPartials, int64(i+1))
+		inter := make([]float32, len(sig)*ch)
+		for s, v := range sig {
+			for c := 0; c < ch; c++ {
+				inter[s*ch+c] = v
+			}
+		}
+		writeBench(b, filepath.Join(root, fmt.Sprintf("t%d.wav", i)),
+			testaudio.EncodeWAV16Multi(rate, ch, inter))
 	}
 
 	b.ResetTimer()

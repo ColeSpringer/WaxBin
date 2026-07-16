@@ -147,7 +147,7 @@ func tagsFromDoc(doc *waxlabel.Document, fields tag.Tags) model.Tags {
 		MBAlbumArtistID:  strings.TrimSpace(first(fields.MusicBrainz.AlbumArtistID)),
 
 		Container:  strings.ToLower(strings.TrimSpace(props.Container)),
-		Codec:      normalizeCodec(at.Codec, props.Container),
+		Codec:      normalizeCodec(at.Codec),
 		DurationMS: props.Duration().Milliseconds(),
 		SampleRate: at.SampleRate,
 		Channels:   at.Channels,

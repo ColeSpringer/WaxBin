@@ -8,8 +8,10 @@
 // # Boundaries
 //
 // Cataloging is pure Go. Scanning reads tags and decoder-independent identity
-// data without decoding PCM; PCM work belongs to the separate analysis pass.
-// The read side is owned by WaxBin so consumers share one catalog view.
+// data without decoding PCM; PCM work belongs to the separate analysis pass,
+// which is itself pure Go: decode, loudness, fingerprint, and waveforms all run
+// through WaxFlow with no CGO and no external binaries. The read side is owned by
+// WaxBin so consumers share one catalog view.
 //
 // # Layout
 //
@@ -17,10 +19,11 @@
 // in their own packages: model (domain types + repository interfaces), query
 // (the shared selection engine), identity (entity identity + essence hashing),
 // store/sqlite (the SQLite DataStore, write coordinator, and flock ownership),
-// read (facet/browse/search/pagination), art (CAS + thumbnails), decode and
-// analyze (the PCM analysis pass), scan, organize, inbox, trash, playback,
-// playlist, podcast, source (the acquisition port), enrich (metadata brain),
-// audit (quality/repair), jobs, meta, and config; the CLI lives under cmd/waxbin.
+// read (facet/browse/search/pagination), art (CAS + thumbnails), decode (pure-Go
+// PCM decoding via WaxFlow) and analyze (the PCM analysis pass), scan, organize,
+// inbox, trash, playback, playlist, podcast, source (the acquisition port),
+// enrich (metadata brain), audit (quality/repair), jobs, meta, and config; the
+// CLI lives under cmd/waxbin.
 //
 // The engine covers the full lifecycle: scan, analyze, organize, read/browse,
 // playback state, podcasts, audiobooks, enrichment, and audit/quality/repair, all

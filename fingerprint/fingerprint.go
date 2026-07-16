@@ -25,10 +25,22 @@ import (
 // AlgoVersion identifies the fingerprint algorithm. Bumping it forces the
 // analyze pass to recompute fingerprints. Analysis is keyed by both essence and
 // algorithm version, so a better algorithm supersedes stored fingerprints.
-const AlgoVersion = 1
+//
+// Bumped 1->2 with the WaxFlow migration: the decode now resamples to InternalRate
+// through the decoder's high-quality polyphase resampler instead of the box
+// averager below, which aliased HF energy into the fingerprint's bands.
+const AlgoVersion = 2
+
+// InternalRate is the mono rate the fingerprint frames at. It is exported
+// because the analyze pass decodes straight to it: the decoder's own high-
+// quality resampler is a far better path to this rate than resample below, whose
+// box-averaging aliases the 5512-22050 Hz band down into the 200-2000 Hz bands
+// the fingerprint keys on, which is where lossy codecs differ most. Compute still
+// accepts any rate; feeding it audio already at this rate simply makes its
+// resample step a no-op.
+const InternalRate = 11025
 
 const (
-	internalRate  = 11025 // PCM is resampled here before framing
 	frameSize     = 4096  // FFT window (power of two)
 	hopSize       = 2048  // 50% overlap between frames
 	numBands      = 16    // log-spaced energy bands -> numBands-1 = 15 bits/frame
@@ -50,11 +62,20 @@ type Fingerprint struct {
 	Sub        []uint32 // 15-bit sub-fingerprints, one per frame transition
 }
 
+// The analysis window and band-edge bins depend only on compile-time constants,
+// so they are computed once here rather than on every Compute call, which runs
+// once per file across a whole library. Both are read-only after init (Compute
+// copies the small edges array and only reads the window), so sharing them is safe.
+var (
+	fpWindow    = hann(frameSize)
+	fpBandEdges = bandEdges()
+)
+
 // Compute derives a fingerprint from decoded PCM. It returns a fingerprint with
 // no sub-values when the audio is too short to frame (the caller treats that as
 // "analyzed, nothing to group on").
 func Compute(pcm *decode.PCM) *Fingerprint {
-	mono := resample(pcm.Mono(), pcm.SampleRate, internalRate)
+	mono := resample(pcm.Mono(), pcm.SampleRate, InternalRate)
 	fp := &Fingerprint{Version: AlgoVersion}
 	if pcm.SampleRate > 0 {
 		fp.DurationMS = pcm.DurationMS()
@@ -63,8 +84,8 @@ func Compute(pcm *decode.PCM) *Fingerprint {
 		return fp
 	}
 
-	edges := bandEdges()
-	window := hann(frameSize)
+	edges := fpBandEdges
+	window := fpWindow
 
 	var prevBands, curBands [numBands]float64
 	havePrev := false
@@ -120,7 +141,7 @@ func bandEdges() [numBands + 1]int {
 	ratio := math.Pow(maxFreq/minFreq, 1.0/float64(numBands))
 	freq := minFreq
 	for i := 0; i <= numBands; i++ {
-		bin := int(freq * float64(frameSize) / float64(internalRate))
+		bin := int(freq * float64(frameSize) / float64(InternalRate))
 		if bin >= frameSize/2 {
 			bin = frameSize/2 - 1
 		}

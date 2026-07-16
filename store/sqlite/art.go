@@ -204,10 +204,9 @@ func (s *Store) ResolveArt(ctx context.Context, ref model.EntityRef, size int) (
 	if size <= 0 || (longest > 0 && longest <= size) {
 		return blob, nil
 	}
-	// Dimensions unknown (an undecodable/exotic source): serve the original UNLESS an
-	// external helper can thumbnail this exotic format. That path decodes it, so it
-	// must not take the serve-original shortcut.
-	if longest == 0 && !exoticSupported(srcFormat) {
+	// Dimensions unknown (an undecodable or exotic source, e.g. an AVIF/HEIC cover
+	// with no pure-Go decoder): there is nothing to scale, so serve the original.
+	if longest == 0 {
 		return blob, nil
 	}
 	return s.thumbnail(ctx, hash, srcData, srcFormat, srcW, srcH, size)
@@ -245,20 +244,10 @@ func (s *Store) thumbnail(ctx context.Context, hash string, srcData []byte, srcF
 
 	thumb, tFormat, tw, th, gerr := art.Thumbnail(srcData, size)
 	if gerr != nil {
-		// The pure-Go decoders cannot handle this source. If it is an exotic format an
-		// external helper supports (AVIF/HEIC), shell the helper once and cache the
-		// result; otherwise serve the original unscaled rather than failing.
-		if exoticSupported(srcFormat) {
-			if et, ef, ew, eh, eerr := s.exoticThumbnail(ctx, srcData, size); eerr == nil {
-				thumb, tFormat, tw, th = et, ef, ew, eh
-			} else {
-				s.log.Warn("exotic art thumbnail failed; serving original", "hash", hash, "size", size, "err", eerr)
-				return &model.ArtBlob{Bytes: srcData, Format: srcFormat, Width: srcW, Height: srcH, SourceHash: hash}, nil
-			}
-		} else {
-			s.log.Warn("art thumbnail generation failed; serving original", "hash", hash, "size", size, "err", gerr)
-			return &model.ArtBlob{Bytes: srcData, Format: srcFormat, Width: srcW, Height: srcH, SourceHash: hash}, nil
-		}
+		// The pure-Go decoders cannot handle this source (an undecodable or exotic
+		// format such as AVIF/HEIC): serve the original unscaled rather than failing.
+		s.log.Warn("art thumbnail generation failed; serving original", "hash", hash, "size", size, "err", gerr)
+		return &model.ArtBlob{Bytes: srcData, Format: srcFormat, Width: srcW, Height: srcH, SourceHash: hash}, nil
 	}
 
 	blob := model.ArtBlob{Bytes: thumb, Format: tFormat, Width: tw, Height: th, SourceHash: hash, Thumbnail: true}

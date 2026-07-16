@@ -73,7 +73,7 @@ type Library struct {
 	podcasts  *podcast.Service
 	enricher  *enrich.Service
 	auditor   *audit.Auditor
-	decoders  *decode.Registry
+	decoder   *decode.Engine
 	log       *slog.Logger
 	opts      Options
 }
@@ -121,7 +121,7 @@ func Open(ctx context.Context, opts Options) (*Library, error) {
 		return nil, err
 	}
 
-	decoders := decode.Default()
+	decoder := decode.New(log)
 	l := &Library{
 		store:     st,
 		jobs:      jobs.NewManager(st, owner, log),
@@ -129,7 +129,7 @@ func Open(ctx context.Context, opts Options) (*Library, error) {
 		organizer: organize.New(st, meta.NewWriter(), log),
 		profiles:  profiles,
 		trasher:   trash.New(st, log),
-		analyzer:  analyze.New(st, decoders, log),
+		analyzer:  analyze.New(st, decoder, log),
 		playback:  playback.New(st),
 		playlists: playlist.New(st),
 		podcasts: podcast.New(st, meta.NewReader(), podcast.Config{
@@ -144,7 +144,7 @@ func Open(ctx context.Context, opts Options) (*Library, error) {
 			Providers:         opts.SourceProviders,
 		}, log),
 		enricher: enrich.New(st, enrichConfig(opts.Enrichment), log),
-		decoders: decoders,
+		decoder:  decoder,
 		log:      log,
 		opts:     opts,
 	}
@@ -717,7 +717,7 @@ func (l *Library) RefreshAlbumGain(ctx context.Context) error {
 }
 
 // Coverage reports per-codec analysis decode support for doctor.
-func (l *Library) Coverage() []decode.FormatSupport { return l.decoders.Coverage() }
+func (l *Library) Coverage() []decode.FormatSupport { return decode.Coverage() }
 
 // VerifyDerived runs the derived-data consistency check (FTS, rollups, and
 // generated sort keys versus the source rows). It is read-only; it reports drift

@@ -5,7 +5,6 @@ import (
 	"context"
 	"database/sql"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -314,40 +313,37 @@ collect:
 }
 
 // TestAnalyzeAIFFNotErrored verifies an AIFF file (which WaxLabel reports as PCM)
-// is decoded via ffmpeg rather than routed to the RIFF/WAVE-only pure-Go decoder
-// and erroring. ffmpeg is required to synthesize and decode it, so skip without it.
+// decodes through WaxFlow like any other input, rather than erroring for lack of a
+// RIFF/WAVE-only decoder. The fixture is a pure-Go WaxFlow encode, so the test
+// needs no external binary. Before the migration it ran only when ffmpeg was
+// installed.
 func TestAnalyzeAIFFNotErrored(t *testing.T) {
-	bin, err := exec.LookPath("ffmpeg")
-	if err != nil {
-		t.Skip("ffmpeg not installed")
-	}
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
-	aiff := filepath.Join(root, "tone.aiff")
-	if out, err := exec.Command(bin, "-hide_banner", "-loglevel", "error",
-		"-f", "lavfi", "-i", "sine=frequency=440:duration=2", "-y", aiff).CombinedOutput(); err != nil {
-		t.Skipf("could not synthesize AIFF: %v (%s)", err, out)
-	}
+	const rate = 44100
+	sig := testaudio.ReferenceSignal(rate, 2*time.Second)
+	writeFile(t, filepath.Join(root, "tone.aiff"), testaudio.EncodeAs(t, "aiff", "", rate, sig))
 
 	lib := openManaged(t, ctx, db, root)
 	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
 		t.Fatalf("scan: %v", err)
 	}
-	// The AIFF cataloged with the container-keyed codec, not "pcm".
+	// PCM in any container now catalogs as plain "pcm": nothing routes on the codec,
+	// so there is no container-keyed "aiff" codec key.
 	items, _ := lib.Query(ctx, query.New(query.EntityItems).Build())
-	if len(items) != 1 || items[0].Codec != "aiff" {
-		t.Fatalf("AIFF codec = %v, want one item keyed 'aiff'", items)
+	if len(items) != 1 || items[0].Codec != "pcm" {
+		t.Fatalf("AIFF codec = %v, want one item keyed 'pcm'", items)
 	}
 	res, err := lib.Analyze(ctx, waxbin.AnalyzeOptions{})
 	if err != nil {
 		t.Fatalf("analyze: %v", err)
 	}
 	if res.Result.Errored != 0 {
-		t.Errorf("AIFF analysis errored (%d); it should decode via ffmpeg", res.Result.Errored)
+		t.Errorf("AIFF analysis errored (%d); it should decode via WaxFlow", res.Result.Errored)
 	}
 	if res.Result.Analyzed != 1 {
-		t.Errorf("AIFF analyzed = %d, want 1 (ffmpeg path)", res.Result.Analyzed)
+		t.Errorf("AIFF analyzed = %d, want 1", res.Result.Analyzed)
 	}
 }
 

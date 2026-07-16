@@ -47,7 +47,10 @@ func newAnalyzeCmd(g *globals) *cobra.Command {
 			if res.Result.ReplayGainTagsUnrepresented > 0 {
 				fmt.Fprintf(w, "rg tags:    %d files with a value the format could not store\n", res.Result.ReplayGainTagsUnrepresented)
 			}
-			fmt.Fprintf(w, "skipped:    %d (no decoder for codec)\n", res.Result.Skipped)
+			fmt.Fprintf(w, "skipped:    %d (cannot decode; retried later)\n", res.Result.Skipped)
+			if res.Result.MeasureFailed > 0 {
+				fmt.Fprintf(w, "no loudness: %d (fingerprint stored; measurement failed)\n", res.Result.MeasureFailed)
+			}
 			fmt.Fprintf(w, "errored:    %d\n", res.Result.Errored)
 			fmt.Fprintf(w, "job:        %s\n", res.JobPID)
 			return nil

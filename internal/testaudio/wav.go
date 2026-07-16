@@ -52,24 +52,31 @@ func Reencode(samples []float32, gain float64, seed int64) []float32 {
 	return out
 }
 
-// EncodeWAV16 wraps mono float32 samples as a minimal RIFF/WAVE 16-bit PCM file.
-func EncodeWAV16(rate int, samples []float32) []byte {
-	dataLen := len(samples) * 2
+// EncodeWAV16Multi wraps interleaved float32 samples as a minimal RIFF/WAVE 16-bit
+// PCM file with the given channel count (samples are frame-interleaved, length a
+// multiple of channels). It is the multichannel companion to EncodeWAV16, used to
+// price the analyze pass's per-channel resample on wide layouts (5.1, 7.1).
+func EncodeWAV16Multi(rate, channels int, interleaved []float32) []byte {
+	if channels < 1 {
+		channels = 1
+	}
+	dataLen := len(interleaved) * 2
+	blockAlign := channels * 2
 	buf := make([]byte, 0, 44+dataLen)
 	buf = append(buf, "RIFF"...)
 	buf = binary.LittleEndian.AppendUint32(buf, uint32(36+dataLen))
 	buf = append(buf, "WAVE"...)
 	buf = append(buf, "fmt "...)
 	buf = binary.LittleEndian.AppendUint32(buf, 16)
-	buf = binary.LittleEndian.AppendUint16(buf, 1)            // PCM
-	buf = binary.LittleEndian.AppendUint16(buf, 1)            // mono
-	buf = binary.LittleEndian.AppendUint32(buf, uint32(rate)) // sample rate
-	buf = binary.LittleEndian.AppendUint32(buf, uint32(rate*2))
-	buf = binary.LittleEndian.AppendUint16(buf, 2)  // block align
-	buf = binary.LittleEndian.AppendUint16(buf, 16) // bits/sample
+	buf = binary.LittleEndian.AppendUint16(buf, 1) // PCM
+	buf = binary.LittleEndian.AppendUint16(buf, uint16(channels))
+	buf = binary.LittleEndian.AppendUint32(buf, uint32(rate))
+	buf = binary.LittleEndian.AppendUint32(buf, uint32(rate*blockAlign))
+	buf = binary.LittleEndian.AppendUint16(buf, uint16(blockAlign))
+	buf = binary.LittleEndian.AppendUint16(buf, 16)
 	buf = append(buf, "data"...)
 	buf = binary.LittleEndian.AppendUint32(buf, uint32(dataLen))
-	for _, s := range samples {
+	for _, s := range interleaved {
 		if s > 1 {
 			s = 1
 		} else if s < -1 {
@@ -78,4 +85,12 @@ func EncodeWAV16(rate int, samples []float32) []byte {
 		buf = binary.LittleEndian.AppendUint16(buf, uint16(int16(math.Round(float64(s)*32767))))
 	}
 	return buf
+}
+
+// EncodeWAV16 wraps mono float32 samples as a minimal RIFF/WAVE 16-bit PCM file. It
+// delegates to EncodeWAV16Multi at one channel. The output stays byte-identical to
+// the standalone mono encoder its many callers key on, and the two copies of the
+// encoding cannot drift apart.
+func EncodeWAV16(rate int, samples []float32) []byte {
+	return EncodeWAV16Multi(rate, 1, samples)
 }
