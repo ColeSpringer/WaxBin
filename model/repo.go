@@ -281,8 +281,12 @@ type Catalog interface {
 	// organize). It refuses a locked field unless force is set.
 	SetFieldProvenance(ctx context.Context, itemPID PID, field string, source ProvenanceSource, value string, force bool) error
 
-	QueryItems(ctx context.Context, q query.Query) ([]*ItemView, error)
-	CountItems(ctx context.Context, q query.Query) (int, error)
+	// QueryItems/CountItems evaluate q against the item whitelist. If q references a
+	// per-user field such as starred, rating, or play_count, it is scoped to userPID's
+	// play_state (empty selects the default user). A query with no user-state field is
+	// not scoped by user.
+	QueryItems(ctx context.Context, q query.Query, userPID PID) ([]*ItemView, error)
+	CountItems(ctx context.Context, q query.Query, userPID PID) (int, error)
 	ItemByPID(ctx context.Context, pid PID) (*ItemView, error)
 	// ItemFiles returns every file backing an item in reading order (one for a
 	// track or single-file book, all parts for a multi-file book).

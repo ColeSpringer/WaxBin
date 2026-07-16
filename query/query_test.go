@@ -101,6 +101,49 @@ func TestCompileOrNot(t *testing.T) {
 	}
 }
 
+func TestCompileNeedsUser(t *testing.T) {
+	// A field map with one per-user column, mirroring the store's user-state fields.
+	fm := query.FieldMap{
+		"title":      {Expr: "pi.title", Kind: query.KindText},
+		"year":       {Expr: "t.year", Kind: query.KindInt},
+		"rating":     {Expr: "ps.rating", Kind: query.KindInt, NeedsUser: true},
+		"play_count": {Expr: "COALESCE(ps.play_count, 0)", Kind: query.KindInt, NeedsUser: true},
+	}
+
+	// A query touching no per-user field must not flag NeedsUser, so the store skips
+	// the user lookup and join entirely.
+	plain, err := query.Compile(query.New(query.EntityItems).
+		Where("title", query.OpContains, "x").Where("year", query.OpGte, 2000).Build(), fm)
+	if err != nil {
+		t.Fatalf("compile plain: %v", err)
+	}
+	if plain.NeedsUser {
+		t.Error("plain query flagged NeedsUser")
+	}
+
+	// A per-user field in the WHERE (any operator, including presence) flags it.
+	for _, tc := range []struct {
+		name string
+		q    query.Query
+	}{
+		{"where-cond", query.New(query.EntityItems).Where("rating", query.OpGte, 50).Build()},
+		{"where-presence", query.New(query.EntityItems).WherePresence("rating", query.OpIsMissing).Build()},
+		{"where-nested", query.New(query.EntityItems).WhereNode(query.Or{Nodes: []query.Node{
+			query.Cond{Field: "title", Op: query.OpIs, Value: "a"},
+			query.Not{Node: query.Cond{Field: "play_count", Op: query.OpGt, Value: 0}},
+		}}).Build()},
+		{"sort-only", query.New(query.EntityItems).OrderBy("rating", true).Build()},
+	} {
+		c, err := query.Compile(tc.q, fm)
+		if err != nil {
+			t.Fatalf("compile %s: %v", tc.name, err)
+		}
+		if !c.NeedsUser {
+			t.Errorf("%s: NeedsUser not set for a per-user field reference", tc.name)
+		}
+	}
+}
+
 func TestRuleRoundTrip(t *testing.T) {
 	q := query.New(query.EntityItems).
 		Where("title", query.OpContains, "x").

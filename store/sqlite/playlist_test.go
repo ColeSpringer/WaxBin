@@ -32,7 +32,7 @@ func TestStaticPlaylistOrderAndEdits(t *testing.T) {
 	if err := st.AddPlaylistItems(ctx, pl, []model.PID{c, a, b}); err != nil {
 		t.Fatalf("add: %v", err)
 	}
-	items, err := st.PlaylistItems(ctx, pl)
+	items, err := st.PlaylistItems(ctx, pl, "")
 	if err != nil {
 		t.Fatalf("items: %v", err)
 	}
@@ -44,7 +44,7 @@ func TestStaticPlaylistOrderAndEdits(t *testing.T) {
 	if err := st.RemovePlaylistItem(ctx, pl, a); err != nil {
 		t.Fatalf("remove: %v", err)
 	}
-	items, _ = st.PlaylistItems(ctx, pl)
+	items, _ = st.PlaylistItems(ctx, pl, "")
 	if got := titlesOf(items); !equalStrings(got, []string{"C", "B"}) {
 		t.Errorf("after remove = %v, want [C B]", got)
 	}
@@ -53,7 +53,7 @@ func TestStaticPlaylistOrderAndEdits(t *testing.T) {
 	if err := st.SetPlaylistItems(ctx, pl, []model.PID{a, b, c}); err != nil {
 		t.Fatalf("set: %v", err)
 	}
-	items, _ = st.PlaylistItems(ctx, pl)
+	items, _ = st.PlaylistItems(ctx, pl, "")
 	if got := titlesOf(items); !equalStrings(got, []string{"A", "B", "C"}) {
 		t.Errorf("after set = %v, want [A B C]", got)
 	}
@@ -74,7 +74,7 @@ func TestSmartPlaylistEvaluatedOnRead(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create smart: %v", err)
 	}
-	items, err := st.PlaylistItems(ctx, pl)
+	items, err := st.PlaylistItems(ctx, pl, "")
 	if err != nil {
 		t.Fatalf("items: %v", err)
 	}
@@ -85,7 +85,7 @@ func TestSmartPlaylistEvaluatedOnRead(t *testing.T) {
 	// A track that newly satisfies the rule appears without re-saving the playlist
 	// (evaluated on read), proving it is not a frozen snapshot.
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/3.flac", essence: "e3", content: "c3", title: "Newer", artist: "X", album: "Al", year: 2020})
-	items, _ = st.PlaylistItems(ctx, pl)
+	items, _ = st.PlaylistItems(ctx, pl, "")
 	if len(items) != 2 {
 		t.Errorf("smart membership after new match = %v, want 2 items", titlesOf(items))
 	}
@@ -143,7 +143,7 @@ func TestRemovePlaylistItemAt(t *testing.T) {
 	if err := st.RemovePlaylistItemAt(ctx, pl, 0); err != nil {
 		t.Fatalf("remove at: %v", err)
 	}
-	items, _ := st.PlaylistItems(ctx, pl)
+	items, _ := st.PlaylistItems(ctx, pl, "")
 	if got := titlesOf(items); !equalStrings(got, []string{"B", "A"}) {
 		t.Errorf("after removing position 0 = %v, want [B A]", got)
 	}

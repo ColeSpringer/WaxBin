@@ -182,8 +182,12 @@ func (s *Store) playlistUpdate(ctx context.Context, op string, pid model.PID, st
 }
 
 // PlaylistItems returns a playlist's items: a static playlist's stored order, or a
-// smart playlist's rule evaluated on read through the shared query engine.
-func (s *Store) PlaylistItems(ctx context.Context, pid model.PID) ([]*model.ItemView, error) {
+// smart playlist's rule evaluated on read through the shared query engine. If a smart
+// rule references a per-user field such as rating, starred, or play_count, it
+// evaluates against userPID's play_state, so one rule yields different membership per
+// user. The user is bound at read time and never stored in the rule. userPID goes
+// unused for a static playlist or a smart rule that touches no user-state field.
+func (s *Store) PlaylistItems(ctx context.Context, pid model.PID, userPID model.PID) ([]*model.ItemView, error) {
 	const op = "store.PlaylistItems"
 	p, err := s.PlaylistByPID(ctx, pid)
 	if err != nil {
@@ -193,7 +197,7 @@ func (s *Store) PlaylistItems(ctx context.Context, pid model.PID) ([]*model.Item
 		if p.Rule == nil {
 			return nil, waxerr.New(waxerr.CodeInvalid, op, "smart playlist has no rule")
 		}
-		return s.QueryItems(ctx, *p.Rule)
+		return s.QueryItems(ctx, *p.Rule, userPID)
 	}
 	rows, err := s.read.QueryContext(ctx,
 		itemSelect+` JOIN playlist_item pli ON pli.item_id = pi.id

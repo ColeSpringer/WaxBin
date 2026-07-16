@@ -25,7 +25,7 @@ func TestFacetByGenre(t *testing.T) {
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/2.flac", essence: "e2", content: "c2", title: "B", artist: "Y", album: "Bl", genre: "Rock"})
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/3.flac", essence: "e3", content: "c3", title: "C", artist: "Z", album: "Cl", genre: ""})
 
-	res, err := st.Facet(ctx, query.New(query.EntityItems).Build(), read.GroupGenre)
+	res, err := st.Facet(ctx, query.New(query.EntityItems).Build(), read.GroupGenre, "")
 	if err != nil {
 		t.Fatalf("facet: %v", err)
 	}
@@ -52,7 +52,7 @@ func TestFacetByArtistUnknownBucket(t *testing.T) {
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/1.flac", essence: "e1", content: "c1", title: "A", artist: "Radiohead", album: "OK"})
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/2.flac", essence: "e2", content: "c2", title: "B", artist: "", album: ""})
 
-	res, err := st.Facet(ctx, query.New(query.EntityItems).Build(), read.GroupArtist)
+	res, err := st.Facet(ctx, query.New(query.EntityItems).Build(), read.GroupArtist, "")
 	if err != nil {
 		t.Fatalf("facet: %v", err)
 	}
@@ -71,7 +71,7 @@ func TestFacetByYearAndKind(t *testing.T) {
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/2.flac", essence: "e2", content: "c2", title: "B", artist: "Y", album: "Bl", year: 1997})
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/3.flac", essence: "e3", content: "c3", title: "C", artist: "Z", album: "Cl"}) // no year
 
-	res, err := st.Facet(ctx, query.New(query.EntityItems).Build(), read.GroupYear)
+	res, err := st.Facet(ctx, query.New(query.EntityItems).Build(), read.GroupYear, "")
 	if err != nil {
 		t.Fatalf("facet year: %v", err)
 	}
@@ -82,7 +82,7 @@ func TestFacetByYearAndKind(t *testing.T) {
 		t.Errorf("Unknown-Year bucket = %+v, want count 1", b)
 	}
 
-	kindRes, err := st.Facet(ctx, query.New(query.EntityItems).Build(), read.GroupKind)
+	kindRes, err := st.Facet(ctx, query.New(query.EntityItems).Build(), read.GroupKind, "")
 	if err != nil {
 		t.Fatalf("facet kind: %v", err)
 	}
@@ -98,7 +98,7 @@ func TestFacetHonorsFilter(t *testing.T) {
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/2.flac", essence: "e2", content: "c2", title: "B", artist: "Y", album: "Bl", genre: "Rock", year: 1990})
 
 	q := query.New(query.EntityItems).Where("year", query.OpGte, 2000).Build()
-	res, err := st.Facet(ctx, q, read.GroupGenre)
+	res, err := st.Facet(ctx, q, read.GroupGenre, "")
 	if err != nil {
 		t.Fatalf("facet: %v", err)
 	}
@@ -110,7 +110,7 @@ func TestFacetHonorsFilter(t *testing.T) {
 
 func TestFacetRejectsBadGroupBy(t *testing.T) {
 	st, _ := entityFixture(t)
-	if _, err := st.Facet(context.Background(), query.New(query.EntityItems).Build(), read.GroupBy("bogus")); err == nil {
+	if _, err := st.Facet(context.Background(), query.New(query.EntityItems).Build(), read.GroupBy("bogus"), ""); err == nil {
 		t.Fatal("expected an error for an unsupported group-by")
 	}
 }
@@ -132,7 +132,7 @@ func TestQueryPageKeysetCoversAllOnce(t *testing.T) {
 	cursor := read.Cursor("")
 	pages := 0
 	for {
-		page, err := st.QueryPage(ctx, query.New(query.EntityItems).Build(), cursor, 2, false)
+		page, err := st.QueryPage(ctx, query.New(query.EntityItems).Build(), cursor, 2, false, "")
 		if err != nil {
 			t.Fatalf("page: %v", err)
 		}
@@ -179,7 +179,7 @@ func TestQueryPageDescending(t *testing.T) {
 	var order []string
 	cursor := read.Cursor("")
 	for {
-		page, err := st.QueryPage(ctx, query.New(query.EntityItems).Build(), cursor, 2, true) // desc
+		page, err := st.QueryPage(ctx, query.New(query.EntityItems).Build(), cursor, 2, true, "") // desc
 		if err != nil {
 			t.Fatalf("page: %v", err)
 		}
@@ -212,7 +212,7 @@ func TestQueryPageStableUnderConcurrentInsert(t *testing.T) {
 		})
 	}
 
-	page1, err := st.QueryPage(ctx, query.New(query.EntityItems).Build(), "", 2, false)
+	page1, err := st.QueryPage(ctx, query.New(query.EntityItems).Build(), "", 2, false, "")
 	if err != nil {
 		t.Fatalf("page1: %v", err)
 	}
@@ -228,7 +228,7 @@ func TestQueryPageStableUnderConcurrentInsert(t *testing.T) {
 		})
 	}
 
-	page2, err := st.QueryPage(ctx, query.New(query.EntityItems).Build(), page1.Next, 10, false)
+	page2, err := st.QueryPage(ctx, query.New(query.EntityItems).Build(), page1.Next, 10, false, "")
 	if err != nil {
 		t.Fatalf("page2: %v", err)
 	}

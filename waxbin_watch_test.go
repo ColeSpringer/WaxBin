@@ -116,7 +116,7 @@ func TestWatchScheduledCatalogsAndReconciles(t *testing.T) {
 
 func itemCount(t *testing.T, lib *waxbin.Library, title string) int {
 	t.Helper()
-	items, err := lib.Query(context.Background(), query.New(query.EntityItems).Where("title", query.OpIs, title).Build())
+	items, err := lib.Query(context.Background(), query.New(query.EntityItems).Where("title", query.OpIs, title).Build(), "")
 	if err != nil {
 		t.Fatalf("query %q: %v", title, err)
 	}
@@ -125,7 +125,7 @@ func itemCount(t *testing.T, lib *waxbin.Library, title string) int {
 
 func itemState(t *testing.T, lib *waxbin.Library, title string) model.ItemState {
 	t.Helper()
-	items, err := lib.Query(context.Background(), query.New(query.EntityItems).Where("title", query.OpIs, title).Build())
+	items, err := lib.Query(context.Background(), query.New(query.EntityItems).Where("title", query.OpIs, title).Build(), "")
 	if err != nil || len(items) == 0 {
 		return ""
 	}

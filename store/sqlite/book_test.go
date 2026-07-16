@@ -279,7 +279,7 @@ func TestBookSearchAndFacet(t *testing.T) {
 	}
 
 	// The author appears in the artist facet via the author COALESCE.
-	f, err := st.Facet(ctx, query.New(query.EntityItems).Build(), read.GroupArtist)
+	f, err := st.Facet(ctx, query.New(query.EntityItems).Build(), read.GroupArtist, "")
 	if err != nil {
 		t.Fatalf("facet: %v", err)
 	}
@@ -378,24 +378,24 @@ func TestTrackEntityExcludesBooks(t *testing.T) {
 	putBook(t, st, lib.ID, bookSpec{path: "/lib/b/x.m4b", essence: "be9", content: "bc9", title: "Book", author: "Auth", asin: "BX", durationMS: 100})
 
 	// The items entity is kind-agnostic; the tracks entity is music-only.
-	items, err := st.QueryItems(ctx, query.New(query.EntityItems).Build())
+	items, err := st.QueryItems(ctx, query.New(query.EntityItems).Build(), "")
 	if err != nil {
 		t.Fatalf("query items: %v", err)
 	}
 	if len(items) != 2 {
 		t.Fatalf("items = %d, want 2 (track + book)", len(items))
 	}
-	tracks, err := st.QueryItems(ctx, query.New(query.EntityTracks).Build())
+	tracks, err := st.QueryItems(ctx, query.New(query.EntityTracks).Build(), "")
 	if err != nil {
 		t.Fatalf("query tracks: %v", err)
 	}
 	if len(tracks) != 1 || tracks[0].Kind != model.KindTrack {
 		t.Fatalf("tracks entity = %v, want exactly the one track", tracks)
 	}
-	if n, _ := st.CountItems(ctx, query.New(query.EntityTracks).Build()); n != 1 {
+	if n, _ := st.CountItems(ctx, query.New(query.EntityTracks).Build(), ""); n != 1 {
 		t.Errorf("count tracks = %d, want 1", n)
 	}
-	if n, _ := st.CountItems(ctx, query.New(query.EntityItems).Build()); n != 2 {
+	if n, _ := st.CountItems(ctx, query.New(query.EntityItems).Build(), ""); n != 2 {
 		t.Errorf("count items = %d, want 2", n)
 	}
 }
@@ -418,7 +418,7 @@ func TestBookMatchesItemFilters(t *testing.T) {
 		{"year", string(query.OpIs), 1937},
 		{"genre", string(query.OpContains), "Fantasy"},
 	} {
-		got, err := st.QueryItems(ctx, query.New(query.EntityItems).Where(tc.field, query.Op(tc.op), tc.val).Build())
+		got, err := st.QueryItems(ctx, query.New(query.EntityItems).Where(tc.field, query.Op(tc.op), tc.val).Build(), "")
 		if err != nil {
 			t.Fatalf("query %s: %v", tc.field, err)
 		}
@@ -427,7 +427,7 @@ func TestBookMatchesItemFilters(t *testing.T) {
 		}
 	}
 	// The tracks entity excludes the book even when its author matches.
-	got, err := st.QueryItems(ctx, query.New(query.EntityTracks).Where("artist", query.OpContains, "Tolkien").Build())
+	got, err := st.QueryItems(ctx, query.New(query.EntityTracks).Where("artist", query.OpContains, "Tolkien").Build(), "")
 	if err != nil {
 		t.Fatalf("query tracks: %v", err)
 	}
@@ -737,7 +737,7 @@ func TestStatsArtistCountMatchesFacet(t *testing.T) {
 	if stats.Artists != 1 {
 		t.Errorf("artists = %d, want 1 (author only)", stats.Artists)
 	}
-	f, _ := st.Facet(ctx, query.New(query.EntityItems).Build(), read.GroupArtist)
+	f, _ := st.Facet(ctx, query.New(query.EntityItems).Build(), read.GroupArtist, "")
 	nonUnknown := 0
 	for _, b := range f.Buckets {
 		if !b.IsUnknown {

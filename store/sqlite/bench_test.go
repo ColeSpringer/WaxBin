@@ -88,7 +88,7 @@ func BenchmarkQueryPageAtScale(b *testing.B) {
 	populate(b, st, lib.ID, benchScale)
 	q := query.New(query.EntityItems).Build()
 	for b.Loop() {
-		if _, err := st.QueryPage(context.Background(), q, "", 50, false); err != nil {
+		if _, err := st.QueryPage(context.Background(), q, "", 50, false, ""); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -100,7 +100,7 @@ func BenchmarkFacetGenreAtScale(b *testing.B) {
 	populate(b, st, lib.ID, benchScale)
 	q := query.New(query.EntityItems).Build()
 	for b.Loop() {
-		if _, err := st.Facet(context.Background(), q, read.GroupGenre); err != nil {
+		if _, err := st.Facet(context.Background(), q, read.GroupGenre, ""); err != nil {
 			b.Fatal(err)
 		}
 	}

@@ -41,7 +41,7 @@ func TestUpsertFeedAndItemView(t *testing.T) {
 	// Episodes read back through the shared item view as kind=episode, with the
 	// podcast title standing in for artist/album.
 	items, err := st.QueryItems(ctx, query.New(query.EntityItems).
-		Where("kind", query.OpIs, "episode").Build())
+		Where("kind", query.OpIs, "episode").Build(), "")
 	if err != nil {
 		t.Fatalf("QueryItems: %v", err)
 	}

@@ -2,6 +2,7 @@ package playlist
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 
 	"github.com/colespringer/waxbin/query"
@@ -16,9 +17,22 @@ import (
 // lossy partial that would silently drift on re-import.
 
 // nspFieldToWB maps a Navidrome field name to a WaxBin query field. Only fields that
-// map cleanly (text and integer) are listed; a date/relative field, or any field not
-// here, is rejected. WaxBin has no relative-date operator, so Navidrome's date
-// fields (with inTheLast/before/after over dates) cannot round-trip and are excluded.
+// map cleanly (text and integer) are listed; a date or relative field, or any field
+// not here, is rejected. WaxBin has no relative-date operator, so Navidrome's date
+// fields (inTheLast/before/after over dates) cannot round-trip and are left out.
+//
+// lastPlayed is left out for that same reason. WaxBin stores last_played_at as Unix
+// nanoseconds and Navidrome's lastPlayed rules hold dates, so mapping it would
+// quietly produce always-true or always-empty predicates (an integer compared to a
+// date). A clean "unsupported" rejection beats that.
+//
+// The per-user fields that do map: starred (Navidrome's boolean to WaxBin's 0/1
+// starred field) and playcount (an integer count, 1:1). rating maps too, but its
+// value is scale-converted, since Navidrome rates 0 to 5 stars while WaxBin uses 0 to
+// 100. A rating is multiplied by nspRatingScale on import and divided on export (see
+// nspCond and nspExportCond). A WaxBin rating that is not a whole number of stars is
+// rejected on export rather than written at the wrong scale. A mapped rule evaluates
+// against the reading user, bound at read time and never persisted.
 var nspFieldToWB = map[string]string{
 	"title":       "title",
 	"album":       "album",
@@ -28,6 +42,57 @@ var nspFieldToWB = map[string]string{
 	"year":        "year",
 	"tracknumber": "track_no",
 	"discnumber":  "disc_no",
+	"rating":      "rating",
+	"starred":     "starred",
+	"playcount":   "play_count",
+}
+
+// nspRatingScale bridges Navidrome's 0 to 5 star scale and WaxBin's 0 to 100 rating.
+// A Navidrome value is multiplied by it on import and a WaxBin value divided by it on
+// export. A 1:1 mapping would quietly mis-match: a Navidrome "more than 3 stars" rule
+// would read as WaxBin "more than 3 out of 100" (nearly everything), and a WaxBin
+// "rating at least 80" would export as "80 stars" (nothing).
+const nspRatingScale = 20
+
+// asFloat coerces a JSON-decoded (float64) or programmatically-built (int/int64)
+// numeric value to a float64.
+func asFloat(v any) (float64, bool) {
+	switch n := v.(type) {
+	case float64:
+		return n, true
+	case int:
+		return float64(n), true
+	case int64:
+		return float64(n), true
+	default:
+		return 0, false
+	}
+}
+
+// scaleRatingIn converts a Navidrome rating value (0 to 5 stars) to WaxBin's 0 to 100
+// scale.
+func scaleRatingIn(v any) (any, error) {
+	f, ok := asFloat(v)
+	if !ok {
+		return nil, nspErr("nsp: rating value must be numeric")
+	}
+	return f * nspRatingScale, nil
+}
+
+// scaleRatingOut converts a WaxBin rating value (0 to 100) back to Navidrome's 0 to 5
+// scale. It rejects a value that is not a whole number of stars rather than writing a
+// fractional or mismatched star count.
+func scaleRatingOut(v any) (any, error) {
+	f, ok := asFloat(v)
+	if !ok {
+		return nil, nspErr("nsp: rating value must be numeric")
+	}
+	n := int64(f)
+	if float64(n) != f || n%nspRatingScale != 0 {
+		return nil, nspErr(fmt.Sprintf(
+			"nsp: WaxBin rating %v is not a whole star (a multiple of %d) and has no Navidrome 0-5 equivalent", v, nspRatingScale))
+	}
+	return n / nspRatingScale, nil
 }
 
 // wbFieldToNSP is the reverse map for export, built from nspFieldToWB.
@@ -198,12 +263,23 @@ func nspLeaf(op string, val json.RawMessage) (query.Node, error) {
 	return nil, nspErr("nsp: empty operator")
 }
 
-// nspCond builds a condition (or a negated one) for a leaf operator.
+// nspCond builds a condition (or a negated one) for a leaf operator. A rating value
+// is scaled up from Navidrome's 0-to-5 scale to WaxBin's 0-to-100 one. field is the
+// resolved WaxBin name, so "rating" here is WaxBin's rating field.
 func nspCond(op, field string, rawVal json.RawMessage) (query.Node, error) {
 	if op == "inTheRange" {
 		var vals []any
 		if err := json.Unmarshal(rawVal, &vals); err != nil || len(vals) != 2 {
 			return nil, nspErr("nsp: inTheRange needs a [low, high] array")
+		}
+		if field == "rating" {
+			for i := range vals {
+				sv, err := scaleRatingIn(vals[i])
+				if err != nil {
+					return nil, err
+				}
+				vals[i] = sv
+			}
 		}
 		return query.Cond{Field: field, Op: query.OpInRange, Values: vals}, nil
 	}
@@ -217,6 +293,13 @@ func nspCond(op, field string, rawVal json.RawMessage) (query.Node, error) {
 	wbOp, ok := nspOpToWB[op]
 	if !ok {
 		return nil, nspErr("nsp: unsupported operator: " + op)
+	}
+	if field == "rating" {
+		sv, err := scaleRatingIn(v)
+		if err != nil {
+			return nil, err
+		}
+		v = sv
 	}
 	return query.Cond{Field: field, Op: wbOp, Value: v}, nil
 }
@@ -310,7 +393,9 @@ func nspExportChildren(nodes []query.Node) ([]any, error) {
 	return arr, nil
 }
 
-// nspExportCond renders a single condition as `{"<op>": {"<field>": <value>}}`.
+// nspExportCond renders a single condition as `{"<op>": {"<field>": <value>}}`. A
+// rating value is scaled back down from WaxBin's 0-to-100 scale to Navidrome's 0-to-5
+// one, rejecting a value that is not a whole star rather than writing a mismatched one.
 func nspExportCond(c query.Cond) (map[string]any, error) {
 	field, ok := wbFieldToNSP[c.Field]
 	if !ok {
@@ -321,7 +406,26 @@ func nspExportCond(c query.Cond) (map[string]any, error) {
 		return nil, nspErr("nsp: unsupported operator: " + string(c.Op))
 	}
 	if c.Op == query.OpInRange {
-		return map[string]any{op: map[string]any{field: c.Values}}, nil
+		vals := c.Values
+		if c.Field == "rating" {
+			vals = make([]any, len(c.Values))
+			for i, x := range c.Values {
+				sv, err := scaleRatingOut(x)
+				if err != nil {
+					return nil, err
+				}
+				vals[i] = sv
+			}
+		}
+		return map[string]any{op: map[string]any{field: vals}}, nil
 	}
-	return map[string]any{op: map[string]any{field: c.Value}}, nil
+	val := c.Value
+	if c.Field == "rating" {
+		sv, err := scaleRatingOut(c.Value)
+		if err != nil {
+			return nil, err
+		}
+		val = sv
+	}
+	return map[string]any{op: map[string]any{field: val}}, nil
 }

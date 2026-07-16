@@ -139,7 +139,7 @@ func TestRescanEssenceChangeReplacesItem(t *testing.T) {
 	if _, err := st.ItemByPID(ctx, r1.ItemPID); !waxerr.Is(err, waxerr.CodeNotFound) {
 		t.Fatalf("old item should be deleted (no ghost), got %v", err)
 	}
-	items, err := st.QueryItems(ctx, query.New(query.EntityItems).Build())
+	items, err := st.QueryItems(ctx, query.New(query.EntityItems).Build(), "")
 	if err != nil {
 		t.Fatalf("query: %v", err)
 	}
@@ -178,11 +178,11 @@ func TestQueryItemsOffsetWithoutLimit(t *testing.T) {
 		}
 	}
 
-	all, err := st.QueryItems(ctx, query.New(query.EntityItems).OrderBy("title", false).Build())
+	all, err := st.QueryItems(ctx, query.New(query.EntityItems).OrderBy("title", false).Build(), "")
 	if err != nil || len(all) != 5 {
 		t.Fatalf("baseline query: %v len=%d", err, len(all))
 	}
-	got, err := st.QueryItems(ctx, query.New(query.EntityItems).OrderBy("title", false).Offset(2).Build())
+	got, err := st.QueryItems(ctx, query.New(query.EntityItems).OrderBy("title", false).Offset(2).Build(), "")
 	if err != nil {
 		t.Fatalf("offset query: %v", err)
 	}
@@ -208,7 +208,7 @@ func TestConcurrentCloseAndReads(t *testing.T) {
 			defer wg.Done()
 			for j := 0; j < 50; j++ {
 				// May error once the store is closed; must never panic or race.
-				_, _ = st.QueryItems(ctx, query.New(query.EntityItems).Build())
+				_, _ = st.QueryItems(ctx, query.New(query.EntityItems).Build(), "")
 			}
 		}()
 	}

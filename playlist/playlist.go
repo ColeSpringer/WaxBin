@@ -24,7 +24,7 @@ type Store interface {
 	DeletePlaylist(ctx context.Context, pid model.PID) error
 	RenamePlaylist(ctx context.Context, pid model.PID, name string) error
 	SetPlaylistVisibility(ctx context.Context, pid model.PID, vis model.PlaylistVisibility) error
-	PlaylistItems(ctx context.Context, pid model.PID) ([]*model.ItemView, error)
+	PlaylistItems(ctx context.Context, pid model.PID, userPID model.PID) ([]*model.ItemView, error)
 	AddPlaylistItems(ctx context.Context, pid model.PID, itemPIDs []model.PID) error
 	SetPlaylistItems(ctx context.Context, pid model.PID, itemPIDs []model.PID) error
 	RemovePlaylistItem(ctx context.Context, pid model.PID, itemPID model.PID) error
@@ -60,10 +60,13 @@ func (s *Service) Get(ctx context.Context, pid model.PID) (*model.Playlist, erro
 	return s.store.PlaylistByPID(ctx, pid)
 }
 
-// Items returns a playlist's members (a static list's stored order, or a smart
-// rule evaluated on read).
-func (s *Service) Items(ctx context.Context, pid model.PID) ([]*model.ItemView, error) {
-	return s.store.PlaylistItems(ctx, pid)
+// Items returns a playlist's members: a static list's stored order, or a smart rule
+// evaluated on read. If a smart rule references a per-user field such as rating,
+// starred, or play_count, it evaluates against userPID's play_state, so one playlist
+// yields different membership per user. An empty userPID selects the default user.
+// The user is bound at read time and never stored in the rule.
+func (s *Service) Items(ctx context.Context, pid model.PID, userPID model.PID) ([]*model.ItemView, error) {
+	return s.store.PlaylistItems(ctx, pid, userPID)
 }
 
 // Delete removes a playlist.
@@ -103,10 +106,12 @@ func (s *Service) RemoveAt(ctx context.Context, pid model.PID, position int) err
 
 // ExportM3U8 writes a playlist's current members as an extended M3U (#EXTM3U)
 // document: a #EXTINF metadata line plus the file path per item. Smart playlists
-// export their evaluated membership, so the file is a static snapshot.
-func (s *Service) ExportM3U8(ctx context.Context, pid model.PID, w io.Writer) error {
+// export their evaluated membership, so the file is a static snapshot; that
+// membership is evaluated for userPID (empty selects the default user) when the
+// rule references per-user state.
+func (s *Service) ExportM3U8(ctx context.Context, pid model.PID, w io.Writer, userPID model.PID) error {
 	const op = "playlist.ExportM3U8"
-	items, err := s.store.PlaylistItems(ctx, pid)
+	items, err := s.store.PlaylistItems(ctx, pid, userPID)
 	if err != nil {
 		return err
 	}

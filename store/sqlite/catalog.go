@@ -351,9 +351,12 @@ func preserveItemIdentityForFile(ctx context.Context, tx *sql.Tx, fileID int64, 
 	return err
 }
 
-// QueryItems compiles q against the item field whitelist and returns the
-// matching item views.
-func (s *Store) QueryItems(ctx context.Context, q query.Query) ([]*model.ItemView, error) {
+// QueryItems compiles q against the item field whitelist and returns the matching
+// item views. If q references a per-user field such as starred, rating, or
+// play_count, it evaluates against userPID's play_state, and an empty userPID means
+// the default user. A query with no user-state field is not scoped by user, but a
+// non-empty userPID is still checked to exist so a typo does not pass silently.
+func (s *Store) QueryItems(ctx context.Context, q query.Query, userPID model.PID) ([]*model.ItemView, error) {
 	const op = "store.QueryItems"
 	fm, ok := fieldMapFor(q.Entity)
 	if !ok {
@@ -363,10 +366,16 @@ func (s *Store) QueryItems(ctx context.Context, q query.Query) ([]*model.ItemVie
 	if err != nil {
 		return nil, err
 	}
+	userJoin, leadArgs, err := s.userStateJoin(ctx, c, userPID, op)
+	if err != nil {
+		return nil, err
+	}
 
 	var sb strings.Builder
 	sb.WriteString(itemSelect)
-	args := append([]any(nil), c.Args...)
+	sb.WriteString(userJoin)
+	// leadArgs carries the join's user id (or is empty) and precedes the query args.
+	args := append(leadArgs, c.Args...)
 	where := andWhere(c.Where, entityPredicate(q.Entity))
 	if where != "" {
 		sb.WriteString(" WHERE ")
@@ -407,7 +416,10 @@ func (s *Store) QueryItems(ctx context.Context, q query.Query) ([]*model.ItemVie
 }
 
 // CountItems returns the number of items matching q (ignoring limit/offset).
-func (s *Store) CountItems(ctx context.Context, q query.Query) (int, error) {
+// userPID scopes any per-user field the same way QueryItems does. The user join
+// is on play_state's primary key, so it matches at most one row per item and
+// COUNT(*) stays exact.
+func (s *Store) CountItems(ctx context.Context, q query.Query, userPID model.PID) (int, error) {
 	const op = "store.CountItems"
 	fm, ok := fieldMapFor(q.Entity)
 	if !ok {
@@ -417,12 +429,18 @@ func (s *Store) CountItems(ctx context.Context, q query.Query) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	stmt := itemCountSelect
+	userJoin, leadArgs, err := s.userStateJoin(ctx, c, userPID, op)
+	if err != nil {
+		return 0, err
+	}
+	stmt := itemCountSelect + userJoin
 	if where := andWhere(c.Where, entityPredicate(q.Entity)); where != "" {
 		stmt += " WHERE " + where
 	}
+	// leadArgs (the join user id, or empty) precedes the WHERE args.
+	args := append(leadArgs, c.Args...)
 	var n int
-	if err := s.read.QueryRowContext(ctx, stmt, c.Args...).Scan(&n); err != nil {
+	if err := s.read.QueryRowContext(ctx, stmt, args...).Scan(&n); err != nil {
 		return 0, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
 	return n, nil

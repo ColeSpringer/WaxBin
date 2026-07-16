@@ -49,7 +49,7 @@ type UpgradeGroup struct {
 // It is a maintenance scan: it walks every track item and probes the fingerprint
 // index for each, so it is meant for occasional use, not the hot path.
 func (l *Library) FindUpgrades(ctx context.Context) ([]UpgradeGroup, error) {
-	items, err := l.store.QueryItems(ctx, query.New(query.EntityTracks).Build())
+	items, err := l.store.QueryItems(ctx, query.New(query.EntityTracks).Build(), "")
 	if err != nil {
 		return nil, err
 	}

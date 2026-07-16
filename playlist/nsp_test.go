@@ -1,6 +1,7 @@
 package playlist
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/colespringer/waxbin/query"
@@ -130,6 +131,85 @@ func TestNSPRoundTrip(t *testing.T) {
 	}
 	if string(b1) != string(b2) {
 		t.Errorf("round-trip diverged:\n q1=%s\n q2=%s", b1, b2)
+	}
+}
+
+func TestNSPUserStateFields(t *testing.T) {
+	// Navidrome's per-user fields (rating/starred/playcount) map to WaxBin's
+	// user-state query fields, so a rating/starred/playcount rule imports and
+	// round-trips. The user is bound at read time, never in the rule doc.
+	data := []byte(`{"all":[{"gt":{"rating":3}},{"is":{"starred":true}},{"gt":{"playcount":0}}]}`)
+	q, err := ImportNSP(data)
+	if err != nil {
+		t.Fatalf("import user-state nsp: %v", err)
+	}
+	and, ok := q.Where.(query.And)
+	if !ok || len(and.Nodes) != 3 {
+		t.Fatalf("where = %T, want And of 3", q.Where)
+	}
+	// The fields lowered to the WaxBin user-state field names, and rating scaled from
+	// Navidrome's 0-to-5 scale to WaxBin's 0-to-100 one (3 stars becomes 60).
+	wantFields := map[string]bool{"rating": true, "starred": true, "play_count": true}
+	for _, n := range and.Nodes {
+		c, ok := n.(query.Cond)
+		if !ok {
+			t.Fatalf("node = %T, want Cond", n)
+		}
+		if !wantFields[c.Field] {
+			t.Errorf("unexpected field %q", c.Field)
+		}
+		delete(wantFields, c.Field)
+		if c.Field == "rating" {
+			if f, _ := asFloat(c.Value); f != 60 {
+				t.Errorf("rating value = %v, want 60 (3 stars * %d)", c.Value, nspRatingScale)
+			}
+		}
+	}
+	if len(wantFields) != 0 {
+		t.Errorf("missing mapped fields: %v", wantFields)
+	}
+
+	// Full round-trip equivalence through the canonical rule marshal (60 -> 3 stars
+	// on export -> 60 again on re-import).
+	out, err := ExportNSP(q)
+	if err != nil {
+		t.Fatalf("export: %v", err)
+	}
+	q2, err := ImportNSP(out)
+	if err != nil {
+		t.Fatalf("re-import: %v", err)
+	}
+	b1, _ := query.MarshalRule(q)
+	b2, _ := query.MarshalRule(q2)
+	if string(b1) != string(b2) {
+		t.Errorf("user-state round-trip diverged:\n q1=%s\n q2=%s", b1, b2)
+	}
+}
+
+func TestNSPRatingScaleAndLastPlayed(t *testing.T) {
+	// lastPlayed is a Navidrome date field; WaxBin stores nanoseconds and has no
+	// relative-date operator, so it is (deliberately) unsupported, not silently
+	// mis-mapped.
+	if _, err := ImportNSP([]byte(`{"all":[{"before":{"lastPlayed":"2023-01-01"}}]}`)); !waxerr.Is(err, waxerr.CodeUnsupported) {
+		t.Errorf("lastPlayed import: want CodeUnsupported, got %v", err)
+	}
+
+	// A WaxBin rating that is a whole star exports cleanly (80/100 -> 4 stars).
+	// (gte/lte have no .nsp operator, so gt is used here.)
+	whole := query.New(query.EntityItems).Where("rating", query.OpGt, 80).Build()
+	out, err := ExportNSP(whole)
+	if err != nil {
+		t.Fatalf("export whole-star rating: %v", err)
+	}
+	if !strings.Contains(string(out), `"rating": 4`) {
+		t.Errorf("rating 80 should export as 4 stars, got: %s", out)
+	}
+
+	// A rating that is not a whole star has no faithful 0-to-5 representation, so
+	// export rejects it rather than emitting a mismatched value.
+	frac := query.New(query.EntityItems).Where("rating", query.OpGt, 73).Build()
+	if _, err := ExportNSP(frac); !waxerr.Is(err, waxerr.CodeUnsupported) {
+		t.Errorf("export rating 73 (not a whole star): want CodeUnsupported, got %v", err)
 	}
 }
 

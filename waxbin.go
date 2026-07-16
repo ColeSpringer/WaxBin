@@ -203,28 +203,33 @@ func (l *Library) Libraries(ctx context.Context) ([]*model.Library, error) {
 	return l.store.Libraries(ctx)
 }
 
-// Query runs a compiled selection and returns matching item views.
-func (l *Library) Query(ctx context.Context, q query.Query) ([]*model.ItemView, error) {
-	return l.store.QueryItems(ctx, q)
+// Query runs a compiled selection and returns matching item views. A query that
+// references a per-user field (starred, rating, play_count, played, finished, or
+// last_played) evaluates against userPID's play_state. An empty userPID selects the
+// default user. A query with no user-state field is not scoped by user.
+func (l *Library) Query(ctx context.Context, q query.Query, userPID model.PID) ([]*model.ItemView, error) {
+	return l.store.QueryItems(ctx, q, userPID)
 }
 
-// Count returns the number of items matching q.
-func (l *Library) Count(ctx context.Context, q query.Query) (int, error) {
-	return l.store.CountItems(ctx, q)
+// Count returns the number of items matching q. userPID scopes any per-user field
+// the same way Query does.
+func (l *Library) Count(ctx context.Context, q query.Query, userPID model.PID) (int, error) {
+	return l.store.CountItems(ctx, q, userPID)
 }
 
 // Facet groups the items matching q by a dimension and counts each bucket. The
 // CLI, OpenSubsonic adapters, and stats code use this same API, so they share
-// one canonical grouping result.
-func (l *Library) Facet(ctx context.Context, q query.Query, g read.GroupBy) (*read.FacetResult, error) {
-	return l.store.Facet(ctx, q, g)
+// one canonical grouping result. userPID scopes any per-user filter in q.
+func (l *Library) Facet(ctx context.Context, q query.Query, g read.GroupBy, userPID model.PID) (*read.FacetResult, error) {
+	return l.store.Facet(ctx, q, g, userPID)
 }
 
 // QueryPage returns one keyset-paginated, collation-correct window of items.
 // Pass an empty cursor for the first page and the returned Next cursor for each
-// subsequent page; pagination is stable under concurrent mutation.
-func (l *Library) QueryPage(ctx context.Context, q query.Query, cursor read.Cursor, limit int, desc bool) (*read.Page, error) {
-	return l.store.QueryPage(ctx, q, cursor, limit, desc)
+// subsequent page; pagination is stable under concurrent mutation. userPID scopes
+// any per-user filter in q.
+func (l *Library) QueryPage(ctx context.Context, q query.Query, cursor read.Cursor, limit int, desc bool, userPID model.PID) (*read.Page, error) {
+	return l.store.QueryPage(ctx, q, cursor, limit, desc, userPID)
 }
 
 // Browse returns one keyset-paginated window for a discovery list such as newest,
@@ -1167,7 +1172,9 @@ func (l *Library) PlanOrganize(ctx context.Context, q query.Query, profileName s
 	if err != nil {
 		return nil, err
 	}
-	items, err := l.store.QueryItems(ctx, q)
+	// Organize acts on catalog rows; a per-user filter in q resolves against the
+	// default user.
+	items, err := l.store.QueryItems(ctx, q, "")
 	if err != nil {
 		return nil, err
 	}
@@ -1246,7 +1253,9 @@ func (l *Library) PlanDelete(ctx context.Context, q query.Query, mode model.Dele
 	if err != nil {
 		return nil, err
 	}
-	items, err := l.store.QueryItems(ctx, q)
+	// Delete acts on catalog rows; a per-user filter in q resolves against the
+	// default user.
+	items, err := l.store.QueryItems(ctx, q, "")
 	if err != nil {
 		return nil, err
 	}
@@ -1655,7 +1664,7 @@ func (l *Library) Export(ctx context.Context, w io.Writer) (*port.Manifest, erro
 			libs = append(libs, lib)
 		}
 	}
-	allItems, err := l.store.QueryItems(ctx, query.New(query.EntityItems).Build())
+	allItems, err := l.store.QueryItems(ctx, query.New(query.EntityItems).Build(), "")
 	if err != nil {
 		return nil, err
 	}

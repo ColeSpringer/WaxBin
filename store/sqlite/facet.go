@@ -69,8 +69,9 @@ func facetSpecFor(g read.GroupBy) (facetSpec, bool) {
 // Facet groups the items matching q by one dimension and counts each group. It
 // reuses the shared query engine's WHERE so `facet --group-by genre` honors the
 // same filters as a plain query; q's sort/limit/offset are ignored (a facet is
-// an aggregation, not a row window).
-func (s *Store) Facet(ctx context.Context, q query.Query, g read.GroupBy) (*read.FacetResult, error) {
+// an aggregation, not a row window). A filter over a per-user field scopes to
+// userPID's play_state (empty selects the default user).
+func (s *Store) Facet(ctx context.Context, q query.Query, g read.GroupBy, userPID model.PID) (*read.FacetResult, error) {
 	const op = "store.Facet"
 	fm, ok := fieldMapFor(q.Entity)
 	if !ok {
@@ -84,6 +85,10 @@ func (s *Store) Facet(ctx context.Context, q query.Query, g read.GroupBy) (*read
 	if err != nil {
 		return nil, err
 	}
+	userJoin, leadArgs, err := s.userStateJoin(ctx, c, userPID, op)
+	if err != nil {
+		return nil, err
+	}
 	where := andWhere(c.Where, entityPredicate(q.Entity))
 	if spec.noEpisodes {
 		where = andWhere(where, "pi.kind <> 'episode'")
@@ -92,12 +97,19 @@ func (s *Store) Facet(ctx context.Context, q query.Query, g read.GroupBy) (*read
 		where = "1=1"
 	}
 
+	// The user join goes right after itemJoins, before the facet dimension join, so
+	// its ON-clause user id (carried in leadArgs) leads the args. This works only
+	// because every facetSpecFor join is static and binds nothing, leaving the user id
+	// as the one positional arg ahead of the WHERE args. If a facet dimension join
+	// ever adds placeholders, its args land between the two and this needs revisiting:
+	// user id first, then the spec.join args, then c.Args.
 	stmt := fmt.Sprintf(
-		"SELECT %s, %s, COUNT(DISTINCT pi.id)%s%s WHERE %s GROUP BY %s ORDER BY (%s IS NULL), %s, %s",
-		spec.keyExpr, spec.display, itemJoins, spec.join, where, spec.groupBy,
+		"SELECT %s, %s, COUNT(DISTINCT pi.id)%s%s%s WHERE %s GROUP BY %s ORDER BY (%s IS NULL), %s, %s",
+		spec.keyExpr, spec.display, itemJoins, userJoin, spec.join, where, spec.groupBy,
 		spec.sortExpr, spec.sortExpr, spec.display)
 
-	rows, err := s.read.QueryContext(ctx, stmt, c.Args...)
+	args := append(leadArgs, c.Args...)
+	rows, err := s.read.QueryContext(ctx, stmt, args...)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
@@ -134,7 +146,7 @@ const defaultPageSize = 100
 // rather than skipping a fixed offset. q's own sort/limit/offset are ignored;
 // the canonical sort_key ordering owns the page. A non-empty but malformed
 // cursor is rejected rather than silently restarting.
-func (s *Store) QueryPage(ctx context.Context, q query.Query, cursor read.Cursor, limit int, desc bool) (*read.Page, error) {
+func (s *Store) QueryPage(ctx context.Context, q query.Query, cursor read.Cursor, limit int, desc bool, userPID model.PID) (*read.Page, error) {
 	const op = "store.QueryPage"
 	fm, ok := fieldMapFor(q.Entity)
 	if !ok {
@@ -144,11 +156,17 @@ func (s *Store) QueryPage(ctx context.Context, q query.Query, cursor read.Cursor
 	if err != nil {
 		return nil, err
 	}
+	userJoin, leadArgs, err := s.userStateJoin(ctx, c, userPID, op)
+	if err != nil {
+		return nil, err
+	}
 	if limit <= 0 {
 		limit = defaultPageSize
 	}
 
-	args := append([]any(nil), c.Args...)
+	// leadArgs (the join user id, or empty) leads the args: its ON clause precedes
+	// WHERE and the keyset comparison.
+	args := append(leadArgs, c.Args...)
 	where := andWhere(c.Where, entityPredicate(q.Entity))
 	cmp := ">"
 	order := "ASC"
@@ -174,6 +192,7 @@ func (s *Store) QueryPage(ctx context.Context, q query.Query, cursor read.Cursor
 
 	var sb strings.Builder
 	sb.WriteString(pageItemSelect)
+	sb.WriteString(userJoin)
 	if where != "" {
 		sb.WriteString(" WHERE ")
 		sb.WriteString(where)

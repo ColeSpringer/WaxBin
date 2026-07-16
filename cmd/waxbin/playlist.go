@@ -89,6 +89,7 @@ func newPlaylistListCmd(g *globals) *cobra.Command {
 }
 
 func newPlaylistShowCmd(g *globals) *cobra.Command {
+	var user string
 	cmd := &cobra.Command{
 		Use:   "show PID",
 		Short: "Show a playlist's items (a smart playlist is evaluated on read)",
@@ -103,7 +104,7 @@ func newPlaylistShowCmd(g *globals) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			items, err := lib.Playlists().Items(ctx(cmd), model.PID(args[0]))
+			items, err := lib.Playlists().Items(ctx(cmd), model.PID(args[0]), model.PID(user))
 			if err != nil {
 				return err
 			}
@@ -119,6 +120,7 @@ func newPlaylistShowCmd(g *globals) *cobra.Command {
 			return tw.Flush()
 		},
 	}
+	cmd.Flags().StringVar(&user, "user", "", "evaluate a smart playlist for this user pid (empty = default user)")
 	return cmd
 }
 
@@ -223,7 +225,7 @@ func newPlaylistRenameCmd(g *globals) *cobra.Command {
 }
 
 func newPlaylistExportCmd(g *globals) *cobra.Command {
-	var outPath string
+	var outPath, user string
 	cmd := &cobra.Command{
 		Use:   "export PID",
 		Short: "Export a playlist as an M3U8 file (stdout or --out)",
@@ -243,10 +245,11 @@ func newPlaylistExportCmd(g *globals) *cobra.Command {
 				defer f.Close()
 				w = f
 			}
-			return lib.Playlists().ExportM3U8(ctx(cmd), model.PID(args[0]), w)
+			return lib.Playlists().ExportM3U8(ctx(cmd), model.PID(args[0]), w, model.PID(user))
 		},
 	}
 	cmd.Flags().StringVar(&outPath, "out", "", "write the M3U8 to this file instead of stdout")
+	cmd.Flags().StringVar(&user, "user", "", "evaluate a smart playlist for this user pid (empty = default user)")
 	return cmd
 }
 

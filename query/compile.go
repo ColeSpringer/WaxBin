@@ -25,6 +25,12 @@ const (
 type Column struct {
 	Expr string
 	Kind Kind
+	// NeedsUser marks a column whose Expr references a per-user join alias (a
+	// user's play_state). A query touching such a column must be executed with a
+	// user bound: the caller splices the join and prepends the user id to the
+	// args. The compiler surfaces this via Compiled.NeedsUser rather than
+	// resolving a user itself, keeping the query package store-agnostic.
+	NeedsUser bool
 }
 
 // FieldMap whitelists the logical fields a query may reference for one entity.
@@ -40,6 +46,10 @@ type Compiled struct {
 	OrderBy string // comma-separated ordering, or ""
 	Limit   int    // 0 == none
 	Offset  int    // 0 == none
+	// NeedsUser is set when any field referenced in Where or Sorts carries
+	// Column.NeedsUser, telling the caller to splice the per-user join and bind a
+	// user id before executing.
+	NeedsUser bool
 }
 
 const likeEscape = '\\'
@@ -50,7 +60,7 @@ func Compile(q Query, fm FieldMap) (*Compiled, error) {
 
 	if q.Where != nil {
 		var sb strings.Builder
-		if err := compileNode(q.Where, fm, &sb, &c.Args); err != nil {
+		if err := compileNode(q.Where, fm, &sb, &c.Args, &c.NeedsUser); err != nil {
 			return nil, err
 		}
 		c.Where = sb.String()
@@ -64,6 +74,9 @@ func Compile(q Query, fm FieldMap) (*Compiled, error) {
 				return nil, waxerr.New(waxerr.CodeInvalid, "query.Compile",
 					fmt.Sprintf("unknown sort field %q", s.Field))
 			}
+			if col.NeedsUser {
+				c.NeedsUser = true
+			}
 			dir := "ASC"
 			if s.Desc {
 				dir = "DESC"
@@ -76,20 +89,20 @@ func Compile(q Query, fm FieldMap) (*Compiled, error) {
 	return c, nil
 }
 
-func compileNode(n Node, fm FieldMap, sb *strings.Builder, args *[]any) error {
+func compileNode(n Node, fm FieldMap, sb *strings.Builder, args *[]any, nu *bool) error {
 	switch v := n.(type) {
 	case Cond:
-		return compileCond(v, fm, sb, args)
+		return compileCond(v, fm, sb, args, nu)
 	case And:
-		return compileGroup(v.Nodes, "AND", "1=1", fm, sb, args)
+		return compileGroup(v.Nodes, "AND", "1=1", fm, sb, args, nu)
 	case Or:
-		return compileGroup(v.Nodes, "OR", "1=0", fm, sb, args)
+		return compileGroup(v.Nodes, "OR", "1=0", fm, sb, args, nu)
 	case Not:
 		if v.Node == nil {
 			return waxerr.New(waxerr.CodeInvalid, "query.Compile", "NOT with no child")
 		}
 		sb.WriteString("NOT (")
-		if err := compileNode(v.Node, fm, sb, args); err != nil {
+		if err := compileNode(v.Node, fm, sb, args, nu); err != nil {
 			return err
 		}
 		sb.WriteString(")")
@@ -100,7 +113,7 @@ func compileNode(n Node, fm FieldMap, sb *strings.Builder, args *[]any) error {
 	}
 }
 
-func compileGroup(nodes []Node, joiner, empty string, fm FieldMap, sb *strings.Builder, args *[]any) error {
+func compileGroup(nodes []Node, joiner, empty string, fm FieldMap, sb *strings.Builder, args *[]any, nu *bool) error {
 	if len(nodes) == 0 {
 		sb.WriteString(empty) // empty AND => always true; empty OR => always false
 		return nil
@@ -110,7 +123,7 @@ func compileGroup(nodes []Node, joiner, empty string, fm FieldMap, sb *strings.B
 		if i > 0 {
 			sb.WriteString(" " + joiner + " ")
 		}
-		if err := compileNode(child, fm, sb, args); err != nil {
+		if err := compileNode(child, fm, sb, args, nu); err != nil {
 			return err
 		}
 	}
@@ -118,11 +131,16 @@ func compileGroup(nodes []Node, joiner, empty string, fm FieldMap, sb *strings.B
 	return nil
 }
 
-func compileCond(c Cond, fm FieldMap, sb *strings.Builder, args *[]any) error {
+func compileCond(c Cond, fm FieldMap, sb *strings.Builder, args *[]any, nu *bool) error {
 	col, ok := fm[c.Field]
 	if !ok {
 		return waxerr.New(waxerr.CodeInvalid, "query.Compile",
 			fmt.Sprintf("unknown field %q", c.Field))
+	}
+	// Any reference to a per-user column (in any operator, including presence
+	// checks) means the statement needs the user join and bind.
+	if col.NeedsUser {
+		*nu = true
 	}
 
 	switch c.Op {

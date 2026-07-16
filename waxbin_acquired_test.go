@@ -75,7 +75,7 @@ func TestImportAcquiredRoutesByKind(t *testing.T) {
 	}
 
 	// The track reads back under the music root, sourced youtube.
-	tracks, err := lib.Query(ctx, query.New(query.EntityItems).Where("kind", query.OpIs, "track").Build())
+	tracks, err := lib.Query(ctx, query.New(query.EntityItems).Where("kind", query.OpIs, "track").Build(), "")
 	if err != nil {
 		t.Fatalf("query tracks: %v", err)
 	}
@@ -90,7 +90,7 @@ func TestImportAcquiredRoutesByKind(t *testing.T) {
 	}
 
 	// The book reads back under the audiobook root, sourced manual, kind book.
-	books, err := lib.Query(ctx, query.New(query.EntityItems).Where("kind", query.OpIs, "book").Build())
+	books, err := lib.Query(ctx, query.New(query.EntityItems).Where("kind", query.OpIs, "book").Build(), "")
 	if err != nil {
 		t.Fatalf("query books: %v", err)
 	}
@@ -105,7 +105,7 @@ func TestImportAcquiredRoutesByKind(t *testing.T) {
 	}
 
 	// The acquisition provenance is queryable by source and readable per item.
-	yt, err := lib.Query(ctx, query.New(query.EntityItems).Where("source", query.OpIs, "youtube").Build())
+	yt, err := lib.Query(ctx, query.New(query.EntityItems).Where("source", query.OpIs, "youtube").Build(), "")
 	if err != nil || len(yt) != 1 || yt[0].PID != tracks[0].PID {
 		t.Fatalf("source=youtube filter = %d items (err %v), want the acquired track", len(yt), err)
 	}

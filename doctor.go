@@ -78,7 +78,7 @@ func (l *Library) Doctor(ctx context.Context) (*DoctorReport, error) {
 	}
 	rep.LibraryCount = len(libs)
 
-	n, err := l.store.CountItems(ctx, query.New(query.EntityItems).Build())
+	n, err := l.store.CountItems(ctx, query.New(query.EntityItems).Build(), "")
 	if err != nil {
 		return nil, err
 	}

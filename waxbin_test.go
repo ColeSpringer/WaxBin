@@ -48,7 +48,7 @@ func TestEndToEndSingleFile(t *testing.T) {
 
 	// QUERY (by substring, through the shared query engine)
 	items, err := lib.Query(ctx, query.New(query.EntityItems).
-		Where("title", query.OpContains, "Midnight").Build())
+		Where("title", query.OpContains, "Midnight").Build(), "")
 	if err != nil {
 		t.Fatalf("query: %v", err)
 	}
@@ -241,7 +241,7 @@ func TestAnalyzeMeasuresLoudness(t *testing.T) {
 
 func itemPIDByTitle(t *testing.T, ctx context.Context, lib *waxbin.Library, title string) model.PID {
 	t.Helper()
-	items, err := lib.Query(ctx, query.New(query.EntityItems).Where("title", query.OpIs, title).Build())
+	items, err := lib.Query(ctx, query.New(query.EntityItems).Where("title", query.OpIs, title).Build(), "")
 	if err != nil {
 		t.Fatalf("query %q: %v", title, err)
 	}
@@ -324,7 +324,7 @@ func TestPlaybackAndChangeBus(t *testing.T) {
 	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
 		t.Fatalf("scan: %v", err)
 	}
-	items, _ := lib.Query(ctx, query.New(query.EntityItems).Build())
+	items, _ := lib.Query(ctx, query.New(query.EntityItems).Build(), "")
 	if len(items) != 1 {
 		t.Fatalf("want 1 item, got %d", len(items))
 	}
@@ -392,7 +392,7 @@ func TestAnalyzeAIFFNotErrored(t *testing.T) {
 	}
 	// PCM in any container now catalogs as plain "pcm": nothing routes on the codec,
 	// so there is no container-keyed "aiff" codec key.
-	items, _ := lib.Query(ctx, query.New(query.EntityItems).Build())
+	items, _ := lib.Query(ctx, query.New(query.EntityItems).Build(), "")
 	if len(items) != 1 || items[0].Codec != "pcm" {
 		t.Fatalf("AIFF codec = %v, want one item keyed 'pcm'", items)
 	}
@@ -429,7 +429,7 @@ func TestStatsOnFacet(t *testing.T) {
 	}
 
 	// Record some plays on the first item.
-	items, _ := lib.Query(ctx, query.New(query.EntityItems).Where("title", query.OpIs, "A").Build())
+	items, _ := lib.Query(ctx, query.New(query.EntityItems).Where("title", query.OpIs, "A").Build(), "")
 	if len(items) != 1 {
 		t.Fatalf("want item A, got %d", len(items))
 	}
@@ -544,7 +544,7 @@ func TestReadOnlyRefusesMutations(t *testing.T) {
 	}
 	defer ro.Close()
 
-	items, err := ro.Query(ctx, query.New(query.EntityItems).Build())
+	items, err := ro.Query(ctx, query.New(query.EntityItems).Build(), "")
 	if err != nil {
 		t.Fatalf("read-only query: %v", err)
 	}
@@ -628,7 +628,7 @@ func TestScanRelativeSubPath(t *testing.T) {
 	if res.Total.AudioFiles != 1 {
 		t.Fatalf("expected 1 file under sub1, got %d", res.Total.AudioFiles)
 	}
-	items, err := lib.Query(ctx, query.New(query.EntityItems).Build())
+	items, err := lib.Query(ctx, query.New(query.EntityItems).Build(), "")
 	if err != nil {
 		t.Fatalf("query: %v", err)
 	}
@@ -675,7 +675,7 @@ func TestReadOnlyConcurrentWithWriter(t *testing.T) {
 	}
 	defer ro.Close()
 
-	items, err := ro.Query(ctx, query.New(query.EntityItems).Build())
+	items, err := ro.Query(ctx, query.New(query.EntityItems).Build(), "")
 	if err != nil || len(items) != 1 {
 		t.Fatalf("concurrent read-only query: err=%v len=%d", err, len(items))
 	}
@@ -772,7 +772,7 @@ func TestDeleteTrashRestoreRoundTrip(t *testing.T) {
 	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
 		t.Fatalf("scan: %v", err)
 	}
-	items, _ := lib.Query(ctx, query.New(query.EntityItems).Build())
+	items, _ := lib.Query(ctx, query.New(query.EntityItems).Build(), "")
 	if len(items) != 1 {
 		t.Fatalf("want 1 item, got %d", len(items))
 	}
@@ -861,7 +861,7 @@ func TestPruneBypassesTrash(t *testing.T) {
 	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
 		t.Fatalf("scan: %v", err)
 	}
-	items, _ := lib.Query(ctx, query.New(query.EntityItems).Build())
+	items, _ := lib.Query(ctx, query.New(query.EntityItems).Build(), "")
 	itemPID := items[0].PID
 
 	plan, err := lib.PlanDeletePIDs(ctx, []model.PID{itemPID}, model.DeletePrune)
@@ -925,7 +925,7 @@ func TestInboxImportAndDedup(t *testing.T) {
 	if fileExists(staged) {
 		t.Fatal("staged file should be moved out of the inbox")
 	}
-	items, _ := lib.Query(ctx, query.New(query.EntityItems).Build())
+	items, _ := lib.Query(ctx, query.New(query.EntityItems).Build(), "")
 	if len(items) != 1 || items[0].Title != "Song" {
 		t.Fatalf("imported item not cataloged: %+v", items)
 	}
@@ -1000,7 +1000,7 @@ func TestBackupRedactAndRestore(t *testing.T) {
 		t.Fatalf("open restored: %v", err)
 	}
 	defer rlib.Close()
-	items, err := rlib.Query(ctx, query.New(query.EntityItems).Build())
+	items, err := rlib.Query(ctx, query.New(query.EntityItems).Build(), "")
 	if err != nil || len(items) != 1 {
 		t.Fatalf("restored query: err=%v len=%d, want 1", err, len(items))
 	}
@@ -1015,7 +1015,7 @@ func TestBackupRedactAndRestore(t *testing.T) {
 	if err := rlib.RelocateRoot(ctx, libs[0].PID, newRoot); err != nil {
 		t.Fatalf("relocate: %v", err)
 	}
-	moved, _ := rlib.Query(ctx, query.New(query.EntityItems).Build())
+	moved, _ := rlib.Query(ctx, query.New(query.EntityItems).Build(), "")
 	if len(moved) != 1 || !strings.HasPrefix(moved[0].DisplayPath, newRoot) {
 		t.Fatalf("relocate did not re-point file paths: %q (want prefix %q)", moved[0].DisplayPath, newRoot)
 	}
@@ -1033,7 +1033,7 @@ func TestLogicalExport(t *testing.T) {
 	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
 		t.Fatalf("scan: %v", err)
 	}
-	items, _ := lib.Query(ctx, query.New(query.EntityItems).Build())
+	items, _ := lib.Query(ctx, query.New(query.EntityItems).Build(), "")
 	if err := lib.Playback().SetStar(ctx, "", items[0].PID, true); err != nil {
 		t.Fatalf("star: %v", err)
 	}
@@ -1112,7 +1112,7 @@ func TestRestoreReplacesAtomically(t *testing.T) {
 		t.Fatalf("open restored: %v", err)
 	}
 	defer ro.Close()
-	items, err := ro.Query(ctx, query.New(query.EntityItems).Build())
+	items, err := ro.Query(ctx, query.New(query.EntityItems).Build(), "")
 	if err != nil || len(items) != 1 || items[0].Title != "FromBackup" {
 		t.Fatalf("restored content wrong: err=%v items=%+v", err, items)
 	}
@@ -1306,7 +1306,7 @@ func TestEndToEndAudiobook(t *testing.T) {
 		t.Fatalf("scan tally = %+v, want 1 audio / 1 created", scanRes.Total)
 	}
 
-	books, err := lib.Query(ctx, query.New(query.EntityItems).Where("kind", query.OpIs, "book").Build())
+	books, err := lib.Query(ctx, query.New(query.EntityItems).Where("kind", query.OpIs, "book").Build(), "")
 	if err != nil {
 		t.Fatalf("query books: %v", err)
 	}
@@ -1397,7 +1397,7 @@ func TestEndToEndMultiFileAudiobookOrganize(t *testing.T) {
 		t.Fatalf("scan: %v", err)
 	}
 
-	books, err := lib.Query(ctx, query.New(query.EntityItems).Where("kind", query.OpIs, "book").Build())
+	books, err := lib.Query(ctx, query.New(query.EntityItems).Where("kind", query.OpIs, "book").Build(), "")
 	if err != nil {
 		t.Fatalf("query: %v", err)
 	}
@@ -1451,7 +1451,7 @@ func TestMultiFileBookSameBasenameOrganize(t *testing.T) {
 	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
 		t.Fatalf("scan: %v", err)
 	}
-	books, _ := lib.Query(ctx, query.New(query.EntityItems).Where("kind", query.OpIs, "book").Build())
+	books, _ := lib.Query(ctx, query.New(query.EntityItems).Where("kind", query.OpIs, "book").Build(), "")
 	if len(books) != 1 {
 		t.Fatalf("books = %d, want 1 grouped book", len(books))
 	}
@@ -1489,7 +1489,7 @@ func TestTrashExpandsMultiFileBook(t *testing.T) {
 	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
 		t.Fatalf("scan: %v", err)
 	}
-	books, _ := lib.Query(ctx, query.New(query.EntityItems).Where("kind", query.OpIs, "book").Build())
+	books, _ := lib.Query(ctx, query.New(query.EntityItems).Where("kind", query.OpIs, "book").Build(), "")
 	if len(books) != 1 {
 		t.Fatalf("books = %d, want 1", len(books))
 	}

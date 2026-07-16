@@ -52,7 +52,7 @@ func TestAcquisitionRoundTripAndSourceSurfacing(t *testing.T) {
 		t.Fatalf("acquired item source = %q, want youtube", v.Source)
 	}
 	items, err := st.QueryItems(ctx, query.New(query.EntityItems).
-		Where("source", query.OpIs, string(model.SourceYouTube)).Build())
+		Where("source", query.OpIs, string(model.SourceYouTube)).Build(), "")
 	if err != nil {
 		t.Fatalf("query by source: %v", err)
 	}
@@ -61,7 +61,7 @@ func TestAcquisitionRoundTripAndSourceSurfacing(t *testing.T) {
 	}
 	// The local-source filter excludes it.
 	locals, _ := st.QueryItems(ctx, query.New(query.EntityItems).
-		Where("source", query.OpIs, string(model.SourceLocal)).Build())
+		Where("source", query.OpIs, string(model.SourceLocal)).Build(), "")
 	for _, it := range locals {
 		if it.PID == res.ItemPID {
 			t.Fatal("acquired item leaked into the local-source filter")

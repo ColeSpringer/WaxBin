@@ -83,7 +83,7 @@ func TestReplayGainWriteBackAlbum(t *testing.T) {
 	}
 
 	// Record loudness for each track directly (no decoder needed in the test env).
-	items, err := lib.Query(ctx, query.New(query.EntityItems).Build())
+	items, err := lib.Query(ctx, query.New(query.EntityItems).Build(), "")
 	if err != nil || len(items) != 2 {
 		t.Fatalf("query items: %v (n=%d)", err, len(items))
 	}
@@ -168,7 +168,7 @@ func TestReplayGainWriteBackCountsFailures(t *testing.T) {
 	if _, err := lib.Scan(ctx, ScanRequest{}); err != nil {
 		t.Fatalf("scan: %v", err)
 	}
-	items, err := lib.Query(ctx, query.New(query.EntityItems).Build())
+	items, err := lib.Query(ctx, query.New(query.EntityItems).Build(), "")
 	if err != nil || len(items) != 1 {
 		t.Fatalf("query items: %v (n=%d)", err, len(items))
 	}
@@ -230,7 +230,7 @@ func TestOrganizeTagWriteAndPIDStamp(t *testing.T) {
 	if _, err := lib.Scan(ctx, ScanRequest{}); err != nil {
 		t.Fatalf("scan: %v", err)
 	}
-	items, err := lib.Query(ctx, query.New(query.EntityItems).Build())
+	items, err := lib.Query(ctx, query.New(query.EntityItems).Build(), "")
 	if err != nil || len(items) != 1 {
 		t.Fatalf("query: %v (n=%d)", err, len(items))
 	}
@@ -255,7 +255,7 @@ func TestOrganizeTagWriteAndPIDStamp(t *testing.T) {
 	}
 
 	// Find the moved file and read its tags.
-	items, _ = lib.Query(ctx, query.New(query.EntityItems).Build())
+	items, _ = lib.Query(ctx, query.New(query.EntityItems).Build(), "")
 	moved := string(items[0].Path)
 	doc, err := waxlabel.ParseFile(ctx, moved)
 	if err != nil {
@@ -302,7 +302,7 @@ func TestRebuildAdoptsStampedPID(t *testing.T) {
 	if _, err := lib1.ApplyOrganize(ctx, plan); err != nil {
 		t.Fatalf("apply: %v", err)
 	}
-	items, _ := lib1.Query(ctx, query.New(query.EntityItems).Build())
+	items, _ := lib1.Query(ctx, query.New(query.EntityItems).Build(), "")
 	origPID := items[0].PID
 	lib1.Close()
 
@@ -318,7 +318,7 @@ func TestRebuildAdoptsStampedPID(t *testing.T) {
 	if _, err := lib2.Scan(ctx, ScanRequest{AdoptStampedPIDs: true}); err != nil {
 		t.Fatalf("rebuild scan: %v", err)
 	}
-	items2, _ := lib2.Query(ctx, query.New(query.EntityItems).Build())
+	items2, _ := lib2.Query(ctx, query.New(query.EntityItems).Build(), "")
 	if len(items2) != 1 {
 		t.Fatalf("rebuild items = %d, want 1", len(items2))
 	}
@@ -355,7 +355,7 @@ func TestPIDAdoptionConflictMintsFresh(t *testing.T) {
 	if _, err := lib.Scan(ctx, ScanRequest{AdoptStampedPIDs: true}); err != nil {
 		t.Fatalf("scan: %v", err)
 	}
-	items, _ := lib.Query(ctx, query.New(query.EntityItems).Build())
+	items, _ := lib.Query(ctx, query.New(query.EntityItems).Build(), "")
 	if len(items) != 2 {
 		t.Fatalf("items = %d, want 2 distinct", len(items))
 	}

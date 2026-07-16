@@ -391,7 +391,7 @@ func TestCoverChangedFast(t *testing.T) {
 func currentItemPID(t *testing.T, st *sqlite.Store, title string) model.PID {
 	t.Helper()
 	q := query.New(query.EntityItems).Where("title", query.OpIs, title).Build()
-	items, err := st.QueryItems(context.Background(), q)
+	items, err := st.QueryItems(context.Background(), q, "")
 	if err != nil || len(items) == 0 {
 		t.Fatalf("find item %q: %v (n=%d)", title, err, len(items))
 	}

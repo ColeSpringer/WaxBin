@@ -6,6 +6,7 @@ import (
 	"os"
 	"text/tabwriter"
 
+	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/query"
 	"github.com/colespringer/waxbin/read"
 	"github.com/colespringer/waxbin/waxerr"
@@ -21,6 +22,7 @@ func newQueryCmd(g *globals) *cobra.Command {
 		rulePath                                  string
 		pageSize                                  int
 		cursor                                    string
+		user                                      string
 	)
 	cmd := &cobra.Command{
 		Use:     "query",
@@ -47,10 +49,10 @@ func newQueryCmd(g *globals) *cobra.Command {
 			// Keyset pagination mode: stable, collation-correct windows by sort_key.
 			// --sort/--limit do not apply here (the canonical order owns the page).
 			if pageSize > 0 || cursor != "" {
-				return runQueryPage(cmd, g, lib, q, pageSize, cursor, desc)
+				return runQueryPage(cmd, g, lib, q, pageSize, cursor, desc, model.PID(user))
 			}
 
-			items, err := lib.Query(ctx(cmd), q)
+			items, err := lib.Query(ctx(cmd), q, model.PID(user))
 			if err != nil {
 				return err
 			}
@@ -85,12 +87,13 @@ func newQueryCmd(g *globals) *cobra.Command {
 	f.StringVar(&rulePath, "rule", "", "load a JSON rule document (overrides filter flags)")
 	f.IntVar(&pageSize, "page-size", 0, "keyset pagination: rows per page (enables paged mode)")
 	f.StringVar(&cursor, "cursor", "", "keyset pagination: cursor from a prior page's nextCursor")
+	f.StringVar(&user, "user", "", "user pid for per-user fields (e.g. rating, starred, play_count); empty = default user")
 	return cmd
 }
 
 // runQueryPage serves one keyset-paginated window and prints the next cursor.
-func runQueryPage(cmd *cobra.Command, g *globals, lib pager, q query.Query, pageSize int, cursor string, desc bool) error {
-	page, err := lib.QueryPage(ctx(cmd), q, read.Cursor(cursor), pageSize, desc)
+func runQueryPage(cmd *cobra.Command, g *globals, lib pager, q query.Query, pageSize int, cursor string, desc bool, userPID model.PID) error {
+	page, err := lib.QueryPage(ctx(cmd), q, read.Cursor(cursor), pageSize, desc, userPID)
 	if err != nil {
 		return err
 	}
@@ -115,7 +118,7 @@ func runQueryPage(cmd *cobra.Command, g *globals, lib pager, q query.Query, page
 
 // pager is the subset of the library used by paged query (eases testing).
 type pager interface {
-	QueryPage(ctx context.Context, q query.Query, cursor read.Cursor, limit int, desc bool) (*read.Page, error)
+	QueryPage(ctx context.Context, q query.Query, cursor read.Cursor, limit int, desc bool, userPID model.PID) (*read.Page, error)
 }
 
 type queryFlags struct {

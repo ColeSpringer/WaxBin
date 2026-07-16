@@ -36,7 +36,7 @@ func (f *fakeStore) CreatePlaylist(_ context.Context, name string, _ model.PID, 
 	return pid, nil
 }
 
-func (f *fakeStore) PlaylistItems(_ context.Context, pid model.PID) ([]*model.ItemView, error) {
+func (f *fakeStore) PlaylistItems(_ context.Context, pid model.PID, _ model.PID) ([]*model.ItemView, error) {
 	var out []*model.ItemView
 	for _, ip := range f.members[pid] {
 		for _, it := range f.byPath {
@@ -92,7 +92,7 @@ func TestM3U8RoundTrip(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	if err := svc.ExportM3U8(ctx, src, &buf); err != nil {
+	if err := svc.ExportM3U8(ctx, src, &buf, ""); err != nil {
 		t.Fatalf("export: %v", err)
 	}
 	text := buf.String()
@@ -111,7 +111,7 @@ func TestM3U8RoundTrip(t *testing.T) {
 	if res.Matched != 2 || res.Unmatched != 0 {
 		t.Errorf("import result = %+v, want matched 2 / unmatched 0", res)
 	}
-	items, _ := svc.Items(ctx, res.PlaylistPID)
+	items, _ := svc.Items(ctx, res.PlaylistPID, "")
 	if len(items) != 2 {
 		t.Errorf("imported playlist has %d items, want 2", len(items))
 	}
@@ -126,7 +126,7 @@ func TestExportM3U8RefusesNewlinePath(t *testing.T) {
 	if err := svc.Set(ctx, src, []model.PID{"ia"}); err != nil {
 		t.Fatalf("set: %v", err)
 	}
-	if err := svc.ExportM3U8(ctx, src, &bytes.Buffer{}); !waxerr.Is(err, waxerr.CodeInvalid) {
+	if err := svc.ExportM3U8(ctx, src, &bytes.Buffer{}, ""); !waxerr.Is(err, waxerr.CodeInvalid) {
 		t.Errorf("exporting a newline path err = %v, want CodeInvalid (refuse, not corrupt)", err)
 	}
 }
@@ -141,7 +141,7 @@ func TestExportM3U8FoldsMetadataNewlines(t *testing.T) {
 		t.Fatalf("set: %v", err)
 	}
 	var buf bytes.Buffer
-	if err := svc.ExportM3U8(ctx, src, &buf); err != nil {
+	if err := svc.ExportM3U8(ctx, src, &buf, ""); err != nil {
 		t.Fatalf("export: %v", err)
 	}
 	// The #EXTINF directive must stay one line: title/artist newlines folded to spaces.

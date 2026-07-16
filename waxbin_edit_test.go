@@ -153,7 +153,7 @@ func TestEditBookFacade(t *testing.T) {
 	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
 		t.Fatalf("scan: %v", err)
 	}
-	books, err := lib.Query(ctx, query.New(query.EntityItems).Where("kind", query.OpIs, "book").Build())
+	books, err := lib.Query(ctx, query.New(query.EntityItems).Where("kind", query.OpIs, "book").Build(), "")
 	if err != nil || len(books) != 1 {
 		t.Fatalf("book query: %d books (err %v)", len(books), err)
 	}

@@ -149,7 +149,7 @@ func TestBrowseByYearAndByGenre(t *testing.T) {
 	}
 
 	// Resolve the Rock genre pid via the facet, then browse it.
-	facet, err := st.Facet(ctx, query.New(query.EntityItems).Build(), read.GroupGenre)
+	facet, err := st.Facet(ctx, query.New(query.EntityItems).Build(), read.GroupGenre, "")
 	if err != nil {
 		t.Fatalf("facet: %v", err)
 	}

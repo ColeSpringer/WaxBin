@@ -5,6 +5,7 @@ import (
 	"strings"
 	"text/tabwriter"
 
+	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/read"
 	"github.com/colespringer/waxbin/waxerr"
 	"github.com/spf13/cobra"
@@ -16,6 +17,7 @@ func newFacetCmd(g *globals) *cobra.Command {
 		title, artist, album, genre, kind string
 		year                              int
 		rulePath                          string
+		user                              string
 	)
 	cmd := &cobra.Command{
 		Use:   "facet --group-by DIM",
@@ -41,7 +43,7 @@ func newFacetCmd(g *globals) *cobra.Command {
 			}
 			defer lib.Close()
 
-			res, err := lib.Facet(ctx(cmd), q, gb)
+			res, err := lib.Facet(ctx(cmd), q, gb, model.PID(user))
 			if err != nil {
 				return err
 			}
@@ -70,6 +72,7 @@ func newFacetCmd(g *globals) *cobra.Command {
 	f.StringVar(&kind, "kind", "", "match kind: track|book|episode (exact)")
 	f.IntVar(&year, "year", 0, "match year (exact)")
 	f.StringVar(&rulePath, "rule", "", "load a JSON rule document (overrides filter flags)")
+	f.StringVar(&user, "user", "", "user pid for per-user fields (e.g. rating, starred, play_count); empty = default user")
 	_ = cmd.MarkFlagRequired("group-by")
 	return cmd
 }
