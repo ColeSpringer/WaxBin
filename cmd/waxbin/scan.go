@@ -5,6 +5,8 @@ import (
 
 	"github.com/colespringer/waxbin"
 	"github.com/colespringer/waxbin/model"
+	"github.com/colespringer/waxbin/proxy"
+	"github.com/colespringer/waxbin/scan"
 	"github.com/spf13/cobra"
 )
 
@@ -19,6 +21,32 @@ func newScanCmd(g *globals) *cobra.Command {
 		Use:   "scan",
 		Short: "Index library roots into the catalog (never decodes PCM)",
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			// When a server holds the write lock, submit the scan to it: the server runs
+			// the whole pass in its own process and stays available, and we follow the
+			// job through the read-only job row rather than pausing it.
+			px, err := g.jobServer(cmd)
+			if err != nil {
+				return err
+			}
+			if px != nil {
+				defer px.Close()
+				jobPID, err := px.RunScan(ctx(cmd), proxy.ScanParams{
+					LibraryPID: libraryPID, SubPath: subPath, Force: force, ForceReconcile: reconcileDelet,
+				})
+				if err != nil {
+					return err
+				}
+				job, err := g.tailJob(cmd, jobPID)
+				if err != nil {
+					return err
+				}
+				var t scan.Result
+				if err := unmarshalJobResult(job, &t); err != nil {
+					return err
+				}
+				return renderScanResult(cmd, g, jobPID, t)
+			}
+
 			lib, _, err := g.open(cmd)
 			if err != nil {
 				return err
@@ -34,43 +62,7 @@ func newScanCmd(g *globals) *cobra.Command {
 			if err != nil {
 				return err
 			}
-
-			if g.jsonOut {
-				return printJSON(cmd, struct {
-					JobPID          string `json:"jobPid"`
-					FilesSeen       int    `json:"filesSeen"`
-					AudioFiles      int    `json:"audioFiles"`
-					ItemsCreated    int    `json:"itemsCreated"`
-					ItemsUpdated    int    `json:"itemsUpdated"`
-					Relinked        int    `json:"relinked"`
-					Unchanged       int    `json:"unchanged"`
-					SidecarsUpdated int    `json:"sidecarsUpdated"`
-					Missing         int    `json:"missing"`
-					Skipped         int    `json:"skipped"`
-					Errored         int    `json:"errored"`
-				}{
-					string(res.JobPID), res.Total.FilesSeen, res.Total.AudioFiles,
-					res.Total.ItemsCreated, res.Total.ItemsUpdated, res.Total.Relinked,
-					res.Total.Unchanged, res.Total.SidecarsUpdated, res.Total.Missing,
-					res.Total.Skipped, res.Total.Errored,
-				})
-			}
-
-			t := res.Total
-			fmt.Fprintf(out(cmd), "Scan complete (job %s)\n", res.JobPID)
-			fmt.Fprintf(out(cmd), "  files seen:   %d\n", t.FilesSeen)
-			fmt.Fprintf(out(cmd), "  audio files:  %d\n", t.AudioFiles)
-			fmt.Fprintf(out(cmd), "  created:      %d\n", t.ItemsCreated)
-			fmt.Fprintf(out(cmd), "  updated:      %d\n", t.ItemsUpdated)
-			fmt.Fprintf(out(cmd), "  unchanged:    %d\n", t.Unchanged)
-			if t.SidecarsUpdated > 0 {
-				fmt.Fprintf(out(cmd), "  sidecars:     %d updated\n", t.SidecarsUpdated)
-			}
-			fmt.Fprintf(out(cmd), "  re-linked:    %d\n", t.Relinked)
-			fmt.Fprintf(out(cmd), "  missing:      %d\n", t.Missing)
-			fmt.Fprintf(out(cmd), "  skipped:      %d\n", t.Skipped)
-			fmt.Fprintf(out(cmd), "  errored:      %d\n", t.Errored)
-			return nil
+			return renderScanResult(cmd, g, res.JobPID, res.Total)
 		},
 	}
 	var full bool
@@ -82,4 +74,41 @@ func newScanCmd(g *globals) *cobra.Command {
 		"reconcile deletions even past the survival-gate floor (recovery for a deliberate large deletion)")
 	cmd.PreRun = func(*cobra.Command, []string) { force = force || full }
 	return cmd
+}
+
+// renderScanResult prints a scan's totals, shared by the direct run and the
+// server-run (job-tailed) path.
+func renderScanResult(cmd *cobra.Command, g *globals, jobPID model.PID, t scan.Result) error {
+	if g.jsonOut {
+		return printJSON(cmd, struct {
+			JobPID          string `json:"jobPid"`
+			FilesSeen       int    `json:"filesSeen"`
+			AudioFiles      int    `json:"audioFiles"`
+			ItemsCreated    int    `json:"itemsCreated"`
+			ItemsUpdated    int    `json:"itemsUpdated"`
+			Relinked        int    `json:"relinked"`
+			Unchanged       int    `json:"unchanged"`
+			SidecarsUpdated int    `json:"sidecarsUpdated"`
+			Missing         int    `json:"missing"`
+			Skipped         int    `json:"skipped"`
+			Errored         int    `json:"errored"`
+		}{
+			string(jobPID), t.FilesSeen, t.AudioFiles, t.ItemsCreated, t.ItemsUpdated,
+			t.Relinked, t.Unchanged, t.SidecarsUpdated, t.Missing, t.Skipped, t.Errored,
+		})
+	}
+	fmt.Fprintf(out(cmd), "Scan complete (job %s)\n", jobPID)
+	fmt.Fprintf(out(cmd), "  files seen:   %d\n", t.FilesSeen)
+	fmt.Fprintf(out(cmd), "  audio files:  %d\n", t.AudioFiles)
+	fmt.Fprintf(out(cmd), "  created:      %d\n", t.ItemsCreated)
+	fmt.Fprintf(out(cmd), "  updated:      %d\n", t.ItemsUpdated)
+	fmt.Fprintf(out(cmd), "  unchanged:    %d\n", t.Unchanged)
+	if t.SidecarsUpdated > 0 {
+		fmt.Fprintf(out(cmd), "  sidecars:     %d updated\n", t.SidecarsUpdated)
+	}
+	fmt.Fprintf(out(cmd), "  re-linked:    %d\n", t.Relinked)
+	fmt.Fprintf(out(cmd), "  missing:      %d\n", t.Missing)
+	fmt.Fprintf(out(cmd), "  skipped:      %d\n", t.Skipped)
+	fmt.Fprintf(out(cmd), "  errored:      %d\n", t.Errored)
+	return nil
 }

@@ -74,8 +74,8 @@ func (s *Store) CreateJob(ctx context.Context, j *model.Job) error {
 func (s *Store) UpdateJob(ctx context.Context, j *model.Job) error {
 	return s.writeTx(ctx, func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx,
-			`UPDATE job SET state=?, progress=?, message=?, error=?, heartbeat_at=?, finished_at=? WHERE id=?`,
-			string(j.State), j.Progress, j.Message, j.Error, j.HeartbeatAt, nullInt64(j.FinishedAt), j.ID)
+			`UPDATE job SET state=?, progress=?, message=?, error=?, result=?, heartbeat_at=?, finished_at=? WHERE id=?`,
+			string(j.State), j.Progress, j.Message, j.Error, j.Result, j.HeartbeatAt, nullInt64(j.FinishedAt), j.ID)
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, "store.UpdateJob", err)
 		}
@@ -125,6 +125,21 @@ func (s *Store) JobByPID(ctx context.Context, pid model.PID) (*model.Job, error)
 	return j, nil
 }
 
+// HasRunningJob reports whether any job is currently in the running state. It is
+// the guard a maintenance hand-off checks before closing the store: closing it
+// while a server-run scan/analyze/enrich/organize is mid-pass would abort that job.
+// Orphaned "running" rows from a dead owner are reclaimed to crashed on Open, so a
+// running row here means a live in-process job.
+func (s *Store) HasRunningJob(ctx context.Context) (bool, error) {
+	var exists int
+	err := s.read.QueryRowContext(ctx,
+		"SELECT EXISTS(SELECT 1 FROM job WHERE state = ?)", string(model.JobRunning)).Scan(&exists)
+	if err != nil {
+		return false, waxerr.Wrap(waxerr.CodeIO, "store.HasRunningJob", err)
+	}
+	return exists > 0, nil
+}
+
 // ReclaimOrphans is called on Open while holding the exclusive write flock: any
 // still-running job belongs to a dead prior owner, so mark it crashed and drop
 // every lease. Recovery is based on the flock, not PID checks.
@@ -172,14 +187,14 @@ func (s *Store) ReclaimOrphans(ctx context.Context, ts int64) (int, error) {
 	return reclaimed, err
 }
 
-const jobSelect = `SELECT id, pid, kind, scope, state, owner, progress, message, error,
+const jobSelect = `SELECT id, pid, kind, scope, state, owner, progress, message, error, result,
 	started_at, heartbeat_at, finished_at FROM job`
 
 func scanJob(sc rowScanner) (*model.Job, error) {
 	var j model.Job
 	var finished sql.NullInt64
 	if err := sc.Scan(&j.ID, &j.PID, &j.Kind, &j.Scope, &j.State, &j.Owner, &j.Progress,
-		&j.Message, &j.Error, &j.StartedAt, &j.HeartbeatAt, &finished); err != nil {
+		&j.Message, &j.Error, &j.Result, &j.StartedAt, &j.HeartbeatAt, &finished); err != nil {
 		return nil, err
 	}
 	j.FinishedAt = finished.Int64

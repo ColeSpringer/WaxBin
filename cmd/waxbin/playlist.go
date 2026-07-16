@@ -130,12 +130,12 @@ func newPlaylistAddCmd(g *globals) *cobra.Command {
 		Short: "Append items to a static playlist",
 		Args:  cobra.MinimumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			lib, _, err := g.open(cmd)
+			m, _, err := g.openMutator(cmd)
 			if err != nil {
 				return err
 			}
-			defer lib.Close()
-			if err := lib.Playlists().Add(ctx(cmd), model.PID(args[0]), pids(args[1:])...); err != nil {
+			defer m.Close()
+			if err := m.PlaylistAdd(ctx(cmd), model.PID(args[0]), pids(args[1:])...); err != nil {
 				return err
 			}
 			fmt.Fprintf(out(cmd), "added %d items\n", len(args)-1)
@@ -162,16 +162,16 @@ func newPlaylistRemoveCmd(g *globals) *cobra.Command {
 			if !byPos && len(args) != 2 {
 				return waxerr.New(waxerr.CodeInvalid, "playlist remove", "give an ITEMPID or --position N")
 			}
-			lib, _, err := g.open(cmd)
+			m, _, err := g.openMutator(cmd)
 			if err != nil {
 				return err
 			}
-			defer lib.Close()
+			defer m.Close()
 			if byPos {
-				if err := lib.Playlists().RemoveAt(ctx(cmd), model.PID(args[0]), position); err != nil {
+				if err := m.PlaylistRemoveAt(ctx(cmd), model.PID(args[0]), position); err != nil {
 					return err
 				}
-			} else if err := lib.Playlists().Remove(ctx(cmd), model.PID(args[0]), model.PID(args[1])); err != nil {
+			} else if err := m.PlaylistRemove(ctx(cmd), model.PID(args[0]), model.PID(args[1])); err != nil {
 				return err
 			}
 			fmt.Fprintln(out(cmd), "removed")

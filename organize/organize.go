@@ -87,6 +87,14 @@ type Report struct {
 	Warnings []Warning
 }
 
+// RunResult is a Report plus the resolved profile name, the summary a server-run
+// organize job records so a tailing client reports the same profile the direct
+// path prints (the resolved name, not a placeholder).
+type RunResult struct {
+	Profile string `json:"profile"`
+	Report  Report `json:"report"`
+}
+
 // Failure records one action that could not be applied.
 type Failure struct {
 	FilePID model.PID

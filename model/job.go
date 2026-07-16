@@ -16,15 +16,19 @@ const (
 // Heartbeats prove liveness; flock-based reclaim on Open turns orphaned running
 // jobs into crashed without PID checks.
 type Job struct {
-	ID          int64
-	PID         PID
-	Kind        string // "scan", "organize", ...
-	Scope       string // lease scope this job ran under
-	State       JobState
-	Owner       string  // write-owner identity that created the job
-	Progress    float64 // 0..1
-	Message     string
-	Error       string
+	ID       int64
+	PID      PID
+	Kind     string // "scan", "organize", ...
+	Scope    string // lease scope this job ran under
+	State    JobState
+	Owner    string  // write-owner identity that created the job
+	Progress float64 // 0..1
+	Message  string
+	Error    string
+	// Result is a JSON summary a completed job records for a client tailing it
+	// (a server-run scan/analyze/enrich/organize the client did not run in-process).
+	// Empty while running and for jobs that record no summary.
+	Result      string
 	StartedAt   int64 // unix nanoseconds
 	HeartbeatAt int64 // unix nanoseconds
 	FinishedAt  int64 // unix nanoseconds, 0 while running

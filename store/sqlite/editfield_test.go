@@ -176,6 +176,9 @@ func TestEditGenreUpdatesLinksAndVerifyClean(t *testing.T) {
 		}
 		names[n] = true
 	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterating genres: %v", err)
+	}
 	rows.Close()
 	if !names["Jazz"] || !names["Blues"] || names["Rock"] {
 		t.Fatalf("genres = %v, want Jazz+Blues and not Rock", names)

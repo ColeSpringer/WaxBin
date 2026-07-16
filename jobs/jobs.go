@@ -46,6 +46,13 @@ func (h *Handle) Heartbeat(ctx context.Context, progress float64, msg string) er
 	return h.mgr.store.Heartbeat(ctx, h.job.ID, h.job.HeartbeatAt, progress, msg)
 }
 
+// SetResult attaches a JSON result summary to the job, persisted when the job is
+// finalized. A server-run job records its result here so a client tailing the job
+// row (which did not run the work in-process) can render the same outcome a local
+// run prints. It is set in memory; Run's finalize writes it out with the terminal
+// state.
+func (h *Handle) SetResult(result string) { h.job.Result = result }
+
 // Run acquires the lease for scope, creates a running job, invokes fn, then
 // finalizes the job (done/failed) and releases the lease. It returns
 // CodeConflict if the scope is already leased. A panic from fn is recovered,

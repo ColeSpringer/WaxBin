@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 
-	"github.com/colespringer/waxbin"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/waxerr"
 	"github.com/spf13/cobra"
@@ -47,12 +46,12 @@ func newUserCmd(g *globals) *cobra.Command {
 			Short: "Add a playback user",
 			Args:  cobra.ExactArgs(1),
 			RunE: func(cmd *cobra.Command, args []string) error {
-				lib, _, err := g.open(cmd)
+				m, _, err := g.openMutator(cmd)
 				if err != nil {
 					return err
 				}
-				defer lib.Close()
-				u, err := lib.CreateUser(ctx(cmd), args[0])
+				defer m.Close()
+				u, err := m.CreateUser(ctx(cmd), args[0])
 				if err != nil {
 					return err
 				}
@@ -82,17 +81,16 @@ func newStateCmd(g *globals) *cobra.Command {
 		Short: "Set a user's playback state for an item",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			lib, _, err := g.open(cmd)
+			m, _, err := g.openMutator(cmd)
 			if err != nil {
 				return err
 			}
-			defer lib.Close()
+			defer m.Close()
 			item := model.PID(args[0])
-			uPID, err := resolveUser(cmd, lib, user)
+			uPID, err := resolveUser(cmd, m, user)
 			if err != nil {
 				return err
 			}
-			pb := lib.Playback()
 			flags := cmd.Flags()
 
 			if flags.Changed("rating") {
@@ -100,32 +98,32 @@ func newStateCmd(g *globals) *cobra.Command {
 				if rating >= 0 { // a negative rating clears it
 					r = &rating
 				}
-				if err := pb.SetRating(ctx(cmd), uPID, item, r); err != nil {
+				if err := m.SetRating(ctx(cmd), uPID, item, r); err != nil {
 					return err
 				}
 			}
 			if star {
-				if err := pb.SetStar(ctx(cmd), uPID, item, true); err != nil {
+				if err := m.SetStar(ctx(cmd), uPID, item, true); err != nil {
 					return err
 				}
 			}
 			if unstar {
-				if err := pb.SetStar(ctx(cmd), uPID, item, false); err != nil {
+				if err := m.SetStar(ctx(cmd), uPID, item, false); err != nil {
 					return err
 				}
 			}
 			if played || finished {
-				if err := pb.MarkPlayed(ctx(cmd), uPID, item, finished); err != nil {
+				if err := m.MarkPlayed(ctx(cmd), uPID, item, finished); err != nil {
 					return err
 				}
 			}
 			if flags.Changed("position") {
-				if err := pb.Checkpoint(ctx(cmd), uPID, item, position); err != nil {
+				if err := m.Checkpoint(ctx(cmd), uPID, item, position); err != nil {
 					return err
 				}
 			}
 
-			st, err := pb.State(ctx(cmd), uPID, item)
+			st, err := m.PlayState(ctx(cmd), uPID, item)
 			if err != nil {
 				return err
 			}
@@ -176,8 +174,9 @@ func newStateCmd(g *globals) *cobra.Command {
 }
 
 // resolveUser maps a user name to its pid, returning "" (the store's default-user
-// sentinel) when no name is given.
-func resolveUser(cmd *cobra.Command, lib *waxbin.Library, name string) (model.PID, error) {
+// sentinel) when no name is given. It reads users through a userLister, so it works
+// with a directly-opened Library or a proxied mutator alike.
+func resolveUser(cmd *cobra.Command, lib userLister, name string) (model.PID, error) {
 	if name == "" {
 		return "", nil
 	}

@@ -3,12 +3,15 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
+	"time"
 
 	"github.com/colespringer/waxbin"
 	"github.com/colespringer/waxbin/config"
+	"github.com/colespringer/waxbin/proxy"
 	"github.com/colespringer/waxbin/waxerr"
 	"github.com/spf13/cobra"
 )
@@ -25,10 +28,14 @@ type globals struct {
 	jsonOut  bool
 	logLevel string
 	readOnly bool
+
+	// maintConn holds the proxy connection of an in-progress maintenance-mode
+	// hand-off, kept open for the command's lifetime; closing it (in cleanup, or on
+	// process exit) tells the server to reopen. See openViaMaintenance.
+	maintConn *proxy.Client
 }
 
-func newRootCmd() *cobra.Command {
-	g := &globals{}
+func newRootCmd(g *globals) *cobra.Command {
 	root := &cobra.Command{
 		Use:           "waxbin",
 		Short:         "WaxBin catalog and organization engine",
@@ -83,6 +90,7 @@ func newRootCmd() *cobra.Command {
 		newMergeCmd(g),
 		newAuditCmd(g),
 		newUpgradeCmd(g),
+		newServeCmd(g),
 		newDBCmd(g),
 		newDoctorCmd(g),
 		newVersionCmd(g),
@@ -151,9 +159,148 @@ func (g *globals) openLib(cmd *cobra.Command, forceReadOnly bool) (*waxbin.Libra
 	opts.ReadOnly = forceReadOnly || g.readOnly
 	lib, err := waxbin.Open(cmd.Context(), opts)
 	if err != nil {
+		// A read-write open that conflicts with a running server: hand off through
+		// maintenance mode so the command still runs holding the lock itself. Read-only
+		// opens never take the lock, so they never reach here.
+		if !opts.ReadOnly && waxerr.Is(err, waxerr.CodeConflict) {
+			if sock := advertisedSocket(cfg.DBPath); sock != "" {
+				if lib2, err2 := g.openViaMaintenance(cmd, opts, sock); err2 == nil {
+					return lib2, cfg, nil
+				}
+			}
+		}
 		return nil, nil, err
 	}
 	return lib, cfg, nil
+}
+
+// openMutator resolves how a mutating command reaches the catalog. When a server
+// advertises a reachable socket, the command's mutations are proxied through it
+// (no write-lock contention); otherwise it opens the catalog directly, which for a
+// read-write open falls back to a maintenance-mode hand-off on a conflict. It is
+// the single interception point the proxied mutation commands use in place of
+// open.
+func (g *globals) openMutator(cmd *cobra.Command) (*mutator, *config.Config, error) {
+	cfg, err := g.loadConfig(cmd)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !g.readOnly {
+		if px := dialServer(cfg.DBPath); px != nil {
+			return &mutator{px: px}, cfg, nil
+		}
+	}
+	lib, _, err := g.openLib(cmd, false)
+	if err != nil {
+		return nil, nil, err
+	}
+	return &mutator{lib: lib}, cfg, nil
+}
+
+// openViaMaintenance performs the maintenance-mode hand-off: it asks the server to
+// close its Library and release the write lock, opens the catalog directly (the
+// server now yielding the lock), and keeps the proxy connection open on g so the
+// command's lifetime brackets the hand-off. cleanup (or, on a crash, the dropped
+// connection) tells the server to reopen.
+func (g *globals) openViaMaintenance(cmd *cobra.Command, opts waxbin.Options, sock string) (*waxbin.Library, error) {
+	px, err := proxy.Dial(sock)
+	if err != nil {
+		return nil, err
+	}
+	if err := px.MaintenanceBegin(cmd.Context()); err != nil {
+		_ = px.Close()
+		return nil, err
+	}
+	// The server has released the lock; open directly. A brief retry covers the
+	// filesystem race where the flock is not yet observably free.
+	lib, err := openReadWriteRetry(cmd.Context(), opts)
+	if err != nil {
+		// Best effort: return the server to service before giving up.
+		_ = px.MaintenanceEnd(context.Background())
+		_ = px.Close()
+		return nil, err
+	}
+	fmt.Fprintln(errOut(cmd), "waxbin: server is running; took the lock via maintenance mode")
+	g.maintConn = px
+	return lib, nil
+}
+
+// openReadWriteRetry opens the catalog read-write, retrying a transient conflict
+// with bounded exponential backoff to cover the flock hand-off race after a server
+// releases the lock. The server releases the flock synchronously before answering
+// maintenance-begin, but a heavy WAL checkpoint or a loaded filesystem can delay
+// when the lock is observably free, so the wait is generous (a few seconds) rather
+// than a fixed 200ms that could fail a slow hand-off. It mirrors the daemon-side
+// acquireWriteLockRetry so both ends of the hand-off tolerate the same lag.
+func openReadWriteRetry(ctx context.Context, opts waxbin.Options) (*waxbin.Library, error) {
+	const maxAttempts = 40
+	const maxBackoff = 200 * time.Millisecond
+	backoff := 5 * time.Millisecond
+	for attempt := 0; ; attempt++ {
+		lib, err := waxbin.Open(ctx, opts)
+		if err == nil {
+			return lib, nil
+		}
+		if !waxerr.Is(err, waxerr.CodeConflict) || attempt >= maxAttempts {
+			return nil, err
+		}
+		select {
+		case <-ctx.Done():
+			return nil, waxerr.FromContext("cli.openReadWrite", ctx.Err(), waxerr.CodeConflict)
+		case <-time.After(backoff):
+		}
+		if backoff < maxBackoff {
+			backoff *= 2
+		}
+	}
+}
+
+// cleanup ends any in-progress maintenance hand-off, telling the server to reopen.
+// It runs after the command (and its deferred lib.Close, which releases the lock),
+// so the server reacquires a lock that is already free. It is best effort: on a
+// crash the dropped connection triggers the same reopen on the server side.
+func (g *globals) cleanup() {
+	if g.maintConn == nil {
+		return
+	}
+	// Use a fresh context: the command's context may already be canceled (a Ctrl-C
+	// that interrupted the command must still return the server to service).
+	_ = g.maintConn.MaintenanceEnd(context.Background())
+	_ = g.maintConn.Close()
+	g.maintConn = nil
+}
+
+// advertisedSocket returns the IPC socket a running server advertises in the
+// catalog's lockfile, or "" when no server is advertised.
+func advertisedSocket(dbPath string) string {
+	info, err := waxbin.ReadLockOwner(dbPath)
+	if err != nil {
+		return ""
+	}
+	return info.IPCSocket
+}
+
+// dialServer connects to an advertised server socket and confirms it is live,
+// returning a client or nil. A stale advertisement (the server died leaving the
+// lockfile) yields nil, so the caller falls back to a direct open.
+func dialServer(dbPath string) *proxy.Client {
+	sock := advertisedSocket(dbPath)
+	if sock == "" {
+		return nil
+	}
+	px, err := proxy.Dial(sock)
+	if err != nil {
+		return nil
+	}
+	// Bound the liveness probe: a stale or wedged server must not hang command
+	// startup. On timeout, fall back to a direct open.
+	pctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := px.Ping(pctx); err != nil {
+		_ = px.Close()
+		return nil
+	}
+	return px
 }
 
 func (g *globals) logger(cfg *config.Config) *slog.Logger {

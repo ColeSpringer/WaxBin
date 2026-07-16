@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 
-	"github.com/colespringer/waxbin"
 	"github.com/colespringer/waxbin/model"
 	"github.com/spf13/cobra"
 )
@@ -14,16 +13,16 @@ func newLockCmd(g *globals) *cobra.Command {
 		Short: "Lock item fields against enrichment and organize writes",
 		Args:  cobra.MinimumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			lib, _, err := g.open(cmd)
+			m, _, err := g.openMutator(cmd)
 			if err != nil {
 				return err
 			}
-			defer lib.Close()
+			defer m.Close()
 			pid := model.PID(args[0])
-			if err := lib.Lock(ctx(cmd), pid, args[1:]...); err != nil {
+			if err := m.Lock(ctx(cmd), pid, args[1:]...); err != nil {
 				return err
 			}
-			return reportProvenance(cmd, g, lib, pid)
+			return reportProvenance(cmd, g, m, pid)
 		},
 	}
 }
@@ -34,16 +33,16 @@ func newUnlockCmd(g *globals) *cobra.Command {
 		Short: "Clear locks on item fields",
 		Args:  cobra.MinimumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			lib, _, err := g.open(cmd)
+			m, _, err := g.openMutator(cmd)
 			if err != nil {
 				return err
 			}
-			defer lib.Close()
+			defer m.Close()
 			pid := model.PID(args[0])
-			if err := lib.Unlock(ctx(cmd), pid, args[1:]...); err != nil {
+			if err := m.Unlock(ctx(cmd), pid, args[1:]...); err != nil {
 				return err
 			}
-			return reportProvenance(cmd, g, lib, pid)
+			return reportProvenance(cmd, g, m, pid)
 		},
 	}
 }
@@ -74,8 +73,10 @@ type provRow struct {
 }
 
 // reportProvenance prints an item's provenance rows. An item with no curated or
-// locked fields reports that every field is plain tag-sourced.
-func reportProvenance(cmd *cobra.Command, g *globals, lib *waxbin.Library, pid model.PID) error {
+// locked fields reports that every field is plain tag-sourced. It reads through a
+// provenanceReader, so it works with a directly-opened Library or a proxied
+// mutator alike.
+func reportProvenance(cmd *cobra.Command, g *globals, lib provenanceReader, pid model.PID) error {
 	rows, err := lib.Provenance(ctx(cmd), pid)
 	if err != nil {
 		return err

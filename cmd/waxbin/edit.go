@@ -33,15 +33,15 @@ func newEditCmd(g *globals) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			lib, _, err := g.open(cmd)
+			m, _, err := g.openMutator(cmd)
 			if err != nil {
 				return err
 			}
-			defer lib.Close()
+			defer m.Close()
 
 			pid := model.PID(args[0])
 			opts := waxbin.EditOptions{WriteBack: writeBack, Lock: !noLock, Force: force}
-			err = lib.EditFields(ctx(cmd), pid, edits, opts)
+			err = m.EditFields(ctx(cmd), pid, edits, opts)
 
 			// A write-back failure is its own outcome. The catalog edit committed and only
 			// the on-disk tags did not follow, so surface it as a warning rather than a
@@ -54,7 +54,7 @@ func newEditCmd(g *globals) *cobra.Command {
 			} else if err != nil {
 				return err
 			}
-			return reportProvenance(cmd, g, lib, pid)
+			return reportProvenance(cmd, g, m, pid)
 		},
 	}
 	cmd.Flags().StringArrayVar(&sets, "set", nil, "field=value to set (repeatable)")

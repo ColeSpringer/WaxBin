@@ -18,6 +18,7 @@ CREATE TABLE job (
   progress     REAL    NOT NULL DEFAULT 0,
   message      TEXT    NOT NULL DEFAULT '',
   error        TEXT    NOT NULL DEFAULT '',
+  result       TEXT    NOT NULL DEFAULT '',  -- JSON result summary of a completed job, for a tailer
   started_at   INTEGER NOT NULL,
   heartbeat_at INTEGER NOT NULL,
   finished_at  INTEGER

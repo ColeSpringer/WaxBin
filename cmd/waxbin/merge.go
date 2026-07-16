@@ -34,15 +34,15 @@ func newMergeCmd(g *globals) *cobra.Command {
 					"no distinct loser entities to merge into the survivor")
 			}
 
-			lib, _, err := g.open(cmd)
+			m, _, err := g.openMutator(cmd)
 			if err != nil {
 				return err
 			}
-			defer lib.Close()
+			defer m.Close()
 
 			// One atomic batch: a bad PID rolls the whole merge back rather than
 			// leaving earlier losers merged and the command aborted mid-way.
-			reports, err := lib.MergeMany(ctx(cmd), et, survivor, losers)
+			reports, err := m.MergeMany(ctx(cmd), et, survivor, losers)
 			if err != nil {
 				return err
 			}

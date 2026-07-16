@@ -13,7 +13,13 @@ import (
 )
 
 func main() {
-	if err := newRootCmd().Execute(); err != nil {
+	g := &globals{}
+	err := newRootCmd(g).Execute()
+	// Close out any maintenance-mode hand-off before exiting, so a server this
+	// command borrowed the lock from is returned to service (runs after the
+	// command's deferred Close released the lock).
+	g.cleanup()
+	if err != nil {
 		// Cobra already prints the error; map it to a stable exit code.
 		fmt.Fprintln(os.Stderr, "waxbin: "+err.Error())
 		os.Exit(exitCodeFor(err))

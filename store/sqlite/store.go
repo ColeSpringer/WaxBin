@@ -42,11 +42,12 @@ type OpenOptions struct {
 // through the single coordinated write connection; reads use a connection pool.
 type Store struct {
 	path     string
-	read     *sql.DB    // read pool (set once in Open; never reassigned)
-	write    *sql.DB    // single write connection (nil when read-only)
-	wmu      sync.Mutex // serializes write transactions; also guards closed
-	closed   bool       // guarded by wmu
-	lock     *writeLock // held advisory lock (nil when read-only)
+	opt      OpenOptions // normalized open options, retained so Reopen rebuilds the same DSNs
+	read     *sql.DB     // read pool (reopened in place by Reopen)
+	write    *sql.DB     // single write connection (nil when read-only)
+	wmu      sync.Mutex  // serializes write transactions; also guards closed
+	closed   bool        // guarded by wmu
+	lock     *writeLock  // held advisory lock (nil when read-only)
 	readOnly bool
 	owner    string
 	log      *slog.Logger
@@ -86,7 +87,7 @@ func Open(ctx context.Context, opt OpenOptions) (*Store, error) {
 	}
 
 	s := &Store{
-		path: opt.Path, readOnly: opt.ReadOnly, owner: opt.Owner, log: log,
+		path: opt.Path, opt: opt, readOnly: opt.ReadOnly, owner: opt.Owner, log: log,
 		thumbMem: newThumbCache(thumbCacheMax),
 	}
 
@@ -158,10 +159,22 @@ func Open(ctx context.Context, opt OpenOptions) (*Store, error) {
 	return s, nil
 }
 
-// Close releases the read/write connections and the advisory lock. It first
-// attempts a WAL checkpoint so the main DB file is self-contained for backups and
-// read-only consumers.
-func (s *Store) Close() error {
+// Close releases the read/write connections and the advisory lock, and closes
+// in-process change listeners so their range loops terminate. It first attempts a
+// WAL checkpoint so the main DB file is self-contained for backups and read-only
+// consumers.
+func (s *Store) Close() error { return s.teardown(true) }
+
+// Suspend is Close for a maintenance-mode hand-off: it checkpoints, releases the
+// lock, and closes the connections, but KEEPS the in-process change subscribers
+// registered so an embedder's subscription survives the hand-off and resumes
+// delivering after Reopen. (A full Close would close those channels, terminating
+// the embedder's range loop with no way to re-establish it.)
+func (s *Store) Suspend() error { return s.teardown(false) }
+
+// teardown closes the store, optionally closing change subscribers. closeSubs is
+// true for a full Close and false for a maintenance Suspend.
+func (s *Store) teardown(closeSubs bool) error {
 	// Mark closed under wmu so an in-flight writeTx (which holds wmu for its whole
 	// duration and checks closed) cannot be mid-transaction here; checkpoint while
 	// still holding it. The connection fields are not nil'd; a racing reader hits
@@ -177,8 +190,12 @@ func (s *Store) Close() error {
 	}
 	s.wmu.Unlock()
 
-	// Close in-process change listeners so their range loops terminate.
-	s.closeSubscribers()
+	if closeSubs {
+		// Close in-process change listeners so their range loops terminate.
+		s.closeSubscribers()
+	}
+	// The pinned data_version connection is drawn from the read pool; drop it either
+	// way. DataVersion re-pins a fresh one lazily after a reopen.
 	s.closeDataVersionConn()
 
 	var errs []error
@@ -192,6 +209,86 @@ func (s *Store) Close() error {
 		errs = append(errs, s.lock.release())
 	}
 	return errors.Join(errs...)
+}
+
+// Reopen re-acquires the write lock and reopens the connections of a Store that
+// was Closed for a maintenance-mode hand-off, restoring it in place so every
+// subsystem that still holds this *Store keeps working. It is the inverse of Close
+// for the read-write path; a read-only store cannot be reopened this way, and a
+// store that is already open is a no-op.
+//
+// The lock re-acquire retries with bounded backoff because a foreground process
+// may still be releasing the flock as the hand-off ends. migrate runs again so a
+// restore/rebuild that replaced the DB file mid-hand-off is brought current; the
+// rest mirrors Open's read-write reconciliation.
+func (s *Store) Reopen(ctx context.Context) error {
+	const op = "store.Reopen"
+	if s.readOnly {
+		return waxerr.New(waxerr.CodeUnsupported, op, "a read-only store cannot be reopened")
+	}
+	s.wmu.Lock()
+	closed := s.closed
+	s.wmu.Unlock()
+	if !closed {
+		return nil
+	}
+
+	// Acquire the lock and open the connections without holding wmu: the retry can
+	// sleep, and the reconciliation steps below take wmu themselves via writeTx.
+	lock, err := acquireWriteLockRetry(ctx, s.opt.Path+".waxlock", s.opt.Owner, s.opt.IPCSocket)
+	if err != nil {
+		return err
+	}
+	wdb, err := openDB(ctx, rwDSN(s.opt), 1)
+	if err != nil {
+		_ = lock.release()
+		return waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	rdb, err := openDB(ctx, readDSN(s.opt), s.opt.ReadPoolSize)
+	if err != nil {
+		_ = wdb.Close()
+		_ = lock.release()
+		return waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+
+	s.wmu.Lock()
+	if !s.closed {
+		// Raced with a concurrent Reopen/Open that already restored the store; drop
+		// the connections and lock we just took.
+		s.wmu.Unlock()
+		_ = rdb.Close()
+		_ = wdb.Close()
+		_ = lock.release()
+		return nil
+	}
+	s.lock, s.write, s.read = lock, wdb, rdb
+	s.closed = false
+	s.wmu.Unlock()
+
+	// The store is open again; run the same post-open reconciliation as Open. On any
+	// failure, Close tears the half-restored store back down so it stays cleanly
+	// closed (Close is safe here because s.closed is now false).
+	if err := s.migrate(ctx); err != nil {
+		_ = s.Close()
+		return err
+	}
+	if n, err := s.ReclaimOrphans(ctx, nowNS()); err != nil {
+		_ = s.Close()
+		return err
+	} else if n > 0 {
+		s.log.Info("reclaimed orphaned jobs on reopen", "count", n)
+	}
+	if n, err := s.recoverOrganize(ctx); err != nil {
+		_ = s.Close()
+		return err
+	} else if n > 0 {
+		s.log.Info("recovered interrupted organize moves on reopen", "count", n)
+	}
+	if err := s.ensureDefaultUser(ctx); err != nil {
+		_ = s.Close()
+		return err
+	}
+	return nil
 }
 
 // ReadOnly reports whether the store was opened read-only.

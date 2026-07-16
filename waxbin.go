@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/colespringer/waxbin/analyze"
@@ -84,6 +85,10 @@ type Library struct {
 	decoder   *decode.Engine
 	log       *slog.Logger
 	opts      Options
+
+	// jobsWG tracks in-flight asynchronous (server-run) jobs started via startJob, so
+	// Close drains them against the still-open store instead of tearing it down mid-job.
+	jobsWG sync.WaitGroup
 }
 
 // Open opens (creating if needed) the catalog and wires the subsystems. A
@@ -180,7 +185,14 @@ func Open(ctx context.Context, opts Options) (*Library, error) {
 // Close flushes buffered playback progress, then releases the catalog and write
 // lock. The flush is best effort: shutdown should save resume positions, but a
 // flush error should not block release. Read-only handles skip the flush.
+//
+// It first drains any in-flight server-run jobs so they finalize against the
+// still-open store; otherwise a shutdown mid-scan would leave a job row stuck
+// "running" (reclaimed as crashed only on a later open). The jobs run under a
+// server's lifetime context, so a shutdown that cancels that context makes them
+// return promptly.
 func (l *Library) Close() error {
+	l.jobsWG.Wait()
 	if l.playback != nil && !l.ReadOnly() {
 		_ = l.playback.Flush(context.Background())
 	}
@@ -437,29 +449,18 @@ type ScanResult struct {
 }
 
 // Scan indexes the selected libraries under a single "scan"-scoped job.
+//
+// Rollups are maintained transactionally for the entities touched by each scanned
+// track, so no whole-catalog refresh is needed here; RefreshRollups is the repair
+// path for drift reported by `db verify`. StartScan is the asynchronous variant a
+// server exposes so a CLI can submit a scan without pausing it.
 func (l *Library) Scan(ctx context.Context, req ScanRequest) (*ScanResult, error) {
 	libs, err := l.resolveLibraries(ctx, req.LibraryPID)
 	if err != nil {
 		return nil, err
 	}
 	out := &ScanResult{}
-	job, runErr := l.jobs.Run(ctx, "scan", fsMutateScope, func(ctx context.Context, h *jobs.Handle) error {
-		for _, lib := range libs {
-			r, err := l.scanner.Scan(ctx, scan.Request{
-				Library: lib, SubPath: req.SubPath, Force: req.Force,
-				AdoptStampedPIDs: req.AdoptStampedPIDs, ForceReconcile: req.ForceReconcile,
-			}, func(p float64, msg string) error { return h.Heartbeat(ctx, p, msg) })
-			if err != nil {
-				return err
-			}
-			out.Runs = append(out.Runs, *r)
-			addResult(&out.Total, r)
-		}
-		// Rollups are maintained transactionally for the entities touched by each
-		// scanned track. No whole-catalog refresh is needed here; RefreshRollups is
-		// the repair path for drift reported by `db verify`.
-		return nil
-	})
+	job, runErr := l.jobs.Run(ctx, "scan", fsMutateScope, l.scanWork(libs, req, out))
 	if job != nil {
 		out.JobPID = job.PID
 	}
@@ -487,33 +488,7 @@ type AnalyzeOptions struct {
 func (l *Library) Analyze(ctx context.Context, opts AnalyzeOptions) (*AnalyzeResult, error) {
 	out := &AnalyzeResult{}
 	writeRG := l.opts.WriteReplayGainTags || opts.WriteReplayGainTags
-	job, runErr := l.jobs.Run(ctx, "analyze", "analyze", func(ctx context.Context, h *jobs.Handle) error {
-		r, err := l.analyzer.Run(ctx, func(p float64, msg string) error { return h.Heartbeat(ctx, p, msg) })
-		if r != nil {
-			out.Result = *r
-		}
-		if err != nil {
-			return err
-		}
-		// Album ReplayGain depends on per-file loudness and album membership.
-		// Membership can change in a tag-only scan, so reconcile it after every
-		// analyze pass. Catalogs with no loudness return immediately.
-		if err := l.store.RefreshAlbumGain(ctx); err != nil {
-			return err
-		}
-		// Optionally mirror the (now album-aggregated) ReplayGain into files on disk,
-		// in one pass. Off by default; failures are logged, not fatal to the analyze.
-		if writeRG {
-			c, err := l.writeReplayGainTags(ctx)
-			if err != nil {
-				return err
-			}
-			out.Result.ReplayGainTagsWritten = c.written
-			out.Result.ReplayGainTagsFailed = c.failed
-			out.Result.ReplayGainTagsUnrepresented = c.unrepresented
-		}
-		return nil
-	})
+	job, runErr := l.jobs.Run(ctx, "analyze", "analyze", l.analyzeWork(writeRG, out))
 	if job != nil {
 		out.JobPID = job.PID
 	}
@@ -655,14 +630,7 @@ func (l *Library) Enrich(ctx context.Context, opts EnrichOptions) (*EnrichResult
 		return out, waxerr.New(waxerr.CodeUnsupported, "waxbin.Enrich",
 			"enrichment needs a MusicBrainz contact (set enrichment.contact / WAXBIN_ENRICH_CONTACT)")
 	}
-	job, runErr := l.jobs.Run(ctx, "enrich", "enrich", func(ctx context.Context, h *jobs.Handle) error {
-		r, err := l.enricher.Run(ctx, enrich.RunOptions{Force: opts.Force, Limit: opts.Limit},
-			func(p float64, msg string) error { return h.Heartbeat(ctx, p, msg) })
-		if r != nil {
-			out.Result = *r
-		}
-		return err
-	})
+	job, runErr := l.jobs.Run(ctx, "enrich", "enrich", l.enrichWork(opts, out))
 	if job != nil {
 		out.JobPID = job.PID
 	}
