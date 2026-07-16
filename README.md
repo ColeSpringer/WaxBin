@@ -6,11 +6,6 @@ searches, browses, and tracks per-user state across **music, audiobooks, and
 podcasts**. It runs standalone, much like `beets`, and is a clean dependency for
 WaxDeck.
 
-> **Status:** feature-complete for v1.0. The engine covers cataloging, a separate
-> analysis pass (ReplayGain / fingerprint / peaks), native-template organization,
-> a canonical read/browse API, playback state, podcasts, audiobooks, metadata
-> enrichment, and audit/quality/repair. See [CHANGELOG.md](CHANGELOG.md).
-
 ## Design tenets
 
 - **No CGO, no external binaries.** Cataloging is pure Go for every format via
