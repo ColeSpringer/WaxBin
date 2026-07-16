@@ -6,6 +6,7 @@ import (
 	"os"
 
 	"github.com/colespringer/waxbin/config"
+	"github.com/colespringer/waxbin/enrich"
 	"github.com/colespringer/waxbin/source"
 )
 
@@ -46,6 +47,12 @@ type Options struct {
 	// registered; these register under their own source types. The default CLI build
 	// does not ship extra providers.
 	SourceProviders []source.Provider
+	// EnrichmentProviders are injected metadata-enrichment providers (Discogs, Last.fm,
+	// Audnexus, Hardcover, fanart.tv, ...) supplied by an embedding module. They take
+	// priority over the key-free built-ins (Cover Art Archive, ListenBrainz, LRCLIB)
+	// for a value conflict; the MusicBrainz identity spine still resolves the anchoring
+	// MBID first. The default CLI build ships none.
+	EnrichmentProviders []enrich.Provider
 
 	// Storage tuning; zero values fall back to library defaults.
 	BusyTimeoutMS int

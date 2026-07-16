@@ -459,6 +459,8 @@ type enrichView struct {
 	ReleaseGroupsMatched  int    `json:"releaseGroupsMatched"`
 	BooksEnriched         int    `json:"booksEnriched"`
 	BooksMatched          int    `json:"booksMatched"`
+	LyricsEnriched        int    `json:"lyricsEnriched"`
+	LyricsMatched         int    `json:"lyricsMatched"`
 	ArtFetched            int    `json:"artFetched"`
 	JobPID                string `json:"jobPid,omitempty"`
 }
@@ -468,6 +470,7 @@ func toEnrichView(r *waxbin.EnrichResult) enrichView {
 		ArtistsEnriched: r.Result.ArtistsEnriched, ArtistsMatched: r.Result.ArtistsMatched,
 		ReleaseGroupsEnriched: r.Result.ReleaseGroupsEnriched, ReleaseGroupsMatched: r.Result.ReleaseGroupsMatched,
 		BooksEnriched: r.Result.BooksEnriched, BooksMatched: r.Result.BooksMatched,
+		LyricsEnriched: r.Result.LyricsEnriched, LyricsMatched: r.Result.LyricsMatched,
 		ArtFetched: r.Result.ArtFetched, JobPID: string(r.JobPID),
 	}
 }

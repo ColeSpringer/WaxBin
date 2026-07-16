@@ -384,13 +384,14 @@ func deleteItemCascade(ctx context.Context, tx *sql.Tx, itemID int64) (model.PID
 	if _, err := tx.ExecContext(ctx, "DELETE FROM search_fts WHERE rowid = ?", itemID); err != nil {
 		return "", err
 	}
-	// entity_enrichment is polymorphic (no FK cascade). A book's marker is keyed by
-	// the item id, so drop it here. Because playable_item.id is not AUTOINCREMENT, a
-	// reused rowid could otherwise inherit a stale "already enriched" marker and skip
-	// a new book. Artist and release-group markers have no delete path in v1.0; their
+	// entity_enrichment is polymorphic (no FK cascade). A book's marker and a track's
+	// lyrics marker are both keyed by the item id, so drop them here. Because
+	// playable_item.id is not AUTOINCREMENT, a reused rowid could otherwise inherit a
+	// stale "already enriched" marker and skip a new book, or skip lyrics for a new
+	// track. Artist and release-group markers have no delete path in v1.0; their
 	// cleanup rides with the future entity-merge/GC gate.
 	if _, err := tx.ExecContext(ctx,
-		"DELETE FROM entity_enrichment WHERE entity_type = 'book' AND entity_id = ?", itemID); err != nil {
+		"DELETE FROM entity_enrichment WHERE entity_type IN ('book','lyrics') AND entity_id = ?", itemID); err != nil {
 		return "", err
 	}
 	if _, err := tx.ExecContext(ctx, "DELETE FROM playable_item WHERE id = ?", itemID); err != nil {

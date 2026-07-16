@@ -166,14 +166,20 @@ func scalarInt(t *testing.T, db *sql.DB, q string, args ...any) int {
 }
 
 // newService builds an enrichment service wired to the mock endpoints with pacing
-// effectively disabled (a tiny non-zero interval).
+// effectively disabled (a tiny non-zero interval). Community genres are on (as in the
+// default build) but its ListenBrainz base URL, and the (here-disabled) LRCLIB base
+// URL, point at the CAA mock, which 404s their paths, so the pass never reaches the
+// real network for a genre/lyrics lookup.
 func newService(st enrich.Store, mbURL, caaURL string) *enrich.Service {
 	return enrich.New(st, enrich.Config{
-		Contact:            "test@example.com",
-		FetchCoverArt:      true,
-		MinRequestInterval: time.Millisecond,
-		MusicBrainzBaseURL: mbURL,
-		CoverArtBaseURL:    caaURL,
+		Contact:              "test@example.com",
+		FetchCoverArt:        true,
+		FetchCommunityGenres: true,
+		MinRequestInterval:   time.Millisecond,
+		MusicBrainzBaseURL:   mbURL,
+		CoverArtBaseURL:      caaURL,
+		ListenBrainzBaseURL:  caaURL,
+		LRCLibBaseURL:        caaURL,
 	}, nil)
 }
 

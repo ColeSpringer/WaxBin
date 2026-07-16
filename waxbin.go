@@ -43,18 +43,25 @@ var _ enrich.Store = (*sqlite.Store)(nil)
 var _ audit.Store = (*sqlite.Store)(nil)
 
 // enrichConfig converts the config-only EnrichConfig into the enrich package's
-// Config, resolving the cover-art default (on unless explicitly disabled).
-func enrichConfig(c config.EnrichConfig) enrich.Config {
+// Config, resolving the cover-art and lyrics defaults (each on unless explicitly
+// disabled) and attaching any injected providers. The injected providers outrank the
+// key-free built-ins for a value conflict.
+func enrichConfig(c config.EnrichConfig, providers []enrich.Provider) enrich.Config {
 	return enrich.Config{
-		Contact:            c.Contact,
-		UserAgent:          c.UserAgent,
-		AcoustIDKey:        c.AcoustIDKey,
-		FetchCoverArt:      c.CoverArt == nil || *c.CoverArt,
-		BlockPrivateIPs:    c.BlockPrivateIPs,
-		Timeout:            time.Duration(c.TimeoutSeconds) * time.Second,
-		MusicBrainzBaseURL: c.MusicBrainzBaseURL,
-		CoverArtBaseURL:    c.CoverArtBaseURL,
-		AcoustIDBaseURL:    c.AcoustIDBaseURL,
+		Contact:              c.Contact,
+		UserAgent:            c.UserAgent,
+		AcoustIDKey:          c.AcoustIDKey,
+		FetchCoverArt:        c.CoverArt == nil || *c.CoverArt,
+		FetchLyrics:          c.Lyrics == nil || *c.Lyrics,
+		FetchCommunityGenres: c.CommunityGenres == nil || *c.CommunityGenres,
+		Providers:            providers,
+		BlockPrivateIPs:      c.BlockPrivateIPs,
+		Timeout:              time.Duration(c.TimeoutSeconds) * time.Second,
+		MusicBrainzBaseURL:   c.MusicBrainzBaseURL,
+		CoverArtBaseURL:      c.CoverArtBaseURL,
+		AcoustIDBaseURL:      c.AcoustIDBaseURL,
+		ListenBrainzBaseURL:  c.ListenBrainzBaseURL,
+		LRCLibBaseURL:        c.LRCLibBaseURL,
 	}
 }
 
@@ -144,7 +151,7 @@ func Open(ctx context.Context, opts Options) (*Library, error) {
 			DefaultRetention:  opts.Podcasts.DefaultRetention,
 			Providers:         opts.SourceProviders,
 		}, log),
-		enricher: enrich.New(st, enrichConfig(opts.Enrichment), log),
+		enricher: enrich.New(st, enrichConfig(opts.Enrichment, opts.EnrichmentProviders), log),
 		decoder:  decoder,
 		log:      log,
 		opts:     opts,

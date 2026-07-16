@@ -28,12 +28,14 @@ type EnrichTarget struct {
 	Type       string // EnrichArtistType | EnrichReleaseGroupType | EnrichBookType
 	ID         int64
 	PID        PID
-	Name       string // artist name / release-group title / book title
+	Name       string // artist name / release-group title / book/track title
 	MBID       string // existing MBID, when known
-	ArtistName string // release-group primary artist / book author, for search disambiguation
+	ArtistName string // release-group primary artist / book author / track artist, for disambiguation
+	Album      string // album title, for a per-track lyrics lookup
 	// FilePath and DurationSec back the optional AcoustID fallback: a representative
 	// audio file for a release group with no MBID, fingerprinted to resolve one. They
 	// are populated only when the store is asked to include the representative file.
+	// DurationSec also disambiguates a per-track lyrics lookup.
 	FilePath    string
 	DurationSec int
 }
@@ -75,7 +77,23 @@ type ReleaseGroupEnrichment struct {
 	MBID           string
 	Type           string // album|ep|single|compilation
 	Genres         []string
-	Art            *ArtImage
+	// GenreProvider is the provider that supplied the display-primary genre, recorded
+	// as field_provenance.provider for the genre field. Empty when no genre was found
+	// (or the provider is untracked); "musicbrainz" when the genre came from the
+	// identity spine's own release-group genres.
+	GenreProvider string
+	Art           *ArtImage
+}
+
+// LyricsEnrichment is the resolved lyrics for one recording (track). Lyrics are
+// filled only when the item has none, so a sidecar/embedded copy is never overwritten.
+// Matched=false records a completed no-match so the track is not re-queried each run.
+type LyricsEnrichment struct {
+	ItemID   int64
+	PID      PID
+	Matched  bool
+	Lyrics   *Lyrics
+	Provider string // the provider that supplied the lyrics ("lrclib", ...)
 }
 
 // BookEnrichment is the resolved data for one audiobook: external identifiers and

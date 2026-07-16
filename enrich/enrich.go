@@ -21,7 +21,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/colespringer/waxbin/art"
 	"github.com/colespringer/waxbin/fingerprint"
 	"github.com/colespringer/waxbin/identity"
 	"github.com/colespringer/waxbin/internal/caps"
@@ -41,11 +40,18 @@ type Store interface {
 	// lookup is skipped on the common path where AcoustID is off.
 	ReleaseGroupsNeedingEnrichment(ctx context.Context, force bool, afterID int64, limit int, includeRepFile bool) ([]model.EnrichTarget, error)
 	BooksNeedingEnrichment(ctx context.Context, force bool, afterID int64, limit int) ([]model.EnrichTarget, error)
-	CountEntitiesNeedingEnrichment(ctx context.Context, force bool) (int, error)
+	// ItemsNeedingLyrics returns the next keyset page of tracks that carry no lyrics
+	// yet (and, unless force, have not already been looked up), each with the title,
+	// artist, album, and duration a lyrics provider keys on.
+	ItemsNeedingLyrics(ctx context.Context, force bool, afterID int64, limit int) ([]model.EnrichTarget, error)
+	CountEntitiesNeedingEnrichment(ctx context.Context, force bool, includeLyrics bool) (int, error)
 
 	ApplyArtistEnrichment(ctx context.Context, in model.ArtistEnrichment) error
 	ApplyReleaseGroupEnrichment(ctx context.Context, in model.ReleaseGroupEnrichment) error
 	ApplyBookEnrichment(ctx context.Context, in model.BookEnrichment) error
+	// ApplyLyricsEnrichment attaches a track's resolved lyrics, only when it has none
+	// (fill-when-empty), and records the per-recording enrichment marker.
+	ApplyLyricsEnrichment(ctx context.Context, in model.LyricsEnrichment) error
 
 	EnrichmentCacheGet(ctx context.Context, key string) ([]byte, bool, error)
 	EnrichmentCachePut(ctx context.Context, key string, payload []byte) error
@@ -69,18 +75,35 @@ type Config struct {
 	// FetchCoverArt enables Cover Art Archive lookups (default enabled when a contact
 	// is set; the facade sets it explicitly).
 	FetchCoverArt bool
+	// FetchLyrics enables the LRCLIB lyrics provider (default enabled when a contact
+	// is set; the facade sets it explicitly). Lyrics are filled only for a track that
+	// has none.
+	FetchLyrics bool
+	// FetchCommunityGenres enables the ListenBrainz community-genre provider (default
+	// enabled when a contact is set; the facade sets it explicitly). MusicBrainz genres
+	// always flow through the identity spine regardless of this toggle.
+	FetchCommunityGenres bool
+
+	// Providers are injected candidate providers supplied by an embedder (Discogs,
+	// Last.fm, Audnexus, ...). They take priority over the built-in field/genre/cover/
+	// lyrics providers for a value conflict; the MusicBrainz identity spine still
+	// resolves the anchoring MBID first regardless. The default CLI build injects none.
+	Providers []Provider
 
 	// Network policy applied to the shared netsafe client.
 	BlockPrivateIPs bool
 	Timeout         time.Duration
 	// MinRequestInterval is the per-host spacing (MusicBrainz requires >= 1s). Zero
-	// takes the 1s default; tests set a tiny value.
+	// takes the 1s default; tests set a tiny value. The key-free built-ins (LRCLIB,
+	// ListenBrainz) pace at this interval too when set, else a gentler default.
 	MinRequestInterval time.Duration
 
 	// Endpoint overrides. Empty fields default to the public services.
-	MusicBrainzBaseURL string
-	CoverArtBaseURL    string
-	AcoustIDBaseURL    string
+	MusicBrainzBaseURL  string
+	CoverArtBaseURL     string
+	AcoustIDBaseURL     string
+	ListenBrainzBaseURL string
+	LRCLibBaseURL       string
 }
 
 const (
@@ -88,7 +111,17 @@ const (
 	defaultMBBaseURL     = "https://musicbrainz.org/ws/2"
 	defaultCAABaseURL    = "https://coverartarchive.org"
 	defaultAcoustBaseURL = "https://api.acoustid.org"
+	defaultLBBaseURL     = "https://api.listenbrainz.org"
+	defaultLRCLibBaseURL = "https://lrclib.net"
 	defaultMBInterval    = time.Second // MusicBrainz: at most 1 request/second
+	// defaultBuiltinInterval paces the key-free built-ins (LRCLIB, ListenBrainz) when
+	// no explicit interval is configured. They publish rate limits and return 429/503
+	// under load, so a gentle default keeps a large pass from being throttled.
+	defaultBuiltinInterval = 500 * time.Millisecond
+	// providerTimeout bounds one candidate-provider call so a slow optional provider
+	// cannot stall the identity/genre loop; it never aborts the pass, only that lookup.
+	providerTimeout      = 15 * time.Second
+	maxEnrichGenres      = 6 // cap on non-MusicBrainz (injected/community) genres added to an item
 	enrichBatch          = 100
 	defaultEnrichTimeout = 30 * time.Second
 	// acoustFingerprintMaxDur bounds how much audio fpcalc analyzes for an AcoustID
@@ -105,13 +138,26 @@ type Service struct {
 	log   *slog.Logger
 	caps  caps.Caps
 
+	// mb + aid are the identity spine: MusicBrainz resolves the anchoring MBID (and,
+	// for a release group, its type and its own genres) and AcoustID is the internal
+	// fingerprint fallback that feeds MBIDs back to MusicBrainz. Neither is a port
+	// Provider; they always run first.
 	mb  *musicBrainz
-	caa *coverArt
 	aid *acoustID
+
+	// providers are the layerable candidate providers (genres, cover, lyrics, book
+	// meta), in priority order: the injected providers first (indices [0:numInjected]),
+	// then the key-free built-ins. First non-nil wins for a single-value candidate
+	// (cover, lyrics); genres merge as a union with the MusicBrainz baseline spliced
+	// between the injected and built-in groups.
+	providers   []Provider
+	numInjected int
 }
 
 // New builds an enrichment service from cfg, constructing the shared netsafe client
-// with the contact User-Agent and MusicBrainz pacing.
+// with the contact User-Agent and MusicBrainz pacing, then registering the injected
+// providers ahead of the key-free built-ins (Cover Art Archive cover, ListenBrainz
+// genres, LRCLIB lyrics). Each rate-limited built-in gets its own paced client.
 func New(store Store, cfg Config, log *slog.Logger) *Service {
 	if log == nil {
 		log = slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -144,8 +190,37 @@ func New(store Store, cfg Config, log *slog.Logger) *Service {
 		log:   log,
 		caps:  caps.Detect(),
 		mb:    &musicBrainz{client: client, baseURL: baseOr(cfg.MusicBrainzBaseURL, defaultMBBaseURL), cache: c},
-		caa:   &coverArt{client: client, baseURL: baseOr(cfg.CoverArtBaseURL, defaultCAABaseURL)},
 		aid:   &acoustID{client: client, baseURL: baseOr(cfg.AcoustIDBaseURL, defaultAcoustBaseURL), key: cfg.AcoustIDKey},
+	}
+
+	// Injected providers rank first; record the boundary so the genre merge can splice
+	// the MusicBrainz baseline in after them but before the built-ins.
+	s.providers = append(s.providers, cfg.Providers...)
+	s.numInjected = len(s.providers)
+
+	// The key-free built-ins. The Cover Art Archive shares the MusicBrainz client (a
+	// different host, so its pacing is independent anyway); the rate-limited lyrics/
+	// genre built-ins each get their own paced client.
+	builtinInterval := cfg.MinRequestInterval
+	if builtinInterval == 0 {
+		builtinInterval = defaultBuiltinInterval
+	}
+	builtinPolicy := netsafe.Policy{UserAgent: ua, Timeout: timeout, BlockPrivateIPs: cfg.BlockPrivateIPs, MinHostInterval: builtinInterval}
+	if cfg.FetchCoverArt {
+		s.providers = append(s.providers, &caaProvider{
+			caa: &coverArt{client: client, baseURL: baseOr(cfg.CoverArtBaseURL, defaultCAABaseURL)},
+			log: log,
+		})
+	}
+	if cfg.FetchCommunityGenres {
+		s.providers = append(s.providers, &listenBrainz{
+			client: netsafe.New(builtinPolicy), baseURL: baseOr(cfg.ListenBrainzBaseURL, defaultLBBaseURL),
+		})
+	}
+	if cfg.FetchLyrics {
+		s.providers = append(s.providers, &lrclib{
+			client: netsafe.New(builtinPolicy), baseURL: baseOr(cfg.LRCLibBaseURL, defaultLRCLibBaseURL),
+		})
 	}
 	return s
 }
@@ -185,10 +260,14 @@ type Result struct {
 	ReleaseGroupsMatched  int
 	BooksEnriched         int
 	BooksMatched          int
+	LyricsEnriched        int
+	LyricsMatched         int
 	ArtFetched            int
 }
 
-func (r *Result) total() int { return r.ArtistsEnriched + r.ReleaseGroupsEnriched + r.BooksEnriched }
+func (r *Result) total() int {
+	return r.ArtistsEnriched + r.ReleaseGroupsEnriched + r.BooksEnriched + r.LyricsEnriched
+}
 
 // Heartbeat reports progress; it may be nil.
 type Heartbeat func(progress float64, msg string) error
@@ -212,7 +291,10 @@ func (s *Service) Run(ctx context.Context, opts RunOptions, hb Heartbeat) (*Resu
 	// counting queries entirely when there is no heartbeat.
 	var total int
 	if hb != nil {
-		n, err := s.store.CountEntitiesNeedingEnrichment(ctx, opts.Force)
+		// includeLyrics must match the phase list below, which adds the lyrics phase
+		// only when a lyrics-capable provider is registered, so the denominator counts
+		// exactly the work that will run.
+		n, err := s.store.CountEntitiesNeedingEnrichment(ctx, opts.Force, s.hasCapability(CapLyrics))
 		if err != nil {
 			return res, err
 		}
@@ -267,6 +349,18 @@ func (s *Service) Run(ctx context.Context, opts RunOptions, hb Heartbeat) (*Resu
 			},
 			enrich: func(ctx context.Context, t model.EnrichTarget) (bool, error) { return s.enrichBook(ctx, st, t) },
 		},
+	}
+	// Lyrics are a per-recording phase, run only when a lyrics-capable provider is
+	// registered so no marker is written for tracks nothing could ever fill. It walks
+	// tracks that carry no lyrics yet, filling from LRCLIB (or an injected provider).
+	if s.hasCapability(CapLyrics) {
+		phases = append(phases, phase{
+			label: "lyrics", enriched: &res.LyricsEnriched, matched: &res.LyricsMatched,
+			fetch: func(ctx context.Context, after int64, lim int) ([]model.EnrichTarget, error) {
+				return s.store.ItemsNeedingLyrics(ctx, st.force, after, lim)
+			},
+			enrich: func(ctx context.Context, t model.EnrichTarget) (bool, error) { return s.enrichLyrics(ctx, st, t) },
+		})
 	}
 	for i := range phases {
 		if err := s.runPhase(ctx, res, phases[i], beat, remaining, limitReached); err != nil {
@@ -393,10 +487,13 @@ func (s *Service) enrichReleaseGroup(ctx context.Context, st *runState, res *Res
 		enr.Matched = true
 		enr.MBID = rg.ID
 		enr.Type = mapReleaseGroupType(rg.PrimaryType, rg.SecondaryTypes)
-		enr.Genres = genreNames(rg.Genres)
-		if s.cfg.FetchCoverArt {
-			enr.Art = s.fetchCover(ctx, rg.ID) // best-effort; never aborts the run
-		}
+		// Genres: the MusicBrainz baseline merged with the genre providers (injected
+		// first, then built-ins like ListenBrainz), deduped and capped. The winning
+		// provider of the display-primary genre is recorded as field provenance.
+		enr.Genres, enr.GenreProvider = s.gatherGenres(ctx, st, rg, genreNames(rg.Genres))
+		// Cover: the first cover provider to answer, injected first (an embedder's
+		// fanart.tv beats the built-in Cover Art Archive). Best-effort: never aborts.
+		enr.Art = s.gatherCover(ctx, st, rg)
 	}
 	if err := s.store.ApplyReleaseGroupEnrichment(ctx, enr); err != nil {
 		return false, err
@@ -495,29 +592,157 @@ func (s *Service) enrichBook(ctx context.Context, st *runState, t model.EnrichTa
 	return enr.Matched, nil
 }
 
-// fetchCover downloads and decodes a release group's front cover. It is best-effort:
-// any failure (a 404 "no cover", a transient network error, or an undecodable image)
-// logs and returns nil instead of aborting the run, since cover art is optional and a
-// skipped cover is re-fetchable with --force. MusicBrainz failures abort the pass; a
-// Cover Art Archive failure never does.
-func (s *Service) fetchCover(ctx context.Context, mbid string) *model.ArtImage {
-	data, err := s.caa.frontCover(ctx, mbid)
-	if err != nil {
-		if waxerr.Is(err, waxerr.CodeNotFound) {
-			s.log.Debug("no cover art for release group", "mbid", mbid)
-		} else {
-			s.log.Warn("cover art fetch failed; skipping cover", "mbid", mbid, "err", err)
+// enrichLyrics fills one track's lyrics from the first lyrics provider to answer
+// (injected first, then LRCLIB). A provider error is best-effort (logged, skipped);
+// only the store write can abort. A no-match still records the marker so the track is
+// not re-queried every run. Returns whether a provider matched.
+func (s *Service) enrichLyrics(ctx context.Context, st *runState, t model.EnrichTarget) (bool, error) {
+	req := Request{
+		Type: TargetRecording, Force: st.force,
+		Title: t.Name, Artist: t.ArtistName, Album: t.Album, DurationSec: t.DurationSec,
+	}
+	var got *model.Lyrics
+	var provider string
+	for _, p := range s.providers {
+		if !p.Capabilities().Has(CapLyrics) {
+			continue
 		}
-		return nil
+		cand, err := s.callProvider(ctx, p, req)
+		if err != nil || cand == nil || !cand.Lyrics.HasContent() {
+			continue
+		}
+		got, provider = cand.Lyrics, p.Name()
+		break
 	}
-	img := &model.ArtImage{Data: data, Hash: art.Hash(data)}
-	format, w, h, err := art.Probe(data)
+	in := model.LyricsEnrichment{ItemID: t.ID, PID: t.PID, Matched: got != nil, Lyrics: got, Provider: provider}
+	if err := s.store.ApplyLyricsEnrichment(ctx, in); err != nil {
+		return false, err
+	}
+	return in.Matched, nil
+}
+
+// genreCandidate is one genre display name and the provider that supplied it, used to
+// attribute the display-primary genre to a provider for field provenance.
+type genreCandidate struct {
+	name     string
+	provider string
+}
+
+// gatherGenres merges genres from the genre providers and the MusicBrainz baseline
+// into one deduped union in priority order: injected providers first, then the
+// MusicBrainz baseline, then the built-in providers (ListenBrainz). Every MusicBrainz
+// baseline genre is kept (they were always applied before providers were merged in);
+// only the non-MusicBrainz additions are capped, so a provider ranked ahead can never
+// evict an authoritative MB genre. It returns the merged display names and the provider
+// that supplied the display-primary genre (for field provenance), "" when nothing was
+// found.
+func (s *Service) gatherGenres(ctx context.Context, st *runState, rg *mbReleaseGroup, mbBaseline []string) ([]string, string) {
+	req := Request{
+		Type: TargetReleaseGroup, Force: st.force,
+		Title: rg.Title, Artist: releaseGroupArtistName(rg), MBID: rg.ID,
+	}
+	var cands []genreCandidate
+	add := func(p Provider) {
+		if !p.Capabilities().Has(CapGenres) {
+			return
+		}
+		cand, err := s.callProvider(ctx, p, req)
+		if err != nil || cand == nil {
+			return
+		}
+		for _, g := range cand.Genres {
+			cands = append(cands, genreCandidate{name: g, provider: p.Name()})
+		}
+	}
+	for _, p := range s.providers[:s.numInjected] {
+		add(p)
+	}
+	for _, g := range mbBaseline {
+		cands = append(cands, genreCandidate{name: g, provider: providerMusicBrainz})
+	}
+	for _, p := range s.providers[s.numInjected:] {
+		add(p)
+	}
+
+	seen := make(map[string]bool, len(cands))
+	var names []string
+	var primary string
+	nonMB := 0
+	for _, c := range cands {
+		isMB := c.provider == providerMusicBrainz
+		for _, name := range identity.SplitGenres(c.name) {
+			mk := identity.MatchKey(name)
+			if mk == "" || seen[mk] {
+				continue
+			}
+			// Cap only the non-MusicBrainz (injected/community) additions; a MusicBrainz
+			// baseline genre is authoritative and always kept, so the cap never narrows
+			// what a pre-provider run would have applied.
+			if !isMB && nonMB >= maxEnrichGenres {
+				continue
+			}
+			seen[mk] = true
+			if !isMB {
+				nonMB++
+			}
+			if primary == "" {
+				primary = c.provider
+			}
+			names = append(names, name)
+		}
+	}
+	return names, primary
+}
+
+// gatherCover returns the first non-nil cover from a cover provider, in priority
+// order (injected first, then the Cover Art Archive). It passes the same identity
+// hints as gatherGenres. The built-in CAA keys only on the MBID, but an injected cover
+// provider (fanart.tv, a Discogs-style source) may key on the release title and artist,
+// so withholding them would leave such a provider unable to match. It is best-effort: a
+// provider error or a missing cover is skipped, never aborting the run.
+func (s *Service) gatherCover(ctx context.Context, st *runState, rg *mbReleaseGroup) *model.ArtImage {
+	req := Request{
+		Type: TargetReleaseGroup, Force: st.force,
+		Title: rg.Title, Artist: releaseGroupArtistName(rg), MBID: rg.ID,
+	}
+	for _, p := range s.providers {
+		if !p.Capabilities().Has(CapCover) {
+			continue
+		}
+		cand, err := s.callProvider(ctx, p, req)
+		if err != nil || cand == nil || cand.Cover == nil {
+			continue
+		}
+		return cand.Cover
+	}
+	return nil
+}
+
+// callProvider runs one candidate-provider lookup under a soft per-provider timeout so
+// a slow optional provider cannot stall the pass. It is best-effort: an error is
+// logged and returned for the caller to skip past. Only the identity spine (mb/aid)
+// aborts a run; every port provider is optional. Run cancellation still propagates,
+// because the next store write (or the runPhase loop's context check) observes it.
+func (s *Service) callProvider(ctx context.Context, p Provider, req Request) (*Candidate, error) {
+	cctx, cancel := context.WithTimeout(ctx, providerTimeout)
+	defer cancel()
+	cand, err := p.Enrich(cctx, req)
 	if err != nil {
-		s.log.Debug("cover art undecodable", "mbid", mbid, "err", err)
-		return nil
+		s.log.Warn("enrich provider failed; skipping", "provider", p.Name(), "target", req.Type, "err", err)
+		return nil, err
 	}
-	img.Format, img.Width, img.Height = format, w, h
-	return img
+	return cand, nil
+}
+
+// hasCapability reports whether any registered provider advertises c, so an
+// entity/recording phase that no provider can serve is skipped entirely.
+func (s *Service) hasCapability(c Capability) bool {
+	for _, p := range s.providers {
+		if p.Capabilities().Has(c) {
+			return true
+		}
+	}
+	return false
 }
 
 // Coverage reports how many entities have been enriched, for doctor.

@@ -59,12 +59,16 @@ type EnrichConfig struct {
 	UserAgent       string `json:"user_agent,omitempty"`        // overrides the built User-Agent
 	AcoustIDKey     string `json:"acoustid_key,omitempty"`      // enables the AcoustID fallback (needs fpcalc)
 	CoverArt        *bool  `json:"cover_art,omitempty"`         // fetch release-group covers (default on)
+	Lyrics          *bool  `json:"lyrics,omitempty"`            // fill lyrics from LRCLIB (default on)
+	CommunityGenres *bool  `json:"community_genres,omitempty"`  // fetch community genres from ListenBrainz (default on)
 	BlockPrivateIPs bool   `json:"block_private_ips,omitempty"` // SSRF guard for provider requests
 	TimeoutSeconds  int    `json:"timeout_seconds,omitempty"`   // per-request timeout (0 = default)
 
-	MusicBrainzBaseURL string `json:"musicbrainz_base_url,omitempty"`
-	CoverArtBaseURL    string `json:"cover_art_base_url,omitempty"`
-	AcoustIDBaseURL    string `json:"acoustid_base_url,omitempty"`
+	MusicBrainzBaseURL  string `json:"musicbrainz_base_url,omitempty"`
+	CoverArtBaseURL     string `json:"cover_art_base_url,omitempty"`
+	AcoustIDBaseURL     string `json:"acoustid_base_url,omitempty"`
+	ListenBrainzBaseURL string `json:"listenbrainz_base_url,omitempty"`
+	LRCLibBaseURL       string `json:"lrclib_base_url,omitempty"`
 }
 
 // Config is the resolved configuration.

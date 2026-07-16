@@ -16,6 +16,17 @@ import (
 // coverage report. Enrichment adds entity data and fills gaps; it never overwrites
 // a tagged or locked field.
 
+const (
+	// enrichProviderMusicBrainz is the provenance id for the identity spine: artist,
+	// release-group, and book identity are always resolved by MusicBrainz.
+	enrichProviderMusicBrainz = "musicbrainz"
+	// enrichEntityLyrics is the entity_enrichment.entity_type for a per-recording
+	// lyrics lookup marker, keyed by the track's item id. It is distinct from the three
+	// entity types so a no-match lyrics lookup is not re-queried every run, while the
+	// coverage report (which counts only the entity types) ignores it.
+	enrichEntityLyrics = "lyrics"
+)
+
 // enrichArtistBacksItems restricts artist enrichment to artists that actually back
 // a track (as artist or album artist) or credit a book, so ghost artists left by a
 // retag are not looked up.
@@ -138,15 +149,22 @@ func (s *Store) BooksNeedingEnrichment(ctx context.Context, force bool, afterID 
 }
 
 // CountEntitiesNeedingEnrichment totals the artists, release groups, and books the
-// pass would process, so the heartbeat can report a real ratio.
-func (s *Store) CountEntitiesNeedingEnrichment(ctx context.Context, force bool) (int, error) {
+// pass would process, plus (when includeLyrics is set) the tracks needing a lyrics
+// lookup, so the heartbeat can report a real ratio. includeLyrics must mirror whether
+// the run actually runs the lyrics phase, or the ratio drifts.
+func (s *Store) CountEntitiesNeedingEnrichment(ctx context.Context, force bool, includeLyrics bool) (int, error) {
 	const op = "store.CountEntitiesNeedingEnrichment"
-	var total int
-	for _, q := range []string{
+	queries := []string{
 		`SELECT COUNT(*) FROM artist a WHERE ` + enrichArtistBacksItems + ` AND ` + notEnriched(model.EnrichArtistType, "a.id", force),
 		`SELECT COUNT(*) FROM release_group rg WHERE ` + enrichRGBacksItems + ` AND ` + notEnriched(model.EnrichReleaseGroupType, "rg.id", force),
 		`SELECT COUNT(*) FROM book b WHERE b.mbid IS NOT NULL AND b.mbid <> '' AND ` + notEnriched(model.EnrichBookType, "b.item_id", force),
-	} {
+	}
+	if includeLyrics {
+		queries = append(queries, `SELECT COUNT(*) FROM playable_item pi JOIN track t ON t.item_id = pi.id
+			WHERE `+lyricsNeededPredicate+` AND `+notEnriched(enrichEntityLyrics, "pi.id", force))
+	}
+	var total int
+	for _, q := range queries {
 		var n int
 		if err := s.read.QueryRowContext(ctx, q).Scan(&n); err != nil {
 			return 0, waxerr.Wrap(waxerr.CodeIO, op, err)
@@ -164,7 +182,7 @@ func (s *Store) ApplyArtistEnrichment(ctx context.Context, in model.ArtistEnrich
 	const op = "store.ApplyArtistEnrichment"
 	return s.writeTx(ctx, func(tx *sql.Tx) error {
 		if !in.Matched {
-			return markEnrichedTx(ctx, tx, model.EnrichArtistType, in.ArtistID, false, "")
+			return markEnrichedTx(ctx, tx, model.EnrichArtistType, in.ArtistID, enrichProviderMusicBrainz, false, "")
 		}
 		if in.MBID != "" {
 			if _, err := tx.ExecContext(ctx,
@@ -178,7 +196,7 @@ func (s *Store) ApplyArtistEnrichment(ctx context.Context, in model.ArtistEnrich
 		if err := insertRelationsTx(ctx, tx, in.ArtistID, in.Relations); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
-		if err := markEnrichedTx(ctx, tx, model.EnrichArtistType, in.ArtistID, true, in.MBID); err != nil {
+		if err := markEnrichedTx(ctx, tx, model.EnrichArtistType, in.ArtistID, enrichProviderMusicBrainz, true, in.MBID); err != nil {
 			return err
 		}
 		return appendChange(ctx, tx, "artist", in.PID, model.OpUpdate)
@@ -250,7 +268,7 @@ func (s *Store) ApplyReleaseGroupEnrichment(ctx context.Context, in model.Releas
 	const op = "store.ApplyReleaseGroupEnrichment"
 	return s.writeTx(ctx, func(tx *sql.Tx) error {
 		if !in.Matched {
-			return markEnrichedTx(ctx, tx, model.EnrichReleaseGroupType, in.ReleaseGroupID, false, "")
+			return markEnrichedTx(ctx, tx, model.EnrichReleaseGroupType, in.ReleaseGroupID, enrichProviderMusicBrainz, false, "")
 		}
 		if err := setReleaseGroupMBIDTx(ctx, tx, s.log, in.ReleaseGroupID, in.MBID); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
@@ -261,7 +279,7 @@ func (s *Store) ApplyReleaseGroupEnrichment(ctx context.Context, in model.Releas
 			}
 		}
 		aff := newAffectedRollups()
-		if err := populateReleaseGroupGenresTx(ctx, tx, in.ReleaseGroupID, in.Genres, aff); err != nil {
+		if err := populateReleaseGroupGenresTx(ctx, tx, in.ReleaseGroupID, in.Genres, in.GenreProvider, aff); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		if in.Art != nil {
@@ -274,7 +292,7 @@ func (s *Store) ApplyReleaseGroupEnrichment(ctx context.Context, in model.Releas
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 		}
-		if err := markEnrichedTx(ctx, tx, model.EnrichReleaseGroupType, in.ReleaseGroupID, true, in.MBID); err != nil {
+		if err := markEnrichedTx(ctx, tx, model.EnrichReleaseGroupType, in.ReleaseGroupID, enrichProviderMusicBrainz, true, in.MBID); err != nil {
 			return err
 		}
 		return appendChange(ctx, tx, "release_group", in.PID, model.OpUpdate)
@@ -304,9 +322,9 @@ func setReleaseGroupMBIDTx(ctx context.Context, tx *sql.Tx, log logger, rgID int
 
 // populateReleaseGroupGenresTx attaches the release group's genres to member items
 // that carry no genre and whose genre field is not locked, recording enrichment
-// provenance and collecting the touched genres for rollup maintenance. It never
-// overwrites a tagged or user genre.
-func populateReleaseGroupGenresTx(ctx context.Context, tx *sql.Tx, rgID int64, genres []string, aff *affectedRollups) error {
+// provenance (with the attributing provider) and collecting the touched genres for
+// rollup maintenance. It never overwrites a tagged or user genre.
+func populateReleaseGroupGenresTx(ctx context.Context, tx *sql.Tx, rgID int64, genres []string, provider string, aff *affectedRollups) error {
 	if len(genres) == 0 {
 		return nil
 	}
@@ -374,13 +392,15 @@ func populateReleaseGroupGenresTx(ctx context.Context, tx *sql.Tx, rgID int64, g
 			"UPDATE track SET genre = ? WHERE item_id = ? AND (genre IS NULL OR genre = '')", genreDisplay, it.id); err != nil {
 			return err
 		}
-		// Record that genres came from enrichment so future organize/enrichment
-		// respects them. The value stays empty (genres are multi-valued via
-		// item_genre); the row exists to carry the source and enable a lock.
-		if _, err := tx.ExecContext(ctx, `INSERT INTO field_provenance(item_id, field, source, locked, updated_at)
-			VALUES (?, 'genre', 'enrichment', 0, ?)
-			ON CONFLICT(item_id, field) DO UPDATE SET source = 'enrichment', updated_at = excluded.updated_at`,
-			it.id, now); err != nil {
+		// Record that genres came from enrichment, and which provider supplied the
+		// display-primary genre, so future organize/enrichment respects them and a
+		// consumer can attribute the value. The value stays empty (genres are
+		// multi-valued via item_genre); the row exists to carry the source, provider,
+		// and lock. provider is stored NULL when untracked so it stays sparse.
+		if _, err := tx.ExecContext(ctx, `INSERT INTO field_provenance(item_id, field, source, provider, locked, updated_at)
+			VALUES (?, 'genre', 'enrichment', ?, 0, ?)
+			ON CONFLICT(item_id, field) DO UPDATE SET source = 'enrichment', provider = excluded.provider, updated_at = excluded.updated_at`,
+			it.id, nullStr(provider), now); err != nil {
 			return err
 		}
 		if err := appendChange(ctx, tx, "item", it.pid, model.OpUpdate); err != nil {
@@ -397,7 +417,7 @@ func (s *Store) ApplyBookEnrichment(ctx context.Context, in model.BookEnrichment
 	const op = "store.ApplyBookEnrichment"
 	return s.writeTx(ctx, func(tx *sql.Tx) error {
 		if !in.Matched {
-			return markEnrichedTx(ctx, tx, model.EnrichBookType, in.BookItemID, false, "")
+			return markEnrichedTx(ctx, tx, model.EnrichBookType, in.BookItemID, enrichProviderMusicBrainz, false, "")
 		}
 		// Fill-when-empty for each field.
 		for _, f := range []struct {
@@ -414,20 +434,95 @@ func (s *Store) ApplyBookEnrichment(ctx context.Context, in model.BookEnrichment
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 		}
-		if err := markEnrichedTx(ctx, tx, model.EnrichBookType, in.BookItemID, true, in.MBID); err != nil {
+		if err := markEnrichedTx(ctx, tx, model.EnrichBookType, in.BookItemID, enrichProviderMusicBrainz, true, in.MBID); err != nil {
 			return err
 		}
 		return appendChange(ctx, tx, "item", in.PID, model.OpUpdate)
 	})
 }
 
-// markEnrichedTx upserts the sparse enrichment marker for an entity.
-func markEnrichedTx(ctx context.Context, tx *sql.Tx, entityType string, entityID int64, matched bool, mbid string) error {
+// lyricsNeededPredicate selects tracks eligible for a lyrics lookup: a present track
+// that carries both a title and an artist (a lyrics provider keys on both) and has no
+// lyrics row yet. Requiring a non-empty artist keeps an untagged track out of the set,
+// so a lookup that would only ever miss for lack of local metadata never writes a
+// negative marker that would then wrongly skip the track once it is retagged. It reads
+// pi (playable_item) and t (track), so a caller must join both under those aliases.
+const lyricsNeededPredicate = `pi.kind = 'track' AND pi.state = 'present' AND pi.title <> ''
+	AND COALESCE(t.artist,'') <> ''
+	AND NOT EXISTS (SELECT 1 FROM lyrics ly WHERE ly.item_id = pi.id)`
+
+// ItemsNeedingLyrics returns the next keyset page of present tracks that have no
+// lyrics row yet (and, unless force, have not been looked up), each carrying the
+// title, artist, album, and duration a lyrics provider keys on. It mirrors the
+// entity keyset queries: a forced re-run rewrites the marker rather than removing the
+// track from the set, so the walk still advances and terminates.
+func (s *Store) ItemsNeedingLyrics(ctx context.Context, force bool, afterID int64, limit int) ([]model.EnrichTarget, error) {
+	const op = "store.ItemsNeedingLyrics"
+	stmt := `SELECT pi.id, pi.pid, pi.title, COALESCE(t.artist,''), COALESCE(t.album,''), COALESCE(f.duration_ms,0)
+		FROM playable_item pi
+		JOIN track t ON t.item_id = pi.id
+		LEFT JOIN item_file itf ON itf.item_id = pi.id AND itf.role = 'primary'
+		LEFT JOIN file f ON f.id = itf.file_id
+		WHERE pi.id > ? AND ` + lyricsNeededPredicate + `
+		  AND ` + notEnriched(enrichEntityLyrics, "pi.id", force) + `
+		ORDER BY pi.id LIMIT ?`
+	rows, err := s.read.QueryContext(ctx, stmt, afterID, limitOr(limit))
+	if err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	defer rows.Close()
+	var out []model.EnrichTarget
+	for rows.Next() {
+		t := model.EnrichTarget{Type: enrichEntityLyrics}
+		var pid string
+		var durMS int64
+		if err := rows.Scan(&t.ID, &pid, &t.Name, &t.ArtistName, &t.Album, &durMS); err != nil {
+			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		t.PID = model.PID(pid)
+		t.DurationSec = int(durMS / 1000)
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// ApplyLyricsEnrichment attaches a track's resolved lyrics and records the
+// per-recording marker. Lyrics are written only when the item still has none
+// (fill-when-empty, re-checked inside the transaction so a sidecar added since the
+// iteration query is never clobbered); a no-match writes only the marker so the track
+// is not re-queried each run. A match emits an item change delta.
+func (s *Store) ApplyLyricsEnrichment(ctx context.Context, in model.LyricsEnrichment) error {
+	const op = "store.ApplyLyricsEnrichment"
+	return s.writeTx(ctx, func(tx *sql.Tx) error {
+		if in.Matched && in.Lyrics.HasContent() {
+			var exists int
+			if err := tx.QueryRowContext(ctx,
+				"SELECT COUNT(*) FROM lyrics WHERE item_id = ?", in.ItemID).Scan(&exists); err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+			if exists == 0 {
+				if _, err := putLyricsTx(ctx, tx, in.ItemID, in.Lyrics); err != nil {
+					return waxerr.Wrap(waxerr.CodeIO, op, err)
+				}
+				if err := appendChange(ctx, tx, "item", in.PID, model.OpUpdate); err != nil {
+					return err
+				}
+			}
+		}
+		return markEnrichedTx(ctx, tx, enrichEntityLyrics, in.ItemID, in.Provider, in.Matched, "")
+	})
+}
+
+// markEnrichedTx upserts the sparse enrichment marker for an entity, recording which
+// provider resolved it. The identity spine (artist/release-group/book) passes
+// "musicbrainz"; a per-recording lyrics marker passes the lyrics provider (or "" on a
+// no-match). An empty provider stores as "" so the NOT NULL column is satisfied.
+func markEnrichedTx(ctx context.Context, tx *sql.Tx, entityType string, entityID int64, provider string, matched bool, mbid string) error {
 	_, err := tx.ExecContext(ctx, `INSERT INTO entity_enrichment(entity_type, entity_id, provider, matched, mbid, enriched_at)
 		VALUES (?,?,?,?,?,?)
 		ON CONFLICT(entity_type, entity_id) DO UPDATE SET
 		  provider = excluded.provider, matched = excluded.matched, mbid = excluded.mbid, enriched_at = excluded.enriched_at`,
-		entityType, entityID, "musicbrainz", boolInt(matched), nullStr(strings.TrimSpace(mbid)), nowNS())
+		entityType, entityID, provider, boolInt(matched), nullStr(strings.TrimSpace(mbid)), nowNS())
 	return err
 }
 
@@ -459,8 +554,12 @@ func (s *Store) EnrichmentCachePut(ctx context.Context, key string, payload []by
 func (s *Store) EnrichmentCoverage(ctx context.Context) (model.EnrichmentCoverage, error) {
 	const op = "store.EnrichmentCoverage"
 	var cov model.EnrichmentCoverage
+	// Only the three entity types are coverage-reported; the per-recording lyrics
+	// marker shares the table but is a fill-when-empty side channel, not entity
+	// coverage, so it is excluded from the counts.
 	rows, err := s.read.QueryContext(ctx,
-		"SELECT entity_type, COUNT(*), COALESCE(SUM(matched),0) FROM entity_enrichment GROUP BY entity_type")
+		`SELECT entity_type, COUNT(*), COALESCE(SUM(matched),0) FROM entity_enrichment
+		 WHERE entity_type IN ('artist','release_group','book') GROUP BY entity_type`)
 	if err != nil {
 		return cov, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
