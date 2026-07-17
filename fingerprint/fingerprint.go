@@ -276,6 +276,19 @@ func IndexTerms(sub []uint32, n int) []int64 {
 // DefaultIndexTerms is the number of min-hash terms stored per file.
 const DefaultIndexTerms = 64
 
+// TermsForAlgo returns the DefaultIndexTerms min-hash terms for a fingerprint under
+// the given algorithm: the Chromaprint backend hashes its wider 32-bit sub-values,
+// the pure-Go backend bit-packs its 15-bit ones. It is the single source of truth for
+// the algo->terms dispatch, called both by the analyze write path (via indexTerms) and
+// by the cross-catalog resolve probe, so the write side and the probe side can never
+// derive terms differently for the same fingerprint.
+func TermsForAlgo(algo int, sub []uint32) []int64 {
+	if algo == ChromaprintAlgoVersion {
+		return ChromaprintTerms(sub, DefaultIndexTerms)
+	}
+	return IndexTerms(sub, DefaultIndexTerms)
+}
+
 // DurationBucket maps a track duration to its pruning bucket; only files in the
 // same bucket are compared, so grouping never scans the whole catalog.
 func DurationBucket(durationMS int64) int64 {

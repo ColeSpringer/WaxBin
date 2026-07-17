@@ -30,3 +30,8 @@ CREATE INDEX track_album           ON track(album);
 CREATE INDEX track_artist_id       ON track(artist_id);
 CREATE INDEX track_album_artist_id ON track(album_artist_id);
 CREATE INDEX track_album_id        ON track(album_id);
+-- Recording-MBID lookup for cross-catalog ResolveRef (the strong-id rung). Partial
+-- + COLLATE NOCASE keeps the index tiny (most tracks have no recording id) and
+-- matches the case-insensitive lookup, since MBID case is the only cross-catalog
+-- variance. Without it every strong-id resolve full-scans track.
+CREATE INDEX track_mbid ON track(mbid COLLATE NOCASE) WHERE mbid IS NOT NULL;

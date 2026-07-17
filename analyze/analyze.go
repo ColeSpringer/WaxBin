@@ -278,13 +278,11 @@ func (a *Analyzer) fingerprintFile(ctx context.Context, f *model.File) ([]uint32
 }
 
 // indexTerms builds the inverted-index min-hash terms for the chosen fingerprint
-// backend (Chromaprint hashes its wider sub-values; the pure-Go fingerprint packs
-// its 15-bit ones).
+// backend. It defers to fingerprint.TermsForAlgo, which owns the algo->terms dispatch,
+// so the analyze write path and the cross-catalog resolve probe always derive the same
+// terms for a given fingerprint.
 func indexTerms(algo int, sub []uint32) []int64 {
-	if algo == fingerprint.ChromaprintAlgoVersion {
-		return fingerprint.ChromaprintTerms(sub, fingerprint.DefaultIndexTerms)
-	}
-	return fingerprint.IndexTerms(sub, fingerprint.DefaultIndexTerms)
+	return fingerprint.TermsForAlgo(algo, sub)
 }
 
 // measure computes whole-file loudness and a waveform in one streamed decode: the

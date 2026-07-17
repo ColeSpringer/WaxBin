@@ -1489,6 +1489,16 @@ type AcquiredResult struct {
 	EpisodePID model.PID   // episode: the ingested episode
 	FilePID    model.PID   // episode: its attached file, when a local file was provided
 	Path       string      // episode: the placed file path, when attached
+
+	// AlreadyPresent reports that the acquired file's audio essence is already in the
+	// catalog, resolved independent of DupPolicy (so a DupAllow import of a genuine
+	// duplicate still reports it). AlreadyPresentPID names the existing local item when
+	// one resolves by essence. They let the host tell the user "already in your library"
+	// on a receive, e.g. "3 of 12 already present". Set for the track/book path only;
+	// the host can pre-check an episode via ResolveRef by essence. The action's Outcome
+	// separately conveys whether the file was skipped (DupSkip) or imported (DupAllow).
+	AlreadyPresent    bool
+	AlreadyPresentPID model.PID
 }
 
 // ImportAcquired routes an acquired or manual file by kind. Tracks and books go
@@ -1535,7 +1545,18 @@ func (l *Library) importAcquiredMedia(ctx context.Context, file AcquiredFile, ki
 	if err != nil {
 		return nil, err
 	}
-	return &AcquiredResult{Kind: kind, Plan: plan}, nil
+	res := &AcquiredResult{Kind: kind, Plan: plan}
+	// Report already-present independent of DupPolicy. The plan sets Action.Essence before
+	// the dup gate, so it is populated under any policy, and resolving by essence here
+	// surfaces the existing item even for a DupAllow import that will go ahead anyway. It
+	// costs one indexed essence lookup; the len>0 and non-empty guard covers a quarantine
+	// or zero-action plan. A resolve error is non-fatal, and the import plan still stands.
+	if len(plan.Actions) > 0 && plan.Actions[0].Essence != "" {
+		if item, _, err := l.ResolveRef(ctx, model.PortableRef{Essence: plan.Actions[0].Essence}); err == nil && item != nil {
+			res.AlreadyPresent, res.AlreadyPresentPID = true, item.PID
+		}
+	}
+	return res, nil
 }
 
 // importAcquiredEpisode ingests an acquired episode into the internal podcast

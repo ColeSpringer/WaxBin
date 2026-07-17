@@ -45,6 +45,16 @@ CREATE TABLE book (
 );
 CREATE INDEX book_series ON book(series_id);
 CREATE INDEX book_author ON book(author_id);
+-- Strong-id lookups for cross-catalog ResolveRef (the book strong-id rung); without
+-- them a book strong-id resolve full-scans book. mbid is nullable, so a partial index
+-- works: `mbid = ?` provably implies the `mbid IS NOT NULL` predicate, so the planner
+-- uses it. asin/isbn are NOT NULL DEFAULT '', so a partial `... <> ''` index is not
+-- usable, because the planner cannot prove `asin = ?` implies `asin <> ''` (the bound
+-- value could be ''), and the lookup would fall back to a full scan. They are therefore
+-- full indexes; the empty-string rows sort together and an equality seek skips past them.
+CREATE INDEX book_mbid ON book(mbid COLLATE NOCASE) WHERE mbid IS NOT NULL;
+CREATE INDEX book_asin ON book(asin COLLATE NOCASE);
+CREATE INDEX book_isbn ON book(isbn COLLATE NOCASE);
 
 -- Navigation chapters within a book or episode. start_ms/end_ms are offsets
 -- within file_id (a single-file book has all chapters on one file; a
