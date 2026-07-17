@@ -93,6 +93,7 @@ func (l *Library) scanWork(libs []*model.Library, req ScanRequest, out *ScanResu
 			r, err := l.scanner.Scan(ctx, scan.Request{
 				Library: lib, SubPath: req.SubPath, Force: req.Force,
 				AdoptStampedPIDs: req.AdoptStampedPIDs, ForceReconcile: req.ForceReconcile,
+				IgnoreLocks: req.IgnoreLocks,
 			}, func(p float64, msg string) error { return h.Heartbeat(ctx, p, msg) })
 			if err != nil {
 				return err

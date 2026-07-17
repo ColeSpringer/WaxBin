@@ -64,6 +64,43 @@ func assertConsistent(t *testing.T, st *sqlite.Store) {
 	}
 }
 
+// TestVirtualTrackForcePreservesLockedTitle: a curated edit on a CUE-carved virtual
+// track survives a content-changed forced rescan, and --ignore-locks re-derives it.
+func TestVirtualTrackForcePreservesLockedTitle(t *testing.T) {
+	st, lib := openTestStore(t)
+	ctx := context.Background()
+	windows := [][2]int64{{0, 300}, {300, 600}}
+	if _, err := st.PutScannedVirtualTracks(ctx,
+		vtrackInput(lib.ID, "/lib/album.flac", "sha256:VE", "sha256:VC1", 8000, windows)); err != nil {
+		t.Fatalf("put vtracks: %v", err)
+	}
+	pid := vtItems(t, st)[0].PID // Track 1
+
+	if err := st.EditItemFields(ctx, pid, map[string]string{"title": "Curated VT"}, model.SourceUser, true, false); err != nil {
+		t.Fatalf("edit vtrack: %v", err)
+	}
+
+	// Forced rescan (fresh content) with lock preservation: the locked title survives.
+	preserve := vtrackInput(lib.ID, "/lib/album.flac", "sha256:VE", "sha256:VC2", 8000, windows)
+	preserve.PreserveLocks = true
+	if _, err := st.PutScannedVirtualTracks(ctx, preserve); err != nil {
+		t.Fatalf("preserve rescan: %v", err)
+	}
+	if v, _ := st.ItemByPID(ctx, pid); v.Title != "Curated VT" {
+		t.Fatalf("vtrack title after rescan = %q, want Curated VT", v.Title)
+	}
+
+	// --ignore-locks (PreserveLocks=false) re-derives the .cue title.
+	ignore := vtrackInput(lib.ID, "/lib/album.flac", "sha256:VE", "sha256:VC3", 8000, windows)
+	ignore.PreserveLocks = false
+	if _, err := st.PutScannedVirtualTracks(ctx, ignore); err != nil {
+		t.Fatalf("ignore rescan: %v", err)
+	}
+	if v, _ := st.ItemByPID(ctx, pid); v.Title != "Track 1" {
+		t.Fatalf("vtrack title after ignore-locks = %q, want Track 1", v.Title)
+	}
+}
+
 // TestVirtualTracksCreateAndOffsets: a single-file rip becomes N ordinary track
 // items sharing one file, each with its offset window driving its duration, and the
 // rollups/stats sum the windows rather than the whole file once per track.

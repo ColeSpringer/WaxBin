@@ -124,6 +124,74 @@ func (l *Library) proxyHandlers() map[string]proxy.Handler {
 			}
 			return proxy.EditFieldsResult{}, nil
 		},
+		proxy.MethodEditManyFields: func(ctx context.Context, raw json.RawMessage) (any, error) {
+			p, err := decodeParams[proxy.EditManyFieldsParams](raw)
+			if err != nil {
+				return nil, err
+			}
+			pids := make([]model.PID, len(p.ItemPIDs))
+			for i, s := range p.ItemPIDs {
+				pids[i] = model.PID(s)
+			}
+			res, err := l.EditManyFields(ctx, pids, p.Edits,
+				EditOptions{WriteBack: p.WriteBack, Lock: p.Lock, Force: p.Force, SkipLocked: p.SkipLocked})
+			if err != nil {
+				return nil, err
+			}
+			out := proxy.EditManyFieldsResult{Edited: pidStrings(res.Edited), Skipped: pidStrings(res.Skipped)}
+			if len(res.WriteBackErrors) > 0 {
+				out.WriteBackFailures = make(map[string][]proxy.WriteBackFailure, len(res.WriteBackErrors))
+				for pid, wbe := range res.WriteBackErrors {
+					out.WriteBackFailures[string(pid)] = toProxyFailures(wbe.Failures)
+				}
+			}
+			return out, nil
+		},
+		proxy.MethodSetCredits: func(ctx context.Context, raw json.RawMessage) (any, error) {
+			p, err := decodeParams[proxy.SetCreditsParams](raw)
+			if err != nil {
+				return nil, err
+			}
+			stored, editErr := l.SetCredits(ctx, model.PID(p.ItemPID), model.ContributorRole(p.Role), p.Names,
+				CreditEditOptions{WriteBack: p.WriteBack, Lock: p.Lock, Force: p.Force})
+			// A write-back failure is a result, not a transport error (the catalog edit stands).
+			var wbErr *WriteBackError
+			if errors.As(editErr, &wbErr) {
+				return proxy.SetCreditsResult{Stored: stored, WriteBackFailures: toProxyFailures(wbErr.Failures)}, nil
+			}
+			if editErr != nil {
+				return nil, editErr
+			}
+			return proxy.SetCreditsResult{Stored: stored}, nil
+		},
+		proxy.MethodSetLyrics: func(ctx context.Context, raw json.RawMessage) (any, error) {
+			p, err := decodeParams[proxy.SetLyricsParams](raw)
+			if err != nil {
+				return nil, err
+			}
+			return nil, l.SetLyrics(ctx, model.PID(p.ItemPID), p.Lyrics, p.Lock, p.Force)
+		},
+		proxy.MethodSetChapters: func(ctx context.Context, raw json.RawMessage) (any, error) {
+			p, err := decodeParams[proxy.SetChaptersParams](raw)
+			if err != nil {
+				return nil, err
+			}
+			return nil, l.SetChapters(ctx, model.PID(p.ItemPID), p.Chapters, p.Lock, p.Force)
+		},
+		proxy.MethodSetItemArt: func(ctx context.Context, raw json.RawMessage) (any, error) {
+			p, err := decodeParams[proxy.SetItemArtParams](raw)
+			if err != nil {
+				return nil, err
+			}
+			return nil, l.SetItemArt(ctx, model.PID(p.ItemPID), p.Data, p.Lock, p.Force)
+		},
+		proxy.MethodSetEntityArt: func(ctx context.Context, raw json.RawMessage) (any, error) {
+			p, err := decodeParams[proxy.SetEntityArtParams](raw)
+			if err != nil {
+				return nil, err
+			}
+			return nil, l.SetEntityArt(ctx, model.ArtEntity(p.EntityType), model.PID(p.EntityPID), p.Role, p.Data)
+		},
 		proxy.MethodLock: func(ctx context.Context, raw json.RawMessage) (any, error) {
 			p, err := decodeParams[proxy.FieldsParams](raw)
 			if err != nil {
@@ -236,6 +304,7 @@ func (l *Library) proxyHandlers() map[string]proxy.Handler {
 			pid, err := l.StartScan(ctx, ScanRequest{
 				LibraryPID: model.PID(p.LibraryPID), SubPath: p.SubPath, Force: p.Force,
 				AdoptStampedPIDs: p.AdoptStampedPIDs, ForceReconcile: p.ForceReconcile,
+				IgnoreLocks: p.IgnoreLocks,
 			})
 			if err != nil {
 				return nil, err
@@ -300,6 +369,18 @@ func toProxyFailures(failures []WriteBackFailure) []proxy.WriteBackFailure {
 	out := make([]proxy.WriteBackFailure, len(failures))
 	for i, f := range failures {
 		out[i] = proxy.WriteBackFailure{FilePID: string(f.FilePID), Path: f.Path, Reason: f.Reason}
+	}
+	return out
+}
+
+// pidStrings converts a PID slice to a plain string slice for a wire payload.
+func pidStrings(pids []model.PID) []string {
+	if len(pids) == 0 {
+		return nil
+	}
+	out := make([]string, len(pids))
+	for i, p := range pids {
+		out[i] = string(p)
 	}
 	return out
 }

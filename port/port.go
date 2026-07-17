@@ -217,6 +217,10 @@ func Restore(ctx context.Context, backupPath, targetPath string, force bool) err
 		_ = os.Remove(tmp)
 		return waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
+	// The restored catalog carries the secret table, so restrict it to owner-only.
+	// This is best-effort: a filesystem without Unix permissions is not a restore
+	// failure, and the next read-write open re-applies it anyway.
+	_ = os.Chmod(targetPath, 0o600)
 	return nil
 }
 

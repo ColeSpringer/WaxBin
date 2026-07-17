@@ -39,6 +39,11 @@ type PutScannedTrackInput struct {
 	// Diagnostics are this file's scan-origin observations. The store replaces the
 	// scan's whole set, so a file that comes back clean clears its own stale rows.
 	Diagnostics []FileDiagnostic
+	// PreserveLocks keeps a field the user has locked from being re-derived from the
+	// file's tags: the store overlays the item's current locked-field values onto the
+	// scanned track before writing, so a `scan --force` cannot clobber a curated edit.
+	// The scanner sets it on every scan except an explicit `--ignore-locks` run.
+	PreserveLocks bool
 }
 
 // TagWaxbinItemPID is the custom tag key that carries a backing item's stable WaxBin
@@ -89,6 +94,9 @@ type PutScannedBookInput struct {
 	// PutScannedTrackInput.Diagnostics). They are per-FILE, so each part carries its
 	// own rather than the book carrying a merged set.
 	Diagnostics []FileDiagnostic
+	// PreserveLocks keeps a user-locked book field from being re-derived from tags on
+	// a forced rescan (see PutScannedTrackInput.PreserveLocks).
+	PreserveLocks bool
 }
 
 // PutScannedVirtualTracksInput carries a single-file album rip and the virtual
@@ -117,6 +125,9 @@ type PutScannedVirtualTracksInput struct {
 	// Diagnostics are this file's scan-origin observations, replacing the file's whole
 	// scan-origin set.
 	Diagnostics []FileDiagnostic
+	// PreserveLocks keeps a user-locked field on a virtual track from being re-derived
+	// from the .cue on a forced rescan (see PutScannedTrackInput.PreserveLocks).
+	PreserveLocks bool
 }
 
 // VirtualTrack is one cue TRACK of a single-file rip: a full track item plus the

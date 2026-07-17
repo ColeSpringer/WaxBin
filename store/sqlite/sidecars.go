@@ -60,14 +60,14 @@ func (s *Store) UpdateItemSidecars(ctx context.Context, in model.SidecarUpdate) 
 					ly = &merged
 				}
 			}
-			c, err := putLyricsTx(ctx, tx, itemID, ly)
+			c, err := putLyricsTx(ctx, tx, itemID, ly, true)
 			if err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 			changed = changed || c
 		}
 		if in.CoverArt != nil {
-			c, err := attachArtTxChanged(ctx, tx, itemID, in.CoverArt)
+			c, err := attachArtRespectingLockTx(ctx, tx, itemID, in.CoverArt, true)
 			if err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}

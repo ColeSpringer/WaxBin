@@ -32,6 +32,15 @@ type OpenOptions struct {
 	IPCSocket string // optional IPC socket path advertised in the lockfile
 	Logger    *slog.Logger
 
+	// SecretCipher, when set, seals secret-table values at rest. When nil the
+	// store keeps secrets in plaintext (standalone CLI). Like Logger, it is a live
+	// injected object held on the Store and preserved across Reopen.
+	SecretCipher model.SecretCipher
+	// SecretKeyID labels the key/epoch a sealed value was written under, so a
+	// rotation can be told apart from the prior generation. Defaults to "1" when a
+	// cipher is set without one; ignored when no cipher is configured.
+	SecretKeyID string
+
 	BusyTimeoutMS int
 	CacheSizeKB   int
 	MmapSizeBytes int64
@@ -51,6 +60,9 @@ type Store struct {
 	readOnly bool
 	owner    string
 	log      *slog.Logger
+
+	cipher      model.SecretCipher // seals/opens secret-table values (nil = plaintext)
+	cipherKeyID string             // key/epoch label stamped into a sealed value
 
 	thumbMem *thumbCache // in-process cache of generated thumbnails (see art.go)
 
@@ -86,8 +98,19 @@ func Open(ctx context.Context, opt OpenOptions) (*Store, error) {
 		log = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
 
+	keyID := opt.SecretKeyID
+	if opt.SecretCipher != nil {
+		if keyID == "" {
+			keyID = defaultSecretKeyID
+		}
+		if err := validateSecretKeyID(keyID); err != nil {
+			return nil, err
+		}
+	}
+
 	s := &Store{
 		path: opt.Path, opt: opt, readOnly: opt.ReadOnly, owner: opt.Owner, log: log,
+		cipher: opt.SecretCipher, cipherKeyID: keyID,
 		thumbMem: newThumbCache(thumbCacheMax),
 	}
 
@@ -155,6 +178,11 @@ func Open(ctx context.Context, opt OpenOptions) (*Store, error) {
 		_ = s.Close()
 		return nil, err
 	}
+
+	// Restrict the secret-bearing files to owner-only. In plaintext mode this is
+	// the only at-rest protection a stored password has; in ciphered mode it is
+	// defense-in-depth. Best-effort: a filesystem without Unix perms just warns.
+	s.restrictSecretFiles()
 
 	return s, nil
 }

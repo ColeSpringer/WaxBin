@@ -25,7 +25,7 @@ func (s *Store) UnlockField(ctx context.Context, itemPID model.PID, field string
 
 func (s *Store) setLock(ctx context.Context, itemPID model.PID, field string, locked bool) error {
 	const op = "store.LockField"
-	if !model.IsMetadataField(field) {
+	if !model.IsCuratableField(field) {
 		return waxerr.New(waxerr.CodeInvalid, op, "not a lockable metadata field: "+field)
 	}
 	return s.writeTx(ctx, func(tx *sql.Tx) error {
@@ -34,10 +34,11 @@ func (s *Store) setLock(ctx context.Context, itemPID model.PID, field string, lo
 			return err
 		}
 		// Which fields are lockable depends on the kind. MetadataFields is the union of
-		// the track and book vocabularies, so guard against locking a field that does not
-		// apply to this item's kind, such as author on a track. That would leave an inert
-		// junk provenance row, the very thing the whitelist exists to prevent.
-		if allowed := editableFieldsForKind(kind); allowed == nil || !allowed[field] {
+		// the track and book vocabularies, and credit.<role> is kind-specific too, so
+		// guard against locking a field that does not apply to this item's kind (author
+		// on a track, credit.narrator on a track). That would leave an inert junk
+		// provenance row, the very thing the whitelist exists to prevent.
+		if !curatableFieldForKind(kind, field) {
 			return waxerr.New(waxerr.CodeInvalid, op, "field "+field+" is not valid for a "+kind+" item")
 		}
 		// Idempotent: if the field is already in the desired lock state, do nothing

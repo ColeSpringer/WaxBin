@@ -46,12 +46,41 @@ var fieldTagKeys = map[string]string{
 	"year":         "DATE",
 	"track_no":     "TRACKNUMBER",
 	"disc_no":      "DISCNUMBER",
+	"isrc":         "ISRC",
+	"mbid":         "MUSICBRAINZ_TRACKID", // recording MBID (track write-back only)
+	"compilation":  "COMPILATION",
 }
 
 // TagKeyForField returns the canonical WaxLabel tag key an on-disk write uses for a
 // catalog field name, and whether the field has one.
 func TagKeyForField(field string) (string, bool) {
 	k, ok := fieldTagKeys[field]
+	return k, ok
+}
+
+// roleTagKeys maps a contributor role to its canonical WaxLabel tag key for on-disk
+// write-back. The music roles (v1.2.0 keys) drive track credit write-back; the book
+// roles are present for completeness but audiobook credit write-back is not wired
+// through the writer yet (a book's tags follow their own conventions).
+var roleTagKeys = map[model.ContributorRole]string{
+	model.RoleComposer:  string(tag.Composer),
+	model.RoleLyricist:  string(tag.Lyricist),
+	model.RoleConductor: string(tag.Conductor),
+	model.RolePerformer: string(tag.Performer),
+	model.RoleRemixer:   string(tag.Remixer),
+	model.RoleProducer:  string(tag.Producer),
+	model.RoleEngineer:  string(tag.Engineer),
+	model.RoleMixer:     string(tag.Mixer),
+	model.RoleArranger:  string(tag.Arranger),
+	model.RoleWriter:    string(tag.Writer),
+	model.RoleDJMixer:   string(tag.DJMixer),
+	model.RoleNarrator:  string(tag.Narrator),
+}
+
+// RoleTagKey returns the canonical WaxLabel tag key an on-disk write uses for a
+// contributor role, and whether the role has one wired for write-back.
+func RoleTagKey(role model.ContributorRole) (string, bool) {
+	k, ok := roleTagKeys[role]
 	return k, ok
 }
 

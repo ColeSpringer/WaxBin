@@ -99,6 +99,15 @@ func (s *Store) PutScannedVirtualTracks(ctx context.Context, in model.PutScanned
 		}
 
 		for _, vt := range in.Tracks {
+			// Overlay any user-locked fields onto the scanned virtual track before the
+			// change comparison, so a forced rescan neither reverts a curated edit nor
+			// counts a locked-field .cue change as a reason to rewrite the track. vt is a
+			// loop-local copy, so mutating it is safe.
+			if in.PreserveLocks {
+				if err := preserveLockedTrackFieldsTx(ctx, tx, &vt.Track, &vt.Item); err != nil {
+					return waxerr.Wrap(waxerr.CodeIO, op, err)
+				}
+			}
 			ex, had := existing[vt.Item.IdentityKey]
 			metaChanged := !had || virtualTrackMetaDiffers(ex, vt)
 			offsetChanged := !had || ex.startFrames != vt.StartFrames || ex.endFrames != vt.EndFrames

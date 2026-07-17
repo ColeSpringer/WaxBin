@@ -2,10 +2,13 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"text/tabwriter"
 
+	"github.com/colespringer/waxbin/meta"
 	"github.com/colespringer/waxbin/model"
+	"github.com/colespringer/waxbin/waxerr"
 	"github.com/spf13/cobra"
 )
 
@@ -96,7 +99,7 @@ func newBookCmd(g *globals) *cobra.Command {
 }
 
 func newChaptersCmd(g *globals) *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "chapters <pid>",
 		Short: "List an audiobook's chapters with book-timeline offsets",
 		Args:  cobra.ExactArgs(1),
@@ -122,6 +125,62 @@ func newChaptersCmd(g *globals) *cobra.Command {
 			return nil
 		},
 	}
+	cmd.AddCommand(newChaptersSetCmd(g))
+	return cmd
+}
+
+func newChaptersSetCmd(g *globals) *cobra.Command {
+	var (
+		filePath string
+		clear    bool
+		noLock   bool
+		force    bool
+	)
+	cmd := &cobra.Command{
+		Use:   "set <pid> --file <cue>",
+		Short: "Set (or clear) a book's user chapters from a .cue file",
+		Long: "Sets user-curated chapters on a book from a .cue file (file-relative offsets), " +
+			"which win on read over the scanned chapters and survive a `scan --force`. --clear " +
+			"removes the user chapters, falling back to the scanned ones. Locks the chapters " +
+			"field by default.",
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			var chapters []model.Chapter
+			if !clear {
+				if filePath == "" {
+					return waxerr.New(waxerr.CodeInvalid, "chapters set", "provide --file or --clear")
+				}
+				b, err := os.ReadFile(filePath)
+				if err != nil {
+					return waxerr.Wrapf(waxerr.CodeIO, "chapters set", err, "reading %s", filePath)
+				}
+				chapters = meta.ParseCue(string(b))
+				if len(chapters) == 0 {
+					return waxerr.New(waxerr.CodeInvalid, "chapters set", "no chapters parsed from "+filePath)
+				}
+			}
+			m, _, err := g.openMutator(cmd)
+			if err != nil {
+				return err
+			}
+			defer m.Close()
+			if err := m.SetChapters(ctx(cmd), model.PID(args[0]), chapters, !noLock, force); err != nil {
+				return err
+			}
+			if clear {
+				fmt.Fprintf(out(cmd), "cleared user chapters for %s\n", args[0])
+			} else {
+				fmt.Fprintf(out(cmd), "set %d user chapter(s) for %s\n", len(chapters), args[0])
+			}
+			return nil
+		},
+	}
+	f := cmd.Flags()
+	f.StringVar(&filePath, "file", "", ".cue file to set as the chapters")
+	f.BoolVar(&clear, "clear", false, "remove the user chapters instead of setting them")
+	f.BoolVar(&noLock, "no-lock", false, "do not lock the chapters field (it defaults to locked)")
+	f.BoolVar(&force, "force", false, "override a locked chapters field")
+	return cmd
 }
 
 func printChapters(cmd *cobra.Command, chs []model.Chapter) {

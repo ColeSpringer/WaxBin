@@ -112,6 +112,7 @@ func loudnessView(l *model.Loudness) *loudnessJSON {
 type showView struct {
 	Item       itemView      `json:"item"`
 	ReplayGain *loudnessJSON `json:"replayGain,omitempty"`
+	Credits    []creditView  `json:"credits,omitempty"`
 }
 
 // chapterView is the JSON shape for one book chapter, with book-timeline offsets.

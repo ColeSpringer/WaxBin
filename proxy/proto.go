@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"errors"
 
+	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/waxerr"
 )
 
@@ -39,6 +40,12 @@ const ProtocolVersion = 1
 const (
 	MethodPing             = "ping"
 	MethodEditFields       = "edit_fields"
+	MethodEditManyFields   = "edit_many_fields"
+	MethodSetCredits       = "set_credits"
+	MethodSetLyrics        = "set_lyrics"
+	MethodSetChapters      = "set_chapters"
+	MethodSetItemArt       = "set_item_art"
+	MethodSetEntityArt     = "set_entity_art"
 	MethodLock             = "lock"
 	MethodUnlock           = "unlock"
 	MethodCreateUser       = "create_user"
@@ -145,6 +152,76 @@ type EditFieldsResult struct {
 	WriteBackFailures []WriteBackFailure `json:"writeBackFailures,omitempty"`
 }
 
+// EditManyFieldsParams is the edit_many_fields request payload.
+type EditManyFieldsParams struct {
+	ItemPIDs   []string          `json:"itemPids"`
+	Edits      map[string]string `json:"edits"`
+	WriteBack  bool              `json:"writeBack"`
+	Lock       bool              `json:"lock"`
+	Force      bool              `json:"force"`
+	SkipLocked bool              `json:"skipLocked"`
+}
+
+// EditManyFieldsResult is the edit_many_fields response payload. The catalog batch
+// is atomic; per-item write-back failures are reported here (keyed by item pid), not
+// as a transport error, matching the local semantics.
+type EditManyFieldsResult struct {
+	Edited            []string                      `json:"edited,omitempty"`
+	Skipped           []string                      `json:"skipped,omitempty"`
+	WriteBackFailures map[string][]WriteBackFailure `json:"writeBackFailures,omitempty"`
+}
+
+// SetCreditsParams is the set_credits request payload.
+type SetCreditsParams struct {
+	ItemPID   string   `json:"itemPid"`
+	Role      string   `json:"role"`
+	Names     []string `json:"names,omitempty"`
+	WriteBack bool     `json:"writeBack"`
+	Lock      bool     `json:"lock"`
+	Force     bool     `json:"force"`
+}
+
+// SetCreditsResult is the set_credits response payload: the number of contributors
+// actually stored (after trim/dedup) and any music write-back failures.
+type SetCreditsResult struct {
+	Stored            int                `json:"stored"`
+	WriteBackFailures []WriteBackFailure `json:"writeBackFailures,omitempty"`
+}
+
+// SetLyricsParams is the set_lyrics request payload. A nil Lyrics clears the row.
+type SetLyricsParams struct {
+	ItemPID string        `json:"itemPid"`
+	Lyrics  *model.Lyrics `json:"lyrics,omitempty"`
+	Lock    bool          `json:"lock"`
+	Force   bool          `json:"force"`
+}
+
+// SetChaptersParams is the set_chapters request payload. An empty list clears the
+// user chapters.
+type SetChaptersParams struct {
+	ItemPID  string          `json:"itemPid"`
+	Chapters []model.Chapter `json:"chapters,omitempty"`
+	Lock     bool            `json:"lock"`
+	Force    bool            `json:"force"`
+}
+
+// SetItemArtParams is the set_item_art request payload. Empty Data clears the cover.
+// The image bytes travel base64-encoded in the JSON frame.
+type SetItemArtParams struct {
+	ItemPID string `json:"itemPid"`
+	Data    []byte `json:"data,omitempty"`
+	Lock    bool   `json:"lock"`
+	Force   bool   `json:"force"`
+}
+
+// SetEntityArtParams is the set_entity_art request payload (album/artist/... covers).
+type SetEntityArtParams struct {
+	EntityType string `json:"entityType"`
+	EntityPID  string `json:"entityPid"`
+	Role       string `json:"role"`
+	Data       []byte `json:"data,omitempty"`
+}
+
 // FieldsParams is the lock / unlock request payload.
 type FieldsParams struct {
 	ItemPID string   `json:"itemPid"`
@@ -228,6 +305,7 @@ type ScanParams struct {
 	Force            bool   `json:"force,omitempty"`
 	AdoptStampedPIDs bool   `json:"adoptStampedPids,omitempty"`
 	ForceReconcile   bool   `json:"forceReconcile,omitempty"`
+	IgnoreLocks      bool   `json:"ignoreLocks,omitempty"`
 }
 
 // AnalyzeParams is the run_analyze request payload.

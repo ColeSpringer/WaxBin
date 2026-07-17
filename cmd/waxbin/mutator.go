@@ -47,6 +47,68 @@ func (m *mutator) EditFields(ctx context.Context, pid model.PID, edits map[strin
 	return m.lib.EditFields(ctx, pid, edits, opts)
 }
 
+func (m *mutator) EditManyFields(ctx context.Context, pids []model.PID, edits map[string]string, opts waxbin.EditOptions) (*waxbin.BatchEditResult, error) {
+	if m.px != nil {
+		res, err := m.px.EditManyFields(ctx, pids, edits, opts.WriteBack, opts.Lock, opts.Force, opts.SkipLocked)
+		if err != nil {
+			return nil, err
+		}
+		out := &waxbin.BatchEditResult{Edited: toPIDs(res.Edited), Skipped: toPIDs(res.Skipped)}
+		if len(res.WriteBackFailures) > 0 {
+			out.WriteBackErrors = make(map[model.PID]*waxbin.WriteBackError, len(res.WriteBackFailures))
+			for pid, fails := range res.WriteBackFailures {
+				out.WriteBackErrors[model.PID(pid)] = &waxbin.WriteBackError{
+					ItemPID: model.PID(pid), Edits: edits, Failures: fromProxyFailures(fails),
+				}
+			}
+		}
+		return out, nil
+	}
+	return m.lib.EditManyFields(ctx, pids, edits, opts)
+}
+
+func (m *mutator) SetCredits(ctx context.Context, pid model.PID, role model.ContributorRole, names []string, opts waxbin.CreditEditOptions) (int, error) {
+	if m.px != nil {
+		res, err := m.px.SetCredits(ctx, pid, string(role), names, opts.WriteBack, opts.Lock, opts.Force)
+		if err != nil {
+			return 0, err
+		}
+		if len(res.WriteBackFailures) > 0 {
+			return res.Stored, &waxbin.WriteBackError{ItemPID: pid, Failures: fromProxyFailures(res.WriteBackFailures)}
+		}
+		return res.Stored, nil
+	}
+	return m.lib.SetCredits(ctx, pid, role, names, opts)
+}
+
+func (m *mutator) SetLyrics(ctx context.Context, pid model.PID, ly *model.Lyrics, lock, force bool) error {
+	if m.px != nil {
+		return m.px.SetLyrics(ctx, pid, ly, lock, force)
+	}
+	return m.lib.SetLyrics(ctx, pid, ly, lock, force)
+}
+
+func (m *mutator) SetChapters(ctx context.Context, pid model.PID, chapters []model.Chapter, lock, force bool) error {
+	if m.px != nil {
+		return m.px.SetChapters(ctx, pid, chapters, lock, force)
+	}
+	return m.lib.SetChapters(ctx, pid, chapters, lock, force)
+}
+
+func (m *mutator) SetItemArt(ctx context.Context, pid model.PID, data []byte, lock, force bool) error {
+	if m.px != nil {
+		return m.px.SetItemArt(ctx, pid, data, lock, force)
+	}
+	return m.lib.SetItemArt(ctx, pid, data, lock, force)
+}
+
+func (m *mutator) SetEntityArt(ctx context.Context, entityType model.ArtEntity, entityPID model.PID, role string, data []byte) error {
+	if m.px != nil {
+		return m.px.SetEntityArt(ctx, entityType, entityPID, role, data)
+	}
+	return m.lib.SetEntityArt(ctx, entityType, entityPID, role, data)
+}
+
 func (m *mutator) Provenance(ctx context.Context, pid model.PID) ([]model.FieldProvenance, error) {
 	if m.px != nil {
 		return m.px.Provenance(ctx, pid)
@@ -143,6 +205,18 @@ func (m *mutator) PlaylistRemoveAt(ctx context.Context, playlistPID model.PID, p
 		return m.px.PlaylistRemoveAt(ctx, playlistPID, position)
 	}
 	return m.lib.Playlists().RemoveAt(ctx, playlistPID, position)
+}
+
+// toPIDs converts a wire string slice into a PID slice.
+func toPIDs(ss []string) []model.PID {
+	if len(ss) == 0 {
+		return nil
+	}
+	out := make([]model.PID, len(ss))
+	for i, s := range ss {
+		out[i] = model.PID(s)
+	}
+	return out
 }
 
 // fromProxyFailures converts wire write-back failures back into the facade shape.

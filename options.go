@@ -7,6 +7,7 @@ import (
 
 	"github.com/colespringer/waxbin/config"
 	"github.com/colespringer/waxbin/enrich"
+	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/source"
 )
 
@@ -53,6 +54,12 @@ type Options struct {
 	// for a value conflict; the MusicBrainz identity spine still resolves the anchoring
 	// MBID first. The default CLI build ships none.
 	EnrichmentProviders []enrich.Provider
+	// SecretCipher, when set, seals secret-table values (private-feed passwords) at
+	// rest; an embedder supplies one to own the key. Nil keeps secrets in plaintext.
+	SecretCipher model.SecretCipher
+	// SecretKeyID labels the key/epoch sealed values are written under; defaults to
+	// "1" when a cipher is set without one. Change it when rotating to a new key.
+	SecretKeyID string
 
 	// Storage tuning; zero values fall back to library defaults.
 	BusyTimeoutMS int

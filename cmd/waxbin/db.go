@@ -12,8 +12,36 @@ func newDBCmd(g *globals) *cobra.Command {
 		Use:   "db",
 		Short: "Database maintenance",
 	}
-	db.AddCommand(newDBVerifyCmd(g), newDBVacuumCmd(g), newDBMigrateCmd(g))
+	db.AddCommand(newDBVerifyCmd(g), newDBVacuumCmd(g), newDBMigrateCmd(g), newDBReSealSecretsCmd(g))
 	return db
+}
+
+func newDBReSealSecretsCmd(g *globals) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "reseal-secrets",
+		Short: "Seal any plaintext secrets with the configured cipher",
+		Long: "Seals every plaintext secret in the catalog with the configured secret " +
+			"cipher, leaving already-sealed values untouched. It is the one-time adoption " +
+			"step after a cipher is first configured, and is idempotent. Requires a build " +
+			"with a secret cipher wired in; the stock CLI configures none.",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			lib, _, err := g.open(cmd)
+			if err != nil {
+				return err
+			}
+			defer lib.Close()
+			n, err := lib.ReSealSecrets(ctx(cmd))
+			if err != nil {
+				return err
+			}
+			if g.jsonOut {
+				return printJSON(cmd, map[string]any{"sealed": n})
+			}
+			fmt.Fprintf(out(cmd), "sealed %d secret(s)\n", n)
+			return nil
+		},
+	}
+	return cmd
 }
 
 func newDBVacuumCmd(g *globals) *cobra.Command {

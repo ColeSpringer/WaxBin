@@ -507,7 +507,7 @@ func (s *Store) ApplyLyricsEnrichment(ctx context.Context, in model.LyricsEnrich
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 			if exists == 0 {
-				if _, err := putLyricsTx(ctx, tx, in.ItemID, in.Lyrics); err != nil {
+				if _, err := putLyricsTx(ctx, tx, in.ItemID, in.Lyrics, true); err != nil {
 					return waxerr.Wrap(waxerr.CodeIO, op, err)
 				}
 				if err := appendChange(ctx, tx, "item", in.PID, model.OpUpdate); err != nil {

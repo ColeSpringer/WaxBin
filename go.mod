@@ -4,7 +4,7 @@ go 1.26
 
 require (
 	github.com/colespringer/waxflow v0.0.0-20260717133419-d80145366512
-	github.com/colespringer/waxlabel v1.0.0
+	github.com/colespringer/waxlabel v1.2.0
 	github.com/fsnotify/fsnotify v1.9.0
 	github.com/gofrs/flock v0.13.0
 	github.com/oklog/ulid/v2 v2.1.1

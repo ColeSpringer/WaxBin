@@ -130,6 +130,66 @@ func (c *Client) EditFields(ctx context.Context, itemPID model.PID, edits map[st
 	return &res, nil
 }
 
+// EditManyFields proxies a multi-item catalog field edit. The catalog batch is
+// atomic; per-item write-back failures come back in the result rather than as a
+// transport error, matching the local semantics.
+func (c *Client) EditManyFields(ctx context.Context, itemPIDs []model.PID, edits map[string]string, writeBack, lock, force, skipLocked bool) (*EditManyFieldsResult, error) {
+	pids := make([]string, len(itemPIDs))
+	for i, p := range itemPIDs {
+		pids[i] = string(p)
+	}
+	var res EditManyFieldsResult
+	err := c.call(ctx, MethodEditManyFields, EditManyFieldsParams{
+		ItemPIDs: pids, Edits: edits, WriteBack: writeBack, Lock: lock, Force: force, SkipLocked: skipLocked,
+	}, &res)
+	if err != nil {
+		return nil, err
+	}
+	return &res, nil
+}
+
+// SetCredits proxies a credit edit. The result carries the stored contributor count
+// and, for a committed edit whose music write-back partially failed, the failed files
+// (the transport error stays nil, matching edit_fields).
+func (c *Client) SetCredits(ctx context.Context, itemPID model.PID, role string, names []string, writeBack, lock, force bool) (*SetCreditsResult, error) {
+	var res SetCreditsResult
+	err := c.call(ctx, MethodSetCredits, SetCreditsParams{
+		ItemPID: string(itemPID), Role: role, Names: names, WriteBack: writeBack, Lock: lock, Force: force,
+	}, &res)
+	if err != nil {
+		return nil, err
+	}
+	return &res, nil
+}
+
+// SetLyrics proxies a lyrics edit.
+func (c *Client) SetLyrics(ctx context.Context, itemPID model.PID, ly *model.Lyrics, lock, force bool) error {
+	return c.call(ctx, MethodSetLyrics, SetLyricsParams{
+		ItemPID: string(itemPID), Lyrics: ly, Lock: lock, Force: force,
+	}, nil)
+}
+
+// SetChapters proxies a chapters edit.
+func (c *Client) SetChapters(ctx context.Context, itemPID model.PID, chapters []model.Chapter, lock, force bool) error {
+	return c.call(ctx, MethodSetChapters, SetChaptersParams{
+		ItemPID: string(itemPID), Chapters: chapters, Lock: lock, Force: force,
+	}, nil)
+}
+
+// SetItemArt proxies an item cover edit.
+func (c *Client) SetItemArt(ctx context.Context, itemPID model.PID, data []byte, lock, force bool) error {
+	return c.call(ctx, MethodSetItemArt, SetItemArtParams{
+		ItemPID: string(itemPID), Data: data, Lock: lock, Force: force,
+	}, nil)
+}
+
+// SetEntityArt proxies a durable entity cover edit.
+func (c *Client) SetEntityArt(ctx context.Context, entityType model.ArtEntity, entityPID model.PID, role string, data []byte) error {
+	return c.call(ctx, MethodSetEntityArt, SetEntityArtParams{
+		EntityType: string(entityType), EntityPID: string(entityPID), Role: role, Data: data,
+	}, nil)
+}
+
 // Lock proxies locking item fields.
 func (c *Client) Lock(ctx context.Context, itemPID model.PID, fields []string) error {
 	return c.call(ctx, MethodLock, FieldsParams{ItemPID: string(itemPID), Fields: fields}, nil)

@@ -280,6 +280,14 @@ func upsertEpisode(ctx context.Context, tx *sql.Tx, podcastID int64, podcastTitl
 	stored.pinned = pinnedInt != 0
 
 	if exists {
+		// Preserve user-edited episode fields against a feed re-sync: overlay the stored
+		// value for every locked field onto the incoming item BEFORE the change check, so
+		// a locked-field feed change is neither written nor treated as a reason to rewrite.
+		if locked, err := lockedFieldSetTx(ctx, tx, itemID); err != nil {
+			return false, false, waxerr.Wrap(waxerr.CodeIO, op, err)
+		} else if len(locked) > 0 {
+			fe = overlayLockedEpisodeFields(fe, stored, locked)
+		}
 		// Unchanged: write nothing and emit no delta (state, which may be present for a
 		// downloaded episode, is untouched throughout). pinned participates in the change
 		// check only when the caller manages it (managePinned): a feed re-sync passes
@@ -329,6 +337,132 @@ func upsertEpisode(ctx context.Context, tx *sql.Tx, podcastID int64, podcastTitl
 		return false, false, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
 	return true, true, nil
+}
+
+// editEpisodeFieldsTx applies user edits to a podcast episode. It writes the episode
+// row columns and the title on playable_item, then rebuilds the episode's search row.
+// Provenance, auto-lock, and the item delta are recorded by the shared edit caller.
+func editEpisodeFieldsTx(ctx context.Context, tx *sql.Tx, itemID int64, fields []string, edits map[string]string, op string) error {
+	var touchTitle bool
+	var newTitle string
+	setCols := make([]string, 0, len(fields))
+	args := make([]any, 0, len(fields)+2)
+	for _, f := range fields {
+		switch f {
+		case "title":
+			touchTitle, newTitle = true, edits[f]
+		case "description":
+			setCols, args = append(setCols, "description=?"), append(args, edits[f])
+		case "link":
+			setCols, args = append(setCols, "link=?"), append(args, edits[f])
+		case "season":
+			n, err := parseIntField(edits[f], "season", op)
+			if err != nil {
+				return err
+			}
+			setCols, args = append(setCols, "season=?"), append(args, nullInt(n))
+		case "episode_no":
+			n, err := parseIntField(edits[f], "episode_no", op)
+			if err != nil {
+				return err
+			}
+			setCols, args = append(setCols, "episode_no=?"), append(args, nullInt(n))
+		case "episode_type":
+			et := edits[f]
+			if et == "" {
+				et = string(model.EpisodeFull)
+			}
+			if !validEpisodeType(et) {
+				return waxerr.New(waxerr.CodeInvalid, op, "episode_type must be full|trailer|bonus: "+et)
+			}
+			setCols, args = append(setCols, "episode_type=?"), append(args, et)
+		case "explicit":
+			b, err := parseBoolField(edits[f], "explicit", op)
+			if err != nil {
+				return err
+			}
+			setCols, args = append(setCols, "explicit=?"), append(args, boolInt(b))
+		case "pinned":
+			b, err := parseBoolField(edits[f], "pinned", op)
+			if err != nil {
+				return err
+			}
+			setCols, args = append(setCols, "pinned=?"), append(args, boolInt(b))
+		default:
+			return waxerr.New(waxerr.CodeInvalid, op, "unhandled episode field: "+f)
+		}
+	}
+
+	now := nowNS()
+	if touchTitle {
+		if _, err := tx.ExecContext(ctx,
+			"UPDATE playable_item SET title=?, sort_key=?, updated_at=? WHERE id=?",
+			newTitle, model.SortKey(newTitle), now, itemID); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+	}
+	if len(setCols) > 0 {
+		setCols = append(setCols, "updated_at=?")
+		args = append(args, now, itemID)
+		if _, err := tx.ExecContext(ctx,
+			"UPDATE episode SET "+strings.Join(setCols, ", ")+" WHERE item_id=?", args...); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+	}
+	return rebuildEpisodeSearchFTSTx(ctx, tx, itemID)
+}
+
+// validEpisodeType reports whether t is one of the three feed episode types.
+func validEpisodeType(t string) bool {
+	switch model.EpisodeType(t) {
+	case model.EpisodeFull, model.EpisodeTrailer, model.EpisodeBonus:
+		return true
+	default:
+		return false
+	}
+}
+
+// rebuildEpisodeSearchFTSTx reloads an episode's current title/description and its
+// show title, then rewrites its search row (so an edited title/description is
+// searchable).
+func rebuildEpisodeSearchFTSTx(ctx context.Context, tx *sql.Tx, itemID int64) error {
+	var title, description, podcastTitle string
+	err := tx.QueryRowContext(ctx, `SELECT pi.title, ep.description, pod.title
+		FROM playable_item pi JOIN episode ep ON ep.item_id = pi.id
+		JOIN podcast pod ON pod.id = ep.podcast_id WHERE pi.id = ?`, itemID).
+		Scan(&title, &description, &podcastTitle)
+	if err != nil {
+		return waxerr.Wrap(waxerr.CodeIO, "store.EditItemFields", err)
+	}
+	return syncEpisodeSearchFTS(ctx, tx, itemID, model.FeedEpisode{Title: title, Description: description}, podcastTitle)
+}
+
+// overlayLockedEpisodeFields returns fe with every user-locked field replaced by the
+// stored value, so a feed re-sync neither overwrites a curated episode edit nor
+// counts a locked-field feed change as a reason to rewrite the row.
+func overlayLockedEpisodeFields(fe model.FeedEpisode, stored storedEpisode, locked map[string]bool) model.FeedEpisode {
+	if locked["title"] {
+		fe.Title = stored.title
+	}
+	if locked["description"] {
+		fe.Description = stored.description
+	}
+	if locked["link"] {
+		fe.Link = stored.link
+	}
+	if locked["season"] {
+		fe.Season = int(stored.season)
+	}
+	if locked["episode_no"] {
+		fe.EpisodeNo = int(stored.episodeNo)
+	}
+	if locked["episode_type"] {
+		fe.EpisodeType = model.EpisodeType(stored.episodeType)
+	}
+	if locked["explicit"] {
+		fe.Explicit = stored.explicit
+	}
+	return fe
 }
 
 // rekeyEpisodes rewrites the per-show prefix of every episode identity_key when a

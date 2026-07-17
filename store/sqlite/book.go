@@ -47,6 +47,15 @@ func (s *Store) PutScannedBook(ctx context.Context, in model.PutScannedBookInput
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 
+		// Overlay locked book fields onto the scanned values before any writer runs, so a
+		// curated edit survives a re-derive-from-disk `scan --force`. Off only for
+		// `scan --force --ignore-locks`.
+		if in.PreserveLocks {
+			if err := preserveLockedBookFieldsTx(ctx, tx, &in.Book, &in.Item); err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+		}
+
 		// A rebuild adopts the file's WAXBIN_ITEM_PID stamp (organize stamps books too) to
 		// restore the book's original identity; identity stays essence-first, so a taken or
 		// invalid hint falls back to a fresh PID. Parts of one book share the stamp: the
@@ -140,7 +149,7 @@ func (s *Store) PutScannedBook(ctx context.Context, in model.PutScannedBookInput
 		// changed flag feeds the item delta so a cover-only change is not silent.
 		artChanged := false
 		if created || role == bookPrimaryRole {
-			c, err := attachArtTxChanged(ctx, tx, itemID, in.CoverArt)
+			c, err := attachArtRespectingLockTx(ctx, tx, itemID, in.CoverArt, in.PreserveLocks)
 			if err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
@@ -261,17 +270,17 @@ func upsertBook(ctx context.Context, tx *sql.Tx, itemID int64, b model.Book, aff
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO book
 		(item_id, subtitle, author, author_sort, author_id, narrator, series_id, series_seq,
-		 series_seq_sort, year, publisher, asin, isbn, edition, abridged, description, genre)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		 series_seq_sort, year, publisher, asin, isbn, edition, abridged, description, genre, mbid)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(item_id) DO UPDATE SET
 			subtitle=excluded.subtitle, author=excluded.author, author_sort=excluded.author_sort,
 			author_id=excluded.author_id, narrator=excluded.narrator, series_id=excluded.series_id,
 			series_seq=excluded.series_seq, series_seq_sort=excluded.series_seq_sort, year=excluded.year,
 			publisher=excluded.publisher, asin=excluded.asin, isbn=excluded.isbn, edition=excluded.edition,
-			abridged=excluded.abridged, description=excluded.description, genre=excluded.genre`,
+			abridged=excluded.abridged, description=excluded.description, genre=excluded.genre, mbid=excluded.mbid`,
 		itemID, b.Subtitle, author, authorSort, nullInt64(authorID), b.Narrator, nullInt64(seriesID),
 		b.SeriesSeq, model.SortKey(b.SeriesSeq), nullInt(b.Year), b.Publisher, b.ASIN, b.ISBN,
-		b.Edition, nullBool(b.Abridged), b.Description, b.Genre); err != nil {
+		b.Edition, nullBool(b.Abridged), b.Description, b.Genre, nullStr(b.MBID)); err != nil {
 		return err
 	}
 	if err := syncItemGenres(ctx, tx, itemID, b.Genres, b.Genre); err != nil {
@@ -527,6 +536,9 @@ func refreshBookDuration(ctx context.Context, tx *sql.Tx, itemID int64) error {
 // disjoint (books: embedded/cue/synthetic; episodes: podcast_url).
 func chapterSourceRank(source string) int {
 	switch source {
+	case "user":
+		// A user-curated chapter list is authoritative over any derived source.
+		return -1
 	case "podcast_url":
 		return 0
 	case "embedded":
@@ -590,6 +602,10 @@ func syncChapters(ctx context.Context, tx *sql.Tx, bookItemID, fileID int64, sou
 	if scopeToSource {
 		del += " AND source = ?"
 		args = append(args, source)
+	} else {
+		// An all-source scan replace never touches user-curated chapters, so a
+		// `scan --force` cannot discard them (they win on read via chapterSourceRank).
+		del += " AND source <> 'user'"
 	}
 	if _, err := tx.ExecContext(ctx, del, args...); err != nil {
 		return false, err
@@ -614,6 +630,11 @@ func chaptersInSync(ctx context.Context, tx *sql.Tx, bookItemID, fileID int64, s
 	if scopeToSource {
 		q += " AND source = ?"
 		args = append(args, source)
+	} else {
+		// Mirror the all-source replace, which never deletes user chapters, so the
+		// no-op comparison ignores them too (a scan stays silent when only its own
+		// derived sources are unchanged).
+		q += " AND source <> 'user'"
 	}
 	q += " ORDER BY position"
 	rows, err := tx.QueryContext(ctx, q, args...)

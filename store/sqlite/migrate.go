@@ -68,6 +68,9 @@ func (s *Store) migrate(ctx context.Context) error {
 		if _, err := s.write.ExecContext(ctx, "VACUUM INTO ?", backup); err != nil {
 			return waxerr.Wrapf(waxerr.CodeIO, op, err, "backing up to %s before migrate", backup)
 		}
+		// The pre-migrate backup carries the secret table, so restrict it like the
+		// live catalog.
+		s.restrictSecretFiles(backup)
 		s.log.Info("backed up catalog before migration", "to", backup, "from_version", current)
 	}
 

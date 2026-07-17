@@ -64,6 +64,10 @@ type Request struct {
 	// operator action; the watcher never sets it, so a transient mount loss during a
 	// scheduled/forced watch rescan can never wipe the catalog.
 	ForceReconcile bool
+	// IgnoreLocks re-derives every field from the file's tags even when the user has
+	// locked it, so a `scan --force --ignore-locks` deliberately discards curated
+	// edits. Off by default: a normal or forced scan preserves locked fields.
+	IgnoreLocks bool
 }
 
 // Result tallies what a scan did. Every field counts files, not items: the Items*
@@ -129,7 +133,7 @@ func (s *Scanner) Scan(ctx context.Context, req Request, hb Heartbeat) (*Result,
 	}
 
 	res := &Result{}
-	sc := &scanCtx{cache: newArtCache(), force: req.Force, adopt: req.AdoptStampedPIDs}
+	sc := &scanCtx{cache: newArtCache(), force: req.Force, adopt: req.AdoptStampedPIDs, preserveLocks: !req.IgnoreLocks}
 
 	// Preload the scope's file index once, so the walk fast-paths an unchanged file
 	// (size+mtime match) in memory and reconciles vanished ones at end-of-walk, with
@@ -206,10 +210,11 @@ func (s *Scanner) Scan(ctx context.Context, req Request, hb Heartbeat) (*Result,
 // single-goroutine (WalkDir invokes its callback sequentially), so the index map
 // needs no locking.
 type scanCtx struct {
-	index map[string]model.ScopedFile // path -> known file; entries deleted as visited
-	force bool                        // bypass the fast-path (re-hash everything)
-	adopt bool                        // pass WAXBIN_ITEM_PID hints to the store (rebuild)
-	cache *artCache
+	index         map[string]model.ScopedFile // path -> known file; entries deleted as visited
+	force         bool                        // bypass the fast-path (re-hash everything)
+	adopt         bool                        // pass WAXBIN_ITEM_PID hints to the store (rebuild)
+	preserveLocks bool                        // keep user-locked fields from being re-derived from tags
+	cache         *artCache
 }
 
 // reconcileMissing marks the items behind the index's residual (unwalked) files as
@@ -295,7 +300,8 @@ func (s *Scanner) scanFileForced(ctx context.Context, lib *model.Library, path s
 	}
 	res.FilesSeen++
 	// A single-file scan has no preloaded index, so it always takes the full path.
-	if err := s.scanAudioFile(ctx, lib, string(lib.Root), path, res, &scanCtx{cache: newArtCache()}, kind); err != nil {
+	// Preserve user-locked fields by default, like a full scan.
+	if err := s.scanAudioFile(ctx, lib, string(lib.Root), path, res, &scanCtx{cache: newArtCache(), preserveLocks: true}, kind); err != nil {
 		res.Errored++
 		return res, err
 	}
@@ -442,8 +448,9 @@ func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, p
 		// rip: one window over the whole file is just the file, and it would be strictly
 		// worse as a virtual track (its tags become unwritable and it exports no
 		// fingerprint), so it falls through to the plain whole-file path below.
-		out, err = s.cat.PutScannedVirtualTracks(ctx,
-			virtualTracksInput(lib.ID, file, tags, essenceHash, cueSheet, carve, cover, aux, diags))
+		vin := virtualTracksInput(lib.ID, file, tags, essenceHash, cueSheet, carve, cover, aux, diags)
+		vin.PreserveLocks = sc.preserveLocks
+		out, err = s.cat.PutScannedVirtualTracks(ctx, vin)
 	case isBook:
 		bin := bookInput(lib.ID, file, tags, essenceHash, cover)
 		// With no embedded chapters, a sibling .cue fills them (marked source='cue' so
@@ -455,6 +462,7 @@ func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, p
 		bin.AuxObservations = aux
 		bin.PreferredItemPID = adoptedPID(sc, fm)
 		bin.Diagnostics = diags
+		bin.PreserveLocks = sc.preserveLocks
 		out, err = s.cat.PutScannedBook(ctx, bin)
 	default:
 		out, err = s.cat.PutScannedTrack(ctx, model.PutScannedTrackInput{
@@ -474,6 +482,7 @@ func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, p
 			PreferredItemPID: adoptedPID(sc, fm),
 			Acquisition:      tags.Acquisition,
 			Diagnostics:      diags,
+			PreserveLocks:    sc.preserveLocks,
 		})
 	}
 	if err != nil {

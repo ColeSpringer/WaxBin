@@ -21,6 +21,7 @@ type Book struct {
 	ASIN        string // Audible identifier
 	ISBN        string
 	Edition     string
+	MBID        string // MusicBrainz release id, when known
 	// Abridged is the abridged/unabridged flag: nil when unknown, else true for an
 	// abridged edition. A pointer so "unknown" is distinct from "unabridged".
 	Abridged    *bool

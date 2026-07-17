@@ -2,9 +2,12 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"time"
 
+	"github.com/colespringer/waxbin/meta"
 	"github.com/colespringer/waxbin/model"
+	"github.com/colespringer/waxbin/waxerr"
 	"github.com/spf13/cobra"
 )
 
@@ -40,6 +43,61 @@ func newLyricsCmd(g *globals) *cobra.Command {
 			return nil
 		},
 	}
+	cmd.AddCommand(newLyricsSetCmd(g))
+	return cmd
+}
+
+func newLyricsSetCmd(g *globals) *cobra.Command {
+	var (
+		filePath string
+		clear    bool
+		noLock   bool
+		force    bool
+	)
+	cmd := &cobra.Command{
+		Use:   "set <pid> --file <lrc>",
+		Short: "Set (or clear) an item's lyrics from an .lrc file",
+		Long: "Sets user-curated lyrics on a track from an .lrc file (timed lines are parsed; " +
+			"plain lines become unsynchronized text), or --clear removes them. A set locks the " +
+			"item's lyrics field by default so a scan does not overwrite it.",
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			var ly *model.Lyrics
+			if !clear {
+				if filePath == "" {
+					return waxerr.New(waxerr.CodeInvalid, "lyrics set", "provide --file or --clear")
+				}
+				b, err := os.ReadFile(filePath)
+				if err != nil {
+					return waxerr.Wrapf(waxerr.CodeIO, "lyrics set", err, "reading %s", filePath)
+				}
+				synced, _ := meta.ParseLRC(string(b))
+				ly = &model.Lyrics{Synced: synced}
+				if len(synced) == 0 {
+					ly.Unsynced = string(b)
+				}
+			}
+			m, _, err := g.openMutator(cmd)
+			if err != nil {
+				return err
+			}
+			defer m.Close()
+			if err := m.SetLyrics(ctx(cmd), model.PID(args[0]), ly, !noLock, force); err != nil {
+				return err
+			}
+			if clear {
+				fmt.Fprintf(out(cmd), "cleared lyrics for %s\n", args[0])
+			} else {
+				fmt.Fprintf(out(cmd), "set lyrics for %s\n", args[0])
+			}
+			return nil
+		},
+	}
+	f := cmd.Flags()
+	f.StringVar(&filePath, "file", "", ".lrc file to set as the lyrics")
+	f.BoolVar(&clear, "clear", false, "remove the lyrics instead of setting them")
+	f.BoolVar(&noLock, "no-lock", false, "do not lock the lyrics field (it defaults to locked)")
+	f.BoolVar(&force, "force", false, "override a locked lyrics field")
 	return cmd
 }
 

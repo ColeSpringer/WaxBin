@@ -16,6 +16,7 @@ func newScanCmd(g *globals) *cobra.Command {
 		libraryPID     string
 		force          bool
 		reconcileDelet bool
+		ignoreLocks    bool
 	)
 	cmd := &cobra.Command{
 		Use:   "scan",
@@ -32,6 +33,7 @@ func newScanCmd(g *globals) *cobra.Command {
 				defer px.Close()
 				jobPID, err := px.RunScan(ctx(cmd), proxy.ScanParams{
 					LibraryPID: libraryPID, SubPath: subPath, Force: force, ForceReconcile: reconcileDelet,
+					IgnoreLocks: ignoreLocks,
 				})
 				if err != nil {
 					return err
@@ -58,6 +60,7 @@ func newScanCmd(g *globals) *cobra.Command {
 				SubPath:        subPath,
 				Force:          force,
 				ForceReconcile: reconcileDelet,
+				IgnoreLocks:    ignoreLocks,
 			})
 			if err != nil {
 				return err
@@ -72,6 +75,8 @@ func newScanCmd(g *globals) *cobra.Command {
 	cmd.Flags().BoolVar(&full, "full", false, "alias for --force")
 	cmd.Flags().BoolVar(&reconcileDelet, "reconcile-deletions", false,
 		"reconcile deletions even past the survival-gate floor (recovery for a deliberate large deletion)")
+	cmd.Flags().BoolVar(&ignoreLocks, "ignore-locks", false,
+		"re-derive locked fields from disk too, discarding curated edits (use with --force)")
 	cmd.PreRun = func(*cobra.Command, []string) { force = force || full }
 	return cmd
 }

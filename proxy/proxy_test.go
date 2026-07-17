@@ -92,6 +92,73 @@ func TestRoundTripAndResultPayload(t *testing.T) {
 	}
 }
 
+// TestCurationRoundTrip checks the curation set methods carry their params over the
+// wire (including image bytes and a nested lyrics struct) and that a credit
+// write-back failure comes back as an ok result, matching edit_fields.
+func TestCurationRoundTrip(t *testing.T) {
+	var gotArt []byte
+	var gotLyrics *model.Lyrics
+	handlers := map[string]proxy.Handler{
+		proxy.MethodSetCredits: func(_ context.Context, raw json.RawMessage) (any, error) {
+			var p proxy.SetCreditsParams
+			_ = json.Unmarshal(raw, &p)
+			if p.ItemPID != "i1" || p.Role != "producer" || len(p.Names) != 2 {
+				t.Errorf("credit params = %+v", p)
+			}
+			return proxy.SetCreditsResult{Stored: 2, WriteBackFailures: []proxy.WriteBackFailure{{Path: "/x.mp3", Reason: "shared"}}}, nil
+		},
+		proxy.MethodSetLyrics: func(_ context.Context, raw json.RawMessage) (any, error) {
+			var p proxy.SetLyricsParams
+			_ = json.Unmarshal(raw, &p)
+			gotLyrics = p.Lyrics
+			return nil, nil
+		},
+		proxy.MethodSetItemArt: func(_ context.Context, raw json.RawMessage) (any, error) {
+			var p proxy.SetItemArtParams
+			_ = json.Unmarshal(raw, &p)
+			gotArt = p.Data
+			return nil, nil
+		},
+		proxy.MethodSetEntityArt: func(_ context.Context, raw json.RawMessage) (any, error) {
+			var p proxy.SetEntityArtParams
+			_ = json.Unmarshal(raw, &p)
+			if p.EntityType != "album" || p.Role != "front" {
+				t.Errorf("entity art params = %+v", p)
+			}
+			return nil, nil
+		},
+	}
+	c := dial(t, startServer(t, handlers, nil))
+	ctx := context.Background()
+
+	res, err := c.SetCredits(ctx, "i1", "producer", []string{"A", "B"}, true, true, false)
+	if err != nil {
+		t.Fatalf("set credits: %v", err)
+	}
+	if res.Stored != 2 || len(res.WriteBackFailures) != 1 {
+		t.Fatalf("credit result = %+v", res)
+	}
+
+	ly := &model.Lyrics{Synced: []model.SyncedLine{{TimeMS: 10, Text: "hi"}}}
+	if err := c.SetLyrics(ctx, "i1", ly, true, false); err != nil {
+		t.Fatalf("set lyrics: %v", err)
+	}
+	if gotLyrics == nil || len(gotLyrics.Synced) != 1 || gotLyrics.Synced[0].Text != "hi" {
+		t.Fatalf("lyrics not carried: %+v", gotLyrics)
+	}
+
+	if err := c.SetItemArt(ctx, "i1", []byte{1, 2, 3, 4}, true, false); err != nil {
+		t.Fatalf("set item art: %v", err)
+	}
+	if len(gotArt) != 4 || gotArt[0] != 1 {
+		t.Fatalf("art bytes not carried: %v", gotArt)
+	}
+
+	if err := c.SetEntityArt(ctx, model.ArtAlbum, "a1", "front", []byte{9}); err != nil {
+		t.Fatalf("set entity art: %v", err)
+	}
+}
+
 // TestErrorCodePreserved checks a handler's waxerr Code survives the round-trip so
 // the CLI's exit-code mapping is unchanged whether a command ran locally or proxied.
 func TestErrorCodePreserved(t *testing.T) {

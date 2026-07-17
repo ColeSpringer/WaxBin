@@ -23,7 +23,10 @@ type lyricLineJSON struct {
 // table stays sparse; synced lines are stored as a JSON array in time order. It
 // reports whether it changed the stored row, so the sidecar-update seam can emit a
 // delta only on a real change.
-func putLyricsTx(ctx context.Context, tx *sql.Tx, itemID int64, ly *model.Lyrics) (bool, error) {
+// preserveLock, when true, makes a would-be change to a user-locked lyrics row a
+// no-op, so a scan/enrich pass never overwrites a curated edit. SetItemLyrics passes
+// false (it is the authoritative user write).
+func putLyricsTx(ctx context.Context, tx *sql.Tx, itemID int64, ly *model.Lyrics, preserveLock bool) (bool, error) {
 	// Desired row (empty source means "no lyrics row").
 	var wantSource, wantUnsynced, wantLines string
 	wantSynced := 0
@@ -54,16 +57,30 @@ func putLyricsTx(ctx context.Context, tx *sql.Tx, itemID int64, ly *model.Lyrics
 		return false, err
 	}
 
-	if wantSource == "" { // no lyrics desired
-		if exists {
-			_, derr := tx.ExecContext(ctx, "DELETE FROM lyrics WHERE item_id = ?", itemID)
-			return derr == nil, derr
-		}
+	// Decide whether a write is even needed before consulting the lock, so an
+	// unchanged rescan neither writes nor pays a lock lookup.
+	changeNeeded := exists
+	if wantSource != "" {
+		changeNeeded = !(exists && curSource.String == wantSource && int(curSynced.Int64) == wantSynced &&
+			curUnsynced.String == wantUnsynced && curLines.String == wantLines)
+	}
+	if !changeNeeded {
 		return false, nil
 	}
-	if exists && curSource.String == wantSource && int(curSynced.Int64) == wantSynced &&
-		curUnsynced.String == wantUnsynced && curLines.String == wantLines {
-		return false, nil // unchanged
+	// A user-locked lyrics row is preserved against scan/enrich re-derivation.
+	if preserveLock {
+		locked, err := fieldLockedTx(ctx, tx, itemID, "lyrics")
+		if err != nil {
+			return false, err
+		}
+		if locked {
+			return false, nil
+		}
+	}
+
+	if wantSource == "" { // no lyrics desired
+		_, derr := tx.ExecContext(ctx, "DELETE FROM lyrics WHERE item_id = ?", itemID)
+		return derr == nil, derr
 	}
 
 	var linesArg any

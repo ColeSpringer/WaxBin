@@ -32,8 +32,13 @@ func newShowCmd(g *globals) *cobra.Command {
 				return ldErr
 			}
 
+			credits, err := lib.Credits(ctx(cmd), v.PID)
+			if err != nil {
+				return err
+			}
+
 			if g.jsonOut {
-				return printJSON(cmd, showView{Item: toItemView(v), ReplayGain: loudnessView(ld)})
+				return printJSON(cmd, showView{Item: toItemView(v), ReplayGain: loudnessView(ld), Credits: creditViews(credits)})
 			}
 			w := out(cmd)
 			fmt.Fprintf(w, "pid:          %s\n", v.PID)
@@ -66,6 +71,9 @@ func newShowCmd(g *globals) *cobra.Command {
 			}
 			fmt.Fprintf(w, "file pid:     %s\n", v.FilePID)
 			fmt.Fprintf(w, "path:         %s\n", v.DisplayPath)
+			for _, c := range credits {
+				fmt.Fprintf(w, "credit:       %s = %s\n", c.Role, c.Name)
+			}
 			return nil
 		},
 	}

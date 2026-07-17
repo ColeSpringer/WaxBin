@@ -2,6 +2,7 @@ package waxbin
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"path/filepath"
@@ -119,6 +120,8 @@ func Open(ctx context.Context, opts Options) (*Library, error) {
 		Owner:         owner,
 		IPCSocket:     opts.IPCSocket,
 		Logger:        log,
+		SecretCipher:  opts.SecretCipher,
+		SecretKeyID:   opts.SecretKeyID,
 		BusyTimeoutMS: opts.BusyTimeoutMS,
 		CacheSizeKB:   opts.CacheSizeKB,
 		MmapSizeBytes: opts.MmapSizeBytes,
@@ -431,6 +434,11 @@ type ScanRequest struct {
 	// is reconciled to missing (the recovery path). An explicit operator action; the
 	// watcher never sets it.
 	ForceReconcile bool
+	// IgnoreLocks re-derives every field from disk even when the user locked it, so a
+	// `scan --force --ignore-locks` discards curated edits. Off by default: a scan
+	// (including --force) preserves locked fields, and write-back is what propagates a
+	// DB edit back onto disk.
+	IgnoreLocks bool
 }
 
 // fsMutateScope is the shared lease scope held by every job that mutates files on
@@ -873,6 +881,20 @@ type EditOptions struct {
 	Lock bool
 	// Force overrides a lock. Without it, editing a locked field returns CodeLocked.
 	Force bool
+	// SkipLocked applies only to a multi-item batch: a locked item is skipped and
+	// reported rather than failing the whole batch. Ignored by a single-item edit.
+	SkipLocked bool
+}
+
+// BatchEditResult reports a multi-item edit's outcome: the items whose catalog edit
+// applied, the items skipped because a target field was locked (skip-locked mode),
+// and, for a write-back batch, the per-item on-disk write-back failures. The catalog
+// edit is atomic; a WriteBackErrors entry means that item's catalog edit stands but
+// its file tags did not follow.
+type BatchEditResult struct {
+	Edited          []model.PID
+	Skipped         []model.PID
+	WriteBackErrors map[model.PID]*WriteBackError
 }
 
 // EditField edits one metadata field on a track or book item. See EditFields.
@@ -908,6 +930,46 @@ func (l *Library) EditFields(ctx context.Context, itemPID model.PID, edits map[s
 		return nil
 	}
 	return l.writeBackFields(ctx, itemPID, edits)
+}
+
+// EditManyFields applies the same field edits to several items in one atomic
+// transaction, then optionally mirrors each edited item's new values into its on-disk
+// tags. The catalog edit commits or rolls back as a whole. Write-back is per-item and
+// best-effort: an item whose on-disk sync failed is recorded in the result's
+// WriteBackErrors rather than failing the batch, matching single-item semantics. With
+// opts.SkipLocked a locked item is skipped (reported in Skipped) instead of failing.
+//
+// The returned *BatchEditResult is non-nil and meaningful even when err is non-nil:
+// the catalog batch already committed, and err is only returned for a non-write-back
+// failure during the on-disk pass (such as a canceled context). Callers should
+// inspect the result's Edited list in that case, since those items were edited.
+func (l *Library) EditManyFields(ctx context.Context, itemPIDs []model.PID, edits map[string]string, opts EditOptions) (*BatchEditResult, error) {
+	res, err := l.store.EditManyFields(ctx, itemPIDs, edits, model.SourceUser, opts.Lock, opts.Force, opts.SkipLocked)
+	if err != nil {
+		return nil, err
+	}
+	out := &BatchEditResult{Edited: res.Edited, Skipped: res.Skipped}
+	if !opts.WriteBack {
+		return out, nil
+	}
+	for _, pid := range res.Edited {
+		wberr := l.writeBackFields(ctx, pid, edits)
+		if wberr == nil {
+			continue
+		}
+		var wbe *WriteBackError
+		if errors.As(wberr, &wbe) {
+			if out.WriteBackErrors == nil {
+				out.WriteBackErrors = make(map[model.PID]*WriteBackError)
+			}
+			out.WriteBackErrors[pid] = wbe
+			continue
+		}
+		// A non-write-back error (e.g. a canceled context) aborts the remaining
+		// write-backs; the catalog batch already committed.
+		return out, wberr
+	}
+	return out, nil
 }
 
 // WriteBackFailure records one backing file whose on-disk tag write-back did not
@@ -1119,12 +1181,28 @@ func tagEditsForFields(edits map[string]string) ([]meta.TagEdit, error) {
 			return nil, waxerr.New(waxerr.CodeInternal, "waxbin.EditFields", "no tag key for field: "+field)
 		}
 		e := meta.TagEdit{Key: key}
-		if v := strings.TrimSpace(value); v != "" {
+		// compilation is a flag: normalize whatever spelling the user gave to the
+		// canonical "1"/"0" the COMPILATION tag expects (the store has already
+		// validated it is a boolean), and always write it rather than clearing.
+		if field == "compilation" {
+			e.Values = []string{compilationTagValue(value)}
+		} else if v := strings.TrimSpace(value); v != "" {
 			e.Values = []string{v}
 		}
 		out = append(out, e)
 	}
 	return out, nil
+}
+
+// compilationTagValue maps a validated boolean edit value to the "1"/"0" the
+// COMPILATION tag uses, via the SAME vocabulary the store validated it against (so a
+// spelling the store accepts can never write the wrong tag). The store rejects an
+// un-parseable value before write-back, so ok is always true here.
+func compilationTagValue(value string) string {
+	if v, _ := model.ParseBoolValue(value); v {
+		return "1"
+	}
+	return "0"
 }
 
 // writeBackSetupFailure wraps a store-lookup error hit while preparing a write-back
@@ -1736,6 +1814,22 @@ func (l *Library) GetSecret(ctx context.Context, key string) (string, error) {
 // DeleteSecret removes a stored credential.
 func (l *Library) DeleteSecret(ctx context.Context, key string) error {
 	return l.store.DeleteSecret(ctx, key)
+}
+
+// ReSealSecrets seals every plaintext secret with the configured cipher, leaving
+// already-sealed values untouched, in one transaction. It is the one-time adoption
+// step after a secret cipher is first configured and is idempotent. It requires a
+// configured cipher (Options.SecretCipher). Returns the number of secrets sealed.
+func (l *Library) ReSealSecrets(ctx context.Context) (int, error) {
+	return l.store.ReSealSecrets(ctx)
+}
+
+// RotateSecrets re-seals every secret from oldCipher to newCipher under newKeyID in
+// one transaction, so a crash rolls the whole rotation back rather than leaving a
+// mix of key generations. After it succeeds the caller reopens the Library with
+// newCipher as Options.SecretCipher. Returns the number of secrets rotated.
+func (l *Library) RotateSecrets(ctx context.Context, oldCipher, newCipher model.SecretCipher, newKeyID string) (int, error) {
+	return l.store.RotateSecrets(ctx, oldCipher, newCipher, newKeyID)
 }
 
 // InboxFolders returns the configured staging folders.

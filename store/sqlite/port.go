@@ -11,30 +11,53 @@ import (
 	"github.com/colespringer/waxbin/waxerr"
 )
 
-// SetSecret stores (or replaces) a named secret. Values are plaintext; they are
-// never logged or written to a logical export, but a full DB backup contains them.
+// SetSecret stores (or replaces) a named secret. When a cipher is configured the
+// value is sealed at rest (bound to its key as associated data); otherwise it is
+// stored in plaintext. Values are never logged or written to a logical export, but
+// a full DB backup contains them. A plaintext-mode value literally beginning with
+// the reserved sealed-value marker is refused so it can never be misread as sealed.
 func (s *Store) SetSecret(ctx context.Context, key, value string) error {
 	const op = "store.SetSecret"
 	if strings.TrimSpace(key) == "" {
 		return waxerr.New(waxerr.CodeInvalid, op, "empty secret key")
 	}
+	stored := value
+	if s.cipher != nil {
+		sealed, err := sealValue(s.cipher, s.cipherKeyID, key, value)
+		if err != nil {
+			return waxerr.Wrap(waxerr.CodeInternal, op, err)
+		}
+		stored = sealed
+	} else if looksSealed(value) {
+		return waxerr.New(waxerr.CodeInvalid, op, "secret value cannot begin with the reserved "+sealPrefix+" marker")
+	}
 	return s.writeTx(ctx, func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `INSERT INTO secret(key, value, updated_at) VALUES (?,?,?)
 			ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at`,
-			key, value, nowNS())
+			key, stored, nowNS())
 		return waxerr.Wrap(waxerr.CodeIO, op, err)
 	})
 }
 
-// GetSecret returns a secret value, or CodeNotFound.
+// GetSecret returns a secret value, or CodeNotFound. A sealed value is opened with
+// the configured cipher; a sealed value with no cipher configured is CodeInvalid, and
+// a plaintext value (either plaintext mode, or one not yet adopted by ReSealSecrets)
+// is returned as-is.
 func (s *Store) GetSecret(ctx context.Context, key string) (string, error) {
+	const op = "store.GetSecret"
 	var v string
 	err := s.read.QueryRowContext(ctx, "SELECT value FROM secret WHERE key = ?", key).Scan(&v)
 	if errors.Is(err, sql.ErrNoRows) {
-		return "", waxerr.New(waxerr.CodeNotFound, "store.GetSecret", "no such secret: "+key)
+		return "", waxerr.New(waxerr.CodeNotFound, op, "no such secret: "+key)
 	}
 	if err != nil {
-		return "", waxerr.Wrap(waxerr.CodeIO, "store.GetSecret", err)
+		return "", waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	if looksSealed(v) {
+		if s.cipher == nil {
+			return "", waxerr.New(waxerr.CodeInvalid, op, "secret is sealed but no cipher is configured: "+key)
+		}
+		return openValue(s.cipher, key, v)
 	}
 	return v, nil
 }
@@ -60,6 +83,8 @@ func (s *Store) BackupTo(ctx context.Context, dest string) error {
 	if _, err := s.read.ExecContext(ctx, "VACUUM INTO ?", dest); err != nil {
 		return waxerr.Wrapf(waxerr.CodeIO, op, err, "backing up to %s", dest)
 	}
+	// The backup carries the secret table, so restrict it like the live catalog.
+	s.restrictSecretFiles(dest)
 	return nil
 }
 

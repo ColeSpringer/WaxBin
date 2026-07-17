@@ -104,6 +104,18 @@ func attachArtTxChanged(ctx context.Context, tx *sql.Tx, itemID int64, img *mode
 	return attachEntityArtTxChanged(ctx, tx, "track", itemID, img)
 }
 
+// insertArtSourceTx dedups a decoded/probed cover into the content-addressed
+// art_source store (keyed by content hash), a no-op when the source is already
+// present. It is the single art-blob writer shared by the front-cover attach and the
+// role-scoped entity-art set.
+func insertArtSourceTx(ctx context.Context, tx *sql.Tx, img *model.ArtImage) error {
+	_, err := tx.ExecContext(ctx,
+		`INSERT OR IGNORE INTO art_source(hash, format, width, height, size, data, created_at)
+		 VALUES (?,?,?,?,?,?,?)`,
+		img.Hash, img.Format, img.Width, img.Height, len(img.Data), img.Data, nowNS())
+	return err
+}
+
 // attachEntityArtTx is the error-only wrapper over attachEntityArtTxChanged for the
 // callers that do not need the changed signal.
 func attachEntityArtTx(ctx context.Context, tx *sql.Tx, entityType string, entityID int64, img *model.ArtImage) error {
@@ -133,10 +145,7 @@ func attachEntityArtTxChanged(ctx context.Context, tx *sql.Tx, entityType string
 		return false, nil
 	}
 
-	if _, err := tx.ExecContext(ctx,
-		`INSERT OR IGNORE INTO art_source(hash, format, width, height, size, data, created_at)
-		 VALUES (?,?,?,?,?,?,?)`,
-		img.Hash, img.Format, img.Width, img.Height, len(img.Data), img.Data, nowNS()); err != nil {
+	if err := insertArtSourceTx(ctx, tx, img); err != nil {
 		return false, err
 	}
 	// Re-point this entity's front cover; an entity has exactly one. When the old

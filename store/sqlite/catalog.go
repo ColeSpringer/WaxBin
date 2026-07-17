@@ -138,6 +138,16 @@ func (s *Store) PutScannedTrack(ctx context.Context, in model.PutScannedTrackInp
 			}
 		}
 
+		// Overlay the item's locked fields onto the scanned values before any writer
+		// runs, so a curated edit survives a re-derive-from-disk `scan --force`. Runs
+		// after the essence-algorithm re-key above so it resolves the (possibly re-keyed)
+		// existing item. Off only for `scan --force --ignore-locks`.
+		if in.PreserveLocks {
+			if err := preserveLockedTrackFieldsTx(ctx, tx, &in.Track, &in.Item); err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+		}
+
 		itemID, itemPID, created, stateChanged, err := upsertItem(ctx, tx, in.Item, now, in.PreferredItemPID)
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
@@ -177,11 +187,11 @@ func (s *Store) PutScannedTrack(ctx context.Context, in model.PutScannedTrackInp
 		// so a freshly resolved album_id is available to map art onto; an unchanged
 		// rescan reuses the album_id persisted by a prior scan. Their changed flags feed
 		// the item delta below so a lyrics/cover-only change is not silent to consumers.
-		lyricsChanged, err := putLyricsTx(ctx, tx, itemID, in.Lyrics)
+		lyricsChanged, err := putLyricsTx(ctx, tx, itemID, in.Lyrics, in.PreserveLocks)
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
-		artChanged, err := attachArtTxChanged(ctx, tx, itemID, in.CoverArt)
+		artChanged, err := attachArtRespectingLockTx(ctx, tx, itemID, in.CoverArt, in.PreserveLocks)
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}

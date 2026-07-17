@@ -18,12 +18,15 @@ var trackEditFields = map[string]bool{
 	"title": true, "artist": true, "album_artist": true, "album": true,
 	"composer": true, "comment": true, "genre": true, "year": true,
 	"track_no": true, "disc_no": true,
+	"isrc": true, "mbid": true, "compilation": true,
 }
 
 // bookEditFields are the fields editable on a book item.
 var bookEditFields = map[string]bool{
 	"title": true, "author": true, "narrator": true, "series": true,
 	"subtitle": true, "genre": true, "year": true,
+	"asin": true, "isbn": true, "publisher": true, "edition": true,
+	"description": true, "mbid": true,
 }
 
 // editEntityFields are the track fields whose edit re-resolves normalized entities
@@ -34,14 +37,22 @@ var editEntityFields = map[string]bool{
 	"artist": true, "album_artist": true, "album": true, "genre": true, "year": true,
 }
 
-// editableFieldsForKind returns the editable-field set for an item kind, or nil for
-// a kind with no edit path (episodes edit through the podcast subsystem).
+// episodeEditFields are the fields editable on a podcast episode item.
+var episodeEditFields = map[string]bool{
+	"title": true, "description": true, "pinned": true, "season": true,
+	"episode_no": true, "episode_type": true, "explicit": true, "link": true,
+}
+
+// editableFieldsForKind returns the editable-field set for an item kind, or nil for a
+// kind with no edit path.
 func editableFieldsForKind(kind string) map[string]bool {
 	switch kind {
 	case string(model.KindTrack):
 		return trackEditFields
 	case string(model.KindBook):
 		return bookEditFields
+	case string(model.KindEpisode):
+		return episodeEditFields
 	default:
 		return nil
 	}
@@ -105,59 +116,167 @@ func (s *Store) EditItemFields(ctx context.Context, itemPID model.PID, edits map
 		if err != nil {
 			return err
 		}
-		allowed := editableFieldsForKind(kind)
-		if allowed == nil {
-			return waxerr.New(waxerr.CodeUnsupported, op, "metadata editing is not supported for a "+kind+" item")
+		if err := validateEditTargetTx(ctx, tx, itemID, kind, fields, force, op); err != nil {
+			return err
 		}
-		for _, f := range fields {
-			if !allowed[f] {
-				return waxerr.New(waxerr.CodeInvalid, op, "field "+f+" is not editable on a "+kind+" item")
-			}
+		affected := newAffectedRollups()
+		if err := applyItemEditTx(ctx, tx, itemPID, itemID, kind, fields, norm, source, lock, op, affected); err != nil {
+			return err
 		}
-
-		// Honor locks unless force: reject the whole edit if any target field is
-		// locked, so a partial edit never lands.
-		if !force {
-			for _, f := range fields {
-				locked, err := fieldLockedTx(ctx, tx, itemID, f)
-				if err != nil {
-					return err
-				}
-				if locked {
-					return waxerr.New(waxerr.CodeLocked, op, "field is locked (use force to override): "+f)
-				}
-			}
-		}
-
-		switch kind {
-		case string(model.KindTrack):
-			if err := editTrackFieldsTx(ctx, tx, itemID, fields, norm, op); err != nil {
-				return err
-			}
-		case string(model.KindBook):
-			if err := editBookFieldsTx(ctx, tx, itemID, fields, norm, op); err != nil {
-				return err
-			}
-		}
-
-		// Record a provenance row for every edited field with the source, the curated
-		// value, and a null provider. A user or organize edit has no external provider;
-		// enrichment is what fills provider later. This runs in the same transaction as
-		// the column writes, so the whole edit commits or rolls back together.
-		now := nowNS()
-		for _, f := range fields {
-			if err := upsertEditProvenanceTx(ctx, tx, itemID, f, source, norm[f], lock, now); err != nil {
+		if !affected.empty() {
+			if err := maintainRollupsTx(ctx, tx, affected, nowNS()); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 		}
-		return appendChange(ctx, tx, "item", itemPID, model.OpUpdate)
+		return nil
 	})
+}
+
+// validateEditTargetTx checks that every field applies to the item's kind and, unless
+// force is set, that no target field is locked. A kind mismatch (album on a book,
+// author on a track) or a missing edit path is CodeInvalid/CodeUnsupported; a locked
+// field is CodeLocked.
+func validateEditTargetTx(ctx context.Context, tx *sql.Tx, itemID int64, kind string, fields []string, force bool, op string) error {
+	allowed := editableFieldsForKind(kind)
+	if allowed == nil {
+		return waxerr.New(waxerr.CodeUnsupported, op, "metadata editing is not supported for a "+kind+" item")
+	}
+	for _, f := range fields {
+		if !allowed[f] {
+			return waxerr.New(waxerr.CodeInvalid, op, "field "+f+" is not editable on a "+kind+" item")
+		}
+	}
+	if force {
+		return nil
+	}
+	// One query for the item's locked set, then membership checks, rather than a
+	// per-field probe (which is N×F queries across a batch).
+	locked, err := lockedFieldSetTx(ctx, tx, itemID)
+	if err != nil {
+		return err
+	}
+	for _, f := range fields {
+		if locked[f] {
+			return waxerr.New(waxerr.CodeLocked, op, "field is locked (use force to override): "+f)
+		}
+	}
+	return nil
+}
+
+// applyItemEditTx applies the edits to one already-validated item: it writes the
+// kind-specific columns and re-resolves entities into the shared affected set (the
+// caller finalizes the rollups so a batch can union them once), records a provenance
+// row per field, and emits one item change delta. It does NOT call maintainRollupsTx.
+func applyItemEditTx(ctx context.Context, tx *sql.Tx, itemPID model.PID, itemID int64, kind string, fields []string, norm map[string]string, source model.ProvenanceSource, lock bool, op string, affected *affectedRollups) error {
+	switch kind {
+	case string(model.KindTrack):
+		if err := editTrackFieldsTx(ctx, tx, itemID, fields, norm, op, affected); err != nil {
+			return err
+		}
+	case string(model.KindBook):
+		if err := editBookFieldsTx(ctx, tx, itemID, fields, norm, op, affected); err != nil {
+			return err
+		}
+	case string(model.KindEpisode):
+		if err := editEpisodeFieldsTx(ctx, tx, itemID, fields, norm, op); err != nil {
+			return err
+		}
+	}
+
+	// Record a provenance row for every edited field with the source, the curated
+	// value, and a null provider. A user or organize edit has no external provider;
+	// enrichment is what fills provider later. This runs in the same transaction as
+	// the column writes, so the whole edit commits or rolls back together.
+	now := nowNS()
+	for _, f := range fields {
+		if err := upsertEditProvenanceTx(ctx, tx, itemID, f, source, norm[f], lock, now); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+	}
+	return appendChange(ctx, tx, "item", itemPID, model.OpUpdate)
+}
+
+// EditManyFields applies the same field edits to several track and/or book items in
+// one transaction, so the whole batch commits or rolls back together. Validation runs
+// per item up front inside the transaction: a field that does not apply to an item's
+// kind is CodeInvalid and aborts the batch. A locked target field aborts with
+// CodeLocked unless force is set; with skipLocked the locked item is skipped (and
+// reported) instead of failing the batch. The touched entities' rollups are
+// recomputed once over the union of every edited item. Duplicate pids are collapsed.
+func (s *Store) EditManyFields(ctx context.Context, itemPIDs []model.PID, edits map[string]string, source model.ProvenanceSource, lock, force, skipLocked bool) (model.BatchEditResult, error) {
+	const op = "store.EditManyFields"
+	var res model.BatchEditResult
+	if len(itemPIDs) == 0 {
+		return res, waxerr.New(waxerr.CodeInvalid, op, "no items to edit")
+	}
+	if len(edits) == 0 {
+		return res, waxerr.New(waxerr.CodeInvalid, op, "no fields to edit")
+	}
+	if !source.Valid() {
+		return res, waxerr.New(waxerr.CodeInvalid, op, "invalid provenance source: "+string(source))
+	}
+	fields := make([]string, 0, len(edits))
+	for f := range edits {
+		if !model.IsMetadataField(f) {
+			return res, waxerr.New(waxerr.CodeInvalid, op, "not an editable metadata field: "+f)
+		}
+		fields = append(fields, f)
+	}
+	sort.Strings(fields)
+	norm := make(map[string]string, len(edits))
+	for _, f := range fields {
+		norm[f] = strings.TrimSpace(edits[f])
+	}
+
+	// Collapse duplicate pids, preserving first-seen order, so an item is edited once.
+	unique := make([]model.PID, 0, len(itemPIDs))
+	seen := make(map[model.PID]struct{}, len(itemPIDs))
+	for _, pid := range itemPIDs {
+		if _, ok := seen[pid]; ok {
+			continue
+		}
+		seen[pid] = struct{}{}
+		unique = append(unique, pid)
+	}
+
+	err := s.writeTx(ctx, func(tx *sql.Tx) error {
+		affected := newAffectedRollups()
+		for _, pid := range unique {
+			itemID, kind, err := itemIDKindByPIDTx(ctx, tx, pid, op)
+			if err != nil {
+				return err
+			}
+			if err := validateEditTargetTx(ctx, tx, itemID, kind, fields, force, op); err != nil {
+				// A locked field is skippable when skipLocked is set; a kind mismatch
+				// always aborts the batch (the caller's field set is wrong for this item).
+				if skipLocked && waxerr.Is(err, waxerr.CodeLocked) {
+					res.Skipped = append(res.Skipped, pid)
+					continue
+				}
+				return err
+			}
+			if err := applyItemEditTx(ctx, tx, pid, itemID, kind, fields, norm, source, lock, op, affected); err != nil {
+				return err
+			}
+			res.Edited = append(res.Edited, pid)
+		}
+		if !affected.empty() {
+			if err := maintainRollupsTx(ctx, tx, affected, nowNS()); err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return model.BatchEditResult{}, err
+	}
+	return res, nil
 }
 
 // editTrackFieldsTx applies the edits to a track item. It mutates the loaded track,
 // updates the title on playable_item, and when an entity field changed re-resolves
 // the entities and their rollups and rebuilds the FTS row.
-func editTrackFieldsTx(ctx context.Context, tx *sql.Tx, itemID int64, fields []string, edits map[string]string, op string) error {
+func editTrackFieldsTx(ctx context.Context, tx *sql.Tx, itemID int64, fields []string, edits map[string]string, op string, affected *affectedRollups) error {
 	tr, title, filePath, err := loadTrackForEditTx(ctx, tx, itemID)
 	if err != nil {
 		return err
@@ -198,9 +317,9 @@ func editTrackFieldsTx(ctx context.Context, tx *sql.Tx, itemID int64, fields []s
 	switch {
 	case touchEntities:
 		// Collect the entities the item belongs to now, re-resolve its FKs and genres
-		// from the mutated track (this also rebuilds FTS), collect the entities it belongs
-		// to after, and recompute the rollups for that combined set only.
-		affected := newAffectedRollups()
+		// from the mutated track (this also rebuilds FTS), and collect the entities it
+		// belongs to after into the caller-supplied set. The caller finalizes the rollups
+		// so a batch unions every item's touched entities and recomputes once.
 		if err := affected.collect(ctx, tx, itemID); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
@@ -209,11 +328,6 @@ func editTrackFieldsTx(ctx context.Context, tx *sql.Tx, itemID int64, fields []s
 		}
 		if err := affected.collect(ctx, tx, itemID); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
-		}
-		if !affected.empty() {
-			if err := maintainRollupsTx(ctx, tx, affected, nowNS()); err != nil {
-				return waxerr.Wrap(waxerr.CodeIO, op, err)
-			}
 		}
 	case touchTitle:
 		// A title-only edit still needs its FTS row rebuilt, since title is the heaviest
@@ -230,7 +344,7 @@ func editTrackFieldsTx(ctx context.Context, tx *sql.Tx, itemID int64, fields []s
 // contributor artists and series, rebuilds the item genres and FTS row, and refreshes
 // the touched entities' rollups. Reusing upsertBook, the scanner's own book writer,
 // means a user edit resolves identity the same way a scan does.
-func editBookFieldsTx(ctx context.Context, tx *sql.Tx, itemID int64, fields []string, edits map[string]string, op string) error {
+func editBookFieldsTx(ctx context.Context, tx *sql.Tx, itemID int64, fields []string, edits map[string]string, op string, affected *affectedRollups) error {
 	b, title, err := loadBookForEditTx(ctx, tx, itemID)
 	if err != nil {
 		return err
@@ -261,10 +375,9 @@ func editBookFieldsTx(ctx context.Context, tx *sql.Tx, itemID int64, fields []st
 	switch {
 	case touchBook:
 		// upsertBook re-resolves the series and contributors, adding the touched artists
-		// to affected, then rewrites the book row, syncs item genres, and rebuilds the
-		// book FTS row from the title updated above. Collecting genres before and after
-		// keeps the genre rollup current.
-		affected := newAffectedRollups()
+		// to the caller-supplied affected set, then rewrites the book row, syncs item
+		// genres, and rebuilds the book FTS row from the title updated above. Collecting
+		// genres before and after keeps the genre rollup current; the caller finalizes.
 		if err := affected.collect(ctx, tx, itemID); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
@@ -273,11 +386,6 @@ func editBookFieldsTx(ctx context.Context, tx *sql.Tx, itemID int64, fields []st
 		}
 		if err := affected.collect(ctx, tx, itemID); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
-		}
-		if !affected.empty() {
-			if err := maintainRollupsTx(ctx, tx, affected, nowNS()); err != nil {
-				return waxerr.Wrap(waxerr.CodeIO, op, err)
-			}
 		}
 	case touchTitle:
 		if err := syncBookSearchFTS(ctx, tx, itemID, b, bookAuthorDisplay(b)); err != nil {
@@ -306,6 +414,19 @@ func applyTrackEdit(tr *model.Track, field, value, op string) error {
 	case "genre":
 		tr.Genre = value
 		tr.Genres = identity.SplitGenres(value)
+	case "isrc":
+		tr.ISRC = value
+	case "mbid":
+		if err := validateMBIDField(value, op); err != nil {
+			return err
+		}
+		tr.MBID = value
+	case "compilation":
+		b, err := parseBoolField(value, "compilation", op)
+		if err != nil {
+			return err
+		}
+		tr.Compilation = b
 	case "year":
 		n, err := parseIntField(value, "year", op)
 		if err != nil {
@@ -352,6 +473,21 @@ func applyBookEdit(b *model.Book, field, value, op string) error {
 	case "genre":
 		b.Genre = value
 		b.Genres = identity.SplitGenres(value)
+	case "publisher":
+		b.Publisher = value
+	case "asin":
+		b.ASIN = value
+	case "isbn":
+		b.ISBN = value
+	case "edition":
+		b.Edition = value
+	case "description":
+		b.Description = value
+	case "mbid":
+		if err := validateMBIDField(value, op); err != nil {
+			return err
+		}
+		b.MBID = value
 	case "year":
 		n, err := parseIntField(value, "year", op)
 		if err != nil {
@@ -392,6 +528,47 @@ func parseIntField(value, field, op string) (int, error) {
 		return 0, waxerr.New(waxerr.CodeInvalid, op, "field "+field+" cannot be negative: "+value)
 	}
 	return n, nil
+}
+
+// parseBoolField parses a boolean field value via the shared model vocabulary. An
+// empty string clears the field to false. A value it does not recognize is a usage
+// error.
+func parseBoolField(value, field, op string) (bool, error) {
+	v, ok := model.ParseBoolValue(value)
+	if !ok {
+		return false, waxerr.New(waxerr.CodeInvalid, op, "field "+field+" must be a boolean: "+value)
+	}
+	return v, nil
+}
+
+// validateMBIDField accepts an empty value (a clear) or a canonical UUID. The
+// MusicBrainz identifiers WaxBin stores are UUIDs; a malformed one is a usage error
+// rather than something to persist and later fail to match.
+func validateMBIDField(value, op string) error {
+	if value == "" || isCanonicalUUID(value) {
+		return nil
+	}
+	return waxerr.New(waxerr.CodeInvalid, op, "mbid must be a UUID or empty: "+value)
+}
+
+// isCanonicalUUID reports whether s is a canonical 8-4-4-4-12 hex UUID.
+func isCanonicalUUID(s string) bool {
+	if len(s) != 36 {
+		return false
+	}
+	for i, r := range s {
+		switch i {
+		case 8, 13, 18, 23:
+			if r != '-' {
+				return false
+			}
+		default:
+			if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F')) {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // loadTrackForEditTx reads a track item's current denormalized columns, title, and
@@ -453,11 +630,12 @@ func loadTrackForEditTx(ctx context.Context, tx *sql.Tx, itemID int64) (model.Tr
 func loadBookForEditTx(ctx context.Context, tx *sql.Tx, itemID int64) (model.Book, string, error) {
 	b := model.Book{ItemID: itemID}
 	var seriesID, year, abridged sql.NullInt64
+	var mbid sql.NullString
 	err := tx.QueryRowContext(ctx, `SELECT subtitle, author, author_sort, narrator, series_id,
-		series_seq, year, publisher, asin, isbn, edition, abridged, description, genre
+		series_seq, year, publisher, asin, isbn, edition, abridged, description, genre, mbid
 		FROM book WHERE item_id = ?`, itemID).Scan(
 		&b.Subtitle, &b.Author, &b.AuthorSort, &b.Narrator, &seriesID,
-		&b.SeriesSeq, &year, &b.Publisher, &b.ASIN, &b.ISBN, &b.Edition, &abridged, &b.Description, &b.Genre)
+		&b.SeriesSeq, &year, &b.Publisher, &b.ASIN, &b.ISBN, &b.Edition, &abridged, &b.Description, &b.Genre, &mbid)
 	if errors.Is(err, sql.ErrNoRows) {
 		return b, "", waxerr.New(waxerr.CodeNotFound, "store.EditItemFields", "item has no book row")
 	}
@@ -465,6 +643,7 @@ func loadBookForEditTx(ctx context.Context, tx *sql.Tx, itemID int64) (model.Boo
 		return b, "", waxerr.Wrap(waxerr.CodeIO, "store.EditItemFields", err)
 	}
 	b.Year = int(year.Int64)
+	b.MBID = mbid.String
 	if abridged.Valid {
 		v := abridged.Int64 != 0
 		b.Abridged = &v

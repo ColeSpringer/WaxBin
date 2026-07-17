@@ -66,5 +66,71 @@ func newArtCmd(g *globals) *cobra.Command {
 	f.StringVar(&entType, "type", "track", "entity type: track|album|release_group|artist|genre")
 	f.IntVar(&size, "size", 0, "thumbnail max dimension in px (0 = original)")
 	f.StringVar(&outPath, "out", "", "write image bytes to this file instead of stdout")
+	cmd.AddCommand(newArtSetCmd(g))
+	return cmd
+}
+
+func newArtSetCmd(g *globals) *cobra.Command {
+	var (
+		entType  string
+		role     string
+		filePath string
+		clear    bool
+		noLock   bool
+		force    bool
+	)
+	cmd := &cobra.Command{
+		Use:   "set <pid> --file <image>",
+		Short: "Set (or clear) an entity's cover art from an image file",
+		Long: "Sets cover art for a track/book item, or for an album/artist/release_group/genre/" +
+			"podcast entity (--type). The image bytes come from --file; --clear removes the cover. " +
+			"An item cover locks the item's art field by default so a scan does not re-derive it.",
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			et := model.ArtEntity(entType)
+			if !et.Valid() {
+				return waxerr.New(waxerr.CodeInvalid, "art set",
+					fmt.Sprintf("unknown --type %q", entType))
+			}
+			var raw []byte
+			if !clear {
+				if filePath == "" {
+					return waxerr.New(waxerr.CodeInvalid, "art set", "provide --file or --clear")
+				}
+				b, err := os.ReadFile(filePath)
+				if err != nil {
+					return waxerr.Wrapf(waxerr.CodeIO, "art set", err, "reading %s", filePath)
+				}
+				raw = b
+			}
+			m, _, err := g.openMutator(cmd)
+			if err != nil {
+				return err
+			}
+			defer m.Close()
+
+			pid := model.PID(args[0])
+			if et == model.ArtTrack {
+				if err := m.SetItemArt(ctx(cmd), pid, raw, !noLock, force); err != nil {
+					return err
+				}
+			} else if err := m.SetEntityArt(ctx(cmd), et, pid, role, raw); err != nil {
+				return err
+			}
+			if clear {
+				fmt.Fprintf(out(cmd), "cleared %s art for %s\n", et, pid)
+			} else {
+				fmt.Fprintf(out(cmd), "set %s art for %s (%d bytes)\n", et, pid, len(raw))
+			}
+			return nil
+		},
+	}
+	f := cmd.Flags()
+	f.StringVar(&entType, "type", "track", "entity type: track|album|release_group|artist|genre|podcast")
+	f.StringVar(&role, "role", "front", "art role for a non-item entity")
+	f.StringVar(&filePath, "file", "", "image file to set as the cover")
+	f.BoolVar(&clear, "clear", false, "remove the cover instead of setting one")
+	f.BoolVar(&noLock, "no-lock", false, "do not lock an item's art field (it defaults to locked)")
+	f.BoolVar(&force, "force", false, "override a locked art field")
 	return cmd
 }
