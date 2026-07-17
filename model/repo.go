@@ -93,10 +93,11 @@ type PutScannedBookInput struct {
 
 // PutScannedVirtualTracksInput carries a single-file album rip and the virtual
 // tracks a .cue sheet carves out of it. Every track shares the one backing File
-// through its own primary item_file edge, which carries the track's [StartMS, EndMS)
-// offset window; the tracks are reconciled as a SET, so a rescan adds, updates, and
-// removes the whole set against the file at once, without the single-owner detach
-// that PutScannedTrack applies to a file. The store owns PID assignment.
+// through its own primary item_file edge, which carries the track's
+// [StartFrames, EndFrames) offset window; the tracks are reconciled as a SET, so a
+// rescan adds, updates, and removes the whole set against the file at once, without
+// the single-owner detach that PutScannedTrack applies to a file. The store owns PID
+// assignment.
 type PutScannedVirtualTracksInput struct {
 	LibraryID int64
 	File      File
@@ -119,13 +120,16 @@ type PutScannedVirtualTracksInput struct {
 }
 
 // VirtualTrack is one cue TRACK of a single-file rip: a full track item plus the
-// [StartMS, EndMS) window it plays within the shared file. EndMS is 0 for the final
-// track when the file's own duration is unknown (it plays to the end of the file).
+// [StartFrames, EndFrames) window it plays within the shared file, in CD frames
+// (75/sec), the unit the .cue is written in. EndFrames is 0 for the final track,
+// which runs to the end of the file. The sheet names no end for that one, and the
+// file's own duration is stored in milliseconds, which cannot be converted back to a
+// frame without losing the sample the boundary sits on.
 type VirtualTrack struct {
-	Item    PlayableItem // Kind=KindTrack, IdentityKey=identity.VirtualTrackKey(...)
-	Track   Track
-	StartMS int64
-	EndMS   int64
+	Item        PlayableItem // Kind=KindTrack, IdentityKey=identity.VirtualTrackKey(...)
+	Track       Track
+	StartFrames int64
+	EndFrames   int64
 }
 
 // ScanItemResult reports what the store did for a PutScannedTrack call, enough

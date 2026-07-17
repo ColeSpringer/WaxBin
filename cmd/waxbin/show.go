@@ -49,7 +49,13 @@ func newShowCmd(g *globals) *cobra.Command {
 			fmt.Fprintf(w, "duration(ms): %d\n", v.DurationMS)
 			if v.Virtual {
 				// A cue-carved virtual track plays only this window of the shared file.
-				fmt.Fprintf(w, "window(ms):   [%d, %d) of a shared file\n", v.StartMS, v.EndMS)
+				// Frames (75/sec) are what is stored and what converts to an exact sample;
+				// the duration above already gives the window's length in ms.
+				if v.EndFrames == 0 {
+					fmt.Fprintf(w, "window:       frames [%d, end) of a shared file\n", v.StartFrames)
+				} else {
+					fmt.Fprintf(w, "window:       frames [%d, %d) of a shared file\n", v.StartFrames, v.EndFrames)
+				}
 			}
 			if ld != nil {
 				fmt.Fprintf(w, "replaygain:   track %+.2f dB (peak %.3f)", ld.TrackGainDB, ld.TrackPeak)

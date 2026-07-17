@@ -38,22 +38,34 @@ const itemJoins = ` FROM playable_item pi
 // itemEffectiveDurationExpr is the playable duration of one item, in milliseconds,
 // given its primary item_file edge (alias pf) and backing file (alias f). A virtual
 // track carved from a shared single-file rip by a .cue sheet plays only its window
-// [start_ms, end_ms) within the file, so its duration is that window; every other
-// item plays the whole file. It is reused verbatim by the item read view, the
+// [start_frames, end_frames) within the file, so its duration is that window; every
+// other item plays the whole file. It is reused verbatim by the item read view, the
 // duration_ms query field, the maintained rollups, db verify's rollup-drift checks,
 // and the library stats total, so display, filter, and aggregates can never
 // disagree. Every one of those sites already binds the pf and f aliases it depends
 // on.
 //
+// The window is stored in CD frames and the file's duration in milliseconds, so both
+// branches convert to milliseconds here. The frame delta converts as a unit:
+// converting each endpoint and subtracting (end*1000/75 - start*1000/75) truncates
+// twice and drifts, because frames 1 and 3 are a 2-frame window, 26 ms truncated,
+// but 40 - 13 reports 27.
+//
+// The 75 is model.FramesPerSecond, spelled out because a SQL string constant cannot
+// reference a Go one and stay a constant. It is the CD format's fixed frame rate, so
+// it does not drift; see model.FramesToMS, which is this same arithmetic in Go.
+//
 // The MAX(0, ...) floors the window against a malformed or mismatched cue: if the
 // final track's start lies past the file's probed duration (its end is left open, so
 // the window falls back to f.duration_ms), the raw subtraction would be negative and
 // would corrupt every duration sum. A window of genuinely unknown length (both
-// end_ms and f.duration_ms NULL) still yields NULL, since scalar MAX returns NULL
+// end_frames and f.duration_ms NULL) still yields NULL, since scalar MAX returns NULL
 // when any argument is NULL, so it is skipped in a SUM and COALESCEd in the view,
 // exactly as before.
-const itemEffectiveDurationExpr = `CASE WHEN pf.start_ms IS NOT NULL ` +
-	`THEN MAX(0, COALESCE(pf.end_ms, f.duration_ms) - pf.start_ms) ELSE f.duration_ms END`
+const itemEffectiveDurationExpr = `CASE WHEN pf.start_frames IS NOT NULL ` +
+	`THEN MAX(0, COALESCE((pf.end_frames - pf.start_frames) * 1000 / 75, ` +
+	`f.duration_ms - pf.start_frames * 1000 / 75)) ` +
+	`ELSE f.duration_ms END`
 
 // itemViewCols is the column list for an item read-view, shared by the plain
 // select and the keyset-paginated select (which prepends pi.sort_key). The shared
@@ -64,8 +76,9 @@ const itemEffectiveDurationExpr = `CASE WHEN pf.start_ms IS NOT NULL ` +
 // book's denormalized total_duration_ms (the sum of its parts), then the item's
 // effective duration (a virtual track's window, else the primary file's whole
 // duration for a downloaded episode or a track), then the feed-declared episode
-// duration (an undownloaded episode). The trailing pf.start_ms/pf.end_ms expose a
-// virtual track's offset window.
+// duration (an undownloaded episode). The trailing pf.start_frames/pf.end_frames
+// expose a virtual track's offset window, and f.sample_rate rides along beside the
+// container and codec so a consumer can convert that window to samples.
 const itemViewCols = `pi.pid, pi.kind, pi.state, pi.title,
 	COALESCE(NULLIF(t.artist,''), bk.author, pod.title, ''),
 	COALESCE(NULLIF(t.album_artist,''), bk.author, pod.title, ''),
@@ -78,7 +91,7 @@ const itemViewCols = `pi.pid, pi.kind, pi.state, pi.title,
 	COALESCE(acq.source_type, pod.source_type, 'local'),
 	f.pid, f.path, f.display_path,
 	COALESCE(bk.total_duration_ms, ` + itemEffectiveDurationExpr + `, ep.duration_ms),
-	f.container, f.codec, pf.start_ms, pf.end_ms`
+	f.container, f.codec, f.sample_rate, pf.start_frames, pf.end_frames`
 
 const itemSelect = `SELECT ` + itemViewCols + itemJoins
 
@@ -98,7 +111,8 @@ type itemViewNulls struct {
 	trackNo, discNo, year, dur    sql.NullInt64
 	compilation                   sql.NullInt64
 	season, pubDate               sql.NullInt64
-	startMS, endMS                sql.NullInt64
+	sampleRate                    sql.NullInt64
+	startFrames, endFrames        sql.NullInt64
 	fpid, fdisp, container, codec sql.NullString
 	fpath                         []byte
 }
@@ -111,7 +125,8 @@ func itemViewDests(v *model.ItemView, n *itemViewNulls) []any {
 		&v.Artist, &v.AlbumArtist, &v.Album, &n.trackNo, &n.discNo, &n.year, &v.Genre, &n.compilation,
 		&v.AuthorSort, &v.Narrator, &v.Series, &v.SeriesSeq, &v.Subtitle, &v.ASIN,
 		&n.season, &n.pubDate, &v.Source,
-		&n.fpid, &n.fpath, &n.fdisp, &n.dur, &n.container, &n.codec, &n.startMS, &n.endMS,
+		&n.fpid, &n.fpath, &n.fdisp, &n.dur, &n.container, &n.codec, &n.sampleRate,
+		&n.startFrames, &n.endFrames,
 	}
 }
 
@@ -128,10 +143,13 @@ func (n *itemViewNulls) apply(v *model.ItemView) {
 	v.DisplayPath = n.fdisp.String
 	v.Container = n.container.String
 	v.Codec = n.codec.String
+	v.SampleRate = int(n.sampleRate.Int64)
 	// A non-NULL start offset marks the primary edge as a virtual track's window.
-	v.Virtual = n.startMS.Valid
-	v.StartMS = n.startMS.Int64
-	v.EndMS = n.endMS.Int64
+	v.Virtual = n.startFrames.Valid
+	v.StartFrames = n.startFrames.Int64
+	v.EndFrames = n.endFrames.Int64
+	v.StartMS = model.FramesToMS(n.startFrames.Int64)
+	v.EndMS = model.FramesToMS(n.endFrames.Int64)
 }
 
 func scanItemView(sc rowScanner) (*model.ItemView, error) {
@@ -392,26 +410,32 @@ func linkPrimaryFile(ctx context.Context, tx *sql.Tx, itemID, fileID int64) ([]i
 }
 
 // linkVirtualTrackFile attaches the shared file to a virtual-track item as its
-// primary edge, carrying the [startMS, endMS) offset window, WITHOUT detaching the
-// file from its sibling virtual tracks and WITHOUT deleting an item left with no
-// files. This is the deliberate departure from linkPrimaryFile's single-owner
-// detach: one file backs every virtual track of a single-file rip, so the normal
-// path would rip the edge out from under the siblings and delete them. It replaces
-// only this item's own primary edge and no-ops when that edge already carries the
-// same file and window, so a rescan of an unchanged rip stays silent. It reports
-// whether it changed the edge. startMS is stored verbatim (0 for the first track is
-// a real value, and its non-NULL presence is what marks the edge virtual); endMS is
-// stored NULL when 0 (the final track runs to the end of a file of unknown length).
-func linkVirtualTrackFile(ctx context.Context, tx *sql.Tx, itemID, fileID, startMS, endMS int64) (bool, error) {
+// primary edge, carrying the [startFrames, endFrames) offset window, WITHOUT
+// detaching the file from its sibling virtual tracks and WITHOUT deleting an item
+// left with no files. This is the deliberate departure from linkPrimaryFile's
+// single-owner detach: one file backs every virtual track of a single-file rip, so
+// the normal path would rip the edge out from under the siblings and delete them. It
+// replaces only this item's own primary edge and no-ops when that edge already
+// carries the same file and window, so a rescan of an unchanged rip stays silent. It
+// reports whether it changed the edge. startFrames is stored verbatim (0 for the
+// first track is a real value, and its non-NULL presence is what marks the edge
+// virtual); endFrames is stored NULL when 0.
+//
+// An endFrames of 0 is therefore a sentinel meaning "runs to the end of the file",
+// not a length: an empty [n, n) window is unrepresentable here by construction, and
+// passing one would read back as the whole file. The caller owes it a non-empty
+// window or an open end; scan's virtualTracksInput drops a cue track the next one
+// starts on top of for exactly this reason.
+func linkVirtualTrackFile(ctx context.Context, tx *sql.Tx, itemID, fileID, startFrames, endFrames int64) (bool, error) {
 	var curFile int64
 	var curStart, curEnd sql.NullInt64
 	err := tx.QueryRowContext(ctx,
-		"SELECT file_id, start_ms, end_ms FROM item_file WHERE item_id = ? AND role = 'primary'", itemID).
+		"SELECT file_id, start_frames, end_frames FROM item_file WHERE item_id = ? AND role = 'primary'", itemID).
 		Scan(&curFile, &curStart, &curEnd)
 	switch {
 	case err == nil:
-		if curFile == fileID && curStart.Valid && curStart.Int64 == startMS &&
-			curEnd.Valid == (endMS != 0) && curEnd.Int64 == endMS {
+		if curFile == fileID && curStart.Valid && curStart.Int64 == startFrames &&
+			curEnd.Valid == (endFrames != 0) && curEnd.Int64 == endFrames {
 			return false, nil // unchanged
 		}
 	case err != sql.ErrNoRows:
@@ -422,8 +446,8 @@ func linkVirtualTrackFile(ctx context.Context, tx *sql.Tx, itemID, fileID, start
 		return false, err
 	}
 	if _, err := tx.ExecContext(ctx,
-		"INSERT INTO item_file(item_id, file_id, role, position, start_ms, end_ms) VALUES (?,?,'primary',0,?,?)",
-		itemID, fileID, startMS, nullInt64(endMS)); err != nil {
+		"INSERT INTO item_file(item_id, file_id, role, position, start_frames, end_frames) VALUES (?,?,'primary',0,?,?)",
+		itemID, fileID, startFrames, nullInt64(endFrames)); err != nil {
 		return false, err
 	}
 	return true, nil

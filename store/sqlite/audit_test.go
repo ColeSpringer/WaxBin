@@ -2,8 +2,10 @@ package sqlite
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
+	"github.com/colespringer/waxbin/identity"
 	"github.com/colespringer/waxbin/model"
 )
 
@@ -224,5 +226,74 @@ func TestAuditFilesReturnsRows(t *testing.T) {
 	}
 	if files[0].Kind != model.FileAudio || files[0].ContentHash != "c1" || files[0].ItemPID == "" {
 		t.Errorf("file row = %+v", files[0])
+	}
+}
+
+// TestAuditFilesYieldsOneRowPerSharedRip: a single-file rip is backed by one primary
+// edge per virtual track, and these are FILE-level checks, so it must still come back
+// once. An ungated join returned it N times, which made the path-conflict check report
+// the file as colliding with itself at error severity (a non-zero exit for anyone with
+// a rip) and made integrity re-hash the same bytes once per track.
+func TestAuditFilesYieldsOneRowPerSharedRip(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+
+	// One rip carved into three virtual tracks: three primary edges onto one file.
+	tracks := make([]model.VirtualTrack, 3)
+	for i, w := range [][2]int64{{0, 9}, {9, 27}, {27, 0}} {
+		n := i + 1
+		title := fmt.Sprintf("R%d", n)
+		tracks[i] = model.VirtualTrack{
+			Item: model.PlayableItem{
+				Kind: model.KindTrack, State: model.StatePresent, Title: title,
+				SortKey: model.SortKey(title), IdentityKey: identity.VirtualTrackKey("eRip", n, w[0]),
+			},
+			Track:       model.Track{Artist: "Band", AlbumArtist: "Band", Album: "Rip", TrackNo: n},
+			StartFrames: w[0], EndFrames: w[1],
+		}
+	}
+	if _, err := st.PutScannedVirtualTracks(ctx, model.PutScannedVirtualTracksInput{
+		LibraryID: lib.ID,
+		File: model.File{
+			Path: []byte("/lib/rip.flac"), DisplayPath: "/lib/rip.flac", RelPath: []byte("rip.flac"),
+			Kind: model.FileAudio, Size: 5, MTimeNS: 1, ContentHash: "cRip", EssenceHash: "eRip",
+			DurationMS: 360, ScanState: model.ScanIndexed,
+		},
+		Tracks: tracks,
+	}); err != nil {
+		t.Fatalf("put virtual tracks: %v", err)
+	}
+	// A plain whole-file track alongside it, to pin that the gate did not cost the
+	// ordinary case its owning item.
+	putTrack(t, st, lib.ID, trackSpec{
+		path: "/lib/plain.flac", essence: "e2", content: "c2", title: "Plain", artist: "X", album: "A",
+	})
+
+	files, err := st.AuditFiles(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 2 {
+		t.Fatalf("audit files = %d, want 2 (the rip counts once despite backing 3 items): %+v",
+			len(files), files)
+	}
+	byPath := make(map[string]model.AuditFileInfo, len(files))
+	for _, f := range files {
+		byPath[f.DisplayPath] = f
+	}
+	rip, ok := byPath["/lib/rip.flac"]
+	if !ok {
+		t.Fatal("the rip's file is missing from the audit entirely; the gate must not drop it")
+	}
+	// No single item owns a shared rip, so the audit names none rather than picking an
+	// arbitrary sibling to pin a finding on.
+	if rip.ItemPID != "" {
+		t.Errorf("rip owning item = %q, want empty (3 virtual tracks share it; none owns it)", rip.ItemPID)
+	}
+	if rip.ContentHash != "cRip" {
+		t.Errorf("rip content hash = %q, want cRip (the integrity check needs it)", rip.ContentHash)
+	}
+	if plain := byPath["/lib/plain.flac"]; plain.ItemPID == "" {
+		t.Error("a whole-file track lost its owning item to the gate")
 	}
 }

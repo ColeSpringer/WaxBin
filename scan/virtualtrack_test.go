@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -77,8 +78,9 @@ func TestScanVirtualTracksFromCue(t *testing.T) {
 		t.Fatalf("virtual tracks = %d, want 2", len(items))
 	}
 	t1, t2 := items[0], items[1]
-	if !t1.Virtual || t1.StartMS != 0 || t1.EndMS != 66 || t1.DurationMS != 66 {
-		t.Errorf("track 1 = virtual %v [%d,%d] dur %d, want virtual [0,66] dur 66", t1.Virtual, t1.StartMS, t1.EndMS, t1.DurationMS)
+	if !t1.Virtual || t1.StartFrames != 0 || t1.EndFrames != 5 || t1.DurationMS != 66 {
+		t.Errorf("track 1 = virtual %v [%d,%d) frames dur %d, want virtual [0,5) dur 66",
+			t1.Virtual, t1.StartFrames, t1.EndFrames, t1.DurationMS)
 	}
 	if t1.Title != "First" || t1.Artist != "Alice" {
 		t.Errorf("track 1 = %q by %q, want First by Alice", t1.Title, t1.Artist)
@@ -89,8 +91,9 @@ func TestScanVirtualTracksFromCue(t *testing.T) {
 	}
 	// Track 2 has no performer of its own, so it inherits the album performer, and it
 	// runs to the end of the file.
-	if !t2.Virtual || t2.StartMS != 66 || t2.Artist != "Album Performer" {
-		t.Errorf("track 2 = virtual %v start %d by %q, want virtual start 66 by Album Performer", t2.Virtual, t2.StartMS, t2.Artist)
+	if !t2.Virtual || t2.StartFrames != 5 || t2.StartMS != 66 || t2.Artist != "Album Performer" {
+		t.Errorf("track 2 = virtual %v start %d frames / %d ms by %q, want virtual start 5 / 66 by Album Performer",
+			t2.Virtual, t2.StartFrames, t2.StartMS, t2.Artist)
 	}
 	f, err := st.FileByPID(ctx, t2.FilePID)
 	if err != nil {
@@ -99,8 +102,16 @@ func TestScanVirtualTracksFromCue(t *testing.T) {
 	if f.DurationMS <= 66 {
 		t.Fatalf("fixture file duration %d ms too short for the test", f.DurationMS)
 	}
-	if t2.EndMS != f.DurationMS || t2.DurationMS != f.DurationMS-66 {
-		t.Errorf("track 2 end = %d dur %d, want end %d dur %d", t2.EndMS, t2.DurationMS, f.DurationMS, f.DurationMS-66)
+	// The final track's end is left OPEN rather than copying the file's probed
+	// duration: ms->frames is the lossy direction and must not exist. The duration
+	// still reads back as the remainder of the file, through the COALESCE.
+	if t2.EndFrames != 0 || t2.EndMS != 0 {
+		t.Errorf("track 2 end = %d frames / %d ms, want 0 (the final track's end stays open)",
+			t2.EndFrames, t2.EndMS)
+	}
+	if t2.DurationMS != f.DurationMS-66 {
+		t.Errorf("track 2 dur = %d, want %d (the file's duration less the 5-frame start)",
+			t2.DurationMS, f.DurationMS-66)
 	}
 	if t1.FilePID != t2.FilePID {
 		t.Fatalf("virtual tracks must share one file: %s vs %s", t1.FilePID, t2.FilePID)
@@ -109,6 +120,175 @@ func TestScanVirtualTracksFromCue(t *testing.T) {
 	shared, err := st.FileSharedOrVirtual(ctx, t1.FilePID)
 	if err != nil || !shared {
 		t.Fatalf("FileSharedOrVirtual = %v (err %v), want true for a virtual-track file", shared, err)
+	}
+	assertScanConsistent(t, st)
+}
+
+// TestScanVirtualTracksDropsUnindexedTrack: a cue TRACK whose INDEX 01 will not parse
+// is dropped with a diagnostic rather than carved. Anchoring it at 0 would serve the
+// head of the album under its name, because a virtual track's start is its content
+// identity, not a seek hint.
+func TestScanVirtualTracksDropsUnindexedTrack(t *testing.T) {
+	st, lib, sc, _, root := fastPathFixture(t)
+	ctx := context.Background()
+
+	writeMP3Raw(t, filepath.Join(root, "album.mp3"),
+		testaudio.BuildMP3WithAudio("Whole", "A", "Al", 1, testaudio.AudioWithSeed(17)))
+	// TRACK 02's INDEX names 90 seconds, which MM:SS:FF cannot spell.
+	writeCue(t, filepath.Join(root, "album.cue"), "TITLE \"The Album\"\nFILE \"album.mp3\" WAVE\n"+
+		"  TRACK 01 AUDIO\n    TITLE \"Fine\"\n    INDEX 01 00:00:00\n"+
+		"  TRACK 02 AUDIO\n    TITLE \"Broken\"\n    INDEX 01 00:90:00\n"+
+		"  TRACK 03 AUDIO\n    TITLE \"Also Fine\"\n    INDEX 01 00:00:10\n")
+	scanAll(t, sc, lib, false)
+
+	items := itemsByTrack(t, st)
+	if len(items) != 2 {
+		t.Fatalf("virtual tracks = %d, want 2 (the unindexed TRACK 02 is dropped)", len(items))
+	}
+	for _, it := range items {
+		if it.Title == "Broken" {
+			t.Fatalf("the unindexed track was carved anyway, at frame %d", it.StartFrames)
+		}
+	}
+	// The survivors keep their own starts; nothing is anchored at 0 in TRACK 02's place.
+	if items[0].Title != "Fine" || items[0].StartFrames != 0 {
+		t.Errorf("track 1 = %q at frame %d, want Fine at 0", items[0].Title, items[0].StartFrames)
+	}
+	if items[1].Title != "Also Fine" || items[1].StartFrames != 10 {
+		t.Errorf("track 2 = %q at frame %d, want Also Fine at 10", items[1].Title, items[1].StartFrames)
+	}
+
+	// The drop is visible, not silent.
+	ds, err := st.FileDiagnostics(ctx)
+	if err != nil {
+		t.Fatalf("file diagnostics: %v", err)
+	}
+	found := 0
+	for _, d := range ds {
+		if d.Code == model.DiagCueTrackDropped {
+			found++
+		}
+	}
+	if found != 1 {
+		t.Fatalf("cue_track_dropped diagnostics = %d, want 1: %+v", found, ds)
+	}
+}
+
+// TestScanCueWithNoUsableTracksKeepsTheFile: a sheet whose every INDEX is malformed
+// names no windows, so the file is not a rip and must stay an ordinary whole-file
+// track. Carving it anyway committed the file with an empty track set: the pre-cue
+// track was detached and deleted, nothing replaced it, and the audio became
+// unreachable in the catalog.
+func TestScanCueWithNoUsableTracksKeepsTheFile(t *testing.T) {
+	st, lib, sc, _, root := fastPathFixture(t)
+	ctx := context.Background()
+	cuePath := filepath.Join(root, "album.cue")
+	writeMP3Raw(t, filepath.Join(root, "album.mp3"),
+		testaudio.BuildMP3WithAudio("Whole File", "A", "Al", 1, testaudio.AudioWithSeed(21)))
+
+	scanAll(t, sc, lib, false)
+	before := itemsByTrack(t, st)
+	if len(before) != 1 || before[0].Virtual {
+		t.Fatalf("first scan should yield one whole-file track, got %d", len(before))
+	}
+
+	// Every INDEX names 99 seconds, which MM:SS:FF cannot spell.
+	writeCue(t, cuePath, "TITLE \"X\"\nFILE \"album.mp3\" WAVE\n"+
+		"  TRACK 01 AUDIO\n    TITLE \"A\"\n    INDEX 01 00:99:00\n"+
+		"  TRACK 02 AUDIO\n    TITLE \"B\"\n    INDEX 01 00:99:01\n")
+	future := time.Now().Add(time.Hour)
+	_ = os.Chtimes(cuePath, future, future)
+	scanAll(t, sc, lib, false)
+
+	after := itemsByTrack(t, st)
+	if len(after) != 1 {
+		t.Fatalf("items = %d, want the whole-file track to survive an unusable cue", len(after))
+	}
+	if after[0].Virtual {
+		t.Error("a sheet that named no usable window must not produce a virtual track")
+	}
+	// The drop is reported even though the file never reached the rip path, and both
+	// tracks are named in the one row file_diagnostic's key allows per code.
+	ds, err := st.FileDiagnostics(ctx)
+	if err != nil {
+		t.Fatalf("file diagnostics: %v", err)
+	}
+	var got []model.FileDiagnostic
+	for _, d := range ds {
+		if d.Code == model.DiagCueTrackDropped {
+			got = append(got, d)
+		}
+	}
+	if len(got) != 1 {
+		t.Fatalf("cue_track_dropped diagnostics = %d, want exactly 1 summary row "+
+			"(the code is part of file_diagnostic's primary key, so extras would collide "+
+			"and vanish): %+v", len(got), got)
+	}
+	if !strings.Contains(got[0].Detail, "TRACK 01") || !strings.Contains(got[0].Detail, "TRACK 02") {
+		t.Errorf("summary names only some of the dropped tracks: %q", got[0].Detail)
+	}
+	assertScanConsistent(t, st)
+}
+
+// TestScanCueWithOneUsableTrackStaysWholeFile: one window over a whole file is just
+// the file. Counting the malformed track toward the >= 2 rip gate carved a single
+// virtual track spanning everything, which is strictly worse than a plain track: its
+// tags become unwritable and it exports no fingerprint.
+func TestScanCueWithOneUsableTrackStaysWholeFile(t *testing.T) {
+	st, lib, sc, _, root := fastPathFixture(t)
+	ctx := context.Background()
+	writeMP3Raw(t, filepath.Join(root, "album.mp3"),
+		testaudio.BuildMP3WithAudio("Whole File", "A", "Al", 1, testaudio.AudioWithSeed(22)))
+	writeCue(t, filepath.Join(root, "album.cue"), "TITLE \"X\"\nFILE \"album.mp3\" WAVE\n"+
+		"  TRACK 01 AUDIO\n    TITLE \"Good\"\n    INDEX 01 00:00:00\n"+
+		"  TRACK 02 AUDIO\n    TITLE \"Bad\"\n    INDEX 01 00:99:00\n")
+	scanAll(t, sc, lib, false)
+
+	items := itemsByTrack(t, st)
+	if len(items) != 1 {
+		t.Fatalf("items = %d, want 1 (one usable cue track is not a rip)", len(items))
+	}
+	if items[0].Virtual {
+		t.Errorf("item = %q virtual, want a plain whole-file track", items[0].Title)
+	}
+	shared, err := st.FileSharedOrVirtual(ctx, items[0].FilePID)
+	if err != nil {
+		t.Fatalf("FileSharedOrVirtual: %v", err)
+	}
+	if shared {
+		t.Error("a whole-file track's tags must stay writable; carving it as a virtual " +
+			"track would refuse every tag write-back")
+	}
+	assertScanConsistent(t, st)
+}
+
+// TestScanCueDropsEmptyWindow: two TRACKs on the same frame leave the first holding
+// nothing. It cannot be stored, because an end of 0 is the sentinel for "runs to the
+// end of the file", so an empty window would read back as the whole album under the
+// first track's name. That is the failure the frame window exists to prevent.
+func TestScanCueDropsEmptyWindow(t *testing.T) {
+	st, lib, sc, _, root := fastPathFixture(t)
+	writeMP3Raw(t, filepath.Join(root, "album.mp3"),
+		testaudio.BuildMP3WithAudio("Whole", "A", "Al", 1, testaudio.AudioWithSeed(23)))
+	writeCue(t, filepath.Join(root, "album.cue"), "TITLE \"X\"\nFILE \"album.mp3\" WAVE\n"+
+		"  TRACK 01 AUDIO\n    TITLE \"Empty\"\n    INDEX 01 00:00:00\n"+
+		"  TRACK 02 AUDIO\n    TITLE \"Real\"\n    INDEX 01 00:00:00\n"+
+		"  TRACK 03 AUDIO\n    TITLE \"Last\"\n    INDEX 01 00:00:10\n")
+	scanAll(t, sc, lib, false)
+
+	items := itemsByTrack(t, st)
+	if len(items) != 2 {
+		t.Fatalf("virtual tracks = %d, want 2 (the empty leading window is dropped): %+v",
+			len(items), items)
+	}
+	for _, it := range items {
+		if it.Title == "Empty" {
+			t.Fatalf("the empty track was stored as [%d,%d), which reads as the whole file",
+				it.StartFrames, it.EndFrames)
+		}
+		if it.EndFrames == 0 && it.Title != "Last" {
+			t.Errorf("%q stored an open end; only the final track runs to the end", it.Title)
+		}
 	}
 	assertScanConsistent(t, st)
 }

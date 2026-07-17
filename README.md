@@ -132,7 +132,7 @@ page, err := lib.Browse(ctx, read.ListNewest, read.BrowseOptions{Limit: 50})
 The stable facade lives in the root package; implementation subsystems live under
 `model/`, `store/sqlite/`, `identity/`, `decode/`, `analyze/`, `query/`, `read/`,
 `art/`, `meta/`, `scan/`, `organize/`, `inbox/`, `trash/`, `podcast/`, `enrich/`,
-`audit/`, `jobs/`, and `internal/`.
+`audit/`, `jobs/`, `pidpath/`, and `internal/`.
 
 ## License
 

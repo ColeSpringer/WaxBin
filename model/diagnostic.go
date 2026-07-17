@@ -30,6 +30,17 @@ const (
 	// is invisible: the user sees a sidecar beside the audio, no lyrics or chapters,
 	// and no explanation.
 	DiagSidecarSkipped DiagnosticCode = "sidecar_skipped"
+	// DiagCueTrackDropped marks a cue TRACK the scanner could not use: the sheet gave
+	// it no usable INDEX 01, or the next TRACK starts on the same frame and leaves it
+	// holding nothing. Such a track is dropped rather than anchored at 0, since a
+	// virtual track's content window is carved from its start offset and a book
+	// chapter's end is read off the next chapter's start; a fabricated 0 would claim
+	// the head of the file and truncate the track before it. The sheet's other tracks
+	// are used as usual.
+	//
+	// Without the diagnostic the drop is invisible: the user sees fewer tracks or
+	// chapters than the sheet declares, and no explanation.
+	DiagCueTrackDropped DiagnosticCode = "cue_track_dropped"
 	// DiagTagWriteLost marks an on-disk tag write that did not land a value as asked.
 	DiagTagWriteLost DiagnosticCode = "tag_write_lost"
 	// DiagTagWriteUnsynced marks a catalog field edit whose on-disk tag write-back did

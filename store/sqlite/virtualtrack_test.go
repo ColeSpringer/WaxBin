@@ -14,8 +14,10 @@ import (
 )
 
 // vtrackInput builds a virtual-track scan input for one single-file rip: each window
-// is a [start, end) pair, and the track number is its 1-based position, so the
-// offset-anchored identity key is stable when the trailing window is dropped.
+// is a [start, end) pair in CD frames (75/sec, so 3 frames is 40 ms), and the track
+// number is its 1-based position, so the offset-anchored identity key is stable when
+// the trailing window is dropped. dur is the backing file's duration in
+// milliseconds, which is what the file row stores.
 func vtrackInput(libID int64, path, essence, content string, dur int64, windows [][2]int64) model.PutScannedVirtualTracksInput {
 	tracks := make([]model.VirtualTrack, len(windows))
 	for i, w := range windows {
@@ -27,8 +29,8 @@ func vtrackInput(libID int64, path, essence, content string, dur int64, windows 
 				Title: title, SortKey: model.SortKey(title),
 				IdentityKey: identity.VirtualTrackKey(essence, n, w[0]),
 			},
-			Track:   model.Track{Artist: "Rip Artist", AlbumArtist: "Rip Artist", Album: "Rip Album", TrackNo: n},
-			StartMS: w[0], EndMS: w[1],
+			Track:       model.Track{Artist: "Rip Artist", AlbumArtist: "Rip Artist", Album: "Rip Album", TrackNo: n},
+			StartFrames: w[0], EndFrames: w[1],
 		}
 	}
 	return model.PutScannedVirtualTracksInput{
@@ -69,7 +71,9 @@ func TestVirtualTracksCreateAndOffsets(t *testing.T) {
 	ctx := context.Background()
 	st, lib := openTestStore(t)
 
-	in := vtrackInput(lib.ID, "/lib/album.mp3", "sha256:VE", "sha256:VC", 300, [][2]int64{{0, 100}, {100, 300}})
+	// Frames 0..9..27 over a 360 ms file: a 9-frame (120 ms) opener and an 18-frame
+	// (240 ms) remainder.
+	in := vtrackInput(lib.ID, "/lib/album.mp3", "sha256:VE", "sha256:VC", 360, [][2]int64{{0, 9}, {9, 27}})
 	res, err := st.PutScannedVirtualTracks(ctx, in)
 	if err != nil {
 		t.Fatalf("put virtual tracks: %v", err)
@@ -83,24 +87,30 @@ func TestVirtualTracksCreateAndOffsets(t *testing.T) {
 		t.Fatalf("virtual tracks = %d, want 2", len(items))
 	}
 	t1, t2 := items[0], items[1]
-	if !t1.Virtual || t1.StartMS != 0 || t1.EndMS != 100 || t1.DurationMS != 100 {
-		t.Errorf("track 1 = virtual %v [%d,%d] dur %d, want virtual [0,100] dur 100", t1.Virtual, t1.StartMS, t1.EndMS, t1.DurationMS)
+	if !t1.Virtual || t1.StartFrames != 0 || t1.EndFrames != 9 || t1.DurationMS != 120 {
+		t.Errorf("track 1 = virtual %v [%d,%d) frames dur %d, want virtual [0,9) dur 120",
+			t1.Virtual, t1.StartFrames, t1.EndFrames, t1.DurationMS)
 	}
-	if !t2.Virtual || t2.StartMS != 100 || t2.EndMS != 300 || t2.DurationMS != 200 {
-		t.Errorf("track 2 = virtual %v [%d,%d] dur %d, want virtual [100,300] dur 200", t2.Virtual, t2.StartMS, t2.EndMS, t2.DurationMS)
+	if !t2.Virtual || t2.StartFrames != 9 || t2.EndFrames != 27 || t2.DurationMS != 240 {
+		t.Errorf("track 2 = virtual %v [%d,%d) frames dur %d, want virtual [9,27) dur 240",
+			t2.Virtual, t2.StartFrames, t2.EndFrames, t2.DurationMS)
+	}
+	// The millisecond pair rides along, derived, for a player that seeks.
+	if t2.StartMS != 120 || t2.EndMS != 360 {
+		t.Errorf("track 2 ms window = [%d,%d), want [120,360)", t2.StartMS, t2.EndMS)
 	}
 	if t1.FilePID != t2.FilePID || t1.FilePID != res.FilePID {
 		t.Fatalf("virtual tracks must share one file: %s / %s / %s", t1.FilePID, t2.FilePID, res.FilePID)
 	}
 
-	// The library total sums the two windows (300), not the file duration once per
-	// track (600). Because db verify uses the same expression, it also stays clean.
+	// The library total sums the two windows (360), not the file duration once per
+	// track (720). Because db verify uses the same expression, it also stays clean.
 	stats, err := st.Stats(ctx, "", 5)
 	if err != nil {
 		t.Fatalf("stats: %v", err)
 	}
-	if stats.TotalDuration != 300 {
-		t.Fatalf("stats total = %d, want 300 (window sum, not inflated per-track file duration)", stats.TotalDuration)
+	if stats.TotalDuration != 360 {
+		t.Fatalf("stats total = %d, want 360 (window sum, not inflated per-track file duration)", stats.TotalDuration)
 	}
 	assertConsistent(t, st)
 
@@ -120,7 +130,7 @@ func TestVirtualTracksReconcileSet(t *testing.T) {
 
 	three := func() model.PutScannedVirtualTracksInput {
 		return vtrackInput(lib.ID, "/lib/album.mp3", "sha256:VE", "sha256:VC", 600,
-			[][2]int64{{0, 100}, {100, 300}, {300, 600}})
+			[][2]int64{{0, 9}, {9, 27}, {27, 45}})
 	}
 	if _, err := st.PutScannedVirtualTracks(ctx, three()); err != nil {
 		t.Fatalf("initial put: %v", err)
@@ -147,7 +157,7 @@ func TestVirtualTracksReconcileSet(t *testing.T) {
 	// Drop the trailing track: only it is deleted; the survivors keep their pids
 	// (linkVirtualTrackFile never detaches or deletes a sibling).
 	dropped := vtrackInput(lib.ID, "/lib/album.mp3", "sha256:VE", "sha256:VC", 600,
-		[][2]int64{{0, 100}, {100, 300}})
+		[][2]int64{{0, 9}, {9, 27}})
 	if _, err := st.PutScannedVirtualTracks(ctx, dropped); err != nil {
 		t.Fatalf("drop-track put: %v", err)
 	}
@@ -169,10 +179,10 @@ func TestVirtualTrackDurationNeverNegative(t *testing.T) {
 	ctx := context.Background()
 	st, lib := openTestStore(t)
 
-	// The file is 100 ms, but track 2 (the last) starts at 200 ms with an open end, so
-	// its window would compute as 100 - 200 = -100 without the floor.
-	in := vtrackInput(lib.ID, "/lib/album.mp3", "sha256:VE", "sha256:VC", 100,
-		[][2]int64{{0, 100}, {200, 0}})
+	// The file is 120 ms, but track 2 (the last) starts at frame 15 (200 ms) with an
+	// open end, so its window would compute as 120 - 200 = -80 without the floor.
+	in := vtrackInput(lib.ID, "/lib/album.mp3", "sha256:VE", "sha256:VC", 120,
+		[][2]int64{{0, 9}, {15, 0}})
 	if _, err := st.PutScannedVirtualTracks(ctx, in); err != nil {
 		t.Fatalf("put virtual tracks: %v", err)
 	}
@@ -185,8 +195,8 @@ func TestVirtualTrackDurationNeverNegative(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stats: %v", err)
 	}
-	if stats.TotalDuration != 100 {
-		t.Fatalf("stats total = %d, want 100 (the out-of-range window floors to 0)", stats.TotalDuration)
+	if stats.TotalDuration != 120 {
+		t.Fatalf("stats total = %d, want 120 (the out-of-range window floors to 0)", stats.TotalDuration)
 	}
 	assertConsistent(t, st)
 }
@@ -198,9 +208,10 @@ func TestVirtualTrackLyricsUsesWindowDuration(t *testing.T) {
 	ctx := context.Background()
 	st, lib := openTestStore(t)
 
-	// A 60 s file carved into a 3 s opening track and a 57 s remainder.
+	// A 60 s file (4500 frames) carved into a 3 s opening track (225 frames) and a
+	// 57 s remainder.
 	in := vtrackInput(lib.ID, "/lib/album.mp3", "sha256:VE", "sha256:VC", 60000,
-		[][2]int64{{0, 3000}, {3000, 60000}})
+		[][2]int64{{0, 225}, {225, 4500}})
 	if _, err := st.PutScannedVirtualTracks(ctx, in); err != nil {
 		t.Fatalf("put virtual tracks: %v", err)
 	}
@@ -217,7 +228,55 @@ func TestVirtualTrackLyricsUsesWindowDuration(t *testing.T) {
 		t.Errorf("track 1 lyrics duration = %d s, want 3 s (its window, not the 60 s file)", got)
 	}
 	if got := byTitle["Track 2"]; got != 57 {
-		t.Errorf("track 2 lyrics duration = %d s, want 57 s (window 3000..60000)", got)
+		t.Errorf("track 2 lyrics duration = %d s, want 57 s (window frames 225..4500)", got)
+	}
+}
+
+// TestVirtualTrackWindowRoundTripsExactly is the store half of the guard the frame
+// unit exists for: a window on frames not divisible by 3 must read back as the same
+// frames it was written with, so a consumer converts them to the exact sample the
+// disc named. Asserted on frames, never on the derived milliseconds, which are lossy
+// by construction.
+//
+// It also pins the duration expression against the drift it would have if it
+// converted each endpoint before subtracting: frames 1 to 3 is a 2-frame window,
+// which is 26 ms, while 40 - 13 reports 27.
+func TestVirtualTrackWindowRoundTripsExactly(t *testing.T) {
+	ctx := context.Background()
+	st, lib := openTestStore(t)
+
+	// Track 2 starts at cue time 03:15:22 = (3*60+15)*75 + 22 = 14647 frames, which at
+	// 44.1 kHz is sample 8612436 exactly. The old millisecond path landed 15 samples
+	// early.
+	in := vtrackInput(lib.ID, "/lib/album.mp3", "sha256:VE", "sha256:VC", 300000,
+		[][2]int64{{1, 3}, {14647, 0}})
+	if _, err := st.PutScannedVirtualTracks(ctx, in); err != nil {
+		t.Fatalf("put virtual tracks: %v", err)
+	}
+
+	items := vtItems(t, st)
+	if len(items) != 2 {
+		t.Fatalf("virtual tracks = %d, want 2", len(items))
+	}
+	t1, t2 := items[0], items[1]
+	if t1.StartFrames != 1 || t1.EndFrames != 3 {
+		t.Errorf("track 1 window = [%d,%d) frames, want [1,3)", t1.StartFrames, t1.EndFrames)
+	}
+	if t1.DurationMS != 26 {
+		t.Errorf("track 1 duration = %d ms, want 26 (the frame delta converts as a unit; "+
+			"converting each endpoint first reports 27)", t1.DurationMS)
+	}
+	if t2.StartFrames != 14647 {
+		t.Errorf("track 2 start = %d frames, want 14647 exactly", t2.StartFrames)
+	}
+	if got := t2.StartFrames * 44100 / 75; got != 8612436 {
+		t.Errorf("track 2 first sample at 44.1 kHz = %d, want 8612436", got)
+	}
+	// An open end reads back as 0 frames, and the window's duration falls through to
+	// the file's own.
+	if t2.EndFrames != 0 || t2.EndMS != 0 {
+		t.Errorf("track 2 end = %d frames / %d ms, want 0 (runs to the end of the file)",
+			t2.EndFrames, t2.EndMS)
 	}
 }
 
@@ -236,8 +295,8 @@ func TestVirtualTracksConvertFromWholeFile(t *testing.T) {
 	wholePID := r.ItemPID
 
 	// Re-catalog the same file as a two-track rip.
-	if _, err := st.PutScannedVirtualTracks(ctx, vtrackInput(lib.ID, "/lib/album.mp3", "sha256:VE", "sha256:VC", 300,
-		[][2]int64{{0, 100}, {100, 300}})); err != nil {
+	if _, err := st.PutScannedVirtualTracks(ctx, vtrackInput(lib.ID, "/lib/album.mp3", "sha256:VE", "sha256:VC", 360,
+		[][2]int64{{0, 9}, {9, 27}})); err != nil {
 		t.Fatalf("put virtual tracks: %v", err)
 	}
 

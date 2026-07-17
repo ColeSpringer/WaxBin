@@ -245,7 +245,7 @@ func makeBackingFileVirtual(t *testing.T, ctx context.Context, db string, pid mo
 		t.Fatalf("open raw db: %v", err)
 	}
 	defer raw.Close()
-	res, err := raw.ExecContext(ctx, `UPDATE item_file SET end_ms = 1000
+	res, err := raw.ExecContext(ctx, `UPDATE item_file SET end_frames = 75
 		WHERE role = 'primary' AND item_id = (SELECT id FROM playable_item WHERE pid = ?)`, string(pid))
 	if err != nil {
 		t.Fatalf("mark virtual: %v", err)

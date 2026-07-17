@@ -46,11 +46,27 @@ type itemView struct {
 	Codec       string `json:"codec,omitempty"`
 	Path        string `json:"path,omitempty"`
 	FilePID     string `json:"filePid,omitempty"`
-	// A virtual track (a cue TRACK of a single-file rip) plays only [startMs, endMs)
-	// within the shared file. Present only for such an item, so a player knows to seek.
-	Virtual bool  `json:"virtual,omitempty"`
-	StartMS int64 `json:"startMs,omitempty"`
-	EndMS   int64 `json:"endMs,omitempty"`
+	// A virtual track (a cue TRACK of a single-file rip) plays only one window within
+	// the shared file, and virtual marks it. The window arrives in both coordinate
+	// systems: startFrames/endFrames are CD frames (75/sec), the stored truth a
+	// consumer converts to an exact sample, and startMs/endMs are the derived
+	// milliseconds a player seeks to.
+	//
+	// These are omitempty like the rest of this view, so a zero bound is absent rather
+	// than 0: the leading track of a rip carries no startFrames, and the final one
+	// carries no endFrames. Default a missing bound to 0 and each field's contract
+	// reads the same either way, since a missing start is the head of the file and a
+	// missing end runs to the end of it. Both tracks are complete descriptions rather
+	// than truncated ones.
+	//
+	// Branch on virtual, never on whether a bound is present. virtual is itself
+	// omitempty, so a whole-file item omits it along with all four bounds; that
+	// absence, not the missing offsets, is what says "no window".
+	Virtual     bool  `json:"virtual,omitempty"`
+	StartFrames int64 `json:"startFrames,omitempty"`
+	EndFrames   int64 `json:"endFrames,omitempty"`
+	StartMS     int64 `json:"startMs,omitempty"`
+	EndMS       int64 `json:"endMs,omitempty"`
 }
 
 func toItemView(v *model.ItemView) itemView {
@@ -59,7 +75,8 @@ func toItemView(v *model.ItemView) itemView {
 		Artist: v.Artist, AlbumArtist: v.AlbumArtist, Album: v.Album, Track: v.TrackNo,
 		Disc: v.DiscNo, Year: v.Year, Genre: v.Genre, Source: string(v.Source),
 		DurationMS: v.DurationMS, Codec: v.Codec, Path: v.DisplayPath, FilePID: string(v.FilePID),
-		Virtual: v.Virtual, StartMS: v.StartMS, EndMS: v.EndMS,
+		Virtual: v.Virtual, StartFrames: v.StartFrames, EndFrames: v.EndFrames,
+		StartMS: v.StartMS, EndMS: v.EndMS,
 	}
 }
 

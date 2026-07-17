@@ -22,8 +22,9 @@
 // read (facet/browse/search/pagination), art (CAS + thumbnails), decode (pure-Go
 // PCM decoding via WaxFlow) and analyze (the PCM analysis pass), scan, organize,
 // inbox, trash, playback, playlist, podcast, source (the acquisition port),
-// enrich (metadata brain), audit (quality/repair), jobs, meta, and config; the
-// CLI lives under cmd/waxbin.
+// enrich (metadata brain), audit (quality/repair), jobs, meta, config, and
+// pidpath (item PID -> file location, cached off the change feed, for a consumer
+// that serves audio by PID); the CLI lives under cmd/waxbin.
 //
 // The engine covers the full lifecycle: scan, analyze, organize, read/browse,
 // playback state, podcasts, audiobooks, enrichment, and audit/quality/repair, all

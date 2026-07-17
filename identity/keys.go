@@ -276,13 +276,14 @@ func normalizeFeedURL(raw string) string {
 
 // VirtualTrackKey is the entity-identity key for one virtual track carved out of a
 // single-file album rip by a .cue sheet. It anchors on the backing file's essence
-// hash plus the cue TRACK number and the track's start offset, deliberately NOT its
-// title, so retagging one track's name in the cue does not fork its identity across
-// a rescan (offset-anchored, not title-anchored). The essence hash keeps two
-// distinct rips from colliding, and the "vtrack:" namespace keeps a virtual track
-// from ever sharing a key with a whole-file track keyed on the same essence.
-func VirtualTrackKey(fileEssence string, trackNumber int, startMS int64) string {
-	return "vtrack:" + fileEssence + "\x1f" + strconv.Itoa(trackNumber) + "\x1f" + strconv.FormatInt(startMS, 10)
+// hash plus the cue TRACK number and the track's start offset in CD frames,
+// deliberately NOT its title, so retagging one track's name in the cue does not fork
+// its identity across a rescan (offset-anchored, not title-anchored). The essence
+// hash keeps two distinct rips from colliding, and the "vtrack:" namespace keeps a
+// virtual track from ever sharing a key with a whole-file track keyed on the same
+// essence.
+func VirtualTrackKey(fileEssence string, trackNumber int, startFrames int64) string {
+	return "vtrack:" + fileEssence + "\x1f" + strconv.Itoa(trackNumber) + "\x1f" + strconv.FormatInt(startFrames, 10)
 }
 
 // normalizeISBN keeps only the digits and the ISBN-10 check character 'X' (folded

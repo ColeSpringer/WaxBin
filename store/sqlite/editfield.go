@@ -581,7 +581,7 @@ func (s *Store) FileSharedOrVirtual(ctx context.Context, filePID model.PID) (boo
 	var distinctItems, hasOffsets int
 	err := s.read.QueryRowContext(ctx, `SELECT
 		COUNT(DISTINCT itf.item_id),
-		COALESCE(MAX(CASE WHEN itf.start_ms IS NOT NULL OR itf.end_ms IS NOT NULL THEN 1 ELSE 0 END), 0)
+		COALESCE(MAX(CASE WHEN itf.start_frames IS NOT NULL OR itf.end_frames IS NOT NULL THEN 1 ELSE 0 END), 0)
 		FROM item_file itf JOIN file f ON f.id = itf.file_id
 		WHERE f.pid = ?`, string(filePID)).Scan(&distinctItems, &hasOffsets)
 	if err != nil {

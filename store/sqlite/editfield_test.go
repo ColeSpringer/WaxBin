@@ -386,7 +386,7 @@ func TestFileSharedOrVirtual(t *testing.T) {
 	var vid int64
 	_ = st.read.QueryRowContext(ctx, "SELECT id FROM playable_item WHERE pid='01J0VIRTUAL00000000000000'").Scan(&vid)
 	if _, err := st.write.ExecContext(ctx,
-		"INSERT INTO item_file(item_id, file_id, role, position, start_ms, end_ms) VALUES (?,?,'primary',0,0,1000)", vid, fileID); err != nil {
+		"INSERT INTO item_file(item_id, file_id, role, position, start_frames, end_frames) VALUES (?,?,'primary',0,0,75)", vid, fileID); err != nil {
 		t.Fatalf("insert virtual edge: %v", err)
 	}
 	shared, err = st.FileSharedOrVirtual(ctx, model.PID(filePID))

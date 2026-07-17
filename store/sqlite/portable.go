@@ -135,7 +135,7 @@ func (s *Store) ItemsByAuthorKey(ctx context.Context, authorMatchKey string) ([]
 // (a book's total across its parts, else the item's effective/window duration, else the
 // feed-declared episode duration), so an exported ref's duration agrees with the
 // ItemView it is later matched against. The fingerprint join is gated on
-// pf.start_ms IS NULL, so a virtual/CUE track exports NO fingerprint: one shared
+// pf.start_frames IS NULL, so a virtual/CUE track exports NO fingerprint: one shared
 // whole-file fingerprint backs N virtual tracks, and exporting it would let the
 // fingerprint rung resolve any of them to an arbitrary sibling. Virtual tracks fall to
 // the descriptive rung instead, which uses each track's own artist/title. fingerprint
@@ -147,7 +147,7 @@ const identitySelect = `SELECT pi.pid, pi.kind, f.essence_hash,
 	pi.title,
 	COALESCE(NULLIF(t.album,''), srs.name, pod.title, ''),
 	COALESCE(bk.total_duration_ms, ` + itemEffectiveDurationExpr + `, ep.duration_ms), fp.fp, fp.algo_version` +
-	itemJoins + ` LEFT JOIN fingerprint fp ON fp.file_id = f.id AND pf.start_ms IS NULL`
+	itemJoins + ` LEFT JOIN fingerprint fp ON fp.file_id = f.id AND pf.start_frames IS NULL`
 
 // ItemIdentitiesByPIDs returns a portable identity descriptor per pid, in input order,
 // skipping any pid with no matching item and collapsing a repeated pid to its first
@@ -233,7 +233,7 @@ func (s *Store) ItemIdentitiesByPIDs(ctx context.Context, pids []model.PID) ([]m
 // It returns nil for an empty term set, because IN () is a SQLite syntax error and a
 // zero-term (short/corrupt) fingerprint has nothing to match anyway.
 //
-// The primary-file join is gated on pf.start_ms IS NULL, mirroring the export side: a
+// The primary-file join is gated on pf.start_frames IS NULL, mirroring the export side: a
 // single-file CUE album's shared file is backed by N virtual-track primary edges, so an
 // ungated join would fan every term row out N-fold (inflating the shared count) and
 // collapse to an arbitrary sibling under GROUP BY. Gating to whole-file edges yields one
@@ -263,7 +263,7 @@ SELECT f.pid, COALESCE(pi.pid, ''), cf.fp, cf.algo_version, COUNT(*) AS shared
 FROM fingerprint_term ct
 JOIN fingerprint cf        ON cf.file_id = ct.file_id
 JOIN file f                ON f.id = ct.file_id
-LEFT JOIN item_file pf     ON pf.file_id = f.id AND pf.role = 'primary' AND pf.start_ms IS NULL
+LEFT JOIN item_file pf     ON pf.file_id = f.id AND pf.role = 'primary' AND pf.start_frames IS NULL
 LEFT JOIN playable_item pi ON pi.id = pf.item_id
 WHERE ct.term IN ` + placeholders(len(terms)) + `
   AND cf.algo_version = ?

@@ -107,15 +107,17 @@ type Track struct {
 	MBAlbumArtistID  string
 }
 
-// ItemFile is an edge from a logical item to a backing file. Offsets support a
-// single file holding multiple items, such as a chapterized audiobook.
+// ItemFile is an edge from a logical item to a backing file. The offsets support a
+// single file holding multiple items, as a single-file album rip carved into virtual
+// tracks does; they are CD frames (75/sec), the unit the .cue that carved them is
+// written in, and 0 for a whole-file edge.
 type ItemFile struct {
-	ItemID   int64
-	FileID   int64
-	Role     string // "primary" for the main audio file
-	Position int
-	StartMS  int64
-	EndMS    int64
+	ItemID      int64
+	FileID      int64
+	Role        string // "primary" for the main audio file
+	Position    int
+	StartFrames int64
+	EndFrames   int64
 }
 
 // Tags is metadata read from a file's tags, with filename-derived values as a
@@ -263,21 +265,55 @@ type ItemView struct {
 	Source SourceType
 
 	// Virtual reports that this item is a virtual track carved out of a shared
-	// single-file album rip by a .cue sheet: it plays only the window [StartMS, EndMS)
-	// within the backing file rather than the whole file. A player seeks to StartMS and
-	// stops at EndMS. StartMS/EndMS are the file-relative offsets of that window and are
-	// 0 for a whole-file item (Virtual is false). EndMS is 0 when the window runs to the
-	// end of the file and the file's own duration is unknown.
-	Virtual bool
-	StartMS int64
-	EndMS   int64
+	// single-file album rip by a .cue sheet: it plays only a window within the backing
+	// file rather than the whole file.
+	//
+	// The window carries two coordinate systems with different jobs. StartFrames/
+	// EndFrames are CD frames (75/sec), the cue sheet's own unit and what is stored:
+	// they are the track's content identity, exact to the sample at every rate a
+	// player serves. StartMS/EndMS are the same window in milliseconds, derived
+	// through FramesToMS for display and for a player's seek. Read FramesToMS before
+	// combining the millisecond pair with anything: each field rounds independently,
+	// so the arithmetic across them does not close.
+	//
+	// All four are 0 for a whole-file item (Virtual is false). EndFrames (and so
+	// EndMS) is 0 when the window runs to the end of the file.
+	Virtual     bool
+	StartFrames int64
+	EndFrames   int64
+	StartMS     int64
+	EndMS       int64
 
-	FilePID     PID
-	Path        []byte // raw bytes of the primary file path
+	FilePID PID
+	Path    []byte // raw bytes of the primary file path
+	// SampleRate is the backing file's sample rate in Hz, 0 when the header did not
+	// declare one. A virtual track's consumer needs it to convert the frame window to
+	// sample offsets.
+	SampleRate  int
 	DisplayPath string
 	Container   string
 	Codec       string
 }
+
+// FramesPerSecond is the CD frame rate: a frame is 1/75 s, the disc's own addressing
+// quantum and the unit every MM:SS:FF in a .cue sheet is written in. It is a fixed
+// property of the CD format, not a tunable.
+//
+// It is the reason a window is stored in frames at all: every sample rate a player
+// serves divides 75 exactly (44100/75 = 588, 48000/75 = 640, and likewise the rest of
+// the CD and hi-res families), so a frame converts to a sample with no rounding,
+// while a millisecond quantizes 50 of every 75 frames away.
+const FramesPerSecond = 75
+
+// FramesToMS converts CD frames to milliseconds for display and for a player's seek.
+// It is lossy by construction: only frames divisible by 3 land on a whole
+// millisecond. Never convert back. A span is content identity and a millisecond is
+// not precise enough to carry one.
+//
+// Every millisecond field derived through it is rounded independently, so arithmetic
+// across them does not close: a 1-frame to 3-frame window reports StartMS 13, EndMS
+// 40, and DurationMS 26, and 13 + 26 is not 40. Read them; don't combine them.
+func FramesToMS(frames int64) int64 { return frames * 1000 / FramesPerSecond }
 
 // Change is one row of the change_log: the single delta vocabulary consumers
 // tail to keep their caches current.

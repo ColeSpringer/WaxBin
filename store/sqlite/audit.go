@@ -249,12 +249,29 @@ func (s *Store) CountItemsMissingReplayGain(ctx context.Context) (int, error) {
 
 // AuditFiles returns every catalogued file's path, kind, content hash, and owning
 // item, for the filesystem-level checks (bad filenames, orphan sidecars, path
-// conflicts, integrity/corrupt audio).
+// conflicts, integrity/corrupt audio). These are file-level checks, so it yields
+// exactly one row per file.
+//
+// The primary-file join is gated on if2.start_frames IS NULL, mirroring the portable
+// export: a single-file CUE album's shared file is backed by N virtual-track primary
+// edges, so an ungated join returns that file N times. Every consumer then treats one
+// file as N: the path-conflict check groups those rows by folded path, finds more than
+// one, and reports the file as colliding with ITSELF at error severity, which exits
+// the CLI non-zero for anyone with a rip; integrity re-hashes the same bytes N times
+// and inflates FilesChecked; corrupt-audio re-decodes them N times; and any real
+// finding is emitted N times over.
+//
+// Gating to whole-file edges yields one (or zero) primary row per file, so a
+// virtual-track-backed file reports an empty owning item rather than an arbitrary
+// sibling. That is the truthful answer: N items share the file and none of them owns
+// it, and a finding about the file must not be pinned on whichever track sorted
+// first. The file itself is still audited, since the join is LEFT and the file row
+// survives with no item, and every finding still carries its path.
 func (s *Store) AuditFiles(ctx context.Context) ([]model.AuditFileInfo, error) {
 	rows, err := s.read.QueryContext(ctx, `SELECT f.pid, f.path, f.display_path, f.kind, f.content_hash,
 			COALESCE(pi.pid,'')
 		FROM file f
-		LEFT JOIN item_file if2 ON if2.file_id = f.id AND if2.role = 'primary'
+		LEFT JOIN item_file if2 ON if2.file_id = f.id AND if2.role = 'primary' AND if2.start_frames IS NULL
 		LEFT JOIN playable_item pi ON pi.id = if2.item_id
 		ORDER BY f.id`)
 	if err != nil {

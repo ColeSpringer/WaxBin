@@ -11,9 +11,9 @@ import (
 // PutScannedVirtualTracks persists the virtual tracks a .cue sheet carves out of one
 // single-file album rip. Every track is an ordinary playable_item(kind='track') that
 // shares the one backing file through its own primary item_file edge, and that edge
-// carries the track's [start_ms, end_ms) offset window. The tracks are reconciled as
-// a SET keyed by identity_key: a rescan creates new tracks, updates changed ones,
-// and deletes stale ones, all against the same file.
+// carries the track's [start_frames, end_frames) offset window. The tracks are
+// reconciled as a SET keyed by identity_key: a rescan creates new tracks, updates
+// changed ones, and deletes stale ones, all against the same file.
 //
 // This departs deliberately from the single-owner file model the rest of the scan
 // path enforces (linkPrimaryFile detaches a file from every other item and deletes
@@ -101,7 +101,7 @@ func (s *Store) PutScannedVirtualTracks(ctx context.Context, in model.PutScanned
 		for _, vt := range in.Tracks {
 			ex, had := existing[vt.Item.IdentityKey]
 			metaChanged := !had || virtualTrackMetaDiffers(ex, vt)
-			offsetChanged := !had || ex.startMS != vt.StartMS || ex.endMS != vt.EndMS
+			offsetChanged := !had || ex.startFrames != vt.StartFrames || ex.endFrames != vt.EndFrames
 			if !metaChanged && !offsetChanged {
 				continue // an unchanged virtual track (a forced rescan of a stable rip)
 			}
@@ -141,7 +141,7 @@ func (s *Store) PutScannedVirtualTracks(ctx context.Context, in model.PutScanned
 				return err
 			}
 
-			if _, err := linkVirtualTrackFile(ctx, tx, itemID, fileID, vt.StartMS, vt.EndMS); err != nil {
+			if _, err := linkVirtualTrackFile(ctx, tx, itemID, fileID, vt.StartFrames, vt.EndFrames); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 
@@ -186,24 +186,24 @@ type existingVirtualTrack struct {
 	genre       string
 	trackNo     int
 	year        int
-	startMS     int64
-	endMS       int64
+	startFrames int64
+	endFrames   int64
 }
 
 // virtualTracksForFile returns the virtual tracks currently backing fileID, keyed by
 // identity_key. A virtual track is identified by its primary item_file edge carrying
-// a start offset (start_ms IS NOT NULL), which no whole-file track or book part edge
-// ever has. It drains and closes its cursor before returning so the caller can write
-// to the same transaction.
+// a start offset (start_frames IS NOT NULL), which no whole-file track or book part
+// edge ever has. It drains and closes its cursor before returning so the caller can
+// write to the same transaction.
 func virtualTracksForFile(ctx context.Context, tx *sql.Tx, fileID int64) (map[string]existingVirtualTrack, error) {
 	rows, err := tx.QueryContext(ctx, `SELECT pi.identity_key, pi.id, pi.title,
 			COALESCE(t.artist,''), COALESCE(t.album,''), COALESCE(t.album_artist,''),
 			COALESCE(t.genre,''), COALESCE(t.track_no,0), COALESCE(t.year,0),
-			itf.start_ms, itf.end_ms
+			itf.start_frames, itf.end_frames
 		FROM item_file itf
 		JOIN playable_item pi ON pi.id = itf.item_id
 		LEFT JOIN track t ON t.item_id = pi.id
-		WHERE itf.file_id = ? AND itf.role = 'primary' AND itf.start_ms IS NOT NULL`, fileID)
+		WHERE itf.file_id = ? AND itf.role = 'primary' AND itf.start_frames IS NOT NULL`, fileID)
 	if err != nil {
 		return nil, err
 	}
@@ -212,13 +212,13 @@ func virtualTracksForFile(ctx context.Context, tx *sql.Tx, fileID int64) (map[st
 	for rows.Next() {
 		var key sql.NullString
 		var ex existingVirtualTrack
-		var startMS, endMS sql.NullInt64
+		var startFrames, endFrames sql.NullInt64
 		if err := rows.Scan(&key, &ex.itemID, &ex.title, &ex.artist, &ex.album,
-			&ex.albumArtist, &ex.genre, &ex.trackNo, &ex.year, &startMS, &endMS); err != nil {
+			&ex.albumArtist, &ex.genre, &ex.trackNo, &ex.year, &startFrames, &endFrames); err != nil {
 			return nil, err
 		}
-		ex.startMS = startMS.Int64
-		ex.endMS = endMS.Int64
+		ex.startFrames = startFrames.Int64
+		ex.endFrames = endFrames.Int64
 		if key.Valid {
 			out[key.String] = ex
 		}
@@ -241,15 +241,15 @@ func virtualTrackMetaDiffers(ex existingVirtualTrack, vt model.VirtualTrack) boo
 }
 
 // detachWholeFileItems removes any item that backs fileID through a whole-file edge
-// (start_ms IS NULL), such as a plain track or a book part catalogued before this file
-// became a virtual-track container. It detaches those edges and cleans up: an item
+// (start_frames IS NULL), such as a plain track or a book part catalogued before this
+// file became a virtual-track container. It detaches those edges and cleans up: an item
 // left with no files is deleted; a multi-file book that lost a part keeps a primary,
 // refreshes its duration, and gets an update delta (symmetric with the attach side).
 // The affected entities are collected so their rollups stay current. It reports
 // whether it removed anything, so the caller can count the conversion as a change.
 func detachWholeFileItems(ctx context.Context, tx *sql.Tx, fileID int64, affected *affectedRollups) (bool, error) {
 	rows, err := tx.QueryContext(ctx,
-		"SELECT DISTINCT item_id FROM item_file WHERE file_id = ? AND start_ms IS NULL", fileID)
+		"SELECT DISTINCT item_id FROM item_file WHERE file_id = ? AND start_frames IS NULL", fileID)
 	if err != nil {
 		return false, err
 	}
@@ -272,7 +272,7 @@ func detachWholeFileItems(ctx context.Context, tx *sql.Tx, fileID int64, affecte
 	}
 
 	if _, err := tx.ExecContext(ctx,
-		"DELETE FROM item_file WHERE file_id = ? AND start_ms IS NULL", fileID); err != nil {
+		"DELETE FROM item_file WHERE file_id = ? AND start_frames IS NULL", fileID); err != nil {
 		return false, err
 	}
 	for _, oid := range prev {
