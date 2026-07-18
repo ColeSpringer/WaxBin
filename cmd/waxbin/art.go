@@ -72,19 +72,22 @@ func newArtCmd(g *globals) *cobra.Command {
 
 func newArtSetCmd(g *globals) *cobra.Command {
 	var (
-		entType  string
-		role     string
-		filePath string
-		clear    bool
-		noLock   bool
-		force    bool
+		entType   string
+		role      string
+		filePath  string
+		clear     bool
+		noLock    bool
+		force     bool
+		writeBack bool
 	)
 	cmd := &cobra.Command{
 		Use:   "set <pid> --file <image>",
 		Short: "Set (or clear) an entity's cover art from an image file",
 		Long: "Sets cover art for a track/book item, or for an album/artist/release_group/genre/" +
 			"podcast entity (--type). The image bytes come from --file; --clear removes the cover. " +
-			"An item cover locks the item's art field by default so a scan does not re-derive it.",
+			"An item cover locks the item's art field by default so a scan does not re-derive it. " +
+			"--write-back also embeds the cover into the backing file(s): a track into its file, a " +
+			"book into every part, an album across every member track's file.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			et := model.ArtEntity(entType)
@@ -111,10 +114,11 @@ func newArtSetCmd(g *globals) *cobra.Command {
 
 			pid := model.PID(args[0])
 			if et == model.ArtTrack {
-				if err := m.SetItemArt(ctx(cmd), pid, raw, !noLock, force); err != nil {
-					return err
-				}
-			} else if err := m.SetEntityArt(ctx(cmd), et, pid, role, raw); err != nil {
+				err = m.SetItemArt(ctx(cmd), pid, raw, !noLock, force, writeBack)
+			} else {
+				err = m.SetEntityArt(ctx(cmd), et, pid, role, raw, writeBack)
+			}
+			if err := surfaceWriteBack(cmd, err); err != nil {
 				return err
 			}
 			if clear {
@@ -132,5 +136,6 @@ func newArtSetCmd(g *globals) *cobra.Command {
 	f.BoolVar(&clear, "clear", false, "remove the cover instead of setting one")
 	f.BoolVar(&noLock, "no-lock", false, "do not lock an item's art field (it defaults to locked)")
 	f.BoolVar(&force, "force", false, "override a locked art field")
+	f.BoolVar(&writeBack, "write-back", false, "also embed the cover into the backing file(s) on disk")
 	return cmd
 }

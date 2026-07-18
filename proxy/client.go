@@ -176,18 +176,31 @@ func (c *Client) SetChapters(ctx context.Context, itemPID model.PID, chapters []
 	}, nil)
 }
 
-// SetItemArt proxies an item cover edit.
-func (c *Client) SetItemArt(ctx context.Context, itemPID model.PID, data []byte, lock, force bool) error {
-	return c.call(ctx, MethodSetItemArt, SetItemArtParams{
-		ItemPID: string(itemPID), Data: data, Lock: lock, Force: force,
-	}, nil)
+// SetItemArt proxies an item cover edit. A committed edit whose on-disk embed partially
+// failed returns the failed files in the result; the transport error stays nil, matching
+// edit_fields.
+func (c *Client) SetItemArt(ctx context.Context, itemPID model.PID, data []byte, lock, force, writeBack bool) (*SetItemArtResult, error) {
+	var res SetItemArtResult
+	err := c.call(ctx, MethodSetItemArt, SetItemArtParams{
+		ItemPID: string(itemPID), Data: data, Lock: lock, Force: force, WriteBack: writeBack,
+	}, &res)
+	if err != nil {
+		return nil, err
+	}
+	return &res, nil
 }
 
-// SetEntityArt proxies a durable entity cover edit.
-func (c *Client) SetEntityArt(ctx context.Context, entityType model.ArtEntity, entityPID model.PID, role string, data []byte) error {
-	return c.call(ctx, MethodSetEntityArt, SetEntityArtParams{
-		EntityType: string(entityType), EntityPID: string(entityPID), Role: role, Data: data,
-	}, nil)
+// SetEntityArt proxies a durable entity cover edit. An album cover fan-out whose embed
+// partially failed returns the failed files in the result (transport error stays nil).
+func (c *Client) SetEntityArt(ctx context.Context, entityType model.ArtEntity, entityPID model.PID, role string, data []byte, writeBack bool) (*SetEntityArtResult, error) {
+	var res SetEntityArtResult
+	err := c.call(ctx, MethodSetEntityArt, SetEntityArtParams{
+		EntityType: string(entityType), EntityPID: string(entityPID), Role: role, Data: data, WriteBack: writeBack,
+	}, &res)
+	if err != nil {
+		return nil, err
+	}
+	return &res, nil
 }
 
 // SetTag proxies a custom-tag edit, returning the canonical key stored and the number
@@ -204,11 +217,17 @@ func (c *Client) SetTag(ctx context.Context, itemPID model.PID, key string, valu
 }
 
 // EditEntity proxies a curation edit to one shared entity (artist/release_group/
-// album). The edit is DB-only, so there is no result payload.
-func (c *Client) EditEntity(ctx context.Context, entityType model.MergeEntity, entityPID model.PID, edits map[string]string, lock, force bool) error {
-	return c.call(ctx, MethodEditEntity, EditEntityParams{
-		EntityType: string(entityType), EntityPID: string(entityPID), Edits: edits, Lock: lock, Force: force,
-	}, nil)
+// album). A committed edit whose member-file fan-out partially failed returns the failed
+// files in the result; the transport error stays nil, matching edit_fields.
+func (c *Client) EditEntity(ctx context.Context, entityType model.MergeEntity, entityPID model.PID, edits map[string]string, writeBack, lock, force bool) (*EditEntityResult, error) {
+	var res EditEntityResult
+	err := c.call(ctx, MethodEditEntity, EditEntityParams{
+		EntityType: string(entityType), EntityPID: string(entityPID), Edits: edits, Lock: lock, Force: force, WriteBack: writeBack,
+	}, &res)
+	if err != nil {
+		return nil, err
+	}
+	return &res, nil
 }
 
 // Lock proxies locking item fields.

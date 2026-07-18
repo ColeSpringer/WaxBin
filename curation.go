@@ -2,15 +2,16 @@ package waxbin
 
 import (
 	"context"
+	"strconv"
 
+	"github.com/colespringer/waxbin/meta"
 	"github.com/colespringer/waxbin/model"
 )
 
 // This file exposes the structured-curation edit APIs (lyrics, chapters, artwork) on
-// the Library facade. They are catalog-only in this phase: a set records user
-// provenance and, by default, locks the artifact so a scan/enrichment pass preserves
-// it. Embedding the edit into the on-disk file (an .lrc sidecar, an embedded picture)
-// is a later, opt-in write-back concern.
+// the Library facade. The edit is catalog-first: a set records user provenance and, by
+// default, locks the artifact so a scan/enrichment pass preserves it. Artwork also
+// supports opt-in on-disk write-back, embedding the cover into the backing file(s).
 
 // SetLyrics replaces an item's lyrics with a user-curated set, locking the "lyrics"
 // field by default. Passing nil clears the lyrics.
@@ -25,17 +26,105 @@ func (l *Library) SetChapters(ctx context.Context, itemPID model.PID, chapters [
 }
 
 // SetItemArt sets (or, with empty bytes, clears) a track/book item's cover from raw
-// image bytes, locking the "art" field by default.
-func (l *Library) SetItemArt(ctx context.Context, itemPID model.PID, raw []byte, lock, force bool) error {
-	return l.store.SetItemArt(ctx, itemPID, raw, lock, force)
+// image bytes, locking the "art" field by default. With writeBack the cover is also
+// embedded into the item's backing file, or into every part of a multi-file book so an
+// external player sees the same cover on each part. A file that cannot be written is
+// reported through a *WriteBackError while the catalog edit stands.
+func (l *Library) SetItemArt(ctx context.Context, itemPID model.PID, raw []byte, lock, force, writeBack bool) error {
+	if err := l.store.SetItemArt(ctx, itemPID, raw, lock, force); err != nil {
+		return err
+	}
+	if !writeBack {
+		return nil
+	}
+	return l.writeBackItemArt(ctx, itemPID, raw)
 }
 
 // SetEntityArt sets a durable cover on a non-item entity (album, artist, release
 // group, genre, or podcast) under the given role (default "front"). This makes album
 // art durable: ResolveArt prefers it over the read-derived track cover. Entity art
-// takes no lock/force (the lock system is item-scoped).
-func (l *Library) SetEntityArt(ctx context.Context, entityType model.ArtEntity, entityPID model.PID, role string, raw []byte) error {
-	return l.store.SetEntityArt(ctx, entityType, entityPID, role, raw)
+// takes no lock/force (the lock system is item-scoped). With writeBack an album cover is
+// also embedded into every member track's file; other entity covers stay catalog-only
+// on disk (they have no single natural file target).
+func (l *Library) SetEntityArt(ctx context.Context, entityType model.ArtEntity, entityPID model.PID, role string, raw []byte, writeBack bool) error {
+	if err := l.store.SetEntityArt(ctx, entityType, entityPID, role, raw); err != nil {
+		return err
+	}
+	if !writeBack {
+		return nil
+	}
+	return l.writeBackEntityArt(ctx, entityType, entityPID, raw)
+}
+
+// writeBackItemArt embeds (or clears) a committed item cover into the item's backing
+// file. It runs after the catalog edit committed, so a refusal or failure is reported as
+// a *WriteBackError rather than a hard error.
+func (l *Library) writeBackItemArt(ctx context.Context, itemPID model.PID, raw []byte) error {
+	edits := artEditDesc(raw)
+	// Embed into every backing file, not just the primary part: a multi-file audiobook
+	// keeps the same cover in each part by convention, so writing only the primary would
+	// leave the other parts showing a stale cover to an external player. A track or a
+	// single-file book has one file, so this is unchanged for them.
+	files, err := l.store.ItemFiles(ctx, itemPID)
+	if err != nil {
+		return writeBackSetupFailure(itemPID, edits, err)
+	}
+	if len(files) == 0 {
+		// An archived item has no file to embed into; report the skipped write-back so a
+		// caller does not read a silent success.
+		wbErr := &WriteBackError{ItemPID: itemPID, Edits: edits}
+		wbErr.Failures = append(wbErr.Failures, WriteBackFailure{Reason: "no backing files present to write"})
+		return wbErr
+	}
+	return l.writeBackPicture(ctx, "waxbin.SetItemArt", itemPID, edits, files,
+		meta.PictureEdit{Clear: len(raw) == 0, Data: raw})
+}
+
+// writeBackEntityArt fans a committed album cover across every member track's file. Only
+// album covers fan out to disk (each album track embeds the cover); an artist, release
+// group, genre, or podcast cover stays durable in the catalog with no on-disk target, so
+// write-back for those is a no-op.
+func (l *Library) writeBackEntityArt(ctx context.Context, entityType model.ArtEntity, entityPID model.PID, raw []byte) error {
+	if entityType != model.ArtAlbum {
+		return nil
+	}
+	edits := artEditDesc(raw)
+	files, err := l.store.EntityMemberFiles(ctx, model.MergeAlbum, entityPID)
+	if err != nil {
+		return writeBackSetupFailure(entityPID, edits, err)
+	}
+	return l.writeBackPicture(ctx, "waxbin.SetEntityArt", entityPID, edits, files,
+		meta.PictureEdit{Clear: len(raw) == 0, Data: raw})
+}
+
+// writeBackPicture applies a cover embed/clear across files through the shared
+// per-file write-back engine, returning a *WriteBackError on any refusal or failure. An
+// empty file set is a clean no-op (the album had no member files); a caller that needs
+// to report a missing file for a single item does so before calling this.
+func (l *Library) writeBackPicture(ctx context.Context, op string, refPID model.PID, edits map[string]string, files []model.ItemFileRef, pedit meta.PictureEdit) error {
+	if len(files) == 0 {
+		return nil
+	}
+	wbErr := &WriteBackError{ItemPID: refPID, Edits: edits}
+	if err := l.writeBackFiles(ctx, op, files, wbErr,
+		func(w *meta.Writer, path string) (*meta.WriteResult, error) {
+			return w.ApplyPicture(ctx, path, pedit)
+		}); err != nil {
+		return err
+	}
+	if len(wbErr.Failures) > 0 {
+		return wbErr
+	}
+	return nil
+}
+
+// artEditDesc is the WriteBackError.Edits record for a cover write-back (art has no
+// scalar value; this names the operation for the diagnostic and the error message).
+func artEditDesc(raw []byte) map[string]string {
+	if len(raw) == 0 {
+		return map[string]string{"art": "cleared"}
+	}
+	return map[string]string{"art": "set (" + strconv.Itoa(len(raw)) + " bytes)"}
 }
 
 // TagEditOptions configures a custom-tag edit, mirroring EditOptions.

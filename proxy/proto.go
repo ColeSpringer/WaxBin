@@ -210,10 +210,18 @@ type SetChaptersParams struct {
 // SetItemArtParams is the set_item_art request payload. Empty Data clears the cover.
 // The image bytes travel base64-encoded in the JSON frame.
 type SetItemArtParams struct {
-	ItemPID string `json:"itemPid"`
-	Data    []byte `json:"data,omitempty"`
-	Lock    bool   `json:"lock"`
-	Force   bool   `json:"force"`
+	ItemPID   string `json:"itemPid"`
+	Data      []byte `json:"data,omitempty"`
+	Lock      bool   `json:"lock"`
+	Force     bool   `json:"force"`
+	WriteBack bool   `json:"writeBack"`
+}
+
+// SetItemArtResult is the set_item_art response payload. A committed cover edit whose
+// on-disk embed partially failed returns the failed files here rather than as a
+// transport error, matching edit_fields.
+type SetItemArtResult struct {
+	WriteBackFailures []WriteBackFailure `json:"writeBackFailures,omitempty"`
 }
 
 // SetEntityArtParams is the set_entity_art request payload (album/artist/... covers).
@@ -222,6 +230,13 @@ type SetEntityArtParams struct {
 	EntityPID  string `json:"entityPid"`
 	Role       string `json:"role"`
 	Data       []byte `json:"data,omitempty"`
+	WriteBack  bool   `json:"writeBack"`
+}
+
+// SetEntityArtResult is the set_entity_art response payload: the member files an album
+// cover fan-out could not embed into (empty for a non-album cover or a clean fan-out).
+type SetEntityArtResult struct {
+	WriteBackFailures []WriteBackFailure `json:"writeBackFailures,omitempty"`
 }
 
 // SetTagParams is the set_tag request payload: a custom tag's ordered values on an
@@ -243,14 +258,22 @@ type SetTagResult struct {
 }
 
 // EditEntityParams is the edit_entity request payload: curation edits to one shared
-// entity (artist/release_group/album). The catalog edit is DB-only in this phase, so
-// there is no result payload beyond the ok/error frame.
+// entity (artist/release_group/album). With WriteBack the fanned identifiers/sort are
+// also mirrored across the entity's member files.
 type EditEntityParams struct {
 	EntityType string            `json:"entityType"`
 	EntityPID  string            `json:"entityPid"`
 	Edits      map[string]string `json:"edits"`
 	Lock       bool              `json:"lock"`
 	Force      bool              `json:"force"`
+	WriteBack  bool              `json:"writeBack"`
+}
+
+// EditEntityResult is the edit_entity response payload. A committed entity edit whose
+// member-file fan-out partially failed returns the failed files here rather than as a
+// transport error, matching edit_fields.
+type EditEntityResult struct {
+	WriteBackFailures []WriteBackFailure `json:"writeBackFailures,omitempty"`
 }
 
 // FieldsParams is the lock / unlock request payload.

@@ -66,7 +66,7 @@ func entityColumnForField(field string) string {
 // A field that does not apply to the entity type is CodeInvalid; a genre (or any other
 // non-curatable entity type) is CodeUnsupported. A locked field is refused with
 // CodeLocked unless force is set. On-disk tag write-back of these values fans out
-// across the entity's member files and is sequenced separately (Phase 9); this edit is
+// across the entity's member files and is sequenced separately; this edit is
 // DB-only.
 func (s *Store) EditEntityFields(ctx context.Context, entityType model.MergeEntity, entityPID model.PID, edits map[string]string, source model.ProvenanceSource, lock, force bool) error {
 	const op = "store.EditEntityFields"

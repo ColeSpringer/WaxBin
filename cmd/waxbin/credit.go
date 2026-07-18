@@ -1,7 +1,6 @@
 package main
 
 import (
-	"errors"
 	"fmt"
 	"text/tabwriter"
 
@@ -24,7 +23,8 @@ func newCreditCmd(g *globals) *cobra.Command {
 		Long: "Without --role, lists an item's contributors across every role. With --role, " +
 			"replaces that role's contributors with the given --name values (repeatable; none " +
 			"clears the role). A credit records user provenance and, by default, locks the " +
-			"credit.<role> field. --write-back also mirrors a track credit into its file's tag.\n\n" +
+			"credit.<role> field. --write-back also mirrors the credit into the file's on-disk " +
+			"tag (a track's music role, or a book's author/narrator across its parts).\n\n" +
 			"Music roles (tracks): composer, lyricist, conductor, performer, remixer, producer, " +
 			"engineer, mixer, arranger, writer, djmixer.\n" +
 			"Book roles (audiobooks): author, narrator, translator, editor.",
@@ -41,7 +41,7 @@ func newCreditCmd(g *globals) *cobra.Command {
 	f := cmd.Flags()
 	f.StringVar(&role, "role", "", "contributor role to set (omit to list all credits)")
 	f.StringArrayVar(&names, "name", nil, "contributor name for the role (repeatable; none clears it)")
-	f.BoolVar(&writeBack, "write-back", false, "also write the role into the file's on-disk tag (tracks only)")
+	f.BoolVar(&writeBack, "write-back", false, "also write the credit into the file's on-disk tag")
 	f.BoolVar(&noLock, "no-lock", false, "do not lock the credit (it defaults to locked)")
 	f.BoolVar(&force, "force", false, "override a locked credit role")
 	return cmd
@@ -80,12 +80,9 @@ func setCredits(cmd *cobra.Command, g *globals, pid model.PID, role model.Contri
 	defer m.Close()
 
 	stored, err := m.SetCredits(ctx(cmd), pid, role, names, opts)
-	var wbErr *waxbin.WriteBackError
-	if errors.As(err, &wbErr) {
-		for _, f := range wbErr.Failures {
-			fmt.Fprintf(errOut(cmd), "warning: on-disk credit write-back skipped for %s: %s\n", f.Path, f.Reason)
-		}
-	} else if err != nil {
+	// The catalog edit stands even when the on-disk write-back partially failed, so
+	// surface those as warnings and keep reporting the stored count.
+	if err := surfaceWriteBack(cmd, err); err != nil {
 		return err
 	}
 	// Report the count actually stored (trimmed, resolvable, deduped) rather than the

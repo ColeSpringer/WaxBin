@@ -84,6 +84,72 @@ func RoleTagKey(role model.ContributorRole) (string, bool) {
 	return k, ok
 }
 
+// bookFieldTagKeys maps a book metadata field to the on-disk tag key(s) the audiobook
+// scanner reads back for it, so a book edit round-trips through a rescan. It is a
+// separate map from fieldTagKeys because a book reconstructs the same catalog fields
+// from different tags than a track does: a book's title is the ALBUM tag (the file
+// TITLE holds a part or chapter name) and its author is ALBUMARTIST. narrator maps to
+// two keys, NARRATOR and the COMPOSER fallback the scanner also reads (the Audiobookshelf
+// convention), so both stay in step. A book field absent here (subtitle, asin, isbn,
+// publisher, edition, description, mbid) is one the scanner does not reconstruct from a
+// tag: it stays DB-only, since writing it to disk could not survive a rescan. series is
+// deliberately not in this map. It packs a name and a sequence into one GROUPING value,
+// so the caller builds that through BookSeriesTagKey and PackSeriesGrouping.
+var bookFieldTagKeys = map[string][]string{
+	"title":    {string(tag.Album)},
+	"author":   {string(tag.AlbumArtist)},
+	"narrator": {string(tag.Narrator), string(tag.Composer)},
+	"genre":    {string(tag.Genre)},
+	"year":     {"DATE"}, // same key a track's year uses; no tag constant, matching fieldTagKeys
+}
+
+// BookFieldTagKeys returns the on-disk tag keys the audiobook scanner reads back for a
+// book metadata field, and whether the field round-trips through a tag at all. A field
+// with no keys is DB-only by design; see bookFieldTagKeys. series is handled through
+// BookSeriesTagKey, not here.
+func BookFieldTagKeys(field string) ([]string, bool) {
+	k, ok := bookFieldTagKeys[field]
+	return k, ok
+}
+
+// BookSeriesTagKey is the single tag that carries a book's series and sequence. The
+// scanner splits it back into a series name and sequence (parseSeries); PackSeriesGrouping
+// is the inverse that builds the value an edit writes.
+const BookSeriesTagKey = string(tag.Grouping)
+
+// EntityFieldTagKey returns the on-disk tag key an entity-curation field fans out to
+// across the entity's member files, and whether the field has one. Only the fields that
+// round-trip through a rescan WITHOUT disturbing the entity's identity are wired: an
+// album's non-identity release identifiers and sort (BARCODE, LABEL, CATALOGNUMBER,
+// ALBUMSORT) and an artist's sort (ARTISTSORT).
+//
+// An entity MBID is deliberately NOT fanned (neither album nor artist): a member track's
+// MusicBrainz ID is the entity's identity key on the next scan (AlbumKey/artist match are
+// mbid-first), but the entity edit updates only the mbid column, not the row's match_key,
+// so writing the MBID to the files would re-key the entity to a fresh row and orphan its
+// curation and locks. Barcode/label/catalog#/sort are not identity inputs, so they fan
+// safely. A release-group field and a release-group type also stay DB-only.
+func EntityFieldTagKey(entityType model.MergeEntity, field string) (string, bool) {
+	switch entityType {
+	case model.MergeAlbum:
+		switch field {
+		case "sort":
+			return string(tag.AlbumSort), true
+		case "barcode":
+			return string(tag.Barcode), true
+		case "label":
+			return string(tag.Label), true
+		case "catalog_number":
+			return string(tag.CatalogNumber), true
+		}
+	case model.MergeArtist:
+		if field == "sort" {
+			return string(tag.ArtistSort), true
+		}
+	}
+	return "", false
+}
+
 // WriteResult reports the file's on-disk state after a write. When Changed is false
 // the edits were a no-op and the file was not rewritten (Size/MTimeNS/ContentHash
 // are left zero, since the caller already holds the current values).
@@ -198,6 +264,84 @@ func (w *Writer) Apply(ctx context.Context, path string, edits []TagEdit) (*Writ
 		return nil, waxerr.Wrapf(waxerr.CodeIO, op, err, "writing tags to %s", path)
 	}
 
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	ch, err := identity.ContentHash(path)
+	if err != nil {
+		return nil, err
+	}
+	return &WriteResult{
+		Changed:     true,
+		Size:        info.Size(),
+		MTimeNS:     info.ModTime().UnixNano(),
+		ContentHash: ch,
+		Warnings:    warnings,
+	}, nil
+}
+
+// PictureEdit is a change to a file's embedded front cover. Clear removes the front
+// cover; otherwise Data (raw image bytes) is embedded as the front cover, replacing any
+// existing one. Either way only the front cover is touched. Other embedded pictures such
+// as a back cover or booklet scan are left intact, matching the catalog's "art" field,
+// which models the front cover alone.
+type PictureEdit struct {
+	Clear bool
+	Data  []byte
+}
+
+// ApplyPicture embeds (or clears) the front-cover picture on the file at path,
+// preserving the audio essence exactly as Apply does (WithVerifyEssence re-hashes the
+// copied audio and refuses to commit if it changed). A format that cannot store a
+// picture, or a read-only format, is refused with CodeUnsupported so the caller records
+// a write-back failure rather than silently dropping the cover. A no-op reports
+// Changed=false without rewriting: this covers clearing a file that has no pictures and
+// re-embedding the bytes it already carries.
+func (w *Writer) ApplyPicture(ctx context.Context, path string, edit PictureEdit) (*WriteResult, error) {
+	const op = "meta.Writer.ApplyPicture"
+
+	doc, err := waxlabel.ParseFile(ctx, path)
+	if err != nil {
+		return nil, waxerr.Wrapf(waxerr.CodeInvalid, op, err, "parsing %s for picture write", path)
+	}
+	// The format gate is a capability check, not a byte check: a read-only container or
+	// one with no picture slot cannot carry the cover, so refuse rather than write a
+	// no-op the caller would read as a clean sync.
+	caps := doc.Capabilities()
+	if caps.ReadOnly || caps.Pictures.Write == waxlabel.AccessNone {
+		return nil, waxerr.New(waxerr.CodeUnsupported, op, "this file's format cannot store an embedded cover")
+	}
+
+	ed := doc.Edit()
+	opts := []waxlabel.WriteOption{waxlabel.WithVerifyEssence()}
+	// Drop any existing front cover first. On a set this stops repeated edits from
+	// accumulating duplicate covers, since AddPicture appends. On a clear it removes only
+	// the front cover and leaves a back cover or booklet scan intact. Never call
+	// ClearPictures(): that would delete pictures the catalog's front-cover "art" field
+	// does not model.
+	ed.RemovePictures(func(p waxlabel.Picture) bool { return p.Type == waxlabel.PicFrontCover })
+	if !edit.Clear {
+		ed.AddPicture(waxlabel.Picture{Type: waxlabel.PicFrontCover, Data: edit.Data})
+		if !waxlabel.IsRecognizedImage(edit.Data) {
+			// An exotic but valid cover (AVIF/HEIC, already probed and accepted by the
+			// store) is not decodable by the picture validator; allow it explicitly so the
+			// embed is not rejected at Prepare.
+			opts = append(opts, waxlabel.WithUnrecognizedPictures())
+		}
+	}
+
+	plan, err := ed.Prepare(opts...)
+	if err != nil {
+		return nil, waxerr.Wrapf(waxerr.CodeInvalid, op, err, "preparing picture write for %s", path)
+	}
+	warnings := writeWarnings(plan.Report().Warnings)
+	if plan.IsNoOp() {
+		return &WriteResult{Changed: false, Warnings: warnings}, nil
+	}
+	if _, _, err := plan.Execute(ctx, waxlabel.SaveBack()); err != nil {
+		return nil, waxerr.Wrapf(waxerr.CodeIO, op, err, "writing cover to %s", path)
+	}
 	info, err := os.Stat(path)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)

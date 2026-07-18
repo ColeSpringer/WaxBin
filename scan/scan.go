@@ -223,7 +223,7 @@ type scanCtx struct {
 // (root exists but is empty/unreadable, or a partial walk saw far fewer files than
 // known), and skips reconciliation entirely on the transient cases, logging a
 // degraded warning and keeping every row, so a momentary mount loss cannot wipe the
-// catalog (which Phase 4's orphan GC could then compound).
+// catalog.
 func (s *Scanner) reconcileMissing(ctx context.Context, walkRoot string, index map[string]model.ScopedFile, knownCount int, forceReconcile bool, res *Result) {
 	if len(index) == 0 {
 		return // every known file was seen; nothing vanished
@@ -529,7 +529,7 @@ func adoptedPID(sc *scanCtx, fm *meta.FileMeta) model.PID {
 func bookInput(libraryID int64, file model.File, tags model.Tags, essenceHash string, cover *model.ArtImage) model.PutScannedBookInput {
 	title := cleanBookTitle(firstNonEmpty(tags.Album, tags.Title))
 	author := firstNonEmpty(tags.AlbumArtist, tags.Artist)
-	key := identity.BookKey(tags.ASIN, tags.ISBN, author, title, tags.Edition)
+	key := BookIdentityKey(tags)
 	if key == "" {
 		key = identity.TrackKey("", essenceHash)
 	}
@@ -665,6 +665,19 @@ func virtualTracksInput(libraryID int64, file model.File, tags model.Tags, essen
 // requires the brackets (mirroring parseAbridged) so a title that genuinely ends in
 // the word is not truncated, which would also shift the identity key.
 var abridgedMarkerRe = regexp.MustCompile(`(?i)\s*[\(\[]\s*(?:un)?abridged\s*[\)\]]\s*$`)
+
+// BookIdentityKey derives an audiobook's content identity key from its scanned tags: the
+// same key PutScannedBook resolves the item by, from the title (ALBUM), author
+// (ALBUMARTIST), and any identifiers. It is exported so the on-disk write-back re-anchor
+// can recompute a book's identity from its file after a title or author edit lands there,
+// keeping the catalog's stored key in step with what a rescan will derive. It returns ""
+// for a book with no title, author, or identifier, in which case the scanner falls back
+// to the essence hash, an identity a metadata edit does not disturb.
+func BookIdentityKey(tags model.Tags) string {
+	title := cleanBookTitle(firstNonEmpty(tags.Album, tags.Title))
+	author := firstNonEmpty(tags.AlbumArtist, tags.Artist)
+	return identity.BookKey(tags.ASIN, tags.ISBN, author, title, tags.Edition)
+}
 
 // cleanBookTitle removes a trailing bracketed abridged/unabridged marker from a
 // book title.

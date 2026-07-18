@@ -1,7 +1,6 @@
 package main
 
 import (
-	"errors"
 	"fmt"
 	"strings"
 
@@ -117,13 +116,7 @@ func runSingleEdit(cmd *cobra.Command, g *globals, pid model.PID, edits map[stri
 	}
 	defer m.Close()
 
-	err = m.EditFields(ctx(cmd), pid, edits, opts)
-	var wbErr *waxbin.WriteBackError
-	if errors.As(err, &wbErr) {
-		for _, f := range wbErr.Failures {
-			fmt.Fprintf(errOut(cmd), "warning: on-disk tag write-back skipped for %s: %s\n", f.Path, f.Reason)
-		}
-	} else if err != nil {
+	if err := surfaceWriteBack(cmd, m.EditFields(ctx(cmd), pid, edits, opts)); err != nil {
 		return err
 	}
 	return reportProvenance(cmd, g, m, pid)

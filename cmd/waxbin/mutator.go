@@ -95,23 +95,46 @@ func (m *mutator) SetChapters(ctx context.Context, pid model.PID, chapters []mod
 	return m.lib.SetChapters(ctx, pid, chapters, lock, force)
 }
 
-func (m *mutator) SetItemArt(ctx context.Context, pid model.PID, data []byte, lock, force bool) error {
+func (m *mutator) SetItemArt(ctx context.Context, pid model.PID, data []byte, lock, force, writeBack bool) error {
 	if m.px != nil {
-		return m.px.SetItemArt(ctx, pid, data, lock, force)
+		res, err := m.px.SetItemArt(ctx, pid, data, lock, force, writeBack)
+		if err != nil {
+			return err
+		}
+		// Rebuild the typed write-back error so the CLI reports a partial on-disk sync
+		// exactly as the local path does (catalog updated, cover not embedded).
+		if len(res.WriteBackFailures) > 0 {
+			return &waxbin.WriteBackError{ItemPID: pid, Failures: fromProxyFailures(res.WriteBackFailures)}
+		}
+		return nil
 	}
-	return m.lib.SetItemArt(ctx, pid, data, lock, force)
+	return m.lib.SetItemArt(ctx, pid, data, lock, force, writeBack)
 }
 
-func (m *mutator) SetEntityArt(ctx context.Context, entityType model.ArtEntity, entityPID model.PID, role string, data []byte) error {
+func (m *mutator) SetEntityArt(ctx context.Context, entityType model.ArtEntity, entityPID model.PID, role string, data []byte, writeBack bool) error {
 	if m.px != nil {
-		return m.px.SetEntityArt(ctx, entityType, entityPID, role, data)
+		res, err := m.px.SetEntityArt(ctx, entityType, entityPID, role, data, writeBack)
+		if err != nil {
+			return err
+		}
+		if len(res.WriteBackFailures) > 0 {
+			return &waxbin.WriteBackError{ItemPID: entityPID, Failures: fromProxyFailures(res.WriteBackFailures)}
+		}
+		return nil
 	}
-	return m.lib.SetEntityArt(ctx, entityType, entityPID, role, data)
+	return m.lib.SetEntityArt(ctx, entityType, entityPID, role, data, writeBack)
 }
 
 func (m *mutator) EditEntity(ctx context.Context, entityType model.MergeEntity, entityPID model.PID, edits map[string]string, opts waxbin.EntityEditOptions) error {
 	if m.px != nil {
-		return m.px.EditEntity(ctx, entityType, entityPID, edits, opts.Lock, opts.Force)
+		res, err := m.px.EditEntity(ctx, entityType, entityPID, edits, opts.WriteBack, opts.Lock, opts.Force)
+		if err != nil {
+			return err
+		}
+		if len(res.WriteBackFailures) > 0 {
+			return &waxbin.WriteBackError{ItemPID: entityPID, Edits: edits, Failures: fromProxyFailures(res.WriteBackFailures)}
+		}
+		return nil
 	}
 	return m.lib.EditEntity(ctx, entityType, entityPID, edits, opts)
 }

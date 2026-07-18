@@ -29,14 +29,20 @@ func newEntityCmd(g *globals) *cobra.Command {
 
 func newEntityEditCmd(g *globals) *cobra.Command {
 	var (
-		sets   []string
-		noLock bool
-		force  bool
+		sets      []string
+		noLock    bool
+		force     bool
+		writeBack bool
 	)
 	cmd := &cobra.Command{
 		Use:   "edit <type> <pid> --set field=value [--set field=value ...]",
 		Short: "Edit fields on a shared entity",
-		Args:  cobra.ExactArgs(2),
+		Long: "Edit identifiers and sort-name overrides on a shared entity. --write-back also " +
+			"fans the values that round-trip through a scan across the entity's member files' " +
+			"on-disk tags: an album's BARCODE, LABEL, CATALOGNUMBER, and ALBUMSORT, and an " +
+			"artist's ARTISTSORT. A release-group field, a type, and an entity MBID stay " +
+			"catalog-only.",
+		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			et := model.MergeEntity(args[0])
 			if !model.EntityEditable(et) {
@@ -52,7 +58,8 @@ func newEntityEditCmd(g *globals) *cobra.Command {
 				return err
 			}
 			defer m.Close()
-			if err := m.EditEntity(ctx(cmd), et, pid, edits, waxbin.EntityEditOptions{Lock: !noLock, Force: force}); err != nil {
+			err = m.EditEntity(ctx(cmd), et, pid, edits, waxbin.EntityEditOptions{WriteBack: writeBack, Lock: !noLock, Force: force})
+			if err := surfaceWriteBack(cmd, err); err != nil {
 				return err
 			}
 			fmt.Fprintf(out(cmd), "edited %d field(s) on %s %s\n", len(edits), et, pid)
@@ -63,6 +70,7 @@ func newEntityEditCmd(g *globals) *cobra.Command {
 	f.StringArrayVar(&sets, "set", nil, "field=value to set (repeatable; empty value clears)")
 	f.BoolVar(&noLock, "no-lock", false, "do not lock the edited fields (they default to locked)")
 	f.BoolVar(&force, "force", false, "override a locked entity field")
+	f.BoolVar(&writeBack, "write-back", false, "also fan the values across the entity's member files' on-disk tags")
 	return cmd
 }
 

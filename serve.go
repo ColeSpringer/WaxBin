@@ -183,22 +183,47 @@ func (l *Library) proxyHandlers() map[string]proxy.Handler {
 			if err != nil {
 				return nil, err
 			}
-			return nil, l.SetItemArt(ctx, model.PID(p.ItemPID), p.Data, p.Lock, p.Force)
+			artErr := l.SetItemArt(ctx, model.PID(p.ItemPID), p.Data, p.Lock, p.Force, p.WriteBack)
+			// A write-back failure is a result, not a transport error (the catalog edit stands).
+			var wbErr *WriteBackError
+			if errors.As(artErr, &wbErr) {
+				return proxy.SetItemArtResult{WriteBackFailures: toProxyFailures(wbErr.Failures)}, nil
+			}
+			if artErr != nil {
+				return nil, artErr
+			}
+			return proxy.SetItemArtResult{}, nil
 		},
 		proxy.MethodSetEntityArt: func(ctx context.Context, raw json.RawMessage) (any, error) {
 			p, err := decodeParams[proxy.SetEntityArtParams](raw)
 			if err != nil {
 				return nil, err
 			}
-			return nil, l.SetEntityArt(ctx, model.ArtEntity(p.EntityType), model.PID(p.EntityPID), p.Role, p.Data)
+			artErr := l.SetEntityArt(ctx, model.ArtEntity(p.EntityType), model.PID(p.EntityPID), p.Role, p.Data, p.WriteBack)
+			var wbErr *WriteBackError
+			if errors.As(artErr, &wbErr) {
+				return proxy.SetEntityArtResult{WriteBackFailures: toProxyFailures(wbErr.Failures)}, nil
+			}
+			if artErr != nil {
+				return nil, artErr
+			}
+			return proxy.SetEntityArtResult{}, nil
 		},
 		proxy.MethodEditEntity: func(ctx context.Context, raw json.RawMessage) (any, error) {
 			p, err := decodeParams[proxy.EditEntityParams](raw)
 			if err != nil {
 				return nil, err
 			}
-			return nil, l.EditEntity(ctx, model.MergeEntity(p.EntityType), model.PID(p.EntityPID), p.Edits,
-				EntityEditOptions{Lock: p.Lock, Force: p.Force})
+			editErr := l.EditEntity(ctx, model.MergeEntity(p.EntityType), model.PID(p.EntityPID), p.Edits,
+				EntityEditOptions{WriteBack: p.WriteBack, Lock: p.Lock, Force: p.Force})
+			var wbErr *WriteBackError
+			if errors.As(editErr, &wbErr) {
+				return proxy.EditEntityResult{WriteBackFailures: toProxyFailures(wbErr.Failures)}, nil
+			}
+			if editErr != nil {
+				return nil, editErr
+			}
+			return proxy.EditEntityResult{}, nil
 		},
 		proxy.MethodSetTag: func(ctx context.Context, raw json.RawMessage) (any, error) {
 			p, err := decodeParams[proxy.SetTagParams](raw)

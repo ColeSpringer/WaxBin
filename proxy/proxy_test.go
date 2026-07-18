@@ -147,14 +147,14 @@ func TestCurationRoundTrip(t *testing.T) {
 		t.Fatalf("lyrics not carried: %+v", gotLyrics)
 	}
 
-	if err := c.SetItemArt(ctx, "i1", []byte{1, 2, 3, 4}, true, false); err != nil {
+	if _, err := c.SetItemArt(ctx, "i1", []byte{1, 2, 3, 4}, true, false, false); err != nil {
 		t.Fatalf("set item art: %v", err)
 	}
 	if len(gotArt) != 4 || gotArt[0] != 1 {
 		t.Fatalf("art bytes not carried: %v", gotArt)
 	}
 
-	if err := c.SetEntityArt(ctx, model.ArtAlbum, "a1", "front", []byte{9}); err != nil {
+	if _, err := c.SetEntityArt(ctx, model.ArtAlbum, "a1", "front", []byte{9}, false); err != nil {
 		t.Fatalf("set entity art: %v", err)
 	}
 }

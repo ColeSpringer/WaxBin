@@ -715,6 +715,24 @@ func parseSeries(grouping string) (name, seq string) {
 	return grouping, ""
 }
 
+// PackSeriesGrouping builds the GROUPING tag value that carries a book's series name
+// and sequence, the inverse of parseSeries: it uses the "#" marker (the shortest form
+// parseSeries recognizes) so a written value re-reads to the same name and sequence on
+// a rescan. An empty name yields an empty value (clearing the tag); an empty sequence
+// yields the bare name.
+func PackSeriesGrouping(name, seq string) string {
+	name = strings.TrimSpace(name)
+	seq = strings.TrimSpace(seq)
+	switch {
+	case name == "":
+		return ""
+	case seq == "":
+		return name
+	default:
+		return name + " #" + seq
+	}
+}
+
 // abridgedRe matches the conventional bracketed marker "(Unabridged)"/"[Abridged]".
 // Requiring the brackets (not a bare word anywhere) keeps a real title that merely
 // contains the word, like "An Abridged History of Time", from getting a spurious

@@ -137,9 +137,9 @@ func TestEditWriteBackSharedFileRefused(t *testing.T) {
 }
 
 // TestEditBookFacade exercises book-field editing through the facade. A DB-only edit
-// re-resolves the author contributor and shows up in the read view, and a write-back
-// on a book is refused, since audiobook tags need their own design, while the catalog
-// edit still stands.
+// re-resolves the author contributor and shows up in the read view, and a write-back on
+// a DB-only book field such as subtitle is a clean no-op: the field has no on-disk tag a
+// scan reads back, so nothing is written and the catalog edit stands.
 func TestEditBookFacade(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
@@ -175,15 +175,212 @@ func TestEditBookFacade(t *testing.T) {
 		t.Fatalf("provenance = %+v, want one locked author row", prov)
 	}
 
-	// Write-back on a book is refused, and the catalog edit still applies.
-	err = lib.EditField(ctx, pid, "subtitle", "There and Back Again", waxbin.EditOptions{Lock: true, WriteBack: true})
-	var wbErr *waxbin.WriteBackError
-	if !errors.As(err, &wbErr) {
-		t.Fatalf("book write-back: want *WriteBackError, got %v", err)
+	// subtitle is a DB-only book field (no tag a scan reconstructs it from), so a
+	// write-back writes nothing on disk and returns no error while the edit stands.
+	if err := lib.EditField(ctx, pid, "subtitle", "There and Back Again", waxbin.EditOptions{Lock: true, WriteBack: true}); err != nil {
+		t.Fatalf("book subtitle write-back should be a clean no-op, got %v", err)
 	}
 	d, _ = lib.Book(ctx, pid)
 	if d.Subtitle != "There and Back Again" {
-		t.Fatalf("subtitle = %q, want the edit applied despite refused write-back", d.Subtitle)
+		t.Fatalf("subtitle = %q, want the edit applied", d.Subtitle)
+	}
+	// The on-disk book title (ALBUM) is untouched: the edited fields so far are DB-only.
+	fm, err := meta.NewReader().Read(ctx, src)
+	if err != nil {
+		t.Fatalf("read tags: %v", err)
+	}
+	if fm.Tags.Album != "The Hobbit" {
+		t.Fatalf("on-disk ALBUM = %q, want The Hobbit (DB-only edits must not write tags)", fm.Tags.Album)
+	}
+}
+
+// TestEditBookWriteBackRoundTrip verifies a book field write-back embeds the audiobook
+// tags a scan reads back (title→ALBUM, author→ALBUMARTIST, narrator→NARRATOR,
+// series→GROUPING, genre→GENRE) into the primary part, and that a fresh scan of the
+// rewritten file reconstructs the same catalog values from those tags.
+func TestEditBookWriteBackRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	src := filepath.Join(root, "hobbit.m4b")
+	writeFile(t, src, testaudio.BuildMP3("The Hobbit", "JRR Tolkien", "The Hobbit", 1))
+
+	lib := openManaged(t, ctx, db, root)
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	books, err := lib.Query(ctx, query.New(query.EntityItems).Where("kind", query.OpIs, "book").Build(), "")
+	if err != nil || len(books) != 1 {
+		t.Fatalf("book query: %d books (err %v)", len(books), err)
+	}
+	pid := books[0].PID
+
+	if err := lib.EditFields(ctx, pid, map[string]string{
+		"title":    "The Hobbit: Illustrated",
+		"author":   "J.R.R. Tolkien",
+		"narrator": "Andy Serkis",
+		"series":   "Middle-earth",
+		"genre":    "Fantasy",
+	}, waxbin.EditOptions{Lock: true, WriteBack: true}); err != nil {
+		t.Fatalf("book write-back: %v", err)
+	}
+
+	// The audiobook tags were embedded into the file.
+	fm, err := meta.NewReader().Read(ctx, src)
+	if err != nil {
+		t.Fatalf("read tags: %v", err)
+	}
+	if fm.Tags.Album != "The Hobbit: Illustrated" {
+		t.Errorf("on-disk ALBUM = %q, want the edited title", fm.Tags.Album)
+	}
+	if fm.Tags.AlbumArtist != "J.R.R. Tolkien" {
+		t.Errorf("on-disk ALBUMARTIST = %q, want the edited author", fm.Tags.AlbumArtist)
+	}
+	if len(fm.Tags.Narrators) != 1 || fm.Tags.Narrators[0] != "Andy Serkis" {
+		t.Errorf("on-disk narrators = %v, want [Andy Serkis]", fm.Tags.Narrators)
+	}
+	if fm.Tags.Series != "Middle-earth" {
+		t.Errorf("on-disk series (GROUPING) = %q, want Middle-earth", fm.Tags.Series)
+	}
+	if fm.Tags.Genre != "Fantasy" {
+		t.Errorf("on-disk GENRE = %q, want Fantasy", fm.Tags.Genre)
+	}
+
+	// A fresh scan into a new catalog reconstructs the book from the embedded tags,
+	// proving the write-back round-trips through the scanner.
+	db2 := filepath.Join(t.TempDir(), "catalog2.db")
+	lib2 := openManaged(t, ctx, db2, root)
+	if _, err := lib2.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("rescan: %v", err)
+	}
+	books2, err := lib2.Query(ctx, query.New(query.EntityItems).Where("kind", query.OpIs, "book").Build(), "")
+	if err != nil || len(books2) != 1 {
+		t.Fatalf("rescan book query: %d books (err %v)", len(books2), err)
+	}
+	d2, err := lib2.Book(ctx, books2[0].PID)
+	if err != nil {
+		t.Fatalf("rescanned book detail: %v", err)
+	}
+	if d2.Item.Title != "The Hobbit: Illustrated" {
+		t.Errorf("rescanned title = %q, want The Hobbit: Illustrated", d2.Item.Title)
+	}
+	if len(d2.Authors) != 1 || d2.Authors[0] != "J.R.R. Tolkien" {
+		t.Errorf("rescanned authors = %v, want [J.R.R. Tolkien]", d2.Authors)
+	}
+	if len(d2.Narrators) != 1 || d2.Narrators[0] != "Andy Serkis" {
+		t.Errorf("rescanned narrators = %v, want [Andy Serkis]", d2.Narrators)
+	}
+	if d2.Series != "Middle-earth" {
+		t.Errorf("rescanned series = %q, want Middle-earth", d2.Series)
+	}
+}
+
+// TestEditBookWriteBackReanchorsIdentity verifies that writing a book's title and author
+// (its identity anchor) to disk re-anchors the catalog's identity key, so a same-catalog
+// scan --force resolves the same item and keeps its pid and its locks, rather than
+// re-keying to the new on-disk title and dropping the curation.
+func TestEditBookWriteBackReanchorsIdentity(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	src := filepath.Join(root, "hobbit.m4b")
+	writeFile(t, src, testaudio.BuildMP3("The Hobbit", "JRR Tolkien", "The Hobbit", 1))
+
+	lib := openManaged(t, ctx, db, root)
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	books, err := lib.Query(ctx, query.New(query.EntityItems).Where("kind", query.OpIs, "book").Build(), "")
+	if err != nil || len(books) != 1 {
+		t.Fatalf("book query: %d books (err %v)", len(books), err)
+	}
+	pid := books[0].PID
+
+	// Edit the two identity fields and propagate them to disk.
+	if err := lib.EditFields(ctx, pid, map[string]string{
+		"title":  "The Hobbit: Illustrated",
+		"author": "J.R.R. Tolkien",
+	}, waxbin.EditOptions{Lock: true, WriteBack: true}); err != nil {
+		t.Fatalf("book identity write-back: %v", err)
+	}
+
+	// A full re-derive from disk must resolve the same item, not a re-keyed new one.
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{Force: true}); err != nil {
+		t.Fatalf("scan --force: %v", err)
+	}
+	d, err := lib.Book(ctx, pid)
+	if err != nil {
+		t.Fatalf("book pid did not survive scan --force (re-anchor failed): %v", err)
+	}
+	if d.Item.Title != "The Hobbit: Illustrated" {
+		t.Errorf("title after re-anchor = %q, want the edited title", d.Item.Title)
+	}
+	// The locks must survive: the item was not re-created.
+	prov, _ := lib.Provenance(ctx, pid)
+	locked := map[string]bool{}
+	for _, p := range prov {
+		if p.Locked {
+			locked[p.Field] = true
+		}
+	}
+	if !locked["title"] || !locked["author"] {
+		t.Errorf("locks after scan --force = %+v, want title and author still locked", prov)
+	}
+}
+
+// TestEditBookWriteBackMultiFileStaysWhole verifies a multi-file book's identity-field
+// write-back writes every part (not just the primary), so the parts keep a single shared
+// identity key and a scan --force resolves one whole book rather than splitting it.
+func TestEditBookWriteBackMultiFileStaysWhole(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	// Three .m4b parts of one book: same album/author, distinct essence, distinct part
+	// titles (the file TITLE holds a part name; the book title is the ALBUM).
+	for i, seed := range []byte{11, 12, 13} {
+		p := filepath.Join(root, "part"+string(rune('1'+i))+".m4b")
+		writeFile(t, p, testaudio.BuildMP3WithAudio("Chapter "+string(rune('1'+i)), "Tolkien", "The Hobbit", i+1, testaudio.AudioWithSeed(seed)))
+	}
+
+	lib := openManaged(t, ctx, db, root)
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	books, err := lib.Query(ctx, query.New(query.EntityItems).Where("kind", query.OpIs, "book").Build(), "")
+	if err != nil || len(books) != 1 {
+		t.Fatalf("book query: %d books (err %v), want 1", len(books), err)
+	}
+	pid := books[0].PID
+	d0, _ := lib.Book(ctx, pid)
+	if len(d0.Files) != 3 {
+		t.Fatalf("book parts = %d, want 3", len(d0.Files))
+	}
+
+	// Edit the identity fields and propagate to disk, then re-derive from disk.
+	if err := lib.EditFields(ctx, pid, map[string]string{
+		"title":  "The Hobbit Deluxe",
+		"author": "J.R.R. Tolkien",
+	}, waxbin.EditOptions{Lock: true, WriteBack: true}); err != nil {
+		t.Fatalf("book identity write-back: %v", err)
+	}
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{Force: true}); err != nil {
+		t.Fatalf("scan --force: %v", err)
+	}
+
+	// Exactly one book remains (no split), it is the same item, and it kept all 3 parts.
+	books2, err := lib.Query(ctx, query.New(query.EntityItems).Where("kind", query.OpIs, "book").Build(), "")
+	if err != nil || len(books2) != 1 {
+		t.Fatalf("after write-back: %d books, want 1 (a split means the parts diverged)", len(books2))
+	}
+	d, err := lib.Book(ctx, pid)
+	if err != nil {
+		t.Fatalf("original book pid did not survive scan --force: %v", err)
+	}
+	if len(d.Files) != 3 {
+		t.Errorf("book parts after = %d, want 3 (a part was lost to a split)", len(d.Files))
+	}
+	if d.Item.Title != "The Hobbit Deluxe" {
+		t.Errorf("title = %q, want The Hobbit Deluxe", d.Item.Title)
 	}
 }
 

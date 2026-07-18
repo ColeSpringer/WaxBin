@@ -910,9 +910,12 @@ func (l *Library) EditField(ctx context.Context, itemPID model.PID, field, value
 // kind is rejected.
 //
 // With opts.WriteBack set, the new values are also written into the backing files'
-// on-disk tags through the WaxLabel writer seam. Write-back covers track items only. A
-// book edit lands in the catalog, but its on-disk tags are left for a later
-// audiobook-tag design and reported through a *WriteBackError.
+// on-disk tags through the WaxLabel writer seam. A track writes every edited scalar to
+// its file; a book writes the audiobook tags a scan reads back (title→ALBUM,
+// author→ALBUMARTIST, narrator→NARRATOR+COMPOSER, series+sequence→GROUPING, genre/year)
+// across all its parts, leaving the enrichment-only book fields (subtitle, identifiers,
+// publisher, description) DB-only. A file that cannot be written is reported through a
+// *WriteBackError while the catalog edit stands.
 //
 // Write-back is a separate step, not part of the atomic catalog edit. The edit has
 // already committed by the time it runs, so a file that cannot be written does not
@@ -999,58 +1002,37 @@ func (e *WriteBackError) Error() string {
 		strconv.Itoa(len(e.Failures)) + " file(s): " + strings.Join(paths, ", ")
 }
 
-// writeBackFields mirrors committed catalog edits into the backing files' tags. Each
-// file is written on its own. A refusal (a shared file) or a failure (an I/O error)
-// records a drift diagnostic and joins a WriteBackError rather than aborting the rest
-// of the files. A clean write clears any drift diagnostic that file carried before.
-//
-// Only track write-back is supported. Audiobook on-disk tags follow their own
-// conventions (a book's title is the ALBUM tag, series and sequence are packed into
-// one GROUPING tag, and subtitle is not read back by a scan at all), so a naive
-// per-field mapping would silently drop data. A book edit is refused for write-back
-// and left to a later audiobook-tag design. The catalog edit still stands.
-func (l *Library) writeBackFields(ctx context.Context, itemPID model.PID, edits map[string]string) error {
-	// Everything below runs after the catalog edit committed. A setup-lookup error is
-	// therefore a write-back failure to report, not a hard error that would make the CLI
-	// hide the committed catalog change.
-	item, err := l.store.ItemByPID(ctx, itemPID)
-	if err != nil {
-		return writeBackSetupFailure(itemPID, edits, err)
-	}
-	if item.Kind != model.KindTrack {
-		return l.refuseWriteBack(ctx, itemPID, edits,
-			"on-disk tag write-back is not yet supported for "+string(item.Kind)+" items; the catalog edit was applied")
-	}
-
-	tagEdits, err := tagEditsForFields(edits)
-	if err != nil {
-		return err
-	}
-	files, err := l.store.ItemFiles(ctx, itemPID)
-	if err != nil {
-		return writeBackSetupFailure(itemPID, edits, err)
-	}
-	wbErr := &WriteBackError{ItemPID: itemPID, Edits: edits}
-	// A write-back on an item with no backing files, such as an archived track, has
-	// nothing to write, and the catalog edit already committed. Report a skipped
-	// write-back rather than a silent success, the same way refuseWriteBack does.
-	if len(files) == 0 {
-		wbErr.Failures = append(wbErr.Failures, WriteBackFailure{Reason: "no backing files present to write"})
-		return wbErr
-	}
+// writeBackFiles applies a per-file on-disk write across files, recording every refusal
+// or failure on wbErr instead of aborting the rest. It is the shared engine behind every
+// write-back fan-out: a track or book field edit, a credit edit, an entity identifier
+// fan-out, an embedded cover. Each caller supplies the file set and an apply closure that
+// does the actual write, and this handles the rest: the shared-or-virtual-file guard, the
+// drift diagnostic on failure, the unrepresented-value warning, and the optimistic
+// file-state update on a real change. A file backing more than one member is written once
+// (dedup by file pid). It returns a hard error only for a context cancellation, which
+// aborts the whole pass, and op names the caller for that error. Everything else is a
+// soft per-file failure on wbErr.
+func (l *Library) writeBackFiles(ctx context.Context, op string, files []model.ItemFileRef, wbErr *WriteBackError, apply func(w *meta.Writer, path string) (*meta.WriteResult, error)) error {
 	w := meta.NewWriter()
+	seen := make(map[model.PID]bool, len(files))
 	for _, ref := range files {
+		if ref.FilePID != "" {
+			if seen[ref.FilePID] {
+				continue
+			}
+			seen[ref.FilePID] = true
+		}
 		// A canceled context aborts the whole write-back rather than being recorded as a
 		// per-file failure, so a genuine cancellation is not masked as a soft warning.
 		if err := ctx.Err(); err != nil {
-			return waxerr.FromContext("waxbin.EditFields", err, waxerr.CodeCanceled)
+			return waxerr.FromContext(op, err, waxerr.CodeCanceled)
 		}
 		// The catalog edit is already committed, so a per-file store lookup failure is one
 		// more write-back failure to record and move past, not a reason to report the
 		// whole edit as failed and hide the committed catalog change.
 		file, err := l.store.FileByPID(ctx, ref.FilePID)
 		if err != nil {
-			l.log.Warn("edit write-back file lookup", "file", ref.FilePID, "err", err)
+			l.log.Warn("write-back file lookup", "file", ref.FilePID, "err", err)
 			l.recordWriteBackDrift(ctx, ref.FilePID, err.Error())
 			wbErr.Failures = append(wbErr.Failures, WriteBackFailure{FilePID: ref.FilePID, Path: string(ref.Path), Reason: err.Error()})
 			continue
@@ -1062,7 +1044,7 @@ func (l *Library) writeBackFields(ctx context.Context, itemPID model.PID, edits 
 		// record the drift, and move on.
 		shared, err := l.store.FileSharedOrVirtual(ctx, ref.FilePID)
 		if err != nil {
-			l.log.Warn("edit write-back share check", "path", path, "err", err)
+			l.log.Warn("write-back share check", "path", path, "err", err)
 			l.recordWriteBackDrift(ctx, ref.FilePID, err.Error())
 			wbErr.Failures = append(wbErr.Failures, WriteBackFailure{FilePID: ref.FilePID, Path: path, Reason: err.Error()})
 			continue
@@ -1074,9 +1056,9 @@ func (l *Library) writeBackFields(ctx context.Context, itemPID model.PID, edits 
 			continue
 		}
 
-		res, err := w.Apply(ctx, path, tagEdits)
+		res, err := apply(w, path)
 		if err != nil {
-			l.log.Warn("edit tag write-back", "path", path, "err", err)
+			l.log.Warn("tag write-back", "path", path, "err", err)
 			l.recordWriteBackDrift(ctx, ref.FilePID, err.Error())
 			wbErr.Failures = append(wbErr.Failures, WriteBackFailure{FilePID: ref.FilePID, Path: path, Reason: err.Error()})
 			continue
@@ -1095,7 +1077,7 @@ func (l *Library) writeBackFields(ctx context.Context, itemPID model.PID, edits 
 			}
 		}
 		if len(lost) > 0 {
-			l.log.Warn("edit tag value unrepresented", "path", path)
+			l.log.Warn("tag value unrepresented", "path", path)
 			if derr := l.store.PutFileDiagnostics(ctx, ref.FilePID, model.OriginEdit, lost); derr != nil {
 				l.log.Warn("edit diagnostics", "path", path, "err", derr)
 			}
@@ -1121,10 +1103,177 @@ func (l *Library) writeBackFields(ctx context.Context, itemPID model.PID, edits 
 			l.log.Warn("edit file-state update", "path", path, "err", err)
 		}
 	}
+	return nil
+}
+
+// writeBackFields mirrors committed catalog edits into the backing files' tags. Each
+// file is written on its own; a refusal or failure records a drift diagnostic and joins
+// a WriteBackError rather than aborting the rest, and a clean write clears any drift the
+// file carried before.
+//
+// A track writes every edited scalar field to its file (tagEditsForFields). A book
+// writes the audiobook tags the scanner reads back (bookTagEditsForFields: title to
+// ALBUM, author to ALBUMARTIST, narrator to NARRATOR and COMPOSER, series and sequence to
+// one GROUPING tag, plus genre and year) across all of its parts. A book's title and
+// author are the key its parts group by, so writing them to one part alone would split a
+// multi-file book on rescan. Book fields the scanner does not reconstruct from a tag
+// (subtitle, asin, isbn, publisher, edition, description, mbid) are DB-only and written
+// nowhere on disk, so a rescan can never undo them. An episode is refused, since episodes
+// are not tagged. The catalog edit stands regardless.
+func (l *Library) writeBackFields(ctx context.Context, itemPID model.PID, edits map[string]string) error {
+	// Everything below runs after the catalog edit committed. A setup-lookup error is
+	// therefore a write-back failure to report, not a hard error that would make the CLI
+	// hide the committed catalog change.
+	item, err := l.store.ItemByPID(ctx, itemPID)
+	if err != nil {
+		return writeBackSetupFailure(itemPID, edits, err)
+	}
+
+	var tagEdits []meta.TagEdit
+	var files []model.ItemFileRef
+	switch item.Kind {
+	case model.KindTrack:
+		tagEdits, err = tagEditsForFields(edits)
+		if err != nil {
+			return err
+		}
+		files, err = l.store.ItemFiles(ctx, itemPID)
+		if err != nil {
+			return writeBackSetupFailure(itemPID, edits, err)
+		}
+	case model.KindBook:
+		// The series name shares its GROUPING tag with the sequence, so read the book's
+		// current sequence when the series is edited, to write "<series> #<seq>" and keep
+		// the sequence on disk.
+		seriesSeq := ""
+		if _, editingSeries := edits["series"]; editingSeries {
+			detail, derr := l.store.BookByPID(ctx, itemPID)
+			if derr != nil {
+				return writeBackSetupFailure(itemPID, edits, derr)
+			}
+			seriesSeq = detail.SeriesSeq
+		}
+		tagEdits = bookTagEditsForFields(edits, seriesSeq)
+		// A book edit that touched only DB-only fields has no on-disk representation; the
+		// catalog edit stands and those fields are DB-only by design, so there is no drift.
+		if len(tagEdits) == 0 {
+			return nil
+		}
+		// Write EVERY part, not just the primary: a book's title/author (ALBUM/ALBUMARTIST)
+		// are the key the scanner groups its parts by, so writing them to one part alone
+		// would split a multi-file book on the next rescan. The scanner reads a book's
+		// metadata from the primary part, so the same tags on the other parts are inert for
+		// the catalog but keep every part on the same identity key.
+		files, err = l.store.ItemFiles(ctx, itemPID)
+		if err != nil {
+			return writeBackSetupFailure(itemPID, edits, err)
+		}
+	default:
+		return l.refuseWriteBack(ctx, itemPID, edits,
+			"on-disk tag write-back is not supported for "+string(item.Kind)+" items; the catalog edit was applied")
+	}
+
+	wbErr := &WriteBackError{ItemPID: itemPID, Edits: edits}
+	// A write-back on an item with no backing files, such as an archived item, has
+	// nothing to write, and the catalog edit already committed. Report a skipped
+	// write-back rather than a silent success, the same way refuseWriteBack does.
+	if len(files) == 0 {
+		wbErr.Failures = append(wbErr.Failures, WriteBackFailure{Reason: "no backing files present to write"})
+		return wbErr
+	}
+	if err := l.writeBackFiles(ctx, "waxbin.EditFields", files, wbErr,
+		func(w *meta.Writer, path string) (*meta.WriteResult, error) {
+			return w.Apply(ctx, path, tagEdits)
+		}); err != nil {
+		return err
+	}
+	// A book's title/author ARE its identity anchor (unlike a track, whose identity is
+	// essence-anchored): writing them to disk would otherwise make the next scan --force
+	// re-key the book to a new pid and drop its locks. Re-anchor the catalog's identity
+	// key to the file's post-write value so a rescan resolves the same item. This reads
+	// the file's ACTUAL state, so it is safe to run even on a partial write-back failure:
+	// if a part failed and still holds the old value, re-anchoring to it is a no-op, and
+	// if the source part was written it steers the catalog item to follow the new key.
+	if item.Kind == model.KindBook && len(files) > 0 && bookIdentityEdited(edits) {
+		l.reanchorBookIdentity(ctx, itemPID, files[0].FilePID)
+	}
 	if len(wbErr.Failures) > 0 {
 		return wbErr
 	}
 	return nil
+}
+
+// bookIdentityEdited reports whether an edit touched a book field that participates in
+// the book's identity key (title or author), so its on-disk write-back needs an identity
+// re-anchor. The other identity-key inputs (asin/isbn/edition) are DB-only and never
+// written to disk, so they cannot move the on-disk-derived key.
+func bookIdentityEdited(edits map[string]string) bool {
+	_, title := edits["title"]
+	_, author := edits["author"]
+	return title || author
+}
+
+// reanchorBookIdentity recomputes a book's identity key from the current on-disk state
+// of one of its files and updates the catalog to match, so a later scan --force resolves
+// the same item. It reads the file's ACTUAL tags, so it self-corrects: if the write-back
+// to that file did not land, the file still holds the old title and the recomputed key
+// equals the stored one, making RekeyBook a no-op. It is best-effort and runs after the
+// catalog edit and write-back committed, so a lookup, read, or re-key failure is logged,
+// not surfaced.
+func (l *Library) reanchorBookIdentity(ctx context.Context, itemPID, filePID model.PID) {
+	file, err := l.store.FileByPID(ctx, filePID)
+	if err != nil {
+		l.log.Warn("book re-anchor file lookup", "item", itemPID, "err", err)
+		return
+	}
+	fm, err := meta.NewReader().Read(ctx, string(file.Path))
+	if err != nil {
+		l.log.Warn("book re-anchor read", "item", itemPID, "err", err)
+		return
+	}
+	// An empty key means the file now has no title/author, so the scanner would fall back
+	// to an essence-anchored key. Leave the stored key alone rather than guess the essence
+	// fallback here; clearing both identity fields is a degenerate edit.
+	newKey := scan.BookIdentityKey(fm.Tags)
+	if newKey == "" {
+		return
+	}
+	if _, err := l.store.RekeyBook(ctx, itemPID, newKey); err != nil {
+		l.log.Warn("book identity re-anchor", "item", itemPID, "err", err)
+	}
+}
+
+// bookTagEditsForFields maps committed book field edits to the on-disk tags the
+// audiobook scanner reads back, so a book edit round-trips through a rescan. It covers
+// only the fields the scanner reconstructs from a tag; the rest are DB-only and produce
+// no edit (so writing them to disk cannot create drift a rescan would undo). seriesSeq
+// is the book's current sequence, folded into the GROUPING value only when "series" is
+// among the edits. A value empty after trimming clears its tag.
+func bookTagEditsForFields(edits map[string]string, seriesSeq string) []meta.TagEdit {
+	out := make([]meta.TagEdit, 0, len(edits))
+	add := func(key, value string) {
+		e := meta.TagEdit{Key: key}
+		if v := strings.TrimSpace(value); v != "" {
+			e.Values = []string{v}
+		}
+		out = append(out, e)
+	}
+	for field, value := range edits {
+		if field == "series" {
+			// The series name and sequence share one GROUPING tag; pack them so a rescan
+			// splits them back apart into the same name and sequence.
+			add(meta.BookSeriesTagKey, meta.PackSeriesGrouping(value, seriesSeq))
+			continue
+		}
+		keys, ok := meta.BookFieldTagKeys(field)
+		if !ok {
+			continue // a DB-only book field: subtitle, asin, isbn, publisher, edition, description, mbid
+		}
+		for _, k := range keys {
+			add(k, value)
+		}
+	}
+	return out
 }
 
 // refuseWriteBack reports that write-back was not attempted for an item, such as a
