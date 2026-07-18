@@ -103,18 +103,30 @@ func (s *Store) VerifyDerived(ctx context.Context) (*DerivedReport, error) {
 // entirely in SQL.
 func (s *Store) sortKeyDrift(ctx context.Context) (int, error) {
 	const op = "store.VerifyDerived"
-	sources := []struct{ text, table string }{
-		{"title", "playable_item"},
-		{"name", "artist"},
-		{"name", "genre"},
-		{"title", "release_group"},
-		{"title", "album"},
-		{"name", "series"},
-		{"title", "podcast"},
+	// entityType is set for the tables whose sort key a user can override through
+	// entity curation (artist/release_group/album). A curated sort override deliberately
+	// diverges from the name-derived key, so it is excluded from the drift count.
+	sources := []struct{ text, table, entityType string }{
+		{"title", "playable_item", ""},
+		{"name", "artist", string(model.MergeArtist)},
+		{"name", "genre", ""},
+		{"title", "release_group", string(model.MergeReleaseGroup)},
+		{"title", "album", string(model.MergeAlbum)},
+		{"name", "series", ""},
+		{"title", "podcast", ""},
 	}
 	total := 0
 	for _, src := range sources {
-		rows, err := s.read.QueryContext(ctx, "SELECT "+src.text+", sort_key FROM "+src.table)
+		// text/table are internal constants (no user input), so they are interpolated;
+		// entity_type is bound as a parameter for consistency with the rest of the store.
+		q := "SELECT " + src.text + ", sort_key FROM " + src.table
+		var args []any
+		if src.entityType != "" {
+			q += " t WHERE NOT EXISTS (SELECT 1 FROM entity_curation ec" +
+				" WHERE ec.entity_type = ? AND ec.entity_id = t.id AND ec.field = 'sort')"
+			args = append(args, src.entityType)
+		}
+		rows, err := s.read.QueryContext(ctx, q, args...)
 		if err != nil {
 			return 0, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}

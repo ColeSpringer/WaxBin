@@ -27,6 +27,10 @@ func curatableFieldForKind(kind, field string) bool {
 	if role, ok := model.CutCreditPrefix(field); ok {
 		return model.RoleValidForKind(model.ContributorRole(role), model.Kind(kind))
 	}
+	if _, ok := model.CutTagPrefix(field); ok {
+		// Custom tags live on the items that carry file tags (tracks and books).
+		return model.Kind(kind) == model.KindTrack || model.Kind(kind) == model.KindBook
+	}
 	if kinds, ok := staticCurationFieldKinds[field]; ok {
 		return kinds[model.Kind(kind)]
 	}

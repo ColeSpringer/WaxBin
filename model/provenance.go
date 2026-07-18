@@ -84,15 +84,21 @@ func IsMetadataField(field string) bool { return MetadataFields[field] }
 
 // IsCuratableField reports whether field may carry a provenance/lock row. It is the
 // lock whitelist: the superset of IsMetadataField plus the structured lock-only
-// artifacts (lyrics/chapters/art) and a namespaced credit key ("credit.<role>"). The
-// scalar edit path stays on IsMetadataField so a credit key or an art lock cannot be
-// set as if it were a scalar (those go through their own APIs).
+// artifacts (lyrics/chapters/art), a namespaced credit key ("credit.<role>"), and a
+// namespaced custom-tag key ("tag.<KEY>"). The scalar edit path stays on
+// IsMetadataField so a credit key, an art lock, or a custom tag cannot be set as if it
+// were a scalar (those go through their own APIs).
 func IsCuratableField(field string) bool {
 	if MetadataFields[field] || lockOnlyFields[field] {
 		return true
 	}
 	if role, ok := CutCreditPrefix(field); ok {
 		return ContributorRole(role).Valid()
+	}
+	if key, ok := CutTagPrefix(field); ok {
+		// A custom-tag lock names a canonical, non-reserved key.
+		canon, valid := CanonicalTagKey(key)
+		return valid && canon == key && !IsReservedTagKey(key)
 	}
 	return false
 }

@@ -120,6 +120,10 @@ func mergeEntityTx(ctx context.Context, tx *sql.Tx, et model.MergeEntity, table 
 	if err := repointArtMap(ctx, tx, table, sid, lid); err != nil {
 		return nil, err
 	}
+	// Re-point the entity-curation rows (also polymorphic, no FK) with locked-wins.
+	if err := repointEntityCuration(ctx, tx, table, sid, lid); err != nil {
+		return nil, err
+	}
 	// Union the MBID: a merge driven by enrichment (two heuristic rows sharing an
 	// MBID) should leave the survivor carrying that MBID.
 	if et.HasMBID() {
@@ -380,6 +384,35 @@ func repointArtMap(ctx context.Context, tx *sql.Tx, entityType string, sid, lid 
 	}
 	_, err := tx.ExecContext(ctx,
 		"DELETE FROM art_map WHERE entity_type = ? AND entity_id = ?", entityType, lid)
+	return err
+}
+
+// repointEntityCuration re-points the loser's entity_curation rows (polymorphic, no
+// FK) onto the survivor with locked-wins: on a field both carry, the survivor keeps its
+// value and source but unions the lock, so a value the loser had protected stays
+// protected; a field only the loser carries moves onto the survivor. It is the entity
+// analogue of repointArtMap. A genre merge finds no rows and is a no-op.
+func repointEntityCuration(ctx context.Context, tx *sql.Tx, entityType string, sid, lid int64) error {
+	// Union the lock on a field both entities curate: promote the survivor's row to
+	// locked when the loser locked that field. Value and source stay the survivor's.
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE entity_curation SET locked = 1
+		 WHERE entity_type = ? AND entity_id = ? AND locked = 0
+		   AND field IN (SELECT field FROM entity_curation
+		                 WHERE entity_type = ? AND entity_id = ? AND locked = 1)`,
+		entityType, sid, entityType, lid); err != nil {
+		return err
+	}
+	// Move the loser's non-colliding rows onto the survivor; OR IGNORE keeps the
+	// survivor's row (its value/source already won) on a field both carry.
+	if _, err := tx.ExecContext(ctx,
+		"UPDATE OR IGNORE entity_curation SET entity_id = ? WHERE entity_type = ? AND entity_id = ?",
+		sid, entityType, lid); err != nil {
+		return err
+	}
+	// Drop any loser rows a collision left behind.
+	_, err := tx.ExecContext(ctx,
+		"DELETE FROM entity_curation WHERE entity_type = ? AND entity_id = ?", entityType, lid)
 	return err
 }
 

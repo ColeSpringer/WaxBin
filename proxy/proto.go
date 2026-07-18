@@ -46,6 +46,8 @@ const (
 	MethodSetChapters      = "set_chapters"
 	MethodSetItemArt       = "set_item_art"
 	MethodSetEntityArt     = "set_entity_art"
+	MethodEditEntity       = "edit_entity"
+	MethodSetTag           = "set_tag"
 	MethodLock             = "lock"
 	MethodUnlock           = "unlock"
 	MethodCreateUser       = "create_user"
@@ -220,6 +222,35 @@ type SetEntityArtParams struct {
 	EntityPID  string `json:"entityPid"`
 	Role       string `json:"role"`
 	Data       []byte `json:"data,omitempty"`
+}
+
+// SetTagParams is the set_tag request payload: a custom tag's ordered values on an
+// item. Empty Values clears the tag.
+type SetTagParams struct {
+	ItemPID string   `json:"itemPid"`
+	Key     string   `json:"key"`
+	Values  []string `json:"values,omitempty"`
+	Lock    bool     `json:"lock"`
+	Force   bool     `json:"force"`
+}
+
+// SetTagResult is the set_tag response payload: the canonical key actually stored (the
+// normalized uppercase form) and the number of values stored after trimming (0 = the
+// tag was cleared).
+type SetTagResult struct {
+	Key    string `json:"key"`
+	Stored int    `json:"stored"`
+}
+
+// EditEntityParams is the edit_entity request payload: curation edits to one shared
+// entity (artist/release_group/album). The catalog edit is DB-only in this phase, so
+// there is no result payload beyond the ok/error frame.
+type EditEntityParams struct {
+	EntityType string            `json:"entityType"`
+	EntityPID  string            `json:"entityPid"`
+	Edits      map[string]string `json:"edits"`
+	Lock       bool              `json:"lock"`
+	Force      bool              `json:"force"`
 }
 
 // FieldsParams is the lock / unlock request payload.

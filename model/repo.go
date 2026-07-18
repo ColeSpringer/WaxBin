@@ -44,6 +44,11 @@ type PutScannedTrackInput struct {
 	// scanned track before writing, so a `scan --force` cannot clobber a curated edit.
 	// The scanner sets it on every scan except an explicit `--ignore-locks` run.
 	PreserveLocks bool
+	// CustomTags are the file's non-standard tag frames WaxBin's typed model does not
+	// map (keyed by canonical uppercase key), persisted into item_tag so they are
+	// preserved and searchable. A key the user has locked ("tag.<KEY>") is kept over the
+	// scanned value when PreserveLocks is set.
+	CustomTags map[string][]string
 }
 
 // TagWaxbinItemPID is the custom tag key that carries a backing item's stable WaxBin
@@ -97,6 +102,10 @@ type PutScannedBookInput struct {
 	// PreserveLocks keeps a user-locked book field from being re-derived from tags on
 	// a forced rescan (see PutScannedTrackInput.PreserveLocks).
 	PreserveLocks bool
+	// CustomTags are this file's non-standard tag frames (see
+	// PutScannedTrackInput.CustomTags). A multi-file book takes them from the primary
+	// part, matching how its other metadata is owned.
+	CustomTags map[string][]string
 }
 
 // PutScannedVirtualTracksInput carries a single-file album rip and the virtual

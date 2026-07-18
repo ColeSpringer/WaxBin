@@ -227,9 +227,10 @@ func insertCandidates(ctx context.Context, tx *sql.Tx, entityType string, entity
 	})
 }
 
-// deleteOrphanEntity removes one orphaned entity: its polymorphic art_map and
-// entity_enrichment rows (no FK), the entity row itself (cascading rollups/aliases/
-// relations/contributor links), its candidate row, and a change_log delta.
+// deleteOrphanEntity removes one orphaned entity: its polymorphic art_map,
+// entity_enrichment, and entity_curation rows (no FK), the entity row itself (cascading
+// rollups/aliases/relations/contributor links), its candidate row, and a change_log
+// delta.
 func deleteOrphanEntity(ctx context.Context, tx *sql.Tx, k orphanKind, o orphanRow) error {
 	if _, err := tx.ExecContext(ctx,
 		"DELETE FROM art_map WHERE entity_type = ? AND entity_id = ?", k.entityType, o.id); err != nil {
@@ -237,6 +238,10 @@ func deleteOrphanEntity(ctx context.Context, tx *sql.Tx, k orphanKind, o orphanR
 	}
 	if _, err := tx.ExecContext(ctx,
 		"DELETE FROM entity_enrichment WHERE entity_type = ? AND entity_id = ?", k.entityType, o.id); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx,
+		"DELETE FROM entity_curation WHERE entity_type = ? AND entity_id = ?", k.entityType, o.id); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, "DELETE FROM "+k.table+" WHERE id = ?", o.id); err != nil {

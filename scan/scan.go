@@ -478,6 +478,7 @@ func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, p
 			Track:            trackFromTags(tags),
 			Lyrics:           lyrics,
 			CoverArt:         cover,
+			CustomTags:       tags.Custom,
 			AuxObservations:  aux,
 			PreferredItemPID: adoptedPID(sc, fm),
 			Acquisition:      tags.Acquisition,
@@ -582,6 +583,7 @@ func bookInput(libraryID int64, file model.File, tags model.Tags, essenceHash st
 		Chapters:      chapters,
 		ChapterSource: chapterSource,
 		CoverArt:      cover,
+		CustomTags:    tags.Custom,
 		Acquisition:   tags.Acquisition,
 	}
 }
@@ -723,6 +725,9 @@ func trackFromTags(tags model.Tags) model.Track {
 		MBReleaseGroupID: tags.MBReleaseGroupID,
 		MBArtistID:       tags.MBArtistID,
 		MBAlbumArtistID:  tags.MBAlbumArtistID,
+		Barcode:          tags.Barcode,
+		Label:            tags.Label,
+		CatalogNumber:    tags.CatalogNumber,
 	}
 }
 

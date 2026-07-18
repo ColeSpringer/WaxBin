@@ -107,6 +107,18 @@ func (s *Store) PutScannedBook(ctx context.Context, in model.PutScannedBookInput
 			}
 		}
 
+		// Custom tags are owned by the primary part, like the book's other metadata.
+		// Overlay them onto item_tag every scan (idempotent, honoring per-key locks),
+		// before upsertBook so its FTS rebuild picks up the tag values.
+		tagsChanged := false
+		if created || role == bookPrimaryRole {
+			c, err := syncItemTagsTx(ctx, tx, itemID, in.CustomTags, in.PreserveLocks)
+			if err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+			tagsChanged = c
+		}
+
 		// On a real change, resolve the book's chapters (per file) and, only for the
 		// primary part, its metadata/series/contributors/genres/FTS. Gating the
 		// metadata on the primary makes one part the owner, so an asymmetrically-tagged
@@ -125,6 +137,14 @@ func (s *Store) PutScannedBook(ctx context.Context, in model.PutScannedBookInput
 				if err := affected.collect(ctx, tx, itemID); err != nil {
 					return waxerr.Wrap(waxerr.CodeIO, op, err)
 				}
+			}
+		} else if tagsChanged {
+			// A custom-tag change on the primary part with unchanged audio bytes did not
+			// re-run upsertBook (which rebuilds the FTS row), so refresh the search row
+			// directly or the new tag values would not be searchable until the next audio
+			// change. tagsChanged is only ever set for the primary part.
+			if err := rebuildBookSearchFTSTx(ctx, tx, itemID); err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 		}
 		// Chapters sync OUTSIDE the audio-change gate (idempotent): an external .cue can
@@ -185,7 +205,7 @@ func (s *Store) PutScannedBook(ctx context.Context, in model.PutScannedBookInput
 		// created=false and ContentChanged=false, so without FileCreated/Relinked here a
 		// change_log tailer would never refresh the existing book. An externally-changed
 		// .cue (chaptersChanged with unchanged audio) also warrants a delta.
-		if created || res.ContentChanged || res.FileCreated || res.Relinked || chaptersChanged || stateChanged || artChanged || acqAdded {
+		if created || res.ContentChanged || res.FileCreated || res.Relinked || chaptersChanged || stateChanged || artChanged || acqAdded || tagsChanged {
 			if err := appendChange(ctx, tx, "item", itemPID, opFor(created)); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
@@ -681,8 +701,12 @@ func syncBookSearchFTS(ctx context.Context, tx *sql.Tx, itemID int64, b model.Bo
 	if err := tx.QueryRowContext(ctx, "SELECT title FROM playable_item WHERE id = ?", itemID).Scan(&title); err != nil {
 		return err
 	}
-	extra := strings.TrimSpace(b.Narrator + " " + b.Genre)
-	_, err := tx.ExecContext(ctx,
+	custom, err := itemCustomTagText(ctx, tx, itemID)
+	if err != nil {
+		return err
+	}
+	extra := strings.TrimSpace(b.Narrator + " " + b.Genre + " " + custom)
+	_, err = tx.ExecContext(ctx,
 		"INSERT INTO search_fts(rowid, kind, title, subtitle, artist, album, extra) VALUES (?,?,?,?,?,?,?)",
 		itemID, string(model.KindBook), title, b.Subtitle, author, b.Series, extra)
 	return err

@@ -109,6 +109,20 @@ func (m *mutator) SetEntityArt(ctx context.Context, entityType model.ArtEntity, 
 	return m.lib.SetEntityArt(ctx, entityType, entityPID, role, data)
 }
 
+func (m *mutator) EditEntity(ctx context.Context, entityType model.MergeEntity, entityPID model.PID, edits map[string]string, opts waxbin.EntityEditOptions) error {
+	if m.px != nil {
+		return m.px.EditEntity(ctx, entityType, entityPID, edits, opts.Lock, opts.Force)
+	}
+	return m.lib.EditEntity(ctx, entityType, entityPID, edits, opts)
+}
+
+func (m *mutator) SetItemTag(ctx context.Context, itemPID model.PID, key string, values []string, opts waxbin.TagEditOptions) (string, int, error) {
+	if m.px != nil {
+		return m.px.SetTag(ctx, itemPID, key, values, opts.Lock, opts.Force)
+	}
+	return m.lib.SetItemTag(ctx, itemPID, key, values, opts)
+}
+
 func (m *mutator) Provenance(ctx context.Context, pid model.PID) ([]model.FieldProvenance, error) {
 	if m.px != nil {
 		return m.px.Provenance(ctx, pid)

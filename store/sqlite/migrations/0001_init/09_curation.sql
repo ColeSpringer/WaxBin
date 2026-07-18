@@ -19,6 +19,43 @@ CREATE TABLE field_provenance (
 );
 CREATE INDEX field_provenance_locked ON field_provenance(item_id) WHERE locked = 1;
 
+-- Sparse entity-level curation and locks: the entity-scoped analogue of
+-- field_provenance for the shared entities (artist, release group, album) that no
+-- single item owns. A row exists only when a user set an entity field (a sort-name
+-- override, an identifier) or a value otherwise needs protecting from an enrichment
+-- overwrite, so the table stays sparse. entity_type selects which table entity_id
+-- refers to, so there is no single FK (like art_map); a merge re-points the loser's
+-- rows onto the survivor explicitly, with locked-wins. The lock is what guards the one
+-- unconditional entity enrich write (release_group.type) and the user overrides. The
+-- name is kept distinct from the item-scoped field_provenance so the two do not get
+-- confused, since they sit close together.
+CREATE TABLE entity_curation (
+  entity_type TEXT    NOT NULL,        -- artist|release_group|album
+  entity_id   INTEGER NOT NULL,
+  field       TEXT    NOT NULL,        -- sort|mbid|type|barcode|label|catalog_number
+  source      TEXT    NOT NULL,        -- user|enrichment
+  locked      INTEGER NOT NULL DEFAULT 0,
+  value       TEXT,                    -- the curated value, when set by a user edit
+  updated_at  INTEGER NOT NULL,        -- unix nanoseconds
+  PRIMARY KEY (entity_type, entity_id, field)
+);
+CREATE INDEX entity_curation_locked ON entity_curation(entity_type, entity_id) WHERE locked = 1;
+
+-- Custom (non-standard) tags preserved per item: the tag frames a file carries that
+-- WaxBin's typed model does not map to a column, plus user-set custom tags. key is a
+-- canonical uppercase-ASCII tag key (so BPM and bpm dedup to one), and position
+-- preserves the order of a multi-valued tag. The set is replaced wholesale on a scan
+-- (per key, unless that key is locked under field_provenance 'tag.<KEY>') or by the
+-- SetItemTag edit. It stays sparse: an item with no extra tags has no rows.
+CREATE TABLE item_tag (
+  item_id  INTEGER NOT NULL REFERENCES playable_item(id) ON DELETE CASCADE,
+  key      TEXT    NOT NULL,        -- canonical uppercase tag key (e.g. MOOD, BPM)
+  value    TEXT    NOT NULL,
+  position INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (item_id, key, position)
+);
+CREATE INDEX item_tag_item ON item_tag(item_id);
+
 -- Structured lyrics (synced + unsynced), keyed by item. WaxBin parses a
 -- sibling .lrc sidecar directly (the authoritative source when present) and
 -- reads embedded USLT (unsynced) and SYLT (synced) tags through WaxLabel at

@@ -155,9 +155,12 @@ func resolveAlbum(ctx context.Context, tx *sql.Tx, key string, releaseGroupID in
 	}
 	pid := model.NewPID()
 	r, err := tx.ExecContext(ctx,
-		"INSERT INTO album(pid, release_group_id, title, sort_key, year, disc_total, mbid, match_key) VALUES (?,?,?,?,?,?,?,?)",
+		`INSERT INTO album(pid, release_group_id, title, sort_key, year, disc_total, mbid,
+			barcode, label, catalog_number, match_key) VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
 		string(pid), nullInt64(releaseGroupID), tr.Album, model.SortKey(tr.Album), nullInt(tr.Year),
-		nullInt(tr.DiscTotal), nullStr(strings.TrimSpace(tr.MBReleaseID)), key)
+		nullInt(tr.DiscTotal), nullStr(strings.TrimSpace(tr.MBReleaseID)),
+		nullStr(strings.TrimSpace(tr.Barcode)), nullStr(strings.TrimSpace(tr.Label)),
+		nullStr(strings.TrimSpace(tr.CatalogNumber)), key)
 	if err != nil {
 		return 0, err
 	}
@@ -256,8 +259,13 @@ func syncSearchFTS(ctx context.Context, tx *sql.Tx, itemID int64, tr model.Track
 		return err
 	}
 	artist := strings.TrimSpace(tr.Artist + " " + tr.AlbumArtist)
-	_, err := tx.ExecContext(ctx,
+	custom, err := itemCustomTagText(ctx, tx, itemID)
+	if err != nil {
+		return err
+	}
+	extra := strings.TrimSpace(tr.Genre + " " + custom)
+	_, err = tx.ExecContext(ctx,
 		"INSERT INTO search_fts(rowid, kind, title, subtitle, artist, album, extra) VALUES (?,?,?,?,?,?,?)",
-		itemID, string(model.KindTrack), title, "", artist, tr.Album, tr.Genre)
+		itemID, string(model.KindTrack), title, "", artist, tr.Album, extra)
 	return err
 }

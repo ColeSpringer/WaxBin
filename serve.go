@@ -192,6 +192,25 @@ func (l *Library) proxyHandlers() map[string]proxy.Handler {
 			}
 			return nil, l.SetEntityArt(ctx, model.ArtEntity(p.EntityType), model.PID(p.EntityPID), p.Role, p.Data)
 		},
+		proxy.MethodEditEntity: func(ctx context.Context, raw json.RawMessage) (any, error) {
+			p, err := decodeParams[proxy.EditEntityParams](raw)
+			if err != nil {
+				return nil, err
+			}
+			return nil, l.EditEntity(ctx, model.MergeEntity(p.EntityType), model.PID(p.EntityPID), p.Edits,
+				EntityEditOptions{Lock: p.Lock, Force: p.Force})
+		},
+		proxy.MethodSetTag: func(ctx context.Context, raw json.RawMessage) (any, error) {
+			p, err := decodeParams[proxy.SetTagParams](raw)
+			if err != nil {
+				return nil, err
+			}
+			key, stored, err := l.SetItemTag(ctx, model.PID(p.ItemPID), p.Key, p.Values, TagEditOptions{Lock: p.Lock, Force: p.Force})
+			if err != nil {
+				return nil, err
+			}
+			return proxy.SetTagResult{Key: key, Stored: stored}, nil
+		},
 		proxy.MethodLock: func(ctx context.Context, raw json.RawMessage) (any, error) {
 			p, err := decodeParams[proxy.FieldsParams](raw)
 			if err != nil {

@@ -190,6 +190,27 @@ func (c *Client) SetEntityArt(ctx context.Context, entityType model.ArtEntity, e
 	}, nil)
 }
 
+// SetTag proxies a custom-tag edit, returning the canonical key stored and the number
+// of values stored after trimming (0 = the tag was cleared).
+func (c *Client) SetTag(ctx context.Context, itemPID model.PID, key string, values []string, lock, force bool) (string, int, error) {
+	var res SetTagResult
+	err := c.call(ctx, MethodSetTag, SetTagParams{
+		ItemPID: string(itemPID), Key: key, Values: values, Lock: lock, Force: force,
+	}, &res)
+	if err != nil {
+		return "", 0, err
+	}
+	return res.Key, res.Stored, nil
+}
+
+// EditEntity proxies a curation edit to one shared entity (artist/release_group/
+// album). The edit is DB-only, so there is no result payload.
+func (c *Client) EditEntity(ctx context.Context, entityType model.MergeEntity, entityPID model.PID, edits map[string]string, lock, force bool) error {
+	return c.call(ctx, MethodEditEntity, EditEntityParams{
+		EntityType: string(entityType), EntityPID: string(entityPID), Edits: edits, Lock: lock, Force: force,
+	}, nil)
+}
+
 // Lock proxies locking item fields.
 func (c *Client) Lock(ctx context.Context, itemPID model.PID, fields []string) error {
 	return c.call(ctx, MethodLock, FieldsParams{ItemPID: string(itemPID), Fields: fields}, nil)

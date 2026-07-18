@@ -158,6 +158,15 @@ func (s *Store) PutScannedTrack(ctx context.Context, in model.PutScannedTrackInp
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 
+		// Overlay the file's custom tags onto item_tag, honoring per-key locks. Runs
+		// before the entity block so the FTS rebuild there picks up the tag values, and
+		// every scan (like lyrics/art) so an added custom tag is caught without an audio
+		// change.
+		tagsChanged, err := syncItemTagsTx(ctx, tx, itemID, in.CustomTags, in.PreserveLocks)
+		if err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+
 		// Track the entities whose maintained rollups this write touches, then
 		// recompute only those rows inside this transaction.
 		affected := newAffectedRollups()
@@ -165,7 +174,8 @@ func (s *Store) PutScannedTrack(ctx context.Context, in model.PutScannedTrackInp
 		// Resolve normalized entities and refresh the item's FTS row when the scan
 		// actually changed catalog inputs. A byte-identical rescan skips this work
 		// and emits no entity-side deltas.
-		if created || res.FileCreated || res.ContentChanged || res.Relinked {
+		entitiesResolved := created || res.FileCreated || res.ContentChanged || res.Relinked
+		if entitiesResolved {
 			// The entities the item leaves (on a retag) lose the track, so collect
 			// them before relinking, and the entities it joins after.
 			if err := affected.collect(ctx, tx, itemID); err != nil {
@@ -175,6 +185,13 @@ func (s *Store) PutScannedTrack(ctx context.Context, in model.PutScannedTrackInp
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 			if err := affected.collect(ctx, tx, itemID); err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+		} else if tagsChanged {
+			// A custom-tag change with unchanged audio bytes did not re-resolve entities
+			// (which is what rebuilds the FTS row), so refresh the search row directly or the
+			// new tag values would not be searchable until the next audio change.
+			if err := syncSearchFTS(ctx, tx, itemID, in.Track); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 		}
@@ -266,7 +283,7 @@ func (s *Store) PutScannedTrack(ctx context.Context, in model.PutScannedTrackInp
 		// attributed origin, so a delta consumer never serves stale metadata/art after
 		// any real change. acqAdded is true only when a row was actually inserted, so a
 		// rescan of an already-attributed item stays silent.
-		if created || res.ContentChanged || stateChanged || lyricsChanged || artChanged || acqAdded {
+		if created || res.ContentChanged || stateChanged || lyricsChanged || artChanged || acqAdded || tagsChanged {
 			if err := appendChange(ctx, tx, "item", itemPID, opFor(created)); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}

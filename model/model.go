@@ -105,6 +105,12 @@ type Track struct {
 	MBReleaseGroupID string
 	MBArtistID       string
 	MBAlbumArtistID  string
+
+	// Album-level release identifiers carried from the file's tags into album
+	// resolution (they land on the album entity, not the denormalized track row).
+	Barcode       string
+	Label         string
+	CatalogNumber string
 }
 
 // ItemFile is an edge from a logical item to a backing file. The offsets support a
@@ -141,6 +147,12 @@ type Tags struct {
 	Genres      []string // split genres, normalized into entities downstream
 	Compilation bool
 	ISRC        string
+
+	// Release identifiers (album-level), carried into album resolution. They are
+	// stored on the album entity, not the track row.
+	Barcode       string
+	Label         string
+	CatalogNumber string
 
 	// Sort names from tags, used to seed collation sort keys when present.
 	ArtistSort      string
@@ -182,6 +194,11 @@ type Tags struct {
 	// Chapters are the file's embedded navigation chapters (M4B Nero/QuickTime,
 	// Matroska, MP3 CHAP), file-relative, in file order. Empty for music.
 	Chapters []Chapter
+
+	// Custom holds the tag frames WaxBin's typed model does not map (keyed by canonical
+	// uppercase tag key), so they are preserved on scan and searchable rather than
+	// dropped. The reserved keys WaxBin owns elsewhere are excluded (see IsReservedTagKey).
+	Custom map[string][]string
 
 	// Acquisition is origin provenance carried by the file's own tags, when it has
 	// any. It does not feed Year; see TagAcquisition for why.

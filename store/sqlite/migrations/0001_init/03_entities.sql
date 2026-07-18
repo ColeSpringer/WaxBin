@@ -59,6 +59,9 @@ CREATE TABLE album (
   disc_total       INTEGER,
   mbid             TEXT,
   edition          TEXT,
+  barcode          TEXT,                 -- release barcode (UPC/EAN)
+  label            TEXT,                 -- record label
+  catalog_number   TEXT,                 -- label catalog number
   match_key        TEXT    NOT NULL UNIQUE
 );
 CREATE INDEX album_rg   ON album(release_group_id);

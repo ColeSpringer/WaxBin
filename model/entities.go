@@ -44,7 +44,12 @@ type Album struct {
 	DiscTotal      int
 	MBID           string
 	Edition        string
-	MatchKey       string
+	// Release identifiers, populated from tags at album creation and editable
+	// through the entity-curation surface.
+	Barcode       string // release barcode (UPC/EAN)
+	Label         string // record label
+	CatalogNumber string // label catalog number
+	MatchKey      string
 }
 
 // Genre is a normalized genre-or-mood entity. The Facet field selects which;

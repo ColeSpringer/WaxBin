@@ -185,9 +185,17 @@ func (s *Store) ApplyArtistEnrichment(ctx context.Context, in model.ArtistEnrich
 			return markEnrichedTx(ctx, tx, model.EnrichArtistType, in.ArtistID, enrichProviderMusicBrainz, false, "")
 		}
 		if in.MBID != "" {
-			if _, err := tx.ExecContext(ctx,
-				"UPDATE artist SET mbid = ? WHERE id = ? AND (mbid IS NULL OR mbid = '')", in.MBID, in.ArtistID); err != nil {
+			// A user who curated (and locked) the artist MBID keeps it, even when it was
+			// locked empty. The fill-when-empty WHERE clause alone would refill that case.
+			locked, err := entityFieldLockedTx(ctx, tx, string(model.MergeArtist), in.ArtistID, "mbid")
+			if err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+			if !locked {
+				if _, err := tx.ExecContext(ctx,
+					"UPDATE artist SET mbid = ? WHERE id = ? AND (mbid IS NULL OR mbid = '')", in.MBID, in.ArtistID); err != nil {
+					return waxerr.Wrap(waxerr.CodeIO, op, err)
+				}
 			}
 		}
 		if err := insertAliasesTx(ctx, tx, in.ArtistID, in.SortName, in.Aliases); err != nil {
@@ -274,8 +282,17 @@ func (s *Store) ApplyReleaseGroupEnrichment(ctx context.Context, in model.Releas
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		if in.Type != "" {
-			if _, err := tx.ExecContext(ctx, "UPDATE release_group SET type = ? WHERE id = ?", in.Type, in.ReleaseGroupID); err != nil {
+			// release_group.type is the one entity field enrichment overwrites
+			// unconditionally, so consult the entity-curation lock first: a user who
+			// curated the type keeps it.
+			locked, err := entityFieldLockedTx(ctx, tx, string(model.MergeReleaseGroup), in.ReleaseGroupID, "type")
+			if err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+			if !locked {
+				if _, err := tx.ExecContext(ctx, "UPDATE release_group SET type = ? WHERE id = ?", in.Type, in.ReleaseGroupID); err != nil {
+					return waxerr.Wrap(waxerr.CodeIO, op, err)
+				}
 			}
 		}
 		aff := newAffectedRollups()
@@ -305,6 +322,13 @@ func (s *Store) ApplyReleaseGroupEnrichment(ctx context.Context, in model.Releas
 // so here it is logged and left, never forced into a duplicate key.
 func setReleaseGroupMBIDTx(ctx context.Context, tx *sql.Tx, log logger, rgID int64, mbid string) error {
 	if mbid == "" {
+		return nil
+	}
+	// A curated (locked) release-group MBID is left untouched, including a locked-empty
+	// one the fill-when-empty guard below would otherwise refill.
+	if locked, err := entityFieldLockedTx(ctx, tx, string(model.MergeReleaseGroup), rgID, "mbid"); err != nil {
+		return err
+	} else if locked {
 		return nil
 	}
 	var other int64

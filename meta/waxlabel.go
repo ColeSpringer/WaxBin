@@ -137,6 +137,9 @@ func tagsFromDoc(doc *waxlabel.Document, fields tag.Tags) model.Tags {
 		Genres:          trimAll(fields.Genres),
 		Compilation:     fields.Compilation,
 		ISRC:            strings.TrimSpace(fields.ISRC),
+		Barcode:         strings.TrimSpace(fields.Barcode),
+		Label:           strings.TrimSpace(fields.Label),
+		CatalogNumber:   strings.TrimSpace(fields.CatalogNumber),
 		ArtistSort:      strings.TrimSpace(fields.ArtistSort),
 		AlbumSort:       strings.TrimSpace(fields.AlbumSort),
 		AlbumArtistSort: strings.TrimSpace(fields.AlbumArtistSort),
@@ -164,7 +167,40 @@ func tagsFromDoc(doc *waxlabel.Document, fields tag.Tags) model.Tags {
 	if at.Bitrate > 0 {
 		t.Bitrate = at.Bitrate / 1000 // bits/sec -> kbps for display
 	}
+	t.Custom = customTagsFromDoc(doc)
 	return t
+}
+
+// customTagsFromDoc collects the file's tag frames that WaxBin's typed model does not
+// map (and does not own through another surface), so they are preserved on scan rather
+// than dropped. It walks the authoritative canonical tag set and keeps every key that
+// is not reserved (see model.IsReservedTagKey) and carries at least one non-empty
+// value. WaxLabel keys are already canonical uppercase, so they need no normalization.
+func customTagsFromDoc(doc *waxlabel.Document) map[string][]string {
+	var out map[string][]string
+	for key, vals := range doc.Tags().All() {
+		// WaxLabel keys are already canonical uppercase, but normalize defensively so the
+		// reserved-key check and the stored key can never diverge from the store's own
+		// canonicalization (a non-canonical or invalid key is skipped).
+		k, ok := model.CanonicalTagKey(string(key))
+		if !ok || model.IsReservedTagKey(k) {
+			continue
+		}
+		kept := make([]string, 0, len(vals))
+		for _, v := range vals {
+			if strings.TrimSpace(v) != "" {
+				kept = append(kept, v)
+			}
+		}
+		if len(kept) == 0 {
+			continue
+		}
+		if out == nil {
+			out = map[string][]string{}
+		}
+		out[k] = kept
+	}
+	return out
 }
 
 // maxDetailBytes bounds a persisted diagnostic detail.

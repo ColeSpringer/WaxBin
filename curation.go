@@ -37,3 +37,28 @@ func (l *Library) SetItemArt(ctx context.Context, itemPID model.PID, raw []byte,
 func (l *Library) SetEntityArt(ctx context.Context, entityType model.ArtEntity, entityPID model.PID, role string, raw []byte) error {
 	return l.store.SetEntityArt(ctx, entityType, entityPID, role, raw)
 }
+
+// TagEditOptions configures a custom-tag edit, mirroring EditOptions.
+type TagEditOptions struct {
+	// Lock locks the "tag.<KEY>" field against a scan re-deriving it from the file; on
+	// by default.
+	Lock bool
+	// Force overrides a locked custom tag.
+	Force bool
+}
+
+// SetItemTag replaces a custom tag's ordered values on an item, locking "tag.<KEY>" by
+// default so a scan does not re-derive it from the file. Empty (or whitespace-only)
+// values clear the tag. The key is normalized to canonical uppercase; a reserved key
+// (one WaxBin owns through the scalar, credit, or identifier APIs) is rejected. It
+// returns the canonical key stored and the number of values actually stored after
+// trimming (0 means the tag was cleared).
+func (l *Library) SetItemTag(ctx context.Context, itemPID model.PID, key string, values []string, opts TagEditOptions) (string, int, error) {
+	return l.store.SetItemTag(ctx, itemPID, key, values, model.SourceUser, opts.Lock, opts.Force)
+}
+
+// ItemTags returns an item's custom tags (the non-standard frames WaxBin's model does
+// not map, plus user-set tags), grouped by key.
+func (l *Library) ItemTags(ctx context.Context, itemPID model.PID) ([]model.ItemTag, error) {
+	return l.store.ItemTags(ctx, itemPID)
+}
