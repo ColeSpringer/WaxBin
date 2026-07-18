@@ -18,13 +18,15 @@ const (
 	GroupKind        GroupBy = "kind"
 )
 
-// Valid reports whether g is a known faceting dimension.
+// Valid reports whether g is a known faceting dimension: one of the fixed dimensions
+// or a well-formed custom-tag dimension ("tag.<KEY>" for a canonical, non-reserved key).
 func (g GroupBy) Valid() bool {
 	switch g {
 	case GroupGenre, GroupArtist, GroupAlbumArtist, GroupYear, GroupKind:
 		return true
 	default:
-		return false
+		_, ok := TagGroupKey(g)
+		return ok
 	}
 }
 

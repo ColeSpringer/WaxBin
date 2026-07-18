@@ -114,14 +114,48 @@ func (s *Store) userStateJoin(ctx context.Context, c *query.Compiled, userPID mo
 	return userStateJoinClause, []any{uid}, nil
 }
 
-// fieldMapFor returns the whitelist for an entity and whether it is supported.
-// items and tracks share the item view. Other entities are not queryable here
-// and report false so callers can reject them rather than silently return item
-// rows.
-func fieldMapFor(e query.Entity) (query.FieldMap, bool) {
+// tagFields is the query field resolver for the item/track entities. It resolves the
+// static itemFields plus dynamic tag.<KEY> custom-tag fields, which compile to a
+// correlated EXISTS over item_tag. It is the injection barrier for tag queries: an
+// unknown static field, or a tag key that is not canonical or is reserved (owned by a
+// scalar/credit/identifier surface), is rejected by returning false. The canonical key
+// is bound as a positional arg, never inlined, precisely because model.CanonicalTagKey
+// legally permits SQL metacharacters (quote, semicolon, --) in a key.
+//
+// The correlated subquery keys on pi.id, which is valid for both tracks and books, so a
+// tag.<KEY> filter works on either kind. On the tracks alias entityPredicate still adds
+// pi.kind='track', so a book carrying the tag is excluded there, consistent with every
+// other field on that alias. The CLI defaults to EntityItems (all kinds), so --tag on the
+// CLI matches tracks, books, and episodes alike.
+type tagFields struct{ static query.FieldMap }
+
+func (f tagFields) Column(field string) (query.Column, bool) {
+	if c, ok := f.static[field]; ok {
+		return c, true
+	}
+	raw, ok := model.CutTagPrefix(field)
+	if !ok {
+		return query.Column{}, false
+	}
+	canon, ok := model.CanonicalTagKey(raw)
+	if !ok || model.IsReservedTagKey(canon) {
+		return query.Column{}, false
+	}
+	return query.Column{Set: &query.SetColumn{
+		Sub:       "SELECT 1 FROM item_tag itq WHERE itq.item_id = pi.id AND itq.key = ?",
+		ValueExpr: "itq.value",
+		Args:      []any{canon}, // bound, never inlined: a canonical key may hold SQL metacharacters
+	}}, true
+}
+
+// fieldMapFor returns the query field resolver for an entity and whether it is
+// supported. items and tracks share the item view (and gain tag.<KEY> fields). Other
+// entities are not queryable here and report false so callers can reject them rather
+// than silently return item rows.
+func fieldMapFor(e query.Entity) (query.Fields, bool) {
 	switch e {
 	case query.EntityItems, query.EntityTracks:
-		return itemFields, true
+		return tagFields{static: itemFields}, true
 	default:
 		return nil, false
 	}

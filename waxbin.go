@@ -530,8 +530,10 @@ type WatchOptions struct {
 // WATCH IS A FOREGROUND MODE. A read-write WaxBin holds an exclusive advisory lock
 // on the catalog for the whole process lifetime, so while watch runs, every OTHER
 // mutating command in another terminal (organize, analyze, enrich, import, scan
-// --force) is refused (read-only queries are always allowed). Stop the watcher to
-// do manual mutation. Idle lock release and a socket proxy are deliberately post-1.0.
+// --force) is refused (read-only queries are always allowed). Stop the watcher to do
+// manual mutation, or run waxbin serve instead when other terminals need to mutate
+// concurrently: it proxies mutations over a local control socket (see Library.Serve).
+// Idle lock release is deliberately post-1.0.
 func (l *Library) Watch(ctx context.Context, opts WatchOptions) error {
 	if l.ReadOnly() {
 		return waxerr.New(waxerr.CodeUnsupported, "Library.Watch", "watch requires a read-write library")

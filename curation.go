@@ -6,6 +6,7 @@ import (
 
 	"github.com/colespringer/waxbin/meta"
 	"github.com/colespringer/waxbin/model"
+	"github.com/colespringer/waxbin/read"
 )
 
 // This file exposes the structured-curation edit APIs (lyrics, chapters, artwork) on
@@ -150,4 +151,11 @@ func (l *Library) SetItemTag(ctx context.Context, itemPID model.PID, key string,
 // not map, plus user-set tags), grouped by key.
 func (l *Library) ItemTags(ctx context.Context, itemPID model.PID) ([]model.ItemTag, error) {
 	return l.store.ItemTags(ctx, itemPID)
+}
+
+// TagKeys returns every custom-tag key in the catalog with the number of distinct items
+// carrying it, most-used first. It is the discovery primitive for custom-tag browse
+// dimensions: list the keys, then facet or filter on tag.<KEY>.
+func (l *Library) TagKeys(ctx context.Context) ([]read.TagKeyCount, error) {
+	return l.store.TagKeys(ctx)
 }

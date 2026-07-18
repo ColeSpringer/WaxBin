@@ -22,12 +22,17 @@
 // read (facet/browse/search/pagination), art (CAS + thumbnails), decode (pure-Go
 // PCM decoding via WaxFlow) and analyze (the PCM analysis pass), scan, organize,
 // inbox, trash, playback, playlist, podcast, source (the acquisition port),
-// enrich (metadata brain), audit (quality/repair), jobs, meta, config, and
-// pidpath (item PID -> file location, cached off the change feed, for a consumer
-// that serves audio by PID); the CLI lives under cmd/waxbin.
+// enrich (metadata brain), audit (quality/repair), jobs, meta, config, proxy (the
+// local unix-socket control channel behind serve), and pidpath (item PID -> file
+// location, cached off the change feed, for a consumer that serves audio by PID);
+// the CLI lives under cmd/waxbin. The structured-curation edit surface (scalar/
+// entity/credit/custom-tag/lyrics/chapters/art edits, with opt-in on-disk
+// write-back) lives on the facade alongside the read API.
 //
 // The engine covers the full lifecycle: scan, analyze, organize, read/browse,
-// playback state, podcasts, audiobooks, enrichment, and audit/quality/repair, all
-// on the same package boundaries. The merge primitive and the maintenance commands
-// (db verify/vacuum/migrate) close the loop.
+// curation edits (with opt-in on-disk write-back), playback state, podcasts,
+// audiobooks, enrichment, and audit/quality/repair, all on the same package
+// boundaries. A local control socket (Serve) lets a second process mutate the
+// catalog while one holds the write lock. The merge primitive and the maintenance
+// commands (db verify/vacuum/migrate) close the loop.
 package waxbin

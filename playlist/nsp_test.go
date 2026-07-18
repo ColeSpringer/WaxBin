@@ -186,6 +186,16 @@ func TestNSPUserStateFields(t *testing.T) {
 	}
 }
 
+// TestExportNSPRejectsTagCond confirms a custom-tag predicate cannot round-trip to a
+// Navidrome smart playlist: .nsp has no custom-tag concept, so ExportNSP faithfully
+// rejects the whole document (CodeUnsupported) rather than dropping the tag filter.
+func TestExportNSPRejectsTagCond(t *testing.T) {
+	q := query.New(query.EntityItems).Where("tag.MOOD", query.OpIs, "happy").Build()
+	if _, err := ExportNSP(q); !waxerr.Is(err, waxerr.CodeUnsupported) {
+		t.Errorf("ExportNSP of a tag.* cond: want CodeUnsupported, got %v", err)
+	}
+}
+
 func TestNSPRatingScaleAndLastPlayed(t *testing.T) {
 	// lastPlayed is a Navidrome date field; WaxBin stores nanoseconds and has no
 	// relative-date operator, so it is (deliberately) unsupported, not silently

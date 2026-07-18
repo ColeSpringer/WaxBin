@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"text/tabwriter"
 
 	"github.com/colespringer/waxbin/model"
@@ -15,14 +16,15 @@ import (
 
 func newQueryCmd(g *globals) *cobra.Command {
 	var (
-		title, artist, album, genre, kind, source string
-		year, limit                               int
-		sortField                                 string
-		desc                                      bool
-		rulePath                                  string
-		pageSize                                  int
-		cursor                                    string
-		user                                      string
+		title, artist, album, genre, kind, source  string
+		year, limit                                int
+		sortField                                  string
+		desc                                       bool
+		rulePath                                   string
+		pageSize                                   int
+		cursor                                     string
+		user                                       string
+		tagEq, tagContains, tagPresent, tagMissing []string
 	)
 	cmd := &cobra.Command{
 		Use:     "query",
@@ -35,6 +37,7 @@ func newQueryCmd(g *globals) *cobra.Command {
 			q, err := buildQuery(cmd, rulePath, queryFlags{
 				title: title, artist: artist, album: album, genre: genre, kind: kind, source: source,
 				year: year, limit: limit, sortField: sortField, desc: desc,
+				tagEq: tagEq, tagContains: tagContains, tagPresent: tagPresent, tagMissing: tagMissing,
 			})
 			if err != nil {
 				return err
@@ -88,6 +91,10 @@ func newQueryCmd(g *globals) *cobra.Command {
 	f.IntVar(&pageSize, "page-size", 0, "keyset pagination: rows per page (enables paged mode)")
 	f.StringVar(&cursor, "cursor", "", "keyset pagination: cursor from a prior page's nextCursor")
 	f.StringVar(&user, "user", "", "user pid for per-user fields (e.g. rating, starred, play_count); empty = default user")
+	f.StringArrayVar(&tagEq, "tag", nil, "match a custom tag exactly: KEY=VALUE (repeatable; equality is case-sensitive)")
+	f.StringArrayVar(&tagContains, "tag-contains", nil, "match a custom tag by substring: KEY=SUBSTR (repeatable; case-insensitive)")
+	f.StringArrayVar(&tagPresent, "tag-present", nil, "require a custom tag key to be present (repeatable)")
+	f.StringArrayVar(&tagMissing, "tag-missing", nil, "require a custom tag key to be absent (repeatable)")
 	return cmd
 }
 
@@ -126,6 +133,31 @@ type queryFlags struct {
 	year, limit                               int
 	sortField                                 string
 	desc                                      bool
+	// Custom-tag filters. Each tagEq/tagContains entry is KEY=VALUE; tagPresent and
+	// tagMissing are bare keys. Empty when a command does not expose tag flags (facet),
+	// which is why buildQuery ranges over them without gating.
+	tagEq, tagContains, tagPresent, tagMissing []string
+}
+
+// tagField builds the tag.<KEY> query field for a user-supplied key, giving a clear
+// error at the point of use for each way a key is rejected: empty, malformed, or
+// reserved. Reusing the same model helpers the resolver and the tag editor use keeps
+// the CLI's notion of a valid custom-tag key identical to the compiler's; the resolver
+// remains the ultimate injection barrier, so this only turns its generic "unknown
+// field" into an actionable message (a reserved key like tag.ISRC is not a typo).
+func tagField(flag, key string) (string, error) {
+	if strings.TrimSpace(key) == "" {
+		return "", waxerr.New(waxerr.CodeInvalid, "query", flag+" needs a non-empty tag key")
+	}
+	canon, ok := model.CanonicalTagKey(key)
+	if !ok {
+		return "", waxerr.New(waxerr.CodeInvalid, "query", flag+" has an invalid tag key: "+key)
+	}
+	if model.IsReservedTagKey(canon) {
+		return "", waxerr.New(waxerr.CodeInvalid, "query",
+			flag+": tag key "+canon+" is reserved (WaxBin owns it), not a custom tag")
+	}
+	return "tag." + key, nil
 }
 
 // buildQuery constructs a query from a --rule file (if given) or from flags.
@@ -159,6 +191,50 @@ func buildQuery(cmd *cobra.Command, rulePath string, qf queryFlags) (query.Query
 	}
 	if cmd.Flags().Changed("year") {
 		b.Where("year", query.OpIs, qf.year)
+	}
+	// Custom-tag filters. Split each KEY=VALUE on the FIRST '=' so a value that legally
+	// contains '=' survives (e.g. DISCOGS_RELEASE=id=12345 -> key DISCOGS_RELEASE, value
+	// id=12345). The tag.<KEY> field passes through the builder opaquely; the resolver
+	// uppercases/canonicalizes the key and validates it at Compile, and the value is
+	// bound verbatim. Equality is case-sensitive; substring (contains) is
+	// case-insensitive, mirroring the scalar text fields.
+	for _, kv := range qf.tagEq {
+		key, val, ok := strings.Cut(kv, "=")
+		if !ok {
+			return query.Query{}, waxerr.New(waxerr.CodeInvalid, "query",
+				"--tag needs KEY=VALUE; use --tag-present for presence")
+		}
+		field, err := tagField("--tag", key)
+		if err != nil {
+			return query.Query{}, err
+		}
+		b.Where(field, query.OpIs, val)
+	}
+	for _, kv := range qf.tagContains {
+		key, sub, ok := strings.Cut(kv, "=")
+		if !ok {
+			return query.Query{}, waxerr.New(waxerr.CodeInvalid, "query",
+				"--tag-contains needs KEY=SUBSTR")
+		}
+		field, err := tagField("--tag-contains", key)
+		if err != nil {
+			return query.Query{}, err
+		}
+		b.Where(field, query.OpContains, sub)
+	}
+	for _, key := range qf.tagPresent {
+		field, err := tagField("--tag-present", key)
+		if err != nil {
+			return query.Query{}, err
+		}
+		b.WherePresence(field, query.OpIsPresent)
+	}
+	for _, key := range qf.tagMissing {
+		field, err := tagField("--tag-missing", key)
+		if err != nil {
+			return query.Query{}, err
+		}
+		b.WherePresence(field, query.OpIsMissing)
 	}
 	if qf.sortField != "" {
 		b.OrderBy(qf.sortField, qf.desc)

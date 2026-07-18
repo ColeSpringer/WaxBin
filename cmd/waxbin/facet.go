@@ -23,12 +23,13 @@ func newFacetCmd(g *globals) *cobra.Command {
 		Use:   "facet --group-by DIM",
 		Short: "Group items by a dimension and count each bucket",
 		Long: "Groups the items matching the filters (or a --rule document) by one " +
-			"dimension and returns each bucket's count. Dimensions: " + groupByList() + ".",
+			"dimension and returns each bucket's count. Dimensions: " + groupByList() + ", " +
+			"or tag.<KEY> to group by a custom tag's values (use `tag keys` to discover them).",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			gb := read.GroupBy(groupBy)
 			if !gb.Valid() {
 				return waxerr.New(waxerr.CodeInvalid, "facet",
-					fmt.Sprintf("unknown --group-by %q; valid: %s", groupBy, groupByList()))
+					fmt.Sprintf("unknown --group-by %q; valid: %s or tag.<KEY>", groupBy, groupByList()))
 			}
 			q, err := buildQuery(cmd, rulePath, queryFlags{
 				title: title, artist: artist, album: album, genre: genre, kind: kind, year: year,
@@ -64,7 +65,7 @@ func newFacetCmd(g *globals) *cobra.Command {
 		},
 	}
 	f := cmd.Flags()
-	f.StringVar(&groupBy, "group-by", "", "facet dimension: "+groupByList())
+	f.StringVar(&groupBy, "group-by", "", "facet dimension: "+groupByList()+" or tag.<KEY>")
 	f.StringVar(&title, "title", "", "match title (substring)")
 	f.StringVar(&artist, "artist", "", "match artist (substring)")
 	f.StringVar(&album, "album", "", "match album (substring)")

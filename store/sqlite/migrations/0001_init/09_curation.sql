@@ -55,6 +55,16 @@ CREATE TABLE item_tag (
   PRIMARY KEY (item_id, key, position)
 );
 CREATE INDEX item_tag_item ON item_tag(item_id);
+-- Serves the catalog-wide, key-driven reads: the tag.<KEY> facet's COUNT(DISTINCT
+-- pi.id) grouped by value and TagKeys' COUNT(DISTINCT item_id) grouped by key. item_tag
+-- is a rowid table, so a secondary index appends the hidden rowid (not the PK columns);
+-- naming item_id explicitly makes both those aggregates index-only (covering) for one
+-- extra INTEGER per row on a sparse table. Because it also carries value, this index
+-- covers the per-item tag.<KEY> EXISTS predicate too: an equality check resolves to an
+-- exact (key, value, item_id) seek and a presence check to a (key) covering seek, so no
+-- tag query needs a row fetch. (The (item_id, key, position) PK still uniquely keys a
+-- tag's rows for writes.)
+CREATE INDEX item_tag_key ON item_tag(key, value, item_id);
 
 -- Structured lyrics (synced + unsynced), keyed by item. WaxBin parses a
 -- sibling .lrc sidecar directly (the authoritative source when present) and

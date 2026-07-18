@@ -17,6 +17,7 @@ import (
 // An absent key (NULL) is mapped to the canonical unknown sentinel.
 type facetSpec struct {
 	join     string // extra join(s), aliased to avoid clashing with itemJoins
+	joinArgs []any  // bind args for join's placeholders (e.g. the tag key), before WHERE args
 	groupBy  string // GROUP BY expression
 	keyExpr  string // machine key (NULL => unknown bucket)
 	display  string // display label (NULL => unknown bucket)
@@ -63,6 +64,24 @@ func facetSpecFor(g read.GroupBy) (facetSpec, bool) {
 			groupBy: "pi.kind", keyExpr: "pi.kind", display: "pi.kind", sortExpr: "pi.kind",
 		}, true
 	}
+	// A custom-tag dimension: group items by the values of one tag key. The INNER JOIN
+	// means only items carrying the key contribute (correct for a value browse
+	// dimension), and a multi-value item is counted once per distinct value via the
+	// shared COUNT(DISTINCT pi.id). The key is bound (joinArgs), never inlined, for the
+	// same reason the query resolver binds it: a canonical key may hold SQL
+	// metacharacters. Value buckets are BINARY/case-sensitive (only tag keys are
+	// canonicalized, not values), consistent with the equality query path.
+	if key, ok := read.TagGroupKey(g); ok {
+		// The `itf.value <> ''` guard mirrors the query presence predicate: it keeps the
+		// value dimension independent of the write-path invariant that empty values are
+		// never stored, so a stray empty value could never render as a blank-labeled
+		// bucket (this dimension has no unknown sentinel).
+		return facetSpec{
+			join:     " INNER JOIN item_tag itf ON itf.item_id = pi.id AND itf.key = ? AND itf.value <> ''",
+			joinArgs: []any{key},
+			groupBy:  "itf.value", keyExpr: "itf.value", display: "itf.value", sortExpr: "itf.value",
+		}, true
+	}
 	return facetSpec{}, false
 }
 
@@ -97,18 +116,25 @@ func (s *Store) Facet(ctx context.Context, q query.Query, g read.GroupBy, userPI
 		where = "1=1"
 	}
 
-	// The user join goes right after itemJoins, before the facet dimension join, so
-	// its ON-clause user id (carried in leadArgs) leads the args. This works only
-	// because every facetSpecFor join is static and binds nothing, leaving the user id
-	// as the one positional arg ahead of the WHERE args. If a facet dimension join
-	// ever adds placeholders, its args land between the two and this needs revisiting:
-	// user id first, then the spec.join args, then c.Args.
+	// Arg order follows the statement's clause order: the user join's ON clause (its
+	// user id, in leadArgs) comes right after itemJoins, then the facet dimension join's
+	// placeholders (spec.joinArgs, e.g. a tag key), then the WHERE args (c.Args). A
+	// custom-tag facet's join binds the tag key here, which is why the ordering is
+	// spelled out rather than assuming the dimension join binds nothing.
 	stmt := fmt.Sprintf(
 		"SELECT %s, %s, COUNT(DISTINCT pi.id)%s%s%s WHERE %s GROUP BY %s ORDER BY (%s IS NULL), %s, %s",
 		spec.keyExpr, spec.display, itemJoins, userJoin, spec.join, where, spec.groupBy,
 		spec.sortExpr, spec.sortExpr, spec.display)
 
-	args := append(leadArgs, c.Args...)
+	// Assemble args in clause order: user id (the join ON clause), then the facet
+	// dimension join's args (spec.joinArgs, e.g. the tag key), then the WHERE args. A
+	// fresh slice is needed because spec.joinArgs sits between leadArgs and c.Args; the
+	// sibling readers (QueryItems/CountItems/QueryPage) have no middle args and append
+	// c.Args onto leadArgs directly.
+	args := make([]any, 0, len(leadArgs)+len(spec.joinArgs)+len(c.Args))
+	args = append(args, leadArgs...)
+	args = append(args, spec.joinArgs...)
+	args = append(args, c.Args...)
 	rows, err := s.read.QueryContext(ctx, stmt, args...)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
@@ -136,6 +162,30 @@ func (s *Store) Facet(ctx context.Context, q query.Query, g read.GroupBy, userPI
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
 	return res, nil
+}
+
+// TagKeys returns every custom-tag key in the catalog with the number of distinct
+// items carrying it, most-used first (ties broken by key). It is the "which tag.<KEY>
+// browse dimensions exist" discovery primitive: a consumer lists these, then facets or
+// filters on the ones it wants. A multi-valued tag on one item still counts that item
+// once (COUNT(DISTINCT item_id)). Keys are stored canonical, so no folding is needed.
+func (s *Store) TagKeys(ctx context.Context) ([]read.TagKeyCount, error) {
+	const op = "store.TagKeys"
+	rows, err := s.read.QueryContext(ctx,
+		"SELECT key, COUNT(DISTINCT item_id) AS n FROM item_tag GROUP BY key ORDER BY n DESC, key")
+	if err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	defer rows.Close()
+	var out []read.TagKeyCount
+	for rows.Next() {
+		var tk read.TagKeyCount
+		if err := rows.Scan(&tk.Key, &tk.Count); err != nil {
+			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		out = append(out, tk)
+	}
+	return out, rows.Err()
 }
 
 const defaultPageSize = 100

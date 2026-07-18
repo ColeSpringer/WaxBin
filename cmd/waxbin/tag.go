@@ -6,6 +6,7 @@ import (
 
 	"github.com/colespringer/waxbin"
 	"github.com/colespringer/waxbin/model"
+	"github.com/colespringer/waxbin/read"
 	"github.com/spf13/cobra"
 )
 
@@ -48,7 +49,50 @@ func newTagCmd(g *globals) *cobra.Command {
 	f.StringArrayVar(&values, "value", nil, "value for the tag (repeatable; none clears it)")
 	f.BoolVar(&noLock, "no-lock", false, "do not lock the tag (it defaults to locked)")
 	f.BoolVar(&force, "force", false, "override a locked tag")
+	// `tag keys` is a catalog-wide read subcommand. Routing is unambiguous because an item
+	// pid is a ULID and can never be the literal "keys", so `tag <ulid>` still hits the
+	// parent's set/list RunE while `tag keys` hits the subcommand.
+	cmd.AddCommand(newTagKeysCmd(g))
 	return cmd
+}
+
+// newTagKeysCmd lists the catalog's custom-tag keys and per-key item counts: the browse
+// dimensions available to `facet --group-by tag.<KEY>` and `query --tag KEY=VALUE`.
+func newTagKeysCmd(g *globals) *cobra.Command {
+	return &cobra.Command{
+		Use:   "keys",
+		Short: "List custom-tag keys and how many items carry each",
+		Long: "Lists every custom-tag key in the catalog with the number of distinct items " +
+			"carrying it (most-used first). These are the browse dimensions available to " +
+			"`facet --group-by tag.<KEY>` and `query --tag KEY=VALUE`.",
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			// A catalog-wide read: open read-only so it takes no maintenance lock and does not
+			// auto-proxy through a running server, unlike the mutating `tag <pid>` set path.
+			lib, _, err := g.openRead(cmd)
+			if err != nil {
+				return err
+			}
+			defer lib.Close()
+			keys, err := lib.TagKeys(ctx(cmd))
+			if err != nil {
+				return err
+			}
+			if g.jsonOut {
+				return printJSON(cmd, tagKeyViews(keys))
+			}
+			if len(keys) == 0 {
+				fmt.Fprintln(out(cmd), "(no custom tags)")
+				return nil
+			}
+			tw := tabwriter.NewWriter(out(cmd), 0, 2, 2, ' ', 0)
+			fmt.Fprintln(tw, "KEY\tITEMS")
+			for _, k := range keys {
+				fmt.Fprintf(tw, "%s\t%d\n", k.Key, k.Count)
+			}
+			return tw.Flush()
+		},
+	}
 }
 
 func listTags(cmd *cobra.Command, g *globals, pid model.PID) error {
@@ -108,6 +152,20 @@ func tagViews(tags []model.ItemTag) []tagView {
 	out := make([]tagView, len(tags))
 	for i, t := range tags {
 		out[i] = tagView{Key: t.Key, Values: t.Values}
+	}
+	return out
+}
+
+// tagKeyView is the JSON shape for a custom-tag key and its item count.
+type tagKeyView struct {
+	Key   string `json:"key"`
+	Count int    `json:"count"`
+}
+
+func tagKeyViews(keys []read.TagKeyCount) []tagKeyView {
+	out := make([]tagKeyView, len(keys))
+	for i, k := range keys {
+		out[i] = tagKeyView{Key: k.Key, Count: k.Count}
 	}
 	return out
 }
