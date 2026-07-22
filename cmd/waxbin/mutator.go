@@ -6,6 +6,7 @@ import (
 	"github.com/colespringer/waxbin"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/proxy"
+	"github.com/colespringer/waxbin/query"
 )
 
 // mutator is how a mutating command reaches the catalog: either a directly-opened
@@ -242,6 +243,17 @@ func (m *mutator) PlaylistRemoveAt(ctx context.Context, playlistPID model.PID, p
 		return m.px.PlaylistRemoveAt(ctx, playlistPID, position)
 	}
 	return m.lib.Playlists().RemoveAt(ctx, playlistPID, position)
+}
+
+func (m *mutator) PlaylistSetRule(ctx context.Context, playlistPID model.PID, rule query.Query) error {
+	if m.px != nil {
+		data, err := query.MarshalRule(rule)
+		if err != nil {
+			return err
+		}
+		return m.px.PlaylistSetRule(ctx, playlistPID, data)
+	}
+	return m.lib.Playlists().SetRule(ctx, playlistPID, rule)
 }
 
 // toPIDs converts a wire string slice into a PID slice.

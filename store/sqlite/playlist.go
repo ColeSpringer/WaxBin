@@ -36,6 +36,9 @@ func (s *Store) CreatePlaylist(ctx context.Context, name string, ownerPID model.
 		if rule == nil {
 			return "", waxerr.New(waxerr.CodeInvalid, op, "a smart playlist requires a rule")
 		}
+		if err := validatePlaylistRule(*rule, op); err != nil {
+			return "", err
+		}
 		b, err := query.MarshalRule(*rule)
 		if err != nil {
 			return "", err
@@ -166,6 +169,59 @@ func (s *Store) SetPlaylistVisibility(ctx context.Context, pid model.PID, vis mo
 	return s.playlistUpdate(ctx, op, pid, "UPDATE playlist SET visibility = ?, updated_at = ? WHERE pid = ?", string(vis))
 }
 
+// SetPlaylistRule replaces a smart playlist's rule in place, under its existing
+// pid, so anything keyed on the pid (a share, a client's saved list) survives a
+// rule edit. The rule is validated the way CreatePlaylist validates, so an
+// unrunnable rule is rejected at write time rather than surfacing on every
+// future read. Writing the byte-identical stored rule is a silent no-op (no
+// update, no change_log delta). A static playlist has no rule to replace
+// (CodeInvalid); an unknown pid is CodeNotFound.
+func (s *Store) SetPlaylistRule(ctx context.Context, pid model.PID, rule query.Query) error {
+	const op = "store.SetPlaylistRule"
+	var kind string
+	var stored sql.NullString
+	err := s.read.QueryRowContext(ctx,
+		"SELECT kind, rule FROM playlist WHERE pid = ?", string(pid)).Scan(&kind, &stored)
+	if errors.Is(err, sql.ErrNoRows) {
+		return waxerr.New(waxerr.CodeNotFound, op, "no such playlist: "+string(pid))
+	}
+	if err != nil {
+		return waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	if model.PlaylistKind(kind) != model.PlaylistSmart {
+		return waxerr.New(waxerr.CodeInvalid, op, "cannot set a rule on a static playlist")
+	}
+	if err := validatePlaylistRule(rule, op); err != nil {
+		return err
+	}
+	b, err := query.MarshalRule(rule)
+	if err != nil {
+		return err
+	}
+	if stored.Valid && stored.String == string(b) {
+		return nil // the byte-identical rule: no write, no change-feed churn
+	}
+	return s.playlistUpdate(ctx, op, pid,
+		"UPDATE playlist SET rule = ?, updated_at = ? WHERE pid = ?", string(b))
+}
+
+// validatePlaylistRule compiles a smart-playlist rule against its entity's field
+// whitelist so a rule with an unknown entity, an unknown field, or an invalid
+// limit-mode combination is rejected at write time. Shared by CreatePlaylist
+// (a deliberate tightening: create used to store rules unvalidated) and
+// SetPlaylistRule, so the two write paths can never disagree on what is
+// storable.
+func validatePlaylistRule(rule query.Query, op string) error {
+	fm, ok := fieldMapFor(rule.Entity)
+	if !ok {
+		return waxerr.New(waxerr.CodeInvalid, op, "unsupported rule entity: "+string(rule.Entity))
+	}
+	if _, err := query.Compile(rule, fm); err != nil {
+		return err
+	}
+	return nil
+}
+
 // playlistUpdate runs a single-column playlist update (value, then now, then pid)
 // and emits the update delta, erroring with CodeNotFound when no row matched.
 func (s *Store) playlistUpdate(ctx context.Context, op string, pid model.PID, stmt string, value any) error {
@@ -187,6 +243,9 @@ func (s *Store) playlistUpdate(ctx context.Context, op string, pid model.PID, st
 // evaluates against userPID's play_state, so one rule yields different membership per
 // user. The user is bound at read time and never stored in the rule. userPID goes
 // unused for a static playlist or a smart rule that touches no user-state field.
+// A rule's limit mode (random/minutes/megabytes) and relative-date operators apply
+// here unchanged, because the evaluation goes through QueryItems: "25 random from
+// the last 30 days" is one stored rule.
 func (s *Store) PlaylistItems(ctx context.Context, pid model.PID, userPID model.PID) ([]*model.ItemView, error) {
 	const op = "store.PlaylistItems"
 	p, err := s.PlaylistByPID(ctx, pid)

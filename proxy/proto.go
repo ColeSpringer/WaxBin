@@ -62,6 +62,7 @@ const (
 	MethodPlaylistAdd      = "playlist_add"
 	MethodPlaylistRemove   = "playlist_remove"
 	MethodPlaylistRemoveAt = "playlist_remove_at"
+	MethodPlaylistSetRule  = "playlist_set_rule"
 	MethodMaintenanceBegin = "maintenance_begin"
 	MethodMaintenanceEnd   = "maintenance_end"
 
@@ -350,6 +351,15 @@ type PlaylistRemoveParams struct {
 type PlaylistRemoveAtParams struct {
 	PlaylistPID string `json:"playlistPid"`
 	Position    int    `json:"position"`
+}
+
+// PlaylistSetRuleParams is the playlist_set_rule request payload. Rule is a
+// marshaled query rule document (the versioned envelope), opaque to this
+// package; the server parses it with query.ParseRule, so validation lives on
+// the server side like run_organize's rule.
+type PlaylistSetRuleParams struct {
+	PlaylistPID string          `json:"playlistPid"`
+	Rule        json.RawMessage `json:"rule"`
 }
 
 // ScanParams is the run_scan request payload.

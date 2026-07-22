@@ -338,6 +338,17 @@ func (l *Library) proxyHandlers() map[string]proxy.Handler {
 			}
 			return nil, l.playlists.RemoveAt(ctx, model.PID(p.PlaylistPID), p.Position)
 		},
+		proxy.MethodPlaylistSetRule: func(ctx context.Context, raw json.RawMessage) (any, error) {
+			p, err := decodeParams[proxy.PlaylistSetRuleParams](raw)
+			if err != nil {
+				return nil, err
+			}
+			q, err := query.ParseRule(p.Rule)
+			if err != nil {
+				return nil, err
+			}
+			return nil, l.playlists.SetRule(ctx, model.PID(p.PlaylistPID), q)
+		},
 		proxy.MethodRunScan: func(ctx context.Context, raw json.RawMessage) (any, error) {
 			p, err := decodeParams[proxy.ScanParams](raw)
 			if err != nil {

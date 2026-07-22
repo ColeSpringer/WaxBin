@@ -3,6 +3,7 @@ package query
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/colespringer/waxbin/waxerr"
 )
@@ -89,6 +90,11 @@ type Compiled struct {
 	OrderBy string // comma-separated ordering, or ""
 	Limit   int    // 0 == none
 	Offset  int    // 0 == none
+	// LimitMode/LimitSeed pass the query's limit interpretation through to the
+	// evaluator (the store); the compiler validates the combination (see
+	// validateLimitMode) but does not lower it to SQL itself.
+	LimitMode LimitMode
+	LimitSeed int64
 	// NeedsUser is set when any field referenced in Where or Sorts carries
 	// Column.NeedsUser, telling the caller to splice the per-user join and bind a
 	// user id before executing.
@@ -97,13 +103,24 @@ type Compiled struct {
 
 const likeEscape = '\\'
 
-// Compile lowers a Query to parameterized SQL fragments against fields.
+// Compile lowers a Query to parameterized SQL fragments against fields,
+// anchoring the relative-time operators (inTheLast/notInTheLast) at time.Now.
+// Every call re-anchors "now", so a stored rule evaluated per read stays fresh.
 func Compile(q Query, fields Fields) (*Compiled, error) {
-	c := &Compiled{Limit: q.Limit, Offset: q.Offset}
+	return CompileAt(q, fields, time.Now())
+}
+
+// CompileAt is Compile with an explicit "now" anchor for the relative-time
+// operators, so an evaluation can be pinned (tests, snapshots).
+func CompileAt(q Query, fields Fields, now time.Time) (*Compiled, error) {
+	if err := validateLimitMode(q); err != nil {
+		return nil, err
+	}
+	c := &Compiled{Limit: q.Limit, Offset: q.Offset, LimitMode: q.LimitMode, LimitSeed: q.LimitSeed}
 
 	if q.Where != nil {
 		var sb strings.Builder
-		if err := compileNode(q.Where, fields, &sb, &c.Args, &c.NeedsUser); err != nil {
+		if err := compileNode(q.Where, fields, &sb, &c.Args, &c.NeedsUser, now.UnixNano()); err != nil {
 			return nil, err
 		}
 		c.Where = sb.String()
@@ -136,20 +153,55 @@ func Compile(q Query, fields Fields) (*Compiled, error) {
 	return c, nil
 }
 
-func compileNode(n Node, fields Fields, sb *strings.Builder, args *[]any, nu *bool) error {
+// validateLimitMode enforces the limit-mode contract at compile time, failing
+// closed on an unknown mode so a doc written by a future binary is rejected
+// rather than silently evaluated as unlimited.
+func validateLimitMode(q Query) error {
+	const op = "query.Compile"
+	switch q.LimitMode {
+	case LimitCount:
+		if q.LimitSeed != 0 {
+			return waxerr.New(waxerr.CodeInvalid, op,
+				"limitSeed requires a random, minutes, or megabytes limit mode")
+		}
+	case LimitRandom:
+		if q.Limit <= 0 {
+			return waxerr.New(waxerr.CodeInvalid, op, "limit mode random requires a positive limit")
+		}
+		if len(q.Sorts) > 0 {
+			return waxerr.New(waxerr.CodeInvalid, op,
+				"limit mode random cannot be combined with sorts (the shuffle is the order)")
+		}
+	case LimitMinutes, LimitMegabytes:
+		if q.Limit <= 0 {
+			return waxerr.New(waxerr.CodeInvalid, op,
+				fmt.Sprintf("limit mode %s requires a positive limit", q.LimitMode))
+		}
+		if q.LimitSeed != 0 && len(q.Sorts) > 0 {
+			return waxerr.New(waxerr.CodeInvalid, op,
+				"limitSeed on a budget mode requires empty sorts (the seed supplies the order)")
+		}
+	default:
+		return waxerr.New(waxerr.CodeInvalid, op,
+			fmt.Sprintf("unknown limit mode %q", q.LimitMode))
+	}
+	return nil
+}
+
+func compileNode(n Node, fields Fields, sb *strings.Builder, args *[]any, nu *bool, nowNS int64) error {
 	switch v := n.(type) {
 	case Cond:
-		return compileCond(v, fields, sb, args, nu)
+		return compileCond(v, fields, sb, args, nu, nowNS)
 	case And:
-		return compileGroup(v.Nodes, "AND", "1=1", fields, sb, args, nu)
+		return compileGroup(v.Nodes, "AND", "1=1", fields, sb, args, nu, nowNS)
 	case Or:
-		return compileGroup(v.Nodes, "OR", "1=0", fields, sb, args, nu)
+		return compileGroup(v.Nodes, "OR", "1=0", fields, sb, args, nu, nowNS)
 	case Not:
 		if v.Node == nil {
 			return waxerr.New(waxerr.CodeInvalid, "query.Compile", "NOT with no child")
 		}
 		sb.WriteString("NOT (")
-		if err := compileNode(v.Node, fields, sb, args, nu); err != nil {
+		if err := compileNode(v.Node, fields, sb, args, nu, nowNS); err != nil {
 			return err
 		}
 		sb.WriteString(")")
@@ -160,7 +212,7 @@ func compileNode(n Node, fields Fields, sb *strings.Builder, args *[]any, nu *bo
 	}
 }
 
-func compileGroup(nodes []Node, joiner, empty string, fields Fields, sb *strings.Builder, args *[]any, nu *bool) error {
+func compileGroup(nodes []Node, joiner, empty string, fields Fields, sb *strings.Builder, args *[]any, nu *bool, nowNS int64) error {
 	if len(nodes) == 0 {
 		sb.WriteString(empty) // empty AND => always true; empty OR => always false
 		return nil
@@ -170,7 +222,7 @@ func compileGroup(nodes []Node, joiner, empty string, fields Fields, sb *strings
 		if i > 0 {
 			sb.WriteString(" " + joiner + " ")
 		}
-		if err := compileNode(child, fields, sb, args, nu); err != nil {
+		if err := compileNode(child, fields, sb, args, nu, nowNS); err != nil {
 			return err
 		}
 	}
@@ -178,7 +230,7 @@ func compileGroup(nodes []Node, joiner, empty string, fields Fields, sb *strings
 	return nil
 }
 
-func compileCond(c Cond, fields Fields, sb *strings.Builder, args *[]any, nu *bool) error {
+func compileCond(c Cond, fields Fields, sb *strings.Builder, args *[]any, nu *bool, nowNS int64) error {
 	col, ok := fields.Column(c.Field)
 	if !ok {
 		return waxerr.New(waxerr.CodeInvalid, "query.Compile",
@@ -243,11 +295,56 @@ func compileCond(c Cond, fields Fields, sb *strings.Builder, args *[]any, nu *bo
 		} else {
 			sb.WriteString(col.Expr + " IS NULL")
 		}
+	case OpInTheLast, OpNotInTheLast:
+		if col.Kind != KindTime {
+			return waxerr.New(waxerr.CodeInvalid, "query.Compile",
+				fmt.Sprintf("%s on %q requires a time field", c.Op, c.Field))
+		}
+		window, err := windowNS(c)
+		if err != nil {
+			return err
+		}
+		if c.Op == OpInTheLast {
+			sb.WriteString(col.Expr + " >= ?")
+		} else {
+			// The complement includes NULL: "not played in the last 30 days"
+			// includes never-played (see the store field map's NULL contract).
+			sb.WriteString("(" + col.Expr + " IS NULL OR " + col.Expr + " < ?)")
+		}
+		*args = append(*args, nowNS-window)
 	default:
 		return waxerr.New(waxerr.CodeInvalid, "query.Compile",
 			fmt.Sprintf("unsupported operator %q", c.Op))
 	}
 	return nil
+}
+
+// windowNS extracts a relative-time operator's window: a positive integral
+// nanosecond count. A rule-doc value arrives as int64 (decodeScalar preserves
+// integer precision); a programmatic int or an integral float is accepted too,
+// and anything else is rejected.
+func windowNS(c Cond) (int64, error) {
+	var w int64
+	switch v := c.Value.(type) {
+	case int64:
+		w = v
+	case int:
+		w = int64(v)
+	case float64:
+		w = int64(v)
+		if float64(w) != v {
+			return 0, waxerr.New(waxerr.CodeInvalid, "query.Compile",
+				fmt.Sprintf("%s on %q needs a whole nanosecond window, got %v", c.Op, c.Field, v))
+		}
+	default:
+		return 0, waxerr.New(waxerr.CodeInvalid, "query.Compile",
+			fmt.Sprintf("%s on %q needs an integer nanosecond window, got %T", c.Op, c.Field, c.Value))
+	}
+	if w <= 0 {
+		return 0, waxerr.New(waxerr.CodeInvalid, "query.Compile",
+			fmt.Sprintf("%s on %q needs a positive nanosecond window", c.Op, c.Field))
+	}
+	return w, nil
 }
 
 // compileSetCond compiles a condition against a set-membership column (a tag.<KEY>
@@ -259,7 +356,8 @@ func compileCond(c Cond, fields Fields, sb *strings.Builder, args *[]any, nu *bo
 // not carry value V for key X". An item with no such tag matches, which diverges from
 // scalar isNot (which drops NULLs) and is exactly the deny-list contract. Ordered
 // operators (gt, lt, before, and the rest) are rejected because tag values are
-// unordered TEXT.
+// unordered TEXT; the relative-time operators (inTheLast/notInTheLast) fall under the
+// same rejection.
 func compileSetCond(c Cond, set *SetColumn, sb *strings.Builder, args *[]any) error {
 	// presence guards on a non-empty value so isPresent/isMissing mean the same thing
 	// the scalar text fields do (their presence check is `<> ''`).

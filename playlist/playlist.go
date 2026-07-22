@@ -24,6 +24,7 @@ type Store interface {
 	DeletePlaylist(ctx context.Context, pid model.PID) error
 	RenamePlaylist(ctx context.Context, pid model.PID, name string) error
 	SetPlaylistVisibility(ctx context.Context, pid model.PID, vis model.PlaylistVisibility) error
+	SetPlaylistRule(ctx context.Context, pid model.PID, rule query.Query) error
 	PlaylistItems(ctx context.Context, pid model.PID, userPID model.PID) ([]*model.ItemView, error)
 	AddPlaylistItems(ctx context.Context, pid model.PID, itemPIDs []model.PID) error
 	SetPlaylistItems(ctx context.Context, pid model.PID, itemPIDs []model.PID) error
@@ -82,6 +83,13 @@ func (s *Service) Rename(ctx context.Context, pid model.PID, name string) error 
 // SetVisibility changes a playlist's visibility.
 func (s *Service) SetVisibility(ctx context.Context, pid model.PID, vis model.PlaylistVisibility) error {
 	return s.store.SetPlaylistVisibility(ctx, pid, vis)
+}
+
+// SetRule replaces a smart playlist's rule in place. The pid is stable across
+// the edit; membership follows on the next read (rules are evaluated on read).
+// The rule is validated like CreateSmart's; a static playlist is rejected.
+func (s *Service) SetRule(ctx context.Context, pid model.PID, rule query.Query) error {
+	return s.store.SetPlaylistRule(ctx, pid, rule)
 }
 
 // Add appends items to a static playlist.

@@ -339,6 +339,13 @@ func (c *Client) PlaylistRemoveAt(ctx context.Context, playlistPID model.PID, po
 	return c.call(ctx, MethodPlaylistRemoveAt, PlaylistRemoveAtParams{PlaylistPID: string(playlistPID), Position: position}, nil)
 }
 
+// PlaylistSetRule proxies replacing a smart playlist's rule in place. rule is a
+// marshaled query rule document (query.MarshalRule); the server parses and
+// validates it.
+func (c *Client) PlaylistSetRule(ctx context.Context, playlistPID model.PID, rule []byte) error {
+	return c.call(ctx, MethodPlaylistSetRule, PlaylistSetRuleParams{PlaylistPID: string(playlistPID), Rule: rule}, nil)
+}
+
 // RunScan submits a scan to the server and returns the started job's PID. The
 // server runs the job in its own process (staying available); the caller tails the
 // job through a read-only catalog handle.

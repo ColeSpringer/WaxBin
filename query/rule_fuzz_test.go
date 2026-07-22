@@ -12,6 +12,9 @@ func FuzzParseRule(f *testing.F) {
 	f.Add([]byte(`{}`))
 	f.Add([]byte(`{"kind":"waxbin.rule","version":1,"payload":{"entity":"track"}}`))
 	f.Add([]byte(`{"kind":"waxbin.rule","version":1,"payload":{"entity":"track","root":{"type":"and","nodes":[]}}}`))
+	f.Add([]byte(`{"kind":"waxbin.rule","version":1,"payload":{"entity":"items","where":{"type":"cond","field":"last_played","op":"inTheLast","value":2592000000000000}}}`))
+	f.Add([]byte(`{"kind":"waxbin.rule","version":1,"payload":{"entity":"items","limit":25,"limitMode":"random","limitSeed":42}}`))
+	f.Add([]byte(`{"kind":"waxbin.rule","version":1,"payload":{"entity":"items","limit":60,"limitMode":"minutes"}}`))
 
 	f.Fuzz(func(t *testing.T, data []byte) {
 		q, err := ParseRule(data)

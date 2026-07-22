@@ -296,8 +296,29 @@ func newPlaylistImportCmd(g *globals) *cobra.Command {
 
 func newSmartPlaylistCmd(g *globals) *cobra.Command {
 	cmd := &cobra.Command{Use: "smartplaylist", Short: "Manage smart (query-driven) playlists"}
-	cmd.AddCommand(newSmartPlaylistCreateCmd(g), newSmartPlaylistExportNSPCmd(g))
+	cmd.AddCommand(newSmartPlaylistCreateCmd(g), newSmartPlaylistSetRuleCmd(g), newSmartPlaylistExportNSPCmd(g))
 	return cmd
+}
+
+// loadRule reads a smart-playlist rule from a JSON rule document or a Navidrome
+// .nsp file; exactly one of the two paths must be given. Shared by create and
+// set-rule so both accept the same rule sources.
+func loadRule(op, rulePath, nspPath string) (query.Query, error) {
+	if (rulePath == "") == (nspPath == "") {
+		return query.Query{}, waxerr.New(waxerr.CodeInvalid, op, "exactly one of --rule or --nsp is required")
+	}
+	path := rulePath
+	if nspPath != "" {
+		path = nspPath
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return query.Query{}, waxerr.Wrapf(waxerr.CodeIO, op, err, "reading %s", path)
+	}
+	if nspPath != "" {
+		return playlist.ImportNSP(data)
+	}
+	return query.ParseRule(data)
 }
 
 func newSmartPlaylistCreateCmd(g *globals) *cobra.Command {
@@ -307,26 +328,9 @@ func newSmartPlaylistCreateCmd(g *globals) *cobra.Command {
 		Short: "Create a smart playlist from a JSON query rule or a Navidrome .nsp file",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if (rulePath == "") == (nspPath == "") {
-				return waxerr.New(waxerr.CodeInvalid, "smartplaylist create", "exactly one of --rule or --nsp is required")
-			}
-			var rule query.Query
-			if nspPath != "" {
-				data, err := os.ReadFile(nspPath)
-				if err != nil {
-					return waxerr.Wrapf(waxerr.CodeIO, "smartplaylist create", err, "reading %s", nspPath)
-				}
-				if rule, err = playlist.ImportNSP(data); err != nil {
-					return err
-				}
-			} else {
-				data, err := os.ReadFile(rulePath)
-				if err != nil {
-					return waxerr.Wrapf(waxerr.CodeIO, "smartplaylist create", err, "reading %s", rulePath)
-				}
-				if rule, err = query.ParseRule(data); err != nil {
-					return err
-				}
+			rule, err := loadRule("smartplaylist create", rulePath, nspPath)
+			if err != nil {
+				return err
 			}
 			lib, _, err := g.open(cmd)
 			if err != nil {
@@ -344,6 +348,34 @@ func newSmartPlaylistCreateCmd(g *globals) *cobra.Command {
 	cmd.Flags().StringVar(&nspPath, "nsp", "", "Navidrome .nsp smart-playlist file")
 	cmd.Flags().StringVar(&user, "user", "", "owner user pid (empty = default user)")
 	cmd.Flags().StringVar(&visibility, "visibility", "private", "visibility: private|shared")
+	return cmd
+}
+
+func newSmartPlaylistSetRuleCmd(g *globals) *cobra.Command {
+	var rulePath, nspPath string
+	cmd := &cobra.Command{
+		Use:   "set-rule PID (--rule FILE | --nsp FILE)",
+		Short: "Replace a smart playlist's rule in place (the pid is unchanged)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			rule, err := loadRule("smartplaylist set-rule", rulePath, nspPath)
+			if err != nil {
+				return err
+			}
+			m, _, err := g.openMutator(cmd)
+			if err != nil {
+				return err
+			}
+			defer m.Close()
+			if err := m.PlaylistSetRule(ctx(cmd), model.PID(args[0]), rule); err != nil {
+				return err
+			}
+			fmt.Fprintln(out(cmd), "rule updated")
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&rulePath, "rule", "", "JSON query rule document")
+	cmd.Flags().StringVar(&nspPath, "nsp", "", "Navidrome .nsp smart-playlist file")
 	return cmd
 }
 

@@ -40,17 +40,21 @@ func facetSpecFor(g read.GroupBy) (facetSpec, bool) {
 			entity: true, unknown: read.NoGenre, noEpisodes: true,
 		}, true
 	case read.GroupArtist:
-		// COALESCE the book author so an audiobook groups under its author in the
-		// same artist facet a track groups under its artist (itemJoins provides bk).
+		// itemArtistIDExpr COALESCEs the book author so an audiobook groups under
+		// its author in the same artist facet a track groups under its artist
+		// (itemJoins provides bk). The expr is shared with the artist_pid query
+		// field, so a bucket's EntityPID and a pid filter can never disagree.
 		return facetSpec{
-			join:    " LEFT JOIN artist fa ON fa.id = COALESCE(t.artist_id, bk.author_id)",
-			groupBy: "COALESCE(t.artist_id, bk.author_id)", keyExpr: "fa.pid", display: "fa.name", sortExpr: "fa.sort_key",
+			join:    " LEFT JOIN artist fa ON fa.id = " + itemArtistIDExpr,
+			groupBy: itemArtistIDExpr, keyExpr: "fa.pid", display: "fa.name", sortExpr: "fa.sort_key",
 			entity: true, unknown: read.UnknownArtist, noEpisodes: true,
 		}, true
 	case read.GroupAlbumArtist:
+		// Shares itemAlbumArtistIDExpr with the album_artist_pid query field (see
+		// GroupArtist).
 		return facetSpec{
-			join:    " LEFT JOIN artist faa ON faa.id = COALESCE(t.album_artist_id, bk.author_id)",
-			groupBy: "COALESCE(t.album_artist_id, bk.author_id)", keyExpr: "faa.pid", display: "faa.name", sortExpr: "faa.sort_key",
+			join:    " LEFT JOIN artist faa ON faa.id = " + itemAlbumArtistIDExpr,
+			groupBy: itemAlbumArtistIDExpr, keyExpr: "faa.pid", display: "faa.name", sortExpr: "faa.sort_key",
 			entity: true, unknown: read.UnknownArtist, noEpisodes: true,
 		}, true
 	case read.GroupYear:
@@ -62,6 +66,17 @@ func facetSpecFor(g read.GroupBy) (facetSpec, bool) {
 	case read.GroupKind:
 		return facetSpec{
 			groupBy: "pi.kind", keyExpr: "pi.kind", display: "pi.kind", sortExpr: "pi.kind",
+		}, true
+	case read.GroupLibrary:
+		// The primary backing file's library, keyed by pid (drilldown pairs with
+		// the `library` query field) and displayed by root. A fileless item, such
+		// as an undownloaded episode, has a NULL f.library_id and lands in the
+		// "[No File]" bucket, so episodes stay included. The library table has no
+		// sort_key; display_root is the stable human order.
+		return facetSpec{
+			join:    " LEFT JOIN library flib ON flib.id = f.library_id",
+			groupBy: "flib.id", keyExpr: "flib.pid", display: "flib.display_root", sortExpr: "flib.display_root",
+			entity: true, unknown: read.NoFile,
 		}, true
 	}
 	// A custom-tag dimension: group items by the values of one tag key. The INNER JOIN
@@ -87,9 +102,10 @@ func facetSpecFor(g read.GroupBy) (facetSpec, bool) {
 
 // Facet groups the items matching q by one dimension and counts each group. It
 // reuses the shared query engine's WHERE so `facet --group-by genre` honors the
-// same filters as a plain query; q's sort/limit/offset are ignored (a facet is
-// an aggregation, not a row window). A filter over a per-user field scopes to
-// userPID's play_state (empty selects the default user).
+// same filters as a plain query; q's sort/limit/offset/limit-mode are ignored (a
+// facet is an aggregation over the full match set, not a row window). A filter
+// over a per-user field scopes to userPID's play_state (empty selects the
+// default user).
 func (s *Store) Facet(ctx context.Context, q query.Query, g read.GroupBy, userPID model.PID) (*read.FacetResult, error) {
 	const op = "store.Facet"
 	fm, ok := fieldMapFor(q.Entity)
@@ -193,9 +209,9 @@ const defaultPageSize = 100
 // QueryPage returns one keyset-paginated window of items in collation-correct
 // order (the generated sort_key, then pid as a tiebreak). Pagination is stable
 // under concurrent mutation because it resumes strictly after the cursor row
-// rather than skipping a fixed offset. q's own sort/limit/offset are ignored;
-// the canonical sort_key ordering owns the page. A non-empty but malformed
-// cursor is rejected rather than silently restarting.
+// rather than skipping a fixed offset. q's own sort/limit/offset/limit-mode are
+// ignored; the canonical sort_key ordering owns the page. A non-empty but
+// malformed cursor is rejected rather than silently restarting.
 func (s *Store) QueryPage(ctx context.Context, q query.Query, cursor read.Cursor, limit int, desc bool, userPID model.PID) (*read.Page, error) {
 	const op = "store.QueryPage"
 	fm, ok := fieldMapFor(q.Entity)

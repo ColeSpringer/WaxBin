@@ -25,6 +25,8 @@ func newQueryCmd(g *globals) *cobra.Command {
 		cursor                                     string
 		user                                       string
 		tagEq, tagContains, tagPresent, tagMissing []string
+		limitMode                                  string
+		seed                                       int64
 	)
 	cmd := &cobra.Command{
 		Use:     "query",
@@ -34,10 +36,21 @@ func newQueryCmd(g *globals) *cobra.Command {
 			"returns matching items. Text flags match by substring; year/kind/genre match exactly. " +
 			"With --page-size, results are paged in collation-correct order using a keyset --cursor.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			// The keyset-paged read ignores limit modes entirely (the canonical
+			// order owns the page and its window), so an explicit --limit-mode or
+			// --seed there is rejected rather than silently returning the full
+			// match set unshuffled.
+			if (pageSize > 0 || cursor != "") &&
+				(cmd.Flags().Changed("limit-mode") || cmd.Flags().Changed("seed")) {
+				return waxerr.New(waxerr.CodeInvalid, "query",
+					"--limit-mode/--seed do not apply to keyset-paged mode (--page-size/--cursor)")
+			}
+
 			q, err := buildQuery(cmd, rulePath, queryFlags{
 				title: title, artist: artist, album: album, genre: genre, kind: kind, source: source,
 				year: year, limit: limit, sortField: sortField, desc: desc,
 				tagEq: tagEq, tagContains: tagContains, tagPresent: tagPresent, tagMissing: tagMissing,
+				limitMode: limitMode, seed: seed,
 			})
 			if err != nil {
 				return err
@@ -95,6 +108,8 @@ func newQueryCmd(g *globals) *cobra.Command {
 	f.StringArrayVar(&tagContains, "tag-contains", nil, "match a custom tag by substring: KEY=SUBSTR (repeatable; case-insensitive)")
 	f.StringArrayVar(&tagPresent, "tag-present", nil, "require a custom tag key to be present (repeatable)")
 	f.StringArrayVar(&tagMissing, "tag-missing", nil, "require a custom tag key to be absent (repeatable)")
+	f.StringVar(&limitMode, "limit-mode", "", "interpret --limit as: count|random|minutes|megabytes")
+	f.Int64Var(&seed, "seed", 0, "pin the shuffle order for --limit-mode random or a sortless budget mode (0 = fresh per run)")
 	return cmd
 }
 
@@ -137,6 +152,11 @@ type queryFlags struct {
 	// tagMissing are bare keys. Empty when a command does not expose tag flags (facet),
 	// which is why buildQuery ranges over them without gating.
 	tagEq, tagContains, tagPresent, tagMissing []string
+	// limitMode reinterprets limit (random/minutes/megabytes; "count" and "" are
+	// the plain row cap) and seed pins its shuffle order. Zero when a command does
+	// not expose the flags (facet ignores modes anyway).
+	limitMode string
+	seed      int64
 }
 
 // tagField builds the tag.<KEY> query field for a user-supplied key, giving a clear
@@ -241,6 +261,14 @@ func buildQuery(cmd *cobra.Command, rulePath string, qf queryFlags) (query.Query
 	}
 	if qf.limit > 0 {
 		b.Limit(qf.limit)
+	}
+	// "count" is the explicit spelling of the default row-cap mode; anything else
+	// passes through opaquely for the compiler to validate (fail closed).
+	if qf.limitMode != "" && qf.limitMode != "count" {
+		b.LimitBy(query.LimitMode(qf.limitMode))
+	}
+	if qf.seed != 0 {
+		b.Seed(qf.seed)
 	}
 	return b.Build(), nil
 }

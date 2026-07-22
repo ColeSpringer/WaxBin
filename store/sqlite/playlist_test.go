@@ -126,6 +126,94 @@ func TestCreatePlaylistValidation(t *testing.T) {
 	if _, err := st.CreatePlaylist(ctx, "x", "", model.PlaylistStatic, "", &r); !waxerr.Is(err, waxerr.CodeInvalid) {
 		t.Errorf("static with rule err = %v, want CodeInvalid", err)
 	}
+	// Create validates the rule the way set-rule does: an unknown field, an
+	// unqueryable entity, or a bad limit-mode combination is rejected at write
+	// time rather than surfacing on every future read.
+	for name, bad := range map[string]query.Query{
+		"unknown field":   query.New(query.EntityItems).Where("bogus", query.OpIs, "x").Build(),
+		"files entity":    query.New(query.EntityFiles).Build(),
+		"random no limit": query.New(query.EntityItems).LimitBy(query.LimitRandom).Build(),
+	} {
+		bad := bad
+		if _, err := st.CreatePlaylist(ctx, "x", "", model.PlaylistSmart, "", &bad); !waxerr.Is(err, waxerr.CodeInvalid) {
+			t.Errorf("create with %s err = %v, want CodeInvalid", name, err)
+		}
+	}
+}
+
+func TestSetPlaylistRule(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/1.flac", essence: "e1", content: "c1", title: "Old", artist: "X", album: "Al", year: 1990})
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/2.flac", essence: "e2", content: "c2", title: "New", artist: "X", album: "Al", year: 2010})
+
+	rule := query.New(query.EntityItems).Where("year", query.OpGte, 2000).Build()
+	pl, err := st.CreatePlaylist(ctx, "Recent", "", model.PlaylistSmart, "", &rule)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	items, _ := st.PlaylistItems(ctx, pl, "")
+	if got := titlesOf(items); !equalStrings(got, []string{"New"}) {
+		t.Fatalf("initial membership = %v, want [New]", got)
+	}
+
+	// Replacing the rule flips membership under the same pid and emits exactly
+	// one playlist update delta.
+	seqBefore, _ := st.LatestChangeSeq(ctx)
+	flipped := query.New(query.EntityItems).Where("year", query.OpLt, 2000).Build()
+	if err := st.SetPlaylistRule(ctx, pl, flipped); err != nil {
+		t.Fatalf("set rule: %v", err)
+	}
+	changes, _ := st.ChangesSince(ctx, seqBefore)
+	if len(changes) != 1 || changes[0].EntityType != "playlist" ||
+		changes[0].EntityPID != pl || changes[0].Op != model.OpUpdate {
+		t.Errorf("changes after set-rule = %+v, want one playlist update for %s", changes, pl)
+	}
+	items, _ = st.PlaylistItems(ctx, pl, "")
+	if got := titlesOf(items); !equalStrings(got, []string{"Old"}) {
+		t.Errorf("membership after set-rule = %v, want [Old] (same pid, new rule)", got)
+	}
+	// The stored rule round-trips as the new rule.
+	got, err := st.PlaylistByPID(ctx, pl)
+	if err != nil || got.Rule == nil {
+		t.Fatalf("playlist after set-rule = %+v (err %v), want a rule", got, err)
+	}
+	wantDoc, _ := query.MarshalRule(flipped)
+	gotDoc, _ := query.MarshalRule(*got.Rule)
+	if string(gotDoc) != string(wantDoc) {
+		t.Errorf("stored rule = %s, want %s", gotDoc, wantDoc)
+	}
+
+	// Re-writing the byte-identical rule is a silent no-op: no delta.
+	seqNoop, _ := st.LatestChangeSeq(ctx)
+	if err := st.SetPlaylistRule(ctx, pl, flipped); err != nil {
+		t.Fatalf("no-op set rule: %v", err)
+	}
+	if seqAfter, _ := st.LatestChangeSeq(ctx); seqAfter != seqNoop {
+		t.Errorf("no-op set-rule emitted a delta (seq %d -> %d)", seqNoop, seqAfter)
+	}
+
+	// Rejections, all without a delta and without touching the stored rule: a
+	// static playlist, an unknown pid, and an uncompilable rule.
+	static, _ := st.CreatePlaylist(ctx, "S", "", model.PlaylistStatic, "", nil)
+	seqRej, _ := st.LatestChangeSeq(ctx)
+	if err := st.SetPlaylistRule(ctx, static, flipped); !waxerr.Is(err, waxerr.CodeInvalid) {
+		t.Errorf("set-rule on static err = %v, want CodeInvalid", err)
+	}
+	if err := st.SetPlaylistRule(ctx, "nope", flipped); !waxerr.Is(err, waxerr.CodeNotFound) {
+		t.Errorf("set-rule on unknown pid err = %v, want CodeNotFound", err)
+	}
+	bad := query.New(query.EntityItems).Where("bogus", query.OpIs, "x").Build()
+	if err := st.SetPlaylistRule(ctx, pl, bad); !waxerr.Is(err, waxerr.CodeInvalid) {
+		t.Errorf("set-rule with unknown field err = %v, want CodeInvalid", err)
+	}
+	if seqAfter, _ := st.LatestChangeSeq(ctx); seqAfter != seqRej {
+		t.Errorf("rejected set-rule emitted a delta (seq %d -> %d)", seqRej, seqAfter)
+	}
+	items, _ = st.PlaylistItems(ctx, pl, "")
+	if got := titlesOf(items); !equalStrings(got, []string{"Old"}) {
+		t.Errorf("membership after rejections = %v, want [Old] unchanged", got)
+	}
 }
 
 func TestRemovePlaylistItemAt(t *testing.T) {

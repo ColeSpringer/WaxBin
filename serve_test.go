@@ -171,6 +171,53 @@ func TestServeProxiedMutations(t *testing.T) {
 	}
 }
 
+// TestServeProxiedSmartPlaylistSetRule drives playlist_set_rule end to end: the
+// rule is replaced under the same pid, membership follows on the next read, and a
+// bad rule keeps its CodeInvalid class across the wire.
+func TestServeProxiedSmartPlaylistSetRule(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	sock := filepath.Join(t.TempDir(), "wax.sock")
+	writeFile(t, filepath.Join(root, "song.mp3"), testaudio.BuildMP3("Original", "Old Artist", "Album", 1))
+
+	lib := openServed(t, ctx, db, root, sock)
+	c := dialWhenReady(t, sock)
+
+	// A rule matching nothing, replaced over the socket by one matching the
+	// scanned track.
+	empty := query.New(query.EntityItems).Where("title", query.OpContains, "Nothing").Build()
+	pid, err := lib.Playlists().CreateSmart(ctx, "Mix", "", "", empty)
+	if err != nil {
+		t.Fatalf("create smart: %v", err)
+	}
+	if items, err := lib.Playlists().Items(ctx, pid, ""); err != nil || len(items) != 0 {
+		t.Fatalf("initial membership = %d items (err %v), want 0", len(items), err)
+	}
+
+	match := query.New(query.EntityItems).Where("title", query.OpContains, "Origin").Build()
+	doc, err := query.MarshalRule(match)
+	if err != nil {
+		t.Fatalf("marshal rule: %v", err)
+	}
+	if err := c.PlaylistSetRule(ctx, pid, doc); err != nil {
+		t.Fatalf("proxied set-rule: %v", err)
+	}
+	items, err := lib.Playlists().Items(ctx, pid, "")
+	if err != nil || len(items) != 1 || items[0].Title != "Original" {
+		t.Fatalf("membership after proxied set-rule = %v (err %v), want [Original] under the same pid", items, err)
+	}
+
+	// A rule the store rejects keeps its class across the wire.
+	bad, err := query.MarshalRule(query.New(query.EntityItems).Where("bogus", query.OpIs, "x").Build())
+	if err != nil {
+		t.Fatalf("marshal bad rule: %v", err)
+	}
+	if err := c.PlaylistSetRule(ctx, pid, bad); !waxerr.Is(err, waxerr.CodeInvalid) {
+		t.Fatalf("proxied bad rule err = %v, want CodeInvalid", err)
+	}
+}
+
 // TestServeProxiedError checks a domain error keeps its code across the proxy: a
 // locked field edited without force returns CodeLocked, so the CLI exit code is the
 // same as a local edit.

@@ -37,6 +37,43 @@ const (
 	OpAfter      Op = "after"      // time/ordinal >
 	OpIsPresent  Op = "isPresent"  // non-null and (for text) non-empty
 	OpIsMissing  Op = "isMissing"  // null or (for text) empty
+
+	// Relative-time operators, under Navidrome's names so .nsp rules map 1:1.
+	// The condition value is a positive int64 window in nanoseconds, only
+	// KindTime fields accept them, and "now" is anchored at compile time (see
+	// CompileAt). OpInTheLast matches a timestamp within the window ending now;
+	// OpNotInTheLast matches the complement, which includes NULL, so "not
+	// played in the last 30 days" also matches never-played.
+	OpInTheLast    Op = "inTheLast"
+	OpNotInTheLast Op = "notInTheLast"
+)
+
+// LimitMode selects how Query.Limit is interpreted at evaluation time. The
+// zero value is the plain row-count cap; the other modes are how a smart list
+// says "25 random tracks", "an hour of music", or "what fits on the device".
+type LimitMode string
+
+const (
+	// LimitCount is the default: Limit caps the row count in sorted order.
+	// It marshals as the absent field; "count" is accepted on parse.
+	LimitCount LimitMode = ""
+	// LimitRandom returns Limit rows drawn by a seeded shuffle. LimitSeed pins
+	// the order (0 = a fresh order per evaluation); Sorts are rejected with
+	// this mode, since the shuffle is the order.
+	LimitRandom LimitMode = "random"
+	// LimitMinutes accumulates rows in order until adding the next row would
+	// exceed Limit minutes of playtime, excluding that row and stopping. A row
+	// with no measurable playtime is skipped rather than counted as free.
+	LimitMinutes LimitMode = "minutes"
+	// LimitMegabytes accumulates rows in order until adding the next row would
+	// exceed Limit megabytes (10^6 bytes), excluding that row and stopping. A
+	// row's cost is the summed size of all its backing files (every part of a
+	// multi-file book). A virtual track carved from a shared single-file rip
+	// counts the whole rip file's size once per included track, so a shared rip
+	// over-counts and a device budget under-fills rather than overflowing,
+	// which is the safe way to be wrong. A fileless row costs nothing
+	// measurable and is skipped.
+	LimitMegabytes LimitMode = "megabytes"
 )
 
 // Node is one element of a boolean condition tree: a Cond leaf or an And/Or/Not
@@ -84,16 +121,29 @@ type Query struct {
 	Sorts  []Sort `json:"sorts,omitempty"`
 	Limit  int    `json:"limit,omitempty"`  // 0 == no limit
 	Offset int    `json:"offset,omitempty"` // 0 == no offset
+	// LimitMode interprets Limit (count/random/minutes/megabytes; see the
+	// LimitMode constants). Additive to the version-1 rule document: an older
+	// binary parsing a mode-carrying doc drops the mode but still honors Limit,
+	// so it evaluates the plain row cap. A "random 25" rule comes back as the
+	// first 25 in sort order and a "60 minutes" rule as 60 rows. That silent
+	// drift is accepted pre-1.0.
+	LimitMode LimitMode `json:"limitMode,omitempty"`
+	// LimitSeed pins the shuffle order of a random/budget evaluation (0 = a
+	// fresh order per evaluation). Only meaningful with a non-count LimitMode;
+	// CompileAt rejects it on the count mode.
+	LimitSeed int64 `json:"limitSeed,omitempty"`
 }
 
 // Builder is a fluent constructor. Conditions added via Where are combined with
 // AND; use WhereNode to add arbitrary And/Or/Not subtrees.
 type Builder struct {
-	entity Entity
-	ands   []Node
-	sorts  []Sort
-	limit  int
-	offset int
+	entity    Entity
+	ands      []Node
+	sorts     []Sort
+	limit     int
+	offset    int
+	limitMode LimitMode
+	limitSeed int64
 }
 
 // New starts a Builder for the given entity.
@@ -137,6 +187,13 @@ func (b *Builder) Limit(n int) *Builder { b.limit = n; return b }
 // Offset sets the row offset.
 func (b *Builder) Offset(n int) *Builder { b.offset = n; return b }
 
+// LimitBy sets how Limit is interpreted (count/random/minutes/megabytes).
+func (b *Builder) LimitBy(mode LimitMode) *Builder { b.limitMode = mode; return b }
+
+// Seed pins the shuffle order of a random/budget-mode evaluation (0 = fresh
+// per evaluation).
+func (b *Builder) Seed(seed int64) *Builder { b.limitSeed = seed; return b }
+
 // Build materializes the Query. A single top-level condition is unwrapped;
 // multiple are wrapped in an And.
 func (b *Builder) Build() Query {
@@ -150,10 +207,12 @@ func (b *Builder) Build() Query {
 		where = And{Nodes: b.ands}
 	}
 	return Query{
-		Entity: b.entity,
-		Where:  where,
-		Sorts:  b.sorts,
-		Limit:  b.limit,
-		Offset: b.offset,
+		Entity:    b.entity,
+		Where:     where,
+		Sorts:     b.sorts,
+		Limit:     b.limit,
+		Offset:    b.offset,
+		LimitMode: b.limitMode,
+		LimitSeed: b.limitSeed,
 	}
 }

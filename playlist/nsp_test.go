@@ -1,6 +1,7 @@
 package playlist
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -197,9 +198,9 @@ func TestExportNSPRejectsTagCond(t *testing.T) {
 }
 
 func TestNSPRatingScaleAndLastPlayed(t *testing.T) {
-	// lastPlayed is a Navidrome date field; WaxBin stores nanoseconds and has no
-	// relative-date operator, so it is (deliberately) unsupported, not silently
-	// mis-mapped.
+	// lastPlayed maps only through the RELATIVE operators; an absolute date rule
+	// holds a date string WaxBin's nanosecond column cannot compare against, so it
+	// stays (deliberately) unsupported, not silently mis-mapped.
 	if _, err := ImportNSP([]byte(`{"all":[{"before":{"lastPlayed":"2023-01-01"}}]}`)); !waxerr.Is(err, waxerr.CodeUnsupported) {
 		t.Errorf("lastPlayed import: want CodeUnsupported, got %v", err)
 	}
@@ -220,6 +221,177 @@ func TestNSPRatingScaleAndLastPlayed(t *testing.T) {
 	frac := query.New(query.EntityItems).Where("rating", query.OpGt, 73).Build()
 	if _, err := ExportNSP(frac); !waxerr.Is(err, waxerr.CodeUnsupported) {
 		t.Errorf("export rating 73 (not a whole star): want CodeUnsupported, got %v", err)
+	}
+}
+
+func TestNSPRelativeDates(t *testing.T) {
+	// inTheLast/notInTheLast on the date fields map to WaxBin's relative-time
+	// operators with the day count converted to a nanosecond window.
+	data := []byte(`{"all":[{"inTheLast":{"lastPlayed":30}},{"notInTheLast":{"dateAdded":7}}]}`)
+	q, err := ImportNSP(data)
+	if err != nil {
+		t.Fatalf("import relative dates: %v", err)
+	}
+	and, ok := q.Where.(query.And)
+	if !ok || len(and.Nodes) != 2 {
+		t.Fatalf("where = %T, want And of 2", q.Where)
+	}
+	c0 := and.Nodes[0].(query.Cond)
+	if c0.Field != "last_played" || c0.Op != query.OpInTheLast || c0.Value != 30*nspDayNS {
+		t.Errorf("cond 0 = %+v, want last_played inTheLast 30d in ns", c0)
+	}
+	c1 := and.Nodes[1].(query.Cond)
+	if c1.Field != "added" || c1.Op != query.OpNotInTheLast || c1.Value != 7*nspDayNS {
+		t.Errorf("cond 1 = %+v, want added notInTheLast 7d in ns", c1)
+	}
+
+	// Full round-trip: export back to days, re-import, same canonical rule.
+	out, err := ExportNSP(q)
+	if err != nil {
+		t.Fatalf("export: %v", err)
+	}
+	q2, err := ImportNSP(out)
+	if err != nil {
+		t.Fatalf("re-import: %v", err)
+	}
+	b1, _ := query.MarshalRule(q)
+	b2, _ := query.MarshalRule(q2)
+	if string(b1) != string(b2) {
+		t.Errorf("relative-date round-trip diverged:\n q1=%s\n q2=%s", b1, b2)
+	}
+
+	// Still rejected: absolute operators on date fields, fractional/non-positive
+	// day counts, the relative ops on a non-date field, and a day count whose
+	// nanosecond window would overflow int64 (the wrap can land on a positive,
+	// plausible-looking but wrong window, so the bound rejects before it).
+	rejected := map[string]string{
+		"absolute after":         `{"all":[{"after":{"dateAdded":"2023-01-01"}}]}`,
+		"absolute is":            `{"all":[{"is":{"lastPlayed":"2023-01-01"}}]}`,
+		"fractional days":        `{"all":[{"inTheLast":{"lastPlayed":1.5}}]}`,
+		"zero days":              `{"all":[{"inTheLast":{"lastPlayed":0}}]}`,
+		"negative days":          `{"all":[{"notInTheLast":{"dateAdded":-3}}]}`,
+		"non-numeric days":       `{"all":[{"inTheLast":{"lastPlayed":"thirty"}}]}`,
+		"relative non-date":      `{"all":[{"inTheLast":{"year":30}}]}`,
+		"relative on artist":     `{"all":[{"notInTheLast":{"artist":30}}]}`,
+		"overflow negative-wrap": `{"all":[{"inTheLast":{"lastPlayed":200000}}]}`,
+		"overflow positive-wrap": `{"all":[{"notInTheLast":{"dateAdded":320000}}]}`,
+		"absurd days":            `{"all":[{"inTheLast":{"lastPlayed":1e30}}]}`,
+	}
+	for name, doc := range rejected {
+		if _, err := ImportNSP([]byte(doc)); !waxerr.Is(err, waxerr.CodeUnsupported) {
+			t.Errorf("%s: want CodeUnsupported, got %v", name, err)
+		}
+	}
+
+	// The largest representable whole-day window (MaxInt64/nspDayNS days) still
+	// imports: the overflow bound is exclusive, not a shrunken range.
+	maxDays := int64(9223372036854775807) / nspDayNS
+	big, err := ImportNSP([]byte(fmt.Sprintf(`{"all":[{"inTheLast":{"lastPlayed":%d}}]}`, maxDays)))
+	if err != nil {
+		t.Fatalf("import max-day window (%d days): %v", maxDays, err)
+	}
+	if c := big.Where.(query.And).Nodes[0].(query.Cond); c.Value != maxDays*nspDayNS {
+		t.Errorf("max-day window = %v, want %d", c.Value, maxDays*nspDayNS)
+	}
+
+	// Export of a window that is not a whole number of days rejects (the
+	// whole-star precedent), as does an absolute operator on a date field.
+	partial := query.New(query.EntityItems).Where("last_played", query.OpInTheLast, nspDayNS+1).Build()
+	if _, err := ExportNSP(partial); !waxerr.Is(err, waxerr.CodeUnsupported) {
+		t.Errorf("export partial-day window: want CodeUnsupported, got %v", err)
+	}
+	abs := query.New(query.EntityItems).Where("last_played", query.OpAfter, int64(1)).Build()
+	if _, err := ExportNSP(abs); !waxerr.Is(err, waxerr.CodeUnsupported) {
+		t.Errorf("export absolute op on date field: want CodeUnsupported, got %v", err)
+	}
+}
+
+func TestNSPRandomSortAndLimitModes(t *testing.T) {
+	// sort "random" (with a limit) maps to the random limit mode, not a Sort.
+	q, err := ImportNSP([]byte(`{"all":[{"is":{"artist":"X"}}],"sort":"random","limit":25}`))
+	if err != nil {
+		t.Fatalf("import sort random: %v", err)
+	}
+	if q.LimitMode != query.LimitRandom || q.Limit != 25 || len(q.Sorts) != 0 {
+		t.Errorf("imported = mode %q limit %d sorts %v, want random/25/none", q.LimitMode, q.Limit, q.Sorts)
+	}
+
+	// It round-trips: export renders sort "random" again.
+	out, err := ExportNSP(q)
+	if err != nil {
+		t.Fatalf("export random: %v", err)
+	}
+	q2, err := ImportNSP(out)
+	if err != nil {
+		t.Fatalf("re-import random: %v", err)
+	}
+	if q2.LimitMode != query.LimitRandom || q2.Limit != 25 {
+		t.Errorf("re-imported = mode %q limit %d, want random/25", q2.LimitMode, q2.Limit)
+	}
+
+	// A random sort with no limit, or a zero/negative one, has no WaxBin
+	// representation ("everything, shuffled" is a playback concern; random
+	// requires a positive limit) and rejects all-or-nothing instead of importing
+	// a query every downstream compile refuses.
+	for name, doc := range map[string]string{
+		"no limit":       `{"all":[{"is":{"artist":"X"}}],"sort":"random"}`,
+		"zero limit":     `{"all":[{"is":{"artist":"X"}}],"sort":"random","limit":0}`,
+		"negative limit": `{"all":[{"is":{"artist":"X"}}],"sort":"random","limit":-5}`,
+	} {
+		if _, err := ImportNSP([]byte(doc)); !waxerr.Is(err, waxerr.CodeUnsupported) {
+			t.Errorf("sort random with %s: want CodeUnsupported, got %v", name, err)
+		}
+	}
+
+	// Budget modes and a pinned seed have no .nsp representation, and neither
+	// does the (compile-invalid) random+sorts hybrid, whose sort would otherwise
+	// silently overwrite the shuffle on export.
+	budget := query.New(query.EntityItems).Limit(60).LimitBy(query.LimitMinutes).Build()
+	if _, err := ExportNSP(budget); !waxerr.Is(err, waxerr.CodeUnsupported) {
+		t.Errorf("export minutes mode: want CodeUnsupported, got %v", err)
+	}
+	seeded := query.New(query.EntityItems).Limit(25).LimitBy(query.LimitRandom).Seed(42).Build()
+	if _, err := ExportNSP(seeded); !waxerr.Is(err, waxerr.CodeUnsupported) {
+		t.Errorf("export seeded random: want CodeUnsupported, got %v", err)
+	}
+	hybrid := query.Query{Entity: query.EntityItems, Limit: 25, LimitMode: query.LimitRandom,
+		Sorts: []query.Sort{{Field: "title"}}}
+	if _, err := ExportNSP(hybrid); !waxerr.Is(err, waxerr.CodeUnsupported) {
+		t.Errorf("export random+sorts hybrid: want CodeUnsupported, got %v", err)
+	}
+}
+
+func TestNSPDateSortFields(t *testing.T) {
+	// Navidrome's common "recently added" playlist (sort dateAdded desc) maps to
+	// a WaxBin sort over the added time field; lastPlayed sorts the same way.
+	q, err := ImportNSP([]byte(`{"all":[{"is":{"artist":"X"}}],"sort":"dateAdded","order":"desc","limit":50}`))
+	if err != nil {
+		t.Fatalf("import sort dateAdded: %v", err)
+	}
+	if len(q.Sorts) != 1 || q.Sorts[0].Field != "added" || !q.Sorts[0].Desc {
+		t.Errorf("sorts = %+v, want added desc", q.Sorts)
+	}
+	q2, err := ImportNSP([]byte(`{"all":[{"is":{"artist":"X"}}],"sort":"lastPlayed","order":"asc"}`))
+	if err != nil {
+		t.Fatalf("import sort lastPlayed: %v", err)
+	}
+	if len(q2.Sorts) != 1 || q2.Sorts[0].Field != "last_played" || q2.Sorts[0].Desc {
+		t.Errorf("sorts = %+v, want last_played asc", q2.Sorts)
+	}
+
+	// Round-trip: the date sort exports back and re-imports equivalently.
+	out, err := ExportNSP(q)
+	if err != nil {
+		t.Fatalf("export date sort: %v", err)
+	}
+	back, err := ImportNSP(out)
+	if err != nil {
+		t.Fatalf("re-import date sort: %v", err)
+	}
+	b1, _ := query.MarshalRule(q)
+	b2, _ := query.MarshalRule(back)
+	if string(b1) != string(b2) {
+		t.Errorf("date-sort round-trip diverged:\n q1=%s\n q2=%s", b1, b2)
 	}
 }
 

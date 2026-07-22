@@ -18,10 +18,14 @@ type fakeStore struct {
 	members   map[model.PID][]model.PID
 	nextID    int
 	createdAs map[model.PID]model.PlaylistKind
+	rules     map[model.PID]query.Query
 }
 
 func newFakeStore() *fakeStore {
-	return &fakeStore{byPath: map[string]*model.ItemView{}, members: map[model.PID][]model.PID{}, createdAs: map[model.PID]model.PlaylistKind{}}
+	return &fakeStore{
+		byPath: map[string]*model.ItemView{}, members: map[model.PID][]model.PID{},
+		createdAs: map[model.PID]model.PlaylistKind{}, rules: map[model.PID]query.Query{},
+	}
 }
 
 func (f *fakeStore) add(path string, pid model.PID, title, artist string) {
@@ -78,6 +82,25 @@ func (f *fakeStore) AddPlaylistItems(_ context.Context, pid model.PID, items []m
 }
 func (f *fakeStore) RemovePlaylistItem(context.Context, model.PID, model.PID) error { return nil }
 func (f *fakeStore) RemovePlaylistItemAt(context.Context, model.PID, int) error     { return nil }
+func (f *fakeStore) SetPlaylistRule(_ context.Context, pid model.PID, rule query.Query) error {
+	f.rules[pid] = rule
+	return nil
+}
+
+// TestServiceSetRule confirms the service dispatches a rule replacement to the
+// store unchanged (validation and the no-op contract live store-side).
+func TestServiceSetRule(t *testing.T) {
+	fs := newFakeStore()
+	svc := New(fs)
+	rule := query.New(query.EntityItems).Where("year", query.OpGte, 2000).Limit(3).Build()
+	if err := svc.SetRule(context.Background(), "pl1", rule); err != nil {
+		t.Fatalf("set rule: %v", err)
+	}
+	got, ok := fs.rules["pl1"]
+	if !ok || got.Limit != 3 {
+		t.Errorf("stored rule = %+v (ok %v), want the passed rule under pl1", got, ok)
+	}
+}
 
 func TestM3U8RoundTrip(t *testing.T) {
 	fs := newFakeStore()

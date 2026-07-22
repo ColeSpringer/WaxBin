@@ -7,6 +7,26 @@ import (
 	"github.com/colespringer/waxbin/query"
 )
 
+// itemArtistIDExpr / itemAlbumArtistIDExpr resolve an item's effective artist /
+// album-artist entity id, COALESCEing the book author so an audiobook carries its
+// author where a track carries its artist. Both the artist facet specs
+// (facetSpecFor) and the artist_pid/album_artist_pid query fields consume the
+// same expression, so a facet bucket's EntityPID and a pid filter can never
+// disagree about which entity an item belongs to.
+const (
+	itemArtistIDExpr      = "COALESCE(t.artist_id, bk.author_id)"
+	itemAlbumArtistIDExpr = "COALESCE(t.album_artist_id, bk.author_id)"
+)
+
+// itemArtSlotExpr selects the art_map entity_type slot an item's own art lives
+// under. Tracks and books both store item art under the 'track' slot (the shared
+// attachArtTx path treats the entity id as the playable_item id), but an
+// episode's cover attaches under 'episode' (attachEntityArtTx(..., "episode",
+// itemID, ...) on download). Any read predicate probing item-own art must switch
+// the slot by kind through this expression; a track-only predicate would read 0
+// for every covered episode.
+const itemArtSlotExpr = "CASE WHEN pi.kind='episode' THEN 'episode' ELSE 'track' END"
+
 // itemFields whitelists the logical fields a query over items/tracks may
 // reference, mapping each to a column expression in the items SELECT (aliases:
 // pi=playable_item, t=track, bk=book, srs=series, f=primary file, ps=the current
@@ -38,7 +58,28 @@ import (
 // rating and last_played stay raw NULL, so isMissing and isPresent do work there: an
 // unrated or never-played item reads NULL. Write "never play disliked" as
 // `rating isMissing OR rating gt N`. A plain `rating lte N` drops unrated items,
-// since a comparison against NULL is never true.
+// since a comparison against NULL is never true. The relative-time operators follow
+// the same contract: `last_played notInTheLast <window>` matches NULL ("not played
+// in 30 days" includes never-played), while `inTheLast` never matches NULL.
+//
+// The entity-handle fields (artist_pid, album_artist_pid, album_pid, genre_pid,
+// library) filter by normalized-entity identity instead of display text, so a
+// facet drilldown can query by the bucket's EntityPID. The artist exprs share
+// itemArtistIDExpr/itemAlbumArtistIDExpr with the facet specs, so a facet
+// bucket's EntityPID and a pid filter can never disagree (a book matches by its
+// author, like the artist facet). Each pid field is a correlated scalar subquery
+// resolving by primary-key seek per row; no itemJoins change, so the blast
+// radius stays in this file. album_pid is track-only (NULL for books/episodes)
+// and library is the primary file's library pid (NULL for a fileless item, so
+// `library isMissing` matches undownloaded episodes). genre_pid is a set field
+// over item_genre (tag-field semantics: isNot is a deny-list, ordered operators
+// are rejected).
+//
+// has_art and has_lyrics are presence probes: EXISTS lowered to 0/1, never NULL,
+// so like play_count the presence ops are useless on them; use `is 0` / `is 1`.
+// has_art covers only the item's own front cover, through the kind-switched art
+// slot (itemArtSlotExpr). Chain-inherited album/artist art reads 0 on purpose,
+// since the field exists to find items missing their own cover.
 var itemFields = query.FieldMap{
 	"pid":          {Expr: "pi.pid", Kind: query.KindText},
 	"kind":         {Expr: "pi.kind", Kind: query.KindText},
@@ -66,6 +107,22 @@ var itemFields = query.FieldMap{
 	"codec":        {Expr: "f.codec", Kind: query.KindText},
 	"container":    {Expr: "f.container", Kind: query.KindText},
 	"path":         {Expr: "f.display_path", Kind: query.KindText},
+
+	// Entity handles (see the header block): correlated PK-seek scalar subqueries,
+	// except genre_pid, which is a set field over item_genre.
+	"artist_pid":       {Expr: "(SELECT apq.pid FROM artist apq WHERE apq.id = " + itemArtistIDExpr + ")", Kind: query.KindText},
+	"album_artist_pid": {Expr: "(SELECT aapq.pid FROM artist aapq WHERE aapq.id = " + itemAlbumArtistIDExpr + ")", Kind: query.KindText},
+	"album_pid":        {Expr: "(SELECT albq.pid FROM album albq WHERE albq.id = t.album_id)", Kind: query.KindText},
+	"library":          {Expr: "(SELECT libq.pid FROM library libq WHERE libq.id = f.library_id)", Kind: query.KindText},
+	"genre_pid": {Set: &query.SetColumn{
+		Sub:       "SELECT 1 FROM item_genre igq JOIN genre gq ON gq.id = igq.genre_id WHERE igq.item_id = pi.id",
+		ValueExpr: "gq.pid",
+	}},
+
+	// Presence probes (0/1, never NULL; use `is 0`/`is 1`, not presence ops).
+	"has_art": {Expr: "CASE WHEN EXISTS(SELECT 1 FROM art_map amq WHERE amq.entity_type = " + itemArtSlotExpr +
+		" AND amq.entity_id = pi.id AND amq.role = 'front') THEN 1 ELSE 0 END", Kind: query.KindInt},
+	"has_lyrics": {Expr: "CASE WHEN EXISTS(SELECT 1 FROM lyrics lyq WHERE lyq.item_id = pi.id) THEN 1 ELSE 0 END", Kind: query.KindInt},
 
 	// Per-user playback state (bound via userStateJoin when referenced).
 	"starred":     {Expr: "CASE WHEN ps.starred_at IS NOT NULL THEN 1 ELSE 0 END", Kind: query.KindInt, NeedsUser: true},

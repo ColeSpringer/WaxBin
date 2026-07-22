@@ -4,8 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"math"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/colespringer/waxbin/internal/pathx"
 	"github.com/colespringer/waxbin/model"
@@ -378,11 +380,34 @@ func preserveItemIdentityForFile(ctx context.Context, tx *sql.Tx, fileID int64, 
 	return err
 }
 
+// budgetScanCeiling bounds how many rows a budget-mode (minutes/megabytes)
+// evaluation scans before giving up on filling the budget, so a pathological
+// catalog full of zero-duration or zero-size rows (which are skipped, not
+// admitted) cannot turn "an hour of music" into a full-table crawl.
+const budgetScanCeiling = 50_000
+
 // QueryItems compiles q against the item field whitelist and returns the matching
 // item views. If q references a per-user field such as starred, rating, or
 // play_count, it evaluates against userPID's play_state, and an empty userPID means
 // the default user. A query with no user-state field is not scoped by user, but a
 // non-empty userPID is still checked to exist so a typo does not pass silently.
+//
+// A non-count LimitMode reinterprets Limit: random draws Limit rows by a seeded
+// shuffle (LimitSeed pins the order; 0 draws a fresh order per call), and
+// minutes/megabytes accumulate rows in order until adding the next row would
+// exceed the budget, at which point that row is excluded and the scan stops. A
+// row with no measurable cost (an unknown duration, a fileless item) cannot
+// participate in a budget fill and is skipped, so "an hour of music" can never
+// admit an unbounded run of unpriceable rows as free. Budget modes honor Sorts;
+// with empty Sorts a non-zero LimitSeed fills in shuffle order ("a random hour
+// of music"), and seed 0 fills in the canonical sort_key order. Offset stays in
+// SQL for every mode, so it skips rows before any budget accumulation. A
+// megabytes budget prices an item at the sum of all its backing files, every
+// part of a multi-file book included (pricing only the primary would overflow a
+// device budget). For a virtual track carved from a shared single-file rip that
+// means the whole rip file's size once per included track, over-counting that
+// under-fills the budget rather than overflowing it, which is the safe way to
+// be wrong.
 func (s *Store) QueryItems(ctx context.Context, q query.Query, userPID model.PID) ([]*model.ItemView, error) {
 	const op = "store.QueryItems"
 	fm, ok := fieldMapFor(q.Entity)
@@ -398,8 +423,23 @@ func (s *Store) QueryItems(ctx context.Context, q query.Query, userPID model.PID
 		return nil, err
 	}
 
+	megabytes := c.LimitMode == query.LimitMegabytes
+	budget := megabytes || c.LimitMode == query.LimitMinutes
+
 	var sb strings.Builder
-	sb.WriteString(itemSelect)
+	if megabytes {
+		// The megabytes budget needs the item's total byte cost, which is not an
+		// ItemView column. Widen only this statement's SELECT (the budget scan
+		// appends the matching dest explicitly) rather than touching the shared
+		// itemViewCols/itemViewDests pair every other reader scans. The cost sums
+		// all backing files, not just the primary: a multi-file book transfers
+		// every part, so pricing only part one would overflow a device budget.
+		sb.WriteString("SELECT " + itemViewCols +
+			", (SELECT COALESCE(SUM(szf.size),0) FROM item_file szif JOIN file szf ON szf.id = szif.file_id WHERE szif.item_id = pi.id)" +
+			itemJoins)
+	} else {
+		sb.WriteString(itemSelect)
+	}
 	sb.WriteString(userJoin)
 	// leadArgs carries the join's user id (or is empty) and precedes the query args.
 	args := append(leadArgs, c.Args...)
@@ -408,22 +448,47 @@ func (s *Store) QueryItems(ctx context.Context, q query.Query, userPID model.PID
 		sb.WriteString(" WHERE ")
 		sb.WriteString(where)
 	}
-	if c.OrderBy != "" {
+	// Random mode compiles with no Sorts, and a budget mode with empty Sorts and a
+	// non-zero seed shuffles the fill order; both order by the deterministic
+	// wb_shuffle hash. Browse has to inline its seed as a literal so the identical
+	// expression can repeat in SELECT, ORDER BY, and the keyset WHERE, but here
+	// the expression appears only in the ORDER BY, so the seed binds as a normal
+	// positional arg (after the WHERE args, before LIMIT/OFFSET, matching clause
+	// order). Everything else keeps the query's own order, defaulting to the
+	// canonical sort_key order.
+	switch {
+	case c.LimitMode == query.LimitRandom, budget && c.OrderBy == "" && c.LimitSeed != 0:
+		seed := c.LimitSeed
+		if seed == 0 {
+			seed = time.Now().UnixNano() // a fresh draw per evaluation
+		}
+		sb.WriteString(" ORDER BY wb_shuffle(?, pi.pid), pi.pid")
+		args = append(args, seed)
+	case c.OrderBy != "":
 		sb.WriteString(" ORDER BY ")
 		sb.WriteString(c.OrderBy)
 		sb.WriteString(", pi.pid")
-	} else {
+	default:
 		sb.WriteString(" ORDER BY pi.sort_key, pi.pid")
 	}
-	if c.Limit > 0 {
-		sb.WriteString(" LIMIT ?")
-		args = append(args, c.Limit)
-	} else if c.Offset > 0 {
-		sb.WriteString(" LIMIT -1") // SQLite requires a LIMIT before OFFSET
-	}
-	if c.Offset > 0 {
-		sb.WriteString(" OFFSET ?")
-		args = append(args, c.Offset)
+	if budget {
+		// A budget mode caps by accumulation below, never by SQL LIMIT; only the
+		// offset stays in SQL, skipping rows before any budget accounting.
+		if c.Offset > 0 {
+			sb.WriteString(" LIMIT -1 OFFSET ?") // SQLite requires a LIMIT before OFFSET
+			args = append(args, c.Offset)
+		}
+	} else {
+		if c.Limit > 0 {
+			sb.WriteString(" LIMIT ?")
+			args = append(args, c.Limit)
+		} else if c.Offset > 0 {
+			sb.WriteString(" LIMIT -1") // SQLite requires a LIMIT before OFFSET
+		}
+		if c.Offset > 0 {
+			sb.WriteString(" OFFSET ?")
+			args = append(args, c.Offset)
+		}
 	}
 
 	rows, err := s.read.QueryContext(ctx, sb.String(), args...)
@@ -431,6 +496,11 @@ func (s *Store) QueryItems(ctx context.Context, q query.Query, userPID model.PID
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
 	defer rows.Close()
+
+	if budget {
+		return s.scanBudgetItems(rows, c, megabytes, op)
+	}
+
 	var out []*model.ItemView
 	for rows.Next() {
 		v, err := scanItemView(rows)
@@ -442,10 +512,79 @@ func (s *Store) QueryItems(ctx context.Context, q query.Query, userPID model.PID
 	return out, rows.Err()
 }
 
-// CountItems returns the number of items matching q (ignoring limit/offset).
-// userPID scopes any per-user field the same way QueryItems does. The user join
-// is on play_state's primary key, so it matches at most one row per item and
-// COUNT(*) stays exact.
+// scanBudgetItems fills a minutes/megabytes budget from ordered rows: each row's
+// cost is its effective duration (minutes) or the summed size of all its backing
+// files (megabytes, the extra trailing SELECT column), and the first row that
+// would overflow the budget is excluded and ends the scan. The order is
+// authoritative, so there is no best-fit skipping. A row with no measurable cost
+// (unknown duration, fileless item) is skipped rather than admitted: it cannot
+// be priced against the budget, and admitting it free would let an unanalyzed
+// run swamp "an hour of music". Rows are scanned with explicit dests so the
+// count matches the possibly-widened SELECT; the shared scanItemView would
+// mismatch it.
+func (s *Store) scanBudgetItems(rows *sql.Rows, c *query.Compiled, megabytes bool, op string) ([]*model.ItemView, error) {
+	unit := int64(60_000) // minutes -> milliseconds of playtime
+	if megabytes {
+		unit = 1_000_000 // SI megabytes (10^6 bytes)
+	}
+	budgetLeft := int64(c.Limit) * unit
+	if budgetLeft/unit != int64(c.Limit) {
+		// An absurd Limit overflowed the multiply; saturate rather than let a
+		// wrapped-negative budget silently return nothing (a budget that large
+		// means "everything fits").
+		budgetLeft = math.MaxInt64
+	}
+	var out []*model.ItemView
+	scanned := 0
+	for rows.Next() {
+		if scanned >= budgetScanCeiling {
+			// The scan-work guard fired: the catalog fed this many rows without
+			// filling the budget. The rows accumulated so far are returned (they
+			// legitimately fit), and the warning keeps the truncation observable.
+			// A returned flag would push a signature change through the Catalog
+			// port and every caller for a case only a degenerate catalog hits.
+			s.log.Warn("budget limit-mode scan hit the row ceiling; result truncated",
+				"mode", string(c.LimitMode), "ceiling", budgetScanCeiling, "returned", len(out))
+			break
+		}
+		scanned++
+		var v model.ItemView
+		var n itemViewNulls
+		var size int64
+		dests := itemViewDests(&v, &n)
+		if megabytes {
+			dests = append(dests, &size)
+		}
+		if err := rows.Scan(dests...); err != nil {
+			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		n.apply(&v)
+		cost := v.DurationMS
+		if megabytes {
+			cost = size
+		}
+		if cost <= 0 {
+			continue // no measurable cost, so the row cannot join the fill
+		}
+		if cost > budgetLeft {
+			break // the overflowing row is excluded and the fill ends
+		}
+		budgetLeft -= cost
+		out = append(out, &v)
+	}
+	// Stop the statement promptly on an early break instead of draining the rest
+	// of the (unlimited) result set; the caller's deferred Close is then a no-op.
+	if err := rows.Close(); err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	return out, rows.Err()
+}
+
+// CountItems returns the number of items matching q, ignoring limit, offset, and
+// limit mode: a count is over the full match set, answering "how many would a
+// random 25 draw from". userPID scopes any per-user field the same way QueryItems does.
+// The user join is on play_state's primary key, so it matches at most one row per
+// item and COUNT(*) stays exact.
 func (s *Store) CountItems(ctx context.Context, q query.Query, userPID model.PID) (int, error) {
 	const op = "store.CountItems"
 	fm, ok := fieldMapFor(q.Entity)

@@ -45,15 +45,24 @@ type nodeEnvelope struct {
 }
 
 // MarshalJSON renders the Query, encoding the Node tree as tagged envelopes.
+//
+// The alias struct here and the anonymous struct in UnmarshalJSON must carry
+// the same field set: a field present on only one side silently drops in one
+// direction (marshal loses it, or parse never fills it). Add a new Query field
+// to both sides at once instead of waiting for the round-trip test to catch
+// the miss.
 func (q Query) MarshalJSON() ([]byte, error) {
 	type alias struct {
-		Entity Entity          `json:"entity"`
-		Where  json.RawMessage `json:"where,omitempty"`
-		Sorts  []Sort          `json:"sorts,omitempty"`
-		Limit  int             `json:"limit,omitempty"`
-		Offset int             `json:"offset,omitempty"`
+		Entity    Entity          `json:"entity"`
+		Where     json.RawMessage `json:"where,omitempty"`
+		Sorts     []Sort          `json:"sorts,omitempty"`
+		Limit     int             `json:"limit,omitempty"`
+		Offset    int             `json:"offset,omitempty"`
+		LimitMode LimitMode       `json:"limitMode,omitempty"`
+		LimitSeed int64           `json:"limitSeed,omitempty"`
 	}
-	a := alias{Entity: q.Entity, Sorts: q.Sorts, Limit: q.Limit, Offset: q.Offset}
+	a := alias{Entity: q.Entity, Sorts: q.Sorts, Limit: q.Limit, Offset: q.Offset,
+		LimitMode: q.LimitMode, LimitSeed: q.LimitSeed}
 	if q.Where != nil {
 		raw, err := marshalNode(q.Where)
 		if err != nil {
@@ -65,13 +74,16 @@ func (q Query) MarshalJSON() ([]byte, error) {
 }
 
 // UnmarshalJSON parses a Query, decoding the Node tree from tagged envelopes.
+// See the MarshalJSON note: both sides must carry the same field set.
 func (q *Query) UnmarshalJSON(data []byte) error {
 	var a struct {
-		Entity Entity          `json:"entity"`
-		Where  json.RawMessage `json:"where"`
-		Sorts  []Sort          `json:"sorts"`
-		Limit  int             `json:"limit"`
-		Offset int             `json:"offset"`
+		Entity    Entity          `json:"entity"`
+		Where     json.RawMessage `json:"where"`
+		Sorts     []Sort          `json:"sorts"`
+		Limit     int             `json:"limit"`
+		Offset    int             `json:"offset"`
+		LimitMode LimitMode       `json:"limitMode"`
+		LimitSeed int64           `json:"limitSeed"`
 	}
 	if err := json.Unmarshal(data, &a); err != nil {
 		return err
@@ -80,6 +92,13 @@ func (q *Query) UnmarshalJSON(data []byte) error {
 	q.Sorts = a.Sorts
 	q.Limit = a.Limit
 	q.Offset = a.Offset
+	q.LimitMode = a.LimitMode
+	q.LimitSeed = a.LimitSeed
+	// "count" is the explicit spelling of the default mode; normalize it so a
+	// doc that writes it compares equal to one that omits it.
+	if q.LimitMode == "count" {
+		q.LimitMode = LimitCount
+	}
 	if len(a.Where) > 0 && string(a.Where) != "null" {
 		n, err := unmarshalNode(a.Where)
 		if err != nil {

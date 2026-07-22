@@ -3,6 +3,7 @@ package playlist
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"strings"
 
 	"github.com/colespringer/waxbin/query"
@@ -17,14 +18,9 @@ import (
 // lossy partial that would silently drift on re-import.
 
 // nspFieldToWB maps a Navidrome field name to a WaxBin query field. Only fields that
-// map cleanly (text and integer) are listed; a date or relative field, or any field
-// not here, is rejected. WaxBin has no relative-date operator, so Navidrome's date
-// fields (inTheLast/before/after over dates) cannot round-trip and are left out.
-//
-// lastPlayed is left out for that same reason. WaxBin stores last_played_at as Unix
-// nanoseconds and Navidrome's lastPlayed rules hold dates, so mapping it would
-// quietly produce always-true or always-empty predicates (an integer compared to a
-// date). A clean "unsupported" rejection beats that.
+// map cleanly (text and integer) are listed here; the date fields live in
+// nspDateFieldToWB with their own operator restriction, and any other field is
+// rejected.
 //
 // The per-user fields that do map: starred (Navidrome's boolean to WaxBin's 0/1
 // starred field) and playcount (an integer count, 1:1). rating maps too, but its
@@ -46,6 +42,33 @@ var nspFieldToWB = map[string]string{
 	"starred":     "starred",
 	"playcount":   "play_count",
 }
+
+// nspDateFieldToWB maps Navidrome's date fields to WaxBin's nanosecond time fields.
+// In a condition, only the relative operators map (inTheLast/notInTheLast, a whole
+// number of days): WaxBin stores these fields as Unix nanoseconds while a Navidrome
+// absolute rule (before/after/is) holds a date string ("2023-01-01"), so the
+// absolute forms cannot round-trip faithfully and stay rejected (all-or-nothing)
+// rather than quietly producing an always-true or always-empty predicate (an
+// integer compared to a date string). See nspDateCond/nspExportDateCond for the
+// restriction. As sort fields they map without restriction, since ordering a
+// nanosecond column is exact; sort dateAdded desc is Navidrome's "recently added".
+var nspDateFieldToWB = map[string]string{
+	"lastplayed": "last_played",
+	"dateadded":  "added",
+}
+
+// wbDateFieldToNSP is the reverse date-field map for export.
+var wbDateFieldToNSP = func() map[string]string {
+	m := make(map[string]string, len(nspDateFieldToWB))
+	for k, v := range nspDateFieldToWB {
+		m[v] = k
+	}
+	return m
+}()
+
+// nspDayNS is one day's span in nanoseconds: the unit conversion between a
+// Navidrome relative-date value (days) and a WaxBin relative-time window (ns).
+const nspDayNS = int64(24) * 60 * 60 * 1_000_000_000
 
 // nspRatingScale bridges Navidrome's 0 to 5 star scale and WaxBin's 0 to 100 rating.
 // A Navidrome value is multiplied by it on import and a WaxBin value divided by it on
@@ -170,25 +193,8 @@ func ImportNSP(data []byte) (query.Query, error) {
 	}
 
 	q := query.Query{Entity: query.EntityItems, Where: root}
-	if raw, ok := top["sort"]; ok {
-		var field string
-		if err := json.Unmarshal(raw, &field); err != nil {
-			return query.Query{}, nspErr("nsp: bad sort")
-		}
-		wb, ok := nspFieldToWB[strings.ToLower(field)]
-		if !ok {
-			return query.Query{}, nspErr("nsp: unsupported sort field: " + field)
-		}
-		desc := false
-		if o, ok := top["order"]; ok {
-			var ord string
-			if err := json.Unmarshal(o, &ord); err != nil {
-				return query.Query{}, nspErr("nsp: bad order")
-			}
-			desc = strings.EqualFold(ord, "desc")
-		}
-		q.Sorts = []query.Sort{{Field: wb, Desc: desc}}
-	}
+	// limit/offset parse before the sort block: the random-sort mapping below
+	// checks the parsed limit value, not just whether the key is present.
 	if raw, ok := top["limit"]; ok {
 		var n int
 		if err := json.Unmarshal(raw, &n); err != nil {
@@ -203,9 +209,50 @@ func ImportNSP(data []byte) (query.Query, error) {
 		}
 		q.Offset = n
 	}
+	if raw, ok := top["sort"]; ok {
+		var field string
+		if err := json.Unmarshal(raw, &field); err != nil {
+			return query.Query{}, nspErr("nsp: bad sort")
+		}
+		if lower := strings.ToLower(field); lower == "random" {
+			// Navidrome's random sort maps to WaxBin's random limit mode: a seeded
+			// shuffle, drawn fresh per evaluation (no seed is persisted). WaxBin
+			// requires a positive limit with that mode, since "everything,
+			// shuffled" is a playback concern rather than a selection, so a random
+			// sort with no limit (or a zero/negative one) stays unsupported
+			// instead of importing a query every downstream compile would reject.
+			// "order" is ignored: asc/desc of a shuffle is meaningless.
+			if q.Limit <= 0 {
+				return query.Query{}, nspErr("nsp: sort random requires a positive limit")
+			}
+			q.LimitMode = query.LimitRandom
+		} else {
+			wb, ok := nspFieldToWB[lower]
+			if !ok {
+				// The date fields sort too (WaxBin's added/last_played are plain
+				// time columns): "recently added" is sort dateAdded desc.
+				if wb, ok = nspDateFieldToWB[lower]; !ok {
+					return query.Query{}, nspErr("nsp: unsupported sort field: " + field)
+				}
+			}
+			desc := false
+			if o, ok := top["order"]; ok {
+				var ord string
+				if err := json.Unmarshal(o, &ord); err != nil {
+					return query.Query{}, nspErr("nsp: bad order")
+				}
+				desc = strings.EqualFold(ord, "desc")
+			}
+			q.Sorts = []query.Sort{{Field: wb, Desc: desc}}
+		}
+	}
 
-	// Compile-validate so an operator/field/value combination the engine rejects
-	// fails the whole import rather than producing an un-runnable playlist.
+	// Marshal-validate so a node shape the rule codec cannot represent fails the
+	// whole import. No compilation happens here: field, entity, and limit-mode
+	// validation runs where the rule is stored (CreatePlaylist and
+	// SetPlaylistRule compile against the store's field whitelist), and since
+	// the import maps only fields and combinations it knows, those checks serve
+	// as a backstop rather than the primary barrier.
 	if _, err := query.MarshalRule(q); err != nil {
 		return query.Query{}, err
 	}
@@ -254,6 +301,9 @@ func nspLeaf(op string, val json.RawMessage) (query.Node, error) {
 		return nil, nspErr("nsp: operator " + op + " needs exactly one field")
 	}
 	for field, rawVal := range fv {
+		if wb, ok := nspDateFieldToWB[strings.ToLower(field)]; ok {
+			return nspDateCond(op, wb, field, rawVal)
+		}
 		wb, ok := nspFieldToWB[strings.ToLower(field)]
 		if !ok {
 			return nil, nspErr("nsp: unsupported field: " + field)
@@ -261,6 +311,41 @@ func nspLeaf(op string, val json.RawMessage) (query.Node, error) {
 		return nspCond(op, wb, rawVal)
 	}
 	return nil, nspErr("nsp: empty operator")
+}
+
+// nspDateCond builds a relative-time condition for a Navidrome date field. The .nsp
+// value is a number of days; WaxBin's operators take a nanosecond window, so the
+// value converts on the way in (and back out in nspExportDateCond). Only
+// inTheLast/notInTheLast map; any other operator on a date field is rejected (see
+// nspDateFieldToWB), as is a fractional or non-positive day count, which would have
+// no faithful export.
+func nspDateCond(op, wbField, nspField string, rawVal json.RawMessage) (query.Node, error) {
+	var wbOp query.Op
+	switch op {
+	case "inTheLast":
+		wbOp = query.OpInTheLast
+	case "notInTheLast":
+		wbOp = query.OpNotInTheLast
+	default:
+		return nil, nspErr("nsp: only inTheLast/notInTheLast are supported on " + nspField)
+	}
+	var days float64
+	if err := json.Unmarshal(rawVal, &days); err != nil {
+		return nil, nspErr("nsp: " + op + " needs a number of days")
+	}
+	// Bound before converting: past MaxInt64/nspDayNS (about 106,751 days, or
+	// 292 years) the nanosecond multiply below would overflow int64 and silently
+	// wrap, in part of that range to a positive and plausible-looking window,
+	// and a float that large makes the int64 conversion itself
+	// implementation-defined.
+	if days > float64(math.MaxInt64/nspDayNS) {
+		return nil, nspErr(fmt.Sprintf("nsp: %s window of %v days is too large", op, days))
+	}
+	n := int64(days)
+	if float64(n) != days || n <= 0 {
+		return nil, nspErr(fmt.Sprintf("nsp: %s needs a positive whole number of days, got %v", op, days))
+	}
+	return query.Cond{Field: wbField, Op: wbOp, Value: n * nspDayNS}, nil
 }
 
 // nspCond builds a condition (or a negated one) for a leaf operator. A rating value
@@ -311,11 +396,29 @@ func ExportNSP(q query.Query) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	if q.LimitMode != query.LimitCount || q.LimitSeed != 0 {
+		// Only the unseeded random mode maps back (Navidrome's sort "random"); the
+		// budget modes (minutes/megabytes) and a pinned seed have no .nsp
+		// representation and reject the whole export.
+		if q.LimitMode != query.LimitRandom || q.LimitSeed != 0 {
+			return nil, nspErr("nsp: limit mode/seed has no .nsp representation")
+		}
+		// Random plus Sorts is not even a valid WaxBin query (compile rejects the
+		// combination), and rendering it would let the sort block below silently
+		// overwrite the shuffle, so it is rejected here too.
+		if len(q.Sorts) > 0 {
+			return nil, nspErr("nsp: random limit mode combined with sorts is not exportable")
+		}
+		group["sort"] = "random"
+	}
 	if len(q.Sorts) > 0 {
 		s := q.Sorts[0]
 		nsp, ok := wbFieldToNSP[s.Field]
 		if !ok {
-			return nil, nspErr("nsp: unsupported sort field: " + s.Field)
+			// The date fields export as sorts too (mirroring the import).
+			if nsp, ok = wbDateFieldToNSP[s.Field]; !ok {
+				return nil, nspErr("nsp: unsupported sort field: " + s.Field)
+			}
 		}
 		group["sort"] = nsp
 		if s.Desc {
@@ -397,6 +500,9 @@ func nspExportChildren(nodes []query.Node) ([]any, error) {
 // rating value is scaled back down from WaxBin's 0-to-100 scale to Navidrome's 0-to-5
 // one, rejecting a value that is not a whole star rather than writing a mismatched one.
 func nspExportCond(c query.Cond) (map[string]any, error) {
+	if nspField, ok := wbDateFieldToNSP[c.Field]; ok {
+		return nspExportDateCond(c, nspField)
+	}
 	field, ok := wbFieldToNSP[c.Field]
 	if !ok {
 		return nil, nspErr("nsp: unsupported field: " + c.Field)
@@ -428,4 +534,41 @@ func nspExportCond(c query.Cond) (map[string]any, error) {
 		val = sv
 	}
 	return map[string]any{op: map[string]any{field: val}}, nil
+}
+
+// nspExportDateCond renders a relative-time condition back to .nsp days. A window
+// that is not a whole number of days has no .nsp representation and rejects the
+// export (the whole-star rating precedent), as does any non-relative operator on a
+// date field.
+func nspExportDateCond(c query.Cond, nspField string) (map[string]any, error) {
+	var op string
+	switch c.Op {
+	case query.OpInTheLast:
+		op = "inTheLast"
+	case query.OpNotInTheLast:
+		op = "notInTheLast"
+	default:
+		return nil, nspErr("nsp: only inTheLast/notInTheLast are supported on " + nspField)
+	}
+	// The window is read as int64 directly rather than through asFloat: a window
+	// past about 104 days exceeds 2^53 ns and would silently round in a float64.
+	var ns int64
+	switch v := c.Value.(type) {
+	case int64:
+		ns = v
+	case int:
+		ns = int64(v)
+	case float64:
+		ns = int64(v)
+		if float64(ns) != v {
+			return nil, nspErr("nsp: " + op + " window must be a whole nanosecond count")
+		}
+	default:
+		return nil, nspErr("nsp: " + op + " window must be numeric")
+	}
+	if ns <= 0 || ns%nspDayNS != 0 {
+		return nil, nspErr(fmt.Sprintf(
+			"nsp: %s window %v ns is not a whole number of days and has no .nsp equivalent", op, c.Value))
+	}
+	return map[string]any{op: map[string]any{nspField: ns / nspDayNS}}, nil
 }
