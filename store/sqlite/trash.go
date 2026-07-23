@@ -175,15 +175,22 @@ const trashCols = `pid, item_pid, orig_path, orig_display, trash_path, trash_dis
 	reason, size, trashed_at, COALESCE(restored_at, 0)`
 
 // TrashEntries lists trash journal rows, newest first. includeRestored controls
-// whether already-restored rows are returned (limit 0 = no cap).
-func (s *Store) TrashEntries(ctx context.Context, includeRestored bool, limit int) ([]model.TrashEntry, error) {
+// whether already-restored rows are returned; trashedBefore, when nonzero, keeps
+// only rows trashed strictly before that unix-ns instant (the age filter behind
+// EmptyTrash's OlderThan window); limit 0 = no cap. The filter scans without an
+// index on purpose: the journal is small and shrinks on purge.
+func (s *Store) TrashEntries(ctx context.Context, includeRestored bool, trashedBefore int64, limit int) ([]model.TrashEntry, error) {
 	const op = "store.TrashEntries"
-	q := "SELECT " + trashCols + " FROM trash"
+	q := "SELECT " + trashCols + " FROM trash WHERE 1=1"
+	var args []any
 	if !includeRestored {
-		q += " WHERE restored_at IS NULL"
+		q += " AND restored_at IS NULL"
+	}
+	if trashedBefore != 0 {
+		q += " AND trashed_at < ?"
+		args = append(args, trashedBefore)
 	}
 	q += " ORDER BY trashed_at DESC"
-	var args []any
 	if limit > 0 {
 		q += " LIMIT ?"
 		args = append(args, limit)

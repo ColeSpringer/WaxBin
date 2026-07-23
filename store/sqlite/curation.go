@@ -56,18 +56,25 @@ func (s *Store) SetItemLyrics(ctx context.Context, itemPID model.PID, ly *model.
 	})
 }
 
-// SetItemChapters replaces a single-file book's user-curated chapters (source "user",
-// which wins on read over any derived source). Passing an empty list clears the user
-// chapters, falling back to the scanned ones. It records a lock on the "chapters"
-// field. A user chapter list survives a `scan --force` through the source precedence
-// (the scan replace never touches user rows), not the lock. The lock is a curation
-// marker for consumers. A locked chapters set is refused with CodeLocked unless force
-// is set.
+// SetItemChapters replaces a book's user-curated chapters (source "user", which
+// wins on read over any derived source; on a multi-file book the user rows
+// suppress derived chapters on every part). Passing an empty list clears the
+// user chapters, falling back to the scanned ones. It records a lock on the
+// "chapters" field. A user chapter list survives a `scan --force` through the
+// source precedence (the scan replace never touches user rows), not the lock.
+// The lock is a curation marker for consumers. A locked chapters set is refused
+// with CodeLocked unless force is set.
 //
-// A multi-file book is refused (CodeUnsupported): its chapters span parts with
-// per-file offsets, so writing this one flat list to the primary file only would leave
-// the other parts on their scanned chapters, a silently half-curated book. Curating a
-// multi-file book's chapters needs a per-part API, which is deferred.
+// The input is a flat book-timeline list: StartMS/EndMS are offsets from the
+// start of the whole book, exactly what Chapters returns. Starts must be
+// strictly increasing and non-negative; an explicit end must be past its start.
+// A zero end is open (the read fills it from the next chapter's start, across
+// part boundaries, so a spanning chapter round-trips exactly). The list is split
+// into per-part rows against the same cumulative part timeline the read builds;
+// every part is written, so a re-set clears user rows in parts the new list no
+// longer covers. Legacy shape, single-file books only: a list whose
+// StartMS/EndMS are all zero with any File* offset set is read as file-relative
+// offsets, which mean the same thing there.
 func (s *Store) SetItemChapters(ctx context.Context, itemPID model.PID, chapters []model.Chapter, lock, force bool) error {
 	const op = "store.SetItemChapters"
 	return s.writeTx(ctx, func(tx *sql.Tx) error {
@@ -78,11 +85,6 @@ func (s *Store) SetItemChapters(ctx context.Context, itemPID model.PID, chapters
 		if !curatableFieldForKind(kind, "chapters") {
 			return waxerr.New(waxerr.CodeInvalid, op, "chapters are not editable on a "+kind+" item")
 		}
-		if n, err := itemFileCountTx(ctx, tx, itemID); err != nil {
-			return err
-		} else if n > 1 {
-			return waxerr.New(waxerr.CodeUnsupported, op, "user chapters are only supported for single-file books")
-		}
 		if !force {
 			locked, err := fieldLockedTx(ctx, tx, itemID, "chapters")
 			if err != nil {
@@ -92,14 +94,26 @@ func (s *Store) SetItemChapters(ctx context.Context, itemPID model.PID, chapters
 				return waxerr.New(waxerr.CodeLocked, op, "chapters are locked (use force to override)")
 			}
 		}
-		fileID, err := primaryFileIDTx(ctx, tx, itemID)
+		parts, err := bookPartsQ(ctx, tx, itemID)
 		if err != nil {
 			return err
 		}
-		if _, err := syncChaptersForFileSource(ctx, tx, itemID, fileID, "user", chapters); err != nil {
-			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		if len(parts) == 0 {
+			return waxerr.New(waxerr.CodeNotFound, op, "item has no backing file")
 		}
-		// User chapters can extend the effective duration past the file's own length.
+		perPart, err := splitBookChapters(ctx, tx, itemID, parts, chapters, op)
+		if err != nil {
+			return err
+		}
+		// Every part is written, empty slices included: a re-set must clear the
+		// user rows of parts the new list leaves uncovered, and a clear loops
+		// them all.
+		for i := range parts {
+			if _, err := syncChaptersForFileSource(ctx, tx, itemID, parts[i].fileID, "user", perPart[i]); err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+		}
+		// User chapters can extend the effective duration past the parts' own length.
 		if err := refreshBookDuration(ctx, tx, itemID); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
@@ -108,6 +122,160 @@ func (s *Store) SetItemChapters(ctx context.Context, itemPID model.PID, chapters
 		}
 		return appendChange(ctx, tx, "item", itemPID, model.OpUpdate)
 	})
+}
+
+// splitBookChapters validates a book-timeline chapter list and splits it into
+// one per-part slice (index-aligned with parts), inverting the timeline
+// bookChapters builds. Each chapter becomes a single row in the part its start
+// falls in; a start at or past the total attaches to the last part (the
+// single-file precedent; refreshBookDuration absorbs the extension).
+//
+// Part boundaries are the cumulative effective durations over the derived
+// state: max(file duration, the preferred derived source's furthest chapter
+// extent) per part, the same per-part advance bookChapters used for the
+// timeline the user read before curating, and keeps using after (the
+// derivedFloor there). Using the derived extent also keeps the mapping
+// independent of the user rows being replaced. (A file whose embedded chapter
+// extents overrun its real duration shifts this timeline; that corrupt-metadata
+// edge is accepted, not solved.)
+//
+// End handling per chapter: a zero end stays open. An end equal to the next
+// chapter's start (or, for the last chapter, the book total) is contiguous and
+// is stored open too, so the read reconstructs it exactly even when it crosses a
+// part boundary; a last-chapter end equal to the total therefore means "runs to
+// the end of the book" and follows the total if a rescan changes it. An
+// explicit non-contiguous end stores file-relative when it stays inside the
+// starting part, and clamps to that part's end when it would cross into the
+// next one (a continuation row there would render as a phantom duplicate
+// chapter). The last part never clamps, so an end past the book total extends
+// the book like the single-file path always has.
+func splitBookChapters(ctx context.Context, tx *sql.Tx, itemID int64, parts []bookPart, chapters []model.Chapter, op string) ([][]model.Chapter, error) {
+	chs := make([]model.Chapter, len(chapters))
+	copy(chs, chapters)
+
+	// Legacy input shape: file-relative offsets with the timeline fields unset.
+	// Only a single-file book sniffs for it, since that is the only shape the
+	// old API accepted; the two coordinate systems are identical there, so the
+	// conversion cannot move anything. A multi-file book reads the timeline
+	// fields strictly, so stale File* offsets on a round-tripped chapter can
+	// never be mistaken for input.
+	if len(parts) == 1 {
+		allTimelineZero, anyFileOffset := true, false
+		for i := range chs {
+			if chs[i].StartMS != 0 || chs[i].EndMS != 0 {
+				allTimelineZero = false
+			}
+			if chs[i].FileStartMS > 0 || chs[i].FileEndMS > 0 {
+				anyFileOffset = true
+			}
+		}
+		if allTimelineZero && anyFileOffset {
+			for i := range chs {
+				chs[i].StartMS, chs[i].EndMS = chs[i].FileStartMS, chs[i].FileEndMS
+			}
+		}
+	}
+
+	prev := int64(-1)
+	for i := range chs {
+		c := chs[i]
+		if c.StartMS < 0 {
+			return nil, waxerr.New(waxerr.CodeInvalid, op, "chapter start cannot be negative")
+		}
+		if c.StartMS <= prev {
+			return nil, waxerr.New(waxerr.CodeInvalid, op, "chapter starts must be strictly increasing")
+		}
+		if c.EndMS != 0 && c.EndMS <= c.StartMS {
+			return nil, waxerr.New(waxerr.CodeInvalid, op, "chapter end must be past its start")
+		}
+		prev = c.StartMS
+	}
+
+	extents, err := nonUserChapterExtentsTx(ctx, tx, itemID)
+	if err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+
+	// starts[i] is part i's book-timeline offset; total is the timeline length.
+	starts := make([]int64, len(parts))
+	var total int64
+	for i := range parts {
+		starts[i] = total
+		eff := parts[i].DurationMS
+		if ext := extents[parts[i].fileID]; ext > eff {
+			eff = ext
+		}
+		total += eff
+	}
+
+	perPart := make([][]model.Chapter, len(parts))
+	for i := range chs {
+		c := chs[i]
+		// The part whose window holds the start: the last one starting at or
+		// before it (a start at or past the total lands in the last part).
+		p := len(parts) - 1
+		for ; p > 0; p-- {
+			if starts[p] <= c.StartMS {
+				break
+			}
+		}
+		partEnd := total
+		if p+1 < len(parts) {
+			partEnd = starts[p+1]
+		}
+
+		fileStart := c.StartMS - starts[p]
+		var fileEnd int64
+		contiguous := (i+1 < len(chs) && c.EndMS == chs[i+1].StartMS) ||
+			(i+1 == len(chs) && c.EndMS == total)
+		switch {
+		case c.EndMS == 0 || contiguous:
+			fileEnd = 0
+		case c.EndMS <= partEnd || p == len(parts)-1:
+			fileEnd = c.EndMS - starts[p]
+		default:
+			fileEnd = partEnd - starts[p]
+		}
+		perPart[p] = append(perPart[p], model.Chapter{
+			Position:    len(perPart[p]),
+			Title:       c.Title,
+			FileStartMS: fileStart,
+			FileEndMS:   fileEnd,
+		})
+	}
+	return perPart, nil
+}
+
+// nonUserChapterExtentsTx returns, per backing file, the furthest chapter offset
+// of the file's preferred derived (non-user) source. It mirrors bookChapters'
+// single-source-per-file choice, not a max across sources: the split must map
+// against the exact timeline the read displayed, and when a file briefly carries
+// two derived sources only the preferred one's chapters advanced that timeline.
+// The cursor closes on return, freeing the tx connection for the caller's writes.
+func nonUserChapterExtentsTx(ctx context.Context, tx *sql.Tx, itemID int64) (map[int64]int64, error) {
+	rows, err := tx.QueryContext(ctx,
+		`SELECT file_id, source, MAX(MAX(start_ms, end_ms)) FROM chapter
+		 WHERE book_item_id = ? AND source <> 'user' GROUP BY file_id, source`, itemID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	extents := map[int64]int64{}
+	bestRank := map[int64]int{}
+	for rows.Next() {
+		var fid, ext int64
+		var source string
+		if err := rows.Scan(&fid, &source, &ext); err != nil {
+			return nil, err
+		}
+		rank := chapterSourceRank(source)
+		if cur, ok := bestRank[fid]; ok && rank >= cur {
+			continue
+		}
+		bestRank[fid] = rank
+		extents[fid] = ext
+	}
+	return extents, rows.Err()
 }
 
 // SetItemArt sets (or, with empty bytes, clears) one artwork role on a track/book
@@ -263,32 +431,6 @@ func setCurationLockTx(ctx context.Context, tx *sql.Tx, itemID int64, field stri
 	_, err := tx.ExecContext(ctx,
 		"DELETE FROM field_provenance WHERE item_id=? AND field=? AND (value IS NULL OR value='')", itemID, field)
 	return err
-}
-
-// itemFileCountTx returns how many files back an item (1 for a track or single-file
-// book, N for a multi-file book).
-func itemFileCountTx(ctx context.Context, tx *sql.Tx, itemID int64) (int, error) {
-	var n int
-	if err := tx.QueryRowContext(ctx,
-		"SELECT COUNT(*) FROM item_file WHERE item_id=?", itemID).Scan(&n); err != nil {
-		return 0, waxerr.Wrap(waxerr.CodeIO, "store.SetItemChapters", err)
-	}
-	return n, nil
-}
-
-// primaryFileIDTx returns an item's primary backing file id, or CodeNotFound when it
-// has none (an archived item).
-func primaryFileIDTx(ctx context.Context, tx *sql.Tx, itemID int64) (int64, error) {
-	var fileID int64
-	err := tx.QueryRowContext(ctx,
-		"SELECT file_id FROM item_file WHERE item_id=? AND role='primary'", itemID).Scan(&fileID)
-	if errors.Is(err, sql.ErrNoRows) {
-		return 0, waxerr.New(waxerr.CodeNotFound, "store.SetItemChapters", "item has no primary file")
-	}
-	if err != nil {
-		return 0, waxerr.Wrap(waxerr.CodeIO, "store.SetItemChapters", err)
-	}
-	return fileID, nil
 }
 
 // artEntityIDTx resolves an art entity's pid to the internal id its art_map rows use:

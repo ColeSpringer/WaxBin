@@ -130,11 +130,11 @@ func TestReSyncUnchangedSkipsEpisodeWrites(t *testing.T) {
 	if res.EpisodesAdded != 0 || res.EpisodesUpdated != 0 {
 		t.Fatalf("identical re-sync touched episodes: added=%d updated=%d", res.EpisodesAdded, res.EpisodesUpdated)
 	}
-	// The only delta a no-op re-sync emits is the podcast row itself (its fetch-time /
-	// validators are refreshed); no per-episode deltas.
+	// A no-op re-sync emits nothing at all: the podcast row's fetch-time/validator
+	// refresh is bookkeeping, not a change a consumer needs to see.
 	seqAfter, _ := st.LatestChangeSeq(ctx)
-	if got := seqAfter - seqBefore; got != 1 {
-		t.Fatalf("unchanged re-sync emitted %d deltas, want 1 (podcast only)", got)
+	if got := seqAfter - seqBefore; got != 0 {
+		t.Fatalf("unchanged re-sync emitted %d deltas, want 0", got)
 	}
 }
 

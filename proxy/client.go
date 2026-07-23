@@ -361,6 +361,21 @@ func (c *Client) PlaylistSetRule(ctx context.Context, playlistPID model.PID, rul
 	return c.call(ctx, MethodPlaylistSetRule, PlaylistSetRuleParams{PlaylistPID: string(playlistPID), Rule: rule}, nil)
 }
 
+// PutTranscript proxies storing a caller-supplied transcript for an episode. The
+// server-side service validates the format and size and reduces the body. No
+// protocol bump: an older server answers unknown-method rather than misdriving.
+func (c *Client) PutTranscript(ctx context.Context, episodePID model.PID, format string, body []byte, sourceURL string) error {
+	return c.call(ctx, MethodPutTranscript, PutTranscriptParams{
+		EpisodePID: string(episodePID), Format: format, Body: body, SourceURL: sourceURL,
+	}, nil)
+}
+
+// FetchTranscript proxies an on-demand fetch of an episode's declared transcript;
+// the network fetch runs in the server process.
+func (c *Client) FetchTranscript(ctx context.Context, episodePID model.PID) error {
+	return c.call(ctx, MethodFetchTranscript, FetchTranscriptParams{EpisodePID: string(episodePID)}, nil)
+}
+
 // RunScan submits a scan to the server and returns the started job's PID. The
 // server runs the job in its own process (staying available); the caller tails the
 // job through a read-only catalog handle.

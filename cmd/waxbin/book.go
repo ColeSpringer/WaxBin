@@ -139,10 +139,11 @@ func newChaptersSetCmd(g *globals) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "set <pid> --file <cue>",
 		Short: "Set (or clear) a book's user chapters from a .cue file",
-		Long: "Sets user-curated chapters on a book from a .cue file (file-relative offsets), " +
-			"which win on read over the scanned chapters and survive a `scan --force`. --clear " +
-			"removes the user chapters, falling back to the scanned ones. Locks the chapters " +
-			"field by default.",
+		Long: "Sets user-curated chapters on a book from a .cue file, which win on read over the " +
+			"scanned chapters and survive a `scan --force`. The cue's INDEX offsets are read as " +
+			"book-timeline positions (cumulative across the parts of a multi-file book; for a " +
+			"single file the two are the same). --clear removes the user chapters, falling back " +
+			"to the scanned ones. Locks the chapters field by default.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			var chapters []model.Chapter
@@ -157,6 +158,11 @@ func newChaptersSetCmd(g *globals) *cobra.Command {
 				chapters = meta.ParseCue(string(b))
 				if len(chapters) == 0 {
 					return waxerr.New(waxerr.CodeInvalid, "chapters set", "no chapters parsed from "+filePath)
+				}
+				// ParseCue emits file-relative offsets; a whole-book cue means them as
+				// timeline positions, which SetChapters takes in StartMS.
+				for i := range chapters {
+					chapters[i].StartMS = chapters[i].FileStartMS
 				}
 			}
 			m, _, err := g.openMutator(cmd)

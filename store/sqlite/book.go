@@ -841,8 +841,15 @@ type bookPart struct {
 // path, so an unnumbered set ("p2", "p10") sorts naturally rather than
 // lexicographically (which would place "p10" before "p2" and corrupt the timeline).
 func (s *Store) bookParts(ctx context.Context, bookItemID int64) ([]bookPart, error) {
+	return bookPartsQ(ctx, s.read, bookItemID)
+}
+
+// bookPartsQ is bookParts over an explicit queryer, so the user-chapter write
+// path can read the parts inside its own transaction (the same reading order the
+// read timeline uses).
+func bookPartsQ(ctx context.Context, q queryer, bookItemID int64) ([]bookPart, error) {
 	const op = "store.bookParts"
-	rows, err := s.read.QueryContext(ctx,
+	rows, err := q.QueryContext(ctx,
 		`SELECT f.id, f.pid, f.path, f.display_path, itf.position, COALESCE(f.duration_ms, 0), f.rel_path
 		 FROM item_file itf JOIN file f ON f.id = itf.file_id
 		 WHERE itf.item_id = ?`, bookItemID)
@@ -913,9 +920,53 @@ func (s *Store) bookChapters(ctx context.Context, bookItemID int64, parts []book
 	if err := rows.Err(); err != nil {
 		return nil, 0, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
+	// User chapters are authored against the whole book timeline (SetItemChapters
+	// splits one flat list across the parts), so their presence on any part
+	// suppresses the derived sources book-wide: a part the user's list leaves
+	// uncovered stays empty rather than falling back to its scanned chapters,
+	// which would interleave two navigations. Derived sources keep per-file
+	// precedence, since different parts can legitimately carry different sources
+	// (one part embedded, another cue).
+	userCurated := false
+	for _, srcs := range bySource {
+		if len(srcs["user"]) > 0 {
+			userCurated = true
+			break
+		}
+	}
 	byFile := make(map[int64][]model.Chapter, len(bySource))
+	// derivedFloor is each file's preferred derived source's furthest chapter
+	// offset, kept when user curation suppresses those rows from the output: the
+	// timeline must still advance past the content the derived chapters prove
+	// exists (a part with an unknown file duration would otherwise contribute
+	// nothing), or every later part's chapters would shift away from the
+	// timeline the curation was authored and split against.
+	var derivedFloor map[int64]int64
+	if userCurated {
+		derivedFloor = make(map[int64]int64, len(bySource))
+	}
 	for fid, srcs := range bySource {
-		byFile[fid] = preferredChapters(srcs)
+		if !userCurated {
+			byFile[fid] = preferredChapters(srcs)
+			continue
+		}
+		byFile[fid] = srcs["user"]
+		derived := make(map[string][]model.Chapter, len(srcs))
+		for src, chs := range srcs {
+			if src != "user" {
+				derived[src] = chs
+			}
+		}
+		var ext int64
+		for _, c := range preferredChapters(derived) {
+			if c.FileEndMS > ext {
+				ext = c.FileEndMS
+			}
+			if c.FileStartMS > ext {
+				ext = c.FileStartMS
+			}
+		}
+		derivedFloor[fid] = ext
 	}
 
 	var out []model.Chapter
@@ -944,10 +995,15 @@ func (s *Store) bookChapters(ctx context.Context, bookItemID int64, parts []book
 		// from stacking when a file duration is unknown AND keeps the running total
 		// (cum) from falling short of any chapter span, so the reported total and the
 		// chapter timeline always agree (the same definition refreshBookDuration and
-		// db verify use).
+		// db verify use). Under user curation the suppressed derived chapters still
+		// floor the advance (derivedFloor), matching the timeline splitBookChapters
+		// mapped the curation against.
 		eff := part.DurationMS
 		if maxEnd > eff {
 			eff = maxEnd
+		}
+		if f := derivedFloor[part.fileID]; f > eff {
+			eff = f
 		}
 		cum += eff
 	}

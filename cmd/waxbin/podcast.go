@@ -2,11 +2,14 @@ package main
 
 import (
 	"fmt"
+	"os"
+	"strings"
 	"text/tabwriter"
 	"time"
 
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/podcast"
+	"github.com/colespringer/waxbin/waxerr"
 	"github.com/spf13/cobra"
 )
 
@@ -18,13 +21,164 @@ func newPodcastCmd(g *globals) *cobra.Command {
 		newPodcastAddEpisodeCmd(g),
 		newPodcastListCmd(g),
 		newPodcastShowCmd(g),
+		newPodcastEpisodeCmd(g),
 		newPodcastSyncCmd(g),
 		newPodcastDownloadCmd(g),
+		newPodcastTranscriptCmd(g),
 		newPodcastAuthCmd(g),
 		newPodcastRetentionCmd(g),
 		newPodcastRemoveCmd(g),
 	)
 	return cmd
+}
+
+func newPodcastTranscriptCmd(g *globals) *cobra.Command {
+	var (
+		fetch     bool
+		filePath  string
+		format    string
+		sourceURL string
+	)
+	cmd := &cobra.Command{
+		Use:   "transcript <episode-pid> [--fetch | --file f --format vtt [--source-url u]]",
+		Short: "Show, fetch, or store an episode's transcript",
+		Long: "Without flags, prints the stored transcript. --fetch downloads the transcript the " +
+			"feed declared and stores it (errors are reported, unlike the best-effort fetch during " +
+			"download). --file stores a local transcript file; --format names its format " +
+			"(srt|vtt|json|text) and --source-url records where it came from. The stored body is " +
+			"the reduced searchable text, not the original document.",
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			pid := model.PID(args[0])
+			// Validate the flag shape before opening anything: --format and
+			// --source-url describe a --file body and mean nothing elsewhere, so
+			// rejecting them beats silently ignoring them.
+			if fetch && filePath != "" {
+				return waxerr.New(waxerr.CodeInvalid, "podcast transcript", "--fetch and --file are exclusive")
+			}
+			if filePath == "" && (format != "" || sourceURL != "") {
+				return waxerr.New(waxerr.CodeInvalid, "podcast transcript", "--format and --source-url only apply with --file")
+			}
+			if filePath != "" && format == "" {
+				return waxerr.New(waxerr.CodeInvalid, "podcast transcript", "--file needs --format (srt|vtt|json|text)")
+			}
+			if fetch || filePath != "" {
+				m, _, err := g.openMutator(cmd)
+				if err != nil {
+					return err
+				}
+				defer m.Close()
+				if fetch {
+					if err := m.FetchTranscript(ctx(cmd), pid); err != nil {
+						return err
+					}
+					fmt.Fprintln(out(cmd), "Transcript fetched and stored.")
+					return nil
+				}
+				body, err := os.ReadFile(filePath)
+				if err != nil {
+					return waxerr.Wrapf(waxerr.CodeIO, "podcast transcript", err, "reading %s", filePath)
+				}
+				if err := m.PutTranscript(ctx(cmd), model.PutTranscriptInput{
+					EpisodePID: pid, Format: format, Body: string(body), SourceURL: sourceURL,
+				}); err != nil {
+					return err
+				}
+				fmt.Fprintln(out(cmd), "Transcript stored.")
+				return nil
+			}
+			lib, _, err := g.openRead(cmd)
+			if err != nil {
+				return err
+			}
+			defer lib.Close()
+			tr, err := lib.Podcasts().Transcript(ctx(cmd), pid)
+			if err != nil {
+				return err
+			}
+			if g.jsonOut {
+				return printJSON(cmd, transcriptView{
+					EpisodePID: string(tr.EpisodePID), Format: tr.Format,
+					SourceURL: tr.SourceURL, CreatedAt: tr.CreatedAt, Body: tr.Body,
+				})
+			}
+			w := out(cmd)
+			fmt.Fprintf(w, "format:  %s\n", tr.Format)
+			if tr.SourceURL != "" {
+				fmt.Fprintf(w, "source:  %s\n", tr.SourceURL)
+			}
+			fmt.Fprintln(w)
+			fmt.Fprintln(w, tr.Body)
+			return nil
+		},
+	}
+	f := cmd.Flags()
+	f.BoolVar(&fetch, "fetch", false, "fetch the feed-declared transcript and store it")
+	f.StringVar(&filePath, "file", "", "local transcript file to store")
+	f.StringVar(&format, "format", "", "format of --file: srt|vtt|json|text")
+	f.StringVar(&sourceURL, "source-url", "", "provenance URL recorded with --file")
+	return cmd
+}
+
+// transcriptView is the JSON shape for a stored transcript.
+type transcriptView struct {
+	EpisodePID string `json:"episodePid"`
+	Format     string `json:"format"`
+	SourceURL  string `json:"sourceUrl,omitempty"`
+	// Unix ns as a decimal string (",string"), like every ns timestamp in the CLI
+	// JSON contract.
+	CreatedAt int64  `json:"createdAt,string"`
+	Body      string `json:"body"`
+}
+
+func newPodcastEpisodeCmd(g *globals) *cobra.Command {
+	return &cobra.Command{
+		Use:   "episode <episode-pid>",
+		Short: "Show one episode: credits, soundbites, chapters, transcript state",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			lib, _, err := g.openRead(cmd)
+			if err != nil {
+				return err
+			}
+			defer lib.Close()
+			d, err := lib.Podcasts().Episode(ctx(cmd), model.PID(args[0]))
+			if err != nil {
+				return err
+			}
+			if g.jsonOut {
+				return printJSON(cmd, toEpisodeDetailView(d))
+			}
+			w := out(cmd)
+			e := d.Episode
+			fmt.Fprintf(w, "pid:        %s\n", e.PID)
+			fmt.Fprintf(w, "title:      %s\n", e.Title)
+			fmt.Fprintf(w, "podcast:    %s (%s)\n", e.PodcastTitle, e.PodcastPID)
+			fmt.Fprintf(w, "published:  %s\n", pubDateLabel(e.PubDateNS))
+			fmt.Fprintf(w, "duration:   %s\n", durationLabel(e.DurationMS))
+			fmt.Fprintf(w, "state:      %s\n", episodeStateLabel(e))
+			if len(d.Persons) > 0 {
+				labels := make([]string, len(d.Persons))
+				for i, p := range d.Persons {
+					labels[i] = personLabel(p)
+				}
+				fmt.Fprintf(w, "people:     %s\n", strings.Join(labels, ", "))
+			}
+			fmt.Fprintf(w, "transcript: %s\n", yesNo(d.HasTranscript))
+			if len(d.Soundbites) > 0 {
+				fmt.Fprintln(w, "soundbites:")
+				for _, b := range d.Soundbites {
+					title := b.Title
+					if title == "" {
+						title = e.Title
+					}
+					fmt.Fprintf(w, "  %s +%s  %s\n", durationLabel(b.StartMS), durationLabel(b.DurationMS), title)
+				}
+			}
+			printChapters(cmd, d.Chapters)
+			return nil
+		},
+	}
 }
 
 func newPodcastAddManualCmd(g *globals) *cobra.Command {
@@ -193,6 +347,23 @@ func newPodcastShowCmd(g *globals) *cobra.Command {
 			fmt.Fprintf(w, "feed:       %s\n", pod.FeedURL)
 			if pod.Link != "" {
 				fmt.Fprintf(w, "website:    %s\n", pod.Link)
+			}
+			if pod.Medium != "" {
+				fmt.Fprintf(w, "medium:     %s\n", pod.Medium)
+			}
+			if pod.FundingURL != "" {
+				msg := ""
+				if pod.FundingMessage != "" {
+					msg = " (" + pod.FundingMessage + ")"
+				}
+				fmt.Fprintf(w, "funding:    %s%s\n", pod.FundingURL, msg)
+			}
+			if len(pod.Persons) > 0 {
+				labels := make([]string, len(pod.Persons))
+				for i, p := range pod.Persons {
+					labels[i] = personLabel(p)
+				}
+				fmt.Fprintf(w, "people:     %s\n", strings.Join(labels, ", "))
 			}
 			fmt.Fprintf(w, "episodes:   %d (%d downloaded)\n", pod.EpisodeCount, pod.DownloadedCount)
 			fmt.Fprintf(w, "retention:  %s\n", keepLabel(pod.RetentionKeep))
@@ -377,29 +548,63 @@ func newPodcastRemoveCmd(g *globals) *cobra.Command {
 // --- JSON views ------------------------------------------------------------
 
 type podcastView struct {
-	PID         model.PID `json:"pid"`
-	Title       string    `json:"title"`
-	Author      string    `json:"author,omitempty"`
-	FeedURL     string    `json:"feedUrl"`
-	Source      string    `json:"source"`
-	Description string    `json:"description,omitempty"`
-	Link        string    `json:"link,omitempty"`
-	Language    string    `json:"language,omitempty"`
-	Category    string    `json:"category,omitempty"`
-	Explicit    bool      `json:"explicit,omitempty"`
-	Episodes    int       `json:"episodes"`
-	Downloaded  int       `json:"downloaded"`
-	Keep        int       `json:"retentionKeep"`
-	AuthUser    string    `json:"authUser,omitempty"`
+	PID            model.PID    `json:"pid"`
+	Title          string       `json:"title"`
+	Author         string       `json:"author,omitempty"`
+	FeedURL        string       `json:"feedUrl"`
+	Source         string       `json:"source"`
+	Description    string       `json:"description,omitempty"`
+	Link           string       `json:"link,omitempty"`
+	Language       string       `json:"language,omitempty"`
+	Category       string       `json:"category,omitempty"`
+	Explicit       bool         `json:"explicit,omitempty"`
+	FundingURL     string       `json:"fundingUrl,omitempty"`
+	FundingMessage string       `json:"fundingMessage,omitempty"`
+	Medium         string       `json:"medium,omitempty"`
+	Persons        []personView `json:"persons,omitempty"`
+	Episodes       int          `json:"episodes"`
+	Downloaded     int          `json:"downloaded"`
+	Keep           int          `json:"retentionKeep"`
+	AuthUser       string       `json:"authUser,omitempty"`
 }
 
 func toPodcastView(p *model.Podcast) podcastView {
 	return podcastView{
 		PID: p.PID, Title: p.Title, Author: p.Author, FeedURL: p.FeedURL, Source: sourceLabel(p.SourceType),
 		Description: p.Description, Link: p.Link, Language: p.Language, Category: p.Category,
-		Explicit: p.Explicit, Episodes: p.EpisodeCount, Downloaded: p.DownloadedCount,
+		Explicit: p.Explicit, FundingURL: p.FundingURL, FundingMessage: p.FundingMessage,
+		Medium: p.Medium, Persons: personViews(p.Persons),
+		Episodes: p.EpisodeCount, Downloaded: p.DownloadedCount,
 		Keep: p.RetentionKeep, AuthUser: p.AuthUser,
 	}
+}
+
+// personView is the JSON shape for one <podcast:person> credit.
+type personView struct {
+	Name  string `json:"name"`
+	Role  string `json:"role,omitempty"`
+	Group string `json:"group,omitempty"`
+	Img   string `json:"img,omitempty"`
+	Href  string `json:"href,omitempty"`
+}
+
+func personViews(ps []model.FeedPerson) []personView {
+	if len(ps) == 0 {
+		return nil
+	}
+	out := make([]personView, len(ps))
+	for i, p := range ps {
+		out[i] = personView{Name: p.Name, Role: p.Role, Group: p.Group, Img: p.Img, Href: p.Href}
+	}
+	return out
+}
+
+// personLabel renders one credit for the human listing ("Jane Host (host)").
+func personLabel(p model.FeedPerson) string {
+	if p.Role == "" {
+		return p.Name
+	}
+	return p.Name + " (" + p.Role + ")"
 }
 
 // sourceLabel renders a show's source type, defaulting an unset value to rss for
@@ -441,6 +646,35 @@ func toEpisodeViews(eps []*model.Episode) []episodeView {
 		out[i] = toEpisodeView(e)
 	}
 	return out
+}
+
+// episodeDetailView is the JSON shape for one episode's full detail: the list
+// fields plus the Podcasting 2.0 extras, chapters, and transcript state.
+type episodeDetailView struct {
+	episodeView
+	HasTranscript bool            `json:"hasTranscript"`
+	Persons       []personView    `json:"persons,omitempty"`
+	Soundbites    []soundbiteView `json:"soundbites,omitempty"`
+	Chapters      []chapterView   `json:"chapters,omitempty"`
+}
+
+type soundbiteView struct {
+	StartMS    int64  `json:"startMs"`
+	DurationMS int64  `json:"durationMs"`
+	Title      string `json:"title,omitempty"`
+}
+
+func toEpisodeDetailView(d *model.EpisodeDetail) episodeDetailView {
+	v := episodeDetailView{
+		episodeView:   toEpisodeView(d.Episode),
+		HasTranscript: d.HasTranscript,
+		Persons:       personViews(d.Persons),
+		Chapters:      chapterViews(d.Chapters),
+	}
+	for _, b := range d.Soundbites {
+		v.Soundbites = append(v.Soundbites, soundbiteView{StartMS: b.StartMS, DurationMS: b.DurationMS, Title: b.Title})
+	}
+	return v
 }
 
 func keepLabel(keep int) string {

@@ -11,7 +11,8 @@ import (
 
 // podcastSelect reads a podcast row plus its episode and downloaded counts.
 const podcastSelect = `SELECT p.id, p.pid, p.feed_url, p.identity_key, p.title, p.sort_key, p.author,
-	p.description, p.link, p.language, p.category, p.explicit, p.image_url, p.guid, p.etag,
+	p.description, p.link, p.language, p.category, p.explicit,
+	p.funding_url, p.funding_message, p.medium, p.image_url, p.guid, p.etag,
 	p.last_modified, p.last_fetched_at, p.retention_keep, p.auth_user, p.source_type, p.created_at, p.updated_at,
 	(SELECT COUNT(*) FROM episode e WHERE e.podcast_id = p.id) AS ep_count,
 	(SELECT COUNT(*) FROM episode e JOIN playable_item pi ON pi.id = e.item_id
@@ -22,7 +23,8 @@ func scanPodcast(sc rowScanner) (*model.Podcast, error) {
 	var p model.Podcast
 	var lastFetched sql.NullInt64
 	if err := sc.Scan(&p.ID, &p.PID, &p.FeedURL, &p.IdentityKey, &p.Title, &p.SortKey, &p.Author,
-		&p.Description, &p.Link, &p.Language, &p.Category, &p.Explicit, &p.ImageURL, &p.GUID, &p.ETag,
+		&p.Description, &p.Link, &p.Language, &p.Category, &p.Explicit,
+		&p.FundingURL, &p.FundingMessage, &p.Medium, &p.ImageURL, &p.GUID, &p.ETag,
 		&p.LastModified, &lastFetched, &p.RetentionKeep, &p.AuthUser, &p.SourceType, &p.CreatedAt, &p.UpdatedAt,
 		&p.EpisodeCount, &p.DownloadedCount); err != nil {
 		return nil, err
@@ -50,7 +52,8 @@ func (s *Store) Podcasts(ctx context.Context) ([]*model.Podcast, error) {
 	return out, rows.Err()
 }
 
-// PodcastByPID returns one podcast by public id.
+// PodcastByPID returns one podcast by public id, with its channel-level person
+// credits (a detail-only load; Podcasts, the list read, leaves them empty).
 func (s *Store) PodcastByPID(ctx context.Context, pid model.PID) (*model.Podcast, error) {
 	const op = "store.PodcastByPID"
 	p, err := scanPodcast(s.read.QueryRowContext(ctx, podcastSelect+" WHERE p.pid = ?", string(pid)))
@@ -60,7 +63,54 @@ func (s *Store) PodcastByPID(ctx context.Context, pid model.PID) (*model.Podcast
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
+	persons, err := queryPersons(ctx, s.read,
+		"SELECT name, role, grp, img, href FROM podcast_person WHERE podcast_id = ? AND item_id IS NULL ORDER BY position",
+		p.ID)
+	if err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	p.Persons = persons
 	return p, nil
+}
+
+// queryPersons runs a person listing (name, role, grp, img, href columns, in
+// that order) and scans it into feed credits. The cursor is closed when it
+// returns, so a transactional caller is free to write on the same connection
+// afterward (the chaptersInSync pattern).
+func queryPersons(ctx context.Context, q queryer, stmt string, args ...any) ([]model.FeedPerson, error) {
+	rows, err := q.QueryContext(ctx, stmt, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []model.FeedPerson
+	for rows.Next() {
+		var p model.FeedPerson
+		if err := rows.Scan(&p.Name, &p.Role, &p.Group, &p.Img, &p.Href); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+// querySoundbites is queryPersons for soundbite rows (start_ms, duration_ms,
+// title columns).
+func querySoundbites(ctx context.Context, q queryer, stmt string, args ...any) ([]model.FeedSoundbite, error) {
+	rows, err := q.QueryContext(ctx, stmt, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []model.FeedSoundbite
+	for rows.Next() {
+		var b model.FeedSoundbite
+		if err := rows.Scan(&b.StartMS, &b.DurationMS, &b.Title); err != nil {
+			return nil, err
+		}
+		out = append(out, b)
+	}
+	return out, rows.Err()
 }
 
 // PodcastByIdentity returns the podcast with the given identity key, or
@@ -189,7 +239,48 @@ func (s *Store) EpisodeByPID(ctx context.Context, pid model.PID) (*model.Episode
 	if err != nil {
 		return nil, err
 	}
-	return &model.EpisodeDetail{Episode: e, HasTranscript: hasTranscript, Chapters: chapters}, nil
+	d := &model.EpisodeDetail{Episode: e, HasTranscript: hasTranscript, Chapters: chapters}
+
+	// The Podcasting 2.0 extras are detail-only loads, keeping the list reads to
+	// their single query.
+	d.Persons, err = queryPersons(ctx, s.read, `SELECT pp.name, pp.role, pp.grp, pp.img, pp.href
+		FROM podcast_person pp JOIN playable_item pi ON pi.id = pp.item_id
+		WHERE pi.pid = ? ORDER BY pp.position`, string(pid))
+	if err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	d.Soundbites, err = querySoundbites(ctx, s.read, `SELECT sb.start_ms, sb.duration_ms, sb.title
+		FROM episode_soundbite sb JOIN playable_item pi ON pi.id = sb.item_id
+		WHERE pi.pid = ? ORDER BY sb.position`, string(pid))
+	if err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	return d, nil
+}
+
+// TranscriptByEpisode returns an episode's stored transcript, or CodeNotFound
+// when the episode exists but no transcript is stored (a missing episode is its
+// own CodeNotFound, so the two absences read differently).
+func (s *Store) TranscriptByEpisode(ctx context.Context, pid model.PID) (*model.Transcript, error) {
+	const op = "store.TranscriptByEpisode"
+	itemID, kind, err := s.itemIDKindByPID(ctx, pid, op)
+	if err != nil {
+		return nil, err
+	}
+	if kind != string(model.KindEpisode) {
+		return nil, waxerr.New(waxerr.CodeInvalid, op, "item is not an episode: "+string(pid))
+	}
+	tr := &model.Transcript{EpisodePID: pid}
+	err = s.read.QueryRowContext(ctx,
+		"SELECT format, body, source_url, created_at FROM episode_transcript WHERE item_id = ?", itemID).
+		Scan(&tr.Format, &tr.Body, &tr.SourceURL, &tr.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, waxerr.New(waxerr.CodeNotFound, op, "no transcript stored for episode "+string(pid))
+	}
+	if err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	return tr, nil
 }
 
 // DownloadedEpisodes lists a podcast's currently-downloaded episodes eligible for

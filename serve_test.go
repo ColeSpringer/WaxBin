@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 	"github.com/colespringer/waxbin/config"
 	"github.com/colespringer/waxbin/internal/testaudio"
 	"github.com/colespringer/waxbin/model"
+	"github.com/colespringer/waxbin/podcast"
 	"github.com/colespringer/waxbin/proxy"
 	"github.com/colespringer/waxbin/query"
 	"github.com/colespringer/waxbin/scan"
@@ -215,6 +217,55 @@ func TestServeProxiedSmartPlaylistSetRule(t *testing.T) {
 	}
 	if err := c.PlaylistSetRule(ctx, pid, bad); !waxerr.Is(err, waxerr.CodeInvalid) {
 		t.Fatalf("proxied bad rule err = %v, want CodeInvalid", err)
+	}
+}
+
+// TestServeProxiedTranscript drives put_transcript and fetch_transcript over the
+// socket: a supplied body is validated and reduced server-side, a fetch error
+// keeps its class across the wire, and the stored transcript reads back through
+// the server's own library.
+func TestServeProxiedTranscript(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	sock := filepath.Join(t.TempDir(), "wax.sock")
+
+	lib := openServedRW(t, ctx, db, root, sock)
+	show, err := lib.Podcasts().AddManual(ctx, "Proxied", podcast.ManualOptions{})
+	if err != nil {
+		t.Fatalf("add manual show: %v", err)
+	}
+	res, err := lib.Podcasts().AddEpisode(ctx, show.PID, model.FeedEpisode{Title: "Ep", GUID: "g1"}, true)
+	if err != nil {
+		t.Fatalf("add episode: %v", err)
+	}
+	ep := res.EpisodePID
+	c := dialWhenReady(t, sock)
+
+	srt := "1\n00:00:01,000 --> 00:00:04,000\nproxied transcript words\n"
+	if err := c.PutTranscript(ctx, ep, "srt", []byte(srt), "https://h/t.srt"); err != nil {
+		t.Fatalf("proxied put_transcript: %v", err)
+	}
+	tr, err := lib.Podcasts().Transcript(ctx, ep)
+	if err != nil {
+		t.Fatalf("read transcript: %v", err)
+	}
+	if tr.Format != "srt" || tr.SourceURL != "https://h/t.srt" {
+		t.Fatalf("transcript meta = %+v", tr)
+	}
+	// The reduction ran server-side: cue timecodes are gone, the words are there.
+	if strings.Contains(tr.Body, "-->") || !strings.Contains(tr.Body, "proxied transcript words") {
+		t.Fatalf("proxied body not reduced: %q", tr.Body)
+	}
+
+	// Validation errors keep their class across the wire.
+	if err := c.PutTranscript(ctx, ep, "docx", []byte("x"), ""); !waxerr.Is(err, waxerr.CodeInvalid) {
+		t.Fatalf("proxied bad format = %v, want CodeInvalid", err)
+	}
+	// fetch_transcript on an episode with no declared URL: CodeInvalid, not a
+	// transport failure (the fetch would run in the server process).
+	if err := c.FetchTranscript(ctx, ep); !waxerr.Is(err, waxerr.CodeInvalid) {
+		t.Fatalf("proxied no-url fetch = %v, want CodeInvalid", err)
 	}
 }
 

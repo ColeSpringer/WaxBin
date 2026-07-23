@@ -320,28 +320,6 @@ func (s *Service) fileRow(ctx context.Context, dst string, size int64, contentHa
 	return file, nil
 }
 
-// fetchTranscript downloads and stores an episode transcript when possible. It
-// returns whether a transcript was stored.
-func (s *Service) fetchTranscript(ctx context.Context, episodePID model.PID, url, mimeType string) bool {
-	resp, err := s.client.Do(ctx, netsafe.Request{URL: url, AcceptMIME: transcriptMIME, MaxBytes: s.cfg.MaxFeedBytes})
-	if err != nil {
-		s.log.Debug("transcript fetch failed", "url", url, "err", err)
-		return false
-	}
-	format := transcriptFormat(mimeType, url)
-	body := transcriptToText(resp.Body, format)
-	if strings.TrimSpace(body) == "" {
-		return false
-	}
-	if err := s.store.PutTranscript(ctx, model.PutTranscriptInput{
-		EpisodePID: episodePID, Format: format, Body: body, SourceURL: url,
-	}); err != nil {
-		s.log.Warn("storing transcript", "episode", episodePID, "err", err)
-		return false
-	}
-	return true
-}
-
 // RetentionResult reports a retention pass.
 type RetentionResult struct {
 	PodcastPID     model.PID
@@ -621,56 +599,4 @@ func onDiskSize(path string) int64 {
 		return 0
 	}
 	return info.Size()
-}
-
-// transcriptFormat classifies a transcript by its declared MIME type, falling back
-// to the URL extension.
-func transcriptFormat(mimeType, url string) string {
-	t := strings.ToLower(mimeType)
-	switch {
-	case strings.Contains(t, "json"):
-		return "json"
-	case strings.Contains(t, "srt"), strings.Contains(t, "subrip"), strings.HasSuffix(strings.ToLower(url), ".srt"):
-		return "srt"
-	case strings.Contains(t, "vtt"), strings.HasSuffix(strings.ToLower(url), ".vtt"):
-		return "vtt"
-	default:
-		return "text"
-	}
-}
-
-// transcriptToText reduces a transcript to searchable plain text: SRT/VTT cue
-// numbers and timestamp lines are dropped so the FTS index holds words, not
-// timecodes. JSON and unknown formats are stored verbatim (FTS tokenization
-// ignores punctuation anyway).
-func transcriptToText(data []byte, format string) string {
-	if format != "srt" && format != "vtt" {
-		return string(data)
-	}
-	var b strings.Builder
-	for _, line := range strings.Split(string(data), "\n") {
-		l := strings.TrimSpace(line)
-		if l == "" || l == "WEBVTT" || isTimecodeLine(l) || isAllDigits(l) {
-			continue
-		}
-		b.WriteString(l)
-		b.WriteByte('\n')
-	}
-	return b.String()
-}
-
-// isTimecodeLine reports whether a line is an SRT/VTT timestamp cue ("00:00:01,000
-// --> 00:00:04,000").
-func isTimecodeLine(l string) bool { return strings.Contains(l, "-->") }
-
-func isAllDigits(l string) bool {
-	if l == "" {
-		return false
-	}
-	for _, r := range l {
-		if r < '0' || r > '9' {
-			return false
-		}
-	}
-	return true
 }

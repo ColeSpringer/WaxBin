@@ -69,11 +69,15 @@ type Contributor struct {
 // accumulating the durations of the parts before this chapter's file; on the scan
 // input path only the file-relative pair and Title are set. An end of 0 means
 // "until the next chapter or the end of the file".
+//
+// SetChapters (user curation) takes the book-timeline pair as its input, the
+// same coordinates Chapters returns, and derives the file-relative pair itself,
+// so a multi-file book is curated as one flat timeline.
 type Chapter struct {
 	Position    int // book-timeline order, 0-based (assigned on read)
 	Title       string
-	StartMS     int64 // book-timeline offset (read)
-	EndMS       int64 // book-timeline end offset, 0 if open-ended (read)
+	StartMS     int64 // book-timeline offset (read; input to SetChapters)
+	EndMS       int64 // book-timeline end offset, 0 if open-ended (read; input to SetChapters)
 	FilePID     PID   // the file backing this chapter
 	FileStartMS int64 // offset within FilePID's file (stored)
 	FileEndMS   int64 // end offset within FilePID's file, 0 if open-ended (stored)

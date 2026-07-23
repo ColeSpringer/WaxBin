@@ -889,6 +889,114 @@ func TestPruneBypassesTrash(t *testing.T) {
 	}
 }
 
+// TestEmptyTrashAgeScopeAndPurge exercises the age-scoped empty pass and the
+// single-entry purge: a fresh trash survives an --older-than window, a targeted
+// purge removes exactly one entry (file and row) and is NotFound on a repeat or
+// on a restored entry, and an unscoped empty drains the rest.
+func TestEmptyTrashAgeScopeAndPurge(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	// Seed-varied audio so the two files carry distinct essence (two items, not
+	// one item with a duplicate copy).
+	for i, n := range []string{"one", "two"} {
+		writeFile(t, filepath.Join(root, n+".mp3"),
+			testaudio.BuildMP3WithAudio(n, "Artist", "Album", i+1, testaudio.AudioWithSeed(byte(i+1))))
+	}
+
+	lib := openManaged(t, ctx, db, root)
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	items, _ := lib.Query(ctx, query.New(query.EntityItems).Build(), "")
+	if len(items) != 2 {
+		t.Fatalf("items = %d, want 2", len(items))
+	}
+	plan, err := lib.PlanDeletePIDs(ctx, []model.PID{items[0].PID, items[1].PID}, model.DeleteTrash)
+	if err != nil {
+		t.Fatalf("plan delete: %v", err)
+	}
+	if _, err := lib.ApplyDelete(ctx, plan); err != nil {
+		t.Fatalf("apply delete: %v", err)
+	}
+	entries, err := lib.Trash(ctx, false, 0)
+	if err != nil || len(entries) != 2 {
+		t.Fatalf("trash entries = %d (err %v), want 2", len(entries), err)
+	}
+
+	// A negative window is refused; a one-hour window purges nothing (both
+	// entries are seconds old) and leaves the files in the trash on disk.
+	if _, err := lib.EmptyTrash(ctx, waxbin.EmptyTrashOptions{OlderThan: -time.Second}); !waxerr.Is(err, waxerr.CodeInvalid) {
+		t.Fatalf("negative window = %v, want CodeInvalid", err)
+	}
+	rep, err := lib.EmptyTrash(ctx, waxbin.EmptyTrashOptions{OlderThan: time.Hour})
+	if err != nil {
+		t.Fatalf("scoped empty: %v", err)
+	}
+	if rep.Purged != 0 || rep.Errored != 0 {
+		t.Fatalf("scoped empty purged fresh entries: %+v", rep)
+	}
+	for _, e := range entries {
+		if !fileExists(e.TrashDisplay) {
+			t.Fatalf("scoped empty removed a fresh trashed file: %s", e.TrashDisplay)
+		}
+	}
+
+	// A targeted purge removes exactly that entry, on disk and in the journal.
+	size, err := lib.PurgeTrash(ctx, entries[0].PID)
+	if err != nil {
+		t.Fatalf("purge: %v", err)
+	}
+	if size <= 0 {
+		t.Fatalf("purge reclaimed %d bytes, want > 0", size)
+	}
+	if fileExists(entries[0].TrashDisplay) {
+		t.Fatal("purged file still on disk")
+	}
+	if !fileExists(entries[1].TrashDisplay) {
+		t.Fatal("purge removed the other entry's file")
+	}
+	if remaining, _ := lib.Trash(ctx, false, 0); len(remaining) != 1 || remaining[0].PID != entries[1].PID {
+		t.Fatalf("remaining trash = %+v, want just the second entry", remaining)
+	}
+	// A second purge of the same pid is NotFound (the row is gone).
+	if _, err := lib.PurgeTrash(ctx, entries[0].PID); !waxerr.Is(err, waxerr.CodeNotFound) {
+		t.Fatalf("double purge = %v, want CodeNotFound", err)
+	}
+
+	// A restored entry cannot be purged either: restore the survivor, then try.
+	if err := lib.RestoreTrash(ctx, entries[1].PID); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	if _, err := lib.PurgeTrash(ctx, entries[1].PID); !waxerr.Is(err, waxerr.CodeNotFound) {
+		t.Fatalf("purge of a restored entry = %v, want CodeNotFound", err)
+	}
+
+	// Re-trash the restored file and drain everything with an unscoped empty.
+	items, _ = lib.Query(ctx, query.New(query.EntityItems).
+		Where("state", query.OpIs, string(model.StatePresent)).Build(), "")
+	if len(items) != 1 {
+		t.Fatalf("present items after restore = %d, want 1", len(items))
+	}
+	plan, err = lib.PlanDeletePIDs(ctx, []model.PID{items[0].PID}, model.DeleteTrash)
+	if err != nil {
+		t.Fatalf("re-plan: %v", err)
+	}
+	if _, err := lib.ApplyDelete(ctx, plan); err != nil {
+		t.Fatalf("re-delete: %v", err)
+	}
+	rep, err = lib.EmptyTrash(ctx, waxbin.EmptyTrashOptions{})
+	if err != nil {
+		t.Fatalf("unscoped empty: %v", err)
+	}
+	if rep.Purged != 1 || rep.ReclaimedBytes <= 0 {
+		t.Fatalf("unscoped empty = %+v, want 1 purged with bytes", rep)
+	}
+	if remaining, _ := lib.Trash(ctx, false, 0); len(remaining) != 0 {
+		t.Fatalf("trash not drained: %+v", remaining)
+	}
+}
+
 // TestInboxImportAndDedup verifies importing a staging folder places and catalogs
 // the file under the profile, records an import batch, and skips a duplicate.
 func TestInboxImportAndDedup(t *testing.T) {

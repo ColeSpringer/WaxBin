@@ -68,6 +68,8 @@ const (
 	MethodPlaylistRemove   = "playlist_remove"
 	MethodPlaylistRemoveAt = "playlist_remove_at"
 	MethodPlaylistSetRule  = "playlist_set_rule"
+	MethodPutTranscript    = "put_transcript"
+	MethodFetchTranscript  = "fetch_transcript"
 	MethodMaintenanceBegin = "maintenance_begin"
 	MethodMaintenanceEnd   = "maintenance_end"
 
@@ -385,6 +387,23 @@ type PlaylistRemoveAtParams struct {
 type PlaylistSetRuleParams struct {
 	PlaylistPID string          `json:"playlistPid"`
 	Rule        json.RawMessage `json:"rule"`
+}
+
+// PutTranscriptParams is the put_transcript request payload: a caller-supplied
+// transcript body for an episode. Body travels base64-encoded in the JSON frame
+// (like SetItemArtParams.Data); the server-side service enforces the format
+// whitelist and size cap.
+type PutTranscriptParams struct {
+	EpisodePID string `json:"episodePid"`
+	Format     string `json:"format"`
+	Body       []byte `json:"body"`
+	SourceURL  string `json:"sourceUrl,omitempty"`
+}
+
+// FetchTranscriptParams is the fetch_transcript request payload. The fetch of
+// the episode's declared transcript URL runs in the server process.
+type FetchTranscriptParams struct {
+	EpisodePID string `json:"episodePid"`
 }
 
 // ScanParams is the run_scan request payload.

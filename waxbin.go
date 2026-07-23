@@ -1685,7 +1685,7 @@ func (l *Library) ApplyDelete(ctx context.Context, plan *trash.Plan) (*trash.Rep
 // Trash lists trash journal entries, newest first. includeRestored controls
 // whether already-restored rows are shown; limit 0 returns all.
 func (l *Library) Trash(ctx context.Context, includeRestored bool, limit int) ([]model.TrashEntry, error) {
-	return l.store.TrashEntries(ctx, includeRestored, limit)
+	return l.store.TrashEntries(ctx, includeRestored, 0, limit)
 }
 
 // RestoreTrash undoes a delete: it moves the trashed file back to its original
@@ -1728,12 +1728,28 @@ type EmptyReport struct {
 	ReclaimedBytes int64
 }
 
-// EmptyTrash permanently removes every active trashed file from disk and drops
-// its journal row, reclaiming space. It runs under a "delete"-scoped job.
-func (l *Library) EmptyTrash(ctx context.Context) (*EmptyReport, error) {
+// EmptyTrashOptions scopes an empty-trash pass.
+type EmptyTrashOptions struct {
+	// OlderThan keeps recently-trashed files: only entries trashed strictly
+	// before now-OlderThan are purged, so an undo window survives a routine
+	// space-reclaim pass. Zero purges everything; negative is refused.
+	OlderThan time.Duration
+}
+
+// EmptyTrash permanently removes active trashed files from disk and drops their
+// journal rows, reclaiming space. Options.OlderThan narrows the pass to entries
+// older than that window. It runs under a "delete"-scoped job.
+func (l *Library) EmptyTrash(ctx context.Context, opts EmptyTrashOptions) (*EmptyReport, error) {
+	if opts.OlderThan < 0 {
+		return nil, waxerr.New(waxerr.CodeInvalid, "Library.EmptyTrash", "older-than window cannot be negative")
+	}
+	var cutoff int64
+	if opts.OlderThan > 0 {
+		cutoff = time.Now().Add(-opts.OlderThan).UnixNano()
+	}
 	rep := &EmptyReport{}
 	_, err := l.jobs.Run(ctx, "empty-trash", fsMutateScope, func(ctx context.Context, h *jobs.Handle) error {
-		entries, err := l.store.TrashEntries(ctx, false, 0)
+		entries, err := l.store.TrashEntries(ctx, false, cutoff, 0)
 		if err != nil {
 			return err
 		}
@@ -1741,19 +1757,15 @@ func (l *Library) EmptyTrash(ctx context.Context) (*EmptyReport, error) {
 			if ctx.Err() != nil {
 				return waxerr.FromContext("Library.EmptyTrash", ctx.Err(), waxerr.CodeIO)
 			}
-			size, perr := l.trasher.Purge(entries[i])
+			// Don't abort the whole pass on one entry's failure: a purge error leaves
+			// the entry retryable, and a row-delete failure after a successful purge
+			// would otherwise strand an active journal row whose file is already gone
+			// (un-restorable). Tally it and move on; a later re-run drops the row
+			// (Purge tolerates the already-missing file).
+			size, perr := l.purgeTrashEntry(ctx, entries[i])
 			if perr != nil {
 				rep.Errored++
-				l.log.Warn("purging trashed file", "trash", entries[i].TrashDisplay, "err", perr)
-				continue
-			}
-			// Don't abort the whole pass on a row-delete failure: that would strand an
-			// active journal row whose file is already gone (un-restorable). Tally it
-			// and move on; a later empty-trash re-run drops the row (Purge tolerates the
-			// already-missing file).
-			if err := l.store.DeleteTrashRow(ctx, entries[i].PID); err != nil {
-				rep.Errored++
-				l.log.Warn("dropping trash journal row", "trash", entries[i].PID, "err", err)
+				l.log.Warn("purging trash entry", "trash", entries[i].PID, "path", entries[i].TrashDisplay, "err", perr)
 				continue
 			}
 			rep.Purged++
@@ -1762,6 +1774,43 @@ func (l *Library) EmptyTrash(ctx context.Context) (*EmptyReport, error) {
 		return nil
 	})
 	return rep, err
+}
+
+// PurgeTrash permanently removes a single active trash entry (file and journal
+// row), returning the bytes reclaimed. A pid that is unknown, already purged, or
+// already restored is CodeNotFound. Like EmptyTrash it runs under an fs-mutate
+// job, one lease per call; the entry is resolved inside the lease, so a restore
+// racing in (it holds the same scope) cannot slip between the check and the
+// purge and lose its journal row.
+func (l *Library) PurgeTrash(ctx context.Context, trashPID model.PID) (int64, error) {
+	var size int64
+	_, err := l.jobs.Run(ctx, "purge-trash", fsMutateScope, func(ctx context.Context, h *jobs.Handle) error {
+		entry, err := l.store.ActiveTrashByPID(ctx, trashPID)
+		if err != nil {
+			return err
+		}
+		n, err := l.purgeTrashEntry(ctx, *entry)
+		size = n
+		return err
+	})
+	if err != nil {
+		return 0, err
+	}
+	return size, nil
+}
+
+// purgeTrashEntry is the shared purge step: remove the trashed file (and its
+// unique trash sub-directory) from disk, then drop the journal row. Returns the
+// bytes reclaimed.
+func (l *Library) purgeTrashEntry(ctx context.Context, e model.TrashEntry) (int64, error) {
+	size, err := l.trasher.Purge(e)
+	if err != nil {
+		return 0, err
+	}
+	if err := l.store.DeleteTrashRow(ctx, e.PID); err != nil {
+		return 0, err
+	}
+	return size, nil
 }
 
 // ImportRequest selects a staging folder and how to import it.

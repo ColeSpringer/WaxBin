@@ -22,7 +22,9 @@ func (l *Library) SetLyrics(ctx context.Context, itemPID model.PID, ly *model.Ly
 }
 
 // SetChapters replaces a book's user-curated chapters (which win on read over the
-// scanned ones), locking the "chapters" field by default. An empty list clears them.
+// scanned ones), locking the "chapters" field by default. An empty list clears
+// them. The input is a flat book-timeline list (StartMS/EndMS, what Chapters
+// returns); for a multi-file book the store splits it across the parts.
 func (l *Library) SetChapters(ctx context.Context, itemPID model.PID, chapters []model.Chapter, lock, force bool) error {
 	return l.store.SetItemChapters(ctx, itemPID, chapters, lock, force)
 }

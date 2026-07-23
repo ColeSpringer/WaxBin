@@ -42,6 +42,7 @@ type Store interface {
 	AttachEpisodeFile(ctx context.Context, in model.AttachEpisodeFileInput) (model.PID, error)
 	DropEpisodeFile(ctx context.Context, pid model.PID) error
 	PutTranscript(ctx context.Context, in model.PutTranscriptInput) error
+	TranscriptByEpisode(ctx context.Context, pid model.PID) (*model.Transcript, error)
 	PutEpisodeChapters(ctx context.Context, episodePID model.PID, chapters []model.Chapter) error
 	RemovePodcast(ctx context.Context, pid model.PID) ([]string, error)
 	SetPodcastRetention(ctx context.Context, pid model.PID, keep int) error

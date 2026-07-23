@@ -282,6 +282,20 @@ func (m *mutator) PlaylistSetRule(ctx context.Context, playlistPID model.PID, ru
 	return m.lib.Playlists().SetRule(ctx, playlistPID, rule)
 }
 
+func (m *mutator) PutTranscript(ctx context.Context, in model.PutTranscriptInput) error {
+	if m.px != nil {
+		return m.px.PutTranscript(ctx, in.EpisodePID, in.Format, []byte(in.Body), in.SourceURL)
+	}
+	return m.lib.Podcasts().PutTranscript(ctx, in)
+}
+
+func (m *mutator) FetchTranscript(ctx context.Context, episodePID model.PID) error {
+	if m.px != nil {
+		return m.px.FetchTranscript(ctx, episodePID)
+	}
+	return m.lib.Podcasts().FetchTranscript(ctx, episodePID)
+}
+
 // toPIDs converts a wire string slice into a PID slice.
 func toPIDs(ss []string) []model.PID {
 	if len(ss) == 0 {

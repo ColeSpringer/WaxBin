@@ -369,6 +369,24 @@ func (l *Library) proxyHandlers() map[string]proxy.Handler {
 			}
 			return nil, l.playlists.SetRule(ctx, model.PID(p.PlaylistPID), q)
 		},
+		proxy.MethodPutTranscript: func(ctx context.Context, raw json.RawMessage) (any, error) {
+			p, err := decodeParams[proxy.PutTranscriptParams](raw)
+			if err != nil {
+				return nil, err
+			}
+			return nil, l.podcasts.PutTranscript(ctx, model.PutTranscriptInput{
+				EpisodePID: model.PID(p.EpisodePID), Format: p.Format,
+				Body: string(p.Body), SourceURL: p.SourceURL,
+			})
+		},
+		proxy.MethodFetchTranscript: func(ctx context.Context, raw json.RawMessage) (any, error) {
+			p, err := decodeParams[proxy.FetchTranscriptParams](raw)
+			if err != nil {
+				return nil, err
+			}
+			// The fetch runs in this (server) process, under its network policy.
+			return nil, l.podcasts.FetchTranscript(ctx, model.PID(p.EpisodePID))
+		},
 		proxy.MethodRunScan: func(ctx context.Context, raw json.RawMessage) (any, error) {
 			p, err := decodeParams[proxy.ScanParams](raw)
 			if err != nil {

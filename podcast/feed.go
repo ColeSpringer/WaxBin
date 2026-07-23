@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"encoding/xml"
 	"io"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -42,6 +43,9 @@ type rssChannel struct {
 	Image          rssImage    `xml:"image"`
 	ITunesCategory []itunesCat `xml:"http://www.itunes.com/dtds/podcast-1.0.dtd category"`
 	PodcastGUID    string      `xml:"https://podcastindex.org/namespace/1.0 guid"`
+	Funding        []pcFunding `xml:"https://podcastindex.org/namespace/1.0 funding"`
+	Medium         string      `xml:"https://podcastindex.org/namespace/1.0 medium"`
+	Persons        []pcPerson  `xml:"https://podcastindex.org/namespace/1.0 person"`
 	Items          []rssItem   `xml:"item"`
 }
 
@@ -74,6 +78,8 @@ type rssItem struct {
 	ITunesImage       hrefImage      `xml:"http://www.itunes.com/dtds/podcast-1.0.dtd image"`
 	Transcripts       []pcTranscript `xml:"https://podcastindex.org/namespace/1.0 transcript"`
 	Chapters          pcChapters     `xml:"https://podcastindex.org/namespace/1.0 chapters"`
+	Persons           []pcPerson     `xml:"https://podcastindex.org/namespace/1.0 person"`
+	Soundbites        []pcSoundbite  `xml:"https://podcastindex.org/namespace/1.0 soundbite"`
 }
 
 type rssGUID struct {
@@ -96,6 +102,25 @@ type pcTranscript struct {
 type pcChapters struct {
 	URL  string `xml:"url,attr"`
 	Type string `xml:"type,attr"`
+}
+
+type pcFunding struct {
+	URL     string `xml:"url,attr"`
+	Message string `xml:",chardata"`
+}
+
+type pcPerson struct {
+	Name  string `xml:",chardata"`
+	Role  string `xml:"role,attr"`
+	Group string `xml:"group,attr"`
+	Img   string `xml:"img,attr"`
+	Href  string `xml:"href,attr"`
+}
+
+type pcSoundbite struct {
+	StartTime string `xml:"startTime,attr"`
+	Duration  string `xml:"duration,attr"`
+	Title     string `xml:",chardata"`
 }
 
 // ParseFeed parses an RSS 2.0 podcast feed (iTunes + Podcasting 2.0 extensions)
@@ -124,11 +149,24 @@ func ParseFeed(data []byte) (*model.Feed, error) {
 		Link:        strings.TrimSpace(ch.Link),
 		Language:    strings.TrimSpace(ch.Language),
 		Explicit:    parseExplicit(ch.ITunesExplicit),
-		GUID:        strings.TrimSpace(ch.PodcastGUID),
-		ImageURL:    firstNonEmpty(strings.TrimSpace(ch.ITunesImage.Href), strings.TrimSpace(ch.Image.URL)),
+		// The medium is stored as published (lowercased, no whitelist): the vocabulary
+		// is open-ended and a client filters on the string.
+		Medium:   strings.ToLower(strings.TrimSpace(ch.Medium)),
+		GUID:     strings.TrimSpace(ch.PodcastGUID),
+		ImageURL: firstNonEmpty(strings.TrimSpace(ch.ITunesImage.Href), strings.TrimSpace(ch.Image.URL)),
+		Persons:  normalizePersons(ch.Persons),
 	}
 	if len(ch.ITunesCategory) > 0 {
 		feed.Category = strings.TrimSpace(ch.ITunesCategory[0].Text)
+	}
+	// A feed may list several funding tags; keep the first that carries a URL (a
+	// tag without one has nothing to link to).
+	for i := range ch.Funding {
+		if u := strings.TrimSpace(ch.Funding[i].URL); u != "" {
+			feed.FundingURL = u
+			feed.FundingMessage = strings.TrimSpace(ch.Funding[i].Message)
+			break
+		}
 	}
 
 	feed.Episodes = make([]model.FeedEpisode, 0, len(ch.Items))
@@ -156,6 +194,8 @@ func normalizeItem(it *rssItem) model.FeedEpisode {
 		EnclosureSize: atoi64Safe(it.Enclosure.Length),
 		ImageURL:      strings.TrimSpace(it.ITunesImage.Href),
 		ChaptersURL:   strings.TrimSpace(it.Chapters.URL),
+		Persons:       normalizePersons(it.Persons),
+		Soundbites:    normalizeSoundbites(it.Soundbites),
 	}
 	ep.Year = yearOf(ep.PubDateNS)
 	if t := pickTranscript(it.Transcripts); t != nil {
@@ -197,6 +237,68 @@ func pickTranscript(ts []pcTranscript) *pcTranscript {
 		return nil
 	}
 	return &ts[best]
+}
+
+// normalizePersons converts <podcast:person> tags into feed credits, in feed
+// order. A nameless tag is skipped (a credit without a person); role and group
+// are lowercased for stable matching, and an absent role stays "" rather than
+// being defaulted (the spec default reads as "host", left to consumers).
+func normalizePersons(ps []pcPerson) []model.FeedPerson {
+	if len(ps) == 0 {
+		return nil
+	}
+	out := make([]model.FeedPerson, 0, len(ps))
+	for i := range ps {
+		name := strings.TrimSpace(ps[i].Name)
+		if name == "" {
+			continue
+		}
+		out = append(out, model.FeedPerson{
+			Name:  name,
+			Role:  strings.ToLower(strings.TrimSpace(ps[i].Role)),
+			Group: strings.ToLower(strings.TrimSpace(ps[i].Group)),
+			Img:   strings.TrimSpace(ps[i].Img),
+			Href:  strings.TrimSpace(ps[i].Href),
+		})
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// normalizeSoundbites converts <podcast:soundbite> tags into clip windows, in
+// feed order. startTime/duration are decimal seconds, converted to whole
+// milliseconds. A malformed entry (unparseable numbers, a negative start, or a
+// nonpositive duration) is dropped rather than stored as a bogus span, the same
+// drop-malformed-entries policy parseChapterDoc applies to a negative chapter
+// start.
+func normalizeSoundbites(sbs []pcSoundbite) []model.FeedSoundbite {
+	if len(sbs) == 0 {
+		return nil
+	}
+	// ParseFloat accepts "inf" and "nan" without error; the bound rejects inf (and
+	// any value whose ms conversion could overflow int64) and the IsNaN checks
+	// reject nan, which passes every ordered comparison.
+	const maxClipSec = float64(1 << 40)
+	out := make([]model.FeedSoundbite, 0, len(sbs))
+	for i := range sbs {
+		start, serr := strconv.ParseFloat(strings.TrimSpace(sbs[i].StartTime), 64)
+		dur, derr := strconv.ParseFloat(strings.TrimSpace(sbs[i].Duration), 64)
+		if serr != nil || derr != nil || math.IsNaN(start) || math.IsNaN(dur) ||
+			start < 0 || dur <= 0 || start > maxClipSec || dur > maxClipSec {
+			continue
+		}
+		out = append(out, model.FeedSoundbite{
+			StartMS:    int64(start * 1000),
+			DurationMS: int64(dur * 1000),
+			Title:      strings.TrimSpace(sbs[i].Title),
+		})
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // pubDateLayouts are the date formats podcast feeds use, tried in order. Only

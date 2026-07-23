@@ -22,6 +22,11 @@ const sampleFeed = `<?xml version="1.0" encoding="UTF-8"?>
     <itunes:image href="https://example.com/art.jpg"/>
     <itunes:category text="Technology"/>
     <podcast:guid>show-guid-001</podcast:guid>
+    <podcast:funding url="https://example.com/support">Support the show</podcast:funding>
+    <podcast:medium>Podcast</podcast:medium>
+    <podcast:person role="Host" group="Cast" img="https://example.com/jane.jpg" href="https://example.com/jane">Jane Host</podcast:person>
+    <podcast:person>Sam Producer</podcast:person>
+    <podcast:person role="guest">   </podcast:person>
     <item>
       <title>Episode One</title>
       <link>https://example.com/1</link>
@@ -36,6 +41,11 @@ const sampleFeed = `<?xml version="1.0" encoding="UTF-8"?>
       <enclosure url="https://example.com/1.mp3" length="123456" type="audio/mpeg"/>
       <podcast:transcript url="https://example.com/1.srt" type="application/srt"/>
       <podcast:transcript url="https://example.com/1.html" type="text/html"/>
+      <podcast:person role="Guest">Alex Guest</podcast:person>
+      <podcast:soundbite startTime="73.0" duration="60.5">The best bit</podcast:soundbite>
+      <podcast:soundbite startTime="-5" duration="10">negative start dropped</podcast:soundbite>
+      <podcast:soundbite startTime="10" duration="0">zero duration dropped</podcast:soundbite>
+      <podcast:soundbite startTime="abc" duration="10">unparseable dropped</podcast:soundbite>
     </item>
     <item>
       <title>Episode Two</title>
@@ -100,6 +110,65 @@ func TestParseFeed(t *testing.T) {
 	// Plain-seconds duration.
 	if feed.Episodes[1].DurationMS != 305*1000 {
 		t.Fatalf("e2 duration = %d", feed.Episodes[1].DurationMS)
+	}
+}
+
+func TestParseFeedPodcasting20Extras(t *testing.T) {
+	feed, err := ParseFeed([]byte(sampleFeed))
+	if err != nil {
+		t.Fatalf("ParseFeed: %v", err)
+	}
+	if feed.FundingURL != "https://example.com/support" || feed.FundingMessage != "Support the show" {
+		t.Fatalf("funding = %q / %q", feed.FundingURL, feed.FundingMessage)
+	}
+	// Medium is lowercased on parse.
+	if feed.Medium != "podcast" {
+		t.Fatalf("medium = %q", feed.Medium)
+	}
+	// The nameless third person tag is skipped; role/group are lowercased; the
+	// role-less credit keeps role "".
+	if len(feed.Persons) != 2 {
+		t.Fatalf("channel persons = %+v, want 2", feed.Persons)
+	}
+	jane := feed.Persons[0]
+	if jane.Name != "Jane Host" || jane.Role != "host" || jane.Group != "cast" ||
+		jane.Img != "https://example.com/jane.jpg" || jane.Href != "https://example.com/jane" {
+		t.Fatalf("jane = %+v", jane)
+	}
+	if feed.Persons[1].Name != "Sam Producer" || feed.Persons[1].Role != "" {
+		t.Fatalf("sam = %+v", feed.Persons[1])
+	}
+
+	e1 := feed.Episodes[0]
+	if len(e1.Persons) != 1 || e1.Persons[0].Name != "Alex Guest" || e1.Persons[0].Role != "guest" {
+		t.Fatalf("e1 persons = %+v", e1.Persons)
+	}
+	// The three malformed soundbites are dropped; the valid one converts to ms.
+	if len(e1.Soundbites) != 1 {
+		t.Fatalf("e1 soundbites = %+v, want 1", e1.Soundbites)
+	}
+	sb := e1.Soundbites[0]
+	if sb.StartMS != 73000 || sb.DurationMS != 60500 || sb.Title != "The best bit" {
+		t.Fatalf("soundbite = %+v", sb)
+	}
+	// The second episode carries no extras.
+	if len(feed.Episodes[1].Persons) != 0 || len(feed.Episodes[1].Soundbites) != 0 {
+		t.Fatalf("e2 extras should be empty: %+v", feed.Episodes[1])
+	}
+}
+
+func TestParseFeedMultipleFundingKeepsFirstWithURL(t *testing.T) {
+	feed, err := ParseFeed([]byte(`<rss xmlns:podcast="https://podcastindex.org/namespace/1.0"><channel>
+		<title>S</title>
+		<podcast:funding>no url here</podcast:funding>
+		<podcast:funding url="https://a/support">First</podcast:funding>
+		<podcast:funding url="https://b/support">Second</podcast:funding>
+	</channel></rss>`))
+	if err != nil {
+		t.Fatalf("ParseFeed: %v", err)
+	}
+	if feed.FundingURL != "https://a/support" || feed.FundingMessage != "First" {
+		t.Fatalf("funding = %q / %q, want the first tag with a url", feed.FundingURL, feed.FundingMessage)
 	}
 }
 

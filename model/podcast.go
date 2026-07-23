@@ -5,25 +5,31 @@ package model
 // conditional sync. RetentionKeep is the number of newest downloaded episodes to
 // keep; 0 keeps all.
 type Podcast struct {
-	ID            int64
-	PID           PID
-	FeedURL       string
-	IdentityKey   string
-	Title         string
-	SortKey       string
-	Author        string
-	Description   string
-	Link          string // show website
-	Language      string
-	Category      string
-	Explicit      bool
-	GUID          string // <podcast:guid> when published
-	ETag          string
-	LastModified  string
-	LastFetchedAt int64 // unix nanoseconds; 0 when never fetched
-	RetentionKeep int
-	AuthUser      string // basic-auth user; the password lives in the secret table
-	ImageURL      string // current feed image (ingested into the art store on sync)
+	ID          int64
+	PID         PID
+	FeedURL     string
+	IdentityKey string
+	Title       string
+	SortKey     string
+	Author      string
+	Description string
+	Link        string // show website
+	Language    string
+	Category    string
+	Explicit    bool
+	// Podcasting 2.0 channel extras: the show's funding link with its label text,
+	// and its declared medium (lowercased; podcast|music|audiobook|...), stored as
+	// published with no whitelist.
+	FundingURL     string
+	FundingMessage string
+	Medium         string
+	GUID           string // <podcast:guid> when published
+	ETag           string
+	LastModified   string
+	LastFetchedAt  int64 // unix nanoseconds; 0 when never fetched
+	RetentionKeep  int
+	AuthUser       string // basic-auth user; the password lives in the secret table
+	ImageURL       string // current feed image (ingested into the art store on sync)
 	// SourceType selects the acquisition provider and sync behavior: rss (an HTTP
 	// feed), youtube (an injected provider, feed_url is a channel/playlist URL), or
 	// manual (no feed to sync; episodes arrive via UpsertEpisode). Empty reads as
@@ -34,6 +40,9 @@ type Podcast struct {
 	// EpisodeCount and DownloadedCount are populated by list/detail reads, not stored.
 	EpisodeCount    int
 	DownloadedCount int
+	// Persons are the show-level <podcast:person> credits. Populated by the detail
+	// read (PodcastByPID), not the list.
+	Persons []FeedPerson
 }
 
 // EpisodeType classifies an episode within its feed.
@@ -86,11 +95,33 @@ type Episode struct {
 }
 
 // EpisodeDetail is the full read shape for one episode: the episode plus its
-// resolved play state and any stored chapters.
+// resolved play state, any stored chapters, and its Podcasting 2.0 extras.
+// Persons and Soundbites are detail-only so list reads stay one query.
 type EpisodeDetail struct {
 	Episode       *Episode
 	HasTranscript bool
 	Chapters      []Chapter
+	Persons       []FeedPerson
+	Soundbites    []FeedSoundbite
+}
+
+// FeedPerson is one <podcast:person> credit, at the channel (show) or item
+// (episode) level. Role and Group are lowercased on parse; an empty Role means
+// the feed left it unspecified (the spec default reads as "host").
+type FeedPerson struct {
+	Name  string
+	Role  string
+	Group string
+	Img   string // portrait URL
+	Href  string // profile/info URL
+}
+
+// FeedSoundbite is one <podcast:soundbite> clip of a feed item: a highlight
+// window into the episode audio.
+type FeedSoundbite struct {
+	StartMS    int64
+	DurationMS int64
+	Title      string // "" = use the episode title, per spec
 }
 
 // FeedEpisode is one episode parsed from a feed, before persistence. It is the
@@ -115,21 +146,27 @@ type FeedEpisode struct {
 	TranscriptType string
 	ChaptersURL    string
 	ImageURL       string
+	Persons        []FeedPerson
+	Soundbites     []FeedSoundbite
 }
 
 // Feed is a parsed podcast feed: channel metadata plus its episodes. It is what the
 // feed parser returns and what an UpsertFeed consumes.
 type Feed struct {
-	Title       string
-	Author      string
-	Description string
-	Link        string
-	Language    string
-	Category    string
-	Explicit    bool
-	GUID        string // <podcast:guid>
-	ImageURL    string
-	Episodes    []FeedEpisode
+	Title          string
+	Author         string
+	Description    string
+	Link           string
+	Language       string
+	Category       string
+	Explicit       bool
+	FundingURL     string // <podcast:funding> url (first tag carrying one)
+	FundingMessage string
+	Medium         string // <podcast:medium>, lowercased
+	GUID           string // <podcast:guid>
+	ImageURL       string
+	Persons        []FeedPerson // channel-level <podcast:person> credits
+	Episodes       []FeedEpisode
 }
 
 // OPMLEntry is one subscription line in an OPML document (feed URL plus optional
@@ -213,4 +250,15 @@ type PutTranscriptInput struct {
 	Format     string
 	Body       string
 	SourceURL  string
+}
+
+// Transcript is a stored episode transcript: the reduced searchable text plus
+// its provenance. Body is what the reducer kept (words, not timecodes), not the
+// original document; a client that renders cues keeps its own copy.
+type Transcript struct {
+	EpisodePID PID
+	Format     string // srt|vtt|json|text (the source document's format)
+	Body       string
+	SourceURL  string // where it was fetched from; "" for a caller-supplied body
+	CreatedAt  int64  // unix nanoseconds
 }
