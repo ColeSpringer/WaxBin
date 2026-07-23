@@ -62,7 +62,8 @@ func putTrack(t *testing.T, st *Store, libID int64, s trackSpec) *model.ScanItem
 		},
 		Track: model.Track{
 			Artist: s.artist, ArtistSort: model.SortKey(s.artist), Album: s.album,
-			AlbumArtist: s.albumArt, Composer: s.composer, Genre: s.genre,
+			AlbumArtist: s.albumArt, Composer: s.composer, ComposerSort: model.SortKey(s.composer),
+			Genre:            s.genre,
 			Genres:           identity.SplitGenres(s.genre),
 			Year:             s.year,
 			DiscTotal:        s.discTotal,

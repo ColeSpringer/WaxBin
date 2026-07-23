@@ -110,12 +110,23 @@ func (s *Store) SetItemChapters(ctx context.Context, itemPID model.PID, chapters
 	})
 }
 
-// SetItemArt sets (or, with empty bytes, clears) a track/book item's front cover from
-// raw image bytes, recording a lock on the "art" field by default so a scan does not
-// re-derive it from the file/directory. A locked cover is refused with CodeLocked
-// unless force is set.
-func (s *Store) SetItemArt(ctx context.Context, itemPID model.PID, raw []byte, lock, force bool) error {
+// SetItemArt sets (or, with empty bytes, clears) one artwork role on a track/book
+// item from raw image bytes. An empty role means the front cover. The "art"
+// field's lock story applies to the front role only: a lock is recorded (by
+// default) and enforced there, because front is the slot a scan re-derives from
+// the file/directory and the lock exists to protect against exactly that; the
+// other roles have no scan producer to guard against, so the lock and force
+// flags are ignored for them. A locked front cover is refused with CodeLocked
+// unless force is set. A clear deletes only the named role, leaving the item's
+// other slots intact.
+func (s *Store) SetItemArt(ctx context.Context, itemPID model.PID, role model.ArtRole, raw []byte, lock, force bool) error {
 	const op = "store.SetItemArt"
+	if role == "" {
+		role = model.ArtRoleFront
+	}
+	if !role.Valid() {
+		return waxerr.New(waxerr.CodeInvalid, op, "unknown art role: "+string(role))
+	}
 	var img *model.ArtImage
 	if len(raw) > 0 {
 		i, err := probeArtImage(raw)
@@ -124,6 +135,7 @@ func (s *Store) SetItemArt(ctx context.Context, itemPID model.PID, raw []byte, l
 		}
 		img = i
 	}
+	front := role == model.ArtRoleFront
 	return s.writeTx(ctx, func(tx *sql.Tx) error {
 		itemID, kind, err := itemIDKindByPIDTx(ctx, tx, itemPID, op)
 		if err != nil {
@@ -132,7 +144,7 @@ func (s *Store) SetItemArt(ctx context.Context, itemPID model.PID, raw []byte, l
 		if !curatableFieldForKind(kind, "art") {
 			return waxerr.New(waxerr.CodeInvalid, op, "art is not editable on a "+kind+" item")
 		}
-		if !force {
+		if front && !force {
 			locked, err := fieldLockedTx(ctx, tx, itemID, "art")
 			if err != nil {
 				return err
@@ -141,35 +153,41 @@ func (s *Store) SetItemArt(ctx context.Context, itemPID model.PID, raw []byte, l
 				return waxerr.New(waxerr.CodeLocked, op, "art is locked (use force to override)")
 			}
 		}
-		if img == nil {
-			// Clear the item's cover; the orphaned source becomes GC-able.
-			if _, err := tx.ExecContext(ctx, "DELETE FROM art_map WHERE entity_type='track' AND entity_id=?", itemID); err != nil {
-				return waxerr.Wrap(waxerr.CodeIO, op, err)
-			}
-		} else if _, err := attachArtTxChanged(ctx, tx, itemID, img); err != nil {
+		// One path for set and clear: replace this role's mapping (a nil image just
+		// deletes it). A cleared role's orphaned source becomes GC-able.
+		if err := setEntityArtRoleTx(ctx, tx, "track", itemID, string(role), img); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
-		if err := setCurationLockTx(ctx, tx, itemID, "art", lock); err != nil {
-			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		if front {
+			if err := setCurationLockTx(ctx, tx, itemID, "art", lock); err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
 		}
 		return appendChange(ctx, tx, "item", itemPID, model.OpUpdate)
 	})
 }
 
-// SetEntityArt sets a durable cover on a non-item entity (an album, artist, release
-// group, genre, or podcast) under the given role (default "front"), from raw image
-// bytes. This is what makes album art durable: a set album cover is a real art_map
-// row that ResolveArt prefers over the read-derived track cover, and that GCArt and
-// the derived-data checks already treat as live. Empty bytes clear the role. Entity
-// art takes no lock/force: the lock system is item-scoped (field_provenance), so a
-// non-item entity has nothing to lock; enrichment fills entity covers only when empty.
-func (s *Store) SetEntityArt(ctx context.Context, entityType model.ArtEntity, entityPID model.PID, role string, raw []byte) error {
+// SetEntityArt sets a durable image on a non-item entity (an album, artist, release
+// group, genre, or podcast) under one role, from raw image bytes. An empty role
+// means the front cover. This is what makes album art durable: a set album cover
+// is a real art_map row that ResolveArt prefers over the read-derived track cover,
+// and that GCArt and the derived-data checks already treat as live. Empty bytes
+// clear the role. The role must be in the closed model.ArtRole vocabulary; an
+// arbitrary string used to be accepted (and stored) here, and closing it is a
+// deliberate tightening so a typo cannot mint an unreachable slot. Entity art
+// takes no lock/force: the lock system is item-scoped (field_provenance), so a
+// non-item entity has nothing to lock; enrichment fills entity covers only when
+// empty.
+func (s *Store) SetEntityArt(ctx context.Context, entityType model.ArtEntity, entityPID model.PID, role model.ArtRole, raw []byte) error {
 	const op = "store.SetEntityArt"
 	if !entityType.Valid() {
 		return waxerr.New(waxerr.CodeInvalid, op, "unknown art entity type: "+string(entityType))
 	}
 	if role == "" {
-		role = "front"
+		role = model.ArtRoleFront
+	}
+	if !role.Valid() {
+		return waxerr.New(waxerr.CodeInvalid, op, "unknown art role: "+string(role))
 	}
 	var img *model.ArtImage
 	if len(raw) > 0 {
@@ -184,7 +202,7 @@ func (s *Store) SetEntityArt(ctx context.Context, entityType model.ArtEntity, en
 		if err != nil {
 			return err
 		}
-		if err := setEntityArtRoleTx(ctx, tx, string(entityType), entityID, role, img); err != nil {
+		if err := setEntityArtRoleTx(ctx, tx, string(entityType), entityID, string(role), img); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		// A track/episode entity is a playable_item; emit an item delta for it, else an
@@ -210,8 +228,8 @@ func setEntityArtRoleTx(ctx context.Context, tx *sql.Tx, entityType string, enti
 		return err
 	}
 	_, err := tx.ExecContext(ctx,
-		`INSERT OR IGNORE INTO art_map(entity_type, entity_id, source_hash, role, priority)
-		 VALUES (?,?,?,?,0)`, entityType, entityID, img.Hash, role)
+		`INSERT OR IGNORE INTO art_map(entity_type, entity_id, source_hash, role)
+		 VALUES (?,?,?,?)`, entityType, entityID, img.Hash, role)
 	return err
 }
 

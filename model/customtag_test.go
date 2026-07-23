@@ -26,7 +26,7 @@ func TestCanonicalTagKey(t *testing.T) {
 }
 
 func TestIsReservedTagKey(t *testing.T) {
-	reserved := []string{"TITLE", "ARTIST", "ISRC", "BARCODE", "MUSICBRAINZ_TRACKID", "PRODUCER", "NARRATOR", "WAXBIN_ITEM_PID", "REPLAYGAIN_TRACK_GAIN"}
+	reserved := []string{"TITLE", "ARTIST", "ISRC", "BARCODE", "MUSICBRAINZ_TRACKID", "PRODUCER", "NARRATOR", "COMPOSERSORT", "WAXBIN_ITEM_PID", "REPLAYGAIN_TRACK_GAIN"}
 	for _, k := range reserved {
 		if !IsReservedTagKey(k) {
 			t.Errorf("%q should be reserved", k)

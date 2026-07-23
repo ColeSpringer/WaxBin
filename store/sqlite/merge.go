@@ -360,27 +360,20 @@ func repointGenre(ctx context.Context, tx *sql.Tx, sid, lid int64, aff *affected
 	return int(n), nil
 }
 
-// repointArtMap resolves the loser's art_map rows (polymorphic, no FK). The
-// survivor keeps its own art when it has any: the art_map primary key is
-// (entity_type, entity_id, source_hash), so a blind re-point would move the
-// loser's DIFFERENT-hash covers onto the survivor too, leaving it with several
-// front covers (ResolveArt then picks by rowid, so the survivor could display the
-// loser's cover) plus GC-immune extras. So only inherit the loser's art when the
-// survivor has none for this entity; otherwise drop the loser's maps and let GCArt
-// reclaim the now-unreferenced sources.
+// repointArtMap resolves the loser's art_map rows (polymorphic, no FK) per role:
+// the survivor keeps every role it already fills and inherits the loser's rows
+// only for the roles it lacks. The art_map primary key is (entity_type,
+// entity_id, role), so the UPDATE OR IGNORE lands each loser row exactly when
+// the survivor has no image in that role; a filled slot conflicts, is skipped by
+// the IGNORE, and is then dropped with the rest of the loser's remainder, whose
+// now-unreferenced sources GCArt reclaims. A merge can therefore fill the
+// survivor's missing back cover from the loser without ever displacing the
+// survivor's own front.
 func repointArtMap(ctx context.Context, tx *sql.Tx, entityType string, sid, lid int64) error {
-	var survivorHasArt int
-	if err := tx.QueryRowContext(ctx,
-		"SELECT COUNT(*) FROM art_map WHERE entity_type = ? AND entity_id = ?",
-		entityType, sid).Scan(&survivorHasArt); err != nil {
+	if _, err := tx.ExecContext(ctx,
+		"UPDATE OR IGNORE art_map SET entity_id = ? WHERE entity_type = ? AND entity_id = ?",
+		sid, entityType, lid); err != nil {
 		return err
-	}
-	if survivorHasArt == 0 {
-		if _, err := tx.ExecContext(ctx,
-			"UPDATE OR IGNORE art_map SET entity_id = ? WHERE entity_type = ? AND entity_id = ?",
-			sid, entityType, lid); err != nil {
-			return err
-		}
 	}
 	_, err := tx.ExecContext(ctx,
 		"DELETE FROM art_map WHERE entity_type = ? AND entity_id = ?", entityType, lid)

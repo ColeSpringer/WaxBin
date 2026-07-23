@@ -122,9 +122,9 @@ func (m *mutator) SetChapters(ctx context.Context, pid model.PID, chapters []mod
 	return m.lib.SetChapters(ctx, pid, chapters, lock, force)
 }
 
-func (m *mutator) SetItemArt(ctx context.Context, pid model.PID, data []byte, lock, force, writeBack bool) error {
+func (m *mutator) SetItemArt(ctx context.Context, pid model.PID, role model.ArtRole, data []byte, lock, force, writeBack bool) error {
 	if m.px != nil {
-		res, err := m.px.SetItemArt(ctx, pid, data, lock, force, writeBack)
+		res, err := m.px.SetItemArt(ctx, pid, role, data, lock, force, writeBack)
 		if err != nil {
 			return err
 		}
@@ -135,10 +135,10 @@ func (m *mutator) SetItemArt(ctx context.Context, pid model.PID, data []byte, lo
 		}
 		return nil
 	}
-	return m.lib.SetItemArt(ctx, pid, data, lock, force, writeBack)
+	return m.lib.SetItemArt(ctx, pid, role, data, lock, force, writeBack)
 }
 
-func (m *mutator) SetEntityArt(ctx context.Context, entityType model.ArtEntity, entityPID model.PID, role string, data []byte, writeBack bool) error {
+func (m *mutator) SetEntityArt(ctx context.Context, entityType model.ArtEntity, entityPID model.PID, role model.ArtRole, data []byte, writeBack bool) error {
 	if m.px != nil {
 		res, err := m.px.SetEntityArt(ctx, entityType, entityPID, role, data, writeBack)
 		if err != nil {

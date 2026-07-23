@@ -86,16 +86,19 @@ type Track struct {
 	Album       string
 	AlbumArtist string
 	Composer    string
-	Comment     string
-	TrackNo     int
-	TrackTotal  int
-	DiscNo      int
-	DiscTotal   int
-	Year        int
-	Genre       string   // joined display of Genres (the denormalized column)
-	Genres      []string // individual genres, resolved into item_genre links
-	Compilation bool     // multi-artist release; uses the Various Artists layout
-	ISRC        string
+	// ComposerSort is the composer's collation key, derived like ArtistSort: a
+	// tagged COMPOSERSORT wins as input, else it is generated from the composer.
+	ComposerSort string
+	Comment      string
+	TrackNo      int
+	TrackTotal   int
+	DiscNo       int
+	DiscTotal    int
+	Year         int
+	Genre        string   // joined display of Genres (the denormalized column)
+	Genres       []string // individual genres, resolved into item_genre links
+	Compilation  bool     // multi-artist release; uses the Various Artists layout
+	ISRC         string
 
 	// External identifiers anchor MBID-first entity identity and enrichment
 	// lookups. MBID is the recording id (kept for back-compat); the
@@ -158,6 +161,7 @@ type Tags struct {
 	ArtistSort      string
 	AlbumSort       string
 	AlbumArtistSort string
+	ComposerSort    string
 
 	// External identifiers (MBID-first identity + enrichment fast-path).
 	MBID             string // MusicBrainz recording id
@@ -258,7 +262,12 @@ type ItemView struct {
 	Year        int
 	Genre       string
 	Compilation bool // a multi-artist compilation (drives Various Artists layout)
-	DurationMS  int64
+	// Composer and its collation key, populated for track items (empty for
+	// books/episodes; a book's narrator-in-COMPOSER convention is handled at scan
+	// classification, not surfaced here).
+	Composer     string
+	ComposerSort string
+	DurationMS   int64
 
 	// Audiobook fields, populated for book items (empty for tracks). Author maps
 	// onto Artist for the shared read/organize paths; these carry the extras the

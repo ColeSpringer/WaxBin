@@ -41,11 +41,14 @@ type itemView struct {
 	Disc        int    `json:"disc,omitempty"`
 	Year        int    `json:"year,omitempty"`
 	Genre       string `json:"genre,omitempty"`
-	Source      string `json:"source,omitempty"`
-	DurationMS  int64  `json:"durationMs,omitempty"`
-	Codec       string `json:"codec,omitempty"`
-	Path        string `json:"path,omitempty"`
-	FilePID     string `json:"filePid,omitempty"`
+	// Composer and its collation key, present for track items.
+	Composer     string `json:"composer,omitempty"`
+	ComposerSort string `json:"composerSort,omitempty"`
+	Source       string `json:"source,omitempty"`
+	DurationMS   int64  `json:"durationMs,omitempty"`
+	Codec        string `json:"codec,omitempty"`
+	Path         string `json:"path,omitempty"`
+	FilePID      string `json:"filePid,omitempty"`
 	// A virtual track (a cue TRACK of a single-file rip) plays only one window within
 	// the shared file, and virtual marks it. The window arrives in both coordinate
 	// systems: startFrames/endFrames are CD frames (75/sec), the stored truth a
@@ -73,7 +76,8 @@ func toItemView(v *model.ItemView) itemView {
 	return itemView{
 		PID: string(v.PID), Kind: string(v.Kind), State: string(v.State), Title: v.Title,
 		Artist: v.Artist, AlbumArtist: v.AlbumArtist, Album: v.Album, Track: v.TrackNo,
-		Disc: v.DiscNo, Year: v.Year, Genre: v.Genre, Source: string(v.Source),
+		Disc: v.DiscNo, Year: v.Year, Genre: v.Genre,
+		Composer: v.Composer, ComposerSort: v.ComposerSort, Source: string(v.Source),
 		DurationMS: v.DurationMS, Codec: v.Codec, Path: v.DisplayPath, FilePID: string(v.FilePID),
 		Virtual: v.Virtual, StartFrames: v.StartFrames, EndFrames: v.EndFrames,
 		StartMS: v.StartMS, EndMS: v.EndMS,
@@ -149,6 +153,7 @@ type bookView struct {
 	Title           string         `json:"title"`
 	Subtitle        string         `json:"subtitle,omitempty"`
 	Authors         []string       `json:"authors,omitempty"`
+	AuthorSort      string         `json:"authorSort,omitempty"`
 	Narrators       []string       `json:"narrators,omitempty"`
 	Translators     []string       `json:"translators,omitempty"`
 	Editors         []string       `json:"editors,omitempty"`
@@ -170,7 +175,8 @@ type bookView struct {
 func toBookView(d *model.BookDetail) bookView {
 	v := bookView{
 		PID: string(d.Item.PID), Title: d.Item.Title, Subtitle: d.Subtitle,
-		Authors: d.Authors, Narrators: d.Narrators, Translators: d.Translators, Editors: d.Editors,
+		Authors: d.Authors, AuthorSort: d.Item.AuthorSort,
+		Narrators: d.Narrators, Translators: d.Translators, Editors: d.Editors,
 		Series: d.Series, SeriesPID: string(d.SeriesPID), SeriesSeq: d.SeriesSeq,
 		Year: d.Item.Year, Publisher: d.Publisher, ASIN: d.ASIN, ISBN: d.ISBN, Edition: d.Edition,
 		Abridged: d.Abridged, Description: d.Description, TotalDurationMS: d.TotalDurationMS,

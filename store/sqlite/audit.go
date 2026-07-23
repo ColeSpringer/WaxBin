@@ -187,20 +187,26 @@ func plural(n int, noun string) string {
 }
 
 // itemsMissingArtWhere is the shared predicate for the missing-art count and
-// sample: a present track/book with no cover anywhere in the v1.0 art chain
+// sample: a present track/book with no front cover anywhere in the v1.0 art chain
 // (its own map, its album's direct or track-derived cover, or the release-group
-// cover enrichment populates). Artist/genre rungs have no v1.0 art source, so
-// they are not checked (they are always empty and would false-positive nothing).
+// cover enrichment populates). The role filter matters now that an entity can
+// carry several slots: a lone booklet scan is not a cover, so it must not hide
+// the item from this report. That is the same front-only predicate the has_art
+// query field applies (fields.go). Artist/genre rungs have no v1.0 art source, so they
+// are not checked (they are always empty and would false-positive nothing).
+// These arms stay track/book-scoped with the literal 'track' slot; the
+// kind-switched slot expression (itemArtSlotExpr) exists for predicates that
+// also cover episodes.
 const itemsMissingArtWhere = `
 	FROM playable_item pi
 	LEFT JOIN track t ON t.item_id = pi.id
 	LEFT JOIN album al ON al.id = t.album_id
 	WHERE pi.kind IN ('track','book') AND pi.state = 'present'
-	  AND NOT EXISTS (SELECT 1 FROM art_map am WHERE am.entity_type='track' AND am.entity_id=pi.id)
-	  AND NOT EXISTS (SELECT 1 FROM art_map am WHERE am.entity_type='album' AND am.entity_id=t.album_id)
+	  AND NOT EXISTS (SELECT 1 FROM art_map am WHERE am.entity_type='track' AND am.entity_id=pi.id AND am.role='front')
+	  AND NOT EXISTS (SELECT 1 FROM art_map am WHERE am.entity_type='album' AND am.entity_id=t.album_id AND am.role='front')
 	  AND NOT EXISTS (SELECT 1 FROM art_map am JOIN track t2 ON t2.item_id=am.entity_id
-			WHERE am.entity_type='track' AND t2.album_id=t.album_id)
-	  AND NOT EXISTS (SELECT 1 FROM art_map am WHERE am.entity_type='release_group' AND am.entity_id=al.release_group_id)`
+			WHERE am.entity_type='track' AND am.role='front' AND t2.album_id=t.album_id)
+	  AND NOT EXISTS (SELECT 1 FROM art_map am WHERE am.entity_type='release_group' AND am.entity_id=al.release_group_id AND am.role='front')`
 
 // ItemsMissingArt returns a sample (up to limit) of present items with no
 // resolvable cover, plus the total count.

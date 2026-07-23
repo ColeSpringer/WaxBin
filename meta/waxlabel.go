@@ -143,6 +143,7 @@ func tagsFromDoc(doc *waxlabel.Document, fields tag.Tags) model.Tags {
 		ArtistSort:      strings.TrimSpace(fields.ArtistSort),
 		AlbumSort:       strings.TrimSpace(fields.AlbumSort),
 		AlbumArtistSort: strings.TrimSpace(fields.AlbumArtistSort),
+		ComposerSort:    strings.TrimSpace(fields.ComposerSort),
 
 		MBID:             strings.TrimSpace(fields.MusicBrainz.RecordingID),
 		MBReleaseID:      strings.TrimSpace(fields.MusicBrainz.ReleaseID),

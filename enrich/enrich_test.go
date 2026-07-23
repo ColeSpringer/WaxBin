@@ -254,7 +254,7 @@ func TestEnrichHappyPath(t *testing.T) {
 
 	// Cover art resolves at the release-group level.
 	rgPID := model.PID(scalarStr(t, db, "SELECT pid FROM release_group WHERE title='Wish You Were Here'"))
-	blob, err := st.ResolveArt(ctx, model.EntityRef{Type: model.ArtReleaseGroup, PID: rgPID}, 0)
+	blob, err := st.ResolveArt(ctx, model.EntityRef{Type: model.ArtReleaseGroup, PID: rgPID}, model.ArtRoleFront, 0)
 	if err != nil {
 		t.Fatalf("ResolveArt(release_group): %v", err)
 	}

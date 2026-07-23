@@ -56,8 +56,8 @@ exit codes (`waxbin exit-codes`).
 | Area | Commands |
 | --- | --- |
 | **Lifecycle** | `init`, `scan`, `analyze`, `watch`, `serve`, `doctor`, `jobs`, `version`, `exit-codes` |
-| **Read / browse** | `query`/`ls` (incl. `--tag KEY=VALUE`, `--tag-contains`, `--tag-present`/`--tag-missing`, `--limit-mode`/`--seed`), `browse <list>`, `facet --group-by` (incl. `tag.<KEY>`, `library`), `search` (incl. `--max-candidates`, `--library`), `show`, `art`, `lyrics`, `stats [--year N]`, `provenance`, `lock`/`unlock`, `entity info` |
-| **Curation & editing** | `edit` (incl. `--batch`), `entity`, `credit`, `tag`/`tag keys`, `lyrics set`, `chapters`, `art set` |
+| **Read / browse** | `query`/`ls` (incl. `--tag KEY=VALUE`, `--tag-contains`, `--tag-present`/`--tag-missing`, `--limit-mode`/`--seed`), `browse <list>`, `facet --group-by` (incl. `tag.<KEY>`, `library`), `search` (incl. `--max-candidates`, `--library`), `show`, `art` (incl. `--role`), `lyrics`, `stats [--year N]`, `provenance`, `lock`/`unlock`, `entity info` |
+| **Curation & editing** | `edit` (incl. `--batch`), `entity`, `credit`, `tag`/`tag keys`, `lyrics set`, `chapters`, `art set` (incl. `--role`) |
 | **Ingest / organize** | `inbox`, `import`, `organize`, `profiles` |
 | **Deletion / repair** | `trash`, `rm [--permanent]`, `merge`, `audit`, `diagnostics`, `upgrade` |
 | **Portability** | `backup`, `restore`, `export`, `manifest`, `rebuild` |

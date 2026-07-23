@@ -230,7 +230,7 @@ func seedArt(t *testing.T, st *Store, hash, entityType string, entityID int64) {
 		t.Fatal(err)
 	}
 	if _, err := st.write.ExecContext(ctx,
-		"INSERT INTO art_map(entity_type, entity_id, source_hash, role, priority) VALUES (?,?,?,'front',0)",
+		"INSERT INTO art_map(entity_type, entity_id, source_hash, role) VALUES (?,?,?,'front')",
 		entityType, entityID, hash); err != nil {
 		t.Fatal(err)
 	}
@@ -299,6 +299,49 @@ func TestMergeArtistInheritsArtWhenSurvivorHasNone(t *testing.T) {
 	}
 	if got := artHashes(t, st, "artist", sID); len(got) != 1 || got[0] != "hashLose" {
 		t.Errorf("survivor art = %v, want inherited [hashLose]", got)
+	}
+}
+
+// seedArtRole is seedArt for a specific role slot.
+func seedArtRole(t *testing.T, st *Store, hash, entityType string, entityID int64, role string) {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := st.write.ExecContext(ctx,
+		"INSERT OR IGNORE INTO art_source(hash, format, size, data, created_at) VALUES (?,?,?,?,1)",
+		hash, "jpeg", 3, []byte("img")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.write.ExecContext(ctx,
+		"INSERT INTO art_map(entity_type, entity_id, source_hash, role) VALUES (?,?,?,?)",
+		entityType, entityID, hash, role); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestMergeArtInheritsPerRole verifies the per-role inherit: the survivor keeps
+// the roles it fills and gains only the loser's roles it lacks, in one merge.
+func TestMergeArtInheritsPerRole(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/a/1.flac", essence: "e1", content: "c1", title: "One", artist: "Beatles", album: "A"})
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/b/2.flac", essence: "e2", content: "c2", title: "Two", artist: "The Beatles", album: "B"})
+	survivor, loser := entityPID(t, st, "artist", "The Beatles"), entityPID(t, st, "artist", "Beatles")
+	sID, lID := artistID(t, st, "The Beatles"), artistID(t, st, "Beatles")
+
+	// Survivor: front only. Loser: a competing front plus a background the
+	// survivor lacks.
+	seedArtRole(t, st, "hashSurvFront", "artist", sID, "front")
+	seedArtRole(t, st, "hashLoseFront", "artist", lID, "front")
+	seedArtRole(t, st, "hashLoseBg", "artist", lID, "background")
+
+	if _, err := st.MergeEntity(ctx, model.MergeArtist, survivor, loser); err != nil {
+		t.Fatalf("merge: %v", err)
+	}
+	if got := artHashes(t, st, "artist", sID); len(got) != 2 || got[0] != "hashLoseBg" || got[1] != "hashSurvFront" {
+		t.Errorf("survivor art = %v, want its own front plus the inherited background", got)
+	}
+	if got := artHashes(t, st, "artist", lID); len(got) != 0 {
+		t.Errorf("loser art = %v, want none", got)
 	}
 }
 

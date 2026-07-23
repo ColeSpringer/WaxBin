@@ -11,6 +11,7 @@ CREATE TABLE track (
   album        TEXT    NOT NULL DEFAULT '',
   album_artist TEXT    NOT NULL DEFAULT '',
   composer     TEXT    NOT NULL DEFAULT '',
+  composer_sort TEXT   NOT NULL DEFAULT '',
   comment      TEXT    NOT NULL DEFAULT '',
   track_no     INTEGER,
   track_total  INTEGER,

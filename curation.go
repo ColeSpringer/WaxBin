@@ -7,6 +7,7 @@ import (
 	"github.com/colespringer/waxbin/meta"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/read"
+	"github.com/colespringer/waxbin/waxerr"
 )
 
 // This file exposes the structured-curation edit APIs (lyrics, chapters, artwork) on
@@ -26,13 +27,33 @@ func (l *Library) SetChapters(ctx context.Context, itemPID model.PID, chapters [
 	return l.store.SetItemChapters(ctx, itemPID, chapters, lock, force)
 }
 
-// SetItemArt sets (or, with empty bytes, clears) a track/book item's cover from raw
-// image bytes, locking the "art" field by default. With writeBack the cover is also
-// embedded into the item's backing file, or into every part of a multi-file book so an
-// external player sees the same cover on each part. A file that cannot be written is
-// reported through a *WriteBackError while the catalog edit stands.
-func (l *Library) SetItemArt(ctx context.Context, itemPID model.PID, raw []byte, lock, force, writeBack bool) error {
-	if err := l.store.SetItemArt(ctx, itemPID, raw, lock, force); err != nil {
+// SetItemArt sets (or, with empty bytes, clears) one artwork role on a track/book
+// item from raw image bytes. An empty role means the front cover, which locks the
+// "art" field by default (the lock guards the scan's cover re-derive; the other
+// roles have no scan producer, so lock/force are ignored for them). A clear
+// deletes only the named role. With writeBack the cover is also embedded into the
+// item's backing file, or into every part of a multi-file book so an external
+// player sees the same cover on each part; only the front cover has an embedded
+// representation, so writeBack with any other role is refused with CodeInvalid
+// before anything is written. A file that cannot be written is reported through a
+// *WriteBackError while the catalog edit stands.
+func (l *Library) SetItemArt(ctx context.Context, itemPID model.PID, role model.ArtRole, raw []byte, lock, force, writeBack bool) error {
+	if role == "" {
+		role = model.ArtRoleFront
+	}
+	// Validate the role before the write-back refusal below, so an unknown role
+	// gets the real diagnosis instead of advice to drop the write-back flag.
+	if !role.Valid() {
+		return waxerr.New(waxerr.CodeInvalid, "waxbin.SetItemArt", "unknown art role: "+string(role))
+	}
+	// The refusal happens before any write, because a half-applied case (catalog
+	// row committed, embed failed on every file) would otherwise be the normal
+	// outcome of this flag combination.
+	if writeBack && role != model.ArtRoleFront {
+		return waxerr.New(waxerr.CodeInvalid, "waxbin.SetItemArt",
+			"write-back embeds only the front cover; set role "+string(role)+" without --write-back")
+	}
+	if err := l.store.SetItemArt(ctx, itemPID, role, raw, lock, force); err != nil {
 		return err
 	}
 	if !writeBack {
@@ -41,13 +62,27 @@ func (l *Library) SetItemArt(ctx context.Context, itemPID model.PID, raw []byte,
 	return l.writeBackItemArt(ctx, itemPID, raw)
 }
 
-// SetEntityArt sets a durable cover on a non-item entity (album, artist, release
-// group, genre, or podcast) under the given role (default "front"). This makes album
-// art durable: ResolveArt prefers it over the read-derived track cover. Entity art
-// takes no lock/force (the lock system is item-scoped). With writeBack an album cover is
-// also embedded into every member track's file; other entity covers stay catalog-only
-// on disk (they have no single natural file target).
-func (l *Library) SetEntityArt(ctx context.Context, entityType model.ArtEntity, entityPID model.PID, role string, raw []byte, writeBack bool) error {
+// SetEntityArt sets a durable image on a non-item entity (album, artist, release
+// group, genre, or podcast) under one role (empty = front; the closed
+// model.ArtRole vocabulary, validated by the store). This makes album art durable:
+// ResolveArt prefers it over the read-derived track cover. Entity art takes no
+// lock/force (the lock system is item-scoped). With writeBack an album front cover
+// is also embedded into every member track's file; other entity covers stay
+// catalog-only on disk (they have no single natural file target), and a non-front
+// role is refused with writeBack for the same reason an item's is.
+func (l *Library) SetEntityArt(ctx context.Context, entityType model.ArtEntity, entityPID model.PID, role model.ArtRole, raw []byte, writeBack bool) error {
+	if role == "" {
+		role = model.ArtRoleFront
+	}
+	// Same ordering as SetItemArt: an unknown role reports itself, not the
+	// write-back restriction.
+	if !role.Valid() {
+		return waxerr.New(waxerr.CodeInvalid, "waxbin.SetEntityArt", "unknown art role: "+string(role))
+	}
+	if writeBack && role != model.ArtRoleFront {
+		return waxerr.New(waxerr.CodeInvalid, "waxbin.SetEntityArt",
+			"write-back embeds only the front cover; set role "+string(role)+" without --write-back")
+	}
 	if err := l.store.SetEntityArt(ctx, entityType, entityPID, role, raw); err != nil {
 		return err
 	}

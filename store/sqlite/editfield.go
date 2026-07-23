@@ -16,14 +16,14 @@ import (
 // trackEditFields are the fields editable on a track item.
 var trackEditFields = map[string]bool{
 	"title": true, "artist": true, "album_artist": true, "album": true,
-	"composer": true, "comment": true, "genre": true, "year": true,
+	"composer": true, "composer_sort": true, "comment": true, "genre": true, "year": true,
 	"track_no": true, "disc_no": true,
 	"isrc": true, "mbid": true, "compilation": true,
 }
 
 // bookEditFields are the fields editable on a book item.
 var bookEditFields = map[string]bool{
-	"title": true, "author": true, "narrator": true, "series": true,
+	"title": true, "author": true, "author_sort": true, "narrator": true, "series": true,
 	"subtitle": true, "genre": true, "year": true,
 	"asin": true, "isbn": true, "publisher": true, "edition": true,
 	"description": true, "mbid": true,
@@ -362,8 +362,9 @@ func editTrackFieldsTx(ctx context.Context, tx *sql.Tx, itemID int64, fields []s
 	if err != nil {
 		return err
 	}
+	origComposerSort := tr.ComposerSort
 
-	var touchTitle, touchTrack, touchEntities bool
+	var touchTitle, touchTrack, touchEntities, editedComposer, editedComposerSort bool
 	newTitle := title
 	for _, f := range fields {
 		if f == "title" {
@@ -375,8 +376,25 @@ func editTrackFieldsTx(ctx context.Context, tx *sql.Tx, itemID int64, fields []s
 			return err
 		}
 		touchTrack = true
+		editedComposer = editedComposer || f == "composer"
+		editedComposerSort = editedComposerSort || f == "composer_sort"
 		if editEntityFields[f] {
 			touchEntities = true
+		}
+	}
+
+	// A composer edit regenerates the derived composer_sort, but a locked sort the
+	// edit did not name is curated state the regeneration must not clobber. The lock
+	// validation above checks only the target fields, so probe the side-written one
+	// here and restore it. An explicitly edited composer_sort passed that validation
+	// (or was forced), so the edit wins.
+	if editedComposer && !editedComposerSort {
+		locked, err := fieldLockedTx(ctx, tx, itemID, "composer_sort")
+		if err != nil {
+			return err
+		}
+		if locked {
+			tr.ComposerSort = origComposerSort
 		}
 	}
 
@@ -430,8 +448,9 @@ func editBookFieldsTx(ctx context.Context, tx *sql.Tx, itemID int64, fields []st
 	if err != nil {
 		return err
 	}
+	origAuthorSort := b.AuthorSort
 
-	var touchTitle, touchBook bool
+	var touchTitle, touchBook, editedAuthor, editedAuthorSort bool
 	newTitle := title
 	for _, f := range fields {
 		if f == "title" {
@@ -443,6 +462,23 @@ func editBookFieldsTx(ctx context.Context, tx *sql.Tx, itemID int64, fields []st
 			return err
 		}
 		touchBook = true
+		editedAuthor = editedAuthor || f == "author"
+		editedAuthorSort = editedAuthorSort || f == "author_sort"
+	}
+
+	// An author edit clears author_sort so upsertBook recomputes it, but a locked
+	// sort the edit did not name is curated state that must survive the re-derive.
+	// The lock validation above checks only the target fields, so probe the
+	// side-cleared one here and restore it (the composer_sort probe in
+	// editTrackFieldsTx is the same pattern).
+	if editedAuthor && !editedAuthorSort {
+		locked, err := fieldLockedTx(ctx, tx, itemID, "author_sort")
+		if err != nil {
+			return err
+		}
+		if locked {
+			b.AuthorSort = origAuthorSort
+		}
 	}
 
 	if touchTitle {
@@ -489,7 +525,22 @@ func applyTrackEdit(tr *model.Track, field, value, op string) error {
 	case "album":
 		tr.Album = value
 	case "composer":
+		// A composer edit regenerates the derived sort (like the artist case above).
+		// When composer_sort is locked and not itself edited, editTrackFieldsTx
+		// restores the locked value after the apply loop.
 		tr.Composer = value
+		tr.ComposerSort = model.SortKey(value)
+	case "composer_sort":
+		// The literal value is stored (the lock is what makes it durable across an
+		// unlocked rescan, which folds the tag through SortKey). An empty value
+		// clears the override, reverting to the key derived from the composer; the
+		// sorted field order applies "composer" first, so a combined edit derives
+		// from the new composer.
+		if value == "" {
+			tr.ComposerSort = model.SortKey(tr.Composer)
+		} else {
+			tr.ComposerSort = value
+		}
 	case "comment":
 		tr.Comment = value
 	case "genre":
@@ -541,9 +592,19 @@ func applyTrackEdit(tr *model.Track, field, value, op string) error {
 func applyBookEdit(b *model.Book, field, value, op string) error {
 	switch field {
 	case "author":
+		// Clearing the sort lets upsertBook recompute it from the new author. When
+		// author_sort is locked and not itself edited, editBookFieldsTx restores the
+		// locked value after the apply loop.
 		b.Authors = identity.SplitCredits(value)
 		b.Author = value
-		b.AuthorSort = "" // recomputed from the new author display by upsertBook
+		b.AuthorSort = ""
+	case "author_sort":
+		// The literal value is stored (the lock is what makes it durable across an
+		// unlocked rescan, which folds the ALBUMARTISTSORT tag through SortKey). An
+		// empty value clears the override and upsertBook recomputes SortKey(author);
+		// the sorted field order applies "author" first, so a combined edit derives
+		// from the new author.
+		b.AuthorSort = value
 	case "narrator":
 		b.Narrators = identity.SplitCredits(value)
 		b.Narrator = strings.Join(b.Narrators, ", ")
@@ -663,10 +724,10 @@ func loadTrackForEditTx(ctx context.Context, tx *sql.Tx, itemID int64) (model.Tr
 	var trackNo, trackTotal, discNo, discTotal, year sql.NullInt64
 	var compilation int
 	var mbid sql.NullString
-	err := tx.QueryRowContext(ctx, `SELECT artist, artist_sort, album, album_artist, composer,
+	err := tx.QueryRowContext(ctx, `SELECT artist, artist_sort, album, album_artist, composer, composer_sort,
 		comment, track_no, track_total, disc_no, disc_total, year, genre, compilation, isrc, mbid
 		FROM track WHERE item_id = ?`, itemID).Scan(
-		&tr.Artist, &tr.ArtistSort, &tr.Album, &tr.AlbumArtist, &tr.Composer,
+		&tr.Artist, &tr.ArtistSort, &tr.Album, &tr.AlbumArtist, &tr.Composer, &tr.ComposerSort,
 		&tr.Comment, &trackNo, &trackTotal, &discNo, &discTotal, &year, &tr.Genre, &compilation, &tr.ISRC, &mbid)
 	if errors.Is(err, sql.ErrNoRows) {
 		return tr, "", nil, waxerr.New(waxerr.CodeNotFound, "store.EditItemFields", "item has no track row")

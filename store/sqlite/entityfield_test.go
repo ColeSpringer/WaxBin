@@ -283,7 +283,7 @@ func TestHasArtAcrossKinds(t *testing.T) {
 	// album leaves its own cover absent, which is exactly what has_art exists
 	// to find.
 	albumPID := scalarStr(t, st, "SELECT pid FROM album WHERE title = ?", "Al")
-	if err := st.SetEntityArt(ctx, model.ArtAlbum, model.PID(albumPID), "front", tinyPNG(t)); err != nil {
+	if err := st.SetEntityArt(ctx, model.ArtAlbum, model.PID(albumPID), model.ArtRoleFront, tinyPNG(t)); err != nil {
 		t.Fatalf("set album art: %v", err)
 	}
 	if n := countWhere(t, st, "has_art", query.OpIs, 0); n != 2 {
@@ -326,10 +326,11 @@ func TestHasLyricsField(t *testing.T) {
 }
 
 // TestPresenceFieldPlansSeekIndexes is the EXPLAIN sanity check: the has_art
-// probe must seek the art_map entity index (the CASE'd entity_type still seeks,
-// with the key computed per row) and has_lyrics must seek the lyrics rowid PK,
-// with neither table scanned. Loose string matching, since plan wording varies
-// by SQLite version.
+// probe must seek art_map's primary key (the CASE'd entity_type still seeks,
+// with the key computed per row; the (entity_type, entity_id, role) PK covers
+// the whole probe) and has_lyrics must seek the lyrics rowid PK, with neither
+// table scanned. Loose string matching, since plan wording varies by SQLite
+// version.
 func TestPresenceFieldPlansSeekIndexes(t *testing.T) {
 	st, _ := entityFixture(t)
 	ctx := context.Background()
@@ -361,8 +362,10 @@ func TestPresenceFieldPlansSeekIndexes(t *testing.T) {
 		t.Fatalf("plan rows: %v", err)
 	}
 	plan := strings.Join(details, "\n")
-	if !strings.Contains(plan, "art_map_entity") {
-		t.Errorf("has_art probe does not use the art_map entity index:\n%s", plan)
+	// The PK autoindex name is a SQLite implementation detail; assert a SEARCH on
+	// art_map keyed by entity_type rather than the index's exact name.
+	if !strings.Contains(plan, "SEARCH amq") || !strings.Contains(plan, "entity_type=?") {
+		t.Errorf("has_art probe does not seek the art_map primary key:\n%s", plan)
 	}
 	for _, d := range details {
 		if strings.Contains(d, "SCAN") && (strings.Contains(d, "art_map") || strings.Contains(d, "lyrics")) {

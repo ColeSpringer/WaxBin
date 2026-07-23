@@ -192,7 +192,13 @@ func (l *Library) proxyHandlers() map[string]proxy.Handler {
 			if err != nil {
 				return nil, err
 			}
-			artErr := l.SetItemArt(ctx, model.PID(p.ItemPID), p.Data, p.Lock, p.Force, p.WriteBack)
+			// The wire carries a string; parse at the boundary ("" = front) so an
+			// unknown role rejects here rather than minting an unreachable slot.
+			role, ok := model.ParseArtRole(p.Role)
+			if !ok {
+				return nil, waxerr.New(waxerr.CodeInvalid, "serve.set_item_art", "unknown art role: "+p.Role)
+			}
+			artErr := l.SetItemArt(ctx, model.PID(p.ItemPID), role, p.Data, p.Lock, p.Force, p.WriteBack)
 			// A write-back failure is a result, not a transport error (the catalog edit stands).
 			var wbErr *WriteBackError
 			if errors.As(artErr, &wbErr) {
@@ -208,7 +214,11 @@ func (l *Library) proxyHandlers() map[string]proxy.Handler {
 			if err != nil {
 				return nil, err
 			}
-			artErr := l.SetEntityArt(ctx, model.ArtEntity(p.EntityType), model.PID(p.EntityPID), p.Role, p.Data, p.WriteBack)
+			role, ok := model.ParseArtRole(p.Role)
+			if !ok {
+				return nil, waxerr.New(waxerr.CodeInvalid, "serve.set_entity_art", "unknown art role: "+p.Role)
+			}
+			artErr := l.SetEntityArt(ctx, model.ArtEntity(p.EntityType), model.PID(p.EntityPID), role, p.Data, p.WriteBack)
 			var wbErr *WriteBackError
 			if errors.As(artErr, &wbErr) {
 				return proxy.SetEntityArtResult{WriteBackFailures: toProxyFailures(wbErr.Failures)}, nil

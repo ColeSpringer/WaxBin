@@ -26,8 +26,10 @@ import (
 
 // ProtocolVersion is the wire protocol version. A request carrying a different
 // version is rejected, so a newer client cannot silently misdrive an older
-// server.
-const ProtocolVersion = 1
+// server. Version 2 added SetItemArtParams.Role: a version-1 server would drop
+// the unknown field and store a back-cover set as a front-cover overwrite,
+// which is exactly the misdrive the check exists to stop.
+const ProtocolVersion = 2
 
 // Method names for the proxied operations: the fast request/response catalog
 // mutations, the reads a mutating command needs for its confirmation output, the
@@ -227,10 +229,12 @@ type SetChaptersParams struct {
 	Force    bool            `json:"force"`
 }
 
-// SetItemArtParams is the set_item_art request payload. Empty Data clears the cover.
-// The image bytes travel base64-encoded in the JSON frame.
+// SetItemArtParams is the set_item_art request payload. Empty Data clears the
+// named role; an empty Role means the front cover. The image bytes travel
+// base64-encoded in the JSON frame.
 type SetItemArtParams struct {
 	ItemPID   string `json:"itemPid"`
+	Role      string `json:"role,omitempty"`
 	Data      []byte `json:"data,omitempty"`
 	Lock      bool   `json:"lock"`
 	Force     bool   `json:"force"`

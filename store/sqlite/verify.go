@@ -184,13 +184,18 @@ WHERE COALESCE(gr.track_count, -1) <>
 // liveArtSourceQ selects the source hashes still reachable from a live entity: an
 // art_map row whose (entity_type, entity_id) exists in its table. A source not in
 // this set is referenced only by dead-entity map rows, or none, so it and its
-// thumbnails are reclaimable.
+// thumbnails are reclaimable. The arms mirror GCArt's slot list exactly
+// (verify <-> GC lockstep): the episode/podcast arms were missing for a while, so
+// a cover reachable only through a podcast slot counted as orphaned here while
+// GCArt correctly kept it, and orphan counts can only have dropped with the fix.
 const liveArtSourceQ = `SELECT source_hash FROM art_map m WHERE
     (m.entity_type='track'         AND EXISTS (SELECT 1 FROM playable_item e WHERE e.id = m.entity_id))
+ OR (m.entity_type='episode'       AND EXISTS (SELECT 1 FROM playable_item e WHERE e.id = m.entity_id))
  OR (m.entity_type='album'         AND EXISTS (SELECT 1 FROM album e         WHERE e.id = m.entity_id))
  OR (m.entity_type='release_group' AND EXISTS (SELECT 1 FROM release_group e WHERE e.id = m.entity_id))
  OR (m.entity_type='artist'        AND EXISTS (SELECT 1 FROM artist e        WHERE e.id = m.entity_id))
- OR (m.entity_type='genre'         AND EXISTS (SELECT 1 FROM genre e         WHERE e.id = m.entity_id))`
+ OR (m.entity_type='genre'         AND EXISTS (SELECT 1 FROM genre e         WHERE e.id = m.entity_id))
+ OR (m.entity_type='podcast'       AND EXISTS (SELECT 1 FROM podcast e       WHERE e.id = m.entity_id))`
 
 const releaseGroupRollupDriftQ = `
 SELECT COUNT(*) FROM release_group rg

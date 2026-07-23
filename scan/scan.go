@@ -717,12 +717,20 @@ func trackFromTags(tags model.Tags) model.Track {
 		sortInput = artistForSort
 	}
 	artistSort := model.SortKey(sortInput)
+	// The composer sort mirrors the artist handling: a tagged COMPOSERSORT wins as
+	// input, else the composer itself, folded through SortKey either way (an empty
+	// composer yields an empty key).
+	composerSortInput := tags.ComposerSort
+	if composerSortInput == "" {
+		composerSortInput = tags.Composer
+	}
 	return model.Track{
 		Artist:           tags.Artist,
 		ArtistSort:       artistSort,
 		Album:            tags.Album,
 		AlbumArtist:      tags.AlbumArtist,
 		Composer:         tags.Composer,
+		ComposerSort:     model.SortKey(composerSortInput),
 		Comment:          tags.Comment,
 		TrackNo:          tags.TrackNo,
 		TrackTotal:       tags.TrackTotal,

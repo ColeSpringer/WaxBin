@@ -71,8 +71,9 @@ const itemEffectiveDurationExpr = `CASE WHEN pf.start_frames IS NOT NULL ` +
 // select and the keyset-paginated select (which prepends pi.sort_key). The shared
 // artist/album_artist/album/year/genre columns COALESCE the track values with the
 // book's author/series/year and the podcast's title so one view shape serves all
-// three kinds; the audiobook columns are empty for tracks/episodes and the
-// podcast columns (season, pub_date) are empty otherwise. The duration is the
+// three kinds; the composer pair and the audiobook columns are empty for the
+// kinds that lack them, and the podcast columns (season, pub_date) are empty
+// otherwise. The duration is the
 // book's denormalized total_duration_ms (the sum of its parts), then the item's
 // effective duration (a virtual track's window, else the primary file's whole
 // duration for a downloaded episode or a track), then the feed-declared episode
@@ -85,6 +86,7 @@ const itemViewCols = `pi.pid, pi.kind, pi.state, pi.title,
 	COALESCE(NULLIF(t.album,''), srs.name, pod.title, ''),
 	t.track_no, t.disc_no, COALESCE(t.year, bk.year, ep.year),
 	COALESCE(NULLIF(t.genre,''), bk.genre, ''), t.compilation,
+	COALESCE(t.composer,''), COALESCE(t.composer_sort,''),
 	COALESCE(bk.author_sort,''), COALESCE(bk.narrator,''), COALESCE(srs.name,''),
 	COALESCE(bk.series_seq,''), COALESCE(bk.subtitle,''), COALESCE(bk.asin,''),
 	ep.season, ep.pub_date,
@@ -123,6 +125,7 @@ func itemViewDests(v *model.ItemView, n *itemViewNulls) []any {
 	return []any{
 		&v.PID, &v.Kind, &v.State, &v.Title,
 		&v.Artist, &v.AlbumArtist, &v.Album, &n.trackNo, &n.discNo, &n.year, &v.Genre, &n.compilation,
+		&v.Composer, &v.ComposerSort,
 		&v.AuthorSort, &v.Narrator, &v.Series, &v.SeriesSeq, &v.Subtitle, &v.ASIN,
 		&n.season, &n.pubDate, &v.Source,
 		&n.fpid, &n.fpath, &n.fdisp, &n.dur, &n.container, &n.codec, &n.sampleRate,
@@ -351,16 +354,17 @@ func upsertItem(ctx context.Context, tx *sql.Tx, item model.PlayableItem, now in
 
 func upsertTrack(ctx context.Context, tx *sql.Tx, itemID int64, tr model.Track) error {
 	_, err := tx.ExecContext(ctx, `INSERT INTO track
-		(item_id, artist, artist_sort, album, album_artist, composer, comment,
+		(item_id, artist, artist_sort, album, album_artist, composer, composer_sort, comment,
 		 track_no, track_total, disc_no, disc_total, year, genre, compilation, isrc, mbid)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(item_id) DO UPDATE SET
 			artist=excluded.artist, artist_sort=excluded.artist_sort, album=excluded.album,
-			album_artist=excluded.album_artist, composer=excluded.composer, comment=excluded.comment,
+			album_artist=excluded.album_artist, composer=excluded.composer,
+			composer_sort=excluded.composer_sort, comment=excluded.comment,
 			track_no=excluded.track_no, track_total=excluded.track_total, disc_no=excluded.disc_no,
 			disc_total=excluded.disc_total, year=excluded.year, genre=excluded.genre,
 			compilation=excluded.compilation, isrc=excluded.isrc, mbid=excluded.mbid`,
-		itemID, tr.Artist, tr.ArtistSort, tr.Album, tr.AlbumArtist, tr.Composer, tr.Comment,
+		itemID, tr.Artist, tr.ArtistSort, tr.Album, tr.AlbumArtist, tr.Composer, tr.ComposerSort, tr.Comment,
 		nullInt(tr.TrackNo), nullInt(tr.TrackTotal), nullInt(tr.DiscNo), nullInt(tr.DiscTotal),
 		nullInt(tr.Year), tr.Genre, boolInt(tr.Compilation), tr.ISRC, nullStr(tr.MBID))
 	return err

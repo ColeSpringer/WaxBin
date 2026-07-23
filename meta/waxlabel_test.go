@@ -261,6 +261,29 @@ func TestBookFieldsTrimUntrimmedNarrator(t *testing.T) {
 	}
 }
 
+// TestReadComposerSort verifies a tagged COMPOSERSORT projects into
+// Tags.ComposerSort and, the regression half, no longer lands as a custom tag:
+// the key is reserved now that the scalar composer_sort surface owns it, so
+// double-storing it in item_tag would shadow the modeled value.
+func TestReadComposerSort(t *testing.T) {
+	raw := testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
+		Title: "A Song", Artist: "Band", Album: "An Album", Composer: "The Composer",
+		TXXX: []testaudio.TXXXFrame{{Desc: "COMPOSERSORT", Value: "Composer, The"}},
+	})
+	p := writeTemp(t, "cs.mp3", raw)
+
+	fm, err := NewReader().Read(context.Background(), p)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if fm.Tags.ComposerSort != "Composer, The" {
+		t.Errorf("ComposerSort = %q, want the tagged sort name", fm.Tags.ComposerSort)
+	}
+	if _, ok := fm.Tags.Custom["COMPOSERSORT"]; ok {
+		t.Error("COMPOSERSORT still collected as a custom tag; the reserved-key filter must exclude it")
+	}
+}
+
 func TestParseSeries(t *testing.T) {
 	cases := []struct {
 		in, name, seq string

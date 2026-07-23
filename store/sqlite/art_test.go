@@ -59,7 +59,7 @@ func TestResolveArtOriginalAndThumbnail(t *testing.T) {
 	pid := putWithCover(t, st, lib.ID, "/lib/al/1.flac", "e1", cover)
 
 	// size 0 -> the original source image.
-	orig, err := st.ResolveArt(ctx, model.EntityRef{Type: model.ArtTrack, PID: pid}, 0)
+	orig, err := st.ResolveArt(ctx, model.EntityRef{Type: model.ArtTrack, PID: pid}, model.ArtRoleFront, 0)
 	if err != nil {
 		t.Fatalf("resolve original: %v", err)
 	}
@@ -71,7 +71,7 @@ func TestResolveArtOriginalAndThumbnail(t *testing.T) {
 	}
 
 	// size 40 -> a thumbnail scaled to fit (120x80 -> 40x27).
-	thumb, err := st.ResolveArt(ctx, model.EntityRef{Type: model.ArtTrack, PID: pid}, 40)
+	thumb, err := st.ResolveArt(ctx, model.EntityRef{Type: model.ArtTrack, PID: pid}, model.ArtRoleFront, 40)
 	if err != nil {
 		t.Fatalf("resolve thumb: %v", err)
 	}
@@ -100,7 +100,7 @@ func TestResolveArtFallbackChain(t *testing.T) {
 	pid2 := putWithCover(t, st, lib.ID, "/lib/al/2.flac", "e2", nil)
 
 	// Track 2 has no direct art, so resolution falls back to the album's art.
-	blob, err := st.ResolveArt(ctx, model.EntityRef{Type: model.ArtTrack, PID: pid2}, 0)
+	blob, err := st.ResolveArt(ctx, model.EntityRef{Type: model.ArtTrack, PID: pid2}, model.ArtRoleFront, 0)
 	if err != nil {
 		t.Fatalf("resolve fallback: %v", err)
 	}
@@ -114,14 +114,14 @@ func TestArtAttachedWithoutAudioChange(t *testing.T) {
 	ctx := context.Background()
 	// First scan: no cover.
 	pid := putWithCover(t, st, lib.ID, "/lib/al/1.flac", "e1", nil)
-	if _, err := st.ResolveArt(ctx, model.EntityRef{Type: model.ArtTrack, PID: pid}, 0); !waxerr.Is(err, waxerr.CodeNotFound) {
+	if _, err := st.ResolveArt(ctx, model.EntityRef{Type: model.ArtTrack, PID: pid}, model.ArtRoleFront, 0); !waxerr.Is(err, waxerr.CodeNotFound) {
 		t.Fatalf("expected no art initially, got %v", err)
 	}
 	// Rescan the SAME audio bytes, but now a directory cover image exists. The art
 	// must attach even though the audio did not change.
 	cover := testPNG(t, 64, 64)
 	putWithCover(t, st, lib.ID, "/lib/al/1.flac", "e1", cover)
-	blob, err := st.ResolveArt(ctx, model.EntityRef{Type: model.ArtTrack, PID: pid}, 0)
+	blob, err := st.ResolveArt(ctx, model.EntityRef{Type: model.ArtTrack, PID: pid}, model.ArtRoleFront, 0)
 	if err != nil {
 		t.Fatalf("art should be present after the cover appeared: %v", err)
 	}
@@ -148,7 +148,7 @@ func TestAlbumArtPrunedOnCoverChange(t *testing.T) {
 	putWithCover(t, st, lib.ID, "/lib/al/1.flac", "e1", coverA)
 	putWithCover(t, st, lib.ID, "/lib/al/2.flac", "e2", coverB)
 	alb := albumPID(t, st)
-	got, err := st.ResolveArt(ctx, model.EntityRef{Type: model.ArtAlbum, PID: alb}, 0)
+	got, err := st.ResolveArt(ctx, model.EntityRef{Type: model.ArtAlbum, PID: alb}, model.ArtRoleFront, 0)
 	if err != nil {
 		t.Fatalf("album art: %v", err)
 	}
@@ -159,7 +159,7 @@ func TestAlbumArtPrunedOnCoverChange(t *testing.T) {
 	// Re-cover track 1 (A -> C). Cover A is now backed by no track, so the album
 	// must stop resolving to it and A becomes reclaimable.
 	putWithCover(t, st, lib.ID, "/lib/al/1.flac", "e1", coverC)
-	got, err = st.ResolveArt(ctx, model.EntityRef{Type: model.ArtAlbum, PID: alb}, 0)
+	got, err = st.ResolveArt(ctx, model.EntityRef{Type: model.ArtAlbum, PID: alb}, model.ArtRoleFront, 0)
 	if err != nil {
 		t.Fatalf("album art after change: %v", err)
 	}
@@ -211,14 +211,14 @@ func TestAlbumArtNotStaleAfterTrackDeparts(t *testing.T) {
 	if err := st.read.QueryRowContext(ctx, "SELECT pid FROM album WHERE title = 'X'").Scan(&xPID); err != nil {
 		t.Fatalf("album X pid: %v", err)
 	}
-	if got, err := st.ResolveArt(ctx, model.EntityRef{Type: model.ArtAlbum, PID: xPID}, 0); err != nil || got.SourceHash != coverA.Hash {
+	if got, err := st.ResolveArt(ctx, model.EntityRef{Type: model.ArtAlbum, PID: xPID}, model.ArtRoleFront, 0); err != nil || got.SourceHash != coverA.Hash {
 		t.Fatalf("album X initially = %v (err %v), want cover A", got, err)
 	}
 
 	// Retag T1 into a different album Y (content changed, cover unchanged). Album X
 	// now contains only T2, so it must stop resolving to T1's cover A.
 	putArt(t, st, lib.ID, "/lib/x/1.flac", "e1", "c1b", "Y", coverA)
-	got, err := st.ResolveArt(ctx, model.EntityRef{Type: model.ArtAlbum, PID: xPID}, 0)
+	got, err := st.ResolveArt(ctx, model.EntityRef{Type: model.ArtAlbum, PID: xPID}, model.ArtRoleFront, 0)
 	if err != nil {
 		t.Fatalf("album X after departure: %v", err)
 	}
@@ -259,7 +259,7 @@ func TestVerifyConsistentIgnoresReclaimableArt(t *testing.T) {
 func TestResolveArtNotFound(t *testing.T) {
 	st, lib := entityFixture(t)
 	pid := putWithCover(t, st, lib.ID, "/lib/al/1.flac", "e1", nil) // no art anywhere
-	_, err := st.ResolveArt(context.Background(), model.EntityRef{Type: model.ArtTrack, PID: pid}, 0)
+	_, err := st.ResolveArt(context.Background(), model.EntityRef{Type: model.ArtTrack, PID: pid}, model.ArtRoleFront, 0)
 	if !waxerr.Is(err, waxerr.CodeNotFound) {
 		t.Errorf("err = %v, want CodeNotFound when no art exists", err)
 	}
@@ -271,7 +271,7 @@ func TestGCArtRemovesOrphans(t *testing.T) {
 	cover := testPNG(t, 50, 50)
 	pid := putWithCover(t, st, lib.ID, "/lib/al/1.flac", "e1", cover)
 	// Generate a thumbnail so a thumb_cache row also exists for the source.
-	if _, err := st.ResolveArt(ctx, model.EntityRef{Type: model.ArtTrack, PID: pid}, 25); err != nil {
+	if _, err := st.ResolveArt(ctx, model.EntityRef{Type: model.ArtTrack, PID: pid}, model.ArtRoleFront, 25); err != nil {
 		t.Fatalf("thumb: %v", err)
 	}
 

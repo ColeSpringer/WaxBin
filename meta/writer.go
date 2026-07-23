@@ -36,19 +36,20 @@ type TagEdit struct {
 // catalog field-edit write-back look up their keys through TagKeyForField, so the two
 // cannot drift apart.
 var fieldTagKeys = map[string]string{
-	"title":        "TITLE",
-	"artist":       "ARTIST",
-	"album":        "ALBUM",
-	"album_artist": "ALBUMARTIST",
-	"composer":     "COMPOSER",
-	"comment":      "COMMENT",
-	"genre":        "GENRE",
-	"year":         "DATE",
-	"track_no":     "TRACKNUMBER",
-	"disc_no":      "DISCNUMBER",
-	"isrc":         "ISRC",
-	"mbid":         "MUSICBRAINZ_TRACKID", // recording MBID (track write-back only)
-	"compilation":  "COMPILATION",
+	"title":         "TITLE",
+	"artist":        "ARTIST",
+	"album":         "ALBUM",
+	"album_artist":  "ALBUMARTIST",
+	"composer":      "COMPOSER",
+	"composer_sort": "COMPOSERSORT",
+	"comment":       "COMMENT",
+	"genre":         "GENRE",
+	"year":          "DATE",
+	"track_no":      "TRACKNUMBER",
+	"disc_no":       "DISCNUMBER",
+	"isrc":          "ISRC",
+	"mbid":          "MUSICBRAINZ_TRACKID", // recording MBID (track write-back only)
+	"compilation":   "COMPILATION",
 }
 
 // TagKeyForField returns the canonical WaxLabel tag key an on-disk write uses for a
@@ -56,6 +57,31 @@ var fieldTagKeys = map[string]string{
 func TagKeyForField(field string) (string, bool) {
 	k, ok := fieldTagKeys[field]
 	return k, ok
+}
+
+// DerivedSortPair names a display field whose edit regenerates a stored sort key:
+// the catalog sort field that can carry an explicit value or a lock (empty for
+// artist, whose sort has no edit surface of its own) and the on-disk tag a scan's
+// derivation reads. The write-back uses it to clear the stale sort tag beside a
+// display-name edit; a tag left behind would feed the next derivation and undo
+// the regenerated sort. See Library.writeBackFields.
+type DerivedSortPair struct {
+	Field     string
+	SortField string
+	TagKey    string
+}
+
+// derivedSortPairs is ordered so the produced tag edits are deterministic.
+var derivedSortPairs = []DerivedSortPair{
+	{Field: "artist", SortField: "", TagKey: string(tag.ArtistSort)},
+	{Field: "author", SortField: "author_sort", TagKey: string(tag.AlbumArtistSort)},
+	{Field: "composer", SortField: "composer_sort", TagKey: string(tag.ComposerSort)},
+}
+
+// DerivedSortPairs returns the display-field to derived-sort correspondences, in
+// a fixed order.
+func DerivedSortPairs() []DerivedSortPair {
+	return append([]DerivedSortPair(nil), derivedSortPairs...)
 }
 
 // roleTagKeys maps a contributor role to its canonical WaxLabel tag key for on-disk
@@ -88,19 +114,27 @@ func RoleTagKey(role model.ContributorRole) (string, bool) {
 // scanner reads back for it, so a book edit round-trips through a rescan. It is a
 // separate map from fieldTagKeys because a book reconstructs the same catalog fields
 // from different tags than a track does: a book's title is the ALBUM tag (the file
-// TITLE holds a part or chapter name) and its author is ALBUMARTIST. narrator maps to
-// two keys, NARRATOR and the COMPOSER fallback the scanner also reads (the Audiobookshelf
-// convention), so both stay in step. A book field absent here (subtitle, asin, isbn,
-// publisher, edition, description, mbid) is one the scanner does not reconstruct from a
-// tag: it stays DB-only, since writing it to disk could not survive a rescan. series is
-// deliberately not in this map. It packs a name and a sequence into one GROUPING value,
-// so the caller builds that through BookSeriesTagKey and PackSeriesGrouping.
+// TITLE holds a part or chapter name) and its author is ALBUMARTIST, so its author
+// sort is ALBUMARTISTSORT (the first key the scanner's author_sort derive reads).
+// narrator maps to two keys, NARRATOR and the COMPOSER fallback the scanner also reads
+// (the Audiobookshelf convention), so both stay in step. A book field absent here
+// (subtitle, asin, isbn, publisher, edition, description, mbid) is one the scanner
+// does not reconstruct from a tag: it stays DB-only, since writing it to disk could
+// not survive a rescan. series is deliberately not in this map. It packs a name and a
+// sequence into one GROUPING value, so the caller builds that through BookSeriesTagKey
+// and PackSeriesGrouping.
+//
+// author_sort round-trips with a caveat: the scanner folds the tag through
+// model.SortKey on an unlocked rescan, so what the written literal preserves is
+// the ordering it produces rather than its exact bytes. The edit's lock (on by
+// default) is what keeps the literal value durable in the catalog.
 var bookFieldTagKeys = map[string][]string{
-	"title":    {string(tag.Album)},
-	"author":   {string(tag.AlbumArtist)},
-	"narrator": {string(tag.Narrator), string(tag.Composer)},
-	"genre":    {string(tag.Genre)},
-	"year":     {"DATE"}, // same key a track's year uses; no tag constant, matching fieldTagKeys
+	"title":       {string(tag.Album)},
+	"author":      {string(tag.AlbumArtist)},
+	"author_sort": {string(tag.AlbumArtistSort)},
+	"narrator":    {string(tag.Narrator), string(tag.Composer)},
+	"genre":       {string(tag.Genre)},
+	"year":        {"DATE"}, // same key a track's year uses; no tag constant, matching fieldTagKeys
 }
 
 // BookFieldTagKeys returns the on-disk tag keys the audiobook scanner reads back for a

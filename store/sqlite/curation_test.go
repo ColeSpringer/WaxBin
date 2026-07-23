@@ -87,10 +87,10 @@ func TestSetItemArtAndLockSurvivesScan(t *testing.T) {
 	pid := itemPID(t, st)
 
 	user := tinyPNG(t)
-	if err := st.SetItemArt(ctx, pid, user, true, false); err != nil {
+	if err := st.SetItemArt(ctx, pid, model.ArtRoleFront, user, true, false); err != nil {
 		t.Fatalf("set art: %v", err)
 	}
-	blob, err := st.ResolveArt(ctx, model.EntityRef{Type: model.ArtTrack, PID: pid}, 0)
+	blob, err := st.ResolveArt(ctx, model.EntityRef{Type: model.ArtTrack, PID: pid}, model.ArtRoleFront, 0)
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
@@ -102,13 +102,13 @@ func TestSetItemArtAndLockSurvivesScan(t *testing.T) {
 		scanImg.Hash = "scanhash" // undecodable bytes still store
 	}
 	rescanTrackWithCover(t, st, lib.ID, "e1", "c2", scanImg, true)
-	blob, _ = st.ResolveArt(ctx, model.EntityRef{Type: model.ArtTrack, PID: pid}, 0)
+	blob, _ = st.ResolveArt(ctx, model.EntityRef{Type: model.ArtTrack, PID: pid}, model.ArtRoleFront, 0)
 	if blob.SourceHash != userHash {
 		t.Fatalf("locked cover replaced by scan: %s != %s", blob.SourceHash, userHash)
 	}
 
 	// Locked SetItemArt without force is refused.
-	if err := st.SetItemArt(ctx, pid, tinyPNG(t), true, false); !waxerr.Is(err, waxerr.CodeLocked) {
+	if err := st.SetItemArt(ctx, pid, model.ArtRoleFront, tinyPNG(t), true, false); !waxerr.Is(err, waxerr.CodeLocked) {
 		t.Fatalf("set locked art = %v, want CodeLocked", err)
 	}
 }
@@ -158,10 +158,10 @@ func TestSetEntityArtDurableAlbum(t *testing.T) {
 	}
 
 	img := tinyPNG(t)
-	if err := st.SetEntityArt(ctx, model.ArtAlbum, model.PID(albumPID), "front", img); err != nil {
+	if err := st.SetEntityArt(ctx, model.ArtAlbum, model.PID(albumPID), model.ArtRoleFront, img); err != nil {
 		t.Fatalf("set album art: %v", err)
 	}
-	blob, err := st.ResolveArt(ctx, model.EntityRef{Type: model.ArtAlbum, PID: model.PID(albumPID)}, 0)
+	blob, err := st.ResolveArt(ctx, model.EntityRef{Type: model.ArtAlbum, PID: model.PID(albumPID)}, model.ArtRoleFront, 0)
 	if err != nil {
 		t.Fatalf("resolve album art: %v", err)
 	}

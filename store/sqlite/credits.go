@@ -162,20 +162,43 @@ func (s *Store) SetItemCredits(ctx context.Context, itemPID model.PID, role mode
 
 // syncCreditDenormTx updates the denormalized column a role feeds, returning whether
 // the item's search row must be rebuilt (true for a book author/narrator change).
+// The roles that carry a derived sort column (composer_sort, author_sort) regenerate
+// it from the new display, unless that sort is locked: a locked sort is curated
+// state the credit edit did not name, so it survives, exactly as it does on the
+// scalar edit path (the editTrackFieldsTx/editBookFieldsTx probes).
 func syncCreditDenormTx(ctx context.Context, tx *sql.Tx, itemID int64, kind string, role model.ContributorRole, names []string, firstArtistID int64) (bool, error) {
 	switch {
 	case kind == string(model.KindTrack) && role == model.RoleComposer:
 		// The composer denormalization uses "; " (matching the scanner's multi-composer join).
-		if _, err := tx.ExecContext(ctx, "UPDATE track SET composer=? WHERE item_id=?",
-			strings.Join(names, "; "), itemID); err != nil {
+		display := strings.Join(names, "; ")
+		sortLocked, err := fieldLockedTx(ctx, tx, itemID, "composer_sort")
+		if err != nil {
+			return false, err
+		}
+		if sortLocked {
+			_, err = tx.ExecContext(ctx, "UPDATE track SET composer=? WHERE item_id=?", display, itemID)
+		} else {
+			_, err = tx.ExecContext(ctx, "UPDATE track SET composer=?, composer_sort=? WHERE item_id=?",
+				display, model.SortKey(display), itemID)
+		}
+		if err != nil {
 			return false, err
 		}
 		return false, nil
 	case kind == string(model.KindBook) && role == model.RoleAuthor:
 		display := strings.Join(names, ", ")
-		if _, err := tx.ExecContext(ctx,
-			"UPDATE book SET author=?, author_sort=?, author_id=? WHERE item_id=?",
-			display, model.SortKey(display), nullInt64(firstArtistID), itemID); err != nil {
+		sortLocked, err := fieldLockedTx(ctx, tx, itemID, "author_sort")
+		if err != nil {
+			return false, err
+		}
+		if sortLocked {
+			_, err = tx.ExecContext(ctx, "UPDATE book SET author=?, author_id=? WHERE item_id=?",
+				display, nullInt64(firstArtistID), itemID)
+		} else {
+			_, err = tx.ExecContext(ctx, "UPDATE book SET author=?, author_sort=?, author_id=? WHERE item_id=?",
+				display, model.SortKey(display), nullInt64(firstArtistID), itemID)
+		}
+		if err != nil {
 			return false, err
 		}
 		return true, nil

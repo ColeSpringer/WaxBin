@@ -162,6 +162,9 @@ func TestCurationRoundTrip(t *testing.T) {
 			var p proxy.SetItemArtParams
 			_ = json.Unmarshal(raw, &p)
 			gotArt = p.Data
+			if p.Role != "back" {
+				t.Errorf("item art role = %q, want back", p.Role)
+			}
 			return nil, nil
 		},
 		proxy.MethodSetEntityArt: func(_ context.Context, raw json.RawMessage) (any, error) {
@@ -192,14 +195,14 @@ func TestCurationRoundTrip(t *testing.T) {
 		t.Fatalf("lyrics not carried: %+v", gotLyrics)
 	}
 
-	if _, err := c.SetItemArt(ctx, "i1", []byte{1, 2, 3, 4}, true, false, false); err != nil {
+	if _, err := c.SetItemArt(ctx, "i1", model.ArtRoleBack, []byte{1, 2, 3, 4}, true, false, false); err != nil {
 		t.Fatalf("set item art: %v", err)
 	}
 	if len(gotArt) != 4 || gotArt[0] != 1 {
 		t.Fatalf("art bytes not carried: %v", gotArt)
 	}
 
-	if _, err := c.SetEntityArt(ctx, model.ArtAlbum, "a1", "front", []byte{9}, false); err != nil {
+	if _, err := c.SetEntityArt(ctx, model.ArtAlbum, "a1", model.ArtRoleFront, []byte{9}, false); err != nil {
 		t.Fatalf("set entity art: %v", err)
 	}
 }

@@ -190,13 +190,13 @@ func (c *Client) SetChapters(ctx context.Context, itemPID model.PID, chapters []
 	}, nil)
 }
 
-// SetItemArt proxies an item cover edit. A committed edit whose on-disk embed partially
-// failed returns the failed files in the result; the transport error stays nil, matching
-// edit_fields.
-func (c *Client) SetItemArt(ctx context.Context, itemPID model.PID, data []byte, lock, force, writeBack bool) (*SetItemArtResult, error) {
+// SetItemArt proxies an item artwork edit for one role (empty = front). A committed
+// edit whose on-disk embed partially failed returns the failed files in the result;
+// the transport error stays nil, matching edit_fields.
+func (c *Client) SetItemArt(ctx context.Context, itemPID model.PID, role model.ArtRole, data []byte, lock, force, writeBack bool) (*SetItemArtResult, error) {
 	var res SetItemArtResult
 	err := c.call(ctx, MethodSetItemArt, SetItemArtParams{
-		ItemPID: string(itemPID), Data: data, Lock: lock, Force: force, WriteBack: writeBack,
+		ItemPID: string(itemPID), Role: string(role), Data: data, Lock: lock, Force: force, WriteBack: writeBack,
 	}, &res)
 	if err != nil {
 		return nil, err
@@ -204,12 +204,13 @@ func (c *Client) SetItemArt(ctx context.Context, itemPID model.PID, data []byte,
 	return &res, nil
 }
 
-// SetEntityArt proxies a durable entity cover edit. An album cover fan-out whose embed
-// partially failed returns the failed files in the result (transport error stays nil).
-func (c *Client) SetEntityArt(ctx context.Context, entityType model.ArtEntity, entityPID model.PID, role string, data []byte, writeBack bool) (*SetEntityArtResult, error) {
+// SetEntityArt proxies a durable entity artwork edit for one role. An album cover
+// fan-out whose embed partially failed returns the failed files in the result
+// (transport error stays nil).
+func (c *Client) SetEntityArt(ctx context.Context, entityType model.ArtEntity, entityPID model.PID, role model.ArtRole, data []byte, writeBack bool) (*SetEntityArtResult, error) {
 	var res SetEntityArtResult
 	err := c.call(ctx, MethodSetEntityArt, SetEntityArtParams{
-		EntityType: string(entityType), EntityPID: string(entityPID), Role: role, Data: data, WriteBack: writeBack,
+		EntityType: string(entityType), EntityPID: string(entityPID), Role: string(role), Data: data, WriteBack: writeBack,
 	}, &res)
 	if err != nil {
 		return nil, err

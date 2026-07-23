@@ -94,20 +94,20 @@ CREATE TABLE art_source (
 );
 
 -- Polymorphic entity art map: entity_type selects which table entity_id refers
--- to, so there is no single FK to enforce. The resolver walks the fallback
--- chain track -> album -> release_group -> artist -> genre. Orphan rows left
--- by an entity deletion are cleaned by the art GC, which then drops the
--- now-unreferenced source images and (by cascade) their thumbnails. Lower
--- priority wins within one entity+role.
+-- to, so there is no single FK to enforce. An entity holds at most one image
+-- per role (the primary key), so a slot is replaced by delete-then-insert and
+-- a lookup needs no ordering. Only the front role participates in the
+-- resolver's fallback chain (track -> album -> release_group -> artist ->
+-- genre); the other roles resolve at their own level. Orphan rows left by an
+-- entity deletion are cleaned by the art GC, which then drops the
+-- now-unreferenced source images and (by cascade) their thumbnails.
 CREATE TABLE art_map (
-  entity_type TEXT    NOT NULL,                     -- track|album|release_group|artist|genre
+  entity_type TEXT    NOT NULL,                     -- track|album|release_group|artist|genre|episode|podcast
   entity_id   INTEGER NOT NULL,
   source_hash TEXT    NOT NULL REFERENCES art_source(hash) ON DELETE CASCADE,
-  role        TEXT    NOT NULL DEFAULT 'front',     -- front|back|artist|...
-  priority    INTEGER NOT NULL DEFAULT 0,           -- lower wins within an entity
-  PRIMARY KEY (entity_type, entity_id, source_hash)
+  role        TEXT    NOT NULL DEFAULT 'front',     -- front|back|disc|booklet|background
+  PRIMARY KEY (entity_type, entity_id, role)
 );
-CREATE INDEX art_map_entity ON art_map(entity_type, entity_id);
 CREATE INDEX art_map_source ON art_map(source_hash);
 
 -- Size-negotiated thumbnails generated on demand, keyed by (source hash, max

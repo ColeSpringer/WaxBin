@@ -97,9 +97,14 @@ func preserveLockedTrackFieldsTx(ctx context.Context, tx *sql.Tx, tr *model.Trac
 	// ("credit.composer"), which also writes the track.composer denorm. A track rescan
 	// re-derives that denorm from disk (item_contributor is untouched, since only books
 	// rebuild contributors on scan), so a locked credit.composer must preserve the
-	// denorm too, or show and the credit list would diverge.
+	// denorm too, or show and the credit list would diverge. The derived sort rides
+	// with it (matching the artist arm above), so a locked composer's collation
+	// cannot re-derive from the file's differing value.
 	if locked["composer"] || locked["credit.composer"] {
-		tr.Composer = cur.Composer
+		tr.Composer, tr.ComposerSort = cur.Composer, cur.ComposerSort
+	}
+	if locked["composer_sort"] {
+		tr.ComposerSort = cur.ComposerSort
 	}
 	if locked["comment"] {
 		tr.Comment = cur.Comment
@@ -157,6 +162,9 @@ func preserveLockedBookFieldsTx(ctx context.Context, tx *sql.Tx, b *model.Book, 
 	// this they would vanish entirely on a content-changed rescan.
 	if locked["author"] || locked["credit.author"] {
 		b.Authors, b.Author, b.AuthorSort = cur.Authors, cur.Author, cur.AuthorSort
+	}
+	if locked["author_sort"] {
+		b.AuthorSort = cur.AuthorSort
 	}
 	if locked["narrator"] || locked["credit.narrator"] {
 		b.Narrators, b.Narrator = cur.Narrators, cur.Narrator

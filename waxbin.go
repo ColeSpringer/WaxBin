@@ -274,13 +274,24 @@ func (l *Library) Search(ctx context.Context, q string, opt read.SearchOptions) 
 	return l.store.Search(ctx, q, opt)
 }
 
-// ResolveArt resolves cover art for an entity, walking the fallback chain (track
-// -> album -> release_group -> artist -> genre) to the first level that has art. A
-// non-positive size returns the original image; a positive size returns a
-// thumbnail scaled to fit a square box with that maximum side (generated once and
-// cached). CodeNotFound means no level in the chain has art.
-func (l *Library) ResolveArt(ctx context.Context, ref model.EntityRef, size int) (*model.ArtBlob, error) {
-	return l.store.ResolveArt(ctx, ref, size)
+// ResolveArt resolves artwork for an entity in one role (empty = front). The
+// front cover walks the fallback chain (track -> album -> release_group -> artist
+// -> genre) to the first level that has one; every other role (back, disc,
+// booklet, background) resolves at the requested level only, since an ancestor's
+// auxiliary image would be misleading. A non-positive size returns the original
+// image; a positive size returns a thumbnail scaled to fit a square box with that
+// maximum side (generated once and cached). The blob reports the answering Level
+// and whether an album's answer was Derived from a member track's cover.
+// CodeNotFound means no consulted level has art in that role.
+func (l *Library) ResolveArt(ctx context.Context, ref model.EntityRef, role model.ArtRole, size int) (*model.ArtBlob, error) {
+	return l.store.ResolveArt(ctx, ref, role, size)
+}
+
+// ArtRoles lists the artwork slots an entity holds at its own level (no chain
+// fallback): each stored role with the source image's format, dimensions, and
+// content hash. An entity with no art returns an empty list.
+func (l *Library) ArtRoles(ctx context.Context, ref model.EntityRef) ([]model.ArtRoleInfo, error) {
+	return l.store.ArtRoles(ctx, ref)
 }
 
 // GCArt reclaims orphaned art: map rows whose entity is gone, then source images
@@ -962,10 +973,11 @@ func (l *Library) EditField(ctx context.Context, itemPID model.PID, field, value
 // With opts.WriteBack set, the new values are also written into the backing files'
 // on-disk tags through the WaxLabel writer seam. A track writes every edited scalar to
 // its file; a book writes the audiobook tags a scan reads back (title→ALBUM,
-// author→ALBUMARTIST, narrator→NARRATOR+COMPOSER, series+sequence→GROUPING, genre/year)
-// across all its parts, leaving the enrichment-only book fields (subtitle, identifiers,
-// publisher, description) DB-only. A file that cannot be written is reported through a
-// *WriteBackError while the catalog edit stands.
+// author→ALBUMARTIST, author_sort→ALBUMARTISTSORT, narrator→NARRATOR+COMPOSER,
+// series+sequence→GROUPING, genre/year) across all its parts, leaving the
+// enrichment-only book fields (subtitle, identifiers, publisher, description) DB-only.
+// A file that cannot be written is reported through a *WriteBackError while the
+// catalog edit stands.
 //
 // Write-back is a separate step, not part of the atomic catalog edit. The edit has
 // already committed by the time it runs, so a file that cannot be written does not
@@ -1197,8 +1209,9 @@ func (l *Library) writeBackFiles(ctx context.Context, op string, files []model.I
 //
 // A track writes every edited scalar field to its file (tagEditsForFields). A book
 // writes the audiobook tags the scanner reads back (bookTagEditsForFields: title to
-// ALBUM, author to ALBUMARTIST, narrator to NARRATOR and COMPOSER, series and sequence to
-// one GROUPING tag, plus genre and year) across all of its parts. A book's title and
+// ALBUM, author to ALBUMARTIST, author_sort to ALBUMARTISTSORT, narrator to NARRATOR and
+// COMPOSER, series and sequence to one GROUPING tag, plus genre and year) across all of
+// its parts. A book's title and
 // author are the key its parts group by, so writing them to one part alone would split a
 // multi-file book on rescan. Book fields the scanner does not reconstruct from a tag
 // (subtitle, asin, isbn, publisher, edition, description, mbid) are DB-only and written
@@ -1256,6 +1269,10 @@ func (l *Library) writeBackFields(ctx context.Context, itemPID model.PID, edits 
 		return l.refuseWriteBack(ctx, itemPID, edits,
 			"on-disk tag write-back is not supported for "+string(item.Kind)+" items; the catalog edit was applied")
 	}
+	tagEdits, err = l.appendDerivedSortClears(ctx, itemPID, edits, tagEdits)
+	if err != nil {
+		return writeBackSetupFailure(itemPID, edits, err)
+	}
 
 	wbErr := &WriteBackError{ItemPID: itemPID, Edits: edits}
 	// A write-back on an item with no backing files, such as an archived item, has
@@ -1285,6 +1302,40 @@ func (l *Library) writeBackFields(ctx context.Context, itemPID model.PID, edits 
 		return wbErr
 	}
 	return nil
+}
+
+// appendDerivedSortClears adds the tag clears that keep a file's derived sort
+// names in step with a display-name edit. Editing composer, artist, or a book's
+// author regenerates the stored sort key from the new name, but the edit set
+// carries only the edited fields, and a stale COMPOSERSORT, ARTISTSORT, or
+// ALBUMARTISTSORT left in the file would feed the next scan's derivation and
+// revert the regenerated sort (in this catalog when the field is unlocked, and
+// in any fresh catalog regardless). Clearing the tag makes a scan derive the
+// same key the catalog holds, from the display name itself. A sort the caller
+// edited explicitly is already in the edit set and wins; a locked sort keeps
+// its tag, since the curated value should stay represented on disk. Clearing a
+// tag the file never carried is a no-op in the writer, so the clear costs an
+// unchanged file nothing.
+func (l *Library) appendDerivedSortClears(ctx context.Context, itemPID model.PID, edits map[string]string, tagEdits []meta.TagEdit) ([]meta.TagEdit, error) {
+	for _, p := range meta.DerivedSortPairs() {
+		if _, edited := edits[p.Field]; !edited {
+			continue
+		}
+		if p.SortField != "" {
+			if _, explicit := edits[p.SortField]; explicit {
+				continue
+			}
+			locked, err := l.store.IsFieldLocked(ctx, itemPID, p.SortField)
+			if err != nil {
+				return nil, err
+			}
+			if locked {
+				continue
+			}
+		}
+		tagEdits = append(tagEdits, meta.TagEdit{Key: p.TagKey})
+	}
+	return tagEdits, nil
 }
 
 // bookIdentityEdited reports whether an edit touched a book field that participates in

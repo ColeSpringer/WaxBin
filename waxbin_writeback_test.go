@@ -15,6 +15,7 @@ import (
 	"github.com/colespringer/waxbin/meta"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/query"
+	"github.com/colespringer/waxbin/waxerr"
 	waxlabel "github.com/colespringer/waxlabel"
 )
 
@@ -139,6 +140,234 @@ func TestEditEntityArtistSortOnlyPrimaryArtist(t *testing.T) {
 	}
 }
 
+// TestEditComposerSortWriteBack verifies a composer/composer_sort edit with
+// --write-back lands COMPOSER and COMPOSERSORT in the file's tags, and that the
+// locked catalog values survive a forced rescan of the rewritten file.
+func TestEditComposerSortWriteBack(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	src := filepath.Join(root, "song.mp3")
+	writeFile(t, src, testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
+		Title: "Song", Artist: "Band", Album: "Album", Composer: "Old Composer", Track: 1,
+	}))
+
+	lib := openManaged(t, ctx, db, root)
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	pid := itemPIDByTitle(t, ctx, lib, "Song")
+
+	if err := lib.EditFields(ctx, pid, map[string]string{
+		"composer": "Amy Arranger", "composer_sort": "Arranger, Amy",
+	}, waxbin.EditOptions{Lock: true, WriteBack: true}); err != nil {
+		t.Fatalf("edit with write-back: %v", err)
+	}
+
+	fm, err := meta.NewReader().Read(ctx, src)
+	if err != nil {
+		t.Fatalf("read tags: %v", err)
+	}
+	if fm.Tags.Composer != "Amy Arranger" {
+		t.Errorf("on-disk COMPOSER = %q, want Amy Arranger", fm.Tags.Composer)
+	}
+	if fm.Tags.ComposerSort != "Arranger, Amy" {
+		t.Errorf("on-disk COMPOSERSORT = %q, want Arranger, Amy", fm.Tags.ComposerSort)
+	}
+
+	// A forced rescan folds the tag through SortKey; the lock is what keeps the
+	// catalog's literal value.
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{Force: true}); err != nil {
+		t.Fatalf("forced rescan: %v", err)
+	}
+	v, err := lib.Get(ctx, pid)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if v.Composer != "Amy Arranger" || v.ComposerSort != "Arranger, Amy" {
+		t.Errorf("after forced rescan = (%q, %q), want the locked literal pair", v.Composer, v.ComposerSort)
+	}
+}
+
+// TestEditComposerWriteBackClearsStaleSortTag verifies a display-name edit's
+// write-back clears the derived sort tags the file carried: without the clears,
+// a stale COMPOSERSORT or ARTISTSORT would feed the next scan's derivation and
+// revert the regenerated catalog sort (in a fresh catalog always, and in this
+// one wherever the field is unlocked). A curated, locked sort keeps its tag.
+func TestEditComposerWriteBackClearsStaleSortTag(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	src := filepath.Join(root, "song.mp3")
+	writeFile(t, src, testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
+		Title: "Song", Artist: "Old Artist", Album: "Album", Composer: "Old Composer", Track: 1,
+		TXXX: []testaudio.TXXXFrame{
+			{Desc: "COMPOSERSORT", Value: "Composer, Old"},
+			{Desc: "ARTISTSORT", Value: "Artist, Old"},
+		},
+	}))
+
+	lib := openManaged(t, ctx, db, root)
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	pid := itemPIDByTitle(t, ctx, lib, "Song")
+
+	if err := lib.EditFields(ctx, pid, map[string]string{
+		"composer": "New Composer", "artist": "New Artist",
+	}, waxbin.EditOptions{Lock: true, WriteBack: true}); err != nil {
+		t.Fatalf("edit with write-back: %v", err)
+	}
+
+	fm, err := meta.NewReader().Read(ctx, src)
+	if err != nil {
+		t.Fatalf("read tags: %v", err)
+	}
+	if fm.Tags.Composer != "New Composer" || fm.Tags.Artist != "New Artist" {
+		t.Fatalf("on-disk names = (%q, %q), want the edited values", fm.Tags.Composer, fm.Tags.Artist)
+	}
+	if fm.Tags.ComposerSort != "" {
+		t.Errorf("on-disk COMPOSERSORT = %q, want cleared (the stale sort would revert the derivation)", fm.Tags.ComposerSort)
+	}
+	if fm.Tags.ArtistSort != "" {
+		t.Errorf("on-disk ARTISTSORT = %q, want cleared", fm.Tags.ArtistSort)
+	}
+
+	// A fresh catalog now derives the sorts from the new display names, matching
+	// what this catalog holds.
+	db2 := filepath.Join(t.TempDir(), "catalog2.db")
+	lib2 := openManaged(t, ctx, db2, root)
+	if _, err := lib2.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("fresh scan: %v", err)
+	}
+	v2, err := lib2.Get(ctx, itemPIDByTitle(t, ctx, lib2, "Song"))
+	if err != nil {
+		t.Fatalf("fresh get: %v", err)
+	}
+	if v2.ComposerSort != model.SortKey("New Composer") {
+		t.Errorf("fresh-catalog composer_sort = %q, want %q", v2.ComposerSort, model.SortKey("New Composer"))
+	}
+
+	// A locked composer_sort keeps its tag through a later composer edit: the
+	// curated value stays represented on disk.
+	if err := lib.EditField(ctx, pid, "composer_sort", "Curated, Sort",
+		waxbin.EditOptions{Lock: true, WriteBack: true}); err != nil {
+		t.Fatalf("curate composer_sort: %v", err)
+	}
+	// Force clears the composer's own lock from the first edit; the subject here
+	// is the sort tag, which the locked composer_sort must keep.
+	if err := lib.EditField(ctx, pid, "composer", "Third Composer",
+		waxbin.EditOptions{Lock: true, Force: true, WriteBack: true}); err != nil {
+		t.Fatalf("composer edit over locked sort: %v", err)
+	}
+	fm, err = meta.NewReader().Read(ctx, src)
+	if err != nil {
+		t.Fatalf("read tags: %v", err)
+	}
+	if fm.Tags.ComposerSort != "Curated, Sort" {
+		t.Errorf("on-disk COMPOSERSORT = %q, want the locked curated value kept", fm.Tags.ComposerSort)
+	}
+}
+
+// TestEditAuthorWriteBackClearsStaleSortTag is the book variant: an author edit's
+// write-back clears a stale ALBUMARTISTSORT so the file's derivation follows the
+// new author.
+func TestEditAuthorWriteBackClearsStaleSortTag(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	src := filepath.Join(root, "book.m4b")
+	writeFile(t, src, testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
+		Title: "The Book", Artist: "Old Author", AlbumArtist: "Old Author", Album: "The Book", Track: 1,
+		TXXX: []testaudio.TXXXFrame{{Desc: "ALBUMARTISTSORT", Value: "Author, Old"}},
+	}))
+
+	lib := openManaged(t, ctx, db, root)
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	books, err := lib.Query(ctx, query.New(query.EntityItems).Where("kind", query.OpIs, "book").Build(), "")
+	if err != nil || len(books) != 1 {
+		t.Fatalf("book query: %d books (err %v)", len(books), err)
+	}
+
+	if err := lib.EditField(ctx, books[0].PID, "author", "New Author",
+		waxbin.EditOptions{Lock: true, WriteBack: true}); err != nil {
+		t.Fatalf("author write-back: %v", err)
+	}
+
+	fm, err := meta.NewReader().Read(ctx, src)
+	if err != nil {
+		t.Fatalf("read tags: %v", err)
+	}
+	if fm.Tags.AlbumArtist != "New Author" {
+		t.Fatalf("on-disk ALBUMARTIST = %q, want New Author", fm.Tags.AlbumArtist)
+	}
+	if fm.Tags.AlbumArtistSort != "" {
+		t.Errorf("on-disk ALBUMARTISTSORT = %q, want cleared", fm.Tags.AlbumArtistSort)
+	}
+
+	// A fresh catalog derives the author sort from the new author.
+	db2 := filepath.Join(t.TempDir(), "catalog2.db")
+	lib2 := openManaged(t, ctx, db2, root)
+	if _, err := lib2.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("fresh scan: %v", err)
+	}
+	books2, err := lib2.Query(ctx, query.New(query.EntityItems).Where("kind", query.OpIs, "book").Build(), "")
+	if err != nil || len(books2) != 1 {
+		t.Fatalf("fresh book query: %d books (err %v)", len(books2), err)
+	}
+	if books2[0].AuthorSort != model.SortKey("New Author") {
+		t.Errorf("fresh-catalog author_sort = %q, want %q", books2[0].AuthorSort, model.SortKey("New Author"))
+	}
+}
+
+// TestEditAuthorSortWriteBack verifies a book author_sort edit with --write-back
+// lands ALBUMARTISTSORT (the key the audiobook scanner's author_sort derive reads
+// first) in every part's tags.
+func TestEditAuthorSortWriteBack(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	src := filepath.Join(root, "book.m4b")
+	writeFile(t, src, testaudio.BuildMP3("The Book", "Jane Author", "The Book", 1))
+
+	lib := openManaged(t, ctx, db, root)
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	books, err := lib.Query(ctx, query.New(query.EntityItems).Where("kind", query.OpIs, "book").Build(), "")
+	if err != nil || len(books) != 1 {
+		t.Fatalf("book query: %d books (err %v)", len(books), err)
+	}
+
+	if err := lib.EditField(ctx, books[0].PID, "author_sort", "Author, Jane",
+		waxbin.EditOptions{Lock: true, WriteBack: true}); err != nil {
+		t.Fatalf("author_sort write-back: %v", err)
+	}
+
+	fm, err := meta.NewReader().Read(ctx, src)
+	if err != nil {
+		t.Fatalf("read tags: %v", err)
+	}
+	if fm.Tags.AlbumArtistSort != "Author, Jane" {
+		t.Errorf("on-disk ALBUMARTISTSORT = %q, want Author, Jane", fm.Tags.AlbumArtistSort)
+	}
+
+	// The locked literal survives a forced rescan (an unlocked one would fold the
+	// tag through SortKey).
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{Force: true}); err != nil {
+		t.Fatalf("forced rescan: %v", err)
+	}
+	v, err := lib.Get(ctx, books[0].PID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if v.AuthorSort != "Author, Jane" {
+		t.Errorf("after forced rescan author_sort = %q, want the locked literal", v.AuthorSort)
+	}
+}
+
 // TestSetItemArtWriteBack verifies an item cover set with --write-back embeds the cover
 // into the item's backing file.
 func TestSetItemArtWriteBack(t *testing.T) {
@@ -154,10 +383,23 @@ func TestSetItemArtWriteBack(t *testing.T) {
 	}
 	pid := itemPIDByTitle(t, ctx, lib, "Song")
 
-	if err := lib.SetItemArt(ctx, pid, coverPNG(t), true, false, true); err != nil {
+	if err := lib.SetItemArt(ctx, pid, model.ArtRoleFront, coverPNG(t), true, false, true); err != nil {
 		t.Fatalf("set item art write-back: %v", err)
 	}
 	assertFrontCover(t, ctx, src)
+
+	// Only the front cover has an embedded representation, so --write-back with any
+	// other role is refused before the catalog write: the back slot stays empty.
+	if err := lib.SetItemArt(ctx, pid, model.ArtRoleBack, coverPNG(t), false, false, true); !waxerr.Is(err, waxerr.CodeInvalid) {
+		t.Fatalf("back + write-back = %v, want CodeInvalid", err)
+	}
+	if _, err := lib.ResolveArt(ctx, model.EntityRef{Type: model.ArtTrack, PID: pid}, model.ArtRoleBack, 0); !waxerr.Is(err, waxerr.CodeNotFound) {
+		t.Errorf("refused write-back still wrote the catalog row: %v", err)
+	}
+	// Without write-back the back slot sets fine.
+	if err := lib.SetItemArt(ctx, pid, model.ArtRoleBack, coverPNG(t), false, false, false); err != nil {
+		t.Errorf("back without write-back: %v", err)
+	}
 }
 
 // TestSetItemArtWriteBackMultiFileBook verifies an item cover write-back embeds the
@@ -183,7 +425,7 @@ func TestSetItemArtWriteBackMultiFileBook(t *testing.T) {
 		t.Fatalf("book query: %d books (err %v), want 1", len(books), err)
 	}
 
-	if err := lib.SetItemArt(ctx, books[0].PID, coverPNG(t), true, false, true); err != nil {
+	if err := lib.SetItemArt(ctx, books[0].PID, model.ArtRoleFront, coverPNG(t), true, false, true); err != nil {
 		t.Fatalf("set item art write-back: %v", err)
 	}
 	for _, p := range parts {
@@ -209,7 +451,7 @@ func TestSetEntityArtAlbumFanOut(t *testing.T) {
 	}
 	albumPID := albumPIDByTitle(t, ctx, db, "Night Moves")
 
-	if err := lib.SetEntityArt(ctx, model.ArtAlbum, albumPID, "front", coverPNG(t), true); err != nil {
+	if err := lib.SetEntityArt(ctx, model.ArtAlbum, albumPID, model.ArtRoleFront, coverPNG(t), true); err != nil {
 		t.Fatalf("set album art write-back: %v", err)
 	}
 	assertFrontCover(t, ctx, one)
@@ -292,7 +534,7 @@ func TestSetEntityArtAlbumFanOutRefusesSharedMember(t *testing.T) {
 	makeBackingFileVirtual(t, ctx, db, itemPIDByTitle(t, ctx, lib, "Track Two"))
 	albumPID := albumPIDByTitle(t, ctx, db, "Night Moves")
 
-	err := lib.SetEntityArt(ctx, model.ArtAlbum, albumPID, "front", coverPNG(t), true)
+	err := lib.SetEntityArt(ctx, model.ArtAlbum, albumPID, model.ArtRoleFront, coverPNG(t), true)
 	var wbErr *waxbin.WriteBackError
 	if !errors.As(err, &wbErr) {
 		t.Fatalf("want *WriteBackError for a shared member, got %v", err)
