@@ -90,6 +90,13 @@ type Library struct {
 	// jobsWG tracks in-flight asynchronous (server-run) jobs started via startJob, so
 	// Close drains them against the still-open store instead of tearing it down mid-job.
 	jobsWG sync.WaitGroup
+
+	// rootMu serializes runtime root-set mutations (AddRoot, RelocateRoot) so each
+	// validates against the registered set and writes its row atomically. Without
+	// it two concurrent proxy connections could each validate before the other's
+	// row lands and both commit overlapping roots, the exact state Open's
+	// validation forbids. Root mutations are rare, so a coarse mutex is free.
+	rootMu sync.Mutex
 }
 
 // Open opens (creating if needed) the catalog and wires the subsystems. A
@@ -223,6 +230,117 @@ func (l *Library) ensureRoots(ctx context.Context) error {
 // Libraries lists registered library roots.
 func (l *Library) Libraries(ctx context.Context) ([]*model.Library, error) {
 	return l.store.Libraries(ctx)
+}
+
+// AddRoot registers a library root at runtime, without reopening the Library.
+// The spec is validated against every root already registered (plus the
+// configured inbox folders and podcast download dir), exactly as Open validates
+// the configured set, then upserted: a new path emits a `library` create delta,
+// and re-adding an existing path refreshes its mode/media/profile under the
+// same pid. Spec defaults match config loading (in-place, mixed, waxbin-native).
+//
+// The store is the single source of truth for roots. Scan, organize, and import
+// resolve libraries from store rows, so they pick the new root up immediately,
+// and the row survives a process restart even if the embedder never adds the
+// root to its own configuration: a later Open validates only its configured
+// roots against each other and re-upserts them, never pruning rows absent from
+// the config. A running Watch does NOT pick the root up, because watch
+// snapshots its roots at start; restart the watcher after adding one. The
+// create delta on the change feed is the machine-readable signal for that.
+func (l *Library) AddRoot(ctx context.Context, spec config.Root) (*model.Library, error) {
+	if l.ReadOnly() {
+		return nil, waxerr.New(waxerr.CodeUnsupported, "Library.AddRoot", "adding a root requires a read-write library")
+	}
+	// Hold rootMu across validate + upsert so a concurrent root mutation cannot
+	// slip an overlapping row in between the two.
+	l.rootMu.Lock()
+	defer l.rootMu.Unlock()
+	normalized, err := l.validateRootSet(ctx, "", spec)
+	if err != nil {
+		return nil, err
+	}
+	return l.store.EnsureLibrary(ctx, &model.Library{
+		Root:        []byte(normalized.Path),
+		DisplayRoot: normalized.Path,
+		Mode:        normalized.Mode,
+		Media:       normalized.Media,
+		Profile:     normalized.Profile,
+	})
+}
+
+// validateRootSet validates candidate against every registered root except the
+// one the mutation lands on, reusing config.Validate so a runtime root mutation
+// obeys the same rules as Open: absolute, non-overlapping roots that also avoid
+// the inbox folders and the podcast download dir. The registered set comes from
+// store.Libraries rather than l.opts.Roots, because the store is authoritative
+// once AddRoot can grow it beyond the configured set.
+//
+// The excluded row is identified by replaceLibPID for a relocation, and by the
+// candidate's own path when replaceLibPID is empty (an add: EnsureLibrary
+// upserts by that path key, so a re-add refreshes policy instead of colliding
+// with itself). The two are deliberately not combined: relocating onto another
+// library's exact path is a genuine overlap and must keep that row in the set.
+//
+// The internal podcast library is not a config.Root (its "podcast" mode fails
+// Mode.Valid), so it cannot ride in cfg.Roots. It is checked two ways: config
+// validation compares the candidate to cfg.Podcasts (the configured dir), and a
+// direct overlap check compares it to the podcast library ROW's stored root.
+// The row's root is authoritative and covers the case the configured dir does
+// not: a process opened with Podcasts.Dir unset (or pointing elsewhere) while a
+// podcast row persists from a prior run, where relying on cfg.Podcasts alone
+// would let a root nest inside the download tree and scan episodes as music.
+//
+// Returns the candidate normalized (absolute, cleaned, defaults applied).
+func (l *Library) validateRootSet(ctx context.Context, replaceLibPID model.PID, candidate config.Root) (config.Root, error) {
+	const op = "Library.validateRootSet"
+	libs, err := l.store.Libraries(ctx)
+	if err != nil {
+		return config.Root{}, err
+	}
+	// Registered rows hold Validate-normalized paths, so normalizing the
+	// candidate the same way makes the replacement match exact.
+	candidatePath := ""
+	if replaceLibPID == "" && strings.TrimSpace(candidate.Path) != "" {
+		if abs, err := filepath.Abs(candidate.Path); err == nil {
+			candidatePath = filepath.Clean(abs)
+		}
+	}
+	roots := make([]config.Root, 0, len(libs)+1)
+	var podcastRoots []string
+	for _, lib := range libs {
+		if lib.Mode == model.ModePodcast {
+			podcastRoots = append(podcastRoots, string(lib.Root))
+			continue
+		}
+		if lib.PID == replaceLibPID {
+			continue
+		}
+		if candidatePath != "" && string(lib.Root) == candidatePath {
+			continue
+		}
+		roots = append(roots, config.Root{
+			Path: string(lib.Root), Mode: lib.Mode, Media: lib.Media, Profile: lib.Profile,
+		})
+	}
+	roots = append(roots, candidate)
+	cfg := &config.Config{
+		DBPath: l.opts.DBPath,
+		Roots:  roots,
+		// Copy: Validate normalizes slices in place, and opts must stay untouched.
+		Inbox:    append([]string(nil), l.opts.Inbox...),
+		Podcasts: l.opts.Podcasts,
+	}
+	if err := cfg.Validate(); err != nil {
+		return config.Root{}, err
+	}
+	normalized := cfg.Roots[len(cfg.Roots)-1]
+	for _, pr := range podcastRoots {
+		if pathx.UnderRoot(pr, normalized.Path) || pathx.UnderRoot(normalized.Path, pr) {
+			return config.Root{}, waxerr.New(waxerr.CodeInvalid, op,
+				"root "+normalized.Path+" overlaps the internal podcast library at "+pr)
+		}
+	}
+	return normalized, nil
 }
 
 // Query runs a compiled selection and returns matching item views. A query that
@@ -588,6 +706,11 @@ type WatchOptions struct {
 // manual mutation, or run waxbin serve instead when other terminals need to mutate
 // concurrently: it proxies mutations over a local control socket (see Library.Serve).
 // Idle lock release is deliberately post-1.0.
+//
+// The watched roots are snapshotted here, at start. A root registered later
+// through AddRoot is scanned and organized (those resolve roots per run) but not
+// watched until the watcher restarts; the root's create delta on the change feed
+// is the signal to do so.
 func (l *Library) Watch(ctx context.Context, opts WatchOptions) error {
 	if l.ReadOnly() {
 		return waxerr.New(waxerr.CodeUnsupported, "Library.Watch", "watch requires a read-write library")
@@ -2181,9 +2304,42 @@ func (l *Library) Export(ctx context.Context, w io.Writer) (*port.Manifest, erro
 }
 
 // RelocateRoot re-points a library and every file under it at a new root path,
-// for a portable restore onto a different machine or mount.
+// for a portable restore onto a different machine or mount. The new path is
+// validated against the other registered roots, the inbox folders, and the
+// podcast download dir with the moved library's entry substituted, so a
+// relocation cannot create the overlap Open would refuse. The internal podcast
+// library is not relocatable: its root follows the podcasts dir config.
 func (l *Library) RelocateRoot(ctx context.Context, libPID model.PID, newRoot string) error {
-	return l.store.RelocateLibraryRoot(ctx, libPID, newRoot)
+	const op = "Library.RelocateRoot"
+	// Serialize with AddRoot (and other relocations) so the read-validate-write is
+	// atomic against a concurrent root mutation; see rootMu.
+	l.rootMu.Lock()
+	defer l.rootMu.Unlock()
+	libs, err := l.store.Libraries(ctx)
+	if err != nil {
+		return err
+	}
+	var moved *model.Library
+	for _, lib := range libs {
+		if lib.PID == libPID {
+			moved = lib
+			break
+		}
+	}
+	if moved == nil {
+		return waxerr.New(waxerr.CodeNotFound, op, "no such library: "+string(libPID))
+	}
+	if moved.Mode == model.ModePodcast {
+		return waxerr.New(waxerr.CodeInvalid, op,
+			"the internal podcast library follows the podcasts dir config and cannot be relocated")
+	}
+	normalized, err := l.validateRootSet(ctx, libPID, config.Root{
+		Path: newRoot, Mode: moved.Mode, Media: moved.Media, Profile: moved.Profile,
+	})
+	if err != nil {
+		return err
+	}
+	return l.store.RelocateLibraryRoot(ctx, libPID, normalized.Path)
 }
 
 // SetSecret stores a named credential in the secret table. Values are never

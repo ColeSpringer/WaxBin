@@ -70,6 +70,7 @@ const (
 	MethodPlaylistSetRule  = "playlist_set_rule"
 	MethodPutTranscript    = "put_transcript"
 	MethodFetchTranscript  = "fetch_transcript"
+	MethodAddRoot          = "add_root"
 	MethodMaintenanceBegin = "maintenance_begin"
 	MethodMaintenanceEnd   = "maintenance_end"
 
@@ -404,6 +405,19 @@ type PutTranscriptParams struct {
 // the episode's declared transcript URL runs in the server process.
 type FetchTranscriptParams struct {
 	EpisodePID string `json:"episodePid"`
+}
+
+// AddRootParams is the add_root request payload: a library root spec to
+// register at runtime. The response is the resulting model.Library row. The
+// server validates the spec against its own registered set (Library.AddRoot),
+// so mode/media/profile vocabulary and defaults live server-side. Path should
+// be sent absolute: the server resolves a relative path against its own working
+// directory, not the client's.
+type AddRootParams struct {
+	Path    string `json:"path"`
+	Mode    string `json:"mode,omitempty"`
+	Media   string `json:"media,omitempty"`
+	Profile string `json:"profile,omitempty"`
 }
 
 // ScanParams is the run_scan request payload.

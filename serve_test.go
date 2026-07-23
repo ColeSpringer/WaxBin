@@ -269,6 +269,50 @@ func TestServeProxiedTranscript(t *testing.T) {
 	}
 }
 
+// TestServeProxiedAddRoot drives add_root over the socket: the root lands in the
+// server's catalog (the process that scans), a proxied run_scan catalogs a file
+// under it, and a validation failure keeps its class across the wire.
+func TestServeProxiedAddRoot(t *testing.T) {
+	ctx := context.Background()
+	rootA := t.TempDir()
+	rootB := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	sock := filepath.Join(t.TempDir(), "wax.sock")
+	writeFile(t, filepath.Join(rootB, "late.mp3"), testaudio.BuildMP3("Proxied Late", "Adder", "Runtime", 1))
+
+	lib := openServedRW(t, ctx, db, rootA, sock)
+	c := dialWhenReady(t, sock)
+
+	added, err := c.AddRoot(ctx, proxy.AddRootParams{Path: rootB, Mode: "managed"})
+	if err != nil {
+		t.Fatalf("proxied add_root: %v", err)
+	}
+	if added.PID == "" || added.DisplayRoot != rootB || added.Mode != model.ModeManaged {
+		t.Fatalf("proxied add_root row = %+v, want a managed row at %s", added, rootB)
+	}
+	// The server's own library sees it.
+	if libs, err := lib.Libraries(ctx); err != nil || len(libs) != 2 {
+		t.Fatalf("server libraries = %d (err %v), want 2", len(libs), err)
+	}
+
+	// A proxied scan (run in the server process) catalogs the new root's file.
+	jobPID, err := c.RunScan(ctx, proxy.ScanParams{})
+	if err != nil {
+		t.Fatalf("run_scan after add_root: %v", err)
+	}
+	waitForJobDone(t, ctx, lib, jobPID)
+	items, err := lib.Query(ctx, query.New(query.EntityItems).
+		Where("title", query.OpIs, "Proxied Late").Build(), "")
+	if err != nil || len(items) != 1 {
+		t.Fatalf("track under the proxied-added root: err=%v len=%d, want 1", err, len(items))
+	}
+
+	// Validation runs server-side and keeps its class on the wire.
+	if _, err := c.AddRoot(ctx, proxy.AddRootParams{Path: filepath.Join(rootA, "sub"), Mode: "managed"}); !waxerr.Is(err, waxerr.CodeInvalid) {
+		t.Fatalf("proxied overlapping add_root = %v, want CodeInvalid", err)
+	}
+}
+
 // TestServeProxiedError checks a domain error keeps its code across the proxy: a
 // locked field edited without force returns CodeLocked, so the CLI exit code is the
 // same as a local edit.

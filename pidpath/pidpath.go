@@ -51,6 +51,7 @@ const (
 // closes only a library it opened itself, and that one is held as an io.Closer.
 type catalog interface {
 	Get(ctx context.Context, pid model.PID) (*model.ItemView, error)
+	GetMany(ctx context.Context, pids []model.PID) ([]*model.ItemView, error)
 	DataVersion(ctx context.Context) (int64, error)
 	Changes(ctx context.Context, sinceSeq int64) ([]model.Change, error)
 }
@@ -314,7 +315,61 @@ func (c *Cache) lookup(ctx context.Context, pid model.PID) (Location, error) {
 	if err != nil {
 		return Location{}, err
 	}
-	loc := Location{
+	loc := locationOf(iv)
+	c.store(pid, loc, gen)
+	return loc, nil
+}
+
+// LocateMany resolves a batch of item PIDs, keyed by pid in the result: cache
+// hits are served warm, and the misses go to the catalog in one GetMany rather
+// than a query per pid. A pid with no matching item is omitted from the map (the
+// GetMany contract); the error is reserved for the batch query itself failing,
+// in which case no partial map is returned.
+//
+// Caching follows the Locate discipline with one snapshot for the whole batch: a
+// batch raced by an invalidation returns its results but does not cache them.
+// Batch results also never evict; see storeBatch.
+func (c *Cache) LocateMany(ctx context.Context, pids []model.PID) (map[model.PID]Location, error) {
+	out := make(map[model.PID]Location, len(pids))
+	seen := make(map[model.PID]struct{}, len(pids))
+	var misses []model.PID
+	for _, pid := range pids {
+		if _, dup := seen[pid]; dup {
+			continue
+		}
+		seen[pid] = struct{}{}
+		if loc, hit := c.cached(pid); hit {
+			out[pid] = loc
+		} else {
+			misses = append(misses, pid)
+		}
+	}
+	if len(misses) == 0 {
+		return out, nil
+	}
+
+	gen := c.generation()
+	qctx, cancel := context.WithTimeout(ctx, queryTimeout)
+	defer cancel()
+	stop := context.AfterFunc(c.queryCtx, cancel)
+	defer stop()
+	views, err := c.lib.GetMany(qctx, misses)
+	if err != nil {
+		return nil, err
+	}
+	resolved := make([]batchLoc, 0, len(views))
+	for _, iv := range views {
+		loc := locationOf(iv)
+		out[iv.PID] = loc
+		resolved = append(resolved, batchLoc{pid: iv.PID, loc: loc})
+	}
+	c.storeBatch(resolved, gen)
+	return out, nil
+}
+
+// locationOf projects a catalog item view onto the Location this package serves.
+func locationOf(iv *model.ItemView) Location {
+	return Location{
 		Path:        string(iv.Path),
 		FilePID:     iv.FilePID,
 		SampleRate:  iv.SampleRate,
@@ -322,8 +377,6 @@ func (c *Cache) lookup(ctx context.Context, pid model.PID) (Location, error) {
 		StartFrames: iv.StartFrames,
 		EndFrames:   iv.EndFrames,
 	}
-	c.store(pid, loc, gen)
-	return loc, nil
 }
 
 // Poll runs one poll cycle: a cheap DataVersion read and, when it moved, a Changes
@@ -367,8 +420,15 @@ func (c *Cache) Poll(ctx context.Context) error {
 
 // invalidate drops the cache entries a batch of change rows names and reports how
 // many it dropped. Item rows carry the item PID directly; file rows (how renames and
-// moves surface) map back through byFile. Every other entity type (albums,
-// playlists, play state) is noise to a location cache.
+// moves surface) map back through byFile. A library row is the third rename signal:
+// a whole-library relocate rewrites every file.path under the library but emits one
+// library delta rather than a per-file delta for each (the per-file churn on a bulk
+// move is exactly what the single delta avoids). The cache cannot map a library back
+// to the items under it (a Location carries no library id), so it drops every cached
+// location on any library row. Library rows are rare (a root added, relocated, or its
+// policy changed), so the full flush costs a handful of re-queries, never steady-state
+// churn. Every other entity type (albums, playlists, play state) is noise to a
+// location cache.
 func (c *Cache) invalidate(rows []model.Change) int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -383,9 +443,24 @@ func (c *Cache) invalidate(rows []model.Change) int {
 			for itemPID := range c.byFile[ch.EntityPID] {
 				dropped += c.dropLocked(itemPID)
 			}
+		case "library":
+			c.invalGen++
+			dropped += c.dropAllLocked()
 		}
 	}
 	return dropped
+}
+
+// dropAllLocked clears every cached location, returning how many it dropped. It
+// is the response to a library-level change (a relocate mass-rewrites paths).
+func (c *Cache) dropAllLocked() int {
+	n := len(c.entries)
+	if n == 0 {
+		return 0
+	}
+	c.entries = make(map[model.PID]*entry)
+	c.byFile = make(map[model.PID]map[model.PID]struct{})
+	return n
 }
 
 // generation snapshots the invalidation counter for a store that follows an unlocked
@@ -421,6 +496,43 @@ func (c *Cache) store(pid model.PID, loc Location, gen uint64) {
 	if _, exists := c.entries[pid]; !exists && len(c.entries) >= maxEntries {
 		c.evictOldestLocked()
 	}
+	c.insertLocked(pid, loc)
+}
+
+// batchLoc is one batch-resolved location bound for storeBatch. A slice of these
+// rather than a map keeps the insertion order the catalog returned, so which
+// entries land when a batch straddles capacity is deterministic.
+type batchLoc struct {
+	pid model.PID
+	loc Location
+}
+
+// storeBatch caches a batch of resolved locations under the same invalidation
+// discipline as store, holding the lock and checking the generation once for the
+// whole batch: a raced batch caches nothing, rather than the prefix inserted
+// before the racing row landed. It never evicts: at capacity an uncached entry
+// is simply skipped, because a bulk sweep (a UI hydrating thousands of rows)
+// must not flush the warm working set a consumer is actively serving from. The
+// results were still returned to the caller, and a pid that stays hot re-enters
+// through Locate.
+func (c *Cache) storeBatch(batch []batchLoc, gen uint64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.invalGen != gen {
+		return
+	}
+	for _, e := range batch {
+		if _, exists := c.entries[e.pid]; !exists && len(c.entries) >= maxEntries {
+			continue
+		}
+		c.insertLocked(e.pid, e.loc)
+	}
+}
+
+// insertLocked places one resolved location, maintaining the byFile reverse
+// index on both the outgoing entry (a re-resolve may name a new file) and the
+// incoming one.
+func (c *Cache) insertLocked(pid model.PID, loc Location) {
 	if old := c.entries[pid]; old != nil {
 		c.unindexLocked(old.loc.FilePID, pid)
 	}

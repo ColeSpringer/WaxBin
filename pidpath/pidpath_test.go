@@ -28,6 +28,9 @@ type fakeCatalog struct {
 	hang     chan struct{}
 	gets     int
 	pulls    int
+	// batches records each GetMany's pid argument, so a test can assert exactly
+	// which pids a batch went to the catalog for (the cache hits must not).
+	batches [][]model.PID
 }
 
 func newFakeCatalog() *fakeCatalog {
@@ -46,6 +49,24 @@ func (f *fakeCatalog) Get(_ context.Context, pid model.PID) (*model.ItemView, er
 		return nil, waxerr.New(waxerr.CodeNotFound, "fake.Get", "no such item")
 	}
 	return iv, nil
+}
+
+// GetMany mirrors the facade contract: known pids in input order, unknown pids
+// omitted, never a per-pid error.
+func (f *fakeCatalog) GetMany(_ context.Context, pids []model.PID) ([]*model.ItemView, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.batches = append(f.batches, append([]model.PID(nil), pids...))
+	if f.getErr != nil {
+		return nil, f.getErr
+	}
+	var out []*model.ItemView
+	for _, pid := range pids {
+		if iv, ok := f.items[pid]; ok {
+			out = append(out, iv)
+		}
+	}
+	return out, nil
 }
 
 func (f *fakeCatalog) DataVersion(ctx context.Context) (int64, error) {
@@ -345,6 +366,51 @@ func TestPollInvalidation(t *testing.T) {
 	}
 }
 
+// TestLibraryRowFlushesAll: a whole-library relocate rewrites every file.path but
+// emits one library delta, not per-file deltas. The cache cannot map a library to
+// its items, so a library row drops every cached location; the next Locate re-reads
+// the fresh path. This is the relocate blind spot the file-row path does not cover.
+func TestLibraryRowFlushesAll(t *testing.T) {
+	fake := newFakeCatalog()
+	type row struct{ pid, filePID model.PID }
+	items := make([]row, 3)
+	for i := range items {
+		items[i] = row{model.NewPID(), model.NewPID()}
+		fake.setItem(items[i].pid, items[i].filePID, fmt.Sprintf("/old/t%d.wav", i))
+	}
+	c := newTestCache(t, fake)
+	for _, it := range items {
+		if _, err := c.Locate(context.Background(), it.pid); err != nil {
+			t.Fatalf("warm Locate: %v", err)
+		}
+	}
+
+	// A relocate: one library update row, and the paths move on the fake.
+	for i, it := range items {
+		fake.setItem(it.pid, it.filePID, fmt.Sprintf("/new/t%d.wav", i))
+	}
+	fake.commit(model.Change{Seq: 1, EntityType: "library", EntityPID: model.NewPID(), Op: model.OpUpdate})
+	if err := c.Poll(context.Background()); err != nil {
+		t.Fatalf("Poll: %v", err)
+	}
+	for _, it := range items {
+		if _, ok := c.cached(it.pid); ok {
+			t.Fatal("a library relocate row did not drop a cached location")
+		}
+	}
+	if len(c.byFile) != 0 {
+		t.Fatalf("byFile index not emptied after a library flush: %v", c.byFile)
+	}
+	// The re-read serves the relocated path.
+	loc, err := c.Locate(context.Background(), items[0].pid)
+	if err != nil {
+		t.Fatalf("Locate after relocate: %v", err)
+	}
+	if loc.Path != "/new/t0.wav" {
+		t.Fatalf("located %q after relocate, want the fresh path", loc.Path)
+	}
+}
+
 func TestPollPagesToTheTail(t *testing.T) {
 	fake := newFakeCatalog()
 	fake.pageSize = 2
@@ -466,6 +532,156 @@ func TestStoreLosesRaceToInvalidation(t *testing.T) {
 	c.store(model.PID("00000000000000000000000042"), Location{Path: "/other.flac"}, gen)
 	if _, ok := c.cached(model.PID("00000000000000000000000042")); !ok {
 		t.Fatal("a play_state row aborted an unrelated store")
+	}
+}
+
+// TestLocateManyMixedHitMiss: warm pids are served from the cache and only the
+// misses reach the catalog, in one GetMany. The fake records the batch argument,
+// so a hit leaking into the query is caught directly rather than inferred.
+func TestLocateManyMixedHitMiss(t *testing.T) {
+	fake := newFakeCatalog()
+	warm, cold := model.NewPID(), model.NewPID()
+	fake.setItem(warm, model.NewPID(), "/lib/warm.wav")
+	fake.setItem(cold, model.NewPID(), "/lib/cold.wav")
+	c := newTestCache(t, fake)
+
+	if _, err := c.Locate(context.Background(), warm); err != nil {
+		t.Fatalf("warm Locate: %v", err)
+	}
+
+	// A duplicate of each kind: the batch must collapse them, not re-ask.
+	got, err := c.LocateMany(context.Background(), []model.PID{warm, cold, warm, cold})
+	if err != nil {
+		t.Fatalf("LocateMany: %v", err)
+	}
+	if len(got) != 2 || got[warm].Path != "/lib/warm.wav" || got[cold].Path != "/lib/cold.wav" {
+		t.Fatalf("locations = %+v, want the two items", got)
+	}
+	if len(fake.batches) != 1 {
+		t.Fatalf("GetMany calls = %d, want 1", len(fake.batches))
+	}
+	if b := fake.batches[0]; len(b) != 1 || b[0] != cold {
+		t.Fatalf("batch queried %v, want only the cold pid (the warm one must hit the cache)", b)
+	}
+	// The miss was cached: a follow-up batch is all hits and queries nothing.
+	if _, err := c.LocateMany(context.Background(), []model.PID{warm, cold}); err != nil {
+		t.Fatalf("second LocateMany: %v", err)
+	}
+	if len(fake.batches) != 1 {
+		t.Fatalf("GetMany calls = %d after an all-hit batch, want still 1", len(fake.batches))
+	}
+}
+
+// TestLocateManyOmitsUnknown: an unknown pid is an omission, not an error, per
+// the GetMany contract. The error return is reserved for the batch query itself
+// failing, and then no partial map comes back.
+func TestLocateManyOmitsUnknown(t *testing.T) {
+	fake := newFakeCatalog()
+	known := model.NewPID()
+	fake.setItem(known, model.NewPID(), "/lib/t.wav")
+	c := newTestCache(t, fake)
+
+	got, err := c.LocateMany(context.Background(), []model.PID{known, model.NewPID()})
+	if err != nil {
+		t.Fatalf("LocateMany: %v", err)
+	}
+	if len(got) != 1 || got[known].Path != "/lib/t.wav" {
+		t.Fatalf("locations = %+v, want only the known pid", got)
+	}
+
+	sentinel := errors.New("disk on fire")
+	fake.mu.Lock()
+	fake.getErr = sentinel
+	fake.mu.Unlock()
+	got, err = c.LocateMany(context.Background(), []model.PID{model.NewPID()})
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("LocateMany error = %v, want the catalog's own error unchanged", err)
+	}
+	if got != nil {
+		t.Fatalf("failed batch returned a partial map: %+v", got)
+	}
+}
+
+// TestLocateManyLosesRaceToInvalidation: the batch takes one generation snapshot
+// and storeBatch checks it once under one lock, so an invalidation consumed
+// mid-batch keeps the whole batch out of the cache, not just the entries after
+// the racing row (the results themselves are still returned). Same reasoning as
+// store's guard: the invalidating rows are already spent, and a late insert
+// would never be dropped.
+func TestLocateManyLosesRaceToInvalidation(t *testing.T) {
+	fake := newFakeCatalog()
+	c := newTestCache(t, fake)
+	a, b := model.NewPID(), model.NewPID()
+
+	gen := c.generation()
+	c.invalidate([]model.Change{{Seq: 1, EntityType: "item", EntityPID: a, Op: model.OpUpdate}})
+	c.storeBatch([]batchLoc{
+		{pid: a, loc: Location{Path: "/stale-a.flac", FilePID: model.NewPID()}},
+		{pid: b, loc: Location{Path: "/stale-b.flac", FilePID: model.NewPID()}},
+	}, gen)
+	if _, ok := c.cached(a); ok {
+		t.Fatal("storeBatch cached a location from before a consumed invalidation row")
+	}
+	if _, ok := c.cached(b); ok {
+		t.Fatal("a raced batch cached an entry; the whole batch must stay out")
+	}
+
+	// A clean batch store lands.
+	c.storeBatch([]batchLoc{{pid: a, loc: Location{Path: "/fresh.flac", FilePID: model.NewPID()}}}, c.generation())
+	if loc, ok := c.cached(a); !ok || loc.Path != "/fresh.flac" {
+		t.Fatalf("clean batch store missing: %q, %v", loc.Path, ok)
+	}
+}
+
+// TestLocateManyNeverEvicts: a bulk batch at capacity returns its results but
+// does not cache them, so it cannot flush the warm working set. Locate's
+// single-pid path keeps its oldest-out eviction.
+func TestLocateManyNeverEvicts(t *testing.T) {
+	fake := newFakeCatalog()
+	c := newTestCache(t, fake)
+	for i := 0; i < maxEntries; i++ {
+		c.store(model.PID(fmt.Sprintf("%026d", i)), Location{Path: fmt.Sprintf("/x/%d", i)}, c.generation())
+	}
+	oldest := model.PID(fmt.Sprintf("%026d", 0))
+
+	pid := model.NewPID()
+	fake.setItem(pid, model.NewPID(), "/lib/bulk.wav")
+	got, err := c.LocateMany(context.Background(), []model.PID{pid})
+	if err != nil {
+		t.Fatalf("LocateMany: %v", err)
+	}
+	if got[pid].Path != "/lib/bulk.wav" {
+		t.Fatalf("locations = %+v, want the resolved item even uncached", got)
+	}
+	if _, ok := c.cached(pid); ok {
+		t.Fatal("a batch result was cached at capacity; it must not evict for a bulk sweep")
+	}
+	if _, ok := c.cached(oldest); !ok {
+		t.Fatal("the batch evicted the oldest warm entry")
+	}
+}
+
+// TestLocateManyEntriesInvalidateViaByFile: batch-cached entries share the byFile
+// reverse index, so a later file change row (a rename) drops them like any
+// Locate-cached entry.
+func TestLocateManyEntriesInvalidateViaByFile(t *testing.T) {
+	fake := newFakeCatalog()
+	pid, filePID := model.NewPID(), model.NewPID()
+	fake.setItem(pid, filePID, "/lib/t.wav")
+	c := newTestCache(t, fake)
+
+	if _, err := c.LocateMany(context.Background(), []model.PID{pid}); err != nil {
+		t.Fatalf("LocateMany: %v", err)
+	}
+	if _, ok := c.cached(pid); !ok {
+		t.Fatal("batch result was not cached")
+	}
+	c.invalidate([]model.Change{{Seq: 1, EntityType: "file", EntityPID: filePID, Op: model.OpUpdate}})
+	if _, ok := c.cached(pid); ok {
+		t.Fatal("file change row did not drop the batch-cached location")
+	}
+	if len(c.byFile) != 0 {
+		t.Fatalf("byFile index not emptied: %v", c.byFile)
 	}
 }
 

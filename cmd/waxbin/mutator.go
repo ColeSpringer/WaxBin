@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/colespringer/waxbin"
+	"github.com/colespringer/waxbin/config"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/proxy"
 	"github.com/colespringer/waxbin/query"
@@ -294,6 +295,15 @@ func (m *mutator) FetchTranscript(ctx context.Context, episodePID model.PID) err
 		return m.px.FetchTranscript(ctx, episodePID)
 	}
 	return m.lib.Podcasts().FetchTranscript(ctx, episodePID)
+}
+
+func (m *mutator) AddRoot(ctx context.Context, spec config.Root) (*model.Library, error) {
+	if m.px != nil {
+		return m.px.AddRoot(ctx, proxy.AddRootParams{
+			Path: spec.Path, Mode: string(spec.Mode), Media: string(spec.Media), Profile: spec.Profile,
+		})
+	}
+	return m.lib.AddRoot(ctx, spec)
 }
 
 // toPIDs converts a wire string slice into a PID slice.

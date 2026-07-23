@@ -376,6 +376,19 @@ func (c *Client) FetchTranscript(ctx context.Context, episodePID model.PID) erro
 	return c.call(ctx, MethodFetchTranscript, FetchTranscriptParams{EpisodePID: string(episodePID)}, nil)
 }
 
+// AddRoot proxies registering a library root at runtime, returning the upserted
+// library row. The mutation must land in the server's catalog because the server
+// is the process that scans; validation against the registered set runs there
+// too. No protocol bump: an older server answers unknown-method rather than
+// misdriving.
+func (c *Client) AddRoot(ctx context.Context, params AddRootParams) (*model.Library, error) {
+	var lib model.Library
+	if err := c.call(ctx, MethodAddRoot, params, &lib); err != nil {
+		return nil, err
+	}
+	return &lib, nil
+}
+
 // RunScan submits a scan to the server and returns the started job's PID. The
 // server runs the job in its own process (staying available); the caller tails the
 // job through a read-only catalog handle.

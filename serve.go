@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strings"
 
+	"github.com/colespringer/waxbin/config"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/proxy"
 	"github.com/colespringer/waxbin/query"
@@ -386,6 +387,18 @@ func (l *Library) proxyHandlers() map[string]proxy.Handler {
 			}
 			// The fetch runs in this (server) process, under its network policy.
 			return nil, l.podcasts.FetchTranscript(ctx, model.PID(p.EpisodePID))
+		},
+		proxy.MethodAddRoot: func(ctx context.Context, raw json.RawMessage) (any, error) {
+			p, err := decodeParams[proxy.AddRootParams](raw)
+			if err != nil {
+				return nil, err
+			}
+			// AddRoot validates the spec (mode/media vocabulary, overlaps) against
+			// this server's registered set, which is the catalog that matters: this
+			// process is the one that scans.
+			return l.AddRoot(ctx, config.Root{
+				Path: p.Path, Mode: model.Mode(p.Mode), Media: model.MediaType(p.Media), Profile: p.Profile,
+			})
 		},
 		proxy.MethodRunScan: func(ctx context.Context, raw json.RawMessage) (any, error) {
 			p, err := decodeParams[proxy.ScanParams](raw)

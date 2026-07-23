@@ -52,6 +52,7 @@ func newRootCmd(g *globals) *cobra.Command {
 
 	root.AddCommand(
 		newInitCmd(g),
+		newLibraryCmd(g),
 		newScanCmd(g),
 		newWatchCmd(g),
 		newAnalyzeCmd(g),
