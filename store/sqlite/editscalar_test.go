@@ -81,7 +81,7 @@ func TestEditBookScalarFields(t *testing.T) {
 
 	edits := map[string]string{
 		"asin":        "B0067890AB",
-		"isbn":        "9780000000001",
+		"isbn":        "9780000000002",
 		"publisher":   "Recorded Books",
 		"edition":     "Deluxe",
 		"description": "A long description.",
@@ -98,7 +98,7 @@ func TestEditBookScalarFields(t *testing.T) {
 		string(pid)).Scan(&asin, &isbn, &publisher, &edition, &description, &mbid); err != nil {
 		t.Fatalf("read book: %v", err)
 	}
-	if asin != "B0067890AB" || isbn != "9780000000001" || publisher != "Recorded Books" ||
+	if asin != "B0067890AB" || isbn != "9780000000002" || publisher != "Recorded Books" ||
 		edition != "Deluxe" || description != "A long description." ||
 		mbid != "c5e3a0f1-1111-2222-3333-444455556666" {
 		t.Fatalf("book = asin %q isbn %q pub %q ed %q desc %q mbid %q",

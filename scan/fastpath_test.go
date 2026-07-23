@@ -550,7 +550,7 @@ func TestLyricsPartialDiagnosticClearsOnRepair(t *testing.T) {
 	lrc := filepath.Join(root, "a.lrc")
 	partial := func() []model.FileDiagnostic {
 		t.Helper()
-		ds, err := st.FileDiagnostics(context.Background())
+		ds, err := st.FileDiagnostics(context.Background(), model.DiagnosticFilter{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -620,7 +620,7 @@ func TestOversizedSidecarSkipped(t *testing.T) {
 	// And the skip must be visible. A sidecar sitting beside the audio doing nothing,
 	// with nothing anywhere explaining why, is the exact failure this vocabulary exists
 	// to prevent.
-	ds, err := st.FileDiagnostics(context.Background())
+	ds, err := st.FileDiagnostics(context.Background(), model.DiagnosticFilter{})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -138,6 +138,14 @@ type BatchEditResult struct {
 	Skipped []PID
 }
 
+// ItemFieldEdit pairs one item with its own field-edit map, for the per-item-map
+// batch edit (EditItemsFields): each item in the batch gets different values,
+// where EditManyFields applies one map to every item.
+type ItemFieldEdit struct {
+	ItemPID PID
+	Fields  map[string]string
+}
+
 // FieldProvenance is one provenance row: a field's source, lock state, the curated
 // value when a user set one, and the provider that supplied an enrichment value.
 type FieldProvenance struct {

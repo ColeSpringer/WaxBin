@@ -102,6 +102,15 @@ func (s *Store) EditEntityFields(ctx context.Context, entityType model.MergeEnti
 			if v != "" && !model.ValidReleaseGroupType(v) {
 				return waxerr.New(waxerr.CodeInvalid, op, "invalid release-group type: "+v)
 			}
+		case "barcode":
+			// Normalized before the norm map is built, like the item-edit identifier
+			// fields, so the stored column, the curation row, and the fanned tag all
+			// carry the canonical digits.
+			nv, ok := model.NormalizeBarcode(v)
+			if !ok {
+				return waxerr.New(waxerr.CodeInvalid, op, "invalid barcode value: "+v)
+			}
+			v = nv
 		}
 		norm[f] = v
 	}

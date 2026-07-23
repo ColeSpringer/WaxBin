@@ -39,7 +39,7 @@ func TestEditEntityAlbumIdentifiers(t *testing.T) {
 	albumPID := entityPIDByCol(t, st, "album", "title", "Album")
 
 	if err := st.EditEntityFields(ctx, model.MergeAlbum, albumPID,
-		map[string]string{"barcode": "0123456789", "catalog_number": "CAT-1", "label": "Indie Co"},
+		map[string]string{"barcode": "036000291452", "catalog_number": "CAT-1", "label": "Indie Co"},
 		model.SourceUser, true, false); err != nil {
 		t.Fatalf("edit album: %v", err)
 	}
@@ -50,7 +50,7 @@ func TestEditEntityAlbumIdentifiers(t *testing.T) {
 		string(albumPID)).Scan(&barcode, &catalog, &label); err != nil {
 		t.Fatalf("read album cols: %v", err)
 	}
-	if barcode != "0123456789" || catalog != "CAT-1" || label != "Indie Co" {
+	if barcode != "036000291452" || catalog != "CAT-1" || label != "Indie Co" {
 		t.Fatalf("album identifiers not written: barcode=%q catalog=%q label=%q", barcode, catalog, label)
 	}
 
@@ -108,6 +108,9 @@ func TestScanPopulatesAlbumIdentifiers(t *testing.T) {
 		Scan(&barcode, &label, &catalog); err != nil {
 		t.Fatalf("read album: %v", err)
 	}
+	// The scanned barcode is stored verbatim, checksum or not: identifier
+	// validation is an edit-surface contract, and the scan stays faithful to the
+	// file's tags.
 	if barcode != "0123456789" || label != "Indie Co" || catalog != "CAT-1" {
 		t.Fatalf("scan did not populate album identifiers: barcode=%q label=%q catalog=%q", barcode, label, catalog)
 	}

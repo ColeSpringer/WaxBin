@@ -92,6 +92,51 @@ func TestRoundTripAndResultPayload(t *testing.T) {
 	}
 }
 
+// TestEditBatchRoundTrip checks a per-item-map batch carries each entry's own
+// fields over the wire and the shared batch-result shape comes back intact,
+// per-item write-back failures included.
+func TestEditBatchRoundTrip(t *testing.T) {
+	handlers := map[string]proxy.Handler{
+		proxy.MethodEditBatch: func(_ context.Context, raw json.RawMessage) (any, error) {
+			var p proxy.EditBatchParams
+			if err := json.Unmarshal(raw, &p); err != nil {
+				t.Errorf("unmarshal params: %v", err)
+			}
+			if len(p.Items) != 2 ||
+				p.Items[0].ItemPID != "i1" || p.Items[0].Fields["title"] != "Opener" ||
+				p.Items[1].ItemPID != "i2" || p.Items[1].Fields["track_no"] != "9" {
+				t.Errorf("server got items %+v", p.Items)
+			}
+			if !p.WriteBack || !p.Lock || p.Force || !p.SkipLocked {
+				t.Errorf("server got flags %+v", p)
+			}
+			return proxy.EditManyFieldsResult{
+				Edited:  []string{"i1", "i2"},
+				Skipped: []string{"i3"},
+				WriteBackFailures: map[string][]proxy.WriteBackFailure{
+					"i2": {{FilePID: "f2", Path: "/two.mp3", Reason: "shared file"}},
+				},
+			}, nil
+		},
+	}
+	c := dial(t, startServer(t, handlers, nil))
+
+	res, err := c.EditBatch(context.Background(), []proxy.ItemFieldsEdit{
+		{ItemPID: "i1", Fields: map[string]string{"title": "Opener"}},
+		{ItemPID: "i2", Fields: map[string]string{"track_no": "9"}},
+	}, true, true, false, true)
+	if err != nil {
+		t.Fatalf("edit batch: %v", err)
+	}
+	if len(res.Edited) != 2 || len(res.Skipped) != 1 || res.Skipped[0] != "i3" {
+		t.Fatalf("result = %+v", res)
+	}
+	fails := res.WriteBackFailures["i2"]
+	if len(fails) != 1 || fails[0].Path != "/two.mp3" {
+		t.Fatalf("write-back failures = %+v", res.WriteBackFailures)
+	}
+}
+
 // TestCurationRoundTrip checks the curation set methods carry their params over the
 // wire (including image bytes and a nested lyrics struct) and that a credit
 // write-back failure comes back as an ok result, matching edit_fields.

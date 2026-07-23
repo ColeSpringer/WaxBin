@@ -264,10 +264,12 @@ func (l *Library) Browse(ctx context.Context, list read.DiscoveryList, opt read.
 	return l.store.BrowsePage(ctx, list, opt)
 }
 
-// Search runs a grouped, BM25-ranked metadata search across artists, albums, and
-// tracks. Field weighting puts title hits above artist and album hits. The
-// Episodes group is reserved for transcript-backed podcast search and stays empty
-// until transcripts are indexed.
+// Search runs a grouped, BM25-ranked search across artists, albums, tracks,
+// books, and episodes (episode transcript-body hits rank below metadata hits).
+// Field weighting puts title hits above artist and album hits. opt.MaxCandidates
+// bounds how many matches are ranked (recency-biased under truncation) and
+// opt.Libraries scopes the search to items playable from those libraries; see
+// read.SearchOptions for both contracts.
 func (l *Library) Search(ctx context.Context, q string, opt read.SearchOptions) (*read.SearchResult, error) {
 	return l.store.Search(ctx, q, opt)
 }
@@ -322,6 +324,25 @@ func (l *Library) GetMany(ctx context.Context, pids []model.PID) ([]*model.ItemV
 	return l.store.ItemsByPIDs(ctx, pids)
 }
 
+// ItemsByEssence returns every item backed by a file with the given audio
+// essence hash, matching any of an item's files. The essence hash is
+// tag-stable (it survives a retag), which makes it the dedup oracle: "do I
+// already hold this audio". The result is 0, 1, or N items; a single-file CUE
+// album returns one item per virtual track carved from the shared file. A
+// clean miss is an empty slice, not an error.
+func (l *Library) ItemsByEssence(ctx context.Context, essence string) ([]*model.ItemView, error) {
+	return l.store.ItemsByEssence(ctx, essence)
+}
+
+// ItemsByContentHash returns every item backed by a file with the given
+// whole-file content hash (identity.ContentHash, "sha256:" plus hex). Unlike
+// the essence hash it changes on any byte change, tag writes included, which
+// makes it the pre-transfer byte-identity probe: "do I already hold these
+// exact bytes". Same result shape as ItemsByEssence.
+func (l *Library) ItemsByContentHash(ctx context.Context, hash string) ([]*model.ItemView, error) {
+	return l.store.ItemsByContentHash(ctx, hash)
+}
+
 // Book returns the full detail for an audiobook: subtitle, series placement,
 // role-tagged contributors (author/narrator/...), backing parts in reading order,
 // and chapters resolved to book-timeline offsets with the total duration.
@@ -361,6 +382,16 @@ func (l *Library) BookResume(ctx context.Context, userPID, bookPID model.PID) (*
 // BooksInSeries lists a series' books in sequence order (decimal/string aware).
 func (l *Library) BooksInSeries(ctx context.Context, seriesPID model.PID) ([]*model.ItemView, error) {
 	return l.store.BooksInSeries(ctx, seriesPID)
+}
+
+// EntityByPID returns the summary info for one shared entity (artist, release
+// group, album, genre, or series) by its public id: name, sort key, external
+// identifiers, parent links, membership counts, and the libraries its members'
+// files live in. It answers the pid a facet bucket, an entity-handle query
+// field, or an item view hands out, without a facet scan. An unknown kind is
+// CodeInvalid; an unknown pid is CodeNotFound.
+func (l *Library) EntityByPID(ctx context.Context, kind read.EntityKind, pid model.PID) (*read.EntityInfo, error) {
+	return l.store.EntityByPID(ctx, kind, pid)
 }
 
 // Stats returns a library summary using the same Facet grouping as browse plus
@@ -763,6 +794,23 @@ func (l *Library) Audit(ctx context.Context, opts AuditOptions) (*audit.Report, 
 	return l.auditor.Run(ctx, audit.Config{Only: opts.Only, Integrity: opts.Integrity, Sample: opts.Sample})
 }
 
+// FileDiagnostics returns the persisted per-file diagnostics matching the
+// filter (the zero filter returns everything), each joined to its file's
+// display path, in a stable path/origin/code order. It is the query surface
+// over the rows scan, organize, analyze, and edit write-back record, so a
+// consumer can drive a review queue ("which files have unsynced tags in this
+// library") without running a full audit.
+func (l *Library) FileDiagnostics(ctx context.Context, filter model.DiagnosticFilter) ([]model.FileDiagnostic, error) {
+	return l.store.FileDiagnostics(ctx, filter)
+}
+
+// DiagnosticSummary returns the matching diagnostics grouped by writer, code,
+// and severity, most severe first. The filter's dimensions apply; its Limit and
+// Offset do not (a summary aggregates the whole match).
+func (l *Library) DiagnosticSummary(ctx context.Context, filter model.DiagnosticFilter) ([]model.DiagnosticCount, error) {
+	return l.store.DiagnosticSummary(ctx, filter)
+}
+
 // OrphanGraceWindow is how long an entity must stay childless before the manual
 // orphan GC sweeps it. It is the safety backstop to the scanner's survival gate: a
 // transient reconciliation blip that briefly orphans an entity will not delete it
@@ -957,8 +1005,44 @@ func (l *Library) EditManyFields(ctx context.Context, itemPIDs []model.PID, edit
 	if !opts.WriteBack {
 		return out, nil
 	}
-	for _, pid := range res.Edited {
-		wberr := l.writeBackFields(ctx, pid, edits)
+	return out, l.batchWriteBack(ctx, out, func(model.PID) map[string]string { return edits })
+}
+
+// EditItemsFields applies a per-item field-edit map to several items in one
+// atomic transaction: each entry carries its own values (distinct titles and
+// track numbers across an album, say) where EditManyFields applies one map to
+// every item. The whole catalog batch commits or rolls back together; a
+// duplicate pid or any invalid entry rejects it. Write-back then mirrors each
+// edited item's own map into its on-disk tags, per item and best-effort,
+// exactly as EditManyFields does; see there for the error contract (the
+// returned result stays meaningful when err reports a post-commit write-back
+// interruption).
+func (l *Library) EditItemsFields(ctx context.Context, edits []model.ItemFieldEdit, opts EditOptions) (*BatchEditResult, error) {
+	res, err := l.store.EditItemsFields(ctx, edits, model.SourceUser, opts.Lock, opts.Force, opts.SkipLocked)
+	if err != nil {
+		return nil, err
+	}
+	out := &BatchEditResult{Edited: res.Edited, Skipped: res.Skipped}
+	if !opts.WriteBack {
+		return out, nil
+	}
+	fieldsByPID := make(map[model.PID]map[string]string, len(edits))
+	for _, e := range edits {
+		fieldsByPID[e.ItemPID] = e.Fields
+	}
+	return out, l.batchWriteBack(ctx, out, func(pid model.PID) map[string]string { return fieldsByPID[pid] })
+}
+
+// batchWriteBack mirrors a committed batch's edits into each edited item's
+// on-disk tags, one item at a time, recording a per-item WriteBackError on out
+// instead of failing the rest. fieldsFor supplies the map that was applied to
+// a given item: the shared map for EditManyFields, the item's own for
+// EditItemsFields. Only a non-write-back error (a canceled context) aborts the
+// pass and is returned; the catalog batch has already committed either way, so
+// the caller hands out back alongside that error.
+func (l *Library) batchWriteBack(ctx context.Context, out *BatchEditResult, fieldsFor func(model.PID) map[string]string) error {
+	for _, pid := range out.Edited {
+		wberr := l.writeBackFields(ctx, pid, fieldsFor(pid))
 		if wberr == nil {
 			continue
 		}
@@ -970,11 +1054,9 @@ func (l *Library) EditManyFields(ctx context.Context, itemPIDs []model.PID, edit
 			out.WriteBackErrors[pid] = wbe
 			continue
 		}
-		// A non-write-back error (e.g. a canceled context) aborts the remaining
-		// write-backs; the catalog batch already committed.
-		return out, wberr
+		return wberr
 	}
-	return out, nil
+	return nil
 }
 
 // WriteBackFailure records one backing file whose on-disk tag write-back did not
@@ -1319,11 +1401,13 @@ func (l *Library) recordWriteBackDrift(ctx context.Context, filePID model.PID, d
 
 // tagEditsForFields turns committed field edits into on-disk tag edits. Each tag key
 // comes from meta.TagKeyForField, the field-to-tag-key source of truth shared with
-// organize. Values are trimmed to match what the store persisted, since the store
-// trims every edited value, so surrounding whitespace can never put the on-disk tag
-// out of step with the catalog. A value that is empty after trimming clears the tag.
-// An unmapped field is a programming error and returns CodeInternal, since the store
-// has already checked the field is a real metadata field.
+// organize. Values are trimmed and identifier-normalized to match what the store
+// persisted (the store trims every edited value and normalizes isrc/isbn/asin
+// through the same model normalizers), so neither surrounding whitespace nor an
+// identifier's separators can put the on-disk tag out of step with the catalog
+// column. A value that is empty after trimming clears the tag. An unmapped field is
+// a programming error and returns CodeInternal, since the store has already checked
+// the field is a real metadata field.
 func tagEditsForFields(edits map[string]string) ([]meta.TagEdit, error) {
 	out := make([]meta.TagEdit, 0, len(edits))
 	for field, value := range edits {
@@ -1337,7 +1421,9 @@ func tagEditsForFields(edits map[string]string) ([]meta.TagEdit, error) {
 		// validated it is a boolean), and always write it rather than clearing.
 		if field == "compilation" {
 			e.Values = []string{compilationTagValue(value)}
-		} else if v := strings.TrimSpace(value); v != "" {
+		} else if v, _ := model.NormalizeIdentifierField(field, strings.TrimSpace(value)); v != "" {
+			// The store already rejected a malformed identifier before commit, so the
+			// normalization here cannot fail; it just reproduces the stored form.
 			e.Values = []string{v}
 		}
 		out = append(out, e)

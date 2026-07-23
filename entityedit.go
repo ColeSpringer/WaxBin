@@ -89,8 +89,10 @@ func (l *Library) writeBackEntity(ctx context.Context, entityType model.MergeEnt
 
 // entityTagEditsForFields maps a committed entity edit to the on-disk tags that fan out
 // across the member files. A field with no fanned tag (a release-group field, a type or
-// artist MBID) is skipped: those values stay DB-only. A value empty after trimming
-// clears its tag.
+// artist MBID) is skipped: those values stay DB-only. Values are trimmed and
+// identifier-normalized the way the store normalized them before commit (barcode is
+// the one identifier here), so the fanned tag always carries the stored form. A value
+// empty after trimming clears its tag.
 func entityTagEditsForFields(entityType model.MergeEntity, edits map[string]string) []meta.TagEdit {
 	out := make([]meta.TagEdit, 0, len(edits))
 	for field, value := range edits {
@@ -99,7 +101,7 @@ func entityTagEditsForFields(entityType model.MergeEntity, edits map[string]stri
 			continue
 		}
 		e := meta.TagEdit{Key: key}
-		if v := strings.TrimSpace(value); v != "" {
+		if v, _ := model.NormalizeIdentifierField(field, strings.TrimSpace(value)); v != "" {
 			e.Values = []string{v}
 		}
 		out = append(out, e)

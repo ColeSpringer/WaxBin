@@ -90,6 +90,119 @@ func TestEditFieldWriteBack(t *testing.T) {
 	}
 }
 
+// TestEditWriteBackNormalizesIdentifier verifies an identifier edit stores and
+// writes the canonical form: the loosely-spelled ISRC lands normalized in the
+// catalog column and in the file's tags alike, so the two can never diverge.
+func TestEditWriteBackNormalizesIdentifier(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	src := filepath.Join(root, "song.mp3")
+	writeFile(t, src, testaudio.BuildMP3("Original", "Artist", "Album", 1))
+
+	lib := openManaged(t, ctx, db, root)
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	pid := itemPIDByTitle(t, ctx, lib, "Original")
+
+	if err := lib.EditFields(ctx, pid, map[string]string{"isrc": "us-rc1-77-00001"},
+		waxbin.EditOptions{Lock: true, WriteBack: true}); err != nil {
+		t.Fatalf("edit with write-back: %v", err)
+	}
+
+	fm, err := meta.NewReader().Read(ctx, src)
+	if err != nil {
+		t.Fatalf("read tags: %v", err)
+	}
+	if fm.Tags.ISRC != "USRC17700001" {
+		t.Errorf("on-disk isrc = %q, want the normalized USRC17700001", fm.Tags.ISRC)
+	}
+	prov, _ := lib.Provenance(ctx, pid)
+	for _, p := range prov {
+		if p.Field == "isrc" && p.Value != "USRC17700001" {
+			t.Errorf("provenance value = %q, want the normalized form", p.Value)
+		}
+	}
+
+	// A malformed identifier is a usage error, refused before the catalog write.
+	if err := lib.EditFields(ctx, pid, map[string]string{"isrc": "nope"},
+		waxbin.EditOptions{Lock: true, Force: true}); !waxerr.Is(err, waxerr.CodeInvalid) {
+		t.Errorf("malformed isrc = %v, want CodeInvalid", err)
+	}
+}
+
+// TestEditItemsFieldsWriteBackPerItem verifies the per-item-map batch mirrors
+// each item's own values to disk, and a single item whose file refuses the
+// write (a shared/virtual file) is reported under its pid while the atomic
+// catalog batch and the sibling's on-disk sync both stand.
+func TestEditItemsFieldsWriteBackPerItem(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	one := filepath.Join(root, "one.mp3")
+	two := filepath.Join(root, "two.mp3")
+	writeFile(t, one, testaudio.BuildMP3WithAudio("One", "Artist", "Album", 1, testaudio.AudioWithSeed(1)))
+	writeFile(t, two, testaudio.BuildMP3WithAudio("Two", "Artist", "Album", 2, testaudio.AudioWithSeed(2)))
+
+	lib := openManaged(t, ctx, db, root)
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	p1 := itemPIDByTitle(t, ctx, lib, "One")
+	p2 := itemPIDByTitle(t, ctx, lib, "Two")
+
+	// The second item's backing file reads as virtual/shared, so its write-back
+	// is refused while the first proceeds.
+	makeBackingFileVirtual(t, ctx, db, p2)
+
+	res, err := lib.EditItemsFields(ctx, []model.ItemFieldEdit{
+		{ItemPID: p1, Fields: map[string]string{"comment": "first note"}},
+		{ItemPID: p2, Fields: map[string]string{"comment": "second note"}},
+	}, waxbin.EditOptions{Lock: true, WriteBack: true})
+	if err != nil {
+		t.Fatalf("batch: %v", err)
+	}
+	if len(res.Edited) != 2 {
+		t.Fatalf("edited = %v, want both (catalog batch is atomic)", res.Edited)
+	}
+	if len(res.WriteBackErrors) != 1 || res.WriteBackErrors[p2] == nil {
+		t.Fatalf("write-back errors = %v, want exactly the refused item %s", res.WriteBackErrors, p2)
+	}
+
+	// The first item's file carries ITS map's value; the second's stays untouched.
+	fm, err := meta.NewReader().Read(ctx, one)
+	if err != nil {
+		t.Fatalf("read one: %v", err)
+	}
+	if fm.Tags.Comment != "first note" {
+		t.Errorf("one comment = %q, want the item's own value", fm.Tags.Comment)
+	}
+	fm, err = meta.NewReader().Read(ctx, two)
+	if err != nil {
+		t.Fatalf("read two: %v", err)
+	}
+	if fm.Tags.Comment == "second note" {
+		t.Error("the refused file was written anyway")
+	}
+	// Both catalog rows carry their own values regardless.
+	for pid, want := range map[model.PID]string{p1: "first note", p2: "second note"} {
+		prov, err := lib.Provenance(ctx, pid)
+		if err != nil {
+			t.Fatalf("provenance %s: %v", pid, err)
+		}
+		found := false
+		for _, p := range prov {
+			if p.Field == "comment" && p.Value == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("%s provenance lacks comment=%q", pid, want)
+		}
+	}
+}
+
 // TestEditWriteBackSharedFileRefused verifies write-back to a file with an offset
 // window (a virtual/shared file whose tags are global to it) is refused with a
 // WriteBackError while the catalog edit still lands and a drift diagnostic is

@@ -33,8 +33,10 @@ type Store interface {
 	DerivedDrift(ctx context.Context) (model.DerivedDrift, error)
 	// FileDiagnostics returns the diagnostics the scan and the tag writers persisted.
 	// It is on the port (rather than audit reaching for waxlabel itself) for the same
-	// reason AudioProbe is: the audit stays free of the tag library.
-	FileDiagnostics(ctx context.Context) ([]model.FileDiagnostic, error)
+	// reason AudioProbe is: the audit stays free of the tag library. The audit always
+	// passes the zero filter (the full dump); the filter exists for the query surface
+	// the store shares with the facade.
+	FileDiagnostics(ctx context.Context, filter model.DiagnosticFilter) ([]model.FileDiagnostic, error)
 	// DiagnosticCoverage reports how many audio files have not had diagnostics
 	// derived under the current rule set, and the total.
 	DiagnosticCoverage(ctx context.Context) (stale, total int, err error)
@@ -167,7 +169,7 @@ func (a *Auditor) Run(ctx context.Context, cfg Config) (*Report, error) {
 	var corruptSeen map[string]bool
 	runDiag, runCorrupt := a.runs(cfg, model.CheckFileDiagnostic), a.runs(cfg, model.CheckCorruptAudio)
 	if runDiag || runCorrupt {
-		ds, err := a.store.FileDiagnostics(ctx)
+		ds, err := a.store.FileDiagnostics(ctx, model.DiagnosticFilter{})
 		if err != nil {
 			return nil, err
 		}

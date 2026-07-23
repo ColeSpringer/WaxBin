@@ -68,6 +68,32 @@ func (m *mutator) EditManyFields(ctx context.Context, pids []model.PID, edits ma
 	return m.lib.EditManyFields(ctx, pids, edits, opts)
 }
 
+func (m *mutator) EditItemsFields(ctx context.Context, edits []model.ItemFieldEdit, opts waxbin.EditOptions) (*waxbin.BatchEditResult, error) {
+	if m.px != nil {
+		items := make([]proxy.ItemFieldsEdit, len(edits))
+		fieldsByPID := make(map[string]map[string]string, len(edits))
+		for i, e := range edits {
+			items[i] = proxy.ItemFieldsEdit{ItemPID: string(e.ItemPID), Fields: e.Fields}
+			fieldsByPID[string(e.ItemPID)] = e.Fields
+		}
+		res, err := m.px.EditBatch(ctx, items, opts.WriteBack, opts.Lock, opts.Force, opts.SkipLocked)
+		if err != nil {
+			return nil, err
+		}
+		out := &waxbin.BatchEditResult{Edited: toPIDs(res.Edited), Skipped: toPIDs(res.Skipped)}
+		if len(res.WriteBackFailures) > 0 {
+			out.WriteBackErrors = make(map[model.PID]*waxbin.WriteBackError, len(res.WriteBackFailures))
+			for pid, fails := range res.WriteBackFailures {
+				out.WriteBackErrors[model.PID(pid)] = &waxbin.WriteBackError{
+					ItemPID: model.PID(pid), Edits: fieldsByPID[pid], Failures: fromProxyFailures(fails),
+				}
+			}
+		}
+		return out, nil
+	}
+	return m.lib.EditItemsFields(ctx, edits, opts)
+}
+
 func (m *mutator) SetCredits(ctx context.Context, pid model.PID, role model.ContributorRole, names []string, opts waxbin.CreditEditOptions) (int, error) {
 	if m.px != nil {
 		res, err := m.px.SetCredits(ctx, pid, string(role), names, opts.WriteBack, opts.Lock, opts.Force)

@@ -96,6 +96,29 @@ func (s *Store) Libraries(ctx context.Context) ([]*model.Library, error) {
 	return out, rows.Err()
 }
 
+// libraryIDsByPIDs resolves library pids to rowids, in input order. An unknown
+// pid is CodeNotFound rather than a silently narrower scope, the same treatment
+// userStateJoin gives a bad user pid. A nil or empty input returns nil. The
+// per-pid lookup is fine at this table's size (a handful of roots).
+func (s *Store) libraryIDsByPIDs(ctx context.Context, pids []model.PID, op string) ([]int64, error) {
+	if len(pids) == 0 {
+		return nil, nil
+	}
+	out := make([]int64, 0, len(pids))
+	for _, pid := range pids {
+		var id int64
+		err := s.read.QueryRowContext(ctx, "SELECT id FROM library WHERE pid = ?", string(pid)).Scan(&id)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, waxerr.New(waxerr.CodeNotFound, op, "no such library: "+string(pid))
+		}
+		if err != nil {
+			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		out = append(out, id)
+	}
+	return out, nil
+}
+
 // PutScannedTrack persists one scanned track atomically: resolve/insert the
 // file (preserving pid on a path or essence match), resolve/insert the logical
 // item by (kind, identity_key), upsert the track subtype, and link them, writing

@@ -92,6 +92,7 @@ func newRootCmd(g *globals) *cobra.Command {
 		newJobsCmd(g),
 		newMergeCmd(g),
 		newAuditCmd(g),
+		newDiagnosticsCmd(g),
 		newUpgradeCmd(g),
 		newServeCmd(g),
 		newDBCmd(g),

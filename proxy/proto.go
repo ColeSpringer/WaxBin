@@ -41,6 +41,7 @@ const (
 	MethodPing             = "ping"
 	MethodEditFields       = "edit_fields"
 	MethodEditManyFields   = "edit_many_fields"
+	MethodEditBatch        = "edit_batch"
 	MethodSetCredits       = "set_credits"
 	MethodSetLyrics        = "set_lyrics"
 	MethodSetChapters      = "set_chapters"
@@ -172,6 +173,24 @@ type EditManyFieldsResult struct {
 	Edited            []string                      `json:"edited,omitempty"`
 	Skipped           []string                      `json:"skipped,omitempty"`
 	WriteBackFailures map[string][]WriteBackFailure `json:"writeBackFailures,omitempty"`
+}
+
+// ItemFieldsEdit is one entry of an edit_batch request: an item and its own
+// field map.
+type ItemFieldsEdit struct {
+	ItemPID string            `json:"itemPid"`
+	Fields  map[string]string `json:"fields"`
+}
+
+// EditBatchParams is the edit_batch request payload: a per-item-map batch edit,
+// each item carrying its own fields where edit_many_fields shares one map. The
+// response reuses EditManyFieldsResult (the same atomic-batch shape).
+type EditBatchParams struct {
+	Items      []ItemFieldsEdit `json:"items"`
+	WriteBack  bool             `json:"writeBack"`
+	Lock       bool             `json:"lock"`
+	Force      bool             `json:"force"`
+	SkipLocked bool             `json:"skipLocked"`
 }
 
 // SetCreditsParams is the set_credits request payload.

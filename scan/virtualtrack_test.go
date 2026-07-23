@@ -159,7 +159,7 @@ func TestScanVirtualTracksDropsUnindexedTrack(t *testing.T) {
 	}
 
 	// The drop is visible, not silent.
-	ds, err := st.FileDiagnostics(ctx)
+	ds, err := st.FileDiagnostics(ctx, model.DiagnosticFilter{})
 	if err != nil {
 		t.Fatalf("file diagnostics: %v", err)
 	}
@@ -209,7 +209,7 @@ func TestScanCueWithNoUsableTracksKeepsTheFile(t *testing.T) {
 	}
 	// The drop is reported even though the file never reached the rip path, and both
 	// tracks are named in the one row file_diagnostic's key allows per code.
-	ds, err := st.FileDiagnostics(ctx)
+	ds, err := st.FileDiagnostics(ctx, model.DiagnosticFilter{})
 	if err != nil {
 		t.Fatalf("file diagnostics: %v", err)
 	}

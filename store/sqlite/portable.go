@@ -50,6 +50,29 @@ func (s *Store) ItemsByEssence(ctx context.Context, essence string) ([]*model.It
 	return out, nil
 }
 
+// ItemsByContentHash returns every item backed by a file with the given content
+// hash, matching any of an item's files, mirroring ItemsByEssence over the
+// file_content index. The content hash covers the whole file byte for byte
+// (identity.ContentHash, "sha256:" plus hex), so it changes on any tag write:
+// it answers "do I already hold these exact bytes" before a transfer, where the
+// essence hash stays the dedup oracle across retags. Like the essence lookup,
+// a single-file CUE album returns one item per virtual track sharing the file.
+// Returns an empty slice, not an error, on a clean miss.
+func (s *Store) ItemsByContentHash(ctx context.Context, hash string) ([]*model.ItemView, error) {
+	const op = "store.ItemsByContentHash"
+	if hash == "" {
+		return nil, nil
+	}
+	rows, err := s.read.QueryContext(ctx, itemSelect+` WHERE pi.id IN (
+		SELECT itf.item_id FROM item_file itf
+		JOIN file f2 ON f2.id = itf.file_id
+		WHERE f2.content_hash = ?)`, hash)
+	if err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	return collectItems(rows, op)
+}
+
 // ItemByRecordingMBID returns the single track item whose recording MBID matches
 // (case-insensitively). It returns CodeNotFound for zero matches or for more than one:
 // a recording legitimately appears on both a single and a compilation, and resolving an

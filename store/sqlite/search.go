@@ -38,13 +38,102 @@ func searchFetchCap(limit int) int {
 	return cap
 }
 
+// searchDisplayCols and searchDisplayJoins render one matched item row (its own
+// fields plus the artist/album entities a track hit fans out to). They are shared
+// by the flat statement and the candidate-capped wrap so the two row shapes can
+// never drift.
+const searchDisplayCols = `pi.pid, pi.kind, pi.title,
+		COALESCE(NULLIF(t.artist,''), bk.author, pod.title, ''), COALESCE(t.album_artist,''),
+		COALESCE(t.album,''), COALESCE(art.pid,''), COALESCE(al.pid,'')`
+
+const searchDisplayJoins = `
+		LEFT JOIN track t ON t.item_id = pi.id
+		LEFT JOIN book bk ON bk.item_id = pi.id
+		LEFT JOIN episode ep ON ep.item_id = pi.id
+		LEFT JOIN podcast pod ON pod.id = ep.podcast_id
+		LEFT JOIN artist art ON art.id = t.artist_id
+		LEFT JOIN album al ON al.id = t.album_id`
+
+// searchScopeJoin returns the INNER JOIN fragment scoping matched items (the pi
+// alias) to those playable from the given libraries, plus its bind args. The
+// INNER joins are the point: an item whose primary backing file is missing (an
+// undownloaded episode) or lives elsewhere drops out. An empty scope returns an
+// empty fragment.
+func searchScopeJoin(libIDs []int64) (string, []any) {
+	if len(libIDs) == 0 {
+		return "", nil
+	}
+	args := make([]any, len(libIDs))
+	for i, id := range libIDs {
+		args[i] = id
+	}
+	return `
+		JOIN item_file spf ON spf.item_id = pi.id AND spf.role = 'primary'
+		JOIN file sf ON sf.id = spf.file_id AND sf.library_id IN ` + placeholders(len(libIDs)), args
+}
+
+// searchStmt builds the grouped-search statement for one option set, returning
+// the statement, its bind args in clause order, and the ranked-row scan cap the
+// caller's loop enforces (one row past it sets Truncated).
+//
+// With no candidate cap the statement is the flat FTS query (byte-identical to
+// the pre-option one when the scope is empty too). With maxCandidates > 0 the
+// match is wrapped: the inner query walks it in rowid-DESC order and keeps the
+// newest maxCandidates rows (+1 so pool exhaustion is observable), and only that
+// pool is ranked. ORDER BY rowid DESC is deliberate: FTS5 optimizes rowid-order
+// scans with the same early termination (bm25 is still computed only per emitted
+// row), and search_fts rowids are playable_item ids, roughly insertion order, so
+// a truncated pool is recency-biased instead of systematically dropping
+// recently-added content (an unordered LIMIT would emit rowid ASC, oldest
+// first). The tradeoff is documented on read.SearchOptions: candidates are the
+// newest N matches, not the best-ranked N. The one extra fetched row competes in
+// the ranking too, so at the truncation margin the (N+1)th-newest match can take
+// a slot on rank; the result is flagged Truncated either way, and excluding that
+// row exactly would cost a second pass over the pool for a one-row nicety. The
+// scope joins sit inside the wrap, so an out-of-scope match never consumes the
+// pool.
+func searchStmt(match string, limit, maxCandidates int, libIDs []int64) (string, []any, int) {
+	scanCap := searchFetchCap(limit)
+	if maxCandidates > 0 && maxCandidates < scanCap {
+		scanCap = maxCandidates
+	}
+	scopeJoin, scopeArgs := searchScopeJoin(libIDs)
+
+	if maxCandidates <= 0 {
+		stmt := `SELECT ` + searchDisplayCols + `, ` + searchBM25 + ` AS score
+		FROM search_fts
+		JOIN playable_item pi ON pi.id = search_fts.rowid` + searchDisplayJoins + scopeJoin + `
+		WHERE search_fts MATCH ?
+		ORDER BY score, pi.pid
+		LIMIT ?`
+		return stmt, append(scopeArgs, match, scanCap+1), scanCap
+	}
+
+	innerScope := ""
+	if scopeJoin != "" {
+		innerScope = `
+			JOIN playable_item pi ON pi.id = search_fts.rowid` + scopeJoin
+	}
+	stmt := `SELECT ` + searchDisplayCols + `, c.score AS score
+		FROM (SELECT search_fts.rowid AS rid, ` + searchBM25 + ` AS score
+			FROM search_fts` + innerScope + `
+			WHERE search_fts MATCH ?
+			ORDER BY search_fts.rowid DESC
+			LIMIT ?) c
+		JOIN playable_item pi ON pi.id = c.rid` + searchDisplayJoins + `
+		ORDER BY score, pi.pid
+		LIMIT ?`
+	return stmt, append(scopeArgs, match, maxCandidates+1, scanCap+1), scanCap
+}
+
 // Search runs a grouped, BM25-ranked metadata search. It queries the metadata FTS
 // once with field weighting, then derives the artist/album/track groups from the
 // ranked matches: a matched track contributes itself to Tracks and its album and
 // artist entities to Albums and Artists (best score wins, ties broken by scan
-// order). Episode hits are reserved for transcript-backed podcast search and stay
-// empty until transcripts are indexed. A query with no usable tokens returns an
-// empty result, not an error.
+// order). Episode metadata hits land in Episodes, with transcript-body hits
+// appended after them. A query with no usable tokens returns an empty result,
+// not an error. opt.MaxCandidates bounds the match pool and opt.Libraries scopes
+// it (see read.SearchOptions for both contracts).
 func (s *Store) Search(ctx context.Context, queryStr string, opt read.SearchOptions) (*read.SearchResult, error) {
 	const op = "store.Search"
 	res := &read.SearchResult{Query: queryStr}
@@ -56,27 +145,17 @@ func (s *Store) Search(ctx context.Context, queryStr string, opt read.SearchOpti
 	if limit <= 0 {
 		limit = 20
 	}
+	libIDs, err := s.libraryIDsByPIDs(ctx, opt.Libraries, op)
+	if err != nil {
+		return nil, err
+	}
 
-	stmt := `SELECT pi.pid, pi.kind, pi.title,
-		COALESCE(NULLIF(t.artist,''), bk.author, pod.title, ''), COALESCE(t.album_artist,''),
-		COALESCE(t.album,''), COALESCE(art.pid,''), COALESCE(al.pid,''), ` + searchBM25 + ` AS score
-		FROM search_fts
-		JOIN playable_item pi ON pi.id = search_fts.rowid
-		LEFT JOIN track t ON t.item_id = pi.id
-		LEFT JOIN book bk ON bk.item_id = pi.id
-		LEFT JOIN episode ep ON ep.item_id = pi.id
-		LEFT JOIN podcast pod ON pod.id = ep.podcast_id
-		LEFT JOIN artist art ON art.id = t.artist_id
-		LEFT JOIN album al ON al.id = t.album_id
-		WHERE search_fts MATCH ?
-		ORDER BY score, pi.pid
-		LIMIT ?`
-
-	// Fetch one past the cap so a full result set signals truncation rather than
-	// silently dropping lower-ranked albums/artists. score is tie-broken by pid so
-	// equal-score rows come back in a stable, deterministic order.
-	cap := searchFetchCap(limit)
-	rows, err := s.read.QueryContext(ctx, stmt, match, cap+1)
+	// Both limits fetch one past their cap so a full result set signals truncation
+	// (a spent candidate pool or a spent ranked-row scan alike) rather than
+	// silently dropping matches. score is tie-broken by pid so equal-score rows
+	// come back in a stable, deterministic order.
+	stmt, args, cap := searchStmt(match, limit, opt.MaxCandidates, libIDs)
+	rows, err := s.read.QueryContext(ctx, stmt, args...)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
@@ -150,7 +229,7 @@ func (s *Store) Search(ctx context.Context, queryStr string, opt read.SearchOpti
 	// a title match outranks a body match. Episodes already surfaced by metadata are
 	// skipped to avoid duplicates.
 	if len(res.Episodes) < limit {
-		if err := s.searchTranscripts(ctx, match, limit, episodeSeen, res); err != nil {
+		if err := s.searchTranscripts(ctx, match, limit, opt.MaxCandidates, libIDs, episodeSeen, res); err != nil {
 			return nil, err
 		}
 	}
@@ -161,18 +240,47 @@ func (s *Store) Search(ctx context.Context, queryStr string, opt read.SearchOpti
 // transcript FTS, skipping episodes already in the Episodes group. It over-fetches
 // by the already-seen count so that when a term also matches many episode titles,
 // the top transcript rows being already-seen does not starve transcript-only hits
-// that have room in the group.
-func (s *Store) searchTranscripts(ctx context.Context, match string, limit int, seen map[model.PID]bool, res *read.SearchResult) error {
+// that have room in the group. It honors both search knobs: a library scope keeps
+// a transcript hit from leaking an episode whose file lives outside the scope
+// (an undownloaded one included), and a candidate cap bounds the ranked pool with
+// the same rowid-DESC recency bias (transcript_fts rowids follow transcript
+// insertion order). Exhausting the transcript pool does not set Truncated; the
+// small Episodes group cap already bounds what a fuller pool could add.
+func (s *Store) searchTranscripts(ctx context.Context, match string, limit, maxCandidates int, libIDs []int64, seen map[model.PID]bool, res *read.SearchResult) error {
 	const op = "store.Search"
-	rows, err := s.read.QueryContext(ctx,
-		`SELECT pi.pid, pi.title, p.title, bm25(transcript_fts) AS score
+	scopeJoin, scopeArgs := searchScopeJoin(libIDs)
+	var stmt string
+	var args []any
+	if maxCandidates <= 0 {
+		stmt = `SELECT pi.pid, pi.title, p.title, bm25(transcript_fts) AS score
 		 FROM transcript_fts
 		 JOIN playable_item pi ON pi.id = transcript_fts.episode_id
 		 JOIN episode e ON e.item_id = pi.id
-		 JOIN podcast p ON p.id = e.podcast_id
+		 JOIN podcast p ON p.id = e.podcast_id` + scopeJoin + `
 		 WHERE transcript_fts MATCH ?
 		 ORDER BY score, pi.pid
-		 LIMIT ?`, match, limit+len(seen))
+		 LIMIT ?`
+		args = append(scopeArgs, match, limit+len(seen))
+	} else {
+		innerScope := ""
+		if scopeJoin != "" {
+			innerScope = `
+			JOIN playable_item pi ON pi.id = transcript_fts.episode_id` + scopeJoin
+		}
+		stmt = `SELECT pi.pid, pi.title, p.title, c.score AS score
+		 FROM (SELECT transcript_fts.episode_id AS eid, bm25(transcript_fts) AS score
+			FROM transcript_fts` + innerScope + `
+			WHERE transcript_fts MATCH ?
+			ORDER BY transcript_fts.rowid DESC
+			LIMIT ?) c
+		 JOIN playable_item pi ON pi.id = c.eid
+		 JOIN episode e ON e.item_id = pi.id
+		 JOIN podcast p ON p.id = e.podcast_id
+		 ORDER BY score, pi.pid
+		 LIMIT ?`
+		args = append(scopeArgs, match, maxCandidates, limit+len(seen))
+	}
+	rows, err := s.read.QueryContext(ctx, stmt, args...)
 	if err != nil {
 		return waxerr.Wrap(waxerr.CodeIO, op, err)
 	}

@@ -5,19 +5,26 @@ import (
 	"strings"
 	"text/tabwriter"
 
+	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/read"
 	"github.com/spf13/cobra"
 )
 
 func newSearchCmd(g *globals) *cobra.Command {
-	var limit int
+	var (
+		limit         int
+		maxCandidates int
+		libraries     []string
+	)
 	cmd := &cobra.Command{
 		Use:   "search QUERY",
 		Short: "Grouped, BM25-ranked search across artists, albums, tracks, books, and episodes",
 		Long: "Searches catalog metadata (and podcast transcripts) and returns grouped, " +
 			"relevance-ranked results (artists, albums, tracks, books, episodes). Field " +
 			"weighting makes a title match outrank an artist/album match, which outranks a " +
-			"transcript-body match. Multiple words narrow the result (implicit AND, prefix-matched).",
+			"transcript-body match. Multiple words narrow the result (implicit AND, prefix-matched). " +
+			"--max-candidates bounds how many matches are ranked (the newest ones win under " +
+			"truncation) and --library scopes the search to items playable from those libraries.",
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			q := strings.Join(args, " ")
@@ -27,7 +34,11 @@ func newSearchCmd(g *globals) *cobra.Command {
 			}
 			defer lib.Close()
 
-			res, err := lib.Search(ctx(cmd), q, read.SearchOptions{Limit: limit})
+			opt := read.SearchOptions{Limit: limit, MaxCandidates: maxCandidates}
+			for _, pid := range libraries {
+				opt.Libraries = append(opt.Libraries, model.PID(pid))
+			}
+			res, err := lib.Search(ctx(cmd), q, opt)
 			if err != nil {
 				return err
 			}
@@ -44,10 +55,15 @@ func newSearchCmd(g *globals) *cobra.Command {
 			printHits(cmd, "TRACKS", res.Tracks)
 			printHits(cmd, "BOOKS", res.Books)
 			printHits(cmd, "EPISODES", res.Episodes)
+			if res.Truncated {
+				fmt.Fprintln(out(cmd), "(truncated)")
+			}
 			return nil
 		},
 	}
 	cmd.Flags().IntVar(&limit, "limit", 0, "max results per group (0 = default)")
+	cmd.Flags().IntVar(&maxCandidates, "max-candidates", 0, "cap the ranked match pool; the newest matches win under truncation (0 = no cap)")
+	cmd.Flags().StringArrayVar(&libraries, "library", nil, "scope to items playable from this library pid (repeatable)")
 	return cmd
 }
 

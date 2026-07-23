@@ -55,7 +55,7 @@ func (f *fakeStore) CountItemsMissingReplayGain(context.Context) (int, error) {
 func (f *fakeStore) AuditFiles(context.Context) ([]model.AuditFileInfo, error) { return f.files, nil }
 func (f *fakeStore) Podcasts(context.Context) ([]*model.Podcast, error)        { return f.pods, nil }
 func (f *fakeStore) DerivedDrift(context.Context) (model.DerivedDrift, error)  { return f.drift, nil }
-func (f *fakeStore) FileDiagnostics(context.Context) ([]model.FileDiagnostic, error) {
+func (f *fakeStore) FileDiagnostics(context.Context, model.DiagnosticFilter) ([]model.FileDiagnostic, error) {
 	return f.diags, nil
 }
 func (f *fakeStore) DiagnosticCoverage(context.Context) (int, int, error) {

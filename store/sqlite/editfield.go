@@ -64,6 +64,41 @@ func (s *Store) EditItemField(ctx context.Context, itemPID model.PID, field, val
 	return s.EditItemFields(ctx, itemPID, map[string]string{field: value}, source, lock, force)
 }
 
+// normalizeEdits validates and normalizes one edit map for the field-edit
+// surfaces, returning the field names in sorted order (a deterministic apply
+// regardless of Go's map ordering) and the normalized value map. Every field
+// must be a scalar metadata field. Values are whitespace-trimmed once, up
+// front, so the denormalized column, the resolved entity (whose match key
+// trims), and the recorded provenance all store the same value regardless of
+// how the caller spaced it; this is the storage source of truth for every
+// caller, and the facade's tag write-back mirrors it. The external-identifier
+// fields (isrc, isbn, asin) additionally normalize to their canonical stored
+// form here, ahead of the norm map being built, so provenance records the
+// normalized value; a malformed identifier rejects the whole edit.
+func normalizeEdits(edits map[string]string, op string) ([]string, map[string]string, error) {
+	if len(edits) == 0 {
+		return nil, nil, waxerr.New(waxerr.CodeInvalid, op, "no fields to edit")
+	}
+	fields := make([]string, 0, len(edits))
+	for f := range edits {
+		if !model.IsMetadataField(f) {
+			return nil, nil, waxerr.New(waxerr.CodeInvalid, op, "not an editable metadata field: "+f)
+		}
+		fields = append(fields, f)
+	}
+	sort.Strings(fields)
+	norm := make(map[string]string, len(edits))
+	for _, f := range fields {
+		trimmed := strings.TrimSpace(edits[f])
+		v, ok := model.NormalizeIdentifierField(f, trimmed)
+		if !ok {
+			return nil, nil, waxerr.New(waxerr.CodeInvalid, op, "invalid "+f+" value: "+trimmed)
+		}
+		norm[f] = v
+	}
+	return fields, norm, nil
+}
+
 // EditItemFields applies metadata-field edits to a track or book item in one
 // transaction. It writes the denormalized subtype columns, re-resolves the affected
 // normalized entities (a track's artist, release group, and album, or a book's
@@ -83,32 +118,14 @@ func (s *Store) EditItemField(ctx context.Context, itemPID model.PID, field, val
 // orphan-GC pass removes it later, so the edit needs no in-transaction GC.
 func (s *Store) EditItemFields(ctx context.Context, itemPID model.PID, edits map[string]string, source model.ProvenanceSource, lock, force bool) error {
 	const op = "store.EditItemFields"
-	if len(edits) == 0 {
-		return waxerr.New(waxerr.CodeInvalid, op, "no fields to edit")
-	}
 	if !source.Valid() {
 		return waxerr.New(waxerr.CodeInvalid, op, "invalid provenance source: "+string(source))
 	}
-	// Validate every field name up front so a bad field rejects the whole edit before
-	// any write. Iterate in a stable order so the edit is deterministic regardless of
-	// Go's map ordering.
-	fields := make([]string, 0, len(edits))
-	for f := range edits {
-		if !model.IsMetadataField(f) {
-			return waxerr.New(waxerr.CodeInvalid, op, "not an editable metadata field: "+f)
-		}
-		fields = append(fields, f)
-	}
-	sort.Strings(fields)
-
-	// Trim surrounding whitespace from every value once, up front, so the denormalized
-	// column, the resolved entity (whose match key trims), and the recorded provenance
-	// all store the same value regardless of how the caller spaced it. This is the
-	// storage source of truth for every caller (the CLI and library embedders alike);
-	// the facade mirrors it when writing on-disk tags.
-	norm := make(map[string]string, len(edits))
-	for _, f := range fields {
-		norm[f] = strings.TrimSpace(edits[f])
+	// Validate every field name and normalize every value up front so a bad field
+	// or a malformed identifier rejects the whole edit before any write.
+	fields, norm, err := normalizeEdits(edits, op)
+	if err != nil {
+		return err
 	}
 
 	return s.writeTx(ctx, func(tx *sql.Tx) error {
@@ -209,23 +226,12 @@ func (s *Store) EditManyFields(ctx context.Context, itemPIDs []model.PID, edits 
 	if len(itemPIDs) == 0 {
 		return res, waxerr.New(waxerr.CodeInvalid, op, "no items to edit")
 	}
-	if len(edits) == 0 {
-		return res, waxerr.New(waxerr.CodeInvalid, op, "no fields to edit")
-	}
 	if !source.Valid() {
 		return res, waxerr.New(waxerr.CodeInvalid, op, "invalid provenance source: "+string(source))
 	}
-	fields := make([]string, 0, len(edits))
-	for f := range edits {
-		if !model.IsMetadataField(f) {
-			return res, waxerr.New(waxerr.CodeInvalid, op, "not an editable metadata field: "+f)
-		}
-		fields = append(fields, f)
-	}
-	sort.Strings(fields)
-	norm := make(map[string]string, len(edits))
-	for _, f := range fields {
-		norm[f] = strings.TrimSpace(edits[f])
+	fields, norm, err := normalizeEdits(edits, op)
+	if err != nil {
+		return res, err
 	}
 
 	// Collapse duplicate pids, preserving first-seen order, so an item is edited once.
@@ -239,7 +245,7 @@ func (s *Store) EditManyFields(ctx context.Context, itemPIDs []model.PID, edits 
 		unique = append(unique, pid)
 	}
 
-	err := s.writeTx(ctx, func(tx *sql.Tx) error {
+	err = s.writeTx(ctx, func(tx *sql.Tx) error {
 		affected := newAffectedRollups()
 		for _, pid := range unique {
 			itemID, kind, err := itemIDKindByPIDTx(ctx, tx, pid, op)
@@ -259,6 +265,81 @@ func (s *Store) EditManyFields(ctx context.Context, itemPIDs []model.PID, edits 
 				return err
 			}
 			res.Edited = append(res.Edited, pid)
+		}
+		if !affected.empty() {
+			if err := maintainRollupsTx(ctx, tx, affected, nowNS()); err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return model.BatchEditResult{}, err
+	}
+	return res, nil
+}
+
+// EditItemsFields applies a per-item field-edit map to several track and/or book
+// items in one transaction, so the whole batch commits or rolls back together (the
+// per-unit atomicity a caller writing distinct titles and track numbers across an
+// album needs). It is EditManyFields with each item carrying its own map: the same
+// validation, normalization, and lock semantics apply per entry, every touched
+// entity lands in one shared affected set, and the rollups are recomputed once
+// over the union. Any hard failure (a bad field, a malformed identifier, a missing
+// item, a kind mismatch) rolls the whole batch back. A locked target aborts with
+// CodeLocked unless force is set; with skipLocked the locked item is skipped and
+// reported instead. A duplicate pid is CodeInvalid, since two maps for one item
+// are a caller bug rather than something to merge.
+func (s *Store) EditItemsFields(ctx context.Context, edits []model.ItemFieldEdit, source model.ProvenanceSource, lock, force, skipLocked bool) (model.BatchEditResult, error) {
+	const op = "store.EditItemsFields"
+	var res model.BatchEditResult
+	if len(edits) == 0 {
+		return res, waxerr.New(waxerr.CodeInvalid, op, "no items to edit")
+	}
+	if !source.Valid() {
+		return res, waxerr.New(waxerr.CodeInvalid, op, "invalid provenance source: "+string(source))
+	}
+	// Validate and normalize every entry before the transaction opens, so a bad
+	// entry anywhere rejects the batch without a write.
+	type entry struct {
+		pid    model.PID
+		fields []string
+		norm   map[string]string
+	}
+	entries := make([]entry, 0, len(edits))
+	seen := make(map[model.PID]struct{}, len(edits))
+	for _, e := range edits {
+		if _, dup := seen[e.ItemPID]; dup {
+			return res, waxerr.New(waxerr.CodeInvalid, op, "duplicate item in batch: "+string(e.ItemPID))
+		}
+		seen[e.ItemPID] = struct{}{}
+		fields, norm, err := normalizeEdits(e.Fields, op)
+		if err != nil {
+			return res, err
+		}
+		entries = append(entries, entry{e.ItemPID, fields, norm})
+	}
+
+	err := s.writeTx(ctx, func(tx *sql.Tx) error {
+		affected := newAffectedRollups()
+		for _, e := range entries {
+			itemID, kind, err := itemIDKindByPIDTx(ctx, tx, e.pid, op)
+			if err != nil {
+				return err
+			}
+			if err := validateEditTargetTx(ctx, tx, itemID, kind, e.fields, force, op); err != nil {
+				// A locked field is skippable when skipLocked is set; a kind mismatch
+				// always aborts the batch (that entry's field set is wrong for its item).
+				if skipLocked && waxerr.Is(err, waxerr.CodeLocked) {
+					res.Skipped = append(res.Skipped, e.pid)
+					continue
+				}
+				return err
+			}
+			if err := applyItemEditTx(ctx, tx, e.pid, itemID, kind, e.fields, e.norm, source, lock, op, affected); err != nil {
+				return err
+			}
+			res.Edited = append(res.Edited, e.pid)
 		}
 		if !affected.empty() {
 			if err := maintainRollupsTx(ctx, tx, affected, nowNS()); err != nil {

@@ -138,14 +138,23 @@ func (l *Library) proxyHandlers() map[string]proxy.Handler {
 			if err != nil {
 				return nil, err
 			}
-			out := proxy.EditManyFieldsResult{Edited: pidStrings(res.Edited), Skipped: pidStrings(res.Skipped)}
-			if len(res.WriteBackErrors) > 0 {
-				out.WriteBackFailures = make(map[string][]proxy.WriteBackFailure, len(res.WriteBackErrors))
-				for pid, wbe := range res.WriteBackErrors {
-					out.WriteBackFailures[string(pid)] = toProxyFailures(wbe.Failures)
-				}
+			return toProxyBatchResult(res), nil
+		},
+		proxy.MethodEditBatch: func(ctx context.Context, raw json.RawMessage) (any, error) {
+			p, err := decodeParams[proxy.EditBatchParams](raw)
+			if err != nil {
+				return nil, err
 			}
-			return out, nil
+			edits := make([]model.ItemFieldEdit, len(p.Items))
+			for i, it := range p.Items {
+				edits[i] = model.ItemFieldEdit{ItemPID: model.PID(it.ItemPID), Fields: it.Fields}
+			}
+			res, err := l.EditItemsFields(ctx, edits,
+				EditOptions{WriteBack: p.WriteBack, Lock: p.Lock, Force: p.Force, SkipLocked: p.SkipLocked})
+			if err != nil {
+				return nil, err
+			}
+			return toProxyBatchResult(res), nil
 		},
 		proxy.MethodSetCredits: func(ctx context.Context, raw json.RawMessage) (any, error) {
 			p, err := decodeParams[proxy.SetCreditsParams](raw)
@@ -424,6 +433,19 @@ func toProxyFailures(failures []WriteBackFailure) []proxy.WriteBackFailure {
 	out := make([]proxy.WriteBackFailure, len(failures))
 	for i, f := range failures {
 		out[i] = proxy.WriteBackFailure{FilePID: string(f.FilePID), Path: f.Path, Reason: f.Reason}
+	}
+	return out
+}
+
+// toProxyBatchResult converts a facade batch-edit result into its wire form,
+// shared by the edit_many_fields and edit_batch handlers.
+func toProxyBatchResult(res *BatchEditResult) proxy.EditManyFieldsResult {
+	out := proxy.EditManyFieldsResult{Edited: pidStrings(res.Edited), Skipped: pidStrings(res.Skipped)}
+	if len(res.WriteBackErrors) > 0 {
+		out.WriteBackFailures = make(map[string][]proxy.WriteBackFailure, len(res.WriteBackErrors))
+		for pid, wbe := range res.WriteBackErrors {
+			out.WriteBackFailures[string(pid)] = toProxyFailures(wbe.Failures)
+		}
 	}
 	return out
 }

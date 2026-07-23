@@ -59,6 +59,19 @@ const (
 	DiagCorruptAudio DiagnosticCode = "corrupt_audio"
 )
 
+// Valid reports whether c is a known diagnostic code. Every writer records
+// codes from this vocabulary, so a filter naming anything else is a typo to
+// reject rather than an empty result to return.
+func (c DiagnosticCode) Valid() bool {
+	switch c {
+	case DiagUnsupportedFormat, DiagLegacyOnlyTags, DiagLyricsPartial, DiagSidecarSkipped,
+		DiagCueTrackDropped, DiagTagWriteLost, DiagTagWriteUnsynced, DiagCorruptAudio:
+		return true
+	default:
+		return false
+	}
+}
+
 // DiagnosticOrigin identifies the writer that produced a diagnostic, rather than the
 // phase it occurred in. Each writer replaces its own rows wholesale, so cross-writer
 // isolation is a property of the schema (origin sits in the primary key) instead of
@@ -81,10 +94,20 @@ const (
 	OriginEdit       DiagnosticOrigin = "edit"
 )
 
+// Valid reports whether o is a known diagnostic writer.
+func (o DiagnosticOrigin) Valid() bool {
+	switch o {
+	case OriginScan, OriginOrganize, OriginReplayGain, OriginEdit:
+		return true
+	default:
+		return false
+	}
+}
+
 // FileDiagnostic is one persisted observation about a file. Severity reuses
-// AuditSeverity because the audit is the only consumer and its sort already ranks
-// that vocabulary. TagKey is the canonical tag key a key-specific diagnostic
-// concerns, or "" when it names none.
+// AuditSeverity because the audit's sort already ranks that vocabulary. TagKey
+// is the canonical tag key a key-specific diagnostic concerns, or "" when it
+// names none.
 type FileDiagnostic struct {
 	FilePID     PID
 	DisplayPath string
@@ -94,4 +117,36 @@ type FileDiagnostic struct {
 	TagKey      string
 	Detail      string
 	SeenAt      int64
+}
+
+// DiagnosticFilter selects a slice of the persisted per-file diagnostics. The
+// zero filter selects everything, which is what the audit reads. A zero
+// dimension means "any"; a non-empty Origin, Code, or Severity outside its
+// vocabulary is CodeInvalid (a typo fails closed instead of matching nothing),
+// and an unknown LibraryPID is CodeNotFound. A non-positive Limit is uncapped
+// and a non-positive Offset skips nothing: both are treated as unset and never
+// reach the SQL, so a negative value cannot produce a surprising window.
+// Offset pages over the deterministic path/origin/code order, which is enough
+// at this table's grain (a curated finding vocabulary, not a per-track table),
+// so there is no keyset cursor here.
+//
+// It lives in model, not read, because the audit's Store port consumes it and
+// audit depends only on model (the established seam: the port's other option
+// and result types live here too).
+type DiagnosticFilter struct {
+	Origin     DiagnosticOrigin
+	Code       DiagnosticCode
+	Severity   AuditSeverity
+	LibraryPID PID // scope to files under one library root
+	Limit      int
+	Offset     int
+}
+
+// DiagnosticCount is one bucket of the grouped diagnostic summary: how many
+// diagnostics one writer recorded under one code and severity.
+type DiagnosticCount struct {
+	Origin   DiagnosticOrigin
+	Code     DiagnosticCode
+	Severity AuditSeverity
+	Count    int
 }

@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"strings"
 
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/waxerr"
@@ -94,14 +95,80 @@ func (s *Store) PutFileDiagnostics(ctx context.Context, filePID model.PID, origi
 	})
 }
 
-// FileDiagnostics returns every persisted diagnostic joined to its file's display
-// path, for the audit. Ordering is deterministic so capped output is stable.
-func (s *Store) FileDiagnostics(ctx context.Context) ([]model.FileDiagnostic, error) {
+// diagnosticFilterSQL lowers a DiagnosticFilter into a WHERE fragment and its
+// bind args (both empty for the zero filter, so that path runs today's full-dump
+// SQL). The enum dimensions are validated against their vocabularies first, so
+// a typo is CodeInvalid rather than a silently empty result, the same
+// fail-closed treatment the facet group-by and entity-kind enums get. A library
+// scope resolves the pid to its rowid, so an unknown library is CodeNotFound.
+// The origin/code filters ride the file_diagnostic primary key and
+// file_diagnostic_code index, the library filter rides file_library; no new
+// index is needed at this table's grain.
+func (s *Store) diagnosticFilterSQL(ctx context.Context, filter model.DiagnosticFilter, op string) (string, []any, error) {
+	var conds []string
+	var args []any
+	if filter.Origin != "" {
+		if !filter.Origin.Valid() {
+			return "", nil, waxerr.New(waxerr.CodeInvalid, op, "unknown diagnostic origin: "+string(filter.Origin))
+		}
+		conds = append(conds, "d.origin = ?")
+		args = append(args, string(filter.Origin))
+	}
+	if filter.Code != "" {
+		if !filter.Code.Valid() {
+			return "", nil, waxerr.New(waxerr.CodeInvalid, op, "unknown diagnostic code: "+string(filter.Code))
+		}
+		conds = append(conds, "d.code = ?")
+		args = append(args, string(filter.Code))
+	}
+	if filter.Severity != "" {
+		if !filter.Severity.Valid() {
+			return "", nil, waxerr.New(waxerr.CodeInvalid, op, "unknown severity: "+string(filter.Severity))
+		}
+		conds = append(conds, "d.severity = ?")
+		args = append(args, string(filter.Severity))
+	}
+	if filter.LibraryPID != "" {
+		ids, err := s.libraryIDsByPIDs(ctx, []model.PID{filter.LibraryPID}, op)
+		if err != nil {
+			return "", nil, err
+		}
+		conds = append(conds, "f.library_id = ?")
+		args = append(args, ids[0])
+	}
+	if len(conds) == 0 {
+		return "", nil, nil
+	}
+	return " WHERE " + strings.Join(conds, " AND "), args, nil
+}
+
+// FileDiagnostics returns the persisted diagnostics matching the filter, each
+// joined to its file's display path. Ordering is deterministic (path, origin,
+// code, key) so capped and offset-paged output is stable. The zero filter is the
+// full dump the audit reads.
+func (s *Store) FileDiagnostics(ctx context.Context, filter model.DiagnosticFilter) ([]model.FileDiagnostic, error) {
 	const op = "store.FileDiagnostics"
-	rows, err := s.read.QueryContext(ctx, `SELECT f.pid, f.display_path, d.origin, d.code,
+	where, args, err := s.diagnosticFilterSQL(ctx, filter, op)
+	if err != nil {
+		return nil, err
+	}
+	stmt := `SELECT f.pid, f.display_path, d.origin, d.code,
 		d.severity, d.tag_key, d.detail, d.seen_at
-		FROM file_diagnostic d JOIN file f ON f.id = d.file_id
-		ORDER BY f.display_path, d.origin, d.code, d.tag_key`)
+		FROM file_diagnostic d JOIN file f ON f.id = d.file_id` + where + `
+		ORDER BY f.display_path, d.origin, d.code, d.tag_key`
+	switch {
+	case filter.Limit > 0:
+		stmt += " LIMIT ?"
+		args = append(args, filter.Limit)
+		if filter.Offset > 0 {
+			stmt += " OFFSET ?"
+			args = append(args, filter.Offset)
+		}
+	case filter.Offset > 0:
+		stmt += " LIMIT -1 OFFSET ?" // SQLite requires a LIMIT before OFFSET
+		args = append(args, filter.Offset)
+	}
+	rows, err := s.read.QueryContext(ctx, stmt, args...)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
@@ -115,6 +182,45 @@ func (s *Store) FileDiagnostics(ctx context.Context) ([]model.FileDiagnostic, er
 		}
 		d.Origin, d.Code, d.Severity = model.DiagnosticOrigin(origin), model.DiagnosticCode(code), model.AuditSeverity(sev)
 		out = append(out, d)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	return out, nil
+}
+
+// DiagnosticSummary returns the matching diagnostics grouped by writer, code,
+// and severity, most severe band first (then origin and code for a stable
+// order). It answers "what is wrong, roughly how much" without materializing
+// per-file rows. The filter's dimensions apply; Limit and Offset do not, since
+// a summary is an aggregation over the whole match and its bucket count is
+// bounded by the curated code vocabulary. The file join always rides along so
+// the one statement serves the library scope too; it is a PK probe per row on a
+// table sized by real findings, not by the catalog.
+func (s *Store) DiagnosticSummary(ctx context.Context, filter model.DiagnosticFilter) ([]model.DiagnosticCount, error) {
+	const op = "store.DiagnosticSummary"
+	where, args, err := s.diagnosticFilterSQL(ctx, filter, op)
+	if err != nil {
+		return nil, err
+	}
+	stmt := `SELECT d.origin, d.code, d.severity, COUNT(*)
+		FROM file_diagnostic d JOIN file f ON f.id = d.file_id` + where + `
+		GROUP BY d.origin, d.code, d.severity
+		ORDER BY CASE d.severity WHEN 'error' THEN 0 WHEN 'warn' THEN 1 ELSE 2 END, d.origin, d.code`
+	rows, err := s.read.QueryContext(ctx, stmt, args...)
+	if err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	defer rows.Close()
+	var out []model.DiagnosticCount
+	for rows.Next() {
+		var c model.DiagnosticCount
+		var origin, code, sev string
+		if err := rows.Scan(&origin, &code, &sev, &c.Count); err != nil {
+			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		c.Origin, c.Code, c.Severity = model.DiagnosticOrigin(origin), model.DiagnosticCode(code), model.AuditSeverity(sev)
+		out = append(out, c)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)

@@ -56,6 +56,16 @@ const (
 	SeverityError AuditSeverity = "error"
 )
 
+// Valid reports whether s is a known severity.
+func (s AuditSeverity) Valid() bool {
+	switch s {
+	case SeverityInfo, SeverityWarn, SeverityError:
+		return true
+	default:
+		return false
+	}
+}
+
 // AuditFinding is one issue the audit reports. For duplicate/split findings,
 // MergeType + Entities describe a repair the `merge` primitive can apply
 // (Entities[0] is the suggested survivor).

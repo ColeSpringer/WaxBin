@@ -436,7 +436,11 @@ func populateReleaseGroupGenresTx(ctx context.Context, tx *sql.Tx, rgID int64, g
 
 // ApplyBookEnrichment fills an audiobook's external identifiers and publisher from
 // a MusicBrainz release, only where the field is currently empty so a tagged value
-// is never overwritten.
+// is never overwritten. Identifier values are normalized first, and a value that
+// fails its format check is skipped with a warning rather than stored or allowed
+// to abort the apply. MusicBrainz releases regularly carry a plain barcode where
+// a book ISBN is expected, and before this check that barcode landed in the isbn
+// column as-is; now only a real ISBN (or ASIN) fills the field.
 func (s *Store) ApplyBookEnrichment(ctx context.Context, in model.BookEnrichment) error {
 	const op = "store.ApplyBookEnrichment"
 	return s.writeTx(ctx, func(tx *sql.Tx) error {
@@ -449,12 +453,18 @@ func (s *Store) ApplyBookEnrichment(ctx context.Context, in model.BookEnrichment
 		}{
 			{"asin", in.ASIN}, {"isbn", in.ISBN}, {"publisher", in.Publisher},
 		} {
-			if strings.TrimSpace(f.val) == "" {
+			val := strings.TrimSpace(f.val)
+			if val == "" {
+				continue
+			}
+			norm, ok := model.NormalizeIdentifierField(f.col, val)
+			if !ok {
+				s.log.Warn("enrichment: skipping malformed book identifier", "field", f.col, "value", val, "book", in.PID)
 				continue
 			}
 			if _, err := tx.ExecContext(ctx,
 				"UPDATE book SET "+f.col+" = ? WHERE item_id = ? AND ("+f.col+" = '' OR "+f.col+" IS NULL)",
-				f.val, in.BookItemID); err != nil {
+				norm, in.BookItemID); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 		}

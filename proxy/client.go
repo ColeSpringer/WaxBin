@@ -148,6 +148,20 @@ func (c *Client) EditManyFields(ctx context.Context, itemPIDs []model.PID, edits
 	return &res, nil
 }
 
+// EditBatch proxies a per-item-map batch edit: each entry carries its own field
+// map, applied atomically as one catalog batch. Per-item write-back failures come
+// back in the result rather than as a transport error, matching EditManyFields.
+func (c *Client) EditBatch(ctx context.Context, items []ItemFieldsEdit, writeBack, lock, force, skipLocked bool) (*EditManyFieldsResult, error) {
+	var res EditManyFieldsResult
+	err := c.call(ctx, MethodEditBatch, EditBatchParams{
+		Items: items, WriteBack: writeBack, Lock: lock, Force: force, SkipLocked: skipLocked,
+	}, &res)
+	if err != nil {
+		return nil, err
+	}
+	return &res, nil
+}
+
 // SetCredits proxies a credit edit. The result carries the stored contributor count
 // and, for a committed edit whose music write-back partially failed, the failed files
 // (the transport error stays nil, matching edit_fields).
