@@ -253,7 +253,7 @@ func TestVirtualTrackLyricsUsesWindowDuration(t *testing.T) {
 		t.Fatalf("put virtual tracks: %v", err)
 	}
 
-	targets, err := st.ItemsNeedingLyrics(ctx, false, 0, 100)
+	targets, err := st.ItemsNeedingLyrics(ctx, false, 0, 100, nil)
 	if err != nil {
 		t.Fatalf("items needing lyrics: %v", err)
 	}

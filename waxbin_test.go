@@ -1037,6 +1037,10 @@ func TestLogicalExport(t *testing.T) {
 	if err := lib.Playback().SetStar(ctx, "", items[0].PID, true); err != nil {
 		t.Fatalf("star: %v", err)
 	}
+	r := 85
+	if err := lib.Playback().SetRating(ctx, "", items[0].PID, &r); err != nil {
+		t.Fatalf("rate: %v", err)
+	}
 	if err := lib.SetSecret(ctx, "musicbrainz", "token-xyz"); err != nil {
 		t.Fatalf("secret: %v", err)
 	}
@@ -1052,6 +1056,14 @@ func TestLogicalExport(t *testing.T) {
 	if strings.Contains(buf.String(), "token-xyz") {
 		t.Fatal("logical export must never contain secrets")
 	}
+	// Unix-ns timestamps ride the export as decimal strings (export version 2):
+	// they exceed double precision, so bare numbers would corrupt in loose
+	// parsers. Pin the quoting on the raw document.
+	for _, quoted := range []string{`"createdAt": "`, `"starredChangedNs": "`, `"ratingChangedNs": "`} {
+		if !strings.Contains(buf.String(), quoted) {
+			t.Errorf("export lacks %s...: ns timestamps must encode as strings", quoted)
+		}
+	}
 
 	snap, err := port.ReadSnapshot(&buf)
 	if err != nil {
@@ -1062,6 +1074,11 @@ func TestLogicalExport(t *testing.T) {
 	}
 	if len(snap.PlayState) < 1 || !snap.PlayState[0].Starred {
 		t.Fatalf("exported play state should carry the star: %+v", snap.PlayState)
+	}
+	// The per-field change stamps ride the export, so a consumer replaying it can
+	// order the values against state it already holds.
+	if ps := snap.PlayState[0]; ps.StarredChangedNS == 0 || ps.RatingChangedNS == 0 {
+		t.Fatalf("exported play state missing change stamps: %+v", ps)
 	}
 }
 

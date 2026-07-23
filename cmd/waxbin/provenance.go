@@ -69,7 +69,7 @@ type provRow struct {
 	Locked   bool   `json:"locked"`
 	Value    string `json:"value,omitempty"`
 	Provider string `json:"provider,omitempty"`
-	Updated  int64  `json:"updatedAt"`
+	Updated  int64  `json:"updatedAt,string"` // unix ns; a string, see playStateView
 }
 
 // reportProvenance prints an item's provenance rows. An item with no curated or

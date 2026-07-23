@@ -9,6 +9,7 @@ import (
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/proxy"
 	"github.com/colespringer/waxbin/query"
+	"github.com/colespringer/waxbin/read"
 	"github.com/colespringer/waxbin/store/sqlite"
 	"github.com/colespringer/waxbin/waxerr"
 )
@@ -401,7 +402,10 @@ func (l *Library) proxyHandlers() map[string]proxy.Handler {
 			if err != nil {
 				return nil, err
 			}
-			pid, err := l.StartEnrich(ctx, EnrichOptions{Force: p.Force, Limit: p.Limit})
+			pid, err := l.StartEnrich(ctx, EnrichOptions{
+				Force: p.Force, Limit: p.Limit,
+				ItemPID: model.PID(p.ItemPID), EntityType: read.EntityKind(p.EntityType), EntityPID: model.PID(p.EntityPID),
+			})
 			if err != nil {
 				return nil, err
 			}

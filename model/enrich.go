@@ -19,6 +19,20 @@ const (
 	RelationSimilar  = "similar"
 )
 
+// EnrichScope narrows one enrichment pass to explicit targets, per phase. The id
+// slices are internal store rowids (the same currency the port queries iterate),
+// resolved from a public pid by the store's EnrichScopeForItem and
+// EnrichScopeForEntity. A nil scope is the full pass; a phase whose id list is
+// empty is skipped entirely. A scoped run implies force: the caller pointed at
+// these targets deliberately, so a previously-missed lookup is retried instead
+// of being skipped by its marker.
+type EnrichScope struct {
+	ArtistIDs       []int64
+	ReleaseGroupIDs []int64
+	BookItemIDs     []int64
+	LyricsItemIDs   []int64
+}
+
 // EnrichTarget is one entity the enrichment pass should look up. Type selects the
 // provider query; MBID (when already known) is the fast path; Name/ArtistName/Year
 // disambiguate a text search when there is no MBID. IDs are internal store rowids

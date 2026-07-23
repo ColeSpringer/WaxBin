@@ -661,19 +661,7 @@ func (s *Store) ItemsByPIDs(ctx context.Context, pids []model.PID) ([]*model.Ite
 	if len(pids) == 0 {
 		return nil, nil
 	}
-	// Deduplicate up front, preserving first-seen order, so a repeated pid never
-	// bloats an IN(...) chunk or straddles a chunk boundary, and the rebuild below
-	// needs no second pass to collapse duplicates.
-	unique := make([]model.PID, 0, len(pids))
-	seen := make(map[model.PID]struct{}, len(pids))
-	for _, pid := range pids {
-		if _, ok := seen[pid]; ok {
-			continue
-		}
-		seen[pid] = struct{}{}
-		unique = append(unique, pid)
-	}
-
+	unique := uniquePIDs(pids)
 	byPID := make(map[model.PID]*model.ItemView, len(unique))
 	err := chunkSlice(unique, idBatchSize, func(chunk []model.PID) error {
 		args := make([]any, len(chunk))

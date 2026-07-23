@@ -504,3 +504,93 @@ func TestEnrichOfflineDegradesGracefully(t *testing.T) {
 		t.Logf("offline error: %v", err)
 	}
 }
+
+// TestEnrichScopedRun drives a scoped pass end to end: only the scoped item's
+// artist and release group are looked up and marked (the rest of the catalog is
+// untouched), and the scope implies force, so a second scoped run re-enriches
+// its targets instead of skipping them by their markers.
+func TestEnrichScopedRun(t *testing.T) {
+	ctx := context.Background()
+	st, dbPath, lib := openStore(t)
+	scoped := seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
+	seedTrack(t, st, lib.ID, "/lib/b.mp3", "ess-b", "Other Song", "Other Artist", "Other Album")
+
+	scope, err := st.EnrichScopeForItem(ctx, scoped)
+	if err != nil {
+		t.Fatalf("EnrichScopeForItem: %v", err)
+	}
+
+	mb := newMBMock(t)
+	caa, _ := newCAAMock(t, pngBytes(t))
+	svc := newService(st, mb.server.URL, caa.URL)
+	res, err := svc.Run(ctx, enrich.RunOptions{Scope: scope}, nil)
+	if err != nil {
+		t.Fatalf("scoped Run: %v", err)
+	}
+	if res.ArtistsEnriched != 1 || res.ReleaseGroupsEnriched != 1 {
+		t.Fatalf("scoped result = %+v, want exactly 1 artist + 1 release group", res)
+	}
+
+	db := roDB(t, dbPath)
+	// The scoped targets are enriched and marked with full provenance.
+	if mbid := scalarStr(t, db, "SELECT COALESCE(mbid,'') FROM artist WHERE name='Pink Floyd'"); mbid != "pf-mbid" {
+		t.Errorf("scoped artist mbid = %q, want pf-mbid", mbid)
+	}
+	if n := scalarInt(t, db, `SELECT COUNT(*) FROM entity_enrichment ee JOIN artist a ON a.id=ee.entity_id
+		WHERE ee.entity_type='artist' AND a.name='Pink Floyd'`); n != 1 {
+		t.Errorf("scoped artist marker rows = %d, want 1", n)
+	}
+	// The out-of-scope artist and release group were never looked up: no mbid, no
+	// marker (the mock would have answered for them too, so absence proves the
+	// scope pruned the walk, not the provider).
+	if mbid := scalarStr(t, db, "SELECT COALESCE(mbid,'') FROM artist WHERE name='Other Artist'"); mbid != "" {
+		t.Errorf("out-of-scope artist gained mbid %q", mbid)
+	}
+	if n := scalarInt(t, db, `SELECT COUNT(*) FROM entity_enrichment ee JOIN artist a ON a.id=ee.entity_id
+		WHERE ee.entity_type='artist' AND a.name='Other Artist'`); n != 0 {
+		t.Errorf("out-of-scope artist has %d marker rows, want 0", n)
+	}
+	if n := scalarInt(t, db, `SELECT COUNT(*) FROM entity_enrichment ee JOIN release_group rg ON rg.id=ee.entity_id
+		WHERE ee.entity_type='release_group' AND rg.title='Other Album'`); n != 0 {
+		t.Errorf("out-of-scope release group has %d marker rows, want 0", n)
+	}
+
+	// A second scoped run without Force still re-enriches its targets (scope
+	// implies force); an unscoped unforced run would have found nothing to do.
+	res2, err := svc.Run(ctx, enrich.RunOptions{Scope: scope}, nil)
+	if err != nil {
+		t.Fatalf("second scoped Run: %v", err)
+	}
+	if res2.ArtistsEnriched != 1 || res2.ReleaseGroupsEnriched != 1 {
+		t.Fatalf("second scoped result = %+v, want the targets re-enriched (scope implies force)", res2)
+	}
+}
+
+// TestEnrichScopedRunSkipsEmptyPhases verifies a scope with targets for only one
+// phase runs just that phase: an artist-only scope must not walk release groups,
+// books, or lyrics.
+func TestEnrichScopedRunSkipsEmptyPhases(t *testing.T) {
+	ctx := context.Background()
+	st, dbPath, lib := openStore(t)
+	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
+
+	db := roDB(t, dbPath)
+	var artistID int64
+	if err := db.QueryRow("SELECT id FROM artist WHERE name='Pink Floyd'").Scan(&artistID); err != nil {
+		t.Fatalf("resolve artist: %v", err)
+	}
+
+	mb := newMBMock(t)
+	caa, _ := newCAAMock(t, pngBytes(t))
+	svc := newService(st, mb.server.URL, caa.URL)
+	res, err := svc.Run(ctx, enrich.RunOptions{Scope: &model.EnrichScope{ArtistIDs: []int64{artistID}}}, nil)
+	if err != nil {
+		t.Fatalf("artist-only scoped Run: %v", err)
+	}
+	if res.ArtistsEnriched != 1 || res.ReleaseGroupsEnriched != 0 || res.LyricsEnriched != 0 {
+		t.Fatalf("artist-only scoped result = %+v, want 1 artist and nothing else", res)
+	}
+	if n := scalarInt(t, db, "SELECT COUNT(*) FROM entity_enrichment WHERE entity_type='release_group'"); n != 0 {
+		t.Errorf("release-group markers = %d, want 0 (phase must be skipped)", n)
+	}
+}

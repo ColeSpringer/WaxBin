@@ -13,20 +13,25 @@ type User struct {
 // PlayState is one user's playback state for one item: resume position, played/
 // finished flags, play count, rating, and star. Rating is 0..100 (HasRating
 // distinguishes an explicit 0 from unset); Starred carries the star with its set
-// time for recency ordering.
+// time for recency ordering. The changed-at stamps record when the star or
+// rating last changed value, a clear included, so they survive an unstar or a
+// rating clear; a value-identical set never bumps them. They carry what a sync
+// replay guard needs to order a local change against a remote one.
 type PlayState struct {
-	UserPID      PID
-	ItemPID      PID
-	PositionMS   int64
-	Played       bool
-	Finished     bool
-	PlayCount    int
-	Rating       int
-	HasRating    bool
-	Starred      bool
-	StarredAt    int64 // unix nanoseconds; 0 when not starred
-	LastPlayedAt int64 // unix nanoseconds
-	UpdatedAt    int64 // unix nanoseconds
+	UserPID          PID
+	ItemPID          PID
+	PositionMS       int64
+	Played           bool
+	Finished         bool
+	PlayCount        int
+	Rating           int
+	HasRating        bool
+	Starred          bool
+	StarredAt        int64 // unix nanoseconds; 0 when not starred
+	LastPlayedAt     int64 // unix nanoseconds
+	RatingChangedAt  int64 // unix nanoseconds; 0 = rating never changed
+	StarredChangedAt int64 // unix nanoseconds; 0 = star never changed
+	UpdatedAt        int64 // unix nanoseconds
 }
 
 // Bookmark is a labeled position within an item (audiobooks/podcasts).

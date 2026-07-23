@@ -94,7 +94,7 @@ func (s *Store) AllPlayStates(ctx context.Context) ([]model.PlayState, error) {
 	const op = "store.AllPlayStates"
 	rows, err := s.read.QueryContext(ctx, `
 		SELECT u.pid, pi.pid, ps.position_ms, ps.played, ps.finished, ps.play_count,
-		       ps.rating, ps.starred_at, ps.last_played_at, ps.updated_at
+		       ps.rating, ps.starred_at, ps.last_played_at, ps.rating_changed_at, ps.starred_changed_at, ps.updated_at
 		FROM play_state ps
 		JOIN user u ON u.id = ps.user_id
 		JOIN playable_item pi ON pi.id = ps.item_id
@@ -108,15 +108,16 @@ func (s *Store) AllPlayStates(ctx context.Context) ([]model.PlayState, error) {
 		var ps model.PlayState
 		var userPID, itemPID string
 		var rating sql.NullInt64
-		var starredAt, lastPlayed sql.NullInt64
+		var starredAt, lastPlayed, ratingChanged, starredChanged sql.NullInt64
 		if err := rows.Scan(&userPID, &itemPID, &ps.PositionMS, &ps.Played, &ps.Finished,
-			&ps.PlayCount, &rating, &starredAt, &lastPlayed, &ps.UpdatedAt); err != nil {
+			&ps.PlayCount, &rating, &starredAt, &lastPlayed, &ratingChanged, &starredChanged, &ps.UpdatedAt); err != nil {
 			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		ps.UserPID, ps.ItemPID = model.PID(userPID), model.PID(itemPID)
 		ps.Rating, ps.HasRating = int(rating.Int64), rating.Valid
 		ps.StarredAt, ps.Starred = starredAt.Int64, starredAt.Valid
 		ps.LastPlayedAt = lastPlayed.Int64
+		ps.RatingChangedAt, ps.StarredChangedAt = ratingChanged.Int64, starredChanged.Int64
 		out = append(out, ps)
 	}
 	return out, rows.Err()

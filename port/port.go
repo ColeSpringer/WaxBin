@@ -21,14 +21,19 @@ import (
 const ExportFormat = "waxbin-export"
 
 // ExportVersion is the logical export schema version, independent of the storage
-// schema. It rises when the export shape changes.
-const ExportVersion = 1
+// schema. It rises when the export shape changes. Version 2 encodes
+// unix-nanosecond timestamps as decimal strings (",string" fields): the values
+// exceed IEEE-754 double precision, so the version-1 bare numbers were
+// corrupted by any consumer parsing JSON numbers into doubles. A version-1
+// file no longer parses (the typed decode rejects the unquoted numbers),
+// accepted pre-release.
+const ExportVersion = 2
 
 // Manifest is the versioned header of a logical export.
 type Manifest struct {
 	Format        string `json:"format"`
 	Version       int    `json:"version"`
-	CreatedAt     int64  `json:"createdAt"` // unix nanoseconds
+	CreatedAt     int64  `json:"createdAt,string"` // unix nanoseconds, as a decimal string
 	SchemaVersion int    `json:"schemaVersion"`
 	Items         int    `json:"items"`
 	Libraries     int    `json:"libraries"`
@@ -68,16 +73,23 @@ type ItemExport struct {
 	RelPath     string `json:"relPath,omitempty"`
 }
 
-// PlayStateExport is one user's critical state for one item.
+// PlayStateExport is one user's critical state for one item. The changed-at
+// stamps (unix nanoseconds, 0 = never changed) record when the star or rating
+// last changed value, so a consumer replaying an export can order it against
+// state it already holds. They are JSON-encoded as decimal strings (",string"):
+// ns epochs exceed IEEE-754 double precision, and an ordering token corrupted
+// by a double-based parser would misorder silently.
 type PlayStateExport struct {
-	UserPID    string `json:"userPid"`
-	ItemPID    string `json:"itemPid"`
-	PositionMS int64  `json:"positionMs,omitempty"`
-	Played     bool   `json:"played,omitempty"`
-	Finished   bool   `json:"finished,omitempty"`
-	PlayCount  int    `json:"playCount,omitempty"`
-	Rating     *int   `json:"rating,omitempty"`
-	Starred    bool   `json:"starred,omitempty"`
+	UserPID          string `json:"userPid"`
+	ItemPID          string `json:"itemPid"`
+	PositionMS       int64  `json:"positionMs,omitempty"`
+	Played           bool   `json:"played,omitempty"`
+	Finished         bool   `json:"finished,omitempty"`
+	PlayCount        int    `json:"playCount,omitempty"`
+	Rating           *int   `json:"rating,omitempty"`
+	Starred          bool   `json:"starred,omitempty"`
+	RatingChangedNS  int64  `json:"ratingChangedNs,string,omitempty"`
+	StarredChangedNS int64  `json:"starredChangedNs,string,omitempty"`
 }
 
 // BuildSnapshot assembles a logical export from already-read data. relPathOf maps
@@ -108,6 +120,7 @@ func BuildSnapshot(schemaVersion int, createdAt int64, libs []*model.Library, it
 		pe := PlayStateExport{
 			UserPID: string(ps.UserPID), ItemPID: string(ps.ItemPID), PositionMS: ps.PositionMS,
 			Played: ps.Played, Finished: ps.Finished, PlayCount: ps.PlayCount, Starred: ps.Starred,
+			RatingChangedNS: ps.RatingChangedAt, StarredChangedNS: ps.StarredChangedAt,
 		}
 		if ps.HasRating {
 			r := ps.Rating

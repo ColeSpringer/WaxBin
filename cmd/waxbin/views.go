@@ -205,19 +205,26 @@ func userViews(users []*model.User) []userView {
 }
 
 type playStateView struct {
-	ItemPID    string `json:"itemPid"`
-	PositionMS int64  `json:"positionMs"`
-	Played     bool   `json:"played"`
-	Finished   bool   `json:"finished"`
-	PlayCount  int    `json:"playCount"`
-	Rating     *int   `json:"rating,omitempty"`
-	Starred    bool   `json:"starred"`
+	ItemPID          string `json:"itemPid"`
+	PositionMS       int64  `json:"positionMs"`
+	Played           bool   `json:"played"`
+	Finished         bool   `json:"finished"`
+	PlayCount        int    `json:"playCount"`
+	Rating           *int   `json:"rating,omitempty"`
+	Starred          bool   `json:"starred"`
+	// The change stamps are unix-ns epochs, JSON-encoded as decimal strings
+	// (",string") like every ns timestamp in the CLI JSON contract: the values
+	// exceed IEEE-754 double precision, so a bare number would be corrupted by
+	// any loose-JSON consumer. 0 (never changed) is omitted.
+	RatingChangedAt  int64 `json:"ratingChangedAt,string,omitempty"`
+	StarredChangedAt int64 `json:"starredChangedAt,string,omitempty"`
 }
 
 func toPlayStateView(st *model.PlayState) playStateView {
 	v := playStateView{
 		ItemPID: string(st.ItemPID), PositionMS: st.PositionMS, Played: st.Played,
 		Finished: st.Finished, PlayCount: st.PlayCount, Starred: st.Starred,
+		RatingChangedAt: st.RatingChangedAt, StarredChangedAt: st.StarredChangedAt,
 	}
 	if st.HasRating {
 		r := st.Rating

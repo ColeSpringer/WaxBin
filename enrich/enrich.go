@@ -32,19 +32,23 @@ import (
 // Store is the persistence the enrichment pass needs, satisfied by store/sqlite.
 // The needing-enrichment queries are keyset-paginated by entity id (afterID) so a
 // forced re-run, which rewrites the marker rather than removing the entity from the
-// set, still advances and terminates.
+// set, still advances and terminates. Each takes an optional ids list (nil = the
+// full pass) that scopes the walk to explicit rowids, keeping the keyset shape.
 type Store interface {
-	ArtistsNeedingEnrichment(ctx context.Context, force bool, afterID int64, limit int) ([]model.EnrichTarget, error)
+	ArtistsNeedingEnrichment(ctx context.Context, force bool, afterID int64, limit int, ids []int64) ([]model.EnrichTarget, error)
 	// ReleaseGroupsNeedingEnrichment populates each target's representative file only
 	// when includeRepFile is set (the AcoustID fallback needs it), so the correlated
 	// lookup is skipped on the common path where AcoustID is off.
-	ReleaseGroupsNeedingEnrichment(ctx context.Context, force bool, afterID int64, limit int, includeRepFile bool) ([]model.EnrichTarget, error)
-	BooksNeedingEnrichment(ctx context.Context, force bool, afterID int64, limit int) ([]model.EnrichTarget, error)
+	ReleaseGroupsNeedingEnrichment(ctx context.Context, force bool, afterID int64, limit int, includeRepFile bool, ids []int64) ([]model.EnrichTarget, error)
+	BooksNeedingEnrichment(ctx context.Context, force bool, afterID int64, limit int, ids []int64) ([]model.EnrichTarget, error)
 	// ItemsNeedingLyrics returns the next keyset page of tracks that carry no lyrics
 	// yet (and, unless force, have not already been looked up), each with the title,
 	// artist, album, and duration a lyrics provider keys on.
-	ItemsNeedingLyrics(ctx context.Context, force bool, afterID int64, limit int) ([]model.EnrichTarget, error)
-	CountEntitiesNeedingEnrichment(ctx context.Context, force bool, includeLyrics bool) (int, error)
+	ItemsNeedingLyrics(ctx context.Context, force bool, afterID int64, limit int, ids []int64) ([]model.EnrichTarget, error)
+	// CountEntitiesNeedingEnrichment mirrors the phases a run would execute: a nil
+	// scope counts everything, a scoped count covers only the scoped ids, and a
+	// phase the scoped run skips (an empty id list) contributes zero.
+	CountEntitiesNeedingEnrichment(ctx context.Context, force bool, includeLyrics bool, scope *model.EnrichScope) (int, error)
 
 	ApplyArtistEnrichment(ctx context.Context, in model.ArtistEnrichment) error
 	ApplyReleaseGroupEnrichment(ctx context.Context, in model.ReleaseGroupEnrichment) error
@@ -250,6 +254,14 @@ func (s *Service) acoustEnabled() bool { return s.cfg.AcoustIDKey != "" && s.cap
 type RunOptions struct {
 	Force bool // re-enrich already-enriched entities
 	Limit int  // cap on entities processed (0 = all needing enrichment)
+	// Scope narrows the pass to explicit targets (nil = the full catalog walk).
+	// A scoped run implies Force: pointing at a target is an explicit gesture, so
+	// a previously-missed lookup is retried (markers and cached responses are
+	// bypassed) rather than skipped; the MusicBrainz pacing bounds the cost. A
+	// phase whose scope list is empty is skipped entirely. The fill-when-empty
+	// invariants are unchanged: a scoped lyrics or identifier fill still applies
+	// only where the field is empty and unlocked.
+	Scope *model.EnrichScope
 }
 
 // Result tallies an enrichment run.
@@ -277,7 +289,9 @@ type Heartbeat func(progress float64, msg string) error
 // independently and marked, so an interrupted run resumes where it left off. A
 // per-entity miss marks the entity looked-up-with-no-match and continues; a network
 // failure (offline, cancellation) aborts with the underlying error rather than
-// hammering an unreachable service.
+// hammering an unreachable service. A scoped run (RunOptions.Scope) walks only the
+// scoped targets through the same pipeline, provenance and markers included, and
+// implies force.
 func (s *Service) Run(ctx context.Context, opts RunOptions, hb Heartbeat) (*Result, error) {
 	const op = "enrich.Run"
 	res := &Result{}
@@ -285,16 +299,24 @@ func (s *Service) Run(ctx context.Context, opts RunOptions, hb Heartbeat) (*Resu
 		return res, waxerr.New(waxerr.CodeUnsupported, op,
 			"enrichment needs a MusicBrainz contact (set enrichment.contact)")
 	}
-	st := &runState{force: opts.Force}
+	// A scoped run implies force: the caller pointed at these targets, so markers
+	// and cached provider responses are bypassed and the lookup actually re-runs.
+	scope := opts.Scope
+	st := &runState{force: opts.Force || scope != nil}
+	var artistIDs, rgIDs, bookIDs, lyricsIDs []int64
+	if scope != nil {
+		artistIDs, rgIDs, bookIDs, lyricsIDs = scope.ArtistIDs, scope.ReleaseGroupIDs, scope.BookItemIDs, scope.LyricsItemIDs
+	}
 
 	// The total is only needed to report a heartbeat ratio, so skip the three
 	// counting queries entirely when there is no heartbeat.
 	var total int
 	if hb != nil {
-		// includeLyrics must match the phase list below, which adds the lyrics phase
-		// only when a lyrics-capable provider is registered, so the denominator counts
-		// exactly the work that will run.
-		n, err := s.store.CountEntitiesNeedingEnrichment(ctx, opts.Force, s.hasCapability(CapLyrics))
+		// includeLyrics and the scope must match the phase list below, which adds the
+		// lyrics phase only when a lyrics-capable provider is registered and skips a
+		// phase the scope leaves empty, so the denominator counts exactly the work
+		// that will run.
+		n, err := s.store.CountEntitiesNeedingEnrichment(ctx, st.force, s.hasCapability(CapLyrics), scope)
 		if err != nil {
 			return res, err
 		}
@@ -323,47 +345,56 @@ func (s *Service) Run(ctx context.Context, opts RunOptions, hb Heartbeat) (*Resu
 	}
 	limitReached := func() bool { return opts.Limit > 0 && res.total() >= opts.Limit }
 
+	// A phase runs when the pass is unscoped or the scope names targets for it; a
+	// scoped phase with nothing to do is skipped outright (no fetch, no count).
+	phaseRuns := func(ids []int64) bool { return scope == nil || len(ids) > 0 }
+
 	// Artists first: a release group's artist credit is more useful once its primary
 	// artist carries an MBID.
-	phases := []phase{
-		{
+	var phases []phase
+	if phaseRuns(artistIDs) {
+		phases = append(phases, phase{
 			label: "artist", enriched: &res.ArtistsEnriched, matched: &res.ArtistsMatched,
 			fetch: func(ctx context.Context, after int64, lim int) ([]model.EnrichTarget, error) {
-				return s.store.ArtistsNeedingEnrichment(ctx, st.force, after, lim)
+				return s.store.ArtistsNeedingEnrichment(ctx, st.force, after, lim, artistIDs)
 			},
 			enrich: func(ctx context.Context, t model.EnrichTarget) (bool, error) { return s.enrichArtist(ctx, st, t) },
-		},
-		{
+		})
+	}
+	if phaseRuns(rgIDs) {
+		phases = append(phases, phase{
 			label: "album", enriched: &res.ReleaseGroupsEnriched, matched: &res.ReleaseGroupsMatched,
 			fetch: func(ctx context.Context, after int64, lim int) ([]model.EnrichTarget, error) {
-				return s.store.ReleaseGroupsNeedingEnrichment(ctx, st.force, after, lim, s.acoustEnabled())
+				return s.store.ReleaseGroupsNeedingEnrichment(ctx, st.force, after, lim, s.acoustEnabled(), rgIDs)
 			},
 			enrich: func(ctx context.Context, t model.EnrichTarget) (bool, error) {
 				return s.enrichReleaseGroup(ctx, st, res, t)
 			},
-		},
-		{
+		})
+	}
+	if phaseRuns(bookIDs) {
+		phases = append(phases, phase{
 			label: "book", enriched: &res.BooksEnriched, matched: &res.BooksMatched,
 			fetch: func(ctx context.Context, after int64, lim int) ([]model.EnrichTarget, error) {
-				return s.store.BooksNeedingEnrichment(ctx, st.force, after, lim)
+				return s.store.BooksNeedingEnrichment(ctx, st.force, after, lim, bookIDs)
 			},
 			enrich: func(ctx context.Context, t model.EnrichTarget) (bool, error) { return s.enrichBook(ctx, st, t) },
-		},
+		})
 	}
 	// Lyrics are a per-recording phase, run only when a lyrics-capable provider is
 	// registered so no marker is written for tracks nothing could ever fill. It walks
 	// tracks that carry no lyrics yet, filling from LRCLIB (or an injected provider).
-	if s.hasCapability(CapLyrics) {
+	if s.hasCapability(CapLyrics) && phaseRuns(lyricsIDs) {
 		phases = append(phases, phase{
 			label: "lyrics", enriched: &res.LyricsEnriched, matched: &res.LyricsMatched,
 			fetch: func(ctx context.Context, after int64, lim int) ([]model.EnrichTarget, error) {
-				return s.store.ItemsNeedingLyrics(ctx, st.force, after, lim)
+				return s.store.ItemsNeedingLyrics(ctx, st.force, after, lim, lyricsIDs)
 			},
 			enrich: func(ctx context.Context, t model.EnrichTarget) (bool, error) { return s.enrichLyrics(ctx, st, t) },
 		})
 	}
 	for i := range phases {
-		if err := s.runPhase(ctx, res, phases[i], beat, remaining, limitReached); err != nil {
+		if err := s.runPhase(ctx, phases[i], beat, remaining, limitReached); err != nil {
 			return res, err
 		}
 	}
@@ -394,8 +425,9 @@ type phase struct {
 // runPhase walks one entity type in keyset pages, enriching each target. It is the
 // one loop behind artists, release groups, and books. A MusicBrainz or cancellation
 // error aborts; a per-entity miss is marked by the enrich callback and the walk
-// continues.
-func (s *Service) runPhase(ctx context.Context, res *Result, p phase, beat func(string) error, remaining func() int, limitReached func() bool) error {
+// continues. Counters live on the phase (pointers into the Result), so the loop
+// needs no Result of its own.
+func (s *Service) runPhase(ctx context.Context, p phase, beat func(string) error, remaining func() int, limitReached func() bool) error {
 	var afterID int64
 	for {
 		if limitReached() {

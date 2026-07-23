@@ -433,6 +433,18 @@ func (l *Library) DataVersion(ctx context.Context) (int64, error) {
 // ratings, stars, bookmarks, queue, and play sessions.
 func (l *Library) Playback() *playback.Service { return l.playback }
 
+// PlayStatesForItems returns every user's playback state for each of the given
+// items, keyed by item pid, each item's states ordered by user pid. Untouched
+// and unknown items are absent. It goes through the playback service, so this
+// process's buffered (not yet flushed) resume positions are overlaid; a reader
+// in another process sees flushed state only, and a buffered-but-unflushed pair
+// may synthesize a position-only state (see playback.Service.StatesForItems for
+// the exact contract). It is the bulk "is anyone using these" read a multi-user
+// consumer runs before dropping items.
+func (l *Library) PlayStatesForItems(ctx context.Context, itemPIDs []model.PID) (map[model.PID][]model.PlayState, error) {
+	return l.playback.StatesForItems(ctx, itemPIDs)
+}
+
 // Playlists returns the playlist service for static and smart playlists plus
 // M3U8 import/export.
 func (l *Library) Playlists() *playlist.Service { return l.playlists }
@@ -657,10 +669,20 @@ func (e *watchEngine) SyncSources(ctx context.Context) error {
 	return nil
 }
 
-// EnrichOptions controls a metadata enrichment run.
+// EnrichOptions controls a metadata enrichment run. ItemPID or EntityType+
+// EntityPID (mutually exclusive) scope the pass to one item's or entity's
+// enrichable targets: a track scopes to its artist, album artist, release group,
+// and lyrics; a book to its contributors and identifier fill; an entity scope
+// takes artist, release_group, or album (an album resolves to its parent release
+// group). A scoped run implies Force and runs the full pipeline for its targets,
+// provenance, markers, and change deltas included.
 type EnrichOptions struct {
 	Force bool // re-enrich already-enriched entities
 	Limit int  // cap on entities processed (0 = all needing enrichment)
+
+	ItemPID    model.PID       // scope to one item's targets ("" = no item scope)
+	EntityType read.EntityKind // with EntityPID: scope to one entity
+	EntityPID  model.PID
 }
 
 // EnrichResult reports an enrichment run and the job it ran under.
@@ -669,20 +691,48 @@ type EnrichResult struct {
 	Result enrich.Result
 }
 
+// enrichScope validates EnrichOptions' scoping fields and resolves them to
+// explicit store targets, or returns nil for an unscoped pass. Validation errors
+// (both scopes at once, half an entity scope) and resolution errors (unknown pid,
+// an episode or unsupported entity kind) surface before any job starts. op is
+// the calling method's error attribution (Enrich or StartEnrich).
+func (l *Library) enrichScope(ctx context.Context, op string, opts EnrichOptions) (*model.EnrichScope, error) {
+	hasItem := opts.ItemPID != ""
+	hasEntity := opts.EntityType != "" || opts.EntityPID != ""
+	switch {
+	case hasItem && hasEntity:
+		return nil, waxerr.New(waxerr.CodeInvalid, op, "scope by item or by entity, not both")
+	case hasEntity && (opts.EntityType == "" || opts.EntityPID == ""):
+		return nil, waxerr.New(waxerr.CodeInvalid, op, "an entity scope needs both a type and a pid")
+	case hasItem:
+		return l.store.EnrichScopeForItem(ctx, opts.ItemPID)
+	case hasEntity:
+		return l.store.EnrichScopeForEntity(ctx, opts.EntityType, opts.EntityPID)
+	default:
+		return nil, nil
+	}
+}
+
 // Enrich runs the metadata enrichment pass under an "enrich"-scoped job:
 // MusicBrainz release-group/artist/genre resolution (MBID-first), Cover Art Archive
 // covers, and the optional AcoustID fingerprint fallback. It is resumable and
 // lock-respecting (never overwriting a tagged or user-locked field), caches
 // provider responses, and degrades gracefully offline. Enrichment requires a
 // MusicBrainz contact (Options.Enrichment.Contact); without one it returns
-// CodeUnsupported.
+// CodeUnsupported. A scoped run (see EnrichOptions) holds the same "enrich" job
+// lease as a full pass, so the two exclude each other (CodeConflict while one
+// runs).
 func (l *Library) Enrich(ctx context.Context, opts EnrichOptions) (*EnrichResult, error) {
 	out := &EnrichResult{}
 	if !l.enricher.Enabled() {
 		return out, waxerr.New(waxerr.CodeUnsupported, "waxbin.Enrich",
 			"enrichment needs a MusicBrainz contact (set enrichment.contact / WAXBIN_ENRICH_CONTACT)")
 	}
-	job, runErr := l.jobs.Run(ctx, "enrich", "enrich", l.enrichWork(opts, out))
+	scope, err := l.enrichScope(ctx, "waxbin.Enrich", opts)
+	if err != nil {
+		return out, err
+	}
+	job, runErr := l.jobs.Run(ctx, "enrich", "enrich", l.enrichWork(opts, scope, out))
 	if job != nil {
 		out.JobPID = job.PID
 	}

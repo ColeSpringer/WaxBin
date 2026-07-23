@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/colespringer/waxbin/model"
+	"github.com/colespringer/waxbin/read"
 	"github.com/colespringer/waxbin/waxerr"
 )
 
@@ -37,6 +38,18 @@ const enrichArtistBacksItems = `(EXISTS (SELECT 1 FROM track t WHERE t.artist_id
 // least one track.
 const enrichRGBacksItems = `EXISTS (SELECT 1 FROM album al JOIN track t ON t.album_id = al.id WHERE al.release_group_id = rg.id)`
 
+// enrichBacksFilter returns the backs-items predicate for a walk, neutralized
+// ("1=1") when the walk is scoped to explicit ids: the heuristic protects a
+// full pass from ghost entities, while an explicit scope must reach exactly
+// what it names. The count query applies the same rule so the heartbeat
+// denominator stays in lockstep.
+func enrichBacksFilter(predicate string, ids []int64) string {
+	if len(ids) > 0 {
+		return "1=1"
+	}
+	return predicate
+}
+
 // notEnriched returns the SQL predicate excluding already-enriched entities, or
 // "1=1" for a forced run that re-enriches everything. idExpr is the entity's id
 // column (book keys on item_id, not id).
@@ -48,14 +61,42 @@ func notEnriched(entityType, idExpr string, force bool) string {
 		entityType + "' AND ee.entity_id = " + idExpr + ")"
 }
 
+// enrichIDsFilter returns an "AND col IN (...)" clause with its bound args for a
+// scoped iteration query. nil ids means no scope: the clause is "" so the
+// unscoped statement stays byte-identical to the pre-scope form. An EMPTY
+// non-nil slice is a scope with no targets and matches nothing, mirroring the
+// service layer (which skips such a phase outright) instead of silently
+// widening to a full-catalog walk. Scope lists come from one item or entity (a
+// handful of ids), so they never approach the bound-parameter limit.
+func enrichIDsFilter(col string, ids []int64) (string, []any) {
+	if ids == nil {
+		return "", nil
+	}
+	if len(ids) == 0 {
+		return " AND 1=0", nil
+	}
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		args[i] = id
+	}
+	return " AND " + col + " IN " + placeholders(len(ids)), args
+}
+
 // ArtistsNeedingEnrichment returns the next keyset page of artists to enrich.
-func (s *Store) ArtistsNeedingEnrichment(ctx context.Context, force bool, afterID int64, limit int) ([]model.EnrichTarget, error) {
+// A non-nil ids list scopes the walk to those artist rowids (keyset shape
+// kept), and drops the backs-items ghost heuristic: that filter exists to keep
+// a full pass from wasting lookups on retag leftovers, but a scoped caller
+// pointed at the artist deliberately, so it is reached even when nothing backs
+// it anymore.
+func (s *Store) ArtistsNeedingEnrichment(ctx context.Context, force bool, afterID int64, limit int, ids []int64) ([]model.EnrichTarget, error) {
 	const op = "store.ArtistsNeedingEnrichment"
+	scopeClause, scopeArgs := enrichIDsFilter("a.id", ids)
 	stmt := `SELECT a.id, a.pid, a.name, COALESCE(a.mbid,'')
 		FROM artist a
-		WHERE a.id > ? AND ` + enrichArtistBacksItems + ` AND ` + notEnriched(model.EnrichArtistType, "a.id", force) + `
+		WHERE a.id > ? AND ` + enrichBacksFilter(enrichArtistBacksItems, ids) + ` AND ` + notEnriched(model.EnrichArtistType, "a.id", force) + scopeClause + `
 		ORDER BY a.id LIMIT ?`
-	rows, err := s.read.QueryContext(ctx, stmt, afterID, limitOr(limit))
+	args := append(append([]any{afterID}, scopeArgs...), limitOr(limit))
+	rows, err := s.read.QueryContext(ctx, stmt, args...)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
@@ -76,8 +117,10 @@ func (s *Store) ArtistsNeedingEnrichment(ctx context.Context, force bool, afterI
 // ReleaseGroupsNeedingEnrichment returns the next keyset page of release groups to
 // enrich, each with its primary-artist name. When includeRepFile is set it also
 // resolves a representative member file (path + duration) for the AcoustID fallback;
-// otherwise that correlated lookup is skipped entirely (the common path).
-func (s *Store) ReleaseGroupsNeedingEnrichment(ctx context.Context, force bool, afterID int64, limit int, includeRepFile bool) ([]model.EnrichTarget, error) {
+// otherwise that correlated lookup is skipped entirely (the common path). A non-nil
+// ids list scopes the walk to those release-group rowids and, as with artists,
+// drops the backs-items ghost heuristic for the explicit targets.
+func (s *Store) ReleaseGroupsNeedingEnrichment(ctx context.Context, force bool, afterID int64, limit int, includeRepFile bool, ids []int64) ([]model.EnrichTarget, error) {
 	const op = "store.ReleaseGroupsNeedingEnrichment"
 	// The representative file's path and duration must come from ONE row, so a single
 	// correlated subquery picks the file id (deterministically, lowest first) and the
@@ -93,12 +136,14 @@ func (s *Store) ReleaseGroupsNeedingEnrichment(ctx context.Context, force bool, 
 			ORDER BY pf.file_id LIMIT 1)`
 		repCols = "COALESCE(rf.path, X''), COALESCE(rf.duration_ms, 0)"
 	}
+	scopeClause, scopeArgs := enrichIDsFilter("rg.id", ids)
 	stmt := `SELECT rg.id, rg.pid, rg.title, COALESCE(rg.mbid,''), COALESCE(ar.name,''), ` + repCols + `
 		FROM release_group rg
 		LEFT JOIN artist ar ON ar.id = rg.primary_artist_id` + repJoin + `
-		WHERE rg.id > ? AND ` + enrichRGBacksItems + ` AND ` + notEnriched(model.EnrichReleaseGroupType, "rg.id", force) + `
+		WHERE rg.id > ? AND ` + enrichBacksFilter(enrichRGBacksItems, ids) + ` AND ` + notEnriched(model.EnrichReleaseGroupType, "rg.id", force) + scopeClause + `
 		ORDER BY rg.id LIMIT ?`
-	rows, err := s.read.QueryContext(ctx, stmt, afterID, limitOr(limit))
+	args := append(append([]any{afterID}, scopeArgs...), limitOr(limit))
+	rows, err := s.read.QueryContext(ctx, stmt, args...)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
@@ -123,14 +168,21 @@ func (s *Store) ReleaseGroupsNeedingEnrichment(ctx context.Context, force bool, 
 // BooksNeedingEnrichment returns audiobooks to enrich. It requires a non-empty
 // mbid: MusicBrainz text search for audiobooks is unreliable, so a book is only
 // enriched when it carries an explicit release id. A catalog with no book mbids
-// therefore yields nothing and costs no lookups.
-func (s *Store) BooksNeedingEnrichment(ctx context.Context, force bool, afterID int64, limit int) ([]model.EnrichTarget, error) {
+// therefore yields nothing and costs no lookups. A non-nil ids list scopes the
+// walk to those book item rowids; unlike the artist/release-group ghost
+// heuristic, the mbid requirement applies to a scoped walk too, because it is a
+// capability gate, not a cost filter: without a release id there is no
+// resolution path at all, so a scoped mbid-less book stays skipped (its
+// contributors still enrich through the artist phase).
+func (s *Store) BooksNeedingEnrichment(ctx context.Context, force bool, afterID int64, limit int, ids []int64) ([]model.EnrichTarget, error) {
 	const op = "store.BooksNeedingEnrichment"
+	scopeClause, scopeArgs := enrichIDsFilter("b.item_id", ids)
 	stmt := `SELECT b.item_id, pi.pid, pi.title, COALESCE(b.mbid,''), COALESCE(b.author,'')
 		FROM book b JOIN playable_item pi ON pi.id = b.item_id
-		WHERE b.item_id > ? AND b.mbid IS NOT NULL AND b.mbid <> '' AND ` + notEnriched(model.EnrichBookType, "b.item_id", force) + `
+		WHERE b.item_id > ? AND b.mbid IS NOT NULL AND b.mbid <> '' AND ` + notEnriched(model.EnrichBookType, "b.item_id", force) + scopeClause + `
 		ORDER BY b.item_id LIMIT ?`
-	rows, err := s.read.QueryContext(ctx, stmt, afterID, limitOr(limit))
+	args := append(append([]any{afterID}, scopeArgs...), limitOr(limit))
+	rows, err := s.read.QueryContext(ctx, stmt, args...)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
@@ -151,22 +203,39 @@ func (s *Store) BooksNeedingEnrichment(ctx context.Context, force bool, afterID 
 // CountEntitiesNeedingEnrichment totals the artists, release groups, and books the
 // pass would process, plus (when includeLyrics is set) the tracks needing a lyrics
 // lookup, so the heartbeat can report a real ratio. includeLyrics must mirror whether
-// the run actually runs the lyrics phase, or the ratio drifts.
-func (s *Store) CountEntitiesNeedingEnrichment(ctx context.Context, force bool, includeLyrics bool) (int, error) {
+// the run actually runs the lyrics phase, or the ratio drifts. A non-nil scope
+// filters each per-type count to its id list, and a type with an empty list
+// contributes zero, because the scoped run skips that phase entirely; the
+// denominator stays in lockstep with the work that actually runs.
+func (s *Store) CountEntitiesNeedingEnrichment(ctx context.Context, force bool, includeLyrics bool, scope *model.EnrichScope) (int, error) {
 	const op = "store.CountEntitiesNeedingEnrichment"
-	queries := []string{
-		`SELECT COUNT(*) FROM artist a WHERE ` + enrichArtistBacksItems + ` AND ` + notEnriched(model.EnrichArtistType, "a.id", force),
-		`SELECT COUNT(*) FROM release_group rg WHERE ` + enrichRGBacksItems + ` AND ` + notEnriched(model.EnrichReleaseGroupType, "rg.id", force),
-		`SELECT COUNT(*) FROM book b WHERE b.mbid IS NOT NULL AND b.mbid <> '' AND ` + notEnriched(model.EnrichBookType, "b.item_id", force),
+	type countQuery struct {
+		stmt string
+		args []any
 	}
+	var queries []countQuery
+	add := func(stmt, idCol string, ids []int64) {
+		if scope != nil && len(ids) == 0 {
+			return
+		}
+		clause, args := enrichIDsFilter(idCol, ids)
+		queries = append(queries, countQuery{stmt + clause, args})
+	}
+	var artistIDs, rgIDs, bookIDs, lyricsIDs []int64
+	if scope != nil {
+		artistIDs, rgIDs, bookIDs, lyricsIDs = scope.ArtistIDs, scope.ReleaseGroupIDs, scope.BookItemIDs, scope.LyricsItemIDs
+	}
+	add(`SELECT COUNT(*) FROM artist a WHERE `+enrichBacksFilter(enrichArtistBacksItems, artistIDs)+` AND `+notEnriched(model.EnrichArtistType, "a.id", force), "a.id", artistIDs)
+	add(`SELECT COUNT(*) FROM release_group rg WHERE `+enrichBacksFilter(enrichRGBacksItems, rgIDs)+` AND `+notEnriched(model.EnrichReleaseGroupType, "rg.id", force), "rg.id", rgIDs)
+	add(`SELECT COUNT(*) FROM book b WHERE b.mbid IS NOT NULL AND b.mbid <> '' AND `+notEnriched(model.EnrichBookType, "b.item_id", force), "b.item_id", bookIDs)
 	if includeLyrics {
-		queries = append(queries, `SELECT COUNT(*) FROM playable_item pi JOIN track t ON t.item_id = pi.id
-			WHERE `+lyricsNeededPredicate+` AND `+notEnriched(enrichEntityLyrics, "pi.id", force))
+		add(`SELECT COUNT(*) FROM playable_item pi JOIN track t ON t.item_id = pi.id
+			WHERE `+lyricsNeededPredicate+` AND `+notEnriched(enrichEntityLyrics, "pi.id", force), "pi.id", lyricsIDs)
 	}
 	var total int
 	for _, q := range queries {
 		var n int
-		if err := s.read.QueryRowContext(ctx, q).Scan(&n); err != nil {
+		if err := s.read.QueryRowContext(ctx, q.stmt, q.args...).Scan(&n); err != nil {
 			return 0, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		total += n
@@ -489,14 +558,17 @@ const lyricsNeededPredicate = `pi.kind = 'track' AND pi.state = 'present' AND pi
 // lyrics row yet (and, unless force, have not been looked up), each carrying the
 // title, artist, album, and duration a lyrics provider keys on. It mirrors the
 // entity keyset queries: a forced re-run rewrites the marker rather than removing the
-// track from the set, so the walk still advances and terminates.
-func (s *Store) ItemsNeedingLyrics(ctx context.Context, force bool, afterID int64, limit int) ([]model.EnrichTarget, error) {
+// track from the set, so the walk still advances and terminates. A non-nil ids list
+// scopes the walk to those item rowids; the fill-when-empty predicate still applies,
+// so a scoped item that already carries lyrics is not returned.
+func (s *Store) ItemsNeedingLyrics(ctx context.Context, force bool, afterID int64, limit int, ids []int64) ([]model.EnrichTarget, error) {
 	const op = "store.ItemsNeedingLyrics"
 	// A virtual track plays only its window of the shared file, so the duration a lyrics
 	// provider keys on must be that window (itemEffectiveDurationExpr), not the whole
 	// file. Otherwise a 3-minute cue track carved from an hour-long rip is looked up as
 	// 3600s and never matches. The primary edge is aliased pf so the shared expression
 	// applies.
+	scopeClause, scopeArgs := enrichIDsFilter("pi.id", ids)
 	stmt := `SELECT pi.id, pi.pid, pi.title, COALESCE(t.artist,''), COALESCE(t.album,''),
 			COALESCE(` + itemEffectiveDurationExpr + `, 0)
 		FROM playable_item pi
@@ -504,9 +576,10 @@ func (s *Store) ItemsNeedingLyrics(ctx context.Context, force bool, afterID int6
 		LEFT JOIN item_file pf ON pf.item_id = pi.id AND pf.role = 'primary'
 		LEFT JOIN file f ON f.id = pf.file_id
 		WHERE pi.id > ? AND ` + lyricsNeededPredicate + `
-		  AND ` + notEnriched(enrichEntityLyrics, "pi.id", force) + `
+		  AND ` + notEnriched(enrichEntityLyrics, "pi.id", force) + scopeClause + `
 		ORDER BY pi.id LIMIT ?`
-	rows, err := s.read.QueryContext(ctx, stmt, afterID, limitOr(limit))
+	args := append(append([]any{afterID}, scopeArgs...), limitOr(limit))
+	rows, err := s.read.QueryContext(ctx, stmt, args...)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
@@ -621,6 +694,130 @@ func (s *Store) EnrichmentCoverage(ctx context.Context) (model.EnrichmentCoverag
 		}
 	}
 	return cov, rows.Err()
+}
+
+// EnrichScopeForItem resolves one item into the enrichment targets a scoped pass
+// should touch. A track scopes to its artist and album artist, its album's release
+// group, and its own lyrics lookup; a book scopes to its contributors and its own
+// identifier fill. An episode is CodeUnsupported: episode metadata is feed-owned
+// and synced, not enriched. An unknown pid is CodeNotFound.
+func (s *Store) EnrichScopeForItem(ctx context.Context, itemPID model.PID) (*model.EnrichScope, error) {
+	const op = "store.EnrichScopeForItem"
+	var itemID int64
+	var kind string
+	err := s.read.QueryRowContext(ctx,
+		"SELECT id, kind FROM playable_item WHERE pid = ?", string(itemPID)).Scan(&itemID, &kind)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, waxerr.New(waxerr.CodeNotFound, op, "no such item: "+string(itemPID))
+	}
+	if err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	scope := &model.EnrichScope{}
+	switch model.Kind(kind) {
+	case model.KindTrack:
+		var artistID, albumArtistID, albumID sql.NullInt64
+		err := s.read.QueryRowContext(ctx,
+			"SELECT artist_id, album_artist_id, album_id FROM track WHERE item_id = ?", itemID).
+			Scan(&artistID, &albumArtistID, &albumID)
+		if err != nil {
+			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		if artistID.Valid {
+			scope.ArtistIDs = append(scope.ArtistIDs, artistID.Int64)
+		}
+		// The album artist counts when it is a different entity, or when it is the
+		// only artist the track has (an untagged primary artist stores NULL).
+		if albumArtistID.Valid && (!artistID.Valid || albumArtistID.Int64 != artistID.Int64) {
+			scope.ArtistIDs = append(scope.ArtistIDs, albumArtistID.Int64)
+		}
+		if albumID.Valid {
+			var rgID sql.NullInt64
+			err := s.read.QueryRowContext(ctx,
+				"SELECT release_group_id FROM album WHERE id = ?", albumID.Int64).Scan(&rgID)
+			if err != nil && !errors.Is(err, sql.ErrNoRows) {
+				return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+			if rgID.Valid {
+				scope.ReleaseGroupIDs = append(scope.ReleaseGroupIDs, rgID.Int64)
+			}
+		}
+		scope.LyricsItemIDs = append(scope.LyricsItemIDs, itemID)
+	case model.KindBook:
+		rows, err := s.read.QueryContext(ctx,
+			"SELECT DISTINCT artist_id FROM item_contributor WHERE item_id = ? ORDER BY artist_id", itemID)
+		if err != nil {
+			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var id int64
+			if err := rows.Scan(&id); err != nil {
+				return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+			scope.ArtistIDs = append(scope.ArtistIDs, id)
+		}
+		if err := rows.Err(); err != nil {
+			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		scope.BookItemIDs = append(scope.BookItemIDs, itemID)
+	default:
+		return nil, waxerr.New(waxerr.CodeUnsupported, op,
+			"cannot scope enrichment to a "+kind+" (episode metadata is feed-owned)")
+	}
+	return scope, nil
+}
+
+// EnrichScopeForEntity resolves one shared entity into a scoped pass's targets:
+// an artist to itself, a release group to itself, and an album to its parent
+// release group (enrichment resolves at release-group grain). Other entity kinds
+// have no enrichment provider and are CodeUnsupported; an unknown pid is
+// CodeNotFound.
+func (s *Store) EnrichScopeForEntity(ctx context.Context, kind read.EntityKind, pid model.PID) (*model.EnrichScope, error) {
+	const op = "store.EnrichScopeForEntity"
+	scope := &model.EnrichScope{}
+	switch kind {
+	case read.EntityArtist:
+		var id int64
+		err := s.read.QueryRowContext(ctx, "SELECT id FROM artist WHERE pid = ?", string(pid)).Scan(&id)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, waxerr.New(waxerr.CodeNotFound, op, "no such artist: "+string(pid))
+		}
+		if err != nil {
+			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		scope.ArtistIDs = append(scope.ArtistIDs, id)
+	case read.EntityReleaseGroup:
+		var id int64
+		err := s.read.QueryRowContext(ctx, "SELECT id FROM release_group WHERE pid = ?", string(pid)).Scan(&id)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, waxerr.New(waxerr.CodeNotFound, op, "no such release group: "+string(pid))
+		}
+		if err != nil {
+			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		scope.ReleaseGroupIDs = append(scope.ReleaseGroupIDs, id)
+	case read.EntityAlbum:
+		var rgID sql.NullInt64
+		err := s.read.QueryRowContext(ctx,
+			"SELECT release_group_id FROM album WHERE pid = ?", string(pid)).Scan(&rgID)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, waxerr.New(waxerr.CodeNotFound, op, "no such album: "+string(pid))
+		}
+		if err != nil {
+			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		// A null parent only happens when the release group was deleted out from
+		// under the album; surface it rather than run a pass that touches nothing.
+		if !rgID.Valid {
+			return nil, waxerr.New(waxerr.CodeNotFound, op, "album has no release group: "+string(pid))
+		}
+		scope.ReleaseGroupIDs = append(scope.ReleaseGroupIDs, rgID.Int64)
+	default:
+		return nil, waxerr.New(waxerr.CodeUnsupported, op,
+			"cannot scope enrichment to a "+string(kind)+" (want artist, release_group, or album)")
+	}
+	return scope, nil
 }
 
 // limitOr defaults a non-positive limit to a sane batch cap.

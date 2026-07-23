@@ -182,16 +182,7 @@ func (s *Store) ItemIdentitiesByPIDs(ctx context.Context, pids []model.PID) ([]m
 	if len(pids) == 0 {
 		return nil, nil
 	}
-	unique := make([]model.PID, 0, len(pids))
-	seen := make(map[model.PID]struct{}, len(pids))
-	for _, pid := range pids {
-		if _, ok := seen[pid]; ok {
-			continue
-		}
-		seen[pid] = struct{}{}
-		unique = append(unique, pid)
-	}
-
+	unique := uniquePIDs(pids)
 	byPID := make(map[model.PID]model.PortableRef, len(unique))
 	err := chunkSlice(unique, idBatchSize, func(chunk []model.PID) error {
 		args := make([]any, len(chunk))

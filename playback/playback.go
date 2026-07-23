@@ -6,9 +6,11 @@ package playback
 
 import (
 	"context"
+	"sort"
 	"sync"
 
 	"github.com/colespringer/waxbin/model"
+	"github.com/colespringer/waxbin/waxerr"
 )
 
 // Store is the persistence the playback service needs (satisfied by store/sqlite).
@@ -18,6 +20,13 @@ type Store interface {
 	SetRating(ctx context.Context, userPID, itemPID model.PID, rating *int) error
 	SetStar(ctx context.Context, userPID, itemPID model.PID, starred bool) error
 	PlayStateFor(ctx context.Context, userPID, itemPID model.PID) (*model.PlayState, error)
+	// PlayStatesForItems is the bulk read behind StatesForItems: every user's
+	// state for each given item, keyed by item pid, each slice ordered by user
+	// pid; untouched and unknown items are absent.
+	PlayStatesForItems(ctx context.Context, itemPIDs []model.PID) (map[model.PID][]model.PlayState, error)
+	// DefaultUser resolves the seeded default user, so the overlay can match a
+	// position buffered under the empty-pid sentinel to its flushed row.
+	DefaultUser(ctx context.Context) (*model.User, error)
 	AddBookmark(ctx context.Context, userPID, itemPID model.PID, positionMS int64, label string) (model.PID, error)
 	Bookmarks(ctx context.Context, userPID, itemPID model.PID) ([]model.Bookmark, error)
 	DeleteBookmark(ctx context.Context, bookmarkPID model.PID) error
@@ -76,7 +85,10 @@ func (s *Service) Flush(ctx context.Context) error { return s.flush(ctx) }
 // replaced by an older buffered tick. Writes happen outside s.mu so incoming
 // ticks do not block. On write errors, the batch keeps going, the first error is
 // returned, and failed positions are re-queued unless a newer tick already
-// arrived for that item.
+// arrived for that item. A CodeNotFound failure is the exception: the user or
+// item is gone, a retry can never succeed, so the tick is dropped instead of
+// re-queued (it would otherwise linger forever, resurfacing through the
+// StatesForItems overlay on every read).
 func (s *Service) flush(ctx context.Context) error {
 	s.flushMu.Lock()
 	defer s.flushMu.Unlock()
@@ -95,6 +107,9 @@ func (s *Service) flush(ctx context.Context) error {
 		if err := s.store.SetProgress(ctx, k.user, k.item, pos); err != nil {
 			if firstErr == nil {
 				firstErr = err
+			}
+			if waxerr.Is(err, waxerr.CodeNotFound) {
+				continue
 			}
 			s.mu.Lock()
 			if _, newer := s.pending[k]; !newer {
@@ -134,6 +149,83 @@ func (s *Service) State(ctx context.Context, userPID, itemPID model.PID) (*model
 	}
 	s.mu.Unlock()
 	return st, nil
+}
+
+// StatesForItems returns every user's playback state for each of the given
+// items, keyed by item pid with each slice ordered by user pid, overlaying
+// buffered (not yet flushed) resume positions: a buffered position replaces the
+// flushed one on its state, and a (user, item) pair that has only a buffered
+// position gets a position-only state synthesized, so a same-process reader
+// never misses the window between a tick and its flush. Only this process's
+// buffer is visible; a second process reads flushed state alone. Untouched and
+// unknown items are absent from the flushed read, but a synthesized entry is
+// not existence-checked: an item deleted after this process buffered a tick for
+// it can surface until the next flush (which discards a not-found tick). That
+// errs on the side the overlay exists for; a keep-or-drop consumer briefly sees
+// "in use" rather than ever missing a live pair.
+func (s *Service) StatesForItems(ctx context.Context, itemPIDs []model.PID) (map[model.PID][]model.PlayState, error) {
+	states, err := s.store.PlayStatesForItems(ctx, itemPIDs)
+	if err != nil {
+		return nil, err
+	}
+	requested := make(map[model.PID]bool, len(itemPIDs))
+	for _, pid := range itemPIDs {
+		requested[pid] = true
+	}
+	s.mu.Lock()
+	pending := make(map[progressKey]int64)
+	needDefault := false
+	for k, pos := range s.pending {
+		if requested[k.item] {
+			pending[k] = pos
+			if k.user == "" {
+				needDefault = true
+			}
+		}
+	}
+	s.mu.Unlock()
+	if len(pending) == 0 {
+		return states, nil
+	}
+	// A position buffered under the empty-pid default-user sentinel must match
+	// the default user's flushed row (which carries the real pid), not synthesize
+	// a duplicate state beside it. A caller mixing the sentinel and the explicit
+	// pid for the same item has two buffer slots already; whichever resolves last
+	// wins here, exactly as unordered flushes would.
+	if needDefault {
+		u, err := s.store.DefaultUser(ctx)
+		if err != nil {
+			return nil, err
+		}
+		resolved := make(map[progressKey]int64, len(pending))
+		for k, pos := range pending {
+			if k.user == "" {
+				k.user = u.PID
+			}
+			resolved[k] = pos
+		}
+		pending = resolved
+	}
+	if states == nil {
+		states = make(map[model.PID][]model.PlayState)
+	}
+	for k, pos := range pending {
+		list := states[k.item]
+		hit := false
+		for i := range list {
+			if list[i].UserPID == k.user {
+				list[i].PositionMS = pos
+				hit = true
+				break
+			}
+		}
+		if !hit {
+			list = append(list, model.PlayState{UserPID: k.user, ItemPID: k.item, PositionMS: pos})
+			sort.Slice(list, func(i, j int) bool { return list[i].UserPID < list[j].UserPID })
+		}
+		states[k.item] = list
+	}
+	return states, nil
 }
 
 // AddBookmark records a labeled position within an item.

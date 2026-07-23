@@ -28,8 +28,10 @@ import (
 // version is rejected, so a newer client cannot silently misdrive an older
 // server. Version 2 added SetItemArtParams.Role: a version-1 server would drop
 // the unknown field and store a back-cover set as a front-cover overwrite,
-// which is exactly the misdrive the check exists to stop.
-const ProtocolVersion = 2
+// which is exactly the misdrive the check exists to stop. Version 3 added the
+// EnrichParams scope fields: a version-2 server would drop them and run a
+// full-catalog pass where the client asked for one item or entity.
+const ProtocolVersion = 3
 
 // Method names for the proxied operations: the fast request/response catalog
 // mutations, the reads a mutating command needs for its confirmation output, the
@@ -400,10 +402,16 @@ type AnalyzeParams struct {
 	WriteReplayGainTags bool `json:"writeReplayGainTags,omitempty"`
 }
 
-// EnrichParams is the run_enrich request payload.
+// EnrichParams is the run_enrich request payload. The scoping fields are
+// additive and mutually exclusive: ItemPID scopes the pass to one item's
+// enrichable targets, EntityType+EntityPID to one entity (artist,
+// release_group, or album). The server validates and resolves the scope.
 type EnrichParams struct {
-	Force bool `json:"force,omitempty"`
-	Limit int  `json:"limit,omitempty"`
+	Force      bool   `json:"force,omitempty"`
+	Limit      int    `json:"limit,omitempty"`
+	ItemPID    string `json:"itemPid,omitempty"`
+	EntityType string `json:"entityType,omitempty"`
+	EntityPID  string `json:"entityPid,omitempty"`
 }
 
 // OrganizeParams is the run_organize request payload. Rule is a marshaled query

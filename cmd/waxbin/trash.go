@@ -117,8 +117,8 @@ func trashEntriesJSON(entries []model.TrashEntry) any {
 		Orig       string `json:"origPath"`
 		Reason     string `json:"reason"`
 		Size       int64  `json:"size"`
-		TrashedAt  int64  `json:"trashedAt"`
-		RestoredAt int64  `json:"restoredAt,omitempty"`
+		TrashedAt  int64  `json:"trashedAt,string"`            // unix ns; a string, see playStateView
+		RestoredAt int64  `json:"restoredAt,string,omitempty"` // unix ns; 0 (never) omitted
 	}
 	out := make([]entryJSON, 0, len(entries))
 	for _, e := range entries {

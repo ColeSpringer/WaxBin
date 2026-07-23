@@ -7,17 +7,24 @@ import (
 )
 
 // PlayStateRecord is one external play-state datum to import: a resume position and
-// optional played/rating signals for one item and user. It is the neutral shape a
-// concrete adapter maps a foreign export (a prior media server, a companion app)
-// into before handing it to a PlayStateImporter.
+// optional played/rating/star signals for one item and user. It is the neutral shape
+// a concrete adapter maps a foreign export (a prior media server, a companion app)
+// into before handing it to a PlayStateImporter. The changed-at stamps (unix
+// nanoseconds, 0 = unknown) say when the star or rating last changed value on the
+// foreign side; the engine carries them so an adapter can build a replay guard
+// (skip a record older than local state), but the guard itself is the adapter's
+// job, and this seam holds no comparison logic.
 type PlayStateRecord struct {
-	UserPID      model.PID
-	ItemPID      model.PID
-	PositionMS   int64
-	Played       bool
-	HasRating    bool
-	Rating       int // 0..100 when HasRating
-	LastPlayedNS int64
+	UserPID          model.PID
+	ItemPID          model.PID
+	PositionMS       int64
+	Played           bool
+	HasRating        bool
+	Rating           int // 0..100 when HasRating
+	Starred          bool
+	LastPlayedNS     int64
+	RatingChangedNS  int64
+	StarredChangedNS int64
 }
 
 // PlayStateImportResult tallies an import pass.

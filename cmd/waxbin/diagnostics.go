@@ -137,7 +137,7 @@ type diagnosticView struct {
 	Severity string `json:"severity"`
 	TagKey   string `json:"tagKey,omitempty"`
 	Detail   string `json:"detail,omitempty"`
-	SeenAt   int64  `json:"seenAt"`
+	SeenAt   int64  `json:"seenAt,string"` // unix ns; a string, see playStateView
 }
 
 func diagnosticViews(ds []model.FileDiagnostic) []diagnosticView {

@@ -106,6 +106,85 @@ func TestUserStateQueryThroughFacade(t *testing.T) {
 	}
 }
 
+// TestPlayStatesForItemsFacade drives the bulk play-state read end to end: the
+// facade map agrees with the per-pair State reads, a buffered (unflushed)
+// position is overlaid in-process, and untouched items are absent.
+func TestPlayStatesForItemsFacade(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	writeFile(t, filepath.Join(root, "a.mp3"), testaudio.BuildMP3FromSpec(testaudio.MP3Spec{Title: "A", Artist: "Alpha", Album: "One", Audio: testaudio.AudioWithSeed(1)}))
+	writeFile(t, filepath.Join(root, "b.mp3"), testaudio.BuildMP3FromSpec(testaudio.MP3Spec{Title: "B", Artist: "Beta", Album: "Two", Audio: testaudio.AudioWithSeed(2)}))
+	writeFile(t, filepath.Join(root, "c.mp3"), testaudio.BuildMP3FromSpec(testaudio.MP3Spec{Title: "C", Artist: "Gamma", Album: "Three", Audio: testaudio.AudioWithSeed(3)}))
+
+	lib := openManaged(t, ctx, db, root)
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	byTitle := map[string]model.PID{}
+	all, _ := lib.Query(ctx, query.New(query.EntityItems).Build(), "")
+	for _, it := range all {
+		byTitle[it.Title] = it.PID
+	}
+
+	bob, err := lib.CreateUser(ctx, "bob")
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	def, err := lib.DefaultUser(ctx)
+	if err != nil {
+		t.Fatalf("default user: %v", err)
+	}
+
+	pb := lib.Playback()
+	if err := pb.SetStar(ctx, def.PID, byTitle["A"], true); err != nil {
+		t.Fatal(err)
+	}
+	if err := pb.SetStar(ctx, bob.PID, byTitle["A"], true); err != nil {
+		t.Fatal(err)
+	}
+	r := 90
+	if err := pb.SetRating(ctx, bob.PID, byTitle["B"], &r); err != nil {
+		t.Fatal(err)
+	}
+	// A buffered tick that has NOT been flushed: the bulk read must still see it.
+	pb.Progress(bob.PID, byTitle["B"], 123000)
+
+	states, err := lib.PlayStatesForItems(ctx, []model.PID{byTitle["A"], byTitle["B"], byTitle["C"]})
+	if err != nil {
+		t.Fatalf("PlayStatesForItems: %v", err)
+	}
+	if len(states) != 2 {
+		t.Fatalf("states map has %d items, want 2 (untouched C absent): %v", len(states), states)
+	}
+	if a := states[byTitle["A"]]; len(a) != 2 {
+		t.Fatalf("item A states = %+v, want both users", a)
+	}
+	b := states[byTitle["B"]]
+	if len(b) != 1 || b[0].UserPID != bob.PID {
+		t.Fatalf("item B states = %+v, want bob only", b)
+	}
+	if b[0].PositionMS != 123000 {
+		t.Errorf("item B position = %d, want the buffered 123000 overlaid", b[0].PositionMS)
+	}
+
+	// Each bulk entry agrees with the per-pair State read (the overlay applies to
+	// both paths in-process).
+	for _, itemPID := range []model.PID{byTitle["A"], byTitle["B"]} {
+		for _, s := range states[itemPID] {
+			single, err := pb.State(ctx, s.UserPID, itemPID)
+			if err != nil {
+				t.Fatalf("State(%s,%s): %v", s.UserPID, itemPID, err)
+			}
+			if single.PositionMS != s.PositionMS || single.Starred != s.Starred ||
+				single.HasRating != s.HasRating || single.Rating != s.Rating ||
+				single.StarredChangedAt != s.StarredChangedAt || single.RatingChangedAt != s.RatingChangedAt {
+				t.Errorf("bulk state %+v disagrees with State %+v", s, single)
+			}
+		}
+	}
+}
+
 func facadeTitles(t *testing.T, lib *waxbin.Library, q query.Query, userPID model.PID) []string {
 	t.Helper()
 	items, err := lib.Query(context.Background(), q, userPID)

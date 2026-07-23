@@ -21,6 +21,12 @@ CREATE TABLE play_state (
   rating         INTEGER,                     -- 0..100, NULL = unset
   starred_at     INTEGER,                     -- NULL = not starred
   last_played_at INTEGER,
+  -- Per-field change stamps for star and rating, bumped only when the stored
+  -- value actually changes (a clear included), so a sync adapter can order a
+  -- local change against a remote one. NULL = never changed. No index: a replay
+  -- guard compares against a row it already holds.
+  rating_changed_at  INTEGER,
+  starred_changed_at INTEGER,
   updated_at     INTEGER NOT NULL,
   PRIMARY KEY (user_id, item_id)
 );

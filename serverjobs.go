@@ -166,10 +166,12 @@ func (l *Library) StartAnalyze(ctx context.Context, opts AnalyzeOptions) (model.
 
 // --- enrich ---
 
-// enrichWork runs the enrichment pass into out. Shared by Enrich and StartEnrich.
-func (l *Library) enrichWork(opts EnrichOptions, out *EnrichResult) jobFn {
+// enrichWork runs the enrichment pass into out. Shared by Enrich and StartEnrich,
+// which resolve the scope (nil for a full pass) before taking the job lease so a
+// bad scope never starts a job.
+func (l *Library) enrichWork(opts EnrichOptions, scope *model.EnrichScope, out *EnrichResult) jobFn {
 	return func(ctx context.Context, h *jobs.Handle) error {
-		r, err := l.enricher.Run(ctx, enrich.RunOptions{Force: opts.Force, Limit: opts.Limit},
+		r, err := l.enricher.Run(ctx, enrich.RunOptions{Force: opts.Force, Limit: opts.Limit, Scope: scope},
 			func(p float64, msg string) error { return h.Heartbeat(ctx, p, msg) })
 		if r != nil {
 			out.Result = *r
@@ -179,16 +181,20 @@ func (l *Library) enrichWork(opts EnrichOptions, out *EnrichResult) jobFn {
 }
 
 // StartEnrich submits the enrichment pass as a background job and returns its PID.
-// It refuses (before starting a job) when enrichment is not configured, matching
-// the synchronous Enrich.
+// It refuses (before starting a job) when enrichment is not configured or the
+// scoping options do not resolve, matching the synchronous Enrich.
 func (l *Library) StartEnrich(ctx context.Context, opts EnrichOptions) (model.PID, error) {
 	if !l.enricher.Enabled() {
 		return "", waxerr.New(waxerr.CodeUnsupported, "waxbin.StartEnrich",
 			"enrichment needs a MusicBrainz contact (set enrichment.contact / WAXBIN_ENRICH_CONTACT)")
 	}
+	scope, err := l.enrichScope(ctx, "waxbin.StartEnrich", opts)
+	if err != nil {
+		return "", err
+	}
 	return l.startJob(ctx, "enrich", "enrich", func(jctx context.Context, h *jobs.Handle) error {
 		out := &EnrichResult{}
-		if err := l.enrichWork(opts, out)(jctx, h); err != nil {
+		if err := l.enrichWork(opts, scope, out)(jctx, h); err != nil {
 			return err
 		}
 		h.SetResult(l.jsonResult(out.Result))

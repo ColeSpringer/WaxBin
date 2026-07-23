@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"strings"
+
+	"github.com/colespringer/waxbin/model"
 )
 
 // Maintained rollups are catalog-structural counts and durations per artist,
@@ -141,6 +143,23 @@ func placeholders(n int) string {
 // idBatchSize bounds an IN(...) / multi-row VALUES batch to stay well under the
 // SQLite bound-parameter limit.
 const idBatchSize = 500
+
+// uniquePIDs deduplicates pids preserving first-seen order, the shared front
+// half of the chunked IN(...) lookups (ItemsByPIDs and friends): a repeated pid
+// never bloats a chunk or straddles a chunk boundary, and an input-order
+// rebuild needs no second pass to collapse duplicates.
+func uniquePIDs(pids []model.PID) []model.PID {
+	unique := make([]model.PID, 0, len(pids))
+	seen := make(map[model.PID]struct{}, len(pids))
+	for _, pid := range pids {
+		if _, ok := seen[pid]; ok {
+			continue
+		}
+		seen[pid] = struct{}{}
+		unique = append(unique, pid)
+	}
+	return unique
+}
 
 // chunkSlice invokes fn for each successive slice of s no longer than size, so a
 // large id/pid set is processed in bounded batches. It is the shared batching
