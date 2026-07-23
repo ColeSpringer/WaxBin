@@ -205,13 +205,13 @@ func userViews(users []*model.User) []userView {
 }
 
 type playStateView struct {
-	ItemPID          string `json:"itemPid"`
-	PositionMS       int64  `json:"positionMs"`
-	Played           bool   `json:"played"`
-	Finished         bool   `json:"finished"`
-	PlayCount        int    `json:"playCount"`
-	Rating           *int   `json:"rating,omitempty"`
-	Starred          bool   `json:"starred"`
+	ItemPID    string `json:"itemPid"`
+	PositionMS int64  `json:"positionMs"`
+	Played     bool   `json:"played"`
+	Finished   bool   `json:"finished"`
+	PlayCount  int    `json:"playCount"`
+	Rating     *int   `json:"rating,omitempty"`
+	Starred    bool   `json:"starred"`
 	// The change stamps are unix-ns epochs, JSON-encoded as decimal strings
 	// (",string") like every ns timestamp in the CLI JSON contract: the values
 	// exceed IEEE-754 double precision, so a bare number would be corrupted by
