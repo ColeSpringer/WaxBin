@@ -523,6 +523,16 @@ func (l *Library) EntityByPID(ctx context.Context, kind read.EntityKind, pid mod
 	return l.store.EntityByPID(ctx, kind, pid)
 }
 
+// EntityByPIDs is the batched form of EntityByPID: it returns summary info for many
+// entities of one kind keyed by pid, omitting unknown pids and collapsing a repeated
+// pid. It retires the per-hit EntityByPID cost when a consumer hydrates a page of
+// entity pids (a restricted-user entity search that scopes each hit to the user's
+// libraries, for instance). The caller batches within a single kind; a set larger
+// than one internal chunk is not an atomic snapshot across chunks.
+func (l *Library) EntityByPIDs(ctx context.Context, kind read.EntityKind, pids []model.PID) (map[model.PID]*read.EntityInfo, error) {
+	return l.store.EntityByPIDs(ctx, kind, pids)
+}
+
 // Stats returns a library summary using the same Facet grouping as browse plus
 // per-user playback state. An empty userPID selects the default user; topN caps
 // the ranked lists.

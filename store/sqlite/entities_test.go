@@ -202,7 +202,7 @@ func TestEssenceAlgoUpgradePreservesItem(t *testing.T) {
 	r1 := putTrack(t, st, lib.ID, spec)
 
 	// User state on the item (the thing that must survive the upgrade).
-	if err := st.SetStar(ctx, "", r1.ItemPID, true); err != nil {
+	if err := st.SetStar(ctx, "", r1.ItemPID, true, nil); err != nil {
 		t.Fatalf("star: %v", err)
 	}
 

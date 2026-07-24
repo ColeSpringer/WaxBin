@@ -17,8 +17,12 @@ import (
 type Store interface {
 	SetProgress(ctx context.Context, userPID, itemPID model.PID, positionMS int64) error
 	MarkPlayed(ctx context.Context, userPID, itemPID model.PID, finished bool) error
-	SetRating(ctx context.Context, userPID, itemPID model.PID, rating *int) error
-	SetStar(ctx context.Context, userPID, itemPID model.PID, starred bool) error
+	// SetRating/SetStar take an optional recorded time asOf (unix ns, nil = server
+	// now); when supplied the store stamps the change in recorded time and enforces
+	// recorded-time last-writer-wins, so an import or replayed offline toggle orders
+	// correctly against an out-of-band change.
+	SetRating(ctx context.Context, userPID, itemPID model.PID, rating *int, asOf *int64) error
+	SetStar(ctx context.Context, userPID, itemPID model.PID, starred bool, asOf *int64) error
 	PlayStateFor(ctx context.Context, userPID, itemPID model.PID) (*model.PlayState, error)
 	// PlayStatesForItems is the bulk read behind StatesForItems: every user's
 	// state for each given item, keyed by item pid, each slice ordered by user
@@ -126,14 +130,18 @@ func (s *Service) MarkPlayed(ctx context.Context, userPID, itemPID model.PID, fi
 	return s.store.MarkPlayed(ctx, userPID, itemPID, finished)
 }
 
-// SetRating sets (0..100) or clears (nil) a user's rating for an item.
-func (s *Service) SetRating(ctx context.Context, userPID, itemPID model.PID, rating *int) error {
-	return s.store.SetRating(ctx, userPID, itemPID, rating)
+// SetRating sets (0..100) or clears (nil) a user's rating for an item. asOf (unix
+// ns, nil = server now) records the change time so a replayed or imported rating
+// orders by recorded-time last-writer-wins.
+func (s *Service) SetRating(ctx context.Context, userPID, itemPID model.PID, rating *int, asOf *int64) error {
+	return s.store.SetRating(ctx, userPID, itemPID, rating, asOf)
 }
 
-// SetStar stars or unstars an item for a user.
-func (s *Service) SetStar(ctx context.Context, userPID, itemPID model.PID, starred bool) error {
-	return s.store.SetStar(ctx, userPID, itemPID, starred)
+// SetStar stars or unstars an item for a user. asOf (unix ns, nil = server now)
+// records the flip time so a replayed or imported star orders by recorded-time
+// last-writer-wins.
+func (s *Service) SetStar(ctx context.Context, userPID, itemPID model.PID, starred bool, asOf *int64) error {
+	return s.store.SetStar(ctx, userPID, itemPID, starred, asOf)
 }
 
 // State returns a user's playback state for an item, overlaying any buffered (not

@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"reflect"
 	"testing"
 
 	"github.com/colespringer/waxbin/model"
@@ -9,6 +10,27 @@ import (
 	"github.com/colespringer/waxbin/read"
 	"github.com/colespringer/waxbin/waxerr"
 )
+
+// allEntityPIDs lists every pid of a kind's table. The EntityKind value is the
+// table name (artist/release_group/album/genre/series), the same whitelist basis
+// the batch and merge paths interpolate a table name on.
+func allEntityPIDs(t *testing.T, st *Store, kind read.EntityKind) []model.PID {
+	t.Helper()
+	rows, err := st.read.QueryContext(context.Background(), "SELECT pid FROM "+string(kind))
+	if err != nil {
+		t.Fatalf("list %s pids: %v", kind, err)
+	}
+	defer rows.Close()
+	var out []model.PID
+	for rows.Next() {
+		var pid string
+		if err := rows.Scan(&pid); err != nil {
+			t.Fatalf("scan %s pid: %v", kind, err)
+		}
+		out = append(out, model.PID(pid))
+	}
+	return out
+}
 
 // entityPIDByName resolves an entity table row's pid by its display column, for
 // asserting against the pids EntityByPID is looked up with.
@@ -186,6 +208,72 @@ func TestEntityLibraryPIDsSpanLibraries(t *testing.T) {
 	}
 	if len(author.LibraryPIDs) != 1 || author.LibraryPIDs[0] != lib2.PID {
 		t.Errorf("author libraries = %v, want [%s] via the authored book", author.LibraryPIDs, lib2.PID)
+	}
+}
+
+// TestEntityByPIDs pins the batch lookup: a map keyed by pid that is independent
+// of input order, omits unknown pids, collapses a repeat, and matches EntityByPID
+// field for field across every kind (the divergence guard the plan asks for).
+func TestEntityByPIDs(t *testing.T) {
+	st, _ := entityInfoFixture(t)
+	ctx := context.Background()
+
+	radiohead := entityPIDByName(t, st, "artist", "name", "Radiohead")
+	tolkien := entityPIDByName(t, st, "artist", "name", "J.R.R. Tolkien")
+
+	// Order-independent + omit-missing + duplicate-collapse: request reversed with a
+	// bogus pid and a repeat mixed in.
+	got, err := st.EntityByPIDs(ctx, read.EntityArtist, []model.PID{"missing", tolkien, radiohead, tolkien})
+	if err != nil {
+		t.Fatalf("EntityByPIDs: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d entities, want 2 (unknown omitted, duplicate collapsed)", len(got))
+	}
+	if _, ok := got["missing"]; ok {
+		t.Error("unknown pid must be omitted from the map")
+	}
+	if got[radiohead] == nil || got[radiohead].Name != "Radiohead" {
+		t.Errorf("radiohead entry = %+v, want the Radiohead info", got[radiohead])
+	}
+
+	// Field-by-field parity with EntityByPID for every kind's entities.
+	for _, kind := range read.EntityKinds() {
+		pids := allEntityPIDs(t, st, kind)
+		if len(pids) == 0 {
+			t.Fatalf("fixture has no %s entities to check parity against", kind)
+		}
+		batch, err := st.EntityByPIDs(ctx, kind, pids)
+		if err != nil {
+			t.Fatalf("%s batch: %v", kind, err)
+		}
+		if len(batch) != len(pids) {
+			t.Errorf("%s batch returned %d, want %d", kind, len(batch), len(pids))
+		}
+		for _, pid := range pids {
+			single, err := st.EntityByPID(ctx, kind, pid)
+			if err != nil {
+				t.Fatalf("%s single %s: %v", kind, pid, err)
+			}
+			b := batch[pid]
+			if b == nil {
+				t.Fatalf("%s %s absent from batch", kind, pid)
+			}
+			if !reflect.DeepEqual(b, single) {
+				t.Errorf("%s %s parity: batch %+v != single %+v", kind, pid, b, single)
+			}
+		}
+	}
+}
+
+func TestEntityByPIDsEmptyAndBadKind(t *testing.T) {
+	st, _ := entityInfoFixture(t)
+	ctx := context.Background()
+	if got, err := st.EntityByPIDs(ctx, read.EntityArtist, nil); err != nil || got != nil {
+		t.Errorf("empty pids = (%v, %v), want (nil, nil)", got, err)
+	}
+	if _, err := st.EntityByPIDs(ctx, "podcast", []model.PID{"x"}); !waxerr.Is(err, waxerr.CodeInvalid) {
+		t.Errorf("unknown kind = %v, want CodeInvalid", err)
 	}
 }
 

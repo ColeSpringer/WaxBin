@@ -297,14 +297,14 @@ func (l *Library) proxyHandlers() map[string]proxy.Handler {
 			if err != nil {
 				return nil, err
 			}
-			return nil, l.playback.SetRating(ctx, model.PID(p.UserPID), model.PID(p.ItemPID), p.Rating)
+			return nil, l.playback.SetRating(ctx, model.PID(p.UserPID), model.PID(p.ItemPID), p.Rating, proxy.AsOf(p.AsOfNS))
 		},
 		proxy.MethodSetStar: func(ctx context.Context, raw json.RawMessage) (any, error) {
 			p, err := decodeParams[proxy.StarParams](raw)
 			if err != nil {
 				return nil, err
 			}
-			return nil, l.playback.SetStar(ctx, model.PID(p.UserPID), model.PID(p.ItemPID), p.Starred)
+			return nil, l.playback.SetStar(ctx, model.PID(p.UserPID), model.PID(p.ItemPID), p.Starred, proxy.AsOf(p.AsOfNS))
 		},
 		proxy.MethodMarkPlayed: func(ctx context.Context, raw json.RawMessage) (any, error) {
 			p, err := decodeParams[proxy.PlayedParams](raw)

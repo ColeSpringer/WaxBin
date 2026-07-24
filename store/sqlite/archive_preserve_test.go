@@ -20,10 +20,10 @@ import (
 func seedPlayState(t *testing.T, ctx context.Context, st *sqlite.Store, itemPID model.PID) {
 	t.Helper()
 	rating := 80
-	if err := st.SetRating(ctx, "", itemPID, &rating); err != nil {
+	if err := st.SetRating(ctx, "", itemPID, &rating, nil); err != nil {
 		t.Fatalf("SetRating: %v", err)
 	}
-	if err := st.SetStar(ctx, "", itemPID, true); err != nil {
+	if err := st.SetStar(ctx, "", itemPID, true, nil); err != nil {
 		t.Fatalf("SetStar: %v", err)
 	}
 	if err := st.MarkPlayed(ctx, "", itemPID, false); err != nil {

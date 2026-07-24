@@ -80,6 +80,19 @@ const itemEffectiveDurationExpr = `CASE WHEN pf.start_frames IS NOT NULL ` +
 // duration (an undownloaded episode). The trailing pf.start_frames/pf.end_frames
 // expose a virtual track's offset window, and f.sample_rate rides along beside the
 // container and codec so a consumer can convert that window to samples.
+//
+// The final three columns project the item's effective artist/album-artist/album
+// entity pids as correlated primary-key-seek subqueries, reusing itemArtistIDExpr/
+// itemAlbumArtistIDExpr/t.album_id so a projected pid and a pid filter (the
+// artist_pid/album_artist_pid/album_pid query fields) can never disagree. A book
+// resolves its author for the two artist pids and NULL for album; an episode
+// resolves NULL for all three, which n.apply maps to the empty PID.
+//
+// These ride on every item read, the busiest read shape, so their cost was
+// measured on BenchmarkQueryPageAtScale (a 50-item keyset page over a 5k-track
+// catalog): the three primary-key-seek subqueries add a couple of microseconds per
+// item, a sub-millisecond page either way, which is cheap enough to keep them
+// always-on rather than behind a separate enriched projection.
 const itemViewCols = `pi.pid, pi.kind, pi.state, pi.title,
 	COALESCE(NULLIF(t.artist,''), bk.author, pod.title, ''),
 	COALESCE(NULLIF(t.album_artist,''), bk.author, pod.title, ''),
@@ -93,7 +106,10 @@ const itemViewCols = `pi.pid, pi.kind, pi.state, pi.title,
 	COALESCE(acq.source_type, pod.source_type, 'local'),
 	f.pid, f.path, f.display_path,
 	COALESCE(bk.total_duration_ms, ` + itemEffectiveDurationExpr + `, ep.duration_ms),
-	f.container, f.codec, f.sample_rate, pf.start_frames, pf.end_frames`
+	f.container, f.codec, f.sample_rate, pf.start_frames, pf.end_frames,
+	(SELECT vap.pid FROM artist vap WHERE vap.id = ` + itemArtistIDExpr + `),
+	(SELECT vaap.pid FROM artist vaap WHERE vaap.id = ` + itemAlbumArtistIDExpr + `),
+	(SELECT valb.pid FROM album valb WHERE valb.id = t.album_id)`
 
 const itemSelect = `SELECT ` + itemViewCols + itemJoins
 
@@ -110,13 +126,14 @@ const fileSelect = `SELECT id, pid, library_id, path, display_path, rel_path, ki
 
 // itemViewNulls holds the nullable columns of an item view during a scan.
 type itemViewNulls struct {
-	trackNo, discNo, year, dur    sql.NullInt64
-	compilation                   sql.NullInt64
-	season, pubDate               sql.NullInt64
-	sampleRate                    sql.NullInt64
-	startFrames, endFrames        sql.NullInt64
-	fpid, fdisp, container, codec sql.NullString
-	fpath                         []byte
+	trackNo, discNo, year, dur          sql.NullInt64
+	compilation                         sql.NullInt64
+	season, pubDate                     sql.NullInt64
+	sampleRate                          sql.NullInt64
+	startFrames, endFrames              sql.NullInt64
+	fpid, fdisp, container, codec       sql.NullString
+	artistPID, albumArtistPID, albumPID sql.NullString
+	fpath                               []byte
 }
 
 // itemViewDests returns the scan destinations for an item view, in itemViewCols
@@ -130,6 +147,7 @@ func itemViewDests(v *model.ItemView, n *itemViewNulls) []any {
 		&n.season, &n.pubDate, &v.Source,
 		&n.fpid, &n.fpath, &n.fdisp, &n.dur, &n.container, &n.codec, &n.sampleRate,
 		&n.startFrames, &n.endFrames,
+		&n.artistPID, &n.albumArtistPID, &n.albumPID,
 	}
 }
 
@@ -147,6 +165,10 @@ func (n *itemViewNulls) apply(v *model.ItemView) {
 	v.Container = n.container.String
 	v.Codec = n.codec.String
 	v.SampleRate = int(n.sampleRate.Int64)
+	// Absent entity pids scan as NULL, which NullString maps to "" -> the empty PID.
+	v.ArtistPID = model.PID(n.artistPID.String)
+	v.AlbumArtistPID = model.PID(n.albumArtistPID.String)
+	v.AlbumPID = model.PID(n.albumPID.String)
 	// A non-NULL start offset marks the primary edge as a virtual track's window.
 	v.Virtual = n.startFrames.Valid
 	v.StartFrames = n.startFrames.Int64

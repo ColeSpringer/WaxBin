@@ -82,6 +82,7 @@ func TestEntityPIDFieldsMirrorFacets(t *testing.T) {
 	}{
 		{read.GroupArtist, "artist_pid"},
 		{read.GroupAlbumArtist, "album_artist_pid"},
+		{read.GroupAlbum, "album_pid"},
 		{read.GroupGenre, "genre_pid"},
 	} {
 		res, err := st.Facet(ctx, query.New(query.EntityItems).Build(), mirror.group, "")

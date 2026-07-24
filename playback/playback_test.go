@@ -73,9 +73,9 @@ func (f *fakeStore) DefaultUser(context.Context) (*model.User, error) {
 }
 
 // Unused-by-these-tests methods.
-func (f *fakeStore) MarkPlayed(context.Context, model.PID, model.PID, bool) error { return nil }
-func (f *fakeStore) SetRating(context.Context, model.PID, model.PID, *int) error  { return nil }
-func (f *fakeStore) SetStar(context.Context, model.PID, model.PID, bool) error    { return nil }
+func (f *fakeStore) MarkPlayed(context.Context, model.PID, model.PID, bool) error        { return nil }
+func (f *fakeStore) SetRating(context.Context, model.PID, model.PID, *int, *int64) error { return nil }
+func (f *fakeStore) SetStar(context.Context, model.PID, model.PID, bool, *int64) error   { return nil }
 func (f *fakeStore) AddBookmark(context.Context, model.PID, model.PID, int64, string) (model.PID, error) {
 	return "", nil
 }

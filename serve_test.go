@@ -145,10 +145,10 @@ func TestServeProxiedMutations(t *testing.T) {
 
 	// Play-state mutations round-trip.
 	rating := 80
-	if err := c.SetRating(ctx, "", pid, &rating); err != nil {
+	if err := c.SetRating(ctx, "", pid, &rating, nil); err != nil {
 		t.Fatalf("proxied rating: %v", err)
 	}
-	if err := c.SetStar(ctx, "", pid, true); err != nil {
+	if err := c.SetStar(ctx, "", pid, true, nil); err != nil {
 		t.Fatalf("proxied star: %v", err)
 	}
 	st, err := c.PlayState(ctx, "", pid)
@@ -157,6 +157,21 @@ func TestServeProxiedMutations(t *testing.T) {
 	}
 	if !st.HasRating || st.Rating != 80 || !st.Starred {
 		t.Fatalf("play state = %+v, want rating 80 + starred", st)
+	}
+
+	// The as-of stamp rides the wire (asOfNs): an unstar recorded far in the past,
+	// older than the server-now star just applied, is skipped as a stale replay, so
+	// the item stays starred. This exercises the client encode, server decode, and
+	// store recorded-time guard end to end.
+	oldNS := int64(1_000_000_000) // 1970, older than the server-now star above
+	if err := c.SetStar(ctx, "", pid, false, &oldNS); err != nil {
+		t.Fatalf("proxied stale unstar: %v", err)
+	}
+	if st, err = c.PlayState(ctx, "", pid); err != nil {
+		t.Fatalf("proxied play state after stale unstar: %v", err)
+	}
+	if !st.Starred {
+		t.Fatalf("stale as-of unstar was applied over the wire, want skipped (still starred)")
 	}
 
 	// User creation round-trips and is visible in the listing.

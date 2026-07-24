@@ -53,7 +53,7 @@ func TestSubscribePublishesDeltas(t *testing.T) {
 	}
 
 	// A play_state mutation publishes a play_state delta.
-	if err := st.SetStar(ctx, "", r.ItemPID, true); err != nil {
+	if err := st.SetStar(ctx, "", r.ItemPID, true, nil); err != nil {
 		t.Fatal(err)
 	}
 	psChanges := drain(ch)

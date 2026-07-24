@@ -2,6 +2,9 @@ package main
 
 import (
 	"fmt"
+	"math"
+	"strconv"
+	"time"
 
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/waxerr"
@@ -75,12 +78,28 @@ func newStateCmd(g *globals) *cobra.Command {
 		played   bool
 		finished bool
 		position int64
+		asOf     string
 	)
 	set := &cobra.Command{
 		Use:   "set <item-pid>",
 		Short: "Set a user's playback state for an item",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// Validate the flag combination before opening the catalog and taking the
+			// write lock, so a doomed command fails fast.
+			flags := cmd.Flags()
+			asOfNS, err := parseAsOf(asOf)
+			if err != nil {
+				return err
+			}
+			// --as-of records the star/rating change time; with none of those
+			// operations present it would be silently ignored (played/finished/position
+			// carry no recorded time), so refuse rather than mislead.
+			if flags.Changed("as-of") && !star && !unstar && !flags.Changed("rating") {
+				return waxerr.New(waxerr.CodeInvalid, "cli.state",
+					"--as-of applies only to --rating, --star, or --unstar")
+			}
+
 			m, _, err := g.openMutator(cmd)
 			if err != nil {
 				return err
@@ -91,24 +110,23 @@ func newStateCmd(g *globals) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			flags := cmd.Flags()
 
 			if flags.Changed("rating") {
 				var r *int
 				if rating >= 0 { // a negative rating clears it
 					r = &rating
 				}
-				if err := m.SetRating(ctx(cmd), uPID, item, r); err != nil {
+				if err := m.SetRating(ctx(cmd), uPID, item, r, asOfNS); err != nil {
 					return err
 				}
 			}
 			if star {
-				if err := m.SetStar(ctx(cmd), uPID, item, true); err != nil {
+				if err := m.SetStar(ctx(cmd), uPID, item, true, asOfNS); err != nil {
 					return err
 				}
 			}
 			if unstar {
-				if err := m.SetStar(ctx(cmd), uPID, item, false); err != nil {
+				if err := m.SetStar(ctx(cmd), uPID, item, false, asOfNS); err != nil {
 					return err
 				}
 			}
@@ -141,6 +159,11 @@ func newStateCmd(g *globals) *cobra.Command {
 	pf.BoolVar(&played, "played", false, "mark played (increments play count)")
 	pf.BoolVar(&finished, "finished", false, "mark finished (implies played)")
 	pf.Int64Var(&position, "position", 0, "set resume position in milliseconds")
+	pf.StringVar(&asOf, "as-of", "", "record the star/rating change at this time (unix ns or RFC3339); default is now")
+	// star and unstar are contradictory. Rejecting the pair avoids the order-dependent
+	// outcome of applying both, which a shared --as-of makes worse: the second flip
+	// carries the same recorded time as the first and loses the stale-replay comparison.
+	set.MarkFlagsMutuallyExclusive("star", "unstar")
 
 	show := &cobra.Command{
 		Use:   "show <item-pid>",
@@ -171,6 +194,47 @@ func newStateCmd(g *globals) *cobra.Command {
 	cmd := &cobra.Command{Use: "state", Short: "Inspect or set playback state"}
 	cmd.AddCommand(set, show)
 	return cmd
+}
+
+// asOfNSFloor is the smallest bare integer parseAsOf accepts as a unix-nanosecond
+// stamp. Below it the value is almost certainly a timestamp in the wrong unit (a
+// seconds, millisecond, or microsecond time), which as nanoseconds would land an
+// instant after the epoch and be silently discarded as a stale replay. 1e17 ns is
+// early 1973, so every real recorded-time stamp clears it while every plausible
+// wrong-unit value (a modern seconds/ms/micros timestamp) falls below it. RFC3339
+// input is exempt: a date typed out carries its own unambiguous intent.
+const asOfNSFloor = 100_000_000_000_000_000 // 1e17 ns, ~1973
+
+// parseAsOf parses a --as-of flag into an optional recorded-time stamp (unix
+// nanoseconds): the empty string yields nil (stamp at server now), a bare integer
+// is taken as unix nanoseconds, and anything else is parsed as RFC3339. A bare
+// integer below asOfNSFloor is rejected rather than silently read as an
+// epoch-adjacent (stale) time, catching a seconds/milliseconds unit mix-up. It is
+// the one shared parser for every --as-of flag so the item and entity mutations read
+// the flag identically.
+func parseAsOf(s string) (*int64, error) {
+	if s == "" {
+		return nil, nil
+	}
+	if ns, err := strconv.ParseInt(s, 10, 64); err == nil {
+		if ns < asOfNSFloor {
+			return nil, waxerr.New(waxerr.CodeInvalid, "cli.state",
+				"--as-of "+s+" is too small to be unix nanoseconds (looks like a seconds or milliseconds time); pass nanoseconds or an RFC3339 time")
+		}
+		return &ns, nil
+	}
+	t, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		return nil, waxerr.New(waxerr.CodeInvalid, "cli.state", "invalid --as-of (want unix ns or RFC3339): "+s)
+	}
+	// time.Time.UnixNano is undefined outside roughly 1678..2262 (the int64-ns range),
+	// where it wraps silently to a garbage stamp. Reject an out-of-range date instead.
+	if lo, hi := time.Unix(0, math.MinInt64), time.Unix(0, math.MaxInt64); t.Before(lo) || t.After(hi) {
+		return nil, waxerr.New(waxerr.CodeInvalid, "cli.state",
+			"--as-of "+s+" is outside the representable range (about 1678 to 2262)")
+	}
+	ns := t.UnixNano()
+	return &ns, nil
 }
 
 // resolveUser maps a user name to its pid, returning "" (the store's default-user

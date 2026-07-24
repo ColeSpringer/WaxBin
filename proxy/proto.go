@@ -30,8 +30,11 @@ import (
 // the unknown field and store a back-cover set as a front-cover overwrite,
 // which is exactly the misdrive the check exists to stop. Version 3 added the
 // EnrichParams scope fields: a version-2 server would drop them and run a
-// full-catalog pass where the client asked for one item or entity.
-const ProtocolVersion = 3
+// full-catalog pass where the client asked for one item or entity. Version 4
+// added the StarParams/RatingParams as-of stamp: a version-3 server would drop it
+// and stamp the change at server-now, a real misdrive for a replayed offline
+// toggle whose recorded time is what orders it against an out-of-band change.
+const ProtocolVersion = 4
 
 // Method names for the proxied operations: the fast request/response catalog
 // mutations, the reads a mutating command needs for its confirmation output, the
@@ -324,18 +327,45 @@ type MergeParams struct {
 }
 
 // RatingParams is the set_rating request payload. Rating is nil to clear the
-// rating.
+// rating. AsOfNS is the optional recorded-time stamp (see asOfToWire).
 type RatingParams struct {
 	UserPID string `json:"userPid"`
 	ItemPID string `json:"itemPid"`
 	Rating  *int   `json:"rating"`
+	AsOfNS  int64  `json:"asOfNs,string,omitempty"`
 }
 
-// StarParams is the set_star request payload.
+// StarParams is the set_star request payload. AsOfNS is the optional recorded-time
+// stamp (see asOfToWire).
 type StarParams struct {
 	UserPID string `json:"userPid"`
 	ItemPID string `json:"itemPid"`
 	Starred bool   `json:"starred"`
+	AsOfNS  int64  `json:"asOfNs,string,omitempty"`
+}
+
+// asOfToWire encodes an optional recorded-time stamp for the wire: nil becomes 0,
+// which omitempty then drops from the frame. A real value travels as a quoted
+// decimal string (the `,string` tag on AsOfNS), matching the RatingChangedNS/
+// StarredChangedNS stamp encoding in importer.go: a nanosecond value can exceed
+// 2^53, so a bare JSON number is not safe for a JS client, and a plain int64 with
+// omitempty (0 = not provided) sidesteps the *int64-with-,string encoding footgun.
+func asOfToWire(asOf *int64) int64 {
+	if asOf == nil {
+		return 0
+	}
+	return *asOf
+}
+
+// AsOf decodes a wire as-of stamp back to the optional recorded time a server hands
+// the store: 0 (the omitted/absent value) becomes nil, which stamps at server-now;
+// any other value points to itself. It is exported because the server dispatch lives
+// outside this package (waxbin.Serve).
+func AsOf(ns int64) *int64 {
+	if ns == 0 {
+		return nil
+	}
+	return &ns
 }
 
 // PlayedParams is the mark_played request payload.

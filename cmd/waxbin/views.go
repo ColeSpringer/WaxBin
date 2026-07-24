@@ -41,6 +41,11 @@ type itemView struct {
 	Disc        int    `json:"disc,omitempty"`
 	Year        int    `json:"year,omitempty"`
 	Genre       string `json:"genre,omitempty"`
+	// Entity handles: the effective artist/album-artist/album entity pids, so a
+	// consumer can group by real identity. albumPid is absent for a book or episode.
+	ArtistPID      string `json:"artistPid,omitempty"`
+	AlbumArtistPID string `json:"albumArtistPid,omitempty"`
+	AlbumPID       string `json:"albumPid,omitempty"`
 	// Composer and its collation key, present for track items.
 	Composer     string `json:"composer,omitempty"`
 	ComposerSort string `json:"composerSort,omitempty"`
@@ -77,6 +82,7 @@ func toItemView(v *model.ItemView) itemView {
 		PID: string(v.PID), Kind: string(v.Kind), State: string(v.State), Title: v.Title,
 		Artist: v.Artist, AlbumArtist: v.AlbumArtist, Album: v.Album, Track: v.TrackNo,
 		Disc: v.DiscNo, Year: v.Year, Genre: v.Genre,
+		ArtistPID: string(v.ArtistPID), AlbumArtistPID: string(v.AlbumArtistPID), AlbumPID: string(v.AlbumPID),
 		Composer: v.Composer, ComposerSort: v.ComposerSort, Source: string(v.Source),
 		DurationMS: v.DurationMS, Codec: v.Codec, Path: v.DisplayPath, FilePID: string(v.FilePID),
 		Virtual: v.Virtual, StartFrames: v.StartFrames, EndFrames: v.EndFrames,

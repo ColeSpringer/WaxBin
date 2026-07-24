@@ -262,6 +262,18 @@ type ItemView struct {
 	Year        int
 	Genre       string
 	Compilation bool // a multi-artist compilation (drives Various Artists layout)
+
+	// Entity handles: the effective artist, album-artist, and album entity pids,
+	// projected so a consumer can group an item view by real identity instead of
+	// display text. ArtistPID and AlbumArtistPID resolve a track's artist/album-artist
+	// or, for a book, its author; AlbumPID is track-only and empty for a book or
+	// episode, which are not album members. Each is empty when the entity is absent.
+	// Genre is intentionally omitted: an item can carry several, so a single genre pid
+	// would be lossy; enumerate genres through the genre facet instead.
+	ArtistPID      PID
+	AlbumArtistPID PID
+	AlbumPID       PID
+
 	// Composer and its collation key, populated for track items (empty for
 	// books/episodes; a book's narrator-in-COMPOSER convention is handled at scan
 	// classification, not surfaced here).

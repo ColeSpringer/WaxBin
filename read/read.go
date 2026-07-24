@@ -14,6 +14,7 @@ const (
 	GroupGenre       GroupBy = "genre"
 	GroupArtist      GroupBy = "artist"
 	GroupAlbumArtist GroupBy = "albumArtist"
+	GroupAlbum       GroupBy = "album"
 	GroupYear        GroupBy = "year"
 	GroupKind        GroupBy = "kind"
 	// GroupLibrary buckets items by their primary backing file's library (key =
@@ -26,7 +27,7 @@ const (
 // or a well-formed custom-tag dimension ("tag.<KEY>" for a canonical, non-reserved key).
 func (g GroupBy) Valid() bool {
 	switch g {
-	case GroupGenre, GroupArtist, GroupAlbumArtist, GroupYear, GroupKind, GroupLibrary:
+	case GroupGenre, GroupArtist, GroupAlbumArtist, GroupAlbum, GroupYear, GroupKind, GroupLibrary:
 		return true
 	default:
 		_, ok := TagGroupKey(g)
@@ -36,7 +37,7 @@ func (g GroupBy) Valid() bool {
 
 // GroupBys lists the supported faceting dimensions (for help text and tests).
 func GroupBys() []GroupBy {
-	return []GroupBy{GroupGenre, GroupArtist, GroupAlbumArtist, GroupYear, GroupKind, GroupLibrary}
+	return []GroupBy{GroupGenre, GroupArtist, GroupAlbumArtist, GroupAlbum, GroupYear, GroupKind, GroupLibrary}
 }
 
 // Canonical "unknown" bucket display labels. A consumer rendering a facet or a

@@ -124,7 +124,7 @@ func TestBrowseMostPlayedAndStarred(t *testing.T) {
 		t.Errorf("most-played order = %v, want %v", order, want)
 	}
 
-	if err := st.SetStar(ctx, "", ids["One"], true); err != nil {
+	if err := st.SetStar(ctx, "", ids["One"], true, nil); err != nil {
 		t.Fatalf("star: %v", err)
 	}
 	starred := drainBrowse(t, st, read.ListStarred, read.BrowseOptions{}, 5)

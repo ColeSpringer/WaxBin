@@ -334,11 +334,11 @@ func TestPlaybackAndChangeBus(t *testing.T) {
 	defer cancel()
 
 	pb := lib.Playback()
-	if err := pb.SetStar(ctx, "", item, true); err != nil {
+	if err := pb.SetStar(ctx, "", item, true, nil); err != nil {
 		t.Fatalf("star: %v", err)
 	}
 	r := 90
-	if err := pb.SetRating(ctx, "", item, &r); err != nil {
+	if err := pb.SetRating(ctx, "", item, &r, nil); err != nil {
 		t.Fatalf("rate: %v", err)
 	}
 	if err := pb.MarkPlayed(ctx, "", item, true); err != nil {
@@ -439,7 +439,7 @@ func TestStatsOnFacet(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	_ = pb.SetStar(ctx, "", items[0].PID, true)
+	_ = pb.SetStar(ctx, "", items[0].PID, true, nil)
 
 	st, err := lib.Stats(ctx, "", 5)
 	if err != nil {
@@ -1142,11 +1142,11 @@ func TestLogicalExport(t *testing.T) {
 		t.Fatalf("scan: %v", err)
 	}
 	items, _ := lib.Query(ctx, query.New(query.EntityItems).Build(), "")
-	if err := lib.Playback().SetStar(ctx, "", items[0].PID, true); err != nil {
+	if err := lib.Playback().SetStar(ctx, "", items[0].PID, true, nil); err != nil {
 		t.Fatalf("star: %v", err)
 	}
 	r := 85
-	if err := lib.Playback().SetRating(ctx, "", items[0].PID, &r); err != nil {
+	if err := lib.Playback().SetRating(ctx, "", items[0].PID, &r, nil); err != nil {
 		t.Fatalf("rate: %v", err)
 	}
 	if err := lib.SetSecret(ctx, "musicbrainz", "token-xyz"); err != nil {

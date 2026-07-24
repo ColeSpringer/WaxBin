@@ -57,6 +57,16 @@ func facetSpecFor(g read.GroupBy) (facetSpec, bool) {
 			groupBy: itemAlbumArtistIDExpr, keyExpr: "faa.pid", display: "faa.name", sortExpr: "faa.sort_key",
 			entity: true, unknown: read.UnknownArtist, noEpisodes: true,
 		}, true
+	case read.GroupAlbum:
+		// Albums are track-only (t.album_id), so a book or episode has no album and
+		// falls into the [Non-Album] bucket, consistent with the album_pid query
+		// field a bucket's EntityPID drills down through. noEpisodes keeps episodes
+		// out entirely rather than piling them into that bucket.
+		return facetSpec{
+			join:    " LEFT JOIN album falb ON falb.id = t.album_id",
+			groupBy: "t.album_id", keyExpr: "falb.pid", display: "falb.title", sortExpr: "falb.sort_key",
+			entity: true, unknown: read.NonAlbum, noEpisodes: true,
+		}, true
 	case read.GroupYear:
 		return facetSpec{
 			groupBy: "COALESCE(t.year, bk.year)", keyExpr: "CAST(COALESCE(t.year, bk.year) AS TEXT)",

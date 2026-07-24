@@ -289,17 +289,21 @@ func (c *Client) Merge(ctx context.Context, entityType model.MergeEntity, surviv
 	return reports, nil
 }
 
-// SetRating proxies setting or clearing a user's rating for an item.
-func (c *Client) SetRating(ctx context.Context, userPID, itemPID model.PID, rating *int) error {
+// SetRating proxies setting or clearing a user's rating for an item. asOf (nil =
+// server now) is the recorded change time; it travels as asOfNs and lets the server
+// order a replayed rating by recorded-time last-writer-wins.
+func (c *Client) SetRating(ctx context.Context, userPID, itemPID model.PID, rating *int, asOf *int64) error {
 	return c.call(ctx, MethodSetRating, RatingParams{
-		UserPID: string(userPID), ItemPID: string(itemPID), Rating: rating,
+		UserPID: string(userPID), ItemPID: string(itemPID), Rating: rating, AsOfNS: asOfToWire(asOf),
 	}, nil)
 }
 
-// SetStar proxies starring or unstarring an item for a user.
-func (c *Client) SetStar(ctx context.Context, userPID, itemPID model.PID, starred bool) error {
+// SetStar proxies starring or unstarring an item for a user. asOf (nil = server now)
+// is the recorded flip time; it travels as asOfNs and lets the server order a
+// replayed toggle by recorded-time last-writer-wins.
+func (c *Client) SetStar(ctx context.Context, userPID, itemPID model.PID, starred bool, asOf *int64) error {
 	return c.call(ctx, MethodSetStar, StarParams{
-		UserPID: string(userPID), ItemPID: string(itemPID), Starred: starred,
+		UserPID: string(userPID), ItemPID: string(itemPID), Starred: starred, AsOfNS: asOfToWire(asOf),
 	}, nil)
 }
 

@@ -216,18 +216,18 @@ func (m *mutator) MergeMany(ctx context.Context, et model.MergeEntity, survivor 
 	return m.lib.MergeMany(ctx, et, survivor, losers)
 }
 
-func (m *mutator) SetRating(ctx context.Context, userPID, itemPID model.PID, rating *int) error {
+func (m *mutator) SetRating(ctx context.Context, userPID, itemPID model.PID, rating *int, asOf *int64) error {
 	if m.px != nil {
-		return m.px.SetRating(ctx, userPID, itemPID, rating)
+		return m.px.SetRating(ctx, userPID, itemPID, rating, asOf)
 	}
-	return m.lib.Playback().SetRating(ctx, userPID, itemPID, rating)
+	return m.lib.Playback().SetRating(ctx, userPID, itemPID, rating, asOf)
 }
 
-func (m *mutator) SetStar(ctx context.Context, userPID, itemPID model.PID, starred bool) error {
+func (m *mutator) SetStar(ctx context.Context, userPID, itemPID model.PID, starred bool, asOf *int64) error {
 	if m.px != nil {
-		return m.px.SetStar(ctx, userPID, itemPID, starred)
+		return m.px.SetStar(ctx, userPID, itemPID, starred, asOf)
 	}
-	return m.lib.Playback().SetStar(ctx, userPID, itemPID, starred)
+	return m.lib.Playback().SetStar(ctx, userPID, itemPID, starred, asOf)
 }
 
 func (m *mutator) MarkPlayed(ctx context.Context, userPID, itemPID model.PID, finished bool) error {

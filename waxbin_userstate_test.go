@@ -47,14 +47,14 @@ func TestUserStateQueryThroughFacade(t *testing.T) {
 
 	// Default user stars A and rates it 90; bob stars B.
 	pb := lib.Playback()
-	if err := pb.SetStar(ctx, "", byTitle["A"], true); err != nil {
+	if err := pb.SetStar(ctx, "", byTitle["A"], true, nil); err != nil {
 		t.Fatal(err)
 	}
 	r90 := 90
-	if err := pb.SetRating(ctx, "", byTitle["A"], &r90); err != nil {
+	if err := pb.SetRating(ctx, "", byTitle["A"], &r90, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := pb.SetStar(ctx, bob.PID, byTitle["B"], true); err != nil {
+	if err := pb.SetStar(ctx, bob.PID, byTitle["B"], true, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -137,14 +137,14 @@ func TestPlayStatesForItemsFacade(t *testing.T) {
 	}
 
 	pb := lib.Playback()
-	if err := pb.SetStar(ctx, def.PID, byTitle["A"], true); err != nil {
+	if err := pb.SetStar(ctx, def.PID, byTitle["A"], true, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := pb.SetStar(ctx, bob.PID, byTitle["A"], true); err != nil {
+	if err := pb.SetStar(ctx, bob.PID, byTitle["A"], true, nil); err != nil {
 		t.Fatal(err)
 	}
 	r := 90
-	if err := pb.SetRating(ctx, bob.PID, byTitle["B"], &r); err != nil {
+	if err := pb.SetRating(ctx, bob.PID, byTitle["B"], &r, nil); err != nil {
 		t.Fatal(err)
 	}
 	// A buffered tick that has NOT been flushed: the bulk read must still see it.

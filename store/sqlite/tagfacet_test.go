@@ -58,7 +58,7 @@ func TestFacetByTagWithUserFilter(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create user: %v", err)
 	}
-	if err := st.SetStar(ctx, bob.PID, a.ItemPID, true); err != nil {
+	if err := st.SetStar(ctx, bob.PID, a.ItemPID, true, nil); err != nil {
 		t.Fatalf("star: %v", err)
 	}
 

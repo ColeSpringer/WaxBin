@@ -64,6 +64,53 @@ func TestFacetByArtistUnknownBucket(t *testing.T) {
 	}
 }
 
+func TestFacetByAlbum(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/1.flac", essence: "e1", content: "c1", title: "A", artist: "X", album: "First"})
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/2.flac", essence: "e2", content: "c2", title: "B", artist: "X", album: "First"})
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/3.flac", essence: "e3", content: "c3", title: "C", artist: "Y", album: "Second"})
+	// A book is track-only-absent (no t.album_id), so it lands in [Non-Album].
+	putBook(t, st, lib.ID, bookSpec{path: "/lib/book.m4b", essence: "be1", content: "bc1", title: "Memoir", author: "Author", durationMS: 100})
+
+	res, err := st.Facet(ctx, query.New(query.EntityItems).Build(), read.GroupAlbum, "")
+	if err != nil {
+		t.Fatalf("facet album: %v", err)
+	}
+	first, ok := bucketByDisplay(res, "First")
+	if !ok || first.Count != 2 {
+		t.Errorf("First bucket = %+v, want count 2", first)
+	}
+	if first.EntityPID == "" {
+		t.Error("album bucket should carry the entity pid for drilldown")
+	}
+	if b, ok := bucketByDisplay(res, "Second"); !ok || b.Count != 1 {
+		t.Errorf("Second bucket = %+v, want count 1", b)
+	}
+	if b, ok := bucketByDisplay(res, read.NonAlbum); !ok || b.Count != 1 || !b.IsUnknown {
+		t.Errorf("Non-Album bucket = %+v, want count 1 + unknown (the book)", b)
+	}
+
+	// Drilldown: the bucket's EntityPID pairs with the album_pid query field and
+	// returns exactly that album's tracks, whose item-view AlbumPID matches.
+	items, err := st.QueryItems(ctx, query.New(query.EntityItems).
+		Where("album_pid", query.OpIs, string(first.EntityPID)).Build(), "")
+	if err != nil {
+		t.Fatalf("album drilldown: %v", err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("album drilldown returned %d items, want the 2 First tracks", len(items))
+	}
+	for _, it := range items {
+		if it.Album != "First" {
+			t.Errorf("drilldown item album = %q, want First", it.Album)
+		}
+		if it.AlbumPID != first.EntityPID {
+			t.Errorf("drilldown item AlbumPID = %s, want the bucket pid %s", it.AlbumPID, first.EntityPID)
+		}
+	}
+}
+
 func TestFacetByYearAndKind(t *testing.T) {
 	st, lib := entityFixture(t)
 	ctx := context.Background()

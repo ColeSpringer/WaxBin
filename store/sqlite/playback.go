@@ -39,12 +39,56 @@ func (s *Store) MarkPlayed(ctx context.Context, userPID, itemPID model.PID, fini
 	})
 }
 
+// asOfRecorded reports the recorded time an as-of carries and whether it carries a
+// usable one. A nil pointer and a zero value both mean "no recorded time": unix-ns 0
+// is the epoch, never a real star/rating change time, and 0 is the not-provided
+// sentinel the proxy wire (proxy.AsOf / asOfToWire) and the import seam (0 = unknown)
+// already use. Collapsing 0 here keeps the direct, proxied, and imported paths
+// identical, rather than letting a lone &0 stamp at the epoch on the direct path
+// while the wire treats the same value as absent and stamps at server-now.
+func asOfRecorded(asOf *int64) (int64, bool) {
+	if asOf == nil || *asOf == 0 {
+		return 0, false
+	}
+	return *asOf, true
+}
+
+// stampFor is the change-time stamp a star/rating mutation records: the caller's
+// recorded time when one is supplied (so a replayed offline toggle or a migration
+// import lands in recorded time, letting the engine order it against an out-of-band
+// change), otherwise the server's current time. It is shared by the item and entity
+// play-state writes so the two cannot drift.
+func stampFor(asOf *int64, now int64) int64 {
+	if ns, ok := asOfRecorded(asOf); ok {
+		return ns
+	}
+	return now
+}
+
+// staleReplay reports whether a value change carrying a recorded time asOf loses to
+// the change already recorded at stored: a replay whose recorded time is not newer
+// than the stored change is stale and must be skipped, so a replayed offline toggle
+// can never undo a later out-of-band change. A NULL stored stamp (validStored false)
+// carries no ordering information, so the change applies. With no recorded time the
+// caller is stamping at server-now and there is nothing to order against.
+func staleReplay(asOf *int64, storedChanged int64, validStored bool) bool {
+	ns, ok := asOfRecorded(asOf)
+	return ok && validStored && ns <= storedChanged
+}
+
 // SetRating sets (0..100) or clears (rating nil) a user's rating for an item.
 // A call that would store the value already held is a silent no-op: no write,
 // no play_state delta, and the change stamp keeps its time, so an idempotent
 // re-rate never masquerades as a newer change to a syncing client. A real value
 // change, a clear of a set rating included, bumps rating_changed_at.
-func (s *Store) SetRating(ctx context.Context, userPID, itemPID model.PID, rating *int) error {
+//
+// asOf (unix nanoseconds, nil = server now) is the recorded time of the change. When
+// supplied, the stamp lands in recorded time and the engine enforces recorded-time
+// last-writer-wins: a change whose asOf is not newer than the stored
+// rating_changed_at is skipped as a stale replay (changed=false, no delta), so a
+// replayed offline rating cannot overwrite a later one. A NULL prior stamp has no
+// ordering info, so it applies.
+func (s *Store) SetRating(ctx context.Context, userPID, itemPID model.PID, rating *int, asOf *int64) error {
 	var val any
 	want := sql.NullInt64{}
 	if rating != nil {
@@ -53,9 +97,10 @@ func (s *Store) SetRating(ctx context.Context, userPID, itemPID model.PID, ratin
 		want = sql.NullInt64{Int64: int64(v), Valid: true}
 	}
 	return s.playStateWrite(ctx, "store.SetRating", userPID, itemPID, func(ctx context.Context, tx *sql.Tx, userID, itemID, now int64) (bool, error) {
-		var cur sql.NullInt64
+		var cur, curChanged sql.NullInt64
 		err := tx.QueryRowContext(ctx,
-			"SELECT rating FROM play_state WHERE user_id = ? AND item_id = ?", userID, itemID).Scan(&cur)
+			"SELECT rating, rating_changed_at FROM play_state WHERE user_id = ? AND item_id = ?", userID, itemID).
+			Scan(&cur, &curChanged)
 		noRow := errors.Is(err, sql.ErrNoRows)
 		if err != nil && !noRow {
 			return false, err
@@ -65,17 +110,23 @@ func (s *Store) SetRating(ctx context.Context, userPID, itemPID model.PID, ratin
 			if rating == nil {
 				return false, nil
 			}
+			stamp := stampFor(asOf, now)
 			_, err := tx.ExecContext(ctx,
 				`INSERT INTO play_state(user_id, item_id, rating, rating_changed_at, updated_at) VALUES (?,?,?,?,?)`,
-				userID, itemID, val, now, now)
+				userID, itemID, val, stamp, now)
 			return true, err
 		}
 		if cur == want {
 			return false, nil
 		}
+		if staleReplay(asOf, curChanged.Int64, curChanged.Valid) {
+			return false, nil
+		}
+		// updated_at is always the server's real row-touch time; only the change
+		// stamp records recorded time.
 		_, err = tx.ExecContext(ctx,
 			`UPDATE play_state SET rating = ?, rating_changed_at = ?, updated_at = ? WHERE user_id = ? AND item_id = ?`,
-			val, now, now, userID, itemID)
+			val, stampFor(asOf, now), now, userID, itemID)
 		return true, err
 	})
 }
@@ -87,11 +138,19 @@ func (s *Store) SetRating(ctx context.Context, userPID, itemPID model.PID, ratin
 // row, and neither emits a play_state delta or bumps the change stamp. A real
 // flip, unstar included, bumps starred_changed_at; starred_at goes NULL on
 // unstar as before.
-func (s *Store) SetStar(ctx context.Context, userPID, itemPID model.PID, starred bool) error {
+//
+// asOf (unix nanoseconds, nil = server now) is the recorded time of the flip. When
+// supplied, both starred_changed_at and, on a star, starred_at land in recorded time
+// (recency-correct for a migration import), and the engine enforces recorded-time
+// last-writer-wins: a flip whose asOf is not newer than the stored starred_changed_at
+// is skipped as a stale replay (changed=false, no delta), so a replayed offline
+// toggle can never resurrect an undone state. A NULL prior stamp applies.
+func (s *Store) SetStar(ctx context.Context, userPID, itemPID model.PID, starred bool, asOf *int64) error {
 	return s.playStateWrite(ctx, "store.SetStar", userPID, itemPID, func(ctx context.Context, tx *sql.Tx, userID, itemID, now int64) (bool, error) {
-		var cur sql.NullInt64 // starred_at; Valid mirrors the starred flag
+		var cur, curChanged sql.NullInt64 // starred_at (Valid mirrors the flag), starred_changed_at
 		err := tx.QueryRowContext(ctx,
-			"SELECT starred_at FROM play_state WHERE user_id = ? AND item_id = ?", userID, itemID).Scan(&cur)
+			"SELECT starred_at, starred_changed_at FROM play_state WHERE user_id = ? AND item_id = ?", userID, itemID).
+			Scan(&cur, &curChanged)
 		noRow := errors.Is(err, sql.ErrNoRows)
 		if err != nil && !noRow {
 			return false, err
@@ -99,19 +158,23 @@ func (s *Store) SetStar(ctx context.Context, userPID, itemPID model.PID, starred
 		if cur.Valid == starred { // covers no-row + unstar: cur is zero-valued
 			return false, nil
 		}
+		if staleReplay(asOf, curChanged.Int64, curChanged.Valid) {
+			return false, nil
+		}
+		stamp := stampFor(asOf, now)
 		if noRow {
 			_, err := tx.ExecContext(ctx,
 				`INSERT INTO play_state(user_id, item_id, starred_at, starred_changed_at, updated_at) VALUES (?,?,?,?,?)`,
-				userID, itemID, now, now, now)
+				userID, itemID, stamp, stamp, now)
 			return true, err
 		}
 		var starredAt any
 		if starred {
-			starredAt = now
+			starredAt = stamp
 		}
 		_, err = tx.ExecContext(ctx,
 			`UPDATE play_state SET starred_at = ?, starred_changed_at = ?, updated_at = ? WHERE user_id = ? AND item_id = ?`,
-			starredAt, now, now, userID, itemID)
+			starredAt, stamp, now, userID, itemID)
 		return true, err
 	})
 }

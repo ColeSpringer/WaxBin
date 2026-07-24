@@ -11,9 +11,16 @@ import (
 // a concrete adapter maps a foreign export (a prior media server, a companion app)
 // into before handing it to a PlayStateImporter. The changed-at stamps (unix
 // nanoseconds, 0 = unknown) say when the star or rating last changed value on the
-// foreign side; the engine carries them so an adapter can build a replay guard
-// (skip a record older than local state), but the guard itself is the adapter's
-// job, and this seam holds no comparison logic.
+// foreign side.
+//
+// An adapter passes these stamps straight into SetStar/SetRating as their asOf
+// argument (the address of the changed-at field), and the engine then enforces
+// recorded-time last-writer-wins: a record older than local state is skipped. The
+// comparison is the engine's once the adapter supplies the recorded time, so this
+// seam no longer holds the replay guard itself. The engine treats a 0 stamp (the
+// seam's "unknown" value) as no recorded time, stamping at server-now and ordering
+// against nothing, so an adapter can pass every record's stamp straight through
+// without special-casing the unknown ones.
 type PlayStateRecord struct {
 	UserPID          model.PID
 	ItemPID          model.PID
