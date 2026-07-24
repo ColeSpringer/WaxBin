@@ -192,8 +192,14 @@ func plural(n int, noun string) string {
 // cover enrichment populates). The role filter matters now that an entity can
 // carry several slots: a lone booklet scan is not a cover, so it must not hide
 // the item from this report. That is the same front-only predicate the has_art
-// query field applies (fields.go). Artist/genre rungs have no v1.0 art source, so they
-// are not checked (they are always empty and would false-positive nothing).
+// query field applies (fields.go). Artist/genre rungs are not checked: nothing in a
+// scan or enrich pass fills them, so in practice they are empty. A user-set artist or
+// genre cover does resolve for the items under it, so an item covered only that way is
+// still reported here; covering that would mean restating the resolver's artist rung
+// (the release group's artist, else the album artist, else the track artist) in SQL and
+// keeping the two in step. A playlist is an art entity too, but it is deliberately
+// absent here: this report is item-scoped, and a playlist without a cover is normal
+// rather than a finding.
 // These arms stay track/book-scoped with the literal 'track' slot; the
 // kind-switched slot expression (itemArtSlotExpr) exists for predicates that
 // also cover episodes.

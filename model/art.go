@@ -29,12 +29,17 @@ const (
 	// its podcast's feed image.
 	ArtEpisode ArtEntity = "episode"
 	ArtPodcast ArtEntity = "podcast"
+	// ArtPlaylist is a terminal level: a playlist has no ancestry, so its chain is
+	// one rung and even a front cover resolves at the playlist's own level or not at
+	// all. A playlist is a user-made list, not a catalog entity, so there is nothing
+	// above it to inherit a cover from.
+	ArtPlaylist ArtEntity = "playlist"
 )
 
 // Valid reports whether e is a known art entity level.
 func (e ArtEntity) Valid() bool {
 	switch e {
-	case ArtTrack, ArtAlbum, ArtReleaseGroup, ArtArtist, ArtGenre, ArtEpisode, ArtPodcast:
+	case ArtTrack, ArtAlbum, ArtReleaseGroup, ArtArtist, ArtGenre, ArtEpisode, ArtPodcast, ArtPlaylist:
 		return true
 	default:
 		return false

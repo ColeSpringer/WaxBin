@@ -9,6 +9,10 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// artTypeList is the --type vocabulary both art commands accept (model.ArtEntity),
+// named once so the resolve and set help texts cannot drift apart.
+const artTypeList = "track|album|release_group|artist|genre|episode|podcast|playlist"
+
 func newArtCmd(g *globals) *cobra.Command {
 	var (
 		entType string
@@ -22,7 +26,8 @@ func newArtCmd(g *globals) *cobra.Command {
 		Long: "Resolves artwork for an entity. The front cover (the default --role) follows the " +
 			"fallback chain (track -> album -> release_group -> artist -> genre) to the first level " +
 			"that has one; any other role (back|disc|booklet|background) resolves at the entity's " +
-			"own level only. With --size, returns a thumbnail scaled to fit a square box with that " +
+			"own level only, as does every role on a playlist, which has no ancestry. With --size, " +
+			"returns a thumbnail scaled to fit a square box with that " +
 			"maximum side. Writes " +
 			"the image bytes to --out (or stdout); with --json, reports metadata instead, " +
 			"including the chain level that answered and whether an album's cover was derived " +
@@ -32,7 +37,7 @@ func newArtCmd(g *globals) *cobra.Command {
 			et := model.ArtEntity(entType)
 			if !et.Valid() {
 				return waxerr.New(waxerr.CodeInvalid, "art",
-					fmt.Sprintf("unknown --type %q; valid: track|album|release_group|artist|genre", entType))
+					fmt.Sprintf("unknown --type %q; valid: %s", entType, artTypeList))
 			}
 			r, ok := model.ParseArtRole(role)
 			if !ok {
@@ -73,7 +78,7 @@ func newArtCmd(g *globals) *cobra.Command {
 		},
 	}
 	f := cmd.Flags()
-	f.StringVar(&entType, "type", "track", "entity type: track|album|release_group|artist|genre")
+	f.StringVar(&entType, "type", "track", "entity type: "+artTypeList)
 	f.StringVar(&role, "role", "front", "art role: front|back|disc|booklet|background")
 	f.IntVar(&size, "size", 0, "thumbnail max dimension in px (0 = original)")
 	f.StringVar(&outPath, "out", "", "write image bytes to this file instead of stdout")
@@ -95,7 +100,7 @@ func newArtSetCmd(g *globals) *cobra.Command {
 		Use:   "set <pid> --file <image>",
 		Short: "Set (or clear) an entity's artwork from an image file",
 		Long: "Sets artwork for a track/book item, or for an album/artist/release_group/genre/" +
-			"podcast entity (--type), in one role (--role; front is the default, and " +
+			"podcast/playlist entity (--type), in one role (--role; front is the default, and " +
 			"back|disc|booklet|background hold a release's auxiliary images). The image bytes come " +
 			"from --file; --clear removes only the named role. An item front cover locks the " +
 			"item's art field by default so a scan does not re-derive it; the other roles have no " +
@@ -103,7 +108,8 @@ func newArtSetCmd(g *globals) *cobra.Command {
 			"--write-back also embeds a front cover into the backing file(s): a track into its " +
 			"file, a book into every part, an album across every member track's file. Only the " +
 			"front cover has an embedded representation, so --write-back with another role is " +
-			"refused.",
+			"refused. An entity with no file of its own (artist, release_group, genre, podcast, " +
+			"episode, playlist) keeps its cover in the catalog, so --write-back does nothing there.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			et := model.ArtEntity(entType)
@@ -151,7 +157,7 @@ func newArtSetCmd(g *globals) *cobra.Command {
 		},
 	}
 	f := cmd.Flags()
-	f.StringVar(&entType, "type", "track", "entity type: track|album|release_group|artist|genre|podcast")
+	f.StringVar(&entType, "type", "track", "entity type: "+artTypeList)
 	f.StringVar(&role, "role", "front", "art role: front|back|disc|booklet|background")
 	f.StringVar(&filePath, "file", "", "image file to set as this role's artwork")
 	f.BoolVar(&clear, "clear", false, "remove this role's artwork instead of setting it")

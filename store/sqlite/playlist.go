@@ -73,7 +73,9 @@ func (s *Store) CreatePlaylist(ctx context.Context, name string, ownerPID model.
 
 const playlistSelect = `SELECT p.pid, p.name, u.pid, u.name, p.kind, p.visibility, p.rule,
 	p.created_at, p.updated_at,
-	(SELECT COUNT(*) FROM playlist_item pli WHERE pli.playlist_id = p.id)
+	(SELECT COUNT(*) FROM playlist_item pli WHERE pli.playlist_id = p.id),
+	EXISTS(SELECT 1 FROM art_map am
+	         WHERE am.entity_type = 'playlist' AND am.entity_id = p.id AND am.role = 'front')
 	FROM playlist p JOIN user u ON u.id = p.owner_user_id`
 
 func scanPlaylist(sc rowScanner) (*model.Playlist, error) {
@@ -81,7 +83,7 @@ func scanPlaylist(sc rowScanner) (*model.Playlist, error) {
 	var kind, vis string
 	var rule sql.NullString
 	if err := sc.Scan(&p.PID, &p.Name, &p.OwnerPID, &p.OwnerName, &kind, &vis, &rule,
-		&p.CreatedAt, &p.UpdatedAt, &p.ItemCount); err != nil {
+		&p.CreatedAt, &p.UpdatedAt, &p.ItemCount, &p.HasArt); err != nil {
 		return nil, err
 	}
 	p.Kind = model.PlaylistKind(kind)
@@ -135,16 +137,27 @@ func (s *Store) ListPlaylists(ctx context.Context, ownerPID model.PID) ([]*model
 	return out, rows.Err()
 }
 
-// DeletePlaylist removes a playlist and (by cascade) its item rows.
+// DeletePlaylist removes a playlist and (by cascade) its item rows, along with any
+// cover it carried. art_map is polymorphic with no FK, and a playlist is never merged
+// or orphan-GC'd, so this is the only place a playlist's art rows are cleaned; see
+// deleteEntityArtTx for why they cannot wait for GCArt. The source image left behind
+// becomes ordinary GC-able garbage, exactly like a swapped cover.
 func (s *Store) DeletePlaylist(ctx context.Context, pid model.PID) error {
 	const op = "store.DeletePlaylist"
 	return s.writeTx(ctx, func(tx *sql.Tx) error {
-		r, err := tx.ExecContext(ctx, "DELETE FROM playlist WHERE pid = ?", string(pid))
+		var id int64
+		err := tx.QueryRowContext(ctx, "SELECT id FROM playlist WHERE pid = ?", string(pid)).Scan(&id)
+		if errors.Is(err, sql.ErrNoRows) {
+			return waxerr.New(waxerr.CodeNotFound, op, "no such playlist: "+string(pid))
+		}
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
-		if n, _ := r.RowsAffected(); n == 0 {
-			return waxerr.New(waxerr.CodeNotFound, op, "no such playlist: "+string(pid))
+		if err := deleteEntityArtTx(ctx, tx, "playlist", id); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		if _, err := tx.ExecContext(ctx, "DELETE FROM playlist WHERE id = ?", id); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		return appendChange(ctx, tx, "playlist", pid, model.OpDelete)
 	})

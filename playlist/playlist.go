@@ -117,6 +117,10 @@ func (s *Service) RemoveAt(ctx context.Context, pid model.PID, position int) err
 // export their evaluated membership, so the file is a static snapshot; that
 // membership is evaluated for userPID (empty selects the default user) when the
 // rule references per-user state.
+//
+// A playlist's cover art is not exported: the format has no standard cover
+// directive, and this document carries track metadata only. A consumer that wants
+// the cover reads it through ResolveArt on the playlist reference instead.
 func (s *Service) ExportM3U8(ctx context.Context, pid model.PID, w io.Writer, userPID model.PID) error {
 	const op = "playlist.ExportM3U8"
 	items, err := s.store.PlaylistItems(ctx, pid, userPID)

@@ -394,9 +394,11 @@ func (l *Library) Search(ctx context.Context, q string, opt read.SearchOptions) 
 
 // ResolveArt resolves artwork for an entity in one role (empty = front). The
 // front cover walks the fallback chain (track -> album -> release_group -> artist
-// -> genre) to the first level that has one; every other role (back, disc,
-// booklet, background) resolves at the requested level only, since an ancestor's
-// auxiliary image would be misleading. A non-positive size returns the original
+// -> genre, or episode -> podcast) to the first level that has one; every other
+// role (back, disc, booklet, background) resolves at the requested level only,
+// since an ancestor's auxiliary image would be misleading. A playlist has no
+// ancestry, so every role on one resolves at the playlist itself or not at all.
+// A non-positive size returns the original
 // image; a positive size returns a thumbnail scaled to fit a square box with that
 // maximum side (generated once and cached). The blob reports the answering Level
 // and whether an album's answer was Derived from a member track's cover.

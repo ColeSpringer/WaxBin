@@ -65,7 +65,7 @@ func (l *Library) SetItemArt(ctx context.Context, itemPID model.PID, role model.
 }
 
 // SetEntityArt sets a durable image on a non-item entity (album, artist, release
-// group, genre, or podcast) under one role (empty = front; the closed
+// group, genre, podcast, or playlist) under one role (empty = front; the closed
 // model.ArtRole vocabulary, validated by the store). This makes album art durable:
 // ResolveArt prefers it over the read-derived track cover. Entity art takes no
 // lock/force (the lock system is item-scoped). With writeBack an album front cover
@@ -120,8 +120,8 @@ func (l *Library) writeBackItemArt(ctx context.Context, itemPID model.PID, raw [
 
 // writeBackEntityArt fans a committed album cover across every member track's file. Only
 // album covers fan out to disk (each album track embeds the cover); an artist, release
-// group, genre, or podcast cover stays durable in the catalog with no on-disk target, so
-// write-back for those is a no-op.
+// group, genre, podcast, or playlist cover stays durable in the catalog with no on-disk
+// target, so write-back for those is a no-op.
 func (l *Library) writeBackEntityArt(ctx context.Context, entityType model.ArtEntity, entityPID model.PID, raw []byte) error {
 	if entityType != model.ArtAlbum {
 		return nil

@@ -98,11 +98,12 @@ CREATE TABLE art_source (
 -- per role (the primary key), so a slot is replaced by delete-then-insert and
 -- a lookup needs no ordering. Only the front role participates in the
 -- resolver's fallback chain (track -> album -> release_group -> artist ->
--- genre); the other roles resolve at their own level. Orphan rows left by an
+-- genre); the other roles resolve at their own level, as does every role on a
+-- playlist (a playlist has no ancestry to inherit from). Orphan rows left by an
 -- entity deletion are cleaned by the art GC, which then drops the
 -- now-unreferenced source images and (by cascade) their thumbnails.
 CREATE TABLE art_map (
-  entity_type TEXT    NOT NULL,                     -- track|album|release_group|artist|genre|episode|podcast
+  entity_type TEXT    NOT NULL,                     -- track|album|release_group|artist|genre|episode|podcast|playlist
   entity_id   INTEGER NOT NULL,
   source_hash TEXT    NOT NULL REFERENCES art_source(hash) ON DELETE CASCADE,
   role        TEXT    NOT NULL DEFAULT 'front',     -- front|back|disc|booklet|background

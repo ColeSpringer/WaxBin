@@ -427,6 +427,14 @@ func (s *Store) artChain(ctx context.Context, ref model.EntityRef) ([]artLevel, 
 			return nil, err
 		}
 		return []artLevel{{string(model.ArtPodcast), podID}}, nil
+	case model.ArtPlaylist:
+		plID, err := s.idByPID(ctx, "playlist", ref.PID, op)
+		if err != nil {
+			return nil, err
+		}
+		// One rung on purpose: a playlist has no ancestor, so even a front cover has
+		// nowhere to fall back to.
+		return []artLevel{{string(model.ArtPlaylist), plID}}, nil
 	}
 	return nil, waxerr.New(waxerr.CodeInvalid, op, "unknown art entity type: "+string(ref.Type))
 }
@@ -593,6 +601,19 @@ func (s *Store) idByPID(ctx context.Context, table string, pid model.PID, op str
 	return id, nil
 }
 
+// deleteEntityArtTx drops every art_map row an entity holds, in all roles. A delete
+// path must call this rather than leave the rows for GCArt: the entity tables use a
+// plain INTEGER PRIMARY KEY, and SQLite hands a deleted row's id to the next insert,
+// so a surviving map row would show a dead entity's cover on whatever live entity
+// inherits its id, and GC would keep the row because the id exists again. It is the
+// same reasoning deleteItemCascade applies to entity_enrichment markers. The source
+// image left behind is still GC's to reclaim.
+func deleteEntityArtTx(ctx context.Context, tx *sql.Tx, entityType string, entityID int64) error {
+	_, err := tx.ExecContext(ctx,
+		"DELETE FROM art_map WHERE entity_type = ? AND entity_id = ?", entityType, entityID)
+	return err
+}
+
 // GCArt reclaims orphaned art: map rows whose entity is gone, then source images
 // no longer referenced by any map, cascading to their cached thumbnails. It
 // returns the number of source images and thumbnails removed. It is the repair for
@@ -610,6 +631,7 @@ func (s *Store) GCArt(ctx context.Context) (sources, thumbnails int, err error) 
 			{"track", "playable_item"}, {"album", "album"},
 			{"release_group", "release_group"}, {"artist", "artist"}, {"genre", "genre"},
 			{"episode", "playable_item"}, {"podcast", "podcast"},
+			{"playlist", "playlist"},
 		} {
 			if _, e := tx.ExecContext(ctx,
 				"DELETE FROM art_map WHERE entity_type = ? AND entity_id NOT IN (SELECT id FROM "+m.table+")",

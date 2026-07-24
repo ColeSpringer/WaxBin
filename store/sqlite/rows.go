@@ -509,6 +509,14 @@ func deleteItemCascade(ctx context.Context, tx *sql.Tx, itemID int64) (model.PID
 		"DELETE FROM entity_enrichment WHERE entity_type IN ('book','lyrics') AND entity_id = ?", itemID); err != nil {
 		return "", err
 	}
+	// art_map is polymorphic too, and a reused rowid would inherit the old item's cover
+	// the same way. An item's own art sits under the track slot (a track or a book) or
+	// the episode slot; the kind is not loaded here, so clear both.
+	for _, slot := range []string{"track", "episode"} {
+		if err := deleteEntityArtTx(ctx, tx, slot, itemID); err != nil {
+			return "", err
+		}
+	}
 	if _, err := tx.ExecContext(ctx, "DELETE FROM playable_item WHERE id = ?", itemID); err != nil {
 		return "", err
 	}

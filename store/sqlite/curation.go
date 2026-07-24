@@ -336,8 +336,8 @@ func (s *Store) SetItemArt(ctx context.Context, itemPID model.PID, role model.Ar
 }
 
 // SetEntityArt sets a durable image on a non-item entity (an album, artist, release
-// group, genre, or podcast) under one role, from raw image bytes. An empty role
-// means the front cover. This is what makes album art durable: a set album cover
+// group, genre, podcast, or playlist) under one role, from raw image bytes. An empty
+// role means the front cover. This is what makes album art durable: a set album cover
 // is a real art_map row that ResolveArt prefers over the read-derived track cover,
 // and that GCArt and the derived-data checks already treat as live. Empty bytes
 // clear the role. The role must be in the closed model.ArtRole vocabulary; an
@@ -435,11 +435,15 @@ func setCurationLockTx(ctx context.Context, tx *sql.Tx, itemID int64, field stri
 
 // artEntityIDTx resolves an art entity's pid to the internal id its art_map rows use:
 // the playable_item id for a track/episode, else the row id in the entity's own table.
+// The track and episode slots share playable_item, so the row's kind has to match the
+// requested slot (itemArtSlotExpr is the read side of the same rule). Without that
+// check an episode cover set on a track's pid would store a map row no resolver ever
+// consults, and GC would keep it alive because the id is real.
 func artEntityIDTx(ctx context.Context, tx *sql.Tx, entityType model.ArtEntity, pid model.PID, op string) (int64, error) {
 	var table string
 	switch entityType {
 	case model.ArtTrack, model.ArtEpisode:
-		table = "playable_item"
+		return itemIDForArtSlotTx(ctx, tx, entityType, pid, op)
 	case model.ArtAlbum:
 		table = "album"
 	case model.ArtReleaseGroup:
@@ -450,6 +454,8 @@ func artEntityIDTx(ctx context.Context, tx *sql.Tx, entityType model.ArtEntity, 
 		table = "genre"
 	case model.ArtPodcast:
 		table = "podcast"
+	case model.ArtPlaylist:
+		table = "playlist"
 	default:
 		return 0, waxerr.New(waxerr.CodeInvalid, op, "unsupported art entity type: "+string(entityType))
 	}
@@ -460,6 +466,28 @@ func artEntityIDTx(ctx context.Context, tx *sql.Tx, entityType model.ArtEntity, 
 	}
 	if err != nil {
 		return 0, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	return id, nil
+}
+
+// itemIDForArtSlotTx resolves a playable item's pid for the track or episode art slot,
+// rejecting a pid whose kind belongs to the other slot. An episode's cover lives under
+// the episode slot and a track's or book's under the track slot, so a mismatch would
+// write art nothing reads back.
+func itemIDForArtSlotTx(ctx context.Context, tx *sql.Tx, slot model.ArtEntity, pid model.PID, op string) (int64, error) {
+	var id int64
+	var kind string
+	err := tx.QueryRowContext(ctx, "SELECT id, kind FROM playable_item WHERE pid=?", string(pid)).Scan(&id, &kind)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, waxerr.New(waxerr.CodeNotFound, op, "no such "+string(slot)+": "+string(pid))
+	}
+	if err != nil {
+		return 0, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	isEpisode := model.Kind(kind) == model.KindEpisode
+	if isEpisode != (slot == model.ArtEpisode) {
+		return 0, waxerr.New(waxerr.CodeInvalid, op,
+			"item "+string(pid)+" is a "+kind+", which does not carry "+string(slot)+" art")
 	}
 	return id, nil
 }

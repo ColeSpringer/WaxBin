@@ -213,6 +213,114 @@ func TestSetArtUnknownRoleRejected(t *testing.T) {
 	}
 }
 
+// TestEntityArtSlotKindMismatchRejected covers the track and episode art slots sharing
+// playable_item: setting episode art on a track's pid (or the reverse) would store a
+// map row no resolver reads back, since the chain probes the slot the item's kind
+// selects, so the mismatch is refused up front.
+func TestEntityArtSlotKindMismatchRejected(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	img := testPNG(t, 40, 40)
+	track := putWithCover(t, st, lib.ID, "/lib/al/1.flac", "e1", nil)
+
+	if err := st.SetEntityArt(ctx, model.ArtEpisode, track, model.ArtRoleFront, img.Data); !waxerr.Is(err, waxerr.CodeInvalid) {
+		t.Errorf("episode art on a track pid = %v, want CodeInvalid", err)
+	}
+	if n := scalarInt(t, st, "SELECT COUNT(*) FROM art_map WHERE entity_type = 'episode'"); n != 0 {
+		t.Errorf("%d episode art rows written for a track, want none", n)
+	}
+	// The reverse, for a consumer calling the entity path with the track slot.
+	feed, err := st.UpsertFeed(ctx, extrasFeedInput("http://feed.example/slots"))
+	if err != nil {
+		t.Fatalf("UpsertFeed: %v", err)
+	}
+	ep := episodeByTitle(t, st, feed.PodcastPID, "Alpha").PID
+	if err := st.SetEntityArt(ctx, model.ArtTrack, ep, model.ArtRoleFront, img.Data); !waxerr.Is(err, waxerr.CodeInvalid) {
+		t.Errorf("track art on an episode pid = %v, want CodeInvalid", err)
+	}
+	// The matching slot still works: an episode's own cover is a real, resolvable row.
+	if err := st.SetEntityArt(ctx, model.ArtEpisode, ep, model.ArtRoleFront, img.Data); err != nil {
+		t.Fatalf("episode art on an episode pid: %v", err)
+	}
+	blob, err := st.ResolveArt(ctx, model.EntityRef{Type: model.ArtEpisode, PID: ep}, model.ArtRoleFront, 0)
+	if err != nil || blob.SourceHash != img.Hash {
+		t.Fatalf("episode front = %+v (err %v), want the set cover", blob, err)
+	}
+}
+
+// TestItemDeleteDropsArtRows pins the art half of deleteItemCascade: an item that is
+// deleted because its file re-keyed to a new identity takes its art_map rows with it.
+// playable_item.id is a plain INTEGER PRIMARY KEY, so a row left for GCArt could
+// resurface on whatever item inherits the rowid.
+func TestItemDeleteDropsArtRows(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	cover := testPNG(t, 40, 40)
+	old := putWithCover(t, st, lib.ID, "/lib/al/1.flac", "e1", cover)
+	oldID := int64(scalarInt(t, st, "SELECT id FROM playable_item WHERE pid = ?", string(old)))
+	if n := scalarInt(t, st, "SELECT COUNT(*) FROM art_map WHERE entity_type='track' AND entity_id=?", oldID); n != 1 {
+		t.Fatalf("scanned cover rows = %d, want 1 before the re-key", n)
+	}
+
+	// Rescanning the same path with a different essence re-keys the file to a new
+	// identity, orphaning the old item and deleting it.
+	putWithCover(t, st, lib.ID, "/lib/al/1.flac", "e2", nil)
+	if n := scalarInt(t, st, "SELECT COUNT(*) FROM playable_item WHERE id = ?", oldID); n != 0 {
+		t.Fatalf("the re-keyed item survived, so this test no longer covers the delete path")
+	}
+	if n := scalarInt(t, st, "SELECT COUNT(*) FROM art_map WHERE entity_type='track' AND entity_id=?", oldID); n != 0 {
+		t.Errorf("%d art rows outlived the deleted item, want 0", n)
+	}
+	if _, _, err := st.GCArt(ctx); err != nil {
+		t.Fatalf("gc: %v", err)
+	}
+	rep, err := st.VerifyDerived(ctx)
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if rep.OrphanArtSources != 0 || rep.OrphanThumbnails != 0 {
+		t.Errorf("verify after GC = %+v, want clean", rep)
+	}
+}
+
+// TestRemovePodcastDropsArtRows is the podcast twin of TestItemDeleteDropsArtRows: a
+// removed show takes its own feed art and each episode's cover with it, since podcast
+// and playable_item rowids are reused the same way.
+func TestRemovePodcastDropsArtRows(t *testing.T) {
+	st, _ := entityFixture(t)
+	ctx := context.Background()
+	feedArt, epArt := testPNG(t, 40, 40), testPNG(t, 41, 41)
+	feed, err := st.UpsertFeed(ctx, extrasFeedInput("http://feed.example/art"))
+	if err != nil {
+		t.Fatalf("UpsertFeed: %v", err)
+	}
+	ep := episodeByTitle(t, st, feed.PodcastPID, "Alpha").PID
+	if err := st.SetEntityArt(ctx, model.ArtPodcast, feed.PodcastPID, model.ArtRoleFront, feedArt.Data); err != nil {
+		t.Fatalf("set podcast art: %v", err)
+	}
+	if err := st.SetEntityArt(ctx, model.ArtEpisode, ep, model.ArtRoleFront, epArt.Data); err != nil {
+		t.Fatalf("set episode art: %v", err)
+	}
+
+	if _, err := st.RemovePodcast(ctx, feed.PodcastPID); err != nil {
+		t.Fatalf("RemovePodcast: %v", err)
+	}
+	if n := scalarInt(t, st, "SELECT COUNT(*) FROM art_map WHERE entity_type IN ('podcast','episode')"); n != 0 {
+		t.Errorf("%d podcast/episode art rows outlived the show, want 0", n)
+	}
+	// The sources are now unreferenced, which is GC's job, and both agree on it.
+	rep, err := st.VerifyDerived(ctx)
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if rep.OrphanArtSources != 2 {
+		t.Errorf("orphan sources = %d, want the show's and the episode's covers", rep.OrphanArtSources)
+	}
+	if sources, _, err := st.GCArt(ctx); err != nil || sources != 2 {
+		t.Errorf("GCArt reclaimed %d sources (err %v), want 2", sources, err)
+	}
+}
+
 // TestGCArtMultiRole verifies GC reclaims every role's source once the entity is
 // gone, and that VerifyDerived counts live multi-role sources as reachable.
 func TestGCArtMultiRole(t *testing.T) {

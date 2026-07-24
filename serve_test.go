@@ -299,6 +299,49 @@ func TestServeProxiedSmartPlaylistSetRule(t *testing.T) {
 	}
 }
 
+// TestServeProxiedPlaylistArt drives set_entity_art for a playlist over the socket:
+// the entity type rides the existing wire field (no new method, no version bump), the
+// cover resolves at the playlist's own level through the served library, and the
+// HasArt projection follows. This is the surface WaxDeck serves a synced playlist's
+// cover from.
+func TestServeProxiedPlaylistArt(t *testing.T) {
+	ctx := context.Background()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	sock := filepath.Join(t.TempDir(), "wax.sock")
+
+	// A playlist cover needs no catalog behind it, so this one skips the scan.
+	lib := openServedRW(t, ctx, db, t.TempDir(), sock)
+	pid, err := lib.Playlists().CreateStatic(ctx, "Mix", "", "")
+	if err != nil {
+		t.Fatalf("create playlist: %v", err)
+	}
+	c := dialWhenReady(t, sock)
+
+	cover := coverPNG(t)
+	// Write-back is on to prove a playlist has no on-disk fan-out to fail at: there is
+	// no file behind a playlist, so the flag is a clean no-op rather than an error.
+	res, err := c.SetEntityArt(ctx, model.ArtPlaylist, pid, model.ArtRoleFront, cover, true)
+	if err != nil {
+		t.Fatalf("proxied playlist art: %v", err)
+	}
+	if len(res.WriteBackFailures) != 0 {
+		t.Fatalf("write-back failures for a playlist cover: %+v, want none", res.WriteBackFailures)
+	}
+
+	blob, err := lib.ResolveArt(ctx, model.EntityRef{Type: model.ArtPlaylist, PID: pid}, model.ArtRoleFront, 0)
+	if err != nil {
+		t.Fatalf("resolve playlist art: %v", err)
+	}
+	if blob.Level != model.ArtPlaylist || len(blob.Bytes) != len(cover) {
+		t.Fatalf("resolved = %d bytes at level %s, want the %d-byte cover at level playlist",
+			len(blob.Bytes), blob.Level, len(cover))
+	}
+	pl, err := lib.Playlists().Get(ctx, pid)
+	if err != nil || !pl.HasArt {
+		t.Fatalf("playlist = %+v (err %v), want HasArt after the proxied cover set", pl, err)
+	}
+}
+
 // TestServeProxiedTranscript drives put_transcript and fetch_transcript over the
 // socket: a supplied body is validated and reduced server-side, a fetch error
 // keeps its class across the wire, and the stored transcript reads back through

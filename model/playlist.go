@@ -30,7 +30,9 @@ func (v PlaylistVisibility) Valid() bool {
 
 // Playlist is a user's playlist: a static ordered list or a smart query rule.
 // Rule is set only for smart playlists; ItemCount is the stored member count for
-// static playlists (a smart playlist's membership is computed on read).
+// static playlists (a smart playlist's membership is computed on read). HasArt
+// reports whether the playlist carries its own front cover, so a list read can tell
+// which playlists have one without a resolve call each.
 type Playlist struct {
 	PID        PID
 	Name       string
@@ -40,6 +42,7 @@ type Playlist struct {
 	Visibility PlaylistVisibility
 	Rule       *query.Query
 	ItemCount  int
+	HasArt     bool
 	CreatedAt  int64
 	UpdatedAt  int64
 }

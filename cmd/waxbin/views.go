@@ -350,12 +350,13 @@ type playlistView struct {
 	Kind       string `json:"kind"`
 	Visibility string `json:"visibility"`
 	ItemCount  int    `json:"itemCount"`
+	HasArt     bool   `json:"hasArt"`
 }
 
 func toPlaylistView(p *model.Playlist) playlistView {
 	return playlistView{
 		PID: string(p.PID), Name: p.Name, Owner: p.OwnerName, Kind: string(p.Kind),
-		Visibility: string(p.Visibility), ItemCount: p.ItemCount,
+		Visibility: string(p.Visibility), ItemCount: p.ItemCount, HasArt: p.HasArt,
 	}
 }
 

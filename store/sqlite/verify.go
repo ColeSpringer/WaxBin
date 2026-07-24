@@ -195,7 +195,8 @@ const liveArtSourceQ = `SELECT source_hash FROM art_map m WHERE
  OR (m.entity_type='release_group' AND EXISTS (SELECT 1 FROM release_group e WHERE e.id = m.entity_id))
  OR (m.entity_type='artist'        AND EXISTS (SELECT 1 FROM artist e        WHERE e.id = m.entity_id))
  OR (m.entity_type='genre'         AND EXISTS (SELECT 1 FROM genre e         WHERE e.id = m.entity_id))
- OR (m.entity_type='podcast'       AND EXISTS (SELECT 1 FROM podcast e       WHERE e.id = m.entity_id))`
+ OR (m.entity_type='podcast'       AND EXISTS (SELECT 1 FROM podcast e       WHERE e.id = m.entity_id))
+ OR (m.entity_type='playlist'      AND EXISTS (SELECT 1 FROM playlist e      WHERE e.id = m.entity_id))`
 
 const releaseGroupRollupDriftQ = `
 SELECT COUNT(*) FROM release_group rg

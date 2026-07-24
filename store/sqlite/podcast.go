@@ -988,6 +988,9 @@ func (s *Store) RemovePodcast(ctx context.Context, podcastPID model.PID) ([]stri
 			"DELETE FROM file WHERE id IN (SELECT file_id FROM item_file WHERE item_id IN (" + epItems + "))",
 			"DELETE FROM transcript_fts WHERE episode_id IN (" + epItems + ")",
 			"DELETE FROM search_fts WHERE rowid IN (" + epItems + ")",
+			// Each episode's own art rows go with it, before the item rows they hang
+			// off are gone (deleteEntityArtTx explains why GCArt cannot be left to it).
+			"DELETE FROM art_map WHERE entity_type = 'episode' AND entity_id IN (" + epItems + ")",
 			"DELETE FROM playable_item WHERE id IN (" + epItems + ")",
 		}
 		for _, stmt := range stmts {
@@ -996,8 +999,11 @@ func (s *Store) RemovePodcast(ctx context.Context, podcastPID model.PID) ([]stri
 			}
 		}
 
-		// 7. Drop the podcast row and emit its delta. Orphaned podcast/episode art_map
-		//    rows are reclaimed by GCArt (the same path as any deleted entity's art).
+		// 7. Drop the show's own feed art, then the podcast row and its delta. The
+		//    orphaned source images are reclaimed by GCArt.
+		if err := deleteEntityArtTx(ctx, tx, "podcast", podcastID); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
 		if _, err := tx.ExecContext(ctx, "DELETE FROM podcast WHERE id = ?", podcastID); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
