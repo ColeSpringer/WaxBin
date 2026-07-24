@@ -34,6 +34,29 @@ type PlayState struct {
 	UpdatedAt        int64 // unix nanoseconds
 }
 
+// EntityPlayState is one user's star/rating state for one catalog entity (an
+// artist, release group, album, or genre): the entity-scoped twin of PlayState.
+// A migration import that carries album or artist stars (Subsonic getStarred2)
+// persists them here as what they are, rather than dropping them for want of an
+// item to hang them on. Rating is 0..100 (HasRating distinguishes an explicit 0
+// from unset); Starred carries the star with its set time for recency ordering.
+// The changed-at stamps record when the star or rating last changed value, a
+// clear included, and carry what a sync replay guard needs to order a local
+// change against a remote one, exactly as PlayState's do. Kind names which entity
+// table EntityPID resolves against.
+type EntityPlayState struct {
+	Kind             MergeEntity
+	UserPID          PID
+	EntityPID        PID
+	Rating           int
+	HasRating        bool
+	Starred          bool
+	StarredAt        int64 // unix nanoseconds; 0 when not starred
+	RatingChangedAt  int64 // unix nanoseconds; 0 = rating never changed
+	StarredChangedAt int64 // unix nanoseconds; 0 = star never changed
+	UpdatedAt        int64 // unix nanoseconds
+}
+
 // Bookmark is a labeled position within an item (audiobooks/podcasts).
 type Bookmark struct {
 	PID        PID

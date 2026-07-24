@@ -306,6 +306,22 @@ func (l *Library) proxyHandlers() map[string]proxy.Handler {
 			}
 			return nil, l.playback.SetStar(ctx, model.PID(p.UserPID), model.PID(p.ItemPID), p.Starred, proxy.AsOf(p.AsOfNS))
 		},
+		// Entity star/rating go through the facade, not l.playback: an entity star is a
+		// catalog-entity concept with no buffering service in front of it.
+		proxy.MethodSetEntityStar: func(ctx context.Context, raw json.RawMessage) (any, error) {
+			p, err := decodeParams[proxy.EntityStarParams](raw)
+			if err != nil {
+				return nil, err
+			}
+			return nil, l.SetEntityStar(ctx, model.PID(p.UserPID), model.MergeEntity(p.Kind), model.PID(p.EntityPID), p.Starred, proxy.AsOf(p.AsOfNS))
+		},
+		proxy.MethodSetEntityRating: func(ctx context.Context, raw json.RawMessage) (any, error) {
+			p, err := decodeParams[proxy.EntityRatingParams](raw)
+			if err != nil {
+				return nil, err
+			}
+			return nil, l.SetEntityRating(ctx, model.PID(p.UserPID), model.MergeEntity(p.Kind), model.PID(p.EntityPID), p.Rating, proxy.AsOf(p.AsOfNS))
+		},
 		proxy.MethodMarkPlayed: func(ctx context.Context, raw json.RawMessage) (any, error) {
 			p, err := decodeParams[proxy.PlayedParams](raw)
 			if err != nil {

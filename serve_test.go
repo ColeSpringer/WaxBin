@@ -16,6 +16,7 @@ import (
 	"github.com/colespringer/waxbin/podcast"
 	"github.com/colespringer/waxbin/proxy"
 	"github.com/colespringer/waxbin/query"
+	"github.com/colespringer/waxbin/read"
 	"github.com/colespringer/waxbin/scan"
 	"github.com/colespringer/waxbin/waxerr"
 )
@@ -185,6 +186,69 @@ func TestServeProxiedMutations(t *testing.T) {
 	}
 	if !hasUser(users, u.PID, "Bob") {
 		t.Fatalf("users = %+v, want one named Bob", users)
+	}
+}
+
+// TestServeProxiedEntityStar drives set_entity_star / set_entity_rating end to end: an
+// album entity is starred and rated over the wire and read back through the served
+// library, and the as-of stamp rides asOfNs so a stale replay is skipped by the recorded
+// time guard, the same wire fields and new methods WaxDeck's getStarred2 import uses.
+func TestServeProxiedEntityStar(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	sock := filepath.Join(t.TempDir(), "wax.sock")
+	writeFile(t, filepath.Join(root, "song.mp3"), testaudio.BuildMP3("Original", "Old Artist", "Album", 1))
+
+	lib := openServed(t, ctx, db, root, sock)
+
+	// The album entity pid comes from the album facet (the exact enumeration WaxDeck uses).
+	fr, err := lib.Facet(ctx, query.New(query.EntityItems).Build(), read.GroupAlbum, "")
+	if err != nil {
+		t.Fatalf("album facet: %v", err)
+	}
+	var albumPID model.PID
+	for _, b := range fr.Buckets {
+		if b.EntityPID != "" {
+			albumPID = b.EntityPID
+			break
+		}
+	}
+	if albumPID == "" {
+		t.Fatal("no album entity pid from the album facet")
+	}
+
+	c := dialWhenReady(t, sock)
+
+	// Star and rate the album entity over the wire; read back through the served library
+	// (entity state has no proxy read method by design, so the read is in-process).
+	if err := c.SetEntityStar(ctx, "", model.MergeAlbum, albumPID, true, nil); err != nil {
+		t.Fatalf("proxied entity star: %v", err)
+	}
+	rating := 90
+	if err := c.SetEntityRating(ctx, "", model.MergeAlbum, albumPID, &rating, nil); err != nil {
+		t.Fatalf("proxied entity rating: %v", err)
+	}
+	st, err := lib.EntityPlayState(ctx, "", model.MergeAlbum, albumPID)
+	if err != nil {
+		t.Fatalf("read entity state: %v", err)
+	}
+	if !st.Starred || !st.HasRating || st.Rating != 90 {
+		t.Fatalf("entity state = %+v, want starred + rating 90", st)
+	}
+
+	// The as-of stamp rides asOfNs: an unstar recorded far in the past (older than the
+	// server-now star above) is skipped as a stale replay, so the album stays starred.
+	// This exercises the client encode, server decode, and store guard end to end.
+	oldNS := int64(1_000_000_000) // 1970
+	if err := c.SetEntityStar(ctx, "", model.MergeAlbum, albumPID, false, &oldNS); err != nil {
+		t.Fatalf("proxied stale entity unstar: %v", err)
+	}
+	if st, err = lib.EntityPlayState(ctx, "", model.MergeAlbum, albumPID); err != nil {
+		t.Fatalf("read entity state after stale unstar: %v", err)
+	}
+	if !st.Starred {
+		t.Fatalf("stale as-of entity unstar was applied over the wire (state %+v), want skipped", st)
 	}
 }
 

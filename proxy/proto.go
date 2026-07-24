@@ -63,6 +63,8 @@ const (
 	MethodMerge            = "merge"
 	MethodSetRating        = "set_rating"
 	MethodSetStar          = "set_star"
+	MethodSetEntityStar    = "set_entity_star"
+	MethodSetEntityRating  = "set_entity_rating"
 	MethodMarkPlayed       = "mark_played"
 	MethodSetProgress      = "set_progress"
 	MethodPlayState        = "play_state"
@@ -342,6 +344,27 @@ type StarParams struct {
 	ItemPID string `json:"itemPid"`
 	Starred bool   `json:"starred"`
 	AsOfNS  int64  `json:"asOfNs,string,omitempty"`
+}
+
+// EntityStarParams is the set_entity_star request payload: a per-user star on a catalog
+// entity (Kind is a model.MergeEntity: artist|release_group|album|genre). AsOfNS is the
+// optional recorded-time stamp, the same encoding as StarParams (see asOfToWire).
+type EntityStarParams struct {
+	UserPID   string `json:"userPid"`
+	Kind      string `json:"kind"`
+	EntityPID string `json:"entityPid"`
+	Starred   bool   `json:"starred"`
+	AsOfNS    int64  `json:"asOfNs,string,omitempty"`
+}
+
+// EntityRatingParams is the set_entity_rating request payload. Rating is nil to clear.
+// AsOfNS is the optional recorded-time stamp (see asOfToWire).
+type EntityRatingParams struct {
+	UserPID   string `json:"userPid"`
+	Kind      string `json:"kind"`
+	EntityPID string `json:"entityPid"`
+	Rating    *int   `json:"rating"`
+	AsOfNS    int64  `json:"asOfNs,string,omitempty"`
 }
 
 // asOfToWire encodes an optional recorded-time stamp for the wire: nil becomes 0,

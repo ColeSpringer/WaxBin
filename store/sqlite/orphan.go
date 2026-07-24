@@ -63,9 +63,9 @@ var orphanKinds = []orphanKind{
 // grace window).
 //
 // Deletion cascades an entity's rollups and (for an artist) its aliases, relations,
-// and contributor links via foreign keys; the polymorphic art_map and
-// entity_enrichment rows carry no FK and are removed explicitly, leaving their art
-// sources for the GCArt pass the same maintenance flow runs.
+// and contributor links via foreign keys; the polymorphic art_map, entity_enrichment,
+// entity_curation, and entity_play_state rows carry no FK and are removed explicitly,
+// leaving their art sources for the GCArt pass the same maintenance flow runs.
 func (s *Store) GCOrphans(ctx context.Context, graceNS int64) (*model.OrphanGCReport, error) {
 	const op = "store.GCOrphans"
 	rep := &model.OrphanGCReport{}
@@ -228,9 +228,9 @@ func insertCandidates(ctx context.Context, tx *sql.Tx, entityType string, entity
 }
 
 // deleteOrphanEntity removes one orphaned entity: its polymorphic art_map,
-// entity_enrichment, and entity_curation rows (no FK), the entity row itself (cascading
-// rollups/aliases/relations/contributor links), its candidate row, and a change_log
-// delta.
+// entity_enrichment, entity_curation, and entity_play_state rows (no FK), the entity row
+// itself (cascading rollups/aliases/relations/contributor links), its candidate row, and
+// a change_log delta.
 func deleteOrphanEntity(ctx context.Context, tx *sql.Tx, k orphanKind, o orphanRow) error {
 	if _, err := tx.ExecContext(ctx,
 		"DELETE FROM art_map WHERE entity_type = ? AND entity_id = ?", k.entityType, o.id); err != nil {
@@ -242,6 +242,14 @@ func deleteOrphanEntity(ctx context.Context, tx *sql.Tx, k orphanKind, o orphanR
 	}
 	if _, err := tx.ExecContext(ctx,
 		"DELETE FROM entity_curation WHERE entity_type = ? AND entity_id = ?", k.entityType, o.id); err != nil {
+		return err
+	}
+	// entity_play_state is polymorphic with no FK, so it is cleaned here like the rows
+	// above. A childless artist/release_group/album/genre a user had starred loses that
+	// star with the entity. series is in orphanKinds but is never written by the entity
+	// play-state path, so this delete is a harmless no-op for it.
+	if _, err := tx.ExecContext(ctx,
+		"DELETE FROM entity_play_state WHERE entity_type = ? AND entity_id = ?", k.entityType, o.id); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, "DELETE FROM "+k.table+" WHERE id = ?", o.id); err != nil {

@@ -230,6 +230,20 @@ func (m *mutator) SetStar(ctx context.Context, userPID, itemPID model.PID, starr
 	return m.lib.Playback().SetStar(ctx, userPID, itemPID, starred, asOf)
 }
 
+func (m *mutator) SetEntityStar(ctx context.Context, userPID model.PID, kind model.MergeEntity, entityPID model.PID, starred bool, asOf *int64) error {
+	if m.px != nil {
+		return m.px.SetEntityStar(ctx, userPID, kind, entityPID, starred, asOf)
+	}
+	return m.lib.SetEntityStar(ctx, userPID, kind, entityPID, starred, asOf)
+}
+
+func (m *mutator) SetEntityRating(ctx context.Context, userPID model.PID, kind model.MergeEntity, entityPID model.PID, rating *int, asOf *int64) error {
+	if m.px != nil {
+		return m.px.SetEntityRating(ctx, userPID, kind, entityPID, rating, asOf)
+	}
+	return m.lib.SetEntityRating(ctx, userPID, kind, entityPID, rating, asOf)
+}
+
 func (m *mutator) MarkPlayed(ctx context.Context, userPID, itemPID model.PID, finished bool) error {
 	if m.px != nil {
 		return m.px.MarkPlayed(ctx, userPID, itemPID, finished)

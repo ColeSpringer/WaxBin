@@ -307,6 +307,24 @@ func (c *Client) SetStar(ctx context.Context, userPID, itemPID model.PID, starre
 	}, nil)
 }
 
+// SetEntityStar proxies starring or unstarring a catalog entity (artist/release_group/
+// album/genre) for a user. asOf (nil = server now) is the recorded flip time; it travels
+// as asOfNs and orders a replayed toggle by recorded-time last-writer-wins, matching
+// SetStar.
+func (c *Client) SetEntityStar(ctx context.Context, userPID model.PID, kind model.MergeEntity, entityPID model.PID, starred bool, asOf *int64) error {
+	return c.call(ctx, MethodSetEntityStar, EntityStarParams{
+		UserPID: string(userPID), Kind: string(kind), EntityPID: string(entityPID), Starred: starred, AsOfNS: asOfToWire(asOf),
+	}, nil)
+}
+
+// SetEntityRating proxies setting or clearing a user's rating for a catalog entity. asOf
+// (nil = server now) is the recorded change time; see SetEntityStar.
+func (c *Client) SetEntityRating(ctx context.Context, userPID model.PID, kind model.MergeEntity, entityPID model.PID, rating *int, asOf *int64) error {
+	return c.call(ctx, MethodSetEntityRating, EntityRatingParams{
+		UserPID: string(userPID), Kind: string(kind), EntityPID: string(entityPID), Rating: rating, AsOfNS: asOfToWire(asOf),
+	}, nil)
+}
+
 // MarkPlayed proxies marking an item played (and optionally finished) for a user.
 func (c *Client) MarkPlayed(ctx context.Context, userPID, itemPID model.PID, finished bool) error {
 	return c.call(ctx, MethodMarkPlayed, PlayedParams{

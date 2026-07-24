@@ -35,6 +35,29 @@ CREATE INDEX play_state_recent  ON play_state(user_id, last_played_at);
 CREATE INDEX play_state_starred ON play_state(user_id, starred_at);
 CREATE INDEX play_state_played  ON play_state(user_id, play_count);
 
+-- Per-user star and rating on a catalog entity (an artist, release group, album,
+-- or genre), the entity-scoped twin of play_state. A migration import that carries
+-- album or artist stars (Subsonic getStarred2) persists them here as what they are
+-- rather than dropping them for want of an item to hang them on. The user side is a
+-- real FK that cascades on user delete; the entity side is polymorphic
+-- (entity_type, entity_id) with no FK, the same shape as art_map and
+-- entity_curation, cleaned by the merge re-point and the orphan sweep. The change
+-- stamps mirror play_state's: bumped only on a real value change (a clear included),
+-- NULL when never changed, so a sync adapter can order a local change against a
+-- remote one. starred_at is the recency key the starred list orders by.
+CREATE TABLE entity_play_state (
+  user_id     INTEGER NOT NULL REFERENCES user(id) ON DELETE CASCADE,
+  entity_type TEXT    NOT NULL,   -- artist|release_group|album|genre (polymorphic, no FK)
+  entity_id   INTEGER NOT NULL,
+  rating              INTEGER,     -- 0..100, NULL = unset
+  starred_at          INTEGER,     -- NULL = not starred
+  rating_changed_at   INTEGER,
+  starred_changed_at  INTEGER,
+  updated_at          INTEGER NOT NULL,
+  PRIMARY KEY (user_id, entity_type, entity_id)
+);
+CREATE INDEX entity_play_state_starred ON entity_play_state(user_id, entity_type, starred_at);
+
 CREATE TABLE bookmark (
   id          INTEGER PRIMARY KEY,
   pid         TEXT    NOT NULL UNIQUE,

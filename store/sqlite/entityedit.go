@@ -116,7 +116,7 @@ func (s *Store) EditEntityFields(ctx context.Context, entityType model.MergeEnti
 	}
 
 	return s.writeTx(ctx, func(tx *sql.Tx) error {
-		entityID, err := entityIDByPID(ctx, tx, table, entityPID)
+		entityID, err := entityIDByPID(ctx, tx, table, entityPID, op)
 		if err != nil {
 			return err
 		}

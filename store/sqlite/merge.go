@@ -79,12 +79,13 @@ func (s *Store) MergeEntities(ctx context.Context, et model.MergeEntity, survivo
 
 // mergeEntityTx performs one merge inside the caller's transaction.
 func mergeEntityTx(ctx context.Context, tx *sql.Tx, et model.MergeEntity, table string, survivorPID, loserPID model.PID) (*model.MergeReport, error) {
+	const op = "store.MergeEntities"
 	rep := &model.MergeReport{EntityType: et, Survivor: survivorPID, Loser: loserPID}
-	sid, err := entityIDByPID(ctx, tx, table, survivorPID)
+	sid, err := entityIDByPID(ctx, tx, table, survivorPID, op)
 	if err != nil {
 		return nil, err
 	}
-	lid, err := entityIDByPID(ctx, tx, table, loserPID)
+	lid, err := entityIDByPID(ctx, tx, table, loserPID, op)
 	if err != nil {
 		return nil, err
 	}
@@ -122,6 +123,10 @@ func mergeEntityTx(ctx context.Context, tx *sql.Tx, et model.MergeEntity, table 
 	}
 	// Re-point the entity-curation rows (also polymorphic, no FK) with locked-wins.
 	if err := repointEntityCuration(ctx, tx, table, sid, lid); err != nil {
+		return nil, err
+	}
+	// Re-point the per-user entity play-state rows (also polymorphic, no FK).
+	if err := repointEntityPlayState(ctx, tx, table, sid, lid); err != nil {
 		return nil, err
 	}
 	// Union the MBID: a merge driven by enrichment (two heuristic rows sharing an
@@ -217,15 +222,19 @@ func affectedItemPIDs(ctx context.Context, tx *sql.Tx, et model.MergeEntity, lid
 }
 
 // entityIDByPID resolves an entity's internal id from its public id, returning
-// CodeNotFound when no such row exists in the table.
-func entityIDByPID(ctx context.Context, tx *sql.Tx, table string, pid model.PID) (int64, error) {
+// CodeNotFound when no such row exists in the table. op names the calling operation so
+// the error carries the real caller's context (a merge, an entity edit, an entity star)
+// rather than a single hardcoded op. It takes a queryer, like userIDByPID and
+// itemIDByPIDRead, so a write path resolves through its tx (seeing uncommitted state) and
+// a read path resolves on the pool.
+func entityIDByPID(ctx context.Context, q queryer, table string, pid model.PID, op string) (int64, error) {
 	var id int64
-	err := tx.QueryRowContext(ctx, "SELECT id FROM "+table+" WHERE pid = ?", string(pid)).Scan(&id)
+	err := q.QueryRowContext(ctx, "SELECT id FROM "+table+" WHERE pid = ?", string(pid)).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
-		return 0, waxerr.New(waxerr.CodeNotFound, "store.MergeEntity", table+" not found: "+string(pid))
+		return 0, waxerr.New(waxerr.CodeNotFound, op, table+" not found: "+string(pid))
 	}
 	if err != nil {
-		return 0, waxerr.Wrap(waxerr.CodeIO, "store.MergeEntity", err)
+		return 0, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
 	return id, nil
 }
@@ -406,6 +415,55 @@ func repointEntityCuration(ctx context.Context, tx *sql.Tx, entityType string, s
 	// Drop any loser rows a collision left behind.
 	_, err := tx.ExecContext(ctx,
 		"DELETE FROM entity_curation WHERE entity_type = ? AND entity_id = ?", entityType, lid)
+	return err
+}
+
+// repointEntityPlayState re-points the loser's entity_play_state rows (polymorphic, no
+// FK) onto the survivor. For a user who touched only one of the two entities the row
+// moves across intact; for a user who touched both, the survivor's row absorbs the
+// loser's by (value, changed_at) pair: the star pair and the rating pair each stay the
+// survivor's when the survivor already has one (survivor-wins on a conflict, deliberately
+// ignoring the recorded-time stamps, so this is not the SetEntityStar recorded-time
+// guard) and are inherited from the loser only when the survivor has none.
+//
+// This preserves a user's disjoint state, a rating on one merged entity and a star on the
+// other, the same way repointArtMap and repointEntityCuration preserve a role or field
+// only the loser held. Those tables key one row per sub-value, so a plain re-point already
+// keeps the disjoint ones; this table packs star and rating into a single row, so the fold
+// below is what gives it the same non-lossy behavior. "Has a pair" tests the pair's
+// *_changed_at, not its value, so a user who rated the survivor then cleared it (rating
+// NULL, rating_changed_at set) keeps that cleared state rather than inheriting the loser's
+// stale rating. A kind whose users starred nothing finds no rows and is a no-op.
+func repointEntityPlayState(ctx context.Context, tx *sql.Tx, entityType string, sid, lid int64) error {
+	// Fold the loser's disjoint pairs into the survivor's row for every user who has both.
+	// Each field's CASE keys on the survivor's own *_changed_at so a pair moves as a unit;
+	// updated_at advances to the later real row-touch of the two.
+	loSub := func(col string) string {
+		return "(SELECT lo." + col + " FROM entity_play_state lo" +
+			" WHERE lo.user_id = entity_play_state.user_id AND lo.entity_type = entity_play_state.entity_type AND lo.entity_id = ?)"
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE entity_play_state SET
+		   rating             = CASE WHEN rating_changed_at  IS NULL THEN `+loSub("rating")+`             ELSE rating END,
+		   rating_changed_at  = CASE WHEN rating_changed_at  IS NULL THEN `+loSub("rating_changed_at")+`  ELSE rating_changed_at END,
+		   starred_at         = CASE WHEN starred_changed_at IS NULL THEN `+loSub("starred_at")+`         ELSE starred_at END,
+		   starred_changed_at = CASE WHEN starred_changed_at IS NULL THEN `+loSub("starred_changed_at")+` ELSE starred_changed_at END,
+		   updated_at         = MAX(updated_at, COALESCE(`+loSub("updated_at")+`, 0))
+		 WHERE entity_type = ? AND entity_id = ?
+		   AND EXISTS (SELECT 1 FROM entity_play_state lo
+		               WHERE lo.user_id = entity_play_state.user_id AND lo.entity_type = entity_play_state.entity_type AND lo.entity_id = ?)`,
+		lid, lid, lid, lid, lid, entityType, sid, lid); err != nil {
+		return err
+	}
+	// Move the loser rows of users who have no survivor row (UPDATE OR IGNORE lands them on
+	// the survivor), then drop the folded leftovers whose IGNORE skipped them.
+	if _, err := tx.ExecContext(ctx,
+		"UPDATE OR IGNORE entity_play_state SET entity_id = ? WHERE entity_type = ? AND entity_id = ?",
+		sid, entityType, lid); err != nil {
+		return err
+	}
+	_, err := tx.ExecContext(ctx,
+		"DELETE FROM entity_play_state WHERE entity_type = ? AND entity_id = ?", entityType, lid)
 	return err
 }
 
