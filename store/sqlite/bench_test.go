@@ -100,7 +100,7 @@ func BenchmarkFacetGenreAtScale(b *testing.B) {
 	populate(b, st, lib.ID, benchScale)
 	q := query.New(query.EntityItems).Build()
 	for b.Loop() {
-		if _, err := st.Facet(context.Background(), q, read.GroupGenre, ""); err != nil {
+		if _, err := st.Facet(context.Background(), q, read.GroupGenre, "", 0, ""); err != nil {
 			b.Fatal(err)
 		}
 	}

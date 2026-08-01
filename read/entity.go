@@ -69,3 +69,31 @@ type EntityInfo struct {
 	// genre, contributes nothing.
 	LibraryPIDs []model.PID
 }
+
+// EntityPage is one keyset-paginated window of entity summaries in collation order
+// (the generated sort_key, then pid as a tiebreak), the entity-side twin of
+// read.Page. It enumerates the entities that exist rather than the entities matching
+// a query: a filtered, counted answer is what Facet gives.
+//
+// It is the primitive behind an alphabetical index over a large dimension. A facet
+// cannot be that: paging one would re-run the whole GROUP BY per page, where this
+// walks the entity table's sort_key index and costs O(page).
+//
+// Drain it on HasMore, not on a non-empty Entities. A page enumerates its entities
+// and hydrates them separately, so one deleted in between is counted toward the page
+// but absent from Entities, and a page can be short (even empty) with more to come.
+// Nothing is skipped or repeated by that; Next still resumes after the last
+// enumerated entity.
+//
+// Two things to know before comparing its numbers to a facet's. First, EntityInfo
+// counts come from the maintained rollups, which are track-based for artist and
+// release group, so an artist's ItemCount differs from the artist facet's bucket
+// count, which COALESCEs a book under its author. Both are correct answers to
+// different questions. Second, EntityGenre enumerates both the genre and mood facets
+// of the genre table, matching EntityByPID.
+type EntityPage struct {
+	Kind     EntityKind
+	Entities []*EntityInfo
+	Next     Cursor
+	HasMore  bool
+}

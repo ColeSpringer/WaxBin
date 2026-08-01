@@ -292,19 +292,30 @@ func (l *Library) proxyHandlers() map[string]proxy.Handler {
 			}
 			return l.MergeMany(ctx, model.MergeEntity(p.EntityType), model.PID(p.Survivor), losers)
 		},
+		// The four star/rating methods answer with PlayStateChangeResult rather than a
+		// bare ok, so a proxied caller learns the same "did this change anything" the
+		// local call returns. A failure still returns a nil payload with the error.
 		proxy.MethodSetRating: func(ctx context.Context, raw json.RawMessage) (any, error) {
 			p, err := decodeParams[proxy.RatingParams](raw)
 			if err != nil {
 				return nil, err
 			}
-			return nil, l.playback.SetRating(ctx, model.PID(p.UserPID), model.PID(p.ItemPID), p.Rating, proxy.AsOf(p.AsOfNS))
+			changed, err := l.playback.SetRating(ctx, model.PID(p.UserPID), model.PID(p.ItemPID), p.Rating, proxy.AsOf(p.AsOfNS))
+			if err != nil {
+				return nil, err
+			}
+			return proxy.PlayStateChangeResult{Changed: changed}, nil
 		},
 		proxy.MethodSetStar: func(ctx context.Context, raw json.RawMessage) (any, error) {
 			p, err := decodeParams[proxy.StarParams](raw)
 			if err != nil {
 				return nil, err
 			}
-			return nil, l.playback.SetStar(ctx, model.PID(p.UserPID), model.PID(p.ItemPID), p.Starred, proxy.AsOf(p.AsOfNS))
+			changed, err := l.playback.SetStar(ctx, model.PID(p.UserPID), model.PID(p.ItemPID), p.Starred, proxy.AsOf(p.AsOfNS))
+			if err != nil {
+				return nil, err
+			}
+			return proxy.PlayStateChangeResult{Changed: changed}, nil
 		},
 		// Entity star/rating go through the facade, not l.playback: an entity star is a
 		// catalog-entity concept with no buffering service in front of it.
@@ -313,14 +324,22 @@ func (l *Library) proxyHandlers() map[string]proxy.Handler {
 			if err != nil {
 				return nil, err
 			}
-			return nil, l.SetEntityStar(ctx, model.PID(p.UserPID), model.MergeEntity(p.Kind), model.PID(p.EntityPID), p.Starred, proxy.AsOf(p.AsOfNS))
+			changed, err := l.SetEntityStar(ctx, model.PID(p.UserPID), model.MergeEntity(p.Kind), model.PID(p.EntityPID), p.Starred, proxy.AsOf(p.AsOfNS))
+			if err != nil {
+				return nil, err
+			}
+			return proxy.PlayStateChangeResult{Changed: changed}, nil
 		},
 		proxy.MethodSetEntityRating: func(ctx context.Context, raw json.RawMessage) (any, error) {
 			p, err := decodeParams[proxy.EntityRatingParams](raw)
 			if err != nil {
 				return nil, err
 			}
-			return nil, l.SetEntityRating(ctx, model.PID(p.UserPID), model.MergeEntity(p.Kind), model.PID(p.EntityPID), p.Rating, proxy.AsOf(p.AsOfNS))
+			changed, err := l.SetEntityRating(ctx, model.PID(p.UserPID), model.MergeEntity(p.Kind), model.PID(p.EntityPID), p.Rating, proxy.AsOf(p.AsOfNS))
+			if err != nil {
+				return nil, err
+			}
+			return proxy.PlayStateChangeResult{Changed: changed}, nil
 		},
 		proxy.MethodMarkPlayed: func(ctx context.Context, raw json.RawMessage) (any, error) {
 			p, err := decodeParams[proxy.PlayedParams](raw)

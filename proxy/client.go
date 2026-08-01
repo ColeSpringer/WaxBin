@@ -291,38 +291,50 @@ func (c *Client) Merge(ctx context.Context, entityType model.MergeEntity, surviv
 
 // SetRating proxies setting or clearing a user's rating for an item. asOf (nil =
 // server now) is the recorded change time; it travels as asOfNs and lets the server
-// order a replayed rating by recorded-time last-writer-wins.
-func (c *Client) SetRating(ctx context.Context, userPID, itemPID model.PID, rating *int, asOf *int64) error {
-	return c.call(ctx, MethodSetRating, RatingParams{
+// order a replayed rating by recorded-time last-writer-wins. It reports whether the
+// write changed anything, the same bool the local call returns; a server too old to
+// send it is rejected by the protocol-version check rather than decoding as false.
+func (c *Client) SetRating(ctx context.Context, userPID, itemPID model.PID, rating *int, asOf *int64) (bool, error) {
+	var res PlayStateChangeResult
+	err := c.call(ctx, MethodSetRating, RatingParams{
 		UserPID: string(userPID), ItemPID: string(itemPID), Rating: rating, AsOfNS: asOfToWire(asOf),
-	}, nil)
+	}, &res)
+	return res.Changed, err
 }
 
 // SetStar proxies starring or unstarring an item for a user. asOf (nil = server now)
 // is the recorded flip time; it travels as asOfNs and lets the server order a
-// replayed toggle by recorded-time last-writer-wins.
-func (c *Client) SetStar(ctx context.Context, userPID, itemPID model.PID, starred bool, asOf *int64) error {
-	return c.call(ctx, MethodSetStar, StarParams{
+// replayed toggle by recorded-time last-writer-wins. It reports whether the write
+// changed anything; see SetRating.
+func (c *Client) SetStar(ctx context.Context, userPID, itemPID model.PID, starred bool, asOf *int64) (bool, error) {
+	var res PlayStateChangeResult
+	err := c.call(ctx, MethodSetStar, StarParams{
 		UserPID: string(userPID), ItemPID: string(itemPID), Starred: starred, AsOfNS: asOfToWire(asOf),
-	}, nil)
+	}, &res)
+	return res.Changed, err
 }
 
 // SetEntityStar proxies starring or unstarring a catalog entity (artist/release_group/
 // album/genre) for a user. asOf (nil = server now) is the recorded flip time; it travels
 // as asOfNs and orders a replayed toggle by recorded-time last-writer-wins, matching
-// SetStar.
-func (c *Client) SetEntityStar(ctx context.Context, userPID model.PID, kind model.MergeEntity, entityPID model.PID, starred bool, asOf *int64) error {
-	return c.call(ctx, MethodSetEntityStar, EntityStarParams{
+// SetStar. It reports whether the write changed anything; see SetRating.
+func (c *Client) SetEntityStar(ctx context.Context, userPID model.PID, kind model.MergeEntity, entityPID model.PID, starred bool, asOf *int64) (bool, error) {
+	var res PlayStateChangeResult
+	err := c.call(ctx, MethodSetEntityStar, EntityStarParams{
 		UserPID: string(userPID), Kind: string(kind), EntityPID: string(entityPID), Starred: starred, AsOfNS: asOfToWire(asOf),
-	}, nil)
+	}, &res)
+	return res.Changed, err
 }
 
 // SetEntityRating proxies setting or clearing a user's rating for a catalog entity. asOf
-// (nil = server now) is the recorded change time; see SetEntityStar.
-func (c *Client) SetEntityRating(ctx context.Context, userPID model.PID, kind model.MergeEntity, entityPID model.PID, rating *int, asOf *int64) error {
-	return c.call(ctx, MethodSetEntityRating, EntityRatingParams{
+// (nil = server now) is the recorded change time; see SetEntityStar. It reports whether
+// the write changed anything.
+func (c *Client) SetEntityRating(ctx context.Context, userPID model.PID, kind model.MergeEntity, entityPID model.PID, rating *int, asOf *int64) (bool, error) {
+	var res PlayStateChangeResult
+	err := c.call(ctx, MethodSetEntityRating, EntityRatingParams{
 		UserPID: string(userPID), Kind: string(kind), EntityPID: string(entityPID), Rating: rating, AsOfNS: asOfToWire(asOf),
-	}, nil)
+	}, &res)
+	return res.Changed, err
 }
 
 // MarkPlayed proxies marking an item played (and optionally finished) for a user.

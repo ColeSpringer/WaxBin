@@ -179,6 +179,12 @@ type ItemFileRef struct {
 	Path        []byte // raw bytes of the current path
 	DisplayPath string
 	Position    int
+	// Role is the file's edge role, "primary" or "part". It is not derivable from
+	// Position: the primary is whichever part was attached first on the create path,
+	// or the lowest-positioned survivor after a primary is detached, so neither rule
+	// makes it part one. A consumer needs it to tell which part the primary-file
+	// reads (Peaks, Loudness) answered for.
+	Role string
 }
 
 // RelocateInput records a completed filesystem move so the store can update the

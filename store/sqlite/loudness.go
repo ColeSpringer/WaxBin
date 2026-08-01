@@ -79,9 +79,89 @@ func (s *Store) ReplayGainWriteback(ctx context.Context) ([]model.ReplayGainRow,
 	return out, rows.Err()
 }
 
+// LoadPeaksForFile returns one file's waveform, or CodeNotFound when the file has
+// none or its stored waveform is stale. There is no item_file join at all, so no
+// role filter can hide a part: every analyzed file has its own peaks row keyed by
+// file_id (needsAnalysisPredicate selects over the file table alone), and this read
+// reaches any of them. The essence_hash join is kept, so a re-encoded file whose
+// waveform predates the new audio reads as absent rather than wrong.
+func (s *Store) LoadPeaksForFile(ctx context.Context, filePID model.PID) (*model.PeaksData, error) {
+	const op = "store.LoadPeaksForFile"
+	var pk model.PeaksData
+	err := s.read.QueryRowContext(ctx, `SELECT p.version, p.bucket_count, p.data
+		FROM peaks p
+		JOIN file f ON f.id = p.file_id AND f.essence_hash = p.essence_hash
+		WHERE f.pid = ?`, string(filePID)).Scan(&pk.Version, &pk.Buckets, &pk.Data)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, waxerr.New(waxerr.CodeNotFound, op, "no peaks for file: "+string(filePID))
+	}
+	if err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	return &pk, nil
+}
+
+// LoadPeaksForItem returns every backing file's waveform for an item, in the same
+// reading order ItemFiles and the chapter timeline use. A track yields at most one
+// entry; a multi-file audiobook yields one per analyzed part, which is what a
+// scrubber over the whole book needs and what LoadPeaks, pinned to the single
+// representative primary edge, cannot give it.
+//
+// An unknown item pid is CodeNotFound. A known item whose parts have no current
+// waveform yet returns an empty slice and no error, and a partly analyzed book
+// returns only the parts that have one, so the result can be shorter than
+// ItemFiles; the Position and FilePID on each entry say which parts those are.
+func (s *Store) LoadPeaksForItem(ctx context.Context, itemPID model.PID) ([]model.ItemPeaks, error) {
+	const op = "store.LoadPeaksForItem"
+	itemID, _, err := s.itemIDKindByPID(ctx, itemPID, op)
+	if err != nil {
+		return nil, err
+	}
+	// Reading order comes from bookParts, which sorts numerically-aware in Go
+	// ("p2" before "p10"); ordering in SQL here would silently disagree with the
+	// chapter timeline. So the peaks are fetched keyed by file and then walked in
+	// parts order.
+	parts, err := s.bookParts(ctx, itemID)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.read.QueryContext(ctx, `SELECT p.file_id, p.version, p.bucket_count, p.data
+		FROM peaks p
+		JOIN file f ON f.id = p.file_id AND f.essence_hash = p.essence_hash
+		JOIN item_file itf ON itf.file_id = p.file_id
+		WHERE itf.item_id = ?`, itemID)
+	if err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	defer rows.Close()
+	byFile := make(map[int64]model.PeaksData)
+	for rows.Next() {
+		var fileID int64
+		var pk model.PeaksData
+		if err := rows.Scan(&fileID, &pk.Version, &pk.Buckets, &pk.Data); err != nil {
+			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		byFile[fileID] = pk
+	}
+	if err := rows.Err(); err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	out := make([]model.ItemPeaks, 0, len(byFile))
+	for _, p := range parts {
+		pk, ok := byFile[p.fileID]
+		if !ok {
+			continue
+		}
+		out = append(out, model.ItemPeaks{FilePID: p.FilePID, Position: p.Position, Peaks: pk})
+	}
+	return out, nil
+}
+
 // LoadPeaks returns an item's current primary-file waveform, or CodeNotFound. The
 // essence_hash join mirrors LoudnessByItem and hides waveforms from superseded
-// audio.
+// audio. The primary is the representative backing file, not reading-order part
+// one: see Library.Peaks for the two rules that pick it. LoadPeaksForItem returns
+// every part's waveform.
 func (s *Store) LoadPeaks(ctx context.Context, itemPID model.PID) (*model.PeaksData, error) {
 	const op = "store.LoadPeaks"
 	var pk model.PeaksData

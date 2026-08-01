@@ -116,17 +116,17 @@ func newStateCmd(g *globals) *cobra.Command {
 				if rating >= 0 { // a negative rating clears it
 					r = &rating
 				}
-				if err := m.SetRating(ctx(cmd), uPID, item, r, asOfNS); err != nil {
+				if _, err := m.SetRating(ctx(cmd), uPID, item, r, asOfNS); err != nil {
 					return err
 				}
 			}
 			if star {
-				if err := m.SetStar(ctx(cmd), uPID, item, true, asOfNS); err != nil {
+				if _, err := m.SetStar(ctx(cmd), uPID, item, true, asOfNS); err != nil {
 					return err
 				}
 			}
 			if unstar {
-				if err := m.SetStar(ctx(cmd), uPID, item, false, asOfNS); err != nil {
+				if _, err := m.SetStar(ctx(cmd), uPID, item, false, asOfNS); err != nil {
 					return err
 				}
 			}

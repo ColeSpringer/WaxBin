@@ -10,6 +10,9 @@ CREATE TABLE series (
   match_key TEXT    NOT NULL UNIQUE,
   mbid      TEXT
 );
+-- Keyset enumeration in collation order (EntityPage) walks this index, matching
+-- artist/release_group/album/genre, so all five entity kinds page the same way.
+CREATE INDEX series_sort ON series(sort_key);
 
 -- Audiobook subtype. Shares its PK with playable_item, mirroring track. It
 -- keeps denormalized display columns (author/narrator/series sequence)

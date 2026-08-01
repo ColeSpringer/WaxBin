@@ -21,13 +21,19 @@ const (
 	// library pid, display = the display root). A fileless item, such as an
 	// undownloaded episode, lands in the NoFile unknown bucket.
 	GroupLibrary GroupBy = "library"
+	// GroupPodcast buckets episodes by their feed (key = podcast pid, display = the
+	// feed title). It is the mirror of the podcast_pid query field, so a bucket
+	// drills down through it. The dimension is episode-scoped and every episode has
+	// a feed, so it has no unknown bucket: the five music dimensions exclude
+	// episodes for the same reason this one includes only them.
+	GroupPodcast GroupBy = "podcast"
 )
 
 // Valid reports whether g is a known faceting dimension: one of the fixed dimensions
 // or a well-formed custom-tag dimension ("tag.<KEY>" for a canonical, non-reserved key).
 func (g GroupBy) Valid() bool {
 	switch g {
-	case GroupGenre, GroupArtist, GroupAlbumArtist, GroupAlbum, GroupYear, GroupKind, GroupLibrary:
+	case GroupGenre, GroupArtist, GroupAlbumArtist, GroupAlbum, GroupYear, GroupKind, GroupLibrary, GroupPodcast:
 		return true
 	default:
 		_, ok := TagGroupKey(g)
@@ -37,7 +43,7 @@ func (g GroupBy) Valid() bool {
 
 // GroupBys lists the supported faceting dimensions (for help text and tests).
 func GroupBys() []GroupBy {
-	return []GroupBy{GroupGenre, GroupArtist, GroupAlbumArtist, GroupAlbum, GroupYear, GroupKind, GroupLibrary}
+	return []GroupBy{GroupGenre, GroupArtist, GroupAlbumArtist, GroupAlbum, GroupYear, GroupKind, GroupLibrary, GroupPodcast}
 }
 
 // Canonical "unknown" bucket display labels. A consumer rendering a facet or a

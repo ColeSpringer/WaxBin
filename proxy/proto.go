@@ -34,7 +34,10 @@ import (
 // added the StarParams/RatingParams as-of stamp: a version-3 server would drop it
 // and stamp the change at server-now, a real misdrive for a replayed offline
 // toggle whose recorded time is what orders it against an out-of-band change.
-const ProtocolVersion = 4
+// Version 5 added the PlayStateChangeResult payload on the four star/rating
+// methods: a version-4 server returns no data at all, which decodes as
+// changed=false, so every proxied write would report itself as a no-op.
+const ProtocolVersion = 5
 
 // Method names for the proxied operations: the fast request/response catalog
 // mutations, the reads a mutating command needs for its confirmation output, the
@@ -365,6 +368,16 @@ type EntityRatingParams struct {
 	EntityPID string `json:"entityPid"`
 	Rating    *int   `json:"rating"`
 	AsOfNS    int64  `json:"asOfNs,string,omitempty"`
+}
+
+// PlayStateChangeResult is the result payload for the star/rating methods
+// (set_rating, set_star, set_entity_star, set_entity_rating): whether the write
+// changed anything. A value-identical call or a stale replay reports false,
+// matching the store's suppressed change-feed delta. One struct for all four
+// because they answer the same question and a consumer switching between the item
+// and entity twins should not decode two shapes.
+type PlayStateChangeResult struct {
+	Changed bool `json:"changed"`
 }
 
 // asOfToWire encodes an optional recorded-time stamp for the wire: nil becomes 0,

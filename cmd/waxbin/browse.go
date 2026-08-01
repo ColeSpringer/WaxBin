@@ -6,6 +6,7 @@ import (
 	"text/tabwriter"
 
 	"github.com/colespringer/waxbin/model"
+	"github.com/colespringer/waxbin/query"
 	"github.com/colespringer/waxbin/read"
 	"github.com/colespringer/waxbin/waxerr"
 	"github.com/spf13/cobra"
@@ -19,6 +20,7 @@ func newBrowseCmd(g *globals) *cobra.Command {
 		seed     int64
 		pageSize int
 		cursor   string
+		rulePath string
 	)
 	cmd := &cobra.Command{
 		Use:   "browse LIST",
@@ -26,13 +28,26 @@ func newBrowseCmd(g *globals) *cobra.Command {
 		Long: "Returns one keyset-paginated window of a discovery list in its canonical " +
 			"order. Lists: " + discoveryList() + ". Play-derived lists (most-played, " +
 			"recently-played, starred) read --user's state; by-year needs --year, by-genre " +
-			"needs --genre PID, and random takes a --seed for a stable paginated shuffle.",
+			"needs --genre PID, and random takes a --seed for a stable paginated shuffle.\n\n" +
+			"--rule scopes any list to the items a JSON rule document matches, using the same " +
+			"filter engine `query` uses, so a list can be narrowed to one genre, media type, " +
+			"or per-user state while keeping its own ordering. A cursor is only valid for the " +
+			"exact options it was issued under, --rule included.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			list := read.DiscoveryList(args[0])
 			if !list.Valid() {
 				return waxerr.New(waxerr.CodeInvalid, "browse",
 					fmt.Sprintf("unknown list %q; valid: %s", args[0], discoveryList()))
+			}
+			// Only a --rule browse carries a query; without one the zero Query leaves
+			// the unfiltered path exactly as it was.
+			var rule query.Query
+			if rulePath != "" {
+				var err error
+				if rule, err = buildQuery(cmd, rulePath, queryFlags{}); err != nil {
+					return err
+				}
 			}
 
 			lib, _, err := g.openRead(cmd)
@@ -43,7 +58,7 @@ func newBrowseCmd(g *globals) *cobra.Command {
 
 			page, err := lib.Browse(ctx(cmd), list, read.BrowseOptions{
 				UserPID: model.PID(user), Year: year, GenrePID: model.PID(genre),
-				Seed: seed, Cursor: read.Cursor(cursor), Limit: pageSize,
+				Seed: seed, Cursor: read.Cursor(cursor), Limit: pageSize, Query: rule,
 			})
 			if err != nil {
 				return err
@@ -75,6 +90,7 @@ func newBrowseCmd(g *globals) *cobra.Command {
 	f.Int64Var(&seed, "seed", 0, "stable shuffle seed for the random list")
 	f.IntVar(&pageSize, "page-size", 0, "rows per page (0 = default)")
 	f.StringVar(&cursor, "cursor", "", "keyset cursor from a prior page's nextCursor")
+	f.StringVar(&rulePath, "rule", "", "load a JSON rule document to scope the list")
 	return cmd
 }
 

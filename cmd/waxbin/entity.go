@@ -34,9 +34,64 @@ func newEntityCmd(g *globals) *cobra.Command {
 			"Star-able types (star/rate/state/stars): artist, release_group, album, genre.",
 	}
 	cmd.AddCommand(
-		newEntityEditCmd(g), newEntityShowCmd(g), newEntityInfoCmd(g),
+		newEntityEditCmd(g), newEntityShowCmd(g), newEntityInfoCmd(g), newEntityListCmd(g),
 		newEntityStarCmd(g), newEntityRateCmd(g), newEntityStateCmd(g), newEntityStarsCmd(g),
 	)
+	return cmd
+}
+
+// newEntityListCmd enumerates one kind's entities in collation order, keyset-paged.
+// It is `entity info` over the whole kind rather than one pid: the alphabetical index
+// a facet cannot page, since paging a facet re-runs its whole aggregation.
+func newEntityListCmd(g *globals) *cobra.Command {
+	var (
+		cursor string
+		limit  int
+	)
+	cmd := &cobra.Command{
+		Use:   "list <type>",
+		Short: "List a kind's entities in collation order, one page at a time",
+		Long: "Enumerates every entity of one kind in collation order (sort key, then pid), " +
+			"a page at a time. Pass the printed next cursor back as --cursor for the following " +
+			"page. Each row is the same summary `entity info` prints for a single pid.\n\n" +
+			"Entity types: " + entityKindList() + ".\n\n" +
+			"Counts come from the maintained rollups, which are track-based for artist and " +
+			"release group, so an artist's item count can differ from the artist facet's " +
+			"bucket count (that one counts a book under its author). Both are correct; they " +
+			"answer different questions.",
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			kind := read.EntityKind(args[0])
+			lib, _, err := g.openRead(cmd)
+			if err != nil {
+				return err
+			}
+			defer lib.Close()
+			page, err := lib.EntityPage(ctx(cmd), kind, read.Cursor(cursor), limit)
+			if err != nil {
+				return err
+			}
+			if g.jsonOut {
+				return printJSON(cmd, toEntityPageView(page))
+			}
+			tw := tabwriter.NewWriter(out(cmd), 0, 2, 2, ' ', 0)
+			fmt.Fprintln(tw, "PID\tNAME\tITEMS\tDURATION")
+			for _, e := range page.Entities {
+				fmt.Fprintf(tw, "%s\t%s\t%d\t%s\n", e.PID, e.Name, e.ItemCount, durationLabel(e.TotalDurationMS))
+			}
+			if err := tw.Flush(); err != nil {
+				return err
+			}
+			fmt.Fprintf(out(cmd), "(%d %s)\n", len(page.Entities), kind)
+			if page.HasMore {
+				fmt.Fprintf(out(cmd), "next cursor: %s\n", page.Next)
+			}
+			return nil
+		},
+	}
+	f := cmd.Flags()
+	f.StringVar(&cursor, "cursor", "", "keyset cursor from a prior page's next cursor")
+	f.IntVar(&limit, "limit", 0, "entities per page (0 = default)")
 	return cmd
 }
 
@@ -131,7 +186,7 @@ func newEntityInfoCmd(g *globals) *cobra.Command {
 		Short: "Show an entity's summary (identity, links, counts, libraries)",
 		Long: "Looks up one shared entity by pid and prints its identity, parent links, " +
 			"membership counts, and the libraries its members' files live in.\n\n" +
-			"Entity types: artist, release_group, album, genre, series.",
+			"Entity types: " + entityKindList() + ".",
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			kind := read.EntityKind(args[0])
@@ -244,7 +299,7 @@ func newEntityStarCmd(g *globals) *cobra.Command {
 				return err
 			}
 			pid := model.PID(args[1])
-			if err := m.SetEntityStar(ctx(cmd), uPID, kind, pid, !unstar, asOfNS); err != nil {
+			if _, err := m.SetEntityStar(ctx(cmd), uPID, kind, pid, !unstar, asOfNS); err != nil {
 				return err
 			}
 			verb := "starred"
@@ -297,7 +352,7 @@ func newEntityRateCmd(g *globals) *cobra.Command {
 				return err
 			}
 			pid := model.PID(args[1])
-			if err := m.SetEntityRating(ctx(cmd), uPID, kind, pid, rating, asOfNS); err != nil {
+			if _, err := m.SetEntityRating(ctx(cmd), uPID, kind, pid, rating, asOfNS); err != nil {
 				return err
 			}
 			if rating == nil {
@@ -453,6 +508,24 @@ func toEntityInfoView(info *read.EntityInfo) entityInfoView {
 	}
 }
 
+// entityPageView is the JSON shape for one keyset-paginated entity window.
+type entityPageView struct {
+	Kind       string           `json:"kind"`
+	Entities   []entityInfoView `json:"entities"`
+	NextCursor string           `json:"nextCursor,omitempty"`
+	HasMore    bool             `json:"hasMore"`
+}
+
+func toEntityPageView(p *read.EntityPage) entityPageView {
+	entities := make([]entityInfoView, len(p.Entities))
+	for i, e := range p.Entities {
+		entities[i] = toEntityInfoView(e)
+	}
+	return entityPageView{
+		Kind: string(p.Kind), Entities: entities, NextCursor: string(p.Next), HasMore: p.HasMore,
+	}
+}
+
 // entityCurationView is the JSON shape for an entity_curation row.
 type entityCurationView struct {
 	Field  string `json:"field"`
@@ -467,4 +540,16 @@ func entityCurationViews(rows []model.EntityCuration) []entityCurationView {
 		out[i] = entityCurationView{Field: r.Field, Source: string(r.Source), Locked: r.Locked, Value: r.Value}
 	}
 	return out
+}
+
+// entityKindList renders the entity kinds a lookup accepts, for help text. It reads
+// read.EntityKinds so a new kind reaches the help without a second edit, the same
+// way facet and browse build their vocabulary lists.
+func entityKindList() string {
+	ks := read.EntityKinds()
+	names := make([]string, len(ks))
+	for i, k := range ks {
+		names[i] = string(k)
+	}
+	return strings.Join(names, ", ")
 }

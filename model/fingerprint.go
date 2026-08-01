@@ -56,6 +56,17 @@ type PeaksData struct {
 	EssenceHash string
 }
 
+// ItemPeaks is one backing file's waveform within an item, carrying what a scrubber
+// needs to place it on the item's timeline: which file it belongs to and its part
+// position. A track has exactly one; a multi-file audiobook has one per part, which
+// is why the per-item read exists at all, since the primary-file read answers for
+// a single representative part only.
+type ItemPeaks struct {
+	FilePID  PID
+	Position int
+	Peaks    PeaksData
+}
+
 // AnalysisInput is one analyzed file's full result, written atomically: the
 // fingerprint, optional loudness and peaks, and the combined AnalysisVersion
 // stamped onto the file so the work is not repeated until the essence or an

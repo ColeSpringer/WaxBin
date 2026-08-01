@@ -360,8 +360,13 @@ func (l *Library) Count(ctx context.Context, q query.Query, userPID model.PID) (
 // Facet groups the items matching q by a dimension and counts each bucket. The
 // CLI, OpenSubsonic adapters, and stats code use this same API, so they share
 // one canonical grouping result. userPID scopes any per-user filter in q.
-func (l *Library) Facet(ctx context.Context, q query.Query, g read.GroupBy, userPID model.PID) (*read.FacetResult, error) {
-	return l.store.Facet(ctx, q, g, userPID)
+//
+// order picks the bucket order (empty = collation order) and limit truncates the
+// result (<= 0 = every bucket), which together give a top-N shelf. limit bounds only
+// what is returned: the aggregation still covers the whole match set, so it is not a
+// way to page a facet. Use EntityPage for an index over a large dimension.
+func (l *Library) Facet(ctx context.Context, q query.Query, g read.GroupBy, order read.FacetOrder, limit int, userPID model.PID) (*read.FacetResult, error) {
+	return l.store.Facet(ctx, q, g, order, limit, userPID)
 }
 
 // QueryPage returns one keyset-paginated, collation-correct window of items.
@@ -378,6 +383,12 @@ func (l *Library) QueryPage(ctx context.Context, q query.Query, cursor read.Curs
 // (empty selects the default user). The by-year, by-genre, and random lists use
 // opt.Year, opt.GenrePID, and opt.Seed respectively. Pagination is stable under
 // concurrent mutation.
+//
+// opt.Query scopes any list to the items it matches, through the same filter engine
+// Query and QueryPage use, so a discovery list can be narrowed to a facet bucket, a
+// media type, or a per-user state while keeping its own ordering. The list owns the
+// order, so the query's own sort/limit/offset are ignored. Browse owns the ordering
+// vocabulary, QueryPage owns sort_key ordering, and the two share the filter engine.
 func (l *Library) Browse(ctx context.Context, list read.DiscoveryList, opt read.BrowseOptions) (*read.Page, error) {
 	return l.store.BrowsePage(ctx, list, opt)
 }
@@ -533,6 +544,16 @@ func (l *Library) EntityByPID(ctx context.Context, kind read.EntityKind, pid mod
 // than one internal chunk is not an atomic snapshot across chunks.
 func (l *Library) EntityByPIDs(ctx context.Context, kind read.EntityKind, pids []model.PID) (map[model.PID]*read.EntityInfo, error) {
 	return l.store.EntityByPIDs(ctx, kind, pids)
+}
+
+// EntityPage enumerates one kind's entities in collation order, keyset-paginated:
+// pass an empty cursor for the first page and the returned Next for each subsequent
+// one. It is the alphabetical index over a large dimension that a facet cannot be,
+// since paging a facet would re-run the whole aggregation per page. Each entry is
+// the same summary EntityByPID returns; see read.EntityPage for how its rollup-based
+// counts differ from a facet's bucket counts.
+func (l *Library) EntityPage(ctx context.Context, kind read.EntityKind, cursor read.Cursor, limit int) (*read.EntityPage, error) {
+	return l.store.EntityPage(ctx, kind, cursor, limit)
 }
 
 // Stats returns a library summary using the same Facet grouping as browse plus
@@ -943,9 +964,41 @@ func (l *Library) Loudness(ctx context.Context, itemPID model.PID) (*model.Loudn
 	return l.store.LoudnessByItem(ctx, itemPID)
 }
 
-// Peaks returns an item's stored waveform overview, or CodeNotFound.
+// Peaks returns the stored waveform overview of an item's representative primary
+// backing file, or CodeNotFound.
+//
+// For a multi-file audiobook that is one part out of many, and which part is not
+// reading order: the primary is the first part attached on the create path, or the
+// lowest-positioned survivor after a primary is detached. Neither rule guarantees
+// part one, and the two disagree with each other. Use PeaksForItem for a scrubber
+// over the whole book, or PeaksForFile with a pid from ItemFiles for a chosen part.
 func (l *Library) Peaks(ctx context.Context, itemPID model.PID) (*model.PeaksData, error) {
 	return l.store.LoadPeaks(ctx, itemPID)
+}
+
+// PeaksForFile returns one file's stored waveform overview, or CodeNotFound when it
+// has none or the stored one predates the file's current audio. Every analyzed file
+// has its own waveform, including every part of a multi-file book.
+func (l *Library) PeaksForFile(ctx context.Context, filePID model.PID) (*model.PeaksData, error) {
+	return l.store.LoadPeaksForFile(ctx, filePID)
+}
+
+// PeaksForItem returns every backing file's waveform for an item, in reading order:
+// one entry for a track, one per analyzed part for a multi-file audiobook. It is one
+// call where an ItemFiles plus a PeaksForFile per part would be N+1 round trips.
+// Parts with no current waveform are omitted, so the result can be shorter than
+// ItemFiles; an unknown item pid is CodeNotFound.
+func (l *Library) PeaksForItem(ctx context.Context, itemPID model.PID) ([]model.ItemPeaks, error) {
+	return l.store.LoadPeaksForItem(ctx, itemPID)
+}
+
+// ItemFiles returns every file backing an item in reading order: one row for a track
+// or single-file book, one per part for a multi-file book. Each ref carries the
+// file's pid, path, part position, and edge role, so a consumer can address a
+// specific part (PeaksForFile) and can tell which one the primary-file reads
+// answered for.
+func (l *Library) ItemFiles(ctx context.Context, itemPID model.PID) ([]model.ItemFileRef, error) {
+	return l.store.ItemFiles(ctx, itemPID)
 }
 
 // RefreshAlbumGain recomputes album-aware ReplayGain from the per-file loudness.

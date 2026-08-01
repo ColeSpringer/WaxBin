@@ -27,6 +27,18 @@ const (
 // for every covered episode.
 const itemArtSlotExpr = "CASE WHEN pi.kind='episode' THEN 'episode' ELSE 'track' END"
 
+// The value-side lowering subqueries behind the entity-handle query fields: each
+// resolves one caller-supplied pid to the internal id the item row carries, and is
+// emitted where the value's placeholder would otherwise go (query.Column.ValueSub).
+// Each holds exactly one ?, which binds the pid; the SQL around it is constant, so
+// no caller text ever reaches the statement.
+const (
+	artistIDByPIDSub  = "(SELECT apq.id FROM artist apq WHERE apq.pid = ?)"
+	albumIDByPIDSub   = "(SELECT albq.id FROM album albq WHERE albq.pid = ?)"
+	podcastIDByPIDSub = "(SELECT podq.id FROM podcast podq WHERE podq.pid = ?)"
+	libraryIDByPIDSub = "(SELECT libq.id FROM library libq WHERE libq.pid = ?)"
+)
+
 // itemFields whitelists the logical fields a query over items/tracks may
 // reference, mapping each to a column expression in the items SELECT (aliases:
 // pi=playable_item, t=track, bk=book, srs=series, f=primary file, ps=the current
@@ -62,18 +74,37 @@ const itemArtSlotExpr = "CASE WHEN pi.kind='episode' THEN 'episode' ELSE 'track'
 // the same contract: `last_played notInTheLast <window>` matches NULL ("not played
 // in 30 days" includes never-played), while `inTheLast` never matches NULL.
 //
-// The entity-handle fields (artist_pid, album_artist_pid, album_pid, genre_pid,
-// library) filter by normalized-entity identity instead of display text, so a
-// facet drilldown can query by the bucket's EntityPID. The artist exprs share
-// itemArtistIDExpr/itemAlbumArtistIDExpr with the facet specs, so a facet
-// bucket's EntityPID and a pid filter can never disagree (a book matches by its
-// author, like the artist facet). Each pid field is a correlated scalar subquery
-// resolving by primary-key seek per row; no itemJoins change, so the blast
-// radius stays in this file. album_pid is track-only (NULL for books/episodes)
-// and library is the primary file's library pid (NULL for a fileless item, so
-// `library isMissing` matches undownloaded episodes). genre_pid is a set field
-// over item_genre (tag-field semantics: isNot is a deny-list, ordered operators
-// are rejected).
+// The entity-handle fields filter by normalized-entity identity instead of display
+// text, so a facet drilldown can query by the bucket's EntityPID. There are six, and
+// they split two ways: artist_pid, album_artist_pid, album_pid, podcast_pid, and
+// library are scalar columns lowered on the value side, while genre_pid alone is a
+// set field over item_genre (the last paragraph below says why it stays one).
+//
+// The artist exprs share itemArtistIDExpr/itemAlbumArtistIDExpr with the facet specs,
+// so a facet bucket's EntityPID and a pid filter can never disagree (a book matches by
+// its author, like the artist facet). album_pid is track-only (NULL for books/
+// episodes), podcast_pid is episode-only, and library is the primary file's library
+// pid (NULL for a fileless item, so `library isMissing` matches undownloaded
+// episodes).
+//
+// Value-side lowering (query.Column.ValueSub) means the compiled column is the item
+// row's internal id and the caller's pid is resolved by a subquery on the other side
+// of the comparison. Doing it the other way round, a per-row correlated subquery
+// projecting each item's pid, forced a full scan and one pid lookup per row.
+// Lowering resolves the pid once per query and lets the planner
+// use the id column's index where one exists: podcast_pid seeks episode_podcast,
+// album_pid seeks track_album_id, library reaches file_library. artist_pid and
+// album_artist_pid still scan, because their expression COALESCEs across track and
+// book so no single index covers it; what they gain is N pid lookups collapsing to
+// one, not an indexed seek. Only is/isNot/isPresent/isMissing are accepted on a
+// lowered field, sorting by one is rejected, and isNot against a pid no entity holds
+// matches nothing, because the lowered value is NULL. See Column.ValueSub.
+//
+// genre_pid stays a set field over item_genre (tag-field semantics: isNot is a
+// deny-list, ordered operators are rejected) and is deliberately not converted: its
+// EXISTS correlates on pi.id whatever side the value sits, so lowering would save the
+// per-row genre join but not the scan, and it would need a second lowering mechanism
+// on SetColumn for no plan change.
 //
 // has_art and has_lyrics are presence probes: EXISTS lowered to 0/1, never NULL,
 // so like play_count the presence ops are useless on them; use `is 0` / `is 1`.
@@ -114,12 +145,19 @@ var itemFields = query.FieldMap{
 	"container":     {Expr: "f.container", Kind: query.KindText},
 	"path":          {Expr: "f.display_path", Kind: query.KindText},
 
-	// Entity handles (see the header block): correlated PK-seek scalar subqueries,
-	// except genre_pid, which is a set field over item_genre.
-	"artist_pid":       {Expr: "(SELECT apq.pid FROM artist apq WHERE apq.id = " + itemArtistIDExpr + ")", Kind: query.KindText},
-	"album_artist_pid": {Expr: "(SELECT aapq.pid FROM artist aapq WHERE aapq.id = " + itemAlbumArtistIDExpr + ")", Kind: query.KindText},
-	"album_pid":        {Expr: "(SELECT albq.pid FROM album albq WHERE albq.id = t.album_id)", Kind: query.KindText},
-	"library":          {Expr: "(SELECT libq.pid FROM library libq WHERE libq.id = f.library_id)", Kind: query.KindText},
+	// Entity handles (see the header block): the item's internal id column compared
+	// against a subquery that resolves the caller's pid once, except genre_pid, which
+	// is a set field over item_genre. Kind describes the Expr, which since the lowering
+	// is an integer id column and not the pid text the caller passes. Nothing reads it
+	// today (compileValueSubCond handles every operator these fields accept), but
+	// declaring KindText would leave a live trap: routed back through the generic path,
+	// `library isMissing` would compile the text presence check and test an integer
+	// column against ''.
+	"artist_pid":       {Expr: itemArtistIDExpr, ValueSub: artistIDByPIDSub, Kind: query.KindInt},
+	"album_artist_pid": {Expr: itemAlbumArtistIDExpr, ValueSub: artistIDByPIDSub, Kind: query.KindInt},
+	"album_pid":        {Expr: "t.album_id", ValueSub: albumIDByPIDSub, Kind: query.KindInt},
+	"podcast_pid":      {Expr: "ep.podcast_id", ValueSub: podcastIDByPIDSub, Kind: query.KindInt},
+	"library":          {Expr: "f.library_id", ValueSub: libraryIDByPIDSub, Kind: query.KindInt},
 	"genre_pid": {Set: &query.SetColumn{
 		Sub:       "SELECT 1 FROM item_genre igq JOIN genre gq ON gq.id = igq.genre_id WHERE igq.item_id = pi.id",
 		ValueExpr: "gq.pid",

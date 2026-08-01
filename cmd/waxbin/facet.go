@@ -18,18 +18,28 @@ func newFacetCmd(g *globals) *cobra.Command {
 		year                              int
 		rulePath                          string
 		user                              string
+		order                             string
+		limit                             int
 	)
 	cmd := &cobra.Command{
 		Use:   "facet --group-by DIM",
 		Short: "Group items by a dimension and count each bucket",
 		Long: "Groups the items matching the filters (or a --rule document) by one " +
 			"dimension and returns each bucket's count. Dimensions: " + groupByList() + ", " +
-			"or tag.<KEY> to group by a custom tag's values (use `tag keys` to discover them).",
+			"or tag.<KEY> to group by a custom tag's values (use `tag keys` to discover them). " +
+			"--order count --limit N is a top-N shelf; note that --limit bounds only what is " +
+			"printed, since a facet always aggregates the whole match set. For an alphabetical " +
+			"index over a large dimension use `entity list` instead.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			gb := read.GroupBy(groupBy)
 			if !gb.Valid() {
 				return waxerr.New(waxerr.CodeInvalid, "facet",
 					fmt.Sprintf("unknown --group-by %q; valid: %s or tag.<KEY>", groupBy, groupByList()))
+			}
+			ord := read.FacetOrder(order)
+			if !ord.Valid() {
+				return waxerr.New(waxerr.CodeInvalid, "facet",
+					fmt.Sprintf("unknown --order %q; valid: label|count", order))
 			}
 			q, err := buildQuery(cmd, rulePath, queryFlags{
 				title: title, artist: artist, album: album, genre: genre, kind: kind, year: year,
@@ -44,7 +54,7 @@ func newFacetCmd(g *globals) *cobra.Command {
 			}
 			defer lib.Close()
 
-			res, err := lib.Facet(ctx(cmd), q, gb, model.PID(user))
+			res, err := lib.Facet(ctx(cmd), q, gb, ord, limit, model.PID(user))
 			if err != nil {
 				return err
 			}
@@ -74,6 +84,8 @@ func newFacetCmd(g *globals) *cobra.Command {
 	f.IntVar(&year, "year", 0, "match year (exact)")
 	f.StringVar(&rulePath, "rule", "", "load a JSON rule document (overrides filter flags)")
 	f.StringVar(&user, "user", "", "user pid for per-user fields (e.g. rating, starred, play_count); empty = default user")
+	f.StringVar(&order, "order", "", "bucket order: label (collation, the default) or count (biggest first)")
+	f.IntVar(&limit, "limit", 0, "return at most N buckets (0 = all)")
 	_ = cmd.MarkFlagRequired("group-by")
 	return cmd
 }

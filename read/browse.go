@@ -1,6 +1,9 @@
 package read
 
-import "github.com/colespringer/waxbin/model"
+import (
+	"github.com/colespringer/waxbin/model"
+	"github.com/colespringer/waxbin/query"
+)
 
 // DiscoveryList is one of the enumerated browse lists. The vocabulary is fixed
 // and individually tested so every consumer (CLI browse, WaxDeck home rows) asks
@@ -32,8 +35,13 @@ func (d DiscoveryList) Valid() bool {
 	}
 }
 
-// PerUser reports whether d reads per-user play_state (so BrowseOptions.UserPID
-// selects whose state to read).
+// PerUser reports whether the list itself is derived from per-user play_state, so
+// BrowseOptions.UserPID selects whose state defines its membership and order.
+//
+// It is not a complete answer to "does this browse need a user". Any list can now
+// read play_state through BrowseOptions.Query (`starred is 1` on an alphabetical
+// browse, say), and that filter is evaluated against the same UserPID. Decide
+// whether to pass a user from the options you are about to send, not from this alone.
 func (d DiscoveryList) PerUser() bool {
 	switch d {
 	case ListMostPlayed, ListRecentlyPlayed, ListStarred:
@@ -54,11 +62,35 @@ func DiscoveryLists() []DiscoveryList {
 // BrowseOptions parameterizes a discovery-list browse. The zero value is valid
 // for the catalog-structural lists; the per-list fields are consulted only by the
 // lists that need them.
+//
+// A cursor is valid only for the identical (list, options) it was issued under. It
+// was already sensitive to Seed and Year; Query is one more dimension of that same
+// pre-existing contract. Reusing a cursor across a changed query yields a
+// coherent-looking wrong window with no error.
 type BrowseOptions struct {
-	UserPID  model.PID // play-derived lists; empty selects the default user
+	UserPID  model.PID // play-derived lists and per-user Query fields; empty selects the default user
 	Year     int       // ListByYear (required)
 	GenrePID model.PID // ListByGenre (required)
 	Seed     int64     // ListRandom: consumer-supplied seed for a stable shuffle
 	Cursor   Cursor    // keyset cursor from a prior page; empty starts at the head
 	Limit    int       // page size (0 uses the store default)
+	// Query narrows the list to the items it matches, compiled by the same engine
+	// QueryPage uses, so a discovery list can be scoped to a facet bucket, a media
+	// type, or any whitelisted field. The zero Query means no filter. Its
+	// sort/limit/offset/limit-mode are ignored, exactly as QueryPage ignores them:
+	// the list owns the order. A per-user field reads UserPID's state, the same user
+	// the play-derived lists read.
+	//
+	// A non-zero Query must name an Entity; a Where with an empty Entity is
+	// CodeInvalid rather than defaulting to items, because the entity is what selects
+	// the field whitelist. Entity also scopes the kind, so query.EntityTracks
+	// excludes books and episodes.
+	//
+	// The division of labour it creates, so the two surfaces do not drift: Browse
+	// owns the ordering vocabulary, QueryPage owns sort_key ordering, and they share
+	// one filter engine. by-year and by-genre stay as named lists for vocabulary
+	// stability even though a query expresses both, and by-genre keeps resolving its
+	// pid up front so an unknown genre is CodeNotFound where a genre_pid filter would
+	// silently return an empty page.
+	Query query.Query
 }

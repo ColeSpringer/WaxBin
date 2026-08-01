@@ -150,7 +150,7 @@ func TestEntityByPIDMatchesFacet(t *testing.T) {
 	st, _ := entityInfoFixture(t)
 	ctx := context.Background()
 
-	res, err := st.Facet(ctx, query.New(query.EntityItems).Build(), read.GroupArtist, "")
+	res, err := st.Facet(ctx, query.New(query.EntityItems).Build(), read.GroupArtist, "", 0, "")
 	if err != nil {
 		t.Fatalf("facet: %v", err)
 	}
@@ -285,5 +285,116 @@ func TestEntityByPIDUnknown(t *testing.T) {
 	}
 	if _, err := st.EntityByPID(ctx, read.EntityArtist, "missing"); !waxerr.Is(err, waxerr.CodeNotFound) {
 		t.Errorf("unknown pid = %v, want CodeNotFound", err)
+	}
+}
+
+// drainEntityPages walks every page of one kind at a given page size and returns the
+// entities in the order they came back, asserting each page respects the limit and
+// that HasMore and Next agree. It is the entity twin of drainBrowse.
+func drainEntityPages(t *testing.T, st *Store, kind read.EntityKind, limit int) []*read.EntityInfo {
+	t.Helper()
+	ctx := context.Background()
+	var out []*read.EntityInfo
+	var cursor read.Cursor
+	for pages := 0; ; pages++ {
+		if pages > 100 {
+			t.Fatalf("%s pagination did not terminate at limit %d", kind, limit)
+		}
+		page, err := st.EntityPage(ctx, kind, cursor, limit)
+		if err != nil {
+			t.Fatalf("%s page: %v", kind, err)
+		}
+		if limit > 0 && len(page.Entities) > limit {
+			t.Fatalf("%s page returned %d entities, over the limit %d", kind, len(page.Entities), limit)
+		}
+		if page.HasMore != (page.Next != "") {
+			t.Fatalf("%s page HasMore=%v but Next=%q", kind, page.HasMore, page.Next)
+		}
+		out = append(out, page.Entities...)
+		if !page.HasMore {
+			return out
+		}
+		cursor = page.Next
+	}
+}
+
+// TestEntityPageCoversAllOnce drains every kind at several page sizes and checks the
+// three things keyset pagination has to get right: every entity appears exactly once,
+// the sequence is (sort_key, pid) order, and each row is field-for-field what
+// EntityByPIDs hydrates for the same pid. The last is what makes a page row and a
+// looked-up row the same thing by construction rather than by coincidence.
+func TestEntityPageCoversAllOnce(t *testing.T) {
+	st, _ := entityInfoFixture(t)
+	ctx := context.Background()
+
+	for _, kind := range read.EntityKinds() {
+		want := allEntityPIDs(t, st, kind)
+		hydrated, err := st.EntityByPIDs(ctx, kind, want)
+		if err != nil {
+			t.Fatalf("%s hydrate: %v", kind, err)
+		}
+		for _, limit := range []int{1, 2, 0} {
+			got := drainEntityPages(t, st, kind, limit)
+			if len(got) != len(want) {
+				t.Fatalf("%s at limit %d returned %d entities, want %d", kind, limit, len(got), len(want))
+			}
+			seen := make(map[model.PID]bool, len(got))
+			for i, e := range got {
+				if seen[e.PID] {
+					t.Errorf("%s at limit %d repeated %s", kind, limit, e.PID)
+				}
+				seen[e.PID] = true
+				if i > 0 {
+					prev := got[i-1]
+					if prev.SortKey > e.SortKey || (prev.SortKey == e.SortKey && prev.PID >= e.PID) {
+						t.Errorf("%s at limit %d out of order: (%q,%s) then (%q,%s)",
+							kind, limit, prev.SortKey, prev.PID, e.SortKey, e.PID)
+					}
+				}
+				if !reflect.DeepEqual(e, hydrated[e.PID]) {
+					t.Errorf("%s %s page row != hydrated row:\npage %+v\nhydr %+v", kind, e.PID, e, hydrated[e.PID])
+				}
+			}
+		}
+	}
+}
+
+// TestEntityPageSharedSortKey pins the pid tiebreak. sort_key carries only a
+// non-unique index (match_key is the UNIQUE one), so two entities can collide there:
+// "The Wall" and "Wall" both generate the sort key "wall". Without pid in the keyset
+// comparison a page boundary landing between them would drop one or repeat both.
+func TestEntityPageSharedSortKey(t *testing.T) {
+	st, lib := entityFixture(t)
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/1.flac", essence: "e1", content: "c1",
+		title: "A", artist: "X", album: "The Wall"})
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/2.flac", essence: "e2", content: "c2",
+		title: "B", artist: "Y", album: "Wall"})
+
+	albums := allEntityPIDs(t, st, read.EntityAlbum)
+	if len(albums) != 2 {
+		t.Fatalf("fixture albums = %d, want 2", len(albums))
+	}
+	keys := map[string]bool{}
+	for _, e := range drainEntityPages(t, st, read.EntityAlbum, 0) {
+		keys[e.SortKey] = true
+	}
+	if len(keys) != 1 {
+		t.Fatalf("albums do not share a sort key (%v); the tiebreak is not being exercised", keys)
+	}
+	// One entity per page is the boundary that lands between the colliding pair.
+	got := drainEntityPages(t, st, read.EntityAlbum, 1)
+	if len(got) != 2 || got[0].PID == got[1].PID {
+		t.Fatalf("paging a shared sort key returned %d entities (%+v), want both exactly once", len(got), got)
+	}
+}
+
+func TestEntityPageBadInput(t *testing.T) {
+	st, _ := entityInfoFixture(t)
+	ctx := context.Background()
+	if _, err := st.EntityPage(ctx, "podcast", "", 0); !waxerr.Is(err, waxerr.CodeInvalid) {
+		t.Errorf("unknown kind = %v, want CodeInvalid", err)
+	}
+	if _, err := st.EntityPage(ctx, read.EntityArtist, "not-a-cursor!!", 0); !waxerr.Is(err, waxerr.CodeInvalid) {
+		t.Errorf("malformed cursor = %v, want CodeInvalid", err)
 	}
 }

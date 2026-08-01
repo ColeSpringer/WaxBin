@@ -21,7 +21,7 @@ func TestFacetByTagValue(t *testing.T) {
 	// C: no MOOD, so an untagged item is excluded from the value dimension (INNER JOIN).
 	putTrackCustom(t, st, lib.ID, "/lib/c.flac", "ec", "cc", "C", nil, true)
 
-	res, err := st.Facet(ctx, query.New(query.EntityItems).Build(), read.GroupBy("tag.MOOD"), "")
+	res, err := st.Facet(ctx, query.New(query.EntityItems).Build(), read.GroupBy("tag.MOOD"), "", 0, "")
 	if err != nil {
 		t.Fatalf("facet: %v", err)
 	}
@@ -58,12 +58,12 @@ func TestFacetByTagWithUserFilter(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create user: %v", err)
 	}
-	if err := st.SetStar(ctx, bob.PID, a.ItemPID, true, nil); err != nil {
+	if _, err := st.SetStar(ctx, bob.PID, a.ItemPID, true, nil); err != nil {
 		t.Fatalf("star: %v", err)
 	}
 
 	q := query.New(query.EntityItems).Where("starred", query.OpIs, 1).Build()
-	res, err := st.Facet(ctx, q, read.GroupBy("tag.MOOD"), bob.PID)
+	res, err := st.Facet(ctx, q, read.GroupBy("tag.MOOD"), "", 0, bob.PID)
 	if err != nil {
 		t.Fatalf("facet: %v", err)
 	}

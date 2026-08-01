@@ -71,6 +71,7 @@ func TestEntityPIDFieldsMirrorFacets(t *testing.T) {
 		title: "Three", artist: "Orbital", albumArt: "Orbital", album: "Insides", genre: "Electronic"})
 	putBook(t, st, lib.ID, bookSpec{path: "/lib/earthsea.m4b", essence: "be1", content: "bc1",
 		title: "A Wizard of Earthsea", author: "Ursula K. Le Guin", genres: []string{"Fantasy"}})
+	putFeed(t, st, "http://cast.example/f", "Ep1", "Ep2")
 
 	// The mirror guarantee: for every entity-keyed facet bucket, filtering by the
 	// matching pid field returns exactly the bucket's count. The facet specs and
@@ -84,8 +85,9 @@ func TestEntityPIDFieldsMirrorFacets(t *testing.T) {
 		{read.GroupAlbumArtist, "album_artist_pid"},
 		{read.GroupAlbum, "album_pid"},
 		{read.GroupGenre, "genre_pid"},
+		{read.GroupPodcast, "podcast_pid"},
 	} {
-		res, err := st.Facet(ctx, query.New(query.EntityItems).Build(), mirror.group, "")
+		res, err := st.Facet(ctx, query.New(query.EntityItems).Build(), mirror.group, "", 0, "")
 		if err != nil {
 			t.Fatalf("facet %s: %v", mirror.group, err)
 		}
@@ -118,9 +120,185 @@ func TestEntityPIDFieldsMirrorFacets(t *testing.T) {
 	if n := countWhere(t, st, "album_pid", query.OpIs, albumPID); n != 2 {
 		t.Errorf("album_pid filter = %d, want 2", n)
 	}
-	// The book and nothing else lacks an album here (books never carry album_pid).
-	if n := countWhere(t, st, "album_pid", query.OpIsMissing, nil); n != 1 {
-		t.Errorf("album_pid isMissing = %d, want 1 (the book)", n)
+	// Albums are track-only, so the book and both episodes read NULL there.
+	if n := countWhere(t, st, "album_pid", query.OpIsMissing, nil); n != 3 {
+		t.Errorf("album_pid isMissing = %d, want 3 (the book and two episodes)", n)
+	}
+}
+
+// TestPodcastPIDField pins the field WaxDeck asked for: the unplayed count of one
+// show is a single CountItems bounded by that show, not a walk over its episodes in
+// Go. isMissing is the complement over the whole catalog (every non-episode carries a
+// NULL podcast_id), which is what makes the field usable as a kind discriminator too.
+func TestPodcastPIDField(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/1.flac", essence: "e1", content: "c1", title: "A", artist: "X", album: "Al"})
+	one := putFeed(t, st, "http://cast.example/one", "Ep1", "Ep2", "Ep3")
+	putFeed(t, st, "http://cast.example/two", "Other")
+
+	if n := countWhere(t, st, "podcast_pid", query.OpIs, string(one.PodcastPID)); n != 3 {
+		t.Errorf("podcast_pid is show one = %d, want 3", n)
+	}
+	// Every non-episode reads NULL, so isMissing is the whole rest of the catalog.
+	if n := countWhere(t, st, "podcast_pid", query.OpIsMissing, nil); n != 1 {
+		t.Errorf("podcast_pid isMissing = %d, want 1 (the track)", n)
+	}
+	if n := countWhere(t, st, "podcast_pid", query.OpIsPresent, nil); n != 4 {
+		t.Errorf("podcast_pid isPresent = %d, want 4 (every episode)", n)
+	}
+
+	// The target shape: how many of this show's episodes are unplayed. Playing one
+	// must move the count by exactly one.
+	unplayed := func() int {
+		t.Helper()
+		n, err := st.CountItems(ctx, query.New(query.EntityItems).
+			Where("kind", query.OpIs, "episode").
+			Where("podcast_pid", query.OpIs, string(one.PodcastPID)).
+			Where("played", query.OpIs, 0).Build(), "")
+		if err != nil {
+			t.Fatalf("unplayed count: %v", err)
+		}
+		return n
+	}
+	if n := unplayed(); n != 3 {
+		t.Fatalf("unplayed episodes of show one = %d, want 3", n)
+	}
+	eps, err := st.EpisodesByPodcast(ctx, one.PodcastPID, 0)
+	if err != nil || len(eps) != 3 {
+		t.Fatalf("episodes = %v (err %v), want 3", eps, err)
+	}
+	if err := st.MarkPlayed(ctx, "", eps[0].PID, true); err != nil {
+		t.Fatalf("mark played: %v", err)
+	}
+	if n := unplayed(); n != 2 {
+		t.Errorf("unplayed after one play = %d, want 2", n)
+	}
+}
+
+// TestLoweredIdentityFieldPlans pins the plans the value-side lowering exists to
+// produce, which is the whole point of the change: the pid is resolved once per
+// query by a plain SCALAR SUBQUERY rather than a CORRELATED one evaluated per row,
+// and the three fields whose id column is indexed drive the comparison off that
+// index instead of scanning. The correlated-subquery assertion is the important
+// one, since it catches a regression back to per-row lowering on all five fields
+// at once.
+func TestLoweredIdentityFieldPlans(t *testing.T) {
+	st, lib := entityFixture(t)
+	// Real rows in every table the lowered fields touch, so the planner is choosing
+	// over a populated schema rather than over empty tables. Nothing here runs ANALYZE,
+	// which matches production: WaxBin never collects statistics, so these are the
+	// plans a real catalog gets for an equality on an indexed column.
+	for i, artist := range []string{"Radiohead", "Orbital", "Aphex Twin"} {
+		n := string(rune('a' + i))
+		putTrack(t, st, lib.ID, trackSpec{path: "/lib/" + n + ".flac", essence: "e" + n, content: "c" + n,
+			title: "T" + n, artist: artist, album: "Al" + n, genre: "Rock"})
+	}
+	putBook(t, st, lib.ID, bookSpec{path: "/lib/b.m4b", essence: "eb", content: "cb",
+		title: "Tome", author: "Auth", asin: "BX"})
+	putFeed(t, st, "http://cast.example/f", "Ep1", "Ep2")
+
+	fm, ok := fieldMapFor(query.EntityItems)
+	if !ok {
+		t.Fatal("no field map for items")
+	}
+	for _, tc := range []struct {
+		field string
+		seek  string // an index seek the plan must contain ("" = the expr is not indexable)
+	}{
+		{"podcast_pid", "SEARCH ep USING COVERING INDEX episode_podcast"},
+		{"album_pid", "SEARCH t USING COVERING INDEX track_album_id"},
+		{"library", "SEARCH f USING COVERING INDEX file_library"},
+		// artist_pid and album_artist_pid COALESCE across track and book, so no single
+		// index covers the expression and the scan stays. What lowering buys them is
+		// one pid lookup per query instead of one per row.
+		{"artist_pid", ""},
+		{"album_artist_pid", ""},
+	} {
+		c, err := query.Compile(query.New(query.EntityItems).
+			Where(tc.field, query.OpIs, "some-pid").Build(), fm)
+		if err != nil {
+			t.Fatalf("%s compile: %v", tc.field, err)
+		}
+		plan := explainPlan(t, st, "SELECT COUNT(*)"+itemJoins+" WHERE "+c.Where, c.Args...)
+		if strings.Contains(plan, "CORRELATED") {
+			t.Errorf("%s plans a correlated subquery (lowering regressed to per-row):\n%s", tc.field, plan)
+		}
+		if !strings.Contains(plan, "SCALAR SUBQUERY") {
+			t.Errorf("%s does not lower the pid to a subquery:\n%s", tc.field, plan)
+		}
+		if tc.seek != "" && !strings.Contains(plan, tc.seek) {
+			t.Errorf("%s does not seek its index (want %q):\n%s", tc.field, tc.seek, plan)
+		}
+	}
+}
+
+// explainPlan returns the EXPLAIN QUERY PLAN detail lines for a statement, joined by
+// newlines, for the plan assertions above.
+func explainPlan(t *testing.T, st *Store, stmt string, args ...any) string {
+	t.Helper()
+	rows, err := st.read.QueryContext(context.Background(), "EXPLAIN QUERY PLAN "+stmt, args...)
+	if err != nil {
+		t.Fatalf("explain: %v", err)
+	}
+	defer rows.Close()
+	var details []string
+	for rows.Next() {
+		var id, parent, notused int
+		var detail string
+		if err := rows.Scan(&id, &parent, &notused, &detail); err != nil {
+			t.Fatalf("scan plan row: %v", err)
+		}
+		details = append(details, detail)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("plan rows: %v", err)
+	}
+	return strings.Join(details, "\n")
+}
+
+// TestLoweredIdentityFieldOperators pins the narrowed operator set on a value-lowered
+// field. Everything but is/isNot/isPresent/isMissing is rejected, because the column
+// is an internal id: an ordered or LIKE comparison against it is not a question an
+// identity handle answers. Sorting by one is rejected for the same reason, mirroring
+// the tag-field restriction.
+func TestLoweredIdentityFieldOperators(t *testing.T) {
+	st, _ := entityFixture(t)
+	ctx := context.Background()
+	for _, op := range []query.Op{query.OpGt, query.OpLt, query.OpGte, query.OpLte,
+		query.OpContains, query.OpStartsWith, query.OpEndsWith} {
+		_, err := st.QueryItems(ctx, query.New(query.EntityItems).
+			Where("artist_pid", op, "some-pid").Build(), "")
+		if !waxerr.Is(err, waxerr.CodeInvalid) {
+			t.Errorf("artist_pid %s: want CodeInvalid, got %v", op, err)
+		}
+	}
+	_, err := st.QueryItems(ctx, query.New(query.EntityItems).
+		OrderBy("album_pid", false).Build(), "")
+	if !waxerr.Is(err, waxerr.CodeInvalid) {
+		t.Errorf("sort by album_pid: want CodeInvalid, got %v", err)
+	}
+}
+
+// TestLoweredIdentityIsNotUnknownPID pins the one semantic the lowering changes. The
+// value lowers to NULL when no entity holds the pid, and `x <> NULL` is NULL, so
+// isNot against an unknown pid now matches nothing where the unlowered text compare
+// matched everything. `is` matched nothing before and still does.
+func TestLoweredIdentityIsNotUnknownPID(t *testing.T) {
+	st, lib := entityFixture(t)
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/1.flac", essence: "e1", content: "c1", title: "A", artist: "X", album: "Al"})
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/2.flac", essence: "e2", content: "c2", title: "B", artist: "Y", album: "Al2"})
+
+	if n := countWhere(t, st, "artist_pid", query.OpIsNot, "no-such-artist-pid"); n != 0 {
+		t.Errorf("artist_pid isNot an unknown pid = %d, want 0 (the lowered value is NULL)", n)
+	}
+	if n := countWhere(t, st, "artist_pid", query.OpIs, "no-such-artist-pid"); n != 0 {
+		t.Errorf("artist_pid is an unknown pid = %d, want 0", n)
+	}
+	// Against a real pid, isNot is still the complement among items that have one.
+	xPID := scalarStr(t, st, "SELECT pid FROM artist WHERE name = ?", "X")
+	if n := countWhere(t, st, "artist_pid", query.OpIsNot, xPID); n != 1 {
+		t.Errorf("artist_pid isNot X = %d, want 1", n)
 	}
 }
 
@@ -182,7 +360,7 @@ func TestLibraryFieldAndFacet(t *testing.T) {
 		t.Errorf("library isMissing = %d, want 1 (the remote episode)", n)
 	}
 
-	res, err := st.Facet(ctx, query.New(query.EntityItems).Build(), read.GroupLibrary, "")
+	res, err := st.Facet(ctx, query.New(query.EntityItems).Build(), read.GroupLibrary, "", 0, "")
 	if err != nil {
 		t.Fatalf("facet library: %v", err)
 	}

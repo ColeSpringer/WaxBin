@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/colespringer/waxbin/model"
+	"github.com/colespringer/waxbin/query"
 	"github.com/colespringer/waxbin/read"
 	"github.com/colespringer/waxbin/waxerr"
 )
@@ -27,6 +28,10 @@ type browseSpec struct {
 	orderExpr string
 	orderInt  bool
 	desc      bool
+	// userID is the resolved play_state user, set only by the play-derived specs
+	// (which have to resolve it to build their join). A filtered browse reuses it
+	// instead of resolving the same pid a second time for the query's user join.
+	userID *int64
 }
 
 // BrowsePage returns one keyset-paginated window of a named discovery list. The
@@ -34,12 +39,22 @@ type browseSpec struct {
 // play_state for opt.UserPID (empty selects the default user). Pagination is
 // stable under concurrent mutation because each page resumes strictly after the
 // cursor's (order value, pid) rather than skipping a fixed offset.
+//
+// opt.Query narrows the list through the shared query engine (see
+// read.BrowseOptions.Query). Only a filtered browse validates opt.UserPID: an
+// unfiltered one ignores the field entirely, so a bogus pid stays ignored there
+// rather than newly erroring, while a filtered one validates it like Facet and
+// QueryPage do.
 func (s *Store) BrowsePage(ctx context.Context, list read.DiscoveryList, opt read.BrowseOptions) (*read.Page, error) {
 	const op = "store.BrowsePage"
 	if !list.Valid() {
 		return nil, waxerr.New(waxerr.CodeInvalid, op, "unknown discovery list: "+string(list))
 	}
 	spec, err := s.browseSpecFor(ctx, list, opt)
+	if err != nil {
+		return nil, err
+	}
+	userJoin, leadArgs, compiled, err := s.browseFilter(ctx, opt, spec.userID, op)
 	if err != nil {
 		return nil, err
 	}
@@ -53,11 +68,22 @@ func (s *Store) BrowsePage(ctx context.Context, list read.DiscoveryList, opt rea
 		cmp, dir = "<", "DESC"
 	}
 
-	// Arg order must match clause order in the statement: join, then filter, then
-	// the keyset comparison.
-	args := append([]any(nil), spec.joinArgs...)
-	where := spec.where
+	// Arg order must match clause order in the statement: the user join's ON clause
+	// (leadArgs), then the list's own join, then the filter, then the keyset. One
+	// hazard this ordering does not make obvious: spec.orderExpr is emitted in the
+	// SELECT list before every join, so a spec that ever bound a placeholder there
+	// would lead all of these, leadArgs included. Today only random varies and it
+	// inlines its seed.
+	//
+	// The capacity covers every segment plus the trailing three: a keyset cursor's two
+	// binds and the limit. Sized up front like Facet's, which assembles the same
+	// four-segment shape.
+	args := make([]any, 0, len(leadArgs)+len(spec.joinArgs)+len(spec.whereArgs)+len(compiled.args)+3)
+	args = append(args, leadArgs...)
+	args = append(args, spec.joinArgs...)
+	where := andWhere(andWhere(spec.where, compiled.where), compiled.entityWhere)
 	args = append(args, spec.whereArgs...)
+	args = append(args, compiled.args...)
 	if opt.Cursor != "" {
 		ord, pid, ok := opt.Cursor.Decode()
 		if !ok {
@@ -86,6 +112,7 @@ func (s *Store) BrowsePage(ctx context.Context, list read.DiscoveryList, opt rea
 	sb.WriteString(" AS ord, ")
 	sb.WriteString(itemViewCols)
 	sb.WriteString(itemJoins)
+	sb.WriteString(userJoin)
 	sb.WriteString(spec.join)
 	if where != "" {
 		sb.WriteString(" WHERE ")
@@ -122,6 +149,76 @@ func (s *Store) BrowsePage(ctx context.Context, list read.DiscoveryList, opt rea
 		page.Next = read.EncodeCursor(ords[limit-1], page.Items[limit-1].PID)
 	}
 	return page, nil
+}
+
+// browseCompiled is the spliceable form of opt.Query: the compiled WHERE and its
+// args, plus the entity's kind predicate kept separate so it ANDs on last. All three
+// are empty for an unfiltered browse.
+type browseCompiled struct {
+	where       string
+	entityWhere string
+	args        []any
+}
+
+// browseFilter compiles opt.Query into the user join, its leading args, and the
+// spliceable WHERE. A query with neither an entity nor a where clause contributes
+// nothing and short-circuits to empty values, so an unfiltered browse's statement
+// stays byte-identical to what it was before filters existed.
+//
+// Sorts are the one field that neither triggers compilation nor blocks the
+// short-circuit. This path ignores them whether or not an entity is named (the list
+// owns the order), so a caller reusing a smart-playlist rule doc that carries sorts
+// gets the same answer either way rather than an error naming a field it never set.
+//
+// A where clause with no entity is rejected rather than defaulting to items.
+// fieldMapFor's fail-closed default is the injection barrier, and giving the zero
+// entity a second meaning would silently accept a caller who meant EntityFiles. The
+// error mirrors "by-year browse requires a year" and keeps BrowseOptions' promise
+// that its zero value is valid.
+//
+// Only the query's Entity and Where are compiled. query.Compile validates the limit
+// mode before anything else, so passing the whole thing through would reject a
+// caller reusing a smart-playlist query with LimitMode random over fields this path
+// deliberately ignores.
+//
+// specUserID, when non-nil, is the play_state user a play-derived spec already
+// resolved; reusing it keeps a filtered play browse to one user lookup per page.
+// Otherwise the user resolves through userStateJoin, which is called only on the
+// filtered path: it validates a non-empty userPID even when the query needs no join,
+// so calling it unconditionally would make Browse(alphabetical, {UserPID: "bogus"})
+// start erroring where the field is ignored today.
+func (s *Store) browseFilter(ctx context.Context, opt read.BrowseOptions, specUserID *int64, op string) (userJoin string, leadArgs []any, out browseCompiled, err error) {
+	q := opt.Query
+	if q.Entity == "" && q.Where == nil {
+		return "", nil, browseCompiled{}, nil
+	}
+	if q.Entity == "" {
+		return "", nil, browseCompiled{}, waxerr.New(waxerr.CodeInvalid, op, "browse query requires an entity")
+	}
+	fm, ok := fieldMapFor(q.Entity)
+	if !ok {
+		return "", nil, browseCompiled{}, waxerr.New(waxerr.CodeInvalid, op, "unsupported query entity: "+string(q.Entity))
+	}
+	c, err := query.Compile(query.Query{Entity: q.Entity, Where: q.Where}, fm)
+	if err != nil {
+		return "", nil, browseCompiled{}, err
+	}
+	switch {
+	case specUserID == nil:
+		if userJoin, leadArgs, err = s.userStateJoin(ctx, c, opt.UserPID, op); err != nil {
+			return "", nil, browseCompiled{}, err
+		}
+	case c.NeedsUser:
+		// The spec resolved this pid (and so already rejected an unknown user), so the
+		// join is built directly rather than resolving it again.
+		userJoin, leadArgs = userStateJoinClause, []any{*specUserID}
+	}
+	// entityPredicate is what narrows the browse to the entity's kind. Without it an
+	// EntityTracks query passes fieldMapFor but never reaches pi.kind='track', so the
+	// page would carry books and episodes with null track columns.
+	return userJoin, leadArgs, browseCompiled{
+		where: c.Where, entityWhere: entityPredicate(q.Entity), args: c.Args,
+	}, nil
 }
 
 // browseSpecFor builds the SQL recipe for a discovery list, resolving the per-list
@@ -167,6 +264,15 @@ func (s *Store) browseSpecFor(ctx context.Context, list read.DiscoveryList, opt 
 
 // playBrowseSpec builds the recipe for a per-user play-derived list: an inner join
 // to the user's play_state plus the list's NULL-excluding filter and order column.
+//
+// A play-derived list filtered by a per-user field joins play_state twice, as bps
+// here and as ps through userStateJoin, and that is correct rather than redundant.
+// This join is an inner join because it defines the list's membership: most-played is
+// the items that have a play_state row. The filter's join has to be a left join,
+// because itemFields coalesces a missing row to 0, which is what makes `played is 0`
+// mean "unplayed". Collapsing them into one join would quietly give every filter
+// inner semantics and drop every never-played item. The cost is one extra
+// primary-key seek per candidate row; the user id is resolved once and shared.
 func (s *Store) playBrowseSpec(ctx context.Context, list read.DiscoveryList, userPID model.PID, op string) (browseSpec, error) {
 	userID, err := userIDByPID(ctx, s.read, userPID, op)
 	if err != nil {
@@ -177,6 +283,7 @@ func (s *Store) playBrowseSpec(ctx context.Context, list read.DiscoveryList, use
 		joinArgs: []any{userID},
 		orderInt: true,
 		desc:     true,
+		userID:   &userID,
 	}
 	switch list {
 	case read.ListMostPlayed:

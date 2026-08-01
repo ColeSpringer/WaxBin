@@ -20,14 +20,20 @@ import (
 // last-writer-wins, so a replayed offline toggle cannot undo a later out-of-band change,
 // exactly as item SetStar does. A value-identical call is a silent no-op that preserves
 // the stored star time.
-func (l *Library) SetEntityStar(ctx context.Context, userPID model.PID, kind model.MergeEntity, entityPID model.PID, starred bool, asOf *int64) error {
+//
+// It reports whether the write changed anything; false means no change-feed delta was
+// appended (a re-star, an unstar of an unstarred entity, or a stale replay). A consumer
+// re-importing a whole starred set uses it to tell the flips apart from the rows that
+// were already correct.
+func (l *Library) SetEntityStar(ctx context.Context, userPID model.PID, kind model.MergeEntity, entityPID model.PID, starred bool, asOf *int64) (bool, error) {
 	return l.store.SetEntityStar(ctx, userPID, kind, entityPID, starred, asOf)
 }
 
 // SetEntityRating sets (0..100) or clears (rating nil) a user's rating for a catalog
 // entity. asOf carries the recorded change time and enforces recorded-time
-// last-writer-wins; see SetEntityStar.
-func (l *Library) SetEntityRating(ctx context.Context, userPID model.PID, kind model.MergeEntity, entityPID model.PID, rating *int, asOf *int64) error {
+// last-writer-wins; see SetEntityStar. It reports whether the write changed anything,
+// with the same meaning.
+func (l *Library) SetEntityRating(ctx context.Context, userPID model.PID, kind model.MergeEntity, entityPID model.PID, rating *int, asOf *int64) (bool, error) {
 	return l.store.SetEntityRating(ctx, userPID, kind, entityPID, rating, asOf)
 }
 

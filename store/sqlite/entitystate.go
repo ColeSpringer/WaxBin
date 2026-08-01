@@ -37,12 +37,17 @@ import (
 // carries the entity pid but not its kind; entity pids are globally unique, so a consumer
 // can still resolve the target (and to read the state back it holds the kind already, or
 // resolves the pid, then calls EntityPlayState).
-func (s *Store) entityPlayStateWrite(ctx context.Context, op string, userPID model.PID, kind model.MergeEntity, entityPID model.PID, mut func(context.Context, *sql.Tx, int64, int64, int64) (bool, error)) error {
+//
+// Like playStateWrite it returns the mutation's changed bool, so the entity star and
+// rating writes can report a no-op the same way their item twins do; a failed write
+// returns false with the error.
+func (s *Store) entityPlayStateWrite(ctx context.Context, op string, userPID model.PID, kind model.MergeEntity, entityPID model.PID, mut func(context.Context, *sql.Tx, int64, int64, int64) (bool, error)) (bool, error) {
 	if !kind.Valid() {
-		return waxerr.New(waxerr.CodeInvalid, op, "unknown entity type: "+string(kind))
+		return false, waxerr.New(waxerr.CodeInvalid, op, "unknown entity type: "+string(kind))
 	}
 	table := string(kind)
-	return s.writeTx(ctx, func(tx *sql.Tx) error {
+	var changed bool
+	err := s.writeTx(ctx, func(tx *sql.Tx) error {
 		userID, err := userIDByPID(ctx, tx, userPID, op)
 		if err != nil {
 			return err
@@ -51,7 +56,7 @@ func (s *Store) entityPlayStateWrite(ctx context.Context, op string, userPID mod
 		if err != nil {
 			return err
 		}
-		changed, err := mut(ctx, tx, userID, entityID, nowNS())
+		changed, err = mut(ctx, tx, userID, entityID, nowNS())
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
@@ -60,6 +65,10 @@ func (s *Store) entityPlayStateWrite(ctx context.Context, op string, userPID mod
 		}
 		return appendChange(ctx, tx, "entity_play_state", entityPID, model.OpUpdate)
 	})
+	if err != nil {
+		return false, err
+	}
+	return changed, nil
 }
 
 // SetEntityStar stars or unstars a catalog entity for a user, recording the star time
@@ -75,7 +84,12 @@ func (s *Store) entityPlayStateWrite(ctx context.Context, op string, userPID mod
 // (recency-correct for a migration import), and the engine enforces recorded-time
 // last-writer-wins: a flip whose asOf is not newer than the stored starred_changed_at is
 // skipped as a stale replay. A NULL prior stamp has no ordering info, so it applies.
-func (s *Store) SetEntityStar(ctx context.Context, userPID model.PID, kind model.MergeEntity, entityPID model.PID, starred bool, asOf *int64) error {
+//
+// The returned bool reports whether the call changed anything, and false is exactly "no
+// entity_play_state delta was appended": a re-star, an unstar of an unstarred entity, and
+// a stale replay all report false. It is the item SetStar bool, on the entity twin; see
+// there for why a follow-up state read cannot substitute for it.
+func (s *Store) SetEntityStar(ctx context.Context, userPID model.PID, kind model.MergeEntity, entityPID model.PID, starred bool, asOf *int64) (bool, error) {
 	table := string(kind)
 	return s.entityPlayStateWrite(ctx, "store.SetEntityStar", userPID, kind, entityPID, func(ctx context.Context, tx *sql.Tx, userID, entityID, now int64) (bool, error) {
 		var cur, curChanged sql.NullInt64 // starred_at (Valid mirrors the flag), starred_changed_at
@@ -117,7 +131,11 @@ func (s *Store) SetEntityStar(ctx context.Context, userPID model.PID, kind model
 // keeps the stamp, and a real change (a clear of a set rating included) bumps
 // rating_changed_at. asOf carries the recorded change time and enforces recorded-time
 // last-writer-wins; see SetEntityStar.
-func (s *Store) SetEntityRating(ctx context.Context, userPID model.PID, kind model.MergeEntity, entityPID model.PID, rating *int, asOf *int64) error {
+//
+// The returned bool reports whether the call changed anything, and false is exactly "no
+// entity_play_state delta was appended": a value-identical re-rate, a clear of a rating
+// that was never set, and a stale replay all report false.
+func (s *Store) SetEntityRating(ctx context.Context, userPID model.PID, kind model.MergeEntity, entityPID model.PID, rating *int, asOf *int64) (bool, error) {
 	table := string(kind)
 	var val any
 	want := sql.NullInt64{}

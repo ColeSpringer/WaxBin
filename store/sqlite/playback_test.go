@@ -53,10 +53,10 @@ func TestPlayStateLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	r := 80
-	if err := st.SetRating(ctx, "", item, &r, nil); err != nil {
+	if _, err := st.SetRating(ctx, "", item, &r, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.SetStar(ctx, "", item, true, nil); err != nil {
+	if _, err := st.SetStar(ctx, "", item, true, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -78,10 +78,10 @@ func TestPlayStateLifecycle(t *testing.T) {
 	}
 
 	// Clearing the rating and unstarring.
-	if err := st.SetRating(ctx, "", item, nil, nil); err != nil {
+	if _, err := st.SetRating(ctx, "", item, nil, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.SetStar(ctx, "", item, false, nil); err != nil {
+	if _, err := st.SetStar(ctx, "", item, false, nil); err != nil {
 		t.Fatal(err)
 	}
 	got, _ = st.PlayStateFor(ctx, "", item)
@@ -98,7 +98,7 @@ func TestRatingClamped(t *testing.T) {
 	ctx := context.Background()
 	item := seedItem(t, st, lib)
 	over := 250
-	if err := st.SetRating(ctx, "", item, &over, nil); err != nil {
+	if _, err := st.SetRating(ctx, "", item, &over, nil); err != nil {
 		t.Fatal(err)
 	}
 	got, _ := st.PlayStateFor(ctx, "", item)
@@ -183,7 +183,7 @@ func TestStarAsOfRecordedTime(t *testing.T) {
 	ns := func(v int64) *int64 { return &v }
 
 	// Star recorded at time 100: starred_at and the stamp both land in recorded time.
-	if err := st.SetStar(ctx, "", item, true, ns(100)); err != nil {
+	if _, err := st.SetStar(ctx, "", item, true, ns(100)); err != nil {
 		t.Fatal(err)
 	}
 	got, _ := st.PlayStateFor(ctx, "", item)
@@ -196,7 +196,7 @@ func TestStarAsOfRecordedTime(t *testing.T) {
 
 	// Stale replay: an unstar recorded at 50 (not newer than the stored 100) is
 	// skipped, leaving the item starred with its stamp untouched and no new delta.
-	if err := st.SetStar(ctx, "", item, false, ns(50)); err != nil {
+	if _, err := st.SetStar(ctx, "", item, false, ns(50)); err != nil {
 		t.Fatal(err)
 	}
 	got, _ = st.PlayStateFor(ctx, "", item)
@@ -209,7 +209,7 @@ func TestStarAsOfRecordedTime(t *testing.T) {
 
 	// Equal recorded time is also stale (not strictly newer): an unstar at exactly
 	// 100 loses to the star already recorded at 100.
-	if err := st.SetStar(ctx, "", item, false, ns(100)); err != nil {
+	if _, err := st.SetStar(ctx, "", item, false, ns(100)); err != nil {
 		t.Fatal(err)
 	}
 	if got, _ = st.PlayStateFor(ctx, "", item); !got.Starred {
@@ -217,7 +217,7 @@ func TestStarAsOfRecordedTime(t *testing.T) {
 	}
 
 	// A value-identical re-star with any as-of stays a no-op: the stamp keeps 100.
-	if err := st.SetStar(ctx, "", item, true, ns(999)); err != nil {
+	if _, err := st.SetStar(ctx, "", item, true, ns(999)); err != nil {
 		t.Fatal(err)
 	}
 	got, _ = st.PlayStateFor(ctx, "", item)
@@ -230,7 +230,7 @@ func TestStarAsOfRecordedTime(t *testing.T) {
 
 	// A newer recorded time wins: unstar at 200 (> 100) applies, clearing the star
 	// and advancing the stamp, with a new delta.
-	if err := st.SetStar(ctx, "", item, false, ns(200)); err != nil {
+	if _, err := st.SetStar(ctx, "", item, false, ns(200)); err != nil {
 		t.Fatal(err)
 	}
 	got, _ = st.PlayStateFor(ctx, "", item)
@@ -253,11 +253,11 @@ func TestStarAsOfNullPriorApplies(t *testing.T) {
 
 	// A rating creates the row but leaves starred_changed_at NULL.
 	r := 80
-	if err := st.SetRating(ctx, "", item, &r, nil); err != nil {
+	if _, err := st.SetRating(ctx, "", item, &r, nil); err != nil {
 		t.Fatal(err)
 	}
 	// Star recorded at an old time: with no prior star stamp to lose to, it applies.
-	if err := st.SetStar(ctx, "", item, true, &old); err != nil {
+	if _, err := st.SetStar(ctx, "", item, true, &old); err != nil {
 		t.Fatal(err)
 	}
 	got, _ := st.PlayStateFor(ctx, "", item)
@@ -277,7 +277,7 @@ func TestStarAsOfZeroIsServerNow(t *testing.T) {
 	zero := int64(0)
 	before := nowNS()
 
-	if err := st.SetStar(ctx, "", item, true, &zero); err != nil {
+	if _, err := st.SetStar(ctx, "", item, true, &zero); err != nil {
 		t.Fatal(err)
 	}
 	got, _ := st.PlayStateFor(ctx, "", item)
@@ -296,7 +296,7 @@ func TestRatingAsOfRecordedTime(t *testing.T) {
 	ns := func(v int64) *int64 { return &v }
 	r80, r60 := 80, 60
 
-	if err := st.SetRating(ctx, "", item, &r80, ns(100)); err != nil {
+	if _, err := st.SetRating(ctx, "", item, &r80, ns(100)); err != nil {
 		t.Fatal(err)
 	}
 	got, _ := st.PlayStateFor(ctx, "", item)
@@ -306,7 +306,7 @@ func TestRatingAsOfRecordedTime(t *testing.T) {
 
 	// Stale replay: a different value recorded at 50 (not newer than 100) is skipped,
 	// with no delta beyond the first write.
-	if err := st.SetRating(ctx, "", item, &r60, ns(50)); err != nil {
+	if _, err := st.SetRating(ctx, "", item, &r60, ns(50)); err != nil {
 		t.Fatal(err)
 	}
 	got, _ = st.PlayStateFor(ctx, "", item)
@@ -318,7 +318,7 @@ func TestRatingAsOfRecordedTime(t *testing.T) {
 	}
 
 	// Value-identical re-rate with any as-of is a no-op preserving the stamp.
-	if err := st.SetRating(ctx, "", item, &r80, ns(999)); err != nil {
+	if _, err := st.SetRating(ctx, "", item, &r80, ns(999)); err != nil {
 		t.Fatal(err)
 	}
 	if got, _ = st.PlayStateFor(ctx, "", item); got.RatingChangedAt != 100 {
@@ -326,7 +326,7 @@ func TestRatingAsOfRecordedTime(t *testing.T) {
 	}
 
 	// A newer recorded time wins.
-	if err := st.SetRating(ctx, "", item, &r60, ns(200)); err != nil {
+	if _, err := st.SetRating(ctx, "", item, &r60, ns(200)); err != nil {
 		t.Fatal(err)
 	}
 	got, _ = st.PlayStateFor(ctx, "", item)
@@ -345,7 +345,7 @@ func TestStarStampAndNoOp(t *testing.T) {
 	item := seedItem(t, st, lib)
 
 	// Unstar on an untouched item: no row, no delta.
-	if err := st.SetStar(ctx, "", item, false, nil); err != nil {
+	if _, err := st.SetStar(ctx, "", item, false, nil); err != nil {
 		t.Fatal(err)
 	}
 	if n := scalarInt(t, st, "SELECT COUNT(*) FROM play_state"); n != 0 {
@@ -356,7 +356,7 @@ func TestStarStampAndNoOp(t *testing.T) {
 	}
 
 	// First star: starred with a time, stamp set, one delta.
-	if err := st.SetStar(ctx, "", item, true, nil); err != nil {
+	if _, err := st.SetStar(ctx, "", item, true, nil); err != nil {
 		t.Fatal(err)
 	}
 	first, _ := st.PlayStateFor(ctx, "", item)
@@ -369,7 +369,7 @@ func TestStarStampAndNoOp(t *testing.T) {
 
 	// Re-star: silent no-op. starred_at keeps the ORIGINAL time (no
 	// refresh-on-restar), the stamp does not move, and no delta is emitted.
-	if err := st.SetStar(ctx, "", item, true, nil); err != nil {
+	if _, err := st.SetStar(ctx, "", item, true, nil); err != nil {
 		t.Fatal(err)
 	}
 	restar, _ := st.PlayStateFor(ctx, "", item)
@@ -385,7 +385,7 @@ func TestStarStampAndNoOp(t *testing.T) {
 
 	// Unstar: a real change. starred_at clears, the stamp advances past the
 	// star's (the ordering an adapter-side replay guard compares), one new delta.
-	if err := st.SetStar(ctx, "", item, false, nil); err != nil {
+	if _, err := st.SetStar(ctx, "", item, false, nil); err != nil {
 		t.Fatal(err)
 	}
 	unstar, _ := st.PlayStateFor(ctx, "", item)
@@ -401,7 +401,7 @@ func TestStarStampAndNoOp(t *testing.T) {
 	}
 
 	// Re-unstar on the existing row: silent no-op again.
-	if err := st.SetStar(ctx, "", item, false, nil); err != nil {
+	if _, err := st.SetStar(ctx, "", item, false, nil); err != nil {
 		t.Fatal(err)
 	}
 	if n := playStateDeltas(t, st); n != 2 {
@@ -418,7 +418,7 @@ func TestRatingStampAndNoOp(t *testing.T) {
 	item := seedItem(t, st, lib)
 
 	// Clearing an absent rating: no row, no delta.
-	if err := st.SetRating(ctx, "", item, nil, nil); err != nil {
+	if _, err := st.SetRating(ctx, "", item, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if n := scalarInt(t, st, "SELECT COUNT(*) FROM play_state"); n != 0 {
@@ -426,7 +426,7 @@ func TestRatingStampAndNoOp(t *testing.T) {
 	}
 
 	r := 80
-	if err := st.SetRating(ctx, "", item, &r, nil); err != nil {
+	if _, err := st.SetRating(ctx, "", item, &r, nil); err != nil {
 		t.Fatal(err)
 	}
 	first, _ := st.PlayStateFor(ctx, "", item)
@@ -438,7 +438,7 @@ func TestRatingStampAndNoOp(t *testing.T) {
 	}
 
 	// Identical re-rate: silent no-op, stamp untouched.
-	if err := st.SetRating(ctx, "", item, &r, nil); err != nil {
+	if _, err := st.SetRating(ctx, "", item, &r, nil); err != nil {
 		t.Fatal(err)
 	}
 	same, _ := st.PlayStateFor(ctx, "", item)
@@ -451,7 +451,7 @@ func TestRatingStampAndNoOp(t *testing.T) {
 
 	// A different value bumps the stamp.
 	r2 := 60
-	if err := st.SetRating(ctx, "", item, &r2, nil); err != nil {
+	if _, err := st.SetRating(ctx, "", item, &r2, nil); err != nil {
 		t.Fatal(err)
 	}
 	changed, _ := st.PlayStateFor(ctx, "", item)
@@ -461,7 +461,7 @@ func TestRatingStampAndNoOp(t *testing.T) {
 
 	// Clearing a set rating is a change: the value goes, the stamp survives and
 	// advances.
-	if err := st.SetRating(ctx, "", item, nil, nil); err != nil {
+	if _, err := st.SetRating(ctx, "", item, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	cleared, _ := st.PlayStateFor(ctx, "", item)
@@ -476,12 +476,68 @@ func TestRatingStampAndNoOp(t *testing.T) {
 		t.Errorf("deltas after rate/re-rate/change/clear = %d, want 3", n)
 	}
 	// Re-clear: silent no-op on the existing row.
-	if err := st.SetRating(ctx, "", item, nil, nil); err != nil {
+	if _, err := st.SetRating(ctx, "", item, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if n := playStateDeltas(t, st); n != 3 {
 		t.Errorf("re-clear emitted a delta (%d total), want the silent no-op", n)
 	}
+}
+
+// TestPlayStateChangedAgreesWithDelta pins the whole contract of the changed bool
+// SetStar and SetRating return: it is true exactly when a play_state delta was
+// appended. Every no-op case is covered (a value-identical write, a clear of
+// something never set, and a stale as-of replay) alongside the real changes, and
+// each step asserts the bool against the delta count rather than against a
+// hardcoded expectation, so the two can never drift apart. That agreement is the
+// reason the bool exists: a follow-up state read cannot tell "applied" from
+// "duplicate skipped" for a replay, which lands the stamp on the value it already
+// held.
+func TestPlayStateChangedAgreesWithDelta(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	item := seedItem(t, st, lib)
+	ns := func(v int64) *int64 { return &v }
+
+	before := playStateDeltas(t, st)
+	// step runs one mutation and asserts its bool against the observable it claims to
+	// mirror: whether the play_state delta count moved.
+	step := func(what string, mut func() (bool, error)) {
+		t.Helper()
+		changed, err := mut()
+		if err != nil {
+			t.Fatalf("%s: %v", what, err)
+		}
+		now := playStateDeltas(t, st)
+		if wrote := now > before; wrote != changed {
+			t.Errorf("%s reported changed=%v but the delta count went %d -> %d", what, changed, before, now)
+		}
+		before = now
+	}
+
+	r80, r60 := 80, 60
+	// Clearing a never-set rating and unstarring an untouched item create no row at
+	// all, so there is no stamp for the recorded-time steps below to trip over.
+	step("clear unset rating", func() (bool, error) { return st.SetRating(ctx, "", item, nil, nil) })
+	step("unstar untouched", func() (bool, error) { return st.SetStar(ctx, "", item, false, nil) })
+
+	// Stars, in recorded time. A stale replay is the case with no read-back tell:
+	// afterwards the row is exactly what an applied write would have left, so the bool
+	// is the only thing that distinguishes applied from skipped.
+	step("star @100", func() (bool, error) { return st.SetStar(ctx, "", item, true, ns(100)) })
+	step("older replay @50", func() (bool, error) { return st.SetStar(ctx, "", item, false, ns(50)) })
+	step("same-time replay @100", func() (bool, error) { return st.SetStar(ctx, "", item, false, ns(100)) })
+	step("unstar @999", func() (bool, error) { return st.SetStar(ctx, "", item, false, ns(999)) })
+
+	// Ratings, on the row the stars left behind: its rating stamp is still NULL, which
+	// carries no ordering, so the first recorded-time rating applies.
+	step("rate 80 @100", func() (bool, error) { return st.SetRating(ctx, "", item, &r80, ns(100)) })
+	step("older replay @50", func() (bool, error) { return st.SetRating(ctx, "", item, &r60, ns(50)) })
+	step("identical re-rate @999", func() (bool, error) { return st.SetRating(ctx, "", item, &r80, ns(999)) })
+	step("rate 60 @999", func() (bool, error) { return st.SetRating(ctx, "", item, &r60, ns(999)) })
+	// Clearing a set rating is a change; re-clearing it is not.
+	step("clear set rating", func() (bool, error) { return st.SetRating(ctx, "", item, nil, ns(1500)) })
+	step("re-clear rating", func() (bool, error) { return st.SetRating(ctx, "", item, nil, ns(2000)) })
 }
 
 // TestStampsUntouchedByProgressAndPlays pins the stamp scope: checkpoints and
@@ -491,11 +547,11 @@ func TestStampsUntouchedByProgressAndPlays(t *testing.T) {
 	ctx := context.Background()
 	item := seedItem(t, st, lib)
 
-	if err := st.SetStar(ctx, "", item, true, nil); err != nil {
+	if _, err := st.SetStar(ctx, "", item, true, nil); err != nil {
 		t.Fatal(err)
 	}
 	r := 90
-	if err := st.SetRating(ctx, "", item, &r, nil); err != nil {
+	if _, err := st.SetRating(ctx, "", item, &r, nil); err != nil {
 		t.Fatal(err)
 	}
 	before, _ := st.PlayStateFor(ctx, "", item)
@@ -541,14 +597,14 @@ func TestPlayStatesForItems(t *testing.T) {
 	}
 
 	// Default user stars item1 and rates item2; bob stars item2. item3 untouched.
-	if err := st.SetStar(ctx, "", item1, true, nil); err != nil {
+	if _, err := st.SetStar(ctx, "", item1, true, nil); err != nil {
 		t.Fatal(err)
 	}
 	r := 70
-	if err := st.SetRating(ctx, "", item2, &r, nil); err != nil {
+	if _, err := st.SetRating(ctx, "", item2, &r, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.SetStar(ctx, bob.PID, item2, true, nil); err != nil {
+	if _, err := st.SetStar(ctx, bob.PID, item2, true, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -596,7 +652,7 @@ func TestPlayStateCascadesWithItem(t *testing.T) {
 	// Re-key the file essence so the prior item is orphaned and deleted.
 	spec := trackSpec{path: "/lib/a/1.mp3", essence: "e1", content: "c1", title: "First", artist: "A", album: "Al"}
 	r := putTrack(t, st, lib.ID, spec)
-	if err := st.SetStar(ctx, "", r.ItemPID, true, nil); err != nil {
+	if _, err := st.SetStar(ctx, "", r.ItemPID, true, nil); err != nil {
 		t.Fatal(err)
 	}
 	spec.essence, spec.content, spec.title = "e2", "c2", "Second"

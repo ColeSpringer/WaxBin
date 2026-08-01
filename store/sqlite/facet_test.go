@@ -2,11 +2,14 @@ package sqlite
 
 import (
 	"context"
+	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/query"
 	"github.com/colespringer/waxbin/read"
+	"github.com/colespringer/waxbin/waxerr"
 )
 
 func bucketByDisplay(r *read.FacetResult, display string) (read.Bucket, bool) {
@@ -25,7 +28,7 @@ func TestFacetByGenre(t *testing.T) {
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/2.flac", essence: "e2", content: "c2", title: "B", artist: "Y", album: "Bl", genre: "Rock"})
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/3.flac", essence: "e3", content: "c3", title: "C", artist: "Z", album: "Cl", genre: ""})
 
-	res, err := st.Facet(ctx, query.New(query.EntityItems).Build(), read.GroupGenre, "")
+	res, err := st.Facet(ctx, query.New(query.EntityItems).Build(), read.GroupGenre, "", 0, "")
 	if err != nil {
 		t.Fatalf("facet: %v", err)
 	}
@@ -52,7 +55,7 @@ func TestFacetByArtistUnknownBucket(t *testing.T) {
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/1.flac", essence: "e1", content: "c1", title: "A", artist: "Radiohead", album: "OK"})
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/2.flac", essence: "e2", content: "c2", title: "B", artist: "", album: ""})
 
-	res, err := st.Facet(ctx, query.New(query.EntityItems).Build(), read.GroupArtist, "")
+	res, err := st.Facet(ctx, query.New(query.EntityItems).Build(), read.GroupArtist, "", 0, "")
 	if err != nil {
 		t.Fatalf("facet: %v", err)
 	}
@@ -73,7 +76,7 @@ func TestFacetByAlbum(t *testing.T) {
 	// A book is track-only-absent (no t.album_id), so it lands in [Non-Album].
 	putBook(t, st, lib.ID, bookSpec{path: "/lib/book.m4b", essence: "be1", content: "bc1", title: "Memoir", author: "Author", durationMS: 100})
 
-	res, err := st.Facet(ctx, query.New(query.EntityItems).Build(), read.GroupAlbum, "")
+	res, err := st.Facet(ctx, query.New(query.EntityItems).Build(), read.GroupAlbum, "", 0, "")
 	if err != nil {
 		t.Fatalf("facet album: %v", err)
 	}
@@ -118,7 +121,7 @@ func TestFacetByYearAndKind(t *testing.T) {
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/2.flac", essence: "e2", content: "c2", title: "B", artist: "Y", album: "Bl", year: 1997})
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/3.flac", essence: "e3", content: "c3", title: "C", artist: "Z", album: "Cl"}) // no year
 
-	res, err := st.Facet(ctx, query.New(query.EntityItems).Build(), read.GroupYear, "")
+	res, err := st.Facet(ctx, query.New(query.EntityItems).Build(), read.GroupYear, "", 0, "")
 	if err != nil {
 		t.Fatalf("facet year: %v", err)
 	}
@@ -129,7 +132,7 @@ func TestFacetByYearAndKind(t *testing.T) {
 		t.Errorf("Unknown-Year bucket = %+v, want count 1", b)
 	}
 
-	kindRes, err := st.Facet(ctx, query.New(query.EntityItems).Build(), read.GroupKind, "")
+	kindRes, err := st.Facet(ctx, query.New(query.EntityItems).Build(), read.GroupKind, "", 0, "")
 	if err != nil {
 		t.Fatalf("facet kind: %v", err)
 	}
@@ -145,7 +148,7 @@ func TestFacetHonorsFilter(t *testing.T) {
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/2.flac", essence: "e2", content: "c2", title: "B", artist: "Y", album: "Bl", genre: "Rock", year: 1990})
 
 	q := query.New(query.EntityItems).Where("year", query.OpGte, 2000).Build()
-	res, err := st.Facet(ctx, q, read.GroupGenre, "")
+	res, err := st.Facet(ctx, q, read.GroupGenre, "", 0, "")
 	if err != nil {
 		t.Fatalf("facet: %v", err)
 	}
@@ -157,8 +160,176 @@ func TestFacetHonorsFilter(t *testing.T) {
 
 func TestFacetRejectsBadGroupBy(t *testing.T) {
 	st, _ := entityFixture(t)
-	if _, err := st.Facet(context.Background(), query.New(query.EntityItems).Build(), read.GroupBy("bogus"), ""); err == nil {
+	if _, err := st.Facet(context.Background(), query.New(query.EntityItems).Build(), read.GroupBy("bogus"), "", 0, ""); err == nil {
 		t.Fatal("expected an error for an unsupported group-by")
+	}
+	if _, err := st.Facet(context.Background(), query.New(query.EntityItems).Build(), read.GroupGenre, "bogus", 0, ""); !waxerr.Is(err, waxerr.CodeInvalid) {
+		t.Fatalf("unsupported facet order = %v, want CodeInvalid", err)
+	}
+}
+
+// orderLimitFixture catalogs genres of deliberately unequal size with two of them
+// tied, so both facet orders have something to distinguish: counts 3, 2, 2, 1, with
+// the tied pair adjacent in collation order.
+func orderLimitFixture(t *testing.T) (*Store, *model.Library) {
+	st, lib := entityFixture(t)
+	genres := []string{"Rock", "Rock", "Rock", "Ambient", "Ambient", "Blues", "Blues", "Country"}
+	for i, g := range genres {
+		n := string(rune('a' + i))
+		putTrack(t, st, lib.ID, trackSpec{
+			path: "/lib/" + n + ".flac", essence: "e" + n, content: "c" + n,
+			title: "T" + n, artist: "X", album: "Al", genre: g,
+		})
+	}
+	return st, lib
+}
+
+// TestFacetCountOrderAndLimit pins the top-N shelf: count order is descending by
+// bucket size with ties left in collation order (so the result is deterministic, not
+// whatever the grouping produced), and limit truncates that order without reshaping
+// it. The tied pair is the load-bearing case; without the collation tiebreak the two
+// could swap between runs.
+func TestFacetCountOrderAndLimit(t *testing.T) {
+	st, _ := orderLimitFixture(t)
+	ctx := context.Background()
+	all := query.New(query.EntityItems).Build()
+
+	res, err := st.Facet(ctx, all, read.GroupGenre, read.FacetOrderCount, 0, "")
+	if err != nil {
+		t.Fatalf("count-order facet: %v", err)
+	}
+	// Rock 3, then the tied Ambient/Blues in collation order, then Country 1.
+	want := []struct {
+		display string
+		count   int
+	}{{"Rock", 3}, {"Ambient", 2}, {"Blues", 2}, {"Country", 1}}
+	if len(res.Buckets) != len(want) {
+		t.Fatalf("count-order buckets = %d, want %d", len(res.Buckets), len(want))
+	}
+	for i, w := range want {
+		if res.Buckets[i].Display != w.display || res.Buckets[i].Count != w.count {
+			t.Errorf("count-order bucket[%d] = %+v, want %s/%d", i, res.Buckets[i], w.display, w.count)
+		}
+	}
+
+	// A limit truncates that same order rather than changing it.
+	top, err := st.Facet(ctx, all, read.GroupGenre, read.FacetOrderCount, 2, "")
+	if err != nil {
+		t.Fatalf("limited count-order facet: %v", err)
+	}
+	if len(top.Buckets) != 2 {
+		t.Fatalf("limit 2 returned %d buckets", len(top.Buckets))
+	}
+	for i := range top.Buckets {
+		if top.Buckets[i] != res.Buckets[i] {
+			t.Errorf("limited bucket[%d] = %+v, want the unlimited %+v", i, top.Buckets[i], res.Buckets[i])
+		}
+	}
+
+	// A limit on the default label order truncates that order instead.
+	labeled, err := st.Facet(ctx, all, read.GroupGenre, "", 0, "")
+	if err != nil {
+		t.Fatalf("label-order facet: %v", err)
+	}
+	shortLabeled, err := st.Facet(ctx, all, read.GroupGenre, read.FacetOrderLabel, 2, "")
+	if err != nil {
+		t.Fatalf("limited label-order facet: %v", err)
+	}
+	if len(shortLabeled.Buckets) != 2 {
+		t.Fatalf("label-order limit 2 returned %d buckets", len(shortLabeled.Buckets))
+	}
+	for i := range shortLabeled.Buckets {
+		if shortLabeled.Buckets[i] != labeled.Buckets[i] {
+			t.Errorf("limited label bucket[%d] = %+v, want %+v", i, shortLabeled.Buckets[i], labeled.Buckets[i])
+		}
+	}
+}
+
+// TestFacetDefaultOrderUnchanged pins the compatibility half of the order/limit
+// change on every dimension, custom-tag dimensions included: ("", 0) is collation
+// order with the unknown bucket last, which is what every existing call site was
+// already getting, and FacetOrderLabel is that same order spelled explicitly.
+//
+// The unknown-last assertion is what makes this test bite. Comparing the two orders
+// alone would be tautological, since both take the same branch by construction; it
+// is dropping the (sortExpr IS NULL) term that this has to catch, and that only
+// shows up against a dimension with an unknown bucket to misplace.
+func TestFacetDefaultOrderUnchanged(t *testing.T) {
+	st, lib := orderLimitFixture(t)
+	ctx := context.Background()
+	all := query.New(query.EntityItems).Build()
+
+	// A track with no artist, album, genre, or year lands in the unknown bucket of
+	// every music dimension at once, and a remote episode has no file so it lands in
+	// the library dimension's. A tagged item and a feed complete the sweep over the
+	// spec shapes: music, kind-agnostic, episode-scoped, and custom-tag.
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/bare.flac", essence: "ebare", content: "cbare", title: "Bare"})
+	putFeed(t, st, "http://cast.example/f", "Ep1", "Ep2")
+	items, err := st.QueryItems(ctx, all, "")
+	if err != nil || len(items) == 0 {
+		t.Fatalf("items = %d (err %v)", len(items), err)
+	}
+	if _, _, err := st.SetItemTag(ctx, items[0].PID, "MOOD", []string{"calm"}, model.SourceUser, false, false); err != nil {
+		t.Fatalf("set tag: %v", err)
+	}
+
+	withUnknown := 0
+	dims := append(read.GroupBys(), read.GroupBy("tag.MOOD"))
+	for _, g := range dims {
+		base, err := st.Facet(ctx, all, g, "", 0, "")
+		if err != nil {
+			t.Fatalf("facet %s: %v", g, err)
+		}
+		explicit, err := st.Facet(ctx, all, g, read.FacetOrderLabel, 0, "")
+		if err != nil {
+			t.Fatalf("facet %s (explicit label): %v", g, err)
+		}
+		if !reflect.DeepEqual(base.Buckets, explicit.Buckets) {
+			t.Errorf("%s: explicit label order differs from the default\n got %+v\nwant %+v",
+				g, explicit.Buckets, base.Buckets)
+		}
+		for i, b := range base.Buckets {
+			if !b.IsUnknown {
+				continue
+			}
+			withUnknown++
+			if i != len(base.Buckets)-1 {
+				t.Errorf("%s: unknown bucket %q is at %d of %d, want last: %+v",
+					g, b.Display, i, len(base.Buckets), base.Buckets)
+			}
+		}
+	}
+	// Guard the guard: if the fixture stops producing unknown buckets the loop above
+	// asserts nothing and the (sortExpr IS NULL) term goes unpinned again.
+	if withUnknown < 5 {
+		t.Fatalf("fixture produced %d unknown buckets across %d dimensions, want the "+
+			"five music dimensions plus library", withUnknown, len(dims))
+	}
+}
+
+// TestFacetLabelOrderIsCollation pins the label order as the SORT KEY's order, not
+// the display label's. The two are chosen to disagree: sort keys drop a leading
+// article, so "The Aardvark" keys to "aardvark" and sorts before "Beta", while by
+// title "Beta" comes first. Ordering by display ahead of sort_key, or dropping the
+// sort_key term, flips the result.
+func TestFacetLabelOrderIsCollation(t *testing.T) {
+	st, lib := entityFixture(t)
+	for i, album := range []string{"Beta", "The Aardvark"} {
+		n := string(rune('a' + i))
+		putTrack(t, st, lib.ID, trackSpec{path: "/lib/" + n + ".flac", essence: "e" + n, content: "c" + n,
+			title: "T" + n, artist: "X", album: album})
+	}
+	res, err := st.Facet(context.Background(), query.New(query.EntityItems).Build(), read.GroupAlbum, "", 0, "")
+	if err != nil {
+		t.Fatalf("facet: %v", err)
+	}
+	var got []string
+	for _, b := range res.Buckets {
+		got = append(got, b.Display)
+	}
+	want := []string{"The Aardvark", "Beta"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("album label order = %v, want %v (sort_key order: aardvark, beta)", got, want)
 	}
 }
 

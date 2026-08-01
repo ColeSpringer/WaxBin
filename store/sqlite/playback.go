@@ -14,20 +14,21 @@ import (
 // is called on checkpoints, not every tick. It never touches the star/rating
 // change stamps.
 func (s *Store) SetProgress(ctx context.Context, userPID, itemPID model.PID, positionMS int64) error {
-	return s.playStateWrite(ctx, "store.SetProgress", userPID, itemPID, func(ctx context.Context, tx *sql.Tx, userID, itemID, now int64) (bool, error) {
+	_, err := s.playStateWrite(ctx, "store.SetProgress", userPID, itemPID, func(ctx context.Context, tx *sql.Tx, userID, itemID, now int64) (bool, error) {
 		_, err := tx.ExecContext(ctx,
 			`INSERT INTO play_state(user_id, item_id, position_ms, updated_at) VALUES (?,?,?,?)
 			 ON CONFLICT(user_id, item_id) DO UPDATE SET position_ms=excluded.position_ms, updated_at=excluded.updated_at`,
 			userID, itemID, positionMS, now)
 		return true, err
 	})
+	return err
 }
 
 // MarkPlayed increments a user's play count for an item, sets it played (and
 // finished when finished is true), and stamps last_played_at. It never touches
 // the star/rating change stamps.
 func (s *Store) MarkPlayed(ctx context.Context, userPID, itemPID model.PID, finished bool) error {
-	return s.playStateWrite(ctx, "store.MarkPlayed", userPID, itemPID, func(ctx context.Context, tx *sql.Tx, userID, itemID, now int64) (bool, error) {
+	_, err := s.playStateWrite(ctx, "store.MarkPlayed", userPID, itemPID, func(ctx context.Context, tx *sql.Tx, userID, itemID, now int64) (bool, error) {
 		_, err := tx.ExecContext(ctx,
 			`INSERT INTO play_state(user_id, item_id, played, finished, play_count, last_played_at, updated_at)
 			 VALUES (?,?,1,?,1,?,?)
@@ -37,6 +38,7 @@ func (s *Store) MarkPlayed(ctx context.Context, userPID, itemPID model.PID, fini
 			userID, itemID, boolInt(finished), now, now)
 		return true, err
 	})
+	return err
 }
 
 // asOfRecorded reports the recorded time an as-of carries and whether it carries a
@@ -88,7 +90,14 @@ func staleReplay(asOf *int64, storedChanged int64, validStored bool) bool {
 // rating_changed_at is skipped as a stale replay (changed=false, no delta), so a
 // replayed offline rating cannot overwrite a later one. A NULL prior stamp has no
 // ordering info, so it applies.
-func (s *Store) SetRating(ctx context.Context, userPID, itemPID model.PID, rating *int, asOf *int64) error {
+//
+// The returned bool reports whether the call changed anything, and false is exactly
+// "no play_state delta was appended". All three no-op cases report false: the stored
+// value is already the requested one, a clear of a rating that was never set, and a
+// stale replay. A caller cannot recover this from a follow-up read: a stale replay
+// lands the stamp on the value it already held, and a value-identical call leaves
+// the stamp untouched. The bool is the only answer to "did this write do anything".
+func (s *Store) SetRating(ctx context.Context, userPID, itemPID model.PID, rating *int, asOf *int64) (bool, error) {
 	var val any
 	want := sql.NullInt64{}
 	if rating != nil {
@@ -145,7 +154,12 @@ func (s *Store) SetRating(ctx context.Context, userPID, itemPID model.PID, ratin
 // last-writer-wins: a flip whose asOf is not newer than the stored starred_changed_at
 // is skipped as a stale replay (changed=false, no delta), so a replayed offline
 // toggle can never resurrect an undone state. A NULL prior stamp applies.
-func (s *Store) SetStar(ctx context.Context, userPID, itemPID model.PID, starred bool, asOf *int64) error {
+//
+// The returned bool reports whether the call changed anything, and false is exactly
+// "no play_state delta was appended": a re-star of a starred item, an unstar of an
+// unstarred one, and a stale replay all report false. See SetRating for why a
+// follow-up state read cannot substitute for it.
+func (s *Store) SetStar(ctx context.Context, userPID, itemPID model.PID, starred bool, asOf *int64) (bool, error) {
 	return s.playStateWrite(ctx, "store.SetStar", userPID, itemPID, func(ctx context.Context, tx *sql.Tx, userID, itemID, now int64) (bool, error) {
 		var cur, curChanged sql.NullInt64 // starred_at (Valid mirrors the flag), starred_changed_at
 		err := tx.QueryRowContext(ctx,
@@ -183,9 +197,29 @@ func (s *Store) SetStar(ctx context.Context, userPID, itemPID model.PID, starred
 // play_state delta - the shared envelope for every per-user playback mutation.
 // A mutation reporting changed=false wrote nothing and stays silent: no delta is
 // appended, aligning value-identical star/rating calls with the repo's
-// silent-no-op convention.
-func (s *Store) playStateWrite(ctx context.Context, op string, userPID, itemPID model.PID, mut func(context.Context, *sql.Tx, int64, int64, int64) (bool, error)) error {
-	return s.writeTx(ctx, func(tx *sql.Tx) error {
+// silent-no-op convention. It returns that same bool so a caller whose write can
+// legitimately do nothing (SetStar, SetRating) can report it; a failed write
+// returns false with the error.
+//
+// The delta itself is not that answer, which is the obvious objection and why it is
+// worth stating. A consumer already tailing ChangesSince for catalog sync cannot
+// reuse it for play state: model.Change carries {Seq, TS, EntityType, EntityPID, Op}
+// with no user dimension, and for a play_state row EntityPID is the item pid. So a
+// per-user consumer sees "item X's play state changed" and cannot tell whose.
+// Routing it would mean reading every user's state for that item on every row and
+// diffing, which costs more than the redundant event, and it would wake user B
+// because user A starred a shared track. The bool answers per call, for the caller
+// that made it.
+//
+// Only the star and rating mutations expose it, and the asymmetry is deliberate.
+// SetProgress and MarkPlayed always write (an unconditional upsert, and a play_count
+// increment), so they hardcode changed=true and discard it here; returning a
+// constant would invite a branch no call can ever take. A caller that wants
+// applied-or-skipped for a checkpoint has the position stamp it just sent to compare
+// against, and one gating a play already reads the state first.
+func (s *Store) playStateWrite(ctx context.Context, op string, userPID, itemPID model.PID, mut func(context.Context, *sql.Tx, int64, int64, int64) (bool, error)) (bool, error) {
+	var changed bool
+	err := s.writeTx(ctx, func(tx *sql.Tx) error {
 		userID, err := userIDByPID(ctx, tx, userPID, op)
 		if err != nil {
 			return err
@@ -194,7 +228,7 @@ func (s *Store) playStateWrite(ctx context.Context, op string, userPID, itemPID 
 		if err != nil {
 			return err
 		}
-		changed, err := mut(ctx, tx, userID, itemID, nowNS())
+		changed, err = mut(ctx, tx, userID, itemID, nowNS())
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
@@ -203,6 +237,10 @@ func (s *Store) playStateWrite(ctx context.Context, op string, userPID, itemPID 
 		}
 		return appendChange(ctx, tx, "play_state", itemPID, model.OpUpdate)
 	})
+	if err != nil {
+		return false, err
+	}
+	return changed, nil
 }
 
 // PlayStateFor returns a user's playback state for an item. A user who has never

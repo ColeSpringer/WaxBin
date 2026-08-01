@@ -279,7 +279,7 @@ func TestBookSearchAndFacet(t *testing.T) {
 	}
 
 	// The author appears in the artist facet via the author COALESCE.
-	f, err := st.Facet(ctx, query.New(query.EntityItems).Build(), read.GroupArtist, "")
+	f, err := st.Facet(ctx, query.New(query.EntityItems).Build(), read.GroupArtist, "", 0, "")
 	if err != nil {
 		t.Fatalf("facet: %v", err)
 	}
@@ -737,7 +737,7 @@ func TestStatsArtistCountMatchesFacet(t *testing.T) {
 	if stats.Artists != 1 {
 		t.Errorf("artists = %d, want 1 (author only)", stats.Artists)
 	}
-	f, _ := st.Facet(ctx, query.New(query.EntityItems).Build(), read.GroupArtist, "")
+	f, _ := st.Facet(ctx, query.New(query.EntityItems).Build(), read.GroupArtist, "", 0, "")
 	nonUnknown := 0
 	for _, b := range f.Buckets {
 		if !b.IsUnknown {

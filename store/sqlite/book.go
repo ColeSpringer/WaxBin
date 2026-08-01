@@ -833,6 +833,7 @@ type bookPart struct {
 	fileID  int64
 	path    []byte
 	sortKey string
+	role    string // the item_file edge role: primary or part
 }
 
 // bookParts returns a book's backing files in reading order. It is the single
@@ -850,7 +851,7 @@ func (s *Store) bookParts(ctx context.Context, bookItemID int64) ([]bookPart, er
 func bookPartsQ(ctx context.Context, q queryer, bookItemID int64) ([]bookPart, error) {
 	const op = "store.bookParts"
 	rows, err := q.QueryContext(ctx,
-		`SELECT f.id, f.pid, f.path, f.display_path, itf.position, COALESCE(f.duration_ms, 0), f.rel_path
+		`SELECT f.id, f.pid, f.path, f.display_path, itf.position, COALESCE(f.duration_ms, 0), f.rel_path, itf.role
 		 FROM item_file itf JOIN file f ON f.id = itf.file_id
 		 WHERE itf.item_id = ?`, bookItemID)
 	if err != nil {
@@ -861,7 +862,7 @@ func bookPartsQ(ctx context.Context, q queryer, bookItemID int64) ([]bookPart, e
 	for rows.Next() {
 		var p bookPart
 		var rel []byte
-		if err := rows.Scan(&p.fileID, &p.FilePID, &p.path, &p.DisplayPath, &p.Position, &p.DurationMS, &rel); err != nil {
+		if err := rows.Scan(&p.fileID, &p.FilePID, &p.path, &p.DisplayPath, &p.Position, &p.DurationMS, &rel, &p.role); err != nil {
 			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		// model.SortKey zero-pads digit runs, so a plain string compare of the keys is
@@ -1088,6 +1089,13 @@ func (s *Store) BooksInSeries(ctx context.Context, seriesPID model.PID) ([]*mode
 // ItemFiles returns every file backing an item in the same natural reading order
 // the chapter timeline uses (one row for a track or single-file book, every part
 // for a multi-file book), so organize moves a book's parts in order.
+//
+// Each ref carries its item_file edge role alongside the position. The two are
+// independent: the primary is whichever part was attached first, or the
+// lowest-positioned survivor after a primary is detached, so it is not reading-order
+// part one and cannot be inferred from Position. A caller that needs to know which
+// part the primary-file reads (LoadPeaks, LoudnessByItem) answered for has to read
+// Role.
 func (s *Store) ItemFiles(ctx context.Context, pid model.PID) ([]model.ItemFileRef, error) {
 	const op = "store.ItemFiles"
 	itemID, _, err := s.itemIDKindByPID(ctx, pid, op)
@@ -1101,7 +1109,7 @@ func (s *Store) ItemFiles(ctx context.Context, pid model.PID) ([]model.ItemFileR
 	out := make([]model.ItemFileRef, len(parts))
 	for i, p := range parts {
 		out[i] = model.ItemFileRef{
-			FilePID: p.FilePID, Path: p.path, DisplayPath: p.DisplayPath, Position: p.Position,
+			FilePID: p.FilePID, Path: p.path, DisplayPath: p.DisplayPath, Position: p.Position, Role: p.role,
 		}
 	}
 	return out, nil

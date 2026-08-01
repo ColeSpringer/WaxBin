@@ -36,6 +36,22 @@ type Column struct {
 	// a correlated EXISTS subquery (see SetColumn) rather than a scalar comparison.
 	// Expr and Kind are ignored when Set is non-nil.
 	Set *SetColumn
+	// ValueSub lowers a bound value before comparison: the compiler emits it in
+	// place of the value's ? placeholder, so an identity handle compares an
+	// internal id column against a subquery resolving the caller's pid, instead of
+	// comparing a per-row correlated subquery against that pid. That is what lets
+	// the planner drive the comparison off the id column's index rather than
+	// visiting every row, and it evaluates the pid lookup once per query instead of
+	// once per row. It must contain exactly one ? and, like Expr, is emitted
+	// verbatim, so it must never contain caller-supplied text.
+	//
+	// Only is, isNot, isPresent, and isMissing are accepted on such a column, and
+	// sorting by one is rejected: the rest either carry no value to lower or would
+	// compare an internal id by text or by range, which is not a question an
+	// identity handle answers, and ORDER BY would sort by internal rowid. The two
+	// presence operators emit no value at all, so they compile to a direct
+	// IS NULL / IS NOT NULL on the id column.
+	ValueSub string
 }
 
 // SetColumn describes a set-membership field: one whose value lives in a related
@@ -137,6 +153,13 @@ func CompileAt(q Query, fields Fields, now time.Time) (*Compiled, error) {
 			if col.Set != nil {
 				return nil, waxerr.New(waxerr.CodeInvalid, "query.Compile",
 					fmt.Sprintf("cannot sort by a tag field %q", s.Field))
+			}
+			if col.ValueSub != "" {
+				// The Expr of a lowered column is an internal id, so ordering by it
+				// would order by rowid: an arbitrary, non-reproducible sequence a
+				// caller would read as alphabetical. Sort by the display field instead.
+				return nil, waxerr.New(waxerr.CodeInvalid, "query.Compile",
+					fmt.Sprintf("cannot sort by an identity field %q", s.Field))
 			}
 			if col.NeedsUser {
 				c.NeedsUser = true
@@ -247,6 +270,12 @@ func compileCond(c Cond, fields Fields, sb *strings.Builder, args *[]any, nu *bo
 	if col.Set != nil {
 		return compileSetCond(c, col.Set, sb, args)
 	}
+	// A value-lowered column (an identity handle) compares an internal id against a
+	// subquery resolving the caller's pid, and accepts only the operators that
+	// comparison can answer; see Column.ValueSub.
+	if col.ValueSub != "" {
+		return compileValueSubCond(c, col, sb, args)
+	}
 
 	switch c.Op {
 	case OpIs:
@@ -315,6 +344,41 @@ func compileCond(c Cond, fields Fields, sb *strings.Builder, args *[]any, nu *bo
 	default:
 		return waxerr.New(waxerr.CodeInvalid, "query.Compile",
 			fmt.Sprintf("unsupported operator %q", c.Op))
+	}
+	return nil
+}
+
+// compileValueSubCond compiles a condition against a value-lowered column (an
+// identity handle such as artist_pid) by emitting Column.ValueSub in place of the
+// value's placeholder, so the comparison reads "<id column> = (SELECT id ... WHERE
+// pid = ?)". The pid still binds as a positional arg inside ValueSub, exactly once
+// per query rather than once per row.
+//
+// isNot against a pid no entity holds matches nothing rather than everything,
+// because the lowered value is NULL and `x <> NULL` is NULL. That differs from an
+// unlowered isNot, which compares text and so matches every row carrying a different
+// pid. It is the one behavior change lowering makes, and it is the more useful
+// answer of the two: "items not by this artist" over an artist that does not exist
+// is a question with no meaningful subject. `is` against a nonexistent pid matched
+// nothing before and still does.
+func compileValueSubCond(c Cond, col Column, sb *strings.Builder, args *[]any) error {
+	switch c.Op {
+	case OpIs:
+		sb.WriteString(col.Expr + " = " + col.ValueSub)
+		*args = append(*args, c.Value)
+	case OpIsNot:
+		sb.WriteString(col.Expr + " <> " + col.ValueSub)
+		*args = append(*args, c.Value)
+	case OpIsPresent:
+		// No value to lower: the id column being non-NULL is the whole question, and
+		// it beats the unlowered form, which had to run a subquery per row to
+		// discover the same thing.
+		sb.WriteString(col.Expr + " IS NOT NULL")
+	case OpIsMissing:
+		sb.WriteString(col.Expr + " IS NULL")
+	default:
+		return waxerr.New(waxerr.CodeInvalid, "query.Compile",
+			fmt.Sprintf("operator %q not supported on an identity field %q", c.Op, c.Field))
 	}
 	return nil
 }

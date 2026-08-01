@@ -227,6 +227,177 @@ func TestStalePeaksHidden(t *testing.T) {
 	}
 }
 
+// putPeaks stamps a file's waveform via PutAnalysis (the atomic write path), using
+// the data bytes as the distinguishing mark so a read can be traced to a part.
+func putPeaks(t *testing.T, st *Store, filePID model.PID, essence string, data []byte) {
+	t.Helper()
+	if err := st.PutAnalysis(context.Background(), model.AnalysisInput{
+		AnalysisVersion: 1,
+		Fingerprint:     model.FingerprintInput{FilePID: filePID, EssenceHash: essence, AlgoVersion: 1, FP: []byte{}},
+		Peaks:           &model.PeaksData{Version: 1, Buckets: len(data) / 2, Data: data},
+	}); err != nil {
+		t.Fatalf("put peaks: %v", err)
+	}
+}
+
+// outOfOrderBook attaches a three-part audiobook out of reading order (part three
+// first) and gives each part its own waveform. Attach order is what picks the
+// primary, so the fixture separates "the primary part" from "part one", which are
+// the two the peaks reads must not conflate.
+func outOfOrderBook(t *testing.T, st *Store, libID int64) map[int]*model.ScanItemResult {
+	t.Helper()
+	parts := map[int]*model.ScanItemResult{}
+	for _, pos := range []int{3, 1, 2} {
+		e := "dp" + string(rune('0'+pos))
+		parts[pos] = putBook(t, st, libID, bookSpec{
+			path:    "/lib/b/p" + string(rune('0'+pos)) + ".mp3",
+			essence: e, content: "dc" + string(rune('0'+pos)),
+			title: "Tome", author: "Auth", asin: "BD", position: pos, durationMS: 1000,
+		})
+		putPeaks(t, st, parts[pos].FilePID, e, []byte{byte(pos), 0, byte(pos), 0})
+	}
+	return parts
+}
+
+// TestPeaksPrimaryIsNotReadingOrderPartOne pins what Peaks actually answers for on a
+// multi-file book, against both rules that pick the primary. The book's parts are
+// attached out of order, so the primary is part three (first attached, the
+// linkBookFile rule); after that part is detached the answer follows the promotion
+// to the lowest-positioned survivor (the ensurePrimary rule), which is part one.
+// Neither rule is reading order, which is why the per-part reads exist.
+func TestPeaksPrimaryIsNotReadingOrderPartOne(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	parts := outOfOrderBook(t, st, lib.ID)
+	book := parts[3].ItemPID
+
+	pk, err := st.LoadPeaks(ctx, book)
+	if err != nil {
+		t.Fatalf("load peaks: %v", err)
+	}
+	if pk.Data[0] != 3 {
+		t.Errorf("Peaks answered for part %d, want part 3 (attached first, so primary)", pk.Data[0])
+	}
+
+	// Re-key part three's file as a music track: the book loses its primary and
+	// promotes the lowest-positioned survivor.
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/b/p3.mp3", essence: "trk3", content: "tc3", title: "Song", artist: "Band"})
+	pk, err = st.LoadPeaks(ctx, book)
+	if err != nil {
+		t.Fatalf("load peaks after detach: %v", err)
+	}
+	if pk.Data[0] != 1 {
+		t.Errorf("Peaks answered for part %d after the primary was detached, want part 1 (lowest-positioned survivor)", pk.Data[0])
+	}
+}
+
+// TestPeaksPerFileAndPerItem is the multi-part waveform surface: every part of a book
+// has its own waveform (analysis is per file and never consulted item_file), each is
+// reachable by file pid, and the per-item read returns them all in reading order
+// rather than the single primary Peaks answers for.
+func TestPeaksPerFileAndPerItem(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	parts := outOfOrderBook(t, st, lib.ID)
+
+	for pos := 1; pos <= 3; pos++ {
+		pk, err := st.LoadPeaksForFile(ctx, parts[pos].FilePID)
+		if err != nil {
+			t.Fatalf("peaks for part %d: %v", pos, err)
+		}
+		if pk.Data[0] != byte(pos) {
+			t.Errorf("part %d file read back part %d's waveform", pos, pk.Data[0])
+		}
+	}
+
+	got, err := st.LoadPeaksForItem(ctx, parts[1].ItemPID)
+	if err != nil {
+		t.Fatalf("peaks for item: %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("per-item peaks = %d parts, want 3", len(got))
+	}
+	for i, ip := range got {
+		wantPos := i + 1
+		if ip.Position != wantPos || ip.Peaks.Data[0] != byte(wantPos) {
+			t.Errorf("per-item peaks[%d] = position %d waveform %d, want part %d in reading order",
+				i, ip.Position, ip.Peaks.Data[0], wantPos)
+		}
+		if ip.FilePID != parts[wantPos].FilePID {
+			t.Errorf("per-item peaks[%d] file = %s, want part %d's file", i, ip.FilePID, wantPos)
+		}
+	}
+}
+
+// TestPeaksForFileNotFound pins the two absent cases on the per-file read: an unknown
+// file pid, and a waveform left over from superseded audio, which the essence gate
+// hides exactly as it does for the item-level read (TestStalePeaksHidden). A stale
+// part also drops out of the per-item read rather than reporting an old waveform for
+// a part that has been re-encoded.
+func TestPeaksForFileNotFound(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	parts := outOfOrderBook(t, st, lib.ID)
+
+	if _, err := st.LoadPeaksForFile(ctx, "file-does-not-exist"); !waxerr.Is(err, waxerr.CodeNotFound) {
+		t.Errorf("unknown file pid gave %v, want CodeNotFound", err)
+	}
+
+	// Re-encode part two: its essence advances, so its stored waveform is stale.
+	putBook(t, st, lib.ID, bookSpec{
+		path: "/lib/b/p2.mp3", essence: "dp2b", content: "dc2b",
+		title: "Tome", author: "Auth", asin: "BD", position: 2, durationMS: 1000,
+	})
+	if _, err := st.LoadPeaksForFile(ctx, parts[2].FilePID); !waxerr.Is(err, waxerr.CodeNotFound) {
+		t.Errorf("stale waveform gave %v, want CodeNotFound", err)
+	}
+	got, err := st.LoadPeaksForItem(ctx, parts[1].ItemPID)
+	if err != nil {
+		t.Fatalf("peaks for item: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("per-item peaks = %d parts, want 2 with part two's waveform stale", len(got))
+	}
+	for _, ip := range got {
+		if ip.Position == 2 {
+			t.Errorf("per-item peaks returned the stale part two waveform: %+v", ip)
+		}
+	}
+}
+
+// TestItemFilesCarryRole pins the role on ItemFileRef against the primary-selection
+// rule it exists to expose: the parts come back in reading order, but the primary is
+// the one attached first, so a consumer cannot infer it from position.
+func TestItemFilesCarryRole(t *testing.T) {
+	st, lib := entityFixture(t)
+	parts := outOfOrderBook(t, st, lib.ID)
+
+	refs, err := st.ItemFiles(context.Background(), parts[1].ItemPID)
+	if err != nil {
+		t.Fatalf("item files: %v", err)
+	}
+	if len(refs) != 3 {
+		t.Fatalf("item files = %d, want 3", len(refs))
+	}
+	var primaries int
+	for i, r := range refs {
+		if r.Position != i+1 {
+			t.Errorf("refs[%d] position = %d, want reading order", i, r.Position)
+		}
+		if r.Role == "primary" {
+			primaries++
+			if r.Position != 3 {
+				t.Errorf("primary is part %d, want part 3 (attached first)", r.Position)
+			}
+		} else if r.Role != "part" {
+			t.Errorf("refs[%d] role = %q, want primary or part", i, r.Role)
+		}
+	}
+	if primaries != 1 {
+		t.Errorf("primary edges = %d, want exactly 1", primaries)
+	}
+}
+
 func TestLoudnessNotFound(t *testing.T) {
 	st, lib := entityFixture(t)
 	r := putTrack(t, st, lib.ID, trackSpec{path: "/lib/a/1.flac", essence: "e1", content: "c1", title: "T", artist: "A", album: "Al"})

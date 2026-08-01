@@ -66,17 +66,17 @@ func (s *Store) Stats(ctx context.Context, userPID model.PID, topN int) (*read.S
 	// These are catalog-wide, deliberately user-agnostic (the query references no
 	// per-user field), so the empty user is a no-op.
 	all := query.New(query.EntityItems).Build()
-	genreFacet, err := s.Facet(ctx, all, read.GroupGenre, "")
+	genreFacet, err := s.Facet(ctx, all, read.GroupGenre, "", 0, "")
 	if err != nil {
 		return nil, err
 	}
 	out.TopGenres = topBuckets(genreFacet.Buckets, topN)
-	artistFacet, err := s.Facet(ctx, all, read.GroupArtist, "")
+	artistFacet, err := s.Facet(ctx, all, read.GroupArtist, "", 0, "")
 	if err != nil {
 		return nil, err
 	}
 	out.TopArtists = topBuckets(artistFacet.Buckets, topN)
-	yearFacet, err := s.Facet(ctx, all, read.GroupYear, "")
+	yearFacet, err := s.Facet(ctx, all, read.GroupYear, "", 0, "")
 	if err != nil {
 		return nil, err
 	}

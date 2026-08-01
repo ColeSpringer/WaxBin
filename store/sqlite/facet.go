@@ -24,12 +24,22 @@ type facetSpec struct {
 	sortExpr string // ORDER BY expression (NULLs sort last)
 	entity   bool   // keyExpr is an entity pid (drilldown target)
 	unknown  string // sentinel display when the dimension is absent
-	// noEpisodes excludes podcast episodes from this dimension: they carry no
-	// artist/album/genre/year in the music sense, so including them would pile every
-	// episode into a single Unknown bucket. The kind facet keeps them (it groups them
-	// correctly under 'episode').
-	noEpisodes bool
+	// kindWhere scopes the dimension to the item kinds it is meaningful for, ANDed
+	// onto the caller's WHERE ("" for a kind-agnostic dimension). The five music
+	// dimensions exclude episodes ("pi.kind <> 'episode'"), which carry no
+	// artist/album/genre/year in the music sense and would otherwise pile into one
+	// Unknown bucket; the podcast dimension is the converse, keeping only episodes.
+	// It holds the predicate rather than a flag because the two scopes are mutually
+	// exclusive and a pair of booleans could encode a state that means nothing.
+	kindWhere string
 }
+
+// Kind scopes shared by the facet specs. notEpisodes is the music dimensions' scope;
+// onlyEpisodes is the podcast dimension's.
+const (
+	notEpisodes  = "pi.kind <> 'episode'"
+	onlyEpisodes = "pi.kind = 'episode'"
+)
 
 func facetSpecFor(g read.GroupBy) (facetSpec, bool) {
 	switch g {
@@ -37,7 +47,7 @@ func facetSpecFor(g read.GroupBy) (facetSpec, bool) {
 		return facetSpec{
 			join:    " LEFT JOIN item_genre fig ON fig.item_id = pi.id LEFT JOIN genre fg ON fg.id = fig.genre_id",
 			groupBy: "fg.id", keyExpr: "fg.pid", display: "fg.name", sortExpr: "fg.sort_key",
-			entity: true, unknown: read.NoGenre, noEpisodes: true,
+			entity: true, unknown: read.NoGenre, kindWhere: notEpisodes,
 		}, true
 	case read.GroupArtist:
 		// itemArtistIDExpr COALESCEs the book author so an audiobook groups under
@@ -47,7 +57,7 @@ func facetSpecFor(g read.GroupBy) (facetSpec, bool) {
 		return facetSpec{
 			join:    " LEFT JOIN artist fa ON fa.id = " + itemArtistIDExpr,
 			groupBy: itemArtistIDExpr, keyExpr: "fa.pid", display: "fa.name", sortExpr: "fa.sort_key",
-			entity: true, unknown: read.UnknownArtist, noEpisodes: true,
+			entity: true, unknown: read.UnknownArtist, kindWhere: notEpisodes,
 		}, true
 	case read.GroupAlbumArtist:
 		// Shares itemAlbumArtistIDExpr with the album_artist_pid query field (see
@@ -55,23 +65,23 @@ func facetSpecFor(g read.GroupBy) (facetSpec, bool) {
 		return facetSpec{
 			join:    " LEFT JOIN artist faa ON faa.id = " + itemAlbumArtistIDExpr,
 			groupBy: itemAlbumArtistIDExpr, keyExpr: "faa.pid", display: "faa.name", sortExpr: "faa.sort_key",
-			entity: true, unknown: read.UnknownArtist, noEpisodes: true,
+			entity: true, unknown: read.UnknownArtist, kindWhere: notEpisodes,
 		}, true
 	case read.GroupAlbum:
 		// Albums are track-only (t.album_id), so a book or episode has no album and
 		// falls into the [Non-Album] bucket, consistent with the album_pid query
-		// field a bucket's EntityPID drills down through. noEpisodes keeps episodes
+		// field a bucket's EntityPID drills down through. kindWhere keeps episodes
 		// out entirely rather than piling them into that bucket.
 		return facetSpec{
 			join:    " LEFT JOIN album falb ON falb.id = t.album_id",
 			groupBy: "t.album_id", keyExpr: "falb.pid", display: "falb.title", sortExpr: "falb.sort_key",
-			entity: true, unknown: read.NonAlbum, noEpisodes: true,
+			entity: true, unknown: read.NonAlbum, kindWhere: notEpisodes,
 		}, true
 	case read.GroupYear:
 		return facetSpec{
 			groupBy: "COALESCE(t.year, bk.year)", keyExpr: "CAST(COALESCE(t.year, bk.year) AS TEXT)",
 			display: "CAST(COALESCE(t.year, bk.year) AS TEXT)", sortExpr: "COALESCE(t.year, bk.year)",
-			unknown: read.UnknownYear, noEpisodes: true,
+			unknown: read.UnknownYear, kindWhere: notEpisodes,
 		}, true
 	case read.GroupKind:
 		return facetSpec{
@@ -87,6 +97,18 @@ func facetSpecFor(g read.GroupBy) (facetSpec, bool) {
 			join:    " LEFT JOIN library flib ON flib.id = f.library_id",
 			groupBy: "flib.id", keyExpr: "flib.pid", display: "flib.display_root", sortExpr: "flib.display_root",
 			entity: true, unknown: read.NoFile,
+		}, true
+	case read.GroupPodcast:
+		// The episode's feed, keyed by pid so a bucket drills down through the
+		// podcast_pid query field. There is no unknown bucket because keyExpr cannot be
+		// null: episode.podcast_id is NOT NULL, and the inner join then drops any row
+		// that somehow failed to reach a feed rather than rendering it as a bucket with
+		// a blank label. The join shape carries that guarantee, not the foreign key
+		// alone, which is the same reason the tag dimension joins inner.
+		return facetSpec{
+			join:    " INNER JOIN podcast fpod ON fpod.id = ep.podcast_id",
+			groupBy: "ep.podcast_id", keyExpr: "fpod.pid", display: "fpod.title", sortExpr: "fpod.sort_key",
+			entity: true, kindWhere: onlyEpisodes,
 		}, true
 	}
 	// A custom-tag dimension: group items by the values of one tag key. The INNER JOIN
@@ -116,7 +138,18 @@ func facetSpecFor(g read.GroupBy) (facetSpec, bool) {
 // facet is an aggregation over the full match set, not a row window). A filter
 // over a per-user field scopes to userPID's play_state (empty selects the
 // default user).
-func (s *Store) Facet(ctx context.Context, q query.Query, g read.GroupBy, userPID model.PID) (*read.FacetResult, error) {
+//
+// order selects the bucket order (empty = collation order; see read.FacetOrder) and
+// limit truncates the result (<= 0 = every bucket). Together they are the top-N
+// shelf: `facet artist --order count --limit 5`.
+//
+// Understand what limit does and does not cost. A facet aggregates the whole match
+// set no matter what: the GROUP BY, the COUNT(DISTINCT), and the sort of every
+// bucket all run in full, and limit bounds only the rows returned. That is also why
+// paging a facet is not offered: a cursor would re-run the entire aggregation for
+// every page. For an index over a large dimension, enumerate the entities instead
+// (EntityPage), which is O(page) off the entity table's sort_key index.
+func (s *Store) Facet(ctx context.Context, q query.Query, g read.GroupBy, order read.FacetOrder, limit int, userPID model.PID) (*read.FacetResult, error) {
 	const op = "store.Facet"
 	fm, ok := fieldMapFor(q.Entity)
 	if !ok {
@@ -126,6 +159,9 @@ func (s *Store) Facet(ctx context.Context, q query.Query, g read.GroupBy, userPI
 	if !ok {
 		return nil, waxerr.New(waxerr.CodeInvalid, op, "unsupported group-by: "+string(g))
 	}
+	if !order.Valid() {
+		return nil, waxerr.New(waxerr.CodeInvalid, op, "unsupported facet order: "+string(order))
+	}
 	c, err := query.Compile(q, fm)
 	if err != nil {
 		return nil, err
@@ -134,33 +170,46 @@ func (s *Store) Facet(ctx context.Context, q query.Query, g read.GroupBy, userPI
 	if err != nil {
 		return nil, err
 	}
-	where := andWhere(c.Where, entityPredicate(q.Entity))
-	if spec.noEpisodes {
-		where = andWhere(where, "pi.kind <> 'episode'")
-	}
+	where := andWhere(andWhere(c.Where, entityPredicate(q.Entity)), spec.kindWhere)
 	if where == "" {
 		where = "1=1"
 	}
 
+	// The label order's three terms: the unknown bucket last, then the dimension's
+	// sort key, then its display as a final tiebreak. The count order prefixes the
+	// descending count onto the same three, so ties stay in collation order and the
+	// result is deterministic rather than whatever order the grouping happened to
+	// produce.
+	orderBy := fmt.Sprintf("(%s IS NULL), %s, %s", spec.sortExpr, spec.sortExpr, spec.display)
+	if order == read.FacetOrderCount {
+		orderBy = "COUNT(DISTINCT pi.id) DESC, " + orderBy
+	}
+
 	// Arg order follows the statement's clause order: the user join's ON clause (its
 	// user id, in leadArgs) comes right after itemJoins, then the facet dimension join's
-	// placeholders (spec.joinArgs, e.g. a tag key), then the WHERE args (c.Args). A
-	// custom-tag facet's join binds the tag key here, which is why the ordering is
-	// spelled out rather than assuming the dimension join binds nothing.
+	// placeholders (spec.joinArgs, e.g. a tag key), then the WHERE args (c.Args), and
+	// last the limit. A custom-tag facet's join binds the tag key here, which is why
+	// the ordering is spelled out rather than assuming the dimension join binds nothing.
+	limitClause := ""
+	if limit > 0 {
+		limitClause = " LIMIT ?"
+	}
 	stmt := fmt.Sprintf(
-		"SELECT %s, %s, COUNT(DISTINCT pi.id)%s%s%s WHERE %s GROUP BY %s ORDER BY (%s IS NULL), %s, %s",
-		spec.keyExpr, spec.display, itemJoins, userJoin, spec.join, where, spec.groupBy,
-		spec.sortExpr, spec.sortExpr, spec.display)
+		"SELECT %s, %s, COUNT(DISTINCT pi.id)%s%s%s WHERE %s GROUP BY %s ORDER BY %s%s",
+		spec.keyExpr, spec.display, itemJoins, userJoin, spec.join, where, spec.groupBy, orderBy, limitClause)
 
 	// Assemble args in clause order: user id (the join ON clause), then the facet
-	// dimension join's args (spec.joinArgs, e.g. the tag key), then the WHERE args. A
-	// fresh slice is needed because spec.joinArgs sits between leadArgs and c.Args; the
-	// sibling readers (QueryItems/CountItems/QueryPage) have no middle args and append
-	// c.Args onto leadArgs directly.
-	args := make([]any, 0, len(leadArgs)+len(spec.joinArgs)+len(c.Args))
+	// dimension join's args (spec.joinArgs, e.g. the tag key), then the WHERE args, and
+	// last the limit. A fresh slice is needed because spec.joinArgs sits between
+	// leadArgs and c.Args; the sibling readers (QueryItems/CountItems/QueryPage) have no
+	// middle args and append c.Args onto leadArgs directly.
+	args := make([]any, 0, len(leadArgs)+len(spec.joinArgs)+len(c.Args)+1)
 	args = append(args, leadArgs...)
 	args = append(args, spec.joinArgs...)
 	args = append(args, c.Args...)
+	if limitClause != "" {
+		args = append(args, limit)
+	}
 	rows, err := s.read.QueryContext(ctx, stmt, args...)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)

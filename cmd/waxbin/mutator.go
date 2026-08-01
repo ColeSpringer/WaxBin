@@ -216,28 +216,31 @@ func (m *mutator) MergeMany(ctx context.Context, et model.MergeEntity, survivor 
 	return m.lib.MergeMany(ctx, et, survivor, losers)
 }
 
-func (m *mutator) SetRating(ctx context.Context, userPID, itemPID model.PID, rating *int, asOf *int64) error {
+// The four star/rating mutations report whether they changed anything. The commands
+// discard it: each re-reads and prints the resulting state, and a no-op is silent by
+// convention.
+func (m *mutator) SetRating(ctx context.Context, userPID, itemPID model.PID, rating *int, asOf *int64) (bool, error) {
 	if m.px != nil {
 		return m.px.SetRating(ctx, userPID, itemPID, rating, asOf)
 	}
 	return m.lib.Playback().SetRating(ctx, userPID, itemPID, rating, asOf)
 }
 
-func (m *mutator) SetStar(ctx context.Context, userPID, itemPID model.PID, starred bool, asOf *int64) error {
+func (m *mutator) SetStar(ctx context.Context, userPID, itemPID model.PID, starred bool, asOf *int64) (bool, error) {
 	if m.px != nil {
 		return m.px.SetStar(ctx, userPID, itemPID, starred, asOf)
 	}
 	return m.lib.Playback().SetStar(ctx, userPID, itemPID, starred, asOf)
 }
 
-func (m *mutator) SetEntityStar(ctx context.Context, userPID model.PID, kind model.MergeEntity, entityPID model.PID, starred bool, asOf *int64) error {
+func (m *mutator) SetEntityStar(ctx context.Context, userPID model.PID, kind model.MergeEntity, entityPID model.PID, starred bool, asOf *int64) (bool, error) {
 	if m.px != nil {
 		return m.px.SetEntityStar(ctx, userPID, kind, entityPID, starred, asOf)
 	}
 	return m.lib.SetEntityStar(ctx, userPID, kind, entityPID, starred, asOf)
 }
 
-func (m *mutator) SetEntityRating(ctx context.Context, userPID model.PID, kind model.MergeEntity, entityPID model.PID, rating *int, asOf *int64) error {
+func (m *mutator) SetEntityRating(ctx context.Context, userPID model.PID, kind model.MergeEntity, entityPID model.PID, rating *int, asOf *int64) (bool, error) {
 	if m.px != nil {
 		return m.px.SetEntityRating(ctx, userPID, kind, entityPID, rating, asOf)
 	}

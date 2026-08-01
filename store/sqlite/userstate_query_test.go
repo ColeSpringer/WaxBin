@@ -55,10 +55,10 @@ func TestQueryUserStateFields(t *testing.T) {
 
 	// Alpha: rated 80 + starred + played twice. Bravo: rated 20. Charlie: untouched.
 	r80, r20 := 80, 20
-	if err := st.SetRating(ctx, "", ids["Alpha"], &r80, nil); err != nil {
+	if _, err := st.SetRating(ctx, "", ids["Alpha"], &r80, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.SetStar(ctx, "", ids["Alpha"], true, nil); err != nil {
+	if _, err := st.SetStar(ctx, "", ids["Alpha"], true, nil); err != nil {
 		t.Fatal(err)
 	}
 	for i := 0; i < 2; i++ {
@@ -66,7 +66,7 @@ func TestQueryUserStateFields(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := st.SetRating(ctx, "", ids["Bravo"], &r20, nil); err != nil {
+	if _, err := st.SetRating(ctx, "", ids["Bravo"], &r20, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -144,7 +144,7 @@ func TestQueryUserStateCrossUserIsolation(t *testing.T) {
 	if err := st.MarkPlayed(ctx, "", ids["Alpha"], false); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.SetRating(ctx, "", ids["Alpha"], &r90, nil); err != nil {
+	if _, err := st.SetRating(ctx, "", ids["Alpha"], &r90, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -232,10 +232,10 @@ func TestSmartPlaylistPerUser(t *testing.T) {
 	bob, _ := st.CreateUser(ctx, "bob")
 
 	// Alpha starred for the default user; Bravo starred for bob.
-	if err := st.SetStar(ctx, "", ids["Alpha"], true, nil); err != nil {
+	if _, err := st.SetStar(ctx, "", ids["Alpha"], true, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.SetStar(ctx, bob.PID, ids["Bravo"], true, nil); err != nil {
+	if _, err := st.SetStar(ctx, bob.PID, ids["Bravo"], true, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -345,7 +345,7 @@ func TestQueryUnknownUserValidated(t *testing.T) {
 	if _, err := st.QueryPage(ctx, noUserField, "", 10, false, "nope"); !waxerr.Is(err, waxerr.CodeNotFound) {
 		t.Errorf("QueryPage unknown user: want CodeNotFound, got %v", err)
 	}
-	if _, err := st.Facet(ctx, noUserField, read.GroupGenre, "nope"); !waxerr.Is(err, waxerr.CodeNotFound) {
+	if _, err := st.Facet(ctx, noUserField, read.GroupGenre, "", 0, "nope"); !waxerr.Is(err, waxerr.CodeNotFound) {
 		t.Errorf("Facet unknown user: want CodeNotFound, got %v", err)
 	}
 
@@ -368,7 +368,7 @@ func TestFacetUserState(t *testing.T) {
 
 	// Facet the played items by genre: only Rock (A) has a play.
 	q := query.New(query.EntityItems).Where("play_count", query.OpGt, 0).Build()
-	res, err := st.Facet(ctx, q, read.GroupGenre, "")
+	res, err := st.Facet(ctx, q, read.GroupGenre, "", 0, "")
 	if err != nil {
 		t.Fatalf("facet: %v", err)
 	}

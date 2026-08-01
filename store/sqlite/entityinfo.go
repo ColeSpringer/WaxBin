@@ -100,6 +100,118 @@ func (s *Store) EntityByPID(ctx context.Context, kind read.EntityKind, pid model
 	return info, nil
 }
 
+// entityTable returns the table backing an entity kind. The value is a constant
+// chosen by a validated kind, never caller text, so it is safe to concatenate.
+func entityTable(kind read.EntityKind) string {
+	switch kind {
+	case read.EntityArtist:
+		return "artist"
+	case read.EntityReleaseGroup:
+		return "release_group"
+	case read.EntityAlbum:
+		return "album"
+	case read.EntityGenre:
+		return "genre"
+	case read.EntitySeries:
+		return "series"
+	}
+	return ""
+}
+
+// EntityPage enumerates one kind's entities in collation order (sort_key, then pid
+// as a tiebreak), keyset-paginated: the entity-side twin of QueryPage. It is the
+// alphabetical index a large dimension wants, where paging a facet would re-run the
+// full aggregation per page. A non-empty but malformed cursor is rejected rather
+// than silently restarting, and limit <= 0 takes the default page size.
+//
+// It runs in two steps: walk the table's sort_key index for this page's pids, then
+// hand them to EntityByPIDs and restore the keyset order. Hydrating through the
+// existing batch read is deliberate. It means a page row is identical to a looked-up
+// row by construction, with no second definition of what an entity summary is, and it
+// already fills counts, parent links, and LibraryPIDs.
+//
+// The cost of those two steps is that they are two statements on the read pool, so an
+// entity deleted between them is enumerated but not hydrated, and Entities comes back
+// shorter than limit while HasMore and Next still describe the enumeration. No entity
+// is skipped or repeated by that: the cursor still points at the last enumerated row,
+// so the next page resumes correctly. Page a drain on HasMore rather than on a
+// non-empty Entities, since a page whose entities were all deleted is legitimately
+// empty with more to come. QueryPage has no such window because its page is one
+// statement; buying that here would mean restating what an entity summary is.
+func (s *Store) EntityPage(ctx context.Context, kind read.EntityKind, cursor read.Cursor, limit int) (*read.EntityPage, error) {
+	const op = "store.EntityPage"
+	if !kind.Valid() {
+		return nil, waxerr.New(waxerr.CodeInvalid, op, "unknown entity kind: "+string(kind))
+	}
+	if limit <= 0 {
+		limit = defaultPageSize
+	}
+	// A validated whitelist value, never user text. The empty check is the loud
+	// failure for a kind added to EntityKind.Valid but not to entityTable, which would
+	// otherwise interpolate nothing and surface as a SQL syntax error.
+	table := entityTable(kind)
+	if table == "" {
+		return nil, waxerr.New(waxerr.CodeInvalid, op, "no table for entity kind: "+string(kind))
+	}
+
+	stmt := "SELECT pid, sort_key FROM " + table
+	var args []any
+	if cursor != "" {
+		sk, pid, ok := cursor.Decode()
+		if !ok {
+			return nil, waxerr.New(waxerr.CodeInvalid, op, "malformed page cursor")
+		}
+		// SQLite row-value comparison, the same shape QueryPage uses: the planner
+		// drives it off the sort_key index directly and it needs only two binds.
+		stmt += " WHERE (sort_key, pid) > (?, ?)"
+		args = append(args, sk, string(pid))
+	}
+	stmt += " ORDER BY sort_key, pid LIMIT ?"
+	args = append(args, limit+1) // one extra to detect a further page
+
+	rows, err := s.read.QueryContext(ctx, stmt, args...)
+	if err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	defer rows.Close()
+	var pids []model.PID
+	var sortKeys []string
+	for rows.Next() {
+		var pid, sortKey string
+		if err := rows.Scan(&pid, &sortKey); err != nil {
+			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		pids = append(pids, model.PID(pid))
+		sortKeys = append(sortKeys, sortKey)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+
+	page := &read.EntityPage{Kind: kind}
+	// The extra row only signals a further page; the next cursor points at the last
+	// row this page returns, not the dropped probe.
+	if len(pids) > limit {
+		pids, sortKeys = pids[:limit], sortKeys[:limit]
+		page.HasMore = true
+		page.Next = read.EncodeCursor(sortKeys[limit-1], pids[limit-1])
+	}
+	if len(pids) == 0 {
+		return page, nil
+	}
+	byPID, err := s.EntityByPIDs(ctx, kind, pids)
+	if err != nil {
+		return nil, err
+	}
+	page.Entities = make([]*read.EntityInfo, 0, len(pids))
+	for _, pid := range pids {
+		if info, ok := byPID[pid]; ok {
+			page.Entities = append(page.Entities, info)
+		}
+	}
+	return page, nil
+}
+
 // entityMemberSource returns the FROM/JOIN clause reaching an entity's member
 // items' primary backing files, and the expression selecting each member's entity
 // id. It is shared by the single and batched library-pid lookups so the two can

@@ -33,10 +33,10 @@ func TestEntityStarRatingReadBack(t *testing.T) {
 	albumPID := model.PID(scalarStr(t, st, "SELECT pid FROM album WHERE title = ?", "Al"))
 	artistPID := entityPID(t, st, "artist", "X")
 
-	if err := st.SetEntityStar(ctx, "", model.MergeAlbum, albumPID, true, nil); err != nil {
+	if _, err := st.SetEntityStar(ctx, "", model.MergeAlbum, albumPID, true, nil); err != nil {
 		t.Fatalf("star album: %v", err)
 	}
-	if err := st.SetEntityStar(ctx, "", model.MergeArtist, artistPID, true, nil); err != nil {
+	if _, err := st.SetEntityStar(ctx, "", model.MergeArtist, artistPID, true, nil); err != nil {
 		t.Fatalf("star artist: %v", err)
 	}
 
@@ -69,20 +69,20 @@ func TestEntityStarRatingReadBack(t *testing.T) {
 
 	// Rating set, clamp above 100, then clear.
 	r := 80
-	if err := st.SetEntityRating(ctx, "", model.MergeAlbum, albumPID, &r, nil); err != nil {
+	if _, err := st.SetEntityRating(ctx, "", model.MergeAlbum, albumPID, &r, nil); err != nil {
 		t.Fatalf("rate album: %v", err)
 	}
 	if al, _ = st.EntityPlayState(ctx, "", model.MergeAlbum, albumPID); !al.HasRating || al.Rating != 80 {
 		t.Fatalf("album rating = %+v, want 80", al)
 	}
 	over := 150
-	if err := st.SetEntityRating(ctx, "", model.MergeAlbum, albumPID, &over, nil); err != nil {
+	if _, err := st.SetEntityRating(ctx, "", model.MergeAlbum, albumPID, &over, nil); err != nil {
 		t.Fatalf("rate album over: %v", err)
 	}
 	if al, _ = st.EntityPlayState(ctx, "", model.MergeAlbum, albumPID); al.Rating != 100 {
 		t.Errorf("over-100 rating = %d, want clamped to 100", al.Rating)
 	}
-	if err := st.SetEntityRating(ctx, "", model.MergeAlbum, albumPID, nil, nil); err != nil {
+	if _, err := st.SetEntityRating(ctx, "", model.MergeAlbum, albumPID, nil, nil); err != nil {
 		t.Fatalf("clear album rating: %v", err)
 	}
 	if al, _ = st.EntityPlayState(ctx, "", model.MergeAlbum, albumPID); al.HasRating {
@@ -138,10 +138,10 @@ func TestStarredEntitiesRecencyOrder(t *testing.T) {
 	second := model.PID(scalarStr(t, st, "SELECT pid FROM album WHERE title = ?", "Second"))
 
 	ns := func(v int64) *int64 { return &v }
-	if err := st.SetEntityStar(ctx, "", model.MergeAlbum, first, true, ns(100)); err != nil {
+	if _, err := st.SetEntityStar(ctx, "", model.MergeAlbum, first, true, ns(100)); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.SetEntityStar(ctx, "", model.MergeAlbum, second, true, ns(200)); err != nil {
+	if _, err := st.SetEntityStar(ctx, "", model.MergeAlbum, second, true, ns(200)); err != nil {
 		t.Fatal(err)
 	}
 	got, err := st.StarredEntities(ctx, "", model.MergeAlbum)
@@ -166,7 +166,7 @@ func TestEntityStarAsOfRecordedTime(t *testing.T) {
 	ns := func(v int64) *int64 { return &v }
 
 	// Star recorded at 100: starred_at and the stamp both land in recorded time.
-	if err := st.SetEntityStar(ctx, "", model.MergeAlbum, album, true, ns(100)); err != nil {
+	if _, err := st.SetEntityStar(ctx, "", model.MergeAlbum, album, true, ns(100)); err != nil {
 		t.Fatal(err)
 	}
 	got, _ := st.EntityPlayState(ctx, "", model.MergeAlbum, album)
@@ -178,7 +178,7 @@ func TestEntityStarAsOfRecordedTime(t *testing.T) {
 	}
 
 	// Stale replay: an unstar recorded at 50 (not newer than 100) is skipped.
-	if err := st.SetEntityStar(ctx, "", model.MergeAlbum, album, false, ns(50)); err != nil {
+	if _, err := st.SetEntityStar(ctx, "", model.MergeAlbum, album, false, ns(50)); err != nil {
 		t.Fatal(err)
 	}
 	got, _ = st.EntityPlayState(ctx, "", model.MergeAlbum, album)
@@ -186,14 +186,14 @@ func TestEntityStarAsOfRecordedTime(t *testing.T) {
 		t.Errorf("stale unstar@50 = %+v, want still starred with stamp 100", got)
 	}
 	// Equal recorded time is stale too (not strictly newer).
-	if err := st.SetEntityStar(ctx, "", model.MergeAlbum, album, false, ns(100)); err != nil {
+	if _, err := st.SetEntityStar(ctx, "", model.MergeAlbum, album, false, ns(100)); err != nil {
 		t.Fatal(err)
 	}
 	if got, _ = st.EntityPlayState(ctx, "", model.MergeAlbum, album); !got.Starred {
 		t.Errorf("unstar@100 (equal) = %+v, want skipped", got)
 	}
 	// A value-identical re-star with any as-of stays a no-op preserving the stamp.
-	if err := st.SetEntityStar(ctx, "", model.MergeAlbum, album, true, ns(999)); err != nil {
+	if _, err := st.SetEntityStar(ctx, "", model.MergeAlbum, album, true, ns(999)); err != nil {
 		t.Fatal(err)
 	}
 	if got, _ = st.EntityPlayState(ctx, "", model.MergeAlbum, album); got.StarredChangedAt != 100 || got.StarredAt != 100 {
@@ -204,7 +204,7 @@ func TestEntityStarAsOfRecordedTime(t *testing.T) {
 	}
 
 	// A newer recorded time wins: unstar at 200 applies and advances the stamp.
-	if err := st.SetEntityStar(ctx, "", model.MergeAlbum, album, false, ns(200)); err != nil {
+	if _, err := st.SetEntityStar(ctx, "", model.MergeAlbum, album, false, ns(200)); err != nil {
 		t.Fatal(err)
 	}
 	got, _ = st.EntityPlayState(ctx, "", model.MergeAlbum, album)
@@ -225,21 +225,21 @@ func TestEntityRatingAsOfRecordedTime(t *testing.T) {
 	ns := func(v int64) *int64 { return &v }
 	r80, r60 := 80, 60
 
-	if err := st.SetEntityRating(ctx, "", model.MergeAlbum, album, &r80, ns(100)); err != nil {
+	if _, err := st.SetEntityRating(ctx, "", model.MergeAlbum, album, &r80, ns(100)); err != nil {
 		t.Fatal(err)
 	}
 	if got, _ := st.EntityPlayState(ctx, "", model.MergeAlbum, album); got.Rating != 80 || got.RatingChangedAt != 100 {
 		t.Fatalf("rate@100 = %+v, want 80 with stamp 100", got)
 	}
 	// Stale: a different value recorded at 50 is skipped.
-	if err := st.SetEntityRating(ctx, "", model.MergeAlbum, album, &r60, ns(50)); err != nil {
+	if _, err := st.SetEntityRating(ctx, "", model.MergeAlbum, album, &r60, ns(50)); err != nil {
 		t.Fatal(err)
 	}
 	if got, _ := st.EntityPlayState(ctx, "", model.MergeAlbum, album); got.Rating != 80 || got.RatingChangedAt != 100 {
 		t.Errorf("stale rate@50 = %+v, want unchanged 80/100", got)
 	}
 	// Newer wins.
-	if err := st.SetEntityRating(ctx, "", model.MergeAlbum, album, &r60, ns(200)); err != nil {
+	if _, err := st.SetEntityRating(ctx, "", model.MergeAlbum, album, &r60, ns(200)); err != nil {
 		t.Fatal(err)
 	}
 	if got, _ := st.EntityPlayState(ctx, "", model.MergeAlbum, album); got.Rating != 60 || got.RatingChangedAt != 200 {
@@ -256,27 +256,69 @@ func TestEntityStarIdempotentReimportNoDelta(t *testing.T) {
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/a/1.flac", essence: "e1", content: "c1", title: "One", artist: "X", album: "Al"})
 	album := model.PID(scalarStr(t, st, "SELECT pid FROM album WHERE title = ?", "Al"))
 
-	if err := st.SetEntityStar(ctx, "", model.MergeAlbum, album, true, nil); err != nil {
+	if _, err := st.SetEntityStar(ctx, "", model.MergeAlbum, album, true, nil); err != nil {
 		t.Fatal(err)
 	}
 	r := 70
-	if err := st.SetEntityRating(ctx, "", model.MergeAlbum, album, &r, nil); err != nil {
+	if _, err := st.SetEntityRating(ctx, "", model.MergeAlbum, album, &r, nil); err != nil {
 		t.Fatal(err)
 	}
 	afterFirst := entityStateDeltas(t, st, album)
 
 	// Re-send the identical star and rating twice: no new deltas.
 	for i := 0; i < 2; i++ {
-		if err := st.SetEntityStar(ctx, "", model.MergeAlbum, album, true, nil); err != nil {
+		if _, err := st.SetEntityStar(ctx, "", model.MergeAlbum, album, true, nil); err != nil {
 			t.Fatal(err)
 		}
-		if err := st.SetEntityRating(ctx, "", model.MergeAlbum, album, &r, nil); err != nil {
+		if _, err := st.SetEntityRating(ctx, "", model.MergeAlbum, album, &r, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
 	if n := entityStateDeltas(t, st, album); n != afterFirst {
 		t.Errorf("idempotent re-import moved the delta count %d -> %d, want unchanged", afterFirst, n)
 	}
+}
+
+// TestEntityStateChangedAgreesWithDelta is the entity twin of
+// TestPlayStateChangedAgreesWithDelta: the bool SetEntityStar and SetEntityRating return
+// is true exactly when an entity_play_state delta was appended, across every no-op case
+// (value-identical, clear-of-never-set, stale replay) and the real changes between them.
+// Each step asserts the bool against the delta count rather than a hardcoded expectation,
+// so the suppression and the report cannot drift apart.
+func TestEntityStateChangedAgreesWithDelta(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/a/1.flac", essence: "e1", content: "c1", title: "One", artist: "X", album: "Al"})
+	album := model.PID(scalarStr(t, st, "SELECT pid FROM album WHERE title = ?", "Al"))
+	ns := func(v int64) *int64 { return &v }
+
+	before := entityStateDeltas(t, st, album)
+	step := func(what string, mut func() (bool, error)) {
+		t.Helper()
+		changed, err := mut()
+		if err != nil {
+			t.Fatalf("%s: %v", what, err)
+		}
+		now := entityStateDeltas(t, st, album)
+		if wrote := now > before; wrote != changed {
+			t.Errorf("%s reported changed=%v but the delta count went %d -> %d", what, changed, before, now)
+		}
+		before = now
+	}
+
+	r80, r60 := 80, 60
+	step("clear unset rating", func() (bool, error) { return st.SetEntityRating(ctx, "", model.MergeAlbum, album, nil, nil) })
+	step("unstar untouched", func() (bool, error) { return st.SetEntityStar(ctx, "", model.MergeAlbum, album, false, nil) })
+	step("star @100", func() (bool, error) { return st.SetEntityStar(ctx, "", model.MergeAlbum, album, true, ns(100)) })
+	step("older replay @50", func() (bool, error) { return st.SetEntityStar(ctx, "", model.MergeAlbum, album, false, ns(50)) })
+	step("same-time replay @100", func() (bool, error) { return st.SetEntityStar(ctx, "", model.MergeAlbum, album, false, ns(100)) })
+	step("re-star @999", func() (bool, error) { return st.SetEntityStar(ctx, "", model.MergeAlbum, album, true, ns(999)) })
+	step("rate 80 @100", func() (bool, error) { return st.SetEntityRating(ctx, "", model.MergeAlbum, album, &r80, ns(100)) })
+	step("older replay @50", func() (bool, error) { return st.SetEntityRating(ctx, "", model.MergeAlbum, album, &r60, ns(50)) })
+	step("identical re-rate @999", func() (bool, error) { return st.SetEntityRating(ctx, "", model.MergeAlbum, album, &r80, ns(999)) })
+	step("rate 60 @999", func() (bool, error) { return st.SetEntityRating(ctx, "", model.MergeAlbum, album, &r60, ns(999)) })
+	step("clear set rating", func() (bool, error) { return st.SetEntityRating(ctx, "", model.MergeAlbum, album, nil, ns(1500)) })
+	step("re-clear rating", func() (bool, error) { return st.SetEntityRating(ctx, "", model.MergeAlbum, album, nil, ns(2000)) })
 }
 
 // TestEntityStateMergeConflict drives repointEntityPlayState: two users each starred both
@@ -303,10 +345,10 @@ func TestEntityStateMergeConflict(t *testing.T) {
 	// picked by recorded time it would keep the loser's 200, so a surviving stamp of 100
 	// proves survivor-wins-by-position.
 	for _, u := range []model.PID{"", bob.PID} {
-		if err := st.SetEntityStar(ctx, u, model.MergeReleaseGroup, surv, true, ns(100)); err != nil {
+		if _, err := st.SetEntityStar(ctx, u, model.MergeReleaseGroup, surv, true, ns(100)); err != nil {
 			t.Fatal(err)
 		}
-		if err := st.SetEntityStar(ctx, u, model.MergeReleaseGroup, lose, true, ns(200)); err != nil {
+		if _, err := st.SetEntityStar(ctx, u, model.MergeReleaseGroup, lose, true, ns(200)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -349,11 +391,11 @@ func TestEntityStateMergeUnionsDisjoint(t *testing.T) {
 
 	// Survivor is rated (no star); loser is starred (no rating). No field conflicts.
 	r := 80
-	if err := st.SetEntityRating(ctx, "", model.MergeReleaseGroup, surv, &r, nil); err != nil {
+	if _, err := st.SetEntityRating(ctx, "", model.MergeReleaseGroup, surv, &r, nil); err != nil {
 		t.Fatal(err)
 	}
 	ns := func(v int64) *int64 { return &v }
-	if err := st.SetEntityStar(ctx, "", model.MergeReleaseGroup, lose, true, ns(200)); err != nil {
+	if _, err := st.SetEntityStar(ctx, "", model.MergeReleaseGroup, lose, true, ns(200)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -391,13 +433,13 @@ func TestEntityStateMergeKeepsClearedRating(t *testing.T) {
 
 	// Survivor: rate then clear, leaving rating NULL with rating_changed_at set. Loser: 90.
 	r50, r90 := 50, 90
-	if err := st.SetEntityRating(ctx, "", model.MergeReleaseGroup, surv, &r50, nil); err != nil {
+	if _, err := st.SetEntityRating(ctx, "", model.MergeReleaseGroup, surv, &r50, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.SetEntityRating(ctx, "", model.MergeReleaseGroup, surv, nil, nil); err != nil {
+	if _, err := st.SetEntityRating(ctx, "", model.MergeReleaseGroup, surv, nil, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.SetEntityRating(ctx, "", model.MergeReleaseGroup, lose, &r90, nil); err != nil {
+	if _, err := st.SetEntityRating(ctx, "", model.MergeReleaseGroup, lose, &r90, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -419,7 +461,7 @@ func TestEntityStateOrphanLockstep(t *testing.T) {
 	r := putTrack(t, st, lib.ID, trackSpec{path: "/lib/a/1.flac", essence: "e1", content: "c1", title: "One", artist: "X", album: "Al"})
 	album := model.PID(scalarStr(t, st, "SELECT pid FROM album WHERE title = ?", "Al"))
 
-	if err := st.SetEntityStar(ctx, "", model.MergeAlbum, album, true, nil); err != nil {
+	if _, err := st.SetEntityStar(ctx, "", model.MergeAlbum, album, true, nil); err != nil {
 		t.Fatal(err)
 	}
 	if n := scalarInt(t, st, "SELECT COUNT(*) FROM entity_play_state"); n != 1 {

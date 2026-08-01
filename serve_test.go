@@ -1,9 +1,11 @@
 package waxbin_test
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -146,10 +148,10 @@ func TestServeProxiedMutations(t *testing.T) {
 
 	// Play-state mutations round-trip.
 	rating := 80
-	if err := c.SetRating(ctx, "", pid, &rating, nil); err != nil {
+	if _, err := c.SetRating(ctx, "", pid, &rating, nil); err != nil {
 		t.Fatalf("proxied rating: %v", err)
 	}
-	if err := c.SetStar(ctx, "", pid, true, nil); err != nil {
+	if _, err := c.SetStar(ctx, "", pid, true, nil); err != nil {
 		t.Fatalf("proxied star: %v", err)
 	}
 	st, err := c.PlayState(ctx, "", pid)
@@ -165,7 +167,7 @@ func TestServeProxiedMutations(t *testing.T) {
 	// the item stays starred. This exercises the client encode, server decode, and
 	// store recorded-time guard end to end.
 	oldNS := int64(1_000_000_000) // 1970, older than the server-now star above
-	if err := c.SetStar(ctx, "", pid, false, &oldNS); err != nil {
+	if _, err := c.SetStar(ctx, "", pid, false, &oldNS); err != nil {
 		t.Fatalf("proxied stale unstar: %v", err)
 	}
 	if st, err = c.PlayState(ctx, "", pid); err != nil {
@@ -189,6 +191,23 @@ func TestServeProxiedMutations(t *testing.T) {
 	}
 }
 
+// albumPIDFromFacet returns the pid of the first album entity in the catalog, read
+// through the album facet, the same enumeration WaxDeck uses to find one.
+func albumPIDFromFacet(t *testing.T, ctx context.Context, lib *waxbin.Library) model.PID {
+	t.Helper()
+	fr, err := lib.Facet(ctx, query.New(query.EntityItems).Build(), read.GroupAlbum, "", 0, "")
+	if err != nil {
+		t.Fatalf("album facet: %v", err)
+	}
+	for _, b := range fr.Buckets {
+		if b.EntityPID != "" {
+			return b.EntityPID
+		}
+	}
+	t.Fatal("no album entity pid from the album facet")
+	return ""
+}
+
 // TestServeProxiedEntityStar drives set_entity_star / set_entity_rating end to end: an
 // album entity is starred and rated over the wire and read back through the served
 // library, and the as-of stamp rides asOfNs so a stale replay is skipped by the recorded
@@ -201,32 +220,16 @@ func TestServeProxiedEntityStar(t *testing.T) {
 	writeFile(t, filepath.Join(root, "song.mp3"), testaudio.BuildMP3("Original", "Old Artist", "Album", 1))
 
 	lib := openServed(t, ctx, db, root, sock)
-
-	// The album entity pid comes from the album facet (the exact enumeration WaxDeck uses).
-	fr, err := lib.Facet(ctx, query.New(query.EntityItems).Build(), read.GroupAlbum, "")
-	if err != nil {
-		t.Fatalf("album facet: %v", err)
-	}
-	var albumPID model.PID
-	for _, b := range fr.Buckets {
-		if b.EntityPID != "" {
-			albumPID = b.EntityPID
-			break
-		}
-	}
-	if albumPID == "" {
-		t.Fatal("no album entity pid from the album facet")
-	}
-
+	albumPID := albumPIDFromFacet(t, ctx, lib)
 	c := dialWhenReady(t, sock)
 
 	// Star and rate the album entity over the wire; read back through the served library
 	// (entity state has no proxy read method by design, so the read is in-process).
-	if err := c.SetEntityStar(ctx, "", model.MergeAlbum, albumPID, true, nil); err != nil {
+	if _, err := c.SetEntityStar(ctx, "", model.MergeAlbum, albumPID, true, nil); err != nil {
 		t.Fatalf("proxied entity star: %v", err)
 	}
 	rating := 90
-	if err := c.SetEntityRating(ctx, "", model.MergeAlbum, albumPID, &rating, nil); err != nil {
+	if _, err := c.SetEntityRating(ctx, "", model.MergeAlbum, albumPID, &rating, nil); err != nil {
 		t.Fatalf("proxied entity rating: %v", err)
 	}
 	st, err := lib.EntityPlayState(ctx, "", model.MergeAlbum, albumPID)
@@ -241,7 +244,7 @@ func TestServeProxiedEntityStar(t *testing.T) {
 	// server-now star above) is skipped as a stale replay, so the album stays starred.
 	// This exercises the client encode, server decode, and store guard end to end.
 	oldNS := int64(1_000_000_000) // 1970
-	if err := c.SetEntityStar(ctx, "", model.MergeAlbum, albumPID, false, &oldNS); err != nil {
+	if _, err := c.SetEntityStar(ctx, "", model.MergeAlbum, albumPID, false, &oldNS); err != nil {
 		t.Fatalf("proxied stale entity unstar: %v", err)
 	}
 	if st, err = lib.EntityPlayState(ctx, "", model.MergeAlbum, albumPID); err != nil {
@@ -249,6 +252,85 @@ func TestServeProxiedEntityStar(t *testing.T) {
 	}
 	if !st.Starred {
 		t.Fatalf("stale as-of entity unstar was applied over the wire (state %+v), want skipped", st)
+	}
+}
+
+// TestServeProxiedChangedBool drives the changed bool of the four star/rating methods
+// over the wire: a real flip reports true, an immediate value-identical repeat reports
+// false, for both the item and the entity twins. It also pins why the protocol version
+// had to move: a version-4 frame carries no result payload, which would decode as
+// changed=false and make every proxied write look like a no-op, so the server must refuse
+// it outright rather than answer it.
+func TestServeProxiedChangedBool(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	sock := filepath.Join(t.TempDir(), "wax.sock")
+	writeFile(t, filepath.Join(root, "song.mp3"), testaudio.BuildMP3("Original", "Old Artist", "Album", 1))
+
+	lib := openServed(t, ctx, db, root, sock)
+	pid := itemPIDByTitle(t, ctx, lib, "Original")
+	c := dialWhenReady(t, sock)
+
+	rating := 80
+	if changed, err := c.SetRating(ctx, "", pid, &rating, nil); err != nil || !changed {
+		t.Fatalf("first proxied rating: changed=%v err=%v, want true", changed, err)
+	}
+	if changed, err := c.SetRating(ctx, "", pid, &rating, nil); err != nil || changed {
+		t.Fatalf("identical proxied re-rate: changed=%v err=%v, want false", changed, err)
+	}
+	if changed, err := c.SetStar(ctx, "", pid, true, nil); err != nil || !changed {
+		t.Fatalf("first proxied star: changed=%v err=%v, want true", changed, err)
+	}
+	if changed, err := c.SetStar(ctx, "", pid, true, nil); err != nil || changed {
+		t.Fatalf("proxied re-star: changed=%v err=%v, want false", changed, err)
+	}
+
+	albumPID := albumPIDFromFacet(t, ctx, lib)
+	if changed, err := c.SetEntityStar(ctx, "", model.MergeAlbum, albumPID, true, nil); err != nil || !changed {
+		t.Fatalf("first proxied entity star: changed=%v err=%v, want true", changed, err)
+	}
+	if changed, err := c.SetEntityStar(ctx, "", model.MergeAlbum, albumPID, true, nil); err != nil || changed {
+		t.Fatalf("proxied entity re-star: changed=%v err=%v, want false", changed, err)
+	}
+	if changed, err := c.SetEntityRating(ctx, "", model.MergeAlbum, albumPID, &rating, nil); err != nil || !changed {
+		t.Fatalf("first proxied entity rating: changed=%v err=%v, want true", changed, err)
+	}
+	if changed, err := c.SetEntityRating(ctx, "", model.MergeAlbum, albumPID, &rating, nil); err != nil || changed {
+		t.Fatalf("identical proxied entity re-rate: changed=%v err=%v, want false", changed, err)
+	}
+
+	// A hand-built version-4 set_star frame: refused with a typed error, so a client
+	// speaking the older protocol gets a distinct failure instead of a silent false.
+	conn, err := net.Dial("unix", sock)
+	if err != nil {
+		t.Fatalf("raw dial: %v", err)
+	}
+	defer conn.Close()
+	frame := fmt.Sprintf(`{"v":4,"method":%q,"params":{"userPid":"","itemPid":%q,"starred":false}}`+"\n",
+		proxy.MethodSetStar, pid)
+	if _, err := conn.Write([]byte(frame)); err != nil {
+		t.Fatalf("raw write: %v", err)
+	}
+	line, err := bufio.NewReader(conn).ReadString('\n')
+	if err != nil {
+		t.Fatalf("raw read: %v", err)
+	}
+	var resp struct {
+		OK    bool `json:"ok"`
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(line), &resp); err != nil {
+		t.Fatalf("unmarshal %q: %v", line, err)
+	}
+	if resp.OK || resp.Error.Code != string(waxerr.CodeInvalid) {
+		t.Fatalf("v4 set_star response = %+v, want a CodeInvalid rejection", resp)
+	}
+	// The refused frame must not have unstarred the item.
+	if st, err := c.PlayState(ctx, "", pid); err != nil || !st.Starred {
+		t.Fatalf("play state after the refused v4 unstar = %+v (err %v), want still starred", st, err)
 	}
 }
 
