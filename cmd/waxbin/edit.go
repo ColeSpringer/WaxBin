@@ -111,7 +111,7 @@ func newEditCmd(g *globals) *cobra.Command {
 	f.StringVar(&qf.artist, "artist", "", "select items whose artist matches (substring)")
 	f.StringVar(&qf.album, "album", "", "select items whose album matches (substring)")
 	f.StringVar(&qf.genre, "genre", "", "select items with this genre (exact)")
-	f.StringVar(&qf.kind, "kind", "", "select items of this kind: track|book (exact)")
+	f.StringVar(&qf.kind, "kind", "", "select items of this kind ("+kindList()+", exact)")
 	f.StringVar(&qf.source, "source", "", "select items with this acquisition source (exact)")
 	f.IntVar(&qf.year, "year", 0, "select items of this year (exact)")
 	f.StringVar(&rulePath, "rule", "", "select items with a JSON rule document")

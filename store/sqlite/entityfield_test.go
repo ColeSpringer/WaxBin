@@ -22,26 +22,64 @@ func scalarStr(t *testing.T, st *Store, q string, args ...any) string {
 	return s
 }
 
-// putFeed upserts a podcast feed with remote (undownloaded) episodes.
-func putFeed(t *testing.T, st *Store, feedURL string, titles ...string) *model.UpsertFeedResult {
+// epSpec is one seeded episode. A zero pubNS stores NULL (nullInt64), which is the
+// undated episode recent-episodes excludes; the two explicit flags are independent
+// of each other and of the show's, which is what the paired advisory query fields
+// exist to express.
+type epSpec struct {
+	title    string
+	pubNS    int64
+	year     int
+	explicit bool
+}
+
+// putFeedSpec is the one feed-seeding helper the package uses; putFeed and
+// putFeedAdvisory are the two common shorthands over it. Every feed it writes is
+// titled "Cast" whatever its URL, so a test asserting on the show's display name does
+// not have to know which helper seeded it.
+func putFeedSpec(t *testing.T, st *Store, feedURL string, chExplicit bool, eps ...epSpec) *model.UpsertFeedResult {
 	t.Helper()
-	eps := make([]model.FeedEpisode, len(titles))
-	for i, tt := range titles {
-		eps[i] = model.FeedEpisode{
-			GUID: "guid-" + tt, Title: tt, EnclosureURL: feedURL + "/" + tt + ".mp3",
-			EnclosureType: "audio/mpeg", DurationMS: 1000, PubDateNS: int64(i+1) * 1_000_000_000,
+	fe := make([]model.FeedEpisode, len(eps))
+	for i, e := range eps {
+		fe[i] = model.FeedEpisode{
+			GUID: "guid-" + e.title, Title: e.title, EnclosureURL: feedURL + "/" + e.title + ".mp3",
+			EnclosureType: "audio/mpeg", DurationMS: 1000,
+			PubDateNS: e.pubNS, Year: e.year, Explicit: e.explicit,
 		}
 	}
 	res, err := st.UpsertFeed(context.Background(), model.UpsertFeedInput{
 		FeedURL:     feedURL,
 		IdentityKey: identity.PodcastKey("", feedURL),
-		Feed:        model.Feed{Title: "Cast", Author: "Host", Episodes: eps},
+		Feed:        model.Feed{Title: "Cast", Author: "Host", Explicit: chExplicit, Episodes: fe},
 		FetchedAtNS: 1,
 	})
 	if err != nil {
-		t.Fatalf("upsert feed: %v", err)
+		t.Fatalf("upsert feed %s: %v", feedURL, err)
 	}
 	return res
+}
+
+// putFeed upserts a podcast feed with remote (undownloaded) episodes, dated in
+// ascending order so a listing has a deterministic sequence.
+func putFeed(t *testing.T, st *Store, feedURL string, titles ...string) *model.UpsertFeedResult {
+	t.Helper()
+	eps := make([]epSpec, len(titles))
+	for i, tt := range titles {
+		eps[i] = epSpec{title: tt, pubNS: int64(i+1) * 1_000_000_000}
+	}
+	return putFeedSpec(t, st, feedURL, false, eps...)
+}
+
+// putFeedAdvisory upserts a feed carrying advisory flags: chExplicit is the
+// channel-level <itunes:explicit> and epExplicit names the episodes carrying the
+// item-level one.
+func putFeedAdvisory(t *testing.T, st *Store, feedURL string, chExplicit bool, epExplicit map[string]bool, titles ...string) *model.UpsertFeedResult {
+	t.Helper()
+	eps := make([]epSpec, len(titles))
+	for i, tt := range titles {
+		eps[i] = epSpec{title: tt, pubNS: int64(i+1) * 1_000_000_000, explicit: epExplicit[tt]}
+	}
+	return putFeedSpec(t, st, feedURL, chExplicit, eps...)
 }
 
 // countWhere counts items matching one condition over the items entity.
@@ -84,6 +122,7 @@ func TestEntityPIDFieldsMirrorFacets(t *testing.T) {
 		{read.GroupArtist, "artist_pid"},
 		{read.GroupAlbumArtist, "album_artist_pid"},
 		{read.GroupAlbum, "album_pid"},
+		{read.GroupReleaseGroup, "release_group_pid"},
 		{read.GroupGenre, "genre_pid"},
 		{read.GroupPodcast, "podcast_pid"},
 	} {
@@ -214,6 +253,15 @@ func TestLoweredIdentityFieldPlans(t *testing.T) {
 		// one pid lookup per query instead of one per row.
 		{"artist_pid", ""},
 		{"album_artist_pid", ""},
+		// release_group_pid belongs here and not with album_pid above, however much
+		// the joined alb alias makes it look indexed. Its plan is SCAN pi with a
+		// per-row probe into alb; the album_rg line that appears in this COUNT shape
+		// is that inner probe, and the itemSelect shape SQLite actually runs in
+		// production reaches alb by rowid without album_rg at all. Asserting the
+		// album_rg substring here would pass on a full catalog scan, which is the
+		// silent-false-pass this test exists to prevent, so it is asserted the other
+		// way: see TestReleaseGroupPIDScansOuterLoop below.
+		{"release_group_pid", ""},
 	} {
 		c, err := query.Compile(query.New(query.EntityItems).
 			Where(tc.field, query.OpIs, "some-pid").Build(), fm)
@@ -233,9 +281,69 @@ func TestLoweredIdentityFieldPlans(t *testing.T) {
 	}
 }
 
+// TestReleaseGroupPIDScansOuterLoop records what the release_group_pid filter
+// actually costs, over the itemSelect shape production runs rather than the COUNT
+// shape the plan table above compiles.
+//
+// It asserts the scan rather than an index, which is the unusual direction, so the
+// reason matters: an assertion that the field seeks album_rg passes on a plan whose
+// outer loop is a full catalog scan, because the album_rg line is the inner per-row
+// probe. Pinning the honest shape means a later change that genuinely narrows the
+// outer loop, by putting release_group_id on track, say, fails here and gets the
+// field promoted to the seeking group in the field map header along with this test.
+func TestReleaseGroupPIDScansOuterLoop(t *testing.T) {
+	st, lib := entityFixture(t)
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/a.flac", essence: "ea", content: "ca",
+		title: "A", artist: "X", albumArt: "X", album: "Al"})
+
+	fm, ok := fieldMapFor(query.EntityItems)
+	if !ok {
+		t.Fatal("no field map for items")
+	}
+	c, err := query.Compile(query.New(query.EntityItems).
+		Where("release_group_pid", query.OpIs, "some-pid").Build(), fm)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	lines := explainPlanLines(t, st, itemSelect+" WHERE "+c.Where, c.Args...)
+	plan := strings.Join(lines, "\n")
+	if !strings.Contains(plan, "SCAN pi") {
+		t.Errorf("release_group_pid no longer scans playable_item; if it now narrows the "+
+			"outer loop, move it to the seeking group in the itemFields header and in "+
+			"TestLoweredIdentityFieldPlans:\n%s", plan)
+	}
+	// The lowering itself must still hold: one pid resolution per query, not per row.
+	// The filter's subquery is the one that searches rgq, and its parent node is the
+	// line above it. Asserting on that relationship rather than on a subquery ordinal
+	// keeps the check working when the projection's own correlated subqueries are
+	// added to or removed (phase 4 changed that count, which is what a
+	// "CORRELATED SCALAR SUBQUERY 4" assertion would have silently tracked).
+	var parent string
+	for i, l := range lines {
+		if strings.Contains(l, "rgq") && i > 0 {
+			parent = lines[i-1]
+		}
+	}
+	if parent == "" {
+		t.Fatalf("no rgq lookup in the plan, so the pid is not being lowered at all:\n%s", plan)
+	}
+	if !strings.Contains(parent, "SCALAR SUBQUERY") || strings.Contains(parent, "CORRELATED") {
+		t.Errorf("release_group_pid lowering regressed to a per-row subquery (rgq sits under %q):\n%s",
+			parent, plan)
+	}
+}
+
 // explainPlan returns the EXPLAIN QUERY PLAN detail lines for a statement, joined by
 // newlines, for the plan assertions above.
 func explainPlan(t *testing.T, st *Store, stmt string, args ...any) string {
+	t.Helper()
+	return strings.Join(explainPlanLines(t, st, stmt, args...), "\n")
+}
+
+// explainPlanLines returns the plan's detail lines in order, for an assertion that
+// needs a node's position relative to its neighbours rather than a substring of the
+// whole plan.
+func explainPlanLines(t *testing.T, st *Store, stmt string, args ...any) []string {
 	t.Helper()
 	rows, err := st.read.QueryContext(context.Background(), "EXPLAIN QUERY PLAN "+stmt, args...)
 	if err != nil {
@@ -254,7 +362,7 @@ func explainPlan(t *testing.T, st *Store, stmt string, args ...any) string {
 	if err := rows.Err(); err != nil {
 		t.Fatalf("plan rows: %v", err)
 	}
-	return strings.Join(details, "\n")
+	return details
 }
 
 // TestLoweredIdentityFieldOperators pins the narrowed operator set on a value-lowered
@@ -265,12 +373,14 @@ func explainPlan(t *testing.T, st *Store, stmt string, args ...any) string {
 func TestLoweredIdentityFieldOperators(t *testing.T) {
 	st, _ := entityFixture(t)
 	ctx := context.Background()
-	for _, op := range []query.Op{query.OpGt, query.OpLt, query.OpGte, query.OpLte,
-		query.OpContains, query.OpStartsWith, query.OpEndsWith} {
-		_, err := st.QueryItems(ctx, query.New(query.EntityItems).
-			Where("artist_pid", op, "some-pid").Build(), "")
-		if !waxerr.Is(err, waxerr.CodeInvalid) {
-			t.Errorf("artist_pid %s: want CodeInvalid, got %v", op, err)
+	for _, field := range []string{"artist_pid", "release_group_pid"} {
+		for _, op := range []query.Op{query.OpGt, query.OpLt, query.OpGte, query.OpLte,
+			query.OpContains, query.OpStartsWith, query.OpEndsWith} {
+			_, err := st.QueryItems(ctx, query.New(query.EntityItems).
+				Where(field, op, "some-pid").Build(), "")
+			if !waxerr.Is(err, waxerr.CodeInvalid) {
+				t.Errorf("%s %s: want CodeInvalid, got %v", field, op, err)
+			}
 		}
 	}
 	_, err := st.QueryItems(ctx, query.New(query.EntityItems).
@@ -467,6 +577,58 @@ func TestHasArtAcrossKinds(t *testing.T) {
 	}
 	if n := countWhere(t, st, "has_art", query.OpIs, 0); n != 2 {
 		t.Errorf("has_art is 0 after album art = %d, want still 2 (inherited art is not own art)", n)
+	}
+}
+
+// TestAdvisoryFields pins why the advisory ask needs two fields rather than one.
+// A feed may mark <itunes:explicit> once at the channel level and leave every
+// episode unmarked, and WaxBin's parser reads the two flags independently with no
+// inheritance, so the channel-marked-only show is the case a single-field design
+// gets wrong: `explicit is 0` still returns every one of its episodes. The
+// restricted browse is the conjunction of both fields.
+func TestAdvisoryFields(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/1.flac", essence: "e1", content: "c1",
+		title: "Clean Track", artist: "X", album: "Al"})
+	// A wholly-explicit show: the flag sits on the channel and on no episode.
+	putFeedAdvisory(t, st, "http://cast.example/adult", true, nil, "A1", "A2")
+	// A clean show with one explicit episode: the flag sits on the item only.
+	putFeedAdvisory(t, st, "http://cast.example/mixed", false, map[string]bool{"B1": true}, "B1", "B2")
+
+	explicitItems, err := st.QueryItems(ctx, query.New(query.EntityItems).
+		Where("explicit", query.OpIs, 1).Build(), "")
+	if err != nil {
+		t.Fatalf("explicit query: %v", err)
+	}
+	if got := titlesOf(explicitItems); !equalStrings(got, []string{"B1"}) {
+		t.Errorf("explicit is 1 = %v, want just the item-marked episode [B1]", got)
+	}
+	showExplicit, err := st.QueryItems(ctx, query.New(query.EntityItems).
+		Where("podcast_explicit", query.OpIs, 1).OrderBy("title", false).Build(), "")
+	if err != nil {
+		t.Fatalf("podcast_explicit query: %v", err)
+	}
+	if got := titlesOf(showExplicit); !equalStrings(got, []string{"A1", "A2"}) {
+		t.Errorf("podcast_explicit is 1 = %v, want the channel-marked show's episodes [A1 A2]", got)
+	}
+	// The channel-marked episodes carry no item flag of their own, which is exactly
+	// what an explicit-only filter would miss.
+	if n := countWhere(t, st, "explicit", query.OpIs, 0); n != 4 {
+		t.Errorf("explicit is 0 = %d, want 4 (the track, A1, A2, and B2)", n)
+	}
+
+	// The restricted browse: neither the episode nor its show is marked. It keeps the
+	// track (a track reads 0 on both, since WaxBin stores no music advisory flag).
+	clean, err := st.QueryItems(ctx, query.New(query.EntityItems).
+		Where("explicit", query.OpIs, 0).
+		Where("podcast_explicit", query.OpIs, 0).
+		OrderBy("title", false).Build(), "")
+	if err != nil {
+		t.Fatalf("restricted query: %v", err)
+	}
+	if got := titlesOf(clean); !equalStrings(got, []string{"B2", "Clean Track"}) {
+		t.Errorf("restricted browse = %v, want [B2 Clean Track]", got)
 	}
 }
 

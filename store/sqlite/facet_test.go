@@ -114,6 +114,96 @@ func TestFacetByAlbum(t *testing.T) {
 	}
 }
 
+// detachReleaseGroup clears one album's release group, the state a scan never
+// produces on its own (resolveAlbumChain always chains an album to a group) but the
+// schema explicitly allows: album.release_group_id is nullable with
+// ON DELETE SET NULL, so a merged or GC'd group leaves exactly this behind. It is
+// what separates [No Release Group] from [Non-Album].
+func detachReleaseGroup(t *testing.T, st *Store, albumTitle string) {
+	t.Helper()
+	res, err := st.write.ExecContext(context.Background(),
+		"UPDATE album SET release_group_id = NULL WHERE title = ?", albumTitle)
+	if err != nil {
+		t.Fatalf("detach release group from %q: %v", albumTitle, err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		t.Fatalf("no album titled %q to detach", albumTitle)
+	}
+}
+
+// TestFacetByReleaseGroup covers the dimension above album: its buckets, the two
+// distinct unknown states it has to keep apart, and the drilldown through
+// release_group_pid that a bucket's EntityPID is for.
+func TestFacetByReleaseGroup(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	// Two editions of one record: same album artist and album title, different
+	// folders, so they are two albums under one release group.
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/cd/1.flac", essence: "e1", content: "c1",
+		title: "A", artist: "X", albumArt: "X", album: "Kid A"})
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/vinyl/2.flac", essence: "e2", content: "c2",
+		title: "B", artist: "X", albumArt: "X", album: "Kid A"})
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/other/3.flac", essence: "e3", content: "c3",
+		title: "C", artist: "Y", albumArt: "Y", album: "Insides"})
+	// A track on an album that has no release group, which is not the same state as
+	// having no album.
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/orphan/4.flac", essence: "e4", content: "c4",
+		title: "D", artist: "Z", albumArt: "Z", album: "Orphan"})
+	detachReleaseGroup(t, st, "Orphan")
+	// A book has no track row at all, so it lands in the same unknown bucket.
+	putBook(t, st, lib.ID, bookSpec{path: "/lib/book.m4b", essence: "be1", content: "bc1",
+		title: "Memoir", author: "Author", durationMS: 100})
+	// An episode is excluded from the dimension entirely (kindWhere), like every
+	// other music dimension.
+	putFeed(t, st, "http://cast.example/f", "Ep1")
+
+	res, err := st.Facet(ctx, query.New(query.EntityItems).Build(), read.GroupReleaseGroup, "", 0, "")
+	if err != nil {
+		t.Fatalf("facet releaseGroup: %v", err)
+	}
+	kidA, ok := bucketByDisplay(res, "Kid A")
+	if !ok || kidA.Count != 2 {
+		t.Fatalf("Kid A bucket = %+v, want count 2 (both editions under one group)", kidA)
+	}
+	if kidA.EntityPID == "" {
+		t.Error("release group bucket should carry the entity pid for drilldown")
+	}
+	if b, ok := bucketByDisplay(res, "Insides"); !ok || b.Count != 1 {
+		t.Errorf("Insides bucket = %+v, want count 1", b)
+	}
+	// The group-less track and the book share the unknown bucket; the episode is not
+	// in the dimension at all.
+	if b, ok := bucketByDisplay(res, read.NoReleaseGroup); !ok || b.Count != 2 || !b.IsUnknown {
+		t.Errorf("%s bucket = %+v, want count 2 + unknown (the group-less track and the book)",
+			read.NoReleaseGroup, b)
+	}
+	if _, ok := bucketByDisplay(res, "Cast"); ok {
+		t.Error("the episode's feed leaked into the release-group dimension")
+	}
+
+	// Drilldown: the bucket's EntityPID pairs with release_group_pid and returns
+	// exactly the bucket's count, whose item views carry the same handle.
+	items, err := st.QueryItems(ctx, query.New(query.EntityItems).
+		Where("release_group_pid", query.OpIs, string(kidA.EntityPID)).Build(), "")
+	if err != nil {
+		t.Fatalf("release group drilldown: %v", err)
+	}
+	if len(items) != kidA.Count {
+		t.Fatalf("drilldown returned %d items, want the bucket's %d", len(items), kidA.Count)
+	}
+	for _, it := range items {
+		if it.ReleaseGroupPID != kidA.EntityPID {
+			t.Errorf("drilldown item ReleaseGroupPID = %s, want the bucket pid %s",
+				it.ReleaseGroupPID, kidA.EntityPID)
+		}
+	}
+	// isMissing is the complement over the whole dimension plus the episode, since a
+	// NULL release_group_id covers no album, no group, and not a track.
+	if n := countWhere(t, st, "release_group_pid", query.OpIsMissing, nil); n != 3 {
+		t.Errorf("release_group_pid isMissing = %d, want 3 (the group-less track, the book, the episode)", n)
+	}
+}
+
 func TestFacetByYearAndKind(t *testing.T) {
 	st, lib := entityFixture(t)
 	ctx := context.Background()

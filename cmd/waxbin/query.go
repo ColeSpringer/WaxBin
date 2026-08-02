@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"text/tabwriter"
 
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/query"
@@ -76,13 +75,7 @@ func newQueryCmd(g *globals) *cobra.Command {
 			if g.jsonOut {
 				return printJSON(cmd, itemViews(items))
 			}
-			tw := tabwriter.NewWriter(out(cmd), 0, 2, 2, ' ', 0)
-			fmt.Fprintln(tw, "PID\tTITLE\tARTIST\tALBUM\tTRK\tYEAR")
-			for _, v := range items {
-				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%d\t%d\n",
-					v.PID, v.Title, v.Artist, v.Album, v.TrackNo, v.Year)
-			}
-			if err := tw.Flush(); err != nil {
+			if err := printItemTable(out(cmd), items); err != nil {
 				return err
 			}
 			fmt.Fprintf(out(cmd), "(%d items)\n", len(items))
@@ -94,7 +87,7 @@ func newQueryCmd(g *globals) *cobra.Command {
 	f.StringVar(&artist, "artist", "", "match artist (substring)")
 	f.StringVar(&album, "album", "", "match album (substring)")
 	f.StringVar(&genre, "genre", "", "match genre (exact)")
-	f.StringVar(&kind, "kind", "", "match kind: track|book|episode (exact)")
+	f.StringVar(&kind, "kind", "", "match kind ("+kindList()+", exact)")
 	f.StringVar(&source, "source", "", "match acquisition source: local|rss|youtube|manual (exact)")
 	f.IntVar(&year, "year", 0, "match year (exact)")
 	f.IntVar(&limit, "limit", 0, "limit results (0 = no limit)")
@@ -122,13 +115,7 @@ func runQueryPage(cmd *cobra.Command, g *globals, lib pager, q query.Query, page
 	if g.jsonOut {
 		return printJSON(cmd, toPageView(page))
 	}
-	tw := tabwriter.NewWriter(out(cmd), 0, 2, 2, ' ', 0)
-	fmt.Fprintln(tw, "PID\tTITLE\tARTIST\tALBUM\tTRK\tYEAR")
-	for _, v := range page.Items {
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%d\t%d\n",
-			v.PID, v.Title, v.Artist, v.Album, v.TrackNo, v.Year)
-	}
-	if err := tw.Flush(); err != nil {
+	if err := printItemTable(out(cmd), page.Items); err != nil {
 		return err
 	}
 	fmt.Fprintf(out(cmd), "(%d items)\n", len(page.Items))
@@ -136,6 +123,30 @@ func runQueryPage(cmd *cobra.Command, g *globals, lib pager, q query.Query, page
 		fmt.Fprintf(out(cmd), "next cursor: %s\n", page.Next)
 	}
 	return nil
+}
+
+// validateKind rejects an unknown item kind, failing closed on a typo. An unknown
+// kind matches no rows, so without this `--kind traks` reads as an empty library
+// rather than a mistake, the same reason the facet group-by and the diagnostic enums
+// validate. An empty kind means "any" and is accepted.
+func validateKind(kind string) error {
+	if kind == "" || model.Kind(kind).Valid() {
+		return nil
+	}
+	return waxerr.New(waxerr.CodeInvalid, "query", "unknown kind "+kind+"; valid: "+kindList())
+}
+
+// kindList renders the item-kind vocabulary. Every --kind flag's help string and the
+// validation error are built from it, so adding a kind to model.Kinds() updates all
+// of them rather than leaving one behind (edit's help said "track|book" for as long
+// as it had in fact accepted episodes).
+func kindList() string {
+	ks := model.Kinds()
+	names := make([]string, len(ks))
+	for i, k := range ks {
+		names[i] = string(k)
+	}
+	return strings.Join(names, "|")
 }
 
 // pager is the subset of the library used by paged query (eases testing).
@@ -204,6 +215,9 @@ func buildQuery(cmd *cobra.Command, rulePath string, qf queryFlags) (query.Query
 		b.Where("genre", query.OpIs, qf.genre)
 	}
 	if qf.kind != "" {
+		if err := validateKind(qf.kind); err != nil {
+			return query.Query{}, err
+		}
 		b.Where("kind", query.OpIs, qf.kind)
 	}
 	if qf.source != "" {

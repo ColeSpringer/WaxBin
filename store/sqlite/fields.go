@@ -18,6 +18,12 @@ const (
 	itemAlbumArtistIDExpr = "COALESCE(t.album_artist_id, bk.author_id)"
 )
 
+// itemYearExpr is an item's effective release year: a track's, else a book's, else an
+// episode's (derived from its pub date). Shared by the year field, itemViewCols, and
+// the newest/by-year specs so they cannot disagree. The year facet deliberately does
+// not use it; see GroupYear.
+const itemYearExpr = "COALESCE(t.year, bk.year, ep.year)"
+
 // itemArtSlotExpr selects the art_map entity_type slot an item's own art lives
 // under. Tracks and books both store item art under the 'track' slot (the shared
 // attachArtTx path treats the entity id as the playable_item id), but an
@@ -33,10 +39,11 @@ const itemArtSlotExpr = "CASE WHEN pi.kind='episode' THEN 'episode' ELSE 'track'
 // Each holds exactly one ?, which binds the pid; the SQL around it is constant, so
 // no caller text ever reaches the statement.
 const (
-	artistIDByPIDSub  = "(SELECT apq.id FROM artist apq WHERE apq.pid = ?)"
-	albumIDByPIDSub   = "(SELECT albq.id FROM album albq WHERE albq.pid = ?)"
-	podcastIDByPIDSub = "(SELECT podq.id FROM podcast podq WHERE podq.pid = ?)"
-	libraryIDByPIDSub = "(SELECT libq.id FROM library libq WHERE libq.pid = ?)"
+	artistIDByPIDSub       = "(SELECT apq.id FROM artist apq WHERE apq.pid = ?)"
+	albumIDByPIDSub        = "(SELECT albq.id FROM album albq WHERE albq.pid = ?)"
+	releaseGroupIDByPIDSub = "(SELECT rgq.id FROM release_group rgq WHERE rgq.pid = ?)"
+	podcastIDByPIDSub      = "(SELECT podq.id FROM podcast podq WHERE podq.pid = ?)"
+	libraryIDByPIDSub      = "(SELECT libq.id FROM library libq WHERE libq.pid = ?)"
 )
 
 // itemFields whitelists the logical fields a query over items/tracks may
@@ -61,11 +68,15 @@ const (
 //
 // The two groups handle NULL differently, which changes how you query them.
 //
-// play_count, played, finished, and starred coalesce a missing play_state row to 0
-// (unplayed). That is what lets `played is 0`, `play_count is 0`, and `starred is 0`
-// match an item with no row, which is how you ask for "unplayed". The tradeoff is
-// that these expressions are never NULL, so isMissing and isPresent are useless on
-// them (isMissing never matches, isPresent always does). Use `is 0` or `gt 0`.
+// play_count, played, finished, starred, and position_ms coalesce a missing
+// play_state row to 0 (unplayed). That is what lets `played is 0`, `play_count is 0`,
+// and `starred is 0` match an item with no row, which is how you ask for "unplayed".
+// The tradeoff is that these expressions are never NULL, so isMissing and isPresent
+// are useless on them (isMissing never matches, isPresent always does). Use `is 0`
+// or `gt 0`.
+//
+// position_ms is the in-progress predicate: `position_ms gt 0` with `finished is 0`,
+// which excludes a finished item whose position was never reset.
 //
 // rating and last_played stay raw NULL, so isMissing and isPresent do work there: an
 // unrated or never-played item reads NULL. Write "never play disliked" as
@@ -75,17 +86,20 @@ const (
 // in 30 days" includes never-played), while `inTheLast` never matches NULL.
 //
 // The entity-handle fields filter by normalized-entity identity instead of display
-// text, so a facet drilldown can query by the bucket's EntityPID. There are six, and
-// they split two ways: artist_pid, album_artist_pid, album_pid, podcast_pid, and
-// library are scalar columns lowered on the value side, while genre_pid alone is a
-// set field over item_genre (the last paragraph below says why it stays one).
+// text, so a facet drilldown can query by the bucket's EntityPID. There are seven,
+// and they split two ways: artist_pid, album_artist_pid, album_pid,
+// release_group_pid, podcast_pid, and library are scalar columns lowered on the value
+// side, while genre_pid alone is a set field over item_genre (the last paragraph below
+// says why it stays one).
 //
 // The artist exprs share itemArtistIDExpr/itemAlbumArtistIDExpr with the facet specs,
 // so a facet bucket's EntityPID and a pid filter can never disagree (a book matches by
-// its author, like the artist facet). album_pid is track-only (NULL for books/
-// episodes), podcast_pid is episode-only, and library is the primary file's library
-// pid (NULL for a fileless item, so `library isMissing` matches undownloaded
-// episodes).
+// its author, like the artist facet). album_pid and release_group_pid are track-only
+// (NULL for books/episodes), podcast_pid is episode-only, and library is the primary
+// file's library pid (NULL for a fileless item, so `library isMissing` matches
+// undownloaded episodes). release_group_pid reads the album joined by itemJoins, so
+// it is additionally NULL for a track whose album carries no release group:
+// isMissing there covers all three of no album, no release group, and not a track.
 //
 // Value-side lowering (query.Column.ValueSub) means the compiled column is the item
 // row's internal id and the caller's pid is resolved by a subquery on the other side
@@ -93,12 +107,18 @@ const (
 // projecting each item's pid, forced a full scan and one pid lookup per row.
 // Lowering resolves the pid once per query and lets the planner
 // use the id column's index where one exists: podcast_pid seeks episode_podcast,
-// album_pid seeks track_album_id, library reaches file_library. artist_pid and
-// album_artist_pid still scan, because their expression COALESCEs across track and
-// book so no single index covers it; what they gain is N pid lookups collapsing to
-// one, not an indexed seek. Only is/isNot/isPresent/isMissing are accepted on a
-// lowered field, sorting by one is rejected, and isNot against a pid no entity holds
-// matches nothing, because the lowered value is NULL. See Column.ValueSub.
+// album_pid seeks track_album_id, and library reaches file_library. Those three
+// narrow the outer loop, so they cost O(matches).
+//
+// artist_pid, album_artist_pid, and release_group_pid still scan playable_item; what
+// they gain from lowering is N pid lookups collapsing to one, not an indexed seek.
+// The artist pair scan because their COALESCE across track and book has no single
+// index. release_group_pid scans despite the joined alb alias looking indexed: the
+// plan is SCAN pi with a per-row alb probe, and a plan line naming album_rg is that
+// probe, not a narrowing drive. Only
+// is/isNot/isPresent/isMissing are accepted on a lowered field, sorting by one is
+// rejected, and isNot against a pid no entity holds matches nothing, because the
+// lowered value is NULL. See Column.ValueSub.
 //
 // genre_pid stays a set field over item_genre (tag-field semantics: isNot is a
 // deny-list, ordered operators are rejected) and is deliberately not converted: its
@@ -111,6 +131,13 @@ const (
 // has_art covers only the item's own front cover, through the kind-switched art
 // slot (itemArtSlotExpr). Chain-inherited album/artist art reads 0 on purpose,
 // since the field exists to find items missing their own cover.
+//
+// explicit and podcast_explicit are advisory-flag probes, episode-sourced and
+// show-sourced. Both COALESCE to 0, so a track or book reads 0; use `is 0` / `is 1`.
+// They stay separate because the feed parser reads the channel and item
+// <itunes:explicit> independently with no inheritance, and a show routinely marks
+// itself once and leaves every episode unmarked. A restricted browse is therefore
+// `explicit is 0 AND podcast_explicit is 0`.
 var itemFields = query.FieldMap{
 	"pid":          {Expr: "pi.pid", Kind: query.KindText},
 	"kind":         {Expr: "pi.kind", Kind: query.KindText},
@@ -132,7 +159,7 @@ var itemFields = query.FieldMap{
 	"composer":      {Expr: "COALESCE(t.composer,'')", Kind: query.KindText},
 	"composer_sort": {Expr: "COALESCE(t.composer_sort,'')", Kind: query.KindText},
 	"author_sort":   {Expr: "COALESCE(bk.author_sort,'')", Kind: query.KindText},
-	"year":          {Expr: "COALESCE(t.year, bk.year, ep.year)", Kind: query.KindInt},
+	"year":          {Expr: itemYearExpr, Kind: query.KindInt},
 	"track":         {Expr: "t.track_no", Kind: query.KindInt},
 	"track_no":      {Expr: "t.track_no", Kind: query.KindInt},
 	"disc":          {Expr: "t.disc_no", Kind: query.KindInt},
@@ -155,9 +182,12 @@ var itemFields = query.FieldMap{
 	// column against ''.
 	"artist_pid":       {Expr: itemArtistIDExpr, ValueSub: artistIDByPIDSub, Kind: query.KindInt},
 	"album_artist_pid": {Expr: itemAlbumArtistIDExpr, ValueSub: artistIDByPIDSub, Kind: query.KindInt},
-	"album_pid":        {Expr: "t.album_id", ValueSub: albumIDByPIDSub, Kind: query.KindInt},
-	"podcast_pid":      {Expr: "ep.podcast_id", ValueSub: podcastIDByPIDSub, Kind: query.KindInt},
-	"library":          {Expr: "f.library_id", ValueSub: libraryIDByPIDSub, Kind: query.KindInt},
+	// album_pid stays t.album_id, not alb.id: track_album_id is the better seek and
+	// TestLoweredIdentityFieldPlans pins it.
+	"album_pid":         {Expr: "t.album_id", ValueSub: albumIDByPIDSub, Kind: query.KindInt},
+	"release_group_pid": {Expr: "alb.release_group_id", ValueSub: releaseGroupIDByPIDSub, Kind: query.KindInt},
+	"podcast_pid":       {Expr: "ep.podcast_id", ValueSub: podcastIDByPIDSub, Kind: query.KindInt},
+	"library":           {Expr: "f.library_id", ValueSub: libraryIDByPIDSub, Kind: query.KindInt},
 	"genre_pid": {Set: &query.SetColumn{
 		Sub:       "SELECT 1 FROM item_genre igq JOIN genre gq ON gq.id = igq.genre_id WHERE igq.item_id = pi.id",
 		ValueExpr: "gq.pid",
@@ -168,11 +198,17 @@ var itemFields = query.FieldMap{
 		" AND amq.entity_id = pi.id AND amq.role = 'front') THEN 1 ELSE 0 END", Kind: query.KindInt},
 	"has_lyrics": {Expr: "CASE WHEN EXISTS(SELECT 1 FROM lyrics lyq WHERE lyq.item_id = pi.id) THEN 1 ELSE 0 END", Kind: query.KindInt},
 
+	// Advisory flags (see the header). The COALESCE covers the LEFT JOIN's NULL for a
+	// non-episode; without it `explicit is 0` would skip every track and book.
+	"explicit":         {Expr: "COALESCE(ep.explicit, 0)", Kind: query.KindInt},
+	"podcast_explicit": {Expr: "COALESCE(pod.explicit, 0)", Kind: query.KindInt},
+
 	// Per-user playback state (bound via userStateJoin when referenced).
 	"starred":     {Expr: "CASE WHEN ps.starred_at IS NOT NULL THEN 1 ELSE 0 END", Kind: query.KindInt, NeedsUser: true},
 	"starred_at":  {Expr: "ps.starred_at", Kind: query.KindTime, NeedsUser: true},
 	"rating":      {Expr: "ps.rating", Kind: query.KindInt, NeedsUser: true},
 	"play_count":  {Expr: "COALESCE(ps.play_count, 0)", Kind: query.KindInt, NeedsUser: true},
+	"position_ms": {Expr: "COALESCE(ps.position_ms, 0)", Kind: query.KindInt, NeedsUser: true},
 	"played":      {Expr: "COALESCE(ps.played, 0)", Kind: query.KindInt, NeedsUser: true},
 	"finished":    {Expr: "COALESCE(ps.finished, 0)", Kind: query.KindInt, NeedsUser: true},
 	"last_played": {Expr: "ps.last_played_at", Kind: query.KindTime, NeedsUser: true},

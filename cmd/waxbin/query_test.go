@@ -96,3 +96,62 @@ func TestBuildQueryTagPresenceAndContains(t *testing.T) {
 		t.Fatalf("contains cond = %+v, want tag.MOOD contains \"hap\"", c)
 	}
 }
+
+// TestBuildQueryKindValidation pins that a mistyped kind is a usage error, not an
+// empty result that reads as an empty library. query, browse, facet, and edit all
+// route through buildQuery.
+func TestBuildQueryKindValidation(t *testing.T) {
+	for _, k := range []string{"track", "book", "episode"} {
+		if _, err := buildQuery(yearCmd(), "", queryFlags{kind: k}); err != nil {
+			t.Errorf("--kind %s: %v", k, err)
+		}
+	}
+	for _, bad := range []string{"tracks", "Track", "music", "podcast"} {
+		_, err := buildQuery(yearCmd(), "", queryFlags{kind: bad})
+		if !waxerr.Is(err, waxerr.CodeInvalid) {
+			t.Errorf("--kind %s = %v, want CodeInvalid", bad, err)
+		}
+		if err != nil && !strings.Contains(err.Error(), "track|book|episode") {
+			t.Errorf("--kind %s error does not list the vocabulary: %v", bad, err)
+		}
+	}
+}
+
+// TestBrowseKindDoesNotInheritYearFlag pins the collision that made
+// `browse by-year --year 2000 --kind track` return an empty page. buildQuery keys its
+// year filter off Changed("year"), right for query and facet where --year is a
+// filter, wrong for browse where it is the by-year list's parameter. browse builds
+// its kind filter directly instead.
+func TestBrowseKindDoesNotInheritYearFlag(t *testing.T) {
+	cmd := newBrowseCmd(&globals{})
+	if err := cmd.Flags().Set("year", "2000"); err != nil {
+		t.Fatalf("set --year: %v", err)
+	}
+	if err := cmd.Flags().Set("kind", "track"); err != nil {
+		t.Fatalf("set --kind: %v", err)
+	}
+	// The shape browse must not use: with --year changed, buildQuery folds in a year
+	// predicate from the zero queryFlags.
+	q, err := buildQuery(cmd, "", queryFlags{kind: "track"})
+	if err != nil {
+		t.Fatalf("buildQuery: %v", err)
+	}
+	rule, err := query.MarshalRule(q)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(rule), `"year"`) {
+		t.Fatalf("buildQuery no longer folds in the year flag; browse may be able to "+
+			"share it again, so re-check browse.go's comment: %s", rule)
+	}
+
+	// What browse compiles instead: the kind alone.
+	direct, err := query.MarshalRule(query.New(query.EntityItems).
+		Where("kind", query.OpIs, "track").Build())
+	if err != nil {
+		t.Fatalf("marshal direct: %v", err)
+	}
+	if strings.Contains(string(direct), `"year"`) {
+		t.Errorf("browse's kind filter carries a year predicate: %s", direct)
+	}
+}

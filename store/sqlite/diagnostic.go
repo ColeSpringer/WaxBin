@@ -99,11 +99,14 @@ func (s *Store) PutFileDiagnostics(ctx context.Context, filePID model.PID, origi
 // bind args (both empty for the zero filter, so that path runs today's full-dump
 // SQL). The enum dimensions are validated against their vocabularies first, so
 // a typo is CodeInvalid rather than a silently empty result, the same
-// fail-closed treatment the facet group-by and entity-kind enums get. A library
-// scope resolves the pid to its rowid, so an unknown library is CodeNotFound.
+// fail-closed treatment the facet group-by and entity-kind enums get. A library,
+// file, or item scope resolves the pid to its rowid first, so an unknown one is
+// CodeNotFound before any diagnostic SQL runs.
 // The origin/code filters ride the file_diagnostic primary key and
-// file_diagnostic_code index, the library filter rides file_library; no new
-// index is needed at this table's grain.
+// file_diagnostic_code index, the library filter rides file_library, the file filter
+// rides file_diagnostic's own file_id-leading primary key, and the item filter's
+// subquery rides item_file's item_id-leading primary key and materializes once; no
+// new index is needed at this table's grain.
 func (s *Store) diagnosticFilterSQL(ctx context.Context, filter model.DiagnosticFilter, op string) (string, []any, error) {
 	var conds []string
 	var args []any
@@ -135,6 +138,22 @@ func (s *Store) diagnosticFilterSQL(ctx context.Context, filter model.Diagnostic
 		}
 		conds = append(conds, "f.library_id = ?")
 		args = append(args, ids[0])
+	}
+	if filter.FilePID != "" {
+		id, err := fileIDByPIDRead(ctx, s.read, filter.FilePID, op)
+		if err != nil {
+			return "", nil, err
+		}
+		conds = append(conds, "d.file_id = ?")
+		args = append(args, id)
+	}
+	if filter.ItemPID != "" {
+		id, err := itemIDByPIDRead(ctx, s.read, filter.ItemPID, op)
+		if err != nil {
+			return "", nil, err
+		}
+		conds = append(conds, "d.file_id IN (SELECT itf.file_id FROM item_file itf WHERE itf.item_id = ?)")
+		args = append(args, id)
 	}
 	if len(conds) == 0 {
 		return "", nil, nil
@@ -197,6 +216,10 @@ func (s *Store) FileDiagnostics(ctx context.Context, filter model.DiagnosticFilt
 // bounded by the curated code vocabulary. The file join always rides along so
 // the one statement serves the library scope too; it is a PK probe per row on a
 // table sized by real findings, not by the catalog.
+//
+// Sharing diagnosticFilterSQL means it takes the file and item scopes as well, which
+// is worth knowing: "how bad is this one item" is a real question, and this is where
+// it is answered.
 func (s *Store) DiagnosticSummary(ctx context.Context, filter model.DiagnosticFilter) ([]model.DiagnosticCount, error) {
 	const op = "store.DiagnosticSummary"
 	where, args, err := s.diagnosticFilterSQL(ctx, filter, op)
@@ -247,6 +270,13 @@ func (s *Store) hasFileDiagnostics(ctx context.Context, filePID model.PID, origi
 // them. Doctor wants only the number, and materializing every row (a join to file
 // plus an ORDER BY) just to take its length would scale the cost with how many
 // problems a library has.
+//
+// It takes no filter on purpose, and adding one would be a mistake. This is the
+// whole-catalog health count; scoping it would make "how many diagnostics does this
+// catalog have" answer a different question per caller. A scoped count wants its own
+// method. So does a badge count per row in a list view: that is one
+// GROUP BY itf.item_id read over the same join, never a fan-out of ItemPID-filtered
+// calls.
 func (s *Store) CountFileDiagnostics(ctx context.Context) (int, error) {
 	const op = "store.CountFileDiagnostics"
 	var n int

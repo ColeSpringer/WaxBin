@@ -47,81 +47,16 @@ type browseSpec struct {
 // QueryPage do.
 func (s *Store) BrowsePage(ctx context.Context, list read.DiscoveryList, opt read.BrowseOptions) (*read.Page, error) {
 	const op = "store.BrowsePage"
-	if !list.Valid() {
-		return nil, waxerr.New(waxerr.CodeInvalid, op, "unknown discovery list: "+string(list))
-	}
-	spec, err := s.browseSpecFor(ctx, list, opt)
-	if err != nil {
-		return nil, err
-	}
-	userJoin, leadArgs, compiled, err := s.browseFilter(ctx, opt, spec.userID, op)
-	if err != nil {
-		return nil, err
-	}
 	limit := opt.Limit
 	if limit <= 0 {
 		limit = defaultPageSize
 	}
-
-	cmp, dir := ">", "ASC"
-	if spec.desc {
-		cmp, dir = "<", "DESC"
+	stmt, args, err := s.browseStmt(ctx, list, opt, limit, op)
+	if err != nil {
+		return nil, err
 	}
 
-	// Arg order must match clause order in the statement: the user join's ON clause
-	// (leadArgs), then the list's own join, then the filter, then the keyset. One
-	// hazard this ordering does not make obvious: spec.orderExpr is emitted in the
-	// SELECT list before every join, so a spec that ever bound a placeholder there
-	// would lead all of these, leadArgs included. Today only random varies and it
-	// inlines its seed.
-	//
-	// The capacity covers every segment plus the trailing three: a keyset cursor's two
-	// binds and the limit. Sized up front like Facet's, which assembles the same
-	// four-segment shape.
-	args := make([]any, 0, len(leadArgs)+len(spec.joinArgs)+len(spec.whereArgs)+len(compiled.args)+3)
-	args = append(args, leadArgs...)
-	args = append(args, spec.joinArgs...)
-	where := andWhere(andWhere(spec.where, compiled.where), compiled.entityWhere)
-	args = append(args, spec.whereArgs...)
-	args = append(args, compiled.args...)
-	if opt.Cursor != "" {
-		ord, pid, ok := opt.Cursor.Decode()
-		if !ok {
-			return nil, waxerr.New(waxerr.CodeInvalid, op, "malformed browse cursor")
-		}
-		keyset := fmt.Sprintf("(%s, pi.pid) %s (?, ?)", spec.orderExpr, cmp)
-		if where != "" {
-			where = "(" + where + ") AND " + keyset
-		} else {
-			where = keyset
-		}
-		if spec.orderInt {
-			n, perr := strconv.ParseInt(ord, 10, 64)
-			if perr != nil {
-				return nil, waxerr.New(waxerr.CodeInvalid, op, "malformed browse cursor")
-			}
-			args = append(args, n, string(pid))
-		} else {
-			args = append(args, ord, string(pid))
-		}
-	}
-
-	var sb strings.Builder
-	sb.WriteString("SELECT ")
-	sb.WriteString(spec.orderExpr)
-	sb.WriteString(" AS ord, ")
-	sb.WriteString(itemViewCols)
-	sb.WriteString(itemJoins)
-	sb.WriteString(userJoin)
-	sb.WriteString(spec.join)
-	if where != "" {
-		sb.WriteString(" WHERE ")
-		sb.WriteString(where)
-	}
-	fmt.Fprintf(&sb, " ORDER BY ord %s, pi.pid %s LIMIT ?", dir, dir)
-	args = append(args, limit+1) // one extra row signals a further page
-
-	rows, err := s.read.QueryContext(ctx, sb.String(), args...)
+	rows, err := s.read.QueryContext(ctx, stmt, args...)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
@@ -149,6 +84,82 @@ func (s *Store) BrowsePage(ctx context.Context, list read.DiscoveryList, opt rea
 		page.Next = read.EncodeCursor(ords[limit-1], page.Items[limit-1].PID)
 	}
 	return page, nil
+}
+
+// browseStmt assembles one page's statement and bind args, asking for one row past
+// limit to detect a further page. Split out of BrowsePage so the plan tests EXPLAIN
+// the real statement rather than a lookalike that can drift.
+func (s *Store) browseStmt(ctx context.Context, list read.DiscoveryList, opt read.BrowseOptions, limit int, op string) (string, []any, error) {
+	if !list.Valid() {
+		return "", nil, waxerr.New(waxerr.CodeInvalid, op, "unknown discovery list: "+string(list))
+	}
+	spec, err := s.browseSpecFor(ctx, list, opt)
+	if err != nil {
+		return "", nil, err
+	}
+	userJoin, leadArgs, compiled, err := s.browseFilter(ctx, opt, spec.userID, op)
+	if err != nil {
+		return "", nil, err
+	}
+
+	cmp, dir := ">", "ASC"
+	if spec.desc {
+		cmp, dir = "<", "DESC"
+	}
+
+	// Arg order must match clause order in the statement: the user join's ON clause
+	// (leadArgs), then the list's own join, then the filter, then the keyset. One
+	// hazard this ordering does not make obvious: spec.orderExpr is emitted in the
+	// SELECT list before every join, so a spec that ever bound a placeholder there
+	// would lead all of these, leadArgs included. Today only random varies and it
+	// inlines its seed.
+	//
+	// The capacity covers every segment plus the trailing three: a keyset cursor's two
+	// binds and the limit. Sized up front like Facet's, which assembles the same
+	// four-segment shape.
+	args := make([]any, 0, len(leadArgs)+len(spec.joinArgs)+len(spec.whereArgs)+len(compiled.args)+3)
+	args = append(args, leadArgs...)
+	args = append(args, spec.joinArgs...)
+	where := andWhere(andWhere(spec.where, compiled.where), compiled.entityWhere)
+	args = append(args, spec.whereArgs...)
+	args = append(args, compiled.args...)
+	if opt.Cursor != "" {
+		ord, pid, ok := opt.Cursor.Decode()
+		if !ok {
+			return "", nil, waxerr.New(waxerr.CodeInvalid, op, "malformed browse cursor")
+		}
+		keyset := fmt.Sprintf("(%s, pi.pid) %s (?, ?)", spec.orderExpr, cmp)
+		if where != "" {
+			where = "(" + where + ") AND " + keyset
+		} else {
+			where = keyset
+		}
+		if spec.orderInt {
+			n, perr := strconv.ParseInt(ord, 10, 64)
+			if perr != nil {
+				return "", nil, waxerr.New(waxerr.CodeInvalid, op, "malformed browse cursor")
+			}
+			args = append(args, n, string(pid))
+		} else {
+			args = append(args, ord, string(pid))
+		}
+	}
+
+	var sb strings.Builder
+	sb.WriteString("SELECT ")
+	sb.WriteString(spec.orderExpr)
+	sb.WriteString(" AS ord, ")
+	sb.WriteString(itemViewCols)
+	sb.WriteString(itemJoins)
+	sb.WriteString(userJoin)
+	sb.WriteString(spec.join)
+	if where != "" {
+		sb.WriteString(" WHERE ")
+		sb.WriteString(where)
+	}
+	fmt.Fprintf(&sb, " ORDER BY ord %s, pi.pid %s LIMIT ?", dir, dir)
+	args = append(args, limit+1) // one extra row signals a further page
+	return sb.String(), args, nil
 }
 
 // browseCompiled is the spliceable form of opt.Query: the compiled WHERE and its
@@ -231,16 +242,25 @@ func (s *Store) browseSpecFor(ctx context.Context, list read.DiscoveryList, opt 
 	case read.ListRecentlyAdded:
 		return browseSpec{orderExpr: "pi.created_at", orderInt: true, desc: true}, nil
 	case read.ListNewest:
-		// Newest release first; an untagged year coalesces to 0 so it sorts last
-		// under DESC and the order column is never NULL (keyset stays well defined).
-		// The book's year stands in for a track's, matching the field map and facets.
-		return browseSpec{orderExpr: "COALESCE(t.year, bk.year, 0)", orderInt: true, desc: true}, nil
+		// COALESCE to 0 sorts an undated item last under DESC and keeps the keyset
+		// column non-NULL. Episodes are excluded because ep.year is yearOf(pub_date),
+		// not a release year: every episode of a year would tie here, and
+		// recent-episodes orders the same rows by the full date.
+		return browseSpec{
+			where:     notEpisodes,
+			orderExpr: "COALESCE(" + itemYearExpr + ", 0)",
+			orderInt:  true,
+			desc:      true,
+		}, nil
 	case read.ListByYear:
 		if opt.Year <= 0 {
 			return browseSpec{}, waxerr.New(waxerr.CodeInvalid, op, "by-year browse requires a year")
 		}
+		// Keeps episodes, unlike newest: this is a filter and an episode genuinely is
+		// from the year it was published. The year facet excludes them, like every
+		// music dimension; a filter matches what the row displays, a facet does not.
 		return browseSpec{
-			where: "COALESCE(t.year, bk.year) = ?", whereArgs: []any{opt.Year}, orderExpr: "pi.sort_key",
+			where: itemYearExpr + " = ?", whereArgs: []any{opt.Year}, orderExpr: "pi.sort_key",
 		}, nil
 	case read.ListByGenre:
 		gid, err := s.genreIDByPID(ctx, opt.GenrePID, op)
@@ -251,6 +271,21 @@ func (s *Store) browseSpecFor(ctx context.Context, list read.DiscoveryList, opt 
 			where:     "EXISTS (SELECT 1 FROM item_genre big WHERE big.item_id = pi.id AND big.genre_id = ?)",
 			whereArgs: []any{gid},
 			orderExpr: "pi.sort_key",
+		}, nil
+	case read.ListRecentEpisodes:
+		// Excluding undated episodes rather than coalescing them is what lets this drive
+		// off episode_pubdate; the excluded set is real, since manual episodes often
+		// arrive with no date. The filter doubles as the kind scope, only an episode
+		// having an ep row.
+		//
+		// Same-pubdate ties break on pid DESC, where EpisodesByPodcast uses pid ASC.
+		// BrowsePage emits one direction for both key columns because a mixed-direction
+		// keyset cannot use SQLite's row-value comparison.
+		return browseSpec{
+			where:     "ep.pub_date IS NOT NULL",
+			orderExpr: "ep.pub_date",
+			orderInt:  true,
+			desc:      true,
 		}, nil
 	case read.ListRandom:
 		// The seed is an int we control, so inlining it as a literal is injection-safe

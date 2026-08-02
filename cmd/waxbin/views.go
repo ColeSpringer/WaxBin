@@ -1,6 +1,14 @@
 package main
 
 import (
+	"bytes"
+	"fmt"
+	"io"
+	"strconv"
+	"strings"
+	"text/tabwriter"
+	"time"
+
 	"github.com/colespringer/waxbin"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/read"
@@ -9,6 +17,69 @@ import (
 
 // JSON-facing projections of domain types. The CLI owns presentation; it never
 // leaks internal ids or raw path bytes.
+
+// printItemTable renders the shared item table for query, query --page, and browse.
+// PUBLISHED appears only when the rows hold an episode, since an episode's year is a
+// rounded pub date and a whole season otherwise reads as one repeated year; a
+// music-only catalog would just get a blank column. A zero TRK or YEAR prints blank.
+func printItemTable(w io.Writer, items []*model.ItemView) error {
+	// Buffered so each line can be right-trimmed: tabwriter pads empty tab-terminated
+	// cells, so a book's blank TRK/YEAR would trail spaces. Trimming afterwards rather
+	// than dropping the cells keeps every row's cell count equal, which is what keeps
+	// the table one column block.
+	var buf bytes.Buffer
+	tw := tabwriter.NewWriter(&buf, 0, 2, 2, ' ', 0)
+	withPub := false
+	for _, v := range items {
+		if v.Kind == model.KindEpisode {
+			withPub = true
+			break
+		}
+	}
+	header := "PID\tTITLE\tARTIST\tALBUM\tTRK\tYEAR"
+	if withPub {
+		header += "\tPUBLISHED"
+	}
+	fmt.Fprintln(tw, header)
+	for _, v := range items {
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s",
+			v.PID, v.Title, v.Artist, v.Album, blankZero(v.TrackNo), blankZero(v.Year))
+		if withPub {
+			fmt.Fprintf(tw, "\t%s", pubDate(v.PubDateNS))
+		}
+		fmt.Fprintln(tw)
+	}
+	if err := tw.Flush(); err != nil {
+		return err
+	}
+	for _, line := range strings.SplitAfter(buf.String(), "\n") {
+		if line == "" {
+			continue
+		}
+		if _, err := io.WriteString(w, strings.TrimRight(line, " \t\n")+"\n"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// blankZero renders a count-like column, with 0 as blank (see printItemTable).
+func blankZero(n int) string {
+	if n == 0 {
+		return ""
+	}
+	return strconv.Itoa(n)
+}
+
+// pubDate renders a publication time as a date, blank when undated. UTC, not local:
+// the stored value is a resolved instant, and the reader's zone would shift the date
+// across a day boundary for everyone west of the publisher.
+func pubDate(ns int64) string {
+	if ns == 0 {
+		return ""
+	}
+	return time.Unix(0, ns).UTC().Format("2006-01-02")
+}
 
 type libView struct {
 	PID     string `json:"pid"`
@@ -41,19 +112,30 @@ type itemView struct {
 	Disc        int    `json:"disc,omitempty"`
 	Year        int    `json:"year,omitempty"`
 	Genre       string `json:"genre,omitempty"`
-	// Entity handles: the effective artist/album-artist/album entity pids, so a
-	// consumer can group by real identity. albumPid is absent for a book or episode.
-	ArtistPID      string `json:"artistPid,omitempty"`
-	AlbumArtistPID string `json:"albumArtistPid,omitempty"`
-	AlbumPID       string `json:"albumPid,omitempty"`
+	// Entity handles: the effective artist/album-artist/album/release-group entity
+	// pids, so a consumer can group by real identity. albumPid and releaseGroupPid are
+	// absent for a book or episode, and releaseGroupPid is also absent for a track
+	// whose album has no release group.
+	ArtistPID       string `json:"artistPid,omitempty"`
+	AlbumArtistPID  string `json:"albumArtistPid,omitempty"`
+	AlbumPID        string `json:"albumPid,omitempty"`
+	ReleaseGroupPID string `json:"releaseGroupPid,omitempty"`
 	// Composer and its collation key, present for track items.
 	Composer     string `json:"composer,omitempty"`
 	ComposerSort string `json:"composerSort,omitempty"`
-	Source       string `json:"source,omitempty"`
-	DurationMS   int64  `json:"durationMs,omitempty"`
-	Codec        string `json:"codec,omitempty"`
-	Path         string `json:"path,omitempty"`
-	FilePID      string `json:"filePid,omitempty"`
+	// Episode fields, present for episode items only. pubDateNs is nanoseconds, the
+	// unit every timestamp in this JSON contract uses. explicit is the episode's own
+	// advisory flag; the show's is reached through the podcast, not projected here.
+	Explicit  bool  `json:"explicit,omitempty"`
+	Season    int   `json:"season,omitempty"`
+	PubDateNS int64 `json:"pubDateNs,omitempty"`
+
+	// Everything below is kind-agnostic; the episode block above ends at pubDateNs.
+	Source     string `json:"source,omitempty"`
+	DurationMS int64  `json:"durationMs,omitempty"`
+	Codec      string `json:"codec,omitempty"`
+	Path       string `json:"path,omitempty"`
+	FilePID    string `json:"filePid,omitempty"`
 	// A virtual track (a cue TRACK of a single-file rip) plays only one window within
 	// the shared file, and virtual marks it. The window arrives in both coordinate
 	// systems: startFrames/endFrames are CD frames (75/sec), the stored truth a
@@ -82,8 +164,10 @@ func toItemView(v *model.ItemView) itemView {
 		PID: string(v.PID), Kind: string(v.Kind), State: string(v.State), Title: v.Title,
 		Artist: v.Artist, AlbumArtist: v.AlbumArtist, Album: v.Album, Track: v.TrackNo,
 		Disc: v.DiscNo, Year: v.Year, Genre: v.Genre,
-		ArtistPID: string(v.ArtistPID), AlbumArtistPID: string(v.AlbumArtistPID), AlbumPID: string(v.AlbumPID),
-		Composer: v.Composer, ComposerSort: v.ComposerSort, Source: string(v.Source),
+		ArtistPID: string(v.ArtistPID), AlbumArtistPID: string(v.AlbumArtistPID),
+		AlbumPID: string(v.AlbumPID), ReleaseGroupPID: string(v.ReleaseGroupPID),
+		Composer: v.Composer, ComposerSort: v.ComposerSort,
+		Explicit: v.Explicit, Season: v.Season, PubDateNS: v.PubDateNS, Source: string(v.Source),
 		DurationMS: v.DurationMS, Codec: v.Codec, Path: v.DisplayPath, FilePID: string(v.FilePID),
 		Virtual: v.Virtual, StartFrames: v.StartFrames, EndFrames: v.EndFrames,
 		StartMS: v.StartMS, EndMS: v.EndMS,

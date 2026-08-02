@@ -90,7 +90,9 @@ const (
 	FileForeign    FileKind = "foreign"
 )
 
-// Kind is the supertype of a playable_item.
+// Kind is the supertype of a playable_item. The three map onto the media types a
+// consumer thinks in: a track is music, a book is an audiobook, an episode is a
+// podcast episode.
 type Kind string
 
 const (
@@ -98,6 +100,21 @@ const (
 	KindBook    Kind = "book"
 	KindEpisode Kind = "episode"
 )
+
+// Valid reports whether k is a known item kind. A caller filtering by kind should
+// check it rather than passing the string through: an unknown kind matches no rows,
+// so a typo would read as an empty library instead of a mistake.
+func (k Kind) Valid() bool {
+	switch k {
+	case KindTrack, KindBook, KindEpisode:
+		return true
+	default:
+		return false
+	}
+}
+
+// Kinds lists the item kinds, for help text and validation messages.
+func Kinds() []Kind { return []Kind{KindTrack, KindBook, KindEpisode} }
 
 // ItemState decouples a logical item from the presence of its files.
 type ItemState string

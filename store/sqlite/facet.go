@@ -16,7 +16,12 @@ import (
 // dimension to the item base, what to group by, and how to render each bucket.
 // An absent key (NULL) is mapped to the canonical unknown sentinel.
 type facetSpec struct {
-	join     string // extra join(s), aliased to avoid clashing with itemJoins
+	// join is the extra join(s) this dimension needs, aliased to avoid clashing with
+	// itemJoins. Empty when the dimension reads the item base directly (year, kind) or
+	// an alias itemJoins already binds (album and releaseGroup read alb; a second
+	// album join would be a per-row seek SQLite does not elide). The facet tests are
+	// what catch an itemJoins alias rename, since it fails at runtime.
+	join     string
 	joinArgs []any  // bind args for join's placeholders (e.g. the tag key), before WHERE args
 	groupBy  string // GROUP BY expression
 	keyExpr  string // machine key (NULL => unknown bucket)
@@ -73,11 +78,25 @@ func facetSpecFor(g read.GroupBy) (facetSpec, bool) {
 		// field a bucket's EntityPID drills down through. kindWhere keeps episodes
 		// out entirely rather than piling them into that bucket.
 		return facetSpec{
-			join:    " LEFT JOIN album falb ON falb.id = t.album_id",
-			groupBy: "t.album_id", keyExpr: "falb.pid", display: "falb.title", sortExpr: "falb.sort_key",
+			groupBy: "t.album_id", keyExpr: "alb.pid", display: "alb.title", sortExpr: "alb.sort_key",
 			entity: true, unknown: read.NonAlbum, kindWhere: notEpisodes,
 		}, true
+	case read.GroupReleaseGroup:
+		// The dimension above album: a record's editions under one release group.
+		// Track-only and episode-excluded like GroupAlbum. A track with an album but no
+		// release group lands in [No Release Group], which is not [Non-Album].
+		return facetSpec{
+			join:    " LEFT JOIN release_group frg ON frg.id = alb.release_group_id",
+			groupBy: "alb.release_group_id", keyExpr: "frg.pid", display: "frg.title", sortExpr: "frg.sort_key",
+			entity: true, unknown: read.NoReleaseGroup, kindWhere: notEpisodes,
+		}, true
 	case read.GroupYear:
+		// Deliberately narrower than itemYearExpr, which the year field and item view
+		// use: every music dimension here pairs with a wider field the same way (an
+		// `--artist "My Show"` filter finds a podcast's episodes; this has no such
+		// bucket). read.Stats is built from these and is music-scoped throughout, its
+		// Items count being tracks alone, so adding ep.year would change what
+		// `facet --group-by year` and `stats` mean rather than close a drift.
 		return facetSpec{
 			groupBy: "COALESCE(t.year, bk.year)", keyExpr: "CAST(COALESCE(t.year, bk.year) AS TEXT)",
 			display: "CAST(COALESCE(t.year, bk.year) AS TEXT)", sortExpr: "COALESCE(t.year, bk.year)",

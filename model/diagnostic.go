@@ -123,12 +123,15 @@ type FileDiagnostic struct {
 // zero filter selects everything, which is what the audit reads. A zero
 // dimension means "any"; a non-empty Origin, Code, or Severity outside its
 // vocabulary is CodeInvalid (a typo fails closed instead of matching nothing),
-// and an unknown LibraryPID is CodeNotFound. A non-positive Limit is uncapped
-// and a non-positive Offset skips nothing: both are treated as unset and never
-// reach the SQL, so a negative value cannot produce a surprising window.
-// Offset pages over the deterministic path/origin/code order, which is enough
-// at this table's grain (a curated finding vocabulary, not a per-track table),
-// so there is no keyset cursor here.
+// and an unknown LibraryPID, FilePID, or ItemPID is CodeNotFound. A non-positive
+// Limit is uncapped and a non-positive Offset skips nothing: both are treated as
+// unset and never reach the SQL, so a negative value cannot produce a surprising
+// window. Offset pages over the deterministic path/origin/code order, which is
+// enough at this table's grain (a curated finding vocabulary, not a per-track
+// table), so there is no keyset cursor here.
+//
+// Every dimension ANDs with the rest, so FilePID together with ItemPID means "that
+// file, if it backs that item".
 //
 // It lives in model, not read, because the audit's Store port consumes it and
 // audit depends only on model (the established seam: the port's other option
@@ -138,8 +141,15 @@ type DiagnosticFilter struct {
 	Code       DiagnosticCode
 	Severity   AuditSeverity
 	LibraryPID PID // scope to files under one library root
-	Limit      int
-	Offset     int
+	// FilePID scopes to one file, the grain a diagnostic row is recorded at.
+	FilePID PID
+	// ItemPID scopes to every file backing one item, which is what "this item's
+	// issues" actually asks: an item can be multi-file (a multi-part audiobook), so a
+	// FilePID-only API would leave the consumer resolving the parts and fanning out
+	// one call per part.
+	ItemPID PID
+	Limit   int
+	Offset  int
 }
 
 // DiagnosticCount is one bucket of the grouped diagnostic summary: how many

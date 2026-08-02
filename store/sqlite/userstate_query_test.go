@@ -172,6 +172,56 @@ func TestQueryUserStateCrossUserIsolation(t *testing.T) {
 	}
 }
 
+// TestPositionField pins the in-progress predicate. position_ms coalesces a missing
+// play_state row to 0 like the rest of its group, so an item nobody has started reads
+// 0 rather than dropping out of the result, and `position_ms gt 0` is what
+// distinguishes "started" from "opened once" (which played cannot). Progress is
+// per-user, so another user's position must not select the item for this one.
+func TestPositionField(t *testing.T) {
+	st, ids := userStateFixture(t)
+	ctx := context.Background()
+	bob, err := st.CreateUser(ctx, "bob")
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+
+	// Alpha is 60s in for the default user. Bravo is played but never seeked, so it
+	// has a play_state row with position 0. Charlie has no row at all.
+	if err := st.SetProgress(ctx, "", ids["Alpha"], 60_000); err != nil {
+		t.Fatalf("set progress: %v", err)
+	}
+	if err := st.MarkPlayed(ctx, "", ids["Bravo"], false); err != nil {
+		t.Fatalf("mark played: %v", err)
+	}
+
+	started := query.New(query.EntityItems).Where("position_ms", query.OpGt, 0).Build()
+	if got := userQueryTitles(t, st, started, ""); joinTitles(got) != "Alpha" {
+		t.Errorf("position_ms gt 0 = %v, want [Alpha]", got)
+	}
+	// The coalesce: a row-less item and a row-with-zero item both read 0 and stay
+	// visible, which is what makes `is 0` mean "not started".
+	if got := userQueryTitles(t, st, query.New(query.EntityItems).
+		Where("position_ms", query.OpIs, 0).Build(), ""); joinTitles(got) != "Bravo,Charlie" {
+		t.Errorf("position_ms is 0 = %v, want [Bravo Charlie]", got)
+	}
+	// The whole in-progress shape: started and not finished.
+	inProgress := query.New(query.EntityItems).
+		Where("position_ms", query.OpGt, 0).
+		Where("finished", query.OpIs, 0).Build()
+	if got := userQueryTitles(t, st, inProgress, ""); joinTitles(got) != "Alpha" {
+		t.Errorf("in-progress = %v, want [Alpha]", got)
+	}
+	// Progress is one user's. Bob has none, so nothing is in progress for him and
+	// every item reads 0.
+	if got := userQueryTitles(t, st, started, bob.PID); len(got) != 0 {
+		t.Errorf("bob position_ms gt 0 = %v, want [] (progress is per-user)", got)
+	}
+	if got := userQueryTitles(t, st, query.New(query.EntityItems).
+		Where("position_ms", query.OpIs, 0).Build(), bob.PID); joinTitles(got) != "Alpha,Bravo,Charlie" {
+		t.Errorf("bob position_ms is 0 = %v, want all three", got)
+	}
+}
+
 // TestCountItemsUserState confirms Count honors the per-user filter and, because the
 // join is on play_state's primary key, never multiplies the count.
 func TestCountItemsUserState(t *testing.T) {

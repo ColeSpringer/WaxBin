@@ -43,6 +43,98 @@ func drainBrowse(t *testing.T, st *Store, list read.DiscoveryList, opt read.Brow
 	return order
 }
 
+// TestRecentEpisodesList pins the cross-show publication ordering the list exists
+// for: episodes from every feed interleave by pub date, newest first, and the two
+// populations the spec excludes stay out (an undated episode, which the NULL filter
+// drops so the statement can drive off episode_pubdate, and every non-episode, which
+// has no ep row at all).
+func TestRecentEpisodesList(t *testing.T) {
+	st, lib := entityFixture(t)
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/t.flac", essence: "et", content: "ct",
+		title: "A Track", artist: "X", album: "Al"})
+	putFeedSpec(t, st, "http://cast.example/one", false,
+		epSpec{title: "One-Old", pubNS: 1_000_000_000},
+		epSpec{title: "One-New", pubNS: 4_000_000_000})
+	putFeedSpec(t, st, "http://cast.example/two", false,
+		epSpec{title: "Two-Mid", pubNS: 2_000_000_000},
+		epSpec{title: "Two-Newest", pubNS: 5_000_000_000},
+		epSpec{title: "Two-Undated", pubNS: 0})
+
+	want := []string{"Two-Newest", "One-New", "Two-Mid", "One-Old"}
+	full := drainBrowse(t, st, read.ListRecentEpisodes, read.BrowseOptions{}, 50)
+	if strings.Join(full, ",") != strings.Join(want, ",") {
+		t.Errorf("recent-episodes = %v, want %v (newest published first, across shows)", full, want)
+	}
+	// Cursor tiling: paging two at a time must reassemble the same list, with
+	// drainBrowse asserting no row is duplicated or skipped across the boundaries.
+	tiled := drainBrowse(t, st, read.ListRecentEpisodes, read.BrowseOptions{}, 2)
+	if strings.Join(tiled, ",") != strings.Join(want, ",") {
+		t.Errorf("recent-episodes paged by 2 = %v, want %v", tiled, want)
+	}
+}
+
+// TestRecentEpisodesPlanUsesPubDateIndex is why the spec excludes undated episodes
+// instead of coalescing them: this has to be a keyset over an index, not a full sort.
+//
+// The second assertion rests on a substring distinction, so read it before loosening
+// it: the plan says "USE TEMP B-TREE FOR LAST TERM OF ORDER BY", which does not
+// contain "USE TEMP B-TREE FOR ORDER BY". Only the pid tiebreak is block-sorted; a
+// bare "FOR ORDER BY" would mean the whole result set was.
+func TestRecentEpisodesPlanUsesPubDateIndex(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/t.flac", essence: "et", content: "ct",
+		title: "A Track", artist: "X", album: "Al"})
+	putFeedSpec(t, st, "http://cast.example/one", false,
+		epSpec{title: "One-Old", pubNS: 1_000_000_000},
+		epSpec{title: "One-New", pubNS: 4_000_000_000})
+	putFeedSpec(t, st, "http://cast.example/two", false,
+		epSpec{title: "Two-Mid", pubNS: 2_000_000_000})
+
+	inProgress := query.New(query.EntityItems).
+		Where("position_ms", query.OpGt, 0).
+		Where("finished", query.OpIs, 0).Build()
+	for _, tc := range []struct {
+		name string
+		opt  read.BrowseOptions
+	}{
+		{"head", read.BrowseOptions{}},
+		{"cursor-bound", read.BrowseOptions{Cursor: read.EncodeCursor("4000000000", "01ARZ3NDEKTSV4RRFFQ69G5FAV")}},
+		{"in-progress filter", read.BrowseOptions{Query: inProgress}},
+	} {
+		stmt, args, err := st.browseStmt(ctx, read.ListRecentEpisodes, tc.opt, 50, "test")
+		if err != nil {
+			t.Fatalf("%s: browse stmt: %v", tc.name, err)
+		}
+		plan := explainPlan(t, st, stmt, args...)
+		if !strings.Contains(plan, "episode_pubdate") {
+			t.Errorf("%s does not drive off episode_pubdate:\n%s", tc.name, plan)
+		}
+		if strings.Contains(plan, "USE TEMP B-TREE FOR ORDER BY") {
+			t.Errorf("%s sorts the whole result set instead of walking the index:\n%s", tc.name, plan)
+		}
+	}
+
+	// The control that makes the assertion above mean anything. recently-added has no
+	// index to walk (playable_item indexes kind, sort_key, and the partial
+	// identity_key, not created_at), so it scans and full-sorts, and its plan carries
+	// the bare "USE TEMP B-TREE FOR ORDER BY" verbatim. Without this, the !Contains
+	// check on recent-episodes could be passing because SQLite never emits that exact
+	// wording at all rather than because the new list avoids it.
+	//
+	// A failure here is informative either way: recently-added gained an index and is
+	// no longer the vocabulary's floor (update this and the comment), or SQLite
+	// reworded its plan output and the check above needs the new string.
+	stmt, args, err := st.browseStmt(ctx, read.ListRecentlyAdded, read.BrowseOptions{}, 50, "test")
+	if err != nil {
+		t.Fatalf("recently-added stmt: %v", err)
+	}
+	if plan := explainPlan(t, st, stmt, args...); !strings.Contains(plan, "USE TEMP B-TREE FOR ORDER BY") {
+		t.Errorf("recently-added no longer emits the bare full-sort string, so the "+
+			"recent-episodes assertion above is no longer known to discriminate:\n%s", plan)
+	}
+}
+
 func TestBrowseAlphabetical(t *testing.T) {
 	st, lib := entityFixture(t)
 	for _, title := range []string{"Echo", "Alpha", "Delta", "Bravo", "Charlie"} {
@@ -64,11 +156,25 @@ func TestBrowseNewest(t *testing.T) {
 	for _, s := range specs {
 		putTrack(t, st, lib.ID, trackSpec{path: "/lib/" + s.title + ".flac", essence: "e" + s.title, content: "c" + s.title, title: s.title, artist: "X", album: "Al", year: s.year})
 	}
+	// A book carries a real release year, so it ranks here beside the tracks: the
+	// scope is "kinds that have a release year", not "music".
+	putBook(t, st, lib.ID, bookSpec{path: "/lib/bk.m4b", essence: "ebk", content: "cbk",
+		title: "Book2015", author: "Author", year: 2015})
+	// An episode is absent however recent, because its year is derived from its
+	// publication date. It would outrank every track while being ordered meaninglessly
+	// against its own siblings; recent-episodes orders those at full precision.
+	putFeedSpec(t, st, "http://cast.example/f", false, epSpec{title: "Ep2010", pubNS: 1_000_000_000, year: 2010})
+
 	order := drainBrowse(t, st, read.ListNewest, read.BrowseOptions{}, 2)
 	// Newest release first; the undated track (year 0) sorts last.
-	want := []string{"New", "Mid", "Old", "Undated"}
+	want := []string{"New", "Book2015", "Mid", "Old", "Undated"}
 	if strings.Join(order, ",") != strings.Join(want, ",") {
 		t.Errorf("newest order = %v, want %v", order, want)
+	}
+	// The same episode is reachable through by-year, which is a filter rather than an
+	// ordering. That asymmetry is deliberate; see the two specs.
+	if got := drainBrowse(t, st, read.ListByYear, read.BrowseOptions{Year: 2010}, 5); strings.Join(got, ",") != "Ep2010" {
+		t.Errorf("by-year 2010 = %v, want the episode newest excludes", got)
 	}
 }
 
@@ -140,10 +246,14 @@ func TestBrowseByYearAndByGenre(t *testing.T) {
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/a.flac", essence: "ea", content: "ca", title: "A", artist: "X", album: "Al", genre: "Rock", year: 2000})
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/b.flac", essence: "eb", content: "cb", title: "B", artist: "Y", album: "Bl", genre: "Jazz", year: 2000})
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/c.flac", essence: "ec", content: "cc", title: "C", artist: "Z", album: "Cl", genre: "Rock", year: 1990})
+	// The episode side of the same three-way year coalesce newest uses: an episode
+	// visible at 2000 there must be reachable here, or the two lists disagree about
+	// what year an item is from.
+	putFeedSpec(t, st, "http://cast.example/f", false, epSpec{title: "Ep", pubNS: 1_000_000_000, year: 2000})
 
 	byYear := drainBrowse(t, st, read.ListByYear, read.BrowseOptions{Year: 2000}, 5)
-	if strings.Join(byYear, ",") != "A,B" {
-		t.Errorf("by-year 2000 = %v, want [A B]", byYear)
+	if strings.Join(byYear, ",") != "A,B,Ep" {
+		t.Errorf("by-year 2000 = %v, want [A B Ep]", byYear)
 	}
 	if _, err := st.BrowsePage(ctx, read.ListByYear, read.BrowseOptions{}); err == nil {
 		t.Error("by-year without a year should error")
@@ -166,6 +276,121 @@ func TestBrowseByYearAndByGenre(t *testing.T) {
 	byGenre := drainBrowse(t, st, read.ListByGenre, read.BrowseOptions{GenrePID: rockPID}, 5)
 	if strings.Join(byGenre, ",") != "A,C" {
 		t.Errorf("by-genre Rock = %v, want [A C]", byGenre)
+	}
+}
+
+// TestEpisodeScopeAcrossReadSurfaces pins one rule, not three: a query field matches
+// what the row displays and so finds episodes, a browse list spans every kind unless
+// its ordering is kind-specific, and a music facet excludes them. Year is asserted
+// beside artist because year is the pair people re-litigate, and seeing artist behave
+// identically shows it is the design.
+func TestEpisodeScopeAcrossReadSurfaces(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/a.flac", essence: "ea", content: "ca",
+		title: "A", artist: "X", albumArt: "X", album: "Al", year: 2000})
+	// putFeedSpec titles every show "Cast", which the artist/album fields coalesce.
+	putFeedSpec(t, st, "http://cast.example/f", false,
+		epSpec{title: "Ep2000", pubNS: 1_000_000_000, year: 2000},
+		epSpec{title: "Ep2025", pubNS: 2_000_000_000, year: 2025})
+
+	// Fields find episodes.
+	if n := countWhere(t, st, "artist", query.OpIs, "Cast"); n != 2 {
+		t.Errorf("artist field over the show title = %d, want both episodes", n)
+	}
+	if n := countWhere(t, st, "year", query.OpIs, 2025); n != 1 {
+		t.Errorf("year field at 2025 = %d, want the episode", n)
+	}
+
+	// Browse lists span kinds.
+	if got := drainBrowse(t, st, read.ListByYear, read.BrowseOptions{Year: 2000}, 10); len(got) != 2 {
+		t.Errorf("by-year 2000 = %v, want the track and the episode", got)
+	}
+	if got := drainBrowse(t, st, read.ListByYear, read.BrowseOptions{Year: 2025}, 10); len(got) != 1 {
+		t.Errorf("by-year 2025 = %v, want the one episode", got)
+	}
+	// And a caller that wants one kind asks for it, which is what `browse --kind` does.
+	scoped := drainBrowse(t, st, read.ListByYear, read.BrowseOptions{
+		Year:  2000,
+		Query: query.New(query.EntityItems).Where("kind", query.OpIs, "track").Build(),
+	}, 10)
+	if strings.Join(scoped, ",") != "A" {
+		t.Errorf("by-year 2000 scoped to tracks = %v, want just the track", scoped)
+	}
+
+	// Music facets exclude episodes, for year and artist alike.
+	for _, tc := range []struct {
+		group   read.GroupBy
+		present string // a bucket the music dimension must have
+		count   int
+		absent  string // a bucket only an episode could produce
+	}{
+		{read.GroupYear, "2000", 1, "2025"},
+		{read.GroupArtist, "X", 1, "Cast"},
+	} {
+		res, err := st.Facet(ctx, query.New(query.EntityItems).Build(), tc.group, "", 0, "")
+		if err != nil {
+			t.Fatalf("facet %s: %v", tc.group, err)
+		}
+		if b, ok := bucketByDisplay(res, tc.present); !ok || b.Count != tc.count {
+			t.Errorf("%s facet %q bucket = %+v, want count %d (music only)",
+				tc.group, tc.present, b, tc.count)
+		}
+		if b, ok := bucketByDisplay(res, tc.absent); ok {
+			t.Errorf("%s facet gained an episode-only bucket %q (%+v); the dimension is music-scoped",
+				tc.group, tc.absent, b)
+		}
+	}
+}
+
+// TestBrowseKindScoped pins the primitive the CLI's --kind flag rides on: any
+// discovery list narrows to one media type through the shared filter engine, with
+// the list keeping its own ordering. This is what makes an unscoped newest, which
+// spans every kind and so leads with podcast episodes on a podcast-heavy catalog,
+// a default rather than the only option.
+func TestBrowseKindScoped(t *testing.T) {
+	st, lib := entityFixture(t)
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/a.flac", essence: "ea", content: "ca",
+		title: "Newer Track", artist: "X", album: "Al", year: 2010})
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/b.flac", essence: "eb", content: "cb",
+		title: "Older Track", artist: "X", album: "Al", year: 1990})
+	putBook(t, st, lib.ID, bookSpec{path: "/lib/bk.m4b", essence: "ebk", content: "cbk",
+		title: "A Book", author: "Author", year: 2000})
+	putFeedSpec(t, st, "http://cast.example/f", false,
+		epSpec{title: "An Episode", pubNS: 1_000_000_000, year: 2025})
+
+	// recently-added is the kind-agnostic recency list, so it holds everything and
+	// scoping it is exactly what the filter is for.
+	if all := drainBrowse(t, st, read.ListRecentlyAdded, read.BrowseOptions{}, 10); len(all) != 4 {
+		t.Errorf("unscoped recently-added = %v, want all four items", all)
+	}
+	for _, tc := range []struct {
+		list read.DiscoveryList
+		kind string
+		want string
+	}{
+		{read.ListNewest, "track", "Newer Track,Older Track"},
+		{read.ListNewest, "book", "A Book"},
+		{read.ListRecentlyAdded, "book", "A Book"},
+		{read.ListAlphabetical, "episode", "An Episode"},
+		// The store answers a combination the list cannot hold with an empty page
+		// rather than an error: a filter ANDing to nothing is not a store-level
+		// mistake. The CLI is where it fails closed (checkListKind).
+		{read.ListNewest, "episode", ""},
+	} {
+		got := drainBrowse(t, st, tc.list, read.BrowseOptions{
+			Query: query.New(query.EntityItems).Where("kind", query.OpIs, tc.kind).Build(),
+		}, 10)
+		if strings.Join(got, ",") != tc.want {
+			t.Errorf("%s scoped to %s = %v, want %q", tc.list, tc.kind, got, tc.want)
+		}
+	}
+	// It composes with any list, not just newest: the ordering stays the list's.
+	alpha := drainBrowse(t, st, read.ListAlphabetical, read.BrowseOptions{
+		Query: query.New(query.EntityItems).Where("kind", query.OpIs, "track").Build(),
+	}, 10)
+	if strings.Join(alpha, ",") != "Newer Track,Older Track" {
+		t.Errorf("alphabetical --kind track = %v, want collation order over tracks only", alpha)
 	}
 }
 

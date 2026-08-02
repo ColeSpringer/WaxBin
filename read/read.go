@@ -15,8 +15,15 @@ const (
 	GroupArtist      GroupBy = "artist"
 	GroupAlbumArtist GroupBy = "albumArtist"
 	GroupAlbum       GroupBy = "album"
-	GroupYear        GroupBy = "year"
-	GroupKind        GroupBy = "kind"
+	// GroupReleaseGroup buckets tracks by their album's release group (key = release
+	// group pid, display = its title), the dimension above album that collects a
+	// record's editions. It is the mirror of the release_group_pid query field. Like
+	// album it is track-only and excludes episodes; a track whose album has no release
+	// group lands in NoReleaseGroup, which is distinct from NonAlbum because a track
+	// can have an album and still no release group.
+	GroupReleaseGroup GroupBy = "releaseGroup"
+	GroupYear         GroupBy = "year"
+	GroupKind         GroupBy = "kind"
 	// GroupLibrary buckets items by their primary backing file's library (key =
 	// library pid, display = the display root). A fileless item, such as an
 	// undownloaded episode, lands in the NoFile unknown bucket.
@@ -33,7 +40,8 @@ const (
 // or a well-formed custom-tag dimension ("tag.<KEY>" for a canonical, non-reserved key).
 func (g GroupBy) Valid() bool {
 	switch g {
-	case GroupGenre, GroupArtist, GroupAlbumArtist, GroupAlbum, GroupYear, GroupKind, GroupLibrary, GroupPodcast:
+	case GroupGenre, GroupArtist, GroupAlbumArtist, GroupAlbum, GroupReleaseGroup,
+		GroupYear, GroupKind, GroupLibrary, GroupPodcast:
 		return true
 	default:
 		_, ok := TagGroupKey(g)
@@ -43,7 +51,8 @@ func (g GroupBy) Valid() bool {
 
 // GroupBys lists the supported faceting dimensions (for help text and tests).
 func GroupBys() []GroupBy {
-	return []GroupBy{GroupGenre, GroupArtist, GroupAlbumArtist, GroupAlbum, GroupYear, GroupKind, GroupLibrary, GroupPodcast}
+	return []GroupBy{GroupGenre, GroupArtist, GroupAlbumArtist, GroupAlbum, GroupReleaseGroup,
+		GroupYear, GroupKind, GroupLibrary, GroupPodcast}
 }
 
 // Canonical "unknown" bucket display labels. A consumer rendering a facet or a
@@ -55,4 +64,7 @@ const (
 	UnknownYear   = "[Unknown Year]"
 	NonAlbum      = "[Non-Album]"
 	NoFile        = "[No File]"
+	// NoReleaseGroup is deliberately not NonAlbum: a track can belong to an album and
+	// still have no release group, so folding the two would hide that state.
+	NoReleaseGroup = "[No Release Group]"
 )

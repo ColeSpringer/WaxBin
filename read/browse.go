@@ -13,7 +13,8 @@ import (
 type DiscoveryList string
 
 const (
-	ListNewest         DiscoveryList = "newest"          // by release year, newest first
+	// by release year, newest first; tracks and books only (see Kinds)
+	ListNewest         DiscoveryList = "newest"
 	ListRecentlyAdded  DiscoveryList = "recently-added"  // by catalog insertion time
 	ListMostPlayed     DiscoveryList = "most-played"     // by play count (per user)
 	ListRecentlyPlayed DiscoveryList = "recently-played" // by last played (per user)
@@ -22,13 +23,19 @@ const (
 	ListByYear         DiscoveryList = "by-year"         // filtered to one year (Options.Year)
 	ListByGenre        DiscoveryList = "by-genre"        // filtered to one genre (Options.GenrePID)
 	ListAlphabetical   DiscoveryList = "alphabetical"    // by collation sort key
+	// Episodes by publication date, newest first, across every feed. Remote and
+	// downloaded alike, since finding an undownloaded episode is the point; undated
+	// ones are excluded (see the spec). Named off-pattern from recently-* on purpose:
+	// it is a kind scope as well as an ordering.
+	ListRecentEpisodes DiscoveryList = "recent-episodes"
 )
 
 // Valid reports whether d is a known discovery list.
 func (d DiscoveryList) Valid() bool {
 	switch d {
 	case ListNewest, ListRecentlyAdded, ListMostPlayed, ListRecentlyPlayed,
-		ListRandom, ListStarred, ListByYear, ListByGenre, ListAlphabetical:
+		ListRandom, ListStarred, ListByYear, ListByGenre, ListAlphabetical,
+		ListRecentEpisodes:
 		return true
 	default:
 		return false
@@ -51,11 +58,27 @@ func (d DiscoveryList) PerUser() bool {
 	}
 }
 
+// Kinds reports the item kinds a list can contain, nil when it spans all of them.
+// Only newest and recent-episodes are scoped, each ordering by something only its
+// kinds carry. Consult it before offering a media-type filter over a list; asking for
+// a kind outside the scope is an empty page, not an error.
+func (d DiscoveryList) Kinds() []model.Kind {
+	switch d {
+	case ListNewest:
+		return []model.Kind{model.KindTrack, model.KindBook}
+	case ListRecentEpisodes:
+		return []model.Kind{model.KindEpisode}
+	default:
+		return nil
+	}
+}
+
 // DiscoveryLists lists the supported browse lists (for help text and tests).
 func DiscoveryLists() []DiscoveryList {
 	return []DiscoveryList{
 		ListNewest, ListRecentlyAdded, ListMostPlayed, ListRecentlyPlayed,
 		ListRandom, ListStarred, ListByYear, ListByGenre, ListAlphabetical,
+		ListRecentEpisodes,
 	}
 }
 

@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/colespringer/waxbin/model"
@@ -39,4 +40,86 @@ func TestPlayStateViewJSON(t *testing.T) {
 	if string(b) != want {
 		t.Errorf("zero json = %s\nwant %s (never-changed stamps omitted)", b, want)
 	}
+}
+
+// TestPrintItemTableEpisodeColumn pins the kind-aware header of the shared item
+// table, which query, query --page, and browse all render through.
+//
+// The PUBLISHED column is what makes a publication-ordered listing legible: an
+// episode's year is derived from its pub date, so a whole season reads as one
+// repeated year and `browse recent-episodes` looks unordered without the date. It is
+// chosen from the rows rather than always emitted, so a music-only catalog does not
+// grow a permanently blank column.
+func TestPrintItemTableEpisodeColumn(t *testing.T) {
+	track := &model.ItemView{
+		PID: "t1", Kind: model.KindTrack, Title: "Airbag",
+		Artist: "Radiohead", Album: "OK Computer", TrackNo: 1, Year: 1997,
+	}
+	// 2025-01-09T10:00:00Z, and a book with neither a track number nor a year.
+	episode := &model.ItemView{
+		PID: "e1", Kind: model.KindEpisode, Title: "Ep One",
+		Artist: "My Show", Album: "My Show", Year: 2025, PubDateNS: 1736416800_000000000,
+	}
+	book := &model.ItemView{PID: "b1", Kind: model.KindBook, Title: "Tome", Artist: "Author"}
+
+	var musicOnly strings.Builder
+	if err := printItemTable(&musicOnly, []*model.ItemView{track, book}); err != nil {
+		t.Fatalf("music-only table: %v", err)
+	}
+	if strings.Contains(musicOnly.String(), "PUBLISHED") {
+		t.Errorf("a catalog with no episodes grew a PUBLISHED column:\n%s", musicOnly.String())
+	}
+	// A zero track number and year print blank, not "0": neither is a real value for
+	// a book, and printing 0 reads as data.
+	bookLine := lineWith(t, musicOnly.String(), "Tome")
+	if strings.Contains(bookLine, "0") {
+		t.Errorf("book row renders a zero track/year as 0: %q", bookLine)
+	}
+
+	var mixed strings.Builder
+	if err := printItemTable(&mixed, []*model.ItemView{track, episode}); err != nil {
+		t.Fatalf("mixed table: %v", err)
+	}
+	out := mixed.String()
+	if !strings.Contains(out, "PUBLISHED") {
+		t.Errorf("a listing containing an episode has no PUBLISHED column:\n%s", out)
+	}
+	if got := lineWith(t, out, "Ep One"); !strings.Contains(got, "2025-01-09") {
+		t.Errorf("episode row = %q, want the UTC publication date", got)
+	}
+	// No row in either table ends in whitespace. This is the assertion that matters
+	// for the blank-cell rendering: tabwriter pads an empty tab-terminated cell, so a
+	// book (no track number, no year) would otherwise trail a run of spaces from the
+	// columns it leaves blank. Checking only the track line missed it, since a track
+	// populates both.
+	for name, table := range map[string]string{"music-only": musicOnly.String(), "mixed": out} {
+		for _, line := range strings.Split(strings.TrimRight(table, "\n"), "\n") {
+			if line != strings.TrimRight(line, " \t") {
+				t.Errorf("%s table has a row ending in whitespace: %q", name, line)
+			}
+		}
+	}
+	// Alignment survives the trimming: the date lines up under its header.
+	if hdr, ep := lineWith(t, out, "PUBLISHED"), lineWith(t, out, "Ep One"); //
+	strings.Index(hdr, "PUBLISHED") != strings.Index(ep, "2025-01-09") {
+		t.Errorf("PUBLISHED column is misaligned:\n%s\n%s", hdr, ep)
+	}
+}
+
+// lineWith returns the single output line containing want.
+func lineWith(t *testing.T, out, want string) string {
+	t.Helper()
+	var found string
+	for _, l := range strings.Split(out, "\n") {
+		if strings.Contains(l, want) {
+			if found != "" {
+				t.Fatalf("more than one line contains %q", want)
+			}
+			found = l
+		}
+	}
+	if found == "" {
+		t.Fatalf("no line contains %q in:\n%s", want, out)
+	}
+	return found
 }

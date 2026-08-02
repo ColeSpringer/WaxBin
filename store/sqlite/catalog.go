@@ -823,9 +823,21 @@ func (s *Store) AbortMove(ctx context.Context, journalPID model.PID) error {
 	})
 }
 
+// fileIDByPID resolves a file pid to its rowid inside a write transaction, or
+// CodeNotFound. It keeps the concrete *sql.Tx rather than widening to queryer: every
+// caller resolves the pid and then mutates that row, and the parameter type is what
+// makes it a compile error to resolve against the read pool and mutate in a
+// transaction the resolution never joined. A read-only caller wants fileIDByPIDRead.
 func fileIDByPID(ctx context.Context, tx *sql.Tx, pid model.PID, op string) (int64, error) {
+	return fileIDByPIDRead(ctx, tx, pid, op)
+}
+
+// fileIDByPIDRead resolves a file pid to its rowid over any read surface, for callers
+// that only read (a diagnostic scope, say). It holds the single copy of the SELECT
+// both entry points share, following itemIDByPIDRead.
+func fileIDByPIDRead(ctx context.Context, q queryer, pid model.PID, op string) (int64, error) {
 	var fileID int64
-	err := tx.QueryRowContext(ctx, "SELECT id FROM file WHERE pid = ?", string(pid)).Scan(&fileID)
+	err := q.QueryRowContext(ctx, "SELECT id FROM file WHERE pid = ?", string(pid)).Scan(&fileID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, waxerr.New(waxerr.CodeNotFound, op, "no such file: "+string(pid))
 	}

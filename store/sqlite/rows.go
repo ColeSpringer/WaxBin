@@ -19,18 +19,28 @@ type rowScanner interface {
 }
 
 // itemJoins LEFT JOINs all three subtypes (track, book, episode) plus the book's
-// series and the episode's podcast, so a book or episode item, which has no track
-// row, still reads back. The book's author/series/year and the podcast's title
-// stand in for the music artist/album/year columns via COALESCE in itemViewCols,
-// and the primary file is the representative backing file (the first part of a
-// multi-file book, or the downloaded enclosure of an episode; NULL for a not-yet-
-// downloaded episode).
+// series, the episode's podcast, and the track's album, so a book or episode item,
+// which has no track row, still reads back. The book's author/series/year and the
+// podcast's title stand in for the music artist/album/year columns via COALESCE in
+// itemViewCols, and the primary file is the representative backing file (the first
+// part of a multi-file book, or the downloaded enclosure of an episode; NULL for a
+// not-yet-downloaded episode).
+//
+// The album is joined rather than sought per row (unlike artist_pid, whose COALESCE
+// across subtypes no join can serve) because a subquery-valued release_group_pid
+// would plan as CORRELATED, which TestLoweredIdentityFieldPlans rejects. It does not
+// make that filter indexed: it still plans as SCAN pi with a per-row alb probe.
+//
+// facet.go's album and releaseGroup specs read alb instead of joining their own, so
+// this join cannot be made conditional. itemCountSelect and portable.go's
+// identitySelect pay one PK seek for a column they never read.
 const itemJoins = ` FROM playable_item pi
 	LEFT JOIN track t ON t.item_id = pi.id
 	LEFT JOIN book bk ON bk.item_id = pi.id
 	LEFT JOIN series srs ON srs.id = bk.series_id
 	LEFT JOIN episode ep ON ep.item_id = pi.id
 	LEFT JOIN podcast pod ON pod.id = ep.podcast_id
+	LEFT JOIN album alb ON alb.id = t.album_id
 	LEFT JOIN acquisition acq ON acq.item_id = pi.id
 	LEFT JOIN item_file pf ON pf.item_id = pi.id AND pf.role = 'primary'
 	LEFT JOIN file f ON f.id = pf.file_id`
@@ -72,8 +82,8 @@ const itemEffectiveDurationExpr = `CASE WHEN pf.start_frames IS NOT NULL ` +
 // artist/album_artist/album/year/genre columns COALESCE the track values with the
 // book's author/series/year and the podcast's title so one view shape serves all
 // three kinds; the composer pair and the audiobook columns are empty for the
-// kinds that lack them, and the podcast columns (season, pub_date) are empty
-// otherwise. The duration is the
+// kinds that lack them, and the podcast columns (season, pub_date, explicit) are
+// empty otherwise. The duration is the
 // book's denormalized total_duration_ms (the sum of its parts), then the item's
 // effective duration (a virtual track's window, else the primary file's whole
 // duration for a downloaded episode or a track), then the feed-declared episode
@@ -81,35 +91,32 @@ const itemEffectiveDurationExpr = `CASE WHEN pf.start_frames IS NOT NULL ` +
 // expose a virtual track's offset window, and f.sample_rate rides along beside the
 // container and codec so a consumer can convert that window to samples.
 //
-// The final three columns project the item's effective artist/album-artist/album
-// entity pids as correlated primary-key-seek subqueries, reusing itemArtistIDExpr/
-// itemAlbumArtistIDExpr/t.album_id so a projected pid and a pid filter (the
-// artist_pid/album_artist_pid/album_pid query fields) can never disagree. A book
-// resolves its author for the two artist pids and NULL for album; an episode
-// resolves NULL for all three, which n.apply maps to the empty PID.
+// The final four columns project the artist/album-artist/album/release-group entity
+// pids, sharing their expressions with the matching query fields so a projected pid
+// and a pid filter cannot disagree. A book resolves its author for the artist pair
+// and NULL for the album pair; an episode is NULL for all four. The release group is
+// also NULL for a track whose album has none.
 //
-// These ride on every item read, the busiest read shape, so their cost was
-// measured on BenchmarkQueryPageAtScale (a 50-item keyset page over a 5k-track
-// catalog): the three primary-key-seek subqueries add a couple of microseconds per
-// item, a sub-millisecond page either way, which is cheap enough to keep them
-// always-on rather than behind a separate enriched projection.
+// These ride on every item read. BenchmarkQueryPageAtScale puts a 50-item page around
+// 1 ms, unchanged by the release group (p=0.69 over 5 runs).
 const itemViewCols = `pi.pid, pi.kind, pi.state, pi.title,
 	COALESCE(NULLIF(t.artist,''), bk.author, pod.title, ''),
 	COALESCE(NULLIF(t.album_artist,''), bk.author, pod.title, ''),
 	COALESCE(NULLIF(t.album,''), srs.name, pod.title, ''),
-	t.track_no, t.disc_no, COALESCE(t.year, bk.year, ep.year),
+	t.track_no, t.disc_no, ` + itemYearExpr + `,
 	COALESCE(NULLIF(t.genre,''), bk.genre, ''), t.compilation,
 	COALESCE(t.composer,''), COALESCE(t.composer_sort,''),
 	COALESCE(bk.author_sort,''), COALESCE(bk.narrator,''), COALESCE(srs.name,''),
 	COALESCE(bk.series_seq,''), COALESCE(bk.subtitle,''), COALESCE(bk.asin,''),
-	ep.season, ep.pub_date,
+	ep.season, ep.pub_date, ep.explicit,
 	COALESCE(acq.source_type, pod.source_type, 'local'),
 	f.pid, f.path, f.display_path,
 	COALESCE(bk.total_duration_ms, ` + itemEffectiveDurationExpr + `, ep.duration_ms),
 	f.container, f.codec, f.sample_rate, pf.start_frames, pf.end_frames,
 	(SELECT vap.pid FROM artist vap WHERE vap.id = ` + itemArtistIDExpr + `),
 	(SELECT vaap.pid FROM artist vaap WHERE vaap.id = ` + itemAlbumArtistIDExpr + `),
-	(SELECT valb.pid FROM album valb WHERE valb.id = t.album_id)`
+	alb.pid,
+	(SELECT vrg.pid FROM release_group vrg WHERE vrg.id = alb.release_group_id)`
 
 const itemSelect = `SELECT ` + itemViewCols + itemJoins
 
@@ -128,11 +135,12 @@ const fileSelect = `SELECT id, pid, library_id, path, display_path, rel_path, ki
 type itemViewNulls struct {
 	trackNo, discNo, year, dur          sql.NullInt64
 	compilation                         sql.NullInt64
-	season, pubDate                     sql.NullInt64
+	season, pubDate, explicit           sql.NullInt64
 	sampleRate                          sql.NullInt64
 	startFrames, endFrames              sql.NullInt64
 	fpid, fdisp, container, codec       sql.NullString
 	artistPID, albumArtistPID, albumPID sql.NullString
+	releaseGroupPID                     sql.NullString
 	fpath                               []byte
 }
 
@@ -144,10 +152,10 @@ func itemViewDests(v *model.ItemView, n *itemViewNulls) []any {
 		&v.Artist, &v.AlbumArtist, &v.Album, &n.trackNo, &n.discNo, &n.year, &v.Genre, &n.compilation,
 		&v.Composer, &v.ComposerSort,
 		&v.AuthorSort, &v.Narrator, &v.Series, &v.SeriesSeq, &v.Subtitle, &v.ASIN,
-		&n.season, &n.pubDate, &v.Source,
+		&n.season, &n.pubDate, &n.explicit, &v.Source,
 		&n.fpid, &n.fpath, &n.fdisp, &n.dur, &n.container, &n.codec, &n.sampleRate,
 		&n.startFrames, &n.endFrames,
-		&n.artistPID, &n.albumArtistPID, &n.albumPID,
+		&n.artistPID, &n.albumArtistPID, &n.albumPID, &n.releaseGroupPID,
 	}
 }
 
@@ -158,6 +166,7 @@ func (n *itemViewNulls) apply(v *model.ItemView) {
 	v.Compilation = n.compilation.Int64 != 0
 	v.Season = int(n.season.Int64)
 	v.PubDateNS = n.pubDate.Int64
+	v.Explicit = n.explicit.Int64 != 0
 	v.DurationMS = n.dur.Int64
 	v.FilePID = model.PID(n.fpid.String)
 	v.Path = n.fpath
@@ -169,6 +178,7 @@ func (n *itemViewNulls) apply(v *model.ItemView) {
 	v.ArtistPID = model.PID(n.artistPID.String)
 	v.AlbumArtistPID = model.PID(n.albumArtistPID.String)
 	v.AlbumPID = model.PID(n.albumPID.String)
+	v.ReleaseGroupPID = model.PID(n.releaseGroupPID.String)
 	// A non-NULL start offset marks the primary edge as a virtual track's window.
 	v.Virtual = n.startFrames.Valid
 	v.StartFrames = n.startFrames.Int64

@@ -80,7 +80,7 @@ func newFacetCmd(g *globals) *cobra.Command {
 	f.StringVar(&artist, "artist", "", "match artist (substring)")
 	f.StringVar(&album, "album", "", "match album (substring)")
 	f.StringVar(&genre, "genre", "", "match genre (exact)")
-	f.StringVar(&kind, "kind", "", "match kind: track|book|episode (exact)")
+	f.StringVar(&kind, "kind", "", "match kind ("+kindList()+", exact)")
 	f.IntVar(&year, "year", 0, "match year (exact)")
 	f.StringVar(&rulePath, "rule", "", "load a JSON rule document (overrides filter flags)")
 	f.StringVar(&user, "user", "", "user pid for per-user fields (e.g. rating, starred, play_count); empty = default user")

@@ -14,6 +14,8 @@ type diagnosticFlags struct {
 	code     string
 	severity string
 	library  string
+	file     string
+	item     string
 }
 
 func (df *diagnosticFlags) register(cmd *cobra.Command) {
@@ -22,6 +24,8 @@ func (df *diagnosticFlags) register(cmd *cobra.Command) {
 	f.StringVar(&df.code, "code", "", "filter by diagnostic code (e.g. tag_write_unsynced)")
 	f.StringVar(&df.severity, "severity", "", "filter by severity: info|warn|error")
 	f.StringVar(&df.library, "library", "", "filter to files under this library pid")
+	f.StringVar(&df.file, "file", "", "filter to one file pid")
+	f.StringVar(&df.item, "item", "", "filter to every file backing this item pid (all parts of a book)")
 }
 
 func (df *diagnosticFlags) filter() model.DiagnosticFilter {
@@ -30,6 +34,8 @@ func (df *diagnosticFlags) filter() model.DiagnosticFilter {
 		Code:       model.DiagnosticCode(df.code),
 		Severity:   model.AuditSeverity(df.severity),
 		LibraryPID: model.PID(df.library),
+		FilePID:    model.PID(df.file),
+		ItemPID:    model.PID(df.item),
 	}
 }
 
@@ -39,8 +45,8 @@ func newDiagnosticsCmd(g *globals) *cobra.Command {
 		Short: "Query the persisted per-file diagnostics",
 		Long: "Reads the diagnostics the scan, organize, analyze, and edit write-back passes " +
 			"recorded per file (unsupported formats, dropped cue tracks, unsynced tags, and the " +
-			"rest), filtered by writer, code, severity, or library. `list` prints the rows; " +
-			"`summary` prints grouped counts, most severe first.",
+			"rest), filtered by writer, code, severity, library, file, or item. `list` prints " +
+			"the rows; `summary` prints grouped counts, most severe first.",
 	}
 	cmd.AddCommand(newDiagnosticsListCmd(g), newDiagnosticsSummaryCmd(g))
 	return cmd
