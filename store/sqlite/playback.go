@@ -11,31 +11,34 @@ import (
 
 // SetProgress records a user's resume position for an item. High-frequency
 // progress is coalesced by the playback service before it reaches here, so this
-// is called on checkpoints, not every tick. It never touches the star/rating
-// change stamps.
+// is called on checkpoints, not every tick. It stamps last_progress_at, which is
+// what puts a checkpointed-but-never-played item on the in-progress list, and it
+// never touches the star/rating change stamps.
 func (s *Store) SetProgress(ctx context.Context, userPID, itemPID model.PID, positionMS int64) error {
 	_, err := s.playStateWrite(ctx, "store.SetProgress", userPID, itemPID, func(ctx context.Context, tx *sql.Tx, userID, itemID, now int64) (bool, error) {
 		_, err := tx.ExecContext(ctx,
-			`INSERT INTO play_state(user_id, item_id, position_ms, updated_at) VALUES (?,?,?,?)
-			 ON CONFLICT(user_id, item_id) DO UPDATE SET position_ms=excluded.position_ms, updated_at=excluded.updated_at`,
-			userID, itemID, positionMS, now)
+			`INSERT INTO play_state(user_id, item_id, position_ms, last_progress_at, updated_at) VALUES (?,?,?,?,?)
+			 ON CONFLICT(user_id, item_id) DO UPDATE SET position_ms=excluded.position_ms,
+			   last_progress_at=excluded.last_progress_at, updated_at=excluded.updated_at`,
+			userID, itemID, positionMS, now, now)
 		return true, err
 	})
 	return err
 }
 
 // MarkPlayed increments a user's play count for an item, sets it played (and
-// finished when finished is true), and stamps last_played_at. It never touches
-// the star/rating change stamps.
+// finished when finished is true), and stamps both last_played_at and
+// last_progress_at. It never touches the star/rating change stamps.
 func (s *Store) MarkPlayed(ctx context.Context, userPID, itemPID model.PID, finished bool) error {
 	_, err := s.playStateWrite(ctx, "store.MarkPlayed", userPID, itemPID, func(ctx context.Context, tx *sql.Tx, userID, itemID, now int64) (bool, error) {
 		_, err := tx.ExecContext(ctx,
-			`INSERT INTO play_state(user_id, item_id, played, finished, play_count, last_played_at, updated_at)
-			 VALUES (?,?,1,?,1,?,?)
+			`INSERT INTO play_state(user_id, item_id, played, finished, play_count, last_played_at, last_progress_at, updated_at)
+			 VALUES (?,?,1,?,1,?,?,?)
 			 ON CONFLICT(user_id, item_id) DO UPDATE SET
 			   played=1, finished=MAX(finished, excluded.finished), play_count=play_count+1,
-			   last_played_at=excluded.last_played_at, updated_at=excluded.updated_at`,
-			userID, itemID, boolInt(finished), now, now)
+			   last_played_at=excluded.last_played_at, last_progress_at=excluded.last_progress_at,
+			   updated_at=excluded.updated_at`,
+			userID, itemID, boolInt(finished), now, now, now)
 		return true, err
 	})
 	return err
@@ -82,7 +85,9 @@ func staleReplay(asOf *int64, storedChanged int64, validStored bool) bool {
 // A call that would store the value already held is a silent no-op: no write,
 // no play_state delta, and the change stamp keeps its time, so an idempotent
 // re-rate never masquerades as a newer change to a syncing client. A real value
-// change, a clear of a set rating included, bumps rating_changed_at.
+// change, a clear of a set rating included, bumps rating_changed_at. It leaves
+// last_progress_at alone: rating is not playback, and moving it would reorder the
+// in-progress list.
 //
 // asOf (unix nanoseconds, nil = server now) is the recorded time of the change. When
 // supplied, the stamp lands in recorded time and the engine enforces recorded-time
@@ -146,7 +151,8 @@ func (s *Store) SetRating(ctx context.Context, userPID, itemPID model.PID, ratin
 // (so "starred since" stays truthful), unstarring an unstarred one creates no
 // row, and neither emits a play_state delta or bumps the change stamp. A real
 // flip, unstar included, bumps starred_changed_at; starred_at goes NULL on
-// unstar as before.
+// unstar as before. Like SetRating it leaves last_progress_at alone, so starring
+// an old half-heard item does not push it to the head of the in-progress list.
 //
 // asOf (unix nanoseconds, nil = server now) is the recorded time of the flip. When
 // supplied, both starred_changed_at and, on a star, starred_at land in recorded time
@@ -258,13 +264,13 @@ func (s *Store) PlayStateFor(ctx context.Context, userPID, itemPID model.PID) (*
 	}
 	st := &model.PlayState{UserPID: userPID, ItemPID: itemPID}
 	var played, finished int
-	var rating, starredAt, lastPlayed, ratingChanged, starredChanged, updatedAt sql.NullInt64
+	var rating, starredAt, lastPlayed, lastProgress, ratingChanged, starredChanged, updatedAt sql.NullInt64
 	err = s.read.QueryRowContext(ctx,
 		`SELECT position_ms, played, finished, play_count, rating, starred_at, last_played_at,
-		        rating_changed_at, starred_changed_at, updated_at
+		        last_progress_at, rating_changed_at, starred_changed_at, updated_at
 		 FROM play_state WHERE user_id = ? AND item_id = ?`, userID, itemID).
 		Scan(&st.PositionMS, &played, &finished, &st.PlayCount, &rating, &starredAt, &lastPlayed,
-			&ratingChanged, &starredChanged, &updatedAt)
+			&lastProgress, &ratingChanged, &starredChanged, &updatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return st, nil
 	}
@@ -275,6 +281,7 @@ func (s *Store) PlayStateFor(ctx context.Context, userPID, itemPID model.PID) (*
 	st.Rating, st.HasRating = int(rating.Int64), rating.Valid
 	st.Starred, st.StarredAt = starredAt.Valid, starredAt.Int64
 	st.LastPlayedAt, st.UpdatedAt = lastPlayed.Int64, updatedAt.Int64
+	st.LastProgressAt = lastProgress.Int64
 	st.RatingChangedAt, st.StarredChangedAt = ratingChanged.Int64, starredChanged.Int64
 	return st, nil
 }
@@ -303,7 +310,8 @@ func (s *Store) PlayStatesForItems(ctx context.Context, itemPIDs []model.PID) (m
 		// order below holds across the whole batch.
 		rows, err := s.read.QueryContext(ctx,
 			`SELECT u.pid, pi.pid, ps.position_ms, ps.played, ps.finished, ps.play_count,
-			        ps.rating, ps.starred_at, ps.last_played_at, ps.rating_changed_at, ps.starred_changed_at, ps.updated_at
+			        ps.rating, ps.starred_at, ps.last_played_at, ps.last_progress_at,
+			        ps.rating_changed_at, ps.starred_changed_at, ps.updated_at
 			 FROM play_state ps
 			 JOIN user u ON u.id = ps.user_id
 			 JOIN playable_item pi ON pi.id = ps.item_id
@@ -317,16 +325,16 @@ func (s *Store) PlayStatesForItems(ctx context.Context, itemPIDs []model.PID) (m
 			var ps model.PlayState
 			var userPID, itemPID string
 			var played, finished int
-			var rating, starredAt, lastPlayed, ratingChanged, starredChanged sql.NullInt64
+			var rating, starredAt, lastPlayed, lastProgress, ratingChanged, starredChanged sql.NullInt64
 			if err := rows.Scan(&userPID, &itemPID, &ps.PositionMS, &played, &finished, &ps.PlayCount,
-				&rating, &starredAt, &lastPlayed, &ratingChanged, &starredChanged, &ps.UpdatedAt); err != nil {
+				&rating, &starredAt, &lastPlayed, &lastProgress, &ratingChanged, &starredChanged, &ps.UpdatedAt); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 			ps.UserPID, ps.ItemPID = model.PID(userPID), model.PID(itemPID)
 			ps.Played, ps.Finished = played == 1, finished == 1
 			ps.Rating, ps.HasRating = int(rating.Int64), rating.Valid
 			ps.Starred, ps.StarredAt = starredAt.Valid, starredAt.Int64
-			ps.LastPlayedAt = lastPlayed.Int64
+			ps.LastPlayedAt, ps.LastProgressAt = lastPlayed.Int64, lastProgress.Int64
 			ps.RatingChangedAt, ps.StarredChangedAt = ratingChanged.Int64, starredChanged.Int64
 			out[ps.ItemPID] = append(out[ps.ItemPID], ps)
 		}

@@ -345,13 +345,14 @@ func (l *Library) validateRootSet(ctx context.Context, replaceLibPID model.PID, 
 
 // Query runs a compiled selection and returns matching item views. A query that
 // references a per-user field (starred, starred_at, rating, play_count, played,
-// finished, position_ms, or last_played) evaluates against userPID's play_state. An
-// empty userPID selects the default user. A query with no user-state field is not
-// scoped by user.
+// finished, position_ms, last_played, or last_progress) evaluates against userPID's
+// play_state. An empty userPID selects the default user. A query with no user-state
+// field is not scoped by user.
 //
 // position_ms is the in-progress predicate: `position_ms gt 0` paired with
 // `finished is 0` selects what a consumer would call "continue listening", and is the
-// only way to tell a started item from one merely opened.
+// only way to tell a started item from one merely opened. For the ordered, paginated
+// form of that same set, Browse the in-progress list instead.
 func (l *Library) Query(ctx context.Context, q query.Query, userPID model.PID) ([]*model.ItemView, error) {
 	return l.store.QueryItems(ctx, q, userPID)
 }
@@ -384,7 +385,7 @@ func (l *Library) QueryPage(ctx context.Context, q query.Query, cursor read.Curs
 
 // Browse returns one keyset-paginated window for a discovery list such as newest,
 // recently-added, most-played, recently-played, random, starred, by-year,
-// by-genre, alphabetical, or recent-episodes. Play-derived lists read opt.UserPID's
+// by-genre, alphabetical, recent-episodes, or in-progress. Play-derived lists read opt.UserPID's
 // play_state (empty selects the default user). The by-year, by-genre, and random
 // lists use opt.Year, opt.GenrePID, and opt.Seed respectively.
 // Pagination is stable under concurrent mutation.

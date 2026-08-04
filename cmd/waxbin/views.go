@@ -112,23 +112,27 @@ type itemView struct {
 	Disc        int    `json:"disc,omitempty"`
 	Year        int    `json:"year,omitempty"`
 	Genre       string `json:"genre,omitempty"`
-	// Entity handles: the effective artist/album-artist/album/release-group entity
-	// pids, so a consumer can group by real identity. albumPid and releaseGroupPid are
-	// absent for a book or episode, and releaseGroupPid is also absent for a track
-	// whose album has no release group.
+	// Entity handles: the effective artist/album-artist/album/release-group/podcast
+	// entity pids, so a consumer can group by real identity. albumPid and
+	// releaseGroupPid are absent for a book or episode, releaseGroupPid is also absent
+	// for a track whose album has no release group, and podcastPid is present only for
+	// an episode.
 	ArtistPID       string `json:"artistPid,omitempty"`
 	AlbumArtistPID  string `json:"albumArtistPid,omitempty"`
 	AlbumPID        string `json:"albumPid,omitempty"`
 	ReleaseGroupPID string `json:"releaseGroupPid,omitempty"`
+	PodcastPID      string `json:"podcastPid,omitempty"`
 	// Composer and its collation key, present for track items.
 	Composer     string `json:"composer,omitempty"`
 	ComposerSort string `json:"composerSort,omitempty"`
 	// Episode fields, present for episode items only. pubDateNs is nanoseconds, the
 	// unit every timestamp in this JSON contract uses. explicit is the episode's own
-	// advisory flag; the show's is reached through the podcast, not projected here.
-	Explicit  bool  `json:"explicit,omitempty"`
-	Season    int   `json:"season,omitempty"`
-	PubDateNS int64 `json:"pubDateNs,omitempty"`
+	// advisory flag and podcastExplicit its show's; the two are independent, so a
+	// restricted consumer checks both.
+	Explicit        bool  `json:"explicit,omitempty"`
+	PodcastExplicit bool  `json:"podcastExplicit,omitempty"`
+	Season          int   `json:"season,omitempty"`
+	PubDateNS       int64 `json:"pubDateNs,omitempty"`
 
 	// Everything below is kind-agnostic; the episode block above ends at pubDateNs.
 	Source     string `json:"source,omitempty"`
@@ -166,8 +170,10 @@ func toItemView(v *model.ItemView) itemView {
 		Disc: v.DiscNo, Year: v.Year, Genre: v.Genre,
 		ArtistPID: string(v.ArtistPID), AlbumArtistPID: string(v.AlbumArtistPID),
 		AlbumPID: string(v.AlbumPID), ReleaseGroupPID: string(v.ReleaseGroupPID),
-		Composer: v.Composer, ComposerSort: v.ComposerSort,
-		Explicit: v.Explicit, Season: v.Season, PubDateNS: v.PubDateNS, Source: string(v.Source),
+		PodcastPID: string(v.PodcastPID),
+		Composer:   v.Composer, ComposerSort: v.ComposerSort,
+		Explicit: v.Explicit, PodcastExplicit: v.PodcastExplicit,
+		Season: v.Season, PubDateNS: v.PubDateNS, Source: string(v.Source),
 		DurationMS: v.DurationMS, Codec: v.Codec, Path: v.DisplayPath, FilePID: string(v.FilePID),
 		Virtual: v.Virtual, StartFrames: v.StartFrames, EndFrames: v.EndFrames,
 		StartMS: v.StartMS, EndMS: v.EndMS,
@@ -302,10 +308,16 @@ type playStateView struct {
 	PlayCount  int    `json:"playCount"`
 	Rating     *int   `json:"rating,omitempty"`
 	Starred    bool   `json:"starred"`
-	// The change stamps are unix-ns epochs, JSON-encoded as decimal strings
-	// (",string") like every ns timestamp in the CLI JSON contract: the values
-	// exceed IEEE-754 double precision, so a bare number would be corrupted by
-	// any loose-JSON consumer. 0 (never changed) is omitted.
+	// The stamps are unix-ns epochs, JSON-encoded as decimal strings (",string")
+	// like every ns timestamp in the CLI JSON contract: the values exceed
+	// IEEE-754 double precision, so a bare number would be corrupted by any
+	// loose-JSON consumer. 0 (never set) is omitted.
+	//
+	// lastPlayedAt moves on a play and lastProgressAt on a play or a checkpoint, so
+	// a checkpointed-but-unplayed item carries the second and not the first. Neither
+	// moves for a star or a rating.
+	LastPlayedAt     int64 `json:"lastPlayedAt,string,omitempty"`
+	LastProgressAt   int64 `json:"lastProgressAt,string,omitempty"`
 	RatingChangedAt  int64 `json:"ratingChangedAt,string,omitempty"`
 	StarredChangedAt int64 `json:"starredChangedAt,string,omitempty"`
 }
@@ -314,6 +326,7 @@ func toPlayStateView(st *model.PlayState) playStateView {
 	v := playStateView{
 		ItemPID: string(st.ItemPID), PositionMS: st.PositionMS, Played: st.Played,
 		Finished: st.Finished, PlayCount: st.PlayCount, Starred: st.Starred,
+		LastPlayedAt: st.LastPlayedAt, LastProgressAt: st.LastProgressAt,
 		RatingChangedAt: st.RatingChangedAt, StarredChangedAt: st.StarredChangedAt,
 	}
 	if st.HasRating {

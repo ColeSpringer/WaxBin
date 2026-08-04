@@ -82,8 +82,8 @@ const itemEffectiveDurationExpr = `CASE WHEN pf.start_frames IS NOT NULL ` +
 // artist/album_artist/album/year/genre columns COALESCE the track values with the
 // book's author/series/year and the podcast's title so one view shape serves all
 // three kinds; the composer pair and the audiobook columns are empty for the
-// kinds that lack them, and the podcast columns (season, pub_date, explicit) are
-// empty otherwise. The duration is the
+// kinds that lack them, and the podcast columns (season, pub_date, and the episode's
+// own and its show's explicit flags) are empty otherwise. The duration is the
 // book's denormalized total_duration_ms (the sum of its parts), then the item's
 // effective duration (a virtual track's window, else the primary file's whole
 // duration for a downloaded episode or a track), then the feed-declared episode
@@ -91,11 +91,12 @@ const itemEffectiveDurationExpr = `CASE WHEN pf.start_frames IS NOT NULL ` +
 // expose a virtual track's offset window, and f.sample_rate rides along beside the
 // container and codec so a consumer can convert that window to samples.
 //
-// The final four columns project the artist/album-artist/album/release-group entity
-// pids, sharing their expressions with the matching query fields so a projected pid
-// and a pid filter cannot disagree. A book resolves its author for the artist pair
-// and NULL for the album pair; an episode is NULL for all four. The release group is
-// also NULL for a track whose album has none.
+// The final five columns project the artist/album-artist/album/release-group/podcast
+// entity pids, sharing their expressions with the matching query fields so a projected
+// pid and a pid filter cannot disagree. A book resolves its author for the artist pair
+// and NULL for the album pair; an episode is NULL for all but the podcast, which is
+// NULL for everything else. The release group is also NULL for a track whose album has
+// none.
 //
 // These ride on every item read. BenchmarkQueryPageAtScale puts a 50-item page around
 // 1 ms, unchanged by the release group (p=0.69 over 5 runs).
@@ -108,7 +109,7 @@ const itemViewCols = `pi.pid, pi.kind, pi.state, pi.title,
 	COALESCE(t.composer,''), COALESCE(t.composer_sort,''),
 	COALESCE(bk.author_sort,''), COALESCE(bk.narrator,''), COALESCE(srs.name,''),
 	COALESCE(bk.series_seq,''), COALESCE(bk.subtitle,''), COALESCE(bk.asin,''),
-	ep.season, ep.pub_date, ep.explicit,
+	ep.season, ep.pub_date, ep.explicit, COALESCE(pod.explicit, 0),
 	COALESCE(acq.source_type, pod.source_type, 'local'),
 	f.pid, f.path, f.display_path,
 	COALESCE(bk.total_duration_ms, ` + itemEffectiveDurationExpr + `, ep.duration_ms),
@@ -116,7 +117,8 @@ const itemViewCols = `pi.pid, pi.kind, pi.state, pi.title,
 	(SELECT vap.pid FROM artist vap WHERE vap.id = ` + itemArtistIDExpr + `),
 	(SELECT vaap.pid FROM artist vaap WHERE vaap.id = ` + itemAlbumArtistIDExpr + `),
 	alb.pid,
-	(SELECT vrg.pid FROM release_group vrg WHERE vrg.id = alb.release_group_id)`
+	(SELECT vrg.pid FROM release_group vrg WHERE vrg.id = alb.release_group_id),
+	pod.pid`
 
 const itemSelect = `SELECT ` + itemViewCols + itemJoins
 
@@ -136,11 +138,12 @@ type itemViewNulls struct {
 	trackNo, discNo, year, dur          sql.NullInt64
 	compilation                         sql.NullInt64
 	season, pubDate, explicit           sql.NullInt64
+	podcastExplicit                     sql.NullInt64
 	sampleRate                          sql.NullInt64
 	startFrames, endFrames              sql.NullInt64
 	fpid, fdisp, container, codec       sql.NullString
 	artistPID, albumArtistPID, albumPID sql.NullString
-	releaseGroupPID                     sql.NullString
+	releaseGroupPID, podcastPID         sql.NullString
 	fpath                               []byte
 }
 
@@ -152,10 +155,10 @@ func itemViewDests(v *model.ItemView, n *itemViewNulls) []any {
 		&v.Artist, &v.AlbumArtist, &v.Album, &n.trackNo, &n.discNo, &n.year, &v.Genre, &n.compilation,
 		&v.Composer, &v.ComposerSort,
 		&v.AuthorSort, &v.Narrator, &v.Series, &v.SeriesSeq, &v.Subtitle, &v.ASIN,
-		&n.season, &n.pubDate, &n.explicit, &v.Source,
+		&n.season, &n.pubDate, &n.explicit, &n.podcastExplicit, &v.Source,
 		&n.fpid, &n.fpath, &n.fdisp, &n.dur, &n.container, &n.codec, &n.sampleRate,
 		&n.startFrames, &n.endFrames,
-		&n.artistPID, &n.albumArtistPID, &n.albumPID, &n.releaseGroupPID,
+		&n.artistPID, &n.albumArtistPID, &n.albumPID, &n.releaseGroupPID, &n.podcastPID,
 	}
 }
 
@@ -167,6 +170,7 @@ func (n *itemViewNulls) apply(v *model.ItemView) {
 	v.Season = int(n.season.Int64)
 	v.PubDateNS = n.pubDate.Int64
 	v.Explicit = n.explicit.Int64 != 0
+	v.PodcastExplicit = n.podcastExplicit.Int64 != 0
 	v.DurationMS = n.dur.Int64
 	v.FilePID = model.PID(n.fpid.String)
 	v.Path = n.fpath
@@ -179,6 +183,7 @@ func (n *itemViewNulls) apply(v *model.ItemView) {
 	v.AlbumArtistPID = model.PID(n.albumArtistPID.String)
 	v.AlbumPID = model.PID(n.albumPID.String)
 	v.ReleaseGroupPID = model.PID(n.releaseGroupPID.String)
+	v.PodcastPID = model.PID(n.podcastPID.String)
 	// A non-NULL start offset marks the primary edge as a virtual track's window.
 	v.Virtual = n.startFrames.Valid
 	v.StartFrames = n.startFrames.Int64

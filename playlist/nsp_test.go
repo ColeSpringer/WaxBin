@@ -197,6 +197,16 @@ func TestExportNSPRejectsTagCond(t *testing.T) {
 	}
 }
 
+// TestExportNSPRejectsInCond pins the same fail-closed behaviour for set membership:
+// Navidrome has no `in`, so the whole document is rejected rather than dropping the
+// condition.
+func TestExportNSPRejectsInCond(t *testing.T) {
+	q := query.New(query.EntityItems).WhereValues("artist", query.OpIn, "A", "B").Build()
+	if _, err := ExportNSP(q); !waxerr.Is(err, waxerr.CodeUnsupported) {
+		t.Errorf("ExportNSP of an in cond: want CodeUnsupported, got %v", err)
+	}
+}
+
 func TestNSPRatingScaleAndLastPlayed(t *testing.T) {
 	// lastPlayed maps only through the RELATIVE operators; an absolute date rule
 	// holds a date string WaxBin's nanosecond column cannot compare against, so it

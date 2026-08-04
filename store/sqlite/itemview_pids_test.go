@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"sort"
 	"testing"
 
 	"github.com/colespringer/waxbin/identity"
@@ -12,7 +13,7 @@ import (
 // TestItemViewEntityPIDs pins the entity-handle columns the item view projects: a
 // track carries its artist, album-artist, and album entity pids; a book resolves
 // its author for the two artist pids and has no album; an episode, which has no
-// track or book row, carries none of the three.
+// track or book row, carries none of those three and carries its show's instead.
 func TestItemViewEntityPIDs(t *testing.T) {
 	st, lib := entityFixture(t)
 	ctx := context.Background()
@@ -88,6 +89,15 @@ func TestItemViewEntityPIDs(t *testing.T) {
 		t.Errorf("episode pids = %q/%q/%q, want all empty",
 			epView.ArtistPID, epView.AlbumArtistPID, epView.AlbumPID)
 	}
+	// The one handle an episode does carry, and the one the other kinds do not.
+	podcastPID := entityPIDByName(t, st, "podcast", "title", "My Show")
+	if epView.PodcastPID != podcastPID {
+		t.Errorf("episode PodcastPID = %s, want %s", epView.PodcastPID, podcastPID)
+	}
+	if trackView.PodcastPID != "" || bookView.PodcastPID != "" {
+		t.Errorf("track/book PodcastPID = %q/%q, want empty",
+			trackView.PodcastPID, bookView.PodcastPID)
+	}
 }
 
 // TestItemViewReleaseGroupPID pins the fourth entity handle and its three empty
@@ -161,12 +171,12 @@ func TestItemViewReleaseGroupPID(t *testing.T) {
 	}
 }
 
-// TestItemViewExplicit pins the projected advisory flag against the field that
-// filters on it: a row's Explicit and an `explicit is 1` match must agree for
-// every kind, which is the contract the field map carries. A track and a book read
-// false because WaxBin stores no music advisory flag, and an episode of a
-// channel-marked show reads false too: the show's flag is reached through
-// podcast_pid, not projected onto the item's own row.
+// TestItemViewExplicit pins the projected advisory flags against the fields that
+// filter on them: a row's Explicit and an `explicit is 1` match must agree for every
+// kind, which is the contract the field map carries. A track and a book read false on
+// both because WaxBin stores no music advisory flag. An episode of a channel-marked
+// show reads Explicit false and PodcastExplicit true, which is the inheritance
+// question AdvisoryFlagged answers in one read.
 func TestItemViewExplicit(t *testing.T) {
 	st, lib := entityFixture(t)
 	ctx := context.Background()
@@ -205,7 +215,7 @@ func TestItemViewExplicit(t *testing.T) {
 		t.Fatalf("episode pid rows: %v", err)
 	}
 
-	var explicitTitles []string
+	var explicitTitles, showExplicitTitles, flaggedTitles []string
 	for _, pid := range pids {
 		v, err := st.ItemByPID(ctx, pid)
 		if err != nil {
@@ -218,8 +228,25 @@ func TestItemViewExplicit(t *testing.T) {
 		if v.Explicit {
 			explicitTitles = append(explicitTitles, v.Title)
 		}
+		if v.PodcastExplicit {
+			showExplicitTitles = append(showExplicitTitles, v.Title)
+		}
+		if v.AdvisoryFlagged() {
+			flaggedTitles = append(flaggedTitles, v.Title)
+		}
 	}
 	if !equalStrings(explicitTitles, []string{"Marked"}) {
 		t.Errorf("projected Explicit = %v, want just [Marked]", explicitTitles)
+	}
+	// The show flag rides on both of its episodes, including the one carrying no item
+	// flag of its own, which is exactly what an Explicit-only check would miss. The
+	// episode pids are collected unordered, so compare sorted.
+	sort.Strings(showExplicitTitles)
+	sort.Strings(flaggedTitles)
+	if !equalStrings(showExplicitTitles, []string{"Marked", "Unmarked"}) {
+		t.Errorf("projected PodcastExplicit = %v, want both episodes", showExplicitTitles)
+	}
+	if !equalStrings(flaggedTitles, []string{"Marked", "Unmarked"}) {
+		t.Errorf("AdvisoryFlagged = %v, want both episodes", flaggedTitles)
 	}
 }

@@ -263,6 +263,55 @@ func TestFlushDropsNotFound(t *testing.T) {
 // pair gets a position-only state synthesized (the window an unsubscribe check
 // must not miss), the empty-pid default-user sentinel matches the default
 // user's flushed row instead of duplicating it, and per-item user order holds.
+// TestOverlayStampsLastProgress pins that an overlaid position carries a matching
+// last-progress stamp. Without it the state contradicts itself: a fresh position
+// with a zero stamp sorts to the bottom of the in-progress ordering that stamp is
+// the key for, or drops off it.
+func TestOverlayStampsLastProgress(t *testing.T) {
+	fake := newFake()
+	fake.flushed = map[model.PID][]model.PlayState{
+		"item-1": {{UserPID: "u-alice", ItemPID: "item-1", PositionMS: 1000}},
+	}
+	svc := New(fake)
+	ctx := context.Background()
+	svc.Progress("u-alice", "item-1", 5000) // overlays a flushed row
+	svc.Progress("u-bob", "item-2", 7000)   // synthesized, nothing flushed
+
+	st, err := svc.State(ctx, "u-alice", "item-1")
+	if err != nil {
+		t.Fatalf("State: %v", err)
+	}
+	if st.PositionMS != 5000 || st.LastProgressAt == 0 {
+		t.Errorf("State = pos %d stamp %d, want the buffered position with a stamp",
+			st.PositionMS, st.LastProgressAt)
+	}
+
+	got, err := svc.StatesForItems(ctx, []model.PID{"item-1", "item-2"})
+	if err != nil {
+		t.Fatalf("StatesForItems: %v", err)
+	}
+	for _, tc := range []struct {
+		item model.PID
+		user model.PID
+		pos  int64
+	}{{"item-1", "u-alice", 5000}, {"item-2", "u-bob", 7000}} {
+		var found bool
+		for _, s := range got[tc.item] {
+			if s.UserPID != tc.user {
+				continue
+			}
+			found = true
+			if s.PositionMS != tc.pos || s.LastProgressAt == 0 {
+				t.Errorf("%s/%s = pos %d stamp %d, want pos %d with a stamp",
+					tc.item, tc.user, s.PositionMS, s.LastProgressAt, tc.pos)
+			}
+		}
+		if !found {
+			t.Errorf("%s/%s missing from the overlay", tc.item, tc.user)
+		}
+	}
+}
+
 func TestStatesForItemsOverlay(t *testing.T) {
 	fake := newFake()
 	fake.flushed = map[model.PID][]model.PlayState{

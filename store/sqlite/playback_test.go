@@ -571,6 +571,56 @@ func TestStampsUntouchedByProgressAndPlays(t *testing.T) {
 	}
 }
 
+// TestLastProgressStampedByPlaybackWritesOnly pins which writes move
+// last_progress_at. The two playback writes stamp it; a star and a rating move
+// updated_at and leave it alone, which is what keeps a star off the head of the
+// in-progress list.
+func TestLastProgressStampedByPlaybackWritesOnly(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	item := seedItem(t, st, lib)
+
+	if err := st.SetProgress(ctx, "", item, 42000); err != nil {
+		t.Fatal(err)
+	}
+	afterProgress, _ := st.PlayStateFor(ctx, "", item)
+	if afterProgress.LastProgressAt == 0 {
+		t.Fatal("SetProgress did not stamp last_progress_at")
+	}
+	if afterProgress.LastPlayedAt != 0 {
+		t.Errorf("SetProgress stamped last_played_at = %d, want 0", afterProgress.LastPlayedAt)
+	}
+
+	if err := st.MarkPlayed(ctx, "", item, false); err != nil {
+		t.Fatal(err)
+	}
+	afterPlay, _ := st.PlayStateFor(ctx, "", item)
+	if afterPlay.LastProgressAt <= afterProgress.LastProgressAt {
+		t.Errorf("MarkPlayed did not advance last_progress_at (%d -> %d)",
+			afterProgress.LastProgressAt, afterPlay.LastProgressAt)
+	}
+	if afterPlay.LastPlayedAt == 0 {
+		t.Error("MarkPlayed did not stamp last_played_at")
+	}
+
+	r := 90
+	if _, err := st.SetRating(ctx, "", item, &r, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.SetStar(ctx, "", item, true, nil); err != nil {
+		t.Fatal(err)
+	}
+	afterMeta, _ := st.PlayStateFor(ctx, "", item)
+	if afterMeta.LastProgressAt != afterPlay.LastProgressAt {
+		t.Errorf("a star or a rating moved last_progress_at (%d -> %d)",
+			afterPlay.LastProgressAt, afterMeta.LastProgressAt)
+	}
+	if afterMeta.UpdatedAt <= afterPlay.UpdatedAt {
+		t.Errorf("a star or a rating did not move updated_at (%d -> %d)",
+			afterPlay.UpdatedAt, afterMeta.UpdatedAt)
+	}
+}
+
 // TestPlayStatesForItems covers the bulk read: multi-user states keyed by item,
 // per-item ordering by user pid, untouched and unknown pids absent, duplicate
 // input collapsed, and the stamps carried through.

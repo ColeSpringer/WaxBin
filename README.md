@@ -169,9 +169,9 @@ allow/deny rules.
   MOOD=hap` (substring), `--tag-present MYKEY` and `--tag-missing MYKEY` (presence).
   A value may itself contain `=`, since only the first `=` splits key from value
   (`--tag DISCOGS_RELEASE=id=12345`). The same fields are available in smart-playlist
-  rules as `tag.<KEY>` with the `is`, `isNot`, `isPresent`, `isMissing`, `contains`,
-  `startsWith`, and `endsWith` operators. Ordered operators are rejected, since tag
-  values are unordered text.
+  rules as `tag.<KEY>` with the `is`, `isNot`, `in`, `notIn`, `isPresent`, `isMissing`,
+  `contains`, `startsWith`, and `endsWith` operators. Ordered operators are rejected,
+  since tag values are unordered text.
 - **Facets and discovery:** `waxbin facet --group-by tag.MOOD` counts items per
   distinct value, and `waxbin tag keys` lists the keys that exist to facet on.
 - **`isNot` is deny-list semantics.** `tag.X isNot V` means the item does not carry

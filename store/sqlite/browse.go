@@ -291,7 +291,7 @@ func (s *Store) browseSpecFor(ctx context.Context, list read.DiscoveryList, opt 
 		// The seed is an int we control, so inlining it as a literal is injection-safe
 		// and lets the identical expression appear in SELECT, ORDER BY, and the keyset.
 		return browseSpec{orderExpr: fmt.Sprintf("wb_shuffle(%d, pi.pid)", opt.Seed), orderInt: true}, nil
-	case read.ListMostPlayed, read.ListRecentlyPlayed, read.ListStarred:
+	case read.ListMostPlayed, read.ListRecentlyPlayed, read.ListStarred, read.ListInProgress:
 		return s.playBrowseSpec(ctx, list, opt.UserPID, op)
 	}
 	return browseSpec{}, waxerr.New(waxerr.CodeInvalid, op, "unknown discovery list: "+string(list))
@@ -327,6 +327,11 @@ func (s *Store) playBrowseSpec(ctx context.Context, list read.DiscoveryList, use
 		spec.where, spec.orderExpr = "bps.last_played_at IS NOT NULL", "bps.last_played_at"
 	case read.ListStarred:
 		spec.where, spec.orderExpr = "bps.starred_at IS NOT NULL", "bps.starred_at"
+	case read.ListInProgress:
+		// The IS NOT NULL guard is what keeps the non-NULL keyset invariant structurally
+		// true, rather than true only because position_ms > 0 implies a SetProgress write.
+		spec.where = "bps.position_ms > 0 AND bps.finished = 0 AND bps.last_progress_at IS NOT NULL"
+		spec.orderExpr = "bps.last_progress_at"
 	}
 	return spec, nil
 }

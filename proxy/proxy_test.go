@@ -7,11 +7,14 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
+	"github.com/colespringer/waxbin/internal/testsock"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/proxy"
 	"github.com/colespringer/waxbin/waxerr"
@@ -22,7 +25,7 @@ import (
 // test cleanup.
 func startServer(t *testing.T, handlers map[string]proxy.Handler, maint proxy.Maintainer) string {
 	t.Helper()
-	sock := filepath.Join(t.TempDir(), "s.sock")
+	sock := testsock.Path(t)
 	ln, err := proxy.Listen(sock)
 	if err != nil {
 		t.Fatalf("listen: %v", err)
@@ -371,10 +374,55 @@ func TestMaintenanceAutoReopenOnDrop(t *testing.T) {
 	}
 }
 
+// maxSocketPath mirrors the unexported limit proxy derives from this platform's
+// sockaddr_un (103 on darwin, 107 on Linux and Windows). Recomputed rather than
+// hardcoded so the at-the-limit case below tests the real boundary everywhere.
+const maxSocketPath = len(syscall.RawSockaddrUnix{}.Path) - 1
+
+// TestSocketPathTooLong pins the length guard on both ends: without it the kernel
+// answers a bare "invalid argument" naming neither the path nor a limit.
+func TestSocketPathTooLong(t *testing.T) {
+	long := filepath.Join(t.TempDir(), strings.Repeat("x", 200)+".sock")
+	listenErr, dialErr := errOf2(proxy.Listen(long)), errOf2(proxy.Dial(long))
+	if !waxerr.Is(listenErr, waxerr.CodeInvalid) {
+		t.Errorf("Listen on a %d-byte path: want CodeInvalid, got %v", len(long), listenErr)
+	}
+	if !waxerr.Is(dialErr, waxerr.CodeInvalid) {
+		t.Errorf("Dial on a %d-byte path: want CodeInvalid, got %v", len(long), dialErr)
+	}
+	// The error has to carry the length and the limit; the kernel's carries neither.
+	if msg := listenErr.Error(); !strings.Contains(msg, "socket path is") || !strings.Contains(msg, "limit") {
+		t.Errorf("error does not explain the failure: %q", msg)
+	}
+
+	// A path exactly at the limit binds, so the guard cannot drift into rejecting
+	// valid paths. Skipped rather than panicking if the temp dir alone overruns it,
+	// which is the deep-TMPDIR case this whole area exists for.
+	dir := filepath.Dir(testsock.Path(t))
+	pad := maxSocketPath - len(dir) - 1
+	if pad < 1 {
+		t.Skipf("temp dir %q is %d bytes, leaving no room under the %d-byte limit", dir, len(dir), maxSocketPath)
+	}
+	atLimit := filepath.Join(dir, strings.Repeat("y", pad))
+	if len(atLimit) != maxSocketPath {
+		t.Fatalf("built a %d-byte path, want exactly %d", len(atLimit), maxSocketPath)
+	}
+	ln, err := proxy.Listen(atLimit)
+	if err != nil {
+		t.Fatalf("Listen on a %d-byte path (exactly the limit): %v", len(atLimit), err)
+	}
+	ln.Close()
+}
+
+// errOf2 drops the value from a (T, error) pair so two calls can be made on one line.
+func errOf2[T any](_ T, err error) error { return err }
+
 // TestDialMissingSocket checks a dial to an absent socket fails cleanly, so a CLI
 // can fall back to a direct open rather than hang.
 func TestDialMissingSocket(t *testing.T) {
-	_, err := proxy.Dial(filepath.Join(t.TempDir(), "nope.sock"))
+	// testSocket's directory exists and holds no socket, so the failure under test is
+	// the missing socket and not an unbindable path.
+	_, err := proxy.Dial(testsock.Path(t))
 	if err == nil {
 		t.Fatal("dial to a missing socket should fail")
 	}

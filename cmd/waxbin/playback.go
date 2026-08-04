@@ -266,5 +266,15 @@ func printPlayState(cmd *cobra.Command, st *model.PlayState) error {
 		fmt.Fprintf(w, "rating:    %d/100\n", st.Rating)
 	}
 	fmt.Fprintf(w, "starred:   %t\n", st.Starred)
+	// Side by side because the pair is the question: a checkpoint moves only the
+	// second, so an item can be in progress without ever having been played. Both
+	// are formatted as times, not the raw ns they are stored in, which beside
+	// "position: N ms" would read as another quantity.
+	if st.LastPlayedAt != 0 {
+		fmt.Fprintf(w, "played at:   %s\n", time.Unix(0, st.LastPlayedAt).Format(time.RFC3339))
+	}
+	if st.LastProgressAt != 0 {
+		fmt.Fprintf(w, "progress at: %s\n", time.Unix(0, st.LastProgressAt).Format(time.RFC3339))
+	}
 	return nil
 }

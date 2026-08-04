@@ -22,11 +22,18 @@ type Client struct {
 	mu   sync.Mutex // serializes request/response round-trips on the one connection
 }
 
-// Dial connects to a proxy server listening on the unix socket at path.
+// Dial connects to a proxy server listening on the unix socket at path. A path
+// over maxSocketPath is CodeInvalid.
 func Dial(path string) (*Client, error) {
+	const op = "proxy.Dial"
+	// The same length limit binds both ends, and a client reaching an over-long path
+	// is the likelier case: the server that advertised it has already failed.
+	if err := checkSocketPath(path, op); err != nil {
+		return nil, err
+	}
 	conn, err := net.Dial("unix", path)
 	if err != nil {
-		return nil, waxerr.Wrap(waxerr.CodeIO, "proxy.Dial", err)
+		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
 	return &Client{conn: conn, enc: json.NewEncoder(conn), dec: json.NewDecoder(conn)}, nil
 }

@@ -32,6 +32,12 @@ type PlayState struct {
 	RatingChangedAt  int64 // unix nanoseconds; 0 = rating never changed
 	StarredChangedAt int64 // unix nanoseconds; 0 = star never changed
 	UpdatedAt        int64 // unix nanoseconds
+	// LastProgressAt is the last playback write: a progress checkpoint or a play,
+	// whichever came last. 0 when the item was never played or checkpointed. A star
+	// or a rating moves UpdatedAt but not this, which is what makes it the ordering
+	// key for "where was I" and lets a consumer drop the
+	// LastPlayedAt-else-UpdatedAt fallback.
+	LastProgressAt int64 // unix nanoseconds
 }
 
 // EntityPlayState is one user's star/rating state for one catalog entity (an

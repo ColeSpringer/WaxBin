@@ -53,7 +53,8 @@ func TestQueryUserStateFields(t *testing.T) {
 	st, ids := userStateFixture(t)
 	ctx := context.Background()
 
-	// Alpha: rated 80 + starred + played twice. Bravo: rated 20. Charlie: untouched.
+	// Alpha: rated 80 + starred + played twice. Bravo: rated 20. Charlie: checkpointed
+	// only, which is what separates last_progress from last_played below.
 	r80, r20 := 80, 20
 	if _, err := st.SetRating(ctx, "", ids["Alpha"], &r80, nil); err != nil {
 		t.Fatal(err)
@@ -67,6 +68,9 @@ func TestQueryUserStateFields(t *testing.T) {
 		}
 	}
 	if _, err := st.SetRating(ctx, "", ids["Bravo"], &r20, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetProgress(ctx, "", ids["Charlie"], 30_000); err != nil {
 		t.Fatal(err)
 	}
 
@@ -85,6 +89,9 @@ func TestQueryUserStateFields(t *testing.T) {
 		{"played is 1", query.New(query.EntityItems).Where("played", query.OpIs, 1).Build(), []string{"Alpha"}},
 		{"finished is 1", query.New(query.EntityItems).Where("finished", query.OpIs, 1).Build(), []string{"Alpha"}},
 		{"last_played present", query.New(query.EntityItems).WherePresence("last_played", query.OpIsPresent).Build(), []string{"Alpha"}},
+		{"last_progress present", query.New(query.EntityItems).WherePresence("last_progress", query.OpIsPresent).Build(), []string{"Alpha", "Charlie"}},
+		{"last_progress missing", query.New(query.EntityItems).WherePresence("last_progress", query.OpIsMissing).Build(), []string{"Bravo"}},
+		{"last_progress gt 0", query.New(query.EntityItems).Where("last_progress", query.OpGt, 0).Build(), []string{"Alpha", "Charlie"}},
 	}
 	for _, c := range cases {
 		got := userQueryTitles(t, st, c.q, "")

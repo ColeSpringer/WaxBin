@@ -106,6 +106,27 @@ func TestCompileTagTwoCondsIndependentScopes(t *testing.T) {
 	}
 }
 
+func TestCompileTagInAndNotIn(t *testing.T) {
+	in := compileTag(t, query.New(query.EntityItems).
+		WhereValues("tag.MOOD", query.OpIn, "happy", "calm").Build())
+	want := "EXISTS (SELECT 1 FROM item_tag itq WHERE itq.item_id = pi.id AND itq.key = ? AND itq.value IN (?, ?))"
+	if in.Where != want {
+		t.Fatalf("in where = %q\nwant %q", in.Where, want)
+	}
+	if !reflect.DeepEqual(in.Args, []any{"MOOD", "happy", "calm"}) {
+		t.Fatalf("in args = %#v, want [MOOD happy calm] (key first)", in.Args)
+	}
+
+	notIn := compileTag(t, query.New(query.EntityItems).
+		WhereValues("tag.MOOD", query.OpNotIn, "happy", "calm").Build())
+	if notIn.Where != "NOT "+want {
+		t.Fatalf("notIn where = %q\nwant %q", notIn.Where, "NOT "+want)
+	}
+	if !reflect.DeepEqual(notIn.Args, in.Args) {
+		t.Fatalf("notIn args = %#v, want the same as in", notIn.Args)
+	}
+}
+
 func TestCompileTagRejectsOrderedOperators(t *testing.T) {
 	for _, q := range []query.Query{
 		query.New(query.EntityItems).Where("tag.YEAR", query.OpGt, "2000").Build(),

@@ -8,6 +8,7 @@ import (
 	"context"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/waxerr"
@@ -48,9 +49,9 @@ type Store interface {
 type Service struct {
 	store    Store
 	mu       sync.Mutex
-	pending  map[progressKey]int64 // buffered resume positions awaiting a flush (mu)
-	flushMu  sync.Mutex            // serializes the actual DB writes across flushes
-	importer PlayStateImporter     // external play-state import seam (no-op default)
+	pending  map[progressKey]tick // buffered resume positions awaiting a flush (mu)
+	flushMu  sync.Mutex           // serializes the actual DB writes across flushes
+	importer PlayStateImporter    // external play-state import seam (no-op default)
 }
 
 type progressKey struct {
@@ -58,9 +59,17 @@ type progressKey struct {
 	item model.PID
 }
 
+// tick is one buffered resume position and when it was buffered. The time is for
+// the overlay only, so an unflushed position comes back with a matching stamp
+// instead of contradicting it; the write stamps at the store's own now.
+type tick struct {
+	positionMS int64
+	atNS       int64
+}
+
 // New builds a playback service over a store.
 func New(store Store) *Service {
-	return &Service{store: store, pending: map[progressKey]int64{}, importer: noopImporter{}}
+	return &Service{store: store, pending: map[progressKey]tick{}, importer: noopImporter{}}
 }
 
 // Progress buffers a resume position without writing it. Call it on every tick;
@@ -68,7 +77,7 @@ func New(store Store) *Service {
 // collapses to one write. The newest position for an item wins.
 func (s *Service) Progress(userPID, itemPID model.PID, positionMS int64) {
 	s.mu.Lock()
-	s.pending[progressKey{userPID, itemPID}] = positionMS
+	s.pending[progressKey{userPID, itemPID}] = tick{positionMS, time.Now().UnixNano()}
 	s.mu.Unlock()
 }
 
@@ -77,7 +86,7 @@ func (s *Service) Progress(userPID, itemPID model.PID, positionMS int64) {
 // concurrent flush cannot overwrite the newer checkpoint with an older tick.
 func (s *Service) Checkpoint(ctx context.Context, userPID, itemPID model.PID, positionMS int64) error {
 	s.mu.Lock()
-	s.pending[progressKey{userPID, itemPID}] = positionMS
+	s.pending[progressKey{userPID, itemPID}] = tick{positionMS, time.Now().UnixNano()}
 	s.mu.Unlock()
 	return s.flush(ctx)
 }
@@ -106,12 +115,12 @@ func (s *Service) flush(ctx context.Context) error {
 		return nil
 	}
 	batch := s.pending
-	s.pending = map[progressKey]int64{}
+	s.pending = map[progressKey]tick{}
 	s.mu.Unlock()
 
 	var firstErr error
-	for k, pos := range batch {
-		if err := s.store.SetProgress(ctx, k.user, k.item, pos); err != nil {
+	for k, t := range batch {
+		if err := s.store.SetProgress(ctx, k.user, k.item, t.positionMS); err != nil {
 			if firstErr == nil {
 				firstErr = err
 			}
@@ -120,7 +129,7 @@ func (s *Service) flush(ctx context.Context) error {
 			}
 			s.mu.Lock()
 			if _, newer := s.pending[k]; !newer {
-				s.pending[k] = pos
+				s.pending[k] = t
 			}
 			s.mu.Unlock()
 		}
@@ -152,15 +161,16 @@ func (s *Service) SetStar(ctx context.Context, userPID, itemPID model.PID, starr
 }
 
 // State returns a user's playback state for an item, overlaying any buffered (not
-// yet flushed) resume position so a same-process reader sees its own latest tick.
+// yet flushed) resume position, and its stamp, so a same-process reader sees its
+// own latest tick.
 func (s *Service) State(ctx context.Context, userPID, itemPID model.PID) (*model.PlayState, error) {
 	st, err := s.store.PlayStateFor(ctx, userPID, itemPID)
 	if err != nil {
 		return nil, err
 	}
 	s.mu.Lock()
-	if pos, ok := s.pending[progressKey{userPID, itemPID}]; ok {
-		st.PositionMS = pos
+	if t, ok := s.pending[progressKey{userPID, itemPID}]; ok {
+		st.PositionMS, st.LastProgressAt = t.positionMS, t.atNS
 	}
 	s.mu.Unlock()
 	return st, nil
@@ -188,11 +198,11 @@ func (s *Service) StatesForItems(ctx context.Context, itemPIDs []model.PID) (map
 		requested[pid] = true
 	}
 	s.mu.Lock()
-	pending := make(map[progressKey]int64)
+	pending := make(map[progressKey]tick)
 	needDefault := false
-	for k, pos := range s.pending {
+	for k, t := range s.pending {
 		if requested[k.item] {
-			pending[k] = pos
+			pending[k] = t
 			if k.user == "" {
 				needDefault = true
 			}
@@ -212,30 +222,31 @@ func (s *Service) StatesForItems(ctx context.Context, itemPIDs []model.PID) (map
 		if err != nil {
 			return nil, err
 		}
-		resolved := make(map[progressKey]int64, len(pending))
-		for k, pos := range pending {
+		resolved := make(map[progressKey]tick, len(pending))
+		for k, t := range pending {
 			if k.user == "" {
 				k.user = u.PID
 			}
-			resolved[k] = pos
+			resolved[k] = t
 		}
 		pending = resolved
 	}
 	if states == nil {
 		states = make(map[model.PID][]model.PlayState)
 	}
-	for k, pos := range pending {
+	for k, t := range pending {
 		list := states[k.item]
 		hit := false
 		for i := range list {
 			if list[i].UserPID == k.user {
-				list[i].PositionMS = pos
+				list[i].PositionMS, list[i].LastProgressAt = t.positionMS, t.atNS
 				hit = true
 				break
 			}
 		}
 		if !hit {
-			list = append(list, model.PlayState{UserPID: k.user, ItemPID: k.item, PositionMS: pos})
+			list = append(list, model.PlayState{UserPID: k.user, ItemPID: k.item,
+				PositionMS: t.positionMS, LastProgressAt: t.atNS})
 			sort.Slice(list, func(i, j int) bool { return list[i].UserPID < list[j].UserPID })
 		}
 		states[k.item] = list

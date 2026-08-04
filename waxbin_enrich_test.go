@@ -13,6 +13,7 @@ import (
 	"github.com/colespringer/waxbin/config"
 	"github.com/colespringer/waxbin/enrich"
 	"github.com/colespringer/waxbin/internal/testaudio"
+	"github.com/colespringer/waxbin/internal/testsock"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/proxy"
 	"github.com/colespringer/waxbin/read"
@@ -138,7 +139,7 @@ func TestServeProxiedScopedEnrich(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
-	sock := filepath.Join(t.TempDir(), "wax.sock")
+	sock := testsock.Path(t)
 	writeFile(t, filepath.Join(root, "a.mp3"), testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
 		Title: "One", Artist: "Artist One", Album: "Album One", Audio: testaudio.AudioWithSeed(1)}))
 	writeFile(t, filepath.Join(root, "b.mp3"), testaudio.BuildMP3FromSpec(testaudio.MP3Spec{

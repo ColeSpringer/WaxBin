@@ -263,19 +263,21 @@ type ItemView struct {
 	Genre       string
 	Compilation bool // a multi-artist compilation (drives Various Artists layout)
 
-	// Entity handles: the effective artist, album-artist, album, and release-group
-	// entity pids, projected so a consumer can group an item view by real identity
-	// instead of display text. ArtistPID and AlbumArtistPID resolve a track's
+	// Entity handles: the effective artist, album-artist, album, release-group, and
+	// podcast entity pids, projected so a consumer can group an item view by real
+	// identity instead of display text. ArtistPID and AlbumArtistPID resolve a track's
 	// artist/album-artist or, for a book, its author; AlbumPID and ReleaseGroupPID are
-	// track-only and empty for a book or episode, which are not album members. Each is
-	// empty when the entity is absent, and ReleaseGroupPID is additionally empty for a
-	// track whose album has no release group, which is its own state rather than a
-	// missing album. Genre is intentionally omitted: an item can carry several, so a
-	// single genre pid would be lossy; enumerate genres through the genre facet instead.
+	// track-only and empty for a book or episode, which are not album members;
+	// PodcastPID is the reverse, set only for an episode. Each is empty when the entity
+	// is absent, and ReleaseGroupPID is additionally empty for a track whose album has
+	// no release group, which is its own state rather than a missing album. Genre is
+	// intentionally omitted: an item can carry several, so a single genre pid would be
+	// lossy; enumerate genres through the genre facet instead.
 	ArtistPID       PID
 	AlbumArtistPID  PID
 	AlbumPID        PID
 	ReleaseGroupPID PID
+	PodcastPID      PID
 
 	// Composer and its collation key, populated for track items (empty for
 	// books/episodes; a book's narrator-in-COMPOSER convention is handled at scan
@@ -298,14 +300,14 @@ type ItemView struct {
 	// carry the podcast title through the shared view; these fields hold the
 	// episode-specific values used by layouts and detail views.
 	//
-	// Explicit is the episode's own advisory flag, and false for a track or a book
-	// (WaxBin stores no music advisory flag). It is independent of the show's flag:
-	// a feed may mark itself explicit at the channel level and leave every episode
-	// unmarked, so a caller filtering restricted content needs both the explicit and
-	// podcast_explicit query fields rather than this value alone.
-	Season    int
-	PubDateNS int64 // publication time, unix nanoseconds (0 when undated)
-	Explicit  bool
+	// Explicit is the episode's own advisory flag and PodcastExplicit its show's,
+	// both false for a track or a book (WaxBin stores no music advisory flag). The
+	// two are independent: a feed may mark itself explicit at the channel level and
+	// leave every episode unmarked. Use AdvisoryFlagged rather than either alone.
+	Season          int
+	PubDateNS       int64 // publication time, unix nanoseconds (0 when undated)
+	Explicit        bool
+	PodcastExplicit bool
 
 	// Source is the item's acquisition origin (local/rss/youtube/manual). A locally
 	// scanned item has no acquisition row and reads back as "local"; an acquired item
@@ -342,6 +344,14 @@ type ItemView struct {
 	Container   string
 	Codec       string
 }
+
+// AdvisoryFlagged reports whether the item carries an explicit advisory flag from
+// either source: its own, or its show's. The two are independent, since a feed may
+// mark itself explicit at the channel level and leave every episode unmarked, so a
+// restricted caller must consult both. Always false for a track or a book, which
+// carry no advisory flag. The receiver is a pointer to match the read path, which
+// carries *ItemView; a value receiver would copy the whole view to read two bools.
+func (v *ItemView) AdvisoryFlagged() bool { return v.Explicit || v.PodcastExplicit }
 
 // FramesPerSecond is the CD frame rate: a frame is 1/75 s, the disc's own addressing
 // quantum and the unit every MM:SS:FF in a .cue sheet is written in. It is a fixed

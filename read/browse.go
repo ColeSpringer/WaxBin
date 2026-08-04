@@ -8,8 +8,8 @@ import (
 // DiscoveryList is one of the enumerated browse lists. The vocabulary is fixed
 // and individually tested so every consumer (CLI browse, WaxDeck home rows) asks
 // for the same canonical list rather than reinventing each ordering. Play-derived
-// lists (most-played, recently-played, starred) read indexed play_state for one
-// user; the rest are catalog-structural.
+// lists (most-played, recently-played, starred, in-progress) read indexed play_state
+// for one user; the rest are catalog-structural.
 type DiscoveryList string
 
 const (
@@ -28,6 +28,19 @@ const (
 	// ones are excluded (see the spec). Named off-pattern from recently-* on purpose:
 	// it is a kind scope as well as an ordering.
 	ListRecentEpisodes DiscoveryList = "recent-episodes"
+	// Started and not finished, most recently progressed first (per user). The
+	// "where was I" list: membership is a resume position on an unfinished item,
+	// ordering is the last playback write, so a checkpoint counts and a star does
+	// not. Spans every kind, since a half-read audiobook belongs here as much as a
+	// half-heard episode.
+	//
+	// Membership is only as good as the client's reset or finish call. Nothing here
+	// clears a resume position: MarkPlayed leaves position_ms alone and never
+	// unsets finished. So a client that scrobbles a track it played to the end,
+	// without passing finished and without zeroing the position, pins that track to
+	// the head of this list until something resets it. Callers that mark played
+	// should pass finished, or checkpoint back to 0.
+	ListInProgress DiscoveryList = "in-progress"
 )
 
 // Valid reports whether d is a known discovery list.
@@ -35,7 +48,7 @@ func (d DiscoveryList) Valid() bool {
 	switch d {
 	case ListNewest, ListRecentlyAdded, ListMostPlayed, ListRecentlyPlayed,
 		ListRandom, ListStarred, ListByYear, ListByGenre, ListAlphabetical,
-		ListRecentEpisodes:
+		ListRecentEpisodes, ListInProgress:
 		return true
 	default:
 		return false
@@ -51,7 +64,7 @@ func (d DiscoveryList) Valid() bool {
 // whether to pass a user from the options you are about to send, not from this alone.
 func (d DiscoveryList) PerUser() bool {
 	switch d {
-	case ListMostPlayed, ListRecentlyPlayed, ListStarred:
+	case ListMostPlayed, ListRecentlyPlayed, ListStarred, ListInProgress:
 		return true
 	default:
 		return false
@@ -78,7 +91,7 @@ func DiscoveryLists() []DiscoveryList {
 	return []DiscoveryList{
 		ListNewest, ListRecentlyAdded, ListMostPlayed, ListRecentlyPlayed,
 		ListRandom, ListStarred, ListByYear, ListByGenre, ListAlphabetical,
-		ListRecentEpisodes,
+		ListRecentEpisodes, ListInProgress,
 	}
 }
 

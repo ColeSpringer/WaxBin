@@ -45,12 +45,21 @@ type Column struct {
 	// once per row. It must contain exactly one ? and, like Expr, is emitted
 	// verbatim, so it must never contain caller-supplied text.
 	//
-	// Only is, isNot, isPresent, and isMissing are accepted on such a column, and
-	// sorting by one is rejected: the rest either carry no value to lower or would
-	// compare an internal id by text or by range, which is not a question an
+	// Only is, isNot, in, isPresent, and isMissing are accepted on such a column,
+	// and sorting by one is rejected: the rest either carry no value to lower or
+	// would compare an internal id by text or by range, which is not a question an
 	// identity handle answers, and ORDER BY would sort by internal rowid. The two
 	// presence operators emit no value at all, so they compile to a direct
 	// IS NULL / IS NOT NULL on the id column.
+	//
+	// notIn is rejected because nobody asked for it, not because it cannot be written:
+	// "id NOT IN (SELECT e.id FROM e WHERE e.pid IN (?,?))" works, but it is a second
+	// SQL shape for one operator on one column class. The rejection is a speed bump,
+	// not a guarantee: Not{Cond{field, in, ...}} compiles and looks equivalent, but a
+	// single stale pid in its list takes the whole condition to "no rows" through the
+	// same UNKNOWN described above, silently. It is not the workaround to reach for
+	// (store/sqlite's TestNotInWorkaroundHasStalePIDHole pins that); the NOT IN
+	// subquery form above is, if the operator is ever actually wanted.
 	ValueSub string
 }
 
@@ -119,6 +128,19 @@ type Compiled struct {
 
 const likeEscape = '\\'
 
+const (
+	// maxInValues caps one set-membership condition, matching idBatchSize in
+	// store/sqlite/rollups.go. A caller needing more should chunk as ItemsByPIDs does.
+	maxInValues = 500
+	// maxBindArgs is SQLite's variable ceiling. maxInValues bounds a condition, not a
+	// statement, so enough capped conditions still cross it (see CompileAt).
+	maxBindArgs = 32766
+	// bindReserve is headroom for binds the compiler never sees: the user-join id, a
+	// keyset cursor's two, the limit. Without it a query landing on the ceiling
+	// passes here and dies at execution anyway.
+	bindReserve = 64
+)
+
 // Compile lowers a Query to parameterized SQL fragments against fields,
 // anchoring the relative-time operators (inTheLast/notInTheLast) at time.Now.
 // Every call re-anchors "now", so a stored rule evaluated per read stays fresh.
@@ -171,6 +193,13 @@ func CompileAt(q Query, fields Fields, now time.Time) (*Compiled, error) {
 			terms = append(terms, col.Expr+" "+dir)
 		}
 		c.OrderBy = strings.Join(terms, ", ")
+	}
+
+	// Checked here because the statement total is only in hand once every condition
+	// has compiled; otherwise it surfaces as an opaque driver error.
+	if limit := maxBindArgs - bindReserve; len(c.Args) > limit {
+		return nil, waxerr.New(waxerr.CodeInvalid, "query.Compile",
+			fmt.Sprintf("query binds %d values, over the %d limit", len(c.Args), limit))
 	}
 
 	return c, nil
@@ -264,6 +293,29 @@ func compileCond(c Cond, fields Fields, sb *strings.Builder, args *[]any, nu *bo
 	if col.NeedsUser {
 		*nu = true
 	}
+	// Decided once here, so the three column helpers below can assume a validated,
+	// non-empty list.
+	if c.Op == OpIn || c.Op == OpNotIn {
+		if err := checkSetValues(c); err != nil {
+			return err
+		}
+		// Before the empty-list shortcut, so acceptance never depends on how many
+		// values the caller happens to hold: notIn on a lowered field would otherwise
+		// answer 1=1 for an empty list and fail on the first element.
+		if col.ValueSub != "" && c.Op == OpNotIn {
+			return unsupportedIdentityOp(c)
+		}
+		if len(c.Values) == 0 {
+			// IN () is a syntax error, and an empty list is a shape real callers reach
+			// (a user who follows no shows), so it gets an answer rather than an error.
+			if c.Op == OpIn {
+				sb.WriteString("1=0")
+			} else {
+				sb.WriteString("1=1")
+			}
+			return nil
+		}
+	}
 	// A set-membership column (a tag.<KEY> field) compiles to a correlated EXISTS
 	// subquery instead of a scalar comparison; its bind order is security-sensitive
 	// (see SetColumn), so it lives in its own helper.
@@ -312,6 +364,14 @@ func compileCond(c Cond, fields Fields, sb *strings.Builder, args *[]any, nu *bo
 		}
 		sb.WriteString(col.Expr + " BETWEEN ? AND ?")
 		*args = append(*args, c.Values[0], c.Values[1])
+	case OpIn, OpNotIn:
+		if c.Op == OpNotIn {
+			sb.WriteString(col.Expr + " NOT")
+		} else {
+			sb.WriteString(col.Expr)
+		}
+		sb.WriteString(" IN " + placeholderList(len(c.Values)))
+		*args = append(*args, c.Values...)
 	case OpIsPresent:
 		if col.Kind == KindText {
 			sb.WriteString("(" + col.Expr + " IS NOT NULL AND " + col.Expr + " <> '')")
@@ -369,6 +429,26 @@ func compileValueSubCond(c Cond, col Column, sb *strings.Builder, args *[]any) e
 	case OpIsNot:
 		sb.WriteString(col.Expr + " <> " + col.ValueSub)
 		*args = append(*args, c.Value)
+	case OpIn:
+		if len(c.Values) == 1 {
+			// SQLite reads `x IN ((SELECT ...))` as the subquery form rather than a
+			// one-element list, and that plans as a scan. Arity 1 emits exactly what `is`
+			// emits, which is indexed and means the same thing.
+			sb.WriteString(col.Expr + " = " + col.ValueSub)
+			*args = append(*args, c.Values[0])
+			return nil
+		}
+		// The subquery repeats per value on purpose, and it is not free. Measured: the
+		// collapsed form (`IN (SELECT id FROM podcast WHERE pid IN (?,?))`) plans as
+		// SCAN pi at 2 and at 500 values; this seeks at both. It costs 27KB/~2ms to
+		// prepare at 500 against 1KB/~0.25ms, and nothing at 2. The seek scales with
+		// the catalog, the parse with a subscription count.
+		subs := make([]string, len(c.Values))
+		for i := range subs {
+			subs[i] = col.ValueSub
+		}
+		sb.WriteString(col.Expr + " IN (" + strings.Join(subs, ", ") + ")")
+		*args = append(*args, c.Values...)
 	case OpIsPresent:
 		// No value to lower: the id column being non-NULL is the whole question, and
 		// it beats the unlowered form, which had to run a subquery per row to
@@ -377,10 +457,16 @@ func compileValueSubCond(c Cond, col Column, sb *strings.Builder, args *[]any) e
 	case OpIsMissing:
 		sb.WriteString(col.Expr + " IS NULL")
 	default:
-		return waxerr.New(waxerr.CodeInvalid, "query.Compile",
-			fmt.Sprintf("operator %q not supported on an identity field %q", c.Op, c.Field))
+		return unsupportedIdentityOp(c)
 	}
 	return nil
+}
+
+// unsupportedIdentityOp is raised from here and from compileCond's set-membership
+// pre-check, which must agree.
+func unsupportedIdentityOp(c Cond) error {
+	return waxerr.New(waxerr.CodeInvalid, "query.Compile",
+		fmt.Sprintf("operator %q not supported on an identity field %q", c.Op, c.Field))
 }
 
 // windowNS extracts a relative-time operator's window: a positive integral
@@ -441,6 +527,15 @@ func compileSetCond(c Cond, set *SetColumn, sb *strings.Builder, args *[]any) er
 		sb.WriteString("NOT EXISTS (" + set.Sub + " AND " + set.ValueExpr + " = ?)")
 		*args = append(*args, set.Args...)
 		*args = append(*args, c.Value)
+	case OpIn:
+		sb.WriteString("EXISTS (" + set.Sub + " AND " + set.ValueExpr + " IN " + placeholderList(len(c.Values)) + ")")
+		*args = append(*args, set.Args...)
+		*args = append(*args, c.Values...)
+	case OpNotIn:
+		// Inherits isNot's deny-list semantics: an item carrying no such tag matches.
+		sb.WriteString("NOT EXISTS (" + set.Sub + " AND " + set.ValueExpr + " IN " + placeholderList(len(c.Values)) + ")")
+		*args = append(*args, set.Args...)
+		*args = append(*args, c.Values...)
 	case OpContains:
 		sb.WriteString("EXISTS (" + set.Sub + " AND " + likeExpr(set.ValueExpr) + ")")
 		*args = append(*args, set.Args...)
@@ -458,6 +553,38 @@ func compileSetCond(c Cond, set *SetColumn, sb *strings.Builder, args *[]any) er
 			fmt.Sprintf("operator %q not supported on a tag field", c.Op))
 	}
 	return nil
+}
+
+// checkSetValues bounds a set-membership list and rejects a nil element, which
+// decodes straight out of a rule doc ({"values":["a",null]}) and would compile to a
+// NULL bind matching nothing. Rejecting it uniformly names the caller bug instead of
+// dropping a value in silence.
+func checkSetValues(c Cond) error {
+	// Where(f, OpIn, v) fills Value, which these operators do not read, leaving an
+	// empty Values that legitimately compiles to the match-nothing constant. Caught
+	// here because the wrong answer is otherwise silent: the range operators need no
+	// such guard, since their arity check already rejects an empty Values.
+	if c.Value != nil {
+		return waxerr.New(waxerr.CodeInvalid, "query.Compile",
+			fmt.Sprintf("%s on %q takes values, not value", c.Op, c.Field))
+	}
+	if len(c.Values) > maxInValues {
+		return waxerr.New(waxerr.CodeInvalid, "query.Compile",
+			fmt.Sprintf("%s on %q takes at most %d values, got %d", c.Op, c.Field, maxInValues, len(c.Values)))
+	}
+	for _, v := range c.Values {
+		if v == nil {
+			return waxerr.New(waxerr.CodeInvalid, "query.Compile",
+				fmt.Sprintf("%s on %q has a null value", c.Op, c.Field))
+		}
+	}
+	return nil
+}
+
+// placeholderList renders "(?, ?, ?)" for n values; n is always >= 1, since an empty
+// list is answered with a constant before any column helper runs.
+func placeholderList(n int) string {
+	return "(" + strings.Repeat("?, ", n-1) + "?)"
 }
 
 func likeExpr(expr string) string {

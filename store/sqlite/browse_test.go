@@ -240,6 +240,175 @@ func TestBrowseMostPlayedAndStarred(t *testing.T) {
 	}
 }
 
+// TestBrowseRecentlyPlayed pins the list in-progress is most easily confused with:
+// membership is a play, ordering is last_played_at, and a checkpoint alone does not
+// put an item here. That last one is the gap in-progress exists to fill.
+func TestBrowseRecentlyPlayed(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	ids := map[string]model.PID{}
+	for _, title := range []string{"One", "Two", "Three"} {
+		res := putTrack(t, st, lib.ID, trackSpec{path: "/lib/" + title + ".flac",
+			essence: "e" + title, content: "c" + title, title: title, artist: "X", album: "Al"})
+		ids[title] = res.ItemPID
+	}
+	for _, title := range []string{"One", "Three", "Two"} {
+		if err := st.MarkPlayed(ctx, "", ids[title], false); err != nil {
+			t.Fatalf("mark played %s: %v", title, err)
+		}
+	}
+	order := drainBrowse(t, st, read.ListRecentlyPlayed, read.BrowseOptions{}, 2)
+	if want := "Two,Three,One"; strings.Join(order, ",") != want {
+		t.Errorf("recently-played order = %v, want %v", order, want)
+	}
+
+	// A checkpoint stamps last_progress_at, not last_played_at, so it does not join
+	// this list.
+	four := putTrack(t, st, lib.ID, trackSpec{path: "/lib/Four.flac", essence: "eFour",
+		content: "cFour", title: "Four", artist: "X", album: "Al"})
+	if err := st.SetProgress(ctx, "", four.ItemPID, 60_000); err != nil {
+		t.Fatalf("set progress: %v", err)
+	}
+	if order := drainBrowse(t, st, read.ListRecentlyPlayed, read.BrowseOptions{}, 5); strings.Join(order, ",") != "Two,Three,One" {
+		t.Errorf("recently-played after a checkpoint = %v, want the play order unchanged", order)
+	}
+}
+
+// TestBrowseInProgress pins the "where was I" list: membership is a resume position
+// on an unfinished item and ordering is the last playback write.
+func TestBrowseInProgress(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	ids := map[string]model.PID{}
+	for _, title := range []string{"One", "Two", "Three", "Done", "Untouched"} {
+		res := putTrack(t, st, lib.ID, trackSpec{path: "/lib/" + title + ".flac",
+			essence: "e" + title, content: "c" + title, title: title, artist: "X", album: "Al"})
+		ids[title] = res.ItemPID
+	}
+	for _, title := range []string{"One", "Three", "Two"} {
+		if err := st.SetProgress(ctx, "", ids[title], 60_000); err != nil {
+			t.Fatalf("set progress %s: %v", title, err)
+		}
+	}
+	// A finished item with a non-zero position is excluded; an untouched one has no
+	// row to be excluded by.
+	if err := st.SetProgress(ctx, "", ids["Done"], 90_000); err != nil {
+		t.Fatalf("set progress Done: %v", err)
+	}
+	if err := st.MarkPlayed(ctx, "", ids["Done"], true); err != nil {
+		t.Fatalf("mark Done finished: %v", err)
+	}
+
+	want := "Two,Three,One"
+	if order := drainBrowse(t, st, read.ListInProgress, read.BrowseOptions{}, 5); strings.Join(order, ",") != want {
+		t.Errorf("in-progress = %v, want %v", order, want)
+	}
+	// Paging reassembles the same order.
+	if order := drainBrowse(t, st, read.ListInProgress, read.BrowseOptions{}, 2); strings.Join(order, ",") != want {
+		t.Errorf("in-progress paged at 2 = %v, want %v", order, want)
+	}
+
+	// The regression that motivates a dedicated column rather than reusing
+	// updated_at: starring the oldest entry must not move it.
+	if _, err := st.SetStar(ctx, "", ids["One"], true, nil); err != nil {
+		t.Fatalf("star One: %v", err)
+	}
+	if order := drainBrowse(t, st, read.ListInProgress, read.BrowseOptions{}, 5); strings.Join(order, ",") != want {
+		t.Errorf("in-progress after starring the tail = %v, want %v (a star must not reorder)", order, want)
+	}
+	rating := 80
+	if _, err := st.SetRating(ctx, "", ids["One"], &rating, nil); err != nil {
+		t.Fatalf("rate One: %v", err)
+	}
+	if order := drainBrowse(t, st, read.ListInProgress, read.BrowseOptions{}, 5); strings.Join(order, ",") != want {
+		t.Errorf("in-progress after rating the tail = %v, want %v (a rating must not reorder)", order, want)
+	}
+}
+
+// TestBrowseInProgressBoundaries pins the three write/membership edges, including
+// the documented sharp one. A test asserting the behaviour is what stops someone
+// "fixing" it later without reading the contract on read.ListInProgress.
+func TestBrowseInProgressBoundaries(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	ids := map[string]model.PID{}
+	for _, title := range []string{"Reset", "Finished", "Stale"} {
+		res := putTrack(t, st, lib.ID, trackSpec{path: "/lib/" + title + ".flac",
+			essence: "e" + title, content: "c" + title, title: title, artist: "X", album: "Al"})
+		ids[title] = res.ItemPID
+		if err := st.SetProgress(ctx, "", res.ItemPID, 60_000); err != nil {
+			t.Fatalf("set progress %s: %v", title, err)
+		}
+	}
+
+	// Checkpointing back to 0 stamps the write and drops the item off the list.
+	if err := st.SetProgress(ctx, "", ids["Reset"], 0); err != nil {
+		t.Fatalf("reset progress: %v", err)
+	}
+	// MarkPlayed(finished=true) stamps it, and finished keeps it off.
+	if err := st.MarkPlayed(ctx, "", ids["Finished"], true); err != nil {
+		t.Fatalf("mark finished: %v", err)
+	}
+	// MarkPlayed(finished=false) on a stale non-zero position keeps it on the list, at
+	// the head. Nothing here clears a resume position, so a client that scrobbles a
+	// fully-played track without passing finished pins it until something resets it.
+	if err := st.MarkPlayed(ctx, "", ids["Stale"], false); err != nil {
+		t.Fatalf("mark played: %v", err)
+	}
+
+	order := drainBrowse(t, st, read.ListInProgress, read.BrowseOptions{}, 5)
+	if strings.Join(order, ",") != "Stale" {
+		t.Errorf("in-progress = %v, want just [Stale]", order)
+	}
+	for _, pid := range []model.PID{ids["Reset"], ids["Finished"], ids["Stale"]} {
+		ps, err := st.PlayStateFor(ctx, "", pid)
+		if err != nil {
+			t.Fatalf("play state: %v", err)
+		}
+		if ps.LastProgressAt == 0 {
+			t.Errorf("%s has no last_progress_at; all three writes stamp it", pid)
+		}
+	}
+}
+
+// TestBrowseInProgressPlanUsesProgressIndex mirrors
+// TestRecentEpisodesPlanUsesPubDateIndex, control included: the head and the
+// cursor-bound page must both drive off play_state_progress rather than sorting the
+// whole set.
+func TestBrowseInProgressPlanUsesProgressIndex(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	for _, title := range []string{"One", "Two"} {
+		res := putTrack(t, st, lib.ID, trackSpec{path: "/lib/" + title + ".flac",
+			essence: "e" + title, content: "c" + title, title: title, artist: "X", album: "Al"})
+		if err := st.SetProgress(ctx, "", res.ItemPID, 60_000); err != nil {
+			t.Fatalf("set progress: %v", err)
+		}
+	}
+	for _, tc := range []struct {
+		name string
+		opt  read.BrowseOptions
+	}{
+		{"head", read.BrowseOptions{}},
+		{"cursor-bound", read.BrowseOptions{Cursor: read.EncodeCursor("4000000000", "01ARZ3NDEKTSV4RRFFQ69G5FAV")}},
+	} {
+		stmt, args, err := st.browseStmt(ctx, read.ListInProgress, tc.opt, 50, "test")
+		if err != nil {
+			t.Fatalf("%s: browse stmt: %v", tc.name, err)
+		}
+		plan := explainPlan(t, st, stmt, args...)
+		if !strings.Contains(plan, "play_state_progress") {
+			t.Errorf("%s does not drive off play_state_progress:\n%s", tc.name, plan)
+		}
+		// Not tightened past the bare string: this plan legitimately carries
+		// "USE TEMP B-TREE FOR LAST TERM OF ORDER BY" for the pi.pid tiebreak, as
+		// recently-played and starred already do.
+		if strings.Contains(plan, "USE TEMP B-TREE FOR ORDER BY") {
+			t.Errorf("%s sorts the whole result set instead of walking the index:\n%s", tc.name, plan)
+		}
+	}
+}
+
 func TestBrowseByYearAndByGenre(t *testing.T) {
 	st, lib := entityFixture(t)
 	ctx := context.Background()

@@ -21,6 +21,11 @@ CREATE TABLE play_state (
   rating         INTEGER,                     -- 0..100, NULL = unset
   starred_at     INTEGER,                     -- NULL = not starred
   last_played_at INTEGER,
+  -- Stamped by the two playback writes only: a progress checkpoint (SetProgress)
+  -- and a play (MarkPlayed). Deliberately NOT bumped by a star or a rating, which
+  -- move updated_at instead: starring a half-heard episode from two years ago must
+  -- not push it to the top of "where was I". NULL = never played or checkpointed.
+  last_progress_at INTEGER,
   -- Per-field change stamps for star and rating, bumped only when the stored
   -- value actually changes (a clear included), so a sync adapter can order a
   -- local change against a remote one. NULL = never changed. No index: a replay
@@ -34,6 +39,7 @@ CREATE INDEX play_state_item    ON play_state(item_id);
 CREATE INDEX play_state_recent  ON play_state(user_id, last_played_at);
 CREATE INDEX play_state_starred ON play_state(user_id, starred_at);
 CREATE INDEX play_state_played  ON play_state(user_id, play_count);
+CREATE INDEX play_state_progress ON play_state(user_id, last_progress_at);
 
 -- Per-user star and rating on a catalog entity (an artist, release group, album,
 -- or genre), the entity-scoped twin of play_state. A migration import that carries

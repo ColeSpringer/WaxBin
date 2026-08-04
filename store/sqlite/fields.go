@@ -78,12 +78,17 @@ const (
 // position_ms is the in-progress predicate: `position_ms gt 0` with `finished is 0`,
 // which excludes a finished item whose position was never reset.
 //
-// rating and last_played stay raw NULL, so isMissing and isPresent do work there: an
-// unrated or never-played item reads NULL. Write "never play disliked" as
-// `rating isMissing OR rating gt N`. A plain `rating lte N` drops unrated items,
-// since a comparison against NULL is never true. The relative-time operators follow
-// the same contract: `last_played notInTheLast <window>` matches NULL ("not played
-// in 30 days" includes never-played), while `inTheLast` never matches NULL.
+// rating, last_played, and last_progress stay raw NULL, so isMissing and isPresent do
+// work there: an unrated, never-played, or never-touched item reads NULL. Write "never
+// play disliked" as `rating isMissing OR rating gt N`. A plain `rating lte N` drops
+// unrated items, since a comparison against NULL is never true. The relative-time
+// operators follow the same contract: `last_played notInTheLast <window>` matches NULL
+// ("not played in 30 days" includes never-played), while `inTheLast` never matches NULL.
+//
+// last_progress is the wider of the two playback stamps: a play moves both, while a
+// progress checkpoint moves only this one, so a checkpointed-but-never-played item
+// reads NULL for last_played and non-NULL here. A star or a rating moves neither (they
+// move updated_at), which is what makes last_progress the ordering key for "where was I".
 //
 // The entity-handle fields filter by normalized-entity identity instead of display
 // text, so a facet drilldown can query by the bucket's EntityPID. There are seven,
@@ -116,15 +121,21 @@ const (
 // index. release_group_pid scans despite the joined alb alias looking indexed: the
 // plan is SCAN pi with a per-row alb probe, and a plan line naming album_rg is that
 // probe, not a narrowing drive. Only
-// is/isNot/isPresent/isMissing are accepted on a lowered field, sorting by one is
+// is/isNot/in/isPresent/isMissing are accepted on a lowered field, sorting by one is
 // rejected, and isNot against a pid no entity holds matches nothing, because the
 // lowered value is NULL. See Column.ValueSub.
 //
+// `in` seeks the same index `is` does at every arity, including one, and an empty
+// list matches nothing. notIn is rejected; see Column.ValueSub for why.
+//
 // genre_pid stays a set field over item_genre (tag-field semantics: isNot is a
 // deny-list, ordered operators are rejected) and is deliberately not converted: its
-// EXISTS correlates on pi.id whatever side the value sits, so lowering would save the
-// per-row genre join but not the scan, and it would need a second lowering mechanism
-// on SetColumn for no plan change.
+// set-membership vocabulary differs from the other six the way isNot already does:
+// both in and notIn work here, notIn as the deny-list complement, while the lowered
+// six reject notIn outright.
+// Its EXISTS correlates on pi.id whatever side the value sits, so lowering would save
+// the per-row genre join but not the scan, and it would need a second lowering
+// mechanism on SetColumn for no plan change.
 //
 // has_art and has_lyrics are presence probes: EXISTS lowered to 0/1, never NULL,
 // so like play_count the presence ops are useless on them; use `is 0` / `is 1`.
@@ -212,6 +223,9 @@ var itemFields = query.FieldMap{
 	"played":      {Expr: "COALESCE(ps.played, 0)", Kind: query.KindInt, NeedsUser: true},
 	"finished":    {Expr: "COALESCE(ps.finished, 0)", Kind: query.KindInt, NeedsUser: true},
 	"last_played": {Expr: "ps.last_played_at", Kind: query.KindTime, NeedsUser: true},
+	// The ps alias joins on play_state's primary key, so a filter or sort here cannot
+	// use play_state_progress; that index serves the in-progress browse list alone.
+	"last_progress": {Expr: "ps.last_progress_at", Kind: query.KindTime, NeedsUser: true},
 }
 
 // userStateJoinClause binds the current user's play_state as the ps alias. The user

@@ -364,6 +364,142 @@ func (fieldsWithTag) Column(f string) (query.Column, bool) {
 	return c, ok
 }
 
+func TestCompileInAndNotInScalar(t *testing.T) {
+	c, err := query.Compile(query.New(query.EntityItems).
+		WhereValues("artist", query.OpIn, "A", "B", "C").Build(), testFields)
+	if err != nil {
+		t.Fatalf("compile in: %v", err)
+	}
+	if c.Where != "t.artist IN (?, ?, ?)" {
+		t.Fatalf("where = %q", c.Where)
+	}
+	if !reflect.DeepEqual(c.Args, []any{"A", "B", "C"}) {
+		t.Fatalf("args = %#v, want [A B C]", c.Args)
+	}
+
+	c, err = query.Compile(query.New(query.EntityItems).
+		WhereValues("year", query.OpNotIn, 1999, 2000).Build(), testFields)
+	if err != nil {
+		t.Fatalf("compile notIn: %v", err)
+	}
+	if c.Where != "t.year NOT IN (?, ?)" {
+		t.Fatalf("where = %q", c.Where)
+	}
+	if !reflect.DeepEqual(c.Args, []any{1999, 2000}) {
+		t.Fatalf("args = %#v, want [1999 2000]", c.Args)
+	}
+}
+
+func TestCompileEmptyValueListIsAConstant(t *testing.T) {
+	for _, tc := range []struct {
+		op   query.Op
+		want string
+	}{
+		{query.OpIn, "1=0"},
+		{query.OpNotIn, "1=1"},
+	} {
+		c, err := query.Compile(query.New(query.EntityItems).
+			WhereValues("artist", tc.op).Build(), testFields)
+		if err != nil {
+			t.Fatalf("compile %s []: %v", tc.op, err)
+		}
+		if c.Where != tc.want {
+			t.Errorf("%s [] where = %q, want %q", tc.op, c.Where, tc.want)
+		}
+		if len(c.Args) != 0 {
+			t.Errorf("%s [] args = %#v, want none", tc.op, c.Args)
+		}
+	}
+}
+
+func TestCompileSetValuesRejectsNilElement(t *testing.T) {
+	for _, op := range []query.Op{query.OpIn, query.OpNotIn} {
+		q := query.Query{Entity: query.EntityItems,
+			Where: query.Cond{Field: "artist", Op: op, Values: []any{"a", nil}}}
+		if _, err := query.Compile(q, testFields); !waxerr.Is(err, waxerr.CodeInvalid) {
+			t.Errorf("%s with a nil element: want CodeInvalid, got %v", op, err)
+		}
+	}
+}
+
+// TestCompileSetOpRejectsScalarValue pins the guard on the easy mistake: Where()
+// fills Value, which in/notIn do not read, so without it the condition would
+// silently compile to the empty-list constant and match nothing.
+func TestCompileSetOpRejectsScalarValue(t *testing.T) {
+	for _, op := range []query.Op{query.OpIn, query.OpNotIn} {
+		_, err := query.Compile(query.New(query.EntityItems).
+			Where("artist", op, "Radiohead").Build(), testFields)
+		if !waxerr.Is(err, waxerr.CodeInvalid) {
+			t.Errorf("%s via Where (a scalar value): want CodeInvalid, got %v", op, err)
+		}
+		// A value alongside a real list is the same mistake and is caught too.
+		q := query.Query{Entity: query.EntityItems,
+			Where: query.Cond{Field: "artist", Op: op, Value: "A", Values: []any{"B"}}}
+		if _, err := query.Compile(q, testFields); !waxerr.Is(err, waxerr.CodeInvalid) {
+			t.Errorf("%s with both value and values: want CodeInvalid, got %v", op, err)
+		}
+	}
+}
+
+func TestCompileSetValuesCaps(t *testing.T) {
+	atCap := make([]any, 500)
+	for i := range atCap {
+		atCap[i] = i
+	}
+	if _, err := query.Compile(query.New(query.EntityItems).
+		WhereValues("year", query.OpIn, atCap...).Build(), testFields); err != nil {
+		t.Fatalf("500 values should compile: %v", err)
+	}
+	if _, err := query.Compile(query.New(query.EntityItems).
+		WhereValues("year", query.OpIn, append(atCap, 500)...).Build(), testFields); !waxerr.Is(err, waxerr.CodeInvalid) {
+		t.Fatalf("501 values: want CodeInvalid, got %v", err)
+	}
+
+	// The per-condition cap does not bound the statement total.
+	b := query.New(query.EntityItems)
+	for i := 0; i < 66; i++ { // 66 * 500 = 33000, past the 32766 limit
+		b.WhereValues("year", query.OpIn, atCap...)
+	}
+	if _, err := query.Compile(b.Build(), testFields); !waxerr.Is(err, waxerr.CodeInvalid) {
+		t.Fatalf("33000 bound args: want CodeInvalid, got %v", err)
+	}
+}
+
+// TestWhereValuesCopiesSlice pins the defensive copy: a caller refilling one
+// scratch buffer must not have every condition it built compile against the last
+// group's values.
+func TestWhereValuesCopiesSlice(t *testing.T) {
+	buf := []any{"A"}
+	b := query.New(query.EntityItems).WhereValues("artist", query.OpIn, buf...)
+	buf[0] = "B" // the caller reuses its buffer before Build
+	c, err := query.Compile(b.Build(), testFields)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	if !reflect.DeepEqual(c.Args, []any{"A"}) {
+		t.Errorf("args = %#v, want [A]; the builder aliased the caller's slice", c.Args)
+	}
+}
+
+func TestValuesWidensTypedSlice(t *testing.T) {
+	type pid string
+	got := query.Values([]pid{"a", "b"})
+	if !reflect.DeepEqual(got, []any{pid("a"), pid("b")}) {
+		t.Fatalf("Values = %#v", got)
+	}
+	if n := len(query.Values([]string(nil))); n != 0 {
+		t.Fatalf("Values(nil) len = %d, want 0", n)
+	}
+	c, err := query.Compile(query.New(query.EntityItems).
+		WhereValues("artist", query.OpIn, query.Values([]pid{"a", "b"})...).Build(), testFields)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	if c.Where != "t.artist IN (?, ?)" {
+		t.Fatalf("where = %q", c.Where)
+	}
+}
+
 func TestParseRuleRejectsFutureVersion(t *testing.T) {
 	_, err := query.ParseRule([]byte(`{"kind":"waxbin.rule","version":999,"payload":{"entity":"items"}}`))
 	if !waxerr.Is(err, waxerr.CodeInvalid) {

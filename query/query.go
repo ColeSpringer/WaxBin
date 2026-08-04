@@ -10,6 +10,8 @@
 // ever reaching SQL.
 package query
 
+import "slices"
+
 // Entity is the top-level thing a query selects.
 type Entity string
 
@@ -33,6 +35,8 @@ const (
 	OpGte        Op = "gte"
 	OpLte        Op = "lte"
 	OpInRange    Op = "inTheRange" // Values[0]..Values[1] inclusive
+	OpIn         Op = "in"         // Values: matches any listed value
+	OpNotIn      Op = "notIn"      // Values: matches no listed value
 	OpBefore     Op = "before"     // time/ordinal <
 	OpAfter      Op = "after"      // time/ordinal >
 	OpIsPresent  Op = "isPresent"  // non-null and (for text) non-empty
@@ -85,7 +89,7 @@ type Cond struct {
 	Field  string `json:"field"`
 	Op     Op     `json:"op"`
 	Value  any    `json:"value,omitempty"`  // single-value operators
-	Values []any  `json:"values,omitempty"` // range operators (inTheRange)
+	Values []any  `json:"values,omitempty"` // range (inTheRange) and set membership (in, notIn)
 }
 
 // And is a conjunction; an empty And matches everything.
@@ -159,6 +163,29 @@ func (b *Builder) Where(field string, op Op, value any) *Builder {
 func (b *Builder) WhereRange(field string, op Op, lo, hi any) *Builder {
 	b.ands = append(b.ands, Cond{Field: field, Op: op, Values: []any{lo, hi}})
 	return b
+}
+
+// WhereValues appends a multi-value condition (e.g. OpIn) to the top-level AND.
+// WhereRange stays the two-ended convenience; this is the general form, for the
+// operators whose value count is the caller's.
+//
+// The values are copied: a variadic spread hands over the caller's backing array,
+// so a reused scratch buffer would leave every condition pointing at the same one.
+func (b *Builder) WhereValues(field string, op Op, values ...any) *Builder {
+	b.ands = append(b.ands, Cond{Field: field, Op: op, Values: slices.Clone(values)})
+	return b
+}
+
+// Values widens a typed slice into the []any a set-membership condition takes, so
+// a caller holding pids can write
+// WhereValues("podcast_pid", OpIn, Values(showPIDs)...) instead of hand-rolling
+// the copy loop at every call site.
+func Values[T any](vs []T) []any {
+	out := make([]any, len(vs))
+	for i, v := range vs {
+		out[i] = v
+	}
+	return out
 }
 
 // WherePresence appends a presence condition (OpIsPresent / OpIsMissing).

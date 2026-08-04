@@ -28,8 +28,9 @@ func newBrowseCmd(g *globals) *cobra.Command {
 		Short: "Page a canonical discovery list",
 		Long: "Returns one keyset-paginated window of a discovery list in its canonical " +
 			"order. Lists: " + discoveryList() + ". Play-derived lists (most-played, " +
-			"recently-played, starred) read --user's state; by-year needs --year, by-genre " +
-			"needs --genre PID, and random takes a --seed for a stable paginated shuffle.\n\n" +
+			"recently-played, starred, in-progress) read --user's state; by-year needs --year, " +
+			"by-genre needs --genre PID, and random takes a --seed for a stable paginated " +
+			"shuffle.\n\n" +
 			"--kind scopes a list to one media type, so `recently-added --kind book` is the " +
 			"audiobooks added most recently. Most lists span every kind on their own. The two " +
 			"that do not are counterparts, each ordering by something only its kinds carry: " +

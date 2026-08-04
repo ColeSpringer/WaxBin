@@ -4,14 +4,34 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	"os"
 	"sync"
+	"syscall"
 
 	"github.com/colespringer/waxbin/waxerr"
 )
+
+// maxSocketPath is the longest unix socket path this platform can bind or dial:
+// sun_path less its NUL terminator, so 103 on darwin/BSD and 107 on Linux and
+// Windows. Read from the platform's own struct rather than hardcoded, which needs
+// no build tags. It is checked up front because the kernel's own answer is a bare
+// "invalid argument" naming neither the path nor a length, and the socket lives
+// wherever a config or TMPDIR put it.
+const maxSocketPath = len(syscall.RawSockaddrUnix{}.Path) - 1
+
+// checkSocketPath rejects a socket path too long for this platform's sockaddr_un.
+func checkSocketPath(path, op string) error {
+	if len(path) > maxSocketPath {
+		return waxerr.New(waxerr.CodeInvalid, op, fmt.Sprintf(
+			"socket path is %d bytes, over this platform's %d-byte limit: %s",
+			len(path), maxSocketPath, path))
+	}
+	return nil
+}
 
 // Handler runs one proxied method. It receives the raw params frame and returns a
 // value to marshal into the response data, or an error to serialize as the typed
@@ -242,9 +262,12 @@ func errResponse(err error) response {
 // Listen opens an owner-only (0600) unix-domain listener at path, removing a
 // stale socket file left by a previous crash. The 0600 mode matters: the endpoint
 // drives admin mutations, so a broader mode would let any local user issue
-// unauthenticated writes.
+// unauthenticated writes. A path over maxSocketPath is CodeInvalid.
 func Listen(path string) (net.Listener, error) {
 	const op = "proxy.Listen"
+	if err := checkSocketPath(path, op); err != nil {
+		return nil, err
+	}
 	// A leftover socket file from a crashed owner would make net.Listen fail with
 	// "address already in use" even though nothing is listening. Removing a plain
 	// file (not a live socket) is safe here because write ownership is guarded by

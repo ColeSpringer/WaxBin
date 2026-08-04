@@ -98,6 +98,17 @@ func countWhere(t *testing.T, st *Store, field string, op query.Op, value any) i
 	return n
 }
 
+// countValuesWhere counts items matching one set-membership condition.
+func countValuesWhere(t *testing.T, st *Store, field string, op query.Op, values ...any) int {
+	t.Helper()
+	n, err := st.CountItems(context.Background(), query.New(query.EntityItems).
+		WhereValues(field, op, values...).Build(), "")
+	if err != nil {
+		t.Fatalf("count %s %s: %v", field, op, err)
+	}
+	return n
+}
+
 func TestEntityPIDFieldsMirrorFacets(t *testing.T) {
 	st, lib := entityFixture(t)
 	ctx := context.Background()
@@ -279,6 +290,51 @@ func TestLoweredIdentityFieldPlans(t *testing.T) {
 			t.Errorf("%s does not seek its index (want %q):\n%s", tc.field, tc.seek, plan)
 		}
 	}
+
+	// `in` must seek the same index at every arity. Arity 1 is the regression guard:
+	// without the single-value special case it silently becomes a scan with a LIST
+	// SUBQUERY, and an arity-2 test alone would never catch that.
+	const seek = "SEARCH ep USING COVERING INDEX episode_podcast"
+	for _, n := range []int{1, 2, 500} { // 500 is the compiler's per-condition cap
+		vals := make([]any, n)
+		for i := range vals {
+			vals[i] = "some-pid"
+		}
+		c, err := query.Compile(query.New(query.EntityItems).
+			WhereValues("podcast_pid", query.OpIn, vals...).Build(), fm)
+		if err != nil {
+			t.Fatalf("podcast_pid in (%d values) compile: %v", n, err)
+		}
+		plan := explainPlan(t, st, "SELECT COUNT(*)"+itemJoins+" WHERE "+c.Where, c.Args...)
+		if !strings.Contains(plan, seek) {
+			t.Errorf("podcast_pid in (%d values) does not seek episode_podcast:\n%s", n, plan)
+		}
+	}
+}
+
+// TestPodcastPIDInSemantics pins what `in` answers on a lowered field, next to the
+// `is` coverage above: the union of the listed shows, an arity-1 list matching what
+// `is` matches, an empty list matching nothing, and an unknown pid contributing
+// nothing rather than poisoning the whole condition.
+func TestPodcastPIDInSemantics(t *testing.T) {
+	st, lib := entityFixture(t)
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/1.flac", essence: "e1", content: "c1", title: "A", artist: "X", album: "Al"})
+	one := putFeed(t, st, "http://cast.example/one", "Ep1", "Ep2", "Ep3")
+	two := putFeed(t, st, "http://cast.example/two", "Other")
+
+	a, b := string(one.PodcastPID), string(two.PodcastPID)
+	if n := countValuesWhere(t, st, "podcast_pid", query.OpIn, a, b); n != 4 {
+		t.Errorf("in [one two] = %d, want 4 (every episode of both)", n)
+	}
+	if n := countValuesWhere(t, st, "podcast_pid", query.OpIn, a); n != countWhere(t, st, "podcast_pid", query.OpIs, a) {
+		t.Errorf("in [one] = %d, want the same as is one", n)
+	}
+	if n := countValuesWhere(t, st, "podcast_pid", query.OpIn); n != 0 {
+		t.Errorf("in [] = %d, want 0", n)
+	}
+	if n := countValuesWhere(t, st, "podcast_pid", query.OpIn, a, "no-such-podcast-pid"); n != 3 {
+		t.Errorf("in [one unknown] = %d, want 3 (the unknown pid contributes nothing)", n)
+	}
 }
 
 // TestReleaseGroupPIDScansOuterLoop records what the release_group_pid filter
@@ -383,10 +439,67 @@ func TestLoweredIdentityFieldOperators(t *testing.T) {
 			}
 		}
 	}
+	// notIn is rejected on every lowered field while in is accepted; see
+	// query.Column.ValueSub for why the pair splits. The empty list is checked
+	// alongside the one-value form because the rejection must not depend on arity:
+	// an empty list taking the match-everything shortcut would make the operator
+	// appear to work until the caller's first value.
+	for _, field := range []string{"artist_pid", "album_artist_pid", "album_pid",
+		"release_group_pid", "podcast_pid", "library"} {
+		for _, vals := range [][]any{{"some-pid"}, {}} {
+			_, err := st.QueryItems(ctx, query.New(query.EntityItems).
+				WhereValues(field, query.OpNotIn, vals...).Build(), "")
+			if !waxerr.Is(err, waxerr.CodeInvalid) {
+				t.Errorf("%s notIn %v: want CodeInvalid, got %v", field, vals, err)
+			}
+		}
+		if _, err := st.QueryItems(ctx, query.New(query.EntityItems).
+			WhereValues(field, query.OpIn, "some-pid").Build(), ""); err != nil {
+			t.Errorf("%s in: %v", field, err)
+		}
+	}
 	_, err := st.QueryItems(ctx, query.New(query.EntityItems).
 		OrderBy("album_pid", false).Build(), "")
 	if !waxerr.Is(err, waxerr.CodeInvalid) {
 		t.Errorf("sort by album_pid: want CodeInvalid, got %v", err)
+	}
+}
+
+// TestNotInWorkaroundHasStalePIDHole pins why Not{Cond{in}} is not the answer for
+// the rejected notIn, so nobody reaches for it as an equivalent or implements notIn
+// on top of it. A stale pid lowers to NULL, `x IN (NULL, ...)` is UNKNOWN rather
+// than false, and negating UNKNOWN is still not true, so the whole condition
+// collapses to "no rows" the moment one listed pid no longer resolves. That is the
+// live case for this filter (a show the user unsubscribed from), and the failure is
+// silent.
+func TestNotInWorkaroundHasStalePIDHole(t *testing.T) {
+	st, lib := entityFixture(t)
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/1.flac", essence: "e1", content: "c1", title: "A", artist: "X", album: "Al"})
+	one := putFeed(t, st, "http://cast.example/one", "Ep1", "Ep2")
+	putFeed(t, st, "http://cast.example/two", "Other")
+
+	notIn := func(vals ...any) int {
+		t.Helper()
+		n, err := st.CountItems(context.Background(), query.New(query.EntityItems).
+			WhereNode(query.Not{Node: query.Cond{Field: "podcast_pid", Op: query.OpIn, Values: vals}}).Build(), "")
+		if err != nil {
+			t.Fatalf("count: %v", err)
+		}
+		return n
+	}
+	a := string(one.PodcastPID)
+	// Every pid resolves, so the negation answers what it looks like it answers.
+	if n := notIn(a); n != 1 {
+		t.Errorf("NOT in [one] = %d, want 1 (the other show's episode)", n)
+	}
+	// One stale pid in the list takes the answer to zero, not to "the same minus
+	// nothing". If this ever stops being 0, the NULL semantics changed and
+	// Column.ValueSub's documented limit needs rewriting.
+	if n := notIn(a, "no-such-podcast-pid"); n != 0 {
+		t.Errorf("NOT in [one, stale] = %d, want 0 (the documented hole)", n)
+	}
+	if n := notIn("no-such-podcast-pid"); n != 0 {
+		t.Errorf("NOT in [stale] = %d, want 0 (the documented hole)", n)
 	}
 }
 

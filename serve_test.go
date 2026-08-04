@@ -14,6 +14,7 @@ import (
 	"github.com/colespringer/waxbin"
 	"github.com/colespringer/waxbin/config"
 	"github.com/colespringer/waxbin/internal/testaudio"
+	"github.com/colespringer/waxbin/internal/testsock"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/podcast"
 	"github.com/colespringer/waxbin/proxy"
@@ -112,7 +113,7 @@ func TestServeProxiedMutations(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
-	sock := filepath.Join(t.TempDir(), "wax.sock")
+	sock := testsock.Path(t)
 	writeFile(t, filepath.Join(root, "song.mp3"), testaudio.BuildMP3("Original", "Old Artist", "Album", 1))
 
 	lib := openServed(t, ctx, db, root, sock)
@@ -216,7 +217,7 @@ func TestServeProxiedEntityStar(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
-	sock := filepath.Join(t.TempDir(), "wax.sock")
+	sock := testsock.Path(t)
 	writeFile(t, filepath.Join(root, "song.mp3"), testaudio.BuildMP3("Original", "Old Artist", "Album", 1))
 
 	lib := openServed(t, ctx, db, root, sock)
@@ -265,7 +266,7 @@ func TestServeProxiedChangedBool(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
-	sock := filepath.Join(t.TempDir(), "wax.sock")
+	sock := testsock.Path(t)
 	writeFile(t, filepath.Join(root, "song.mp3"), testaudio.BuildMP3("Original", "Old Artist", "Album", 1))
 
 	lib := openServed(t, ctx, db, root, sock)
@@ -341,7 +342,7 @@ func TestServeProxiedSmartPlaylistSetRule(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
-	sock := filepath.Join(t.TempDir(), "wax.sock")
+	sock := testsock.Path(t)
 	writeFile(t, filepath.Join(root, "song.mp3"), testaudio.BuildMP3("Original", "Old Artist", "Album", 1))
 
 	lib := openServed(t, ctx, db, root, sock)
@@ -389,7 +390,7 @@ func TestServeProxiedSmartPlaylistSetRule(t *testing.T) {
 func TestServeProxiedPlaylistArt(t *testing.T) {
 	ctx := context.Background()
 	db := filepath.Join(t.TempDir(), "catalog.db")
-	sock := filepath.Join(t.TempDir(), "wax.sock")
+	sock := testsock.Path(t)
 
 	// A playlist cover needs no catalog behind it, so this one skips the scan.
 	lib := openServedRW(t, ctx, db, t.TempDir(), sock)
@@ -432,7 +433,7 @@ func TestServeProxiedTranscript(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
-	sock := filepath.Join(t.TempDir(), "wax.sock")
+	sock := testsock.Path(t)
 
 	lib := openServedRW(t, ctx, db, root, sock)
 	show, err := lib.Podcasts().AddManual(ctx, "Proxied", podcast.ManualOptions{})
@@ -481,7 +482,7 @@ func TestServeProxiedAddRoot(t *testing.T) {
 	rootA := t.TempDir()
 	rootB := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
-	sock := filepath.Join(t.TempDir(), "wax.sock")
+	sock := testsock.Path(t)
 	writeFile(t, filepath.Join(rootB, "late.mp3"), testaudio.BuildMP3("Proxied Late", "Adder", "Runtime", 1))
 
 	lib := openServedRW(t, ctx, db, rootA, sock)
@@ -524,7 +525,7 @@ func TestServeProxiedError(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
-	sock := filepath.Join(t.TempDir(), "wax.sock")
+	sock := testsock.Path(t)
 	writeFile(t, filepath.Join(root, "song.mp3"), testaudio.BuildMP3("Original", "Old Artist", "Album", 1))
 
 	lib := openServed(t, ctx, db, root, sock)
@@ -548,7 +549,7 @@ func TestMaintenanceHandoffReopen(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
-	sock := filepath.Join(t.TempDir(), "wax.sock")
+	sock := testsock.Path(t)
 	writeFile(t, filepath.Join(root, "song.mp3"), testaudio.BuildMP3("Original", "Old Artist", "Album", 1))
 
 	lib := openServed(t, ctx, db, root, sock)
@@ -615,7 +616,7 @@ func TestServerRunJobKeepsServerUp(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
-	sock := filepath.Join(t.TempDir(), "wax.sock")
+	sock := testsock.Path(t)
 	writeFile(t, filepath.Join(root, "a.mp3"), testaudio.BuildMP3WithAudio("A", "Artist", "Album", 1, testaudio.AudioWithSeed(1)))
 	writeFile(t, filepath.Join(root, "b.mp3"), testaudio.BuildMP3WithAudio("B", "Artist", "Album", 2, testaudio.AudioWithSeed(2)))
 	writeFile(t, filepath.Join(root, "c.mp3"), testaudio.BuildMP3WithAudio("C", "Artist", "Album", 3, testaudio.AudioWithSeed(3)))
@@ -733,7 +734,7 @@ func TestSubscriberSurvivesMaintenance(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
-	sock := filepath.Join(t.TempDir(), "wax.sock")
+	sock := testsock.Path(t)
 	writeFile(t, filepath.Join(root, "song.mp3"), testaudio.BuildMP3("Original", "Old Artist", "Album", 1))
 
 	lib := openServed(t, ctx, db, root, sock)
