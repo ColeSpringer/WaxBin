@@ -1,13 +1,22 @@
 -- Artist entity. Artists are resolved by normalized match_key unless stronger
 -- external identifiers are available. Audiobook credits (author, narrator)
 -- point at the same rows through item_contributor.
+--
+-- mbid is deliberately bare, so two rows may share one id. resolveArtist writes it
+-- straight into the INSERT for a new artist, which is how a collision actually
+-- arises: a second spelling of one artist mints a row carrying an mbid an existing
+-- row already holds. Topping up an existing row goes through fillEntityFieldTx
+-- instead, which only fills an empty column, so it cannot see the collision either.
+-- Only entityedit.go rejects a duplicate, because relation resolution reads one
+-- artist by mbid. Tolerated rather than guarded: that is what audit's
+-- duplicate_artist reports and what merge collapses.
 CREATE TABLE artist (
   id        INTEGER PRIMARY KEY,
   pid       TEXT    NOT NULL UNIQUE,
   name      TEXT    NOT NULL,            -- canonical display casing
   sort_key  TEXT    NOT NULL,            -- WaxBin-generated, BINARY-sortable
   match_key TEXT    NOT NULL UNIQUE,     -- normalized dedup key
-  mbid      TEXT
+  mbid      TEXT                         -- not unique, not indexed; see above
 );
 CREATE INDEX artist_sort ON artist(sort_key);
 

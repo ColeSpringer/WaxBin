@@ -3,6 +3,7 @@ package port_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -44,6 +45,29 @@ func TestSnapshotRoundTrip(t *testing.T) {
 	}
 	if got.PlayState[0].Rating == nil || *got.PlayState[0].Rating != 80 {
 		t.Fatalf("rating round-trip wrong: %+v", got.PlayState[0])
+	}
+}
+
+// TestItemExportCarriesNoLibraryHandle pins the intent in ItemExport's doc comment.
+// ItemView now projects a library pid, so copying it across is a change someone could
+// reasonably make; this is what says it would be wrong.
+func TestItemExportCarriesNoLibraryHandle(t *testing.T) {
+	libs := []*model.Library{{PID: "L1", DisplayRoot: "/music", Mode: model.ModeManaged, Profile: "waxbin-native"}}
+	items := []*model.ItemView{{PID: "I1", Kind: model.KindTrack, State: model.StatePresent,
+		Title: "Song", LibraryPID: "L1"}}
+
+	snap := port.BuildSnapshot(12, 1700000000, libs, items, nil, nil)
+	// Marshal the items alone, so the library pid in the top-level Libraries array
+	// cannot mask a leak here.
+	encoded, err := json.Marshal(snap.Items)
+	if err != nil {
+		t.Fatalf("marshal items: %v", err)
+	}
+	if strings.Contains(string(encoded), "L1") {
+		t.Errorf("marshalled items carry the library pid: %s", encoded)
+	}
+	if len(snap.Libraries) != 1 || snap.Libraries[0].PID != "L1" {
+		t.Errorf("libraries = %+v, want the one root as a top-level entry", snap.Libraries)
 	}
 }
 

@@ -85,6 +85,12 @@ func resolveAlbumChain(ctx context.Context, tx *sql.Tx, tr model.Track, albumArt
 // same-named artists is enrichment's job); a known MBID is recorded on the new
 // row so enrichment and Subsonic artist info have it. A new artist is logged.
 //
+// Name-keyed is settled, despite release groups and albums being MBID-first. Keying
+// artists that way does not remove duplicates, it changes which ones you get: an
+// artist tagged across half a library forks into an mbid-keyed row and a name-keyed
+// one, splitting on tag coverage rather than spelling, which is worse because partial
+// tagging is normal. identity.ArtistKey spells the MBID-first form and is never called.
+//
 // An existing row with no id of its own takes one from a tag that now supplies it,
 // so a Picard pass over a library scanned before it tagged lands the ids on a
 // rescan. book.go and credits.go resolve contributors with mbid="", so those calls

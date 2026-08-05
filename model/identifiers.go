@@ -9,6 +9,9 @@ import "strings"
 // scan stays faithful to what a file's tags say, malformed or not, because
 // rewriting scanned values would put the catalog out of step with the file it
 // claims to mirror.
+// So album.barcode can read back with the spaces it was tagged with, and a value an
+// edit would reject can still arrive from a file. Normalize before comparing, and
+// validate before interpolating a stored identifier into anything with its own syntax.
 //
 // Each normalizer follows the ParseBoolValue shape: (normalized, ok). An empty
 // input is a clear and always normalizes to ("", true). A non-empty input

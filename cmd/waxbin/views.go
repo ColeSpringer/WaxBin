@@ -122,6 +122,9 @@ type itemView struct {
 	AlbumPID        string `json:"albumPid,omitempty"`
 	ReleaseGroupPID string `json:"releaseGroupPid,omitempty"`
 	PodcastPID      string `json:"podcastPid,omitempty"`
+	// The registered root the item's primary file sits under, absent for a fileless
+	// item such as an undownloaded episode.
+	LibraryPID string `json:"libraryPid,omitempty"`
 	// External identifiers (see model.ItemView). Only a tagged file or a completed
 	// enrich pass supplies one, so an untagged library emits none of them.
 	MBID             string `json:"mbid,omitempty"`
@@ -178,8 +181,8 @@ func toItemView(v *model.ItemView) itemView {
 		Disc: v.DiscNo, Year: v.Year, Genre: v.Genre,
 		ArtistPID: string(v.ArtistPID), AlbumArtistPID: string(v.AlbumArtistPID),
 		AlbumPID: string(v.AlbumPID), ReleaseGroupPID: string(v.ReleaseGroupPID),
-		PodcastPID: string(v.PodcastPID),
-		MBID:       v.MBID, ISRC: v.ISRC, AlbumMBID: v.AlbumMBID,
+		PodcastPID: string(v.PodcastPID), LibraryPID: string(v.LibraryPID),
+		MBID: v.MBID, ISRC: v.ISRC, AlbumMBID: v.AlbumMBID,
 		ReleaseGroupMBID: v.ReleaseGroupMBID,
 		ArtistMBID:       v.ArtistMBID, AlbumArtistMBID: v.AlbumArtistMBID,
 		Composer: v.Composer, ComposerSort: v.ComposerSort,

@@ -284,6 +284,12 @@ type ItemView struct {
 	ReleaseGroupPID PID
 	PodcastPID      PID
 
+	// LibraryPID is the registered root the item's primary file sits under. It resolves
+	// through the file rather than a subtype row, so it is empty only for a fileless
+	// item and never because an entity is missing, and an empty value selects what
+	// `library isMissing` and the facet's [No File] bucket select.
+	LibraryPID PID
+
 	// External identifiers, projected so a consumer can hand an item to a
 	// MusicBrainz-keyed service without a lookup per item. MBID is the item's own id: a
 	// recording id for a track, a release id for a book. AlbumMBID is the release the

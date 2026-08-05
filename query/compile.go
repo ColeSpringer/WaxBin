@@ -45,21 +45,18 @@ type Column struct {
 	// once per row. It must contain exactly one ? and, like Expr, is emitted
 	// verbatim, so it must never contain caller-supplied text.
 	//
-	// Only is, isNot, in, isPresent, and isMissing are accepted on such a column,
-	// and sorting by one is rejected: the rest either carry no value to lower or
-	// would compare an internal id by text or by range, which is not a question an
+	// Only is, isNot, in, notIn, isPresent, and isMissing are accepted on such a
+	// column, and sorting by one is rejected: the rest either carry no value to lower
+	// or would compare an internal id by text or by range, which is not a question an
 	// identity handle answers, and ORDER BY would sort by internal rowid. The two
 	// presence operators emit no value at all, so they compile to a direct
 	// IS NULL / IS NOT NULL on the id column.
 	//
-	// notIn is rejected because nobody asked for it, not because it cannot be written:
-	// "id NOT IN (SELECT e.id FROM e WHERE e.pid IN (?,?))" works, but it is a second
-	// SQL shape for one operator on one column class. The rejection is a speed bump,
-	// not a guarantee: Not{Cond{field, in, ...}} compiles and looks equivalent, but a
-	// single stale pid in its list takes the whole condition to "no rows" through the
-	// same UNKNOWN described above, silently. It is not the workaround to reach for
-	// (store/sqlite's TestNotInWorkaroundHasStalePIDHole pins that); the NOT IN
-	// subquery form above is, if the operator is ever actually wanted.
+	// notIn is a deny-list, matching compileSetCond's, and diverges from isNot twice on
+	// purpose: a stale pid excludes nothing, and a row with no value is kept. A stored
+	// deny-list goes stale one entry at a time, so one bad entry must not empty the
+	// result, while isNot names a single subject and keeps its own reading. Prefer it
+	// to Not{Cond{field, in, ...}}, which collapses to zero rows on one stale pid.
 	ValueSub string
 }
 
@@ -299,12 +296,6 @@ func compileCond(c Cond, fields Fields, sb *strings.Builder, args *[]any, nu *bo
 		if err := checkSetValues(c); err != nil {
 			return err
 		}
-		// Before the empty-list shortcut, so acceptance never depends on how many
-		// values the caller happens to hold: notIn on a lowered field would otherwise
-		// answer 1=1 for an empty list and fail on the first element.
-		if col.ValueSub != "" && c.Op == OpNotIn {
-			return unsupportedIdentityOp(c)
-		}
 		if len(c.Values) == 0 {
 			// IN () is a syntax error, and an empty list is a shape real callers reach
 			// (a user who follows no shows), so it gets an answer rather than an error.
@@ -449,6 +440,21 @@ func compileValueSubCond(c Cond, col Column, sb *strings.Builder, args *[]any) e
 		}
 		sb.WriteString(col.Expr + " IN (" + strings.Join(subs, ", ") + ")")
 		*args = append(*args, c.Values...)
+	case OpNotIn:
+		// A deny-list (see Column.ValueSub). IS NOT is null-safe, so a stale pid lowers
+		// to NULL and its term reads true for every row instead of taking the condition
+		// to UNKNOWN; the IS NULL disjunct then covers a valueless row meeting one. The
+		// outer parens are required: compileGroup joins children with a bare AND, so a
+		// fragment holding a top-level OR must parenthesize itself.
+		sb.WriteString("(" + col.Expr + " IS NULL OR (")
+		for i := range c.Values {
+			if i > 0 {
+				sb.WriteString(" AND ")
+			}
+			sb.WriteString(col.Expr + " IS NOT " + col.ValueSub)
+		}
+		sb.WriteString("))")
+		*args = append(*args, c.Values...)
 	case OpIsPresent:
 		// No value to lower: the id column being non-NULL is the whole question, and
 		// it beats the unlowered form, which had to run a subquery per row to
@@ -457,16 +463,10 @@ func compileValueSubCond(c Cond, col Column, sb *strings.Builder, args *[]any) e
 	case OpIsMissing:
 		sb.WriteString(col.Expr + " IS NULL")
 	default:
-		return unsupportedIdentityOp(c)
+		return waxerr.New(waxerr.CodeInvalid, "query.Compile",
+			fmt.Sprintf("operator %q not supported on an identity field %q", c.Op, c.Field))
 	}
 	return nil
-}
-
-// unsupportedIdentityOp is raised from here and from compileCond's set-membership
-// pre-check, which must agree.
-func unsupportedIdentityOp(c Cond) error {
-	return waxerr.New(waxerr.CodeInvalid, "query.Compile",
-		fmt.Sprintf("operator %q not supported on an identity field %q", c.Op, c.Field))
 }
 
 // windowNS extracts a relative-time operator's window: a positive integral

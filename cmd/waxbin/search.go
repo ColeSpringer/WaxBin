@@ -5,7 +5,6 @@ import (
 	"strings"
 	"text/tabwriter"
 
-	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/read"
 	"github.com/spf13/cobra"
 )
@@ -34,10 +33,11 @@ func newSearchCmd(g *globals) *cobra.Command {
 			}
 			defer lib.Close()
 
-			opt := read.SearchOptions{Limit: limit, MaxCandidates: maxCandidates}
-			for _, pid := range libraries {
-				opt.Libraries = append(opt.Libraries, model.PID(pid))
+			libPIDs, err := resolveLibraryRefs(ctx(cmd), lib, "search", libraries)
+			if err != nil {
+				return err
 			}
+			opt := read.SearchOptions{Limit: limit, MaxCandidates: maxCandidates, Libraries: libPIDs}
 			res, err := lib.Search(ctx(cmd), q, opt)
 			if err != nil {
 				return err
@@ -63,7 +63,7 @@ func newSearchCmd(g *globals) *cobra.Command {
 	}
 	cmd.Flags().IntVar(&limit, "limit", 0, "max results per group (0 = default)")
 	cmd.Flags().IntVar(&maxCandidates, "max-candidates", 0, "cap the ranked match pool; the newest matches win under truncation (0 = no cap)")
-	cmd.Flags().StringArrayVar(&libraries, "library", nil, "scope to items playable from this library pid (repeatable)")
+	cmd.Flags().StringArrayVar(&libraries, "library", nil, "scope to items playable from this library, by pid or registered root path (repeatable)")
 	return cmd
 }
 

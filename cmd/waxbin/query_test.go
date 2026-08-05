@@ -1,9 +1,14 @@
 package main
 
 import (
+	"context"
+	"os"
+	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/query"
 	"github.com/colespringer/waxbin/waxerr"
 	"github.com/spf13/cobra"
@@ -114,6 +119,179 @@ func TestBuildQueryKindValidation(t *testing.T) {
 		if err != nil && !strings.Contains(err.Error(), "track|book|episode") {
 			t.Errorf("--kind %s error does not list the vocabulary: %v", bad, err)
 		}
+	}
+}
+
+// fakeLibraryLister stands in for the catalog so the resolver can be tested here,
+// where nothing opens a database.
+type fakeLibraryLister struct{ libs []*model.Library }
+
+func (f fakeLibraryLister) Libraries(context.Context) ([]*model.Library, error) {
+	return f.libs, nil
+}
+
+func testLibs() fakeLibraryLister {
+	return fakeLibraryLister{libs: []*model.Library{
+		{PID: "lib-music", Root: []byte("/music"), DisplayRoot: "/music"},
+		{PID: "lib-books", Root: []byte("/books"), DisplayRoot: "/books"},
+	}}
+}
+
+func TestBuildQueryLibraryFlagsCompileToIn(t *testing.T) {
+	q, err := buildQuery(yearCmd(), "", queryFlags{library: []model.PID{"lib-music", "lib-books"}})
+	if err != nil {
+		t.Fatalf("buildQuery: %v", err)
+	}
+	c := condOf(t, q)
+	if c.Field != "library" || c.Op != query.OpIn {
+		t.Fatalf("cond = %+v, want library in", c)
+	}
+	if !reflect.DeepEqual(c.Values, []any{model.PID("lib-music"), model.PID("lib-books")}) {
+		t.Errorf("values = %#v, want both pids", c.Values)
+	}
+}
+
+func TestResolveLibraryRefsAcceptsAPIDOrARootPath(t *testing.T) {
+	for _, ref := range []string{"lib-music", "/music", "/music/"} {
+		got, err := resolveLibraryRefs(context.Background(), testLibs(), "query", []string{ref})
+		if err != nil {
+			t.Fatalf("%q: %v", ref, err)
+		}
+		if len(got) != 1 || got[0] != "lib-music" {
+			t.Errorf("%q resolved to %v, want [lib-music]", ref, got)
+		}
+	}
+}
+
+// A pid and its root path name one library, and collapsing them keeps the condition at
+// arity 1, which is the only arity compileValueSubCond drives off file_library.
+func TestResolveLibraryRefsDeduplicatesSpellingsOfOneLibrary(t *testing.T) {
+	got, err := resolveLibraryRefs(context.Background(), testLibs(), "query",
+		[]string{"/music", "lib-music", "/books", "/music/"})
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	want := []model.PID{"lib-music", "lib-books"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("resolved = %v, want %v (deduplicated, first-seen order)", got, want)
+	}
+}
+
+// No writer produces a library whose root and display_root differ, so this covers the
+// branch real data never reaches: both spellings must still resolve, and a path under
+// either must still get the containing-root hint.
+func TestResolveLibraryRefsMatchesEitherRootSpelling(t *testing.T) {
+	libs := fakeLibraryLister{libs: []*model.Library{
+		{PID: "lib-odd", Root: []byte("/raw\xffmusic"), DisplayRoot: "/shown/music"},
+	}}
+	for _, ref := range []string{"/raw\xffmusic", "/shown/music"} {
+		got, err := resolveLibraryRefs(context.Background(), libs, "query", []string{ref})
+		if err != nil {
+			t.Fatalf("%q: %v", ref, err)
+		}
+		if len(got) != 1 || got[0] != "lib-odd" {
+			t.Errorf("%q resolved to %v, want [lib-odd]", ref, got)
+		}
+	}
+	_, err := resolveLibraryRefs(context.Background(), libs, "query", []string{"/raw\xffmusic/jazz"})
+	if !waxerr.Is(err, waxerr.CodeNotFound) || !strings.Contains(err.Error(), "inside root") {
+		t.Errorf("err = %v, want the containing-root hint against the raw spelling", err)
+	}
+}
+
+func TestResolveLibraryRefsRejectsAnUnknownLibrary(t *testing.T) {
+	_, err := resolveLibraryRefs(context.Background(), testLibs(), "query", []string{"/nope"})
+	if !waxerr.Is(err, waxerr.CodeNotFound) {
+		t.Fatalf("err = %v, want CodeNotFound", err)
+	}
+	for _, want := range []string{"/nope", "/music", "/books"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not name %q", err, want)
+		}
+	}
+
+	// A path under a root must not resolve to the parent, which would widen the filter.
+	_, err = resolveLibraryRefs(context.Background(), testLibs(), "query", []string{"/music/jazz"})
+	if !waxerr.Is(err, waxerr.CodeNotFound) {
+		t.Fatalf("err = %v, want CodeNotFound", err)
+	}
+	if !strings.Contains(err.Error(), "inside root /music") {
+		t.Errorf("error %q does not point at the containing root", err)
+	}
+}
+
+// Roots are stored absolute, so a ref typed relative to the working directory has to
+// resolve the same way `library add` resolves the path it registers.
+func TestResolveLibraryRefsAcceptsARelativePath(t *testing.T) {
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	libs := fakeLibraryLister{libs: []*model.Library{
+		{PID: "lib-here", Root: []byte(filepath.Join(wd, "music")), DisplayRoot: filepath.Join(wd, "music")},
+	}}
+	for _, ref := range []string{"music", "./music", "music/"} {
+		got, err := resolveLibraryRefs(context.Background(), libs, "query", []string{ref})
+		if err != nil {
+			t.Fatalf("%q: %v", ref, err)
+		}
+		if len(got) != 1 || got[0] != "lib-here" {
+			t.Errorf("%q resolved to %v, want [lib-here]", ref, got)
+		}
+	}
+}
+
+// pathx.UnderRoot is the repo's one containment check. A hand-rolled
+// !HasPrefix(rel, "..") calls a sibling like /musicarchive a child of /music, which
+// would hand back the wrong root in the hint.
+func TestResolveLibraryRefsDoesNotTreatASiblingAsContained(t *testing.T) {
+	for _, ref := range []string{"/musicarchive", "/music.old"} {
+		_, err := resolveLibraryRefs(context.Background(), testLibs(), "query", []string{ref})
+		if !waxerr.Is(err, waxerr.CodeNotFound) {
+			t.Fatalf("%q: err = %v, want CodeNotFound", ref, err)
+		}
+		if strings.Contains(err.Error(), "inside root") {
+			t.Errorf("%q is a sibling of /music, not a child, but got the containment hint: %v", ref, err)
+		}
+	}
+}
+
+// The op names the command the error came from, so `search --library bogus` does not
+// report itself as a query error.
+func TestResolveLibraryRefsCarriesTheCallersOp(t *testing.T) {
+	for _, op := range []string{"query", "facet", "search", "diagnostics"} {
+		_, err := resolveLibraryRefs(context.Background(), testLibs(), op, []string{"/nope"})
+		if err == nil || !strings.HasPrefix(err.Error(), op+": ") {
+			t.Errorf("op %q produced %v, want the message to lead with its own op", op, err)
+		}
+	}
+}
+
+// scopedQuery is the seam that keeps resolve and apply together. Dropping the apply
+// would leave a --library that validates its input and then filters nothing.
+func TestScopedQueryAppliesTheResolvedLibraries(t *testing.T) {
+	q, err := scopedQuery(context.Background(), testLibs(), yearCmd(), "query", "",
+		queryFlags{}, []string{"/music"})
+	if err != nil {
+		t.Fatalf("scopedQuery: %v", err)
+	}
+	c := condOf(t, q)
+	if c.Field != "library" || c.Op != query.OpIn ||
+		!reflect.DeepEqual(c.Values, []any{model.PID("lib-music")}) {
+		t.Errorf("cond = %+v, want the resolved pid applied as `library in`", c)
+	}
+}
+
+// A rule document owns the whole where-clause, so layering --library on top is refused
+// rather than dropped. Silently ignoring it would answer a wider question than asked.
+func TestScopedQueryRefusesLibraryWithARule(t *testing.T) {
+	_, err := scopedQuery(context.Background(), testLibs(), yearCmd(), "query", "rule.json",
+		queryFlags{}, []string{"/music"})
+	if !waxerr.Is(err, waxerr.CodeInvalid) {
+		t.Fatalf("err = %v, want CodeInvalid", err)
+	}
+	if !strings.Contains(err.Error(), "--rule") {
+		t.Errorf("error %q does not name the conflicting flag", err)
 	}
 }
 

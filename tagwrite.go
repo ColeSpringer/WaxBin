@@ -168,7 +168,9 @@ func r128Gain(rgDB float64) string {
 // these columns from the file's tags on every content-changed rescan, so a value living
 // only in the catalog is cleared the next time the file is retagged. Writing it to the
 // file puts it where the scanner reads, which is also what makes it portable to any
-// other tool.
+// other tool. The enrichment marker is what made that loss permanent: a later pass
+// skips a marked entity, so nothing refilled what the retag cleared. It reaches only
+// fields the reader fills; bookFieldTagKeys records which book fields those are.
 //
 // ASIN and ISBN feed identity.BookKey, so a book whose parts were written is re-anchored
 // from its primary part's post-write tags. Without that the next scan computes a

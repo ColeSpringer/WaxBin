@@ -100,7 +100,9 @@ const itemEffectiveDurationExpr = `CASE WHEN pf.start_frames IS NOT NULL ` +
 // projected pid and a pid filter cannot disagree. A book resolves its author for the
 // artist pair and NULL for the album pair; an episode is NULL for all but the podcast,
 // which is NULL for everything else. The release group is also NULL for a track whose
-// album has none.
+// album has none. The library pid follows them and is not an entity: it reads through
+// the primary file, so it is NULL for a fileless item and matches the library query
+// field, which reads the same f.library_id.
 //
 // The six external-identifier columns closing the list are the MusicBrainz ids and the
 // ISRC (see model.ItemView). The first four read off joined aliases; the artist pair is
@@ -111,10 +113,17 @@ const itemEffectiveDurationExpr = `CASE WHEN pf.start_frames IS NOT NULL ` +
 // These ride on every item read. BenchmarkQueryPageAtScale puts a 50-item page around
 // 0.7 ms, unchanged by the release group (p=0.69 over 5 runs). The identifiers cost
 // 689 -> 792 us, 15% over 8 runs: the artist pair adds two per-row probes and the rg
-// join removes one, so a row does four where it did three. Serving the artist pair
-// from two more joins instead does cut it to two probes, but it costs more than it
-// saves: the extra joins lose album_pid its track_album_id seek, which
-// TestLoweredIdentityFieldPlans catches.
+// join removes one, so a row does four where it did three. The library pid costs a
+// fifth probe and another 797 -> 842 us, 5.6% over 8 runs (p=0.01). A rowid seek into a
+// one-row table is not free, so measure before adding a sixth. The tax also falls on
+// readers that never want the column, since every splicer of this list pays it: the
+// playback queue, share's resolve ladders, portable's identity selects, and port's
+// export, which discards the library pid outright.
+//
+// Serving the artist pair from two more joins instead cuts it to two probes but costs
+// album_pid its track_album_id seek, which TestLoweredIdentityFieldPlans catches, so a
+// column only the projection reads is added as a correlated scalar subquery even though
+// the per-row probe is the more expensive half.
 const itemViewCols = `pi.pid, pi.kind, pi.state, pi.title,
 	COALESCE(NULLIF(t.artist,''), bk.author, pod.title, ''),
 	COALESCE(NULLIF(t.album_artist,''), bk.author, pod.title, ''),
@@ -132,6 +141,7 @@ const itemViewCols = `pi.pid, pi.kind, pi.state, pi.title,
 	(SELECT vap.pid FROM artist vap WHERE vap.id = ` + itemArtistIDExpr + `),
 	(SELECT vaap.pid FROM artist vaap WHERE vaap.id = ` + itemAlbumArtistIDExpr + `),
 	alb.pid, rg.pid, pod.pid,
+	(SELECT vlib.pid FROM library vlib WHERE vlib.id = f.library_id),
 	COALESCE(NULLIF(t.mbid,''), bk.mbid, ''),
 	COALESCE(t.isrc,''),
 	COALESCE(NULLIF(alb.mbid,''), bk.mbid, ''),
@@ -163,6 +173,7 @@ type itemViewNulls struct {
 	fpid, fdisp, container, codec       sql.NullString
 	artistPID, albumArtistPID, albumPID sql.NullString
 	releaseGroupPID, podcastPID         sql.NullString
+	libraryPID                          sql.NullString
 	fpath                               []byte
 }
 
@@ -178,6 +189,7 @@ func itemViewDests(v *model.ItemView, n *itemViewNulls) []any {
 		&n.fpid, &n.fpath, &n.fdisp, &n.dur, &n.container, &n.codec, &n.sampleRate,
 		&n.startFrames, &n.endFrames,
 		&n.artistPID, &n.albumArtistPID, &n.albumPID, &n.releaseGroupPID, &n.podcastPID,
+		&n.libraryPID,
 		&v.MBID, &v.ISRC, &v.AlbumMBID, &v.ReleaseGroupMBID, &v.ArtistMBID, &v.AlbumArtistMBID,
 	}
 }
@@ -204,6 +216,7 @@ func (n *itemViewNulls) apply(v *model.ItemView) {
 	v.AlbumPID = model.PID(n.albumPID.String)
 	v.ReleaseGroupPID = model.PID(n.releaseGroupPID.String)
 	v.PodcastPID = model.PID(n.podcastPID.String)
+	v.LibraryPID = model.PID(n.libraryPID.String)
 	// A non-NULL start offset marks the primary edge as a virtual track's window.
 	v.Virtual = n.startFrames.Valid
 	v.StartFrames = n.startFrames.Int64

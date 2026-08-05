@@ -65,6 +65,11 @@ type Location struct {
 	FilePID    model.PID
 	SampleRate int
 
+	// LibraryPID is the registered root Path sits under, empty for a fileless item.
+	// It goes stale on a different signal than Path does: a relocate rewrites every
+	// root's paths and leaves the pids alone.
+	LibraryPID model.PID
+
 	// Virtual reports that the item is a window into Path rather than the whole
 	// file. StartFrames/EndFrames are CD frames; EndFrames is 0 when the window
 	// runs to the end of the file. Use Span rather than converting these directly.
@@ -372,6 +377,7 @@ func locationOf(iv *model.ItemView) Location {
 	return Location{
 		Path:        string(iv.Path),
 		FilePID:     iv.FilePID,
+		LibraryPID:  iv.LibraryPID,
 		SampleRate:  iv.SampleRate,
 		Virtual:     iv.Virtual,
 		StartFrames: iv.StartFrames,
@@ -423,12 +429,12 @@ func (c *Cache) Poll(ctx context.Context) error {
 // moves surface) map back through byFile. A library row is the third rename signal:
 // a whole-library relocate rewrites every file.path under the library but emits one
 // library delta rather than a per-file delta for each (the per-file churn on a bulk
-// move is exactly what the single delta avoids). The cache cannot map a library back
-// to the items under it (a Location carries no library id), so it drops every cached
-// location on any library row. Library rows are rare (a root added, relocated, or its
-// policy changed), so the full flush costs a handful of re-queries, never steady-state
-// churn. Every other entity type (albums, playlists, play state) is noise to a
-// location cache.
+// move is exactly what the single delta avoids). It drops every cached location on any
+// library row rather than only the ones under that root: a Location does carry the
+// library pid, so a narrower sweep is possible, but library rows are rare (a root
+// added, relocated, or its policy changed) and the full flush costs a handful of
+// re-queries, never steady-state churn. Every other entity type (albums, playlists,
+// play state) is noise to a location cache.
 func (c *Cache) invalidate(rows []model.Change) int {
 	c.mu.Lock()
 	defer c.mu.Unlock()

@@ -422,10 +422,10 @@ func explainPlanLines(t *testing.T, st *Store, stmt string, args ...any) []strin
 }
 
 // TestLoweredIdentityFieldOperators pins the narrowed operator set on a value-lowered
-// field. Everything but is/isNot/isPresent/isMissing is rejected, because the column
-// is an internal id: an ordered or LIKE comparison against it is not a question an
-// identity handle answers. Sorting by one is rejected for the same reason, mirroring
-// the tag-field restriction.
+// field: is/isNot/in/notIn/isPresent/isMissing are accepted and everything else is
+// rejected, because the column is an internal id and an ordered or LIKE comparison
+// against it is not a question an identity handle answers. Sorting by one is rejected
+// for the same reason, mirroring the tag-field restriction.
 func TestLoweredIdentityFieldOperators(t *testing.T) {
 	st, _ := entityFixture(t)
 	ctx := context.Background()
@@ -439,23 +439,17 @@ func TestLoweredIdentityFieldOperators(t *testing.T) {
 			}
 		}
 	}
-	// notIn is rejected on every lowered field while in is accepted; see
-	// query.Column.ValueSub for why the pair splits. The empty list is checked
-	// alongside the one-value form because the rejection must not depend on arity:
-	// an empty list taking the match-everything shortcut would make the operator
-	// appear to work until the caller's first value.
+	// in and notIn are both accepted on every lowered field, at arity 1 and at 0,
+	// since the empty list takes a shortcut before the operator is ever consulted.
 	for _, field := range []string{"artist_pid", "album_artist_pid", "album_pid",
 		"release_group_pid", "podcast_pid", "library"} {
-		for _, vals := range [][]any{{"some-pid"}, {}} {
-			_, err := st.QueryItems(ctx, query.New(query.EntityItems).
-				WhereValues(field, query.OpNotIn, vals...).Build(), "")
-			if !waxerr.Is(err, waxerr.CodeInvalid) {
-				t.Errorf("%s notIn %v: want CodeInvalid, got %v", field, vals, err)
+		for _, op := range []query.Op{query.OpIn, query.OpNotIn} {
+			for _, vals := range [][]any{{"some-pid"}, {}} {
+				if _, err := st.QueryItems(ctx, query.New(query.EntityItems).
+					WhereValues(field, op, vals...).Build(), ""); err != nil {
+					t.Errorf("%s %s %v: %v", field, op, vals, err)
+				}
 			}
-		}
-		if _, err := st.QueryItems(ctx, query.New(query.EntityItems).
-			WhereValues(field, query.OpIn, "some-pid").Build(), ""); err != nil {
-			t.Errorf("%s in: %v", field, err)
 		}
 	}
 	_, err := st.QueryItems(ctx, query.New(query.EntityItems).
@@ -465,14 +459,136 @@ func TestLoweredIdentityFieldOperators(t *testing.T) {
 	}
 }
 
-// TestNotInWorkaroundHasStalePIDHole pins why Not{Cond{in}} is not the answer for
-// the rejected notIn, so nobody reaches for it as an equivalent or implements notIn
-// on top of it. A stale pid lowers to NULL, `x IN (NULL, ...)` is UNKNOWN rather
-// than false, and negating UNKNOWN is still not true, so the whole condition
-// collapses to "no rows" the moment one listed pid no longer resolves. That is the
-// live case for this filter (a show the user unsubscribed from), and the failure is
-// silent.
-func TestNotInWorkaroundHasStalePIDHole(t *testing.T) {
+func TestLibraryNotInIsADenyList(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	lib2, err := st.EnsureLibrary(ctx, &model.Library{
+		Root: []byte("/lib2"), DisplayRoot: "/lib2", Mode: model.ModeManaged, Profile: "waxbin-native",
+	})
+	if err != nil {
+		t.Fatalf("ensure lib2: %v", err)
+	}
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/1.flac", essence: "e1", content: "c1", title: "A", artist: "X", album: "Al"})
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/2.flac", essence: "e2", content: "c2", title: "B", artist: "X", album: "Al"})
+	putTrack(t, st, lib2.ID, trackSpec{path: "/lib2/3.flac", essence: "e3", content: "c3", title: "C", artist: "X", album: "Al"})
+	putFeed(t, st, "http://cast.example/f", "Ep1")
+
+	notIn := func(vals ...any) int {
+		t.Helper()
+		n, err := st.CountItems(ctx, query.New(query.EntityItems).
+			WhereValues("library", query.OpNotIn, vals...).Build(), "")
+		if err != nil {
+			t.Fatalf("count: %v", err)
+		}
+		return n
+	}
+	// Denying lib1 leaves lib2's track and the fileless episode.
+	if n := notIn(string(lib.PID)); n != 2 {
+		t.Errorf("library notIn [lib1] = %d, want 2", n)
+	}
+	if n := notIn(string(lib.PID), string(lib2.PID)); n != 1 {
+		t.Errorf("library notIn [lib1, lib2] = %d, want 1 (the episode)", n)
+	}
+	if n := notIn(); n != 4 {
+		t.Errorf("library notIn [] = %d, want 4 (an empty deny-list denies nothing)", n)
+	}
+}
+
+// TestLoweredNotInKeepsItemsWithoutTheHandle passes a stale pid alongside a live one
+// deliberately: with only live pids the IS NULL disjunct changes nothing, because
+// IS NOT is already null-safe, and the test would pass either way.
+func TestLoweredNotInKeepsItemsWithoutTheHandle(t *testing.T) {
+	st, lib := entityFixture(t)
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/1.flac", essence: "e1", content: "c1", title: "A", artist: "X", album: "Al"})
+	one := putFeed(t, st, "http://cast.example/one", "Ep1")
+	putFeed(t, st, "http://cast.example/two", "Other")
+
+	notIn := func(vals ...any) int {
+		t.Helper()
+		n, err := st.CountItems(context.Background(), query.New(query.EntityItems).
+			WhereValues("podcast_pid", query.OpNotIn, vals...).Build(), "")
+		if err != nil {
+			t.Fatalf("count: %v", err)
+		}
+		return n
+	}
+	// The track has no podcast at all, so it survives a deny-list naming one show.
+	if n := notIn(string(one.PodcastPID)); n != 2 {
+		t.Errorf("podcast_pid notIn [one] = %d, want 2 (the track and the other episode)", n)
+	}
+	if n := notIn(string(one.PodcastPID), "no-such-podcast-pid"); n != 2 {
+		t.Errorf("podcast_pid notIn [one, stale] = %d, want 2; a stale entry must not "+
+			"drop the handle-less track, which is what the IS NULL disjunct is for", n)
+	}
+}
+
+func TestLoweredNotInStalePIDExcludesNothing(t *testing.T) {
+	st, lib := entityFixture(t)
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/1.flac", essence: "e1", content: "c1", title: "A", artist: "X", album: "Al"})
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/2.flac", essence: "e2", content: "c2", title: "B", artist: "Y", album: "Al2"})
+
+	total, err := st.CountItems(context.Background(), query.New(query.EntityItems).Build(), "")
+	if err != nil {
+		t.Fatalf("total: %v", err)
+	}
+	n, err := st.CountItems(context.Background(), query.New(query.EntityItems).
+		WhereValues("artist_pid", query.OpNotIn, "no-such-artist-pid").Build(), "")
+	if err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if n != total {
+		t.Errorf("artist_pid notIn [stale] = %d, want all %d; one stale entry must exclude "+
+			"nothing rather than emptying the result", n, total)
+	}
+}
+
+// TestLoweredNotInScansTheCatalog records the honest cost, in
+// TestReleaseGroupPIDScansOuterLoop's voice: a deny-list is an anti-join, so even
+// library, which `is` drives off file_library, scans here.
+func TestLoweredNotInScansTheCatalog(t *testing.T) {
+	st, lib := entityFixture(t)
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/a.flac", essence: "ea", content: "ca",
+		title: "A", artist: "X", albumArt: "X", album: "Al"})
+
+	fm, ok := fieldMapFor(query.EntityItems)
+	if !ok {
+		t.Fatal("no field map for items")
+	}
+	c, err := query.Compile(query.New(query.EntityItems).
+		WhereValues("library", query.OpNotIn, "some-pid").Build(), fm)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	lines := explainPlanLines(t, st, itemSelect+" WHERE "+c.Where, c.Args...)
+	plan := strings.Join(lines, "\n")
+	if !strings.Contains(plan, "SCAN pi") {
+		t.Errorf("library notIn no longer scans playable_item:\n%s", plan)
+	}
+	if strings.Contains(plan, "file_library") {
+		t.Errorf("library notIn seeks file_library; a deny-list cannot drive off that index, "+
+			"so this plan is not the one the field map header describes:\n%s", plan)
+	}
+	// The projection's own columns are correlated by design, so search for the filter's
+	// own subquery (the one resolving the pid against libq) and check its parent node.
+	var parent string
+	for i, l := range lines {
+		if strings.Contains(l, "libq") && i > 0 {
+			parent = lines[i-1]
+		}
+	}
+	if parent == "" {
+		t.Fatalf("no libq line; the filter did not lower its pid:\n%s", plan)
+	}
+	if strings.Contains(parent, "CORRELATED") {
+		t.Errorf("library notIn resolves its pid per row (%q); lowering regressed:\n%s", parent, plan)
+	}
+}
+
+// TestNotInDiffersFromNotOfInOnAStalePID pins why Not{Cond{in}} is not a spelling of
+// notIn. A stale pid lowers to NULL, `x IN (NULL, ...)` is UNKNOWN, and negating that
+// is still not true, so the condition collapses to "no rows" the moment one listed pid
+// stops resolving. notIn keeps those rows; see TestLoweredNotInStalePIDExcludesNothing.
+func TestNotInDiffersFromNotOfInOnAStalePID(t *testing.T) {
 	st, lib := entityFixture(t)
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/1.flac", essence: "e1", content: "c1", title: "A", artist: "X", album: "Al"})
 	one := putFeed(t, st, "http://cast.example/one", "Ep1", "Ep2")
@@ -492,9 +608,7 @@ func TestNotInWorkaroundHasStalePIDHole(t *testing.T) {
 	if n := notIn(a); n != 1 {
 		t.Errorf("NOT in [one] = %d, want 1 (the other show's episode)", n)
 	}
-	// One stale pid in the list takes the answer to zero, not to "the same minus
-	// nothing". If this ever stops being 0, the NULL semantics changed and
-	// Column.ValueSub's documented limit needs rewriting.
+	// One stale pid takes the answer to zero, not to "the same minus nothing".
 	if n := notIn(a, "no-such-podcast-pid"); n != 0 {
 		t.Errorf("NOT in [one, stale] = %d, want 0 (the documented hole)", n)
 	}

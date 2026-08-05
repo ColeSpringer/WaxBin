@@ -16,6 +16,56 @@ var testFields = query.FieldMap{
 	"artist": {Expr: "t.artist", Kind: query.KindText},
 	"year":   {Expr: "t.year", Kind: query.KindInt},
 	"added":  {Expr: "pi.created_at", Kind: query.KindTime},
+	"artist_pid": {Expr: "t.artist_id", Kind: query.KindInt,
+		ValueSub: "(SELECT a.id FROM artist a WHERE a.pid = ?)"},
+}
+
+const artistSub = "(SELECT a.id FROM artist a WHERE a.pid = ?)"
+
+func TestLoweredNotInKeepsRowsWithNoValue(t *testing.T) {
+	c, err := query.Compile(query.New(query.EntityItems).
+		WhereValues("artist_pid", query.OpNotIn, "p1", "p2").Build(), testFields)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	want := "(t.artist_id IS NULL OR (t.artist_id IS NOT " + artistSub +
+		" AND t.artist_id IS NOT " + artistSub + "))"
+	if c.Where != want {
+		t.Errorf("where = %q, want %q", c.Where, want)
+	}
+	if !reflect.DeepEqual(c.Args, []any{"p1", "p2"}) {
+		t.Errorf("args = %#v, want [p1 p2]", c.Args)
+	}
+}
+
+func TestLoweredNotInEmptyListDeniesNothing(t *testing.T) {
+	c, err := query.Compile(query.New(query.EntityItems).
+		WhereValues("artist_pid", query.OpNotIn).Build(), testFields)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	if c.Where != "1=1" {
+		t.Errorf("where = %q, want 1=1", c.Where)
+	}
+}
+
+// The group has two conditions on purpose: compileGroup joins children with a bare
+// AND, so a single-condition group reads correctly whether or not the fragment
+// parenthesizes itself and would pin nothing.
+func TestLoweredNotInParenthesizesItself(t *testing.T) {
+	c, err := query.Compile(query.New(query.EntityItems).
+		Where("year", query.OpIs, 2000).
+		WhereValues("artist_pid", query.OpNotIn, "p1").Build(), testFields)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	want := "(t.year = ? AND (t.artist_id IS NULL OR (t.artist_id IS NOT " + artistSub + ")))"
+	if c.Where != want {
+		t.Errorf("where = %q, want %q", c.Where, want)
+	}
+	if !reflect.DeepEqual(c.Args, []any{2000, "p1"}) {
+		t.Errorf("args = %#v, want [2000 p1]", c.Args)
+	}
 }
 
 func TestCompileBasicAnd(t *testing.T) {

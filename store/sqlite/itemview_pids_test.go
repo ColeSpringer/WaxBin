@@ -388,6 +388,134 @@ func TestItemViewIdentifiersUnderMegabytesBudget(t *testing.T) {
 	}
 }
 
+// TestItemViewLibraryPID reads the projected library pid back through all four shapes
+// that splice itemViewCols, because the megabytes budget extends the column list and
+// the dest list at two independent sites and a mis-ordered column shows up only there.
+func TestItemViewLibraryPID(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	lib2, err := st.EnsureLibrary(ctx, &model.Library{
+		Root: []byte("/lib2"), DisplayRoot: "/lib2", Mode: model.ModeManaged, Profile: "waxbin-native",
+	})
+	if err != nil {
+		t.Fatalf("ensure lib2: %v", err)
+	}
+	one := putTrack(t, st, lib.ID, trackSpec{path: "/lib/1.flac", essence: "e1", content: "c1",
+		title: "A", artist: "X", album: "Al", durationMS: 100})
+	two := putTrack(t, st, lib2.ID, trackSpec{path: "/lib2/2.flac", essence: "e2", content: "c2",
+		title: "B", artist: "X", album: "Al", durationMS: 100})
+	setFileSize(t, st, "/lib/1.flac", 100)
+	setFileSize(t, st, "/lib2/2.flac", 100)
+	putFeed(t, st, "http://cast.example/f", "Ep1")
+	var epPID model.PID
+	if err := st.read.QueryRowContext(ctx, "SELECT pid FROM playable_item WHERE kind='episode'").Scan(&epPID); err != nil {
+		t.Fatalf("episode pid: %v", err)
+	}
+
+	want := map[model.PID]model.PID{one.ItemPID: lib.PID, two.ItemPID: lib2.PID, epPID: ""}
+	if lib.PID == lib2.PID {
+		t.Fatal("the two roots share a pid; the fixture cannot distinguish them")
+	}
+	check := func(shape string, got map[model.PID]*model.ItemView) {
+		t.Helper()
+		for pid, wantLib := range want {
+			v, ok := got[pid]
+			if !ok {
+				t.Errorf("%s did not return item %s", shape, pid)
+				continue
+			}
+			if v.LibraryPID != wantLib {
+				t.Errorf("%s %s LibraryPID = %q, want %q", shape, v.Title, v.LibraryPID, wantLib)
+			}
+		}
+	}
+	byPID := func(items []*model.ItemView) map[model.PID]*model.ItemView {
+		m := make(map[model.PID]*model.ItemView, len(items))
+		for _, v := range items {
+			m[v.PID] = v
+		}
+		return m
+	}
+
+	single := map[model.PID]*model.ItemView{}
+	for pid := range want {
+		v, err := st.ItemByPID(ctx, pid)
+		if err != nil {
+			t.Fatalf("item %s: %v", pid, err)
+		}
+		single[pid] = v
+	}
+	check("ItemByPID", single)
+
+	items, err := st.QueryItems(ctx, query.New(query.EntityItems).Build(), "")
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	check("QueryItems", byPID(items))
+
+	page, err := st.BrowsePage(ctx, read.ListAlphabetical, read.BrowseOptions{Limit: 10})
+	if err != nil {
+		t.Fatalf("browse: %v", err)
+	}
+	check("BrowsePage", byPID(page.Items))
+
+	budgeted, err := st.QueryItems(ctx, query.New(query.EntityItems).
+		Limit(1).LimitBy(query.LimitMegabytes).Build(), "")
+	if err != nil {
+		t.Fatalf("megabytes query: %v", err)
+	}
+	if len(budgeted) == 0 {
+		t.Fatal("megabytes budget returned nothing")
+	}
+	for _, v := range budgeted {
+		if v.LibraryPID != want[v.PID] {
+			t.Errorf("megabytes budget %s LibraryPID = %q, want %q; a shifted column list "+
+				"lands the wrong value here alone", v.Title, v.LibraryPID, want[v.PID])
+		}
+		if v.DurationMS == 0 {
+			t.Error("budget row lost its duration; the widened SELECT and its dests are out of step")
+		}
+	}
+}
+
+// TestItemViewLibraryPIDMatchesTheLibraryFilter pins projection against filter. Chained
+// with TestLibraryFieldAndFacet's mirror loop this gives projection equals filter equals
+// facet, which is the guarantee a consumer holding an item view relies on.
+func TestItemViewLibraryPIDMatchesTheLibraryFilter(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	lib2, err := st.EnsureLibrary(ctx, &model.Library{
+		Root: []byte("/lib2"), DisplayRoot: "/lib2", Mode: model.ModeManaged, Profile: "waxbin-native",
+	})
+	if err != nil {
+		t.Fatalf("ensure lib2: %v", err)
+	}
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/1.flac", essence: "e1", content: "c1", title: "A", artist: "X", album: "Al"})
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/2.flac", essence: "e2", content: "c2", title: "B", artist: "X", album: "Al"})
+	putTrack(t, st, lib2.ID, trackSpec{path: "/lib2/3.flac", essence: "e3", content: "c3", title: "C", artist: "X", album: "Al"})
+	putFeed(t, st, "http://cast.example/f", "Ep1")
+
+	items, err := st.QueryItems(ctx, query.New(query.EntityItems).Build(), "")
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	projected := map[model.PID]int{}
+	for _, v := range items {
+		projected[v.LibraryPID]++
+	}
+	for _, l := range []*model.Library{lib, lib2} {
+		if n := countWhere(t, st, "library", query.OpIs, string(l.PID)); n != projected[l.PID] {
+			t.Errorf("library %s: filter selects %d, projection reports %d", l.DisplayRoot, n, projected[l.PID])
+		}
+	}
+	if n := countWhere(t, st, "library", query.OpIsMissing, nil); n != projected[""] {
+		t.Errorf("library isMissing selects %d, but %d items project an empty LibraryPID", n, projected[""])
+	}
+	if projected[""] == 0 {
+		t.Error("no item projects an empty LibraryPID; the fileless case is untested")
+	}
+}
+
 // TestIdentifierQueryFields covers the filters behind a "which items have no
 // MusicBrainz id" sweep. isMissing is the whole point: the columns are nullable and
 // the fields COALESCE to ”, so it has to match both an absent row and an empty

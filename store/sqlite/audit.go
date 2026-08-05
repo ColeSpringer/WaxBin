@@ -280,6 +280,9 @@ const itemsMissingMBIDWhere = `
 
 // ItemsMissingMBID returns a sample (up to limit) of present items with no
 // MusicBrainz identity, plus the total count.
+// It samples per item like ItemsMissingArt rather than returning a bare count,
+// because the pid is what a caller acts on. That makes it the loudest check on an
+// untagged library, which is accepted: Sample bounds it.
 func (s *Store) ItemsMissingMBID(ctx context.Context, limit int) ([]model.ItemRef, int, error) {
 	return s.sampleItemRefs(ctx, "store.ItemsMissingMBID", itemsMissingMBIDWhere, limit)
 }

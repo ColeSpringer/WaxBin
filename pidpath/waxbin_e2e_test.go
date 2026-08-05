@@ -281,6 +281,18 @@ func TestResolveAgainstRealCatalog(t *testing.T) {
 	if loc.SampleRate != 44100 {
 		t.Errorf("sample rate = %d, want 44100 (it rides along with the location)", loc.SampleRate)
 	}
+	// The library pid rides along too, and must be the root the file was scanned under
+	// rather than merely non-empty.
+	libs, err := lib.Libraries(ctx)
+	if err != nil {
+		t.Fatalf("libraries: %v", err)
+	}
+	if len(libs) != 1 {
+		t.Fatalf("catalog has %d libraries, want the one scanned root", len(libs))
+	}
+	if loc.LibraryPID != libs[0].PID {
+		t.Errorf("library pid = %q, want %q (the scanned root)", loc.LibraryPID, libs[0].PID)
+	}
 	// A whole-file item has no window, so Span asks for no bounds.
 	if from, to, err := loc.Span(); from != 0 || to != 0 || err != nil {
 		t.Errorf("whole-file Span = (%d, %d, %v), want (0, 0, nil)", from, to, err)

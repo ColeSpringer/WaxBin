@@ -4,8 +4,10 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
+	"github.com/colespringer/waxbin/internal/pathx"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/query"
 	"github.com/colespringer/waxbin/read"
@@ -26,6 +28,7 @@ func newQueryCmd(g *globals) *cobra.Command {
 		tagEq, tagContains, tagPresent, tagMissing []string
 		limitMode                                  string
 		seed                                       int64
+		libraries                                  []string
 	)
 	cmd := &cobra.Command{
 		Use:     "query",
@@ -45,21 +48,21 @@ func newQueryCmd(g *globals) *cobra.Command {
 					"--limit-mode/--seed do not apply to keyset-paged mode (--page-size/--cursor)")
 			}
 
-			q, err := buildQuery(cmd, rulePath, queryFlags{
-				title: title, artist: artist, album: album, genre: genre, kind: kind, source: source,
-				year: year, limit: limit, sortField: sortField, desc: desc,
-				tagEq: tagEq, tagContains: tagContains, tagPresent: tagPresent, tagMissing: tagMissing,
-				limitMode: limitMode, seed: seed,
-			})
-			if err != nil {
-				return err
-			}
-
 			lib, _, err := g.openRead(cmd)
 			if err != nil {
 				return err
 			}
 			defer lib.Close()
+
+			q, err := scopedQuery(ctx(cmd), lib, cmd, "query", rulePath, queryFlags{
+				title: title, artist: artist, album: album, genre: genre, kind: kind, source: source,
+				year: year, limit: limit, sortField: sortField, desc: desc,
+				tagEq: tagEq, tagContains: tagContains, tagPresent: tagPresent, tagMissing: tagMissing,
+				limitMode: limitMode, seed: seed,
+			}, libraries)
+			if err != nil {
+				return err
+			}
 
 			// Keyset pagination mode: stable, collation-correct windows by sort_key.
 			// --sort/--limit do not apply here (the canonical order owns the page).
@@ -101,6 +104,7 @@ func newQueryCmd(g *globals) *cobra.Command {
 	f.StringArrayVar(&tagContains, "tag-contains", nil, "match a custom tag by substring: KEY=SUBSTR (repeatable; case-insensitive)")
 	f.StringArrayVar(&tagPresent, "tag-present", nil, "require a custom tag key to be present (repeatable)")
 	f.StringArrayVar(&tagMissing, "tag-missing", nil, "require a custom tag key to be absent (repeatable)")
+	f.StringArrayVar(&libraries, "library", nil, "restrict to a library, by pid or registered root path (repeatable)")
 	f.StringVar(&limitMode, "limit-mode", "", "interpret --limit as: count|random|minutes|megabytes")
 	f.Int64Var(&seed, "seed", 0, "pin the shuffle order for --limit-mode random or a sortless budget mode (0 = fresh per run)")
 	return cmd
@@ -154,6 +158,120 @@ type pager interface {
 	QueryPage(ctx context.Context, q query.Query, cursor read.Cursor, limit int, desc bool, userPID model.PID) (*read.Page, error)
 }
 
+// libraryLister is the subset of the library resolveLibraryRefs needs (eases testing).
+type libraryLister interface {
+	Libraries(ctx context.Context) ([]*model.Library, error)
+}
+
+// scopedQuery resolves the --library refs against the catalog and builds the query with
+// the resulting pids applied. Resolving and applying live together so they cannot drift:
+// a resolve whose result never reaches the query is a filter that silently matches
+// everything, which is the failure this flag exists to prevent.
+func scopedQuery(ctx context.Context, lister libraryLister, cmd *cobra.Command,
+	op, rulePath string, qf queryFlags, refs []string) (query.Query, error) {
+	// A rule document owns the whole where-clause, so --library cannot be layered on
+	// top of one. Refused rather than ignored: this flag validates its input, so
+	// silently dropping it would answer a wider question than the user asked for.
+	if rulePath != "" && len(refs) > 0 {
+		return query.Query{}, waxerr.New(waxerr.CodeInvalid, op,
+			"--library does not combine with --rule; put a library condition in the rule document")
+	}
+	pids, err := resolveLibraryRefs(ctx, lister, op, refs)
+	if err != nil {
+		return query.Query{}, err
+	}
+	qf.library = pids
+	return buildQuery(cmd, rulePath, qf)
+}
+
+// resolveLibraryRefs turns each --library ref into a library pid, accepting a pid or
+// either spelling of a registered root. An unknown ref errors rather than matching
+// nothing, so a mistyped root does not read as an empty catalog.
+func resolveLibraryRefs(ctx context.Context, lister libraryLister, op string, refs []string) ([]model.PID, error) {
+	if len(refs) == 0 {
+		return nil, nil
+	}
+	libs, err := lister.Libraries(ctx)
+	if err != nil {
+		return nil, err
+	}
+	// Deduplicated, first-seen order. A pid and its root path are two spellings of one
+	// library, and the arity is load-bearing: compileValueSubCond emits the indexed
+	// `is` form only at one value, and repeats the whole subquery above that.
+	out := make([]model.PID, 0, len(refs))
+	seen := make(map[model.PID]bool, len(refs))
+	for _, ref := range refs {
+		pid, err := matchLibraryRef(libs, op, ref)
+		if err != nil {
+			return nil, err
+		}
+		if seen[pid] {
+			continue
+		}
+		seen[pid] = true
+		out = append(out, pid)
+	}
+	return out, nil
+}
+
+// rootSpellings returns the distinct ways a library's root can be written. Every
+// writer of the library row builds root and display_root from one string, so the two
+// are the same bytes today and this yields one entry; model.Library types them apart
+// (raw OS bytes against a UTF-8 rendering) so they are allowed to diverge, which is
+// why both are still matched rather than one being picked.
+func rootSpellings(l *model.Library) []string {
+	if raw := string(l.Root); raw != l.DisplayRoot {
+		return []string{l.DisplayRoot, raw}
+	}
+	return []string{l.DisplayRoot}
+}
+
+func matchLibraryRef(libs []*model.Library, op, ref string) (model.PID, error) {
+	// Roots are stored absolute, so a relative ref is resolved against the working
+	// directory before comparing, the same way `library add` resolves the path it
+	// registers. A pid is matched before this ever matters, and Abs on a pid produces
+	// a path no root can equal.
+	abs := filepath.Clean(ref)
+	if a, err := filepath.Abs(ref); err == nil {
+		abs = a
+	}
+	for _, l := range libs {
+		if ref == string(l.PID) {
+			return l.PID, nil
+		}
+		for _, root := range rootSpellings(l) {
+			if ref == root || abs == filepath.Clean(root) {
+				return l.PID, nil
+			}
+		}
+	}
+	// A path under a registered root is the mistake a user will actually make. It is
+	// not resolved to the parent, which would silently widen a subdirectory filter to
+	// the whole library. Containment goes through pathx so this agrees with every
+	// other containment check in the repo, including on a sibling like /music/..old.
+	for _, l := range libs {
+		for _, root := range rootSpellings(l) {
+			if root != "" && pathx.UnderRoot(filepath.Clean(root), abs) {
+				return "", waxerr.New(waxerr.CodeNotFound, op,
+					"no such library: "+ref+"; it is inside root "+root+", so filter by path instead")
+			}
+		}
+	}
+	return "", waxerr.New(waxerr.CodeNotFound, op,
+		"no such library: "+ref+"; registered: "+libraryRootList(libs))
+}
+
+func libraryRootList(libs []*model.Library) string {
+	if len(libs) == 0 {
+		return "(none)"
+	}
+	names := make([]string, len(libs))
+	for i, l := range libs {
+		names[i] = l.DisplayRoot
+	}
+	return strings.Join(names, ", ")
+}
+
 type queryFlags struct {
 	title, artist, album, genre, kind, source string
 	year, limit                               int
@@ -168,6 +286,11 @@ type queryFlags struct {
 	// not expose the flags (facet ignores modes anyway).
 	limitMode string
 	seed      int64
+	// library holds already-resolved library pids, since buildQuery is deliberately
+	// catalog-free and resolving a root path needs a catalog. Registering the flag on
+	// a new command means extending that command's own selection check too; edit.go
+	// enumerates these fields by hand.
+	library []model.PID
 }
 
 // tagField builds the tag.<KEY> query field for a user-supplied key, giving a clear
@@ -222,6 +345,11 @@ func buildQuery(cmd *cobra.Command, rulePath string, qf queryFlags) (query.Query
 	}
 	if qf.source != "" {
 		b.Where("source", query.OpIs, qf.source)
+	}
+	// `in` at arity 1 compiles to what `is` compiles to, so a single --library still
+	// seeks file_library.
+	if len(qf.library) > 0 {
+		b.WhereValues("library", query.OpIn, query.Values(qf.library)...)
 	}
 	if cmd.Flags().Changed("year") {
 		b.Where("year", query.OpIs, qf.year)

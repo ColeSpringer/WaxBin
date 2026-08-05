@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"text/tabwriter"
 
@@ -23,20 +24,30 @@ func (df *diagnosticFlags) register(cmd *cobra.Command) {
 	f.StringVar(&df.origin, "origin", "", "filter by writer: scan|organize|replaygain|edit")
 	f.StringVar(&df.code, "code", "", "filter by diagnostic code (e.g. tag_write_unsynced)")
 	f.StringVar(&df.severity, "severity", "", "filter by severity: info|warn|error")
-	f.StringVar(&df.library, "library", "", "filter to files under this library pid")
+	f.StringVar(&df.library, "library", "", "filter to files under this library, by pid or registered root path")
 	f.StringVar(&df.file, "file", "", "filter to one file pid")
 	f.StringVar(&df.item, "item", "", "filter to every file backing this item pid (all parts of a book)")
 }
 
-func (df *diagnosticFlags) filter() model.DiagnosticFilter {
-	return model.DiagnosticFilter{
-		Origin:     model.DiagnosticOrigin(df.origin),
-		Code:       model.DiagnosticCode(df.code),
-		Severity:   model.AuditSeverity(df.severity),
-		LibraryPID: model.PID(df.library),
-		FilePID:    model.PID(df.file),
-		ItemPID:    model.PID(df.item),
+// resolvedFilter builds the filter, turning --library's pid-or-root-path into a pid so
+// this command spells the flag the way query, facet, and search do.
+func (df *diagnosticFlags) resolvedFilter(ctx context.Context, lister libraryLister) (model.DiagnosticFilter, error) {
+	f := model.DiagnosticFilter{
+		Origin:   model.DiagnosticOrigin(df.origin),
+		Code:     model.DiagnosticCode(df.code),
+		Severity: model.AuditSeverity(df.severity),
+		FilePID:  model.PID(df.file),
+		ItemPID:  model.PID(df.item),
 	}
+	if df.library == "" {
+		return f, nil
+	}
+	pids, err := resolveLibraryRefs(ctx, lister, "diagnostics", []string{df.library})
+	if err != nil {
+		return model.DiagnosticFilter{}, err
+	}
+	f.LibraryPID = pids[0]
+	return f, nil
 }
 
 func newDiagnosticsCmd(g *globals) *cobra.Command {
@@ -68,7 +79,10 @@ func newDiagnosticsListCmd(g *globals) *cobra.Command {
 				return err
 			}
 			defer lib.Close()
-			filter := df.filter()
+			filter, err := df.resolvedFilter(ctx(cmd), lib)
+			if err != nil {
+				return err
+			}
 			filter.Limit, filter.Offset = limit, offset
 			ds, err := lib.FileDiagnostics(ctx(cmd), filter)
 			if err != nil {
@@ -111,7 +125,11 @@ func newDiagnosticsSummaryCmd(g *globals) *cobra.Command {
 				return err
 			}
 			defer lib.Close()
-			counts, err := lib.DiagnosticSummary(ctx(cmd), df.filter())
+			filter, err := df.resolvedFilter(ctx(cmd), lib)
+			if err != nil {
+				return err
+			}
+			counts, err := lib.DiagnosticSummary(ctx(cmd), filter)
 			if err != nil {
 				return err
 			}

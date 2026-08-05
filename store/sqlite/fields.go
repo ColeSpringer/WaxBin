@@ -121,18 +121,23 @@ const (
 // index. release_group_pid scans despite the joined alb alias looking indexed: the
 // plan is SCAN pi with a per-row alb probe, and a plan line naming album_rg is that
 // probe, not a narrowing drive. Only
-// is/isNot/in/isPresent/isMissing are accepted on a lowered field, sorting by one is
-// rejected, and isNot against a pid no entity holds matches nothing, because the
+// is/isNot/in/notIn/isPresent/isMissing are accepted on a lowered field, sorting by one
+// is rejected, and isNot against a pid no entity holds matches nothing, because the
 // lowered value is NULL. See Column.ValueSub.
 //
-// `in` seeks the same index `is` does at every arity, including one, and an empty
-// list matches nothing. notIn is rejected; see Column.ValueSub for why.
+// The indexed seeks above are `is` and `in` only. `in` seeks the same index `is` does
+// at every arity, including one, and an empty list matches nothing. notIn is an
+// anti-join and scans at any arity, on every one of the six, so a deny-list costs
+// O(catalog) even on podcast_pid and library.
+//
+// in and notIn are not complements over an item with no handle at all. notIn keeps
+// such a row, so `library notIn [every root]` returns every fileless item (an
+// undownloaded episode) while `library in [every root]` returns none. That is the
+// deny-list contract a stale entry needs; see query.Column.ValueSub. A caller
+// scoping visibility by library has to decide what a fileless item means to it.
 //
 // genre_pid stays a set field over item_genre (tag-field semantics: isNot is a
-// deny-list, ordered operators are rejected) and is deliberately not converted: its
-// set-membership vocabulary differs from the other six the way isNot already does:
-// both in and notIn work here, notIn as the deny-list complement, while the lowered
-// six reject notIn outright.
+// deny-list, ordered operators are rejected) and is deliberately not converted.
 // Its EXISTS correlates on pi.id whatever side the value sits, so lowering would save
 // the per-row genre join but not the scan, and it would need a second lowering
 // mechanism on SetColumn for no plan change.

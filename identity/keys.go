@@ -114,6 +114,8 @@ func SplitCredits(s string) []string {
 
 // ArtistKey is the entity-identity key for an artist: MBID when known, else the
 // normalized name. Matches the track/release-group MBID-first convention.
+// It has no callers, deliberately: see resolveArtist in store/sqlite/entities.go for
+// why an artist is the one entity not keyed MBID-first.
 func ArtistKey(mbid, name string) string {
 	if m := strings.TrimSpace(mbid); m != "" {
 		return "mbid:" + strings.ToLower(m)
