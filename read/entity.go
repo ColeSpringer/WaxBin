@@ -50,6 +50,16 @@ type EntityInfo struct {
 	Type    string // release-group primary type (album|ep|single|...); empty otherwise
 	Year    int    // album release year; 0 otherwise
 
+	// The album's other release identifiers, filled by scan from tags and writable
+	// through entity edit. Album only, empty for every other kind, as Type and Year are.
+	//
+	// The two writers normalize differently by policy: an edit runs Barcode through
+	// model.NormalizeBarcode, a scan stores the tag verbatim (the track.mbid rule). So
+	// normalize before comparing.
+	Barcode       string
+	Label         string
+	CatalogNumber string
+
 	// Parent links, filled where the schema has one: a release group's primary
 	// artist and an album's release group.
 	ArtistPID       model.PID

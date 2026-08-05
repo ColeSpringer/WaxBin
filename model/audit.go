@@ -23,6 +23,10 @@ const (
 	// writes). Corrupt-audio diagnostics belong to CheckCorruptAudio instead, so that
 	// one concept keeps one --check name.
 	CheckFileDiagnostic AuditCheck = "file_diagnostic"
+	// CheckMissingMBID reports items nothing can resolve to a MusicBrainz recording,
+	// release, or release group, which is what a Cover Art Archive lookup or a rich
+	// presence card needs.
+	CheckMissingMBID AuditCheck = "missing_mbid"
 )
 
 // AuditChecks returns every known audit check, for validation and help text.
@@ -31,7 +35,7 @@ func AuditChecks() []AuditCheck {
 		CheckDuplicateArtist, CheckDuplicateGenre, CheckDuplicateAlbum, CheckSplitAlbum,
 		CheckInconsistentMeta, CheckMissingArt, CheckMissingReplayGain, CheckBadFilename,
 		CheckOrphanSidecar, CheckPathConflict, CheckInvalidFeed, CheckDerivedData,
-		CheckIntegrity, CheckCorruptAudio, CheckFileDiagnostic,
+		CheckIntegrity, CheckCorruptAudio, CheckFileDiagnostic, CheckMissingMBID,
 	}
 }
 

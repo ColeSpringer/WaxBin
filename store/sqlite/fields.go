@@ -204,6 +204,25 @@ var itemFields = query.FieldMap{
 		ValueExpr: "gq.pid",
 	}},
 
+	// External identifiers. Each COALESCEs to '' so isPresent and isMissing read as
+	// "the catalog knows this id" rather than tripping over the nullable columns behind
+	// them, and each shares its expression with itemViewCols so a filter and a displayed
+	// value cannot disagree. Only ids reachable from a bound alias are here: an artist
+	// MBID would need a correlated subquery in the WHERE, which
+	// TestLoweredIdentityFieldPlans rejects anywhere in a compiled item plan. Filter by
+	// release_group_pid, which lowers to an indexed id, and read the artist MBIDs off
+	// the projected item view.
+	//
+	// release_group_mbid completes the chain audit's missing_mbid walks. Without it that
+	// check is inexpressible as a query on an enriched-but-untagged library, where
+	// enrichment resolved release groups and no release id exists to match. The three
+	// together still need `kind in (track, book)` to match the audit: an episode is
+	// missing all of them and always will be, so the audit excludes it by kind.
+	"mbid":               {Expr: "COALESCE(NULLIF(t.mbid,''), bk.mbid, '')", Kind: query.KindText},
+	"isrc":               {Expr: "COALESCE(t.isrc,'')", Kind: query.KindText},
+	"album_mbid":         {Expr: "COALESCE(NULLIF(alb.mbid,''), bk.mbid, '')", Kind: query.KindText},
+	"release_group_mbid": {Expr: "COALESCE(rg.mbid,'')", Kind: query.KindText},
+
 	// Presence probes (0/1, never NULL; use `is 0`/`is 1`, not presence ops).
 	"has_art": {Expr: "CASE WHEN EXISTS(SELECT 1 FROM art_map amq WHERE amq.entity_type = " + itemArtSlotExpr +
 		" AND amq.entity_id = pi.id AND amq.role = 'front') THEN 1 ELSE 0 END", Kind: query.KindInt},

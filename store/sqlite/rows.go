@@ -31,8 +31,11 @@ type rowScanner interface {
 // would plan as CORRELATED, which TestLoweredIdentityFieldPlans rejects. It does not
 // make that filter indexed: it still plans as SCAN pi with a per-row alb probe.
 //
-// facet.go's album and releaseGroup specs read alb instead of joining their own, so
-// this join cannot be made conditional. itemCountSelect and portable.go's
+// The release group is joined on the same trade, which makes rg.mbid free and
+// collapses the release-group pid column from a correlated subquery to rg.pid.
+//
+// facet.go's album and releaseGroup specs read alb and rg instead of joining their
+// own, so this join cannot be made conditional. itemCountSelect and portable.go's
 // identitySelect pay one PK seek for a column they never read.
 const itemJoins = ` FROM playable_item pi
 	LEFT JOIN track t ON t.item_id = pi.id
@@ -41,6 +44,7 @@ const itemJoins = ` FROM playable_item pi
 	LEFT JOIN episode ep ON ep.item_id = pi.id
 	LEFT JOIN podcast pod ON pod.id = ep.podcast_id
 	LEFT JOIN album alb ON alb.id = t.album_id
+	LEFT JOIN release_group rg ON rg.id = alb.release_group_id
 	LEFT JOIN acquisition acq ON acq.item_id = pi.id
 	LEFT JOIN item_file pf ON pf.item_id = pi.id AND pf.role = 'primary'
 	LEFT JOIN file f ON f.id = pf.file_id`
@@ -91,15 +95,26 @@ const itemEffectiveDurationExpr = `CASE WHEN pf.start_frames IS NOT NULL ` +
 // expose a virtual track's offset window, and f.sample_rate rides along beside the
 // container and codec so a consumer can convert that window to samples.
 //
-// The final five columns project the artist/album-artist/album/release-group/podcast
-// entity pids, sharing their expressions with the matching query fields so a projected
-// pid and a pid filter cannot disagree. A book resolves its author for the artist pair
-// and NULL for the album pair; an episode is NULL for all but the podcast, which is
-// NULL for everything else. The release group is also NULL for a track whose album has
-// none.
+// The five entity-pid columns project the artist/album-artist/album/release-group/
+// podcast entity pids, sharing their expressions with the matching query fields so a
+// projected pid and a pid filter cannot disagree. A book resolves its author for the
+// artist pair and NULL for the album pair; an episode is NULL for all but the podcast,
+// which is NULL for everything else. The release group is also NULL for a track whose
+// album has none.
+//
+// The six external-identifier columns closing the list are the MusicBrainz ids and the
+// ISRC (see model.ItemView). The first four read off joined aliases; the artist pair is
+// sought per row, reusing itemArtistIDExpr so a projected MBID and a projected pid
+// cannot point at different artist rows. These COALESCE to ” rather than scanning
+// through sql.NullString, which only the pid columns need for model.PID's empty value.
 //
 // These ride on every item read. BenchmarkQueryPageAtScale puts a 50-item page around
-// 1 ms, unchanged by the release group (p=0.69 over 5 runs).
+// 0.7 ms, unchanged by the release group (p=0.69 over 5 runs). The identifiers cost
+// 689 -> 792 us, 15% over 8 runs: the artist pair adds two per-row probes and the rg
+// join removes one, so a row does four where it did three. Serving the artist pair
+// from two more joins instead does cut it to two probes, but it costs more than it
+// saves: the extra joins lose album_pid its track_album_id seek, which
+// TestLoweredIdentityFieldPlans catches.
 const itemViewCols = `pi.pid, pi.kind, pi.state, pi.title,
 	COALESCE(NULLIF(t.artist,''), bk.author, pod.title, ''),
 	COALESCE(NULLIF(t.album_artist,''), bk.author, pod.title, ''),
@@ -116,9 +131,13 @@ const itemViewCols = `pi.pid, pi.kind, pi.state, pi.title,
 	f.container, f.codec, f.sample_rate, pf.start_frames, pf.end_frames,
 	(SELECT vap.pid FROM artist vap WHERE vap.id = ` + itemArtistIDExpr + `),
 	(SELECT vaap.pid FROM artist vaap WHERE vaap.id = ` + itemAlbumArtistIDExpr + `),
-	alb.pid,
-	(SELECT vrg.pid FROM release_group vrg WHERE vrg.id = alb.release_group_id),
-	pod.pid`
+	alb.pid, rg.pid, pod.pid,
+	COALESCE(NULLIF(t.mbid,''), bk.mbid, ''),
+	COALESCE(t.isrc,''),
+	COALESCE(NULLIF(alb.mbid,''), bk.mbid, ''),
+	COALESCE(rg.mbid,''),
+	COALESCE((SELECT vapm.mbid FROM artist vapm WHERE vapm.id = ` + itemArtistIDExpr + `),''),
+	COALESCE((SELECT vaapm.mbid FROM artist vaapm WHERE vaapm.id = ` + itemAlbumArtistIDExpr + `),'')`
 
 const itemSelect = `SELECT ` + itemViewCols + itemJoins
 
@@ -159,6 +178,7 @@ func itemViewDests(v *model.ItemView, n *itemViewNulls) []any {
 		&n.fpid, &n.fpath, &n.fdisp, &n.dur, &n.container, &n.codec, &n.sampleRate,
 		&n.startFrames, &n.endFrames,
 		&n.artistPID, &n.albumArtistPID, &n.albumPID, &n.releaseGroupPID, &n.podcastPID,
+		&v.MBID, &v.ISRC, &v.AlbumMBID, &v.ReleaseGroupMBID, &v.ArtistMBID, &v.AlbumArtistMBID,
 	}
 }
 

@@ -27,6 +27,7 @@ type Store interface {
 	SplitAlbums(ctx context.Context) ([]model.SplitAlbum, error)
 	InconsistentAlbums(ctx context.Context) ([]model.AlbumIssue, error)
 	ItemsMissingArt(ctx context.Context, limit int) ([]model.ItemRef, int, error)
+	ItemsMissingMBID(ctx context.Context, limit int) ([]model.ItemRef, int, error)
 	CountItemsMissingReplayGain(ctx context.Context) (int, error)
 	AuditFiles(ctx context.Context) ([]model.AuditFileInfo, error)
 	Podcasts(ctx context.Context) ([]*model.Podcast, error)
@@ -144,6 +145,11 @@ func (a *Auditor) Run(ctx context.Context, cfg Config) (*Report, error) {
 	}
 	if a.runs(cfg, model.CheckMissingArt) {
 		if err := a.checkMissingArt(ctx, sample, add); err != nil {
+			return nil, err
+		}
+	}
+	if a.runs(cfg, model.CheckMissingMBID) {
+		if err := a.checkMissingMBID(ctx, sample, add); err != nil {
 			return nil, err
 		}
 	}
@@ -304,30 +310,53 @@ func (a *Auditor) checkInconsistentAlbums(ctx context.Context, add func(model.Au
 	return nil
 }
 
-func (a *Auditor) checkMissingArt(ctx context.Context, sample int, add func(model.AuditFinding)) error {
-	items, total, err := a.store.ItemsMissingArt(ctx, sample)
-	if err != nil {
+// itemLister is a Store method that returns a sample of items plus the full count.
+type itemLister func(ctx context.Context, limit int) ([]model.ItemRef, int, error)
+
+// reportSampledItems is the shape the list-style checks share: one info finding per
+// sampled item carrying its pid, then a roll-up naming the total when the sample was
+// capped. Nothing is reported when the count is zero.
+func reportSampledItems(ctx context.Context, list itemLister, check model.AuditCheck,
+	sample int, itemMsg func(model.ItemRef) string, rollup func(total, shown int) string,
+	add func(model.AuditFinding)) error {
+	items, total, err := list(ctx, sample)
+	if err != nil || total == 0 {
 		return err
-	}
-	if total == 0 {
-		return nil
 	}
 	for _, it := range items {
 		add(model.AuditFinding{
-			Check:    model.CheckMissingArt,
-			Severity: model.SeverityInfo,
-			Message:  "no cover art: " + it.Title,
-			Entities: []model.PID{it.PID},
+			Check: check, Severity: model.SeverityInfo,
+			Message: itemMsg(it), Entities: []model.PID{it.PID},
 		})
 	}
 	if total > len(items) {
 		add(model.AuditFinding{
-			Check:    model.CheckMissingArt,
-			Severity: model.SeverityInfo,
-			Message:  strconv.Itoa(total) + " items lack cover art (" + strconv.Itoa(len(items)) + " shown)",
+			Check: check, Severity: model.SeverityInfo,
+			Message: rollup(total, len(items)),
 		})
 	}
 	return nil
+}
+
+func (a *Auditor) checkMissingArt(ctx context.Context, sample int, add func(model.AuditFinding)) error {
+	return reportSampledItems(ctx, a.store.ItemsMissingArt, model.CheckMissingArt, sample,
+		func(it model.ItemRef) string { return "no cover art: " + it.Title },
+		func(total, shown int) string {
+			return strconv.Itoa(total) + " items lack cover art (" + strconv.Itoa(shown) + " shown)"
+		}, add)
+}
+
+// checkMissingMBID reports items nothing can resolve to a MusicBrainz recording,
+// release, or release group. Expect it to be the loudest check in a default run. It
+// follows missing_art's per-item shape rather than missing_replaygain's bare count
+// because the pid is what a caller acts on. Info severity keeps it out of the CLI's
+// error exit.
+func (a *Auditor) checkMissingMBID(ctx context.Context, sample int, add func(model.AuditFinding)) error {
+	return reportSampledItems(ctx, a.store.ItemsMissingMBID, model.CheckMissingMBID, sample,
+		func(it model.ItemRef) string { return "no MusicBrainz identity: " + it.Title },
+		func(total, shown int) string {
+			return strconv.Itoa(total) + " items have no MusicBrainz identity (" + strconv.Itoa(shown) + " shown)"
+		}, add)
 }
 
 func (a *Auditor) checkMissingReplayGain(ctx context.Context, add func(model.AuditFinding)) error {

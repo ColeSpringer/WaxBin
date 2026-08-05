@@ -468,7 +468,7 @@ func (l *Library) proxyHandlers() map[string]proxy.Handler {
 			if err != nil {
 				return nil, err
 			}
-			pid, err := l.StartEnrich(ctx, EnrichOptions{
+			pid, err := l.StartEnrich(ctx, EnrichOptions{WriteTags: p.WriteTags,
 				Force: p.Force, Limit: p.Limit,
 				ItemPID: model.PID(p.ItemPID), EntityType: read.EntityKind(p.EntityType), EntityPID: model.PID(p.EntityPID),
 			})

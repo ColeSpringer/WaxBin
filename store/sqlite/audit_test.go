@@ -297,3 +297,50 @@ func TestAuditFilesYieldsOneRowPerSharedRip(t *testing.T) {
 		t.Error("a whole-file track lost its owning item to the gate")
 	}
 }
+
+// TestItemsMissingMBID pins the chain the predicate walks. A track need not carry its
+// own recording id to count as covered: its album's release id or its release group's
+// id also resolves it, the way the missing-art predicate walks its own fallback chain.
+func TestItemsMissingMBID(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/1.flac", essence: "e1", content: "c1",
+		title: "Own Recording ID", artist: "A", albumArt: "A", album: "Al1", mbRecording: "rec-1"})
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/2.flac", essence: "e2", content: "c2",
+		title: "Album Release ID", artist: "B", albumArt: "B", album: "Al2", mbRelease: "rel-2"})
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/3.flac", essence: "e3", content: "c3",
+		title: "Group ID Only", artist: "C", albumArt: "C", album: "Al3", mbReleaseGroup: "rg-3"})
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/4.flac", essence: "e4", content: "c4",
+		title: "Bare Track", artist: "D", albumArt: "D", album: "Al4"})
+	putBook(t, st, lib.ID, bookSpec{path: "/lib/b1.m4b", essence: "be1", content: "bc1",
+		title: "Tagged Book", author: "Auth One", mbid: "rel-book"})
+	putBook(t, st, lib.ID, bookSpec{path: "/lib/b2.m4b", essence: "be2", content: "bc2",
+		title: "Bare Book", author: "Auth Two"})
+	// An episode is never reported: a podcast's identity is a feed GUID.
+	putFeed(t, st, "http://cast.example/f", "Ep1", "Ep2")
+
+	items, total, err := st.ItemsMissingMBID(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 2 || len(items) != 2 {
+		t.Fatalf("missing-mbid total=%d sample=%d, want 2/2", total, len(items))
+	}
+	got := map[string]bool{}
+	for _, it := range items {
+		got[it.Title] = true
+	}
+	if !got["Bare Track"] || !got["Bare Book"] {
+		t.Errorf("missing-mbid items = %v, want the bare track and the bare book", got)
+	}
+
+	// The sample is capped while the total still counts everything.
+	sample, total, err := st.ItemsMissingMBID(ctx, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sample) != 1 || total != 2 {
+		t.Errorf("limited call = %d sampled of %d, want 1 of 2", len(sample), total)
+	}
+}

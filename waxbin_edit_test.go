@@ -603,3 +603,56 @@ func TestEditReadOnlyRefused(t *testing.T) {
 		t.Fatalf("read-only edit: want CodeUnsupported, got %v", err)
 	}
 }
+
+// TestEditBookIdentifierReanchors covers the trap that opened when asin and isbn
+// started reaching disk: they feed identity.BookKey, so an edit that writes them
+// without re-anchoring the stored key leaves the next scan resolving a different item,
+// orphaning this one's pid and everything hanging off it.
+func TestEditBookIdentifierReanchors(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	src := filepath.Join(root, "hobbit.m4b")
+	writeFile(t, src, testaudio.BuildMP3("The Hobbit", "J.R.R. Tolkien", "The Hobbit", 1))
+
+	lib := openManaged(t, ctx, db, root)
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	pid := itemPIDByTitle(t, ctx, lib, "The Hobbit")
+
+	// Hyphenated on the way in: the catalog normalizes, and the tag must carry the same
+	// value or the next rescan reads the raw form back over it.
+	if err := lib.EditFields(ctx, pid, map[string]string{"isbn": "978-0-261-10221-7"},
+		waxbin.EditOptions{Lock: true, WriteBack: true}); err != nil {
+		t.Fatalf("edit isbn: %v", err)
+	}
+	fm, err := meta.NewReader().Read(ctx, src)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if fm.Tags.ISBN != "9780261102217" {
+		t.Errorf("on-disk ISBN = %q, want the normalized form the catalog stored", fm.Tags.ISBN)
+	}
+
+	// Forced, which is the scan that recomputes identity from tags. A plain rescan
+	// fast-paths this file (the write-back left its size and mtime recorded), so it
+	// would never notice the new key and would prove nothing.
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{Force: true}); err != nil {
+		t.Fatalf("forced rescan: %v", err)
+	}
+	d, err := lib.Book(ctx, pid)
+	if err != nil {
+		t.Fatalf("book after a forced rescan (identity was not re-anchored, so the pid is orphaned): %v", err)
+	}
+	if d.ISBN != "9780261102217" {
+		t.Errorf("isbn after rescan = %q, want it preserved", d.ISBN)
+	}
+	items, err := lib.Query(ctx, query.New(query.EntityItems).Where("kind", query.OpIs, "book").Build(), "")
+	if err != nil {
+		t.Fatalf("query books: %v", err)
+	}
+	if len(items) != 1 {
+		t.Errorf("book count after rescan = %d, want 1 (a re-key would leave two)", len(items))
+	}
+}

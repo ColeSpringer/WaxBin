@@ -151,6 +151,10 @@ never alters the audio):
 - `waxbin analyze --write-replaygain` (or `write_replaygain_tags` in config) writes
   computed track and album ReplayGain into files after album aggregation
   (`REPLAYGAIN_*`, or Opus `R128_*`).
+- `waxbin enrich --write-tags` (or `write_enrichment_tags` in config) writes what the
+  pass filled into files: a book's `ASIN`/`ISBN`/`PUBLISHER` and a track's `GENRE`.
+  Without it those values live only in the catalog, which a rescan rebuilds from the
+  file's tags, so the next retag clears them.
 - An organize profile with `tag_write` corrects `albumArtist` (literal
   `Various Artists` for compilations) and disc/track numbering on disk as it moves
   files, skipping locked fields and re-tagging before the move so a failure aborts

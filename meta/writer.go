@@ -118,11 +118,20 @@ func RoleTagKey(role model.ContributorRole) (string, bool) {
 // sort is ALBUMARTISTSORT (the first key the scanner's author_sort derive reads).
 // narrator maps to two keys, NARRATOR and the COMPOSER fallback the scanner also reads
 // (the Audiobookshelf convention), so both stay in step. A book field absent here
-// (subtitle, asin, isbn, publisher, edition, description, mbid) is one the scanner
-// does not reconstruct from a tag: it stays DB-only, since writing it to disk could
-// not survive a rescan. series is deliberately not in this map. It packs a name and a
-// sequence into one GROUPING value, so the caller builds that through BookSeriesTagKey
-// and PackSeriesGrouping.
+// (subtitle, edition, description) is one the reader does not fill, so writing it to
+// disk could not survive a rescan. series is deliberately not in this map. It packs a
+// name and a sequence into one GROUPING value, so the caller builds that through
+// BookSeriesTagKey and PackSeriesGrouping.
+//
+// asin/isbn/publisher round-trip now that applyBookFields reads them back. publisher
+// writes the LABEL key because that is the frame it is read from (TPUB, or PUBLISHER on
+// Vorbis and Matroska), which a book does not otherwise use.
+//
+// asin and isbn are identity inputs (identity.BookKey), unlike every other entry here
+// except title and author. A caller that writes them must re-anchor the book's stored
+// identity key from the file's post-write tags, or the next scan resolves a different
+// item; see reanchorBookIdentity and bookIdentityEdited. mbid is not an identity input,
+// so it needs no re-anchor.
 //
 // author_sort round-trips with a caveat: the scanner folds the tag through
 // model.SortKey on an unlocked rescan, so what the written literal preserves is
@@ -135,6 +144,10 @@ var bookFieldTagKeys = map[string][]string{
 	"narrator":    {string(tag.Narrator), string(tag.Composer)},
 	"genre":       {string(tag.Genre)},
 	"year":        {"DATE"}, // same key a track's year uses; no tag constant, matching fieldTagKeys
+	"asin":        {"ASIN"}, // no tag constant: read back by name in applyBookFields
+	"isbn":        {"ISBN"},
+	"publisher":   {string(tag.Label)},
+	"mbid":        {"MUSICBRAINZ_ALBUMID"}, // a book's release id, read back by bookInput
 }
 
 // BookFieldTagKeys returns the on-disk tag keys the audiobook scanner reads back for a

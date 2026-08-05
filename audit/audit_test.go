@@ -14,20 +14,22 @@ import (
 // fakeStore is a hand-rolled audit.Store for exercising the auditor logic without
 // a real database.
 type fakeStore struct {
-	dupArtists []model.DuplicateSet
-	dupGenres  []model.DuplicateSet
-	dupAlbums  []model.DuplicateSet
-	splits     []model.SplitAlbum
-	inconsist  []model.AlbumIssue
-	missingArt []model.ItemRef
-	missingTot int
-	missingRG  int
-	files      []model.AuditFileInfo
-	pods       []*model.Podcast
-	drift      model.DerivedDrift
-	diags      []model.FileDiagnostic
-	diagStale  int
-	diagTotal  int
+	dupArtists   []model.DuplicateSet
+	dupGenres    []model.DuplicateSet
+	dupAlbums    []model.DuplicateSet
+	splits       []model.SplitAlbum
+	inconsist    []model.AlbumIssue
+	missingArt   []model.ItemRef
+	missingTot   int
+	missingMBID  []model.ItemRef
+	missingMBTot int
+	missingRG    int
+	files        []model.AuditFileInfo
+	pods         []*model.Podcast
+	drift        model.DerivedDrift
+	diags        []model.FileDiagnostic
+	diagStale    int
+	diagTotal    int
 }
 
 func (f *fakeStore) DuplicateArtists(context.Context) ([]model.DuplicateSet, error) {
@@ -48,6 +50,12 @@ func (f *fakeStore) ItemsMissingArt(_ context.Context, limit int) ([]model.ItemR
 		return f.missingArt[:limit], f.missingTot, nil
 	}
 	return f.missingArt, f.missingTot, nil
+}
+func (f *fakeStore) ItemsMissingMBID(_ context.Context, limit int) ([]model.ItemRef, int, error) {
+	if len(f.missingMBID) > limit {
+		return f.missingMBID[:limit], f.missingMBTot, nil
+	}
+	return f.missingMBID, f.missingMBTot, nil
 }
 func (f *fakeStore) CountItemsMissingReplayGain(context.Context) (int, error) {
 	return f.missingRG, nil
@@ -199,5 +207,31 @@ func TestAuditIntegrity(t *testing.T) {
 	// good.flac probes clean; the other two (a missing file and bitrot) fail the probe.
 	if got := findingsFor(rep, model.CheckCorruptAudio); len(got) != 2 {
 		t.Errorf("corrupt findings = %+v, want 2", got)
+	}
+}
+
+func TestAuditMissingMBIDRollsUp(t *testing.T) {
+	st := &fakeStore{
+		missingMBID:  []model.ItemRef{{PID: "i1", Title: "One"}, {PID: "i2", Title: "Two"}},
+		missingMBTot: 40,
+	}
+	rep, err := New(st, nil, nil, nil).Run(context.Background(), Config{
+		Only: []model.AuditCheck{model.CheckMissingMBID}, Sample: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fs := findingsFor(rep, model.CheckMissingMBID)
+	if len(fs) != 3 {
+		t.Fatalf("want 2 per-item findings plus a roll-up, got %d: %+v", len(fs), fs)
+	}
+	if fs[0].Message != "no MusicBrainz identity: One" || len(fs[0].Entities) != 1 {
+		t.Errorf("per-item finding = %+v", fs[0])
+	}
+	if !strings.Contains(fs[2].Message, "40 items") || !strings.Contains(fs[2].Message, "2 shown") {
+		t.Errorf("roll-up = %q, want the total and the sample size", fs[2].Message)
+	}
+	// Info severity keeps an untagged library out of the CLI's error exit.
+	if rep.Errors() != 0 {
+		t.Errorf("missing_mbid produced %d error findings, want 0", rep.Errors())
 	}
 }

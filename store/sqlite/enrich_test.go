@@ -55,7 +55,7 @@ func trackWithArtist(libID int64, path, essence, artist, mbArtistID string) mode
 			Kind: model.KindTrack, State: model.StatePresent, Title: "T-" + essence,
 			SortKey: model.SortKey("T-" + essence), IdentityKey: "essence:" + essence,
 		},
-		Track: model.Track{Artist: artist, AlbumArtist: artist, MBArtistID: mbArtistID, TrackNo: 1},
+		Track: model.Track{Artist: artist, AlbumArtist: artist, MBArtistIDs: []string{mbArtistID}, TrackNo: 1},
 	}
 }
 

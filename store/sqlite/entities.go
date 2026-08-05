@@ -17,15 +17,15 @@ import (
 // the change_log so delta consumers can update browse/facet caches. It runs
 // inside the PutScannedTrack write transaction.
 func resolveAndLinkEntities(ctx context.Context, tx *sql.Tx, itemID int64, tr model.Track, filePath []byte) error {
-	artistID, err := resolveArtist(ctx, tx, tr.Artist, tr.MBArtistID)
+	artistID, err := resolveArtist(ctx, tx, tr.Artist, model.SoleMBID(tr.MBArtistIDs))
 	if err != nil {
 		return err
 	}
 	// The album-artist anchors the release group; fall back to the track artist
 	// when a track carries no explicit album-artist (the common single-artist case).
-	albumArtistName, albumArtistMBID := tr.AlbumArtist, tr.MBAlbumArtistID
+	albumArtistName, albumArtistMBID := tr.AlbumArtist, model.SoleMBID(tr.MBAlbumArtistIDs)
 	if strings.TrimSpace(albumArtistName) == "" {
-		albumArtistName, albumArtistMBID = tr.Artist, tr.MBArtistID
+		albumArtistName, albumArtistMBID = tr.Artist, model.SoleMBID(tr.MBArtistIDs)
 	}
 	albumArtistID, err := resolveArtist(ctx, tx, albumArtistName, albumArtistMBID)
 	if err != nil {
@@ -84,6 +84,16 @@ func resolveAlbumChain(ctx context.Context, tx *sql.Tx, tr model.Track, albumArt
 // its id (0 when name is blank). Artists dedup by name (MBID-first unification of
 // same-named artists is enrichment's job); a known MBID is recorded on the new
 // row so enrichment and Subsonic artist info have it. A new artist is logged.
+//
+// An existing row with no id of its own takes one from a tag that now supplies it,
+// so a Picard pass over a library scanned before it tagged lands the ids on a
+// rescan. book.go and credits.go resolve contributors with mbid="", so those calls
+// short-circuit and never write an id. Callers pass model.SoleMBID, so a joint
+// credit's several ids resolve to none rather than to the first one.
+//
+// Nothing enforces uniqueness on artist.mbid, so this can leave two rows sharing
+// one, exactly as ApplyArtistEnrichment can. That is what audit's duplicate_artist
+// reports and what merge fixes.
 func resolveArtist(ctx context.Context, tx *sql.Tx, name, mbid string) (int64, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
@@ -93,18 +103,35 @@ func resolveArtist(ctx context.Context, tx *sql.Tx, name, mbid string) (int64, e
 	if mk == "" {
 		return 0, nil
 	}
+	mbid = strings.TrimSpace(mbid)
 	var id int64
-	err := tx.QueryRowContext(ctx, "SELECT id FROM artist WHERE match_key = ?", mk).Scan(&id)
+	var pid, cur string
+	err := tx.QueryRowContext(ctx,
+		"SELECT id, pid, COALESCE(mbid,'') FROM artist WHERE match_key = ?", mk).Scan(&id, &pid, &cur)
 	if err == nil {
+		// Free in both steady states, an artist that already has an id and the
+		// untagged majority: the fill is reached at most once per artist per scan,
+		// when a tag supplies an id the row lacks.
+		if cur != "" || mbid == "" {
+			return id, nil
+		}
+		wrote, err := fillEntityFieldTx(ctx, tx, model.MergeArtist, "artist", "mbid", id, mbid)
+		if err != nil {
+			return 0, err
+		}
+		// Only a real write emits a delta, so a no-op rescan stays change_log-silent.
+		if wrote {
+			return id, appendChange(ctx, tx, "artist", model.PID(pid), model.OpUpdate)
+		}
 		return id, nil
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
 		return 0, err
 	}
-	pid := model.NewPID()
+	newPID := model.NewPID()
 	r, err := tx.ExecContext(ctx,
 		"INSERT INTO artist(pid, name, sort_key, match_key, mbid) VALUES (?,?,?,?,?)",
-		string(pid), name, model.SortKey(name), mk, nullStr(strings.TrimSpace(mbid)))
+		string(newPID), name, model.SortKey(name), mk, nullStr(mbid))
 	if err != nil {
 		return 0, err
 	}
@@ -112,7 +139,7 @@ func resolveArtist(ctx context.Context, tx *sql.Tx, name, mbid string) (int64, e
 	if err != nil {
 		return 0, err
 	}
-	return id, appendChange(ctx, tx, "artist", pid, model.OpCreate)
+	return id, appendChange(ctx, tx, "artist", newPID, model.OpCreate)
 }
 
 // resolveReleaseGroup finds-or-creates a release group by its identity key.
@@ -141,23 +168,33 @@ func resolveReleaseGroup(ctx context.Context, tx *sql.Tx, key, title string, pri
 
 // resolveAlbum finds-or-creates a specific release/edition by its identity key,
 // recording its disc total and MusicBrainz release id when known.
+//
+// An existing row takes any of barcode/label/catalog_number it still lacks from tags
+// that now supply them: they are not part of identity.AlbumKey, so a late tag pass
+// hits the row already there. The mbid is not filled here because it IS part of the
+// key, so a newly MBID-tagged release inserts its own row instead; collapsing that
+// pair is merge's job.
 func resolveAlbum(ctx context.Context, tx *sql.Tx, key string, releaseGroupID int64, tr model.Track) (int64, error) {
 	if key == "" {
 		return 0, nil
 	}
 	var id int64
-	err := tx.QueryRowContext(ctx, "SELECT id FROM album WHERE match_key = ?", key).Scan(&id)
+	var pid, curBarcode, curLabel, curCatNo string
+	err := tx.QueryRowContext(ctx, `SELECT id, pid, COALESCE(barcode,''), COALESCE(label,''),
+		COALESCE(catalog_number,'') FROM album WHERE match_key = ?`, key).
+		Scan(&id, &pid, &curBarcode, &curLabel, &curCatNo)
 	if err == nil {
-		return id, nil
+		return id, fillAlbumIdentifiersTx(ctx, tx, id, model.PID(pid), tr,
+			curBarcode, curLabel, curCatNo)
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
 		return 0, err
 	}
-	pid := model.NewPID()
+	newPID := model.NewPID()
 	r, err := tx.ExecContext(ctx,
 		`INSERT INTO album(pid, release_group_id, title, sort_key, year, disc_total, mbid,
 			barcode, label, catalog_number, match_key) VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
-		string(pid), nullInt64(releaseGroupID), tr.Album, model.SortKey(tr.Album), nullInt(tr.Year),
+		string(newPID), nullInt64(releaseGroupID), tr.Album, model.SortKey(tr.Album), nullInt(tr.Year),
 		nullInt(tr.DiscTotal), nullStr(strings.TrimSpace(tr.MBReleaseID)),
 		nullStr(strings.TrimSpace(tr.Barcode)), nullStr(strings.TrimSpace(tr.Label)),
 		nullStr(strings.TrimSpace(tr.CatalogNumber)), key)
@@ -168,7 +205,56 @@ func resolveAlbum(ctx context.Context, tx *sql.Tx, key string, releaseGroupID in
 	if err != nil {
 		return 0, err
 	}
-	return id, appendChange(ctx, tx, "album", pid, model.OpCreate)
+	return id, appendChange(ctx, tx, "album", newPID, model.OpCreate)
+}
+
+// fillEntityFieldTx fills one empty entity column and reports whether it wrote. The
+// lock keeps a curated value, including a deliberately empty one the WHERE clause
+// alone would refill. table and column are caller constants, never caller text.
+func fillEntityFieldTx(ctx context.Context, tx *sql.Tx, entityType model.MergeEntity,
+	table, column string, id int64, value string) (bool, error) {
+	if value == "" {
+		return false, nil
+	}
+	locked, err := entityFieldLockedTx(ctx, tx, string(entityType), id, column)
+	if err != nil || locked {
+		return false, err
+	}
+	r, err := tx.ExecContext(ctx,
+		"UPDATE "+table+" SET "+column+" = ? WHERE id = ? AND ("+column+" IS NULL OR "+column+" = '')",
+		value, id)
+	if err != nil {
+		return false, err
+	}
+	n, err := r.RowsAffected()
+	return n > 0, err
+}
+
+// fillAlbumIdentifiersTx tops up an existing album's release identifiers, emitting one
+// delta if anything landed. The cur values come from resolveAlbum's own lookup, so the
+// common no-op costs nothing extra.
+func fillAlbumIdentifiersTx(ctx context.Context, tx *sql.Tx, id int64, pid model.PID,
+	tr model.Track, curBarcode, curLabel, curCatNo string) error {
+	var wrote bool
+	for _, f := range []struct{ column, cur, val string }{
+		{"barcode", curBarcode, tr.Barcode},
+		{"label", curLabel, tr.Label},
+		{"catalog_number", curCatNo, tr.CatalogNumber},
+	} {
+		if f.cur != "" {
+			continue
+		}
+		w, err := fillEntityFieldTx(ctx, tx, model.MergeAlbum, "album", f.column, id,
+			strings.TrimSpace(f.val))
+		if err != nil {
+			return err
+		}
+		wrote = wrote || w
+	}
+	if !wrote {
+		return nil
+	}
+	return appendChange(ctx, tx, "album", pid, model.OpUpdate)
 }
 
 // resolveGenre finds-or-creates a genre/mood entity by (facet, match key).

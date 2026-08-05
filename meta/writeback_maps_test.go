@@ -55,10 +55,21 @@ func TestBookFieldTagKeys(t *testing.T) {
 	if k, _ := BookFieldTagKeys("title"); k[0] == "TITLE" {
 		t.Error("book title must map to ALBUM, not TITLE")
 	}
-	// DB-only book fields (and series, handled separately) have no key here.
-	for _, f := range []string{"subtitle", "asin", "isbn", "publisher", "edition", "description", "mbid", "series"} {
+	// DB-only book fields (and series, handled separately) have no key here. asin,
+	// isbn and publisher left this set when applyBookFields learned to read them: a
+	// field is DB-only because the reader ignores it, not because it is an identifier.
+	for _, f := range []string{"subtitle", "edition", "description", "series"} {
 		if _, ok := BookFieldTagKeys(f); ok {
 			t.Errorf("BookFieldTagKeys(%q): want no mapping (DB-only or series)", f)
+		}
+	}
+	// The identifier trio must round-trip: every key written here is one
+	// applyBookFields reads back, or a rescan silently clears the value.
+	for field, want := range map[string]string{
+		"asin": "ASIN", "isbn": "ISBN", "publisher": "LABEL", "mbid": "MUSICBRAINZ_ALBUMID"} {
+		got, ok := BookFieldTagKeys(field)
+		if !ok || len(got) != 1 || got[0] != want {
+			t.Errorf("BookFieldTagKeys(%q) = %v (ok=%v), want [%s]", field, got, ok, want)
 		}
 	}
 }

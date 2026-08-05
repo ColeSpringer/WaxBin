@@ -18,9 +18,9 @@ import (
 type facetSpec struct {
 	// join is the extra join(s) this dimension needs, aliased to avoid clashing with
 	// itemJoins. Empty when the dimension reads the item base directly (year, kind) or
-	// an alias itemJoins already binds (album and releaseGroup read alb; a second
-	// album join would be a per-row seek SQLite does not elide). The facet tests are
-	// what catch an itemJoins alias rename, since it fails at runtime.
+	// an alias itemJoins already binds (album reads alb, releaseGroup reads rg; a
+	// second join on the same condition is a per-row seek SQLite does not elide). The
+	// facet tests are what catch an itemJoins alias rename, since it fails at runtime.
 	join     string
 	joinArgs []any  // bind args for join's placeholders (e.g. the tag key), before WHERE args
 	groupBy  string // GROUP BY expression
@@ -85,9 +85,9 @@ func facetSpecFor(g read.GroupBy) (facetSpec, bool) {
 		// The dimension above album: a record's editions under one release group.
 		// Track-only and episode-excluded like GroupAlbum. A track with an album but no
 		// release group lands in [No Release Group], which is not [Non-Album].
+		// Reads the rg alias itemJoins binds, like album reads alb.
 		return facetSpec{
-			join:    " LEFT JOIN release_group frg ON frg.id = alb.release_group_id",
-			groupBy: "alb.release_group_id", keyExpr: "frg.pid", display: "frg.title", sortExpr: "frg.sort_key",
+			groupBy: "alb.release_group_id", keyExpr: "rg.pid", display: "rg.title", sortExpr: "rg.sort_key",
 			entity: true, unknown: read.NoReleaseGroup, kindWhere: notEpisodes,
 		}, true
 	case read.GroupYear:

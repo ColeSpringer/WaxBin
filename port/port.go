@@ -26,8 +26,9 @@ const ExportFormat = "waxbin-export"
 // exceed IEEE-754 double precision, so the version-1 bare numbers were
 // corrupted by any consumer parsing JSON numbers into doubles. A version-1
 // file no longer parses (the typed decode rejects the unquoted numbers),
-// accepted pre-release.
-const ExportVersion = 2
+// accepted pre-release. Version 3 adds the item's MusicBrainz id and ISRC and is
+// purely additive: it parses identically under any consumer that handled version 2.
+const ExportVersion = 3
 
 // Manifest is the versioned header of a logical export.
 type Manifest struct {
@@ -71,6 +72,11 @@ type ItemExport struct {
 	Year        int    `json:"year,omitempty"`
 	Genre       string `json:"genre,omitempty"`
 	RelPath     string `json:"relPath,omitempty"`
+	// The item's own external ids, the strongest cross-tool keys there are. Only its
+	// own two: this is a flat per-item record carrying no relational handles, and an
+	// album or artist id here would denormalize entity identity into every row.
+	MBID string `json:"mbid,omitempty"`
+	ISRC string `json:"isrc,omitempty"`
 }
 
 // PlayStateExport is one user's critical state for one item. The changed-at
@@ -110,6 +116,7 @@ func BuildSnapshot(schemaVersion int, createdAt int64, libs []*model.Library, it
 			PID: string(it.PID), Kind: string(it.Kind), State: string(it.State), Title: it.Title,
 			Artist: it.Artist, AlbumArtist: it.AlbumArtist, Album: it.Album,
 			TrackNo: it.TrackNo, DiscNo: it.DiscNo, Year: it.Year, Genre: it.Genre,
+			MBID: it.MBID, ISRC: it.ISRC,
 		}
 		if relPathOf != nil {
 			ie.RelPath = relPathOf(it.PID)

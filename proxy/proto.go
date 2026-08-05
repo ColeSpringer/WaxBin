@@ -37,7 +37,10 @@ import (
 // Version 5 added the PlayStateChangeResult payload on the four star/rating
 // methods: a version-4 server returns no data at all, which decodes as
 // changed=false, so every proxied write would report itself as a no-op.
-const ProtocolVersion = 5
+// Version 6 added EnrichParams.WriteTags: a version-5 server drops it and runs
+// without the on-disk write-back, so a client that asked for durable enrichment
+// silently gets values the next rescan clears.
+const ProtocolVersion = 6
 
 // Method names for the proxied operations: the fast request/response catalog
 // mutations, the reads a mutating command needs for its confirmation output, the
@@ -511,6 +514,10 @@ type EnrichParams struct {
 	ItemPID    string `json:"itemPid,omitempty"`
 	EntityType string `json:"entityType,omitempty"`
 	EntityPID  string `json:"entityPid,omitempty"`
+	// WriteTags asks the server to write what the pass filled back into the files.
+	// Additive: an older server drops it and runs without the write-back, which is
+	// the same as the default.
+	WriteTags bool `json:"writeTags,omitempty"`
 }
 
 // OrganizeParams is the run_organize request payload. Rule is a marshaled query

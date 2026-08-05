@@ -122,6 +122,14 @@ type itemView struct {
 	AlbumPID        string `json:"albumPid,omitempty"`
 	ReleaseGroupPID string `json:"releaseGroupPid,omitempty"`
 	PodcastPID      string `json:"podcastPid,omitempty"`
+	// External identifiers (see model.ItemView). Only a tagged file or a completed
+	// enrich pass supplies one, so an untagged library emits none of them.
+	MBID             string `json:"mbid,omitempty"`
+	ISRC             string `json:"isrc,omitempty"`
+	AlbumMBID        string `json:"albumMbid,omitempty"`
+	ReleaseGroupMBID string `json:"releaseGroupMbid,omitempty"`
+	ArtistMBID       string `json:"artistMbid,omitempty"`
+	AlbumArtistMBID  string `json:"albumArtistMbid,omitempty"`
 	// Composer and its collation key, present for track items.
 	Composer     string `json:"composer,omitempty"`
 	ComposerSort string `json:"composerSort,omitempty"`
@@ -171,7 +179,10 @@ func toItemView(v *model.ItemView) itemView {
 		ArtistPID: string(v.ArtistPID), AlbumArtistPID: string(v.AlbumArtistPID),
 		AlbumPID: string(v.AlbumPID), ReleaseGroupPID: string(v.ReleaseGroupPID),
 		PodcastPID: string(v.PodcastPID),
-		Composer:   v.Composer, ComposerSort: v.ComposerSort,
+		MBID:       v.MBID, ISRC: v.ISRC, AlbumMBID: v.AlbumMBID,
+		ReleaseGroupMBID: v.ReleaseGroupMBID,
+		ArtistMBID:       v.ArtistMBID, AlbumArtistMBID: v.AlbumArtistMBID,
+		Composer: v.Composer, ComposerSort: v.ComposerSort,
 		Explicit: v.Explicit, PodcastExplicit: v.PodcastExplicit,
 		Season: v.Season, PubDateNS: v.PubDateNS, Source: string(v.Source),
 		DurationMS: v.DurationMS, Codec: v.Codec, Path: v.DisplayPath, FilePID: string(v.FilePID),
@@ -603,6 +614,10 @@ type enrichView struct {
 	LyricsEnriched        int    `json:"lyricsEnriched"`
 	LyricsMatched         int    `json:"lyricsMatched"`
 	ArtFetched            int    `json:"artFetched"`
+	TagsWritten           int    `json:"tagsWritten,omitempty"`
+	TagsFailed            int    `json:"tagsFailed,omitempty"`
+	TagsUnrepresented     int    `json:"tagsUnrepresented,omitempty"`
+	TagsSkipped           int    `json:"tagsSkipped,omitempty"`
 	JobPID                string `json:"jobPid,omitempty"`
 }
 
@@ -612,7 +627,10 @@ func toEnrichView(r *waxbin.EnrichResult) enrichView {
 		ReleaseGroupsEnriched: r.Result.ReleaseGroupsEnriched, ReleaseGroupsMatched: r.Result.ReleaseGroupsMatched,
 		BooksEnriched: r.Result.BooksEnriched, BooksMatched: r.Result.BooksMatched,
 		LyricsEnriched: r.Result.LyricsEnriched, LyricsMatched: r.Result.LyricsMatched,
-		ArtFetched: r.Result.ArtFetched, JobPID: string(r.JobPID),
+		ArtFetched:  r.Result.ArtFetched,
+		TagsWritten: r.Result.TagsWritten, TagsFailed: r.Result.TagsFailed,
+		TagsUnrepresented: r.Result.TagsUnrepresented, TagsSkipped: r.Result.TagsSkipped,
+		JobPID: string(r.JobPID),
 	}
 }
 

@@ -14,6 +14,7 @@ import (
 	"github.com/colespringer/waxbin/enrich"
 	"github.com/colespringer/waxbin/internal/testaudio"
 	"github.com/colespringer/waxbin/internal/testsock"
+	"github.com/colespringer/waxbin/meta"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/proxy"
 	"github.com/colespringer/waxbin/read"
@@ -185,4 +186,174 @@ func TestServeProxiedScopedEnrich(t *testing.T) {
 	if r.ArtistsEnriched != 1 || r.ReleaseGroupsEnriched != 1 {
 		t.Fatalf("proxied scoped result = %+v, want 1 artist + 1 release group", r)
 	}
+}
+
+// TestScannedBookEnriches covers the book arm of enrichment, which
+// BooksNeedingEnrichment gates on a non-empty book.mbid. Until the scanner copied the
+// release id off a file's tags, that gate was never satisfied on a scanned library.
+func TestScannedBookEnriches(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+
+	// A .m4b holding valid MP3 bytes classifies as a book. The release id rides in a
+	// TXXX frame, the way Picard writes it into an ID3 tag.
+	const releaseMBID = "b1f4ec1e-0c8a-4b0e-9c22-2c1d0d5e7a33"
+	writeFile(t, filepath.Join(root, "hobbit.m4b"), testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
+		Title: "The Hobbit", Artist: "J.R.R. Tolkien", AlbumArtist: "J.R.R. Tolkien",
+		Album: "The Hobbit",
+		TXXX:  []testaudio.TXXXFrame{{Desc: "MusicBrainz Album Id", Value: releaseMBID}},
+	}))
+
+	// The barcode is a real ISBN-13, which ApplyBookEnrichment's format check requires
+	// before it lands in isbn.
+	var releaseHits int
+	mb := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/release/"+releaseMBID {
+			releaseHits++
+			_, _ = w.Write([]byte(`{"id":"` + releaseMBID + `","title":"The Hobbit",
+				"asin":"B002V0QUOC","barcode":"9780261102217",
+				"label-info":[{"label":{"name":"HarperCollins"}}]}`))
+			return
+		}
+		// Everything else answers empty, so a stray lookup cannot fill these by accident.
+		_, _ = w.Write([]byte(`{"artists":[],"release-groups":[]}`))
+	}))
+	t.Cleanup(mb.Close)
+
+	lib, err := waxbin.Open(ctx, waxbin.Options{
+		DBPath:     db,
+		Roots:      []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}},
+		Enrichment: enrichTestConfig(mb.URL),
+	})
+	if err != nil {
+		t.Fatalf("open library: %v", err)
+	}
+	t.Cleanup(func() { _ = lib.Close() })
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+
+	pid := itemPIDByTitle(t, ctx, lib, "The Hobbit")
+	res, err := lib.Enrich(ctx, waxbin.EnrichOptions{})
+	if err != nil {
+		t.Fatalf("enrich: %v", err)
+	}
+	if res.Result.BooksEnriched != 1 || res.Result.BooksMatched != 1 {
+		t.Fatalf("enrich result = %+v, want 1 book enriched and matched; the book arm is "+
+			"reachable only when scan writes book.mbid", res.Result)
+	}
+	if releaseHits != 1 {
+		t.Errorf("MusicBrainz release lookups = %d, want 1", releaseHits)
+	}
+
+	d, err := lib.Book(ctx, pid)
+	if err != nil {
+		t.Fatalf("Book: %v", err)
+	}
+	if d.ASIN != "B002V0QUOC" || d.ISBN != "9780261102217" || d.Publisher != "HarperCollins" {
+		t.Errorf("book after enrichment: asin=%q isbn=%q publisher=%q, want the release's values",
+			d.ASIN, d.ISBN, d.Publisher)
+	}
+}
+
+// TestEnrichmentTagWriteBackSurvivesRescan is the reason the write-back exists. The
+// scanner rebuilds a book's identifier columns from tags, so a value living only in
+// the catalog is cleared by the next content-changed rescan and the enrichment marker
+// then stops `enrich` refilling it. Writing it to the file puts it where the scanner
+// reads.
+//
+// The pid assertion is the other half: ASIN and ISBN feed identity.BookKey, so writing
+// them re-keys the book unless the pass re-anchors its stored key.
+func TestEnrichmentTagWriteBackSurvivesRescan(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	const releaseMBID = "b1f4ec1e-0c8a-4b0e-9c22-2c1d0d5e7a33"
+	path := filepath.Join(root, "hobbit.m4b")
+	spec := testaudio.MP3Spec{
+		Title: "The Hobbit", Artist: "J.R.R. Tolkien", AlbumArtist: "J.R.R. Tolkien",
+		Album: "The Hobbit",
+		TXXX:  []testaudio.TXXXFrame{{Desc: "MusicBrainz Album Id", Value: releaseMBID}},
+	}
+	writeFile(t, path, testaudio.BuildMP3FromSpec(spec))
+
+	mb := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/release/"+releaseMBID {
+			_, _ = w.Write([]byte(`{"id":"` + releaseMBID + `","title":"The Hobbit",
+				"asin":"B002V0QUOC","barcode":"9780261102217",
+				"label-info":[{"label":{"name":"HarperCollins"}}]}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"artists":[],"release-groups":[]}`))
+	}))
+	t.Cleanup(mb.Close)
+
+	lib, err := waxbin.Open(ctx, waxbin.Options{
+		DBPath:              db,
+		Roots:               []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}},
+		Enrichment:          enrichTestConfig(mb.URL),
+		WriteEnrichmentTags: true,
+	})
+	if err != nil {
+		t.Fatalf("open library: %v", err)
+	}
+	t.Cleanup(func() { _ = lib.Close() })
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	pid := itemPIDByTitle(t, ctx, lib, "The Hobbit")
+
+	res, err := lib.Enrich(ctx, waxbin.EnrichOptions{})
+	if err != nil {
+		t.Fatalf("enrich: %v", err)
+	}
+	if res.Result.TagsWritten != 1 {
+		t.Fatalf("enrich wrote %d files (failed %d, unrepresented %d), want 1",
+			res.Result.TagsWritten, res.Result.TagsFailed, res.Result.TagsUnrepresented)
+	}
+
+	// The values are on disk: a fresh read of the file sees them.
+	fm, err := meta.NewReader().Read(ctx, path)
+	if err != nil {
+		t.Fatalf("re-read file: %v", err)
+	}
+	if fm.Tags.ASIN != "B002V0QUOC" || fm.Tags.ISBN != "9780261102217" || fm.Tags.Publisher != "HarperCollins" {
+		t.Fatalf("file tags after write-back: asin=%q isbn=%q publisher=%q",
+			fm.Tags.ASIN, fm.Tags.ISBN, fm.Tags.Publisher)
+	}
+
+	// Retag the file the way a user would, forcing the full rescan path that used to
+	// clear these columns.
+	spec.Genre = "Fantasy"
+	writeFile(t, path, mergeTags(t, path, spec))
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("rescan: %v", err)
+	}
+
+	d, err := lib.Book(ctx, pid)
+	if err != nil {
+		t.Fatalf("Book after rescan (the pid did not survive the re-anchor): %v", err)
+	}
+	if d.ASIN != "B002V0QUOC" || d.ISBN != "9780261102217" || d.Publisher != "HarperCollins" {
+		t.Errorf("after rescan: asin=%q isbn=%q publisher=%q, want the enriched values to survive",
+			d.ASIN, d.ISBN, d.Publisher)
+	}
+}
+
+// mergeTags rebuilds a fixture file's tags from spec while preserving the identifier
+// tags the write-back just wrote, which is what a real retag in a tag editor does.
+func mergeTags(t *testing.T, path string, spec testaudio.MP3Spec) []byte {
+	t.Helper()
+	fm, err := meta.NewReader().Read(context.Background(), path)
+	if err != nil {
+		t.Fatalf("read for merge: %v", err)
+	}
+	spec.Label = fm.Tags.Publisher
+	spec.TXXX = append(spec.TXXX,
+		testaudio.TXXXFrame{Desc: "ASIN", Value: fm.Tags.ASIN},
+		testaudio.TXXXFrame{Desc: "ISBN", Value: fm.Tags.ISBN})
+	return testaudio.BuildMP3FromSpec(spec)
 }

@@ -214,31 +214,74 @@ const itemsMissingArtWhere = `
 			WHERE am.entity_type='track' AND am.role='front' AND t2.album_id=t.album_id)
 	  AND NOT EXISTS (SELECT 1 FROM art_map am WHERE am.entity_type='release_group' AND am.entity_id=al.release_group_id AND am.role='front')`
 
-// ItemsMissingArt returns a sample (up to limit) of present items with no
-// resolvable cover, plus the total count.
-func (s *Store) ItemsMissingArt(ctx context.Context, limit int) ([]model.ItemRef, int, error) {
+// sampleItemRefs is the count-then-sample shape the list-style audit checks share.
+// where is a package constant beginning at FROM, never caller text; a non-positive
+// limit counts without sampling. The pid tiebreak is load-bearing: sort_key is not
+// unique, so ordering by it alone returns a different subset run to run.
+func (s *Store) sampleItemRefs(ctx context.Context, op, where string, limit int) ([]model.ItemRef, int, error) {
 	var total int
-	if err := s.read.QueryRowContext(ctx, "SELECT COUNT(*) "+itemsMissingArtWhere).Scan(&total); err != nil {
-		return nil, 0, waxerr.Wrap(waxerr.CodeIO, "store.ItemsMissingArt", err)
+	if err := s.read.QueryRowContext(ctx, "SELECT COUNT(*) "+where).Scan(&total); err != nil {
+		return nil, 0, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
-	if total == 0 {
-		return nil, 0, nil
+	if total == 0 || limit <= 0 {
+		return nil, total, nil
 	}
 	rows, err := s.read.QueryContext(ctx,
-		"SELECT pi.pid, pi.title, pi.kind "+itemsMissingArtWhere+" ORDER BY pi.sort_key LIMIT ?", limit)
+		"SELECT pi.pid, pi.title, pi.kind "+where+" ORDER BY pi.sort_key, pi.pid LIMIT ?", limit)
 	if err != nil {
-		return nil, 0, waxerr.Wrap(waxerr.CodeIO, "store.ItemsMissingArt", err)
+		return nil, 0, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
 	defer rows.Close()
 	var out []model.ItemRef
 	for rows.Next() {
 		var pid, title, kind string
 		if err := rows.Scan(&pid, &title, &kind); err != nil {
-			return nil, 0, waxerr.Wrap(waxerr.CodeIO, "store.ItemsMissingArt", err)
+			return nil, 0, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		out = append(out, model.ItemRef{PID: model.PID(pid), Title: title, Kind: model.Kind(kind)})
 	}
-	return out, total, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, 0, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	return out, total, nil
+}
+
+// ItemsMissingArt returns a sample (up to limit) of present items with no
+// resolvable cover, plus the total count.
+func (s *Store) ItemsMissingArt(ctx context.Context, limit int) ([]model.ItemRef, int, error) {
+	return s.sampleItemRefs(ctx, "store.ItemsMissingArt", itemsMissingArtWhere, limit)
+}
+
+// itemsMissingMBIDWhere selects present tracks and books with no MusicBrainz identity
+// anywhere on the chain: not their own recording/release id, and not their album's or
+// release group's. A track whose release group enrichment matched is therefore not
+// reported, the way the missing-art predicate walks its own fallback chain. Episodes
+// stay out: a podcast's identity is a feed GUID and no MusicBrainz id will ever exist
+// for one.
+//
+// artist.mbid is deliberately not on the chain even though an item resolves through an
+// artist. Coverage here means the item can be resolved to a specific recording,
+// release, or release group. An artist id identifies the credited artist and says
+// nothing about which of their works this is, so counting it would report clean on
+// items nothing can be fetched for.
+//
+// Unlike itemsMissingArtWhere this joins book, which cannot fan the row out: book is
+// unique on item_id (upsertBook's ON CONFLICT(item_id)), so it is at most one row like
+// every other join here.
+const itemsMissingMBIDWhere = `
+	FROM playable_item pi
+	LEFT JOIN track t ON t.item_id = pi.id
+	LEFT JOIN book bk ON bk.item_id = pi.id
+	LEFT JOIN album al ON al.id = t.album_id
+	LEFT JOIN release_group rg ON rg.id = al.release_group_id
+	WHERE pi.kind IN ('track','book') AND pi.state = 'present'
+	  AND COALESCE(NULLIF(t.mbid,''), NULLIF(bk.mbid,'')) IS NULL
+	  AND COALESCE(NULLIF(al.mbid,''), NULLIF(rg.mbid,'')) IS NULL`
+
+// ItemsMissingMBID returns a sample (up to limit) of present items with no
+// MusicBrainz identity, plus the total count.
+func (s *Store) ItemsMissingMBID(ctx context.Context, limit int) ([]model.ItemRef, int, error) {
+	return s.sampleItemRefs(ctx, "store.ItemsMissingMBID", itemsMissingMBIDWhere, limit)
 }
 
 // CountItemsMissingReplayGain counts audio files with no essence-matched loudness

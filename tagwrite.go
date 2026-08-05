@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"strconv"
+	"strings"
 
 	"github.com/colespringer/waxbin/loudness"
 	"github.com/colespringer/waxbin/meta"
@@ -155,4 +156,153 @@ func r128Gain(rgDB float64) string {
 	offset := loudness.ReferenceLUFS - r128ReferenceLUFS // -18 - (-23) = 5 dB
 	q78 := int(math.Round((rgDB - offset) * 256.0))
 	return strconv.Itoa(q78)
+}
+
+// writeEnrichmentTags mirrors what the enrichment pass filled into the backing files:
+// a book's ASIN/ISBN/PUBLISHER and a track's GENRE. Off by default, and it runs at the
+// end of an enrich pass. It shares writeReplayGainTags' shape (disk I/O outside any
+// transaction, an optimistic file-state update that a concurrent scan or move makes a
+// no-op, per-file counts and diagnostics), so read that first.
+//
+// Why it exists rather than the catalog simply keeping the values: the scanner rebuilds
+// these columns from the file's tags on every content-changed rescan, so a value living
+// only in the catalog is cleared the next time the file is retagged. Writing it to the
+// file puts it where the scanner reads, which is also what makes it portable to any
+// other tool.
+//
+// ASIN and ISBN feed identity.BookKey, so a book whose parts were written is re-anchored
+// from its primary part's post-write tags. Without that the next scan computes a
+// different identity key and resolves a different item, orphaning the book's pid, play
+// state and locks. reanchorBookIdentity re-reads the file, so it self-corrects when a
+// write did not land.
+func (l *Library) writeEnrichmentTags(ctx context.Context, sinceNS int64) (enrichWriteCounts, error) {
+	var c enrichWriteCounts
+	rows, err := l.store.EnrichmentWriteback(ctx, sinceNS)
+	if err != nil {
+		return c, err
+	}
+	w := meta.NewWriter()
+	// Books re-anchor once per item, from the primary part, after every part is written.
+	// primaryOf is captured for every book seen rather than only for one that wrote,
+	// because the anchor must run even when the primary's own write failed.
+	primaryOf := map[model.PID]model.PID{}
+	var books []model.PID
+	// A book whose primary part failed to write is abandoned mid-item: its remaining
+	// parts are skipped. Writing them anyway would leave the parts carrying an
+	// identifier the primary lacks, and since identity.BookKey is computed per file the
+	// next scan would key them apart and split the book with no way back. Re-anchoring
+	// cannot repair that, since it can only follow one file.
+	abandoned := map[model.PID]bool{}
+	for _, r := range rows {
+		if ctx.Err() != nil {
+			return c, ctx.Err()
+		}
+		if r.Kind == model.KindBook {
+			if abandoned[r.ItemPID] {
+				c.skipped++
+				continue
+			}
+			if r.IsPrimary {
+				if _, seen := primaryOf[r.ItemPID]; !seen {
+					primaryOf[r.ItemPID] = r.FilePID
+					books = append(books, r.ItemPID)
+				}
+			}
+		}
+		edits := enrichmentEdits(r)
+		if len(edits) == 0 {
+			continue
+		}
+		res, err := w.Apply(ctx, string(r.Path), edits)
+		if err != nil {
+			l.log.Warn("enrichment tag write", "path", string(r.Path), "err", err)
+			c.failed++
+			if r.Kind == model.KindBook && r.IsPrimary {
+				abandoned[r.ItemPID] = true
+			}
+			continue
+		}
+		var diags []model.FileDiagnostic
+		lost := false
+		for _, wn := range res.Warnings {
+			if wn.Unrepresented {
+				l.log.Warn("enrichment tag unrepresented", "path", string(r.Path), "key", wn.Key, "warning", wn.Message)
+				lost = true
+				diags = append(diags, model.FileDiagnostic{
+					Code: model.DiagTagWriteLost, Severity: model.SeverityWarn,
+					TagKey: wn.Key, Detail: wn.Message,
+				})
+			}
+		}
+		if lost {
+			c.unrepresented++
+		}
+		if err := l.store.PutFileDiagnostics(ctx, r.FilePID, model.OriginEnrichment, diags); err != nil {
+			l.log.Warn("enrichment diagnostics", "path", string(r.Path), "err", err)
+		}
+		if !res.Changed {
+			continue
+		}
+		c.written++
+		if _, err := l.store.UpdateFileStateIfUnchanged(ctx, model.FileStateUpdate{
+			FilePID:         r.FilePID,
+			ExpectedSize:    r.Size,
+			ExpectedMTimeNS: r.MTimeNS,
+			NewSize:         res.Size,
+			NewMTimeNS:      res.MTimeNS,
+			NewContentHash:  res.ContentHash,
+		}); err != nil {
+			// The tags landed; only the file row's size/mtime/hash did not follow, which
+			// the next scan repairs. Not a write failure.
+			l.log.Warn("enrichment file-state update", "path", string(r.Path), "err", err)
+		}
+	}
+	// Unconditional per book, like the edit write-back: reanchorBookIdentity re-reads
+	// the primary part, so a book whose write did not land recomputes its stored key
+	// and the re-key is a no-op.
+	for _, itemPID := range books {
+		l.reanchorBookIdentity(ctx, itemPID, primaryOf[itemPID])
+	}
+	return c, nil
+}
+
+// enrichWriteCounts tallies one enrichment write-back pass.
+type enrichWriteCounts struct {
+	written       int
+	failed        int
+	unrepresented int
+	// skipped counts parts left unwritten because their book's primary part failed.
+	skipped int
+}
+
+// enrichmentEdits builds the tag edits for one file. Every key comes from
+// meta.BookFieldTagKeys or meta.TagKeyForField, so a written key is one the reader
+// reads back. An empty value produces no edit at all rather than a clear: this pass
+// mirrors what enrichment supplied, and it is not the authority on what a file should
+// not contain.
+func enrichmentEdits(r model.EnrichedTagRow) []meta.TagEdit {
+	var out []meta.TagEdit
+	add := func(keys []string, value string) {
+		if strings.TrimSpace(value) == "" {
+			return
+		}
+		for _, k := range keys {
+			out = append(out, meta.TagEdit{Key: k, Values: []string{value}})
+		}
+	}
+	if r.Kind != model.KindBook {
+		if key, ok := meta.TagKeyForField("genre"); ok {
+			add([]string{key}, r.Genre)
+		}
+		return out
+	}
+	// Ordered, so one file's write is reproducible.
+	for _, f := range []struct{ field, value string }{
+		{"asin", r.ASIN}, {"genre", r.Genre}, {"isbn", r.ISBN}, {"publisher", r.Publisher},
+	} {
+		if keys, ok := meta.BookFieldTagKeys(f.field); ok {
+			add(keys, f.value)
+		}
+	}
+	return out
 }

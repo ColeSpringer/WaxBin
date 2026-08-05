@@ -851,6 +851,10 @@ type EnrichOptions struct {
 	ItemPID    model.PID       // scope to one item's targets ("" = no item scope)
 	EntityType read.EntityKind // with EntityPID: scope to one entity
 	EntityPID  model.PID
+
+	// WriteTags writes what the pass filled back into the backing files, ORed with
+	// the library's WriteEnrichmentTags option so a run can opt in without config.
+	WriteTags bool
 }
 
 // EnrichResult reports an enrichment run and the job it ran under.
@@ -1593,9 +1597,18 @@ func (l *Library) appendDerivedSortClears(ctx context.Context, itemPID model.PID
 // re-anchor. The other identity-key inputs (asin/isbn/edition) are DB-only and never
 // written to disk, so they cannot move the on-disk-derived key.
 func bookIdentityEdited(edits map[string]string) bool {
-	_, title := edits["title"]
-	_, author := edits["author"]
-	return title || author
+	// Every field identity.BookKey reads that also reaches disk. asin and isbn joined
+	// when bookFieldTagKeys learned to write them: without them here the edit stamps a
+	// new identifier onto the files and leaves the stored key behind, so the next scan
+	// resolves a different item and orphans this one's pid, play state and locks.
+	// edition is a BookKey input too and is deliberately absent, because nothing writes
+	// it to disk; adding it there means adding it here.
+	for _, f := range []string{"title", "author", "asin", "isbn"} {
+		if _, ok := edits[f]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 // reanchorBookIdentity recomputes a book's identity key from the current on-disk state
@@ -1644,6 +1657,13 @@ func bookTagEditsForFields(edits map[string]string, seriesSeq string) []meta.Tag
 		out = append(out, e)
 	}
 	for field, value := range edits {
+		// The catalog stored the normalized form (editfield.go), so write that and not
+		// the caller's raw string: a hyphenated ISBN on disk is read back verbatim by
+		// the next rescan and undoes the normalization. Same reason the track twin
+		// normalizes; a value that fails its check is written as given, matching there.
+		if v, ok := model.NormalizeIdentifierField(field, strings.TrimSpace(value)); ok {
+			value = v
+		}
 		if field == "series" {
 			// The series name and sequence share one GROUPING tag; pack them so a rescan
 			// splits them back apart into the same name and sequence.

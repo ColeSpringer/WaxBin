@@ -254,6 +254,29 @@ type SidecarUpdate struct {
 	Observations    []AuxObservation // sidecar observations to persist for FilePID
 }
 
+// EnrichedTagRow is one file an enrichment write-back should stamp, carrying the
+// values enrichment supplied and the file state the optimistic update checks. One row
+// per file: a multi-part book repeats its values across every part, since the parts
+// must agree on the identity-bearing ones.
+//
+// Only fields enrichment actually wrote are set (field_provenance source), so a
+// tagged value is never rewritten back over itself. Empty means "nothing to write for
+// this field", not "clear it".
+type EnrichedTagRow struct {
+	ItemPID   PID
+	FilePID   PID
+	Kind      Kind
+	Path      []byte
+	Size      int64
+	MTimeNS   int64
+	IsPrimary bool // the part a book re-anchor should read back from
+
+	ASIN      string
+	ISBN      string
+	Publisher string
+	Genre     string
+}
+
 // ReplayGainRow is one file's current ReplayGain measurement plus the on-disk file
 // state, for the post-analysis tag write-back pass. HasAlbum reports whether an
 // album aggregate exists (a standalone track has none).

@@ -135,6 +135,27 @@ func NormalizeBarcode(value string) (string, bool) {
 	return s, true
 }
 
+// SoleMBID returns the one id in ids, or "" when there is any other number of them.
+// A credit naming several artists carries an id per artist and still resolves to a
+// single artist entity named for the whole credit string, and no one of those ids
+// describes that entity, so stamping the first would misattribute it. Returning ""
+// there leaves the entity unidentified, which is recoverable; a wrong id is not,
+// because every writer of an entity MBID fills only when empty.
+func SoleMBID(ids []string) string {
+	var sole string
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if sole != "" {
+			return ""
+		}
+		sole = id
+	}
+	return sole
+}
+
 // NormalizeIdentifierField dispatches a field edit's value to the matching
 // identifier normalizer. A field without an identifier format passes its value
 // through unchanged (ok is always true for it), so callers can run every edited

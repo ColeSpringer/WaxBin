@@ -275,6 +275,17 @@ type Result struct {
 	LyricsEnriched        int
 	LyricsMatched         int
 	ArtFetched            int
+
+	// On-disk write-back tallies, all zero unless the run wrote tags. They live here
+	// rather than on the facade's wrapper because a background job serializes this
+	// struct alone, and a run where every write failed must not read the same as one
+	// with nothing to write. Unrepresented counts files whose format could not store a
+	// key, which leaves the bytes unchanged and so is not a failure. Skipped counts
+	// parts left unwritten because their book's primary part failed.
+	TagsWritten       int
+	TagsFailed        int
+	TagsUnrepresented int
+	TagsSkipped       int
 }
 
 func (r *Result) total() int {

@@ -216,6 +216,15 @@ func newEntityInfoCmd(g *globals) *cobra.Command {
 			if info.Year != 0 {
 				fmt.Fprintf(tw, "YEAR\t%d\n", info.Year)
 			}
+			if info.Barcode != "" {
+				fmt.Fprintf(tw, "BARCODE\t%s\n", info.Barcode)
+			}
+			if info.Label != "" {
+				fmt.Fprintf(tw, "LABEL\t%s\n", info.Label)
+			}
+			if info.CatalogNumber != "" {
+				fmt.Fprintf(tw, "CATALOG NO\t%s\n", info.CatalogNumber)
+			}
 			if info.ArtistPID != "" {
 				fmt.Fprintf(tw, "ARTIST\t%s\n", info.ArtistPID)
 			}
@@ -486,6 +495,9 @@ type entityInfoView struct {
 	MBID              string   `json:"mbid,omitempty"`
 	Type              string   `json:"type,omitempty"`
 	Year              int      `json:"year,omitempty"`
+	Barcode           string   `json:"barcode,omitempty"`
+	Label             string   `json:"label,omitempty"`
+	CatalogNumber     string   `json:"catalogNumber,omitempty"`
 	ArtistPID         string   `json:"artistPid,omitempty"`
 	ReleaseGroupPID   string   `json:"releaseGroupPid,omitempty"`
 	ItemCount         int      `json:"itemCount"`
@@ -502,6 +514,7 @@ func toEntityInfoView(info *read.EntityInfo) entityInfoView {
 	return entityInfoView{
 		Kind: string(info.Kind), PID: string(info.PID), Name: info.Name, SortKey: info.SortKey,
 		MBID: info.MBID, Type: info.Type, Year: info.Year,
+		Barcode: info.Barcode, Label: info.Label, CatalogNumber: info.CatalogNumber,
 		ArtistPID: string(info.ArtistPID), ReleaseGroupPID: string(info.ReleaseGroupPID),
 		ItemCount: info.ItemCount, ReleaseGroupCount: info.ReleaseGroupCount,
 		TotalDurationMS: info.TotalDurationMS, LibraryPIDs: libs,

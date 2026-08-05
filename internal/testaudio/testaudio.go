@@ -82,10 +82,14 @@ type TXXXFrame struct{ Desc, Value string }
 type MP3Spec struct {
 	Title, Artist, AlbumArtist, Album string
 	Genre, Composer                   string
-	Track, Disc, Year                 int
-	Compilation                       bool
-	TXXX                              []TXXXFrame // user-defined frames, in order
-	Audio                             []byte      // nil uses DefaultAudio
+	// Label is the release label, which ID3 carries in TPUB rather than a TXXX. Its
+	// two siblings, BARCODE and CATALOGNUMBER, have no dedicated frame and go through
+	// TXXX instead.
+	Label             string
+	Track, Disc, Year int
+	Compilation       bool
+	TXXX              []TXXXFrame // user-defined frames, in order
+	Audio             []byte      // nil uses DefaultAudio
 }
 
 // BuildMP3FromSpec builds an ID3v2.3-tagged MP3 from spec over valid MPEG frames.
@@ -105,6 +109,7 @@ func BuildMP3FromSpec(s MP3Spec) []byte {
 	add("TPE2", s.AlbumArtist)
 	add("TALB", s.Album)
 	add("TCON", s.Genre)
+	add("TPUB", s.Label)
 	add("TCOM", s.Composer)
 	if s.Track > 0 {
 		add("TRCK", strconv.Itoa(s.Track))

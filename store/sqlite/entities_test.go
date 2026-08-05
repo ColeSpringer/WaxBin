@@ -7,6 +7,7 @@ import (
 
 	"github.com/colespringer/waxbin/identity"
 	"github.com/colespringer/waxbin/model"
+	"github.com/colespringer/waxbin/read"
 )
 
 // entityFixture opens a store with one managed library for white-box assertions
@@ -40,6 +41,10 @@ type trackSpec struct {
 	mbRecording             string
 	mbReleaseGroup          string
 	mbRelease               string
+	mbArtists               []string
+	mbAlbumArtists          []string
+	isrc                    string
+	barcode, label, catNo   string
 }
 
 func putTrack(t *testing.T, st *Store, libID int64, s trackSpec) *model.ScanItemResult {
@@ -71,6 +76,12 @@ func putTrack(t *testing.T, st *Store, libID int64, s trackSpec) *model.ScanItem
 			MBID:             s.mbRecording,
 			MBReleaseGroupID: s.mbReleaseGroup,
 			MBReleaseID:      s.mbRelease,
+			MBArtistIDs:      s.mbArtists,
+			MBAlbumArtistIDs: s.mbAlbumArtists,
+			ISRC:             s.isrc,
+			Barcode:          s.barcode,
+			Label:            s.label,
+			CatalogNumber:    s.catNo,
 		},
 	}
 	res, err := st.PutScannedTrack(context.Background(), in)
@@ -456,5 +467,193 @@ func TestNonAlbumSingleNotGrouped(t *testing.T) {
 	// The artist is still resolved even without an album.
 	if n := scalarInt(t, st, "SELECT COUNT(*) FROM artist"); n != 1 {
 		t.Errorf("artist count = %d, want 1", n)
+	}
+}
+
+// TestArtistMBIDBackfill covers the late-arriving id: an artist row created before
+// its files carried MUSICBRAINZ_ARTISTID never got one, however often the library was
+// rescanned after a Picard pass. Each rescan here varies the content hash the way a
+// retag does, since a byte-identical rescan skips entity resolution outright.
+func TestArtistMBIDBackfill(t *testing.T) {
+	st, lib := entityFixture(t)
+
+	untagged := trackSpec{
+		path: "/lib/a/1.flac", essence: "e1", content: "c1", title: "Song",
+		artist: "Radiohead", albumArt: "Radiohead", album: "OK Computer",
+	}
+	putTrack(t, st, lib.ID, untagged)
+	if got := artistMBID(t, st, "Radiohead"); got != "" {
+		t.Fatalf("artist mbid before the retag = %q, want empty", got)
+	}
+
+	tagged := untagged
+	tagged.content = "c2"
+	tagged.mbArtists, tagged.mbAlbumArtists = []string{"a1-mbid"}, []string{"a1-mbid"}
+	putTrack(t, st, lib.ID, tagged)
+	if got := artistMBID(t, st, "Radiohead"); got != "a1-mbid" {
+		t.Fatalf("artist mbid after the retag = %q, want a1-mbid", got)
+	}
+	if n := artistChanges(t, st); n != 2 {
+		t.Errorf("artist change_log rows = %d, want 2 (the create, then the backfill)", n)
+	}
+
+	// A later retag re-resolves the artist with the id already stored: no write, so
+	// no delta. That is the standing invariant on every scan write path, and this
+	// runs twice per scanned track.
+	again := tagged
+	again.content = "c3"
+	putTrack(t, st, lib.ID, again)
+	if n := artistChanges(t, st); n != 2 {
+		t.Errorf("artist change_log rows after a no-op re-resolve = %d, want the same 2", n)
+	}
+
+	// A different id never displaces one already there: this fills gaps only.
+	replacement := again
+	replacement.content = "c4"
+	replacement.mbArtists, replacement.mbAlbumArtists = []string{"a2-mbid"}, []string{"a2-mbid"}
+	putTrack(t, st, lib.ID, replacement)
+	if got := artistMBID(t, st, "Radiohead"); got != "a1-mbid" {
+		t.Errorf("artist mbid after a conflicting tag = %q, want the stored a1-mbid", got)
+	}
+}
+
+// TestArtistMBIDBackfillRespectsLock: a locked-empty mbid is a curated value, and the
+// fill-when-empty WHERE clause alone would refill it.
+func TestArtistMBIDBackfillRespectsLock(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+
+	spec := trackSpec{
+		path: "/lib/a/1.flac", essence: "e1", content: "c1", title: "Song",
+		artist: "Radiohead", albumArt: "Radiohead", album: "OK Computer",
+	}
+	putTrack(t, st, lib.ID, spec)
+	artistPID := entityPIDByName(t, st, "artist", "name", "Radiohead")
+	if err := st.EditEntityFields(ctx, model.MergeArtist, artistPID,
+		map[string]string{"mbid": ""}, model.SourceUser, true, false); err != nil {
+		t.Fatalf("lock mbid empty: %v", err)
+	}
+
+	spec.content = "c2"
+	spec.mbArtists, spec.mbAlbumArtists = []string{"a1-mbid"}, []string{"a1-mbid"}
+	putTrack(t, st, lib.ID, spec)
+	if got := artistMBID(t, st, "Radiohead"); got != "" {
+		t.Errorf("locked-empty artist mbid = %q after a tagged rescan, want it left empty", got)
+	}
+}
+
+func artistMBID(t *testing.T, st *Store, name string) string {
+	t.Helper()
+	var mbid string
+	if err := st.read.QueryRowContext(context.Background(),
+		"SELECT COALESCE(mbid,'') FROM artist WHERE name = ?", name).Scan(&mbid); err != nil {
+		t.Fatalf("read artist %q mbid: %v", name, err)
+	}
+	return mbid
+}
+
+func artistChanges(t *testing.T, st *Store) int {
+	t.Helper()
+	return scalarInt(t, st, "SELECT COUNT(*) FROM change_log WHERE entity_type = 'artist'")
+}
+
+// TestAlbumIdentifierBackfill: barcode/label/catalog_number are not part of
+// identity.AlbumKey, so a late tag pass hits the existing row and never reaches the
+// insert that carries them.
+func TestAlbumIdentifierBackfill(t *testing.T) {
+	st, lib := entityFixture(t)
+
+	untagged := trackSpec{
+		path: "/lib/a/1.flac", essence: "e1", content: "c1", title: "Airbag",
+		artist: "Radiohead", albumArt: "Radiohead", album: "OK Computer", year: 1997,
+	}
+	putTrack(t, st, lib.ID, untagged)
+	albumPID := entityPIDByName(t, st, "album", "title", "OK Computer")
+
+	tagged := untagged
+	tagged.content = "c2"
+	tagged.barcode, tagged.label, tagged.catNo = "724385522925", "Parlophone", "CDNODATA 02"
+	putTrack(t, st, lib.ID, tagged)
+
+	album, err := st.EntityByPID(context.Background(), read.EntityAlbum, albumPID)
+	if err != nil {
+		t.Fatalf("album: %v", err)
+	}
+	if album.Barcode != "724385522925" || album.Label != "Parlophone" || album.CatalogNumber != "CDNODATA 02" {
+		t.Fatalf("album identifiers after the retag = %q/%q/%q, want the tagged values",
+			album.Barcode, album.Label, album.CatalogNumber)
+	}
+	if n := albumChanges(t, st); n != 2 {
+		t.Errorf("album change_log rows = %d, want 2 (the create, then the backfill)", n)
+	}
+
+	replacement := tagged
+	replacement.content = "c3"
+	replacement.barcode, replacement.label, replacement.catNo = "036000291452", "Other", "OTHER-1"
+	putTrack(t, st, lib.ID, replacement)
+	album, err = st.EntityByPID(context.Background(), read.EntityAlbum, albumPID)
+	if err != nil {
+		t.Fatalf("album: %v", err)
+	}
+	if album.Barcode != "724385522925" || album.Label != "Parlophone" {
+		t.Errorf("stored identifiers were displaced by a later tag: %q/%q", album.Barcode, album.Label)
+	}
+	if n := albumChanges(t, st); n != 2 {
+		t.Errorf("album change_log rows after a no-op re-resolve = %d, want the same 2", n)
+	}
+}
+
+func albumChanges(t *testing.T, st *Store) int {
+	t.Helper()
+	return scalarInt(t, st, "SELECT COUNT(*) FROM change_log WHERE entity_type = 'album'")
+}
+
+// TestJointCreditTakesNoArtistMBID: a credit naming several artists carries an id per
+// artist but resolves to one entity named for the whole string, so none of them
+// describes it. Asserted on both writers, since the insert stamped the first id long
+// before the backfill widened that to existing rows.
+func TestJointCreditTakesNoArtistMBID(t *testing.T) {
+	st, lib := entityFixture(t)
+
+	joint := trackSpec{
+		path: "/lib/a/1.flac", essence: "e1", content: "c1", title: "Empire State of Mind",
+		artist: "Jay-Z feat. Alicia Keys", albumArt: "Jay-Z feat. Alicia Keys", album: "The Blueprint 3",
+		mbArtists:      []string{"jayz-id", "keys-id"},
+		mbAlbumArtists: []string{"jayz-id", "keys-id"},
+	}
+	putTrack(t, st, lib.ID, joint)
+	if got := artistMBID(t, st, "Jay-Z feat. Alicia Keys"); got != "" {
+		t.Errorf("joint credit stamped at insert with %q, want empty", got)
+	}
+
+	// The backfill must not stamp it either, on a row that already exists.
+	again := joint
+	again.content = "c2"
+	putTrack(t, st, lib.ID, again)
+	if got := artistMBID(t, st, "Jay-Z feat. Alicia Keys"); got != "" {
+		t.Errorf("joint credit backfilled with %q, want empty", got)
+	}
+
+	// A single-artist credit is unaffected, on both paths.
+	solo := trackSpec{
+		path: "/lib/b/1.flac", essence: "e2", content: "c2", title: "99 Problems",
+		artist: "Jay-Z", albumArt: "Jay-Z", album: "The Black Album",
+		mbArtists: []string{"jayz-id"}, mbAlbumArtists: []string{"jayz-id"},
+	}
+	putTrack(t, st, lib.ID, solo)
+	if got := artistMBID(t, st, "Jay-Z"); got != "jayz-id" {
+		t.Errorf("solo credit mbid = %q, want jayz-id", got)
+	}
+
+	late := trackSpec{
+		path: "/lib/c/1.flac", essence: "e3", content: "c3", title: "Otis",
+		artist: "Kanye West", albumArt: "Kanye West", album: "Watch the Throne",
+	}
+	putTrack(t, st, lib.ID, late)
+	late.content = "c4"
+	late.mbArtists, late.mbAlbumArtists = []string{"kanye-id"}, []string{"kanye-id"}
+	putTrack(t, st, lib.ID, late)
+	if got := artistMBID(t, st, "Kanye West"); got != "kanye-id" {
+		t.Errorf("solo credit backfill = %q, want kanye-id", got)
 	}
 }

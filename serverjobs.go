@@ -3,6 +3,7 @@ package waxbin
 import (
 	"context"
 	"encoding/json"
+	"time"
 
 	"github.com/colespringer/waxbin/enrich"
 	"github.com/colespringer/waxbin/jobs"
@@ -171,12 +172,28 @@ func (l *Library) StartAnalyze(ctx context.Context, opts AnalyzeOptions) (model.
 // bad scope never starts a job.
 func (l *Library) enrichWork(opts EnrichOptions, scope *model.EnrichScope, out *EnrichResult) jobFn {
 	return func(ctx context.Context, h *jobs.Handle) error {
+		// Stamped before the pass, so the write-back mirrors what this run filled rather
+		// than re-writing every file any past pass ever touched.
+		startNS := time.Now().UnixNano()
 		r, err := l.enricher.Run(ctx, enrich.RunOptions{Force: opts.Force, Limit: opts.Limit, Scope: scope},
 			func(p float64, msg string) error { return h.Heartbeat(ctx, p, msg) })
 		if r != nil {
 			out.Result = *r
 		}
-		return err
+		if err != nil {
+			return err
+		}
+		// After the pass, so it writes everything this run filled. A write-back failure
+		// is reported in the counts, not raised: the values are in the catalog either way.
+		if l.opts.WriteEnrichmentTags || opts.WriteTags {
+			c, werr := l.writeEnrichmentTags(ctx, startNS)
+			if werr != nil {
+				return werr
+			}
+			out.Result.TagsWritten, out.Result.TagsFailed = c.written, c.failed
+			out.Result.TagsUnrepresented, out.Result.TagsSkipped = c.unrepresented, c.skipped
+		}
+		return nil
 	}
 }
 

@@ -619,3 +619,77 @@ func TestWriteWarningsFansOutKeysAndSurvivesKeyless(t *testing.T) {
 		t.Errorf("keyless entry = %+v, want an empty key and still unrepresented", got[2])
 	}
 }
+
+// TestReadsBookIdentifierTags covers the three fields the reader used to drop. They
+// matter beyond display: a field the reader ignores is one the scanner clears on
+// every content-changed rescan, so nothing written to disk could survive.
+func TestReadsBookIdentifierTags(t *testing.T) {
+	p := writeTemp(t, "book.m4b", testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
+		Title: "The Hobbit", Artist: "J.R.R. Tolkien", AlbumArtist: "J.R.R. Tolkien",
+		Album: "The Hobbit", Label: "HarperCollins",
+		TXXX: []testaudio.TXXXFrame{
+			{Desc: "ASIN", Value: "B002V0QUOC"},
+			{Desc: "ISBN", Value: "9780261102217"},
+		},
+	}))
+	fm, err := NewReader().Read(context.Background(), p)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if !fm.Tags.IsAudiobook {
+		t.Fatal("fixture did not classify as a book")
+	}
+	if fm.Tags.ASIN != "B002V0QUOC" || fm.Tags.ISBN != "9780261102217" {
+		t.Errorf("asin/isbn = %q/%q, want the tagged values", fm.Tags.ASIN, fm.Tags.ISBN)
+	}
+	// A book's PUBLISHER and an album's LABEL are one frame; for a book it is the publisher.
+	if fm.Tags.Publisher != "HarperCollins" {
+		t.Errorf("publisher = %q, want HarperCollins", fm.Tags.Publisher)
+	}
+	// Promoted out of the custom map, so one value does not report through two surfaces.
+	for _, k := range []string{"ASIN", "ISBN", "LABEL"} {
+		if v, ok := fm.Tags.Custom[k]; ok {
+			t.Errorf("custom[%s] = %v, want it promoted to the typed field", k, v)
+		}
+	}
+}
+
+// TestTrackKeepsLabelAsLabel: the shared frame must still mean "label" for music.
+func TestTrackKeepsLabelAsLabel(t *testing.T) {
+	p := writeTemp(t, "song.mp3", testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
+		Title: "Airbag", Artist: "Radiohead", Album: "OK Computer", Label: "Parlophone",
+	}))
+	fm, err := NewReader().Read(context.Background(), p)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if fm.Tags.IsAudiobook {
+		t.Fatal("music fixture classified as a book")
+	}
+	if fm.Tags.Label != "Parlophone" {
+		t.Errorf("label = %q, want Parlophone", fm.Tags.Label)
+	}
+	if fm.Tags.Publisher != "" {
+		t.Errorf("publisher = %q on a track, want empty (books only)", fm.Tags.Publisher)
+	}
+}
+
+// TestTrackKeepsASINAsCustomTag: a music release can carry an ASIN, and only a book
+// promotes it to a typed field. Reserving the key globally would drop it from every
+// track that has one, since applyBookFields returns early for a non-book.
+func TestTrackKeepsASINAsCustomTag(t *testing.T) {
+	p := writeTemp(t, "song.mp3", testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
+		Title: "Airbag", Artist: "Radiohead", Album: "OK Computer",
+		TXXX: []testaudio.TXXXFrame{{Desc: "ASIN", Value: "B000002UB1"}},
+	}))
+	fm, err := NewReader().Read(context.Background(), p)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if got := fm.Tags.Custom["ASIN"]; len(got) != 1 || got[0] != "B000002UB1" {
+		t.Errorf("track custom[ASIN] = %v, want the tagged value preserved", got)
+	}
+	if fm.Tags.ASIN != "" {
+		t.Errorf("track ASIN typed field = %q, want empty (books only)", fm.Tags.ASIN)
+	}
+}

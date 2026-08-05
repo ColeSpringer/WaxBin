@@ -253,19 +253,11 @@ func (s *Store) ApplyArtistEnrichment(ctx context.Context, in model.ArtistEnrich
 		if !in.Matched {
 			return markEnrichedTx(ctx, tx, model.EnrichArtistType, in.ArtistID, enrichProviderMusicBrainz, false, "")
 		}
-		if in.MBID != "" {
-			// A user who curated (and locked) the artist MBID keeps it, even when it was
-			// locked empty. The fill-when-empty WHERE clause alone would refill that case.
-			locked, err := entityFieldLockedTx(ctx, tx, string(model.MergeArtist), in.ArtistID, "mbid")
-			if err != nil {
-				return waxerr.Wrap(waxerr.CodeIO, op, err)
-			}
-			if !locked {
-				if _, err := tx.ExecContext(ctx,
-					"UPDATE artist SET mbid = ? WHERE id = ? AND (mbid IS NULL OR mbid = '')", in.MBID, in.ArtistID); err != nil {
-					return waxerr.Wrap(waxerr.CodeIO, op, err)
-				}
-			}
+		// Shares the fill-when-empty rule with the scan path, lock probe included, so a
+		// curated (or deliberately locked-empty) artist MBID survives either writer.
+		if _, err := fillEntityFieldTx(ctx, tx, model.MergeArtist, "artist", "mbid",
+			in.ArtistID, in.MBID); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		if err := insertAliasesTx(ctx, tx, in.ArtistID, in.SortName, in.Aliases); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
@@ -510,6 +502,12 @@ func populateReleaseGroupGenresTx(ctx context.Context, tx *sql.Tx, rgID int64, g
 // to abort the apply. MusicBrainz releases regularly carry a plain barcode where
 // a book ISBN is expected, and before this check that barcode landed in the isbn
 // column as-is; now only a real ISBN (or ASIN) fills the field.
+//
+// What it writes does not survive a rescan: upsertBook assigns these from tags and
+// only locked fields are rescued, so retagging clears them and the enrichment marker
+// then stops `enrich` refilling without --force. That holds for every enrichment
+// write, not just books (the genre pass above records locked=0 too); changing it
+// means deciding enrichment outranks an empty tag on rescan.
 func (s *Store) ApplyBookEnrichment(ctx context.Context, in model.BookEnrichment) error {
 	const op = "store.ApplyBookEnrichment"
 	return s.writeTx(ctx, func(tx *sql.Tx) error {
@@ -531,10 +529,32 @@ func (s *Store) ApplyBookEnrichment(ctx context.Context, in model.BookEnrichment
 				s.log.Warn("enrichment: skipping malformed book identifier", "field", f.col, "value", val, "book", in.PID)
 				continue
 			}
-			if _, err := tx.ExecContext(ctx,
+			// A curated value keeps, including one locked deliberately empty, which the
+			// fill-when-empty WHERE alone would refill. The genre pass guards the same way.
+			locked, lerr := fieldLockedTx(ctx, tx, in.BookItemID, f.col)
+			if lerr != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, lerr)
+			}
+			if locked {
+				continue
+			}
+			r, err := tx.ExecContext(ctx,
 				"UPDATE book SET "+f.col+" = ? WHERE item_id = ? AND ("+f.col+" = '' OR "+f.col+" IS NULL)",
-				norm, in.BookItemID); err != nil {
+				norm, in.BookItemID)
+			if err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+			// Attribute what landed, the way the genre pass does. Unlocked, so a later
+			// tag still wins; the row is what the on-disk write-back selects on, and
+			// what tells a consumer the value came from a provider rather than the file.
+			if n, _ := r.RowsAffected(); n > 0 {
+				if _, err := tx.ExecContext(ctx, `INSERT INTO field_provenance(item_id, field, source, provider, locked, updated_at)
+					VALUES (?, ?, 'enrichment', ?, 0, ?)
+					ON CONFLICT(item_id, field) DO UPDATE SET source = 'enrichment',
+					  provider = excluded.provider, updated_at = excluded.updated_at`,
+					in.BookItemID, f.col, enrichProviderMusicBrainz, nowNS()); err != nil {
+					return waxerr.Wrap(waxerr.CodeIO, op, err)
+				}
 			}
 		}
 		if err := markEnrichedTx(ctx, tx, model.EnrichBookType, in.BookItemID, enrichProviderMusicBrainz, true, in.MBID); err != nil {
@@ -832,4 +852,80 @@ func limitOr(limit int) int {
 // *slog.Logger).
 type logger interface {
 	Warn(msg string, args ...any)
+}
+
+// enrichedTagSelect finds every file an enrichment write-back should stamp: the items
+// carrying a field_provenance row this pass wrote, joined to their backing files. A
+// book repeats across its parts because asin and isbn feed identity.BookKey, so parts
+// disagreeing on them would not group on the next scan; a track has one file. The
+// primary part sorts first, so a caller can abandon a book whose primary fails before
+// touching the rest.
+//
+// The ?1 bound is the pass's start, and it is what keeps this from being a full-library
+// rewrite: without it every run reopens and reparses every file any past pass ever
+// enriched. A --force run refills the values, which moves updated_at, so it re-writes
+// them too.
+//
+// Each value is gated on its own provenance row, so a field the user tagged (or edited)
+// is never rewritten from the catalog, and a locked row is excluded because a curated
+// value did not come from the file.
+//
+// The item_file join drops virtual tracks (start_frames IS NULL): one shared file backs
+// N cue-carved tracks, so an ungated join would rewrite that file once per track, each
+// after the first carrying a stale size/mtime for the optimistic update.
+const enrichedTagSelect = `SELECT pi.pid, f.pid, pi.kind, f.path, f.size, f.mtime_ns,
+		CASE WHEN itf.role = 'primary' THEN 1 ELSE 0 END,
+		CASE WHEN fp_asin.item_id IS NOT NULL THEN COALESCE(bk.asin,'') ELSE '' END,
+		CASE WHEN fp_isbn.item_id IS NOT NULL THEN COALESCE(bk.isbn,'') ELSE '' END,
+		CASE WHEN fp_pub.item_id IS NOT NULL THEN COALESCE(bk.publisher,'') ELSE '' END,
+		CASE WHEN fp_genre.item_id IS NOT NULL THEN COALESCE(NULLIF(t.genre,''), bk.genre, '') ELSE '' END
+	FROM playable_item pi
+	JOIN item_file itf ON itf.item_id = pi.id AND itf.start_frames IS NULL
+	JOIN file f ON f.id = itf.file_id
+	LEFT JOIN book bk ON bk.item_id = pi.id
+	LEFT JOIN track t ON t.item_id = pi.id
+	LEFT JOIN field_provenance fp_asin ON fp_asin.item_id = pi.id AND fp_asin.field = 'asin'
+		AND fp_asin.source = 'enrichment' AND fp_asin.locked = 0
+	LEFT JOIN field_provenance fp_isbn ON fp_isbn.item_id = pi.id AND fp_isbn.field = 'isbn'
+		AND fp_isbn.source = 'enrichment' AND fp_isbn.locked = 0
+	LEFT JOIN field_provenance fp_pub ON fp_pub.item_id = pi.id AND fp_pub.field = 'publisher'
+		AND fp_pub.source = 'enrichment' AND fp_pub.locked = 0
+	LEFT JOIN field_provenance fp_genre ON fp_genre.item_id = pi.id AND fp_genre.field = 'genre'
+		AND fp_genre.source = 'enrichment' AND fp_genre.locked = 0
+	WHERE pi.state = 'present' AND pi.kind IN ('track','book')
+	  AND (fp_asin.updated_at >= ?1 OR fp_isbn.updated_at >= ?1
+	       OR fp_pub.updated_at >= ?1 OR fp_genre.updated_at >= ?1)
+	ORDER BY pi.id, CASE WHEN itf.role = 'primary' THEN 0 ELSE 1 END, itf.position, f.id`
+
+// EnrichmentWriteback returns the files an enrichment write-back should stamp, with the
+// values to write. sinceNS bounds it to the values written at or after that time, which
+// a caller stamps before the pass it is about to mirror. A row with every value empty is
+// filtered out here rather than left for the caller: it means the provenance row
+// outlived the value (a rescan cleared it), and writing nothing is not the same as
+// clearing the tag.
+func (s *Store) EnrichmentWriteback(ctx context.Context, sinceNS int64) ([]model.EnrichedTagRow, error) {
+	const op = "store.EnrichmentWriteback"
+	rows, err := s.read.QueryContext(ctx, enrichedTagSelect, sinceNS)
+	if err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	defer rows.Close()
+	var out []model.EnrichedTagRow
+	for rows.Next() {
+		var r model.EnrichedTagRow
+		var primary int
+		if err := rows.Scan(&r.ItemPID, &r.FilePID, &r.Kind, &r.Path, &r.Size, &r.MTimeNS,
+			&primary, &r.ASIN, &r.ISBN, &r.Publisher, &r.Genre); err != nil {
+			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		r.IsPrimary = primary == 1
+		if r.ASIN == "" && r.ISBN == "" && r.Publisher == "" && r.Genre == "" {
+			continue
+		}
+		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	return out, nil
 }

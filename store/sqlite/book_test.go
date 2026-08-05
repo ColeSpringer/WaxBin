@@ -17,6 +17,7 @@ type bookSpec struct {
 	narrators              []string
 	series, seq            string
 	asin, isbn, edition    string
+	mbid                   string
 	year                   int
 	genres                 []string
 	position               int
@@ -49,7 +50,7 @@ func putBook(t *testing.T, st *Store, libID int64, s bookSpec) *model.ScanItemRe
 		Book: model.Book{
 			Author: s.author, AuthorSort: model.SortKey(s.author), Authors: []string{s.author},
 			Narrators: s.narrators, Series: s.series, SeriesSeq: s.seq,
-			ASIN: s.asin, ISBN: s.isbn, Edition: s.edition, Year: s.year,
+			ASIN: s.asin, ISBN: s.isbn, Edition: s.edition, MBID: s.mbid, Year: s.year,
 			Genres: s.genres, Genre: genre,
 		},
 		Position: s.position,

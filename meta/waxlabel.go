@@ -148,8 +148,8 @@ func tagsFromDoc(doc *waxlabel.Document, fields tag.Tags) model.Tags {
 		MBID:             strings.TrimSpace(fields.MusicBrainz.RecordingID),
 		MBReleaseID:      strings.TrimSpace(fields.MusicBrainz.ReleaseID),
 		MBReleaseGroupID: strings.TrimSpace(fields.MusicBrainz.ReleaseGroupID),
-		MBArtistID:       strings.TrimSpace(first(fields.MusicBrainz.ArtistID)),
-		MBAlbumArtistID:  strings.TrimSpace(first(fields.MusicBrainz.AlbumArtistID)),
+		MBArtistIDs:      trimAll(fields.MusicBrainz.ArtistID),
+		MBAlbumArtistIDs: trimAll(fields.MusicBrainz.AlbumArtistID),
 
 		Container:  strings.ToLower(strings.TrimSpace(props.Container)),
 		Codec:      normalizeCodec(at.Codec),
@@ -655,9 +655,21 @@ func chaptersFromDoc(doc *waxlabel.Document) []model.Chapter {
 // applyBookFields classifies a file as an audiobook and, when it is, fills the
 // spoken-word fields on t from the caller's already-projected tag view.
 // A file is a book when its container is .m4b, its iTunes media kind is audiobook
-// (stik=2), or it carries a narrator credit. Series/sequence, abridged/edition come
-// from conventional tag patterns; ASIN/ISBN/subtitle/publisher are
-// enrichment-populated (the schema and layout carry them, tags rarely do).
+// (stik=2), or it carries a narrator credit. Series/sequence and abridged/edition come
+// from conventional tag patterns.
+//
+// The three identifier fields are read here rather than globally because they are
+// kind-dependent. Publisher rides the same frame as an album's label (TPUB, Vorbis and
+// Matroska PUBLISHER), which the projection hands over as fields.Label; for a book that
+// value is the publisher, and a book consumes no album label, so the two never collide.
+// ASIN and ISBN have no typed key in the tag library, so they arrive as custom tags and
+// are promoted out of that map here. They stay reserved for a book alone: a music
+// release can carry an ASIN too, and reserving the key globally would drop it from
+// every track that has one, since this function returns early for a non-book.
+//
+// Reading them is what lets enrichment write them back to disk and survive a rescan:
+// a field the reader ignores is one the scanner clears from an empty value on every
+// content-changed rescan, however it is tagged.
 func applyBookFields(t *model.Tags, fields tag.Tags, path string) {
 	// tag.Project does not trim, so trim the two values whose meaning depends on it:
 	// mediaType is compared exactly, and narrator gates on being non-empty. The rest
@@ -678,6 +690,26 @@ func applyBookFields(t *model.Tags, fields tag.Tags, path string) {
 	t.Description = firstNonEmpty(fields.Description, fields.LongDescription)
 	t.Series, t.SeriesSeq = parseSeries(fields.Grouping)
 	t.Abridged, t.Edition = parseAbridged(t.Album, t.Title, t.Comment)
+	t.Publisher = strings.TrimSpace(fields.Label)
+	t.ASIN = takeCustom(t, "ASIN")
+	t.ISBN = takeCustom(t, "ISBN")
+}
+
+// takeCustom promotes a custom tag to a typed field: it returns the key's first
+// non-empty value and removes it from the custom map, so one value never reports
+// through two surfaces.
+func takeCustom(t *model.Tags, key string) string {
+	vals, ok := t.Custom[key]
+	if !ok {
+		return ""
+	}
+	delete(t.Custom, key)
+	for _, v := range vals {
+		if s := strings.TrimSpace(v); s != "" {
+			return s
+		}
+	}
+	return ""
 }
 
 // firstTag returns the first value of a canonical key, trimmed, or "". It reads

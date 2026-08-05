@@ -90,6 +90,12 @@ type Config struct {
 	// by default: the catalog is always authoritative; this only mirrors it to tags
 	// for external players. Never writes a locked-format's audio (essence-verified).
 	WriteReplayGainTags bool `json:"write_replaygain_tags,omitempty"`
+	// WriteEnrichmentTags, when true, makes the enrich pass write what it filled back
+	// into files on disk: a book's ASIN/ISBN/PUBLISHER and a track's GENRE. Off by
+	// default, like its ReplayGain sibling. Unlike that one it is not only a mirror:
+	// the scanner rebuilds these columns from tags, so a value that never reaches the
+	// file is cleared by the next content-changed rescan.
+	WriteEnrichmentTags bool `json:"write_enrichment_tags,omitempty"`
 	// StampItemPID, when true, makes organize's tag write-back also stamp the backing
 	// item's stable WaxBin PID into a WAXBIN_ITEM_PID tag on managed-root files, so a
 	// rebuild-from-tags can restore item identity. Off by default and managed-only;

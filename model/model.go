@@ -106,8 +106,8 @@ type Track struct {
 	MBID             string // MusicBrainz recording id
 	MBReleaseID      string
 	MBReleaseGroupID string
-	MBArtistID       string
-	MBAlbumArtistID  string
+	MBArtistIDs      []string // see Tags.MBArtistIDs
+	MBAlbumArtistIDs []string
 
 	// Album-level release identifiers carried from the file's tags into album
 	// resolution (they land on the album entity, not the denormalized track row).
@@ -167,8 +167,13 @@ type Tags struct {
 	MBID             string // MusicBrainz recording id
 	MBReleaseID      string
 	MBReleaseGroupID string
-	MBArtistID       string
-	MBAlbumArtistID  string
+	// The artist ids the file lists for the credit, in tag order. Plural because a
+	// joint credit ("Jay-Z feat. Alicia Keys") carries one id per artist while the
+	// credit resolves to a single artist entity named for the whole string, so no
+	// single id describes that entity. Entity resolution takes an id only when there
+	// is exactly one; see SoleMBID.
+	MBArtistIDs      []string
+	MBAlbumArtistIDs []string
 
 	// Audio properties, read from the container without decoding PCM.
 	Container  string
@@ -278,6 +283,24 @@ type ItemView struct {
 	AlbumPID        PID
 	ReleaseGroupPID PID
 	PodcastPID      PID
+
+	// External identifiers, projected so a consumer can hand an item to a
+	// MusicBrainz-keyed service without a lookup per item. MBID is the item's own id: a
+	// recording id for a track, a release id for a book. AlbumMBID is the release the
+	// item belongs to, and unlike AlbumPID it is filled for a book too, from that same
+	// book.mbid, so a Cover Art Archive consumer need not branch on Kind.
+	// ReleaseGroupMBID is track-only; the artist pair follows the same resolution as
+	// ArtistPID/AlbumArtistPID, so a book resolves its author.
+	//
+	// Each is empty when unknown, the common case. An enriched-rather-than-tagged
+	// library carries ReleaseGroupMBID and not AlbumMBID: enrichment resolves release
+	// groups, never releases.
+	MBID             string
+	ISRC             string
+	AlbumMBID        string
+	ReleaseGroupMBID string
+	ArtistMBID       string
+	AlbumArtistMBID  string
 
 	// Composer and its collation key, populated for track items (empty for
 	// books/episodes; a book's narrator-in-COMPOSER convention is handled at scan

@@ -8,6 +8,7 @@ import (
 	"github.com/colespringer/waxbin/identity"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/query"
+	"github.com/colespringer/waxbin/read"
 )
 
 // TestItemViewEntityPIDs pins the entity-handle columns the item view projects: a
@@ -248,5 +249,236 @@ func TestItemViewExplicit(t *testing.T) {
 	}
 	if !equalStrings(flaggedTitles, []string{"Marked", "Unmarked"}) {
 		t.Errorf("AdvisoryFlagged = %v, want both episodes", flaggedTitles)
+	}
+}
+
+// TestItemViewIdentifiers pins the external-identifier columns across the three paths
+// that splice the shared column list differently. The book arm is the one that is not
+// a straight copy: with no album entity, its AlbumMBID reads its own book.mbid rather
+// than staying empty the way AlbumPID does.
+func TestItemViewIdentifiers(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+
+	const (
+		recordingMBID   = "rec-1111"
+		releaseMBID     = "rel-2222"
+		rgMBID          = "rg-3333"
+		artistMBID      = "art-4444"
+		albumArtistMBID = "art-5555"
+		trackISRC       = "USRC17607839"
+		bookMBID        = "rel-6666"
+	)
+	tr := putTrack(t, st, lib.ID, trackSpec{
+		path: "/lib/al/01.flac", essence: "e1", content: "c1",
+		title: "Airbag", artist: "Track Artist", albumArt: "Album Artist", album: "OK Computer",
+		year: 1997, durationMS: 100,
+		mbRecording: recordingMBID, mbRelease: releaseMBID, mbReleaseGroup: rgMBID,
+		mbArtists: []string{artistMBID}, mbAlbumArtists: []string{albumArtistMBID}, isrc: trackISRC,
+	})
+	bk := putBook(t, st, lib.ID, bookSpec{
+		path: "/lib/book.m4b", essence: "be1", content: "bc1",
+		title: "The Hobbit", author: "J.R.R. Tolkien", mbid: bookMBID, durationMS: 3000,
+	})
+
+	wantTrack := model.ItemView{
+		MBID: recordingMBID, ISRC: trackISRC, AlbumMBID: releaseMBID,
+		ReleaseGroupMBID: rgMBID, ArtistMBID: artistMBID, AlbumArtistMBID: albumArtistMBID,
+	}
+	wantBook := model.ItemView{
+		MBID: bookMBID, AlbumMBID: bookMBID,
+	}
+	check := func(path string, got *model.ItemView, want model.ItemView) {
+		t.Helper()
+		if got.MBID != want.MBID || got.ISRC != want.ISRC || got.AlbumMBID != want.AlbumMBID ||
+			got.ReleaseGroupMBID != want.ReleaseGroupMBID || got.ArtistMBID != want.ArtistMBID ||
+			got.AlbumArtistMBID != want.AlbumArtistMBID {
+			t.Errorf("%s %s identifiers = mbid:%q isrc:%q album:%q rg:%q artist:%q albumArtist:%q, "+
+				"want mbid:%q isrc:%q album:%q rg:%q artist:%q albumArtist:%q",
+				path, got.Title, got.MBID, got.ISRC, got.AlbumMBID, got.ReleaseGroupMBID,
+				got.ArtistMBID, got.AlbumArtistMBID,
+				want.MBID, want.ISRC, want.AlbumMBID, want.ReleaseGroupMBID,
+				want.ArtistMBID, want.AlbumArtistMBID)
+		}
+	}
+
+	trackView, err := st.ItemByPID(ctx, tr.ItemPID)
+	if err != nil {
+		t.Fatalf("track view: %v", err)
+	}
+	check("ItemByPID", trackView, wantTrack)
+	bookView, err := st.ItemByPID(ctx, bk.ItemPID)
+	if err != nil {
+		t.Fatalf("book view: %v", err)
+	}
+	check("ItemByPID", bookView, wantBook)
+
+	if trackView.ArtistMBID == trackView.AlbumArtistMBID {
+		t.Error("track artist and album-artist MBIDs are equal; the fixture credits distinct artists")
+	}
+	if bookView.ArtistMBID != bookView.AlbumArtistMBID {
+		t.Errorf("book artist/album-artist MBIDs = %q/%q, want both to resolve the one author",
+			bookView.ArtistMBID, bookView.AlbumArtistMBID)
+	}
+
+	byPID := func(items []*model.ItemView) map[model.PID]*model.ItemView {
+		m := make(map[model.PID]*model.ItemView, len(items))
+		for _, v := range items {
+			m[v.PID] = v
+		}
+		return m
+	}
+
+	items, err := st.QueryItems(ctx, query.New(query.EntityItems).Build(), "")
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	q := byPID(items)
+	if len(q) != 2 {
+		t.Fatalf("query returned %d items, want 2", len(q))
+	}
+	check("QueryItems", q[tr.ItemPID], wantTrack)
+	check("QueryItems", q[bk.ItemPID], wantBook)
+
+	page, err := st.BrowsePage(ctx, read.ListAlphabetical, read.BrowseOptions{Limit: 10})
+	if err != nil {
+		t.Fatalf("browse: %v", err)
+	}
+	b := byPID(page.Items)
+	if len(b) != 2 {
+		t.Fatalf("browse returned %d items, want 2", len(b))
+	}
+	check("BrowsePage", b[tr.ItemPID], wantTrack)
+	check("BrowsePage", b[bk.ItemPID], wantBook)
+}
+
+// TestItemViewIdentifiersUnderMegabytesBudget covers the one reader that extends the
+// column list and the dest list at two independent sites, so an off-by-one between
+// them shifts the identifiers rather than failing the scan. The values are asserted,
+// not just the query: an all-text shift still scans cleanly.
+func TestItemViewIdentifiersUnderMegabytesBudget(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	tr := putTrack(t, st, lib.ID, trackSpec{
+		path: "/lib/al/01.flac", essence: "e1", content: "c1",
+		title: "Airbag", artist: "Track Artist", albumArt: "Album Artist", album: "OK Computer",
+		durationMS:  100,
+		mbRecording: "rec-1111", mbRelease: "rel-2222", mbReleaseGroup: "rg-3333",
+		mbArtists: []string{"art-4444"}, mbAlbumArtists: []string{"art-5555"}, isrc: "USRC17607839",
+	})
+	setFileSize(t, st, "/lib/al/01.flac", 100)
+
+	items, err := st.QueryItems(ctx, query.New(query.EntityItems).
+		Limit(1).LimitBy(query.LimitMegabytes).Build(), "")
+	if err != nil {
+		t.Fatalf("megabytes query: %v", err)
+	}
+	if len(items) != 1 || items[0].PID != tr.ItemPID {
+		t.Fatalf("megabytes budget returned %d items, want the one track", len(items))
+	}
+	v := items[0]
+	if v.MBID != "rec-1111" || v.ISRC != "USRC17607839" || v.AlbumMBID != "rel-2222" ||
+		v.ReleaseGroupMBID != "rg-3333" || v.ArtistMBID != "art-4444" || v.AlbumArtistMBID != "art-5555" {
+		t.Errorf("identifiers under the megabytes budget = %q/%q/%q/%q/%q/%q; a shifted "+
+			"column list would land the wrong value in each",
+			v.MBID, v.ISRC, v.AlbumMBID, v.ReleaseGroupMBID, v.ArtistMBID, v.AlbumArtistMBID)
+	}
+	if v.DurationMS == 0 {
+		t.Error("budget row lost its duration; the widened SELECT and its dests are out of step")
+	}
+}
+
+// TestIdentifierQueryFields covers the filters behind a "which items have no
+// MusicBrainz id" sweep. isMissing is the whole point: the columns are nullable and
+// the fields COALESCE to ”, so it has to match both an absent row and an empty
+// string. mbid spans track and book, which is why an untagged book counts.
+func TestIdentifierQueryFields(t *testing.T) {
+	st, lib := entityFixture(t)
+
+	putTrack(t, st, lib.ID, trackSpec{
+		path: "/lib/1.flac", essence: "e1", content: "c1", title: "Tagged",
+		artist: "A", albumArt: "A", album: "Al",
+		mbRecording: "rec-1", mbRelease: "rel-1", isrc: "USRC17607839",
+	})
+	putTrack(t, st, lib.ID, trackSpec{
+		path: "/lib/2.flac", essence: "e2", content: "c2", title: "Bare",
+		artist: "B", albumArt: "B", album: "Bl",
+	})
+	putBook(t, st, lib.ID, bookSpec{
+		path: "/lib/b1.m4b", essence: "be1", content: "bc1",
+		title: "Tagged Book", author: "Auth One", mbid: "rel-book",
+	})
+	putBook(t, st, lib.ID, bookSpec{
+		path: "/lib/b2.m4b", essence: "be2", content: "bc2",
+		title: "Bare Book", author: "Auth Two",
+	})
+
+	for _, tc := range []struct {
+		field string
+		op    query.Op
+		value any
+		want  int
+		why   string
+	}{
+		{"mbid", query.OpIs, "rec-1", 1, "the tagged track by its recording id"},
+		{"mbid", query.OpIs, "rel-book", 1, "the tagged book by its release id"},
+		{"mbid", query.OpIsPresent, nil, 2, "one tagged track and one tagged book"},
+		{"mbid", query.OpIsMissing, nil, 2, "the bare track and the bare book"},
+		{"isrc", query.OpIs, "USRC17607839", 1, "the one track carrying an ISRC"},
+		{"isrc", query.OpIsMissing, nil, 3, "everything else, books included"},
+		{"album_mbid", query.OpIs, "rel-1", 1, "the track whose album carries the release id"},
+		{"album_mbid", query.OpIs, "rel-book", 1, "the book, which reports its own id here"},
+		{"album_mbid", query.OpIsMissing, nil, 2, "the bare track and the bare book"},
+	} {
+		if n := countWhere(t, st, tc.field, tc.op, tc.value); n != tc.want {
+			t.Errorf("%s %s %v = %d, want %d (%s)", tc.field, tc.op, tc.value, n, tc.want, tc.why)
+		}
+	}
+}
+
+// TestReleaseGroupMBIDField: the query surface must be able to express what audit's
+// missing_mbid walks. An enriched-but-untagged library carries only a release-group
+// id, so mbid/album_mbid alone would report every track as missing while the audit
+// reports none.
+func TestReleaseGroupMBIDField(t *testing.T) {
+	st, lib := entityFixture(t)
+
+	putTrack(t, st, lib.ID, trackSpec{
+		path: "/lib/1.flac", essence: "e1", content: "c1", title: "Grouped",
+		artist: "A", albumArt: "A", album: "Al1", mbReleaseGroup: "rg-1"})
+	putTrack(t, st, lib.ID, trackSpec{
+		path: "/lib/2.flac", essence: "e2", content: "c2", title: "Bare",
+		artist: "B", albumArt: "B", album: "Al2"})
+	// An episode carries no MusicBrainz identity and never will, so the audit excludes
+	// it by kind. Without it in the fixture the equivalence below passes for the wrong
+	// reason: the query chain has to spell that exclusion out.
+	putFeed(t, st, "http://cast.example/f", "Ep1", "Ep2")
+
+	if n := countWhere(t, st, "release_group_mbid", query.OpIs, "rg-1"); n != 1 {
+		t.Errorf("release_group_mbid is rg-1 = %d, want 1", n)
+	}
+	// The bare track plus both episodes: an episode has no release group either, which
+	// is why the audit scopes by kind rather than leaning on this field alone.
+	if n := countWhere(t, st, "release_group_mbid", query.OpIsMissing, nil); n != 3 {
+		t.Errorf("release_group_mbid isMissing = %d, want 3 (the bare track and two episodes)", n)
+	}
+
+	// The full chain the audit walks is now expressible, and agrees with it. The kind
+	// filter is part of the equivalence, not incidental: itemsMissingMBIDWhere is scoped
+	// to tracks and books, so a query without it also counts every episode.
+	uncovered, err := st.CountItems(context.Background(), query.New(query.EntityItems).
+		WhereValues("kind", query.OpIn, "track", "book").
+		WherePresence("mbid", query.OpIsMissing).
+		WherePresence("album_mbid", query.OpIsMissing).
+		WherePresence("release_group_mbid", query.OpIsMissing).Build(), "")
+	if err != nil {
+		t.Fatalf("chain query: %v", err)
+	}
+	_, total, err := st.ItemsMissingMBID(context.Background(), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if uncovered != total {
+		t.Errorf("query chain counts %d uncovered, audit counts %d; they must agree", uncovered, total)
 	}
 }

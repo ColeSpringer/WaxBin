@@ -36,6 +36,9 @@ type Options struct {
 	// WriteReplayGainTags mirrors computed ReplayGain into files after analyze (off
 	// by default; the catalog stays authoritative).
 	WriteReplayGainTags bool
+	// WriteEnrichmentTags writes what enrichment filled back into files after an
+	// enrich pass (off by default), which is also what makes it survive a rescan.
+	WriteEnrichmentTags bool
 	// StampItemPID stamps the backing item's WaxBin PID into a tag during organize's
 	// tag write-back on managed roots (off by default).
 	StampItemPID bool
@@ -77,6 +80,7 @@ func OptionsFromConfig(cfg *config.Config, log *slog.Logger) Options {
 		Inbox:                 cfg.Inbox,
 		FreeSpaceReserveBytes: cfg.FreeSpaceReserveBytes,
 		WriteReplayGainTags:   cfg.WriteReplayGainTags,
+		WriteEnrichmentTags:   cfg.WriteEnrichmentTags,
 		StampItemPID:          cfg.StampItemPID,
 		Podcasts:              cfg.Podcasts,
 		Enrichment:            cfg.Enrichment,

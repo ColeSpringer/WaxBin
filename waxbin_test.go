@@ -1635,3 +1635,52 @@ func TestTrashExpandsMultiFileBook(t *testing.T) {
 		t.Errorf("parts left on disk after delete: %v", left)
 	}
 }
+
+// TestAlbumReleaseIdentifiersFromTags walks the release identifiers the whole way:
+// a tagged file on disk, through the WaxLabel adapter and the album entity, to the
+// read surface. Each leg was covered on its own but the chain was not, and the
+// three arrive by two different ID3 routes (TPUB for the label, TXXX for the other
+// two), so a mapping regression on either could not surface.
+func TestAlbumReleaseIdentifiersFromTags(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	writeFile(t, filepath.Join(root, "airbag.mp3"), testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
+		Title: "Airbag", Artist: "Radiohead", AlbumArtist: "Radiohead", Album: "OK Computer",
+		Track: 1, Year: 1997, Label: "Parlophone",
+		TXXX: []testaudio.TXXXFrame{
+			{Desc: "BARCODE", Value: "724385522925"},
+			{Desc: "CATALOGNUMBER", Value: "CDNODATA 02"},
+		},
+	}))
+
+	lib := openManaged(t, ctx, db, root)
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+
+	items, err := lib.Query(ctx, query.New(query.EntityItems).Build(), "")
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("query returned %d items, want 1", len(items))
+	}
+	if items[0].AlbumPID == "" {
+		t.Fatal("scanned track has no album entity to read identifiers off")
+	}
+
+	album, err := lib.EntityByPID(ctx, read.EntityAlbum, items[0].AlbumPID)
+	if err != nil {
+		t.Fatalf("album entity: %v", err)
+	}
+	if album.Barcode != "724385522925" {
+		t.Errorf("album Barcode = %q, want the tagged 724385522925", album.Barcode)
+	}
+	if album.Label != "Parlophone" {
+		t.Errorf("album Label = %q, want the tagged Parlophone (ID3 carries it in TPUB)", album.Label)
+	}
+	if album.CatalogNumber != "CDNODATA 02" {
+		t.Errorf("album CatalogNumber = %q, want the tagged CDNODATA 02", album.CatalogNumber)
+	}
+}

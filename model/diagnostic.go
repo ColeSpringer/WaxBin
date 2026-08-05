@@ -92,12 +92,13 @@ const (
 	OriginOrganize   DiagnosticOrigin = "organize"
 	OriginReplayGain DiagnosticOrigin = "replaygain"
 	OriginEdit       DiagnosticOrigin = "edit"
+	OriginEnrichment DiagnosticOrigin = "enrichment"
 )
 
 // Valid reports whether o is a known diagnostic writer.
 func (o DiagnosticOrigin) Valid() bool {
 	switch o {
-	case OriginScan, OriginOrganize, OriginReplayGain, OriginEdit:
+	case OriginScan, OriginOrganize, OriginReplayGain, OriginEdit, OriginEnrichment:
 		return true
 	default:
 		return false

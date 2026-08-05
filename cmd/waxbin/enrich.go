@@ -14,6 +14,7 @@ import (
 
 func newEnrichCmd(g *globals) *cobra.Command {
 	var force bool
+	var writeTags bool
 	var limit int
 	var item string
 	var entity string
@@ -39,8 +40,8 @@ func newEnrichCmd(g *globals) *cobra.Command {
 			if item != "" && entity != "" {
 				return fmt.Errorf("scope by --item or --entity, not both")
 			}
-			opts := waxbin.EnrichOptions{Force: force, Limit: limit, ItemPID: model.PID(item)}
-			params := proxy.EnrichParams{Force: force, Limit: limit, ItemPID: item}
+			opts := waxbin.EnrichOptions{Force: force, Limit: limit, ItemPID: model.PID(item), WriteTags: writeTags}
+			params := proxy.EnrichParams{Force: force, Limit: limit, ItemPID: item, WriteTags: writeTags}
 			if entity != "" {
 				typ, pid, ok := strings.Cut(entity, ":")
 				if !ok || typ == "" || pid == "" {
@@ -91,6 +92,7 @@ func newEnrichCmd(g *globals) *cobra.Command {
 			return renderEnrichResult(cmd, g, res)
 		},
 	}
+	cmd.Flags().BoolVar(&writeTags, "write-tags", false, "write what the pass filled back into the files on disk")
 	cmd.Flags().BoolVar(&force, "force", false, "re-enrich entities already looked up")
 	cmd.Flags().IntVar(&limit, "limit", 0, "cap the number of entities processed (0 = all)")
 	cmd.Flags().StringVar(&item, "item", "", "scope the pass to one item's targets (item pid; implies --force)")
@@ -111,6 +113,12 @@ func renderEnrichResult(cmd *cobra.Command, g *globals, res *waxbin.EnrichResult
 	fmt.Fprintf(w, "books:          %d enriched (%d matched)\n", r.BooksEnriched, r.BooksMatched)
 	fmt.Fprintf(w, "lyrics:         %d looked up (%d matched)\n", r.LyricsEnriched, r.LyricsMatched)
 	fmt.Fprintf(w, "cover art:      %d fetched\n", r.ArtFetched)
+	// Only when the run wrote tags, and always with the failures beside the writes: a
+	// run where every write failed must not read like one with nothing to write.
+	if r.TagsWritten+r.TagsFailed+r.TagsUnrepresented+r.TagsSkipped > 0 {
+		fmt.Fprintf(w, "tags written:   %d (%d failed, %d unrepresented, %d skipped)\n",
+			r.TagsWritten, r.TagsFailed, r.TagsUnrepresented, r.TagsSkipped)
+	}
 	fmt.Fprintf(w, "job:            %s\n", res.JobPID)
 	return nil
 }

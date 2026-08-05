@@ -49,10 +49,13 @@ func entityPIDByName(t *testing.T, st *Store, table, nameCol, name string) model
 // author, the members every kind's lookup is asserted against.
 func entityInfoFixture(t *testing.T) (*Store, *model.Library) {
 	st, lib := entityFixture(t)
+	// The release identifiers ride on the fixture album so the batch/single parity
+	// check below compares them non-empty.
 	putTrack(t, st, lib.ID, trackSpec{
 		path: "/lib/Radiohead/OK Computer/01.flac", essence: "e1", content: "c1",
 		title: "Airbag", artist: "Radiohead", album: "OK Computer", genre: "Rock",
 		year: 1997, durationMS: 100,
+		barcode: "724385522925", label: "Parlophone", catNo: "CDNODATA 02",
 	})
 	putTrack(t, st, lib.ID, trackSpec{
 		path: "/lib/Radiohead/OK Computer/02.flac", essence: "e2", content: "c2",
@@ -396,5 +399,33 @@ func TestEntityPageBadInput(t *testing.T) {
 	}
 	if _, err := st.EntityPage(ctx, read.EntityArtist, "not-a-cursor!!", 0); !waxerr.Is(err, waxerr.CodeInvalid) {
 		t.Errorf("malformed cursor = %v, want CodeInvalid", err)
+	}
+}
+
+// TestEntityInfoAlbumIdentifiers reads back the album's other release identifiers,
+// which scan fills from tags and entity edit can write but nothing could read.
+func TestEntityInfoAlbumIdentifiers(t *testing.T) {
+	st, _ := entityInfoFixture(t)
+	ctx := context.Background()
+
+	albumPID := entityPIDByName(t, st, "album", "title", "OK Computer")
+	album, err := st.EntityByPID(ctx, read.EntityAlbum, albumPID)
+	if err != nil {
+		t.Fatalf("album: %v", err)
+	}
+	if album.Barcode != "724385522925" || album.Label != "Parlophone" || album.CatalogNumber != "CDNODATA 02" {
+		t.Errorf("album identifiers = %q/%q/%q, want the scanned values",
+			album.Barcode, album.Label, album.CatalogNumber)
+	}
+
+	// Album only, as Type and Year already are.
+	rg, err := st.EntityByPID(ctx, read.EntityReleaseGroup,
+		entityPIDByName(t, st, "release_group", "title", "OK Computer"))
+	if err != nil {
+		t.Fatalf("release group: %v", err)
+	}
+	if rg.Barcode != "" || rg.Label != "" || rg.CatalogNumber != "" {
+		t.Errorf("release group carries album identifiers %q/%q/%q, want all empty",
+			rg.Barcode, rg.Label, rg.CatalogNumber)
 	}
 }
