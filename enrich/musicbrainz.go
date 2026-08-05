@@ -67,28 +67,37 @@ type mbArtistCred struct {
 	Artist mbArtist `json:"artist"`
 }
 
-// mbRelease is the subset of a MusicBrainz release we consume for audiobooks.
+// mbRelease is the subset of a MusicBrainz release we consume, for audiobooks and
+// for the album release match. ReleaseGroup is present on a search document and is
+// what the release match verifies against, rather than trusting that the query's
+// rgid term was honored.
 type mbRelease struct {
-	ID        string        `json:"id"`
-	Title     string        `json:"title"`
-	ASIN      string        `json:"asin"`
-	Barcode   string        `json:"barcode"` // often the ISBN/EAN for books
-	Score     int           `json:"score"`
-	LabelInfo []mbLabelInfo `json:"label-info"`
+	ID           string          `json:"id"`
+	Title        string          `json:"title"`
+	ASIN         string          `json:"asin"`
+	Barcode      string          `json:"barcode"` // often the ISBN/EAN for books
+	Score        int             `json:"score"`
+	LabelInfo    []mbLabelInfo   `json:"label-info"`
+	ReleaseGroup *mbReleaseGroup `json:"release-group"`
 }
 
 type mbLabelInfo struct {
-	Label struct {
+	CatalogNumber string `json:"catalog-number"`
+	Label         struct {
 		Name string `json:"name"`
 	} `json:"label"`
 }
 
-// artistSearchResult / releaseGroupSearchResult wrap the search list responses.
+// artistSearchResult / releaseGroupSearchResult / releaseSearchResult wrap the
+// search list responses.
 type artistSearchResult struct {
 	Artists []mbArtist `json:"artists"`
 }
 type releaseGroupSearchResult struct {
 	ReleaseGroups []mbReleaseGroup `json:"release-groups"`
+}
+type releaseSearchResult struct {
+	Releases []mbRelease `json:"releases"`
 }
 
 // minMatchScore is the search score required to accept a text-search hit. It is
@@ -180,6 +189,36 @@ func releaseGroupArtistName(rg *mbReleaseGroup) string {
 		return ""
 	}
 	return rg.ArtistCredit[0].Artist.Name
+}
+
+// searchReleaseByIdentifier finds the releases of one release group carrying an
+// identifier, as a Lucene query against the search server. field is a release-search
+// index field ("barcode", "catno") and values are the spellings to accept, OR-ed, so
+// a barcode can ask for the padded and unpadded forms in one request.
+//
+// Searching rather than browsing the group is deliberate. A release browse caps at
+// 100 per page, and the groups that exceed it are exactly the popular records a
+// barcode most often identifies, so a browse fails on the population this exists to
+// serve. Note also that the obvious REST spelling does not exist: barcode is not a
+// browse parameter, and inc= does not apply to search, so it has to be query=.
+//
+// rgMBID is interpolated unescaped and must be a validated UUID: escapeLucene
+// escapes '-', which every UUID is built from.
+func (m *musicBrainz) searchReleaseByIdentifier(ctx context.Context, force bool, rgMBID, field string, values []string) ([]mbRelease, error) {
+	if rgMBID == "" || len(values) == 0 {
+		return nil, nil
+	}
+	terms := make([]string, 0, len(values))
+	for _, v := range values {
+		terms = append(terms, field+`:"`+escapeLucene(v)+`"`)
+	}
+	q := "rgid:" + rgMBID + " AND (" + strings.Join(terms, " OR ") + ")"
+	var res releaseSearchResult
+	if err := m.get(ctx, force, "mb:release-ident:"+rgMBID+"\x1f"+field+"\x1f"+strings.Join(values, "|"),
+		"/release?query="+url.QueryEscape(q)+"&limit=25&fmt=json", &res); err != nil {
+		return nil, err
+	}
+	return res.Releases, nil
 }
 
 // lookupRelease fetches a release by MBID with label info (for audiobook publisher).

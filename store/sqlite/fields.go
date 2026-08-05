@@ -91,11 +91,12 @@ const (
 // move updated_at), which is what makes last_progress the ordering key for "where was I".
 //
 // The entity-handle fields filter by normalized-entity identity instead of display
-// text, so a facet drilldown can query by the bucket's EntityPID. There are seven,
-// and they split two ways: artist_pid, album_artist_pid, album_pid,
-// release_group_pid, podcast_pid, and library are scalar columns lowered on the value
-// side, while genre_pid alone is a set field over item_genre (the last paragraph below
-// says why it stays one).
+// text, so a facet drilldown can query by the bucket's EntityPID. There are eight, and
+// they split two ways: artist_pid, album_artist_pid, album_pid, release_group_pid,
+// podcast_pid, and library are scalar columns lowered on the value side, while
+// genre_pid and credit_artist_pid are set fields, over item_genre and
+// item_contributor, because those dimensions hold many rows per item (the last
+// paragraph below says why they stay set fields).
 //
 // The artist exprs share itemArtistIDExpr/itemAlbumArtistIDExpr with the facet specs,
 // so a facet bucket's EntityPID and a pid filter can never disagree (a book matches by
@@ -136,10 +137,10 @@ const (
 // deny-list contract a stale entry needs; see query.Column.ValueSub. A caller
 // scoping visibility by library has to decide what a fileless item means to it.
 //
-// genre_pid stays a set field over item_genre (tag-field semantics: isNot is a
-// deny-list, ordered operators are rejected) and is deliberately not converted.
-// Its EXISTS correlates on pi.id whatever side the value sits, so lowering would save
-// the per-row genre join but not the scan, and it would need a second lowering
+// genre_pid and credit_artist_pid stay set fields (tag-field semantics: isNot is a
+// deny-list, ordered operators are rejected) and are deliberately not converted.
+// Their EXISTS correlates on pi.id whatever side the value sits, so lowering would
+// save the per-row join but not the scan, and it would need a second lowering
 // mechanism on SetColumn for no plan change.
 //
 // has_art and has_lyrics are presence probes: EXISTS lowered to 0/1, never NULL,
@@ -207,6 +208,11 @@ var itemFields = query.FieldMap{
 	"genre_pid": {Set: &query.SetColumn{
 		Sub:       "SELECT 1 FROM item_genre igq JOIN genre gq ON gq.id = igq.genre_id WHERE igq.item_id = pi.id",
 		ValueExpr: "gq.pid",
+	}},
+	"credit_artist_pid": {Set: &query.SetColumn{
+		Sub: "SELECT 1 FROM item_contributor icq JOIN artist caq ON caq.id = icq.artist_id" +
+			" WHERE icq.item_id = pi.id AND icq.role = 'artist'",
+		ValueExpr: "caq.pid",
 	}},
 
 	// External identifiers. Each COALESCEs to '' so isPresent and isMissing read as

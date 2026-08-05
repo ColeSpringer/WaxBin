@@ -97,8 +97,17 @@ type Track struct {
 	Year         int
 	Genre        string   // joined display of Genres (the denormalized column)
 	Genres       []string // individual genres, resolved into item_genre links
-	Compilation  bool     // multi-artist release; uses the Various Artists layout
-	ISRC         string
+	// Artists is the credit list someone stated: a repeated ARTIST frame, or a curated
+	// credit. Empty means Artist is the whole credit and the store splits it. A stated
+	// list is taken verbatim; only a split one can be overruled by a tagged artist id.
+	//
+	// Artist keeps the file's raw string, or the stated list joined when there are
+	// several and no single raw string exists. Rewriting a scanned credit beyond that
+	// would change artist_sort and the organize path, unlike book.author which is
+	// rebuilt. Album identity does not read it: see resolveAndLinkEntities.
+	Artists     []string
+	Compilation bool // multi-artist release; uses the Various Artists layout
+	ISRC        string
 
 	// External identifiers anchor MBID-first entity identity and enrichment
 	// lookups. MBID is the recording id (kept for back-compat); the
@@ -298,9 +307,11 @@ type ItemView struct {
 	// ReleaseGroupMBID is track-only; the artist pair follows the same resolution as
 	// ArtistPID/AlbumArtistPID, so a book resolves its author.
 	//
-	// Each is empty when unknown, the common case. An enriched-rather-than-tagged
-	// library carries ReleaseGroupMBID and not AlbumMBID: enrichment resolves release
-	// groups, never releases.
+	// Each is empty when unknown, the common case. Enrichment resolves a release group
+	// from its title and artist, but a release only from an identifier the album
+	// already carries, so a library enriched rather than tagged carries
+	// ReleaseGroupMBID everywhere and AlbumMBID only where a barcode or catalog number
+	// pinned one release of the group.
 	MBID             string
 	ISRC             string
 	AlbumMBID        string

@@ -25,8 +25,8 @@ func newCreditCmd(g *globals) *cobra.Command {
 			"clears the role). A credit records user provenance and, by default, locks the " +
 			"credit.<role> field. --write-back also mirrors the credit into the file's on-disk " +
 			"tag (a track's music role, or a book's author/narrator across its parts).\n\n" +
-			"Music roles (tracks): composer, lyricist, conductor, performer, remixer, producer, " +
-			"engineer, mixer, arranger, writer, djmixer.\n" +
+			"Music roles (tracks): artist, composer, lyricist, conductor, performer, remixer, " +
+			"producer, engineer, mixer, arranger, writer, djmixer.\n" +
 			"Book roles (audiobooks): author, narrator, translator, editor.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {

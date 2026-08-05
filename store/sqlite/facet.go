@@ -64,6 +64,17 @@ func facetSpecFor(g read.GroupBy) (facetSpec, bool) {
 			groupBy: itemArtistIDExpr, keyExpr: "fa.pid", display: "fa.name", sortExpr: "fa.sort_key",
 			entity: true, unknown: read.UnknownArtist, kindWhere: notEpisodes,
 		}, true
+	case read.GroupCreditArtist:
+		// The many-per-item shape genre already has: the join fans a track across one
+		// bucket per credited artist, so counts sum above the item count. Scoped to
+		// role='artist' because that is the only role a scan writes; a book's author
+		// shares the table and already has a bucket under GroupArtist.
+		return facetSpec{
+			join: " LEFT JOIN item_contributor fic ON fic.item_id = pi.id AND fic.role = 'artist'" +
+				" LEFT JOIN artist fca ON fca.id = fic.artist_id",
+			groupBy: "fca.id", keyExpr: "fca.pid", display: "fca.name", sortExpr: "fca.sort_key",
+			entity: true, unknown: read.UnknownArtist, kindWhere: notEpisodes,
+		}, true
 	case read.GroupAlbumArtist:
 		// Shares itemAlbumArtistIDExpr with the album_artist_pid query field (see
 		// GroupArtist).

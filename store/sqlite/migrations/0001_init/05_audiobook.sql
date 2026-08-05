@@ -1,14 +1,16 @@
 -- The book grouping above the individual title (the album abstraction for
 -- books). The decimal/string sequence lives on the book, not the series.
--- match_key dedups by normalized name; mbid keys it directly when enrichment
--- resolves one.
+-- match_key dedups by normalized name, and is the only key there is: a series
+-- carries no external id. Book enrichment resolves a release from a tagged
+-- release id and never reaches the series above it, so an mbid column here
+-- would need a MusicBrainz series ladder or an Audible-style provider before
+-- anything could write one.
 CREATE TABLE series (
   id        INTEGER PRIMARY KEY,
   pid       TEXT    NOT NULL UNIQUE,
   name      TEXT    NOT NULL,
   sort_key  TEXT    NOT NULL,
-  match_key TEXT    NOT NULL UNIQUE,
-  mbid      TEXT
+  match_key TEXT    NOT NULL UNIQUE
 );
 -- Keyset enumeration in collation order (EntityPage) walks this index, matching
 -- artist/release_group/album/genre, so all five entity kinds page the same way.

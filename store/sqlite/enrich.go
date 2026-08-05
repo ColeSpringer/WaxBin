@@ -200,14 +200,55 @@ func (s *Store) BooksNeedingEnrichment(ctx context.Context, force bool, afterID 
 	return out, rows.Err()
 }
 
+// AlbumsNeedingReleaseMatch returns the next keyset page of albums that could take a
+// release MBID from an identifier they already carry. The gate is four-part and
+// self-limiting: the album has no mbid, its release group has one (that is what the
+// search is constrained to), it carries a barcode or a catalog number, and it has no
+// album marker yet. A Picard-tagged library qualifies zero albums because they all
+// have an mbid; an untagged library qualifies zero because none carries an
+// identifier. A non-nil ids list scopes the walk to those album rowids.
+//
+// It reads rg.mbid live rather than from a snapshot, so running this after the
+// release-group phase in the same pass picks up the ids that phase just filled.
+func (s *Store) AlbumsNeedingReleaseMatch(ctx context.Context, force bool, afterID int64, limit int, ids []int64) ([]model.EnrichTarget, error) {
+	const op = "store.AlbumsNeedingReleaseMatch"
+	scopeClause, scopeArgs := enrichIDsFilter("al.id", ids)
+	stmt := `SELECT al.id, al.pid, al.title, rg.mbid, COALESCE(al.barcode,''), COALESCE(al.catalog_number,'')
+		FROM album al JOIN release_group rg ON rg.id = al.release_group_id
+		WHERE al.id > ?
+		  AND (al.mbid IS NULL OR al.mbid = '')
+		  AND rg.mbid IS NOT NULL AND rg.mbid <> ''
+		  AND (COALESCE(al.barcode,'') <> '' OR COALESCE(al.catalog_number,'') <> '')
+		  AND ` + notEnriched(model.EnrichAlbumType, "al.id", force) + scopeClause + `
+		ORDER BY al.id LIMIT ?`
+	args := append(append([]any{afterID}, scopeArgs...), limitOr(limit))
+	rows, err := s.read.QueryContext(ctx, stmt, args...)
+	if err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	defer rows.Close()
+	var out []model.EnrichTarget
+	for rows.Next() {
+		t := model.EnrichTarget{Type: model.EnrichAlbumType}
+		var pid string
+		if err := rows.Scan(&t.ID, &pid, &t.Name, &t.ReleaseGroupMBID, &t.Barcode, &t.CatalogNumber); err != nil {
+			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		t.PID = model.PID(pid)
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
 // CountEntitiesNeedingEnrichment totals the artists, release groups, and books the
-// pass would process, plus (when includeLyrics is set) the tracks needing a lyrics
-// lookup, so the heartbeat can report a real ratio. includeLyrics must mirror whether
-// the run actually runs the lyrics phase, or the ratio drifts. A non-nil scope
-// filters each per-type count to its id list, and a type with an empty list
-// contributes zero, because the scoped run skips that phase entirely; the
-// denominator stays in lockstep with the work that actually runs.
-func (s *Store) CountEntitiesNeedingEnrichment(ctx context.Context, force bool, includeLyrics bool, scope *model.EnrichScope) (int, error) {
+// pass would process, plus the albums needing a release match (when includeAlbums is
+// set) and the tracks needing a lyrics lookup (when includeLyrics is set), so the
+// heartbeat can report a real ratio. Both flags must mirror whether the run actually
+// runs that phase, or the ratio drifts. A non-nil scope filters each per-type count
+// to its id list, and a type with an empty list contributes zero, because the scoped
+// run skips that phase entirely; the denominator stays in lockstep with the work that
+// actually runs.
+func (s *Store) CountEntitiesNeedingEnrichment(ctx context.Context, force, includeAlbums, includeLyrics bool, scope *model.EnrichScope) (int, error) {
 	const op = "store.CountEntitiesNeedingEnrichment"
 	type countQuery struct {
 		stmt string
@@ -221,12 +262,19 @@ func (s *Store) CountEntitiesNeedingEnrichment(ctx context.Context, force bool, 
 		clause, args := enrichIDsFilter(idCol, ids)
 		queries = append(queries, countQuery{stmt + clause, args})
 	}
-	var artistIDs, rgIDs, bookIDs, lyricsIDs []int64
+	var artistIDs, rgIDs, albumIDs, bookIDs, lyricsIDs []int64
 	if scope != nil {
-		artistIDs, rgIDs, bookIDs, lyricsIDs = scope.ArtistIDs, scope.ReleaseGroupIDs, scope.BookItemIDs, scope.LyricsItemIDs
+		artistIDs, rgIDs, albumIDs = scope.ArtistIDs, scope.ReleaseGroupIDs, scope.AlbumIDs
+		bookIDs, lyricsIDs = scope.BookItemIDs, scope.LyricsItemIDs
 	}
 	add(`SELECT COUNT(*) FROM artist a WHERE `+enrichBacksFilter(enrichArtistBacksItems, artistIDs)+` AND `+notEnriched(model.EnrichArtistType, "a.id", force), "a.id", artistIDs)
 	add(`SELECT COUNT(*) FROM release_group rg WHERE `+enrichBacksFilter(enrichRGBacksItems, rgIDs)+` AND `+notEnriched(model.EnrichReleaseGroupType, "rg.id", force), "rg.id", rgIDs)
+	if includeAlbums {
+		add(`SELECT COUNT(*) FROM album al JOIN release_group rg ON rg.id = al.release_group_id
+			WHERE (al.mbid IS NULL OR al.mbid = '') AND rg.mbid IS NOT NULL AND rg.mbid <> ''
+			  AND (COALESCE(al.barcode,'') <> '' OR COALESCE(al.catalog_number,'') <> '')
+			  AND `+notEnriched(model.EnrichAlbumType, "al.id", force), "al.id", albumIDs)
+	}
 	add(`SELECT COUNT(*) FROM book b WHERE b.mbid IS NOT NULL AND b.mbid <> '' AND `+notEnriched(model.EnrichBookType, "b.item_id", force), "b.item_id", bookIDs)
 	if includeLyrics {
 		add(`SELECT COUNT(*) FROM playable_item pi JOIN track t ON t.item_id = pi.id
@@ -402,6 +450,60 @@ func setReleaseGroupMBIDTx(ctx context.Context, tx *sql.Tx, log logger, rgID int
 		return err
 	}
 	_, err = tx.ExecContext(ctx, "UPDATE release_group SET mbid = ? WHERE id = ? AND (mbid IS NULL OR mbid = '')", mbid, rgID)
+	return err
+}
+
+// ApplyAlbumReleaseMatch persists one album's matched release id, filled only when
+// the album has none and the id is not already held by another album, mirroring
+// setReleaseGroupMBIDTx. A no-match records the marker too, so a second run does not
+// re-search an album nothing could identify, following the per-recording lyrics
+// marker precedent.
+//
+// That marker is the one thing to know before adding another album-level enrichment
+// pass. notEnriched keys on (entity_type, entity_id) with no per-pass granularity, so
+// the row this pass writes is the only album marker there is: a later album pass would
+// silently inherit it and skip every album this one merely failed to match. Give a new
+// pass its own entity_type (the way lyrics did) rather than sharing this one.
+func (s *Store) ApplyAlbumReleaseMatch(ctx context.Context, in model.AlbumReleaseMatch) error {
+	const op = "store.ApplyAlbumReleaseMatch"
+	return s.writeTx(ctx, func(tx *sql.Tx) error {
+		if !in.Matched {
+			return markEnrichedTx(ctx, tx, model.EnrichAlbumType, in.AlbumID, enrichProviderMusicBrainz, false, "")
+		}
+		if err := setAlbumMBIDTx(ctx, tx, s.log, in.AlbumID, in.MBID); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		if err := markEnrichedTx(ctx, tx, model.EnrichAlbumType, in.AlbumID, enrichProviderMusicBrainz, true, in.MBID); err != nil {
+			return err
+		}
+		return appendChange(ctx, tx, "album", in.PID, model.OpUpdate)
+	})
+}
+
+// setAlbumMBIDTx sets an album's MBID only when it has none and the id is not
+// already held by another album. It is setReleaseGroupMBIDTx one rung down: a
+// collision means two heuristic albums resolved to one release, which is the merge
+// primitive's job to unify, so here it is logged and left rather than forced into a
+// duplicate the entity-edit surface would refuse.
+func setAlbumMBIDTx(ctx context.Context, tx *sql.Tx, log logger, albumID int64, mbid string) error {
+	if mbid == "" {
+		return nil
+	}
+	if locked, err := entityFieldLockedTx(ctx, tx, string(model.MergeAlbum), albumID, "mbid"); err != nil {
+		return err
+	} else if locked {
+		return nil
+	}
+	var other int64
+	err := tx.QueryRowContext(ctx, "SELECT id FROM album WHERE mbid = ? AND id <> ?", mbid, albumID).Scan(&other)
+	if err == nil {
+		log.Warn("enrichment: release MBID already used by another album; leaving unmerged", "mbid", mbid, "album", albumID, "other", other)
+		return nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, "UPDATE album SET mbid = ? WHERE id = ? AND (mbid IS NULL OR mbid = '')", mbid, albumID)
 	return err
 }
 
@@ -687,9 +789,10 @@ func (s *Store) EnrichmentCachePut(ctx context.Context, key string, payload []by
 func (s *Store) EnrichmentCoverage(ctx context.Context) (model.EnrichmentCoverage, error) {
 	const op = "store.EnrichmentCoverage"
 	var cov model.EnrichmentCoverage
-	// Only the three entity types are coverage-reported; the per-recording lyrics
-	// marker shares the table but is a fill-when-empty side channel, not entity
-	// coverage, so it is excluded from the counts.
+	// Only the three entity types are coverage-reported. The other markers sharing the
+	// table (the per-recording lyrics lookup, the per-album release match) are
+	// fill-when-empty side channels rather than entity coverage, and the WHERE already
+	// excludes them.
 	rows, err := s.read.QueryContext(ctx,
 		`SELECT entity_type, COUNT(*), COALESCE(SUM(matched),0) FROM entity_enrichment
 		 WHERE entity_type IN ('artist','release_group','book') GROUP BY entity_type`)
@@ -752,6 +855,7 @@ func (s *Store) EnrichScopeForItem(ctx context.Context, itemPID model.PID) (*mod
 			scope.ArtistIDs = append(scope.ArtistIDs, albumArtistID.Int64)
 		}
 		if albumID.Valid {
+			scope.AlbumIDs = append(scope.AlbumIDs, albumID.Int64)
 			var rgID sql.NullInt64
 			err := s.read.QueryRowContext(ctx,
 				"SELECT release_group_id FROM album WHERE id = ?", albumID.Int64).Scan(&rgID)
@@ -818,9 +922,10 @@ func (s *Store) EnrichScopeForEntity(ctx context.Context, kind read.EntityKind, 
 		}
 		scope.ReleaseGroupIDs = append(scope.ReleaseGroupIDs, id)
 	case read.EntityAlbum:
+		var id int64
 		var rgID sql.NullInt64
 		err := s.read.QueryRowContext(ctx,
-			"SELECT release_group_id FROM album WHERE pid = ?", string(pid)).Scan(&rgID)
+			"SELECT id, release_group_id FROM album WHERE pid = ?", string(pid)).Scan(&id, &rgID)
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, waxerr.New(waxerr.CodeNotFound, op, "no such album: "+string(pid))
 		}
@@ -832,6 +937,9 @@ func (s *Store) EnrichScopeForEntity(ctx context.Context, kind read.EntityKind, 
 		if !rgID.Valid {
 			return nil, waxerr.New(waxerr.CodeNotFound, op, "album has no release group: "+string(pid))
 		}
+		// Both rungs: the group carries the type and genres, the album itself is what
+		// the release match resolves.
+		scope.AlbumIDs = append(scope.AlbumIDs, id)
 		scope.ReleaseGroupIDs = append(scope.ReleaseGroupIDs, rgID.Int64)
 	default:
 		return nil, waxerr.New(waxerr.CodeUnsupported, op,

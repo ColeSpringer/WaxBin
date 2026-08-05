@@ -112,6 +112,44 @@ func SplitCredits(s string) []string {
 	return out
 }
 
+// performerSplitRe are the separators between artists in a MUSIC credit: a featuring
+// marker ("feat", "feat.", "ft", "ft.", "featuring", "vs", "vs.") standing as its own
+// word so a name containing the letters survives ("Ftera", "Vsevolod"), a semicolon,
+// or a slash with whitespace on both sides.
+var performerSplitRe = regexp.MustCompile(`(?i)(?:\s+(?:feat|ft|featuring|vs)\.?\s+|\s*;\s*|\s+/\s+)`)
+
+// SplitPerformerCredit splits a music artist credit into the individual artists it
+// names, de-duplicated by MatchKey keeping the first-seen casing, since these go
+// straight into item_contributor with a gapless position per artist.
+//
+// It deliberately does NOT reuse SplitCredits, which books use. That splitter breaks
+// on "&" and on a bare "/", and band names are full of both: "AC/DC", "Hall & Oates",
+// "Simon & Garfunkel", "Sly & the Family Stone", "Earth, Wind & Fire" would each
+// become two artists. A comma, "with", and a bare "x" are excluded for the same
+// reason.
+//
+// The asymmetry is what decides every one of those: a wrong split creates artist rows
+// no later pass removes, while a missed split only leaves a credit as coarse as it
+// already was, which a user can fix with `credit --role artist`. So a real joint
+// credit like "Jay-Z & Alicia Keys" stays whole, and that is the cheaper mistake.
+func SplitPerformerCredit(s string) []string {
+	if strings.TrimSpace(s) == "" {
+		return nil
+	}
+	var out []string
+	seen := make(map[string]bool, 4)
+	for _, part := range performerSplitRe.Split(s, -1) {
+		name := strings.TrimSpace(part)
+		mk := MatchKey(name)
+		if mk == "" || seen[mk] {
+			continue
+		}
+		seen[mk] = true
+		out = append(out, name)
+	}
+	return out
+}
+
 // ArtistKey is the entity-identity key for an artist: MBID when known, else the
 // normalized name. Matches the track/release-group MBID-first convention.
 // It has no callers, deliberately: see resolveArtist in store/sqlite/entities.go for

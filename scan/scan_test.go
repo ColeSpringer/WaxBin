@@ -261,3 +261,54 @@ func TestFindDirCoverAVIF(t *testing.T) {
 		t.Errorf("cover path = %q, want cover.avif", path)
 	}
 }
+
+// TestCreditArtistsReportsOnlyAStatedList pins what the scanner passes down: the
+// values a file repeated in its ARTIST frame, or nil to let the store split the
+// combined one. The distinction is what keeps a tagged artist id from collapsing a
+// list the tagger stated.
+func TestCreditArtistsReportsOnlyAStatedList(t *testing.T) {
+	cases := []struct {
+		name string
+		tags model.Tags
+		want []string
+	}{
+		{
+			"a repeated frame is taken verbatim",
+			model.Tags{Artist: "A vs. B", Artists: []string{"A vs. B", "Sunn O)))"}},
+			[]string{"A vs. B", "Sunn O)))"},
+		},
+		{
+			"one value states nothing",
+			model.Tags{Artist: "Jay-Z feat. Alicia Keys", Artists: []string{"Jay-Z feat. Alicia Keys"}},
+			nil,
+		},
+		{
+			"no Artists at all states nothing",
+			model.Tags{Artist: "Jay-Z feat. Alicia Keys"},
+			nil,
+		},
+		{"untagged", model.Tags{}, nil},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := creditArtists(c.tags)
+			if len(got) != len(c.want) {
+				t.Fatalf("creditArtists = %v, want %v", got, c.want)
+			}
+			for i := range got {
+				if got[i] != c.want[i] {
+					t.Fatalf("creditArtists = %v, want %v", got, c.want)
+				}
+			}
+		})
+	}
+
+	// The returned slice must not alias the tags', or a later mutation of one would
+	// surface in the other.
+	tags := model.Tags{Artist: "A", Artists: []string{"A", "B"}}
+	got := creditArtists(tags)
+	got[0] = "mutated"
+	if tags.Artists[0] != "A" {
+		t.Error("creditArtists aliased the tag slice")
+	}
+}

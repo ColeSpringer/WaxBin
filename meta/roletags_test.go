@@ -11,6 +11,7 @@ import (
 // WaxLabel tag key present at the pinned waxlabel version (the prerequisite gate).
 func TestRoleTagKeysResolve(t *testing.T) {
 	want := map[model.ContributorRole]tag.Key{
+		model.RoleArtist:    tag.Artist,
 		model.RoleComposer:  tag.Composer,
 		model.RoleLyricist:  tag.Lyricist,
 		model.RoleConductor: tag.Conductor,
@@ -23,8 +24,8 @@ func TestRoleTagKeysResolve(t *testing.T) {
 		model.RoleWriter:    tag.Writer,
 		model.RoleDJMixer:   tag.DJMixer,
 	}
-	if len(want) != 11 {
-		t.Fatalf("expected 11 music roles, have %d", len(want))
+	if len(want) != 12 {
+		t.Fatalf("expected 12 music roles, have %d", len(want))
 	}
 	for role, key := range want {
 		got, ok := RoleTagKey(role)

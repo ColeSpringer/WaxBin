@@ -32,19 +32,23 @@ func entityFixture(t *testing.T) (*Store, *model.Library) {
 type trackSpec struct {
 	path, essence, content  string
 	title, artist, albumArt string
-	album, genre            string
-	composer                string
-	year                    int
-	discTotal               int
-	durationMS              int64
-	compilation             bool
-	mbRecording             string
-	mbReleaseGroup          string
-	mbRelease               string
-	mbArtists               []string
-	mbAlbumArtists          []string
-	isrc                    string
-	barcode, label, catNo   string
+	// artists is the split credit the scanner supplies alongside the raw artist
+	// string. Leaving it nil is a pre-split caller, which the store re-splits.
+	artists               []string
+	preserveLocks         bool
+	album, genre          string
+	composer              string
+	year                  int
+	discTotal             int
+	durationMS            int64
+	compilation           bool
+	mbRecording           string
+	mbReleaseGroup        string
+	mbRelease             string
+	mbArtists             []string
+	mbAlbumArtists        []string
+	isrc                  string
+	barcode, label, catNo string
 }
 
 func putTrack(t *testing.T, st *Store, libID int64, s trackSpec) *model.ScanItemResult {
@@ -54,7 +58,8 @@ func putTrack(t *testing.T, st *Store, libID int64, s trackSpec) *model.ScanItem
 		idKey = "mbid:" + s.mbRecording
 	}
 	in := model.PutScannedTrackInput{
-		LibraryID: libID,
+		LibraryID:     libID,
+		PreserveLocks: s.preserveLocks,
 		File: model.File{
 			Path: []byte(s.path), DisplayPath: s.path, RelPath: []byte(filepath.Base(s.path)),
 			Kind: model.FileAudio, Size: int64(len(s.content)), MTimeNS: 1,
@@ -66,7 +71,7 @@ func putTrack(t *testing.T, st *Store, libID int64, s trackSpec) *model.ScanItem
 			SortKey: model.SortKey(s.title), IdentityKey: idKey,
 		},
 		Track: model.Track{
-			Artist: s.artist, ArtistSort: model.SortKey(s.artist), Album: s.album,
+			Artist: s.artist, Artists: s.artists, ArtistSort: model.SortKey(s.artist), Album: s.album,
 			AlbumArtist: s.albumArt, Composer: s.composer, ComposerSort: model.SortKey(s.composer),
 			Genre:            s.genre,
 			Genres:           identity.SplitGenres(s.genre),
@@ -606,54 +611,4 @@ func TestAlbumIdentifierBackfill(t *testing.T) {
 func albumChanges(t *testing.T, st *Store) int {
 	t.Helper()
 	return scalarInt(t, st, "SELECT COUNT(*) FROM change_log WHERE entity_type = 'album'")
-}
-
-// TestJointCreditTakesNoArtistMBID: a credit naming several artists carries an id per
-// artist but resolves to one entity named for the whole string, so none of them
-// describes it. Asserted on both writers, since the insert stamped the first id long
-// before the backfill widened that to existing rows.
-func TestJointCreditTakesNoArtistMBID(t *testing.T) {
-	st, lib := entityFixture(t)
-
-	joint := trackSpec{
-		path: "/lib/a/1.flac", essence: "e1", content: "c1", title: "Empire State of Mind",
-		artist: "Jay-Z feat. Alicia Keys", albumArt: "Jay-Z feat. Alicia Keys", album: "The Blueprint 3",
-		mbArtists:      []string{"jayz-id", "keys-id"},
-		mbAlbumArtists: []string{"jayz-id", "keys-id"},
-	}
-	putTrack(t, st, lib.ID, joint)
-	if got := artistMBID(t, st, "Jay-Z feat. Alicia Keys"); got != "" {
-		t.Errorf("joint credit stamped at insert with %q, want empty", got)
-	}
-
-	// The backfill must not stamp it either, on a row that already exists.
-	again := joint
-	again.content = "c2"
-	putTrack(t, st, lib.ID, again)
-	if got := artistMBID(t, st, "Jay-Z feat. Alicia Keys"); got != "" {
-		t.Errorf("joint credit backfilled with %q, want empty", got)
-	}
-
-	// A single-artist credit is unaffected, on both paths.
-	solo := trackSpec{
-		path: "/lib/b/1.flac", essence: "e2", content: "c2", title: "99 Problems",
-		artist: "Jay-Z", albumArt: "Jay-Z", album: "The Black Album",
-		mbArtists: []string{"jayz-id"}, mbAlbumArtists: []string{"jayz-id"},
-	}
-	putTrack(t, st, lib.ID, solo)
-	if got := artistMBID(t, st, "Jay-Z"); got != "jayz-id" {
-		t.Errorf("solo credit mbid = %q, want jayz-id", got)
-	}
-
-	late := trackSpec{
-		path: "/lib/c/1.flac", essence: "e3", content: "c3", title: "Otis",
-		artist: "Kanye West", albumArt: "Kanye West", album: "Watch the Throne",
-	}
-	putTrack(t, st, lib.ID, late)
-	late.content = "c4"
-	late.mbArtists, late.mbAlbumArtists = []string{"kanye-id"}, []string{"kanye-id"}
-	putTrack(t, st, lib.ID, late)
-	if got := artistMBID(t, st, "Kanye West"); got != "kanye-id" {
-		t.Errorf("solo credit backfill = %q, want kanye-id", got)
-	}
 }

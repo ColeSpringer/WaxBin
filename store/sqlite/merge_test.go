@@ -121,6 +121,62 @@ func TestMergeArtistsUnionsMBIDAndEnrichmentMarker(t *testing.T) {
 	}
 }
 
+// TestMergeAlbumUnionsEnrichmentMarker guards the marker union for albums, which
+// only became reachable once the release match started writing album markers.
+// Without it, merging two albums strands the loser's entity_enrichment row and the
+// survivor reads as never-searched.
+func TestMergeAlbumUnionsEnrichmentMarker(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	putTrack(t, st, lib.ID, trackSpec{
+		path: "/lib/a/1.flac", essence: "e1", content: "c1", title: "One",
+		artist: "A", albumArt: "A", album: "Greatest Hits", durationMS: 100,
+	})
+	putTrack(t, st, lib.ID, trackSpec{
+		path: "/lib/b/2.flac", essence: "e2", content: "c2", title: "Two",
+		artist: "B", albumArt: "B", album: "Greatest Hits", durationMS: 100,
+	})
+	// Album match keys embed the folder and artist, so these are two album rows.
+	var survivor, loser string
+	if err := st.read.QueryRowContext(ctx,
+		"SELECT MIN(pid), MAX(pid) FROM album").Scan(&survivor, &loser); err != nil {
+		t.Fatal(err)
+	}
+	if survivor == loser {
+		t.Fatalf("want two album rows to merge, got one (%s)", survivor)
+	}
+
+	// The loser was searched and matched; the survivor was never looked up.
+	if _, err := st.write.ExecContext(ctx,
+		`INSERT INTO entity_enrichment(entity_type, entity_id, provider, matched, mbid, enriched_at)
+		 SELECT 'album', id, 'musicbrainz', 1, 'rel-x', 1 FROM album WHERE pid = ?`, loser); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := st.MergeEntity(ctx, model.MergeAlbum, model.PID(survivor), model.PID(loser)); err != nil {
+		t.Fatalf("merge: %v", err)
+	}
+	var matched int
+	if err := st.read.QueryRowContext(ctx,
+		`SELECT matched FROM entity_enrichment ee JOIN album al ON al.id = ee.entity_id
+		 WHERE ee.entity_type = 'album' AND al.pid = ?`, survivor).Scan(&matched); err != nil {
+		t.Fatalf("survivor should inherit the album enrichment marker: %v", err)
+	}
+	if matched != 1 {
+		t.Errorf("survivor album marker matched = %d, want 1", matched)
+	}
+	var stranded int
+	if err := st.read.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM entity_enrichment ee
+		 WHERE ee.entity_type = 'album' AND NOT EXISTS (SELECT 1 FROM album al WHERE al.id = ee.entity_id)`).
+		Scan(&stranded); err != nil {
+		t.Fatal(err)
+	}
+	if stranded != 0 {
+		t.Errorf("stranded album markers = %d, want 0", stranded)
+	}
+}
+
 func TestMergeGenresDedupsSharedItems(t *testing.T) {
 	st, lib := entityFixture(t)
 	ctx := context.Background()

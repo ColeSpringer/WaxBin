@@ -108,6 +108,14 @@ func (l *Library) writeBackCredit(ctx context.Context, itemPID model.PID, role m
 			"on-disk credit write-back is not supported for "+string(item.Kind)+" items; the catalog edit was applied")
 	}
 
+	// A credit edit regenerates the derived sort, so it needs the same sort-tag clears
+	// a field edit gets, or a stale ARTISTSORT reverts it on the next scan. Keyed by
+	// the display field ("artist"), not the credit.<role> spelling in edits.
+	tagEdits, err = l.appendDerivedSortClears(ctx, itemPID, map[string]string{string(role): ""}, tagEdits)
+	if err != nil {
+		return writeBackSetupFailure(itemPID, edits, err)
+	}
+
 	wbErr := &WriteBackError{ItemPID: itemPID, Edits: edits}
 	if len(files) == 0 {
 		wbErr.Failures = append(wbErr.Failures, WriteBackFailure{Reason: "no backing files present to write"})

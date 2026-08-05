@@ -422,7 +422,7 @@ func editTrackFieldsTx(ctx context.Context, tx *sql.Tx, itemID int64, fields []s
 		if err := affected.collect(ctx, tx, itemID); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
-		if err := resolveAndLinkEntities(ctx, tx, itemID, tr, filePath); err != nil {
+		if err := resolveAndLinkEntities(ctx, tx, itemID, tr, filePath, affected); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		if err := affected.collect(ctx, tx, itemID); err != nil {
@@ -518,7 +518,10 @@ func editBookFieldsTx(ctx context.Context, tx *sql.Tx, itemID int64, fields []st
 func applyTrackEdit(tr *model.Track, field, value, op string) error {
 	switch field {
 	case "artist":
+		// Re-split the credit, exactly as the author case does below: the edit routes
+		// through resolveAndLinkEntities, so the contributor rows follow for free.
 		tr.Artist = value
+		tr.Artists = identity.SplitPerformerCredit(value)
 		tr.ArtistSort = model.SortKey(value)
 	case "album_artist":
 		tr.AlbumArtist = value
@@ -694,24 +697,7 @@ func validateMBIDField(value, op string) error {
 }
 
 // isCanonicalUUID reports whether s is a canonical 8-4-4-4-12 hex UUID.
-func isCanonicalUUID(s string) bool {
-	if len(s) != 36 {
-		return false
-	}
-	for i, r := range s {
-		switch i {
-		case 8, 13, 18, 23:
-			if r != '-' {
-				return false
-			}
-		default:
-			if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F')) {
-				return false
-			}
-		}
-	}
-	return true
-}
+func isCanonicalUUID(s string) bool { return model.IsMBID(s) }
 
 // loadTrackForEditTx reads a track item's current denormalized columns, title, and
 // primary-file path so an edit can change one field and re-resolve. Genres come from
@@ -746,6 +732,14 @@ func loadTrackForEditTx(ctx context.Context, tx *sql.Tx, itemID int64) (model.Tr
 		return tr, "", nil, waxerr.Wrap(waxerr.CodeIO, "store.EditItemFields", err)
 	}
 	tr.Genres = genres
+
+	// The credited artists in credited order, exactly as Genres comes from item_genre.
+	// The scan-lock overlay carries this list, so it cannot be left to a re-derive.
+	artists, err := contributorNamesForRoleTx(ctx, tx, itemID, model.RoleArtist)
+	if err != nil {
+		return tr, "", nil, waxerr.Wrap(waxerr.CodeIO, "store.EditItemFields", err)
+	}
+	tr.Artists = artists
 
 	var title string
 	if err := tx.QueryRowContext(ctx, "SELECT title FROM playable_item WHERE id = ?", itemID).Scan(&title); err != nil {

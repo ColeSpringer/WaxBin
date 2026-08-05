@@ -7,6 +7,12 @@ package model
 // entity with the same dedup and browse machinery. Each maps to a canonical tag key
 // for on-disk write-back (see meta.RoleTagKey).
 const (
+	// RoleArtist is the track's performing credit, one row per artist the credit
+	// names, written by the scanner. It is distinct from RolePerformer: that role
+	// maps to the PERFORMER tag, means the instrument-qualified relation, and is
+	// user-set, so a scan writing into it would clobber a curated list on every
+	// content change.
+	RoleArtist    ContributorRole = "artist"
 	RoleComposer  ContributorRole = "composer"
 	RoleLyricist  ContributorRole = "lyricist"
 	RoleConductor ContributorRole = "conductor"
@@ -22,9 +28,9 @@ const (
 
 // musicRoles is the set of contributor roles that apply to a music track.
 var musicRoles = map[ContributorRole]bool{
-	RoleComposer: true, RoleLyricist: true, RoleConductor: true, RolePerformer: true,
-	RoleRemixer: true, RoleProducer: true, RoleEngineer: true, RoleMixer: true,
-	RoleArranger: true, RoleWriter: true, RoleDJMixer: true,
+	RoleArtist: true, RoleComposer: true, RoleLyricist: true, RoleConductor: true,
+	RolePerformer: true, RoleRemixer: true, RoleProducer: true, RoleEngineer: true,
+	RoleMixer: true, RoleArranger: true, RoleWriter: true, RoleDJMixer: true,
 }
 
 // bookRoles is the set of contributor roles that apply to an audiobook.

@@ -16,23 +16,51 @@ import (
 // the track/item, and refreshes the item's FTS row. New entities are emitted to
 // the change_log so delta consumers can update browse/facet caches. It runs
 // inside the PutScannedTrack write transaction.
-func resolveAndLinkEntities(ctx context.Context, tx *sql.Tx, itemID int64, tr model.Track, filePath []byte) error {
-	artistID, err := resolveArtist(ctx, tx, tr.Artist, model.SoleMBID(tr.MBArtistIDs))
+//
+// affected collects the artists the credit resolved to, which the caller's rollup
+// maintenance then recomputes. It is not optional: a featured artist backs no
+// track's artist_id, so without a rollup row of its own db verify reads the missing
+// row as -1 against a recompute of 0 and reports permanent drift.
+func resolveAndLinkEntities(ctx context.Context, tx *sql.Tx, itemID int64, tr model.Track, filePath []byte, affected *affectedRollups) error {
+	artistID, err := resolveTrackArtists(ctx, tx, itemID, tr, affected)
 	if err != nil {
 		return err
 	}
 	// The album-artist anchors the release group; fall back to the track artist
 	// when a track carries no explicit album-artist (the common single-artist case).
-	albumArtistName, albumArtistMBID := tr.AlbumArtist, model.SoleMBID(tr.MBAlbumArtistIDs)
+	albumArtistName, albumArtistIDs := tr.AlbumArtist, tr.MBAlbumArtistIDs
 	if strings.TrimSpace(albumArtistName) == "" {
-		albumArtistName, albumArtistMBID = tr.Artist, model.SoleMBID(tr.MBArtistIDs)
+		// The FIRST stated artist, not the joined display. This string reaches
+		// ReleaseGroupKey below, and a file that repeated its ARTIST frame used to
+		// anchor its album on that first value, so joining here would re-key every
+		// heuristically-grouped album in such a library on the next scan.
+		albumArtistName, albumArtistIDs = tr.Artist, tr.MBArtistIDs
+		if len(tr.Artists) > 0 {
+			albumArtistName = tr.Artists[0]
+		}
 	}
-	albumArtistID, err := resolveArtist(ctx, tx, albumArtistName, albumArtistMBID)
-	if err != nil {
-		return err
+	// Files routinely tag MUSICBRAINZ_ARTISTID and omit the album-artist one. When the
+	// two credits are the same string they name the same artists, so the track's ids
+	// apply, and without them a joint credit would split here after collapsing above.
+	// Only when the track stated no list of its own: there tr.Artist is not the whole
+	// credit, and lending the ids would stamp an artist the arity rule just refused.
+	if len(albumArtistIDs) == 0 && len(tr.Artists) == 0 &&
+		identity.MatchKey(albumArtistName) == identity.MatchKey(tr.Artist) {
+		albumArtistIDs = tr.MBArtistIDs
+	}
+	// The PRIMARY of the credit, not an entity named for the whole string, so
+	// "Jay-Z & Alicia Keys" resolves to Jay-Z and takes his id. Only the entity
+	// changes: resolveAlbumChain still keys on the raw string below, so every release
+	// group and album keeps the match_key it already has.
+	var albumArtistID int64
+	if names, ids := creditNames(albumArtistName, nil, albumArtistIDs); len(names) > 0 {
+		albumArtistID, err = resolveArtist(ctx, tx, names[0], ids[0])
+		if err != nil {
+			return err
+		}
 	}
 
-	albumID, err := resolveAlbumChain(ctx, tx, tr, albumArtistName, albumArtistID, filePath)
+	albumID, err := resolveAlbumChain(ctx, tx, tr, albumArtistName, albumArtistID, filePath, affected)
 	if err != nil {
 		return err
 	}
@@ -49,11 +77,87 @@ func resolveAndLinkEntities(ctx context.Context, tx *sql.Tx, itemID int64, tr mo
 	return syncSearchFTS(ctx, tx, itemID, tr)
 }
 
+// creditNames turns one credit into its artists paired positionally with the ids the
+// file listed, as equal-length slices. A stated list is verbatim; otherwise the credit
+// is split, and a split of several names against exactly one id is the file overruling
+// the guess ("Earth, Wind & Fire"), so it collapses back to the artist it names.
+func creditNames(raw string, stated, ids []string) ([]string, []string) {
+	if len(stated) > 0 {
+		return stated, model.CreditMBIDs(stated, ids)
+	}
+	names := identity.SplitPerformerCredit(raw)
+	if len(names) > 1 && len(ids) == 1 && strings.TrimSpace(ids[0]) != "" {
+		return []string{strings.TrimSpace(raw)}, []string{strings.TrimSpace(ids[0])}
+	}
+	return names, model.CreditMBIDs(names, ids)
+}
+
+// resolveTrackArtists resolves a track's performing credit into one artist entity per
+// name and rewrites its RoleArtist contributor rows, returning the primary artist's
+// id for track.artist_id.
+//
+// It replaces ONLY the artist role, never the whole contributor set, diverging from
+// resolveContributors on the book path: a track's other music credits have no
+// denormalized column and no scan-side input, so a wholesale delete would destroy a
+// curated producer list on the next content change. Within the role it rewrites
+// unconditionally rather than diffing, matching syncItemGenres, since a compare would
+// have to run against resolved ids and so would do the resolve anyway.
+//
+// The returned id is the PRIMARY artist, which is what book.author_id already means.
+// Not a combined entity, because that entity is the bug this closes. Not NULL, which
+// would drop the track out of the artist facet, artist_rollup, and every drilldown
+// that reads artist_id.
+func resolveTrackArtists(ctx context.Context, tx *sql.Tx, itemID int64, tr model.Track, affected *affectedRollups) (int64, error) {
+	names, ids := creditNames(tr.Artist, tr.Artists, tr.MBArtistIDs)
+
+	prior, err := contributorArtistIDsForRole(ctx, tx, itemID, model.RoleArtist)
+	if err != nil {
+		return 0, err
+	}
+	for _, aid := range prior {
+		affected.artists[aid] = true
+	}
+	if _, err := tx.ExecContext(ctx,
+		"DELETE FROM item_contributor WHERE item_id=? AND role=?", itemID, string(model.RoleArtist)); err != nil {
+		return 0, err
+	}
+
+	var primary int64
+	seen := make(map[int64]bool, len(names))
+	pos := 0
+	for i, name := range names {
+		aid, err := resolveArtist(ctx, tx, name, ids[i])
+		if err != nil {
+			return 0, err
+		}
+		if aid == 0 || seen[aid] {
+			continue
+		}
+		seen[aid] = true
+		affected.artists[aid] = true
+		if primary == 0 {
+			primary = aid
+		}
+		// position is the credited order with no gaps for names that dropped out.
+		if _, err := tx.ExecContext(ctx,
+			"INSERT INTO item_contributor(item_id, artist_id, role, position) VALUES (?,?,?,?)",
+			itemID, aid, string(model.RoleArtist), pos); err != nil {
+			return 0, err
+		}
+		pos++
+	}
+	return primary, nil
+}
+
 // resolveAlbumChain resolves the release_group and album for a track, returning
 // the album id (0 when the track has no album title, or no artist to anchor the
 // group on). MusicBrainz ids, when present, key the group/release directly
 // (MBID-first), so two heuristic guesses for one release unify on the same id.
-func resolveAlbumChain(ctx context.Context, tx *sql.Tx, tr model.Track, albumArtistName string, albumArtistID int64, filePath []byte) (int64, error) {
+//
+// albumArtistName is the RAW credit string and albumArtistID the entity its primary
+// resolved to. Keeping them separate is what let the album-artist credit split
+// without re-keying anything: only the name reaches ReleaseGroupKey.
+func resolveAlbumChain(ctx context.Context, tx *sql.Tx, tr model.Track, albumArtistName string, albumArtistID int64, filePath []byte, affected *affectedRollups) (int64, error) {
 	artistMatchKey := identity.MatchKey(albumArtistName)
 	if artistMatchKey == "" && tr.MBReleaseGroupID == "" {
 		// No artist and no MBID (fully untagged): do not group. A title-only
@@ -66,7 +170,7 @@ func resolveAlbumChain(ctx context.Context, tx *sql.Tx, tr model.Track, albumArt
 	if rgKey == "" {
 		return 0, nil // non-album single: not grouped
 	}
-	rgID, err := resolveReleaseGroup(ctx, tx, rgKey, tr.Album, albumArtistID, tr.MBReleaseGroupID)
+	rgID, err := resolveReleaseGroup(ctx, tx, rgKey, tr.Album, albumArtistID, tr.MBReleaseGroupID, affected)
 	if err != nil {
 		return 0, err
 	}
@@ -94,8 +198,10 @@ func resolveAlbumChain(ctx context.Context, tx *sql.Tx, tr model.Track, albumArt
 // An existing row with no id of its own takes one from a tag that now supplies it,
 // so a Picard pass over a library scanned before it tagged lands the ids on a
 // rescan. book.go and credits.go resolve contributors with mbid="", so those calls
-// short-circuit and never write an id. Callers pass model.SoleMBID, so a joint
-// credit's several ids resolve to none rather than to the first one.
+// short-circuit and never write an id. The track-artist path pairs ids to names
+// positionally through model.CreditMBIDs, so each split artist takes its own; the
+// album-artist path resolves one entity for the whole credit and so passes an id
+// only when the file named exactly one.
 //
 // Nothing enforces uniqueness on artist.mbid, so this can leave two rows sharing
 // one, exactly as ApplyArtistEnrichment can. That is what audit's duplicate_artist
@@ -149,10 +255,33 @@ func resolveArtist(ctx context.Context, tx *sql.Tx, name, mbid string) (int64, e
 }
 
 // resolveReleaseGroup finds-or-creates a release group by its identity key.
-func resolveReleaseGroup(ctx context.Context, tx *sql.Tx, key, title string, primaryArtistID int64, mbid string) (int64, error) {
+//
+// An existing row adopts the newly resolved primary artist when it differs. It has to:
+// before the album-artist credit split, a joint credit resolved to one entity named
+// for the whole string, and leaving that pointer would keep the combined artist alive,
+// holding the release-group count that belongs to the real primary. The guard makes
+// the steady state a no-op, so only the transition writes.
+//
+// Last-writer-wins is deliberate for the one case where tracks can disagree, an
+// MBID-keyed group whose members carry different ALBUMARTIST tags. Under a heuristic
+// key they cannot disagree, since the album-artist name is part of the key.
+func resolveReleaseGroup(ctx context.Context, tx *sql.Tx, key, title string, primaryArtistID int64, mbid string, affected *affectedRollups) (int64, error) {
 	var id int64
-	err := tx.QueryRowContext(ctx, "SELECT id FROM release_group WHERE match_key = ?", key).Scan(&id)
+	var curPrimary sql.NullInt64
+	err := tx.QueryRowContext(ctx,
+		"SELECT id, primary_artist_id FROM release_group WHERE match_key = ?", key).Scan(&id, &curPrimary)
 	if err == nil {
+		if primaryArtistID != 0 && curPrimary.Int64 != primaryArtistID {
+			if _, err := tx.ExecContext(ctx,
+				"UPDATE release_group SET primary_artist_id = ? WHERE id = ?", primaryArtistID, id); err != nil {
+				return 0, err
+			}
+			// Both ends move a release_group_count, so both rollups need recomputing.
+			if curPrimary.Valid {
+				affected.artists[curPrimary.Int64] = true
+			}
+			affected.artists[primaryArtistID] = true
+		}
 		return id, nil
 	}
 	if !errors.Is(err, sql.ErrNoRows) {

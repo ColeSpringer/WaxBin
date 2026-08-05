@@ -77,6 +77,18 @@ type ItemExport struct {
 	// album or artist id here would denormalize entity identity into every row.
 	MBID string `json:"mbid,omitempty"`
 	ISRC string `json:"isrc,omitempty"`
+
+	// Artist is the combined display string, and the track's split artist credit is
+	// deliberately NOT carried alongside it. The credit is a relational fan-out (one
+	// item_contributor row per artist), which is the thing this record does not carry,
+	// and a consumer rebuilding a catalog from a snapshot re-derives it from Artist the
+	// same way a scan does.
+	//
+	// That re-derive is lossy in one case worth naming: a credit the user curated
+	// stores as a comma-joined display, and the splitter does not split on a comma, so
+	// a rebuilt catalog would collapse it back to one artist. Carrying the list would
+	// need an importer that writes contributor rows, and there is none: Restore below
+	// restores a physical backup, not a snapshot.
 }
 
 // PlayStateExport is one user's critical state for one item. The changed-at

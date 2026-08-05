@@ -65,9 +65,9 @@ func (s *Store) EntityByPID(ctx context.Context, kind read.EntityKind, pid model
 			Scan(&id, &info.Name, &info.SortKey, &info.ItemCount, &info.TotalDurationMS)
 	case read.EntitySeries:
 		err = s.read.QueryRowContext(ctx,
-			"SELECT srs.id, srs.name, srs.sort_key, COALESCE(srs.mbid,'') FROM series srs WHERE srs.pid = ?",
+			"SELECT srs.id, srs.name, srs.sort_key FROM series srs WHERE srs.pid = ?",
 			string(pid)).
-			Scan(&id, &info.Name, &info.SortKey, &info.MBID)
+			Scan(&id, &info.Name, &info.SortKey)
 	}
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, waxerr.New(waxerr.CodeNotFound, op, "no such "+string(kind)+": "+string(pid))
@@ -404,12 +404,12 @@ func (s *Store) entityBaseBatch(ctx context.Context, kind read.EntityKind, chunk
 			return id, info, err
 		}
 	case read.EntitySeries:
-		stmt = `SELECT srs.id, srs.pid, srs.name, srs.sort_key, COALESCE(srs.mbid,'')
+		stmt = `SELECT srs.id, srs.pid, srs.name, srs.sort_key
 			FROM series srs WHERE srs.pid IN ` + ph
 		scan = func(rows *sql.Rows) (int64, *read.EntityInfo, error) {
 			var id int64
 			info := &read.EntityInfo{}
-			err := rows.Scan(&id, &info.PID, &info.Name, &info.SortKey, &info.MBID)
+			err := rows.Scan(&id, &info.PID, &info.Name, &info.SortKey)
 			return id, info, err
 		}
 	}

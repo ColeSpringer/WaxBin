@@ -708,7 +708,14 @@ func firstNonEmpty(vals ...string) string {
 // primary (or album) artist, so collation is correct even when a file carries no
 // ARTISTSORT tag.
 func trackFromTags(tags model.Tags) model.Track {
-	artistForSort := tags.Artist
+	// Tags.Artist is only the FIRST value, so a repeated ARTIST frame needs the whole
+	// list joined, or a credit write-back loses every artist after the first on the
+	// next scan. The separator matches syncCreditDenormTx's, so it round-trips.
+	artistDisplay := tags.Artist
+	if len(tags.Artists) > 1 {
+		artistDisplay = strings.Join(tags.Artists, ", ")
+	}
+	artistForSort := artistDisplay
 	if artistForSort == "" {
 		artistForSort = tags.AlbumArtist
 	}
@@ -728,7 +735,8 @@ func trackFromTags(tags model.Tags) model.Track {
 		composerSortInput = tags.Composer
 	}
 	return model.Track{
-		Artist:           tags.Artist,
+		Artist:           artistDisplay,
+		Artists:          creditArtists(tags),
 		ArtistSort:       artistSort,
 		Album:            tags.Album,
 		AlbumArtist:      tags.AlbumArtist,
@@ -753,6 +761,17 @@ func trackFromTags(tags model.Tags) model.Track {
 		Label:            tags.Label,
 		CatalogNumber:    tags.CatalogNumber,
 	}
+}
+
+// creditArtists returns the credit list the file stated, or nil to let the store
+// split the combined value. ID3v2.4 and Vorbis both carry true multi-valued tags, so
+// a repeated frame is a statement and a split is a guess; the store treats them
+// differently.
+func creditArtists(tags model.Tags) []string {
+	if len(tags.Artists) > 1 {
+		return append([]string(nil), tags.Artists...)
+	}
+	return nil
 }
 
 // scanSidecars resolves an audio file's structured lyrics and records the on-disk

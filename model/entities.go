@@ -43,7 +43,6 @@ type Album struct {
 	Year           int
 	DiscTotal      int
 	MBID           string
-	Edition        string
 	// Release identifiers, populated from tags at album creation and editable
 	// through the entity-curation surface.
 	Barcode       string // release barcode (UPC/EAN)

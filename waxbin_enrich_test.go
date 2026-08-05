@@ -343,6 +343,84 @@ func TestEnrichmentTagWriteBackSurvivesRescan(t *testing.T) {
 	}
 }
 
+// TestMatchedReleaseStaysOffDisk is the guard on the one thing the album release
+// match deliberately does not do. identity.AlbumKey returns "mbid:"+lower(mbid) when
+// a file carries one, so writing a matched release id to disk would re-key the album
+// on the next scan and abandon the row's pid, curation, and stars. The value lives in
+// the catalog only; enrichedTagSelect does not carry it.
+func TestMatchedReleaseStaysOffDisk(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	const (
+		rgMBID  = "b0000000-0000-4000-8000-000000000002"
+		relMBID = "c0000000-0000-4000-8000-000000000003"
+		barcode = "0075992739429"
+	)
+	path := filepath.Join(root, "song.mp3")
+	writeFile(t, path, testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
+		Title: "Shine On", Artist: "Artist One", AlbumArtist: "Artist One", Album: "Album One",
+		TXXX: []testaudio.TXXXFrame{
+			{Desc: "MusicBrainz Release Group Id", Value: rgMBID},
+			{Desc: "BARCODE", Value: barcode},
+		},
+	}))
+
+	mb := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/release-group/"+rgMBID:
+			_, _ = w.Write([]byte(`{"id":"` + rgMBID + `","title":"Album One","primary-type":"Album"}`))
+		case r.URL.Path == "/release" && r.URL.Query().Get("query") != "":
+			_, _ = w.Write([]byte(`{"releases":[{"id":"` + relMBID + `","title":"Album One","score":100,
+				"barcode":"` + barcode + `","release-group":{"id":"` + rgMBID + `"}}]}`))
+		default:
+			_, _ = w.Write([]byte(`{"artists":[],"release-groups":[],"releases":[]}`))
+		}
+	}))
+	t.Cleanup(mb.Close)
+
+	lib, err := waxbin.Open(ctx, waxbin.Options{
+		DBPath:              db,
+		Roots:               []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}},
+		Enrichment:          enrichTestConfig(mb.URL),
+		WriteEnrichmentTags: true,
+	})
+	if err != nil {
+		t.Fatalf("open library: %v", err)
+	}
+	t.Cleanup(func() { _ = lib.Close() })
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	pid := itemPIDByTitle(t, ctx, lib, "Shine On")
+	if _, err := lib.Enrich(ctx, waxbin.EnrichOptions{}); err != nil {
+		t.Fatalf("enrich: %v", err)
+	}
+
+	// The catalog took the release id.
+	item, err := lib.Get(ctx, pid)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if item.AlbumMBID != relMBID {
+		t.Fatalf("item AlbumMBID = %q, want the matched release %s", item.AlbumMBID, relMBID)
+	}
+
+	// The file did not: it still carries only the release-group id it was tagged with.
+	fm, err := meta.NewReader().Read(ctx, path)
+	if err != nil {
+		t.Fatalf("re-read file: %v", err)
+	}
+	if fm.Tags.MBReleaseID != "" {
+		t.Errorf("file gained a release id %q; writing one re-keys the album on the next scan",
+			fm.Tags.MBReleaseID)
+	}
+	if fm.Tags.MBReleaseGroupID != rgMBID {
+		t.Errorf("file release-group id = %q, want the tagged %s", fm.Tags.MBReleaseGroupID, rgMBID)
+	}
+}
+
 // mergeTags rebuilds a fixture file's tags from spec while preserving the identifier
 // tags the write-back just wrote, which is what a real retag in a tag editor does.
 func mergeTags(t *testing.T, path string, spec testaudio.MP3Spec) []byte {

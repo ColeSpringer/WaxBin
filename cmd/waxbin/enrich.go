@@ -110,6 +110,7 @@ func renderEnrichResult(cmd *cobra.Command, g *globals, res *waxbin.EnrichResult
 	r := res.Result
 	fmt.Fprintf(w, "artists:        %d enriched (%d matched)\n", r.ArtistsEnriched, r.ArtistsMatched)
 	fmt.Fprintf(w, "release groups: %d enriched (%d matched)\n", r.ReleaseGroupsEnriched, r.ReleaseGroupsMatched)
+	fmt.Fprintf(w, "album releases: %d searched (%d matched)\n", r.AlbumsSearched, r.AlbumsMatched)
 	fmt.Fprintf(w, "books:          %d enriched (%d matched)\n", r.BooksEnriched, r.BooksMatched)
 	fmt.Fprintf(w, "lyrics:         %d looked up (%d matched)\n", r.LyricsEnriched, r.LyricsMatched)
 	fmt.Fprintf(w, "cover art:      %d fetched\n", r.ArtFetched)

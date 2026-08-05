@@ -138,32 +138,65 @@ func NormalizeBarcode(value string) (string, bool) {
 	return s, true
 }
 
-// SoleMBID returns the one id in ids, or "" when there is any other number of them.
-// A credit naming several artists carries an id per artist and still resolves to a
-// single artist entity named for the whole credit string, and no one of those ids
-// describes that entity, so stamping the first would misattribute it. Returning ""
-// there leaves the entity unidentified, which is recoverable; a wrong id is not,
-// because every writer of an entity MBID fills only when empty.
-func SoleMBID(ids []string) string {
-	var sole string
+// CreditMBIDs pairs a split credit's artist names with the ids the file listed for
+// it, positionally, returning one id per name. A file writes one MUSICBRAINZ_ARTISTID
+// per credited artist in credited order, so position is the pairing and arity is the
+// evidence that the pairing is real.
+//
+// When the counts disagree the file and the split describe different things, and
+// every id is dropped rather than guessed at: leaving an artist unidentified is
+// recoverable, while a wrong id is not, because every writer of an entity MBID fills
+// only when empty. At one name and one id it reduces to taking that id, which is what
+// the whole credit used to get.
+//
+// The returned slice is always len(names), with "" where there is no id to pair.
+func CreditMBIDs(names, ids []string) []string {
+	out := make([]string, len(names))
+	clean := make([]string, 0, len(ids))
 	for _, id := range ids {
-		id = strings.TrimSpace(id)
-		if id == "" {
-			continue
+		if id = strings.TrimSpace(id); id != "" {
+			clean = append(clean, id)
 		}
-		if sole != "" {
-			return ""
-		}
-		sole = id
 	}
-	return sole
+	if len(clean) != len(names) {
+		return out
+	}
+	copy(out, clean)
+	return out
+}
+
+// IsMBID reports whether s is a canonical 8-4-4-4-12 hex UUID, the form every
+// MusicBrainz id takes. It is a shape check rather than a normalizer: an mbid has
+// nothing to strip and no checksum, so a value either is one or is not.
+//
+// It matters wherever a stored mbid is interpolated into something with its own
+// syntax. A scan stores identifiers verbatim (see the file header), so an mbid column
+// holds whatever a tag said, and a malformed one concatenated into a query produces
+// garbage rather than a clean miss.
+func IsMBID(s string) bool {
+	if len(s) != 36 {
+		return false
+	}
+	for i, r := range s {
+		switch i {
+		case 8, 13, 18, 23:
+			if r != '-' {
+				return false
+			}
+		default:
+			if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F')) {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // NormalizeIdentifierField dispatches a field edit's value to the matching
 // identifier normalizer. A field without an identifier format passes its value
 // through unchanged (ok is always true for it), so callers can run every edited
-// field through one call. mbid is not here; it has its own UUID validation at
-// the edit sites.
+// field through one call. mbid is not here; it is a shape check rather than a
+// normalizer, so the edit sites call IsMBID.
 func NormalizeIdentifierField(field, value string) (string, bool) {
 	switch field {
 	case "isrc":

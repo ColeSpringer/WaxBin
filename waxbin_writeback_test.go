@@ -8,6 +8,7 @@ import (
 	"image"
 	"image/png"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/colespringer/waxbin"
@@ -510,6 +511,93 @@ func TestSetCreditsBookWriteBack(t *testing.T) {
 	d, _ := lib.Book(ctx, pid)
 	if len(d.Translators) != 1 || d.Translators[0] != "A. Translator" {
 		t.Errorf("translators = %v, want [A. Translator] (catalog edit must stand)", d.Translators)
+	}
+}
+
+// TestScanSplitCreditRoundTripsThroughCreditWriteBack closes the loop on the track
+// artist credit: a scanned "feat." credit splits into one artist per name, an edited
+// credit written back lands as a repeated ARTIST frame, and the next scan reads that
+// frame verbatim rather than re-splitting it, so the curated list survives.
+func TestScanSplitCreditRoundTripsThroughCreditWriteBack(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	src := filepath.Join(root, "song.mp3")
+	writeFile(t, src, testaudio.BuildMP3("Empire State of Mind", "Jay-Z feat. Alicia Keys", "The Blueprint 3", 1))
+
+	lib := openManaged(t, ctx, db, root)
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	pid := itemPIDByTitle(t, ctx, lib, "Empire State of Mind")
+
+	// The scan split the credit into one artist each.
+	credits, err := lib.Credits(ctx, pid)
+	if err != nil {
+		t.Fatalf("credits: %v", err)
+	}
+	var scanned []string
+	for _, c := range credits {
+		if c.Role == model.RoleArtist {
+			scanned = append(scanned, c.Name)
+		}
+	}
+	if len(scanned) != 2 || scanned[0] != "Jay-Z" || scanned[1] != "Alicia Keys" {
+		t.Fatalf("scanned artist credits = %v, want [Jay-Z Alicia Keys]", scanned)
+	}
+
+	// An edited credit writes a repeated ARTIST frame. One of the names carries a
+	// splitter marker of its own, which is what makes the rescan below meaningful.
+	want := []string{"Jay-Z", "Run-D.M.C. vs. Jason Nevins"}
+	if _, err := lib.SetCredits(ctx, pid, model.RoleArtist, want,
+		waxbin.CreditEditOptions{WriteBack: true, Lock: false}); err != nil {
+		t.Fatalf("artist credit write-back: %v", err)
+	}
+	fm, err := meta.NewReader().Read(ctx, src)
+	if err != nil {
+		t.Fatalf("read tags: %v", err)
+	}
+	if len(fm.Tags.Artists) != 2 || fm.Tags.Artists[0] != want[0] || fm.Tags.Artists[1] != want[1] {
+		t.Fatalf("on-disk ARTIST values = %v, want %v", fm.Tags.Artists, want)
+	}
+
+	// A rescan reads that repeated frame verbatim. Had the splitter run on it, the
+	// second name would have become two more artists behind the user's back.
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{Force: true}); err != nil {
+		t.Fatalf("scan --force: %v", err)
+	}
+	credits, err = lib.Credits(ctx, pid)
+	if err != nil {
+		t.Fatalf("credits after rescan: %v", err)
+	}
+	var after []string
+	for _, c := range credits {
+		if c.Role == model.RoleArtist {
+			after = append(after, c.Name)
+		}
+	}
+	if len(after) != 2 || after[0] != want[0] || after[1] != want[1] {
+		t.Errorf("artist credits after rescan = %v, want %v", after, want)
+	}
+
+	// The display survives too. model.Tags.Artist is only the first repeated value, so
+	// without joining the list the rescan would silently drop every artist after it,
+	// taking artist_sort and the organize path along.
+	item, err := lib.Get(ctx, pid)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if item.Artist != strings.Join(want, ", ") {
+		t.Errorf("track artist after rescan = %q, want %q", item.Artist, strings.Join(want, ", "))
+	}
+
+	// And the file carries no stale ARTISTSORT to revert the regenerated sort key.
+	fm, err = meta.NewReader().Read(ctx, src)
+	if err != nil {
+		t.Fatalf("re-read tags: %v", err)
+	}
+	if fm.Tags.ArtistSort != "" {
+		t.Errorf("file kept ARTISTSORT %q; it would revert the credit's sort on the next scan", fm.Tags.ArtistSort)
 	}
 }
 

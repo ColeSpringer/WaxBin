@@ -86,6 +86,12 @@ func (s *Store) SetItemCredits(ctx context.Context, itemPID model.PID, role mode
 		}
 
 		affected := newAffectedRollups()
+		// The artist role rewrites track.artist_id, and the outgoing artist need not be
+		// a prior contributor: a catalog scanned before credits existed has no
+		// RoleArtist rows, so its rollup would drift unrecomputed.
+		if err := affected.collect(ctx, tx, itemID); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
 		// Collect the role's prior artists so a dropped contributor's rollup is refreshed.
 		prior, err := contributorArtistIDsForRole(ctx, tx, itemID, role)
 		if err != nil {
@@ -142,7 +148,14 @@ func (s *Store) SetItemCredits(ctx context.Context, itemPID model.PID, role mode
 			}
 		}
 		if ftsDirty {
-			if err := rebuildBookSearchFTSTx(ctx, tx, itemID); err != nil {
+			// The rebuild is per kind: search_fts.artist for a track is artist +
+			// album artist, where a book's is author + narrator, so the book rebuild
+			// run against a track would write the wrong row.
+			rebuild := rebuildBookSearchFTSTx
+			if kind == string(model.KindTrack) {
+				rebuild = rebuildTrackSearchFTSTx
+			}
+			if err := rebuild(ctx, tx, itemID); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 		}
@@ -168,6 +181,17 @@ func (s *Store) SetItemCredits(ctx context.Context, itemPID model.PID, role mode
 // scalar edit path (the editTrackFieldsTx/editBookFieldsTx probes).
 func syncCreditDenormTx(ctx context.Context, tx *sql.Tx, itemID int64, kind string, role model.ContributorRole, names []string, firstArtistID int64) (bool, error) {
 	switch {
+	case kind == string(model.KindTrack) && role == model.RoleArtist:
+		// Here the display IS rebuilt from the edited names, unlike the scan path,
+		// which keeps the file's raw credit string. The user typed these, so there is
+		// no file text to stay faithful to. artist_sort follows because it has no edit
+		// surface of its own, so unlike composer_sort there is no lock to probe.
+		display := strings.Join(names, ", ")
+		if _, err := tx.ExecContext(ctx, "UPDATE track SET artist=?, artist_sort=?, artist_id=? WHERE item_id=?",
+			display, model.SortKey(display), nullInt64(firstArtistID), itemID); err != nil {
+			return false, err
+		}
+		return true, nil
 	case kind == string(model.KindTrack) && role == model.RoleComposer:
 		// The composer denormalization uses "; " (matching the scanner's multi-composer join).
 		display := strings.Join(names, "; ")
@@ -215,6 +239,18 @@ func syncCreditDenormTx(ctx context.Context, tx *sql.Tx, itemID int64, kind stri
 	}
 }
 
+// rebuildTrackSearchFTSTx reloads a track's current state and rewrites its search
+// row, so an artist credit change is reflected in search. The scan and scalar-edit
+// paths reach syncSearchFTS through resolveAndLinkEntities; the credit path is the
+// only one that rewrites track.artist without passing through it.
+func rebuildTrackSearchFTSTx(ctx context.Context, tx *sql.Tx, itemID int64) error {
+	tr, _, _, err := loadTrackForEditTx(ctx, tx, itemID)
+	if err != nil {
+		return err
+	}
+	return syncSearchFTS(ctx, tx, itemID, tr)
+}
+
 // rebuildBookSearchFTSTx reloads a book's current state and rewrites its search row,
 // so an author/narrator credit change is reflected in search.
 func rebuildBookSearchFTSTx(ctx context.Context, tx *sql.Tx, itemID int64) error {
@@ -223,6 +259,28 @@ func rebuildBookSearchFTSTx(ctx context.Context, tx *sql.Tx, itemID int64) error
 		return err
 	}
 	return syncBookSearchFTS(ctx, tx, itemID, b, bookAuthorDisplay(b))
+}
+
+// contributorNamesForRoleTx returns the names currently credited in one role, in
+// credited order, draining its cursor before returning so the caller can write to the
+// same transaction.
+func contributorNamesForRoleTx(ctx context.Context, tx *sql.Tx, itemID int64, role model.ContributorRole) ([]string, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT a.name FROM item_contributor ic
+		JOIN artist a ON a.id = ic.artist_id
+		WHERE ic.item_id = ? AND ic.role = ? ORDER BY ic.position`, itemID, string(role))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		out = append(out, name)
+	}
+	return out, rows.Err()
 }
 
 // contributorArtistIDsForRole returns the artist ids currently credited in one role,

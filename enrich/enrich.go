@@ -40,6 +40,9 @@ type Store interface {
 	// when includeRepFile is set (the AcoustID fallback needs it), so the correlated
 	// lookup is skipped on the common path where AcoustID is off.
 	ReleaseGroupsNeedingEnrichment(ctx context.Context, force bool, afterID int64, limit int, includeRepFile bool, ids []int64) ([]model.EnrichTarget, error)
+	// AlbumsNeedingReleaseMatch returns the next keyset page of albums that carry a
+	// release identifier but no release MBID, under a release group that has one.
+	AlbumsNeedingReleaseMatch(ctx context.Context, force bool, afterID int64, limit int, ids []int64) ([]model.EnrichTarget, error)
 	BooksNeedingEnrichment(ctx context.Context, force bool, afterID int64, limit int, ids []int64) ([]model.EnrichTarget, error)
 	// ItemsNeedingLyrics returns the next keyset page of tracks that carry no lyrics
 	// yet (and, unless force, have not already been looked up), each with the title,
@@ -48,10 +51,13 @@ type Store interface {
 	// CountEntitiesNeedingEnrichment mirrors the phases a run would execute: a nil
 	// scope counts everything, a scoped count covers only the scoped ids, and a
 	// phase the scoped run skips (an empty id list) contributes zero.
-	CountEntitiesNeedingEnrichment(ctx context.Context, force bool, includeLyrics bool, scope *model.EnrichScope) (int, error)
+	CountEntitiesNeedingEnrichment(ctx context.Context, force, includeAlbums, includeLyrics bool, scope *model.EnrichScope) (int, error)
 
 	ApplyArtistEnrichment(ctx context.Context, in model.ArtistEnrichment) error
 	ApplyReleaseGroupEnrichment(ctx context.Context, in model.ReleaseGroupEnrichment) error
+	// ApplyAlbumReleaseMatch fills an album's release MBID when it has none, and
+	// records the marker either way so a no-match is not re-searched every run.
+	ApplyAlbumReleaseMatch(ctx context.Context, in model.AlbumReleaseMatch) error
 	ApplyBookEnrichment(ctx context.Context, in model.BookEnrichment) error
 	// ApplyLyricsEnrichment attaches a track's resolved lyrics, only when it has none
 	// (fill-when-empty), and records the per-recording enrichment marker.
@@ -87,6 +93,11 @@ type Config struct {
 	// enabled when a contact is set; the facade sets it explicitly). MusicBrainz genres
 	// always flow through the identity spine regardless of this toggle.
 	FetchCommunityGenres bool
+	// MatchReleases enables the album release match: resolving which release of a
+	// group an album is, from a barcode or catalog number it already carries. It costs
+	// one request per qualifying album rather than one per group, which is the trade
+	// for searching by the identifier instead of browsing the group.
+	MatchReleases bool
 
 	// Providers are injected candidate providers supplied by an embedder (Discogs,
 	// Last.fm, Audnexus, ...). They take priority over the built-in field/genre/cover/
@@ -270,6 +281,8 @@ type Result struct {
 	ArtistsMatched        int
 	ReleaseGroupsEnriched int
 	ReleaseGroupsMatched  int
+	AlbumsSearched        int
+	AlbumsMatched         int
 	BooksEnriched         int
 	BooksMatched          int
 	LyricsEnriched        int
@@ -289,7 +302,7 @@ type Result struct {
 }
 
 func (r *Result) total() int {
-	return r.ArtistsEnriched + r.ReleaseGroupsEnriched + r.BooksEnriched + r.LyricsEnriched
+	return r.ArtistsEnriched + r.ReleaseGroupsEnriched + r.AlbumsSearched + r.BooksEnriched + r.LyricsEnriched
 }
 
 // Heartbeat reports progress; it may be nil.
@@ -314,20 +327,21 @@ func (s *Service) Run(ctx context.Context, opts RunOptions, hb Heartbeat) (*Resu
 	// and cached provider responses are bypassed and the lookup actually re-runs.
 	scope := opts.Scope
 	st := &runState{force: opts.Force || scope != nil}
-	var artistIDs, rgIDs, bookIDs, lyricsIDs []int64
+	var artistIDs, rgIDs, albumIDs, bookIDs, lyricsIDs []int64
 	if scope != nil {
-		artistIDs, rgIDs, bookIDs, lyricsIDs = scope.ArtistIDs, scope.ReleaseGroupIDs, scope.BookItemIDs, scope.LyricsItemIDs
+		artistIDs, rgIDs, albumIDs = scope.ArtistIDs, scope.ReleaseGroupIDs, scope.AlbumIDs
+		bookIDs, lyricsIDs = scope.BookItemIDs, scope.LyricsItemIDs
 	}
 
 	// The total is only needed to report a heartbeat ratio, so skip the three
 	// counting queries entirely when there is no heartbeat.
 	var total int
 	if hb != nil {
-		// includeLyrics and the scope must match the phase list below, which adds the
-		// lyrics phase only when a lyrics-capable provider is registered and skips a
-		// phase the scope leaves empty, so the denominator counts exactly the work
-		// that will run.
-		n, err := s.store.CountEntitiesNeedingEnrichment(ctx, st.force, s.hasCapability(CapLyrics), scope)
+		// The two flags and the scope must match the phase list below, which adds the
+		// album phase only when the toggle is on, adds the lyrics phase only when a
+		// lyrics-capable provider is registered, and skips a phase the scope leaves
+		// empty, so the denominator counts exactly the work that will run.
+		n, err := s.store.CountEntitiesNeedingEnrichment(ctx, st.force, s.cfg.MatchReleases, s.hasCapability(CapLyrics), scope)
 		if err != nil {
 			return res, err
 		}
@@ -380,6 +394,22 @@ func (s *Service) Run(ctx context.Context, opts RunOptions, hb Heartbeat) (*Resu
 			},
 			enrich: func(ctx context.Context, t model.EnrichTarget) (bool, error) {
 				return s.enrichReleaseGroup(ctx, st, res, t)
+			},
+		})
+	}
+	// Albums come after release groups, and the ordering is load-bearing: the album
+	// query requires a non-empty release_group.mbid, and the phase above is what fills
+	// it. Running them the other way round would leave a freshly-enriched group's
+	// albums unqueued until the next pass.
+	if s.cfg.MatchReleases && phaseRuns(albumIDs) {
+		phases = append(phases, phase{
+			// Not "release": the phase above is already labelled "album".
+			label: "album release", enriched: &res.AlbumsSearched, matched: &res.AlbumsMatched,
+			fetch: func(ctx context.Context, after int64, lim int) ([]model.EnrichTarget, error) {
+				return s.store.AlbumsNeedingReleaseMatch(ctx, st.force, after, lim, albumIDs)
+			},
+			enrich: func(ctx context.Context, t model.EnrichTarget) (bool, error) {
+				return s.enrichAlbumRelease(ctx, st, t)
 			},
 		})
 	}
@@ -606,6 +636,63 @@ func (s *Service) acoustResolveReleaseGroup(ctx context.Context, st *runState, t
 		return ""
 	}
 	return m.ReleaseGroupMBID
+}
+
+// enrichAlbumRelease resolves which release of its group one album is, from a
+// barcode or catalog number the album already carries, and applies the result. A
+// no-match still writes the marker so the album is not re-searched every run.
+// Returns whether a release matched.
+//
+// Only an identifier decides it. The album's own title, year, and track count are
+// never consulted, because the releases of one group share them and an identifier is
+// the only local evidence that separates a reissue from the original.
+func (s *Service) enrichAlbumRelease(ctx context.Context, st *runState, t model.EnrichTarget) (bool, error) {
+	// A scan stores identifiers verbatim, so this column holds whatever a tag said, and
+	// a malformed value would make a garbage query rather than a clean miss. No marker
+	// either: "could not search" must stay re-queueable, and the recheck costs nothing
+	// because it bails before the request.
+	if !model.IsMBID(t.ReleaseGroupMBID) {
+		s.log.Warn("enrichment: skipping release match, release-group mbid is not a UUID",
+			"album", t.PID, "mbid", t.ReleaseGroupMBID)
+		return false, nil
+	}
+	mbid, reason, err := s.matchAlbumRelease(ctx, st, t)
+	if err != nil {
+		return false, err
+	}
+	in := model.AlbumReleaseMatch{AlbumID: t.ID, PID: t.PID}
+	if mbid != "" {
+		in.Matched, in.MBID, in.Reason = true, mbid, reason
+	}
+	if err := s.store.ApplyAlbumReleaseMatch(ctx, in); err != nil {
+		return false, err
+	}
+	return in.Matched, nil
+}
+
+// matchAlbumRelease runs the identifier tiers in order, each with its own search,
+// and stops at the first that decides. Barcode leads because it identifies a release
+// outright where a catalog number identifies one only within a label, so the second
+// request is skipped entirely on the CD rips this phase exists to serve.
+func (s *Service) matchAlbumRelease(ctx context.Context, st *runState, t model.EnrichTarget) (string, string, error) {
+	if spellings := barcodeSpellings(t.Barcode); len(spellings) > 0 {
+		byBarcode, err := s.mb.searchReleaseByIdentifier(ctx, st.force, t.ReleaseGroupMBID, "barcode", spellings)
+		if err != nil {
+			return "", "", err
+		}
+		if mbid, reason := matchRelease(t, byBarcode, nil); mbid != "" {
+			return mbid, reason, nil
+		}
+	}
+	if cat := strings.TrimSpace(t.CatalogNumber); cat != "" {
+		byCatNo, err := s.mb.searchReleaseByIdentifier(ctx, st.force, t.ReleaseGroupMBID, "catno", []string{cat})
+		if err != nil {
+			return "", "", err
+		}
+		mbid, reason := matchRelease(t, nil, byCatNo)
+		return mbid, reason, nil
+	}
+	return "", "", nil
 }
 
 // enrichBook resolves an audiobook against a MusicBrainz release and applies its

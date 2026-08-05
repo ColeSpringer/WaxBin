@@ -67,7 +67,6 @@ CREATE TABLE album (
   year             INTEGER,
   disc_total       INTEGER,
   mbid             TEXT,
-  edition          TEXT,
   barcode          TEXT,                 -- release barcode (UPC/EAN)
   label            TEXT,                 -- record label
   catalog_number   TEXT,                 -- label catalog number
@@ -102,7 +101,7 @@ CREATE INDEX item_genre_genre ON item_genre(genre_id);
 CREATE TABLE item_contributor (
   item_id   INTEGER NOT NULL REFERENCES playable_item(id) ON DELETE CASCADE,
   artist_id INTEGER NOT NULL REFERENCES artist(id) ON DELETE CASCADE,
-  role      TEXT    NOT NULL,                     -- author|narrator|translator|editor
+  role      TEXT    NOT NULL,                     -- music: artist|composer|producer|...; books: author|narrator|translator|editor
   position  INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (item_id, role, artist_id)
 );

@@ -144,9 +144,9 @@ func mergeEntityTx(ctx context.Context, tx *sql.Tx, et model.MergeEntity, table 
 		}
 	}
 	// Union the enrichment marker so a post-enrichment merge doesn't strand the
-	// survivor as never-looked-up (or force a redundant re-lookup). Only artist and
-	// release_group carry markers, so skip it for album and genre.
-	if et == model.MergeArtist || et == model.MergeReleaseGroup {
+	// survivor as never-looked-up (or force a redundant re-lookup). Genre is the only
+	// kind with no marker of its own; album carries the release-match one.
+	if et == model.MergeArtist || et == model.MergeReleaseGroup || et == model.MergeAlbum {
 		if err := unionEnrichmentMarker(ctx, tx, table, sid, lid); err != nil {
 			return nil, err
 		}

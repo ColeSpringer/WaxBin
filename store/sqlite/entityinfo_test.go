@@ -147,6 +147,33 @@ func TestEntityByPIDAllKinds(t *testing.T) {
 	}
 }
 
+// TestSeriesEntityCarriesNoMBID guards the dropped series.mbid column against a
+// reflex reintroduction. A series has no external id to hold: enrichment resolves
+// a book release from a tagged release id and never reaches the series above it,
+// so the column had no writer in any catalog. Both read paths are checked, since
+// the batch one is a separate statement.
+func TestSeriesEntityCarriesNoMBID(t *testing.T) {
+	st, _ := entityInfoFixture(t)
+	ctx := context.Background()
+	pid := entityPIDByName(t, st, "series", "name", "Middle-earth")
+
+	single, err := st.EntityByPID(ctx, read.EntitySeries, pid)
+	if err != nil {
+		t.Fatalf("EntityByPID: %v", err)
+	}
+	if single.MBID != "" {
+		t.Errorf("series mbid = %q, want empty (a series carries no external id)", single.MBID)
+	}
+
+	batch, err := st.EntityByPIDs(ctx, read.EntitySeries, []model.PID{pid})
+	if err != nil {
+		t.Fatalf("EntityByPIDs: %v", err)
+	}
+	if got := batch[pid]; got == nil || got.MBID != "" {
+		t.Errorf("batched series = %+v, want a hit with an empty mbid", got)
+	}
+}
+
 // TestEntityByPIDMatchesFacet pins the lookup's counts to the facet the pid came
 // from: an artist bucket's count and its EntityByPID ItemCount must agree.
 func TestEntityByPIDMatchesFacet(t *testing.T) {

@@ -61,6 +61,7 @@ type EnrichConfig struct {
 	CoverArt        *bool  `json:"cover_art,omitempty"`         // fetch release-group covers (default on)
 	Lyrics          *bool  `json:"lyrics,omitempty"`            // fill lyrics from LRCLIB (default on)
 	CommunityGenres *bool  `json:"community_genres,omitempty"`  // fetch community genres from ListenBrainz (default on)
+	MatchReleases   *bool  `json:"match_releases,omitempty"`    // resolve album.mbid from a barcode/catalog number (default on)
 	BlockPrivateIPs bool   `json:"block_private_ips,omitempty"` // SSRF guard for provider requests
 	TimeoutSeconds  int    `json:"timeout_seconds,omitempty"`   // per-request timeout (0 = default)
 

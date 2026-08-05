@@ -612,6 +612,8 @@ type enrichView struct {
 	ArtistsMatched        int    `json:"artistsMatched"`
 	ReleaseGroupsEnriched int    `json:"releaseGroupsEnriched"`
 	ReleaseGroupsMatched  int    `json:"releaseGroupsMatched"`
+	AlbumsSearched        int    `json:"albumsSearched"`
+	AlbumsMatched         int    `json:"albumsMatched"`
 	BooksEnriched         int    `json:"booksEnriched"`
 	BooksMatched          int    `json:"booksMatched"`
 	LyricsEnriched        int    `json:"lyricsEnriched"`
@@ -628,6 +630,7 @@ func toEnrichView(r *waxbin.EnrichResult) enrichView {
 	return enrichView{
 		ArtistsEnriched: r.Result.ArtistsEnriched, ArtistsMatched: r.Result.ArtistsMatched,
 		ReleaseGroupsEnriched: r.Result.ReleaseGroupsEnriched, ReleaseGroupsMatched: r.Result.ReleaseGroupsMatched,
+		AlbumsSearched: r.Result.AlbumsSearched, AlbumsMatched: r.Result.AlbumsMatched,
 		BooksEnriched: r.Result.BooksEnriched, BooksMatched: r.Result.BooksMatched,
 		LyricsEnriched: r.Result.LyricsEnriched, LyricsMatched: r.Result.LyricsMatched,
 		ArtFetched:  r.Result.ArtFetched,

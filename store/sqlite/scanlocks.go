@@ -84,8 +84,17 @@ func preserveLockedTrackFieldsTx(ctx context.Context, tx *sql.Tx, tr *model.Trac
 		item.Title = curTitle
 		item.SortKey = model.SortKey(curTitle)
 	}
-	if locked["artist"] {
-		tr.Artist, tr.ArtistSort = cur.Artist, cur.ArtistSort
+	// artist is set either as a scalar edit ("artist") or via the credit API
+	// ("credit.artist"), which also rewrites the track.artist denorm; both spellings
+	// preserve the same triple, mirroring the composer arm below. Widening this one
+	// condition is what makes "which lock wins" unobservable, since either restores
+	// the identical values from the same row.
+	//
+	// Artists is carried explicitly rather than re-derived: a credit set as
+	// ["Jay-Z", "Alicia Keys"] stores "Jay-Z, Alicia Keys", and the splitter does not
+	// split on a comma, so re-deriving would collapse two curated artists into one.
+	if locked["artist"] || locked["credit.artist"] {
+		tr.Artist, tr.ArtistSort, tr.Artists = cur.Artist, cur.ArtistSort, cur.Artists
 	}
 	if locked["album_artist"] {
 		tr.AlbumArtist = cur.AlbumArtist

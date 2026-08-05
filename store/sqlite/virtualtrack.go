@@ -133,7 +133,7 @@ func (s *Store) PutScannedVirtualTracks(ctx context.Context, in model.PutScanned
 			if err := affected.collect(ctx, tx, itemID); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
-			if err := resolveAndLinkEntities(ctx, tx, itemID, vt.Track, in.File.Path); err != nil {
+			if err := resolveAndLinkEntities(ctx, tx, itemID, vt.Track, in.File.Path, affected); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 			if err := affected.collect(ctx, tx, itemID); err != nil {

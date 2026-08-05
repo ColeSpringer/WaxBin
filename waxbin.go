@@ -56,6 +56,7 @@ func enrichConfig(c config.EnrichConfig, providers []enrich.Provider) enrich.Con
 		FetchCoverArt:        c.CoverArt == nil || *c.CoverArt,
 		FetchLyrics:          c.Lyrics == nil || *c.Lyrics,
 		FetchCommunityGenres: c.CommunityGenres == nil || *c.CommunityGenres,
+		MatchReleases:        c.MatchReleases == nil || *c.MatchReleases,
 		Providers:            providers,
 		BlockPrivateIPs:      c.BlockPrivateIPs,
 		Timeout:              time.Duration(c.TimeoutSeconds) * time.Second,

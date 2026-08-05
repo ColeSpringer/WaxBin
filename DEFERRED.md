@@ -8,36 +8,23 @@ Everything here is work still to do. Reasoning about work deliberately not done
 belongs in the doc comment beside the code it constrains, not in this file, since
 that is where someone about to get it wrong will actually read it.
 
-## Music credits are one artist per track
+## An album with no barcode gets no release id
 
-A scanned track stores one denormalized artist string and one `artist_id`, so
-`"Jay-Z feat. Alicia Keys"` becomes a single artist entity named for the whole
-credit. The model for the alternative already exists: `item_contributor` is
-role-tagged and supports music roles, but only a user edit (`SetCredits`) writes it,
-never the scanner. `meta.SplitCredits` already splits credit strings for book
-authors.
+A release group is the album as a concept; a release is one edition of it, and a
+popular record has dozens. Enrichment resolves the group from title and artist, but
+the editions under it share the title, the artist, the track list, and usually the
+track count, so almost nothing WaxBin knows about a local rip tells them apart.
 
-Consequence today: a joint credit gets no MusicBrainz id at all. `model.SoleMBID`
-takes an id only when the file names exactly one, because stamping the first artist's
-id onto the combined entity misattributes it, and every writer of an entity MBID
-fills only when empty, so a wrong id is not self-correcting. That stops the
-misattribution without fixing the modeling.
+Barcode and label catalog number do, because they are printed per edition, and those
+are what `album.mbid` is matched on. A library tagged without them gets a release
+group and no release. Why counts and year are not used as a fallback is settled and
+lives in `enrich/release.go`.
 
-The fix is credit splitting at scan: one track resolving to N artist entities through
-`item_contributor`, each keyed and MBID-stamped on its own. It reaches the rollups,
-the artist facet, and every read surface that assumes one artist per track, so it is
-its own piece of work.
+Closing it needs media format and country, which genuinely separate a group's
+editions and which WaxBin does not store at all (`library.media` is unrelated: it is
+what content a root holds). That is a column, a scan-side source to fill it, and a
+read surface, so it is a feature rather than a matcher tweak.
 
-## `album.mbid` is never enriched
-
-`lookupReleaseGroup` requests `inc=artist-credits+genres`, so the music path
-structurally cannot see a release id. Deciding which release of a group a local rip is
-(track count, barcode, media) is a matching problem, not a projection. Consequence: an
-enriched-rather-than-tagged library carries `ReleaseGroupMBID` and no `AlbumMBID`.
-
-## Dead columns
-
-`series.mbid` and `album.edition` have no writer. Cheaper to remove than it looks
-under the pre-1.0 single-migration policy, but `series.mbid` is read (it feeds
-`read.EntityInfo.MBID` for a series), so dropping it is an API change rather than a
-tidy-up.
+The practical cost is small: a consumer wanting cover art can use
+`/release-group/<mbid>/front`, which `enrich/coverart.go` already calls. What is lost
+is per-edition detail, that pressing's label, country, date, and its own art.

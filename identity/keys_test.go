@@ -74,6 +74,49 @@ func TestSplitGenres(t *testing.T) {
 	}
 }
 
+func TestSplitPerformerCredit(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want []string
+	}{
+		{"plain", "Jay-Z", []string{"Jay-Z"}},
+		{"feat with a period", "Jay-Z feat. Alicia Keys", []string{"Jay-Z", "Alicia Keys"}},
+		{"feat without one", "Jay-Z feat Alicia Keys", []string{"Jay-Z", "Alicia Keys"}},
+		{"ft", "Jay-Z ft. Alicia Keys", []string{"Jay-Z", "Alicia Keys"}},
+		{"featuring", "Jay-Z Featuring Alicia Keys", []string{"Jay-Z", "Alicia Keys"}},
+		{"vs", "Run-D.M.C. vs. Jason Nevins", []string{"Run-D.M.C.", "Jason Nevins"}},
+		{"semicolon", "A; B", []string{"A", "B"}},
+		{"spaced slash", "A / B", []string{"A", "B"}},
+		{"markers compose", "A; B feat. C", []string{"A", "B", "C"}},
+		{"dedup keeps the first casing", "Jay-Z feat. JAY-Z", []string{"Jay-Z"}},
+		{"blank", "   ", nil},
+
+		// Band names are full of the separators SplitCredits uses for book authors, so
+		// none of them splits here. A wrong split creates artist rows nothing removes;
+		// a missed one leaves a coarse credit the user can fix with `credit`.
+		{"slash inside a name", "AC/DC", []string{"AC/DC"}},
+		{"ampersand band", "Hall & Oates", []string{"Hall & Oates"}},
+		{"ampersand band 2", "Simon & Garfunkel", []string{"Simon & Garfunkel"}},
+		{"ampersand band 3", "Sly & the Family Stone", []string{"Sly & the Family Stone"}},
+		{"comma and ampersand", "Earth, Wind & Fire", []string{"Earth, Wind & Fire"}},
+		// The cost of the rule above: a real joint credit joined by "&" stays whole.
+		{"joint credit joined by an ampersand", "Jay-Z & Alicia Keys", []string{"Jay-Z & Alicia Keys"}},
+
+		{"comma alone", "Crosby, Stills, Nash", []string{"Crosby, Stills, Nash"}},
+		{"with", "Tom Petty with the Heartbreakers", []string{"Tom Petty with the Heartbreakers"}},
+		{"bare x", "Skrillex x Diplo", []string{"Skrillex x Diplo"}},
+		{"marker inside a word", "Ftera Vsevolod", []string{"Ftera Vsevolod"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := SplitPerformerCredit(c.in); !reflect.DeepEqual(got, c.want) {
+				t.Errorf("SplitPerformerCredit(%q) = %v, want %v", c.in, got, c.want)
+			}
+		})
+	}
+}
+
 func TestArtistKeyMBIDFirst(t *testing.T) {
 	withMBID := ArtistKey("ABC-123", "Some Name")
 	if withMBID != "mbid:abc-123" {

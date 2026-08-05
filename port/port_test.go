@@ -71,6 +71,29 @@ func TestItemExportCarriesNoLibraryHandle(t *testing.T) {
 	}
 }
 
+// TestItemExportCarriesNoSplitArtistCredit is the sibling of the library-handle test
+// above, for the same reason: a track's credit now fans out to one artist row each,
+// and copying that list into the flat per-item record is a change someone could
+// reasonably make. Only the combined display crosses.
+func TestItemExportCarriesNoSplitArtistCredit(t *testing.T) {
+	items := []*model.ItemView{{PID: "I1", Kind: model.KindTrack, State: model.StatePresent,
+		Title: "Empire State of Mind", Artist: "Jay-Z feat. Alicia Keys"}}
+
+	snap := port.BuildSnapshot(12, 1700000000, nil, items, nil, nil)
+	encoded, err := json.Marshal(snap.Items)
+	if err != nil {
+		t.Fatalf("marshal items: %v", err)
+	}
+	for _, key := range []string{"artists", "credits", "contributors"} {
+		if strings.Contains(string(encoded), `"`+key+`"`) {
+			t.Errorf("marshalled items carry a %q key: %s", key, encoded)
+		}
+	}
+	if snap.Items[0].Artist != "Jay-Z feat. Alicia Keys" {
+		t.Errorf("exported artist = %q, want the combined display", snap.Items[0].Artist)
+	}
+}
+
 func TestReadSnapshotRejectsForeignJSON(t *testing.T) {
 	_, err := port.ReadSnapshot(strings.NewReader(`{"manifest":{"format":"something-else"}}`))
 	if !waxerr.Is(err, waxerr.CodeInvalid) {

@@ -11,10 +11,16 @@ package read
 type GroupBy string
 
 const (
-	GroupGenre       GroupBy = "genre"
-	GroupArtist      GroupBy = "artist"
-	GroupAlbumArtist GroupBy = "albumArtist"
-	GroupAlbum       GroupBy = "album"
+	GroupGenre  GroupBy = "genre"
+	GroupArtist GroupBy = "artist"
+	// GroupCreditArtist buckets a track under EVERY artist its credit names, where
+	// GroupArtist buckets it once under the primary. A featured artist has a bucket
+	// here and none there. It is the second many-per-item dimension after genre, so a
+	// track appears in several buckets and the bucket counts sum to more than the
+	// item count.
+	GroupCreditArtist GroupBy = "creditArtist"
+	GroupAlbumArtist  GroupBy = "albumArtist"
+	GroupAlbum        GroupBy = "album"
 	// GroupReleaseGroup buckets tracks by their album's release group (key = release
 	// group pid, display = its title), the dimension above album that collects a
 	// record's editions. It is the mirror of the release_group_pid query field. Like
@@ -40,8 +46,8 @@ const (
 // or a well-formed custom-tag dimension ("tag.<KEY>" for a canonical, non-reserved key).
 func (g GroupBy) Valid() bool {
 	switch g {
-	case GroupGenre, GroupArtist, GroupAlbumArtist, GroupAlbum, GroupReleaseGroup,
-		GroupYear, GroupKind, GroupLibrary, GroupPodcast:
+	case GroupGenre, GroupArtist, GroupCreditArtist, GroupAlbumArtist, GroupAlbum,
+		GroupReleaseGroup, GroupYear, GroupKind, GroupLibrary, GroupPodcast:
 		return true
 	default:
 		_, ok := TagGroupKey(g)
@@ -51,8 +57,8 @@ func (g GroupBy) Valid() bool {
 
 // GroupBys lists the supported faceting dimensions (for help text and tests).
 func GroupBys() []GroupBy {
-	return []GroupBy{GroupGenre, GroupArtist, GroupAlbumArtist, GroupAlbum, GroupReleaseGroup,
-		GroupYear, GroupKind, GroupLibrary, GroupPodcast}
+	return []GroupBy{GroupGenre, GroupArtist, GroupCreditArtist, GroupAlbumArtist, GroupAlbum,
+		GroupReleaseGroup, GroupYear, GroupKind, GroupLibrary, GroupPodcast}
 }
 
 // Canonical "unknown" bucket display labels. A consumer rendering a facet or a

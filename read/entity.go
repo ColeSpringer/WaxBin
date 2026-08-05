@@ -46,9 +46,13 @@ type EntityInfo struct {
 	PID     model.PID
 	Name    string // artist/genre/series name, or release-group/album title
 	SortKey string
-	MBID    string // empty for a genre, which carries no external id
-	Type    string // release-group primary type (album|ep|single|...); empty otherwise
-	Year    int    // album release year; 0 otherwise
+	// MBID is empty for a genre and for a series, neither of which carries an
+	// external id: a genre is a normalized local label, and book enrichment
+	// resolves a release from a tagged release id without ever reaching the
+	// series above it.
+	MBID string
+	Type string // release-group primary type (album|ep|single|...); empty otherwise
+	Year int    // album release year; 0 otherwise
 
 	// The album's other release identifiers, filled by scan from tags and writable
 	// through entity edit. Album only, empty for every other kind, as Type and Year are.

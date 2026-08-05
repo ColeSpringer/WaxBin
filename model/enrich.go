@@ -9,6 +9,7 @@ package model
 const (
 	EnrichArtistType       = "artist"
 	EnrichReleaseGroupType = "release_group"
+	EnrichAlbumType        = "album"
 	EnrichBookType         = "book"
 )
 
@@ -29,6 +30,7 @@ const (
 type EnrichScope struct {
 	ArtistIDs       []int64
 	ReleaseGroupIDs []int64
+	AlbumIDs        []int64
 	BookItemIDs     []int64
 	LyricsItemIDs   []int64
 }
@@ -52,6 +54,16 @@ type EnrichTarget struct {
 	// DurationSec also disambiguates a per-track lyrics lookup.
 	FilePath    string
 	DurationSec int
+
+	// The album release match keys on these three. Barcode and CatalogNumber are the
+	// identifiers it searches by, verbatim as a scan stored them, so a consumer
+	// normalizes before comparing. ReleaseGroupMBID is the group the answer must
+	// belong to, and is separate from MBID because MBID names the target's own id,
+	// which for an album target is empty by construction: an album that already has
+	// one is not queued.
+	Barcode          string
+	CatalogNumber    string
+	ReleaseGroupMBID string
 }
 
 // ArtistEnrichment is the resolved data for one artist, applied in a single
@@ -108,6 +120,19 @@ type LyricsEnrichment struct {
 	Matched  bool
 	Lyrics   *Lyrics
 	Provider string // the provider that supplied the lyrics ("lrclib", ...)
+}
+
+// AlbumReleaseMatch is the release one album was matched to, applied fill-when-empty
+// like every other entity MBID. Matched=false records a completed no-match so the
+// album is not re-searched every run. Reason names the identifier that decided it
+// ("barcode", "catalog number"), for the change log and for a human reading a log
+// line; nothing branches on it.
+type AlbumReleaseMatch struct {
+	AlbumID int64
+	PID     PID
+	Matched bool
+	MBID    string
+	Reason  string
 }
 
 // BookEnrichment is the resolved data for one audiobook: external identifiers and

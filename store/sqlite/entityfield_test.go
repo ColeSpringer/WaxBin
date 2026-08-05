@@ -131,6 +131,7 @@ func TestEntityPIDFieldsMirrorFacets(t *testing.T) {
 		field string
 	}{
 		{read.GroupArtist, "artist_pid"},
+		{read.GroupCreditArtist, "credit_artist_pid"},
 		{read.GroupAlbumArtist, "album_artist_pid"},
 		{read.GroupAlbum, "album_pid"},
 		{read.GroupReleaseGroup, "release_group_pid"},

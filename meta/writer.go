@@ -89,6 +89,7 @@ func DerivedSortPairs() []DerivedSortPair {
 // roles are present for completeness but audiobook credit write-back is not wired
 // through the writer yet (a book's tags follow their own conventions).
 var roleTagKeys = map[model.ContributorRole]string{
+	model.RoleArtist:    string(tag.Artist),
 	model.RoleComposer:  string(tag.Composer),
 	model.RoleLyricist:  string(tag.Lyricist),
 	model.RoleConductor: string(tag.Conductor),

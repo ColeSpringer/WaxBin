@@ -197,6 +197,158 @@ func scopeTrack(t *testing.T, st *sqlite.Store, libID int64, path, essence, titl
 	return res.ItemPID
 }
 
+// The album release match works in UUIDs, so its fixtures do too.
+const (
+	relTestRGMBID  = "b0000000-0000-4000-8000-000000000002"
+	relTestOneMBID = "c0000000-0000-4000-8000-000000000003"
+	relTestTwoMBID = "d0000000-0000-4000-8000-000000000004"
+)
+
+// albumTrack persists one track whose album carries release identifiers. Each album
+// gets its own folder, since the album match key embeds it and these would otherwise
+// collapse into one row under their shared release group.
+func albumTrack(t *testing.T, st *sqlite.Store, libID int64, essence, album, barcode, catNo string) {
+	t.Helper()
+	path := "/lib/" + essence + "/1.mp3"
+	_, err := st.PutScannedTrack(context.Background(), model.PutScannedTrackInput{
+		LibraryID: libID,
+		File: model.File{
+			Path: []byte(path), DisplayPath: path, RelPath: []byte(filepath.Base(path)),
+			Kind: model.FileAudio, Size: 100, MTimeNS: 1,
+			ContentHash: "c-" + essence, EssenceHash: essence, ScanState: model.ScanIndexed,
+		},
+		Item: model.PlayableItem{
+			Kind: model.KindTrack, State: model.StatePresent, Title: "T-" + essence,
+			SortKey: model.SortKey("T-" + essence), IdentityKey: "essence:" + essence,
+		},
+		Track: model.Track{
+			Artist: "PF", AlbumArtist: "PF", Album: album, TrackNo: 1,
+			MBReleaseGroupID: relTestRGMBID, Barcode: barcode, CatalogNumber: catNo,
+		},
+	})
+	if err != nil {
+		t.Fatalf("PutScannedTrack: %v", err)
+	}
+}
+
+func albumIDByTitle(t *testing.T, db *sql.DB, title string) int64 {
+	t.Helper()
+	var id int64
+	if err := db.QueryRow("SELECT id FROM album WHERE title = ?", title).Scan(&id); err != nil {
+		t.Fatalf("no album titled %q: %v", title, err)
+	}
+	return id
+}
+
+func setEntityMBID(t *testing.T, st *sqlite.Store, et model.MergeEntity, pid, mbid string, lock bool) {
+	t.Helper()
+	if err := st.EditEntityFields(context.Background(), et, model.PID(pid),
+		map[string]string{"mbid": mbid}, model.SourceUser, lock, false); err != nil {
+		t.Fatalf("set %s mbid: %v", et, err)
+	}
+}
+
+// TestAlbumsNeedingReleaseMatchGatesOnIdentifiers pins the four-part queue gate: an
+// album is queued only when it has no mbid of its own, its release group has one, and
+// it carries a barcode or a catalog number.
+func TestAlbumsNeedingReleaseMatchGatesOnIdentifiers(t *testing.T) {
+	ctx := context.Background()
+	st, dbPath, lib := openStoreAt(t)
+	db := roConn(t, dbPath)
+
+	albumTrack(t, st, lib.ID, "ess-a", "Has Barcode", "0075992739429", "")
+	albumTrack(t, st, lib.ID, "ess-b", "Has CatNo", "", "SHVL 804")
+	albumTrack(t, st, lib.ID, "ess-c", "Has Neither", "", "")
+
+	queued, err := st.AlbumsNeedingReleaseMatch(ctx, false, 0, 100, nil)
+	if err != nil {
+		t.Fatalf("AlbumsNeedingReleaseMatch: %v", err)
+	}
+	got := map[string]bool{}
+	for _, q := range queued {
+		got[q.Name] = true
+		if q.ReleaseGroupMBID != relTestRGMBID {
+			t.Errorf("queued %q under group %q, want %s", q.Name, q.ReleaseGroupMBID, relTestRGMBID)
+		}
+	}
+	if !got["Has Barcode"] || !got["Has CatNo"] || got["Has Neither"] {
+		t.Errorf("queued albums = %v, want the two carrying an identifier", got)
+	}
+
+	// An album that already has a release id drops out: entity MBIDs fill only when
+	// empty, so there is nothing left for a match to write.
+	setEntityMBID(t, st, model.MergeAlbum,
+		scalarQueryStr(t, db, "SELECT pid FROM album WHERE title='Has Barcode'"), relTestOneMBID, false)
+	queued, err = st.AlbumsNeedingReleaseMatch(ctx, false, 0, 100, nil)
+	if err != nil {
+		t.Fatalf("AlbumsNeedingReleaseMatch: %v", err)
+	}
+	if len(queued) != 1 || queued[0].Name != "Has CatNo" {
+		t.Errorf("queued = %+v, want only Has CatNo", queued)
+	}
+
+	// Clearing the shared group's mbid leaves nothing to constrain a search to.
+	setEntityMBID(t, st, model.MergeReleaseGroup,
+		scalarQueryStr(t, db, "SELECT pid FROM release_group LIMIT 1"), "", false)
+	queued, err = st.AlbumsNeedingReleaseMatch(ctx, false, 0, 100, nil)
+	if err != nil {
+		t.Fatalf("AlbumsNeedingReleaseMatch: %v", err)
+	}
+	if len(queued) != 0 {
+		t.Errorf("queued = %+v, want none", queued)
+	}
+}
+
+// TestAlbumReleaseMatchRespectsLockAndDuplicate covers the two refusals the apply
+// shares with setReleaseGroupMBIDTx: a curated (locked) mbid keeps, and an id another
+// album already holds is left for the merge primitive rather than duplicated. The
+// marker is still recorded in both cases, so neither is re-searched every run.
+func TestAlbumReleaseMatchRespectsLockAndDuplicate(t *testing.T) {
+	ctx := context.Background()
+	st, dbPath, lib := openStoreAt(t)
+	db := roConn(t, dbPath)
+
+	albumTrack(t, st, lib.ID, "ess-a", "Locked", "0075992739429", "")
+	albumTrack(t, st, lib.ID, "ess-b", "Taken", "5099902154251", "")
+	albumTrack(t, st, lib.ID, "ess-c", "Holder", "", "SHVL 804")
+
+	lockedPID := scalarQueryStr(t, db, "SELECT pid FROM album WHERE title='Locked'")
+	takenPID := scalarQueryStr(t, db, "SELECT pid FROM album WHERE title='Taken'")
+	holderPID := scalarQueryStr(t, db, "SELECT pid FROM album WHERE title='Holder'")
+
+	// A lock on a deliberately empty value: the fill-when-empty WHERE alone would
+	// refill it, so only the lock probe keeps it.
+	setEntityMBID(t, st, model.MergeAlbum, lockedPID, "", true)
+	setEntityMBID(t, st, model.MergeAlbum, holderPID, relTestOneMBID, false)
+
+	for _, tc := range []struct {
+		name, pid, mbid string
+	}{
+		{"Locked", lockedPID, relTestTwoMBID},
+		{"Taken", takenPID, relTestOneMBID}, // already held by Holder
+	} {
+		id := albumIDByTitle(t, db, tc.name)
+		err := st.ApplyAlbumReleaseMatch(ctx, model.AlbumReleaseMatch{
+			AlbumID: id, PID: model.PID(tc.pid), Matched: true, MBID: tc.mbid, Reason: "barcode",
+		})
+		if err != nil {
+			t.Fatalf("ApplyAlbumReleaseMatch(%s): %v", tc.name, err)
+		}
+		if got := scalarQueryStr(t, db, "SELECT COALESCE(mbid,'') FROM album WHERE title = ?", tc.name); got != "" {
+			t.Errorf("%s album mbid = %q, want empty (refused)", tc.name, got)
+		}
+		if n := scalarQueryInt(t, db,
+			"SELECT COUNT(*) FROM entity_enrichment WHERE entity_type='album' AND entity_id=?", id); n != 1 {
+			t.Errorf("%s marker rows = %d, want 1", tc.name, n)
+		}
+	}
+
+	// The refusals are specific: the holder kept the id, so nothing was clobbered.
+	if got := scalarQueryStr(t, db, "SELECT COALESCE(mbid,'') FROM album WHERE title='Holder'"); got != relTestOneMBID {
+		t.Errorf("Holder album mbid = %q, want %s", got, relTestOneMBID)
+	}
+}
+
 // TestEnrichScopeForItem checks the per-kind scope resolution: a track scopes to
 // its (distinct) artist and album artist, its release group, and its own lyrics
 // lookup; a book to its contributors and its own identifier fill; an episode is
@@ -429,9 +581,9 @@ func TestScopedEnrichmentQueries(t *testing.T) {
 	}
 
 	// The scoped count covers exactly the phases a scoped run executes: one
-	// artist + one release group here, and the empty book/lyrics lists add zero.
+	// artist + one release group here, and the empty album/book/lyrics lists add zero.
 	scope := &model.EnrichScope{ArtistIDs: []int64{oneID}, ReleaseGroupIDs: []int64{rgOneID}}
-	n, err := st.CountEntitiesNeedingEnrichment(ctx, true, true, scope)
+	n, err := st.CountEntitiesNeedingEnrichment(ctx, true, true, true, scope)
 	if err != nil {
 		t.Fatalf("scoped count: %v", err)
 	}
@@ -440,7 +592,7 @@ func TestScopedEnrichmentQueries(t *testing.T) {
 	}
 	// The unscoped count still covers the catalog (2 artists + 2 rgs; the tracks
 	// need lyrics lookups too under includeLyrics).
-	un, err := st.CountEntitiesNeedingEnrichment(ctx, true, false, nil)
+	un, err := st.CountEntitiesNeedingEnrichment(ctx, true, false, false, nil)
 	if err != nil || un != 4 {
 		t.Fatalf("unscoped count = %d (err %v), want 4", un, err)
 	}
@@ -518,10 +670,19 @@ func TestScopedEnrichmentReachesGhostEntities(t *testing.T) {
 	}
 
 	// The scoped count stays in lockstep with the relaxed walk.
-	n, err := st.CountEntitiesNeedingEnrichment(ctx, true, false, &model.EnrichScope{ArtistIDs: []int64{ghostID}})
+	n, err := st.CountEntitiesNeedingEnrichment(ctx, true, false, false, &model.EnrichScope{ArtistIDs: []int64{ghostID}})
 	if err != nil || n != 1 {
 		t.Fatalf("scoped ghost count = %d (err %v), want 1", n, err)
 	}
+}
+
+func scalarQueryStr(t *testing.T, db *sql.DB, q string, args ...any) string {
+	t.Helper()
+	var s string
+	if err := db.QueryRow(q, args...).Scan(&s); err != nil {
+		t.Fatalf("query %q: %v", q, err)
+	}
+	return s
 }
 
 func scalarQueryInt(t *testing.T, db *sql.DB, q string, args ...any) int {
