@@ -29,14 +29,20 @@ const (
 	relOtherCode  = "5099902154251"
 )
 
-// relMock serves the MusicBrainz endpoints an album release match needs: the artist
-// and release-group ladder that fills release_group.mbid, plus the release search.
-// releases is the JSON array body the /release search answers with, so a test picks
-// what came back; releaseQueries records every query string it was asked.
+// relMock serves the MusicBrainz endpoints an album release match needs: the artist and
+// release-group ladder that fills release_group.mbid, the release search, and the
+// whole-group browse the edition tier pages.
+//
+// releases is the /release search body and releaseQueries records every query asked.
+// browsePages are the browse bodies in offset order (nil serves no browse at all, which
+// is how a test asserts the tier never reached it) and browseOffsets records every offset,
+// so a test can pin how many pages a group cost.
 type relMock struct {
 	server         *httptest.Server
 	releases       string
 	releaseQueries []string
+	browsePages    []string
+	browseOffsets  []string
 	requests       int
 }
 
@@ -60,12 +66,43 @@ func newRelMock(t *testing.T, releases string) *relMock {
 		case r.URL.Path == "/release" && q != "":
 			m.releaseQueries = append(m.releaseQueries, q)
 			io(w, `{"releases":`+m.releases+`}`)
+		case r.URL.Path == "/release" && r.URL.Query().Get("release-group") != "" && m.browsePages != nil:
+			offset := r.URL.Query().Get("offset")
+			m.browseOffsets = append(m.browseOffsets, offset)
+			n, _ := strconv.Atoi(offset)
+			page := n / 100
+			if page >= len(m.browsePages) {
+				page = len(m.browsePages) - 1
+			}
+			io(w, m.browsePages[page])
 		default:
 			http.NotFound(w, r)
 		}
 	}))
 	t.Cleanup(m.server.Close)
 	return m
+}
+
+// browseDoc builds one release as the browse endpoint returns it: no score and no
+// release-group field, with the media and country the tier reads.
+func browseDoc(id string, formats []string, country, barcode string) string {
+	media := make([]string, 0, len(formats))
+	for _, f := range formats {
+		media = append(media, `{"format":`+strconv.Quote(f)+`}`)
+	}
+	events := `[]`
+	if country != "" {
+		events = `[{"area":{"iso-3166-1-codes":[` + strconv.Quote(country) + `]}}]`
+	}
+	return `{"id":"` + id + `","title":"Wish You Were Here","barcode":"` + barcode + `",` +
+		`"country":` + strconv.Quote(country) + `,"release-events":` + events + `,` +
+		`"media":[` + strings.Join(media, ",") + `]}`
+}
+
+// browsePage wraps release documents as one browse page, with the group's total.
+func browsePage(count int, docs ...string) string {
+	return `{"release-count":` + strconv.Itoa(count) + `,"release-offset":0,"releases":[` +
+		strings.Join(docs, ",") + `]}`
 }
 
 // releaseDoc builds one search document in the seeded release group.
@@ -84,7 +121,28 @@ func releaseDoc(id, barcode, catNo string) string {
 // release group verbatim, so a test can put a malformed id there the way a tag can.
 func seedAlbumWithIdentifiers(t *testing.T, st *sqlite.Store, libID int64, essence, barcode, catNo, rgTag string) {
 	t.Helper()
-	path := "/lib/" + essence + ".mp3"
+	seedAlbumTrack(t, st, libID, essence, model.Track{
+		Artist: "Pink Floyd", AlbumArtist: "Pink Floyd", Album: "Wish You Were Here", TrackNo: 1,
+		Barcode: barcode, CatalogNumber: catNo, MBReleaseGroupID: rgTag,
+	})
+}
+
+// seedAlbumEdition is the edition tier's population: a medium and a country, no printed
+// identifier and no MUSICBRAINZ_ALBUMID.
+func seedAlbumEdition(t *testing.T, st *sqlite.Store, libID int64, essence, media, country string) {
+	t.Helper()
+	seedAlbumTrack(t, st, libID, essence, model.Track{
+		Artist: "Pink Floyd", AlbumArtist: "Pink Floyd", Album: "Wish You Were Here", TrackNo: 1,
+		Media: media, Country: country,
+	})
+}
+
+// seedAlbumTrack persists one track of the shared album. Each essence gets its own
+// folder, because the album match key embeds it, so distinct essences give distinct
+// albums under one release group, which is what watching a per-group cache needs.
+func seedAlbumTrack(t *testing.T, st *sqlite.Store, libID int64, essence string, tr model.Track) {
+	t.Helper()
+	path := "/lib/" + essence + "/1.mp3"
 	in := model.PutScannedTrackInput{
 		LibraryID: libID,
 		File: model.File{
@@ -96,12 +154,33 @@ func seedAlbumWithIdentifiers(t *testing.T, st *sqlite.Store, libID int64, essen
 			Kind: model.KindTrack, State: model.StatePresent, Title: "Shine On",
 			SortKey: model.SortKey("Shine On"), IdentityKey: "essence:" + essence,
 		},
-		Track: model.Track{
-			Artist: "Pink Floyd", AlbumArtist: "Pink Floyd", Album: "Wish You Were Here", TrackNo: 1,
-			Barcode: barcode, CatalogNumber: catNo, MBReleaseGroupID: rgTag,
-		},
+		Track: tr,
 	}
 	if _, err := st.PutScannedTrack(context.Background(), in); err != nil {
+		t.Fatalf("PutScannedTrack: %v", err)
+	}
+}
+
+// seedAlbumTrackWithCover is seedAlbumTrack with an embedded front cover on the track,
+// which is what the album's art normally derives from.
+func seedAlbumTrackWithCover(t *testing.T, st *sqlite.Store, libID int64, essence string, tr model.Track, art []byte) {
+	t.Helper()
+	path := "/lib/" + essence + "/1.mp3"
+	_, err := st.PutScannedTrack(context.Background(), model.PutScannedTrackInput{
+		LibraryID: libID,
+		File: model.File{
+			Path: []byte(path), DisplayPath: path, RelPath: []byte(filepath.Base(path)),
+			Kind: model.FileAudio, Size: 100, MTimeNS: 1, DurationMS: 300000,
+			ContentHash: "c-" + essence, EssenceHash: essence, ScanState: model.ScanIndexed,
+		},
+		Item: model.PlayableItem{
+			Kind: model.KindTrack, State: model.StatePresent, Title: "Shine On",
+			SortKey: model.SortKey("Shine On"), IdentityKey: "essence:" + essence,
+		},
+		Track:    tr,
+		CoverArt: &model.ArtImage{Data: art, Hash: "h-embedded", Format: "png", Width: 4, Height: 4},
+	})
+	if err != nil {
 		t.Fatalf("PutScannedTrack: %v", err)
 	}
 }

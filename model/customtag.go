@@ -23,6 +23,14 @@ var reservedTagKeys = map[string]bool{
 	"ISRC": true, "BARCODE": true, "CATALOGNUMBER": true, "LABEL": true,
 	"MUSICBRAINZ_TRACKID": true, "MUSICBRAINZ_ALBUMID": true, "MUSICBRAINZ_RELEASEGROUPID": true,
 	"MUSICBRAINZ_ARTISTID": true, "MUSICBRAINZ_ALBUMARTISTID": true,
+	// Edition description, owned by the album entity's media/country columns. Only the
+	// canonical spellings appear: WaxLabel folds Picard's ID3 and MP4 variants onto
+	// RELEASECOUNTRY, so the mixed-case name never reaches a tag set. Newly reserving a
+	// key costs a catalog that stored one two things on the next rescan: the item_tag
+	// rows go, so a `tag.MEDIA` predicate stops matching, and a locked curated row goes
+	// with its lock and provenance. On-disk data is safe (TagEdit is per-key
+	// set-or-clear), and the album column is where the value now surfaces.
+	"MEDIA": true, "RELEASECOUNTRY": true,
 	// Sort names. COMPOSERSORT is reserved globally, so an audiobook file carrying
 	// it loses the frame as a custom tag even though books do not consume the
 	// field (m4b narrator conventionally rides COMPOSER, not its sort). The

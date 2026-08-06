@@ -125,14 +125,18 @@ func attachEntityArtTx(ctx context.Context, tx *sql.Tx, entityType string, entit
 
 // attachEntityArtTxChanged dedups a front-cover image into the content-addressed art
 // store and maps it to one entity (entity_type, entity_id). It backs every cover
-// ingest: a track/book item ('track'), a podcast feed ('podcast'), and an episode
-// ('episode'). Album art is derived on read from current track maps, so a re-cover,
-// retag, or delete cannot leave a stale album mapping behind. The write is
-// idempotent: when the entity already maps this exact cover it does nothing (and
-// reports false), so it can run on every scan/sync without churn. A nil/empty image
-// is a no-op; a missing read does not mean the art was removed. It touches the
-// front role and nothing else: a scan or feed re-sync must not clobber the
-// back/booklet/... slots a user set through SetItemArt/SetEntityArt.
+// ingest: a track/book item ('track'), a podcast feed ('podcast'), an episode
+// ('episode'), and, from enrichment, a release group and a matched album's own
+// pressing.
+//
+// The album slot needs care: album art is otherwise derived on read from the current
+// track maps, which keeps a re-cover or delete from leaving a stale cover behind, and a
+// stored album row wins over that derivation (artInChain consults it first). Only a
+// writer that knows WHICH edition the album is should use it, today the release match.
+//
+// The write is idempotent: an entity already mapping this cover does nothing (reporting
+// false), so it can run on every scan/sync without churn. A nil/empty image is a no-op.
+// It touches the front role alone, so a re-sync cannot clobber a user's back/booklet.
 func attachEntityArtTxChanged(ctx context.Context, tx *sql.Tx, entityType string, entityID int64, img *model.ArtImage) (bool, error) {
 	if img == nil || len(img.Data) == 0 || img.Hash == "" {
 		return false, nil
@@ -153,6 +157,43 @@ func attachEntityArtTxChanged(ctx context.Context, tx *sql.Tx, entityType string
 		return false, err
 	}
 	return true, nil
+}
+
+// fillAlbumArtTx attaches an album's front cover only when the album resolves none at
+// all, which is the rule SetEntityArt's doc states for enrichment ("fills entity covers
+// only when empty"). Entity art carries no lock, so fill-when-empty is the only thing
+// standing between a provider and a cover the user already has.
+//
+// "Empty" has to mean what ResolveArt means. An album normally owns no art_map row and
+// answers from a member track's embedded cover instead (artInChain's derived rung), and a
+// stored album row wins over that derivation. Probing only for the album's own row would
+// therefore call almost every album empty and quietly replace the file's own artwork with
+// the Cover Art Archive's on the first release match.
+//
+// It is separate from attachEntityArtTxChanged, which re-points on any differing hash,
+// because that behaviour belongs to the writers whose source is the file itself: a scan's
+// embedded cover should follow a retag.
+func fillAlbumArtTx(ctx context.Context, tx *sql.Tx, albumID int64, img *model.ArtImage) error {
+	var resolves int
+	if err := tx.QueryRowContext(ctx,
+		`SELECT CASE WHEN `+albumResolvesFrontArt+` THEN 1 ELSE 0 END FROM album al WHERE al.id = ?`,
+		albumID).Scan(&resolves); err != nil {
+		return err
+	}
+	if resolves == 1 {
+		return nil
+	}
+	return attachEntityArtTx(ctx, tx, string(model.ArtAlbum), albumID, img)
+}
+
+// clearAlbumArtTx drops an album's own front-cover row, returning it to whatever the
+// derived rung answers. It undoes a release match's cover; a member track's embedded
+// cover is untouched, since nothing here wrote it.
+func clearAlbumArtTx(ctx context.Context, tx *sql.Tx, albumID int64) error {
+	_, err := tx.ExecContext(ctx,
+		"DELETE FROM art_map WHERE entity_type = ? AND entity_id = ? AND role = 'front'",
+		string(model.ArtAlbum), albumID)
+	return err
 }
 
 // artLevel is one rung of the resolution fallback chain: an entity type and its

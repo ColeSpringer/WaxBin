@@ -159,12 +159,17 @@ func syncItemTagsTx(ctx context.Context, tx *sql.Tx, itemID int64, scanned map[s
 	if len(scanned) == 0 && len(current) == 0 {
 		return false, nil
 	}
+	// Every tag.<KEY> provenance row this item has, with its lock bit. Loading them all
+	// rather than only the locked ones costs the same query and is what lets the reserved
+	// sweep below reach an unlocked row too; the lock decisions read the same map, since a
+	// key with no row and a key with an unlocked row both answer false.
+	tagFields, err := tagProvenanceKeysTx(ctx, tx, itemID)
+	if err != nil {
+		return false, err
+	}
 	locked := map[string]bool{}
 	if preserveLock {
-		locked, err = lockedTagKeysTx(ctx, tx, itemID)
-		if err != nil {
-			return false, err
-		}
+		locked = tagFields
 	}
 
 	// Build the desired set: the scanned values for every non-locked key (normalized to
@@ -185,7 +190,24 @@ func syncItemTagsTx(ctx context.Context, tx *sql.Tx, itemID int64, scanned map[s
 			desired[canon] = clean
 		}
 	}
-	for k := range locked {
+	// A locked key keeps its values unless it has since become reserved: SetItemTag
+	// rejects a reserved key, so re-adding it here would store a tag nothing could edit.
+	// Dropping it is what makes newly reserving a key take effect.
+	for k, isLocked := range tagFields {
+		// A reserved key's provenance row goes whether or not it was locked.
+		// IsCuratableField refuses a reserved tag.<KEY> field, so once the values are gone
+		// neither SetItemTag nor UnlockField can reach the row and it would sit there
+		// unremovable except by raw SQL.
+		if model.IsReservedTagKey(k) {
+			if _, err := tx.ExecContext(ctx, "DELETE FROM field_provenance WHERE item_id=? AND field=?",
+				itemID, model.TagLockField(k)); err != nil {
+				return false, err
+			}
+			continue
+		}
+		if !isLocked || !preserveLock {
+			continue
+		}
 		if vs, ok := current[k]; ok {
 			desired[k] = vs
 		}
@@ -224,10 +246,11 @@ func loadItemTagsTx(ctx context.Context, tx *sql.Tx, itemID int64) (map[string][
 	return out, rows.Err()
 }
 
-// lockedTagKeysTx returns the canonical keys whose "tag.<KEY>" field is locked.
-func lockedTagKeysTx(ctx context.Context, tx *sql.Tx, itemID int64) (map[string]bool, error) {
+// tagProvenanceKeysTx returns the canonical keys that have a "tag.<KEY>" provenance row,
+// mapped to whether that row is locked.
+func tagProvenanceKeysTx(ctx context.Context, tx *sql.Tx, itemID int64) (map[string]bool, error) {
 	rows, err := tx.QueryContext(ctx,
-		"SELECT field FROM field_provenance WHERE item_id=? AND locked=1 AND field LIKE 'tag.%'", itemID)
+		"SELECT field, locked FROM field_provenance WHERE item_id=? AND field LIKE 'tag.%'", itemID)
 	if err != nil {
 		return nil, err
 	}
@@ -235,11 +258,12 @@ func lockedTagKeysTx(ctx context.Context, tx *sql.Tx, itemID int64) (map[string]
 	out := map[string]bool{}
 	for rows.Next() {
 		var field string
-		if err := rows.Scan(&field); err != nil {
+		var locked int
+		if err := rows.Scan(&field, &locked); err != nil {
 			return nil, err
 		}
 		if key, ok := model.CutTagPrefix(field); ok {
-			out[key] = true
+			out[key] = locked == 1
 		}
 	}
 	return out, rows.Err()

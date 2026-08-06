@@ -55,15 +55,24 @@ type EnrichTarget struct {
 	FilePath    string
 	DurationSec int
 
-	// The album release match keys on these three. Barcode and CatalogNumber are the
+	// The album release match keys on these. Barcode and CatalogNumber are the
 	// identifiers it searches by, verbatim as a scan stored them, so a consumer
-	// normalizes before comparing. ReleaseGroupMBID is the group the answer must
-	// belong to, and is separate from MBID because MBID names the target's own id,
-	// which for an album target is empty by construction: an album that already has
-	// one is not queued.
+	// normalizes before comparing. Media and Country describe the edition without
+	// naming it and feed the weaker third tier, also verbatim and in the tags' own
+	// vocabulary ("2xCD", "US & Europe"), so that tier does its own folding.
+	// ReleaseGroupMBID is the group the answer must belong to, and is separate from
+	// MBID because MBID names the target's own id, which for an album target is empty
+	// by construction: an album that already has one is not queued.
 	Barcode          string
 	CatalogNumber    string
+	Media            string
+	Country          string
 	ReleaseGroupMBID string
+	// HasArt reports whether the album already resolves a front cover, its own or one
+	// derived from a member track's. The release match fetches a matched pressing's cover
+	// only when it does not, so a library whose rips carry embedded art spends no
+	// rate-limited requests on covers the store would refuse to fill anyway.
+	HasArt bool
 }
 
 // ArtistEnrichment is the resolved data for one artist, applied in a single
@@ -124,15 +133,22 @@ type LyricsEnrichment struct {
 
 // AlbumReleaseMatch is the release one album was matched to, applied fill-when-empty
 // like every other entity MBID. Matched=false records a completed no-match so the
-// album is not re-searched every run. Reason names the identifier that decided it
-// ("barcode", "catalog number"), for the change log and for a human reading a log
-// line; nothing branches on it.
+// album is not re-searched every run. Reason names the evidence that decided it
+// ("barcode", "catalog number", "medium and country", ...), for the change log and for
+// a human reading a log line; nothing branches on it.
+//
+// Provider is the enrichment marker's provider string, and it carries meaning: the
+// weaker edition tier records its own value so an edition match stays findable,
+// reviewable, and undoable afterwards. Art is that specific pressing's front cover,
+// which only a matched release has (the release-group pass fetches the group's).
 type AlbumReleaseMatch struct {
-	AlbumID int64
-	PID     PID
-	Matched bool
-	MBID    string
-	Reason  string
+	AlbumID  int64
+	PID      PID
+	Matched  bool
+	MBID     string
+	Reason   string
+	Provider string
+	Art      *ArtImage
 }
 
 // BookEnrichment is the resolved data for one audiobook: external identifiers and

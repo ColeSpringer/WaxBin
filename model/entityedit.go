@@ -17,9 +17,11 @@ var artistEntityEditFields = map[string]bool{"sort": true, "mbid": true}
 var releaseGroupEntityEditFields = map[string]bool{"sort": true, "mbid": true, "type": true}
 
 // albumEntityEditFields are the fields editable on an album: a sort-name override, the
-// release MBID, and the release identifiers (barcode/label/catalog number).
+// release MBID, the release identifiers (barcode/label/catalog number), and the two
+// descriptive edition columns (media/country).
 var albumEntityEditFields = map[string]bool{
 	"sort": true, "mbid": true, "barcode": true, "label": true, "catalog_number": true,
+	"media": true, "country": true,
 }
 
 // entityEditFieldsFor returns the editable-field set for an entity type, or nil for a

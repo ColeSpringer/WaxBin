@@ -28,6 +28,31 @@ const (
 	enrichEntityLyrics = "lyrics"
 )
 
+// albumResolvesFrontArt is true when an album already answers a front-cover request: its
+// own art_map row, or the member track's cover ResolveArt derives one from. It mirrors
+// artInChain's album rung, so a caller can ask the question outside a read without
+// disagreeing with what the resolver would actually return. It reads the album as al.
+const albumResolvesFrontArt = `(EXISTS (SELECT 1 FROM art_map am
+		WHERE am.entity_type = 'album' AND am.entity_id = al.id AND am.role = 'front')
+	OR EXISTS (SELECT 1 FROM art_map tm JOIN track t ON t.item_id = tm.entity_id
+		WHERE tm.entity_type = 'track' AND tm.role = 'front' AND t.album_id = al.id))`
+
+// albumMatchEvidence are the album columns the release matcher can decide on. One list
+// because three places must agree: the enrichment queue predicate, and the two writers
+// that clear a stale no-match marker when new evidence lands (the scan top-up and the
+// entity edit). label is deliberately absent, since it feeds no tier.
+var albumMatchEvidence = []string{"barcode", "catalog_number", "media", "country"}
+
+// albumMatchEvidencePredicate builds the "carries some matchable evidence" SQL over an
+// album alias.
+func albumMatchEvidencePredicate(alias string) string {
+	terms := make([]string, len(albumMatchEvidence))
+	for i, col := range albumMatchEvidence {
+		terms[i] = "COALESCE(" + alias + "." + col + ",'') <> ''"
+	}
+	return "(" + strings.Join(terms, " OR ") + ")"
+}
+
 // enrichArtistBacksItems restricts artist enrichment to artists that actually back
 // a track (as artist or album artist) or credit a book, so ghost artists left by a
 // retag are not looked up.
@@ -201,24 +226,30 @@ func (s *Store) BooksNeedingEnrichment(ctx context.Context, force bool, afterID 
 }
 
 // AlbumsNeedingReleaseMatch returns the next keyset page of albums that could take a
-// release MBID from an identifier they already carry. The gate is four-part and
+// release MBID from evidence they already carry. The gate is four-part and
 // self-limiting: the album has no mbid, its release group has one (that is what the
-// search is constrained to), it carries a barcode or a catalog number, and it has no
-// album marker yet. A Picard-tagged library qualifies zero albums because they all
-// have an mbid; an untagged library qualifies zero because none carries an
-// identifier. A non-nil ids list scopes the walk to those album rowids.
+// lookup is constrained to), it carries one of albumMatchEvidence, and it has no album
+// marker yet. A non-nil ids list scopes the walk to those album rowids.
+//
+// Two populations qualify for nothing, which keeps the phase cheap: a Picard-tagged
+// library (they all have an mbid) and an untagged one (no evidence). What is left is
+// albums carrying an identifier or a medium or a country but no MUSICBRAINZ_ALBUMID:
+// partial retags, transcode-stripped files, and Discogs- or beets-derived tagging.
 //
 // It reads rg.mbid live rather than from a snapshot, so running this after the
 // release-group phase in the same pass picks up the ids that phase just filled.
 func (s *Store) AlbumsNeedingReleaseMatch(ctx context.Context, force bool, afterID int64, limit int, ids []int64) ([]model.EnrichTarget, error) {
 	const op = "store.AlbumsNeedingReleaseMatch"
 	scopeClause, scopeArgs := enrichIDsFilter("al.id", ids)
-	stmt := `SELECT al.id, al.pid, al.title, rg.mbid, COALESCE(al.barcode,''), COALESCE(al.catalog_number,'')
+	stmt := `SELECT al.id, al.pid, al.title, rg.mbid, COALESCE(al.barcode,''), COALESCE(al.catalog_number,''),
+			COALESCE(al.media,''), COALESCE(al.country,''), COALESCE(ar.name,''),
+			CASE WHEN ` + albumResolvesFrontArt + ` THEN 1 ELSE 0 END
 		FROM album al JOIN release_group rg ON rg.id = al.release_group_id
+		LEFT JOIN artist ar ON ar.id = rg.primary_artist_id
 		WHERE al.id > ?
 		  AND (al.mbid IS NULL OR al.mbid = '')
 		  AND rg.mbid IS NOT NULL AND rg.mbid <> ''
-		  AND (COALESCE(al.barcode,'') <> '' OR COALESCE(al.catalog_number,'') <> '')
+		  AND ` + albumMatchEvidencePredicate("al") + `
 		  AND ` + notEnriched(model.EnrichAlbumType, "al.id", force) + scopeClause + `
 		ORDER BY al.id LIMIT ?`
 	args := append(append([]any{afterID}, scopeArgs...), limitOr(limit))
@@ -231,10 +262,13 @@ func (s *Store) AlbumsNeedingReleaseMatch(ctx context.Context, force bool, after
 	for rows.Next() {
 		t := model.EnrichTarget{Type: model.EnrichAlbumType}
 		var pid string
-		if err := rows.Scan(&t.ID, &pid, &t.Name, &t.ReleaseGroupMBID, &t.Barcode, &t.CatalogNumber); err != nil {
+		var hasArt int
+		if err := rows.Scan(&t.ID, &pid, &t.Name, &t.ReleaseGroupMBID, &t.Barcode, &t.CatalogNumber,
+			&t.Media, &t.Country, &t.ArtistName, &hasArt); err != nil {
 			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		t.PID = model.PID(pid)
+		t.HasArt = hasArt == 1
 		out = append(out, t)
 	}
 	return out, rows.Err()
@@ -272,7 +306,7 @@ func (s *Store) CountEntitiesNeedingEnrichment(ctx context.Context, force, inclu
 	if includeAlbums {
 		add(`SELECT COUNT(*) FROM album al JOIN release_group rg ON rg.id = al.release_group_id
 			WHERE (al.mbid IS NULL OR al.mbid = '') AND rg.mbid IS NOT NULL AND rg.mbid <> ''
-			  AND (COALESCE(al.barcode,'') <> '' OR COALESCE(al.catalog_number,'') <> '')
+			  AND `+albumMatchEvidencePredicate("al")+`
 			  AND `+notEnriched(model.EnrichAlbumType, "al.id", force), "al.id", albumIDs)
 	}
 	add(`SELECT COUNT(*) FROM book b WHERE b.mbid IS NOT NULL AND b.mbid <> '' AND `+notEnriched(model.EnrichBookType, "b.item_id", force), "b.item_id", bookIDs)
@@ -455,25 +489,56 @@ func setReleaseGroupMBIDTx(ctx context.Context, tx *sql.Tx, log logger, rgID int
 
 // ApplyAlbumReleaseMatch persists one album's matched release id, filled only when
 // the album has none and the id is not already held by another album, mirroring
-// setReleaseGroupMBIDTx. A no-match records the marker too, so a second run does not
-// re-search an album nothing could identify, following the per-recording lyrics
-// marker precedent.
+// setReleaseGroupMBIDTx, plus that pressing's own front cover when one came back. A
+// no-match records the marker too, so a second run does not re-search an album nothing
+// could identify, following the per-recording lyrics marker precedent.
 //
-// That marker is the one thing to know before adding another album-level enrichment
-// pass. notEnriched keys on (entity_type, entity_id) with no per-pass granularity, so
-// the row this pass writes is the only album marker there is: a later album pass would
-// silently inherit it and skip every album this one merely failed to match. Give a new
-// pass its own entity_type (the way lyrics did) rather than sharing this one.
+// in.Provider records which tier decided it, so an edition match (weaker evidence, see
+// enrich/release.go) stays distinguishable and undoable. Empty falls back to the spine.
+//
+// A declined write still marks, and still records the id the provider named. That looks
+// like a lie and is not: the marker says what the LOOKUP found, the way every phase's
+// matched flag does (ApplyArtistEnrichment discards its own fill result too), and the
+// retained id is what a human needs to resolve the collision the decline reported. What
+// it does mean is that the album stops being queued, which for a curated mbid is the
+// user's stated wish and for a collision is merge's problem to settle.
+//
+// It deliberately does not write media or country back from the matched release.
+// resolveAlbum is fill-when-empty, so an enrichment-written media=CD would permanently
+// shadow the file's real MEDIA=Vinyl, the column would stop meaning "what the tags said",
+// and a setAlbumMBIDTx that declines on a lock or collision would leave the album queued
+// carrying enrichment's own output as evidence. Per-edition detail is album.mbid plus a
+// lookup, which is what a match buys.
+//
+// The marker is the thing to know before adding another album-level pass. notEnriched
+// keys on (entity_type, entity_id) with no per-pass granularity, so a later pass would
+// inherit this row and skip every album this one merely failed to match; give it its own
+// entity_type, as lyrics did. What keeps a retagged album re-queueable without a second
+// marker type is fillAlbumIdentifiersTx deleting an unmatched marker on new evidence.
 func (s *Store) ApplyAlbumReleaseMatch(ctx context.Context, in model.AlbumReleaseMatch) error {
 	const op = "store.ApplyAlbumReleaseMatch"
+	provider := in.Provider
+	if provider == "" {
+		provider = enrichProviderMusicBrainz
+	}
 	return s.writeTx(ctx, func(tx *sql.Tx) error {
 		if !in.Matched {
-			return markEnrichedTx(ctx, tx, model.EnrichAlbumType, in.AlbumID, enrichProviderMusicBrainz, false, "")
+			return markEnrichedTx(ctx, tx, model.EnrichAlbumType, in.AlbumID, provider, false, "")
 		}
-		if err := setAlbumMBIDTx(ctx, tx, s.log, in.AlbumID, in.MBID); err != nil {
+		wrote, err := setAlbumMBIDTx(ctx, tx, s.log, in.AlbumID, in.MBID)
+		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
-		if err := markEnrichedTx(ctx, tx, model.EnrichAlbumType, in.AlbumID, enrichProviderMusicBrainz, true, in.MBID); err != nil {
+		// The cover rides on the id landing. A declined write means this album is not
+		// (or is not yet known to be) that pressing, so stamping its art would be the
+		// wrong picture on a row that never took the id: a curated mbid keeps its own
+		// artwork, and a collision leaves both albums alone for merge to settle.
+		if wrote && in.Art != nil {
+			if err := fillAlbumArtTx(ctx, tx, in.AlbumID, in.Art); err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+		}
+		if err := markEnrichedTx(ctx, tx, model.EnrichAlbumType, in.AlbumID, provider, true, in.MBID); err != nil {
 			return err
 		}
 		return appendChange(ctx, tx, "album", in.PID, model.OpUpdate)
@@ -481,30 +546,37 @@ func (s *Store) ApplyAlbumReleaseMatch(ctx context.Context, in model.AlbumReleas
 }
 
 // setAlbumMBIDTx sets an album's MBID only when it has none and the id is not
-// already held by another album. It is setReleaseGroupMBIDTx one rung down: a
-// collision means two heuristic albums resolved to one release, which is the merge
-// primitive's job to unify, so here it is logged and left rather than forced into a
-// duplicate the entity-edit surface would refuse.
-func setAlbumMBIDTx(ctx context.Context, tx *sql.Tx, log logger, albumID int64, mbid string) error {
+// already held by another album, reporting whether the row actually took it. It is
+// setReleaseGroupMBIDTx one rung down: a collision means two heuristic albums resolved
+// to one release, which is the merge primitive's job to unify, so here it is logged and
+// left rather than forced into a duplicate the entity-edit surface would refuse.
+//
+// The bool exists because a caller may have more to write than the id (the matched
+// pressing's cover), and everything downstream of a declined write is equally wrong.
+func setAlbumMBIDTx(ctx context.Context, tx *sql.Tx, log logger, albumID int64, mbid string) (bool, error) {
 	if mbid == "" {
-		return nil
+		return false, nil
 	}
 	if locked, err := entityFieldLockedTx(ctx, tx, string(model.MergeAlbum), albumID, "mbid"); err != nil {
-		return err
+		return false, err
 	} else if locked {
-		return nil
+		return false, nil
 	}
 	var other int64
 	err := tx.QueryRowContext(ctx, "SELECT id FROM album WHERE mbid = ? AND id <> ?", mbid, albumID).Scan(&other)
 	if err == nil {
 		log.Warn("enrichment: release MBID already used by another album; leaving unmerged", "mbid", mbid, "album", albumID, "other", other)
-		return nil
+		return false, nil
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
-		return err
+		return false, err
 	}
-	_, err = tx.ExecContext(ctx, "UPDATE album SET mbid = ? WHERE id = ? AND (mbid IS NULL OR mbid = '')", mbid, albumID)
-	return err
+	r, err := tx.ExecContext(ctx, "UPDATE album SET mbid = ? WHERE id = ? AND (mbid IS NULL OR mbid = '')", mbid, albumID)
+	if err != nil {
+		return false, err
+	}
+	n, err := r.RowsAffected()
+	return n > 0, err
 }
 
 // populateReleaseGroupGenresTx attaches the release group's genres to member items

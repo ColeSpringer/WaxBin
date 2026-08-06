@@ -49,6 +49,7 @@ type trackSpec struct {
 	mbAlbumArtists        []string
 	isrc                  string
 	barcode, label, catNo string
+	media, country        string
 }
 
 func putTrack(t *testing.T, st *Store, libID int64, s trackSpec) *model.ScanItemResult {
@@ -87,6 +88,8 @@ func putTrack(t *testing.T, st *Store, libID int64, s trackSpec) *model.ScanItem
 			Barcode:          s.barcode,
 			Label:            s.label,
 			CatalogNumber:    s.catNo,
+			Media:            s.media,
+			Country:          s.country,
 		},
 	}
 	res, err := st.PutScannedTrack(context.Background(), in)

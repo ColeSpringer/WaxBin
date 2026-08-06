@@ -177,6 +177,15 @@ const BookSeriesTagKey = string(tag.Grouping)
 // so writing the MBID to the files would re-key the entity to a fresh row and orphan its
 // curation and locks. Barcode/label/catalog#/sort are not identity inputs, so they fan
 // safely. A release-group field and a release-group type also stay DB-only.
+//
+// An album's media stays DB-only, for a reason that is about the tag rather than
+// identity: MEDIA is a per-medium tag while the fan-out writes one value to every member
+// file, so an album-level edit would stamp "CD" over a DVD medium's tracks. Country has no
+// such problem, since every disc of a release shares one, and it fans. It only became
+// fannable with WaxLabel v1.3.0, which made RELEASECOUNTRY canonical and writes it as the
+// Picard-interoperable frame on each format; before that there was no key worth writing.
+// The two-letter code model.NormalizeCountry produces is also what WaxLabel's
+// malformed-country lint accepts, so a fanned value is clean on disk.
 func EntityFieldTagKey(entityType model.MergeEntity, field string) (string, bool) {
 	switch entityType {
 	case model.MergeAlbum:
@@ -189,6 +198,8 @@ func EntityFieldTagKey(entityType model.MergeEntity, field string) (string, bool
 			return string(tag.Label), true
 		case "catalog_number":
 			return string(tag.CatalogNumber), true
+		case "country":
+			return string(tag.ReleaseCountry), true
 		}
 	case model.MergeArtist:
 		if field == "sort" {

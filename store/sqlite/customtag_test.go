@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"database/sql"
 	"path/filepath"
 	"testing"
 
@@ -196,5 +197,108 @@ func TestCustomTagIsSearchable(t *testing.T) {
 	}
 	if len(sr.Tracks) != 1 || sr.Tracks[0].PID != pid {
 		t.Fatalf("custom tag value should be searchable, got %+v", sr.Tracks)
+	}
+}
+
+// TestScanDropsALockedRowUnderANewlyReservedKey: newly reserving a key (MEDIA moved to
+// album.media) takes effect on the next rescan, and a lock cannot exempt it, since
+// SetItemTag rejects a reserved key and a surviving row would be uneditable. The fixture
+// is written directly: only a catalog predating the reservation can hold such a row.
+func TestScanDropsALockedRowUnderANewlyReservedKey(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	res := putTrackCustom(t, st, lib.ID, "/lib/1.flac", "e1", "c1", "One",
+		map[string][]string{"MOOD": {"chill"}}, true)
+	pid := res.ItemPID
+	// The control: a curated, locked tag under a key that stays custom.
+	if _, _, err := st.SetItemTag(ctx, pid, "MOOD", []string{"chill"}, model.SourceUser, true, true); err != nil {
+		t.Fatalf("lock MOOD: %v", err)
+	}
+
+	var itemID int64
+	if err := st.read.QueryRowContext(ctx,
+		"SELECT id FROM playable_item WHERE pid = ?", string(pid)).Scan(&itemID); err != nil {
+		t.Fatalf("resolve item: %v", err)
+	}
+	err := st.writeTx(ctx, func(tx *sql.Tx) error {
+		if err := writeItemTagTx(ctx, tx, itemID, "MEDIA", []string{"CD"}); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, `INSERT INTO field_provenance(item_id, field, source, locked, updated_at)
+			VALUES (?, 'tag.MEDIA', 'user', 1, ?)`, itemID, nowNS())
+		return err
+	})
+	if err != nil {
+		t.Fatalf("seed the legacy row: %v", err)
+	}
+	if got := tagValues(t, st, pid, "MEDIA"); len(got) != 1 {
+		t.Fatalf("fixture did not store the legacy row: %v", got)
+	}
+
+	// A lock-preserving rescan: MOOD keeps, MEDIA does not.
+	putTrackCustom(t, st, lib.ID, "/lib/1.flac", "e1", "c2", "One",
+		map[string][]string{"MOOD": {"from-file"}}, true)
+	if got := tagValues(t, st, pid, "MEDIA"); got != nil {
+		t.Errorf("locked tag.MEDIA survived the sync as %v; a reserved key has no custom-tag surface", got)
+	}
+	// The lock row goes with the values. IsCuratableField refuses a reserved tag.<KEY>,
+	// so a surviving row would be unreachable by SetItemTag and UnlockField alike.
+	var orphans int
+	if err := st.read.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM field_provenance WHERE item_id=? AND field='tag.MEDIA'", itemID).
+		Scan(&orphans); err != nil {
+		t.Fatalf("count provenance: %v", err)
+	}
+	if orphans != 0 {
+		t.Errorf("tag.MEDIA provenance rows = %d, want 0 (nothing could remove them)", orphans)
+	}
+	if err := st.UnlockField(ctx, pid, "tag.MEDIA"); !waxerr.Is(err, waxerr.CodeInvalid) {
+		t.Fatalf("unlocking a reserved key should be CodeInvalid, got %v", err)
+	}
+	if got := tagValues(t, st, pid, "MOOD"); len(got) != 1 || got[0] != "chill" {
+		t.Errorf("locked MOOD = %v, want it still curated (the drop must be specific to reserved keys)", got)
+	}
+}
+
+// TestScanDropsAnUnlockedRowUnderANewlyReservedKey is the same sweep for a row that was
+// never locked. It is just as unreachable once reserved (IsCuratableField refuses the
+// field whatever its lock bit), so iterating only the locked keys would leave it behind.
+func TestScanDropsAnUnlockedRowUnderANewlyReservedKey(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	res := putTrackCustom(t, st, lib.ID, "/lib/1.flac", "e1", "c1", "One",
+		map[string][]string{"MOOD": {"chill"}}, true)
+	pid := res.ItemPID
+
+	var itemID int64
+	if err := st.read.QueryRowContext(ctx,
+		"SELECT id FROM playable_item WHERE pid = ?", string(pid)).Scan(&itemID); err != nil {
+		t.Fatalf("resolve item: %v", err)
+	}
+	err := st.writeTx(ctx, func(tx *sql.Tx) error {
+		if err := writeItemTagTx(ctx, tx, itemID, "RELEASECOUNTRY", []string{"GB"}); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, `INSERT INTO field_provenance(item_id, field, source, locked, updated_at)
+			VALUES (?, 'tag.RELEASECOUNTRY', 'user', 0, ?)`, itemID, nowNS())
+		return err
+	})
+	if err != nil {
+		t.Fatalf("seed the legacy row: %v", err)
+	}
+
+	putTrackCustom(t, st, lib.ID, "/lib/1.flac", "e1", "c2", "One",
+		map[string][]string{"MOOD": {"chill"}}, true)
+	if got := tagValues(t, st, pid, "RELEASECOUNTRY"); got != nil {
+		t.Errorf("reserved tag survived the sync as %v", got)
+	}
+	var orphans int
+	if err := st.read.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM field_provenance WHERE item_id=? AND field='tag.RELEASECOUNTRY'", itemID).
+		Scan(&orphans); err != nil {
+		t.Fatalf("count provenance: %v", err)
+	}
+	if orphans != 0 {
+		t.Errorf("unlocked tag.RELEASECOUNTRY provenance rows = %d, want 0", orphans)
 	}
 }

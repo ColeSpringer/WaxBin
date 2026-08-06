@@ -76,8 +76,13 @@ type TargetType string
 const (
 	TargetArtist       TargetType = "artist"        // one artist
 	TargetReleaseGroup TargetType = "release_group" // one album/release group (genres, cover)
-	TargetBook         TargetType = "book"          // one audiobook (identifiers, publisher)
-	TargetRecording    TargetType = "recording"     // one track (lyrics)
+	// TargetRelease is one specific release (edition) of a group, for the cover of the
+	// pressing an album actually is. It is separate from TargetReleaseGroup because the
+	// group's cover is one edition's art standing in for all of them, and a provider that
+	// only knows groups should answer nothing rather than the wrong picture.
+	TargetRelease   TargetType = "release"
+	TargetBook      TargetType = "book"      // one audiobook (identifiers, publisher)
+	TargetRecording TargetType = "recording" // one track (lyrics)
 )
 
 // Request is a provider lookup input. The Service fills the identity hints it has;
@@ -128,7 +133,11 @@ type Candidate struct {
 // Provider-name constants used as provenance ids. The built-ins are fixed; an
 // injected provider supplies its own Name().
 const (
-	providerMusicBrainz  = "musicbrainz"
+	providerMusicBrainz = "musicbrainz"
+	// providerMBEdition marks an album whose release the edition tier decided rather than
+	// a printed identifier. Distinct on purpose: that tier is not immune to MusicBrainz
+	// coverage gaps (see release.go), so its writes must stay findable and reviewable.
+	providerMBEdition    = "musicbrainz:edition"
 	providerCoverArt     = "coverartarchive"
 	providerListenBrainz = "listenbrainz"
 	providerLRCLIB       = "lrclib"

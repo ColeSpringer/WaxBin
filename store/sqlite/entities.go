@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/colespringer/waxbin/identity"
@@ -304,23 +305,31 @@ func resolveReleaseGroup(ctx context.Context, tx *sql.Tx, key, title string, pri
 // resolveAlbum finds-or-creates a specific release/edition by its identity key,
 // recording its disc total and MusicBrainz release id when known.
 //
-// An existing row takes any of barcode/label/catalog_number it still lacks from tags
-// that now supply them: they are not part of identity.AlbumKey, so a late tag pass
-// hits the row already there. The mbid is not filled here because it IS part of the
-// key, so a newly MBID-tagged release inserts its own row instead; collapsing that
-// pair is merge's job.
+// An existing row takes any of barcode/label/catalog_number/media/country it still
+// lacks from tags that now supply them: they are not part of identity.AlbumKey, so a
+// late tag pass hits the row already there. The mbid is not filled here because it IS
+// part of the key, so a newly MBID-tagged release inserts its own row instead;
+// collapsing that pair is merge's job.
+//
+// media is first-scanned-file-wins, so a CD+DVD set whose CD track scanned first reads
+// "CD". That is acceptable, not merely unfixed: the release matcher accepts a release
+// when any of its mediums matches, so the true CD+DVD release and a CD-only sibling both
+// survive and the tier refuses on the tie. It costs a decision, not a wrong one, among
+// the editions MusicBrainz knows. Aggregating the album's distinct media would not help,
+// since discriminating on the SET means requiring a release to cover every value, and
+// narrowing is the shape the matcher rejects.
 func resolveAlbum(ctx context.Context, tx *sql.Tx, key string, releaseGroupID int64, tr model.Track) (int64, error) {
 	if key == "" {
 		return 0, nil
 	}
 	var id int64
-	var pid, curBarcode, curLabel, curCatNo string
+	var pid, curBarcode, curLabel, curCatNo, curMedia, curCountry string
 	err := tx.QueryRowContext(ctx, `SELECT id, pid, COALESCE(barcode,''), COALESCE(label,''),
-		COALESCE(catalog_number,'') FROM album WHERE match_key = ?`, key).
-		Scan(&id, &pid, &curBarcode, &curLabel, &curCatNo)
+		COALESCE(catalog_number,''), COALESCE(media,''), COALESCE(country,'') FROM album WHERE match_key = ?`, key).
+		Scan(&id, &pid, &curBarcode, &curLabel, &curCatNo, &curMedia, &curCountry)
 	if err == nil {
 		return id, fillAlbumIdentifiersTx(ctx, tx, id, model.PID(pid), tr,
-			curBarcode, curLabel, curCatNo)
+			curBarcode, curLabel, curCatNo, curMedia, curCountry)
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
 		return 0, err
@@ -328,11 +337,12 @@ func resolveAlbum(ctx context.Context, tx *sql.Tx, key string, releaseGroupID in
 	newPID := model.NewPID()
 	r, err := tx.ExecContext(ctx,
 		`INSERT INTO album(pid, release_group_id, title, sort_key, year, disc_total, mbid,
-			barcode, label, catalog_number, match_key) VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+			barcode, label, catalog_number, media, country, match_key) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		string(newPID), nullInt64(releaseGroupID), tr.Album, model.SortKey(tr.Album), nullInt(tr.Year),
 		nullInt(tr.DiscTotal), nullStr(strings.TrimSpace(tr.MBReleaseID)),
 		nullStr(strings.TrimSpace(tr.Barcode)), nullStr(strings.TrimSpace(tr.Label)),
-		nullStr(strings.TrimSpace(tr.CatalogNumber)), key)
+		nullStr(strings.TrimSpace(tr.CatalogNumber)), nullStr(strings.TrimSpace(tr.Media)),
+		nullStr(strings.TrimSpace(tr.Country)), key)
 	if err != nil {
 		return 0, err
 	}
@@ -365,16 +375,26 @@ func fillEntityFieldTx(ctx context.Context, tx *sql.Tx, entityType model.MergeEn
 	return n > 0, err
 }
 
-// fillAlbumIdentifiersTx tops up an existing album's release identifiers, emitting one
-// delta if anything landed. The cur values come from resolveAlbum's own lookup, so the
-// common no-op costs nothing extra.
+// fillAlbumIdentifiersTx tops up an existing album's release identifiers and the two
+// descriptive edition columns, emitting one delta if anything landed. The cur values
+// come from resolveAlbum's own lookup, so the common no-op costs nothing extra.
+//
+// A column the release matcher can decide on also clears a stale no-match marker, since
+// a retag that adds a barcode must re-queue an album the weak edition tier failed on and
+// the marker has no per-pass granularity. Only an unmatched one is cleared, because a
+// matched album already carries the id this would re-search for: re-queueing it could
+// write nothing (every mbid writer fills only when empty) and would discard the record of
+// which tier decided it. Undoing a match is a deliberate act, and clearing the album's
+// mbid through the entity-edit surface is what does it.
 func fillAlbumIdentifiersTx(ctx context.Context, tx *sql.Tx, id int64, pid model.PID,
-	tr model.Track, curBarcode, curLabel, curCatNo string) error {
-	var wrote bool
+	tr model.Track, curBarcode, curLabel, curCatNo, curMedia, curCountry string) error {
+	var wrote, newEvidence bool
 	for _, f := range []struct{ column, cur, val string }{
 		{"barcode", curBarcode, tr.Barcode},
 		{"label", curLabel, tr.Label},
 		{"catalog_number", curCatNo, tr.CatalogNumber},
+		{"media", curMedia, tr.Media},
+		{"country", curCountry, tr.Country},
 	} {
 		if f.cur != "" {
 			continue
@@ -385,11 +405,50 @@ func fillAlbumIdentifiersTx(ctx context.Context, tx *sql.Tx, id int64, pid model
 			return err
 		}
 		wrote = wrote || w
+		if w && slices.Contains(albumMatchEvidence, f.column) {
+			newEvidence = true
+		}
+	}
+	if newEvidence {
+		if err := clearUnmatchedAlbumMarkerTx(ctx, tx, id); err != nil {
+			return err
+		}
 	}
 	if !wrote {
 		return nil
 	}
 	return appendChange(ctx, tx, "album", pid, model.OpUpdate)
+}
+
+// clearUnmatchedAlbumMarkerTx removes an album's no-match enrichment marker so a pass
+// re-queues it. It is a no-op on a matched marker; see fillAlbumIdentifiersTx.
+func clearUnmatchedAlbumMarkerTx(ctx context.Context, tx *sql.Tx, albumID int64) error {
+	_, err := tx.ExecContext(ctx,
+		"DELETE FROM entity_enrichment WHERE entity_type = ? AND entity_id = ? AND matched = 0",
+		model.EnrichAlbumType, albumID)
+	return err
+}
+
+// albumMarkerMatchedTx reports whether an album's enrichment marker records a match, so
+// the undo path knows whether enrichment ever wrote anything to take back.
+func albumMarkerMatchedTx(ctx context.Context, tx *sql.Tx, albumID int64) (bool, error) {
+	var matched int
+	err := tx.QueryRowContext(ctx,
+		"SELECT matched FROM entity_enrichment WHERE entity_type = ? AND entity_id = ?",
+		model.EnrichAlbumType, albumID).Scan(&matched)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return matched == 1, err
+}
+
+// clearAlbumMarkerTx removes an album's enrichment marker whatever it recorded, for the
+// one caller that undoes a match outright by clearing the release id.
+func clearAlbumMarkerTx(ctx context.Context, tx *sql.Tx, albumID int64) error {
+	_, err := tx.ExecContext(ctx,
+		"DELETE FROM entity_enrichment WHERE entity_type = ? AND entity_id = ?",
+		model.EnrichAlbumType, albumID)
+	return err
 }
 
 // resolveGenre finds-or-creates a genre/mood entity by (facet, match key).

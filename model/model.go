@@ -120,9 +120,13 @@ type Track struct {
 
 	// Album-level release identifiers carried from the file's tags into album
 	// resolution (they land on the album entity, not the denormalized track row).
+	// Media and Country describe the edition rather than name it, and are what the
+	// enrichment release matcher falls back to when no identifier was printed.
 	Barcode       string
 	Label         string
 	CatalogNumber string
+	Media         string
+	Country       string
 }
 
 // ItemFile is an edge from a logical item to a backing file. The offsets support a
@@ -161,10 +165,14 @@ type Tags struct {
 	ISRC        string
 
 	// Release identifiers (album-level), carried into album resolution. They are
-	// stored on the album entity, not the track row.
+	// stored on the album entity, not the track row. Media is the physical medium
+	// (MEDIA/TMED) and Country the release country (RELEASECOUNTRY); both describe
+	// the edition without naming it.
 	Barcode       string
 	Label         string
 	CatalogNumber string
+	Media         string
+	Country       string
 
 	// Sort names from tags, used to seed collation sort keys when present.
 	ArtistSort      string

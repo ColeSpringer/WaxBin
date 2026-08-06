@@ -40,8 +40,9 @@ type Store interface {
 	// when includeRepFile is set (the AcoustID fallback needs it), so the correlated
 	// lookup is skipped on the common path where AcoustID is off.
 	ReleaseGroupsNeedingEnrichment(ctx context.Context, force bool, afterID int64, limit int, includeRepFile bool, ids []int64) ([]model.EnrichTarget, error)
-	// AlbumsNeedingReleaseMatch returns the next keyset page of albums that carry a
-	// release identifier but no release MBID, under a release group that has one.
+	// AlbumsNeedingReleaseMatch returns the next keyset page of albums that carry some
+	// matchable evidence (a release identifier, or a medium or country) but no release
+	// MBID, under a release group that has one.
 	AlbumsNeedingReleaseMatch(ctx context.Context, force bool, afterID int64, limit int, ids []int64) ([]model.EnrichTarget, error)
 	BooksNeedingEnrichment(ctx context.Context, force bool, afterID int64, limit int, ids []int64) ([]model.EnrichTarget, error)
 	// ItemsNeedingLyrics returns the next keyset page of tracks that carry no lyrics
@@ -55,8 +56,9 @@ type Store interface {
 
 	ApplyArtistEnrichment(ctx context.Context, in model.ArtistEnrichment) error
 	ApplyReleaseGroupEnrichment(ctx context.Context, in model.ReleaseGroupEnrichment) error
-	// ApplyAlbumReleaseMatch fills an album's release MBID when it has none, and
-	// records the marker either way so a no-match is not re-searched every run.
+	// ApplyAlbumReleaseMatch fills an album's release MBID when it has none, attaches
+	// that pressing's own cover when one came back, and records the marker either way
+	// (under the deciding tier's provider) so a no-match is not re-searched every run.
 	ApplyAlbumReleaseMatch(ctx context.Context, in model.AlbumReleaseMatch) error
 	ApplyBookEnrichment(ctx context.Context, in model.BookEnrichment) error
 	// ApplyLyricsEnrichment attaches a track's resolved lyrics, only when it has none
@@ -94,9 +96,11 @@ type Config struct {
 	// always flow through the identity spine regardless of this toggle.
 	FetchCommunityGenres bool
 	// MatchReleases enables the album release match: resolving which release of a
-	// group an album is, from a barcode or catalog number it already carries. It costs
-	// one request per qualifying album rather than one per group, which is the trade
-	// for searching by the identifier instead of browsing the group.
+	// group an album is, from a barcode, a catalog number, or the medium and country
+	// it already carries. An identifier costs one search per qualifying album, which is
+	// the trade for searching by the identifier instead of browsing the group. Falling
+	// through to the medium/country tier costs a whole-group browse, but the projected
+	// result is cached per group, so a group's second album is free.
 	MatchReleases bool
 
 	// Providers are injected candidate providers supplied by an embedder (Discogs,
@@ -326,7 +330,7 @@ func (s *Service) Run(ctx context.Context, opts RunOptions, hb Heartbeat) (*Resu
 	// A scoped run implies force: the caller pointed at these targets, so markers
 	// and cached provider responses are bypassed and the lookup actually re-runs.
 	scope := opts.Scope
-	st := &runState{force: opts.Force || scope != nil}
+	st := &runState{force: opts.Force || scope != nil, browsedGroups: map[string]bool{}}
 	var artistIDs, rgIDs, albumIDs, bookIDs, lyricsIDs []int64
 	if scope != nil {
 		artistIDs, rgIDs, albumIDs = scope.ArtistIDs, scope.ReleaseGroupIDs, scope.AlbumIDs
@@ -409,7 +413,7 @@ func (s *Service) Run(ctx context.Context, opts RunOptions, hb Heartbeat) (*Resu
 				return s.store.AlbumsNeedingReleaseMatch(ctx, st.force, after, lim, albumIDs)
 			},
 			enrich: func(ctx context.Context, t model.EnrichTarget) (bool, error) {
-				return s.enrichAlbumRelease(ctx, st, t)
+				return s.enrichAlbumRelease(ctx, st, res, t)
 			},
 		})
 	}
@@ -450,6 +454,12 @@ func (s *Service) Run(ctx context.Context, opts RunOptions, hb Heartbeat) (*Resu
 type runState struct {
 	force     bool
 	acoustOff bool
+	// browsedGroups records, per release group this run attempted, whether the browse
+	// produced a usable edition set. It does two jobs: a forced or scoped run (both bypass
+	// the per-group cache read) refreshes a group once rather than once per album under
+	// it, and a group whose browse never reconciles costs one attempt per run instead of
+	// one per album. The pass is single-goroutine, so no lock is needed.
+	browsedGroups map[string]bool
 }
 
 // phase describes one entity type's enrichment for the shared keyset runner: how to
@@ -566,7 +576,10 @@ func (s *Service) enrichReleaseGroup(ctx context.Context, st *runState, res *Res
 		enr.Genres, enr.GenreProvider = s.gatherGenres(ctx, st, rg, genreNames(rg.Genres))
 		// Cover: the first cover provider to answer, injected first (an embedder's
 		// fanart.tv beats the built-in Cover Art Archive). Best-effort: never aborts.
-		enr.Art = s.gatherCover(ctx, st, rg)
+		enr.Art = s.gatherCover(ctx, st, Request{
+			Type: TargetReleaseGroup, Force: st.force,
+			Title: rg.Title, Artist: releaseGroupArtistName(rg), MBID: rg.ID,
+		})
 	}
 	if err := s.store.ApplyReleaseGroupEnrichment(ctx, enr); err != nil {
 		return false, err
@@ -639,14 +652,14 @@ func (s *Service) acoustResolveReleaseGroup(ctx context.Context, st *runState, t
 }
 
 // enrichAlbumRelease resolves which release of its group one album is, from a
-// barcode or catalog number the album already carries, and applies the result. A
-// no-match still writes the marker so the album is not re-searched every run.
-// Returns whether a release matched.
+// barcode, a catalog number, or (failing both) the medium and country it carries, and
+// applies the result. A no-match still writes the marker so the album is not
+// re-searched every run. Returns whether a release matched.
 //
-// Only an identifier decides it. The album's own title, year, and track count are
-// never consulted, because the releases of one group share them and an identifier is
-// the only local evidence that separates a reissue from the original.
-func (s *Service) enrichAlbumRelease(ctx context.Context, st *runState, t model.EnrichTarget) (bool, error) {
+// The album's own title, year, and track count are never consulted, because the
+// releases of one group share them. The evidence that does decide, and how the weak
+// third tier differs from the two identifier tiers, is release.go's subject.
+func (s *Service) enrichAlbumRelease(ctx context.Context, st *runState, res *Result, t model.EnrichTarget) (bool, error) {
 	// A scan stores identifiers verbatim, so this column holds whatever a tag said, and
 	// a malformed value would make a garbage query rather than a clean miss. No marker
 	// either: "could not search" must stay re-queueable, and the recheck costs nothing
@@ -656,43 +669,109 @@ func (s *Service) enrichAlbumRelease(ctx context.Context, st *runState, t model.
 			"album", t.PID, "mbid", t.ReleaseGroupMBID)
 		return false, nil
 	}
-	mbid, reason, err := s.matchAlbumRelease(ctx, st, t)
+	m, err := s.matchAlbumRelease(ctx, st, t)
 	if err != nil {
 		return false, err
 	}
-	in := model.AlbumReleaseMatch{AlbumID: t.ID, PID: t.PID}
-	if mbid != "" {
-		in.Matched, in.MBID, in.Reason = true, mbid, reason
+	// A transient failure is not a decision, so nothing is written. Marking here would
+	// keep the album out of the queue on every later run, which is the opposite of what
+	// leaving the group uncached was for.
+	if m.Skip {
+		s.log.Debug("enrichment: release match inconclusive this run, leaving the album queued",
+			"album", t.PID, "group", t.ReleaseGroupMBID)
+		return false, nil
+	}
+	in := model.AlbumReleaseMatch{AlbumID: t.ID, PID: t.PID, Provider: providerMusicBrainz}
+	if m.MBID != "" {
+		in.Matched, in.MBID, in.Reason = true, m.MBID, m.Reason
+		if m.Edition {
+			in.Provider = providerMBEdition
+		}
+		// Log which evidence decided it. With a weaker tier in play a human debugging a
+		// match needs to see that, and the reason was previously computed and discarded.
+		s.log.Info("enrichment: matched album release",
+			"album", t.PID, "mbid", m.MBID, "by", m.Reason, "provider", in.Provider)
+		// This pressing's own front cover. The album rung of the art chain has had no
+		// producer until now: the release-group pass fetches the group's cover, which is
+		// one edition's art standing in for all of them, and a matched release is the
+		// first time WaxBin knows which edition it actually holds. An album that already
+		// resolves art keeps it (the store fills only when empty), so asking a provider
+		// for one would spend a rate-limited request on a picture nothing would store.
+		if !t.HasArt {
+			in.Art = s.gatherCover(ctx, st, Request{
+				Type: TargetRelease, Force: st.force, MBID: m.MBID,
+				Title: t.Name, Artist: t.ArtistName,
+			})
+		}
 	}
 	if err := s.store.ApplyAlbumReleaseMatch(ctx, in); err != nil {
 		return false, err
 	}
+	if in.Art != nil {
+		res.ArtFetched++
+	}
 	return in.Matched, nil
 }
 
-// matchAlbumRelease runs the identifier tiers in order, each with its own search,
-// and stops at the first that decides. Barcode leads because it identifies a release
-// outright where a catalog number identifies one only within a label, so the second
-// request is skipped entirely on the CD rips this phase exists to serve.
-func (s *Service) matchAlbumRelease(ctx context.Context, st *runState, t model.EnrichTarget) (string, string, error) {
+// albumMatch is what one album's tier ladder decided. Edition separates the descriptive
+// medium/country evidence from a printed identifier, since only the former takes the
+// edition provider marker. Skip means no tier reached a verdict for a transient reason,
+// so the caller must write nothing at all rather than record a no-match.
+type albumMatch struct {
+	MBID    string
+	Reason  string
+	Edition bool
+	Skip    bool
+}
+
+// matchAlbumRelease runs the tiers in order and stops at the first that decides. Barcode
+// leads because it identifies a release outright where a catalog number identifies one
+// only within a label, so the later requests are skipped entirely on the CD rips this
+// phase exists to serve.
+//
+// The edition tier is last and costs a whole-group browse, so it runs only when the
+// album's media/country would actually interpret. The queue gate fires on a non-empty
+// column rather than an interpretable one, so without this check an album whose only
+// evidence is MEDIA=FLAC would spend a request to discover it has nothing to say.
+func (s *Service) matchAlbumRelease(ctx context.Context, st *runState, t model.EnrichTarget) (albumMatch, error) {
 	if spellings := barcodeSpellings(t.Barcode); len(spellings) > 0 {
 		byBarcode, err := s.mb.searchReleaseByIdentifier(ctx, st.force, t.ReleaseGroupMBID, "barcode", spellings)
 		if err != nil {
-			return "", "", err
+			return albumMatch{}, err
 		}
 		if mbid, reason := matchRelease(t, byBarcode, nil); mbid != "" {
-			return mbid, reason, nil
+			return albumMatch{MBID: mbid, Reason: reason}, nil
 		}
 	}
 	if cat := strings.TrimSpace(t.CatalogNumber); cat != "" {
 		byCatNo, err := s.mb.searchReleaseByIdentifier(ctx, st.force, t.ReleaseGroupMBID, "catno", []string{cat})
 		if err != nil {
-			return "", "", err
+			return albumMatch{}, err
 		}
-		mbid, reason := matchRelease(t, nil, byCatNo)
-		return mbid, reason, nil
+		if mbid, reason := matchRelease(t, nil, byCatNo); mbid != "" {
+			return albumMatch{MBID: mbid, Reason: reason}, nil
+		}
 	}
-	return "", "", nil
+	if !editionEvidence(t) {
+		return albumMatch{}, nil
+	}
+	// One browse per group per run. A group already attempted and found unusable is not
+	// re-paged for each of its remaining albums, and a forced run refreshes a group once
+	// and lets every later album under it read what that refresh cached.
+	usable, attempted := st.browsedGroups[t.ReleaseGroupMBID]
+	if attempted && !usable {
+		return albumMatch{Skip: true}, nil
+	}
+	group, ok, err := s.mb.releaseEditions(ctx, st.force && !attempted, t.ReleaseGroupMBID)
+	if err != nil {
+		return albumMatch{}, err
+	}
+	st.browsedGroups[t.ReleaseGroupMBID] = ok
+	if !ok {
+		return albumMatch{Skip: true}, nil
+	}
+	mbid, reason, edition := matchEdition(t, group)
+	return albumMatch{MBID: mbid, Reason: reason, Edition: edition}, nil
 }
 
 // enrichBook resolves an audiobook against a MusicBrainz release and applies its
@@ -824,17 +903,13 @@ func (s *Service) gatherGenres(ctx context.Context, st *runState, rg *mbReleaseG
 	return names, primary
 }
 
-// gatherCover returns the first non-nil cover from a cover provider, in priority
-// order (injected first, then the Cover Art Archive). It passes the same identity
-// hints as gatherGenres. The built-in CAA keys only on the MBID, but an injected cover
-// provider (fanart.tv, a Discogs-style source) may key on the release title and artist,
-// so withholding them would leave such a provider unable to match. It is best-effort: a
-// provider error or a missing cover is skipped, never aborting the run.
-func (s *Service) gatherCover(ctx context.Context, st *runState, rg *mbReleaseGroup) *model.ArtImage {
-	req := Request{
-		Type: TargetReleaseGroup, Force: st.force,
-		Title: rg.Title, Artist: releaseGroupArtistName(rg), MBID: rg.ID,
-	}
+// gatherCover returns the first non-nil cover from a cover provider, in priority order
+// (injected first, then the Cover Art Archive). req names the rung: a release group, or
+// the specific release an album was matched to. Routing both through the provider list
+// rather than reaching for the built-in CAA directly is what lets an embedder's cover
+// provider serve either one, and keeps the documented priority order intact. It is
+// best-effort: a provider error or a missing cover is skipped, never aborting the run.
+func (s *Service) gatherCover(ctx context.Context, st *runState, req Request) *model.ArtImage {
 	for _, p := range s.providers {
 		if !p.Capabilities().Has(CapCover) {
 			continue

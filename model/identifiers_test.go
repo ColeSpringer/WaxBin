@@ -110,10 +110,62 @@ func TestNormalizeBarcode(t *testing.T) {
 	}
 }
 
+// TestNormalizeCountry pins the edit contract, deliberately stricter than the album
+// column: an edit asserts ONE country while a scan stores whatever the tag said.
+func TestNormalizeCountry(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+		ok   bool
+	}{
+		{"", "", true},
+		{"GB", "GB", true},
+		{" gb ", "GB", true},
+		{"USA", "US", true}, // alpha-3 folds through the alias map
+		{"DEU", "DE", true},
+		{"ISL", "IS", true},
+		// UK is ISO's reserved code for the United Kingdom; GB is what MusicBrainz
+		// stores, and storing UK would make the matcher exclude the album's own release.
+		{"UK", "GB", true},
+		{"uk", "GB", true},
+		{"XW", "XW", true}, // supra-national codes pass through
+		{"XE", "XE", true},
+		{"ZZZ", "", false},         // three letters the map does not know
+		{"US & Europe", "", false}, // a list is not a single assertion
+		{"U", "", false},
+		{"UNITED KINGDOM", "", false},
+		{"G1", "", false},
+	}
+	for _, tc := range cases {
+		got, ok := NormalizeCountry(tc.in)
+		if got != tc.want || ok != tc.ok {
+			t.Errorf("NormalizeCountry(%q) = (%q, %v), want (%q, %v)", tc.in, got, ok, tc.want, tc.ok)
+		}
+	}
+
+	// CountryAlias is the same table, exported for the enrichment matcher.
+	if got, ok := CountryAlias("JPN"); got != "JP" || !ok {
+		t.Errorf("CountryAlias(JPN) = (%q, %v), want (JP, true)", got, ok)
+	}
+	if got, ok := CountryAlias("UK"); got != "GB" || !ok {
+		t.Errorf("CountryAlias(UK) = (%q, %v), want (GB, true)", got, ok)
+	}
+	if _, ok := CountryAlias("GB"); ok {
+		t.Error("a code that is already canonical needs no alias")
+	}
+}
+
 func TestNormalizeIdentifierField(t *testing.T) {
 	// Identifier fields dispatch to their normalizer.
 	if got, ok := NormalizeIdentifierField("isrc", "us-rc1-77-00001"); got != "USRC17700001" || !ok {
 		t.Errorf("isrc = (%q, %v)", got, ok)
+	}
+	// The two entity-edit normalization sites must agree.
+	if got, ok := NormalizeIdentifierField("country", "usa"); got != "US" || !ok {
+		t.Errorf("country = (%q, %v), want (US, true)", got, ok)
+	}
+	if _, ok := NormalizeIdentifierField("country", "US & Europe"); ok {
+		t.Error("a multi-value country accepted")
 	}
 	if _, ok := NormalizeIdentifierField("isbn", "not-an-isbn"); ok {
 		t.Error("malformed isbn accepted")

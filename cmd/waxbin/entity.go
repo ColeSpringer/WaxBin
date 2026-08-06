@@ -29,7 +29,7 @@ func newEntityCmd(g *globals) *cobra.Command {
 			"Editable entity types: artist, release_group, album.\n" +
 			"Artist fields: sort, mbid.\n" +
 			"Release-group fields: sort, mbid, type (album|ep|single|compilation|audiobook).\n" +
-			"Album fields: sort, mbid, barcode, label, catalog_number.\n" +
+			"Album fields: sort, mbid, barcode, label, catalog_number, media, country.\n" +
 			"`entity info` reads those three plus genre and series.\n" +
 			"Star-able types (star/rate/state/stars): artist, release_group, album, genre.",
 	}
@@ -107,9 +107,9 @@ func newEntityEditCmd(g *globals) *cobra.Command {
 		Short: "Edit fields on a shared entity",
 		Long: "Edit identifiers and sort-name overrides on a shared entity. --write-back also " +
 			"fans the values that round-trip through a scan across the entity's member files' " +
-			"on-disk tags: an album's BARCODE, LABEL, CATALOGNUMBER, and ALBUMSORT, and an " +
-			"artist's ARTISTSORT. A release-group field, a type, and an entity MBID stay " +
-			"catalog-only.",
+			"on-disk tags: an album's BARCODE, LABEL, CATALOGNUMBER, RELEASECOUNTRY, and " +
+			"ALBUMSORT, and an artist's ARTISTSORT. A release-group field, a type, an entity " +
+			"MBID, and an album's media stay catalog-only.",
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			et := model.MergeEntity(args[0])
@@ -224,6 +224,12 @@ func newEntityInfoCmd(g *globals) *cobra.Command {
 			}
 			if info.CatalogNumber != "" {
 				fmt.Fprintf(tw, "CATALOG NO\t%s\n", info.CatalogNumber)
+			}
+			if info.Media != "" {
+				fmt.Fprintf(tw, "MEDIA\t%s\n", info.Media)
+			}
+			if info.Country != "" {
+				fmt.Fprintf(tw, "COUNTRY\t%s\n", info.Country)
 			}
 			if info.ArtistPID != "" {
 				fmt.Fprintf(tw, "ARTIST\t%s\n", info.ArtistPID)
@@ -498,6 +504,8 @@ type entityInfoView struct {
 	Barcode           string   `json:"barcode,omitempty"`
 	Label             string   `json:"label,omitempty"`
 	CatalogNumber     string   `json:"catalogNumber,omitempty"`
+	Media             string   `json:"media,omitempty"`
+	Country           string   `json:"country,omitempty"`
 	ArtistPID         string   `json:"artistPid,omitempty"`
 	ReleaseGroupPID   string   `json:"releaseGroupPid,omitempty"`
 	ItemCount         int      `json:"itemCount"`
@@ -515,6 +523,7 @@ func toEntityInfoView(info *read.EntityInfo) entityInfoView {
 		Kind: string(info.Kind), PID: string(info.PID), Name: info.Name, SortKey: info.SortKey,
 		MBID: info.MBID, Type: info.Type, Year: info.Year,
 		Barcode: info.Barcode, Label: info.Label, CatalogNumber: info.CatalogNumber,
+		Media: info.Media, Country: info.Country,
 		ArtistPID: string(info.ArtistPID), ReleaseGroupPID: string(info.ReleaseGroupPID),
 		ItemCount: info.ItemCount, ReleaseGroupCount: info.ReleaseGroupCount,
 		TotalDurationMS: info.TotalDurationMS, LibraryPIDs: libs,

@@ -140,6 +140,8 @@ func tagsFromDoc(doc *waxlabel.Document, fields tag.Tags) model.Tags {
 		Barcode:         strings.TrimSpace(fields.Barcode),
 		Label:           strings.TrimSpace(fields.Label),
 		CatalogNumber:   strings.TrimSpace(fields.CatalogNumber),
+		Media:           strings.TrimSpace(fields.Media),
+		Country:         releaseCountryFromDoc(doc),
 		ArtistSort:      strings.TrimSpace(fields.ArtistSort),
 		AlbumSort:       strings.TrimSpace(fields.AlbumSort),
 		AlbumArtistSort: strings.TrimSpace(fields.AlbumArtistSort),
@@ -170,6 +172,28 @@ func tagsFromDoc(doc *waxlabel.Document, fields tag.Tags) model.Tags {
 	}
 	t.Custom = customTagsFromDoc(doc)
 	return t
+}
+
+// releaseCountryFromDoc reads the release country off the canonical key. WaxLabel folds
+// every spelling onto it, including Picard's mixed-case ID3 TXXX description and the MP4
+// freeform atom that used not to reach the canonical set at all, so an .m4a or .m4b now
+// reads its country like any other format.
+//
+// A file carrying two spellings of the key surfaces both values, which WaxLabel itself
+// lints as single-valued-multi. Two that disagree read as absent here: the file states
+// two different things and a guess would feed a matcher that writes a permanent id.
+func releaseCountryFromDoc(doc *waxlabel.Document) string {
+	vals, ok := doc.Get(tag.ReleaseCountry)
+	if !ok || len(vals) == 0 {
+		return ""
+	}
+	first := strings.TrimSpace(vals[0])
+	for _, other := range vals[1:] {
+		if !strings.EqualFold(first, strings.TrimSpace(other)) {
+			return ""
+		}
+	}
+	return first
 }
 
 // customTagsFromDoc collects the file's tag frames that WaxBin's typed model does not

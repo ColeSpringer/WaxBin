@@ -86,6 +86,11 @@ func TestEntityFieldTagKey(t *testing.T) {
 		{model.MergeAlbum, "barcode", "BARCODE", true},
 		{model.MergeAlbum, "label", "LABEL", true},
 		{model.MergeAlbum, "catalog_number", "CATALOGNUMBER", true},
+		// Country fans because every disc of a release shares one and WaxLabel v1.3.0
+		// made RELEASECOUNTRY canonical; media does not, being a per-medium tag the
+		// fan-out would stamp over a DVD medium's tracks.
+		{model.MergeAlbum, "country", "RELEASECOUNTRY", true},
+		{model.MergeAlbum, "media", "", false},
 		{model.MergeArtist, "sort", "ARTISTSORT", true},
 		// An entity MBID (album OR artist) stays DB-only: fanning it to member files would
 		// re-key the entity on rescan (its match_key column is not updated by the edit). A

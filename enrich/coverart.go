@@ -24,14 +24,15 @@ const coverImageMaxBytes = 24 << 20 // 24 MiB
 
 var coverMIME = []string{"image/*", "application/octet-stream"}
 
-// frontCover returns the raw bytes of a release group's front cover, or
-// CodeNotFound when it has none. The caller decodes and hashes the bytes.
-func (c *coverArt) frontCover(ctx context.Context, mbid string) ([]byte, error) {
+// frontCover returns the raw bytes of one entity's front cover, or CodeNotFound when it
+// has none. rung is the archive path segment: "release-group" for the group's cover, or
+// "release" for the specific pressing's own. The caller decodes and hashes the bytes.
+func (c *coverArt) frontCover(ctx context.Context, rung, mbid string) ([]byte, error) {
 	if mbid == "" {
 		return nil, waxerr.New(waxerr.CodeNotFound, "enrich.coverart", "no mbid")
 	}
 	resp, err := c.client.Do(ctx, netsafe.Request{
-		URL:        c.baseURL + "/release-group/" + url.PathEscape(mbid) + "/front",
+		URL:        c.baseURL + "/" + rung + "/" + url.PathEscape(mbid) + "/front",
 		AcceptMIME: coverMIME,
 		MaxBytes:   coverImageMaxBytes,
 	})
@@ -55,21 +56,39 @@ func (p *caaProvider) Name() string             { return providerCoverArt }
 func (p *caaProvider) Capabilities() Capability { return CapCover }
 
 func (p *caaProvider) Enrich(ctx context.Context, req Request) (*Candidate, error) {
-	if req.Type != TargetReleaseGroup || req.MBID == "" {
+	var rung string
+	switch req.Type {
+	case TargetReleaseGroup:
+		rung = "release-group"
+	case TargetRelease:
+		rung = "release"
+	default:
 		return nil, nil
 	}
-	data, err := p.caa.frontCover(ctx, req.MBID)
+	if req.MBID == "" {
+		return nil, nil
+	}
+	data, err := p.caa.frontCover(ctx, rung, req.MBID)
 	if err != nil {
 		if waxerr.Is(err, waxerr.CodeNotFound) {
-			return nil, nil // no cover for this release group
+			return nil, nil // no cover at this rung
 		}
 		return nil, err // transient: the Service logs and skips
 	}
 	img := &model.ArtImage{Data: data, Hash: art.Hash(data)}
 	format, w, h, err := art.Probe(data)
 	if err != nil {
-		p.log.Debug("cover art undecodable", "mbid", req.MBID, "err", err)
-		return nil, nil
+		// An ISOBMFF cover (AVIF/HEIC) has no pure-Go decoder, so it probes as a failure
+		// while still being a perfectly good image to store. The user-set art path
+		// (probeArtImage) already accepts it on the sniffed format alone; accepting it
+		// here too keeps enrichment from silently discarding a cover a manual set keeps.
+		f, ok := art.SniffExotic(data)
+		if !ok {
+			p.log.Debug("cover art undecodable", "mbid", req.MBID, "err", err)
+			return nil, nil
+		}
+		img.Format = f
+		return &Candidate{Cover: img}, nil
 	}
 	img.Format, img.Width, img.Height = format, w, h
 	return &Candidate{Cover: img}, nil

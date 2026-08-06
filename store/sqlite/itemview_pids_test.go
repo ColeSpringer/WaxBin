@@ -564,6 +564,50 @@ func TestIdentifierQueryFields(t *testing.T) {
 	}
 }
 
+// TestAlbumEntityQueryFields covers the album entity's release columns. They compare raw
+// text, which is the trap worth pinning: a scan stores the tag and an edit normalizes, so
+// "USA" and "US" differ here even though the enrichment matcher folds them together.
+func TestAlbumEntityQueryFields(t *testing.T) {
+	st, lib := entityFixture(t)
+
+	putTrack(t, st, lib.ID, trackSpec{
+		path: "/lib/1.flac", essence: "e1", content: "c1", title: "Tagged",
+		artist: "A", albumArt: "A", album: "Al",
+		barcode: "0075992739429", label: "Harvest", catNo: "SHVL 804",
+		media: `12" Vinyl`, country: "USA",
+	})
+	putTrack(t, st, lib.ID, trackSpec{
+		path: "/lib/2.flac", essence: "e2", content: "c2", title: "Bare",
+		artist: "B", albumArt: "B", album: "Bl",
+	})
+	putBook(t, st, lib.ID, bookSpec{
+		path: "/lib/b1.m4b", essence: "be1", content: "bc1", title: "Book", author: "Auth",
+	})
+
+	for _, tc := range []struct {
+		field string
+		op    query.Op
+		value any
+		want  int
+		why   string
+	}{
+		{"album_barcode", query.OpIs, "0075992739429", 1, "the tagged track's album"},
+		{"album_label", query.OpIs, "Harvest", 1, "the tagged track's album"},
+		{"album_catalog_number", query.OpIs, "SHVL 804", 1, "the tagged track's album"},
+		{"album_media", query.OpIs, `12" Vinyl`, 1, "the medium as tagged"},
+		{"album_country", query.OpIs, "USA", 1, "the country as tagged, unnormalized"},
+		{"album_country", query.OpIs, "US", 0, "the field compares raw text; an edit would have folded this"},
+		{"album_media", query.OpContains, "Vinyl", 1, "contains is what an untidily-tagged catalog wants"},
+		{"album_media", query.OpIsMissing, nil, 2, "the bare track and the book"},
+		{"album_country", query.OpIsMissing, nil, 2, "the bare track and the book"},
+		{"album_media", query.OpIsPresent, nil, 1, "only the tagged track"},
+	} {
+		if n := countWhere(t, st, tc.field, tc.op, tc.value); n != tc.want {
+			t.Errorf("%s %s %v = %d, want %d (%s)", tc.field, tc.op, tc.value, n, tc.want, tc.why)
+		}
+	}
+}
+
 // TestReleaseGroupMBIDField: the query surface must be able to express what audit's
 // missing_mbid walks. An enriched-but-untagged library carries only a release-group
 // id, so mbid/album_mbid alone would report every track as missing while the audit

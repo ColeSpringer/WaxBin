@@ -234,6 +234,23 @@ var itemFields = query.FieldMap{
 	"album_mbid":         {Expr: "COALESCE(NULLIF(alb.mbid,''), bk.mbid, '')", Kind: query.KindText},
 	"release_group_mbid": {Expr: "COALESCE(rg.mbid,'')", Kind: query.KindText},
 
+	// The album entity's remaining release columns, off the alb alias itemJoins binds.
+	// They compare raw text, which is the trap: a scan stores whatever the tag said while
+	// an entity edit normalizes, so `album_country is "US"` misses albums scanned "USA".
+	// album_media has no normalizer at all, so "CD", "2xCD", and "CD, Album, Reissue" are
+	// three values. Prefer `contains` unless the catalog is uniformly tagged; the
+	// enrichment matcher folds separately and shares nothing with these.
+	//
+	// Deliberately not mirrored into itemViewCols: rows.go documents a per-column cost
+	// budget there, and these are entity-scoped values `entity info album` already serves.
+	// No CLI flags either, like album_mbid; they reach users through --rule and smart
+	// playlists.
+	"album_barcode":        {Expr: "COALESCE(alb.barcode,'')", Kind: query.KindText},
+	"album_label":          {Expr: "COALESCE(alb.label,'')", Kind: query.KindText},
+	"album_catalog_number": {Expr: "COALESCE(alb.catalog_number,'')", Kind: query.KindText},
+	"album_media":          {Expr: "COALESCE(alb.media,'')", Kind: query.KindText},
+	"album_country":        {Expr: "COALESCE(alb.country,'')", Kind: query.KindText},
+
 	// Presence probes (0/1, never NULL; use `is 0`/`is 1`, not presence ops).
 	"has_art": {Expr: "CASE WHEN EXISTS(SELECT 1 FROM art_map amq WHERE amq.entity_type = " + itemArtSlotExpr +
 		" AND amq.entity_id = pi.id AND amq.role = 'front') THEN 1 ELSE 0 END", Kind: query.KindInt},

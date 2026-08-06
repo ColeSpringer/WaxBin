@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"slices"
 	"sort"
 	"strings"
 
@@ -111,6 +112,17 @@ func (s *Store) EditEntityFields(ctx context.Context, entityType model.MergeEnti
 				return waxerr.New(waxerr.CodeInvalid, op, "invalid barcode value: "+v)
 			}
 			v = nv
+		case "country":
+			// Stricter than the column, which holds whatever a tag said. The message names
+			// the accepted shape because `entity info` shows values this refuses. It does
+			// not promise the code exists: validating that would need the whole ISO table,
+			// and a code no release carries decides nothing anyway (see countryAffirmed).
+			nv, ok := model.NormalizeCountry(v)
+			if !ok {
+				return waxerr.New(waxerr.CodeInvalid, op,
+					"invalid country value: "+v+" (want one two-letter code, e.g. GB, an alpha-3 or UK alias, or XW/XE)")
+			}
+			v = nv
 		}
 		norm[f] = v
 	}
@@ -148,12 +160,46 @@ func (s *Store) EditEntityFields(ctx context.Context, entityType model.MergeEnti
 		}
 
 		now := nowNS()
+		var newEvidence bool
 		for _, f := range fields {
 			if err := applyEntityFieldTx(ctx, tx, entityType, table, entityID, f, norm[f]); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 			if err := upsertEntityCurationTx(ctx, tx, string(entityType), entityID, f, source, norm[f], lock, now); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+			if entityType == model.MergeAlbum && norm[f] != "" && slices.Contains(albumMatchEvidence, f) {
+				newEvidence = true
+			}
+		}
+		// Re-queues an album a past pass failed to match, as the scan top-up does; a
+		// matched marker is left alone. See fillAlbumIdentifiersTx.
+		if newEvidence {
+			if err := clearUnmatchedAlbumMarkerTx(ctx, tx, entityID); err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+		}
+		// Clearing the release id is how a wrong match is undone, which the weak edition
+		// tier's own marker exists to make possible. Two things go with the id. The marker
+		// must, matched or not, because the queue skips a marked album and leaving it would
+		// mean the undo silently prevented the album from ever being re-decided. The
+		// album's own front cover goes only when a matched marker was there to have written
+		// it, since that art came from the pressing now being disowned; the member tracks'
+		// embedded covers are untouched, so the album falls back to what it showed before.
+		if entityType == model.MergeAlbum {
+			if v, edited := norm["mbid"]; edited && v == "" {
+				matched, err := albumMarkerMatchedTx(ctx, tx, entityID)
+				if err != nil {
+					return waxerr.Wrap(waxerr.CodeIO, op, err)
+				}
+				if err := clearAlbumMarkerTx(ctx, tx, entityID); err != nil {
+					return waxerr.Wrap(waxerr.CodeIO, op, err)
+				}
+				if matched {
+					if err := clearAlbumArtTx(ctx, tx, entityID); err != nil {
+						return waxerr.Wrap(waxerr.CodeIO, op, err)
+					}
+				}
 			}
 		}
 

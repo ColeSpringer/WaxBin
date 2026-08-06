@@ -70,6 +70,8 @@ CREATE TABLE album (
   barcode          TEXT,                 -- release barcode (UPC/EAN)
   label            TEXT,                 -- record label
   catalog_number   TEXT,                 -- label catalog number
+  media            TEXT,                 -- physical medium as tagged, e.g. "CD", "12\" Vinyl"
+  country          TEXT,                 -- release country as tagged, e.g. "GB", "US & Europe"
   match_key        TEXT    NOT NULL UNIQUE
 );
 CREATE INDEX album_rg   ON album(release_group_id);

@@ -32,7 +32,7 @@ CREATE INDEX field_provenance_locked ON field_provenance(item_id) WHERE locked =
 CREATE TABLE entity_curation (
   entity_type TEXT    NOT NULL,        -- artist|release_group|album
   entity_id   INTEGER NOT NULL,
-  field       TEXT    NOT NULL,        -- sort|mbid|type|barcode|label|catalog_number
+  field       TEXT    NOT NULL,        -- sort|mbid|type|barcode|label|catalog_number|media|country
   source      TEXT    NOT NULL,        -- user|enrichment
   locked      INTEGER NOT NULL DEFAULT 0,
   value       TEXT,                    -- the curated value, when set by a user edit

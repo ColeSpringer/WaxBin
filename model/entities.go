@@ -45,9 +45,15 @@ type Album struct {
 	MBID           string
 	// Release identifiers, populated from tags at album creation and editable
 	// through the entity-curation surface.
+	//
+	// Media and Country describe the edition rather than naming it, and like Barcode hold
+	// whatever the tags said: "2xCD", "CD, Album, Reissue", "US & Europe". Only an edit
+	// normalizes, and only Country has a normalizer.
 	Barcode       string // release barcode (UPC/EAN)
 	Label         string // record label
 	CatalogNumber string // label catalog number
+	Media         string // physical medium, e.g. "CD", "12\" Vinyl"
+	Country       string // release country, e.g. "GB"
 	MatchKey      string
 }
 

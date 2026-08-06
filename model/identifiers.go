@@ -138,6 +138,70 @@ func NormalizeBarcode(value string) (string, bool) {
 	return s, true
 }
 
+// countryAliases folds the country spellings a tagger writes onto the ISO 3166-1 alpha-2
+// code MusicBrainz stores. Two kinds live here: alpha-3 codes, and UK, which ISO reserves
+// for the United Kingdom while the standard (and MusicBrainz) code is GB. UK is the
+// load-bearing entry: without it a UK-tagged album excludes its own GB release.
+//
+// Hand-written on purpose: golang.org/x/text/language.ParseRegion would cover alpha-3
+// completely and WaxBin already depends on the module, but that subpackage carries the
+// CLDR tables and this is an edge case. Widen freely.
+var countryAliases = map[string]string{
+	"UK": "GB",
+
+	"USA": "US", "GBR": "GB", "DEU": "DE", "JPN": "JP", "FRA": "FR", "CAN": "CA",
+	"AUS": "AU", "ITA": "IT", "ESP": "ES", "NLD": "NL", "SWE": "SE", "BRA": "BR",
+	"NZL": "NZ", "MEX": "MX", "RUS": "RU", "CHE": "CH", "AUT": "AT", "BEL": "BE",
+	"DNK": "DK", "NOR": "NO", "FIN": "FI", "IRL": "IE", "POL": "PL", "PRT": "PT",
+	"KOR": "KR", "CHN": "CN", "IND": "IN", "ARG": "AR", "ZAF": "ZA", "GRC": "GR",
+	"ISL": "IS", "ISR": "IL", "IRN": "IR", "UKR": "UA", "TUR": "TR", "THA": "TH",
+	"PHL": "PH", "IDN": "ID", "MYS": "MY", "SGP": "SG", "VNM": "VN", "TWN": "TW",
+	"HKG": "HK", "CZE": "CZ", "SVK": "SK", "HUN": "HU", "ROU": "RO", "BGR": "BG",
+	"HRV": "HR", "SRB": "RS", "SVN": "SI", "EST": "EE", "LVA": "LV", "LTU": "LT",
+	"CHL": "CL", "COL": "CO", "PER": "PE", "URY": "UY", "VEN": "VE", "CRI": "CR",
+	"EGY": "EG", "MAR": "MA", "NGA": "NG", "KEN": "KE", "GHA": "GH", "SAU": "SA",
+	"ARE": "AE", "PAK": "PK", "BGD": "BD", "LKA": "LK", "LUX": "LU", "MLT": "MT",
+	"CYP": "CY", "JAM": "JM", "CUB": "CU", "PRI": "PR", "DOM": "DO", "PAN": "PA",
+}
+
+// CountryAlias returns a country spelling's canonical alpha-2 form and whether the table
+// knows it. Exported for the enrichment matcher, which offers it alongside the tagged
+// form rather than in place of it.
+func CountryAlias(code string) (string, bool) {
+	v, ok := countryAliases[code]
+	return v, ok
+}
+
+// NormalizeCountry normalizes a release country for the edit surface: two ASCII letters,
+// the supra-national XW/XE MusicBrainz uses, or a spelling countryAliases folds (an
+// alpha-3 code, or UK). Anything else, a multi-value list included, is rejected.
+//
+// An edit is a deliberate single-value assertion, so it is stricter than the column: a
+// scan stores whatever the tag said, so `entity info` will show a "US & Europe" this
+// refuses. Same asymmetry barcode has; the matcher's own folding copes with the rest.
+func NormalizeCountry(value string) (string, bool) {
+	s := strings.ToUpper(strings.TrimSpace(value))
+	if s == "" {
+		return "", true
+	}
+	if s == "XW" || s == "XE" {
+		return s, true
+	}
+	for _, r := range s {
+		if r < 'A' || r > 'Z' {
+			return "", false
+		}
+	}
+	// An alias first, so an edit stores the code MusicBrainz uses (UK becomes GB).
+	if v, ok := countryAliases[s]; ok {
+		return v, true
+	}
+	if len(s) == 2 {
+		return s, true
+	}
+	return "", false
+}
+
 // CreditMBIDs pairs a split credit's artist names with the ids the file listed for
 // it, positionally, returning one id per name. A file writes one MUSICBRAINZ_ARTISTID
 // per credited artist in credited order, so position is the pairing and arity is the
@@ -207,6 +271,8 @@ func NormalizeIdentifierField(field, value string) (string, bool) {
 		return NormalizeASIN(value)
 	case "barcode":
 		return NormalizeBarcode(value)
+	case "country":
+		return NormalizeCountry(value)
 	default:
 		return value, true
 	}

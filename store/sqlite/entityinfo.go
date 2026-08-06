@@ -52,11 +52,12 @@ func (s *Store) EntityByPID(ctx context.Context, kind read.EntityKind, pid model
 	case read.EntityAlbum:
 		err = s.read.QueryRowContext(ctx, `SELECT al.id, al.title, al.sort_key, COALESCE(al.mbid,''),
 			COALESCE(al.year,0), COALESCE(rg.pid,''),
-			COALESCE(al.barcode,''), COALESCE(al.label,''), COALESCE(al.catalog_number,'')
+			COALESCE(al.barcode,''), COALESCE(al.label,''), COALESCE(al.catalog_number,''),
+			COALESCE(al.media,''), COALESCE(al.country,'')
 			FROM album al LEFT JOIN release_group rg ON rg.id = al.release_group_id
 			WHERE al.pid = ?`, string(pid)).
 			Scan(&id, &info.Name, &info.SortKey, &info.MBID, &info.Year, &rgPID,
-				&info.Barcode, &info.Label, &info.CatalogNumber)
+				&info.Barcode, &info.Label, &info.CatalogNumber, &info.Media, &info.Country)
 	case read.EntityGenre:
 		err = s.read.QueryRowContext(ctx, `SELECT g.id, g.name, g.sort_key,
 			COALESCE(gr.track_count,0), COALESCE(gr.total_duration_ms,0)
@@ -380,7 +381,8 @@ func (s *Store) entityBaseBatch(ctx context.Context, kind read.EntityKind, chunk
 	case read.EntityAlbum:
 		stmt = `SELECT al.id, al.pid, al.title, al.sort_key, COALESCE(al.mbid,''),
 			COALESCE(al.year,0), COALESCE(rg.pid,''),
-			COALESCE(al.barcode,''), COALESCE(al.label,''), COALESCE(al.catalog_number,'')
+			COALESCE(al.barcode,''), COALESCE(al.label,''), COALESCE(al.catalog_number,''),
+			COALESCE(al.media,''), COALESCE(al.country,'')
 			FROM album al LEFT JOIN release_group rg ON rg.id = al.release_group_id
 			WHERE al.pid IN ` + ph
 		scan = func(rows *sql.Rows) (int64, *read.EntityInfo, error) {
@@ -388,7 +390,7 @@ func (s *Store) entityBaseBatch(ctx context.Context, kind read.EntityKind, chunk
 			var rgPID string
 			info := &read.EntityInfo{}
 			err := rows.Scan(&id, &info.PID, &info.Name, &info.SortKey, &info.MBID, &info.Year, &rgPID,
-				&info.Barcode, &info.Label, &info.CatalogNumber)
+				&info.Barcode, &info.Label, &info.CatalogNumber, &info.Media, &info.Country)
 			info.ReleaseGroupPID = model.PID(rgPID)
 			return id, info, err
 		}

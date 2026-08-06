@@ -646,6 +646,13 @@ func virtualTracksInput(libraryID int64, file model.File, tags model.Tags, essen
 				Year:        year,
 				Genre:       genre,
 				Genres:      identity.SplitGenres(genre),
+				// From the file's own tags: a .cue has no vocabulary for these, and without
+				// them a carved rip's album row is empty where a plain rip's is filled.
+				Barcode:       tags.Barcode,
+				Label:         tags.Label,
+				CatalogNumber: tags.CatalogNumber,
+				Media:         tags.Media,
+				Country:       tags.Country,
 			},
 			StartFrames: start,
 			EndFrames:   end,
@@ -760,6 +767,8 @@ func trackFromTags(tags model.Tags) model.Track {
 		Barcode:          tags.Barcode,
 		Label:            tags.Label,
 		CatalogNumber:    tags.CatalogNumber,
+		Media:            tags.Media,
+		Country:          tags.Country,
 	}
 }
 

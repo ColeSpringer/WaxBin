@@ -693,3 +693,89 @@ func TestTrackKeepsASINAsCustomTag(t *testing.T) {
 		t.Errorf("track ASIN typed field = %q, want empty (books only)", fm.Tags.ASIN)
 	}
 }
+
+// TestReadsMediaAndReleaseCountry covers the scan-side source for the two columns the
+// release matcher falls back to. Both are promoted out of the custom-tag map.
+func TestReadsMediaAndReleaseCountry(t *testing.T) {
+	p := writeTemp(t, "song.mp3", testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
+		Title: "Airbag", Artist: "Radiohead", Album: "OK Computer",
+		TXXX: []testaudio.TXXXFrame{
+			{Desc: "MEDIA", Value: `12" Vinyl`},
+			{Desc: "RELEASECOUNTRY", Value: "GB"},
+		},
+	}))
+	fm, err := NewReader().Read(context.Background(), p)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if fm.Tags.Media != `12" Vinyl` {
+		t.Errorf("media = %q, want the tagged value verbatim", fm.Tags.Media)
+	}
+	if fm.Tags.Country != "GB" {
+		t.Errorf("country = %q, want GB", fm.Tags.Country)
+	}
+	for _, k := range []string{"MEDIA", "RELEASECOUNTRY"} {
+		if v, ok := fm.Tags.Custom[k]; ok {
+			t.Errorf("custom[%s] = %v, want it promoted to the typed field", k, v)
+		}
+	}
+}
+
+// TestReadsPicardsReleaseCountrySpelling: Picard writes its own TXXX description, which
+// WaxLabel folds onto the canonical RELEASECOUNTRY key, so the reader needs to know only
+// that one. Neither spelling may leak into the custom-tag map.
+func TestReadsPicardsReleaseCountrySpelling(t *testing.T) {
+	p := writeTemp(t, "song.mp3", testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
+		Title: "Airbag", Artist: "Radiohead", Album: "OK Computer",
+		TXXX: []testaudio.TXXXFrame{{Desc: "MusicBrainz Album Release Country", Value: "GB"}},
+	}))
+	fm, err := NewReader().Read(context.Background(), p)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if fm.Tags.Country != "GB" {
+		t.Errorf("country = %q, want GB from the Picard spelling", fm.Tags.Country)
+	}
+	for _, k := range []string{"RELEASECOUNTRY", "MUSICBRAINZ ALBUM RELEASE COUNTRY"} {
+		if v, ok := fm.Tags.Custom[k]; ok {
+			t.Errorf("custom[%s] = %v, want it promoted to the typed field", k, v)
+		}
+	}
+}
+
+// TestDisagreeingCountrySpellingsReadAsAbsent: both spellings fold onto one key, so a
+// file carrying two of them surfaces two values (which WaxLabel lints as
+// single-valued-multi). Two that disagree read as absent, because a guess would feed a
+// matcher that writes a permanent release id.
+func TestDisagreeingCountrySpellingsReadAsAbsent(t *testing.T) {
+	p := writeTemp(t, "song.mp3", testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
+		Title: "Airbag", Artist: "Radiohead", Album: "OK Computer",
+		TXXX: []testaudio.TXXXFrame{
+			{Desc: "RELEASECOUNTRY", Value: "GB"},
+			{Desc: "MusicBrainz Album Release Country", Value: "US"},
+		},
+	}))
+	fm, err := NewReader().Read(context.Background(), p)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if fm.Tags.Country != "" {
+		t.Errorf("country = %q, want empty when the two values disagree", fm.Tags.Country)
+	}
+
+	// Agreeing values still read, case-insensitively.
+	q := writeTemp(t, "agree.mp3", testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
+		Title: "Airbag", Artist: "Radiohead", Album: "OK Computer",
+		TXXX: []testaudio.TXXXFrame{
+			{Desc: "RELEASECOUNTRY", Value: "GB"},
+			{Desc: "MusicBrainz Album Release Country", Value: "gb"},
+		},
+	}))
+	fm2, err := NewReader().Read(context.Background(), q)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if fm2.Tags.Country != "GB" {
+		t.Errorf("country = %q, want GB when the values agree", fm2.Tags.Country)
+	}
+}
