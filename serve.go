@@ -292,6 +292,17 @@ func (l *Library) proxyHandlers() map[string]proxy.Handler {
 			}
 			return l.MergeMany(ctx, model.MergeEntity(p.EntityType), model.PID(p.Survivor), losers)
 		},
+		proxy.MethodMarkMissing: func(ctx context.Context, raw json.RawMessage) (any, error) {
+			p, err := decodeParams[proxy.MarkMissingParams](raw)
+			if err != nil {
+				return nil, err
+			}
+			outcome, err := l.MarkMissing(ctx, model.PID(p.ItemPID), MarkMissingOptions{Force: p.Force})
+			if err != nil {
+				return nil, err
+			}
+			return proxy.MarkMissingResult{Outcome: string(outcome)}, nil
+		},
 		// The four star/rating methods answer with PlayStateChangeResult rather than a
 		// bare ok, so a proxied caller learns the same "did this change anything" the
 		// local call returns. A failure still returns a nil payload with the error.

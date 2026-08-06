@@ -311,6 +311,52 @@ func TestFileAndGetMany(t *testing.T) {
 	}
 }
 
+// TestLatestChangeSeqTracksTheFeedTail covers the delegate an in-process tailer uses
+// to find where the feed ends: it is the seq of the last row Changes would return, so
+// priming from it delivers nothing twice, and a seq taken before a write redelivers
+// that write. The 0-on-empty case lives beside the store, since Open seeds a default
+// user whose delta is already on the feed by the time a Library exists.
+func TestLatestChangeSeqTracksTheFeedTail(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+
+	lib := openManaged(t, ctx, db, root)
+	writeFile(t, filepath.Join(root, "one.mp3"), testaudio.BuildMP3("One", "Artist", "Album", 1))
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	seq, err := lib.LatestChangeSeq(ctx)
+	if err != nil {
+		t.Fatalf("latest seq after the scan: %v", err)
+	}
+	if seq <= 0 {
+		t.Fatalf("seq after a scan = %d, want > 0", seq)
+	}
+	rest, err := lib.Changes(ctx, seq)
+	if err != nil {
+		t.Fatalf("changes: %v", err)
+	}
+	if len(rest) != 0 {
+		t.Errorf("resuming from the tail returned %d changes, want none", len(rest))
+	}
+
+	// Taken before a write, the same seq redelivers it, which is the at-least-once
+	// half of the contract a bootstrap relies on.
+	writeFile(t, filepath.Join(root, "two.mp3"),
+		testaudio.BuildMP3WithAudio("Two", "Artist", "Album", 2, testaudio.AudioWithSeed(2)))
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("second scan: %v", err)
+	}
+	rest, err = lib.Changes(ctx, seq)
+	if err != nil {
+		t.Fatalf("changes after the second scan: %v", err)
+	}
+	if len(rest) == 0 {
+		t.Error("a seq read before a write must redeliver it")
+	}
+}
+
 // TestPlaybackAndChangeBus verifies the playback service and the in-process
 // change bus wired through the facade: a star/rating round-trips for the default
 // user, and a subscriber sees the play_state delta.
@@ -943,9 +989,29 @@ func TestEmptyTrashAgeScopeAndPurge(t *testing.T) {
 	}
 
 	// A targeted purge removes exactly that entry, on disk and in the journal.
+	seqBeforePurge, err := lib.LatestChangeSeq(ctx)
+	if err != nil {
+		t.Fatalf("latest seq: %v", err)
+	}
 	size, err := lib.PurgeTrash(ctx, entries[0].PID)
 	if err != nil {
 		t.Fatalf("purge: %v", err)
+	}
+	// The purge announces itself on the feed a consumer actually tails. The item is
+	// already archived and its columns do not move, so this delta is the only signal
+	// that a client's copy of it became unrecoverable.
+	purgeChanges, err := lib.Changes(ctx, seqBeforePurge)
+	if err != nil {
+		t.Fatalf("changes after purge: %v", err)
+	}
+	purgeDelta := false
+	for _, ch := range purgeChanges {
+		if ch.EntityType == "item" && ch.EntityPID == entries[0].ItemPID && ch.Op == model.OpUpdate {
+			purgeDelta = true
+		}
+	}
+	if !purgeDelta {
+		t.Fatalf("no item delta for the purge of %s: %+v", entries[0].ItemPID, purgeChanges)
 	}
 	if size <= 0 {
 		t.Fatalf("purge reclaimed %d bytes, want > 0", size)

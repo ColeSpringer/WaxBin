@@ -167,11 +167,11 @@ func newDBVerifyCmd(g *globals) *cobra.Command {
 	var fix bool
 	cmd := &cobra.Command{
 		Use:   "verify",
-		Short: "Check derived data (FTS, rollups, sort keys) against the source rows",
+		Short: "Check derived data (FTS, rollups, sort keys, book durations) against the source rows",
 		Long: "Runs the derived-data consistency check: the writer-maintained FTS, " +
 			"rollups, and generated sort keys are compared against a fresh recompute from " +
-			"the source rows. Reports drift; --fix recomputes the maintained rollups first. " +
-			"Exits non-zero when any drift remains.",
+			"the source rows. Reports drift; --fix recomputes the maintained rollups and " +
+			"book durations first. Exits non-zero when any drift remains.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			// --fix recomputes rollups and reclaims orphaned art, so it needs the
 			// write lock; a plain verify is read-only and runs alongside a writer.
@@ -229,6 +229,6 @@ func newDBVerifyCmd(g *globals) *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().BoolVar(&fix, "fix", false, "recompute rollups and reclaim orphaned art before verifying (takes the write lock)")
+	cmd.Flags().BoolVar(&fix, "fix", false, "recompute rollups and book durations and reclaim orphaned art before verifying (takes the write lock)")
 	return cmd
 }

@@ -10,10 +10,14 @@ type SearchOptions struct {
 	// at all. The pool is the newest MaxCandidates matches (insertion order),
 	// not the best-ranked ones: bounding the ranked set exactly is what the cap
 	// exists to avoid, and biasing the pool toward recent additions beats
-	// systematically dropping them. 0 ranks every match up to the internal scan
-	// cap, exactly as before the option existed. Exhausting the metadata pool
-	// sets SearchResult.Truncated; the transcript-body rung is capped too but
-	// does not report its own exhaustion (see Truncated).
+	// systematically dropping them. With States set the pool is the newest N
+	// matches in those states, which is the point of the pairing: without it a
+	// bulk deletion matches its own names best, takes the top of the ranking,
+	// and spends the pool on rows the caller discards afterwards. 0 ranks every
+	// match up to the internal scan cap, exactly as before the option existed.
+	// Exhausting the metadata pool sets SearchResult.Truncated; the
+	// transcript-body rung is capped too but does not report its own exhaustion
+	// (see Truncated).
 	MaxCandidates int
 
 	// Libraries, when non-empty, scopes the search to items playable from these
@@ -22,6 +26,27 @@ type SearchOptions struct {
 	// drops out of a scoped search (its transcript hits included). An unknown
 	// library pid is an error, not an empty scope.
 	Libraries []model.PID
+
+	// States, when non-empty, narrows the search to items in these lifecycle
+	// states. Empty means no narrowing, which is the behavior from before the
+	// option existed: an archived item keeps its FTS row and stays searchable.
+	// An unknown state is an error, not an empty scope.
+	//
+	// It is orthogonal to Libraries in both directions, which is worth spelling
+	// out because neither half is obvious. Marking an item missing preserves its
+	// file row and its item_file edges, so a missing item is still inside a
+	// library scope and only States can exclude it. An archived or remote item
+	// has no file at all and is already outside every library scope, so only
+	// States can include it: States{StateRemote} searches the unfetched backlog,
+	// which no library scope can reach.
+	//
+	// It is an allow-list, so a caller that spells out today's four states will
+	// not see a fifth if one is ever added. A caller wanting a stable "everything
+	// a listing shows" set should name it once as a constant rather than
+	// spelling it at each call site: the default stays "no narrowing" for
+	// compatibility, so a call site forgotten at the next addition silently
+	// reverts to today's behavior rather than failing.
+	States []model.ItemState
 }
 
 // SearchHit is one ranked search result: an entity reference plus its display
@@ -49,7 +74,9 @@ type SearchResult struct {
 	// Truncated is set when the metadata search did not rank every match: it hit
 	// its internal ranked-row scan cap, or it exhausted a
 	// SearchOptions.MaxCandidates candidate pool. Either way the groups may omit
-	// matches (under a candidate cap, older ones). The transcript-body rung that
+	// matches (under a candidate cap, older ones), where "matches" means matches
+	// in SearchOptions.States when that is set, since the same narrowing bounds
+	// the pool this reports on. The transcript-body rung that
 	// tops up Episodes is not covered: it ranks its own bounded pool (the group
 	// cap, plus MaxCandidates when set) and never reports exhaustion here, so
 	// transcript hits can be partial while Truncated is false, as they always

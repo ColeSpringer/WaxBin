@@ -12,12 +12,16 @@ import (
 // detachedFile carries the columns the trash journal needs about a file being
 // removed from the catalog.
 type detachedFile struct {
-	id          int64
-	libraryID   sql.NullInt64
-	path        []byte
-	display     string
-	size        int64
-	primaryItem model.PID
+	id        int64
+	libraryID sql.NullInt64
+	path      []byte
+	display   string
+	size      int64
+	// itemPID is the item the file backed, for reporting and for the delta a later
+	// purge emits. It is the primary item when the file has a primary edge, and any
+	// linked item otherwise: a multi-file book's non-first parts are 'part' edges, so
+	// requiring 'primary' left every trashed book part with a blank item.
+	itemPID model.PID
 }
 
 // TrashFile drops a file's catalog row (after the file has been moved into the
@@ -35,7 +39,7 @@ func (s *Store) TrashFile(ctx context.Context, in model.TrashFileInput) (model.P
 		_, err = tx.ExecContext(ctx, `INSERT INTO trash
 			(pid, library_id, item_pid, orig_path, orig_display, trash_path, trash_display, reason, size, trashed_at)
 			VALUES (?,?,?,?,?,?,?,?,?,?)`,
-			string(tpid), d.libraryID, string(d.primaryItem), d.path, d.display,
+			string(tpid), d.libraryID, string(d.itemPID), d.path, d.display,
 			in.TrashPath, in.TrashDisplay, reasonOr(in.Reason), d.size, nowNS())
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
@@ -74,17 +78,28 @@ func detachFileTx(ctx context.Context, tx *sql.Tx, filePID model.PID, op string)
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
 
-	// The primary item (for reporting) and every item linked to this file, captured
-	// before the cascade removes the edges.
-	if err := tx.QueryRowContext(ctx,
-		`SELECT pi.pid FROM item_file itf JOIN playable_item pi ON pi.id = itf.item_id
-		 WHERE itf.file_id = ? AND itf.role = 'primary' LIMIT 1`, d.id).Scan(&d.primaryItem); err != nil &&
-		!errors.Is(err, sql.ErrNoRows) {
-		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
-	}
+	// Every item linked to this file, and the one the journal records, captured
+	// before the cascade removes the edges. The primary edge is preferred, and any
+	// linked item stands in when there is none: a book part is a 'part' edge, so
+	// insisting on 'primary' recorded a blank item for it. A part file has exactly
+	// one linked item; a single-file rip backing several virtual tracks has one per
+	// track, each of them primary, so that case already picks arbitrarily.
 	itemIDs, err := itemIDsForFile(ctx, tx, d.id)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	if err := tx.QueryRowContext(ctx,
+		`SELECT pi.pid FROM item_file itf JOIN playable_item pi ON pi.id = itf.item_id
+		 WHERE itf.file_id = ? AND itf.role = 'primary'
+		 ORDER BY itf.item_id LIMIT 1`, d.id).Scan(&d.itemPID); err != nil &&
+		!errors.Is(err, sql.ErrNoRows) {
+		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	if d.itemPID == "" && len(itemIDs) > 0 {
+		if err := tx.QueryRowContext(ctx,
+			"SELECT pid FROM playable_item WHERE id = ?", itemIDs[0]).Scan(&d.itemPID); err != nil {
+			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
 	}
 
 	// The rollups' total_duration_ms sums from the file row, so dropping the file
@@ -113,16 +128,20 @@ func detachFileTx(ctx context.Context, tx *sql.Tx, filePID model.PID, op string)
 		if err != nil {
 			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
+		// A book's denormalized total is derived from the parts it currently has, so it
+		// is refreshed whether any survived or not. An archived book has no parts and
+		// its total is 0, the same shedding the entity rollups above do: left stale it
+		// keeps feeding the item view's duration, the duration_ms filter, and its
+		// series' running time with time the book no longer has.
+		if err := refreshBookDuration(ctx, tx, iid); err != nil {
+			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
 		if has {
 			// A surviving multi-file book that lost a part must promote a primary (or
-			// it reads back headless), refresh its denormalized total duration, and
-			// emit an item update because its part count/duration/chapters changed, so a
-			// change_log consumer must refresh it (symmetric with the attach side). Its
-			// rollups were already recomputed above.
+			// it reads back headless) and emit an item update because its part
+			// count/duration/chapters changed, so a change_log consumer must refresh it
+			// (symmetric with the attach side). Its rollups were already recomputed above.
 			if err := ensurePrimary(ctx, tx, iid); err != nil {
-				return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
-			}
-			if err := refreshBookDuration(ctx, tx, iid); err != nil {
 				return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 			var pid model.PID
@@ -153,9 +172,11 @@ func detachFileTx(ctx context.Context, tx *sql.Tx, filePID model.PID, op string)
 	return &d, nil
 }
 
-// itemIDsForFile returns the distinct item ids linked to a file by any role.
+// itemIDsForFile returns the distinct item ids linked to a file by any role, in id
+// order so a caller that picks one of them picks deterministically.
 func itemIDsForFile(ctx context.Context, tx *sql.Tx, fileID int64) ([]int64, error) {
-	rows, err := tx.QueryContext(ctx, "SELECT DISTINCT item_id FROM item_file WHERE file_id = ?", fileID)
+	rows, err := tx.QueryContext(ctx,
+		"SELECT DISTINCT item_id FROM item_file WHERE file_id = ? ORDER BY item_id", fileID)
 	if err != nil {
 		return nil, err
 	}
@@ -244,12 +265,47 @@ func (s *Store) MarkTrashRestored(ctx context.Context, trashPID model.PID) error
 }
 
 // DeleteTrashRow removes a trash journal row (after its file has been permanently
-// removed from disk by an empty-trash pass).
+// removed from disk by an empty-trash pass) and, in the same transaction, appends an
+// item update for the item the row recorded. A missing row is a silent no-op.
+//
+// The delta carries no payload and no playable_item column changes with it: a
+// change_log row is an invalidation signal, so a tailer re-reads the item and finds
+// no restorable trash entry behind it. That is the whole point here. The usual case
+// is an already-archived item whose state does not move, and without the delta a
+// client holding a download of it would never learn those bytes became
+// unrecoverable. A multi-file book that is still present after one part was trashed
+// and purged earns one too, because that part's bytes are gone as well.
+//
+// A row with no item (an edge-less file, or one written before the journal recorded
+// book parts correctly) emits nothing, and neither does one whose item has since
+// been tombstoned, such as by a virtual-track re-carve.
 func (s *Store) DeleteTrashRow(ctx context.Context, trashPID model.PID) error {
 	const op = "store.DeleteTrashRow"
 	return s.writeTx(ctx, func(tx *sql.Tx) error {
-		_, err := tx.ExecContext(ctx, "DELETE FROM trash WHERE pid = ?", string(trashPID))
-		return waxerr.Wrap(waxerr.CodeIO, op, err)
+		var itemPID model.PID
+		err := tx.QueryRowContext(ctx,
+			"SELECT item_pid FROM trash WHERE pid = ?", string(trashPID)).Scan(&itemPID)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		if _, err := tx.ExecContext(ctx, "DELETE FROM trash WHERE pid = ?", string(trashPID)); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		if itemPID == "" {
+			return nil
+		}
+		var exists int
+		switch err := tx.QueryRowContext(ctx,
+			"SELECT 1 FROM playable_item WHERE pid = ?", string(itemPID)).Scan(&exists); {
+		case errors.Is(err, sql.ErrNoRows):
+			return nil
+		case err != nil:
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		return waxerr.Wrap(waxerr.CodeIO, op, appendChange(ctx, tx, "item", itemPID, model.OpUpdate))
 	})
 }
 

@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/colespringer/waxbin/model"
+	"github.com/colespringer/waxbin/waxerr"
 )
 
 // TestLoadScopedFileIndex verifies the preloaded index carries each present file's
@@ -118,6 +119,113 @@ func TestMarkFilesMissingMultiFileBook(t *testing.T) {
 	}
 	if s := itemState(t, st, p1.ItemPID); s != string(model.StateMissing) {
 		t.Errorf("book state = %q, want missing", s)
+	}
+}
+
+// TestMarkItemMissing pins the state rule the single-item verb owns: present flips
+// and emits a delta, a second call is a silent no-op, and an unknown pid is
+// CodeNotFound.
+func TestMarkItemMissing(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	a := putTrack(t, st, lib.ID, trackSpec{path: "/lib/a.mp3", essence: "ea", content: "ca", title: "A"})
+
+	before := latestSeq(t, st)
+	outcome, err := st.MarkItemMissing(ctx, a.ItemPID)
+	if err != nil {
+		t.Fatalf("mark: %v", err)
+	}
+	if outcome != model.OutcomeMarked {
+		t.Errorf("outcome = %q, want marked", outcome)
+	}
+	if s := itemState(t, st, a.ItemPID); s != string(model.StateMissing) {
+		t.Errorf("state = %q, want missing", s)
+	}
+	changes, err := st.ChangesSince(ctx, before)
+	if err != nil {
+		t.Fatalf("changes: %v", err)
+	}
+	marked := false
+	for _, c := range changes {
+		if c.EntityType == "item" && c.EntityPID == a.ItemPID && c.Op == model.OpUpdate {
+			marked = true
+		}
+	}
+	if !marked {
+		t.Errorf("no item update delta for the mark: %+v", changes)
+	}
+
+	seq := latestSeq(t, st)
+	outcome, err = st.MarkItemMissing(ctx, a.ItemPID)
+	if err != nil {
+		t.Fatalf("re-mark: %v", err)
+	}
+	if outcome != model.OutcomeAlreadyMissing {
+		t.Errorf("re-mark outcome = %q, want already-missing", outcome)
+	}
+	if latestSeq(t, st) != seq {
+		t.Error("an already-missing item must not emit a delta")
+	}
+
+	if _, err := st.MarkItemMissing(ctx, "nope"); !waxerr.Is(err, waxerr.CodeNotFound) {
+		t.Errorf("unknown pid = %v, want CodeNotFound", err)
+	}
+}
+
+// TestMarkItemMissingRefusesFilelessStates pins the non-obvious half of the contract:
+// archived and remote already say there are no local bytes, so each is reported back
+// rather than downgraded. Downgrading archived would lose the fact that the listener
+// deleted the item and would put it back into every listing that excludes archived.
+func TestMarkItemMissingRefusesFilelessStates(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+
+	gone := putTrack(t, st, lib.ID, trackSpec{path: "/lib/a.mp3", essence: "ea", content: "ca", title: "A"})
+	if err := st.DetachFile(ctx, gone.FilePID); err != nil {
+		t.Fatalf("detach: %v", err)
+	}
+	res, err := st.UpsertFeed(ctx, model.UpsertFeedInput{
+		FeedURL:     "http://feed.example/y",
+		IdentityKey: "podcast:feed.example/y",
+		Feed: model.Feed{Title: "Show", Episodes: []model.FeedEpisode{
+			{GUID: "g1", Title: "Unfetched", EnclosureURL: "http://feed.example/1.mp3", EnclosureType: "audio/mpeg"},
+		}},
+		FetchedAtNS: 1,
+	})
+	if err != nil {
+		t.Fatalf("UpsertFeed: %v", err)
+	}
+	eps, err := st.EpisodesByPodcast(ctx, res.PodcastPID, 0)
+	if err != nil || len(eps) != 1 {
+		t.Fatalf("episodes = %d (err %v), want 1", len(eps), err)
+	}
+
+	cases := []struct {
+		name  string
+		pid   model.PID
+		want  model.MarkMissingOutcome
+		state model.ItemState
+	}{
+		{"archived", gone.ItemPID, model.OutcomeArchived, model.StateArchived},
+		{"remote", eps[0].PID, model.OutcomeRemote, model.StateRemote},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			seq := latestSeq(t, st)
+			outcome, err := st.MarkItemMissing(ctx, tc.pid)
+			if err != nil {
+				t.Fatalf("mark: %v", err)
+			}
+			if outcome != tc.want {
+				t.Errorf("outcome = %q, want %q", outcome, tc.want)
+			}
+			if s := itemState(t, st, tc.pid); s != string(tc.state) {
+				t.Errorf("state = %q, want %q (a refusal must not write)", s, tc.state)
+			}
+			if latestSeq(t, st) != seq {
+				t.Error("a refusal must not emit a delta")
+			}
+		})
 	}
 }
 

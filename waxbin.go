@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"io"
+	"io/fs"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -409,9 +411,10 @@ func (l *Library) Browse(ctx context.Context, list read.DiscoveryList, opt read.
 // Search runs a grouped, BM25-ranked search across artists, albums, tracks,
 // books, and episodes (episode transcript-body hits rank below metadata hits).
 // Field weighting puts title hits above artist and album hits. opt.MaxCandidates
-// bounds how many matches are ranked (recency-biased under truncation) and
-// opt.Libraries scopes the search to items playable from those libraries; see
-// read.SearchOptions for both contracts.
+// bounds how many matches are ranked (recency-biased under truncation),
+// opt.Libraries scopes the search to items playable from those libraries, and
+// opt.States narrows it to items in those lifecycle states; see
+// read.SearchOptions for all three contracts.
 func (l *Library) Search(ctx context.Context, q string, opt read.SearchOptions) (*read.SearchResult, error) {
 	return l.store.Search(ctx, q, opt)
 }
@@ -579,6 +582,21 @@ func (l *Library) Stats(ctx context.Context, userPID model.PID, topN int) (*read
 // Changes returns change_log rows after seq.
 func (l *Library) Changes(ctx context.Context, sinceSeq int64) ([]model.Change, error) {
 	return l.store.ChangesSince(ctx, sinceSeq)
+}
+
+// LatestChangeSeq returns the sequence number at the tail of the change feed, so a
+// consumer can find where the feed currently ends without pulling a page of changes.
+// An empty feed is 0.
+//
+// Read it before a bootstrap read and resume from it afterwards, not the other way
+// round. There is no atomic snapshot-plus-seq here, so the natural reading is the
+// wrong one: a seq taken after the read silently drops everything committed during
+// it, permanently, while a seq taken before only redelivers those deltas, which is
+// harmless. The feed is at-least-once under that pattern. It is the same
+// order-first contract Subscribe has, where the subscription is registered before
+// the priming read.
+func (l *Library) LatestChangeSeq(ctx context.Context) (int64, error) {
+	return l.store.LatestChangeSeq(ctx)
 }
 
 // Subscribe registers an in-process listener for change_log rows after each
@@ -1034,8 +1052,9 @@ func (l *Library) VerifyDerived(ctx context.Context) (*sqlite.DerivedReport, err
 	return l.store.VerifyDerived(ctx)
 }
 
-// RefreshRollups recomputes the maintained rollups, the repair for the rollup
-// drift that VerifyDerived can report.
+// RefreshRollups recomputes the maintained rollups and every book's denormalized
+// total duration, the repair for the rollup and book-duration drift VerifyDerived
+// can report.
 func (l *Library) RefreshRollups(ctx context.Context) error {
 	return l.store.RefreshRollups(ctx)
 }
@@ -1903,6 +1922,139 @@ func (l *Library) ApplyDelete(ctx context.Context, plan *trash.Plan) (*trash.Rep
 	return rep, err
 }
 
+// MarkMissingOptions tunes a mark-missing.
+type MarkMissingOptions struct {
+	// Force skips the on-disk verification and the mount gate entirely, for a caller
+	// whose view of the filesystem is the authoritative one, including one in a
+	// different container whose mount view differs from the server's. The store's
+	// state rule still applies, so Force cannot turn an archived item into a missing
+	// one.
+	Force bool
+}
+
+// MarkMissing records that an item's bytes are gone, for a caller that discovered it
+// out of band and would otherwise keep requeuing doomed work against a catalog that
+// still claims the file is there. The outcome says what happened, including the
+// refusals: files-present means the bytes really are on disk and the caller's failure
+// is something else.
+//
+// It verifies before it writes. Every backing file is stat'ed, and the item is only
+// marked when none of them is on disk; a single present file answers files-present.
+// A stat failing with anything other than "does not exist" refuses the whole call
+// with CodeIO rather than answering from a partial view, whichever part it was, so
+// the answer never depends on which part came first.
+//
+// Once a file has come back absent, the owning library root is stat'ed too. An
+// absent, unreadable, or non-directory root is a dropped mount, not a deletion, and
+// is refused. The gate is on the root rather than each file's parent directory
+// deliberately: the ordinary genuine deletion is a user removing an album or a book
+// folder, and a parent gate refuses exactly that, teaching callers to reach for
+// Force, which skips every guard. Gating on the root admits the deleted-folder case
+// and still catches the failure the guard exists for. A file under no registered
+// root has no mount to check and is not gated.
+//
+// The scanner checks its walk root for the same reason but decides the absent case
+// the other way, treating a vanished root as a real full removal and reconciling. It
+// can afford to: it has just walked the whole tree, so it holds evidence this verb
+// does not, and it still gates that on a survival floor plus an explicit
+// --reconcile-deletions override. One stat of one item is not evidence that a whole
+// library was deleted, and an unplugged drive is exactly a root that stopped
+// existing, so this refuses and leaves Force as the deliberate override.
+//
+// An item with no file rows has nothing to stat, so the store answers from state
+// alone; a present item with no files is drift, and marking it missing is the right
+// repair, so Force and non-Force agree there.
+//
+// It marks the named item only. When several items share one file (a single-file rip
+// carved into virtual tracks), the siblings keep whatever state they had, so a caller
+// repairing such a rip passes every pid; store.MarkItemMissing says the same.
+//
+// It takes no job lease, unlike the fs-mutating verbs, because it only stats and
+// writes one transaction (the scan path's MarkFilesMissing takes none either).
+// Racing a concurrent scan is benign: the last transaction to commit wins, and
+// missing is recoverable by the next scan.
+func (l *Library) MarkMissing(ctx context.Context, itemPID model.PID, opts MarkMissingOptions) (model.MarkMissingOutcome, error) {
+	const op = "Library.MarkMissing"
+	if !opts.Force {
+		files, err := l.store.ItemFiles(ctx, itemPID)
+		if err != nil {
+			return "", err
+		}
+		present, absent := false, false
+		for _, ref := range files {
+			// pathx.Long or a Windows long path reports a present file as absent, which
+			// here would flip a perfectly present item to missing.
+			switch _, err := os.Stat(pathx.Long(string(ref.Path))); {
+			case err == nil:
+				present = true
+			case errors.Is(err, fs.ErrNotExist):
+				absent = true
+			default:
+				return "", waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+		}
+		if present {
+			return model.OutcomeFilesPresent, nil
+		}
+		if absent {
+			if err := l.checkRootsMounted(ctx, files, op); err != nil {
+				return "", err
+			}
+		}
+	}
+	return l.store.MarkItemMissing(ctx, itemPID)
+}
+
+// checkRootsMounted refuses when a library root holding one of these files is not a
+// readable directory, which is a dropped mount rather than a deletion. The roots are
+// listed once per call and each distinct one is stat'ed once, however many parts sit
+// under it.
+func (l *Library) checkRootsMounted(ctx context.Context, files []model.ItemFileRef, op string) error {
+	libs, err := l.store.Libraries(ctx)
+	if err != nil {
+		return err
+	}
+	checked := map[model.PID]bool{}
+	for _, ref := range files {
+		lib := libraryForRawPath(libs, ref.Path)
+		if lib == nil || checked[lib.PID] {
+			continue
+		}
+		checked[lib.PID] = true
+		info, err := os.Stat(pathx.Long(rawRoot(lib)))
+		if err != nil || !info.IsDir() {
+			return waxerr.New(waxerr.CodeIO, op, "library root "+lib.DisplayRoot+
+				" is not a readable directory, so its files cannot be confirmed gone;"+
+				" remount it, or narrow a rescan with --sub-path, or pass force to record it anyway")
+		}
+	}
+	return nil
+}
+
+// libraryForRawPath returns the library whose root contains a raw path, or nil. It
+// matches on raw bytes both sides, unlike libraryContaining, because its caller stats
+// the result: DisplayRoot is a lossy UTF-8 rendering, so a root carrying non-UTF-8
+// bytes would stat as absent and refuse every mark-missing under that library.
+// Roots are validated non-overlapping (config.Validate, and AddRoot at runtime), so
+// the first match is the only one.
+func libraryForRawPath(libs []*model.Library, path []byte) *model.Library {
+	for _, lib := range libs {
+		if pathx.UnderRoot(rawRoot(lib), string(path)) {
+			return lib
+		}
+	}
+	return nil
+}
+
+// rawRoot returns a library's root as raw OS bytes, falling back to the display
+// rendering only when the raw column is empty.
+func rawRoot(lib *model.Library) string {
+	if len(lib.Root) > 0 {
+		return string(lib.Root)
+	}
+	return lib.DisplayRoot
+}
+
 // Trash lists trash journal entries, newest first. includeRestored controls
 // whether already-restored rows are shown; limit 0 returns all.
 func (l *Library) Trash(ctx context.Context, includeRestored bool, limit int) ([]model.TrashEntry, error) {
@@ -1959,7 +2111,9 @@ type EmptyTrashOptions struct {
 
 // EmptyTrash permanently removes active trashed files from disk and drops their
 // journal rows, reclaiming space. Options.OlderThan narrows the pass to entries
-// older than that window. It runs under a "delete"-scoped job.
+// older than that window. It runs under a "delete"-scoped job. Each purged entry
+// announces itself on the change feed as an item update, so a client holding a copy
+// of an already-archived item learns those bytes are now unrecoverable.
 func (l *Library) EmptyTrash(ctx context.Context, opts EmptyTrashOptions) (*EmptyReport, error) {
 	if opts.OlderThan < 0 {
 		return nil, waxerr.New(waxerr.CodeInvalid, "Library.EmptyTrash", "older-than window cannot be negative")
@@ -1998,8 +2152,10 @@ func (l *Library) EmptyTrash(ctx context.Context, opts EmptyTrashOptions) (*Empt
 }
 
 // PurgeTrash permanently removes a single active trash entry (file and journal
-// row), returning the bytes reclaimed. A pid that is unknown, already purged, or
-// already restored is CodeNotFound. Like EmptyTrash it runs under an fs-mutate
+// row), returning the bytes reclaimed, and announces the purge on the change feed
+// as an item update (see DeleteTrashRow for why the item's own columns do not move).
+// A pid that is unknown, already purged, or already restored is CodeNotFound. Like
+// EmptyTrash it runs under an fs-mutate
 // job, one lease per call; the entry is resolved inside the lease, so a restore
 // racing in (it holds the same scope) cannot slip between the check and the
 // purge and lose its journal row.

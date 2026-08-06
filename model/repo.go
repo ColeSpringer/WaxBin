@@ -354,6 +354,12 @@ type Catalog interface {
 	// part stays present). Rows are preserved, so a rescan restores present state.
 	// Returns the number of items newly marked missing.
 	MarkFilesMissing(ctx context.Context, filePIDs []PID) (int, error)
+	// MarkItemMissing marks one item missing by pid, whatever its files say, for a
+	// caller that already knows the bytes are gone. It shares MarkFilesMissing's
+	// idempotence and preserved rows, and owns the state rule: present flips and
+	// emits a delta, missing is a no-op, and archived or remote are refused with
+	// their own outcome rather than downgraded.
+	MarkItemMissing(ctx context.Context, itemPID PID) (MarkMissingOutcome, error)
 	// UpdateItemSidecars refreshes an item's sidecar-sourced lyrics/art/chapters
 	// outside the audio-change gate and records the new sidecar observations, in one
 	// transaction. It returns whether anything changed and emits an item change_log
@@ -405,8 +411,10 @@ type Catalog interface {
 	LatestChangeSeq(ctx context.Context) (int64, error)
 
 	// RefreshRollups recomputes the maintained catalog-structural rollups
-	// (per artist/release_group/genre) from the base tables. Normal scans maintain
-	// touched rows transactionally; this is the repair path for db verify drift.
+	// (per artist/release_group/genre) and each book's denormalized total duration
+	// from the base tables. Normal scans maintain touched rows transactionally; this
+	// is the repair path for db verify drift, so it must cover every maintained sum
+	// the drift report names or `db verify --fix` reports drift it cannot clear.
 	RefreshRollups(ctx context.Context) error
 }
 

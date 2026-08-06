@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -94,5 +95,29 @@ func TestDataVersionMovesOnCommit(t *testing.T) {
 	}
 	if after == before {
 		t.Errorf("data_version did not move after a commit (%d == %d)", before, after)
+	}
+}
+
+// TestLatestChangeSeqEmptyFeed pins the zero every consumer bootstraps from. The
+// empty feed has to be staged: Open seeds a default user, whose create delta is
+// already row one, and PruneChangeLog always keeps a row, so no caller above this
+// layer can ever observe it naturally.
+func TestLatestChangeSeqEmptyFeed(t *testing.T) {
+	ctx := context.Background()
+	st, err := Open(ctx, OpenOptions{Path: filepath.Join(t.TempDir(), "c.db"), Owner: "test"})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if _, err := st.write.ExecContext(ctx, "DELETE FROM change_log"); err != nil {
+		t.Fatalf("drain the feed: %v", err)
+	}
+
+	seq, err := st.LatestChangeSeq(ctx)
+	if err != nil {
+		t.Fatalf("latest seq: %v", err)
+	}
+	if seq != 0 {
+		t.Errorf("empty-feed seq = %d, want 0", seq)
 	}
 }

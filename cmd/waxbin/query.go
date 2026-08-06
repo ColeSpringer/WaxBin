@@ -153,6 +153,32 @@ func kindList() string {
 	return strings.Join(names, "|")
 }
 
+// resolveStateRefs turns each --state ref into an item state, rejecting an unknown
+// one so a typo does not read as an empty catalog. The store validates too, for a
+// caller reaching Search directly; this runs first so the rejection lands before the
+// catalog is opened, and both quote model.ItemStateList. Deduplicated first-seen for
+// symmetry with resolveLibraryRefs, though nothing downstream depends on the arity.
+func resolveStateRefs(op string, refs []string) ([]model.ItemState, error) {
+	if len(refs) == 0 {
+		return nil, nil
+	}
+	out := make([]model.ItemState, 0, len(refs))
+	seen := make(map[model.ItemState]bool, len(refs))
+	for _, ref := range refs {
+		st := model.ItemState(ref)
+		if !st.Valid() {
+			return nil, waxerr.New(waxerr.CodeInvalid, op,
+				"unknown item state "+ref+"; valid: "+model.ItemStateList())
+		}
+		if seen[st] {
+			continue
+		}
+		seen[st] = true
+		out = append(out, st)
+	}
+	return out, nil
+}
+
 // pager is the subset of the library used by paged query (eases testing).
 type pager interface {
 	QueryPage(ctx context.Context, q query.Query, cursor read.Cursor, limit int, desc bool, userPID model.PID) (*read.Page, error)

@@ -99,12 +99,19 @@ func refreshRollupSubset(ctx context.Context, tx *sql.Tx, idList []int64, table,
 	return err
 }
 
-// RefreshRollups recomputes every rollup from the base tables in one transaction.
-// Per-write maintenance keeps rollups current during normal operation; this
-// whole-catalog rebuild repairs drift reported by `db verify`.
+// RefreshRollups recomputes every rollup from the base tables in one transaction,
+// plus each book's denormalized total duration. Per-write maintenance keeps both
+// current during normal operation; this whole-catalog rebuild repairs drift reported
+// by `db verify`. The book total is not a rollup table, but it is the same kind of
+// maintained derived sum, it is on the same drift report, and this is the verb
+// `db verify --fix` runs, so repairing it anywhere else would leave the fix
+// unreachable.
 func (s *Store) RefreshRollups(ctx context.Context) error {
 	return s.writeTx(ctx, func(tx *sql.Tx) error {
-		return rebuildRollups(ctx, tx, nowNS())
+		if err := rebuildRollups(ctx, tx, nowNS()); err != nil {
+			return err
+		}
+		return refreshAllBookDurations(ctx, tx)
 	})
 }
 

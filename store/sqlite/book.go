@@ -548,6 +548,17 @@ func refreshBookDuration(ctx context.Context, tx *sql.Tx, itemID int64) error {
 	return err
 }
 
+// refreshAllBookDurations recomputes every book's total from its current parts. The
+// per-write refreshes keep the column current; this whole-catalog pass is the repair
+// for drift `db verify` reports, and it is the only way back for a book that lost its
+// last part before the detach path shed the total, since a rescan cannot help when
+// the file it would re-read is gone.
+func refreshAllBookDurations(ctx context.Context, tx *sql.Tx) error {
+	_, err := tx.ExecContext(ctx,
+		"UPDATE book SET total_duration_ms = "+fmt.Sprintf(bookEffectiveDurationSum, "book.item_id"))
+	return err
+}
+
 // chapterSourceRank orders chapter sources by precedence (lower wins). A remote
 // podcast:chapters JSON is richest and outranks embedded chapters (the documented
 // episode contract); for books (which never carry podcast_url) embedded chapters are

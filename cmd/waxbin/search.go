@@ -5,6 +5,7 @@ import (
 	"strings"
 	"text/tabwriter"
 
+	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/read"
 	"github.com/spf13/cobra"
 )
@@ -14,6 +15,7 @@ func newSearchCmd(g *globals) *cobra.Command {
 		limit         int
 		maxCandidates int
 		libraries     []string
+		states        []string
 	)
 	cmd := &cobra.Command{
 		Use:   "search QUERY",
@@ -23,7 +25,8 @@ func newSearchCmd(g *globals) *cobra.Command {
 			"weighting makes a title match outrank an artist/album match, which outranks a " +
 			"transcript-body match. Multiple words narrow the result (implicit AND, prefix-matched). " +
 			"--max-candidates bounds how many matches are ranked (the newest ones win under " +
-			"truncation) and --library scopes the search to items playable from those libraries.",
+			"truncation), --library scopes the search to items playable from those libraries, " +
+			"and --state narrows it to items in those lifecycle states.",
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			q := strings.Join(args, " ")
@@ -37,7 +40,13 @@ func newSearchCmd(g *globals) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			opt := read.SearchOptions{Limit: limit, MaxCandidates: maxCandidates, Libraries: libPIDs}
+			itemStates, err := resolveStateRefs("search", states)
+			if err != nil {
+				return err
+			}
+			opt := read.SearchOptions{
+				Limit: limit, MaxCandidates: maxCandidates, Libraries: libPIDs, States: itemStates,
+			}
 			res, err := lib.Search(ctx(cmd), q, opt)
 			if err != nil {
 				return err
@@ -64,6 +73,10 @@ func newSearchCmd(g *globals) *cobra.Command {
 	cmd.Flags().IntVar(&limit, "limit", 0, "max results per group (0 = default)")
 	cmd.Flags().IntVar(&maxCandidates, "max-candidates", 0, "cap the ranked match pool; the newest matches win under truncation (0 = no cap)")
 	cmd.Flags().StringArrayVar(&libraries, "library", nil, "scope to items playable from this library, by pid or registered root path (repeatable)")
+	cmd.Flags().StringArrayVar(&states, "state", nil,
+		"narrow to items in this item lifecycle state: "+model.ItemStateList()+
+			" (repeatable; not the per-user star/rating of the 'state' command, nor 'entity state';"+
+			" for anything richer than an allow-list, query the state field with in/notIn)")
 	return cmd
 }
 

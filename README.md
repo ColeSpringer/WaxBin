@@ -56,10 +56,10 @@ exit codes (`waxbin exit-codes`).
 | Area | Commands |
 | --- | --- |
 | **Lifecycle** | `init`, `library add`/`library list`, `scan`, `analyze`, `watch`, `serve`, `doctor`, `jobs`, `version`, `exit-codes` |
-| **Read / browse** | `query`/`ls` (incl. `--library`, `--tag KEY=VALUE`, `--tag-contains`, `--tag-present`/`--tag-missing`, `--limit-mode`/`--seed`), `browse <list>`, `facet --group-by` (incl. `tag.<KEY>`, `library`, `podcast`, `creditArtist`), `search` (incl. `--max-candidates`, `--library`), `show`, `art` (incl. `--role`), `lyrics`, `stats [--year N]`, `provenance`, `lock`/`unlock`, `entity info`/`entity list` |
+| **Read / browse** | `query`/`ls` (incl. `--library`, `--tag KEY=VALUE`, `--tag-contains`, `--tag-present`/`--tag-missing`, `--limit-mode`/`--seed`), `browse <list>`, `facet --group-by` (incl. `tag.<KEY>`, `library`, `podcast`, `creditArtist`), `search` (incl. `--max-candidates`, `--library`, `--state`), `show`, `art` (incl. `--role`), `lyrics`, `stats [--year N]`, `provenance`, `lock`/`unlock`, `entity info`/`entity list` |
 | **Curation & editing** | `edit` (incl. `--batch`), `entity`, `credit`, `tag`/`tag keys`, `lyrics set`, `chapters`, `art set` (incl. `--role`) |
 | **Ingest / organize** | `inbox`, `import`, `organize`, `profiles` |
-| **Deletion / repair** | `trash`, `rm [--permanent]`, `merge`, `audit`, `diagnostics`, `upgrade` |
+| **Deletion / repair** | `trash`, `rm [--permanent]`, `mark-missing [--force]`, `merge`, `audit`, `diagnostics`, `upgrade` |
 | **Portability** | `backup`, `restore`, `export`, `manifest`, `rebuild` |
 | **Playlists / podcasts** | `playlist`, `smartplaylist`, `podcast`, `opml` |
 | **Enrichment** | `enrich` (MusicBrainz + Cover Art Archive; optional AcoustID; incl. `--item`/`--entity`) |

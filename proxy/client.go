@@ -296,6 +296,21 @@ func (c *Client) Merge(ctx context.Context, entityType model.MergeEntity, surviv
 	return reports, nil
 }
 
+// MarkMissing proxies recording that an item's bytes are gone, returning what the
+// call did. Without force the server verifies against its own filesystem, so the
+// refusals (files-present, and the dropped-mount CodeIO) reflect the server's view,
+// which is the point of proxying it rather than the client deciding alone.
+func (c *Client) MarkMissing(ctx context.Context, itemPID model.PID, force bool) (model.MarkMissingOutcome, error) {
+	var res MarkMissingResult
+	err := c.call(ctx, MethodMarkMissing, MarkMissingParams{
+		ItemPID: string(itemPID), Force: force,
+	}, &res)
+	if err != nil {
+		return "", err
+	}
+	return model.MarkMissingOutcome(res.Outcome), nil
+}
+
 // SetRating proxies setting or clearing a user's rating for an item. asOf (nil =
 // server now) is the recorded change time; it travels as asOfNs and lets the server
 // order a replayed rating by recorded-time last-writer-wins. It reports whether the

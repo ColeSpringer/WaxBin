@@ -4,6 +4,8 @@
 // organize, jobs, and the facade depend on the domain, not on SQLite.
 package model
 
+import "strings"
+
 // Mode is how a library root is handled.
 type Mode string
 
@@ -124,6 +126,52 @@ const (
 	StateArchived ItemState = "archived" // files gone, history kept
 	StateRemote   ItemState = "remote"   // known but not local (e.g. unfetched episode)
 	StateMissing  ItemState = "missing"  // expected file absent at scan
+)
+
+// Valid reports whether s is a known item state. A caller narrowing by state should
+// check it rather than passing the string through: an unknown state matches no rows,
+// so a typo would read as an empty catalog instead of a mistake.
+func (s ItemState) Valid() bool {
+	switch s {
+	case StatePresent, StateArchived, StateRemote, StateMissing:
+		return true
+	default:
+		return false
+	}
+}
+
+// ItemStates lists the item states, for help text and validation messages. The
+// playable_item.state column has no CHECK constraint, so this is the vocabulary's
+// only authority.
+func ItemStates() []ItemState {
+	return []ItemState{StatePresent, StateArchived, StateRemote, StateMissing}
+}
+
+// ItemStateList renders the state vocabulary for a help string or a rejection
+// message. It lives here so the store and the CLI, which both validate a caller's
+// states, quote the same list rather than keeping one each.
+func ItemStateList() string {
+	sts := ItemStates()
+	names := make([]string, len(sts))
+	for i, st := range sts {
+		names[i] = string(st)
+	}
+	return strings.Join(names, "|")
+}
+
+// MarkMissingOutcome is what a mark-missing did, or why it did nothing. A bare
+// bool would collapse four different answers into false, and for a caller repairing
+// the catalog the distinction is the payload: a worker requeuing doomed work needs
+// to tell "the bytes really are on disk, so your failure is something else" apart
+// from "already recorded".
+type MarkMissingOutcome string
+
+const (
+	OutcomeMarked         MarkMissingOutcome = "marked"
+	OutcomeAlreadyMissing MarkMissingOutcome = "already-missing"
+	OutcomeFilesPresent   MarkMissingOutcome = "files-present"
+	OutcomeArchived       MarkMissingOutcome = "archived"
+	OutcomeRemote         MarkMissingOutcome = "remote"
 )
 
 // ScanState tracks where a file is in the scan/analyze lifecycle.

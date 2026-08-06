@@ -54,22 +54,62 @@ const searchDisplayJoins = `
 		LEFT JOIN artist art ON art.id = t.artist_id
 		LEFT JOIN album al ON al.id = t.album_id`
 
-// searchScopeJoin returns the INNER JOIN fragment scoping matched items (the pi
-// alias) to those playable from the given libraries, plus its bind args. The
-// INNER joins are the point: an item whose primary backing file is missing (an
-// undownloaded episode) or lives elsewhere drops out. An empty scope returns an
-// empty fragment.
-func searchScopeJoin(libIDs []int64) (string, []any) {
-	if len(libIDs) == 0 {
+// searchNarrow returns the fragment narrowing matched items (the pi alias) to the
+// given states and libraries, plus its bind args. It is spliced directly after a
+// caller's own `JOIN playable_item pi ON ...` line, because the two rungs join pi
+// on different columns and disagree about whether the join is wanted when nothing
+// narrows at all. For libIDs=[7] and states=[present remote] it returns:
+//
+//	` AND pi.state IN (?,?)
+//		JOIN item_file spf ON spf.item_id = pi.id AND spf.role = 'primary'
+//		JOIN file sf ON sf.id = spf.file_id AND sf.library_id IN (?)`
+//
+// The states ride the pi join's ON clause, so they must come before the scope
+// joins: the ON clause ends at the next JOIN keyword. pi is INNER-joined in both
+// rungs, so ON and WHERE are equivalent here, and keeping both narrowings in one
+// contiguous fragment is what makes the bind order fall out of fragment order.
+//
+// The library joins are INNER for the usual reason: an item whose primary backing
+// file lives elsewhere, or that has no file at all (an undownloaded episode),
+// drops out of a scoped search. Either half being empty contributes nothing.
+func searchNarrow(libIDs []int64, states []model.ItemState) (string, []any) {
+	if len(libIDs) == 0 && len(states) == 0 {
 		return "", nil
 	}
-	args := make([]any, len(libIDs))
-	for i, id := range libIDs {
-		args[i] = id
+	// Exact capacity so every caller's append reallocates rather than writing into
+	// a shared backing array.
+	args := make([]any, 0, len(states)+len(libIDs))
+	frag := ""
+	if len(states) > 0 { // placeholders(0) is "()", and IN () is a syntax error
+		frag += ` AND pi.state IN ` + placeholders(len(states))
+		for _, st := range states {
+			args = append(args, string(st))
+		}
 	}
-	return `
+	if len(libIDs) > 0 {
+		frag += `
 		JOIN item_file spf ON spf.item_id = pi.id AND spf.role = 'primary'
-		JOIN file sf ON sf.id = spf.file_id AND sf.library_id IN ` + placeholders(len(libIDs)), args
+		JOIN file sf ON sf.id = spf.file_id AND sf.library_id IN ` + placeholders(len(libIDs))
+		for _, id := range libIDs {
+			args = append(args, id)
+		}
+	}
+	return frag, args
+}
+
+// checkItemStates rejects an unknown item state, failing closed on a typo the way
+// an unknown library pid does: an unknown state matches no rows, so without this a
+// misspelled state reads as an empty catalog. Repeats are left alone; unlike a
+// library pid, whose arity decides which query form the compiler picks, a repeated
+// value in `pi.state IN (?,?)` is inert beyond one extra bind slot.
+func checkItemStates(states []model.ItemState, op string) error {
+	for _, st := range states {
+		if !st.Valid() {
+			return waxerr.New(waxerr.CodeInvalid, op,
+				"unknown item state "+string(st)+"; valid: "+model.ItemStateList())
+		}
+	}
+	return nil
 }
 
 // searchStmt builds the grouped-search statement for one option set, returning
@@ -90,40 +130,45 @@ func searchScopeJoin(libIDs []int64) (string, []any) {
 // the ranking too, so at the truncation margin the (N+1)th-newest match can take
 // a slot on rank; the result is flagged Truncated either way, and excluding that
 // row exactly would cost a second pass over the pool for a one-row nicety. The
-// scope joins sit inside the wrap, so an out-of-scope match never consumes the
-// pool.
-func searchStmt(match string, limit, maxCandidates int, libIDs []int64) (string, []any, int) {
+// narrowing sits inside the wrap, so a match the caller excluded by library or by
+// state never consumes the pool.
+func searchStmt(match string, limit, maxCandidates int, libIDs []int64, states []model.ItemState) (string, []any, int) {
 	scanCap := searchFetchCap(limit)
 	if maxCandidates > 0 && maxCandidates < scanCap {
 		scanCap = maxCandidates
 	}
-	scopeJoin, scopeArgs := searchScopeJoin(libIDs)
+	narrow, narrowArgs := searchNarrow(libIDs, states)
 
 	if maxCandidates <= 0 {
 		stmt := `SELECT ` + searchDisplayCols + `, ` + searchBM25 + ` AS score
 		FROM search_fts
-		JOIN playable_item pi ON pi.id = search_fts.rowid` + searchDisplayJoins + scopeJoin + `
+		JOIN playable_item pi ON pi.id = search_fts.rowid` + narrow + searchDisplayJoins + `
 		WHERE search_fts MATCH ?
 		ORDER BY score, pi.pid
 		LIMIT ?`
-		return stmt, append(scopeArgs, match, scanCap+1), scanCap
+		return stmt, append(narrowArgs, match, scanCap+1), scanCap
 	}
 
-	innerScope := ""
-	if scopeJoin != "" {
-		innerScope = `
-			JOIN playable_item pi ON pi.id = search_fts.rowid` + scopeJoin
+	// Guarded rather than joined unconditionally: with nothing to narrow, the inner
+	// query is a pure FTS scan, and a rowid join per candidate row would be wasted
+	// work on the common capped path. Guarded on the fragment rather than on the
+	// inputs that produced it, so adding a narrowing dimension cannot leave the
+	// statement and its binds disagreeing about whether pi is joined.
+	innerNarrow := ""
+	if narrow != "" {
+		innerNarrow = `
+			JOIN playable_item pi ON pi.id = search_fts.rowid` + narrow
 	}
 	stmt := `SELECT ` + searchDisplayCols + `, c.score AS score
 		FROM (SELECT search_fts.rowid AS rid, ` + searchBM25 + ` AS score
-			FROM search_fts` + innerScope + `
+			FROM search_fts` + innerNarrow + `
 			WHERE search_fts MATCH ?
 			ORDER BY search_fts.rowid DESC
 			LIMIT ?) c
 		JOIN playable_item pi ON pi.id = c.rid` + searchDisplayJoins + `
 		ORDER BY score, pi.pid
 		LIMIT ?`
-	return stmt, append(scopeArgs, match, maxCandidates+1, scanCap+1), scanCap
+	return stmt, append(narrowArgs, match, maxCandidates+1, scanCap+1), scanCap
 }
 
 // Search runs a grouped, BM25-ranked metadata search. It queries the metadata FTS
@@ -132,8 +177,10 @@ func searchStmt(match string, limit, maxCandidates int, libIDs []int64) (string,
 // artist entities to Albums and Artists (best score wins, ties broken by scan
 // order). Episode metadata hits land in Episodes, with transcript-body hits
 // appended after them. A query with no usable tokens returns an empty result,
-// not an error. opt.MaxCandidates bounds the match pool and opt.Libraries scopes
-// it (see read.SearchOptions for both contracts).
+// not an error. opt.MaxCandidates bounds the match pool, while opt.Libraries and
+// opt.States narrow it (see read.SearchOptions for all three contracts). Because
+// the entity groups are derived from matched item rows, an item-level narrowing
+// carries into Artists and Albums for free.
 func (s *Store) Search(ctx context.Context, queryStr string, opt read.SearchOptions) (*read.SearchResult, error) {
 	const op = "store.Search"
 	res := &read.SearchResult{Query: queryStr}
@@ -149,12 +196,15 @@ func (s *Store) Search(ctx context.Context, queryStr string, opt read.SearchOpti
 	if err != nil {
 		return nil, err
 	}
+	if err := checkItemStates(opt.States, op); err != nil {
+		return nil, err
+	}
 
 	// Both limits fetch one past their cap so a full result set signals truncation
 	// (a spent candidate pool or a spent ranked-row scan alike) rather than
 	// silently dropping matches. score is tie-broken by pid so equal-score rows
 	// come back in a stable, deterministic order.
-	stmt, args, cap := searchStmt(match, limit, opt.MaxCandidates, libIDs)
+	stmt, args, cap := searchStmt(match, limit, opt.MaxCandidates, libIDs, opt.States)
 	rows, err := s.read.QueryContext(ctx, stmt, args...)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
@@ -229,7 +279,7 @@ func (s *Store) Search(ctx context.Context, queryStr string, opt read.SearchOpti
 	// a title match outranks a body match. Episodes already surfaced by metadata are
 	// skipped to avoid duplicates.
 	if len(res.Episodes) < limit {
-		if err := s.searchTranscripts(ctx, match, limit, opt.MaxCandidates, libIDs, episodeSeen, res); err != nil {
+		if err := s.searchTranscripts(ctx, match, limit, opt.MaxCandidates, libIDs, opt.States, episodeSeen, res); err != nil {
 			return nil, err
 		}
 	}
@@ -240,36 +290,40 @@ func (s *Store) Search(ctx context.Context, queryStr string, opt read.SearchOpti
 // transcript FTS, skipping episodes already in the Episodes group. It over-fetches
 // by the already-seen count so that when a term also matches many episode titles,
 // the top transcript rows being already-seen does not starve transcript-only hits
-// that have room in the group. It honors both search knobs: a library scope keeps
+// that have room in the group. It honors every search knob: a library scope keeps
 // a transcript hit from leaking an episode whose file lives outside the scope
-// (an undownloaded one included), and a candidate cap bounds the ranked pool with
-// the same rowid-DESC recency bias (transcript_fts rowids follow transcript
-// insertion order). Exhausting the transcript pool does not set Truncated; the
-// small Episodes group cap already bounds what a fuller pool could add.
-func (s *Store) searchTranscripts(ctx context.Context, match string, limit, maxCandidates int, libIDs []int64, seen map[model.PID]bool, res *read.SearchResult) error {
+// (an undownloaded one included), a state narrowing does the same for an episode
+// the caller excluded, and a candidate cap bounds the ranked pool with the same
+// rowid-DESC recency bias (transcript_fts rowids follow transcript insertion
+// order). Exhausting the transcript pool does not set Truncated; the small
+// Episodes group cap already bounds what a fuller pool could add.
+func (s *Store) searchTranscripts(ctx context.Context, match string, limit, maxCandidates int, libIDs []int64, states []model.ItemState, seen map[model.PID]bool, res *read.SearchResult) error {
 	const op = "store.Search"
-	scopeJoin, scopeArgs := searchScopeJoin(libIDs)
+	narrow, narrowArgs := searchNarrow(libIDs, states)
 	var stmt string
 	var args []any
 	if maxCandidates <= 0 {
 		stmt = `SELECT pi.pid, pi.title, p.title, bm25(transcript_fts) AS score
 		 FROM transcript_fts
-		 JOIN playable_item pi ON pi.id = transcript_fts.episode_id
+		 JOIN playable_item pi ON pi.id = transcript_fts.episode_id` + narrow + `
 		 JOIN episode e ON e.item_id = pi.id
-		 JOIN podcast p ON p.id = e.podcast_id` + scopeJoin + `
+		 JOIN podcast p ON p.id = e.podcast_id
 		 WHERE transcript_fts MATCH ?
 		 ORDER BY score, pi.pid
 		 LIMIT ?`
-		args = append(scopeArgs, match, limit+len(seen))
+		args = append(narrowArgs, match, limit+len(seen))
 	} else {
-		innerScope := ""
-		if scopeJoin != "" {
-			innerScope = `
-			JOIN playable_item pi ON pi.id = transcript_fts.episode_id` + scopeJoin
+		innerNarrow := ""
+		if narrow != "" {
+			innerNarrow = `
+			JOIN playable_item pi ON pi.id = transcript_fts.episode_id` + narrow
 		}
+		// The inner LIMIT is maxCandidates, not maxCandidates+1, unlike the metadata
+		// rung: this rung never reports pool exhaustion, so it has no probe row to
+		// fetch. The asymmetry is deliberate rather than an oversight.
 		stmt = `SELECT pi.pid, pi.title, p.title, c.score AS score
 		 FROM (SELECT transcript_fts.episode_id AS eid, bm25(transcript_fts) AS score
-			FROM transcript_fts` + innerScope + `
+			FROM transcript_fts` + innerNarrow + `
 			WHERE transcript_fts MATCH ?
 			ORDER BY transcript_fts.rowid DESC
 			LIMIT ?) c
@@ -278,7 +332,7 @@ func (s *Store) searchTranscripts(ctx context.Context, match string, limit, maxC
 		 JOIN podcast p ON p.id = e.podcast_id
 		 ORDER BY score, pi.pid
 		 LIMIT ?`
-		args = append(scopeArgs, match, maxCandidates, limit+len(seen))
+		args = append(narrowArgs, match, maxCandidates, limit+len(seen))
 	}
 	rows, err := s.read.QueryContext(ctx, stmt, args...)
 	if err != nil {

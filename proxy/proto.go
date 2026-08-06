@@ -40,7 +40,10 @@ import (
 // Version 6 added EnrichParams.WriteTags: a version-5 server drops it and runs
 // without the on-disk write-back, so a client that asked for durable enrichment
 // silently gets values the next rescan clears.
-const ProtocolVersion = 6
+// Version 7 added mark_missing: a version-6 server does not implement it, so a
+// client that recorded a vanished file would leave the catalog claiming the bytes
+// are still there and keep handing the same doomed work back out.
+const ProtocolVersion = 7
 
 // Method names for the proxied operations: the fast request/response catalog
 // mutations, the reads a mutating command needs for its confirmation output, the
@@ -67,6 +70,7 @@ const (
 	MethodCreateUser       = "create_user"
 	MethodUsers            = "users"
 	MethodMerge            = "merge"
+	MethodMarkMissing      = "mark_missing"
 	MethodSetRating        = "set_rating"
 	MethodSetStar          = "set_star"
 	MethodSetEntityStar    = "set_entity_star"
@@ -371,6 +375,22 @@ type EntityRatingParams struct {
 	EntityPID string `json:"entityPid"`
 	Rating    *int   `json:"rating"`
 	AsOfNS    int64  `json:"asOfNs,string,omitempty"`
+}
+
+// MarkMissingParams is the mark_missing request payload. Force skips the server's
+// on-disk verification, for a client whose own view of the filesystem is the
+// authoritative one (one in a different container, say, whose mounts differ from
+// the server's).
+type MarkMissingParams struct {
+	ItemPID string `json:"itemPid"`
+	Force   bool   `json:"force,omitempty"`
+}
+
+// MarkMissingResult is the mark_missing result payload: what the call did, or why
+// it did nothing. It carries the outcome rather than a bool because the refusals
+// differ in what they tell the caller to do next (see model.MarkMissingOutcome).
+type MarkMissingResult struct {
+	Outcome string `json:"outcome"`
 }
 
 // PlayStateChangeResult is the result payload for the star/rating methods

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -332,6 +333,44 @@ func TestServeProxiedChangedBool(t *testing.T) {
 	// The refused frame must not have unstarred the item.
 	if st, err := c.PlayState(ctx, "", pid); err != nil || !st.Starred {
 		t.Fatalf("play state after the refused v4 unstar = %+v (err %v), want still starred", st, err)
+	}
+}
+
+// TestServeProxiedMarkMissing drives mark_missing over the wire, which is the point
+// of proxying it at all: the server holds the write lock, so a client that finds a
+// vanished file has no other way to tell the catalog while `waxbin serve` is up. The
+// verification runs on the server's filesystem, so the refusal travels too.
+func TestServeProxiedMarkMissing(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	sock := testsock.Path(t)
+	path := filepath.Join(root, "song.mp3")
+	writeFile(t, path, testaudio.BuildMP3("Original", "Old Artist", "Album", 1))
+
+	lib := openServed(t, ctx, db, root, sock)
+	pid := itemPIDByTitle(t, ctx, lib, "Original")
+	c := dialWhenReady(t, sock)
+
+	outcome, err := c.MarkMissing(ctx, pid, false)
+	if err != nil {
+		t.Fatalf("proxied mark with the file present: %v", err)
+	}
+	if outcome != model.OutcomeFilesPresent {
+		t.Fatalf("outcome = %q, want files-present", outcome)
+	}
+
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if outcome, err = c.MarkMissing(ctx, pid, false); err != nil || outcome != model.OutcomeMarked {
+		t.Fatalf("proxied mark after deletion = %q (err %v), want marked", outcome, err)
+	}
+	if st := stateOf(t, ctx, lib, pid); st != model.StateMissing {
+		t.Fatalf("state = %q, want missing", st)
+	}
+	if outcome, err = c.MarkMissing(ctx, pid, true); err != nil || outcome != model.OutcomeAlreadyMissing {
+		t.Fatalf("proxied forced re-mark = %q (err %v), want already-missing", outcome, err)
 	}
 }
 

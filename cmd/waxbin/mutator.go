@@ -216,6 +216,13 @@ func (m *mutator) MergeMany(ctx context.Context, et model.MergeEntity, survivor 
 	return m.lib.MergeMany(ctx, et, survivor, losers)
 }
 
+func (m *mutator) MarkMissing(ctx context.Context, itemPID model.PID, force bool) (model.MarkMissingOutcome, error) {
+	if m.px != nil {
+		return m.px.MarkMissing(ctx, itemPID, force)
+	}
+	return m.lib.MarkMissing(ctx, itemPID, waxbin.MarkMissingOptions{Force: force})
+}
+
 // The four star/rating mutations report whether they changed anything. The commands
 // discard it: each re-reads and prints the resulting state, and a no-op is silent by
 // convention.

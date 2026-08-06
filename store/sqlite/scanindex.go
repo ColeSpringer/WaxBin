@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"errors"
 
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/waxerr"
@@ -191,6 +192,68 @@ func (s *Store) MarkFilesMissing(ctx context.Context, filePIDs []model.PID) (int
 		return 0, err
 	}
 	return marked, nil
+}
+
+// MarkItemMissing marks one item missing by pid, whatever its files say, and is the
+// sole authority on the state rule the whole verb obeys. A present item flips and
+// emits an item delta; a missing one is a no-op, the same idempotence MarkFilesMissing
+// has. An unknown pid is CodeNotFound.
+//
+// Archived and remote are refused rather than downgraded, which is the non-obvious
+// half of the contract. Both already say there are no local bytes, so missing would
+// add nothing, and archived carries the fact that the listener deleted the item:
+// rewriting it to missing would lose that and put the item back into every listing
+// that excludes archived.
+//
+// File rows and item_file edges are untouched, so a rescan that re-walks the files
+// restores present by the existing path.
+//
+// It marks exactly the item named, unlike MarkFilesMissing, which works from a file
+// set and so reaches every item backing those files. Where several items share one
+// file (a single-file rip carved into virtual tracks), marking one leaves its
+// siblings claiming present, so a caller repairing such a rip passes every pid. The
+// item-scoped rule is what lets the verb answer for an item with no files at all,
+// which is the drift case it exists to repair.
+func (s *Store) MarkItemMissing(ctx context.Context, itemPID model.PID) (model.MarkMissingOutcome, error) {
+	const op = "store.MarkItemMissing"
+	var outcome model.MarkMissingOutcome
+	err := s.writeTx(ctx, func(tx *sql.Tx) error {
+		var id int64
+		var state string
+		err := tx.QueryRowContext(ctx,
+			"SELECT id, state FROM playable_item WHERE pid = ?", string(itemPID)).Scan(&id, &state)
+		if errors.Is(err, sql.ErrNoRows) {
+			return waxerr.New(waxerr.CodeNotFound, op, "no such item: "+string(itemPID))
+		}
+		if err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		switch model.ItemState(state) {
+		case model.StateMissing:
+			outcome = model.OutcomeAlreadyMissing
+			return nil
+		case model.StateArchived:
+			outcome = model.OutcomeArchived
+			return nil
+		case model.StateRemote:
+			outcome = model.OutcomeRemote
+			return nil
+		}
+		if _, err := tx.ExecContext(ctx,
+			"UPDATE playable_item SET state = ?, updated_at = ? WHERE id = ?",
+			string(model.StateMissing), nowNS(), id); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		if err := appendChange(ctx, tx, "item", itemPID, model.OpUpdate); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		outcome = model.OutcomeMarked
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	return outcome, nil
 }
 
 // fileIDSet resolves file PIDs to a set of internal file ids, chunking the lookup so

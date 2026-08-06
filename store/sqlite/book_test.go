@@ -561,6 +561,99 @@ func TestPromotePrimaryOnDetach(t *testing.T) {
 	}
 }
 
+// TestArchivedBookShedsItsDuration pins that a book losing its last part sheds its
+// denormalized total the way the entity rollups on the same path shed theirs. Left
+// stale, the book reads back with a running time it no longer has and `db verify`
+// reports drift a rescan cannot clear, since the file it would re-read is gone.
+func TestArchivedBookShedsItsDuration(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	r1 := putBook(t, st, lib.ID, bookSpec{
+		path: "/lib/b/p1.mp3", essence: "ad1", content: "ac1", title: "Tome", author: "Auth",
+		asin: "AD", position: 1, durationMS: 1000,
+	})
+	r2 := putBook(t, st, lib.ID, bookSpec{
+		path: "/lib/b/p2.mp3", essence: "ad2", content: "ac2", title: "Tome", author: "Auth",
+		asin: "AD", position: 2, durationMS: 2000,
+	})
+
+	// One part gone: the book survives, and its total is the surviving part alone.
+	if err := st.DetachFile(ctx, r1.FilePID); err != nil {
+		t.Fatalf("detach p1: %v", err)
+	}
+	d, err := st.BookByPID(ctx, r1.ItemPID)
+	if err != nil {
+		t.Fatalf("BookByPID: %v", err)
+	}
+	if d.TotalDurationMS != 2000 {
+		t.Errorf("total after losing p1 = %d, want 2000", d.TotalDurationMS)
+	}
+
+	// Last part gone: the book is archived with no parts, so its total is 0.
+	if err := st.DetachFile(ctx, r2.FilePID); err != nil {
+		t.Fatalf("detach p2: %v", err)
+	}
+	if s := itemState(t, st, r1.ItemPID); s != string(model.StateArchived) {
+		t.Fatalf("book state = %q, want archived", s)
+	}
+	if d, err = st.BookByPID(ctx, r1.ItemPID); err != nil {
+		t.Fatalf("BookByPID after archive: %v", err)
+	}
+	if d.TotalDurationMS != 0 {
+		t.Errorf("archived book total = %d, want 0 (it has no parts left)", d.TotalDurationMS)
+	}
+
+	rep, err := st.VerifyDerived(ctx)
+	if err != nil {
+		t.Fatalf("VerifyDerived: %v", err)
+	}
+	if rep.BookDurationDrift != 0 {
+		t.Errorf("book-duration drift = %d, want 0", rep.BookDurationDrift)
+	}
+}
+
+// TestRefreshRollupsRepairsBookDuration covers the other half: a catalog that already
+// drifted, which is every catalog written before the detach path refreshed the total.
+// `db verify --fix` runs RefreshRollups, and without this it reported drift it could
+// not clear.
+func TestRefreshRollupsRepairsBookDuration(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	r := putBook(t, st, lib.ID, bookSpec{
+		path: "/lib/b/p1.mp3", essence: "rr1", content: "rc1", title: "Tome", author: "Auth",
+		asin: "RR", position: 1, durationMS: 1000,
+	})
+	if _, err := st.write.ExecContext(ctx,
+		"UPDATE book SET total_duration_ms = 999999 WHERE item_id = (SELECT id FROM playable_item WHERE pid = ?)",
+		string(r.ItemPID)); err != nil {
+		t.Fatalf("stage the drift: %v", err)
+	}
+	rep, err := st.VerifyDerived(ctx)
+	if err != nil {
+		t.Fatalf("VerifyDerived: %v", err)
+	}
+	if rep.BookDurationDrift != 1 {
+		t.Fatalf("staged drift = %d, want 1", rep.BookDurationDrift)
+	}
+
+	if err := st.RefreshRollups(ctx); err != nil {
+		t.Fatalf("RefreshRollups: %v", err)
+	}
+	if rep, err = st.VerifyDerived(ctx); err != nil {
+		t.Fatalf("VerifyDerived after repair: %v", err)
+	}
+	if rep.BookDurationDrift != 0 {
+		t.Errorf("drift after --fix = %d, want 0", rep.BookDurationDrift)
+	}
+	d, err := st.BookByPID(ctx, r.ItemPID)
+	if err != nil {
+		t.Fatalf("BookByPID: %v", err)
+	}
+	if d.TotalDurationMS != 1000 {
+		t.Errorf("repaired total = %d, want 1000", d.TotalDurationMS)
+	}
+}
+
 func TestZeroDurationPartAdvancesTimeline(t *testing.T) {
 	st, lib := entityFixture(t)
 	ctx := context.Background()
