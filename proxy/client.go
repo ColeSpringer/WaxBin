@@ -336,6 +336,21 @@ func (c *Client) SetStar(ctx context.Context, userPID, itemPID model.PID, starre
 	return res.Changed, err
 }
 
+// SetPlayed proxies setting a user's played and finished flags for an item
+// directly, and optionally its play count (nil keeps it, &0 resets it, &n sets
+// it). asOf (nil = server now) is the recorded change time and orders a replay by
+// recorded-time last-writer-wins; an interactive un-mark passes nil. It reports
+// whether the write changed anything; see SetRating.
+func (c *Client) SetPlayed(ctx context.Context, userPID, itemPID model.PID,
+	played, finished bool, playCount *int, asOf *int64) (bool, error) {
+	var res PlayStateChangeResult
+	err := c.call(ctx, MethodSetPlayed, SetPlayedParams{
+		UserPID: string(userPID), ItemPID: string(itemPID), Played: played, Finished: finished,
+		PlayCount: playCount, AsOfNS: asOfToWire(asOf),
+	}, &res)
+	return res.Changed, err
+}
+
 // SetEntityStar proxies starring or unstarring a catalog entity (artist/release_group/
 // album/genre) for a user. asOf (nil = server now) is the recorded flip time; it travels
 // as asOfNs and orders a replayed toggle by recorded-time last-writer-wins, matching

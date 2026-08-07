@@ -3,6 +3,9 @@
 -- transaction, in filename order: the numeric prefix puts FK targets ahead of
 -- their referrers and carries no version meaning. Post-1.0 schema changes land
 -- as new NNNN_*.sql migrations.
+-- Until then it is edited in place, and a catalog created from an earlier version
+-- of it is refused at open rather than migrated (the store fingerprints this
+-- baseline and stamps it into the catalog), so a schema change costs a rebuild.
 
 -- Registered library roots. A file belongs to exactly one library; roots are
 -- validated non-overlapping at config time. media is what a managed root

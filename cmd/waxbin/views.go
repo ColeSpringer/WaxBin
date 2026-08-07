@@ -334,6 +334,7 @@ type playStateView struct {
 	LastProgressAt   int64 `json:"lastProgressAt,string,omitempty"`
 	RatingChangedAt  int64 `json:"ratingChangedAt,string,omitempty"`
 	StarredChangedAt int64 `json:"starredChangedAt,string,omitempty"`
+	PlayedChangedAt  int64 `json:"playedChangedAt,string,omitempty"`
 }
 
 func toPlayStateView(st *model.PlayState) playStateView {
@@ -342,6 +343,7 @@ func toPlayStateView(st *model.PlayState) playStateView {
 		Finished: st.Finished, PlayCount: st.PlayCount, Starred: st.Starred,
 		LastPlayedAt: st.LastPlayedAt, LastProgressAt: st.LastProgressAt,
 		RatingChangedAt: st.RatingChangedAt, StarredChangedAt: st.StarredChangedAt,
+		PlayedChangedAt: st.PlayedChangedAt,
 	}
 	if st.HasRating {
 		r := st.Rating

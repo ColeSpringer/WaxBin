@@ -359,6 +359,18 @@ func (l *Library) proxyHandlers() map[string]proxy.Handler {
 			}
 			return nil, l.playback.MarkPlayed(ctx, model.PID(p.UserPID), model.PID(p.ItemPID), p.Finished)
 		},
+		proxy.MethodSetPlayed: func(ctx context.Context, raw json.RawMessage) (any, error) {
+			p, err := decodeParams[proxy.SetPlayedParams](raw)
+			if err != nil {
+				return nil, err
+			}
+			changed, err := l.playback.SetPlayed(ctx, model.PID(p.UserPID), model.PID(p.ItemPID),
+				p.Played, p.Finished, p.PlayCount, proxy.AsOf(p.AsOfNS))
+			if err != nil {
+				return nil, err
+			}
+			return proxy.PlayStateChangeResult{Changed: changed}, nil
+		},
 		proxy.MethodSetProgress: func(ctx context.Context, raw json.RawMessage) (any, error) {
 			p, err := decodeParams[proxy.ProgressParams](raw)
 			if err != nil {

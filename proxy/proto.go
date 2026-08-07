@@ -43,7 +43,8 @@ import (
 // Version 7 added mark_missing: a version-6 server does not implement it, so a
 // client that recorded a vanished file would leave the catalog claiming the bytes
 // are still there and keep handing the same doomed work back out.
-const ProtocolVersion = 7
+// Version 8 added set_played.
+const ProtocolVersion = 8
 
 // Method names for the proxied operations: the fast request/response catalog
 // mutations, the reads a mutating command needs for its confirmation output, the
@@ -76,6 +77,7 @@ const (
 	MethodSetEntityStar    = "set_entity_star"
 	MethodSetEntityRating  = "set_entity_rating"
 	MethodMarkPlayed       = "mark_played"
+	MethodSetPlayed        = "set_played"
 	MethodSetProgress      = "set_progress"
 	MethodPlayState        = "play_state"
 	MethodProvenance       = "provenance"
@@ -432,6 +434,19 @@ type PlayedParams struct {
 	UserPID  string `json:"userPid"`
 	ItemPID  string `json:"itemPid"`
 	Finished bool   `json:"finished"`
+}
+
+// SetPlayedParams is the set_played request payload: played/finished set directly
+// rather than incremented. PlayCount is nil to keep the stored count, &0 to reset
+// it, &n to set it exactly. AsOfNS is the optional recorded-time stamp (see
+// asOfToWire); the result is a PlayStateChangeResult.
+type SetPlayedParams struct {
+	UserPID   string `json:"userPid"`
+	ItemPID   string `json:"itemPid"`
+	Played    bool   `json:"played"`
+	Finished  bool   `json:"finished"`
+	PlayCount *int   `json:"playCount,omitempty"`
+	AsOfNS    int64  `json:"asOfNs,string,omitempty"`
 }
 
 // ProgressParams is the set_progress request payload.

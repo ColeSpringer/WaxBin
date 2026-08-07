@@ -2,7 +2,13 @@ package main
 
 import (
 	"fmt"
+	"os"
+	"strings"
+	"time"
 
+	"github.com/colespringer/waxbin/config"
+	"github.com/colespringer/waxbin/port"
+	"github.com/colespringer/waxbin/store/sqlite"
 	"github.com/colespringer/waxbin/waxerr"
 	"github.com/spf13/cobra"
 )
@@ -12,8 +18,194 @@ func newDBCmd(g *globals) *cobra.Command {
 		Use:   "db",
 		Short: "Database maintenance",
 	}
-	db.AddCommand(newDBVerifyCmd(g), newDBVacuumCmd(g), newDBMigrateCmd(g), newDBReSealSecretsCmd(g))
+	db.AddCommand(newDBVerifyCmd(g), newDBVacuumCmd(g), newDBMigrateCmd(g), newDBResetCmd(g),
+		newDBReSealSecretsCmd(g))
 	return db
+}
+
+// newDBResetCmd is the recovery a stale-baseline refusal names. It works at the
+// file level first because the catalog it resets is the one that will not open.
+func newDBResetCmd(g *globals) *cobra.Command {
+	var yes bool
+	cmd := &cobra.Command{
+		Use:   "reset",
+		Short: "Move the catalog aside and create an empty one",
+		Long: "Renames the catalog (and its WAL/shm sidecars) to a .stale-<ts>.bak copy " +
+			"and creates a fresh one in its place. This is the recovery for a catalog built " +
+			"from an older schema baseline, which pre-1.0 is edited in place rather than " +
+			"migrated. It discards every play position, rating, star, playlist, curation " +
+			"edit, podcast subscription and trash entry; only what is on disk comes back, " +
+			"and only through `waxbin rebuild`. The previous catalog is renamed rather than " +
+			"deleted, so a mis-fire is recoverable.",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if g.readOnly {
+				return waxerr.New(waxerr.CodeInvalid, "db reset", "cannot reset in --read-only mode")
+			}
+			cfg, err := g.loadConfig(cmd)
+			if err != nil {
+				return err
+			}
+			if !yes {
+				return waxerr.New(waxerr.CodeInvalid, "db reset",
+					"this discards all catalog state that is not on disk; pass --yes to confirm")
+			}
+
+			if err := ensureNoCatalogOwner(cfg.DBPath); err != nil {
+				return err
+			}
+
+			// Best-effort: a file too broken to census still resets, it just reports less.
+			census, _ := port.ReadCensus(ctx(cmd), cfg.DBPath)
+
+			moved, err := moveCatalogAside(cfg.DBPath)
+			if err != nil {
+				return err
+			}
+
+			lib, _, err := g.open(cmd)
+			if err != nil {
+				// The catalog is already aside, so the failure has to name it: without
+				// the path every later command reports an uninitialized catalog, and the
+				// backup that makes a mis-fire recoverable is the one thing nobody knows
+				// to look for.
+				if moved != "" {
+					return waxerr.Wrapf(waxerr.CodeIO, "db reset", err,
+						"the previous catalog was saved to %s but the replacement could not be created; "+
+							"fix the cause and rename it back", moved)
+				}
+				return err
+			}
+			defer lib.Close()
+
+			// The open above re-registers the configured roots; anything else has to be
+			// re-added by hand.
+			var extraRoots []string
+			if census != nil {
+				extraRoots = rootsNotConfigured(census.Roots, cfg)
+			}
+
+			if g.jsonOut {
+				data := map[string]any{"dbPath": cfg.DBPath, "savedTo": moved, "next": "waxbin rebuild"}
+				if census != nil {
+					data["discardedUnknown"] = census.Partial
+					if !census.Partial {
+						data["discarded"] = map[string]int{
+							"items": census.Items, "playStates": census.PlayStates,
+							"playlists": census.Playlists, "podcasts": census.Podcasts,
+							"trashEntries": census.TrashEntries,
+						}
+					}
+					data["rootsNotInConfig"] = extraRoots
+				}
+				return printJSON(cmd, data)
+			}
+
+			w := out(cmd)
+			if moved == "" {
+				fmt.Fprintf(w, "Catalog created at %s (nothing to move aside)\n", cfg.DBPath)
+			} else {
+				fmt.Fprintf(w, "Catalog reset. Previous catalog saved to %s\n", moved)
+			}
+			switch {
+			case census == nil:
+			case census.Partial:
+				// Zeros here would read as "the catalog was empty", which is the one thing
+				// they do not mean.
+				fmt.Fprintln(w, "Discarded: contents unknown (the previous catalog could not be read)")
+			default:
+				fmt.Fprintf(w, "Discarded: %d items, %d play states, %d playlists, %d podcasts, %d trash entries\n",
+					census.Items, census.PlayStates, census.Playlists, census.Podcasts, census.TrashEntries)
+			}
+			if len(extraRoots) > 0 {
+				fmt.Fprintf(w, "Roots not in config (re-add with `waxbin library add`): %s\n",
+					strings.Join(extraRoots, ", "))
+			}
+			// rebuild, not scan: it adopts WAXBIN_ITEM_PID tags, so stamped items keep
+			// their original pid instead of minting a fresh one.
+			fmt.Fprintln(w, "Run: waxbin rebuild")
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&yes, "yes", false, "confirm discarding the catalog")
+	return cmd
+}
+
+// moveCatalogAside renames the catalog and its sidecars to a timestamped .bak set,
+// keeping the -wal/-shm suffixes so the saved files stay a readable trio. Returns
+// the new main-file path, or "" when there was no catalog to move.
+//
+// The set moves together or not at all, rolling back what it already renamed: the
+// -wal can hold commits the main file lacks, so a half-moved catalog would drop
+// them from the copy that exists to make a mis-fire recoverable.
+func moveCatalogAside(dbPath string) (string, error) {
+	// The stamp is second-granular and os.Rename overwrites silently, so a retry
+	// within the same second would replace the backup it just made with the empty
+	// catalog that followed it. Take the first free name instead.
+	base := fmt.Sprintf("%s.stale-%s", dbPath, time.Now().UTC().Format("20060102T150405Z"))
+	dest := base + ".bak"
+	for n := 2; ; n++ {
+		if _, err := os.Stat(dest); os.IsNotExist(err) {
+			break
+		}
+		dest = fmt.Sprintf("%s-%d.bak", base, n)
+	}
+	return moveCatalogTo(dbPath, dest)
+}
+
+// moveCatalogTo is moveCatalogAside with the destination supplied, so a test can
+// arrange a failure partway through the set.
+func moveCatalogTo(dbPath, dest string) (string, error) {
+	const op = "db reset"
+	if _, err := os.Stat(dbPath); err != nil {
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		return "", waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	var done [][2]string
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		src, dst := dbPath+suffix, dest+suffix
+		if _, err := os.Stat(src); err != nil {
+			continue
+		}
+		if err := os.Rename(src, dst); err != nil {
+			for _, d := range done {
+				_ = os.Rename(d[1], d[0])
+			}
+			return "", waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		done = append(done, [2]string{src, dst})
+	}
+	return dest, nil
+}
+
+// ensureNoCatalogOwner refuses the reset while another process owns the catalog:
+// renaming a live owner's file leaves it writing to a path nothing points at while
+// a fresh catalog appears beside it. It probes the flock rather than opening,
+// because an open would migrate and checkpoint the file this command is about to
+// preserve, and because only the flock tells a live owner from a lockfile a crash
+// left behind.
+func ensureNoCatalogOwner(dbPath string) error {
+	if _, err := os.Stat(dbPath); err != nil {
+		return nil
+	}
+	return sqlite.ProbeWriteLock(dbPath)
+}
+
+// rootsNotConfigured returns the catalog's roots that configuration does not name,
+// the ones a reset really loses.
+func rootsNotConfigured(catalogRoots []string, cfg *config.Config) []string {
+	configured := make(map[string]struct{}, len(cfg.Roots))
+	for _, r := range cfg.Roots {
+		configured[r.Path] = struct{}{}
+	}
+	var out []string
+	for _, r := range catalogRoots {
+		if _, ok := configured[r]; !ok {
+			out = append(out, r)
+		}
+	}
+	return out
 }
 
 func newDBReSealSecretsCmd(g *globals) *cobra.Command {

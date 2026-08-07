@@ -257,9 +257,10 @@ func TestServeProxiedEntityStar(t *testing.T) {
 	}
 }
 
-// TestServeProxiedChangedBool drives the changed bool of the four star/rating methods
-// over the wire: a real flip reports true, an immediate value-identical repeat reports
-// false, for both the item and the entity twins. It also pins why the protocol version
+// TestServeProxiedChangedBool drives the changed bool of the star/rating methods and
+// set_played over the wire: a real flip reports true, an immediate value-identical
+// repeat reports false, for both the item and the entity twins. It also pins why the
+// protocol version
 // had to move: a version-4 frame carries no result payload, which would decode as
 // changed=false and make every proxied write look like a no-op, so the server must refuse
 // it outright rather than answer it.
@@ -286,6 +287,14 @@ func TestServeProxiedChangedBool(t *testing.T) {
 	}
 	if changed, err := c.SetStar(ctx, "", pid, true, nil); err != nil || changed {
 		t.Fatalf("proxied re-star: changed=%v err=%v, want false", changed, err)
+	}
+
+	// set_played returns the same payload, so it rides the same assertion.
+	if changed, err := c.SetPlayed(ctx, "", pid, true, true, nil, nil); err != nil || !changed {
+		t.Fatalf("first proxied set_played: changed=%v err=%v, want true", changed, err)
+	}
+	if changed, err := c.SetPlayed(ctx, "", pid, true, true, nil, nil); err != nil || changed {
+		t.Fatalf("identical proxied set_played: changed=%v err=%v, want false", changed, err)
 	}
 
 	albumPID := albumPIDFromFacet(t, ctx, lib)

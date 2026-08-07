@@ -10,11 +10,11 @@ import (
 // optional played/rating/star signals for one item and user. It is the neutral shape
 // a concrete adapter maps a foreign export (a prior media server, a companion app)
 // into before handing it to a PlayStateImporter. The changed-at stamps (unix
-// nanoseconds, 0 = unknown) say when the star or rating last changed value on the
-// foreign side.
+// nanoseconds, 0 = unknown) say when the star, rating, or played/finished pair last
+// changed value on the foreign side.
 //
-// An adapter passes these stamps straight into SetStar/SetRating as their asOf
-// argument (the address of the changed-at field), and the engine then enforces
+// An adapter passes these stamps straight into SetStar/SetRating/SetPlayed as their
+// asOf argument (the address of the changed-at field), and the engine then enforces
 // recorded-time last-writer-wins: a record older than local state is skipped. The
 // comparison is the engine's once the adapter supplies the recorded time, so this
 // seam no longer holds the replay guard itself. The engine treats a 0 stamp (the
@@ -22,16 +22,20 @@ import (
 // against nothing, so an adapter can pass every record's stamp straight through
 // without special-casing the unknown ones.
 type PlayStateRecord struct {
-	UserPID          model.PID
-	ItemPID          model.PID
-	PositionMS       int64
-	Played           bool
+	UserPID    model.PID
+	ItemPID    model.PID
+	PositionMS int64
+	Played     bool
+	// Finished carries the second playback flag, since SetPlayed sets the pair
+	// together and an adapter with only Played would clear a finish it never read.
+	Finished         bool
 	HasRating        bool
 	Rating           int // 0..100 when HasRating
 	Starred          bool
 	LastPlayedNS     int64
 	RatingChangedNS  int64
 	StarredChangedNS int64
+	PlayedChangedNS  int64
 }
 
 // PlayStateImportResult tallies an import pass.

@@ -24,6 +24,7 @@ func newPodcastCmd(g *globals) *cobra.Command {
 		newPodcastEpisodeCmd(g),
 		newPodcastSyncCmd(g),
 		newPodcastDownloadCmd(g),
+		newPodcastUnfetchCmd(g),
 		newPodcastTranscriptCmd(g),
 		newPodcastAuthCmd(g),
 		newPodcastRetentionCmd(g),
@@ -459,6 +460,43 @@ func newPodcastDownloadCmd(g *globals) *cobra.Command {
 			if res.Transcript {
 				fmt.Fprintln(out(cmd), "Transcript stored.")
 			}
+			return nil
+		},
+	}
+}
+
+func newPodcastUnfetchCmd(g *globals) *cobra.Command {
+	return &cobra.Command{
+		Use:   "unfetch <episode-pid>",
+		Short: "Delete a downloaded episode's audio, returning it to remote",
+		Long: "Reclaims one downloaded episode's bytes and returns the episode to remote. " +
+			"The subscription, the episode, and its play state survive, so a re-download " +
+			"resumes where the listener left off. A pinned episode is reclaimed too (the pin " +
+			"exempts it from retention, not from an explicit unfetch, and stays set). An " +
+			"episode that is not downloaded is a no-op.",
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			lib, _, err := g.open(cmd)
+			if err != nil {
+				return err
+			}
+			defer lib.Close()
+			res, err := lib.Podcasts().Unfetch(ctx(cmd), model.PID(args[0]))
+			if err != nil {
+				return err
+			}
+			if g.jsonOut {
+				return printJSON(cmd, struct {
+					Episode   model.PID `json:"episode"`
+					Unfetched bool      `json:"unfetched"`
+					Bytes     int64     `json:"bytes"`
+				}{res.EpisodePID, res.Unfetched, res.ReclaimedBytes})
+			}
+			if !res.Unfetched {
+				fmt.Fprintln(out(cmd), "Episode is not downloaded; nothing to reclaim.")
+				return nil
+			}
+			fmt.Fprintf(out(cmd), "Unfetched %s, reclaimed %d bytes\n", res.EpisodePID, res.ReclaimedBytes)
 			return nil
 		},
 	}

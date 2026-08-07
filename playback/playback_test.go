@@ -80,6 +80,9 @@ func (f *fakeStore) SetRating(context.Context, model.PID, model.PID, *int, *int6
 func (f *fakeStore) SetStar(context.Context, model.PID, model.PID, bool, *int64) (bool, error) {
 	return false, nil
 }
+func (f *fakeStore) SetPlayed(context.Context, model.PID, model.PID, bool, bool, *int, *int64) (bool, error) {
+	return false, nil
+}
 func (f *fakeStore) AddBookmark(context.Context, model.PID, model.PID, int64, string) (model.PID, error) {
 	return "", nil
 }

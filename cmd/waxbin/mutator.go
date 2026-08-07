@@ -254,6 +254,14 @@ func (m *mutator) SetEntityRating(ctx context.Context, userPID model.PID, kind m
 	return m.lib.SetEntityRating(ctx, userPID, kind, entityPID, rating, asOf)
 }
 
+func (m *mutator) SetPlayed(ctx context.Context, userPID, itemPID model.PID,
+	played, finished bool, playCount *int, asOf *int64) (bool, error) {
+	if m.px != nil {
+		return m.px.SetPlayed(ctx, userPID, itemPID, played, finished, playCount, asOf)
+	}
+	return m.lib.Playback().SetPlayed(ctx, userPID, itemPID, played, finished, playCount, asOf)
+}
+
 func (m *mutator) MarkPlayed(ctx context.Context, userPID, itemPID model.PID, finished bool) error {
 	if m.px != nil {
 		return m.px.MarkPlayed(ctx, userPID, itemPID, finished)

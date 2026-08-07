@@ -198,8 +198,9 @@ const trashCols = `pid, item_pid, orig_path, orig_display, trash_path, trash_dis
 // TrashEntries lists trash journal rows, newest first. includeRestored controls
 // whether already-restored rows are returned; trashedBefore, when nonzero, keeps
 // only rows trashed strictly before that unix-ns instant (the age filter behind
-// EmptyTrash's OlderThan window); limit 0 = no cap. The filter scans without an
-// index on purpose: the journal is small and shrinks on purge.
+// EmptyTrash's OlderThan window); limit 0 = no cap. These filters scan without an
+// index on purpose: the journal is small and shrinks on purge. A lookup by item
+// pid is keyed rather than scanned; see ActiveTrashForItems.
 func (s *Store) TrashEntries(ctx context.Context, includeRestored bool, trashedBefore int64, limit int) ([]model.TrashEntry, error) {
 	const op = "store.TrashEntries"
 	q := "SELECT " + trashCols + " FROM trash WHERE 1=1"
@@ -245,6 +246,59 @@ func (s *Store) ActiveTrashByPID(ctx context.Context, trashPID model.PID) (*mode
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
 	return e, nil
+}
+
+// ActiveTrashForItems returns the restorable trash entries for each of the given
+// items, keyed by item pid, each item's entries newest first: the batched,
+// item-keyed twin of ActiveTrashByPID, served by the trash_item index.
+//
+// Items with nothing restorable and unknown pids are absent from the map rather
+// than mapped to an empty slice, so a present key is itself the answer and an item
+// purged between a delta page and this lookup is not an error. Entries rather than
+// a bool because a partly-trashed book needs each trash pid to restore, and Size is
+// the byte count the tombstone decision is about.
+func (s *Store) ActiveTrashForItems(ctx context.Context, itemPIDs []model.PID) (map[model.PID][]model.TrashEntry, error) {
+	const op = "store.ActiveTrashForItems"
+	if len(itemPIDs) == 0 {
+		return nil, nil
+	}
+	// chunkSlice splits the input as given, so without the dedup a repeated pid lands
+	// in two chunks and its entries are appended twice.
+	unique := uniquePIDs(itemPIDs)
+	out := make(map[model.PID][]model.TrashEntry)
+	err := chunkSlice(unique, idBatchSize, func(chunk []model.PID) error {
+		args := make([]any, 0, len(chunk))
+		for _, pid := range chunk {
+			// trash.item_pid is NOT NULL DEFAULT '', so an empty input would match
+			// every edge-less journal row.
+			if pid == "" {
+				continue
+			}
+			args = append(args, string(pid))
+		}
+		if len(args) == 0 {
+			return nil
+		}
+		rows, err := s.read.QueryContext(ctx,
+			"SELECT "+trashCols+" FROM trash WHERE restored_at IS NULL AND item_pid IN "+
+				placeholders(len(args))+" ORDER BY item_pid, trashed_at DESC", args...)
+		if err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			e, err := scanTrashEntry(rows)
+			if err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+			out[e.ItemPID] = append(out[e.ItemPID], *e)
+		}
+		return waxerr.Wrap(waxerr.CodeIO, op, rows.Err())
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // MarkTrashRestored marks an entry restored. It is a no-op (CodeNotFound) if the

@@ -27,6 +27,10 @@ type Store interface {
 	// replay. SetProgress and MarkPlayed always write, so neither returns it.
 	SetRating(ctx context.Context, userPID, itemPID model.PID, rating *int, asOf *int64) (bool, error)
 	SetStar(ctx context.Context, userPID, itemPID model.PID, starred bool, asOf *int64) (bool, error)
+	// SetPlayed sets played/finished directly, the undo MarkPlayed lacks, with the
+	// same asOf and changed-bool contract. playCount is three-way: nil keeps the
+	// stored count, &0 resets it, &n sets it exactly.
+	SetPlayed(ctx context.Context, userPID, itemPID model.PID, played, finished bool, playCount *int, asOf *int64) (bool, error)
 	PlayStateFor(ctx context.Context, userPID, itemPID model.PID) (*model.PlayState, error)
 	// PlayStatesForItems is the bulk read behind StatesForItems: every user's
 	// state for each given item, keyed by item pid, each slice ordered by user
@@ -158,6 +162,17 @@ func (s *Service) SetRating(ctx context.Context, userPID, itemPID model.PID, rat
 // stale replay).
 func (s *Service) SetStar(ctx context.Context, userPID, itemPID model.PID, starred bool, asOf *int64) (bool, error) {
 	return s.store.SetStar(ctx, userPID, itemPID, starred, asOf)
+}
+
+// SetPlayed sets a user's played and finished flags for an item directly, and
+// optionally its play count (nil keeps it, &0 resets it, &n sets it). asOf (unix
+// ns, nil = server now) records the change time so a replayed or imported change
+// orders by recorded-time last-writer-wins; an interactive un-mark passes nil, or
+// a client clock trailing the server drops it as stale. It reports whether the
+// write changed anything; false means no change-feed delta was appended.
+func (s *Service) SetPlayed(ctx context.Context, userPID, itemPID model.PID,
+	played, finished bool, playCount *int, asOf *int64) (bool, error) {
+	return s.store.SetPlayed(ctx, userPID, itemPID, played, finished, playCount, asOf)
 }
 
 // State returns a user's playback state for an item, overlaying any buffered (not

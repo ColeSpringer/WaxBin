@@ -29,6 +29,8 @@ type globals struct {
 	logLevel string
 	readOnly bool
 
+	allowStale bool
+
 	// maintConn holds the proxy connection of an in-progress maintenance-mode
 	// hand-off, kept open for the command's lifetime; closing it (in cleanup, or on
 	// process exit) tells the server to reopen. See openViaMaintenance.
@@ -49,6 +51,9 @@ func newRootCmd(g *globals) *cobra.Command {
 	pf.BoolVar(&g.jsonOut, "json", false, "emit JSON instead of text")
 	pf.StringVar(&g.logLevel, "log-level", "", "log level: debug|info|warn|error")
 	pf.BoolVar(&g.readOnly, "read-only", false, "open the catalog read-only")
+	pf.BoolVar(&g.allowStale, "allow-stale", false,
+		"read a catalog built from an older schema baseline instead of refusing it "+
+			"(read-only opens only; commands touching a changed table still fail)")
 
 	root.AddCommand(
 		newInitCmd(g),
@@ -163,6 +168,7 @@ func (g *globals) openLib(cmd *cobra.Command, forceReadOnly bool) (*waxbin.Libra
 	}
 	opts := waxbin.OptionsFromConfig(cfg, g.logger(cfg))
 	opts.ReadOnly = forceReadOnly || g.readOnly
+	opts.AllowStaleBaseline = g.allowStale
 	lib, err := waxbin.Open(cmd.Context(), opts)
 	if err != nil {
 		// A read-write open that conflicts with a running server: hand off through

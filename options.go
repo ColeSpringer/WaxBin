@@ -19,6 +19,10 @@ type Options struct {
 	Roots []config.Root
 	// ReadOnly opens without taking the write lock and forbids mutations.
 	ReadOnly bool
+	// AllowStaleBaseline opens a catalog built from an older schema baseline instead
+	// of refusing it, for best-effort salvage: read-only opens only, and a read
+	// touching a table the baseline edit changed still fails.
+	AllowStaleBaseline bool
 	// Logger receives structured logs; nil discards (the library never prints).
 	Logger *slog.Logger
 	// WriteOwner identifies this owner in the lockfile and job rows; defaulted

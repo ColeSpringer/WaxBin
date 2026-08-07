@@ -26,12 +26,19 @@ CREATE TABLE play_state (
   -- move updated_at instead: starring a half-heard episode from two years ago must
   -- not push it to the top of "where was I". NULL = never played or checkpointed.
   last_progress_at INTEGER,
-  -- Per-field change stamps for star and rating, bumped only when the stored
-  -- value actually changes (a clear included), so a sync adapter can order a
-  -- local change against a remote one. NULL = never changed. No index: a replay
-  -- guard compares against a row it already holds.
+  -- Per-field change stamps for star, rating, and played/finished, bumped only
+  -- when the stored value actually changes (a clear included), so a sync adapter
+  -- can order a local change against a remote one. NULL = never changed. No
+  -- index: a replay guard compares against a row it already holds.
+  --
+  -- played_changed_at exists because SetPlayed can move played and finished back
+  -- down, which lets a replayed offline "mark finished" resurrect a state the user
+  -- undid later elsewhere. Neither updated_at (moved by a checkpoint or a rating)
+  -- nor last_played_at (moved by the very play being undone) can stand in for it.
+  -- Unlike its neighbours it also moves on every play.
   rating_changed_at  INTEGER,
   starred_changed_at INTEGER,
+  played_changed_at  INTEGER,
   updated_at     INTEGER NOT NULL,
   PRIMARY KEY (user_id, item_id)
 );

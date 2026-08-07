@@ -95,7 +95,7 @@ func (s *Store) AllPlayStates(ctx context.Context) ([]model.PlayState, error) {
 	rows, err := s.read.QueryContext(ctx, `
 		SELECT u.pid, pi.pid, ps.position_ms, ps.played, ps.finished, ps.play_count,
 		       ps.rating, ps.starred_at, ps.last_played_at, ps.last_progress_at,
-		       ps.rating_changed_at, ps.starred_changed_at, ps.updated_at
+		       ps.rating_changed_at, ps.starred_changed_at, ps.played_changed_at, ps.updated_at
 		FROM play_state ps
 		JOIN user u ON u.id = ps.user_id
 		JOIN playable_item pi ON pi.id = ps.item_id
@@ -109,10 +109,10 @@ func (s *Store) AllPlayStates(ctx context.Context) ([]model.PlayState, error) {
 		var ps model.PlayState
 		var userPID, itemPID string
 		var rating sql.NullInt64
-		var starredAt, lastPlayed, lastProgress, ratingChanged, starredChanged sql.NullInt64
+		var starredAt, lastPlayed, lastProgress, ratingChanged, starredChanged, playedChanged sql.NullInt64
 		if err := rows.Scan(&userPID, &itemPID, &ps.PositionMS, &ps.Played, &ps.Finished,
 			&ps.PlayCount, &rating, &starredAt, &lastPlayed, &lastProgress,
-			&ratingChanged, &starredChanged, &ps.UpdatedAt); err != nil {
+			&ratingChanged, &starredChanged, &playedChanged, &ps.UpdatedAt); err != nil {
 			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		ps.UserPID, ps.ItemPID = model.PID(userPID), model.PID(itemPID)
@@ -120,6 +120,7 @@ func (s *Store) AllPlayStates(ctx context.Context) ([]model.PlayState, error) {
 		ps.StarredAt, ps.Starred = starredAt.Int64, starredAt.Valid
 		ps.LastPlayedAt, ps.LastProgressAt = lastPlayed.Int64, lastProgress.Int64
 		ps.RatingChangedAt, ps.StarredChangedAt = ratingChanged.Int64, starredChanged.Int64
+		ps.PlayedChangedAt = playedChanged.Int64
 		out = append(out, ps)
 	}
 	return out, rows.Err()

@@ -538,10 +538,18 @@ func TestPlayStateChangedAgreesWithDelta(t *testing.T) {
 	// Clearing a set rating is a change; re-clearing it is not.
 	step("clear set rating", func() (bool, error) { return st.SetRating(ctx, "", item, nil, ns(1500)) })
 	step("re-clear rating", func() (bool, error) { return st.SetRating(ctx, "", item, nil, ns(2000)) })
+
+	// Played/finished, whose stamp is still NULL on this row.
+	step("mark played @100", func() (bool, error) { return st.SetPlayed(ctx, "", item, true, true, nil, ns(100)) })
+	step("identical re-set @999", func() (bool, error) { return st.SetPlayed(ctx, "", item, true, true, nil, ns(999)) })
+	step("older un-mark @50", func() (bool, error) { return st.SetPlayed(ctx, "", item, false, false, nil, ns(50)) })
+	step("un-mark @999", func() (bool, error) { return st.SetPlayed(ctx, "", item, false, false, nil, ns(999)) })
+	// A count-only change is still a change.
+	step("reset count @1500", func() (bool, error) { return st.SetPlayed(ctx, "", item, false, false, ptrInt(0), ns(1500)) })
 }
 
-// TestStampsUntouchedByProgressAndPlays pins the stamp scope: checkpoints and
-// play counts never move the star/rating change stamps.
+// TestStampsUntouchedByProgressAndPlays pins the stamp scope: checkpoints, play
+// counts, and a played/finished change never move the star/rating change stamps.
 func TestStampsUntouchedByProgressAndPlays(t *testing.T) {
 	st, lib := entityFixture(t)
 	ctx := context.Background()
@@ -562,12 +570,15 @@ func TestStampsUntouchedByProgressAndPlays(t *testing.T) {
 	if err := st.MarkPlayed(ctx, "", item, true); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := st.SetPlayed(ctx, "", item, false, false, ptrInt(0), nil); err != nil {
+		t.Fatal(err)
+	}
 	after, _ := st.PlayStateFor(ctx, "", item)
 	if after.StarredChangedAt != before.StarredChangedAt || after.RatingChangedAt != before.RatingChangedAt {
 		t.Errorf("progress/play moved the stamps: %+v -> %+v", before, after)
 	}
-	if after.PositionMS != 42000 || after.PlayCount != 1 {
-		t.Errorf("progress/play state = %+v, want position 42000 and one play", after)
+	if after.PositionMS != 42000 || after.PlayCount != 0 || after.Played {
+		t.Errorf("progress/play state = %+v, want position 42000 and the play un-marked", after)
 	}
 }
 
@@ -610,13 +621,22 @@ func TestLastProgressStampedByPlaybackWritesOnly(t *testing.T) {
 	if _, err := st.SetStar(ctx, "", item, true, nil); err != nil {
 		t.Fatal(err)
 	}
+	// SetPlayed belongs with the star and the rating, not the playback writes:
+	// un-marking a play must not push the item back up the in-progress list.
+	if _, err := st.SetPlayed(ctx, "", item, false, false, nil, nil); err != nil {
+		t.Fatal(err)
+	}
 	afterMeta, _ := st.PlayStateFor(ctx, "", item)
 	if afterMeta.LastProgressAt != afterPlay.LastProgressAt {
-		t.Errorf("a star or a rating moved last_progress_at (%d -> %d)",
+		t.Errorf("a star, rating, or un-mark moved last_progress_at (%d -> %d)",
 			afterPlay.LastProgressAt, afterMeta.LastProgressAt)
 	}
+	if afterMeta.LastPlayedAt != afterPlay.LastPlayedAt {
+		t.Errorf("an un-mark moved last_played_at (%d -> %d)",
+			afterPlay.LastPlayedAt, afterMeta.LastPlayedAt)
+	}
 	if afterMeta.UpdatedAt <= afterPlay.UpdatedAt {
-		t.Errorf("a star or a rating did not move updated_at (%d -> %d)",
+		t.Errorf("a star, rating, or un-mark did not move updated_at (%d -> %d)",
 			afterPlay.UpdatedAt, afterMeta.UpdatedAt)
 	}
 }

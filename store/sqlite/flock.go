@@ -39,11 +39,7 @@ func acquireWriteLock(lockPath, owner, ipcSocket string, nowNS int64) (*writeLoc
 		return nil, waxerr.Wrap(waxerr.CodeIO, "sqlite.acquireWriteLock", err)
 	}
 	if !locked {
-		msg := "library is owned by another process"
-		if info, e := readOwnerInfo(lockPath); e == nil && info.Owner != "" {
-			msg += " (owner=" + info.Owner + ")"
-		}
-		return nil, waxerr.New(waxerr.CodeConflict, "sqlite.acquireWriteLock", msg)
+		return nil, ownedElsewhere(lockPath, "sqlite.acquireWriteLock")
 	}
 
 	// Record owner metadata. The advisory flock does not block this write, and
@@ -53,6 +49,35 @@ func acquireWriteLock(lockPath, owner, ipcSocket string, nowNS int64) (*writeLoc
 		_ = os.WriteFile(lockPath, data, 0o600)
 	}
 	return &writeLock{fl: fl, path: lockPath}, nil
+}
+
+// ownedElsewhere is the CodeConflict a held lock raises, naming the owner when the
+// lockfile metadata is readable.
+func ownedElsewhere(lockPath, op string) error {
+	msg := "library is owned by another process"
+	if info, e := readOwnerInfo(lockPath); e == nil && info.Owner != "" {
+		msg += " (owner=" + info.Owner + ")"
+	}
+	return waxerr.New(waxerr.CodeConflict, op, msg)
+}
+
+// ProbeWriteLock reports whether the catalog's write lock is free, taking it only
+// long enough to find out. It exists for commands that manipulate the catalog files
+// directly (db reset): a full Open would answer the same question but migrate,
+// reclaim jobs, seed the default user and checkpoint the WAL of the very file the
+// caller is about to preserve as its recovery copy.
+func ProbeWriteLock(dbPath string) error {
+	const op = "sqlite.ProbeWriteLock"
+	lockPath := dbPath + ".waxlock"
+	fl := flock.New(lockPath)
+	locked, err := fl.TryLock()
+	if err != nil {
+		return waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	if !locked {
+		return ownedElsewhere(lockPath, op)
+	}
+	return fl.Unlock()
 }
 
 // acquireWriteLockRetry is acquireWriteLock with bounded exponential backoff over

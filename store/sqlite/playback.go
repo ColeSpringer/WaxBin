@@ -27,18 +27,27 @@ func (s *Store) SetProgress(ctx context.Context, userPID, itemPID model.PID, pos
 }
 
 // MarkPlayed increments a user's play count for an item, sets it played (and
-// finished when finished is true), and stamps both last_played_at and
-// last_progress_at. It never touches the star/rating change stamps.
+// finished when finished is true), and stamps last_played_at, last_progress_at
+// and played_changed_at. It never touches the star/rating change stamps. It means
+// "a play happened, now", so it takes no asOf; replaying a recorded play is
+// SetPlayed's job.
+//
+// It stamps played_changed_at because a stamp that orders only one of the two
+// writers orders nothing. Monotonically, so a SetPlayed carrying a future-skewed
+// asOf cannot be regressed by the next play; the COALESCE is required because
+// SQLite's MAX() returns NULL if any argument is NULL, which would wipe the stamp
+// on an item's first play.
 func (s *Store) MarkPlayed(ctx context.Context, userPID, itemPID model.PID, finished bool) error {
 	_, err := s.playStateWrite(ctx, "store.MarkPlayed", userPID, itemPID, func(ctx context.Context, tx *sql.Tx, userID, itemID, now int64) (bool, error) {
 		_, err := tx.ExecContext(ctx,
-			`INSERT INTO play_state(user_id, item_id, played, finished, play_count, last_played_at, last_progress_at, updated_at)
-			 VALUES (?,?,1,?,1,?,?,?)
+			`INSERT INTO play_state(user_id, item_id, played, finished, play_count, last_played_at, last_progress_at, played_changed_at, updated_at)
+			 VALUES (?,?,1,?,1,?,?,?,?)
 			 ON CONFLICT(user_id, item_id) DO UPDATE SET
 			   played=1, finished=MAX(finished, excluded.finished), play_count=play_count+1,
 			   last_played_at=excluded.last_played_at, last_progress_at=excluded.last_progress_at,
+			   played_changed_at=MAX(COALESCE(played_changed_at, 0), excluded.played_changed_at),
 			   updated_at=excluded.updated_at`,
-			userID, itemID, boolInt(finished), now, now, now)
+			userID, itemID, boolInt(finished), now, now, now, now)
 		return true, err
 	})
 	return err
@@ -199,6 +208,108 @@ func (s *Store) SetStar(ctx context.Context, userPID, itemPID model.PID, starred
 	})
 }
 
+// SetPlayed sets a user's played and finished flags for an item directly, the
+// undo MarkPlayed lacks. A value-identical call is a silent no-op, and asOf works
+// exactly as it does for SetStar and SetRating, including the returned bool. It
+// leaves last_progress_at and last_played_at alone: un-marking a play is a state
+// edit, not playback. There is no entity twin (entity_play_state has no
+// played/finished columns) and no query field (a change stamp is sync plumbing).
+//
+// playCount: nil keeps the stored count, &0 resets it, &n sets it exactly. Without
+// it an un-mark would leave played=0 beside a play_count of 1 forever, and
+// play_count is indexed and orders `browse most-played`. nil alongside played=true
+// raises a zero count to 1, since the flag means the item was played at least once.
+//
+// One hazard the star and rating setters do not have: played_changed_at moves on
+// every play, stamped with the server clock, so a client whose clock trails the
+// server sends an asOf older than the play it is undoing and has its un-mark
+// dropped as stale. An interactive un-mark passes nil; asOf is for replaying
+// recorded history.
+func (s *Store) SetPlayed(ctx context.Context, userPID, itemPID model.PID,
+	played, finished bool, playCount *int, asOf *int64) (bool, error) {
+	const op = "store.SetPlayed"
+	// Both checks live here, not in the service, so the proxied path gets them too.
+	if playCount != nil && *playCount < 0 {
+		return false, waxerr.New(waxerr.CodeInvalid, op, "play count cannot be negative")
+	}
+	// Both flags are query fields, so a finished-but-unplayed row would make
+	// `played is 0` match items every UI renders as finished.
+	if !played && finished {
+		return false, waxerr.New(waxerr.CodeInvalid, op, "an item cannot be finished but not played")
+	}
+	// played means "played at least once", so it cannot be paired with an explicit
+	// zero count; that row would sort as never played in `browse most-played` and is
+	// unreachable through MarkPlayed. A caller zeroing the count is un-marking.
+	if played && playCount != nil && *playCount == 0 {
+		return false, waxerr.New(waxerr.CodeInvalid, op, "a played item cannot have a zero play count")
+	}
+	return s.playStateWrite(ctx, op, userPID, itemPID, func(ctx context.Context, tx *sql.Tx, userID, itemID, now int64) (bool, error) {
+		var curPlayed, curFinished, curCount int
+		var curChanged sql.NullInt64
+		err := tx.QueryRowContext(ctx,
+			"SELECT played, finished, play_count, played_changed_at FROM play_state WHERE user_id = ? AND item_id = ?",
+			userID, itemID).Scan(&curPlayed, &curFinished, &curCount, &curChanged)
+		noRow := errors.Is(err, sql.ErrNoRows)
+		if err != nil && !noRow {
+			return false, err
+		}
+		wantCount := curCount
+		if playCount != nil {
+			wantCount = *playCount
+		} else if played && wantCount == 0 {
+			// played means "played at least once", which MarkPlayed keeps true by
+			// incrementing. A caller that sets the flag without naming a count gets the
+			// smallest count consistent with it, rather than a played row that
+			// `browse most-played` sorts as never played.
+			wantCount = 1
+		}
+		if noRow {
+			// Clearing flags on an item with no state creates no row at all.
+			if !played && !finished && wantCount == 0 {
+				return false, nil
+			}
+			stamp := stampFor(asOf, now)
+			_, err := tx.ExecContext(ctx,
+				`INSERT INTO play_state(user_id, item_id, played, finished, play_count, played_changed_at, updated_at)
+				 VALUES (?,?,?,?,?,?,?)`,
+				userID, itemID, boolInt(played), boolInt(finished), wantCount, stamp, now)
+			return true, err
+		}
+		flagsChanged := curPlayed != boolInt(played) || curFinished != boolInt(finished)
+		if !flagsChanged && curCount == wantCount {
+			return false, nil
+		}
+		if staleReplay(asOf, curChanged.Int64, curChanged.Valid) {
+			return false, nil
+		}
+		// The stamp belongs to played/finished, so a count-only change leaves it
+		// alone: bumping it would let a count reset outrank a genuine flag change
+		// recorded earlier. When it does move it never moves backwards, for the reason
+		// MarkPlayed spells out - an interactive un-mark stamping at server-now must
+		// not undercut a future-skewed stamp a replay already stored.
+		stamp := nullableInt64(curChanged)
+		if flagsChanged {
+			if s := stampFor(asOf, now); !curChanged.Valid || s > curChanged.Int64 {
+				stamp = s
+			}
+		}
+		_, err = tx.ExecContext(ctx,
+			`UPDATE play_state SET played = ?, finished = ?, play_count = ?, played_changed_at = ?, updated_at = ?
+			 WHERE user_id = ? AND item_id = ?`,
+			boolInt(played), boolInt(finished), wantCount, stamp, now, userID, itemID)
+		return true, err
+	})
+}
+
+// nullableInt64 renders a NullInt64 as a query argument, so an unset column stays
+// NULL rather than being written as 0.
+func nullableInt64(v sql.NullInt64) any {
+	if !v.Valid {
+		return nil
+	}
+	return v.Int64
+}
+
 // playStateWrite resolves the user and item, runs the mutation, and emits the
 // play_state delta - the shared envelope for every per-user playback mutation.
 // A mutation reporting changed=false wrote nothing and stays silent: no delta is
@@ -264,13 +375,13 @@ func (s *Store) PlayStateFor(ctx context.Context, userPID, itemPID model.PID) (*
 	}
 	st := &model.PlayState{UserPID: userPID, ItemPID: itemPID}
 	var played, finished int
-	var rating, starredAt, lastPlayed, lastProgress, ratingChanged, starredChanged, updatedAt sql.NullInt64
+	var rating, starredAt, lastPlayed, lastProgress, ratingChanged, starredChanged, playedChanged, updatedAt sql.NullInt64
 	err = s.read.QueryRowContext(ctx,
 		`SELECT position_ms, played, finished, play_count, rating, starred_at, last_played_at,
-		        last_progress_at, rating_changed_at, starred_changed_at, updated_at
+		        last_progress_at, rating_changed_at, starred_changed_at, played_changed_at, updated_at
 		 FROM play_state WHERE user_id = ? AND item_id = ?`, userID, itemID).
 		Scan(&st.PositionMS, &played, &finished, &st.PlayCount, &rating, &starredAt, &lastPlayed,
-			&lastProgress, &ratingChanged, &starredChanged, &updatedAt)
+			&lastProgress, &ratingChanged, &starredChanged, &playedChanged, &updatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return st, nil
 	}
@@ -283,6 +394,7 @@ func (s *Store) PlayStateFor(ctx context.Context, userPID, itemPID model.PID) (*
 	st.LastPlayedAt, st.UpdatedAt = lastPlayed.Int64, updatedAt.Int64
 	st.LastProgressAt = lastProgress.Int64
 	st.RatingChangedAt, st.StarredChangedAt = ratingChanged.Int64, starredChanged.Int64
+	st.PlayedChangedAt = playedChanged.Int64
 	return st, nil
 }
 
@@ -311,7 +423,7 @@ func (s *Store) PlayStatesForItems(ctx context.Context, itemPIDs []model.PID) (m
 		rows, err := s.read.QueryContext(ctx,
 			`SELECT u.pid, pi.pid, ps.position_ms, ps.played, ps.finished, ps.play_count,
 			        ps.rating, ps.starred_at, ps.last_played_at, ps.last_progress_at,
-			        ps.rating_changed_at, ps.starred_changed_at, ps.updated_at
+			        ps.rating_changed_at, ps.starred_changed_at, ps.played_changed_at, ps.updated_at
 			 FROM play_state ps
 			 JOIN user u ON u.id = ps.user_id
 			 JOIN playable_item pi ON pi.id = ps.item_id
@@ -325,9 +437,10 @@ func (s *Store) PlayStatesForItems(ctx context.Context, itemPIDs []model.PID) (m
 			var ps model.PlayState
 			var userPID, itemPID string
 			var played, finished int
-			var rating, starredAt, lastPlayed, lastProgress, ratingChanged, starredChanged sql.NullInt64
+			var rating, starredAt, lastPlayed, lastProgress, ratingChanged, starredChanged, playedChanged sql.NullInt64
 			if err := rows.Scan(&userPID, &itemPID, &ps.PositionMS, &played, &finished, &ps.PlayCount,
-				&rating, &starredAt, &lastPlayed, &lastProgress, &ratingChanged, &starredChanged, &ps.UpdatedAt); err != nil {
+				&rating, &starredAt, &lastPlayed, &lastProgress, &ratingChanged, &starredChanged,
+				&playedChanged, &ps.UpdatedAt); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 			ps.UserPID, ps.ItemPID = model.PID(userPID), model.PID(itemPID)
@@ -336,6 +449,7 @@ func (s *Store) PlayStatesForItems(ctx context.Context, itemPIDs []model.PID) (m
 			ps.Starred, ps.StarredAt = starredAt.Valid, starredAt.Int64
 			ps.LastPlayedAt, ps.LastProgressAt = lastPlayed.Int64, lastProgress.Int64
 			ps.RatingChangedAt, ps.StarredChangedAt = ratingChanged.Int64, starredChanged.Int64
+			ps.PlayedChangedAt = playedChanged.Int64
 			out[ps.ItemPID] = append(out[ps.ItemPID], ps)
 		}
 		if err := rows.Err(); err != nil {

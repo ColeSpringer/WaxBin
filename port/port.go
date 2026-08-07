@@ -8,11 +8,13 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"strings"
 
 	"github.com/colespringer/waxbin/model"
+	"github.com/colespringer/waxbin/store/sqlite"
 	"github.com/colespringer/waxbin/waxerr"
 	_ "modernc.org/sqlite"
 )
@@ -28,7 +30,8 @@ const ExportFormat = "waxbin-export"
 // file no longer parses (the typed decode rejects the unquoted numbers),
 // accepted pre-release. Version 3 adds the item's MusicBrainz id and ISRC and is
 // purely additive: it parses identically under any consumer that handled version 2.
-const ExportVersion = 3
+// Version 4 adds the played/finished change stamp and is additive the same way.
+const ExportVersion = 4
 
 // Manifest is the versioned header of a logical export.
 type Manifest struct {
@@ -92,11 +95,11 @@ type ItemExport struct {
 }
 
 // PlayStateExport is one user's critical state for one item. The changed-at
-// stamps (unix nanoseconds, 0 = never changed) record when the star or rating
-// last changed value, so a consumer replaying an export can order it against
-// state it already holds. They are JSON-encoded as decimal strings (",string"):
-// ns epochs exceed IEEE-754 double precision, and an ordering token corrupted
-// by a double-based parser would misorder silently.
+// stamps (unix nanoseconds, 0 = never changed) record when the star, rating, or
+// played/finished pair last changed value, so a consumer replaying an export can
+// order it against state it already holds. They are JSON-encoded as decimal
+// strings (",string"): ns epochs exceed IEEE-754 double precision, and an
+// ordering token corrupted by a double-based parser would misorder silently.
 type PlayStateExport struct {
 	UserPID          string `json:"userPid"`
 	ItemPID          string `json:"itemPid"`
@@ -108,6 +111,7 @@ type PlayStateExport struct {
 	Starred          bool   `json:"starred,omitempty"`
 	RatingChangedNS  int64  `json:"ratingChangedNs,string,omitempty"`
 	StarredChangedNS int64  `json:"starredChangedNs,string,omitempty"`
+	PlayedChangedNS  int64  `json:"playedChangedNs,string,omitempty"`
 }
 
 // BuildSnapshot assembles a logical export from already-read data. relPathOf maps
@@ -140,6 +144,7 @@ func BuildSnapshot(schemaVersion int, createdAt int64, libs []*model.Library, it
 			UserPID: string(ps.UserPID), ItemPID: string(ps.ItemPID), PositionMS: ps.PositionMS,
 			Played: ps.Played, Finished: ps.Finished, PlayCount: ps.PlayCount, Starred: ps.Starred,
 			RatingChangedNS: ps.RatingChangedAt, StarredChangedNS: ps.StarredChangedAt,
+			PlayedChangedNS: ps.PlayedChangedAt,
 		}
 		if ps.HasRating {
 			r := ps.Rating
@@ -200,7 +205,13 @@ func RedactBackupFile(ctx context.Context, path string) error {
 }
 
 // ValidateBackup opens a backup read-only and returns its recorded schema
-// version, confirming it is a WaxBin catalog. A file that is not one is rejected.
+// version, confirming it is a WaxBin catalog built from the same schema baseline
+// as this build.
+//
+// The baseline check is not about protecting the target from a partial copy, which
+// Restore's temp-and-rename already covers. It closes the opposite risk: a fully
+// successful restore of an incompatible backup leaves a catalog the store refuses
+// to open.
 func ValidateBackup(ctx context.Context, path string) (int, error) {
 	const op = "port.ValidateBackup"
 	if _, err := os.Stat(path); err != nil {
@@ -211,12 +222,102 @@ func ValidateBackup(ctx context.Context, path string) (int, error) {
 		return 0, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
 	defer db.Close()
+	// schema_migrations first, so a file that is not a WaxBin catalog at all says so
+	// rather than reporting a baseline it was never going to match.
 	var v int
 	err = db.QueryRowContext(ctx, "SELECT COALESCE(MAX(version),0) FROM schema_migrations").Scan(&v)
 	if err != nil {
 		return 0, waxerr.Wrapf(waxerr.CodeInvalid, op, err, "not a WaxBin catalog")
 	}
+	want, err := sqlite.BaselineFingerprint()
+	if err != nil {
+		return 0, err
+	}
+	var stamp int64
+	if err := db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&stamp); err != nil {
+		return 0, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	if int32(stamp) != want {
+		return 0, waxerr.New(waxerr.CodeUnsupported, op, fmt.Sprintf(
+			"backup was built from a different schema baseline (backup %08x, this build %08x); "+
+				"restoring it would leave a catalog this build refuses to open. Read what it still "+
+				"holds with `waxbin --db %s --read-only --allow-stale ...` instead",
+			uint32(int32(stamp)), uint32(want), path))
+	}
 	return v, nil
+}
+
+// Census counts what a catalog file holds, so `db reset` can say what it is about
+// to discard.
+type Census struct {
+	Items        int
+	PlayStates   int
+	Playlists    int
+	Podcasts     int
+	TrashEntries int
+	// Roots is every user-registered display_root, including ones added at runtime
+	// that configuration will not bring back. The internal podcast library is
+	// excluded: it is re-created on demand and is not a root anyone can re-add.
+	Roots []string
+	// Partial is set when a table could not be read, so the counts understate what
+	// the catalog holds. A hot -wal after a crash fails every read on a mode=ro
+	// connection, and reporting those zeros as the contents would tell the operator
+	// a full catalog is empty.
+	Partial bool
+}
+
+// ReadCensus opens a catalog file read-only and counts what it holds. It reads only
+// counts and display_root, never a column an in-place baseline edit may have added,
+// since the catalog is one the store itself will not open. A file too damaged to
+// census must still be resettable, so a failed read sets Partial rather than
+// failing the call.
+func ReadCensus(ctx context.Context, path string) (*Census, error) {
+	const op = "port.ReadCensus"
+	if _, err := os.Stat(path); err != nil {
+		return nil, waxerr.Wrapf(waxerr.CodeNotFound, op, err, "opening catalog %s", path)
+	}
+	db, err := sql.Open("sqlite", "file:"+path+"?mode=ro")
+	if err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	defer db.Close()
+
+	c := &Census{}
+	for _, t := range []struct {
+		query string
+		into  *int
+	}{
+		{"SELECT COUNT(*) FROM playable_item", &c.Items},
+		{"SELECT COUNT(*) FROM play_state", &c.PlayStates},
+		{"SELECT COUNT(*) FROM playlist", &c.Playlists},
+		{"SELECT COUNT(*) FROM podcast", &c.Podcasts},
+		// Restorable entries only, matching what `trash list` shows: a restored row
+		// is journal history and nothing is at stake in discarding it.
+		{"SELECT COUNT(*) FROM trash WHERE restored_at IS NULL", &c.TrashEntries},
+	} {
+		var n int
+		if err := db.QueryRowContext(ctx, t.query).Scan(&n); err != nil {
+			c.Partial = true
+			continue
+		}
+		*t.into = n
+	}
+	rows, err := db.QueryContext(ctx,
+		"SELECT display_root FROM library WHERE mode != ? ORDER BY display_root", string(model.ModePodcast))
+	if err != nil {
+		c.Partial = true
+		return c, nil
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var root string
+		if err := rows.Scan(&root); err != nil {
+			c.Partial = true
+			return c, nil
+		}
+		c.Roots = append(c.Roots, root)
+	}
+	return c, nil
 }
 
 // Restore byte-copies a validated backup over the target catalog path. It removes

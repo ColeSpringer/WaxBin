@@ -71,14 +71,17 @@ func newUserCmd(g *globals) *cobra.Command {
 
 func newStateCmd(g *globals) *cobra.Command {
 	var (
-		user     string
-		rating   int
-		star     bool
-		unstar   bool
-		played   bool
-		finished bool
-		position int64
-		asOf     string
+		user       string
+		rating     int
+		star       bool
+		unstar     bool
+		played     bool
+		finished   bool
+		unplayed   bool
+		unfinished bool
+		resetCount bool
+		position   int64
+		asOf       string
 	)
 	set := &cobra.Command{
 		Use:   "set <item-pid>",
@@ -92,12 +95,13 @@ func newStateCmd(g *globals) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			// --as-of records the star/rating change time; with none of those
-			// operations present it would be silently ignored (played/finished/position
-			// carry no recorded time), so refuse rather than mislead.
-			if flags.Changed("as-of") && !star && !unstar && !flags.Changed("rating") {
+			// --as-of only reaches the setters that write a change stamp. --played and
+			// --finished go through MarkPlayed, which carries no recorded time, so
+			// --as-of alongside only those would be silently ignored.
+			if flags.Changed("as-of") && !star && !unstar && !unplayed && !unfinished &&
+				!resetCount && !flags.Changed("rating") {
 				return waxerr.New(waxerr.CodeInvalid, "cli.state",
-					"--as-of applies only to --rating, --star, or --unstar")
+					"--as-of applies only to --rating, --star, --unstar, --unplayed, --unfinished, or --reset-count")
 			}
 
 			m, _, err := g.openMutator(cmd)
@@ -130,6 +134,35 @@ func newStateCmd(g *globals) *cobra.Command {
 					return err
 				}
 			}
+			// The clears compose into one SetPlayed, each flag naming the field it
+			// clears and the rest coming from stored state, so the outcome does not
+			// depend on their order. Ahead of MarkPlayed, so `--played --unfinished`
+			// reads as "record a play that did not finish".
+			if unplayed || unfinished || resetCount {
+				cur, err := m.PlayState(ctx(cmd), uPID, item)
+				if err != nil {
+					return err
+				}
+				wantPlayed, wantFinished := cur.Played, cur.Finished
+				if unfinished {
+					wantFinished = false
+				}
+				var count *int
+				// A zero count means the item was never played, so --reset-count clears
+				// the flags with it; the store rejects the contradictory pair. --unplayed
+				// clears them without touching the count, which is the whole difference
+				// between the two.
+				if unplayed || resetCount {
+					wantPlayed, wantFinished = false, false
+				}
+				if resetCount {
+					zero := 0
+					count = &zero
+				}
+				if _, err := m.SetPlayed(ctx(cmd), uPID, item, wantPlayed, wantFinished, count, asOfNS); err != nil {
+					return err
+				}
+			}
 			if played || finished {
 				if err := m.MarkPlayed(ctx(cmd), uPID, item, finished); err != nil {
 					return err
@@ -158,12 +191,22 @@ func newStateCmd(g *globals) *cobra.Command {
 	pf.BoolVar(&unstar, "unstar", false, "unstar the item")
 	pf.BoolVar(&played, "played", false, "mark played (increments play count)")
 	pf.BoolVar(&finished, "finished", false, "mark finished (implies played)")
+	pf.BoolVar(&unplayed, "unplayed", false,
+		"clear played and finished; the play count is left alone (--played increments it, --reset-count zeroes it)")
+	pf.BoolVar(&unfinished, "unfinished", false, "clear finished, leaving played alone")
+	pf.BoolVar(&resetCount, "reset-count", false, "zero the play count, clearing played and finished with it")
 	pf.Int64Var(&position, "position", 0, "set resume position in milliseconds")
-	pf.StringVar(&asOf, "as-of", "", "record the star/rating change at this time (unix ns or RFC3339); default is now")
+	pf.StringVar(&asOf, "as-of", "",
+		"record the rating/star/unplayed/unfinished/reset-count change at this time (unix ns or RFC3339); default is now")
 	// star and unstar are contradictory. Rejecting the pair avoids the order-dependent
 	// outcome of applying both, which a shared --as-of makes worse: the second flip
 	// carries the same recorded time as the first and loses the stale-replay comparison.
 	set.MarkFlagsMutuallyExclusive("star", "unstar")
+	// --unplayed clears finished too, so it contradicts --finished as squarely as
+	// --played; MarkPlayed would otherwise re-set both flags right after the clear.
+	set.MarkFlagsMutuallyExclusive("played", "unplayed")
+	set.MarkFlagsMutuallyExclusive("finished", "unplayed")
+	set.MarkFlagsMutuallyExclusive("finished", "unfinished")
 
 	show := &cobra.Command{
 		Use:   "show <item-pid>",

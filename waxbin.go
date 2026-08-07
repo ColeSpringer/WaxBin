@@ -125,8 +125,10 @@ func Open(ctx context.Context, opts Options) (*Library, error) {
 	opts.DBPath, opts.Roots = cfg.DBPath, cfg.Roots
 
 	st, err := sqlite.Open(ctx, sqlite.OpenOptions{
-		Path:          opts.DBPath,
-		ReadOnly:      opts.ReadOnly,
+		Path:               opts.DBPath,
+		ReadOnly:           opts.ReadOnly,
+		AllowStaleBaseline: opts.AllowStaleBaseline,
+
 		Owner:         owner,
 		IPCSocket:     opts.IPCSocket,
 		Logger:        log,
@@ -2059,6 +2061,19 @@ func rawRoot(lib *model.Library) string {
 // whether already-restored rows are shown; limit 0 returns all.
 func (l *Library) Trash(ctx context.Context, includeRestored bool, limit int) ([]model.TrashEntry, error) {
 	return l.store.TrashEntries(ctx, includeRestored, 0, limit)
+}
+
+// RestorableTrash returns the restorable trash entries for each of the given
+// items, keyed by item pid, newest first. An item with nothing restorable is
+// absent from the map, so a present key is the answer; unknown pids are absent
+// rather than an error, which is what makes it safe against an item purged
+// between a delta page and this lookup.
+//
+// It takes no limit deliberately: a bounded listing that missed an item would read
+// as permanently removed, and a client acting on that would reclaim bytes it could
+// have restored. It is a read, so it is available on a read-only handle.
+func (l *Library) RestorableTrash(ctx context.Context, itemPIDs []model.PID) (map[model.PID][]model.TrashEntry, error) {
+	return l.store.ActiveTrashForItems(ctx, itemPIDs)
 }
 
 // RestoreTrash undoes a delete: it moves the trashed file back to its original

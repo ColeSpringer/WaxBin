@@ -13,10 +13,10 @@ type User struct {
 // PlayState is one user's playback state for one item: resume position, played/
 // finished flags, play count, rating, and star. Rating is 0..100 (HasRating
 // distinguishes an explicit 0 from unset); Starred carries the star with its set
-// time for recency ordering. The changed-at stamps record when the star or
-// rating last changed value, a clear included, so they survive an unstar or a
-// rating clear; a value-identical set never bumps them. They carry what a sync
-// replay guard needs to order a local change against a remote one.
+// time for recency ordering. The changed-at stamps record when the star, rating,
+// or played/finished pair last changed value, a clear included, so they survive
+// an unstar or a rating clear; a value-identical set never bumps them. They carry
+// what a sync replay guard needs to order a local change against a remote one.
 type PlayState struct {
 	UserPID          PID
 	ItemPID          PID
@@ -31,7 +31,10 @@ type PlayState struct {
 	LastPlayedAt     int64 // unix nanoseconds
 	RatingChangedAt  int64 // unix nanoseconds; 0 = rating never changed
 	StarredChangedAt int64 // unix nanoseconds; 0 = star never changed
-	UpdatedAt        int64 // unix nanoseconds
+	// PlayedChangedAt is when played/finished last changed, which unlike its two
+	// neighbours also moves on every play, not only on an explicit user action.
+	PlayedChangedAt int64 // unix nanoseconds; 0 = never played or changed
+	UpdatedAt       int64 // unix nanoseconds
 	// LastProgressAt is the last playback write: a progress checkpoint or a play,
 	// whichever came last. 0 when the item was never played or checkpointed. A star
 	// or a rating moves UpdatedAt but not this, which is what makes it the ordering

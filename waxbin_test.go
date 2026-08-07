@@ -860,6 +860,15 @@ func TestDeleteTrashRestoreRoundTrip(t *testing.T) {
 		t.Fatalf("trash list: err=%v len=%d, want 1", err, len(entries))
 	}
 
+	// The item-keyed lookup finds the same entry.
+	restorable, err := lib.RestorableTrash(ctx, []model.PID{itemPID})
+	if err != nil {
+		t.Fatalf("restorable trash: %v", err)
+	}
+	if got := restorable[itemPID]; len(got) != 1 || got[0].PID != entries[0].PID {
+		t.Fatalf("restorable trash for the item = %+v, want the one journal entry", got)
+	}
+
 	// A re-scan must not resurrect the trashed file (the trash dir is skipped).
 	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
 		t.Fatalf("re-scan: %v", err)
@@ -891,6 +900,13 @@ func TestDeleteTrashRestoreRoundTrip(t *testing.T) {
 	// The trash entry is now marked restored.
 	if active, _ := lib.Trash(ctx, false, 0); len(active) != 0 {
 		t.Fatalf("restored entry should leave the active trash empty, got %d", len(active))
+	}
+	after, err := lib.RestorableTrash(ctx, []model.PID{itemPID})
+	if err != nil {
+		t.Fatalf("restorable trash after restore: %v", err)
+	}
+	if _, ok := after[itemPID]; ok {
+		t.Errorf("a restored item is still reported as restorable: %+v", after)
 	}
 }
 

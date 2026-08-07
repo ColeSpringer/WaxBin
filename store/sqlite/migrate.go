@@ -30,6 +30,9 @@ type migration struct {
 // migrate brings the catalog up to SchemaVersion, applying each pending
 // migration in its own transaction. If the DB already holds data (version > 0),
 // it is byte-copied to a backup via VACUUM INTO before the first migration.
+// Pre-1.0 the recorded version alone cannot say whether a catalog matches this
+// build, so an existing one is also checked against the baseline fingerprint and
+// refused if it was built from a different one (see baseline.go).
 func (s *Store) migrate(ctx context.Context) error {
 	const op = "store.migrate"
 	if _, err := s.write.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -47,6 +50,22 @@ func (s *Store) migrate(ctx context.Context) error {
 	if current > SchemaVersion {
 		return waxerr.New(waxerr.CodeUnsupported, op,
 			fmt.Sprintf("catalog schema v%d is newer than this build supports (v%d)", current, SchemaVersion))
+	}
+
+	want, err := buildBaseline()
+	if err != nil {
+		return err
+	}
+	// AllowStaleBaseline deliberately does not reach here: the write path is where a
+	// missing column costs data.
+	if current > 0 {
+		got, err := baselineStamp(ctx, s.write)
+		if err != nil {
+			return err
+		}
+		if got != want {
+			return staleBaselineError(op, got, want)
+		}
 	}
 
 	all, err := loadMigrations(migrationsFS)
@@ -79,6 +98,13 @@ func (s *Store) migrate(ctx context.Context) error {
 			if _, err := tx.ExecContext(ctx, m.sql); err != nil {
 				return waxerr.Wrapf(waxerr.CodeIO, op, err, "applying migration %04d_%s", m.version, m.name)
 			}
+			// Only the baseline stamps; the fingerprint describes what a catalog was
+			// created from, so a later migration leaves it alone.
+			if m.version == 1 {
+				if err := setBaselineStamp(ctx, tx, want); err != nil {
+					return err
+				}
+			}
 			if _, err := tx.ExecContext(ctx,
 				"INSERT INTO schema_migrations(version, name, applied_at) VALUES (?, ?, ?)",
 				m.version, m.name, nowNS()); err != nil {
@@ -95,7 +121,9 @@ func (s *Store) migrate(ctx context.Context) error {
 }
 
 // verifyReadable ensures a read-only open is not against a DB newer than this
-// build understands.
+// build understands, nor one built from a different schema baseline. The baseline
+// check runs after the schema_migrations probe, so an uninitialized catalog is
+// told to run `waxbin init` rather than reported as the stamp mismatch it also is.
 func (s *Store) verifyReadable(ctx context.Context) error {
 	var v int
 	err := s.read.QueryRowContext(ctx,
@@ -113,6 +141,22 @@ func (s *Store) verifyReadable(ctx context.Context) error {
 	if v > SchemaVersion {
 		return waxerr.New(waxerr.CodeUnsupported, "store.Open",
 			fmt.Sprintf("catalog schema v%d is newer than this build supports (v%d)", v, SchemaVersion))
+	}
+
+	want, err := buildBaseline()
+	if err != nil {
+		return err
+	}
+	got, err := baselineStamp(ctx, s.read)
+	if err != nil {
+		return err
+	}
+	if got != want {
+		if !s.allowStale {
+			return staleBaselineError("store.Open", got, want)
+		}
+		s.log.Warn("opening a catalog built from a different schema baseline; reads touching a changed table will fail",
+			"catalog", fmt.Sprintf("%08x", uint32(got)), "build", fmt.Sprintf("%08x", uint32(want)))
 	}
 	return nil
 }
@@ -150,6 +194,8 @@ func (s *Store) currentVersion(ctx context.Context) (int, error) {
 // migration all the same: its files run in filename order inside the same
 // transaction and record a single schema_migrations row. The v1 baseline uses
 // the directory shape; post-1.0 changes are expected to be single files.
+// Until 1.0 the baseline is edited in place instead, so the stream stays a single
+// migration and a catalog created before an edit is refused rather than upgraded.
 func loadMigrations(fsys fs.FS) ([]migration, error) {
 	entries, err := fs.ReadDir(fsys, "migrations")
 	if err != nil {

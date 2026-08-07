@@ -32,6 +32,11 @@ type OpenOptions struct {
 	IPCSocket string // optional IPC socket path advertised in the lockfile
 	Logger    *slog.Logger
 
+	// AllowStaleBaseline downgrades the stale-baseline refusal to a logged warning so
+	// the catalog can be read for salvage. Read-only opens only: a read-write open is
+	// refused regardless, since the write path is where a missing column costs data.
+	AllowStaleBaseline bool
+
 	// SecretCipher, when set, seals secret-table values at rest. When nil the
 	// store keeps secrets in plaintext (standalone CLI). Like Logger, it is a live
 	// injected object held on the Store and preserved across Reopen.
@@ -58,8 +63,11 @@ type Store struct {
 	closed   bool        // guarded by wmu
 	lock     *writeLock  // held advisory lock (nil when read-only)
 	readOnly bool
-	owner    string
-	log      *slog.Logger
+	// allowStale warns instead of refusing on a baseline mismatch; read-only opens
+	// only (migrate never consults it).
+	allowStale bool
+	owner      string
+	log        *slog.Logger
 
 	cipher      model.SecretCipher // seals/opens secret-table values (nil = plaintext)
 	cipherKeyID string             // key/epoch label stamped into a sealed value
@@ -110,7 +118,8 @@ func Open(ctx context.Context, opt OpenOptions) (*Store, error) {
 
 	s := &Store{
 		path: opt.Path, opt: opt, readOnly: opt.ReadOnly, owner: opt.Owner, log: log,
-		cipher: opt.SecretCipher, cipherKeyID: keyID,
+		allowStale: opt.AllowStaleBaseline,
+		cipher:     opt.SecretCipher, cipherKeyID: keyID,
 		thumbMem: newThumbCache(thumbCacheMax),
 	}
 
