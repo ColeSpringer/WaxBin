@@ -190,7 +190,7 @@ func facetSpecFor(g read.GroupBy, userID int64) (facetSpec, bool) {
 				" AND (fpl.owner_user_id = ? OR fpl.visibility = 'shared')",
 			joinArgs: []any{userID},
 			groupBy:  "fpl.id", keyExpr: "fpl.pid", display: "fpl.name", sortExpr: "fpl.name",
-			entity:   true,
+			entity: true,
 		}, true
 	}
 	// A custom-tag dimension: group items by the values of one tag key. The INNER JOIN
