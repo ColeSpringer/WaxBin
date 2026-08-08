@@ -67,6 +67,34 @@ type Config struct {
 	// another module. The built-in netsafe rss provider is always registered; an
 	// injected provider registers under its own SourceType.
 	Providers []source.Provider
+	// Leaser serializes this package's filesystem mutators against each other. Nil
+	// runs them inline, which is what a standalone Service and this package's own
+	// tests get.
+	Leaser Leaser
+}
+
+// Leaser serializes filesystem mutations against WaxBin's other mutating passes. A
+// nil Leaser runs the work inline.
+//
+// The seam is injected rather than the package taking a lease itself because the lease
+// store belongs to the embedding Library, and because a standalone podcast Service has
+// nothing to serialize against.
+type Leaser interface {
+	// Lease runs fn holding the podcast filesystem lease, returning CodeConflict if
+	// another podcast mutator holds it.
+	//
+	// No implementation records a job row, retention included. The watch loop calls
+	// ApplyRetentionAll every tick, so a row there would fill `waxbin jobs` and, worse,
+	// advance the change feed once per tick on a catalog where nothing happened. The
+	// episodes a retention pass does drop emit their own deltas.
+	Lease(ctx context.Context, fn func(context.Context) error) error
+	// LeaseWait is Lease with a bounded retry on a busy lease, for the one caller whose
+	// work is already paid for by the time it needs the lease: a finished download's
+	// commit tail, which would otherwise throw the bytes away.
+	LeaseWait(ctx context.Context, fn func(context.Context) error) error
+	// LeaseImport runs fn holding both the user-tree and podcast leases, for the one
+	// verb that moves a file from an arbitrary source path into the podcast tree.
+	LeaseImport(ctx context.Context, fn func(context.Context) error) error
 }
 
 const (
@@ -137,7 +165,34 @@ func New(store Store, reader meta.Reader, cfg Config, log *slog.Logger) *Service
 			providers[p.SourceType()] = p
 		}
 	}
-	return &Service{store: store, client: client, reader: reader, cfg: cfg, log: log, providers: providers}
+	return &Service{store: store, client: client, reader: reader, cfg: cfg, log: log,
+		providers: providers}
+}
+
+// lease runs fn holding the podcast filesystem lease, or inline when no Leaser is
+// injected.
+func (s *Service) lease(ctx context.Context, fn func(context.Context) error) error {
+	if s.cfg.Leaser == nil {
+		return fn(ctx)
+	}
+	return s.cfg.Leaser.Lease(ctx, fn)
+}
+
+// leaseWait is lease with a bounded retry, for a download's commit tail.
+func (s *Service) leaseWait(ctx context.Context, fn func(context.Context) error) error {
+	if s.cfg.Leaser == nil {
+		return fn(ctx)
+	}
+	return s.cfg.Leaser.LeaseWait(ctx, fn)
+}
+
+// leaseImport runs fn holding both the user-tree and podcast leases, or inline when no
+// Leaser is injected.
+func (s *Service) leaseImport(ctx context.Context, fn func(context.Context) error) error {
+	if s.cfg.Leaser == nil {
+		return fn(ctx)
+	}
+	return s.cfg.Leaser.LeaseImport(ctx, fn)
 }
 
 // providerFor returns the provider that syncs a show of source type st, defaulting
@@ -410,21 +465,26 @@ func secretKey(pid model.PID) string { return "podcast.auth." + string(pid) }
 // Remove unsubscribes from a podcast and deletes its episodes and downloaded files,
 // reclaiming the disk space. It also drops the stored basic-auth password so a
 // private feed's credential does not outlive the subscription.
+//
+// It unlinks the files itself rather than calling Unfetch, so it holds the podcast
+// filesystem lease around the whole thing.
 func (s *Service) Remove(ctx context.Context, pid model.PID) error {
-	files, err := s.store.RemovePodcast(ctx, pid)
-	if err != nil {
-		return err
-	}
-	// Drop the auth secret (idempotent when the feed had none).
-	if err := s.store.DeleteSecret(ctx, secretKey(pid)); err != nil {
-		s.log.Warn("dropping podcast auth secret on unsubscribe", "podcast", pid, "err", err)
-	}
-	for _, p := range files {
-		if err := os.Remove(pathx.Long(p)); err != nil && !os.IsNotExist(err) {
-			s.log.Warn("removing episode file on unsubscribe", "path", p, "err", err)
+	return s.lease(ctx, func(ctx context.Context) error {
+		files, err := s.store.RemovePodcast(ctx, pid)
+		if err != nil {
+			return err
 		}
-	}
-	return nil
+		// Drop the auth secret (idempotent when the feed had none).
+		if err := s.store.DeleteSecret(ctx, secretKey(pid)); err != nil {
+			s.log.Warn("dropping podcast auth secret on unsubscribe", "podcast", pid, "err", err)
+		}
+		for _, p := range files {
+			if err := os.Remove(pathx.Long(p)); err != nil && !os.IsNotExist(err) {
+				s.log.Warn("removing episode file on unsubscribe", "path", p, "err", err)
+			}
+		}
+		return nil
+	})
 }
 
 // fetchImage downloads and decodes an image for the art store, best effort: a

@@ -447,6 +447,23 @@ func (c *Client) FetchTranscript(ctx context.Context, episodePID model.PID) erro
 	return c.call(ctx, MethodFetchTranscript, FetchTranscriptParams{EpisodePID: string(episodePID)}, nil)
 }
 
+// Unfetch proxies reclaiming a downloaded episode's bytes, returning what was
+// reclaimed. It goes over the socket rather than through the maintenance hand-off,
+// which paused the whole server for what is a short leased mutation.
+func (c *Client) Unfetch(ctx context.Context, episodePID model.PID) (*UnfetchResult, error) {
+	var res UnfetchResult
+	if err := c.call(ctx, MethodUnfetch, UnfetchParams{EpisodePID: string(episodePID)}, &res); err != nil {
+		return nil, err
+	}
+	return &res, nil
+}
+
+// PodcastRemove proxies unsubscribing from a show, deleting its episodes and their
+// downloaded files.
+func (c *Client) PodcastRemove(ctx context.Context, podcastPID model.PID) error {
+	return c.call(ctx, MethodPodcastRemove, PodcastRemoveParams{PodcastPID: string(podcastPID)}, nil)
+}
+
 // AddRoot proxies registering a library root at runtime, returning the upserted
 // library row. The mutation must land in the server's catalog because the server
 // is the process that scans; validation against the registered set runs there

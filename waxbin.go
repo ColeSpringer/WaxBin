@@ -160,25 +160,29 @@ func Open(ctx context.Context, opts Options) (*Library, error) {
 		analyzer:  analyze.New(st, decoder, log),
 		playback:  playback.New(st),
 		playlists: playlist.New(st),
-		podcasts: podcast.New(st, meta.NewReader(), podcast.Config{
-			Dir:               opts.Podcasts.Dir,
-			UserAgent:         opts.Podcasts.UserAgent,
-			BlockPrivateIPs:   opts.Podcasts.BlockPrivateIPs,
-			Timeout:           time.Duration(opts.Podcasts.TimeoutSeconds) * time.Second,
-			MaxFeedBytes:      opts.Podcasts.MaxFeedBytes,
-			MaxEnclosureBytes: opts.Podcasts.MaxEnclosureBytes,
-			ReserveBytes:      opts.FreeSpaceReserveBytes,
-			DefaultRetention:  opts.Podcasts.DefaultRetention,
-			Providers:         opts.SourceProviders,
-		}, log),
-		enricher: enrich.New(st, enrichConfig(opts.Enrichment, opts.EnrichmentProviders), log),
-		decoder:  decoder,
-		log:      log,
-		opts:     opts,
+		enricher:  enrich.New(st, enrichConfig(opts.Enrichment, opts.EnrichmentProviders), log),
+		decoder:   decoder,
+		log:       log,
+		opts:      opts,
 	}
 	// The importer catalogs each placed file through the scanner, so it is wired
 	// after the struct is built and shares that scanner.
 	l.importer = inbox.New(st, meta.NewReader(), l.scanner, log)
+
+	// The podcast service takes a lease adapter closing over l, so it is wired after
+	// the struct too.
+	l.podcasts = podcast.New(st, meta.NewReader(), podcast.Config{
+		Dir:               opts.Podcasts.Dir,
+		UserAgent:         opts.Podcasts.UserAgent,
+		BlockPrivateIPs:   opts.Podcasts.BlockPrivateIPs,
+		Timeout:           time.Duration(opts.Podcasts.TimeoutSeconds) * time.Second,
+		MaxFeedBytes:      opts.Podcasts.MaxFeedBytes,
+		MaxEnclosureBytes: opts.Podcasts.MaxEnclosureBytes,
+		ReserveBytes:      opts.FreeSpaceReserveBytes,
+		DefaultRetention:  opts.Podcasts.DefaultRetention,
+		Providers:         opts.SourceProviders,
+		Leaser:            fsLeaser{lib: l},
+	}, log)
 
 	// The auditor's integrity check re-hashes files (identity.ContentHash) and its
 	// corrupt-audio check parses essence through a WaxLabel reader.
@@ -370,7 +374,9 @@ func (l *Library) Count(ctx context.Context, q query.Query, userPID model.PID) (
 
 // Facet groups the items matching q by a dimension and counts each bucket. The
 // CLI, OpenSubsonic adapters, and stats code use this same API, so they share
-// one canonical grouping result. userPID scopes any per-user filter in q.
+// one canonical grouping result. userPID scopes any per-user filter in q, and on a
+// dimension read.GroupBy.UserScoped reports (GroupPlaylist alone) it also selects
+// which buckets exist.
 //
 // order picks the bucket order (empty = collation order) and limit truncates the
 // result (<= 0 = every bucket), which together give a top-N shelf. limit bounds only
@@ -685,7 +691,45 @@ type ScanRequest struct {
 // otherwise use different scopes and not exclude each other, letting a watch rescan
 // race an in-flight organize. Read-only passes (analyze, enrich) keep their own
 // scopes so they can still overlap a scan.
-const fsMutateScope = "fs-mutate"
+//
+// podcastFSScope is its sibling for the podcast download tree. The two are separate
+// because they cover disjoint trees: fsMutateScope serializes mutators of the user
+// library trees, which scan, organize and the trash family walk, and none of them
+// enter the podcast tree (resolveLibraries and managedLibraries drop ModePodcast, and
+// the trash family refuses it; see inPodcastLibrary). Putting the podcast verbs on
+// fsMutateScope would make them fail during a scan that provably cannot touch their
+// files, a regression on today's behavior for no safety gain.
+//
+// ImportEpisodeFile is the one verb spanning both trees and takes both, always
+// fsMutateScope first (see fsLeaser.LeaseImport).
+const (
+	fsMutateScope  = "fs-mutate"
+	podcastFSScope = "podcast-fs"
+)
+
+// fsLeaser adapts the job manager to podcast.Leaser, so the podcast package can
+// serialize its filesystem verbs without knowing about jobs or scopes.
+type fsLeaser struct{ lib *Library }
+
+// Lease takes the podcast scope with no job row. Retention is the tempting exception
+// and is deliberately not one: the watch loop runs ApplyRetentionAll every tick, and
+// jobs.Run's CreateJob writes a change_log delta, so a row there would advance the
+// change feed once per tick on a catalog where nothing happened.
+func (f fsLeaser) Lease(ctx context.Context, fn func(context.Context) error) error {
+	return f.lib.jobs.RunLeased(ctx, podcastFSScope, fn)
+}
+
+func (f fsLeaser) LeaseWait(ctx context.Context, fn func(context.Context) error) error {
+	return f.lib.jobs.RunLeasedWait(ctx, podcastFSScope, fn)
+}
+
+// LeaseImport takes fsMutateScope then podcastFSScope. That order is fixed and
+// nothing acquires them the other way round, so the pair cannot deadlock.
+func (f fsLeaser) LeaseImport(ctx context.Context, fn func(context.Context) error) error {
+	return f.lib.jobs.RunLeased(ctx, fsMutateScope, func(ctx context.Context) error {
+		return f.lib.jobs.RunLeased(ctx, podcastFSScope, fn)
+	})
+}
 
 // ScanResult reports a scan, including the job it ran under.
 type ScanResult struct {
@@ -829,6 +873,18 @@ func (e *watchEngine) Analyze(ctx context.Context) error {
 	return err
 }
 
+// logTick reports a per-tick failure at the level it deserves. A lease conflict is
+// expected flow on a watch tick, not a fault: another mutator holds the scope and the
+// next tick retries, so logging it at Warn is noise a healthy server emits routinely.
+func (e *watchEngine) logTick(msg string, err error, args ...any) {
+	args = append(args, "err", err)
+	if waxerr.Is(err, waxerr.CodeConflict) {
+		e.lib.log.Debug(msg+" (busy; retrying next tick)", args...)
+		return
+	}
+	e.lib.log.Warn(msg, args...)
+}
+
 // SyncSources drives the layered background acquisition on top of the watcher:
 // podcast feed sync + retention, and auto-import of any configured inbox staging
 // folders. All are thin callers of existing primitives; each is best-effort so one
@@ -838,7 +894,7 @@ func (e *watchEngine) SyncSources(ctx context.Context) error {
 		e.lib.log.Warn("watch: podcast sync", "err", err)
 	}
 	if _, err := e.lib.Podcasts().ApplyRetentionAll(ctx); err != nil {
-		e.lib.log.Warn("watch: podcast retention", "err", err)
+		e.logTick("watch: podcast retention", err)
 	}
 	// Live inbox import: plan then apply each configured staging folder, so a file
 	// dropped into the inbox is imported into a managed root and cataloged.
@@ -852,7 +908,7 @@ func (e *watchEngine) SyncSources(ctx context.Context) error {
 			continue
 		}
 		if _, err := e.lib.ApplyImport(ctx, plan); err != nil {
-			e.lib.log.Warn("watch: inbox import", "folder", folder, "err", err)
+			e.logTick("watch: inbox import", err, "folder", folder)
 		}
 	}
 	return nil
@@ -1881,6 +1937,12 @@ func (l *Library) ApplyOrganize(ctx context.Context, plan *organize.Plan) (*orga
 // mode (trash|prune|permanent). DeleteTrash moves files to the reversible
 // per-library trash; the other modes bypass it to reclaim space. Every mode keeps
 // the logical item (archived when it loses its last file).
+//
+// Items in the internal podcast library are dropped before planning and counted on
+// the plan as SkippedPodcast (see inPodcastLibrary). This is the query-driven path
+// used by retention and dedup, so a sweep over a mixed query must not fail because it
+// happened to match an episode. The count is surfaced rather than dropped, since a
+// silent skip would misreport what the sweep covered.
 func (l *Library) PlanDelete(ctx context.Context, q query.Query, mode model.DeleteMode) (*trash.Plan, error) {
 	libs, err := l.store.Libraries(ctx)
 	if err != nil {
@@ -1888,15 +1950,32 @@ func (l *Library) PlanDelete(ctx context.Context, q query.Query, mode model.Dele
 	}
 	// Delete acts on catalog rows; a per-user filter in q resolves against the
 	// default user.
-	items, err := l.store.QueryItems(ctx, q, "")
+	matched, err := l.store.QueryItems(ctx, q, "")
 	if err != nil {
 		return nil, err
 	}
-	return l.trasher.Plan(ctx, libs, items, mode)
+	items := make([]*model.ItemView, 0, len(matched))
+	skipped := 0
+	for _, it := range matched {
+		if podcastOwned(libs, it) {
+			skipped++
+			continue
+		}
+		items = append(items, it)
+	}
+	plan, err := l.trasher.Plan(ctx, libs, items, mode)
+	if err != nil {
+		return nil, err
+	}
+	plan.SkippedPodcast = skipped
+	return plan, nil
 }
 
 // PlanDeletePIDs computes a deletion plan for explicit item pids. It is the
 // `rm <pid>` path; PlanDelete is the query-driven path used by retention/dedup.
+//
+// An episode is refused here rather than skipped: the caller named the item, so a
+// silent skip would lie about what happened. See inPodcastLibrary.
 func (l *Library) PlanDeletePIDs(ctx context.Context, pids []model.PID, mode model.DeleteMode) (*trash.Plan, error) {
 	libs, err := l.store.Libraries(ctx)
 	if err != nil {
@@ -1907,6 +1986,11 @@ func (l *Library) PlanDeletePIDs(ctx context.Context, pids []model.PID, mode mod
 		it, err := l.store.ItemByPID(ctx, pid)
 		if err != nil {
 			return nil, err
+		}
+		if podcastOwned(libs, it) {
+			return nil, waxerr.New(waxerr.CodeInvalid, "Library.PlanDeletePIDs",
+				"cannot delete a podcast episode: "+string(pid)+
+					"; use `podcast unfetch` to reclaim its bytes and keep it re-fetchable")
 		}
 		items = append(items, it)
 	}
@@ -2079,6 +2163,13 @@ func (l *Library) RestorableTrash(ctx context.Context, itemPIDs []model.PID) (ma
 // RestoreTrash undoes a delete: it moves the trashed file back to its original
 // path and re-scans it so the catalog re-links it (un-archiving its item). It
 // refuses if the original path is occupied.
+//
+// A file whose original path is in the internal podcast library is refused: the
+// re-scan here goes straight to the scanner and would generic-scan a library
+// resolveLibraries exists to keep out, cataloging the episode as a track. Nothing new
+// can enter the trash from there once PlanDelete and PlanDeletePIDs refuse it, but a
+// pre-1.0 catalog may already hold such an entry, and this is what removes the bypass
+// rather than leaving it latent.
 func (l *Library) RestoreTrash(ctx context.Context, trashPID model.PID) error {
 	entry, err := l.store.ActiveTrashByPID(ctx, trashPID)
 	if err != nil {
@@ -2092,6 +2183,10 @@ func (l *Library) RestoreTrash(ctx context.Context, trashPID model.PID) error {
 	if lib == nil {
 		return waxerr.New(waxerr.CodeInvalid, "Library.RestoreTrash",
 			"restore target is not under a known library root")
+	}
+	if lib.Mode == model.ModePodcast {
+		return waxerr.New(waxerr.CodeInvalid, "Library.RestoreTrash",
+			"cannot restore a file into the internal podcast library; re-download the episode instead")
 	}
 	_, err = l.jobs.Run(ctx, "restore", fsMutateScope, func(ctx context.Context, h *jobs.Handle) error {
 		// Move the file back (idempotent: a retry after a failed re-scan is a no-op).
@@ -2666,6 +2761,39 @@ func (l *Library) resolveManagedLibrary(ctx context.Context, pid model.PID) (*mo
 		}
 	}
 	return nil, waxerr.New(waxerr.CodeNotFound, "Library.import", "no such library: "+string(pid))
+}
+
+// podcastOwned reports whether the trash/delete family must keep its hands off an
+// item, which is the boundary Phase 4 settled: `podcast unfetch` is the only verb that
+// removes episode bytes.
+//
+// The reason is ownership rather than locking. `rm <episode-pid>` archives the item
+// ("files gone, history kept") where the correct end state for an episode is remote
+// and re-fetchable, which is why Unfetch was written as its own path. RestoreTrash is
+// worse: it resolves the target library from store.Libraries and re-scans through the
+// scanner directly, bypassing resolveLibraries, so restoring a trashed episode would
+// generic-scan the very library resolveLibraries refuses.
+//
+// Two tests, because neither alone covers the set. The library mode is the general
+// invariant and catches anything ever placed in that tree, but it needs a path, and a
+// never-downloaded episode has none: keying on the path alone let `rm <remote-episode>`
+// through to an empty plan instead of the refusal. The kind test is what closes that,
+// and it holds because AttachEpisodeFile always binds the podcast library id, so an
+// episode's file is never anywhere else.
+func podcastOwned(libs []*model.Library, it *model.ItemView) bool {
+	if it == nil {
+		return false
+	}
+	return it.Kind == model.KindEpisode || inPodcastLibrary(libs, it.DisplayPath)
+}
+
+// inPodcastLibrary reports whether path sits under a ModePodcast root.
+func inPodcastLibrary(libs []*model.Library, path string) bool {
+	if path == "" {
+		return false
+	}
+	lib := libraryContaining(libs, path)
+	return lib != nil && lib.Mode == model.ModePodcast
 }
 
 // libraryContaining returns the library whose root contains path, or nil.

@@ -88,38 +88,66 @@ func (s *Service) Download(ctx context.Context, episodePID model.PID) (*Download
 		_ = os.Remove(pathx.Long(tmp))
 		return nil, err
 	}
-	if err := os.Rename(pathx.Long(tmp), pathx.Long(dst)); err != nil {
-		_ = os.Remove(pathx.Long(tmp))
-		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
-	}
+	// Fetched above the lease region below, deliberately: it is an HTTP GET of up to
+	// episodeImageMaxBytes bounded only by cfg.Timeout, and evaluating it as an
+	// argument to AttachEpisodeFile would hold the lease across it.
+	image := s.fetchImage(ctx, ep.ImageURL)
 
-	file, err := s.fileRow(ctx, dst, n, contentHash)
-	if err != nil {
-		return nil, err
-	}
-	filePID, err := s.store.AttachEpisodeFile(ctx, model.AttachEpisodeFileInput{
-		EpisodePID: episodePID,
-		LibraryID:  libID,
-		File:       file,
-		Image:      s.fetchImage(ctx, ep.ImageURL),
-	})
-	if err != nil {
-		// The catalog write failed after bytes landed at dst. Remove the new file only
-		// when the catalog cannot still reference it. A first download, or a re-download
-		// with a different name, leaves dst orphaned; a same-path re-download leaves dst
-		// as the live file still referenced by the existing episode row.
-		if ep.DisplayPath != dst {
-			_ = os.Remove(pathx.Long(dst))
+	// Only the commit tail is leased, and with a bounded wait. Holding the lease
+	// across the enclosure fetch would discard a finished multi-hundred-megabyte
+	// download whenever the lease happened to be busy at the moment it completed,
+	// since fetchTo streams from scratch with no range-request resume. The tail is
+	// where the hazard actually is, on disk and in the catalog both: a concurrent
+	// unfetch could unlink the file this is renaming into place, or drop the episode's
+	// file row just after AttachEpisodeFile flipped it to present, leaving state and
+	// disk disagreeing.
+	//
+	// The wait is what makes the split worth its complexity, since the bytes are
+	// already paid for by the time the lease is needed. It is bounded, not unbounded,
+	// and two contenders on this scope are bulk passes rather than brief verbs:
+	// ApplyRetentionAll walks every subscription and Remove every episode of one, both
+	// unlinking a file at a time. Either can outlast the budget on a large library, and
+	// the download is then discarded and has to be re-run. That is the accepted
+	// failure: waiting forever would hang a command behind a pass that is itself
+	// unbounded.
+	var filePID model.PID
+	if err := s.leaseWait(ctx, func(ctx context.Context) error {
+		if err := os.Rename(pathx.Long(tmp), pathx.Long(dst)); err != nil {
+			_ = os.Remove(pathx.Long(tmp))
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
-		return nil, err
-	}
-	// A re-download whose filename changed leaves the prior file uncataloged after
-	// AttachEpisodeFile drops its row. Remove it here so retention and unsubscribe do
-	// not miss it.
-	if ep.Downloaded && ep.DisplayPath != "" && ep.DisplayPath != dst {
-		if err := os.Remove(pathx.Long(ep.DisplayPath)); err != nil && !os.IsNotExist(err) {
-			s.log.Warn("removing superseded episode file", "path", ep.DisplayPath, "err", err)
+		file, err := s.fileRow(ctx, dst, n, contentHash)
+		if err != nil {
+			return err
 		}
+		filePID, err = s.store.AttachEpisodeFile(ctx, model.AttachEpisodeFileInput{
+			EpisodePID: episodePID,
+			LibraryID:  libID,
+			File:       file,
+			Image:      image,
+		})
+		if err != nil {
+			// The catalog write failed after bytes landed at dst. Remove the new file only
+			// when the catalog cannot still reference it. A first download, or a re-download
+			// with a different name, leaves dst orphaned; a same-path re-download leaves dst
+			// as the live file still referenced by the existing episode row.
+			if ep.DisplayPath != dst {
+				_ = os.Remove(pathx.Long(dst))
+			}
+			return err
+		}
+		// A re-download whose filename changed leaves the prior file uncataloged after
+		// AttachEpisodeFile drops its row. Remove it here so retention and unsubscribe do
+		// not miss it.
+		if ep.Downloaded && ep.DisplayPath != "" && ep.DisplayPath != dst {
+			if err := os.Remove(pathx.Long(ep.DisplayPath)); err != nil && !os.IsNotExist(err) {
+				s.log.Warn("removing superseded episode file", "path", ep.DisplayPath, "err", err)
+			}
+		}
+		return nil
+	}); err != nil {
+		_ = os.Remove(pathx.Long(tmp))
+		return nil, err
 	}
 
 	res := &DownloadResult{EpisodePID: episodePID, FilePID: filePID, Path: dst, Bytes: n}
@@ -254,28 +282,39 @@ func (s *Service) ImportEpisodeFile(ctx context.Context, episodePID model.PID, s
 	// Cap the basename (like Download's downloadFilename) so a pathological source name
 	// stays within the filesystem segment limit rather than failing with ENAMETOOLONG.
 	dst := filepath.Join(folder, string(episodePID)+"-"+capFilename(netsafe.SafeFilename(filepath.Base(srcPath), "episode"), 120))
-	if err := fsx.MoveOrCopy(srcPath, dst, keepOriginal); err != nil {
-		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
-	}
+	// Fetched above the lease region, like Download's: it is a bounded-but-slow HTTP GET.
+	image := s.fetchImage(ctx, d.Episode.ImageURL)
 
-	file, err := s.fileRow(ctx, dst, info.Size(), contentHash)
-	if err != nil {
-		return nil, err
-	}
-	filePID, err := s.store.AttachEpisodeFile(ctx, model.AttachEpisodeFileInput{
-		EpisodePID: episodePID, LibraryID: libID, File: file, Image: s.fetchImage(ctx, d.Episode.ImageURL),
-	})
-	if err != nil {
-		// The catalog write failed after the file landed at dst. If it was copied, the
-		// original at srcPath survives, so remove the orphan. If it was moved, dst is the
-		// user's only copy; restore it to srcPath rather than deleting it. If restore
-		// fails, leave the file at dst.
-		if keepOriginal {
-			_ = os.Remove(pathx.Long(dst))
-		} else if rerr := fsx.Move(dst, srcPath); rerr != nil {
-			s.log.Warn("could not restore acquired episode file after a catalog failure; left in place",
-				"dst", dst, "src", srcPath, "err", rerr)
+	// Both leases, in the fixed fs-mutate then podcast-fs order: this is the one verb
+	// that moves a file out of an arbitrary source path (which may sit in a user
+	// library tree) and into the podcast tree.
+	var filePID model.PID
+	if err := s.leaseImport(ctx, func(ctx context.Context) error {
+		if err := fsx.MoveOrCopy(srcPath, dst, keepOriginal); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
+		file, err := s.fileRow(ctx, dst, info.Size(), contentHash)
+		if err != nil {
+			return err
+		}
+		filePID, err = s.store.AttachEpisodeFile(ctx, model.AttachEpisodeFileInput{
+			EpisodePID: episodePID, LibraryID: libID, File: file, Image: image,
+		})
+		if err != nil {
+			// The catalog write failed after the file landed at dst. If it was copied, the
+			// original at srcPath survives, so remove the orphan. If it was moved, dst is the
+			// user's only copy; restore it to srcPath rather than deleting it. If restore
+			// fails, leave the file at dst.
+			if keepOriginal {
+				_ = os.Remove(pathx.Long(dst))
+			} else if rerr := fsx.Move(dst, srcPath); rerr != nil {
+				s.log.Warn("could not restore acquired episode file after a catalog failure; left in place",
+					"dst", dst, "src", srcPath, "err", rerr)
+			}
+			return err
+		}
+		return nil
+	}); err != nil {
 		return nil, err
 	}
 	return &DownloadResult{EpisodePID: episodePID, FilePID: filePID, Path: dst, Bytes: info.Size()}, nil
@@ -331,7 +370,22 @@ type RetentionResult struct {
 // downloaded episodes beyond N. It bypasses the trash to reclaim space and keeps
 // play_state on the episode item, which returns to remote and can be downloaded
 // again. A keep value of 0 keeps everything.
+//
+// The work is split out of the exported form because ApplyRetentionAll calls it per
+// podcast: leasing both entry points around the same body would fail CodeConflict
+// against itself on the first podcast of every watch tick. Each exported form leases
+// once, and the CLI calls this one directly.
 func (s *Service) ApplyRetention(ctx context.Context, podcastPID model.PID) (*RetentionResult, error) {
+	var res *RetentionResult
+	err := s.lease(ctx, func(ctx context.Context) error {
+		r, err := s.applyRetention(ctx, podcastPID)
+		res = r
+		return err
+	})
+	return res, err
+}
+
+func (s *Service) applyRetention(ctx context.Context, podcastPID model.PID) (*RetentionResult, error) {
 	pod, err := s.store.PodcastByPID(ctx, podcastPID)
 	if err != nil {
 		return nil, err
@@ -369,22 +423,26 @@ func (s *Service) ApplyRetention(ctx context.Context, podcastPID model.PID) (*Re
 	return res, nil
 }
 
-// ApplyRetentionAll runs retention for every podcast and sums the results.
+// ApplyRetentionAll runs retention for every podcast and sums the results under a
+// single lease, calling the unexported body rather than the leased per-podcast form.
 func (s *Service) ApplyRetentionAll(ctx context.Context) (*RetentionResult, error) {
-	pods, err := s.store.Podcasts(ctx)
-	if err != nil {
-		return nil, err
-	}
 	total := &RetentionResult{}
-	for _, p := range pods {
-		r, err := s.ApplyRetention(ctx, p.PID)
+	err := s.lease(ctx, func(ctx context.Context) error {
+		pods, err := s.store.Podcasts(ctx)
 		if err != nil {
-			return total, err
+			return err
 		}
-		total.Removed += r.Removed
-		total.ReclaimedBytes += r.ReclaimedBytes
-	}
-	return total, nil
+		for _, p := range pods {
+			r, err := s.applyRetention(ctx, p.PID)
+			if err != nil {
+				return err
+			}
+			total.Removed += r.Removed
+			total.ReclaimedBytes += r.ReclaimedBytes
+		}
+		return nil
+	})
+	return total, err
 }
 
 // preflightSpace refuses a download when the destination volume lacks room for the

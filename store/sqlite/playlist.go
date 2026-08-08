@@ -290,6 +290,153 @@ func (s *Store) PlaylistItems(ctx context.Context, pid model.PID, userPID model.
 	return out, rows.Err()
 }
 
+// CountPlaylistItems returns how many of a playlist's members also match narrow. The
+// contract is exact for any userPID that resolves: the result equals the number of
+// rows PlaylistItems(pid, userPID) returns that satisfy narrow. A nil narrow counts
+// every member. See the playlist.Service.CountItems doc comment for the three
+// "playlist count" semantics this sits among.
+//
+// The "that resolves" qualifier is the one gap, and it is the strict side of it. A
+// static PlaylistItems never looks the user up, so it answers for an unknown pid;
+// this goes through userStateJoin, which validates any non-empty pid so a typo is not
+// silently answered as the default user. The two therefore disagree on a pid no user
+// holds, where this returns CodeNotFound and PlaylistItems returns the members.
+//
+// A static playlist is one indexed COUNT(*) off the playlist. A smart one branches on
+// whether its rule selects every matching row, because narrowing only commutes with
+// the rule when it does. A limit picks rows first, so pushing narrow inside a "10 most
+// recent tracks" rule would count every matching track in the catalog and clamp to 10,
+// where the truth is however many of those 10 match. An offset changes which rows get
+// skipped. Both cases evaluate the rule and count the matches among the rows it chose.
+func (s *Store) CountPlaylistItems(ctx context.Context, pid model.PID, userPID model.PID, narrow query.Node) (int, error) {
+	const op = "store.CountPlaylistItems"
+	p, err := s.PlaylistByPID(ctx, pid)
+	if err != nil {
+		return 0, err
+	}
+	if p.Kind != model.PlaylistSmart {
+		return s.countStaticPlaylistItems(ctx, op, pid, userPID, narrow)
+	}
+	if p.Rule == nil {
+		return 0, waxerr.New(waxerr.CodeInvalid, op, "smart playlist has no rule")
+	}
+	rule := *p.Rule
+
+	// An unlimited, unoffset rule selects every matching row, so the narrow folds into
+	// its WHERE and the whole answer is one count. A budget mode always carries a
+	// positive limit, so this branch is the plain count mode by construction.
+	if rule.Limit == 0 && rule.Offset == 0 {
+		q := rule
+		q.Where = andNodes(rule.Where, narrow)
+		return s.CountItems(ctx, q, userPID)
+	}
+	if rule.Offset == 0 && narrow == nil {
+		switch rule.LimitMode {
+		case query.LimitMinutes, query.LimitMegabytes:
+			// A budget fills row by row, so only the evaluation knows where it stopped.
+			items, err := s.QueryItems(ctx, rule, userPID)
+			if err != nil {
+				return 0, err
+			}
+			return len(items), nil
+		default:
+			// CountItems ignores limit and offset, so this is the full match set.
+			n, err := s.CountItems(ctx, rule, userPID)
+			if err != nil {
+				return 0, err
+			}
+			return min(n, rule.Limit), nil
+		}
+	}
+	return s.countEvaluatedPlaylist(ctx, rule, userPID, narrow)
+}
+
+// countStaticPlaylistItems counts a static playlist's entries matching narrow, driving
+// off the playlist rather than the catalog. The clause and arg order mirror Facet's:
+// itemJoins, the user-state join, the dimension join, then WHERE. Verified on the real
+// schema with no ANALYZE, the plan seeks playlist(pid), then playlist_item, then the
+// item by rowid, with no scan anywhere.
+//
+// COUNT(*) rather than COUNT(DISTINCT pi.id): the result has to equal
+// len(PlaylistItems(...)), which returns one row per position, so an item held twice
+// counts twice. The facet counts distinct items instead; see the count triangle.
+func (s *Store) countStaticPlaylistItems(ctx context.Context, op string, pid, userPID model.PID, narrow query.Node) (int, error) {
+	fm, ok := fieldMapFor(query.EntityItems)
+	if !ok {
+		return 0, waxerr.New(waxerr.CodeInvalid, op, "unsupported query entity: items")
+	}
+	c, err := query.Compile(query.New(query.EntityItems).WhereNode(narrow).Build(), fm)
+	if err != nil {
+		return 0, err
+	}
+	userJoin, leadArgs, err := s.userStateJoin(ctx, c, userPID, op)
+	if err != nil {
+		return 0, err
+	}
+	stmt := itemCountSelect + userJoin +
+		" JOIN playlist_item pcli ON pcli.item_id = pi.id" +
+		" JOIN playlist pcl ON pcl.id = pcli.playlist_id" +
+		" WHERE " + andWhere("pcl.pid = ?", c.Where)
+	// Args in clause order: the user join's id (its ON clause precedes WHERE), then the
+	// pid, then the narrow's. The pid comes before c.Args because andWhere puts
+	// pcl.pid = ? ahead of c.Where, not because the joins bind anything.
+	args := make([]any, 0, len(leadArgs)+1+len(c.Args))
+	args = append(args, leadArgs...)
+	args = append(args, string(pid))
+	args = append(args, c.Args...)
+	var n int
+	if err := s.read.QueryRowContext(ctx, stmt, args...).Scan(&n); err != nil {
+		return 0, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	return n, nil
+}
+
+// countEvaluatedPlaylist evaluates a smart rule and counts how many of the rows it
+// chose match narrow, which is the only correct order once a limit or an offset has
+// already picked the rows. It needs no new SQL: the pids go back through CountItems on
+// the existing pid field, chunked because one IN condition is capped at idBatchSize.
+// The rows are distinct items, so the chunk sums cannot double-count.
+func (s *Store) countEvaluatedPlaylist(ctx context.Context, rule query.Query, userPID model.PID, narrow query.Node) (int, error) {
+	items, err := s.QueryItems(ctx, rule, userPID)
+	if err != nil {
+		return 0, err
+	}
+	if narrow == nil {
+		return len(items), nil
+	}
+	pids := make([]model.PID, len(items))
+	for i, it := range items {
+		pids[i] = it.PID
+	}
+	total := 0
+	err = chunkSlice(pids, idBatchSize, func(chunk []model.PID) error {
+		n, err := s.CountItems(ctx, query.New(rule.Entity).
+			WhereValues("pid", query.OpIn, query.Values(chunk)...).
+			WhereNode(narrow).Build(), userPID)
+		if err != nil {
+			return err
+		}
+		total += n
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	return total, nil
+}
+
+// andNodes combines two optional query nodes with AND, tolerating a nil either side.
+func andNodes(a, b query.Node) query.Node {
+	switch {
+	case a == nil:
+		return b
+	case b == nil:
+		return a
+	default:
+		return query.And{Nodes: []query.Node{a, b}}
+	}
+}
+
 // AddPlaylistItems appends items to a static playlist, after its current last
 // position. A smart playlist rejects explicit membership edits.
 func (s *Store) AddPlaylistItems(ctx context.Context, pid model.PID, itemPIDs []model.PID) error {

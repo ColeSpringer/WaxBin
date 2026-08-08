@@ -44,7 +44,19 @@ import (
 // client that recorded a vanished file would leave the catalog claiming the bytes
 // are still there and keep handing the same doomed work back out.
 // Version 8 added set_played.
-const ProtocolVersion = 8
+// Version 9 added unfetch and podcast_remove, the two podcast verbs that had been
+// taking the maintenance hand-off (pausing the whole server for a short mutation).
+//
+// Neither could misdrive a version-8 server the way the field additions above could:
+// the version gate rejects every frame, ping included, so a v9 client reads a v8
+// server as absent and falls back to the maintenance hand-off, which is the pause this
+// removes rather than a wrong answer. The bump is what makes that fallback total
+// instead of leaving the client to discover an unknown-method error partway through a
+// command, matching how mark_missing (v7) and set_played (v8) were added. Adding a
+// method without a bump is also precedent (put_transcript, fetch_transcript,
+// add_root), and is the choice when keeping the other proxied methods working across a
+// version boundary matters more.
+const ProtocolVersion = 9
 
 // Method names for the proxied operations: the fast request/response catalog
 // mutations, the reads a mutating command needs for its confirmation output, the
@@ -87,6 +99,8 @@ const (
 	MethodPlaylistSetRule  = "playlist_set_rule"
 	MethodPutTranscript    = "put_transcript"
 	MethodFetchTranscript  = "fetch_transcript"
+	MethodUnfetch          = "unfetch"
+	MethodPodcastRemove    = "podcast_remove"
 	MethodAddRoot          = "add_root"
 	MethodMaintenanceBegin = "maintenance_begin"
 	MethodMaintenanceEnd   = "maintenance_end"
@@ -509,6 +523,26 @@ type PutTranscriptParams struct {
 // the episode's declared transcript URL runs in the server process.
 type FetchTranscriptParams struct {
 	EpisodePID string `json:"episodePid"`
+}
+
+// UnfetchParams is the unfetch request payload: the episode whose downloaded bytes
+// are to be reclaimed, leaving it remote and re-fetchable.
+type UnfetchParams struct {
+	EpisodePID string `json:"episodePid"`
+}
+
+// UnfetchResult is the unfetch response. Unfetched is false when the episode held no
+// file, which is a no-op rather than an error, so a client needs the flag to tell "I
+// reclaimed these bytes" from "there was nothing to reclaim".
+type UnfetchResult struct {
+	Unfetched      bool  `json:"unfetched"`
+	ReclaimedBytes int64 `json:"reclaimedBytes"`
+}
+
+// PodcastRemoveParams is the podcast_remove request payload: the show to unsubscribe
+// from, deleting its episodes and their downloaded files.
+type PodcastRemoveParams struct {
+	PodcastPID string `json:"podcastPid"`
 }
 
 // AddRootParams is the add_root request payload: a library root spec to

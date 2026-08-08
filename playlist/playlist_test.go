@@ -52,6 +52,14 @@ func (f *fakeStore) PlaylistItems(_ context.Context, pid model.PID, _ model.PID)
 	return out, nil
 }
 
+// CountPlaylistItems ignores narrow: the fake has no query engine, and the service
+// method is a straight delegation, so the narrowing semantics are pinned in
+// store/sqlite where they live.
+func (f *fakeStore) CountPlaylistItems(ctx context.Context, pid model.PID, userPID model.PID, _ query.Node) (int, error) {
+	items, err := f.PlaylistItems(ctx, pid, userPID)
+	return len(items), err
+}
+
 func (f *fakeStore) SetPlaylistItems(_ context.Context, pid model.PID, itemPIDs []model.PID) error {
 	f.members[pid] = append([]model.PID(nil), itemPIDs...)
 	return nil

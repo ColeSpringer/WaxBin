@@ -91,12 +91,12 @@ const (
 // move updated_at), which is what makes last_progress the ordering key for "where was I".
 //
 // The entity-handle fields filter by normalized-entity identity instead of display
-// text, so a facet drilldown can query by the bucket's EntityPID. There are eight, and
+// text, so a facet drilldown can query by the bucket's EntityPID. There are nine, and
 // they split two ways: artist_pid, album_artist_pid, album_pid, release_group_pid,
 // podcast_pid, and library are scalar columns lowered on the value side, while
-// genre_pid and credit_artist_pid are set fields, over item_genre and
-// item_contributor, because those dimensions hold many rows per item (the last
-// paragraph below says why they stay set fields).
+// genre_pid, credit_artist_pid, and playlist_pid are set fields, over item_genre,
+// item_contributor, and playlist_item, because those dimensions hold many rows per
+// item (the paragraphs below say why they stay set fields).
 //
 // The artist exprs share itemArtistIDExpr/itemAlbumArtistIDExpr with the facet specs,
 // so a facet bucket's EntityPID and a pid filter can never disagree (a book matches by
@@ -137,11 +137,48 @@ const (
 // deny-list contract a stale entry needs; see query.Column.ValueSub. A caller
 // scoping visibility by library has to decide what a fileless item means to it.
 //
-// genre_pid and credit_artist_pid stay set fields (tag-field semantics: isNot is a
-// deny-list, ordered operators are rejected) and are deliberately not converted.
-// Their EXISTS correlates on pi.id whatever side the value sits, so lowering would
-// save the per-row join but not the scan, and it would need a second lowering
-// mechanism on SetColumn for no plan change.
+// genre_pid, credit_artist_pid, and playlist_pid stay set fields (set-field
+// semantics: isNot is a deny-list, ordered operators are rejected) and are
+// deliberately not converted. Their EXISTS correlates on pi.id whatever side the
+// value sits, so lowering would save the per-row join but not the scan, and it would
+// need a second lowering mechanism on SetColumn for no plan change. playlist_pid has
+// no scalar form to lower to at all: an item carries no playlist id column.
+//
+// playlist_pid matches static playlist membership only. A smart playlist stores no
+// playlist_item rows, so its pid never matches, which is also what keeps the field
+// non-recursive: a smart rule can reference a playlist without a rule ever evaluating
+// a rule. Matching nothing for a wrong-kind pid is this family's existing contract,
+// the same one stated above for a pid no entity holds. A compiler check is not
+// available, since query.Compile is storage-agnostic by design (see query/query.go)
+// and the value is an untyped any, so checking would mean a database round trip
+// inside the query layer. There is no CLI flag to check in either: like album_mbid,
+// this reaches users through --rule and smart playlists. A consumer building a rule
+// editor should offer only static playlists in its picker.
+//
+// isNot and notIn are the deny-list here, inherited from set-field semantics, so an
+// item in no playlist matches `playlist_pid isNot P`. That is exactly the shape
+// "tracks not in my Archive list" needs.
+//
+// isPresent and isMissing are catalog-wide, not caller-scoped. They compile to
+// EXISTS/NOT EXISTS over the whole playlist_item table, so on a multi-user catalog
+// `playlist_pid isPresent` is true for an item sitting only in another user's private
+// playlist, and isMissing excludes it. The usability trap is the sharper edge: "tracks
+// I have not filed anywhere" is a natural rule and this is not it. The owner-scoped
+// form is `playlist_pid notIn [the caller's playlist pids]`, which already works and
+// puts the visibility decision where the caller's grants live.
+//
+// The field is not owner-scoped where the playlist facet is. Scoping it would need the
+// user at query.Compile time, but fieldMapFor takes no user and all four callers
+// compile before resolving one; threading it in would make every compiled query
+// user-dependent and break faceting on a read-only catalog that never ran
+// ensureDefaultUser (store.go). A pid is an unguessable ULID, so a pid-targeted filter
+// leaks nothing a caller does not already hold.
+//
+// A rule referencing playlist_pid changes membership when the *referenced* playlist
+// changes, which bumps that playlist's updated_at and emits its delta, never the smart
+// playlist's. A consumer memoizing a smart playlist's membership on its own UpdatedAt
+// was already unsound (a `starred is 1` rule changes membership on a star with no
+// playlist write at all); this is one more way.
 //
 // has_art and has_lyrics are presence probes: EXISTS lowered to 0/1, never NULL,
 // so like play_count the presence ops are useless on them; use `is 0` / `is 1`.
@@ -213,6 +250,11 @@ var itemFields = query.FieldMap{
 		Sub: "SELECT 1 FROM item_contributor icq JOIN artist caq ON caq.id = icq.artist_id" +
 			" WHERE icq.item_id = pi.id AND icq.role = 'artist'",
 		ValueExpr: "caq.pid",
+	}},
+	"playlist_pid": {Set: &query.SetColumn{
+		Sub: "SELECT 1 FROM playlist_item pliq JOIN playlist plq ON plq.id = pliq.playlist_id" +
+			" WHERE pliq.item_id = pi.id",
+		ValueExpr: "plq.pid",
 	}},
 
 	// External identifiers. Each COALESCEs to '' so isPresent and isMissing read as

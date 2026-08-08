@@ -248,6 +248,208 @@ func TestFacetHonorsFilter(t *testing.T) {
 	}
 }
 
+// playlistFacetFixture seeds the shape the owner-scoped facet has to get right: the
+// default user's private "Mine" holds A twice plus B, bob owns a shared "BobShared"
+// (B) and a private "BobPrivate" (C), and D sits in no playlist at all.
+func playlistFacetFixture(t *testing.T) (st *Store, bob *model.User, mine, bobShared, bobPrivate model.PID) {
+	t.Helper()
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	a := putTrack(t, st, lib.ID, trackSpec{path: "/lib/a.flac", essence: "ea", content: "ca", title: "A", artist: "X", album: "Al"}).ItemPID
+	b := putTrack(t, st, lib.ID, trackSpec{path: "/lib/b.flac", essence: "eb", content: "cb", title: "B", artist: "X", album: "Al"}).ItemPID
+	c := putTrack(t, st, lib.ID, trackSpec{path: "/lib/c.flac", essence: "ec", content: "cc", title: "C", artist: "X", album: "Al"}).ItemPID
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/d.flac", essence: "ed", content: "cd", title: "D", artist: "X", album: "Al"})
+
+	bob, err := st.CreateUser(ctx, "bob")
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	mkList := func(name string, owner model.PID, vis model.PlaylistVisibility, items ...model.PID) model.PID {
+		t.Helper()
+		pid, err := st.CreatePlaylist(ctx, name, owner, model.PlaylistStatic, vis, nil)
+		if err != nil {
+			t.Fatalf("create %s: %v", name, err)
+		}
+		if err := st.AddPlaylistItems(ctx, pid, items); err != nil {
+			t.Fatalf("add to %s: %v", name, err)
+		}
+		return pid
+	}
+	// A held twice, so the COUNT(DISTINCT pi.id) contract has something to bite on.
+	mine = mkList("Mine", "", model.VisibilityPrivate, a, a, b)
+	bobShared = mkList("BobShared", bob.PID, model.VisibilityShared, b)
+	bobPrivate = mkList("BobPrivate", bob.PID, model.VisibilityPrivate, c)
+	return st, bob, mine, bobShared, bobPrivate
+}
+
+func TestFacetByPlaylist(t *testing.T) {
+	st, _, mine, bobShared, _ := playlistFacetFixture(t)
+	ctx := context.Background()
+
+	res, err := st.Facet(ctx, query.New(query.EntityItems).Build(), read.GroupPlaylist, "", 0, "")
+	if err != nil {
+		t.Fatalf("facet playlist: %v", err)
+	}
+	// A sits at two positions and counts once: COUNT(DISTINCT pi.id), not entries.
+	if b, ok := bucketByDisplay(res, "Mine"); !ok || b.Count != 2 || b.EntityPID != mine {
+		t.Errorf("Mine bucket = %+v, want count 2 keyed by its pid (A is held twice)", b)
+	}
+	if b, ok := bucketByDisplay(res, "BobShared"); !ok || b.Count != 1 || b.EntityPID != bobShared {
+		t.Errorf("BobShared bucket = %+v, want count 1", b)
+	}
+	if b, ok := bucketByDisplay(res, "BobPrivate"); ok {
+		t.Errorf("BobPrivate bucket = %+v, want none (another user's private list)", b)
+	}
+	if len(res.Buckets) != 2 {
+		t.Errorf("buckets = %+v, want just Mine and BobShared", res.Buckets)
+	}
+	for _, b := range res.Buckets {
+		if b.IsUnknown {
+			t.Errorf("unexpected unknown bucket %+v: the dimension has none, so D is absent "+
+				"rather than bucketed", b)
+		}
+		if b.EntityPID == "" {
+			t.Errorf("bucket %+v carries no EntityPID", b)
+		}
+	}
+}
+
+// TestFacetByPlaylistBucketSetVariesByUser is the property no other dimension has:
+// the same query faceted by the same dimension returns a different bucket set per
+// caller.
+func TestFacetByPlaylistBucketSetVariesByUser(t *testing.T) {
+	st, bob, _, bobShared, bobPrivate := playlistFacetFixture(t)
+	ctx := context.Background()
+	all := query.New(query.EntityItems).Build()
+
+	res, err := st.Facet(ctx, all, read.GroupPlaylist, "", 0, bob.PID)
+	if err != nil {
+		t.Fatalf("facet as bob: %v", err)
+	}
+	if b, ok := bucketByDisplay(res, "BobPrivate"); !ok || b.Count != 1 || b.EntityPID != bobPrivate {
+		t.Errorf("BobPrivate bucket as bob = %+v, want count 1", b)
+	}
+	if b, ok := bucketByDisplay(res, "BobShared"); !ok || b.EntityPID != bobShared {
+		t.Errorf("BobShared bucket as bob = %+v, want its own list", b)
+	}
+	if _, ok := bucketByDisplay(res, "Mine"); ok {
+		t.Error("bob sees the default user's private Mine bucket")
+	}
+
+	if _, err := st.Facet(ctx, all, read.GroupPlaylist, "", 0, model.PID("no-such-user")); !waxerr.Is(err, waxerr.CodeNotFound) {
+		t.Errorf("facet for an unknown user = %v, want CodeNotFound", err)
+	}
+}
+
+func TestFacetByPlaylistExcludesSmart(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/a.flac", essence: "ea", content: "ca", title: "A", artist: "X", album: "Al"})
+	rule := query.New(query.EntityItems).Where("artist", query.OpIs, "X").Build()
+	if _, err := st.CreatePlaylist(ctx, "Smart", "", model.PlaylistSmart, "", &rule); err != nil {
+		t.Fatalf("create smart: %v", err)
+	}
+
+	res, err := st.Facet(ctx, query.New(query.EntityItems).Build(), read.GroupPlaylist, "", 0, "")
+	if err != nil {
+		t.Fatalf("facet playlist: %v", err)
+	}
+	if len(res.Buckets) != 0 {
+		t.Errorf("buckets = %+v, want none: a smart playlist stores no membership rows", res.Buckets)
+	}
+}
+
+// TestFacetByPlaylistWithUserFilter is the arg-ordering assertion for the second
+// dimension with joinArgs: the user id binds twice, once for the play_state join and
+// once for the visibility clause, and the WHERE args follow. Any swap makes the
+// visibility clause test a non-id and the facet comes back empty or wrong.
+func TestFacetByPlaylistWithUserFilter(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	a := putTrack(t, st, lib.ID, trackSpec{path: "/lib/a.flac", essence: "ea", content: "ca", title: "A", artist: "X", album: "Al"}).ItemPID
+	b := putTrack(t, st, lib.ID, trackSpec{path: "/lib/b.flac", essence: "eb", content: "cb", title: "B", artist: "X", album: "Al"}).ItemPID
+
+	bob, err := st.CreateUser(ctx, "bob")
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	pl, err := st.CreatePlaylist(ctx, "Bobs", bob.PID, model.PlaylistStatic, model.VisibilityPrivate, nil)
+	if err != nil {
+		t.Fatalf("create playlist: %v", err)
+	}
+	if err := st.AddPlaylistItems(ctx, pl, []model.PID{a, b}); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	if _, err := st.SetStar(ctx, bob.PID, a, true, nil); err != nil {
+		t.Fatalf("star: %v", err)
+	}
+
+	q := query.New(query.EntityItems).
+		Where("starred", query.OpIs, 1).
+		Where("kind", query.OpIs, "track").Build()
+	res, err := st.Facet(ctx, q, read.GroupPlaylist, "", 0, bob.PID)
+	if err != nil {
+		t.Fatalf("facet: %v", err)
+	}
+	if bk, ok := bucketByDisplay(res, "Bobs"); !ok || bk.Count != 1 {
+		t.Fatalf("Bobs bucket = %+v, want count 1 (only A is starred); arg order likely wrong", bk)
+	}
+	if len(res.Buckets) != 1 {
+		t.Errorf("buckets = %+v, want just Bobs:1", res.Buckets)
+	}
+}
+
+// TestFacetByPlaylistDrivesFromPlaylistItem pins the plan the dimension is cheap
+// because of: the drive is playlist_item, not playable_item. The invariant holds
+// without statistics, which is what production and every fixture run with, and it is
+// what a flip to LEFT JOIN would break. SCAN fpl is deliberately not asserted: it
+// appears only after ANALYZE.
+func TestFacetByPlaylistDrivesFromPlaylistItem(t *testing.T) {
+	st, _, _, _, _ := playlistFacetFixture(t)
+	fm, ok := fieldMapFor(query.EntityItems)
+	if !ok {
+		t.Fatal("no field map for items")
+	}
+	c, err := query.Compile(query.New(query.EntityItems).Build(), fm)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	spec, ok := facetSpecFor(read.GroupPlaylist, 1)
+	if !ok {
+		t.Fatal("no playlist facet spec")
+	}
+	stmt := "SELECT " + spec.keyExpr + ", " + spec.display + ", COUNT(DISTINCT pi.id)" +
+		itemJoins + spec.join + " WHERE 1=1 GROUP BY " + spec.groupBy
+	args := append(append([]any{}, spec.joinArgs...), c.Args...)
+	plan := explainPlan(t, st, stmt, args...)
+	if !strings.Contains(plan, "SCAN fpli") {
+		t.Errorf("the playlist facet no longer drives off playlist_item:\n%s", plan)
+	}
+	if strings.Contains(plan, "SCAN pi") {
+		t.Errorf("the playlist facet scans playable_item, which is the cost this dimension "+
+			"exists to avoid (a LEFT JOIN would do this):\n%s", plan)
+	}
+}
+
+// TestFacetSpecUserScopedMatchesFlag keeps read.GroupBy.UserScoped honest against the
+// specs it describes. Without it a future user-scoped dimension that forgets the flag
+// would silently bind userID = 0 and return an empty bucket set instead of an error,
+// and the read package's own test cannot see the specs.
+func TestFacetSpecUserScopedMatchesFlag(t *testing.T) {
+	for _, g := range read.GroupBys() {
+		zero, ok := facetSpecFor(g, 0)
+		if !ok {
+			t.Fatalf("no spec for %s", g)
+		}
+		one, _ := facetSpecFor(g, 1)
+		differs := !reflect.DeepEqual(zero, one)
+		if differs != g.UserScoped() {
+			t.Errorf("%s: spec varies with the user id = %v, but UserScoped() = %v",
+				g, differs, g.UserScoped())
+		}
+	}
+}
+
 func TestFacetRejectsBadGroupBy(t *testing.T) {
 	st, _ := entityFixture(t)
 	if _, err := st.Facet(context.Background(), query.New(query.EntityItems).Build(), read.GroupBy("bogus"), "", 0, ""); err == nil {
@@ -361,6 +563,15 @@ func TestFacetDefaultOrderUnchanged(t *testing.T) {
 	}
 	if _, _, err := st.SetItemTag(ctx, items[0].PID, "MOOD", []string{"calm"}, model.SourceUser, false, false); err != nil {
 		t.Fatalf("set tag: %v", err)
+	}
+	// The playlist dimension needs a default-user playlist or its loop iteration
+	// asserts nothing.
+	pl, err := st.CreatePlaylist(ctx, "Mix", "", model.PlaylistStatic, "", nil)
+	if err != nil {
+		t.Fatalf("create playlist: %v", err)
+	}
+	if err := st.AddPlaylistItems(ctx, pl, []model.PID{items[0].PID}); err != nil {
+		t.Fatalf("add to playlist: %v", err)
 	}
 
 	withUnknown := 0
@@ -554,5 +765,26 @@ func TestQueryPageStableUnderConcurrentInsert(t *testing.T) {
 		if !seen[title] {
 			t.Errorf("item %q present at page-1 time was skipped across pages", title)
 		}
+	}
+}
+
+// TestFacetArgumentErrorsBeatUserLookup pins the error a caller gets when more than one
+// argument is wrong. Resolving the user before validating the dimension and the order
+// masked both with "no such user", sending the caller after the wrong argument.
+func TestFacetArgumentErrorsBeatUserLookup(t *testing.T) {
+	st, _, _, _, _ := playlistFacetFixture(t)
+	ctx := context.Background()
+	all := query.New(query.EntityItems).Build()
+	bogus := model.PID("no-such-user")
+
+	if _, err := st.Facet(ctx, all, read.GroupBy("bogus"), "", 0, bogus); !waxerr.Is(err, waxerr.CodeInvalid) {
+		t.Errorf("bad dimension + bad user = %v, want CodeInvalid naming the dimension", err)
+	}
+	if _, err := st.Facet(ctx, all, read.GroupPlaylist, "bogus-order", 0, bogus); !waxerr.Is(err, waxerr.CodeInvalid) {
+		t.Errorf("bad order + bad user = %v, want CodeInvalid naming the order", err)
+	}
+	// With every other argument sound, the user error is the one that surfaces.
+	if _, err := st.Facet(ctx, all, read.GroupPlaylist, "", 0, bogus); !waxerr.Is(err, waxerr.CodeNotFound) {
+		t.Errorf("bad user alone = %v, want CodeNotFound", err)
 	}
 }

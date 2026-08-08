@@ -201,3 +201,23 @@ func TestUnfetchIgnoresThePin(t *testing.T) {
 		t.Errorf("pinned episode state = %s, want remote", after.Episode.State)
 	}
 }
+
+// TestNilLeaserRunsInline pins the standalone contract: a Service built with no
+// Leaser (which is every test in this package, and any embedder that does not inject
+// one) runs its filesystem verbs directly rather than failing for want of a lease.
+func TestNilLeaserRunsInline(t *testing.T) {
+	ctx := context.Background()
+	svc, _, eps := unfetchFixture(t)
+	if _, err := svc.Download(ctx, eps[0].PID); err != nil {
+		t.Fatalf("download with a nil leaser: %v", err)
+	}
+	if _, err := svc.Unfetch(ctx, eps[0].PID); err != nil {
+		t.Fatalf("unfetch with a nil leaser: %v", err)
+	}
+	if _, err := svc.ApplyRetentionAll(ctx); err != nil {
+		t.Fatalf("retention with a nil leaser: %v", err)
+	}
+	if err := svc.Remove(ctx, eps[0].PodcastPID); err != nil {
+		t.Fatalf("remove with a nil leaser: %v", err)
+	}
+}

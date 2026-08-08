@@ -85,7 +85,7 @@ func newFacetCmd(g *globals) *cobra.Command {
 	f.IntVar(&year, "year", 0, "match year (exact)")
 	f.StringArrayVar(&libraries, "library", nil, "restrict to a library, by pid or registered root path (repeatable)")
 	f.StringVar(&rulePath, "rule", "", "load a JSON rule document (overrides filter flags)")
-	f.StringVar(&user, "user", "", "user pid for per-user fields (e.g. rating, starred, play_count); empty = default user")
+	f.StringVar(&user, "user", "", "user pid for per-user fields (e.g. rating, starred, play_count) and, with --group-by playlist, for which playlists get buckets; empty = default user")
 	f.StringVar(&order, "order", "", "bucket order: label (collation, the default) or count (biggest first)")
 	f.IntVar(&limit, "limit", 0, "return at most N buckets (0 = all)")
 	_ = cmd.MarkFlagRequired("group-by")

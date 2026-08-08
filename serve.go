@@ -446,6 +446,24 @@ func (l *Library) proxyHandlers() map[string]proxy.Handler {
 			// The fetch runs in this (server) process, under its network policy.
 			return nil, l.podcasts.FetchTranscript(ctx, model.PID(p.EpisodePID))
 		},
+		proxy.MethodUnfetch: func(ctx context.Context, raw json.RawMessage) (any, error) {
+			p, err := decodeParams[proxy.UnfetchParams](raw)
+			if err != nil {
+				return nil, err
+			}
+			res, err := l.podcasts.Unfetch(ctx, model.PID(p.EpisodePID))
+			if err != nil {
+				return nil, err
+			}
+			return proxy.UnfetchResult{Unfetched: res.Unfetched, ReclaimedBytes: res.ReclaimedBytes}, nil
+		},
+		proxy.MethodPodcastRemove: func(ctx context.Context, raw json.RawMessage) (any, error) {
+			p, err := decodeParams[proxy.PodcastRemoveParams](raw)
+			if err != nil {
+				return nil, err
+			}
+			return nil, l.podcasts.Remove(ctx, model.PID(p.PodcastPID))
+		},
 		proxy.MethodAddRoot: func(ctx context.Context, raw json.RawMessage) (any, error) {
 			p, err := decodeParams[proxy.AddRootParams](raw)
 			if err != nil {

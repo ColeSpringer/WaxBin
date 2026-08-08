@@ -57,6 +57,19 @@ type Action struct {
 type Plan struct {
 	Mode    model.DeleteMode
 	Actions []Action
+	// SkippedPodcast counts items a caller dropped before planning because they are
+	// podcast episodes, where `podcast unfetch` owns the bytes. Plan never sets it; the
+	// caller does (see Library.PlanDelete), and the guard stays there rather than
+	// moving into Plan because the two Library entry points need opposite answers:
+	// PlanDelete skips so a mixed sweep still runs, while PlanDeletePIDs refuses,
+	// because the caller named the item and a silent skip would lie. A Plan-side guard
+	// could only ever skip.
+	//
+	// It is carried through to Report so a sweep can say what it did not cover instead
+	// of reporting a smaller total with no explanation. The waxbin CLI has no
+	// query-driven delete, so nothing there reads it yet; PlanDelete is a facade API
+	// and an embedder driving a sweep is the consumer.
+	SkippedPodcast int
 }
 
 // Pending returns the number of actions that would actually delete.
@@ -78,6 +91,10 @@ type Report struct {
 	Errored        int
 	ReclaimedBytes int64
 	Failures       []Failure
+	// SkippedPodcast is the plan's count carried through, so a report reads as a
+	// complete account of the matched set. Skipped counts planned actions the
+	// execution skipped; these never became actions at all.
+	SkippedPodcast int
 }
 
 // Failure records one deletion that could not be applied.
@@ -126,7 +143,7 @@ func (s *Service) Plan(ctx context.Context, libs []*model.Library, items []*mode
 // the run. Trash moves are same-volume renames (the trash lives under the root);
 // pruning/permanent deletes remove the file outright and tally reclaimed bytes.
 func (s *Service) Execute(ctx context.Context, plan *Plan) (*Report, error) {
-	rep := &Report{}
+	rep := &Report{SkippedPodcast: plan.SkippedPodcast}
 	for i := range plan.Actions {
 		if ctx.Err() != nil {
 			return rep, waxerr.FromContext("trash.Execute", ctx.Err(), waxerr.CodeIO)

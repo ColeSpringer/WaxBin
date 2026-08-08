@@ -96,7 +96,8 @@ func emitDeleteReport(cmd *cobra.Command, g *globals, plan *trash.Plan, rep *tra
 			Errored        int             `json:"errored"`
 			ReclaimedBytes int64           `json:"reclaimedBytes"`
 			Failures       []trash.Failure `json:"failures,omitempty"`
-		}{string(plan.Mode), rep.Trashed, rep.Deleted, rep.Skipped, rep.Errored, rep.ReclaimedBytes, rep.Failures})
+		}{string(plan.Mode), rep.Trashed, rep.Deleted, rep.Skipped, rep.Errored,
+			rep.ReclaimedBytes, rep.Failures})
 	}
 	w := out(cmd)
 	fmt.Fprintf(w, "Deleted (mode %s): trashed %d, removed %d, skipped %d, errored %d, reclaimed %d bytes\n",

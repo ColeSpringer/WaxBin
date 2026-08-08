@@ -122,6 +122,20 @@ func TestEntityPIDFieldsMirrorFacets(t *testing.T) {
 		title: "A Wizard of Earthsea", author: "Ursula K. Le Guin", genres: []string{"Fantasy"}})
 	putFeed(t, st, "http://cast.example/f", "Ep1", "Ep2")
 
+	// A default-user playlist, so the playlist row of the mirror table below has a
+	// bucket to check rather than passing vacuously.
+	all, err := st.QueryItems(ctx, query.New(query.EntityItems).Build(), "")
+	if err != nil || len(all) == 0 {
+		t.Fatalf("items = %d (err %v)", len(all), err)
+	}
+	mine, err := st.CreatePlaylist(ctx, "Mine", "", model.PlaylistStatic, model.VisibilityPrivate, nil)
+	if err != nil {
+		t.Fatalf("create playlist: %v", err)
+	}
+	if err := st.AddPlaylistItems(ctx, mine, []model.PID{all[0].PID, all[1].PID}); err != nil {
+		t.Fatalf("add to playlist: %v", err)
+	}
+
 	// The mirror guarantee: for every entity-keyed facet bucket, filtering by the
 	// matching pid field returns exactly the bucket's count. The facet specs and
 	// the pid fields share their entity expressions, which is what keeps the two
@@ -137,6 +151,11 @@ func TestEntityPIDFieldsMirrorFacets(t *testing.T) {
 		{read.GroupReleaseGroup, "release_group_pid"},
 		{read.GroupGenre, "genre_pid"},
 		{read.GroupPodcast, "podcast_pid"},
+		// The playlist dimension holds too, even though its buckets are owner-scoped
+		// and the field is not: scoping selects which playlists get buckets, never
+		// which items land in one. The loop is one-directional, so the divergence is
+		// pinned separately below.
+		{read.GroupPlaylist, "playlist_pid"},
 	} {
 		res, err := st.Facet(ctx, query.New(query.EntityItems).Build(), mirror.group, "", 0, "")
 		if err != nil {
@@ -174,6 +193,33 @@ func TestEntityPIDFieldsMirrorFacets(t *testing.T) {
 	// Albums are track-only, so the book and both episodes read NULL there.
 	if n := countWhere(t, st, "album_pid", query.OpIsMissing, nil); n != 3 {
 		t.Errorf("album_pid isMissing = %d, want 3 (the book and two episodes)", n)
+	}
+
+	// Where the playlist mirror stops: another user's private playlist has a non-zero
+	// playlist_pid count and no bucket at all, which is the one asymmetry the
+	// bucket-walking loop above cannot see.
+	bob, err := st.CreateUser(ctx, "bob")
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	hidden, err := st.CreatePlaylist(ctx, "BobPrivate", bob.PID, model.PlaylistStatic, model.VisibilityPrivate, nil)
+	if err != nil {
+		t.Fatalf("create bob's playlist: %v", err)
+	}
+	if err := st.AddPlaylistItems(ctx, hidden, []model.PID{all[2].PID}); err != nil {
+		t.Fatalf("add to bob's playlist: %v", err)
+	}
+	if n := countWhere(t, st, "playlist_pid", query.OpIs, string(hidden)); n != 1 {
+		t.Errorf("playlist_pid is bob's private list = %d, want 1", n)
+	}
+	res, err := st.Facet(ctx, query.New(query.EntityItems).Build(), read.GroupPlaylist, "", 0, "")
+	if err != nil {
+		t.Fatalf("facet playlist: %v", err)
+	}
+	for _, b := range res.Buckets {
+		if b.EntityPID == hidden {
+			t.Errorf("bob's private playlist has a bucket for the default user: %+v", b)
+		}
 	}
 }
 
@@ -672,6 +718,85 @@ func TestGenrePIDSetSemantics(t *testing.T) {
 	}
 }
 
+// TestPlaylistPIDSetSemantics pins the field's contract: static membership only, isNot
+// as a deny-list, and presence catalog-wide rather than caller-scoped. The second
+// user's private playlist is in the fixture so the documented boundary is asserted and
+// not only described.
+func TestPlaylistPIDSetSemantics(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	a := putTrack(t, st, lib.ID, trackSpec{path: "/lib/a.flac", essence: "ea", content: "ca", title: "A", artist: "X", album: "Al"}).ItemPID
+	b := putTrack(t, st, lib.ID, trackSpec{path: "/lib/b.flac", essence: "eb", content: "cb", title: "B", artist: "X", album: "Al"}).ItemPID
+	c := putTrack(t, st, lib.ID, trackSpec{path: "/lib/c.flac", essence: "ec", content: "cc", title: "C", artist: "X", album: "Al"}).ItemPID
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/d.flac", essence: "ed", content: "cd", title: "D", artist: "X", album: "Al"})
+
+	mine, err := st.CreatePlaylist(ctx, "Mine", "", model.PlaylistStatic, "", nil)
+	if err != nil {
+		t.Fatalf("create static: %v", err)
+	}
+	if err := st.AddPlaylistItems(ctx, mine, []model.PID{a, b}); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	bob, err := st.CreateUser(ctx, "bob")
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	hidden, err := st.CreatePlaylist(ctx, "BobPrivate", bob.PID, model.PlaylistStatic, model.VisibilityPrivate, nil)
+	if err != nil {
+		t.Fatalf("create bob's playlist: %v", err)
+	}
+	if err := st.AddPlaylistItems(ctx, hidden, []model.PID{c}); err != nil {
+		t.Fatalf("add to bob's playlist: %v", err)
+	}
+	rule := query.New(query.EntityItems).Where("artist", query.OpIs, "X").Build()
+	smart, err := st.CreatePlaylist(ctx, "Smart", "", model.PlaylistSmart, "", &rule)
+	if err != nil {
+		t.Fatalf("create smart: %v", err)
+	}
+
+	if n := countWhere(t, st, "playlist_pid", query.OpIs, string(mine)); n != 2 {
+		t.Errorf("playlist_pid is Mine = %d, want 2", n)
+	}
+	// isNot is the deny-list: an item in no playlist matches, an item in Mine does not.
+	if n := countWhere(t, st, "playlist_pid", query.OpIsNot, string(mine)); n != 2 {
+		t.Errorf("playlist_pid isNot Mine = %d, want 2 (bob's item and the unfiled one)", n)
+	}
+	// Presence is catalog-wide, so an item held only in another user's private
+	// playlist reads present here even though it gets no facet bucket.
+	if n := countWhere(t, st, "playlist_pid", query.OpIsPresent, nil); n != 3 {
+		t.Errorf("playlist_pid isPresent = %d, want 3 (bob's private member counts)", n)
+	}
+	if n := countWhere(t, st, "playlist_pid", query.OpIsMissing, nil); n != 1 {
+		t.Errorf("playlist_pid isMissing = %d, want 1 (the unfiled track)", n)
+	}
+	if n := countValuesWhere(t, st, "playlist_pid", query.OpIn, string(mine), string(hidden)); n != 3 {
+		t.Errorf("playlist_pid in [Mine, BobPrivate] = %d, want 3", n)
+	}
+	if n := countValuesWhere(t, st, "playlist_pid", query.OpNotIn, string(mine)); n != 2 {
+		t.Errorf("playlist_pid notIn [Mine] = %d, want 2", n)
+	}
+	// A smart playlist stores no playlist_item rows, so its pid matches nothing. That
+	// is what keeps a rule referencing this field from ever evaluating another rule.
+	if n := countWhere(t, st, "playlist_pid", query.OpIs, string(smart)); n != 0 {
+		t.Errorf("playlist_pid is a smart playlist = %d, want 0", n)
+	}
+	if n := countWhere(t, st, "playlist_pid", query.OpIsNot, string(smart)); n != 4 {
+		t.Errorf("playlist_pid isNot a smart playlist = %d, want every item", n)
+	}
+	for _, op := range []query.Op{query.OpGt, query.OpLt, query.OpGte, query.OpLte} {
+		_, err := st.QueryItems(ctx, query.New(query.EntityItems).
+			Where("playlist_pid", op, string(mine)).Build(), "")
+		if !waxerr.Is(err, waxerr.CodeInvalid) {
+			t.Errorf("playlist_pid %s: want CodeInvalid, got %v", op, err)
+		}
+	}
+	_, err = st.QueryItems(ctx, query.New(query.EntityItems).
+		OrderBy("playlist_pid", false).Build(), "")
+	if !waxerr.Is(err, waxerr.CodeInvalid) {
+		t.Errorf("sorting by playlist_pid: want CodeInvalid, got %v", err)
+	}
+}
+
 func TestLibraryFieldAndFacet(t *testing.T) {
 	st, lib := entityFixture(t)
 	ctx := context.Background()
@@ -972,5 +1097,48 @@ func TestSmartRuleRoundTripsNewFields(t *testing.T) {
 	}
 	if len(items) != 1 || items[0].PID != covered {
 		t.Errorf("smart membership = %v, want just the covered track", titlesOf(items))
+	}
+}
+
+// TestSmartRuleRoundTripsPlaylistPID is the "tracks not in my Archive list" shape
+// stored as a rule: it survives the marshal/parse round trip and evaluates as a
+// deny-list against the referenced static playlist.
+func TestSmartRuleRoundTripsPlaylistPID(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	filed := putTrack(t, st, lib.ID, trackSpec{path: "/lib/1.flac", essence: "e1", content: "c1",
+		title: "Filed", artist: "X", album: "Al"}).ItemPID
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/2.flac", essence: "e2", content: "c2",
+		title: "Loose", artist: "X", album: "Al"})
+
+	archive, err := st.CreatePlaylist(ctx, "Archive", "", model.PlaylistStatic, "", nil)
+	if err != nil {
+		t.Fatalf("create archive: %v", err)
+	}
+	if err := st.AddPlaylistItems(ctx, archive, []model.PID{filed}); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+
+	rule := query.New(query.EntityItems).
+		Where("playlist_pid", query.OpIsNot, string(archive)).
+		Build()
+	data, err := query.MarshalRule(rule)
+	if err != nil {
+		t.Fatalf("marshal rule: %v", err)
+	}
+	parsed, err := query.ParseRule(data)
+	if err != nil {
+		t.Fatalf("parse rule: %v", err)
+	}
+	pl, err := st.CreatePlaylist(ctx, "Unfiled", "", model.PlaylistSmart, "", &parsed)
+	if err != nil {
+		t.Fatalf("create smart playlist: %v", err)
+	}
+	items, err := st.PlaylistItems(ctx, pl, "")
+	if err != nil {
+		t.Fatalf("playlist items: %v", err)
+	}
+	if len(items) != 1 || items[0].Title != "Loose" {
+		t.Errorf("membership = %v, want just the unfiled track", titlesOf(items))
 	}
 }

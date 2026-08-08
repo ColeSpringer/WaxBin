@@ -26,6 +26,7 @@ type Store interface {
 	SetPlaylistVisibility(ctx context.Context, pid model.PID, vis model.PlaylistVisibility) error
 	SetPlaylistRule(ctx context.Context, pid model.PID, rule query.Query) error
 	PlaylistItems(ctx context.Context, pid model.PID, userPID model.PID) ([]*model.ItemView, error)
+	CountPlaylistItems(ctx context.Context, pid model.PID, userPID model.PID, narrow query.Node) (int, error)
 	AddPlaylistItems(ctx context.Context, pid model.PID, itemPIDs []model.PID) error
 	SetPlaylistItems(ctx context.Context, pid model.PID, itemPIDs []model.PID) error
 	RemovePlaylistItem(ctx context.Context, pid model.PID, itemPID model.PID) error
@@ -68,6 +69,36 @@ func (s *Service) Get(ctx context.Context, pid model.PID) (*model.Playlist, erro
 // The user is bound at read time and never stored in the rule.
 func (s *Service) Items(ctx context.Context, pid model.PID, userPID model.PID) ([]*model.ItemView, error) {
 	return s.store.PlaylistItems(ctx, pid, userPID)
+}
+
+// CountItems returns how many of a playlist's members also match narrow, without
+// hydrating them. A nil narrow counts every member. The contract is exact: the result
+// equals the number of rows Items(pid, userPID) returns that satisfy narrow, for both
+// playlist kinds and whatever limit or offset a smart rule carries.
+//
+// Three "playlist count" semantics now exist, and a static playlist holding A twice
+// plus B reports 3, 2, 3:
+//
+//	model.Playlist.ItemCount  COUNT(*) entries    static only, no user, no narrow
+//	the playlist facet bucket COUNT(DISTINCT)     narrowed, owner-scoped, static only
+//	CountItems                COUNT(*) entries    narrowed, both kinds, per-user
+//
+// COUNT(*) is what the stated contract requires here, so this is documentation rather
+// than a semantics change.
+//
+// This is the single-playlist answer; the facet is the fan-out answer. A caller
+// looping this over many playlists should use Library.Facet with read.GroupPlaylist
+// and the same narrow as the query instead, which returns the narrowed count for every
+// visible static playlist in one query, owner-scoped to that caller. The split is
+// intentional rather than redundant: the facet excludes smart playlists, which store no
+// membership rows, and it counts distinct items where this counts entries.
+//
+// One case cannot be exact. A random-limited rule with no seed draws a fresh order per
+// evaluation, so with a non-nil narrow the count evaluates one draw and a following
+// Items call is a different draw. With a nil narrow the answer is min(matches, limit)
+// and stays stable, and a seeded or budget-mode rule is deterministic.
+func (s *Service) CountItems(ctx context.Context, pid model.PID, userPID model.PID, narrow query.Node) (int, error) {
+	return s.store.CountPlaylistItems(ctx, pid, userPID, narrow)
 }
 
 // Delete removes a playlist.

@@ -23,6 +23,21 @@ func TestGroupByValidAcceptsTagDimensions(t *testing.T) {
 	}
 }
 
+// TestGroupByUserScopedIsPlaylistOnly is the consumer-facing half of the caching
+// contract: every other dimension may be keyed by (query, dimension) alone. The
+// store-side half, that the flag matches the specs, is
+// TestFacetSpecUserScopedMatchesFlag.
+func TestGroupByUserScopedIsPlaylistOnly(t *testing.T) {
+	for _, g := range GroupBys() {
+		if want := g == GroupPlaylist; g.UserScoped() != want {
+			t.Errorf("%q.UserScoped() = %v, want %v", g, g.UserScoped(), want)
+		}
+	}
+	if GroupBy("tag.MOOD").UserScoped() {
+		t.Error("a custom-tag dimension should not be user-scoped")
+	}
+}
+
 func TestTagGroupKeyCanonicalizes(t *testing.T) {
 	if k, ok := TagGroupKey("tag.mood"); !ok || k != "MOOD" {
 		t.Errorf("TagGroupKey(tag.mood) = (%q,%v), want (MOOD,true)", k, ok)

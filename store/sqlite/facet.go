@@ -14,7 +14,9 @@ import (
 
 // facetSpec is the SQL recipe for one faceting dimension: how to join the
 // dimension to the item base, what to group by, and how to render each bucket.
-// An absent key (NULL) is mapped to the canonical unknown sentinel.
+// An absent key (NULL) is mapped to the canonical unknown sentinel. A spec is a
+// function of the dimension alone, except on the user-scoped dimensions, where
+// joinArgs also carries the calling user's id (see facetSpecFor).
 type facetSpec struct {
 	// join is the extra join(s) this dimension needs, aliased to avoid clashing with
 	// itemJoins. Empty when the dimension reads the item base directly (year, kind) or
@@ -46,7 +48,13 @@ const (
 	onlyEpisodes = "pi.kind = 'episode'"
 )
 
-func facetSpecFor(g read.GroupBy) (facetSpec, bool) {
+// facetSpecFor returns the SQL recipe for one dimension. userID is the resolved
+// calling user and is read only by the dimensions read.GroupBy.UserScoped reports,
+// which today is GroupPlaylist alone; every other spec ignores it and is a pure
+// function of g. TestFacetSpecUserScopedMatchesFlag pins that correspondence, so a
+// new user-scoped dimension cannot silently bind a zero id and return an empty
+// bucket set.
+func facetSpecFor(g read.GroupBy, userID int64) (facetSpec, bool) {
 	switch g {
 	case read.GroupGenre:
 		return facetSpec{
@@ -140,6 +148,50 @@ func facetSpecFor(g read.GroupBy) (facetSpec, bool) {
 			groupBy: "ep.podcast_id", keyExpr: "fpod.pid", display: "fpod.title", sortExpr: "fpod.sort_key",
 			entity: true, kindWhere: onlyEpisodes,
 		}, true
+	case read.GroupPlaylist:
+		// The only dimension whose bucket set varies by user: a playlist contributes
+		// when the caller owns it or it is shared. That visibility clause is a listing
+		// filter and not an access boundary. It matches what ListPlaylists applies,
+		// while PlaylistByPID, PlaylistItems and every mutator stay unscoped and
+		// model.Playlist defers ACLs past v1.0, so nothing multi-tenant should be built
+		// on it.
+		//
+		// The measured plan, with no ANALYZE (which is production and every fixture),
+		// drives off a full scan of playlist_item and applies the visibility filter at
+		// the fpl rowid seek, so the cost is O(all playlist entries) plus three temp
+		// b-trees. That is still the cheapest dimension here, because playlist_item is
+		// small next to playable_item. Reordering the join text changes nothing, since
+		// SQLite reorders freely; only a CROSS JOIN with playlist leading the FROM
+		// clause forces the seek, and facetSpec appends after itemJoins by design.
+		//
+		// No unknown bucket, for three reasons and the third is decisive: it matches the
+		// tag dimension's membership shape, a LEFT JOIN would turn the playlist_item
+		// drive into a full playable_item scan, and under owner scoping "[Not in a
+		// Playlist]" would mean "in no playlist you can see", making a catalog-shaped
+		// number user-varying. The complement stays expressible as `playlist_pid
+		// isMissing`, which is catalog-wide (see the itemFields header).
+		//
+		// Static only, structurally: a smart playlist stores no playlist_item rows and
+		// every membership writer goes through staticPlaylistIDTx, so no kind guard is
+		// needed. Bucket labels can collide across owners because playlist has no
+		// sort_key, so display and sort are both the name and the caller's private
+		// "Favorites" renders like someone else's shared one; EntityPID disambiguates.
+		// ListPlaylists avoids this by ordering on the owner name and carrying
+		// OwnerName, which read.Bucket has no room for.
+		//
+		// The shared COUNT(DISTINCT pi.id) means an item held at two positions counts
+		// once here, where CountPlaylistItems counts entries. See the count triangle on
+		// playlist.CountItems.
+		//
+		// kindWhere is empty: a playlist holds tracks, books and episodes alike.
+		return facetSpec{
+			join: " INNER JOIN playlist_item fpli ON fpli.item_id = pi.id" +
+				" INNER JOIN playlist fpl ON fpl.id = fpli.playlist_id" +
+				" AND (fpl.owner_user_id = ? OR fpl.visibility = 'shared')",
+			joinArgs: []any{userID},
+			groupBy:  "fpl.id", keyExpr: "fpl.pid", display: "fpl.name", sortExpr: "fpl.name",
+			entity:   true,
+		}, true
 	}
 	// A custom-tag dimension: group items by the values of one tag key. The INNER JOIN
 	// means only items carrying the key contribute (correct for a value browse
@@ -169,6 +221,11 @@ func facetSpecFor(g read.GroupBy) (facetSpec, bool) {
 // over a per-user field scopes to userPID's play_state (empty selects the
 // default user).
 //
+// userPID also selects the bucket set on a dimension read.GroupBy.UserScoped
+// reports, which is GroupPlaylist alone: two users faceting the same query by
+// playlist see different playlists. On every other dimension the buckets are a
+// function of the query, so userPID reaches only the per-user filters.
+//
 // order selects the bucket order (empty = collation order; see read.FacetOrder) and
 // limit truncates the result (<= 0 = every bucket). Together they are the top-N
 // shelf: `facet artist --order count --limit 5`.
@@ -185,8 +242,7 @@ func (s *Store) Facet(ctx context.Context, q query.Query, g read.GroupBy, order 
 	if !ok {
 		return nil, waxerr.New(waxerr.CodeInvalid, op, "unsupported query entity: "+string(q.Entity))
 	}
-	spec, ok := facetSpecFor(g)
-	if !ok {
+	if !g.Valid() {
 		return nil, waxerr.New(waxerr.CodeInvalid, op, "unsupported group-by: "+string(g))
 	}
 	if !order.Valid() {
@@ -199,6 +255,27 @@ func (s *Store) Facet(ctx context.Context, q query.Query, g read.GroupBy, order 
 	userJoin, leadArgs, err := s.userStateJoin(ctx, c, userPID, op)
 	if err != nil {
 		return nil, err
+	}
+
+	// Resolve the user id only for a dimension whose bucket set needs it. A read-only
+	// catalog never opened read-write has no user row (ensureDefaultUser runs on a
+	// read-write Open), and faceting by genre has to keep working there, which is the
+	// same reason userStateJoin resolves one only when the compiled query asks.
+	//
+	// Every argument-shaped error is already returned above, so a caller passing both a
+	// bogus dimension and a bogus user gets CodeInvalid naming the dimension rather
+	// than "no such user", which would send them after the wrong argument.
+	var userID int64
+	if g.UserScoped() {
+		id, uerr := userIDByPID(ctx, s.read, userPID, op)
+		if uerr != nil {
+			return nil, uerr
+		}
+		userID = id
+	}
+	spec, ok := facetSpecFor(g, userID)
+	if !ok {
+		return nil, waxerr.New(waxerr.CodeInvalid, op, "unsupported group-by: "+string(g))
 	}
 	where := andWhere(andWhere(c.Where, entityPredicate(q.Entity)), spec.kindWhere)
 	if where == "" {

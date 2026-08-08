@@ -25,7 +25,20 @@ type UnfetchResult struct {
 // Disk first, like ApplyRetention: a crash between the two steps leaves the next
 // Unfetch to skip the missing file and finish the catalog half. Catalog-first
 // would orphan the bytes with nothing pointing at them.
+//
+// The whole function holds the podcast filesystem lease, so a concurrent retention
+// pass or unsubscribe cannot unlink the same file between the read and the remove.
 func (s *Service) Unfetch(ctx context.Context, episodePID model.PID) (*UnfetchResult, error) {
+	var res *UnfetchResult
+	err := s.lease(ctx, func(ctx context.Context) error {
+		r, err := s.unfetch(ctx, episodePID)
+		res = r
+		return err
+	})
+	return res, err
+}
+
+func (s *Service) unfetch(ctx context.Context, episodePID model.PID) (*UnfetchResult, error) {
 	const op = "podcast.Unfetch"
 	d, err := s.store.EpisodeByPID(ctx, episodePID)
 	if err != nil {

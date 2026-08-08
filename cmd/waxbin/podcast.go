@@ -476,12 +476,12 @@ func newPodcastUnfetchCmd(g *globals) *cobra.Command {
 			"episode that is not downloaded is a no-op.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			lib, _, err := g.open(cmd)
+			m, _, err := g.openMutator(cmd)
 			if err != nil {
 				return err
 			}
-			defer lib.Close()
-			res, err := lib.Podcasts().Unfetch(ctx(cmd), model.PID(args[0]))
+			defer m.Close()
+			res, err := m.Unfetch(ctx(cmd), model.PID(args[0]))
 			if err != nil {
 				return err
 			}
@@ -569,12 +569,12 @@ func newPodcastRemoveCmd(g *globals) *cobra.Command {
 		Short: "Unsubscribe and delete a podcast's episodes and downloads",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			lib, _, err := g.open(cmd)
+			m, _, err := g.openMutator(cmd)
 			if err != nil {
 				return err
 			}
-			defer lib.Close()
-			if err := lib.Podcasts().Remove(ctx(cmd), model.PID(args[0])); err != nil {
+			defer m.Close()
+			if err := m.PodcastRemove(ctx(cmd), model.PID(args[0])); err != nil {
 				return err
 			}
 			fmt.Fprintln(out(cmd), "Unsubscribed.")

@@ -5,6 +5,7 @@ import (
 	"os"
 	"text/tabwriter"
 
+	"github.com/colespringer/waxbin"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/playlist"
 	"github.com/colespringer/waxbin/query"
@@ -67,25 +68,48 @@ func newPlaylistListCmd(g *globals) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			counts, err := playlistCounts(cmd, lib, pls, model.PID(user))
+			if err != nil {
+				return err
+			}
 			if g.jsonOut {
-				return printJSON(cmd, playlistViews(pls))
+				return printJSON(cmd, playlistViews(pls, counts))
 			}
 			tw := tabwriter.NewWriter(out(cmd), 0, 2, 2, ' ', 0)
 			fmt.Fprintln(tw, "PID\tNAME\tKIND\tOWNER\tVIS\tITEMS")
 			for _, p := range pls {
-				// A smart playlist's membership is computed on read, so its stored count
-				// is 0; show "-" rather than mislead the reader into thinking it is empty.
-				count := fmt.Sprintf("%d", p.ItemCount)
-				if p.Kind == model.PlaylistSmart {
-					count = "-"
-				}
-				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", p.PID, p.Name, p.Kind, p.OwnerName, p.Visibility, count)
+				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%d\n",
+					p.PID, p.Name, p.Kind, p.OwnerName, p.Visibility, counts[p.PID])
 			}
 			return tw.Flush()
 		},
 	}
 	cmd.Flags().StringVar(&user, "user", "", "viewer user pid (empty = default user)")
 	return cmd
+}
+
+// playlistCounts resolves each listed playlist's member count, keyed by pid, for both
+// the table and the JSON view so the two cannot disagree.
+//
+// A static playlist reuses the count ListPlaylists already selected, which is the same
+// COUNT(*) over entries CountItems would run. Only a smart playlist costs a call, and
+// there it is unavoidable: its membership is the rule, so its size is not known until
+// the rule is evaluated. Calling CountItems for every row would instead turn one query
+// into one per playlist for no new information.
+func playlistCounts(cmd *cobra.Command, lib *waxbin.Library, pls []*model.Playlist, user model.PID) (map[model.PID]int, error) {
+	counts := make(map[model.PID]int, len(pls))
+	for _, p := range pls {
+		if p.Kind != model.PlaylistSmart {
+			counts[p.PID] = p.ItemCount
+			continue
+		}
+		n, err := lib.Playlists().CountItems(ctx(cmd), p.PID, user, nil)
+		if err != nil {
+			return nil, err
+		}
+		counts[p.PID] = n
+	}
+	return counts, nil
 }
 
 func newPlaylistShowCmd(g *globals) *cobra.Command {
@@ -109,7 +133,10 @@ func newPlaylistShowCmd(g *globals) *cobra.Command {
 				return err
 			}
 			if g.jsonOut {
-				return printJSON(cmd, map[string]any{"playlist": toPlaylistView(pl), "items": itemViews(items)})
+				// len(items) is the count the text branch prints, and for a smart
+				// playlist it is the only true one; pl.ItemCount reads 0 there.
+				return printJSON(cmd, map[string]any{
+					"playlist": toPlaylistView(pl, len(items)), "items": itemViews(items)})
 			}
 			fmt.Fprintf(out(cmd), "%s (%s, %s) - %d items\n", pl.Name, pl.Kind, pl.Visibility, len(items))
 			tw := tabwriter.NewWriter(out(cmd), 0, 2, 2, ' ', 0)

@@ -466,17 +466,21 @@ type playlistView struct {
 	HasArt     bool   `json:"hasArt"`
 }
 
-func toPlaylistView(p *model.Playlist) playlistView {
+// toPlaylistView takes the count rather than reading model.Playlist.ItemCount, which
+// is always 0 for a smart playlist because its membership is computed on read. The
+// caller has already resolved the real number for its text output, so passing it in is
+// what keeps --json from reporting 0 where the table reports 42.
+func toPlaylistView(p *model.Playlist, count int) playlistView {
 	return playlistView{
 		PID: string(p.PID), Name: p.Name, Owner: p.OwnerName, Kind: string(p.Kind),
-		Visibility: string(p.Visibility), ItemCount: p.ItemCount, HasArt: p.HasArt,
+		Visibility: string(p.Visibility), ItemCount: count, HasArt: p.HasArt,
 	}
 }
 
-func playlistViews(pls []*model.Playlist) []playlistView {
+func playlistViews(pls []*model.Playlist, counts map[model.PID]int) []playlistView {
 	out := make([]playlistView, 0, len(pls))
 	for _, p := range pls {
-		out = append(out, toPlaylistView(p))
+		out = append(out, toPlaylistView(p, counts[p.PID]))
 	}
 	return out
 }

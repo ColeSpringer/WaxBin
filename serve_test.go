@@ -843,3 +843,82 @@ func hasUsernamed(users []*model.User, name string) bool {
 	}
 	return false
 }
+
+// TestServeProxiedPodcastUnfetchAndRemove drives the two v9 methods end to end. Both
+// used to take the maintenance hand-off, which paused the whole server for what is a
+// short leased mutation; over the socket the server stays up and the episode still
+// comes back remote rather than archived.
+func TestServeProxiedPodcastUnfetchAndRemove(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	podDir := t.TempDir()
+	acq := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	sock := testsock.Path(t)
+
+	lib, err := waxbin.Open(ctx, waxbin.Options{
+		DBPath:    db,
+		Roots:     []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}},
+		Podcasts:  config.PodcastConfig{Dir: podDir},
+		IPCSocket: sock,
+	})
+	if err != nil {
+		t.Fatalf("open served library: %v", err)
+	}
+	serveLib(t, ctx, lib, sock)
+	c := dialWhenReady(t, sock)
+
+	epFile := filepath.Join(acq, "ep.mp3")
+	writeFile(t, epFile, testaudio.BuildMP3WithAudio("Ep One", "Host", "Show", 1, testaudio.AudioWithSeed(5)))
+	res, err := lib.ImportAcquired(ctx, waxbin.AcquiredFile{Path: epFile}, model.KindEpisode, waxbin.AcquiredMeta{
+		ShowTitle: "Served Show", SourceType: model.SourceManual, Title: "Ep One",
+	})
+	if err != nil {
+		t.Fatalf("import episode: %v", err)
+	}
+	before, err := lib.Podcasts().Episode(ctx, res.EpisodePID)
+	if err != nil {
+		t.Fatalf("Episode: %v", err)
+	}
+	path := before.Episode.DisplayPath
+
+	got, err := c.Unfetch(ctx, res.EpisodePID)
+	if err != nil {
+		t.Fatalf("proxied unfetch: %v", err)
+	}
+	if !got.Unfetched || got.ReclaimedBytes <= 0 {
+		t.Errorf("proxied unfetch = %+v, want the bytes reclaimed", got)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("the episode file survives at %s", path)
+	}
+	after, err := lib.Podcasts().Episode(ctx, res.EpisodePID)
+	if err != nil {
+		t.Fatalf("Episode after: %v", err)
+	}
+	if after.Episode.Downloaded || after.Episode.State != model.StateRemote {
+		t.Errorf("episode = %+v, want remote and not downloaded", after.Episode)
+	}
+	// A second unfetch is a no-op, not an error, and the flag is what says so.
+	again, err := c.Unfetch(ctx, res.EpisodePID)
+	if err != nil {
+		t.Fatalf("second proxied unfetch: %v", err)
+	}
+	if again.Unfetched || again.ReclaimedBytes != 0 {
+		t.Errorf("second proxied unfetch = %+v, want a no-op", again)
+	}
+	// An unknown episode keeps its class across the wire.
+	if _, err := c.Unfetch(ctx, model.PID("no-such-episode")); !waxerr.Is(err, waxerr.CodeNotFound) {
+		t.Errorf("proxied unfetch of an unknown episode = %v, want CodeNotFound", err)
+	}
+
+	if err := c.PodcastRemove(ctx, before.Episode.PodcastPID); err != nil {
+		t.Fatalf("proxied podcast remove: %v", err)
+	}
+	if _, err := lib.Podcasts().Get(ctx, before.Episode.PodcastPID); !waxerr.Is(err, waxerr.CodeNotFound) {
+		t.Errorf("show after proxied remove = %v, want CodeNotFound", err)
+	}
+	if err := c.PodcastRemove(ctx, before.Episode.PodcastPID); !waxerr.Is(err, waxerr.CodeNotFound) {
+		t.Errorf("proxied remove of an already-removed show = %v, want CodeNotFound", err)
+	}
+}

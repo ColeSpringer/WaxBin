@@ -6,6 +6,7 @@ import (
 	"github.com/colespringer/waxbin"
 	"github.com/colespringer/waxbin/config"
 	"github.com/colespringer/waxbin/model"
+	"github.com/colespringer/waxbin/podcast"
 	"github.com/colespringer/waxbin/proxy"
 	"github.com/colespringer/waxbin/query"
 )
@@ -327,6 +328,26 @@ func (m *mutator) FetchTranscript(ctx context.Context, episodePID model.PID) err
 		return m.px.FetchTranscript(ctx, episodePID)
 	}
 	return m.lib.Podcasts().FetchTranscript(ctx, episodePID)
+}
+
+func (m *mutator) Unfetch(ctx context.Context, episodePID model.PID) (*podcast.UnfetchResult, error) {
+	if m.px != nil {
+		res, err := m.px.Unfetch(ctx, episodePID)
+		if err != nil {
+			return nil, err
+		}
+		return &podcast.UnfetchResult{
+			EpisodePID: episodePID, Unfetched: res.Unfetched, ReclaimedBytes: res.ReclaimedBytes,
+		}, nil
+	}
+	return m.lib.Podcasts().Unfetch(ctx, episodePID)
+}
+
+func (m *mutator) PodcastRemove(ctx context.Context, podcastPID model.PID) error {
+	if m.px != nil {
+		return m.px.PodcastRemove(ctx, podcastPID)
+	}
+	return m.lib.Podcasts().Remove(ctx, podcastPID)
 }
 
 func (m *mutator) AddRoot(ctx context.Context, spec config.Root) (*model.Library, error) {

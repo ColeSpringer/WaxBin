@@ -171,7 +171,7 @@ func CompileAt(q Query, fields Fields, now time.Time) (*Compiled, error) {
 			}
 			if col.Set != nil {
 				return nil, waxerr.New(waxerr.CodeInvalid, "query.Compile",
-					fmt.Sprintf("cannot sort by a tag field %q", s.Field))
+					fmt.Sprintf("cannot sort by a set field %q", s.Field))
 			}
 			if col.ValueSub != "" {
 				// The Expr of a lowered column is an internal id, so ordering by it
@@ -550,7 +550,7 @@ func compileSetCond(c Cond, set *SetColumn, sb *strings.Builder, args *[]any) er
 		*args = append(*args, "%"+likePattern(c.Value))
 	default:
 		return waxerr.New(waxerr.CodeInvalid, "query.Compile",
-			fmt.Sprintf("operator %q not supported on a tag field", c.Op))
+			fmt.Sprintf("operator %q not supported on a set field", c.Op))
 	}
 	return nil
 }
