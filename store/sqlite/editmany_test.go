@@ -20,18 +20,27 @@ func twoTrackFixture(t *testing.T) (*Store, *model.Library, model.PID, model.PID
 		path: "/lib/B/1/01.flac", essence: "e2", content: "c2",
 		title: "Two", artist: "Beta", albumArt: "Beta", album: "Second", genre: "Rock",
 	})
-	var p1, p2 string
 	rows, err := st.read.QueryContext(context.Background(),
 		"SELECT pid FROM playable_item WHERE kind='track' ORDER BY id")
 	if err != nil {
 		t.Fatalf("pids: %v", err)
 	}
 	defer rows.Close()
-	rows.Next()
-	rows.Scan(&p1)
-	rows.Next()
-	rows.Scan(&p2)
-	return st, lib, model.PID(p1), model.PID(p2)
+	var pids []model.PID
+	for rows.Next() {
+		var pid string
+		if err := rows.Scan(&pid); err != nil {
+			t.Fatalf("scan pid: %v", err)
+		}
+		pids = append(pids, model.PID(pid))
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterating pids: %v", err)
+	}
+	if len(pids) != 2 {
+		t.Fatalf("track pids = %d, want 2", len(pids))
+	}
+	return st, lib, pids[0], pids[1]
 }
 
 func TestEditManyFieldsApplies(t *testing.T) {

@@ -29,6 +29,9 @@ func allEntityPIDs(t *testing.T, st *Store, kind read.EntityKind) []model.PID {
 		}
 		out = append(out, model.PID(pid))
 	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterating %s pids: %v", kind, err)
+	}
 	return out
 }
 

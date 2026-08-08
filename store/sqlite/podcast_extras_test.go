@@ -131,6 +131,9 @@ func TestPodcasting20IdenticalReSyncIsSilent(t *testing.T) {
 				}
 				ids = append(ids, id)
 			}
+			if err := rows.Err(); err != nil {
+				t.Fatalf("iterating rowids: %v", err)
+			}
 			rows.Close()
 		}
 		return ids
