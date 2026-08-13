@@ -1,0 +1,32 @@
+* text=auto eol=lf
+
+# Declared outright instead of leaving them to Git's text detection, which can
+# misread a file that looks binary in its first few kilobytes.
+*.go   text eol=lf
+*.mod  text eol=lf
+*.sum  text eol=lf
+*.sql  text eol=lf
+*.md   text eol=lf
+*.yml  text eol=lf
+*.yaml text eol=lf
+*.json text eol=lf
+*.sh   text eol=lf
+
+# Audio and art fixtures move byte for byte, never through a filter.
+*.aac  binary
+*.aif  binary
+*.aiff binary
+*.ape  binary
+*.flac binary
+*.m4a  binary
+*.m4b  binary
+*.mp3  binary
+*.ogg  binary
+*.opus binary
+*.wav  binary
+*.wv   binary
+*.gif  binary
+*.jpeg binary
+*.jpg  binary
+*.png  binary
+*.webp binary
