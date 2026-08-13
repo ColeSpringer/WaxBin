@@ -95,10 +95,9 @@ type Library struct {
 	jobsWG sync.WaitGroup
 
 	// rootMu serializes runtime root-set mutations (AddRoot, RelocateRoot) so each
-	// validates against the registered set and writes its row atomically. Without
-	// it two concurrent proxy connections could each validate before the other's
-	// row lands and both commit overlapping roots, the exact state Open's
-	// validation forbids. Root mutations are rare, so a coarse mutex is free.
+	// validates against the registered set and writes its row atomically. Without it,
+	// two concurrent proxy connections could each validate before the other's row lands
+	// and both commit overlapping roots, the state Open's validation forbids.
 	rootMu sync.Mutex
 }
 
@@ -201,15 +200,13 @@ func Open(ctx context.Context, opts Options) (*Library, error) {
 	return l, nil
 }
 
-// Close flushes buffered playback progress, then releases the catalog and write
-// lock. The flush is best effort: shutdown should save resume positions, but a
-// flush error should not block release. Read-only handles skip the flush.
+// Close flushes buffered playback progress, then releases the catalog and write lock.
+// The flush is best effort, since a flush error should not block release, and a
+// read-only handle skips it.
 //
-// It first drains any in-flight server-run jobs so they finalize against the
-// still-open store; otherwise a shutdown mid-scan would leave a job row stuck
-// "running" (reclaimed as crashed only on a later open). The jobs run under a
-// server's lifetime context, so a shutdown that cancels that context makes them
-// return promptly.
+// It first drains any in-flight server-run jobs so they finalize against the still-open
+// store; otherwise a shutdown mid-scan leaves a job row stuck "running", reclaimed as
+// crashed only on a later open.
 func (l *Library) Close() error {
 	l.jobsWG.Wait()
 	if l.playback != nil && !l.ReadOnly() {
@@ -241,21 +238,17 @@ func (l *Library) Libraries(ctx context.Context) ([]*model.Library, error) {
 	return l.store.Libraries(ctx)
 }
 
-// AddRoot registers a library root at runtime, without reopening the Library.
-// The spec is validated against every root already registered (plus the
-// configured inbox folders and podcast download dir), exactly as Open validates
-// the configured set, then upserted: a new path emits a `library` create delta,
-// and re-adding an existing path refreshes its mode/media/profile under the
-// same pid. Spec defaults match config loading (in-place, mixed, waxbin-native).
+// AddRoot registers a library root at runtime, without reopening the Library. The
+// spec is validated against every root already registered exactly as Open validates
+// the configured set, then upserted: a new path emits a `library` create delta, and
+// re-adding an existing path refreshes its mode/media/profile under the same pid.
+// Spec defaults match config loading (in-place, mixed, waxbin-native).
 //
-// The store is the single source of truth for roots. Scan, organize, and import
-// resolve libraries from store rows, so they pick the new root up immediately,
-// and the row survives a process restart even if the embedder never adds the
-// root to its own configuration: a later Open validates only its configured
-// roots against each other and re-upserts them, never pruning rows absent from
-// the config. A running Watch does NOT pick the root up, because watch
-// snapshots its roots at start; restart the watcher after adding one. The
-// create delta on the change feed is the machine-readable signal for that.
+// The store is the single source of truth for roots, so scan, organize, and import
+// pick the new root up immediately and the row survives a restart even if the embedder
+// never adds it to its own configuration. A running Watch does not pick it up, since
+// watch snapshots its roots at start; the create delta on the change feed is the signal
+// to restart the watcher.
 func (l *Library) AddRoot(ctx context.Context, spec config.Root) (*model.Library, error) {
 	if l.ReadOnly() {
 		return nil, waxerr.New(waxerr.CodeUnsupported, "Library.AddRoot", "adding a root requires a read-write library")
@@ -277,29 +270,22 @@ func (l *Library) AddRoot(ctx context.Context, spec config.Root) (*model.Library
 	})
 }
 
-// validateRootSet validates candidate against every registered root except the
-// one the mutation lands on, reusing config.Validate so a runtime root mutation
-// obeys the same rules as Open: absolute, non-overlapping roots that also avoid
-// the inbox folders and the podcast download dir. The registered set comes from
-// store.Libraries rather than l.opts.Roots, because the store is authoritative
-// once AddRoot can grow it beyond the configured set.
+// validateRootSet validates candidate against every registered root except the one
+// the mutation lands on, reusing config.Validate so a runtime root mutation obeys the
+// same rules as Open. The registered set comes from store.Libraries rather than
+// l.opts.Roots, because the store is authoritative once AddRoot can grow it beyond
+// the configured set. It returns the candidate normalized.
 //
-// The excluded row is identified by replaceLibPID for a relocation, and by the
-// candidate's own path when replaceLibPID is empty (an add: EnsureLibrary
-// upserts by that path key, so a re-add refreshes policy instead of colliding
-// with itself). The two are deliberately not combined: relocating onto another
+// The excluded row is replaceLibPID for a relocation, and the candidate's own path
+// for an add (EnsureLibrary upserts by that key, so a re-add refreshes policy instead
+// of colliding with itself). Not combined, deliberately: relocating onto another
 // library's exact path is a genuine overlap and must keep that row in the set.
 //
-// The internal podcast library is not a config.Root (its "podcast" mode fails
-// Mode.Valid), so it cannot ride in cfg.Roots. It is checked two ways: config
-// validation compares the candidate to cfg.Podcasts (the configured dir), and a
-// direct overlap check compares it to the podcast library ROW's stored root.
-// The row's root is authoritative and covers the case the configured dir does
-// not: a process opened with Podcasts.Dir unset (or pointing elsewhere) while a
-// podcast row persists from a prior run, where relying on cfg.Podcasts alone
-// would let a root nest inside the download tree and scan episodes as music.
-//
-// Returns the candidate normalized (absolute, cleaned, defaults applied).
+// The internal podcast library is not a config.Root, so it cannot ride in cfg.Roots.
+// It is checked twice: config validation against cfg.Podcasts, and a direct overlap
+// check against the podcast library row's stored root. The row is authoritative and
+// covers what the configured dir does not, a process opened with Podcasts.Dir unset
+// while a podcast row persists from a prior run.
 func (l *Library) validateRootSet(ctx context.Context, replaceLibPID model.PID, candidate config.Root) (config.Root, error) {
 	const op = "Library.validateRootSet"
 	libs, err := l.store.Libraries(ctx)
@@ -353,15 +339,14 @@ func (l *Library) validateRootSet(ctx context.Context, replaceLibPID model.PID, 
 }
 
 // Query runs a compiled selection and returns matching item views. A query that
-// references a per-user field (starred, starred_at, rating, play_count, played,
-// finished, position_ms, last_played, or last_progress) evaluates against userPID's
-// play_state. An empty userPID selects the default user. A query with no user-state
-// field is not scoped by user.
+// references a per-user field (starred, rating, play_count, played, finished,
+// position_ms, last_played, and the rest) evaluates against userPID's play_state, where
+// an empty userPID selects the default user. A query with no user-state field is not
+// scoped by user.
 //
-// position_ms is the in-progress predicate: `position_ms gt 0` paired with
-// `finished is 0` selects what a consumer would call "continue listening", and is the
-// only way to tell a started item from one merely opened. For the ordered, paginated
-// form of that same set, Browse the in-progress list instead.
+// position_ms is the in-progress predicate: `position_ms gt 0` with `finished is 0` is
+// "continue listening", and the only way to tell a started item from one merely opened.
+// Browse the in-progress list for the ordered, paginated form.
 func (l *Library) Query(ctx context.Context, q query.Query, userPID model.PID) ([]*model.ItemView, error) {
 	return l.store.QueryItems(ctx, q, userPID)
 }
@@ -372,16 +357,14 @@ func (l *Library) Count(ctx context.Context, q query.Query, userPID model.PID) (
 	return l.store.CountItems(ctx, q, userPID)
 }
 
-// Facet groups the items matching q by a dimension and counts each bucket. The
-// CLI, OpenSubsonic adapters, and stats code use this same API, so they share
-// one canonical grouping result. userPID scopes any per-user filter in q, and on a
-// dimension read.GroupBy.UserScoped reports (GroupPlaylist alone) it also selects
-// which buckets exist.
+// Facet groups the items matching q by a dimension and counts each bucket. userPID
+// scopes any per-user filter in q, and on a dimension read.GroupBy.UserScoped reports
+// (GroupPlaylist alone) it also selects which buckets exist.
 //
-// order picks the bucket order (empty = collation order) and limit truncates the
-// result (<= 0 = every bucket), which together give a top-N shelf. limit bounds only
-// what is returned: the aggregation still covers the whole match set, so it is not a
-// way to page a facet. Use EntityPage for an index over a large dimension.
+// order picks the bucket order (empty = collation order) and limit truncates the result
+// (<= 0 = every bucket), which together give a top-N shelf. limit bounds only what is
+// returned, not what is aggregated, so it is not a way to page a facet. Use EntityPage
+// for an index over a large dimension.
 func (l *Library) Facet(ctx context.Context, q query.Query, g read.GroupBy, order read.FacetOrder, limit int, userPID model.PID) (*read.FacetResult, error) {
 	return l.store.Facet(ctx, q, g, order, limit, userPID)
 }
@@ -395,48 +378,38 @@ func (l *Library) QueryPage(ctx context.Context, q query.Query, cursor read.Curs
 }
 
 // Browse returns one keyset-paginated window for a discovery list such as newest,
-// recently-added, most-played, recently-played, random, starred, by-year,
-// by-genre, alphabetical, recent-episodes, or in-progress. Play-derived lists read opt.UserPID's
-// play_state (empty selects the default user). The by-year, by-genre, and random
-// lists use opt.Year, opt.GenrePID, and opt.Seed respectively.
-// Pagination is stable under concurrent mutation.
+// recently-added, most-played, random, by-year, or in-progress. Play-derived lists
+// read opt.UserPID's play_state (empty selects the default user); by-year, by-genre,
+// and random use opt.Year, opt.GenrePID, and opt.Seed. Pagination is stable under
+// concurrent mutation.
 //
 // Most lists span every kind. The two that do not are counterparts, each ordering by
 // something only its own kinds carry: newest covers tracks and books by release year,
-// and recent-episodes covers episodes by publication date across every feed.
-// recently-added is the kind-agnostic recency list. See read.DiscoveryList.Kinds to
-// avoid offering a media-type filter a list cannot answer.
+// recent-episodes covers episodes by publication date. See read.DiscoveryList.Kinds
+// to avoid offering a media-type filter a list cannot answer.
 //
-// opt.Query scopes any list to the items it matches, through the same filter engine
-// Query and QueryPage use, so a discovery list can be narrowed to a facet bucket, a
-// media type, or a per-user state while keeping its own ordering. The list owns the
-// order, so the query's own sort/limit/offset are ignored. Browse owns the ordering
-// vocabulary, QueryPage owns sort_key ordering, and the two share the filter engine.
+// opt.Query scopes any list to the items it matches, through the filter engine Query
+// uses. The list owns the order, so the query's own sort/limit/offset are ignored.
 func (l *Library) Browse(ctx context.Context, list read.DiscoveryList, opt read.BrowseOptions) (*read.Page, error) {
 	return l.store.BrowsePage(ctx, list, opt)
 }
 
-// Search runs a grouped, BM25-ranked search across artists, albums, tracks,
-// books, and episodes (episode transcript-body hits rank below metadata hits).
-// Field weighting puts title hits above artist and album hits. opt.MaxCandidates
-// bounds how many matches are ranked (recency-biased under truncation),
-// opt.Libraries scopes the search to items playable from those libraries, and
-// opt.States narrows it to items in those lifecycle states; see
-// read.SearchOptions for all three contracts.
+// Search runs a grouped, BM25-ranked search across artists, albums, tracks, books,
+// and episodes (transcript-body hits rank below metadata hits). Field weighting puts
+// title hits above artist and album hits. opt.MaxCandidates bounds how many matches
+// are ranked, opt.Libraries and opt.States scope the search; see read.SearchOptions
+// for those contracts.
 func (l *Library) Search(ctx context.Context, q string, opt read.SearchOptions) (*read.SearchResult, error) {
 	return l.store.Search(ctx, q, opt)
 }
 
-// ResolveArt resolves artwork for an entity in one role (empty = front). The
-// front cover walks the fallback chain (track -> album -> release_group -> artist
-// -> genre, or episode -> podcast) to the first level that has one; every other
-// role (back, disc, booklet, background) resolves at the requested level only,
-// since an ancestor's auxiliary image would be misleading. A playlist has no
-// ancestry, so every role on one resolves at the playlist itself or not at all.
-// A non-positive size returns the original
-// image; a positive size returns a thumbnail scaled to fit a square box with that
-// maximum side (generated once and cached). The blob reports the answering Level
-// and whether an album's answer was Derived from a member track's cover.
+// ResolveArt resolves artwork for an entity in one role (empty = front). The front
+// cover walks the fallback chain (track -> album -> release_group -> artist -> genre,
+// or episode -> podcast) to the first level that has one. Every other role (back,
+// disc, booklet, background) resolves at the requested level only, since an
+// ancestor's auxiliary image would be misleading, and a playlist has no ancestry at
+// all. A non-positive size returns the original image; a positive one returns a
+// thumbnail fitted to a square box of that side, generated once and cached.
 // CodeNotFound means no consulted level has art in that role.
 func (l *Library) ResolveArt(ctx context.Context, ref model.EntityRef, role model.ArtRole, size int) (*model.ArtBlob, error) {
 	return l.store.ResolveArt(ctx, ref, role, size)
@@ -482,20 +455,17 @@ func (l *Library) File(ctx context.Context, filePID model.PID) (*model.File, err
 // GetMany returns item views for the given pids in input order, skipping any pid
 // with no matching item and collapsing a duplicate pid to its first position.
 //
-// It is NOT an atomic snapshot: a pid array longer than the internal batch size is
-// read across multiple SELECTs, so a concurrent write between batches can yield a
-// mixed view. A UI list can feed from it; a caller that needs a consistent view of
-// every pid at one instant cannot.
+// It is not an atomic snapshot: a pid array longer than the internal batch size is
+// read across several SELECTs, so a concurrent write between batches yields a mixed
+// view. Fine for a UI list, not for a caller needing every pid at one instant.
 func (l *Library) GetMany(ctx context.Context, pids []model.PID) ([]*model.ItemView, error) {
 	return l.store.ItemsByPIDs(ctx, pids)
 }
 
-// ItemsByEssence returns every item backed by a file with the given audio
-// essence hash, matching any of an item's files. The essence hash is
-// tag-stable (it survives a retag), which makes it the dedup oracle: "do I
-// already hold this audio". The result is 0, 1, or N items; a single-file CUE
-// album returns one item per virtual track carved from the shared file. A
-// clean miss is an empty slice, not an error.
+// ItemsByEssence returns every item backed by a file with the given audio essence
+// hash. The hash survives a retag, which makes it the dedup oracle for "do I already
+// hold this audio". A single-file CUE album returns one item per virtual track carved
+// from the shared file. A clean miss is an empty slice, not an error.
 func (l *Library) ItemsByEssence(ctx context.Context, essence string) ([]*model.ItemView, error) {
 	return l.store.ItemsByEssence(ctx, essence)
 }
@@ -550,32 +520,28 @@ func (l *Library) BooksInSeries(ctx context.Context, seriesPID model.PID) ([]*mo
 	return l.store.BooksInSeries(ctx, seriesPID)
 }
 
-// EntityByPID returns the summary info for one shared entity (artist, release
-// group, album, genre, or series) by its public id: name, sort key, external
-// identifiers, parent links, membership counts, and the libraries its members'
-// files live in. It answers the pid a facet bucket, an entity-handle query
-// field, or an item view hands out, without a facet scan. An unknown kind is
-// CodeInvalid; an unknown pid is CodeNotFound.
+// EntityByPID returns the summary info for one shared entity (artist, release group,
+// album, genre, or series): name, sort key, external identifiers, parent links,
+// membership counts, and the libraries its members' files live in. It answers the pid a
+// facet bucket or an item view hands out, without a facet scan. An unknown kind is
+// CodeInvalid, an unknown pid CodeNotFound.
 func (l *Library) EntityByPID(ctx context.Context, kind read.EntityKind, pid model.PID) (*read.EntityInfo, error) {
 	return l.store.EntityByPID(ctx, kind, pid)
 }
 
-// EntityByPIDs is the batched form of EntityByPID: it returns summary info for many
-// entities of one kind keyed by pid, omitting unknown pids and collapsing a repeated
-// pid. It retires the per-hit EntityByPID cost when a consumer hydrates a page of
-// entity pids (a restricted-user entity search that scopes each hit to the user's
-// libraries, for instance). The caller batches within a single kind; a set larger
-// than one internal chunk is not an atomic snapshot across chunks.
+// EntityByPIDs is the batched form of EntityByPID: summary info for many entities of
+// one kind keyed by pid, omitting unknown pids and collapsing a repeated one. It
+// retires the per-hit cost when a consumer hydrates a page of entity pids. One kind per
+// call, and a set larger than one internal chunk is not an atomic snapshot.
 func (l *Library) EntityByPIDs(ctx context.Context, kind read.EntityKind, pids []model.PID) (map[model.PID]*read.EntityInfo, error) {
 	return l.store.EntityByPIDs(ctx, kind, pids)
 }
 
-// EntityPage enumerates one kind's entities in collation order, keyset-paginated:
-// pass an empty cursor for the first page and the returned Next for each subsequent
-// one. It is the alphabetical index over a large dimension that a facet cannot be,
-// since paging a facet would re-run the whole aggregation per page. Each entry is
-// the same summary EntityByPID returns; see read.EntityPage for how its rollup-based
-// counts differ from a facet's bucket counts.
+// EntityPage enumerates one kind's entities in collation order, keyset-paginated: an
+// empty cursor for the first page, the returned Next for each one after. It is the
+// alphabetical index a facet cannot be, since paging a facet would re-run the whole
+// aggregation per page. See read.EntityPage for how its rollup-based counts differ from
+// a facet's bucket counts.
 func (l *Library) EntityPage(ctx context.Context, kind read.EntityKind, cursor read.Cursor, limit int) (*read.EntityPage, error) {
 	return l.store.EntityPage(ctx, kind, cursor, limit)
 }
@@ -593,16 +559,13 @@ func (l *Library) Changes(ctx context.Context, sinceSeq int64) ([]model.Change, 
 }
 
 // LatestChangeSeq returns the sequence number at the tail of the change feed, so a
-// consumer can find where the feed currently ends without pulling a page of changes.
-// An empty feed is 0.
+// consumer can find where the feed ends without pulling a page of changes. An empty
+// feed is 0.
 //
-// Read it before a bootstrap read and resume from it afterwards, not the other way
-// round. There is no atomic snapshot-plus-seq here, so the natural reading is the
-// wrong one: a seq taken after the read silently drops everything committed during
-// it, permanently, while a seq taken before only redelivers those deltas, which is
-// harmless. The feed is at-least-once under that pattern. It is the same
-// order-first contract Subscribe has, where the subscription is registered before
-// the priming read.
+// Read it before a bootstrap read and resume from it afterwards, never the other way
+// round. There is no atomic snapshot-plus-seq, so a seq taken after the read
+// permanently drops everything committed during it, while one taken before merely
+// redelivers those deltas. Same order-first contract as Subscribe.
 func (l *Library) LatestChangeSeq(ctx context.Context) (int64, error) {
 	return l.store.LatestChangeSeq(ctx)
 }
@@ -623,14 +586,11 @@ func (l *Library) DataVersion(ctx context.Context) (int64, error) {
 // ratings, stars, bookmarks, queue, and play sessions.
 func (l *Library) Playback() *playback.Service { return l.playback }
 
-// PlayStatesForItems returns every user's playback state for each of the given
-// items, keyed by item pid, each item's states ordered by user pid. Untouched
-// and unknown items are absent. It goes through the playback service, so this
-// process's buffered (not yet flushed) resume positions are overlaid; a reader
-// in another process sees flushed state only, and a buffered-but-unflushed pair
-// may synthesize a position-only state (see playback.Service.StatesForItems for
-// the exact contract). It is the bulk "is anyone using these" read a multi-user
-// consumer runs before dropping items.
+// PlayStatesForItems returns every user's playback state for each of the given items,
+// keyed by item pid and ordered by user pid. Untouched and unknown items are absent.
+// It goes through the playback service, so this process's buffered resume positions
+// are overlaid while another process sees flushed state only; see
+// playback.Service.StatesForItems for the exact contract.
 func (l *Library) PlayStatesForItems(ctx context.Context, itemPIDs []model.PID) (map[model.PID][]model.PlayState, error) {
 	return l.playback.StatesForItems(ctx, itemPIDs)
 }
@@ -686,21 +646,15 @@ type ScanRequest struct {
 }
 
 // fsMutateScope is the shared lease scope held by every job that mutates files on
-// disk (scan, organize, import, and trash moves), so at most one filesystem
-// mutator runs at a time. Leases are per-scope, and scan and organize would
-// otherwise use different scopes and not exclude each other, letting a watch rescan
-// race an in-flight organize. Read-only passes (analyze, enrich) keep their own
-// scopes so they can still overlap a scan.
+// disk (scan, organize, import, and trash moves), so at most one filesystem mutator
+// runs at a time. Leases are per-scope, so separate scopes here would let a watch
+// rescan race an in-flight organize. Read-only passes (analyze, enrich) keep their
+// own scopes and can still overlap a scan.
 //
-// podcastFSScope is its sibling for the podcast download tree. The two are separate
-// because they cover disjoint trees: fsMutateScope serializes mutators of the user
-// library trees, which scan, organize and the trash family walk, and none of them
-// enter the podcast tree (resolveLibraries and managedLibraries drop ModePodcast, and
-// the trash family refuses it; see inPodcastLibrary). Putting the podcast verbs on
-// fsMutateScope would make them fail during a scan that provably cannot touch their
-// files, a regression on today's behavior for no safety gain.
-//
-// ImportEpisodeFile is the one verb spanning both trees and takes both, always
+// podcastFSScope is its sibling for the podcast download tree. They are separate
+// because the trees are disjoint: nothing on fsMutateScope enters the podcast tree,
+// so sharing one scope would only make the podcast verbs fail during a scan that
+// cannot touch their files. ImportEpisodeFile spans both trees and takes both,
 // fsMutateScope first (see fsLeaser.LeaseImport).
 const (
 	fsMutateScope  = "fs-mutate"
@@ -738,12 +692,9 @@ type ScanResult struct {
 	Runs   []scan.Result
 }
 
-// Scan indexes the selected libraries under a single "scan"-scoped job.
-//
-// Rollups are maintained transactionally for the entities touched by each scanned
-// track, so no whole-catalog refresh is needed here; RefreshRollups is the repair
-// path for drift reported by `db verify`. StartScan is the asynchronous variant a
-// server exposes so a CLI can submit a scan without pausing it.
+// Scan indexes the selected libraries under a single "scan"-scoped job. Rollups are
+// maintained transactionally per scanned track, so no whole-catalog refresh is needed
+// here. StartScan is the asynchronous variant a server exposes.
 func (l *Library) Scan(ctx context.Context, req ScanRequest) (*ScanResult, error) {
 	libs, err := l.resolveLibraries(ctx, req.LibraryPID)
 	if err != nil {
@@ -805,22 +756,19 @@ type WatchOptions struct {
 	OnActivity func(WatchActivity)
 }
 
-// Watch runs a foreground watcher that keeps the catalog in sync with the
-// filesystem until ctx is canceled (returning a CodeCanceled error on a clean
-// shutdown). It refuses on a read-only library.
+// Watch runs a foreground watcher that keeps the catalog in sync with the filesystem
+// until ctx is canceled (returning a CodeCanceled error on a clean shutdown). It
+// refuses on a read-only library.
 //
-// WATCH IS A FOREGROUND MODE. A read-write WaxBin holds an exclusive advisory lock
-// on the catalog for the whole process lifetime, so while watch runs, every OTHER
-// mutating command in another terminal (organize, analyze, enrich, import, scan
-// --force) is refused (read-only queries are always allowed). Stop the watcher to do
-// manual mutation, or run waxbin serve instead when other terminals need to mutate
-// concurrently: it proxies mutations over a local control socket (see Library.Serve).
-// Idle lock release is deliberately post-1.0.
+// It is a foreground mode, and a read-write WaxBin holds the catalog's exclusive
+// advisory lock for the process lifetime, so while it runs every other mutating
+// command in another terminal is refused (read-only queries are always allowed).
+// Stop the watcher to mutate manually, or run waxbin serve, which proxies mutations
+// over a local control socket. Idle lock release is deliberately post-1.0.
 //
-// The watched roots are snapshotted here, at start. A root registered later
-// through AddRoot is scanned and organized (those resolve roots per run) but not
-// watched until the watcher restarts; the root's create delta on the change feed
-// is the signal to do so.
+// The watched roots are snapshotted at start. A root registered later through AddRoot
+// is scanned and organized but not watched until the watcher restarts; its create
+// delta on the change feed is the signal to do so.
 func (l *Library) Watch(ctx context.Context, opts WatchOptions) error {
 	if l.ReadOnly() {
 		return waxerr.New(waxerr.CodeUnsupported, "Library.Watch", "watch requires a read-write library")
@@ -861,8 +809,7 @@ func (e *watchEngine) Rescan(ctx context.Context, libPID model.PID, subPath stri
 	}
 	t := res.Total
 	// A live .lrc/.cue edit mutates the catalog without touching the audio bytes, so it
-	// bumps SidecarsUpdated and NOT ItemsUpdated (ContentChanged is false either way,
-	// on the fast path and the full path alike). Include it, or a sidecar-only change
+	// bumps SidecarsUpdated but not ItemsUpdated. Include it, or a sidecar-only change
 	// reports changed=false and every downstream scheduler is silently skipped.
 	changed := t.ItemsCreated > 0 || t.ItemsUpdated > 0 || t.Relinked > 0 || t.Missing > 0 || t.SidecarsUpdated > 0
 	return changed, nil
@@ -914,13 +861,11 @@ func (e *watchEngine) SyncSources(ctx context.Context) error {
 	return nil
 }
 
-// EnrichOptions controls a metadata enrichment run. ItemPID or EntityType+
-// EntityPID (mutually exclusive) scope the pass to one item's or entity's
-// enrichable targets: a track scopes to its artist, album artist, release group,
-// and lyrics; a book to its contributors and identifier fill; an entity scope
-// takes artist, release_group, or album (an album resolves to its parent release
-// group). A scoped run implies Force and runs the full pipeline for its targets,
-// provenance, markers, and change deltas included.
+// EnrichOptions controls a metadata enrichment run. ItemPID or EntityType+EntityPID
+// (mutually exclusive) scope the pass to one item's or entity's enrichable targets: a
+// track to its artist, album artist, release group, and lyrics; a book to its
+// contributors and identifier fill; an entity to artist, release_group, or album (an
+// album resolves to its parent release group). A scoped run implies Force.
 type EnrichOptions struct {
 	Force bool // re-enrich already-enriched entities
 	Limit int  // cap on entities processed (0 = all needing enrichment)
@@ -962,15 +907,12 @@ func (l *Library) enrichScope(ctx context.Context, op string, opts EnrichOptions
 	}
 }
 
-// Enrich runs the metadata enrichment pass under an "enrich"-scoped job:
-// MusicBrainz release-group/artist/genre resolution (MBID-first), Cover Art Archive
-// covers, and the optional AcoustID fingerprint fallback. It is resumable and
-// lock-respecting (never overwriting a tagged or user-locked field), caches
-// provider responses, and degrades gracefully offline. Enrichment requires a
-// MusicBrainz contact (Options.Enrichment.Contact); without one it returns
-// CodeUnsupported. A scoped run (see EnrichOptions) holds the same "enrich" job
-// lease as a full pass, so the two exclude each other (CodeConflict while one
-// runs).
+// Enrich runs the metadata enrichment pass under an "enrich"-scoped job: MusicBrainz
+// release-group/artist/genre resolution (MBID-first), Cover Art Archive covers, and
+// the optional AcoustID fallback. It is resumable and lock-respecting, caches provider
+// responses, and degrades gracefully offline. It needs a MusicBrainz contact
+// (Options.Enrichment.Contact) or returns CodeUnsupported. A scoped run holds the same
+// lease as a full pass, so the two exclude each other.
 func (l *Library) Enrich(ctx context.Context, opts EnrichOptions) (*EnrichResult, error) {
 	out := &EnrichResult{}
 	if !l.enricher.Enabled() {
@@ -1002,11 +944,10 @@ type AltEncoding struct {
 }
 
 const (
-	// altMinSharedTerms is the inverted-index candidate threshold. It is
-	// deliberately low: the index needs high recall, while full-fingerprint
-	// similarity below is the precision filter. The 30-bit shingle terms are
-	// selective enough that an unrelated track in the same duration bucket
-	// usually shares none, so the low threshold does not flood verification.
+	// altMinSharedTerms is the inverted-index candidate threshold, deliberately low:
+	// the index needs recall, and full-fingerprint similarity below is the precision
+	// filter. The 30-bit shingle terms are selective enough that the low threshold
+	// does not flood verification.
 	altMinSharedTerms  = 2
 	altSimilarityFloor = 0.7 // full-vector bit-agreement threshold
 )
@@ -1060,11 +1001,10 @@ func (l *Library) Loudness(ctx context.Context, itemPID model.PID) (*model.Loudn
 // Peaks returns the stored waveform overview of an item's representative primary
 // backing file, or CodeNotFound.
 //
-// For a multi-file audiobook that is one part out of many, and which part is not
-// reading order: the primary is the first part attached on the create path, or the
-// lowest-positioned survivor after a primary is detached. Neither rule guarantees
-// part one, and the two disagree with each other. Use PeaksForItem for a scrubber
-// over the whole book, or PeaksForFile with a pid from ItemFiles for a chosen part.
+// For a multi-file audiobook that is one part of many, and not necessarily part one:
+// the primary is whichever part was attached first, or the lowest-positioned survivor
+// after a primary is detached. Use PeaksForItem for a scrubber over the whole book, or
+// PeaksForFile with a pid from ItemFiles for a chosen part.
 func (l *Library) Peaks(ctx context.Context, itemPID model.PID) (*model.PeaksData, error) {
 	return l.store.LoadPeaks(ctx, itemPID)
 }
@@ -1085,11 +1025,10 @@ func (l *Library) PeaksForItem(ctx context.Context, itemPID model.PID) ([]model.
 	return l.store.LoadPeaksForItem(ctx, itemPID)
 }
 
-// ItemFiles returns every file backing an item in reading order: one row for a track
-// or single-file book, one per part for a multi-file book. Each ref carries the
-// file's pid, path, part position, and edge role, so a consumer can address a
-// specific part (PeaksForFile) and can tell which one the primary-file reads
-// answered for.
+// ItemFiles returns every file backing an item in reading order: one row for a track or
+// single-file book, one per part for a multi-file book. Each ref carries the file's pid,
+// path, part position, and edge role, so a consumer can address a specific part and tell
+// which one the primary-file reads answered for.
 func (l *Library) ItemFiles(ctx context.Context, itemPID model.PID) ([]model.ItemFileRef, error) {
 	return l.store.ItemFiles(ctx, itemPID)
 }
@@ -1117,6 +1056,15 @@ func (l *Library) RefreshRollups(ctx context.Context) error {
 	return l.store.RefreshRollups(ctx)
 }
 
+// RefreshSortKeys rewrites every stored sort key that model.SortKey no longer
+// generates, the repair for the sort-key drift VerifyDerived reports, and returns
+// the number of rows rewritten. A rescan cannot heal one. Page cursors encode a
+// sort key, so a consumer holding one should re-page from the start after a run
+// that rewrote rows.
+func (l *Library) RefreshSortKeys(ctx context.Context) (int, error) {
+	return l.store.RefreshSortKeys(ctx)
+}
+
 // AuditOptions selects which audit checks run.
 type AuditOptions struct {
 	// Only, when non-empty, restricts the run to these checks.
@@ -1137,12 +1085,11 @@ func (l *Library) Audit(ctx context.Context, opts AuditOptions) (*audit.Report, 
 	return l.auditor.Run(ctx, audit.Config{Only: opts.Only, Integrity: opts.Integrity, Sample: opts.Sample})
 }
 
-// FileDiagnostics returns the persisted per-file diagnostics matching the
-// filter (the zero filter returns everything), each joined to its file's
-// display path, in a stable path/origin/code order. It is the query surface
-// over the rows scan, organize, analyze, and edit write-back record, so a
-// consumer can drive a review queue ("which files have unsynced tags in this
-// library") without running a full audit.
+// FileDiagnostics returns the persisted per-file diagnostics matching the filter (the
+// zero filter returns everything), joined to each file's display path in a stable
+// path/origin/code order. It is the query surface over the rows scan, organize,
+// analyze, and edit write-back record, so a consumer can drive a review queue without
+// running a full audit.
 func (l *Library) FileDiagnostics(ctx context.Context, filter model.DiagnosticFilter) ([]model.FileDiagnostic, error) {
 	return l.store.FileDiagnostics(ctx, filter)
 }
@@ -1217,13 +1164,12 @@ func (l *Library) YearInReview(ctx context.Context, userPID model.PID, year, top
 	return l.store.YearInReview(ctx, userPID, year, topN)
 }
 
-// Merge collapses the loser entity onto the survivor: children (tracks, albums,
-// genre links, contributor credits) are re-pointed onto the survivor, its MBID
-// and enrichment marker are unioned when it lacks one, rollups are recomputed,
-// and the loser is deleted. The survivor keeps its PID. This is the first-class
-// entity-merge primitive for artists, release groups, albums, and genres. It
-// repairs the duplicate-entity findings audit reports, and is the seam late
-// enrichment uses to unify two heuristic rows that resolve to one MBID.
+// Merge collapses the loser entity onto the survivor: children (tracks, albums, genre
+// links, contributor credits) are re-pointed, the survivor's MBID and enrichment
+// marker are unioned when it lacks one, rollups are recomputed, and the loser is
+// deleted. The survivor keeps its PID. It repairs audit's duplicate-entity findings,
+// and is the seam enrichment uses to unify two heuristic rows that resolve to one
+// MBID.
 func (l *Library) Merge(ctx context.Context, entityType model.MergeEntity, survivorPID, loserPID model.PID) (*model.MergeReport, error) {
 	return l.store.MergeEntity(ctx, entityType, survivorPID, loserPID)
 }
@@ -1295,30 +1241,23 @@ func (l *Library) EditField(ctx context.Context, itemPID model.PID, field, value
 	return l.EditFields(ctx, itemPID, map[string]string{field: value}, opts)
 }
 
-// EditFields applies metadata-field edits to a track or book item. It records the
-// edit as user provenance and, unless told otherwise, locks each field so enrichment
-// and organize leave it alone. The catalog write is atomic and runs first. Which
-// fields are editable depends on the kind (a track has artist, album, and the rest; a
-// book has author, narrator, series), and a field that does not apply to the item's
-// kind is rejected.
+// EditFields applies metadata-field edits to a track or book item. It records user
+// provenance and, unless told otherwise, locks each field so enrichment and organize
+// leave it alone. Which fields are editable depends on the kind, and a field that does
+// not apply to the item's kind is rejected.
 //
-// With opts.WriteBack set, the new values are also written into the backing files'
-// on-disk tags through the WaxLabel writer seam. A track writes every edited scalar to
-// its file; a book writes the audiobook tags a scan reads back (title→ALBUM,
-// author→ALBUMARTIST, author_sort→ALBUMARTISTSORT, narrator→NARRATOR+COMPOSER,
-// series+sequence→GROUPING, genre/year) across all its parts, leaving the
-// enrichment-only book fields (subtitle, identifiers, publisher, description) DB-only.
-// A file that cannot be written is reported through a *WriteBackError while the
-// catalog edit stands.
+// With opts.WriteBack set, the values are also written into the backing files' on-disk
+// tags. A track writes every edited scalar to its file; a book writes the audiobook
+// tags a scan reads back (title to ALBUM, author to ALBUMARTIST, narrator to NARRATOR
+// and COMPOSER, series and sequence to GROUPING, plus genre and year) across all its
+// parts, leaving the enrichment-only fields (subtitle, identifiers, publisher,
+// description) DB-only.
 //
-// Write-back is a separate step, not part of the atomic catalog edit. The edit has
-// already committed by the time it runs, so a file that cannot be written does not
-// roll the edit back. That covers a read-only mount, a permission error, a value the
-// format cannot store, and a file shared by several items whose tags must not be
-// clobbered per item. In those cases EditFields returns a *WriteBackError naming the
-// failed files and records a per-file drift diagnostic, while the catalog edit stands.
-// Callers should surface that as "catalog updated, on-disk tag sync failed" rather
-// than a failed edit.
+// Write-back runs after the catalog edit has committed, so a file that cannot be
+// written (a read-only mount, a permission error, an unrepresentable value, a file
+// shared by several items) does not roll the edit back. EditFields then returns a
+// *WriteBackError naming the failed files and records a per-file drift diagnostic.
+// Surface that as "catalog updated, on-disk tag sync failed", not as a failed edit.
 func (l *Library) EditFields(ctx context.Context, itemPID model.PID, edits map[string]string, opts EditOptions) error {
 	if err := l.store.EditItemFields(ctx, itemPID, edits, model.SourceUser, opts.Lock, opts.Force); err != nil {
 		return err
@@ -1330,16 +1269,14 @@ func (l *Library) EditFields(ctx context.Context, itemPID model.PID, edits map[s
 }
 
 // EditManyFields applies the same field edits to several items in one atomic
-// transaction, then optionally mirrors each edited item's new values into its on-disk
-// tags. The catalog edit commits or rolls back as a whole. Write-back is per-item and
-// best-effort: an item whose on-disk sync failed is recorded in the result's
-// WriteBackErrors rather than failing the batch, matching single-item semantics. With
-// opts.SkipLocked a locked item is skipped (reported in Skipped) instead of failing.
+// transaction, then optionally mirrors each item's new values into its on-disk tags.
+// The catalog edit commits or rolls back as a whole. Write-back is per-item and
+// best-effort: a failed sync lands in the result's WriteBackErrors rather than failing
+// the batch. With opts.SkipLocked a locked item is skipped instead of failing.
 //
-// The returned *BatchEditResult is non-nil and meaningful even when err is non-nil:
-// the catalog batch already committed, and err is only returned for a non-write-back
-// failure during the on-disk pass (such as a canceled context). Callers should
-// inspect the result's Edited list in that case, since those items were edited.
+// The returned *BatchEditResult is meaningful even when err is non-nil, because the
+// catalog batch has already committed and err only reports a non-write-back failure
+// during the on-disk pass. Inspect the result's Edited list in that case.
 func (l *Library) EditManyFields(ctx context.Context, itemPIDs []model.PID, edits map[string]string, opts EditOptions) (*BatchEditResult, error) {
 	res, err := l.store.EditManyFields(ctx, itemPIDs, edits, model.SourceUser, opts.Lock, opts.Force, opts.SkipLocked)
 	if err != nil {
@@ -1352,15 +1289,11 @@ func (l *Library) EditManyFields(ctx context.Context, itemPIDs []model.PID, edit
 	return out, l.batchWriteBack(ctx, out, func(model.PID) map[string]string { return edits })
 }
 
-// EditItemsFields applies a per-item field-edit map to several items in one
-// atomic transaction: each entry carries its own values (distinct titles and
-// track numbers across an album, say) where EditManyFields applies one map to
-// every item. The whole catalog batch commits or rolls back together; a
-// duplicate pid or any invalid entry rejects it. Write-back then mirrors each
-// edited item's own map into its on-disk tags, per item and best-effort,
-// exactly as EditManyFields does; see there for the error contract (the
-// returned result stays meaningful when err reports a post-commit write-back
-// interruption).
+// EditItemsFields applies a per-item field-edit map to several items in one atomic
+// transaction, where EditManyFields applies one map to every item. The batch commits
+// or rolls back together; a duplicate pid or any invalid entry rejects it. Write-back
+// then mirrors each item's own map into its tags, best-effort, as EditManyFields does;
+// see there for the error contract.
 func (l *Library) EditItemsFields(ctx context.Context, edits []model.ItemFieldEdit, opts EditOptions) (*BatchEditResult, error) {
 	res, err := l.store.EditItemsFields(ctx, edits, model.SourceUser, opts.Lock, opts.Force, opts.SkipLocked)
 	if err != nil {
@@ -1377,13 +1310,11 @@ func (l *Library) EditItemsFields(ctx context.Context, edits []model.ItemFieldEd
 	return out, l.batchWriteBack(ctx, out, func(pid model.PID) map[string]string { return fieldsByPID[pid] })
 }
 
-// batchWriteBack mirrors a committed batch's edits into each edited item's
-// on-disk tags, one item at a time, recording a per-item WriteBackError on out
-// instead of failing the rest. fieldsFor supplies the map that was applied to
-// a given item: the shared map for EditManyFields, the item's own for
-// EditItemsFields. Only a non-write-back error (a canceled context) aborts the
-// pass and is returned; the catalog batch has already committed either way, so
-// the caller hands out back alongside that error.
+// batchWriteBack mirrors a committed batch's edits into each item's on-disk tags,
+// recording a per-item WriteBackError on out instead of failing the rest. fieldsFor
+// supplies the map applied to a given item: the shared one for EditManyFields, the
+// item's own for EditItemsFields. Only a canceled context aborts the pass, and the
+// catalog batch has committed either way, so the caller hands out back alongside it.
 func (l *Library) batchWriteBack(ctx context.Context, out *BatchEditResult, fieldsFor func(model.PID) map[string]string) error {
 	for _, pid := range out.Edited {
 		wberr := l.writeBackFields(ctx, pid, fieldsFor(pid))
@@ -1432,14 +1363,11 @@ func (e *WriteBackError) Error() string {
 
 // writeBackFiles applies a per-file on-disk write across files, recording every refusal
 // or failure on wbErr instead of aborting the rest. It is the shared engine behind every
-// write-back fan-out: a track or book field edit, a credit edit, an entity identifier
-// fan-out, an embedded cover. Each caller supplies the file set and an apply closure that
-// does the actual write, and this handles the rest: the shared-or-virtual-file guard, the
-// drift diagnostic on failure, the unrepresented-value warning, and the optimistic
-// file-state update on a real change. A file backing more than one member is written once
-// (dedup by file pid). It returns a hard error only for a context cancellation, which
-// aborts the whole pass, and op names the caller for that error. Everything else is a
-// soft per-file failure on wbErr.
+// write-back fan-out. The caller supplies the file set and an apply closure; this handles
+// the shared-or-virtual-file guard, the drift diagnostic, the unrepresented-value
+// warning, and the optimistic file-state update, and writes a file backing several
+// members once. Only a context cancellation is a hard error, and op names the caller
+// in it.
 func (l *Library) writeBackFiles(ctx context.Context, op string, files []model.ItemFileRef, wbErr *WriteBackError, apply func(w *meta.Writer, path string) (*meta.WriteResult, error)) error {
 	w := meta.NewWriter()
 	seen := make(map[model.PID]bool, len(files))
@@ -1539,16 +1467,12 @@ func (l *Library) writeBackFiles(ctx context.Context, op string, files []model.I
 // a WriteBackError rather than aborting the rest, and a clean write clears any drift the
 // file carried before.
 //
-// A track writes every edited scalar field to its file (tagEditsForFields). A book
-// writes the audiobook tags the scanner reads back (bookTagEditsForFields: title to
-// ALBUM, author to ALBUMARTIST, author_sort to ALBUMARTISTSORT, narrator to NARRATOR and
-// COMPOSER, series and sequence to one GROUPING tag, plus genre and year) across all of
-// its parts. A book's title and
-// author are the key its parts group by, so writing them to one part alone would split a
-// multi-file book on rescan. Book fields the scanner does not reconstruct from a tag
-// (subtitle, asin, isbn, publisher, edition, description, mbid) are DB-only and written
-// nowhere on disk, so a rescan can never undo them. An episode is refused, since episodes
-// are not tagged. The catalog edit stands regardless.
+// A track writes every edited scalar to its file (tagEditsForFields). A book writes the
+// audiobook tags the scanner reads back (bookTagEditsForFields) across all of its parts,
+// because a book's title and author are the key its parts group by and writing them to
+// one part alone would split the book on rescan. Book fields the scanner cannot
+// reconstruct from a tag (subtitle, asin, isbn, publisher, edition, description, mbid)
+// stay DB-only, so a rescan can never undo them. An episode is refused.
 func (l *Library) writeBackFields(ctx context.Context, itemPID model.PID, edits map[string]string) error {
 	// Everything below runs after the catalog edit committed. A setup-lookup error is
 	// therefore a write-back failure to report, not a hard error that would make the CLI
@@ -1588,11 +1512,10 @@ func (l *Library) writeBackFields(ctx context.Context, itemPID model.PID, edits 
 		if len(tagEdits) == 0 {
 			return nil
 		}
-		// Write EVERY part, not just the primary: a book's title/author (ALBUM/ALBUMARTIST)
-		// are the key the scanner groups its parts by, so writing them to one part alone
-		// would split a multi-file book on the next rescan. The scanner reads a book's
-		// metadata from the primary part, so the same tags on the other parts are inert for
-		// the catalog but keep every part on the same identity key.
+		// Every part, not just the primary: a book's title and author are the key the
+		// scanner groups its parts by, so writing them to one part alone would split a
+		// multi-file book on the next rescan. The catalog reads a book's metadata from the
+		// primary, so the same tags elsewhere are inert but keep every part on one key.
 		files, err = l.store.ItemFiles(ctx, itemPID)
 		if err != nil {
 			return writeBackSetupFailure(itemPID, edits, err)
@@ -1620,13 +1543,11 @@ func (l *Library) writeBackFields(ctx context.Context, itemPID model.PID, edits 
 		}); err != nil {
 		return err
 	}
-	// A book's title/author ARE its identity anchor (unlike a track, whose identity is
-	// essence-anchored): writing them to disk would otherwise make the next scan --force
-	// re-key the book to a new pid and drop its locks. Re-anchor the catalog's identity
-	// key to the file's post-write value so a rescan resolves the same item. This reads
-	// the file's ACTUAL state, so it is safe to run even on a partial write-back failure:
-	// if a part failed and still holds the old value, re-anchoring to it is a no-op, and
-	// if the source part was written it steers the catalog item to follow the new key.
+	// A book's title and author are its identity anchor, unlike a track's essence, so
+	// writing them to disk would make the next scan --force re-key the book to a new pid
+	// and drop its locks. Re-anchor to the file's post-write value instead. It reads the
+	// file's actual state, so a partial write-back failure is safe: a part still holding
+	// the old value re-anchors to a no-op.
 	if item.Kind == model.KindBook && len(files) > 0 && bookIdentityEdited(edits) {
 		l.reanchorBookIdentity(ctx, itemPID, files[0].FilePID)
 	}
@@ -1636,18 +1557,12 @@ func (l *Library) writeBackFields(ctx context.Context, itemPID model.PID, edits 
 	return nil
 }
 
-// appendDerivedSortClears adds the tag clears that keep a file's derived sort
-// names in step with a display-name edit. Editing composer, artist, or a book's
-// author regenerates the stored sort key from the new name, but the edit set
-// carries only the edited fields, and a stale COMPOSERSORT, ARTISTSORT, or
-// ALBUMARTISTSORT left in the file would feed the next scan's derivation and
-// revert the regenerated sort (in this catalog when the field is unlocked, and
-// in any fresh catalog regardless). Clearing the tag makes a scan derive the
-// same key the catalog holds, from the display name itself. A sort the caller
-// edited explicitly is already in the edit set and wins; a locked sort keeps
-// its tag, since the curated value should stay represented on disk. Clearing a
-// tag the file never carried is a no-op in the writer, so the clear costs an
-// unchanged file nothing.
+// appendDerivedSortClears adds the tag clears that keep a file's derived sort names in
+// step with a display-name edit. Editing composer, artist, or a book's author
+// regenerates the stored sort key, but a stale COMPOSERSORT, ARTISTSORT, or
+// ALBUMARTISTSORT left in the file would feed the next scan's derivation and revert it.
+// Clearing the tag makes a scan derive the same key from the display name. A sort the
+// caller edited explicitly wins, and a locked sort keeps its tag.
 func (l *Library) appendDerivedSortClears(ctx context.Context, itemPID model.PID, edits map[string]string, tagEdits []meta.TagEdit) ([]meta.TagEdit, error) {
 	for _, p := range meta.DerivedSortPairs() {
 		if _, edited := edits[p.Field]; !edited {
@@ -1675,12 +1590,11 @@ func (l *Library) appendDerivedSortClears(ctx context.Context, itemPID model.PID
 // re-anchor. The other identity-key inputs (asin/isbn/edition) are DB-only and never
 // written to disk, so they cannot move the on-disk-derived key.
 func bookIdentityEdited(edits map[string]string) bool {
-	// Every field identity.BookKey reads that also reaches disk. asin and isbn joined
-	// when bookFieldTagKeys learned to write them: without them here the edit stamps a
-	// new identifier onto the files and leaves the stored key behind, so the next scan
-	// resolves a different item and orphans this one's pid, play state and locks.
-	// edition is a BookKey input too and is deliberately absent, because nothing writes
-	// it to disk; adding it there means adding it here.
+	// Every field identity.BookKey reads that also reaches disk. Without asin and isbn
+	// here, an edit stamps a new identifier onto the files while the stored key stays
+	// behind, so the next scan resolves a different item and orphans this one's pid,
+	// play state, and locks. edition is a BookKey input but nothing writes it to disk;
+	// adding it there means adding it here.
 	for _, f := range []string{"title", "author", "asin", "isbn"} {
 		if _, ok := edits[f]; ok {
 			return true
@@ -1690,12 +1604,10 @@ func bookIdentityEdited(edits map[string]string) bool {
 }
 
 // reanchorBookIdentity recomputes a book's identity key from the current on-disk state
-// of one of its files and updates the catalog to match, so a later scan --force resolves
-// the same item. It reads the file's ACTUAL tags, so it self-corrects: if the write-back
-// to that file did not land, the file still holds the old title and the recomputed key
-// equals the stored one, making RekeyBook a no-op. It is best-effort and runs after the
-// catalog edit and write-back committed, so a lookup, read, or re-key failure is logged,
-// not surfaced.
+// of one of its files, so a later scan --force resolves the same item. It reads the
+// file's actual tags, so it self-corrects: a write-back that did not land leaves the old
+// title in place and the re-key is a no-op. Best-effort, running after the catalog edit
+// committed, so a failure is logged rather than surfaced.
 func (l *Library) reanchorBookIdentity(ctx context.Context, itemPID, filePID model.PID) {
 	file, err := l.store.FileByPID(ctx, filePID)
 	if err != nil {
@@ -1721,8 +1633,7 @@ func (l *Library) reanchorBookIdentity(ctx context.Context, itemPID, filePID mod
 
 // bookTagEditsForFields maps committed book field edits to the on-disk tags the
 // audiobook scanner reads back, so a book edit round-trips through a rescan. It covers
-// only the fields the scanner reconstructs from a tag; the rest are DB-only and produce
-// no edit (so writing them to disk cannot create drift a rescan would undo). seriesSeq
+// only the fields the scanner reconstructs from a tag; the rest stay DB-only. seriesSeq
 // is the book's current sequence, folded into the GROUPING value only when "series" is
 // among the edits. A value empty after trimming clears its tag.
 func bookTagEditsForFields(edits map[string]string, seriesSeq string) []meta.TagEdit {
@@ -1799,14 +1710,11 @@ func (l *Library) recordWriteBackDrift(ctx context.Context, filePID model.PID, d
 }
 
 // tagEditsForFields turns committed field edits into on-disk tag edits. Each tag key
-// comes from meta.TagKeyForField, the field-to-tag-key source of truth shared with
-// organize. Values are trimmed and identifier-normalized to match what the store
-// persisted (the store trims every edited value and normalizes isrc/isbn/asin
-// through the same model normalizers), so neither surrounding whitespace nor an
-// identifier's separators can put the on-disk tag out of step with the catalog
-// column. A value that is empty after trimming clears the tag. An unmapped field is
-// a programming error and returns CodeInternal, since the store has already checked
-// the field is a real metadata field.
+// comes from meta.TagKeyForField, the source of truth shared with organize. Values are
+// trimmed and identifier-normalized the same way the store persisted them, so neither
+// whitespace nor an identifier's separators can put the tag out of step with the
+// column. An empty value clears the tag. An unmapped field is a programming error and
+// returns CodeInternal.
 func tagEditsForFields(edits map[string]string) ([]meta.TagEdit, error) {
 	out := make([]meta.TagEdit, 0, len(edits))
 	for field, value := range edits {
@@ -1933,16 +1841,15 @@ func (l *Library) ApplyOrganize(ctx context.Context, plan *organize.Plan) (*orga
 	return rep, err
 }
 
-// PlanDelete computes a dry-run deletion plan for the items matching q under a
-// mode (trash|prune|permanent). DeleteTrash moves files to the reversible
-// per-library trash; the other modes bypass it to reclaim space. Every mode keeps
-// the logical item (archived when it loses its last file).
+// PlanDelete computes a dry-run deletion plan for the items matching q under a mode
+// (trash|prune|permanent). DeleteTrash moves files to the reversible per-library trash;
+// the other modes bypass it to reclaim space. Every mode keeps the logical item,
+// archived when it loses its last file.
 //
-// Items in the internal podcast library are dropped before planning and counted on
-// the plan as SkippedPodcast (see inPodcastLibrary). This is the query-driven path
-// used by retention and dedup, so a sweep over a mixed query must not fail because it
-// happened to match an episode. The count is surfaced rather than dropped, since a
-// silent skip would misreport what the sweep covered.
+// Items in the internal podcast library are dropped before planning and counted as
+// SkippedPodcast, so a sweep over a mixed query does not fail because it matched an
+// episode. The count is surfaced rather than dropped, since a silent skip would
+// misreport what the sweep covered.
 func (l *Library) PlanDelete(ctx context.Context, q query.Query, mode model.DeleteMode) (*trash.Plan, error) {
 	libs, err := l.store.Libraries(ctx)
 	if err != nil {
@@ -2010,55 +1917,32 @@ func (l *Library) ApplyDelete(ctx context.Context, plan *trash.Plan) (*trash.Rep
 
 // MarkMissingOptions tunes a mark-missing.
 type MarkMissingOptions struct {
-	// Force skips the on-disk verification and the mount gate entirely, for a caller
-	// whose view of the filesystem is the authoritative one, including one in a
-	// different container whose mount view differs from the server's. The store's
-	// state rule still applies, so Force cannot turn an archived item into a missing
+	// Force skips the on-disk verification and the mount gate, for a caller whose view of
+	// the filesystem is the authoritative one (one in a different container, say). The
+	// store's state rule still applies, so it cannot turn an archived item into a missing
 	// one.
 	Force bool
 }
 
 // MarkMissing records that an item's bytes are gone, for a caller that discovered it
-// out of band and would otherwise keep requeuing doomed work against a catalog that
-// still claims the file is there. The outcome says what happened, including the
-// refusals: files-present means the bytes really are on disk and the caller's failure
-// is something else.
+// out of band and would otherwise keep requeuing doomed work. The outcome says what
+// happened, refusals included: files-present means the bytes really are on disk and the
+// caller's failure is something else.
 //
-// It verifies before it writes. Every backing file is stat'ed, and the item is only
-// marked when none of them is on disk; a single present file answers files-present.
-// A stat failing with anything other than "does not exist" refuses the whole call
-// with CodeIO rather than answering from a partial view, whichever part it was, so
-// the answer never depends on which part came first.
+// It verifies before it writes. Every backing file is stat'ed and the item is marked
+// only when none is on disk; a stat failing with anything other than "does not exist"
+// refuses the call with CodeIO rather than answering from a partial view. Once a file
+// comes back absent the owning library root is stat'ed too, and an absent, unreadable,
+// or non-directory root is a dropped mount rather than a deletion, so it is refused.
+// The gate is on the root and not each file's parent directory because the ordinary
+// genuine deletion is a user removing an album folder, which a parent gate would refuse.
+// A file under no registered root has no mount to check.
 //
-// Once a file has come back absent, the owning library root is stat'ed too. An
-// absent, unreadable, or non-directory root is a dropped mount, not a deletion, and
-// is refused. The gate is on the root rather than each file's parent directory
-// deliberately: the ordinary genuine deletion is a user removing an album or a book
-// folder, and a parent gate refuses exactly that, teaching callers to reach for
-// Force, which skips every guard. Gating on the root admits the deleted-folder case
-// and still catches the failure the guard exists for. A file under no registered
-// root has no mount to check and is not gated.
-//
-// The scanner checks its walk root for the same reason but decides the absent case
-// the other way, treating a vanished root as a real full removal and reconciling. It
-// can afford to: it has just walked the whole tree, so it holds evidence this verb
-// does not, and it still gates that on a survival floor plus an explicit
-// --reconcile-deletions override. One stat of one item is not evidence that a whole
-// library was deleted, and an unplugged drive is exactly a root that stopped
-// existing, so this refuses and leaves Force as the deliberate override.
-//
-// An item with no file rows has nothing to stat, so the store answers from state
-// alone; a present item with no files is drift, and marking it missing is the right
-// repair, so Force and non-Force agree there.
-//
-// It marks the named item only. When several items share one file (a single-file rip
-// carved into virtual tracks), the siblings keep whatever state they had, so a caller
-// repairing such a rip passes every pid; store.MarkItemMissing says the same.
-//
-// It takes no job lease, unlike the fs-mutating verbs, because it only stats and
-// writes one transaction (the scan path's MarkFilesMissing takes none either).
-// Racing a concurrent scan is benign: the last transaction to commit wins, and
-// missing is recoverable by the next scan.
+// An item with no file rows has nothing to stat and is answered from state alone. Only
+// the named item is marked: siblings sharing one file (a rip carved into virtual tracks)
+// keep their state, so a caller repairing such a rip passes every pid. It takes no job
+// lease, since it only stats and writes one transaction; racing a scan is benign,
+// because the last commit wins and missing is recoverable by the next scan.
 func (l *Library) MarkMissing(ctx context.Context, itemPID model.PID, opts MarkMissingOptions) (model.MarkMissingOutcome, error) {
 	const op = "Library.MarkMissing"
 	if !opts.Force {
@@ -2118,11 +2002,10 @@ func (l *Library) checkRootsMounted(ctx context.Context, files []model.ItemFileR
 }
 
 // libraryForRawPath returns the library whose root contains a raw path, or nil. It
-// matches on raw bytes both sides, unlike libraryContaining, because its caller stats
-// the result: DisplayRoot is a lossy UTF-8 rendering, so a root carrying non-UTF-8
-// bytes would stat as absent and refuse every mark-missing under that library.
-// Roots are validated non-overlapping (config.Validate, and AddRoot at runtime), so
-// the first match is the only one.
+// matches raw bytes on both sides, unlike libraryContaining, because its caller stats
+// the result and DisplayRoot is a lossy UTF-8 rendering: a root carrying non-UTF-8
+// bytes would stat as absent. Roots are validated non-overlapping, so the first match
+// is the only one.
 func libraryForRawPath(libs []*model.Library, path []byte) *model.Library {
 	for _, lib := range libs {
 		if pathx.UnderRoot(rawRoot(lib), string(path)) {
@@ -2147,29 +2030,24 @@ func (l *Library) Trash(ctx context.Context, includeRestored bool, limit int) ([
 	return l.store.TrashEntries(ctx, includeRestored, 0, limit)
 }
 
-// RestorableTrash returns the restorable trash entries for each of the given
-// items, keyed by item pid, newest first. An item with nothing restorable is
-// absent from the map, so a present key is the answer; unknown pids are absent
-// rather than an error, which is what makes it safe against an item purged
-// between a delta page and this lookup.
-//
-// It takes no limit deliberately: a bounded listing that missed an item would read
-// as permanently removed, and a client acting on that would reclaim bytes it could
-// have restored. It is a read, so it is available on a read-only handle.
+// RestorableTrash returns the restorable trash entries for each of the given items,
+// keyed by item pid, newest first. An item with nothing restorable is absent, and so is
+// an unknown pid, which is what makes it safe against an item purged between a delta
+// page and this lookup. It takes no limit deliberately: a bounded listing that missed
+// an item would read as permanently removed.
 func (l *Library) RestorableTrash(ctx context.Context, itemPIDs []model.PID) (map[model.PID][]model.TrashEntry, error) {
 	return l.store.ActiveTrashForItems(ctx, itemPIDs)
 }
 
-// RestoreTrash undoes a delete: it moves the trashed file back to its original
-// path and re-scans it so the catalog re-links it (un-archiving its item). It
-// refuses if the original path is occupied.
+// RestoreTrash undoes a delete: it moves the trashed file back to its original path and
+// re-scans it so the catalog re-links it, un-archiving its item. It refuses if the
+// original path is occupied.
 //
-// A file whose original path is in the internal podcast library is refused: the
-// re-scan here goes straight to the scanner and would generic-scan a library
+// A file whose original path is in the internal podcast library is also refused. The
+// re-scan goes straight to the scanner and would generic-scan a library
 // resolveLibraries exists to keep out, cataloging the episode as a track. Nothing new
-// can enter the trash from there once PlanDelete and PlanDeletePIDs refuse it, but a
-// pre-1.0 catalog may already hold such an entry, and this is what removes the bypass
-// rather than leaving it latent.
+// can enter the trash from there, but a pre-1.0 catalog may already hold such an
+// entry.
 func (l *Library) RestoreTrash(ctx context.Context, trashPID model.PID) error {
 	entry, err := l.store.ActiveTrashByPID(ctx, trashPID)
 	if err != nil {
@@ -2242,11 +2120,10 @@ func (l *Library) EmptyTrash(ctx context.Context, opts EmptyTrashOptions) (*Empt
 			if ctx.Err() != nil {
 				return waxerr.FromContext("Library.EmptyTrash", ctx.Err(), waxerr.CodeIO)
 			}
-			// Don't abort the whole pass on one entry's failure: a purge error leaves
-			// the entry retryable, and a row-delete failure after a successful purge
-			// would otherwise strand an active journal row whose file is already gone
-			// (un-restorable). Tally it and move on; a later re-run drops the row
-			// (Purge tolerates the already-missing file).
+			// One entry's failure must not abort the pass: a purge error leaves the entry
+			// retryable, and a row-delete failure after a successful purge would strand an
+			// active journal row whose file is already gone. Tally it and move on, since a
+			// later re-run drops the row.
 			size, perr := l.purgeTrashEntry(ctx, entries[i])
 			if perr != nil {
 				rep.Errored++
@@ -2261,14 +2138,12 @@ func (l *Library) EmptyTrash(ctx context.Context, opts EmptyTrashOptions) (*Empt
 	return rep, err
 }
 
-// PurgeTrash permanently removes a single active trash entry (file and journal
-// row), returning the bytes reclaimed, and announces the purge on the change feed
-// as an item update (see DeleteTrashRow for why the item's own columns do not move).
-// A pid that is unknown, already purged, or already restored is CodeNotFound. Like
-// EmptyTrash it runs under an fs-mutate
-// job, one lease per call; the entry is resolved inside the lease, so a restore
-// racing in (it holds the same scope) cannot slip between the check and the
-// purge and lose its journal row.
+// PurgeTrash permanently removes a single active trash entry (file and journal row),
+// returning the bytes reclaimed, and announces it on the change feed as an item update
+// (see DeleteTrashRow for why the item's own columns do not move). A pid that is
+// unknown, already purged, or already restored is CodeNotFound. It runs under an
+// fs-mutate job and resolves the entry inside the lease, so a restore racing in cannot
+// slip between the check and the purge.
 func (l *Library) PurgeTrash(ctx context.Context, trashPID model.PID) (int64, error) {
 	var size int64
 	_, err := l.jobs.Run(ctx, "purge-trash", fsMutateScope, func(ctx context.Context, h *jobs.Handle) error {
@@ -2443,22 +2318,19 @@ type AcquiredResult struct {
 	Path       string      // episode: the placed file path, when attached
 
 	// AlreadyPresent reports that the acquired file's audio essence is already in the
-	// catalog, resolved independent of DupPolicy (so a DupAllow import of a genuine
-	// duplicate still reports it). AlreadyPresentPID names the existing local item when
-	// one resolves by essence. They let the host tell the user "already in your library"
-	// on a receive, e.g. "3 of 12 already present". Set for the track/book path only;
-	// the host can pre-check an episode via ResolveRef by essence. The action's Outcome
-	// separately conveys whether the file was skipped (DupSkip) or imported (DupAllow).
+	// catalog, resolved independent of DupPolicy, so a DupAllow import of a genuine
+	// duplicate still reports it. AlreadyPresentPID names the existing item. Set for the
+	// track/book path only; the host can pre-check an episode via ResolveRef. Whether the
+	// file was skipped or imported is the action's Outcome.
 	AlreadyPresent    bool
 	AlreadyPresentPID model.PID
 }
 
-// ImportAcquired routes an acquired or manual file by kind. Tracks and books go
-// through the import planner for the matching managed library, including duplicate
-// checks, destination rendering, free-space checks, and acquisition provenance.
-// Episodes go into the internal podcast library under an existing or manual show and
-// are pinned by default. WaxBin never performs platform extraction itself; callers
-// hand it an already acquired file or a remote enclosure URL.
+// ImportAcquired routes an acquired or manual file by kind. Tracks and books go through
+// the import planner for the matching managed library, with duplicate checks,
+// destination rendering, free-space checks, and acquisition provenance. Episodes go into
+// the internal podcast library under an existing or manual show, pinned by default.
+// WaxBin never performs platform extraction itself.
 func (l *Library) ImportAcquired(ctx context.Context, file AcquiredFile, kind model.Kind, meta AcquiredMeta) (*AcquiredResult, error) {
 	switch kind {
 	case model.KindTrack, model.KindBook:
@@ -2499,10 +2371,9 @@ func (l *Library) importAcquiredMedia(ctx context.Context, file AcquiredFile, ki
 	}
 	res := &AcquiredResult{Kind: kind, Plan: plan}
 	// Report already-present independent of DupPolicy. The plan sets Action.Essence before
-	// the dup gate, so it is populated under any policy, and resolving by essence here
-	// surfaces the existing item even for a DupAllow import that will go ahead anyway. It
-	// costs one indexed essence lookup; the len>0 and non-empty guard covers a quarantine
-	// or zero-action plan. A resolve error is non-fatal, and the import plan still stands.
+	// the dup gate, so resolving by essence here surfaces the existing item even for a
+	// DupAllow import that will go ahead anyway. The guard covers a quarantine or
+	// zero-action plan, and a resolve error is non-fatal.
 	if len(plan.Actions) > 0 && plan.Actions[0].Essence != "" {
 		if item, _, err := l.ResolveRef(ctx, model.PortableRef{Essence: plan.Actions[0].Essence}); err == nil && item != nil {
 			res.AlreadyPresent, res.AlreadyPresentPID = true, item.PID
@@ -2667,12 +2538,11 @@ func (l *Library) Export(ctx context.Context, w io.Writer) (*port.Manifest, erro
 	return &snap.Manifest, nil
 }
 
-// RelocateRoot re-points a library and every file under it at a new root path,
-// for a portable restore onto a different machine or mount. The new path is
-// validated against the other registered roots, the inbox folders, and the
-// podcast download dir with the moved library's entry substituted, so a
-// relocation cannot create the overlap Open would refuse. The internal podcast
-// library is not relocatable: its root follows the podcasts dir config.
+// RelocateRoot re-points a library and every file under it at a new root path, for a
+// portable restore onto a different machine or mount. The new path is validated with the
+// moved library's entry substituted, so a relocation cannot create the overlap Open
+// would refuse. The internal podcast library is not relocatable: its root follows the
+// podcasts dir config.
 func (l *Library) RelocateRoot(ctx context.Context, libPID model.PID, newRoot string) error {
 	const op = "Library.RelocateRoot"
 	// Serialize with AddRoot (and other relocations) so the read-validate-write is
@@ -2763,23 +2633,16 @@ func (l *Library) resolveManagedLibrary(ctx context.Context, pid model.PID) (*mo
 	return nil, waxerr.New(waxerr.CodeNotFound, "Library.import", "no such library: "+string(pid))
 }
 
-// podcastOwned reports whether the trash/delete family must keep its hands off an
-// item, which is the boundary Phase 4 settled: `podcast unfetch` is the only verb that
-// removes episode bytes.
+// podcastOwned reports whether the trash/delete family must keep its hands off an item.
+// `podcast unfetch` is the only verb that removes episode bytes, because `rm` archives
+// the item ("files gone, history kept") where an episode's correct end state is remote
+// and re-fetchable, and RestoreTrash would re-scan a trashed episode through the generic
+// scanner into the library resolveLibraries refuses.
 //
-// The reason is ownership rather than locking. `rm <episode-pid>` archives the item
-// ("files gone, history kept") where the correct end state for an episode is remote
-// and re-fetchable, which is why Unfetch was written as its own path. RestoreTrash is
-// worse: it resolves the target library from store.Libraries and re-scans through the
-// scanner directly, bypassing resolveLibraries, so restoring a trashed episode would
-// generic-scan the very library resolveLibraries refuses.
-//
-// Two tests, because neither alone covers the set. The library mode is the general
-// invariant and catches anything ever placed in that tree, but it needs a path, and a
-// never-downloaded episode has none: keying on the path alone let `rm <remote-episode>`
-// through to an empty plan instead of the refusal. The kind test is what closes that,
-// and it holds because AttachEpisodeFile always binds the podcast library id, so an
-// episode's file is never anywhere else.
+// It tests two things, because neither alone covers the set. The library mode catches
+// anything ever placed in that tree but needs a path, and a never-downloaded episode has
+// none. The kind test closes that, and holds because AttachEpisodeFile always binds the
+// podcast library id.
 func podcastOwned(libs []*model.Library, it *model.ItemView) bool {
 	if it == nil {
 		return false

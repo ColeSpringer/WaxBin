@@ -11,8 +11,7 @@ import (
 
 // DerivedReport is the result of the derived-data consistency check: a count of
 // drift in each kind of writer-maintained denormalized state versus a fresh
-// recompute from the source rows. Any denormalized state can drift if a writer
-// path is missed, so this single check covers all of it. All zeros means clean.
+// recompute from the source rows. All zeros means clean.
 type DerivedReport struct {
 	ItemsMissingFTS         int // present items with no search_fts row
 	OrphanFTSRows           int // search_fts rows with no backing item
@@ -27,29 +26,36 @@ type DerivedReport struct {
 
 // Consistent reports whether the writer-maintained derived data is correct: FTS
 // coverage, rollups, and generated sort keys. Orphan-art counts are excluded
-// because cover swaps and item deletion can leave reclaimable sources for GCArt;
-// those leftovers are not consistency drift. Call Reclaimable to report art
-// garbage separately.
+// because a cover swap or an item deletion leaves reclaimable sources behind as a
+// matter of course; Reclaimable reports those.
 func (r DerivedReport) Consistent() bool {
+	return r.SortKeyDrift == 0 && r.consistentApartFromSortKeys()
+}
+
+// SortKeyDriftOnly reports whether stale sort keys are the only inconsistency, so
+// `db verify` can recommend --fix and nothing else: re-scanning repairs the other
+// kinds of drift but never rewrites a sort key.
+func (r DerivedReport) SortKeyDriftOnly() bool {
+	return r.SortKeyDrift > 0 && r.consistentApartFromSortKeys()
+}
+
+func (r DerivedReport) consistentApartFromSortKeys() bool {
 	return r.ItemsMissingFTS == 0 && r.OrphanFTSRows == 0 &&
 		r.ArtistRollupDrift == 0 && r.GenreRollupDrift == 0 &&
-		r.ReleaseGroupRollupDrift == 0 && r.SortKeyDrift == 0 &&
-		r.BookDurationDrift == 0
+		r.ReleaseGroupRollupDrift == 0 && r.BookDurationDrift == 0
 }
 
 // Reclaimable reports whether `db verify --fix` (GCArt) would reclaim space:
 // orphaned art sources or thumbnails with no live entity references. It is
-// informational and independent of Consistent.
+// informational, and independent of Consistent.
 func (r DerivedReport) Reclaimable() bool {
 	return r.OrphanArtSources > 0 || r.OrphanThumbnails > 0
 }
 
-// VerifyDerived runs the derived-data consistency check read-only: FTS coverage
-// (every present item has a row, no row outlives its item), the maintained
-// rollups (versus a fresh recompute), and the generated sort keys (versus
-// regeneration) are each checked against the source rows. FTS field *content* is
-// not diffed yet, only coverage. It never writes; `db verify` surfaces the
-// report and the operator reruns the relevant refresh if drift is found.
+// VerifyDerived checks FTS coverage, the maintained rollups, and the generated
+// sort keys against the source rows. FTS field content is not diffed yet, only
+// coverage. It never writes: `db verify` surfaces the report and the operator
+// runs the matching repair.
 func (s *Store) VerifyDerived(ctx context.Context) (*DerivedReport, error) {
 	const op = "store.VerifyDerived"
 	rep := &DerivedReport{}
@@ -69,10 +75,8 @@ func (s *Store) VerifyDerived(ctx context.Context) (*DerivedReport, error) {
 		// effective durations (the same definition refreshBookDuration writes).
 		{&rep.BookDurationDrift, "SELECT COUNT(*) FROM book b WHERE b.total_duration_ms <> " +
 			fmt.Sprintf(bookEffectiveDurationSum, "b.item_id")},
-		// An art source with no live entity reference, or a thumbnail whose source
-		// has none, is reclaimable derived state. A map row pointing at a deleted
-		// entity is ignored here; GCArt removes that stale map before deleting the
-		// source.
+		// A map row pointing at a deleted entity does not count as a reference here,
+		// matching GCArt, which removes the stale map before deleting the source.
 		{&rep.OrphanArtSources, "SELECT COUNT(*) FROM art_source WHERE hash NOT IN (" + liveArtSourceQ + ")"},
 		{&rep.OrphanThumbnails, "SELECT COUNT(*) FROM thumb_cache WHERE source_hash NOT IN (" + liveArtSourceQ + ")"},
 	}
@@ -82,8 +86,6 @@ func (s *Store) VerifyDerived(ctx context.Context) (*DerivedReport, error) {
 		}
 	}
 
-	// Sort keys are generated in Go, so they cannot be recomputed in SQL; load
-	// each (text, stored_key) pair and compare against a fresh SortKey.
 	drift, err := s.sortKeyDrift(ctx)
 	if err != nil {
 		return nil, err
@@ -92,40 +94,25 @@ func (s *Store) VerifyDerived(ctx context.Context) (*DerivedReport, error) {
 	return rep, nil
 }
 
-// sortKeyDrift counts entities whose stored sort_key differs from regenerating it
-// from the display text. It covers every table that carries a generated sort key.
+// sortKeyDrift counts rows whose stored sort key differs from regenerating it. It
+// walks sortKeySources (sortkeys.go) and uses that source's own recompute
+// expression, so the check and the repair cannot disagree; a divergence would
+// present as permanent unfixable drift. A curated entity is checked against its
+// sort override, which is what applyEntityFieldTx stored the key from.
 //
-// Sort keys are generated in Go, so this streams every entity row (O(n) time,
-// O(1) memory because it never buffers the result set) and recomputes
-// model.SortKey per row. That is acceptable for `db verify`, a deliberate
-// maintenance operation; if it ever needs to run hot, model.SortKey can be
-// registered as a deterministic SQLite scalar function so the comparison runs
-// entirely in SQL.
+// The tag-derived columns (track.artist_sort and friends) are deliberately absent:
+// their input is a tag the catalog does not keep, and a locked one holds literal
+// user text that no fix should repair.
+//
+// Sort keys are generated in Go, so this streams every row (O(n) time, O(1)
+// memory) and recomputes model.SortKey per row. That is acceptable for `db
+// verify`; if it ever needs to run hot, model.SortKey can be registered as a
+// deterministic SQLite scalar function so the comparison runs in SQL.
 func (s *Store) sortKeyDrift(ctx context.Context) (int, error) {
 	const op = "store.VerifyDerived"
-	// entityType is set for the tables whose sort key a user can override through
-	// entity curation (artist/release_group/album). A curated sort override deliberately
-	// diverges from the name-derived key, so it is excluded from the drift count.
-	sources := []struct{ text, table, entityType string }{
-		{"title", "playable_item", ""},
-		{"name", "artist", string(model.MergeArtist)},
-		{"name", "genre", ""},
-		{"title", "release_group", string(model.MergeReleaseGroup)},
-		{"title", "album", string(model.MergeAlbum)},
-		{"name", "series", ""},
-		{"title", "podcast", ""},
-	}
 	total := 0
-	for _, src := range sources {
-		// text/table are internal constants (no user input), so they are interpolated;
-		// entity_type is bound as a parameter for consistency with the rest of the store.
-		q := "SELECT " + src.text + ", sort_key FROM " + src.table
-		var args []any
-		if src.entityType != "" {
-			q += " t WHERE NOT EXISTS (SELECT 1 FROM entity_curation ec" +
-				" WHERE ec.entity_type = ? AND ec.entity_id = t.id AND ec.field = 'sort')"
-			args = append(args, src.entityType)
-		}
+	for _, src := range sortKeySources {
+		q, args := src.query("")
 		rows, err := s.read.QueryContext(ctx, q, args...)
 		if err != nil {
 			return 0, waxerr.Wrap(waxerr.CodeIO, op, err)
@@ -184,10 +171,8 @@ WHERE COALESCE(gr.track_count, -1) <>
 // liveArtSourceQ selects the source hashes still reachable from a live entity: an
 // art_map row whose (entity_type, entity_id) exists in its table. A source not in
 // this set is referenced only by dead-entity map rows, or none, so it and its
-// thumbnails are reclaimable. The arms mirror GCArt's slot list exactly
-// (verify <-> GC lockstep): the episode/podcast arms were missing for a while, so
-// a cover reachable only through a podcast slot counted as orphaned here while
-// GCArt correctly kept it, and orphan counts can only have dropped with the fix.
+// thumbnails are reclaimable. The arms must mirror GCArt's slot list exactly, or
+// verify reports as orphaned what GC correctly keeps.
 const liveArtSourceQ = `SELECT source_hash FROM art_map m WHERE
     (m.entity_type='track'         AND EXISTS (SELECT 1 FROM playable_item e WHERE e.id = m.entity_id))
  OR (m.entity_type='episode'       AND EXISTS (SELECT 1 FROM playable_item e WHERE e.id = m.entity_id))

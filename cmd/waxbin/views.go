@@ -576,6 +576,8 @@ type derivedView struct {
 	OrphanArtSources        int  `json:"orphanArtSources"`
 	OrphanThumbnails        int  `json:"orphanThumbnails"`
 	Consistent              bool `json:"consistent"`
+	// Present only when --fix rewrote sort keys, which invalidates open page cursors.
+	SortKeysRewritten int `json:"sortKeysRewritten,omitempty"`
 }
 
 func toDerivedView(r *sqlite.DerivedReport) derivedView {

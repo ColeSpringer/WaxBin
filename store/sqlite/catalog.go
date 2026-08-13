@@ -879,10 +879,12 @@ func (s *Store) LatestChangeSeq(ctx context.Context) (int64, error) {
 	return seq, nil
 }
 
+// appendChangeSQL is the one change_log insert. A bulk writer prepares it once
+// (see sortKeyPatch.flush) rather than re-parsing it per row.
+const appendChangeSQL = "INSERT INTO change_log(ts, entity_type, entity_pid, op) VALUES (?,?,?,?)"
+
 func appendChange(ctx context.Context, tx *sql.Tx, entityType string, pid model.PID, op model.ChangeOp) error {
-	_, err := tx.ExecContext(ctx,
-		"INSERT INTO change_log(ts, entity_type, entity_pid, op) VALUES (?,?,?,?)",
-		nowNS(), entityType, string(pid), string(op))
+	_, err := tx.ExecContext(ctx, appendChangeSQL, nowNS(), entityType, string(pid), string(op))
 	return err
 }
 

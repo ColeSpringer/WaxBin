@@ -64,10 +64,9 @@ func newDBResetCmd(g *globals) *cobra.Command {
 
 			lib, _, err := g.open(cmd)
 			if err != nil {
-				// The catalog is already aside, so the failure has to name it: without
-				// the path every later command reports an uninitialized catalog, and the
-				// backup that makes a mis-fire recoverable is the one thing nobody knows
-				// to look for.
+				// The catalog is already aside, so the failure has to name where it went.
+				// Every later command would otherwise just report an uninitialized
+				// catalog.
 				if moved != "" {
 					return waxerr.Wrapf(waxerr.CodeIO, "db reset", err,
 						"the previous catalog was saved to %s but the replacement could not be created; "+
@@ -132,15 +131,13 @@ func newDBResetCmd(g *globals) *cobra.Command {
 
 // moveCatalogAside renames the catalog and its sidecars to a timestamped .bak set,
 // keeping the -wal/-shm suffixes so the saved files stay a readable trio. Returns
-// the new main-file path, or "" when there was no catalog to move.
-//
-// The set moves together or not at all, rolling back what it already renamed: the
-// -wal can hold commits the main file lacks, so a half-moved catalog would drop
-// them from the copy that exists to make a mis-fire recoverable.
+// the new main-file path, or "" when there was no catalog to move. The set moves
+// together or not at all, rolling back what it already renamed, because the -wal
+// can hold commits the main file lacks.
 func moveCatalogAside(dbPath string) (string, error) {
 	// The stamp is second-granular and os.Rename overwrites silently, so a retry
-	// within the same second would replace the backup it just made with the empty
-	// catalog that followed it. Take the first free name instead.
+	// within the same second would overwrite the backup it just made. Take the first
+	// free name instead.
 	base := fmt.Sprintf("%s.stale-%s", dbPath, time.Now().UTC().Format("20060102T150405Z"))
 	dest := base + ".bak"
 	for n := 2; ; n++ {
@@ -180,11 +177,10 @@ func moveCatalogTo(dbPath, dest string) (string, error) {
 }
 
 // ensureNoCatalogOwner refuses the reset while another process owns the catalog:
-// renaming a live owner's file leaves it writing to a path nothing points at while
-// a fresh catalog appears beside it. It probes the flock rather than opening,
-// because an open would migrate and checkpoint the file this command is about to
-// preserve, and because only the flock tells a live owner from a lockfile a crash
-// left behind.
+// renaming a live owner's file leaves it writing to a path nothing points at. It
+// probes the flock rather than opening, because an open would migrate and
+// checkpoint the file this command is about to preserve, and only the flock tells
+// a live owner from a lockfile a crash left behind.
 func ensureNoCatalogOwner(dbPath string) error {
 	if _, err := os.Stat(dbPath); err != nil {
 		return nil
@@ -357,13 +353,15 @@ func newDBMigrateCmd(g *globals) *cobra.Command {
 
 func newDBVerifyCmd(g *globals) *cobra.Command {
 	var fix bool
+	var resorted int
 	cmd := &cobra.Command{
 		Use:   "verify",
 		Short: "Check derived data (FTS, rollups, sort keys, book durations) against the source rows",
 		Long: "Runs the derived-data consistency check: the writer-maintained FTS, " +
 			"rollups, and generated sort keys are compared against a fresh recompute from " +
 			"the source rows. Reports drift; --fix recomputes the maintained rollups and " +
-			"book durations first. Exits non-zero when any drift remains.",
+			"book durations and refolds stale sort keys first. Exits non-zero when any " +
+			"drift remains.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			// --fix recomputes rollups and reclaims orphaned art, so it needs the
 			// write lock; a plain verify is read-only and runs alongside a writer.
@@ -377,6 +375,13 @@ func newDBVerifyCmd(g *globals) *cobra.Command {
 				if err := lib.RefreshRollups(ctx(cmd)); err != nil {
 					return err
 				}
+				// Rewrites the keys model.SortKey no longer generates, which no rescan
+				// reaches.
+				n, err := lib.RefreshSortKeys(ctx(cmd))
+				if err != nil {
+					return err
+				}
+				resorted = n
 				// Sweep entities that have stayed childless past the grace window, then
 				// reclaim any art their removal orphaned.
 				if _, err := lib.GCOrphans(ctx(cmd)); err != nil {
@@ -393,7 +398,9 @@ func newDBVerifyCmd(g *globals) *cobra.Command {
 			}
 
 			if g.jsonOut {
-				if err := printJSON(cmd, toDerivedView(rep)); err != nil {
+				view := toDerivedView(rep)
+				view.SortKeysRewritten = resorted
+				if err := printJSON(cmd, view); err != nil {
 					return err
 				}
 			} else {
@@ -408,6 +415,10 @@ func newDBVerifyCmd(g *globals) *cobra.Command {
 				fmt.Fprintf(w, "orphan art sources:       %d\n", rep.OrphanArtSources)
 				fmt.Fprintf(w, "orphan thumbnails:        %d\n", rep.OrphanThumbnails)
 				fmt.Fprintf(w, "consistent:               %t\n", rep.Consistent())
+				// A refold moves the keys page cursors resume against.
+				if resorted > 0 {
+					fmt.Fprintf(w, "sort keys rewritten:      %d (re-page any open cursors)\n", resorted)
+				}
 				// Orphaned art is reclaimable garbage, not corruption, so it does
 				// not fail the check; point the operator at --fix to reclaim it.
 				if rep.Reclaimable() && !fix {
@@ -415,12 +426,17 @@ func newDBVerifyCmd(g *globals) *cobra.Command {
 				}
 			}
 			if !rep.Consistent() {
-				return waxerr.New(waxerr.CodeInvalid, "db verify",
-					"derived data is inconsistent; re-run with --fix or re-scan")
+				// Only --fix rewrites a sort key, so do not offer a re-scan when that
+				// is all that drifted.
+				msg := "derived data is inconsistent; re-run with --fix or re-scan"
+				if rep.SortKeyDriftOnly() {
+					msg = "sort keys are stale; re-run with --fix (a re-scan cannot rewrite them)"
+				}
+				return waxerr.New(waxerr.CodeInvalid, "db verify", msg)
 			}
 			return nil
 		},
 	}
-	cmd.Flags().BoolVar(&fix, "fix", false, "recompute rollups and book durations and reclaim orphaned art before verifying (takes the write lock)")
+	cmd.Flags().BoolVar(&fix, "fix", false, "recompute rollups and book durations, refold stale sort keys, and reclaim orphaned art before verifying (takes the write lock)")
 	return cmd
 }

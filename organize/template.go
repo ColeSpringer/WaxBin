@@ -13,8 +13,7 @@ import (
 
 // Canonical buckets for missing required (top-level, non-optional) grouping
 // fields, so every layout renders the same placeholder rather than an empty path
-// segment. Optional fields and fields inside a conditional group never use a
-// bucket; they render empty and let their group drop.
+// segment. Optional and group-internal fields never use a bucket.
 const (
 	unknownArtist  = "Unknown Artist"
 	unknownAlbum   = "Unknown Album"
@@ -95,10 +94,8 @@ func RenderRelPath(p Profile, item *model.ItemView) (string, error) {
 	parts := strings.Split(rendered, "/")
 	clean := make([]string, 0, len(parts))
 	for _, raw := range parts {
-		// A genuinely empty segment is a dropped conditional group (or a doubled
-		// separator): collapse it rather than create an empty directory. A non-empty
-		// segment is kept even if it sanitizes to "_" (e.g. a title of only illegal
-		// characters), so the file is never left nameless.
+		// A non-empty segment is kept even when it sanitizes to "_" (a title of only
+		// illegal characters), so the file is never left nameless.
 		if raw == "" {
 			continue
 		}
@@ -111,14 +108,12 @@ func RenderRelPath(p Profile, item *model.ItemView) (string, error) {
 }
 
 // itemFields builds the template vocabulary from an item view. String values are
-// folded (separators neutralized) but not bucketed here: the renderer applies the
-// unknown bucket only to a required top-level field, so optional fields and
-// group-internal fields stay genuinely empty and let their group drop.
-// Compilations use a literal Various Artists album-artist folder.
+// folded (separators neutralized) but not bucketed here, so a group-internal field
+// stays genuinely empty and lets its group drop. Compilations use a literal
+// Various Artists album-artist folder.
 func itemFields(item *model.ItemView) map[string]fieldVal {
 	// Seed every known field empty so a template for another media kind can still
-	// render a music item: unused fields drop their optional groups. A genuine typo
-	// is still absent from the map and fails during validation or rendering.
+	// render a music item, dropping the unused fields' optional groups.
 	f := make(map[string]fieldVal, len(knownFields))
 	for name := range knownFields {
 		f[name] = fieldVal{}
@@ -143,9 +138,11 @@ func itemFields(item *model.ItemView) map[string]fieldVal {
 	f["year"] = fieldVal{n: item.Year, isNum: true}
 
 	// Audiobook tokens. For a book the view's Artist is the author (COALESCE'd in
-	// the read view), so author/authorsort derive from it; the rest map directly.
-	// These stay empty for a track, dropping their optional groups in any layout.
+	// the read view), so author/authorsort derive from it.
 	f["author"] = fieldVal{s: foldField(firstNonEmpty(item.Artist, item.AlbumArtist))}
+	// This renders a folded value, so an accented author is spelled without accents
+	// on disk: a book by Édith Piaf files under "piaf, edith". That is model.SortKey
+	// showing through, and it is permanent, not a one-time move.
 	f["authorsort"] = fieldVal{s: foldField(firstNonEmpty(item.AuthorSort, model.SortKey(item.Artist)))}
 	f["series"] = fieldVal{s: foldField(item.Series)}
 	f["seq"] = fieldVal{s: foldField(item.SeriesSeq)}
@@ -154,8 +151,7 @@ func itemFields(item *model.ItemView) map[string]fieldVal {
 	f["asin"] = fieldVal{s: foldField(item.ASIN)}
 
 	// Podcast tokens. For an episode, Album is the podcast title in the shared item
-	// view and Title is the episode title. These stay empty for non-episodes, which
-	// drops their optional groups.
+	// view and Title is the episode title.
 	f["podcast"] = fieldVal{s: foldField(item.Album)}
 	f["episode"] = fieldVal{s: foldField(item.Title)}
 	f["season"] = fieldVal{n: item.Season, isNum: true}
@@ -192,8 +188,7 @@ func renderTemplate(tmpl string, fields map[string]fieldVal) (string, error) {
 
 // renderNodes renders from tmpl[i] until end (top level) or the matching '>'
 // (inside a group). It returns the rendered text, whether any field token
-// contributed a value (which decides a group's survival), and the index after
-// the consumed run.
+// contributed a value (which decides a group's survival), and the next index.
 func renderNodes(tmpl string, i int, inGroup bool, fields map[string]fieldVal) (string, bool, int, error) {
 	var b strings.Builder
 	anyVal := false
@@ -265,9 +260,9 @@ func renderField(tmpl string, i int, inGroup bool, fields map[string]fieldVal) (
 		return "", false, 0, waxerr.New(waxerr.CodeInvalid, op, "unknown template field {"+name+"}")
 	}
 	if fv.empty() {
-		// Inside a group, or marked optional, an empty field contributes nothing and
-		// does not keep its group alive. A required top-level numeric still formats
-		// (0 -> "00"); a required top-level string renders its unknown bucket.
+		// An optional or group-internal field contributes nothing when empty. A
+		// required top-level numeric still formats (0 -> "00"), and a required string
+		// renders its unknown bucket.
 		if optional || inGroup {
 			return "", false, next, nil
 		}
@@ -289,9 +284,8 @@ func firstNonEmpty(vals ...string) string {
 }
 
 // validateTemplate checks a template parses (balanced groups/braces) and
-// references only known fields. It renders against a vocabulary where every field
-// is present, so an unknown-field reference surfaces as an error at profile-load
-// time rather than at the first organize.
+// references only known fields, so a typo surfaces at profile-load time rather
+// than at the first organize.
 func validateTemplate(tmpl string) error {
 	full := make(map[string]fieldVal, len(knownFields))
 	for name := range knownFields {

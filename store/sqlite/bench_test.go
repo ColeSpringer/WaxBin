@@ -127,3 +127,34 @@ func BenchmarkSearchAtScale(b *testing.B) {
 		}
 	}
 }
+
+// BenchmarkRefreshSortKeys measures the whole-catalog sort-key refold, the bulk
+// write path behind `db verify --fix`. Every seeded row drifts, so it is the
+// worst case: one rewrite and one delta each.
+func BenchmarkRefreshSortKeys(b *testing.B) {
+	const n = 20000
+	ctx := context.Background()
+	for b.Loop() {
+		// Opened and closed per iteration rather than through benchStore, whose
+		// cleanup would hold every catalog open until the benchmark ends.
+		b.StopTimer()
+		st, err := Open(ctx, OpenOptions{Path: filepath.Join(b.TempDir(), "c.db"), Owner: "bench"})
+		if err != nil {
+			b.Fatal(err)
+		}
+		if _, err := st.write.ExecContext(ctx, `
+			WITH RECURSIVE seq(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM seq WHERE i < ?)
+			INSERT INTO artist(pid, name, sort_key, match_key)
+			SELECT 'pid' || i, 'Édith ' || i, 'WRONG', 'edith ' || i FROM seq`, n); err != nil {
+			b.Fatal(err)
+		}
+		b.StartTimer()
+		got, err := st.RefreshSortKeys(ctx)
+		b.StopTimer()
+		if err != nil || got != n {
+			b.Fatalf("rewrote %d (err %v), want %d", got, err, n)
+		}
+		_ = st.Close()
+		b.StartTimer()
+	}
+}

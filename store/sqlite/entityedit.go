@@ -243,6 +243,27 @@ func applyEntityFieldTx(ctx context.Context, tx *sql.Tx, entityType model.MergeE
 	return err
 }
 
+// refreshEntitySortKeyTx rewrites an entity's sort_key from its current curation and
+// display name, the same source sortKeyDrift checks. Any path that moves a sort
+// override without going through applyEntityFieldTx has to call it. A non-curatable
+// type has no override to inherit and is a no-op.
+func refreshEntitySortKeyTx(ctx context.Context, tx *sql.Tx, entityType model.MergeEntity, table string, entityID int64) error {
+	if _, ok := entityTableFor(entityType); !ok {
+		return nil
+	}
+	var text string
+	if err := tx.QueryRowContext(ctx,
+		"SELECT COALESCE(NULLIF(TRIM(ec.value), ''), t."+entityDisplayColumn(entityType)+")"+
+			" FROM "+table+" t LEFT JOIN entity_curation ec"+
+			" ON ec.entity_type = ? AND ec.entity_id = t.id AND ec.field = 'sort'"+
+			" WHERE t.id = ?", string(entityType), entityID).Scan(&text); err != nil {
+		return err
+	}
+	_, err := tx.ExecContext(ctx,
+		"UPDATE "+table+" SET sort_key = ? WHERE id = ?", model.SortKey(text), entityID)
+	return err
+}
+
 // upsertEntityCurationTx writes an entity field's curation row with the source, the
 // curated value, and the lock bit. It mirrors upsertEditProvenanceTx for the entity
 // scope.

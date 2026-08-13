@@ -884,11 +884,16 @@ func bookPartsQ(ctx context.Context, q queryer, bookItemID int64) ([]bookPart, e
 	if err := rows.Err(); err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
+	// The query has no ORDER BY, and folding can give two part names one key, so the
+	// file id breaks the last tie rather than leaving reading order to row order.
 	sort.SliceStable(out, func(i, j int) bool {
 		if out[i].Position != out[j].Position {
 			return out[i].Position < out[j].Position
 		}
-		return out[i].sortKey < out[j].sortKey
+		if out[i].sortKey != out[j].sortKey {
+			return out[i].sortKey < out[j].sortKey
+		}
+		return out[i].fileID < out[j].fileID
 	})
 	return out, nil
 }

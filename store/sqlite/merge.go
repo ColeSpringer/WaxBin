@@ -125,6 +125,11 @@ func mergeEntityTx(ctx context.Context, tx *sql.Tx, et model.MergeEntity, table 
 	if err := repointEntityCuration(ctx, tx, table, sid, lid); err != nil {
 		return nil, err
 	}
+	// An inherited sort override has to reach the column too, or the survivor reads
+	// as sort-key drift that `db verify` reports and --fix repairs behind the merge.
+	if err := refreshEntitySortKeyTx(ctx, tx, et, table, sid); err != nil {
+		return nil, err
+	}
 	// Re-point the per-user entity play-state rows (also polymorphic, no FK).
 	if err := repointEntityPlayState(ctx, tx, table, sid, lid); err != nil {
 		return nil, err
