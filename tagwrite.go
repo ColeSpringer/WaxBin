@@ -49,6 +49,11 @@ func (l *Library) writeReplayGainTags(ctx context.Context) (rgWriteCounts, error
 		var diags []model.FileDiagnostic
 		lost := false
 		for _, wn := range res.Warnings {
+			// The write landed and only a post-commit step failed; log it so the
+			// operator hears about the degraded durability, but it is not a loss.
+			if wn.Code == meta.PostWriteWarningCode {
+				l.log.Warn("replaygain tag post-write", "path", string(r.Path), "warning", wn.Message)
+			}
 			if wn.Unrepresented {
 				l.log.Warn("replaygain tag unrepresented", "path", string(r.Path), "key", wn.Key, "warning", wn.Message)
 				lost = true
@@ -227,6 +232,9 @@ func (l *Library) writeEnrichmentTags(ctx context.Context, sinceNS int64) (enric
 		var diags []model.FileDiagnostic
 		lost := false
 		for _, wn := range res.Warnings {
+			if wn.Code == meta.PostWriteWarningCode {
+				l.log.Warn("enrichment tag post-write", "path", string(r.Path), "warning", wn.Message)
+			}
 			if wn.Unrepresented {
 				l.log.Warn("enrichment tag unrepresented", "path", string(r.Path), "key", wn.Key, "warning", wn.Message)
 				lost = true

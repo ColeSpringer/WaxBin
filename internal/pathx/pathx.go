@@ -18,3 +18,11 @@ func UnderRoot(root, p string) bool {
 	}
 	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
 }
+
+// SamePath reports whether two absolute, cleaned paths name the same location, by
+// the same rules UnderRoot uses. Byte equality is wrong on Windows, where path
+// comparison folds case; filepath.Rel carries the platform's rule.
+func SamePath(a, b string) bool {
+	rel, err := filepath.Rel(a, b)
+	return err == nil && rel == "."
+}

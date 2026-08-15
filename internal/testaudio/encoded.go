@@ -24,8 +24,8 @@ func ReferenceSignal(rate int, dur time.Duration) []float32 {
 // EncodeAs re-encodes samples (as a 16-bit WAV) into format via WaxFlow, returning
 // the encoded container bytes. format is one of WaxFlow's output names: "wav",
 // "aiff", "flac", "alac", "mp3", "aac", "opus", or "vorbis"; container overrides
-// the format default where one exists ("adts" for a raw AAC elementary stream)
-// and is empty for the default.
+// the format default where one exists ("adts" for a raw AAC elementary stream,
+// "fragmented" or "progressive" for an MP4 box shape) and is empty for the default.
 //
 // It sets no GainDB, Channels, or Dynamics, so the transcode has no mix stage, no
 // matrix, and no true-peak limiter, the same ChainSpec{Channels:1} trap the decode

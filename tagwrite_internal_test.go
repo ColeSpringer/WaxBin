@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/colespringer/waxbin/config"
@@ -185,11 +186,20 @@ func TestReplayGainWriteBackCountsFailures(t *testing.T) {
 	}
 
 	// The write is atomic (a rewrite into the directory), so removing the directory's
-	// write bit is what makes it fail.
+	// write bit is what makes it fail. Windows ignores that bit on a directory, so
+	// there the blocker is an open handle on the target: WaxLabel documents that a
+	// handle the caller still holds on the path fails the replacing rename.
 	if err := os.Chmod(root, 0o555); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Chmod(root, 0o755) })
+	if runtime.GOOS == "windows" {
+		h, err := os.Open(string(items[0].Path))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = h.Close() })
+	}
 
 	c, err := lib.writeReplayGainTags(ctx)
 	if err != nil {

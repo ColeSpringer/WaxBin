@@ -12,8 +12,9 @@
 *.db-journal
 *.pre-migrate-*.bak
 
-# Write-ownership lockfile
+# Write-ownership lockfile and its owner-record sidecar
 *.waxlock
+*.waxlock.owner
 
 # Editor / OS cruft
 .DS_Store

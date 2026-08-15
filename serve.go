@@ -24,10 +24,11 @@ var _ proxy.Maintainer = (*Library)(nil)
 // CLI command needs for its confirmation output) to this Library, plus the
 // maintenance-mode hand-off. It blocks until ctx is canceled, then returns nil.
 //
-// The socket is created owner-only (0600); the endpoint drives admin mutations, so
-// a broader mode would let any local user issue unauthenticated writes. socketPath
-// should match the Options.IPCSocket advertised in the lockfile so a CLI can
-// discover it. Serve refuses on a read-only library.
+// The socket is created owner-only (0600 on Unix; on Windows it inherits its
+// directory's DACL): the endpoint drives admin mutations, so a broader mode would
+// let any local user issue unauthenticated writes. socketPath should match the
+// Options.IPCSocket advertised beside the lockfile so a CLI can discover it.
+// Serve refuses on a read-only library.
 func (l *Library) Serve(ctx context.Context, socketPath string) error {
 	const op = "waxbin.Serve"
 	if l.ReadOnly() {
@@ -93,10 +94,10 @@ func (l *Library) Reopen(ctx context.Context) error {
 	return l.ensureRoots(ctx)
 }
 
-// ReadLockOwner reads the write-owner metadata from a catalog's lockfile without
+// ReadLockOwner reads the write-owner record beside a catalog's lockfile without
 // opening the catalog. It is how a CLI discovers whether a server is running and
 // on which socket, before deciding to proxy a mutation. It returns an error when
-// the lockfile is absent or unreadable (no live owner).
+// the record is absent or unreadable (no live owner).
 func ReadLockOwner(dbPath string) (sqlite.OwnerInfo, error) {
 	return sqlite.ReadOwnerInfo(dbPath + ".waxlock")
 }

@@ -20,7 +20,7 @@ func newServeCmd(g *globals) *cobra.Command {
 			"fail with a write-ownership conflict: fast mutations (edit, lock, play state, " +
 			"ratings/stars, playlist membership, user, merge) are proxied through the server, " +
 			"and other mutating commands borrow the lock through maintenance mode. Read " +
-			"commands always run directly. The socket is created owner-only (0600). Runs until " +
+			"commands always run directly. The socket is created owner-only. Runs until " +
 			"interrupted (Ctrl-C / SIGTERM).",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {

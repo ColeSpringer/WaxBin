@@ -259,10 +259,13 @@ func errResponse(err error) response {
 	return response{OK: false, Error: toWireError(err)}
 }
 
-// Listen opens an owner-only (0600) unix-domain listener at path, removing a
-// stale socket file left by a previous crash. The 0600 mode matters: the endpoint
+// Listen opens an owner-only unix-domain listener at path, removing a stale
+// socket file left by a previous crash. The restriction matters: the endpoint
 // drives admin mutations, so a broader mode would let any local user issue
-// unauthenticated writes. A path over maxSocketPath is CodeInvalid.
+// unauthenticated writes. On Unix that is the 0600 mode; on Windows chmod cannot
+// express it and the socket's gate is the DACL inherited from its directory, so
+// the socket belongs beside the catalog in a user-owned location. A path over
+// maxSocketPath is CodeInvalid.
 func Listen(path string) (net.Listener, error) {
 	const op = "proxy.Listen"
 	if err := checkSocketPath(path, op); err != nil {

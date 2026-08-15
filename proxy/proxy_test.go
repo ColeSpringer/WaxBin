@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -266,6 +267,11 @@ func TestProtocolVersionRejected(t *testing.T) {
 
 // TestSocketPerms checks the control socket is created owner-only.
 func TestSocketPerms(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// Chmod cannot express 0600 there; the socket's gate is the DACL it
+		// inherits from the catalog directory.
+		t.Skip("unix permissions")
+	}
 	sock := startServer(t, map[string]proxy.Handler{}, nil)
 	fi, err := os.Stat(sock)
 	if err != nil {

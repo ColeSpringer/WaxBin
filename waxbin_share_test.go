@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/colespringer/waxbin"
+	"github.com/colespringer/waxbin/fingerprint"
 	"github.com/colespringer/waxbin/internal/testaudio"
 	"github.com/colespringer/waxbin/model"
 
@@ -176,9 +177,15 @@ func TestResolveRefFingerprint(t *testing.T) {
 	}
 
 	// An algorithm mismatch scores against no candidates and, with no descriptive tags on
-	// a WAV, misses cleanly.
+	// a WAV, misses cleanly. The mismatching algo is derived rather than hardcoded: both
+	// catalogs store whichever algorithm the host's analyzer picked (Chromaprint when
+	// fpcalc is installed, pure-Go otherwise), so the other one is the absent one.
 	algoMismatch := alphaRef
-	algoMismatch.FingerprintAlgo = 100 // Chromaprint; B stores only pure-Go (algo 1)
+	if alphaRef.FingerprintAlgo == fingerprint.ChromaprintAlgoVersion {
+		algoMismatch.FingerprintAlgo = fingerprint.AlgoVersion
+	} else {
+		algoMismatch.FingerprintAlgo = fingerprint.ChromaprintAlgoVersion
+	}
 	if _, rung, err := libB.ResolveRef(ctx, algoMismatch); err != nil || rung == model.MatchFingerprint {
 		t.Fatalf("algo mismatch = rung %s err %v, must not match by fingerprint", rung, err)
 	}

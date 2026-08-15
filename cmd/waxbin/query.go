@@ -266,7 +266,10 @@ func matchLibraryRef(libs []*model.Library, op, ref string) (model.PID, error) {
 			return l.PID, nil
 		}
 		for _, root := range rootSpellings(l) {
-			if ref == root || abs == filepath.Clean(root) {
+			// SamePath rather than byte equality: Windows folds case, so c:\music
+			// must name a library rooted at C:\Music instead of drawing the
+			// inside-root hint below.
+			if ref == root || pathx.SamePath(filepath.Clean(root), abs) {
 				return l.PID, nil
 			}
 		}

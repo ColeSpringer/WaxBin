@@ -10,10 +10,15 @@ import (
 	"github.com/gofrs/flock"
 )
 
-// OwnerInfo is the metadata written into the lockfile by the current write
-// owner. It is advisory only; liveness is the OS flock itself, never a PID
-// check, so this works across container and host processes where PIDs are not
-// comparable.
+// OwnerInfo is the metadata the current write owner records beside the lockfile.
+// It is advisory only; liveness is the OS flock itself, never a PID check, so
+// this works across container and host processes where PIDs are not comparable.
+//
+// The record lives in a sidecar file (ownerPath), not in the lockfile: Windows
+// byte-range locks are mandatory, so while the lock is held every other handle's
+// read or write of the locked file fails, including this process's own. The
+// advisory POSIX flock never conflicted, which is what let the in-file design
+// appear to work.
 type OwnerInfo struct {
 	Owner        string `json:"owner"`
 	IPCSocket    string `json:"ipc_socket,omitempty"`
@@ -31,7 +36,7 @@ type writeLock struct {
 
 // acquireWriteLock takes the exclusive advisory lock on lockPath without
 // blocking. It returns CodeConflict if another live owner holds it, naming that
-// owner when the lockfile metadata is readable.
+// owner when its owner record is readable.
 func acquireWriteLock(lockPath, owner, ipcSocket string, nowNS int64) (*writeLock, error) {
 	fl := flock.New(lockPath)
 	locked, err := fl.TryLock()
@@ -42,17 +47,28 @@ func acquireWriteLock(lockPath, owner, ipcSocket string, nowNS int64) (*writeLoc
 		return nil, ownedElsewhere(lockPath, "sqlite.acquireWriteLock")
 	}
 
-	// Record owner metadata. The advisory flock does not block this write, and
-	// truncating the lockfile contents does not drop the lock.
+	// Record owner metadata beside the lockfile. The write error is surfaced, not
+	// discarded: a discarded error is what let the old in-file write fail silently
+	// on Windows for as long as it existed, and a directory where this write fails
+	// cannot host the catalog either.
 	info := OwnerInfo{Owner: owner, IPCSocket: ipcSocket, PID: os.Getpid(), AcquiredAtNS: nowNS}
-	if data, err := json.Marshal(info); err == nil {
-		_ = os.WriteFile(lockPath, data, 0o600)
+	data, err := json.Marshal(info)
+	if err == nil {
+		err = os.WriteFile(ownerPath(lockPath), data, 0o600)
+	}
+	if err != nil {
+		_ = fl.Unlock()
+		return nil, waxerr.Wrap(waxerr.CodeIO, "sqlite.acquireWriteLock", err)
 	}
 	return &writeLock{fl: fl, path: lockPath}, nil
 }
 
-// ownedElsewhere is the CodeConflict a held lock raises, naming the owner when the
-// lockfile metadata is readable.
+// ownerPath is the sidecar file carrying the owner record for a lockfile. Derived
+// here so every caller keeps passing the lock path.
+func ownerPath(lockPath string) string { return lockPath + ".owner" }
+
+// ownedElsewhere is the CodeConflict a held lock raises, naming the owner when
+// its record is readable.
 func ownedElsewhere(lockPath, op string) error {
 	msg := "library is owned by another process"
 	if info, e := readOwnerInfo(lockPath); e == nil && info.Owner != "" {
@@ -109,31 +125,36 @@ func acquireWriteLockRetry(ctx context.Context, lockPath, owner, ipcSocket strin
 	}
 }
 
-// ReadOwnerInfo reads the lockfile metadata at lockPath without taking the lock.
-// It is the exported form a CLI uses to discover a running server's advertised IPC
-// socket before deciding whether to proxy a mutation.
+// ReadOwnerInfo reads the owner record for the lockfile at lockPath without
+// taking the lock. It is the exported form a CLI uses to discover a running
+// server's advertised IPC socket before deciding whether to proxy a mutation.
 func ReadOwnerInfo(lockPath string) (OwnerInfo, error) { return readOwnerInfo(lockPath) }
 
-// release clears the lockfile metadata and drops the lock. The metadata is
-// truncated while the lock is still held, so a process that acquires next never
-// reads this owner's stale info; an interleaving reader sees an empty file
-// (reported as "no owner") rather than a misleading name.
+// release removes the owner record and drops the lock. The record goes while the
+// lock is still held, so a process that acquires next never reads this owner's
+// stale info; an interleaving reader sees a missing file (reported as "no owner")
+// rather than a misleading name.
 func (w *writeLock) release() error {
 	if w == nil || w.fl == nil {
 		return nil
 	}
-	_ = os.Truncate(w.path, 0)
+	// A reader mid-ReadFile blocks the delete on Windows (Go opens files without
+	// FILE_SHARE_DELETE), so fall back to truncating: an empty record reads as "no
+	// owner", the same answer removal gives.
+	if err := os.Remove(ownerPath(w.path)); err != nil && !os.IsNotExist(err) {
+		_ = os.Truncate(ownerPath(w.path), 0)
+	}
 	if err := w.fl.Unlock(); err != nil {
 		return waxerr.Wrap(waxerr.CodeIO, "sqlite.writeLock.release", err)
 	}
 	return nil
 }
 
-// readOwnerInfo reads the lockfile metadata without taking the lock. Used to
-// report who owns a contended library.
+// readOwnerInfo reads the owner record without taking the lock. Used to report
+// who owns a contended library.
 func readOwnerInfo(lockPath string) (OwnerInfo, error) {
 	var info OwnerInfo
-	data, err := os.ReadFile(lockPath)
+	data, err := os.ReadFile(ownerPath(lockPath))
 	if err != nil {
 		return info, err
 	}

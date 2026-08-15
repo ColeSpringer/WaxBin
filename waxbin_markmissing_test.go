@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/colespringer/waxbin"
@@ -156,6 +157,12 @@ func TestMarkMissingRefusesUnreachableRoot(t *testing.T) {
 func TestMarkMissingMultiFileBookRefusesPartialView(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root ignores directory permissions, so the unreadable part cannot be staged")
+	}
+	if runtime.GOOS == "windows" {
+		// Chmod 0 on a directory is a no-op there; staging an unreadable part would
+		// need a deny ACE. The product path is reachable on Windows (an access-denied
+		// stat maps to CodeIO), only the fixture cannot stage it.
+		t.Skip("directory permissions cannot make a part unreadable on Windows")
 	}
 	ctx := context.Background()
 	root := t.TempDir()

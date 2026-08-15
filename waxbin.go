@@ -1425,6 +1425,12 @@ func (l *Library) writeBackFiles(ctx context.Context, op string, files []model.I
 		// as a drift diagnostic and a write-back failure instead of cleared as a clean sync.
 		var lost []model.FileDiagnostic
 		for _, wn := range res.Warnings {
+			// A landed write whose post-commit step failed: worth a log line, but the
+			// tags are on disk and match the catalog, so it is neither a lost value
+			// nor drift.
+			if wn.Code == meta.PostWriteWarningCode {
+				l.log.Warn("tag write-back post-write", "path", path, "warning", wn.Message)
+			}
 			if wn.Unrepresented {
 				lost = append(lost, model.FileDiagnostic{
 					Code: model.DiagTagWriteLost, Severity: model.SeverityWarn,

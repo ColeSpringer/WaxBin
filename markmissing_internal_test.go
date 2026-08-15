@@ -1,6 +1,7 @@
 package waxbin
 
 import (
+	"runtime"
 	"testing"
 
 	"github.com/colespringer/waxbin/model"
@@ -13,6 +14,12 @@ import (
 // under the library. The end-to-end shape cannot be staged everywhere, since a
 // filesystem that enforces UTF-8 names (APFS, HFS+) rejects such a root outright.
 func TestLibraryForRawPathMatchesRawBytes(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// The premise is unreachable there: raw and display roots are always the same
+		// bytes on Windows, and filepath.Rel folds an invalid byte onto its U+FFFD
+		// rendering, so the display spelling matches by design.
+		t.Skip("raw and display roots cannot diverge on Windows")
+	}
 	rawRootBytes := []byte("/mnt/m\xffusic")
 	libs := []*model.Library{
 		{PID: "other", Root: []byte("/mnt/spoken"), DisplayRoot: "/mnt/spoken"},

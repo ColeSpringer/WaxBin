@@ -10,7 +10,20 @@ permissions:
 
 jobs:
   build-test:
-    runs-on: ubuntu-latest
+    strategy:
+      # Let each OS report on its own; a Windows-only failure is a real signal
+      # (chmod, flock, and clock semantics all differ there), not a reason to
+      # cancel the Linux run.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        # One shell for both runners, so the gofmt and grep steps stay a single
+        # spelling. .gitattributes pins eol=lf, so the Windows checkout is
+        # byte-identical and gofmt agrees across the matrix.
+        shell: bash
     env:
       CGO_ENABLED: "0" # WaxBin is strictly no-CGO
     steps:

@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -130,10 +131,24 @@ func (f fakeLibraryLister) Libraries(context.Context) ([]*model.Library, error) 
 	return f.libs, nil
 }
 
+// vol prefixes fixture roots so they are absolute on Windows too: a bare "/music"
+// has no volume there, so filepath.Abs resolves a ref against the current drive
+// and filepath.Rel refuses to relate the two spellings. Empty on POSIX, so the
+// forward-slash coverage is unchanged.
+var vol = func() string {
+	wd, err := os.Getwd()
+	if err != nil {
+		// A silent "" would reinstate the volume-less roots this exists to prevent,
+		// failing five tests with no visible cause.
+		panic("query_test: getwd: " + err.Error())
+	}
+	return filepath.VolumeName(wd)
+}()
+
 func testLibs() fakeLibraryLister {
 	return fakeLibraryLister{libs: []*model.Library{
-		{PID: "lib-music", Root: []byte("/music"), DisplayRoot: "/music"},
-		{PID: "lib-books", Root: []byte("/books"), DisplayRoot: "/books"},
+		{PID: "lib-music", Root: []byte(vol + "/music"), DisplayRoot: vol + "/music"},
+		{PID: "lib-books", Root: []byte(vol + "/books"), DisplayRoot: vol + "/books"},
 	}}
 }
 
@@ -152,7 +167,7 @@ func TestBuildQueryLibraryFlagsCompileToIn(t *testing.T) {
 }
 
 func TestResolveLibraryRefsAcceptsAPIDOrARootPath(t *testing.T) {
-	for _, ref := range []string{"lib-music", "/music", "/music/"} {
+	for _, ref := range []string{"lib-music", vol + "/music", vol + "/music/"} {
 		got, err := resolveLibraryRefs(context.Background(), testLibs(), "query", []string{ref})
 		if err != nil {
 			t.Fatalf("%q: %v", ref, err)
@@ -167,7 +182,7 @@ func TestResolveLibraryRefsAcceptsAPIDOrARootPath(t *testing.T) {
 // arity 1, which is the only arity compileValueSubCond drives off file_library.
 func TestResolveLibraryRefsDeduplicatesSpellingsOfOneLibrary(t *testing.T) {
 	got, err := resolveLibraryRefs(context.Background(), testLibs(), "query",
-		[]string{"/music", "lib-music", "/books", "/music/"})
+		[]string{vol + "/music", "lib-music", vol + "/books", vol + "/music/"})
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
@@ -182,9 +197,9 @@ func TestResolveLibraryRefsDeduplicatesSpellingsOfOneLibrary(t *testing.T) {
 // either must still get the containing-root hint.
 func TestResolveLibraryRefsMatchesEitherRootSpelling(t *testing.T) {
 	libs := fakeLibraryLister{libs: []*model.Library{
-		{PID: "lib-odd", Root: []byte("/raw\xffmusic"), DisplayRoot: "/shown/music"},
+		{PID: "lib-odd", Root: []byte(vol + "/raw\xffmusic"), DisplayRoot: vol + "/shown/music"},
 	}}
-	for _, ref := range []string{"/raw\xffmusic", "/shown/music"} {
+	for _, ref := range []string{vol + "/raw\xffmusic", vol + "/shown/music"} {
 		got, err := resolveLibraryRefs(context.Background(), libs, "query", []string{ref})
 		if err != nil {
 			t.Fatalf("%q: %v", ref, err)
@@ -193,29 +208,29 @@ func TestResolveLibraryRefsMatchesEitherRootSpelling(t *testing.T) {
 			t.Errorf("%q resolved to %v, want [lib-odd]", ref, got)
 		}
 	}
-	_, err := resolveLibraryRefs(context.Background(), libs, "query", []string{"/raw\xffmusic/jazz"})
+	_, err := resolveLibraryRefs(context.Background(), libs, "query", []string{vol + "/raw\xffmusic/jazz"})
 	if !waxerr.Is(err, waxerr.CodeNotFound) || !strings.Contains(err.Error(), "inside root") {
 		t.Errorf("err = %v, want the containing-root hint against the raw spelling", err)
 	}
 }
 
 func TestResolveLibraryRefsRejectsAnUnknownLibrary(t *testing.T) {
-	_, err := resolveLibraryRefs(context.Background(), testLibs(), "query", []string{"/nope"})
+	_, err := resolveLibraryRefs(context.Background(), testLibs(), "query", []string{vol + "/nope"})
 	if !waxerr.Is(err, waxerr.CodeNotFound) {
 		t.Fatalf("err = %v, want CodeNotFound", err)
 	}
-	for _, want := range []string{"/nope", "/music", "/books"} {
+	for _, want := range []string{vol + "/nope", vol + "/music", vol + "/books"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q does not name %q", err, want)
 		}
 	}
 
 	// A path under a root must not resolve to the parent, which would widen the filter.
-	_, err = resolveLibraryRefs(context.Background(), testLibs(), "query", []string{"/music/jazz"})
+	_, err = resolveLibraryRefs(context.Background(), testLibs(), "query", []string{vol + "/music/jazz"})
 	if !waxerr.Is(err, waxerr.CodeNotFound) {
 		t.Fatalf("err = %v, want CodeNotFound", err)
 	}
-	if !strings.Contains(err.Error(), "inside root /music") {
+	if !strings.Contains(err.Error(), "inside root "+vol+"/music") {
 		t.Errorf("error %q does not point at the containing root", err)
 	}
 }
@@ -245,7 +260,7 @@ func TestResolveLibraryRefsAcceptsARelativePath(t *testing.T) {
 // !HasPrefix(rel, "..") calls a sibling like /musicarchive a child of /music, which
 // would hand back the wrong root in the hint.
 func TestResolveLibraryRefsDoesNotTreatASiblingAsContained(t *testing.T) {
-	for _, ref := range []string{"/musicarchive", "/music.old"} {
+	for _, ref := range []string{vol + "/musicarchive", vol + "/music.old"} {
 		_, err := resolveLibraryRefs(context.Background(), testLibs(), "query", []string{ref})
 		if !waxerr.Is(err, waxerr.CodeNotFound) {
 			t.Fatalf("%q: err = %v, want CodeNotFound", ref, err)
@@ -253,6 +268,23 @@ func TestResolveLibraryRefsDoesNotTreatASiblingAsContained(t *testing.T) {
 		if strings.Contains(err.Error(), "inside root") {
 			t.Errorf("%q is a sibling of /music, not a child, but got the containment hint: %v", ref, err)
 		}
+	}
+}
+
+// Windows compares paths case-insensitively, so a retyped root in different case
+// names the same directory. Byte equality used to miss it and hand back the
+// inside-root hint for the root itself.
+func TestResolveLibraryRefsFoldsCaseOnWindows(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("path case folding is a Windows filesystem property")
+	}
+	got, err := resolveLibraryRefs(context.Background(), testLibs(), "query",
+		[]string{strings.ToUpper(vol + "/music")})
+	if err != nil {
+		t.Fatalf("upper-cased root: %v", err)
+	}
+	if len(got) != 1 || got[0] != "lib-music" {
+		t.Errorf("upper-cased root resolved to %v, want [lib-music]", got)
 	}
 }
 
@@ -271,7 +303,7 @@ func TestResolveLibraryRefsCarriesTheCallersOp(t *testing.T) {
 // would leave a --library that validates its input and then filters nothing.
 func TestScopedQueryAppliesTheResolvedLibraries(t *testing.T) {
 	q, err := scopedQuery(context.Background(), testLibs(), yearCmd(), "query", "",
-		queryFlags{}, []string{"/music"})
+		queryFlags{}, []string{vol + "/music"})
 	if err != nil {
 		t.Fatalf("scopedQuery: %v", err)
 	}

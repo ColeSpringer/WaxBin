@@ -346,6 +346,8 @@ func (o *Organizer) apply(ctx context.Context, plan *Plan, a *Action, jobPID mod
 
 	// Re-tag the source first. The write is essence-preserving, so item identity is
 	// unchanged; a failure leaves the file untouched (atomic) and aborts the move.
+	// The writer's one exception (a landed write whose hash could not be read) also
+	// aborts here, and the next scan of the un-moved source heals its row.
 	edits := o.buildEdits(plan, a)
 	var retag *meta.WriteResult
 	var prevSize, prevMtime int64
@@ -420,6 +422,11 @@ func (o *Organizer) noteUnrepresented(ctx context.Context, a *Action, retag *met
 	if retag != nil {
 		for _, w := range retag.Warnings {
 			if !w.Unrepresented {
+				// The retag landed and only a post-commit step failed; surface it in
+				// the log without gating anything.
+				if w.Code == meta.PostWriteWarningCode {
+					o.log.Warn("organize tag post-write", "path", a.Dst, "warning", w.Message)
+				}
 				continue
 			}
 			if w.Key != "" {

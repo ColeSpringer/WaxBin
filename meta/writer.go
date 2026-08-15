@@ -2,6 +2,8 @@ package meta
 
 import (
 	"context"
+	"errors"
+	"io/fs"
 	"os"
 
 	"github.com/colespringer/waxbin/identity"
@@ -9,6 +11,7 @@ import (
 	"github.com/colespringer/waxbin/waxerr"
 	waxlabel "github.com/colespringer/waxlabel"
 	"github.com/colespringer/waxlabel/tag"
+	wlerr "github.com/colespringer/waxlabel/waxerr"
 )
 
 // Writer applies tag edits to files on disk through WaxLabel. It builds on
@@ -239,6 +242,72 @@ var unrepresentedCodes = map[waxlabel.WarningCode]bool{
 	waxlabel.WarnValueReduced: true,
 }
 
+// PostWriteWarningCode marks a write whose bytes landed but whose post-commit step
+// (the directory sync, a restored file attribute) failed. WaxLabel v1.4 reports
+// that outcome as committed-with-error; the writer folds it into Warnings so the
+// caller records the file's new state instead of counting a landed write as
+// failed. It is never Unrepresented, since no value was lost; consumers that want
+// the event visible log entries carrying this code.
+const PostWriteWarningCode = "post-write"
+
+// writeCode classifies a WaxLabel failure. Cancellation is CodeCanceled wherever
+// it surfaces. A write refusal, meaning the file or format cannot take the edit at
+// all (a fragmented MP4, a chained or unaligned Ogg stream, an unwritable or
+// unparseable container, an unsupported tag, an oversized picture), is
+// CodeUnsupported, matching ApplyPicture's capability gate. A filesystem error
+// reaching the file is CodeIO. Anything else takes fallback: a bad edit at parse
+// or prepare, an I/O failure at execute.
+func writeCode(err error, fallback waxerr.Code) waxerr.Code {
+	var pe *fs.PathError
+	switch {
+	case errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded):
+		return waxerr.CodeCanceled
+	case errors.Is(err, wlerr.ErrFragmented) || errors.Is(err, wlerr.ErrUnsupportedFormat) ||
+		errors.Is(err, wlerr.ErrUnsupportedTag) || errors.Is(err, wlerr.ErrPictureTooLarge) ||
+		errors.Is(err, wlerr.ErrChainedStream) || errors.Is(err, wlerr.ErrUnalignedStream):
+		return waxerr.CodeUnsupported
+	case errors.As(err, &pe):
+		return waxerr.CodeIO
+	}
+	return fallback
+}
+
+// commitPlan executes the plan in place and reports the file's post-write state.
+// A landed write is success even when a post-commit step failed (the plan is
+// spent and the bytes are on disk); that failure rides in Warnings under
+// PostWriteWarningCode. One narrow exception keeps the reported state truthful: a
+// landed write whose content hash cannot be read reports the error anyway, since
+// the caller cannot update the file row without the hash, and the next scan
+// re-hashes and heals that row. Size and mtime come from WaxLabel's own
+// post-commit stat (Dest), so a racing external write cannot skew them.
+func commitPlan(ctx context.Context, plan *waxlabel.Plan, op, path, what string, warnings []model.TagWriteWarning) (*WriteResult, error) {
+	_, sres, err := plan.Execute(ctx, waxlabel.SaveBack())
+	if err != nil && !sres.Committed {
+		return nil, waxerr.Wrapf(writeCode(err, waxerr.CodeIO), op, err, "writing %s to %s", what, path)
+	}
+	if err != nil {
+		// Sanitized at the seam like every other warning; the error text embeds the
+		// file path, which the terminal must not have to trust.
+		warnings = append(warnings, model.TagWriteWarning{
+			Code: PostWriteWarningCode, Message: capDetail(tag.SanitizeLine(err.Error())),
+		})
+	}
+	size, mtime := sres.Dest.Size, sres.Dest.ModTimeUnixNano
+	if mtime == 0 {
+		// Dest's zero mtime is WaxLabel's "unknown" marker; fall back to a stat.
+		info, serr := os.Stat(path)
+		if serr != nil {
+			return nil, waxerr.Wrap(waxerr.CodeIO, op, serr)
+		}
+		size, mtime = info.Size(), info.ModTime().UnixNano()
+	}
+	ch, err := identity.ContentHash(path)
+	if err != nil {
+		return nil, err
+	}
+	return &WriteResult{Changed: true, Size: size, MTimeNS: mtime, ContentHash: ch, Warnings: warnings}, nil
+}
+
 // writeWarnings projects a write plan's warnings into the model. It is the one place
 // WaxLabel's warning vocabulary is interpreted, which keeps waxlabel types out of
 // model and gives the allowlist a single home.
@@ -284,6 +353,11 @@ func writeWarnings(ws []waxlabel.Warning) []model.TagWriteWarning {
 // audio essence (WithVerifyEssence). It returns the new size, mtime, and content
 // hash so the caller can update the catalog's file row through the optimistic
 // file-state seam. A no-op edit set reports Changed=false without rewriting.
+//
+// An error means the file was not rewritten, apart from the one narrow exception
+// commitPlan documents (a landed write whose hash cannot be read; the next scan
+// heals it). A write whose bytes landed but whose post-commit step failed reports
+// success with a post-write warning instead.
 func (w *Writer) Apply(ctx context.Context, path string, edits []TagEdit) (*WriteResult, error) {
 	const op = "meta.Writer.Apply"
 	if len(edits) == 0 {
@@ -292,7 +366,7 @@ func (w *Writer) Apply(ctx context.Context, path string, edits []TagEdit) (*Writ
 
 	doc, err := waxlabel.ParseFile(ctx, path)
 	if err != nil {
-		return nil, waxerr.Wrapf(waxerr.CodeInvalid, op, err, "parsing %s for tag write", path)
+		return nil, waxerr.Wrapf(writeCode(err, waxerr.CodeInvalid), op, err, "parsing %s for tag write", path)
 	}
 
 	ed := doc.Edit()
@@ -308,7 +382,7 @@ func (w *Writer) Apply(ctx context.Context, path string, edits []TagEdit) (*Writ
 	// if it differs, so a tag edit can never mutate audio.
 	plan, err := ed.Prepare(waxlabel.WithVerifyEssence())
 	if err != nil {
-		return nil, waxerr.Wrapf(waxerr.CodeInvalid, op, err, "preparing tag write for %s", path)
+		return nil, waxerr.Wrapf(writeCode(err, waxerr.CodeInvalid), op, err, "preparing tag write for %s", path)
 	}
 	// Read the report before the no-op gate. WaxLabel documents that a no-op can still
 	// carry a warning the consumer needs to see: an edit whose only effect was a value
@@ -319,25 +393,12 @@ func (w *Writer) Apply(ctx context.Context, path string, edits []TagEdit) (*Writ
 		return &WriteResult{Changed: false, Warnings: warnings}, nil
 	}
 
-	if _, _, err := plan.Execute(ctx, waxlabel.SaveBack()); err != nil {
-		return nil, waxerr.Wrapf(waxerr.CodeIO, op, err, "writing tags to %s", path)
-	}
-
-	info, err := os.Stat(path)
-	if err != nil {
-		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
-	}
-	ch, err := identity.ContentHash(path)
-	if err != nil {
-		return nil, err
-	}
-	return &WriteResult{
-		Changed:     true,
-		Size:        info.Size(),
-		MTimeNS:     info.ModTime().UnixNano(),
-		ContentHash: ch,
-		Warnings:    warnings,
-	}, nil
+	// A committed-with-error write is a landed write. WaxLabel documents that
+	// quadrant as a warning: the plan is spent and a retry is refused, so reporting
+	// failure would leave every caller skipping the file-state update for a file
+	// whose bytes did change (and the enrichment pass abandoning a book whose
+	// primary part was in fact written). commitPlan carries that contract.
+	return commitPlan(ctx, plan, op, path, "tags", warnings)
 }
 
 // PictureEdit is a change to a file's embedded front cover. Clear removes the front
@@ -362,14 +423,15 @@ func (w *Writer) ApplyPicture(ctx context.Context, path string, edit PictureEdit
 
 	doc, err := waxlabel.ParseFile(ctx, path)
 	if err != nil {
-		return nil, waxerr.Wrapf(waxerr.CodeInvalid, op, err, "parsing %s for picture write", path)
+		return nil, waxerr.Wrapf(writeCode(err, waxerr.CodeInvalid), op, err, "parsing %s for picture write", path)
 	}
-	// The format gate is a capability check, not a byte check: a read-only container or
-	// one with no picture slot cannot carry the cover, so refuse rather than write a
+	// The gate is a capability check, not a byte check: a read-only file (WaxLabel
+	// v1.4 reports ReadOnly per file, so this covers a fragmented MP4) or a format
+	// with no picture slot cannot carry the cover, so refuse rather than write a
 	// no-op the caller would read as a clean sync.
 	caps := doc.Capabilities()
 	if caps.ReadOnly || caps.Pictures.Write == waxlabel.AccessNone {
-		return nil, waxerr.New(waxerr.CodeUnsupported, op, "this file's format cannot store an embedded cover")
+		return nil, waxerr.New(waxerr.CodeUnsupported, op, "this file cannot store an embedded cover")
 	}
 
 	ed := doc.Edit()
@@ -392,28 +454,11 @@ func (w *Writer) ApplyPicture(ctx context.Context, path string, edit PictureEdit
 
 	plan, err := ed.Prepare(opts...)
 	if err != nil {
-		return nil, waxerr.Wrapf(waxerr.CodeInvalid, op, err, "preparing picture write for %s", path)
+		return nil, waxerr.Wrapf(writeCode(err, waxerr.CodeInvalid), op, err, "preparing picture write for %s", path)
 	}
 	warnings := writeWarnings(plan.Report().Warnings)
 	if plan.IsNoOp() {
 		return &WriteResult{Changed: false, Warnings: warnings}, nil
 	}
-	if _, _, err := plan.Execute(ctx, waxlabel.SaveBack()); err != nil {
-		return nil, waxerr.Wrapf(waxerr.CodeIO, op, err, "writing cover to %s", path)
-	}
-	info, err := os.Stat(path)
-	if err != nil {
-		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
-	}
-	ch, err := identity.ContentHash(path)
-	if err != nil {
-		return nil, err
-	}
-	return &WriteResult{
-		Changed:     true,
-		Size:        info.Size(),
-		MTimeNS:     info.ModTime().UnixNano(),
-		ContentHash: ch,
-		Warnings:    warnings,
-	}, nil
+	return commitPlan(ctx, plan, op, path, "cover", warnings)
 }

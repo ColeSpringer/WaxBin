@@ -56,7 +56,7 @@ func (s *Store) entityPlayStateWrite(ctx context.Context, op string, userPID mod
 		if err != nil {
 			return err
 		}
-		changed, err = mut(ctx, tx, userID, entityID, nowNS())
+		changed, err = mut(ctx, tx, userID, entityID, s.stampNS())
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}

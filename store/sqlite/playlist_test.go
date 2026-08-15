@@ -2,6 +2,8 @@ package sqlite
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/colespringer/waxbin/model"
@@ -266,10 +268,19 @@ func TestRemovePlaylistItemNonMemberIsNoOp(t *testing.T) {
 func TestItemByPlaylistPathMatching(t *testing.T) {
 	st, lib := entityFixture(t)
 	ctx := context.Background()
-	putTrack(t, st, lib.ID, trackSpec{path: "/lib/al/1.flac", essence: "e1", content: "c1", title: "One", artist: "X", album: "Al"})
+	// Stored paths are OS-native and absolute, as a real scan writes them. The
+	// playlist entries below stay forward-slash, which is what M3U8 carries on
+	// every platform and what the matcher normalizes; a bare "/lib" is not even
+	// absolute on Windows without a volume.
+	vol := ""
+	if wd, err := os.Getwd(); err == nil {
+		vol = filepath.VolumeName(wd)
+	}
+	nat := func(p string) string { return filepath.FromSlash(vol + p) }
+	putTrack(t, st, lib.ID, trackSpec{path: nat("/lib/al/1.flac"), essence: "e1", content: "c1", title: "One", artist: "X", album: "Al"})
 
 	// Absolute path: exact (indexed) match.
-	if it, err := st.ItemByPlaylistPath(ctx, "/lib/al/1.flac"); err != nil || it.Title != "One" {
+	if it, err := st.ItemByPlaylistPath(ctx, vol+"/lib/al/1.flac"); err != nil || it.Title != "One" {
 		t.Errorf("absolute match = %v (err %v), want One", it, err)
 	}
 	// Relative path: unique suffix match.
@@ -288,8 +299,8 @@ func TestItemByPlaylistPathMatching(t *testing.T) {
 	}
 
 	// Ambiguous basename across two folders is not guessed.
-	putTrack(t, st, lib.ID, trackSpec{path: "/lib/x/dup.flac", essence: "ex", content: "cx", title: "Dx", artist: "X", album: "Al"})
-	putTrack(t, st, lib.ID, trackSpec{path: "/lib/y/dup.flac", essence: "ey", content: "cy", title: "Dy", artist: "X", album: "Al"})
+	putTrack(t, st, lib.ID, trackSpec{path: nat("/lib/x/dup.flac"), essence: "ex", content: "cx", title: "Dx", artist: "X", album: "Al"})
+	putTrack(t, st, lib.ID, trackSpec{path: nat("/lib/y/dup.flac"), essence: "ey", content: "cy", title: "Dy", artist: "X", album: "Al"})
 	if _, err := st.ItemByPlaylistPath(ctx, "dup.flac"); !waxerr.Is(err, waxerr.CodeNotFound) {
 		t.Errorf("ambiguous basename should be CodeNotFound, got %v", err)
 	}

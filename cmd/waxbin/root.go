@@ -282,7 +282,7 @@ func (g *globals) cleanup() {
 	g.maintConn = nil
 }
 
-// advertisedSocket returns the IPC socket a running server advertises in the
+// advertisedSocket returns the IPC socket a running server advertises beside the
 // catalog's lockfile, or "" when no server is advertised.
 func advertisedSocket(dbPath string) string {
 	info, err := waxbin.ReadLockOwner(dbPath)
@@ -293,8 +293,8 @@ func advertisedSocket(dbPath string) string {
 }
 
 // dialServer connects to an advertised server socket and confirms it is live,
-// returning a client or nil. A stale advertisement (the server died leaving the
-// lockfile) yields nil, so the caller falls back to a direct open.
+// returning a client or nil. A stale advertisement (the server died leaving its
+// owner record behind) yields nil, so the caller falls back to a direct open.
 func dialServer(dbPath string) *proxy.Client {
 	sock := advertisedSocket(dbPath)
 	if sock == "" {

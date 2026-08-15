@@ -55,12 +55,13 @@ func input(libID int64, path, essence, content, title string) model.PutScannedTr
 func TestLockfileClearedOnClose(t *testing.T) {
 	ctx := context.Background()
 	db := filepath.Join(t.TempDir(), "c.db")
-	lock := db + ".waxlock"
+	ownerFile := db + ".waxlock.owner"
 
 	st, err := sqlite.Open(ctx, sqlite.OpenOptions{Path: db, Owner: "owner-x"})
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
+	t.Cleanup(func() { _ = st.Close() })
 	info, err := st.OwnerInfo()
 	if err != nil || info.Owner != "owner-x" {
 		t.Fatalf("owner while open = %+v (err %v), want owner-x", info, err)
@@ -69,12 +70,10 @@ func TestLockfileClearedOnClose(t *testing.T) {
 		t.Fatalf("close: %v", err)
 	}
 
-	data, err := os.ReadFile(lock)
-	if err != nil {
-		t.Fatalf("read lockfile: %v", err)
-	}
-	if len(data) != 0 {
-		t.Fatalf("lockfile not cleared on close: %q", data)
+	// The owner record is a sidecar (the lockfile itself is a pure lock token,
+	// unreadable while locked on Windows), and close removes it.
+	if _, err := os.Stat(ownerFile); !os.IsNotExist(err) {
+		t.Fatalf("owner record not removed on close: stat err = %v", err)
 	}
 }
 

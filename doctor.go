@@ -126,7 +126,7 @@ func (l *Library) Doctor(ctx context.Context) (*DoctorReport, error) {
 	}
 	rep.DiagnosticsStale = stale
 
-	// The lockfile is read without taking the lock, so even a read-only doctor
+	// The owner record is read without taking the lock, so even a read-only doctor
 	// can report who currently owns the catalog (empty when no one holds it).
 	if info, err := l.store.OwnerInfo(); err == nil {
 		rep.Owner = info

@@ -19,6 +19,10 @@ func openRootedStore(t *testing.T, dir, db, owner string) (*sqlite.Store, *model
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
+	// Close is idempotent, so tests that close explicitly to reopen are unaffected;
+	// without this the second store leaks its handle and Windows fails the TempDir
+	// removal.
+	t.Cleanup(func() { _ = st.Close() })
 	lib, err := st.EnsureLibrary(ctx, &model.Library{
 		Root: []byte(dir), DisplayRoot: dir, Mode: model.ModeManaged, Profile: "waxbin-native",
 	})
