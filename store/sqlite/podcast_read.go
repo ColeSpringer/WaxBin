@@ -9,27 +9,37 @@ import (
 	"github.com/colespringer/waxbin/waxerr"
 )
 
-// podcastSelect reads a podcast row plus its episode and downloaded counts.
+// podcastSelect reads a podcast row plus its episode and downloaded counts, and the
+// two facts a sync needs about the cover it already holds: where that cover came from
+// and whether it is locked. Both are scalar subqueries beside the counts, so a sync
+// gets them from the PodcastByPID it already does rather than earning a port method
+// and a per-show query in SyncAll.
 const podcastSelect = `SELECT p.id, p.pid, p.feed_url, p.identity_key, p.title, p.sort_key, p.author,
 	p.description, p.link, p.language, p.category, p.explicit,
 	p.funding_url, p.funding_message, p.medium, p.image_url, p.guid, p.etag,
 	p.last_modified, p.last_fetched_at, p.retention_keep, p.auth_user, p.source_type, p.created_at, p.updated_at,
 	(SELECT COUNT(*) FROM episode e WHERE e.podcast_id = p.id) AS ep_count,
 	(SELECT COUNT(*) FROM episode e JOIN playable_item pi ON pi.id = e.item_id
-	   WHERE e.podcast_id = p.id AND pi.state = 'present') AS dl_count
+	   WHERE e.podcast_id = p.id AND pi.state = 'present') AS dl_count,
+	COALESCE((SELECT am.source_url FROM art_map am
+	   WHERE am.entity_type = 'podcast' AND am.entity_id = p.id AND am.role = 'front'), '') AS cover_source_url,
+	COALESCE((SELECT ec.locked FROM entity_curation ec
+	   WHERE ec.entity_type = 'podcast' AND ec.entity_id = p.id AND ec.field = 'art'), 0) AS cover_locked
 	FROM podcast p`
 
 func scanPodcast(sc rowScanner) (*model.Podcast, error) {
 	var p model.Podcast
 	var lastFetched sql.NullInt64
+	var coverLocked int
 	if err := sc.Scan(&p.ID, &p.PID, &p.FeedURL, &p.IdentityKey, &p.Title, &p.SortKey, &p.Author,
 		&p.Description, &p.Link, &p.Language, &p.Category, &p.Explicit,
 		&p.FundingURL, &p.FundingMessage, &p.Medium, &p.ImageURL, &p.GUID, &p.ETag,
 		&p.LastModified, &lastFetched, &p.RetentionKeep, &p.AuthUser, &p.SourceType, &p.CreatedAt, &p.UpdatedAt,
-		&p.EpisodeCount, &p.DownloadedCount); err != nil {
+		&p.EpisodeCount, &p.DownloadedCount, &p.CoverSourceURL, &coverLocked); err != nil {
 		return nil, err
 	}
 	p.LastFetchedAt = lastFetched.Int64
+	p.CoverLocked = coverLocked == 1
 	return &p, nil
 }
 

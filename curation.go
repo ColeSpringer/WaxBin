@@ -101,6 +101,21 @@ func (l *Library) SetEntityArt(ctx context.Context, entityType model.ArtEntity, 
 	return l.writeBackEntityArt(ctx, entityType, entityPID, raw)
 }
 
+// ArtLocked reports whether an entity's front cover is locked. It is what turns a
+// bare "no front art" or a refused `art set` into an explanation, since a cleared and
+// locked cover leaves nothing else to see.
+func (l *Library) ArtLocked(ctx context.Context, entityType model.ArtEntity, entityPID model.PID) (bool, error) {
+	return l.store.ArtLocked(ctx, entityType, entityPID)
+}
+
+// SetArtLock sets or clears an entity's front-cover lock without touching the cover.
+// SetEntityArt cannot express that, since it always writes the cover slot as well, so
+// this is the way out of a cover that was cleared and locked. For a track entity it
+// writes the same row `Lock(pid, "art")` does.
+func (l *Library) SetArtLock(ctx context.Context, entityType model.ArtEntity, entityPID model.PID, lock bool) error {
+	return l.store.SetArtLock(ctx, entityType, entityPID, lock)
+}
+
 // writeBackItemArt embeds (or clears) a committed item cover into the item's backing
 // file. It runs after the catalog edit committed, so a refusal or failure is reported as
 // a *WriteBackError rather than a hard error.

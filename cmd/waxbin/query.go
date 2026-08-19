@@ -245,6 +245,11 @@ func resolveLibraryRefs(ctx context.Context, lister libraryLister, op string, re
 // are the same bytes today and this yields one entry; model.Library types them apart
 // (raw OS bytes against a UTF-8 rendering) so they are allowed to diverge, which is
 // why both are still matched rather than one being picked.
+//
+// Neither is necessarily the spelling the caller typed: the store matches a root by
+// case fold where the platform does, and keeps the first-registered spelling. That is
+// why the caller compares with pathx.SamePath rather than against these strings
+// directly.
 func rootSpellings(l *model.Library) []string {
 	if raw := string(l.Root); raw != l.DisplayRoot {
 		return []string{l.DisplayRoot, raw}

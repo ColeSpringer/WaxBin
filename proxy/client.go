@@ -226,6 +226,14 @@ func (c *Client) SetEntityArt(ctx context.Context, entityType model.ArtEntity, e
 	return &res, nil
 }
 
+// SetArtLock proxies an entity front-cover lock change, leaving the cover itself
+// alone. Unlocking is the way out of a cover that was cleared and locked.
+func (c *Client) SetArtLock(ctx context.Context, entityType model.ArtEntity, entityPID model.PID, lock bool) error {
+	return c.call(ctx, MethodSetArtLock, SetArtLockParams{
+		EntityType: string(entityType), EntityPID: string(entityPID), Lock: lock,
+	}, nil)
+}
+
 // SetTag proxies a custom-tag edit, returning the canonical key stored and the number
 // of values stored after trimming (0 = the tag was cleared).
 func (c *Client) SetTag(ctx context.Context, itemPID model.PID, key string, values []string, lock, force bool) (string, int, error) {

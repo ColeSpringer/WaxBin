@@ -169,6 +169,11 @@ func attachEntityArtTxChanged(ctx context.Context, tx *sql.Tx, entityType string
 // podcast feed sync) call it so a cover the user chose survives a forced re-run or an
 // image-URL change in the feed. A nil image is a no-op, and costs no lock lookup.
 //
+// It is the last guard, not the first. A caller that would pay to produce the image
+// should check the lock before doing so: the podcast sync reads it off the show
+// (model.Podcast.CoverLocked) and skips the download entirely, rather than fetching
+// megabytes for this to discard on every sync while the lock stands.
+//
 // The lock, not the provenance, is what governs the write. Provenance stays purely
 // descriptive, so a future producer that legitimately stamps "user" cannot quietly
 // change who is allowed to overwrite what.
@@ -320,9 +325,19 @@ func (s *Store) ResolveArt(ctx context.Context, ref model.EntityRef, role model.
 
 // ArtRoles lists the artwork slots an entity holds at its own level, with no
 // chain fallback: each stored role with its source's format, dimensions, and
-// hash, plus where that attachment came from, in role order. An entity with no art
-// returns an empty list, not an error, so a caller can distinguish "nothing stored"
-// from "no such entity". It has no CLI or proxy surface; it is here for embedders.
+// hash, plus where that attachment came from, in role order.
+//
+// A Locked entry with an empty SourceHash is a lock with no artifact behind it, so a
+// renderer must check SourceHash before trying to fetch bytes. That is what a cleared
+// and locked cover looks like, the state that stops a feed or an enrichment pass
+// refilling the slot, and reporting it is the whole point: it is otherwise invisible
+// and every later `art set` on the entity is refused. The lock is the base fact and
+// the artifact is the overlay, the same inversion FieldProvenance makes on the item
+// side. So an entity with no art returns an empty list only when it is also unlocked.
+//
+// A nonexistent entity is an error, so a caller can still tell that apart from
+// "nothing stored". `waxbin art roles` is the CLI face of it. There is no proxy
+// surface, since a read never needs the write lock the socket exists to share.
 func (s *Store) ArtRoles(ctx context.Context, ref model.EntityRef) ([]model.ArtRoleInfo, error) {
 	const op = "store.ArtRoles"
 	if !ref.Type.Valid() {
@@ -359,21 +374,30 @@ func (s *Store) ArtRoles(ctx context.Context, ref model.EntityRef) ([]model.ArtR
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
 	// The "art" lock guards the front cover alone, matching the item-side art lock, so
-	// only that row reports it. One extra read, skipped when the entity has no front row.
-	// It reads whichever table governs this entity type, so a track cover locked by
-	// SetItemArt reports here too (artLockIsItemScoped).
-	for i := range out {
-		if out[i].Role != model.ArtRoleFront {
-			continue
-		}
-		locked, err := artLockedTx(ctx, s.read, ref.Type, chain[0].id)
-		if err != nil {
-			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
-		}
-		out[i].Locked = locked
-		break
+	// only that row reports it. One extra read, taken unconditionally because a lock
+	// with no front row is exactly the state worth reporting. It reads whichever table
+	// governs this entity type, so a track cover locked by SetItemArt reports here too
+	// (artLockIsItemScoped).
+	lock, err := artLockTx(ctx, s.read, ref.Type, chain[0].id)
+	if err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
-	return out, nil
+	if !lock.Locked {
+		return out, nil
+	}
+	for i := range out {
+		if out[i].Role == model.ArtRoleFront {
+			out[i].Locked = true
+			return out, nil
+		}
+	}
+	// Locked with nothing attached. Synthesize the front entry from the lock row alone,
+	// carrying its recorded source and timestamp rather than zero values, the way
+	// FieldProvenance does for a lock-only row. The rows come back ordered by role name,
+	// where front sorts after back/background/booklet/disc, so it goes last.
+	return append(out, model.ArtRoleInfo{
+		Role: model.ArtRoleFront, Source: lock.Source, UpdatedAt: lock.UpdatedAt, Locked: true,
+	}), nil
 }
 
 // thumbnail returns a cached thumbnail for (source hash, size), generating and

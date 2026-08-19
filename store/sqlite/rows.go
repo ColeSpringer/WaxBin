@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 
+	"github.com/colespringer/waxbin/internal/pathx"
 	"github.com/colespringer/waxbin/model"
 )
 
@@ -290,18 +291,83 @@ func libraryByRootTx(ctx context.Context, q queryer, root []byte) (*model.Librar
 	return libraryByRootDB(ctx, q, root)
 }
 
+// libraryByRootDB finds a library by root, byte-exact first and then by the
+// platform's own path rule. The exact match stays primary because a POSIX root can
+// hold bytes that are not valid UTF-8, where raw bytes are the only safe identity;
+// the fold only runs on a miss, and only where pathx.FoldsCase says path comparison
+// is case-insensitive anyway.
+//
+// It exists because the CLI's --library resolver already folds (pathx.SamePath), so
+// a byte-exact store left the two layers disagreeing: on Windows, re-registering
+// C:\Music as c:\Music inserted a second library row over one tree. Libraries number
+// in the single digits, so the miss path scans them rather than earning an index or a
+// normalized column, and no DDL changes.
+//
+// A fold hit means "same library, different spelling", and the caller must keep the
+// stored spelling: every file.path was built by joining it with rel_path, and
+// LoadScopedFileIndex selects a scan's rows with a raw byte-range prefix over it.
+// RelocateLibraryRoot is the supported way to change a root, and it rewrites those
+// paths to match.
 func libraryByRootDB(ctx context.Context, q queryer, root []byte) (*model.Library, error) {
 	lib, err := scanLibrary(q.QueryRowContext(ctx, librarySelect+" WHERE root = ?", root))
-	if err == sql.ErrNoRows {
+	if err == nil {
+		return lib, nil
+	}
+	if err != sql.ErrNoRows {
+		return nil, err
+	}
+	if !pathx.FoldsCase {
 		return nil, nil
 	}
-	return lib, err
+	libs, err := librariesDB(ctx, q)
+	if err != nil {
+		return nil, err
+	}
+	for _, l := range libs {
+		if pathx.SamePath(string(l.Root), string(root)) {
+			return l, nil
+		}
+	}
+	return nil, nil
+}
+
+// librariesDB lists every library row, for the fold-match scan above.
+func librariesDB(ctx context.Context, q queryer) ([]*model.Library, error) {
+	rows, err := q.QueryContext(ctx, librarySelect+" ORDER BY id")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*model.Library
+	for rows.Next() {
+		lib, err := scanLibrary(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, lib)
+	}
+	return out, rows.Err()
 }
 
 func fileByPathTx(ctx context.Context, q queryer, path []byte) (*model.File, error) {
 	return fileByPathDB(ctx, q, path)
 }
 
+// fileByPathDB finds a file by its raw path bytes, with no case fold, unlike the
+// library lookup above. A stored file path is normally not user-typed: it descends
+// from one canonical library root, which EnsureLibrary pins to its first-registered
+// spelling and scan.Scan re-anchors a sub-path onto, and the walker supplies the real
+// on-disk casing of every component beneath it.
+//
+// Two residuals on Windows, both of which read as a new file and leave a duplicate row
+// the audit's path_conflict check reports. A case-only rename of a deep component is
+// not recognized, because the essence re-link that would catch it is gated on the old
+// path no longer existing (!pathExists in resolveFile) and the old path still resolves.
+// And a scan sub-path re-spells whatever lies below the root: scan.Scan canonicalizes
+// the root prefix only, so `--sub-path C:\Music\someartist` against a stored
+// SomeArtist walks and stores the typed casing. Canonicalizing that would mean
+// resolving each component's real on-disk name, which is the cost the fold deliberately
+// avoids paying.
 func fileByPathDB(ctx context.Context, q queryer, path []byte) (*model.File, error) {
 	f, err := scanFile(q.QueryRowContext(ctx, fileSelect+" WHERE path = ?", path))
 	if err == sql.ErrNoRows {

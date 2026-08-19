@@ -29,6 +29,14 @@ func (s *Store) EnsurePodcastLibrary(ctx context.Context, dir string) (int64, er
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		if existing != nil {
+			// The lookup folds case where the platform's path rule does, so a podcast dir
+			// that only re-spells a music root now finds it. Adopting it would file every
+			// episode into that library and put the downloads under a scanner that treats
+			// them as tracks, so name the collision instead.
+			if existing.Mode != model.ModePodcast {
+				return waxerr.New(waxerr.CodeConflict, op,
+					"podcast dir "+dir+" is already a "+string(existing.Mode)+" library root")
+			}
 			id = existing.ID
 			return nil
 		}

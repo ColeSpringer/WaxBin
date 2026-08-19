@@ -1,6 +1,7 @@
 package sqlite
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
@@ -20,6 +21,15 @@ var _ model.Catalog = (*Store)(nil)
 
 // EnsureLibrary upserts a library by root, preserving pid/created_at on an
 // existing row and refreshing its mode/profile/display.
+//
+// The root is matched byte-exact first and then by the platform's path rule
+// (libraryByRootDB), so on Windows a re-registered C:\Music and c:\Music are one
+// library. A row found by that fold keeps the root and display_root it was first
+// registered with: the stored spelling is the prefix every file.path was built from
+// and the one LoadScopedFileIndex ranges over, so re-spelling it in place would hide
+// every file under it from the next scan. Use RelocateLibraryRoot to actually move a
+// root; it rewrites the file paths too. Only the policy fields (mode/media/profile)
+// refresh on that branch.
 func (s *Store) EnsureLibrary(ctx context.Context, lib *model.Library) (*model.Library, error) {
 	const op = "store.EnsureLibrary"
 	var out *model.Library
@@ -30,6 +40,27 @@ func (s *Store) EnsureLibrary(ctx context.Context, lib *model.Library) (*model.L
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		media := string(lib.MediaType()) // "" normalizes to mixed
+		if existing != nil && !bytes.Equal(existing.Root, lib.Root) {
+			// Matched by case fold, so the caller spelled the root differently. The
+			// stored spelling stays, which means display_root does too; only the policy
+			// fields can change here. This branch needs its own no-op guard because the
+			// one below compares DisplayRoot, which differs by definition on a fold
+			// match, so reusing it would re-spell the row and append a delta on every
+			// open.
+			if existing.Mode == lib.Mode && existing.MediaType() == lib.MediaType() &&
+				existing.Profile == lib.Profile {
+				out = existing
+				return nil
+			}
+			if _, err := tx.ExecContext(ctx,
+				"UPDATE library SET mode=?, media=?, profile=? WHERE id=?",
+				string(lib.Mode), media, lib.Profile, existing.ID); err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+			existing.Mode, existing.Media, existing.Profile = lib.Mode, model.MediaType(media), lib.Profile
+			out = existing
+			return appendChange(ctx, tx, "library", existing.PID, model.OpUpdate)
+		}
 		if existing != nil {
 			// No-op when nothing changed, so re-opening a library each session
 			// doesn't emit a spurious change_log delta.
@@ -66,7 +97,9 @@ func (s *Store) EnsureLibrary(ctx context.Context, lib *model.Library) (*model.L
 	return out, nil
 }
 
-// LibraryByRoot looks up a library by its raw root bytes.
+// LibraryByRoot looks up a library by root: byte-exact first, then by the platform's
+// path rule where it folds case (libraryByRootDB), so a re-cased Windows root finds
+// the library it names rather than reporting no such root.
 func (s *Store) LibraryByRoot(ctx context.Context, root []byte) (*model.Library, error) {
 	lib, err := libraryByRootDB(ctx, s.read, root)
 	if err != nil {
@@ -80,20 +113,11 @@ func (s *Store) LibraryByRoot(ctx context.Context, root []byte) (*model.Library,
 
 // Libraries lists all registered libraries.
 func (s *Store) Libraries(ctx context.Context) ([]*model.Library, error) {
-	rows, err := s.read.QueryContext(ctx, librarySelect+" ORDER BY id")
+	out, err := librariesDB(ctx, s.read)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, "store.Libraries", err)
 	}
-	defer rows.Close()
-	var out []*model.Library
-	for rows.Next() {
-		lib, err := scanLibrary(rows)
-		if err != nil {
-			return nil, waxerr.Wrap(waxerr.CodeIO, "store.Libraries", err)
-		}
-		out = append(out, lib)
-	}
-	return out, rows.Err()
+	return out, nil
 }
 
 // libraryIDsByPIDs resolves library pids to rowids, in input order. An unknown

@@ -31,6 +31,7 @@ type Store interface {
 	CountItemsMissingReplayGain(ctx context.Context) (int, error)
 	AuditFiles(ctx context.Context) ([]model.AuditFileInfo, error)
 	Podcasts(ctx context.Context) ([]*model.Podcast, error)
+	Libraries(ctx context.Context) ([]*model.Library, error)
 	DerivedDrift(ctx context.Context) (model.DerivedDrift, error)
 	// FileDiagnostics returns the diagnostics the scan and the tag writers persisted.
 	// It is on the port (rather than audit reaching for waxlabel itself) for the same
@@ -165,6 +166,11 @@ func (a *Auditor) Run(ctx context.Context, cfg Config) (*Report, error) {
 	}
 	if a.runs(cfg, model.CheckDerivedData) {
 		if err := a.checkDerived(ctx, add); err != nil {
+			return nil, err
+		}
+	}
+	if a.runs(cfg, model.CheckLibraryConflict) {
+		if err := a.checkLibraryConflicts(ctx, sample, add); err != nil {
 			return nil, err
 		}
 	}

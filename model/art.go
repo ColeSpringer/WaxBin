@@ -96,6 +96,10 @@ func ParseArtRole(s string) (ArtRole, bool) {
 // decodable), and content hash, followed by the attachment's provenance. Locked
 // reports the entity-curation lock on the entity's "art" field, which guards the
 // front cover alone, so it is false on every other role.
+//
+// A Locked front entry with an empty SourceHash is a lock with no artifact behind it,
+// which is what a cleared and locked cover looks like. Check SourceHash before trying
+// to fetch bytes for an entry.
 type ArtRoleInfo struct {
 	Role       ArtRole
 	Format     string

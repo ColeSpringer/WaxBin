@@ -86,6 +86,16 @@ func (s *Store) EditEntityFields(ctx context.Context, entityType model.MergeEnti
 	fields := make([]string, 0, len(edits))
 	for f := range edits {
 		if !model.IsEntityEditField(entityType, f) {
+			// "art" gets its own branch rather than the generic message: it is a real
+			// curatable field whose value is bytes, so it has a home (the art command
+			// group) to point at. Appending that pointer to the catch-all would advertise
+			// `art unlock` on every field typo instead.
+			if f == "art" {
+				return waxerr.New(waxerr.CodeInvalid, op,
+					"art is bytes, not a scalar field: use `waxbin art set --type "+string(entityType)+
+						"` to set or clear the cover, and `waxbin art unlock --type "+string(entityType)+
+						"` to release its lock")
+			}
 			return waxerr.New(waxerr.CodeInvalid, op, "field "+f+" is not editable on a "+string(entityType)+" entity")
 		}
 		fields = append(fields, f)

@@ -28,8 +28,9 @@ func newAuditCmd(g *globals) *cobra.Command {
 		Short: "Report catalog quality and integrity problems",
 		Long: "Runs quality checks over the catalog: duplicate/split entities, inconsistent " +
 			"metadata, missing art/ReplayGain, unportable filenames, orphaned sidecars, " +
-			"case-insensitive path conflicts, invalid feeds, derived-data drift, and the " +
-			"diagnostics recorded during scanning and tag write-back. " +
+			"case-insensitive path conflicts, library roots that differ only by case, " +
+			"invalid feeds, derived-data drift, and the diagnostics recorded during " +
+			"scanning and tag write-back. " +
 			"Corrupt-audio reporting comes in two halves. The free half reads signals the " +
 			"scan already derived, and covers MP3, AAC, AIFF, MP4, and WAV only. It is a " +
 			"true positive when it fires and proves nothing when it does not, so a quiet " +

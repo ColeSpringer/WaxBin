@@ -319,7 +319,7 @@ func (s *Store) SetItemArt(ctx context.Context, itemPID model.PID, role model.Ar
 				return err
 			}
 			if locked {
-				return waxerr.New(waxerr.CodeLocked, op, "art is locked (use force to override)")
+				return waxerr.New(waxerr.CodeLocked, op, artLockedMessage(model.ArtTrack, itemPID))
 			}
 		}
 		// One path for set and clear: replace this role's mapping (a nil image just
@@ -381,12 +381,12 @@ func (s *Store) SetEntityArt(ctx context.Context, entityType model.ArtEntity, en
 			return err
 		}
 		if front && !force {
-			locked, err := artLockedTx(ctx, tx, entityType, entityID)
+			lock, err := artLockTx(ctx, tx, entityType, entityID)
 			if err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
-			if locked {
-				return waxerr.New(waxerr.CodeLocked, op, "art is locked (use force to override)")
+			if lock.Locked {
+				return waxerr.New(waxerr.CodeLocked, op, artLockedMessage(entityType, entityPID))
 			}
 		}
 		if err := setEntityArtRoleTx(ctx, tx, string(entityType), entityID, string(role), img); err != nil {
@@ -403,6 +403,68 @@ func (s *Store) SetEntityArt(ctx context.Context, entityType model.ArtEntity, en
 			return appendChange(ctx, tx, "item", entityPID, model.OpUpdate)
 		}
 		return appendChange(ctx, tx, string(entityType), entityPID, model.OpUpdate)
+	})
+}
+
+// ArtLocked reports whether an art entity's front cover is locked. It is the read a
+// caller needs to explain a refused `art set` or a cover that resolves to nothing:
+// the lock is what stops both, and on an entity with no art at all it is otherwise
+// only visible through ArtRoles.
+func (s *Store) ArtLocked(ctx context.Context, entityType model.ArtEntity, pid model.PID) (bool, error) {
+	const op = "store.ArtLocked"
+	if !entityType.Valid() {
+		return false, waxerr.New(waxerr.CodeInvalid, op, "unknown art entity type: "+string(entityType))
+	}
+	entityID, err := artEntityIDTx(ctx, s.read, entityType, pid, op)
+	if err != nil {
+		return false, err
+	}
+	lock, err := artLockTx(ctx, s.read, entityType, entityID)
+	if err != nil {
+		return false, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	return lock.Locked, nil
+}
+
+// SetArtLock sets or clears an art entity's front-cover lock without touching the
+// cover itself, which is the one thing SetEntityArt cannot express: that one always
+// writes the cover slot too, so unlocking through it means re-supplying the image.
+// Unlocking is the way out of a cleared-and-locked cover, the state that refuses
+// every later `art set`.
+//
+// It inherits SetEntityArt's behavior exactly otherwise: the lock lands in whichever
+// table governs the entity type (artLockIsItemScoped), so a track's shares one home
+// with `lock <pid> art`, and the change delta has the same shape. Like SetEntityArt,
+// and unlike SetItemArt, it does not run the curatableFieldForKind(kind, "art") check;
+// that is deliberate, not an oversight, since the art lock is keyed by art entity type
+// rather than by item kind.
+func (s *Store) SetArtLock(ctx context.Context, entityType model.ArtEntity, pid model.PID, lock bool) error {
+	const op = "store.SetArtLock"
+	if !entityType.Valid() {
+		return waxerr.New(waxerr.CodeInvalid, op, "unknown art entity type: "+string(entityType))
+	}
+	return s.writeTx(ctx, func(tx *sql.Tx) error {
+		entityID, err := artEntityIDTx(ctx, tx, entityType, pid, op)
+		if err != nil {
+			return err
+		}
+		// Idempotent, the way LockField/UnlockField already are: unlocking an entity
+		// that was never locked writes nothing, so publishing an update delta for it
+		// would send every ChangesSince tailer to re-fetch for no change.
+		cur, err := artLockTx(ctx, tx, entityType, entityID)
+		if err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		if cur.Locked == lock {
+			return nil
+		}
+		if err := setArtLockTx(ctx, tx, entityType, entityID, lock); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		if entityType == model.ArtTrack || entityType == model.ArtEpisode {
+			return appendChange(ctx, tx, "item", pid, model.OpUpdate)
+		}
+		return appendChange(ctx, tx, string(entityType), pid, model.OpUpdate)
 	})
 }
 
@@ -488,12 +550,50 @@ func artLockIsItemScoped(entityType model.ArtEntity) bool {
 	return entityType == model.ArtTrack
 }
 
-// artLockedTx reads an art entity's front-cover lock from whichever table governs it.
-func artLockedTx(ctx context.Context, q queryer, entityType model.ArtEntity, entityID int64) (bool, error) {
+// artLock is an art entity's front-cover lock row, from whichever table governs it.
+// Source and UpdatedAt matter when the lock has no artifact behind it, since they are
+// then the only attribution ArtRoles has to report. A missing row reads as the zero
+// value, which is an unlocked entity.
+type artLock struct {
+	Locked    bool
+	Source    model.ProvenanceSource
+	UpdatedAt int64
+}
+
+// artLockTx reads an art entity's front-cover lock from whichever table governs it.
+func artLockTx(ctx context.Context, q queryer, entityType model.ArtEntity, entityID int64) (artLock, error) {
+	var (
+		out    artLock
+		locked int
+		source string
+		err    error
+	)
 	if artLockIsItemScoped(entityType) {
-		return fieldLockedTx(ctx, q, entityID, "art")
+		err = q.QueryRowContext(ctx,
+			"SELECT locked, source, updated_at FROM field_provenance WHERE item_id=? AND field='art'",
+			entityID).Scan(&locked, &source, &out.UpdatedAt)
+	} else {
+		err = q.QueryRowContext(ctx,
+			"SELECT locked, source, updated_at FROM entity_curation WHERE entity_type=? AND entity_id=? AND field='art'",
+			string(entityType), entityID).Scan(&locked, &source, &out.UpdatedAt)
 	}
-	return entityFieldLockedTx(ctx, q, string(entityType), entityID, "art")
+	if errors.Is(err, sql.ErrNoRows) {
+		return artLock{}, nil
+	}
+	if err != nil {
+		return artLock{}, err
+	}
+	out.Locked, out.Source = locked == 1, model.ProvenanceSource(source)
+	return out, nil
+}
+
+// artLockedMessage is the refusal a locked front cover gets from both set paths. It
+// names `art unlock` rather than only --force: releasing the lock is the fix when the
+// cover was cleared and locked, and --force alone would overwrite under a lock the
+// user may still want. The --type is spelled out because it defaults to track.
+func artLockedMessage(entityType model.ArtEntity, pid model.PID) string {
+	return "art is locked: waxbin art unlock " + string(pid) + " --type " + string(entityType) +
+		" to release it, or --force to override this one write"
 }
 
 // setArtLockTx records an art entity's front-cover lock in whichever table governs it,
@@ -510,12 +610,13 @@ func setArtLockTx(ctx context.Context, tx *sql.Tx, entityType model.ArtEntity, e
 // The track and episode slots share playable_item, so the row's kind has to match the
 // requested slot (itemArtSlotExpr is the read side of the same rule). Without that
 // check an episode cover set on a track's pid would store a map row no resolver ever
-// consults, and GC would keep it alive because the id is real.
-func artEntityIDTx(ctx context.Context, tx *sql.Tx, entityType model.ArtEntity, pid model.PID, op string) (int64, error) {
+// consults, and GC would keep it alive because the id is real. It takes a queryer so
+// the ArtLocked read shares one resolver with the writers.
+func artEntityIDTx(ctx context.Context, q queryer, entityType model.ArtEntity, pid model.PID, op string) (int64, error) {
 	var table string
 	switch entityType {
 	case model.ArtTrack, model.ArtEpisode:
-		return itemIDForArtSlotTx(ctx, tx, entityType, pid, op)
+		return itemIDForArtSlotTx(ctx, q, entityType, pid, op)
 	case model.ArtAlbum:
 		table = "album"
 	case model.ArtReleaseGroup:
@@ -532,7 +633,7 @@ func artEntityIDTx(ctx context.Context, tx *sql.Tx, entityType model.ArtEntity, 
 		return 0, waxerr.New(waxerr.CodeInvalid, op, "unsupported art entity type: "+string(entityType))
 	}
 	var id int64
-	err := tx.QueryRowContext(ctx, "SELECT id FROM "+table+" WHERE pid=?", string(pid)).Scan(&id)
+	err := q.QueryRowContext(ctx, "SELECT id FROM "+table+" WHERE pid=?", string(pid)).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, waxerr.New(waxerr.CodeNotFound, op, "no such "+string(entityType)+": "+string(pid))
 	}
@@ -546,10 +647,10 @@ func artEntityIDTx(ctx context.Context, tx *sql.Tx, entityType model.ArtEntity, 
 // rejecting a pid whose kind belongs to the other slot. An episode's cover lives under
 // the episode slot and a track's or book's under the track slot, so a mismatch would
 // write art nothing reads back.
-func itemIDForArtSlotTx(ctx context.Context, tx *sql.Tx, slot model.ArtEntity, pid model.PID, op string) (int64, error) {
+func itemIDForArtSlotTx(ctx context.Context, q queryer, slot model.ArtEntity, pid model.PID, op string) (int64, error) {
 	var id int64
 	var kind string
-	err := tx.QueryRowContext(ctx, "SELECT id, kind FROM playable_item WHERE pid=?", string(pid)).Scan(&id, &kind)
+	err := q.QueryRowContext(ctx, "SELECT id, kind FROM playable_item WHERE pid=?", string(pid)).Scan(&id, &kind)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, waxerr.New(waxerr.CodeNotFound, op, "no such "+string(slot)+": "+string(pid))
 	}

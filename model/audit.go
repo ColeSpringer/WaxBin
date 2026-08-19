@@ -27,6 +27,11 @@ const (
 	// release, or release group, which is what a Cover Art Archive lookup or a rich
 	// presence card needs.
 	CheckMissingMBID AuditCheck = "missing_mbid"
+	// CheckLibraryConflict reports library roots that differ only by case, which name
+	// one tree on a case-insensitive filesystem. The store now folds when matching a
+	// root, so new ones cannot collide; this is for a catalog that already holds both
+	// spellings from before it did.
+	CheckLibraryConflict AuditCheck = "library_conflict"
 )
 
 // AuditChecks returns every known audit check, for validation and help text.
@@ -36,6 +41,7 @@ func AuditChecks() []AuditCheck {
 		CheckInconsistentMeta, CheckMissingArt, CheckMissingReplayGain, CheckBadFilename,
 		CheckOrphanSidecar, CheckPathConflict, CheckInvalidFeed, CheckDerivedData,
 		CheckIntegrity, CheckCorruptAudio, CheckFileDiagnostic, CheckMissingMBID,
+		CheckLibraryConflict,
 	}
 }
 

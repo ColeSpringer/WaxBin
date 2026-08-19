@@ -179,6 +179,14 @@ func TestCurationRoundTrip(t *testing.T) {
 			}
 			return nil, nil
 		},
+		proxy.MethodSetArtLock: func(_ context.Context, raw json.RawMessage) (any, error) {
+			var p proxy.SetArtLockParams
+			_ = json.Unmarshal(raw, &p)
+			if p.EntityType != "podcast" || p.EntityPID != "pod1" || p.Lock {
+				t.Errorf("art lock params = %+v", p)
+			}
+			return nil, nil
+		},
 	}
 	c := dial(t, startServer(t, handlers, nil))
 	ctx := context.Background()
@@ -208,6 +216,12 @@ func TestCurationRoundTrip(t *testing.T) {
 
 	if _, err := c.SetEntityArt(ctx, model.ArtAlbum, "a1", model.ArtRoleFront, []byte{9}, true, false, false); err != nil {
 		t.Fatalf("set entity art: %v", err)
+	}
+
+	// set_art_lock carries no result payload; the unlock direction is the one that
+	// matters, since it is the way out of a cleared and locked cover.
+	if err := c.SetArtLock(ctx, model.ArtPodcast, "pod1", false); err != nil {
+		t.Fatalf("set art lock: %v", err)
 	}
 }
 

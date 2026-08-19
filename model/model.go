@@ -2,10 +2,17 @@ package model
 
 // Library is a registered root and its handling policy. A file belongs to
 // exactly one library (roots are validated non-overlapping at config time).
+//
+// Root is the identity, matched byte-exact first and then by the platform's path
+// rule where it folds case, so on Windows one tree is one library however the caller
+// spells it. The stored spelling is the one it was first registered with and does not
+// move afterwards: every File.Path was built by joining it with a RelPath, and a
+// scan selects its rows by a raw byte-range prefix over it. Changing a root means
+// relocating it, which rewrites those paths.
 type Library struct {
 	ID          int64
 	PID         PID
-	Root        []byte // raw OS path bytes (non-UTF8 safe)
+	Root        []byte // raw OS path bytes (non-UTF8 safe); see above on identity
 	DisplayRoot string // fallback UTF-8 rendering for humans/logs
 	Mode        Mode
 	// Media is the content class a managed root holds (music/audiobook/mixed).

@@ -6,8 +6,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/colespringer/waxbin/identity"
+	"github.com/colespringer/waxbin/internal/pathx"
 	"github.com/colespringer/waxbin/model"
 )
 
@@ -26,6 +28,7 @@ type fakeStore struct {
 	missingRG    int
 	files        []model.AuditFileInfo
 	pods         []*model.Podcast
+	libs         []*model.Library
 	drift        model.DerivedDrift
 	diags        []model.FileDiagnostic
 	diagStale    int
@@ -62,6 +65,7 @@ func (f *fakeStore) CountItemsMissingReplayGain(context.Context) (int, error) {
 }
 func (f *fakeStore) AuditFiles(context.Context) ([]model.AuditFileInfo, error) { return f.files, nil }
 func (f *fakeStore) Podcasts(context.Context) ([]*model.Podcast, error)        { return f.pods, nil }
+func (f *fakeStore) Libraries(context.Context) ([]*model.Library, error)       { return f.libs, nil }
 func (f *fakeStore) DerivedDrift(context.Context) (model.DerivedDrift, error)  { return f.drift, nil }
 func (f *fakeStore) FileDiagnostics(context.Context, model.DiagnosticFilter) ([]model.FileDiagnostic, error) {
 	return f.diags, nil
@@ -233,5 +237,80 @@ func TestAuditMissingMBIDRollsUp(t *testing.T) {
 	// Info severity keeps an untagged library out of the CLI's error exit.
 	if rep.Errors() != 0 {
 		t.Errorf("missing_mbid produced %d error findings, want 0", rep.Errors())
+	}
+}
+
+func TestAuditLibraryConflict(t *testing.T) {
+	st := &fakeStore{libs: []*model.Library{
+		{PID: "l1", Root: []byte(`C:\Music`), DisplayRoot: `C:\Music`},
+		{PID: "l2", Root: []byte(`c:\music`), DisplayRoot: `c:\music`},
+		{PID: "l3", Root: []byte(`D:\Books`), DisplayRoot: `D:\Books`},
+	}}
+	rep, err := New(st, nil, nil, nil).Run(context.Background(), Config{
+		Only: []model.AuditCheck{model.CheckLibraryConflict}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fs := findingsFor(rep, model.CheckLibraryConflict)
+	if len(fs) != 1 {
+		t.Fatalf("want one finding for the colliding pair, got %d: %+v", len(fs), fs)
+	}
+	// Error only where the platform folds. On a case-sensitive filesystem the two
+	// roots are two real directories and a legal configuration, so an error here would
+	// fail every audit run on a supported setup.
+	wantSev := model.SeverityWarn
+	if pathx.FoldsCase {
+		wantSev = model.SeverityError
+	}
+	if fs[0].Severity != wantSev {
+		t.Errorf("severity = %q, want %q", fs[0].Severity, wantSev)
+	}
+	if len(fs[0].Entities) != 2 || fs[0].Entities[0] != "l1" || fs[0].Entities[1] != "l2" {
+		t.Errorf("entities = %v, want both colliding pids", fs[0].Entities)
+	}
+	for _, want := range []string{`C:\Music`, `c:\music`, "case-insensitive", "db reset"} {
+		if !strings.Contains(fs[0].Message, want) {
+			t.Errorf("message %q does not mention %q", fs[0].Message, want)
+		}
+	}
+}
+
+func TestAuditLibraryConflictCleanCatalog(t *testing.T) {
+	st := &fakeStore{libs: []*model.Library{
+		{PID: "l1", Root: []byte(`C:\Music`), DisplayRoot: `C:\Music`},
+		{PID: "l2", Root: []byte(`D:\Books`), DisplayRoot: `D:\Books`},
+	}}
+	rep, err := New(st, nil, nil, nil).Run(context.Background(), Config{
+		Only: []model.AuditCheck{model.CheckLibraryConflict}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fs := findingsFor(rep, model.CheckLibraryConflict); len(fs) != 0 {
+		t.Errorf("distinct roots reported a conflict: %+v", fs)
+	}
+}
+
+// Two POSIX roots differing only in an invalid UTF-8 byte are two real directories.
+// strings.ToLower decodes each such byte to U+FFFD, which would fold them onto one key
+// and report them as one tree under a message printing their identical renderings.
+func TestAuditLibraryConflictKeepsRawByteRootsApart(t *testing.T) {
+	// Built byte by byte: 0xff and 0xfe are not valid UTF-8, which is the whole point,
+	// and a string literal would be normalized before the check ever sees them.
+	rootA := append(append([]byte("/mnt/m"), 0xff), []byte("usic")...)
+	rootB := append(append([]byte("/mnt/m"), 0xfe), []byte("usic")...)
+	// Both roots carry the same lossy UTF-8 rendering, the way the store stores it, so
+	// a finding here would print the same name twice and read as "X vs X".
+	display := "/mnt/m" + string(utf8.RuneError) + "usic"
+	st := &fakeStore{libs: []*model.Library{
+		{PID: "l1", Root: rootA, DisplayRoot: display},
+		{PID: "l2", Root: rootB, DisplayRoot: display},
+	}}
+	rep, err := New(st, nil, nil, nil).Run(context.Background(), Config{
+		Only: []model.AuditCheck{model.CheckLibraryConflict}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fs := findingsFor(rep, model.CheckLibraryConflict); len(fs) != 0 {
+		t.Errorf("distinct raw-byte roots reported a collision: %+v", fs)
 	}
 }

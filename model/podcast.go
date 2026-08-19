@@ -29,7 +29,11 @@ type Podcast struct {
 	LastFetchedAt  int64 // unix nanoseconds; 0 when never fetched
 	RetentionKeep  int
 	AuthUser       string // basic-auth user; the password lives in the secret table
-	ImageURL       string // current feed image (ingested into the art store on sync)
+	// ImageURL is the image URL the feed currently advertises, recorded as published.
+	// It is not what a sync compares against to decide whether to re-fetch: nothing
+	// resets it when a cover is cleared, so it would eventually say a cover is current
+	// that the show no longer holds. CoverSourceURL is that comparison.
+	ImageURL string
 	// SourceType selects the acquisition provider and sync behavior: rss (an HTTP
 	// feed), youtube (an injected provider, feed_url is a channel/playlist URL), or
 	// manual (no feed to sync; episodes arrive via UpsertEpisode). Empty reads as
@@ -40,6 +44,12 @@ type Podcast struct {
 	// EpisodeCount and DownloadedCount are populated by list/detail reads, not stored.
 	EpisodeCount    int
 	DownloadedCount int
+	// CoverSourceURL and CoverLocked describe the front cover the show currently holds:
+	// the URL it was fetched from (art_map.source_url, empty when there is no cover)
+	// and whether the user locked it. A sync uses the pair to decide whether to
+	// download the feed's image at all. Read-populated like the counts above.
+	CoverSourceURL string
+	CoverLocked    bool
 	// Persons are the show-level <podcast:person> credits. Populated by the detail
 	// read (PodcastByPID), not the list.
 	Persons []FeedPerson

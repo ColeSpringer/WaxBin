@@ -7,6 +7,7 @@ import (
 	"github.com/colespringer/waxbin/identity"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/query"
+	"github.com/colespringer/waxbin/waxerr"
 )
 
 func feedInput(feedURL string, titles ...string) model.UpsertFeedInput {
@@ -204,5 +205,26 @@ func TestTruncatedFeedDoesNotDeleteEpisodes(t *testing.T) {
 	eps, _ := st.EpisodesByPodcast(ctx, res.PodcastPID, 0)
 	if len(eps) != 3 {
 		t.Fatalf("truncated feed deleted episodes: have %d, want 3", len(eps))
+	}
+}
+
+// EnsurePodcastLibrary refuses to adopt a library that is not a podcast one. The root
+// lookup folds case where the platform's path rule does, which widened the ways a
+// podcast dir and a music root can collide; filing episodes into a scanned library
+// would leave the scanner treating every download as a track.
+func TestEnsurePodcastLibraryRefusesAMusicRoot(t *testing.T) {
+	ctx := context.Background()
+	st, _, lib := openStoreAt(t)
+
+	if _, err := st.EnsurePodcastLibrary(ctx, string(lib.Root)); !waxerr.Is(err, waxerr.CodeConflict) {
+		t.Fatalf("EnsurePodcastLibrary on a music root = %v, want CodeConflict", err)
+	}
+	id, err := st.EnsurePodcastLibrary(ctx, "/pods")
+	if err != nil {
+		t.Fatalf("EnsurePodcastLibrary: %v", err)
+	}
+	again, err := st.EnsurePodcastLibrary(ctx, "/pods")
+	if err != nil || again != id {
+		t.Errorf("second EnsurePodcastLibrary = %d (err %v), want the first id %d", again, err, id)
 	}
 }

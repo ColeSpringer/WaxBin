@@ -310,7 +310,10 @@ func (l *Library) validateRootSet(ctx context.Context, replaceLibPID model.PID, 
 		if lib.PID == replaceLibPID {
 			continue
 		}
-		if candidatePath != "" && string(lib.Root) == candidatePath {
+		// Fold, not byte-compare: the store matches a root the same way
+		// (libraryByRootDB), so a re-cased `library add` has to recognize itself here
+		// too or it reports "library roots overlap" against the row it would update.
+		if candidatePath != "" && pathx.SamePath(string(lib.Root), candidatePath) {
 			continue
 		}
 		roots = append(roots, config.Root{
@@ -417,7 +420,12 @@ func (l *Library) ResolveArt(ctx context.Context, ref model.EntityRef, role mode
 
 // ArtRoles lists the artwork slots an entity holds at its own level (no chain
 // fallback): each stored role with the source image's format, dimensions, and
-// content hash. An entity with no art returns an empty list.
+// content hash.
+//
+// A Locked entry with an empty SourceHash is a lock with no artifact behind it, so
+// check SourceHash before trying to fetch bytes. That is what a cleared and locked
+// cover looks like, and reporting it is the only way that state is visible. An entity
+// with no art returns an empty list only when it is also unlocked.
 func (l *Library) ArtRoles(ctx context.Context, ref model.EntityRef) ([]model.ArtRoleInfo, error) {
 	return l.store.ArtRoles(ctx, ref)
 }

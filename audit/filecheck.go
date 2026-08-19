@@ -53,6 +53,81 @@ func (a *Auditor) checkInvalidFeeds(ctx context.Context, add func(model.AuditFin
 	return nil
 }
 
+// checkLibraryConflicts flags library roots that differ only by case, which name one
+// tree on a case-insensitive filesystem and so leave two library rows over it. The
+// store folds when matching a root now (libraryByRootDB), so this reports a catalog
+// seeded before it did.
+//
+// The grouping is unconditional but the severity is not. Where the platform folds it
+// is an error, because the two rows certainly cover one tree. Elsewhere it is a
+// warning: whether they collide depends on the volume (a stock APFS Mac folds, ext4
+// does not), and on a case-sensitive filesystem two roots differing only by case are
+// a legal configuration the store deliberately keeps as two libraries. Grading that
+// as an error would fail `waxbin audit` on every run, with advice that loses a real
+// library. Warning still covers macOS, which is why the grouping itself is not gated.
+//
+// There is no repair. Re-pointing file/trash/import_batch onto a survivor row and
+// rewriting every path would be the repo's first library deletion against an ON
+// DELETE CASCADE, and findings are advisory by design, so the message names the cure
+// instead. Roots are stored already cleaned, so there is no filepath.Clean here.
+func (a *Auditor) checkLibraryConflicts(ctx context.Context, sample int, add func(model.AuditFinding)) error {
+	libs, err := a.store.Libraries(ctx)
+	if err != nil {
+		return err
+	}
+	groups := map[string][]*model.Library{}
+	for _, l := range libs {
+		key := foldASCIIPath(l.Root)
+		groups[key] = append(groups[key], l)
+	}
+	keys := make([]string, 0, len(groups))
+	for k, g := range groups {
+		if len(g) > 1 {
+			keys = append(keys, k)
+		}
+	}
+	sort.Strings(keys)
+	sev := model.SeverityWarn
+	if pathx.FoldsCase {
+		sev = model.SeverityError
+	}
+	c := &capped{limit: sample, check: model.CheckLibraryConflict, sev: sev, add: add}
+	for _, k := range keys {
+		g := groups[k]
+		names := make([]string, 0, len(g))
+		pids := make([]model.PID, 0, len(g))
+		for _, l := range g {
+			names = append(names, l.DisplayRoot)
+			pids = append(pids, l.PID)
+		}
+		c.emit(model.AuditFinding{
+			Check:    model.CheckLibraryConflict,
+			Severity: sev,
+			Message: "library roots differ only by case: " + strings.Join(names, " vs ") +
+				" (one tree on a case-insensitive filesystem; drop one root, or db reset plus rebuild)",
+			Entities: pids,
+		})
+	}
+	c.summary("library root collisions")
+	return nil
+}
+
+// foldASCIIPath lowercases a raw path's ASCII letters byte by byte. strings.ToLower
+// cannot be used: it decodes every invalid UTF-8 byte to U+FFFD, so /mnt/mÿusic and
+// /mnt/mþusic fold to the same key and two genuinely different POSIX roots get
+// reported as one tree, under a message that prints their identical lossy renderings.
+// A path is a byte string with no declared encoding, so only ASCII folds safely.
+func foldASCIIPath(raw []byte) string {
+	b := make([]byte, len(raw))
+	for i, c := range raw {
+		if c >= 'A' && c <= 'Z' {
+			c += 'a' - 'A'
+		}
+		b[i] = c
+	}
+	return string(b)
+}
+
 // checkFiles runs the file-list-driven checks in one pass: bad filenames, orphaned
 // sidecars, case-insensitive path conflicts, and (opt-in) on-disk integrity and
 // corrupt-audio detection.

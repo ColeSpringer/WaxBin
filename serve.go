@@ -231,6 +231,13 @@ func (l *Library) proxyHandlers() map[string]proxy.Handler {
 			}
 			return proxy.SetEntityArtResult{}, nil
 		},
+		proxy.MethodSetArtLock: func(ctx context.Context, raw json.RawMessage) (any, error) {
+			p, err := decodeParams[proxy.SetArtLockParams](raw)
+			if err != nil {
+				return nil, err
+			}
+			return nil, l.SetArtLock(ctx, model.ArtEntity(p.EntityType), model.PID(p.EntityPID), p.Lock)
+		},
 		proxy.MethodEditEntity: func(ctx context.Context, raw json.RawMessage) (any, error) {
 			p, err := decodeParams[proxy.EditEntityParams](raw)
 			if err != nil {

@@ -3,6 +3,8 @@ package waxbin_test
 import (
 	"context"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"sync"
 	"testing"
 
@@ -164,6 +166,24 @@ func TestAddRootIdempotentReAdd(t *testing.T) {
 	}
 	if again.MediaType() != model.MediaMusic {
 		t.Fatalf("re-add media = %s, want the refreshed music", again.MediaType())
+	}
+
+	// A retyped root in a different case names the same directory on Windows, so it
+	// has to match the registered library rather than trip the overlap check against
+	// the very row it would update.
+	if runtime.GOOS == "windows" {
+		recased, err := lib.AddRoot(ctx, config.Root{
+			Path: strings.ToUpper(rootB), Mode: model.ModeManaged, Media: model.MediaMusic,
+		})
+		if err != nil {
+			t.Fatalf("re-add with a re-cased root: %v", err)
+		}
+		if recased.PID != first.PID {
+			t.Fatalf("re-cased re-add minted pid %s, want the original %s", recased.PID, first.PID)
+		}
+		if string(recased.Root) != rootB {
+			t.Errorf("re-cased re-add moved the stored root to %q, want %q", recased.Root, rootB)
+		}
 	}
 }
 

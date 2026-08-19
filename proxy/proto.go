@@ -64,6 +64,12 @@ import (
 // gate rejects every frame, so a WaxDeck built against 9 falls back cleanly instead of
 // rendering the art row as an editable scalar field, and it has to rebuild anyway to
 // draw the mark.
+//
+// set_art_lock landed after 10 with no bump, following the add_root precedent: it adds
+// no field to any existing struct, ArtRoles (the read that made the lock visible) has
+// no wire surface at all, and WaxDeck already has Lock/Force on set_entity_art. A bump
+// would cost it a rebuild for a method it has no reason to call, and the version gate
+// would meanwhile reject every frame from a client built against 10, including ping.
 const ProtocolVersion = 10
 
 // Method names for the proxied operations: the fast request/response catalog
@@ -84,6 +90,7 @@ const (
 	MethodSetChapters      = "set_chapters"
 	MethodSetItemArt       = "set_item_art"
 	MethodSetEntityArt     = "set_entity_art"
+	MethodSetArtLock       = "set_art_lock"
 	MethodEditEntity       = "edit_entity"
 	MethodSetTag           = "set_tag"
 	MethodLock             = "lock"
@@ -309,6 +316,15 @@ type SetEntityArtParams struct {
 // cover fan-out could not embed into (empty for a non-album cover or a clean fan-out).
 type SetEntityArtResult struct {
 	WriteBackFailures []WriteBackFailure `json:"writeBackFailures,omitempty"`
+}
+
+// SetArtLockParams is the set_art_lock request payload: an entity's front-cover lock,
+// set or cleared without touching the cover. It is the mutation set_entity_art cannot
+// express, since that one always writes the cover slot too.
+type SetArtLockParams struct {
+	EntityType string `json:"entityType"`
+	EntityPID  string `json:"entityPid"`
+	Lock       bool   `json:"lock"`
 }
 
 // SetTagParams is the set_tag request payload: a custom tag's ordered values on an

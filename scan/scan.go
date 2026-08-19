@@ -130,6 +130,18 @@ func (s *Scanner) Scan(ctx context.Context, req Request, hb Heartbeat) (*Result,
 		if !pathx.UnderRoot(root, walkRoot) {
 			return nil, waxerr.New(waxerr.CodeInvalid, op, "sub-path is outside the library root")
 		}
+		// Re-anchor on the stored root's spelling. UnderRoot folds case, so on Windows
+		// a sub-path may pass the guard while carrying a different casing of the root
+		// than the catalog holds. Left alone, scopePrefix would miss the path byte-range
+		// in LoadScopedFileIndex and every walked path would miss fileByPathTx, so the
+		// whole subtree would re-insert as new file rows.
+		//
+		// This fixes the root prefix only. Rel returns the remainder as the caller typed
+		// it, so a re-cased component below the root still walks and stores that casing;
+		// see the note beside fileByPathDB for why that is left alone.
+		if rel, err := filepath.Rel(root, walkRoot); err == nil {
+			walkRoot = filepath.Join(root, rel)
+		}
 	}
 
 	res := &Result{}

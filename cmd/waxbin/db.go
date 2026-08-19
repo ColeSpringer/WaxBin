@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/colespringer/waxbin/config"
+	"github.com/colespringer/waxbin/internal/pathx"
 	"github.com/colespringer/waxbin/port"
 	"github.com/colespringer/waxbin/store/sqlite"
 	"github.com/colespringer/waxbin/waxerr"
@@ -191,13 +192,20 @@ func ensureNoCatalogOwner(dbPath string) error {
 // rootsNotConfigured returns the catalog's roots that configuration does not name,
 // the ones a reset really loses.
 func rootsNotConfigured(catalogRoots []string, cfg *config.Config) []string {
-	configured := make(map[string]struct{}, len(cfg.Roots))
-	for _, r := range cfg.Roots {
-		configured[r.Path] = struct{}{}
-	}
+	// Matched with pathx.SamePath, not by bytes: the store matches a root by case fold
+	// where the platform does and keeps the first-registered spelling, so a catalog root
+	// and the configured root naming it can differ in case. A byte compare would warn
+	// that a configured root is about to be lost.
 	var out []string
 	for _, r := range catalogRoots {
-		if _, ok := configured[r]; !ok {
+		configured := false
+		for _, c := range cfg.Roots {
+			if pathx.SamePath(c.Path, r) {
+				configured = true
+				break
+			}
+		}
+		if !configured {
 			out = append(out, r)
 		}
 	}

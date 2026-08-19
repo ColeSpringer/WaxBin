@@ -269,7 +269,17 @@ func (s *Service) AddSource(ctx context.Context, url string, sourceType model.So
 	if key == "" {
 		return nil, waxerr.New(waxerr.CodeInvalid, op, "feed has no usable identity (url or guid)")
 	}
-	res, err := s.upsert(ctx, url, key, prov.SourceType(), enum, "")
+	// A re-add is a sync (OPML import routes every entry through here), so the show may
+	// already hold a cover, and it may be locked. Reading that first is what stops a
+	// 200-show re-import fetching a full channel image per show only for
+	// attachEntityArtUnlessLockedTx to discard it. A genuinely new show has no row, and
+	// the not-found leaves the zero values, which fetch.
+	var coverSourceURL string
+	var coverLocked bool
+	if prior, err := s.store.PodcastByIdentity(ctx, key); err == nil && prior != nil {
+		coverSourceURL, coverLocked = prior.CoverSourceURL, prior.CoverLocked
+	}
+	res, err := s.upsert(ctx, url, key, prov.SourceType(), enum, coverSourceURL, coverLocked)
 	if err != nil {
 		return nil, err
 	}
@@ -331,6 +341,10 @@ func (s *Service) AddEpisode(ctx context.Context, showPID model.PID, ep model.Fe
 // upserted. It never deletes episodes the source stopped listing. A manual show has
 // nothing to sync; a youtube show needs an injected provider. rss and youtube shows
 // use the same sync path.
+//
+// The show's cover is refreshed from the feed only when the feed's image URL differs
+// from where the cover it holds came from, and never while that cover is locked. Both
+// facts ride along on the PodcastByPID this already does, so neither costs a query.
 func (s *Service) Sync(ctx context.Context, podcastPID model.PID) (*model.UpsertFeedResult, error) {
 	pod, err := s.store.PodcastByPID(ctx, podcastPID)
 	if err != nil {
@@ -360,8 +374,9 @@ func (s *Service) Sync(ctx context.Context, podcastPID model.PID) (*model.Upsert
 		// so just report no change.
 		return &model.UpsertFeedResult{PodcastPID: podcastPID}, nil
 	}
-	// Pass the stored image URL so an unchanged cover is not re-fetched/re-decoded.
-	return s.upsert(ctx, pod.FeedURL, pod.IdentityKey, st, enum, pod.ImageURL)
+	// Pass what we know about the cover the show already holds, so an unchanged one is
+	// not re-fetched/re-decoded and a locked one is not fetched at all.
+	return s.upsert(ctx, pod.FeedURL, pod.IdentityKey, st, enum, pod.CoverSourceURL, pod.CoverLocked)
 }
 
 // SyncAll syncs every subscribed podcast, returning the per-podcast results. A
@@ -387,12 +402,31 @@ func (s *Service) SyncAll(ctx context.Context) (map[model.PID]*model.UpsertFeedR
 }
 
 // upsert ingests the show image and persists an enumeration under a source type.
-// priorImageURL is the image URL already stored for this show (empty on first
-// subscribe); the cover is re-fetched only when it differs, avoiding a multi-MiB
-// download + decode on every sync of a source that does not answer NotModified.
-func (s *Service) upsert(ctx context.Context, feedURL, key string, st model.SourceType, enum *source.Enumeration, priorImageURL string) (*model.UpsertFeedResult, error) {
+//
+// coverSourceURL is where the cover the show currently holds was fetched from
+// (art_map.source_url, empty when it holds none), and the download is skipped when the
+// feed still advertises that same URL. This avoids a multi-MiB fetch + decode on every
+// sync of a source that does not answer NotModified, and it compares against the cover
+// we actually have rather than against podcast.image_url, which the feed advances
+// whether or not the picture was ever attached. A cleared cover leaves no art_map row,
+// so this reads empty and the next sync refills it; image_url would still match and
+// leave the show coverless forever.
+//
+// coverLocked short-circuits the whole thing: a locked cover is one the user chose, so
+// there is nothing to fetch. Checking it here rather than at the store is what keeps
+// the compare honest, since attachEntityArtUnlessLockedTx would otherwise discard the
+// bytes after paying for them, every sync, for as long as the lock stands.
+//
+// Two consequences worth knowing. A cover a user set with --no-lock carries no
+// source_url, so the next sync fetches once and the feed re-points it; that is what an
+// unlocked cover means, and it settles after that one fetch. And a fetch that fails
+// attaches nothing, so the compare still differs and the next sync retries. Retrying is
+// right for an outage but not free for a permanently broken image URL, which re-pulls
+// up to episodeImageMaxBytes on every sync that actually re-enumerates. Feeds that
+// answer NotModified never get that far.
+func (s *Service) upsert(ctx context.Context, feedURL, key string, st model.SourceType, enum *source.Enumeration, coverSourceURL string, coverLocked bool) (*model.UpsertFeedResult, error) {
 	var img *model.ArtImage
-	if enum.Feed.ImageURL != "" && enum.Feed.ImageURL != priorImageURL {
+	if !coverLocked && enum.Feed.ImageURL != "" && enum.Feed.ImageURL != coverSourceURL {
 		img = s.fetchImage(ctx, enum.Feed.ImageURL)
 	}
 	return s.store.UpsertFeed(ctx, model.UpsertFeedInput{
@@ -504,6 +538,15 @@ func (s *Service) fetchImage(ctx context.Context, url string) *model.ArtImage {
 	img.Hash = art.Hash(resp.Body)
 	format, w, h, err := art.Probe(resp.Body)
 	if err != nil {
+		// Fall back to the magic sniff for an AVIF/HEIC cover, the same second chance
+		// probeArtImage gives a user-supplied one. Without it a feed publishing an
+		// exotic-but-valid channel image attaches nothing, and since the sync now
+		// compares against the cover it holds rather than the URL the feed advertises,
+		// nothing would ever advance and every later sync would re-download it.
+		if f, ok := art.SniffExotic(resp.Body); ok {
+			img.Format = f
+			return img
+		}
 		s.log.Debug("podcast image undecodable", "url", url, "err", err)
 		return nil
 	}
