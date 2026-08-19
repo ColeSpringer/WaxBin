@@ -73,6 +73,10 @@ type EnrichTarget struct {
 	// only when it does not, so a library whose rips carry embedded art spends no
 	// rate-limited requests on covers the store would refuse to fill anyway.
 	HasArt bool
+	// ArtLocked reports whether the entity's cover is locked. It serves the release-group
+	// pass what HasArt serves the album pass: the store refuses the write, so fetching
+	// first would spend a rate-limited request on every locked cover, every forced run.
+	ArtLocked bool
 }
 
 // ArtistEnrichment is the resolved data for one artist, applied in a single

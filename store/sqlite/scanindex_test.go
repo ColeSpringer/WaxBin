@@ -237,7 +237,7 @@ func TestUpdateItemSidecars(t *testing.T) {
 	a := putTrack(t, st, lib.ID, trackSpec{path: "/lib/a.mp3", essence: "ea", content: "ca", title: "A"})
 
 	before := latestSeq(t, st)
-	ly := &model.Lyrics{Source: "lrc", Synced: []model.SyncedLine{{TimeMS: 0, Text: "hi"}}}
+	ly := &model.Lyrics{Source: model.SourceSidecar, Synced: []model.SyncedLine{{TimeMS: 0, Text: "hi"}}}
 	changed, err := st.UpdateItemSidecars(ctx, model.SidecarUpdate{ItemPID: a.ItemPID, FilePID: a.FilePID, Lyrics: ly})
 	if err != nil {
 		t.Fatalf("update sidecars: %v", err)
@@ -342,7 +342,7 @@ func TestUpdateItemSidecarsPreservesUnsynced(t *testing.T) {
 	// unsynchronized block.
 	if _, err := st.UpdateItemSidecars(ctx, model.SidecarUpdate{
 		ItemPID: a.ItemPID, FilePID: a.FilePID,
-		Lyrics: &model.Lyrics{Source: "lrc", Synced: []model.SyncedLine{{TimeMS: 0, Text: "one"}}, Unsynced: "embedded block"},
+		Lyrics: &model.Lyrics{Source: model.SourceSidecar, Synced: []model.SyncedLine{{TimeMS: 0, Text: "one"}}, Unsynced: "embedded block"},
 	}); err != nil {
 		t.Fatalf("seed lyrics: %v", err)
 	}
@@ -350,7 +350,7 @@ func TestUpdateItemSidecarsPreservesUnsynced(t *testing.T) {
 	// A fast-path .lrc update carries only synced lines (no unsynced).
 	if _, err := st.UpdateItemSidecars(ctx, model.SidecarUpdate{
 		ItemPID: a.ItemPID, FilePID: a.FilePID,
-		Lyrics: &model.Lyrics{Source: "lrc", Synced: []model.SyncedLine{{TimeMS: 0, Text: "one"}, {TimeMS: 1000, Text: "two"}}},
+		Lyrics: &model.Lyrics{Source: model.SourceSidecar, Synced: []model.SyncedLine{{TimeMS: 0, Text: "one"}, {TimeMS: 1000, Text: "two"}}},
 	}); err != nil {
 		t.Fatalf("update lyrics: %v", err)
 	}

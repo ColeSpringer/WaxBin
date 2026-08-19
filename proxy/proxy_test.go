@@ -174,7 +174,7 @@ func TestCurationRoundTrip(t *testing.T) {
 		proxy.MethodSetEntityArt: func(_ context.Context, raw json.RawMessage) (any, error) {
 			var p proxy.SetEntityArtParams
 			_ = json.Unmarshal(raw, &p)
-			if p.EntityType != "album" || p.Role != "front" {
+			if p.EntityType != "album" || p.Role != "front" || !p.Lock || p.Force {
 				t.Errorf("entity art params = %+v", p)
 			}
 			return nil, nil
@@ -206,7 +206,7 @@ func TestCurationRoundTrip(t *testing.T) {
 		t.Fatalf("art bytes not carried: %v", gotArt)
 	}
 
-	if _, err := c.SetEntityArt(ctx, model.ArtAlbum, "a1", model.ArtRoleFront, []byte{9}, false); err != nil {
+	if _, err := c.SetEntityArt(ctx, model.ArtAlbum, "a1", model.ArtRoleFront, []byte{9}, true, false, false); err != nil {
 		t.Fatalf("set entity art: %v", err)
 	}
 }
@@ -462,5 +462,43 @@ func TestCallHonorsContextCancel(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("call did not return after context cancellation (it hung)")
+	}
+}
+
+// TestProvenanceRoundTripCarriesArtRow checks the art row the store overlays survives
+// the wire, source URL included. The provenance result marshals model.FieldProvenance
+// directly, so a field added to the model has to reach the client to be usable.
+func TestProvenanceRoundTripCarriesArtRow(t *testing.T) {
+	handlers := map[string]proxy.Handler{
+		proxy.MethodProvenance: func(_ context.Context, raw json.RawMessage) (any, error) {
+			var p proxy.ItemParams
+			_ = json.Unmarshal(raw, &p)
+			if p.ItemPID != "i1" {
+				t.Errorf("provenance pid = %q, want i1", p.ItemPID)
+			}
+			return []model.FieldProvenance{
+				{ItemPID: "i1", Field: "art", Source: model.SourceEnrichment, Locked: true,
+					Provider:  "coverartarchive",
+					SourceURL: "https://coverartarchive.org/release-group/rg/front", UpdatedAt: 42},
+				{ItemPID: "i1", Field: "title", Source: model.SourceUser, Value: "T"},
+			}, nil
+		},
+	}
+	c := dial(t, startServer(t, handlers, nil))
+	rows, err := c.Provenance(context.Background(), "i1")
+	if err != nil {
+		t.Fatalf("provenance: %v", err)
+	}
+	if len(rows) != 2 || rows[0].Field != "art" {
+		t.Fatalf("rows = %+v, want the art row first", rows)
+	}
+	art := rows[0]
+	if art.Source != model.SourceEnrichment || art.Provider != "coverartarchive" ||
+		art.SourceURL != "https://coverartarchive.org/release-group/rg/front" ||
+		!art.Locked || art.UpdatedAt != 42 {
+		t.Errorf("art row did not survive the wire: %+v", art)
+	}
+	if rows[1].SourceURL != "" {
+		t.Errorf("scalar row picked up a source URL: %+v", rows[1])
 	}
 }

@@ -81,7 +81,7 @@ func (l *lrclib) Enrich(ctx context.Context, req Request) (*Candidate, error) {
 	if out.Instrumental {
 		return nil, nil
 	}
-	ly := &model.Lyrics{Source: providerLRCLIB}
+	ly := &model.Lyrics{Source: model.SourceEnrichment, Provider: providerLRCLIB}
 	if synced := parseLRC(out.SyncedLyrics); len(synced) > 0 {
 		ly.Synced = synced
 	}

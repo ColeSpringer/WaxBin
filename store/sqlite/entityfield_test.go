@@ -925,7 +925,7 @@ func TestHasArtAcrossKinds(t *testing.T) {
 	// album leaves its own cover absent, which is exactly what has_art exists
 	// to find.
 	albumPID := scalarStr(t, st, "SELECT pid FROM album WHERE title = ?", "Al")
-	if err := st.SetEntityArt(ctx, model.ArtAlbum, model.PID(albumPID), model.ArtRoleFront, tinyPNG(t)); err != nil {
+	if err := st.SetEntityArt(ctx, model.ArtAlbum, model.PID(albumPID), model.ArtRoleFront, tinyPNG(t), false, false); err != nil {
 		t.Fatalf("set album art: %v", err)
 	}
 	if n := countWhere(t, st, "has_art", query.OpIs, 0); n != 2 {
@@ -999,7 +999,7 @@ func TestHasLyricsField(t *testing.T) {
 			SortKey: model.SortKey("Sung"), IdentityKey: "essence:el",
 		},
 		Track:  model.Track{Artist: "X", Album: "Al"},
-		Lyrics: &model.Lyrics{Source: "embedded", Unsynced: "la la la"},
+		Lyrics: &model.Lyrics{Source: model.SourceTag, Unsynced: "la la la"},
 	}); err != nil {
 		t.Fatalf("put track with lyrics: %v", err)
 	}
@@ -1023,8 +1023,9 @@ func TestHasLyricsField(t *testing.T) {
 // probe must seek art_map's primary key (the CASE'd entity_type still seeks,
 // with the key computed per row; the (entity_type, entity_id, role) PK covers
 // the whole probe) and has_lyrics must seek the lyrics rowid PK, with neither
-// table scanned. Loose string matching, since plan wording varies by SQLite
-// version.
+// table scanned. art_source rides the same key, seeking the PK and then fetching
+// the row for the source column. Loose string matching, since plan wording varies
+// by SQLite version.
 func TestPresenceFieldPlansSeekIndexes(t *testing.T) {
 	st, _ := entityFixture(t)
 	ctx := context.Background()
@@ -1034,7 +1035,8 @@ func TestPresenceFieldPlansSeekIndexes(t *testing.T) {
 		t.Fatal("no field map for items")
 	}
 	c, err := query.Compile(query.New(query.EntityItems).
-		Where("has_art", query.OpIs, 1).Where("has_lyrics", query.OpIs, 0).Build(), fm)
+		Where("has_art", query.OpIs, 1).Where("has_lyrics", query.OpIs, 0).
+		Where("art_source", query.OpIs, "tag").Build(), fm)
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}
@@ -1060,6 +1062,9 @@ func TestPresenceFieldPlansSeekIndexes(t *testing.T) {
 	// art_map keyed by entity_type rather than the index's exact name.
 	if !strings.Contains(plan, "SEARCH amq") || !strings.Contains(plan, "entity_type=?") {
 		t.Errorf("has_art probe does not seek the art_map primary key:\n%s", plan)
+	}
+	if !strings.Contains(plan, "SEARCH asq") {
+		t.Errorf("art_source does not seek the art_map primary key:\n%s", plan)
 	}
 	for _, d := range details {
 		if strings.Contains(d, "SCAN") && (strings.Contains(d, "art_map") || strings.Contains(d, "lyrics")) {

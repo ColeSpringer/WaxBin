@@ -67,12 +67,19 @@ func (l *Library) SetItemArt(ctx context.Context, itemPID model.PID, role model.
 // SetEntityArt sets a durable image on a non-item entity (album, artist, release
 // group, genre, podcast, or playlist) under one role (empty = front; the closed
 // model.ArtRole vocabulary, validated by the store). This makes album art durable:
-// ResolveArt prefers it over the read-derived track cover. Entity art takes no
-// lock/force (the lock system is item-scoped). With writeBack an album front cover
-// is also embedded into every member track's file; other entity covers stay
-// catalog-only on disk (they have no single natural file target), and a non-front
-// role is refused with writeBack for the same reason an item's is.
-func (l *Library) SetEntityArt(ctx context.Context, entityType model.ArtEntity, entityPID model.PID, role model.ArtRole, raw []byte, writeBack bool) error {
+// ResolveArt prefers it over the read-derived track cover. A front cover locks the
+// entity's "art" field by default, which is what keeps it through an enrich --force
+// and a podcast feed's next image-URL change; a locked cover is refused without
+// force. With writeBack an album front cover is also embedded into every member
+// track's file; other entity covers stay catalog-only on disk (they have no single
+// natural file target), and a non-front role is refused with writeBack for the same
+// reason an item's is.
+//
+// One consequence of the album write-back is worth knowing. Embedding the chosen cover
+// into every member track's file means the next scan reads it back as that track's own
+// tag cover, so the track rung reports source "tag" while the album rung still reports
+// "user". Both are accurate, since the track's cover genuinely is a tag by then.
+func (l *Library) SetEntityArt(ctx context.Context, entityType model.ArtEntity, entityPID model.PID, role model.ArtRole, raw []byte, lock, force, writeBack bool) error {
 	if role == "" {
 		role = model.ArtRoleFront
 	}
@@ -85,7 +92,7 @@ func (l *Library) SetEntityArt(ctx context.Context, entityType model.ArtEntity, 
 		return waxerr.New(waxerr.CodeInvalid, "waxbin.SetEntityArt",
 			"write-back embeds only the front cover; set role "+string(role)+" without --write-back")
 	}
-	if err := l.store.SetEntityArt(ctx, entityType, entityPID, role, raw); err != nil {
+	if err := l.store.SetEntityArt(ctx, entityType, entityPID, role, raw, lock, force); err != nil {
 		return err
 	}
 	if !writeBack {

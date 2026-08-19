@@ -576,10 +576,14 @@ func (s *Service) enrichReleaseGroup(ctx context.Context, st *runState, res *Res
 		enr.Genres, enr.GenreProvider = s.gatherGenres(ctx, st, rg, genreNames(rg.Genres))
 		// Cover: the first cover provider to answer, injected first (an embedder's
 		// fanart.tv beats the built-in Cover Art Archive). Best-effort: never aborts.
-		enr.Art = s.gatherCover(ctx, st, Request{
-			Type: TargetReleaseGroup, Force: st.force,
-			Title: rg.Title, Artist: releaseGroupArtistName(rg), MBID: rg.ID,
-		})
+		// Skipped for a locked cover, which the store would refuse to replace, so a
+		// forced re-run does not re-download one picture per locked group.
+		if !t.ArtLocked {
+			enr.Art = s.gatherCover(ctx, st, Request{
+				Type: TargetReleaseGroup, Force: st.force,
+				Title: rg.Title, Artist: releaseGroupArtistName(rg), MBID: rg.ID,
+			})
+		}
 	}
 	if err := s.store.ApplyReleaseGroupEnrichment(ctx, enr); err != nil {
 		return false, err
@@ -821,6 +825,11 @@ func (s *Service) enrichLyrics(ctx context.Context, st *runState, t model.Enrich
 			continue
 		}
 		got, provider = cand.Lyrics, p.Name()
+		// Stamped here, not trusted from the provider, the same way gatherCover stamps a
+		// cover: an injected provider cannot claim its words came off the file's tags,
+		// and one that stamps nothing at all cannot reach putLyricsTx unattributed,
+		// where an empty source reads as "no lyrics" and drops them silently.
+		got.Source, got.Provider = model.SourceEnrichment, p.Name()
 		break
 	}
 	in := model.LyricsEnrichment{ItemID: t.ID, PID: t.PID, Matched: got != nil, Lyrics: got, Provider: provider}
@@ -909,6 +918,12 @@ func (s *Service) gatherGenres(ctx context.Context, st *runState, rg *mbReleaseG
 // rather than reaching for the built-in CAA directly is what lets an embedder's cover
 // provider serve either one, and keeps the documented priority order intact. It is
 // best-effort: a provider error or a missing cover is skipped, never aborting the run.
+//
+// The winner is stamped here rather than trusted from the provider, the same way
+// gatherGenres records which provider supplied the display-primary genre: an injected
+// provider cannot claim a cover came from the tags. SourceURL is left as the provider
+// set it, since only the provider knows where it fetched, so an injected provider can
+// be named one thing and point at another.
 func (s *Service) gatherCover(ctx context.Context, st *runState, req Request) *model.ArtImage {
 	for _, p := range s.providers {
 		if !p.Capabilities().Has(CapCover) {
@@ -918,6 +933,7 @@ func (s *Service) gatherCover(ctx context.Context, st *runState, req Request) *m
 		if err != nil || cand == nil || cand.Cover == nil {
 			continue
 		}
+		cand.Cover.Source, cand.Cover.Provider = model.SourceEnrichment, p.Name()
 		return cand.Cover
 	}
 	return nil

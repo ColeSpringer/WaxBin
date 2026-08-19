@@ -37,22 +37,22 @@ func TestSetItemLyricsAndLockSurvivesScan(t *testing.T) {
 		t.Fatalf("set lyrics: %v", err)
 	}
 	got, err := st.LyricsByItem(ctx, pid)
-	if err != nil || len(got.Synced) != 2 || got.Source != string(model.SourceUser) {
+	if err != nil || len(got.Synced) != 2 || got.Source != model.SourceUser {
 		t.Fatalf("lyrics = %+v, err %v", got, err)
 	}
 
 	// A forced rescan carrying different embedded lyrics must NOT overwrite the locked set.
-	scanLy := &model.Lyrics{Source: "embedded", Unsynced: "scanned lyrics"}
+	scanLy := &model.Lyrics{Source: model.SourceTag, Unsynced: "scanned lyrics"}
 	rescanTrackWithLyrics(t, st, lib.ID, "e1", "c2", scanLy, true)
 	got, _ = st.LyricsByItem(ctx, pid)
-	if got.Source != string(model.SourceUser) || len(got.Synced) != 2 {
+	if got.Source != model.SourceUser || len(got.Synced) != 2 {
 		t.Fatalf("locked lyrics overwritten by scan: %+v", got)
 	}
 
 	// --ignore-locks (preserveLocks=false) re-derives.
 	rescanTrackWithLyrics(t, st, lib.ID, "e1", "c3", scanLy, false)
 	got, _ = st.LyricsByItem(ctx, pid)
-	if got.Source != "embedded" {
+	if got.Source != model.SourceTag {
 		t.Fatalf("ignore-locks did not re-derive lyrics: %+v", got)
 	}
 }
@@ -98,7 +98,7 @@ func TestSetItemArtAndLockSurvivesScan(t *testing.T) {
 	userHash := blob.SourceHash
 
 	// A forced rescan with a DIFFERENT cover must not replace the locked user cover.
-	scanImg := &model.ArtImage{Data: []byte("JPEGSCANDATA-different-bytes")}
+	scanImg := &model.ArtImage{Data: []byte("JPEGSCANDATA-different-bytes"), Source: model.SourceTag}
 	if ok := finalizeScanImg(scanImg); !ok {
 		scanImg.Hash = "scanhash" // undecodable bytes still store
 	}
@@ -159,7 +159,7 @@ func TestSetEntityArtDurableAlbum(t *testing.T) {
 	}
 
 	img := tinyPNG(t)
-	if err := st.SetEntityArt(ctx, model.ArtAlbum, model.PID(albumPID), model.ArtRoleFront, img); err != nil {
+	if err := st.SetEntityArt(ctx, model.ArtAlbum, model.PID(albumPID), model.ArtRoleFront, img, false, false); err != nil {
 		t.Fatalf("set album art: %v", err)
 	}
 	blob, err := st.ResolveArt(ctx, model.EntityRef{Type: model.ArtAlbum, PID: model.PID(albumPID)}, model.ArtRoleFront, 0)

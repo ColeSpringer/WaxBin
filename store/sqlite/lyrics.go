@@ -17,9 +17,10 @@ type lyricLineJSON struct {
 }
 
 // putLyricsTx writes (or clears) an item's lyrics row. It is idempotent: it
-// compares the desired lyrics against the stored row and writes only on a
-// difference, so it can run on every scan (catching an added/edited .lrc sidecar)
-// without churning a no-op rescan. Empty/nil lyrics delete any existing row so the
+// compares the desired lyrics against the stored row (source and provider included,
+// so a re-attribution is a real change) and writes only on a difference, so it can
+// run on every scan (catching an added/edited .lrc sidecar) without churning a no-op
+// rescan. Empty/nil lyrics delete any existing row so the
 // table stays sparse; synced lines are stored as a JSON array in time order. It
 // reports whether it changed the stored row, so the sidecar-update seam can emit a
 // delta only on a real change.
@@ -28,10 +29,17 @@ type lyricLineJSON struct {
 // false (it is the authoritative user write).
 func putLyricsTx(ctx context.Context, tx *sql.Tx, itemID int64, ly *model.Lyrics, preserveLock bool) (bool, error) {
 	// Desired row (empty source means "no lyrics row").
-	var wantSource, wantUnsynced, wantLines string
+	var wantSource, wantProvider, wantUnsynced, wantLines string
 	wantSynced := 0
 	if ly.HasContent() {
-		wantSource, wantUnsynced = ly.Source, ly.Unsynced
+		// Refuse an unknown source the way setEntityArtRoleTx refuses an unstamped
+		// cover. Without this an unstamped producer falls through to wantSource == "",
+		// which reads as "no lyrics desired" and drops the words with no error.
+		if !ly.Source.Valid() {
+			return false, waxerr.New(waxerr.CodeInvalid, "store.putLyrics",
+				"lyrics have no known provenance source: "+string(ly.Source))
+		}
+		wantSource, wantProvider, wantUnsynced = string(ly.Source), ly.Provider, ly.Unsynced
 		if len(ly.Synced) > 0 {
 			wantSynced = 1
 			arr := make([]lyricLineJSON, len(ly.Synced))
@@ -47,11 +55,11 @@ func putLyricsTx(ctx context.Context, tx *sql.Tx, itemID int64, ly *model.Lyrics
 	}
 
 	// Stored row (NULL columns scan as empty strings, matching the want defaults).
-	var curSource, curUnsynced, curLines sql.NullString
+	var curSource, curProvider, curUnsynced, curLines sql.NullString
 	var curSynced sql.NullInt64
 	err := tx.QueryRowContext(ctx,
-		"SELECT source, synced, unsynced, lines FROM lyrics WHERE item_id = ?", itemID).
-		Scan(&curSource, &curSynced, &curUnsynced, &curLines)
+		"SELECT source, provider, synced, unsynced, lines FROM lyrics WHERE item_id = ?", itemID).
+		Scan(&curSource, &curProvider, &curSynced, &curUnsynced, &curLines)
 	exists := !errors.Is(err, sql.ErrNoRows)
 	if err != nil && exists {
 		return false, err
@@ -61,7 +69,8 @@ func putLyricsTx(ctx context.Context, tx *sql.Tx, itemID int64, ly *model.Lyrics
 	// unchanged rescan neither writes nor pays a lock lookup.
 	changeNeeded := exists
 	if wantSource != "" {
-		changeNeeded = !(exists && curSource.String == wantSource && int(curSynced.Int64) == wantSynced &&
+		changeNeeded = !(exists && curSource.String == wantSource && curProvider.String == wantProvider &&
+			int(curSynced.Int64) == wantSynced &&
 			curUnsynced.String == wantUnsynced && curLines.String == wantLines)
 	}
 	if !changeNeeded {
@@ -88,11 +97,11 @@ func putLyricsTx(ctx context.Context, tx *sql.Tx, itemID int64, ly *model.Lyrics
 		linesArg = wantLines
 	}
 	_, err = tx.ExecContext(ctx,
-		`INSERT INTO lyrics(item_id, source, synced, unsynced, lines, updated_at) VALUES (?,?,?,?,?,?)
+		`INSERT INTO lyrics(item_id, source, provider, synced, unsynced, lines, updated_at) VALUES (?,?,?,?,?,?,?)
 		 ON CONFLICT(item_id) DO UPDATE SET
-		   source=excluded.source, synced=excluded.synced, unsynced=excluded.unsynced,
-		   lines=excluded.lines, updated_at=excluded.updated_at`,
-		itemID, wantSource, wantSynced, nullStr(wantUnsynced), linesArg, nowNS())
+		   source=excluded.source, provider=excluded.provider, synced=excluded.synced,
+		   unsynced=excluded.unsynced, lines=excluded.lines, updated_at=excluded.updated_at`,
+		itemID, wantSource, wantProvider, wantSynced, nullStr(wantUnsynced), linesArg, nowNS())
 	if err != nil {
 		return false, err
 	}
@@ -102,20 +111,22 @@ func putLyricsTx(ctx context.Context, tx *sql.Tx, itemID int64, ly *model.Lyrics
 // LyricsByItem returns an item's stored lyrics, or CodeNotFound when it has none.
 func (s *Store) LyricsByItem(ctx context.Context, itemPID model.PID) (*model.Lyrics, error) {
 	const op = "store.LyricsByItem"
-	var source string
+	var source, provider string
 	var synced int
+	var updatedAt int64
 	var unsynced, lines sql.NullString
 	err := s.read.QueryRowContext(ctx,
-		`SELECT ly.source, ly.synced, ly.unsynced, ly.lines
+		`SELECT ly.source, ly.provider, ly.synced, ly.unsynced, ly.lines, ly.updated_at
 		 FROM lyrics ly JOIN playable_item pi ON pi.id = ly.item_id
-		 WHERE pi.pid = ?`, string(itemPID)).Scan(&source, &synced, &unsynced, &lines)
+		 WHERE pi.pid = ?`, string(itemPID)).Scan(&source, &provider, &synced, &unsynced, &lines, &updatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, waxerr.New(waxerr.CodeNotFound, op, "no lyrics for item: "+string(itemPID))
 	}
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
-	out := &model.Lyrics{ItemPID: itemPID, Source: source, Unsynced: unsynced.String}
+	out := &model.Lyrics{ItemPID: itemPID, Source: model.ProvenanceSource(source),
+		Provider: provider, Unsynced: unsynced.String, UpdatedAt: updatedAt}
 	if lines.Valid && lines.String != "" {
 		var arr []lyricLineJSON
 		if err := json.Unmarshal([]byte(lines.String), &arr); err != nil {

@@ -114,7 +114,7 @@ func TestNonFrontResolvesOwnLevelOnly(t *testing.T) {
 	ctx := context.Background()
 	back := testPNG(t, 41, 41)
 	pid := putWithCover(t, st, lib.ID, "/lib/al/1.flac", "e1", nil)
-	if err := st.SetEntityArt(ctx, model.ArtAlbum, albumPID(t, st), model.ArtRoleBack, back.Data); err != nil {
+	if err := st.SetEntityArt(ctx, model.ArtAlbum, albumPID(t, st), model.ArtRoleBack, back.Data, false, false); err != nil {
 		t.Fatalf("set album back: %v", err)
 	}
 
@@ -129,7 +129,7 @@ func TestNonFrontResolvesOwnLevelOnly(t *testing.T) {
 
 	// The reverse direction: with the album's own back cleared and a back on the
 	// member track instead, the album must not derive it.
-	if err := st.SetEntityArt(ctx, model.ArtAlbum, albumPID(t, st), model.ArtRoleBack, nil); err != nil {
+	if err := st.SetEntityArt(ctx, model.ArtAlbum, albumPID(t, st), model.ArtRoleBack, nil, false, false); err != nil {
 		t.Fatalf("clear album back: %v", err)
 	}
 	if err := st.SetItemArt(ctx, pid, model.ArtRoleBack, back.Data, false, false); err != nil {
@@ -170,7 +170,7 @@ func TestResolveArtLevelDerivedMatrix(t *testing.T) {
 	}
 
 	// A durable album cover flips Derived off (and wins over the track-derived one).
-	if err := st.SetEntityArt(ctx, model.ArtAlbum, alb, model.ArtRoleFront, albumCover.Data); err != nil {
+	if err := st.SetEntityArt(ctx, model.ArtAlbum, alb, model.ArtRoleFront, albumCover.Data, false, false); err != nil {
 		t.Fatalf("set album front: %v", err)
 	}
 	ba, err = st.ResolveArt(ctx, model.EntityRef{Type: model.ArtAlbum, PID: alb}, model.ArtRoleFront, 0)
@@ -194,7 +194,7 @@ func TestSetArtUnknownRoleRejected(t *testing.T) {
 	if err := st.SetItemArt(ctx, pid, model.ArtRole("portrait"), img.Data, false, false); !waxerr.Is(err, waxerr.CodeInvalid) {
 		t.Errorf("item art with unknown role = %v, want CodeInvalid", err)
 	}
-	if err := st.SetEntityArt(ctx, model.ArtAlbum, albumPID(t, st), model.ArtRole("artist"), img.Data); !waxerr.Is(err, waxerr.CodeInvalid) {
+	if err := st.SetEntityArt(ctx, model.ArtAlbum, albumPID(t, st), model.ArtRole("artist"), img.Data, false, false); !waxerr.Is(err, waxerr.CodeInvalid) {
 		t.Errorf("entity art with unknown role = %v, want CodeInvalid (the vocabulary is closed now)", err)
 	}
 	if _, err := st.ResolveArt(ctx, model.EntityRef{Type: model.ArtTrack, PID: pid}, model.ArtRole("nope"), 0); !waxerr.Is(err, waxerr.CodeInvalid) {
@@ -223,7 +223,7 @@ func TestEntityArtSlotKindMismatchRejected(t *testing.T) {
 	img := testPNG(t, 40, 40)
 	track := putWithCover(t, st, lib.ID, "/lib/al/1.flac", "e1", nil)
 
-	if err := st.SetEntityArt(ctx, model.ArtEpisode, track, model.ArtRoleFront, img.Data); !waxerr.Is(err, waxerr.CodeInvalid) {
+	if err := st.SetEntityArt(ctx, model.ArtEpisode, track, model.ArtRoleFront, img.Data, false, false); !waxerr.Is(err, waxerr.CodeInvalid) {
 		t.Errorf("episode art on a track pid = %v, want CodeInvalid", err)
 	}
 	if n := scalarInt(t, st, "SELECT COUNT(*) FROM art_map WHERE entity_type = 'episode'"); n != 0 {
@@ -235,11 +235,11 @@ func TestEntityArtSlotKindMismatchRejected(t *testing.T) {
 		t.Fatalf("UpsertFeed: %v", err)
 	}
 	ep := episodeByTitle(t, st, feed.PodcastPID, "Alpha").PID
-	if err := st.SetEntityArt(ctx, model.ArtTrack, ep, model.ArtRoleFront, img.Data); !waxerr.Is(err, waxerr.CodeInvalid) {
+	if err := st.SetEntityArt(ctx, model.ArtTrack, ep, model.ArtRoleFront, img.Data, false, false); !waxerr.Is(err, waxerr.CodeInvalid) {
 		t.Errorf("track art on an episode pid = %v, want CodeInvalid", err)
 	}
 	// The matching slot still works: an episode's own cover is a real, resolvable row.
-	if err := st.SetEntityArt(ctx, model.ArtEpisode, ep, model.ArtRoleFront, img.Data); err != nil {
+	if err := st.SetEntityArt(ctx, model.ArtEpisode, ep, model.ArtRoleFront, img.Data, false, false); err != nil {
 		t.Fatalf("episode art on an episode pid: %v", err)
 	}
 	blob, err := st.ResolveArt(ctx, model.EntityRef{Type: model.ArtEpisode, PID: ep}, model.ArtRoleFront, 0)
@@ -295,10 +295,10 @@ func TestRemovePodcastDropsArtRows(t *testing.T) {
 		t.Fatalf("UpsertFeed: %v", err)
 	}
 	ep := episodeByTitle(t, st, feed.PodcastPID, "Alpha").PID
-	if err := st.SetEntityArt(ctx, model.ArtPodcast, feed.PodcastPID, model.ArtRoleFront, feedArt.Data); err != nil {
+	if err := st.SetEntityArt(ctx, model.ArtPodcast, feed.PodcastPID, model.ArtRoleFront, feedArt.Data, false, false); err != nil {
 		t.Fatalf("set podcast art: %v", err)
 	}
-	if err := st.SetEntityArt(ctx, model.ArtEpisode, ep, model.ArtRoleFront, epArt.Data); err != nil {
+	if err := st.SetEntityArt(ctx, model.ArtEpisode, ep, model.ArtRoleFront, epArt.Data, false, false); err != nil {
 		t.Fatalf("set episode art: %v", err)
 	}
 

@@ -214,10 +214,11 @@ func (c *Client) SetItemArt(ctx context.Context, itemPID model.PID, role model.A
 // SetEntityArt proxies a durable entity artwork edit for one role. An album cover
 // fan-out whose embed partially failed returns the failed files in the result
 // (transport error stays nil).
-func (c *Client) SetEntityArt(ctx context.Context, entityType model.ArtEntity, entityPID model.PID, role model.ArtRole, data []byte, writeBack bool) (*SetEntityArtResult, error) {
+func (c *Client) SetEntityArt(ctx context.Context, entityType model.ArtEntity, entityPID model.PID, role model.ArtRole, data []byte, lock, force, writeBack bool) (*SetEntityArtResult, error) {
 	var res SetEntityArtResult
 	err := c.call(ctx, MethodSetEntityArt, SetEntityArtParams{
-		EntityType: string(entityType), EntityPID: string(entityPID), Role: string(role), Data: data, WriteBack: writeBack,
+		EntityType: string(entityType), EntityPID: string(entityPID), Role: string(role), Data: data,
+		Lock: lock, Force: force, WriteBack: writeBack,
 	}, &res)
 	if err != nil {
 		return nil, err

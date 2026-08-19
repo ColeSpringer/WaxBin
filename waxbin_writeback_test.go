@@ -452,7 +452,7 @@ func TestSetEntityArtAlbumFanOut(t *testing.T) {
 	}
 	albumPID := albumPIDByTitle(t, ctx, db, "Night Moves")
 
-	if err := lib.SetEntityArt(ctx, model.ArtAlbum, albumPID, model.ArtRoleFront, coverPNG(t), true); err != nil {
+	if err := lib.SetEntityArt(ctx, model.ArtAlbum, albumPID, model.ArtRoleFront, coverPNG(t), false, false, true); err != nil {
 		t.Fatalf("set album art write-back: %v", err)
 	}
 	assertFrontCover(t, ctx, one)
@@ -622,7 +622,7 @@ func TestSetEntityArtAlbumFanOutRefusesSharedMember(t *testing.T) {
 	makeBackingFileVirtual(t, ctx, db, itemPIDByTitle(t, ctx, lib, "Track Two"))
 	albumPID := albumPIDByTitle(t, ctx, db, "Night Moves")
 
-	err := lib.SetEntityArt(ctx, model.ArtAlbum, albumPID, model.ArtRoleFront, coverPNG(t), true)
+	err := lib.SetEntityArt(ctx, model.ArtAlbum, albumPID, model.ArtRoleFront, coverPNG(t), false, false, true)
 	var wbErr *waxbin.WriteBackError
 	if !errors.As(err, &wbErr) {
 		t.Fatalf("want *WriteBackError for a shared member, got %v", err)

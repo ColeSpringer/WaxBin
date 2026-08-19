@@ -162,7 +162,9 @@ func (s *Store) ReleaseGroupsNeedingEnrichment(ctx context.Context, force bool, 
 		repCols = "COALESCE(rf.path, X''), COALESCE(rf.duration_ms, 0)"
 	}
 	scopeClause, scopeArgs := enrichIDsFilter("rg.id", ids)
-	stmt := `SELECT rg.id, rg.pid, rg.title, COALESCE(rg.mbid,''), COALESCE(ar.name,''), ` + repCols + `
+	stmt := `SELECT rg.id, rg.pid, rg.title, COALESCE(rg.mbid,''), COALESCE(ar.name,''), ` + repCols + `,
+		EXISTS(SELECT 1 FROM entity_curation ec WHERE ec.entity_type = 'release_group'
+		       AND ec.entity_id = rg.id AND ec.field = 'art' AND ec.locked = 1)
 		FROM release_group rg
 		LEFT JOIN artist ar ON ar.id = rg.primary_artist_id` + repJoin + `
 		WHERE rg.id > ? AND ` + enrichBacksFilter(enrichRGBacksItems, ids) + ` AND ` + notEnriched(model.EnrichReleaseGroupType, "rg.id", force) + scopeClause + `
@@ -179,12 +181,14 @@ func (s *Store) ReleaseGroupsNeedingEnrichment(ctx context.Context, force bool, 
 		var pid string
 		var path []byte
 		var durMS int64
-		if err := rows.Scan(&t.ID, &pid, &t.Name, &t.MBID, &t.ArtistName, &path, &durMS); err != nil {
+		var artLocked int
+		if err := rows.Scan(&t.ID, &pid, &t.Name, &t.MBID, &t.ArtistName, &path, &durMS, &artLocked); err != nil {
 			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		t.PID = model.PID(pid)
 		t.FilePath = string(path)
 		t.DurationSec = int(durMS / 1000)
+		t.ArtLocked = artLocked == 1
 		out = append(out, t)
 	}
 	return out, rows.Err()
@@ -443,7 +447,9 @@ func (s *Store) ApplyReleaseGroupEnrichment(ctx context.Context, in model.Releas
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		if in.Art != nil {
-			if err := attachEntityArtTx(ctx, tx, string(model.ArtReleaseGroup), in.ReleaseGroupID, in.Art); err != nil {
+			// Reads identically to the release_group.type guard six lines above: a user
+			// who chose this group's cover keeps it, forced run or not.
+			if err := attachEntityArtUnlessLockedTx(ctx, tx, string(model.ArtReleaseGroup), in.ReleaseGroupID, in.Art); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 		}

@@ -39,11 +39,12 @@ func (s *Store) SetItemLyrics(ctx context.Context, itemPID model.PID, ly *model.
 				return waxerr.New(waxerr.CodeLocked, op, "lyrics are locked (use force to override)")
 			}
 		}
-		// The user write is authoritative (preserveLock=false); source is stamped "user".
+		// The user write is authoritative (preserveLock=false); source is stamped "user",
+		// and any provider the caller carried over is dropped with it.
 		want := &model.Lyrics{}
 		if ly != nil {
 			cp := *ly
-			cp.Source = string(model.SourceUser)
+			cp.Source, cp.Provider = model.SourceUser, ""
 			want = &cp
 		}
 		if _, err := putLyricsTx(ctx, tx, itemID, want, false); err != nil {
@@ -342,11 +343,19 @@ func (s *Store) SetItemArt(ctx context.Context, itemPID model.PID, role model.Ar
 // and that GCArt and the derived-data checks already treat as live. Empty bytes
 // clear the role. The role must be in the closed model.ArtRole vocabulary; an
 // arbitrary string used to be accepted (and stored) here, and closing it is a
-// deliberate tightening so a typo cannot mint an unreachable slot. Entity art
-// takes no lock/force: the lock system is item-scoped (field_provenance), so a
-// non-item entity has nothing to lock; enrichment fills entity covers only when
-// empty.
-func (s *Store) SetEntityArt(ctx context.Context, entityType model.ArtEntity, entityPID model.PID, role model.ArtRole, raw []byte) error {
+// deliberate tightening so a typo cannot mint an unreachable slot.
+//
+// The lock story mirrors SetItemArt's and applies to the front role only: a lock is
+// recorded by default and enforced, so a chosen cover survives an enrich --force and a
+// podcast feed's next image-URL change. A locked front cover is refused with CodeLocked
+// unless force is set. The other roles have no automatic producer to guard against, so
+// the flags are ignored for them. Locking a cleared front role is how a user stops a
+// provider filling it.
+//
+// The lock is recorded in whichever table governs the entity type (artLockIsItemScoped),
+// so a track cover set through here and one set through SetItemArt share one lock, and
+// the scan, enrichment, and feed-sync guards all read the lock they were written.
+func (s *Store) SetEntityArt(ctx context.Context, entityType model.ArtEntity, entityPID model.PID, role model.ArtRole, raw []byte, lock, force bool) error {
 	const op = "store.SetEntityArt"
 	if !entityType.Valid() {
 		return waxerr.New(waxerr.CodeInvalid, op, "unknown art entity type: "+string(entityType))
@@ -365,13 +374,28 @@ func (s *Store) SetEntityArt(ctx context.Context, entityType model.ArtEntity, en
 		}
 		img = i
 	}
+	front := role == model.ArtRoleFront
 	return s.writeTx(ctx, func(tx *sql.Tx) error {
 		entityID, err := artEntityIDTx(ctx, tx, entityType, entityPID, op)
 		if err != nil {
 			return err
 		}
+		if front && !force {
+			locked, err := artLockedTx(ctx, tx, entityType, entityID)
+			if err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+			if locked {
+				return waxerr.New(waxerr.CodeLocked, op, "art is locked (use force to override)")
+			}
+		}
 		if err := setEntityArtRoleTx(ctx, tx, string(entityType), entityID, string(role), img); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		if front {
+			if err := setArtLockTx(ctx, tx, entityType, entityID, lock); err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
 		}
 		// A track/episode entity is a playable_item; emit an item delta for it, else an
 		// entity delta so a consumer re-resolves the (now durable) cover.
@@ -382,9 +406,17 @@ func (s *Store) SetEntityArt(ctx context.Context, entityType model.ArtEntity, en
 	})
 }
 
-// setEntityArtRoleTx replaces one (entity, role) art mapping, storing the source and
-// leaving the entity's other roles intact. A nil image clears the role.
+// setEntityArtRoleTx replaces one (entity, role) art mapping, storing the source, its
+// provenance, and leaving the entity's other roles intact. A nil image clears the role.
+// Being the single art_map writer, it is also where an unstamped image is refused
+// rather than stored. It replaces the row unconditionally, so a deliberate set always
+// re-attributes; the automatic ingests come through attachEntityArtTxChanged, which
+// re-points only on a differing hash.
 func setEntityArtRoleTx(ctx context.Context, tx *sql.Tx, entityType string, entityID int64, role string, img *model.ArtImage) error {
+	if img != nil && !img.Source.Valid() {
+		return waxerr.New(waxerr.CodeInvalid, "store.setEntityArtRole",
+			"art image has no known provenance source ("+string(img.Source)+"): "+entityType+" "+role)
+	}
 	if _, err := tx.ExecContext(ctx,
 		"DELETE FROM art_map WHERE entity_type=? AND entity_id=? AND role=?", entityType, entityID, role); err != nil {
 		return err
@@ -395,17 +427,24 @@ func setEntityArtRoleTx(ctx context.Context, tx *sql.Tx, entityType string, enti
 	if err := insertArtSourceTx(ctx, tx, img); err != nil {
 		return err
 	}
+	// A plain INSERT, not OR IGNORE: the DELETE above already removed the only primary
+	// key this can collide with, so the IGNORE has nothing left to absorb except a
+	// genuine failure (a missing art_source under foreign_keys=ON, a rejected value).
+	// Swallowing one of those would delete the old mapping and store no new one, and
+	// report success.
 	_, err := tx.ExecContext(ctx,
-		`INSERT OR IGNORE INTO art_map(entity_type, entity_id, source_hash, role)
-		 VALUES (?,?,?,?)`, entityType, entityID, img.Hash, role)
+		`INSERT INTO art_map(entity_type, entity_id, source_hash, role, source, provider, source_url, updated_at)
+		 VALUES (?,?,?,?,?,?,?,?)`,
+		entityType, entityID, img.Hash, role, string(img.Source), img.Provider, img.SourceURL, nowNS())
 	return err
 }
 
 // probeArtImage builds a storable art image from raw bytes: its content hash always,
 // and its format/dimensions when the bytes decode (or its magic-sniffed format for an
 // exotic AVIF/HEIC cover). Undecodable bytes with no recognizable magic are rejected.
+// Its only callers are the two curation set paths, so the image is stamped "user".
 func probeArtImage(raw []byte) (*model.ArtImage, error) {
-	img := &model.ArtImage{Data: raw, Hash: art.Hash(raw)}
+	img := &model.ArtImage{Data: raw, Hash: art.Hash(raw), Source: model.SourceUser}
 	format, w, h, err := art.Probe(raw)
 	if err != nil {
 		if f, ok := art.SniffExotic(raw); ok {
@@ -431,6 +470,39 @@ func setCurationLockTx(ctx context.Context, tx *sql.Tx, itemID int64, field stri
 	_, err := tx.ExecContext(ctx,
 		"DELETE FROM field_provenance WHERE item_id=? AND field=? AND (value IS NULL OR value='')", itemID, field)
 	return err
+}
+
+// artLockIsItemScoped reports whether an art entity's "art" lock lives in the
+// item-scoped field_provenance table rather than in entity_curation. It exists because
+// the lock has to sit where the writer that must respect it already looks, and the two
+// art writers look in different places: a track or book item's cover is re-derived by
+// the scan through attachArtRespectingLockTx, which reads field_provenance, while every
+// other entity's cover is written by enrichment or a feed sync, which read
+// entity_curation.
+//
+// An episode is deliberately not item-scoped even though it is a playable_item: "art"
+// is not a curatable field for the episode kind (staticCurationFieldKinds), so a
+// field_provenance row for it would be the junk row that whitelist exists to prevent.
+// Its lock lives in entity_curation and AttachEpisodeFile consults it there.
+func artLockIsItemScoped(entityType model.ArtEntity) bool {
+	return entityType == model.ArtTrack
+}
+
+// artLockedTx reads an art entity's front-cover lock from whichever table governs it.
+func artLockedTx(ctx context.Context, q queryer, entityType model.ArtEntity, entityID int64) (bool, error) {
+	if artLockIsItemScoped(entityType) {
+		return fieldLockedTx(ctx, q, entityID, "art")
+	}
+	return entityFieldLockedTx(ctx, q, string(entityType), entityID, "art")
+}
+
+// setArtLockTx records an art entity's front-cover lock in whichever table governs it,
+// dropping a pure-lock row on unlock so both tables stay sparse.
+func setArtLockTx(ctx context.Context, tx *sql.Tx, entityType model.ArtEntity, entityID int64, lock bool) error {
+	if artLockIsItemScoped(entityType) {
+		return setCurationLockTx(ctx, tx, entityID, "art", lock)
+	}
+	return setEntityCurationLockTx(ctx, tx, string(entityType), entityID, "art", lock)
 }
 
 // artEntityIDTx resolves an art entity's pid to the internal id its art_map rows use:

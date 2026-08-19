@@ -53,7 +53,7 @@ func (s *Store) SetItemCredits(ctx context.Context, itemPID model.PID, role mode
 	if !role.Valid() {
 		return nil, waxerr.New(waxerr.CodeInvalid, op, "unknown contributor role: "+string(role))
 	}
-	if !source.Valid() {
+	if !source.ValidForField() {
 		return nil, waxerr.New(waxerr.CodeInvalid, op, "invalid provenance source: "+string(source))
 	}
 	// Trim and drop empties, preserving order, so a blank entry never resolves to a

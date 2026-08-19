@@ -78,7 +78,7 @@ func (s *Store) EditEntityFields(ctx context.Context, entityType model.MergeEnti
 	if len(edits) == 0 {
 		return waxerr.New(waxerr.CodeInvalid, op, "no fields to edit")
 	}
-	if !source.Valid() {
+	if !source.ValidForField() {
 		return waxerr.New(waxerr.CodeInvalid, op, "invalid provenance source: "+string(source))
 	}
 	// Validate every field name and value up front so a bad edit is rejected before any
@@ -276,12 +276,32 @@ func upsertEntityCurationTx(ctx context.Context, tx *sql.Tx, entityType string, 
 	return err
 }
 
+// setEntityCurationLockTx upserts the lock bit on an entity's curation field (source
+// "user"), or drops a pure-lock row when unlocking, keeping the table sparse. It is
+// the entity-scoped twin of setCurationLockTx, for the artifact fields that have no
+// scalar value of their own to carry ("art").
+func setEntityCurationLockTx(ctx context.Context, tx *sql.Tx, entityType string, entityID int64, field string, lock bool) error {
+	if lock {
+		_, err := tx.ExecContext(ctx, `INSERT INTO entity_curation(entity_type, entity_id, field, source, locked, updated_at)
+			VALUES (?,?,?,?,1,?)
+			ON CONFLICT(entity_type, entity_id, field) DO UPDATE SET
+				source=excluded.source, locked=1, updated_at=excluded.updated_at`,
+			entityType, entityID, field, string(model.SourceUser), nowNS())
+		return err
+	}
+	_, err := tx.ExecContext(ctx,
+		"DELETE FROM entity_curation WHERE entity_type=? AND entity_id=? AND field=? AND (value IS NULL OR value='')",
+		entityType, entityID, field)
+	return err
+}
+
 // entityFieldLockedTx reports whether an entity field is locked in entity_curation. A
 // missing row means unlocked. It is the guard enrichment calls before overwriting a
-// shared entity field.
-func entityFieldLockedTx(ctx context.Context, tx *sql.Tx, entityType string, entityID int64, field string) (bool, error) {
+// shared entity field. It takes a queryer so the ArtRoles read can share it with the
+// in-transaction writers.
+func entityFieldLockedTx(ctx context.Context, q queryer, entityType string, entityID int64, field string) (bool, error) {
 	var locked int
-	err := tx.QueryRowContext(ctx,
+	err := q.QueryRowContext(ctx,
 		"SELECT locked FROM entity_curation WHERE entity_type=? AND entity_id=? AND field=?",
 		entityType, entityID, field).Scan(&locked)
 	if errors.Is(err, sql.ErrNoRows) {

@@ -817,7 +817,7 @@ func scanSidecars(audioPath string, embedded *model.Lyrics, cache *artCache) (*m
 			if data, err := os.ReadFile(lrcPath); err == nil {
 				synced, dropped := meta.ParseLRC(string(data))
 				if len(synced) > 0 {
-					ly := &model.Lyrics{Source: "lrc", Synced: synced}
+					ly := &model.Lyrics{Source: model.SourceSidecar, Synced: synced}
 					if embedded != nil {
 						ly.Unsynced = embedded.Unsynced
 					}
@@ -1292,7 +1292,9 @@ func coverFilesByLower(dir string) map[string]string {
 
 // findDirCover returns the first recognized cover image in dir (case-insensitive,
 // in CoverArtNames priority order), finalized, plus its full path, or (nil, "")
-// when there is none.
+// when there is none. The image is stamped "sidecar": it came off a companion file
+// beside the audio, not out of the tags. Its path is not carried as a source URL;
+// the on-disk location is recorded as the AuxCover observation instead.
 func findDirCover(dir string) (*model.ArtImage, string) {
 	byLower := coverFilesByLower(dir)
 	for _, cand := range model.CoverArtNames {
@@ -1305,7 +1307,7 @@ func findDirCover(dir string) (*model.ArtImage, string) {
 		if err != nil {
 			continue
 		}
-		img := &model.ArtImage{Data: data}
+		img := &model.ArtImage{Data: data, Source: model.SourceSidecar}
 		if finalizeArt(img) {
 			return img, full
 		}

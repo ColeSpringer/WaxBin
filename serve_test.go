@@ -451,7 +451,7 @@ func TestServeProxiedPlaylistArt(t *testing.T) {
 	cover := coverPNG(t)
 	// Write-back is on to prove a playlist has no on-disk fan-out to fail at: there is
 	// no file behind a playlist, so the flag is a clean no-op rather than an error.
-	res, err := c.SetEntityArt(ctx, model.ArtPlaylist, pid, model.ArtRoleFront, cover, true)
+	res, err := c.SetEntityArt(ctx, model.ArtPlaylist, pid, model.ArtRoleFront, cover, false, false, true)
 	if err != nil {
 		t.Fatalf("proxied playlist art: %v", err)
 	}

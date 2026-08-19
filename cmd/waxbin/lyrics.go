@@ -16,8 +16,8 @@ func newLyricsCmd(g *globals) *cobra.Command {
 		Use:   "lyrics PID",
 		Short: "Show an item's structured lyrics",
 		Long: "Prints an item's lyrics: timed (synced) lines when present, otherwise the " +
-			"unsynchronized text. Lyrics come from a sibling .lrc sidecar or embedded tags, " +
-			"captured at scan time.",
+			"unsynchronized text, under a line naming where they came from (tag|sidecar|" +
+			"user|enrichment, with the provider for a fetched lyric).",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			lib, _, err := g.openRead(cmd)
@@ -33,6 +33,10 @@ func newLyricsCmd(g *globals) *cobra.Command {
 			if g.jsonOut {
 				return printJSON(cmd, toLyricsView(ly))
 			}
+			// stdout carries the lyric text alone: `waxbin lyrics A > song.lrc` feeds
+			// `lyrics set B --file song.lrc`, and a header line there would be stored as
+			// B's first line of unsynchronized text. --json carries it in the payload.
+			fmt.Fprintln(errOut(cmd), "source: "+attribution(ly.Source, ly.Provider, ""))
 			if len(ly.Synced) > 0 {
 				for _, l := range ly.Synced {
 					fmt.Fprintf(out(cmd), "[%s] %s\n", fmtLyricTime(l.TimeMS), l.Text)

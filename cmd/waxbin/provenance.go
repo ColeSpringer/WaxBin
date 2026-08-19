@@ -64,18 +64,20 @@ func newProvenanceCmd(g *globals) *cobra.Command {
 }
 
 type provRow struct {
-	Field    string `json:"field"`
-	Source   string `json:"source"`
-	Locked   bool   `json:"locked"`
-	Value    string `json:"value,omitempty"`
-	Provider string `json:"provider,omitempty"`
-	Updated  int64  `json:"updatedAt,string"` // unix ns; a string, see playStateView
+	Field     string `json:"field"`
+	Source    string `json:"source"`
+	Locked    bool   `json:"locked"`
+	Value     string `json:"value,omitempty"`
+	Provider  string `json:"provider,omitempty"`
+	SourceURL string `json:"sourceUrl,omitempty"`
+	Updated   int64  `json:"updatedAt,string"` // unix ns; a string, see playStateView
 }
 
-// reportProvenance prints an item's provenance rows. An item with no curated or
-// locked fields reports that every field is plain tag-sourced. It reads through a
-// provenanceReader, so it works with a directly-opened Library or a proxied
-// mutator alike.
+// reportProvenance prints an item's provenance rows, including the "art" row the
+// store overlays from the item's own cover. An item with no curated or locked fields
+// and no cover reports that every field is plain tag-sourced. It reads through a
+// provenanceReader, so it works with a directly-opened Library or a proxied mutator
+// alike.
 func reportProvenance(cmd *cobra.Command, g *globals, lib provenanceReader, pid model.PID) error {
 	rows, err := lib.Provenance(ctx(cmd), pid)
 	if err != nil {
@@ -84,7 +86,10 @@ func reportProvenance(cmd *cobra.Command, g *globals, lib provenanceReader, pid 
 	if g.jsonOut {
 		out := make([]provRow, 0, len(rows))
 		for _, r := range rows {
-			out = append(out, provRow{r.Field, string(r.Source), r.Locked, r.Value, r.Provider, r.UpdatedAt})
+			out = append(out, provRow{
+				Field: r.Field, Source: string(r.Source), Locked: r.Locked,
+				Value: r.Value, Provider: r.Provider, SourceURL: r.SourceURL, Updated: r.UpdatedAt,
+			})
 		}
 		return printJSON(cmd, struct {
 			PID  model.PID `json:"pid"`
@@ -93,7 +98,7 @@ func reportProvenance(cmd *cobra.Command, g *globals, lib provenanceReader, pid 
 	}
 	w := out(cmd)
 	if len(rows) == 0 {
-		fmt.Fprintf(w, "%s: all fields tag-sourced, unlocked\n", pid)
+		fmt.Fprintf(w, "%s: all fields tag-sourced, unlocked, no cover of its own\n", pid)
 		return nil
 	}
 	for _, r := range rows {
@@ -101,10 +106,11 @@ func reportProvenance(cmd *cobra.Command, g *globals, lib provenanceReader, pid 
 		if r.Locked {
 			lock = " [locked]"
 		}
+		src := attribution(r.Source, r.Provider, r.SourceURL)
 		if r.Value != "" {
-			fmt.Fprintf(w, "%-12s %s%s = %q\n", r.Field, r.Source, lock, r.Value)
+			fmt.Fprintf(w, "%-12s %s%s = %q\n", r.Field, src, lock, r.Value)
 		} else {
-			fmt.Fprintf(w, "%-12s %s%s\n", r.Field, r.Source, lock)
+			fmt.Fprintf(w, "%-12s %s%s\n", r.Field, src, lock)
 		}
 	}
 	return nil

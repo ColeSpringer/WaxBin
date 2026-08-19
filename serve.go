@@ -221,7 +221,7 @@ func (l *Library) proxyHandlers() map[string]proxy.Handler {
 			if !ok {
 				return nil, waxerr.New(waxerr.CodeInvalid, "serve.set_entity_art", "unknown art role: "+p.Role)
 			}
-			artErr := l.SetEntityArt(ctx, model.ArtEntity(p.EntityType), model.PID(p.EntityPID), role, p.Data, p.WriteBack)
+			artErr := l.SetEntityArt(ctx, model.ArtEntity(p.EntityType), model.PID(p.EntityPID), role, p.Data, p.Lock, p.Force, p.WriteBack)
 			var wbErr *WriteBackError
 			if errors.As(artErr, &wbErr) {
 				return proxy.SetEntityArtResult{WriteBackFailures: toProxyFailures(wbErr.Failures)}, nil

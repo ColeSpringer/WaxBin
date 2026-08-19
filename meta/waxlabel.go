@@ -563,14 +563,14 @@ func lyricsFromDoc(doc *waxlabel.Document, fields tag.Tags) *model.Lyrics {
 	if len(synced) == 0 && unsynced == "" {
 		return nil
 	}
-	return &model.Lyrics{Source: "embedded", Synced: synced, Unsynced: unsynced}
+	return &model.Lyrics{Source: model.SourceTag, Synced: synced, Unsynced: unsynced}
 }
 
 // coverFromDoc extracts the embedded front-cover image from a Document: it prefers
 // an explicit front-cover picture and otherwise takes the first picture. It returns
 // the raw bytes plus a format derived from the picture MIME; the scanner finalizes
-// the content hash and dimensions. It returns nil when the file embeds no usable
-// picture.
+// the content hash and dimensions. The image is stamped "tag": it came out of the
+// file's own picture frames. It returns nil when the file embeds no usable picture.
 func coverFromDoc(doc *waxlabel.Document) *model.ArtImage {
 	pics := doc.Pictures()
 	// Prefer a non-empty front cover; otherwise the first picture with bytes. A
@@ -593,7 +593,7 @@ func coverFromDoc(doc *waxlabel.Document) *model.ArtImage {
 	if best == nil {
 		return nil
 	}
-	return &model.ArtImage{Data: best.Data, Format: formatFromMIME(best.MIME)}
+	return &model.ArtImage{Data: best.Data, Format: formatFromMIME(best.MIME), Source: model.SourceTag}
 }
 
 // formatFromMIME maps an image MIME type to WaxBin's short format token, falling

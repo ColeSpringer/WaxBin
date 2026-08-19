@@ -202,7 +202,7 @@ type RelocateInput struct {
 // Sidecar-observation kinds recorded in file_aux_state. They are the file kinds the
 // scanner stat-compares beside an audio file to decide whether to re-parse a sidecar.
 const (
-	AuxLyrics   = "lrc"      // a sibling .lrc lyrics sidecar
+	AuxLyrics   = "lrc"      // a sibling .lrc lyrics sidecar; not a ProvenanceSource
 	AuxCover    = "cover"    // the directory cover image
 	AuxCue      = "cue"      // an external .cue / chapter sidecar
 	AuxChapters = "chapters" // a JSON/other external chapter file

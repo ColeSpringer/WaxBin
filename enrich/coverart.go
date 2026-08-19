@@ -24,22 +24,28 @@ const coverImageMaxBytes = 24 << 20 // 24 MiB
 
 var coverMIME = []string{"image/*", "application/octet-stream"}
 
-// frontCover returns the raw bytes of one entity's front cover, or CodeNotFound when it
-// has none. rung is the archive path segment: "release-group" for the group's cover, or
-// "release" for the specific pressing's own. The caller decodes and hashes the bytes.
-func (c *coverArt) frontCover(ctx context.Context, rung, mbid string) ([]byte, error) {
+// frontCover returns the raw bytes of one entity's front cover and the URL they were
+// requested from, or CodeNotFound when it has none. rung is the archive path segment:
+// "release-group" for the group's cover, or "release" for the specific pressing's own.
+// The caller decodes and hashes the bytes.
+//
+// The returned URL is the archive request, not the archive.org object netsafe followed
+// the redirect to. The request URL is stable and names the entity, so it stays a useful
+// citation; the redirect target is an implementation detail of where the file sits today.
+func (c *coverArt) frontCover(ctx context.Context, rung, mbid string) ([]byte, string, error) {
 	if mbid == "" {
-		return nil, waxerr.New(waxerr.CodeNotFound, "enrich.coverart", "no mbid")
+		return nil, "", waxerr.New(waxerr.CodeNotFound, "enrich.coverart", "no mbid")
 	}
+	reqURL := c.baseURL + "/" + rung + "/" + url.PathEscape(mbid) + "/front"
 	resp, err := c.client.Do(ctx, netsafe.Request{
-		URL:        c.baseURL + "/" + rung + "/" + url.PathEscape(mbid) + "/front",
+		URL:        reqURL,
 		AcceptMIME: coverMIME,
 		MaxBytes:   coverImageMaxBytes,
 	})
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
-	return resp.Body, nil
+	return resp.Body, reqURL, nil
 }
 
 // caaProvider is the Cover Art Archive as a CapCover Provider. It keys on a release
@@ -68,14 +74,16 @@ func (p *caaProvider) Enrich(ctx context.Context, req Request) (*Candidate, erro
 	if req.MBID == "" {
 		return nil, nil
 	}
-	data, err := p.caa.frontCover(ctx, rung, req.MBID)
+	data, srcURL, err := p.caa.frontCover(ctx, rung, req.MBID)
 	if err != nil {
 		if waxerr.Is(err, waxerr.CodeNotFound) {
 			return nil, nil // no cover at this rung
 		}
 		return nil, err // transient: the Service logs and skips
 	}
-	img := &model.ArtImage{Data: data, Hash: art.Hash(data)}
+	// gatherCover stamps Source and Provider on the winner; the URL is the provider's
+	// to report, since only it knows where it fetched.
+	img := &model.ArtImage{Data: data, Hash: art.Hash(data), SourceURL: srcURL}
 	format, w, h, err := art.Probe(data)
 	if err != nil {
 		// An ISOBMFF cover (AVIF/HEIC) has no pure-Go decoder, so it probes as a failure

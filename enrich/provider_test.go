@@ -219,8 +219,8 @@ func TestLRCLIBLyrics(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LyricsByItem: %v", err)
 	}
-	if ly.Source != "lrclib" {
-		t.Errorf("lyrics source = %q, want lrclib", ly.Source)
+	if ly.Source != model.SourceEnrichment || ly.Provider != "lrclib" {
+		t.Errorf("lyrics attribution = %q/%q, want enrichment/lrclib", ly.Source, ly.Provider)
 	}
 	if len(ly.Synced) != 2 || ly.Synced[0].TimeMS != 10000 || ly.Synced[1].TimeMS != 12500 {
 		t.Errorf("synced lines = %+v, want two at 10000/12500 ms", ly.Synced)
@@ -283,7 +283,7 @@ func TestLyricsFillWhenEmpty(t *testing.T) {
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	item := seedTrackWithLyrics(t, st, lib.ID, &model.Lyrics{
-		Source: "lrc", Synced: []model.SyncedLine{{TimeMS: 0, Text: "existing"}},
+		Source: model.SourceSidecar, Synced: []model.SyncedLine{{TimeMS: 0, Text: "existing"}},
 	})
 
 	mb := mbMockGenres(t, `[]`)
@@ -304,7 +304,7 @@ func TestLyricsFillWhenEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LyricsByItem: %v", err)
 	}
-	if ly.Source != "lrc" || len(ly.Synced) != 1 || ly.Synced[0].Text != "existing" {
+	if ly.Source != model.SourceSidecar || len(ly.Synced) != 1 || ly.Synced[0].Text != "existing" {
 		t.Errorf("lyrics were overwritten: %+v, want the original sidecar copy", ly)
 	}
 	db := roDB(t, dbPath)

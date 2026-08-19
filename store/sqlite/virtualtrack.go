@@ -141,8 +141,10 @@ func (s *Store) PutScannedVirtualTracks(ctx context.Context, in model.PutScanned
 			}
 
 			// The rip's cover maps onto every virtual track (idempotent), so each browses
-			// with its album art.
-			if _, err := attachArtTxChanged(ctx, tx, itemID, in.CoverArt); err != nil {
+			// with its album art. It respects a locked cover like the whole-file scan
+			// paths do (catalog.go, book.go), so re-reading the .cue does not undo a
+			// chosen cover on one of its tracks.
+			if _, err := attachArtRespectingLockTx(ctx, tx, itemID, in.CoverArt, in.PreserveLocks); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 			// Origin provenance from the file's tags, recorded per track when absent.

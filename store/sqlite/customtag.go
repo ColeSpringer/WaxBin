@@ -35,7 +35,7 @@ func (s *Store) SetItemTag(ctx context.Context, itemPID model.PID, key string, v
 		return "", 0, waxerr.New(waxerr.CodeInvalid, op,
 			"tag key "+canon+" is reserved; set it through the scalar, credit, or entity edit API")
 	}
-	if !source.Valid() {
+	if !source.ValidForField() {
 		return "", 0, waxerr.New(waxerr.CodeInvalid, op, "invalid provenance source: "+string(source))
 	}
 	// Drop values that are empty after trimming surrounding whitespace, preserving order.

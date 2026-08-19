@@ -12,12 +12,16 @@ type SyncedLine struct {
 // Lyrics is an item's structured lyrics: timed (synced) lines and/or a plain
 // unsynchronized block. WaxBin parses a sibling .lrc sidecar directly and reads
 // embedded USLT/SYLT through WaxLabel; the catalog row is authoritative for reads.
-// Source records which producer the stored copy came from.
+// Source records which producer the stored copy came from, in the same vocabulary
+// art uses, so a consumer can draw one mark under both.
 type Lyrics struct {
-	ItemPID  PID
-	Source   string       // "lrc" (sidecar) | "embedded"
-	Synced   []SyncedLine // timed lines, ordered by TimeMS; nil when none
-	Unsynced string       // plain unsynchronized text; "" when none
+	ItemPID PID
+	// tag (embedded USLT/SYLT) | sidecar (an .lrc beside the audio) | user | enrichment.
+	Source    ProvenanceSource
+	Provider  string       // lyrics provider id, when Source is enrichment
+	Synced    []SyncedLine // timed lines, ordered by TimeMS; nil when none
+	Unsynced  string       // plain unsynchronized text; "" when none
+	UpdatedAt int64        // unix nanoseconds
 }
 
 // HasContent reports whether the lyrics carry any synced lines or unsynced text.

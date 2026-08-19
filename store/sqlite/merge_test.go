@@ -286,7 +286,7 @@ func seedArt(t *testing.T, st *Store, hash, entityType string, entityID int64) {
 		t.Fatal(err)
 	}
 	if _, err := st.write.ExecContext(ctx,
-		"INSERT INTO art_map(entity_type, entity_id, source_hash, role) VALUES (?,?,?,'front')",
+		"INSERT INTO art_map(entity_type, entity_id, source_hash, role, source, updated_at) VALUES (?,?,?,'front','tag',1)",
 		entityType, entityID, hash); err != nil {
 		t.Fatal(err)
 	}
@@ -368,7 +368,7 @@ func seedArtRole(t *testing.T, st *Store, hash, entityType string, entityID int6
 		t.Fatal(err)
 	}
 	if _, err := st.write.ExecContext(ctx,
-		"INSERT INTO art_map(entity_type, entity_id, source_hash, role) VALUES (?,?,?,?)",
+		"INSERT INTO art_map(entity_type, entity_id, source_hash, role, source, updated_at) VALUES (?,?,?,?,'tag',1)",
 		entityType, entityID, hash, role); err != nil {
 		t.Fatal(err)
 	}

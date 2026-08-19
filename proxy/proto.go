@@ -56,7 +56,15 @@ import (
 // method without a bump is also precedent (put_transcript, fetch_transcript,
 // add_root), and is the choice when keeping the other proxied methods working across a
 // version boundary matters more.
-const ProtocolVersion = 9
+//
+// Version 10 added artwork provenance: model.FieldProvenance gained SourceURL, the
+// provenance result gained the item's own cover as an "art" row, and
+// SetEntityArtParams gained Lock/Force. The params addition alone forces the bump by
+// the rule above, and the read addition follows version 6's precedent: the version
+// gate rejects every frame, so a WaxDeck built against 9 falls back cleanly instead of
+// rendering the art row as an editable scalar field, and it has to rebuild anyway to
+// draw the mark.
+const ProtocolVersion = 10
 
 // Method names for the proxied operations: the fast request/response catalog
 // mutations, the reads a mutating command needs for its confirmation output, the
@@ -285,11 +293,15 @@ type SetItemArtResult struct {
 }
 
 // SetEntityArtParams is the set_entity_art request payload (album/artist/... covers).
+// Lock and Force govern the entity's "art" curation lock, and apply to the front role
+// alone, the same way SetItemArtParams' do for an item.
 type SetEntityArtParams struct {
 	EntityType string `json:"entityType"`
 	EntityPID  string `json:"entityPid"`
 	Role       string `json:"role"`
 	Data       []byte `json:"data,omitempty"`
+	Lock       bool   `json:"lock"`
+	Force      bool   `json:"force"`
 	WriteBack  bool   `json:"writeBack"`
 }
 

@@ -488,7 +488,9 @@ func (s *Service) Remove(ctx context.Context, pid model.PID) error {
 }
 
 // fetchImage downloads and decodes an image for the art store, best effort: a
-// failure logs and returns nil so a missing/oversized image never blocks a sync.
+// failure logs and returns nil so a missing/oversized image never blocks a sync. It
+// is the one constructor behind the show image, the episode image, and the manual
+// import, so stamping "feed" and the fetched URL here covers all three.
 func (s *Service) fetchImage(ctx context.Context, url string) *model.ArtImage {
 	if strings.TrimSpace(url) == "" {
 		return nil
@@ -498,7 +500,7 @@ func (s *Service) fetchImage(ctx context.Context, url string) *model.ArtImage {
 		s.log.Debug("podcast image fetch failed", "url", url, "err", err)
 		return nil
 	}
-	img := &model.ArtImage{Data: resp.Body}
+	img := &model.ArtImage{Data: resp.Body, Source: model.SourceFeed, SourceURL: url}
 	img.Hash = art.Hash(resp.Body)
 	format, w, h, err := art.Probe(resp.Body)
 	if err != nil {

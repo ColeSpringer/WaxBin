@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"strconv"
 
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/waxerr"
@@ -30,8 +31,9 @@ func newArtCmd(g *globals) *cobra.Command {
 			"returns a thumbnail scaled to fit a square box with that " +
 			"maximum side. Writes " +
 			"the image bytes to --out (or stdout); with --json, reports metadata instead, " +
-			"including the chain level that answered and whether an album's cover was derived " +
-			"from a member track.",
+			"including the chain level that answered, whether an album's cover was derived " +
+			"from a member track, and where the picture came from (tag|sidecar|user|" +
+			"enrichment|feed) with its provider and fetch URL.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			et := model.ArtEntity(entType)
@@ -57,10 +59,14 @@ func newArtCmd(g *globals) *cobra.Command {
 			}
 
 			if g.jsonOut {
+				// A map view marshals an int64 as a bare number, so the timestamp is
+				// formatted to match the string-encoded ns every other view emits.
 				return printJSON(cmd, map[string]any{
 					"format": blob.Format, "width": blob.Width, "height": blob.Height,
 					"bytes": len(blob.Bytes), "sourceHash": blob.SourceHash, "thumbnail": blob.Thumbnail,
 					"level": string(blob.Level), "derived": blob.Derived,
+					"source": string(blob.Source), "provider": blob.Provider,
+					"sourceUrl": blob.SourceURL, "updatedAt": strconv.FormatInt(blob.UpdatedAt, 10),
 				})
 			}
 			if outPath != "" {
@@ -102,9 +108,9 @@ func newArtSetCmd(g *globals) *cobra.Command {
 		Long: "Sets artwork for a track/book item, or for an album/artist/release_group/genre/" +
 			"podcast/playlist entity (--type), in one role (--role; front is the default, and " +
 			"back|disc|booklet|background hold a release's auxiliary images). The image bytes come " +
-			"from --file; --clear removes only the named role. An item front cover locks the " +
-			"item's art field by default so a scan does not re-derive it; the other roles have no " +
-			"scan producer and take no lock. " +
+			"from --file; --clear removes only the named role. A front cover locks the art " +
+			"field by default so a scan, an enrichment pass, or a feed sync does not replace " +
+			"it; the other roles have no automatic producer and take no lock. " +
 			"--write-back also embeds a front cover into the backing file(s): a track into its " +
 			"file, a book into every part, an album across every member track's file. Only the " +
 			"front cover has an embedded representation, so --write-back with another role is " +
@@ -143,7 +149,7 @@ func newArtSetCmd(g *globals) *cobra.Command {
 			if et == model.ArtTrack {
 				err = m.SetItemArt(ctx(cmd), pid, r, raw, !noLock, force, writeBack)
 			} else {
-				err = m.SetEntityArt(ctx(cmd), et, pid, r, raw, writeBack)
+				err = m.SetEntityArt(ctx(cmd), et, pid, r, raw, !noLock, force, writeBack)
 			}
 			if err := surfaceWriteBack(cmd, err); err != nil {
 				return err
@@ -161,7 +167,7 @@ func newArtSetCmd(g *globals) *cobra.Command {
 	f.StringVar(&role, "role", "front", "art role: front|back|disc|booklet|background")
 	f.StringVar(&filePath, "file", "", "image file to set as this role's artwork")
 	f.BoolVar(&clear, "clear", false, "remove this role's artwork instead of setting it")
-	f.BoolVar(&noLock, "no-lock", false, "do not lock an item's art field (a front cover defaults to locked)")
+	f.BoolVar(&noLock, "no-lock", false, "do not lock the art field (a front cover defaults to locked)")
 	f.BoolVar(&force, "force", false, "override a locked art field")
 	f.BoolVar(&writeBack, "write-back", false, "also embed a front cover into the backing file(s) on disk")
 	return cmd

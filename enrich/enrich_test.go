@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"fmt"
 	"image"
 	"image/color"
 	"image/png"
@@ -592,5 +593,57 @@ func TestEnrichScopedRunSkipsEmptyPhases(t *testing.T) {
 	}
 	if n := scalarInt(t, db, "SELECT COUNT(*) FROM entity_enrichment WHERE entity_type='release_group'"); n != 0 {
 		t.Errorf("release-group markers = %d, want 0 (phase must be skipped)", n)
+	}
+}
+
+// TestCoverArtProvenanceRecordsProviderAndURL: a fetched release-group cover is stored
+// as enrichment art naming the provider and the archive request URL, not the redirect
+// target the client actually read the bytes from.
+func TestCoverArtProvenanceRecordsProviderAndURL(t *testing.T) {
+	ctx := context.Background()
+	st, dbPath, lib := openStore(t)
+	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
+
+	mb := newMBMock(t)
+	caa, _ := newCAAMock(t, pngBytes(t))
+	if _, err := newService(st, mb.server.URL, caa.URL).Run(ctx, enrich.RunOptions{}, nil); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	db := roDB(t, dbPath)
+	const q = `SELECT am.%s FROM art_map am JOIN release_group rg ON rg.id = am.entity_id
+		WHERE am.entity_type = 'release_group' AND am.role = 'front'`
+	if got := scalarStr(t, db, fmt.Sprintf(q, "source")); got != string(model.SourceEnrichment) {
+		t.Errorf("fetched cover source = %q, want enrichment", got)
+	}
+	if got := scalarStr(t, db, fmt.Sprintf(q, "provider")); got != "coverartarchive" {
+		t.Errorf("fetched cover provider = %q, want coverartarchive", got)
+	}
+	want := caa.URL + "/release-group/wywh-mbid/front"
+	if got := scalarStr(t, db, fmt.Sprintf(q, "source_url")); got != want {
+		t.Errorf("fetched cover source_url = %q, want the stable request URL %q", got, want)
+	}
+}
+
+// TestLockedCoverIsNotFetched: the store refuses to replace a locked cover, so the pass
+// must not spend a rate-limited Cover Art Archive request discovering that on every
+// forced run.
+func TestLockedCoverIsNotFetched(t *testing.T) {
+	ctx := context.Background()
+	st, dbPath, lib := openStore(t)
+	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
+
+	rgPID := scalarStr(t, roDB(t, dbPath), "SELECT pid FROM release_group WHERE title='Wish You Were Here'")
+	if err := st.SetEntityArt(ctx, model.ArtReleaseGroup, model.PID(rgPID), model.ArtRoleFront, pngBytes(t), true, false); err != nil {
+		t.Fatalf("SetEntityArt: %v", err)
+	}
+
+	mb := newMBMock(t)
+	caa, caaHits := newCAAMock(t, pngBytes(t))
+	if _, err := newService(st, mb.server.URL, caa.URL).Run(ctx, enrich.RunOptions{Force: true}, nil); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if *caaHits != 0 {
+		t.Errorf("CAA fetched %d times for a locked cover, want 0", *caaHits)
 	}
 }

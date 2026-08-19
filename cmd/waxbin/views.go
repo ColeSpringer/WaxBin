@@ -488,6 +488,8 @@ func playlistViews(pls []*model.Playlist, counts map[model.PID]int) []playlistVi
 // lyricsView is the JSON shape for an item's structured lyrics.
 type lyricsView struct {
 	Source   string           `json:"source"`
+	Provider string           `json:"provider,omitempty"`
+	Updated  int64            `json:"updatedAt,string"` // unix ns; a string, see playStateView
 	Synced   bool             `json:"synced"`
 	Lines    []syncedLineView `json:"lines,omitempty"`
 	Unsynced string           `json:"unsynced,omitempty"`
@@ -499,7 +501,8 @@ type syncedLineView struct {
 }
 
 func toLyricsView(ly *model.Lyrics) lyricsView {
-	v := lyricsView{Source: ly.Source, Synced: len(ly.Synced) > 0, Unsynced: ly.Unsynced}
+	v := lyricsView{Source: string(ly.Source), Provider: ly.Provider, Updated: ly.UpdatedAt,
+		Synced: len(ly.Synced) > 0, Unsynced: ly.Unsynced}
 	for _, l := range ly.Synced {
 		v.Lines = append(v.Lines, syncedLineView{MS: l.TimeMS, Text: l.Text})
 	}
@@ -657,4 +660,18 @@ func jobViews(jobs []*model.Job) []jobView {
 		})
 	}
 	return out
+}
+
+// attribution renders a provenance source for a human: the source alone, or the
+// source with the provider that supplied it and the URL it came from. It is shared by
+// the provenance table and the lyrics header so the two cannot drift.
+func attribution(source model.ProvenanceSource, provider, sourceURL string) string {
+	s := string(source)
+	if provider != "" {
+		s += " (" + provider + ")"
+	}
+	if sourceURL != "" {
+		s += " " + sourceURL
+	}
+	return s
 }

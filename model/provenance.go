@@ -2,20 +2,47 @@ package model
 
 import "strings"
 
-// ProvenanceSource records where a field's current value came from. The absence
-// of a field_provenance row means the value is plain tag-sourced and unlocked;
-// a row is written only for the non-default cases below.
+// ProvenanceSource records where a value came from. It is shared by two surfaces
+// with different value sets. On a scalar field (field_provenance, entity_curation)
+// the absence of a row means the value is plain tag-sourced and unlocked, so a row
+// is written only for the non-default cases; ValidForField is that surface's gate.
+// On an artifact (an art_map cover, a lyrics row) every row carries a source,
+// including the ordinary tag one, because the artifact exists whether or not it was
+// curated and a consumer wants to mark where the picture came from.
+//
+// The neighbouring SourceType constants in enums.go (SourceRSS, SourceYouTube,
+// SourceManual, SourceLocal) are a different type, describing how an item was acquired
+// rather than where a value came from.
 type ProvenanceSource string
 
 const (
-	SourceTag        ProvenanceSource = "tag"        // read from the file's tags (default; usually no row)
-	SourceUser       ProvenanceSource = "user"       // edited by a user
-	SourceEnrichment ProvenanceSource = "enrichment" // written by a metadata provider
-	SourceOrganize   ProvenanceSource = "organize"   // written by an organize tag write-back
+	// Scalar fields and artifacts both.
+	SourceTag        ProvenanceSource = "tag"        // read from the file's own tags (an APIC frame, an embedded USLT)
+	SourceUser       ProvenanceSource = "user"       // set through the curation surface
+	SourceEnrichment ProvenanceSource = "enrichment" // supplied by a metadata provider, named in Provider
+	// Scalar fields only.
+	SourceOrganize ProvenanceSource = "organize" // written by an organize tag write-back
+	// Artifacts only.
+	SourceSidecar ProvenanceSource = "sidecar" // read from a companion file beside the audio (cover.jpg, .lrc)
+	SourceFeed    ProvenanceSource = "feed"    // supplied by a podcast feed or its episode metadata
 )
 
-// Valid reports whether s is a known provenance source.
+// Valid reports whether s is a known provenance source, across both surfaces. It is
+// the gate the artifact surfaces (art, lyrics) use.
 func (s ProvenanceSource) Valid() bool {
+	switch s {
+	case SourceTag, SourceUser, SourceEnrichment, SourceOrganize, SourceSidecar, SourceFeed:
+		return true
+	default:
+		return false
+	}
+}
+
+// ValidForField reports whether s may be stored on a scalar field row. The artifact
+// values (sidecar, feed) are excluded: nothing produces a scalar field from a
+// cover.jpg or a feed image, so accepting one here would only mint the junk row
+// IsMetadataField exists to prevent.
+func (s ProvenanceSource) ValidForField() bool {
 	switch s {
 	case SourceTag, SourceUser, SourceEnrichment, SourceOrganize:
 		return true
@@ -149,7 +176,8 @@ type ItemFieldEdit struct {
 }
 
 // FieldProvenance is one provenance row: a field's source, lock state, the curated
-// value when a user set one, and the provider that supplied an enrichment value.
+// value when a user set one, the provider that supplied an enrichment value, and the
+// URL it was fetched from where one exists.
 type FieldProvenance struct {
 	ItemPID   PID
 	Field     string
@@ -157,5 +185,6 @@ type FieldProvenance struct {
 	Locked    bool
 	Value     string
 	Provider  string // enrichment provider id (empty for tag/user/organize rows)
+	SourceURL string // fetch URL, on the art row a fetched cover fills (empty otherwise)
 	UpdatedAt int64  // unix nanoseconds
 }

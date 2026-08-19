@@ -34,7 +34,7 @@ func TestLyricsRoundTripAndClear(t *testing.T) {
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	pid := putWithLyrics(t, st, lib.ID, "c1", &model.Lyrics{
-		Source:   "lrc",
+		Source:   model.SourceSidecar,
 		Synced:   []model.SyncedLine{{TimeMS: 0, Text: "Hello"}, {TimeMS: 1500, Text: "World"}},
 		Unsynced: "Hello\nWorld",
 	})
@@ -43,7 +43,7 @@ func TestLyricsRoundTripAndClear(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read lyrics: %v", err)
 	}
-	if got.Source != "lrc" || len(got.Synced) != 2 {
+	if got.Source != model.SourceSidecar || len(got.Synced) != 2 {
 		t.Fatalf("lyrics = %+v, want source lrc + 2 synced lines", got)
 	}
 	if got.Synced[1].TimeMS != 1500 || got.Synced[1].Text != "World" {
@@ -76,7 +76,7 @@ func TestLyricsPickedUpWithoutAudioChange(t *testing.T) {
 	// Rescan the SAME audio bytes (content "c1" unchanged) but now a .lrc sidecar
 	// exists. The lyrics must be ingested even though the audio did not change.
 	pid2 := putWithLyrics(t, st, lib.ID, "c1", &model.Lyrics{
-		Source: "lrc", Synced: []model.SyncedLine{{TimeMS: 0, Text: "added later"}},
+		Source: model.SourceSidecar, Synced: []model.SyncedLine{{TimeMS: 0, Text: "added later"}},
 	})
 	if pid2 != pid {
 		t.Fatalf("expected the same item pid, got %s vs %s", pid2, pid)

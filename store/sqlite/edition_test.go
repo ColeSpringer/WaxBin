@@ -371,7 +371,7 @@ func TestDeclinedMBIDWriteTakesNoArt(t *testing.T) {
 	setEntityMBID(t, st, model.MergeAlbum, lockedPID, "", true)
 	setEntityMBID(t, st, model.MergeAlbum, holderPID, relTestOneMBID, false)
 
-	cover := &model.ArtImage{Data: []byte("cover-bytes"), Hash: "h-cover", Format: "png", Width: 4, Height: 4}
+	cover := &model.ArtImage{Data: []byte("cover-bytes"), Hash: "h-cover", Format: "png", Width: 4, Height: 4, Source: model.SourceEnrichment}
 	for _, tc := range []struct{ title, mbid string }{
 		{"Locked", relTestTwoMBID},
 		{"Taken", relTestOneMBID}, // already held by Holder
@@ -421,7 +421,7 @@ func TestReleaseCoverDoesNotOverwriteADerivedTrackCover(t *testing.T) {
 
 	if err := st.ApplyAlbumReleaseMatch(ctx, model.AlbumReleaseMatch{
 		AlbumID: id, PID: model.PID(pid), Matched: true, MBID: relTestOneMBID, Reason: "medium",
-		Art: &model.ArtImage{Data: []byte("provider-bytes"), Hash: "h-provider", Format: "png", Width: 4, Height: 4},
+		Art: &model.ArtImage{Data: []byte("provider-bytes"), Hash: "h-provider", Format: "png", Width: 4, Height: 4, Source: model.SourceEnrichment},
 	}); err != nil {
 		t.Fatalf("ApplyAlbumReleaseMatch: %v", err)
 	}
@@ -444,7 +444,7 @@ func TestReleaseCoverDoesNotOverwriteADerivedTrackCover(t *testing.T) {
 	barePID := scalarQueryStr(t, db, "SELECT pid FROM album WHERE title='Bare'")
 	if err := st.ApplyAlbumReleaseMatch(ctx, model.AlbumReleaseMatch{
 		AlbumID: bareID, PID: model.PID(barePID), Matched: true, MBID: relTestTwoMBID, Reason: "medium",
-		Art: &model.ArtImage{Data: []byte("provider-bytes"), Hash: "h-provider", Format: "png", Width: 4, Height: 4},
+		Art: &model.ArtImage{Data: []byte("provider-bytes"), Hash: "h-provider", Format: "png", Width: 4, Height: 4, Source: model.SourceEnrichment},
 	}); err != nil {
 		t.Fatalf("ApplyAlbumReleaseMatch(Bare): %v", err)
 	}
@@ -464,7 +464,7 @@ func TestReleaseCoverDoesNotOverwriteACuratedOne(t *testing.T) {
 
 	editionTrack(t, st, lib.ID, "ess-a", "Curated", 1, model.Track{Media: "CD"})
 	pid := model.PID(scalarQueryStr(t, db, "SELECT pid FROM album WHERE title='Curated'"))
-	if err := st.SetEntityArt(ctx, model.ArtAlbum, pid, model.ArtRoleFront, pngFixture()); err != nil {
+	if err := st.SetEntityArt(ctx, model.ArtAlbum, pid, model.ArtRoleFront, pngFixture(), false, false); err != nil {
 		t.Fatalf("SetEntityArt: %v", err)
 	}
 	before := scalarQueryStr(t, db, `SELECT am.source_hash FROM art_map am
@@ -474,7 +474,7 @@ func TestReleaseCoverDoesNotOverwriteACuratedOne(t *testing.T) {
 	id := albumIDByTitle(t, db, "Curated")
 	if err := st.ApplyAlbumReleaseMatch(ctx, model.AlbumReleaseMatch{
 		AlbumID: id, PID: pid, Matched: true, MBID: relTestOneMBID, Reason: "medium",
-		Art: &model.ArtImage{Data: []byte("provider-bytes"), Hash: "h-provider", Format: "png", Width: 4, Height: 4},
+		Art: &model.ArtImage{Data: []byte("provider-bytes"), Hash: "h-provider", Format: "png", Width: 4, Height: 4, Source: model.SourceEnrichment},
 	}); err != nil {
 		t.Fatalf("ApplyAlbumReleaseMatch: %v", err)
 	}
@@ -537,7 +537,7 @@ func TestUndoTakesTheMatchedCoverWithIt(t *testing.T) {
 	if err := st.ApplyAlbumReleaseMatch(ctx, model.AlbumReleaseMatch{
 		AlbumID: id, PID: model.PID(pid), Matched: true, MBID: relTestOneMBID,
 		Reason: "medium", Provider: "musicbrainz:edition",
-		Art: &model.ArtImage{Data: []byte("provider-bytes"), Hash: "h-provider", Format: "png", Width: 4, Height: 4},
+		Art: &model.ArtImage{Data: []byte("provider-bytes"), Hash: "h-provider", Format: "png", Width: 4, Height: 4, Source: model.SourceEnrichment},
 	}); err != nil {
 		t.Fatalf("ApplyAlbumReleaseMatch: %v", err)
 	}
@@ -577,7 +577,7 @@ func editionTrackWithCover(t *testing.T, st *sqlite.Store, libID int64, essence,
 			SortKey: model.SortKey("T-" + essence), IdentityKey: "essence:" + essence,
 		},
 		Track:    tr,
-		CoverArt: &model.ArtImage{Data: art, Hash: "h-embedded", Format: "png", Width: 2, Height: 2},
+		CoverArt: &model.ArtImage{Data: art, Hash: "h-embedded", Format: "png", Width: 2, Height: 2, Source: model.SourceTag},
 	})
 	if err != nil {
 		t.Fatalf("PutScannedTrack: %v", err)

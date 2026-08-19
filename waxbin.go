@@ -1203,8 +1203,11 @@ func (l *Library) Unlock(ctx context.Context, pid model.PID, fields ...string) e
 	return nil
 }
 
-// Provenance returns an item's field provenance. Only non-default fields have
-// rows, so a tag-only item returns an empty slice.
+// Provenance returns an item's field provenance: the non-default scalar fields, plus
+// an "art" row whenever the item carries a cover of its own, which the store overlays
+// from the cover's own attribution. A non-empty result therefore does not mean the item
+// was curated or locked; read Source and Locked per row. An item with no cover and no
+// curated or locked field returns an empty slice.
 func (l *Library) Provenance(ctx context.Context, pid model.PID) ([]model.FieldProvenance, error) {
 	return l.store.FieldProvenance(ctx, pid)
 }

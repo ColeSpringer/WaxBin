@@ -25,14 +25,19 @@ CREATE INDEX field_provenance_locked ON field_provenance(item_id) WHERE locked =
 -- override, an identifier) or a value otherwise needs protecting from an enrichment
 -- overwrite, so the table stays sparse. entity_type selects which table entity_id
 -- refers to, so there is no single FK (like art_map); a merge re-points the loser's
--- rows onto the survivor explicitly, with locked-wins. The lock is what guards the one
--- unconditional entity enrich write (release_group.type) and the user overrides. The
--- name is kept distinct from the item-scoped field_provenance so the two do not get
--- confused, since they sit close together.
+-- rows onto the survivor explicitly, with locked-wins. The lock is what guards the
+-- unconditional entity enrich writes (release_group.type, a fetched cover) and the
+-- user overrides. The name is kept distinct from the item-scoped field_provenance so
+-- the two do not get confused, since they sit close together.
+--
+-- The scalar fields only ever name the three editable entities, but the rows are
+-- polymorphic like art_map's, and the 'art' field can name any art entity type: a
+-- podcast, a playlist and a genre all hold a cover a user can choose and lock, and
+-- none of them is scalar-editable.
 CREATE TABLE entity_curation (
-  entity_type TEXT    NOT NULL,        -- artist|release_group|album
+  entity_type TEXT    NOT NULL,        -- artist|release_group|album, plus any art entity for 'art'
   entity_id   INTEGER NOT NULL,
-  field       TEXT    NOT NULL,        -- sort|mbid|type|barcode|label|catalog_number|media|country
+  field       TEXT    NOT NULL,        -- sort|mbid|type|barcode|label|catalog_number|media|country|art
   source      TEXT    NOT NULL,        -- user|enrichment
   locked      INTEGER NOT NULL DEFAULT 0,
   value       TEXT,                    -- the curated value, when set by a user edit
@@ -72,9 +77,17 @@ CREATE INDEX item_tag_key ON item_tag(key, value, item_id);
 -- scan time. The DB row is authoritative for reads; synced lines are stored as
 -- JSON [{ms,text}] in time order. A row exists only when the file carried some
 -- lyric content, so the table stays sparse.
+--
+-- source and provider are the art_map vocabulary, so a consumer draws one mark
+-- under a cover and a lyric alike. The column used to hold three vocabularies at
+-- once ('lrc' and 'embedded' from the scan, 'user' from a curation edit, and a
+-- provider id such as 'lrclib' from enrichment), which left no way to tell a
+-- provider id from a sidecar kind. There is no source_url: LRCLIB's /api/get is a
+-- query endpoint, not a stable page to cite, so there would be nothing to record.
 CREATE TABLE lyrics (
   item_id    INTEGER PRIMARY KEY REFERENCES playable_item(id) ON DELETE CASCADE,
-  source     TEXT    NOT NULL,           -- 'lrc' (sidecar) | 'embedded'
+  source     TEXT    NOT NULL,           -- tag (USLT/SYLT) | sidecar (.lrc) | user | enrichment
+  provider   TEXT    NOT NULL DEFAULT '',-- lyrics provider id, when source = enrichment
   synced     INTEGER NOT NULL DEFAULT 0, -- 1 when timed lines are present
   unsynced   TEXT,                       -- plain unsynchronized text (USLT)
   lines      TEXT,                       -- JSON [{"ms":N,"text":"..."}], time-ordered
@@ -102,14 +115,27 @@ CREATE TABLE art_source (
 -- playlist (a playlist has no ancestry to inherit from). Orphan rows left by an
 -- entity deletion are cleaned by the art GC, which then drops the
 -- now-unreferenced source images and (by cascade) their thumbnails.
+--
+-- The provenance columns live here rather than on art_source because that store is
+-- content-addressed: one JPEG both scraped from the Cover Art Archive and embedded in
+-- a file is a single row, backing a tag cover on one album and a fetched cover on
+-- another, and only the mapping knows which. provider is NOT NULL DEFAULT '' where
+-- field_provenance.provider is nullable because this table keeps no sparse-row
+-- contract. A sidecar cover's on-disk path is not recorded in source_url; it is the
+-- AuxCover observation in file_aux_state.
 CREATE TABLE art_map (
   entity_type TEXT    NOT NULL,                     -- track|album|release_group|artist|genre|episode|podcast|playlist
   entity_id   INTEGER NOT NULL,
   source_hash TEXT    NOT NULL REFERENCES art_source(hash) ON DELETE CASCADE,
   role        TEXT    NOT NULL DEFAULT 'front',     -- front|back|disc|booklet|background
+  source      TEXT    NOT NULL,                     -- tag|sidecar|user|enrichment|feed
+  provider    TEXT    NOT NULL DEFAULT '',          -- metadata provider id, when source = enrichment
+  source_url  TEXT    NOT NULL DEFAULT '',          -- fetch URL, for an enrichment or feed cover
+  updated_at  INTEGER NOT NULL,                     -- unix nanoseconds
   PRIMARY KEY (entity_type, entity_id, role)
 );
-CREATE INDEX art_map_source ON art_map(source_hash);
+-- Named for the column it indexes, so it is not read as an index on source.
+CREATE INDEX art_map_source_hash ON art_map(source_hash);
 
 -- Size-negotiated thumbnails generated on demand, keyed by (source hash, max
 -- dimension); derived data, reference-counted against art_source and

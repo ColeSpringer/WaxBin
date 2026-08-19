@@ -565,6 +565,8 @@ func refreshAllBookDurations(ctx context.Context, tx *sql.Tx) error {
 // authoritative over an external .cue, and a synthesized single chapter ranks below
 // a real source. One ordering serves both kinds because their source sets are
 // disjoint (books: embedded/cue/synthetic; episodes: podcast_url).
+// These literals are not model.ProvenanceSource: they name a derivation method, which
+// is what the ranking is over, so unifying the two vocabularies would break it.
 func chapterSourceRank(source string) int {
 	switch source {
 	case "user":

@@ -178,7 +178,7 @@ func seedAlbumTrackWithCover(t *testing.T, st *sqlite.Store, libID int64, essenc
 			SortKey: model.SortKey("Shine On"), IdentityKey: "essence:" + essence,
 		},
 		Track:    tr,
-		CoverArt: &model.ArtImage{Data: art, Hash: "h-embedded", Format: "png", Width: 4, Height: 4},
+		CoverArt: &model.ArtImage{Data: art, Hash: "h-embedded", Format: "png", Width: 4, Height: 4, Source: model.SourceTag},
 	})
 	if err != nil {
 		t.Fatalf("PutScannedTrack: %v", err)

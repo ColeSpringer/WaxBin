@@ -118,7 +118,7 @@ func normalizeEdits(edits map[string]string, op string) ([]string, map[string]st
 // orphan-GC pass removes it later, so the edit needs no in-transaction GC.
 func (s *Store) EditItemFields(ctx context.Context, itemPID model.PID, edits map[string]string, source model.ProvenanceSource, lock, force bool) error {
 	const op = "store.EditItemFields"
-	if !source.Valid() {
+	if !source.ValidForField() {
 		return waxerr.New(waxerr.CodeInvalid, op, "invalid provenance source: "+string(source))
 	}
 	// Validate every field name and normalize every value up front so a bad field
@@ -226,7 +226,7 @@ func (s *Store) EditManyFields(ctx context.Context, itemPIDs []model.PID, edits 
 	if len(itemPIDs) == 0 {
 		return res, waxerr.New(waxerr.CodeInvalid, op, "no items to edit")
 	}
-	if !source.Valid() {
+	if !source.ValidForField() {
 		return res, waxerr.New(waxerr.CodeInvalid, op, "invalid provenance source: "+string(source))
 	}
 	fields, norm, err := normalizeEdits(edits, op)
@@ -296,7 +296,7 @@ func (s *Store) EditItemsFields(ctx context.Context, edits []model.ItemFieldEdit
 	if len(edits) == 0 {
 		return res, waxerr.New(waxerr.CodeInvalid, op, "no items to edit")
 	}
-	if !source.Valid() {
+	if !source.ValidForField() {
 		return res, waxerr.New(waxerr.CodeInvalid, op, "invalid provenance source: "+string(source))
 	}
 	// Validate and normalize every entry before the transaction opens, so a bad

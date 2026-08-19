@@ -382,7 +382,7 @@ func repointGenre(ctx context.Context, tx *sql.Tx, sid, lid int64, aff *affected
 // the IGNORE, and is then dropped with the rest of the loser's remainder, whose
 // now-unreferenced sources GCArt reclaims. A merge can therefore fill the
 // survivor's missing back cover from the loser without ever displacing the
-// survivor's own front.
+// survivor's own front. Whole rows move, so an attachment's provenance rides along.
 func repointArtMap(ctx context.Context, tx *sql.Tx, entityType string, sid, lid int64) error {
 	if _, err := tx.ExecContext(ctx,
 		"UPDATE OR IGNORE art_map SET entity_id = ? WHERE entity_type = ? AND entity_id = ?",
@@ -397,14 +397,23 @@ func repointArtMap(ctx context.Context, tx *sql.Tx, entityType string, sid, lid 
 // repointEntityCuration re-points the loser's entity_curation rows (polymorphic, no
 // FK) onto the survivor with locked-wins: on a field both carry, the survivor keeps its
 // value and source but unions the lock, so a value the loser had protected stays
-// protected; a field only the loser carries moves onto the survivor. It is the entity
-// analogue of repointArtMap. A genre merge finds no rows and is a no-op.
+// protected; a field only the loser carries moves onto the survivor. The 'art' field is
+// the one exception, for the reason given below. It is the entity analogue of
+// repointArtMap. A genre merge finds no rows and is a no-op.
 func repointEntityCuration(ctx context.Context, tx *sql.Tx, entityType string, sid, lid int64) error {
 	// Union the lock on a field both entities curate: promote the survivor's row to
 	// locked when the loser locked that field. Value and source stay the survivor's.
+	//
+	// 'art' is excluded, because its subject is not in this table. repointArtMap is
+	// survivor-wins for the image, so unioning the lock on a field both entities carry
+	// would leave the survivor's own picture (often a fetched one) wearing the lock the
+	// loser put on a different picture, shielding it from the pass that would correct
+	// it. Excluding it keeps lock and image agreeing in every case: where the survivor
+	// has no art row, repointArtMap moves the loser's image in and the OR IGNORE below
+	// moves its lock with it.
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE entity_curation SET locked = 1
-		 WHERE entity_type = ? AND entity_id = ? AND locked = 0
+		 WHERE entity_type = ? AND entity_id = ? AND locked = 0 AND field <> 'art'
 		   AND field IN (SELECT field FROM entity_curation
 		                 WHERE entity_type = ? AND entity_id = ? AND locked = 1)`,
 		entityType, sid, entityType, lid); err != nil {

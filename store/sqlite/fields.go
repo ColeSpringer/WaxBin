@@ -298,6 +298,13 @@ var itemFields = query.FieldMap{
 		" AND amq.entity_id = pi.id AND amq.role = 'front') THEN 1 ELSE 0 END", Kind: query.KindInt},
 	"has_lyrics": {Expr: "CASE WHEN EXISTS(SELECT 1 FROM lyrics lyq WHERE lyq.item_id = pi.id) THEN 1 ELSE 0 END", Kind: query.KindInt},
 
+	// Where the item's own front cover came from, '' when it has none, on has_art's slot
+	// switch and own-art-only rule. It returns tag, sidecar, user, feed, or '': enrichment
+	// writes covers to the release_group and album rungs alone, so `art_source is
+	// enrichment` matches nothing by construction, not for want of data.
+	"art_source": {Expr: "COALESCE((SELECT asq.source FROM art_map asq WHERE asq.entity_type = " + itemArtSlotExpr +
+		" AND asq.entity_id = pi.id AND asq.role = 'front'), '')", Kind: query.KindText},
+
 	// Advisory flags (see the header). The COALESCE covers the LEFT JOIN's NULL for a
 	// non-episode; without it `explicit is 0` would skip every track and book.
 	"explicit":         {Expr: "COALESCE(ep.explicit, 0)", Kind: query.KindInt},

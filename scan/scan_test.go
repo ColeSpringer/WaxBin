@@ -68,10 +68,10 @@ func TestSidecarLyricsPrecedence(t *testing.T) {
 		t.Fatalf("write lrc: %v", err)
 	}
 
-	embedded := &model.Lyrics{Source: "embedded", Unsynced: "embedded block", Synced: []model.SyncedLine{{TimeMS: 99, Text: "old"}}}
+	embedded := &model.Lyrics{Source: model.SourceTag, Unsynced: "embedded block", Synced: []model.SyncedLine{{TimeMS: 99, Text: "old"}}}
 	got, _, _ := scanSidecars(audio, embedded, newArtCache())
-	if got.Source != "lrc" {
-		t.Fatalf("source = %q, want lrc (sidecar is authoritative)", got.Source)
+	if got.Source != model.SourceSidecar {
+		t.Fatalf("source = %q, want sidecar (the sidecar is authoritative)", got.Source)
 	}
 	if len(got.Synced) != 2 || got.Synced[1].TimeMS != 1500 || got.Synced[1].Text != "World" {
 		t.Errorf("synced = %+v, want the sidecar's 2 lines", got.Synced)
@@ -86,7 +86,7 @@ func TestSidecarLyricsPrecedence(t *testing.T) {
 func TestSidecarLyricsFallbackToEmbedded(t *testing.T) {
 	dir := t.TempDir()
 	audio := filepath.Join(dir, "song.flac") // no .lrc next to it
-	embedded := &model.Lyrics{Source: "embedded", Unsynced: "just text"}
+	embedded := &model.Lyrics{Source: model.SourceTag, Unsynced: "just text"}
 	if got, _, _ := scanSidecars(audio, embedded, newArtCache()); got != embedded {
 		t.Errorf("with no sidecar, expected the embedded lyrics unchanged, got %+v", got)
 	}
