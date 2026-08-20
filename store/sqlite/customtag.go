@@ -15,9 +15,10 @@ import (
 // under a namespaced "tag.<KEY>" field in field_provenance (Category B), so a scan does
 // not re-derive a curated tag from the file.
 
-// SetItemTag replaces one custom tag's ordered values on an item (source "user"),
-// recording a lock on "tag.<KEY>" by default so a scan does not re-derive it from the
-// file. Passing no values (or only whitespace) clears the tag and drops any lock, so a
+// SetItemTag replaces one custom tag's ordered values on an item, attributed to attr
+// (an unstated origin is a user edit) and recording the caller's lock instruction on
+// "tag.<KEY>" so a scan does not re-derive it from the file. Passing no values (or only
+// whitespace) clears the tag and drops any lock regardless of lock, so a
 // later scan re-derives it: a clear is a full forget, never a locked-empty tag. The key
 // is normalized to canonical uppercase, so BPM and bpm are one tag. A reserved key (one
 // WaxBin owns through the scalar, credit, or identifier APIs) is rejected with
@@ -25,7 +26,7 @@ import (
 // refused with CodeLocked unless force is set. It returns the canonical key stored and
 // the number of values stored after trimming (0 means the tag was cleared), so a caller
 // does not report a whitespace-only clear as a set.
-func (s *Store) SetItemTag(ctx context.Context, itemPID model.PID, key string, values []string, source model.ProvenanceSource, lock, force bool) (string, int, error) {
+func (s *Store) SetItemTag(ctx context.Context, itemPID model.PID, key string, values []string, attr model.Attribution, lock model.LockChange, force bool) (string, int, error) {
 	const op = "store.SetItemTag"
 	canon, ok := model.CanonicalTagKey(key)
 	if !ok {
@@ -35,8 +36,12 @@ func (s *Store) SetItemTag(ctx context.Context, itemPID model.PID, key string, v
 		return "", 0, waxerr.New(waxerr.CodeInvalid, op,
 			"tag key "+canon+" is reserved; set it through the scalar, credit, or entity edit API")
 	}
-	if !source.ValidForField() {
-		return "", 0, waxerr.New(waxerr.CodeInvalid, op, "invalid provenance source: "+string(source))
+	attr, err := checkFieldAttribution(attr, op)
+	if err != nil {
+		return "", 0, err
+	}
+	if err := checkLockChange(lock, op); err != nil {
+		return "", 0, err
 	}
 	// Drop values that are empty after trimming surrounding whitespace, preserving order.
 	// An all-empty (or nil) list clears the tag.
@@ -48,7 +53,7 @@ func (s *Store) SetItemTag(ctx context.Context, itemPID model.PID, key string, v
 	}
 	field := model.TagLockField(canon)
 
-	err := s.writeTx(ctx, func(tx *sql.Tx) error {
+	err = s.writeTx(ctx, func(tx *sql.Tx) error {
 		itemID, kind, err := itemIDKindByPIDTx(ctx, tx, itemPID, op)
 		if err != nil {
 			return err
@@ -69,17 +74,19 @@ func (s *Store) SetItemTag(ctx context.Context, itemPID model.PID, key string, v
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		if len(clean) == 0 {
-			// A clear forgets the tag entirely, including any lock, so a scan re-derives the
-			// file's value next time. This keeps the default lock from turning an accidental
-			// clear (say a whitespace-only value) into a locked-empty tag that then blocks a
-			// re-set. Deliberately suppressing a file tag is an explicit `lock tag.<KEY>`.
+			// A clear forgets the tag entirely, including any lock, whatever lock instruction
+			// came with it, so a scan re-derives the file's value next time. This keeps the
+			// default lock from turning an accidental clear (say a whitespace-only value) into
+			// a locked-empty tag that then blocks a re-set, and it is why this is the one
+			// curation write LockUnchanged does not govern. Deliberately suppressing a file
+			// tag is an explicit `lock tag.<KEY>`.
 			if _, err := tx.ExecContext(ctx, "DELETE FROM field_provenance WHERE item_id=? AND field=?", itemID, field); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 		} else {
-			// Record the tag's provenance, whose value is the joined display list, and lock
-			// it unless the caller opted out.
-			if err := upsertEditProvenanceTx(ctx, tx, itemID, field, source, strings.Join(clean, "; "), lock, nowNS()); err != nil {
+			// Record the tag's provenance, whose value is the joined display list, under the
+			// caller's attribution and lock instruction.
+			if err := upsertEditProvenanceTx(ctx, tx, itemID, field, attr, strings.Join(clean, "; "), lock, nowNS()); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 		}

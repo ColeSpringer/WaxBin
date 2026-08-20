@@ -16,12 +16,29 @@ import (
 // curated artifact. The scalar edit path never touches these; they have their own
 // shapes (structured lyrics, a chapter list, raw image bytes).
 
-// SetItemLyrics replaces an item's lyrics with a user-curated set (source "user"),
-// recording a lock on the "lyrics" field by default so a later scan/enrichment does
-// not overwrite it. Passing nil (or empty) lyrics clears the row. A locked lyrics is
-// refused with CodeLocked unless force is set.
-func (s *Store) SetItemLyrics(ctx context.Context, itemPID model.PID, ly *model.Lyrics, lock, force bool) error {
+// SetItemLyrics replaces an item's lyrics with a curated set, recording the lock the
+// caller asked for on the "lyrics" field so a later scan/enrichment does not overwrite
+// it. Passing nil (or empty) lyrics clears the row. A locked lyrics is refused with
+// CodeLocked unless force is set.
+//
+// The lyrics carry their own attribution on the *model.Lyrics: an unstamped set is
+// recorded as a user edit, and one that names an origin keeps it, so an embedder that
+// fetched the words itself is not reported as having typed them. A caller that read the
+// lyrics, edited the text, and passes the same struct back is therefore stamping the
+// origin it read; clear Source to record a hand edit.
+func (s *Store) SetItemLyrics(ctx context.Context, itemPID model.PID, ly *model.Lyrics, lock model.LockChange, force bool) error {
 	const op = "store.SetItemLyrics"
+	if err := checkLockChange(lock, op); err != nil {
+		return err
+	}
+	// Up front so a caller error is CodeInvalid rather than the CodeIO the transaction
+	// wraps putLyricsTx's refusal in.
+	if ly.HasContent() {
+		attr := model.Attribution{Source: ly.Source, Provider: ly.Provider}.OrUser()
+		if err := checkAttribution(attr, attr.ValidForLyrics, op); err != nil {
+			return err
+		}
+	}
 	return s.writeTx(ctx, func(tx *sql.Tx) error {
 		itemID, kind, err := itemIDKindByPIDTx(ctx, tx, itemPID, op)
 		if err != nil {
@@ -39,18 +56,20 @@ func (s *Store) SetItemLyrics(ctx context.Context, itemPID model.PID, ly *model.
 				return waxerr.New(waxerr.CodeLocked, op, "lyrics are locked (use force to override)")
 			}
 		}
-		// The user write is authoritative (preserveLock=false); source is stamped "user",
-		// and any provider the caller carried over is dropped with it.
+		// The curation write is authoritative (preserveLock=false). An unnamed origin
+		// defaults to a user edit; a named one is kept, and putLyricsTx refuses an
+		// unpaired or unknown source rather than storing a half-answer.
 		want := &model.Lyrics{}
 		if ly != nil {
 			cp := *ly
-			cp.Source, cp.Provider = model.SourceUser, ""
+			attr := model.Attribution{Source: cp.Source, Provider: cp.Provider}.OrUser()
+			cp.Source, cp.Provider = attr.Source, attr.Provider
 			want = &cp
 		}
 		if _, err := putLyricsTx(ctx, tx, itemID, want, false); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
-		if err := setCurationLockTx(ctx, tx, itemID, "lyrics", lock); err != nil {
+		if err := setCurationLockTx(ctx, tx, itemID, "lyrics", lyricsAttribution(want), lock); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		return appendChange(ctx, tx, "item", itemPID, model.OpUpdate)
@@ -76,8 +95,11 @@ func (s *Store) SetItemLyrics(ctx context.Context, itemPID model.PID, ly *model.
 // longer covers. Legacy shape, single-file books only: a list whose
 // StartMS/EndMS are all zero with any File* offset set is read as file-relative
 // offsets, which mean the same thing there.
-func (s *Store) SetItemChapters(ctx context.Context, itemPID model.PID, chapters []model.Chapter, lock, force bool) error {
+func (s *Store) SetItemChapters(ctx context.Context, itemPID model.PID, chapters []model.Chapter, lock model.LockChange, force bool) error {
 	const op = "store.SetItemChapters"
+	if err := checkLockChange(lock, op); err != nil {
+		return err
+	}
 	return s.writeTx(ctx, func(tx *sql.Tx) error {
 		itemID, kind, err := itemIDKindByPIDTx(ctx, tx, itemPID, op)
 		if err != nil {
@@ -118,7 +140,7 @@ func (s *Store) SetItemChapters(ctx context.Context, itemPID model.PID, chapters
 		if err := refreshBookDuration(ctx, tx, itemID); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
-		if err := setCurationLockTx(ctx, tx, itemID, "chapters", lock); err != nil {
+		if err := setCurationLockTx(ctx, tx, itemID, "chapters", model.Attribution{Source: model.SourceUser}, lock); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		return appendChange(ctx, tx, "item", itemPID, model.OpUpdate)
@@ -280,15 +302,17 @@ func nonUserChapterExtentsTx(ctx context.Context, tx *sql.Tx, itemID int64) (map
 }
 
 // SetItemArt sets (or, with empty bytes, clears) one artwork role on a track/book
-// item from raw image bytes. An empty role means the front cover. The "art"
-// field's lock story applies to the front role only: a lock is recorded (by
-// default) and enforced there, because front is the slot a scan re-derives from
-// the file/directory and the lock exists to protect against exactly that; the
-// other roles have no scan producer to guard against, so the lock and force
-// flags are ignored for them. A locked front cover is refused with CodeLocked
-// unless force is set. A clear deletes only the named role, leaving the item's
-// other slots intact.
-func (s *Store) SetItemArt(ctx context.Context, itemPID model.PID, role model.ArtRole, raw []byte, lock, force bool) error {
+// item from raw image bytes, attributed to attr (an unstated origin is a user edit).
+// An empty role means the front cover. The "art" field's lock story applies to the
+// front role only: the caller's lock instruction is recorded and the lock enforced
+// there, because front is the slot a scan re-derives from the file/directory and the
+// lock exists to protect against exactly that; the other roles have no scan producer to
+// guard against, so the lock and force flags are ignored for them. A locked front cover
+// is refused with CodeLocked unless force is set. force skips that check for this one
+// write and nothing else: it no longer rewrites the lock, so a forced set leaves an
+// existing lock standing unless the caller asked for a change. A clear deletes only the
+// named role, leaving the item's other slots intact.
+func (s *Store) SetItemArt(ctx context.Context, itemPID model.PID, role model.ArtRole, raw []byte, attr model.Attribution, lock model.LockChange, force bool) error {
 	const op = "store.SetItemArt"
 	if role == "" {
 		role = model.ArtRoleFront
@@ -296,9 +320,19 @@ func (s *Store) SetItemArt(ctx context.Context, itemPID model.PID, role model.Ar
 	if !role.Valid() {
 		return waxerr.New(waxerr.CodeInvalid, op, "unknown art role: "+string(role))
 	}
+	if err := checkLockChange(lock, op); err != nil {
+		return err
+	}
+	// Up front, not left to the inner write: a clear carries no image for the art_map
+	// writer to check, and the attribution still reaches the lock row. Checking here also
+	// keeps a caller error CodeInvalid rather than the CodeIO the transaction wraps it in.
+	attr = attr.OrUser()
+	if err := checkAttribution(attr, attr.ValidForArt, op); err != nil {
+		return err
+	}
 	var img *model.ArtImage
 	if len(raw) > 0 {
-		i, err := probeArtImage(raw)
+		i, err := probeArtImage(raw, attr)
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeInvalid, op, err)
 		}
@@ -327,8 +361,8 @@ func (s *Store) SetItemArt(ctx context.Context, itemPID model.PID, role model.Ar
 		if err := setEntityArtRoleTx(ctx, tx, "track", itemID, string(role), img); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
-		if front {
-			if err := setCurationLockTx(ctx, tx, itemID, "art", lock); err != nil {
+		if front && lock != model.LockUnchanged {
+			if err := setCurationLockTx(ctx, tx, itemID, "art", attr, lock); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 		}
@@ -345,17 +379,22 @@ func (s *Store) SetItemArt(ctx context.Context, itemPID model.PID, role model.Ar
 // arbitrary string used to be accepted (and stored) here, and closing it is a
 // deliberate tightening so a typo cannot mint an unreachable slot.
 //
-// The lock story mirrors SetItemArt's and applies to the front role only: a lock is
-// recorded by default and enforced, so a chosen cover survives an enrich --force and a
-// podcast feed's next image-URL change. A locked front cover is refused with CodeLocked
-// unless force is set. The other roles have no automatic producer to guard against, so
-// the flags are ignored for them. Locking a cleared front role is how a user stops a
-// provider filling it.
+// The cover is attributed to attr, so an embedder that fetched the picture itself is
+// recorded as having fetched it rather than as a hand-set cover; an unstated origin is a
+// user edit.
+//
+// The lock story mirrors SetItemArt's and applies to the front role only: the caller's
+// lock instruction is recorded and the lock enforced, so a chosen cover survives an
+// enrich --force and a podcast feed's next image-URL change. A locked front cover is
+// refused with CodeLocked unless force is set, and force skips that check for this one
+// write alone, leaving the lock as it stands. The other roles have no automatic producer
+// to guard against, so the flags are ignored for them. Locking a cleared front role is
+// how a user stops a provider filling it.
 //
 // The lock is recorded in whichever table governs the entity type (artLockIsItemScoped),
 // so a track cover set through here and one set through SetItemArt share one lock, and
 // the scan, enrichment, and feed-sync guards all read the lock they were written.
-func (s *Store) SetEntityArt(ctx context.Context, entityType model.ArtEntity, entityPID model.PID, role model.ArtRole, raw []byte, lock, force bool) error {
+func (s *Store) SetEntityArt(ctx context.Context, entityType model.ArtEntity, entityPID model.PID, role model.ArtRole, raw []byte, attr model.Attribution, lock model.LockChange, force bool) error {
 	const op = "store.SetEntityArt"
 	if !entityType.Valid() {
 		return waxerr.New(waxerr.CodeInvalid, op, "unknown art entity type: "+string(entityType))
@@ -366,9 +405,18 @@ func (s *Store) SetEntityArt(ctx context.Context, entityType model.ArtEntity, en
 	if !role.Valid() {
 		return waxerr.New(waxerr.CodeInvalid, op, "unknown art role: "+string(role))
 	}
+	if err := checkLockChange(lock, op); err != nil {
+		return err
+	}
+	// See SetItemArt: the clear path has no image to carry the check, and a caller error
+	// belongs outside the transaction that would reclassify it as I/O.
+	attr = attr.OrUser()
+	if err := checkAttribution(attr, attr.ValidForArt, op); err != nil {
+		return err
+	}
 	var img *model.ArtImage
 	if len(raw) > 0 {
-		i, err := probeArtImage(raw)
+		i, err := probeArtImage(raw, attr)
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeInvalid, op, err)
 		}
@@ -381,19 +429,19 @@ func (s *Store) SetEntityArt(ctx context.Context, entityType model.ArtEntity, en
 			return err
 		}
 		if front && !force {
-			lock, err := artLockTx(ctx, tx, entityType, entityID)
+			cur, err := artLockTx(ctx, tx, entityType, entityID)
 			if err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
-			if lock.Locked {
+			if cur.Locked {
 				return waxerr.New(waxerr.CodeLocked, op, artLockedMessage(entityType, entityPID))
 			}
 		}
 		if err := setEntityArtRoleTx(ctx, tx, string(entityType), entityID, string(role), img); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
-		if front {
-			if err := setArtLockTx(ctx, tx, entityType, entityID, lock); err != nil {
+		if front && lock != model.LockUnchanged {
+			if err := setArtLockTx(ctx, tx, entityType, entityID, attr, lock); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 		}
@@ -458,7 +506,10 @@ func (s *Store) SetArtLock(ctx context.Context, entityType model.ArtEntity, pid 
 		if cur.Locked == lock {
 			return nil
 		}
-		if err := setArtLockTx(ctx, tx, entityType, entityID, lock); err != nil {
+		// The lock is the write here, not an instruction accompanying one, so it carries the
+		// only attribution there is: a user asking for it.
+		if err := setArtLockTx(ctx, tx, entityType, entityID,
+			model.Attribution{Source: model.SourceUser}, model.LockOf(lock)); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		if entityType == model.ArtTrack || entityType == model.ArtEpisode {
@@ -470,14 +521,16 @@ func (s *Store) SetArtLock(ctx context.Context, entityType model.ArtEntity, pid 
 
 // setEntityArtRoleTx replaces one (entity, role) art mapping, storing the source, its
 // provenance, and leaving the entity's other roles intact. A nil image clears the role.
-// Being the single art_map writer, it is also where an unstamped image is refused
-// rather than stored. It replaces the row unconditionally, so a deliberate set always
-// re-attributes; the automatic ingests come through attachEntityArtTxChanged, which
-// re-points only on a differing hash.
+// It is where an unstorable image is refused rather than stored, and where an
+// undescribed one is completed from its own bytes. It replaces the row unconditionally,
+// so a deliberate set always re-attributes; the automatic ingests come through
+// attachEntityArtTxChanged, which re-points only on a differing hash and re-attributes
+// in place otherwise. Those two are the only writers of an art_map row's attribution,
+// and both run it through checkArtImage first.
 func setEntityArtRoleTx(ctx context.Context, tx *sql.Tx, entityType string, entityID int64, role string, img *model.ArtImage) error {
-	if img != nil && !img.Source.Valid() {
-		return waxerr.New(waxerr.CodeInvalid, "store.setEntityArtRole",
-			"art image has no known provenance source ("+string(img.Source)+"): "+entityType+" "+role)
+	img = storableArt(img)
+	if err := checkArtImage(img, entityType, role); err != nil {
+		return err
 	}
 	if _, err := tx.ExecContext(ctx,
 		"DELETE FROM art_map WHERE entity_type=? AND entity_id=? AND role=?", entityType, entityID, role); err != nil {
@@ -501,37 +554,71 @@ func setEntityArtRoleTx(ctx context.Context, tx *sql.Tx, entityType string, enti
 	return err
 }
 
+// checkArtImage refuses an image an art_map row cannot hold: an attribution outside the
+// column's vocabulary or without its pairing, and a content address the store could not
+// derive. A nil image is a clear and passes. The address branch is unreachable while
+// storableArt hashes every carrier with bytes, and stands as the guard against a future
+// path that hands an image over some other way.
+func checkArtImage(img *model.ArtImage, entityType, role string) error {
+	if img == nil {
+		return nil
+	}
+	const op = "store.setEntityArtRole"
+	if err := checkAttribution(img.Attribution, img.Attribution.ValidForArt, op); err != nil {
+		return err
+	}
+	if img.Hash == "" {
+		return waxerr.New(waxerr.CodeInvalid, op, "art image has no content address: "+entityType+" "+role)
+	}
+	return nil
+}
+
 // probeArtImage builds a storable art image from raw bytes: its content hash always,
 // and its format/dimensions when the bytes decode (or its magic-sniffed format for an
 // exotic AVIF/HEIC cover). Undecodable bytes with no recognizable magic are rejected.
-// Its only callers are the two curation set paths, so the image is stamped "user".
-func probeArtImage(raw []byte) (*model.ArtImage, error) {
-	img := &model.ArtImage{Data: raw, Hash: art.Hash(raw), Source: model.SourceUser}
-	format, w, h, err := art.Probe(raw)
-	if err != nil {
-		if f, ok := art.SniffExotic(raw); ok {
-			img.Format = f
-			return img, nil
-		}
+func probeArtImage(raw []byte, attr model.Attribution) (*model.ArtImage, error) {
+	info := art.Describe(raw)
+	if info.Format == "" {
 		return nil, errors.New("unrecognized image data")
 	}
-	img.Format, img.Width, img.Height = format, w, h
-	return img, nil
+	return &model.ArtImage{
+		Data: raw, Hash: info.Hash, Format: info.Format, Width: info.Width, Height: info.Height,
+		Attribution: attr,
+	}, nil
 }
 
-// setCurationLockTx upserts the lock bit on a curation field's provenance row
-// (source "user"), or drops a pure-lock row when unlocking, keeping the table sparse.
-func setCurationLockTx(ctx context.Context, tx *sql.Tx, itemID int64, field string, lock bool) error {
-	if lock {
-		_, err := tx.ExecContext(ctx, `INSERT INTO field_provenance(item_id, field, source, locked, updated_at)
-			VALUES (?,?,?,1,?)
-			ON CONFLICT(item_id, field) DO UPDATE SET source=excluded.source, locked=1, updated_at=excluded.updated_at`,
-			itemID, field, string(model.SourceUser), nowNS())
+// setCurationLockTx upserts the lock bit on a curation field's provenance row, carrying
+// the attribution of the write that asked for the lock, or drops a pure-lock row when
+// unlocking, keeping the table sparse. LockUnchanged writes nothing at all, so a write
+// that formed no lock intent leaves the stored one exactly as it stands.
+//
+// The row is not inert: with no artifact attached, ArtRoles reports the "art" row's
+// source as the front cover's, so a lock recorded here under an invented source would
+// be reported as fact.
+func setCurationLockTx(ctx context.Context, tx *sql.Tx, itemID int64, field string, attr model.Attribution, lock model.LockChange) error {
+	switch lock {
+	case model.LockUnchanged:
+		return nil
+	case model.LockOn:
+		_, err := tx.ExecContext(ctx, `INSERT INTO field_provenance(item_id, field, source, provider, locked, updated_at)
+			VALUES (?,?,?,?,1,?)
+			ON CONFLICT(item_id, field) DO UPDATE SET
+				source=excluded.source, provider=excluded.provider, locked=1, updated_at=excluded.updated_at`,
+			itemID, field, string(attr.Source), nullStr(attr.Provider), nowNS())
 		return err
 	}
 	_, err := tx.ExecContext(ctx,
 		"DELETE FROM field_provenance WHERE item_id=? AND field=? AND (value IS NULL OR value='')", itemID, field)
 	return err
+}
+
+// lyricsAttribution is the attribution a lyrics set records on its lock row: the words'
+// own origin, so a locked lyric with no row of its own still reports where it came from.
+func lyricsAttribution(ly *model.Lyrics) model.Attribution {
+	if !ly.HasContent() {
+		return model.Attribution{Source: model.SourceUser}
+	}
+	return model.Attribution{Source: ly.Source, Provider: ly.Provider}
 }
 
 // artLockIsItemScoped reports whether an art entity's "art" lock lives in the
@@ -551,16 +638,19 @@ func artLockIsItemScoped(entityType model.ArtEntity) bool {
 }
 
 // artLock is an art entity's front-cover lock row, from whichever table governs it.
-// Source and UpdatedAt matter when the lock has no artifact behind it, since they are
-// then the only attribution ArtRoles has to report. A missing row reads as the zero
-// value, which is an unlocked entity.
+// The attribution and UpdatedAt matter when the lock has no artifact behind it, since
+// they are then the only attribution ArtRoles has to report. A missing row reads as the
+// zero value, which is an unlocked entity.
 type artLock struct {
-	Locked    bool
-	Source    model.ProvenanceSource
+	Locked bool
+	model.Attribution
 	UpdatedAt int64
 }
 
-// artLockTx reads an art entity's front-cover lock from whichever table governs it.
+// artLockTx reads an art entity's front-cover lock from whichever table governs it. It
+// reads the provider alongside the source, because a lock row can now carry the
+// attribution of the write that created it and reporting the source without it would
+// reintroduce the half-answer on exactly the read that makes a coverless lock visible.
 func artLockTx(ctx context.Context, q queryer, entityType model.ArtEntity, entityID int64) (artLock, error) {
 	var (
 		out    artLock
@@ -570,12 +660,12 @@ func artLockTx(ctx context.Context, q queryer, entityType model.ArtEntity, entit
 	)
 	if artLockIsItemScoped(entityType) {
 		err = q.QueryRowContext(ctx,
-			"SELECT locked, source, updated_at FROM field_provenance WHERE item_id=? AND field='art'",
-			entityID).Scan(&locked, &source, &out.UpdatedAt)
+			"SELECT locked, source, COALESCE(provider,''), updated_at FROM field_provenance WHERE item_id=? AND field='art'",
+			entityID).Scan(&locked, &source, &out.Provider, &out.UpdatedAt)
 	} else {
 		err = q.QueryRowContext(ctx,
-			"SELECT locked, source, updated_at FROM entity_curation WHERE entity_type=? AND entity_id=? AND field='art'",
-			string(entityType), entityID).Scan(&locked, &source, &out.UpdatedAt)
+			"SELECT locked, source, COALESCE(provider,''), updated_at FROM entity_curation WHERE entity_type=? AND entity_id=? AND field='art'",
+			string(entityType), entityID).Scan(&locked, &source, &out.Provider, &out.UpdatedAt)
 	}
 	if errors.Is(err, sql.ErrNoRows) {
 		return artLock{}, nil
@@ -597,12 +687,13 @@ func artLockedMessage(entityType model.ArtEntity, pid model.PID) string {
 }
 
 // setArtLockTx records an art entity's front-cover lock in whichever table governs it,
-// dropping a pure-lock row on unlock so both tables stay sparse.
-func setArtLockTx(ctx context.Context, tx *sql.Tx, entityType model.ArtEntity, entityID int64, lock bool) error {
+// dropping a pure-lock row on unlock so both tables stay sparse and writing nothing at
+// all for LockUnchanged.
+func setArtLockTx(ctx context.Context, tx *sql.Tx, entityType model.ArtEntity, entityID int64, attr model.Attribution, lock model.LockChange) error {
 	if artLockIsItemScoped(entityType) {
-		return setCurationLockTx(ctx, tx, entityID, "art", lock)
+		return setCurationLockTx(ctx, tx, entityID, "art", attr, lock)
 	}
-	return setEntityCurationLockTx(ctx, tx, string(entityType), entityID, "art", lock)
+	return setEntityCurationLockTx(ctx, tx, string(entityType), entityID, "art", attr, lock)
 }
 
 // artEntityIDTx resolves an art entity's pid to the internal id its art_map rows use:

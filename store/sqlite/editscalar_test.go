@@ -17,7 +17,7 @@ func TestEditTrackScalarIdentifiers(t *testing.T) {
 		"mbid":        "b1a9c0e9-d987-4042-ae91-78d6a3267d69",
 		"compilation": "true",
 	}
-	if err := st.EditItemFields(ctx, pid, edits, model.SourceUser, true, false); err != nil {
+	if err := st.EditItemFields(ctx, pid, edits, model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
 		t.Fatalf("edit scalars: %v", err)
 	}
 
@@ -42,10 +42,10 @@ func TestEditTrackCompilationClear(t *testing.T) {
 	st, pid := editFixture(t)
 	ctx := context.Background()
 
-	if err := st.EditItemField(ctx, pid, "compilation", "1", model.SourceUser, false, false); err != nil {
+	if err := st.EditItemField(ctx, pid, "compilation", "1", model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("set compilation: %v", err)
 	}
-	if err := st.EditItemField(ctx, pid, "compilation", "", model.SourceUser, false, true); err != nil {
+	if err := st.EditItemField(ctx, pid, "compilation", "", model.Attribution{Source: model.SourceUser}, model.LockOf(false), true); err != nil {
 		t.Fatalf("clear compilation: %v", err)
 	}
 	var comp int
@@ -63,14 +63,14 @@ func TestEditTrackBadValues(t *testing.T) {
 	st, pid := editFixture(t)
 	ctx := context.Background()
 
-	if err := st.EditItemField(ctx, pid, "mbid", "not-a-uuid", model.SourceUser, false, false); !waxerr.Is(err, waxerr.CodeInvalid) {
+	if err := st.EditItemField(ctx, pid, "mbid", "not-a-uuid", model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); !waxerr.Is(err, waxerr.CodeInvalid) {
 		t.Fatalf("bad mbid = %v, want CodeInvalid", err)
 	}
-	if err := st.EditItemField(ctx, pid, "compilation", "maybe", model.SourceUser, false, false); !waxerr.Is(err, waxerr.CodeInvalid) {
+	if err := st.EditItemField(ctx, pid, "compilation", "maybe", model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); !waxerr.Is(err, waxerr.CodeInvalid) {
 		t.Fatalf("bad compilation = %v, want CodeInvalid", err)
 	}
 	// A book-only field is rejected on a track.
-	if err := st.EditItemField(ctx, pid, "publisher", "x", model.SourceUser, false, false); !waxerr.Is(err, waxerr.CodeInvalid) {
+	if err := st.EditItemField(ctx, pid, "publisher", "x", model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); !waxerr.Is(err, waxerr.CodeInvalid) {
 		t.Fatalf("publisher on track = %v, want CodeInvalid", err)
 	}
 }
@@ -87,7 +87,7 @@ func TestEditBookScalarFields(t *testing.T) {
 		"description": "A long description.",
 		"mbid":        "c5e3a0f1-1111-2222-3333-444455556666",
 	}
-	if err := st.EditItemFields(ctx, pid, edits, model.SourceUser, true, false); err != nil {
+	if err := st.EditItemFields(ctx, pid, edits, model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
 		t.Fatalf("edit book scalars: %v", err)
 	}
 

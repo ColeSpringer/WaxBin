@@ -83,21 +83,20 @@ func (p *caaProvider) Enrich(ctx context.Context, req Request) (*Candidate, erro
 	}
 	// gatherCover stamps Source and Provider on the winner; the URL is the provider's
 	// to report, since only it knows where it fetched.
-	img := &model.ArtImage{Data: data, Hash: art.Hash(data), SourceURL: srcURL}
-	format, w, h, err := art.Probe(data)
-	if err != nil {
-		// An ISOBMFF cover (AVIF/HEIC) has no pure-Go decoder, so it probes as a failure
-		// while still being a perfectly good image to store. The user-set art path
-		// (probeArtImage) already accepts it on the sniffed format alone; accepting it
-		// here too keeps enrichment from silently discarding a cover a manual set keeps.
-		f, ok := art.SniffExotic(data)
-		if !ok {
-			p.log.Debug("cover art undecodable", "mbid", req.MBID, "err", err)
-			return nil, nil
-		}
-		img.Format = f
-		return &Candidate{Cover: img}, nil
+	// An ISOBMFF cover (AVIF/HEIC) has no pure-Go decoder, so it describes with a
+	// sniffed format and no dimensions while still being a perfectly good image to
+	// store. Only bytes nothing recognizes at all are discarded.
+	info := art.Describe(data)
+	if info.Format == "" {
+		// Re-probe for the reason: Describe reports only that nothing recognized the
+		// bytes, and an HTML error page and a truncated JPEG are worth telling apart.
+		_, _, _, perr := art.Probe(data)
+		p.log.Debug("cover art undecodable", "mbid", req.MBID, "bytes", len(data), "err", perr)
+		return nil, nil
 	}
-	img.Format, img.Width, img.Height = format, w, h
+	img := &model.ArtImage{
+		Data: data, Hash: info.Hash, Format: info.Format, Width: info.Width, Height: info.Height,
+		Attribution: model.Attribution{SourceURL: srcURL},
+	}
 	return &Candidate{Cover: img}, nil
 }

@@ -62,11 +62,11 @@ func (s *Store) setLock(ctx context.Context, itemPID model.PID, field string, lo
 		}
 		// Keep the table sparse: drop a row that now carries neither a lock nor a
 		// non-tag provenance nor a curated value. The art row goes whatever source it
-		// carries, because that source is always a lock writer's guess: art keeps no
-		// value here (the bytes and their real attribution live in art_map), and the
-		// curation set paths guess "user" where this one guesses "tag". Without the
-		// exception an `art lock` followed by `unlock <pid> art` would strand an inert
-		// row claiming a user-sourced cover that does not exist.
+		// carries, because art keeps no value here (the bytes and their real attribution
+		// live in art_map) and this command has no artifact to attribute, so it guesses
+		// "tag" where a curation set records what it was told. Without the exception an
+		// `art lock` followed by `unlock <pid> art` would strand an inert row claiming a
+		// cover that does not exist.
 		if !locked {
 			const sparse = `DELETE FROM field_provenance
 				WHERE item_id=? AND field=? AND locked=0 AND (value IS NULL OR value='')`
@@ -82,17 +82,63 @@ func (s *Store) setLock(ctx context.Context, itemPID model.PID, field string, lo
 	})
 }
 
-// SetFieldProvenance records that a field was set by a non-tag source, storing
-// the curated value and preserving any lock. Enrichment and edit paths should use
-// this method. It does not clobber a locked field unless force is set, such as a
-// user edit overriding that user's own lock.
-func (s *Store) SetFieldProvenance(ctx context.Context, itemPID model.PID, field string, source model.ProvenanceSource, value string, force bool) error {
+// checkFieldAttribution is the single gate every scalar curation write runs its
+// caller's attribution through. It applies the one rule governing the source (a write
+// that names no origin is a user edit, one that names an origin is honoured, one that
+// names an impossible origin is refused) and returns the attribution to store.
+//
+// A non-empty SourceURL is refused rather than dropped, the way setEntityArtRoleTx
+// refuses an unstamped image. Neither field_provenance nor entity_curation has a column
+// for one, and a URL attributes a fetched artifact rather than a value copied into a
+// tag, so there is nowhere honest to put it.
+func checkFieldAttribution(attr model.Attribution, op string) (model.Attribution, error) {
+	attr = attr.OrUser()
+	if err := checkAttribution(attr, attr.ValidForField, op); err != nil {
+		return attr, err
+	}
+	if attr.SourceURL != "" {
+		return attr, waxerr.New(waxerr.CodeInvalid, op,
+			"a scalar field records no fetch URL: "+attr.SourceURL)
+	}
+	return attr, nil
+}
+
+// checkAttribution refuses an attribution the surface ok guards cannot hold, naming the
+// field that is actually wrong. The pairing failures are reported as pairing failures:
+// a caller whose provider is missing is not told its source is bad, which is the one
+// thing about the write that was right.
+func checkAttribution(attr model.Attribution, ok func() bool, op string) error {
+	if ok() {
+		return nil
+	}
+	switch {
+	case attr.Source == model.SourceEnrichment && attr.Provider == "":
+		return waxerr.New(waxerr.CodeInvalid, op,
+			"an enrichment source must name the provider that supplied it")
+	case attr.Provider != "" && attr.Source.Valid():
+		return waxerr.New(waxerr.CodeInvalid, op,
+			"only an enrichment source names a provider, not "+string(attr.Source))
+	default:
+		return waxerr.New(waxerr.CodeInvalid, op, "invalid provenance source: "+string(attr.Source))
+	}
+}
+
+// SetFieldProvenance records that a field was set by a non-tag source, storing the
+// curated value and preserving any lock. Enrichment and edit paths should use this
+// method. It does not clobber a locked field unless force is set, such as a user edit
+// overriding that user's own lock.
+//
+// The row is re-attributed whole: the caller's source and provider replace whatever was
+// there, so a provider left over from a previous source does not survive a write that
+// names a different one. Only the lock is preserved.
+func (s *Store) SetFieldProvenance(ctx context.Context, itemPID model.PID, field string, attr model.Attribution, value string, force bool) error {
 	const op = "store.SetFieldProvenance"
 	if !model.IsMetadataField(field) {
 		return waxerr.New(waxerr.CodeInvalid, op, "not a metadata field: "+field)
 	}
-	if !source.ValidForField() {
-		return waxerr.New(waxerr.CodeInvalid, op, "invalid provenance source: "+string(source))
+	attr, err := checkFieldAttribution(attr, op)
+	if err != nil {
+		return err
 	}
 	return s.writeTx(ctx, func(tx *sql.Tx) error {
 		itemID, err := itemIDByPID(ctx, tx, itemPID, op)
@@ -108,10 +154,9 @@ func (s *Store) SetFieldProvenance(ctx context.Context, itemPID model.PID, field
 				return waxerr.New(waxerr.CodeConflict, op, "field is locked: "+field)
 			}
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO field_provenance(item_id, field, source, locked, value, updated_at)
-			VALUES (?,?,?,0,?,?)
-			ON CONFLICT(item_id, field) DO UPDATE SET source=excluded.source, value=excluded.value, updated_at=excluded.updated_at`,
-			itemID, field, string(source), value, nowNS()); err != nil {
+		// The shared upsert with no lock instruction, which is what preserves the stored
+		// lock, and what carries the provider a bespoke statement here used to drop.
+		if err := upsertEditProvenanceTx(ctx, tx, itemID, field, attr, value, model.LockUnchanged, nowNS()); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		return appendChange(ctx, tx, "item", itemPID, model.OpUpdate)
@@ -129,10 +174,10 @@ func (s *Store) SetFieldProvenance(ctx context.Context, itemPID model.PID, field
 // stop the scanner filling it looks like, so that row survives on its own; when the
 // item does carry the artifact, its own source, provider, URL and timestamp are laid
 // over the row, and when there is no row at all one is inserted in sort position. The
-// overlay is what makes them truthful, because the lock writers invent a source: the
-// curation set paths (setCurationLockTx) write "user" while `waxbin lock <pid> art`
-// goes through LockField and writes "tag", and neither knows where the artifact came
-// from. Enrichment writes no provenance row for lyrics at all.
+// overlay is what makes them truthful when the artifact is present, because a lock row
+// only ever carries what its own write knew: a curation set records the attribution it
+// was given, while `waxbin lock <pid> art` goes through LockField and can only guess
+// "tag". Enrichment writes no provenance row for lyrics at all.
 //
 // Only the item's own cover appears; art inherited from an album or artist is not the
 // item's field, matching has_art's semantics. Value stays empty on both overlaid rows,

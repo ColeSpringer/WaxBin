@@ -16,10 +16,11 @@ import (
 // re-derive it from the file.
 func newTagCmd(g *globals) *cobra.Command {
 	var (
-		key    string
-		values []string
-		noLock bool
-		force  bool
+		key      string
+		values   []string
+		noLock   bool
+		keepLock bool
+		force    bool
 	)
 	cmd := &cobra.Command{
 		Use:   "tag <pid> [--key KEY --value V ...]",
@@ -36,18 +37,23 @@ func newTagCmd(g *globals) *cobra.Command {
 			if key == "" {
 				// A set-side flag with no --key is a mistake (the values would be silently
 				// dropped into a list), so reject it rather than falling through to a listing.
-				if len(values) > 0 || cmd.Flags().Changed("no-lock") || cmd.Flags().Changed("force") {
-					return fmt.Errorf("--key is required to set a tag (with --value/--no-lock/--force)")
+				if len(values) > 0 || cmd.Flags().Changed("no-lock") ||
+					cmd.Flags().Changed("keep-lock") || cmd.Flags().Changed("force") {
+					return fmt.Errorf("--key is required to set a tag (with --value/--no-lock/--keep-lock/--force)")
 				}
 				return listTags(cmd, g, pid)
 			}
-			return setTag(cmd, g, pid, key, values, waxbin.TagEditOptions{Lock: !noLock, Force: force})
+			return setTag(cmd, g, pid, key, values,
+				waxbin.TagEditOptions{Lock: lockChange(noLock, keepLock), Force: force})
 		},
 	}
 	f := cmd.Flags()
 	f.StringVar(&key, "key", "", "custom tag key to set (omit to list all tags)")
 	f.StringArrayVar(&values, "value", nil, "value for the tag (repeatable; none clears it)")
-	f.BoolVar(&noLock, "no-lock", false, "do not lock the tag (it defaults to locked)")
+	f.BoolVar(&noLock, "no-lock", false, "unlock the tag (it defaults to locked)")
+	f.BoolVar(&keepLock, "keep-lock", false, keepLockUsage("the tag")+
+		"; clearing a tag forgets it entirely, lock included, whichever lock flag is given")
+	cmd.MarkFlagsMutuallyExclusive("no-lock", "keep-lock")
 	f.BoolVar(&force, "force", false, "override a locked tag")
 	// `tag keys` is a catalog-wide read subcommand. Routing is unambiguous because an item
 	// pid is a ULID and can never be the literal "keys", so `tag <ulid>` still hits the

@@ -132,7 +132,7 @@ func TestRescanReplacesOnlyTheArtistRoleOnATrack(t *testing.T) {
 	res := putTrack(t, st, lib.ID, spec)
 
 	if _, err := st.SetItemCredits(ctx, res.ItemPID, model.RoleProducer,
-		[]string{"Rick Rubin"}, model.SourceUser, false, false); err != nil {
+		[]string{"Rick Rubin"}, model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("set producer: %v", err)
 	}
 
@@ -171,12 +171,12 @@ func TestLockedArtistCreditSurvivesAForcedRescan(t *testing.T) {
 
 			if field == "artist" {
 				if err := st.EditItemField(ctx, res.ItemPID, "artist", "Jay-Z feat. Alicia Keys",
-					model.SourceUser, true, false); err != nil {
+					model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
 					t.Fatalf("edit artist: %v", err)
 				}
 			} else {
 				if _, err := st.SetItemCredits(ctx, res.ItemPID, model.RoleArtist,
-					[]string{"Jay-Z", "Alicia Keys"}, model.SourceUser, true, false); err != nil {
+					[]string{"Jay-Z", "Alicia Keys"}, model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
 					t.Fatalf("set artist credit: %v", err)
 				}
 			}
@@ -301,7 +301,7 @@ func TestSetArtistCreditRewritesTheTrackDisplayAndItsArtistID(t *testing.T) {
 		artist: "Old Name", albumArt: "Old Name", album: "Album", durationMS: 100,
 	})
 	if _, err := st.SetItemCredits(ctx, res.ItemPID, model.RoleArtist,
-		[]string{"Jay-Z", "Alicia Keys"}, model.SourceUser, false, false); err != nil {
+		[]string{"Jay-Z", "Alicia Keys"}, model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("set artist credit: %v", err)
 	}
 	if got := scalarStr(t, st, "SELECT artist FROM track"); got != "Jay-Z, Alicia Keys" {
@@ -331,7 +331,7 @@ func TestSetArtistCreditRefreshesTheOutgoingArtistRollup(t *testing.T) {
 	}
 
 	if _, err := st.SetItemCredits(ctx, res.ItemPID, model.RoleArtist,
-		[]string{"New Name"}, model.SourceUser, false, false); err != nil {
+		[]string{"New Name"}, model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("set artist credit: %v", err)
 	}
 	if n := scalarInt(t, st,
@@ -360,7 +360,7 @@ func TestSetArtistCreditRefreshesTheTrackSearchRow(t *testing.T) {
 		artist: "Old Name", albumArt: "Old Name", album: "Album", durationMS: 100,
 	})
 	if _, err := st.SetItemCredits(ctx, res.ItemPID, model.RoleArtist,
-		[]string{"Jay-Z"}, model.SourceUser, false, false); err != nil {
+		[]string{"Jay-Z"}, model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("set artist credit: %v", err)
 	}
 	got := scalarStr(t, st, "SELECT artist FROM search_fts WHERE rowid = (SELECT id FROM playable_item)")

@@ -21,25 +21,39 @@ type EntityEditOptions struct {
 	// artist's ARTISTSORT. A release-group field, a release-group type, and an entity MBID
 	// have no fanned tag and stay DB-only.
 	WriteBack bool
-	// Lock locks each edited entity field against enrichment overwrites; on by default.
-	Lock bool
+	// Lock is the instruction for each edited field's lock, which guards it against an
+	// enrichment overwrite. The zero value leaves the stored lock alone; the CLI states
+	// LockOn or LockOff explicitly.
+	Lock model.LockChange
 	// Force overrides a locked entity field.
 	Force bool
+	// Source is where the values came from; empty records a user edit.
+	Source model.ProvenanceSource
+	// Provider names the service that supplied an enrichment value, and is required
+	// with that source and refused with any other.
+	Provider string
+}
+
+// Attribution is the store-side value Source and Provider describe. See
+// EditOptions.Attribution.
+func (o EntityEditOptions) Attribution() model.Attribution {
+	return model.Attribution{Source: o.Source, Provider: o.Provider}
 }
 
 // EditEntity applies curation edits to one shared entity (an artist, release group, or
 // album): sort-name overrides and release identifiers (barcode/label/catalog number and
-// the entity MBIDs, plus the release-group type). It records user provenance and, by
-// default, locks each edited field so enrichment leaves it alone. The catalog write is
-// atomic. A field that does not apply to the entity type, or an invalid value, is
-// rejected; a locked field returns CodeLocked unless opts.Force is set.
+// the entity MBIDs, plus the release-group type). It records opts.Source (empty means a
+// user edit) and applies opts.Lock to each edited field. The catalog write is atomic. A
+// field that does not apply to the entity type, or an invalid value, is rejected; a
+// locked field returns CodeLocked unless opts.Force is set.
 //
 // With opts.WriteBack the edited values that round-trip through a rescan are also fanned
 // out across the entity's member files' on-disk tags. Write-back runs after the catalog
 // edit committed, so a file that cannot be written is reported through a *WriteBackError
 // naming the failed files while the entity edit stands.
 func (l *Library) EditEntity(ctx context.Context, entityType model.MergeEntity, entityPID model.PID, edits map[string]string, opts EntityEditOptions) error {
-	if err := l.store.EditEntityFields(ctx, entityType, entityPID, edits, model.SourceUser, opts.Lock, opts.Force); err != nil {
+	if err := l.store.EditEntityFields(ctx, entityType, entityPID, edits,
+		opts.Attribution(), opts.Lock, opts.Force); err != nil {
 		return err
 	}
 	if !opts.WriteBack {

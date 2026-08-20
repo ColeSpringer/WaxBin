@@ -56,7 +56,7 @@ func TestSetItemTag(t *testing.T) {
 	pid := res.ItemPID
 
 	// Set a multi-valued custom tag (key normalized to uppercase).
-	stored, n, err := st.SetItemTag(ctx, pid, "mood", []string{"chill", "upbeat"}, model.SourceUser, true, false)
+	stored, n, err := st.SetItemTag(ctx, pid, "mood", []string{"chill", "upbeat"}, model.Attribution{Source: model.SourceUser}, model.LockOf(true), false)
 	if err != nil {
 		t.Fatalf("set tag: %v", err)
 	}
@@ -73,18 +73,18 @@ func TestSetItemTag(t *testing.T) {
 	}
 
 	// A reserved key is rejected, directing the caller to the right surface.
-	if _, _, err := st.SetItemTag(ctx, pid, "artist", []string{"x"}, model.SourceUser, true, false); !waxerr.Is(err, waxerr.CodeInvalid) {
+	if _, _, err := st.SetItemTag(ctx, pid, "artist", []string{"x"}, model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); !waxerr.Is(err, waxerr.CodeInvalid) {
 		t.Fatalf("reserved key should be CodeInvalid, got %v", err)
 	}
 	// An invalid key is rejected.
-	if _, _, err := st.SetItemTag(ctx, pid, "bad=key", []string{"x"}, model.SourceUser, true, false); !waxerr.Is(err, waxerr.CodeInvalid) {
+	if _, _, err := st.SetItemTag(ctx, pid, "bad=key", []string{"x"}, model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); !waxerr.Is(err, waxerr.CodeInvalid) {
 		t.Fatalf("invalid key should be CodeInvalid, got %v", err)
 	}
 
 	// A whitespace-only value trims to empty, so it clears (reporting 0 stored) rather
 	// than reading as a set of one value. Even with lock on (the default), a clear must
 	// NOT leave a locked-empty tag behind (force is needed to clear the locked MOOD).
-	if _, n, err := st.SetItemTag(ctx, pid, "MOOD", []string{"   "}, model.SourceUser, true, true); err != nil || n != 0 {
+	if _, n, err := st.SetItemTag(ctx, pid, "MOOD", []string{"   "}, model.Attribution{Source: model.SourceUser}, model.LockOf(true), true); err != nil || n != 0 {
 		t.Fatalf("whitespace-only value should clear (n=0), got n=%d err=%v", n, err)
 	}
 	if got := tagValues(t, st, pid, "MOOD"); got != nil {
@@ -94,7 +94,7 @@ func TestSetItemTag(t *testing.T) {
 		t.Fatalf("a clear must drop the tag.MOOD lock, not leave a locked-empty tag")
 	}
 	// Because the clear dropped the lock, a re-set needs no force.
-	if _, n, err := st.SetItemTag(ctx, pid, "MOOD", []string{"reset"}, model.SourceUser, true, false); err != nil || n != 1 {
+	if _, n, err := st.SetItemTag(ctx, pid, "MOOD", []string{"reset"}, model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil || n != 1 {
 		t.Fatalf("re-set after a clear should succeed without force: n=%d err=%v", n, err)
 	}
 }
@@ -112,7 +112,7 @@ func TestScanPreservesLockedCustomTag(t *testing.T) {
 	}
 
 	// User curates and locks MOOD.
-	if _, _, err := st.SetItemTag(ctx, pid, "MOOD", []string{"locked-mood"}, model.SourceUser, true, true); err != nil {
+	if _, _, err := st.SetItemTag(ctx, pid, "MOOD", []string{"locked-mood"}, model.Attribution{Source: model.SourceUser}, model.LockOf(true), true); err != nil {
 		t.Fatalf("set tag: %v", err)
 	}
 
@@ -148,7 +148,7 @@ func TestScanRefreshesFTSOnTagChangeWithoutAudioChange(t *testing.T) {
 	pid := res.ItemPID
 
 	// User overrides MOOD (unlocked) to a searchable value.
-	if _, _, err := st.SetItemTag(ctx, pid, "MOOD", []string{"editvalue"}, model.SourceUser, false, false); err != nil {
+	if _, _, err := st.SetItemTag(ctx, pid, "MOOD", []string{"editvalue"}, model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("set tag: %v", err)
 	}
 	sr, _ := st.Search(ctx, "editvalue", read.SearchOptions{})
@@ -188,7 +188,7 @@ func TestCustomTagIsSearchable(t *testing.T) {
 	pid := res.ItemPID
 
 	// A distinctive custom-tag value should surface the item in full-text search.
-	if _, _, err := st.SetItemTag(ctx, pid, "MOOD", []string{"melancholic"}, model.SourceUser, true, false); err != nil {
+	if _, _, err := st.SetItemTag(ctx, pid, "MOOD", []string{"melancholic"}, model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
 		t.Fatalf("set tag: %v", err)
 	}
 	sr, err := st.Search(ctx, "melancholic", read.SearchOptions{})
@@ -211,7 +211,7 @@ func TestScanDropsALockedRowUnderANewlyReservedKey(t *testing.T) {
 		map[string][]string{"MOOD": {"chill"}}, true)
 	pid := res.ItemPID
 	// The control: a curated, locked tag under a key that stays custom.
-	if _, _, err := st.SetItemTag(ctx, pid, "MOOD", []string{"chill"}, model.SourceUser, true, true); err != nil {
+	if _, _, err := st.SetItemTag(ctx, pid, "MOOD", []string{"chill"}, model.Attribution{Source: model.SourceUser}, model.LockOf(true), true); err != nil {
 		t.Fatalf("lock MOOD: %v", err)
 	}
 

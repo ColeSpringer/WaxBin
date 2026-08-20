@@ -58,13 +58,16 @@ var releaseGroupTypes = map[string]bool{
 // ValidReleaseGroupType reports whether s is an accepted release-group type.
 func ValidReleaseGroupType(s string) bool { return releaseGroupTypes[s] }
 
-// EntityCuration is one entity_curation row: an entity field's source, lock state, and
-// the curated value when a user set one.
+// EntityCuration is one entity_curation row: an entity field's source and the provider
+// behind it, its lock state, and the curated value when a user set one. It carries no
+// SourceURL, because entity_curation has no column for one, which is why Attribution is
+// not embedded here the way it is on FieldProvenance.
 type EntityCuration struct {
 	EntityType MergeEntity
 	EntityPID  PID
 	Field      string
 	Source     ProvenanceSource
+	Provider   string // enrichment provider id (empty for a tag or user edit)
 	Locked     bool
 	Value      string
 	UpdatedAt  int64 // unix nanoseconds

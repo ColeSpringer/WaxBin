@@ -534,22 +534,21 @@ func (s *Service) fetchImage(ctx context.Context, url string) *model.ArtImage {
 		s.log.Debug("podcast image fetch failed", "url", url, "err", err)
 		return nil
 	}
-	img := &model.ArtImage{Data: resp.Body, Source: model.SourceFeed, SourceURL: url}
-	img.Hash = art.Hash(resp.Body)
-	format, w, h, err := art.Probe(resp.Body)
-	if err != nil {
-		// Fall back to the magic sniff for an AVIF/HEIC cover, the same second chance
-		// probeArtImage gives a user-supplied one. Without it a feed publishing an
-		// exotic-but-valid channel image attaches nothing, and since the sync now
-		// compares against the cover it holds rather than the URL the feed advertises,
-		// nothing would ever advance and every later sync would re-download it.
-		if f, ok := art.SniffExotic(resp.Body); ok {
-			img.Format = f
-			return img
-		}
-		s.log.Debug("podcast image undecodable", "url", url, "err", err)
+	// Describe recognizes an AVIF/HEIC channel image on its magic alone, the same second
+	// chance probeArtImage gives a user-supplied one. Without it a feed publishing an
+	// exotic-but-valid image attaches nothing, and since the sync compares against the
+	// cover it holds rather than the URL the feed advertises, nothing would ever advance
+	// and every later sync would re-download it.
+	info := art.Describe(resp.Body)
+	if info.Format == "" {
+		// Re-probe for the reason, the way the cover-art provider does: a feed serving an
+		// error page and one serving a truncated image should not log identically.
+		_, _, _, perr := art.Probe(resp.Body)
+		s.log.Debug("podcast image undecodable", "url", url, "bytes", len(resp.Body), "err", perr)
 		return nil
 	}
-	img.Format, img.Width, img.Height = format, w, h
-	return img
+	return &model.ArtImage{
+		Data: resp.Body, Hash: info.Hash, Format: info.Format, Width: info.Width, Height: info.Height,
+		Attribution: model.Attribution{Source: model.SourceFeed, SourceURL: url},
+	}
 }

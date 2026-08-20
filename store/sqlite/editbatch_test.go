@@ -18,7 +18,7 @@ func TestEditItemsFieldsPerItemMaps(t *testing.T) {
 	res, err := st.EditItemsFields(ctx, []model.ItemFieldEdit{
 		{ItemPID: p1, Fields: map[string]string{"title": "Opener", "track_no": "1"}},
 		{ItemPID: p2, Fields: map[string]string{"title": "Closer", "track_no": "9"}},
-	}, model.SourceUser, true, false, false)
+	}, model.Attribution{Source: model.SourceUser}, model.LockOf(true), false, false)
 	if err != nil {
 		t.Fatalf("batch: %v", err)
 	}
@@ -55,7 +55,7 @@ func TestEditItemsFieldsAtomic(t *testing.T) {
 	_, err := st.EditItemsFields(ctx, []model.ItemFieldEdit{
 		{ItemPID: p1, Fields: map[string]string{"title": "Changed"}},
 		{ItemPID: p2, Fields: map[string]string{"publisher": "X"}}, // a book field on a track
-	}, model.SourceUser, true, false, false)
+	}, model.Attribution{Source: model.SourceUser}, model.LockOf(true), false, false)
 	if !waxerr.Is(err, waxerr.CodeInvalid) {
 		t.Fatalf("bad field = %v, want CodeInvalid", err)
 	}
@@ -71,7 +71,7 @@ func TestEditItemsFieldsAtomic(t *testing.T) {
 	_, err = st.EditItemsFields(ctx, []model.ItemFieldEdit{
 		{ItemPID: p1, Fields: map[string]string{"title": "Changed"}},
 		{ItemPID: "no-such-item", Fields: map[string]string{"title": "X"}},
-	}, model.SourceUser, true, false, false)
+	}, model.Attribution{Source: model.SourceUser}, model.LockOf(true), false, false)
 	if !waxerr.Is(err, waxerr.CodeNotFound) {
 		t.Fatalf("missing pid = %v, want CodeNotFound", err)
 	}
@@ -91,18 +91,18 @@ func TestEditItemsFieldsSkipLocked(t *testing.T) {
 	st, _, p1, p2 := twoTrackFixture(t)
 	ctx := context.Background()
 
-	if err := st.EditItemField(ctx, p1, "genre", "Locked", model.SourceUser, true, false); err != nil {
+	if err := st.EditItemField(ctx, p1, "genre", "Locked", model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
 		t.Fatalf("lock: %v", err)
 	}
 	batch := []model.ItemFieldEdit{
 		{ItemPID: p1, Fields: map[string]string{"genre": "Jazz"}},
 		{ItemPID: p2, Fields: map[string]string{"genre": "Blues"}},
 	}
-	if _, err := st.EditItemsFields(ctx, batch, model.SourceUser, true, false, false); !waxerr.Is(err, waxerr.CodeLocked) {
+	if _, err := st.EditItemsFields(ctx, batch, model.Attribution{Source: model.SourceUser}, model.LockOf(true), false, false); !waxerr.Is(err, waxerr.CodeLocked) {
 		t.Fatalf("locked batch = %v, want CodeLocked", err)
 	}
 
-	res, err := st.EditItemsFields(ctx, batch, model.SourceUser, true, false, true)
+	res, err := st.EditItemsFields(ctx, batch, model.Attribution{Source: model.SourceUser}, model.LockOf(true), false, true)
 	if err != nil {
 		t.Fatalf("skip-locked batch: %v", err)
 	}
@@ -124,7 +124,7 @@ func TestEditItemsFieldsDuplicatePID(t *testing.T) {
 	_, err := st.EditItemsFields(context.Background(), []model.ItemFieldEdit{
 		{ItemPID: p1, Fields: map[string]string{"title": "A"}},
 		{ItemPID: p1, Fields: map[string]string{"title": "B"}},
-	}, model.SourceUser, true, false, false)
+	}, model.Attribution{Source: model.SourceUser}, model.LockOf(true), false, false)
 	if !waxerr.Is(err, waxerr.CodeInvalid) {
 		t.Fatalf("duplicate pid = %v, want CodeInvalid", err)
 	}
@@ -144,7 +144,7 @@ func TestEditItemsFieldsMixedKinds(t *testing.T) {
 	res, err := st.EditItemsFields(ctx, []model.ItemFieldEdit{
 		{ItemPID: p1, Fields: map[string]string{"artist": "Renamed Artist"}},
 		{ItemPID: bres.ItemPID, Fields: map[string]string{"author": "Renamed Author", "isbn": "978-0-13-468599-1"}},
-	}, model.SourceUser, true, false, false)
+	}, model.Attribution{Source: model.SourceUser}, model.LockOf(true), false, false)
 	if err != nil {
 		t.Fatalf("mixed batch: %v", err)
 	}

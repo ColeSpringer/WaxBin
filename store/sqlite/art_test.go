@@ -27,7 +27,8 @@ func testPNG(t *testing.T, w, h int) *model.ArtImage {
 		t.Fatalf("encode png: %v", err)
 	}
 	data := buf.Bytes()
-	return &model.ArtImage{Data: data, Format: "png", Width: w, Height: h, Hash: art.Hash(data), Source: model.SourceTag}
+	return &model.ArtImage{Data: data, Format: "png", Width: w, Height: h, Hash: art.Hash(data),
+		Attribution: model.Attribution{Source: model.SourceTag}}
 }
 
 func putWithCover(t *testing.T, st *Store, libID int64, path, essence string, cover *model.ArtImage) model.PID {

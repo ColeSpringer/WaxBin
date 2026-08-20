@@ -81,7 +81,7 @@ func TestEditEntityWriteBackFanOut(t *testing.T) {
 	if err := lib.EditEntity(ctx, model.MergeAlbum, albumPID, map[string]string{
 		"barcode": "0123456789012",
 		"sort":    "Night Moves, The",
-	}, waxbin.EntityEditOptions{WriteBack: true, Lock: true}); err != nil {
+	}, waxbin.EntityEditOptions{WriteBack: true, Lock: model.LockOn}); err != nil {
 		t.Fatalf("entity edit write-back: %v", err)
 	}
 
@@ -126,7 +126,7 @@ func TestEditEntityArtistSortOnlyPrimaryArtist(t *testing.T) {
 	xavier := artistPIDByName(t, ctx, db, "Xavier")
 
 	if err := lib.EditEntity(ctx, model.MergeArtist, xavier, map[string]string{"sort": "Xavier, DJ"},
-		waxbin.EntityEditOptions{WriteBack: true, Lock: true}); err != nil {
+		waxbin.EntityEditOptions{WriteBack: true, Lock: model.LockOn}); err != nil {
 		t.Fatalf("artist sort write-back: %v", err)
 	}
 
@@ -161,7 +161,7 @@ func TestEditComposerSortWriteBack(t *testing.T) {
 
 	if err := lib.EditFields(ctx, pid, map[string]string{
 		"composer": "Amy Arranger", "composer_sort": "Arranger, Amy",
-	}, waxbin.EditOptions{Lock: true, WriteBack: true}); err != nil {
+	}, waxbin.EditOptions{Lock: model.LockOn, WriteBack: true}); err != nil {
 		t.Fatalf("edit with write-back: %v", err)
 	}
 
@@ -216,7 +216,7 @@ func TestEditComposerWriteBackClearsStaleSortTag(t *testing.T) {
 
 	if err := lib.EditFields(ctx, pid, map[string]string{
 		"composer": "New Composer", "artist": "New Artist",
-	}, waxbin.EditOptions{Lock: true, WriteBack: true}); err != nil {
+	}, waxbin.EditOptions{Lock: model.LockOn, WriteBack: true}); err != nil {
 		t.Fatalf("edit with write-back: %v", err)
 	}
 
@@ -252,13 +252,13 @@ func TestEditComposerWriteBackClearsStaleSortTag(t *testing.T) {
 	// A locked composer_sort keeps its tag through a later composer edit: the
 	// curated value stays represented on disk.
 	if err := lib.EditField(ctx, pid, "composer_sort", "Curated, Sort",
-		waxbin.EditOptions{Lock: true, WriteBack: true}); err != nil {
+		waxbin.EditOptions{Lock: model.LockOn, WriteBack: true}); err != nil {
 		t.Fatalf("curate composer_sort: %v", err)
 	}
-	// Force clears the composer's own lock from the first edit; the subject here
-	// is the sort tag, which the locked composer_sort must keep.
+	// Force writes through the composer's own lock from the first edit without releasing
+	// it; the subject here is the sort tag, which the locked composer_sort must keep.
 	if err := lib.EditField(ctx, pid, "composer", "Third Composer",
-		waxbin.EditOptions{Lock: true, Force: true, WriteBack: true}); err != nil {
+		waxbin.EditOptions{Lock: model.LockOn, Force: true, WriteBack: true}); err != nil {
 		t.Fatalf("composer edit over locked sort: %v", err)
 	}
 	fm, err = meta.NewReader().Read(ctx, src)
@@ -293,7 +293,7 @@ func TestEditAuthorWriteBackClearsStaleSortTag(t *testing.T) {
 	}
 
 	if err := lib.EditField(ctx, books[0].PID, "author", "New Author",
-		waxbin.EditOptions{Lock: true, WriteBack: true}); err != nil {
+		waxbin.EditOptions{Lock: model.LockOn, WriteBack: true}); err != nil {
 		t.Fatalf("author write-back: %v", err)
 	}
 
@@ -343,7 +343,7 @@ func TestEditAuthorSortWriteBack(t *testing.T) {
 	}
 
 	if err := lib.EditField(ctx, books[0].PID, "author_sort", "Author, Jane",
-		waxbin.EditOptions{Lock: true, WriteBack: true}); err != nil {
+		waxbin.EditOptions{Lock: model.LockOn, WriteBack: true}); err != nil {
 		t.Fatalf("author_sort write-back: %v", err)
 	}
 
@@ -384,21 +384,24 @@ func TestSetItemArtWriteBack(t *testing.T) {
 	}
 	pid := itemPIDByTitle(t, ctx, lib, "Song")
 
-	if err := lib.SetItemArt(ctx, pid, model.ArtRoleFront, coverPNG(t), true, false, true); err != nil {
+	if err := lib.SetItemArt(ctx, pid, model.ArtRoleFront, coverPNG(t),
+		waxbin.ArtEditOptions{Lock: model.LockOn, WriteBack: true}); err != nil {
 		t.Fatalf("set item art write-back: %v", err)
 	}
 	assertFrontCover(t, ctx, src)
 
 	// Only the front cover has an embedded representation, so --write-back with any
 	// other role is refused before the catalog write: the back slot stays empty.
-	if err := lib.SetItemArt(ctx, pid, model.ArtRoleBack, coverPNG(t), false, false, true); !waxerr.Is(err, waxerr.CodeInvalid) {
+	if err := lib.SetItemArt(ctx, pid, model.ArtRoleBack, coverPNG(t),
+		waxbin.ArtEditOptions{Lock: model.LockOff, WriteBack: true}); !waxerr.Is(err, waxerr.CodeInvalid) {
 		t.Fatalf("back + write-back = %v, want CodeInvalid", err)
 	}
 	if _, err := lib.ResolveArt(ctx, model.EntityRef{Type: model.ArtTrack, PID: pid}, model.ArtRoleBack, 0); !waxerr.Is(err, waxerr.CodeNotFound) {
 		t.Errorf("refused write-back still wrote the catalog row: %v", err)
 	}
 	// Without write-back the back slot sets fine.
-	if err := lib.SetItemArt(ctx, pid, model.ArtRoleBack, coverPNG(t), false, false, false); err != nil {
+	if err := lib.SetItemArt(ctx, pid, model.ArtRoleBack, coverPNG(t),
+		waxbin.ArtEditOptions{Lock: model.LockOff}); err != nil {
 		t.Errorf("back without write-back: %v", err)
 	}
 }
@@ -426,7 +429,8 @@ func TestSetItemArtWriteBackMultiFileBook(t *testing.T) {
 		t.Fatalf("book query: %d books (err %v), want 1", len(books), err)
 	}
 
-	if err := lib.SetItemArt(ctx, books[0].PID, model.ArtRoleFront, coverPNG(t), true, false, true); err != nil {
+	if err := lib.SetItemArt(ctx, books[0].PID, model.ArtRoleFront, coverPNG(t),
+		waxbin.ArtEditOptions{Lock: model.LockOn, WriteBack: true}); err != nil {
 		t.Fatalf("set item art write-back: %v", err)
 	}
 	for _, p := range parts {
@@ -452,7 +456,8 @@ func TestSetEntityArtAlbumFanOut(t *testing.T) {
 	}
 	albumPID := albumPIDByTitle(t, ctx, db, "Night Moves")
 
-	if err := lib.SetEntityArt(ctx, model.ArtAlbum, albumPID, model.ArtRoleFront, coverPNG(t), false, false, true); err != nil {
+	if err := lib.SetEntityArt(ctx, model.ArtAlbum, albumPID, model.ArtRoleFront, coverPNG(t),
+		waxbin.ArtEditOptions{Lock: model.LockOff, WriteBack: true}); err != nil {
 		t.Fatalf("set album art write-back: %v", err)
 	}
 	assertFrontCover(t, ctx, one)
@@ -481,7 +486,7 @@ func TestSetCreditsBookWriteBack(t *testing.T) {
 
 	// An author credit round-trips to ALBUMARTIST.
 	if _, err := lib.SetCredits(ctx, pid, model.RoleAuthor, []string{"J.R.R. Tolkien"},
-		waxbin.CreditEditOptions{WriteBack: true, Lock: true}); err != nil {
+		waxbin.CreditEditOptions{WriteBack: true, Lock: model.LockOn}); err != nil {
 		t.Fatalf("book author credit write-back: %v", err)
 	}
 	fm, err := meta.NewReader().Read(ctx, src)
@@ -503,7 +508,7 @@ func TestSetCreditsBookWriteBack(t *testing.T) {
 	// A translator credit has no scanner tag, so write-back is refused; the catalog
 	// edit still stands.
 	_, err = lib.SetCredits(ctx, pid, model.RoleTranslator, []string{"A. Translator"},
-		waxbin.CreditEditOptions{WriteBack: true, Lock: true})
+		waxbin.CreditEditOptions{WriteBack: true, Lock: model.LockOn})
 	var wbErr *waxbin.WriteBackError
 	if !errors.As(err, &wbErr) {
 		t.Fatalf("book translator write-back: want *WriteBackError, got %v", err)
@@ -550,7 +555,7 @@ func TestScanSplitCreditRoundTripsThroughCreditWriteBack(t *testing.T) {
 	// splitter marker of its own, which is what makes the rescan below meaningful.
 	want := []string{"Jay-Z", "Run-D.M.C. vs. Jason Nevins"}
 	if _, err := lib.SetCredits(ctx, pid, model.RoleArtist, want,
-		waxbin.CreditEditOptions{WriteBack: true, Lock: false}); err != nil {
+		waxbin.CreditEditOptions{WriteBack: true, Lock: model.LockOff}); err != nil {
 		t.Fatalf("artist credit write-back: %v", err)
 	}
 	fm, err := meta.NewReader().Read(ctx, src)
@@ -622,7 +627,8 @@ func TestSetEntityArtAlbumFanOutRefusesSharedMember(t *testing.T) {
 	makeBackingFileVirtual(t, ctx, db, itemPIDByTitle(t, ctx, lib, "Track Two"))
 	albumPID := albumPIDByTitle(t, ctx, db, "Night Moves")
 
-	err := lib.SetEntityArt(ctx, model.ArtAlbum, albumPID, model.ArtRoleFront, coverPNG(t), false, false, true)
+	err := lib.SetEntityArt(ctx, model.ArtAlbum, albumPID, model.ArtRoleFront, coverPNG(t),
+		waxbin.ArtEditOptions{Lock: model.LockOff, WriteBack: true})
 	var wbErr *waxbin.WriteBackError
 	if !errors.As(err, &wbErr) {
 		t.Fatalf("want *WriteBackError for a shared member, got %v", err)

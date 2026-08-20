@@ -106,31 +106,46 @@ type ArtRoleInfo struct {
 	Width      int
 	Height     int
 	SourceHash string
-	Source     ProvenanceSource
-	Provider   string
-	SourceURL  string
-	UpdatedAt  int64 // unix nanoseconds
-	Locked     bool
+	Attribution
+	UpdatedAt int64 // unix nanoseconds
+	Locked    bool
 }
 
 // ArtImage is a source cover image plus its content hash, decoded dimensions, and
-// the provenance of this particular ingest. Hash is the content-address key; the
-// ingestor fills it (and the dimensions) before the store dedups and persists the
-// image.
+// the provenance of this particular ingest. Hash is the content-address key. A producer
+// normally fills it and the dimensions before handing the image over; one that fills
+// neither has them derived from the bytes at the store's write chokepoints rather than
+// losing the write.
 //
-// Every producer stamps Source, and the store refuses an image without one. Provider
-// names the metadata provider for an enrichment cover; SourceURL holds the fetch URL
-// for a fetched or feed cover and stays empty otherwise. See art_map in 09_curation.sql
-// for why the attachment carries this rather than the content-addressed blob.
+// Every producer stamps an Attribution, and the store refuses an image whose one is not
+// Valid, so an enrichment cover always names the provider that supplied it. SourceURL
+// holds the fetch URL for a fetched or feed cover and stays empty otherwise. See art_map
+// in 09_curation.sql for why the attachment carries this rather than the
+// content-addressed blob.
 type ArtImage struct {
-	Data      []byte
-	Format    string // jpeg|png|webp|gif
-	Width     int
-	Height    int
-	Hash      string
-	Source    ProvenanceSource
-	Provider  string
-	SourceURL string
+	Data   []byte
+	Format string // jpeg|png|webp|gif
+	Width  int
+	Height int
+	Hash   string
+	Attribution
+}
+
+// ArtProvenance describes what one art resolve would answer with, without loading the
+// picture. The dimensions are the stored source's rather than any thumbnail's, which is
+// what separates it from ArtBlob, and it carries no Locked because a lock belongs to the
+// entity that was asked about rather than to whichever chain level answered.
+type ArtProvenance struct {
+	Role       ArtRole
+	Level      ArtEntity
+	Derived    bool
+	SourceHash string
+	Format     string
+	Width      int
+	Height     int
+	Size       int
+	Attribution
+	UpdatedAt int64 // unix nanoseconds
 }
 
 // ArtBlob is resolved art ready to serve: an original source image or a generated
@@ -150,8 +165,6 @@ type ArtBlob struct {
 	Derived    bool
 	// Where the answering level's attachment came from. A derived album cover reports
 	// the member track's provenance, since that is the picture being served.
-	Source    ProvenanceSource
-	Provider  string
-	SourceURL string
+	Attribution
 	UpdatedAt int64 // unix nanoseconds
 }

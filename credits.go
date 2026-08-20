@@ -14,10 +14,23 @@ type CreditEditOptions struct {
 	// track's music role, or a book's author (ALBUMARTIST) / narrator (NARRATOR+COMPOSER).
 	// A book translator/editor credit has no round-trippable tag and is refused.
 	WriteBack bool
-	// Lock locks the credit.<role> field against enrichment/organize; on by default.
-	Lock bool
+	// Lock is the instruction for the credit.<role> field's lock, which guards it
+	// against enrichment and organize. The zero value leaves the stored lock alone;
+	// the CLI states LockOn or LockOff explicitly.
+	Lock model.LockChange
 	// Force overrides a locked credit role.
 	Force bool
+	// Source is where the names came from; empty records a user edit.
+	Source model.ProvenanceSource
+	// Provider names the service that supplied an enrichment value, and is required
+	// with that source and refused with any other.
+	Provider string
+}
+
+// Attribution is the store-side value Source and Provider describe. See
+// EditOptions.Attribution.
+func (o CreditEditOptions) Attribution() model.Attribution {
+	return model.Attribution{Source: o.Source, Provider: o.Provider}
 }
 
 // Credits returns an item's contributors across every role.
@@ -26,8 +39,8 @@ func (l *Library) Credits(ctx context.Context, itemPID model.PID) ([]model.Contr
 }
 
 // SetCredits replaces the contributors of one role on an item (music roles on a
-// track, book roles on a book), recording user provenance and, by default, locking
-// the credit.<role> field. With opts.WriteBack it also mirrors the credit into the
+// track, book roles on a book), recording opts.Source (empty means a user edit) and
+// opts.Lock on the credit.<role> field. With opts.WriteBack it also mirrors the credit into the
 // backing file's on-disk tag: a track's music role, or a book's author/narrator across
 // its parts. A book translator/editor credit has no round-trippable tag and is
 // refused (returned as a *WriteBackError) while the catalog edit stands. It returns the
@@ -35,7 +48,7 @@ func (l *Library) Credits(ctx context.Context, itemPID model.PID) ([]model.Contr
 // by artist), so a caller does not report a wipe (an unresolvable name that cleared the
 // role) as a set.
 func (l *Library) SetCredits(ctx context.Context, itemPID model.PID, role model.ContributorRole, names []string, opts CreditEditOptions) (int, error) {
-	stored, err := l.store.SetItemCredits(ctx, itemPID, role, names, model.SourceUser, opts.Lock, opts.Force)
+	stored, err := l.store.SetItemCredits(ctx, itemPID, role, names, opts.Attribution(), opts.Lock, opts.Force)
 	if err != nil {
 		return 0, err
 	}

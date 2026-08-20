@@ -42,19 +42,23 @@ func curatableFieldForKind(kind, field string) bool {
 // a scan's contributor resolution), so setting the producers leaves the composers and
 // the book's author untouched. It keeps the denormalized column in step for the roles
 // that have one (composer on a track; author/narrator on a book), refreshes the
-// touched artists' rollups, records a credit.<role> provenance row (locked by
-// default), rebuilds the item's search row when the role feeds it, and emits one item
-// delta. A role that does not apply to the item's kind is CodeInvalid; a locked
-// credit role is CodeLocked unless force is set. It returns the names actually
-// stored (trimmed, resolvable, de-duplicated by artist), which is what the denorm
-// column, provenance value, and any tag write-back reflect.
-func (s *Store) SetItemCredits(ctx context.Context, itemPID model.PID, role model.ContributorRole, names []string, source model.ProvenanceSource, lock, force bool) ([]string, error) {
+// touched artists' rollups, records a credit.<role> provenance row carrying the
+// caller's attribution and lock instruction, rebuilds the item's search row when the
+// role feeds it, and emits one item delta. A role that does not apply to the item's
+// kind is CodeInvalid; a locked credit role is CodeLocked unless force is set. It
+// returns the names actually stored (trimmed, resolvable, de-duplicated by artist),
+// which is what the denorm column, provenance value, and any tag write-back reflect.
+func (s *Store) SetItemCredits(ctx context.Context, itemPID model.PID, role model.ContributorRole, names []string, attr model.Attribution, lock model.LockChange, force bool) ([]string, error) {
 	const op = "store.SetItemCredits"
 	if !role.Valid() {
 		return nil, waxerr.New(waxerr.CodeInvalid, op, "unknown contributor role: "+string(role))
 	}
-	if !source.ValidForField() {
-		return nil, waxerr.New(waxerr.CodeInvalid, op, "invalid provenance source: "+string(source))
+	attr, err := checkFieldAttribution(attr, op)
+	if err != nil {
+		return nil, err
+	}
+	if err := checkLockChange(lock, op); err != nil {
+		return nil, err
 	}
 	// Trim and drop empties, preserving order, so a blank entry never resolves to a
 	// junk artist. An empty result clears the role.
@@ -67,7 +71,7 @@ func (s *Store) SetItemCredits(ctx context.Context, itemPID model.PID, role mode
 	field := model.CreditField(role)
 
 	var stored []string
-	err := s.writeTx(ctx, func(tx *sql.Tx) error {
+	err = s.writeTx(ctx, func(tx *sql.Tx) error {
 		itemID, kind, err := itemIDKindByPIDTx(ctx, tx, itemPID, op)
 		if err != nil {
 			return err
@@ -160,8 +164,9 @@ func (s *Store) SetItemCredits(ctx context.Context, itemPID model.PID, role mode
 			}
 		}
 
-		// Record the credit's provenance (value = the display list), locking by default.
-		if err := upsertEditProvenanceTx(ctx, tx, itemID, field, source, strings.Join(resolved, "; "), lock, nowNS()); err != nil {
+		// Record the credit's provenance (value = the display list) under the caller's
+		// attribution and lock instruction.
+		if err := upsertEditProvenanceTx(ctx, tx, itemID, field, attr, strings.Join(resolved, "; "), lock, nowNS()); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		stored = resolved

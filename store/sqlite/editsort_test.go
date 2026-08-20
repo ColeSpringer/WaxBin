@@ -45,7 +45,7 @@ func TestEditComposerSortMatrix(t *testing.T) {
 
 	// An explicit edit stores the literal value (not SortKey-folded); the lock is
 	// what makes it durable.
-	if err := st.EditItemField(ctx, pid, "composer_sort", "Writer, The", model.SourceUser, true, false); err != nil {
+	if err := st.EditItemField(ctx, pid, "composer_sort", "Writer, The", model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
 		t.Fatalf("edit composer_sort: %v", err)
 	}
 	if _, sort := trackComposerRow(t, st, pid); sort != "Writer, The" {
@@ -53,12 +53,12 @@ func TestEditComposerSortMatrix(t *testing.T) {
 	}
 
 	// Editing the locked sort itself without force is refused.
-	if err := st.EditItemField(ctx, pid, "composer_sort", "X", model.SourceUser, false, false); !waxerr.Is(err, waxerr.CodeLocked) {
+	if err := st.EditItemField(ctx, pid, "composer_sort", "X", model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); !waxerr.Is(err, waxerr.CodeLocked) {
 		t.Fatalf("edit locked composer_sort = %v, want CodeLocked", err)
 	}
 
 	// A composer edit regenerates the sort, but the locked sort survives it.
-	if err := st.EditItemField(ctx, pid, "composer", "New Name", model.SourceUser, false, false); err != nil {
+	if err := st.EditItemField(ctx, pid, "composer", "New Name", model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("edit composer over locked sort: %v", err)
 	}
 	comp, sort := trackComposerRow(t, st, pid)
@@ -70,7 +70,7 @@ func TestEditComposerSortMatrix(t *testing.T) {
 	if err := st.UnlockField(ctx, pid, "composer_sort"); err != nil {
 		t.Fatalf("unlock: %v", err)
 	}
-	if err := st.EditItemField(ctx, pid, "composer", "Third Name", model.SourceUser, false, false); err != nil {
+	if err := st.EditItemField(ctx, pid, "composer", "Third Name", model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("edit composer unlocked: %v", err)
 	}
 	if _, sort := trackComposerRow(t, st, pid); sort != model.SortKey("Third Name") {
@@ -78,10 +78,10 @@ func TestEditComposerSortMatrix(t *testing.T) {
 	}
 
 	// Clearing the sort reverts to the key derived from the composer.
-	if err := st.EditItemField(ctx, pid, "composer_sort", "Custom Order", model.SourceUser, false, false); err != nil {
+	if err := st.EditItemField(ctx, pid, "composer_sort", "Custom Order", model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("set literal: %v", err)
 	}
-	if err := st.EditItemField(ctx, pid, "composer_sort", "", model.SourceUser, false, false); err != nil {
+	if err := st.EditItemField(ctx, pid, "composer_sort", "", model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("clear composer_sort: %v", err)
 	}
 	if _, sort := trackComposerRow(t, st, pid); sort != model.SortKey("Third Name") {
@@ -92,7 +92,7 @@ func TestEditComposerSortMatrix(t *testing.T) {
 	// sort wins over the regeneration.
 	if err := st.EditItemFields(ctx, pid, map[string]string{
 		"composer": "Fourth Name", "composer_sort": "Fourth, The",
-	}, model.SourceUser, false, false); err != nil {
+	}, model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("combined edit: %v", err)
 	}
 	comp, sort = trackComposerRow(t, st, pid)
@@ -103,7 +103,7 @@ func TestEditComposerSortMatrix(t *testing.T) {
 	// Clearing the composer clears the derived sort with it.
 	if err := st.EditItemFields(ctx, pid, map[string]string{
 		"composer": "", "composer_sort": "",
-	}, model.SourceUser, false, false); err != nil {
+	}, model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("clear both: %v", err)
 	}
 	if comp, sort = trackComposerRow(t, st, pid); comp != "" || sort != "" {
@@ -125,7 +125,7 @@ func TestEditAuthorSortMatrix(t *testing.T) {
 	}
 
 	// The literal value is stored, not its SortKey folding.
-	if err := st.EditItemField(ctx, pid, "author_sort", "Author, Jane", model.SourceUser, true, false); err != nil {
+	if err := st.EditItemField(ctx, pid, "author_sort", "Author, Jane", model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
 		t.Fatalf("edit author_sort: %v", err)
 	}
 	if _, sort := bookAuthorRow(t, st, pid); sort != "Author, Jane" {
@@ -133,7 +133,7 @@ func TestEditAuthorSortMatrix(t *testing.T) {
 	}
 
 	// An author edit re-derives the sort, but the locked sort survives.
-	if err := st.EditItemField(ctx, pid, "author", "John Writer", model.SourceUser, false, false); err != nil {
+	if err := st.EditItemField(ctx, pid, "author", "John Writer", model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("edit author over locked sort: %v", err)
 	}
 	author, sort := bookAuthorRow(t, st, pid)
@@ -145,7 +145,7 @@ func TestEditAuthorSortMatrix(t *testing.T) {
 	if err := st.UnlockField(ctx, pid, "author_sort"); err != nil {
 		t.Fatalf("unlock: %v", err)
 	}
-	if err := st.EditItemField(ctx, pid, "author", "Third Writer", model.SourceUser, false, false); err != nil {
+	if err := st.EditItemField(ctx, pid, "author", "Third Writer", model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("edit author unlocked: %v", err)
 	}
 	if _, sort := bookAuthorRow(t, st, pid); sort != model.SortKey("Third Writer") {
@@ -153,10 +153,10 @@ func TestEditAuthorSortMatrix(t *testing.T) {
 	}
 
 	// Clearing the sort reverts to the derived key.
-	if err := st.EditItemField(ctx, pid, "author_sort", "Custom", model.SourceUser, false, false); err != nil {
+	if err := st.EditItemField(ctx, pid, "author_sort", "Custom", model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("set literal: %v", err)
 	}
-	if err := st.EditItemField(ctx, pid, "author_sort", "", model.SourceUser, false, false); err != nil {
+	if err := st.EditItemField(ctx, pid, "author_sort", "", model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("clear author_sort: %v", err)
 	}
 	if _, sort := bookAuthorRow(t, st, pid); sort != model.SortKey("Third Writer") {
@@ -177,7 +177,7 @@ func TestCreditEditRespectsSortLocks(t *testing.T) {
 	ctx := context.Background()
 
 	// Unlocked: the credit edit regenerates composer_sort from the new display.
-	if _, err := st.SetItemCredits(ctx, pid, model.RoleComposer, []string{"Anna Arranger"}, model.SourceUser, false, false); err != nil {
+	if _, err := st.SetItemCredits(ctx, pid, model.RoleComposer, []string{"Anna Arranger"}, model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("set composer credit: %v", err)
 	}
 	comp, sort := trackComposerRow(t, st, pid)
@@ -186,10 +186,10 @@ func TestCreditEditRespectsSortLocks(t *testing.T) {
 	}
 
 	// Locked: the credit edit updates the display but the curated sort survives.
-	if err := st.EditItemField(ctx, pid, "composer_sort", "Arranger, Anna", model.SourceUser, true, false); err != nil {
+	if err := st.EditItemField(ctx, pid, "composer_sort", "Arranger, Anna", model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
 		t.Fatalf("lock composer_sort: %v", err)
 	}
-	if _, err := st.SetItemCredits(ctx, pid, model.RoleComposer, []string{"Bob Builder"}, model.SourceUser, false, false); err != nil {
+	if _, err := st.SetItemCredits(ctx, pid, model.RoleComposer, []string{"Bob Builder"}, model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("credit edit over locked sort: %v", err)
 	}
 	comp, sort = trackComposerRow(t, st, pid)
@@ -199,10 +199,10 @@ func TestCreditEditRespectsSortLocks(t *testing.T) {
 
 	// The book author credit follows the same rule.
 	stB, bookPID := bookEditFixture(t)
-	if err := stB.EditItemField(ctx, bookPID, "author_sort", "Author, Jane", model.SourceUser, true, false); err != nil {
+	if err := stB.EditItemField(ctx, bookPID, "author_sort", "Author, Jane", model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
 		t.Fatalf("lock author_sort: %v", err)
 	}
-	if _, err := stB.SetItemCredits(ctx, bookPID, model.RoleAuthor, []string{"New Author"}, model.SourceUser, false, false); err != nil {
+	if _, err := stB.SetItemCredits(ctx, bookPID, model.RoleAuthor, []string{"New Author"}, model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("author credit over locked sort: %v", err)
 	}
 	author, aSort := bookAuthorRow(t, stB, bookPID)
@@ -242,7 +242,7 @@ func TestScanPreservesLockedSortNames(t *testing.T) {
 	ctx := context.Background()
 
 	// Lock a curated composer_sort, then force-rescan with a different on-disk value.
-	if err := st.EditItemField(ctx, pid, "composer_sort", "Writer, The", model.SourceUser, true, false); err != nil {
+	if err := st.EditItemField(ctx, pid, "composer_sort", "Writer, The", model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
 		t.Fatalf("edit composer_sort: %v", err)
 	}
 	rescanTrackWithComposer(t, st, lib1ID(t, st), "/lib/Alpha/One/01.flac", "e1", "c2", "Disk Composer", true)
@@ -261,7 +261,7 @@ func TestScanPreservesLockedSortNames(t *testing.T) {
 	// collation cannot silently re-derive from the file's differing value. Fresh
 	// fixture: only the composer is locked here, never the sort.
 	st2, pid2 := editFixture(t)
-	if err := st2.EditItemField(ctx, pid2, "composer", "Curated Composer", model.SourceUser, true, false); err != nil {
+	if err := st2.EditItemField(ctx, pid2, "composer", "Curated Composer", model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
 		t.Fatalf("edit composer: %v", err)
 	}
 	rescanTrackWithComposer(t, st2, lib1ID(t, st2), "/lib/Alpha/One/01.flac", "e1", "c4", "Disk Composer", true)

@@ -40,13 +40,17 @@ func coverPNG(t *testing.T, seed int) []byte {
 // way every real producer does before the write.
 func stamped(t *testing.T, raw []byte, source model.ProvenanceSource, provider, srcURL string) *model.ArtImage {
 	t.Helper()
-	img := &model.ArtImage{Data: raw, Hash: art.Hash(raw), Source: source, Provider: provider, SourceURL: srcURL}
-	format, w, h, err := art.Probe(raw)
-	if err != nil {
-		t.Fatalf("probe cover: %v", err)
+	info := art.Describe(raw)
+	// Decoded, not merely recognized: an exotic source describes with zero dimensions by
+	// design, and a fixture built that way would send every later assertion down the
+	// serve-unscaled branch without saying so.
+	if info.Format == "" || info.Width == 0 || info.Height == 0 {
+		t.Fatalf("probe cover: %+v, want a decoded image", info)
 	}
-	img.Format, img.Width, img.Height = format, w, h
-	return img
+	return &model.ArtImage{
+		Data: raw, Hash: info.Hash, Format: info.Format, Width: info.Width, Height: info.Height,
+		Attribution: model.Attribution{Source: source, Provider: provider, SourceURL: srcURL},
+	}
 }
 
 // putCoveredTrack seeds one track carrying a scanned cover, the shape every ingest
@@ -152,7 +156,7 @@ func TestArtProvenancePerOrigin(t *testing.T) {
 		t.Errorf("directory cover = %q/%q, want sidecar with no source_url", got, url)
 	}
 
-	if err := st.SetItemArt(ctx, tagged, model.ArtRoleFront, coverPNG(t, 4), true, false); err != nil {
+	if err := st.SetItemArt(ctx, tagged, model.ArtRoleFront, coverPNG(t, 4), model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
 		t.Fatalf("SetItemArt: %v", err)
 	}
 	if got, _, _ := artRow(t, db, "track", itemRowID(t, db, tagged)); got != "user" {
@@ -241,6 +245,115 @@ func hasCode(err error, code waxerr.Code) bool {
 	return false
 }
 
+// sizedCoverPNG encodes a PNG at the requested size, for the cases that need a source
+// big enough to actually thumbnail.
+func sizedCoverPNG(t *testing.T, w, h int) []byte {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, w, h))
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			img.Set(x, y, color.RGBA{uint8(x % 256), uint8(y % 256), 64, 255})
+		}
+	}
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatalf("encode png: %v", err)
+	}
+	return buf.Bytes()
+}
+
+// storedArt reads the art_source row one entity's front cover maps to.
+func storedArt(t *testing.T, db *sql.DB, entityType string, entityID int64) (hash, format string, w, h, size int) {
+	t.Helper()
+	if err := db.QueryRow(
+		`SELECT s.hash, s.format, s.width, s.height, s.size FROM art_map m
+		 JOIN art_source s ON s.hash = m.source_hash
+		 WHERE m.entity_type=? AND m.entity_id=? AND m.role='front'`,
+		entityType, entityID).Scan(&hash, &format, &w, &h, &size); err != nil {
+		t.Fatalf("read stored art %s/%d: %v", entityType, entityID, err)
+	}
+	return hash, format, w, h, size
+}
+
+// TestUndescribedCoverIsStoredNotDropped is the fix for a producer that hands the store
+// good bytes and describes none of them, which every injected cover provider did: the
+// write used to be discarded with no error and no log. The address, format and
+// dimensions are all derivable from the bytes the store is already holding, so it
+// derives them.
+func TestUndescribedCoverIsStoredNotDropped(t *testing.T) {
+	st, dbPath, lib := openStoreAt(t)
+	raw := coverPNG(t, 11)
+
+	pid := putCoveredTrack(t, st, lib.ID, "/lib/u.flac", "ess-u", "Undescribed", "U",
+		&model.ArtImage{Data: raw, Attribution: model.Attribution{Source: model.SourceTag}})
+
+	db := roConn(t, dbPath)
+	hash, format, w, h, size := storedArt(t, db, "track", itemRowID(t, db, pid))
+	if hash != art.Hash(raw) {
+		t.Errorf("stored under %q, want the address the bytes imply (%q)", hash, art.Hash(raw))
+	}
+	if format != "png" || w != 8 || h != 8 || size != len(raw) {
+		t.Errorf("stored source = %s %dx%d %d bytes, want png 8x8 %d", format, w, h, size, len(raw))
+	}
+}
+
+// TestCoverWithFormatButNoDimensionsStillThumbnails is the half-described case, which
+// is worse than the undescribed one because it looks stored: zero dimensions read as
+// undecodable to ResolveArt, which then serves the source unscaled forever. Filling
+// each field independently is what keeps the thumbnail path reachable.
+func TestCoverWithFormatButNoDimensionsStillThumbnails(t *testing.T) {
+	ctx := context.Background()
+	st, dbPath, lib := openStoreAt(t)
+	raw := sizedCoverPNG(t, 400, 300)
+
+	pid := putCoveredTrack(t, st, lib.ID, "/lib/half.flac", "ess-half", "Half", "H",
+		&model.ArtImage{Data: raw, Hash: art.Hash(raw), Format: "png",
+			Attribution: model.Attribution{Source: model.SourceTag}})
+
+	db := roConn(t, dbPath)
+	if _, _, w, h, _ := storedArt(t, db, "track", itemRowID(t, db, pid)); w != 400 || h != 300 {
+		t.Fatalf("stored dimensions = %dx%d, want the bytes' own 400x300", w, h)
+	}
+	blob, err := st.ResolveArt(ctx, model.EntityRef{Type: model.ArtTrack, PID: pid}, model.ArtRoleFront, 100)
+	if err != nil {
+		t.Fatalf("ResolveArt: %v", err)
+	}
+	if !blob.Thumbnail || blob.Width != 100 {
+		t.Errorf("resolve at 100 = thumbnail %v %dx%d, want a scaled thumbnail",
+			blob.Thumbnail, blob.Width, blob.Height)
+	}
+}
+
+// TestUndescribedCoverMatchingTheStoredOneReattributes pins the second behaviour change
+// filling the address brings: the comparison that decides whether the slot moved now
+// happens against a real address, so a cover whose bytes match the stored one refreshes
+// the attribution in place instead of being dropped before the comparison ran.
+func TestUndescribedCoverMatchingTheStoredOneReattributes(t *testing.T) {
+	st, dbPath, lib := openStoreAt(t)
+	raw := coverPNG(t, 12)
+
+	pid := putCoveredTrack(t, st, lib.ID, "/lib/r.flac", "ess-r", "Rescan", "R",
+		stamped(t, raw, model.SourceTag, "", ""))
+	db := roConn(t, dbPath)
+	id := itemRowID(t, db, pid)
+	before, _, _, _, _ := storedArt(t, db, "track", id)
+
+	// The same picture from a new origin, described by nothing.
+	putCoveredTrack(t, st, lib.ID, "/lib/r.flac", "ess-r", "Rescan", "R",
+		&model.ArtImage{Data: raw, Attribution: model.Attribution{Source: model.SourceSidecar}})
+
+	if got, _, _ := artRow(t, db, "track", id); got != string(model.SourceSidecar) {
+		t.Errorf("source after the undescribed rescan = %q, want sidecar", got)
+	}
+	after, _, _, _, _ := storedArt(t, db, "track", id)
+	if after != before {
+		t.Errorf("source hash moved from %q to %q; the picture did not change", before, after)
+	}
+	if n := scalarInt64(t, db, "SELECT COUNT(*) FROM art_source"); n != 1 {
+		t.Errorf("art_source rows = %d, want 1 (the bytes are identical)", n)
+	}
+}
+
 // TestThumbnailCacheDoesNotCacheProvenance is the regression the thumbnail cache
 // invites: it is keyed by (source hash, size) alone, so a cached entry must not carry
 // the first requester's provenance into a second entity's answer.
@@ -311,7 +424,7 @@ func TestLockedEntityCoverSurvivesEnrichment(t *testing.T) {
 	rgPID := model.PID(scalarQueryStr(t, db, "SELECT pid FROM release_group WHERE id = ?", rgID))
 
 	chosen := coverPNG(t, 11)
-	if err := st.SetEntityArt(ctx, model.ArtReleaseGroup, rgPID, model.ArtRoleFront, chosen, true, false); err != nil {
+	if err := st.SetEntityArt(ctx, model.ArtReleaseGroup, rgPID, model.ArtRoleFront, chosen, model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
 		t.Fatalf("SetEntityArt: %v", err)
 	}
 	chosenHash := art.Hash(chosen)
@@ -343,7 +456,7 @@ func TestLockedEntityCoverSurvivesEnrichment(t *testing.T) {
 	}
 
 	// Unlocking lets the next pass fill it.
-	if err := st.SetEntityArt(ctx, model.ArtReleaseGroup, rgPID, model.ArtRoleFront, chosen, false, true); err != nil {
+	if err := st.SetEntityArt(ctx, model.ArtReleaseGroup, rgPID, model.ArtRoleFront, chosen, model.Attribution{Source: model.SourceUser}, model.LockOf(false), true); err != nil {
 		t.Fatalf("SetEntityArt unlock: %v", err)
 	}
 	apply()
@@ -376,7 +489,7 @@ func TestLockedShowCoverSurvivesFeedSync(t *testing.T) {
 	podID := scalarInt64(t, db, "SELECT id FROM podcast WHERE pid = ?", string(feed.PodcastPID))
 
 	chosen := coverPNG(t, 21)
-	if err := st.SetEntityArt(ctx, model.ArtPodcast, feed.PodcastPID, model.ArtRoleFront, chosen, true, false); err != nil {
+	if err := st.SetEntityArt(ctx, model.ArtPodcast, feed.PodcastPID, model.ArtRoleFront, chosen, model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
 		t.Fatalf("SetEntityArt: %v", err)
 	}
 	sync("http://feed.example/two.png", 22)
@@ -385,7 +498,7 @@ func TestLockedShowCoverSurvivesFeedSync(t *testing.T) {
 		t.Fatalf("locked show cover was replaced by a feed sync")
 	}
 
-	if err := st.SetEntityArt(ctx, model.ArtPodcast, feed.PodcastPID, model.ArtRoleFront, chosen, false, true); err != nil {
+	if err := st.SetEntityArt(ctx, model.ArtPodcast, feed.PodcastPID, model.ArtRoleFront, chosen, model.Attribution{Source: model.SourceUser}, model.LockOf(false), true); err != nil {
 		t.Fatalf("SetEntityArt unlock: %v", err)
 	}
 	sync("http://feed.example/three.png", 23)
@@ -406,7 +519,7 @@ func TestArtLockIsFrontRoleOnly(t *testing.T) {
 	albumID := scalarInt64(t, db, "SELECT id FROM album WHERE title = 'A'")
 
 	// A back cover asking to be locked records no lock at all.
-	if err := st.SetEntityArt(ctx, model.ArtAlbum, albumPID, model.ArtRoleBack, coverPNG(t, 32), true, false); err != nil {
+	if err := st.SetEntityArt(ctx, model.ArtAlbum, albumPID, model.ArtRoleBack, coverPNG(t, 32), model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
 		t.Fatalf("set back: %v", err)
 	}
 	if n := scalarInt64(t, db,
@@ -415,14 +528,14 @@ func TestArtLockIsFrontRoleOnly(t *testing.T) {
 		t.Fatalf("a back-role set recorded %d art lock rows, want 0", n)
 	}
 	// Which is why a second back set is not refused, where a front one would be.
-	if err := st.SetEntityArt(ctx, model.ArtAlbum, albumPID, model.ArtRoleBack, coverPNG(t, 33), true, false); err != nil {
+	if err := st.SetEntityArt(ctx, model.ArtAlbum, albumPID, model.ArtRoleBack, coverPNG(t, 33), model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
 		t.Errorf("a second back set was refused, so the front-only scope leaked: %v", err)
 	}
 
-	if err := st.SetEntityArt(ctx, model.ArtAlbum, albumPID, model.ArtRoleFront, coverPNG(t, 31), true, false); err != nil {
+	if err := st.SetEntityArt(ctx, model.ArtAlbum, albumPID, model.ArtRoleFront, coverPNG(t, 31), model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
 		t.Fatalf("set front: %v", err)
 	}
-	if err := st.SetEntityArt(ctx, model.ArtAlbum, albumPID, model.ArtRoleFront, coverPNG(t, 34), true, false); !waxerr.Is(err, waxerr.CodeLocked) {
+	if err := st.SetEntityArt(ctx, model.ArtAlbum, albumPID, model.ArtRoleFront, coverPNG(t, 34), model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); !waxerr.Is(err, waxerr.CodeLocked) {
 		t.Errorf("second front set = %v, want CodeLocked", err)
 	}
 	roles, err := st.ArtRoles(ctx, model.EntityRef{Type: model.ArtAlbum, PID: albumPID})
@@ -451,10 +564,10 @@ func TestItemArtLockHasOneHome(t *testing.T) {
 	db := roConn(t, dbPath)
 
 	// Locked through the entity API, refused through the item API.
-	if err := st.SetEntityArt(ctx, model.ArtTrack, pid, model.ArtRoleFront, coverPNG(t, 61), true, false); err != nil {
+	if err := st.SetEntityArt(ctx, model.ArtTrack, pid, model.ArtRoleFront, coverPNG(t, 61), model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
 		t.Fatalf("SetEntityArt: %v", err)
 	}
-	if err := st.SetItemArt(ctx, pid, model.ArtRoleFront, coverPNG(t, 62), true, false); !waxerr.Is(err, waxerr.CodeLocked) {
+	if err := st.SetItemArt(ctx, pid, model.ArtRoleFront, coverPNG(t, 62), model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); !waxerr.Is(err, waxerr.CodeLocked) {
 		t.Errorf("SetItemArt after an entity-API lock = %v, want CodeLocked", err)
 	}
 	// It landed in the item-scoped table, which is the one the scan reads.
@@ -468,10 +581,10 @@ func TestItemArtLockHasOneHome(t *testing.T) {
 	}
 
 	// And back the other way, with both read surfaces agreeing.
-	if err := st.SetItemArt(ctx, pid, model.ArtRoleFront, coverPNG(t, 63), true, true); err != nil {
+	if err := st.SetItemArt(ctx, pid, model.ArtRoleFront, coverPNG(t, 63), model.Attribution{Source: model.SourceUser}, model.LockOf(true), true); err != nil {
 		t.Fatalf("forced SetItemArt: %v", err)
 	}
-	if err := st.SetEntityArt(ctx, model.ArtTrack, pid, model.ArtRoleFront, coverPNG(t, 64), true, false); !waxerr.Is(err, waxerr.CodeLocked) {
+	if err := st.SetEntityArt(ctx, model.ArtTrack, pid, model.ArtRoleFront, coverPNG(t, 64), model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); !waxerr.Is(err, waxerr.CodeLocked) {
 		t.Errorf("SetEntityArt after an item-API lock = %v, want CodeLocked", err)
 	}
 	roles, err := st.ArtRoles(ctx, model.EntityRef{Type: model.ArtTrack, PID: pid})
@@ -512,7 +625,7 @@ func TestEpisodeArtLockSurvivesRedownload(t *testing.T) {
 	}
 
 	chosen := coverPNG(t, 70)
-	if err := st.SetEntityArt(ctx, model.ArtEpisode, ep, model.ArtRoleFront, chosen, true, false); err != nil {
+	if err := st.SetEntityArt(ctx, model.ArtEpisode, ep, model.ArtRoleFront, chosen, model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
 		t.Fatalf("SetEntityArt episode: %v", err)
 	}
 	// The download path re-attaches the feed's image on every fetch.
@@ -596,7 +709,7 @@ func TestFieldProvenanceOverlaysArt(t *testing.T) {
 	// An item whose only cover is the album's gets no art row: inherited art is not
 	// the item's own field.
 	albumPID := model.PID(scalarQueryStr(t, db, "SELECT pid FROM album WHERE title = 'B'"))
-	if err := st.SetEntityArt(ctx, model.ArtAlbum, albumPID, model.ArtRoleFront, coverPNG(t, 41), false, false); err != nil {
+	if err := st.SetEntityArt(ctx, model.ArtAlbum, albumPID, model.ArtRoleFront, coverPNG(t, 41), model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("SetEntityArt album: %v", err)
 	}
 	if err := st.UnlockField(ctx, bare, "art"); err != nil {
@@ -620,7 +733,7 @@ func TestArtSourceQueryField(t *testing.T) {
 
 	db := roConn(t, dbPath)
 	albumC := model.PID(scalarQueryStr(t, db, "SELECT pid FROM album WHERE title = 'C'"))
-	if err := st.SetEntityArt(ctx, model.ArtAlbum, albumC, model.ArtRoleFront, coverPNG(t, 52), false, false); err != nil {
+	if err := st.SetEntityArt(ctx, model.ArtAlbum, albumC, model.ArtRoleFront, coverPNG(t, 52), model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("SetEntityArt: %v", err)
 	}
 

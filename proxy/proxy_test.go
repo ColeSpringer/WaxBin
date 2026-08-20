@@ -66,6 +66,11 @@ func TestRoundTripAndResultPayload(t *testing.T) {
 			if p.ItemPID != "item1" || p.Edits["artist"] != "New" {
 				t.Errorf("server got params %+v", p)
 			}
+			// The scalar edits carry an attribution too: an embedder that fetched the value
+			// is the other half of the bug the art fields close.
+			if p.Source != "enrichment" || p.Provider != "itunes" {
+				t.Errorf("edit attribution = %q/%q, want the caller's", p.Source, p.Provider)
+			}
 			return proxy.EditFieldsResult{WriteBackFailures: []proxy.WriteBackFailure{
 				{FilePID: "f1", Path: "/x.mp3", Reason: "read-only mount"},
 			}}, nil
@@ -79,7 +84,8 @@ func TestRoundTripAndResultPayload(t *testing.T) {
 	c := dial(t, startServer(t, handlers, nil))
 	ctx := context.Background()
 
-	res, err := c.EditFields(ctx, "item1", map[string]string{"artist": "New"}, true, true, false)
+	editAttr := model.Attribution{Source: model.SourceEnrichment, Provider: "itunes"}
+	res, err := c.EditFields(ctx, "item1", map[string]string{"artist": "New"}, true, editAttr, model.LockOn, false)
 	if err != nil {
 		t.Fatalf("edit: %v", err)
 	}
@@ -111,7 +117,7 @@ func TestEditBatchRoundTrip(t *testing.T) {
 				p.Items[1].ItemPID != "i2" || p.Items[1].Fields["track_no"] != "9" {
 				t.Errorf("server got items %+v", p.Items)
 			}
-			if !p.WriteBack || !p.Lock || p.Force || !p.SkipLocked {
+			if !p.WriteBack || p.Lock != string(model.LockOn) || p.Force || !p.SkipLocked {
 				t.Errorf("server got flags %+v", p)
 			}
 			return proxy.EditManyFieldsResult{
@@ -128,7 +134,7 @@ func TestEditBatchRoundTrip(t *testing.T) {
 	res, err := c.EditBatch(context.Background(), []proxy.ItemFieldsEdit{
 		{ItemPID: "i1", Fields: map[string]string{"title": "Opener"}},
 		{ItemPID: "i2", Fields: map[string]string{"track_no": "9"}},
-	}, true, true, false, true)
+	}, true, model.Attribution{}, model.LockOn, false, true)
 	if err != nil {
 		t.Fatalf("edit batch: %v", err)
 	}
@@ -169,13 +175,19 @@ func TestCurationRoundTrip(t *testing.T) {
 			if p.Role != "back" {
 				t.Errorf("item art role = %q, want back", p.Role)
 			}
+			if p.Source != "enrichment" || p.Provider != "itunes" || p.SourceURL != "https://itunes.example/c.png" {
+				t.Errorf("item art attribution = %q/%q/%q, want the caller's", p.Source, p.Provider, p.SourceURL)
+			}
 			return nil, nil
 		},
 		proxy.MethodSetEntityArt: func(_ context.Context, raw json.RawMessage) (any, error) {
 			var p proxy.SetEntityArtParams
 			_ = json.Unmarshal(raw, &p)
-			if p.EntityType != "album" || p.Role != "front" || !p.Lock || p.Force {
+			if p.EntityType != "album" || p.Role != "front" || p.Lock != string(model.LockUnchanged) || p.Force {
 				t.Errorf("entity art params = %+v", p)
+			}
+			if p.Source != "" || p.Provider != "" {
+				t.Errorf("unstamped entity art carried %q/%q, want neither", p.Source, p.Provider)
 			}
 			return nil, nil
 		},
@@ -191,7 +203,7 @@ func TestCurationRoundTrip(t *testing.T) {
 	c := dial(t, startServer(t, handlers, nil))
 	ctx := context.Background()
 
-	res, err := c.SetCredits(ctx, "i1", "producer", []string{"A", "B"}, true, true, false)
+	res, err := c.SetCredits(ctx, "i1", "producer", []string{"A", "B"}, true, model.Attribution{}, model.LockOn, false)
 	if err != nil {
 		t.Fatalf("set credits: %v", err)
 	}
@@ -200,21 +212,26 @@ func TestCurationRoundTrip(t *testing.T) {
 	}
 
 	ly := &model.Lyrics{Synced: []model.SyncedLine{{TimeMS: 10, Text: "hi"}}}
-	if err := c.SetLyrics(ctx, "i1", ly, true, false); err != nil {
+	if err := c.SetLyrics(ctx, "i1", ly, model.LockOn, false); err != nil {
 		t.Fatalf("set lyrics: %v", err)
 	}
 	if gotLyrics == nil || len(gotLyrics.Synced) != 1 || gotLyrics.Synced[0].Text != "hi" {
 		t.Fatalf("lyrics not carried: %+v", gotLyrics)
 	}
 
-	if _, err := c.SetItemArt(ctx, "i1", model.ArtRoleBack, []byte{1, 2, 3, 4}, true, false, false); err != nil {
+	artAttr := model.Attribution{
+		Source: model.SourceEnrichment, Provider: "itunes", SourceURL: "https://itunes.example/c.png",
+	}
+	if _, err := c.SetItemArt(ctx, "i1", model.ArtRoleBack, []byte{1, 2, 3, 4}, artAttr, model.LockOn, false, false); err != nil {
 		t.Fatalf("set item art: %v", err)
 	}
 	if len(gotArt) != 4 || gotArt[0] != 1 {
 		t.Fatalf("art bytes not carried: %v", gotArt)
 	}
 
-	if _, err := c.SetEntityArt(ctx, model.ArtAlbum, "a1", model.ArtRoleFront, []byte{9}, true, false, false); err != nil {
+	// Unstamped and lock-unchanged: the wire carries the caller's silence as silence.
+	if _, err := c.SetEntityArt(ctx, model.ArtAlbum, "a1", model.ArtRoleFront, []byte{9},
+		model.Attribution{}, model.LockUnchanged, false, false); err != nil {
 		t.Fatalf("set entity art: %v", err)
 	}
 
@@ -491,10 +508,13 @@ func TestProvenanceRoundTripCarriesArtRow(t *testing.T) {
 				t.Errorf("provenance pid = %q, want i1", p.ItemPID)
 			}
 			return []model.FieldProvenance{
-				{ItemPID: "i1", Field: "art", Source: model.SourceEnrichment, Locked: true,
+				{ItemPID: "i1", Field: "art", Locked: true, UpdatedAt: 42, Attribution: model.Attribution{
+					Source:    model.SourceEnrichment,
 					Provider:  "coverartarchive",
-					SourceURL: "https://coverartarchive.org/release-group/rg/front", UpdatedAt: 42},
-				{ItemPID: "i1", Field: "title", Source: model.SourceUser, Value: "T"},
+					SourceURL: "https://coverartarchive.org/release-group/rg/front",
+				}},
+				{ItemPID: "i1", Field: "title", Value: "T",
+					Attribution: model.Attribution{Source: model.SourceUser}},
 			}, nil
 		},
 	}

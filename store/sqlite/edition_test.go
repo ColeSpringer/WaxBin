@@ -109,7 +109,7 @@ func TestEditionColumnLockSurvivesBothWriters(t *testing.T) {
 	pid := scalarQueryStr(t, db, "SELECT pid FROM album WHERE title='Locked'")
 	// Locked deliberately empty, so only the lock probe keeps it.
 	if err := st.EditEntityFields(ctx, model.MergeAlbum, model.PID(pid),
-		map[string]string{"media": ""}, model.SourceUser, true, false); err != nil {
+		map[string]string{"media": ""}, model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
 		t.Fatalf("lock media: %v", err)
 	}
 	editionTrack(t, st, lib.ID, "ess-a", "Locked", 2, model.Track{Media: "CD", Country: "GB"})
@@ -262,7 +262,7 @@ func TestEntityEditClearsAnUnmatchedAlbumMarker(t *testing.T) {
 
 	editedPID := scalarQueryStr(t, db, "SELECT pid FROM album WHERE title='Edited'")
 	if err := st.EditEntityFields(ctx, model.MergeAlbum, model.PID(editedPID),
-		map[string]string{"barcode": "0075992739429"}, model.SourceUser, false, false); err != nil {
+		map[string]string{"barcode": "0075992739429"}, model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("edit barcode: %v", err)
 	}
 	if n, _, _ := markerRows(t, db, editedID); n != 0 {
@@ -271,7 +271,7 @@ func TestEntityEditClearsAnUnmatchedAlbumMarker(t *testing.T) {
 
 	untouchedPID := scalarQueryStr(t, db, "SELECT pid FROM album WHERE title='Untouched'")
 	if err := st.EditEntityFields(ctx, model.MergeAlbum, model.PID(untouchedPID),
-		map[string]string{"label": "Harvest"}, model.SourceUser, false, false); err != nil {
+		map[string]string{"label": "Harvest"}, model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("edit label: %v", err)
 	}
 	if n, _, _ := markerRows(t, db, untouchedID); n != 1 {
@@ -294,7 +294,7 @@ func TestEntityEditNormalizesCountry(t *testing.T) {
 	pid := model.PID(scalarQueryStr(t, db, "SELECT pid FROM album WHERE title='Untidy'"))
 
 	if err := st.EditEntityFields(ctx, model.MergeAlbum, pid,
-		map[string]string{"country": "usa", "media": "2xCD"}, model.SourceUser, false, false); err != nil {
+		map[string]string{"country": "usa", "media": "2xCD"}, model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("edit: %v", err)
 	}
 	media, country := albumColumns(t, db, "Untidy")
@@ -306,7 +306,7 @@ func TestEntityEditNormalizesCountry(t *testing.T) {
 	}
 
 	err := st.EditEntityFields(ctx, model.MergeAlbum, pid,
-		map[string]string{"country": "US & Europe"}, model.SourceUser, false, false)
+		map[string]string{"country": "US & Europe"}, model.Attribution{Source: model.SourceUser}, model.LockOf(false), false)
 	if err == nil {
 		t.Fatal("editing country to a multi-value list should be refused")
 	}
@@ -371,7 +371,8 @@ func TestDeclinedMBIDWriteTakesNoArt(t *testing.T) {
 	setEntityMBID(t, st, model.MergeAlbum, lockedPID, "", true)
 	setEntityMBID(t, st, model.MergeAlbum, holderPID, relTestOneMBID, false)
 
-	cover := &model.ArtImage{Data: []byte("cover-bytes"), Hash: "h-cover", Format: "png", Width: 4, Height: 4, Source: model.SourceEnrichment}
+	cover := &model.ArtImage{Data: []byte("cover-bytes"), Hash: "h-cover", Format: "png", Width: 4, Height: 4,
+		Attribution: model.Attribution{Source: model.SourceEnrichment, Provider: "musicbrainz"}}
 	for _, tc := range []struct{ title, mbid string }{
 		{"Locked", relTestTwoMBID},
 		{"Taken", relTestOneMBID}, // already held by Holder
@@ -421,7 +422,8 @@ func TestReleaseCoverDoesNotOverwriteADerivedTrackCover(t *testing.T) {
 
 	if err := st.ApplyAlbumReleaseMatch(ctx, model.AlbumReleaseMatch{
 		AlbumID: id, PID: model.PID(pid), Matched: true, MBID: relTestOneMBID, Reason: "medium",
-		Art: &model.ArtImage{Data: []byte("provider-bytes"), Hash: "h-provider", Format: "png", Width: 4, Height: 4, Source: model.SourceEnrichment},
+		Art: &model.ArtImage{Data: []byte("provider-bytes"), Hash: "h-provider", Format: "png", Width: 4, Height: 4,
+			Attribution: model.Attribution{Source: model.SourceEnrichment, Provider: "musicbrainz"}},
 	}); err != nil {
 		t.Fatalf("ApplyAlbumReleaseMatch: %v", err)
 	}
@@ -444,7 +446,8 @@ func TestReleaseCoverDoesNotOverwriteADerivedTrackCover(t *testing.T) {
 	barePID := scalarQueryStr(t, db, "SELECT pid FROM album WHERE title='Bare'")
 	if err := st.ApplyAlbumReleaseMatch(ctx, model.AlbumReleaseMatch{
 		AlbumID: bareID, PID: model.PID(barePID), Matched: true, MBID: relTestTwoMBID, Reason: "medium",
-		Art: &model.ArtImage{Data: []byte("provider-bytes"), Hash: "h-provider", Format: "png", Width: 4, Height: 4, Source: model.SourceEnrichment},
+		Art: &model.ArtImage{Data: []byte("provider-bytes"), Hash: "h-provider", Format: "png", Width: 4, Height: 4,
+			Attribution: model.Attribution{Source: model.SourceEnrichment, Provider: "musicbrainz"}},
 	}); err != nil {
 		t.Fatalf("ApplyAlbumReleaseMatch(Bare): %v", err)
 	}
@@ -464,7 +467,7 @@ func TestReleaseCoverDoesNotOverwriteACuratedOne(t *testing.T) {
 
 	editionTrack(t, st, lib.ID, "ess-a", "Curated", 1, model.Track{Media: "CD"})
 	pid := model.PID(scalarQueryStr(t, db, "SELECT pid FROM album WHERE title='Curated'"))
-	if err := st.SetEntityArt(ctx, model.ArtAlbum, pid, model.ArtRoleFront, pngFixture(), false, false); err != nil {
+	if err := st.SetEntityArt(ctx, model.ArtAlbum, pid, model.ArtRoleFront, pngFixture(), model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("SetEntityArt: %v", err)
 	}
 	before := scalarQueryStr(t, db, `SELECT am.source_hash FROM art_map am
@@ -474,7 +477,8 @@ func TestReleaseCoverDoesNotOverwriteACuratedOne(t *testing.T) {
 	id := albumIDByTitle(t, db, "Curated")
 	if err := st.ApplyAlbumReleaseMatch(ctx, model.AlbumReleaseMatch{
 		AlbumID: id, PID: pid, Matched: true, MBID: relTestOneMBID, Reason: "medium",
-		Art: &model.ArtImage{Data: []byte("provider-bytes"), Hash: "h-provider", Format: "png", Width: 4, Height: 4, Source: model.SourceEnrichment},
+		Art: &model.ArtImage{Data: []byte("provider-bytes"), Hash: "h-provider", Format: "png", Width: 4, Height: 4,
+			Attribution: model.Attribution{Source: model.SourceEnrichment, Provider: "musicbrainz"}},
 	}); err != nil {
 		t.Fatalf("ApplyAlbumReleaseMatch: %v", err)
 	}
@@ -508,7 +512,7 @@ func TestClearingAnAlbumMBIDUndoesTheMatch(t *testing.T) {
 	}
 
 	if err := st.EditEntityFields(ctx, model.MergeAlbum, model.PID(pid),
-		map[string]string{"mbid": ""}, model.SourceUser, false, true); err != nil {
+		map[string]string{"mbid": ""}, model.Attribution{Source: model.SourceUser}, model.LockOf(false), true); err != nil {
 		t.Fatalf("clear mbid: %v", err)
 	}
 	if n, _, _ := markerRows(t, db, id); n != 0 {
@@ -537,7 +541,8 @@ func TestUndoTakesTheMatchedCoverWithIt(t *testing.T) {
 	if err := st.ApplyAlbumReleaseMatch(ctx, model.AlbumReleaseMatch{
 		AlbumID: id, PID: model.PID(pid), Matched: true, MBID: relTestOneMBID,
 		Reason: "medium", Provider: "musicbrainz:edition",
-		Art: &model.ArtImage{Data: []byte("provider-bytes"), Hash: "h-provider", Format: "png", Width: 4, Height: 4, Source: model.SourceEnrichment},
+		Art: &model.ArtImage{Data: []byte("provider-bytes"), Hash: "h-provider", Format: "png", Width: 4, Height: 4,
+			Attribution: model.Attribution{Source: model.SourceEnrichment, Provider: "musicbrainz"}},
 	}); err != nil {
 		t.Fatalf("ApplyAlbumReleaseMatch: %v", err)
 	}
@@ -547,7 +552,7 @@ func TestUndoTakesTheMatchedCoverWithIt(t *testing.T) {
 	}
 
 	if err := st.EditEntityFields(ctx, model.MergeAlbum, model.PID(pid),
-		map[string]string{"mbid": ""}, model.SourceUser, false, true); err != nil {
+		map[string]string{"mbid": ""}, model.Attribution{Source: model.SourceUser}, model.LockOf(false), true); err != nil {
 		t.Fatalf("clear mbid: %v", err)
 	}
 	if n := scalarQueryInt(t, db,
@@ -576,8 +581,9 @@ func editionTrackWithCover(t *testing.T, st *sqlite.Store, libID int64, essence,
 			Kind: model.KindTrack, State: model.StatePresent, Title: "T-" + essence,
 			SortKey: model.SortKey("T-" + essence), IdentityKey: "essence:" + essence,
 		},
-		Track:    tr,
-		CoverArt: &model.ArtImage{Data: art, Hash: "h-embedded", Format: "png", Width: 2, Height: 2, Source: model.SourceTag},
+		Track: tr,
+		CoverArt: &model.ArtImage{Data: art, Hash: "h-embedded", Format: "png", Width: 2, Height: 2,
+			Attribution: model.Attribution{Source: model.SourceTag}},
 	})
 	if err != nil {
 		t.Fatalf("PutScannedTrack: %v", err)

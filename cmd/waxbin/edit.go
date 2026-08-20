@@ -17,6 +17,7 @@ func newEditCmd(g *globals) *cobra.Command {
 		sets      []string
 		writeBack bool
 		noLock    bool
+		keepLock  bool
 		force     bool
 		// Batch selection + safety.
 		qf         queryFlags
@@ -48,7 +49,9 @@ func newEditCmd(g *globals) *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			hasSelection := qf.title != "" || qf.artist != "" || qf.album != "" || qf.genre != "" ||
 				qf.kind != "" || qf.source != "" || qf.year != 0 || rulePath != ""
-			opts := waxbin.EditOptions{WriteBack: writeBack, Lock: !noLock, Force: force, SkipLocked: skipLocked}
+			opts := waxbin.EditOptions{
+				WriteBack: writeBack, Lock: lockChange(noLock, keepLock), Force: force, SkipLocked: skipLocked,
+			}
 
 			if batchPath != "" {
 				if len(args) > 0 || len(sets) > 0 || hasSelection {
@@ -104,7 +107,9 @@ func newEditCmd(g *globals) *cobra.Command {
 	f := cmd.Flags()
 	f.StringArrayVar(&sets, "set", nil, "field=value to set (repeatable)")
 	f.BoolVar(&writeBack, "write-back", false, "also write the new values into each file's on-disk tags")
-	f.BoolVar(&noLock, "no-lock", false, "do not lock the edited fields (they default to locked)")
+	f.BoolVar(&noLock, "no-lock", false, "unlock the edited fields (they default to locked)")
+	f.BoolVar(&keepLock, "keep-lock", false, keepLockUsage("the edited fields"))
+	cmd.MarkFlagsMutuallyExclusive("no-lock", "keep-lock")
 	f.BoolVar(&force, "force", false, "override a locked field")
 	// Selection flags (mirror the query command).
 	f.StringVar(&qf.title, "title", "", "select items whose title matches (substring)")

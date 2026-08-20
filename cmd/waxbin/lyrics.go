@@ -56,16 +56,27 @@ func newLyricsSetCmd(g *globals) *cobra.Command {
 		filePath string
 		clear    bool
 		noLock   bool
+		keepLock bool
 		force    bool
+		source   string
+		provider string
 	)
 	cmd := &cobra.Command{
 		Use:   "set <pid> --file <lrc>",
 		Short: "Set (or clear) an item's lyrics from an .lrc file",
-		Long: "Sets user-curated lyrics on a track from an .lrc file (timed lines are parsed; " +
+		Long: "Sets curated lyrics on a track from an .lrc file (timed lines are parsed; " +
 			"plain lines become unsynchronized text), or --clear removes them. A set locks the " +
-			"item's lyrics field by default so a scan does not overwrite it.",
+			"item's lyrics field by default so a scan does not overwrite it. The words are " +
+			"recorded as set by hand unless --source says otherwise, which is what a program " +
+			"that fetched them uses to record where they came from. There is no --source-url: " +
+			"the lyrics row has no column for one.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			attr, err := parseAttribution("lyrics set", source, provider, "",
+				model.Attribution.ValidForLyrics, lyricsSourceList)
+			if err != nil {
+				return err
+			}
 			var ly *model.Lyrics
 			if !clear {
 				if filePath == "" {
@@ -76,7 +87,7 @@ func newLyricsSetCmd(g *globals) *cobra.Command {
 					return waxerr.Wrapf(waxerr.CodeIO, "lyrics set", err, "reading %s", filePath)
 				}
 				synced, _ := meta.ParseLRC(string(b))
-				ly = &model.Lyrics{Synced: synced}
+				ly = &model.Lyrics{Source: attr.Source, Provider: attr.Provider, Synced: synced}
 				if len(synced) == 0 {
 					ly.Unsynced = string(b)
 				}
@@ -86,7 +97,7 @@ func newLyricsSetCmd(g *globals) *cobra.Command {
 				return err
 			}
 			defer m.Close()
-			if err := m.SetLyrics(ctx(cmd), model.PID(args[0]), ly, !noLock, force); err != nil {
+			if err := m.SetLyrics(ctx(cmd), model.PID(args[0]), ly, lockChange(noLock, keepLock), force); err != nil {
 				return err
 			}
 			if clear {
@@ -100,8 +111,17 @@ func newLyricsSetCmd(g *globals) *cobra.Command {
 	f := cmd.Flags()
 	f.StringVar(&filePath, "file", "", ".lrc file to set as the lyrics")
 	f.BoolVar(&clear, "clear", false, "remove the lyrics instead of setting them")
-	f.BoolVar(&noLock, "no-lock", false, "do not lock the lyrics field (it defaults to locked)")
+	f.BoolVar(&noLock, "no-lock", false, "unlock the lyrics field (it defaults to locked)")
+	f.BoolVar(&keepLock, "keep-lock", false, keepLockUsage("the lyrics field"))
+	cmd.MarkFlagsMutuallyExclusive("no-lock", "keep-lock")
 	f.BoolVar(&force, "force", false, "override a locked lyrics field")
+	f.StringVar(&source, "source", "", "where the lyrics came from: "+lyricsSourceList+" (default user)")
+	f.StringVar(&provider, "provider", "", "service that supplied the lyrics, with --source enrichment")
+	// Lyrics provenance rides on the words themselves, and a clear has no words, so
+	// there is nothing for a source to attribute. Refuse the combination rather than
+	// parsing a value and dropping it.
+	cmd.MarkFlagsMutuallyExclusive("clear", "source")
+	cmd.MarkFlagsMutuallyExclusive("clear", "provider")
 	return cmd
 }
 

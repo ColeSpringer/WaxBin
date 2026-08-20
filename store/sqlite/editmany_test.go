@@ -48,7 +48,7 @@ func TestEditManyFieldsApplies(t *testing.T) {
 	ctx := context.Background()
 
 	res, err := st.EditManyFields(ctx, []model.PID{p1, p2, p1}, map[string]string{"genre": "Jazz"},
-		model.SourceUser, true, false, false)
+		model.Attribution{Source: model.SourceUser}, model.LockOf(true), false, false)
 	if err != nil {
 		t.Fatalf("batch: %v", err)
 	}
@@ -87,7 +87,7 @@ func TestEditManyFieldsAtomicOnKindMismatch(t *testing.T) {
 		t.Fatalf("book pid: %v", err)
 	}
 	_, err := st.EditManyFields(ctx, []model.PID{model.PID(bpid), p1}, map[string]string{"publisher": "X"},
-		model.SourceUser, true, false, false)
+		model.Attribution{Source: model.SourceUser}, model.LockOf(true), false, false)
 	if !waxerr.Is(err, waxerr.CodeInvalid) {
 		t.Fatalf("batch = %v, want CodeInvalid (publisher on a track)", err)
 	}
@@ -107,12 +107,12 @@ func TestEditManyFieldsSkipLocked(t *testing.T) {
 	ctx := context.Background()
 
 	// Lock genre on p1.
-	if err := st.EditItemField(ctx, p1, "genre", "Locked", model.SourceUser, true, false); err != nil {
+	if err := st.EditItemField(ctx, p1, "genre", "Locked", model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
 		t.Fatalf("lock: %v", err)
 	}
 	// Without force, a batch touching genre would fail on p1; skip-locked skips it.
 	res, err := st.EditManyFields(ctx, []model.PID{p1, p2}, map[string]string{"genre": "Jazz"},
-		model.SourceUser, true, false, true)
+		model.Attribution{Source: model.SourceUser}, model.LockOf(true), false, true)
 	if err != nil {
 		t.Fatalf("skip-locked batch: %v", err)
 	}
@@ -134,7 +134,7 @@ func TestEditManyFieldsSkipLocked(t *testing.T) {
 
 	// Without skip-locked and without force, the same batch fails fast (atomic).
 	if _, err := st.EditManyFields(ctx, []model.PID{p1, p2}, map[string]string{"genre": "Pop"},
-		model.SourceUser, true, false, false); !waxerr.Is(err, waxerr.CodeLocked) {
+		model.Attribution{Source: model.SourceUser}, model.LockOf(true), false, false); !waxerr.Is(err, waxerr.CodeLocked) {
 		t.Fatalf("locked batch = %v, want CodeLocked", err)
 	}
 }

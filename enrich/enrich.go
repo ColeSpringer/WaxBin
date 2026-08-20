@@ -214,7 +214,18 @@ func New(store Store, cfg Config, log *slog.Logger) *Service {
 
 	// Injected providers rank first; record the boundary so the genre merge can splice
 	// the MusicBrainz baseline in after them but before the built-ins.
-	s.providers = append(s.providers, cfg.Providers...)
+	//
+	// A provider's name is the provenance mark stamped on everything it supplies, and the
+	// store refuses an enrichment value that names no provider. Dropping a nameless one
+	// here keeps that refusal from aborting the whole pass for every item it answers,
+	// which would leave the catalog retrying forever with nothing to show for it.
+	for _, p := range cfg.Providers {
+		if p.Name() == "" {
+			log.Warn("enrichment: dropping an injected provider with no name; its values could carry no provenance")
+			continue
+		}
+		s.providers = append(s.providers, p)
+	}
 	s.numInjected = len(s.providers)
 
 	// The key-free built-ins. The Cover Art Archive shares the MusicBrainz client (a

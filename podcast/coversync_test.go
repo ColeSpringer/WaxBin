@@ -146,7 +146,7 @@ func TestSyncSkipsFetchWhileCoverLocked(t *testing.T) {
 
 	// A user cover, locked. Nothing about the feed changes from here on.
 	user := testPNGBytes(t, 8, 8)
-	if err := f.store.SetEntityArt(ctx, model.ArtPodcast, pid, model.ArtRoleFront, user, true, true); err != nil {
+	if err := f.store.SetEntityArt(ctx, model.ArtPodcast, pid, model.ArtRoleFront, user, model.Attribution{Source: model.SourceUser}, model.LockOf(true), true); err != nil {
 		t.Fatalf("set user cover: %v", err)
 	}
 	locked := f.coverHash(t, pid)
@@ -192,7 +192,7 @@ func TestSyncRefillsClearedCover(t *testing.T) {
 	}
 
 	// Cleared without a lock, so nothing but the compare decides what happens next.
-	if err := f.store.SetEntityArt(ctx, model.ArtPodcast, pid, model.ArtRoleFront, nil, false, true); err != nil {
+	if err := f.store.SetEntityArt(ctx, model.ArtPodcast, pid, model.ArtRoleFront, nil, model.Attribution{Source: model.SourceUser}, model.LockOf(false), true); err != nil {
 		t.Fatalf("clear cover: %v", err)
 	}
 	if f.coverHash(t, pid) != "" {
@@ -256,7 +256,7 @@ func TestReAddSkipsFetchWhileCoverLocked(t *testing.T) {
 	}
 
 	user := testPNGBytes(t, 8, 8)
-	if err := f.store.SetEntityArt(ctx, model.ArtPodcast, pid, model.ArtRoleFront, user, true, true); err != nil {
+	if err := f.store.SetEntityArt(ctx, model.ArtPodcast, pid, model.ArtRoleFront, user, model.Attribution{Source: model.SourceUser}, model.LockOf(true), true); err != nil {
 		t.Fatalf("set user cover: %v", err)
 	}
 	locked := f.coverHash(t, pid)

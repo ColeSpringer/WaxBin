@@ -13,11 +13,11 @@ func TestSetItemCreditsMusicRoles(t *testing.T) {
 	ctx := context.Background()
 
 	// Set producers on the track.
-	if _, err := st.SetItemCredits(ctx, pid, model.RoleProducer, []string{"Prod One", "Prod Two"}, model.SourceUser, true, false); err != nil {
+	if _, err := st.SetItemCredits(ctx, pid, model.RoleProducer, []string{"Prod One", "Prod Two"}, model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
 		t.Fatalf("set producers: %v", err)
 	}
 	// Set composers via the credit API; the denormalized track.composer follows.
-	if _, err := st.SetItemCredits(ctx, pid, model.RoleComposer, []string{"Comp A", "Comp B"}, model.SourceUser, true, false); err != nil {
+	if _, err := st.SetItemCredits(ctx, pid, model.RoleComposer, []string{"Comp A", "Comp B"}, model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
 		t.Fatalf("set composers: %v", err)
 	}
 
@@ -45,7 +45,7 @@ func TestSetItemCreditsMusicRoles(t *testing.T) {
 
 	// Setting producers again rewrites ONLY that role, so composers survive. The first
 	// set locked credit.producer, so this uses force.
-	if _, err := st.SetItemCredits(ctx, pid, model.RoleProducer, []string{"Prod Solo"}, model.SourceUser, true, true); err != nil {
+	if _, err := st.SetItemCredits(ctx, pid, model.RoleProducer, []string{"Prod Solo"}, model.Attribution{Source: model.SourceUser}, model.LockOf(true), true); err != nil {
 		t.Fatalf("reset producers: %v", err)
 	}
 	credits, _ = st.ItemCredits(ctx, pid)
@@ -83,11 +83,11 @@ func TestSetItemCreditsRoleKindValidation(t *testing.T) {
 	ctx := context.Background()
 
 	// A book role on a track is rejected.
-	if _, err := st.SetItemCredits(ctx, pid, model.RoleNarrator, []string{"X"}, model.SourceUser, true, false); !waxerr.Is(err, waxerr.CodeInvalid) {
+	if _, err := st.SetItemCredits(ctx, pid, model.RoleNarrator, []string{"X"}, model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); !waxerr.Is(err, waxerr.CodeInvalid) {
 		t.Fatalf("narrator on track = %v, want CodeInvalid", err)
 	}
 	// An unknown role is rejected.
-	if _, err := st.SetItemCredits(ctx, pid, model.ContributorRole("bogus"), []string{"X"}, model.SourceUser, true, false); !waxerr.Is(err, waxerr.CodeInvalid) {
+	if _, err := st.SetItemCredits(ctx, pid, model.ContributorRole("bogus"), []string{"X"}, model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); !waxerr.Is(err, waxerr.CodeInvalid) {
 		t.Fatalf("bogus role = %v, want CodeInvalid", err)
 	}
 }
@@ -96,7 +96,7 @@ func TestSetItemCreditsBookAuthorSyncsDenorm(t *testing.T) {
 	st, bpid := bookEditFixture(t)
 	ctx := context.Background()
 
-	if _, err := st.SetItemCredits(ctx, bpid, model.RoleAuthor, []string{"New Author"}, model.SourceUser, true, false); err != nil {
+	if _, err := st.SetItemCredits(ctx, bpid, model.RoleAuthor, []string{"New Author"}, model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
 		t.Fatalf("set author: %v", err)
 	}
 	// The denormalized book.author and its item view follow.
@@ -108,7 +108,7 @@ func TestSetItemCreditsBookAuthorSyncsDenorm(t *testing.T) {
 		t.Fatalf("book author view = %q, want New Author", v.Artist)
 	}
 	// A music role is rejected on a book.
-	if _, err := st.SetItemCredits(ctx, bpid, model.RoleDJMixer, []string{"X"}, model.SourceUser, true, false); !waxerr.Is(err, waxerr.CodeInvalid) {
+	if _, err := st.SetItemCredits(ctx, bpid, model.RoleDJMixer, []string{"X"}, model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); !waxerr.Is(err, waxerr.CodeInvalid) {
 		t.Fatalf("djmixer on book = %v, want CodeInvalid", err)
 	}
 }
@@ -119,7 +119,7 @@ func TestSetItemCreditsDedupAndCount(t *testing.T) {
 
 	// "Bob"/"bob" fold to one artist (match key), and "" / "!!!" resolve to nothing.
 	stored, err := st.SetItemCredits(ctx, pid, model.RoleComposer,
-		[]string{"Bob", "bob", "", "!!!"}, model.SourceUser, true, false)
+		[]string{"Bob", "bob", "", "!!!"}, model.Attribution{Source: model.SourceUser}, model.LockOf(true), false)
 	if err != nil {
 		t.Fatalf("set: %v", err)
 	}
@@ -147,7 +147,7 @@ func TestSetItemCreditsDedupAndCount(t *testing.T) {
 	}
 
 	// An all-unresolvable set clears the role and reports 0 stored (not a false "set").
-	stored, err = st.SetItemCredits(ctx, pid, model.RoleComposer, []string{"!!!"}, model.SourceUser, true, true)
+	stored, err = st.SetItemCredits(ctx, pid, model.RoleComposer, []string{"!!!"}, model.Attribution{Source: model.SourceUser}, model.LockOf(true), true)
 	if err != nil {
 		t.Fatalf("clear: %v", err)
 	}
@@ -162,12 +162,12 @@ func TestSetFieldProvenanceRejectsNonScalar(t *testing.T) {
 	// art/lyrics/chapters are lockable but NOT scalar-settable, so SetFieldProvenance
 	// (the scalar provenance path) must reject them instead of writing a junk row.
 	for _, f := range []string{"art", "lyrics", "chapters"} {
-		if err := st.SetFieldProvenance(ctx, pid, f, model.SourceUser, "x", false); !waxerr.Is(err, waxerr.CodeInvalid) {
+		if err := st.SetFieldProvenance(ctx, pid, f, model.Attribution{Source: model.SourceUser}, "x", false); !waxerr.Is(err, waxerr.CodeInvalid) {
 			t.Fatalf("SetFieldProvenance(%q) = %v, want CodeInvalid", f, err)
 		}
 	}
 	// A scalar field still works.
-	if err := st.SetFieldProvenance(ctx, pid, "comment", model.SourceUser, "hi", false); err != nil {
+	if err := st.SetFieldProvenance(ctx, pid, "comment", model.Attribution{Source: model.SourceUser}, "hi", false); err != nil {
 		t.Fatalf("scalar SetFieldProvenance: %v", err)
 	}
 }
@@ -181,11 +181,11 @@ func TestLockCreditRole(t *testing.T) {
 		t.Fatalf("lock credit.producer: %v", err)
 	}
 	// Setting the locked role without force is refused.
-	if _, err := st.SetItemCredits(ctx, pid, model.RoleProducer, []string{"X"}, model.SourceUser, true, false); !waxerr.Is(err, waxerr.CodeLocked) {
+	if _, err := st.SetItemCredits(ctx, pid, model.RoleProducer, []string{"X"}, model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); !waxerr.Is(err, waxerr.CodeLocked) {
 		t.Fatalf("set locked credit = %v, want CodeLocked", err)
 	}
 	// Force overrides it.
-	if _, err := st.SetItemCredits(ctx, pid, model.RoleProducer, []string{"X"}, model.SourceUser, true, true); err != nil {
+	if _, err := st.SetItemCredits(ctx, pid, model.RoleProducer, []string{"X"}, model.Attribution{Source: model.SourceUser}, model.LockOf(true), true); err != nil {
 		t.Fatalf("forced set: %v", err)
 	}
 	// A book-only credit role cannot be locked on a track.

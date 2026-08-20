@@ -102,6 +102,19 @@ func ReadLockOwner(dbPath string) (sqlite.OwnerInfo, error) {
 	return sqlite.ReadOwnerInfo(dbPath + ".waxlock")
 }
 
+// wireLock parses a lock instruction off a frame, at the boundary the way an art role
+// is parsed, so a bad frame never reaches the store. The store refuses the same value,
+// but only after the request has travelled; this is the one place the wire vocabulary is
+// spelled out for a client to read in the refusal.
+func wireLock(op, lock string) (model.LockChange, error) {
+	c, ok := model.ParseLockChange(lock)
+	if !ok {
+		return "", waxerr.New(waxerr.CodeInvalid, op,
+			"unknown lock instruction: "+lock+` (want "", lock, or unlock)`)
+	}
+	return c, nil
+}
+
 // proxyHandlers builds the map of method names to handlers the proxy server
 // dispatches. Each handler unmarshals its params, calls the matching Library
 // operation, and returns a value to marshal into the response. Handlers run
@@ -113,8 +126,15 @@ func (l *Library) proxyHandlers() map[string]proxy.Handler {
 			if err != nil {
 				return nil, err
 			}
+			lock, lockErr := wireLock("serve.edit_fields", p.Lock)
+			if lockErr != nil {
+				return nil, lockErr
+			}
 			editErr := l.EditFields(ctx, model.PID(p.ItemPID), p.Edits,
-				EditOptions{WriteBack: p.WriteBack, Lock: p.Lock, Force: p.Force})
+				EditOptions{
+					WriteBack: p.WriteBack, Lock: lock, Force: p.Force,
+					Source: model.ProvenanceSource(p.Source), Provider: p.Provider,
+				})
 			// A write-back failure is a result, not a transport error: the catalog edit
 			// committed and only the on-disk tags did not follow. Return the failures in
 			// the response so the client rebuilds the same typed error the local path does.
@@ -136,8 +156,15 @@ func (l *Library) proxyHandlers() map[string]proxy.Handler {
 			for i, s := range p.ItemPIDs {
 				pids[i] = model.PID(s)
 			}
+			lock, lockErr := wireLock("serve.edit_many_fields", p.Lock)
+			if lockErr != nil {
+				return nil, lockErr
+			}
 			res, err := l.EditManyFields(ctx, pids, p.Edits,
-				EditOptions{WriteBack: p.WriteBack, Lock: p.Lock, Force: p.Force, SkipLocked: p.SkipLocked})
+				EditOptions{
+					WriteBack: p.WriteBack, Lock: lock, Force: p.Force, SkipLocked: p.SkipLocked,
+					Source: model.ProvenanceSource(p.Source), Provider: p.Provider,
+				})
 			if err != nil {
 				return nil, err
 			}
@@ -152,8 +179,15 @@ func (l *Library) proxyHandlers() map[string]proxy.Handler {
 			for i, it := range p.Items {
 				edits[i] = model.ItemFieldEdit{ItemPID: model.PID(it.ItemPID), Fields: it.Fields}
 			}
+			lock, lockErr := wireLock("serve.edit_batch", p.Lock)
+			if lockErr != nil {
+				return nil, lockErr
+			}
 			res, err := l.EditItemsFields(ctx, edits,
-				EditOptions{WriteBack: p.WriteBack, Lock: p.Lock, Force: p.Force, SkipLocked: p.SkipLocked})
+				EditOptions{
+					WriteBack: p.WriteBack, Lock: lock, Force: p.Force, SkipLocked: p.SkipLocked,
+					Source: model.ProvenanceSource(p.Source), Provider: p.Provider,
+				})
 			if err != nil {
 				return nil, err
 			}
@@ -164,8 +198,15 @@ func (l *Library) proxyHandlers() map[string]proxy.Handler {
 			if err != nil {
 				return nil, err
 			}
+			lock, lockErr := wireLock("serve.set_credits", p.Lock)
+			if lockErr != nil {
+				return nil, lockErr
+			}
 			stored, editErr := l.SetCredits(ctx, model.PID(p.ItemPID), model.ContributorRole(p.Role), p.Names,
-				CreditEditOptions{WriteBack: p.WriteBack, Lock: p.Lock, Force: p.Force})
+				CreditEditOptions{
+					WriteBack: p.WriteBack, Lock: lock, Force: p.Force,
+					Source: model.ProvenanceSource(p.Source), Provider: p.Provider,
+				})
 			// A write-back failure is a result, not a transport error (the catalog edit stands).
 			var wbErr *WriteBackError
 			if errors.As(editErr, &wbErr) {
@@ -181,14 +222,22 @@ func (l *Library) proxyHandlers() map[string]proxy.Handler {
 			if err != nil {
 				return nil, err
 			}
-			return nil, l.SetLyrics(ctx, model.PID(p.ItemPID), p.Lyrics, p.Lock, p.Force)
+			lock, lockErr := wireLock("serve.set_lyrics", p.Lock)
+			if lockErr != nil {
+				return nil, lockErr
+			}
+			return nil, l.SetLyrics(ctx, model.PID(p.ItemPID), p.Lyrics, lock, p.Force)
 		},
 		proxy.MethodSetChapters: func(ctx context.Context, raw json.RawMessage) (any, error) {
 			p, err := decodeParams[proxy.SetChaptersParams](raw)
 			if err != nil {
 				return nil, err
 			}
-			return nil, l.SetChapters(ctx, model.PID(p.ItemPID), p.Chapters, p.Lock, p.Force)
+			lock, lockErr := wireLock("serve.set_chapters", p.Lock)
+			if lockErr != nil {
+				return nil, lockErr
+			}
+			return nil, l.SetChapters(ctx, model.PID(p.ItemPID), p.Chapters, lock, p.Force)
 		},
 		proxy.MethodSetItemArt: func(ctx context.Context, raw json.RawMessage) (any, error) {
 			p, err := decodeParams[proxy.SetItemArtParams](raw)
@@ -201,7 +250,14 @@ func (l *Library) proxyHandlers() map[string]proxy.Handler {
 			if !ok {
 				return nil, waxerr.New(waxerr.CodeInvalid, "serve.set_item_art", "unknown art role: "+p.Role)
 			}
-			artErr := l.SetItemArt(ctx, model.PID(p.ItemPID), role, p.Data, p.Lock, p.Force, p.WriteBack)
+			lock, lockErr := wireLock("serve.set_item_art", p.Lock)
+			if lockErr != nil {
+				return nil, lockErr
+			}
+			artErr := l.SetItemArt(ctx, model.PID(p.ItemPID), role, p.Data, ArtEditOptions{
+				WriteBack: p.WriteBack, Lock: lock, Force: p.Force,
+				Source: model.ProvenanceSource(p.Source), Provider: p.Provider, SourceURL: p.SourceURL,
+			})
 			// A write-back failure is a result, not a transport error (the catalog edit stands).
 			var wbErr *WriteBackError
 			if errors.As(artErr, &wbErr) {
@@ -221,7 +277,14 @@ func (l *Library) proxyHandlers() map[string]proxy.Handler {
 			if !ok {
 				return nil, waxerr.New(waxerr.CodeInvalid, "serve.set_entity_art", "unknown art role: "+p.Role)
 			}
-			artErr := l.SetEntityArt(ctx, model.ArtEntity(p.EntityType), model.PID(p.EntityPID), role, p.Data, p.Lock, p.Force, p.WriteBack)
+			lock, lockErr := wireLock("serve.set_entity_art", p.Lock)
+			if lockErr != nil {
+				return nil, lockErr
+			}
+			artErr := l.SetEntityArt(ctx, model.ArtEntity(p.EntityType), model.PID(p.EntityPID), role, p.Data, ArtEditOptions{
+				WriteBack: p.WriteBack, Lock: lock, Force: p.Force,
+				Source: model.ProvenanceSource(p.Source), Provider: p.Provider, SourceURL: p.SourceURL,
+			})
 			var wbErr *WriteBackError
 			if errors.As(artErr, &wbErr) {
 				return proxy.SetEntityArtResult{WriteBackFailures: toProxyFailures(wbErr.Failures)}, nil
@@ -243,8 +306,15 @@ func (l *Library) proxyHandlers() map[string]proxy.Handler {
 			if err != nil {
 				return nil, err
 			}
+			lock, lockErr := wireLock("serve.edit_entity", p.Lock)
+			if lockErr != nil {
+				return nil, lockErr
+			}
 			editErr := l.EditEntity(ctx, model.MergeEntity(p.EntityType), model.PID(p.EntityPID), p.Edits,
-				EntityEditOptions{WriteBack: p.WriteBack, Lock: p.Lock, Force: p.Force})
+				EntityEditOptions{
+					WriteBack: p.WriteBack, Lock: lock, Force: p.Force,
+					Source: model.ProvenanceSource(p.Source), Provider: p.Provider,
+				})
 			var wbErr *WriteBackError
 			if errors.As(editErr, &wbErr) {
 				return proxy.EditEntityResult{WriteBackFailures: toProxyFailures(wbErr.Failures)}, nil
@@ -259,7 +329,14 @@ func (l *Library) proxyHandlers() map[string]proxy.Handler {
 			if err != nil {
 				return nil, err
 			}
-			key, stored, err := l.SetItemTag(ctx, model.PID(p.ItemPID), p.Key, p.Values, TagEditOptions{Lock: p.Lock, Force: p.Force})
+			lock, lockErr := wireLock("serve.set_tag", p.Lock)
+			if lockErr != nil {
+				return nil, lockErr
+			}
+			key, stored, err := l.SetItemTag(ctx, model.PID(p.ItemPID), p.Key, p.Values, TagEditOptions{
+				Lock: lock, Force: p.Force,
+				Source: model.ProvenanceSource(p.Source), Provider: p.Provider,
+			})
 			if err != nil {
 				return nil, err
 			}

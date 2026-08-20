@@ -59,17 +59,18 @@ func entityColumnForField(field string) string {
 // EditEntityFields applies curation edits to one shared entity (an artist, release
 // group, or album) in a single transaction. It writes the entity's own column
 // (a sort-name override drives the generated sort_key; identifiers write their own
-// columns) and records an entity_curation row per field with the source and, when lock
-// is set, a lock that protects the value from an enrichment overwrite. One item change
-// delta is emitted for every item the entity backs, plus an entity delta, so a delta
-// consumer re-resolves the affected rows.
+// columns) and records an entity_curation row per field with the caller's attribution.
+// The lock follows the caller's instruction: LockOn protects the value from an
+// enrichment overwrite, LockOff releases it, and LockUnchanged leaves whatever was
+// there. One item change delta is emitted for every item the entity backs, plus an
+// entity delta, so a delta consumer re-resolves the affected rows.
 //
 // A field that does not apply to the entity type is CodeInvalid; a genre (or any other
 // non-curatable entity type) is CodeUnsupported. A locked field is refused with
 // CodeLocked unless force is set. On-disk tag write-back of these values fans out
 // across the entity's member files and is sequenced separately; this edit is
 // DB-only.
-func (s *Store) EditEntityFields(ctx context.Context, entityType model.MergeEntity, entityPID model.PID, edits map[string]string, source model.ProvenanceSource, lock, force bool) error {
+func (s *Store) EditEntityFields(ctx context.Context, entityType model.MergeEntity, entityPID model.PID, edits map[string]string, attr model.Attribution, lock model.LockChange, force bool) error {
 	const op = "store.EditEntityFields"
 	table, ok := entityTableFor(entityType)
 	if !ok {
@@ -78,8 +79,12 @@ func (s *Store) EditEntityFields(ctx context.Context, entityType model.MergeEnti
 	if len(edits) == 0 {
 		return waxerr.New(waxerr.CodeInvalid, op, "no fields to edit")
 	}
-	if !source.ValidForField() {
-		return waxerr.New(waxerr.CodeInvalid, op, "invalid provenance source: "+string(source))
+	attr, err := checkFieldAttribution(attr, op)
+	if err != nil {
+		return err
+	}
+	if err := checkLockChange(lock, op); err != nil {
+		return err
 	}
 	// Validate every field name and value up front so a bad edit is rejected before any
 	// write. Iterate in a stable order so the edit is deterministic.
@@ -175,7 +180,7 @@ func (s *Store) EditEntityFields(ctx context.Context, entityType model.MergeEnti
 			if err := applyEntityFieldTx(ctx, tx, entityType, table, entityID, f, norm[f]); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
-			if err := upsertEntityCurationTx(ctx, tx, string(entityType), entityID, f, source, norm[f], lock, now); err != nil {
+			if err := upsertEntityCurationTx(ctx, tx, string(entityType), entityID, f, attr, norm[f], lock, now); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 			if entityType == model.MergeAlbum && norm[f] != "" && slices.Contains(albumMatchEvidence, f) {
@@ -274,29 +279,42 @@ func refreshEntitySortKeyTx(ctx context.Context, tx *sql.Tx, entityType model.Me
 	return err
 }
 
-// upsertEntityCurationTx writes an entity field's curation row with the source, the
-// curated value, and the lock bit. It mirrors upsertEditProvenanceTx for the entity
-// scope.
-func upsertEntityCurationTx(ctx context.Context, tx *sql.Tx, entityType string, entityID int64, field string, source model.ProvenanceSource, value string, lock bool, now int64) error {
-	_, err := tx.ExecContext(ctx, `INSERT INTO entity_curation(entity_type, entity_id, field, source, locked, value, updated_at)
-		VALUES (?,?,?,?,?,?,?)
+// upsertEntityCurationTx writes an entity field's curation row with the caller's
+// attribution, the curated value, and the lock the caller asked for. It mirrors
+// upsertEditProvenanceTx for the entity scope, LockUnchanged included: the stored lock
+// survives a write that formed no lock intent, and a fresh row inserts unlocked.
+func upsertEntityCurationTx(ctx context.Context, tx *sql.Tx, entityType string, entityID int64, field string, attr model.Attribution, value string, lock model.LockChange, now int64) error {
+	_, err := tx.ExecContext(ctx, `INSERT INTO entity_curation(entity_type, entity_id, field, source, provider, locked, value, updated_at)
+		VALUES (?,?,?,?,?,?,?,?)
 		ON CONFLICT(entity_type, entity_id, field) DO UPDATE SET
-			source=excluded.source, locked=excluded.locked, value=excluded.value, updated_at=excluded.updated_at`,
-		entityType, entityID, field, string(source), boolInt(lock), value, now)
+			source=excluded.source, provider=excluded.provider,
+			locked=CASE WHEN ? THEN excluded.locked ELSE locked END,
+			value=excluded.value, updated_at=excluded.updated_at`,
+		entityType, entityID, field, string(attr.Source), nullStr(attr.Provider),
+		boolInt(lock == model.LockOn), value, now,
+		boolInt(lock != model.LockUnchanged))
 	return err
 }
 
-// setEntityCurationLockTx upserts the lock bit on an entity's curation field (source
-// "user"), or drops a pure-lock row when unlocking, keeping the table sparse. It is
-// the entity-scoped twin of setCurationLockTx, for the artifact fields that have no
-// scalar value of their own to carry ("art").
-func setEntityCurationLockTx(ctx context.Context, tx *sql.Tx, entityType string, entityID int64, field string, lock bool) error {
-	if lock {
-		_, err := tx.ExecContext(ctx, `INSERT INTO entity_curation(entity_type, entity_id, field, source, locked, updated_at)
-			VALUES (?,?,?,?,1,?)
+// setEntityCurationLockTx upserts the lock bit on an entity's curation field, carrying
+// the attribution of the write that asked for the lock, or drops a pure-lock row when
+// unlocking, keeping the table sparse. LockUnchanged writes nothing at all. It is the
+// entity-scoped twin of setCurationLockTx, for the artifact fields that have no scalar
+// value of their own to carry ("art").
+//
+// The row it writes is not inert: ArtRoles synthesizes an entity's front entry from it
+// when the cover was cleared and locked, so the attribution recorded here is the only
+// one that read has to report.
+func setEntityCurationLockTx(ctx context.Context, tx *sql.Tx, entityType string, entityID int64, field string, attr model.Attribution, lock model.LockChange) error {
+	switch lock {
+	case model.LockUnchanged:
+		return nil
+	case model.LockOn:
+		_, err := tx.ExecContext(ctx, `INSERT INTO entity_curation(entity_type, entity_id, field, source, provider, locked, updated_at)
+			VALUES (?,?,?,?,?,1,?)
 			ON CONFLICT(entity_type, entity_id, field) DO UPDATE SET
-				source=excluded.source, locked=1, updated_at=excluded.updated_at`,
-			entityType, entityID, field, string(model.SourceUser), nowNS())
+				source=excluded.source, provider=excluded.provider, locked=1, updated_at=excluded.updated_at`,
+			entityType, entityID, field, string(attr.Source), nullStr(attr.Provider), nowNS())
 		return err
 	}
 	_, err := tx.ExecContext(ctx,
@@ -340,7 +358,8 @@ func (s *Store) EntityCuration(ctx context.Context, entityType model.MergeEntity
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
-	rows, err := s.read.QueryContext(ctx, `SELECT field, source, locked, COALESCE(value,''), updated_at
+	rows, err := s.read.QueryContext(ctx, `SELECT field, source, COALESCE(provider,''), locked,
+		COALESCE(value,''), updated_at
 		FROM entity_curation WHERE entity_type = ? AND entity_id = ? ORDER BY field`,
 		string(entityType), entityID)
 	if err != nil {
@@ -352,7 +371,7 @@ func (s *Store) EntityCuration(ctx context.Context, entityType model.MergeEntity
 		ec := model.EntityCuration{EntityType: entityType, EntityPID: entityPID}
 		var source string
 		var locked int
-		if err := rows.Scan(&ec.Field, &source, &locked, &ec.Value, &ec.UpdatedAt); err != nil {
+		if err := rows.Scan(&ec.Field, &source, &ec.Provider, &locked, &ec.Value, &ec.UpdatedAt); err != nil {
 			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		ec.Source = model.ProvenanceSource(source)

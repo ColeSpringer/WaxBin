@@ -48,7 +48,7 @@ func TestEditEpisodeFields(t *testing.T) {
 		"title": "Curated", "description": "Curated Desc", "explicit": "true",
 		"season": "2", "episode_no": "5", "episode_type": "bonus", "pinned": "true",
 	}
-	if err := st.EditItemFields(ctx, pid, edits, model.SourceUser, true, false); err != nil {
+	if err := st.EditItemFields(ctx, pid, edits, model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
 		t.Fatalf("edit episode: %v", err)
 	}
 
@@ -63,11 +63,11 @@ func TestEditEpisodeFields(t *testing.T) {
 	}
 
 	// A bad episode_type is rejected.
-	if err := st.EditItemField(ctx, pid, "episode_type", "weird", model.SourceUser, false, true); !waxerr.Is(err, waxerr.CodeInvalid) {
+	if err := st.EditItemField(ctx, pid, "episode_type", "weird", model.Attribution{Source: model.SourceUser}, model.LockOf(false), true); !waxerr.Is(err, waxerr.CodeInvalid) {
 		t.Fatalf("bad episode_type = %v, want CodeInvalid", err)
 	}
 	// A track/book field is rejected on an episode.
-	if err := st.EditItemField(ctx, pid, "artist", "X", model.SourceUser, false, true); !waxerr.Is(err, waxerr.CodeInvalid) {
+	if err := st.EditItemField(ctx, pid, "artist", "X", model.Attribution{Source: model.SourceUser}, model.LockOf(false), true); !waxerr.Is(err, waxerr.CodeInvalid) {
 		t.Fatalf("artist on episode = %v, want CodeInvalid", err)
 	}
 }
@@ -82,7 +82,7 @@ func TestEditEpisodeSurvivesFeedResync(t *testing.T) {
 
 	// Lock title + description via an edit; leave link unlocked.
 	if err := st.EditItemFields(ctx, pid, map[string]string{"title": "Curated", "description": "Curated Desc"},
-		model.SourceUser, true, false); err != nil {
+		model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
 		t.Fatalf("edit: %v", err)
 	}
 

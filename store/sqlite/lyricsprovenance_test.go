@@ -70,15 +70,27 @@ func TestLyricsProvenanceRoundTrip(t *testing.T) {
 		t.Errorf("fetched lyrics = %+v (err %v), want enrichment/lrclib", got, err)
 	}
 
-	// user: the curation edit re-attributes and drops any provider that came with it.
-	if err := st.SetItemLyrics(ctx, fetched, &model.Lyrics{
-		Source: model.SourceEnrichment, Provider: "lrclib", Unsynced: "my words",
-	}, true, false); err != nil {
+	// user: a curation edit that names no origin is recorded as a hand edit, and the
+	// provider that came with the words it replaces goes with them.
+	if err := st.SetItemLyrics(ctx, fetched, &model.Lyrics{Unsynced: "my words"},
+		model.LockOf(true), false); err != nil {
 		t.Fatalf("SetItemLyrics: %v", err)
 	}
 	got, err = st.LyricsByItem(ctx, fetched)
 	if err != nil || got.Source != model.SourceUser || got.Provider != "" {
 		t.Errorf("user lyrics = %+v (err %v), want a user row with no provider", got, err)
+	}
+
+	// And a curation write that does name an origin keeps it, which is what lets an
+	// embedder that fetched the words record who fetched them.
+	if err := st.SetItemLyrics(ctx, fetched, &model.Lyrics{
+		Source: model.SourceEnrichment, Provider: "lrclib", Unsynced: "their words",
+	}, model.LockOf(true), true); err != nil {
+		t.Fatalf("SetItemLyrics stamped: %v", err)
+	}
+	got, err = st.LyricsByItem(ctx, fetched)
+	if err != nil || got.Source != model.SourceEnrichment || got.Provider != "lrclib" {
+		t.Errorf("stamped curation lyrics = %+v (err %v), want enrichment/lrclib", got, err)
 	}
 }
 

@@ -561,7 +561,7 @@ func TestFacetDefaultOrderUnchanged(t *testing.T) {
 	if err != nil || len(items) == 0 {
 		t.Fatalf("items = %d (err %v)", len(items), err)
 	}
-	if _, _, err := st.SetItemTag(ctx, items[0].PID, "MOOD", []string{"calm"}, model.SourceUser, false, false); err != nil {
+	if _, _, err := st.SetItemTag(ctx, items[0].PID, "MOOD", []string{"calm"}, model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("set tag: %v", err)
 	}
 	// The playlist dimension needs a default-user playlist or its loop iteration

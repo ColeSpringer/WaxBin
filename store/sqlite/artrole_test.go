@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"database/sql"
 	"testing"
 
 	"github.com/colespringer/waxbin/model"
@@ -18,7 +19,7 @@ func TestArtRolesIndependentSetAndClear(t *testing.T) {
 	front, back := testPNG(t, 40, 40), testPNG(t, 41, 41)
 	pid := putWithCover(t, st, lib.ID, "/lib/al/1.flac", "e1", front)
 
-	if err := st.SetItemArt(ctx, pid, model.ArtRoleBack, back.Data, false, false); err != nil {
+	if err := st.SetItemArt(ctx, pid, model.ArtRoleBack, back.Data, model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("set back: %v", err)
 	}
 
@@ -45,7 +46,7 @@ func TestArtRolesIndependentSetAndClear(t *testing.T) {
 	}
 
 	// Clearing one role leaves the other intact.
-	if err := st.SetItemArt(ctx, pid, model.ArtRoleBack, nil, false, false); err != nil {
+	if err := st.SetItemArt(ctx, pid, model.ArtRoleBack, nil, model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("clear back: %v", err)
 	}
 	if _, err := st.ResolveArt(ctx, model.EntityRef{Type: model.ArtTrack, PID: pid}, model.ArtRoleBack, 0); !waxerr.Is(err, waxerr.CodeNotFound) {
@@ -62,7 +63,7 @@ func TestScanPreservesNonFrontRoles(t *testing.T) {
 	coverA, coverB, back := testPNG(t, 40, 40), testPNG(t, 42, 42), testPNG(t, 41, 41)
 	pid := putWithCover(t, st, lib.ID, "/lib/al/1.flac", "e1", coverA)
 
-	if err := st.SetItemArt(ctx, pid, model.ArtRoleBack, back.Data, false, false); err != nil {
+	if err := st.SetItemArt(ctx, pid, model.ArtRoleBack, back.Data, model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("set back: %v", err)
 	}
 	// A rescan with a DIFFERENT front cover replaces front and must not touch back.
@@ -88,7 +89,7 @@ func TestChainIgnoresNonFrontRows(t *testing.T) {
 	// Track 1 carries the album's only front cover; track 2 gets only a back image.
 	putWithCover(t, st, lib.ID, "/lib/al/1.flac", "e1", albumCover)
 	pid2 := putWithCover(t, st, lib.ID, "/lib/al/2.flac", "e2", nil)
-	if err := st.SetItemArt(ctx, pid2, model.ArtRoleBack, back.Data, false, false); err != nil {
+	if err := st.SetItemArt(ctx, pid2, model.ArtRoleBack, back.Data, model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("set back: %v", err)
 	}
 
@@ -114,7 +115,7 @@ func TestNonFrontResolvesOwnLevelOnly(t *testing.T) {
 	ctx := context.Background()
 	back := testPNG(t, 41, 41)
 	pid := putWithCover(t, st, lib.ID, "/lib/al/1.flac", "e1", nil)
-	if err := st.SetEntityArt(ctx, model.ArtAlbum, albumPID(t, st), model.ArtRoleBack, back.Data, false, false); err != nil {
+	if err := st.SetEntityArt(ctx, model.ArtAlbum, albumPID(t, st), model.ArtRoleBack, back.Data, model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("set album back: %v", err)
 	}
 
@@ -129,10 +130,10 @@ func TestNonFrontResolvesOwnLevelOnly(t *testing.T) {
 
 	// The reverse direction: with the album's own back cleared and a back on the
 	// member track instead, the album must not derive it.
-	if err := st.SetEntityArt(ctx, model.ArtAlbum, albumPID(t, st), model.ArtRoleBack, nil, false, false); err != nil {
+	if err := st.SetEntityArt(ctx, model.ArtAlbum, albumPID(t, st), model.ArtRoleBack, nil, model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("clear album back: %v", err)
 	}
-	if err := st.SetItemArt(ctx, pid, model.ArtRoleBack, back.Data, false, false); err != nil {
+	if err := st.SetItemArt(ctx, pid, model.ArtRoleBack, back.Data, model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("set track back: %v", err)
 	}
 	if _, err := st.ResolveArt(ctx, model.EntityRef{Type: model.ArtAlbum, PID: albumPID(t, st)}, model.ArtRoleBack, 0); !waxerr.Is(err, waxerr.CodeNotFound) {
@@ -170,7 +171,7 @@ func TestResolveArtLevelDerivedMatrix(t *testing.T) {
 	}
 
 	// A durable album cover flips Derived off (and wins over the track-derived one).
-	if err := st.SetEntityArt(ctx, model.ArtAlbum, alb, model.ArtRoleFront, albumCover.Data, false, false); err != nil {
+	if err := st.SetEntityArt(ctx, model.ArtAlbum, alb, model.ArtRoleFront, albumCover.Data, model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("set album front: %v", err)
 	}
 	ba, err = st.ResolveArt(ctx, model.EntityRef{Type: model.ArtAlbum, PID: alb}, model.ArtRoleFront, 0)
@@ -191,10 +192,10 @@ func TestSetArtUnknownRoleRejected(t *testing.T) {
 	img := testPNG(t, 40, 40)
 	pid := putWithCover(t, st, lib.ID, "/lib/al/1.flac", "e1", nil)
 
-	if err := st.SetItemArt(ctx, pid, model.ArtRole("portrait"), img.Data, false, false); !waxerr.Is(err, waxerr.CodeInvalid) {
+	if err := st.SetItemArt(ctx, pid, model.ArtRole("portrait"), img.Data, model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); !waxerr.Is(err, waxerr.CodeInvalid) {
 		t.Errorf("item art with unknown role = %v, want CodeInvalid", err)
 	}
-	if err := st.SetEntityArt(ctx, model.ArtAlbum, albumPID(t, st), model.ArtRole("artist"), img.Data, false, false); !waxerr.Is(err, waxerr.CodeInvalid) {
+	if err := st.SetEntityArt(ctx, model.ArtAlbum, albumPID(t, st), model.ArtRole("artist"), img.Data, model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); !waxerr.Is(err, waxerr.CodeInvalid) {
 		t.Errorf("entity art with unknown role = %v, want CodeInvalid (the vocabulary is closed now)", err)
 	}
 	if _, err := st.ResolveArt(ctx, model.EntityRef{Type: model.ArtTrack, PID: pid}, model.ArtRole("nope"), 0); !waxerr.Is(err, waxerr.CodeInvalid) {
@@ -202,13 +203,13 @@ func TestSetArtUnknownRoleRejected(t *testing.T) {
 	}
 
 	// The front lock gates only the front slot: with art locked, a back set works.
-	if err := st.SetItemArt(ctx, pid, model.ArtRoleFront, img.Data, true, false); err != nil {
+	if err := st.SetItemArt(ctx, pid, model.ArtRoleFront, img.Data, model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
 		t.Fatalf("set+lock front: %v", err)
 	}
-	if err := st.SetItemArt(ctx, pid, model.ArtRoleBack, img.Data, false, false); err != nil {
+	if err := st.SetItemArt(ctx, pid, model.ArtRoleBack, img.Data, model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Errorf("back set under a front lock = %v, want allowed (the lock guards the scanned slot only)", err)
 	}
-	if err := st.SetItemArt(ctx, pid, model.ArtRoleFront, img.Data, false, false); !waxerr.Is(err, waxerr.CodeLocked) {
+	if err := st.SetItemArt(ctx, pid, model.ArtRoleFront, img.Data, model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); !waxerr.Is(err, waxerr.CodeLocked) {
 		t.Errorf("front set under lock = %v, want CodeLocked", err)
 	}
 }
@@ -223,7 +224,7 @@ func TestEntityArtSlotKindMismatchRejected(t *testing.T) {
 	img := testPNG(t, 40, 40)
 	track := putWithCover(t, st, lib.ID, "/lib/al/1.flac", "e1", nil)
 
-	if err := st.SetEntityArt(ctx, model.ArtEpisode, track, model.ArtRoleFront, img.Data, false, false); !waxerr.Is(err, waxerr.CodeInvalid) {
+	if err := st.SetEntityArt(ctx, model.ArtEpisode, track, model.ArtRoleFront, img.Data, model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); !waxerr.Is(err, waxerr.CodeInvalid) {
 		t.Errorf("episode art on a track pid = %v, want CodeInvalid", err)
 	}
 	if n := scalarInt(t, st, "SELECT COUNT(*) FROM art_map WHERE entity_type = 'episode'"); n != 0 {
@@ -235,11 +236,11 @@ func TestEntityArtSlotKindMismatchRejected(t *testing.T) {
 		t.Fatalf("UpsertFeed: %v", err)
 	}
 	ep := episodeByTitle(t, st, feed.PodcastPID, "Alpha").PID
-	if err := st.SetEntityArt(ctx, model.ArtTrack, ep, model.ArtRoleFront, img.Data, false, false); !waxerr.Is(err, waxerr.CodeInvalid) {
+	if err := st.SetEntityArt(ctx, model.ArtTrack, ep, model.ArtRoleFront, img.Data, model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); !waxerr.Is(err, waxerr.CodeInvalid) {
 		t.Errorf("track art on an episode pid = %v, want CodeInvalid", err)
 	}
 	// The matching slot still works: an episode's own cover is a real, resolvable row.
-	if err := st.SetEntityArt(ctx, model.ArtEpisode, ep, model.ArtRoleFront, img.Data, false, false); err != nil {
+	if err := st.SetEntityArt(ctx, model.ArtEpisode, ep, model.ArtRoleFront, img.Data, model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("episode art on an episode pid: %v", err)
 	}
 	blob, err := st.ResolveArt(ctx, model.EntityRef{Type: model.ArtEpisode, PID: ep}, model.ArtRoleFront, 0)
@@ -295,10 +296,10 @@ func TestRemovePodcastDropsArtRows(t *testing.T) {
 		t.Fatalf("UpsertFeed: %v", err)
 	}
 	ep := episodeByTitle(t, st, feed.PodcastPID, "Alpha").PID
-	if err := st.SetEntityArt(ctx, model.ArtPodcast, feed.PodcastPID, model.ArtRoleFront, feedArt.Data, false, false); err != nil {
+	if err := st.SetEntityArt(ctx, model.ArtPodcast, feed.PodcastPID, model.ArtRoleFront, feedArt.Data, model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("set podcast art: %v", err)
 	}
-	if err := st.SetEntityArt(ctx, model.ArtEpisode, ep, model.ArtRoleFront, epArt.Data, false, false); err != nil {
+	if err := st.SetEntityArt(ctx, model.ArtEpisode, ep, model.ArtRoleFront, epArt.Data, model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("set episode art: %v", err)
 	}
 
@@ -328,7 +329,7 @@ func TestGCArtMultiRole(t *testing.T) {
 	ctx := context.Background()
 	front, back := testPNG(t, 40, 40), testPNG(t, 41, 41)
 	pid := putWithCover(t, st, lib.ID, "/lib/al/1.flac", "e1", front)
-	if err := st.SetItemArt(ctx, pid, model.ArtRoleBack, back.Data, false, false); err != nil {
+	if err := st.SetItemArt(ctx, pid, model.ArtRoleBack, back.Data, model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("set back: %v", err)
 	}
 
@@ -412,10 +413,10 @@ func TestArtRolesReportsCoverlessLock(t *testing.T) {
 	img := testPNG(t, 44, 44)
 
 	// Set then clear, the journey that produces the state, keeping the default lock.
-	if err := st.SetEntityArt(ctx, model.ArtPodcast, feed.PodcastPID, model.ArtRoleFront, img.Data, true, false); err != nil {
+	if err := st.SetEntityArt(ctx, model.ArtPodcast, feed.PodcastPID, model.ArtRoleFront, img.Data, model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
 		t.Fatalf("set podcast front: %v", err)
 	}
-	if err := st.SetEntityArt(ctx, model.ArtPodcast, feed.PodcastPID, model.ArtRoleFront, nil, true, true); err != nil {
+	if err := st.SetEntityArt(ctx, model.ArtPodcast, feed.PodcastPID, model.ArtRoleFront, nil, model.Attribution{Source: model.SourceUser}, model.LockOf(true), true); err != nil {
 		t.Fatalf("clear podcast front: %v", err)
 	}
 
@@ -466,7 +467,7 @@ func TestArtRolesCoverlessLockKeepsRoleOrder(t *testing.T) {
 	ctx := context.Background()
 	pl := newPlaylist(t, st, "Ordered")
 	back := testPNG(t, 45, 45)
-	if err := st.SetEntityArt(ctx, model.ArtPlaylist, pl, model.ArtRoleBack, back.Data, false, false); err != nil {
+	if err := st.SetEntityArt(ctx, model.ArtPlaylist, pl, model.ArtRoleBack, back.Data, model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("set playlist back: %v", err)
 	}
 	if err := st.SetArtLock(ctx, model.ArtPlaylist, pl, true); err != nil {
@@ -495,7 +496,7 @@ func TestSetArtLockRoundTrip(t *testing.T) {
 	if err := st.SetArtLock(ctx, model.ArtPlaylist, pl, true); err != nil {
 		t.Fatalf("lock: %v", err)
 	}
-	if err := st.SetEntityArt(ctx, model.ArtPlaylist, pl, model.ArtRoleFront, img.Data, true, false); !waxerr.Is(err, waxerr.CodeLocked) {
+	if err := st.SetEntityArt(ctx, model.ArtPlaylist, pl, model.ArtRoleFront, img.Data, model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); !waxerr.Is(err, waxerr.CodeLocked) {
 		t.Fatalf("set under a lock = %v, want CodeLocked", err)
 	}
 	if err := st.SetArtLock(ctx, model.ArtPlaylist, pl, false); err != nil {
@@ -504,7 +505,7 @@ func TestSetArtLockRoundTrip(t *testing.T) {
 	if locked, err := st.ArtLocked(ctx, model.ArtPlaylist, pl); err != nil || locked {
 		t.Fatalf("ArtLocked after unlock = %v (err %v), want false", locked, err)
 	}
-	if err := st.SetEntityArt(ctx, model.ArtPlaylist, pl, model.ArtRoleFront, img.Data, false, false); err != nil {
+	if err := st.SetEntityArt(ctx, model.ArtPlaylist, pl, model.ArtRoleFront, img.Data, model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("set after unlock (no force): %v", err)
 	}
 }
@@ -582,4 +583,295 @@ func TestSetArtLockEmitsNoDeltaWhenAlreadyInState(t *testing.T) {
 	if got := latestSeq(t, st); got != locked {
 		t.Errorf("redundant lock advanced the change log %d -> %d", locked, got)
 	}
+}
+
+// TestArtSetCarriesTheCallersAttribution: an embedder that downloaded the cover itself
+// is recorded as having downloaded it, where every curation write used to be stamped as
+// a hand-set cover on its way into the store.
+func TestArtSetCarriesTheCallersAttribution(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	pid := putWithCover(t, st, lib.ID, "/lib/al/1.flac", "e1", testPNG(t, 40, 40))
+	const url = "https://itunes.example/cover.png"
+
+	if err := st.SetItemArt(ctx, pid, model.ArtRoleFront, testPNG(t, 42, 42).Data,
+		model.Attribution{Source: model.SourceEnrichment, Provider: "itunes", SourceURL: url},
+		model.LockOf(true), false); err != nil {
+		t.Fatalf("set stamped cover: %v", err)
+	}
+	roles, err := st.ArtRoles(ctx, model.EntityRef{Type: model.ArtTrack, PID: pid})
+	if err != nil {
+		t.Fatalf("roles: %v", err)
+	}
+	if len(roles) != 1 || roles[0].Source != model.SourceEnrichment ||
+		roles[0].Provider != "itunes" || roles[0].SourceURL != url {
+		t.Fatalf("front slot = %+v, want the caller's enrichment attribution", roles)
+	}
+
+	// A set that names no origin is still a user set.
+	if err := st.SetItemArt(ctx, pid, model.ArtRoleFront, testPNG(t, 43, 43).Data,
+		model.Attribution{}, model.LockOf(true), true); err != nil {
+		t.Fatalf("set unstamped cover: %v", err)
+	}
+	roles, err = st.ArtRoles(ctx, model.EntityRef{Type: model.ArtTrack, PID: pid})
+	if err != nil {
+		t.Fatalf("roles: %v", err)
+	}
+	if roles[0].Source != model.SourceUser || roles[0].Provider != "" {
+		t.Errorf("front slot = %+v, want a user cover with no provider", roles[0])
+	}
+}
+
+// TestArtWriteLeavesAnUnreadLockAlone covers the two halves of the same hazard: a clear
+// that only meant to remove the picture keeps the pin, and a forced set stops rewriting
+// the lock it forced past. Before this, preserving a lock meant reading it first and
+// passing it back, which is the interleave two administrators lose a decision to.
+func TestArtWriteLeavesAnUnreadLockAlone(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	pid := putWithCover(t, st, lib.ID, "/lib/al/1.flac", "e1", testPNG(t, 40, 40))
+
+	if err := st.SetArtLock(ctx, model.ArtTrack, pid, true); err != nil {
+		t.Fatalf("lock: %v", err)
+	}
+	// A clear that says nothing about the lock leaves it standing.
+	if err := st.SetItemArt(ctx, pid, model.ArtRoleFront, nil, model.Attribution{}, model.LockUnchanged, true); err != nil {
+		t.Fatalf("clear keeping the lock: %v", err)
+	}
+	if locked, err := st.ArtLocked(ctx, model.ArtTrack, pid); err != nil || !locked {
+		t.Fatalf("locked after a keep-lock clear = %v (err %v), want true", locked, err)
+	}
+	// So does a forced set: force skips the lock check for that one write and nothing
+	// more.
+	if err := st.SetItemArt(ctx, pid, model.ArtRoleFront, testPNG(t, 44, 44).Data,
+		model.Attribution{}, model.LockUnchanged, true); err != nil {
+		t.Fatalf("forced set: %v", err)
+	}
+	if locked, err := st.ArtLocked(ctx, model.ArtTrack, pid); err != nil || !locked {
+		t.Fatalf("locked after a forced set = %v (err %v), want the lock still standing", locked, err)
+	}
+	// An explicit unlock still releases it.
+	if err := st.SetItemArt(ctx, pid, model.ArtRoleFront, testPNG(t, 45, 45).Data,
+		model.Attribution{}, model.LockOff, true); err != nil {
+		t.Fatalf("unlocking set: %v", err)
+	}
+	if locked, err := st.ArtLocked(ctx, model.ArtTrack, pid); err != nil || locked {
+		t.Errorf("locked after an explicit unlock = %v (err %v), want false", locked, err)
+	}
+}
+
+// TestCoverlessLockReportsTheWritesAttribution: a cleared and locked cover has no
+// art_map row, so ArtRoles synthesizes the front entry from the lock row alone. That row
+// used to record an invented "user" whatever the write said.
+func TestCoverlessLockReportsTheWritesAttribution(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	pid := putWithCover(t, st, lib.ID, "/lib/al/1.flac", "e1", testPNG(t, 40, 40))
+	al := albumPID(t, st)
+
+	attr := model.Attribution{Source: model.SourceEnrichment, Provider: "itunes"}
+	if err := st.SetItemArt(ctx, pid, model.ArtRoleFront, nil, attr, model.LockOn, false); err != nil {
+		t.Fatalf("clear and lock item cover: %v", err)
+	}
+	roles, err := st.ArtRoles(ctx, model.EntityRef{Type: model.ArtTrack, PID: pid})
+	if err != nil {
+		t.Fatalf("item roles: %v", err)
+	}
+	if len(roles) != 1 || !roles[0].Locked || roles[0].SourceHash != "" ||
+		roles[0].Source != model.SourceEnrichment || roles[0].Provider != "itunes" {
+		t.Fatalf("item front = %+v, want a coverless lock attributed to itunes", roles)
+	}
+
+	// The entity-scoped table answers the same way.
+	if err := st.SetEntityArt(ctx, model.ArtAlbum, al, model.ArtRoleFront, nil, attr, model.LockOn, false); err != nil {
+		t.Fatalf("clear and lock album cover: %v", err)
+	}
+	roles, err = st.ArtRoles(ctx, model.EntityRef{Type: model.ArtAlbum, PID: al})
+	if err != nil {
+		t.Fatalf("album roles: %v", err)
+	}
+	var front *model.ArtRoleInfo
+	for i := range roles {
+		if roles[i].Role == model.ArtRoleFront {
+			front = &roles[i]
+		}
+	}
+	if front == nil || !front.Locked || front.Source != model.SourceEnrichment || front.Provider != "itunes" {
+		t.Errorf("album front = %+v, want a coverless lock attributed to itunes", roles)
+	}
+}
+
+// TestArtProvenanceAgreesWithResolveArt walks the same chain matrix ResolveArt is
+// pinned on and checks the metadata-only read answers identically at every rung: the
+// level, the derivation, the address, the stored source's format and dimensions, and
+// the attribution. The two reads share one chain walk precisely so this cannot drift,
+// and the assertion is what keeps it that way.
+func TestArtProvenanceAgreesWithResolveArt(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	trackCover, albumCover, backCover := testPNG(t, 40, 40), testPNG(t, 42, 42), testPNG(t, 44, 44)
+	pid1 := putWithCover(t, st, lib.ID, "/lib/al/1.flac", "e1", trackCover)
+	pid2 := putWithCover(t, st, lib.ID, "/lib/al/2.flac", "e2", nil)
+	alb := albumPID(t, st)
+	if err := st.SetItemArt(ctx, pid1, model.ArtRoleBack, backCover.Data,
+		model.Attribution{Source: model.SourceEnrichment, Provider: "itunes"}, model.LockOff, false); err != nil {
+		t.Fatalf("set back: %v", err)
+	}
+
+	agrees := func(what string, ref model.EntityRef, role model.ArtRole) {
+		t.Helper()
+		blob, berr := st.ResolveArt(ctx, ref, role, 0)
+		prov, perr := st.ArtProvenance(ctx, ref, role)
+		if berr != nil || perr != nil {
+			t.Fatalf("%s: resolve err %v, provenance err %v", what, berr, perr)
+		}
+		if prov.Level != blob.Level || prov.Derived != blob.Derived || prov.SourceHash != blob.SourceHash {
+			t.Errorf("%s: chain answer %+v, want %s/%v/%s", what, prov, blob.Level, blob.Derived, blob.SourceHash)
+		}
+		if prov.Format != blob.Format || prov.Width != blob.Width || prov.Height != blob.Height {
+			t.Errorf("%s: source shape = %s %dx%d, want %s %dx%d", what,
+				prov.Format, prov.Width, prov.Height, blob.Format, blob.Width, blob.Height)
+		}
+		if prov.Size != len(blob.Bytes) {
+			t.Errorf("%s: size = %d, want %d", what, prov.Size, len(blob.Bytes))
+		}
+		if prov.Attribution != blob.Attribution || prov.UpdatedAt != blob.UpdatedAt {
+			t.Errorf("%s: attribution = %+v/%d, want %+v/%d", what,
+				prov.Attribution, prov.UpdatedAt, blob.Attribution, blob.UpdatedAt)
+		}
+	}
+
+	agrees("own cover", model.EntityRef{Type: model.ArtTrack, PID: pid1}, model.ArtRoleFront)
+	agrees("empty role default", model.EntityRef{Type: model.ArtTrack, PID: pid1}, "")
+	agrees("non-front role", model.EntityRef{Type: model.ArtTrack, PID: pid1}, model.ArtRoleBack)
+	agrees("sibling through the album", model.EntityRef{Type: model.ArtTrack, PID: pid2}, model.ArtRoleFront)
+	agrees("derived album", model.EntityRef{Type: model.ArtAlbum, PID: alb}, model.ArtRoleFront)
+
+	if err := st.SetEntityArt(ctx, model.ArtAlbum, alb, model.ArtRoleFront, albumCover.Data,
+		model.Attribution{}, model.LockOff, false); err != nil {
+		t.Fatalf("set album front: %v", err)
+	}
+	agrees("durable album", model.EntityRef{Type: model.ArtAlbum, PID: alb}, model.ArtRoleFront)
+
+	// And the same refusals, so a caller can swap one read for the other.
+	for _, tc := range []struct {
+		what string
+		ref  model.EntityRef
+		role model.ArtRole
+		code waxerr.Code
+	}{
+		{"missing role", model.EntityRef{Type: model.ArtTrack, PID: pid2}, model.ArtRoleBack, waxerr.CodeNotFound},
+		{"unknown role", model.EntityRef{Type: model.ArtTrack, PID: pid1}, model.ArtRole("nope"), waxerr.CodeInvalid},
+		{"unknown entity type", model.EntityRef{Type: model.ArtEntity("mixtape"), PID: pid1}, model.ArtRoleFront, waxerr.CodeInvalid},
+		{"unknown pid", model.EntityRef{Type: model.ArtTrack, PID: "nope"}, model.ArtRoleFront, waxerr.CodeNotFound},
+	} {
+		_, berr := st.ResolveArt(ctx, tc.ref, tc.role, 0)
+		_, perr := st.ArtProvenance(ctx, tc.ref, tc.role)
+		if !waxerr.Is(berr, tc.code) || !waxerr.Is(perr, tc.code) {
+			t.Errorf("%s: resolve = %v, provenance = %v, want %s from both", tc.what, berr, perr, tc.code)
+		}
+	}
+}
+
+// TestArtProvenanceReportsTheStoredSourceNotAThumbnail: the dimensions describe the
+// image the store holds, which is what separates this read from a sized resolve.
+func TestArtProvenanceReportsTheStoredSourceNotAThumbnail(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	pid := putWithCover(t, st, lib.ID, "/lib/al/1.flac", "e1", testPNG(t, 400, 300))
+
+	ref := model.EntityRef{Type: model.ArtTrack, PID: pid}
+	thumb, err := st.ResolveArt(ctx, ref, model.ArtRoleFront, 100)
+	if err != nil || !thumb.Thumbnail || thumb.Width != 100 {
+		t.Fatalf("sized resolve = %+v (err %v), want a 100px thumbnail", thumb, err)
+	}
+	prov, err := st.ArtProvenance(ctx, ref, model.ArtRoleFront)
+	if err != nil {
+		t.Fatalf("ArtProvenance: %v", err)
+	}
+	if prov.Width != 400 || prov.Height != 300 {
+		t.Errorf("provenance dims = %dx%d, want the stored source's 400x300", prov.Width, prov.Height)
+	}
+}
+
+// TestArtWriteRefusesAnUnstorableAttribution covers the gap a clear used to slip
+// through: with no image there is nothing for the art_map writer to check, so the
+// attribution reached the lock row unvalidated and stored a source no vocabulary
+// contains. The refusal is CodeInvalid, not the CodeIO a transaction would wrap it in,
+// because a caller mistake is not a disk failure.
+func TestArtWriteRefusesAnUnstorableAttribution(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	pid := putWithCover(t, st, lib.ID, "/lib/al/1.flac", "e1", testPNG(t, 40, 40))
+	al := albumPID(t, st)
+	img := testPNG(t, 41, 41)
+
+	for _, tc := range []struct {
+		what string
+		attr model.Attribution
+	}{
+		{"unknown source", model.Attribution{Source: "totally-bogus"}},
+		{"enrichment with no provider", model.Attribution{Source: model.SourceEnrichment}},
+		{"provider on a tag source", model.Attribution{Source: model.SourceTag, Provider: "itunes"}},
+		{"organize, which never makes a picture", model.Attribution{Source: model.SourceOrganize}},
+	} {
+		// A clear and a set are refused alike.
+		if err := st.SetItemArt(ctx, pid, model.ArtRoleFront, nil, tc.attr, model.LockOn, true); !waxerr.Is(err, waxerr.CodeInvalid) {
+			t.Errorf("item clear with %s = %v, want CodeInvalid", tc.what, err)
+		}
+		if err := st.SetItemArt(ctx, pid, model.ArtRoleFront, img.Data, tc.attr, model.LockOn, true); !waxerr.Is(err, waxerr.CodeInvalid) {
+			t.Errorf("item set with %s = %v, want CodeInvalid", tc.what, err)
+		}
+		if err := st.SetEntityArt(ctx, model.ArtAlbum, al, model.ArtRoleFront, nil, tc.attr, model.LockOn, true); !waxerr.Is(err, waxerr.CodeInvalid) {
+			t.Errorf("entity clear with %s = %v, want CodeInvalid", tc.what, err)
+		}
+	}
+	// None of it reached either lock table.
+	if n := scalarInt(t, st, "SELECT COUNT(*) FROM field_provenance WHERE field='art'"); n != 0 {
+		t.Errorf("%d art provenance rows after refused writes, want 0", n)
+	}
+	if n := scalarInt(t, st, "SELECT COUNT(*) FROM entity_curation WHERE field='art'"); n != 0 {
+		t.Errorf("%d entity art rows after refused writes, want 0", n)
+	}
+	// And the cover the fixture came with is untouched.
+	if _, err := st.ResolveArt(ctx, model.EntityRef{Type: model.ArtTrack, PID: pid}, model.ArtRoleFront, 0); err != nil {
+		t.Errorf("front art after refused writes: %v", err)
+	}
+}
+
+// TestAutomaticAttachRefusesAnUnstorableAttribution: the same-hash branch re-attributes
+// an existing mapping in place without going through the role writer, so an unpaired
+// cover could blank a correct provider there. Both branches run the same check.
+func TestAutomaticAttachRefusesAnUnstorableAttribution(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	cover := testPNG(t, 40, 40)
+	cover.Attribution = model.Attribution{Source: model.SourceEnrichment, Provider: "coverartarchive"}
+	pid := putWithCover(t, st, lib.ID, "/lib/al/1.flac", "e1", cover)
+
+	// The same bytes from a provider that forgot its name.
+	same := testPNG(t, 40, 40)
+	same.Attribution = model.Attribution{Source: model.SourceEnrichment}
+	if err := rescanCover(ctx, st, pid, same); !waxerr.Is(err, waxerr.CodeInvalid) {
+		t.Fatalf("same-hash re-attribution with no provider = %v, want CodeInvalid", err)
+	}
+	roles, err := st.ArtRoles(ctx, model.EntityRef{Type: model.ArtTrack, PID: pid})
+	if err != nil {
+		t.Fatalf("roles: %v", err)
+	}
+	if len(roles) != 1 || roles[0].Provider != "coverartarchive" {
+		t.Errorf("front slot = %+v, want the provider it had", roles)
+	}
+}
+
+// rescanCover re-attaches a cover to an existing item the way a rescan would.
+func rescanCover(ctx context.Context, st *Store, pid model.PID, img *model.ArtImage) error {
+	return st.writeTx(ctx, func(tx *sql.Tx) error {
+		var itemID int64
+		if err := tx.QueryRowContext(ctx, "SELECT id FROM playable_item WHERE pid=?", string(pid)).Scan(&itemID); err != nil {
+			return err
+		}
+		_, err := attachArtTxChanged(ctx, tx, itemID, img)
+		return err
+	})
 }

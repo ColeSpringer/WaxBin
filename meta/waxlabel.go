@@ -593,7 +593,8 @@ func coverFromDoc(doc *waxlabel.Document) *model.ArtImage {
 	if best == nil {
 		return nil
 	}
-	return &model.ArtImage{Data: best.Data, Format: formatFromMIME(best.MIME), Source: model.SourceTag}
+	return &model.ArtImage{Data: best.Data, Format: formatFromMIME(best.MIME),
+		Attribution: model.Attribution{Source: model.SourceTag}}
 }
 
 // formatFromMIME maps an image MIME type to WaxBin's short format token, falling

@@ -134,6 +134,7 @@ func newChaptersSetCmd(g *globals) *cobra.Command {
 		filePath string
 		clear    bool
 		noLock   bool
+		keepLock bool
 		force    bool
 	)
 	cmd := &cobra.Command{
@@ -170,7 +171,7 @@ func newChaptersSetCmd(g *globals) *cobra.Command {
 				return err
 			}
 			defer m.Close()
-			if err := m.SetChapters(ctx(cmd), model.PID(args[0]), chapters, !noLock, force); err != nil {
+			if err := m.SetChapters(ctx(cmd), model.PID(args[0]), chapters, lockChange(noLock, keepLock), force); err != nil {
 				return err
 			}
 			if clear {
@@ -184,7 +185,9 @@ func newChaptersSetCmd(g *globals) *cobra.Command {
 	f := cmd.Flags()
 	f.StringVar(&filePath, "file", "", ".cue file to set as the chapters")
 	f.BoolVar(&clear, "clear", false, "remove the user chapters instead of setting them")
-	f.BoolVar(&noLock, "no-lock", false, "do not lock the chapters field (it defaults to locked)")
+	f.BoolVar(&noLock, "no-lock", false, "unlock the chapters field (it defaults to locked)")
+	f.BoolVar(&keepLock, "keep-lock", false, keepLockUsage("the chapters field"))
+	cmd.MarkFlagsMutuallyExclusive("no-lock", "keep-lock")
 	f.BoolVar(&force, "force", false, "override a locked chapters field")
 	return cmd
 }

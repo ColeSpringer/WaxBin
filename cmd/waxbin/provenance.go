@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/colespringer/waxbin/model"
+	"github.com/colespringer/waxbin/waxerr"
 	"github.com/spf13/cobra"
 )
 
@@ -121,4 +122,64 @@ func reportProvenance(cmd *cobra.Command, g *globals, lib provenanceReader, pid 
 		}
 	}
 	return nil
+}
+
+// The --source vocabularies the two stamped curation commands show in their help. They
+// are display strings only; the gate is the model's own ValidForArt/ValidForLyrics.
+const (
+	artSourceList    = "tag|sidecar|user|enrichment|feed"
+	lyricsSourceList = "tag|sidecar|user|enrichment"
+)
+
+// keepLockUsage is the --keep-lock help text, phrased once for the seven commands that
+// carry it. The --force note matters: a locked field refuses the write itself, so
+// keeping a lock through a change means overriding it for that one write.
+func keepLockUsage(what string) string {
+	return "leave the stored lock on " + what + " as it is, neither locking nor unlocking" +
+		" (a locked one still needs --force to write through)"
+}
+
+// lockChange maps the two lock flags onto the store's three-state instruction. Neither
+// flag locks, which is the default every curation command has always had; --no-lock
+// unlocks; --keep-lock leaves the stored lock alone. cobra refuses both at once, so the
+// order here only settles a case that cannot arrive.
+func lockChange(noLock, keepLock bool) model.LockChange {
+	switch {
+	case keepLock:
+		return model.LockUnchanged
+	case noLock:
+		return model.LockOff
+	default:
+		return model.LockOn
+	}
+}
+
+// parseAttribution builds a curation write's attribution from its --source, --provider
+// and --source-url flags. Naming none of them is a hand edit, which is what an unstated
+// origin means everywhere. ok is the model gate for the surface being written
+// (Attribution.ValidForArt, Attribution.ValidForLyrics), so the CLI keeps no vocabulary
+// of its own; it only splits the one refusal into messages naming the flag at fault.
+func parseAttribution(op, source, provider, sourceURL string,
+	ok func(model.Attribution) bool, list string) (model.Attribution, error) {
+	attr := model.Attribution{
+		Source: model.ProvenanceSource(source), Provider: provider, SourceURL: sourceURL,
+	}
+	if attr == (model.Attribution{}) {
+		return attr, nil
+	}
+	attr = attr.OrUser()
+	if ok(attr) {
+		return attr, nil
+	}
+	switch {
+	case attr.Source == model.SourceEnrichment && attr.Provider == "":
+		return attr, waxerr.New(waxerr.CodeInvalid, op,
+			"--source enrichment needs --provider naming the service that supplied it")
+	case attr.Provider != "" && ok(model.Attribution{Source: attr.Source, SourceURL: attr.SourceURL}):
+		return attr, waxerr.New(waxerr.CodeInvalid, op,
+			"--provider names an enrichment service; --source "+string(attr.Source)+" has none")
+	default:
+		return attr, waxerr.New(waxerr.CodeInvalid, op,
+			fmt.Sprintf("unknown --source %q; valid: %s", source, list))
+	}
 }

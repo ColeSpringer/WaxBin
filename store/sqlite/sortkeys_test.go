@@ -129,7 +129,7 @@ func TestRefreshSortKeysUsesCuratedOverride(t *testing.T) {
 	})
 	artistPID := storedKey(t, st, "SELECT pid FROM artist WHERE name = 'Édith Piaf'")
 	if err := st.EditEntityFields(ctx, model.MergeArtist, model.PID(artistPID),
-		map[string]string{"sort": "Piaf, Édith"}, model.SourceUser, false, false); err != nil {
+		map[string]string{"sort": "Piaf, Édith"}, model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("curate sort: %v", err)
 	}
 	// A curated key is not drift, because the column holds SortKey(override).
@@ -227,11 +227,11 @@ func TestRefreshSortKeysSkipsLockedSortFields(t *testing.T) {
 
 	const userText = "Dvořák, Antonín"
 	if err := st.EditItemFields(ctx, locked.ItemPID,
-		map[string]string{"composer_sort": userText}, model.SourceUser, true, false); err != nil {
+		map[string]string{"composer_sort": userText}, model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
 		t.Fatalf("edit composer_sort: %v", err)
 	}
 	if err := st.EditItemFields(ctx, bk.ItemPID,
-		map[string]string{"author_sort": userText}, model.SourceUser, true, false); err != nil {
+		map[string]string{"author_sort": userText}, model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
 		t.Fatalf("edit author_sort: %v", err)
 	}
 	if _, err := st.write.ExecContext(ctx,
@@ -391,7 +391,7 @@ func TestMergeAppliesInheritedSortOverride(t *testing.T) {
 	loser := storedKey(t, st, "SELECT pid FROM artist WHERE name = 'Piaf'")
 
 	if err := st.EditEntityFields(ctx, model.MergeArtist, model.PID(loser),
-		map[string]string{"sort": "Piaf, Edith"}, model.SourceUser, false, false); err != nil {
+		map[string]string{"sort": "Piaf, Edith"}, model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := st.MergeEntity(ctx, model.MergeArtist, model.PID(survivor), model.PID(loser)); err != nil {

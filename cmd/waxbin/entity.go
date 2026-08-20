@@ -99,6 +99,7 @@ func newEntityEditCmd(g *globals) *cobra.Command {
 	var (
 		sets      []string
 		noLock    bool
+		keepLock  bool
 		force     bool
 		writeBack bool
 	)
@@ -126,7 +127,9 @@ func newEntityEditCmd(g *globals) *cobra.Command {
 				return err
 			}
 			defer m.Close()
-			err = m.EditEntity(ctx(cmd), et, pid, edits, waxbin.EntityEditOptions{WriteBack: writeBack, Lock: !noLock, Force: force})
+			err = m.EditEntity(ctx(cmd), et, pid, edits, waxbin.EntityEditOptions{
+				WriteBack: writeBack, Lock: lockChange(noLock, keepLock), Force: force,
+			})
 			if err := surfaceWriteBack(cmd, err); err != nil {
 				return err
 			}
@@ -136,7 +139,9 @@ func newEntityEditCmd(g *globals) *cobra.Command {
 	}
 	f := cmd.Flags()
 	f.StringArrayVar(&sets, "set", nil, "field=value to set (repeatable; empty value clears)")
-	f.BoolVar(&noLock, "no-lock", false, "do not lock the edited fields (they default to locked)")
+	f.BoolVar(&noLock, "no-lock", false, "unlock the edited fields (they default to locked)")
+	f.BoolVar(&keepLock, "keep-lock", false, keepLockUsage("the edited fields"))
+	cmd.MarkFlagsMutuallyExclusive("no-lock", "keep-lock")
 	f.BoolVar(&force, "force", false, "override a locked entity field")
 	f.BoolVar(&writeBack, "write-back", false, "also fan the values across the entity's member files' on-disk tags")
 	return cmd
@@ -169,7 +174,8 @@ func newEntityShowCmd(g *globals) *cobra.Command {
 			tw := tabwriter.NewWriter(out(cmd), 0, 2, 2, ' ', 0)
 			fmt.Fprintln(tw, "FIELD\tSOURCE\tLOCKED\tVALUE")
 			for _, r := range rows {
-				fmt.Fprintf(tw, "%s\t%s\t%t\t%s\n", r.Field, r.Source, r.Locked, r.Value)
+				fmt.Fprintf(tw, "%s\t%s\t%t\t%s\n",
+					r.Field, attribution(r.Source, r.Provider, ""), r.Locked, r.Value)
 			}
 			return tw.Flush()
 		},
@@ -550,16 +556,19 @@ func toEntityPageView(p *read.EntityPage) entityPageView {
 
 // entityCurationView is the JSON shape for an entity_curation row.
 type entityCurationView struct {
-	Field  string `json:"field"`
-	Source string `json:"source"`
-	Locked bool   `json:"locked"`
-	Value  string `json:"value"`
+	Field    string `json:"field"`
+	Source   string `json:"source"`
+	Provider string `json:"provider,omitempty"`
+	Locked   bool   `json:"locked"`
+	Value    string `json:"value"`
 }
 
 func entityCurationViews(rows []model.EntityCuration) []entityCurationView {
 	out := make([]entityCurationView, len(rows))
 	for i, r := range rows {
-		out[i] = entityCurationView{Field: r.Field, Source: string(r.Source), Locked: r.Locked, Value: r.Value}
+		out[i] = entityCurationView{
+			Field: r.Field, Source: string(r.Source), Provider: r.Provider, Locked: r.Locked, Value: r.Value,
+		}
 	}
 	return out
 }

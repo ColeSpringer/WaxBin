@@ -128,7 +128,8 @@ func TestServeProxiedMutations(t *testing.T) {
 	c := dialWhenReady(t, sock)
 
 	// A field edit succeeds through the proxy while the server holds the lock.
-	res, err := c.EditFields(ctx, pid, map[string]string{"artist": "New Artist"}, false, true, false)
+	res, err := c.EditFields(ctx, pid, map[string]string{"artist": "New Artist"}, false,
+		model.Attribution{}, model.LockOn, false)
 	if err != nil {
 		t.Fatalf("proxied edit: %v", err)
 	}
@@ -146,6 +147,30 @@ func TestServeProxiedMutations(t *testing.T) {
 	}
 	if len(prov) != 1 || prov[0].Field != "artist" || prov[0].Source != model.SourceUser || !prov[0].Locked {
 		t.Fatalf("provenance = %+v, want one locked user artist row", prov)
+	}
+
+	// A scalar edit carries its attribution across the socket too: an embedder that
+	// fetched the value is the other half of the bug the art fields close, and a
+	// LockUnchanged write leaves the lock the first edit set.
+	if _, err := c.EditFields(ctx, pid, map[string]string{"comment": "fetched"}, false,
+		model.Attribution{Source: model.SourceEnrichment, Provider: "itunes"}, model.LockUnchanged, false); err != nil {
+		t.Fatalf("proxied stamped edit: %v", err)
+	}
+	prov, err = c.Provenance(ctx, pid)
+	if err != nil {
+		t.Fatalf("proxied provenance: %v", err)
+	}
+	var comment *model.FieldProvenance
+	for i := range prov {
+		if prov[i].Field == "comment" {
+			comment = &prov[i]
+		}
+	}
+	if comment == nil || comment.Source != model.SourceEnrichment || comment.Provider != "itunes" || comment.Locked {
+		t.Fatalf("comment provenance = %+v, want an unlocked itunes row", comment)
+	}
+	if prov[0].Field != "artist" || !prov[0].Locked {
+		t.Errorf("artist row = %+v, want the earlier lock still standing", prov[0])
 	}
 
 	// Play-state mutations round-trip.
@@ -451,7 +476,8 @@ func TestServeProxiedPlaylistArt(t *testing.T) {
 	cover := coverPNG(t)
 	// Write-back is on to prove a playlist has no on-disk fan-out to fail at: there is
 	// no file behind a playlist, so the flag is a clean no-op rather than an error.
-	res, err := c.SetEntityArt(ctx, model.ArtPlaylist, pid, model.ArtRoleFront, cover, false, false, true)
+	res, err := c.SetEntityArt(ctx, model.ArtPlaylist, pid, model.ArtRoleFront, cover,
+		model.Attribution{}, model.LockOff, false, true)
 	if err != nil {
 		t.Fatalf("proxied playlist art: %v", err)
 	}
@@ -470,6 +496,57 @@ func TestServeProxiedPlaylistArt(t *testing.T) {
 	pl, err := lib.Playlists().Get(ctx, pid)
 	if err != nil || !pl.HasArt {
 		t.Fatalf("playlist = %+v (err %v), want HasArt after the proxied cover set", pl, err)
+	}
+}
+
+// TestServeProxiedArtAttribution drives a stamped cover over the socket, which is the
+// path an embedder's "enrich now" takes: the source, provider and fetch URL it supplies
+// reach the stored mapping instead of arriving as a hand-set cover, and a lock
+// instruction of "leave it alone" leaves the pin the entity already carries standing.
+func TestServeProxiedArtAttribution(t *testing.T) {
+	ctx := context.Background()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	sock := testsock.Path(t)
+
+	lib := openServedRW(t, ctx, db, t.TempDir(), sock)
+	pid, err := lib.Playlists().CreateStatic(ctx, "Mosaic", "", "")
+	if err != nil {
+		t.Fatalf("create playlist: %v", err)
+	}
+	c := dialWhenReady(t, sock)
+
+	const url = "https://itunes.example/mosaic.png"
+	attr := model.Attribution{Source: model.SourceEnrichment, Provider: "itunes", SourceURL: url}
+	if _, err := c.SetEntityArt(ctx, model.ArtPlaylist, pid, model.ArtRoleFront, coverPNG(t),
+		attr, model.LockOn, false, false); err != nil {
+		t.Fatalf("proxied stamped cover: %v", err)
+	}
+	roles, err := lib.ArtRoles(ctx, model.EntityRef{Type: model.ArtPlaylist, PID: pid})
+	if err != nil {
+		t.Fatalf("art roles: %v", err)
+	}
+	if len(roles) != 1 || roles[0].Source != model.SourceEnrichment ||
+		roles[0].Provider != "itunes" || roles[0].SourceURL != url || !roles[0].Locked {
+		t.Fatalf("front slot = %+v, want a locked itunes cover", roles)
+	}
+
+	// A later write that says nothing about the lock leaves it standing, where before it
+	// had to read the lock and pass it back with force set.
+	if _, err := c.SetEntityArt(ctx, model.ArtPlaylist, pid, model.ArtRoleFront, coverPNG(t),
+		model.Attribution{}, model.LockUnchanged, true, false); err != nil {
+		t.Fatalf("proxied forced cover: %v", err)
+	}
+	locked, err := lib.ArtLocked(ctx, model.ArtPlaylist, pid)
+	if err != nil || !locked {
+		t.Fatalf("locked after a forced proxied set = %v (err %v), want the lock still standing", locked, err)
+	}
+
+	// An unknown lock instruction is refused at the boundary, the way an art role is.
+	// The client passes the value through untouched, so this is what a non-Go client
+	// sending nonsense looks like.
+	if _, err := c.SetEntityArt(ctx, model.ArtPlaylist, pid, model.ArtRoleFront, coverPNG(t),
+		model.Attribution{}, model.LockChange("yes"), true, false); !waxerr.Is(err, waxerr.CodeInvalid) {
+		t.Errorf("unknown wire lock = %v, want CodeInvalid", err)
 	}
 }
 
@@ -584,7 +661,8 @@ func TestServeProxiedError(t *testing.T) {
 	if err := c.Lock(ctx, pid, []string{"artist"}); err != nil {
 		t.Fatalf("proxied lock: %v", err)
 	}
-	_, err := c.EditFields(ctx, pid, map[string]string{"artist": "Nope"}, false, false, false)
+	_, err := c.EditFields(ctx, pid, map[string]string{"artist": "Nope"}, false,
+		model.Attribution{}, model.LockOff, false)
 	if !waxerr.Is(err, waxerr.CodeLocked) {
 		t.Fatalf("edit of a locked field = %v, want CodeLocked", err)
 	}
@@ -813,7 +891,7 @@ func TestSubscriberSurvivesMaintenance(t *testing.T) {
 
 	// A write through the reopened server library must still publish to the
 	// subscription (the channel was not closed by the hand-off).
-	if err := lib.EditField(ctx, pid, "genre", "PostMaint", waxbin.EditOptions{Lock: true}); err != nil {
+	if err := lib.EditField(ctx, pid, "genre", "PostMaint", waxbin.EditOptions{Lock: model.LockOn}); err != nil {
 		t.Fatalf("post-maintenance edit: %v", err)
 	}
 	select {

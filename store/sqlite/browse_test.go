@@ -761,7 +761,7 @@ func TestBrowseQueryBindOrder(t *testing.T) {
 			essence: "e" + tc.title, content: "c" + tc.title, title: tc.title,
 			artist: "X", album: "Al", genre: tc.genre})
 		ids[tc.title] = res.ItemPID
-		if _, _, err := st.SetItemTag(ctx, res.ItemPID, "MOOD", []string{tc.mood}, model.SourceUser, false, false); err != nil {
+		if _, _, err := st.SetItemTag(ctx, res.ItemPID, "MOOD", []string{tc.mood}, model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 			t.Fatalf("tag %s: %v", tc.title, err)
 		}
 	}

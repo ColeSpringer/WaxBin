@@ -60,8 +60,8 @@ func editableFieldsForKind(kind string) map[string]bool {
 
 // EditItemField edits one metadata field on an item. It is EditItemFields with a
 // single-entry map; see there for the full contract.
-func (s *Store) EditItemField(ctx context.Context, itemPID model.PID, field, value string, source model.ProvenanceSource, lock, force bool) error {
-	return s.EditItemFields(ctx, itemPID, map[string]string{field: value}, source, lock, force)
+func (s *Store) EditItemField(ctx context.Context, itemPID model.PID, field, value string, attr model.Attribution, lock model.LockChange, force bool) error {
+	return s.EditItemFields(ctx, itemPID, map[string]string{field: value}, attr, lock, force)
 }
 
 // normalizeEdits validates and normalizes one edit map for the field-edit
@@ -103,8 +103,9 @@ func normalizeEdits(edits map[string]string, op string) ([]string, map[string]st
 // transaction. It writes the denormalized subtype columns, re-resolves the affected
 // normalized entities (a track's artist, release group, and album, or a book's
 // contributors and series) and their rollups, and rebuilds the FTS row. Each edited
-// field gets a provenance row recording the source, the curated value, and a null
-// provider, and when lock is set the field is locked. One item change delta is
+// field gets a provenance row recording the caller's attribution and the curated value,
+// and the lock follows the caller's instruction: LockOn locks the field, LockOff clears
+// the lock, and LockUnchanged leaves whatever was there. One item change delta is
 // emitted at the end.
 //
 // The edit is DB-only. On-disk tags are left alone; the facade's opt-in write-back
@@ -116,10 +117,14 @@ func normalizeEdits(edits map[string]string, op string) ([]string, map[string]st
 // rollup row instead of being deleted here, which db verify reads as clean (its
 // rollup query LEFT JOINs from the entity, so every entity has a row). The standing
 // orphan-GC pass removes it later, so the edit needs no in-transaction GC.
-func (s *Store) EditItemFields(ctx context.Context, itemPID model.PID, edits map[string]string, source model.ProvenanceSource, lock, force bool) error {
+func (s *Store) EditItemFields(ctx context.Context, itemPID model.PID, edits map[string]string, attr model.Attribution, lock model.LockChange, force bool) error {
 	const op = "store.EditItemFields"
-	if !source.ValidForField() {
-		return waxerr.New(waxerr.CodeInvalid, op, "invalid provenance source: "+string(source))
+	attr, err := checkFieldAttribution(attr, op)
+	if err != nil {
+		return err
+	}
+	if err := checkLockChange(lock, op); err != nil {
+		return err
 	}
 	// Validate every field name and normalize every value up front so a bad field
 	// or a malformed identifier rejects the whole edit before any write.
@@ -137,7 +142,7 @@ func (s *Store) EditItemFields(ctx context.Context, itemPID model.PID, edits map
 			return err
 		}
 		affected := newAffectedRollups()
-		if err := applyItemEditTx(ctx, tx, itemPID, itemID, kind, fields, norm, source, lock, op, affected); err != nil {
+		if err := applyItemEditTx(ctx, tx, itemPID, itemID, kind, fields, norm, attr, lock, op, affected); err != nil {
 			return err
 		}
 		if !affected.empty() {
@@ -184,7 +189,7 @@ func validateEditTargetTx(ctx context.Context, tx *sql.Tx, itemID int64, kind st
 // kind-specific columns and re-resolves entities into the shared affected set (the
 // caller finalizes the rollups so a batch can union them once), records a provenance
 // row per field, and emits one item change delta. It does NOT call maintainRollupsTx.
-func applyItemEditTx(ctx context.Context, tx *sql.Tx, itemPID model.PID, itemID int64, kind string, fields []string, norm map[string]string, source model.ProvenanceSource, lock bool, op string, affected *affectedRollups) error {
+func applyItemEditTx(ctx context.Context, tx *sql.Tx, itemPID model.PID, itemID int64, kind string, fields []string, norm map[string]string, attr model.Attribution, lock model.LockChange, op string, affected *affectedRollups) error {
 	switch kind {
 	case string(model.KindTrack):
 		if err := editTrackFieldsTx(ctx, tx, itemID, fields, norm, op, affected); err != nil {
@@ -200,13 +205,13 @@ func applyItemEditTx(ctx context.Context, tx *sql.Tx, itemPID model.PID, itemID 
 		}
 	}
 
-	// Record a provenance row for every edited field with the source, the curated
-	// value, and a null provider. A user or organize edit has no external provider;
-	// enrichment is what fills provider later. This runs in the same transaction as
+	// Record a provenance row for every edited field with the caller's attribution and
+	// the curated value. A user or organize edit names no provider; an enrichment one
+	// names the service that supplied the value. This runs in the same transaction as
 	// the column writes, so the whole edit commits or rolls back together.
 	now := nowNS()
 	for _, f := range fields {
-		if err := upsertEditProvenanceTx(ctx, tx, itemID, f, source, norm[f], lock, now); err != nil {
+		if err := upsertEditProvenanceTx(ctx, tx, itemID, f, attr, norm[f], lock, now); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 	}
@@ -220,14 +225,18 @@ func applyItemEditTx(ctx context.Context, tx *sql.Tx, itemPID model.PID, itemID 
 // CodeLocked unless force is set; with skipLocked the locked item is skipped (and
 // reported) instead of failing the batch. The touched entities' rollups are
 // recomputed once over the union of every edited item. Duplicate pids are collapsed.
-func (s *Store) EditManyFields(ctx context.Context, itemPIDs []model.PID, edits map[string]string, source model.ProvenanceSource, lock, force, skipLocked bool) (model.BatchEditResult, error) {
+func (s *Store) EditManyFields(ctx context.Context, itemPIDs []model.PID, edits map[string]string, attr model.Attribution, lock model.LockChange, force, skipLocked bool) (model.BatchEditResult, error) {
 	const op = "store.EditManyFields"
 	var res model.BatchEditResult
 	if len(itemPIDs) == 0 {
 		return res, waxerr.New(waxerr.CodeInvalid, op, "no items to edit")
 	}
-	if !source.ValidForField() {
-		return res, waxerr.New(waxerr.CodeInvalid, op, "invalid provenance source: "+string(source))
+	attr, err := checkFieldAttribution(attr, op)
+	if err != nil {
+		return res, err
+	}
+	if err := checkLockChange(lock, op); err != nil {
+		return res, err
 	}
 	fields, norm, err := normalizeEdits(edits, op)
 	if err != nil {
@@ -261,7 +270,7 @@ func (s *Store) EditManyFields(ctx context.Context, itemPIDs []model.PID, edits 
 				}
 				return err
 			}
-			if err := applyItemEditTx(ctx, tx, pid, itemID, kind, fields, norm, source, lock, op, affected); err != nil {
+			if err := applyItemEditTx(ctx, tx, pid, itemID, kind, fields, norm, attr, lock, op, affected); err != nil {
 				return err
 			}
 			res.Edited = append(res.Edited, pid)
@@ -290,14 +299,18 @@ func (s *Store) EditManyFields(ctx context.Context, itemPIDs []model.PID, edits 
 // CodeLocked unless force is set; with skipLocked the locked item is skipped and
 // reported instead. A duplicate pid is CodeInvalid, since two maps for one item
 // are a caller bug rather than something to merge.
-func (s *Store) EditItemsFields(ctx context.Context, edits []model.ItemFieldEdit, source model.ProvenanceSource, lock, force, skipLocked bool) (model.BatchEditResult, error) {
+func (s *Store) EditItemsFields(ctx context.Context, edits []model.ItemFieldEdit, attr model.Attribution, lock model.LockChange, force, skipLocked bool) (model.BatchEditResult, error) {
 	const op = "store.EditItemsFields"
 	var res model.BatchEditResult
 	if len(edits) == 0 {
 		return res, waxerr.New(waxerr.CodeInvalid, op, "no items to edit")
 	}
-	if !source.ValidForField() {
-		return res, waxerr.New(waxerr.CodeInvalid, op, "invalid provenance source: "+string(source))
+	attr, err := checkFieldAttribution(attr, op)
+	if err != nil {
+		return res, err
+	}
+	if err := checkLockChange(lock, op); err != nil {
+		return res, err
 	}
 	// Validate and normalize every entry before the transaction opens, so a bad
 	// entry anywhere rejects the batch without a write.
@@ -320,7 +333,7 @@ func (s *Store) EditItemsFields(ctx context.Context, edits []model.ItemFieldEdit
 		entries = append(entries, entry{e.ItemPID, fields, norm})
 	}
 
-	err := s.writeTx(ctx, func(tx *sql.Tx) error {
+	err = s.writeTx(ctx, func(tx *sql.Tx) error {
 		affected := newAffectedRollups()
 		for _, e := range entries {
 			itemID, kind, err := itemIDKindByPIDTx(ctx, tx, e.pid, op)
@@ -336,7 +349,7 @@ func (s *Store) EditItemsFields(ctx context.Context, edits []model.ItemFieldEdit
 				}
 				return err
 			}
-			if err := applyItemEditTx(ctx, tx, e.pid, itemID, kind, e.fields, e.norm, source, lock, op, affected); err != nil {
+			if err := applyItemEditTx(ctx, tx, e.pid, itemID, kind, e.fields, e.norm, attr, lock, op, affected); err != nil {
 				return err
 			}
 			res.Edited = append(res.Edited, e.pid)
@@ -857,19 +870,31 @@ func currentItemGenresTx(ctx context.Context, tx *sql.Tx, itemID int64) ([]strin
 	return out, rows.Err()
 }
 
-// upsertEditProvenanceTx writes an edit's provenance row with the source, the curated
-// value, the lock bit, and a null provider. The lock bit follows the caller's choice.
-// An edit auto-locks by default, and an unlocked edit still records source=user. The
-// insert names the provider column that a later enrichment pass fills, so enrichment
-// only populates provider and never has to reshape this statement.
-func upsertEditProvenanceTx(ctx context.Context, tx *sql.Tx, itemID int64, field string, source model.ProvenanceSource, value string, lock bool, now int64) error {
+// upsertEditProvenanceTx writes an edit's provenance row with the caller's attribution,
+// the curated value, and the lock the caller asked for. LockUnchanged leaves the stored
+// lock exactly as it stands, which is what stops a write that formed no lock intent from
+// rewriting one it never read; a fresh row inserts unlocked. The provider is stored NULL
+// when empty so the table stays sparse.
+func upsertEditProvenanceTx(ctx context.Context, tx *sql.Tx, itemID int64, field string, attr model.Attribution, value string, lock model.LockChange, now int64) error {
 	_, err := tx.ExecContext(ctx, `INSERT INTO field_provenance(item_id, field, source, locked, value, provider, updated_at)
-		VALUES (?,?,?,?,?,NULL,?)
+		VALUES (?,?,?,?,?,?,?)
 		ON CONFLICT(item_id, field) DO UPDATE SET
-			source=excluded.source, locked=excluded.locked, value=excluded.value,
+			source=excluded.source,
+			locked=CASE WHEN ? THEN excluded.locked ELSE locked END,
+			value=excluded.value,
 			provider=excluded.provider, updated_at=excluded.updated_at`,
-		itemID, field, string(source), boolInt(lock), value, now)
+		itemID, field, string(attr.Source), boolInt(lock == model.LockOn), value, nullStr(attr.Provider), now,
+		boolInt(lock != model.LockUnchanged))
 	return err
+}
+
+// checkLockChange refuses a lock instruction outside the closed vocabulary, the way an
+// unknown art role is refused.
+func checkLockChange(lock model.LockChange, op string) error {
+	if !lock.Valid() {
+		return waxerr.New(waxerr.CodeInvalid, op, "unknown lock instruction: "+string(lock))
+	}
+	return nil
 }
 
 // itemIDKindByPIDTx resolves an item pid to its rowid and kind inside a transaction.

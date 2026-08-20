@@ -29,7 +29,7 @@ func TestEditBookSubtitleAndProvenance(t *testing.T) {
 	st, pid := bookEditFixture(t)
 	ctx := context.Background()
 
-	if err := st.EditItemField(ctx, pid, "subtitle", "A Tale", model.SourceUser, true, false); err != nil {
+	if err := st.EditItemField(ctx, pid, "subtitle", "A Tale", model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
 		t.Fatalf("edit subtitle: %v", err)
 	}
 	var subtitle string
@@ -50,7 +50,7 @@ func TestEditBookAuthorReResolvesContributor(t *testing.T) {
 	st, pid := bookEditFixture(t)
 	ctx := context.Background()
 
-	if err := st.EditItemField(ctx, pid, "author", "Mary Writer", model.SourceUser, true, false); err != nil {
+	if err := st.EditItemField(ctx, pid, "author", "Mary Writer", model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
 		t.Fatalf("edit author: %v", err)
 	}
 
@@ -99,7 +99,7 @@ func TestEditBookSeriesAndNarrator(t *testing.T) {
 
 	if err := st.EditItemFields(ctx, pid, map[string]string{
 		"series": "New Saga", "narrator": "Val Voice & Al Audio",
-	}, model.SourceUser, true, false); err != nil {
+	}, model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
 		t.Fatalf("edit: %v", err)
 	}
 
@@ -128,7 +128,7 @@ func TestEditBookGenreAndTitle(t *testing.T) {
 
 	if err := st.EditItemFields(ctx, pid, map[string]string{
 		"title": "Renamed Book", "genre": "Mystery",
-	}, model.SourceUser, true, false); err != nil {
+	}, model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
 		t.Fatalf("edit: %v", err)
 	}
 	v, _ := st.ItemByPID(ctx, pid)
@@ -151,7 +151,7 @@ func TestEditBookGenreAndTitle(t *testing.T) {
 func TestEditBookRejectsTrackOnlyField(t *testing.T) {
 	st, pid := bookEditFixture(t)
 	// album is a track field, not valid on a book.
-	err := st.EditItemField(context.Background(), pid, "album", "X", model.SourceUser, true, false)
+	err := st.EditItemField(context.Background(), pid, "album", "X", model.Attribution{Source: model.SourceUser}, model.LockOf(true), false)
 	if !waxerr.Is(err, waxerr.CodeInvalid) {
 		t.Fatalf("track field on a book: want CodeInvalid, got %v", err)
 	}
@@ -160,7 +160,7 @@ func TestEditBookRejectsTrackOnlyField(t *testing.T) {
 func TestEditTrackRejectsBookOnlyField(t *testing.T) {
 	st, pid := editFixture(t)
 	// author is a book field, not valid on a track.
-	err := st.EditItemField(context.Background(), pid, "author", "X", model.SourceUser, true, false)
+	err := st.EditItemField(context.Background(), pid, "author", "X", model.Attribution{Source: model.SourceUser}, model.LockOf(true), false)
 	if !waxerr.Is(err, waxerr.CodeInvalid) {
 		t.Fatalf("book field on a track: want CodeInvalid, got %v", err)
 	}

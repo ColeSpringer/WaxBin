@@ -70,7 +70,16 @@ import (
 // no wire surface at all, and WaxDeck already has Lock/Force on set_entity_art. A bump
 // would cost it a rebuild for a method it has no reason to call, and the version gate
 // would meanwhile reject every frame from a client built against 10, including ping.
-const ProtocolVersion = 10
+//
+// Version 11 added curation attribution and the three-state lock. The forcing addition
+// is Source and Provider on every curation params struct (plus SourceURL on the two art
+// ones), by the rule above: a version-10 server would drop them and store a cover or a
+// genre the client fetched itself as hand-set, which is the bug this change exists to
+// fix. The retyped Lock (a bool became the LockChange string) is not the argument for
+// the bump, since the version gate rejects on version before any field decodes. A *bool
+// for Lock would have encoded the same three states without a bump, and was rejected for
+// splitting the lock vocabulary between the wire and Go.
+const ProtocolVersion = 11
 
 // Method names for the proxied operations: the fast request/response catalog
 // mutations, the reads a mutating command needs for its confirmation output, the
@@ -184,12 +193,17 @@ func fromWireError(we *wireError) error {
 
 // --- request/response payload DTOs ---
 
-// EditFieldsParams is the edit_fields request payload.
+// EditFieldsParams is the edit_fields request payload. Source and Provider record where
+// the values came from, so a client that fetched them is not stored as having typed
+// them; an empty Source means a user edit. Lock is a model.LockChange, whose empty value
+// leaves the stored lock alone.
 type EditFieldsParams struct {
 	ItemPID   string            `json:"itemPid"`
 	Edits     map[string]string `json:"edits"`
 	WriteBack bool              `json:"writeBack"`
-	Lock      bool              `json:"lock"`
+	Source    string            `json:"source,omitempty"`
+	Provider  string            `json:"provider,omitempty"`
+	Lock      string            `json:"lock"`
 	Force     bool              `json:"force"`
 }
 
@@ -209,12 +223,15 @@ type EditFieldsResult struct {
 	WriteBackFailures []WriteBackFailure `json:"writeBackFailures,omitempty"`
 }
 
-// EditManyFieldsParams is the edit_many_fields request payload.
+// EditManyFieldsParams is the edit_many_fields request payload. Source, Provider and
+// Lock carry the same meaning as on EditFieldsParams.
 type EditManyFieldsParams struct {
 	ItemPIDs   []string          `json:"itemPids"`
 	Edits      map[string]string `json:"edits"`
 	WriteBack  bool              `json:"writeBack"`
-	Lock       bool              `json:"lock"`
+	Source     string            `json:"source,omitempty"`
+	Provider   string            `json:"provider,omitempty"`
+	Lock       string            `json:"lock"`
 	Force      bool              `json:"force"`
 	SkipLocked bool              `json:"skipLocked"`
 }
@@ -237,22 +254,28 @@ type ItemFieldsEdit struct {
 
 // EditBatchParams is the edit_batch request payload: a per-item-map batch edit,
 // each item carrying its own fields where edit_many_fields shares one map. The
-// response reuses EditManyFieldsResult (the same atomic-batch shape).
+// response reuses EditManyFieldsResult (the same atomic-batch shape). Source, Provider
+// and Lock carry the same meaning as on EditFieldsParams.
 type EditBatchParams struct {
 	Items      []ItemFieldsEdit `json:"items"`
 	WriteBack  bool             `json:"writeBack"`
-	Lock       bool             `json:"lock"`
+	Source     string           `json:"source,omitempty"`
+	Provider   string           `json:"provider,omitempty"`
+	Lock       string           `json:"lock"`
 	Force      bool             `json:"force"`
 	SkipLocked bool             `json:"skipLocked"`
 }
 
-// SetCreditsParams is the set_credits request payload.
+// SetCreditsParams is the set_credits request payload. Source, Provider and Lock carry
+// the same meaning as on EditFieldsParams.
 type SetCreditsParams struct {
 	ItemPID   string   `json:"itemPid"`
 	Role      string   `json:"role"`
 	Names     []string `json:"names,omitempty"`
 	WriteBack bool     `json:"writeBack"`
-	Lock      bool     `json:"lock"`
+	Source    string   `json:"source,omitempty"`
+	Provider  string   `json:"provider,omitempty"`
+	Lock      string   `json:"lock"`
 	Force     bool     `json:"force"`
 }
 
@@ -267,7 +290,7 @@ type SetCreditsResult struct {
 type SetLyricsParams struct {
 	ItemPID string        `json:"itemPid"`
 	Lyrics  *model.Lyrics `json:"lyrics,omitempty"`
-	Lock    bool          `json:"lock"`
+	Lock    string        `json:"lock"`
 	Force   bool          `json:"force"`
 }
 
@@ -276,18 +299,24 @@ type SetLyricsParams struct {
 type SetChaptersParams struct {
 	ItemPID  string          `json:"itemPid"`
 	Chapters []model.Chapter `json:"chapters,omitempty"`
-	Lock     bool            `json:"lock"`
+	Lock     string          `json:"lock"`
 	Force    bool            `json:"force"`
 }
 
 // SetItemArtParams is the set_item_art request payload. Empty Data clears the
 // named role; an empty Role means the front cover. The image bytes travel
-// base64-encoded in the JSON frame.
+// base64-encoded in the JSON frame. Source, Provider and SourceURL record where the
+// picture came from, so a client that fetched it itself is not stored as having chosen
+// it by hand; an empty Source means a user set. Lock is a model.LockChange, whose empty
+// value leaves the stored lock alone.
 type SetItemArtParams struct {
 	ItemPID   string `json:"itemPid"`
 	Role      string `json:"role,omitempty"`
 	Data      []byte `json:"data,omitempty"`
-	Lock      bool   `json:"lock"`
+	Source    string `json:"source,omitempty"`
+	Provider  string `json:"provider,omitempty"`
+	SourceURL string `json:"sourceUrl,omitempty"`
+	Lock      string `json:"lock"`
 	Force     bool   `json:"force"`
 	WriteBack bool   `json:"writeBack"`
 }
@@ -301,13 +330,17 @@ type SetItemArtResult struct {
 
 // SetEntityArtParams is the set_entity_art request payload (album/artist/... covers).
 // Lock and Force govern the entity's "art" curation lock, and apply to the front role
-// alone, the same way SetItemArtParams' do for an item.
+// alone, the same way SetItemArtParams' do for an item. Source, Provider and SourceURL
+// carry the same meaning there too.
 type SetEntityArtParams struct {
 	EntityType string `json:"entityType"`
 	EntityPID  string `json:"entityPid"`
 	Role       string `json:"role"`
 	Data       []byte `json:"data,omitempty"`
-	Lock       bool   `json:"lock"`
+	Source     string `json:"source,omitempty"`
+	Provider   string `json:"provider,omitempty"`
+	SourceURL  string `json:"sourceUrl,omitempty"`
+	Lock       string `json:"lock"`
 	Force      bool   `json:"force"`
 	WriteBack  bool   `json:"writeBack"`
 }
@@ -320,7 +353,8 @@ type SetEntityArtResult struct {
 
 // SetArtLockParams is the set_art_lock request payload: an entity's front-cover lock,
 // set or cleared without touching the cover. It is the mutation set_entity_art cannot
-// express, since that one always writes the cover slot too.
+// express, since that one always writes the cover slot too. Lock stays a bool here,
+// where it is the write itself rather than an instruction accompanying one.
 type SetArtLockParams struct {
 	EntityType string `json:"entityType"`
 	EntityPID  string `json:"entityPid"`
@@ -328,13 +362,16 @@ type SetArtLockParams struct {
 }
 
 // SetTagParams is the set_tag request payload: a custom tag's ordered values on an
-// item. Empty Values clears the tag.
+// item. Empty Values clears the tag. Source, Provider and Lock carry the same meaning as
+// on EditFieldsParams.
 type SetTagParams struct {
-	ItemPID string   `json:"itemPid"`
-	Key     string   `json:"key"`
-	Values  []string `json:"values,omitempty"`
-	Lock    bool     `json:"lock"`
-	Force   bool     `json:"force"`
+	ItemPID  string   `json:"itemPid"`
+	Key      string   `json:"key"`
+	Values   []string `json:"values,omitempty"`
+	Source   string   `json:"source,omitempty"`
+	Provider string   `json:"provider,omitempty"`
+	Lock     string   `json:"lock"`
+	Force    bool     `json:"force"`
 }
 
 // SetTagResult is the set_tag response payload: the canonical key actually stored (the
@@ -347,12 +384,15 @@ type SetTagResult struct {
 
 // EditEntityParams is the edit_entity request payload: curation edits to one shared
 // entity (artist/release_group/album). With WriteBack the fanned identifiers/sort are
-// also mirrored across the entity's member files.
+// also mirrored across the entity's member files. Source, Provider and Lock carry the
+// same meaning as on EditFieldsParams.
 type EditEntityParams struct {
 	EntityType string            `json:"entityType"`
 	EntityPID  string            `json:"entityPid"`
 	Edits      map[string]string `json:"edits"`
-	Lock       bool              `json:"lock"`
+	Source     string            `json:"source,omitempty"`
+	Provider   string            `json:"provider,omitempty"`
+	Lock       string            `json:"lock"`
 	Force      bool              `json:"force"`
 	WriteBack  bool              `json:"writeBack"`
 }

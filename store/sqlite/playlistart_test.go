@@ -48,10 +48,10 @@ func TestPlaylistArtResolvesOwnLevelOnly(t *testing.T) {
 		t.Fatalf("roles on a coverless playlist = %+v (err %v), want an empty list", roles, err)
 	}
 
-	if err := st.SetEntityArt(ctx, model.ArtPlaylist, pl, model.ArtRoleFront, front.Data, false, false); err != nil {
+	if err := st.SetEntityArt(ctx, model.ArtPlaylist, pl, model.ArtRoleFront, front.Data, model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("set playlist front: %v", err)
 	}
-	if err := st.SetEntityArt(ctx, model.ArtPlaylist, pl, model.ArtRoleBack, back.Data, false, false); err != nil {
+	if err := st.SetEntityArt(ctx, model.ArtPlaylist, pl, model.ArtRoleBack, back.Data, model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("set playlist back: %v", err)
 	}
 
@@ -83,7 +83,7 @@ func TestPlaylistArtResolvesOwnLevelOnly(t *testing.T) {
 
 	// Clearing the front leaves the back alone, the same per-role independence every
 	// other entity has.
-	if err := st.SetEntityArt(ctx, model.ArtPlaylist, pl, model.ArtRoleFront, nil, false, false); err != nil {
+	if err := st.SetEntityArt(ctx, model.ArtPlaylist, pl, model.ArtRoleFront, nil, model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("clear playlist front: %v", err)
 	}
 	if _, err := st.ResolveArt(ctx, ref, model.ArtRoleFront, 0); !waxerr.Is(err, waxerr.CodeNotFound) {
@@ -98,7 +98,7 @@ func TestPlaylistArtResolvesOwnLevelOnly(t *testing.T) {
 	if _, err := st.ResolveArt(ctx, missing, model.ArtRoleFront, 0); !waxerr.Is(err, waxerr.CodeNotFound) {
 		t.Errorf("resolve on an unknown playlist = %v, want CodeNotFound", err)
 	}
-	if err := st.SetEntityArt(ctx, model.ArtPlaylist, "nosuch", model.ArtRoleFront, front.Data, false, false); !waxerr.Is(err, waxerr.CodeNotFound) {
+	if err := st.SetEntityArt(ctx, model.ArtPlaylist, "nosuch", model.ArtRoleFront, front.Data, model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); !waxerr.Is(err, waxerr.CodeNotFound) {
 		t.Errorf("set art on an unknown playlist = %v, want CodeNotFound", err)
 	}
 }
@@ -127,7 +127,7 @@ func TestPlaylistHasArt(t *testing.T) {
 		t.Errorf("HasArt = true on a new playlist, want false")
 	}
 
-	if err := st.SetEntityArt(ctx, model.ArtPlaylist, pl, model.ArtRoleFront, front.Data, false, false); err != nil {
+	if err := st.SetEntityArt(ctx, model.ArtPlaylist, pl, model.ArtRoleFront, front.Data, model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("set front: %v", err)
 	}
 	if !playlistHasArt(t, st, pl) {
@@ -142,10 +142,10 @@ func TestPlaylistHasArt(t *testing.T) {
 	}
 
 	// A back image alone is not a cover: the projection is front-scoped.
-	if err := st.SetEntityArt(ctx, model.ArtPlaylist, pl, model.ArtRoleFront, nil, false, false); err != nil {
+	if err := st.SetEntityArt(ctx, model.ArtPlaylist, pl, model.ArtRoleFront, nil, model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("clear front: %v", err)
 	}
-	if err := st.SetEntityArt(ctx, model.ArtPlaylist, pl, model.ArtRoleBack, back.Data, false, false); err != nil {
+	if err := st.SetEntityArt(ctx, model.ArtPlaylist, pl, model.ArtRoleBack, back.Data, model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("set back: %v", err)
 	}
 	if playlistHasArt(t, st, pl) {
@@ -163,7 +163,7 @@ func TestPlaylistArtNotInheritedThroughReusedRowid(t *testing.T) {
 	ctx := context.Background()
 	front := testPNG(t, 42, 42)
 	first := newPlaylist(t, st, "Mix")
-	if err := st.SetEntityArt(ctx, model.ArtPlaylist, first, model.ArtRoleFront, front.Data, false, false); err != nil {
+	if err := st.SetEntityArt(ctx, model.ArtPlaylist, first, model.ArtRoleFront, front.Data, model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("set front: %v", err)
 	}
 	firstID := scalarInt(t, st, "SELECT id FROM playlist WHERE pid = ?", string(first))
@@ -201,10 +201,10 @@ func TestPlaylistArtDeleteAndGC(t *testing.T) {
 	// The track's cover is an unrelated live source: GC must leave it alone.
 	putWithCover(t, st, lib.ID, "/lib/al/1.flac", "e1", trackCover)
 	pl := newPlaylist(t, st, "Mix")
-	if err := st.SetEntityArt(ctx, model.ArtPlaylist, pl, model.ArtRoleFront, front.Data, false, false); err != nil {
+	if err := st.SetEntityArt(ctx, model.ArtPlaylist, pl, model.ArtRoleFront, front.Data, model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("set playlist front: %v", err)
 	}
-	if err := st.SetEntityArt(ctx, model.ArtPlaylist, pl, model.ArtRoleBack, back.Data, false, false); err != nil {
+	if err := st.SetEntityArt(ctx, model.ArtPlaylist, pl, model.ArtRoleBack, back.Data, model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("set playlist back: %v", err)
 	}
 	// Resolve a thumbnail so the delete has a cached derivative to cascade.

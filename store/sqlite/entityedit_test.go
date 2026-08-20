@@ -40,7 +40,7 @@ func TestEditEntityAlbumIdentifiers(t *testing.T) {
 
 	if err := st.EditEntityFields(ctx, model.MergeAlbum, albumPID,
 		map[string]string{"barcode": "036000291452", "catalog_number": "CAT-1", "label": "Indie Co"},
-		model.SourceUser, true, false); err != nil {
+		model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
 		t.Fatalf("edit album: %v", err)
 	}
 
@@ -126,7 +126,7 @@ func TestEditEntitySortOverride(t *testing.T) {
 	artistPID := entityPIDByCol(t, st, "artist", "name", "Miles Davis")
 
 	if err := st.EditEntityFields(ctx, model.MergeArtist, artistPID,
-		map[string]string{"sort": "Davis, Miles"}, model.SourceUser, true, false); err != nil {
+		map[string]string{"sort": "Davis, Miles"}, model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
 		t.Fatalf("edit sort: %v", err)
 	}
 	var sortKey string
@@ -148,7 +148,7 @@ func TestEditEntitySortOverride(t *testing.T) {
 
 	// Clearing the override regenerates the sort key from the display name.
 	if err := st.EditEntityFields(ctx, model.MergeArtist, artistPID,
-		map[string]string{"sort": ""}, model.SourceUser, false, true); err != nil {
+		map[string]string{"sort": ""}, model.Attribution{Source: model.SourceUser}, model.LockOf(false), true); err != nil {
 		t.Fatalf("clear sort: %v", err)
 	}
 	if err := st.read.QueryRowContext(ctx, "SELECT sort_key FROM artist WHERE pid=?", string(artistPID)).Scan(&sortKey); err != nil {
@@ -171,7 +171,7 @@ func TestEnrichRespectsReleaseGroupTypeLock(t *testing.T) {
 
 	// User curates the release-group type and locks it.
 	if err := st.EditEntityFields(ctx, model.MergeReleaseGroup, rgPID,
-		map[string]string{"type": "ep"}, model.SourceUser, true, false); err != nil {
+		map[string]string{"type": "ep"}, model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
 		t.Fatalf("edit type: %v", err)
 	}
 
@@ -191,7 +191,7 @@ func TestEnrichRespectsReleaseGroupTypeLock(t *testing.T) {
 
 	// An invalid type is rejected.
 	if err := st.EditEntityFields(ctx, model.MergeReleaseGroup, rgPID,
-		map[string]string{"type": "bootleg"}, model.SourceUser, true, true); !waxerr.Is(err, waxerr.CodeInvalid) {
+		map[string]string{"type": "bootleg"}, model.Attribution{Source: model.SourceUser}, model.LockOf(true), true); !waxerr.Is(err, waxerr.CodeInvalid) {
 		t.Fatalf("invalid type should be CodeInvalid, got %v", err)
 	}
 }
@@ -209,7 +209,7 @@ func TestEnrichRespectsArtistMBIDLock(t *testing.T) {
 	// User clears and locks the artist MBID (a locked-empty value the fill-when-empty
 	// enrich guard would otherwise refill).
 	if err := st.EditEntityFields(ctx, model.MergeArtist, artistPID,
-		map[string]string{"mbid": ""}, model.SourceUser, true, false); err != nil {
+		map[string]string{"mbid": ""}, model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
 		t.Fatalf("edit mbid: %v", err)
 	}
 	if err := st.ApplyArtistEnrichment(ctx, model.ArtistEnrichment{
@@ -243,13 +243,13 @@ func TestEditEntityRejectsDuplicateMBID(t *testing.T) {
 
 	mbid := "22222222-2222-2222-2222-222222222222"
 	if err := st.EditEntityFields(ctx, model.MergeArtist, alpha,
-		map[string]string{"mbid": mbid}, model.SourceUser, true, false); err != nil {
+		map[string]string{"mbid": mbid}, model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
 		t.Fatalf("edit alpha: %v", err)
 	}
 	// Setting the SAME mbid on another artist must be refused (enrichment relies on
 	// entity-mbid uniqueness).
 	if err := st.EditEntityFields(ctx, model.MergeArtist, beta,
-		map[string]string{"mbid": mbid}, model.SourceUser, true, false); !waxerr.Is(err, waxerr.CodeConflict) {
+		map[string]string{"mbid": mbid}, model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); !waxerr.Is(err, waxerr.CodeConflict) {
 		t.Fatalf("duplicate mbid should be CodeConflict, got %v", err)
 	}
 }
@@ -270,11 +270,11 @@ func TestMergeEntityCurationLockedWins(t *testing.T) {
 
 	// Survivor curates sort unlocked; loser curates the same field locked.
 	if err := st.EditEntityFields(ctx, model.MergeArtist, survivor,
-		map[string]string{"sort": "SSort"}, model.SourceUser, false, false); err != nil {
+		map[string]string{"sort": "SSort"}, model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("edit survivor: %v", err)
 	}
 	if err := st.EditEntityFields(ctx, model.MergeArtist, loser,
-		map[string]string{"sort": "LSort"}, model.SourceUser, true, false); err != nil {
+		map[string]string{"sort": "LSort"}, model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
 		t.Fatalf("edit loser: %v", err)
 	}
 
@@ -295,5 +295,59 @@ func TestMergeEntityCurationLockedWins(t *testing.T) {
 	}
 	if !rows[0].Locked {
 		t.Fatalf("survivor lock should be unioned from the loser (locked-wins)")
+	}
+}
+
+// TestEntityCurationCarriesAttributionAndLockChange is the entity-side twin of
+// TestEditCarriesTheCallersAttribution and TestEditWithLockUnchangedLeavesTheLockStanding:
+// entity_curation carries its own provider column and the same preserving upsert, so
+// both are pinned here rather than left to the item side's coverage.
+func TestEntityCurationCarriesAttributionAndLockChange(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	putTrack(t, st, lib.ID, trackSpec{
+		path: "/lib/a/1.flac", essence: "e1", content: "c1", title: "One",
+		artist: "Artist", album: "Album", genre: "Rock", durationMS: 100,
+	})
+	albumPID := entityPIDByCol(t, st, "album", "title", "Album")
+
+	if err := st.EditEntityFields(ctx, model.MergeAlbum, albumPID,
+		map[string]string{"barcode": "036000291452"},
+		model.Attribution{Source: model.SourceEnrichment, Provider: "musicbrainz"}, model.LockOn, false); err != nil {
+		t.Fatalf("stamped entity edit: %v", err)
+	}
+	rows, err := st.EntityCuration(ctx, model.MergeAlbum, albumPID)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("curation = %+v (err %v), want one row", rows, err)
+	}
+	if rows[0].Source != model.SourceEnrichment || rows[0].Provider != "musicbrainz" || !rows[0].Locked {
+		t.Fatalf("row = %+v, want a locked musicbrainz row", rows[0])
+	}
+
+	// A later edit that says nothing about the lock leaves it standing, and an unstated
+	// origin is a user edit whose provider goes with the source it belonged to.
+	if err := st.EditEntityFields(ctx, model.MergeAlbum, albumPID,
+		map[string]string{"barcode": "012345678905"},
+		model.Attribution{}, model.LockUnchanged, true); err != nil {
+		t.Fatalf("unchanged-lock entity edit: %v", err)
+	}
+	rows, err = st.EntityCuration(ctx, model.MergeAlbum, albumPID)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("curation = %+v (err %v), want one row", rows, err)
+	}
+	if !rows[0].Locked || rows[0].Source != model.SourceUser || rows[0].Provider != "" {
+		t.Errorf("row = %+v, want a still-locked user row with no provider", rows[0])
+	}
+	if rows[0].Value != "012345678905" {
+		t.Errorf("value = %q, want the second edit to have applied", rows[0].Value)
+	}
+
+	// A fresh row under LockUnchanged inserts unlocked.
+	if err := st.EditEntityFields(ctx, model.MergeAlbum, albumPID,
+		map[string]string{"label": "Indie Co"}, model.Attribution{}, model.LockUnchanged, false); err != nil {
+		t.Fatalf("fresh unchanged-lock entity edit: %v", err)
+	}
+	if n := scalarInt(t, st, "SELECT locked FROM entity_curation WHERE field='label'"); n != 0 {
+		t.Errorf("fresh label row locked = %d, want 0", n)
 	}
 }

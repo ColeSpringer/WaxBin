@@ -27,8 +27,9 @@ const (
 	SourceFeed    ProvenanceSource = "feed"    // supplied by a podcast feed or its episode metadata
 )
 
-// Valid reports whether s is a known provenance source, across both surfaces. It is
-// the gate the artifact surfaces (art, lyrics) use.
+// Valid reports whether s is a known provenance source, across every surface. It is
+// the vocabulary half of Attribution.Valid, which adds the provider pairing; a storage
+// surface narrows it further through one of the ValidFor* gates.
 func (s ProvenanceSource) Valid() bool {
 	switch s {
 	case SourceTag, SourceUser, SourceEnrichment, SourceOrganize, SourceSidecar, SourceFeed:
@@ -49,6 +50,116 @@ func (s ProvenanceSource) ValidForField() bool {
 	default:
 		return false
 	}
+}
+
+// Attribution is where one stored value or artifact came from, as one value, so a
+// write path carries the caller's whole answer instead of taking a source and inventing
+// the other two.
+type Attribution struct {
+	Source    ProvenanceSource
+	Provider  string
+	SourceURL string
+}
+
+// OrUser defaults an empty source to SourceUser: a curation write that names no origin
+// is a user edit. It is the one place that default lives.
+func (a Attribution) OrUser() Attribution {
+	if a.Source == "" {
+		a.Source = SourceUser
+	}
+	return a
+}
+
+// Valid reports whether a is storable: a known source, paired the way only the whole
+// value can express. An enrichment value names the provider that supplied it, and the
+// sources with no external provider carry none. A feed is exempt because a feed is its
+// own provider and nothing names one for it. SourceURL takes no pairing rule; it is
+// empty for the on-disk sources by convention, and a rule there would only refuse
+// legitimate writes.
+func (a Attribution) Valid() bool {
+	if !a.Source.Valid() {
+		return false
+	}
+	switch a.Source {
+	case SourceEnrichment:
+		return a.Provider != ""
+	case SourceFeed:
+		return true
+	default:
+		return a.Provider == ""
+	}
+}
+
+// The three ValidFor gates narrow Valid to one storage surface's own vocabulary, each
+// matching the schema comment on the column it guards. Adding a ProvenanceSource means
+// deciding which of them accept it.
+
+// ValidForField reports whether a may be stored on a scalar field row (field_provenance,
+// entity_curation): no artifact-only source, since nothing produces a scalar value from
+// a cover.jpg or a feed image.
+func (a Attribution) ValidForField() bool {
+	return a.Valid() && a.Source.ValidForField()
+}
+
+// ValidForArt reports whether a may be stored on an art attachment (art_map). Every
+// source but organize can produce a picture; nothing organizes one.
+func (a Attribution) ValidForArt() bool {
+	switch a.Source {
+	case SourceTag, SourceSidecar, SourceUser, SourceEnrichment, SourceFeed:
+		return a.Valid()
+	default:
+		return false
+	}
+}
+
+// ValidForLyrics reports whether a may be stored on a lyrics row. A feed publishes
+// covers and never words, and nothing organizes lyrics, so neither is accepted.
+func (a Attribution) ValidForLyrics() bool {
+	switch a.Source {
+	case SourceTag, SourceSidecar, SourceUser, SourceEnrichment:
+		return a.Valid()
+	default:
+		return false
+	}
+}
+
+// LockChange is the lock instruction accompanying a curation write: leave the stored
+// lock as it stands, set it, or clear it. A bool cannot express the first, so a caller
+// that only meant to change a value had to state a lock intent it never formed, and a
+// forced write silently rewrote a lock nobody had read.
+type LockChange string
+
+const (
+	LockUnchanged LockChange = ""       // leave the stored lock alone
+	LockOn        LockChange = "lock"   // lock the field
+	LockOff       LockChange = "unlock" // clear the lock
+)
+
+// LockOf turns the two-state answer a caller already has into a LockChange, for the
+// callers that genuinely decided; one that never formed the intent passes LockUnchanged.
+func LockOf(lock bool) LockChange {
+	if lock {
+		return LockOn
+	}
+	return LockOff
+}
+
+// Valid reports whether c is a known lock instruction. The empty string is one.
+func (c LockChange) Valid() bool {
+	switch c {
+	case LockUnchanged, LockOn, LockOff:
+		return true
+	default:
+		return false
+	}
+}
+
+// ParseLockChange parses a lock instruction at an input boundary (a CLI flag, a proxy
+// frame), mirroring ParseArtRole. The empty string means LockUnchanged, so a caller
+// that sends nothing leaves the lock alone.
+func ParseLockChange(s string) (LockChange, bool) {
+	c := LockChange(s)
+	return c, c.Valid()
 }
 
 // MetadataFields enumerates the SCALAR, one-value item fields that can be set by the
@@ -177,14 +288,13 @@ type ItemFieldEdit struct {
 
 // FieldProvenance is one provenance row: a field's source, lock state, the curated
 // value when a user set one, the provider that supplied an enrichment value, and the
-// URL it was fetched from where one exists.
+// URL it was fetched from where one exists. Only the overlaid artifact rows (art,
+// lyrics) ever carry a URL; field_provenance has no column for one.
 type FieldProvenance struct {
-	ItemPID   PID
-	Field     string
-	Source    ProvenanceSource
+	ItemPID PID
+	Field   string
+	Attribution
 	Locked    bool
 	Value     string
-	Provider  string // enrichment provider id (empty for tag/user/organize rows)
-	SourceURL string // fetch URL, on the art row a fetched cover fills (empty otherwise)
-	UpdatedAt int64  // unix nanoseconds
+	UpdatedAt int64 // unix nanoseconds
 }

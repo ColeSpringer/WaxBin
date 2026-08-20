@@ -398,7 +398,7 @@ func (o *Organizer) apply(ctx context.Context, plan *Plan, a *Action, jobPID mod
 				// source and never writes these fields.
 				continue
 			}
-			if err := o.cat.SetFieldProvenance(ctx, a.ItemPID, tf.Field, model.SourceOrganize, tf.Value, false); err != nil {
+			if err := o.cat.SetFieldProvenance(ctx, a.ItemPID, tf.Field, model.Attribution{Source: model.SourceOrganize}, tf.Value, false); err != nil {
 				o.log.Warn("organize provenance stamp", "item", a.ItemPID, "field", tf.Field, "err", err)
 			}
 		}

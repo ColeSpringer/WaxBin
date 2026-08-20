@@ -30,7 +30,7 @@ func TestEditFieldDBOnly(t *testing.T) {
 	}
 	pid := itemPIDByTitle(t, ctx, lib, "Original")
 
-	if err := lib.EditField(ctx, pid, "artist", "New Artist", waxbin.EditOptions{Lock: true}); err != nil {
+	if err := lib.EditField(ctx, pid, "artist", "New Artist", waxbin.EditOptions{Lock: model.LockOn}); err != nil {
 		t.Fatalf("edit: %v", err)
 	}
 
@@ -74,7 +74,7 @@ func TestEditFieldWriteBack(t *testing.T) {
 
 	if err := lib.EditFields(ctx, pid, map[string]string{
 		"artist": "New Artist", "genre": "Jazz",
-	}, waxbin.EditOptions{Lock: true, WriteBack: true}); err != nil {
+	}, waxbin.EditOptions{Lock: model.LockOn, WriteBack: true}); err != nil {
 		t.Fatalf("edit with write-back: %v", err)
 	}
 
@@ -107,7 +107,7 @@ func TestEditWriteBackNormalizesIdentifier(t *testing.T) {
 	pid := itemPIDByTitle(t, ctx, lib, "Original")
 
 	if err := lib.EditFields(ctx, pid, map[string]string{"isrc": "us-rc1-77-00001"},
-		waxbin.EditOptions{Lock: true, WriteBack: true}); err != nil {
+		waxbin.EditOptions{Lock: model.LockOn, WriteBack: true}); err != nil {
 		t.Fatalf("edit with write-back: %v", err)
 	}
 
@@ -127,7 +127,7 @@ func TestEditWriteBackNormalizesIdentifier(t *testing.T) {
 
 	// A malformed identifier is a usage error, refused before the catalog write.
 	if err := lib.EditFields(ctx, pid, map[string]string{"isrc": "nope"},
-		waxbin.EditOptions{Lock: true, Force: true}); !waxerr.Is(err, waxerr.CodeInvalid) {
+		waxbin.EditOptions{Lock: model.LockOn, Force: true}); !waxerr.Is(err, waxerr.CodeInvalid) {
 		t.Errorf("malformed isrc = %v, want CodeInvalid", err)
 	}
 }
@@ -159,7 +159,7 @@ func TestEditItemsFieldsWriteBackPerItem(t *testing.T) {
 	res, err := lib.EditItemsFields(ctx, []model.ItemFieldEdit{
 		{ItemPID: p1, Fields: map[string]string{"comment": "first note"}},
 		{ItemPID: p2, Fields: map[string]string{"comment": "second note"}},
-	}, waxbin.EditOptions{Lock: true, WriteBack: true})
+	}, waxbin.EditOptions{Lock: model.LockOn, WriteBack: true})
 	if err != nil {
 		t.Fatalf("batch: %v", err)
 	}
@@ -224,7 +224,7 @@ func TestEditWriteBackSharedFileRefused(t *testing.T) {
 	makeBackingFileVirtual(t, ctx, db, pid)
 
 	err := lib.EditFields(ctx, pid, map[string]string{"artist": "New Artist"},
-		waxbin.EditOptions{Lock: true, WriteBack: true})
+		waxbin.EditOptions{Lock: model.LockOn, WriteBack: true})
 	var wbErr *waxbin.WriteBackError
 	if !errors.As(err, &wbErr) {
 		t.Fatalf("want *WriteBackError for a shared file, got %v", err)
@@ -273,7 +273,7 @@ func TestEditBookFacade(t *testing.T) {
 	pid := books[0].PID
 
 	// DB-only author edit re-resolves the contributor and reflects in the view.
-	if err := lib.EditField(ctx, pid, "author", "John Ronald Tolkien", waxbin.EditOptions{Lock: true}); err != nil {
+	if err := lib.EditField(ctx, pid, "author", "John Ronald Tolkien", waxbin.EditOptions{Lock: model.LockOn}); err != nil {
 		t.Fatalf("edit book author: %v", err)
 	}
 	d, err := lib.Book(ctx, pid)
@@ -290,7 +290,7 @@ func TestEditBookFacade(t *testing.T) {
 
 	// subtitle is a DB-only book field (no tag a scan reconstructs it from), so a
 	// write-back writes nothing on disk and returns no error while the edit stands.
-	if err := lib.EditField(ctx, pid, "subtitle", "There and Back Again", waxbin.EditOptions{Lock: true, WriteBack: true}); err != nil {
+	if err := lib.EditField(ctx, pid, "subtitle", "There and Back Again", waxbin.EditOptions{Lock: model.LockOn, WriteBack: true}); err != nil {
 		t.Fatalf("book subtitle write-back should be a clean no-op, got %v", err)
 	}
 	d, _ = lib.Book(ctx, pid)
@@ -334,7 +334,7 @@ func TestEditBookWriteBackRoundTrip(t *testing.T) {
 		"narrator": "Andy Serkis",
 		"series":   "Middle-earth",
 		"genre":    "Fantasy",
-	}, waxbin.EditOptions{Lock: true, WriteBack: true}); err != nil {
+	}, waxbin.EditOptions{Lock: model.LockOn, WriteBack: true}); err != nil {
 		t.Fatalf("book write-back: %v", err)
 	}
 
@@ -413,7 +413,7 @@ func TestEditBookWriteBackReanchorsIdentity(t *testing.T) {
 	if err := lib.EditFields(ctx, pid, map[string]string{
 		"title":  "The Hobbit: Illustrated",
 		"author": "J.R.R. Tolkien",
-	}, waxbin.EditOptions{Lock: true, WriteBack: true}); err != nil {
+	}, waxbin.EditOptions{Lock: model.LockOn, WriteBack: true}); err != nil {
 		t.Fatalf("book identity write-back: %v", err)
 	}
 
@@ -473,7 +473,7 @@ func TestEditBookWriteBackMultiFileStaysWhole(t *testing.T) {
 	if err := lib.EditFields(ctx, pid, map[string]string{
 		"title":  "The Hobbit Deluxe",
 		"author": "J.R.R. Tolkien",
-	}, waxbin.EditOptions{Lock: true, WriteBack: true}); err != nil {
+	}, waxbin.EditOptions{Lock: model.LockOn, WriteBack: true}); err != nil {
 		t.Fatalf("book identity write-back: %v", err)
 	}
 	if _, err := lib.Scan(ctx, waxbin.ScanRequest{Force: true}); err != nil {
@@ -514,7 +514,7 @@ func TestEditWriteBackNoFiles(t *testing.T) {
 	// Detach the item's backing file so it has none, then edit with write-back.
 	detachBackingFiles(t, ctx, db, pid)
 
-	err := lib.EditField(ctx, pid, "title", "Renamed", waxbin.EditOptions{Lock: true, WriteBack: true})
+	err := lib.EditField(ctx, pid, "title", "Renamed", waxbin.EditOptions{Lock: model.LockOn, WriteBack: true})
 	var wbErr *waxbin.WriteBackError
 	if !errors.As(err, &wbErr) {
 		t.Fatalf("want *WriteBackError for a fileless item, got %v", err)
@@ -624,7 +624,7 @@ func TestEditBookIdentifierReanchors(t *testing.T) {
 	// Hyphenated on the way in: the catalog normalizes, and the tag must carry the same
 	// value or the next rescan reads the raw form back over it.
 	if err := lib.EditFields(ctx, pid, map[string]string{"isbn": "978-0-261-10221-7"},
-		waxbin.EditOptions{Lock: true, WriteBack: true}); err != nil {
+		waxbin.EditOptions{Lock: model.LockOn, WriteBack: true}); err != nil {
 		t.Fatalf("edit isbn: %v", err)
 	}
 	fm, err := meta.NewReader().Read(ctx, src)

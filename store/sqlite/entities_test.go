@@ -538,7 +538,7 @@ func TestArtistMBIDBackfillRespectsLock(t *testing.T) {
 	putTrack(t, st, lib.ID, spec)
 	artistPID := entityPIDByName(t, st, "artist", "name", "Radiohead")
 	if err := st.EditEntityFields(ctx, model.MergeArtist, artistPID,
-		map[string]string{"mbid": ""}, model.SourceUser, true, false); err != nil {
+		map[string]string{"mbid": ""}, model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
 		t.Fatalf("lock mbid empty: %v", err)
 	}
 

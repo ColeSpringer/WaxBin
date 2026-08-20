@@ -384,8 +384,8 @@ type Catalog interface {
 	// several fields avoids a per-field round trip.
 	LockedFields(ctx context.Context, itemPID PID) (map[string]bool, error)
 	// SetFieldProvenance records that a field was set by a non-tag source (e.g.
-	// organize). It refuses a locked field unless force is set.
-	SetFieldProvenance(ctx context.Context, itemPID PID, field string, source ProvenanceSource, value string, force bool) error
+	// organize), attributed to attr. It refuses a locked field unless force is set.
+	SetFieldProvenance(ctx context.Context, itemPID PID, field string, attr Attribution, value string, force bool) error
 
 	// QueryItems/CountItems evaluate q against the item whitelist. If q references a
 	// per-user field such as starred, rating, or play_count, it is scoped to userPID's

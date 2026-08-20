@@ -243,7 +243,7 @@ func albumIDByTitle(t *testing.T, db *sql.DB, title string) int64 {
 func setEntityMBID(t *testing.T, st *sqlite.Store, et model.MergeEntity, pid, mbid string, lock bool) {
 	t.Helper()
 	if err := st.EditEntityFields(context.Background(), et, model.PID(pid),
-		map[string]string{"mbid": mbid}, model.SourceUser, lock, false); err != nil {
+		map[string]string{"mbid": mbid}, model.Attribution{Source: model.SourceUser}, model.LockOf(lock), false); err != nil {
 		t.Fatalf("set %s mbid: %v", et, err)
 	}
 }

@@ -76,7 +76,7 @@ func TestVirtualTrackForcePreservesLockedTitle(t *testing.T) {
 	}
 	pid := vtItems(t, st)[0].PID // Track 1
 
-	if err := st.EditItemFields(ctx, pid, map[string]string{"title": "Curated VT"}, model.SourceUser, true, false); err != nil {
+	if err := st.EditItemFields(ctx, pid, map[string]string{"title": "Curated VT"}, model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
 		t.Fatalf("edit vtrack: %v", err)
 	}
 

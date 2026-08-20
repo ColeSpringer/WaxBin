@@ -117,3 +117,32 @@ func TestSniffExotic(t *testing.T) {
 		t.Error("short input should not sniff as exotic")
 	}
 }
+
+// TestDescribe covers the three answers the one describer gives its four callers: a
+// decodable image, an exotic one recognized by magic with no dimensions, and bytes
+// nothing recognizes, which still get a content address.
+func TestDescribe(t *testing.T) {
+	data := makePNG(t, 64, 48)
+	got := Describe(data)
+	if got.Format != "png" || got.Width != 64 || got.Height != 48 {
+		t.Errorf("describe = %s %dx%d, want png 64x48", got.Format, got.Width, got.Height)
+	}
+	if got.Hash != Hash(data) {
+		t.Errorf("describe hash = %q, want the content address", got.Hash)
+	}
+
+	avif := append([]byte{0, 0, 0, 0x20}, []byte("ftypavif")...)
+	exotic := Describe(avif)
+	if exotic.Format != "avif" || exotic.Width != 0 || exotic.Height != 0 {
+		t.Errorf("exotic describe = %s %dx%d, want avif with unknown dimensions",
+			exotic.Format, exotic.Width, exotic.Height)
+	}
+
+	junk := Describe([]byte("not an image"))
+	if junk.Format != "" {
+		t.Errorf("junk describe format = %q, want empty (the neither-decoded-nor-recognized signal)", junk.Format)
+	}
+	if junk.Hash != Hash([]byte("not an image")) {
+		t.Error("junk describe dropped the content address")
+	}
+}

@@ -120,7 +120,9 @@ listener. The server runs until interrupted (Ctrl-C / SIGTERM).
 
 The catalog is authoritative, and a curation edit changes the catalog first: it
 auto-locks the field so a later scan or enrichment pass never re-derives over your
-change, and records provenance (who set the value and when).
+change, and records provenance: a hand edit is yours, and a caller that supplies its
+own source (the Go and socket APIs, `art set --source`, `lyrics set --source`) has
+that recorded instead. `--keep-lock` changes a value without touching its lock.
 
 - `waxbin edit <pid> --set field=value` edits scalar metadata such as title, artist,
   album, year, and track/disc numbers.

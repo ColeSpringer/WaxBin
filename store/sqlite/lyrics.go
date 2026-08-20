@@ -32,12 +32,13 @@ func putLyricsTx(ctx context.Context, tx *sql.Tx, itemID int64, ly *model.Lyrics
 	var wantSource, wantProvider, wantUnsynced, wantLines string
 	wantSynced := 0
 	if ly.HasContent() {
-		// Refuse an unknown source the way setEntityArtRoleTx refuses an unstamped
-		// cover. Without this an unstamped producer falls through to wantSource == "",
-		// which reads as "no lyrics desired" and drops the words with no error.
-		if !ly.Source.Valid() {
-			return false, waxerr.New(waxerr.CodeInvalid, "store.putLyrics",
-				"lyrics have no known provenance source: "+string(ly.Source))
+		// Refuse a source this column cannot hold, the way setEntityArtRoleTx refuses an
+		// unstorable cover. Without it an unstamped producer falls through to
+		// wantSource == "", which reads as "no lyrics desired" and drops the words with no
+		// error, and a fetched lyric could be stored without naming who fetched it.
+		attr := model.Attribution{Source: ly.Source, Provider: ly.Provider}
+		if err := checkAttribution(attr, attr.ValidForLyrics, "store.putLyrics"); err != nil {
+			return false, err
 		}
 		wantSource, wantProvider, wantUnsynced = string(ly.Source), ly.Provider, ly.Unsynced
 		if len(ly.Synced) > 0 {

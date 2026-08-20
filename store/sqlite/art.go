@@ -104,6 +104,36 @@ func attachArtTxChanged(ctx context.Context, tx *sql.Tx, itemID int64, img *mode
 	return attachEntityArtTxChanged(ctx, tx, "track", itemID, img)
 }
 
+// storableArt fills whatever an ingest carrier left empty from the bytes it already
+// holds: the content address, the format, and the dimensions, each independently of the
+// others. Independently, because zero dimensions read as undecodable to ResolveArt,
+// which then serves the source unscaled forever, so a format with no dimensions is a gap
+// to fill rather than an impossible state. It returns a shallow copy when it fills
+// anything, so a producer's own value is never mutated behind its back.
+func storableArt(img *model.ArtImage) *model.ArtImage {
+	if img == nil || len(img.Data) == 0 {
+		return img
+	}
+	if img.Hash != "" && img.Format != "" && img.Width != 0 && img.Height != 0 {
+		return img
+	}
+	info := art.Describe(img.Data)
+	cp := *img
+	if cp.Hash == "" {
+		cp.Hash = info.Hash
+	}
+	if cp.Format == "" {
+		cp.Format = info.Format
+	}
+	if cp.Width == 0 {
+		cp.Width = info.Width
+	}
+	if cp.Height == 0 {
+		cp.Height = info.Height
+	}
+	return &cp
+}
+
 // insertArtSourceTx dedups a decoded/probed cover into the content-addressed
 // art_source store (keyed by content hash), a no-op when the source is already
 // present. It is the single art-blob writer shared by the front-cover attach and the
@@ -135,11 +165,22 @@ func attachEntityArtTx(ctx context.Context, tx *sql.Tx, entityType string, entit
 // writer that knows WHICH edition the album is should use it, today the release match.
 //
 // The write is idempotent: an entity already mapping this cover does nothing (reporting
-// false), so it can run on every scan/sync without churn. A nil/empty image is a no-op.
-// It touches the front role alone, so a re-sync cannot clobber a user's back/booklet.
+// false), so it can run on every scan/sync without churn. A nil or empty image is a
+// no-op, which is the "no cover found" signal every automatic producer uses; an image
+// carrying bytes is always stored, with anything it left undescribed filled from those
+// bytes. It touches the front role alone, so a re-sync cannot clobber a user's
+// back/booklet.
 func attachEntityArtTxChanged(ctx context.Context, tx *sql.Tx, entityType string, entityID int64, img *model.ArtImage) (bool, error) {
-	if img == nil || len(img.Data) == 0 || img.Hash == "" {
+	if img == nil || len(img.Data) == 0 {
 		return false, nil
+	}
+	// Before the hash comparison below, so an undescribed cover matching the stored one
+	// re-attributes in place rather than being read as a different picture. The
+	// attribution is checked here too: the same-hash branch below writes it without
+	// going through setEntityArtRoleTx, so this is the guard for that path.
+	img = storableArt(img)
+	if err := checkArtImage(img, entityType, string(model.ArtRoleFront)); err != nil {
+		return false, err
 	}
 	var curHash sql.NullString
 	if err := tx.QueryRowContext(ctx,
@@ -264,51 +305,38 @@ type artLevel struct {
 // cover, Derived. CodeNotFound means no consulted level has art in that role.
 func (s *Store) ResolveArt(ctx context.Context, ref model.EntityRef, role model.ArtRole, size int) (*model.ArtBlob, error) {
 	const op = "store.ResolveArt"
-	if !ref.Type.Valid() {
-		return nil, waxerr.New(waxerr.CodeInvalid, op, "unknown art entity type: "+string(ref.Type))
-	}
-	if role == "" {
-		role = model.ArtRoleFront
-	}
-	if !role.Valid() {
-		return nil, waxerr.New(waxerr.CodeInvalid, op, "unknown art role: "+string(role))
-	}
-	chain, err := s.artChain(ctx, ref)
+	// The blob is built from the metadata-only read's own answer rather than from a
+	// second walk of the chain, so the two reads cannot drift apart about which level
+	// answered or where its picture came from.
+	prov, err := s.artProvenance(ctx, ref, role, op)
 	if err != nil {
 		return nil, err
 	}
-	// Non-front roles never inherit from an ancestor: truncate the chain to the
-	// requested entity itself (always the first level artChain builds).
-	if role != model.ArtRoleFront && len(chain) > 1 {
-		chain = chain[:1]
-	}
-	hit, ok, err := s.artInChain(ctx, chain, role)
-	if err != nil {
-		return nil, err
-	}
-	if !ok {
-		return nil, waxerr.New(waxerr.CodeNotFound, op, "no "+string(role)+" art for "+string(ref.Type)+":"+string(ref.PID))
+	source := func() (*model.ArtBlob, error) {
+		data, err := s.artSourceData(ctx, prov.SourceHash, op)
+		if err != nil {
+			return nil, err
+		}
+		return &model.ArtBlob{
+			Bytes: data, Format: prov.Format, Width: prov.Width, Height: prov.Height,
+			SourceHash: prov.SourceHash, Level: prov.Level, Derived: prov.Derived,
+			Attribution: prov.Attribution, UpdatedAt: prov.UpdatedAt,
+		}, nil
 	}
 
-	srcData, srcFormat, srcW, srcH, err := s.artSource(ctx, hit.hash)
-	if err != nil {
-		return nil, err
-	}
-	blob := &model.ArtBlob{Bytes: srcData, Format: srcFormat, Width: srcW, Height: srcH, SourceHash: hit.hash,
-		Level: model.ArtEntity(hit.level), Derived: hit.derived,
-		Source: hit.source, Provider: hit.provider, SourceURL: hit.sourceURL, UpdatedAt: hit.updatedAt}
-
-	// Original requested, or a source already within the box: serve the source.
-	longest := max(srcW, srcH)
+	// Original requested, or a source already within the box: serve the source. Nothing
+	// above this point has loaded it, which is what keeps a grid of cached thumbnails
+	// from reading a full-size image out of blob storage per cover and discarding it.
+	longest := max(prov.Width, prov.Height)
 	if size <= 0 || (longest > 0 && longest <= size) {
-		return blob, nil
+		return source()
 	}
 	// Dimensions unknown (an undecodable or exotic source, e.g. an AVIF/HEIC cover
 	// with no pure-Go decoder): there is nothing to scale, so serve the original.
 	if longest == 0 {
-		return blob, nil
+		return source()
 	}
-	thumb, err := s.thumbnail(ctx, hit.hash, srcData, srcFormat, srcW, srcH, size)
+	thumb, err := s.thumbnail(ctx, prov, size, source)
 	if err != nil {
 		return nil, err
 	}
@@ -317,10 +345,79 @@ func (s *Store) ResolveArt(ctx context.Context, ref model.EntityRef, role model.
 	// album), and two entities sharing one deduped source can report different
 	// provenance, so both are stamped per request rather than cached. thumbCache.put
 	// stores the blob above this line, which is what makes this the single stamp site.
-	thumb.Level, thumb.Derived = model.ArtEntity(hit.level), hit.derived
-	thumb.Source, thumb.Provider = hit.source, hit.provider
-	thumb.SourceURL, thumb.UpdatedAt = hit.sourceURL, hit.updatedAt
+	// Format and the dimensions are overwritten by the generator, which is exactly what
+	// separates a thumbnail from the stored source ArtProvenance describes.
+	thumb.Level, thumb.Derived = prov.Level, prov.Derived
+	thumb.Attribution, thumb.UpdatedAt = prov.Attribution, prov.UpdatedAt
 	return thumb, nil
+}
+
+// ArtProvenance answers where an entity's art in one role came from, without loading
+// the picture. It resolves exactly as ResolveArt does, chain fallback and all, and
+// reports the level that answered, whether an album's answer was derived from a member
+// track, and the stored source's address, format, dimensions, byte size and
+// attribution. The blob's overflow pages are never touched, which is the whole saving:
+// a detail screen that only draws a provenance mark stops paying for the image.
+//
+// It carries no lock. A lock belongs to the entity that was asked about rather than to
+// whichever chain level answered, so a caller that wants one reads ArtLocked. Like
+// ResolveArt and ArtRoles it has no proxy surface: a read never needs the write lock the
+// socket exists to share. CodeNotFound means no consulted level has art in that role,
+// the same answer ResolveArt gives.
+func (s *Store) ArtProvenance(ctx context.Context, ref model.EntityRef, role model.ArtRole) (*model.ArtProvenance, error) {
+	return s.artProvenance(ctx, ref, role, "store.ArtProvenance")
+}
+
+// artProvenance is the shared body, taking its caller's op so a ResolveArt failure
+// still reports itself as one.
+func (s *Store) artProvenance(ctx context.Context, ref model.EntityRef, role model.ArtRole, op string) (*model.ArtProvenance, error) {
+	hit, role, err := s.artHitFor(ctx, ref, role, op)
+	if err != nil {
+		return nil, err
+	}
+	format, w, h, size, err := s.artSourceMeta(ctx, hit.hash, op)
+	if err != nil {
+		return nil, err
+	}
+	return &model.ArtProvenance{
+		Role: role, Level: model.ArtEntity(hit.level), Derived: hit.derived, SourceHash: hit.hash,
+		Format: format, Width: w, Height: h, Size: size,
+		Attribution: model.Attribution{Source: hit.source, Provider: hit.provider, SourceURL: hit.sourceURL},
+		UpdatedAt:   hit.updatedAt,
+	}, nil
+}
+
+// artHitFor validates a reference and role and walks the fallback chain for them,
+// returning the answering hit and the normalized role. It is the one chain walk behind
+// both art reads.
+func (s *Store) artHitFor(ctx context.Context, ref model.EntityRef, role model.ArtRole, op string) (artHit, model.ArtRole, error) {
+	if !ref.Type.Valid() {
+		return artHit{}, role, waxerr.New(waxerr.CodeInvalid, op, "unknown art entity type: "+string(ref.Type))
+	}
+	if role == "" {
+		role = model.ArtRoleFront
+	}
+	if !role.Valid() {
+		return artHit{}, role, waxerr.New(waxerr.CodeInvalid, op, "unknown art role: "+string(role))
+	}
+	chain, err := s.artChain(ctx, ref)
+	if err != nil {
+		return artHit{}, role, err
+	}
+	// Non-front roles never inherit from an ancestor: truncate the chain to the
+	// requested entity itself (always the first level artChain builds).
+	if role != model.ArtRoleFront && len(chain) > 1 {
+		chain = chain[:1]
+	}
+	hit, ok, err := s.artInChain(ctx, chain, role)
+	if err != nil {
+		return artHit{}, role, err
+	}
+	if !ok {
+		return artHit{}, role, waxerr.New(waxerr.CodeNotFound, op,
+			"no "+string(role)+" art for "+string(ref.Type)+":"+string(ref.PID))
+	}
+	return hit, role, nil
 }
 
 // ArtRoles lists the artwork slots an entity holds at its own level, with no
@@ -396,16 +493,20 @@ func (s *Store) ArtRoles(ctx context.Context, ref model.EntityRef) ([]model.ArtR
 	// FieldProvenance does for a lock-only row. The rows come back ordered by role name,
 	// where front sorts after back/background/booklet/disc, so it goes last.
 	return append(out, model.ArtRoleInfo{
-		Role: model.ArtRoleFront, Source: lock.Source, UpdatedAt: lock.UpdatedAt, Locked: true,
+		Role:        model.ArtRoleFront,
+		Attribution: lock.Attribution,
+		UpdatedAt:   lock.UpdatedAt, Locked: true,
 	}), nil
 }
 
-// thumbnail returns a cached thumbnail for (source hash, size), generating and
-// caching it on a miss. A generation failure (e.g. an exotic source format) falls
-// back to the original source, served from the bytes/metadata the caller already
-// loaded (no re-fetch).
-func (s *Store) thumbnail(ctx context.Context, hash string, srcData []byte, srcFormat string, srcW, srcH, size int) (*model.ArtBlob, error) {
+// thumbnail returns a cached thumbnail for (source hash, size), generating and caching
+// it on a miss. source loads the original image, and is called only when generation is
+// actually needed: a cache hit at either level answers without touching the blob at all.
+// A generation failure (e.g. an exotic source format) falls back to the original.
+func (s *Store) thumbnail(ctx context.Context, prov *model.ArtProvenance, size int,
+	source func() (*model.ArtBlob, error)) (*model.ArtBlob, error) {
 	const op = "store.ResolveArt"
+	hash := prov.SourceHash
 	// Check the in-process cache first. This serves a read-only store, which cannot
 	// persist to thumb_cache and would otherwise regenerate on every request, and it
 	// saves a read-write store the SQL round-trip and re-decode for a hot cover.
@@ -430,12 +531,16 @@ func (s *Store) thumbnail(ctx context.Context, hash string, srcData []byte, srcF
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
 
-	thumb, tFormat, tw, th, gerr := art.Thumbnail(srcData, size)
+	src, err := source()
+	if err != nil {
+		return nil, err
+	}
+	thumb, tFormat, tw, th, gerr := art.Thumbnail(src.Bytes, size)
 	if gerr != nil {
 		// The pure-Go decoders cannot handle this source (an undecodable or exotic
 		// format such as AVIF/HEIC): serve the original unscaled rather than failing.
 		s.log.Warn("art thumbnail generation failed; serving original", "hash", hash, "size", size, "err", gerr)
-		return &model.ArtBlob{Bytes: srcData, Format: srcFormat, Width: srcW, Height: srcH, SourceHash: hash}, nil
+		return src, nil
 	}
 
 	blob := model.ArtBlob{Bytes: thumb, Format: tFormat, Width: tw, Height: th, SourceHash: hash, Thumbnail: true}
@@ -457,21 +562,33 @@ func (s *Store) thumbnail(ctx context.Context, hash string, srcData []byte, srcF
 	return &b, nil
 }
 
-// artSource loads a source image's bytes and metadata by hash.
-func (s *Store) artSource(ctx context.Context, hash string) ([]byte, string, int, int, error) {
-	const op = "store.ResolveArt"
-	var data []byte
-	var format string
-	var w, h int
-	err := s.read.QueryRowContext(ctx,
-		"SELECT data, format, width, height FROM art_source WHERE hash = ?", hash).Scan(&data, &format, &w, &h)
+// artSourceMeta loads a source image's format, dimensions and byte length by hash,
+// deliberately not its data: the blob's overflow pages stay untouched, which is what
+// makes the metadata-only read cheap.
+func (s *Store) artSourceMeta(ctx context.Context, hash, op string) (format string, w, h, size int, err error) {
+	err = s.read.QueryRowContext(ctx,
+		"SELECT format, width, height, size FROM art_source WHERE hash = ?", hash).Scan(&format, &w, &h, &size)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, "", 0, 0, waxerr.New(waxerr.CodeNotFound, op, "art source missing: "+hash)
+		return "", 0, 0, 0, waxerr.New(waxerr.CodeNotFound, op, "art source missing: "+hash)
 	}
 	if err != nil {
-		return nil, "", 0, 0, waxerr.Wrap(waxerr.CodeIO, op, err)
+		return "", 0, 0, 0, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
-	return data, format, w, h, nil
+	return format, w, h, size, nil
+}
+
+// artSourceData loads a source image's bytes by hash.
+func (s *Store) artSourceData(ctx context.Context, hash, op string) ([]byte, error) {
+	var data []byte
+	err := s.read.QueryRowContext(ctx,
+		"SELECT data FROM art_source WHERE hash = ?", hash).Scan(&data)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, waxerr.New(waxerr.CodeNotFound, op, "art source missing: "+hash)
+	}
+	if err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	return data, nil
 }
 
 // artHit is what one art-chain walk found: the source hash to serve, the level that

@@ -16,9 +16,10 @@ func TestArtRoleViewsJSON(t *testing.T) {
 	b, err := json.Marshal(artRoleViews([]model.ArtRoleInfo{
 		{
 			Role: model.ArtRoleBack, Format: "png", Width: 500, Height: 500,
-			SourceHash: "h1", Source: model.SourceUser, UpdatedAt: 7,
+			SourceHash: "h1", Attribution: model.Attribution{Source: model.SourceUser}, UpdatedAt: 7,
 		},
-		{Role: model.ArtRoleFront, Source: model.SourceUser, UpdatedAt: 9, Locked: true},
+		{Role: model.ArtRoleFront, Attribution: model.Attribution{Source: model.SourceUser},
+			UpdatedAt: 9, Locked: true},
 	}))
 	if err != nil {
 		t.Fatal(err)

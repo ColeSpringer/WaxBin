@@ -418,6 +418,21 @@ func (l *Library) ResolveArt(ctx context.Context, ref model.EntityRef, role mode
 	return l.store.ResolveArt(ctx, ref, role, size)
 }
 
+// ArtProvenance answers where an entity's art in one role came from without loading
+// the picture, which is what a detail screen that draws a provenance mark actually
+// needs. It resolves exactly as ResolveArt does and reports the level that answered,
+// whether an album's answer was derived from a member track, and the stored source's
+// address, format, dimensions, byte size and attribution.
+//
+// What it does not do: no thumbnail, and no bytes, so the dimensions are always the
+// stored source's rather than any generated image's. There is no Locked either, because
+// a lock belongs to the entity that was asked about and not to whichever chain level
+// answered; read ArtLocked for that. CodeNotFound means the same thing it does for
+// ResolveArt.
+func (l *Library) ArtProvenance(ctx context.Context, ref model.EntityRef, role model.ArtRole) (*model.ArtProvenance, error) {
+	return l.store.ArtProvenance(ctx, ref, role)
+}
+
 // ArtRoles lists the artwork slots an entity holds at its own level (no chain
 // fallback): each stored role with the source image's format, dimensions, and
 // content hash.
@@ -1225,15 +1240,31 @@ type EditOptions struct {
 	// WriteBack also writes the new value into each backing file's on-disk tags. It is
 	// off by default, so an edit is catalog-only unless the caller opts in.
 	WriteBack bool
-	// Lock locks each edited field against enrichment and organize overwrites. A user
-	// edit is authoritative, so the CLI sets this by default. Pass false to leave the
-	// field unlocked.
-	Lock bool
-	// Force overrides a lock. Without it, editing a locked field returns CodeLocked.
+	// Lock is the instruction for each edited field's lock, which guards it against
+	// enrichment and organize overwrites. A user edit is authoritative, so the CLI
+	// states LockOn by default; the zero value leaves the stored lock exactly as it
+	// stands, so a caller that formed no lock intent cannot clobber one it never read.
+	Lock model.LockChange
+	// Force overrides a lock for this one edit. Without it, editing a locked field
+	// returns CodeLocked. It skips the lock check and nothing else: the lock itself
+	// still follows Lock.
 	Force bool
+	// Source is where the values came from; empty records a user edit. A hand edit is
+	// a user edit, so the CLI sets neither this nor Provider.
+	Source model.ProvenanceSource
+	// Provider names the service that supplied an enrichment value, and is required
+	// with that source and refused with any other.
+	Provider string
 	// SkipLocked applies only to a multi-item batch: a locked item is skipped and
 	// reported rather than failing the whole batch. Ignored by a single-item edit.
 	SkipLocked bool
+}
+
+// Attribution is the store-side value Source and Provider describe. Every option struct
+// that carries them exposes it under this name, so a caller crossing the socket sends
+// the same value the local path stores rather than re-listing the fields.
+func (o EditOptions) Attribution() model.Attribution {
+	return model.Attribution{Source: o.Source, Provider: o.Provider}
 }
 
 // BatchEditResult reports a multi-item edit's outcome: the items whose catalog edit
@@ -1252,10 +1283,10 @@ func (l *Library) EditField(ctx context.Context, itemPID model.PID, field, value
 	return l.EditFields(ctx, itemPID, map[string]string{field: value}, opts)
 }
 
-// EditFields applies metadata-field edits to a track or book item. It records user
-// provenance and, unless told otherwise, locks each field so enrichment and organize
-// leave it alone. Which fields are editable depends on the kind, and a field that does
-// not apply to the item's kind is rejected.
+// EditFields applies metadata-field edits to a track or book item. It records
+// opts.Source (empty means a user edit) and applies opts.Lock to each field, so
+// enrichment and organize leave a locked one alone. Which fields are editable depends on
+// the kind, and a field that does not apply to the item's kind is rejected.
 //
 // With opts.WriteBack set, the values are also written into the backing files' on-disk
 // tags. A track writes every edited scalar to its file; a book writes the audiobook
@@ -1270,7 +1301,7 @@ func (l *Library) EditField(ctx context.Context, itemPID model.PID, field, value
 // *WriteBackError naming the failed files and records a per-file drift diagnostic.
 // Surface that as "catalog updated, on-disk tag sync failed", not as a failed edit.
 func (l *Library) EditFields(ctx context.Context, itemPID model.PID, edits map[string]string, opts EditOptions) error {
-	if err := l.store.EditItemFields(ctx, itemPID, edits, model.SourceUser, opts.Lock, opts.Force); err != nil {
+	if err := l.store.EditItemFields(ctx, itemPID, edits, opts.Attribution(), opts.Lock, opts.Force); err != nil {
 		return err
 	}
 	if !opts.WriteBack {
@@ -1289,7 +1320,7 @@ func (l *Library) EditFields(ctx context.Context, itemPID model.PID, edits map[s
 // catalog batch has already committed and err only reports a non-write-back failure
 // during the on-disk pass. Inspect the result's Edited list in that case.
 func (l *Library) EditManyFields(ctx context.Context, itemPIDs []model.PID, edits map[string]string, opts EditOptions) (*BatchEditResult, error) {
-	res, err := l.store.EditManyFields(ctx, itemPIDs, edits, model.SourceUser, opts.Lock, opts.Force, opts.SkipLocked)
+	res, err := l.store.EditManyFields(ctx, itemPIDs, edits, opts.Attribution(), opts.Lock, opts.Force, opts.SkipLocked)
 	if err != nil {
 		return nil, err
 	}
@@ -1306,7 +1337,7 @@ func (l *Library) EditManyFields(ctx context.Context, itemPIDs []model.PID, edit
 // then mirrors each item's own map into its tags, best-effort, as EditManyFields does;
 // see there for the error contract.
 func (l *Library) EditItemsFields(ctx context.Context, edits []model.ItemFieldEdit, opts EditOptions) (*BatchEditResult, error) {
-	res, err := l.store.EditItemsFields(ctx, edits, model.SourceUser, opts.Lock, opts.Force, opts.SkipLocked)
+	res, err := l.store.EditItemsFields(ctx, edits, opts.Attribution(), opts.Lock, opts.Force, opts.SkipLocked)
 	if err != nil {
 		return nil, err
 	}

@@ -100,7 +100,7 @@ func TestSetFieldProvenanceRespectsLock(t *testing.T) {
 
 	// A user edit records source=user with the curated value and survives unlock
 	// (it carries a value, so it is not a pure-lock row).
-	if err := st.SetFieldProvenance(ctx, pid, "artist", model.SourceUser, "Curated Artist", false); err != nil {
+	if err := st.SetFieldProvenance(ctx, pid, "artist", model.Attribution{Source: model.SourceUser}, "Curated Artist", false); err != nil {
 		t.Fatalf("set user provenance: %v", err)
 	}
 	if err := st.LockField(ctx, pid, "artist"); err != nil {
@@ -108,7 +108,8 @@ func TestSetFieldProvenanceRespectsLock(t *testing.T) {
 	}
 
 	// Enrichment must not overwrite a locked field.
-	err := st.SetFieldProvenance(ctx, pid, "artist", model.SourceEnrichment, "Wikidata Name", false)
+	err := st.SetFieldProvenance(ctx, pid, "artist",
+		model.Attribution{Source: model.SourceEnrichment, Provider: "wikidata"}, "Wikidata Name", false)
 	if !waxerr.Is(err, waxerr.CodeConflict) {
 		t.Fatalf("enrichment over a locked field: want CodeConflict, got %v", err)
 	}
@@ -158,5 +159,42 @@ func TestProvenanceCascadesWithItem(t *testing.T) {
 	putTrack(t, st, lib.ID, spec)
 	if n := scalarInt(t, st, "SELECT COUNT(*) FROM field_provenance"); n != 0 {
 		t.Errorf("orphaned provenance rows = %d, want 0 (cascaded with the item)", n)
+	}
+}
+
+// TestSetFieldProvenanceReattributesWholly: the row carries one caller's answer, so a
+// provider left over from a previous source does not survive a write that names a
+// different one. Only the lock is preserved.
+func TestSetFieldProvenanceReattributesWholly(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/a/1.flac", essence: "e1", content: "c1", title: "S", artist: "X", album: "A"})
+	pid := itemPID(t, st)
+
+	if err := st.SetFieldProvenance(ctx, pid, "genre",
+		model.Attribution{Source: model.SourceEnrichment, Provider: "musicbrainz"}, "Jazz", false); err != nil {
+		t.Fatalf("enrichment provenance: %v", err)
+	}
+	if err := st.LockField(ctx, pid, "genre"); err != nil {
+		t.Fatalf("lock: %v", err)
+	}
+	// An organize write-back over it: a stale provider on an organize row would be the
+	// unpaired half-answer every other write path refuses.
+	if err := st.SetFieldProvenance(ctx, pid, "genre",
+		model.Attribution{Source: model.SourceOrganize}, "Jazz", true); err != nil {
+		t.Fatalf("organize provenance: %v", err)
+	}
+	var source, provider string
+	var locked int
+	if err := st.read.QueryRowContext(ctx,
+		"SELECT source, COALESCE(provider,''), locked FROM field_provenance WHERE field='genre'").
+		Scan(&source, &provider, &locked); err != nil {
+		t.Fatalf("read row: %v", err)
+	}
+	if source != string(model.SourceOrganize) || provider != "" {
+		t.Errorf("row = %q/%q, want organize with no provider", source, provider)
+	}
+	if locked != 1 {
+		t.Errorf("locked = %d, want the lock preserved", locked)
 	}
 }

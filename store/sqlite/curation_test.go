@@ -33,7 +33,7 @@ func TestSetItemLyricsAndLockSurvivesScan(t *testing.T) {
 	pid := itemPID(t, st)
 
 	ly := &model.Lyrics{Synced: []model.SyncedLine{{TimeMS: 0, Text: "hello"}, {TimeMS: 1000, Text: "world"}}}
-	if err := st.SetItemLyrics(ctx, pid, ly, true, false); err != nil {
+	if err := st.SetItemLyrics(ctx, pid, ly, model.LockOf(true), false); err != nil {
 		t.Fatalf("set lyrics: %v", err)
 	}
 	got, err := st.LyricsByItem(ctx, pid)
@@ -88,7 +88,7 @@ func TestSetItemArtAndLockSurvivesScan(t *testing.T) {
 	pid := itemPID(t, st)
 
 	user := tinyPNG(t)
-	if err := st.SetItemArt(ctx, pid, model.ArtRoleFront, user, true, false); err != nil {
+	if err := st.SetItemArt(ctx, pid, model.ArtRoleFront, user, model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
 		t.Fatalf("set art: %v", err)
 	}
 	blob, err := st.ResolveArt(ctx, model.EntityRef{Type: model.ArtTrack, PID: pid}, model.ArtRoleFront, 0)
@@ -98,7 +98,8 @@ func TestSetItemArtAndLockSurvivesScan(t *testing.T) {
 	userHash := blob.SourceHash
 
 	// A forced rescan with a DIFFERENT cover must not replace the locked user cover.
-	scanImg := &model.ArtImage{Data: []byte("JPEGSCANDATA-different-bytes"), Source: model.SourceTag}
+	scanImg := &model.ArtImage{Data: []byte("JPEGSCANDATA-different-bytes"),
+		Attribution: model.Attribution{Source: model.SourceTag}}
 	if ok := finalizeScanImg(scanImg); !ok {
 		scanImg.Hash = "scanhash" // undecodable bytes still store
 	}
@@ -109,14 +110,14 @@ func TestSetItemArtAndLockSurvivesScan(t *testing.T) {
 	}
 
 	// Locked SetItemArt without force is refused.
-	if err := st.SetItemArt(ctx, pid, model.ArtRoleFront, tinyPNG(t), true, false); !waxerr.Is(err, waxerr.CodeLocked) {
+	if err := st.SetItemArt(ctx, pid, model.ArtRoleFront, tinyPNG(t), model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); !waxerr.Is(err, waxerr.CodeLocked) {
 		t.Fatalf("set locked art = %v, want CodeLocked", err)
 	}
 }
 
 // finalizeScanImg mirrors the scanner's hash/probe so a test cover is storable.
 func finalizeScanImg(img *model.ArtImage) bool {
-	i, err := probeArtImage(img.Data)
+	i, err := probeArtImage(img.Data, img.Attribution)
 	if err != nil {
 		return false
 	}
@@ -159,7 +160,7 @@ func TestSetEntityArtDurableAlbum(t *testing.T) {
 	}
 
 	img := tinyPNG(t)
-	if err := st.SetEntityArt(ctx, model.ArtAlbum, model.PID(albumPID), model.ArtRoleFront, img, false, false); err != nil {
+	if err := st.SetEntityArt(ctx, model.ArtAlbum, model.PID(albumPID), model.ArtRoleFront, img, model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("set album art: %v", err)
 	}
 	blob, err := st.ResolveArt(ctx, model.EntityRef{Type: model.ArtAlbum, PID: model.PID(albumPID)}, model.ArtRoleFront, 0)
@@ -202,7 +203,7 @@ func TestSetItemChaptersSurvivesScan(t *testing.T) {
 		{Position: 0, Title: "User One", FileStartMS: 0},
 		{Position: 1, Title: "User Two", FileStartMS: 2500},
 	}
-	if err := st.SetItemChapters(ctx, pid, userCh, true, false); err != nil {
+	if err := st.SetItemChapters(ctx, pid, userCh, model.LockOf(true), false); err != nil {
 		t.Fatalf("set chapters: %v", err)
 	}
 	chs, err := st.Chapters(ctx, pid)
@@ -258,7 +259,7 @@ func TestSetItemChaptersMultiFileRoundTrip(t *testing.T) {
 		{Title: "Three", StartMS: 3000}, // exactly the part-3 boundary
 		{Title: "Four", StartMS: 4500},
 	}
-	if err := st.SetItemChapters(ctx, pid, in, true, false); err != nil {
+	if err := st.SetItemChapters(ctx, pid, in, model.LockOf(true), false); err != nil {
 		t.Fatalf("set chapters: %v", err)
 	}
 	got, err := st.Chapters(ctx, pid)
@@ -299,7 +300,7 @@ func TestSetItemChaptersSpanningContiguous(t *testing.T) {
 		{Title: "Spanning", StartMS: 0, EndMS: 2500},
 		{Title: "Rest", StartMS: 2500},
 	}
-	if err := st.SetItemChapters(ctx, pid, in, true, false); err != nil {
+	if err := st.SetItemChapters(ctx, pid, in, model.LockOf(true), false); err != nil {
 		t.Fatalf("set chapters: %v", err)
 	}
 	got, _ := st.Chapters(ctx, pid)
@@ -323,7 +324,7 @@ func TestSetItemChaptersClampsGapAcrossBoundary(t *testing.T) {
 		{Title: "Clamped", StartMS: 500, EndMS: 1400},
 		{Title: "Later", StartMS: 2000},
 	}
-	if err := st.SetItemChapters(ctx, pid, in, true, false); err != nil {
+	if err := st.SetItemChapters(ctx, pid, in, model.LockOf(true), false); err != nil {
 		t.Fatalf("set chapters: %v", err)
 	}
 	got, _ := st.Chapters(ctx, pid)
@@ -335,7 +336,7 @@ func TestSetItemChaptersClampsGapAcrossBoundary(t *testing.T) {
 	}
 	// An in-part explicit end is preserved as given.
 	in2 := []model.Chapter{{Title: "InPart", StartMS: 200, EndMS: 700}}
-	if err := st.SetItemChapters(ctx, pid, in2, true, true); err != nil {
+	if err := st.SetItemChapters(ctx, pid, in2, model.LockOf(true), true); err != nil {
 		t.Fatalf("re-set: %v", err)
 	}
 	got2, _ := st.Chapters(ctx, pid)
@@ -355,7 +356,7 @@ func TestSetItemChaptersRejectsBadTimelines(t *testing.T) {
 		"negative":      {{Title: "A", StartMS: -5}},
 		"end<=start":    {{Title: "A", StartMS: 1000, EndMS: 1000}},
 	} {
-		if err := st.SetItemChapters(ctx, pid, in, true, false); !waxerr.Is(err, waxerr.CodeInvalid) {
+		if err := st.SetItemChapters(ctx, pid, in, model.LockOf(true), false); !waxerr.Is(err, waxerr.CodeInvalid) {
 			t.Fatalf("%s = %v, want CodeInvalid", name, err)
 		}
 	}
@@ -376,12 +377,12 @@ func TestSetItemChaptersShrinkClearsUncoveredParts(t *testing.T) {
 		{Title: "Two", StartMS: 1500},
 		{Title: "Three", StartMS: 4000},
 	}
-	if err := st.SetItemChapters(ctx, pid, full, true, false); err != nil {
+	if err := st.SetItemChapters(ctx, pid, full, model.LockOf(true), false); err != nil {
 		t.Fatalf("set full: %v", err)
 	}
 	// The re-set covers only part 1; parts 2 and 3 lose their user rows, and the
 	// book reads exactly the shrunken user list (no scanned fallback).
-	if err := st.SetItemChapters(ctx, pid, []model.Chapter{{Title: "Only", StartMS: 0}}, true, true); err != nil {
+	if err := st.SetItemChapters(ctx, pid, []model.Chapter{{Title: "Only", StartMS: 0}}, model.LockOf(true), true); err != nil {
 		t.Fatalf("shrink: %v", err)
 	}
 	got, _ := st.Chapters(ctx, pid)
@@ -399,7 +400,7 @@ func TestSetItemChaptersShrinkClearsUncoveredParts(t *testing.T) {
 	}
 
 	// A clear loops all parts and falls back to the scanned chapters.
-	if err := st.SetItemChapters(ctx, pid, nil, true, true); err != nil {
+	if err := st.SetItemChapters(ctx, pid, nil, model.LockOf(true), true); err != nil {
 		t.Fatalf("clear: %v", err)
 	}
 	got, _ = st.Chapters(ctx, pid)
@@ -414,7 +415,7 @@ func TestSetItemChaptersMultiFileSurvivesScan(t *testing.T) {
 	pid := threePartBook(t, st, lib.ID)
 
 	in := []model.Chapter{{Title: "Curated", StartMS: 0}, {Title: "Late", StartMS: 5000}}
-	if err := st.SetItemChapters(ctx, pid, in, true, false); err != nil {
+	if err := st.SetItemChapters(ctx, pid, in, model.LockOf(true), false); err != nil {
 		t.Fatalf("set: %v", err)
 	}
 	// A forced rescan of every part re-imports the scanned chapters; the user
@@ -453,7 +454,7 @@ func TestSetItemChaptersZeroDurationPartKeepsTimeline(t *testing.T) {
 	// they advanced must survive: a chapter placed past part 1's 500 ms extent
 	// still reads back where it was authored, backed by part 2.
 	in := []model.Chapter{{Title: "A", StartMS: 0}, {Title: "B", StartMS: 600}}
-	if err := st.SetItemChapters(ctx, pid, in, true, false); err != nil {
+	if err := st.SetItemChapters(ctx, pid, in, model.LockOf(true), false); err != nil {
 		t.Fatalf("set: %v", err)
 	}
 	got, _ := st.Chapters(ctx, pid)
@@ -511,7 +512,7 @@ func TestSetItemChaptersMapsAgainstDisplayedSource(t *testing.T) {
 	}
 
 	in := []model.Chapter{{Title: "A", StartMS: 0}, {Title: "B", StartMS: 600, EndMS: 950}}
-	if err := st.SetItemChapters(ctx, pid, in, true, false); err != nil {
+	if err := st.SetItemChapters(ctx, pid, in, model.LockOf(true), false); err != nil {
 		t.Fatalf("set: %v", err)
 	}
 	got, _ := st.Chapters(ctx, pid)
@@ -537,7 +538,7 @@ func TestSetItemChaptersMultiFileIgnoresStaleFileOffsets(t *testing.T) {
 	// multi-file book the legacy sniff must not fire: the input reads as a
 	// timeline chapter at 0 with an open end, and the stale offsets are ignored.
 	in := []model.Chapter{{Title: "Whole", FileStartMS: 0, FileEndMS: 700}}
-	if err := st.SetItemChapters(ctx, pid, in, true, false); err != nil {
+	if err := st.SetItemChapters(ctx, pid, in, model.LockOf(true), false); err != nil {
 		t.Fatalf("set: %v", err)
 	}
 	got, _ := st.Chapters(ctx, pid)
@@ -557,7 +558,7 @@ func TestSetItemChaptersBeyondTotalExtendsDuration(t *testing.T) {
 	// A start past the 6000 ms total attaches to the last part and extends the
 	// book's effective duration (the single-file precedent).
 	in := []model.Chapter{{Title: "One", StartMS: 0}, {Title: "Epilogue", StartMS: 7000}}
-	if err := st.SetItemChapters(ctx, pid, in, true, false); err != nil {
+	if err := st.SetItemChapters(ctx, pid, in, model.LockOf(true), false); err != nil {
 		t.Fatalf("set: %v", err)
 	}
 	got, _ := st.Chapters(ctx, pid)

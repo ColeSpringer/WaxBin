@@ -15,6 +15,7 @@ func newCreditCmd(g *globals) *cobra.Command {
 		names     []string
 		writeBack bool
 		noLock    bool
+		keepLock  bool
 		force     bool
 	)
 	cmd := &cobra.Command{
@@ -35,14 +36,16 @@ func newCreditCmd(g *globals) *cobra.Command {
 				return listCredits(cmd, g, pid)
 			}
 			return setCredits(cmd, g, pid, model.ContributorRole(role), names,
-				waxbin.CreditEditOptions{WriteBack: writeBack, Lock: !noLock, Force: force})
+				waxbin.CreditEditOptions{WriteBack: writeBack, Lock: lockChange(noLock, keepLock), Force: force})
 		},
 	}
 	f := cmd.Flags()
 	f.StringVar(&role, "role", "", "contributor role to set (omit to list all credits)")
 	f.StringArrayVar(&names, "name", nil, "contributor name for the role (repeatable; none clears it)")
 	f.BoolVar(&writeBack, "write-back", false, "also write the credit into the file's on-disk tag")
-	f.BoolVar(&noLock, "no-lock", false, "do not lock the credit (it defaults to locked)")
+	f.BoolVar(&noLock, "no-lock", false, "unlock the credit (it defaults to locked)")
+	f.BoolVar(&keepLock, "keep-lock", false, keepLockUsage("the credit"))
+	cmd.MarkFlagsMutuallyExclusive("no-lock", "keep-lock")
 	f.BoolVar(&force, "force", false, "override a locked credit role")
 	return cmd
 }

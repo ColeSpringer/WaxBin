@@ -7,10 +7,16 @@
 -- that set an enrichment value, so a consumer can attribute a field and work
 -- out a metadata conflict; it is NULL for a tag or user edit, which have no
 -- external provider.
+--
+-- source carries the scalar vocabulary on a scalar field. The artifact lock rows
+-- ("art", "lyrics", "chapters") are the exception: they hold no value of their own, so
+-- they carry the artifact's own source, which may be 'sidecar' or 'feed' as well. That
+-- row is what FieldProvenance and ArtRoles report when the artifact was cleared and
+-- locked and there is nothing else left to attribute.
 CREATE TABLE field_provenance (
   item_id    INTEGER NOT NULL REFERENCES playable_item(id) ON DELETE CASCADE,
   field      TEXT    NOT NULL,        -- canonical field name (title|artist|album|...)
-  source     TEXT    NOT NULL,        -- tag|user|enrichment|organize
+  source     TEXT    NOT NULL,        -- tag|user|enrichment|organize, plus the artifact values on an artifact lock row
   provider   TEXT,                    -- enrichment provider id, when source = enrichment
   locked     INTEGER NOT NULL DEFAULT 0,
   value      TEXT,                    -- the curated value, when set by a user edit
@@ -34,11 +40,18 @@ CREATE INDEX field_provenance_locked ON field_provenance(item_id) WHERE locked =
 -- polymorphic like art_map's, and the 'art' field can name any art entity type: a
 -- podcast, a playlist and a genre all hold a cover a user can choose and lock, and
 -- none of them is scalar-editable.
+--
+-- provider mirrors field_provenance.provider, and is nullable for the same reason: this
+-- table keeps a sparse-row contract, so a row with no external provider stores NULL
+-- rather than an empty string. art_map's is NOT NULL DEFAULT '' because it keeps no
+-- such contract. Without the column an entity edit carrying a source of 'enrichment'
+-- would lose the name of the service that supplied the value.
 CREATE TABLE entity_curation (
   entity_type TEXT    NOT NULL,        -- artist|release_group|album, plus any art entity for 'art'
   entity_id   INTEGER NOT NULL,
   field       TEXT    NOT NULL,        -- sort|mbid|type|barcode|label|catalog_number|media|country|art
-  source      TEXT    NOT NULL,        -- user|enrichment
+  source      TEXT    NOT NULL,        -- user|enrichment, plus the artifact values on the 'art' lock row
+  provider    TEXT,                    -- enrichment provider id, when source = enrichment
   locked      INTEGER NOT NULL DEFAULT 0,
   value       TEXT,                    -- the curated value, when set by a user edit
   updated_at  INTEGER NOT NULL,        -- unix nanoseconds
@@ -123,6 +136,11 @@ CREATE TABLE art_source (
 -- field_provenance.provider is nullable because this table keeps no sparse-row
 -- contract. A sidecar cover's on-disk path is not recorded in source_url; it is the
 -- AuxCover observation in file_aux_state.
+--
+-- source_hash is always derivable: the store fills a missing content address (and a
+-- missing format or dimensions) from the image bytes rather than dropping the write, so
+-- a producer that hands over bytes alone still gets its cover stored. Do not reinstate a
+-- guard that discards such an image; it discarded them silently.
 CREATE TABLE art_map (
   entity_type TEXT    NOT NULL,                     -- track|album|release_group|artist|genre|episode|podcast|playlist
   entity_id   INTEGER NOT NULL,

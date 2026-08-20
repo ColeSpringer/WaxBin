@@ -66,33 +66,31 @@ func newArtCmd(g *globals) *cobra.Command {
 			defer lib.Close()
 
 			pid := model.PID(args[0])
+			// A sizeless --json reports metadata alone, so it reads through ArtProvenance
+			// and never loads the picture. The payload is the same either way: a sizeless
+			// resolve always returns the source unscaled, so thumbnail is a literal false
+			// and the dimensions are the stored source's. With --size the resolve stays,
+			// since only it knows a generated thumbnail's own format and size.
+			if g.jsonOut && size <= 0 {
+				prov, err := lib.ArtProvenance(ctx(cmd), model.EntityRef{Type: et, PID: pid}, r)
+				if err != nil {
+					return explainMissingArt(cmd, lib, et, pid, r, err)
+				}
+				return printArtJSON(cmd, lib, et, pid, r, artView(prov, false))
+			}
 			blob, err := lib.ResolveArt(ctx(cmd), model.EntityRef{Type: et, PID: pid}, r, size)
 			if err != nil {
 				return explainMissingArt(cmd, lib, et, pid, r, err)
 			}
 
 			if g.jsonOut {
-				// A map view marshals an int64 as a bare number, so the timestamp is
-				// formatted to match the string-encoded ns every other view emits.
-				view := map[string]any{
-					"format": blob.Format, "width": blob.Width, "height": blob.Height,
-					"bytes": len(blob.Bytes), "sourceHash": blob.SourceHash, "thumbnail": blob.Thumbnail,
-					"level": string(blob.Level), "derived": blob.Derived,
-					"source": string(blob.Source), "provider": blob.Provider,
-					"sourceUrl": blob.SourceURL, "updatedAt": strconv.FormatInt(blob.UpdatedAt, 10),
-				}
-				// locked is the requested entity's own front-cover lock, not the lock of
-				// whatever chain level answered: an album cover derived from a member
-				// track says nothing about the album's lock. It is absent on a non-front
-				// role, which has no lock at all rather than an unlocked one.
-				if r == model.ArtRoleFront {
-					locked, err := lib.ArtLocked(ctx(cmd), et, pid)
-					if err != nil {
-						return err
-					}
-					view["locked"] = locked
-				}
-				return printJSON(cmd, view)
+				// The blob describes the image being served, which for a thumbnail is the
+				// generated one, so its own format and size go in where the source's would.
+				return printArtJSON(cmd, lib, et, pid, r, artView(&model.ArtProvenance{
+					Format: blob.Format, Width: blob.Width, Height: blob.Height, Size: len(blob.Bytes),
+					SourceHash: blob.SourceHash, Level: blob.Level, Derived: blob.Derived,
+					Attribution: blob.Attribution, UpdatedAt: blob.UpdatedAt,
+				}, blob.Thumbnail))
 			}
 			if outPath != "" {
 				if err := os.WriteFile(outPath, blob.Bytes, 0o644); err != nil {
@@ -143,6 +141,37 @@ func artRoleViews(roles []model.ArtRoleInfo) []artRoleView {
 		}
 	}
 	return out
+}
+
+// artView renders the `art` command's JSON payload. Both reads produce it, so the shape
+// cannot differ between a sizeless resolve and a sized one. A map view marshals an int64
+// as a bare number, so the timestamp is formatted to match the string-encoded ns every
+// other view emits.
+func artView(p *model.ArtProvenance, thumbnail bool) map[string]any {
+	return map[string]any{
+		"format": p.Format, "width": p.Width, "height": p.Height,
+		"bytes": p.Size, "sourceHash": p.SourceHash, "thumbnail": thumbnail,
+		"level": string(p.Level), "derived": p.Derived,
+		"source": string(p.Source), "provider": p.Provider,
+		"sourceUrl": p.SourceURL, "updatedAt": strconv.FormatInt(p.UpdatedAt, 10),
+	}
+}
+
+// printArtJSON adds the requested entity's own front-cover lock to an art view and
+// prints it. locked is that entity's lock, not the lock of whatever chain level
+// answered: an album cover derived from a member track says nothing about the album's
+// lock. It is absent on a non-front role, which has no lock at all rather than an
+// unlocked one.
+func printArtJSON(cmd *cobra.Command, lib *waxbin.Library, et model.ArtEntity, pid model.PID,
+	r model.ArtRole, view map[string]any) error {
+	if r == model.ArtRoleFront {
+		locked, err := lib.ArtLocked(ctx(cmd), et, pid)
+		if err != nil {
+			return err
+		}
+		view["locked"] = locked
+	}
+	return printJSON(cmd, view)
 }
 
 // newArtRolesCmd lists what an entity holds in its own art slots. It is the only
@@ -281,8 +310,12 @@ func newArtSetCmd(g *globals) *cobra.Command {
 		filePath  string
 		clear     bool
 		noLock    bool
+		keepLock  bool
 		force     bool
 		writeBack bool
+		source    string
+		provider  string
+		sourceURL string
 	)
 	cmd := &cobra.Command{
 		Use:   "set <pid> --file <image>",
@@ -299,7 +332,9 @@ func newArtSetCmd(g *globals) *cobra.Command {
 			"file, a book into every part, an album across every member track's file. Only the " +
 			"front cover has an embedded representation, so --write-back with another role is " +
 			"refused. An entity with no file of its own (artist, release_group, genre, podcast, " +
-			"episode, playlist) keeps its cover in the catalog, so --write-back does nothing there.",
+			"episode, playlist) keeps its cover in the catalog, so --write-back does nothing there.\n\n" +
+			"The cover is recorded as set by hand unless --source says otherwise, which is what a " +
+			"program that fetched the image itself uses to record where it came from.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			et, err := parseArtEntity("art set", entType)
@@ -310,6 +345,11 @@ func newArtSetCmd(g *globals) *cobra.Command {
 			if !ok {
 				return waxerr.New(waxerr.CodeInvalid, "art set",
 					fmt.Sprintf("unknown --role %q; valid: front|back|disc|booklet|background", role))
+			}
+			attr, err := parseAttribution("art set", source, provider, sourceURL,
+				model.Attribution.ValidForArt, artSourceList)
+			if err != nil {
+				return err
 			}
 			var raw []byte
 			if !clear {
@@ -329,10 +369,14 @@ func newArtSetCmd(g *globals) *cobra.Command {
 			defer m.Close()
 
 			pid := model.PID(args[0])
+			opts := waxbin.ArtEditOptions{
+				WriteBack: writeBack, Lock: lockChange(noLock, keepLock), Force: force,
+				Source: attr.Source, Provider: attr.Provider, SourceURL: attr.SourceURL,
+			}
 			if et == model.ArtTrack {
-				err = m.SetItemArt(ctx(cmd), pid, r, raw, !noLock, force, writeBack)
+				err = m.SetItemArt(ctx(cmd), pid, r, raw, opts)
 			} else {
-				err = m.SetEntityArt(ctx(cmd), et, pid, r, raw, !noLock, force, writeBack)
+				err = m.SetEntityArt(ctx(cmd), et, pid, r, raw, opts)
 			}
 			if err := surfaceWriteBack(cmd, err); err != nil {
 				return err
@@ -345,6 +389,8 @@ func newArtSetCmd(g *globals) *cobra.Command {
 				switch {
 				case r != model.ArtRoleFront:
 					lockNote = ""
+				case keepLock:
+					lockNote = " (lock unchanged)"
 				case noLock:
 					lockNote = " (unlocked)"
 				}
@@ -361,8 +407,13 @@ func newArtSetCmd(g *globals) *cobra.Command {
 	f.StringVar(&filePath, "file", "", "image file to set as this role's artwork")
 	f.BoolVar(&clear, "clear", false, "remove this role's artwork instead of setting it")
 	f.BoolVar(&noLock, "no-lock", false,
-		"do not lock the art field (a front cover defaults to locked; an unlocked one may be replaced by a scan, an enrichment pass, or the next feed sync)")
-	f.BoolVar(&force, "force", false, "override a locked art field")
+		"unlock the art field (a front cover defaults to locked; an unlocked one may be replaced by a scan, an enrichment pass, or the next feed sync)")
+	f.BoolVar(&keepLock, "keep-lock", false, keepLockUsage("the art field"))
+	cmd.MarkFlagsMutuallyExclusive("no-lock", "keep-lock")
+	f.BoolVar(&force, "force", false, "override a locked art field for this one write")
 	f.BoolVar(&writeBack, "write-back", false, "also embed a front cover into the backing file(s) on disk")
+	f.StringVar(&source, "source", "", "where the image came from: "+artSourceList+" (default user)")
+	f.StringVar(&provider, "provider", "", "service that supplied the image, with --source enrichment")
+	f.StringVar(&sourceURL, "source-url", "", "URL the image was fetched from")
 	return cmd
 }

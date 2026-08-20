@@ -24,7 +24,7 @@ func TestEditPlainFieldAndProvenance(t *testing.T) {
 	st, pid := editFixture(t)
 	ctx := context.Background()
 
-	if err := st.EditItemField(ctx, pid, "comment", "hello world", model.SourceUser, true, false); err != nil {
+	if err := st.EditItemField(ctx, pid, "comment", "hello world", model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
 		t.Fatalf("edit comment: %v", err)
 	}
 
@@ -55,7 +55,7 @@ func TestEditTitleRebuildsFTSAndSortKey(t *testing.T) {
 	st, pid := editFixture(t)
 	ctx := context.Background()
 
-	if err := st.EditItemField(ctx, pid, "title", "Renamed Song", model.SourceUser, false, false); err != nil {
+	if err := st.EditItemField(ctx, pid, "title", "Renamed Song", model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("edit title: %v", err)
 	}
 
@@ -95,7 +95,7 @@ func TestEditArtistReResolvesEntitiesAndRollups(t *testing.T) {
 	st, pid := editFixture(t)
 	ctx := context.Background()
 
-	if err := st.EditItemField(ctx, pid, "artist", "Beta", model.SourceUser, true, false); err != nil {
+	if err := st.EditItemField(ctx, pid, "artist", "Beta", model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
 		t.Fatalf("edit artist: %v", err)
 	}
 
@@ -138,7 +138,7 @@ func TestEditOrphansEntityKeepsVerifyClean(t *testing.T) {
 
 	err := st.EditItemFields(ctx, pid, map[string]string{
 		"artist": "Beta", "album_artist": "Beta",
-	}, model.SourceUser, true, false)
+	}, model.Attribution{Source: model.SourceUser}, model.LockOf(true), false)
 	if err != nil {
 		t.Fatalf("edit: %v", err)
 	}
@@ -157,7 +157,7 @@ func TestEditGenreUpdatesLinksAndVerifyClean(t *testing.T) {
 	st, pid := editFixture(t)
 	ctx := context.Background()
 
-	if err := st.EditItemField(ctx, pid, "genre", "Jazz; Blues", model.SourceUser, true, false); err != nil {
+	if err := st.EditItemField(ctx, pid, "genre", "Jazz; Blues", model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
 		t.Fatalf("edit genre: %v", err)
 	}
 
@@ -200,7 +200,7 @@ func TestEditYearReResolvesAlbum(t *testing.T) {
 	st, pid := editFixture(t)
 	ctx := context.Background()
 
-	if err := st.EditItemField(ctx, pid, "year", "1999", model.SourceUser, true, false); err != nil {
+	if err := st.EditItemField(ctx, pid, "year", "1999", model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
 		t.Fatalf("edit year: %v", err)
 	}
 	v, _ := st.ItemByPID(ctx, pid)
@@ -220,7 +220,7 @@ func TestEditMultipleFieldsOneDelta(t *testing.T) {
 	seq0, _ := st.LatestChangeSeq(ctx)
 	err := st.EditItemFields(ctx, pid, map[string]string{
 		"artist": "Gamma", "title": "New Title", "composer": "New Writer",
-	}, model.SourceUser, true, false)
+	}, model.Attribution{Source: model.SourceUser}, model.LockOf(true), false)
 	if err != nil {
 		t.Fatalf("edit fields: %v", err)
 	}
@@ -242,7 +242,7 @@ func TestEditTrimsValueEverywhere(t *testing.T) {
 	st, pid := editFixture(t)
 	ctx := context.Background()
 
-	if err := st.EditItemField(ctx, pid, "artist", "  Spaced Artist  ", model.SourceUser, true, false); err != nil {
+	if err := st.EditItemField(ctx, pid, "artist", "  Spaced Artist  ", model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
 		t.Fatalf("edit: %v", err)
 	}
 	// Denormalized column is trimmed.
@@ -275,7 +275,7 @@ func TestEditRespectsLock(t *testing.T) {
 		t.Fatalf("lock: %v", err)
 	}
 	// Without force, editing a locked field is refused with CodeLocked.
-	err := st.EditItemField(ctx, pid, "artist", "Delta", model.SourceUser, true, false)
+	err := st.EditItemField(ctx, pid, "artist", "Delta", model.Attribution{Source: model.SourceUser}, model.LockOf(true), false)
 	if !waxerr.Is(err, waxerr.CodeLocked) {
 		t.Fatalf("edit locked field: want CodeLocked, got %v", err)
 	}
@@ -284,7 +284,7 @@ func TestEditRespectsLock(t *testing.T) {
 		t.Fatalf("artist changed despite lock: %q", v.Artist)
 	}
 	// With force it goes through.
-	if err := st.EditItemField(ctx, pid, "artist", "Delta", model.SourceUser, true, true); err != nil {
+	if err := st.EditItemField(ctx, pid, "artist", "Delta", model.Attribution{Source: model.SourceUser}, model.LockOf(true), true); err != nil {
 		t.Fatalf("forced edit: %v", err)
 	}
 	v, _ = st.ItemByPID(ctx, pid)
@@ -299,11 +299,12 @@ func TestEditLocksAgainstEnrichment(t *testing.T) {
 	st, pid := editFixture(t)
 	ctx := context.Background()
 
-	if err := st.EditItemField(ctx, pid, "genre", "Jazz", model.SourceUser, true, false); err != nil {
+	if err := st.EditItemField(ctx, pid, "genre", "Jazz", model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
 		t.Fatalf("edit genre: %v", err)
 	}
 	// Enrichment (fill-when-empty, lock-respecting) must not overwrite the locked field.
-	err := st.SetFieldProvenance(ctx, pid, "genre", model.SourceEnrichment, "Pop", false)
+	err := st.SetFieldProvenance(ctx, pid, "genre",
+		model.Attribution{Source: model.SourceEnrichment, Provider: "musicbrainz"}, "Pop", false)
 	if !waxerr.Is(err, waxerr.CodeConflict) {
 		t.Fatalf("enrichment over user-locked field: want CodeConflict, got %v", err)
 	}
@@ -313,18 +314,18 @@ func TestEditRejectsBadInput(t *testing.T) {
 	st, pid := editFixture(t)
 	ctx := context.Background()
 
-	if err := st.EditItemField(ctx, pid, "not_a_field", "x", model.SourceUser, true, false); !waxerr.Is(err, waxerr.CodeInvalid) {
+	if err := st.EditItemField(ctx, pid, "not_a_field", "x", model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); !waxerr.Is(err, waxerr.CodeInvalid) {
 		t.Errorf("unknown field: want CodeInvalid, got %v", err)
 	}
-	if err := st.EditItemField(ctx, pid, "year", "not-a-number", model.SourceUser, true, false); !waxerr.Is(err, waxerr.CodeInvalid) {
+	if err := st.EditItemField(ctx, pid, "year", "not-a-number", model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); !waxerr.Is(err, waxerr.CodeInvalid) {
 		t.Errorf("bad year: want CodeInvalid, got %v", err)
 	}
 	for _, f := range []string{"year", "track_no", "disc_no"} {
-		if err := st.EditItemField(ctx, pid, f, "-5", model.SourceUser, true, false); !waxerr.Is(err, waxerr.CodeInvalid) {
+		if err := st.EditItemField(ctx, pid, f, "-5", model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); !waxerr.Is(err, waxerr.CodeInvalid) {
 			t.Errorf("negative %s: want CodeInvalid, got %v", f, err)
 		}
 	}
-	if err := st.EditItemField(ctx, "01J0NONEXISTENT0000000000", "title", "x", model.SourceUser, true, false); !waxerr.Is(err, waxerr.CodeNotFound) {
+	if err := st.EditItemField(ctx, "01J0NONEXISTENT0000000000", "title", "x", model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); !waxerr.Is(err, waxerr.CodeNotFound) {
 		t.Errorf("unknown item: want CodeNotFound, got %v", err)
 	}
 }
@@ -395,5 +396,113 @@ func TestFileSharedOrVirtual(t *testing.T) {
 	}
 	if !shared {
 		t.Fatalf("multi-item offset-bearing file not reported as shared")
+	}
+}
+
+// TestEditCarriesTheCallersAttribution: an edit records the source and provider the
+// caller supplied rather than a source the store invented, which is what lets a program
+// that fetched a value say so.
+func TestEditCarriesTheCallersAttribution(t *testing.T) {
+	st, pid := editFixture(t)
+	ctx := context.Background()
+
+	if err := st.EditItemField(ctx, pid, "comment", "fetched",
+		model.Attribution{Source: model.SourceEnrichment, Provider: "itunes"}, model.LockOf(false), false); err != nil {
+		t.Fatalf("stamped edit: %v", err)
+	}
+	var source, provider string
+	if err := st.read.QueryRowContext(ctx,
+		"SELECT source, COALESCE(provider,'') FROM field_provenance WHERE field='comment'").
+		Scan(&source, &provider); err != nil {
+		t.Fatalf("read provenance: %v", err)
+	}
+	if source != string(model.SourceEnrichment) || provider != "itunes" {
+		t.Errorf("row = %q/%q, want enrichment/itunes", source, provider)
+	}
+
+	// And an edit that names no origin is still a user edit, which is what keeps every
+	// existing caller writing exactly what it always did.
+	if err := st.EditItemField(ctx, pid, "comment", "typed", model.Attribution{}, model.LockOf(false), false); err != nil {
+		t.Fatalf("unstamped edit: %v", err)
+	}
+	if err := st.read.QueryRowContext(ctx,
+		"SELECT source, COALESCE(provider,'') FROM field_provenance WHERE field='comment'").
+		Scan(&source, &provider); err != nil {
+		t.Fatalf("read provenance: %v", err)
+	}
+	if source != string(model.SourceUser) || provider != "" {
+		t.Errorf("row = %q/%q, want user with no provider", source, provider)
+	}
+}
+
+// TestScalarEditRefusesWhatAScalarRowCannotHold: the artifact-only sources have no
+// meaning on a scalar field, and a scalar row has no column for a fetch URL, so both
+// are refused rather than dropped.
+func TestScalarEditRefusesWhatAScalarRowCannotHold(t *testing.T) {
+	st, pid := editFixture(t)
+	ctx := context.Background()
+
+	for _, attr := range []model.Attribution{
+		{Source: model.SourceSidecar},
+		{Source: model.SourceFeed},
+		{Source: model.SourceEnrichment},
+		{Source: model.SourceUser, SourceURL: "https://example/cover.png"},
+	} {
+		if err := st.EditItemField(ctx, pid, "comment", "x", attr, model.LockOf(true), false); !waxerr.Is(err, waxerr.CodeInvalid) {
+			t.Errorf("edit with %+v = %v, want CodeInvalid", attr, err)
+		}
+	}
+	if n := scalarInt(t, st, "SELECT COUNT(*) FROM field_provenance WHERE field='comment'"); n != 0 {
+		t.Errorf("%d comment provenance rows after refused edits, want 0", n)
+	}
+}
+
+// TestEditWithLockUnchangedLeavesTheLockStanding is the fix for a caller that only meant
+// to change a value: it no longer has to state a lock intent it never formed, and a
+// forced edit no longer releases a lock it never read.
+func TestEditWithLockUnchangedLeavesTheLockStanding(t *testing.T) {
+	st, pid := editFixture(t)
+	ctx := context.Background()
+
+	if err := st.EditItemField(ctx, pid, "comment", "first", model.Attribution{}, model.LockOn, false); err != nil {
+		t.Fatalf("locking edit: %v", err)
+	}
+	if err := st.EditItemField(ctx, pid, "comment", "second", model.Attribution{}, model.LockUnchanged, true); err != nil {
+		t.Fatalf("forced edit leaving the lock alone: %v", err)
+	}
+	if n := scalarInt(t, st, "SELECT locked FROM field_provenance WHERE field='comment'"); n != 1 {
+		t.Errorf("locked = %d after an unchanged-lock edit, want the lock still standing", n)
+	}
+	var value string
+	if err := st.read.QueryRowContext(ctx,
+		"SELECT COALESCE(value,'') FROM field_provenance WHERE field='comment'").Scan(&value); err != nil {
+		t.Fatalf("read value: %v", err)
+	}
+	if value != "second" {
+		t.Errorf("value = %q, want the edit to have applied", value)
+	}
+
+	// An unlocked field left unchanged stays unlocked, and a fresh row inserts unlocked.
+	if err := st.EditItemField(ctx, pid, "title", "T", model.Attribution{}, model.LockUnchanged, false); err != nil {
+		t.Fatalf("fresh unchanged-lock edit: %v", err)
+	}
+	if n := scalarInt(t, st, "SELECT locked FROM field_provenance WHERE field='title'"); n != 0 {
+		t.Errorf("locked = %d on a fresh row, want 0", n)
+	}
+	if err := st.EditItemField(ctx, pid, "comment", "third", model.Attribution{}, model.LockOff, true); err != nil {
+		t.Fatalf("unlocking edit: %v", err)
+	}
+	if n := scalarInt(t, st, "SELECT locked FROM field_provenance WHERE field='comment'"); n != 0 {
+		t.Errorf("locked = %d after an explicit unlock, want 0", n)
+	}
+}
+
+// TestEditRefusesAnUnknownLockInstruction keeps the lock vocabulary closed the way the
+// art-role one is.
+func TestEditRefusesAnUnknownLockInstruction(t *testing.T) {
+	st, pid := editFixture(t)
+	if err := st.EditItemField(context.Background(), pid, "comment", "x",
+		model.Attribution{}, model.LockChange("yes"), false); !waxerr.Is(err, waxerr.CodeInvalid) {
+		t.Errorf("unknown lock instruction = %v, want CodeInvalid", err)
 	}
 }

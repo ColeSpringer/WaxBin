@@ -62,6 +62,34 @@ func SniffExotic(data []byte) (format string, ok bool) {
 	return "", false
 }
 
+// Info is what the store needs to know about an image it is about to hold: the content
+// address, the format it was recognized as, and its pixel dimensions.
+type Info struct {
+	Hash   string
+	Format string
+	Width  int
+	Height int
+}
+
+// Describe reports an image's Info: the content address always, and the format and
+// dimensions when the bytes decode, or the magic-sniffed format alone for an exotic
+// AVIF/HEIC image whose dimensions stay unknown. It never fails, because an
+// unrecognized image still has a content address and the resolver already serves such
+// a source unscaled. An empty Format is the single signal that the bytes neither
+// decoded nor were recognized, which each caller answers with its own policy.
+func Describe(data []byte) Info {
+	info := Info{Hash: Hash(data)}
+	format, w, h, err := Probe(data)
+	if err != nil {
+		if f, ok := SniffExotic(data); ok {
+			info.Format = f
+		}
+		return info
+	}
+	info.Format, info.Width, info.Height = format, w, h
+	return info
+}
+
 // Thumbnail decodes src and produces a thumbnail scaled to fit within a
 // maxDim x maxDim box, preserving aspect ratio. It never upscales: a source
 // already within the box is returned re-encoded at its own size. The output is

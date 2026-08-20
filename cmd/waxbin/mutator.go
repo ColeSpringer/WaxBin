@@ -36,7 +36,7 @@ func (m *mutator) Close() error {
 
 func (m *mutator) EditFields(ctx context.Context, pid model.PID, edits map[string]string, opts waxbin.EditOptions) error {
 	if m.px != nil {
-		res, err := m.px.EditFields(ctx, pid, edits, opts.WriteBack, opts.Lock, opts.Force)
+		res, err := m.px.EditFields(ctx, pid, edits, opts.WriteBack, opts.Attribution(), opts.Lock, opts.Force)
 		if err != nil {
 			return err
 		}
@@ -52,7 +52,7 @@ func (m *mutator) EditFields(ctx context.Context, pid model.PID, edits map[strin
 
 func (m *mutator) EditManyFields(ctx context.Context, pids []model.PID, edits map[string]string, opts waxbin.EditOptions) (*waxbin.BatchEditResult, error) {
 	if m.px != nil {
-		res, err := m.px.EditManyFields(ctx, pids, edits, opts.WriteBack, opts.Lock, opts.Force, opts.SkipLocked)
+		res, err := m.px.EditManyFields(ctx, pids, edits, opts.WriteBack, opts.Attribution(), opts.Lock, opts.Force, opts.SkipLocked)
 		if err != nil {
 			return nil, err
 		}
@@ -78,7 +78,7 @@ func (m *mutator) EditItemsFields(ctx context.Context, edits []model.ItemFieldEd
 			items[i] = proxy.ItemFieldsEdit{ItemPID: string(e.ItemPID), Fields: e.Fields}
 			fieldsByPID[string(e.ItemPID)] = e.Fields
 		}
-		res, err := m.px.EditBatch(ctx, items, opts.WriteBack, opts.Lock, opts.Force, opts.SkipLocked)
+		res, err := m.px.EditBatch(ctx, items, opts.WriteBack, opts.Attribution(), opts.Lock, opts.Force, opts.SkipLocked)
 		if err != nil {
 			return nil, err
 		}
@@ -98,7 +98,7 @@ func (m *mutator) EditItemsFields(ctx context.Context, edits []model.ItemFieldEd
 
 func (m *mutator) SetCredits(ctx context.Context, pid model.PID, role model.ContributorRole, names []string, opts waxbin.CreditEditOptions) (int, error) {
 	if m.px != nil {
-		res, err := m.px.SetCredits(ctx, pid, string(role), names, opts.WriteBack, opts.Lock, opts.Force)
+		res, err := m.px.SetCredits(ctx, pid, string(role), names, opts.WriteBack, opts.Attribution(), opts.Lock, opts.Force)
 		if err != nil {
 			return 0, err
 		}
@@ -110,23 +110,23 @@ func (m *mutator) SetCredits(ctx context.Context, pid model.PID, role model.Cont
 	return m.lib.SetCredits(ctx, pid, role, names, opts)
 }
 
-func (m *mutator) SetLyrics(ctx context.Context, pid model.PID, ly *model.Lyrics, lock, force bool) error {
+func (m *mutator) SetLyrics(ctx context.Context, pid model.PID, ly *model.Lyrics, lock model.LockChange, force bool) error {
 	if m.px != nil {
 		return m.px.SetLyrics(ctx, pid, ly, lock, force)
 	}
 	return m.lib.SetLyrics(ctx, pid, ly, lock, force)
 }
 
-func (m *mutator) SetChapters(ctx context.Context, pid model.PID, chapters []model.Chapter, lock, force bool) error {
+func (m *mutator) SetChapters(ctx context.Context, pid model.PID, chapters []model.Chapter, lock model.LockChange, force bool) error {
 	if m.px != nil {
 		return m.px.SetChapters(ctx, pid, chapters, lock, force)
 	}
 	return m.lib.SetChapters(ctx, pid, chapters, lock, force)
 }
 
-func (m *mutator) SetItemArt(ctx context.Context, pid model.PID, role model.ArtRole, data []byte, lock, force, writeBack bool) error {
+func (m *mutator) SetItemArt(ctx context.Context, pid model.PID, role model.ArtRole, data []byte, opts waxbin.ArtEditOptions) error {
 	if m.px != nil {
-		res, err := m.px.SetItemArt(ctx, pid, role, data, lock, force, writeBack)
+		res, err := m.px.SetItemArt(ctx, pid, role, data, opts.Attribution(), opts.Lock, opts.Force, opts.WriteBack)
 		if err != nil {
 			return err
 		}
@@ -137,12 +137,13 @@ func (m *mutator) SetItemArt(ctx context.Context, pid model.PID, role model.ArtR
 		}
 		return nil
 	}
-	return m.lib.SetItemArt(ctx, pid, role, data, lock, force, writeBack)
+	return m.lib.SetItemArt(ctx, pid, role, data, opts)
 }
 
-func (m *mutator) SetEntityArt(ctx context.Context, entityType model.ArtEntity, entityPID model.PID, role model.ArtRole, data []byte, lock, force, writeBack bool) error {
+func (m *mutator) SetEntityArt(ctx context.Context, entityType model.ArtEntity, entityPID model.PID, role model.ArtRole, data []byte, opts waxbin.ArtEditOptions) error {
 	if m.px != nil {
-		res, err := m.px.SetEntityArt(ctx, entityType, entityPID, role, data, lock, force, writeBack)
+		res, err := m.px.SetEntityArt(ctx, entityType, entityPID, role, data,
+			opts.Attribution(), opts.Lock, opts.Force, opts.WriteBack)
 		if err != nil {
 			return err
 		}
@@ -151,7 +152,7 @@ func (m *mutator) SetEntityArt(ctx context.Context, entityType model.ArtEntity, 
 		}
 		return nil
 	}
-	return m.lib.SetEntityArt(ctx, entityType, entityPID, role, data, lock, force, writeBack)
+	return m.lib.SetEntityArt(ctx, entityType, entityPID, role, data, opts)
 }
 
 func (m *mutator) SetArtLock(ctx context.Context, entityType model.ArtEntity, entityPID model.PID, lock bool) error {
@@ -163,7 +164,7 @@ func (m *mutator) SetArtLock(ctx context.Context, entityType model.ArtEntity, en
 
 func (m *mutator) EditEntity(ctx context.Context, entityType model.MergeEntity, entityPID model.PID, edits map[string]string, opts waxbin.EntityEditOptions) error {
 	if m.px != nil {
-		res, err := m.px.EditEntity(ctx, entityType, entityPID, edits, opts.WriteBack, opts.Lock, opts.Force)
+		res, err := m.px.EditEntity(ctx, entityType, entityPID, edits, opts.WriteBack, opts.Attribution(), opts.Lock, opts.Force)
 		if err != nil {
 			return err
 		}
@@ -177,7 +178,7 @@ func (m *mutator) EditEntity(ctx context.Context, entityType model.MergeEntity, 
 
 func (m *mutator) SetItemTag(ctx context.Context, itemPID model.PID, key string, values []string, opts waxbin.TagEditOptions) (string, int, error) {
 	if m.px != nil {
-		return m.px.SetTag(ctx, itemPID, key, values, opts.Lock, opts.Force)
+		return m.px.SetTag(ctx, itemPID, key, values, opts.Attribution(), opts.Lock, opts.Force)
 	}
 	return m.lib.SetItemTag(ctx, itemPID, key, values, opts)
 }

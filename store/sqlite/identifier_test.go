@@ -21,7 +21,7 @@ func TestEditNormalizesISRC(t *testing.T) {
 	})
 
 	if err := st.EditItemFields(ctx, res.ItemPID, map[string]string{"isrc": "us-rc1-77-00001"},
-		model.SourceUser, true, false); err != nil {
+		model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
 		t.Fatalf("edit: %v", err)
 	}
 	var isrc string
@@ -48,7 +48,7 @@ func TestEditNormalizesISRC(t *testing.T) {
 	}
 
 	if err := st.EditItemFields(ctx, res.ItemPID, map[string]string{"isrc": "not-an-isrc"},
-		model.SourceUser, true, false); !waxerr.Is(err, waxerr.CodeInvalid) {
+		model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); !waxerr.Is(err, waxerr.CodeInvalid) {
 		t.Errorf("malformed isrc = %v, want CodeInvalid", err)
 	}
 	// The prior value survived the rejected edit.
@@ -60,7 +60,7 @@ func TestEditNormalizesISRC(t *testing.T) {
 
 	// An empty value still clears (force past the lock the first edit set).
 	if err := st.EditItemFields(ctx, res.ItemPID, map[string]string{"isrc": ""},
-		model.SourceUser, true, true); err != nil {
+		model.Attribution{Source: model.SourceUser}, model.LockOf(true), true); err != nil {
 		t.Fatalf("clear: %v", err)
 	}
 	if err := st.read.QueryRowContext(ctx,
@@ -83,7 +83,7 @@ func TestEditNormalizesBookIdentifiers(t *testing.T) {
 
 	if err := st.EditItemFields(ctx, res.ItemPID, map[string]string{
 		"isbn": "978-0-13-468599-1", "asin": "b000fa5kk0",
-	}, model.SourceUser, true, false); err != nil {
+	}, model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
 		t.Fatalf("edit: %v", err)
 	}
 	var isbn, asin string
@@ -98,7 +98,7 @@ func TestEditNormalizesBookIdentifiers(t *testing.T) {
 
 	err := st.EditItemFields(ctx, res.ItemPID, map[string]string{
 		"isbn": "1234", "publisher": "Legit Books",
-	}, model.SourceUser, true, false)
+	}, model.Attribution{Source: model.SourceUser}, model.LockOf(true), false)
 	if !waxerr.Is(err, waxerr.CodeInvalid) {
 		t.Fatalf("malformed isbn = %v, want CodeInvalid", err)
 	}
@@ -121,7 +121,7 @@ func TestEntityEditNormalizesBarcode(t *testing.T) {
 	albumPID := entityPIDByName(t, st, "album", "title", "Album")
 
 	if err := st.EditEntityFields(ctx, model.MergeAlbum, albumPID,
-		map[string]string{"barcode": "0 36000 29145 2"}, model.SourceUser, true, false); err != nil {
+		map[string]string{"barcode": "0 36000 29145 2"}, model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
 		t.Fatalf("edit: %v", err)
 	}
 	var barcode string
@@ -143,7 +143,7 @@ func TestEntityEditNormalizesBarcode(t *testing.T) {
 	}
 
 	if err := st.EditEntityFields(ctx, model.MergeAlbum, albumPID,
-		map[string]string{"barcode": "12345"}, model.SourceUser, true, false); !waxerr.Is(err, waxerr.CodeInvalid) {
+		map[string]string{"barcode": "12345"}, model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); !waxerr.Is(err, waxerr.CodeInvalid) {
 		t.Errorf("malformed barcode = %v, want CodeInvalid", err)
 	}
 }

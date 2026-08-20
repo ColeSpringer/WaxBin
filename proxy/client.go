@@ -126,10 +126,11 @@ func (c *Client) Ping(ctx context.Context) error {
 // EditFields proxies a catalog field edit. A committed edit whose write-back
 // partially failed returns a non-nil result with the failed files; the transport
 // error stays nil, matching the local semantics where the catalog edit stands.
-func (c *Client) EditFields(ctx context.Context, itemPID model.PID, edits map[string]string, writeBack, lock, force bool) (*EditFieldsResult, error) {
+func (c *Client) EditFields(ctx context.Context, itemPID model.PID, edits map[string]string, writeBack bool, attr model.Attribution, lock model.LockChange, force bool) (*EditFieldsResult, error) {
 	var res EditFieldsResult
 	err := c.call(ctx, MethodEditFields, EditFieldsParams{
-		ItemPID: string(itemPID), Edits: edits, WriteBack: writeBack, Lock: lock, Force: force,
+		ItemPID: string(itemPID), Edits: edits, WriteBack: writeBack,
+		Source: string(attr.Source), Provider: attr.Provider, Lock: string(lock), Force: force,
 	}, &res)
 	if err != nil {
 		return nil, err
@@ -140,14 +141,16 @@ func (c *Client) EditFields(ctx context.Context, itemPID model.PID, edits map[st
 // EditManyFields proxies a multi-item catalog field edit. The catalog batch is
 // atomic; per-item write-back failures come back in the result rather than as a
 // transport error, matching the local semantics.
-func (c *Client) EditManyFields(ctx context.Context, itemPIDs []model.PID, edits map[string]string, writeBack, lock, force, skipLocked bool) (*EditManyFieldsResult, error) {
+func (c *Client) EditManyFields(ctx context.Context, itemPIDs []model.PID, edits map[string]string, writeBack bool, attr model.Attribution, lock model.LockChange, force, skipLocked bool) (*EditManyFieldsResult, error) {
 	pids := make([]string, len(itemPIDs))
 	for i, p := range itemPIDs {
 		pids[i] = string(p)
 	}
 	var res EditManyFieldsResult
 	err := c.call(ctx, MethodEditManyFields, EditManyFieldsParams{
-		ItemPIDs: pids, Edits: edits, WriteBack: writeBack, Lock: lock, Force: force, SkipLocked: skipLocked,
+		ItemPIDs: pids, Edits: edits, WriteBack: writeBack,
+		Source: string(attr.Source), Provider: attr.Provider,
+		Lock: string(lock), Force: force, SkipLocked: skipLocked,
 	}, &res)
 	if err != nil {
 		return nil, err
@@ -158,10 +161,12 @@ func (c *Client) EditManyFields(ctx context.Context, itemPIDs []model.PID, edits
 // EditBatch proxies a per-item-map batch edit: each entry carries its own field
 // map, applied atomically as one catalog batch. Per-item write-back failures come
 // back in the result rather than as a transport error, matching EditManyFields.
-func (c *Client) EditBatch(ctx context.Context, items []ItemFieldsEdit, writeBack, lock, force, skipLocked bool) (*EditManyFieldsResult, error) {
+func (c *Client) EditBatch(ctx context.Context, items []ItemFieldsEdit, writeBack bool, attr model.Attribution, lock model.LockChange, force, skipLocked bool) (*EditManyFieldsResult, error) {
 	var res EditManyFieldsResult
 	err := c.call(ctx, MethodEditBatch, EditBatchParams{
-		Items: items, WriteBack: writeBack, Lock: lock, Force: force, SkipLocked: skipLocked,
+		Items: items, WriteBack: writeBack,
+		Source: string(attr.Source), Provider: attr.Provider,
+		Lock: string(lock), Force: force, SkipLocked: skipLocked,
 	}, &res)
 	if err != nil {
 		return nil, err
@@ -172,10 +177,11 @@ func (c *Client) EditBatch(ctx context.Context, items []ItemFieldsEdit, writeBac
 // SetCredits proxies a credit edit. The result carries the stored contributor count
 // and, for a committed edit whose music write-back partially failed, the failed files
 // (the transport error stays nil, matching edit_fields).
-func (c *Client) SetCredits(ctx context.Context, itemPID model.PID, role string, names []string, writeBack, lock, force bool) (*SetCreditsResult, error) {
+func (c *Client) SetCredits(ctx context.Context, itemPID model.PID, role string, names []string, writeBack bool, attr model.Attribution, lock model.LockChange, force bool) (*SetCreditsResult, error) {
 	var res SetCreditsResult
 	err := c.call(ctx, MethodSetCredits, SetCreditsParams{
-		ItemPID: string(itemPID), Role: role, Names: names, WriteBack: writeBack, Lock: lock, Force: force,
+		ItemPID: string(itemPID), Role: role, Names: names, WriteBack: writeBack,
+		Source: string(attr.Source), Provider: attr.Provider, Lock: string(lock), Force: force,
 	}, &res)
 	if err != nil {
 		return nil, err
@@ -184,26 +190,28 @@ func (c *Client) SetCredits(ctx context.Context, itemPID model.PID, role string,
 }
 
 // SetLyrics proxies a lyrics edit.
-func (c *Client) SetLyrics(ctx context.Context, itemPID model.PID, ly *model.Lyrics, lock, force bool) error {
+func (c *Client) SetLyrics(ctx context.Context, itemPID model.PID, ly *model.Lyrics, lock model.LockChange, force bool) error {
 	return c.call(ctx, MethodSetLyrics, SetLyricsParams{
-		ItemPID: string(itemPID), Lyrics: ly, Lock: lock, Force: force,
+		ItemPID: string(itemPID), Lyrics: ly, Lock: string(lock), Force: force,
 	}, nil)
 }
 
 // SetChapters proxies a chapters edit.
-func (c *Client) SetChapters(ctx context.Context, itemPID model.PID, chapters []model.Chapter, lock, force bool) error {
+func (c *Client) SetChapters(ctx context.Context, itemPID model.PID, chapters []model.Chapter, lock model.LockChange, force bool) error {
 	return c.call(ctx, MethodSetChapters, SetChaptersParams{
-		ItemPID: string(itemPID), Chapters: chapters, Lock: lock, Force: force,
+		ItemPID: string(itemPID), Chapters: chapters, Lock: string(lock), Force: force,
 	}, nil)
 }
 
 // SetItemArt proxies an item artwork edit for one role (empty = front). A committed
 // edit whose on-disk embed partially failed returns the failed files in the result;
 // the transport error stays nil, matching edit_fields.
-func (c *Client) SetItemArt(ctx context.Context, itemPID model.PID, role model.ArtRole, data []byte, lock, force, writeBack bool) (*SetItemArtResult, error) {
+func (c *Client) SetItemArt(ctx context.Context, itemPID model.PID, role model.ArtRole, data []byte, attr model.Attribution, lock model.LockChange, force, writeBack bool) (*SetItemArtResult, error) {
 	var res SetItemArtResult
 	err := c.call(ctx, MethodSetItemArt, SetItemArtParams{
-		ItemPID: string(itemPID), Role: string(role), Data: data, Lock: lock, Force: force, WriteBack: writeBack,
+		ItemPID: string(itemPID), Role: string(role), Data: data,
+		Source: string(attr.Source), Provider: attr.Provider, SourceURL: attr.SourceURL,
+		Lock: string(lock), Force: force, WriteBack: writeBack,
 	}, &res)
 	if err != nil {
 		return nil, err
@@ -214,11 +222,12 @@ func (c *Client) SetItemArt(ctx context.Context, itemPID model.PID, role model.A
 // SetEntityArt proxies a durable entity artwork edit for one role. An album cover
 // fan-out whose embed partially failed returns the failed files in the result
 // (transport error stays nil).
-func (c *Client) SetEntityArt(ctx context.Context, entityType model.ArtEntity, entityPID model.PID, role model.ArtRole, data []byte, lock, force, writeBack bool) (*SetEntityArtResult, error) {
+func (c *Client) SetEntityArt(ctx context.Context, entityType model.ArtEntity, entityPID model.PID, role model.ArtRole, data []byte, attr model.Attribution, lock model.LockChange, force, writeBack bool) (*SetEntityArtResult, error) {
 	var res SetEntityArtResult
 	err := c.call(ctx, MethodSetEntityArt, SetEntityArtParams{
 		EntityType: string(entityType), EntityPID: string(entityPID), Role: string(role), Data: data,
-		Lock: lock, Force: force, WriteBack: writeBack,
+		Source: string(attr.Source), Provider: attr.Provider, SourceURL: attr.SourceURL,
+		Lock: string(lock), Force: force, WriteBack: writeBack,
 	}, &res)
 	if err != nil {
 		return nil, err
@@ -236,10 +245,11 @@ func (c *Client) SetArtLock(ctx context.Context, entityType model.ArtEntity, ent
 
 // SetTag proxies a custom-tag edit, returning the canonical key stored and the number
 // of values stored after trimming (0 = the tag was cleared).
-func (c *Client) SetTag(ctx context.Context, itemPID model.PID, key string, values []string, lock, force bool) (string, int, error) {
+func (c *Client) SetTag(ctx context.Context, itemPID model.PID, key string, values []string, attr model.Attribution, lock model.LockChange, force bool) (string, int, error) {
 	var res SetTagResult
 	err := c.call(ctx, MethodSetTag, SetTagParams{
-		ItemPID: string(itemPID), Key: key, Values: values, Lock: lock, Force: force,
+		ItemPID: string(itemPID), Key: key, Values: values,
+		Source: string(attr.Source), Provider: attr.Provider, Lock: string(lock), Force: force,
 	}, &res)
 	if err != nil {
 		return "", 0, err
@@ -250,10 +260,12 @@ func (c *Client) SetTag(ctx context.Context, itemPID model.PID, key string, valu
 // EditEntity proxies a curation edit to one shared entity (artist/release_group/
 // album). A committed edit whose member-file fan-out partially failed returns the failed
 // files in the result; the transport error stays nil, matching edit_fields.
-func (c *Client) EditEntity(ctx context.Context, entityType model.MergeEntity, entityPID model.PID, edits map[string]string, writeBack, lock, force bool) (*EditEntityResult, error) {
+func (c *Client) EditEntity(ctx context.Context, entityType model.MergeEntity, entityPID model.PID, edits map[string]string, writeBack bool, attr model.Attribution, lock model.LockChange, force bool) (*EditEntityResult, error) {
 	var res EditEntityResult
 	err := c.call(ctx, MethodEditEntity, EditEntityParams{
-		EntityType: string(entityType), EntityPID: string(entityPID), Edits: edits, Lock: lock, Force: force, WriteBack: writeBack,
+		EntityType: string(entityType), EntityPID: string(entityPID), Edits: edits,
+		Source: string(attr.Source), Provider: attr.Provider,
+		Lock: string(lock), Force: force, WriteBack: writeBack,
 	}, &res)
 	if err != nil {
 		return nil, err

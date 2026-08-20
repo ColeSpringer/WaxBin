@@ -1319,7 +1319,7 @@ func findDirCover(dir string) (*model.ArtImage, string) {
 		if err != nil {
 			continue
 		}
-		img := &model.ArtImage{Data: data, Source: model.SourceSidecar}
+		img := &model.ArtImage{Data: data, Attribution: model.Attribution{Source: model.SourceSidecar}}
 		if finalizeArt(img) {
 			return img, full
 		}
@@ -1350,27 +1350,26 @@ func coverStat(dir string) *model.AuxObservation {
 	return nil
 }
 
-// finalizeArt fills an image's content hash and, when the bytes decode, its
-// format and pixel dimensions. It reports whether decoding succeeded. The hash is
-// always set, so undecodable bytes can still be stored as a last resort, but a
-// decodable cover is preferred over one that is not. Empty bytes return false.
+// finalizeArt fills an image's content hash and, when the bytes are recognized, its
+// format and pixel dimensions. It reports whether they were. The hash is always set, so
+// undecodable bytes can still be stored as a last resort, but a recognized cover is
+// preferred over one that is not. An AVIF/HEIC cover counts as recognized on its magic
+// alone, which keeps a cover.avif from being skipped as unreadable even though its
+// dimensions stay unknown. Empty bytes return false.
+//
+// Bytes nothing here recognizes keep whatever format they arrived with: an embedded BMP
+// or TIFF picture has no pure-Go decoder, but its own tag frame's MIME already named it,
+// and that is the only description the stored cover will ever have.
 func finalizeArt(img *model.ArtImage) bool {
 	if img == nil || len(img.Data) == 0 {
 		return false
 	}
-	img.Hash = art.Hash(img.Data)
-	format, w, h, err := art.Probe(img.Data)
-	if err != nil {
-		// An AVIF/HEIC cover has no pure-Go decoder: recognize it by magic so it is
-		// still found and stored (dimensions unknown until an external helper decodes
-		// it). This keeps a cover.avif from being skipped as unreadable.
-		if f, ok := art.SniffExotic(img.Data); ok {
-			img.Format = f
-			return true
-		}
+	info := art.Describe(img.Data)
+	img.Hash = info.Hash
+	if info.Format == "" {
 		return false
 	}
-	img.Format, img.Width, img.Height = format, w, h
+	img.Format, img.Width, img.Height = info.Format, info.Width, info.Height
 	return true
 }
 
