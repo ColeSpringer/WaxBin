@@ -1,6 +1,7 @@
 package waxbin
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -476,6 +477,58 @@ func (l *Library) proxyHandlers() map[string]proxy.Handler {
 				return nil, err
 			}
 			return l.Provenance(ctx, model.PID(p.ItemPID))
+		},
+		proxy.MethodPlaylistCreate: func(ctx context.Context, raw json.RawMessage) (any, error) {
+			p, err := decodeParams[proxy.PlaylistCreateParams](raw)
+			if err != nil {
+				return nil, err
+			}
+			owner, vis := model.PID(p.OwnerPID), model.PlaylistVisibility(p.Visibility)
+			if len(p.Rule) == 0 {
+				pid, err := l.playlists.CreateStatic(ctx, p.Name, owner, vis)
+				if err != nil {
+					return nil, err
+				}
+				return proxy.PlaylistCreateResult{PlaylistPID: string(pid)}, nil
+			}
+			q, err := query.ParseRule(p.Rule)
+			if err != nil {
+				return nil, err
+			}
+			pid, err := l.playlists.CreateSmart(ctx, p.Name, owner, vis, q)
+			if err != nil {
+				return nil, err
+			}
+			return proxy.PlaylistCreateResult{PlaylistPID: string(pid)}, nil
+		},
+		proxy.MethodPlaylistDelete: func(ctx context.Context, raw json.RawMessage) (any, error) {
+			p, err := decodeParams[proxy.PlaylistDeleteParams](raw)
+			if err != nil {
+				return nil, err
+			}
+			return nil, l.playlists.Delete(ctx, model.PID(p.PlaylistPID))
+		},
+		proxy.MethodPlaylistRename: func(ctx context.Context, raw json.RawMessage) (any, error) {
+			p, err := decodeParams[proxy.PlaylistRenameParams](raw)
+			if err != nil {
+				return nil, err
+			}
+			return nil, l.playlists.Rename(ctx, model.PID(p.PlaylistPID), p.Name)
+		},
+		proxy.MethodPlaylistImport: func(ctx context.Context, raw json.RawMessage) (any, error) {
+			p, err := decodeParams[proxy.PlaylistImportParams](raw)
+			if err != nil {
+				return nil, err
+			}
+			res, err := l.playlists.ImportM3U8(ctx, p.Name, model.PID(p.OwnerPID),
+				model.PlaylistVisibility(p.Visibility), bytes.NewReader(p.Document))
+			if err != nil {
+				return nil, err
+			}
+			return proxy.PlaylistImportResult{
+				PlaylistPID: string(res.PlaylistPID), Matched: res.Matched,
+				Unmatched: res.Unmatched, UnmatchedPaths: res.UnmatchedPaths,
+			}, nil
 		},
 		proxy.MethodPlaylistAdd: func(ctx context.Context, raw json.RawMessage) (any, error) {
 			p, err := decodeParams[proxy.PlaylistAddParams](raw)

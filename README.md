@@ -95,7 +95,7 @@ and listens on a local unix control socket (default `<db>.waxsock`, created owne
 `0600`). While it runs, other `waxbin` commands against the same catalog no longer fail
 with an ownership conflict. They **auto-detect** the running server (advertised in the
 lockfile) and dispatch through it: fast mutations (`edit`, `lock`, play state,
-ratings/stars, playlist membership, `user`, `merge`) are proxied to the server, and the
+ratings/stars, playlists, `user`, `merge`) are proxied to the server, and the
 heavier mutating commands borrow the lock through a maintenance-mode hand-off. Read
 commands always run directly. This is a local socket only, with no network or HTTP
 listener. The server runs until interrupted (Ctrl-C / SIGTERM).

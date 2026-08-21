@@ -18,7 +18,7 @@ func newServeCmd(g *globals) *cobra.Command {
 		Long: "Opens the catalog read-write (taking the write lock) and serves a local " +
 			"control socket. While it runs, other waxbin commands in this catalog no longer " +
 			"fail with a write-ownership conflict: fast mutations (edit, lock, play state, " +
-			"ratings/stars, playlist membership, user, merge) are proxied through the server, " +
+			"ratings/stars, playlists, user, merge) are proxied through the server, " +
 			"and other mutating commands borrow the lock through maintenance mode. Read " +
 			"commands always run directly. The socket is created owner-only. Runs until " +
 			"interrupted (Ctrl-C / SIGTERM).",

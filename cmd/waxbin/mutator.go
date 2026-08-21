@@ -1,14 +1,17 @@
 package main
 
 import (
+	"bytes"
 	"context"
 
 	"github.com/colespringer/waxbin"
 	"github.com/colespringer/waxbin/config"
 	"github.com/colespringer/waxbin/model"
+	"github.com/colespringer/waxbin/playlist"
 	"github.com/colespringer/waxbin/podcast"
 	"github.com/colespringer/waxbin/proxy"
 	"github.com/colespringer/waxbin/query"
+	"github.com/colespringer/waxbin/waxerr"
 )
 
 // mutator is how a mutating command reaches the catalog: either a directly-opened
@@ -292,6 +295,55 @@ func (m *mutator) PlayState(ctx context.Context, userPID, itemPID model.PID) (*m
 	return m.lib.Playback().State(ctx, userPID, itemPID)
 }
 
+// PlaylistCreate creates a static playlist, or a smart one when rule is non-nil.
+func (m *mutator) PlaylistCreate(ctx context.Context, name string, owner model.PID, vis model.PlaylistVisibility, rule *query.Query) (model.PID, error) {
+	if m.px != nil {
+		var doc []byte
+		if rule != nil {
+			var err error
+			if doc, err = marshalRuleForWire(*rule); err != nil {
+				return "", err
+			}
+		}
+		return m.px.PlaylistCreate(ctx, name, owner, string(vis), doc)
+	}
+	if rule != nil {
+		return m.lib.Playlists().CreateSmart(ctx, name, owner, vis, *rule)
+	}
+	return m.lib.Playlists().CreateStatic(ctx, name, owner, vis)
+}
+
+func (m *mutator) PlaylistDelete(ctx context.Context, playlistPID model.PID) error {
+	if m.px != nil {
+		return m.px.PlaylistDelete(ctx, playlistPID)
+	}
+	return m.lib.Playlists().Delete(ctx, playlistPID)
+}
+
+func (m *mutator) PlaylistRename(ctx context.Context, playlistPID model.PID, name string) error {
+	if m.px != nil {
+		return m.px.PlaylistRename(ctx, playlistPID, name)
+	}
+	return m.lib.Playlists().Rename(ctx, playlistPID, name)
+}
+
+// PlaylistImportM3U8 imports an M3U8 document as a new static playlist. The
+// document is read whole rather than streamed: the proxied form has to put it in
+// a frame anyway, and a playlist file is small.
+func (m *mutator) PlaylistImportM3U8(ctx context.Context, name string, owner model.PID, vis model.PlaylistVisibility, doc []byte) (*playlist.ImportResult, error) {
+	if m.px != nil {
+		res, err := m.px.PlaylistImportM3U8(ctx, name, owner, string(vis), doc)
+		if err != nil {
+			return nil, err
+		}
+		return &playlist.ImportResult{
+			PlaylistPID: model.PID(res.PlaylistPID), Matched: res.Matched,
+			Unmatched: res.Unmatched, UnmatchedPaths: res.UnmatchedPaths,
+		}, nil
+	}
+	return m.lib.Playlists().ImportM3U8(ctx, name, owner, vis, bytes.NewReader(doc))
+}
+
 func (m *mutator) PlaylistAdd(ctx context.Context, playlistPID model.PID, itemPIDs ...model.PID) error {
 	if m.px != nil {
 		return m.px.PlaylistAdd(ctx, playlistPID, itemPIDs)
@@ -315,13 +367,25 @@ func (m *mutator) PlaylistRemoveAt(ctx context.Context, playlistPID model.PID, p
 
 func (m *mutator) PlaylistSetRule(ctx context.Context, playlistPID model.PID, rule query.Query) error {
 	if m.px != nil {
-		data, err := query.MarshalRule(rule)
+		data, err := marshalRuleForWire(rule)
 		if err != nil {
 			return err
 		}
 		return m.px.PlaylistSetRule(ctx, playlistPID, data)
 	}
 	return m.lib.Playlists().SetRule(ctx, playlistPID, rule)
+}
+
+// marshalRuleForWire encodes a rule for a proxied playlist call. The wrap is what
+// keeps the op honest: envelope.Wrap stamps its own, so a rule the codec cannot
+// encode would otherwise surface as an envelope failure with no sign of which
+// command asked for it.
+func marshalRuleForWire(rule query.Query) ([]byte, error) {
+	data, err := query.MarshalRule(rule)
+	if err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeInternal, "playlist", err)
+	}
+	return data, nil
 }
 
 func (m *mutator) PutTranscript(ctx context.Context, in model.PutTranscriptInput) error {

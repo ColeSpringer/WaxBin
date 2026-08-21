@@ -427,6 +427,43 @@ func (c *Client) Provenance(ctx context.Context, itemPID model.PID) ([]model.Fie
 	return rows, nil
 }
 
+// PlaylistCreate proxies creating a playlist, returning its pid. A nil rule
+// creates a static playlist; a marshaled rule document (query.MarshalRule) creates
+// a smart one, which the server parses and validates.
+func (c *Client) PlaylistCreate(ctx context.Context, name string, ownerPID model.PID, visibility string, rule []byte) (model.PID, error) {
+	var res PlaylistCreateResult
+	err := c.call(ctx, MethodPlaylistCreate, PlaylistCreateParams{
+		Name: name, OwnerPID: string(ownerPID), Visibility: visibility, Rule: rule,
+	}, &res)
+	if err != nil {
+		return "", err
+	}
+	return model.PID(res.PlaylistPID), nil
+}
+
+// PlaylistDelete proxies deleting a playlist.
+func (c *Client) PlaylistDelete(ctx context.Context, playlistPID model.PID) error {
+	return c.call(ctx, MethodPlaylistDelete, PlaylistDeleteParams{PlaylistPID: string(playlistPID)}, nil)
+}
+
+// PlaylistRename proxies renaming a playlist.
+func (c *Client) PlaylistRename(ctx context.Context, playlistPID model.PID, name string) error {
+	return c.call(ctx, MethodPlaylistRename, PlaylistRenameParams{PlaylistPID: string(playlistPID), Name: name}, nil)
+}
+
+// PlaylistImportM3U8 proxies creating a static playlist from an M3U8 document,
+// returning the new playlist and the entries that matched nothing.
+func (c *Client) PlaylistImportM3U8(ctx context.Context, name string, ownerPID model.PID, visibility string, document []byte) (*PlaylistImportResult, error) {
+	var res PlaylistImportResult
+	err := c.call(ctx, MethodPlaylistImport, PlaylistImportParams{
+		Name: name, OwnerPID: string(ownerPID), Visibility: visibility, Document: document,
+	}, &res)
+	if err != nil {
+		return nil, err
+	}
+	return &res, nil
+}
+
 // PlaylistAdd proxies appending items to a static playlist.
 func (c *Client) PlaylistAdd(ctx context.Context, playlistPID model.PID, itemPIDs []model.PID) error {
 	ids := make([]string, len(itemPIDs))

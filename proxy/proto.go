@@ -79,7 +79,15 @@ import (
 // the bump, since the version gate rejects on version before any field decodes. A *bool
 // for Lock would have encoded the same three states without a bump, and was rejected for
 // splitting the lock vocabulary between the wire and Go.
-const ProtocolVersion = 11
+//
+// Version 12 added the playlist lifecycle: playlist_create, playlist_delete,
+// playlist_rename and playlist_import_m3u8. By the add_root precedent these could
+// have landed without a bump, since they add no field to any existing struct. The
+// bump is deliberate: without it a client built against 11 keeps taking the
+// maintenance hand-off for exactly these calls, which is the pause they exist to
+// remove. Nothing has shipped yet, so the total fallback a bump causes costs a
+// rebuild and nothing else.
+const ProtocolVersion = 12
 
 // Method names for the proxied operations: the fast request/response catalog
 // mutations, the reads a mutating command needs for its confirmation output, the
@@ -117,6 +125,10 @@ const (
 	MethodSetProgress      = "set_progress"
 	MethodPlayState        = "play_state"
 	MethodProvenance       = "provenance"
+	MethodPlaylistCreate   = "playlist_create"
+	MethodPlaylistDelete   = "playlist_delete"
+	MethodPlaylistRename   = "playlist_rename"
+	MethodPlaylistImport   = "playlist_import_m3u8"
 	MethodPlaylistAdd      = "playlist_add"
 	MethodPlaylistRemove   = "playlist_remove"
 	MethodPlaylistRemoveAt = "playlist_remove_at"
@@ -553,6 +565,58 @@ type ItemParams struct {
 type PlaylistAddParams struct {
 	PlaylistPID string   `json:"playlistPid"`
 	ItemPIDs    []string `json:"itemPids"`
+}
+
+// PlaylistCreateParams is the playlist_create request payload. A nil Rule creates
+// a static playlist and a present one a smart playlist, so the kind is derived
+// rather than carried: two fields that have to agree can be sent disagreeing, and
+// there is nothing a caller could mean by a static playlist with a rule. Rule is a
+// marshaled query rule document (the versioned envelope) like
+// PlaylistSetRuleParams.Rule, parsed and validated on the server side.
+type PlaylistCreateParams struct {
+	Name       string          `json:"name"`
+	OwnerPID   string          `json:"ownerPid,omitempty"`
+	Visibility string          `json:"visibility,omitempty"`
+	Rule       json.RawMessage `json:"rule,omitempty"`
+}
+
+// PlaylistCreateResult carries the new playlist's pid, which is the whole point
+// of the call: the caller cannot derive it and every follow-up needs it.
+type PlaylistCreateResult struct {
+	PlaylistPID string `json:"playlistPid"`
+}
+
+// PlaylistDeleteParams is the playlist_delete request payload.
+type PlaylistDeleteParams struct {
+	PlaylistPID string `json:"playlistPid"`
+}
+
+// PlaylistRenameParams is the playlist_rename request payload.
+type PlaylistRenameParams struct {
+	PlaylistPID string `json:"playlistPid"`
+	Name        string `json:"name"`
+}
+
+// PlaylistImportParams is the playlist_import_m3u8 request payload. The document
+// travels whole rather than as a path, since the file is the client's and the
+// server may not be able to read it; path matching against the catalog happens on
+// the server, which is the half that needs the catalog.
+type PlaylistImportParams struct {
+	Name       string `json:"name"`
+	OwnerPID   string `json:"ownerPid,omitempty"`
+	Visibility string `json:"visibility,omitempty"`
+	Document   []byte `json:"document"`
+}
+
+// PlaylistImportResult is the playlist_import_m3u8 response: the new playlist and
+// what the import could not match. The unmatched paths are the reason this is not
+// a bare pid, since an import that silently dropped half a file is the failure a
+// caller needs to see.
+type PlaylistImportResult struct {
+	PlaylistPID    string   `json:"playlistPid"`
+	Matched        int      `json:"matched"`
+	Unmatched      int      `json:"unmatched"`
+	UnmatchedPaths []string `json:"unmatchedPaths,omitempty"`
 }
 
 // PlaylistRemoveParams is the playlist_remove request payload.

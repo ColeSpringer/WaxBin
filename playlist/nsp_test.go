@@ -417,3 +417,622 @@ func TestExportNSPRejectsUnsupported(t *testing.T) {
 		t.Errorf("export path: want CodeUnsupported, got %v", err)
 	}
 }
+
+// nspExportCases is the shared export table: every query this file expects
+// ExportNSP to render or refuse, in one place, so the properties below all run
+// over the same set and a case added for one is checked by the others.
+func nspExportCases(t *testing.T) map[string]query.Query {
+	t.Helper()
+	imported := func(doc string) query.Query {
+		q, err := ImportNSP([]byte(doc))
+		if err != nil {
+			t.Fatalf("fixture %s: %v", doc, err)
+		}
+		return q
+	}
+	negated := func(c query.Cond) query.Query {
+		return query.New(query.EntityItems).WhereNode(query.Not{Node: c}).Build()
+	}
+	return map[string]query.Query{
+		"clean and":            imported(`{"all":[{"is":{"artist":"Radiohead"}},{"contains":{"title":"karma"}}],"sort":"title","order":"desc","limit":50}`),
+		"clean nested any":     imported(`{"any":[{"is":{"genre":"Jazz"}},{"all":[{"gt":{"year":2000}},{"notContains":{"album":"live"}}]}]}`),
+		"clean user state":     imported(`{"all":[{"gt":{"rating":3}},{"is":{"starred":true}},{"gt":{"playcount":0}}]}`),
+		"clean relative dates": imported(`{"all":[{"inTheLast":{"lastPlayed":30}},{"notInTheLast":{"dateAdded":7}}]}`),
+		"clean random":         imported(`{"all":[{"is":{"artist":"X"}}],"sort":"random","limit":25}`),
+		"clean date sort":      imported(`{"all":[{"is":{"artist":"X"}}],"sort":"dateAdded","order":"desc","limit":50}`),
+		"clean range":          imported(`{"any":[{"isNot":{"artist":"X"}},{"inTheRange":{"year":[1990,1999]}},{"startsWith":{"album":"The"}}],"sort":"year","order":"asc","limit":25}`),
+		"clean whole star":     query.New(query.EntityItems).Where("rating", query.OpGt, 80).Build(),
+		"clean offset":         query.New(query.EntityItems).Where("artist", query.OpIs, "X").Limit(10).Offset(5).Build(),
+		"clean empty rule":     query.New(query.EntityItems).Build(),
+		"tag field":            query.New(query.EntityItems).Where("tag.MOOD", query.OpIs, "happy").Build(),
+		"in operator":          query.New(query.EntityItems).WhereValues("artist", query.OpIn, "A", "B").Build(),
+		"is present":           query.New(query.EntityItems).WherePresence("title", query.OpIsPresent).Build(),
+		"path field":           query.New(query.EntityItems).Where("path", query.OpContains, "x").Build(),
+		"fractional star":      query.New(query.EntityItems).Where("rating", query.OpGt, 73).Build(),
+		"fractional star range": query.New(query.EntityItems).
+			WhereRange("rating", query.OpInRange, 73, 80).Build(),
+		"rating contains":        query.New(query.EntityItems).Where("rating", query.OpContains, 60).Build(),
+		"rating notContains":     negated(query.Cond{Field: "rating", Op: query.OpContains, Value: 60}),
+		"partial day":            query.New(query.EntityItems).Where("last_played", query.OpInTheLast, nspDayNS+1).Build(),
+		"absolute date op":       query.New(query.EntityItems).Where("last_played", query.OpAfter, int64(1)).Build(),
+		"unsupported negation":   negated(query.Cond{Field: "artist", Op: query.OpIs, Value: "x"}),
+		"notContains on date":    negated(query.Cond{Field: "added", Op: query.OpContains, Value: "x"}),
+		"notContains bad field":  negated(query.Cond{Field: "path", Op: query.OpContains, Value: "x"}),
+		"unsupported sort field": query.New(query.EntityItems).Where("artist", query.OpIs, "X").OrderBy("path", false).Build(),
+		"minutes budget":         query.New(query.EntityItems).Limit(60).LimitBy(query.LimitMinutes).Build(),
+		"seeded random":          query.New(query.EntityItems).Limit(25).LimitBy(query.LimitRandom).Seed(42).Build(),
+		"random with sorts": {Entity: query.EntityItems, Limit: 25, LimitMode: query.LimitRandom,
+			Sorts: []query.Sort{{Field: "title"}}},
+		"mixed group": query.New(query.EntityItems).Where("artist", query.OpIs, "Radiohead").
+			Where("tag.MOOD", query.OpIs, "happy").Build(),
+		"emptied nested group": query.New(query.EntityItems).Where("artist", query.OpIs, "X").
+			WhereNode(query.Or{Nodes: []query.Node{
+				query.Cond{Field: "tag.A", Op: query.OpIs, Value: "1"},
+				query.Cond{Field: "tag.B", Op: query.OpIs, Value: "2"},
+			}}).Build(),
+		"nothing survives": query.New(query.EntityItems).Where("tag.A", query.OpIs, "1").
+			Where("tag.B", query.OpIs, "2").Build(),
+		"extra sorts": query.New(query.EntityItems).Where("artist", query.OpIs, "X").
+			OrderBy("artist", false).OrderBy("year", true).Build(),
+		"entity tracks": query.New(query.EntityTracks).Where("artist", query.OpIs, "X").Build(),
+		"entity files":  query.New(query.EntityFiles).Where("artist", query.OpIs, "X").Build(),
+		"random without limit": query.New(query.EntityItems).Where("artist", query.OpIs, "X").
+			LimitBy(query.LimitRandom).Build(),
+	}
+}
+
+// TestCheckNSPExportOwnsTheAnswer is the guard on the shared walk: whatever
+// ExportNSP says about a query, CheckNSPExport's first gap says the same thing,
+// and a query it renders has no gaps at all. One table owns the answer, so a
+// caller listing the whole refusal can never drift from the sentence the strict
+// export returns.
+func TestCheckNSPExportOwnsTheAnswer(t *testing.T) {
+	for name, q := range nspExportCases(t) {
+		rep := CheckNSPExport(q)
+		if rep.Direction != NSPDirExport {
+			t.Errorf("%s: direction = %q, want export", name, rep.Direction)
+		}
+		for i, g := range rep.All() {
+			if g.Kind == "" || g.Reason == "" {
+				t.Errorf("%s: gap %d = %+v, want a kind and a reason", name, i, g)
+			}
+		}
+		_, err := ExportNSP(q)
+		switch {
+		case err == nil && !rep.OK():
+			t.Errorf("%s: ExportNSP rendered it but the report holds %d gaps", name, len(rep.Gaps))
+		case err != nil && rep.OK():
+			t.Errorf("%s: ExportNSP refused (%v) but the report is OK", name, err)
+		case err != nil:
+			if !waxerr.Is(err, waxerr.CodeUnsupported) {
+				t.Errorf("%s: want CodeUnsupported, got %v", name, err)
+			}
+			if got, want := err.Error(), nspErr(rep.Gaps[0].Reason).Error(); got != want {
+				t.Errorf("%s: ExportNSP said %q, the first gap says %q", name, got, want)
+			}
+		}
+	}
+}
+
+// TestExportNSPNotContainsOnDateField pins the message fix: the Not arm consults
+// the date map before declaring a field unsupported, so a notContains on added
+// reports the operator restriction it actually hit rather than a missing field.
+func TestExportNSPNotContainsOnDateField(t *testing.T) {
+	q := query.New(query.EntityItems).
+		WhereNode(query.Not{Node: query.Cond{Field: "added", Op: query.OpContains, Value: "x"}}).Build()
+	rep := CheckNSPExport(q)
+	if len(rep.Gaps) != 1 || rep.Gaps[0].Kind != NSPGapOperator {
+		t.Fatalf("gaps = %+v, want one operator gap", rep.Gaps)
+	}
+	if !strings.Contains(rep.Gaps[0].Reason, "inTheLast") {
+		t.Errorf("reason = %q, want the date-field operator restriction", rep.Gaps[0].Reason)
+	}
+}
+
+func TestExportNSPPartialPrunes(t *testing.T) {
+	// A tag condition pruned out of an all group leaves the rest intact, and the
+	// report names what went.
+	mixed := query.New(query.EntityItems).Where("artist", query.OpIs, "Radiohead").
+		Where("tag.MOOD", query.OpIs, "happy").Build()
+	e, err := ExportNSPPartial(mixed)
+	if err != nil {
+		t.Fatalf("partial export of a mixed group: %v", err)
+	}
+	if len(e.Report.Gaps) != 1 {
+		t.Fatalf("gaps = %+v, want one", e.Report.Gaps)
+	}
+	if g := e.Report.Gaps[0]; g.Kind != NSPGapField || g.Field != "tag.MOOD" || g.Path != "/where/nodes/1" {
+		t.Errorf("gap = %+v, want a field gap on tag.MOOD at /where/nodes/1", g)
+	}
+	if got := e.Report.Fields(); len(got) != 1 || got[0] != "tag.MOOD" {
+		t.Errorf("Fields() = %v, want [tag.MOOD]", got)
+	}
+	if and, ok := e.Rule.Where.(query.And); !ok || len(and.Nodes) != 1 {
+		t.Errorf("surviving rule = %+v, want an And of 1", e.Rule.Where)
+	}
+	if !strings.Contains(string(e.Data), "Radiohead") || strings.Contains(string(e.Data), "MOOD") {
+		t.Errorf("document kept the wrong half:\n%s", e.Data)
+	}
+
+	// A nested any whose members all drop is dropped in turn: leaving it behind
+	// would turn a dropped leaf into a rule that matches nothing.
+	nested := query.New(query.EntityItems).Where("artist", query.OpIs, "X").
+		WhereNode(query.Or{Nodes: []query.Node{
+			query.Cond{Field: "tag.A", Op: query.OpIs, Value: "1"},
+			query.Cond{Field: "tag.B", Op: query.OpIs, Value: "2"},
+		}}).Build()
+	e, err = ExportNSPPartial(nested)
+	if err != nil {
+		t.Fatalf("partial export of a nested group: %v", err)
+	}
+	if len(e.Report.Gaps) != 3 {
+		t.Fatalf("gaps = %+v, want the two conditions and the group they emptied", e.Report.Gaps)
+	}
+	if g := e.Report.Gaps[2]; g.Kind != NSPGapShape || g.Path != "/where/nodes/1" {
+		t.Errorf("last gap = %+v, want a shape gap on the emptied group", g)
+	}
+	if strings.Contains(string(e.Data), "any") {
+		t.Errorf("emptied any group survived into the document:\n%s", e.Data)
+	}
+
+	// A rule with nothing left is a rule matching the whole library, which is not
+	// a partial export of anything.
+	empty := query.New(query.EntityItems).Where("tag.A", query.OpIs, "1").
+		Where("tag.B", query.OpIs, "2").Build()
+	if _, err := ExportNSPPartial(empty); !waxerr.Is(err, waxerr.CodeUnsupported) {
+		t.Errorf("partial export of an all-unmappable rule: want CodeUnsupported, got %v", err)
+	}
+
+	// A budget limit takes its value with it: rendering the 60 alone would say
+	// sixty tracks where the rule said sixty minutes.
+	budget := query.New(query.EntityItems).Where("artist", query.OpIs, "X").
+		Limit(60).LimitBy(query.LimitMinutes).Build()
+	e, err = ExportNSPPartial(budget)
+	if err != nil {
+		t.Fatalf("partial export of a minutes budget: %v", err)
+	}
+	if len(e.Report.Gaps) != 2 || e.Report.Gaps[0].Path != "/limitMode" || e.Report.Gaps[1].Path != "/limit" {
+		t.Fatalf("gaps = %+v, want the mode and the limit that rode on it", e.Report.Gaps)
+	}
+	if e.Rule.LimitMode != query.LimitCount || e.Rule.Limit != 0 {
+		t.Errorf("surviving rule = mode %q limit %d, want the budget gone entirely", e.Rule.LimitMode, e.Rule.Limit)
+	}
+	if strings.Contains(string(e.Data), "limit") {
+		t.Errorf("the minutes value rode along as a track count:\n%s", e.Data)
+	}
+
+	// A pinned seed drops alone: sort "random" already conveys the shuffle.
+	seeded := query.New(query.EntityItems).Where("artist", query.OpIs, "X").
+		Limit(25).LimitBy(query.LimitRandom).Seed(42).Build()
+	e, err = ExportNSPPartial(seeded)
+	if err != nil {
+		t.Fatalf("partial export of a seeded random: %v", err)
+	}
+	if e.Rule.LimitMode != query.LimitRandom || e.Rule.Limit != 25 || e.Rule.LimitSeed != 0 {
+		t.Errorf("surviving rule = %+v, want the shuffle kept and the seed dropped", e.Rule)
+	}
+	if !strings.Contains(string(e.Data), `"sort": "random"`) {
+		t.Errorf("document lost the shuffle:\n%s", e.Data)
+	}
+}
+
+// nspPartialRefusals names the cases whose whole condition tree drops, which is
+// the one thing ExportNSPPartial refuses. Naming them rather than tolerating any
+// refusal is what keeps the invariant below honest: a regression that made a case
+// like "minutes budget" refuse would otherwise skip the case it exists to pin.
+func nspPartialRefusals() map[string]bool {
+	return map[string]bool{
+		"tag field":             true,
+		"in operator":           true,
+		"is present":            true,
+		"path field":            true,
+		"fractional star":       true,
+		"fractional star range": true,
+		"rating contains":       true,
+		"rating notContains":    true,
+		"partial day":           true,
+		"absolute date op":      true,
+		"unsupported negation":  true,
+		"notContains on date":   true,
+		"notContains bad field": true,
+		"nothing survives":      true,
+	}
+}
+
+// TestExportNSPPartialRuleDescribesTheDocument is the invariant that makes the
+// lossy path honest: the rule a partial export hands back is exactly the rule
+// its document describes, so a caller can show it before writing the file.
+func TestExportNSPPartialRuleDescribesTheDocument(t *testing.T) {
+	refuses := nspPartialRefusals()
+	for name, q := range nspExportCases(t) {
+		e, err := ExportNSPPartial(q)
+		if (err != nil) != refuses[name] {
+			t.Errorf("%s: partial export err = %v, want refusal: %v", name, err, refuses[name])
+		}
+		if err != nil {
+			if !waxerr.Is(err, waxerr.CodeUnsupported) {
+				t.Errorf("%s: partial refusal = %v, want CodeUnsupported", name, err)
+			}
+			continue
+		}
+		again, err := ExportNSP(e.Rule)
+		if err != nil {
+			t.Errorf("%s: the surviving rule does not export cleanly: %v", name, err)
+			continue
+		}
+		if string(again) != string(e.Data) {
+			t.Errorf("%s: rule and document disagree:\n rule renders %s\n partial wrote %s", name, again, e.Data)
+		}
+	}
+}
+
+// TestNSPExportIdempotent is the round-trip property: a document WaxBin exports
+// re-imports to a rule that exports to the same document. It is what catches an
+// exporter emitting something the importer turns away.
+func TestNSPExportIdempotent(t *testing.T) {
+	for name, q := range nspExportCases(t) {
+		first, err := ExportNSP(q)
+		if err != nil {
+			if strings.HasPrefix(name, "clean ") {
+				t.Errorf("%s: strict export refused a case the table calls clean: %v", name, err)
+			}
+			continue
+		}
+		back, err := ImportNSP(first)
+		if err != nil {
+			t.Errorf("%s: WaxBin exported a document it refuses to import: %v\n%s", name, err, first)
+			continue
+		}
+		second, err := ExportNSP(back)
+		if err != nil {
+			t.Errorf("%s: re-export of the round-tripped rule refused: %v", name, err)
+			continue
+		}
+		if string(second) != string(first) {
+			t.Errorf("%s: round trip diverged:\n first=%s\n second=%s", name, first, second)
+		}
+	}
+}
+
+// TestExportNSPExtraSorts pins the behaviour change: a two-term sort is a real
+// stored rule, .nsp has one sort key, and an export that quietly kept the first
+// term handed back a differently ordered playlist.
+func TestExportNSPExtraSorts(t *testing.T) {
+	q := query.New(query.EntityItems).OrderBy("artist", false).OrderBy("year", true).Build()
+	if _, err := ExportNSP(q); !waxerr.Is(err, waxerr.CodeUnsupported) {
+		t.Fatalf("export of a two-term sort: want CodeUnsupported, got %v", err)
+	}
+	e, err := ExportNSPPartial(q)
+	if err != nil {
+		t.Fatalf("partial export of a two-term sort: %v", err)
+	}
+	if len(e.Report.Gaps) != 1 {
+		t.Fatalf("gaps = %+v, want one", e.Report.Gaps)
+	}
+	if g := e.Report.Gaps[0]; g.Kind != NSPGapSort || g.Path != "/sorts/1" || g.Field != "year" {
+		t.Errorf("gap = %+v, want a sort gap on year at /sorts/1", g)
+	}
+	if len(e.Rule.Sorts) != 1 || e.Rule.Sorts[0].Field != "artist" {
+		t.Errorf("surviving sorts = %+v, want artist alone", e.Rule.Sorts)
+	}
+	if !strings.Contains(string(e.Data), `"sort": "artist"`) {
+		t.Errorf("document lost the first sort term:\n%s", e.Data)
+	}
+	// The extra terms are reported even when the first one is itself unmappable,
+	// since the two are separate causes.
+	both := query.New(query.EntityItems).OrderBy("path", false).OrderBy("year", true).Build()
+	if rep := CheckNSPExport(both); len(rep.Gaps) != 2 {
+		t.Errorf("gaps = %+v, want the unmappable field and the extra term", rep.Gaps)
+	}
+}
+
+// TestExportNSPEntity separates the two entities that would round-trip to
+// something else: tracks exports faithfully and comes back wider, files is not a
+// playlist of items at all.
+func TestExportNSPEntity(t *testing.T) {
+	tracks := query.New(query.EntityTracks).Where("artist", query.OpIs, "X").Build()
+	if _, err := ExportNSP(tracks); err != nil {
+		t.Fatalf("export of a tracks rule: %v", err)
+	}
+	rep := CheckNSPExport(tracks)
+	if !rep.OK() {
+		t.Errorf("tracks entity blocked the export: %+v", rep.Gaps)
+	}
+	if len(rep.Notes) != 1 || rep.Notes[0].Kind != NSPGapEntity || rep.Notes[0].Path != "/entity" {
+		t.Errorf("notes = %+v, want one entity note at /entity", rep.Notes)
+	}
+
+	files := query.New(query.EntityFiles).Where("artist", query.OpIs, "X").Build()
+	if _, err := ExportNSP(files); !waxerr.Is(err, waxerr.CodeUnsupported) {
+		t.Errorf("export of a files rule: want CodeUnsupported, got %v", err)
+	}
+	e, err := ExportNSPPartial(files)
+	if err != nil {
+		t.Fatalf("partial export of a files rule: %v", err)
+	}
+	if e.Rule.Entity != query.EntityItems {
+		t.Errorf("surviving entity = %q, want items (the entity was what dropped)", e.Rule.Entity)
+	}
+
+	// Every other value, the zero one included, stays silent: this boundary
+	// reports round-trip drift, it does not validate the entity.
+	if rep := CheckNSPExport(query.Query{}); !rep.OK() || len(rep.Notes) != 0 {
+		t.Errorf("zero entity reported %+v / %+v, want silence", rep.Gaps, rep.Notes)
+	}
+}
+
+// TestExportNSPRandomWithoutLimit closes the hole where the strict exporter
+// emitted a document the strict importer refuses.
+func TestExportNSPRandomWithoutLimit(t *testing.T) {
+	q := query.New(query.EntityItems).LimitBy(query.LimitRandom).Build()
+	if _, err := ExportNSP(q); !waxerr.Is(err, waxerr.CodeUnsupported) {
+		t.Fatalf("export of random with no limit: want CodeUnsupported, got %v", err)
+	}
+	e, err := ExportNSPPartial(q)
+	if err != nil {
+		t.Fatalf("partial export of random with no limit: %v", err)
+	}
+	if e.Rule.LimitMode != query.LimitCount {
+		t.Errorf("surviving mode = %q, want the shuffle dropped", e.Rule.LimitMode)
+	}
+	if strings.Contains(string(e.Data), "random") {
+		t.Errorf("document kept a shuffle ImportNSP refuses:\n%s", e.Data)
+	}
+}
+
+// nspImportCases is the shared import table, the mirror of nspExportCases: every
+// document this file expects ImportNSP to read or refuse.
+func nspImportCases() map[string]string {
+	return map[string]string{
+		"clean and":            `{"all":[{"is":{"artist":"Radiohead"}},{"contains":{"title":"karma"}}],"sort":"title","order":"desc","limit":50}`,
+		"clean nested any":     `{"any":[{"is":{"genre":"Jazz"}},{"all":[{"gt":{"year":2000}},{"notContains":{"album":"live"}}]}]}`,
+		"clean user state":     `{"all":[{"gt":{"rating":3}},{"is":{"starred":true}},{"gt":{"playcount":0}}]}`,
+		"clean relative dates": `{"all":[{"inTheLast":{"lastPlayed":30}},{"notInTheLast":{"dateAdded":7}}]}`,
+		"clean random":         `{"all":[{"is":{"artist":"X"}}],"sort":"random","limit":25}`,
+		"clean date sort":      `{"all":[{"is":{"artist":"X"}}],"sort":"dateAdded","order":"desc","limit":50}`,
+		"clean metadata":       `{"name":"My Mix","comment":"road trip","all":[{"is":{"artist":"Radiohead"}}]}`,
+		"clean empty group":    `{"all":[]}`,
+		"unsupported field":    `{"all":[{"is":{"comment":"x"}}]}`,
+		"unknown operator":     `{"all":[{"inPlaylist":{"title":"x"}}]}`,
+		"relative on non-date": `{"all":[{"inTheLast":{"year":30}}]}`,
+		"absolute date op":     `{"all":[{"before":{"lastPlayed":"2023-01-01"}}]}`,
+		"fractional days":      `{"all":[{"inTheLast":{"lastPlayed":1.5}}]}`,
+		"absurd days":          `{"all":[{"inTheLast":{"lastPlayed":1e30}}]}`,
+		"absurd negative days": `{"all":[{"inTheLast":{"lastPlayed":-1e30}}]}`,
+		"rating contains":      `{"all":[{"contains":{"rating":3}}]}`,
+		"rating notContains":   `{"all":[{"notContains":{"rating":3}}]}`,
+		"unsupported sort":     `{"all":[{"is":{"title":"x"}}],"sort":"comment"}`,
+		"unsupported key":      `{"limitPercent":50,"all":[{"is":{"artist":"X"}}]}`,
+		"random no limit":      `{"all":[{"is":{"artist":"X"}}],"sort":"random"}`,
+		"no root":              `{"limit":10}`,
+		"two rules in one":     `{"all":[{"is":{"artist":"x","album":"y"}}]}`,
+		"bare leaf document":   `{"is":{"artist":"x","album":"y"}}`,
+		"bad limit":            `{"all":[{"is":{"title":"x"}}],"limit":"notanumber"}`,
+		"bad offset":           `{"all":[{"is":{"title":"x"}}],"offset":"notanumber"}`,
+		"bad order":            `{"all":[{"is":{"title":"x"}}],"sort":"title","order":123}`,
+		"bad rating value":     `{"all":[{"is":{"rating":"good"}}]}`,
+		"group not an array":   `{"all":{"is":{"artist":"x"}}}`,
+		"multiple roots":       `{"all":[{"is":{"artist":"x"}}],"any":[{"is":{"genre":"Jazz"}}]}`,
+		"all unmappable":       `{"all":[{"is":{"comment":"x"}},{"is":{"bitrate":320}}]}`,
+	}
+}
+
+// TestCheckNSPImportOwnsTheAnswer is the import half of the one-table guard:
+// whatever ImportNSP says about a document, CheckNSPImport's first gap says the
+// same thing, and a document it reads has no gaps at all.
+func TestCheckNSPImportOwnsTheAnswer(t *testing.T) {
+	for name, doc := range nspImportCases() {
+		rep, cerr := CheckNSPImport([]byte(doc))
+		if cerr != nil {
+			t.Errorf("%s: check failed on a parseable document: %v", name, cerr)
+			continue
+		}
+		if rep.Direction != NSPDirImport {
+			t.Errorf("%s: direction = %q, want import", name, rep.Direction)
+		}
+		_, err := ImportNSP([]byte(doc))
+		switch {
+		case err == nil && !rep.OK():
+			t.Errorf("%s: ImportNSP read it but the report holds %d gaps", name, len(rep.Gaps))
+		case err != nil && rep.OK():
+			t.Errorf("%s: ImportNSP refused (%v) but the report is OK", name, err)
+		case err != nil:
+			if !waxerr.Is(err, waxerr.CodeUnsupported) {
+				t.Errorf("%s: want CodeUnsupported, got %v", name, err)
+			}
+			if got, want := err.Error(), nspErr(rep.Gaps[0].Reason).Error(); got != want {
+				t.Errorf("%s: ImportNSP said %q, the first gap says %q", name, got, want)
+			}
+		}
+	}
+
+	// Unparseable JSON is the one failure that is not a gap.
+	rep, err := CheckNSPImport([]byte(`{not json`))
+	if !waxerr.Is(err, waxerr.CodeInvalid) {
+		t.Errorf("malformed JSON: want CodeInvalid, got %v", err)
+	}
+	if len(rep.All()) != 0 {
+		t.Errorf("malformed JSON reported %+v, want no gaps", rep.All())
+	}
+}
+
+func TestImportNSPPartialPrunes(t *testing.T) {
+	// An unmappable leaf is pruned out of the group and named, in the document's
+	// own vocabulary and at its own pointer.
+	imp, err := ImportNSPPartial([]byte(`{"all":[{"is":{"artist":"Radiohead"}},{"is":{"comment":"x"}}]}`))
+	if err != nil {
+		t.Fatalf("partial import: %v", err)
+	}
+	if len(imp.Report.Gaps) != 1 {
+		t.Fatalf("gaps = %+v, want one", imp.Report.Gaps)
+	}
+	if g := imp.Report.Gaps[0]; g.Kind != NSPGapField || g.Field != "comment" || g.Path != "/all/1" {
+		t.Errorf("gap = %+v, want a field gap on comment at /all/1", g)
+	}
+	and, ok := imp.Rule.Where.(query.And)
+	if !ok || len(and.Nodes) != 1 {
+		t.Fatalf("rule = %+v, want an And of 1", imp.Rule.Where)
+	}
+
+	// A nested group whose members all drop is dropped in turn.
+	imp, err = ImportNSPPartial([]byte(
+		`{"all":[{"is":{"artist":"X"}},{"any":[{"is":{"comment":"a"}},{"is":{"bitrate":320}}]}]}`))
+	if err != nil {
+		t.Fatalf("partial import of a nested group: %v", err)
+	}
+	if len(imp.Report.Gaps) != 3 {
+		t.Fatalf("gaps = %+v, want the two leaves and the group they emptied", imp.Report.Gaps)
+	}
+	if g := imp.Report.Gaps[2]; g.Kind != NSPGapShape || g.Path != "/all/1/any" {
+		t.Errorf("last gap = %+v, want a shape gap on the emptied group", g)
+	}
+	if and, ok := imp.Rule.Where.(query.And); !ok || len(and.Nodes) != 1 {
+		t.Errorf("rule = %+v, want the emptied group gone", imp.Rule.Where)
+	}
+
+	// A top-level key WaxBin cannot represent is a real gap, so a partial import
+	// may drop it, and the rule it built still holds the rest.
+	imp, err = ImportNSPPartial([]byte(`{"limitPercent":50,"all":[{"is":{"artist":"X"}}]}`))
+	if err != nil {
+		t.Fatalf("partial import of limitPercent: %v", err)
+	}
+	if len(imp.Report.Gaps) != 1 || imp.Report.Gaps[0].Path != "/limitPercent" {
+		t.Errorf("gaps = %+v, want one at /limitPercent", imp.Report.Gaps)
+	}
+
+	// A random sort with no limit drops the shuffle rather than the rule.
+	imp, err = ImportNSPPartial([]byte(`{"all":[{"is":{"artist":"X"}}],"sort":"random"}`))
+	if err != nil {
+		t.Fatalf("partial import of an unlimited shuffle: %v", err)
+	}
+	if imp.Rule.LimitMode != query.LimitCount || len(imp.Rule.Sorts) != 0 {
+		t.Errorf("rule = %+v, want the shuffle dropped and nothing put in its place", imp.Rule)
+	}
+
+	// A document with nothing left is a document matching the whole library.
+	if _, err := ImportNSPPartial([]byte(`{"all":[{"is":{"comment":"x"}}]}`)); !waxerr.Is(err, waxerr.CodeUnsupported) {
+		t.Errorf("partial import of an all-unmappable document: want CodeUnsupported, got %v", err)
+	}
+}
+
+// TestImportNSPPartialRefusesMalformed pins the asymmetry with the export side:
+// a broken document is not an unmappable one, and pruning it would turn a rule
+// the person wrote into one nobody can see is missing.
+func TestImportNSPPartialRefusesMalformed(t *testing.T) {
+	broken := map[string]string{
+		"two fields in one rule": `{"all":[{"is":{"artist":"x","album":"y"}}]}`,
+		"bare leaf document":     `{"is":{"artist":"x","album":"y"}}`,
+		"limit with no root":     `{"limit":10}`,
+		"group not an array":     `{"all":{"is":{"artist":"x"}}}`,
+		"bad limit":              `{"all":[{"is":{"title":"x"}}],"limit":"notanumber"}`,
+	}
+	for name, doc := range broken {
+		if _, err := ImportNSPPartial([]byte(doc)); !waxerr.Is(err, waxerr.CodeUnsupported) {
+			t.Errorf("%s: want CodeUnsupported, got %v", name, err)
+		}
+		rep, err := CheckNSPImport([]byte(doc))
+		if err != nil {
+			t.Fatalf("%s: check: %v", name, err)
+		}
+		found := false
+		for _, g := range rep.Gaps {
+			if g.Kind == NSPGapMalformed {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("%s: gaps = %+v, want one marked malformed", name, rep.Gaps)
+		}
+	}
+}
+
+// TestNSPRatingSubstringOpsRejected pins the one place the rating scale bridge
+// cannot be applied. Every other operator on rating converts between 0-to-5 and
+// 0-to-100, but a substring match does not survive a numeric conversion, so
+// scaling it would silently change which ratings match and not scaling it would
+// compare a 0-to-5 value against a 0-to-100 column. Both directions refuse.
+func TestNSPRatingSubstringOpsRejected(t *testing.T) {
+	for _, op := range []query.Op{query.OpContains, query.OpStartsWith, query.OpEndsWith} {
+		q := query.New(query.EntityItems).Where("rating", op, 60).Build()
+		rep := CheckNSPExport(q)
+		if len(rep.Gaps) != 1 || rep.Gaps[0].Kind != NSPGapOperator || rep.Gaps[0].Field != "rating" {
+			t.Errorf("export %s on rating: gaps = %+v, want one operator gap", op, rep.Gaps)
+		}
+	}
+	neg := query.New(query.EntityItems).
+		WhereNode(query.Not{Node: query.Cond{Field: "rating", Op: query.OpContains, Value: 60}}).Build()
+	if rep := CheckNSPExport(neg); len(rep.Gaps) != 1 || rep.Gaps[0].Kind != NSPGapOperator {
+		t.Errorf("export notContains on rating: gaps = %+v, want one operator gap", rep.Gaps)
+	}
+
+	for _, doc := range []string{
+		`{"all":[{"contains":{"rating":3}}]}`,
+		`{"all":[{"startsWith":{"rating":3}}]}`,
+		`{"all":[{"endsWith":{"rating":3}}]}`,
+		`{"all":[{"notContains":{"rating":3}}]}`,
+	} {
+		if _, err := ImportNSP([]byte(doc)); !waxerr.Is(err, waxerr.CodeUnsupported) {
+			t.Errorf("import %s: want CodeUnsupported, got %v", doc, err)
+		}
+		rep, err := CheckNSPImport([]byte(doc))
+		if err != nil {
+			t.Fatalf("check %s: %v", doc, err)
+		}
+		// The leaf is the only member of its group, so the group it empties is
+		// reported after it; the leaf's own gap is what this checks.
+		if len(rep.Gaps) == 0 || rep.Gaps[0].Kind != NSPGapOperator || rep.Gaps[0].Field != "rating" {
+			t.Errorf("import %s: gaps = %+v, want an operator gap on rating first", doc, rep.Gaps)
+		}
+	}
+
+	// The numeric operators still scale, so this is a rule about substring
+	// matching and not about the rating field.
+	if rep := CheckNSPExport(query.New(query.EntityItems).Where("rating", query.OpGt, 60).Build()); !rep.OK() {
+		t.Errorf("gt on rating stopped mapping: %+v", rep.Gaps)
+	}
+}
+
+// TestExportNSPModeAndSeedAreSeparateGaps pins that the two drop independently:
+// one sentence covering both claimed the mode was unrepresentable on a document
+// that kept it.
+func TestExportNSPModeAndSeedAreSeparateGaps(t *testing.T) {
+	both := query.New(query.EntityItems).Limit(60).LimitBy(query.LimitMinutes).Seed(7).Build()
+	rep := CheckNSPExport(both)
+	if len(rep.Gaps) != 3 {
+		t.Fatalf("gaps = %+v, want the mode, the seed and the limit that rode on the mode", rep.Gaps)
+	}
+	if rep.Gaps[0].Path != "/limitMode" || rep.Gaps[1].Path != "/limitSeed" || rep.Gaps[2].Path != "/limit" {
+		t.Errorf("gap paths = %q/%q/%q, want /limitMode /limitSeed /limit",
+			rep.Gaps[0].Path, rep.Gaps[1].Path, rep.Gaps[2].Path)
+	}
+
+	// A seeded shuffle keeps the mode, so its one gap must talk about the seed
+	// alone: the document it produces still says sort "random".
+	seeded := query.New(query.EntityItems).Limit(25).LimitBy(query.LimitRandom).Seed(42).Build()
+	rep = CheckNSPExport(seeded)
+	if len(rep.Gaps) != 1 || rep.Gaps[0].Path != "/limitSeed" {
+		t.Fatalf("gaps = %+v, want the seed alone", rep.Gaps)
+	}
+	if strings.Contains(rep.Gaps[0].Reason, "mode") {
+		t.Errorf("reason = %q, but the mode survives into the document", rep.Gaps[0].Reason)
+	}
+}
+
+// TestNSPGapPathEscapesDocumentKeys covers the one pointer segment that is not
+// ours: a top-level key the document supplied. Unescaped, a key holding a "/"
+// reads as two segments and a rule editor following Path lands somewhere else.
+func TestNSPGapPathEscapesDocumentKeys(t *testing.T) {
+	rep, err := CheckNSPImport([]byte(`{"all":[{"is":{"artist":"x"}}],"limit/percent":50,"a~b":1}`))
+	if err != nil {
+		t.Fatalf("check: %v", err)
+	}
+	got := make(map[string]bool, len(rep.Gaps))
+	for _, g := range rep.Gaps {
+		got[g.Path] = true
+	}
+	for _, want := range []string{"/limit~1percent", "/a~0b"} {
+		if !got[want] {
+			t.Errorf("paths = %v, want one at %q", got, want)
+		}
+	}
+}

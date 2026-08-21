@@ -1000,3 +1000,86 @@ func TestServeProxiedPodcastUnfetchAndRemove(t *testing.T) {
 		t.Errorf("proxied remove of an already-removed show = %v, want CodeNotFound", err)
 	}
 }
+
+// TestServeProxiedPlaylistLifecycle drives the four playlist lifecycle methods
+// over the socket. Before they existed these commands took the maintenance
+// hand-off, which stopped the server for the length of a single row write, so
+// what this test really pins is that creating, renaming, importing and deleting
+// a playlist no longer needs the server to stand down.
+func TestServeProxiedPlaylistLifecycle(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	sock := testsock.Path(t)
+	song := filepath.Join(root, "song.mp3")
+	writeFile(t, song, testaudio.BuildMP3("Original", "Old Artist", "Album", 1))
+
+	lib := openServed(t, ctx, db, root, sock)
+	c := dialWhenReady(t, sock)
+
+	// Static create: the pid comes back over the wire, and the server that holds
+	// the lock is the one that wrote the row.
+	pid, err := c.PlaylistCreate(ctx, "Mix", "", "", nil)
+	if err != nil {
+		t.Fatalf("proxied create: %v", err)
+	}
+	pl, err := lib.Playlists().Get(ctx, pid)
+	if err != nil || pl.Name != "Mix" || pl.Kind != model.PlaylistStatic {
+		t.Fatalf("created playlist = %+v (err %v), want a static Mix", pl, err)
+	}
+
+	if err := c.PlaylistRename(ctx, pid, "Renamed"); err != nil {
+		t.Fatalf("proxied rename: %v", err)
+	}
+	if pl, err := lib.Playlists().Get(ctx, pid); err != nil || pl.Name != "Renamed" {
+		t.Fatalf("name after proxied rename = %+v (err %v), want Renamed", pl, err)
+	}
+
+	// Smart create: the rule travels as a marshaled document and is evaluated by
+	// the server, so membership follows on the next read.
+	rule := query.New(query.EntityItems).Where("title", query.OpContains, "Origin").Build()
+	doc, err := query.MarshalRule(rule)
+	if err != nil {
+		t.Fatalf("marshal rule: %v", err)
+	}
+	smart, err := c.PlaylistCreate(ctx, "Smart", "", "", doc)
+	if err != nil {
+		t.Fatalf("proxied smart create: %v", err)
+	}
+	items, err := lib.Playlists().Items(ctx, smart, "")
+	if err != nil || len(items) != 1 || items[0].Title != "Original" {
+		t.Fatalf("smart membership = %v (err %v), want [Original]", items, err)
+	}
+
+	// A rule the store rejects keeps its class across the wire, and no playlist is
+	// left behind.
+	bad, err := query.MarshalRule(query.New(query.EntityItems).Where("bogus", query.OpIs, "x").Build())
+	if err != nil {
+		t.Fatalf("marshal bad rule: %v", err)
+	}
+	if _, err := c.PlaylistCreate(ctx, "Bad", "", "", bad); !waxerr.Is(err, waxerr.CodeInvalid) {
+		t.Fatalf("proxied bad rule err = %v, want CodeInvalid", err)
+	}
+
+	// Import: the document travels whole and the path matching happens on the
+	// server, which is the side that has the catalog. The unmatched entry is
+	// reported rather than invented.
+	m3u := "#EXTM3U\n" + song + "\n" + filepath.Join(root, "missing.mp3") + "\n"
+	res, err := c.PlaylistImportM3U8(ctx, "Imported", "", "", []byte(m3u))
+	if err != nil {
+		t.Fatalf("proxied import: %v", err)
+	}
+	if res.Matched != 1 || res.Unmatched != 1 || len(res.UnmatchedPaths) != 1 {
+		t.Fatalf("import result = %+v, want 1 matched and 1 unmatched", res)
+	}
+	if items, err := lib.Playlists().Items(ctx, model.PID(res.PlaylistPID), ""); err != nil || len(items) != 1 {
+		t.Fatalf("imported membership = %v (err %v), want the one matched track", items, err)
+	}
+
+	if err := c.PlaylistDelete(ctx, pid); err != nil {
+		t.Fatalf("proxied delete: %v", err)
+	}
+	if _, err := lib.Playlists().Get(ctx, pid); !waxerr.Is(err, waxerr.CodeNotFound) {
+		t.Fatalf("get after proxied delete = %v, want CodeNotFound", err)
+	}
+}
