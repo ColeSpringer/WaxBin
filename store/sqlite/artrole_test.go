@@ -19,7 +19,7 @@ func TestArtRolesIndependentSetAndClear(t *testing.T) {
 	front, back := testPNG(t, 40, 40), testPNG(t, 41, 41)
 	pid := putWithCover(t, st, lib.ID, "/lib/al/1.flac", "e1", front)
 
-	if err := st.SetItemArt(ctx, pid, model.ArtRoleBack, back.Data, model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
+	if err := st.SetItemArt(ctx, pid, model.ArtRoleBack, back.Data, "", model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("set back: %v", err)
 	}
 
@@ -46,7 +46,7 @@ func TestArtRolesIndependentSetAndClear(t *testing.T) {
 	}
 
 	// Clearing one role leaves the other intact.
-	if err := st.SetItemArt(ctx, pid, model.ArtRoleBack, nil, model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
+	if err := st.SetItemArt(ctx, pid, model.ArtRoleBack, nil, "", model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("clear back: %v", err)
 	}
 	if _, err := st.ResolveArt(ctx, model.EntityRef{Type: model.ArtTrack, PID: pid}, model.ArtRoleBack, 0); !waxerr.Is(err, waxerr.CodeNotFound) {
@@ -63,7 +63,7 @@ func TestScanPreservesNonFrontRoles(t *testing.T) {
 	coverA, coverB, back := testPNG(t, 40, 40), testPNG(t, 42, 42), testPNG(t, 41, 41)
 	pid := putWithCover(t, st, lib.ID, "/lib/al/1.flac", "e1", coverA)
 
-	if err := st.SetItemArt(ctx, pid, model.ArtRoleBack, back.Data, model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
+	if err := st.SetItemArt(ctx, pid, model.ArtRoleBack, back.Data, "", model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("set back: %v", err)
 	}
 	// A rescan with a DIFFERENT front cover replaces front and must not touch back.
@@ -89,7 +89,7 @@ func TestChainIgnoresNonFrontRows(t *testing.T) {
 	// Track 1 carries the album's only front cover; track 2 gets only a back image.
 	putWithCover(t, st, lib.ID, "/lib/al/1.flac", "e1", albumCover)
 	pid2 := putWithCover(t, st, lib.ID, "/lib/al/2.flac", "e2", nil)
-	if err := st.SetItemArt(ctx, pid2, model.ArtRoleBack, back.Data, model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
+	if err := st.SetItemArt(ctx, pid2, model.ArtRoleBack, back.Data, "", model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("set back: %v", err)
 	}
 
@@ -115,7 +115,7 @@ func TestNonFrontResolvesOwnLevelOnly(t *testing.T) {
 	ctx := context.Background()
 	back := testPNG(t, 41, 41)
 	pid := putWithCover(t, st, lib.ID, "/lib/al/1.flac", "e1", nil)
-	if err := st.SetEntityArt(ctx, model.ArtAlbum, albumPID(t, st), model.ArtRoleBack, back.Data, model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
+	if err := st.SetEntityArt(ctx, model.ArtAlbum, albumPID(t, st), model.ArtRoleBack, back.Data, "", model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("set album back: %v", err)
 	}
 
@@ -130,10 +130,10 @@ func TestNonFrontResolvesOwnLevelOnly(t *testing.T) {
 
 	// The reverse direction: with the album's own back cleared and a back on the
 	// member track instead, the album must not derive it.
-	if err := st.SetEntityArt(ctx, model.ArtAlbum, albumPID(t, st), model.ArtRoleBack, nil, model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
+	if err := st.SetEntityArt(ctx, model.ArtAlbum, albumPID(t, st), model.ArtRoleBack, nil, "", model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("clear album back: %v", err)
 	}
-	if err := st.SetItemArt(ctx, pid, model.ArtRoleBack, back.Data, model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
+	if err := st.SetItemArt(ctx, pid, model.ArtRoleBack, back.Data, "", model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("set track back: %v", err)
 	}
 	if _, err := st.ResolveArt(ctx, model.EntityRef{Type: model.ArtAlbum, PID: albumPID(t, st)}, model.ArtRoleBack, 0); !waxerr.Is(err, waxerr.CodeNotFound) {
@@ -171,7 +171,7 @@ func TestResolveArtLevelDerivedMatrix(t *testing.T) {
 	}
 
 	// A durable album cover flips Derived off (and wins over the track-derived one).
-	if err := st.SetEntityArt(ctx, model.ArtAlbum, alb, model.ArtRoleFront, albumCover.Data, model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
+	if err := st.SetEntityArt(ctx, model.ArtAlbum, alb, model.ArtRoleFront, albumCover.Data, "", model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("set album front: %v", err)
 	}
 	ba, err = st.ResolveArt(ctx, model.EntityRef{Type: model.ArtAlbum, PID: alb}, model.ArtRoleFront, 0)
@@ -192,10 +192,10 @@ func TestSetArtUnknownRoleRejected(t *testing.T) {
 	img := testPNG(t, 40, 40)
 	pid := putWithCover(t, st, lib.ID, "/lib/al/1.flac", "e1", nil)
 
-	if err := st.SetItemArt(ctx, pid, model.ArtRole("portrait"), img.Data, model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); !waxerr.Is(err, waxerr.CodeInvalid) {
+	if err := st.SetItemArt(ctx, pid, model.ArtRole("portrait"), img.Data, "", model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); !waxerr.Is(err, waxerr.CodeInvalid) {
 		t.Errorf("item art with unknown role = %v, want CodeInvalid", err)
 	}
-	if err := st.SetEntityArt(ctx, model.ArtAlbum, albumPID(t, st), model.ArtRole("artist"), img.Data, model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); !waxerr.Is(err, waxerr.CodeInvalid) {
+	if err := st.SetEntityArt(ctx, model.ArtAlbum, albumPID(t, st), model.ArtRole("artist"), img.Data, "", model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); !waxerr.Is(err, waxerr.CodeInvalid) {
 		t.Errorf("entity art with unknown role = %v, want CodeInvalid (the vocabulary is closed now)", err)
 	}
 	if _, err := st.ResolveArt(ctx, model.EntityRef{Type: model.ArtTrack, PID: pid}, model.ArtRole("nope"), 0); !waxerr.Is(err, waxerr.CodeInvalid) {
@@ -203,13 +203,13 @@ func TestSetArtUnknownRoleRejected(t *testing.T) {
 	}
 
 	// The front lock gates only the front slot: with art locked, a back set works.
-	if err := st.SetItemArt(ctx, pid, model.ArtRoleFront, img.Data, model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
+	if err := st.SetItemArt(ctx, pid, model.ArtRoleFront, img.Data, "", model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
 		t.Fatalf("set+lock front: %v", err)
 	}
-	if err := st.SetItemArt(ctx, pid, model.ArtRoleBack, img.Data, model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
+	if err := st.SetItemArt(ctx, pid, model.ArtRoleBack, img.Data, "", model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Errorf("back set under a front lock = %v, want allowed (the lock guards the scanned slot only)", err)
 	}
-	if err := st.SetItemArt(ctx, pid, model.ArtRoleFront, img.Data, model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); !waxerr.Is(err, waxerr.CodeLocked) {
+	if err := st.SetItemArt(ctx, pid, model.ArtRoleFront, img.Data, "", model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); !waxerr.Is(err, waxerr.CodeLocked) {
 		t.Errorf("front set under lock = %v, want CodeLocked", err)
 	}
 }
@@ -224,7 +224,7 @@ func TestEntityArtSlotKindMismatchRejected(t *testing.T) {
 	img := testPNG(t, 40, 40)
 	track := putWithCover(t, st, lib.ID, "/lib/al/1.flac", "e1", nil)
 
-	if err := st.SetEntityArt(ctx, model.ArtEpisode, track, model.ArtRoleFront, img.Data, model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); !waxerr.Is(err, waxerr.CodeInvalid) {
+	if err := st.SetEntityArt(ctx, model.ArtEpisode, track, model.ArtRoleFront, img.Data, "", model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); !waxerr.Is(err, waxerr.CodeInvalid) {
 		t.Errorf("episode art on a track pid = %v, want CodeInvalid", err)
 	}
 	if n := scalarInt(t, st, "SELECT COUNT(*) FROM art_map WHERE entity_type = 'episode'"); n != 0 {
@@ -236,11 +236,11 @@ func TestEntityArtSlotKindMismatchRejected(t *testing.T) {
 		t.Fatalf("UpsertFeed: %v", err)
 	}
 	ep := episodeByTitle(t, st, feed.PodcastPID, "Alpha").PID
-	if err := st.SetEntityArt(ctx, model.ArtTrack, ep, model.ArtRoleFront, img.Data, model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); !waxerr.Is(err, waxerr.CodeInvalid) {
+	if err := st.SetEntityArt(ctx, model.ArtTrack, ep, model.ArtRoleFront, img.Data, "", model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); !waxerr.Is(err, waxerr.CodeInvalid) {
 		t.Errorf("track art on an episode pid = %v, want CodeInvalid", err)
 	}
 	// The matching slot still works: an episode's own cover is a real, resolvable row.
-	if err := st.SetEntityArt(ctx, model.ArtEpisode, ep, model.ArtRoleFront, img.Data, model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
+	if err := st.SetEntityArt(ctx, model.ArtEpisode, ep, model.ArtRoleFront, img.Data, "", model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("episode art on an episode pid: %v", err)
 	}
 	blob, err := st.ResolveArt(ctx, model.EntityRef{Type: model.ArtEpisode, PID: ep}, model.ArtRoleFront, 0)
@@ -296,10 +296,10 @@ func TestRemovePodcastDropsArtRows(t *testing.T) {
 		t.Fatalf("UpsertFeed: %v", err)
 	}
 	ep := episodeByTitle(t, st, feed.PodcastPID, "Alpha").PID
-	if err := st.SetEntityArt(ctx, model.ArtPodcast, feed.PodcastPID, model.ArtRoleFront, feedArt.Data, model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
+	if err := st.SetEntityArt(ctx, model.ArtPodcast, feed.PodcastPID, model.ArtRoleFront, feedArt.Data, "", model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("set podcast art: %v", err)
 	}
-	if err := st.SetEntityArt(ctx, model.ArtEpisode, ep, model.ArtRoleFront, epArt.Data, model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
+	if err := st.SetEntityArt(ctx, model.ArtEpisode, ep, model.ArtRoleFront, epArt.Data, "", model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("set episode art: %v", err)
 	}
 
@@ -329,7 +329,7 @@ func TestGCArtMultiRole(t *testing.T) {
 	ctx := context.Background()
 	front, back := testPNG(t, 40, 40), testPNG(t, 41, 41)
 	pid := putWithCover(t, st, lib.ID, "/lib/al/1.flac", "e1", front)
-	if err := st.SetItemArt(ctx, pid, model.ArtRoleBack, back.Data, model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
+	if err := st.SetItemArt(ctx, pid, model.ArtRoleBack, back.Data, "", model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("set back: %v", err)
 	}
 
@@ -413,10 +413,10 @@ func TestArtRolesReportsCoverlessLock(t *testing.T) {
 	img := testPNG(t, 44, 44)
 
 	// Set then clear, the journey that produces the state, keeping the default lock.
-	if err := st.SetEntityArt(ctx, model.ArtPodcast, feed.PodcastPID, model.ArtRoleFront, img.Data, model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
+	if err := st.SetEntityArt(ctx, model.ArtPodcast, feed.PodcastPID, model.ArtRoleFront, img.Data, "", model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
 		t.Fatalf("set podcast front: %v", err)
 	}
-	if err := st.SetEntityArt(ctx, model.ArtPodcast, feed.PodcastPID, model.ArtRoleFront, nil, model.Attribution{Source: model.SourceUser}, model.LockOf(true), true); err != nil {
+	if err := st.SetEntityArt(ctx, model.ArtPodcast, feed.PodcastPID, model.ArtRoleFront, nil, "", model.Attribution{Source: model.SourceUser}, model.LockOf(true), true); err != nil {
 		t.Fatalf("clear podcast front: %v", err)
 	}
 
@@ -467,7 +467,7 @@ func TestArtRolesCoverlessLockKeepsRoleOrder(t *testing.T) {
 	ctx := context.Background()
 	pl := newPlaylist(t, st, "Ordered")
 	back := testPNG(t, 45, 45)
-	if err := st.SetEntityArt(ctx, model.ArtPlaylist, pl, model.ArtRoleBack, back.Data, model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
+	if err := st.SetEntityArt(ctx, model.ArtPlaylist, pl, model.ArtRoleBack, back.Data, "", model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("set playlist back: %v", err)
 	}
 	if err := st.SetArtLock(ctx, model.ArtPlaylist, pl, true); err != nil {
@@ -496,7 +496,7 @@ func TestSetArtLockRoundTrip(t *testing.T) {
 	if err := st.SetArtLock(ctx, model.ArtPlaylist, pl, true); err != nil {
 		t.Fatalf("lock: %v", err)
 	}
-	if err := st.SetEntityArt(ctx, model.ArtPlaylist, pl, model.ArtRoleFront, img.Data, model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); !waxerr.Is(err, waxerr.CodeLocked) {
+	if err := st.SetEntityArt(ctx, model.ArtPlaylist, pl, model.ArtRoleFront, img.Data, "", model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); !waxerr.Is(err, waxerr.CodeLocked) {
 		t.Fatalf("set under a lock = %v, want CodeLocked", err)
 	}
 	if err := st.SetArtLock(ctx, model.ArtPlaylist, pl, false); err != nil {
@@ -505,7 +505,7 @@ func TestSetArtLockRoundTrip(t *testing.T) {
 	if locked, err := st.ArtLocked(ctx, model.ArtPlaylist, pl); err != nil || locked {
 		t.Fatalf("ArtLocked after unlock = %v (err %v), want false", locked, err)
 	}
-	if err := st.SetEntityArt(ctx, model.ArtPlaylist, pl, model.ArtRoleFront, img.Data, model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
+	if err := st.SetEntityArt(ctx, model.ArtPlaylist, pl, model.ArtRoleFront, img.Data, "", model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("set after unlock (no force): %v", err)
 	}
 }
@@ -594,7 +594,7 @@ func TestArtSetCarriesTheCallersAttribution(t *testing.T) {
 	pid := putWithCover(t, st, lib.ID, "/lib/al/1.flac", "e1", testPNG(t, 40, 40))
 	const url = "https://itunes.example/cover.png"
 
-	if err := st.SetItemArt(ctx, pid, model.ArtRoleFront, testPNG(t, 42, 42).Data,
+	if err := st.SetItemArt(ctx, pid, model.ArtRoleFront, testPNG(t, 42, 42).Data, "",
 		model.Attribution{Source: model.SourceEnrichment, Provider: "itunes", SourceURL: url},
 		model.LockOf(true), false); err != nil {
 		t.Fatalf("set stamped cover: %v", err)
@@ -609,7 +609,7 @@ func TestArtSetCarriesTheCallersAttribution(t *testing.T) {
 	}
 
 	// A set that names no origin is still a user set.
-	if err := st.SetItemArt(ctx, pid, model.ArtRoleFront, testPNG(t, 43, 43).Data,
+	if err := st.SetItemArt(ctx, pid, model.ArtRoleFront, testPNG(t, 43, 43).Data, "",
 		model.Attribution{}, model.LockOf(true), true); err != nil {
 		t.Fatalf("set unstamped cover: %v", err)
 	}
@@ -635,7 +635,7 @@ func TestArtWriteLeavesAnUnreadLockAlone(t *testing.T) {
 		t.Fatalf("lock: %v", err)
 	}
 	// A clear that says nothing about the lock leaves it standing.
-	if err := st.SetItemArt(ctx, pid, model.ArtRoleFront, nil, model.Attribution{}, model.LockUnchanged, true); err != nil {
+	if err := st.SetItemArt(ctx, pid, model.ArtRoleFront, nil, "", model.Attribution{}, model.LockUnchanged, true); err != nil {
 		t.Fatalf("clear keeping the lock: %v", err)
 	}
 	if locked, err := st.ArtLocked(ctx, model.ArtTrack, pid); err != nil || !locked {
@@ -643,7 +643,7 @@ func TestArtWriteLeavesAnUnreadLockAlone(t *testing.T) {
 	}
 	// So does a forced set: force skips the lock check for that one write and nothing
 	// more.
-	if err := st.SetItemArt(ctx, pid, model.ArtRoleFront, testPNG(t, 44, 44).Data,
+	if err := st.SetItemArt(ctx, pid, model.ArtRoleFront, testPNG(t, 44, 44).Data, "",
 		model.Attribution{}, model.LockUnchanged, true); err != nil {
 		t.Fatalf("forced set: %v", err)
 	}
@@ -651,7 +651,7 @@ func TestArtWriteLeavesAnUnreadLockAlone(t *testing.T) {
 		t.Fatalf("locked after a forced set = %v (err %v), want the lock still standing", locked, err)
 	}
 	// An explicit unlock still releases it.
-	if err := st.SetItemArt(ctx, pid, model.ArtRoleFront, testPNG(t, 45, 45).Data,
+	if err := st.SetItemArt(ctx, pid, model.ArtRoleFront, testPNG(t, 45, 45).Data, "",
 		model.Attribution{}, model.LockOff, true); err != nil {
 		t.Fatalf("unlocking set: %v", err)
 	}
@@ -670,7 +670,7 @@ func TestCoverlessLockReportsTheWritesAttribution(t *testing.T) {
 	al := albumPID(t, st)
 
 	attr := model.Attribution{Source: model.SourceEnrichment, Provider: "itunes"}
-	if err := st.SetItemArt(ctx, pid, model.ArtRoleFront, nil, attr, model.LockOn, false); err != nil {
+	if err := st.SetItemArt(ctx, pid, model.ArtRoleFront, nil, "", attr, model.LockOn, false); err != nil {
 		t.Fatalf("clear and lock item cover: %v", err)
 	}
 	roles, err := st.ArtRoles(ctx, model.EntityRef{Type: model.ArtTrack, PID: pid})
@@ -683,7 +683,7 @@ func TestCoverlessLockReportsTheWritesAttribution(t *testing.T) {
 	}
 
 	// The entity-scoped table answers the same way.
-	if err := st.SetEntityArt(ctx, model.ArtAlbum, al, model.ArtRoleFront, nil, attr, model.LockOn, false); err != nil {
+	if err := st.SetEntityArt(ctx, model.ArtAlbum, al, model.ArtRoleFront, nil, "", attr, model.LockOn, false); err != nil {
 		t.Fatalf("clear and lock album cover: %v", err)
 	}
 	roles, err = st.ArtRoles(ctx, model.EntityRef{Type: model.ArtAlbum, PID: al})
@@ -713,7 +713,7 @@ func TestArtProvenanceAgreesWithResolveArt(t *testing.T) {
 	pid1 := putWithCover(t, st, lib.ID, "/lib/al/1.flac", "e1", trackCover)
 	pid2 := putWithCover(t, st, lib.ID, "/lib/al/2.flac", "e2", nil)
 	alb := albumPID(t, st)
-	if err := st.SetItemArt(ctx, pid1, model.ArtRoleBack, backCover.Data,
+	if err := st.SetItemArt(ctx, pid1, model.ArtRoleBack, backCover.Data, "",
 		model.Attribution{Source: model.SourceEnrichment, Provider: "itunes"}, model.LockOff, false); err != nil {
 		t.Fatalf("set back: %v", err)
 	}
@@ -747,7 +747,7 @@ func TestArtProvenanceAgreesWithResolveArt(t *testing.T) {
 	agrees("sibling through the album", model.EntityRef{Type: model.ArtTrack, PID: pid2}, model.ArtRoleFront)
 	agrees("derived album", model.EntityRef{Type: model.ArtAlbum, PID: alb}, model.ArtRoleFront)
 
-	if err := st.SetEntityArt(ctx, model.ArtAlbum, alb, model.ArtRoleFront, albumCover.Data,
+	if err := st.SetEntityArt(ctx, model.ArtAlbum, alb, model.ArtRoleFront, albumCover.Data, "",
 		model.Attribution{}, model.LockOff, false); err != nil {
 		t.Fatalf("set album front: %v", err)
 	}
@@ -816,13 +816,13 @@ func TestArtWriteRefusesAnUnstorableAttribution(t *testing.T) {
 		{"organize, which never makes a picture", model.Attribution{Source: model.SourceOrganize}},
 	} {
 		// A clear and a set are refused alike.
-		if err := st.SetItemArt(ctx, pid, model.ArtRoleFront, nil, tc.attr, model.LockOn, true); !waxerr.Is(err, waxerr.CodeInvalid) {
+		if err := st.SetItemArt(ctx, pid, model.ArtRoleFront, nil, "", tc.attr, model.LockOn, true); !waxerr.Is(err, waxerr.CodeInvalid) {
 			t.Errorf("item clear with %s = %v, want CodeInvalid", tc.what, err)
 		}
-		if err := st.SetItemArt(ctx, pid, model.ArtRoleFront, img.Data, tc.attr, model.LockOn, true); !waxerr.Is(err, waxerr.CodeInvalid) {
+		if err := st.SetItemArt(ctx, pid, model.ArtRoleFront, img.Data, "", tc.attr, model.LockOn, true); !waxerr.Is(err, waxerr.CodeInvalid) {
 			t.Errorf("item set with %s = %v, want CodeInvalid", tc.what, err)
 		}
-		if err := st.SetEntityArt(ctx, model.ArtAlbum, al, model.ArtRoleFront, nil, tc.attr, model.LockOn, true); !waxerr.Is(err, waxerr.CodeInvalid) {
+		if err := st.SetEntityArt(ctx, model.ArtAlbum, al, model.ArtRoleFront, nil, "", tc.attr, model.LockOn, true); !waxerr.Is(err, waxerr.CodeInvalid) {
 			t.Errorf("entity clear with %s = %v, want CodeInvalid", tc.what, err)
 		}
 	}

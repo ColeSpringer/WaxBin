@@ -45,8 +45,8 @@ func newArtCmd(g *globals) *cobra.Command {
 			"maximum side. Writes " +
 			"the image bytes to --out (or stdout); with --json, reports metadata instead, " +
 			"including the chain level that answered, whether an album's cover was derived " +
-			"from a member track, and where the picture came from (tag|sidecar|user|" +
-			"enrichment|feed) with its provider and fetch URL.",
+			"from a member track, and where the picture came from (" + artSourceList +
+			") with its provider and fetch URL.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			et, err := parseArtEntity("art", entType)
@@ -316,6 +316,7 @@ func newArtSetCmd(g *globals) *cobra.Command {
 		source    string
 		provider  string
 		sourceURL string
+		format    string
 	)
 	cmd := &cobra.Command{
 		Use:   "set <pid> --file <image>",
@@ -360,6 +361,13 @@ func newArtSetCmd(g *globals) *cobra.Command {
 				if err != nil {
 					return waxerr.Wrapf(waxerr.CodeIO, "art set", err, "reading %s", filePath)
 				}
+				if len(b) == 0 {
+					// Empty bytes are how the store spells a clear, so without this an
+					// interrupted download reaching --file deletes the cover and, on the
+					// front role, locks the slot against every later set.
+					return waxerr.New(waxerr.CodeInvalid, "art set",
+						filePath+" is empty; use --clear to remove this role's artwork")
+				}
 				raw = b
 			}
 			m, _, err := g.openMutator(cmd)
@@ -372,6 +380,7 @@ func newArtSetCmd(g *globals) *cobra.Command {
 			opts := waxbin.ArtEditOptions{
 				WriteBack: writeBack, Lock: lockChange(noLock, keepLock), Force: force,
 				Source: attr.Source, Provider: attr.Provider, SourceURL: attr.SourceURL,
+				Format: format,
 			}
 			if et == model.ArtTrack {
 				err = m.SetItemArt(ctx(cmd), pid, r, raw, opts)
@@ -415,5 +424,7 @@ func newArtSetCmd(g *globals) *cobra.Command {
 	f.StringVar(&source, "source", "", "where the image came from: "+artSourceList+" (default user)")
 	f.StringVar(&provider, "provider", "", "service that supplied the image, with --source enrichment")
 	f.StringVar(&sourceURL, "source-url", "", "URL the image was fetched from")
+	f.StringVar(&format, "format", "",
+		"image format for bytes no decoder here recognizes: a token (jxl) or an image media type (image/jxl); ignored when the bytes name themselves")
 	return cmd
 }

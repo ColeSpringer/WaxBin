@@ -476,7 +476,7 @@ func TestServeProxiedPlaylistArt(t *testing.T) {
 	cover := coverPNG(t)
 	// Write-back is on to prove a playlist has no on-disk fan-out to fail at: there is
 	// no file behind a playlist, so the flag is a clean no-op rather than an error.
-	res, err := c.SetEntityArt(ctx, model.ArtPlaylist, pid, model.ArtRoleFront, cover,
+	res, err := c.SetEntityArt(ctx, model.ArtPlaylist, pid, model.ArtRoleFront, cover, "",
 		model.Attribution{}, model.LockOff, false, true)
 	if err != nil {
 		t.Fatalf("proxied playlist art: %v", err)
@@ -517,7 +517,7 @@ func TestServeProxiedArtAttribution(t *testing.T) {
 
 	const url = "https://itunes.example/mosaic.png"
 	attr := model.Attribution{Source: model.SourceEnrichment, Provider: "itunes", SourceURL: url}
-	if _, err := c.SetEntityArt(ctx, model.ArtPlaylist, pid, model.ArtRoleFront, coverPNG(t),
+	if _, err := c.SetEntityArt(ctx, model.ArtPlaylist, pid, model.ArtRoleFront, coverPNG(t), "",
 		attr, model.LockOn, false, false); err != nil {
 		t.Fatalf("proxied stamped cover: %v", err)
 	}
@@ -532,7 +532,7 @@ func TestServeProxiedArtAttribution(t *testing.T) {
 
 	// A later write that says nothing about the lock leaves it standing, where before it
 	// had to read the lock and pass it back with force set.
-	if _, err := c.SetEntityArt(ctx, model.ArtPlaylist, pid, model.ArtRoleFront, coverPNG(t),
+	if _, err := c.SetEntityArt(ctx, model.ArtPlaylist, pid, model.ArtRoleFront, coverPNG(t), "",
 		model.Attribution{}, model.LockUnchanged, true, false); err != nil {
 		t.Fatalf("proxied forced cover: %v", err)
 	}
@@ -544,9 +544,74 @@ func TestServeProxiedArtAttribution(t *testing.T) {
 	// An unknown lock instruction is refused at the boundary, the way an art role is.
 	// The client passes the value through untouched, so this is what a non-Go client
 	// sending nonsense looks like.
-	if _, err := c.SetEntityArt(ctx, model.ArtPlaylist, pid, model.ArtRoleFront, coverPNG(t),
+	if _, err := c.SetEntityArt(ctx, model.ArtPlaylist, pid, model.ArtRoleFront, coverPNG(t), "",
 		model.Attribution{}, model.LockChange("yes"), true, false); !waxerr.Is(err, waxerr.CodeInvalid) {
 		t.Errorf("unknown wire lock = %v, want CodeInvalid", err)
+	}
+}
+
+// TestServeProxiedArtFormatAndGeneratedSource drives the two v13 additions over the
+// socket. A cover whose bytes no decoder here recognizes reaches the store under the
+// media type the client fetched it with, instead of being refused as unrecognized, and
+// a composed cover reports itself as generated rather than as one a hand chose.
+func TestServeProxiedArtFormatAndGeneratedSource(t *testing.T) {
+	ctx := context.Background()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	sock := testsock.Path(t)
+
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "song.mp3"), testaudio.BuildMP3("Song", "Artist", "Album", 1))
+	lib := openServedRW(t, ctx, db, root, sock)
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	pid, err := lib.Playlists().CreateStatic(ctx, "Composed", "", "")
+	if err != nil {
+		t.Fatalf("create playlist: %v", err)
+	}
+	c := dialWhenReady(t, sock)
+
+	exotic := append([]byte("\x00exotic"), make([]byte, 60)...)
+	if _, err := c.SetEntityArt(ctx, model.ArtPlaylist, pid, model.ArtRoleFront, exotic,
+		"image/jxl; charset=binary", model.Attribution{Source: model.SourceGenerated},
+		model.LockUnchanged, false, false); err != nil {
+		t.Fatalf("proxied generated exotic cover: %v", err)
+	}
+	roles, err := lib.ArtRoles(ctx, model.EntityRef{Type: model.ArtPlaylist, PID: pid})
+	if err != nil {
+		t.Fatalf("art roles: %v", err)
+	}
+	if len(roles) != 1 || roles[0].Format != "jxl" || roles[0].Source != model.SourceGenerated {
+		t.Fatalf("front slot = %+v, want a jxl cover sourced generated", roles)
+	}
+
+	// Without the hint the same bytes are still refused, so the field is doing the work
+	// rather than the refusal having been dropped.
+	other := append([]byte("\x00exotic"), make([]byte, 61)...)
+	if _, err := c.SetEntityArt(ctx, model.ArtPlaylist, pid, model.ArtRoleBack, other, "",
+		model.Attribution{}, model.LockUnchanged, false, false); !waxerr.Is(err, waxerr.CodeInvalid) {
+		t.Errorf("unnamed unreadable cover over the wire = %v, want CodeInvalid", err)
+	}
+
+	// set_item_art carries the field too, and nothing else observed it reaching the
+	// store, so a handler wiring Format to the wrong params field would stay green.
+	track := itemPIDByTitle(t, ctx, lib, "Song")
+	if _, err := c.SetItemArt(ctx, track, model.ArtRoleBack, append([]byte("\x00exotic"), make([]byte, 62)...),
+		"jxl", model.Attribution{}, model.LockUnchanged, false, false); err != nil {
+		t.Fatalf("proxied item cover with a format hint: %v", err)
+	}
+	itemRoles, err := lib.ArtRoles(ctx, model.EntityRef{Type: model.ArtTrack, PID: track})
+	if err != nil {
+		t.Fatalf("item art roles: %v", err)
+	}
+	found := false
+	for _, r := range itemRoles {
+		if r.Role == model.ArtRoleBack {
+			found = r.Format == "jxl"
+		}
+	}
+	if !found {
+		t.Errorf("item back slot = %+v, want a jxl cover", itemRoles)
 	}
 }
 

@@ -18,6 +18,8 @@ func TestAttributionPairing(t *testing.T) {
 		{Source: SourceFeed, Provider: "some-feed"},
 		{Source: SourceEnrichment, Provider: "musicbrainz"},
 		{Source: SourceTag, SourceURL: "https://example/cover.png"},
+		{Source: SourceGenerated},
+		{Source: SourceGenerated, SourceURL: "https://example/mosaic.png"},
 	}
 	for _, a := range ok {
 		if !a.Valid() {
@@ -32,6 +34,7 @@ func TestAttributionPairing(t *testing.T) {
 		{Source: SourceSidecar, Provider: "musicbrainz"},
 		{Source: SourceUser, Provider: "musicbrainz"},
 		{Source: SourceOrganize, Provider: "musicbrainz"},
+		{Source: SourceGenerated, Provider: "musicbrainz"},
 	}
 	for _, a := range bad {
 		if a.Valid() {
@@ -56,6 +59,7 @@ func TestAttributionValidForField(t *testing.T) {
 	for _, a := range []Attribution{
 		{Source: SourceSidecar},
 		{Source: SourceFeed},
+		{Source: SourceGenerated},
 		{Source: SourceEnrichment},
 		{},
 	} {
@@ -122,5 +126,34 @@ func TestFieldProvenanceJSONStaysFlat(t *testing.T) {
 	}
 	if len(flat) != 8 {
 		t.Errorf("json has %d keys, want the 8 flat ones: %s", len(flat), b)
+	}
+}
+
+// TestGeneratedAcrossTheGates pins which of the four gates the generated source passes.
+// It is an artifact value: an art_map row may carry it, and the two scalar-field gates
+// and the lyrics gate must not, since nothing composes a scalar value or a set of words
+// and accepting one there would only mint the junk row IsMetadataField exists to
+// prevent.
+func TestGeneratedAcrossTheGates(t *testing.T) {
+	if !SourceGenerated.Valid() {
+		t.Error("SourceGenerated is not in the vocabulary")
+	}
+	if SourceGenerated.ValidForField() {
+		t.Error("SourceGenerated passed the scalar-field vocabulary gate")
+	}
+	a := Attribution{Source: SourceGenerated}
+	if !a.ValidForArt() {
+		t.Error("a generated cover was refused by ValidForArt")
+	}
+	if a.ValidForField() {
+		t.Error("a generated value passed ValidForField")
+	}
+	if a.ValidForLyrics() {
+		t.Error("generated lyrics passed ValidForLyrics")
+	}
+	// No provider pairing of its own: Valid's default branch already says nobody
+	// supplied it, the same rule user carries.
+	if (Attribution{Source: SourceGenerated, Provider: "x"}).ValidForArt() {
+		t.Error("a generated cover with a provider was accepted")
 	}
 }

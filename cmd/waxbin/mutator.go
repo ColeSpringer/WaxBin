@@ -129,7 +129,7 @@ func (m *mutator) SetChapters(ctx context.Context, pid model.PID, chapters []mod
 
 func (m *mutator) SetItemArt(ctx context.Context, pid model.PID, role model.ArtRole, data []byte, opts waxbin.ArtEditOptions) error {
 	if m.px != nil {
-		res, err := m.px.SetItemArt(ctx, pid, role, data, opts.Attribution(), opts.Lock, opts.Force, opts.WriteBack)
+		res, err := m.px.SetItemArt(ctx, pid, role, data, opts.Format, opts.Attribution(), opts.Lock, opts.Force, opts.WriteBack)
 		if err != nil {
 			return err
 		}
@@ -145,7 +145,7 @@ func (m *mutator) SetItemArt(ctx context.Context, pid model.PID, role model.ArtR
 
 func (m *mutator) SetEntityArt(ctx context.Context, entityType model.ArtEntity, entityPID model.PID, role model.ArtRole, data []byte, opts waxbin.ArtEditOptions) error {
 	if m.px != nil {
-		res, err := m.px.SetEntityArt(ctx, entityType, entityPID, role, data,
+		res, err := m.px.SetEntityArt(ctx, entityType, entityPID, role, data, opts.Format,
 			opts.Attribution(), opts.Lock, opts.Force, opts.WriteBack)
 		if err != nil {
 			return err

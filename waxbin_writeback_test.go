@@ -18,6 +18,7 @@ import (
 	"github.com/colespringer/waxbin/query"
 	"github.com/colespringer/waxbin/waxerr"
 	waxlabel "github.com/colespringer/waxlabel"
+	"golang.org/x/image/bmp"
 )
 
 // albumPIDByTitle resolves an album's public id by its title via a direct read (the
@@ -651,5 +652,84 @@ func assertFrontCover(t *testing.T, ctx context.Context, path string) {
 	pics := doc.Pictures()
 	if len(pics) != 1 || pics[0].Type != waxlabel.PicFrontCover || len(pics[0].Data) == 0 {
 		t.Fatalf("%s embedded pictures = %+v, want one front cover", filepath.Base(path), pics)
+	}
+}
+
+// TestSetItemArtFormatHint drives the format hint through the facade, which is the one
+// place a caller's spelling is normalized. A media type and the bare token both have to
+// reach the store as the one token art_source holds, the hint has to stay a fallback,
+// and a picture nobody can name has to stay refused: the hint rescues a cover, it does
+// not turn every file into one.
+func TestSetItemArtFormatHint(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	writeFile(t, filepath.Join(root, "song.mp3"), testaudio.BuildMP3("Song", "Artist", "Album", 1))
+
+	lib := openManaged(t, ctx, db, root)
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	pid := itemPIDByTitle(t, ctx, lib, "Song")
+
+	// Bytes nothing here reads or sniffs, distinct per case: art_source keeps one row per
+	// content address, so the first writer's format is the one that sticks.
+	exotic := func(tag byte) []byte {
+		b := append([]byte("\x00exotic"), make([]byte, 60)...)
+		b[2] = tag
+		return b
+	}
+	// A real BMP, which needs no hint at all: x/image decodes it, dimensions and all.
+	var bmpBuf bytes.Buffer
+	if err := bmp.Encode(&bmpBuf, image.NewRGBA(image.Rect(0, 0, 11, 7))); err != nil {
+		t.Fatalf("bmp encode: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name   string
+		role   model.ArtRole
+		raw    []byte
+		format string
+		want   string
+		wantW  int
+		wantH  int
+	}{
+		{"media type", model.ArtRoleBack, exotic(1), "image/jxl; charset=binary", "jxl", 0, 0},
+		{"token", model.ArtRoleDisc, exotic(2), "jxl", "jxl", 0, 0},
+		{"decoded bytes win", model.ArtRoleBooklet, coverPNG(t), "jxl", "png", 4, 4},
+		{"bmp needs no hint", model.ArtRoleBackground, bmpBuf.Bytes(), "", "bmp", 11, 7},
+	} {
+		if err := lib.SetItemArt(ctx, pid, tc.role, tc.raw,
+			waxbin.ArtEditOptions{Format: tc.format, Lock: model.LockUnchanged}); err != nil {
+			t.Fatalf("%s: set item art: %v", tc.name, err)
+		}
+		roles, err := lib.ArtRoles(ctx, model.EntityRef{Type: model.ArtTrack, PID: pid})
+		if err != nil {
+			t.Fatalf("%s: art roles: %v", tc.name, err)
+		}
+		var got model.ArtRoleInfo
+		for _, r := range roles {
+			if r.Role == tc.role {
+				got = r
+			}
+		}
+		if got.Format != tc.want || got.Width != tc.wantW || got.Height != tc.wantH {
+			t.Errorf("%s: stored %s %dx%d, want %s %dx%d",
+				tc.name, got.Format, got.Width, got.Height, tc.want, tc.wantW, tc.wantH)
+		}
+	}
+
+	// Nobody can name it: still refused, which is what keeps a wrong file from storing.
+	if err := lib.SetItemArt(ctx, pid, model.ArtRoleBack, exotic(9),
+		waxbin.ArtEditOptions{Lock: model.LockUnchanged}); !waxerr.Is(err, waxerr.CodeInvalid) {
+		t.Errorf("unnamed unreadable set = %v, want CodeInvalid", err)
+	}
+	// And a format that names no image is no hint at all, so the same bytes stay refused
+	// however the caller spells the transport's answer.
+	for _, f := range []string{"application/octet-stream", "text/html", "image/*", "-->"} {
+		if err := lib.SetItemArt(ctx, pid, model.ArtRoleBack, exotic(9),
+			waxbin.ArtEditOptions{Format: f, Lock: model.LockUnchanged}); !waxerr.Is(err, waxerr.CodeInvalid) {
+			t.Errorf("set with format %q = %v, want CodeInvalid", f, err)
+		}
 	}
 }

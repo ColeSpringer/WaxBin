@@ -203,15 +203,16 @@ func (c *Client) SetChapters(ctx context.Context, itemPID model.PID, chapters []
 	}, nil)
 }
 
-// SetItemArt proxies an item artwork edit for one role (empty = front). A committed
-// edit whose on-disk embed partially failed returns the failed files in the result;
-// the transport error stays nil, matching edit_fields.
-func (c *Client) SetItemArt(ctx context.Context, itemPID model.PID, role model.ArtRole, data []byte, attr model.Attribution, lock model.LockChange, force, writeBack bool) (*SetItemArtResult, error) {
+// SetItemArt proxies an item artwork edit for one role (empty = front). format is the
+// caller's own name for a picture the bytes cannot name (see SetItemArtParams). A
+// committed edit whose on-disk embed partially failed returns the failed files in the
+// result; the transport error stays nil, matching edit_fields.
+func (c *Client) SetItemArt(ctx context.Context, itemPID model.PID, role model.ArtRole, data []byte, format string, attr model.Attribution, lock model.LockChange, force, writeBack bool) (*SetItemArtResult, error) {
 	var res SetItemArtResult
 	err := c.call(ctx, MethodSetItemArt, SetItemArtParams{
 		ItemPID: string(itemPID), Role: string(role), Data: data,
 		Source: string(attr.Source), Provider: attr.Provider, SourceURL: attr.SourceURL,
-		Lock: string(lock), Force: force, WriteBack: writeBack,
+		Format: format, Lock: string(lock), Force: force, WriteBack: writeBack,
 	}, &res)
 	if err != nil {
 		return nil, err
@@ -219,15 +220,15 @@ func (c *Client) SetItemArt(ctx context.Context, itemPID model.PID, role model.A
 	return &res, nil
 }
 
-// SetEntityArt proxies a durable entity artwork edit for one role. An album cover
-// fan-out whose embed partially failed returns the failed files in the result
-// (transport error stays nil).
-func (c *Client) SetEntityArt(ctx context.Context, entityType model.ArtEntity, entityPID model.PID, role model.ArtRole, data []byte, attr model.Attribution, lock model.LockChange, force, writeBack bool) (*SetEntityArtResult, error) {
+// SetEntityArt proxies a durable entity artwork edit for one role, with the same format
+// hint SetItemArt takes. An album cover fan-out whose embed partially failed returns the
+// failed files in the result (transport error stays nil).
+func (c *Client) SetEntityArt(ctx context.Context, entityType model.ArtEntity, entityPID model.PID, role model.ArtRole, data []byte, format string, attr model.Attribution, lock model.LockChange, force, writeBack bool) (*SetEntityArtResult, error) {
 	var res SetEntityArtResult
 	err := c.call(ctx, MethodSetEntityArt, SetEntityArtParams{
 		EntityType: string(entityType), EntityPID: string(entityPID), Role: string(role), Data: data,
 		Source: string(attr.Source), Provider: attr.Provider, SourceURL: attr.SourceURL,
-		Lock: string(lock), Force: force, WriteBack: writeBack,
+		Format: format, Lock: string(lock), Force: force, WriteBack: writeBack,
 	}, &res)
 	if err != nil {
 		return nil, err

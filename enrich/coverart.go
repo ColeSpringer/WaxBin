@@ -32,11 +32,11 @@ var coverMIME = []string{"image/*", "application/octet-stream"}
 // The returned URL is the archive request, not the archive.org object netsafe followed
 // the redirect to. The request URL is stable and names the entity, so it stays a useful
 // citation; the redirect target is an implementation detail of where the file sits today.
-func (c *coverArt) frontCover(ctx context.Context, rung, mbid string) ([]byte, string, error) {
+func (c *coverArt) frontCover(ctx context.Context, rung, mbid string) (data []byte, reqURL string, err error) {
 	if mbid == "" {
 		return nil, "", waxerr.New(waxerr.CodeNotFound, "enrich.coverart", "no mbid")
 	}
-	reqURL := c.baseURL + "/" + rung + "/" + url.PathEscape(mbid) + "/front"
+	reqURL = c.baseURL + "/" + rung + "/" + url.PathEscape(mbid) + "/front"
 	resp, err := c.client.Do(ctx, netsafe.Request{
 		URL:        reqURL,
 		AcceptMIME: coverMIME,
@@ -85,7 +85,8 @@ func (p *caaProvider) Enrich(ctx context.Context, req Request) (*Candidate, erro
 	// to report, since only it knows where it fetched.
 	// An ISOBMFF cover (AVIF/HEIC) has no pure-Go decoder, so it describes with a
 	// sniffed format and no dimensions while still being a perfectly good image to
-	// store. Only bytes nothing recognizes at all are discarded.
+	// store. Only bytes nothing recognizes at all are discarded; the archive's own
+	// Content-Type is not a second chance here, for the reason podcast.fetchImage gives.
 	info := art.Describe(data)
 	if info.Format == "" {
 		// Re-probe for the reason: Describe reports only that nothing recognized the

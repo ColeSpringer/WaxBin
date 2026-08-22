@@ -11,6 +11,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/colespringer/waxbin/art"
 	"github.com/colespringer/waxbin/identity"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/waxerr"
@@ -593,31 +594,14 @@ func coverFromDoc(doc *waxlabel.Document) *model.ArtImage {
 	if best == nil {
 		return nil
 	}
-	return &model.ArtImage{Data: best.Data, Format: formatFromMIME(best.MIME),
+	// Document.Pictures sniffs each picture authoritatively, so MIME and the dimensions
+	// describe the bytes rather than what the tag claimed about them, and a FLAC PICTURE
+	// block carries its own dimensions besides. Carrying them matters for a format with
+	// no decoder here (an embedded AVIF, say): finalizeArt fills dimensions only when
+	// art.Describe reads the bytes, so dropping these stored the cover as 0x0.
+	return &model.ArtImage{Data: best.Data, Format: art.NormalizeFormat(best.MIME),
+		Width: best.Width, Height: best.Height,
 		Attribution: model.Attribution{Source: model.SourceTag}}
-}
-
-// formatFromMIME maps an image MIME type to WaxBin's short format token, falling
-// back to the MIME subtype for anything unrecognized.
-func formatFromMIME(mime string) string {
-	switch strings.ToLower(strings.TrimSpace(mime)) {
-	case "image/jpeg", "image/jpg":
-		return "jpeg"
-	case "image/png":
-		return "png"
-	case "image/webp":
-		return "webp"
-	case "image/gif":
-		return "gif"
-	case "image/avif":
-		return "avif"
-	case "image/heic", "image/heif":
-		return "heic"
-	}
-	if i := strings.LastIndex(mime, "/"); i >= 0 {
-		return strings.ToLower(strings.TrimSpace(mime[i+1:]))
-	}
-	return ""
 }
 
 // ParseLRC parses .lrc sidecar text into WaxBin synced lines (millisecond offsets,

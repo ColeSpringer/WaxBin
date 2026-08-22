@@ -146,7 +146,7 @@ CREATE TABLE art_map (
   entity_id   INTEGER NOT NULL,
   source_hash TEXT    NOT NULL REFERENCES art_source(hash) ON DELETE CASCADE,
   role        TEXT    NOT NULL DEFAULT 'front',     -- front|back|disc|booklet|background
-  source      TEXT    NOT NULL,                     -- tag|sidecar|user|enrichment|feed
+  source      TEXT    NOT NULL,                     -- tag|sidecar|user|enrichment|feed|generated
   provider    TEXT    NOT NULL DEFAULT '',          -- metadata provider id, when source = enrichment
   source_url  TEXT    NOT NULL DEFAULT '',          -- fetch URL, for an enrichment or feed cover
   updated_at  INTEGER NOT NULL,                     -- unix nanoseconds

@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/query"
 	"github.com/colespringer/waxbin/waxerr"
 )
@@ -67,8 +68,10 @@ import (
 // nspDateFieldToWB with their own operator restriction, and any other field is
 // rejected.
 //
-// The per-user fields that do map: starred (Navidrome's boolean to WaxBin's 0/1
-// starred field) and playcount (an integer count, 1:1). rating maps too, but its
+// The per-user fields that do map: playcount (an integer count, 1:1) and starred, whose
+// value is converted, since .nsp defines it as a boolean while WaxBin lowers the column
+// to 0/1 (see starredIn/starredOut). Only is/isNot carry on it, because ordering or
+// substring-matching a boolean means nothing on either side. rating maps too, but its
 // value is scale-converted, since Navidrome rates 0 to 5 stars while WaxBin uses 0 to
 // 100. A rating is multiplied by nspRatingScale on import and divided on export (see
 // the cond methods on nspImporter and nspExporter). A WaxBin rating that is not a
@@ -80,7 +83,7 @@ var nspFieldToWB = map[string]string{
 	"title":       "title",
 	"album":       "album",
 	"artist":      "artist",
-	"albumartist": "albumartist",
+	"albumartist": "album_artist",
 	"genre":       "genre",
 	"year":        "year",
 	"tracknumber": "track_no",
@@ -104,14 +107,9 @@ var nspDateFieldToWB = map[string]string{
 	"dateadded":  "added",
 }
 
-// wbDateFieldToNSP is the reverse date-field map for export.
-var wbDateFieldToNSP = func() map[string]string {
-	m := make(map[string]string, len(nspDateFieldToWB))
-	for k, v := range nspDateFieldToWB {
-		m[v] = k
-	}
-	return m
-}()
+// wbDateFieldToNSP is the reverse date-field map for export, widened the same way
+// wbFieldToNSP is; see there.
+var wbDateFieldToNSP = widenAliases(invert(nspDateFieldToWB))
 
 // nspDayNS is one day's span in nanoseconds: the unit conversion between a
 // Navidrome relative-date value (days) and a WaxBin relative-time window (ns).
@@ -167,14 +165,113 @@ func scaleRatingOut(v any) (any, string) {
 	return n / nspRatingScale, ""
 }
 
-// wbFieldToNSP is the reverse map for export, built from nspFieldToWB.
-var wbFieldToNSP = func() map[string]string {
-	m := make(map[string]string, len(nspFieldToWB))
-	for k, v := range nspFieldToWB {
-		m[v] = k
+// starredIn converts a .nsp starred value to the 0/1 WaxBin's column holds. .nsp defines
+// the field as a boolean while WaxBin lowers it to CASE ... THEN 1 ELSE 0, so a bool
+// crossing unconverted leaves a stored rule holding a value the engine never produces
+// itself. A 0 or 1 is accepted too, since it means the same thing and refusing it would
+// only reject a document that round-tripped through here.
+func starredIn(v any) (any, string) {
+	if b, ok := v.(bool); ok {
+		if b {
+			return int64(1), ""
+		}
+		return int64(0), ""
+	}
+	if f, ok := asFloat(v); ok && (f == 0 || f == 1) {
+		return int64(f), ""
+	}
+	return nil, fmt.Sprintf("nsp: starred value %v is not a boolean", v)
+}
+
+// starredOut converts a WaxBin starred value back to the .nsp boolean. A bool passes
+// through: a rule imported before this conversion existed holds one, and it is already
+// the value .nsp wants. Anything that is neither 0 nor 1 is not a state the column can
+// be in and has no .nsp form.
+func starredOut(v any) (any, string) {
+	if b, ok := v.(bool); ok {
+		return b, ""
+	}
+	f, ok := asFloat(v)
+	if !ok || (f != 0 && f != 1) {
+		return nil, fmt.Sprintf(
+			"nsp: WaxBin starred value %v is neither 0 nor 1 and has no Navidrome boolean equivalent", v)
+	}
+	return f == 1, ""
+}
+
+// nspValueConvs holds the per-field value conversions, keyed by canonical WaxBin field.
+// A field absent from it crosses verbatim. Both directions report a failure as a
+// sentence rather than an error, since the walks record it in a report and only the
+// strict entry points turn one back into an error.
+var nspValueConvs = map[string]struct{ in, out func(any) (any, string) }{
+	"rating":  {scaleRatingIn, scaleRatingOut},
+	"starred": {starredIn, starredOut},
+}
+
+// nspBoolOps are the only operators a boolean field carries. .nsp defines starred as a
+// boolean, so ordering it, ranging it, or matching a substring of it means nothing on
+// either side; without the gate a converted value would render {"gt":{"starred":true}}.
+var nspBoolOps = map[string]bool{"is": true, "isNot": true}
+
+// wbFieldToNSP is the reverse map for export, built from nspFieldToWB and widened over
+// the engine's own alias spellings. The engine treats album_artist and albumartist as
+// one column, so which of them a stored rule holds is arbitrary; a reverse map covering
+// only the spelling the forward map named refuses a rule .nsp carries perfectly well.
+// The widening happens once at construction rather than at each lookup site, so a fifth
+// site cannot forget it.
+var wbFieldToNSP = widenAliases(invert(nspFieldToWB))
+
+// invert flips a forward field map. Every value is distinct in both maps it is used on,
+// so no entry is lost.
+func invert(m map[string]string) map[string]string {
+	out := make(map[string]string, len(m))
+	for k, v := range m {
+		out[v] = k
+	}
+	return out
+}
+
+// widenAliases adds every other spelling the query engine accepts for a field already
+// in m, mapping it to the same .nsp name. A spelling m already names explicitly wins,
+// and two entries of m wanting the same spelling is a conflict rather than a race
+// between them: map iteration order would otherwise pick a winner per run, and the
+// export would name the same field differently between two runs of one binary.
+func widenAliases(m map[string]string) map[string]string {
+	add := map[string]string{}
+	for field, nspName := range m {
+		for _, spelling := range model.QueryFieldSpellings(field) {
+			if _, ok := m[spelling]; ok {
+				continue
+			}
+			if prior, ok := add[spelling]; ok && prior != nspName {
+				panic("playlist: nsp field " + spelling + " widens to both " + prior + " and " + nspName)
+			}
+			add[spelling] = nspName
+		}
+	}
+	for field, nspName := range add {
+		m[field] = nspName
 	}
 	return m
-}()
+}
+
+// NSPExportableFields lists the WaxBin query fields that have an .nsp name at all,
+// alias spellings included, in sorted order. A field absent from it can never survive a
+// conversion; a field present may still be dropped for the operator or the value it
+// carries, since the date fields take only the relative operators and rating takes only
+// whole stars. CheckNSPExport answers that for a particular rule, and this list is for
+// the coarser question of which fields are in the vocabulary at all.
+func NSPExportableFields() []string {
+	out := make([]string, 0, len(wbFieldToNSP)+len(wbDateFieldToNSP))
+	for f := range wbFieldToNSP {
+		out = append(out, f)
+	}
+	for f := range wbDateFieldToNSP {
+		out = append(out, f)
+	}
+	slices.Sort(out)
+	return out
+}
 
 // nspOpToWB maps a Navidrome leaf operator to a WaxBin operator. notContains has no
 // direct WaxBin operator and is handled specially (wrapped in a Not).
@@ -504,9 +601,12 @@ func (im *nspImporter) cond(op, nspField, wbField string, rawVal json.RawMessage
 			im.broken("nsp: inTheRange needs a [low, high] array")
 			return nil, false
 		}
-		if wbField == "rating" {
+		if !im.opAllowed(op, nspField, wbField) {
+			return nil, false
+		}
+		if conv, ok := nspValueConvs[wbField]; ok {
 			for i := range vals {
-				sv, reason := scaleRatingIn(vals[i])
+				sv, reason := conv.in(vals[i])
 				if reason != "" {
 					im.broken(reason)
 					return nil, false
@@ -526,6 +626,9 @@ func (im *nspImporter) cond(op, nspField, wbField string, rawVal json.RawMessage
 			Reason: "nsp: " + op + " on rating has no WaxBin equivalent, since the 0-to-100 scale conversion does not carry a substring match"})
 		return nil, false
 	}
+	if !im.opAllowed(op, nspField, wbField) {
+		return nil, false
+	}
 	if op == "notContains" {
 		return query.Not{Node: query.Cond{Field: wbField, Op: query.OpContains, Value: v}}, true
 	}
@@ -535,17 +638,29 @@ func (im *nspImporter) cond(op, nspField, wbField string, rawVal json.RawMessage
 			Reason: "nsp: unsupported operator: " + op})
 		return nil, false
 	}
-	if wbField == "rating" {
-		sv, reason := scaleRatingIn(v)
+	if conv, ok := nspValueConvs[wbField]; ok {
+		sv, reason := conv.in(v)
 		if reason != "" {
-			// A rating Navidrome itself would not write is a broken document rather
-			// than a value WaxBin has no room for.
+			// A value Navidrome itself would not write is a broken document rather than
+			// a value WaxBin has no room for.
 			im.broken(reason)
 			return nil, false
 		}
 		v = sv
 	}
 	return query.Cond{Field: wbField, Op: wbOp, Value: v}, true
+}
+
+// opAllowed reports whether op crosses on wbField, recording the gap when it does not.
+// It is where a field narrower than the shared operator table says so: starred is a
+// boolean on both sides and takes only is/isNot.
+func (im *nspImporter) opAllowed(op, nspField, wbField string) bool {
+	if wbField != "starred" || nspBoolOps[op] {
+		return true
+	}
+	im.rep.gap(NSPGap{Kind: NSPGapOperator, Field: nspField, Op: op, Path: im.at(),
+		Reason: "nsp: only is/isNot are supported on starred, which is a boolean"})
+	return false
 }
 
 func (im *nspImporter) valueGap(field, op string, val any, reason string) {
@@ -878,6 +993,9 @@ func (e *nspExporter) not(n query.Not) (map[string]any, query.Node, bool) {
 			Reason: "nsp: notContains on rating has no .nsp equivalent, since the 0-to-5 scale conversion does not carry a substring match"})
 		return nil, nil, false
 	}
+	if !e.opAllowed(c, "notContains") {
+		return nil, nil, false
+	}
 	return map[string]any{"notContains": map[string]any{field: c.Value}}, n, true
 }
 
@@ -906,12 +1024,16 @@ func (e *nspExporter) cond(c query.Cond) (map[string]any, query.Node, bool) {
 			Reason: "nsp: " + op + " on rating has no .nsp equivalent, since the 0-to-5 scale conversion does not carry a substring match"})
 		return nil, nil, false
 	}
+	if !e.opAllowed(c, op) {
+		return nil, nil, false
+	}
+	conv, converts := nspValueConvs[model.CanonicalQueryField(c.Field)]
 	if c.Op == query.OpInRange {
 		vals := c.Values
-		if c.Field == "rating" {
+		if converts {
 			vals = make([]any, len(c.Values))
 			for i, x := range c.Values {
-				sv, reason := scaleRatingOut(x)
+				sv, reason := conv.out(x)
 				if reason != "" {
 					e.valueGap(c, x, reason)
 					return nil, nil, false
@@ -922,8 +1044,8 @@ func (e *nspExporter) cond(c query.Cond) (map[string]any, query.Node, bool) {
 		return map[string]any{op: map[string]any{field: vals}}, c, true
 	}
 	val := c.Value
-	if c.Field == "rating" {
-		sv, reason := scaleRatingOut(c.Value)
+	if converts {
+		sv, reason := conv.out(c.Value)
 		if reason != "" {
 			e.valueGap(c, c.Value, reason)
 			return nil, nil, false
@@ -931,6 +1053,18 @@ func (e *nspExporter) cond(c query.Cond) (map[string]any, query.Node, bool) {
 		val = sv
 	}
 	return map[string]any{op: map[string]any{field: val}}, c, true
+}
+
+// opAllowed reports whether nspOp crosses on c's field, recording the gap when it does
+// not. It mirrors the importer's: starred is a boolean on both sides, so only is/isNot
+// carry, and without this a converted value would render {"gt":{"starred":true}}.
+func (e *nspExporter) opAllowed(c query.Cond, nspOp string) bool {
+	if model.CanonicalQueryField(c.Field) != "starred" || nspBoolOps[nspOp] {
+		return true
+	}
+	e.rep.gap(NSPGap{Kind: NSPGapOperator, Field: c.Field, Op: string(c.Op), Path: e.at(),
+		Reason: "nsp: only is/isNot are supported on starred, which is a boolean"})
+	return false
 }
 
 // dateCond renders a relative-time condition back to .nsp days. A window that is

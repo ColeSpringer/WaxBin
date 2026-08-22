@@ -25,6 +25,12 @@ const (
 	// Artifacts only.
 	SourceSidecar ProvenanceSource = "sidecar" // read from a companion file beside the audio (cover.jpg, .lrc)
 	SourceFeed    ProvenanceSource = "feed"    // supplied by a podcast feed or its episode metadata
+	// SourceGenerated is a picture WaxBin composed from what the catalog already holds,
+	// a playlist mosaic being the case that asked for it. Nothing here produces one; the
+	// value is for a client composing one through SetEntityArt, which used to store it as
+	// a cover a hand chose. Not named derived: ArtProvenance.Derived already means an
+	// album answered from a member track's cover, a fact about the resolution chain.
+	SourceGenerated ProvenanceSource = "generated"
 )
 
 // Valid reports whether s is a known provenance source, across every surface. It is
@@ -32,7 +38,8 @@ const (
 // surface narrows it further through one of the ValidFor* gates.
 func (s ProvenanceSource) Valid() bool {
 	switch s {
-	case SourceTag, SourceUser, SourceEnrichment, SourceOrganize, SourceSidecar, SourceFeed:
+	case SourceTag, SourceUser, SourceEnrichment, SourceOrganize, SourceSidecar, SourceFeed,
+		SourceGenerated:
 		return true
 	default:
 		return false
@@ -40,9 +47,9 @@ func (s ProvenanceSource) Valid() bool {
 }
 
 // ValidForField reports whether s may be stored on a scalar field row. The artifact
-// values (sidecar, feed) are excluded: nothing produces a scalar field from a
-// cover.jpg or a feed image, so accepting one here would only mint the junk row
-// IsMetadataField exists to prevent.
+// values (sidecar, feed, generated) are excluded: nothing produces a scalar field from
+// a cover.jpg, a feed image, or a composition, so accepting one here would only mint
+// the junk row IsMetadataField exists to prevent.
 func (s ProvenanceSource) ValidForField() bool {
 	switch s {
 	case SourceTag, SourceUser, SourceEnrichment, SourceOrganize:
@@ -96,16 +103,19 @@ func (a Attribution) Valid() bool {
 
 // ValidForField reports whether a may be stored on a scalar field row (field_provenance,
 // entity_curation): no artifact-only source, since nothing produces a scalar value from
-// a cover.jpg or a feed image.
+// a cover.jpg, a feed image, or a composition.
 func (a Attribution) ValidForField() bool {
 	return a.Valid() && a.Source.ValidForField()
 }
 
 // ValidForArt reports whether a may be stored on an art attachment (art_map). Every
-// source but organize can produce a picture; nothing organizes one.
+// source but organize can produce a picture; nothing organizes one. A generated cover
+// needs no pairing rule of its own: Valid's default branch already requires an empty
+// Provider, which is the right rule (no external service supplied it, same as user),
+// and SourceURL stays unruled there for the same reason it is for user.
 func (a Attribution) ValidForArt() bool {
 	switch a.Source {
-	case SourceTag, SourceSidecar, SourceUser, SourceEnrichment, SourceFeed:
+	case SourceTag, SourceSidecar, SourceUser, SourceEnrichment, SourceFeed, SourceGenerated:
 		return a.Valid()
 	default:
 		return false
@@ -113,7 +123,8 @@ func (a Attribution) ValidForArt() bool {
 }
 
 // ValidForLyrics reports whether a may be stored on a lyrics row. A feed publishes
-// covers and never words, and nothing organizes lyrics, so neither is accepted.
+// covers and never words, nothing organizes lyrics, and nothing composes a set of
+// words, so none of the three is accepted.
 func (a Attribution) ValidForLyrics() bool {
 	switch a.Source {
 	case SourceTag, SourceSidecar, SourceUser, SourceEnrichment:

@@ -4,6 +4,7 @@ import (
 	"context"
 	"strconv"
 
+	"github.com/colespringer/waxbin/art"
 	"github.com/colespringer/waxbin/meta"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/read"
@@ -45,14 +46,27 @@ type ArtEditOptions struct {
 	// Force overrides a locked front cover for this one write. It skips the lock check
 	// and nothing else: the lock itself still follows Lock.
 	Force bool
-	// Source is where the image came from (tag|sidecar|user|enrichment|feed). Empty
-	// records a user set, which is what a person at a keyboard is.
+	// Source is where the image came from (tag|sidecar|user|enrichment|feed|generated).
+	// Empty records a user set, which is what a person at a keyboard is.
 	Source model.ProvenanceSource
 	// Provider names the service that supplied an enrichment cover. An enrichment
 	// source without one is refused; every other source must leave it empty.
 	Provider string
 	// SourceURL is where a fetched cover was fetched from. Empty otherwise.
 	SourceURL string
+	// Format names the image's format for bytes no decoder here recognizes, which after
+	// jpeg/png/gif/webp/bmp/tiff means an exotic one a caller knows from the transport
+	// that handed it over. It is a fallback, never an override: a format read from the
+	// bytes always wins, so naming png over JPEG bytes stores jpeg. It is ignored on a
+	// clear. Either a short token or an image media type is accepted (see
+	// art.NormalizeFormat), and anything that is neither normalizes away to no hint at
+	// all.
+	//
+	// One consequence is worth knowing, because it is not this field's rule: art_source
+	// is content-addressed, so the first write of a given picture fixes the format every
+	// later attach of those same bytes reports. Naming the same bytes differently a
+	// second time is accepted and changes nothing.
+	Format string
 }
 
 // Attribution is the store-side value the three provenance fields describe. See
@@ -66,7 +80,10 @@ func (o ArtEditOptions) Attribution() model.Attribution {
 // "art" lock guards (the lock guards the scan's cover re-derive; the other roles have
 // no scan producer, so Lock and Force are ignored for them). A clear deletes only the
 // named role. The cover is recorded under opts.Source, so a caller that fetched the
-// picture itself is not reported as having chosen it by hand. With opts.WriteBack the
+// picture itself is not reported as having chosen it by hand, and under opts.Format
+// when the bytes cannot name their own format. This facade is where a format hint is
+// normalized, for every path (the CLI and the proxy handler both arrive here), so no
+// layer below it folds a second time. With opts.WriteBack the
 // cover is also embedded into the item's backing file, or into every part of a
 // multi-file book so an external player sees the same cover on each part; only the
 // front cover has an embedded representation, so write-back with any other role is
@@ -88,7 +105,8 @@ func (l *Library) SetItemArt(ctx context.Context, itemPID model.PID, role model.
 		return waxerr.New(waxerr.CodeInvalid, "waxbin.SetItemArt",
 			"write-back embeds only the front cover; set role "+string(role)+" without --write-back")
 	}
-	if err := l.store.SetItemArt(ctx, itemPID, role, raw, opts.Attribution(), opts.Lock, opts.Force); err != nil {
+	if err := l.store.SetItemArt(ctx, itemPID, role, raw, art.NormalizeFormat(opts.Format),
+		opts.Attribution(), opts.Lock, opts.Force); err != nil {
 		return err
 	}
 	if !opts.WriteBack {
@@ -126,7 +144,8 @@ func (l *Library) SetEntityArt(ctx context.Context, entityType model.ArtEntity, 
 		return waxerr.New(waxerr.CodeInvalid, "waxbin.SetEntityArt",
 			"write-back embeds only the front cover; set role "+string(role)+" without --write-back")
 	}
-	if err := l.store.SetEntityArt(ctx, entityType, entityPID, role, raw, opts.Attribution(), opts.Lock, opts.Force); err != nil {
+	if err := l.store.SetEntityArt(ctx, entityType, entityPID, role, raw, art.NormalizeFormat(opts.Format),
+		opts.Attribution(), opts.Lock, opts.Force); err != nil {
 		return err
 	}
 	if !opts.WriteBack {

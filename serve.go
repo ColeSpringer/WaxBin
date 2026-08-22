@@ -258,6 +258,7 @@ func (l *Library) proxyHandlers() map[string]proxy.Handler {
 			artErr := l.SetItemArt(ctx, model.PID(p.ItemPID), role, p.Data, ArtEditOptions{
 				WriteBack: p.WriteBack, Lock: lock, Force: p.Force,
 				Source: model.ProvenanceSource(p.Source), Provider: p.Provider, SourceURL: p.SourceURL,
+				Format: p.Format,
 			})
 			// A write-back failure is a result, not a transport error (the catalog edit stands).
 			var wbErr *WriteBackError
@@ -285,6 +286,7 @@ func (l *Library) proxyHandlers() map[string]proxy.Handler {
 			artErr := l.SetEntityArt(ctx, model.ArtEntity(p.EntityType), model.PID(p.EntityPID), role, p.Data, ArtEditOptions{
 				WriteBack: p.WriteBack, Lock: lock, Force: p.Force,
 				Source: model.ProvenanceSource(p.Source), Provider: p.Provider, SourceURL: p.SourceURL,
+				Format: p.Format,
 			})
 			var wbErr *WriteBackError
 			if errors.As(artErr, &wbErr) {

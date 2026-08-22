@@ -6,7 +6,11 @@ import (
 	"image/color"
 	"image/jpeg"
 	"image/png"
+	"strings"
 	"testing"
+
+	"golang.org/x/image/bmp"
+	"golang.org/x/image/tiff"
 )
 
 func makePNG(t *testing.T, w, h int) []byte {
@@ -144,5 +148,88 @@ func TestDescribe(t *testing.T) {
 	}
 	if junk.Hash != Hash([]byte("not an image")) {
 		t.Error("junk describe dropped the content address")
+	}
+}
+
+// TestNormalizeFormat covers the three shapes a caller names a format in, the folds
+// that keep one format from storing under two tokens, and everything that names no
+// image and so must not become one.
+func TestNormalizeFormat(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"jpeg", "jpeg"},
+		{"JPEG", "jpeg"},
+		{"  png  ", "png"},
+		{"jpg", "jpeg"},   // ID3v2.2's three-character code
+		{"jpe", "jpeg"},   //
+		{".JPG", "jpeg"},  // a filename extension
+		{".tiff", "tiff"}, //
+		{"tif", "tiff"},   // one format, one token
+		{"image/jpeg", "jpeg"},
+		{"image/jpg", "jpeg"},
+		{"image/jpeg; charset=binary", "jpeg"},
+		{"image/jpeg; charset", "jpeg"}, // parameters ParseMediaType refuses
+		{"IMAGE/PNG", "png"},
+		{"image/x-png", "png"},    // the spellings older servers send
+		{"image/x-ms-bmp", "bmp"}, //
+		{"image/heif", "heic"},    // one ISOBMFF format, one token
+		{"heif", "heic"},
+		{"image/bmp", "bmp"},
+		{"image/tiff", "tiff"},
+		{"image/jxl", "jxl"}, // no decoder, still the only name it will have
+		{"image/svg+xml", "svg+xml"},
+		{"", ""},
+		{"   ", ""},
+		{"application/octet-stream", ""}, // an undeclared blob names no format
+		{"text/html", ""},                // nor does an error page
+		{"image/*", ""},                  // nor does the Accept header echoed back
+		{"image/jpeg, image/jpeg", ""},   // nor does a doubled header
+		{"-->", ""},                      // ID3v2's "the body is a URL" sentinel
+		{"image/<script>alert(1)</script>", ""},
+		{"image/" + strings.Repeat("a", maxFormatToken+1), ""},
+	}
+	for _, c := range cases {
+		got := NormalizeFormat(c.in)
+		if got != c.want {
+			t.Errorf("NormalizeFormat(%q) = %q, want %q", c.in, got, c.want)
+		}
+		// The store documents its format as already normalized, which is only worth
+		// anything if normalizing twice is normalizing once.
+		if again := NormalizeFormat(got); again != got {
+			t.Errorf("NormalizeFormat is not idempotent on %q: %q then %q", c.in, got, again)
+		}
+	}
+}
+
+// TestProbeDecodesBMPAndTIFF pins the reason the format hint is a rescue and not the
+// main path: x/image ships both decoders, so the two formats a cover most often arrives
+// in without one now decode here, with the dimensions a thumbnail needs.
+func TestProbeDecodesBMPAndTIFF(t *testing.T) {
+	src := image.NewRGBA(image.Rect(0, 0, 37, 23))
+	src.Set(0, 0, color.RGBA{R: 1, G: 2, B: 3, A: 255})
+
+	var b bytes.Buffer
+	if err := bmp.Encode(&b, src); err != nil {
+		t.Fatalf("encode bmp: %v", err)
+	}
+	if got := Describe(b.Bytes()); got.Format != "bmp" || got.Width != 37 || got.Height != 23 {
+		t.Errorf("bmp describe = %s %dx%d, want bmp 37x23", got.Format, got.Width, got.Height)
+	}
+	if _, _, w, h, err := Thumbnail(b.Bytes(), 16); err != nil || w != 16 || h != 10 {
+		t.Errorf("bmp thumbnail = %dx%d (err %v), want 16x10", w, h, err)
+	}
+
+	var tb bytes.Buffer
+	if err := tiff.Encode(&tb, src, nil); err != nil {
+		t.Fatalf("encode tiff: %v", err)
+	}
+	if got := Describe(tb.Bytes()); got.Format != "tiff" || got.Width != 37 || got.Height != 23 {
+		t.Errorf("tiff describe = %s %dx%d, want tiff 37x23", got.Format, got.Width, got.Height)
+	}
+
+	// A BMP signature over bytes that are not a BMP stays unrecognized, which is what
+	// keeps the refusal a fact about the bytes rather than about the first two of them.
+	junk := append([]byte("BM"), make([]byte, 60)...)
+	if got := Describe(junk); got.Format != "" {
+		t.Errorf("junk with a BM prefix described as %q, want unrecognized", got.Format)
 	}
 }

@@ -2,6 +2,7 @@ package playlist
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -478,6 +479,282 @@ func nspExportCases(t *testing.T) map[string]query.Query {
 		"entity files":  query.New(query.EntityFiles).Where("artist", query.OpIs, "X").Build(),
 		"random without limit": query.New(query.EntityItems).Where("artist", query.OpIs, "X").
 			LimitBy(query.LimitRandom).Build(),
+		// The four alias spellings the engine accepts as the same column. A stored rule
+		// holds whichever one its author wrote, so every export property here has to
+		// hold for both halves of each pair.
+		"alias album_artist": query.New(query.EntityItems).Where("album_artist", query.OpIs, "X").Build(),
+		"alias albumartist":  query.New(query.EntityItems).Where("albumartist", query.OpIs, "X").Build(),
+		"alias track":        query.New(query.EntityItems).Where("track", query.OpGt, 3).Build(),
+		"alias track_no":     query.New(query.EntityItems).Where("track_no", query.OpGt, 3).Build(),
+		"alias disc":         query.New(query.EntityItems).Where("disc", query.OpIs, 1).Build(),
+		"alias disc_no":      query.New(query.EntityItems).Where("disc_no", query.OpIs, 1).Build(),
+		"alias created_at": query.New(query.EntityItems).
+			Where("created_at", query.OpNotInTheLast, 7*nspDayNS).Build(),
+		"alias added": query.New(query.EntityItems).
+			Where("added", query.OpNotInTheLast, 7*nspDayNS).Build(),
+		"alias sort created_at": query.New(query.EntityItems).Where("artist", query.OpIs, "X").
+			OrderBy("created_at", true).Build(),
+		"alias sort track": query.New(query.EntityItems).Where("artist", query.OpIs, "X").
+			OrderBy("track", false).Build(),
+		// starred is a boolean in .nsp and 0/1 in WaxBin, so both the value conversion
+		// and the operator narrowing have to hold under every export property here.
+		"starred true":     query.New(query.EntityItems).Where("starred", query.OpIs, 1).Build(),
+		"starred false":    query.New(query.EntityItems).Where("starred", query.OpIs, 0).Build(),
+		"starred isNot":    query.New(query.EntityItems).Where("starred", query.OpIsNot, 1).Build(),
+		"starred ordered":  query.New(query.EntityItems).Where("starred", query.OpGt, 0).Build(),
+		"starred nonsense": query.New(query.EntityItems).Where("starred", query.OpIs, 5).Build(),
+		"starred legacy bool": query.New(query.EntityItems).
+			Where("starred", query.OpIs, true).Build(),
+		// The drop-not-widen case: the surviving sibling keeps the document exportable,
+		// so the partial path has to narrow the rule it hands back rather than leave the
+		// playlist matching more than it did.
+		"starred ordered with sibling": query.New(query.EntityItems).
+			Where("artist", query.OpIs, "X").Where("starred", query.OpGt, 0).Build(),
+	}
+}
+
+// TestNSPStarredConverts pins the conversion .nsp's boolean and WaxBin's 0/1 column
+// need. Without it an imported rule stored a Go bool the engine never produces itself,
+// and a natively written `starred is 1` exported as the integer 1 into a document that
+// defines the field as a boolean.
+func TestNSPStarredConverts(t *testing.T) {
+	for _, tc := range []struct {
+		doc  string
+		want int64
+	}{
+		{`{"all":[{"is":{"starred":true}}]}`, 1},
+		{`{"all":[{"is":{"starred":false}}]}`, 0},
+		{`{"all":[{"is":{"starred":1}}]}`, 1}, // a document that round-tripped through here
+	} {
+		q, err := ImportNSP([]byte(tc.doc))
+		if err != nil {
+			t.Fatalf("import %s: %v", tc.doc, err)
+		}
+		c, ok := q.Where.(query.And).Nodes[0].(query.Cond)
+		if !ok {
+			t.Fatalf("import %s: where = %#v", tc.doc, q.Where)
+		}
+		if got, ok := c.Value.(int64); !ok || got != tc.want {
+			t.Errorf("import %s stored %#v, want int64(%d)", tc.doc, c.Value, tc.want)
+		}
+	}
+
+	for _, tc := range []struct {
+		val  any
+		want string
+	}{
+		{1, `{"is":{"starred":true}}`},
+		{0, `{"is":{"starred":false}}`},
+		{int64(1), `{"is":{"starred":true}}`},
+		// A rule imported before the conversion existed holds a bool, which is already
+		// the value .nsp wants.
+		{true, `{"is":{"starred":true}}`},
+	} {
+		doc, err := ExportNSP(query.New(query.EntityItems).Where("starred", query.OpIs, tc.val).Build())
+		if err != nil {
+			t.Fatalf("export starred is %v: %v", tc.val, err)
+		}
+		if !strings.Contains(compact(doc), tc.want) {
+			t.Errorf("export starred is %v = %s, want it to contain %s", tc.val, compact(doc), tc.want)
+		}
+	}
+
+	// A round trip is byte-identical, which is the property the conversion has to keep.
+	const doc = `{"all":[{"is":{"starred":true}},{"isNot":{"starred":false}}]}`
+	q, err := ImportNSP([]byte(doc))
+	if err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	back, err := ExportNSP(q)
+	if err != nil {
+		t.Fatalf("export: %v", err)
+	}
+	if compact(back) != doc {
+		t.Errorf("round trip = %s, want %s", compact(back), doc)
+	}
+}
+
+// TestNSPStarredRefusesNonBoolean covers the two ways a starred rule has no .nsp form:
+// an operator that means nothing on a boolean, and a value the column can never hold.
+// Both used to render a document Navidrome would read as something else.
+func TestNSPStarredRefusesNonBoolean(t *testing.T) {
+	for _, tc := range []struct {
+		what string
+		q    query.Query
+		want string
+	}{
+		{"ordered", query.New(query.EntityItems).Where("starred", query.OpGt, 0).Build(),
+			"only is/isNot are supported on starred"},
+		{"ranged", query.New(query.EntityItems).WhereRange("starred", query.OpInRange, 0, 1).Build(),
+			"only is/isNot are supported on starred"},
+		{"substring", query.New(query.EntityItems).Where("starred", query.OpContains, 1).Build(),
+			"only is/isNot are supported on starred"},
+		{"out of range", query.New(query.EntityItems).Where("starred", query.OpIs, 5).Build(),
+			"neither 0 nor 1"},
+	} {
+		_, err := ExportNSP(tc.q)
+		if !waxerr.Is(err, waxerr.CodeUnsupported) {
+			t.Errorf("%s: export = %v, want CodeUnsupported", tc.what, err)
+		} else if !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: export said %q, want it to name %q", tc.what, err, tc.want)
+		}
+		// The partial export drops the condition rather than widening the playlist, and
+		// the report names what went.
+		rep := CheckNSPExport(tc.q)
+		if rep.OK() || len(rep.Gaps) == 0 {
+			t.Errorf("%s: report = %+v, want a gap", tc.what, rep)
+		}
+	}
+
+	// The import direction narrows the same way, so a document Navidrome would not have
+	// written does not become a stored rule nothing can export back.
+	irep, err := CheckNSPImport([]byte(`{"all":[{"gt":{"starred":true}}]}`))
+	if err != nil {
+		t.Fatalf("check import: %v", err)
+	}
+	if irep.OK() {
+		t.Error("importing an ordered starred rule reported no gap")
+	}
+	if _, err := ImportNSP([]byte(`{"all":[{"is":{"starred":"yes"}}]}`)); err == nil {
+		t.Error("importing a non-boolean starred value was accepted")
+	}
+}
+
+// compact strips the indentation the exporter writes, so a test can compare against the
+// one-line document it means.
+func compact(b []byte) string {
+	out := make([]byte, 0, len(b))
+	for _, c := range b {
+		if c != '\n' && c != ' ' {
+			out = append(out, c)
+		}
+	}
+	return string(out)
+}
+
+// TestExportNSPAliasSpellingsAgree is the case WaxDeck reported. The engine accepts
+// album_artist and albumartist as one column, so which spelling a stored rule holds is
+// arbitrary; strict ExportNSP used to refuse the one every other surface teaches, and
+// ExportNSPPartial dropped the condition and wrote a document matching strictly more
+// than the rule did. Both spellings now produce the same bytes, for all four pairs, in
+// conditions and in sorts.
+func TestExportNSPAliasSpellingsAgree(t *testing.T) {
+	pairs := []struct{ canon, alias string }{
+		{"album_artist", "albumartist"},
+		{"track_no", "track"},
+		{"disc_no", "disc"},
+		{"added", "created_at"},
+	}
+	for _, p := range pairs {
+		var a, b query.Query
+		if p.canon == "added" {
+			a = query.New(query.EntityItems).Where(p.canon, query.OpInTheLast, 30*nspDayNS).Build()
+			b = query.New(query.EntityItems).Where(p.alias, query.OpInTheLast, 30*nspDayNS).Build()
+		} else {
+			a = query.New(query.EntityItems).Where(p.canon, query.OpIs, "X").Build()
+			b = query.New(query.EntityItems).Where(p.alias, query.OpIs, "X").Build()
+		}
+		docA, errA := ExportNSP(a)
+		docB, errB := ExportNSP(b)
+		if errA != nil || errB != nil {
+			t.Fatalf("%s/%s: export errors %v / %v", p.canon, p.alias, errA, errB)
+		}
+		if string(docA) != string(docB) {
+			t.Errorf("%s/%s exported differently:\n %s\n %s", p.canon, p.alias, docA, docB)
+		}
+
+		// And as a sort key, the other lookup site.
+		sa := query.New(query.EntityItems).Where("artist", query.OpIs, "X").OrderBy(p.canon, false).Build()
+		sb := query.New(query.EntityItems).Where("artist", query.OpIs, "X").OrderBy(p.alias, false).Build()
+		docA, errA = ExportNSP(sa)
+		docB, errB = ExportNSP(sb)
+		if errA != nil || errB != nil {
+			t.Fatalf("%s/%s sort: export errors %v / %v", p.canon, p.alias, errA, errB)
+		}
+		if string(docA) != string(docB) {
+			t.Errorf("%s/%s sorted differently:\n %s\n %s", p.canon, p.alias, docA, docB)
+		}
+	}
+}
+
+// TestImportNSPStoresCanonicalAlbumArtist pins the forward map's flip. Every rule
+// imported from a Navidrome file used to store the one spelling nothing else in WaxBin
+// teaches, which is what made the export refusal reachable at all.
+func TestImportNSPStoresCanonicalAlbumArtist(t *testing.T) {
+	q, err := ImportNSP([]byte(`{"all":[{"is":{"albumartist":"X"}}]}`))
+	if err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	all, ok := q.Where.(query.And)
+	if !ok || len(all.Nodes) != 1 {
+		t.Fatalf("where = %#v, want one condition", q.Where)
+	}
+	c, ok := all.Nodes[0].(query.Cond)
+	if !ok || c.Field != "album_artist" {
+		t.Errorf("imported field = %#v, want album_artist", all.Nodes[0])
+	}
+	// And it exports back under .nsp's own spelling, so the file round-trips.
+	doc, err := ExportNSP(q)
+	if err != nil {
+		t.Fatalf("export: %v", err)
+	}
+	if !strings.Contains(string(doc), `"albumartist"`) {
+		t.Errorf("exported %s, want the .nsp spelling albumartist", doc)
+	}
+}
+
+// TestWidenAliasesKeepsExplicit pins the one rule the map builder has: a spelling the
+// forward map named explicitly wins over one the widening would add.
+func TestWidenAliasesKeepsExplicit(t *testing.T) {
+	got := widenAliases(map[string]string{"album_artist": "explicit", "albumartist": "alsoExplicit"})
+	if got["album_artist"] != "explicit" || got["albumartist"] != "alsoExplicit" {
+		t.Errorf("widenAliases overwrote an explicit entry: %v", got)
+	}
+	got = widenAliases(map[string]string{"track_no": "tracknumber"})
+	if got["track"] != "tracknumber" {
+		t.Errorf("widenAliases did not widen track_no: %v", got)
+	}
+	if len(got) != 2 {
+		t.Errorf("widenAliases produced %v, want exactly the pair", got)
+	}
+}
+
+// TestNSPExportableFields is the list WaxDeck reads to know which fields survive a
+// conversion. Every entry has to be a field the exporter really renders, aliases
+// included, and every field the maps hold has to appear.
+func TestNSPExportableFields(t *testing.T) {
+	fields := NSPExportableFields()
+	if !slices.IsSorted(fields) {
+		t.Errorf("NSPExportableFields is not sorted: %v", fields)
+	}
+	for _, want := range []string{"album_artist", "albumartist", "track", "track_no",
+		"disc", "disc_no", "added", "created_at", "last_played", "rating", "title"} {
+		if !slices.Contains(fields, want) {
+			t.Errorf("NSPExportableFields is missing %q: %v", want, fields)
+		}
+	}
+	if slices.Contains(fields, "path") {
+		t.Errorf("NSPExportableFields names path, which no export can carry: %v", fields)
+	}
+	for _, f := range fields {
+		_, cond := wbFieldToNSP[f]
+		_, date := wbDateFieldToNSP[f]
+		if !cond && !date {
+			t.Errorf("NSPExportableFields names %q, which neither export map holds", f)
+		}
+	}
+
+	// invert's stated invariant: no forward entry is lost on the way back, which holds
+	// only while each forward map's values stay distinct.
+	for nspName, field := range nspFieldToWB {
+		if wbFieldToNSP[field] != nspName {
+			t.Errorf("%s maps to %q, which reverses to %q", nspName, field, wbFieldToNSP[field])
+		}
+	}
+	for nspName, field := range nspDateFieldToWB {
+		if wbDateFieldToNSP[field] != nspName {
+			t.Errorf("date %s maps to %q, which reverses to %q", nspName, field, wbDateFieldToNSP[field])
+		}
 	}
 }
 
@@ -636,6 +913,8 @@ func nspPartialRefusals() map[string]bool {
 		"notContains on date":   true,
 		"notContains bad field": true,
 		"nothing survives":      true,
+		"starred ordered":       true,
+		"starred nonsense":      true,
 	}
 }
 

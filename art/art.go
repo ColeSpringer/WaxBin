@@ -1,9 +1,10 @@
 // Package art contains WaxBin's pure-Go image handling for the read-side art
 // resolver: content hashing for the content-addressed store, format and dimension
-// probing, and thumbnail generation (decode, scale to fit, re-encode).
-// JPEG/PNG/GIF use standard library decoders; WebP uses x/image. Formats without
-// a registered decoder, such as AVIF or HEIC, are stored and served unscaled by
-// the resolver. No CGO is used.
+// probing, thumbnail generation (decode, scale to fit, re-encode), and folding a
+// caller-supplied format name to the short token the store holds.
+// JPEG/PNG/GIF use standard library decoders; WebP, BMP and TIFF use x/image.
+// Formats without a registered decoder, such as AVIF or HEIC, are stored and served
+// unscaled by the resolver. No CGO is used.
 package art
 
 import (
@@ -14,8 +15,12 @@ import (
 	"image"
 	"image/jpeg"
 	"image/png"
+	"mime"
+	"strings"
 
+	_ "golang.org/x/image/bmp" // register the BMP decoder with image.Decode
 	xdraw "golang.org/x/image/draw"
+	_ "golang.org/x/image/tiff" // register the TIFF decoder with image.Decode
 	_ "golang.org/x/image/webp" // register the WebP decoder with image.Decode
 
 	_ "image/gif" // register the GIF decoder with image.Decode
@@ -60,6 +65,84 @@ func SniffExotic(data []byte) (format string, ok bool) {
 		return "heic", true
 	}
 	return "", false
+}
+
+// NormalizeFormat folds a caller-supplied image format to the short token
+// ArtImage.Format holds. It accepts the token itself ("jpeg"), a bare extension
+// ("jpg"), or a media type from a transport ("image/jpeg; charset=binary"), and falls
+// back to an image media type's subtype for a format WaxBin has no decoder for, since
+// that is still the only description the stored cover will ever have.
+//
+// Anything it cannot read as a format normalizes to "", which every caller reads as
+// "the caller named nothing" and answers with its own policy. That covers a media type
+// naming something other than an image, and any subtype outside the token shape below:
+// what reaches here is a header a remote server chose or a flag a person typed, and
+// the result is stored, reported over the proxy, and printed, so an unbounded string
+// has no business becoming a format. Its own output always normalizes to itself.
+func NormalizeFormat(s string) string {
+	s = strings.TrimSpace(s)
+	if mt, _, err := mime.ParseMediaType(s); err == nil {
+		s = mt
+	}
+	// A media type ParseMediaType refused still arrives with its parameters attached.
+	if i := strings.IndexByte(s, ';'); i >= 0 {
+		s = s[:i]
+	}
+	if typ, sub, ok := strings.Cut(s, "/"); ok {
+		// A media type names a format only when it is an image type. text/html and
+		// application/octet-stream are what a server hands back an error page or an
+		// undeclared blob under, and reading "html" or "octet-stream" as a format would
+		// store the very bytes an unrecognized-image refusal exists to turn away.
+		if !strings.EqualFold(strings.TrimSpace(typ), "image") {
+			return ""
+		}
+		s = sub
+	}
+	s = strings.ToLower(strings.TrimSpace(strings.TrimPrefix(s, ".")))
+	if !formatToken(s) {
+		return ""
+	}
+	// Fold onto the names image.Decode reports, so one format cannot store under two
+	// tokens. ID3v2.2 writes three-character codes, plenty of taggers write JPG, and
+	// the x- spellings are what older servers send.
+	switch s {
+	case "jpg", "jpe":
+		return "jpeg"
+	case "tif":
+		return "tiff"
+	case "heif":
+		return "heic"
+	case "x-png":
+		return "png"
+	case "x-bmp", "x-ms-bmp":
+		return "bmp"
+	case "x-tiff":
+		return "tiff"
+	}
+	return s
+}
+
+// maxFormatToken bounds a format at more than any real one needs and far less than a
+// header or a flag can carry.
+const maxFormatToken = 32
+
+// formatToken reports whether s has the shape of a media type's subtype: lowercase
+// letters, digits, and the three punctuation marks the real ones use (svg+xml,
+// x-icon, jpeg2000.1). It is what turns "*", "jpeg, image/jpeg", an HTML fragment, and
+// ID3v2's "-->" URL sentinel into "the caller named nothing".
+func formatToken(s string) bool {
+	if s == "" || len(s) > maxFormatToken {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= '0' && c <= '9', c == '+', c == '-', c == '.':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // Info is what the store needs to know about an image it is about to hold: the content

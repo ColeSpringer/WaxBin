@@ -156,7 +156,7 @@ func TestArtProvenancePerOrigin(t *testing.T) {
 		t.Errorf("directory cover = %q/%q, want sidecar with no source_url", got, url)
 	}
 
-	if err := st.SetItemArt(ctx, tagged, model.ArtRoleFront, coverPNG(t, 4), model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
+	if err := st.SetItemArt(ctx, tagged, model.ArtRoleFront, coverPNG(t, 4), "", model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
 		t.Fatalf("SetItemArt: %v", err)
 	}
 	if got, _, _ := artRow(t, db, "track", itemRowID(t, db, tagged)); got != "user" {
@@ -424,7 +424,7 @@ func TestLockedEntityCoverSurvivesEnrichment(t *testing.T) {
 	rgPID := model.PID(scalarQueryStr(t, db, "SELECT pid FROM release_group WHERE id = ?", rgID))
 
 	chosen := coverPNG(t, 11)
-	if err := st.SetEntityArt(ctx, model.ArtReleaseGroup, rgPID, model.ArtRoleFront, chosen, model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
+	if err := st.SetEntityArt(ctx, model.ArtReleaseGroup, rgPID, model.ArtRoleFront, chosen, "", model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
 		t.Fatalf("SetEntityArt: %v", err)
 	}
 	chosenHash := art.Hash(chosen)
@@ -456,7 +456,7 @@ func TestLockedEntityCoverSurvivesEnrichment(t *testing.T) {
 	}
 
 	// Unlocking lets the next pass fill it.
-	if err := st.SetEntityArt(ctx, model.ArtReleaseGroup, rgPID, model.ArtRoleFront, chosen, model.Attribution{Source: model.SourceUser}, model.LockOf(false), true); err != nil {
+	if err := st.SetEntityArt(ctx, model.ArtReleaseGroup, rgPID, model.ArtRoleFront, chosen, "", model.Attribution{Source: model.SourceUser}, model.LockOf(false), true); err != nil {
 		t.Fatalf("SetEntityArt unlock: %v", err)
 	}
 	apply()
@@ -489,7 +489,7 @@ func TestLockedShowCoverSurvivesFeedSync(t *testing.T) {
 	podID := scalarInt64(t, db, "SELECT id FROM podcast WHERE pid = ?", string(feed.PodcastPID))
 
 	chosen := coverPNG(t, 21)
-	if err := st.SetEntityArt(ctx, model.ArtPodcast, feed.PodcastPID, model.ArtRoleFront, chosen, model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
+	if err := st.SetEntityArt(ctx, model.ArtPodcast, feed.PodcastPID, model.ArtRoleFront, chosen, "", model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
 		t.Fatalf("SetEntityArt: %v", err)
 	}
 	sync("http://feed.example/two.png", 22)
@@ -498,7 +498,7 @@ func TestLockedShowCoverSurvivesFeedSync(t *testing.T) {
 		t.Fatalf("locked show cover was replaced by a feed sync")
 	}
 
-	if err := st.SetEntityArt(ctx, model.ArtPodcast, feed.PodcastPID, model.ArtRoleFront, chosen, model.Attribution{Source: model.SourceUser}, model.LockOf(false), true); err != nil {
+	if err := st.SetEntityArt(ctx, model.ArtPodcast, feed.PodcastPID, model.ArtRoleFront, chosen, "", model.Attribution{Source: model.SourceUser}, model.LockOf(false), true); err != nil {
 		t.Fatalf("SetEntityArt unlock: %v", err)
 	}
 	sync("http://feed.example/three.png", 23)
@@ -519,7 +519,7 @@ func TestArtLockIsFrontRoleOnly(t *testing.T) {
 	albumID := scalarInt64(t, db, "SELECT id FROM album WHERE title = 'A'")
 
 	// A back cover asking to be locked records no lock at all.
-	if err := st.SetEntityArt(ctx, model.ArtAlbum, albumPID, model.ArtRoleBack, coverPNG(t, 32), model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
+	if err := st.SetEntityArt(ctx, model.ArtAlbum, albumPID, model.ArtRoleBack, coverPNG(t, 32), "", model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
 		t.Fatalf("set back: %v", err)
 	}
 	if n := scalarInt64(t, db,
@@ -528,14 +528,14 @@ func TestArtLockIsFrontRoleOnly(t *testing.T) {
 		t.Fatalf("a back-role set recorded %d art lock rows, want 0", n)
 	}
 	// Which is why a second back set is not refused, where a front one would be.
-	if err := st.SetEntityArt(ctx, model.ArtAlbum, albumPID, model.ArtRoleBack, coverPNG(t, 33), model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
+	if err := st.SetEntityArt(ctx, model.ArtAlbum, albumPID, model.ArtRoleBack, coverPNG(t, 33), "", model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
 		t.Errorf("a second back set was refused, so the front-only scope leaked: %v", err)
 	}
 
-	if err := st.SetEntityArt(ctx, model.ArtAlbum, albumPID, model.ArtRoleFront, coverPNG(t, 31), model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
+	if err := st.SetEntityArt(ctx, model.ArtAlbum, albumPID, model.ArtRoleFront, coverPNG(t, 31), "", model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
 		t.Fatalf("set front: %v", err)
 	}
-	if err := st.SetEntityArt(ctx, model.ArtAlbum, albumPID, model.ArtRoleFront, coverPNG(t, 34), model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); !waxerr.Is(err, waxerr.CodeLocked) {
+	if err := st.SetEntityArt(ctx, model.ArtAlbum, albumPID, model.ArtRoleFront, coverPNG(t, 34), "", model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); !waxerr.Is(err, waxerr.CodeLocked) {
 		t.Errorf("second front set = %v, want CodeLocked", err)
 	}
 	roles, err := st.ArtRoles(ctx, model.EntityRef{Type: model.ArtAlbum, PID: albumPID})
@@ -564,10 +564,10 @@ func TestItemArtLockHasOneHome(t *testing.T) {
 	db := roConn(t, dbPath)
 
 	// Locked through the entity API, refused through the item API.
-	if err := st.SetEntityArt(ctx, model.ArtTrack, pid, model.ArtRoleFront, coverPNG(t, 61), model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
+	if err := st.SetEntityArt(ctx, model.ArtTrack, pid, model.ArtRoleFront, coverPNG(t, 61), "", model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
 		t.Fatalf("SetEntityArt: %v", err)
 	}
-	if err := st.SetItemArt(ctx, pid, model.ArtRoleFront, coverPNG(t, 62), model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); !waxerr.Is(err, waxerr.CodeLocked) {
+	if err := st.SetItemArt(ctx, pid, model.ArtRoleFront, coverPNG(t, 62), "", model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); !waxerr.Is(err, waxerr.CodeLocked) {
 		t.Errorf("SetItemArt after an entity-API lock = %v, want CodeLocked", err)
 	}
 	// It landed in the item-scoped table, which is the one the scan reads.
@@ -581,10 +581,10 @@ func TestItemArtLockHasOneHome(t *testing.T) {
 	}
 
 	// And back the other way, with both read surfaces agreeing.
-	if err := st.SetItemArt(ctx, pid, model.ArtRoleFront, coverPNG(t, 63), model.Attribution{Source: model.SourceUser}, model.LockOf(true), true); err != nil {
+	if err := st.SetItemArt(ctx, pid, model.ArtRoleFront, coverPNG(t, 63), "", model.Attribution{Source: model.SourceUser}, model.LockOf(true), true); err != nil {
 		t.Fatalf("forced SetItemArt: %v", err)
 	}
-	if err := st.SetEntityArt(ctx, model.ArtTrack, pid, model.ArtRoleFront, coverPNG(t, 64), model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); !waxerr.Is(err, waxerr.CodeLocked) {
+	if err := st.SetEntityArt(ctx, model.ArtTrack, pid, model.ArtRoleFront, coverPNG(t, 64), "", model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); !waxerr.Is(err, waxerr.CodeLocked) {
 		t.Errorf("SetEntityArt after an item-API lock = %v, want CodeLocked", err)
 	}
 	roles, err := st.ArtRoles(ctx, model.EntityRef{Type: model.ArtTrack, PID: pid})
@@ -625,7 +625,7 @@ func TestEpisodeArtLockSurvivesRedownload(t *testing.T) {
 	}
 
 	chosen := coverPNG(t, 70)
-	if err := st.SetEntityArt(ctx, model.ArtEpisode, ep, model.ArtRoleFront, chosen, model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
+	if err := st.SetEntityArt(ctx, model.ArtEpisode, ep, model.ArtRoleFront, chosen, "", model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
 		t.Fatalf("SetEntityArt episode: %v", err)
 	}
 	// The download path re-attaches the feed's image on every fetch.
@@ -709,7 +709,7 @@ func TestFieldProvenanceOverlaysArt(t *testing.T) {
 	// An item whose only cover is the album's gets no art row: inherited art is not
 	// the item's own field.
 	albumPID := model.PID(scalarQueryStr(t, db, "SELECT pid FROM album WHERE title = 'B'"))
-	if err := st.SetEntityArt(ctx, model.ArtAlbum, albumPID, model.ArtRoleFront, coverPNG(t, 41), model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
+	if err := st.SetEntityArt(ctx, model.ArtAlbum, albumPID, model.ArtRoleFront, coverPNG(t, 41), "", model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("SetEntityArt album: %v", err)
 	}
 	if err := st.UnlockField(ctx, bare, "art"); err != nil {
@@ -733,7 +733,7 @@ func TestArtSourceQueryField(t *testing.T) {
 
 	db := roConn(t, dbPath)
 	albumC := model.PID(scalarQueryStr(t, db, "SELECT pid FROM album WHERE title = 'C'"))
-	if err := st.SetEntityArt(ctx, model.ArtAlbum, albumC, model.ArtRoleFront, coverPNG(t, 52), model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
+	if err := st.SetEntityArt(ctx, model.ArtAlbum, albumC, model.ArtRoleFront, coverPNG(t, 52), "", model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("SetEntityArt: %v", err)
 	}
 
@@ -771,4 +771,56 @@ func scalarInt64(t *testing.T, db *sql.DB, q string, args ...any) int64 {
 		t.Fatalf("query %q: %v", q, err)
 	}
 	return n
+}
+
+// TestGeneratedCoverReportsItself is the vocabulary gap WaxDeck reported: a playlist
+// mosaic is none of tag, user, enrichment, sidecar or feed, so it stored as user
+// through OrUser and a picture nobody chose reported itself as hand-set. It now stores
+// and reads back as what it is, and its refusals are the ones user has.
+func TestGeneratedCoverReportsItself(t *testing.T) {
+	ctx := context.Background()
+	st, dbPath, _ := openStoreAt(t)
+	db := roConn(t, dbPath)
+	pl, err := st.CreatePlaylist(ctx, "Mosaic", "", model.PlaylistStatic, "", nil)
+	if err != nil {
+		t.Fatalf("create playlist: %v", err)
+	}
+	attr := model.Attribution{Source: model.SourceGenerated}
+
+	if err := st.SetEntityArt(ctx, model.ArtPlaylist, pl, model.ArtRoleFront,
+		coverPNG(t, 11), "", attr, model.LockUnchanged, false); err != nil {
+		t.Fatalf("set generated cover: %v", err)
+	}
+	plID := scalarInt64(t, db, "SELECT id FROM playlist WHERE pid = ?", string(pl))
+	src, provider, url := artRow(t, db, "playlist", plID)
+	if src != "generated" || provider != "" || url != "" {
+		t.Errorf("stored cover = %q/%q/%q, want generated with no provider and no url", src, provider, url)
+	}
+
+	// The read surface agrees, which is the whole point: a consumer marking covers can
+	// tell a composition from a hand-set one.
+	prov, err := st.ArtProvenance(ctx, model.EntityRef{Type: model.ArtPlaylist, PID: pl}, model.ArtRoleFront)
+	if err != nil {
+		t.Fatalf("art provenance: %v", err)
+	}
+	if prov.Source != model.SourceGenerated {
+		t.Errorf("ArtProvenance source = %q, want generated", prov.Source)
+	}
+
+	// A source URL rides along fine, the way it does for user; a provider does not,
+	// since nothing outside WaxBin supplied a picture WaxBin composed.
+	if err := st.SetEntityArt(ctx, model.ArtPlaylist, pl, model.ArtRoleFront, coverPNG(t, 12), "",
+		model.Attribution{Source: model.SourceGenerated, SourceURL: "waxbin:mosaic"}, model.LockUnchanged, false); err != nil {
+		t.Errorf("generated cover with a source url: %v", err)
+	}
+	if err := st.SetEntityArt(ctx, model.ArtPlaylist, pl, model.ArtRoleFront, coverPNG(t, 13), "",
+		model.Attribution{Source: model.SourceGenerated, Provider: "somebody"}, model.LockUnchanged,
+		false); !waxerr.Is(err, waxerr.CodeInvalid) {
+		t.Errorf("generated cover with a provider = %v, want CodeInvalid", err)
+	}
+
+	// It is an artifact value only: a scalar field row still refuses it.
+	if err := st.SetFieldProvenance(ctx, "nosuch", "genre", attr, "Jazz", false); !waxerr.Is(err, waxerr.CodeInvalid) {
+		t.Errorf("generated on a scalar field = %v, want CodeInvalid", err)
+	}
 }

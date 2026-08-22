@@ -87,7 +87,17 @@ import (
 // maintenance hand-off for exactly these calls, which is the pause they exist to
 // remove. Nothing has shipped yet, so the total fallback a bump causes costs a
 // rebuild and nothing else.
-const ProtocolVersion = 12
+//
+// Version 13 added Format on the two art params structs, for a picture whose bytes no
+// decoder here recognizes, and the generated provenance source. Neither is bump-forcing
+// under the rule the entries above use, which is misdrive and not refusal: a version-12
+// server drops Format and refuses the cover with CodeInvalid, and refuses an unknown
+// source value the same way, so both fail loudly rather than storing the wrong thing.
+// The bump is taken for the add_root reason instead. It makes the fallback total, so a
+// client built against 12 reads a 13 server as absent from the first frame rather than
+// discovering a refusal partway through a command, and neither version has shipped, so
+// it costs a rebuild and nothing else.
+const ProtocolVersion = 13
 
 // Method names for the proxied operations: the fast request/response catalog
 // mutations, the reads a mutating command needs for its confirmation output, the
@@ -319,8 +329,10 @@ type SetChaptersParams struct {
 // named role; an empty Role means the front cover. The image bytes travel
 // base64-encoded in the JSON frame. Source, Provider and SourceURL record where the
 // picture came from, so a client that fetched it itself is not stored as having chosen
-// it by hand; an empty Source means a user set. Lock is a model.LockChange, whose empty
-// value leaves the stored lock alone.
+// it by hand; an empty Source means a user set. Format names the image's format for a
+// picture whose bytes cannot say so themselves (a BMP or TIFF cover); it is a fallback
+// the decoded format beats, and it takes a short token, a bare extension, or an image
+// media type. Lock is a model.LockChange, whose empty value leaves the stored lock alone.
 type SetItemArtParams struct {
 	ItemPID   string `json:"itemPid"`
 	Role      string `json:"role,omitempty"`
@@ -328,6 +340,7 @@ type SetItemArtParams struct {
 	Source    string `json:"source,omitempty"`
 	Provider  string `json:"provider,omitempty"`
 	SourceURL string `json:"sourceUrl,omitempty"`
+	Format    string `json:"format,omitempty"`
 	Lock      string `json:"lock"`
 	Force     bool   `json:"force"`
 	WriteBack bool   `json:"writeBack"`
@@ -342,8 +355,8 @@ type SetItemArtResult struct {
 
 // SetEntityArtParams is the set_entity_art request payload (album/artist/... covers).
 // Lock and Force govern the entity's "art" curation lock, and apply to the front role
-// alone, the same way SetItemArtParams' do for an item. Source, Provider and SourceURL
-// carry the same meaning there too.
+// alone, the same way SetItemArtParams' do for an item. Source, Provider, SourceURL and
+// Format carry the same meaning there too.
 type SetEntityArtParams struct {
 	EntityType string `json:"entityType"`
 	EntityPID  string `json:"entityPid"`
@@ -352,6 +365,7 @@ type SetEntityArtParams struct {
 	Source     string `json:"source,omitempty"`
 	Provider   string `json:"provider,omitempty"`
 	SourceURL  string `json:"sourceUrl,omitempty"`
+	Format     string `json:"format,omitempty"`
 	Lock       string `json:"lock"`
 	Force      bool   `json:"force"`
 	WriteBack  bool   `json:"writeBack"`

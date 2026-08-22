@@ -178,6 +178,11 @@ func TestCurationRoundTrip(t *testing.T) {
 			if p.Source != "enrichment" || p.Provider != "itunes" || p.SourceURL != "https://itunes.example/c.png" {
 				t.Errorf("item art attribution = %q/%q/%q, want the caller's", p.Source, p.Provider, p.SourceURL)
 			}
+			// The v13 addition. A client holding a Content-Type sends it verbatim; the
+			// facade on the far side is what folds it to a token.
+			if p.Format != "image/tiff" {
+				t.Errorf("item art format = %q, want the caller's image/tiff", p.Format)
+			}
 			return nil, nil
 		},
 		proxy.MethodSetEntityArt: func(_ context.Context, raw json.RawMessage) (any, error) {
@@ -188,6 +193,9 @@ func TestCurationRoundTrip(t *testing.T) {
 			}
 			if p.Source != "" || p.Provider != "" {
 				t.Errorf("unstamped entity art carried %q/%q, want neither", p.Source, p.Provider)
+			}
+			if p.Format != "bmp" {
+				t.Errorf("entity art format = %q, want bmp", p.Format)
 			}
 			return nil, nil
 		},
@@ -222,7 +230,7 @@ func TestCurationRoundTrip(t *testing.T) {
 	artAttr := model.Attribution{
 		Source: model.SourceEnrichment, Provider: "itunes", SourceURL: "https://itunes.example/c.png",
 	}
-	if _, err := c.SetItemArt(ctx, "i1", model.ArtRoleBack, []byte{1, 2, 3, 4}, artAttr, model.LockOn, false, false); err != nil {
+	if _, err := c.SetItemArt(ctx, "i1", model.ArtRoleBack, []byte{1, 2, 3, 4}, "image/tiff", artAttr, model.LockOn, false, false); err != nil {
 		t.Fatalf("set item art: %v", err)
 	}
 	if len(gotArt) != 4 || gotArt[0] != 1 {
@@ -230,7 +238,7 @@ func TestCurationRoundTrip(t *testing.T) {
 	}
 
 	// Unstamped and lock-unchanged: the wire carries the caller's silence as silence.
-	if _, err := c.SetEntityArt(ctx, model.ArtAlbum, "a1", model.ArtRoleFront, []byte{9},
+	if _, err := c.SetEntityArt(ctx, model.ArtAlbum, "a1", model.ArtRoleFront, []byte{9}, "bmp",
 		model.Attribution{}, model.LockUnchanged, false, false); err != nil {
 		t.Fatalf("set entity art: %v", err)
 	}

@@ -127,7 +127,7 @@ func reportProvenance(cmd *cobra.Command, g *globals, lib provenanceReader, pid 
 // The --source vocabularies the two stamped curation commands show in their help. They
 // are display strings only; the gate is the model's own ValidForArt/ValidForLyrics.
 const (
-	artSourceList    = "tag|sidecar|user|enrichment|feed"
+	artSourceList    = "tag|sidecar|user|enrichment|feed|generated"
 	lyricsSourceList = "tag|sidecar|user|enrichment"
 )
 

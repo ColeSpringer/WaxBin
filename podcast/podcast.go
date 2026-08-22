@@ -539,6 +539,12 @@ func (s *Service) fetchImage(ctx context.Context, url string) *model.ArtImage {
 	// exotic-but-valid image attaches nothing, and since the sync compares against the
 	// cover it holds rather than the URL the feed advertises, nothing would ever advance
 	// and every later sync would re-download it.
+	//
+	// The response's own Content-Type is deliberately not a fallback here, where it is
+	// one for a hand-set cover. A remote server naming its bytes image/anything would get
+	// them attached, and upsert then skips the fetch while the feed advertises the same
+	// URL, so one bad answer pins a broken cover until someone intervenes. Discarding it
+	// costs a re-download on the next sync and heals itself.
 	info := art.Describe(resp.Body)
 	if info.Format == "" {
 		// Re-probe for the reason, the way the cover-art provider does: a feed serving an

@@ -925,7 +925,7 @@ func TestHasArtAcrossKinds(t *testing.T) {
 	// album leaves its own cover absent, which is exactly what has_art exists
 	// to find.
 	albumPID := scalarStr(t, st, "SELECT pid FROM album WHERE title = ?", "Al")
-	if err := st.SetEntityArt(ctx, model.ArtAlbum, model.PID(albumPID), model.ArtRoleFront, tinyPNG(t), model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
+	if err := st.SetEntityArt(ctx, model.ArtAlbum, model.PID(albumPID), model.ArtRoleFront, tinyPNG(t), "", model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("set album art: %v", err)
 	}
 	if n := countWhere(t, st, "has_art", query.OpIs, 0); n != 2 {

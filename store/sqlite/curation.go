@@ -312,7 +312,10 @@ func nonUserChapterExtentsTx(ctx context.Context, tx *sql.Tx, itemID int64) (map
 // write and nothing else: it no longer rewrites the lock, so a forced set leaves an
 // existing lock standing unless the caller asked for a change. A clear deletes only the
 // named role, leaving the item's other slots intact.
-func (s *Store) SetItemArt(ctx context.Context, itemPID model.PID, role model.ArtRole, raw []byte, attr model.Attribution, lock model.LockChange, force bool) error {
+//
+// format is the caller's own name for the picture, used only when the bytes cannot name
+// themselves (see probeArtImage). It is ignored on a clear.
+func (s *Store) SetItemArt(ctx context.Context, itemPID model.PID, role model.ArtRole, raw []byte, format string, attr model.Attribution, lock model.LockChange, force bool) error {
 	const op = "store.SetItemArt"
 	if role == "" {
 		role = model.ArtRoleFront
@@ -332,7 +335,7 @@ func (s *Store) SetItemArt(ctx context.Context, itemPID model.PID, role model.Ar
 	}
 	var img *model.ArtImage
 	if len(raw) > 0 {
-		i, err := probeArtImage(raw, attr)
+		i, err := probeArtImage(raw, format, attr)
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeInvalid, op, err)
 		}
@@ -394,7 +397,10 @@ func (s *Store) SetItemArt(ctx context.Context, itemPID model.PID, role model.Ar
 // The lock is recorded in whichever table governs the entity type (artLockIsItemScoped),
 // so a track cover set through here and one set through SetItemArt share one lock, and
 // the scan, enrichment, and feed-sync guards all read the lock they were written.
-func (s *Store) SetEntityArt(ctx context.Context, entityType model.ArtEntity, entityPID model.PID, role model.ArtRole, raw []byte, attr model.Attribution, lock model.LockChange, force bool) error {
+//
+// format carries the same meaning it does on SetItemArt: the caller's own name for a
+// picture the bytes cannot name, ignored on a clear.
+func (s *Store) SetEntityArt(ctx context.Context, entityType model.ArtEntity, entityPID model.PID, role model.ArtRole, raw []byte, format string, attr model.Attribution, lock model.LockChange, force bool) error {
 	const op = "store.SetEntityArt"
 	if !entityType.Valid() {
 		return waxerr.New(waxerr.CodeInvalid, op, "unknown art entity type: "+string(entityType))
@@ -416,7 +422,7 @@ func (s *Store) SetEntityArt(ctx context.Context, entityType model.ArtEntity, en
 	}
 	var img *model.ArtImage
 	if len(raw) > 0 {
-		i, err := probeArtImage(raw, attr)
+		i, err := probeArtImage(raw, format, attr)
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeInvalid, op, err)
 		}
@@ -575,9 +581,20 @@ func checkArtImage(img *model.ArtImage, entityType, role string) error {
 
 // probeArtImage builds a storable art image from raw bytes: its content hash always,
 // and its format/dimensions when the bytes decode (or its magic-sniffed format for an
-// exotic AVIF/HEIC cover). Undecodable bytes with no recognizable magic are rejected.
-func probeArtImage(raw []byte, attr model.Attribution) (*model.ArtImage, error) {
+// exotic AVIF/HEIC cover), falling back to the format the caller named for a picture
+// nothing here recognizes. The fallback never overrides a decoded format: naming png
+// over JPEG bytes stores jpeg. The refusal narrows to its true meaning, that neither
+// the caller nor the bytes could name this picture at all, which is still more likely
+// the wrong file than an exotic one.
+//
+// format is normalized here rather than taken on trust. NormalizeFormat is idempotent,
+// so the Library facade normalizing first costs this nothing, and a precondition no
+// caller could be held to is worse than a second call.
+func probeArtImage(raw []byte, format string, attr model.Attribution) (*model.ArtImage, error) {
 	info := art.Describe(raw)
+	if info.Format == "" {
+		info.Format = art.NormalizeFormat(format)
+	}
 	if info.Format == "" {
 		return nil, errors.New("unrecognized image data")
 	}

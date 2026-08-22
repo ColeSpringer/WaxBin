@@ -50,7 +50,9 @@ const (
 // reference, mapping each to a column expression in the items SELECT (aliases:
 // pi=playable_item, t=track, bk=book, srs=series, f=primary file, ps=the current
 // user's play_state). A field absent here is rejected by the compiler, which is
-// what keeps untrusted names out of SQL.
+// what keeps untrusted names out of SQL. The map holds one entry per column; the
+// alternate spellings the engine also accepts are copied in by the init below, from
+// model.QueryFieldAliases.
 //
 // The artist/album_artist/album/genre/year columns COALESCE the track values with
 // the book's author/series/year and the podcast's title, mirroring itemViewCols, so
@@ -199,11 +201,9 @@ var itemFields = query.FieldMap{
 	"title":        {Expr: "pi.title", Kind: query.KindText},
 	"sort_key":     {Expr: "pi.sort_key", Kind: query.KindText},
 	"added":        {Expr: "pi.created_at", Kind: query.KindTime},
-	"created_at":   {Expr: "pi.created_at", Kind: query.KindTime},
 	"updated_at":   {Expr: "pi.updated_at", Kind: query.KindTime},
 	"artist":       {Expr: "COALESCE(NULLIF(t.artist,''), bk.author, pod.title, '')", Kind: query.KindText},
 	"album_artist": {Expr: "COALESCE(NULLIF(t.album_artist,''), bk.author, pod.title, '')", Kind: query.KindText},
-	"albumartist":  {Expr: "COALESCE(NULLIF(t.album_artist,''), bk.author, pod.title, '')", Kind: query.KindText},
 	"album":        {Expr: "COALESCE(NULLIF(t.album,''), srs.name, pod.title, '')", Kind: query.KindText},
 	"podcast":      {Expr: "COALESCE(pod.title, '')", Kind: query.KindText},
 	"genre":        {Expr: "COALESCE(NULLIF(t.genre,''), bk.genre, '')", Kind: query.KindText},
@@ -214,9 +214,7 @@ var itemFields = query.FieldMap{
 	"composer_sort": {Expr: "COALESCE(t.composer_sort,'')", Kind: query.KindText},
 	"author_sort":   {Expr: "COALESCE(bk.author_sort,'')", Kind: query.KindText},
 	"year":          {Expr: itemYearExpr, Kind: query.KindInt},
-	"track":         {Expr: "t.track_no", Kind: query.KindInt},
 	"track_no":      {Expr: "t.track_no", Kind: query.KindInt},
-	"disc":          {Expr: "t.disc_no", Kind: query.KindInt},
 	"disc_no":       {Expr: "t.disc_no", Kind: query.KindInt},
 	"season":        {Expr: "ep.season", Kind: query.KindInt},
 	"published":     {Expr: "ep.pub_date", Kind: query.KindTime},
@@ -301,7 +299,9 @@ var itemFields = query.FieldMap{
 	// Where the item's own front cover came from, '' when it has none, on has_art's slot
 	// switch and own-art-only rule. It returns tag, sidecar, user, feed, or '': enrichment
 	// writes covers to the release_group and album rungs alone, so `art_source is
-	// enrichment` matches nothing by construction, not for want of data.
+	// enrichment` matches nothing by construction, not for want of data. generated is
+	// reachable here, unlike enrichment: `art set --source generated` on a track writes
+	// exactly this row.
 	"art_source": {Expr: "COALESCE((SELECT asq.source FROM art_map asq WHERE asq.entity_type = " + itemArtSlotExpr +
 		" AND asq.entity_id = pi.id AND asq.role = 'front'), '')", Kind: query.KindText},
 
@@ -322,6 +322,23 @@ var itemFields = query.FieldMap{
 	// The ps alias joins on play_state's primary key, so a filter or sort here cannot
 	// use play_state_progress; that index serves the in-progress browse list alone.
 	"last_progress": {Expr: "ps.last_progress_at", Kind: query.KindTime, NeedsUser: true},
+}
+
+// The engine accepts an alias and its canonical spelling as the same column. The
+// entries are copied rather than written twice so the two cannot drift apart in Expr or
+// Kind; model.QueryFieldAliases is the one declaration, and TestNoUndeclaredFieldAliases
+// refuses a new shared-Expr pair that skips it.
+func init() {
+	for alias, canon := range model.QueryFieldAliases() {
+		col, ok := itemFields[canon]
+		if !ok {
+			// A zero Column compiles: the whitelist would admit the alias and emit
+			// " = ?" for it, so a rename on the map side would surface as an opaque
+			// SQLite syntax error out of every item query rather than here.
+			panic("sqlite: query field alias " + alias + " names missing column " + canon)
+		}
+		itemFields[alias] = col
+	}
 }
 
 // userStateJoinClause binds the current user's play_state as the ps alias. The user
