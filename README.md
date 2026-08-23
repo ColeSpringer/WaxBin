@@ -63,7 +63,7 @@ exit codes (`waxbin exit-codes`).
 | **Portability** | `backup`, `restore`, `export`, `manifest`, `rebuild` |
 | **Playlists / podcasts** | `playlist`, `smartplaylist`, `podcast`, `opml` |
 | **Enrichment** | `enrich` (MusicBrainz + Cover Art Archive; optional AcoustID; incl. `--item`/`--entity`) |
-| **Maintenance** | `db verify [--fix]`, `db vacuum [--integrity]`, `db migrate`, `db reset --yes`, `user`, `state` |
+| **Maintenance** | `db verify [--fix]`, `db vacuum [--integrity]`, `db thumbs [--older-than/--max-bytes]`, `db migrate`, `db reset --yes`, `user`, `state` |
 
 ### Watching for changes
 

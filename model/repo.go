@@ -311,6 +311,29 @@ func (r OrphanGCReport) Total() int {
 	return r.Albums + r.ReleaseGroups + r.Artists + r.Genres + r.Series
 }
 
+// ThumbCacheReport is a size census of the generated thumbnail cache: what the
+// derivatives cost, the source images they were derived from, and a breakdown by
+// requested box. The breakdown is the part worth reading. One cover browsed at
+// several rungs holds a derivative per rung, and the totals alone report that as a
+// single cached cover.
+type ThumbCacheReport struct {
+	Rows           int
+	Bytes          int64
+	Sources        int   // source images with at least one derivative, out of ArtSources
+	ArtSources     int   // source images held
+	ArtSourceBytes int64 // what those originals cost, the figure Bytes is read against
+	OldestAt       int64 // unix ns of the oldest entry; 0 when the cache is empty
+	NewestAt       int64
+	Rungs          []ThumbRung // largest box first
+}
+
+// ThumbRung is one requested box's share of the thumbnail cache.
+type ThumbRung struct {
+	Size  int // requested max dimension in px
+	Rows  int
+	Bytes int64
+}
+
 // FileStateUpdate records the result of an on-disk tag write so the catalog's file
 // row matches the bytes now on disk. It is applied only when the stored size and
 // mtime still match ExpectedSize/ExpectedMTimeNS (optimistic concurrency): a match

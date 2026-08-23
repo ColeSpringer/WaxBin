@@ -102,7 +102,7 @@ func newTrashEmptyCmd(g *globals) *cobra.Command {
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			var window time.Duration
 			if olderThan != "" {
-				d, err := parseAge(olderThan)
+				d, err := parseAge("trash empty", olderThan)
 				if err != nil {
 					return err
 				}
@@ -172,17 +172,23 @@ func newTrashPurgeCmd(g *globals) *cobra.Command {
 }
 
 // parseAge parses a retention age: Nd means N whole days (Go's ParseDuration has
-// no day unit), anything else goes through time.ParseDuration.
-func parseAge(s string) (time.Duration, error) {
-	if days, ok := strings.CutSuffix(s, "d"); ok {
-		n, err := strconv.Atoi(days)
-		if err == nil {
-			return time.Duration(n) * 24 * time.Hour, nil
-		}
+// no day unit), anything else goes through time.ParseDuration. op names the caller so
+// a refusal points at the command the operator actually typed. A negative age is
+// refused rather than passed on: it selects everything newer than a moment in the
+// future, which is everything, and no caller means that by typing a minus sign.
+func parseAge(op, s string) (time.Duration, error) {
+	bad := func() (time.Duration, error) {
+		return 0, waxerr.New(waxerr.CodeInvalid, op, "bad age "+s+" (use 30d, 36h, ...)")
 	}
 	d, err := time.ParseDuration(s)
-	if err != nil {
-		return 0, waxerr.New(waxerr.CodeInvalid, "trash empty", "bad age "+s+" (use 30d, 36h, ...)")
+	if days, ok := strings.CutSuffix(s, "d"); ok {
+		n, aerr := strconv.Atoi(days)
+		if aerr == nil {
+			d, err = time.Duration(n)*24*time.Hour, nil
+		}
+	}
+	if err != nil || d < 0 {
+		return bad()
 	}
 	return d, nil
 }

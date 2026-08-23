@@ -8,19 +8,23 @@ Everything here is work still to do. Reasoning about work deliberately not done
 belongs in the doc comment beside the code it constrains, not in this file, since
 that is where someone about to get it wrong will actually read it.
 
-## `thumb_cache` has no size surface and no prune
+## `ResolveArt` caches one entry per requested size, with no ladder
 
-A generated derivative is reclaimed only when its source is, through the cascade on
-`art_source`. There is nothing that reports how much space the table holds and nothing
-that prunes by age or size, so a library browsed at a large rung grows the catalog by a
-derivative per cover per rung and `db verify` reports it as healthy, which it is.
+The box a caller asks for is the cache key, and nothing rounds it. A client asking at
+a fixed set of rungs holds a handful of derivatives per cover. One that sizes to a
+layout box instead holds a derivative per distinct pixel width that box has ever had,
+so a resized window or a responsive grid mints rows nothing will ask for again. The
+in-process LRU keys the same way and holds 256 entries, so the same traffic evicts
+thumbnails that are still in use.
 
-This became worth naming when a sized resolve started re-encoding covers held in a
-format most clients cannot display: those derivatives are full-size rather than
-thumbnail-size, and the box is passed to the generator unclamped, so rungs above a
-source's own size no longer share one entry. See the comment above the `s.thumbnail`
-call in `store/sqlite/art.go` for why the stored dimensions are not trusted to do that
-collapsing.
+`db thumbs` bounds the table after the fact and is the only thing that does. It
+reclaims the waste rather than preventing it, which leaves the growth bounded by how
+often someone remembers to prune.
 
-Left for its own change because a report needs a `db` subcommand surface and a prune
-needs a retention policy, and neither belongs in the art resolver.
+The fix is to round a requested box up to a fixed ladder and serve that rung, which
+collapses the key space to a few entries per cover. It is left for its own change
+because it changes what `ResolveArt` hands back: a caller asking for 187 would get a
+200-wide picture, so the ladder has to be chosen against how clients scale the result,
+and the blob has to carry the size actually served rather than the size requested. See
+the comment above the `s.thumbnail` call in `store/sqlite/art.go` for why the box
+cannot instead be clamped to the source's own stored dimensions.

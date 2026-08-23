@@ -382,7 +382,9 @@ func (s *Store) ResolveArt(ctx context.Context, ref model.EntityRef, role model.
 	// it left zero, so a cover whose stored size understates its bytes would be scaled
 	// down to the stored figure and quietly answer a large request with a small picture.
 	// art.Thumbnail decodes the real bytes and never upscales, so passing the box
-	// through is right whatever the row says.
+	// through is right whatever the row says. The cost is that the cache keys on
+	// whatever sizes clients ask for rather than one entry per cover, so what bounds
+	// thumb_cache is `db thumbs`, not the size of the library.
 	thumb, err := s.thumbnail(ctx, prov, size, source)
 	if err != nil {
 		return nil, err

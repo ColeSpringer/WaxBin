@@ -19,8 +19,8 @@ func newDBCmd(g *globals) *cobra.Command {
 		Use:   "db",
 		Short: "Database maintenance",
 	}
-	db.AddCommand(newDBVerifyCmd(g), newDBVacuumCmd(g), newDBMigrateCmd(g), newDBResetCmd(g),
-		newDBReSealSecretsCmd(g))
+	db.AddCommand(newDBVerifyCmd(g), newDBVacuumCmd(g), newDBThumbsCmd(g), newDBMigrateCmd(g),
+		newDBResetCmd(g), newDBReSealSecretsCmd(g))
 	return db
 }
 

@@ -1175,6 +1175,38 @@ func (l *Library) IntegrityCheck(ctx context.Context) ([]string, error) {
 	return l.store.IntegrityCheck(ctx)
 }
 
+// ThumbPrunePolicy bounds a thumbnail-cache prune. Its zero value bounds nothing and
+// is refused rather than defaulted, so a caller that forgets to set a bound gets an
+// error back instead of an emptied cache. Both bounds are pointers for that reason:
+// zero is a meaningful value on either axis (every entry is at least zero old, and
+// none fits in zero bytes), so absence needs a value of its own to sit in.
+type ThumbPrunePolicy struct {
+	OlderThan *time.Duration // drop entries generated longer ago than this; nil leaves the age unbounded
+	MaxBytes  *int64         // evict oldest first until the cache fits; nil leaves the size unbounded
+}
+
+// ThumbCacheStats censuses the generated thumbnail cache: what it holds, the source
+// images behind it, and a breakdown by requested box. It is read-only.
+func (l *Library) ThumbCacheStats(ctx context.Context) (*model.ThumbCacheReport, error) {
+	return l.store.ThumbCacheStats(ctx)
+}
+
+// PruneThumbnails drops cached thumbnails to fit the policy, returning how many rows
+// went and how many bytes they held. Every entry is regenerated on the next request
+// that asks for it, so a prune costs decode time rather than pictures. The rows are
+// freed inside the catalog file; returning that space to the filesystem takes a
+// vacuum.
+func (l *Library) PruneThumbnails(ctx context.Context, p ThumbPrunePolicy) (removed int, freed int64, err error) {
+	olderThan, maxBytes := int64(-1), int64(-1)
+	if p.OlderThan != nil {
+		olderThan = p.OlderThan.Nanoseconds()
+	}
+	if p.MaxBytes != nil {
+		maxBytes = *p.MaxBytes
+	}
+	return l.store.PruneThumbnails(ctx, olderThan, maxBytes)
+}
+
 // PruneChangeLog trims the change_log to its newest keep rows, returning how many
 // were deleted. A consumer that has fallen behind the retained horizon must
 // full-resync (the documented delta-sync contract).
