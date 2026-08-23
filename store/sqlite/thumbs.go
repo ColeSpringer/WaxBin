@@ -64,7 +64,7 @@ func (s *Store) ThumbCacheStats(ctx context.Context) (*model.ThumbCacheReport, e
 
 // PruneThumbnails drops cached thumbnails to fit a retention policy, returning how
 // many rows went and how many bytes they were holding. olderThanNS drops entries
-// generated longer ago than that; maxBytes then evicts until the cache fits that
+// generated at least that long ago; maxBytes then evicts until the cache fits that
 // budget. A negative leaves either bound off, and the two agree on zero: every entry
 // is at least zero old and none fits in zero bytes, so either zero empties the cache.
 // At least one bound is required, since a prune with neither is a caller bug and
@@ -85,7 +85,10 @@ func (s *Store) PruneThumbnails(ctx context.Context, olderThanNS, maxBytes int64
 	}
 	err = s.writeTx(ctx, func(tx *sql.Tx) error {
 		if olderThanNS >= 0 {
-			n, b, e := deleteThumbsTx(ctx, tx, "created_at < ?", nowNS()-olderThanNS)
+			// The cutoff is inclusive, which is what makes a zero age empty the cache: a
+			// coarse wall clock hands a just-written row the same nanosecond the prune
+			// reads, and an exclusive bound would leave it behind.
+			n, b, e := deleteThumbsTx(ctx, tx, "created_at <= ?", nowNS()-olderThanNS)
 			if e != nil {
 				return e
 			}

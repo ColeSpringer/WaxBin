@@ -1185,7 +1185,7 @@ func (l *Library) IntegrityCheck(ctx context.Context) ([]string, error) {
 // zero is a meaningful value on either axis (every entry is at least zero old, and
 // none fits in zero bytes), so absence needs a value of its own to sit in.
 type ThumbPrunePolicy struct {
-	OlderThan *time.Duration // drop entries generated longer ago than this; nil leaves the age unbounded
+	OlderThan *time.Duration // drop entries generated at least this long ago; nil leaves the age unbounded
 	MaxBytes  *int64         // evict oldest first until the cache fits; nil leaves the size unbounded
 }
 

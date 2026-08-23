@@ -83,7 +83,7 @@ func newDBThumbsCmd(g *globals) *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&olderThan, "older-than", "", "prune entries generated longer ago than this (30d, 36h, ...)")
+	cmd.Flags().StringVar(&olderThan, "older-than", "", "prune entries generated at least this long ago (30d, 36h, ...)")
 	cmd.Flags().StringVar(&maxBytes, "max-bytes", "", "prune oldest first until the cache fits this budget (200MB, 512MiB, 0 empties it)")
 	return cmd
 }
