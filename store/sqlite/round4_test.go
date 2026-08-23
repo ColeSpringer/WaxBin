@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"testing"
 
@@ -65,7 +66,7 @@ func TestThumbCacheLRU(t *testing.T) {
 	}
 	nilc.put("h", 1, model.ArtBlob{})
 
-	c := newThumbCache(2)
+	c := newThumbCache(2, 1<<20)
 	a := model.ArtBlob{Bytes: []byte("A"), SourceHash: "ha", Thumbnail: true}
 	b := model.ArtBlob{Bytes: []byte("B"), SourceHash: "hb", Thumbnail: true}
 	d := model.ArtBlob{Bytes: []byte("D"), SourceHash: "hd", Thumbnail: true}
@@ -97,8 +98,76 @@ func TestThumbCacheLRU(t *testing.T) {
 	}
 }
 
+// TestThumbCacheNegativeEntries covers the negative cache. A source whose bytes do not
+// decode is handed to the generator at every rung rather than short-circuiting above its
+// own size, so without this the same decode is attempted and the same warning emitted
+// once per request during a grid scroll. It is a separate instance from the thumbnail
+// cache so a run of undecodable covers cannot flush the real thumbnails beside them.
+func TestThumbCacheNegativeEntries(t *testing.T) {
+	// A nil negative cache is a permanent miss and never panics, the same guard put has.
+	var nilc *thumbCache
+	nilc.put("h", 1, model.ArtBlob{})
+	if _, ok := nilc.get("h", 1); ok {
+		t.Error("nil cache should miss")
+	}
+
+	fail := newThumbCache(thumbFailMax, thumbFailBytes)
+	fail.put("bad", 100, model.ArtBlob{})
+	if _, ok := fail.get("bad", 100); !ok {
+		t.Error("a recorded failure should read back")
+	}
+	if _, ok := fail.get("bad", 200); ok {
+		t.Error("size is part of the key; another box should miss")
+	}
+
+	// The two caches have independent budgets, which is the point of the split: filling
+	// the negative one past its bound must leave a thumbnail cached beside it untouched.
+	thumbs := newThumbCache(4, 1<<20)
+	thumbs.put("real", 100, model.ArtBlob{Bytes: []byte("R"), SourceHash: "real", Thumbnail: true})
+	for i := range thumbFailMax * 2 {
+		fail.put(fmt.Sprintf("f%d", i), 100, model.ArtBlob{})
+	}
+	if got, ok := thumbs.get("real", 100); !ok || string(got.Bytes) != "R" {
+		t.Error("a run of generation failures evicted a real thumbnail; the budgets must be separate")
+	}
+	if n := fail.ll.Len(); n > thumbFailMax {
+		t.Errorf("negative cache holds %d entries, want at most %d", n, thumbFailMax)
+	}
+}
+
+// TestThumbCacheByteBound pins the second bound. A resolve at or above a source's own
+// size re-encodes at that size, so entry count alone would let a handful of large covers
+// pin far more memory than the cache is meant to hold.
+func TestThumbCacheByteBound(t *testing.T) {
+	c := newThumbCache(100, 1000)
+	for i := range 10 {
+		c.put(fmt.Sprintf("h%d", i), 100, model.ArtBlob{Bytes: make([]byte, 300)})
+	}
+	if c.bytes > 1000 {
+		t.Errorf("cache holds %d bytes, want at most 1000", c.bytes)
+	}
+	if c.ll.Len() != len(c.items) {
+		t.Errorf("list and map disagree: %d vs %d", c.ll.Len(), len(c.items))
+	}
+
+	// An entry larger than the whole bound is still served rather than evicting itself
+	// on the way in, so a single big cover cannot become a permanent miss.
+	c.put("huge", 100, model.ArtBlob{Bytes: make([]byte, 5000)})
+	if _, ok := c.get("huge", 100); !ok {
+		t.Error("an oversized entry evicted itself; the most recent entry must survive")
+	}
+
+	// Replacing an entry re-charges it rather than double-counting the old bytes.
+	c2 := newThumbCache(10, 10000)
+	c2.put("x", 1, model.ArtBlob{Bytes: make([]byte, 400)})
+	c2.put("x", 1, model.ArtBlob{Bytes: make([]byte, 100)})
+	if c2.bytes != 100 {
+		t.Errorf("after replacing a 400-byte entry with a 100-byte one, bytes = %d, want 100", c2.bytes)
+	}
+}
+
 func TestThumbCacheBytesIsolated(t *testing.T) {
-	c := newThumbCache(4)
+	c := newThumbCache(4, 1<<20)
 
 	// The cache must not share a backing array with the caller who PUT the bytes: a
 	// later mutation of that slice must not reach the cache.

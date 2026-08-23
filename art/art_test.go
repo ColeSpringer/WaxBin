@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"image"
 	"image/color"
+	"image/gif"
 	"image/jpeg"
 	"image/png"
 	"strings"
@@ -169,9 +170,14 @@ func TestNormalizeFormat(t *testing.T) {
 		{"image/jpeg; charset=binary", "jpeg"},
 		{"image/jpeg; charset", "jpeg"}, // parameters ParseMediaType refuses
 		{"IMAGE/PNG", "png"},
-		{"image/x-png", "png"},    // the spellings older servers send
-		{"image/x-ms-bmp", "bmp"}, //
-		{"image/heif", "heic"},    // one ISOBMFF format, one token
+		{"image/x-png", "png"},         // the spellings older servers send
+		{"image/x-ms-bmp", "bmp"},      //
+		{"image/x-windows-bmp", "bmp"}, //
+		{"image/pjpeg", "jpeg"},        // progressive JPEG's legacy media type
+		{"pjpeg", "jpeg"},              //
+		{"jfif", "jpeg"},               // an extension that reaches here as a bare token
+		{".jfif", "jpeg"},              //
+		{"image/heif", "heic"},         // one ISOBMFF format, one token
 		{"heif", "heic"},
 		{"image/bmp", "bmp"},
 		{"image/tiff", "tiff"},
@@ -231,5 +237,82 @@ func TestProbeDecodesBMPAndTIFF(t *testing.T) {
 	junk := append([]byte("BM"), make([]byte, 60)...)
 	if got := Describe(junk); got.Format != "" {
 		t.Errorf("junk with a BM prefix described as %q, want unrecognized", got.Format)
+	}
+}
+
+// TestDisplayable pins the membership of the conservative floor, that a media type
+// folds to the same answer as its token, and the two exclusions that carry weight:
+// TIFF, which decodes here and so is the format a sized resolve re-encodes, and AVIF,
+// which older WebViews and Safari before 16 cannot paint.
+func TestDisplayable(t *testing.T) {
+	cases := []struct {
+		in   string
+		want bool
+	}{
+		{"jpeg", true},
+		{"png", true},
+		{"gif", true},
+		{"webp", true},
+		{"bmp", true},
+		{"image/jpeg", true},                 // a Content-Type folds like its token
+		{"image/jpeg; charset=binary", true}, //
+		{"jpg", true},                        // and so does a bare extension
+		{"image/x-ms-bmp", true},             //
+		{"tiff", false},                      // decodes here, outside the floor
+		{"image/tiff", false},                //
+		{"avif", false},                      // deliberately out: no decoder, and older clients cannot paint it
+		{"heic", false},                      //
+		{"svg+xml", false},
+		{"jxl", false},
+		{"", false},          // the caller named nothing
+		{"text/html", false}, // and neither does an error page
+		{"application/octet-stream", false},
+	}
+	for _, c := range cases {
+		if got := Displayable(c.in); got != c.want {
+			t.Errorf("Displayable(%q) = %v, want %v", c.in, got, c.want)
+		}
+	}
+}
+
+// TestThumbnailOutputIsDisplayable is the invariant the sized resolve rests on. It
+// re-encodes a source a client cannot paint, so if Thumbnail could ever emit a format
+// outside the floor the replacement bytes would be as unpaintable as the ones they
+// replaced.
+func TestThumbnailOutputIsDisplayable(t *testing.T) {
+	src := image.NewRGBA(image.Rect(0, 0, 20, 12))
+	src.Set(0, 0, color.RGBA{R: 9, G: 8, B: 7, A: 255})
+
+	var g bytes.Buffer
+	if err := gif.Encode(&g, src, nil); err != nil {
+		t.Fatalf("encode gif: %v", err)
+	}
+	var b bytes.Buffer
+	if err := bmp.Encode(&b, src); err != nil {
+		t.Fatalf("encode bmp: %v", err)
+	}
+	var tb bytes.Buffer
+	if err := tiff.Encode(&tb, src, nil); err != nil {
+		t.Fatalf("encode tiff: %v", err)
+	}
+
+	sources := map[string][]byte{
+		"jpeg": makeJPEG(t, 20, 12),
+		"png":  makePNG(t, 20, 12),
+		"gif":  g.Bytes(),
+		"bmp":  b.Bytes(),
+		"tiff": tb.Bytes(),
+	}
+	for name, data := range sources {
+		for _, box := range []int{8, 20, 200} {
+			_, format, _, _, err := Thumbnail(data, box)
+			if err != nil {
+				t.Errorf("Thumbnail(%s, %d): %v", name, box, err)
+				continue
+			}
+			if !Displayable(format) {
+				t.Errorf("Thumbnail(%s, %d) emitted %q, which is outside the displayable floor", name, box, format)
+			}
+		}
 	}
 }

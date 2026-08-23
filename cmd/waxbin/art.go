@@ -41,8 +41,8 @@ func newArtCmd(g *globals) *cobra.Command {
 			"fallback chain (track -> album -> release_group -> artist -> genre) to the first level " +
 			"that has one; any other role (back|disc|booklet|background) resolves at the entity's " +
 			"own level only, as does every role on a playlist, which has no ancestry. With --size, " +
-			"returns a thumbnail scaled to fit a square box with that " +
-			"maximum side. Writes " +
+			"returns a thumbnail scaled to fit a square box with that maximum side, and converts a " +
+			"cover stored in a format most clients cannot display even when it already fits. Writes " +
 			"the image bytes to --out (or stdout); with --json, reports metadata instead, " +
 			"including the chain level that answered, whether an album's cover was derived " +
 			"from a member track, and where the picture came from (" + artSourceList +
@@ -109,7 +109,7 @@ func newArtCmd(g *globals) *cobra.Command {
 	f := cmd.Flags()
 	f.StringVar(&entType, "type", "track", "entity type: "+artTypeList)
 	f.StringVar(&role, "role", "front", "art role: front|back|disc|booklet|background")
-	f.IntVar(&size, "size", 0, "thumbnail max dimension in px (0 = original)")
+	f.IntVar(&size, "size", 0, "max dimension in px; also converts a format most clients cannot display (0 = stored image)")
 	f.StringVar(&outPath, "out", "", "write image bytes to this file instead of stdout")
 	cmd.AddCommand(newArtRolesCmd(g), newArtSetCmd(g), newArtLockCmd(g, true), newArtLockCmd(g, false))
 	return cmd

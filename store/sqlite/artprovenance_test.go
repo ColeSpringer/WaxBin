@@ -7,6 +7,8 @@ import (
 	"errors"
 	"image"
 	"image/color"
+	"image/gif"
+	"image/jpeg"
 	"image/png"
 	"path/filepath"
 	"testing"
@@ -17,6 +19,8 @@ import (
 	"github.com/colespringer/waxbin/query"
 	"github.com/colespringer/waxbin/store/sqlite"
 	"github.com/colespringer/waxbin/waxerr"
+	"golang.org/x/image/bmp"
+	"golang.org/x/image/tiff"
 )
 
 // coverPNG encodes a distinct PNG per seed value, so two covers in one test are two
@@ -249,15 +253,37 @@ func hasCode(err error, code waxerr.Code) bool {
 // big enough to actually thumbnail.
 func sizedCoverPNG(t *testing.T, w, h int) []byte {
 	t.Helper()
+	return sizedCover(t, "png", w, h)
+}
+
+// sizedCover encodes a cover of the requested size in the requested format, for the
+// cases that turn on what a source is stored as rather than on its pixels.
+func sizedCover(t *testing.T, format string, w, h int) []byte {
+	t.Helper()
 	img := image.NewRGBA(image.Rect(0, 0, w, h))
 	for y := 0; y < h; y++ {
 		for x := 0; x < w; x++ {
-			img.Set(x, y, color.RGBA{uint8(x % 256), uint8(y % 256), 64, 255})
+			img.Set(x, y, color.RGBA{uint8(x % 256), uint8(y % 256), 96, 255})
 		}
 	}
 	var buf bytes.Buffer
-	if err := png.Encode(&buf, img); err != nil {
-		t.Fatalf("encode png: %v", err)
+	var err error
+	switch format {
+	case "png":
+		err = png.Encode(&buf, img)
+	case "gif":
+		err = gif.Encode(&buf, img, nil)
+	case "bmp":
+		err = bmp.Encode(&buf, img)
+	case "tiff":
+		err = tiff.Encode(&buf, img, nil)
+	case "jpeg":
+		err = jpeg.Encode(&buf, img, nil)
+	default:
+		t.Fatalf("sizedCover: no encoder for %q", format)
+	}
+	if err != nil {
+		t.Fatalf("encode %s: %v", format, err)
 	}
 	return buf.Bytes()
 }

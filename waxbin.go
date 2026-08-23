@@ -411,8 +411,10 @@ func (l *Library) Search(ctx context.Context, q string, opt read.SearchOptions) 
 // or episode -> podcast) to the first level that has one. Every other role (back,
 // disc, booklet, background) resolves at the requested level only, since an
 // ancestor's auxiliary image would be misleading, and a playlist has no ancestry at
-// all. A non-positive size returns the original image; a positive one returns a
-// thumbnail fitted to a square box of that side, generated once and cached.
+// all. A non-positive size returns the stored image exactly; a positive one returns an
+// image the caller can draw, fitted to a square box of that side when the source is
+// larger and re-encoded at its own size when the source already fits but is held in a
+// format most clients cannot display. Either is generated once and cached.
 // CodeNotFound means no consulted level has art in that role.
 func (l *Library) ResolveArt(ctx context.Context, ref model.EntityRef, role model.ArtRole, size int) (*model.ArtBlob, error) {
 	return l.store.ResolveArt(ctx, ref, role, size)

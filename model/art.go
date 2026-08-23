@@ -124,7 +124,7 @@ type ArtRoleInfo struct {
 // content-addressed blob.
 type ArtImage struct {
 	Data   []byte
-	Format string // jpeg|png|webp|gif
+	Format string // jpeg|png|webp|gif|bmp|tiff, or an undecoded format's own name
 	Width  int
 	Height int
 	Hash   string
@@ -148,12 +148,14 @@ type ArtProvenance struct {
 	UpdatedAt int64 // unix nanoseconds
 }
 
-// ArtBlob is resolved art ready to serve: an original source image or a generated
-// thumbnail. SourceHash is the content hash of the originating source; Thumbnail
-// is true when Bytes is a derived thumbnail rather than the original. Level names
-// the chain level that answered (the requested entity itself, or the ancestor a
-// front-cover resolve fell back to), and Derived marks an album answered from a
-// member track's cover rather than a durable album row of its own.
+// ArtBlob is resolved art ready to serve: the stored source image or one generated from
+// it. SourceHash is the content hash of the originating source; Thumbnail is true when
+// Bytes were generated from that source rather than being the source itself, whether
+// scaled to fit the requested box, re-encoded because the source is held in a format
+// most clients cannot paint, or both. Level names the chain level that answered (the
+// requested entity itself, or the ancestor a front-cover resolve fell back to), and
+// Derived marks an album answered from a member track's cover rather than a durable
+// album row of its own.
 type ArtBlob struct {
 	Bytes      []byte
 	Format     string

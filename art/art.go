@@ -4,7 +4,8 @@
 // caller-supplied format name to the short token the store holds.
 // JPEG/PNG/GIF use standard library decoders; WebP, BMP and TIFF use x/image.
 // Formats without a registered decoder, such as AVIF or HEIC, are stored and served
-// unscaled by the resolver. No CGO is used.
+// unscaled by the resolver, and Displayable names the formats a resolver may hand back
+// as stored rather than re-encoding. No CGO is used.
 package art
 
 import (
@@ -50,10 +51,12 @@ func Probe(data []byte) (format string, width, height int, err error) {
 
 // SniffExotic recognizes an ISOBMFF-based image WaxBin has no pure-Go decoder for
 // (AVIF, HEIC/HEIF) by its `ftyp` brand, returning the short format token. Such an
-// image is still stored, deduped, and served, but always at full size: with no
-// pure-Go decoder its dimensions are unknown and it cannot be thumbnailed, so the
-// resolver serves the original unscaled. It reports false for anything the standard
-// decoders already handle or do not recognize.
+// image is still stored, deduped, and served, but always at full size, since it cannot
+// be thumbnailed. Which route it takes there depends on whether anything else supplied
+// its dimensions: with none it never reaches a decoder, while a container that declared
+// them (a FLAC picture block, say) sends the first resolve at each box through a decode
+// that fails and falls back. It reports false for anything the standard decoders already
+// handle or do not recognize.
 func SniffExotic(data []byte) (format string, ok bool) {
 	if len(data) < 12 || string(data[4:8]) != "ftyp" {
 		return "", false
@@ -103,10 +106,11 @@ func NormalizeFormat(s string) string {
 		return ""
 	}
 	// Fold onto the names image.Decode reports, so one format cannot store under two
-	// tokens. ID3v2.2 writes three-character codes, plenty of taggers write JPG, and
-	// the x- spellings are what older servers send.
+	// tokens. ID3v2.2 writes three-character codes, plenty of taggers write JPG, the
+	// x- spellings are what older servers send, and pjpeg is progressive JPEG's legacy
+	// media type.
 	switch s {
-	case "jpg", "jpe":
+	case "jpg", "jpe", "pjpeg", "jfif":
 		return "jpeg"
 	case "tif":
 		return "tiff"
@@ -114,12 +118,37 @@ func NormalizeFormat(s string) string {
 		return "heic"
 	case "x-png":
 		return "png"
-	case "x-bmp", "x-ms-bmp":
+	case "x-bmp", "x-ms-bmp", "x-windows-bmp":
 		return "bmp"
 	case "x-tiff":
 		return "tiff"
 	}
 	return s
+}
+
+// Displayable reports whether a format is one every mainstream client, browser and
+// native toolkit alike, has decoded for years. A positive size in a resolve consults it
+// before answering with the stored source unscaled, so a cover that fits the requested
+// box but is held in a format outside the set is re-encoded at its own size rather than
+// handed back as stored.
+//
+// The set is a conservative floor rather than an exhaustive claim about what any given
+// client can paint. A consumer with a wider decoder is free to ignore it and read
+// ArtBlob.Format instead. TIFF is the one format WaxBin decodes today that is outside
+// it, which makes it the case a sized resolve re-encodes; a cover in a format nothing
+// here decodes cannot be re-encoded at all, so it is served as stored and the consumer
+// decides what to draw with it. That residual is why this is exported rather than kept
+// private to the store: the consumer holding it should not have to keep a second list
+// beside this one.
+//
+// It folds its argument first, so a caller holding a transport's Content-Type gets the
+// same answer as one holding a stored token.
+func Displayable(format string) bool {
+	switch NormalizeFormat(format) {
+	case "jpeg", "png", "gif", "webp", "bmp":
+		return true
+	}
+	return false
 }
 
 // maxFormatToken bounds a format at more than any real one needs and far less than a
@@ -190,7 +219,14 @@ func Thumbnail(src []byte, maxDim int) (out []byte, format string, w, h int, err
 	tw, th := fitDimensions(b.Dx(), b.Dy(), maxDim)
 
 	dst := image.NewRGBA(image.Rect(0, 0, tw, th))
-	xdraw.CatmullRom.Scale(dst, dst.Bounds(), img, b, xdraw.Over, nil)
+	if tw == b.Dx() && th == b.Dy() {
+		// Same size in and out, which is every box at or above the source's own longest
+		// side. Kernel.Scale has no equal-size case and would run a full resample whose
+		// weights all resolve to identity, so copy instead.
+		xdraw.Copy(dst, image.Point{}, img, b, xdraw.Src, nil)
+	} else {
+		xdraw.CatmullRom.Scale(dst, dst.Bounds(), img, b, xdraw.Over, nil)
+	}
 
 	var buf bytes.Buffer
 	outFormat := "png"

@@ -12,10 +12,24 @@ import (
 	"github.com/colespringer/waxbin/waxerr"
 )
 
-// thumbCacheMax bounds the in-process thumbnail cache by entry count. Generated
-// thumbnails are small (a few KB to tens of KB at typical box sizes), so a few
-// hundred entries is a modest, predictable memory footprint.
-const thumbCacheMax = 256
+// thumbCacheMax and thumbCacheBytes bound the in-process thumbnail cache. The entry
+// count alone is not enough: a resolve above a source's own size re-encodes at that
+// size, so an entry is only "a few KB" at the small rungs, and a library of large
+// covers browsed at a hero rung would otherwise pin hundreds of full-size images.
+const (
+	thumbCacheMax   = 256
+	thumbCacheBytes = 64 << 20
+)
+
+// thumbFailMax bounds the negative cache. It is separate from the thumbnail cache and
+// deliberately small: failures are cheap to hold and cheap to rebuild, and a library of
+// covers no decoder here reads (embedded AVIF/HEIC, which carry declared dimensions and
+// so reach the generator) must not flush the real thumbnails generated beside them.
+const (
+	thumbFailMax = 64
+	// Negative entries carry no bytes, so the count is the only bound that applies.
+	thumbFailBytes = 0
+)
 
 // thumbCache is a bounded in-process LRU of generated thumbnails keyed by (source
 // hash, size). It sits in front of the thumb_cache table: it serves a read-only store,
@@ -23,10 +37,12 @@ const thumbCacheMax = 256
 // and it saves a read-write store a SQL round-trip and re-decode for a hot cover. It
 // is safe for concurrent use.
 type thumbCache struct {
-	mu    sync.Mutex
-	max   int
-	ll    *list.List // front = most recently used; values are *thumbEntry
-	items map[thumbKey]*list.Element
+	mu       sync.Mutex
+	max      int
+	maxBytes int
+	bytes    int
+	ll       *list.List // front = most recently used; values are *thumbEntry
+	items    map[thumbKey]*list.Element
 }
 
 type thumbKey struct {
@@ -35,12 +51,13 @@ type thumbKey struct {
 }
 
 type thumbEntry struct {
-	key  thumbKey
-	blob model.ArtBlob // Bytes is treated as immutable once cached
+	key   thumbKey
+	blob  model.ArtBlob // Bytes is treated as immutable once cached
+	bytes int           // len(blob.Bytes), the entry's charge against the byte bound
 }
 
-func newThumbCache(max int) *thumbCache {
-	return &thumbCache{max: max, ll: list.New(), items: map[thumbKey]*list.Element{}}
+func newThumbCache(max, maxBytes int) *thumbCache {
+	return &thumbCache{max: max, maxBytes: maxBytes, ll: list.New(), items: map[thumbKey]*list.Element{}}
 }
 
 // get returns a cached thumbnail blob and marks it most-recently-used. A nil cache
@@ -81,18 +98,31 @@ func (c *thumbCache) put(hash string, size int, blob model.ArtBlob) {
 	defer c.mu.Unlock()
 	key := thumbKey{hash, size}
 	if el, ok := c.items[key]; ok {
-		el.Value.(*thumbEntry).blob = stored
+		e := el.Value.(*thumbEntry)
+		c.bytes += len(stored.Bytes) - e.bytes
+		e.blob, e.bytes = stored, len(stored.Bytes)
 		c.ll.MoveToFront(el)
+		c.evict()
 		return
 	}
-	c.items[key] = c.ll.PushFront(&thumbEntry{key: key, blob: stored})
-	for c.ll.Len() > c.max {
+	c.items[key] = c.ll.PushFront(&thumbEntry{key: key, blob: stored, bytes: len(stored.Bytes)})
+	c.bytes += len(stored.Bytes)
+	c.evict()
+}
+
+// evict drops least-recently-used entries until the cache is inside both bounds. It
+// always keeps the most recent entry, so a single image larger than the byte bound is
+// still served rather than evicting itself on the way in.
+func (c *thumbCache) evict() {
+	for c.ll.Len() > 1 && (c.ll.Len() > c.max || c.bytes > c.maxBytes) {
 		oldest := c.ll.Back()
 		if oldest == nil {
-			break
+			return
 		}
 		c.ll.Remove(oldest)
-		delete(c.items, oldest.Value.(*thumbEntry).key)
+		e := oldest.Value.(*thumbEntry)
+		c.bytes -= e.bytes
+		delete(c.items, e.key)
 	}
 }
 
@@ -297,10 +327,12 @@ type artLevel struct {
 // release_group -> artist -> genre) and answers from the first level that has a
 // front cover; every other role resolves at the requested level alone, since an
 // ancestor's back cover or booklet would be misleading for a descendant. An empty
-// role means front. size selects the output: a non-positive size returns the
-// original source; a positive size returns a thumbnail scaled to fit a square box
-// with that maximum side. Generated thumbnails are cached and never upscaled. A
-// source that cannot be decoded for thumbnailing is returned as-is. The blob
+// role means front. size selects the output: a non-positive size returns the stored
+// source exactly, and a positive size returns an image the caller can draw, scaled to
+// fit a square box with that maximum side when the source is larger and re-encoded at
+// its own size when the source already fits but is held in a format outside
+// art.Displayable. Generated images are cached and never upscaled. A source that
+// cannot be decoded at all is returned as stored, whatever its format. The blob
 // carries the answering Level and, for an album answered from a member track's
 // cover, Derived. CodeNotFound means no consulted level has art in that role.
 func (s *Store) ResolveArt(ctx context.Context, ref model.EntityRef, role model.ArtRole, size int) (*model.ArtBlob, error) {
@@ -324,18 +356,33 @@ func (s *Store) ResolveArt(ctx context.Context, ref model.EntityRef, role model.
 		}, nil
 	}
 
-	// Original requested, or a source already within the box: serve the source. Nothing
-	// above this point has loaded it, which is what keeps a grid of cached thumbnails
-	// from reading a full-size image out of blob storage per cover and discarding it.
-	longest := max(prov.Width, prov.Height)
-	if size <= 0 || (longest > 0 && longest <= size) {
+	// Original requested: serve the source. Nothing above this point has loaded it,
+	// which is what keeps a grid of cached thumbnails from reading a full-size image
+	// out of blob storage per cover and discarding it.
+	if size <= 0 {
 		return source()
 	}
-	// Dimensions unknown (an undecodable or exotic source, e.g. an AVIF/HEIC cover
-	// with no pure-Go decoder): there is nothing to scale, so serve the original.
+	// Dimensions unknown (an undecodable or exotic source, e.g. an AVIF/HEIC cover with
+	// no pure-Go decoder): there is nothing to decode, so serve the original and let the
+	// caller decide what to do with a format it may not paint.
+	longest := max(prov.Width, prov.Height)
 	if longest == 0 {
 		return source()
 	}
+	// A source already inside the box needs no scaling, but a sized request is a request
+	// to draw the picture, so a format a client cannot paint is re-encoded at its own
+	// size rather than served as stored.
+	if longest <= size && art.Displayable(prov.Format) {
+		return source()
+	}
+	// The box is passed through as asked rather than clamped to the dimensions above.
+	// Every rung at or above the source's own size yields the same bytes, so clamping
+	// would collapse them onto one cache entry, but those dimensions are only as good as
+	// whatever wrote them: storableArt keeps a producer's own values and fills only what
+	// it left zero, so a cover whose stored size understates its bytes would be scaled
+	// down to the stored figure and quietly answer a large request with a small picture.
+	// art.Thumbnail decodes the real bytes and never upscales, so passing the box
+	// through is right whatever the row says.
 	thumb, err := s.thumbnail(ctx, prov, size, source)
 	if err != nil {
 		return nil, err
@@ -502,12 +549,20 @@ func (s *Store) ArtRoles(ctx context.Context, ref model.EntityRef) ([]model.ArtR
 // thumbnail returns a cached thumbnail for (source hash, size), generating and caching
 // it on a miss. source loads the original image, and is called only when generation is
 // actually needed: a cache hit at either level answers without touching the blob at all.
-// A generation failure (e.g. an exotic source format) falls back to the original.
+// A generation failure (e.g. an exotic source format) falls back to the original and is
+// remembered in a separate small cache, so the decode is not attempted again for those
+// bytes at that box.
 func (s *Store) thumbnail(ctx context.Context, prov *model.ArtProvenance, size int,
 	source func() (*model.ArtBlob, error)) (*model.ArtBlob, error) {
 	const op = "store.ResolveArt"
 	hash := prov.SourceHash
-	// Check the in-process cache first. This serves a read-only store, which cannot
+	// Generation already failed for these bytes at this box. The blob load still happens,
+	// since the original is what gets served either way; what this skips is the repeated
+	// decode attempt and the repeated warning behind it.
+	if _, failed := s.thumbFail.get(hash, size); failed {
+		return source()
+	}
+	// Check the in-process cache next. This serves a read-only store, which cannot
 	// persist to thumb_cache and would otherwise regenerate on every request, and it
 	// saves a read-write store the SQL round-trip and re-decode for a hot cover.
 	if blob, ok := s.thumbMem.get(hash, size); ok {
@@ -537,9 +592,15 @@ func (s *Store) thumbnail(ctx context.Context, prov *model.ArtProvenance, size i
 	}
 	thumb, tFormat, tw, th, gerr := art.Thumbnail(src.Bytes, size)
 	if gerr != nil {
-		// The pure-Go decoders cannot handle this source (an undecodable or exotic
-		// format such as AVIF/HEIC): serve the original unscaled rather than failing.
+		// The pure-Go decoders cannot handle this source (a truncated image, or an
+		// exotic format such as AVIF/HEIC that arrived with dimensions declared): serve
+		// the original unscaled rather than failing. Remembering the failure does not
+		// save the blob load, since the original is what gets served, but it does stop a
+		// grid scroll re-attempting the decode and re-emitting this warning per request.
+		// It goes in its own cache so a run of such covers cannot flush the thumbnails
+		// generated beside them.
 		s.log.Warn("art thumbnail generation failed; serving original", "hash", hash, "size", size, "err", gerr)
+		s.thumbFail.put(hash, size, model.ArtBlob{})
 		return src, nil
 	}
 
