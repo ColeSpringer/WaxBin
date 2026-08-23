@@ -12,12 +12,15 @@ import (
 	"github.com/colespringer/waxbin/waxerr"
 )
 
-// thumbCacheMax and thumbCacheBytes bound the in-process thumbnail cache. The entry
-// count alone is not enough: a resolve above a source's own size re-encodes at that
-// size, so an entry is only "a few KB" at the small rungs, and a library of large
-// covers browsed at a hero rung would otherwise pin hundreds of full-size images.
+// thumbCacheMax and thumbCacheBytes bound the in-process thumbnail cache. Requests round
+// to a ladder rung before they reach it, so a grid scroll lands on one rung and an entry
+// is a cover rather than a window width. The byte bound is meant to be the binding one:
+// a resolve above a source's own size re-encodes at that size, so a library of large
+// covers browsed at a hero rung would otherwise pin hundreds of full-size images. The
+// count is the backstop for the opposite case, a flood of small entries, and is set high
+// enough that at the common rungs the bytes run out first.
 const (
-	thumbCacheMax   = 256
+	thumbCacheMax   = 2048
 	thumbCacheBytes = 64 << 20
 )
 
@@ -25,17 +28,24 @@ const (
 // deliberately small: failures are cheap to hold and cheap to rebuild, and a library of
 // covers no decoder here reads (embedded AVIF/HEIC, which carry declared dimensions and
 // so reach the generator) must not flush the real thumbnails generated beside them.
+//
+// Its entries are keyed by source hash alone, with failBox standing in for the box the
+// thumbnail cache keys on. art.Thumbnail fails inside image.Decode, before it reads the
+// box at all, so a failure belongs to the bytes; keying it per rung would let one bad
+// cover spend a rung's worth of these slots recording the same fact.
 const (
 	thumbFailMax = 64
 	// Negative entries carry no bytes, so the count is the only bound that applies.
 	thumbFailBytes = 0
+	// The box every negative entry is filed under, since none of them is size-scoped.
+	failBox = 0
 )
 
 // thumbCache is a bounded in-process LRU of generated thumbnails keyed by (source
-// hash, size). It sits in front of the thumb_cache table: it serves a read-only store,
-// which cannot persist to the table and would otherwise regenerate on every request,
-// and it saves a read-write store a SQL round-trip and re-decode for a hot cover. It
-// is safe for concurrent use.
+// hash, ladder rung). It sits in front of the thumb_cache table: it serves a read-only
+// store, which cannot persist to the table and would otherwise regenerate on every
+// request, and it saves a read-write store a SQL round-trip and re-decode for a hot
+// cover. It is safe for concurrent use.
 type thumbCache struct {
 	mu       sync.Mutex
 	max      int
@@ -47,7 +57,7 @@ type thumbCache struct {
 
 type thumbKey struct {
 	hash string
-	size int
+	box  int
 }
 
 type thumbEntry struct {
@@ -64,24 +74,33 @@ func newThumbCache(max, maxBytes int) *thumbCache {
 // (defensive) is a permanent miss. The returned blob's Bytes is a private copy: the
 // cache shares no backing array with callers, so a caller that mutates the bytes
 // cannot corrupt the cached entry (or another caller's view of it).
-func (c *thumbCache) get(hash string, size int) (model.ArtBlob, bool) {
+func (c *thumbCache) get(hash string, box int) (model.ArtBlob, bool) {
 	if c == nil {
 		return model.ArtBlob{}, false
 	}
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	if el, ok := c.items[thumbKey{hash, size}]; ok {
-		c.ll.MoveToFront(el)
-		return cloneArtBlob(el.Value.(*thumbEntry).blob), true
+	el, ok := c.items[thumbKey{hash, box}]
+	if !ok {
+		c.mu.Unlock()
+		return model.ArtBlob{}, false
 	}
-	return model.ArtBlob{}, false
+	c.ll.MoveToFront(el)
+	blob := el.Value.(*thumbEntry).blob
+	c.mu.Unlock()
+	// Copied outside the lock. The header was taken under it and a cached entry's bytes
+	// are never written through, so the copy reads a picture that cannot change under it
+	// while other readers carry on. At a hero rung the copy is megabytes, and it used to
+	// run holding the one mutex the whole cache shares.
+	return cloneArtBlob(blob), true
 }
 
 // cloneArtBlob returns a copy of b whose Bytes shares no backing array with the
-// original, so the cache and its callers cannot mutate each other's bytes.
+// original, so the cache and its callers cannot mutate each other's bytes. It preserves
+// whether there is a body at all: appending to a nil slice yields nil when there is
+// nothing to append, and an empty body is a different answer from no body.
 func cloneArtBlob(b model.ArtBlob) model.ArtBlob {
 	if b.Bytes != nil {
-		b.Bytes = append([]byte(nil), b.Bytes...)
+		b.Bytes = append(make([]byte, 0, len(b.Bytes)), b.Bytes...)
 	}
 	return b
 }
@@ -89,14 +108,14 @@ func cloneArtBlob(b model.ArtBlob) model.ArtBlob {
 // put inserts or refreshes a thumbnail, evicting the least-recently-used entries
 // past the bound. It stores a private copy of the blob's bytes so a later mutation of
 // the caller's slice cannot reach the cache.
-func (c *thumbCache) put(hash string, size int, blob model.ArtBlob) {
+func (c *thumbCache) put(hash string, box int, blob model.ArtBlob) {
 	if c == nil {
 		return
 	}
 	stored := cloneArtBlob(blob)
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	key := thumbKey{hash, size}
+	key := thumbKey{hash, box}
 	if el, ok := c.items[key]; ok {
 		e := el.Value.(*thumbEntry)
 		c.bytes += len(stored.Bytes) - e.bytes
@@ -124,6 +143,81 @@ func (c *thumbCache) evict() {
 		c.bytes -= e.bytes
 		delete(c.items, e.key)
 	}
+}
+
+// thumbFlight collapses concurrent generation of one (source, rung) onto a single decode.
+// The caches in front of it only help once a thumbnail exists, so a cold grid scroll
+// misses every layer at once and each caller would otherwise read the whole source blob,
+// run art.Thumbnail over it, and queue behind the write lock to store bytes identical to
+// its neighbours'. Rounding a request to a rung made that likelier rather than rarer,
+// since the layout widths that used to hold their own keys now share one.
+//
+// The decoded frames are what make it worth collapsing rather than merely wasteful: the
+// byte bound on thumbCache covers what is already cached, not what is in flight, so a
+// 4000x4000 source is tens of megabytes of RGBA per caller in the crowd.
+type thumbFlight struct {
+	mu    sync.Mutex
+	calls map[thumbKey]*thumbCall
+}
+
+// thumbCall is one generation in progress. done is closed once blob and err are final, so
+// a waiter that has seen the close can read both without a lock of its own.
+type thumbCall struct {
+	done chan struct{}
+	blob *model.ArtBlob
+	err  error
+}
+
+func newThumbFlight() *thumbFlight { return &thumbFlight{calls: map[thumbKey]*thumbCall{}} }
+
+// do runs gen for key, or waits for the identical call already running. Each caller gets
+// its own copy of the bytes, so one cannot write through another's picture.
+//
+// Cancellation is per caller and stops there. A waiter that gives up returns its own
+// context's error and leaves the call running for whoever is still on it, and the leader
+// runs gen on a context detached from its own for the same reason: otherwise the first
+// caller to walk away decides the answer for the crowd behind it, which is the opposite
+// of what the crowd asked for.
+func (f *thumbFlight) do(ctx context.Context, key thumbKey,
+	gen func(context.Context) (*model.ArtBlob, error)) (*model.ArtBlob, error) {
+	f.mu.Lock()
+	if c, ok := f.calls[key]; ok {
+		f.mu.Unlock()
+		select {
+		case <-c.done:
+			return c.result()
+		case <-ctx.Done():
+			return nil, waxerr.FromContext("store.ResolveArt", ctx.Err(), waxerr.CodeIO)
+		}
+	}
+	c := &thumbCall{done: make(chan struct{})}
+	f.calls[key] = c
+	f.mu.Unlock()
+
+	// Deferred so a gen that does not return normally still lets go of its key. A panic
+	// that left the call listed would wedge this rung for the life of the process, with
+	// every later request joining a call that never closes. The key is delisted before
+	// the close, so the map never holds a finished call.
+	defer func() {
+		if c.blob == nil && c.err == nil {
+			c.err = waxerr.New(waxerr.CodeInternal, "store.ResolveArt", "thumbnail generation did not complete")
+		}
+		f.mu.Lock()
+		delete(f.calls, key)
+		f.mu.Unlock()
+		close(c.done)
+	}()
+	c.blob, c.err = gen(context.WithoutCancel(ctx))
+	return c.result()
+}
+
+// result hands back a private copy of a finished call's answer.
+func (c *thumbCall) result() (*model.ArtBlob, error) {
+	if c.err != nil {
+		return nil, c.err
+	}
+	b := cloneArtBlob(*c.blob)
+	return &b, nil
 }
 
 // attachArtTxChanged maps a track/book item's cover onto the 'track' art slot
@@ -328,13 +422,20 @@ type artLevel struct {
 // front cover; every other role resolves at the requested level alone, since an
 // ancestor's back cover or booklet would be misleading for a descendant. An empty
 // role means front. size selects the output: a non-positive size returns the stored
-// source exactly, and a positive size returns an image the caller can draw, scaled to
-// fit a square box with that maximum side when the source is larger and re-encoded at
-// its own size when the source already fits but is held in a format outside
-// art.Displayable. Generated images are cached and never upscaled. A source that
-// cannot be decoded at all is returned as stored, whatever its format. The blob
-// carries the answering Level and, for an album answered from a member track's
-// cover, Derived. CodeNotFound means no consulted level has art in that role.
+// source exactly, and a positive size is rounded up to a ladder rung (art.Rung) and
+// answered there, with an image the caller can draw, scaled to fit a square box of that
+// side when the source is larger and re-encoded at its own size when the source already
+// fits but is held in a format outside art.Displayable.
+//
+// Rounding is what holds the cache to a few derivatives per cover instead of one per
+// width a client's layout has ever had, and it is why the answer can come back larger than
+// the box asked for: 187 is served at 192. A box past the top rung is served as asked
+// rather than rounded, since a request that large is bespoke rather than a layout size.
+// The blob names the rung in Box, and a caller scales what it gets to its own layout.
+// Generated images are cached and never upscaled. A source that cannot be decoded at all
+// is returned as stored, whatever its format. The blob carries the answering Level and,
+// for an album answered from a member track's cover, Derived. CodeNotFound means no
+// consulted level has art in that role.
 func (s *Store) ResolveArt(ctx context.Context, ref model.EntityRef, role model.ArtRole, size int) (*model.ArtBlob, error) {
 	const op = "store.ResolveArt"
 	// The blob is built from the metadata-only read's own answer rather than from a
@@ -344,14 +445,17 @@ func (s *Store) ResolveArt(ctx context.Context, ref model.EntityRef, role model.
 	if err != nil {
 		return nil, err
 	}
-	source := func() (*model.ArtBlob, error) {
+	// Rounded once, here, so nothing below sees the raw request: what is reported,
+	// generated, and keyed is all this.
+	box := art.Rung(size)
+	source := func(ctx context.Context) (*model.ArtBlob, error) {
 		data, err := s.artSourceData(ctx, prov.SourceHash, op)
 		if err != nil {
 			return nil, err
 		}
 		return &model.ArtBlob{
 			Bytes: data, Format: prov.Format, Width: prov.Width, Height: prov.Height,
-			SourceHash: prov.SourceHash, Level: prov.Level, Derived: prov.Derived,
+			SourceHash: prov.SourceHash, Box: box, Level: prov.Level, Derived: prov.Derived,
 			Attribution: prov.Attribution, UpdatedAt: prov.UpdatedAt,
 		}, nil
 	}
@@ -359,43 +463,47 @@ func (s *Store) ResolveArt(ctx context.Context, ref model.EntityRef, role model.
 	// Original requested: serve the source. Nothing above this point has loaded it,
 	// which is what keeps a grid of cached thumbnails from reading a full-size image
 	// out of blob storage per cover and discarding it.
-	if size <= 0 {
-		return source()
+	if box <= 0 {
+		return source(ctx)
 	}
 	// Dimensions unknown (an undecodable or exotic source, e.g. an AVIF/HEIC cover with
 	// no pure-Go decoder): there is nothing to decode, so serve the original and let the
 	// caller decide what to do with a format it may not paint.
 	longest := max(prov.Width, prov.Height)
 	if longest == 0 {
-		return source()
+		return source(ctx)
 	}
-	// A source already inside the box needs no scaling, but a sized request is a request
-	// to draw the picture, so a format a client cannot paint is re-encoded at its own
-	// size rather than served as stored.
-	if longest <= size && art.Displayable(prov.Format) {
-		return source()
+	// A source already inside the rung needs no scaling, but a sized request is a request
+	// to draw the picture, so a format a client cannot paint is re-encoded at its own size
+	// rather than served as stored. It is measured against the rung and not the raw
+	// request, which is what keeps the answer a function of the rung alone: otherwise 187
+	// and 192 would disagree about a 190px cover while sharing one cache key, and the row
+	// generated for one of them would never be read by the other.
+	if longest <= box && art.Displayable(prov.Format) {
+		return source(ctx)
 	}
-	// The box is passed through as asked rather than clamped to the dimensions above.
-	// Every rung at or above the source's own size yields the same bytes, so clamping
-	// would collapse them onto one cache entry, but those dimensions are only as good as
-	// whatever wrote them: storableArt keeps a producer's own values and fills only what
-	// it left zero, so a cover whose stored size understates its bytes would be scaled
-	// down to the stored figure and quietly answer a large request with a small picture.
-	// art.Thumbnail decodes the real bytes and never upscales, so passing the box
-	// through is right whatever the row says. The cost is that the cache keys on
-	// whatever sizes clients ask for rather than one entry per cover, so what bounds
-	// thumb_cache is `db thumbs`, not the size of the library.
-	thumb, err := s.thumbnail(ctx, prov, size, source)
+	// How far the stored dimensions can be trusted, which is the argument here to keep
+	// intact. storableArt fills only what a producer left zero, so a row can name a size
+	// smaller than its bytes really are. The short circuit above trusts such a row and
+	// this deliberately does not: trusting it there hands back a picture larger than the
+	// box, which a caller can still draw, while clamping the rung to it here would hand
+	// back one smaller than the source really is and cache that where nothing corrects
+	// it. So the rung goes through as it is. art.Thumbnail decodes the real bytes and
+	// never upscales, which is what makes every rung at or above the source's own size
+	// agree without the row having to be right.
+	thumb, err := s.thumbnail(ctx, prov, box, source)
 	if err != nil {
 		return nil, err
 	}
-	// The thumbnail cache is keyed by (source, size) alone; the same cached bytes can
+	// The thumbnail cache is keyed by (source, rung) alone; the same cached bytes can
 	// answer different levels (a track's own cover vs a sibling resolving it through the
 	// album), and two entities sharing one deduped source can report different
 	// provenance, so both are stamped per request rather than cached. thumbCache.put
 	// stores the blob above this line, which is what makes this the single stamp site.
 	// Format and the dimensions are overwritten by the generator, which is exactly what
-	// separates a thumbnail from the stored source ArtProvenance describes.
+	// separates a thumbnail from the stored source ArtProvenance describes. Box is stamped
+	// here as well, since the cached blob is keyed by the rung rather than carrying it.
+	thumb.Box = box
 	thumb.Level, thumb.Derived = prov.Level, prov.Derived
 	thumb.Attribution, thumb.UpdatedAt = prov.Attribution, prov.UpdatedAt
 	return thumb, nil
@@ -548,39 +656,51 @@ func (s *Store) ArtRoles(ctx context.Context, ref model.EntityRef) ([]model.ArtR
 	}), nil
 }
 
-// thumbnail returns a cached thumbnail for (source hash, size), generating and caching
-// it on a miss. source loads the original image, and is called only when generation is
-// actually needed: a cache hit at either level answers without touching the blob at all.
-// A generation failure (e.g. an exotic source format) falls back to the original and is
-// remembered in a separate small cache, so the decode is not attempted again for those
-// bytes at that box.
-func (s *Store) thumbnail(ctx context.Context, prov *model.ArtProvenance, size int,
-	source func() (*model.ArtBlob, error)) (*model.ArtBlob, error) {
-	const op = "store.ResolveArt"
+// thumbnail returns a cached thumbnail for (source hash, rung), generating and caching
+// it on a miss. box is already rounded by the caller, so this is the size generated,
+// keyed, and stored. source loads the original image, and is called only when generation
+// is actually needed: a cache hit at either level answers without touching the blob at
+// all. A generation failure (e.g. an exotic source format) falls back to the original and
+// is remembered in a separate small cache, so the decode is not attempted again for those
+// bytes at any rung. Concurrent callers that miss together share one generation.
+func (s *Store) thumbnail(ctx context.Context, prov *model.ArtProvenance, box int,
+	source func(context.Context) (*model.ArtBlob, error)) (*model.ArtBlob, error) {
 	hash := prov.SourceHash
-	// Generation already failed for these bytes at this box. The blob load still happens,
+	// Generation already failed for these bytes, at any box. The blob load still happens,
 	// since the original is what gets served either way; what this skips is the repeated
 	// decode attempt and the repeated warning behind it.
-	if _, failed := s.thumbFail.get(hash, size); failed {
-		return source()
+	if _, failed := s.thumbFail.get(hash, failBox); failed {
+		return source(ctx)
 	}
 	// Check the in-process cache next. This serves a read-only store, which cannot
 	// persist to thumb_cache and would otherwise regenerate on every request, and it
 	// saves a read-write store the SQL round-trip and re-decode for a hot cover.
-	if blob, ok := s.thumbMem.get(hash, size); ok {
+	if blob, ok := s.thumbMem.get(hash, box); ok {
 		b := blob
 		return &b, nil
 	}
 
+	// Cold at every layer above, so this is the miss that concurrent callers share.
+	return s.thumbFlight.do(ctx, thumbKey{hash, box}, func(ctx context.Context) (*model.ArtBlob, error) {
+		return s.generateThumb(ctx, hash, box, source)
+	})
+}
+
+// generateThumb answers a cold (source, rung) from the thumb_cache table, or generates and
+// stores it. It runs under thumbFlight, so exactly one caller per rung is inside it and the
+// table read doubles as the check for a leader that finished a moment ago.
+func (s *Store) generateThumb(ctx context.Context, hash string, box int,
+	source func(context.Context) (*model.ArtBlob, error)) (*model.ArtBlob, error) {
+	const op = "store.ResolveArt"
 	var data []byte
 	var format string
 	var w, h int
 	err := s.read.QueryRowContext(ctx,
 		"SELECT data, format, width, height FROM thumb_cache WHERE source_hash = ? AND size = ?",
-		hash, size).Scan(&data, &format, &w, &h)
+		hash, box).Scan(&data, &format, &w, &h)
 	if err == nil {
 		blob := model.ArtBlob{Bytes: data, Format: format, Width: w, Height: h, SourceHash: hash, Thumbnail: true}
-		s.thumbMem.put(hash, size, blob)
+		s.thumbMem.put(hash, box, blob)
 		b := blob
 		return &b, nil
 	}
@@ -588,11 +708,11 @@ func (s *Store) thumbnail(ctx context.Context, prov *model.ArtProvenance, size i
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
 
-	src, err := source()
+	src, err := source(ctx)
 	if err != nil {
 		return nil, err
 	}
-	thumb, tFormat, tw, th, gerr := art.Thumbnail(src.Bytes, size)
+	thumb, tFormat, tw, th, gerr := art.Thumbnail(src.Bytes, box)
 	if gerr != nil {
 		// The pure-Go decoders cannot handle this source (a truncated image, or an
 		// exotic format such as AVIF/HEIC that arrived with dimensions declared): serve
@@ -601,13 +721,13 @@ func (s *Store) thumbnail(ctx context.Context, prov *model.ArtProvenance, size i
 		// grid scroll re-attempting the decode and re-emitting this warning per request.
 		// It goes in its own cache so a run of such covers cannot flush the thumbnails
 		// generated beside them.
-		s.log.Warn("art thumbnail generation failed; serving original", "hash", hash, "size", size, "err", gerr)
-		s.thumbFail.put(hash, size, model.ArtBlob{})
+		s.log.Warn("art thumbnail generation failed; serving original", "hash", hash, "box", box, "err", gerr)
+		s.thumbFail.put(hash, failBox, model.ArtBlob{})
 		return src, nil
 	}
 
 	blob := model.ArtBlob{Bytes: thumb, Format: tFormat, Width: tw, Height: th, SourceHash: hash, Thumbnail: true}
-	s.thumbMem.put(hash, size, blob)
+	s.thumbMem.put(hash, box, blob)
 
 	// Best-effort cache write: a read-only library still serves the generated thumbnail
 	// from the in-process cache above, just without persisting it to disk.
@@ -615,10 +735,10 @@ func (s *Store) thumbnail(ctx context.Context, prov *model.ArtProvenance, size i
 		if err := s.writeTx(ctx, func(tx *sql.Tx) error {
 			_, e := tx.ExecContext(ctx,
 				`INSERT OR REPLACE INTO thumb_cache(source_hash, size, format, width, height, data, created_at)
-				 VALUES (?,?,?,?,?,?,?)`, hash, size, tFormat, tw, th, thumb, nowNS())
+				 VALUES (?,?,?,?,?,?,?)`, hash, box, tFormat, tw, th, thumb, nowNS())
 			return e
 		}); err != nil {
-			s.log.Warn("caching thumbnail", "hash", hash, "size", size, "err", err)
+			s.log.Warn("caching thumbnail", "hash", hash, "box", box, "err", err)
 		}
 	}
 	b := blob

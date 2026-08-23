@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/json"
+	"slices"
+	"sort"
 	"testing"
 
 	"github.com/colespringer/waxbin/model"
@@ -29,5 +31,43 @@ func TestArtRoleViewsJSON(t *testing.T) {
 		`{"role":"front","source":"user","updatedAt":"9","locked":true}]`
 	if string(b) != want {
 		t.Errorf("json = %s\nwant %s", b, want)
+	}
+}
+
+// TestArtViewKeySet pins the `art --json` field names, which are the CLI contract. Both
+// producers are checked against one list, so a field reaching one payload and not the
+// other, or reaching either without a decision, fails here rather than in a consumer's
+// parser. artView adding `box` was itself an unpinned change to this payload.
+func TestArtViewKeySet(t *testing.T) {
+	want := []string{"box", "bytes", "derived", "format", "height", "level", "provider",
+		"source", "sourceHash", "sourceUrl", "thumbnail", "updatedAt", "width"}
+	views := map[string]map[string]any{
+		"artView":         artView(&model.ArtProvenance{Format: "png"}, false, 0),
+		"artViewFromBlob": artViewFromBlob(&model.ArtBlob{Format: "png", Box: 192, Thumbnail: true}),
+	}
+	for name, v := range views {
+		got := make([]string, 0, len(v))
+		for k := range v {
+			got = append(got, k)
+		}
+		sort.Strings(got)
+		if !slices.Equal(got, want) {
+			t.Errorf("%s keys = %v, want %v", name, got, want)
+		}
+	}
+}
+
+// TestArtViewReportsTheRungServed pins the field a client needs to make sense of a
+// picture wider than the --size it asked for. The resolve rounds the box up to a
+// ladder rung, so the width alone does not say which request would land on these same
+// bytes; box does. A sizeless read asked for no rung and reports none.
+func TestArtViewReportsTheRungServed(t *testing.T) {
+	sized := artView(&model.ArtProvenance{Format: "png", Width: 192, Height: 144}, true, 192)
+	if got := sized["box"]; got != 192 {
+		t.Errorf("box = %v, want 192 (the rung 187 rounds up to)", got)
+	}
+	sizeless := artView(&model.ArtProvenance{Format: "png", Width: 400, Height: 300}, false, 0)
+	if got := sizeless["box"]; got != 0 {
+		t.Errorf("box = %v, want 0 for a sizeless read", got)
 	}
 }

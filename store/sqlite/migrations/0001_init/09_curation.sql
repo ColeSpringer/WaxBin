@@ -155,12 +155,12 @@ CREATE TABLE art_map (
 -- Named for the column it indexes, so it is not read as an index on source.
 CREATE INDEX art_map_source_hash ON art_map(source_hash);
 
--- Size-negotiated thumbnails generated on demand, keyed by (source hash, max
--- dimension); derived data, reference-counted against art_source and
--- garbage-collected when its source is unreferenced.
+-- Size-negotiated thumbnails generated on demand, keyed by (source hash, ladder
+-- rung); derived data, reference-counted against art_source and garbage-collected
+-- when its source is unreferenced.
 CREATE TABLE thumb_cache (
   source_hash TEXT    NOT NULL REFERENCES art_source(hash) ON DELETE CASCADE,
-  size        INTEGER NOT NULL,           -- requested max dimension in px
+  size        INTEGER NOT NULL,           -- ladder rung in px (art.Rung)
   format      TEXT    NOT NULL,           -- jpeg|png
   width       INTEGER NOT NULL,
   height      INTEGER NOT NULL,

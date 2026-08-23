@@ -13,16 +13,31 @@ import (
 
 // seedRungs resolves one covered track at each of the given boxes, leaving a
 // thumb_cache row per rung. It returns the track's pid and the source bytes.
+//
+// It checks that it delivered what it promises. Its fixture is 400x400, so a box at or
+// above 512 rounds to a rung the source already fits and writes no row at all, and two
+// boxes inside one rung write a single row between them. Either leaves a caller counting
+// rows or backdating one to fail several frames away from the argument that caused it.
 func seedRungs(t *testing.T, st *sqlite.Store, libID int64, boxes ...int) (model.PID, []byte) {
 	t.Helper()
 	raw := sizedCoverPNG(t, 400, 400)
 	pid := putCoveredTrack(t, st, libID, "/lib/a.flac", "ess-a", "A", "Album",
 		stamped(t, raw, model.SourceTag, "", ""))
+	seeded := map[int]bool{}
 	for _, box := range boxes {
-		if _, err := st.ResolveArt(context.Background(),
-			model.EntityRef{Type: model.ArtTrack, PID: pid}, model.ArtRoleFront, box); err != nil {
+		blob, err := st.ResolveArt(context.Background(),
+			model.EntityRef{Type: model.ArtTrack, PID: pid}, model.ArtRoleFront, box)
+		if err != nil {
 			t.Fatalf("resolve at %d: %v", box, err)
 		}
+		if !blob.Thumbnail {
+			t.Fatalf("box %d rounds to rung %d, which the 400x400 fixture already fits, so "+
+				"nothing was cached; seedRungs promises a row per box", box, blob.Box)
+		}
+		if seeded[blob.Box] {
+			t.Fatalf("boxes %v collapse onto rung %d; seedRungs promises a row per box", boxes, blob.Box)
+		}
+		seeded[blob.Box] = true
 	}
 	return pid, raw
 }
@@ -57,7 +72,7 @@ func backdate(t *testing.T, db *sql.DB, size int, age time.Duration) {
 // to show that rather than reporting a single cached cover.
 func TestThumbCacheStatsCountsEachRungSeparately(t *testing.T) {
 	st, dbPath, lib := openStoreAt(t)
-	_, raw := seedRungs(t, st, lib.ID, 40, 80, 160)
+	_, raw := seedRungs(t, st, lib.ID, 48, 96, 192)
 
 	rep, err := st.ThumbCacheStats(context.Background())
 	if err != nil {
@@ -78,7 +93,7 @@ func TestThumbCacheStatsCountsEachRungSeparately(t *testing.T) {
 	// Largest box first: the rung worth pruning is the one that costs the most.
 	var total int64
 	for i, r := range rep.Rungs {
-		if want := []int{160, 80, 40}[i]; r.Size != want {
+		if want := []int{192, 96, 48}[i]; r.Size != want {
 			t.Errorf("Rungs[%d].Size = %d, want %d (largest box first)", i, r.Size, want)
 		}
 		if r.Rows != 1 {
@@ -130,9 +145,9 @@ func TestThumbCacheStatsReportsOriginalsWithNoDerivatives(t *testing.T) {
 // inside the window survives.
 func TestPruneThumbnailsDropsOnlyEntriesPastTheAge(t *testing.T) {
 	st, dbPath, lib := openStoreAt(t)
-	seedRungs(t, st, lib.ID, 40, 160)
+	seedRungs(t, st, lib.ID, 48, 192)
 	db := roConn(t, dbPath)
-	backdate(t, writeConn(t, dbPath), 160, 72*time.Hour)
+	backdate(t, writeConn(t, dbPath), 192, 72*time.Hour)
 
 	removed, freed, err := st.PruneThumbnails(context.Background(), int64(24*time.Hour), -1)
 	if err != nil {
@@ -144,8 +159,8 @@ func TestPruneThumbnailsDropsOnlyEntriesPastTheAge(t *testing.T) {
 	if freed <= 0 {
 		t.Errorf("freed = %d, want the removed rung's bytes", freed)
 	}
-	if n := scalarInt64(t, db, "SELECT size FROM thumb_cache"); n != 40 {
-		t.Errorf("surviving rung = %d, want 40 (the one inside the window)", n)
+	if n := scalarInt64(t, db, thumbSizes); n != 48 {
+		t.Errorf("surviving rung = %d, want 48 (the one inside the window)", n)
 	}
 }
 
@@ -153,14 +168,14 @@ func TestPruneThumbnailsDropsOnlyEntriesPastTheAge(t *testing.T) {
 // nothing but a creation stamp to order by, the budget evicts oldest first.
 func TestPruneThumbnailsKeepsTheNewestInsideTheByteBudget(t *testing.T) {
 	st, dbPath, lib := openStoreAt(t)
-	seedRungs(t, st, lib.ID, 40, 80, 160)
+	seedRungs(t, st, lib.ID, 48, 96, 192)
 	w := writeConn(t, dbPath)
-	backdate(t, w, 160, 72*time.Hour)
-	backdate(t, w, 80, 48*time.Hour)
-	backdate(t, w, 40, 24*time.Hour)
+	backdate(t, w, 192, 72*time.Hour)
+	backdate(t, w, 96, 48*time.Hour)
+	backdate(t, w, 48, 24*time.Hour)
 
 	db := roConn(t, dbPath)
-	keep := scalarInt64(t, db, "SELECT COALESCE(SUM(LENGTH(data)),0) FROM thumb_cache WHERE size IN (40, 80)")
+	keep := scalarInt64(t, db, "SELECT COALESCE(SUM(LENGTH(data)),0) FROM thumb_cache WHERE size IN (48, 96)")
 
 	removed, freed, err := st.PruneThumbnails(context.Background(), -1, keep)
 	if err != nil {
@@ -175,7 +190,7 @@ func TestPruneThumbnailsKeepsTheNewestInsideTheByteBudget(t *testing.T) {
 	if freed <= 0 {
 		t.Errorf("freed = %d, want the evicted rung's bytes", freed)
 	}
-	if n := scalarInt64(t, db, "SELECT COUNT(*) FROM thumb_cache WHERE size = 160"); n != 0 {
+	if n := scalarInt64(t, db, "SELECT COUNT(*) FROM thumb_cache WHERE size = 192"); n != 0 {
 		t.Error("the oldest rung survived a budget it does not fit in")
 	}
 }
@@ -185,7 +200,7 @@ func TestPruneThumbnailsKeepsTheNewestInsideTheByteBudget(t *testing.T) {
 // emptying the cache is a legitimate ask.
 func TestPruneThumbnailsZeroBudgetEmptiesTheCache(t *testing.T) {
 	st, dbPath, lib := openStoreAt(t)
-	seedRungs(t, st, lib.ID, 40, 160)
+	seedRungs(t, st, lib.ID, 48, 192)
 
 	removed, _, err := st.PruneThumbnails(context.Background(), -1, 0)
 	if err != nil {
@@ -204,7 +219,7 @@ func TestPruneThumbnailsZeroBudgetEmptiesTheCache(t *testing.T) {
 // and "removed 0" would read as an empty cache.
 func TestPruneThumbnailsRefusesWithNoPolicy(t *testing.T) {
 	st, _, lib := openStoreAt(t)
-	seedRungs(t, st, lib.ID, 40)
+	seedRungs(t, st, lib.ID, 48)
 
 	_, _, err := st.PruneThumbnails(context.Background(), -1, -1)
 	if waxerr.CodeOf(err) != waxerr.CodeInvalid {
@@ -218,7 +233,7 @@ func TestPruneThumbnailsRefusesWithNoPolicy(t *testing.T) {
 // what zero means, or `--older-than 0d` refuses an invocation that named a bound.
 func TestPruneThumbnailsZeroAgeEmptiesTheCache(t *testing.T) {
 	st, dbPath, lib := openStoreAt(t)
-	seedRungs(t, st, lib.ID, 40, 160)
+	seedRungs(t, st, lib.ID, 48, 192)
 
 	removed, _, err := st.PruneThumbnails(context.Background(), 0, -1)
 	if err != nil {
@@ -237,7 +252,7 @@ func TestPruneThumbnailsZeroAgeEmptiesTheCache(t *testing.T) {
 // alongside it cannot leave the breakdown adding up to more than the total above it.
 func TestThumbCacheStatsRungsSumToTheTotal(t *testing.T) {
 	st, _, lib := openStoreAt(t)
-	seedRungs(t, st, lib.ID, 40, 80, 160)
+	seedRungs(t, st, lib.ID, 48, 96, 192)
 
 	rep, err := st.ThumbCacheStats(context.Background())
 	if err != nil {

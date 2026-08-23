@@ -340,12 +340,12 @@ func TestCoverWithFormatButNoDimensionsStillThumbnails(t *testing.T) {
 	if _, _, w, h, _ := storedArt(t, db, "track", itemRowID(t, db, pid)); w != 400 || h != 300 {
 		t.Fatalf("stored dimensions = %dx%d, want the bytes' own 400x300", w, h)
 	}
-	blob, err := st.ResolveArt(ctx, model.EntityRef{Type: model.ArtTrack, PID: pid}, model.ArtRoleFront, 100)
+	blob, err := st.ResolveArt(ctx, model.EntityRef{Type: model.ArtTrack, PID: pid}, model.ArtRoleFront, 128)
 	if err != nil {
 		t.Fatalf("ResolveArt: %v", err)
 	}
-	if !blob.Thumbnail || blob.Width != 100 {
-		t.Errorf("resolve at 100 = thumbnail %v %dx%d, want a scaled thumbnail",
+	if !blob.Thumbnail || blob.Width != 128 {
+		t.Errorf("resolve at 128 = thumbnail %v %dx%d, want a scaled thumbnail",
 			blob.Thumbnail, blob.Width, blob.Height)
 	}
 }
@@ -386,7 +386,9 @@ func TestUndescribedCoverMatchingTheStoredOneReattributes(t *testing.T) {
 func TestThumbnailCacheDoesNotCacheProvenance(t *testing.T) {
 	ctx := context.Background()
 	st, _, lib := openStoreAt(t)
-	raw := coverPNG(t, 8)
+	// Bigger than the smallest rung, so the resolve below really generates rather than
+	// short-circuiting to the stored source.
+	raw := sizedCoverPNG(t, 64, 64)
 	tagged := putCoveredTrack(t, st, lib.ID, "/lib/a.flac", "ess-a", "Tagged", "A",
 		stamped(t, raw, model.SourceTag, "", ""))
 	sidecar := putCoveredTrack(t, st, lib.ID, "/lib/b.flac", "ess-b", "Sidecar", "B",
@@ -394,7 +396,7 @@ func TestThumbnailCacheDoesNotCacheProvenance(t *testing.T) {
 
 	resolve := func(pid model.PID) *model.ArtBlob {
 		t.Helper()
-		blob, err := st.ResolveArt(ctx, model.EntityRef{Type: model.ArtTrack, PID: pid}, model.ArtRoleFront, 4)
+		blob, err := st.ResolveArt(ctx, model.EntityRef{Type: model.ArtTrack, PID: pid}, model.ArtRoleFront, 32)
 		if err != nil {
 			t.Fatalf("ResolveArt %s: %v", pid, err)
 		}

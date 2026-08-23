@@ -12,7 +12,11 @@ import (
 	"github.com/colespringer/waxbin/store/sqlite"
 )
 
-const thumbRows = "SELECT COUNT(*) FROM thumb_cache"
+const (
+	thumbRows = "SELECT COUNT(*) FROM thumb_cache"
+	// One row's rung, for the tests that seed exactly one.
+	thumbSizes = "SELECT size FROM thumb_cache"
+)
 
 // TestSizedResolveReencodesUndisplayableSource is the gap WaxDeck reported. A TIFF
 // cover thumbnailed correctly into a small grid tile and came back as raw TIFF at a
@@ -46,8 +50,8 @@ func TestSizedResolveReencodesUndisplayableSource(t *testing.T) {
 	if n := scalarInt64(t, db, thumbRows); n != 1 {
 		t.Errorf("thumb_cache rows = %d, want 1", n)
 	}
-	if n := scalarInt64(t, db, "SELECT size FROM thumb_cache"); n != 200 {
-		t.Errorf("cached at size %d, want the rung asked for (200)", n)
+	if n := scalarInt64(t, db, thumbSizes); n != 256 {
+		t.Errorf("cached at size %d, want the rung 200 rounds up to (256)", n)
 	}
 }
 
@@ -122,11 +126,11 @@ func TestSizedResolveRungsAboveSourceAgree(t *testing.T) {
 	}
 }
 
-// TestSizedResolveIgnoresUnderstatedStoredDimensions is why the box is passed through
-// rather than clamped to the stored dimensions. storableArt keeps a producer's own
-// values and fills only what it left zero, so a row can name a size smaller than its
-// bytes really are. Clamping to that figure would answer a large request with a small
-// picture and cache it under the small rung, where nothing would ever correct it.
+// TestSizedResolveIgnoresUnderstatedStoredDimensions is why the rung goes through as
+// it is rather than clamped to the stored dimensions. storableArt keeps a producer's
+// own values and fills only what it left zero, so a row can name a size smaller than
+// its bytes really are. Clamping to that figure would answer a large request with a
+// small picture and cache it under the small rung, where nothing would ever correct it.
 func TestSizedResolveIgnoresUnderstatedStoredDimensions(t *testing.T) {
 	ctx := context.Background()
 	st, dbPath, lib := openStoreAt(t)
@@ -145,12 +149,12 @@ func TestSizedResolveIgnoresUnderstatedStoredDimensions(t *testing.T) {
 		t.Fatalf("stored dimensions = %dx%d, want the understated 100x100 this test is about", w, h)
 	}
 
-	blob, err := st.ResolveArt(ctx, model.EntityRef{Type: model.ArtTrack, PID: pid}, model.ArtRoleFront, 400)
+	blob, err := st.ResolveArt(ctx, model.EntityRef{Type: model.ArtTrack, PID: pid}, model.ArtRoleFront, 512)
 	if err != nil {
-		t.Fatalf("resolve at 400: %v", err)
+		t.Fatalf("resolve at 512: %v", err)
 	}
-	if blob.Width != 400 || blob.Height != 400 {
-		t.Errorf("dimensions = %dx%d, want 400x400; the box was clamped to the row's understated size",
+	if blob.Width != 512 || blob.Height != 512 {
+		t.Errorf("dimensions = %dx%d, want 512x512; the rung was clamped to the row's understated size",
 			blob.Width, blob.Height)
 	}
 	if !blob.Thumbnail || blob.Format != "png" {
@@ -304,12 +308,14 @@ func TestSizedResolveRemembersGenerationFailure(t *testing.T) {
 			"the failure is meant to be remembered", n)
 	}
 
-	// The record is per box, so a different rung is its own decision rather than being
-	// silently covered by the first failure.
+	// The record is per source, not per box: art.Thumbnail fails inside image.Decode,
+	// before it reads the box, so another rung asking about the same bytes is asking a
+	// question already answered.
 	if _, err := st.ResolveArt(ctx, ref, model.ArtRoleFront, 300); err != nil {
 		t.Fatalf("resolve at another rung: %v", err)
 	}
-	if n := h.count(); n != 2 {
-		t.Errorf("warnings = %d after a second rung, want 2 (the record is keyed by box)", n)
+	if n := h.count(); n != 1 {
+		t.Errorf("warnings = %d after a second rung, want 1; the failure is a property "+
+			"of the bytes, so every rung shares one record", n)
 	}
 }

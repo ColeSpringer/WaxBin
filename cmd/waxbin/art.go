@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/colespringer/waxbin"
+	"github.com/colespringer/waxbin/art"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/waxerr"
 	"github.com/spf13/cobra"
@@ -15,6 +16,18 @@ import (
 // artTypeList is the --type vocabulary both art commands accept (model.ArtEntity),
 // named once so the resolve and set help texts cannot drift apart.
 const artTypeList = "track|album|release_group|artist|genre|episode|podcast|playlist"
+
+// artRungList renders the size ladder for the help text. --size is rounded into this
+// vocabulary, so it is published the way the other vocabularies here are, off art.Rungs
+// rather than a second copy that can drift from it.
+func artRungList() string {
+	rungs := art.Rungs()
+	parts := make([]string, len(rungs))
+	for i, r := range rungs {
+		parts[i] = strconv.Itoa(r)
+	}
+	return strings.Join(parts, " ")
+}
 
 // parseArtEntity validates a --type value, naming the vocabulary in the refusal. The
 // three art commands share it so the message cannot drift between them; it already had.
@@ -41,8 +54,12 @@ func newArtCmd(g *globals) *cobra.Command {
 			"fallback chain (track -> album -> release_group -> artist -> genre) to the first level " +
 			"that has one; any other role (back|disc|booklet|background) resolves at the entity's " +
 			"own level only, as does every role on a playlist, which has no ancestry. With --size, " +
-			"returns a thumbnail scaled to fit a square box with that maximum side, and converts a " +
-			"cover stored in a format most clients cannot display even when it already fits. Writes " +
+			"returns a thumbnail fitted to a square box, and converts a cover stored in a format " +
+			"most clients cannot display even when it already fits. The size is rounded up to the " +
+			"nearest of " + artRungList() + ", which is what holds a cover to a few cached " +
+			"derivatives rather than one per width ever asked for; a size under the ladder is " +
+			"served at 32 and one over it is served as asked. The picture can come back wider " +
+			"than the size named, and the rung it was served at is reported. Writes " +
 			"the image bytes to --out (or stdout); with --json, reports metadata instead, " +
 			"including the chain level that answered, whether an album's cover was derived " +
 			"from a member track, and where the picture came from (" + artSourceList +
@@ -76,7 +93,7 @@ func newArtCmd(g *globals) *cobra.Command {
 				if err != nil {
 					return explainMissingArt(cmd, lib, et, pid, r, err)
 				}
-				return printArtJSON(cmd, lib, et, pid, r, artView(prov, false))
+				return printArtJSON(cmd, lib, et, pid, r, artView(prov, false, 0))
 			}
 			blob, err := lib.ResolveArt(ctx(cmd), model.EntityRef{Type: et, PID: pid}, r, size)
 			if err != nil {
@@ -84,20 +101,18 @@ func newArtCmd(g *globals) *cobra.Command {
 			}
 
 			if g.jsonOut {
-				// The blob describes the image being served, which for a thumbnail is the
-				// generated one, so its own format and size go in where the source's would.
-				return printArtJSON(cmd, lib, et, pid, r, artView(&model.ArtProvenance{
-					Format: blob.Format, Width: blob.Width, Height: blob.Height, Size: len(blob.Bytes),
-					SourceHash: blob.SourceHash, Level: blob.Level, Derived: blob.Derived,
-					Attribution: blob.Attribution, UpdatedAt: blob.UpdatedAt,
-				}, blob.Thumbnail))
+				return printArtJSON(cmd, lib, et, pid, r, artViewFromBlob(blob))
 			}
 			if outPath != "" {
 				if err := os.WriteFile(outPath, blob.Bytes, 0o644); err != nil {
 					return waxerr.Wrapf(waxerr.CodeIO, "art", err, "writing %s", outPath)
 				}
-				fmt.Fprintf(out(cmd), "wrote %d bytes (%s %dx%d) to %s\n",
-					len(blob.Bytes), blob.Format, blob.Width, blob.Height, outPath)
+				rounded := ""
+				if blob.Box != size {
+					rounded = fmt.Sprintf(", --size %d rounded to a %dpx box", size, blob.Box)
+				}
+				fmt.Fprintf(out(cmd), "wrote %d bytes (%s %dx%d%s) to %s\n",
+					len(blob.Bytes), blob.Format, blob.Width, blob.Height, rounded, outPath)
 				return nil
 			}
 			if _, err := cmd.OutOrStdout().Write(blob.Bytes); err != nil {
@@ -109,7 +124,8 @@ func newArtCmd(g *globals) *cobra.Command {
 	f := cmd.Flags()
 	f.StringVar(&entType, "type", "track", "entity type: "+artTypeList)
 	f.StringVar(&role, "role", "front", "art role: front|back|disc|booklet|background")
-	f.IntVar(&size, "size", 0, "max dimension in px; also converts a format most clients cannot display (0 = stored image)")
+	f.IntVar(&size, "size", 0, "max dimension in px, rounded up to a ladder rung; "+
+		"also converts a format most clients cannot display (0 = stored image)")
 	f.StringVar(&outPath, "out", "", "write image bytes to this file instead of stdout")
 	cmd.AddCommand(newArtRolesCmd(g), newArtSetCmd(g), newArtLockCmd(g, true), newArtLockCmd(g, false))
 	return cmd
@@ -144,17 +160,32 @@ func artRoleViews(roles []model.ArtRoleInfo) []artRoleView {
 }
 
 // artView renders the `art` command's JSON payload. Both reads produce it, so the shape
-// cannot differ between a sizeless resolve and a sized one. A map view marshals an int64
-// as a bare number, so the timestamp is formatted to match the string-encoded ns every
-// other view emits.
-func artView(p *model.ArtProvenance, thumbnail bool) map[string]any {
+// cannot differ between a sizeless resolve and a sized one. box is the ladder rung the
+// resolve answered at, which is what tells a caller why it got a picture wider than the
+// --size it named and which other sizes would land on these same bytes; it is 0 for a
+// sizeless read. A map view marshals an int64 as a bare number, so the timestamp is
+// formatted to match the string-encoded ns every other view emits.
+func artView(p *model.ArtProvenance, thumbnail bool, box int) map[string]any {
 	return map[string]any{
 		"format": p.Format, "width": p.Width, "height": p.Height,
-		"bytes": p.Size, "sourceHash": p.SourceHash, "thumbnail": thumbnail,
+		"bytes": p.Size, "sourceHash": p.SourceHash, "thumbnail": thumbnail, "box": box,
 		"level": string(p.Level), "derived": p.Derived,
 		"source": string(p.Source), "provider": p.Provider,
 		"sourceUrl": p.SourceURL, "updatedAt": strconv.FormatInt(p.UpdatedAt, 10),
 	}
+}
+
+// artViewFromBlob renders a sized resolve's payload. The blob describes the image being
+// served, which for a thumbnail is the generated one, so its own format and size go in
+// where the source's would. It exists so that mapping lives in one place: the fields it
+// reads all hang off the same value, and a call site assembling them by hand turns an
+// omitted one into a zero in the payload rather than a build failure.
+func artViewFromBlob(b *model.ArtBlob) map[string]any {
+	return artView(&model.ArtProvenance{
+		Format: b.Format, Width: b.Width, Height: b.Height, Size: len(b.Bytes),
+		SourceHash: b.SourceHash, Level: b.Level, Derived: b.Derived,
+		Attribution: b.Attribution, UpdatedAt: b.UpdatedAt,
+	}, b.Thumbnail, b.Box)
 }
 
 // printArtJSON adds the requested entity's own front-cover lock to an art view and

@@ -128,9 +128,10 @@ func NormalizeFormat(s string) string {
 
 // Displayable reports whether a format is one every mainstream client, browser and
 // native toolkit alike, has decoded for years. A positive size in a resolve consults it
-// before answering with the stored source unscaled, so a cover that fits the requested
-// box but is held in a format outside the set is re-encoded at its own size rather than
-// handed back as stored.
+// before answering with the stored source unscaled, so a cover that fits the rung that
+// size rounds to (Rung) but is held in a format outside the set is re-encoded at its own
+// size rather than handed back as stored. The rung and not the raw size is what it is
+// measured against, so a consumer predicting the answer rounds first.
 //
 // The set is a conservative floor rather than an exhaustive claim about what any given
 // client can paint. A consumer with a wider decoder is free to ignore it and read
@@ -200,6 +201,34 @@ func Describe(data []byte) Info {
 	}
 	info.Format, info.Width, info.Height = format, w, h
 	return info
+}
+
+// rungs is the ladder a requested box rounds up to, which is what bounds the derivatives
+// held per cover. It doubles every second step, so a box inside its range is served at
+// most half again the width asked for; below 32 the floor applies instead, and above 2048
+// Rung stops rounding.
+var rungs = [...]int{32, 48, 64, 96, 128, 192, 256, 384, 512, 768, 1024, 1536, 2048}
+
+// Rungs returns the ladder, smallest first, which is the opposite of the census in
+// model.ThumbCacheReport.Rungs. It is exported so a client sizing to a layout box can ask
+// at a rung directly instead of keeping a second copy of the list beside this one.
+func Rungs() []int { return append([]int(nil), rungs[:]...) }
+
+// Rung rounds a requested box up to the smallest rung that holds it, and to the floor for
+// anything under the ladder. A box past the top rung is bespoke rather than a layout size,
+// so it is served as asked: clamping it would silently downscale a caller that budgeted
+// for a full-size image, and a request that large is not the churn the ladder exists to
+// bound. A non-positive size asks for no box and rounds to zero.
+func Rung(size int) int {
+	if size <= 0 {
+		return 0
+	}
+	for _, r := range rungs {
+		if size <= r {
+			return r
+		}
+	}
+	return size
 }
 
 // Thumbnail decodes src and produces a thumbnail scaled to fit within a

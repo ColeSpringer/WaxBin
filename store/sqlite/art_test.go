@@ -7,7 +7,10 @@ import (
 	"image/color"
 	"image/png"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/colespringer/waxbin/art"
 	"github.com/colespringer/waxbin/model"
@@ -71,19 +74,19 @@ func TestResolveArtOriginalAndThumbnail(t *testing.T) {
 		t.Errorf("source hash = %s, want %s", orig.SourceHash, cover.Hash)
 	}
 
-	// size 40 -> a thumbnail scaled to fit (120x80 -> 40x27).
-	thumb, err := st.ResolveArt(ctx, model.EntityRef{Type: model.ArtTrack, PID: pid}, model.ArtRoleFront, 40)
+	// size 48 -> a thumbnail scaled to fit (120x80 -> 48x32).
+	thumb, err := st.ResolveArt(ctx, model.EntityRef{Type: model.ArtTrack, PID: pid}, model.ArtRoleFront, 48)
 	if err != nil {
 		t.Fatalf("resolve thumb: %v", err)
 	}
-	if !thumb.Thumbnail || thumb.Width != 40 {
-		t.Errorf("thumb = %+v, want a 40-wide thumbnail", thumb)
+	if !thumb.Thumbnail || thumb.Width != 48 {
+		t.Errorf("thumb = %+v, want a 48-wide thumbnail", thumb)
 	}
 
 	// A second request hits the cache; verify a thumb_cache row exists.
 	var n int
 	if err := st.read.QueryRowContext(ctx,
-		"SELECT COUNT(*) FROM thumb_cache WHERE source_hash = ? AND size = 40", cover.Hash).Scan(&n); err != nil {
+		"SELECT COUNT(*) FROM thumb_cache WHERE source_hash = ? AND size = 48", cover.Hash).Scan(&n); err != nil {
 		t.Fatalf("count thumbs: %v", err)
 	}
 	if n != 1 {
@@ -316,5 +319,222 @@ func TestGCArtRemovesOrphans(t *testing.T) {
 	rep, _ = st.VerifyDerived(ctx)
 	if rep.OrphanArtSources != 0 || rep.OrphanThumbnails != 0 {
 		t.Errorf("after GC, art orphans remain: %d sources / %d thumbs", rep.OrphanArtSources, rep.OrphanThumbnails)
+	}
+}
+
+// TestGenerationFailureIsRememberedPerSourceNotPerRung pins what the negative cache is
+// keyed on. art.Thumbnail fails inside image.Decode, before it ever reads the box, so a
+// failure belongs to the bytes and not to the size asked for. Remembering it per rung let
+// one undecodable cover take a rung's worth of the 64 slots to record the same fact,
+// which evicts the memos of genuinely different bad sources and puts their decode and
+// their warning back on every request.
+func TestGenerationFailureIsRememberedPerSourceNotPerRung(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	junk := []byte("II*\x00 the first bytes of a tiff and nothing else")
+	pid := putWithCover(t, st, lib.ID, "/lib/junk.flac", "ess-junk", &model.ArtImage{
+		Data: junk, Hash: "deadbeef", Format: "tiff", Width: 600, Height: 400,
+		Attribution: model.Attribution{Source: model.SourceTag},
+	})
+	for _, box := range []int{64, 128, 256, 512} {
+		if _, err := st.ResolveArt(ctx, model.EntityRef{Type: model.ArtTrack, PID: pid},
+			model.ArtRoleFront, box); err != nil {
+			t.Fatalf("resolve at %d: %v", box, err)
+		}
+	}
+	if n := len(st.thumbFail.items); n != 1 {
+		t.Errorf("negative cache holds %d entries, want 1 for one undecodable source", n)
+	}
+}
+
+// TestThumbnailCollapsesConcurrentMissesOntoOneGeneration pins the single-flight. The
+// caches in front of generation only help once a thumbnail exists, so a cold grid scroll
+// misses every layer at once and every caller would otherwise read the whole source,
+// decode it, and queue behind the write lock to store bytes identical to its neighbours'.
+// Rounding to a rung made that likelier rather than rarer: the layout widths that used to
+// hold their own keys now share one.
+//
+// It drives Store.thumbnail directly, since the loader is the only place the duplicated
+// work is observable from outside without a hook in the store itself.
+func TestThumbnailCollapsesConcurrentMissesOntoOneGeneration(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	cover := testPNG(t, 400, 300)
+	pid := putWithCover(t, st, lib.ID, "/lib/flight.flac", "ess-flight", cover)
+	prov, err := st.ArtProvenance(ctx, model.EntityRef{Type: model.ArtTrack, PID: pid}, model.ArtRoleFront)
+	if err != nil {
+		t.Fatalf("provenance: %v", err)
+	}
+
+	const callers = 8
+	var loads atomic.Int64
+	release := make(chan struct{})
+	source := func(context.Context) (*model.ArtBlob, error) {
+		loads.Add(1)
+		<-release // hold the leader inside generation so the rest pile up behind it
+		return &model.ArtBlob{Bytes: cover.Data, Format: cover.Format,
+			Width: cover.Width, Height: cover.Height, SourceHash: cover.Hash}, nil
+	}
+
+	var wg sync.WaitGroup
+	blobs := make([]*model.ArtBlob, callers)
+	errs := make([]error, callers)
+	for i := range callers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			blobs[i], errs[i] = st.thumbnail(ctx, prov, 192, source)
+		}()
+	}
+	// A second entry into the loader is the regression itself, and without the flight it
+	// happens in microseconds, so the wait is bounded rather than a fixed sleep.
+	for deadline := time.Now().Add(300 * time.Millisecond); loads.Load() < 2 && time.Now().Before(deadline); {
+		time.Sleep(time.Millisecond)
+	}
+	close(release)
+	wg.Wait()
+
+	if n := loads.Load(); n != 1 {
+		t.Errorf("the source was loaded %d times for %d concurrent resolves of one rung, want 1", n, callers)
+	}
+	for i := range callers {
+		if errs[i] != nil {
+			t.Fatalf("caller %d: %v", i, errs[i])
+		}
+		if !blobs[i].Thumbnail || blobs[i].Width != 192 {
+			t.Errorf("caller %d got %dx%d thumbnail=%v, want a generated 192-wide image",
+				i, blobs[i].Width, blobs[i].Height, blobs[i].Thumbnail)
+		}
+	}
+	// Every caller owns its bytes. Handing the same slice to the crowd would let one
+	// caller's write reach the others, which is the bargain the cache already keeps.
+	blobs[0].Bytes[0] ^= 0xff
+	if bytes.Equal(blobs[0].Bytes, blobs[1].Bytes) {
+		t.Error("callers share one backing array; a flight result must be copied per caller")
+	}
+}
+
+// TestThumbnailFlightSurvivesOneCallerLeaving pins whose cancellation is whose. A caller
+// that gives up takes its own request with it and nothing else: the generation it was
+// waiting on carries on for the callers still there, which is why the leader runs on a
+// context detached from the one that started it.
+func TestThumbnailFlightSurvivesOneCallerLeaving(t *testing.T) {
+	st, lib := entityFixture(t)
+	cover := testPNG(t, 400, 300)
+	pid := putWithCover(t, st, lib.ID, "/lib/leave.flac", "ess-leave", cover)
+	prov, err := st.ArtProvenance(context.Background(),
+		model.EntityRef{Type: model.ArtTrack, PID: pid}, model.ArtRoleFront)
+	if err != nil {
+		t.Fatalf("provenance: %v", err)
+	}
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	source := func(context.Context) (*model.ArtBlob, error) {
+		close(entered)
+		<-release
+		return &model.ArtBlob{Bytes: cover.Data, Format: cover.Format,
+			Width: cover.Width, Height: cover.Height, SourceHash: cover.Hash}, nil
+	}
+
+	// The leader's own context is cancelled while it is inside generation.
+	leadCtx, cancelLead := context.WithCancel(context.Background())
+	var wg sync.WaitGroup
+	var leadBlob *model.ArtBlob
+	var leadErr error
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		leadBlob, leadErr = st.thumbnail(leadCtx, prov, 192, source)
+	}()
+	<-entered
+
+	var followBlob *model.ArtBlob
+	var followErr error
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		followBlob, followErr = st.thumbnail(context.Background(), prov, 192, source)
+	}()
+
+	cancelLead()
+	close(release)
+	wg.Wait()
+
+	if followErr != nil {
+		t.Fatalf("the caller that stayed got %v, want the thumbnail the leader generated", followErr)
+	}
+	if followBlob.Width != 192 {
+		t.Errorf("the caller that stayed got %dx%d, want 192 wide", followBlob.Width, followBlob.Height)
+	}
+	// The leader's own answer may be its result or its cancellation; either is correct.
+	// What must not happen is the crowd inheriting the cancellation, which is asserted
+	// above, or a panic from a half-finished call.
+	if leadErr == nil && leadBlob.Width != 192 {
+		t.Errorf("the leader returned %dx%d with no error, want 192 wide", leadBlob.Width, leadBlob.Height)
+	}
+}
+
+// TestCloneArtBlobPreservesWhetherBytesArePresent pins the one thing the clone must not
+// change about a body it copies. append to a nil slice returns nil when there is nothing
+// to append, so an empty but present body came back absent, and "no bytes at all" is a
+// distinct answer from "a body of length zero" everywhere this blob is read.
+func TestCloneArtBlobPreservesWhetherBytesArePresent(t *testing.T) {
+	if got := cloneArtBlob(model.ArtBlob{Bytes: []byte{}}).Bytes; got == nil {
+		t.Error("an empty but present body cloned to nil")
+	}
+	if got := cloneArtBlob(model.ArtBlob{}).Bytes; got != nil {
+		t.Errorf("an absent body cloned to %v, want nil", got)
+	}
+	src := []byte{1, 2, 3}
+	clone := cloneArtBlob(model.ArtBlob{Bytes: src})
+	clone.Bytes[0] = 9
+	if src[0] != 1 {
+		t.Error("the clone shares a backing array with its source")
+	}
+}
+
+// TestThumbCachePutReplacesRatherThanWrites pins the invariant get relies on to copy an
+// entry's bytes after releasing the lock: a cached slice is never written through, so a
+// refreshed key installs a new one and a reader already holding the old one keeps a
+// picture that stays what it was.
+func TestThumbCachePutReplacesRatherThanWrites(t *testing.T) {
+	c := newThumbCache(4, 1<<20)
+	c.put("h", 64, model.ArtBlob{Bytes: []byte{1, 2, 3}})
+	held, ok := c.get("h", 64)
+	if !ok {
+		t.Fatal("the entry just stored was not found")
+	}
+	c.put("h", 64, model.ArtBlob{Bytes: []byte{9, 9, 9}})
+	if !bytes.Equal(held.Bytes, []byte{1, 2, 3}) {
+		t.Errorf("refreshing an entry changed a picture already handed out: %v", held.Bytes)
+	}
+}
+
+// TestThumbFlightReleasesTheKeyOnPanic pins that a call which does not return normally
+// still lets go of its key. A panic that left the call listed would wedge that rung for
+// the life of the process: every later request joins a call that never closes, and the
+// symptom is a hang on one cover with nothing in the logs.
+func TestThumbFlightReleasesTheKeyOnPanic(t *testing.T) {
+	f := newThumbFlight()
+	key := thumbKey{"h", 64}
+	func() {
+		defer func() { _ = recover() }()
+		_, _ = f.do(context.Background(), key, func(context.Context) (*model.ArtBlob, error) {
+			panic("generation blew up")
+		})
+	}()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = f.do(context.Background(), key, func(context.Context) (*model.ArtBlob, error) {
+			return &model.ArtBlob{Bytes: []byte{1}}, nil
+		})
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("a later call for the same rung is waiting on one that panicked")
 	}
 }

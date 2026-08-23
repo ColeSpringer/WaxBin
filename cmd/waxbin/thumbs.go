@@ -21,9 +21,10 @@ func newDBThumbsCmd(g *globals) *cobra.Command {
 		Use:   "thumbs",
 		Short: "Report and prune the generated thumbnail cache",
 		Long: "Reports what the generated thumbnail cache holds: the totals, the source " +
-			"images it was derived from, and a breakdown per requested box. One cover " +
-			"browsed at several sizes holds a derivative per size, and the breakdown is " +
-			"where that shows; the totals alone report it as a single cached cover.\n\n" +
+			"images it was derived from, and a breakdown per ladder rung. A requested size " +
+			"rounds up to a rung, so one cover browsed at several sizes holds a derivative " +
+			"per rung rather than per width asked for, and the breakdown is where that shows; " +
+			"the totals alone report it as a single cached cover.\n\n" +
 			"--older-than and --max-bytes prune rather than only report, and can be combined: " +
 			"the age pass runs first, then the budget evicts until what is left fits. Both " +
 			"order by when an entry was generated, because nothing records when one was last " +

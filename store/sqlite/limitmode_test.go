@@ -81,16 +81,34 @@ func TestQueryLimitRandomSeeded(t *testing.T) {
 	if tail := draw(3, 2); !equalStrings(tail, full[2:5]) {
 		t.Errorf("offset draw = %v, want shuffle window %v", tail, full[2:5])
 	}
-	// A different seed yields a different permutation of the same membership
-	// (comparing full orders: with 6! possible arrangements an accidental match
-	// is vanishingly unlikely).
-	q2 := query.New(query.EntityItems).Limit(6).LimitBy(query.LimitRandom).Seed(43).Build()
-	items2, err := st.QueryItems(ctx, q2, "")
-	if err != nil {
-		t.Fatalf("random query seed 43: %v", err)
+	// A different seed reorders the same rows. One seed pair cannot assert that: six rows
+	// have 720 arrangements, so two independent seeds land on the same one about once in
+	// 720 runs, and the test fails with nothing wrong.
+	//
+	// Counting distinct orders across four seeds does assert it. Tolerating exactly one
+	// collision keeps chance out, since two independent collisions are a one in thirty
+	// thousand event, while a seed that is truncated or bucketed is systematic and
+	// collapses the four onto two orders or fewer however the buckets fall.
+	seeds := []int64{42, 43, 44, 45}
+	orders := map[string]bool{}
+	for _, seed := range seeds {
+		q2 := query.New(query.EntityItems).Limit(6).LimitBy(query.LimitRandom).Seed(seed).Build()
+		items2, err := st.QueryItems(ctx, q2, "")
+		if err != nil {
+			t.Fatalf("random query seed %d: %v", seed, err)
+		}
+		// Checked before the order is recorded, since a short draw and a reordered one
+		// are the same answer once the titles are joined, and only one is under test.
+		got := titlesOf(items2)
+		if len(got) != len(full) {
+			t.Errorf("seed %d drew %d rows, want %d", seed, len(got), len(full))
+			continue
+		}
+		orders[fmt.Sprint(got)] = true
 	}
-	if equalStrings(full, titlesOf(items2)) {
-		t.Errorf("seeds 42 and 43 produced the identical order %v", full)
+	if len(orders) < len(seeds)-1 {
+		t.Errorf("seeds %v produced %d distinct orders, want at least %d; the seed is not "+
+			"choosing the permutation", seeds, len(orders), len(seeds)-1)
 	}
 }
 

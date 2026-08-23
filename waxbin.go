@@ -411,10 +411,14 @@ func (l *Library) Search(ctx context.Context, q string, opt read.SearchOptions) 
 // or episode -> podcast) to the first level that has one. Every other role (back,
 // disc, booklet, background) resolves at the requested level only, since an
 // ancestor's auxiliary image would be misleading, and a playlist has no ancestry at
-// all. A non-positive size returns the stored image exactly; a positive one returns an
-// image the caller can draw, fitted to a square box of that side when the source is
-// larger and re-encoded at its own size when the source already fits but is held in a
-// format most clients cannot display. Either is generated once and cached.
+// all. A non-positive size returns the stored image exactly; a positive one is rounded up
+// to a ladder rung (art.Rung) and answered there, so the answer can be wider than the size
+// asked for and the blob names the rung it was served at in Box. That rounding is what
+// stops a client sizing to a layout box from minting a derivative per pixel width the box
+// has ever had. The picture is one the caller can draw, fitted to a square box of the rung
+// when the source is larger and re-encoded at its own size when the source already fits
+// but is held in a format most clients cannot display. Either is generated once and
+// cached, including across callers that ask for the same rung at the same moment.
 // CodeNotFound means no consulted level has art in that role.
 func (l *Library) ResolveArt(ctx context.Context, ref model.EntityRef, role model.ArtRole, size int) (*model.ArtBlob, error) {
 	return l.store.ResolveArt(ctx, ref, role, size)
@@ -1186,7 +1190,7 @@ type ThumbPrunePolicy struct {
 }
 
 // ThumbCacheStats censuses the generated thumbnail cache: what it holds, the source
-// images behind it, and a breakdown by requested box. It is read-only.
+// images behind it, and a breakdown by ladder rung. It is read-only.
 func (l *Library) ThumbCacheStats(ctx context.Context) (*model.ThumbCacheReport, error) {
 	return l.store.ThumbCacheStats(ctx)
 }

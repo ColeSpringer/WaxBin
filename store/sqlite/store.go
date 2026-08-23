@@ -75,8 +75,9 @@ type Store struct {
 	cipher      model.SecretCipher // seals/opens secret-table values (nil = plaintext)
 	cipherKeyID string             // key/epoch label stamped into a sealed value
 
-	thumbMem  *thumbCache // in-process cache of generated thumbnails (see art.go)
-	thumbFail *thumbCache // in-process record of sources that failed to generate
+	thumbMem    *thumbCache  // in-process cache of generated thumbnails (see art.go)
+	thumbFail   *thumbCache  // in-process record of sources that failed to generate
+	thumbFlight *thumbFlight // one generation per (source, rung), however many callers want it
 
 	subMu sync.Mutex                     // guards subs
 	subs  map[chan model.Change]struct{} // in-process change_log listeners
@@ -124,8 +125,9 @@ func Open(ctx context.Context, opt OpenOptions) (*Store, error) {
 		path: opt.Path, opt: opt, readOnly: opt.ReadOnly, owner: opt.Owner, log: log,
 		allowStale: opt.AllowStaleBaseline,
 		cipher:     opt.SecretCipher, cipherKeyID: keyID,
-		thumbMem:  newThumbCache(thumbCacheMax, thumbCacheBytes),
-		thumbFail: newThumbCache(thumbFailMax, thumbFailBytes),
+		thumbMem:    newThumbCache(thumbCacheMax, thumbCacheBytes),
+		thumbFail:   newThumbCache(thumbFailMax, thumbFailBytes),
+		thumbFlight: newThumbFlight(),
 	}
 
 	if opt.ReadOnly {

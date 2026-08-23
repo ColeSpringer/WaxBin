@@ -9,7 +9,7 @@ import (
 )
 
 // ThumbCacheStats censuses the generated thumbnail cache: what it holds, the source
-// images behind it, and a breakdown by requested box. It is read-only.
+// images behind it, and a breakdown by ladder rung. It is read-only.
 //
 // The reads share one transaction, so they share one snapshot. The report path opens
 // read-only precisely so it can run beside a live writer, and three separate reads off

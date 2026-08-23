@@ -313,9 +313,9 @@ func (r OrphanGCReport) Total() int {
 
 // ThumbCacheReport is a size census of the generated thumbnail cache: what the
 // derivatives cost, the source images they were derived from, and a breakdown by
-// requested box. The breakdown is the part worth reading. One cover browsed at
-// several rungs holds a derivative per rung, and the totals alone report that as a
-// single cached cover.
+// ladder rung. The breakdown is the part worth reading. One cover browsed at several
+// rungs holds a derivative per rung, and the totals alone report that as a single
+// cached cover.
 type ThumbCacheReport struct {
 	Rows           int
 	Bytes          int64
@@ -327,9 +327,9 @@ type ThumbCacheReport struct {
 	Rungs          []ThumbRung // largest box first
 }
 
-// ThumbRung is one requested box's share of the thumbnail cache.
+// ThumbRung is one ladder rung's share of the thumbnail cache.
 type ThumbRung struct {
-	Size  int // requested max dimension in px
+	Size  int // the rung in px; a requested box rounds up to one of these
 	Rows  int
 	Bytes int64
 }

@@ -781,9 +781,9 @@ func TestArtProvenanceReportsTheStoredSourceNotAThumbnail(t *testing.T) {
 	pid := putWithCover(t, st, lib.ID, "/lib/al/1.flac", "e1", testPNG(t, 400, 300))
 
 	ref := model.EntityRef{Type: model.ArtTrack, PID: pid}
-	thumb, err := st.ResolveArt(ctx, ref, model.ArtRoleFront, 100)
-	if err != nil || !thumb.Thumbnail || thumb.Width != 100 {
-		t.Fatalf("sized resolve = %+v (err %v), want a 100px thumbnail", thumb, err)
+	thumb, err := st.ResolveArt(ctx, ref, model.ArtRoleFront, 128)
+	if err != nil || !thumb.Thumbnail || thumb.Width != 128 {
+		t.Fatalf("sized resolve = %+v (err %v), want a 128px thumbnail", thumb, err)
 	}
 	prov, err := st.ArtProvenance(ctx, ref, model.ArtRoleFront)
 	if err != nil {

@@ -316,3 +316,60 @@ func TestThumbnailOutputIsDisplayable(t *testing.T) {
 		}
 	}
 }
+
+func TestRung(t *testing.T) {
+	cases := []struct {
+		in   int
+		want int
+	}{
+		{0, 0},   // no box asked for: nothing to round
+		{-1, 0},  //
+		{1, 32},  // under the floor: the smallest rung is what gets generated
+		{31, 32}, //
+		{32, 32}, // an exact rung answers as itself
+		{192, 192},
+		{2048, 2048},
+		{33, 48},     // just past a rung climbs to the next
+		{129, 192},   // worst over-delivery in a 1.5 step, 1.488x
+		{1025, 1536}, // and the worst anywhere on the ladder, 1.499x, in the hero range
+		{187, 192},   // the responsive-layout box the cache used to key on
+		{193, 256},   // and its neighbour, one rung up
+		{2049, 2049}, // past the top: bespoke, so served as asked rather than rounded
+		{100000, 100000},
+	}
+	for _, c := range cases {
+		if got := Rung(c.in); got != c.want {
+			t.Errorf("Rung(%d) = %d, want %d", c.in, got, c.want)
+		}
+	}
+}
+
+// TestRungsAreOrderedAndRoundTrip pins the ladder itself rather than one walk of it:
+// every rung must round to itself, and the list must ascend, since Rung answers by
+// climbing it.
+func TestRungsAreOrderedAndRoundTrip(t *testing.T) {
+	rungs := Rungs()
+	if len(rungs) == 0 {
+		t.Fatal("Rungs() is empty")
+	}
+	for i, r := range rungs {
+		if r <= 0 {
+			t.Errorf("Rungs()[%d] = %d, want a positive box", i, r)
+		}
+		if i > 0 && r <= rungs[i-1] {
+			t.Errorf("Rungs()[%d] = %d does not ascend past %d", i, r, rungs[i-1])
+		}
+		if got := Rung(r); got != r {
+			t.Errorf("Rung(%d) = %d, want the rung itself", r, got)
+		}
+	}
+}
+
+// TestRungsIsACopy keeps a caller from editing the ladder out from under the resolver.
+func TestRungsIsACopy(t *testing.T) {
+	first := Rungs()
+	first[0] = 9999
+	if second := Rungs(); second[0] == 9999 {
+		t.Error("Rungs() handed out the backing array; a caller can rewrite the ladder")
+	}
+}
