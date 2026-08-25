@@ -13,6 +13,7 @@ import (
 	"github.com/colespringer/waxbin/enrich"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/store/sqlite"
+	"github.com/colespringer/waxbin/waxerr"
 )
 
 // --- mocks for the port providers --------------------------------------------
@@ -566,5 +567,314 @@ func assertDerivedConsistent(t *testing.T, st *sqlite.Store) {
 	}
 	if !rep.Consistent() {
 		t.Errorf("derived data inconsistent after enrichment: %+v", rep)
+	}
+}
+
+// TestRequestWantStampedPerPass: each engine pass stamps the capability it is
+// gathering onto the request, so a multi-capability provider can tell what the answer
+// will be used for; a zero-value request still wants everything.
+func TestRequestWantStampedPerPass(t *testing.T) {
+	ctx := context.Background()
+	st, _, lib := openStore(t)
+	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
+
+	type call struct {
+		typ  enrich.TargetType
+		want enrich.Capability
+	}
+	var calls []call
+	mock := &enrich.Mock{ProviderName: "multi",
+		Caps: enrich.CapGenres | enrich.CapCover | enrich.CapLyrics,
+		EnrichFunc: func(ctx context.Context, req enrich.Request) (*enrich.Candidate, error) {
+			calls = append(calls, call{req.Type, req.Want})
+			return nil, nil
+		}}
+	svc := enrich.New(st, enrich.Config{
+		Contact: "t@e.com", MinRequestInterval: time.Millisecond,
+		MusicBrainzBaseURL: mbMockGenres(t, `[]`).URL, ListenBrainzBaseURL: deadURL(t),
+		Providers: []enrich.Provider{mock},
+	}, nil)
+	if _, err := svc.Run(ctx, enrich.RunOptions{}, nil); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	want := []call{
+		{enrich.TargetReleaseGroup, enrich.CapGenres},
+		{enrich.TargetReleaseGroup, enrich.CapCover},
+		{enrich.TargetRecording, enrich.CapLyrics},
+	}
+	if len(calls) != len(want) {
+		t.Fatalf("provider calls = %+v, want %+v", calls, want)
+	}
+	for i, w := range want {
+		if calls[i] != w {
+			t.Errorf("call %d = %+v, want %+v", i, calls[i], w)
+		}
+	}
+	if !(enrich.Request{}).Wants(enrich.CapCover) {
+		t.Errorf("a zero-value request must want everything (the pre-Want contract)")
+	}
+}
+
+// TestMultiCapProviderSkipsUnwantedWork: a provider serving both genres and covers
+// can key its expensive work on req.Wants, so the genres pass no longer triggers a
+// cover download nobody reads.
+func TestMultiCapProviderSkipsUnwantedWork(t *testing.T) {
+	ctx := context.Background()
+	st, dbPath, lib := openStore(t)
+	item := seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
+
+	coverBuilds := 0
+	mock := &enrich.Mock{ProviderName: "discogs",
+		Caps: enrich.CapGenres | enrich.CapCover,
+		EnrichFunc: func(ctx context.Context, req enrich.Request) (*enrich.Candidate, error) {
+			cand := &enrich.Candidate{Genres: []string{"Shoegaze"}}
+			if req.Wants(enrich.CapCover) {
+				coverBuilds++
+				cand.Cover = &model.ArtImage{Data: pngBytes(t), Hash: "mc-hash", Format: "png", Width: 4, Height: 4}
+			}
+			return cand, nil
+		}}
+	svc := enrich.New(st, enrich.Config{
+		Contact: "t@e.com", MinRequestInterval: time.Millisecond,
+		MusicBrainzBaseURL: mbMockGenres(t, `[]`).URL, ListenBrainzBaseURL: deadURL(t),
+		Providers: []enrich.Provider{mock},
+	}, nil)
+	res, err := svc.Run(ctx, enrich.RunOptions{}, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if coverBuilds != 1 {
+		t.Errorf("cover builds = %d, want 1 (the cover pass alone, not the genres pass)", coverBuilds)
+	}
+	if res.ArtFetched != 1 {
+		t.Errorf("art fetched = %d, want 1", res.ArtFetched)
+	}
+	db := roDB(t, dbPath)
+	if n := scalarInt(t, db, `SELECT COUNT(*) FROM item_genre ig JOIN genre gn ON gn.id=ig.genre_id
+		JOIN playable_item pi ON pi.id=ig.item_id WHERE pi.pid=? AND gn.name='Shoegaze'`, string(item)); n != 1 {
+		t.Errorf("Shoegaze genre rows = %d, want 1 (genres still applied)", n)
+	}
+}
+
+// artImg builds a provider-offered art image with a distinct content address.
+func artImg(t *testing.T, hash string) *model.ArtImage {
+	t.Helper()
+	return &model.ArtImage{Data: pngBytes(t), Hash: hash, Format: "png", Width: 4, Height: 4}
+}
+
+// rgFrontHash reads the release-group rung's stored front-cover hash.
+func rgFrontHash(t *testing.T, dbPath string) string {
+	t.Helper()
+	return scalarStr(t, roDB(t, dbPath),
+		`SELECT COALESCE((SELECT source_hash FROM art_map WHERE entity_type='release_group' AND role='front'), '')`)
+}
+
+// TestGatherArtFrontAliasEquivalence: a Cover-only provider behaves exactly as it
+// always did; the front lands and nothing counts as aux.
+func TestGatherArtFrontAliasEquivalence(t *testing.T) {
+	ctx := context.Background()
+	st, dbPath, lib := openStore(t)
+	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
+
+	mock := &enrich.Mock{ProviderName: "fanart", Caps: enrich.CapCover,
+		Ret: &enrich.Candidate{Cover: artImg(t, "alias-hash")}}
+	svc := enrich.New(st, enrich.Config{
+		Contact: "t@e.com", MinRequestInterval: time.Millisecond,
+		MusicBrainzBaseURL: mbMockGenres(t, `[]`).URL, ListenBrainzBaseURL: deadURL(t),
+		Providers: []enrich.Provider{mock},
+	}, nil)
+	res, err := svc.Run(ctx, enrich.RunOptions{}, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.ArtFetched != 1 || res.AuxArtFetched != 0 {
+		t.Errorf("art fetched = %d/%d aux, want 1/0", res.ArtFetched, res.AuxArtFetched)
+	}
+	if h := rgFrontHash(t, dbPath); h != "alias-hash" {
+		t.Errorf("rg front hash = %q, want alias-hash", h)
+	}
+}
+
+// TestGatherArtRoleMapPrecedence: when a provider offers both, the role map's front
+// beats the Cover alias.
+func TestGatherArtRoleMapPrecedence(t *testing.T) {
+	ctx := context.Background()
+	st, dbPath, lib := openStore(t)
+	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
+
+	mock := &enrich.Mock{ProviderName: "fanart", Caps: enrich.CapCover,
+		Ret: &enrich.Candidate{
+			Cover: artImg(t, "alias-hash"),
+			Art:   map[model.ArtRole]*model.ArtImage{model.ArtRoleFront: artImg(t, "map-hash")},
+		}}
+	svc := enrich.New(st, enrich.Config{
+		Contact: "t@e.com", MinRequestInterval: time.Millisecond,
+		MusicBrainzBaseURL: mbMockGenres(t, `[]`).URL, ListenBrainzBaseURL: deadURL(t),
+		Providers: []enrich.Provider{mock},
+	}, nil)
+	res, err := svc.Run(ctx, enrich.RunOptions{}, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.ArtFetched != 1 {
+		t.Errorf("art fetched = %d, want 1", res.ArtFetched)
+	}
+	if h := rgFrontHash(t, dbPath); h != "map-hash" {
+		t.Errorf("rg front hash = %q, want map-hash (Art[front] beats Cover)", h)
+	}
+}
+
+// TestGatherArtStopsAtFrontWinner: providers after the front winner are not
+// consulted, and an aux-only provider ahead of the winner still contributes its
+// roles (first-offer-wins per role).
+func TestGatherArtStopsAtFrontWinner(t *testing.T) {
+	ctx := context.Background()
+	cfg := func(st enrich.Store, providers ...enrich.Provider) *enrich.Service {
+		return enrich.New(st, enrich.Config{
+			Contact: "t@e.com", MinRequestInterval: time.Millisecond,
+			MusicBrainzBaseURL: mbMockGenres(t, `[]`).URL, ListenBrainzBaseURL: deadURL(t),
+			Providers: providers,
+		}, nil)
+	}
+
+	t.Run("front winner stops the loop", func(t *testing.T) {
+		st, _, lib := openStore(t)
+		seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
+		first := &enrich.Mock{ProviderName: "first", Caps: enrich.CapCover,
+			Ret: &enrich.Candidate{Art: map[model.ArtRole]*model.ArtImage{
+				model.ArtRoleFront: artImg(t, "front-hash"),
+				model.ArtRoleBack:  artImg(t, "back-hash"),
+			}}}
+		secondCalls := 0
+		second := &enrich.Mock{ProviderName: "second", Caps: enrich.CapCover,
+			EnrichFunc: func(ctx context.Context, req enrich.Request) (*enrich.Candidate, error) {
+				secondCalls++
+				return &enrich.Candidate{Cover: artImg(t, "late-hash")}, nil
+			}}
+		res, err := cfg(st, first, second).Run(ctx, enrich.RunOptions{}, nil)
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		if secondCalls != 0 {
+			t.Errorf("the provider after the front winner was consulted %d times, want 0", secondCalls)
+		}
+		if res.ArtFetched != 1 || res.AuxArtFetched != 1 {
+			t.Errorf("art fetched = %d/%d aux, want 1/1", res.ArtFetched, res.AuxArtFetched)
+		}
+	})
+
+	t.Run("aux-only first keeps its role and the loop continues", func(t *testing.T) {
+		st, dbPath, lib := openStore(t)
+		seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
+		first := &enrich.Mock{ProviderName: "first", Caps: enrich.CapCover,
+			Ret: &enrich.Candidate{Art: map[model.ArtRole]*model.ArtImage{
+				model.ArtRoleBack: artImg(t, "back-hash"),
+			}}}
+		secondCalls := 0
+		second := &enrich.Mock{ProviderName: "second", Caps: enrich.CapCover,
+			EnrichFunc: func(ctx context.Context, req enrich.Request) (*enrich.Candidate, error) {
+				secondCalls++
+				return &enrich.Candidate{Cover: artImg(t, "front-hash")}, nil
+			}}
+		res, err := cfg(st, first, second).Run(ctx, enrich.RunOptions{}, nil)
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		if secondCalls != 1 {
+			t.Errorf("second provider consulted %d times, want 1 (front still unfilled)", secondCalls)
+		}
+		if res.ArtFetched != 1 || res.AuxArtFetched != 1 {
+			t.Errorf("art fetched = %d/%d aux, want 1/1 (second's front, first's back)", res.ArtFetched, res.AuxArtFetched)
+		}
+		if h := rgFrontHash(t, dbPath); h != "front-hash" {
+			t.Errorf("rg front hash = %q, want front-hash", h)
+		}
+	})
+}
+
+// TestAuxArtAppliedAtReleaseGroup: an injected provider's back cover lands at the
+// release-group rung with its attribution, resolves at that level only, and its
+// source stays referenced (GCArt reclaims nothing while the entity lives).
+func TestAuxArtAppliedAtReleaseGroup(t *testing.T) {
+	ctx := context.Background()
+	st, dbPath, lib := openStore(t)
+	track := seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
+
+	mock := &enrich.Mock{ProviderName: "fanart", Caps: enrich.CapCover,
+		Ret: &enrich.Candidate{Art: map[model.ArtRole]*model.ArtImage{
+			model.ArtRoleFront: artImg(t, "front-hash"),
+			model.ArtRoleBack:  artImg(t, "back-hash"),
+		}}}
+	svc := enrich.New(st, enrich.Config{
+		Contact: "t@e.com", MinRequestInterval: time.Millisecond,
+		MusicBrainzBaseURL: mbMockGenres(t, `[]`).URL, ListenBrainzBaseURL: deadURL(t),
+		Providers: []enrich.Provider{mock},
+	}, nil)
+	res, err := svc.Run(ctx, enrich.RunOptions{}, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.ArtFetched != 1 || res.AuxArtFetched != 1 {
+		t.Errorf("art fetched = %d/%d aux, want 1/1", res.ArtFetched, res.AuxArtFetched)
+	}
+
+	db := roDB(t, dbPath)
+	var source, provider string
+	if err := db.QueryRow(`SELECT source, provider FROM art_map
+		WHERE entity_type='release_group' AND role='back'`).Scan(&source, &provider); err != nil {
+		t.Fatalf("read back row: %v", err)
+	}
+	if source != string(model.SourceEnrichment) || provider != "fanart" {
+		t.Errorf("back attribution = %q/%q, want enrichment/fanart", source, provider)
+	}
+
+	// The back resolves at the release group's own level and nowhere below it.
+	rgPID := scalarStr(t, db, "SELECT pid FROM release_group")
+	blob, err := st.ResolveArt(ctx, model.EntityRef{Type: model.ArtReleaseGroup, PID: model.PID(rgPID)}, model.ArtRoleBack, 0)
+	if err != nil {
+		t.Fatalf("resolve rg back: %v", err)
+	}
+	if blob.SourceHash != "back-hash" {
+		t.Errorf("rg back hash = %q, want back-hash", blob.SourceHash)
+	}
+	if _, err := st.ResolveArt(ctx, model.EntityRef{Type: model.ArtTrack, PID: track}, model.ArtRoleBack, 0); !waxerr.Is(err, waxerr.CodeNotFound) {
+		t.Errorf("track back resolve = %v, want CodeNotFound (own-level contract)", err)
+	}
+
+	// Both sources stay referenced while the entity lives.
+	if sources, _, err := st.GCArt(ctx); err != nil || sources != 0 {
+		t.Errorf("GCArt reclaimed %d sources (err %v), want 0", sources, err)
+	}
+}
+
+// TestGatherArtEmptyFrontFallsBackToCover: a role-map front entry carrying no bytes
+// is not "present", so the Cover alias still supplies the effective front instead of
+// being suppressed and then dropped.
+func TestGatherArtEmptyFrontFallsBackToCover(t *testing.T) {
+	ctx := context.Background()
+	st, dbPath, lib := openStore(t)
+	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
+
+	mock := &enrich.Mock{ProviderName: "fanart", Caps: enrich.CapCover,
+		Ret: &enrich.Candidate{
+			Cover: artImg(t, "cover-hash"),
+			Art:   map[model.ArtRole]*model.ArtImage{model.ArtRoleFront: {Format: "png"}},
+		}}
+	svc := enrich.New(st, enrich.Config{
+		Contact: "t@e.com", MinRequestInterval: time.Millisecond,
+		MusicBrainzBaseURL: mbMockGenres(t, `[]`).URL, ListenBrainzBaseURL: deadURL(t),
+		Providers: []enrich.Provider{mock},
+	}, nil)
+	res, err := svc.Run(ctx, enrich.RunOptions{}, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.ArtFetched != 1 {
+		t.Errorf("art fetched = %d, want 1 (the Cover alias)", res.ArtFetched)
+	}
+	if h := rgFrontHash(t, dbPath); h != "cover-hash" {
+		t.Errorf("rg front hash = %q, want cover-hash", h)
 	}
 }

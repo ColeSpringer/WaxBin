@@ -27,18 +27,11 @@ func resolveAndLinkEntities(ctx context.Context, tx *sql.Tx, itemID int64, tr mo
 	if err != nil {
 		return err
 	}
-	// The album-artist anchors the release group; fall back to the track artist
-	// when a track carries no explicit album-artist (the common single-artist case).
-	albumArtistName, albumArtistIDs := tr.AlbumArtist, tr.MBAlbumArtistIDs
-	if strings.TrimSpace(albumArtistName) == "" {
-		// The FIRST stated artist, not the joined display. This string reaches
-		// ReleaseGroupKey below, and a file that repeated its ARTIST frame used to
-		// anchor its album on that first value, so joining here would re-key every
-		// heuristically-grouped album in such a library on the next scan.
-		albumArtistName, albumArtistIDs = tr.Artist, tr.MBArtistIDs
-		if len(tr.Artists) > 0 {
-			albumArtistName = tr.Artists[0]
-		}
+	anchor, rgKey, albumKey := albumChainKeys(tr, filePath)
+	// The ids follow the same fallback the anchor made in albumChainKeys.
+	albumArtistIDs := tr.MBAlbumArtistIDs
+	if strings.TrimSpace(tr.AlbumArtist) == "" {
+		albumArtistIDs = tr.MBArtistIDs
 	}
 	// Files routinely tag MUSICBRAINZ_ARTISTID and omit the album-artist one. When the
 	// two credits are the same string they name the same artists, so the track's ids
@@ -46,22 +39,22 @@ func resolveAndLinkEntities(ctx context.Context, tx *sql.Tx, itemID int64, tr mo
 	// Only when the track stated no list of its own: there tr.Artist is not the whole
 	// credit, and lending the ids would stamp an artist the arity rule just refused.
 	if len(albumArtistIDs) == 0 && len(tr.Artists) == 0 &&
-		identity.MatchKey(albumArtistName) == identity.MatchKey(tr.Artist) {
+		identity.MatchKey(anchor) == identity.MatchKey(tr.Artist) {
 		albumArtistIDs = tr.MBArtistIDs
 	}
 	// The PRIMARY of the credit, not an entity named for the whole string, so
 	// "Jay-Z & Alicia Keys" resolves to Jay-Z and takes his id. Only the entity
-	// changes: resolveAlbumChain still keys on the raw string below, so every release
+	// changes: resolveAlbumChain still keys on the raw string, so every release
 	// group and album keeps the match_key it already has.
 	var albumArtistID int64
-	if names, ids := creditNames(albumArtistName, nil, albumArtistIDs); len(names) > 0 {
+	if names, ids := creditNames(anchor, nil, albumArtistIDs); len(names) > 0 {
 		albumArtistID, err = resolveArtist(ctx, tx, names[0], ids[0])
 		if err != nil {
 			return err
 		}
 	}
 
-	albumID, err := resolveAlbumChain(ctx, tx, tr, albumArtistName, albumArtistID, filePath, affected)
+	albumID, err := resolveAlbumChain(ctx, tx, tr, rgKey, albumKey, albumArtistID, affected)
 	if err != nil {
 		return err
 	}
@@ -150,38 +143,67 @@ func resolveTrackArtists(ctx context.Context, tx *sql.Tx, itemID int64, tr model
 	return primary, nil
 }
 
-// resolveAlbumChain resolves the release_group and album for a track, returning
-// the album id (0 when the track has no album title, or no artist to anchor the
-// group on). MusicBrainz ids, when present, key the group/release directly
-// (MBID-first), so two heuristic guesses for one release unify on the same id.
-//
-// albumArtistName is the RAW credit string and albumArtistID the entity its primary
-// resolved to. Keeping them separate is what let the album-artist credit split
-// without re-keying anything: only the name reaches ReleaseGroupKey.
-func resolveAlbumChain(ctx context.Context, tx *sql.Tx, tr model.Track, albumArtistName string, albumArtistID int64, filePath []byte, affected *affectedRollups) (int64, error) {
-	artistMatchKey := identity.MatchKey(albumArtistName)
+// albumChainKeys derives the identity of the album chain a track implies: the
+// release-group anchor credit and the release-group and album keys. It is the one
+// place the chain-key derivation lives, shared by resolveAlbumChain (via
+// resolveAndLinkEntities) and the edit-rename pre-pass (editrename.go), so the two
+// cannot drift on any input. Extracting only the anchor would leave the not-grouped
+// guard behind: the raw ReleaseGroupKey of an anchorless titled track is a key no
+// resolution path ever computes, and a caller deriving through the raw identity
+// functions would key entities onto phantoms. Empty keys mean the track does not
+// group; the anchor comes back regardless, since the album-artist entity resolves
+// from it either way.
+func albumChainKeys(tr model.Track, filePath []byte) (anchor, rgKey, albumKey string) {
+	// The album-artist anchors the release group; fall back to the track artist
+	// when a track carries no explicit album-artist (the common single-artist case).
+	anchor = tr.AlbumArtist
+	if strings.TrimSpace(anchor) == "" {
+		// The FIRST stated artist, not the joined display. This string reaches
+		// ReleaseGroupKey below, and a file that repeated its ARTIST frame used to
+		// anchor its album on that first value, so joining here would re-key every
+		// heuristically-grouped album in such a library on the next scan.
+		anchor = tr.Artist
+		if len(tr.Artists) > 0 {
+			anchor = tr.Artists[0]
+		}
+	}
+	artistMatchKey := identity.MatchKey(anchor)
 	if artistMatchKey == "" && tr.MBReleaseGroupID == "" {
 		// No artist and no MBID (fully untagged): do not group. A title-only
 		// release group would collide unrelated untagged albums (e.g. two
 		// different "Greatest Hits"), so the track stays ungrouped until an
 		// artist or MBID is known.
-		return 0, nil
+		return anchor, "", ""
 	}
-	rgKey := identity.ReleaseGroupKey(tr.MBReleaseGroupID, artistMatchKey, tr.Album)
+	rgKey = identity.ReleaseGroupKey(tr.MBReleaseGroupID, artistMatchKey, tr.Album)
 	if rgKey == "" {
-		return 0, nil // non-album single: not grouped
+		return anchor, "", "" // non-album single: not grouped
 	}
-	rgID, err := resolveReleaseGroup(ctx, tx, rgKey, tr.Album, albumArtistID, tr.MBReleaseGroupID, affected)
-	if err != nil {
-		return 0, err
-	}
-	folder := filepath.Dir(string(filePath))
 	// Key the album by release group, year, and folder, not disc total. Multi-disc
 	// albums are often tagged inconsistently, and including disc_total would split
 	// one edition into separate album rows. The folder already disambiguates
 	// editions; disc_total is still recorded for display. A MusicBrainz release id
 	// keys the album directly when present.
-	albumKey := identity.AlbumKey(tr.MBReleaseID, rgKey, tr.Year, 0, folder)
+	albumKey = identity.AlbumKey(tr.MBReleaseID, rgKey, tr.Year, 0, filepath.Dir(string(filePath)))
+	return anchor, rgKey, albumKey
+}
+
+// resolveAlbumChain resolves the release_group and album for a track from the keys
+// albumChainKeys derived, returning the album id (0 when the track does not group).
+// MusicBrainz ids, when present, key the group/release directly (MBID-first), so two
+// heuristic guesses for one release unify on the same id.
+//
+// The keys carry the RAW anchor credit while albumArtistID is the entity its primary
+// resolved to. Keeping them separate is what let the album-artist credit split
+// without re-keying anything: only the name reaches ReleaseGroupKey.
+func resolveAlbumChain(ctx context.Context, tx *sql.Tx, tr model.Track, rgKey, albumKey string, albumArtistID int64, affected *affectedRollups) (int64, error) {
+	if rgKey == "" {
+		return 0, nil
+	}
+	rgID, err := resolveReleaseGroup(ctx, tx, rgKey, tr.Album, albumArtistID, tr.MBReleaseGroupID, affected)
+	if err != nil {
+		return 0, err
+	}
 	return resolveAlbum(ctx, tx, albumKey, rgID, tr)
 }
 
@@ -420,13 +442,20 @@ func fillAlbumIdentifiersTx(ctx context.Context, tx *sql.Tx, id int64, pid model
 	return appendChange(ctx, tx, "album", pid, model.OpUpdate)
 }
 
+// clearUnmatchedEntityMarkerTx removes one entity's no-match enrichment marker so a
+// pass re-queues it on new evidence. It is a no-op on a matched marker, which records
+// a real write.
+func clearUnmatchedEntityMarkerTx(ctx context.Context, tx *sql.Tx, entityType string, entityID int64) error {
+	_, err := tx.ExecContext(ctx,
+		"DELETE FROM entity_enrichment WHERE entity_type = ? AND entity_id = ? AND matched = 0",
+		entityType, entityID)
+	return err
+}
+
 // clearUnmatchedAlbumMarkerTx removes an album's no-match enrichment marker so a pass
 // re-queues it. It is a no-op on a matched marker; see fillAlbumIdentifiersTx.
 func clearUnmatchedAlbumMarkerTx(ctx context.Context, tx *sql.Tx, albumID int64) error {
-	_, err := tx.ExecContext(ctx,
-		"DELETE FROM entity_enrichment WHERE entity_type = ? AND entity_id = ? AND matched = 0",
-		model.EnrichAlbumType, albumID)
-	return err
+	return clearUnmatchedEntityMarkerTx(ctx, tx, model.EnrichAlbumType, albumID)
 }
 
 // albumMarkerMatchedTx reports whether an album's enrichment marker records a match, so

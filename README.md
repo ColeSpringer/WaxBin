@@ -126,8 +126,8 @@ that recorded instead. `--keep-lock` changes a value without touching its lock.
 
 - `waxbin edit <pid> --set field=value` edits scalar metadata such as title, artist,
   album, year, and track/disc numbers.
-- `waxbin entity <pid> ...` edits a normalized entity (an artist or album name, or a
-  sort name) and its identifiers (ISRC, barcode, MusicBrainz IDs).
+- `waxbin entity <pid> ...` edits a normalized entity's curated fields: a sort-name
+  override, release identifiers such as barcode and label, and MusicBrainz IDs.
 - `waxbin credit <pid> ...` curates contributor roles such as composer and performer.
 - `waxbin tag <pid> --key KEY --value V` sets a **custom tag**: a non-standard frame a
   file carries that WaxBin's typed model does not map, or one you add yourself.

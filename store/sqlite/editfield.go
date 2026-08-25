@@ -37,6 +37,14 @@ var editEntityFields = map[string]bool{
 	"artist": true, "album_artist": true, "album": true, "genre": true, "year": true,
 }
 
+// editKeyFields are the track fields that participate in the album-chain identity keys
+// (albumChainKeys), so editing any of them can move a member onto another entity chain
+// and makes the item a rename pre-pass participant. artist is present because a blank
+// album_artist anchors the release group on the first credited artist.
+var editKeyFields = map[string]bool{
+	"artist": true, "album_artist": true, "album": true, "year": true,
+}
+
 // episodeEditFields are the fields editable on a podcast episode item.
 var episodeEditFields = map[string]bool{
 	"title": true, "description": true, "pinned": true, "season": true,
@@ -134,16 +142,19 @@ func (s *Store) EditItemFields(ctx context.Context, itemPID model.PID, edits map
 	}
 
 	return s.writeTx(ctx, func(tx *sql.Tx) error {
-		itemID, kind, err := itemIDKindByPIDTx(ctx, tx, itemPID, op)
+		entries, err := collectEditEntriesTx(ctx, tx,
+			[]editEntry{{pid: itemPID, fields: fields, norm: norm}}, force, false, op, nil)
 		if err != nil {
 			return err
 		}
-		if err := validateEditTargetTx(ctx, tx, itemID, kind, fields, force, op); err != nil {
+		affected := newAffectedRollups()
+		if err := renameEntitiesForEditsTx(ctx, tx, entries, affected, op); err != nil {
 			return err
 		}
-		affected := newAffectedRollups()
-		if err := applyItemEditTx(ctx, tx, itemPID, itemID, kind, fields, norm, attr, lock, op, affected); err != nil {
-			return err
+		for _, e := range entries {
+			if err := applyItemEditTx(ctx, tx, e.pid, e.itemID, e.kind, e.fields, e.norm, attr, lock, op, affected); err != nil {
+				return err
+			}
 		}
 		if !affected.empty() {
 			if err := maintainRollupsTx(ctx, tx, affected, nowNS()); err != nil {
@@ -152,6 +163,46 @@ func (s *Store) EditItemFields(ctx context.Context, itemPID model.PID, edits map
 		}
 		return nil
 	})
+}
+
+// editEntry is one resolved and validated batch-edit target: the item, the sorted
+// field names, and the normalized values it will be edited with.
+type editEntry struct {
+	pid    model.PID
+	itemID int64
+	kind   string
+	fields []string
+	norm   map[string]string
+}
+
+// collectEditEntriesTx resolves and validates every edit target in caller order, ahead
+// of any apply, so the rename pre-pass can see the whole batch before the first write.
+// A locked target is appended to skipped when skipLocked is set, exactly as the apply
+// loops used to do in-line; skipped may be nil only when skipLocked is false. The
+// first hard error aborts. Hoisting validation ahead of the applies is observably
+// identical: everything runs in the one write transaction, and a batch never contains
+// the same item twice, so no target is validated against state an earlier apply
+// changed.
+func collectEditEntriesTx(ctx context.Context, tx *sql.Tx, targets []editEntry, force, skipLocked bool, op string, skipped *[]model.PID) ([]editEntry, error) {
+	entries := make([]editEntry, 0, len(targets))
+	for _, e := range targets {
+		itemID, kind, err := itemIDKindByPIDTx(ctx, tx, e.pid, op)
+		if err != nil {
+			return nil, err
+		}
+		if err := validateEditTargetTx(ctx, tx, itemID, kind, e.fields, force, op); err != nil {
+			// A locked field is skippable when skipLocked is set; a kind mismatch
+			// always aborts the batch (the field set is wrong for that item).
+			if skipLocked && waxerr.Is(err, waxerr.CodeLocked) {
+				*skipped = append(*skipped, e.pid)
+				continue
+			}
+			return nil, err
+		}
+		e.itemID, e.kind = itemID, kind
+		entries = append(entries, e)
+	}
+	return entries, nil
 }
 
 // validateEditTargetTx checks that every field applies to the item's kind and, unless
@@ -255,25 +306,23 @@ func (s *Store) EditManyFields(ctx context.Context, itemPIDs []model.PID, edits 
 	}
 
 	err = s.writeTx(ctx, func(tx *sql.Tx) error {
-		affected := newAffectedRollups()
+		targets := make([]editEntry, 0, len(unique))
 		for _, pid := range unique {
-			itemID, kind, err := itemIDKindByPIDTx(ctx, tx, pid, op)
-			if err != nil {
+			targets = append(targets, editEntry{pid: pid, fields: fields, norm: norm})
+		}
+		entries, err := collectEditEntriesTx(ctx, tx, targets, force, skipLocked, op, &res.Skipped)
+		if err != nil {
+			return err
+		}
+		affected := newAffectedRollups()
+		if err := renameEntitiesForEditsTx(ctx, tx, entries, affected, op); err != nil {
+			return err
+		}
+		for _, e := range entries {
+			if err := applyItemEditTx(ctx, tx, e.pid, e.itemID, e.kind, e.fields, e.norm, attr, lock, op, affected); err != nil {
 				return err
 			}
-			if err := validateEditTargetTx(ctx, tx, itemID, kind, fields, force, op); err != nil {
-				// A locked field is skippable when skipLocked is set; a kind mismatch
-				// always aborts the batch (the caller's field set is wrong for this item).
-				if skipLocked && waxerr.Is(err, waxerr.CodeLocked) {
-					res.Skipped = append(res.Skipped, pid)
-					continue
-				}
-				return err
-			}
-			if err := applyItemEditTx(ctx, tx, pid, itemID, kind, fields, norm, attr, lock, op, affected); err != nil {
-				return err
-			}
-			res.Edited = append(res.Edited, pid)
+			res.Edited = append(res.Edited, e.pid)
 		}
 		if !affected.empty() {
 			if err := maintainRollupsTx(ctx, tx, affected, nowNS()); err != nil {
@@ -314,12 +363,7 @@ func (s *Store) EditItemsFields(ctx context.Context, edits []model.ItemFieldEdit
 	}
 	// Validate and normalize every entry before the transaction opens, so a bad
 	// entry anywhere rejects the batch without a write.
-	type entry struct {
-		pid    model.PID
-		fields []string
-		norm   map[string]string
-	}
-	entries := make([]entry, 0, len(edits))
+	targets := make([]editEntry, 0, len(edits))
 	seen := make(map[model.PID]struct{}, len(edits))
 	for _, e := range edits {
 		if _, dup := seen[e.ItemPID]; dup {
@@ -330,26 +374,20 @@ func (s *Store) EditItemsFields(ctx context.Context, edits []model.ItemFieldEdit
 		if err != nil {
 			return res, err
 		}
-		entries = append(entries, entry{e.ItemPID, fields, norm})
+		targets = append(targets, editEntry{pid: e.ItemPID, fields: fields, norm: norm})
 	}
 
 	err = s.writeTx(ctx, func(tx *sql.Tx) error {
+		entries, err := collectEditEntriesTx(ctx, tx, targets, force, skipLocked, op, &res.Skipped)
+		if err != nil {
+			return err
+		}
 		affected := newAffectedRollups()
+		if err := renameEntitiesForEditsTx(ctx, tx, entries, affected, op); err != nil {
+			return err
+		}
 		for _, e := range entries {
-			itemID, kind, err := itemIDKindByPIDTx(ctx, tx, e.pid, op)
-			if err != nil {
-				return err
-			}
-			if err := validateEditTargetTx(ctx, tx, itemID, kind, e.fields, force, op); err != nil {
-				// A locked field is skippable when skipLocked is set; a kind mismatch
-				// always aborts the batch (that entry's field set is wrong for its item).
-				if skipLocked && waxerr.Is(err, waxerr.CodeLocked) {
-					res.Skipped = append(res.Skipped, e.pid)
-					continue
-				}
-				return err
-			}
-			if err := applyItemEditTx(ctx, tx, e.pid, itemID, kind, e.fields, e.norm, attr, lock, op, affected); err != nil {
+			if err := applyItemEditTx(ctx, tx, e.pid, e.itemID, e.kind, e.fields, e.norm, attr, lock, op, affected); err != nil {
 				return err
 			}
 			res.Edited = append(res.Edited, e.pid)
@@ -531,10 +569,14 @@ func editBookFieldsTx(ctx context.Context, tx *sql.Tx, itemID int64, fields []st
 func applyTrackEdit(tr *model.Track, field, value, op string) error {
 	switch field {
 	case "artist":
-		// Re-split the credit, exactly as the author case does below: the edit routes
-		// through resolveAndLinkEntities, so the contributor rows follow for free.
+		// The credit is stored raw and left for resolution to split (creditNames
+		// splits a nil list), exactly as a scanned single-frame credit is: the
+		// contributor rows still follow through resolveAndLinkEntities, and the
+		// release-group anchor falls back to the raw string rather than the split
+		// primary, so a credit edit cannot move a grouping key the same value in a
+		// tag would not move.
 		tr.Artist = value
-		tr.Artists = identity.SplitPerformerCredit(value)
+		tr.Artists = nil
 		tr.ArtistSort = model.SortKey(value)
 	case "album_artist":
 		tr.AlbumArtist = value
@@ -754,6 +796,26 @@ func loadTrackForEditTx(ctx context.Context, tx *sql.Tx, itemID int64) (model.Tr
 	}
 	tr.Artists = artists
 
+	// When the list folds to what splitting the credit yields, it was derived from
+	// the credit rather than stated or curated, so re-resolution must re-split it the
+	// way the scan did: the release-group anchor then falls back to the raw credit
+	// string instead of the split primary, and an unrelated edit (or the scan-lock
+	// overlay on a forced rescan) cannot move the grouping key. A differing list is a
+	// curated credit or a file-stated multi-value one and is kept. The compare folds
+	// each name through MatchKey because the list holds entity display names, and
+	// resolution keeps the first-seen casing: a credit "alpha feat. beta" whose names
+	// resolved onto an existing "Alpha" would never compare equal as spellings. A
+	// merge that renamed an entity away from the credit's name still reads as
+	// stated (the fold differs), which re-anchors that member on the merged name;
+	// the merge doc already owns that a heuristic merge can be re-derived over.
+	if artistListDerived(tr.Artists, identity.SplitPerformerCredit(tr.Artist)) {
+		tr.Artists = nil
+	}
+
+	if err := adoptEntityKeyMBIDs(ctx, tx, itemID, &tr); err != nil {
+		return tr, "", nil, waxerr.Wrap(waxerr.CodeIO, "store.EditItemFields", err)
+	}
+
 	var title string
 	if err := tx.QueryRowContext(ctx, "SELECT title FROM playable_item WHERE id = ?", itemID).Scan(&title); err != nil {
 		return tr, "", nil, waxerr.Wrap(waxerr.CodeIO, "store.EditItemFields", err)
@@ -769,6 +831,45 @@ func loadTrackForEditTx(ctx context.Context, tx *sql.Tx, itemID int64) (model.Tr
 		return tr, "", nil, waxerr.Wrap(waxerr.CodeIO, "store.EditItemFields", err)
 	}
 	return tr, title, path, nil
+}
+
+// artistListDerived reports whether a contributor list is the split of the credit,
+// folded element-wise through MatchKey since the list carries entity display names.
+func artistListDerived(names, split []string) bool {
+	if len(names) != len(split) {
+		return false
+	}
+	for i := range names {
+		if identity.MatchKey(names[i]) != identity.MatchKey(split[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+// adoptEntityKeyMBIDs carries the release ids an item's current album and release_group
+// rows are keyed on into the loaded track, so re-resolution computes the keys those rows
+// actually own and an MBID-identified album is never re-keyed heuristically. It reads the
+// match_key prefix, not the mbid columns: enrichment fills those columns on heuristically
+// keyed rows too, and using the column would compute an mbid: key no row owns and fork
+// the member off its album. Keys store the id lowercase and the identity functions
+// lowercase again, so the round trip is stable. An item with no album is a no-op.
+func adoptEntityKeyMBIDs(ctx context.Context, tx *sql.Tx, itemID int64, tr *model.Track) error {
+	var albumKey, rgKey sql.NullString
+	err := tx.QueryRowContext(ctx, `SELECT al.match_key, rg.match_key FROM track t
+		LEFT JOIN album al ON al.id = t.album_id
+		LEFT JOIN release_group rg ON rg.id = al.release_group_id
+		WHERE t.item_id = ?`, itemID).Scan(&albumKey, &rgKey)
+	if err != nil {
+		return err
+	}
+	if id, ok := strings.CutPrefix(albumKey.String, "mbid:"); ok {
+		tr.MBReleaseID = id
+	}
+	if id, ok := strings.CutPrefix(rgKey.String, "mbid:"); ok {
+		tr.MBReleaseGroupID = id
+	}
+	return nil
 }
 
 // loadBookForEditTx reads a book item's current columns, contributor role-lists,

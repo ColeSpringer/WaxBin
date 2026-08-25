@@ -31,6 +31,15 @@ import (
 // provider supplies its own HTTP client and should pace it the same way, with a
 // per-host minimum interval or a token bucket, rather than leaning on the Service to
 // space its calls.
+//
+// Request.Want names the capability whose answer the calling pass will use, so a
+// provider advertising several capabilities can skip the work the caller will not
+// read: a genres pass on a genres-plus-cover provider need not download the cover.
+// Honoring it is an optimization, never an obligation. A provider may keep answering
+// with everything it has, since the Service ignores whatever a pass did not ask for,
+// and a zero Want means everything (the pre-Want contract, which is what an embedder
+// calling Enrich directly gets without changing anything). Check it with
+// req.Wants(c) rather than comparing bits.
 type Provider interface {
 	// Name is the stable id recorded as provenance ("musicbrainz", "lrclib", ...). It
 	// is written to entity_enrichment.provider and field_provenance.provider so a
@@ -89,8 +98,13 @@ const (
 // a provider uses whichever it needs (LRCLIB keys on Title+Artist+Album+DurationSec,
 // the Cover Art Archive on MBID). Force asks a caching provider to bypass its cache.
 type Request struct {
-	Type        TargetType
-	Force       bool
+	Type  TargetType
+	Force bool
+	// Want is the capability whose answer this pass will use; zero means everything
+	// (the pre-Want contract, so existing providers and embedders are untouched). A
+	// provider may skip work whose results serve only capabilities absent from Want;
+	// anything extra it returns is ignored by the Service.
+	Want        Capability
 	Title       string // artist name | release-group title | track title | book title
 	Artist      string // disambiguating primary artist (release group / recording / book)
 	Album       string // album title, for a recording lyrics lookup
@@ -99,6 +113,10 @@ type Request struct {
 	ISBN        string
 	DurationSec int // track duration, for a duration-disambiguated lyrics match
 }
+
+// Wants reports whether this request's pass will use an answer for c. Capability.Has
+// is any-overlap, which is exact for the single-bit wants the Service stamps.
+func (r Request) Wants(c Capability) bool { return r.Want == 0 || r.Want.Has(c) }
 
 // Candidate is a provider's proposed enrichment for one request. The Service applies
 // it fill-when-empty and lock-respecting, so a provider returns everything it found
@@ -116,7 +134,12 @@ type Candidate struct {
 	// ReleaseGroup fields.
 	Type   string   // album|ep|single|compilation|audiobook
 	Genres []string // display names, provider-ordered (highest confidence first)
-	Cover  *model.ArtImage
+	// Cover stays as the front alias. Art carries role-tagged images (back, disc,
+	// booklet, background, and optionally front); the effective front is
+	// Art[ArtRoleFront] when present, else Cover. Non-front roles apply
+	// fill-when-empty at the target entity's own level.
+	Cover *model.ArtImage
+	Art   map[model.ArtRole]*model.ArtImage
 
 	// Book fields.
 	Publisher string

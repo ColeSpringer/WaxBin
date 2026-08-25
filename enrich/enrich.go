@@ -302,7 +302,13 @@ type Result struct {
 	BooksMatched          int
 	LyricsEnriched        int
 	LyricsMatched         int
-	ArtFetched            int
+	// ArtFetched counts front covers gathered and handed to the store, not covers
+	// actually applied (the store's fill-when-empty and lock guards decide that);
+	// AuxArtFetched counts the non-front role images the same way. Counting true
+	// applications would need the Store apply methods to return reports, interface
+	// churn the tally is not worth.
+	ArtFetched    int
+	AuxArtFetched int
 
 	// On-disk write-back tallies, all zero unless the run wrote tags. They live here
 	// rather than on the facade's wrapper because a background job serializes this
@@ -585,15 +591,17 @@ func (s *Service) enrichReleaseGroup(ctx context.Context, st *runState, res *Res
 		// first, then built-ins like ListenBrainz), deduped and capped. The winning
 		// provider of the display-primary genre is recorded as field provenance.
 		enr.Genres, enr.GenreProvider = s.gatherGenres(ctx, st, rg, genreNames(rg.Genres))
-		// Cover: the first cover provider to answer, injected first (an embedder's
-		// fanart.tv beats the built-in Cover Art Archive). Best-effort: never aborts.
-		// Skipped for a locked cover, which the store would refuse to replace, so a
-		// forced re-run does not re-download one picture per locked group.
+		// Art: the first cover provider to answer per role, injected first (an
+		// embedder's fanart.tv beats the built-in Cover Art Archive). Best-effort:
+		// never aborts. Skipped for a locked cover, which the store would refuse to
+		// replace, so a forced re-run does not re-download one picture per locked group.
 		if !t.ArtLocked {
-			enr.Art = s.gatherCover(ctx, st, Request{
+			art := s.gatherArt(ctx, st, Request{
 				Type: TargetReleaseGroup, Force: st.force,
 				Title: rg.Title, Artist: releaseGroupArtistName(rg), MBID: rg.ID,
 			})
+			enr.Art = art[model.ArtRoleFront]
+			enr.AuxArt = auxArtRoles(art)
 		}
 	}
 	if err := s.store.ApplyReleaseGroupEnrichment(ctx, enr); err != nil {
@@ -602,6 +610,7 @@ func (s *Service) enrichReleaseGroup(ctx context.Context, st *runState, res *Res
 	if enr.Art != nil {
 		res.ArtFetched++
 	}
+	res.AuxArtFetched += len(enr.AuxArt)
 	return enr.Matched, nil
 }
 
@@ -712,11 +721,16 @@ func (s *Service) enrichAlbumRelease(ctx context.Context, st *runState, res *Res
 		// first time WaxBin knows which edition it actually holds. An album that already
 		// resolves art keeps it (the store fills only when empty), so asking a provider
 		// for one would spend a rate-limited request on a picture nothing would store.
+		// The aux roles ride this front-keyed gate too: an album whose front is
+		// settled (an embedded cover included) is never asked for its empty aux
+		// slots, the deferral DEFERRED.md records under gatherArt.
 		if !t.HasArt {
-			in.Art = s.gatherCover(ctx, st, Request{
+			art := s.gatherArt(ctx, st, Request{
 				Type: TargetRelease, Force: st.force, MBID: m.MBID,
 				Title: t.Name, Artist: t.ArtistName,
 			})
+			in.Art = art[model.ArtRoleFront]
+			in.AuxArt = auxArtRoles(art)
 		}
 	}
 	if err := s.store.ApplyAlbumReleaseMatch(ctx, in); err != nil {
@@ -725,6 +739,7 @@ func (s *Service) enrichAlbumRelease(ctx context.Context, st *runState, res *Res
 	if in.Art != nil {
 		res.ArtFetched++
 	}
+	res.AuxArtFetched += len(in.AuxArt)
 	return in.Matched, nil
 }
 
@@ -822,7 +837,7 @@ func (s *Service) enrichBook(ctx context.Context, st *runState, t model.EnrichTa
 // not re-queried every run. Returns whether a provider matched.
 func (s *Service) enrichLyrics(ctx context.Context, st *runState, t model.EnrichTarget) (bool, error) {
 	req := Request{
-		Type: TargetRecording, Force: st.force,
+		Type: TargetRecording, Force: st.force, Want: CapLyrics,
 		Title: t.Name, Artist: t.ArtistName, Album: t.Album, DurationSec: t.DurationSec,
 	}
 	var got *model.Lyrics
@@ -867,7 +882,7 @@ type genreCandidate struct {
 // found.
 func (s *Service) gatherGenres(ctx context.Context, st *runState, rg *mbReleaseGroup, mbBaseline []string) ([]string, string) {
 	req := Request{
-		Type: TargetReleaseGroup, Force: st.force,
+		Type: TargetReleaseGroup, Force: st.force, Want: CapGenres,
 		Title: rg.Title, Artist: releaseGroupArtistName(rg), MBID: rg.ID,
 	}
 	var cands []genreCandidate
@@ -923,31 +938,82 @@ func (s *Service) gatherGenres(ctx context.Context, st *runState, rg *mbReleaseG
 	return names, primary
 }
 
-// gatherCover returns the first non-nil cover from a cover provider, in priority order
-// (injected first, then the Cover Art Archive). req names the rung: a release group, or
-// the specific release an album was matched to. Routing both through the provider list
-// rather than reaching for the built-in CAA directly is what lets an embedder's cover
-// provider serve either one, and keeps the documented priority order intact. It is
-// best-effort: a provider error or a missing cover is skipped, never aborting the run.
+// gatherArt returns the first offered image per art role from the cover providers, in
+// priority order (injected first, then the Cover Art Archive; CapCover covers all art
+// roles). req names the rung: a release group, or the specific release an album was
+// matched to. Routing both through the provider list rather than reaching for the
+// built-in CAA directly is what lets an embedder's cover provider serve either one,
+// and keeps the documented priority order intact. It is best-effort: a provider error
+// or a missing cover is skipped, never aborting the run.
 //
-// The winner is stamped here rather than trusted from the provider, the same way
-// gatherGenres records which provider supplied the display-primary genre: an injected
-// provider cannot claim a cover came from the tags. SourceURL is left as the provider
-// set it, since only the provider knows where it fetched, so an injected provider can
-// be named one thing and point at another.
-func (s *Service) gatherCover(ctx context.Context, st *runState, req Request) *model.ArtImage {
+// Per consulted provider the offered roles merge first-offer-wins per role (nil
+// images, empty data, and invalid roles are skipped), and the loop stops once the
+// front is filled. Providers after the front winner are not consulted: order is
+// caller-controlled (injected first), this preserves the pre-role call cadence, and
+// it avoids extra full-cover downloads such as CAA's up-to-24MiB fetch, so aux
+// coverage is opportunistic.
+//
+// Every accepted image is stamped here rather than trusted from the provider, the
+// same way gatherGenres records which provider supplied the display-primary genre: an
+// injected provider cannot claim a cover came from the tags. SourceURL is left as the
+// provider set it, since only the provider knows where it fetched, so an injected
+// provider can be named one thing and point at another.
+func (s *Service) gatherArt(ctx context.Context, st *runState, req Request) map[model.ArtRole]*model.ArtImage {
+	// Stamped on the value parameter, so both callers get it without repeating it.
+	req.Want = CapCover
+	var out map[model.ArtRole]*model.ArtImage
 	for _, p := range s.providers {
 		if !p.Capabilities().Has(CapCover) {
 			continue
 		}
 		cand, err := s.callProvider(ctx, p, req)
-		if err != nil || cand == nil || cand.Cover == nil {
+		if err != nil || cand == nil {
 			continue
 		}
-		cand.Cover.Source, cand.Cover.Provider = model.SourceEnrichment, p.Name()
-		return cand.Cover
+		offered := make(map[model.ArtRole]*model.ArtImage, len(cand.Art)+1)
+		for role, img := range cand.Art {
+			offered[role] = img
+		}
+		// "Present" means usable: a role-map front carrying no bytes must not
+		// suppress the Cover alias and then be dropped by the empty-data skip below,
+		// which would lose a cover the provider did answer with.
+		if f := offered[model.ArtRoleFront]; f == nil || len(f.Data) == 0 {
+			offered[model.ArtRoleFront] = cand.Cover
+		}
+		for role, img := range offered {
+			if !role.Valid() || img == nil || len(img.Data) == 0 {
+				continue
+			}
+			if out[role] != nil {
+				continue
+			}
+			img.Source, img.Provider = model.SourceEnrichment, p.Name()
+			if out == nil {
+				out = make(map[model.ArtRole]*model.ArtImage, len(offered))
+			}
+			out[role] = img
+		}
+		if out[model.ArtRoleFront] != nil {
+			break
+		}
 	}
-	return nil
+	return out
+}
+
+// auxArtRoles splits the non-front roles out of a gathered art map, nil when there
+// are none.
+func auxArtRoles(art map[model.ArtRole]*model.ArtImage) map[model.ArtRole]*model.ArtImage {
+	var out map[model.ArtRole]*model.ArtImage
+	for role, img := range art {
+		if role == model.ArtRoleFront {
+			continue
+		}
+		if out == nil {
+			out = make(map[model.ArtRole]*model.ArtImage, len(art))
+		}
+		out[role] = img
+	}
+	return out
 }
 
 // callProvider runs one candidate-provider lookup under a soft per-provider timeout so

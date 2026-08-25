@@ -56,9 +56,10 @@ type EntityRef struct {
 // ArtRole is one artwork slot on an entity: the front cover plus the auxiliary
 // images a release carries. The vocabulary is closed; an entity holds at most one
 // image per role. Only the front role participates in the resolution fallback
-// chain and in scan/feed ingestion; the other roles are set explicitly and
-// resolve at their own level. Artist imagery has no separate portrait role; it
-// lands under background.
+// chain and in scan/feed ingestion; the other roles are set explicitly or filled
+// by an enrichment pass that fetched art and found a role's slot empty, and they
+// resolve at their own level either way. Artist imagery has no separate portrait
+// role; it lands under background.
 type ArtRole string
 
 const (
@@ -94,8 +95,9 @@ func ParseArtRole(s string) (ArtRole, bool) {
 // ArtRoleInfo describes one artwork slot an entity holds at its own level: the
 // role plus the stored source's format, dimensions (0 when the image was not
 // decodable), and content hash, followed by the attachment's provenance. Locked
-// reports the entity-curation lock on the entity's "art" field, which guards the
-// front cover alone, so it is false on every other role.
+// reports the entity-curation lock on the entity's "art" field; it is still
+// reported on the front entry alone, though the lock itself also gates
+// enrichment's aux-role fills.
 //
 // A Locked front entry with an empty SourceHash is a lock with no artifact behind it,
 // which is what a cleared and locked cover looks like. Check SourceHash before trying

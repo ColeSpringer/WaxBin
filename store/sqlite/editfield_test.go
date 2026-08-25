@@ -129,16 +129,29 @@ func TestEditArtistReResolvesEntitiesAndRollups(t *testing.T) {
 	}
 }
 
-// TestEditOrphansEntityKeepsVerifyClean edits both artist and album_artist away
-// from Alpha, fully orphaning it, and asserts Alpha survives as a zero-rollup ghost
-// with db verify still clean (the edit adds no in-transaction entity GC).
+// TestEditOrphansEntityKeepsVerifyClean fully orphans Alpha with a genuinely
+// non-uniform batch (its two tracks move to two different artists, so the whole-set
+// rename-in-place path pinned in editrename_test.go does not apply) and asserts Alpha
+// survives as a zero-rollup ghost with db verify still clean (the edit adds no
+// in-transaction entity GC).
 func TestEditOrphansEntityKeepsVerifyClean(t *testing.T) {
-	st, pid := editFixture(t)
+	st, lib := entityFixture(t)
 	ctx := context.Background()
+	putTrack(t, st, lib.ID, trackSpec{
+		path: "/lib/Alpha/One/01.flac", essence: "e1", content: "c1",
+		title: "S1", artist: "Alpha", albumArt: "Alpha", album: "One", year: 2001,
+	})
+	putTrack(t, st, lib.ID, trackSpec{
+		path: "/lib/Alpha/One/02.flac", essence: "e2", content: "c2",
+		title: "S2", artist: "Alpha", albumArt: "Alpha", album: "One", year: 2001,
+	})
+	pid1 := model.PID(scalarStr(t, st, "SELECT pid FROM playable_item WHERE title='S1'"))
+	pid2 := model.PID(scalarStr(t, st, "SELECT pid FROM playable_item WHERE title='S2'"))
 
-	err := st.EditItemFields(ctx, pid, map[string]string{
-		"artist": "Beta", "album_artist": "Beta",
-	}, model.Attribution{Source: model.SourceUser}, model.LockOf(true), false)
+	_, err := st.EditItemsFields(ctx, []model.ItemFieldEdit{
+		{ItemPID: pid1, Fields: map[string]string{"artist": "Beta", "album_artist": "Beta"}},
+		{ItemPID: pid2, Fields: map[string]string{"artist": "Gamma", "album_artist": "Gamma"}},
+	}, model.Attribution{Source: model.SourceUser}, model.LockOf(true), false, false)
 	if err != nil {
 		t.Fatalf("edit: %v", err)
 	}
@@ -504,5 +517,237 @@ func TestEditRefusesAnUnknownLockInstruction(t *testing.T) {
 	if err := st.EditItemField(context.Background(), pid, "comment", "x",
 		model.Attribution{}, model.LockChange("yes"), false); !waxerr.Is(err, waxerr.CodeInvalid) {
 		t.Errorf("unknown lock instruction = %v, want CodeInvalid", err)
+	}
+}
+
+// TestEditKeepsMBIDKeyedAlbum pins the no-fork contract for an MBID-identified album:
+// an item-level edit re-resolves with the release ids the entity rows actually own, so
+// no edit re-keys a member with a heuristic key no row owns. Without the carryover in
+// loadTrackForEditTx, every one of these edits forked the member off the album.
+func TestEditKeepsMBIDKeyedAlbum(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	const rgMBID = "11111111-1111-1111-1111-111111111111"
+	const relMBID = "22222222-2222-2222-2222-222222222222"
+	for i, title := range []string{"T1", "T2"} {
+		putTrack(t, st, lib.ID, trackSpec{
+			path: "/lib/Alpha/One/0" + string(rune('1'+i)) + ".flac", essence: "e" + title, content: "c" + title,
+			title: title, artist: "Alpha", albumArt: "Alpha", album: "One",
+			genre: "Rock", year: 2001, mbReleaseGroup: rgMBID, mbRelease: relMBID,
+		})
+	}
+	pid1 := model.PID(scalarStr(t, st, "SELECT pid FROM playable_item WHERE title='T1'"))
+	pid2 := model.PID(scalarStr(t, st, "SELECT pid FROM playable_item WHERE title='T2'"))
+	if n := scalarInt(t, st, "SELECT COUNT(*) FROM album"); n != 1 {
+		t.Fatalf("album rows = %d, want 1", n)
+	}
+	albumID := scalarInt(t, st, "SELECT id FROM album")
+	wantKey := "mbid:" + relMBID
+	if k := scalarStr(t, st, "SELECT match_key FROM album"); k != wantKey {
+		t.Fatalf("album match_key = %q, want %q", k, wantKey)
+	}
+
+	check := func(step string) {
+		t.Helper()
+		if n := scalarInt(t, st, "SELECT COUNT(*) FROM album"); n != 1 {
+			t.Fatalf("%s: album rows = %d, want 1", step, n)
+		}
+		if k := scalarStr(t, st, "SELECT match_key FROM album"); k != wantKey {
+			t.Fatalf("%s: album match_key = %q, want %q", step, k, wantKey)
+		}
+		for _, pid := range []model.PID{pid1, pid2} {
+			if id := scalarInt(t, st, `SELECT t.album_id FROM track t
+				JOIN playable_item pi ON pi.id=t.item_id WHERE pi.pid=?`, string(pid)); id != albumID {
+				t.Fatalf("%s: album_id for %s = %d, want %d", step, pid, id, albumID)
+			}
+		}
+		rep, err := st.VerifyDerived(ctx)
+		if err != nil || !rep.Consistent() {
+			t.Fatalf("%s: db verify not clean: %+v (err %v)", step, rep, err)
+		}
+	}
+
+	attr := model.Attribution{Source: model.SourceUser}
+	if err := st.EditItemField(ctx, pid1, "genre", "Jazz", attr, model.LockOf(true), false); err != nil {
+		t.Fatalf("edit genre: %v", err)
+	}
+	check("genre edit")
+	if err := st.EditItemField(ctx, pid2, "album", "Renamed", attr, model.LockOf(true), false); err != nil {
+		t.Fatalf("edit album: %v", err)
+	}
+	check("album edit")
+	if v, _ := st.ItemByPID(ctx, pid2); v.Album != "Renamed" {
+		t.Fatalf("denormalized album = %q, want Renamed", v.Album)
+	}
+	if err := st.EditItemField(ctx, pid1, "year", "1999", attr, model.LockOf(true), false); err != nil {
+		t.Fatalf("edit year: %v", err)
+	}
+	check("year edit")
+	if v, _ := st.ItemByPID(ctx, pid1); v.Year != 1999 {
+		t.Fatalf("denormalized year = %d, want 1999", v.Year)
+	}
+}
+
+// TestEditYearUnderMBIDReleaseGroup is the heuristic-album sibling: with only the
+// release-group mbid set, a partial-member year edit re-keys that member's album (the
+// year is part of the heuristic album key) but stays under the same mbid-keyed RG row.
+func TestEditYearUnderMBIDReleaseGroup(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	const rgMBID = "33333333-3333-3333-3333-333333333333"
+	for i, title := range []string{"T1", "T2"} {
+		putTrack(t, st, lib.ID, trackSpec{
+			path: "/lib/Alpha/One/0" + string(rune('1'+i)) + ".flac", essence: "e" + title, content: "c" + title,
+			title: title, artist: "Alpha", albumArt: "Alpha", album: "One",
+			year: 2001, mbReleaseGroup: rgMBID,
+		})
+	}
+	if n := scalarInt(t, st, "SELECT COUNT(*) FROM release_group"); n != 1 {
+		t.Fatalf("rg rows = %d, want 1", n)
+	}
+	rgID := scalarInt(t, st, "SELECT id FROM release_group")
+
+	pid1 := model.PID(scalarStr(t, st, "SELECT pid FROM playable_item WHERE title='T1'"))
+	if err := st.EditItemField(ctx, pid1, "year", "1999",
+		model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
+		t.Fatalf("edit year: %v", err)
+	}
+	// The member re-keyed onto a different album row, still under the same RG.
+	if n := scalarInt(t, st, "SELECT COUNT(*) FROM release_group"); n != 1 {
+		t.Fatalf("rg rows after year edit = %d, want 1", n)
+	}
+	if id := scalarInt(t, st, `SELECT al.release_group_id FROM track t
+		JOIN album al ON al.id = t.album_id
+		JOIN playable_item pi ON pi.id = t.item_id WHERE pi.pid=?`, string(pid1)); id != rgID {
+		t.Fatalf("member's release group = %d, want %d", id, rgID)
+	}
+	rep, err := st.VerifyDerived(ctx)
+	if err != nil || !rep.Consistent() {
+		t.Fatalf("db verify not clean: %+v (err %v)", rep, err)
+	}
+}
+
+// TestEditKeepsSplitCreditAnchor pins the derived-credit anchor: a single-frame
+// "A feat. B" credit with no album_artist anchors its release group on the raw string
+// at scan time, and an unrelated edit must not move that anchor onto the split primary.
+// A stated multi-value list, by contrast, anchors on its first artist and keeps doing
+// so across an edit (the curated/stated branch keeps the loaded list).
+func TestEditKeepsSplitCreditAnchor(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	putTrack(t, st, lib.ID, trackSpec{
+		path: "/lib/one/01.flac", essence: "e1", content: "c1",
+		title: "S1", artist: "A feat. B", album: "One",
+	})
+	putTrack(t, st, lib.ID, trackSpec{
+		path: "/lib/two/01.flac", essence: "e2", content: "c2",
+		title: "S2", artist: "X", artists: []string{"X", "Y"}, album: "Two",
+	})
+	keyOne := scalarStr(t, st, "SELECT match_key FROM album WHERE title='One'")
+	keyTwo := scalarStr(t, st, "SELECT match_key FROM album WHERE title='Two'")
+
+	attr := model.Attribution{Source: model.SourceUser}
+	pid1 := model.PID(scalarStr(t, st, "SELECT pid FROM playable_item WHERE title='S1'"))
+	if err := st.EditItemField(ctx, pid1, "genre", "Jazz", attr, model.LockOf(true), false); err != nil {
+		t.Fatalf("edit genre: %v", err)
+	}
+	if n := scalarInt(t, st, "SELECT COUNT(*) FROM album WHERE title='One'"); n != 1 {
+		t.Fatalf("album rows for One = %d, want 1 (derived credit re-anchored on the raw string)", n)
+	}
+	if k := scalarStr(t, st, "SELECT match_key FROM album WHERE title='One'"); k != keyOne {
+		t.Fatalf("album One match_key = %q, want unchanged %q", k, keyOne)
+	}
+
+	pid2 := model.PID(scalarStr(t, st, "SELECT pid FROM playable_item WHERE title='S2'"))
+	if err := st.EditItemField(ctx, pid2, "genre", "Jazz", attr, model.LockOf(true), false); err != nil {
+		t.Fatalf("edit genre: %v", err)
+	}
+	if n := scalarInt(t, st, "SELECT COUNT(*) FROM album WHERE title='Two'"); n != 1 {
+		t.Fatalf("album rows for Two = %d, want 1 (stated list keeps its first-artist anchor)", n)
+	}
+	if k := scalarStr(t, st, "SELECT match_key FROM album WHERE title='Two'"); k != keyTwo {
+		t.Fatalf("album Two match_key = %q, want unchanged %q", k, keyTwo)
+	}
+	rep, err := st.VerifyDerived(ctx)
+	if err != nil || !rep.Consistent() {
+		t.Fatalf("db verify not clean: %+v (err %v)", rep, err)
+	}
+}
+
+// TestEditKeepsCaseDriftedDerivedCredit: the contributor list carries entity display
+// names in the first-seen casing, so a derived credit whose spelling differs only in
+// case from the entities it resolved onto must still read as derived; a genre edit
+// then keeps the raw-credit anchor and the chain does not fork.
+func TestEditKeepsCaseDriftedDerivedCredit(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	// Track 1 spells the entity "Alpha"; track 2's credit folds onto it lowercase.
+	putTrack(t, st, lib.ID, trackSpec{
+		path: "/lib/solo/01.flac", essence: "d1", content: "d1",
+		title: "Solo", artist: "Alpha", album: "Solo", year: 2001,
+	})
+	putTrack(t, st, lib.ID, trackSpec{
+		path: "/lib/duet/01.flac", essence: "d2", content: "d2",
+		title: "Duet", artist: "alpha feat. beta", album: "Duet", year: 2001,
+	})
+	keyDuet := scalarStr(t, st, "SELECT match_key FROM album WHERE title='Duet'")
+
+	pid := model.PID(scalarStr(t, st, "SELECT pid FROM playable_item WHERE title='Duet'"))
+	if err := st.EditItemField(ctx, pid, "genre", "Jazz",
+		model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
+		t.Fatalf("edit genre: %v", err)
+	}
+
+	if n := scalarInt(t, st, "SELECT COUNT(*) FROM album WHERE title='Duet'"); n != 1 {
+		t.Fatalf("album rows for Duet = %d, want 1 (case drift must not re-anchor)", n)
+	}
+	if k := scalarStr(t, st, "SELECT match_key FROM album WHERE title='Duet'"); k != keyDuet {
+		t.Fatalf("Duet match_key = %q, want unchanged %q", k, keyDuet)
+	}
+	rep, err := st.VerifyDerived(ctx)
+	if err != nil || !rep.Consistent() {
+		t.Fatalf("db verify not clean: %+v (err %v)", rep, err)
+	}
+}
+
+// TestEditArtistSameValueKeepsRawAnchor: an artist edit stores the credit raw and
+// lets resolution re-split it, so setting the field to the value it already holds on
+// one member of a raw-anchored album computes the same keys a scan would and does
+// not fork the member off its chain.
+func TestEditArtistSameValueKeepsRawAnchor(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	for i, title := range []string{"F1", "F2"} {
+		putTrack(t, st, lib.ID, trackSpec{
+			path: "/lib/feat/0" + string(rune('1'+i)) + ".flac", essence: "f" + title, content: "c" + title,
+			title: title, artist: "A feat. B", album: "One", year: 2001,
+		})
+	}
+	if n := scalarInt(t, st, "SELECT COUNT(*) FROM album"); n != 1 {
+		t.Fatalf("album rows = %d, want 1", n)
+	}
+	key0 := scalarStr(t, st, "SELECT match_key FROM album")
+
+	pid := model.PID(scalarStr(t, st, "SELECT pid FROM playable_item WHERE title='F1'"))
+	if err := st.EditItemField(ctx, pid, "artist", "A feat. B",
+		model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
+		t.Fatalf("edit artist: %v", err)
+	}
+
+	if n := scalarInt(t, st, "SELECT COUNT(*) FROM album"); n != 1 {
+		t.Fatalf("album rows = %d, want 1 (a value-preserving credit edit must not fork)", n)
+	}
+	if k := scalarStr(t, st, "SELECT match_key FROM album"); k != key0 {
+		t.Fatalf("album match_key = %q, want unchanged %q", k, key0)
+	}
+	// The credit still splits into two contributor entities.
+	if n := scalarInt(t, st, `SELECT COUNT(*) FROM item_contributor ic
+		JOIN playable_item pi ON pi.id = ic.item_id
+		WHERE pi.pid=? AND ic.role='artist'`, string(pid)); n != 2 {
+		t.Errorf("contributor rows = %d, want the split pair", n)
+	}
+	rep, err := st.VerifyDerived(ctx)
+	if err != nil || !rep.Consistent() {
+		t.Fatalf("db verify not clean: %+v (err %v)", rep, err)
 	}
 }

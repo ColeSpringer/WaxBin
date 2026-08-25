@@ -693,3 +693,147 @@ func scalarQueryInt(t *testing.T, db *sql.DB, q string, args ...any) int {
 	}
 	return n
 }
+
+// enrichArtImg builds an enrichment-attributed art image with a distinct content
+// address, the shape gatherArt hands the store.
+func enrichArtImg(hash, provider string) *model.ArtImage {
+	return &model.ArtImage{
+		Data: []byte("img-" + hash), Hash: hash, Format: "png", Width: 4, Height: 4,
+		Attribution: model.Attribution{Source: model.SourceEnrichment, Provider: provider},
+	}
+}
+
+// TestApplyReleaseGroupEnrichmentAuxRoles: enrichment's non-front roles land
+// fill-when-empty at the release-group rung with their attribution, a pre-existing
+// user image in a role is never replaced, and the entity art lock skips every
+// enrichment art write.
+func TestApplyReleaseGroupEnrichmentAuxRoles(t *testing.T) {
+	ctx := context.Background()
+	st, dbPath, lib := openStoreAt(t)
+	db := roConn(t, dbPath)
+	albumTrack(t, st, lib.ID, "ess-a", "One", "", "")
+	rgID := scalarQueryInt(t, db, "SELECT id FROM release_group")
+	rgPID := scalarQueryStr(t, db, "SELECT pid FROM release_group")
+
+	// A hand-set back cover already in place.
+	if err := st.SetEntityArt(ctx, model.ArtReleaseGroup, model.PID(rgPID), model.ArtRoleBack,
+		[]byte("user-back"), "png", model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
+		t.Fatalf("seed user back: %v", err)
+	}
+	userBackHash := scalarQueryStr(t, db,
+		"SELECT source_hash FROM art_map WHERE entity_type='release_group' AND role='back'")
+
+	err := st.ApplyReleaseGroupEnrichment(ctx, model.ReleaseGroupEnrichment{
+		ReleaseGroupID: int64(rgID), PID: model.PID(rgPID), Matched: true, MBID: relTestRGMBID,
+		AuxArt: map[model.ArtRole]*model.ArtImage{
+			model.ArtRoleBack: enrichArtImg("enr-back", "mock"),
+			model.ArtRoleDisc: enrichArtImg("enr-disc", "mock"),
+		},
+	})
+	if err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	// The empty disc slot filled with enrichment attribution.
+	var source, provider string
+	if err := db.QueryRow(`SELECT source, provider FROM art_map
+		WHERE entity_type='release_group' AND entity_id=? AND role='disc'`, rgID).Scan(&source, &provider); err != nil {
+		t.Fatalf("read disc row: %v", err)
+	}
+	if source != string(model.SourceEnrichment) || provider != "mock" {
+		t.Errorf("disc attribution = %q/%q, want enrichment/mock", source, provider)
+	}
+	// The hand-set back cover was not replaced.
+	if h := scalarQueryStr(t, db,
+		"SELECT source_hash FROM art_map WHERE entity_type='release_group' AND role='back'"); h != userBackHash {
+		t.Errorf("back hash = %q, want the user's %q (fill-when-empty per role)", h, userBackHash)
+	}
+
+	// Under the entity art lock nothing lands, front or aux.
+	if err := st.SetArtLock(ctx, model.ArtReleaseGroup, model.PID(rgPID), true); err != nil {
+		t.Fatalf("lock art: %v", err)
+	}
+	err = st.ApplyReleaseGroupEnrichment(ctx, model.ReleaseGroupEnrichment{
+		ReleaseGroupID: int64(rgID), PID: model.PID(rgPID), Matched: true, MBID: relTestRGMBID,
+		Art: enrichArtImg("enr-front", "mock"),
+		AuxArt: map[model.ArtRole]*model.ArtImage{
+			model.ArtRoleBooklet: enrichArtImg("enr-booklet", "mock"),
+		},
+	})
+	if err != nil {
+		t.Fatalf("apply under lock: %v", err)
+	}
+	for _, role := range []string{"front", "booklet"} {
+		if n := scalarQueryInt(t, db,
+			"SELECT COUNT(*) FROM art_map WHERE entity_type='release_group' AND role=?", role); n != 0 {
+			t.Errorf("%s rows = %d, want 0 (the art lock gates every enrichment art write)", role, n)
+		}
+	}
+}
+
+// TestApplyAlbumReleaseMatchAuxRidesOnID: aux art rides on the mbid landing the same
+// way the front does; a declined write (a locked mbid) applies neither.
+func TestApplyAlbumReleaseMatchAuxRidesOnID(t *testing.T) {
+	ctx := context.Background()
+	st, dbPath, lib := openStoreAt(t)
+	db := roConn(t, dbPath)
+	albumTrack(t, st, lib.ID, "ess-a", "Declined", "0075992739429", "")
+	albumTrack(t, st, lib.ID, "ess-b", "Landed", "5099902154251", "")
+	declinedPID := scalarQueryStr(t, db, "SELECT pid FROM album WHERE title='Declined'")
+	landedPID := scalarQueryStr(t, db, "SELECT pid FROM album WHERE title='Landed'")
+
+	// A locked-empty mbid declines the write; neither front nor aux lands.
+	setEntityMBID(t, st, model.MergeAlbum, declinedPID, "", true)
+	declinedID := albumIDByTitle(t, db, "Declined")
+	err := st.ApplyAlbumReleaseMatch(ctx, model.AlbumReleaseMatch{
+		AlbumID: declinedID, PID: model.PID(declinedPID), Matched: true, MBID: relTestOneMBID, Reason: "barcode",
+		Art:    enrichArtImg("front-a", "mock"),
+		AuxArt: map[model.ArtRole]*model.ArtImage{model.ArtRoleBack: enrichArtImg("back-a", "mock")},
+	})
+	if err != nil {
+		t.Fatalf("apply declined: %v", err)
+	}
+	if n := scalarQueryInt(t, db,
+		"SELECT COUNT(*) FROM art_map WHERE entity_type='album' AND entity_id=?", declinedID); n != 0 {
+		t.Errorf("declined album art rows = %d, want 0 (aux rides on the id landing)", n)
+	}
+
+	// A landed id applies both.
+	landedID := albumIDByTitle(t, db, "Landed")
+	err = st.ApplyAlbumReleaseMatch(ctx, model.AlbumReleaseMatch{
+		AlbumID: landedID, PID: model.PID(landedPID), Matched: true, MBID: relTestTwoMBID, Reason: "barcode",
+		Art:    enrichArtImg("front-b", "mock"),
+		AuxArt: map[model.ArtRole]*model.ArtImage{model.ArtRoleBack: enrichArtImg("back-b", "mock")},
+	})
+	if err != nil {
+		t.Fatalf("apply landed: %v", err)
+	}
+	for _, role := range []string{"front", "back"} {
+		if n := scalarQueryInt(t, db,
+			"SELECT COUNT(*) FROM art_map WHERE entity_type='album' AND entity_id=? AND role=?", landedID, role); n != 1 {
+			t.Errorf("landed album %s rows = %d, want 1", role, n)
+		}
+	}
+
+	// The album's own art lock skips front and aux even when the mbid lands.
+	albumTrack(t, st, lib.ID, "ess-c", "LockedArt", "", "SHVL 804")
+	lockedArtPID := scalarQueryStr(t, db, "SELECT pid FROM album WHERE title='LockedArt'")
+	if err := st.SetArtLock(ctx, model.ArtAlbum, model.PID(lockedArtPID), true); err != nil {
+		t.Fatalf("lock art: %v", err)
+	}
+	lockedArtID := albumIDByTitle(t, db, "LockedArt")
+	err = st.ApplyAlbumReleaseMatch(ctx, model.AlbumReleaseMatch{
+		AlbumID: lockedArtID, PID: model.PID(lockedArtPID), Matched: true, MBID: relTestRGMBID, Reason: "catalog number",
+		Art:    enrichArtImg("front-c", "mock"),
+		AuxArt: map[model.ArtRole]*model.ArtImage{model.ArtRoleBack: enrichArtImg("back-c", "mock")},
+	})
+	if err != nil {
+		t.Fatalf("apply locked art: %v", err)
+	}
+	if got := scalarQueryStr(t, db, "SELECT COALESCE(mbid,'') FROM album WHERE id=?", lockedArtID); got != relTestRGMBID {
+		t.Errorf("locked-art album mbid = %q, want the id landed", got)
+	}
+	if n := scalarQueryInt(t, db,
+		"SELECT COUNT(*) FROM art_map WHERE entity_type='album' AND entity_id=?", lockedArtID); n != 0 {
+		t.Errorf("locked-art album art rows = %d, want 0 (the art lock gates front and aux)", n)
+	}
+}

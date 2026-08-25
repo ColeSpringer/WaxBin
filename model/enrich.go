@@ -121,7 +121,11 @@ type ReleaseGroupEnrichment struct {
 	// (or the provider is untracked); "musicbrainz" when the genre came from the
 	// identity spine's own release-group genres.
 	GenreProvider string
-	Art           *ArtImage
+	// Art keeps meaning the front cover. AuxArt carries the role-tagged images
+	// excluding front, applied fill-when-empty per role at this entity's own rung and
+	// skipped entirely under the entity's art lock.
+	Art    *ArtImage
+	AuxArt map[ArtRole]*ArtImage
 }
 
 // LyricsEnrichment is the resolved lyrics for one recording (track). Lyrics are
@@ -152,7 +156,11 @@ type AlbumReleaseMatch struct {
 	MBID     string
 	Reason   string
 	Provider string
-	Art      *ArtImage
+	// Art keeps meaning the front cover. AuxArt carries the role-tagged images
+	// excluding front, applied fill-when-empty per role at the album's own rung and
+	// skipped entirely under the album's art lock.
+	Art    *ArtImage
+	AuxArt map[ArtRole]*ArtImage
 }
 
 // BookEnrichment is the resolved data for one audiobook: external identifiers and

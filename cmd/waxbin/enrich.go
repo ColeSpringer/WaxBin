@@ -114,6 +114,11 @@ func renderEnrichResult(cmd *cobra.Command, g *globals, res *waxbin.EnrichResult
 	fmt.Fprintf(w, "books:          %d enriched (%d matched)\n", r.BooksEnriched, r.BooksMatched)
 	fmt.Fprintf(w, "lyrics:         %d looked up (%d matched)\n", r.LyricsEnriched, r.LyricsMatched)
 	fmt.Fprintf(w, "cover art:      %d fetched\n", r.ArtFetched)
+	// Only when a provider offered auxiliary roles, keeping the summary shape stable
+	// for the common built-ins-only run.
+	if r.AuxArtFetched > 0 {
+		fmt.Fprintf(w, "aux art:        %d fetched\n", r.AuxArtFetched)
+	}
 	// Only when the run wrote tags, and always with the failures beside the writes: a
 	// run where every write failed must not read like one with nothing to write.
 	if r.TagsWritten+r.TagsFailed+r.TagsUnrepresented+r.TagsSkipped > 0 {

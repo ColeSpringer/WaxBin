@@ -307,7 +307,8 @@ func newArtLockCmd(g *globals, lock bool) *cobra.Command {
 			"podcast feed's next image change, and refuses `art set` without --force. Unlocking " +
 			"is the way out of a cover cleared with `art set --clear`, which locks by default " +
 			"and would otherwise leave every later set refused. Only the front cover has a " +
-			"lock; the other roles have no automatic producer to guard against. " +
+			"lock of its own, but on a shared entity it also stops enrichment from filling " +
+			"the other roles. " +
 			"On the default --type track this writes the same lock `waxbin " + verb + " <pid> art` " +
 			"does, because an item's art lock has one home; the overlap is deliberate.",
 		Args: cobra.ExactArgs(1),
@@ -357,7 +358,10 @@ func newArtSetCmd(g *globals) *cobra.Command {
 			"back|disc|booklet|background hold a release's auxiliary images). The image bytes come " +
 			"from --file; --clear removes only the named role. A front cover locks the art " +
 			"field by default so a scan, an enrichment pass, or a feed sync does not replace " +
-			"it; the other roles have no automatic producer and take no lock. That lock " +
+			"it; the other roles take no lock of their own, and on an album or release group " +
+			"an enrichment pass may fill an empty one, so a cleared auxiliary role can be " +
+			"refilled by the next pass unless the entity's art lock stands (which also stops " +
+			"enrichment front fills). The front lock " +
 			"outlives the cover, so a cleared front cover keeps refusing later sets until " +
 			"`art unlock` releases it (--force overrides one set without releasing it). " +
 			"--write-back also embeds a front cover into the backing file(s): a track into its " +

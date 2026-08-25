@@ -453,6 +453,9 @@ func (s *Store) ApplyReleaseGroupEnrichment(ctx context.Context, in model.Releas
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 		}
+		if err := fillEntityAuxArtTx(ctx, tx, string(model.ArtReleaseGroup), in.ReleaseGroupID, in.AuxArt); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
 		if !aff.empty() {
 			if err := maintainRollupsTx(ctx, tx, aff, nowNS()); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
@@ -538,9 +541,15 @@ func (s *Store) ApplyAlbumReleaseMatch(ctx context.Context, in model.AlbumReleas
 		// The cover rides on the id landing. A declined write means this album is not
 		// (or is not yet known to be) that pressing, so stamping its art would be the
 		// wrong picture on a row that never took the id: a curated mbid keeps its own
-		// artwork, and a collision leaves both albums alone for merge to settle.
-		if wrote && in.Art != nil {
-			if err := fillAlbumArtTx(ctx, tx, in.AlbumID, in.Art); err != nil {
+		// artwork, and a collision leaves both albums alone for merge to settle. The
+		// aux roles ride on it for the same reason.
+		if wrote {
+			if in.Art != nil {
+				if err := fillAlbumArtTx(ctx, tx, in.AlbumID, in.Art); err != nil {
+					return waxerr.Wrap(waxerr.CodeIO, op, err)
+				}
+			}
+			if err := fillEntityAuxArtTx(ctx, tx, string(model.ArtAlbum), in.AlbumID, in.AuxArt); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 		}

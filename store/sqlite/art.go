@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"sort"
 	"sync"
 
 	"github.com/colespringer/waxbin/art"
@@ -356,6 +357,50 @@ func attachEntityArtUnlessLockedTx(ctx context.Context, tx *sql.Tx, entityType s
 	return attachEntityArtTx(ctx, tx, entityType, entityID, img)
 }
 
+// fillEntityAuxArtTx applies enrichment's non-front role images to one entity,
+// fill-when-empty per (entity, role): an existing row in a role keeps, so a hand-set
+// aux image is never replaced. The one entity-level "art" lock guards every role
+// here, not the front alone: a locked entity means its art is curated, and skipping
+// everything is the reading that cannot surprise. Unlike fillAlbumArtTx there is no
+// derived rung to consult, since non-front roles resolve at their own level only.
+// Roles iterate in sorted order for determinism; the front role, an invalid role, and
+// a nil or empty image are skipped. The writes go through setEntityArtRoleTx, which
+// validates the attribution and stamps the provenance columns.
+func fillEntityAuxArtTx(ctx context.Context, tx *sql.Tx, entityType string, entityID int64, aux map[model.ArtRole]*model.ArtImage) error {
+	if len(aux) == 0 {
+		return nil
+	}
+	locked, err := entityFieldLockedTx(ctx, tx, entityType, entityID, "art")
+	if err != nil || locked {
+		return err
+	}
+	roles := make([]string, 0, len(aux))
+	for role := range aux {
+		roles = append(roles, string(role))
+	}
+	sort.Strings(roles)
+	for _, r := range roles {
+		role := model.ArtRole(r)
+		img := aux[role]
+		if role == model.ArtRoleFront || !role.Valid() || img == nil || len(img.Data) == 0 {
+			continue
+		}
+		var n int
+		if err := tx.QueryRowContext(ctx,
+			"SELECT COUNT(*) FROM art_map WHERE entity_type=? AND entity_id=? AND role=?",
+			entityType, entityID, r).Scan(&n); err != nil {
+			return err
+		}
+		if n > 0 {
+			continue
+		}
+		if err := setEntityArtRoleTx(ctx, tx, entityType, entityID, r, img); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // refreshArtProvenanceTx re-attributes an existing mapping whose image is unchanged.
 // It writes only when some column actually differs, so it cannot churn updated_at on a
 // rescan that read the same cover from the same place.
@@ -627,8 +672,9 @@ func (s *Store) ArtRoles(ctx context.Context, ref model.EntityRef) ([]model.ArtR
 	if err := rows.Err(); err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
-	// The "art" lock guards the front cover alone, matching the item-side art lock, so
-	// only that row reports it. One extra read, taken unconditionally because a lock
+	// The "art" lock is reported on the front row alone, matching the item-side art
+	// lock, though on a shared entity it also gates enrichment's aux-role fills
+	// (fillEntityAuxArtTx). One extra read, taken unconditionally because a lock
 	// with no front row is exactly the state worth reporting. It reads whichever table
 	// governs this entity type, so a track cover locked by SetItemArt reports here too
 	// (artLockIsItemScoped).
