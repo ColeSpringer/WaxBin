@@ -97,7 +97,14 @@ import (
 // client built against 12 reads a 13 server as absent from the first frame rather than
 // discovering a refusal partway through a command, and neither version has shipped, so
 // it costs a rebuild and nothing else.
-const ProtocolVersion = 13
+//
+// Version 14 added SetArtLockParams.Role, which forces the bump under the rule above: a
+// version-13 server drops the field and locks the whole entity, where the client asked
+// to lock one auxiliary slot. That is the widest possible misdrive of the call, since
+// the entity lock also stops enrichment filling every other role. An omitted Role still
+// encodes exactly as it did at 13 and still means the front cover, so the call a
+// version-13 client makes is unchanged in meaning; the bump is for the new field alone.
+const ProtocolVersion = 14
 
 // Method names for the proxied operations: the fast request/response catalog
 // mutations, the reads a mutating command needs for its confirmation output, the
@@ -332,7 +339,9 @@ type SetChaptersParams struct {
 // it by hand; an empty Source means a user set. Format names the image's format for a
 // picture whose bytes cannot say so themselves (a BMP or TIFF cover); it is a fallback
 // the decoded format beats, and it takes a short token, a bare extension, or an image
-// media type. Lock is a model.LockChange, whose empty value leaves the stored lock alone.
+// media type. Lock is a model.LockChange, whose empty value leaves the stored lock
+// alone; it governs the curation lock the named role owns, the item's "art" field for
+// the front cover and "art.<role>" for an auxiliary one.
 type SetItemArtParams struct {
 	ItemPID   string `json:"itemPid"`
 	Role      string `json:"role,omitempty"`
@@ -354,9 +363,10 @@ type SetItemArtResult struct {
 }
 
 // SetEntityArtParams is the set_entity_art request payload (album/artist/... covers).
-// Lock and Force govern the entity's "art" curation lock, and apply to the front role
-// alone, the same way SetItemArtParams' do for an item. Source, Provider, SourceURL and
-// Format carry the same meaning there too.
+// Lock and Force govern the curation lock the named role owns, the entity's "art"
+// field for the front cover and "art.<role>" for an auxiliary one, the same way
+// SetItemArtParams' do for an item. Source, Provider, SourceURL and Format carry the
+// same meaning there too.
 type SetEntityArtParams struct {
 	EntityType string `json:"entityType"`
 	EntityPID  string `json:"entityPid"`
@@ -377,13 +387,20 @@ type SetEntityArtResult struct {
 	WriteBackFailures []WriteBackFailure `json:"writeBackFailures,omitempty"`
 }
 
-// SetArtLockParams is the set_art_lock request payload: an entity's front-cover lock,
-// set or cleared without touching the cover. It is the mutation set_entity_art cannot
-// express, since that one always writes the cover slot too. Lock stays a bool here,
+// SetArtLockParams is the set_art_lock request payload: an entity's art lock in one
+// role, set or cleared without touching the image. It is the mutation set_entity_art
+// cannot express, since that one always writes the slot too. Lock stays a bool here,
 // where it is the write itself rather than an instruction accompanying one.
+//
+// An omitted Role means the front cover, whose lock is the entity's whole "art" field
+// and also gates enrichment's fills in the other roles, so a caller written before
+// per-role locks keeps its exact meaning and its exact bytes. Spelling "front" out is
+// refused instead of aliased: one lock, one home, and an alias would hide that the
+// front lock does the second job.
 type SetArtLockParams struct {
 	EntityType string `json:"entityType"`
 	EntityPID  string `json:"entityPid"`
+	Role       string `json:"role,omitempty"`
 	Lock       bool   `json:"lock"`
 }
 

@@ -59,9 +59,25 @@ func resolveAndLinkEntities(ctx context.Context, tx *sql.Tx, itemID int64, tr mo
 		return err
 	}
 
+	// The album the track sat on before this resolve, read while the FK still points at
+	// it. upsertTrack never writes album_id, so this is exactly what the last resolve
+	// left, and a track row created moments ago reads NULL.
+	var priorAlbumID sql.NullInt64
+	if err := tx.QueryRowContext(ctx,
+		"SELECT album_id FROM track WHERE item_id=?", itemID).Scan(&priorAlbumID); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+
 	if _, err := tx.ExecContext(ctx,
 		"UPDATE track SET artist_id=?, album_artist_id=?, album_id=? WHERE item_id=?",
 		nullInt64(artistID), nullInt64(albumArtistID), nullInt64(albumID), itemID); err != nil {
+		return err
+	}
+	// A folder move re-keys the album, so carry the drained row's identity and
+	// attachments onto the new one rather than leaving it to ghost (scanreconcile.go).
+	// The merge it may perform repoints this track's FK, so nothing below may hold on
+	// to albumID.
+	if err := reconcileAlbumRekeyTx(ctx, tx, priorAlbumID.Int64, albumID, affected); err != nil {
 		return err
 	}
 

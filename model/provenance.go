@@ -235,16 +235,22 @@ func IsMetadataField(field string) bool { return MetadataFields[field] }
 
 // IsCuratableField reports whether field may carry a provenance/lock row. It is the
 // lock whitelist: the superset of IsMetadataField plus the structured lock-only
-// artifacts (lyrics/chapters/art), a namespaced credit key ("credit.<role>"), and a
-// namespaced custom-tag key ("tag.<KEY>"). The scalar edit path stays on
-// IsMetadataField so a credit key, an art lock, or a custom tag cannot be set as if it
-// were a scalar (those go through their own APIs).
+// artifacts (lyrics/chapters/art), a namespaced credit key ("credit.<role>"), a
+// namespaced auxiliary-art key ("art.<role>"), and a namespaced custom-tag key
+// ("tag.<KEY>"). The scalar edit path stays on IsMetadataField so a credit key, an art
+// lock, or a custom tag cannot be set as if it were a scalar (those go through their
+// own APIs).
 func IsCuratableField(field string) bool {
 	if MetadataFields[field] || lockOnlyFields[field] {
 		return true
 	}
 	if role, ok := CutCreditPrefix(field); ok {
 		return ContributorRole(role).Valid()
+	}
+	if role, ok := CutArtRolePrefix(field); ok {
+		// No art.front: the front cover's lock is the plain "art" field.
+		r := ArtRole(role)
+		return r.Valid() && r != ArtRoleFront
 	}
 	if key, ok := CutTagPrefix(field); ok {
 		// A custom-tag lock names a canonical, non-reserved key.
@@ -259,6 +265,22 @@ func IsCuratableField(field string) bool {
 // namespace convention lives, shared by the model whitelist and the store's kind gate.
 func CutCreditPrefix(field string) (string, bool) {
 	const p = "credit."
+	if len(field) > len(p) && field[:len(p)] == p {
+		return field[len(p):], true
+	}
+	return "", false
+}
+
+// CutArtRolePrefix returns the role portion of an "art.<role>" field and whether the
+// prefix was present with a non-empty role, mirroring CutCreditPrefix. It is the one
+// place the auxiliary-art lock namespace lives, shared by the model whitelist and the
+// store's kind gate.
+//
+// There is no "art.front": the front cover's lock is the plain "art" field, which is
+// also the whole-entity gate on enrichment's aux fills, so giving it a second spelling
+// would hide that one row does both jobs. IsCuratableField refuses it for that reason.
+func CutArtRolePrefix(field string) (string, bool) {
+	const p = "art."
 	if len(field) > len(p) && field[:len(p)] == p {
 		return field[len(p):], true
 	}

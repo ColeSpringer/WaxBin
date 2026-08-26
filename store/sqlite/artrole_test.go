@@ -440,7 +440,7 @@ func TestArtRolesReportsCoverlessLock(t *testing.T) {
 		t.Error("UpdatedAt = 0; the lock row carries a timestamp and the entry should too")
 	}
 
-	if locked, err := st.ArtLocked(ctx, model.ArtPodcast, feed.PodcastPID); err != nil || !locked {
+	if locked, err := st.ArtLocked(ctx, model.ArtPodcast, feed.PodcastPID, model.ArtRoleFront); err != nil || !locked {
 		t.Errorf("ArtLocked = %v (err %v), want true", locked, err)
 	}
 }
@@ -460,8 +460,10 @@ func TestArtRolesEmptyOnCoverlessUnlockedEntity(t *testing.T) {
 	}
 }
 
-// A locked entity that still holds other roles reports the front lock alongside them,
-// in role order (front sorts last).
+// A locked entity that still holds other roles reports the synthesized front entry
+// alongside them, in role order (front sorts last). The whole-entity lock is what
+// enrichment answers to in every role, so the stored back row reads locked under it
+// even though it carries no art.back row of its own.
 func TestArtRolesCoverlessLockKeepsRoleOrder(t *testing.T) {
 	st, _ := entityFixture(t)
 	ctx := context.Background()
@@ -470,7 +472,7 @@ func TestArtRolesCoverlessLockKeepsRoleOrder(t *testing.T) {
 	if err := st.SetEntityArt(ctx, model.ArtPlaylist, pl, model.ArtRoleBack, back.Data, "", model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("set playlist back: %v", err)
 	}
-	if err := st.SetArtLock(ctx, model.ArtPlaylist, pl, true); err != nil {
+	if err := st.SetArtLock(ctx, model.ArtPlaylist, pl, model.ArtRoleFront, true); err != nil {
 		t.Fatalf("lock playlist front: %v", err)
 	}
 	roles, err := st.ArtRoles(ctx, model.EntityRef{Type: model.ArtPlaylist, PID: pl})
@@ -480,9 +482,23 @@ func TestArtRolesCoverlessLockKeepsRoleOrder(t *testing.T) {
 	if len(roles) != 2 || roles[0].Role != model.ArtRoleBack || roles[1].Role != model.ArtRoleFront {
 		t.Fatalf("roles = %+v, want [back front]", roles)
 	}
-	if roles[0].Locked || !roles[1].Locked {
-		t.Errorf("locks = back %v / front %v, want false / true", roles[0].Locked, roles[1].Locked)
+	if !roles[0].Locked || !roles[1].Locked {
+		t.Errorf("locks = back %v / front %v, want both true under the whole-entity lock",
+			roles[0].Locked, roles[1].Locked)
 	}
+	// The back row's lock is the entity's, not one of its own, so releasing the front
+	// lock releases it too.
+	if err := st.SetArtLock(ctx, model.ArtPlaylist, pl, model.ArtRoleFront, false); err != nil {
+		t.Fatalf("unlock playlist front: %v", err)
+	}
+	roles, err = st.ArtRoles(ctx, model.EntityRef{Type: model.ArtPlaylist, PID: pl})
+	if err != nil {
+		t.Fatalf("roles after unlock: %v", err)
+	}
+	if len(roles) != 1 || roles[0].Role != model.ArtRoleBack || roles[0].Locked {
+		t.Errorf("roles after unlock = %+v, want one unlocked back row", roles)
+	}
+	assertVerifyClean(t, st)
 }
 
 // SetArtLock is the lock-only mutation SetEntityArt cannot express, and unlocking is
@@ -493,16 +509,16 @@ func TestSetArtLockRoundTrip(t *testing.T) {
 	pl := newPlaylist(t, st, "Locked")
 	img := testPNG(t, 46, 46)
 
-	if err := st.SetArtLock(ctx, model.ArtPlaylist, pl, true); err != nil {
+	if err := st.SetArtLock(ctx, model.ArtPlaylist, pl, model.ArtRoleFront, true); err != nil {
 		t.Fatalf("lock: %v", err)
 	}
 	if err := st.SetEntityArt(ctx, model.ArtPlaylist, pl, model.ArtRoleFront, img.Data, "", model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); !waxerr.Is(err, waxerr.CodeLocked) {
 		t.Fatalf("set under a lock = %v, want CodeLocked", err)
 	}
-	if err := st.SetArtLock(ctx, model.ArtPlaylist, pl, false); err != nil {
+	if err := st.SetArtLock(ctx, model.ArtPlaylist, pl, model.ArtRoleFront, false); err != nil {
 		t.Fatalf("unlock: %v", err)
 	}
-	if locked, err := st.ArtLocked(ctx, model.ArtPlaylist, pl); err != nil || locked {
+	if locked, err := st.ArtLocked(ctx, model.ArtPlaylist, pl, model.ArtRoleFront); err != nil || locked {
 		t.Fatalf("ArtLocked after unlock = %v (err %v), want false", locked, err)
 	}
 	if err := st.SetEntityArt(ctx, model.ArtPlaylist, pl, model.ArtRoleFront, img.Data, "", model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
@@ -517,7 +533,7 @@ func TestSetArtLockSharesTheItemArtLockRow(t *testing.T) {
 	ctx := context.Background()
 	pid := putWithCover(t, st, lib.ID, "/lib/al/1.flac", "e1", testPNG(t, 40, 40))
 
-	if err := st.SetArtLock(ctx, model.ArtTrack, pid, true); err != nil {
+	if err := st.SetArtLock(ctx, model.ArtTrack, pid, model.ArtRoleFront, true); err != nil {
 		t.Fatalf("art lock: %v", err)
 	}
 	if n := scalarInt(t, st, "SELECT COUNT(*) FROM field_provenance WHERE field='art' AND locked=1"); n != 1 {
@@ -543,7 +559,7 @@ func TestSetArtLockSharesTheItemArtLockRow(t *testing.T) {
 	if err := st.UnlockField(ctx, pid, "art"); err != nil {
 		t.Fatalf("unlock field: %v", err)
 	}
-	if locked, err := st.ArtLocked(ctx, model.ArtTrack, pid); err != nil || locked {
+	if locked, err := st.ArtLocked(ctx, model.ArtTrack, pid, model.ArtRoleFront); err != nil || locked {
 		t.Errorf("ArtLocked after `unlock <pid> art` = %v (err %v), want false", locked, err)
 	}
 	// And the row goes with the lock. An art row carries no value, so an unlocked one
@@ -563,21 +579,21 @@ func TestSetArtLockEmitsNoDeltaWhenAlreadyInState(t *testing.T) {
 	pl := newPlaylist(t, st, "Quiet")
 
 	seq := latestSeq(t, st)
-	if err := st.SetArtLock(ctx, model.ArtPlaylist, pl, false); err != nil {
+	if err := st.SetArtLock(ctx, model.ArtPlaylist, pl, model.ArtRoleFront, false); err != nil {
 		t.Fatalf("unlock a never-locked playlist: %v", err)
 	}
 	if got := latestSeq(t, st); got != seq {
 		t.Errorf("redundant unlock advanced the change log %d -> %d", seq, got)
 	}
 
-	if err := st.SetArtLock(ctx, model.ArtPlaylist, pl, true); err != nil {
+	if err := st.SetArtLock(ctx, model.ArtPlaylist, pl, model.ArtRoleFront, true); err != nil {
 		t.Fatalf("lock: %v", err)
 	}
 	locked := latestSeq(t, st)
 	if locked == seq {
 		t.Fatal("a real lock emitted no delta")
 	}
-	if err := st.SetArtLock(ctx, model.ArtPlaylist, pl, true); err != nil {
+	if err := st.SetArtLock(ctx, model.ArtPlaylist, pl, model.ArtRoleFront, true); err != nil {
 		t.Fatalf("re-lock: %v", err)
 	}
 	if got := latestSeq(t, st); got != locked {
@@ -631,14 +647,14 @@ func TestArtWriteLeavesAnUnreadLockAlone(t *testing.T) {
 	ctx := context.Background()
 	pid := putWithCover(t, st, lib.ID, "/lib/al/1.flac", "e1", testPNG(t, 40, 40))
 
-	if err := st.SetArtLock(ctx, model.ArtTrack, pid, true); err != nil {
+	if err := st.SetArtLock(ctx, model.ArtTrack, pid, model.ArtRoleFront, true); err != nil {
 		t.Fatalf("lock: %v", err)
 	}
 	// A clear that says nothing about the lock leaves it standing.
 	if err := st.SetItemArt(ctx, pid, model.ArtRoleFront, nil, "", model.Attribution{}, model.LockUnchanged, true); err != nil {
 		t.Fatalf("clear keeping the lock: %v", err)
 	}
-	if locked, err := st.ArtLocked(ctx, model.ArtTrack, pid); err != nil || !locked {
+	if locked, err := st.ArtLocked(ctx, model.ArtTrack, pid, model.ArtRoleFront); err != nil || !locked {
 		t.Fatalf("locked after a keep-lock clear = %v (err %v), want true", locked, err)
 	}
 	// So does a forced set: force skips the lock check for that one write and nothing
@@ -647,7 +663,7 @@ func TestArtWriteLeavesAnUnreadLockAlone(t *testing.T) {
 		model.Attribution{}, model.LockUnchanged, true); err != nil {
 		t.Fatalf("forced set: %v", err)
 	}
-	if locked, err := st.ArtLocked(ctx, model.ArtTrack, pid); err != nil || !locked {
+	if locked, err := st.ArtLocked(ctx, model.ArtTrack, pid, model.ArtRoleFront); err != nil || !locked {
 		t.Fatalf("locked after a forced set = %v (err %v), want the lock still standing", locked, err)
 	}
 	// An explicit unlock still releases it.
@@ -655,7 +671,7 @@ func TestArtWriteLeavesAnUnreadLockAlone(t *testing.T) {
 		model.Attribution{}, model.LockOff, true); err != nil {
 		t.Fatalf("unlocking set: %v", err)
 	}
-	if locked, err := st.ArtLocked(ctx, model.ArtTrack, pid); err != nil || locked {
+	if locked, err := st.ArtLocked(ctx, model.ArtTrack, pid, model.ArtRoleFront); err != nil || locked {
 		t.Errorf("locked after an explicit unlock = %v (err %v), want false", locked, err)
 	}
 }
@@ -874,4 +890,298 @@ func rescanCover(ctx context.Context, st *Store, pid model.PID, img *model.ArtIm
 		_, err := attachArtTxChanged(ctx, tx, itemID, img)
 		return err
 	})
+}
+
+// fillAux runs the enrichment aux-art fill against one entity, the way an apply site
+// does, so the per-role gate can be exercised without a whole enrichment round.
+func fillAux(t *testing.T, st *Store, entityType model.ArtEntity, pid model.PID,
+	aux map[model.ArtRole]*model.ArtImage) {
+	t.Helper()
+	ctx := context.Background()
+	err := st.writeTx(ctx, func(tx *sql.Tx) error {
+		id, err := artEntityIDTx(ctx, tx, entityType, pid, "test.fillAux")
+		if err != nil {
+			return err
+		}
+		_, err = fillEntityAuxArtTx(ctx, tx, entityType, id, aux)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("fill aux art: %v", err)
+	}
+}
+
+// enrichedPNG is a provider-supplied image, the attribution an enrichment fill carries.
+func enrichedPNG(t *testing.T, w, h int) *model.ArtImage {
+	t.Helper()
+	img := testPNG(t, w, h)
+	img.Attribution = model.Attribution{Source: model.SourceEnrichment, Provider: "mock"}
+	return img
+}
+
+// TestAuxClearRecordsRoleLockAndBlocksFill closes the gap the whole-entity lock used
+// to be the only answer to: clearing an auxiliary role records that role's own lock,
+// so the vacancy stops reading as an invitation and the next enrichment pass leaves it
+// alone. The roles beside it stay fillable, which is the whole point of the split.
+func TestAuxClearRecordsRoleLockAndBlocksFill(t *testing.T) {
+	st, _ := entityFixture(t)
+	ctx := context.Background()
+	pl := newPlaylist(t, st, "Aux")
+	back := testPNG(t, 41, 41)
+
+	if err := st.SetEntityArt(ctx, model.ArtPlaylist, pl, model.ArtRoleBack, back.Data, "", model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
+		t.Fatalf("set back: %v", err)
+	}
+	// The clear locks by default, which is what holds the slot empty.
+	if err := st.SetEntityArt(ctx, model.ArtPlaylist, pl, model.ArtRoleBack, nil, "", model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
+		t.Fatalf("clear back: %v", err)
+	}
+	if n := scalarInt(t, st,
+		"SELECT COUNT(*) FROM entity_curation WHERE entity_type='playlist' AND field='art.back' AND locked=1"); n != 1 {
+		t.Fatalf("art.back lock rows = %d, want 1 after a locking clear", n)
+	}
+
+	fillAux(t, st, model.ArtPlaylist, pl, map[model.ArtRole]*model.ArtImage{
+		model.ArtRoleBack: enrichedPNG(t, 51, 51),
+		model.ArtRoleDisc: enrichedPNG(t, 52, 52),
+	})
+	if n := scalarInt(t, st, "SELECT COUNT(*) FROM art_map WHERE entity_type='playlist' AND role='back'"); n != 0 {
+		t.Errorf("the locked back slot was refilled (%d rows), want it held empty", n)
+	}
+	if n := scalarInt(t, st, "SELECT COUNT(*) FROM art_map WHERE entity_type='playlist' AND role='disc'"); n != 1 {
+		t.Errorf("disc rows = %d, want the unlocked role filled", n)
+	}
+
+	// Releasing the role's lock opens it again, with no effect on the rest.
+	if err := st.SetArtLock(ctx, model.ArtPlaylist, pl, model.ArtRoleBack, false); err != nil {
+		t.Fatalf("unlock back: %v", err)
+	}
+	fillAux(t, st, model.ArtPlaylist, pl, map[model.ArtRole]*model.ArtImage{
+		model.ArtRoleBack: enrichedPNG(t, 51, 51),
+	})
+	if n := scalarInt(t, st, "SELECT COUNT(*) FROM art_map WHERE entity_type='playlist' AND role='back'"); n != 1 {
+		t.Errorf("back rows after unlock = %d, want the fill to land", n)
+	}
+	assertVerifyClean(t, st)
+}
+
+// TestWholeArtLockStillGatesAuxFills: the entity's plain "art" lock keeps skipping
+// every role, which is what a user with no interest in per-role bookkeeping reaches
+// for. Per-role locks narrow the gate, they do not replace it.
+func TestWholeArtLockStillGatesAuxFills(t *testing.T) {
+	st, _ := entityFixture(t)
+	ctx := context.Background()
+	pl := newPlaylist(t, st, "Whole")
+
+	if err := st.SetArtLock(ctx, model.ArtPlaylist, pl, model.ArtRoleFront, true); err != nil {
+		t.Fatalf("lock front: %v", err)
+	}
+	fillAux(t, st, model.ArtPlaylist, pl, map[model.ArtRole]*model.ArtImage{
+		model.ArtRoleBack:    enrichedPNG(t, 51, 51),
+		model.ArtRoleBooklet: enrichedPNG(t, 52, 52),
+	})
+	if n := scalarInt(t, st, "SELECT COUNT(*) FROM art_map WHERE entity_type='playlist'"); n != 0 {
+		t.Errorf("%d art rows landed under the whole-entity lock, want 0", n)
+	}
+	assertVerifyClean(t, st)
+}
+
+// TestArtRolesReportsLockedEmptyAuxRole: a locked-empty auxiliary slot is synthesized
+// into the listing the way a coverless front lock always was, carrying the lock row's
+// own attribution. It is otherwise invisible, and it is what a client needs to tell an
+// empty-and-fillable slot from an empty-and-pinned one.
+func TestArtRolesReportsLockedEmptyAuxRole(t *testing.T) {
+	st, _ := entityFixture(t)
+	ctx := context.Background()
+	pl := newPlaylist(t, st, "Vacancy")
+	front := testPNG(t, 40, 40)
+
+	if err := st.SetEntityArt(ctx, model.ArtPlaylist, pl, model.ArtRoleFront, front.Data, "", model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
+		t.Fatalf("set front: %v", err)
+	}
+	if err := st.SetEntityArt(ctx, model.ArtPlaylist, pl, model.ArtRoleBack, nil, "",
+		model.Attribution{Source: model.SourceEnrichment, Provider: "mock"}, model.LockOf(true), false); err != nil {
+		t.Fatalf("clear-and-lock back: %v", err)
+	}
+
+	roles, err := st.ArtRoles(ctx, model.EntityRef{Type: model.ArtPlaylist, PID: pl})
+	if err != nil {
+		t.Fatalf("roles: %v", err)
+	}
+	if len(roles) != 2 || roles[0].Role != model.ArtRoleBack || roles[1].Role != model.ArtRoleFront {
+		t.Fatalf("roles = %+v, want [back front]", roles)
+	}
+	if !roles[0].Locked || roles[0].SourceHash != "" {
+		t.Errorf("back entry = %+v, want a lock with no artifact behind it", roles[0])
+	}
+	if roles[0].Source != model.SourceEnrichment || roles[0].Provider != "mock" {
+		t.Errorf("back attribution = %q/%q, want the lock row's own", roles[0].Source, roles[0].Provider)
+	}
+	if roles[0].UpdatedAt == 0 {
+		t.Error("back UpdatedAt = 0; the lock row carries a timestamp and the entry should too")
+	}
+	// The front is untouched by a role lock, which is the half the whole-entity lock
+	// could never express.
+	if roles[1].Locked {
+		t.Errorf("front entry = %+v, want it left unlocked by a back-role lock", roles[1])
+	}
+	assertVerifyClean(t, st)
+}
+
+// TestItemArtRoleLockIsItemScoped: a track's per-role lock follows its front lock into
+// field_provenance, so `lock <pid> art.back` and `art lock --role back --type track`
+// write the row the scan and the item surface already read.
+func TestItemArtRoleLockIsItemScoped(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	pid := putWithCover(t, st, lib.ID, "/lib/al/1.flac", "e1", testPNG(t, 40, 40))
+
+	if err := st.SetItemArt(ctx, pid, model.ArtRoleBack, testPNG(t, 41, 41).Data, "",
+		model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
+		t.Fatalf("set back: %v", err)
+	}
+	if n := scalarInt(t, st, `SELECT COUNT(*) FROM field_provenance fp
+		JOIN playable_item pi ON pi.id = fp.item_id
+		WHERE pi.pid = ? AND fp.field = 'art.back' AND fp.locked = 1`, string(pid)); n != 1 {
+		t.Fatalf("item-scoped art.back rows = %d, want 1", n)
+	}
+	if n := scalarInt(t, st, "SELECT COUNT(*) FROM entity_curation WHERE entity_type='track'"); n != 0 {
+		t.Errorf("a track art role lock landed in entity_curation (%d rows), where nothing reads it", n)
+	}
+	// Both write surfaces refuse against that one row, and the entity-typed reader
+	// finds it.
+	if err := st.SetEntityArt(ctx, model.ArtTrack, pid, model.ArtRoleBack, testPNG(t, 42, 42).Data, "",
+		model.Attribution{Source: model.SourceUser}, model.LockUnchanged, false); !waxerr.Is(err, waxerr.CodeLocked) {
+		t.Errorf("SetEntityArt on a locked back = %v, want CodeLocked", err)
+	}
+	if locked, err := st.ArtLocked(ctx, model.ArtTrack, pid, model.ArtRoleBack); err != nil || !locked {
+		t.Errorf("ArtLocked(back) = %v (err %v), want true", locked, err)
+	}
+	if locked, err := st.ArtLocked(ctx, model.ArtTrack, pid, model.ArtRoleFront); err != nil || locked {
+		t.Errorf("ArtLocked(front) = %v (err %v), want false", locked, err)
+	}
+	// And `unlock <pid> art.back` releases the same row.
+	if err := st.UnlockField(ctx, pid, "art.back"); err != nil {
+		t.Fatalf("unlock art.back: %v", err)
+	}
+	if locked, err := st.ArtLocked(ctx, model.ArtTrack, pid, model.ArtRoleBack); err != nil || locked {
+		t.Errorf("ArtLocked(back) after unlock = %v (err %v), want false", locked, err)
+	}
+	assertVerifyClean(t, st)
+}
+
+// TestArtLockedReportsTheEffectiveLock: the read answers the question its callers ask,
+// which is whether a slot is pinned against an automatic fill, so it agrees with what
+// `art roles` prints instead of contradicting it on the same entity. A user's own hand
+// still gets past the whole-entity lock in an auxiliary role.
+func TestArtLockedReportsTheEffectiveLock(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	held := putWithCover(t, st, lib.ID, "/lib/al/1.flac", "e1", testPNG(t, 40, 40))
+	filled := putWithCover(t, st, lib.ID, "/lib/al/2.flac", "e2", testPNG(t, 42, 42))
+
+	if err := st.SetItemArt(ctx, filled, model.ArtRoleBack, testPNG(t, 43, 43).Data, "",
+		model.Attribution{Source: model.SourceUser}, model.LockUnchanged, false); err != nil {
+		t.Fatalf("set back: %v", err)
+	}
+	for _, pid := range []model.PID{held, filled} {
+		if err := st.LockField(ctx, pid, "art"); err != nil {
+			t.Fatalf("lock art on %s: %v", pid, err)
+		}
+	}
+
+	// An empty back slot under the whole lock: the state a missing-art diagnosis has to
+	// explain, and the one the role's own lock says nothing about.
+	if locked, err := st.ArtLocked(ctx, model.ArtTrack, held, model.ArtRoleBack); err != nil || !locked {
+		t.Errorf("ArtLocked(back) on an empty slot under the whole lock = %v (err %v), want true", locked, err)
+	}
+	// And on a slot `art roles` lists, the two reads say the same thing.
+	roles, err := st.ArtRoles(ctx, model.EntityRef{Type: model.ArtTrack, PID: filled})
+	if err != nil {
+		t.Fatalf("art roles: %v", err)
+	}
+	var backListed bool
+	for _, r := range roles {
+		if r.Role != model.ArtRoleBack {
+			continue
+		}
+		backListed = true
+		locked, err := st.ArtLocked(ctx, model.ArtTrack, filled, model.ArtRoleBack)
+		if err != nil || locked != r.Locked {
+			t.Errorf("ArtLocked(back) = %v (err %v), want ArtRoles' %v", locked, err, r.Locked)
+		}
+	}
+	if !backListed {
+		t.Fatal("art roles listed no back entry; the comparison never ran")
+	}
+
+	// The whole lock never refused a hand-set auxiliary image, and still does not.
+	if err := st.SetItemArt(ctx, held, model.ArtRoleBack, testPNG(t, 44, 44).Data, "",
+		model.Attribution{Source: model.SourceUser}, model.LockUnchanged, false); err != nil {
+		t.Errorf("hand-set back under the whole lock = %v, want it allowed", err)
+	}
+	assertVerifyClean(t, st)
+}
+
+// TestGenericUnlockDropsArtRoleLockRow: `unlock <pid> art.back` drops the row rather
+// than leaving it standing unlocked. An item-scoped role lock is written by whatever
+// asked for it and carries that source, so the sparse cleanup's tag-only test would
+// skip it and strand an inert row for a field field_provenance holds no value in.
+func TestGenericUnlockDropsArtRoleLockRow(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	pid := putWithCover(t, st, lib.ID, "/lib/al/1.flac", "e1", testPNG(t, 40, 40))
+
+	if err := st.SetItemArt(ctx, pid, model.ArtRoleBack, testPNG(t, 41, 41).Data, "",
+		model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
+		t.Fatalf("set back: %v", err)
+	}
+	const rowQ = `SELECT COUNT(*) FROM field_provenance fp
+		JOIN playable_item pi ON pi.id = fp.item_id
+		WHERE pi.pid = ? AND fp.field = 'art.back'`
+	if n := scalarInt(t, st, rowQ, string(pid)); n != 1 {
+		t.Fatalf("art.back rows after the set = %d, want 1", n)
+	}
+	if src := scalarStr(t, st, `SELECT fp.source FROM field_provenance fp
+		JOIN playable_item pi ON pi.id = fp.item_id
+		WHERE pi.pid = ? AND fp.field = 'art.back'`, string(pid)); src != string(model.SourceUser) {
+		t.Fatalf("art.back source = %q, want the setter's own; a tag row would not exercise this", src)
+	}
+
+	if err := st.UnlockField(ctx, pid, "art.back"); err != nil {
+		t.Fatalf("unlock art.back: %v", err)
+	}
+	if n := scalarInt(t, st, rowQ, string(pid)); n != 0 {
+		t.Errorf("art.back rows after the unlock = %d, want the row gone rather than merely unlocked", n)
+	}
+	assertVerifyClean(t, st)
+}
+
+// TestGenericLockAcceptsArtRoleField: art.<role> passes the generic lock whitelist the
+// way credit.<role> and tag.<KEY> do, on both kinds that carry art, and the front has
+// no spelling there at all.
+func TestGenericLockAcceptsArtRoleField(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	track := putWithCover(t, st, lib.ID, "/lib/al/1.flac", "e1", testPNG(t, 40, 40))
+	book := putBook(t, st, lib.ID, bookSpec{
+		path: "/lib/b/1.m4b", essence: "eb1", content: "cb1", title: "B", author: "A",
+	}).ItemPID
+
+	for _, pid := range []model.PID{track, book} {
+		if err := st.LockField(ctx, pid, "art.back"); err != nil {
+			t.Fatalf("lock art.back on %s: %v", pid, err)
+		}
+		if locked, err := st.ArtLocked(ctx, model.ArtTrack, pid, model.ArtRoleBack); err != nil || !locked {
+			t.Errorf("%s ArtLocked(back) = %v (err %v), want true", pid, locked, err)
+		}
+	}
+	// There is no art.front: one lock, one home, and "art" is that home.
+	if err := st.LockField(ctx, track, "art.front"); !waxerr.Is(err, waxerr.CodeInvalid) {
+		t.Errorf("lock art.front = %v, want CodeInvalid", err)
+	}
+	if err := st.LockField(ctx, track, "art.sleeve"); !waxerr.Is(err, waxerr.CodeInvalid) {
+		t.Errorf("lock art.sleeve = %v, want CodeInvalid", err)
+	}
+	assertVerifyClean(t, st)
 }

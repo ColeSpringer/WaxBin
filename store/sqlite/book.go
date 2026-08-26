@@ -246,6 +246,7 @@ func (s *Store) resolveScannedFile(ctx context.Context, tx *sql.Tx, libraryID in
 		}
 		if relink != nil && !pathExists(relink.Path) {
 			res.Relinked = true
+			res.RelinkedFrom = string(relink.Path)
 			res.ContentChanged = relink.ContentHash != file.ContentHash
 			if err := updateFileRow(ctx, tx, relink.ID, file, now); err != nil {
 				return 0, "", err

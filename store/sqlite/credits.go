@@ -19,13 +19,20 @@ var staticCurationFieldKinds = map[string]map[model.Kind]bool{
 
 // curatableFieldForKind reports whether a provenance/lock field applies to the given
 // item kind: a scalar field from the kind's edit whitelist, a credit.<role> whose role
-// is valid for the kind, or a static curation field (lyrics/chapters/art).
+// is valid for the kind, an art.<role> auxiliary-art lock, or a static curation field
+// (lyrics/chapters/art).
 func curatableFieldForKind(kind, field string) bool {
 	if allowed := editableFieldsForKind(kind); allowed != nil && allowed[field] {
 		return true
 	}
 	if role, ok := model.CutCreditPrefix(field); ok {
 		return model.RoleValidForKind(model.ContributorRole(role), model.Kind(kind))
+	}
+	if role, ok := model.CutArtRolePrefix(field); ok {
+		// An auxiliary slot goes wherever the front cover does, so it follows "art".
+		// There is no art.front, for the reason CutArtRolePrefix gives.
+		r := model.ArtRole(role)
+		return r.Valid() && r != model.ArtRoleFront && staticCurationFieldKinds["art"][model.Kind(kind)]
 	}
 	if _, ok := model.CutTagPrefix(field); ok {
 		// Custom tags live on the items that carry file tags (tracks and books).

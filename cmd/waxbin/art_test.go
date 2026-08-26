@@ -4,9 +4,11 @@ import (
 	"encoding/json"
 	"slices"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/colespringer/waxbin/model"
+	"github.com/colespringer/waxbin/waxerr"
 )
 
 // TestArtRoleViewsJSON pins the `art roles --json` payload shape. The field names are
@@ -69,5 +71,30 @@ func TestArtViewReportsTheRungServed(t *testing.T) {
 	sizeless := artView(&model.ArtProvenance{Format: "png", Width: 400, Height: 300}, false, 0)
 	if got := sizeless["box"]; got != 0 {
 		t.Errorf("box = %v, want 0 for a sizeless read", got)
+	}
+}
+
+// TestParseArtLockRole pins the --role mapping on `art lock`/`art unlock`. An omitted
+// flag is the front cover, whose lock is the entity's own; spelling "front" out is
+// refused and points at dropping the flag, so there is one way to say it.
+func TestParseArtLockRole(t *testing.T) {
+	if got, err := parseArtLockRole("lock", ""); err != nil || got != model.ArtRoleFront {
+		t.Errorf("empty --role = %q (err %v), want front", got, err)
+	}
+	for _, role := range []model.ArtRole{model.ArtRoleBack, model.ArtRoleDisc,
+		model.ArtRoleBooklet, model.ArtRoleBackground} {
+		if got, err := parseArtLockRole("lock", string(role)); err != nil || got != role {
+			t.Errorf("--role %s = %q (err %v), want it through", role, got, err)
+		}
+	}
+	_, err := parseArtLockRole("lock", "front")
+	if !waxerr.Is(err, waxerr.CodeInvalid) {
+		t.Fatalf("--role front = %v, want CodeInvalid", err)
+	}
+	if !strings.Contains(err.Error(), "drop --role to lock it") {
+		t.Errorf("refusal = %q, want it to point at dropping the flag", err)
+	}
+	if _, err := parseArtLockRole("unlock", "sleeve"); !waxerr.Is(err, waxerr.CodeInvalid) {
+		t.Errorf("--role sleeve = %v, want CodeInvalid", err)
 	}
 }

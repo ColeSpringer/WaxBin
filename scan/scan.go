@@ -519,6 +519,14 @@ func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, p
 	}
 	if out.Relinked {
 		res.Relinked++
+		// The walk only ever looked up sc.index by the path it is currently visiting,
+		// which is the file's new path, so the file's old-path entry is still sitting
+		// in the index. Left there, end-of-walk reconciliation would read it as a
+		// vanished file and mark the very item this scan just relinked as missing. The
+		// store reports the path it moved from, which is that entry's key.
+		if out.RelinkedFrom != "" {
+			delete(sc.index, out.RelinkedFrom)
+		}
 	}
 	return nil
 }

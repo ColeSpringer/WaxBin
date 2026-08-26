@@ -162,7 +162,7 @@ func TestAlbumsNeedingReleaseMatchIncludesEditionEvidence(t *testing.T) {
 	}
 
 	// The heartbeat denominator is built from the same list and must agree.
-	n, err := st.CountEntitiesNeedingEnrichment(ctx, false, true, false, nil)
+	n, err := st.CountEntitiesNeedingEnrichment(ctx, false, true, false, false, nil)
 	if err != nil {
 		t.Fatalf("CountEntitiesNeedingEnrichment: %v", err)
 	}

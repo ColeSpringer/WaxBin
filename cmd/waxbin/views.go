@@ -619,23 +619,27 @@ func toAnalyzeView(r *waxbin.AnalyzeResult) analyzeView {
 }
 
 type enrichView struct {
-	ArtistsEnriched       int    `json:"artistsEnriched"`
-	ArtistsMatched        int    `json:"artistsMatched"`
-	ReleaseGroupsEnriched int    `json:"releaseGroupsEnriched"`
-	ReleaseGroupsMatched  int    `json:"releaseGroupsMatched"`
-	AlbumsSearched        int    `json:"albumsSearched"`
-	AlbumsMatched         int    `json:"albumsMatched"`
-	BooksEnriched         int    `json:"booksEnriched"`
-	BooksMatched          int    `json:"booksMatched"`
-	LyricsEnriched        int    `json:"lyricsEnriched"`
-	LyricsMatched         int    `json:"lyricsMatched"`
-	ArtFetched            int    `json:"artFetched"`
-	AuxArtFetched         int    `json:"auxArtFetched,omitempty"`
-	TagsWritten           int    `json:"tagsWritten,omitempty"`
-	TagsFailed            int    `json:"tagsFailed,omitempty"`
-	TagsUnrepresented     int    `json:"tagsUnrepresented,omitempty"`
-	TagsSkipped           int    `json:"tagsSkipped,omitempty"`
-	JobPID                string `json:"jobPid,omitempty"`
+	ArtistsEnriched       int `json:"artistsEnriched"`
+	ArtistsMatched        int `json:"artistsMatched"`
+	ReleaseGroupsEnriched int `json:"releaseGroupsEnriched"`
+	ReleaseGroupsMatched  int `json:"releaseGroupsMatched"`
+	AlbumsSearched        int `json:"albumsSearched"`
+	AlbumsMatched         int `json:"albumsMatched"`
+	BooksEnriched         int `json:"booksEnriched"`
+	BooksMatched          int `json:"booksMatched"`
+	LyricsEnriched        int `json:"lyricsEnriched"`
+	LyricsMatched         int `json:"lyricsMatched"`
+	// The aux backfill phase is gated on an injected provider, so its counts are
+	// omitted when it did not run and the stock payload keeps the shape it had.
+	AuxArtEnriched    int    `json:"auxArtEnriched,omitempty"`
+	AuxArtMatched     int    `json:"auxArtMatched,omitempty"`
+	ArtFetched        int    `json:"artFetched"`
+	AuxArtFetched     int    `json:"auxArtFetched,omitempty"`
+	TagsWritten       int    `json:"tagsWritten,omitempty"`
+	TagsFailed        int    `json:"tagsFailed,omitempty"`
+	TagsUnrepresented int    `json:"tagsUnrepresented,omitempty"`
+	TagsSkipped       int    `json:"tagsSkipped,omitempty"`
+	JobPID            string `json:"jobPid,omitempty"`
 }
 
 func toEnrichView(r *waxbin.EnrichResult) enrichView {
@@ -645,6 +649,7 @@ func toEnrichView(r *waxbin.EnrichResult) enrichView {
 		AlbumsSearched: r.Result.AlbumsSearched, AlbumsMatched: r.Result.AlbumsMatched,
 		BooksEnriched: r.Result.BooksEnriched, BooksMatched: r.Result.BooksMatched,
 		LyricsEnriched: r.Result.LyricsEnriched, LyricsMatched: r.Result.LyricsMatched,
+		AuxArtEnriched: r.Result.AuxArtEnriched, AuxArtMatched: r.Result.AuxArtMatched,
 		ArtFetched: r.Result.ArtFetched, AuxArtFetched: r.Result.AuxArtFetched,
 		TagsWritten: r.Result.TagsWritten, TagsFailed: r.Result.TagsFailed,
 		TagsUnrepresented: r.Result.TagsUnrepresented, TagsSkipped: r.Result.TagsSkipped,

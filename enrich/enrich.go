@@ -44,6 +44,11 @@ type Store interface {
 	// matchable evidence (a release identifier, or a medium or country) but no release
 	// MBID, under a release group that has one.
 	AlbumsNeedingReleaseMatch(ctx context.Context, force bool, afterID int64, limit int, ids []int64) ([]model.EnrichTarget, error)
+	// ReleaseGroupsNeedingAuxArt returns the next keyset page of release groups the
+	// auxiliary-art backfill should ask about: they carry an MBID, no whole-entity art
+	// lock, and at least one empty auxiliary slot. Their front covers are deliberately
+	// not consulted, since a settled front is the population the phase exists for.
+	ReleaseGroupsNeedingAuxArt(ctx context.Context, force bool, afterID int64, limit int, ids []int64) ([]model.EnrichTarget, error)
 	BooksNeedingEnrichment(ctx context.Context, force bool, afterID int64, limit int, ids []int64) ([]model.EnrichTarget, error)
 	// ItemsNeedingLyrics returns the next keyset page of tracks that carry no lyrics
 	// yet (and, unless force, have not already been looked up), each with the title,
@@ -52,10 +57,15 @@ type Store interface {
 	// CountEntitiesNeedingEnrichment mirrors the phases a run would execute: a nil
 	// scope counts everything, a scoped count covers only the scoped ids, and a
 	// phase the scoped run skips (an empty id list) contributes zero.
-	CountEntitiesNeedingEnrichment(ctx context.Context, force, includeAlbums, includeLyrics bool, scope *model.EnrichScope) (int, error)
+	CountEntitiesNeedingEnrichment(ctx context.Context, force, includeAlbums, includeAuxArt, includeLyrics bool, scope *model.EnrichScope) (int, error)
 
 	ApplyArtistEnrichment(ctx context.Context, in model.ArtistEnrichment) error
 	ApplyReleaseGroupEnrichment(ctx context.Context, in model.ReleaseGroupEnrichment) error
+	// ApplyReleaseGroupAuxArt fills a release group's empty auxiliary art roles
+	// (fill-when-empty, lock-respecting per role) and records the backfill marker
+	// whether or not anything was found, so a group no provider serves is not re-asked
+	// every run.
+	ApplyReleaseGroupAuxArt(ctx context.Context, in model.ReleaseGroupAuxArt) error
 	// ApplyAlbumReleaseMatch fills an album's release MBID when it has none, attaches
 	// that pressing's own cover when one came back, and records the marker either way
 	// (under the deciding tier's provider) so a no-match is not re-searched every run.
@@ -302,11 +312,18 @@ type Result struct {
 	BooksMatched          int
 	LyricsEnriched        int
 	LyricsMatched         int
+	// AuxArtEnriched and AuxArtMatched count release groups the auxiliary-art backfill
+	// phase walked, and the ones some provider answered for: entities, like every other
+	// Enriched/Matched pair here. They are not a finer reading of AuxArtFetched below,
+	// which counts images across every pass that gathers them, this one included. A run
+	// can report AuxArtEnriched=40 with AuxArtFetched=6.
+	AuxArtEnriched int
+	AuxArtMatched  int
 	// ArtFetched counts front covers gathered and handed to the store, not covers
 	// actually applied (the store's fill-when-empty and lock guards decide that);
-	// AuxArtFetched counts the non-front role images the same way. Counting true
-	// applications would need the Store apply methods to return reports, interface
-	// churn the tally is not worth.
+	// AuxArtFetched counts the non-front role images the same way, in whichever pass
+	// gathered them. Counting true applications would need the Store apply methods to
+	// return reports, interface churn the tally is not worth.
 	ArtFetched    int
 	AuxArtFetched int
 
@@ -322,8 +339,12 @@ type Result struct {
 	TagsSkipped       int
 }
 
+// total counts the entities a run has processed, one term per phase. Every phase that
+// can run must appear, since this is both the --limit tally and the heartbeat's
+// numerator against CountEntitiesNeedingEnrichment.
 func (r *Result) total() int {
-	return r.ArtistsEnriched + r.ReleaseGroupsEnriched + r.AlbumsSearched + r.BooksEnriched + r.LyricsEnriched
+	return r.ArtistsEnriched + r.ReleaseGroupsEnriched + r.AlbumsSearched +
+		r.AuxArtEnriched + r.BooksEnriched + r.LyricsEnriched
 }
 
 // Heartbeat reports progress; it may be nil.
@@ -358,11 +379,12 @@ func (s *Service) Run(ctx context.Context, opts RunOptions, hb Heartbeat) (*Resu
 	// counting queries entirely when there is no heartbeat.
 	var total int
 	if hb != nil {
-		// The two flags and the scope must match the phase list below, which adds the
-		// album phase only when the toggle is on, adds the lyrics phase only when a
-		// lyrics-capable provider is registered, and skips a phase the scope leaves
+		// The three flags and the scope must match the phase list below, which adds the
+		// album phase only when the toggle is on, adds the aux-art and lyrics phases only
+		// when a capable provider is registered, and skips a phase the scope leaves
 		// empty, so the denominator counts exactly the work that will run.
-		n, err := s.store.CountEntitiesNeedingEnrichment(ctx, st.force, s.cfg.MatchReleases, s.hasCapability(CapLyrics), scope)
+		n, err := s.store.CountEntitiesNeedingEnrichment(ctx, st.force, s.cfg.MatchReleases,
+			s.hasCapability(CapAuxArt), s.hasCapability(CapLyrics), scope)
 		if err != nil {
 			return res, err
 		}
@@ -431,6 +453,30 @@ func (s *Service) Run(ctx context.Context, opts RunOptions, hb Heartbeat) (*Resu
 			},
 			enrich: func(ctx context.Context, t model.EnrichTarget) (bool, error) {
 				return s.enrichAlbumRelease(ctx, st, res, t)
+			},
+		})
+	}
+	// The auxiliary-art backfill: release groups whose front is settled but whose back,
+	// disc, booklet, or background slots are empty. Neither pass above ever re-asks
+	// about those, because both pre-guard on the front. It runs only when some provider
+	// advertises CapAuxArt, which the built-in Cover Art Archive does not, so a stock
+	// install walks nothing and writes no markers.
+	//
+	// Coming after the release-group phase is load-bearing for the same reason the album
+	// phase above is: its queue requires a non-empty release_group.mbid, read live, and
+	// that phase is what fills it. Ahead of it, a freshly-enriched group would wait a
+	// whole pass to be asked about its empty slots.
+	//
+	// Sitting after "album release" and therefore before the book and lyrics phases is
+	// not: it keeps the art-fetching phases together and nothing else depends on it.
+	if s.hasCapability(CapAuxArt) && phaseRuns(rgIDs) {
+		phases = append(phases, phase{
+			label: "aux art", enriched: &res.AuxArtEnriched, matched: &res.AuxArtMatched,
+			fetch: func(ctx context.Context, after int64, lim int) ([]model.EnrichTarget, error) {
+				return s.store.ReleaseGroupsNeedingAuxArt(ctx, st.force, after, lim, rgIDs)
+			},
+			enrich: func(ctx context.Context, t model.EnrichTarget) (bool, error) {
+				return s.enrichAuxArt(ctx, st, res, t)
 			},
 		})
 	}
@@ -721,9 +767,11 @@ func (s *Service) enrichAlbumRelease(ctx context.Context, st *runState, res *Res
 		// first time WaxBin knows which edition it actually holds. An album that already
 		// resolves art keeps it (the store fills only when empty), so asking a provider
 		// for one would spend a rate-limited request on a picture nothing would store.
-		// The aux roles ride this front-keyed gate too: an album whose front is
-		// settled (an embedded cover included) is never asked for its empty aux
-		// slots, the deferral DEFERRED.md records under gatherArt.
+		// The aux roles ride this front-keyed gate too, so an album whose front is
+		// settled (an embedded cover included) is not asked here about its empty aux
+		// slots. Re-asking is the aux backfill phase's job, and that phase walks
+		// release groups only: an album matched while it already resolved a front
+		// keeps its own aux slots empty until someone fills them by hand.
 		if !t.HasArt {
 			art := s.gatherArt(ctx, st, Request{
 				Type: TargetRelease, Force: st.force, MBID: m.MBID,
@@ -741,6 +789,82 @@ func (s *Service) enrichAlbumRelease(ctx context.Context, st *runState, res *Res
 	}
 	res.AuxArtFetched += len(in.AuxArt)
 	return in.Matched, nil
+}
+
+// enrichAuxArt backfills one release group's empty auxiliary art slots from the
+// providers advertising CapAuxArt. It resolves no identity of its own: the queue hands
+// it a group that already carries an MBID, which is what a provider keys on, so this is
+// a gather and an apply with no MusicBrainz round trip between them.
+//
+// A run that gathered nothing still applies, because the marker is what stops the group
+// being asked again next run. The store decides what actually lands: the queue's
+// vacancy test is approximate, and a per-role lock is re-checked there.
+func (s *Service) enrichAuxArt(ctx context.Context, st *runState, res *Result, t model.EnrichTarget) (bool, error) {
+	in := model.ReleaseGroupAuxArt{ReleaseGroupID: t.ID, PID: t.PID}
+	aux, provider := s.gatherAuxArt(ctx, st, Request{
+		Type: TargetReleaseGroup, Force: st.force,
+		Title: t.Name, Artist: t.ArtistName, MBID: t.MBID,
+	})
+	if len(aux) > 0 {
+		in.Matched, in.AuxArt, in.Provider = true, aux, provider
+	}
+	if err := s.store.ApplyReleaseGroupAuxArt(ctx, in); err != nil {
+		return false, err
+	}
+	res.AuxArtFetched += len(in.AuxArt)
+	return in.Matched, nil
+}
+
+// gatherAuxArt returns the first offered image per auxiliary role, plus the name of the
+// first provider to contribute one (the marker records that provider).
+//
+// It deliberately consults a different provider set from gatherArt, which is the whole
+// reason CapAuxArt exists as its own bit: that pass asks every cover provider and stops
+// at the front winner, so its auxiliary coverage is whatever the winner happened to
+// carry, while this one asks only the providers that claim the non-front roles and
+// keeps going, since there is no front to stop at. A provider serving auxiliary roles
+// under CapCover alone therefore contributes to the first-pass gather and nothing here.
+//
+// The front role is dropped. The release-group pass owns that slot, and a group is
+// queued here precisely because its front is settled, so offering one would put a
+// second writer on a decided question. Every accepted image is stamped with the
+// supplying provider, as in gatherArt. It is best-effort: a provider error is skipped.
+//
+// The loop does stop once every auxiliary role is held, which is gatherArt's stop at
+// the front winner applied to a full set: a provider consulted past that point can only
+// have its images dropped, after downloading them.
+func (s *Service) gatherAuxArt(ctx context.Context, st *runState, req Request) (map[model.ArtRole]*model.ArtImage, string) {
+	req.Want = CapAuxArt
+	need := len(model.AuxArtRoles())
+	var out map[model.ArtRole]*model.ArtImage
+	var provider string
+	for _, p := range s.providers {
+		if !p.Capabilities().Has(CapAuxArt) {
+			continue
+		}
+		cand, err := s.callProvider(ctx, p, req)
+		if err != nil || cand == nil {
+			continue
+		}
+		for role, img := range cand.Art {
+			if role == model.ArtRoleFront || !role.Valid() || img == nil || len(img.Data) == 0 {
+				continue
+			}
+			if out[role] != nil {
+				continue
+			}
+			img.Source, img.Provider = model.SourceEnrichment, p.Name()
+			if out == nil {
+				out = make(map[model.ArtRole]*model.ArtImage, len(cand.Art))
+				provider = p.Name()
+			}
+			out[role] = img
+		}
+		if len(out) == need {
+			break
+		}
+	}
+	return out, provider
 }
 
 // albumMatch is what one album's tier ladder decided. Edition separates the descriptive
@@ -939,8 +1063,14 @@ func (s *Service) gatherGenres(ctx context.Context, st *runState, rg *mbReleaseG
 }
 
 // gatherArt returns the first offered image per art role from the cover providers, in
-// priority order (injected first, then the Cover Art Archive; CapCover covers all art
-// roles). req names the rung: a release group, or the specific release an album was
+// priority order (injected first, then the Cover Art Archive). It asks under CapCover
+// and takes every role a cover provider offers, auxiliary ones included, so a provider
+// that has always served them under that one capability keeps working unchanged. What
+// CapCover does not do any more is speak for the auxiliary backfill: that pass consults
+// CapAuxArt providers alone, so a provider serving auxiliary roles here and not
+// advertising CapAuxArt contributes to this gather and nothing to the backfill.
+//
+// req names the rung: a release group, or the specific release an album was
 // matched to. Routing both through the provider list rather than reaching for the
 // built-in CAA directly is what lets an embedder's cover provider serve either one,
 // and keeps the documented priority order intact. It is best-effort: a provider error

@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"database/sql"
 	"testing"
 	"time"
 
@@ -70,6 +71,48 @@ func TestGCOrphans(t *testing.T) {
 	if n := scalarInt(t, st, "SELECT COUNT(*) FROM orphan_candidate"); n != 0 {
 		t.Errorf("orphan_candidate rows after sweep = %d, want 0", n)
 	}
+}
+
+// TestOrphanRGSweepDropsAuxMarker: the aux-art backfill marker is keyed by the release
+// group's id under its own entity_type, so the sweep's delete (which keys on the
+// entity's own type) misses it. Release-group rowids are reused, and a marker left
+// behind would silently suppress the backfill for whatever new group inherits the id.
+func TestOrphanRGSweepDropsAuxMarker(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	r := putTrack(t, st, lib.ID, trackSpec{
+		path: "/lib/Band/Album/01.flac", essence: "e1", content: "c1", title: "One",
+		artist: "Band", album: "Album",
+	})
+	var rgID int64
+	var rgPID string
+	if err := st.read.QueryRowContext(ctx, "SELECT id, pid FROM release_group").Scan(&rgID, &rgPID); err != nil {
+		t.Fatalf("resolve release group: %v", err)
+	}
+	if err := st.ApplyReleaseGroupAuxArt(ctx,
+		model.ReleaseGroupAuxArt{ReleaseGroupID: rgID, PID: model.PID(rgPID)}); err != nil {
+		t.Fatalf("mark: %v", err)
+	}
+
+	// Through the cascade helper, as the real prune path does: a raw DELETE strands the
+	// item's FTS row and the verify below would fail for an unrelated reason.
+	itemID := int64(scalarInt(t, st, "SELECT id FROM playable_item WHERE pid = ?", string(r.ItemPID)))
+	if err := st.writeTx(ctx, func(tx *sql.Tx) error {
+		_, err := deleteItemCascade(ctx, tx, itemID)
+		return err
+	}); err != nil {
+		t.Fatalf("delete item: %v", err)
+	}
+	if _, err := st.GCOrphans(ctx, 0); err != nil {
+		t.Fatalf("gc: %v", err)
+	}
+	if n := scalarInt(t, st, "SELECT COUNT(*) FROM release_group"); n != 0 {
+		t.Fatalf("release groups after sweep = %d, want 0", n)
+	}
+	if n := scalarInt(t, st, "SELECT COUNT(*) FROM entity_enrichment WHERE entity_type='aux_art'"); n != 0 {
+		t.Errorf("aux_art marker rows after sweep = %d, want 0", n)
+	}
+	assertVerifyClean(t, st)
 }
 
 // TestGCOrphansEmitsDeltas confirms a swept entity emits a change_log delete.

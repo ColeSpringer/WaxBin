@@ -307,6 +307,14 @@ func TestPutScannedTrackRelinksOnMove(t *testing.T) {
 	if r2.FilePID != r1.FilePID {
 		t.Fatalf("re-link should preserve file pid: %s -> %s", r1.FilePID, r2.FilePID)
 	}
+	// The path the row held before the relink. The scanner drops its index entry under
+	// that path, which is otherwise read as a vanished file at end-of-walk.
+	if r2.RelinkedFrom != "/lib/old.mp3" {
+		t.Errorf("RelinkedFrom = %q, want the old path", r2.RelinkedFrom)
+	}
+	if r1.RelinkedFrom != "" {
+		t.Errorf("RelinkedFrom on the first put = %q, want empty", r1.RelinkedFrom)
+	}
 
 	if _, err := st.FileByPath(ctx, []byte("/lib/new.mp3")); err != nil {
 		t.Fatalf("new path should resolve: %v", err)
@@ -314,6 +322,7 @@ func TestPutScannedTrackRelinksOnMove(t *testing.T) {
 	if _, err := st.FileByPath(ctx, []byte("/lib/old.mp3")); err == nil {
 		t.Fatal("old path should no longer resolve after re-link")
 	}
+	assertStoreVerifyClean(t, st)
 }
 
 func TestLeaseExclusion(t *testing.T) {

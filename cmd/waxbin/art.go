@@ -188,20 +188,18 @@ func artViewFromBlob(b *model.ArtBlob) map[string]any {
 	}, b.Thumbnail, b.Box)
 }
 
-// printArtJSON adds the requested entity's own front-cover lock to an art view and
-// prints it. locked is that entity's lock, not the lock of whatever chain level
-// answered: an album cover derived from a member track says nothing about the album's
-// lock. It is absent on a non-front role, which has no lock at all rather than an
-// unlocked one.
+// printArtJSON adds the requested entity's own lock in the requested role to an art
+// view and prints it. locked is that entity's lock, not the lock of whatever chain
+// level answered: an album cover derived from a member track says nothing about the
+// album's lock. A non-front role reads as locked under its own "art.<role>" lock or
+// under the entity's whole front-cover lock, which is what `art roles` prints too.
 func printArtJSON(cmd *cobra.Command, lib *waxbin.Library, et model.ArtEntity, pid model.PID,
 	r model.ArtRole, view map[string]any) error {
-	if r == model.ArtRoleFront {
-		locked, err := lib.ArtLocked(ctx(cmd), et, pid)
-		if err != nil {
-			return err
-		}
-		view["locked"] = locked
+	locked, err := lib.ArtLocked(ctx(cmd), et, pid, r)
+	if err != nil {
+		return err
 	}
+	view["locked"] = locked
 	return printJSON(cmd, view)
 }
 
@@ -218,9 +216,11 @@ func newArtRolesCmd(g *globals) *cobra.Command {
 		Short: "List the artwork slots an entity holds",
 		Long: "Lists the artwork an entity holds at its own level, with none of the album/" +
 			"artist fallback `art` follows: each stored role with its format, size, and where " +
-			"the picture came from, plus whether the front cover is locked. A front row with no " +
-			"image is a lock with nothing attached, the state that refuses every later `art " +
-			"set`; `art unlock` releases it.",
+			"the picture came from, plus whether that role is locked. A row with no image is a " +
+			"lock with nothing attached, the state that refuses every later `art set` in that " +
+			"role and holds the slot empty against enrichment; `art unlock` releases it. A " +
+			"role reads as locked under its own lock or under the entity's whole front-cover " +
+			"lock, which gates enrichment in every role.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			et, err := parseArtEntity("art roles", entType)
@@ -272,48 +272,66 @@ func newArtRolesCmd(g *globals) *cobra.Command {
 }
 
 // explainMissingArt turns a bare not-found from ResolveArt into the diagnosis when the
-// entity's front cover is locked with nothing attached. That state is invisible
-// otherwise, and it refuses every later `art set`, so the error names it and the way
-// out. It does not claim the cover was cleared: `lock <pid> art` on a coverless item
-// reaches the same state without one. Any other failure, and any non-front role (which
-// has no lock), passes straight through.
+// requested slot is locked with nothing attached. That state is invisible otherwise,
+// and it holds the slot empty against every automatic fill, so the error names it and
+// the way out. The lock it reads is the effective one, so an auxiliary slot held open by
+// the entity's whole front-cover lock is diagnosed too; the two are not distinguishable
+// from here, so a non-front role gets both commands, each runnable as printed rather than
+// one command with a caveat glued into it. It does not claim the image was
+// cleared: `lock <pid> art` on a coverless item reaches the same state without one. Any
+// other failure passes straight through.
 func explainMissingArt(cmd *cobra.Command, lib *waxbin.Library, et model.ArtEntity, pid model.PID, r model.ArtRole, err error) error {
-	if !waxerr.Is(err, waxerr.CodeNotFound) || r != model.ArtRoleFront {
+	if !waxerr.Is(err, waxerr.CodeNotFound) {
 		return err
 	}
-	locked, lockErr := lib.ArtLocked(ctx(cmd), et, pid)
+	locked, lockErr := lib.ArtLocked(ctx(cmd), et, pid, r)
 	if lockErr != nil || !locked {
 		return err
 	}
+	unlock := fmt.Sprintf("waxbin art unlock %s --type %s", pid, et)
+	hint := "(" + unlock + ")"
+	if r != model.ArtRoleFront {
+		// Either lock can be the one holding the slot and this side cannot tell them
+		// apart, so both commands are offered whole rather than described.
+		hint = fmt.Sprintf("(%s --role %s)\nor, if the entity's whole art lock is the one standing:\n(%s)",
+			unlock, r, unlock)
+	}
 	return waxerr.New(waxerr.CodeNotFound, "art", fmt.Sprintf(
-		"no front art for %s %s: the front cover is locked with nothing attached\n(waxbin art unlock %s --type %s)",
-		et, pid, pid, et))
+		"no %s art for %s %s: the %s slot is locked with nothing attached\n%s",
+		r, et, pid, r, hint))
 }
 
 // newArtLockCmd builds `art lock` or `art unlock`, the lock-only mutation `art set`
-// cannot express (that one always writes the cover slot too).
+// cannot express (that one always writes the image slot too).
 func newArtLockCmd(g *globals, lock bool) *cobra.Command {
-	var entType string
+	var entType, role string
 	verb, past := "lock", "locked"
 	if !lock {
 		verb, past = "unlock", "unlocked"
 	}
 	cmd := &cobra.Command{
 		Use:   verb + " <pid>",
-		Short: strings.ToUpper(verb[:1]) + verb[1:] + " an entity's front cover against automatic writers",
-		Long: "Sets or clears the front-cover lock on a track/book item, or on an album/artist/" +
-			"release_group/genre/podcast/playlist entity (--type), without touching the cover " +
+		Short: strings.ToUpper(verb[:1]) + verb[1:] + " an entity's artwork against automatic writers",
+		Long: "Sets or clears an artwork lock on a track/book item, or on an album/artist/" +
+			"release_group/genre/podcast/playlist entity (--type), without touching the image " +
 			"itself. A locked cover survives a scan's re-derive, an enrichment pass, and a " +
 			"podcast feed's next image change, and refuses `art set` without --force. Unlocking " +
-			"is the way out of a cover cleared with `art set --clear`, which locks by default " +
-			"and would otherwise leave every later set refused. Only the front cover has a " +
-			"lock of its own, but on a shared entity it also stops enrichment from filling " +
-			"the other roles. " +
+			"is the way out of a slot cleared with `art set --clear`, which locks by default " +
+			"and would otherwise leave every later set refused.\n\n" +
+			"With no --role this is the front cover, whose lock is the entity's own and also " +
+			"stops enrichment filling the auxiliary roles. --role back|disc|booklet|background " +
+			"locks that one slot instead, leaving the front open to enrichment; `--role front` " +
+			"is refused, since the front has no lock separate from the entity's. " +
 			"On the default --type track this writes the same lock `waxbin " + verb + " <pid> art` " +
-			"does, because an item's art lock has one home; the overlap is deliberate.",
+			"does (or `art.<role>` with --role), because an item's art lock has one home; the " +
+			"overlap is deliberate.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			et, err := parseArtEntity("art "+verb, entType)
+			if err != nil {
+				return err
+			}
+			r, err := parseArtLockRole(verb, role)
 			if err != nil {
 				return err
 			}
@@ -324,15 +342,34 @@ func newArtLockCmd(g *globals, lock bool) *cobra.Command {
 			defer m.Close()
 
 			pid := model.PID(args[0])
-			if err := m.SetArtLock(ctx(cmd), et, pid, lock); err != nil {
+			if err := m.SetArtLock(ctx(cmd), et, pid, r, lock); err != nil {
 				return err
 			}
-			fmt.Fprintf(out(cmd), "%s %s front art for %s\n", past, et, pid)
+			fmt.Fprintf(out(cmd), "%s %s %s art for %s\n", past, et, r, pid)
 			return nil
 		},
 	}
 	cmd.Flags().StringVar(&entType, "type", "track", "entity type: "+artTypeList)
+	cmd.Flags().StringVar(&role, "role", "", "auxiliary role to "+verb+" alone: back|disc|booklet|background (default the front cover)")
 	return cmd
+}
+
+// parseArtLockRole parses the --role flag on `art lock`/`art unlock`, where verb is the
+// command's own word. An empty flag is the front cover, whose lock is the entity's
+// plain "art" field; an explicit "front" is refused rather than aliased, so nobody
+// reads it as a lock the front holds separately from the entity.
+func parseArtLockRole(verb, role string) (model.ArtRole, error) {
+	op := "art " + verb
+	if role == string(model.ArtRoleFront) {
+		return "", waxerr.New(waxerr.CodeInvalid, op,
+			"the front cover's lock is the entity's own: drop --role to "+verb+" it")
+	}
+	r, ok := model.ParseArtRole(role)
+	if !ok {
+		return "", waxerr.New(waxerr.CodeInvalid, op,
+			fmt.Sprintf("unknown --role %q; valid: back|disc|booklet|background", role))
+	}
+	return r, nil
 }
 
 func newArtSetCmd(g *globals) *cobra.Command {
@@ -356,14 +393,13 @@ func newArtSetCmd(g *globals) *cobra.Command {
 		Long: "Sets artwork for a track/book item, or for an album/artist/release_group/genre/" +
 			"podcast/playlist entity (--type), in one role (--role; front is the default, and " +
 			"back|disc|booklet|background hold a release's auxiliary images). The image bytes come " +
-			"from --file; --clear removes only the named role. A front cover locks the art " +
-			"field by default so a scan, an enrichment pass, or a feed sync does not replace " +
-			"it; the other roles take no lock of their own, and on an album or release group " +
-			"an enrichment pass may fill an empty one, so a cleared auxiliary role can be " +
-			"refilled by the next pass unless the entity's art lock stands (which also stops " +
-			"enrichment front fills). The front lock " +
-			"outlives the cover, so a cleared front cover keeps refusing later sets until " +
-			"`art unlock` releases it (--force overrides one set without releasing it). " +
+			"from --file; --clear removes only the named role. Every role locks by default so " +
+			"a scan, an enrichment pass, or a feed sync does not replace what you set: the " +
+			"front cover locks the entity's \"art\" field, which also stops enrichment filling " +
+			"the auxiliary roles, and an auxiliary role locks its own \"art.<role>\" field, " +
+			"leaving the front open. A lock outlives its image, so a cleared and locked slot " +
+			"keeps refusing later sets in that role until `art unlock` releases it (--force " +
+			"overrides one set without releasing it). " +
 			"--write-back also embeds a front cover into the backing file(s): a track into its " +
 			"file, a book into every part, an album across every member track's file. Only the " +
 			"front cover has an embedded representation, so --write-back with another role is " +
@@ -426,13 +462,11 @@ func newArtSetCmd(g *globals) *cobra.Command {
 				return err
 			}
 			if clear {
-				// Naming the lock is the point: a cleared front cover is locked by
-				// default, which is what refuses every later set, and nothing else
-				// reports it. The other roles take no lock, so they get no annotation.
+				// Naming the lock is the point: a cleared slot is locked by default,
+				// which is what refuses every later set in that role and holds it empty
+				// against enrichment, and nothing else reports it.
 				lockNote := " (locked)"
 				switch {
-				case r != model.ArtRoleFront:
-					lockNote = ""
 				case keepLock:
 					lockNote = " (lock unchanged)"
 				case noLock:
@@ -451,10 +485,10 @@ func newArtSetCmd(g *globals) *cobra.Command {
 	f.StringVar(&filePath, "file", "", "image file to set as this role's artwork")
 	f.BoolVar(&clear, "clear", false, "remove this role's artwork instead of setting it")
 	f.BoolVar(&noLock, "no-lock", false,
-		"unlock the art field (a front cover defaults to locked; an unlocked one may be replaced by a scan, an enrichment pass, or the next feed sync)")
-	f.BoolVar(&keepLock, "keep-lock", false, keepLockUsage("the art field"))
+		"unlock this role's art field (a set defaults to locked; an unlocked slot may be replaced by a scan, an enrichment pass, or the next feed sync)")
+	f.BoolVar(&keepLock, "keep-lock", false, keepLockUsage("this role's art field"))
 	cmd.MarkFlagsMutuallyExclusive("no-lock", "keep-lock")
-	f.BoolVar(&force, "force", false, "override a locked art field for this one write")
+	f.BoolVar(&force, "force", false, "override this role's art lock for this one write")
 	f.BoolVar(&writeBack, "write-back", false, "also embed a front cover into the backing file(s) on disk")
 	f.StringVar(&source, "source", "", "where the image came from: "+artSourceList+" (default user)")
 	f.StringVar(&provider, "provider", "", "service that supplied the image, with --source enrichment")

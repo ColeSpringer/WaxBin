@@ -73,9 +73,11 @@ type EnrichTarget struct {
 	// only when it does not, so a library whose rips carry embedded art spends no
 	// rate-limited requests on covers the store would refuse to fill anyway.
 	HasArt bool
-	// ArtLocked reports whether the entity's cover is locked. It serves the release-group
-	// pass what HasArt serves the album pass: the store refuses the write, so fetching
-	// first would spend a rate-limited request on every locked cover, every forced run.
+	// ArtLocked reports whether the entity's whole "art" lock stands, the one that gates
+	// the front cover and every auxiliary role alike. It serves the release-group pass
+	// what HasArt serves the album pass: the store refuses the write, so fetching first
+	// would spend a rate-limited request on every locked cover, every forced run. A
+	// per-role lock is not a reason to skip the fetch, so it is checked at apply instead.
 	ArtLocked bool
 }
 
@@ -126,6 +128,26 @@ type ReleaseGroupEnrichment struct {
 	// skipped entirely under the entity's art lock.
 	Art    *ArtImage
 	AuxArt map[ArtRole]*ArtImage
+}
+
+// ReleaseGroupAuxArt is the auxiliary-role backfill for one release group: the
+// images an aux-capable provider offered for the roles beside the front. It is
+// separate from ReleaseGroupEnrichment because the two passes ask different
+// questions. That one resolves identity and fetches art on the way past, keyed on
+// the front; this one asks only about the empty aux slots of a group whose front is
+// already settled, which is the case the front-keyed pre-guards can never reach.
+//
+// Matched=false records a completed lookup nothing answered, so the group is not
+// re-asked every run. Provider names who supplied the first image, and the marker
+// carries it; the store substitutes its own label when there is none, since the
+// column is NOT NULL. AuxArt never carries the front role: the release-group pass
+// owns that slot.
+type ReleaseGroupAuxArt struct {
+	ReleaseGroupID int64
+	PID            PID
+	Matched        bool
+	Provider       string
+	AuxArt         map[ArtRole]*ArtImage
 }
 
 // LyricsEnrichment is the resolved lyrics for one recording (track). Lyrics are

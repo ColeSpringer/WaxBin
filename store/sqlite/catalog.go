@@ -371,6 +371,7 @@ func (s *Store) resolveFile(ctx context.Context, tx *sql.Tx, in model.PutScanned
 		}
 		if relink != nil && !pathExists(relink.Path) {
 			res.Relinked = true
+			res.RelinkedFrom = string(relink.Path)
 			res.ContentChanged = relink.ContentHash != in.File.ContentHash
 			if err := updateFileRow(ctx, tx, relink.ID, in.File, now); err != nil {
 				return 0, "", "", err

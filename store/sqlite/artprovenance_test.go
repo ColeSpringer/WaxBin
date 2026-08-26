@@ -535,9 +535,12 @@ func TestLockedShowCoverSurvivesFeedSync(t *testing.T) {
 	}
 }
 
-// TestArtLockIsFrontRoleOnly: the lock flag applies to the front cover alone, so a
-// non-front set records nothing and refuses nothing.
-func TestArtLockIsFrontRoleOnly(t *testing.T) {
+// TestArtLockPerRole: an auxiliary role carries a lock of its own under the
+// namespaced art.<role> field, so a locked back cover refuses the next back set the
+// way a locked front refuses the next front one. The front role is unchanged: its
+// lock is the plain "art" field, which is also the whole-entity enrichment gate, and
+// that gate deliberately does not refuse a user's aux set.
+func TestArtLockPerRole(t *testing.T) {
 	ctx := context.Background()
 	st, dbPath, lib := openStoreAt(t)
 	putCoveredTrack(t, st, lib.ID, "/lib/a.flac", "ess-a", "One", "A",
@@ -546,19 +549,49 @@ func TestArtLockIsFrontRoleOnly(t *testing.T) {
 	albumPID := model.PID(scalarQueryStr(t, db, "SELECT pid FROM album WHERE title = 'A'"))
 	albumID := scalarInt64(t, db, "SELECT id FROM album WHERE title = 'A'")
 
-	// A back cover asking to be locked records no lock at all.
+	// A back cover asking to be locked records the back role's own row, and nothing
+	// under the plain "art" field the front lock lives in.
 	if err := st.SetEntityArt(ctx, model.ArtAlbum, albumPID, model.ArtRoleBack, coverPNG(t, 32), "", model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
 		t.Fatalf("set back: %v", err)
 	}
 	if n := scalarInt64(t, db,
+		"SELECT COUNT(*) FROM entity_curation WHERE entity_type='album' AND entity_id=? AND field='art.back' AND locked=1",
+		albumID); n != 1 {
+		t.Fatalf("a locked back set recorded %d art.back rows, want 1", n)
+	}
+	if n := scalarInt64(t, db,
 		"SELECT COUNT(*) FROM entity_curation WHERE entity_type='album' AND entity_id=? AND field='art'",
 		albumID); n != 0 {
-		t.Fatalf("a back-role set recorded %d art lock rows, want 0", n)
+		t.Fatalf("a back-role set wrote %d plain art rows, want 0", n)
 	}
-	// Which is why a second back set is not refused, where a front one would be.
-	if err := st.SetEntityArt(ctx, model.ArtAlbum, albumPID, model.ArtRoleBack, coverPNG(t, 33), "", model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
-		t.Errorf("a second back set was refused, so the front-only scope leaked: %v", err)
+	// Which is why a second back set is refused, where before the flag was dropped.
+	if err := st.SetEntityArt(ctx, model.ArtAlbum, albumPID, model.ArtRoleBack, coverPNG(t, 33), "", model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); !waxerr.Is(err, waxerr.CodeLocked) {
+		t.Errorf("second back set = %v, want CodeLocked", err)
 	}
+	// force overrides that one write without releasing the lock.
+	if err := st.SetEntityArt(ctx, model.ArtAlbum, albumPID, model.ArtRoleBack, coverPNG(t, 33), "", model.Attribution{Source: model.SourceUser}, model.LockUnchanged, true); err != nil {
+		t.Fatalf("forced back set: %v", err)
+	}
+	if n := scalarInt64(t, db,
+		"SELECT COUNT(*) FROM entity_curation WHERE entity_type='album' AND entity_id=? AND field='art.back' AND locked=1",
+		albumID); n != 1 {
+		t.Fatalf("a forced set left %d locked art.back rows, want the lock standing", n)
+	}
+	// A disc set with no lock intent records nothing, so the vocabulary stays sparse.
+	if err := st.SetEntityArt(ctx, model.ArtAlbum, albumPID, model.ArtRoleDisc, coverPNG(t, 35), "", model.Attribution{Source: model.SourceUser}, model.LockUnchanged, false); err != nil {
+		t.Fatalf("set disc: %v", err)
+	}
+	if n := scalarInt64(t, db,
+		"SELECT COUNT(*) FROM entity_curation WHERE entity_type='album' AND entity_id=? AND field='art.disc'",
+		albumID); n != 0 {
+		t.Errorf("an unlocked disc set recorded %d art.disc rows, want 0", n)
+	}
+
+	// Each role's lock is its own, so the unlocked disc reads unlocked beside the
+	// locked back.
+	assertRoleLocks(t, st, albumPID, map[model.ArtRole]bool{
+		model.ArtRoleBack: true, model.ArtRoleDisc: false,
+	})
 
 	if err := st.SetEntityArt(ctx, model.ArtAlbum, albumPID, model.ArtRoleFront, coverPNG(t, 31), "", model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
 		t.Fatalf("set front: %v", err)
@@ -566,16 +599,43 @@ func TestArtLockIsFrontRoleOnly(t *testing.T) {
 	if err := st.SetEntityArt(ctx, model.ArtAlbum, albumPID, model.ArtRoleFront, coverPNG(t, 34), "", model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); !waxerr.Is(err, waxerr.CodeLocked) {
 		t.Errorf("second front set = %v, want CodeLocked", err)
 	}
-	roles, err := st.ArtRoles(ctx, model.EntityRef{Type: model.ArtAlbum, PID: albumPID})
+	// The whole-entity lock gates the automatic writers, not the user's own hand: a
+	// disc set under a locked front still lands, as it always has.
+	if err := st.SetEntityArt(ctx, model.ArtAlbum, albumPID, model.ArtRoleDisc, coverPNG(t, 36), "", model.Attribution{Source: model.SourceUser}, model.LockUnchanged, false); err != nil {
+		t.Errorf("disc set under a locked front = %v, want it to land", err)
+	}
+	// But the whole lock is what enrichment answers to in every role, so the disc now
+	// reads locked even though it holds no lock of its own.
+	assertRoleLocks(t, st, albumPID, map[model.ArtRole]bool{
+		model.ArtRoleBack: true, model.ArtRoleDisc: true, model.ArtRoleFront: true,
+	})
+
+	rep, err := st.VerifyDerived(ctx)
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if !rep.Consistent() {
+		t.Fatalf("db verify not clean: %+v", rep)
+	}
+}
+
+// assertRoleLocks checks ArtRoles' effective lock per role against want, which must
+// name every role the album holds.
+func assertRoleLocks(t *testing.T, st *sqlite.Store, albumPID model.PID, want map[model.ArtRole]bool) {
+	t.Helper()
+	roles, err := st.ArtRoles(context.Background(), model.EntityRef{Type: model.ArtAlbum, PID: albumPID})
 	if err != nil {
 		t.Fatalf("ArtRoles: %v", err)
 	}
-	if len(roles) != 2 {
-		t.Fatalf("roles = %d, want 2", len(roles))
+	if len(roles) != len(want) {
+		t.Fatalf("roles = %+v, want %d entries", roles, len(want))
 	}
 	for _, r := range roles {
-		if r.Role == model.ArtRoleFront && (!r.Locked || r.Source != model.SourceUser) {
-			t.Errorf("front role = locked %v source %q, want locked user", r.Locked, r.Source)
+		if r.Locked != want[r.Role] {
+			t.Errorf("%s role locked = %v, want %v", r.Role, r.Locked, want[r.Role])
+		}
+		if r.Locked && r.Source != model.SourceUser {
+			t.Errorf("%s role source = %q, want user", r.Role, r.Source)
 		}
 	}
 }

@@ -155,11 +155,17 @@ type VirtualTrack struct {
 // ScanItemResult reports what the store did for a PutScannedTrack call, enough
 // for the scanner to log and for tests to assert identity behavior.
 type ScanItemResult struct {
-	FilePID        PID
-	ItemPID        PID
-	ItemCreated    bool // a new logical item was created
-	FileCreated    bool // a new file row was created
-	Relinked       bool // an existing file (matched by essence) moved to a new path
+	FilePID     PID
+	ItemPID     PID
+	ItemCreated bool // a new logical item was created
+	FileCreated bool // a new file row was created
+	Relinked    bool // an existing file (matched by essence) moved to a new path
+	// RelinkedFrom is the path the file row held before an essence relink, empty
+	// otherwise. The scanner needs it to drop that path's preloaded index entry, which
+	// end-of-walk reconciliation would otherwise read as a vanished file. Every store
+	// path that reports Relinked has to set it, tracks and books/virtual tracks alike,
+	// since the scanner has no other way back to the old path.
+	RelinkedFrom   string
 	ContentChanged bool // content_hash changed; if essence is stable this is a tag-only update
 	// SidecarsChanged reports that the write changed the item's lyrics or cover art
 	// without changing the audio bytes.

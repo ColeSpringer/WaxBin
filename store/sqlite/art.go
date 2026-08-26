@@ -333,7 +333,8 @@ func attachEntityArtTxChanged(ctx context.Context, tx *sql.Tx, entityType string
 // attachEntityArtUnlessLockedTx is attachEntityArtTx guarded by the entity's "art"
 // curation lock: the automatic entity-cover writers (a release-group enrichment, a
 // podcast feed sync) call it so a cover the user chose survives a forced re-run or an
-// image-URL change in the feed. A nil image is a no-op, and costs no lock lookup.
+// image-URL change in the feed. A nil image is a no-op, and costs no lock lookup. It
+// touches the front role, so artFillBlockedTx reads the plain "art" field alone.
 //
 // It is the last guard, not the first. A caller that would pay to produce the image
 // should check the lock before doing so: the podcast sync reads it off the show
@@ -343,62 +344,87 @@ func attachEntityArtTxChanged(ctx context.Context, tx *sql.Tx, entityType string
 // The lock, not the provenance, is what governs the write. Provenance stays purely
 // descriptive, so a future producer that legitimately stamps "user" cannot quietly
 // change who is allowed to overwrite what.
-func attachEntityArtUnlessLockedTx(ctx context.Context, tx *sql.Tx, entityType string, entityID int64, img *model.ArtImage) error {
+func attachEntityArtUnlessLockedTx(ctx context.Context, tx *sql.Tx, entityType model.ArtEntity, entityID int64, img *model.ArtImage) error {
 	if img == nil || len(img.Data) == 0 {
 		return nil
 	}
-	locked, err := entityFieldLockedTx(ctx, tx, entityType, entityID, "art")
+	locked, err := artFillBlockedTx(ctx, tx, entityType, entityID, model.ArtRoleFront)
 	if err != nil {
 		return err
 	}
 	if locked {
 		return nil
 	}
-	return attachEntityArtTx(ctx, tx, entityType, entityID, img)
+	return attachEntityArtTx(ctx, tx, string(entityType), entityID, img)
 }
 
 // fillEntityAuxArtTx applies enrichment's non-front role images to one entity,
 // fill-when-empty per (entity, role): an existing row in a role keeps, so a hand-set
-// aux image is never replaced. The one entity-level "art" lock guards every role
-// here, not the front alone: a locked entity means its art is curated, and skipping
-// everything is the reading that cannot surprise. Unlike fillAlbumArtTx there is no
-// derived rung to consult, since non-front roles resolve at their own level only.
-// Roles iterate in sorted order for determinism; the front role, an invalid role, and
-// a nil or empty image are skipped. The writes go through setEntityArtRoleTx, which
-// validates the attribution and stamps the provenance columns.
-func fillEntityAuxArtTx(ctx context.Context, tx *sql.Tx, entityType string, entityID int64, aux map[model.ArtRole]*model.ArtImage) error {
+// aux image is never replaced. Unlike fillAlbumArtTx there is no derived rung to
+// consult, since non-front roles resolve at their own level only. Roles iterate in
+// sorted order for determinism; the front role, an invalid role, and a nil or empty
+// image are skipped. The writes go through setEntityArtRoleTx, which validates the
+// attribution and stamps the provenance columns.
+//
+// Two locks gate each fill, which is the whole of the gate matrix on this side:
+//
+//	slot    written by   gate
+//	front   automatic    "art"
+//	role R  automatic    an empty slot, and neither "art" nor "art.R"
+//	front   user set     "art"
+//	role R  user set     "art.R" alone
+//
+// The whole-entity "art" lock still skips every role here: a locked entity means its
+// art is curated, and it is what a user with no interest in per-role bookkeeping
+// reaches for. A cleared slot's own "art.R" row is what closes the gap the whole lock
+// used to be the only answer to, since an empty slot otherwise reads as an invitation
+// to fill.
+//
+// It reports how many slots actually took an image. A caller whose whole reason to run
+// was the fill (the aux backfill pass) needs that to decide whether anything about the
+// entity changed; the callers that fill art on the way past something else ignore it.
+func fillEntityAuxArtTx(ctx context.Context, tx *sql.Tx, entityType model.ArtEntity, entityID int64, aux map[model.ArtRole]*model.ArtImage) (int, error) {
 	if len(aux) == 0 {
-		return nil
+		return 0, nil
 	}
-	locked, err := entityFieldLockedTx(ctx, tx, entityType, entityID, "art")
-	if err != nil || locked {
-		return err
+	whole, err := artLockTx(ctx, tx, entityType, entityID, "art")
+	if err != nil || whole.Locked {
+		return 0, err
 	}
 	roles := make([]string, 0, len(aux))
 	for role := range aux {
 		roles = append(roles, string(role))
 	}
 	sort.Strings(roles)
+	wrote := 0
 	for _, r := range roles {
 		role := model.ArtRole(r)
 		img := aux[role]
 		if role == model.ArtRoleFront || !role.Valid() || img == nil || len(img.Data) == 0 {
 			continue
 		}
+		locked, err := artRoleLockedTx(ctx, tx, entityType, entityID, role)
+		if err != nil {
+			return wrote, err
+		}
+		if locked {
+			continue
+		}
 		var n int
 		if err := tx.QueryRowContext(ctx,
 			"SELECT COUNT(*) FROM art_map WHERE entity_type=? AND entity_id=? AND role=?",
-			entityType, entityID, r).Scan(&n); err != nil {
-			return err
+			string(entityType), entityID, r).Scan(&n); err != nil {
+			return wrote, err
 		}
 		if n > 0 {
 			continue
 		}
-		if err := setEntityArtRoleTx(ctx, tx, entityType, entityID, r, img); err != nil {
-			return err
+		if err := setEntityArtRoleTx(ctx, tx, string(entityType), entityID, r, img); err != nil {
+			return wrote, err
 		}
+		wrote++
 	}
-	return nil
+	return wrote, nil
 }
 
 // refreshArtProvenanceTx re-attributes an existing mapping whose image is unchanged.
@@ -441,7 +467,7 @@ func fillAlbumArtTx(ctx context.Context, tx *sql.Tx, albumID int64, img *model.A
 	if resolves == 1 {
 		return nil
 	}
-	return attachEntityArtUnlessLockedTx(ctx, tx, string(model.ArtAlbum), albumID, img)
+	return attachEntityArtUnlessLockedTx(ctx, tx, model.ArtAlbum, albumID, img)
 }
 
 // clearAlbumArtTx drops an album's own front-cover row, returning it to whatever the
@@ -628,15 +654,22 @@ func (s *Store) artHitFor(ctx context.Context, ref model.EntityRef, role model.A
 //
 // A Locked entry with an empty SourceHash is a lock with no artifact behind it, so a
 // renderer must check SourceHash before trying to fetch bytes. That is what a cleared
-// and locked cover looks like, the state that stops a feed or an enrichment pass
-// refilling the slot, and reporting it is the whole point: it is otherwise invisible
-// and every later `art set` on the entity is refused. The lock is the base fact and
+// and locked slot looks like in any role, the state that stops a feed or an enrichment
+// pass refilling it, and reporting it is the whole point: it is otherwise invisible
+// and every later `art set` in that role is refused. The lock is the base fact and
 // the artifact is the overlay, the same inversion FieldProvenance makes on the item
-// side. So an entity with no art returns an empty list only when it is also unlocked.
+// side. So an entity with no art returns an empty list only when it is also unlocked
+// in every role.
+//
+// Locked is the effective lock: the whole-entity "art" lock, which is the front
+// cover's own and gates enrichment in every role, or the role's own "art.<role>".
+// That makes this the read a client uses to see which slots an enrichment pass may
+// still fill and which a user has pinned, for every art entity type.
 //
 // A nonexistent entity is an error, so a caller can still tell that apart from
 // "nothing stored". `waxbin art roles` is the CLI face of it. There is no proxy
-// surface, since a read never needs the write lock the socket exists to share.
+// surface, since a read never needs the write lock the socket exists to share; one
+// could be added without a protocol bump if a socket-only deployment ever needs it.
 func (s *Store) ArtRoles(ctx context.Context, ref model.EntityRef) ([]model.ArtRoleInfo, error) {
 	const op = "store.ArtRoles"
 	if !ref.Type.Valid() {
@@ -672,34 +705,90 @@ func (s *Store) ArtRoles(ctx context.Context, ref model.EntityRef) ([]model.ArtR
 	if err := rows.Err(); err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
-	// The "art" lock is reported on the front row alone, matching the item-side art
-	// lock, though on a shared entity it also gates enrichment's aux-role fills
-	// (fillEntityAuxArtTx). One extra read, taken unconditionally because a lock
-	// with no front row is exactly the state worth reporting. It reads whichever table
-	// governs this entity type, so a track cover locked by SetItemArt reports here too
-	// (artLockIsItemScoped).
-	lock, err := artLockTx(ctx, s.read, ref.Type, chain[0].id)
+	// The locks in one read, from whichever table governs this entity type, so a track
+	// cover locked by SetItemArt reports here too (artLockIsItemScoped). It is taken
+	// unconditionally because a lock with no image behind it is exactly the state worth
+	// reporting.
+	locks, err := s.artLockRows(ctx, ref.Type, chain[0].id, op)
+	if err != nil {
+		return nil, err
+	}
+	whole := locks["art"]
+	for i := range out {
+		out[i].Locked = whole.Locked || locks[artRoleLockField(out[i].Role)].Locked
+	}
+	// A lock with nothing attached. Synthesize the entry from the lock row alone,
+	// carrying its recorded source and timestamp rather than zero values, the way
+	// FieldProvenance does for a lock-only row. The whole-entity lock synthesizes a
+	// front entry, since that is the slot it belongs to; a role lock synthesizes its
+	// own.
+	stored := make(map[model.ArtRole]bool, len(out))
+	for i := range out {
+		stored[out[i].Role] = true
+	}
+	for field, lock := range locks {
+		if !lock.Locked {
+			continue
+		}
+		role := model.ArtRoleFront
+		if name, ok := model.CutArtRolePrefix(field); ok {
+			role = model.ArtRole(name)
+		}
+		if stored[role] || !role.Valid() {
+			continue
+		}
+		stored[role] = true
+		out = append(out, model.ArtRoleInfo{
+			Role:        role,
+			Attribution: lock.Attribution,
+			UpdatedAt:   lock.UpdatedAt, Locked: true,
+		})
+	}
+	// Role order, which the SQL already gave the stored rows and the synthesized ones
+	// have to be folded into. Front sorts after back/background/booklet/disc, so it
+	// still comes last.
+	sort.Slice(out, func(i, j int) bool { return out[i].Role < out[j].Role })
+	return out, nil
+}
+
+// artLockRows reads every art curation row an entity carries, the plain "art" field
+// and each "art.<role>", keyed by field name. Presence is not the lock: unlocking drops
+// a value-less row, which is every art row, but a caller still reads Locked rather than
+// trusting that the sparse discipline held.
+func (s *Store) artLockRows(ctx context.Context, entityType model.ArtEntity, entityID int64, op string) (map[string]artLock, error) {
+	var (
+		rows *sql.Rows
+		err  error
+	)
+	if artLockIsItemScoped(entityType) {
+		rows, err = s.read.QueryContext(ctx,
+			`SELECT field, locked, source, COALESCE(provider,''), updated_at FROM field_provenance
+			 WHERE item_id = ? AND (field = 'art' OR field LIKE 'art.%')`, entityID)
+	} else {
+		rows, err = s.read.QueryContext(ctx,
+			`SELECT field, locked, source, COALESCE(provider,''), updated_at FROM entity_curation
+			 WHERE entity_type = ? AND entity_id = ? AND (field = 'art' OR field LIKE 'art.%')`,
+			string(entityType), entityID)
+	}
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
-	if !lock.Locked {
-		return out, nil
-	}
-	for i := range out {
-		if out[i].Role == model.ArtRoleFront {
-			out[i].Locked = true
-			return out, nil
+	defer rows.Close()
+	out := map[string]artLock{}
+	for rows.Next() {
+		var field, source string
+		var locked int
+		var lock artLock
+		if err := rows.Scan(&field, &locked, &source, &lock.Provider, &lock.UpdatedAt); err != nil {
+			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
+		lock.Locked, lock.Source = locked == 1, model.ProvenanceSource(source)
+		out[field] = lock
 	}
-	// Locked with nothing attached. Synthesize the front entry from the lock row alone,
-	// carrying its recorded source and timestamp rather than zero values, the way
-	// FieldProvenance does for a lock-only row. The rows come back ordered by role name,
-	// where front sorts after back/background/booklet/disc, so it goes last.
-	return append(out, model.ArtRoleInfo{
-		Role:        model.ArtRoleFront,
-		Attribution: lock.Attribution,
-		UpdatedAt:   lock.UpdatedAt, Locked: true,
-	}), nil
+	if err := rows.Err(); err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	return out, nil
 }
 
 // thumbnail returns a cached thumbnail for (source hash, rung), generating and caching
@@ -1121,15 +1210,17 @@ func deleteEntityArtTx(ctx context.Context, tx *sql.Tx, entityType string, entit
 	return deleteEntityArtLockTx(ctx, tx, entityType, entityID)
 }
 
-// deleteEntityArtLockTx drops an entity's "art" curation row, for the same reason the
-// map rows go: entity_curation is polymorphic with no FK, podcast and playlist rowids
-// are reused (INTEGER PRIMARY KEY without AUTOINCREMENT), and deleteOrphanEntity sweeps
-// only the four merge entities. A stale lock inherited by a reused id refuses every
-// later art set on the new entity and silently skips the feed image, with no surface
-// that shows why.
+// deleteEntityArtLockTx drops an entity's art curation rows, the plain "art" field and
+// every "art.<role>", for the same reason the map rows go: entity_curation is
+// polymorphic with no FK, podcast and playlist rowids are reused (INTEGER PRIMARY KEY
+// without AUTOINCREMENT), and deleteOrphanEntity sweeps only the four merge entities. A
+// stale lock inherited by a reused id refuses every later art set on the new entity and
+// silently skips the feed image, with no surface that shows why. The per-role rows
+// inherit exactly the same way, so they go with it.
 func deleteEntityArtLockTx(ctx context.Context, tx *sql.Tx, entityType string, entityID int64) error {
 	_, err := tx.ExecContext(ctx,
-		"DELETE FROM entity_curation WHERE entity_type = ? AND entity_id = ? AND field = 'art'",
+		`DELETE FROM entity_curation WHERE entity_type = ? AND entity_id = ?
+		   AND (field = 'art' OR field LIKE 'art.%')`,
 		entityType, entityID)
 	return err
 }

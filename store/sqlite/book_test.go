@@ -63,6 +63,39 @@ func putBook(t *testing.T, st *Store, libID int64, s bookSpec) *model.ScanItemRe
 	return res
 }
 
+// TestPutScannedBookRelinksOnMove: a moved book file re-links onto its existing row and
+// reports the path it moved from. The scanner deletes that path from its preloaded index,
+// so without it end-of-walk reconciliation reads the old path as a vanished file and marks
+// the book missing. resolveScannedFile serves the virtual-track path too, so this covers
+// both.
+func TestPutScannedBookRelinksOnMove(t *testing.T) {
+	st, lib := entityFixture(t)
+
+	first := putBook(t, st, lib.ID, bookSpec{
+		path: "/lib/Tolkien/old.m4b", essence: "be1", content: "bc1",
+		title: "The Hobbit", author: "J.R.R. Tolkien",
+	})
+	if first.RelinkedFrom != "" {
+		t.Errorf("RelinkedFrom on the first put = %q, want empty", first.RelinkedFrom)
+	}
+
+	// The same essence at a new path, which is a move rather than a duplicate.
+	moved := putBook(t, st, lib.ID, bookSpec{
+		path: "/lib/Tolkien/new.m4b", essence: "be1", content: "bc1",
+		title: "The Hobbit", author: "J.R.R. Tolkien",
+	})
+	if !moved.Relinked {
+		t.Fatalf("expected a re-link, got %+v", moved)
+	}
+	if moved.FilePID != first.FilePID {
+		t.Fatalf("re-link should preserve the file pid: %s -> %s", first.FilePID, moved.FilePID)
+	}
+	if moved.RelinkedFrom != "/lib/Tolkien/old.m4b" {
+		t.Errorf("RelinkedFrom = %q, want the old path", moved.RelinkedFrom)
+	}
+	assertVerifyClean(t, st)
+}
+
 func TestPutScannedBookSingleFile(t *testing.T) {
 	st, lib := entityFixture(t)
 	ctx := context.Background()

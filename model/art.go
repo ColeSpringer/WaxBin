@@ -70,6 +70,14 @@ const (
 	ArtRoleBackground ArtRole = "background"
 )
 
+// AuxArtRoles returns the auxiliary art roles, which is every role except the front.
+// It is the closed vocabulary the enrichment backfill and the vacancy checks key on,
+// so a role added to the const block above widens both instead of leaving a hardcoded
+// list and count behind. The order is the const block's.
+func AuxArtRoles() []ArtRole {
+	return []ArtRole{ArtRoleBack, ArtRoleDisc, ArtRoleBooklet, ArtRoleBackground}
+}
+
 // Valid reports whether r is a known art role.
 func (r ArtRole) Valid() bool {
 	switch r {
@@ -94,14 +102,14 @@ func ParseArtRole(s string) (ArtRole, bool) {
 
 // ArtRoleInfo describes one artwork slot an entity holds at its own level: the
 // role plus the stored source's format, dimensions (0 when the image was not
-// decodable), and content hash, followed by the attachment's provenance. Locked
-// reports the entity-curation lock on the entity's "art" field; it is still
-// reported on the front entry alone, though the lock itself also gates
-// enrichment's aux-role fills.
+// decodable), and content hash, followed by the attachment's provenance. Locked is
+// the effective lock on this role: the entity's whole "art" lock, which is the front
+// cover's own lock and also gates enrichment's fills in every role, or the role's own
+// "art.<role>" lock, which gates that one slot alone.
 //
-// A Locked front entry with an empty SourceHash is a lock with no artifact behind it,
-// which is what a cleared and locked cover looks like. Check SourceHash before trying
-// to fetch bytes for an entry.
+// A Locked entry with an empty SourceHash is a lock with no artifact behind it, which
+// is what a cleared and locked slot looks like in any role. Check SourceHash before
+// trying to fetch bytes for an entry.
 type ArtRoleInfo struct {
 	Role       ArtRole
 	Format     string

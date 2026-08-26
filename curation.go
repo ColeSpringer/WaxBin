@@ -76,10 +76,11 @@ func (o ArtEditOptions) Attribution() model.Attribution {
 }
 
 // SetItemArt sets (or, with empty bytes, clears) one artwork role on a track/book
-// item from raw image bytes. An empty role means the front cover, the only role the
-// "art" lock guards (the lock guards the scan's cover re-derive; the other roles have
-// no scan producer, so Lock and Force are ignored for them). A clear deletes only the
-// named role. The cover is recorded under opts.Source, so a caller that fetched the
+// item from raw image bytes. An empty role means the front cover, whose lock is the
+// item's "art" field and also guards the scan's cover re-derive; every other role has
+// a lock of its own under "art.<role>", so opts.Lock and opts.Force mean the same
+// thing in each. A clear deletes only the named role and records the lock asked for,
+// which is how a slot is held empty. The cover is recorded under opts.Source, so a caller that fetched the
 // picture itself is not reported as having chosen it by hand, and under opts.Format
 // when the bytes cannot name their own format. This facade is where a format hint is
 // normalized, for every path (the CLI and the proxy handler both arrive here), so no
@@ -118,9 +119,10 @@ func (l *Library) SetItemArt(ctx context.Context, itemPID model.PID, role model.
 // SetEntityArt sets a durable image on a non-item entity (album, artist, release
 // group, genre, podcast, or playlist) under one role (empty = front; the closed
 // model.ArtRole vocabulary, validated by the store). This makes album art durable:
-// ResolveArt prefers it over the read-derived track cover. A front cover honours
+// ResolveArt prefers it over the read-derived track cover. Every role honours
 // opts.Lock, which is what keeps a chosen cover through an enrich --force and a podcast
-// feed's next image-URL change; a locked cover is refused without opts.Force. The cover
+// feed's next image-URL change, and an auxiliary image through the pass that would
+// otherwise fill its slot; a locked slot is refused without opts.Force. The cover
 // is recorded under opts.Source, so a generated playlist mosaic no hand ever touched
 // does not report itself as a user cover. With opts.WriteBack an album front cover is
 // also embedded into every member track's file; other entity covers stay catalog-only
@@ -154,19 +156,24 @@ func (l *Library) SetEntityArt(ctx context.Context, entityType model.ArtEntity, 
 	return l.writeBackEntityArt(ctx, entityType, entityPID, raw)
 }
 
-// ArtLocked reports whether an entity's front cover is locked. It is what turns a
-// bare "no front art" or a refused `art set` into an explanation, since a cleared and
-// locked cover leaves nothing else to see.
-func (l *Library) ArtLocked(ctx context.Context, entityType model.ArtEntity, entityPID model.PID) (bool, error) {
-	return l.store.ArtLocked(ctx, entityType, entityPID)
+// ArtLocked reports whether an entity's slot in one role is held against an automatic
+// fill, under its own lock or the entity's whole front-cover one; an empty role means
+// the front cover. It is what turns a bare "no art" into an explanation, since a cleared
+// and locked slot leaves nothing else to see, and it reports the same lock ArtRoles
+// does. A hand-set image in an auxiliary role answers to that role's lock alone, so a
+// locked reading here does not always mean the next SetEntityArt will be refused.
+func (l *Library) ArtLocked(ctx context.Context, entityType model.ArtEntity, entityPID model.PID, role model.ArtRole) (bool, error) {
+	return l.store.ArtLocked(ctx, entityType, entityPID, role)
 }
 
-// SetArtLock sets or clears an entity's front-cover lock without touching the cover.
-// SetEntityArt cannot express that, since it always writes the cover slot as well, so
-// this is the way out of a cover that was cleared and locked. For a track entity it
-// writes the same row `Lock(pid, "art")` does.
-func (l *Library) SetArtLock(ctx context.Context, entityType model.ArtEntity, entityPID model.PID, lock bool) error {
-	return l.store.SetArtLock(ctx, entityType, entityPID, lock)
+// SetArtLock sets or clears an entity's art lock in one role without touching the
+// image. SetEntityArt cannot express that, since it always writes the slot as well, so
+// this is the way out of a slot that was cleared and locked. An empty role means the
+// front cover, whose lock also gates enrichment's fills in the other roles; for a track
+// entity that is the same row `Lock(pid, "art")` writes, and an auxiliary role is the
+// row `Lock(pid, "art.<role>")` writes.
+func (l *Library) SetArtLock(ctx context.Context, entityType model.ArtEntity, entityPID model.PID, role model.ArtRole, lock bool) error {
+	return l.store.SetArtLock(ctx, entityType, entityPID, role, lock)
 }
 
 // writeBackItemArt embeds (or clears) a committed item cover into the item's backing

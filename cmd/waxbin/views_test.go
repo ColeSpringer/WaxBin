@@ -1,11 +1,15 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"strings"
 	"testing"
 
+	"github.com/colespringer/waxbin"
+	"github.com/colespringer/waxbin/enrich"
 	"github.com/colespringer/waxbin/model"
+	"github.com/spf13/cobra"
 )
 
 // TestPlayStateViewJSON pins the `state --json` payload shape, in particular
@@ -103,6 +107,63 @@ func TestPrintItemTableEpisodeColumn(t *testing.T) {
 	if hdr, ep := lineWith(t, out, "PUBLISHED"), lineWith(t, out, "Ep One"); //
 	strings.Index(hdr, "PUBLISHED") != strings.Index(ep, "2025-01-09") {
 		t.Errorf("PUBLISHED column is misaligned:\n%s\n%s", hdr, ep)
+	}
+}
+
+// TestEnrichViewAuxCounts pins the aux-backfill counters in the `enrich --json`
+// payload: present when the phase ran, absent when it did not, so an install with no
+// aux-capable provider emits exactly the shape it always did. They matter because
+// Result.total() counts them, which means `enrich --limit N` can spend its budget on
+// that phase, and a payload that never mentions it cannot explain where N went.
+func TestEnrichViewAuxCounts(t *testing.T) {
+	b, err := json.Marshal(toEnrichView(&waxbin.EnrichResult{
+		Result: enrich.Result{ArtistsEnriched: 1, ArtistsMatched: 1},
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "auxArt") {
+		t.Errorf("a run without the phase emitted aux counts: %s", b)
+	}
+
+	b, err = json.Marshal(toEnrichView(&waxbin.EnrichResult{
+		Result: enrich.Result{AuxArtEnriched: 3, AuxArtMatched: 2, AuxArtFetched: 4},
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"auxArtEnriched":3`, `"auxArtMatched":2`, `"auxArtFetched":4`} {
+		if !strings.Contains(string(b), want) {
+			t.Errorf("json = %s\nwant it to carry %s", b, want)
+		}
+	}
+}
+
+// TestRenderEnrichResultAuxLine: the backfill phase gets a summary line of its own
+// when it ran, and the image tally beside it stays distinguishable from it.
+func TestRenderEnrichResultAuxLine(t *testing.T) {
+	render := func(r enrich.Result) string {
+		t.Helper()
+		cmd := &cobra.Command{}
+		var buf bytes.Buffer
+		cmd.SetOut(&buf)
+		if err := renderEnrichResult(cmd, &globals{}, &waxbin.EnrichResult{Result: r}); err != nil {
+			t.Fatalf("render: %v", err)
+		}
+		return buf.String()
+	}
+
+	ran := render(enrich.Result{AuxArtEnriched: 3, AuxArtMatched: 2, AuxArtFetched: 4})
+	if got := lineWith(t, ran, "aux art:"); !strings.Contains(got, "3 backfilled (2 matched)") {
+		t.Errorf("aux art line = %q, want the release groups walked and matched", got)
+	}
+	if got := lineWith(t, ran, "aux art images:"); !strings.Contains(got, "4 fetched") {
+		t.Errorf("aux art images line = %q, want the image tally", got)
+	}
+
+	// A stock run (no aux-capable provider) keeps the summary it always had.
+	if got := render(enrich.Result{ArtistsEnriched: 1}); strings.Contains(got, "aux art") {
+		t.Errorf("a run without the phase printed an aux line:\n%s", got)
 	}
 }
 

@@ -236,11 +236,22 @@ func (c *Client) SetEntityArt(ctx context.Context, entityType model.ArtEntity, e
 	return &res, nil
 }
 
-// SetArtLock proxies an entity front-cover lock change, leaving the cover itself
-// alone. Unlocking is the way out of a cover that was cleared and locked.
-func (c *Client) SetArtLock(ctx context.Context, entityType model.ArtEntity, entityPID model.PID, lock bool) error {
+// SetArtLock proxies an entity art lock change in one role, leaving the image itself
+// alone. Unlocking is the way out of a slot that was cleared and locked.
+//
+// The front cover goes on the wire as an omitted role, whether the caller passed the
+// empty role or spelled it out, so a front lock is byte for byte the frame this method
+// sent before roles existed. The server refuses a literal "front" and points at the
+// omitted form; normalizing here means our own callers never meet that refusal, and it
+// still stands for a client that assembles the frame itself.
+func (c *Client) SetArtLock(ctx context.Context, entityType model.ArtEntity, entityPID model.PID, role model.ArtRole, lock bool) error {
+	wireRole := string(role)
+	if role == model.ArtRoleFront {
+		wireRole = ""
+	}
 	return c.call(ctx, MethodSetArtLock, SetArtLockParams{
-		EntityType: string(entityType), EntityPID: string(entityPID), Lock: lock,
+		EntityType: string(entityType), EntityPID: string(entityPID),
+		Role: wireRole, Lock: lock,
 	}, nil)
 }
 

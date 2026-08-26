@@ -157,7 +157,9 @@ func TestPlaylistHasArt(t *testing.T) {
 // rows itself instead of leaving them to GCArt. playlist.id is a plain INTEGER PRIMARY
 // KEY, so the next playlist created takes the deleted one's rowid; a surviving map row
 // would hand it the dead playlist's cover, and GCArt would never reclaim the row
-// because the id is live again.
+// because the id is live again. The lock rows inherit exactly the same way, and a
+// per-role lock is the worst of them to inherit: it is invisible on a fresh entity and
+// silently holds one slot empty against every enrichment pass.
 func TestPlaylistArtNotInheritedThroughReusedRowid(t *testing.T) {
 	st, _ := entityFixture(t)
 	ctx := context.Background()
@@ -165,6 +167,11 @@ func TestPlaylistArtNotInheritedThroughReusedRowid(t *testing.T) {
 	first := newPlaylist(t, st, "Mix")
 	if err := st.SetEntityArt(ctx, model.ArtPlaylist, first, model.ArtRoleFront, front.Data, "", model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("set front: %v", err)
+	}
+	// A cleared-and-locked back slot: a lock row with no map row behind it, which the
+	// art_map sweep alone would leave standing.
+	if err := st.SetEntityArt(ctx, model.ArtPlaylist, first, model.ArtRoleBack, nil, "", model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
+		t.Fatalf("clear-and-lock back: %v", err)
 	}
 	firstID := scalarInt(t, st, "SELECT id FROM playlist WHERE pid = ?", string(first))
 	if err := st.DeletePlaylist(ctx, first); err != nil {
@@ -186,6 +193,15 @@ func TestPlaylistArtNotInheritedThroughReusedRowid(t *testing.T) {
 	if _, err := st.ResolveArt(ctx, ref, model.ArtRoleFront, 0); !waxerr.Is(err, waxerr.CodeNotFound) {
 		t.Errorf("resolve on the fresh playlist = %v, want CodeNotFound", err)
 	}
+	for _, role := range []model.ArtRole{model.ArtRoleFront, model.ArtRoleBack} {
+		if locked, err := st.ArtLocked(ctx, model.ArtPlaylist, second, role); err != nil || locked {
+			t.Errorf("fresh playlist %s lock = %v (err %v), want an unlocked slot", role, locked, err)
+		}
+	}
+	if roles, err := st.ArtRoles(ctx, ref); err != nil || len(roles) != 0 {
+		t.Errorf("fresh playlist roles = %+v (err %v), want an empty list", roles, err)
+	}
+	assertVerifyClean(t, st)
 }
 
 // TestPlaylistArtDeleteAndGC pins the lifecycle the polymorphic no-FK art map rests

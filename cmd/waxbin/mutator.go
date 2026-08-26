@@ -158,11 +158,11 @@ func (m *mutator) SetEntityArt(ctx context.Context, entityType model.ArtEntity, 
 	return m.lib.SetEntityArt(ctx, entityType, entityPID, role, data, opts)
 }
 
-func (m *mutator) SetArtLock(ctx context.Context, entityType model.ArtEntity, entityPID model.PID, lock bool) error {
+func (m *mutator) SetArtLock(ctx context.Context, entityType model.ArtEntity, entityPID model.PID, role model.ArtRole, lock bool) error {
 	if m.px != nil {
-		return m.px.SetArtLock(ctx, entityType, entityPID, lock)
+		return m.px.SetArtLock(ctx, entityType, entityPID, role, lock)
 	}
-	return m.lib.SetArtLock(ctx, entityType, entityPID, lock)
+	return m.lib.SetArtLock(ctx, entityType, entityPID, role, lock)
 }
 
 func (m *mutator) EditEntity(ctx context.Context, entityType model.MergeEntity, entityPID model.PID, edits map[string]string, opts waxbin.EntityEditOptions) error {

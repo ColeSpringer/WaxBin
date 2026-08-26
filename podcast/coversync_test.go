@@ -174,7 +174,7 @@ func TestSyncSkipsFetchWhileCoverLocked(t *testing.T) {
 	}
 
 	// Unlocking releases it, and the very next sync refills from the feed.
-	if err := f.store.SetArtLock(ctx, model.ArtPodcast, pid, false); err != nil {
+	if err := f.store.SetArtLock(ctx, model.ArtPodcast, pid, model.ArtRoleFront, false); err != nil {
 		t.Fatalf("unlock: %v", err)
 	}
 	if _, err := f.svc.Sync(ctx, pid); err != nil {

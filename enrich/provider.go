@@ -73,6 +73,20 @@ const (
 	CapLyrics
 	// CapBookMeta supplies an audiobook's identifiers and publisher.
 	CapBookMeta
+	// CapAuxArt supplies the auxiliary art roles (back, disc, booklet, background) for
+	// a release group, in Candidate.Art. It is separate from CapCover because it gates
+	// its own pass: the auxiliary backfill re-asks about groups whose front cover is
+	// already settled, which the cover-fetching passes never do, and it consults only
+	// the providers advertising this. The built-in Cover Art Archive serves the front
+	// alone and does not advertise it, so an install with no injected provider runs the
+	// backfill not at all and pays nothing for it.
+	//
+	// A provider that already returns auxiliary roles under CapCover keeps working
+	// exactly as before and contributes to the first-pass gather. To join the backfill
+	// it advertises this alongside CapCover, and answers a request whose Want is
+	// CapAuxArt with the non-front roles it has (the front is ignored there; the
+	// release-group pass owns that slot).
+	CapAuxArt
 )
 
 // Has reports whether c advertises want.

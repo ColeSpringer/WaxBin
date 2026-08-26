@@ -61,17 +61,19 @@ func (s *Store) setLock(ctx context.Context, itemPID model.PID, field string, lo
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		// Keep the table sparse: drop a row that now carries neither a lock nor a
-		// non-tag provenance nor a curated value. The art row goes whatever source it
-		// carries, because art keeps no value here (the bytes and their real attribution
-		// live in art_map) and this command has no artifact to attribute, so it guesses
-		// "tag" where a curation set records what it was told. Without the exception an
-		// `art lock` followed by `unlock <pid> art` would strand an inert row claiming a
-		// cover that does not exist.
+		// non-tag provenance nor a curated value. An art row goes whatever source it
+		// carries, because art keeps no value here in any role (the bytes and their real
+		// attribution live in art_map) and this command has no artifact to attribute, so
+		// it guesses "tag" where a curation set records what it was told. Without the
+		// exception an `art lock` followed by `unlock <pid> art` would strand an inert
+		// row claiming a cover that does not exist, and the same for a role slot after
+		// `unlock <pid> art.back`.
 		if !locked {
 			const sparse = `DELETE FROM field_provenance
 				WHERE item_id=? AND field=? AND locked=0 AND (value IS NULL OR value='')`
 			q, args := sparse+" AND source=?", []any{itemID, field, string(model.SourceTag)}
-			if field == "art" {
+			_, isRole := model.CutArtRolePrefix(field)
+			if field == "art" || isRole {
 				q, args = sparse, []any{itemID, field}
 			}
 			if _, err := tx.ExecContext(ctx, q, args...); err != nil {

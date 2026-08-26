@@ -240,6 +240,15 @@ func deleteOrphanEntity(ctx context.Context, tx *sql.Tx, k orphanKind, o orphanR
 		"DELETE FROM entity_enrichment WHERE entity_type = ? AND entity_id = ?", k.entityType, o.id); err != nil {
 		return err
 	}
+	// A release group also carries the aux-art backfill marker, which is keyed by its id
+	// under that pass's own entity_type and so is untouched by the delete above. Entity
+	// rowids are reused, and a marker left behind would silently suppress the backfill
+	// for whatever new group inherits the id.
+	if k.entityType == model.EnrichReleaseGroupType {
+		if err := deleteAuxArtMarkerTx(ctx, tx, o.id); err != nil {
+			return err
+		}
+	}
 	if _, err := tx.ExecContext(ctx,
 		"DELETE FROM entity_curation WHERE entity_type = ? AND entity_id = ?", k.entityType, o.id); err != nil {
 		return err

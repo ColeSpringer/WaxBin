@@ -536,7 +536,7 @@ func TestServeProxiedArtAttribution(t *testing.T) {
 		model.Attribution{}, model.LockUnchanged, true, false); err != nil {
 		t.Fatalf("proxied forced cover: %v", err)
 	}
-	locked, err := lib.ArtLocked(ctx, model.ArtPlaylist, pid)
+	locked, err := lib.ArtLocked(ctx, model.ArtPlaylist, pid, model.ArtRoleFront)
 	if err != nil || !locked {
 		t.Fatalf("locked after a forced proxied set = %v (err %v), want the lock still standing", locked, err)
 	}
@@ -548,6 +548,120 @@ func TestServeProxiedArtAttribution(t *testing.T) {
 		model.Attribution{}, model.LockChange("yes"), true, false); !waxerr.Is(err, waxerr.CodeInvalid) {
 		t.Errorf("unknown wire lock = %v, want CodeInvalid", err)
 	}
+
+	// A per-role lock over the socket: the back slot takes a row of its own and gives it
+	// back, and the front's own lock is untouched by the round trip. The row is what is
+	// read here rather than ArtLocked, which reports the effective lock and so answers
+	// true for every role while the front's whole-entity lock stands.
+	hasBackLock := func() bool {
+		t.Helper()
+		roles, err := lib.ArtRoles(ctx, model.EntityRef{Type: model.ArtPlaylist, PID: pid})
+		if err != nil {
+			t.Fatalf("art roles: %v", err)
+		}
+		for _, r := range roles {
+			if r.Role == model.ArtRoleBack && r.Locked {
+				return true
+			}
+		}
+		return false
+	}
+	if err := c.SetArtLock(ctx, model.ArtPlaylist, pid, model.ArtRoleBack, true); err != nil {
+		t.Fatalf("proxied back lock: %v", err)
+	}
+	if !hasBackLock() {
+		t.Error("the proxied back lock wrote no locked back slot")
+	}
+	if err := c.SetArtLock(ctx, model.ArtPlaylist, pid, model.ArtRoleBack, false); err != nil {
+		t.Fatalf("proxied back unlock: %v", err)
+	}
+	if hasBackLock() {
+		t.Error("the proxied back unlock left the back lock standing")
+	}
+	if locked, err := lib.ArtLocked(ctx, model.ArtPlaylist, pid, model.ArtRoleFront); err != nil || !locked {
+		t.Errorf("front lock after the back round trip = %v (err %v), want it standing", locked, err)
+	}
+}
+
+// TestServeArtLockRefusesExplicitFrontRole: the front cover has one lock and one home,
+// so the wire refuses a role that spells "front" out and points at the omitted form.
+// Our own client normalizes, so this is what a non-Go client assembling the frame by
+// hand meets; the omitted role still means front and still works.
+func TestServeArtLockRefusesExplicitFrontRole(t *testing.T) {
+	ctx := context.Background()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	sock := testsock.Path(t)
+
+	lib := openServedRW(t, ctx, db, t.TempDir(), sock)
+	pid, err := lib.Playlists().CreateStatic(ctx, "Pinned", "", "")
+	if err != nil {
+		t.Fatalf("create playlist: %v", err)
+	}
+	dialWhenReady(t, sock)
+
+	lockFrame := func(role string) (code, message string) {
+		t.Helper()
+		params := fmt.Sprintf(`{"entityType":%q,"entityPid":%q,"lock":true}`,
+			string(model.ArtPlaylist), string(pid))
+		if role != "" {
+			params = fmt.Sprintf(`{"entityType":%q,"entityPid":%q,"role":%q,"lock":true}`,
+				string(model.ArtPlaylist), string(pid), role)
+		}
+		return rawFrame(t, sock, fmt.Sprintf(`{"v":%d,"method":%q,"params":%s}`+"\n",
+			proxy.ProtocolVersion, proxy.MethodSetArtLock, params))
+	}
+
+	code, message := lockFrame("front")
+	if code != string(waxerr.CodeInvalid) {
+		t.Fatalf("explicit front role on the wire = %q, want CodeInvalid", code)
+	}
+	if !strings.Contains(message, "omit role") {
+		t.Errorf("refusal = %q, want it to point at the omitted form", message)
+	}
+	if locked, lerr := lib.ArtLocked(ctx, model.ArtPlaylist, pid, model.ArtRoleFront); lerr != nil || locked {
+		t.Errorf("the refused call still wrote a lock (%v, err %v)", locked, lerr)
+	}
+	// An unknown role is refused the same way, and the omitted role still locks the
+	// front the way it did before roles existed.
+	if code, _ := lockFrame("sleeve"); code != string(waxerr.CodeInvalid) {
+		t.Errorf("unknown wire role = %q, want CodeInvalid", code)
+	}
+	if code, message := lockFrame(""); code != "" {
+		t.Fatalf("omitted role = %q/%q, want it to succeed", code, message)
+	}
+	if locked, lerr := lib.ArtLocked(ctx, model.ArtPlaylist, pid, model.ArtRoleFront); lerr != nil || !locked {
+		t.Errorf("front lock after the omitted-role call = %v (err %v), want true", locked, lerr)
+	}
+}
+
+// rawFrame writes one hand-built request frame to the server socket and returns the
+// response's error code and message (both empty on success). It is how a frame no Go
+// client would assemble gets tested, the way the version-4 set_star frame above is.
+func rawFrame(t *testing.T, sock, frame string) (code, message string) {
+	t.Helper()
+	conn, err := net.Dial("unix", sock)
+	if err != nil {
+		t.Fatalf("raw dial: %v", err)
+	}
+	defer conn.Close()
+	if _, err := conn.Write([]byte(frame)); err != nil {
+		t.Fatalf("raw write: %v", err)
+	}
+	line, err := bufio.NewReader(conn).ReadString('\n')
+	if err != nil {
+		t.Fatalf("raw read: %v", err)
+	}
+	var resp struct {
+		OK    bool `json:"ok"`
+		Error struct {
+			Code string `json:"code"`
+			Msg  string `json:"msg"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(line), &resp); err != nil {
+		t.Fatalf("unmarshal %q: %v", line, err)
+	}
+	return resp.Error.Code, resp.Error.Msg
 }
 
 // TestServeProxiedArtFormatAndGeneratedSource drives the two v13 additions over the

@@ -156,6 +156,18 @@ func mergeEntityTx(ctx context.Context, tx *sql.Tx, et model.MergeEntity, table 
 			return nil, err
 		}
 	}
+	// The aux-art backfill marker is dropped rather than inherited. It records an answer
+	// about the loser's vacancy, and the loser's images have just moved into whichever of
+	// the survivor's roles were empty, so it says nothing about the survivor: a survivor
+	// never asked stays queued, and one already asked keeps its own row. Dropping it is
+	// also what keeps a reused release-group rowid from inheriting a dead group's answer,
+	// since the marker sits under that pass's own entity_type and the union above never
+	// reached it.
+	if et == model.MergeReleaseGroup {
+		if err := deleteAuxArtMarkerTx(ctx, tx, lid); err != nil {
+			return nil, err
+		}
+	}
 
 	// Delete the loser. Remaining child rows still pointing at it (aliases,
 	// relations, contributor credits, its rollup) cascade away here; everything
@@ -397,23 +409,30 @@ func repointArtMap(ctx context.Context, tx *sql.Tx, entityType string, sid, lid 
 // repointEntityCuration re-points the loser's entity_curation rows (polymorphic, no
 // FK) onto the survivor with locked-wins: on a field both carry, the survivor keeps its
 // value and source but unions the lock, so a value the loser had protected stays
-// protected; a field only the loser carries moves onto the survivor. The 'art' field is
+// protected; a field only the loser carries moves onto the survivor. The art fields are
 // the one exception, for the reason given below. It is the entity analogue of
 // repointArtMap. A genre merge finds no rows and is a no-op.
 func repointEntityCuration(ctx context.Context, tx *sql.Tx, entityType string, sid, lid int64) error {
 	// Union the lock on a field both entities curate: promote the survivor's row to
 	// locked when the loser locked that field. Value and source stay the survivor's.
 	//
-	// 'art' is excluded, because its subject is not in this table. repointArtMap is
-	// survivor-wins for the image, so unioning the lock on a field both entities carry
-	// would leave the survivor's own picture (often a fetched one) wearing the lock the
-	// loser put on a different picture, shielding it from the pass that would correct
-	// it. Excluding it keeps lock and image agreeing in every case: where the survivor
-	// has no art row, repointArtMap moves the loser's image in and the OR IGNORE below
-	// moves its lock with it.
+	// 'art' and every 'art.<role>' are excluded, because their subject is not in this
+	// table. repointArtMap is survivor-wins per role for the image, so unioning the lock
+	// on a role both entities carry would leave the survivor's own picture (often a
+	// fetched one) wearing the lock the loser put on a different picture, shielding it
+	// from the pass that would correct it. Excluding them lets each lock follow its own
+	// image instead: where the survivor holds no image in a role, repointArtMap moves
+	// the loser's in and the OR IGNORE below moves its lock with it.
+	//
+	// The pairing holds where a role is empty on one side and filled on the other,
+	// which is the case that arises. It is not a guarantee: whichever lock row reaches
+	// the survivor stands over whichever image reaches the same slot, so a role where
+	// one side brought the picture and the other brought the lock ends with both.
+	// Survivor-wins on each, one role at a time, is the whole rule.
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE entity_curation SET locked = 1
-		 WHERE entity_type = ? AND entity_id = ? AND locked = 0 AND field <> 'art'
+		 WHERE entity_type = ? AND entity_id = ? AND locked = 0
+		   AND field <> 'art' AND field NOT LIKE 'art.%'
 		   AND field IN (SELECT field FROM entity_curation
 		                 WHERE entity_type = ? AND entity_id = ? AND locked = 1)`,
 		entityType, sid, entityType, lid); err != nil {

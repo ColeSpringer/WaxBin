@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strconv"
 	"strings"
 
 	"github.com/colespringer/waxbin/model"
@@ -26,6 +27,24 @@ const (
 	// entity types so a no-match lyrics lookup is not re-queried every run, while the
 	// coverage report (which counts only the entity types) ignores it.
 	enrichEntityLyrics = "lyrics"
+	// enrichEntityAuxArt is the entity_enrichment.entity_type for the auxiliary-art
+	// backfill, keyed by the release group's own id.
+	//
+	// The type column carries two vocabularies at once. Four values name an entity the
+	// coverage report counts or an album's release match (artist, release_group, book,
+	// album); the rest are per-pass markers borrowing the table for their own
+	// granularity, keyed by whatever id that pass walks (lyrics by item id, this one by
+	// release-group id). A new pass needs its own value rather than sharing an entity's:
+	// notEnriched keys on (entity_type, entity_id) alone, so a shared type makes one
+	// pass's no-match silence another pass's queue. The cost of a foreign type is that
+	// the row outlives the entity unless someone deletes it, which is what
+	// deleteAuxArtMarkerTx is for.
+	enrichEntityAuxArt = "aux_art"
+	// enrichProviderNone labels a marker no provider answered. entity_enrichment.provider
+	// is NOT NULL and an aux backfill regularly completes with nothing offered, so the row
+	// names the outcome rather than storing an empty string a reader would take for a
+	// missing value.
+	enrichProviderNone = "none"
 )
 
 // albumResolvesFrontArt is true when an album already answers a front-cover request: its
@@ -280,13 +299,13 @@ func (s *Store) AlbumsNeedingReleaseMatch(ctx context.Context, force bool, after
 
 // CountEntitiesNeedingEnrichment totals the artists, release groups, and books the
 // pass would process, plus the albums needing a release match (when includeAlbums is
-// set) and the tracks needing a lyrics lookup (when includeLyrics is set), so the
-// heartbeat can report a real ratio. Both flags must mirror whether the run actually
-// runs that phase, or the ratio drifts. A non-nil scope filters each per-type count
-// to its id list, and a type with an empty list contributes zero, because the scoped
-// run skips that phase entirely; the denominator stays in lockstep with the work that
-// actually runs.
-func (s *Store) CountEntitiesNeedingEnrichment(ctx context.Context, force, includeAlbums, includeLyrics bool, scope *model.EnrichScope) (int, error) {
+// set), the release groups needing an auxiliary-art backfill (includeAuxArt), and the
+// tracks needing a lyrics lookup (includeLyrics), so the heartbeat can report a real
+// ratio. Every flag must mirror whether the run actually runs that phase, or the ratio
+// drifts. A non-nil scope filters each per-type count to its id list, and a type with
+// an empty list contributes zero, because the scoped run skips that phase entirely;
+// the denominator stays in lockstep with the work that actually runs.
+func (s *Store) CountEntitiesNeedingEnrichment(ctx context.Context, force, includeAlbums, includeAuxArt, includeLyrics bool, scope *model.EnrichScope) (int, error) {
 	const op = "store.CountEntitiesNeedingEnrichment"
 	type countQuery struct {
 		stmt string
@@ -312,6 +331,13 @@ func (s *Store) CountEntitiesNeedingEnrichment(ctx context.Context, force, inclu
 			WHERE (al.mbid IS NULL OR al.mbid = '') AND rg.mbid IS NOT NULL AND rg.mbid <> ''
 			  AND `+albumMatchEvidencePredicate("al")+`
 			  AND `+notEnriched(model.EnrichAlbumType, "al.id", force), "al.id", albumIDs)
+	}
+	// The aux backfill walks release groups, so it counts under the release-group scope
+	// list, the ghost heuristic included, the way its queue does.
+	if includeAuxArt {
+		add(`SELECT COUNT(*) FROM release_group rg WHERE `+enrichBacksFilter(enrichRGBacksItems, rgIDs)+`
+			  AND `+auxArtNeededPredicate+`
+			  AND `+notEnriched(enrichEntityAuxArt, "rg.id", force), "rg.id", rgIDs)
 	}
 	add(`SELECT COUNT(*) FROM book b WHERE b.mbid IS NOT NULL AND b.mbid <> '' AND `+notEnriched(model.EnrichBookType, "b.item_id", force), "b.item_id", bookIDs)
 	if includeLyrics {
@@ -449,11 +475,11 @@ func (s *Store) ApplyReleaseGroupEnrichment(ctx context.Context, in model.Releas
 		if in.Art != nil {
 			// Reads identically to the release_group.type guard six lines above: a user
 			// who chose this group's cover keeps it, forced run or not.
-			if err := attachEntityArtUnlessLockedTx(ctx, tx, string(model.ArtReleaseGroup), in.ReleaseGroupID, in.Art); err != nil {
+			if err := attachEntityArtUnlessLockedTx(ctx, tx, model.ArtReleaseGroup, in.ReleaseGroupID, in.Art); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 		}
-		if err := fillEntityAuxArtTx(ctx, tx, string(model.ArtReleaseGroup), in.ReleaseGroupID, in.AuxArt); err != nil {
+		if _, err := fillEntityAuxArtTx(ctx, tx, model.ArtReleaseGroup, in.ReleaseGroupID, in.AuxArt); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		if !aff.empty() {
@@ -493,6 +519,135 @@ func setReleaseGroupMBIDTx(ctx context.Context, tx *sql.Tx, log logger, rgID int
 		return err
 	}
 	_, err = tx.ExecContext(ctx, "UPDATE release_group SET mbid = ? WHERE id = ? AND (mbid IS NULL OR mbid = '')", mbid, rgID)
+	return err
+}
+
+// auxArtNeededPredicate selects the release groups the auxiliary-art backfill should
+// ask about, reading the group as rg. Three parts: it carries an MBID, since the pass
+// resolves no identity of its own and a provider keyed on one has nothing to answer
+// without it; its whole-entity "art" lock does not stand, which is the one lock cheap
+// enough to test in SQL and the one that skips every role at apply anyway; and at
+// least one auxiliary slot is still empty.
+//
+// The vacancy test is deliberately approximate. It counts stored rows against the
+// closed non-front vocabulary, both the list and the count derived from
+// model.AuxArtRoles, so a slot held empty by its own "art.<role>" lock reads here as a
+// vacancy and is skipped by fillEntityAuxArtTx at apply. That costs one marked pass
+// per such group instead of a per-role lock join in the queue, and the marker is what
+// stops it repeating.
+//
+// The front is not consulted at all. A settled front is exactly the population this
+// pass exists for.
+//
+// Its two callers, the queue and the count, add the shared backs-items ghost heuristic
+// beside it, so the two stay in lockstep and an orphaned group carrying an mbid does
+// not spend a rate-limited request or take a marker.
+var auxArtNeededPredicate = buildAuxArtNeededPredicate()
+
+func buildAuxArtNeededPredicate() string {
+	roles := model.AuxArtRoles()
+	quoted := make([]string, len(roles))
+	for i, r := range roles {
+		quoted[i] = "'" + string(r) + "'"
+	}
+	return `rg.mbid IS NOT NULL AND rg.mbid <> ''
+	AND NOT EXISTS (SELECT 1 FROM entity_curation ec WHERE ec.entity_type = 'release_group'
+		AND ec.entity_id = rg.id AND ec.field = 'art' AND ec.locked = 1)
+	AND (SELECT COUNT(*) FROM art_map am WHERE am.entity_type = 'release_group'
+		AND am.entity_id = rg.id AND am.role IN (` + strings.Join(quoted, ",") + `)) < ` +
+		strconv.Itoa(len(roles))
+}
+
+// ReleaseGroupsNeedingAuxArt returns the next keyset page of release groups whose
+// auxiliary art slots are not all filled, each with its primary-artist name for a
+// provider that keys on more than the MBID. A non-nil ids list scopes the walk to
+// those release-group rowids and, as with the release-group pass, drops the
+// backs-items ghost heuristic for the explicit targets; the rest of the gate still
+// applies, since without an MBID or a vacancy there is nothing for the pass to do even
+// where a caller pointed at it.
+//
+// It reads rg.mbid live rather than from a snapshot, the way AlbumsNeedingReleaseMatch
+// does, so running this after the release-group phase in the same pass picks up the ids
+// that phase just filled.
+func (s *Store) ReleaseGroupsNeedingAuxArt(ctx context.Context, force bool, afterID int64, limit int, ids []int64) ([]model.EnrichTarget, error) {
+	const op = "store.ReleaseGroupsNeedingAuxArt"
+	scopeClause, scopeArgs := enrichIDsFilter("rg.id", ids)
+	stmt := `SELECT rg.id, rg.pid, rg.title, COALESCE(rg.mbid,''), COALESCE(ar.name,'')
+		FROM release_group rg
+		LEFT JOIN artist ar ON ar.id = rg.primary_artist_id
+		WHERE rg.id > ? AND ` + enrichBacksFilter(enrichRGBacksItems, ids) + ` AND ` + auxArtNeededPredicate + `
+		  AND ` + notEnriched(enrichEntityAuxArt, "rg.id", force) + scopeClause + `
+		ORDER BY rg.id LIMIT ?`
+	args := append(append([]any{afterID}, scopeArgs...), limitOr(limit))
+	rows, err := s.read.QueryContext(ctx, stmt, args...)
+	if err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	defer rows.Close()
+	var out []model.EnrichTarget
+	for rows.Next() {
+		t := model.EnrichTarget{Type: enrichEntityAuxArt}
+		var pid string
+		if err := rows.Scan(&t.ID, &pid, &t.Name, &t.MBID, &t.ArtistName); err != nil {
+			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		t.PID = model.PID(pid)
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// ApplyReleaseGroupAuxArt fills a release group's empty auxiliary art roles and records
+// the backfill marker. The fill runs on the images the caller brought rather than on the
+// match flag, since this is an exported port and a caller with pictures and no match
+// would otherwise take a permanent marker and store nothing. It is fill-when-empty per
+// role and answers to both art locks, so the queue's approximate vacancy is settled
+// here; the marker is written either way, so a group nothing serves costs one pass
+// rather than a lookup every run.
+//
+// The entity delta rides on an image actually landing rather than on the match. The
+// applies beside it emit one for every match because a match there always writes
+// something a consumer reads (an MBID, a type, a genre); a matched gather here can
+// still write nothing at all, its roles locked or already filled, and a delta then
+// would send every ChangesSince tailer to re-fetch an unchanged group.
+func (s *Store) ApplyReleaseGroupAuxArt(ctx context.Context, in model.ReleaseGroupAuxArt) error {
+	const op = "store.ApplyReleaseGroupAuxArt"
+	provider := strings.TrimSpace(in.Provider)
+	if provider == "" {
+		provider = enrichProviderNone
+	}
+	return s.writeTx(ctx, func(tx *sql.Tx) error {
+		var wrote int
+		if len(in.AuxArt) > 0 {
+			n, err := fillEntityAuxArtTx(ctx, tx, model.ArtReleaseGroup, in.ReleaseGroupID, in.AuxArt)
+			if err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+			wrote = n
+		}
+		if err := markEnrichedTx(ctx, tx, enrichEntityAuxArt, in.ReleaseGroupID, provider, in.Matched, ""); err != nil {
+			return err
+		}
+		if wrote == 0 {
+			return nil
+		}
+		return appendChange(ctx, tx, "release_group", in.PID, model.OpUpdate)
+	})
+}
+
+// deleteAuxArtMarkerTx drops one release group's aux-art backfill marker. The marker
+// lives under its own entity_type, so neither the orphan sweep's delete (which keys on
+// the entity's own type) nor a merge's marker union reaches it, and a release-group
+// rowid is reused: without this a new group inheriting the id would be silently skipped
+// by a dead group's marker.
+//
+// The curation side calls it too, from SetArtLock's unlock path and from SetEntityArt,
+// on an auxiliary clear or on a set that releases the front's whole-entity lock: the
+// marker means the group's vacancies were asked about as of then, and those are the
+// writes that open a vacancy which came after.
+func deleteAuxArtMarkerTx(ctx context.Context, tx *sql.Tx, rgID int64) error {
+	_, err := tx.ExecContext(ctx,
+		"DELETE FROM entity_enrichment WHERE entity_type = ? AND entity_id = ?", enrichEntityAuxArt, rgID)
 	return err
 }
 
@@ -549,7 +704,7 @@ func (s *Store) ApplyAlbumReleaseMatch(ctx context.Context, in model.AlbumReleas
 					return waxerr.Wrap(waxerr.CodeIO, op, err)
 				}
 			}
-			if err := fillEntityAuxArtTx(ctx, tx, string(model.ArtAlbum), in.AlbumID, in.AuxArt); err != nil {
+			if _, err := fillEntityAuxArtTx(ctx, tx, model.ArtAlbum, in.AlbumID, in.AuxArt); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 		}

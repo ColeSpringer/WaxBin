@@ -683,6 +683,208 @@ func TestScanRelativeSubPath(t *testing.T) {
 	}
 }
 
+// TestScanDoesNotMarkRelinkedFileMissing verifies a rescan that relinks a moved
+// file does not also mark that same file's item missing. Before the fix, the
+// scan's preloaded index kept the file's stale old-path entry (only the new path
+// was looked up during the walk), so end-of-walk reconciliation treated the old
+// path as vanished and flipped the item to missing in the same scan that had
+// just relinked it.
+func TestScanDoesNotMarkRelinkedFileMissing(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+
+	src := filepath.Join(root, "song.mp3")
+	writeFile(t, src, testaudio.BuildMP3("Midnight Drive", "The Foobars", "Night Moves", 3))
+
+	lib := openManaged(t, ctx, db, root)
+
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("initial scan: %v", err)
+	}
+
+	items, err := lib.Query(ctx, query.New(query.EntityItems).Build(), "")
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("query returned %d items, want 1", len(items))
+	}
+	pid := items[0].PID
+
+	seqBeforeMove, err := lib.LatestChangeSeq(ctx)
+	if err != nil {
+		t.Fatalf("seq before move: %v", err)
+	}
+
+	dst := filepath.Join(root, "moved", "song.mp3")
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(src, dst); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := lib.Scan(ctx, waxbin.ScanRequest{})
+	if err != nil {
+		t.Fatalf("rescan: %v", err)
+	}
+	if res.Total.Relinked != 1 {
+		t.Fatalf("rescan tally = %+v, want Relinked 1", res.Total)
+	}
+	if res.Total.Missing != 0 {
+		t.Fatalf("rescan tally = %+v, want Missing 0 (relinked file falsely marked missing)", res.Total)
+	}
+
+	present, err := lib.Query(ctx, query.New(query.EntityItems).
+		Where("state", query.OpIs, string(model.StatePresent)).Build(), "")
+	if err != nil {
+		t.Fatalf("query after move: %v", err)
+	}
+	if len(present) != 1 || present[0].PID != pid {
+		t.Fatalf("present items after move = %+v, want just %s", present, pid)
+	}
+
+	// A relink across folders re-keys the album, since the folder is part of the album
+	// key, and the store carries the row onto the new key rather than letting it ghost,
+	// which emits an item update of its own (store/sqlite/scanreconcile.go). The delta
+	// feed alone can no longer tell that carry apart from a false missing flip, so read
+	// the item's state back for the flip and keep the feed check for the ops the carry
+	// never writes.
+	changes, err := lib.Changes(ctx, seqBeforeMove)
+	if err != nil {
+		t.Fatalf("changes after move: %v", err)
+	}
+	for _, c := range changes {
+		if c.EntityType == "item" && c.EntityPID == pid && c.Op != model.OpUpdate {
+			t.Fatalf("unexpected item %s delta for %s after a relink-only rescan: %+v", c.Op, pid, c)
+		}
+	}
+	item, err := lib.Get(ctx, pid)
+	if err != nil {
+		t.Fatalf("item after move: %v", err)
+	}
+	if item.State != model.StatePresent {
+		t.Fatalf("item state after a relink-only rescan = %s, want present", item.State)
+	}
+}
+
+// TestScanDoesNotMarkRelinkedBookFileMissing is the same guarantee for a book. Books and
+// cue-backed virtual tracks resolve their file rows through their own store method, so
+// the scanner's stale-entry drop has to be fed by every path that reports a relink, not
+// just the track one.
+func TestScanDoesNotMarkRelinkedBookFileMissing(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+
+	// The .m4b extension is the audiobook signal; the bytes are a valid MP3 so the tags
+	// parse.
+	src := filepath.Join(root, "the-hobbit.m4b")
+	writeFile(t, src, testaudio.BuildMP3("The Hobbit", "J.R.R. Tolkien", "The Hobbit", 1))
+
+	lib := openManaged(t, ctx, db, root)
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("initial scan: %v", err)
+	}
+	books, err := lib.Query(ctx, query.New(query.EntityItems).Where("kind", query.OpIs, "book").Build(), "")
+	if err != nil {
+		t.Fatalf("query books: %v", err)
+	}
+	if len(books) != 1 {
+		t.Fatalf("kind=book query returned %d, want 1", len(books))
+	}
+	pid := books[0].PID
+
+	dst := filepath.Join(root, "moved", "the-hobbit.m4b")
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(src, dst); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := lib.Scan(ctx, waxbin.ScanRequest{})
+	if err != nil {
+		t.Fatalf("rescan: %v", err)
+	}
+	if res.Total.Relinked != 1 {
+		t.Fatalf("rescan tally = %+v, want Relinked 1", res.Total)
+	}
+	if res.Total.Missing != 0 {
+		t.Fatalf("rescan tally = %+v, want Missing 0 (the relinked book was marked missing)", res.Total)
+	}
+	item, err := lib.Get(ctx, pid)
+	if err != nil {
+		t.Fatalf("book after move: %v", err)
+	}
+	if item.State != model.StatePresent {
+		t.Fatalf("book state after a relink-only rescan = %s, want present", item.State)
+	}
+}
+
+// TestScanFolderMoveKeepsAlbumIdentity walks the whole scan path for a moved album
+// folder: the heuristic album key embeds the folder, so the rescan re-keys the album,
+// and the store's reconciliation must carry the row rather than leave it ghosting with
+// its pid and star. It also proves the derived state stays consistent afterwards.
+func TestScanFolderMoveKeepsAlbumIdentity(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+
+	src := filepath.Join(root, "Alpha", "One")
+	writeFile(t, filepath.Join(src, "01.mp3"),
+		testaudio.BuildMP3WithAudio("A1", "Alpha", "One", 1, []byte("first")))
+	writeFile(t, filepath.Join(src, "02.mp3"),
+		testaudio.BuildMP3WithAudio("A2", "Alpha", "One", 2, []byte("second")))
+
+	lib := openManaged(t, ctx, db, root)
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("initial scan: %v", err)
+	}
+
+	page, err := lib.EntityPage(ctx, read.EntityAlbum, read.Cursor(""), 10)
+	if err != nil {
+		t.Fatalf("album page: %v", err)
+	}
+	if len(page.Entities) != 1 {
+		t.Fatalf("albums after the first scan = %d, want 1", len(page.Entities))
+	}
+	albumPID := page.Entities[0].PID
+	if _, err := lib.SetEntityStar(ctx, "", model.MergeAlbum, albumPID, true, nil); err != nil {
+		t.Fatalf("star album: %v", err)
+	}
+
+	if err := os.Rename(src, filepath.Join(root, "Alpha", "Two")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("rescan: %v", err)
+	}
+
+	page, err = lib.EntityPage(ctx, read.EntityAlbum, read.Cursor(""), 10)
+	if err != nil {
+		t.Fatalf("album page after move: %v", err)
+	}
+	if len(page.Entities) != 1 {
+		t.Fatalf("albums after the move = %d, want 1 (the old row ghosted)", len(page.Entities))
+	}
+	if page.Entities[0].PID != albumPID {
+		t.Fatalf("album pid after the move = %s, want kept %s", page.Entities[0].PID, albumPID)
+	}
+	state, err := lib.EntityPlayState(ctx, "", model.MergeAlbum, albumPID)
+	if err != nil {
+		t.Fatalf("read star: %v", err)
+	}
+	if !state.Starred {
+		t.Error("the album star did not survive the folder move")
+	}
+	rep, err := lib.VerifyDerived(ctx)
+	if err != nil || !rep.Consistent() {
+		t.Fatalf("db verify not clean after the move: %+v (err %v)", rep, err)
+	}
+}
+
 // TestOpenRejectsOverlappingRoots verifies embedders get the same root isolation
 // as the CLI because Open runs config validation.
 func TestOpenRejectsOverlappingRoots(t *testing.T) {

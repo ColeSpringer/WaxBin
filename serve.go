@@ -302,7 +302,18 @@ func (l *Library) proxyHandlers() map[string]proxy.Handler {
 			if err != nil {
 				return nil, err
 			}
-			return nil, l.SetArtLock(ctx, model.ArtEntity(p.EntityType), model.PID(p.EntityPID), p.Lock)
+			// The front cover has no role name of its own here: an omitted role means
+			// front, and spelling it out is refused rather than aliased, so a client
+			// cannot end up believing the front has a lock separate from the entity's.
+			if p.Role == string(model.ArtRoleFront) {
+				return nil, waxerr.New(waxerr.CodeInvalid, "serve.set_art_lock",
+					`the front cover's lock is the entity's own: omit role instead of sending "front"`)
+			}
+			role, ok := model.ParseArtRole(p.Role)
+			if !ok {
+				return nil, waxerr.New(waxerr.CodeInvalid, "serve.set_art_lock", "unknown art role: "+p.Role)
+			}
+			return nil, l.SetArtLock(ctx, model.ArtEntity(p.EntityType), model.PID(p.EntityPID), role, p.Lock)
 		},
 		proxy.MethodEditEntity: func(ctx context.Context, raw json.RawMessage) (any, error) {
 			p, err := decodeParams[proxy.EditEntityParams](raw)

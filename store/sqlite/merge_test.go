@@ -401,6 +401,68 @@ func TestMergeArtInheritsPerRole(t *testing.T) {
 	}
 }
 
+// TestMergeCarriesRoleArtLocks: an art.<role> lock travels the way the plain "art"
+// lock does, on the row move alone rather than through the locked-wins union the other
+// curation fields take. A role the survivor does not curate inherits the loser's lock
+// beside the image repointArtMap moved into the same empty slot; a role the survivor
+// does curate keeps its own answer, where the union would have promoted it to locked
+// over a picture the loser never protected.
+func TestMergeCarriesRoleArtLocks(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/a/1.flac", essence: "e1", content: "c1", title: "One", artist: "Beatles", album: "A"})
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/b/2.flac", essence: "e2", content: "c2", title: "Two", artist: "The Beatles", album: "B"})
+	survivor, loser := entityPID(t, st, "artist", "The Beatles"), entityPID(t, st, "artist", "Beatles")
+	sID, lID := artistID(t, st, "The Beatles"), artistID(t, st, "Beatles")
+
+	// The survivor fills disc and curates it unlocked; the loser fills back and disc
+	// and locks both roles.
+	seedArtRole(t, st, "hashSurvDisc", "artist", sID, "disc")
+	seedRoleLock(t, st, "artist", sID, "art.disc", false)
+	seedArtRole(t, st, "hashLoseBack", "artist", lID, "back")
+	seedArtRole(t, st, "hashLoseDisc", "artist", lID, "disc")
+	seedRoleLock(t, st, "artist", lID, "art.back", true)
+	seedRoleLock(t, st, "artist", lID, "art.disc", true)
+
+	if _, err := st.MergeEntity(ctx, model.MergeArtist, survivor, loser); err != nil {
+		t.Fatalf("merge: %v", err)
+	}
+	if got := artHashes(t, st, "artist", sID); len(got) != 2 || got[0] != "hashLoseBack" || got[1] != "hashSurvDisc" {
+		t.Errorf("survivor art = %v, want the inherited back plus its own disc", got)
+	}
+	// The back lock came across into the slot the back image landed in.
+	if !roleLocked(t, st, "artist", sID, "art.back") {
+		t.Error("the loser's art.back lock did not reach the survivor")
+	}
+	// The disc lock did not, because the survivor curates that role itself. Without
+	// the art.% exclusion the union would have promoted this row to locked, pinning
+	// the survivor's own disc image under a lock the loser put on a different one.
+	if roleLocked(t, st, "artist", sID, "art.disc") {
+		t.Error("the loser's art.disc lock was unioned onto the survivor's own disc curation")
+	}
+	if n := scalarInt(t, st, "SELECT COUNT(*) FROM entity_curation WHERE entity_type='artist' AND entity_id=?", lID); n != 0 {
+		t.Errorf("%d curation rows outlived the loser, want 0", n)
+	}
+	assertVerifyClean(t, st)
+}
+
+// seedRoleLock writes an entity_curation row for one art field in the given lock state.
+func seedRoleLock(t *testing.T, st *Store, entityType string, entityID int64, field string, locked bool) {
+	t.Helper()
+	if _, err := st.write.ExecContext(context.Background(),
+		`INSERT INTO entity_curation(entity_type, entity_id, field, source, locked, updated_at)
+		 VALUES (?,?,?,'user',?,1)`, entityType, entityID, field, boolInt(locked)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func roleLocked(t *testing.T, st *Store, entityType string, entityID int64, field string) bool {
+	t.Helper()
+	return scalarInt(t, st,
+		"SELECT COUNT(*) FROM entity_curation WHERE entity_type=? AND entity_id=? AND field=? AND locked=1",
+		entityType, entityID, field) == 1
+}
+
 func TestMergePreservesUnrelatedSelfLoop(t *testing.T) {
 	st, lib := entityFixture(t)
 	ctx := context.Background()
@@ -497,6 +559,52 @@ func TestMergeReleaseGroupUnionsType(t *testing.T) {
 	if typ != "compilation" {
 		t.Errorf("survivor release-group type = %q, want compilation (unioned from the loser)", typ)
 	}
+}
+
+// TestMergeDropsLoserAuxMarker: a release-group merge drops the loser's aux-art
+// backfill marker instead of unioning it (the loser's images have just moved into the
+// survivor's empty roles, so its recorded answer no longer describes anything), and
+// leaves the survivor's own marker alone.
+func TestMergeDropsLoserAuxMarker(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/a/1.flac", essence: "e1", content: "c1", title: "One", artist: "A", albumArt: "A", album: "SurvRG"})
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/b/2.flac", essence: "e2", content: "c2", title: "Two", artist: "B", albumArt: "B", album: "LoseRG"})
+
+	rg := func(title string) (int64, model.PID) {
+		t.Helper()
+		var id int64
+		var pid string
+		if err := st.read.QueryRowContext(ctx,
+			"SELECT id, pid FROM release_group WHERE title = ?", title).Scan(&id, &pid); err != nil {
+			t.Fatalf("no release group titled %q: %v", title, err)
+		}
+		return id, model.PID(pid)
+	}
+	survID, survPID := rg("SurvRG")
+	loseID, losePID := rg("LoseRG")
+
+	for _, e := range []struct {
+		id  int64
+		pid model.PID
+	}{{survID, survPID}, {loseID, losePID}} {
+		if err := st.ApplyReleaseGroupAuxArt(ctx, model.ReleaseGroupAuxArt{ReleaseGroupID: e.id, PID: e.pid}); err != nil {
+			t.Fatalf("mark %s: %v", e.pid, err)
+		}
+	}
+
+	if _, err := st.MergeEntity(ctx, model.MergeReleaseGroup, survPID, losePID); err != nil {
+		t.Fatalf("merge: %v", err)
+	}
+	if n := scalarInt(t, st,
+		"SELECT COUNT(*) FROM entity_enrichment WHERE entity_type='aux_art' AND entity_id=?", loseID); n != 0 {
+		t.Errorf("loser aux_art rows = %d, want 0 (a reused rowid would inherit it)", n)
+	}
+	if n := scalarInt(t, st,
+		"SELECT COUNT(*) FROM entity_enrichment WHERE entity_type='aux_art' AND entity_id=?", survID); n != 1 {
+		t.Errorf("survivor aux_art rows = %d, want its own kept", n)
+	}
+	assertVerifyClean(t, st)
 }
 
 func TestMergeErrors(t *testing.T) {

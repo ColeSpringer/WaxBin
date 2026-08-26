@@ -14,8 +14,10 @@ func newLockCmd(g *globals) *cobra.Command {
 		Short: "Lock item fields against enrichment and organize writes",
 		Long: "Locks one or more of an item's fields so enrichment and organize leave them " +
 			"alone. The \"art\" field is the item's front cover, and locking it here writes " +
-			"the same row `waxbin art lock <pid>` does (its --type defaults to track). That " +
-			"overlap is deliberate: an item's art lock has one home.",
+			"the same row `waxbin art lock <pid>` does (its --type defaults to track). An " +
+			"auxiliary slot is \"art.<role>\" (art.back, art.disc, art.booklet, " +
+			"art.background), the row `waxbin art lock <pid> --role <role>` writes. That " +
+			"overlap is deliberate: an item's art locks have one home.",
 		Args: cobra.MinimumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			m, _, err := g.openMutator(cmd)
@@ -37,8 +39,9 @@ func newUnlockCmd(g *globals) *cobra.Command {
 		Use:   "unlock <pid> <field>...",
 		Short: "Clear locks on item fields",
 		Long: "Clears locks on one or more of an item's fields. Unlocking \"art\" clears the " +
-			"same row `waxbin art unlock <pid>` does; an item's art lock has one home. For a " +
-			"non-item entity's cover, use `waxbin art unlock --type <entity>`.",
+			"same row `waxbin art unlock <pid>` does, and \"art.<role>\" the row `--role " +
+			"<role>` writes; an item's art locks have one home. For a non-item entity's " +
+			"artwork, use `waxbin art unlock --type <entity>`.",
 		Args: cobra.MinimumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			m, _, err := g.openMutator(cmd)

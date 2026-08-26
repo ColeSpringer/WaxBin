@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -153,6 +154,7 @@ func TestEditBatchRoundTrip(t *testing.T) {
 func TestCurationRoundTrip(t *testing.T) {
 	var gotArt []byte
 	var gotLyrics *model.Lyrics
+	var gotLockRoles []string
 	handlers := map[string]proxy.Handler{
 		proxy.MethodSetCredits: func(_ context.Context, raw json.RawMessage) (any, error) {
 			var p proxy.SetCreditsParams
@@ -202,8 +204,14 @@ func TestCurationRoundTrip(t *testing.T) {
 		proxy.MethodSetArtLock: func(_ context.Context, raw json.RawMessage) (any, error) {
 			var p proxy.SetArtLockParams
 			_ = json.Unmarshal(raw, &p)
-			if p.EntityType != "podcast" || p.EntityPID != "pod1" || p.Lock {
+			if p.EntityType != "podcast" || p.EntityPID != "pod1" {
 				t.Errorf("art lock params = %+v", p)
+			}
+			gotLockRoles = append(gotLockRoles, p.Role)
+			// The front direction must not carry a role at all, so the frame stays the
+			// one a pre-role client sent.
+			if ok := rawHas(raw, "role"); ok != (p.Role != "") {
+				t.Errorf("role key present = %v with role %q, want them to agree", ok, p.Role)
 			}
 			return nil, nil
 		},
@@ -245,9 +253,31 @@ func TestCurationRoundTrip(t *testing.T) {
 
 	// set_art_lock carries no result payload; the unlock direction is the one that
 	// matters, since it is the way out of a cleared and locked cover.
-	if err := c.SetArtLock(ctx, model.ArtPodcast, "pod1", false); err != nil {
+	if err := c.SetArtLock(ctx, model.ArtPodcast, "pod1", model.ArtRoleFront, false); err != nil {
 		t.Fatalf("set art lock: %v", err)
 	}
+	// An auxiliary role names itself; the front cover does not, in either spelling.
+	if err := c.SetArtLock(ctx, model.ArtPodcast, "pod1", model.ArtRoleBack, true); err != nil {
+		t.Fatalf("set art lock (back): %v", err)
+	}
+	if err := c.SetArtLock(ctx, model.ArtPodcast, "pod1", "", true); err != nil {
+		t.Fatalf("set art lock (empty role): %v", err)
+	}
+	if want := []string{"", "back", ""}; !slices.Equal(gotLockRoles, want) {
+		t.Errorf("roles on the wire = %v, want %v", gotLockRoles, want)
+	}
+}
+
+// rawHas reports whether a JSON object literally carries a key, which is how the
+// front role's absence from the frame is checked rather than inferred from a zero
+// value.
+func rawHas(raw json.RawMessage, key string) bool {
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		return false
+	}
+	_, ok := obj[key]
+	return ok
 }
 
 // TestErrorCodePreserved checks a handler's waxerr Code survives the round-trip so
