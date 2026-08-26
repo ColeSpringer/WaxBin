@@ -16,6 +16,7 @@ import (
 	"github.com/colespringer/waxbin/config"
 	"github.com/colespringer/waxbin/internal/testaudio"
 	"github.com/colespringer/waxbin/internal/testsock"
+	"github.com/colespringer/waxbin/meta"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/podcast"
 	"github.com/colespringer/waxbin/proxy"
@@ -819,6 +820,53 @@ func TestServeProxiedAddRoot(t *testing.T) {
 	// Validation runs server-side and keeps its class on the wire.
 	if _, err := c.AddRoot(ctx, proxy.AddRootParams{Path: filepath.Join(rootA, "sub"), Mode: "managed"}); !waxerr.Is(err, waxerr.CodeInvalid) {
 		t.Fatalf("proxied overlapping add_root = %v, want CodeInvalid", err)
+	}
+}
+
+// TestServeProxiedDetach drives the detach mutator through the socket while the server
+// holds the write lock: the member moves onto its heuristic album and, because the
+// write-back flag crossed the wire, its file loses the release tags that would put it
+// back on the next rescan.
+func TestServeProxiedDetach(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	sock := testsock.Path(t)
+	const relMBID = "16161616-1616-1616-1616-161616161616"
+	for i, title := range []string{"One", "Two"} {
+		writeFile(t, filepath.Join(root, fmt.Sprintf("0%d.mp3", i+1)), testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
+			Title: title, Artist: "Alpha", AlbumArtist: "Alpha", Album: "Both", Track: i + 1,
+			Audio: testaudio.AudioWithSeed(byte(i + 1)),
+			TXXX:  []testaudio.TXXXFrame{{Desc: "MusicBrainz Album Id", Value: relMBID}},
+		}))
+	}
+
+	lib := openServed(t, ctx, db, root, sock)
+	pid := itemPIDByTitle(t, ctx, lib, "One")
+	c := dialWhenReady(t, sock)
+
+	res, err := c.Detach(ctx, pid, true)
+	if err != nil {
+		t.Fatalf("proxied detach: %v", err)
+	}
+	if len(res.WriteBackFailures) != 0 {
+		t.Fatalf("unexpected write-back failures: %+v", res.WriteBackFailures)
+	}
+	if res.OldAlbumPID == "" || res.NewAlbumPID == "" || res.OldAlbumPID == res.NewAlbumPID {
+		t.Fatalf("detach result = %+v, want the member on a different album", res)
+	}
+	after := catalogScalar[string](t, ctx, db,
+		`SELECT al.pid FROM album al JOIN track t ON t.album_id = al.id
+			JOIN playable_item pi ON pi.id = t.item_id WHERE pi.pid = ?`, string(pid))
+	if after != res.NewAlbumPID {
+		t.Errorf("catalog album = %q, want the reported %q", after, res.NewAlbumPID)
+	}
+	fm, err := meta.NewReader().Read(ctx, filepath.Join(root, "01.mp3"))
+	if err != nil {
+		t.Fatalf("read the detached file: %v", err)
+	}
+	if fm.Tags.MBReleaseID != "" {
+		t.Errorf("detached file still carries release id %q, want the write-back to have stripped it", fm.Tags.MBReleaseID)
 	}
 }
 

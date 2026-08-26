@@ -45,21 +45,29 @@ func (o EntityEditOptions) Attribution() model.Attribution {
 // the entity MBIDs, plus the release-group type). It records opts.Source (empty means a
 // user edit) and applies opts.Lock to each edited field. The catalog write is atomic. A
 // field that does not apply to the entity type, or an invalid value, is rejected; a
-// locked field returns CodeLocked unless opts.Force is set.
+// locked field returns CodeLocked unless opts.Force is set. Clearing an mbid re-keys the
+// entity chain, and when that lands on a heuristic twin the entity merges into it, which
+// the returned report names so a caller does not go on talking about a pid that is gone;
+// a clear alongside any other field is refused with CodeConflict naming the survivor to
+// edit instead. That clear is catalog-only: the member files still carry the id, so the
+// linkage returns on the next scan that re-resolves them, which is their next retag,
+// move, or content change rather than every scan. Stripping the tags from those files is
+// the durable fix, the way Detach's write-back strips a single member's.
 //
 // With opts.WriteBack the edited values that round-trip through a rescan are also fanned
 // out across the entity's member files' on-disk tags. Write-back runs after the catalog
 // edit committed, so a file that cannot be written is reported through a *WriteBackError
 // naming the failed files while the entity edit stands.
-func (l *Library) EditEntity(ctx context.Context, entityType model.MergeEntity, entityPID model.PID, edits map[string]string, opts EntityEditOptions) error {
-	if err := l.store.EditEntityFields(ctx, entityType, entityPID, edits,
-		opts.Attribution(), opts.Lock, opts.Force); err != nil {
-		return err
+func (l *Library) EditEntity(ctx context.Context, entityType model.MergeEntity, entityPID model.PID, edits map[string]string, opts EntityEditOptions) (*model.EntityEditReport, error) {
+	rep, err := l.store.EditEntityFields(ctx, entityType, entityPID, edits,
+		opts.Attribution(), opts.Lock, opts.Force)
+	if err != nil {
+		return nil, err
 	}
 	if !opts.WriteBack {
-		return nil
+		return rep, nil
 	}
-	return l.writeBackEntity(ctx, entityType, entityPID, edits)
+	return rep, l.writeBackEntity(ctx, entityType, entityPID, edits)
 }
 
 // EntityCuration returns an entity's curation rows (only non-default fields have rows,

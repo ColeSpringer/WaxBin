@@ -41,7 +41,7 @@ type EnrichScope struct {
 // (the enrich Store port is implemented only by store/sqlite, so it exchanges
 // rowids like the analyze port does).
 type EnrichTarget struct {
-	Type       string // EnrichArtistType | EnrichReleaseGroupType | EnrichBookType
+	Type       string // artist | release_group | album | book, plus the lyrics and aux_art pass markers
 	ID         int64
 	PID        PID
 	Name       string // artist name / release-group title / book/track title

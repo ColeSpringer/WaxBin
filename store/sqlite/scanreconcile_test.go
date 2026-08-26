@@ -27,7 +27,7 @@ func moveFixture(t *testing.T) (*Store, *model.Library, int, model.PID, int) {
 	albPID := albumPID(t, st)
 	rgID := scalarInt(t, st, "SELECT id FROM release_group")
 
-	if err := st.EditEntityFields(ctx, model.MergeAlbum, albPID, map[string]string{"barcode": "1234567890128"},
+	if _, err := st.EditEntityFields(ctx, model.MergeAlbum, albPID, map[string]string{"barcode": "1234567890128"},
 		model.Attribution{Source: model.SourceUser}, model.LockOn, false); err != nil {
 		t.Fatalf("seed curation: %v", err)
 	}

@@ -120,7 +120,7 @@ func TestEntityEditNormalizesBarcode(t *testing.T) {
 	})
 	albumPID := entityPIDByName(t, st, "album", "title", "Album")
 
-	if err := st.EditEntityFields(ctx, model.MergeAlbum, albumPID,
+	if _, err := st.EditEntityFields(ctx, model.MergeAlbum, albumPID,
 		map[string]string{"barcode": "0 36000 29145 2"}, model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
 		t.Fatalf("edit: %v", err)
 	}
@@ -142,7 +142,7 @@ func TestEntityEditNormalizesBarcode(t *testing.T) {
 		}
 	}
 
-	if err := st.EditEntityFields(ctx, model.MergeAlbum, albumPID,
+	if _, err := st.EditEntityFields(ctx, model.MergeAlbum, albumPID,
 		map[string]string{"barcode": "12345"}, model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); !waxerr.Is(err, waxerr.CodeInvalid) {
 		t.Errorf("malformed barcode = %v, want CodeInvalid", err)
 	}

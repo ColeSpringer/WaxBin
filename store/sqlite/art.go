@@ -480,6 +480,23 @@ func clearAlbumArtTx(ctx context.Context, tx *sql.Tx, albumID int64) error {
 	return err
 }
 
+// clearReleaseGroupEnrichmentArtTx drops the art a release-group match wrote: the front
+// cover, the mirror of clearAlbumArtTx, and the auxiliary rows enrichment filled. An
+// auxiliary slot can hold a picture the user chose, so only enrichment-sourced rows go
+// there; the front follows the album's rule instead, since a matched marker is what put
+// it where it is.
+func clearReleaseGroupEnrichmentArtTx(ctx context.Context, tx *sql.Tx, rgID int64) error {
+	if _, err := tx.ExecContext(ctx,
+		"DELETE FROM art_map WHERE entity_type = ? AND entity_id = ? AND role = 'front'",
+		string(model.ArtReleaseGroup), rgID); err != nil {
+		return err
+	}
+	_, err := tx.ExecContext(ctx,
+		"DELETE FROM art_map WHERE entity_type = ? AND entity_id = ? AND role <> 'front' AND source = ?",
+		string(model.ArtReleaseGroup), rgID, string(model.SourceEnrichment))
+	return err
+}
+
 // artLevel is one rung of the resolution fallback chain: an entity type and its
 // internal id.
 type artLevel struct {

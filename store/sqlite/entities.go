@@ -474,26 +474,38 @@ func clearUnmatchedAlbumMarkerTx(ctx context.Context, tx *sql.Tx, albumID int64)
 	return clearUnmatchedEntityMarkerTx(ctx, tx, model.EnrichAlbumType, albumID)
 }
 
-// albumMarkerMatchedTx reports whether an album's enrichment marker records a match, so
-// the undo path knows whether enrichment ever wrote anything to take back.
-func albumMarkerMatchedTx(ctx context.Context, tx *sql.Tx, albumID int64) (bool, error) {
+// entityMarkerMatchedTx reports whether an entity's enrichment marker records a match,
+// so the undo path knows whether enrichment ever wrote anything to take back.
+func entityMarkerMatchedTx(ctx context.Context, tx *sql.Tx, entityType string, entityID int64) (bool, error) {
 	var matched int
 	err := tx.QueryRowContext(ctx,
 		"SELECT matched FROM entity_enrichment WHERE entity_type = ? AND entity_id = ?",
-		model.EnrichAlbumType, albumID).Scan(&matched)
+		entityType, entityID).Scan(&matched)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
 	return matched == 1, err
 }
 
-// clearAlbumMarkerTx removes an album's enrichment marker whatever it recorded, for the
-// one caller that undoes a match outright by clearing the release id.
-func clearAlbumMarkerTx(ctx context.Context, tx *sql.Tx, albumID int64) error {
+// albumMarkerMatchedTx reports whether an album's enrichment marker records a match; see
+// entityMarkerMatchedTx.
+func albumMarkerMatchedTx(ctx context.Context, tx *sql.Tx, albumID int64) (bool, error) {
+	return entityMarkerMatchedTx(ctx, tx, model.EnrichAlbumType, albumID)
+}
+
+// clearEntityMarkerTx removes an entity's enrichment marker whatever it recorded, for the
+// callers that undo a match outright by clearing the MusicBrainz id it was made on.
+func clearEntityMarkerTx(ctx context.Context, tx *sql.Tx, entityType string, entityID int64) error {
 	_, err := tx.ExecContext(ctx,
 		"DELETE FROM entity_enrichment WHERE entity_type = ? AND entity_id = ?",
-		model.EnrichAlbumType, albumID)
+		entityType, entityID)
 	return err
+}
+
+// clearAlbumMarkerTx removes an album's enrichment marker whatever it recorded; see
+// clearEntityMarkerTx.
+func clearAlbumMarkerTx(ctx context.Context, tx *sql.Tx, albumID int64) error {
+	return clearEntityMarkerTx(ctx, tx, model.EnrichAlbumType, albumID)
 }
 
 // resolveGenre finds-or-creates a genre/mood entity by (facet, match key).

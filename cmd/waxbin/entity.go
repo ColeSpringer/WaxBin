@@ -110,7 +110,11 @@ func newEntityEditCmd(g *globals) *cobra.Command {
 			"fans the values that round-trip through a scan across the entity's member files' " +
 			"on-disk tags: an album's BARCODE, LABEL, CATALOGNUMBER, RELEASECOUNTRY, and " +
 			"ALBUMSORT, and an artist's ARTISTSORT. A release-group field, a type, an entity " +
-			"MBID, and an album's media stay catalog-only.",
+			"MBID, and an album's media stay catalog-only.\n\n" +
+			"Clearing an album's or release group's mbid with `--set mbid=` re-keys the chain, " +
+			"but the member files still name the id, so the clear lasts only until a scan " +
+			"re-resolves them: their next retag, move, or content change, and not every scan. " +
+			"Stripping the tags from those files is what makes it durable.",
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			et := model.MergeEntity(args[0])
@@ -127,11 +131,17 @@ func newEntityEditCmd(g *globals) *cobra.Command {
 				return err
 			}
 			defer m.Close()
-			err = m.EditEntity(ctx(cmd), et, pid, edits, waxbin.EntityEditOptions{
+			rep, err := m.EditEntity(ctx(cmd), et, pid, edits, waxbin.EntityEditOptions{
 				WriteBack: writeBack, Lock: lockChange(noLock, keepLock), Force: force,
 			})
 			if err := surfaceWriteBack(cmd, err); err != nil {
 				return err
+			}
+			// A clear that re-keyed onto a twin took this entity with it, so naming the
+			// pid the user typed would name a row that no longer exists.
+			if rep != nil && rep.MergedInto != "" {
+				fmt.Fprintf(out(cmd), "cleared the mbid; %s %s merged into %s\n", et, pid, rep.MergedInto)
+				return nil
 			}
 			fmt.Fprintf(out(cmd), "edited %d field(s) on %s %s\n", len(edits), et, pid)
 			return nil

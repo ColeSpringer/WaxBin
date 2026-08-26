@@ -80,6 +80,7 @@ func newRootCmd(g *globals) *cobra.Command {
 		newEditCmd(g),
 		newEntityCmd(g),
 		newCreditCmd(g),
+		newDetachCmd(g),
 		newTagCmd(g),
 		newLockCmd(g),
 		newUnlockCmd(g),

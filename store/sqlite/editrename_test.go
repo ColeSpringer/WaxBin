@@ -43,6 +43,14 @@ func memberAlbumID(t *testing.T, st *Store, pid model.PID) int {
 		JOIN playable_item pi ON pi.id = t.item_id WHERE pi.pid=?`, string(pid))
 }
 
+// changeCountFor counts change_log rows for one entity's pid and op past a sequence.
+func changeCountFor(t *testing.T, st *Store, seq int64, entityType, pid string, op model.ChangeOp) int {
+	t.Helper()
+	return scalarInt(t, st,
+		"SELECT COUNT(*) FROM change_log WHERE seq>? AND entity_type=? AND entity_pid=? AND op=?",
+		seq, entityType, pid, string(op))
+}
+
 // changeCount counts change_log rows for one entity type and op past a sequence.
 func changeCount(t *testing.T, st *Store, seq int64, entityType string, op model.ChangeOp) int {
 	t.Helper()
@@ -65,7 +73,7 @@ func TestEditAlbumRenamesInPlace(t *testing.T) {
 	// The attachments that must survive: a locked curation row, a front cover, a
 	// star, and a matched RG enrichment marker (matched explicitly, since an
 	// unmatched one is cleared by design on a rename).
-	if err := st.EditEntityFields(ctx, model.MergeAlbum, albPID, map[string]string{"barcode": "1234567890128"},
+	if _, err := st.EditEntityFields(ctx, model.MergeAlbum, albPID, map[string]string{"barcode": "1234567890128"},
 		model.Attribution{Source: model.SourceUser}, model.LockOn, false); err != nil {
 		t.Fatalf("seed curation: %v", err)
 	}
@@ -299,7 +307,7 @@ func TestEditAlbumCollisionMergesIntoIncumbent(t *testing.T) {
 	bID := scalarInt(t, st, "SELECT id FROM album WHERE title='Two'")
 	bPID := model.PID(scalarStr(t, st, "SELECT pid FROM album WHERE title='Two'"))
 	aPID := model.PID(scalarStr(t, st, "SELECT pid FROM album WHERE title='One'"))
-	if err := st.EditEntityFields(ctx, model.MergeAlbum, bPID, map[string]string{"barcode": "1234567890128"},
+	if _, err := st.EditEntityFields(ctx, model.MergeAlbum, bPID, map[string]string{"barcode": "1234567890128"},
 		model.Attribution{Source: model.SourceUser}, model.LockOn, false); err != nil {
 		t.Fatalf("seed incumbent curation: %v", err)
 	}
@@ -558,7 +566,7 @@ func TestEditArtistWholeSetRenamesInPlace(t *testing.T) {
 	artPID := model.PID(scalarStr(t, st, "SELECT pid FROM artist"))
 	rgID := scalarInt(t, st, "SELECT id FROM release_group")
 
-	if err := st.EditEntityFields(ctx, model.MergeArtist, artPID,
+	if _, err := st.EditEntityFields(ctx, model.MergeArtist, artPID,
 		map[string]string{"mbid": "66666666-6666-6666-6666-666666666666"},
 		model.Attribution{Source: model.SourceUser}, model.LockOn, false); err != nil {
 		t.Fatalf("seed curation: %v", err)

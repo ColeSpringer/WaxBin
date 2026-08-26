@@ -58,6 +58,26 @@ var releaseGroupTypes = map[string]bool{
 // ValidReleaseGroupType reports whether s is an accepted release-group type.
 func ValidReleaseGroupType(s string) bool { return releaseGroupTypes[s] }
 
+// EntityEditReport records what an entity edit did beyond writing the fields it was
+// given. MergedInto names the survivor when clearing an mbid re-keyed the entity onto a
+// key a heuristic twin already owned, which is the one case where the entity the caller
+// named no longer exists afterwards. It is empty for every other edit.
+type EntityEditReport struct {
+	MergedInto PID
+}
+
+// DetachReport records a per-member detach: the track pulled off an album keyed on a
+// MusicBrainz release id, the album it left, and the album and release group it landed
+// on. The two new pids are empty when the member's own tags carry no grouping evidence
+// beyond the release id, which leaves it ungrouped exactly as a scan of those tags
+// would.
+type DetachReport struct {
+	ItemPID            PID
+	OldAlbumPID        PID
+	NewAlbumPID        PID
+	NewReleaseGroupPID PID
+}
+
 // EntityCuration is one entity_curation row: an entity field's source and the provider
 // behind it, its lock state, and the curated value when a user set one. It carries no
 // SourceURL, because entity_curation has no column for one, which is why Attribution is

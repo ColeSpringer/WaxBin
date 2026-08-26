@@ -165,18 +165,37 @@ func (m *mutator) SetArtLock(ctx context.Context, entityType model.ArtEntity, en
 	return m.lib.SetArtLock(ctx, entityType, entityPID, role, lock)
 }
 
-func (m *mutator) EditEntity(ctx context.Context, entityType model.MergeEntity, entityPID model.PID, edits map[string]string, opts waxbin.EntityEditOptions) error {
+func (m *mutator) EditEntity(ctx context.Context, entityType model.MergeEntity, entityPID model.PID, edits map[string]string, opts waxbin.EntityEditOptions) (*model.EntityEditReport, error) {
 	if m.px != nil {
 		res, err := m.px.EditEntity(ctx, entityType, entityPID, edits, opts.WriteBack, opts.Attribution(), opts.Lock, opts.Force)
 		if err != nil {
-			return err
+			return nil, err
 		}
+		rep := &model.EntityEditReport{MergedInto: model.PID(res.MergedInto)}
 		if len(res.WriteBackFailures) > 0 {
-			return &waxbin.WriteBackError{ItemPID: entityPID, Edits: edits, Failures: fromProxyFailures(res.WriteBackFailures)}
+			return rep, &waxbin.WriteBackError{ItemPID: entityPID, Edits: edits, Failures: fromProxyFailures(res.WriteBackFailures)}
 		}
-		return nil
+		return rep, nil
 	}
 	return m.lib.EditEntity(ctx, entityType, entityPID, edits, opts)
+}
+
+func (m *mutator) Detach(ctx context.Context, itemPID model.PID, opts waxbin.DetachOptions) (*model.DetachReport, error) {
+	if m.px != nil {
+		res, err := m.px.Detach(ctx, itemPID, opts.WriteBack)
+		if err != nil {
+			return nil, err
+		}
+		rep := &model.DetachReport{
+			ItemPID: itemPID, OldAlbumPID: model.PID(res.OldAlbumPID),
+			NewAlbumPID: model.PID(res.NewAlbumPID), NewReleaseGroupPID: model.PID(res.NewReleaseGroupPID),
+		}
+		if len(res.WriteBackFailures) > 0 {
+			return rep, &waxbin.WriteBackError{ItemPID: itemPID, Failures: fromProxyFailures(res.WriteBackFailures)}
+		}
+		return rep, nil
+	}
+	return m.lib.Detach(ctx, itemPID, opts)
 }
 
 func (m *mutator) SetItemTag(ctx context.Context, itemPID model.PID, key string, values []string, opts waxbin.TagEditOptions) (string, int, error) {

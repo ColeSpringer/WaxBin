@@ -132,7 +132,9 @@ func TestEditItemsFieldsDuplicatePID(t *testing.T) {
 
 // TestEditItemsFieldsMixedKinds verifies one batch can carry kind-appropriate
 // maps for a track and a book, with the union of touched entities' rollups
-// recomputed once and consistent.
+// recomputed once and consistent. It also covers a person credited on both sides:
+// the track artist "Alpha" also wrote a book, and moving both references at once
+// renames the one artist entity in place.
 func TestEditItemsFieldsMixedKinds(t *testing.T) {
 	st, lib, p1, _ := twoTrackFixture(t)
 	ctx := context.Background()
@@ -140,16 +142,37 @@ func TestEditItemsFieldsMixedKinds(t *testing.T) {
 		path: "/lib/Author/Book/b.m4b", essence: "be1", content: "bc1",
 		title: "The Book", author: "Jane Author", durationMS: 100,
 	})
+	shared := putBook(t, st, lib.ID, bookSpec{
+		path: "/lib/Alpha/Sideline/s.m4b", essence: "be2", content: "bc2",
+		title: "Sideline", author: "Alpha", durationMS: 100,
+	})
+	alphaID := entityIDByCol(t, st, "artist", "name", "Alpha")
+	alphaPID := entityPID(t, st, "artist", "Alpha")
 
 	res, err := st.EditItemsFields(ctx, []model.ItemFieldEdit{
-		{ItemPID: p1, Fields: map[string]string{"artist": "Renamed Artist"}},
+		{ItemPID: p1, Fields: map[string]string{"artist": "Renamed Artist", "album_artist": "Renamed Artist"}},
 		{ItemPID: bres.ItemPID, Fields: map[string]string{"author": "Renamed Author", "isbn": "978-0-13-468599-1"}},
+		{ItemPID: shared.ItemPID, Fields: map[string]string{"author": "Renamed Artist"}},
 	}, model.Attribution{Source: model.SourceUser}, model.LockOf(true), false, false)
 	if err != nil {
 		t.Fatalf("mixed batch: %v", err)
 	}
-	if len(res.Edited) != 2 {
-		t.Fatalf("edited = %v, want both", res.Edited)
+	if len(res.Edited) != 3 {
+		t.Fatalf("edited = %v, want all three", res.Edited)
+	}
+	// The track credit and the book author were the same entity, and both moved, so
+	// it was rewritten in place rather than split.
+	var name, gotPID string
+	if err := st.read.QueryRowContext(ctx,
+		"SELECT name, pid FROM artist WHERE id=?", alphaID).Scan(&name, &gotPID); err != nil {
+		t.Fatalf("read artist: %v", err)
+	}
+	if name != "Renamed Artist" || gotPID != string(alphaPID) {
+		t.Fatalf("shared artist = %q/%s, want Renamed Artist with kept pid %s", name, gotPID, alphaPID)
+	}
+	if id := scalarInt(t, st, `SELECT b.author_id FROM book b
+		JOIN playable_item pi ON pi.id=b.item_id WHERE pi.pid=?`, string(shared.ItemPID)); int64(id) != alphaID {
+		t.Errorf("shared book author_id = %d, want the kept entity %d", id, alphaID)
 	}
 	var artist string
 	if err := st.read.QueryRowContext(ctx,

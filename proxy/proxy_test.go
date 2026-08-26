@@ -268,6 +268,74 @@ func TestCurationRoundTrip(t *testing.T) {
 	}
 }
 
+// TestEditEntityRoundTrip checks the entity-edit params reach the handler and the
+// survivor of a merging mbid clear rides back on the response, so a proxied CLI names
+// the row that absorbed the entity rather than the pid it typed.
+func TestEditEntityRoundTrip(t *testing.T) {
+	var got proxy.EditEntityParams
+	handlers := map[string]proxy.Handler{
+		proxy.MethodEditEntity: func(_ context.Context, raw json.RawMessage) (any, error) {
+			_ = json.Unmarshal(raw, &got)
+			return proxy.EditEntityResult{MergedInto: "al-twin"}, nil
+		},
+	}
+	c := dial(t, startServer(t, handlers, nil))
+
+	res, err := c.EditEntity(context.Background(), model.MergeAlbum, "al-1",
+		map[string]string{"mbid": ""}, false, model.Attribution{Source: model.SourceUser}, model.LockOn, false)
+	if err != nil {
+		t.Fatalf("edit entity: %v", err)
+	}
+	if got.EntityType != string(model.MergeAlbum) || got.EntityPID != "al-1" || got.Edits["mbid"] != "" {
+		t.Errorf("edit_entity params = %+v, want the album's cleared mbid", got)
+	}
+	if res.MergedInto != "al-twin" {
+		t.Errorf("mergedInto = %q, want the handler's survivor", res.MergedInto)
+	}
+
+	// An edit that merged nothing leaves the field out of the frame entirely, so an
+	// older server that never sets it decodes to the same empty value.
+	plain := proxy.EditEntityResult{}
+	b, err := json.Marshal(plain)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if rawHas(b, "mergedInto") {
+		t.Errorf("result frame = %s, want no mergedInto key when nothing merged", b)
+	}
+}
+
+// TestDetachRoundTrip checks the detach params reach the handler and the report comes
+// back whole, including the write-back failures a partial tag strip reports as a result
+// rather than a transport error.
+func TestDetachRoundTrip(t *testing.T) {
+	var got proxy.DetachParams
+	handlers := map[string]proxy.Handler{
+		proxy.MethodDetach: func(_ context.Context, raw json.RawMessage) (any, error) {
+			_ = json.Unmarshal(raw, &got)
+			return proxy.DetachResult{
+				OldAlbumPID: "al-old", NewAlbumPID: "al-new", NewReleaseGroupPID: "rg-1",
+				WriteBackFailures: []proxy.WriteBackFailure{{Path: "/x.mp3", Reason: "shared"}},
+			}, nil
+		},
+	}
+	c := dial(t, startServer(t, handlers, nil))
+
+	res, err := c.Detach(context.Background(), "i1", true)
+	if err != nil {
+		t.Fatalf("detach: %v", err)
+	}
+	if got.ItemPID != "i1" || !got.WriteBack {
+		t.Errorf("detach params = %+v, want i1 with write-back", got)
+	}
+	if res.OldAlbumPID != "al-old" || res.NewAlbumPID != "al-new" || res.NewReleaseGroupPID != "rg-1" {
+		t.Errorf("detach result = %+v, want the handler's pids", res)
+	}
+	if len(res.WriteBackFailures) != 1 {
+		t.Errorf("write-back failures = %v, want the one the handler reported", res.WriteBackFailures)
+	}
+}
+
 // rawHas reports whether a JSON object literally carries a key, which is how the
 // front role's absence from the frame is checked rather than inferred from a zero
 // value.

@@ -55,6 +55,15 @@ func curatableFieldForKind(kind, field string) bool {
 // kind is CodeInvalid; a locked credit role is CodeLocked unless force is set. It
 // returns the names actually stored (trimmed, resolvable, de-duplicated by artist),
 // which is what the denorm column, provenance value, and any tag write-back reflect.
+//
+// For a track's performing credit (artist) or a book's author, it also runs the
+// entity rename pre-pass as a single-entry batch, so a single-reference rename lands
+// in place instead of always splitting off a fresh artist; an artist referenced
+// elsewhere in the catalog still splits, since a one-item edit surface cannot prove
+// every reference moved. Only the artist stage runs. The release-group and album
+// stages deliberately do not, because nothing re-resolves the chain behind this call:
+// they would move the chain keys whatever the artist stage decided, leaving them
+// keyed on a credit the columns underneath no longer spell.
 func (s *Store) SetItemCredits(ctx context.Context, itemPID model.PID, role model.ContributorRole, names []string, attr model.Attribution, lock model.LockChange, force bool) ([]string, error) {
 	const op = "store.SetItemCredits"
 	if !role.Valid() {
@@ -97,6 +106,25 @@ func (s *Store) SetItemCredits(ctx context.Context, itemPID model.PID, role mode
 		}
 
 		affected := newAffectedRollups()
+		// Run the rename pre-pass as a batch of one, ahead of the contributor rewrite
+		// below: for the two roles that back an entity-key field (artist on a track,
+		// author on a book) a covered single-reference rename lands in place instead of
+		// splitting. Every other role has no pre-pass field and is left alone, and so is
+		// a set naming several people: that is one entity becoming many, and nothing here
+		// can say which of them should inherit the old row's pid, curation, and star.
+		if renameField, ok := creditRenameField(role); ok && len(clean) == 1 {
+			entry := editEntry{
+				pid:     itemPID,
+				itemID:  itemID,
+				kind:    kind,
+				fields:  []string{renameField},
+				norm:    map[string]string{renameField: strings.Join(clean, ", ")},
+				credits: clean,
+			}
+			if err := renameArtistsForCreditEditTx(ctx, tx, entry, affected, op); err != nil {
+				return err
+			}
+		}
 		// The artist role rewrites track.artist_id, and the outgoing artist need not be
 		// a prior contributor: a catalog scanned before credits existed has no
 		// RoleArtist rows, so its rollup would drift unrecomputed.
@@ -183,6 +211,21 @@ func (s *Store) SetItemCredits(ctx context.Context, itemPID model.PID, role mode
 		return nil, err
 	}
 	return stored, nil
+}
+
+// creditRenameField reports the rename pre-pass's key field for a credit role, if it
+// has one: artist for a track's performing credit, author for a book's author. These
+// are the only two roles that also back an editKeyFields/bookKeyFields entity-key
+// column, so they're the only ones the pre-pass can rename in place.
+func creditRenameField(role model.ContributorRole) (string, bool) {
+	switch role {
+	case model.RoleArtist:
+		return "artist", true
+	case model.RoleAuthor:
+		return "author", true
+	default:
+		return "", false
+	}
 }
 
 // syncCreditDenormTx updates the denormalized column a role feeds, returning whether

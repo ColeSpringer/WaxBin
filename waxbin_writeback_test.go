@@ -79,7 +79,7 @@ func TestEditEntityWriteBackFanOut(t *testing.T) {
 	}
 	albumPID := albumPIDByTitle(t, ctx, db, "Night Moves")
 
-	if err := lib.EditEntity(ctx, model.MergeAlbum, albumPID, map[string]string{
+	if _, err := lib.EditEntity(ctx, model.MergeAlbum, albumPID, map[string]string{
 		"barcode": "0123456789012",
 		"sort":    "Night Moves, The",
 	}, waxbin.EntityEditOptions{WriteBack: true, Lock: model.LockOn}); err != nil {
@@ -126,7 +126,7 @@ func TestEditEntityArtistSortOnlyPrimaryArtist(t *testing.T) {
 	}
 	xavier := artistPIDByName(t, ctx, db, "Xavier")
 
-	if err := lib.EditEntity(ctx, model.MergeArtist, xavier, map[string]string{"sort": "Xavier, DJ"},
+	if _, err := lib.EditEntity(ctx, model.MergeArtist, xavier, map[string]string{"sort": "Xavier, DJ"},
 		waxbin.EntityEditOptions{WriteBack: true, Lock: model.LockOn}); err != nil {
 		t.Fatalf("artist sort write-back: %v", err)
 	}
@@ -731,5 +731,216 @@ func TestSetItemArtFormatHint(t *testing.T) {
 			waxbin.ArtEditOptions{Format: f, Lock: model.LockUnchanged}); !waxerr.Is(err, waxerr.CodeInvalid) {
 			t.Errorf("set with format %q = %v, want CodeInvalid", f, err)
 		}
+	}
+}
+
+// catalogScalar reads one scalar from the catalog directly, for the entity state the
+// facade's views do not surface (match keys, row counts).
+func catalogScalar[T any](t *testing.T, ctx context.Context, db, q string, args ...any) T {
+	t.Helper()
+	raw, err := sql.Open("sqlite", "file:"+db+"?mode=ro")
+	if err != nil {
+		t.Fatalf("open raw db: %v", err)
+	}
+	defer raw.Close()
+	var v T
+	if err := raw.QueryRowContext(ctx, q, args...).Scan(&v); err != nil {
+		t.Fatalf("query %q: %v", q, err)
+	}
+	return v
+}
+
+// TestEditEntityWriteBackAfterMBIDClearMerge covers the write-back side of the mbid escape
+// hatch. A clear that merges the album into its heuristic twin deletes the pid the caller
+// named, so the fan-out must not go looking for that entity's member files: a lone mbid
+// clear fans no tag at all, and the combination that would have fanned one is refused
+// before anything commits.
+func TestEditEntityWriteBackAfterMBIDClearMerge(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	const relMBID = "13131313-1313-1313-1313-131313131313"
+	// One track carries the release id and the other does not, so the scan keys them onto
+	// an mbid album and a heuristic twin under one release group.
+	tagged := filepath.Join(root, "01.mp3")
+	untagged := filepath.Join(root, "02.mp3")
+	writeFile(t, tagged, testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
+		Title: "One", Artist: "Alpha", AlbumArtist: "Alpha", Album: "Twin", Track: 1,
+		Audio: testaudio.AudioWithSeed(1),
+		TXXX:  []testaudio.TXXXFrame{{Desc: "MusicBrainz Album Id", Value: relMBID}},
+	}))
+	writeFile(t, untagged, testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
+		Title: "Two", Artist: "Alpha", AlbumArtist: "Alpha", Album: "Twin", Track: 2,
+		Audio: testaudio.AudioWithSeed(2),
+	}))
+
+	lib := openManaged(t, ctx, db, root)
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if n := catalogScalar[int](t, ctx, db, "SELECT COUNT(*) FROM album"); n != 2 {
+		t.Fatalf("album rows = %d, want the mbid album and its heuristic twin", n)
+	}
+	identified := model.PID(catalogScalar[string](t, ctx, db,
+		"SELECT pid FROM album WHERE match_key = ?", "mbid:"+relMBID))
+	twin := model.PID(catalogScalar[string](t, ctx, db,
+		"SELECT pid FROM album WHERE match_key <> ?", "mbid:"+relMBID))
+
+	// A fannable sibling field alongside the clear is refused, so no tag is written and
+	// the catalog is untouched.
+	_, err := lib.EditEntity(ctx, model.MergeAlbum, identified,
+		map[string]string{"mbid": "", "label": "Blue Note"},
+		waxbin.EntityEditOptions{WriteBack: true, Lock: model.LockOn})
+	if !waxerr.Is(err, waxerr.CodeConflict) {
+		t.Fatalf("clear plus label with write-back = %v, want CodeConflict", err)
+	}
+	if n := catalogScalar[int](t, ctx, db, "SELECT COUNT(*) FROM album"); n != 2 {
+		t.Fatalf("album rows after the refusal = %d, want 2", n)
+	}
+	r := meta.NewReader()
+	for _, p := range []string{tagged, untagged} {
+		fm, err := r.Read(ctx, p)
+		if err != nil {
+			t.Fatalf("read %s: %v", p, err)
+		}
+		if fm.Tags.Label != "" {
+			t.Errorf("%s LABEL = %q, want nothing written by a refused edit", filepath.Base(p), fm.Tags.Label)
+		}
+	}
+
+	// The lone clear commits and merges the album away. Write-back stays clean: an mbid
+	// has no fanned tag, so the fan-out never asks the catalog for the deleted pid's files.
+	if _, err := lib.EditEntity(ctx, model.MergeAlbum, identified, map[string]string{"mbid": ""},
+		waxbin.EntityEditOptions{WriteBack: true, Lock: model.LockOn}); err != nil {
+		t.Fatalf("lone clear with write-back: %v", err)
+	}
+	if n := catalogScalar[int](t, ctx, db, "SELECT COUNT(*) FROM album"); n != 1 {
+		t.Fatalf("album rows after the clear = %d, want the twin alone", n)
+	}
+	if p := catalogScalar[string](t, ctx, db, "SELECT pid FROM album"); model.PID(p) != twin {
+		t.Fatalf("surviving album pid = %q, want the twin %q", p, twin)
+	}
+}
+
+// TestDetachWriteBackStripsMBTags covers the durable half of a per-member detach. The
+// catalog re-resolve alone leaves the release ids in the member's own tags, so the next
+// scan that re-resolves entities would re-adopt it; with write-back the two ids come off
+// the file and a forced rescan leaves the member on its heuristic album.
+func TestDetachWriteBackStripsMBTags(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	const relMBID = "14141414-1414-1414-1414-141414141414"
+	const rgMBID = "15151515-1515-1515-1515-151515151515"
+	mbTags := []testaudio.TXXXFrame{
+		{Desc: "MusicBrainz Album Id", Value: relMBID},
+		{Desc: "MusicBrainz Release Group Id", Value: rgMBID},
+	}
+	first := filepath.Join(root, "01.mp3")
+	second := filepath.Join(root, "02.mp3")
+	writeFile(t, first, testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
+		Title: "One", Artist: "Alpha", AlbumArtist: "Alpha", Album: "Both", Track: 1,
+		Audio: testaudio.AudioWithSeed(1), TXXX: mbTags,
+	}))
+	writeFile(t, second, testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
+		Title: "Two", Artist: "Alpha", AlbumArtist: "Alpha", Album: "Both", Track: 2,
+		Audio: testaudio.AudioWithSeed(2), TXXX: mbTags,
+	}))
+
+	lib := openManaged(t, ctx, db, root)
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if n := catalogScalar[int](t, ctx, db, "SELECT COUNT(*) FROM album"); n != 1 {
+		t.Fatalf("album rows = %d, want the one identified album", n)
+	}
+	member := model.PID(catalogScalar[string](t, ctx, db,
+		"SELECT pid FROM playable_item WHERE title = ?", "One"))
+
+	rep, err := lib.Detach(ctx, member, waxbin.DetachOptions{WriteBack: true})
+	if err != nil {
+		t.Fatalf("detach with write-back: %v", err)
+	}
+	if rep.NewAlbumPID == "" || rep.NewAlbumPID == rep.OldAlbumPID {
+		t.Fatalf("report = %+v, want a new album pid", rep)
+	}
+
+	r := meta.NewReader()
+	fm, err := r.Read(ctx, first)
+	if err != nil {
+		t.Fatalf("read %s: %v", first, err)
+	}
+	if fm.Tags.MBReleaseID != "" || fm.Tags.MBReleaseGroupID != "" {
+		t.Errorf("detached file still carries %q/%q, want both cleared",
+			fm.Tags.MBReleaseID, fm.Tags.MBReleaseGroupID)
+	}
+	// Only the member's own files are rewritten; the album it left keeps its identity
+	// on disk as well as in the catalog.
+	fm2, err := r.Read(ctx, second)
+	if err != nil {
+		t.Fatalf("read %s: %v", second, err)
+	}
+	if fm2.Tags.MBReleaseID != relMBID {
+		t.Errorf("the other member's release id = %q, want it untouched", fm2.Tags.MBReleaseID)
+	}
+
+	// A forced rescan re-resolves every file, and the stripped tags leave the member on
+	// its heuristic album instead of putting it back.
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{Force: true}); err != nil {
+		t.Fatalf("forced rescan: %v", err)
+	}
+	after := catalogScalar[string](t, ctx, db,
+		`SELECT al.pid FROM album al JOIN track t ON t.album_id = al.id
+			JOIN playable_item pi ON pi.id = t.item_id WHERE pi.pid = ?`, string(member))
+	if model.PID(after) != rep.NewAlbumPID {
+		t.Errorf("album after the forced rescan = %q, want the heuristic %q", after, rep.NewAlbumPID)
+	}
+}
+
+// TestDetachWriteBackRefusedKeepsTheTags: a file the write-back engine will not rewrite
+// per item (a virtual or shared backing file) comes back as a *WriteBackError while the
+// catalog detach stands, and the release ids are still on disk. That classification is
+// what the CLI reads to decide whether the durability caveat still applies.
+func TestDetachWriteBackRefusedKeepsTheTags(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	const relMBID = "16161616-1616-1616-1616-161616161616"
+	mbTags := []testaudio.TXXXFrame{{Desc: "MusicBrainz Album Id", Value: relMBID}}
+	first := filepath.Join(root, "01.mp3")
+	writeFile(t, first, testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
+		Title: "One", Artist: "Alpha", AlbumArtist: "Alpha", Album: "Both", Track: 1,
+		Audio: testaudio.AudioWithSeed(1), TXXX: mbTags,
+	}))
+	writeFile(t, filepath.Join(root, "02.mp3"), testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
+		Title: "Two", Artist: "Alpha", AlbumArtist: "Alpha", Album: "Both", Track: 2,
+		Audio: testaudio.AudioWithSeed(2), TXXX: mbTags,
+	}))
+
+	lib := openManaged(t, ctx, db, root)
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	member := model.PID(catalogScalar[string](t, ctx, db,
+		"SELECT pid FROM playable_item WHERE title = ?", "One"))
+	makeBackingFileVirtual(t, ctx, db, member)
+
+	rep, err := lib.Detach(ctx, member, waxbin.DetachOptions{WriteBack: true})
+	var wbErr *waxbin.WriteBackError
+	if !errors.As(err, &wbErr) {
+		t.Fatalf("detach with a refused strip = %v, want a *WriteBackError", err)
+	}
+	if len(wbErr.Failures) == 0 {
+		t.Errorf("write-back error carries no failures: %+v", wbErr)
+	}
+	if rep == nil || rep.NewAlbumPID == "" || rep.NewAlbumPID == rep.OldAlbumPID {
+		t.Fatalf("report = %+v, want the catalog detach to stand", rep)
+	}
+	fm, err := meta.NewReader().Read(ctx, first)
+	if err != nil {
+		t.Fatalf("read %s: %v", first, err)
+	}
+	if fm.Tags.MBReleaseID != relMBID {
+		t.Errorf("release id on disk = %q, want it still there after the refused strip", fm.Tags.MBReleaseID)
 	}
 }

@@ -178,8 +178,12 @@ const BookSeriesTagKey = string(tag.Grouping)
 // MusicBrainz ID is the entity's identity key on the next scan (AlbumKey/artist match are
 // mbid-first), but the entity edit updates only the mbid column, not the row's match_key,
 // so writing the MBID to the files would re-key the entity to a fresh row and orphan its
-// curation and locks. Barcode/label/catalog#/sort are not identity inputs, so they fan
-// safely. A release-group field and a release-group type also stay DB-only.
+// curation and locks. Clearing one is the exception that does re-key, deliberately, and
+// the strip that would make such a clear durable is expressible through the write-back
+// engine (writeBackDetach fans exactly that for one detached member), but the clear
+// deliberately does not fan one across a whole album's files; DEFERRED.md records why.
+// Barcode/label/catalog#/sort are not identity inputs, so they fan safely. A
+// release-group field and a release-group type also stay DB-only.
 //
 // An album's media stays DB-only, for a reason that is about the tag rather than
 // identity: MEDIA is a per-medium tag while the fan-out writes one value to every member

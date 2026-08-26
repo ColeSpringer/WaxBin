@@ -104,6 +104,14 @@ import (
 // the entity lock also stops enrichment filling every other role. An omitted Role still
 // encodes exactly as it did at 13 and still means the front cover, so the call a
 // version-13 client makes is unchanged in meaning; the bump is for the new field alone.
+// The same version added detach and EditEntityResult.MergedInto, both riding along
+// rather than earning a bump. Neither can misdrive a call. The only peer that could
+// take a detach for something else is another version-14 build predating the handler,
+// which fails loudly with "unknown method: detach" (server.go) rather than doing the
+// wrong thing, and a server built without MergedInto simply omits the field, leaving the
+// client with the generic edited-fields line it printed before. That is the house
+// precedent as well: set_art_lock landed at an already-committed version 10 and was left
+// there, with the bump taken later.
 const ProtocolVersion = 14
 
 // Method names for the proxied operations: the fast request/response catalog
@@ -126,6 +134,7 @@ const (
 	MethodSetEntityArt     = "set_entity_art"
 	MethodSetArtLock       = "set_art_lock"
 	MethodEditEntity       = "edit_entity"
+	MethodDetach           = "detach"
 	MethodSetTag           = "set_tag"
 	MethodLock             = "lock"
 	MethodUnlock           = "unlock"
@@ -442,9 +451,32 @@ type EditEntityParams struct {
 
 // EditEntityResult is the edit_entity response payload. A committed entity edit whose
 // member-file fan-out partially failed returns the failed files here rather than as a
-// transport error, matching edit_fields.
+// transport error, matching edit_fields. MergedInto names the survivor when clearing an
+// mbid re-keyed the entity onto a key a heuristic twin already owned, so the edited pid
+// no longer exists; it is empty for every other edit.
 type EditEntityResult struct {
+	MergedInto        string             `json:"mergedInto,omitempty"`
 	WriteBackFailures []WriteBackFailure `json:"writeBackFailures,omitempty"`
+}
+
+// DetachParams is the detach request payload: one member of an album identified by a
+// release id, moved onto the heuristic chain its own tags imply. With WriteBack the
+// member's files also lose the two MusicBrainz release tags, which is what keeps the
+// detach across a rescan.
+type DetachParams struct {
+	ItemPID   string `json:"itemPid"`
+	WriteBack bool   `json:"writeBack"`
+}
+
+// DetachResult is the detach response payload: the album the member left, the album and
+// release group it landed on, and the files a write-back could not rewrite (empty
+// without write-back or after a clean one). The two new pids are empty when the member
+// grouped on nothing but the release id.
+type DetachResult struct {
+	OldAlbumPID        string             `json:"oldAlbumPid"`
+	NewAlbumPID        string             `json:"newAlbumPid,omitempty"`
+	NewReleaseGroupPID string             `json:"newReleaseGroupPid,omitempty"`
+	WriteBackFailures  []WriteBackFailure `json:"writeBackFailures,omitempty"`
 }
 
 // FieldsParams is the lock / unlock request payload.

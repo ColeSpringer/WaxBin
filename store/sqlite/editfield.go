@@ -45,6 +45,18 @@ var editKeyFields = map[string]bool{
 	"artist": true, "album_artist": true, "album": true, "year": true,
 }
 
+// bookKeyFields are the book fields whose edit can move the item onto another author
+// artist or series entity, which makes the book a rename pre-pass participant. Unlike
+// a track's chain keys, they do not move the item's own identity key: a DB-only book
+// edit deliberately leaves that alone and write-back is what re-anchors it.
+var bookKeyFields = map[string]bool{"author": true, "series": true}
+
+// bookCreditFields are the book fields whose value names artists. The rename pre-pass
+// overlays all of them, not just the key-bearing author, so a batch handing the old
+// author's name to another credit is visible to the fold-back guard rather than
+// renaming the entity out from under it.
+var bookCreditFields = map[string]bool{"author": true, "narrator": true}
+
 // episodeEditFields are the fields editable on a podcast episode item.
 var episodeEditFields = map[string]bool{
 	"title": true, "description": true, "pinned": true, "season": true,
@@ -173,6 +185,11 @@ type editEntry struct {
 	kind   string
 	fields []string
 	norm   map[string]string
+	// credits is the credit path's already-cleaned name list, used by the rename
+	// pre-pass verbatim. The norm value is the joined display, and no splitter can
+	// recover the list from it: "Gaiman & Pratchett" is one author, and "A, B" is two.
+	// Nil on the scalar edit path, which splits the value as it always did.
+	credits []string
 }
 
 // collectEditEntriesTx resolves and validates every edit target in caller order, ahead
@@ -854,6 +871,10 @@ func artistListDerived(names, split []string) bool {
 // keyed rows too, and using the column would compute an mbid: key no row owns and fork
 // the member off its album. Keys store the id lowercase and the identity functions
 // lowercase again, so the round trip is stable. An item with no album is a no-op.
+//
+// Taking one member out of an identified album is therefore a gesture of its own rather
+// than something an edit can express: DetachItemFromMBIDAlbum (detach.go) re-resolves the
+// member with both ids emptied.
 func adoptEntityKeyMBIDs(ctx context.Context, tx *sql.Tx, itemID int64, tr *model.Track) error {
 	var albumKey, rgKey sql.NullString
 	err := tx.QueryRowContext(ctx, `SELECT al.match_key, rg.match_key FROM track t

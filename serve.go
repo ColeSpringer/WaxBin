@@ -324,19 +324,42 @@ func (l *Library) proxyHandlers() map[string]proxy.Handler {
 			if lockErr != nil {
 				return nil, lockErr
 			}
-			editErr := l.EditEntity(ctx, model.MergeEntity(p.EntityType), model.PID(p.EntityPID), p.Edits,
+			rep, editErr := l.EditEntity(ctx, model.MergeEntity(p.EntityType), model.PID(p.EntityPID), p.Edits,
 				EntityEditOptions{
 					WriteBack: p.WriteBack, Lock: lock, Force: p.Force,
 					Source: model.ProvenanceSource(p.Source), Provider: p.Provider,
 				})
+			out := proxy.EditEntityResult{}
+			if rep != nil {
+				out.MergedInto = string(rep.MergedInto)
+			}
 			var wbErr *WriteBackError
 			if errors.As(editErr, &wbErr) {
-				return proxy.EditEntityResult{WriteBackFailures: toProxyFailures(wbErr.Failures)}, nil
+				out.WriteBackFailures = toProxyFailures(wbErr.Failures)
+				return out, nil
 			}
 			if editErr != nil {
 				return nil, editErr
 			}
-			return proxy.EditEntityResult{}, nil
+			return out, nil
+		},
+		proxy.MethodDetach: func(ctx context.Context, raw json.RawMessage) (any, error) {
+			p, err := decodeParams[proxy.DetachParams](raw)
+			if err != nil {
+				return nil, err
+			}
+			rep, detachErr := l.Detach(ctx, model.PID(p.ItemPID), DetachOptions{WriteBack: p.WriteBack})
+			// A write-back failure is a result, not a transport error: the detach
+			// committed and only the file's tags did not follow, so the report still
+			// travels alongside the failed files.
+			var wbErr *WriteBackError
+			if errors.As(detachErr, &wbErr) {
+				return detachResult(rep, toProxyFailures(wbErr.Failures)), nil
+			}
+			if detachErr != nil {
+				return nil, detachErr
+			}
+			return detachResult(rep, nil), nil
 		},
 		proxy.MethodSetTag: func(ctx context.Context, raw json.RawMessage) (any, error) {
 			p, err := decodeParams[proxy.SetTagParams](raw)
@@ -707,6 +730,17 @@ func toProxyFailures(failures []WriteBackFailure) []proxy.WriteBackFailure {
 		out[i] = proxy.WriteBackFailure{FilePID: string(f.FilePID), Path: f.Path, Reason: f.Reason}
 	}
 	return out
+}
+
+// detachResult converts a detach report and any write-back failures into the wire
+// payload. Both callers hold a committed detach, so the report is there.
+func detachResult(rep *model.DetachReport, failures []proxy.WriteBackFailure) proxy.DetachResult {
+	return proxy.DetachResult{
+		OldAlbumPID:        string(rep.OldAlbumPID),
+		NewAlbumPID:        string(rep.NewAlbumPID),
+		NewReleaseGroupPID: string(rep.NewReleaseGroupPID),
+		WriteBackFailures:  failures,
+	}
 }
 
 // toProxyBatchResult converts a facade batch-edit result into its wire form,

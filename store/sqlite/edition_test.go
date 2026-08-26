@@ -108,7 +108,7 @@ func TestEditionColumnLockSurvivesBothWriters(t *testing.T) {
 	editionTrack(t, st, lib.ID, "ess-a", "Locked", 1, model.Track{})
 	pid := scalarQueryStr(t, db, "SELECT pid FROM album WHERE title='Locked'")
 	// Locked deliberately empty, so only the lock probe keeps it.
-	if err := st.EditEntityFields(ctx, model.MergeAlbum, model.PID(pid),
+	if _, err := st.EditEntityFields(ctx, model.MergeAlbum, model.PID(pid),
 		map[string]string{"media": ""}, model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
 		t.Fatalf("lock media: %v", err)
 	}
@@ -261,7 +261,7 @@ func TestEntityEditClearsAnUnmatchedAlbumMarker(t *testing.T) {
 	}
 
 	editedPID := scalarQueryStr(t, db, "SELECT pid FROM album WHERE title='Edited'")
-	if err := st.EditEntityFields(ctx, model.MergeAlbum, model.PID(editedPID),
+	if _, err := st.EditEntityFields(ctx, model.MergeAlbum, model.PID(editedPID),
 		map[string]string{"barcode": "0075992739429"}, model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("edit barcode: %v", err)
 	}
@@ -270,7 +270,7 @@ func TestEntityEditClearsAnUnmatchedAlbumMarker(t *testing.T) {
 	}
 
 	untouchedPID := scalarQueryStr(t, db, "SELECT pid FROM album WHERE title='Untouched'")
-	if err := st.EditEntityFields(ctx, model.MergeAlbum, model.PID(untouchedPID),
+	if _, err := st.EditEntityFields(ctx, model.MergeAlbum, model.PID(untouchedPID),
 		map[string]string{"label": "Harvest"}, model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("edit label: %v", err)
 	}
@@ -293,7 +293,7 @@ func TestEntityEditNormalizesCountry(t *testing.T) {
 	}
 	pid := model.PID(scalarQueryStr(t, db, "SELECT pid FROM album WHERE title='Untidy'"))
 
-	if err := st.EditEntityFields(ctx, model.MergeAlbum, pid,
+	if _, err := st.EditEntityFields(ctx, model.MergeAlbum, pid,
 		map[string]string{"country": "usa", "media": "2xCD"}, model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("edit: %v", err)
 	}
@@ -305,7 +305,7 @@ func TestEntityEditNormalizesCountry(t *testing.T) {
 		t.Errorf("edited media = %q, want it stored as given", media)
 	}
 
-	err := st.EditEntityFields(ctx, model.MergeAlbum, pid,
+	_, err := st.EditEntityFields(ctx, model.MergeAlbum, pid,
 		map[string]string{"country": "US & Europe"}, model.Attribution{Source: model.SourceUser}, model.LockOf(false), false)
 	if err == nil {
 		t.Fatal("editing country to a multi-value list should be refused")
@@ -511,7 +511,7 @@ func TestClearingAnAlbumMBIDUndoesTheMatch(t *testing.T) {
 		t.Fatalf("queued %d albums while matched, want 0", len(queued))
 	}
 
-	if err := st.EditEntityFields(ctx, model.MergeAlbum, model.PID(pid),
+	if _, err := st.EditEntityFields(ctx, model.MergeAlbum, model.PID(pid),
 		map[string]string{"mbid": ""}, model.Attribution{Source: model.SourceUser}, model.LockOf(false), true); err != nil {
 		t.Fatalf("clear mbid: %v", err)
 	}
@@ -551,7 +551,7 @@ func TestUndoTakesTheMatchedCoverWithIt(t *testing.T) {
 		t.Fatalf("the match stored %d art rows, want 1", n)
 	}
 
-	if err := st.EditEntityFields(ctx, model.MergeAlbum, model.PID(pid),
+	if _, err := st.EditEntityFields(ctx, model.MergeAlbum, model.PID(pid),
 		map[string]string{"mbid": ""}, model.Attribution{Source: model.SourceUser}, model.LockOf(false), true); err != nil {
 		t.Fatalf("clear mbid: %v", err)
 	}

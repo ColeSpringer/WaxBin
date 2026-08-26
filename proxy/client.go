@@ -285,6 +285,18 @@ func (c *Client) EditEntity(ctx context.Context, entityType model.MergeEntity, e
 	return &res, nil
 }
 
+// Detach proxies pulling one member off an album identified by a release id. A
+// committed detach whose file write-back partially failed returns the failed files in
+// the result; the transport error stays nil, matching edit_fields.
+func (c *Client) Detach(ctx context.Context, itemPID model.PID, writeBack bool) (*DetachResult, error) {
+	var res DetachResult
+	err := c.call(ctx, MethodDetach, DetachParams{ItemPID: string(itemPID), WriteBack: writeBack}, &res)
+	if err != nil {
+		return nil, err
+	}
+	return &res, nil
+}
+
 // Lock proxies locking item fields.
 func (c *Client) Lock(ctx context.Context, itemPID model.PID, fields []string) error {
 	return c.call(ctx, MethodLock, FieldsParams{ItemPID: string(itemPID), Fields: fields}, nil)

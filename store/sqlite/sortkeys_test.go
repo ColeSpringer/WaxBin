@@ -128,7 +128,7 @@ func TestRefreshSortKeysUsesCuratedOverride(t *testing.T) {
 		artist: "Édith Piaf", album: "Éternelle",
 	})
 	artistPID := storedKey(t, st, "SELECT pid FROM artist WHERE name = 'Édith Piaf'")
-	if err := st.EditEntityFields(ctx, model.MergeArtist, model.PID(artistPID),
+	if _, err := st.EditEntityFields(ctx, model.MergeArtist, model.PID(artistPID),
 		map[string]string{"sort": "Piaf, Édith"}, model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("curate sort: %v", err)
 	}
@@ -390,7 +390,7 @@ func TestMergeAppliesInheritedSortOverride(t *testing.T) {
 	survivor := storedKey(t, st, "SELECT pid FROM artist WHERE name = 'Edith Piaf'")
 	loser := storedKey(t, st, "SELECT pid FROM artist WHERE name = 'Piaf'")
 
-	if err := st.EditEntityFields(ctx, model.MergeArtist, model.PID(loser),
+	if _, err := st.EditEntityFields(ctx, model.MergeArtist, model.PID(loser),
 		map[string]string{"sort": "Piaf, Edith"}, model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatal(err)
 	}
