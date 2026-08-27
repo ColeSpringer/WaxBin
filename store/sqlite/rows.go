@@ -105,11 +105,13 @@ const itemEffectiveDurationExpr = `CASE WHEN pf.start_frames IS NOT NULL ` +
 // the primary file, so it is NULL for a fileless item and matches the library query
 // field, which reads the same f.library_id.
 //
-// The six external-identifier columns closing the list are the MusicBrainz ids and the
-// ISRC (see model.ItemView). The first four read off joined aliases; the artist pair is
-// sought per row, reusing itemArtistIDExpr so a projected MBID and a projected pid
-// cannot point at different artist rows. These COALESCE to ” rather than scanning
+// The six external-identifier columns near the end of the list are the MusicBrainz ids
+// and the ISRC (see model.ItemView). The first four read off joined aliases; the artist
+// pair is sought per row, reusing itemArtistIDExpr so a projected MBID and a projected
+// pid cannot point at different artist rows. These COALESCE to ” rather than scanning
 // through sql.NullString, which only the pid columns need for model.PID's empty value.
+// bpm closes the list and is the one nullable scalar among them: it reads the column
+// straight, since 0 and "no tempo stated" are the same thing to every consumer.
 //
 // These ride on every item read. BenchmarkQueryPageAtScale puts a 50-item page around
 // 0.7 ms, unchanged by the release group (p=0.69 over 5 runs). The identifiers cost
@@ -148,7 +150,8 @@ const itemViewCols = `pi.pid, pi.kind, pi.state, pi.title,
 	COALESCE(NULLIF(alb.mbid,''), bk.mbid, ''),
 	COALESCE(rg.mbid,''),
 	COALESCE((SELECT vapm.mbid FROM artist vapm WHERE vapm.id = ` + itemArtistIDExpr + `),''),
-	COALESCE((SELECT vaapm.mbid FROM artist vaapm WHERE vaapm.id = ` + itemAlbumArtistIDExpr + `),'')`
+	COALESCE((SELECT vaapm.mbid FROM artist vaapm WHERE vaapm.id = ` + itemAlbumArtistIDExpr + `),''),
+	t.bpm`
 
 const itemSelect = `SELECT ` + itemViewCols + itemJoins
 
@@ -165,7 +168,7 @@ const fileSelect = `SELECT id, pid, library_id, path, display_path, rel_path, ki
 
 // itemViewNulls holds the nullable columns of an item view during a scan.
 type itemViewNulls struct {
-	trackNo, discNo, year, dur          sql.NullInt64
+	trackNo, discNo, year, bpm, dur     sql.NullInt64
 	compilation                         sql.NullInt64
 	season, pubDate, explicit           sql.NullInt64
 	podcastExplicit                     sql.NullInt64
@@ -192,6 +195,7 @@ func itemViewDests(v *model.ItemView, n *itemViewNulls) []any {
 		&n.artistPID, &n.albumArtistPID, &n.albumPID, &n.releaseGroupPID, &n.podcastPID,
 		&n.libraryPID,
 		&v.MBID, &v.ISRC, &v.AlbumMBID, &v.ReleaseGroupMBID, &v.ArtistMBID, &v.AlbumArtistMBID,
+		&n.bpm,
 	}
 }
 
@@ -199,6 +203,7 @@ func (n *itemViewNulls) apply(v *model.ItemView) {
 	v.TrackNo = int(n.trackNo.Int64)
 	v.DiscNo = int(n.discNo.Int64)
 	v.Year = int(n.year.Int64)
+	v.BPM = int(n.bpm.Int64)
 	v.Compilation = n.compilation.Int64 != 0
 	v.Season = int(n.season.Int64)
 	v.PubDateNS = n.pubDate.Int64
@@ -491,18 +496,18 @@ func upsertItem(ctx context.Context, tx *sql.Tx, item model.PlayableItem, now in
 func upsertTrack(ctx context.Context, tx *sql.Tx, itemID int64, tr model.Track) error {
 	_, err := tx.ExecContext(ctx, `INSERT INTO track
 		(item_id, artist, artist_sort, album, album_artist, composer, composer_sort, comment,
-		 track_no, track_total, disc_no, disc_total, year, genre, compilation, isrc, mbid)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		 track_no, track_total, disc_no, disc_total, year, bpm, genre, compilation, isrc, mbid)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(item_id) DO UPDATE SET
 			artist=excluded.artist, artist_sort=excluded.artist_sort, album=excluded.album,
 			album_artist=excluded.album_artist, composer=excluded.composer,
 			composer_sort=excluded.composer_sort, comment=excluded.comment,
 			track_no=excluded.track_no, track_total=excluded.track_total, disc_no=excluded.disc_no,
-			disc_total=excluded.disc_total, year=excluded.year, genre=excluded.genre,
+			disc_total=excluded.disc_total, year=excluded.year, bpm=excluded.bpm, genre=excluded.genre,
 			compilation=excluded.compilation, isrc=excluded.isrc, mbid=excluded.mbid`,
 		itemID, tr.Artist, tr.ArtistSort, tr.Album, tr.AlbumArtist, tr.Composer, tr.ComposerSort, tr.Comment,
 		nullInt(tr.TrackNo), nullInt(tr.TrackTotal), nullInt(tr.DiscNo), nullInt(tr.DiscTotal),
-		nullInt(tr.Year), tr.Genre, boolInt(tr.Compilation), tr.ISRC, nullStr(tr.MBID))
+		nullInt(tr.Year), nullInt(tr.BPM), tr.Genre, boolInt(tr.Compilation), tr.ISRC, nullStr(tr.MBID))
 	return err
 }
 

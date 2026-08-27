@@ -398,6 +398,11 @@ func newDBVerifyCmd(g *globals) *cobra.Command {
 				if _, _, err := lib.GCArt(ctx(cmd)); err != nil {
 					return err
 				}
+				// Custom-tag provenance rows under a key that has since become
+				// reserved, which no rescan reaches on an item carrying no other tags.
+				if _, err := lib.GCReservedTagProvenance(ctx(cmd)); err != nil {
+					return err
+				}
 			}
 
 			rep, err := lib.VerifyDerived(ctx(cmd))
@@ -422,15 +427,17 @@ func newDBVerifyCmd(g *globals) *cobra.Command {
 				fmt.Fprintf(w, "book-duration drift:      %d\n", rep.BookDurationDrift)
 				fmt.Fprintf(w, "orphan art sources:       %d\n", rep.OrphanArtSources)
 				fmt.Fprintf(w, "orphan thumbnails:        %d\n", rep.OrphanThumbnails)
+				fmt.Fprintf(w, "orphan tag provenance:    %d\n", rep.OrphanReservedTagProvenance)
 				fmt.Fprintf(w, "consistent:               %t\n", rep.Consistent())
 				// A refold moves the keys page cursors resume against.
 				if resorted > 0 {
 					fmt.Fprintf(w, "sort keys rewritten:      %d (re-page any open cursors)\n", resorted)
 				}
-				// Orphaned art is reclaimable garbage, not corruption, so it does
-				// not fail the check; point the operator at --fix to reclaim it.
+				// Orphaned art and stranded tag provenance are reclaimable garbage,
+				// not corruption, so they do not fail the check; point the operator
+				// at --fix to reclaim them.
 				if rep.Reclaimable() && !fix {
-					fmt.Fprintln(w, "note: orphaned art can be reclaimed with `db verify --fix`")
+					fmt.Fprintln(w, "note: orphaned rows can be reclaimed with `db verify --fix`")
 				}
 			}
 			if !rep.Consistent() {
@@ -445,6 +452,6 @@ func newDBVerifyCmd(g *globals) *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().BoolVar(&fix, "fix", false, "recompute rollups and book durations, refold stale sort keys, and reclaim orphaned art before verifying (takes the write lock)")
+	cmd.Flags().BoolVar(&fix, "fix", false, "recompute rollups and book durations, refold stale sort keys, and reclaim orphaned art and tag provenance before verifying (takes the write lock)")
 	return cmd
 }

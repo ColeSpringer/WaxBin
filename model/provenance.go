@@ -193,6 +193,7 @@ var MetadataFields = map[string]bool{
 	"year":          true,
 	"track_no":      true,
 	"disc_no":       true,
+	"bpm":           true,
 	"comment":       true,
 	"isrc":          true,
 	"mbid":          true,

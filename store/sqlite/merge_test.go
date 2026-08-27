@@ -2,7 +2,9 @@ package sqlite
 
 import (
 	"context"
+	"database/sql"
 	"testing"
+	"time"
 
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/waxerr"
@@ -607,13 +609,154 @@ func TestMergeDropsLoserAuxMarker(t *testing.T) {
 	assertVerifyClean(t, st)
 }
 
+// seriesFixture puts two books under two series and returns the store and the two
+// series pids, survivor first. The series merge cases share it.
+func seriesFixture(t *testing.T) (*Store, model.PID, model.PID) {
+	t.Helper()
+	st, lib := entityFixture(t)
+	putBook(t, st, lib.ID, bookSpec{
+		path: "/lib/Author/One/b1.m4b", essence: "be1", content: "bc1",
+		title: "Book One", author: "Jane Author", series: "Dune", seq: "1",
+	})
+	putBook(t, st, lib.ID, bookSpec{
+		path: "/lib/Author/Two/b2.m4b", essence: "be2", content: "bc2",
+		title: "Book Two", author: "Jane Author", series: "Dune Chronicles", seq: "2",
+	})
+	return st, entityPID(t, st, "series", "Dune Chronicles"), entityPID(t, st, "series", "Dune")
+}
+
+// TestMergeSeries collapses one series onto another: the loser's books re-point, the
+// loser row goes, and the moved book gets its own item delta.
+func TestMergeSeries(t *testing.T) {
+	st, survivor, loser := seriesFixture(t)
+	ctx := context.Background()
+	survivorID := entityIDByCol(t, st, "series", "name", "Dune Chronicles")
+
+	rep, err := st.MergeEntity(ctx, model.MergeSeries, survivor, loser)
+	if err != nil {
+		t.Fatalf("merge: %v", err)
+	}
+	if rep.Children != 1 {
+		t.Errorf("children re-pointed = %d, want 1", rep.Children)
+	}
+	if entityExists(t, st, "series", "Dune") {
+		t.Error("loser series still present after merge")
+	}
+	if n := scalarInt(t, st, "SELECT COUNT(*) FROM book WHERE series_id=?", survivorID); n != 2 {
+		t.Errorf("survivor holds %d books, want 2", n)
+	}
+	itemPID := scalarStr(t, st, "SELECT pid FROM playable_item WHERE title='Book One'")
+	if n := scalarInt(t, st,
+		"SELECT COUNT(*) FROM change_log WHERE entity_type='item' AND op='update' AND entity_pid=?",
+		itemPID); n == 0 {
+		t.Error("merge emitted no per-item delta for the moved book")
+	}
+	if n := scalarInt(t, st,
+		"SELECT COUNT(*) FROM change_log WHERE entity_type='series' AND op='delete' AND entity_pid=?",
+		string(loser)); n != 1 {
+		t.Errorf("loser delete deltas = %d, want 1", n)
+	}
+	assertVerifyClean(t, st)
+}
+
+// TestMergeSeriesRebuildsBookFTS: the search row carries the series name in its album
+// column and book has no denormalized series column, so a moved book stays searchable
+// under the dead series unless the merge reindexes it. `db verify` counts rows rather
+// than content, so nothing else catches the drift.
+func TestMergeSeriesRebuildsBookFTS(t *testing.T) {
+	st, survivor, loser := seriesFixture(t)
+	ctx := context.Background()
+
+	if _, err := st.MergeEntity(ctx, model.MergeSeries, survivor, loser); err != nil {
+		t.Fatalf("merge: %v", err)
+	}
+	itemID := scalarInt(t, st, "SELECT id FROM playable_item WHERE title='Book One'")
+	if got := scalarStr(t, st, "SELECT album FROM search_fts WHERE rowid=?", itemID); got != "Dune Chronicles" {
+		t.Errorf("moved book search series = %q, want Dune Chronicles", got)
+	}
+	if n := scalarInt(t, st, "SELECT COUNT(*) FROM search_fts WHERE album='Dune'"); n != 0 {
+		t.Errorf("%d search rows still indexed under the dead series, want 0", n)
+	}
+	assertVerifyClean(t, st)
+}
+
+// TestMergeDropsLoserOrphanCandidate: orphan_candidate is keyed by rowid and SQLite
+// reuses rowids, so a candidate row left behind by a merged-away loser would hand the
+// next entity to take that id a pre-aged first_seen and an immediate sweep.
+func TestMergeDropsLoserOrphanCandidate(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/a/1.flac", essence: "e1", content: "c1", title: "One", artist: "A", albumArt: "A", album: "SurvRG"})
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/b/2.flac", essence: "e2", content: "c2", title: "Two", artist: "B", albumArt: "B", album: "LoseRG"})
+	loseRGID := entityIDByCol(t, st, "release_group", "title", "LoseRG")
+	survRG := model.PID(scalarStr(t, st, "SELECT pid FROM release_group WHERE title='SurvRG'"))
+	loseRG := model.PID(scalarStr(t, st, "SELECT pid FROM release_group WHERE title='LoseRG'"))
+
+	// Emptying the loser group's album leaves it childless, so the next sweep records
+	// it as a candidate; the grace window keeps it alive rather than deleting it.
+	survAlbum := model.PID(scalarStr(t, st, "SELECT pid FROM album WHERE title='SurvRG'"))
+	loseAlbum := model.PID(scalarStr(t, st, "SELECT pid FROM album WHERE title='LoseRG'"))
+	if _, err := st.MergeEntity(ctx, model.MergeAlbum, survAlbum, loseAlbum); err != nil {
+		t.Fatalf("album merge: %v", err)
+	}
+	if _, err := st.GCOrphans(ctx, int64(time.Hour)); err != nil {
+		t.Fatalf("gc orphans: %v", err)
+	}
+	if n := scalarInt(t, st,
+		"SELECT COUNT(*) FROM orphan_candidate WHERE entity_type='release_group' AND entity_id=?",
+		loseRGID); n != 1 {
+		t.Fatalf("candidate rows before the merge = %d, want 1", n)
+	}
+
+	if _, err := st.MergeEntity(ctx, model.MergeReleaseGroup, survRG, loseRG); err != nil {
+		t.Fatalf("release-group merge: %v", err)
+	}
+	if n := scalarInt(t, st,
+		"SELECT COUNT(*) FROM orphan_candidate WHERE entity_type='release_group' AND entity_id=?",
+		loseRGID); n != 0 {
+		t.Errorf("candidate rows after the merge = %d, want 0 (a reused rowid would inherit it)", n)
+	}
+	assertVerifyClean(t, st)
+}
+
+// TestMergeUnhandledTypeRefusesBeforeDeleting: both switches inside the merge carry a
+// default arm, so widening Valid without also adding a re-point and an affected-item
+// query refuses rather than deleting a loser with nothing moved off it. It calls
+// mergeEntityTx directly because the public entry point's own Valid gate catches an
+// unknown type long before either switch sees it.
+func TestMergeUnhandledTypeRefusesBeforeDeleting(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/a/1.flac", essence: "e1", content: "c1", title: "One", artist: "Surv", album: "A"})
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/b/2.flac", essence: "e2", content: "c2", title: "Two", artist: "Lose", album: "B"})
+	survivor := entityPID(t, st, "artist", "Surv")
+	loser := entityPID(t, st, "artist", "Lose")
+
+	err := st.writeTx(ctx, func(tx *sql.Tx) error {
+		_, err := mergeEntityTx(ctx, tx, model.MergeEntity("bogus"), "artist", survivor, loser)
+		return err
+	})
+	if !waxerr.Is(err, waxerr.CodeInvalid) {
+		t.Fatalf("unhandled merge type: got %v, want CodeInvalid", err)
+	}
+	if !entityExists(t, st, "artist", "Lose") {
+		t.Error("a merge that re-pointed nothing still deleted the loser")
+	}
+	assertVerifyClean(t, st)
+}
+
 func TestMergeErrors(t *testing.T) {
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{
 		path: "/lib/a/1.flac", essence: "e1", content: "c1", title: "One", artist: "X", album: "A",
 	})
+	putBook(t, st, lib.ID, bookSpec{
+		path: "/lib/Author/One/b1.m4b", essence: "be1", content: "bc1",
+		title: "Book One", author: "Jane Author", series: "Saga", seq: "1",
+	})
 	pid := entityPID(t, st, "artist", "X")
+	seriesPID := entityPID(t, st, "series", "Saga")
 
 	if _, err := st.MergeEntity(ctx, model.MergeEntity("bogus"), pid, pid); !waxerr.Is(err, waxerr.CodeInvalid) {
 		t.Errorf("bad type: got %v, want CodeInvalid", err)
@@ -623,5 +766,13 @@ func TestMergeErrors(t *testing.T) {
 	}
 	if _, err := st.MergeEntity(ctx, model.MergeArtist, pid, model.PID("nonexistent")); !waxerr.Is(err, waxerr.CodeNotFound) {
 		t.Errorf("missing loser: got %v, want CodeNotFound", err)
+	}
+	// series clears the type gate now, so an unknown loser refuses as not-found rather
+	// than as an unknown entity type.
+	if _, err := st.MergeEntity(ctx, model.MergeSeries, seriesPID, model.PID("nonexistent")); !waxerr.Is(err, waxerr.CodeNotFound) {
+		t.Errorf("missing series loser: got %v, want CodeNotFound", err)
+	}
+	if _, err := st.MergeEntity(ctx, model.MergeSeries, seriesPID, seriesPID); !waxerr.Is(err, waxerr.CodeInvalid) {
+		t.Errorf("same series pid: got %v, want CodeInvalid", err)
 	}
 }

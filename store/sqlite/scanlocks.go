@@ -130,6 +130,9 @@ func preserveLockedTrackFieldsTx(ctx context.Context, tx *sql.Tx, tr *model.Trac
 	if locked["disc_no"] {
 		tr.DiscNo = cur.DiscNo
 	}
+	if locked["bpm"] {
+		tr.BPM = cur.BPM
+	}
 	if locked["isrc"] {
 		tr.ISRC = cur.ISRC
 	}

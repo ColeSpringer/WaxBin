@@ -42,6 +42,11 @@ type FileMeta struct {
 
 // Reader reads tags, properties, and the essence hash from a file. It must never
 // decode PCM (scanning is I/O-bound by contract).
+//
+// A container it has no parser for comes back as a FileMeta carrying
+// DiagUnsupportedFormat and no properties at all. Filling those in is the
+// scanner's job, not a Reader's: it asks decode.Probe, which reads the container
+// header and still decodes no PCM.
 type Reader interface {
 	Read(ctx context.Context, path string) (*FileMeta, error)
 }

@@ -9,8 +9,8 @@ func TestCanonicalTagKey(t *testing.T) {
 		ok   bool
 	}{
 		{"mood", "MOOD", true},
-		{"BPM", "BPM", true},
-		{"  Bpm  ", "BPM", true}, // trimmed + uppercased (bpm/BPM dedup)
+		{"KEY", "KEY", true},
+		{"  Key  ", "KEY", true}, // trimmed + uppercased (key/KEY dedup)
 		{"MY TAG", "MY TAG", true},
 		{"", "", false},
 		{"  ", "", false},
@@ -32,10 +32,33 @@ func TestIsReservedTagKey(t *testing.T) {
 			t.Errorf("%q should be reserved", k)
 		}
 	}
-	free := []string{"MOOD", "BPM", "KEY", "MY TAG", "COPYRIGHT", "ACOUSTID_ID"}
+	free := []string{"MOOD", "KEY", "MY TAG", "COPYRIGHT", "ACOUSTID_ID"}
 	for _, k := range free {
 		if IsReservedTagKey(k) {
 			t.Errorf("%q should not be reserved", k)
+		}
+	}
+}
+
+// TestFoldedWireSpellingsAreReserved covers the frame spellings WaxLabel folds onto a
+// canonical key on every format's read path. Each one now names a value WaxBin already
+// owns through another surface, so none may be stored or edited as a custom tag.
+func TestFoldedWireSpellingsAreReserved(t *testing.T) {
+	folded := []string{
+		"PART_NUMBER", "TOTAL_PARTS", "TOTAL_DISCS", "LEAD_PERFORMER",
+		"DATE_RECORDED", "DATE_RELEASED", "DATE_RELEASE", "DATE_ORIGINAL",
+		"ORIGINAL_DATE", "ENCODED_BY", "CATALOG_NUMBER", "PUBLISHER",
+		"REMIXED_BY", "CONTENT_GROUP",
+		// BPM is the track column's own key and TBPM the ID3 frame spelling folded onto
+		// it. Both retired once the column landed.
+		"BPM", "TBPM",
+	}
+	for _, k := range folded {
+		if !IsReservedTagKey(k) {
+			t.Errorf("%q should be reserved; it folds onto a key WaxBin owns", k)
+		}
+		if IsCuratableField(TagLockField(k)) {
+			t.Errorf("tag.%s should not be curatable", k)
 		}
 	}
 }

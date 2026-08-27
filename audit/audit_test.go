@@ -314,3 +314,34 @@ func TestAuditLibraryConflictKeepsRawByteRootsApart(t *testing.T) {
 		t.Errorf("distinct raw-byte roots reported a collision: %+v", fs)
 	}
 }
+
+// TestAuditCanceledProbeIsNotCorruption pins the cancellation path: a probe cut
+// short because the run was canceled must not name the file as corrupt. The old
+// behavior emitted a severity-error corrupt finding for whichever healthy file a
+// Ctrl-C happened to land on, the one finding a user acts on by re-ripping.
+func TestAuditCanceledProbeIsNotCorruption(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "fine.wv")
+	if err := os.WriteFile(f, []byte("real bytes"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	st := &fakeStore{files: []model.AuditFileInfo{
+		{PID: "f1", Path: []byte(f), DisplayPath: f, Kind: model.FileAudio},
+	}}
+	ctx, cancel := context.WithCancel(context.Background())
+	probe := func(pctx context.Context, _ string) error {
+		cancel()
+		return pctx.Err()
+	}
+	rep, err := New(st, nil, probe, nil).Run(ctx, Config{
+		Only: []model.AuditCheck{model.CheckCorruptAudio}, Integrity: true,
+	})
+	if err == nil {
+		t.Fatal("a canceled run should surface the cancellation")
+	}
+	if rep != nil {
+		if got := findingsFor(rep, model.CheckCorruptAudio); len(got) != 0 {
+			t.Errorf("corrupt findings = %+v, want none from a canceled probe", got)
+		}
+	}
+}

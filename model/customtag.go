@@ -1,6 +1,9 @@
 package model
 
-import "strings"
+import (
+	"slices"
+	"strings"
+)
 
 // This file defines the vocabulary for custom (non-standard) item tags: the tag frames
 // a file carries that WaxBin's typed model does not map to a column, plus the tags a
@@ -49,6 +52,33 @@ var reservedTagKeys = map[string]bool{
 	"REPLAYGAIN_ALBUM_GAIN": true, "REPLAYGAIN_ALBUM_PEAK": true,
 	"ENCODER": true, "ENCODEDBY": true, "ENCODING_HISTORY": true, "ACOUSTID_FINGERPRINT": true,
 	"RATING": true, "PLAYCOUNT": true,
+	// Wire-format frame spellings the tag library folds onto the canonical keys above
+	// on every format's read path. It folded them for Matroska alone until v1.5.0,
+	// which added the ID3 TXXX, MP4 freeform, APEv2, and Vorbis read folds plus global
+	// edit aliases, so a catalog scanned before the bump holds them as custom tags from
+	// one of those four. Reserving them retires those rows on each item's next scan and
+	// stops an edit under the spelling, which the alias would now write onto the
+	// canonical frame while the catalog kept believing it stored a custom tag. Most
+	// fold onto projected track fields and re-surface there. Three do not: their
+	// canonical keys are reserved for owners that give a plain track no surface
+	// (CONTENT_GROUP onto book-owned GROUPING, REMIXED_BY onto credit-owned REMIXER,
+	// ENCODED_BY onto deliberately dropped ENCODEDBY), so on a plain track those
+	// spellings stop surfacing anywhere, the same cost COMPOSERSORT documents above.
+	// Spellings the library aliases for edits but does not fold on every read path
+	// (YEAR, ALBUM_ARTIST, UNSYNCEDLYRICS and kin) stay deliberately unreserved:
+	// reserving one would drop its value entirely on the formats that read it
+	// verbatim, so it keeps surfacing as a custom tag there instead.
+	"PART_NUMBER": true, "TOTAL_PARTS": true, "TOTAL_DISCS": true, "LEAD_PERFORMER": true,
+	"DATE_RECORDED": true, "DATE_RELEASED": true, "DATE_RELEASE": true,
+	"DATE_ORIGINAL": true, "ORIGINAL_DATE": true, "ENCODED_BY": true,
+	"CATALOG_NUMBER": true, "PUBLISHER": true, "REMIXED_BY": true, "CONTENT_GROUP": true,
+	// Tempo, now the track.bpm column. BPM is the canonical key and TBPM the ID3 frame
+	// spelling folded onto it. Reserving them costs a catalog that stored either the
+	// same two things newly reserving MEDIA cost: the item_tag rows go on the next
+	// scan, taking any lock and provenance with them, and a stored rule naming
+	// tag.BPM starts erroring instead of quietly matching nothing. The value itself
+	// re-enters through the column on that same scan.
+	"BPM": true, "TBPM": true,
 	// Internal rebuild hint.
 	TagWaxbinItemPID: true,
 }
@@ -59,10 +89,22 @@ var reservedTagKeys = map[string]bool{
 // SetItemTag edit (which rejects them).
 func IsReservedTagKey(key string) bool { return reservedTagKeys[key] }
 
+// ReservedTagKeys returns the reserved keys in sorted order, for the callers that
+// need the whole set rather than one lookup: the store names it in SQL to sweep the
+// "tag.<KEY>" provenance rows a newly reserved key stranded.
+func ReservedTagKeys() []string {
+	out := make([]string, 0, len(reservedTagKeys))
+	for k := range reservedTagKeys {
+		out = append(out, k)
+	}
+	slices.Sort(out)
+	return out
+}
+
 // CanonicalTagKey normalizes a tag key to its canonical uppercase-ASCII form and
 // reports whether it is valid, mirroring the tag library's key rules so a key that
 // passes here also survives an on-disk write. It trims surrounding whitespace, rejects
-// empty or non-ASCII input, uppercases (so "bpm" and "BPM" dedup), and rejects a byte
+// empty or non-ASCII input, uppercases (so "key" and "KEY" dedup), and rejects a byte
 // outside printable ASCII or a literal '=' (which the tag wire format reserves).
 func CanonicalTagKey(s string) (string, bool) {
 	s = strings.TrimSpace(s)

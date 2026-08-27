@@ -284,6 +284,11 @@ func (a *Auditor) checkCorrupt(ctx context.Context, files []model.AuditFileInfo,
 			return err
 		}
 		if err := a.probe(ctx, pathx.Long(string(f.Path))); err != nil {
+			// A probe cut short by cancellation says nothing about the file. Without
+			// this check a Ctrl-C mid-decode names a healthy file as corrupt.
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
 			c.emit(model.AuditFinding{
 				Check:    model.CheckCorruptAudio,
 				Severity: model.SeverityError,

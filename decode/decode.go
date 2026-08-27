@@ -1,9 +1,13 @@
 // Package decode is WaxBin's PCM-decoding layer, and the only package in the
 // cataloging and analysis path that knows WaxFlow exists (test fixtures and
-// pidpath's integration Examples name it too, neither of which ships). Scanning
-// never imports it; cataloging stays pure Go and reads only tags and essence
-// hashes. The separate analyze pass is the only path that decodes PCM, for
-// loudness, waveforms, and fingerprinting.
+// pidpath's integration Examples name it too, neither of which ships). The
+// analyze pass is the only path that decodes PCM, for loudness, waveforms, and
+// fingerprinting.
+//
+// Scanning imports this package for Probe alone. Probe reads container headers
+// and decodes nothing, and the scanner calls it only for a file whose tags no
+// parser could read, so cataloging is still tag and essence work at I/O speed.
+// Anything here that decodes PCM stays out of the scan path.
 //
 // Decoding is unconditional and universal: every container WaxBin can tag-read,
 // it can decode, on every host, with no external binaries and no CGO. There is

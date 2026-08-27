@@ -22,6 +22,10 @@ type DerivedReport struct {
 	BookDurationDrift       int // books whose stored total_duration_ms != summed parts
 	OrphanArtSources        int // art_source images with no live art_map references
 	OrphanThumbnails        int // thumb_cache rows whose source is unreferenced
+	// field_provenance rows under a "tag.<KEY>" whose key WaxBin has since reserved.
+	// Nothing can read, edit, or unlock one, and the scan's own sweep cannot reach the
+	// row on an item that holds no custom tags at all.
+	OrphanReservedTagProvenance int
 }
 
 // Consistent reports whether the writer-maintained derived data is correct: FTS
@@ -45,11 +49,11 @@ func (r DerivedReport) consistentApartFromSortKeys() bool {
 		r.ReleaseGroupRollupDrift == 0 && r.BookDurationDrift == 0
 }
 
-// Reclaimable reports whether `db verify --fix` (GCArt) would reclaim space:
-// orphaned art sources or thumbnails with no live entity references. It is
-// informational, and independent of Consistent.
+// Reclaimable reports whether `db verify --fix` would reclaim space: orphaned art
+// sources or thumbnails with no live entity references, or provenance rows under a
+// reserved tag key. It is informational, and independent of Consistent.
 func (r DerivedReport) Reclaimable() bool {
-	return r.OrphanArtSources > 0 || r.OrphanThumbnails > 0
+	return r.OrphanArtSources > 0 || r.OrphanThumbnails > 0 || r.OrphanReservedTagProvenance > 0
 }
 
 // VerifyDerived checks FTS coverage, the maintained rollups, and the generated
@@ -84,6 +88,12 @@ func (s *Store) VerifyDerived(ctx context.Context) (*DerivedReport, error) {
 		if err := s.read.QueryRowContext(ctx, c.stmt).Scan(c.dst); err != nil {
 			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
+	}
+	// Stands apart from the table above because it is the one check with bound
+	// arguments: the reserved key set lives in Go, not in the schema.
+	q, args := reservedTagProvenanceQuery("SELECT COUNT(*)")
+	if err := s.read.QueryRowContext(ctx, q, args...).Scan(&rep.OrphanReservedTagProvenance); err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
 
 	drift, err := s.sortKeyDrift(ctx)

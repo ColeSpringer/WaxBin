@@ -255,8 +255,8 @@ func deleteOrphanEntity(ctx context.Context, tx *sql.Tx, k orphanKind, o orphanR
 	}
 	// entity_play_state is polymorphic with no FK, so it is cleaned here like the rows
 	// above. A childless artist/release_group/album/genre a user had starred loses that
-	// star with the entity. series is in orphanKinds but is never written by the entity
-	// play-state path, so this delete is a harmless no-op for it.
+	// star with the entity. series is in orphanKinds but sits outside MergeEntity.Starrable,
+	// so nothing ever writes it a row and this delete is a harmless no-op for it.
 	if _, err := tx.ExecContext(ctx,
 		"DELETE FROM entity_play_state WHERE entity_type = ? AND entity_id = ?", k.entityType, o.id); err != nil {
 		return err

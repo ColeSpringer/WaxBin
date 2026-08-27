@@ -2,9 +2,11 @@ package scan
 
 import (
 	"bytes"
+	"context"
 	"image"
 	"image/color"
 	"image/jpeg"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"testing"
@@ -310,5 +312,45 @@ func TestCreditArtistsReportsOnlyAStatedList(t *testing.T) {
 	got[0] = "mutated"
 	if tags.Artists[0] != "A" {
 		t.Error("creditArtists aliased the tag slice")
+	}
+}
+
+// TestIsAudioMatroska pins which Matroska extensions the scanner picks up. The
+// decoder handles the container whatever the extension says, so audioExts is the
+// only gate, and .mkv and .webm stay out because they routinely carry video.
+func TestIsAudioMatroska(t *testing.T) {
+	for _, p := range []string{"/lib/live.mka", "/lib/LIVE.MKA"} {
+		if !IsAudio(p) {
+			t.Errorf("IsAudio(%q) = false, want true", p)
+		}
+	}
+	for _, p := range []string{"/lib/show.mkv", "/lib/clip.webm"} {
+		if IsAudio(p) {
+			t.Errorf("IsAudio(%q) = true, want false (video containers stay out)", p)
+		}
+	}
+}
+
+// TestProbePropertiesInterruptedScanFails pins the cancellation contract: the
+// size+mtime fast path never revisits an unchanged file, so a probe interrupted
+// mid-rebuild must fail the file's scan rather than commit zeroed properties the
+// next scan will trust. A probe that merely cannot read the file keeps the zeroes
+// and lets the file catalog, so audit can still name it.
+func TestProbePropertiesInterruptedScanFails(t *testing.T) {
+	s := &Scanner{log: slog.New(slog.DiscardHandler)}
+	missing := filepath.Join(t.TempDir(), "gone.wv")
+
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	var tags model.Tags
+	if err := s.probeProperties(canceled, missing, &tags); err == nil {
+		t.Fatal("an interrupted probe must fail the file's scan, or its zeroes freeze on the fast path")
+	}
+
+	if err := s.probeProperties(context.Background(), missing, &tags); err != nil {
+		t.Fatalf("an unreadable file must still catalog with zeroes, got %v", err)
+	}
+	if tags.DurationMS != 0 || tags.SampleRate != 0 {
+		t.Fatalf("tags = %+v, want untouched zeroes when the probe reports nothing", tags)
 	}
 }

@@ -27,12 +27,56 @@ func rescanTrack(t *testing.T, st *Store, libID int64, s trackSpec, preserveLock
 		Track: model.Track{
 			Artist: s.artist, ArtistSort: model.SortKey(s.artist), Album: s.album,
 			AlbumArtist: s.albumArt, Composer: s.composer, Genre: s.genre,
-			Genres: identity.SplitGenres(s.genre), Year: s.year,
+			Genres: identity.SplitGenres(s.genre), Year: s.year, BPM: s.bpm,
 		},
 		PreserveLocks: preserveLocks,
 	}
 	if _, err := st.PutScannedTrack(context.Background(), in); err != nil {
 		t.Fatalf("rescan %s: %v", s.path, err)
+	}
+}
+
+// TestScanForcePreservesLockedBPM covers the numeric column the tags also carry: a
+// curated bpm has to outlive a forced rescan whose file states a different number,
+// and go back to the file's value once the lock is off.
+func TestScanForcePreservesLockedBPM(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+
+	orig := trackSpec{
+		path: "/lib/Alpha/One/01.flac", essence: "e1", content: "c1",
+		title: "Original", artist: "Alpha", albumArt: "Alpha", album: "One", genre: "Rock", bpm: 90,
+	}
+	putTrack(t, st, lib.ID, orig)
+	pid := itemPID(t, st)
+
+	if err := st.EditItemField(ctx, pid, "bpm", "128", model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
+		t.Fatalf("edit bpm: %v", err)
+	}
+
+	retagged := orig
+	retagged.content, retagged.bpm = "c2", 96
+	rescanTrack(t, st, lib.ID, retagged, true)
+
+	readBPM := func() int {
+		t.Helper()
+		var bpm int
+		if err := st.read.QueryRowContext(ctx,
+			"SELECT COALESCE(t.bpm,0) FROM track t JOIN playable_item pi ON pi.id=t.item_id WHERE pi.pid=?",
+			string(pid)).Scan(&bpm); err != nil {
+			t.Fatalf("read bpm: %v", err)
+		}
+		return bpm
+	}
+	if got := readBPM(); got != 128 {
+		t.Fatalf("bpm after preserving rescan = %d, want the locked 128", got)
+	}
+
+	ignore := retagged
+	ignore.content = "c3"
+	rescanTrack(t, st, lib.ID, ignore, false)
+	if got := readBPM(); got != 96 {
+		t.Fatalf("bpm after --ignore-locks = %d, want the file's 96", got)
 	}
 }
 

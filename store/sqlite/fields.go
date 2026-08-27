@@ -216,13 +216,17 @@ var itemFields = query.FieldMap{
 	"year":          {Expr: itemYearExpr, Kind: query.KindInt},
 	"track_no":      {Expr: "t.track_no", Kind: query.KindInt},
 	"disc_no":       {Expr: "t.disc_no", Kind: query.KindInt},
-	"season":        {Expr: "ep.season", Kind: query.KindInt},
-	"published":     {Expr: "ep.pub_date", Kind: query.KindTime},
-	"source":        {Expr: "COALESCE(acq.source_type, pod.source_type, 'local')", Kind: query.KindText},
-	"duration_ms":   {Expr: "COALESCE(bk.total_duration_ms, " + itemEffectiveDurationExpr + ", ep.duration_ms)", Kind: query.KindInt},
-	"codec":         {Expr: "f.codec", Kind: query.KindText},
-	"container":     {Expr: "f.container", Kind: query.KindText},
-	"path":          {Expr: "f.display_path", Kind: query.KindText},
+	// The column is read straight, like track_no and unlike the identifiers below: a
+	// track that states no tempo is genuinely missing one, so `bpm isMissing` should
+	// select it rather than a COALESCE turning it into a track at 0 bpm.
+	"bpm":         {Expr: "t.bpm", Kind: query.KindInt},
+	"season":      {Expr: "ep.season", Kind: query.KindInt},
+	"published":   {Expr: "ep.pub_date", Kind: query.KindTime},
+	"source":      {Expr: "COALESCE(acq.source_type, pod.source_type, 'local')", Kind: query.KindText},
+	"duration_ms": {Expr: "COALESCE(bk.total_duration_ms, " + itemEffectiveDurationExpr + ", ep.duration_ms)", Kind: query.KindInt},
+	"codec":       {Expr: "f.codec", Kind: query.KindText},
+	"container":   {Expr: "f.container", Kind: query.KindText},
+	"path":        {Expr: "f.display_path", Kind: query.KindText},
 
 	// Entity handles (see the header block): the item's internal id column compared
 	// against a subquery that resolves the caller's pid once, except genre_pid, which

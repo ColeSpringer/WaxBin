@@ -17,7 +17,7 @@ import (
 var trackEditFields = map[string]bool{
 	"title": true, "artist": true, "album_artist": true, "album": true,
 	"composer": true, "composer_sort": true, "comment": true, "genre": true, "year": true,
-	"track_no": true, "disc_no": true,
+	"track_no": true, "disc_no": true, "bpm": true,
 	"isrc": true, "mbid": true, "compilation": true,
 }
 
@@ -652,6 +652,18 @@ func applyTrackEdit(tr *model.Track, field, value, op string) error {
 			return err
 		}
 		tr.DiscNo = n
+	case "bpm":
+		// Integers only. The BPM tag itself accepts a fraction on disk and the reader
+		// rounds one on the way in, but an edit is someone stating a number, so "120.5"
+		// is rejected here rather than silently rounded to something they did not type.
+		n, err := parseIntField(value, "bpm", op)
+		if err != nil {
+			return err
+		}
+		if n > model.MaxBPM {
+			return waxerr.New(waxerr.CodeInvalid, op, "field bpm is out of range: "+value)
+		}
+		tr.BPM = n
 	default:
 		// Unreachable: the caller validated field against trackEditFields and split off
 		// title, so every remaining case is handled above.
@@ -779,14 +791,14 @@ func isCanonicalUUID(s string) bool { return model.IsMBID(s) }
 // across re-resolution. The path is nil when the item has no primary file.
 func loadTrackForEditTx(ctx context.Context, tx *sql.Tx, itemID int64) (model.Track, string, []byte, error) {
 	tr := model.Track{ItemID: itemID}
-	var trackNo, trackTotal, discNo, discTotal, year sql.NullInt64
+	var trackNo, trackTotal, discNo, discTotal, year, bpm sql.NullInt64
 	var compilation int
 	var mbid sql.NullString
 	err := tx.QueryRowContext(ctx, `SELECT artist, artist_sort, album, album_artist, composer, composer_sort,
-		comment, track_no, track_total, disc_no, disc_total, year, genre, compilation, isrc, mbid
+		comment, track_no, track_total, disc_no, disc_total, year, bpm, genre, compilation, isrc, mbid
 		FROM track WHERE item_id = ?`, itemID).Scan(
 		&tr.Artist, &tr.ArtistSort, &tr.Album, &tr.AlbumArtist, &tr.Composer, &tr.ComposerSort,
-		&tr.Comment, &trackNo, &trackTotal, &discNo, &discTotal, &year, &tr.Genre, &compilation, &tr.ISRC, &mbid)
+		&tr.Comment, &trackNo, &trackTotal, &discNo, &discTotal, &year, &bpm, &tr.Genre, &compilation, &tr.ISRC, &mbid)
 	if errors.Is(err, sql.ErrNoRows) {
 		return tr, "", nil, waxerr.New(waxerr.CodeNotFound, "store.EditItemFields", "item has no track row")
 	}
@@ -796,6 +808,7 @@ func loadTrackForEditTx(ctx context.Context, tx *sql.Tx, itemID int64) (model.Tr
 	tr.TrackNo, tr.TrackTotal = int(trackNo.Int64), int(trackTotal.Int64)
 	tr.DiscNo, tr.DiscTotal = int(discNo.Int64), int(discTotal.Int64)
 	tr.Year = int(year.Int64)
+	tr.BPM = int(bpm.Int64)
 	tr.Compilation = compilation != 0
 	tr.MBID = mbid.String
 

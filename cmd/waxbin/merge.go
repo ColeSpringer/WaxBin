@@ -10,10 +10,10 @@ import (
 
 func newMergeCmd(g *globals) *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "merge <artist|release_group|album|genre> <survivor-pid> <loser-pid>...",
+		Use:   "merge <artist|release_group|album|genre|series> <survivor-pid> <loser-pid>...",
 		Short: "Merge duplicate entities onto one survivor",
 		Long: "Collapses one or more loser entities onto the survivor, re-pointing their " +
-			"tracks, albums, genre links, and contributor credits (so play state and " +
+			"tracks, albums, books, genre links, and contributor credits (so play state and " +
 			"provenance ride along), unioning MBID/enrichment state, recomputing rollups, " +
 			"and deleting the losers. The survivor keeps its public id. Use `audit` to find " +
 			"duplicate artists/albums/genres to merge.",
@@ -22,7 +22,7 @@ func newMergeCmd(g *globals) *cobra.Command {
 			et := model.MergeEntity(args[0])
 			if !et.Valid() {
 				return waxerr.New(waxerr.CodeInvalid, "merge",
-					"unknown entity type "+args[0]+" (want artist|release_group|album|genre)")
+					"unknown entity type "+args[0]+" (want artist|release_group|album|genre|series)")
 			}
 			survivor := model.PID(args[1])
 			// Dedup the losers and drop any that equal the survivor: each merge deletes

@@ -191,6 +191,54 @@ func TestEditComposerSortWriteBack(t *testing.T) {
 	}
 }
 
+// TestEditBPMWriteBackRoundTrip walks the bpm column through the whole loop: a scan
+// reads TBPM into it, an edit with write-back stamps the new number onto the file, and
+// a forced rescan reads that number back rather than reverting.
+func TestEditBPMWriteBackRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	src := filepath.Join(root, "song.mp3")
+	writeFile(t, src, testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
+		Title: "Song", Artist: "Band", Album: "Album", Track: 1, BPM: "90.4",
+	}))
+
+	lib := openManaged(t, ctx, db, root)
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	pid := itemPIDByTitle(t, ctx, lib, "Song")
+	v, err := lib.Get(ctx, pid)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if v.BPM != 90 {
+		t.Fatalf("scanned BPM = %d, want the rounded 90", v.BPM)
+	}
+
+	if err := lib.EditFields(ctx, pid, map[string]string{"bpm": "128"},
+		waxbin.EditOptions{Lock: model.LockOn, WriteBack: true}); err != nil {
+		t.Fatalf("edit with write-back: %v", err)
+	}
+	fm, err := meta.NewReader().Read(ctx, src)
+	if err != nil {
+		t.Fatalf("read tags: %v", err)
+	}
+	if fm.Tags.BPM != 128 {
+		t.Errorf("on-disk BPM = %d, want 128", fm.Tags.BPM)
+	}
+
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{Force: true}); err != nil {
+		t.Fatalf("forced rescan: %v", err)
+	}
+	if v, err = lib.Get(ctx, pid); err != nil {
+		t.Fatalf("get after rescan: %v", err)
+	}
+	if v.BPM != 128 {
+		t.Errorf("BPM after forced rescan = %d, want 128", v.BPM)
+	}
+}
+
 // TestEditComposerWriteBackClearsStaleSortTag verifies a display-name edit's
 // write-back clears the derived sort tags the file carried: without the clears,
 // a stale COMPOSERSORT or ARTISTSORT would feed the next scan's derivation and

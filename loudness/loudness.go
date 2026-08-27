@@ -18,7 +18,21 @@ const ReferenceLUFS = -18.0
 // AnalysisVersion identifies the loudness algorithm. The analyze pass keys its
 // per-file stamp on the combined analyze version; bumping this is one reason to
 // force re-analysis.
-const AnalysisVersion = 1
+//
+// Version 2 is the first bump made because the decoder's output changed rather
+// than anything in this package. HE-AAC files measured under version 1 were
+// decoded from their LC core alone, at half the bandwidth and in mono where the
+// file is parametric stereo, so their loudness and peaks are off by dB. The same
+// WaxFlow bump added WavPack, Monkey's Audio and WMA decoding, and fpcalc hosts
+// had already stamped those files with a fingerprint and no measurement at all.
+// AAC-LC and Vorbis moved too, but only within WaxFlow's MDCT tolerance, which
+// its own test gates hold at around 1e-9.
+//
+// It is not a cheap way to re-measure. The analyze pass has no measure-only path
+// and PutAnalysis rewrites the fingerprint and its index terms on every store, so
+// any bump here re-runs the whole pipeline. It is bumped because it names what
+// went stale.
+const AnalysisVersion = 2
 
 // Result is a track's measured loudness.
 type Result struct {

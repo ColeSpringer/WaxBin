@@ -29,8 +29,8 @@ import (
 // an author edit is planned in the same artist stage and covered by the same
 // all-references-move checks; the series above the book gets its own stage after it.
 // A series carries no art, curation, or play state, so its rename preserves the pid
-// and the deltas hanging off it and nothing else, and a taken series key falls back
-// to the split (there is no series merge primitive).
+// and the deltas hanging off it and nothing else, and a taken series key merges into
+// the incumbent the way the artist and release-group stages do.
 //
 // Durability: the rename is DB-only. It survives an unforced rescan (the entity block
 // is gated on content change) and a forced rescan when the edited fields are locked
@@ -780,10 +780,9 @@ func finishArtistRenameTx(ctx context.Context, tx *sql.Tx, id int64, pid string,
 // place only when every book on it is a batch participant editing series to one
 // uniform new name and no batch member moves onto the name it is leaving; anything else
 // falls back to the split the per-item resolveSeries performs. There is nothing to carry
-// but the pid and the deltas that reference it: a
-// series row holds no art, curation, play state, or enrichment marker. A taken key
-// splits too rather than merging, since there is no series merge primitive to fold
-// the old row into the incumbent.
+// but the pid and the deltas that reference it: a series row holds no art, curation,
+// play state, or enrichment marker. A taken key folds the old row into the incumbent
+// through the series merge primitive.
 func renameSeriesForEditsTx(ctx context.Context, tx *sql.Tx, books []*bookRenameMember, op string) error {
 	// One uniform target name per old series; a conflicting pair blocks it.
 	targets := map[int64]string{}
@@ -871,9 +870,10 @@ func seriesNameKeptByBatchTx(ctx context.Context, tx *sql.Tx, id int64, n string
 }
 
 // renameSeriesTx rewrites one covered series onto its target name: a same-key
-// respelling refreshes the display, a free key renames in place, and a taken key is
-// left alone so the per-item upsert links the books onto the incumbent and the old row
-// drains. Either write emits one series OpUpdate.
+// respelling refreshes the display, a free key renames in place, and a taken key
+// auto-merges into the incumbent, the same three branches renameArtistTx has. Either
+// write emits one series OpUpdate; the merge branch emits its own deltas instead, the
+// loser's being a delete.
 func renameSeriesTx(ctx context.Context, tx *sql.Tx, id int64, n, op string) error {
 	var curName, curKey, pid string
 	err := tx.QueryRowContext(ctx,
@@ -894,17 +894,22 @@ func renameSeriesTx(ctx context.Context, tx *sql.Tx, id int64, n, op string) err
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 	} else {
-		var taken int
-		if err := tx.QueryRowContext(ctx,
-			"SELECT EXISTS(SELECT 1 FROM series WHERE match_key=?)", newKey).Scan(&taken); err != nil {
-			return waxerr.Wrap(waxerr.CodeIO, op, err)
-		}
-		if taken == 1 {
-			return nil
-		}
-		if _, err := tx.ExecContext(ctx,
-			"UPDATE series SET name=?, sort_key=?, match_key=? WHERE id=?",
-			n, model.SortKey(n), newKey, id); err != nil {
+		var incPID string
+		err := tx.QueryRowContext(ctx, "SELECT pid FROM series WHERE match_key=?", newKey).Scan(&incPID)
+		switch {
+		case err == nil:
+			// Taken: fold this row into the incumbent, which re-points every book and
+			// emits the loser's delete. Returning here rather than falling through is
+			// what keeps the tail from also emitting an update for a deleted pid.
+			_, err := mergeEntityTx(ctx, tx, model.MergeSeries, "series", model.PID(incPID), model.PID(pid))
+			return err
+		case errors.Is(err, sql.ErrNoRows):
+			if _, err := tx.ExecContext(ctx,
+				"UPDATE series SET name=?, sort_key=?, match_key=? WHERE id=?",
+				n, model.SortKey(n), newKey, id); err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+		default:
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 	}

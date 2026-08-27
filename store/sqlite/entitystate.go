@@ -14,10 +14,11 @@ import (
 // share the recorded-time helpers (stampFor/staleReplay) so the item and entity paths
 // order a replayed toggle the same way, and their own envelope (entityPlayStateWrite)
 // so a value-identical re-write stays change-log silent, exactly as playStateWrite does
-// for items. The vocabulary is model.MergeEntity, not read.EntityKind: it is the exact
-// star-able entity set, it is what entity edit already speaks, and it lives in model so
-// model.EntityPlayState can carry it without a model->read import cycle. Series is
-// excluded (not mergeable, no consumer); widen if one appears.
+// for items. The vocabulary is model.MergeEntity, not read.EntityKind: it is what entity
+// edit already speaks, and it lives in model so model.EntityPlayState can carry it
+// without a model->read import cycle. The gate is MergeEntity.Starrable rather than
+// Valid, because the mergeable set is the wider of the two: series merges but holds no
+// per-user state and no consumer asks for one. Widen Starrable if one appears.
 
 // entityPlayStateWrite resolves the user and the polymorphic entity, runs the mutation,
 // and emits the delta only when it reports a real change. It is the entity twin of
@@ -42,8 +43,8 @@ import (
 // rating writes can report a no-op the same way their item twins do; a failed write
 // returns false with the error.
 func (s *Store) entityPlayStateWrite(ctx context.Context, op string, userPID model.PID, kind model.MergeEntity, entityPID model.PID, mut func(context.Context, *sql.Tx, int64, int64, int64) (bool, error)) (bool, error) {
-	if !kind.Valid() {
-		return false, waxerr.New(waxerr.CodeInvalid, op, "unknown entity type: "+string(kind))
+	if !kind.Starrable() {
+		return false, waxerr.New(waxerr.CodeInvalid, op, "entity type carries no per-user state: "+string(kind))
 	}
 	table := string(kind)
 	var changed bool
@@ -187,8 +188,8 @@ func (s *Store) SetEntityRating(ctx context.Context, userPID model.PID, kind mod
 // read because a rowid is not unique across the entity tables.
 func (s *Store) EntityPlayState(ctx context.Context, userPID model.PID, kind model.MergeEntity, entityPID model.PID) (*model.EntityPlayState, error) {
 	const op = "store.EntityPlayState"
-	if !kind.Valid() {
-		return nil, waxerr.New(waxerr.CodeInvalid, op, "unknown entity type: "+string(kind))
+	if !kind.Starrable() {
+		return nil, waxerr.New(waxerr.CodeInvalid, op, "entity type carries no per-user state: "+string(kind))
 	}
 	userID, err := userIDByPID(ctx, s.read, userPID, op)
 	if err != nil {
@@ -227,8 +228,8 @@ func (s *Store) EntityPlayState(ctx context.Context, userPID model.PID, kind mod
 // across the entity tables).
 func (s *Store) StarredEntities(ctx context.Context, userPID model.PID, kind model.MergeEntity) ([]model.EntityPlayState, error) {
 	const op = "store.StarredEntities"
-	if !kind.Valid() {
-		return nil, waxerr.New(waxerr.CodeInvalid, op, "unknown entity type: "+string(kind))
+	if !kind.Starrable() {
+		return nil, waxerr.New(waxerr.CodeInvalid, op, "entity type carries no per-user state: "+string(kind))
 	}
 	userID, err := userIDByPID(ctx, s.read, userPID, op)
 	if err != nil {

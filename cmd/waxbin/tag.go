@@ -27,7 +27,7 @@ func newTagCmd(g *globals) *cobra.Command {
 		Short: "View or set an item's custom tags",
 		Long: "Without --key, lists an item's custom tags. With --key, replaces that tag's values " +
 			"with the given --value entries (repeatable; none clears the tag). The key is normalized " +
-			"to canonical uppercase (BPM and bpm are one tag). A tag records user provenance and, by " +
+			"to canonical uppercase (KEY and key are one tag). A tag records user provenance and, by " +
 			"default, locks the tag against a scan re-deriving it.\n\n" +
 			"A key WaxBin maps through the scalar, credit, or entity edit surface (title, artist, isrc, " +
 			"barcode, a contributor role, ...) is reserved and rejected; use that surface instead.",

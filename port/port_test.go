@@ -17,7 +17,7 @@ import (
 func TestSnapshotRoundTrip(t *testing.T) {
 	libs := []*model.Library{{PID: "L1", DisplayRoot: "/music", Mode: model.ModeManaged, Profile: "waxbin-native"}}
 	items := []*model.ItemView{{PID: "I1", Kind: model.KindTrack, State: model.StatePresent, Title: "Song", Artist: "A",
-		MBID: "rec-1", ISRC: "USRC17607839"}}
+		MBID: "rec-1", ISRC: "USRC17607839", BPM: 128}}
 	rating := 80
 	plays := []model.PlayState{{UserPID: "U1", ItemPID: "I1", PlayCount: 2, Starred: true, HasRating: true, Rating: rating}}
 
@@ -40,8 +40,14 @@ func TestSnapshotRoundTrip(t *testing.T) {
 	if got.Items[0].MBID != "rec-1" || got.Items[0].ISRC != "USRC17607839" {
 		t.Errorf("item ids round-trip wrong: %+v", got.Items[0])
 	}
+	if got.Items[0].BPM != 128 {
+		t.Errorf("bpm round-trip = %d, want 128", got.Items[0].BPM)
+	}
 	if got.Manifest.Version != port.ExportVersion {
 		t.Errorf("manifest version = %d, want %d", got.Manifest.Version, port.ExportVersion)
+	}
+	if port.ExportVersion != 5 {
+		t.Errorf("ExportVersion = %d, want 5 now that bpm is carried", port.ExportVersion)
 	}
 	if got.PlayState[0].Rating == nil || *got.PlayState[0].Rating != 80 {
 		t.Fatalf("rating round-trip wrong: %+v", got.PlayState[0])

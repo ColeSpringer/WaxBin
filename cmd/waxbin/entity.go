@@ -272,14 +272,22 @@ func newEntityInfoCmd(g *globals) *cobra.Command {
 // parseStarEntity parses the <type> argument of the star/rate/state/stars commands into
 // a model.MergeEntity, the star-able entity vocabulary (artist/release_group/album/genre).
 // It is stricter than `entity info` (which also reads genre and series through
-// read.EntityKind): only the four mergeable, star-able types are accepted here.
+// read.EntityKind) and than `merge` (which takes series too): only the four types that
+// carry per-user state are accepted here, which is what MergeEntity.Starrable names. A
+// known type that simply has no state to show refuses on that ground rather than being
+// called unknown, matching how the store words the same refusal.
 func parseStarEntity(arg string) (model.MergeEntity, error) {
 	kind := model.MergeEntity(arg)
-	if !kind.Valid() {
+	switch {
+	case kind.Starrable():
+		return kind, nil
+	case kind.Valid():
+		return "", waxerr.New(waxerr.CodeInvalid, "cli.entity",
+			fmt.Sprintf("entity type %q carries no per-user state (want artist, release_group, album, or genre)", arg))
+	default:
 		return "", waxerr.New(waxerr.CodeInvalid, "cli.entity",
 			fmt.Sprintf("unknown entity type %q (want artist, release_group, album, or genre)", arg))
 	}
-	return kind, nil
 }
 
 // parseEntityRating parses the rating argument of `entity rate`: a 0-100 integer to a

@@ -1230,7 +1230,8 @@ func deleteEntityArtTx(ctx context.Context, tx *sql.Tx, entityType string, entit
 // deleteEntityArtLockTx drops an entity's art curation rows, the plain "art" field and
 // every "art.<role>", for the same reason the map rows go: entity_curation is
 // polymorphic with no FK, podcast and playlist rowids are reused (INTEGER PRIMARY KEY
-// without AUTOINCREMENT), and deleteOrphanEntity sweeps only the four merge entities. A
+// without AUTOINCREMENT), and deleteOrphanEntity sweeps only the catalog entities in
+// orphanKinds, which podcast and playlist are not. A
 // stale lock inherited by a reused id refuses every later art set on the new entity and
 // silently skips the feed image, with no surface that shows why. The per-role rows
 // inherit exactly the same way, so they go with it.

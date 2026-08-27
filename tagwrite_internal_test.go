@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+	"time"
 
 	"github.com/colespringer/waxbin/config"
 	"github.com/colespringer/waxbin/internal/testaudio"
@@ -210,6 +211,92 @@ func TestReplayGainWriteBackCountsFailures(t *testing.T) {
 	}
 	if c.failed != 1 {
 		t.Fatalf("failed = %d, want 1: a write-back that errored must not report as nothing-to-write", c.failed)
+	}
+}
+
+// TestReplayGainWriteBackUnwritableContainer: WaxFlow decoding WavPack gave .wv
+// files loudness rows, and ReplayGainWriteback has no format gate, so this pass now
+// reaches them. WaxLabel has no writer for the container, so the gain can never land
+// there. That is a value the file cannot hold, not a failure to chase, and counting
+// it as a failure would report the same file as freshly broken on every run.
+//
+// The second half is the diagnostic sync. The write-back replaces its own rows
+// wholesale, so a file that flips from unwritable to a plain failure must not keep
+// the stale "cannot store" row.
+func TestReplayGainWriteBackUnwritableContainer(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	lib, err := Open(ctx, Options{
+		DBPath: db, WriteReplayGainTags: true,
+		Roots: []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}},
+	})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer lib.Close()
+
+	const rate = 8000
+	path := filepath.Join(root, "a.wv")
+	writeRaw(t, path, testaudio.EncodeAs(t, "wavpack", "", rate, testaudio.ReferenceSignal(rate, 2*time.Second)))
+	if _, err := lib.Scan(ctx, ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	items, err := lib.Query(ctx, query.New(query.EntityItems).Build(), "")
+	if err != nil || len(items) != 1 {
+		t.Fatalf("query items: %v (n=%d)", err, len(items))
+	}
+	f, err := lib.store.FileByPID(ctx, items[0].FilePID)
+	if err != nil {
+		t.Fatalf("file by pid: %v", err)
+	}
+	if err := lib.store.PutAnalysis(ctx, model.AnalysisInput{
+		AnalysisVersion: 1, MeasureCompleted: true,
+		Fingerprint: model.FingerprintInput{FilePID: f.PID, EssenceHash: f.EssenceHash, AlgoVersion: 1, FP: []byte{}},
+		Loudness:    &model.LoudnessData{IntegratedLUFS: -12, TrackGainDB: -6, TrackPeak: 0.9},
+	}); err != nil {
+		t.Fatalf("put analysis: %v", err)
+	}
+
+	c, err := lib.writeReplayGainTags(ctx)
+	if err != nil {
+		t.Fatalf("write rg tags: %v", err)
+	}
+	if c.written != 0 || c.failed != 0 || c.unrepresented != 1 {
+		t.Fatalf("counts = {written:%d failed:%d unrepresented:%d}, want {0 0 1}: a container that cannot hold the gain is not a failure",
+			c.written, c.failed, c.unrepresented)
+	}
+	diags, err := lib.store.FileDiagnostics(ctx, model.DiagnosticFilter{
+		FilePID: f.PID, Origin: model.OriginReplayGain,
+	})
+	if err != nil {
+		t.Fatalf("diagnostics: %v", err)
+	}
+	if len(diags) != 1 || diags[0].Code != model.DiagTagWriteLost {
+		t.Fatalf("diagnostics = %+v, want one tag_write_lost", diags)
+	}
+
+	// The file goes away, so the same write is now a plain failure. A failure
+	// lands nothing and proves nothing, so the standing drift row stays: clearing
+	// it on a transient error would hide a true unrepresented mark from audit.
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	c, err = lib.writeReplayGainTags(ctx)
+	if err != nil {
+		t.Fatalf("write rg tags after removal: %v", err)
+	}
+	if c.failed != 1 || c.unrepresented != 0 {
+		t.Fatalf("counts = {failed:%d unrepresented:%d}, want {1 0} for a vanished file", c.failed, c.unrepresented)
+	}
+	diags, err = lib.store.FileDiagnostics(ctx, model.DiagnosticFilter{
+		FilePID: f.PID, Origin: model.OriginReplayGain,
+	})
+	if err != nil {
+		t.Fatalf("diagnostics after removal: %v", err)
+	}
+	if len(diags) != 1 {
+		t.Errorf("diagnostics = %+v, want the drift row kept: a failed run must not erase what is still true", diags)
 	}
 }
 

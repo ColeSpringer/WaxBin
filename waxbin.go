@@ -183,13 +183,9 @@ func Open(ctx context.Context, opts Options) (*Library, error) {
 		Leaser:            fsLeaser{lib: l},
 	}, log)
 
-	// The auditor's integrity check re-hashes files (identity.ContentHash) and its
-	// corrupt-audio check parses essence through a WaxLabel reader.
-	auditReader := meta.NewReader()
-	l.auditor = audit.New(st, identity.ContentHash, func(ctx context.Context, p string) error {
-		_, err := auditReader.Read(ctx, p)
-		return err
-	}, log)
+	// The auditor's integrity check re-hashes files (identity.ContentHash); its
+	// corrupt-audio check reads essence through the probe below.
+	l.auditor = audit.New(st, identity.ContentHash, auditProbe(meta.NewReader(), decoder), log)
 
 	if !opts.ReadOnly {
 		if err := l.ensureRoots(ctx); err != nil {
@@ -198,6 +194,41 @@ func Open(ctx context.Context, opts Options) (*Library, error) {
 		}
 	}
 	return l, nil
+}
+
+// auditProbe builds the auditor's corrupt-audio probe: a WaxLabel parse, falling
+// back to a decode for a container WaxLabel has no parser for.
+//
+// The parse on its own is a blind spot. It reports success for anything it cannot
+// parse, so a bit-rotted WavPack sailed through the check that exists to catch
+// exactly that. Decoding is the only read of such a file that can fail on damage.
+// It is not free: the integrity pass already streamed the file to re-hash it, and
+// on anything larger than the page cache this decode streams it again. One
+// limitation is accepted: the decoder reports damage and a failed read with the
+// same error code, so a transient read error during the decode counts as damage,
+// as it always has on the parse path. A file neither reader can open at all is
+// not evidence of damage, so ErrUnsupported passes.
+func auditProbe(r meta.Reader, eng *decode.Engine) func(context.Context, string) error {
+	return func(ctx context.Context, p string) error {
+		fm, err := r.Read(ctx, p)
+		if err != nil || !hasDiag(fm.Diagnostics, model.DiagUnsupportedFormat) {
+			return err
+		}
+		if _, err := eng.Measure(ctx, p, nil); err != nil && !errors.Is(err, decode.ErrUnsupported) {
+			return err
+		}
+		return nil
+	}
+}
+
+// hasDiag reports whether the set carries a diagnostic with this code.
+func hasDiag(diags []model.FileDiagnostic, code model.DiagnosticCode) bool {
+	for _, d := range diags {
+		if d.Code == code {
+			return true
+		}
+	}
+	return false
 }
 
 // Close flushes buffered playback progress, then releases the catalog and write lock.
@@ -457,6 +488,14 @@ func (l *Library) ArtRoles(ctx context.Context, ref model.EntityRef) ([]model.Ar
 // VerifyDerived reports.
 func (l *Library) GCArt(ctx context.Context) (sources, thumbnails int, err error) {
 	return l.store.GCArt(ctx)
+}
+
+// GCReservedTagProvenance deletes the custom-tag provenance rows whose key WaxBin has
+// since reserved, returning how many went. A scan retires them for an item that carries
+// custom tags, but not for one that carries none, so this is the repair for the count
+// VerifyDerived reports.
+func (l *Library) GCReservedTagProvenance(ctx context.Context) (int, error) {
+	return l.store.GCReservedTagProvenance(ctx)
 }
 
 // Lyrics returns an item's structured lyrics (synced timed lines and/or an
@@ -1225,8 +1264,8 @@ func (l *Library) YearInReview(ctx context.Context, userPID model.PID, year, top
 	return l.store.YearInReview(ctx, userPID, year, topN)
 }
 
-// Merge collapses the loser entity onto the survivor: children (tracks, albums, genre
-// links, contributor credits) are re-pointed, the survivor's MBID and enrichment
+// Merge collapses the loser entity onto the survivor: children (tracks, albums, books,
+// genre links, contributor credits) are re-pointed, the survivor's MBID and enrichment
 // marker are unioned when it lacks one, rollups are recomputed, and the loser is
 // deleted. The survivor keeps its PID. It repairs audit's duplicate-entity findings,
 // and is the seam enrichment uses to unify two heuristic rows that resolve to one

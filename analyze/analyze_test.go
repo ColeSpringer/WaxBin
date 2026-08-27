@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"math"
@@ -13,8 +14,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/colespringer/waxbin/decode"
 	"github.com/colespringer/waxbin/fingerprint"
 	"github.com/colespringer/waxbin/internal/testaudio"
+	"github.com/colespringer/waxbin/loudness"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/peaks"
 )
@@ -330,7 +333,7 @@ func TestMeasureMultichannel(t *testing.T) {
 // Because loudness/peaks are best-effort and the fingerprint is independent of the
 // whole-file read, the file must be STORED with its fingerprint (so it groups and
 // converges) and counted in MeasureFailed, not discarded into Errored, which would
-// re-decode the whole file forever without progress.
+// discard the fingerprint too and leave the file with nothing to group on.
 func TestLateCorruptionKeepsFingerprint(t *testing.T) {
 	if testing.Short() {
 		t.Skip("late-corruption fixture is a >120s encode")
@@ -365,5 +368,63 @@ func TestLateCorruptionKeepsFingerprint(t *testing.T) {
 	}
 	if in.Loudness != nil || in.Peaks != nil {
 		t.Error("loudness/peaks should be nil when the whole-file measure failed")
+	}
+	if in.MeasureCompleted {
+		t.Error("a measure that fell over must not stamp the file as measured; the retry predicate reads that flag")
+	}
+}
+
+// TestSilenceStampsAsMeasured is the other half of TestLateCorruptionKeepsFingerprint.
+// Silence never passes the loudness gate, so it stores no loudness row either, and
+// the two used to look identical in the catalog. Its measurement did run to the end
+// of the file, so it is stamped and the pass leaves it alone from here.
+func TestSilenceStampsAsMeasured(t *testing.T) {
+	dir := t.TempDir()
+	const rate = 8000
+	f := writeFixture(t, dir, "silence.wav", 0, testaudio.EncodeWAV16(rate, make([]float32, rate*2)))
+
+	store := newFakeStore(f)
+	res, err := pureGoAnalyzer(t, store).Run(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Analyzed != 1 || res.MeasureFailed != 0 {
+		t.Fatalf("Run = {Analyzed:%d MeasureFailed:%d}, want {1 0}: measuring silence is not a failure",
+			res.Analyzed, res.MeasureFailed)
+	}
+	in := store.puts[f.PID]
+	if in.Loudness != nil {
+		t.Error("silence has no gated loudness to store")
+	}
+	if !in.MeasureCompleted {
+		t.Error("silence measured fine; without the stamp the pass re-decodes it every run")
+	}
+}
+
+// TestVersionLeavesThePreBumpStampBehind: 1001001 is the combined stamp every
+// pure-Go-fingerprinted file carried before the WaxFlow bump. That decoder gave the
+// meter half an HE-AAC file and could not open WavPack, Monkey's Audio or WMA at
+// all, so those measurements are wrong or missing, and only a stamp that differs
+// gets them redone.
+func TestVersionLeavesThePreBumpStampBehind(t *testing.T) {
+	const preBump = 1_001_001
+	if Version == preBump {
+		t.Fatalf("Version is still the pre-bump %d; loudness.AnalysisVersion (%d) did not move with the decoder",
+			Version, loudness.AnalysisVersion)
+	}
+}
+
+// TestMeasureSettled pins which measure failures stamp the file. An unsupported
+// input settles (nothing this build runs can change the answer, and a decoder
+// change re-selects it through AnalysisVersion); anything retryable stays clear.
+func TestMeasureSettled(t *testing.T) {
+	if !measureSettled(nil) {
+		t.Error("a clean measure should settle")
+	}
+	if !measureSettled(fmt.Errorf("open: %w", decode.ErrUnsupported)) {
+		t.Error("an unsupported input should settle rather than re-decode every run")
+	}
+	if measureSettled(errors.New("read: transient glitch")) {
+		t.Error("a retryable failure must leave the stamp clear")
 	}
 }

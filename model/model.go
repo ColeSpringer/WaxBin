@@ -115,6 +115,9 @@ type Track struct {
 	Artists     []string
 	Compilation bool // multi-artist release; uses the Various Artists layout
 	ISRC        string
+	// BPM is the stated tempo, a whole number (see Tags.BPM). 0 means the file did
+	// not state one.
+	BPM int
 
 	// External identifiers anchor MBID-first entity identity and enrichment
 	// lookups. MBID is the recording id (kept for back-compat); the
@@ -170,6 +173,11 @@ type Tags struct {
 	Genres      []string // split genres, normalized into entities downstream
 	Compilation bool
 	ISRC        string
+	// BPM is the stated tempo as a whole number. Text formats store whatever a tagger
+	// wrote, fractions included, so the reader rounds to nearest on the way in and the
+	// catalog holds one number per track whatever the file's format. 0 means the file
+	// stated nothing usable.
+	BPM int
 
 	// Release identifiers (album-level), carried into album resolution. They are
 	// stored on the album entity, not the track row. Media is the physical medium
@@ -237,6 +245,13 @@ type Tags struct {
 	// any. It does not feed Year; see TagAcquisition for why.
 	Acquisition TagAcquisition
 }
+
+// MaxBPM is the largest tempo the catalog stores. It is the MP4 tmpo atom's two-byte
+// ceiling, which is the tightest of the formats WaxBin writes, so a value the edit
+// surface accepts is one every backing file can hold. It lives here rather than in the
+// tag adapter because the store enforces it and must not depend on the tag library;
+// meta's TestBPMCeilingMatchesTagLibrary pins the two together.
+const MaxBPM = 65535
 
 // TagAcquisition is origin provenance read from a file's own tags, meaning the
 // acquisition keys a downloader stamps into what it writes. It is evidence of
@@ -339,7 +354,10 @@ type ItemView struct {
 	// classification, not surfaced here).
 	Composer     string
 	ComposerSort string
-	DurationMS   int64
+	// BPM is the track's stated tempo, whole (see Tags.BPM), and 0 for an item that
+	// states none or is not a track.
+	BPM        int
+	DurationMS int64
 
 	// Audiobook fields, populated for book items (empty for tracks). Author maps
 	// onto Artist for the shared read/organize paths; these carry the extras the

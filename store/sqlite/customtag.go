@@ -20,7 +20,7 @@ import (
 // "tag.<KEY>" so a scan does not re-derive it from the file. Passing no values (or only
 // whitespace) clears the tag and drops any lock regardless of lock, so a
 // later scan re-derives it: a clear is a full forget, never a locked-empty tag. The key
-// is normalized to canonical uppercase, so BPM and bpm are one tag. A reserved key (one
+// is normalized to canonical uppercase, so KEY and key are one tag. A reserved key (one
 // WaxBin owns through the scalar, credit, or identifier APIs) is rejected with
 // CodeInvalid so the caller reaches for the right surface instead. A locked tag is
 // refused with CodeLocked unless force is set. It returns the canonical key stored and
@@ -274,6 +274,45 @@ func tagProvenanceKeysTx(ctx context.Context, tx *sql.Tx, itemID int64) (map[str
 		}
 	}
 	return out, rows.Err()
+}
+
+// reservedTagProvenanceQuery appends to verb a field_provenance clause matching every
+// "tag.<KEY>" row whose key is reserved, and returns it with the bound field names. The
+// reserved set lives in Go, so it has to be spelled out as placeholders; building both
+// the count and the delete from one helper keeps db verify's report and its repair on
+// the same set.
+func reservedTagProvenanceQuery(verb string) (string, []any) {
+	keys := model.ReservedTagKeys()
+	args := make([]any, len(keys))
+	for i, k := range keys {
+		args[i] = model.TagLockField(k)
+	}
+	return verb + " FROM field_provenance WHERE field IN " + placeholders(len(keys)), args
+}
+
+// GCReservedTagProvenance deletes the "tag.<KEY>" provenance rows whose key WaxBin has
+// since reserved, returning how many went. Reserving a key makes its rows unreachable:
+// SetItemTag and UnlockField both refuse a reserved field, and syncItemTagsTx sweeps
+// them on the next scan only for an item that has custom tags on either side, since its
+// fast path returns first. That fast path's one indexed probe per plain file is worth
+// keeping, so the stranded rows are reclaimed here instead, under `db verify --fix`.
+func (s *Store) GCReservedTagProvenance(ctx context.Context) (int, error) {
+	const op = "store.GCReservedTagProvenance"
+	q, args := reservedTagProvenanceQuery("DELETE")
+	var n int
+	err := s.writeTx(ctx, func(tx *sql.Tx) error {
+		r, err := tx.ExecContext(ctx, q, args...)
+		if err != nil {
+			return err
+		}
+		c, _ := r.RowsAffected()
+		n = int(c)
+		return nil
+	})
+	if err != nil {
+		return 0, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	return n, nil
 }
 
 // tagSetsEqual reports whether two key -> ordered-values maps are identical.

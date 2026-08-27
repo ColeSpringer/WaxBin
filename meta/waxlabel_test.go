@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -721,6 +722,39 @@ func TestReadsMediaAndReleaseCountry(t *testing.T) {
 	}
 }
 
+// TestReadsFoldedWireSpellings: WaxLabel folds the Matroska-native frame spellings onto
+// their canonical keys on every format's read path now, not just Matroska's, so an ID3
+// TXXX frame under one of them reaches the typed field instead of the custom-tag map.
+// The spelling is reserved besides, which is what retires the rows an older scan stored.
+func TestReadsFoldedWireSpellings(t *testing.T) {
+	p := writeTemp(t, "song.mp3", testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
+		Title: "Airbag", Artist: "Radiohead", Album: "OK Computer",
+		TXXX: []testaudio.TXXXFrame{
+			{Desc: "CATALOG_NUMBER", Value: "NODATA 02"},
+			{Desc: "TOTAL_PARTS", Value: "12"},
+			{Desc: "DATE_RELEASED", Value: "1997-05-21"},
+		},
+	}))
+	fm, err := NewReader().Read(context.Background(), p)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if fm.Tags.CatalogNumber != "NODATA 02" {
+		t.Errorf("catalogNumber = %q, want the CATALOG_NUMBER value", fm.Tags.CatalogNumber)
+	}
+	if fm.Tags.TrackTotal != 12 {
+		t.Errorf("trackTotal = %d, want 12 from TOTAL_PARTS", fm.Tags.TrackTotal)
+	}
+	if fm.Tags.Year != 1997 {
+		t.Errorf("year = %d, want 1997 from DATE_RELEASED", fm.Tags.Year)
+	}
+	for _, k := range []string{"CATALOG_NUMBER", "TOTAL_PARTS", "DATE_RELEASED", "CATALOGNUMBER"} {
+		if v, ok := fm.Tags.Custom[k]; ok {
+			t.Errorf("custom[%s] = %v, want it folded onto the typed field", k, v)
+		}
+	}
+}
+
 // TestReadsPicardsReleaseCountrySpelling: Picard writes its own TXXX description, which
 // WaxLabel folds onto the canonical RELEASECOUNTRY key, so the reader needs to know only
 // that one. Neither spelling may leak into the custom-tag map.
@@ -777,5 +811,114 @@ func TestDisagreeingCountrySpellingsReadAsAbsent(t *testing.T) {
 	}
 	if fm2.Tags.Country != "GB" {
 		t.Errorf("country = %q, want GB when the values agree", fm2.Tags.Country)
+	}
+}
+
+// TestReadsBPM covers the numeric projection of a text tag. ID3 stores whatever the
+// tagger wrote, so the reader has to fold a fractional value onto the integer column,
+// and it rounds to nearest through the same rule the MP4 tmpo atom applies. A value the
+// key does not accept reads as absent rather than as a partial parse, and neither the
+// canonical key nor the ID3 frame spelling may survive as a custom tag.
+func TestReadsBPM(t *testing.T) {
+	cases := []struct {
+		tagged string
+		want   int
+	}{
+		{"128", 128},
+		{"174.6", 175}, // fractional, rounds to nearest
+		{"174.4", 174},
+		{"0174", 174}, // a respell, not a round
+		{"", 0},
+		{"fast", 0},
+		{"-3", 0},    // no sign: the tmpo atom stores an unsigned magnitude
+		{"70000", 0}, // above the two-byte ceiling
+		{"1e3", 0},   // scientific notation is not the conventional decimal form
+	}
+	for _, c := range cases {
+		p := writeTemp(t, "bpm.mp3", testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
+			Title: "Airbag", Artist: "Radiohead", Album: "OK Computer", BPM: c.tagged,
+		}))
+		fm, err := NewReader().Read(context.Background(), p)
+		if err != nil {
+			t.Fatalf("Read(%q): %v", c.tagged, err)
+		}
+		if fm.Tags.BPM != c.want {
+			t.Errorf("BPM for TBPM %q = %d, want %d", c.tagged, fm.Tags.BPM, c.want)
+		}
+		for _, k := range []string{"BPM", "TBPM"} {
+			if v, ok := fm.Tags.Custom[k]; ok {
+				t.Errorf("custom[%s] = %v, want it folded onto the typed field", k, v)
+			}
+		}
+	}
+}
+
+// TestBPMCeilingMatchesTagLibrary keeps model.MaxBPM in step with the value the tag
+// library accepts. The store enforces the ceiling and cannot import the tag library, so
+// this is what catches a WaxLabel release that moves it.
+func TestBPMCeilingMatchesTagLibrary(t *testing.T) {
+	if !tag.ValidBPMValue(tag.BPM, strconv.Itoa(model.MaxBPM)) {
+		t.Errorf("model.MaxBPM = %d is rejected by tag.ValidBPMValue", model.MaxBPM)
+	}
+	if tag.ValidBPMValue(tag.BPM, strconv.Itoa(model.MaxBPM+1)) {
+		t.Errorf("tag.ValidBPMValue accepts %d, above model.MaxBPM", model.MaxBPM+1)
+	}
+}
+
+// TestWritesWholeBPMToMP4 pins the MP4 half of the BPM surface. testaudio has no MP4
+// tag writer, so the fixture is an encoded m4a tagged through WaxBin's own writer and
+// read back. The tmpo atom stores a whole number, so writing one must not report the
+// value as unrepresented, and the round-trip must return the number that went in.
+func TestWritesWholeBPMToMP4(t *testing.T) {
+	ctx := context.Background()
+	const rate = 44100
+	sig := testaudio.ReferenceSignal(rate, 1200*time.Millisecond)
+	// Progressive, not the format default: a fragmented MP4 refuses a tag rewrite.
+	p := writeTemp(t, "tone.m4a", testaudio.EncodeAs(t, "aac", "progressive", rate, sig))
+
+	res, err := NewWriter().Apply(ctx, p, []TagEdit{{Key: "BPM", Values: []string{"128"}}})
+	if err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	for _, w := range res.Warnings {
+		if w.Unrepresented {
+			t.Errorf("whole-number BPM write reported unrepresented: %+v", w)
+		}
+	}
+	fm, err := NewReader().Read(ctx, p)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if fm.Tags.BPM != 128 {
+		t.Errorf("BPM read back = %d, want 128", fm.Tags.BPM)
+	}
+}
+
+// TestReservedWireSpellingsAreFolded pins the premise the wire-spelling
+// reservations rest on: each one is a recognized alias of a canonical key, so a
+// value tagged under it folds rather than vanishing, and an edit under it
+// retargets the canonical frame. If a WaxLabel bump drops one from its alias
+// table, reserving it would strand real values, and this fails at the bump.
+// TBPM is absent by design: it is an ID3 frame name the ID3 mapping folds, not a
+// global alias, and its read projection is pinned by the BPM tests.
+func TestReservedWireSpellingsAreFolded(t *testing.T) {
+	spellings := []string{
+		"PART_NUMBER", "TOTAL_PARTS", "TOTAL_DISCS", "LEAD_PERFORMER",
+		"DATE_RECORDED", "DATE_RELEASED", "DATE_RELEASE", "DATE_ORIGINAL",
+		"ORIGINAL_DATE", "ENCODED_BY", "CATALOG_NUMBER", "PUBLISHER",
+		"REMIXED_BY", "CONTENT_GROUP",
+	}
+	for _, s := range spellings {
+		k, ok := tag.AliasKey(s)
+		if !ok {
+			t.Errorf("%s is reserved as a folded spelling but tag.AliasKey no longer recognizes it", s)
+			continue
+		}
+		if strings.EqualFold(string(k), s) {
+			t.Errorf("%s aliases onto itself; reserving it would drop the value", s)
+		}
+		if !model.IsReservedTagKey(s) {
+			t.Errorf("%s missing from reservedTagKeys; this list is stale", s)
+		}
 	}
 }

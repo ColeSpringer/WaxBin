@@ -25,7 +25,10 @@ CREATE TABLE library (
 -- Files on disk: audio + sidecars. Paths are BLOBs (non-UTF8 safe) with a
 -- display string alongside. analyzed_essence/analysis_version stamp what the
 -- analyze pass last measured, so derived data from superseded audio reads as
--- absent. diag_version is the rule-set version this file's diagnostics were
+-- absent. measured_essence records the essence whose loudness/peaks measurement
+-- ran to completion, which is what tells a legitimately silent file (measured,
+-- nothing to store) apart from one whose measure failed and should be retried.
+-- diag_version is the rule-set version this file's diagnostics were
 -- last derived under (0 = never derived; only a full-path scan stamps it), so
 -- the audit reports coverage rather than letting an absence of rows read as a
 -- clean library.
@@ -43,6 +46,7 @@ CREATE TABLE file (
   essence_hash TEXT,
   analyzed_essence TEXT,
   analysis_version INTEGER,
+  measured_essence TEXT,
   diag_version INTEGER NOT NULL DEFAULT 0,
   container    TEXT,
   codec        TEXT,

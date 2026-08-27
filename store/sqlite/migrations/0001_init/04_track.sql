@@ -2,8 +2,10 @@
 -- (the item read-view's source) sit alongside FK links to the normalized
 -- entities, which browse/facet/rollups use. The WaxLabel adapter fills the tag
 -- columns for every format; compilation drives Various Artists handling and
--- isrc feeds audit. MusicBrainz ids live on the entity rows (artist/album/
--- release_group .mbid); track.mbid is the recording id when known.
+-- isrc feeds audit. bpm is the tempo the file states, rounded to a whole number
+-- because that is what the MP4 tmpo atom stores. MusicBrainz ids live on the
+-- entity rows (artist/album/release_group .mbid); track.mbid is the recording
+-- id when known.
 CREATE TABLE track (
   item_id      INTEGER PRIMARY KEY REFERENCES playable_item(id) ON DELETE CASCADE,
   artist       TEXT    NOT NULL DEFAULT '',
@@ -18,6 +20,7 @@ CREATE TABLE track (
   disc_no      INTEGER,
   disc_total   INTEGER,
   year         INTEGER,
+  bpm          INTEGER,
   genre        TEXT    NOT NULL DEFAULT '',
   compilation  INTEGER NOT NULL DEFAULT 0,
   isrc         TEXT    NOT NULL DEFAULT '',

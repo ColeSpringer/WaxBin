@@ -518,3 +518,30 @@ func TestEntityStateSeriesOrphanNoOp(t *testing.T) {
 		t.Errorf("series rows after sweep = %d, want 0", n)
 	}
 }
+
+// TestEntityStateRejectsSeries pins the star vocabulary to the Starrable set rather
+// than the mergeable one. Series became mergeable with the series merge primitive, but
+// it carries no per-user state and no consumer asks for one, so every star/rating/read
+// entry point still refuses it.
+func TestEntityStateRejectsSeries(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	putBook(t, st, lib.ID, bookSpec{
+		path: "/lib/Author/One/b1.m4b", essence: "be1", content: "bc1",
+		title: "Book One", author: "Jane Author", series: "Saga", seq: "1",
+	})
+	pid := entityPID(t, st, "series", "Saga")
+
+	if _, err := st.SetEntityStar(ctx, "", model.MergeSeries, pid, true, nil); !waxerr.Is(err, waxerr.CodeInvalid) {
+		t.Errorf("star series: got %v, want CodeInvalid", err)
+	}
+	if _, err := st.SetEntityRating(ctx, "", model.MergeSeries, pid, nil, nil); !waxerr.Is(err, waxerr.CodeInvalid) {
+		t.Errorf("rate series: got %v, want CodeInvalid", err)
+	}
+	if _, err := st.EntityPlayState(ctx, "", model.MergeSeries, pid); !waxerr.Is(err, waxerr.CodeInvalid) {
+		t.Errorf("series play state: got %v, want CodeInvalid", err)
+	}
+	if _, err := st.StarredEntities(ctx, "", model.MergeSeries); !waxerr.Is(err, waxerr.CodeInvalid) {
+		t.Errorf("starred series: got %v, want CodeInvalid", err)
+	}
+}

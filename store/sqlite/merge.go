@@ -23,8 +23,8 @@ func (s *Store) MergeEntity(ctx context.Context, et model.MergeEntity, survivorP
 // MergeEntities collapses every loser entity onto the survivor in one
 // transaction, so a failure on any loser rolls the whole batch back and never
 // leaves a half-applied merge. For each loser it re-points every child row
-// (tracks, albums, item_genre links, contributor credits, aliases, relations, art
-// maps) onto the survivor, unions the MBID, release-group type, and enrichment
+// (tracks, albums, books, item_genre links, contributor credits, aliases, relations,
+// art maps) onto the survivor, unions the MBID, release-group type, and enrichment
 // marker when the survivor lacks one, recomputes the affected rollups, deletes the
 // loser, and writes change_log deltas: a per-item update for every re-pointed item
 // (so a delta-sync consumer sees the moved item/entity associations), a survivor
@@ -59,7 +59,10 @@ func (s *Store) MergeEntities(ctx context.Context, et model.MergeEntity, survivo
 			return nil, waxerr.New(waxerr.CodeInvalid, op, "survivor and loser are the same entity")
 		}
 	}
-	table := string(et) // artist|release_group|album|genre; the table and art_map slot share the name
+	// artist|release_group|album|genre|series, each the name of its own table. The four
+	// that hold art also use it as their art_map slot; series has no art of its own, so
+	// its polymorphic sweeps below simply find nothing.
+	table := string(et)
 	reports := make([]*model.MergeReport, 0, len(loserPIDs))
 	err := s.writeTx(ctx, func(tx *sql.Tx) error {
 		for _, loserPID := range loserPIDs {
@@ -110,6 +113,12 @@ func mergeEntityTx(ctx context.Context, tx *sql.Tx, et model.MergeEntity, table 
 		children, err = repointAlbum(ctx, tx, sid, lid, aff)
 	case model.MergeGenre:
 		children, err = repointGenre(ctx, tx, sid, lid, aff)
+	case model.MergeSeries:
+		children, err = repointSeries(ctx, tx, sid, lid)
+	default:
+		// Valid() let a type through that has no re-point of its own. Refusing here is
+		// what keeps a future widening from deleting a loser with nothing moved off it.
+		return nil, waxerr.New(waxerr.CodeInvalid, op, "no merge re-point for entity type: "+string(et))
 	}
 	if err != nil {
 		return nil, err
@@ -149,8 +158,8 @@ func mergeEntityTx(ctx context.Context, tx *sql.Tx, et model.MergeEntity, table 
 		}
 	}
 	// Union the enrichment marker so a post-enrichment merge doesn't strand the
-	// survivor as never-looked-up (or force a redundant re-lookup). Genre is the only
-	// kind with no marker of its own; album carries the release-match one.
+	// survivor as never-looked-up (or force a redundant re-lookup). Genre and series
+	// have no marker of their own; album carries the release-match one.
 	if et == model.MergeArtist || et == model.MergeReleaseGroup || et == model.MergeAlbum {
 		if err := unionEnrichmentMarker(ctx, tx, table, sid, lid); err != nil {
 			return nil, err
@@ -167,6 +176,16 @@ func mergeEntityTx(ctx context.Context, tx *sql.Tx, et model.MergeEntity, table 
 		if err := deleteAuxArtMarkerTx(ctx, tx, lid); err != nil {
 			return nil, err
 		}
+	}
+
+	// An orphan_candidate row the loser earned from an earlier sweep goes with it. The
+	// table is polymorphic and keyed by rowid, which SQLite reuses (INTEGER PRIMARY KEY,
+	// no AUTOINCREMENT), so a row left behind would hand the next entity to take that id
+	// a first_seen from before it existed and sweep it on its first pass. Every merge
+	// kind is registered there, so this runs for all of them.
+	if _, err := tx.ExecContext(ctx,
+		"DELETE FROM orphan_candidate WHERE entity_type = ? AND entity_id = ?", table, lid); err != nil {
+		return nil, err
 	}
 
 	// Delete the loser. Remaining child rows still pointing at it (aliases,
@@ -221,6 +240,14 @@ func affectedItemPIDs(ctx context.Context, tx *sql.Tx, et model.MergeEntity, lid
 	case model.MergeGenre:
 		q = `SELECT pi.pid FROM item_genre ig JOIN playable_item pi ON pi.id = ig.item_id WHERE ig.genre_id = ?`
 		args = []any{lid}
+	case model.MergeSeries:
+		q = `SELECT pi.pid FROM book b JOIN playable_item pi ON pi.id = b.item_id WHERE b.series_id = ?`
+		args = []any{lid}
+	default:
+		// Same guard as the re-point switch: a type with no query here would silently
+		// report no affected items and skip every per-item delta.
+		return nil, waxerr.New(waxerr.CodeInvalid, "store.MergeEntities",
+			"no affected-item query for entity type: "+string(et))
 	}
 	rows, err := tx.QueryContext(ctx, q, args...)
 	if err != nil {
@@ -384,6 +411,32 @@ func repointGenre(ctx context.Context, tx *sql.Tx, sid, lid int64, aff *affected
 	}
 	n, _ := r.RowsAffected()
 	return int(n), nil
+}
+
+// repointSeries re-points the loser series' books onto the survivor. A series has no
+// rollup, no art, no curation, and no play state, so the books are all there is to move.
+//
+// Their search rows are rebuilt afterwards because the series name is stored in the FTS
+// album column and book keeps no denormalized copy of it: without the rebuild a moved
+// book stays findable under the dead series while every display shows the survivor, and
+// `db verify` never reports it (it counts search rows rather than comparing content).
+// The rename pre-pass edits its books anyway and would reindex them itself, but a CLI
+// merge touches nothing but this re-point.
+func repointSeries(ctx context.Context, tx *sql.Tx, sid, lid int64) (int, error) {
+	itemIDs, err := queryInt64sTx(ctx, tx, "SELECT item_id FROM book WHERE series_id = ?", lid)
+	if err != nil {
+		return 0, err
+	}
+	if _, err := tx.ExecContext(ctx,
+		"UPDATE book SET series_id = ? WHERE series_id = ?", sid, lid); err != nil {
+		return 0, err
+	}
+	for _, itemID := range itemIDs {
+		if err := rebuildBookSearchFTSTx(ctx, tx, itemID); err != nil {
+			return 0, err
+		}
+	}
+	return len(itemIDs), nil
 }
 
 // repointArtMap resolves the loser's art_map rows (polymorphic, no FK) per role:

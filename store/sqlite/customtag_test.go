@@ -302,3 +302,161 @@ func TestScanDropsAnUnlockedRowUnderANewlyReservedKey(t *testing.T) {
 		t.Errorf("unlocked tag.RELEASECOUNTRY provenance rows = %d, want 0", orphans)
 	}
 }
+
+// TestScanRetiresTheFoldedWireSpellings is the MEDIA precedent applied to the frame
+// spellings WaxLabel now folds onto canonical keys on every format's read path. A
+// catalog scanned before the bump holds these rows from an ID3 TXXX, MP4 freeform,
+// APEv2, or Vorbis frame, and a Matroska one cannot be the fixture: those already
+// folded a release earlier, so they left no rows behind. The rows are written
+// directly here for the same reason the MEDIA fixture is.
+func TestScanRetiresTheFoldedWireSpellings(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	res := putTrackCustom(t, st, lib.ID, "/lib/1.mp3", "e1", "c1", "One",
+		map[string][]string{"MOOD": {"chill"}}, true)
+	pid := res.ItemPID
+
+	var itemID int64
+	if err := st.read.QueryRowContext(ctx,
+		"SELECT id FROM playable_item WHERE pid = ?", string(pid)).Scan(&itemID); err != nil {
+		t.Fatalf("resolve item: %v", err)
+	}
+	// CATALOG_NUMBER locked, PART_NUMBER not: neither lock state exempts a key that
+	// has become reserved.
+	seeded := map[string]int{"CATALOG_NUMBER": 1, "PART_NUMBER": 0}
+	err := st.writeTx(ctx, func(tx *sql.Tx) error {
+		for key, locked := range seeded {
+			if err := writeItemTagTx(ctx, tx, itemID, key, []string{"legacy"}); err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO field_provenance(item_id, field, source, locked, updated_at)
+				VALUES (?, ?, 'user', ?, ?)`, itemID, model.TagLockField(key), locked, nowNS()); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("seed the legacy rows: %v", err)
+	}
+	for key := range seeded {
+		if got := tagValues(t, st, pid, key); len(got) != 1 {
+			t.Fatalf("fixture did not store %s: %v", key, got)
+		}
+	}
+
+	putTrackCustom(t, st, lib.ID, "/lib/1.mp3", "e1", "c2", "One",
+		map[string][]string{"MOOD": {"chill"}}, true)
+
+	for key := range seeded {
+		if got := tagValues(t, st, pid, key); got != nil {
+			t.Errorf("%s survived the sync as %v; a reserved key has no custom-tag surface", key, got)
+		}
+		var orphans int
+		if err := st.read.QueryRowContext(ctx,
+			"SELECT COUNT(*) FROM field_provenance WHERE item_id=? AND field=?",
+			itemID, model.TagLockField(key)).Scan(&orphans); err != nil {
+			t.Fatalf("count provenance: %v", err)
+		}
+		if orphans != 0 {
+			t.Errorf("tag.%s provenance rows = %d, want 0 (nothing could remove them)", key, orphans)
+		}
+		if _, _, err := st.SetItemTag(ctx, pid, key, []string{"x"},
+			model.Attribution{Source: model.SourceUser}, model.LockUnchanged, false); !waxerr.Is(err, waxerr.CodeInvalid) {
+			t.Errorf("SetItemTag(%s) = %v, want CodeInvalid for a reserved key", key, err)
+		}
+	}
+	if got := tagValues(t, st, pid, "MOOD"); len(got) != 1 || got[0] != "chill" {
+		t.Errorf("MOOD = %v, want it untouched (the drop must be specific to reserved keys)", got)
+	}
+}
+
+// TestVerifyReclaimsUnreachableReservedTagProvenance covers the row the scan can never
+// reach. syncItemTagsTx returns on its fast path when an item holds no custom tags and
+// the file carries none, which is before the reserved sweep, so a lone tag.<RESERVED>
+// provenance row on an otherwise plain file survives every rescan. Widening the fast
+// path would cost each plain file a second query per scan, so db verify counts the row
+// as reclaimable and --fix deletes it.
+func TestVerifyReclaimsUnreachableReservedTagProvenance(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	res := putTrackCustom(t, st, lib.ID, "/lib/plain.mp3", "e1", "c1", "One", nil, true)
+	pid := res.ItemPID
+
+	var itemID int64
+	if err := st.read.QueryRowContext(ctx,
+		"SELECT id FROM playable_item WHERE pid = ?", string(pid)).Scan(&itemID); err != nil {
+		t.Fatalf("resolve item: %v", err)
+	}
+	err := st.writeTx(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `INSERT INTO field_provenance(item_id, field, source, locked, updated_at)
+			VALUES (?, 'tag.PUBLISHER', 'user', 1, ?)`, itemID, nowNS())
+		return err
+	})
+	if err != nil {
+		t.Fatalf("seed the stranded row: %v", err)
+	}
+	// A rescan of the plain file leaves it: this is the gap, not an oversight in the test.
+	putTrackCustom(t, st, lib.ID, "/lib/plain.mp3", "e1", "c2", "One", nil, true)
+
+	rep, err := st.VerifyDerived(ctx)
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if rep.OrphanReservedTagProvenance != 1 {
+		t.Errorf("orphan reserved tag provenance = %d, want 1", rep.OrphanReservedTagProvenance)
+	}
+	// Garbage, not corruption: the same split the orphan-art counts get.
+	if !rep.Consistent() {
+		t.Errorf("a stranded provenance row made the catalog report inconsistent: %+v", rep)
+	}
+	if !rep.Reclaimable() {
+		t.Error("a stranded provenance row should be reported as reclaimable")
+	}
+
+	n, err := st.GCReservedTagProvenance(ctx)
+	if err != nil {
+		t.Fatalf("gc: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("GCReservedTagProvenance = %d, want 1", n)
+	}
+	rep, err = st.VerifyDerived(ctx)
+	if err != nil {
+		t.Fatalf("verify after gc: %v", err)
+	}
+	if rep.OrphanReservedTagProvenance != 0 || rep.Reclaimable() {
+		t.Errorf("row survived the sweep: %+v", rep)
+	}
+}
+
+// TestGCReservedTagProvenanceKeepsLiveLocks: the sweep is keyed on the reserved set, so
+// a curated lock under a key that is still a custom tag must be left alone.
+func TestGCReservedTagProvenanceKeepsLiveLocks(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	res := putTrackCustom(t, st, lib.ID, "/lib/1.mp3", "e1", "c1", "One",
+		map[string][]string{"MOOD": {"chill"}}, true)
+	pid := res.ItemPID
+	if _, _, err := st.SetItemTag(ctx, pid, "MOOD", []string{"chill"},
+		model.Attribution{Source: model.SourceUser}, model.LockOf(true), true); err != nil {
+		t.Fatalf("lock MOOD: %v", err)
+	}
+	n, err := st.GCReservedTagProvenance(ctx)
+	if err != nil {
+		t.Fatalf("gc: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("GCReservedTagProvenance = %d, want 0 with nothing reserved to sweep", n)
+	}
+	if got := tagValues(t, st, pid, "MOOD"); len(got) != 1 || got[0] != "chill" {
+		t.Errorf("MOOD = %v, want it still curated", got)
+	}
+	rep, err := st.VerifyDerived(ctx)
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if rep.OrphanReservedTagProvenance != 0 {
+		t.Errorf("a live tag.MOOD lock counted as orphaned (%d)", rep.OrphanReservedTagProvenance)
+	}
+}

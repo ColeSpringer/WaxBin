@@ -118,9 +118,10 @@ func TestFilesNeedingAnalysisLifecycle(t *testing.T) {
 		t.Fatalf("a fresh file should need analysis, got %d", len(need))
 	}
 
-	if err := st.PutAnalysis(ctx, model.AnalysisInput{AnalysisVersion: 1, Fingerprint: model.FingerprintInput{
-		FilePID: a, EssenceHash: "ea", AlgoVersion: 1, DurationBucket: 1, FP: []byte{1}, Terms: []int64{1},
-	}}); err != nil {
+	if err := st.PutAnalysis(ctx, model.AnalysisInput{AnalysisVersion: 1, MeasureCompleted: true,
+		Fingerprint: model.FingerprintInput{
+			FilePID: a, EssenceHash: "ea", AlgoVersion: 1, DurationBucket: 1, FP: []byte{1}, Terms: []int64{1},
+		}}); err != nil {
 		t.Fatalf("put: %v", err)
 	}
 	if need, _ := st.FilesNeedingAnalysis(ctx, 1, nil, 0, 100); len(need) != 0 {
@@ -129,6 +130,170 @@ func TestFilesNeedingAnalysisLifecycle(t *testing.T) {
 	// A newer algorithm version makes prior analysis stale.
 	if need, _ := st.FilesNeedingAnalysis(ctx, 2, nil, 0, 100); len(need) != 1 {
 		t.Errorf("a version bump should restage the file, got %d", len(need))
+	}
+}
+
+// TestNeedsAnalysisTracksMeasurementCompletion pins the discriminator between the
+// two ways a file ends up with no loudness row. Silence measures perfectly well and
+// stores nothing, so it must settle; a measuring decode that fell over stores
+// nothing either, and must come back. Before measured_essence the store could not
+// tell them apart, so one of the two was always handled wrong.
+func TestNeedsAnalysisTracksMeasurementCompletion(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	silent := putFile(t, st, lib.ID, "/lib/silent.wav", "es", 200000)
+	broken := putFile(t, st, lib.ID, "/lib/broken.wv", "eb", 200000)
+
+	put := func(pid model.PID, essence string, completed bool) {
+		t.Helper()
+		if err := st.PutAnalysis(ctx, model.AnalysisInput{
+			AnalysisVersion: 1, MeasureCompleted: completed,
+			Fingerprint: model.FingerprintInput{
+				FilePID: pid, EssenceHash: essence, AlgoVersion: 1, DurationBucket: 1,
+				FP: []byte{1}, Terms: []int64{1},
+			},
+		}); err != nil {
+			t.Fatalf("put %s: %v", pid, err)
+		}
+	}
+	// Both store a fingerprint and no loudness. Only the second one's measurement ran.
+	put(silent, "es", true)
+	put(broken, "eb", false)
+
+	need, err := st.FilesNeedingAnalysis(ctx, 1, nil, 0, 100)
+	if err != nil {
+		t.Fatalf("need: %v", err)
+	}
+	if len(need) != 1 || need[0].PID != broken {
+		got := make([]model.PID, len(need))
+		for i, f := range need {
+			got[i] = f.PID
+		}
+		t.Fatalf("restaged %v, want only the file whose measure failed (%s)", got, broken)
+	}
+
+	// A later run that does measure it settles the file.
+	put(broken, "eb", true)
+	if need, _ := st.FilesNeedingAnalysis(ctx, 1, nil, 0, 100); len(need) != 0 {
+		t.Errorf("a completed measurement should settle the file, got %d restaged", len(need))
+	}
+
+	// New audio in the same file: the old measurement covers essence that is gone.
+	if _, err := st.write.ExecContext(ctx,
+		"UPDATE file SET essence_hash = ? WHERE pid = ?", "eb2", string(broken)); err != nil {
+		t.Fatalf("re-essence: %v", err)
+	}
+	if need, _ := st.FilesNeedingAnalysis(ctx, 1, nil, 0, 100); len(need) != 1 {
+		t.Errorf("a changed essence should restage the file, got %d", len(need))
+	}
+}
+
+// TestVersionBumpDoesNotSettleOnAFailedRemeasure is the freeze this phase exists to
+// break, in the one shape that survives a naive fix. A version bump is the only
+// thing that re-selects a file whose essence has not changed, so it is the only
+// time PutAnalysis runs against a file that already carries a completed
+// measurement. If the failing re-measure leaves that old stamp in place, the file
+// settles as fully current while its loudness row still holds numbers from the
+// decoder the bump was raised to invalidate, and nothing ever looks at it again.
+func TestVersionBumpDoesNotSettleOnAFailedRemeasure(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	a := putFile(t, st, lib.ID, "/lib/a.wv", "ea", 200000)
+
+	put := func(version int, completed bool, ld *model.LoudnessData) {
+		t.Helper()
+		if err := st.PutAnalysis(ctx, model.AnalysisInput{
+			AnalysisVersion: version, MeasureCompleted: completed, Loudness: ld,
+			Fingerprint: model.FingerprintInput{
+				FilePID: a, EssenceHash: "ea", AlgoVersion: 1, DurationBucket: 1,
+				FP: []byte{1}, Terms: []int64{1},
+			},
+		}); err != nil {
+			t.Fatalf("put: %v", err)
+		}
+	}
+	loudnessRows := func() int {
+		t.Helper()
+		var n int
+		if err := st.read.QueryRowContext(ctx, "SELECT COUNT(*) FROM loudness").Scan(&n); err != nil {
+			t.Fatalf("count loudness: %v", err)
+		}
+		return n
+	}
+
+	// Measured cleanly under the old decoder, so the file settles at version 1.
+	put(1, true, &model.LoudnessData{IntegratedLUFS: -12, TrackGainDB: -6, TrackPeak: 0.9})
+	if need, _ := st.FilesNeedingAnalysis(ctx, 1, nil, 0, 100); len(need) != 0 {
+		t.Fatalf("a fully measured file should settle, got %d restaged", len(need))
+	}
+
+	// The decoder changes, so the version moves and the file comes back.
+	if need, _ := st.FilesNeedingAnalysis(ctx, 2, nil, 0, 100); len(need) != 1 {
+		t.Fatalf("a version bump should restage the file, got %d", len(need))
+	}
+
+	// This time the measuring decode falls over. The fingerprint is stored, the
+	// version advances, and the stale loudness row survives because the essence did
+	// not change. The file must not be treated as measured at the new version.
+	put(2, false, nil)
+	if got := loudnessRows(); got != 1 {
+		t.Fatalf("loudness rows = %d, want the stale row kept: without it this walk is not the dangerous one", got)
+	}
+	if need, _ := st.FilesNeedingAnalysis(ctx, 2, nil, 0, 100); len(need) != 1 {
+		t.Fatalf("a file carrying a pre-bump measurement settled at the new version; it will never be re-measured")
+	}
+
+	// It settles only once a measure actually completes under the new version.
+	put(2, true, &model.LoudnessData{IntegratedLUFS: -11, TrackGainDB: -7, TrackPeak: 0.8})
+	if need, _ := st.FilesNeedingAnalysis(ctx, 2, nil, 0, 100); len(need) != 0 {
+		t.Errorf("a completed re-measure should settle the file, got %d restaged", len(need))
+	}
+}
+
+// TestVersionBumpClearsLoudnessOnCompletedEmptyRemeasure is the other half of the
+// version-bump hole. A re-measure that runs to completion and produces nothing has
+// superseded the prior loudness row: leaving the row while the stamp settles the
+// file would serve the old decoder's numbers as current forever. Only a measure
+// that failed outright may keep the prior row, and that path stays unsettled.
+func TestVersionBumpClearsLoudnessOnCompletedEmptyRemeasure(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	a := putFile(t, st, lib.ID, "/lib/a.wv", "ea", 200000)
+
+	put := func(version int, completed bool, ld *model.LoudnessData) {
+		t.Helper()
+		if err := st.PutAnalysis(ctx, model.AnalysisInput{
+			AnalysisVersion: version, MeasureCompleted: completed, Loudness: ld,
+			Fingerprint: model.FingerprintInput{
+				FilePID: a, EssenceHash: "ea", AlgoVersion: 1, DurationBucket: 1,
+				FP: []byte{1}, Terms: []int64{1},
+			},
+		}); err != nil {
+			t.Fatalf("put: %v", err)
+		}
+	}
+	loudnessRows := func() int {
+		t.Helper()
+		var n int
+		if err := st.read.QueryRowContext(ctx, "SELECT COUNT(*) FROM loudness").Scan(&n); err != nil {
+			t.Fatalf("count loudness: %v", err)
+		}
+		return n
+	}
+
+	put(1, true, &model.LoudnessData{IntegratedLUFS: -12, TrackGainDB: -6, TrackPeak: 0.9})
+	if got := loudnessRows(); got != 1 {
+		t.Fatalf("loudness rows = %d, want 1 after the first measure", got)
+	}
+
+	// The new decoder gates this material to no valid measurement. The run
+	// completed, so the old row goes and the file settles at the new version.
+	put(2, true, nil)
+	if got := loudnessRows(); got != 0 {
+		t.Fatalf("loudness rows = %d, want the superseded row cleared", got)
+	}
+	if need, _ := st.FilesNeedingAnalysis(ctx, 2, nil, 0, 100); len(need) != 0 {
+		t.Errorf("a completed empty re-measure should settle the file, got %d restaged", len(need))
 	}
 }
 

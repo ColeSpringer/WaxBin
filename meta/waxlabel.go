@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -138,6 +139,7 @@ func tagsFromDoc(doc *waxlabel.Document, fields tag.Tags) model.Tags {
 		Genres:          trimAll(fields.Genres),
 		Compilation:     fields.Compilation,
 		ISRC:            strings.TrimSpace(fields.ISRC),
+		BPM:             bpmFromTag(fields.BPM),
 		Barcode:         strings.TrimSpace(fields.Barcode),
 		Label:           strings.TrimSpace(fields.Label),
 		CatalogNumber:   strings.TrimSpace(fields.CatalogNumber),
@@ -173,6 +175,24 @@ func tagsFromDoc(doc *waxlabel.Document, fields tag.Tags) model.Tags {
 	}
 	t.Custom = customTagsFromDoc(doc)
 	return t
+}
+
+// bpmFromTag projects the BPM tag onto the integer column. WaxLabel hands the value
+// over as the text the file holds, and ID3 and Vorbis store it verbatim, so a DJ tool's
+// "174.6" arrives as a fraction. It rounds to nearest through tag.BPMStoredWhole, the
+// same rule the MP4 tmpo atom applies, so one number on disk reads back as one number
+// whatever the container. A value the key does not accept (a sign, a word, anything
+// past the two-byte ceiling) reads as absent rather than as a partial parse.
+func bpmFromTag(v string) int {
+	stored, _, ok := tag.BPMStoredWhole(v)
+	if !ok {
+		return 0
+	}
+	n, err := strconv.Atoi(stored)
+	if err != nil {
+		return 0
+	}
+	return n
 }
 
 // releaseCountryFromDoc reads the release country off the canonical key. WaxLabel folds

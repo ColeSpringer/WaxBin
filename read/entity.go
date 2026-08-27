@@ -2,11 +2,12 @@ package read
 
 import "github.com/colespringer/waxbin/model"
 
-// EntityKind names a shared entity addressable by the entity-info lookup. It is
-// its own vocabulary rather than model.MergeEntity because the two answer
-// different questions: merge covers what can be collapsed (series cannot), while
-// this covers what a consumer can look up by pid, series included. Podcasts stay
-// out; they have their own read surface (PodcastByPID).
+// EntityKind names a shared entity addressable by the entity-info lookup. It is its
+// own vocabulary rather than model.MergeEntity because the two answer different
+// questions: merge covers what can be collapsed, this covers what a consumer can look
+// up by pid. The two memberships happen to coincide now that series merges, but the
+// read side lives in read and takes no position on collapsibility, so they stay apart.
+// Podcasts stay out; they have their own read surface (PodcastByPID).
 type EntityKind string
 
 const (

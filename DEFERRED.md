@@ -51,17 +51,6 @@ narrow, an album release-matched after its front was already filled, and closing
 needs the album pass to make its own aux ask rather than counting on the
 release-group queue to catch it.
 
-## `resolveSeries`
-
-A book edit that moves a series onto a taken match key falls back to the per-item
-split instead of a merge: the pre-pass carries a series' pid and change-log
-continuity through a same-key display refresh or a free-key in-place rewrite, but a
-taken key has no series merge primitive to fold into the way the album and artist
-chains do, so the old row drains and the incumbent takes the books. A series holds
-no art, curation, or play state today, so the split costs less than it would for an
-album, but a proper merge primitive would still make the taken-key case land in
-place like the others.
-
 ## `EditEntityFields`
 
 Clearing an album's or a release group's mbid re-keys the chain in the catalog and

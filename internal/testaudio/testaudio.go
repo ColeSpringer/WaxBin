@@ -88,8 +88,11 @@ type MP3Spec struct {
 	Label             string
 	Track, Disc, Year int
 	Compilation       bool
-	TXXX              []TXXXFrame // user-defined frames, in order
-	Audio             []byte      // nil uses DefaultAudio
+	// BPM is written verbatim into TBPM. It is a string because ID3 stores the text a
+	// tagger wrote, so a DJ tool's fractional "174.6" is a real fixture case.
+	BPM   string
+	TXXX  []TXXXFrame // user-defined frames, in order
+	Audio []byte      // nil uses DefaultAudio
 }
 
 // BuildMP3FromSpec builds an ID3v2.3-tagged MP3 from spec over valid MPEG frames.
@@ -111,6 +114,7 @@ func BuildMP3FromSpec(s MP3Spec) []byte {
 	add("TCON", s.Genre)
 	add("TPUB", s.Label)
 	add("TCOM", s.Composer)
+	add("TBPM", s.BPM)
 	if s.Track > 0 {
 		add("TRCK", strconv.Itoa(s.Track))
 	}

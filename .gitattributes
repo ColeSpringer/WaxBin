@@ -25,6 +25,8 @@
 *.opus binary
 *.wav  binary
 *.wv   binary
+*.wma  binary
+*.mka  binary
 *.gif  binary
 *.jpeg binary
 *.jpg  binary

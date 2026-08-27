@@ -39,6 +39,7 @@ type trackSpec struct {
 	album, genre          string
 	composer              string
 	year                  int
+	bpm                   int
 	discTotal             int
 	durationMS            int64
 	compilation           bool
@@ -77,6 +78,7 @@ func putTrack(t *testing.T, st *Store, libID int64, s trackSpec) *model.ScanItem
 			Genre:            s.genre,
 			Genres:           identity.SplitGenres(s.genre),
 			Year:             s.year,
+			BPM:              s.bpm,
 			DiscTotal:        s.discTotal,
 			Compilation:      s.compilation,
 			MBID:             s.mbRecording,

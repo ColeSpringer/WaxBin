@@ -43,7 +43,7 @@ func newEditCmd(g *globals) *cobra.Command {
 			"applied in one atomic catalog transaction. It excludes pids, --set, and the selection " +
 			"flags, and honors the same preview gate.\n\n" +
 			"Track fields: title, artist, album_artist, album, composer, composer_sort, comment, " +
-			"genre, year, track_no, disc_no, isrc, mbid, compilation.\n" +
+			"genre, year, track_no, disc_no, bpm, isrc, mbid, compilation.\n" +
 			"Book fields: title, author, author_sort, narrator, series, subtitle, genre, year, " +
 			"asin, isbn, publisher, edition, description, mbid.",
 		RunE: func(cmd *cobra.Command, args []string) error {

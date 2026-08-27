@@ -50,6 +50,7 @@ var fieldTagKeys = map[string]string{
 	"year":          "DATE",
 	"track_no":      "TRACKNUMBER",
 	"disc_no":       "DISCNUMBER",
+	"bpm":           "BPM",
 	"isrc":          "ISRC",
 	"mbid":          "MUSICBRAINZ_TRACKID", // recording MBID (track write-back only)
 	"compilation":   "COMPILATION",

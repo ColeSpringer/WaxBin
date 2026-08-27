@@ -136,6 +136,8 @@ type itemView struct {
 	// Composer and its collation key, present for track items.
 	Composer     string `json:"composer,omitempty"`
 	ComposerSort string `json:"composerSort,omitempty"`
+	// The track's stated tempo, a whole number, absent when the file states none.
+	BPM int `json:"bpm,omitempty"`
 	// Episode fields, present for episode items only. pubDateNs is nanoseconds, the
 	// unit every timestamp in this JSON contract uses. explicit is the episode's own
 	// advisory flag and podcastExplicit its show's; the two are independent, so a
@@ -185,7 +187,7 @@ func toItemView(v *model.ItemView) itemView {
 		MBID: v.MBID, ISRC: v.ISRC, AlbumMBID: v.AlbumMBID,
 		ReleaseGroupMBID: v.ReleaseGroupMBID,
 		ArtistMBID:       v.ArtistMBID, AlbumArtistMBID: v.AlbumArtistMBID,
-		Composer: v.Composer, ComposerSort: v.ComposerSort,
+		Composer: v.Composer, ComposerSort: v.ComposerSort, BPM: v.BPM,
 		Explicit: v.Explicit, PodcastExplicit: v.PodcastExplicit,
 		Season: v.Season, PubDateNS: v.PubDateNS, Source: string(v.Source),
 		DurationMS: v.DurationMS, Codec: v.Codec, Path: v.DisplayPath, FilePID: string(v.FilePID),
@@ -569,16 +571,18 @@ type jobView struct {
 }
 
 type derivedView struct {
-	ItemsMissingFTS         int  `json:"itemsMissingFts"`
-	OrphanFTSRows           int  `json:"orphanFtsRows"`
-	ArtistRollupDrift       int  `json:"artistRollupDrift"`
-	GenreRollupDrift        int  `json:"genreRollupDrift"`
-	ReleaseGroupRollupDrift int  `json:"releaseGroupRollupDrift"`
-	SortKeyDrift            int  `json:"sortKeyDrift"`
-	BookDurationDrift       int  `json:"bookDurationDrift"`
-	OrphanArtSources        int  `json:"orphanArtSources"`
-	OrphanThumbnails        int  `json:"orphanThumbnails"`
-	Consistent              bool `json:"consistent"`
+	ItemsMissingFTS         int `json:"itemsMissingFts"`
+	OrphanFTSRows           int `json:"orphanFtsRows"`
+	ArtistRollupDrift       int `json:"artistRollupDrift"`
+	GenreRollupDrift        int `json:"genreRollupDrift"`
+	ReleaseGroupRollupDrift int `json:"releaseGroupRollupDrift"`
+	SortKeyDrift            int `json:"sortKeyDrift"`
+	BookDurationDrift       int `json:"bookDurationDrift"`
+	OrphanArtSources        int `json:"orphanArtSources"`
+	OrphanThumbnails        int `json:"orphanThumbnails"`
+	// Custom-tag provenance rows under a key WaxBin has since reserved.
+	OrphanReservedTagProvenance int  `json:"orphanReservedTagProvenance"`
+	Consistent                  bool `json:"consistent"`
 	// Present only when --fix rewrote sort keys, which invalidates open page cursors.
 	SortKeysRewritten int `json:"sortKeysRewritten,omitempty"`
 }
@@ -590,7 +594,8 @@ func toDerivedView(r *sqlite.DerivedReport) derivedView {
 		ReleaseGroupRollupDrift: r.ReleaseGroupRollupDrift, SortKeyDrift: r.SortKeyDrift,
 		BookDurationDrift: r.BookDurationDrift,
 		OrphanArtSources:  r.OrphanArtSources, OrphanThumbnails: r.OrphanThumbnails,
-		Consistent: r.Consistent(),
+		OrphanReservedTagProvenance: r.OrphanReservedTagProvenance,
+		Consistent:                  r.Consistent(),
 	}
 }
 

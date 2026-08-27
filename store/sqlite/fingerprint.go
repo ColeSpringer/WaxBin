@@ -12,7 +12,8 @@ import (
 // FilesNeedingAnalysis returns the next keyset page of audio files whose analysis
 // is missing or stale. Ordering by (rel_path, id) keeps album tracks adjacent and
 // lets the caller advance past skipped files without fetching them again. A file
-// is stale when its analyzed_essence or analysis_version no longer matches.
+// is stale when its analyzed_essence, analysis_version, or measured_essence no
+// longer matches.
 func (s *Store) FilesNeedingAnalysis(ctx context.Context, algoVersion int, afterRelPath []byte, afterID int64, limit int) ([]*model.File, error) {
 	const op = "store.FilesNeedingAnalysis"
 	if limit <= 0 {
@@ -44,14 +45,22 @@ func (s *Store) FilesNeedingAnalysis(ctx context.Context, algoVersion int, after
 }
 
 // needsAnalysisPredicate selects audio files whose fingerprint is missing or
-// stale; shared by the list and count queries so they never drift apart.
-// Downloaded podcast episodes (in the internal ModePodcast library) are excluded:
-// fingerprinting hours of speech is wasteful and, worse, would index episodes into
-// the alt-encoding min-hash so dedup could false-match one against a real track.
+// stale, or whose loudness/peaks measurement never ran to completion for the
+// audio they currently hold; shared by the list and count queries so they never
+// drift apart. Downloaded podcast episodes (in the internal ModePodcast library)
+// are excluded: fingerprinting hours of speech is wasteful and, worse, would index
+// episodes into the alt-encoding min-hash so dedup could false-match one against a
+// real track.
+//
+// The measured_essence arm is what unfreezes a file the analyze pass fingerprinted
+// while its measuring decode failed. Silence measures fine and stores no loudness
+// row, so testing for a missing loudness row instead would re-decode every silent
+// file on every run.
 const needsAnalysisPredicate = `kind = 'audio' AND essence_hash IS NOT NULL AND
 	library_id NOT IN (SELECT id FROM library WHERE mode = 'podcast') AND (
 	analyzed_essence IS NULL OR analyzed_essence <> essence_hash OR
-	analysis_version IS NULL OR analysis_version <> ?)`
+	analysis_version IS NULL OR analysis_version <> ? OR
+	measured_essence IS NULL OR measured_essence <> essence_hash)`
 
 // CountFilesNeedingAnalysis returns how many audio files need (re)analysis at the
 // given algorithm version. The analyze pass takes this once up front to report a
@@ -77,14 +86,18 @@ func (s *Store) PutAnalysis(ctx context.Context, in model.AnalysisInput) error {
 		if err != nil {
 			return err
 		}
-		// If the file's essence changed since the last analysis, any prior loudness
-		// or peaks that this run cannot re-measure are stale and must be cleared.
-		// A version-only re-analysis over the same essence can keep them.
+		// A prior loudness or peaks row is dropped when this run supersedes it:
+		// the essence changed (the row describes audio that is gone), or the
+		// re-measure ran to completion and produced nothing (the row holds an
+		// older decoder's numbers for material that no longer measures). Only a
+		// re-measure that failed outright leaves the prior row in place, and the
+		// cleared measurement stamp below chases that case.
 		var prior sql.NullString
 		if err := tx.QueryRowContext(ctx, "SELECT analyzed_essence FROM file WHERE id = ?", fileID).Scan(&prior); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		essenceChanged := prior.String != fp.EssenceHash
+		dropPrior := essenceChanged || in.MeasureCompleted
 
 		for _, del := range []string{
 			"DELETE FROM fingerprint WHERE file_id = ?",
@@ -105,15 +118,25 @@ func (s *Store) PutAnalysis(ctx context.Context, in model.AnalysisInput) error {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 		}
-		if err := putLoudnessTx(ctx, tx, fileID, fp.EssenceHash, in.Loudness, essenceChanged); err != nil {
+		if err := putLoudnessTx(ctx, tx, fileID, fp.EssenceHash, in.Loudness, dropPrior); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
-		if err := putPeaksTx(ctx, tx, fileID, fp.EssenceHash, in.Peaks, essenceChanged); err != nil {
+		if err := putPeaksTx(ctx, tx, fileID, fp.EssenceHash, in.Peaks, dropPrior); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		// measured_essence is stamped only when the measuring decode reached the end of
+		// the file, and cleared otherwise. The clear is what makes a version bump stick:
+		// a bump is the only thing that re-selects an unchanged essence, so the old value
+		// here is a completed measurement, and keeping it across a failed re-measure would
+		// settle the file as current while the loudness row putLoudnessTx preserves still
+		// holds the previous decoder's numbers.
+		var measured sql.NullString
+		if in.MeasureCompleted {
+			measured = sql.NullString{String: fp.EssenceHash, Valid: true}
 		}
 		if _, err := tx.ExecContext(ctx,
-			"UPDATE file SET analyzed_essence = ?, analysis_version = ? WHERE id = ?",
-			fp.EssenceHash, in.AnalysisVersion, fileID); err != nil {
+			"UPDATE file SET analyzed_essence = ?, analysis_version = ?, measured_essence = ? WHERE id = ?",
+			fp.EssenceHash, in.AnalysisVersion, measured, fileID); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		// The file's analysis state changed; emit a delta so consumers can react.
@@ -122,11 +145,12 @@ func (s *Store) PutAnalysis(ctx context.Context, in model.AnalysisInput) error {
 }
 
 // putLoudnessTx upserts per-file loudness while preserving album_gain/album_peak,
-// which are maintained by RefreshAlbumGain. A nil measurement keeps a prior row
-// for the same essence, but clears it after an essence change.
-func putLoudnessTx(ctx context.Context, tx *sql.Tx, fileID int64, essence string, ld *model.LoudnessData, essenceChanged bool) error {
+// which are maintained by RefreshAlbumGain. On a nil measurement, dropPrior says
+// whether the prior row is superseded (essence changed, or a completed re-measure
+// produced nothing) and must go, or was merely not re-measured and may stay.
+func putLoudnessTx(ctx context.Context, tx *sql.Tx, fileID int64, essence string, ld *model.LoudnessData, dropPrior bool) error {
 	if ld == nil {
-		if essenceChanged {
+		if dropPrior {
 			_, err := tx.ExecContext(ctx, "DELETE FROM loudness WHERE file_id = ?", fileID)
 			return err
 		}
@@ -143,11 +167,11 @@ func putLoudnessTx(ctx context.Context, tx *sql.Tx, fileID int64, essence string
 }
 
 // putPeaksTx upserts a file's waveform, stamped with the essence it was computed
-// from. A nil result keeps a prior waveform when the essence is unchanged, but
-// clears it on an essence change (the old waveform is for different audio).
-func putPeaksTx(ctx context.Context, tx *sql.Tx, fileID int64, essence string, pk *model.PeaksData, essenceChanged bool) error {
+// from. On a nil result, dropPrior follows the same rule as putLoudnessTx: a
+// superseded waveform goes, one that was merely not re-measured may stay.
+func putPeaksTx(ctx context.Context, tx *sql.Tx, fileID int64, essence string, pk *model.PeaksData, dropPrior bool) error {
 	if pk == nil {
-		if essenceChanged {
+		if dropPrior {
 			_, err := tx.ExecContext(ctx, "DELETE FROM peaks WHERE file_id = ?", fileID)
 			return err
 		}

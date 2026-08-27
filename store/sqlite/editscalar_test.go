@@ -2,9 +2,11 @@ package sqlite
 
 import (
 	"context"
+	"database/sql"
 	"testing"
 
 	"github.com/colespringer/waxbin/model"
+	"github.com/colespringer/waxbin/query"
 	"github.com/colespringer/waxbin/waxerr"
 )
 
@@ -35,6 +37,86 @@ func TestEditTrackScalarIdentifiers(t *testing.T) {
 	// The recording MBID becomes a cross-catalog resolution anchor.
 	if v, err := st.ItemByRecordingMBID(ctx, "b1a9c0e9-d987-4042-ae91-78d6a3267d69"); err != nil || v.PID != pid {
 		t.Fatalf("resolve by recording mbid = %v, %v", v, err)
+	}
+}
+
+// TestEditTrackBPM covers the numeric bpm column end to end on the edit surface: the
+// value lands in the column, reaches the projected item view, and clears to NULL. The
+// CLI parses integers only, so a fractional or negative value is a usage error here
+// even though the tag key itself accepts a fraction on disk.
+func TestEditTrackBPM(t *testing.T) {
+	st, pid := editFixture(t)
+	ctx := context.Background()
+
+	if err := st.EditItemField(ctx, pid, "bpm", "128", model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
+		t.Fatalf("set bpm: %v", err)
+	}
+	var bpm int
+	if err := st.read.QueryRowContext(ctx,
+		"SELECT bpm FROM track t JOIN playable_item pi ON pi.id=t.item_id WHERE pi.pid=?",
+		string(pid)).Scan(&bpm); err != nil {
+		t.Fatalf("read bpm: %v", err)
+	}
+	if bpm != 128 {
+		t.Fatalf("stored bpm = %d, want 128", bpm)
+	}
+	v, err := st.ItemByPID(ctx, pid)
+	if err != nil {
+		t.Fatalf("get item: %v", err)
+	}
+	if v.BPM != 128 {
+		t.Errorf("projected BPM = %d, want 128", v.BPM)
+	}
+
+	for _, bad := range []string{"120.5", "-3", "fast"} {
+		if err := st.EditItemField(ctx, pid, "bpm", bad, model.Attribution{Source: model.SourceUser}, model.LockOf(true), true); !waxerr.Is(err, waxerr.CodeInvalid) {
+			t.Errorf("bpm %q = %v, want CodeInvalid", bad, err)
+		}
+	}
+
+	// An empty value clears the column back to NULL.
+	if err := st.EditItemField(ctx, pid, "bpm", "", model.Attribution{Source: model.SourceUser}, model.LockOf(true), true); err != nil {
+		t.Fatalf("clear bpm: %v", err)
+	}
+	var stored sql.NullInt64
+	if err := st.read.QueryRowContext(ctx,
+		"SELECT bpm FROM track t JOIN playable_item pi ON pi.id=t.item_id WHERE pi.pid=?",
+		string(pid)).Scan(&stored); err != nil {
+		t.Fatalf("read cleared bpm: %v", err)
+	}
+	if stored.Valid {
+		t.Errorf("bpm after clear = %d, want NULL", stored.Int64)
+	}
+}
+
+// TestQueryBPMRange pins bpm as a numeric query field: a range compare narrows on the
+// number rather than on text, and a track with no bpm is outside every range.
+func TestQueryBPMRange(t *testing.T) {
+	st, lib := entityFixture(t)
+	putTrack(t, st, lib.ID, trackSpec{
+		path: "/lib/a/slow.flac", essence: "e1", content: "c1", title: "Slow", artist: "A", album: "Alp", bpm: 90,
+	})
+	putTrack(t, st, lib.ID, trackSpec{
+		path: "/lib/a/fast.flac", essence: "e2", content: "c2", title: "Fast", artist: "A", album: "Alp", bpm: 174,
+	})
+	putTrack(t, st, lib.ID, trackSpec{
+		path: "/lib/a/none.flac", essence: "e3", content: "c3", title: "None", artist: "A", album: "Alp",
+	})
+
+	cases := []struct {
+		name string
+		q    query.Query
+		want string
+	}{
+		{"gte 100", query.New(query.EntityItems).Where("bpm", query.OpGte, 100).Build(), "Fast"},
+		{"lt 100", query.New(query.EntityItems).Where("bpm", query.OpLt, 100).Build(), "Slow"},
+		{"in the range", query.New(query.EntityItems).WhereRange("bpm", query.OpInRange, 80, 100).Build(), "Slow"},
+		{"is missing", query.New(query.EntityItems).WherePresence("bpm", query.OpIsMissing).Build(), "None"},
+	}
+	for _, c := range cases {
+		if got := joinTitles(userQueryTitles(t, st, c.q, "")); got != c.want {
+			t.Errorf("%s matched %q, want %q", c.name, got, c.want)
+		}
 	}
 }
 

@@ -21,7 +21,8 @@ import (
 // (merge.go).
 
 // entityTableFor maps a curatable entity type to its table name. Only the three
-// identifier/sort-bearing entities are editable; genre is not.
+// identifier/sort-bearing entities are editable; genre and series are not, even though
+// both merge.
 func entityTableFor(et model.MergeEntity) (string, bool) {
 	switch et {
 	case model.MergeArtist:

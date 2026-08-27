@@ -445,10 +445,11 @@ func TestSeriesRenameSkipsWhenBatchReintroducesName(t *testing.T) {
 	assertVerifyClean(t, st)
 }
 
-// TestSeriesRenameTakenKeySplits pins the residue: renaming a fully covered series onto
-// a name another series already owns leaves both rows alone (there is no series merge
-// primitive), so the books move onto the incumbent and the old row drains.
-func TestSeriesRenameTakenKeySplits(t *testing.T) {
+// TestSeriesRenameTakenKeyMerges: renaming a fully covered series onto a name another
+// series already owns folds the old row into the incumbent through the series merge
+// primitive, the way the artist and release-group chains do, so the loser is deleted
+// rather than left to drain and its books arrive on the incumbent.
+func TestSeriesRenameTakenKeyMerges(t *testing.T) {
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putBook(t, st, lib.ID, bookSpec{
@@ -469,23 +470,30 @@ func TestSeriesRenameTakenKeySplits(t *testing.T) {
 		t.Fatalf("edit series: %v", err)
 	}
 
-	if n := scalarInt(t, st, "SELECT COUNT(*) FROM series"); n != 2 {
-		t.Fatalf("series rows = %d, want 2 (no merge primitive)", n)
+	if n := scalarInt(t, st, "SELECT COUNT(*) FROM series"); n != 1 {
+		t.Fatalf("series rows = %d, want 1 (the loser merged away)", n)
 	}
-	var name, gotPID string
-	if err := st.read.QueryRowContext(ctx,
-		"SELECT name, pid FROM series WHERE id=?", alphaID).Scan(&name, &gotPID); err != nil {
-		t.Fatalf("read series: %v", err)
-	}
-	if name != "Alpha Saga" || gotPID != string(alphaPID) {
-		t.Fatalf("old series = %q/%s, want Alpha Saga with kept pid %s", name, gotPID, alphaPID)
+	if n := scalarInt(t, st, "SELECT COUNT(*) FROM series WHERE id=?", alphaID); n != 0 {
+		t.Errorf("old series rows = %d, want 0 (merged into the incumbent)", n)
 	}
 	if id := scalarInt(t, st, `SELECT b.series_id FROM book b
 		JOIN playable_item pi ON pi.id=b.item_id WHERE pi.pid=?`, string(pid1)); int64(id) != betaID {
 		t.Errorf("edited book series_id = %d, want the incumbent %d", id, betaID)
 	}
-	if n := scalarInt(t, st, "SELECT COUNT(*) FROM book WHERE series_id=?", alphaID); n != 0 {
-		t.Errorf("old series still holds %d books, want 0 (drained)", n)
+	if n := scalarInt(t, st, "SELECT COUNT(*) FROM book WHERE series_id=?", betaID); n != 2 {
+		t.Errorf("incumbent holds %d books, want 2", n)
+	}
+	// The merge deletes the loser, so its pid must not also carry an update delta a
+	// consumer would try to re-read.
+	if n := scalarInt(t, st,
+		"SELECT COUNT(*) FROM change_log WHERE entity_type='series' AND op='delete' AND entity_pid=?",
+		string(alphaPID)); n != 1 {
+		t.Errorf("loser delete deltas = %d, want 1", n)
+	}
+	if n := scalarInt(t, st,
+		"SELECT COUNT(*) FROM change_log WHERE entity_type='series' AND op='update' AND entity_pid=?",
+		string(alphaPID)); n != 0 {
+		t.Errorf("loser update deltas = %d, want 0 (it was deleted)", n)
 	}
 	assertVerifyClean(t, st)
 }

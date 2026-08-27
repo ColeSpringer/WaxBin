@@ -2,6 +2,10 @@
 // and never decodes PCM: per file it stats, hashes content and audio essence,
 // reads tags, and writes through model.Catalog. PCM decoding belongs to the
 // separate analysis pass.
+//
+// The one call into decode is decode.Probe, for a file whose container no tag
+// parser covers. It reads that container's header so the row carries a real
+// duration and sample rate instead of zeroes, and it decodes nothing.
 package scan
 
 import (
@@ -18,6 +22,7 @@ import (
 	"strings"
 
 	"github.com/colespringer/waxbin/art"
+	"github.com/colespringer/waxbin/decode"
 	"github.com/colespringer/waxbin/identity"
 	"github.com/colespringer/waxbin/internal/pathx"
 	"github.com/colespringer/waxbin/meta"
@@ -367,6 +372,11 @@ func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, p
 		return err
 	}
 	tags := fm.Tags
+	if unsupportedFormat(fm.Diagnostics) {
+		if err := s.probeProperties(ctx, path, &tags); err != nil {
+			return err
+		}
+	}
 	// essence_hash anchors file identity independently of tags. Files with no
 	// hashable essence fall back to the content hash, so they are still cataloged
 	// but re-key on any byte change.
@@ -668,6 +678,11 @@ func virtualTracksInput(libraryID int64, file model.File, tags model.Tags, essen
 				Genres:      identity.SplitGenres(genre),
 				// From the file's own tags: a .cue has no vocabulary for these, and without
 				// them a carved rip's album row is empty where a plain rip's is filled.
+				//
+				// BPM is left out on purpose. A cue sheet states no tempo, and the file's
+				// own value describes the whole rip rather than the track being carved, so
+				// copying it down would stamp one number onto every track. A per-track bpm
+				// is an edit away for anyone who wants one.
 				Barcode:       tags.Barcode,
 				Label:         tags.Label,
 				CatalogNumber: tags.CatalogNumber,
@@ -779,6 +794,7 @@ func trackFromTags(tags model.Tags) model.Track {
 		Genres:           tags.Genres,
 		Compilation:      tags.Compilation,
 		ISRC:             tags.ISRC,
+		BPM:              tags.BPM,
 		MBID:             tags.MBID,
 		MBReleaseID:      tags.MBReleaseID,
 		MBReleaseGroupID: tags.MBReleaseGroupID,
@@ -1381,10 +1397,45 @@ func finalizeArt(img *model.ArtImage) bool {
 	return true
 }
 
+// unsupportedFormat reports whether the reader gave up on this file's container.
+func unsupportedFormat(diags []model.FileDiagnostic) bool {
+	for _, d := range diags {
+		if d.Code == model.DiagUnsupportedFormat {
+			return true
+		}
+	}
+	return false
+}
+
+// probeProperties fills the stream properties no tag parser could read, from the
+// decoder's own view of the container header. Left at zero they blank the display,
+// drop the file out of duration rollups, and make the upgrade scan rank a 24/96
+// WavPack below a 16/44.1 FLAC. A container the decoder cannot open either keeps
+// the zeroes; there is nothing better to say about it, and a damaged file must
+// still catalog so audit can name it. Only cancellation returns an error: the
+// size+mtime fast path would freeze zeroes committed by an interrupted probe, so
+// an interrupted file's scan must not commit at all. Other probe failures keep
+// the zeroes and log at warn, since they too persist until a forced rescan.
+func (s *Scanner) probeProperties(ctx context.Context, path string, tags *model.Tags) error {
+	p, err := decode.Probe(ctx, path)
+	if err != nil {
+		if cerr := ctx.Err(); cerr != nil {
+			return cerr
+		}
+		s.log.Warn("scan: no properties for an unparsed container", "path", path, "err", err)
+		return nil
+	}
+	tags.DurationMS, tags.Bitrate = p.DurationMS, p.Bitrate
+	tags.SampleRate, tags.Channels, tags.BitDepth = p.SampleRate, p.Channels, p.BitDepth
+	return nil
+}
+
 var audioExts = map[string]bool{
 	".mp3": true, ".flac": true, ".wav": true, ".ogg": true, ".oga": true,
 	".opus": true, ".m4a": true, ".m4b": true, ".aac": true, ".mp4": true,
 	".wma": true, ".aiff": true, ".aif": true, ".ape": true, ".wv": true,
+	// .mka only. .mkv and .webm share the container but routinely carry video.
+	".mka": true,
 }
 
 func isAudio(path string) bool { return audioExts[strings.ToLower(filepath.Ext(path))] }

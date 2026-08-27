@@ -77,4 +77,11 @@ type AnalysisInput struct {
 	AnalysisVersion int
 	Loudness        *LoudnessData
 	Peaks           *PeaksData
+	// MeasureCompleted says the measuring decode ran to the end of the file, whether
+	// or not it produced anything to store. Silent and too-short material measures
+	// fine and yields nil Loudness, which without this flag is indistinguishable from
+	// a decode that fell over halfway. The store stamps the essence as the file's
+	// measured_essence when this is set and clears the column when it is not, so the
+	// retry predicate chases the second and leaves the first alone.
+	MeasureCompleted bool
 }

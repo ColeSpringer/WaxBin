@@ -25,8 +25,18 @@ import (
 // effectiveVersion combines a fingerprint algorithm with the loudness and peaks
 // versions into the single value stamped on a file. Changing any component makes
 // prior analysis stale. Each non-fingerprint component gets three decimal digits
-// (0-999); the fingerprint algorithm occupies the millions place, so the pure-Go
-// (2) and Chromaprint (100) backends yield distinct numbers and never collide.
+// (0-999); the fingerprint algorithm is multiplied by a million, so the pure-Go
+// (1) and Chromaprint (100) backends yield distinct numbers and never collide.
+//
+// Nothing here tracks WaxFlow. A decoder that starts producing different samples
+// for a codec it already handled invalidates every measurement of that codec, and
+// this value will not notice, so read WaxFlow's decoder-version changes on every
+// waxflow bump and bump loudness.AnalysisVersion when one of them moved.
+//
+// Folding format.DecoderVersion in per codec would automate that, and it is
+// deliberately not done: it would key catalog codec strings to WaxFlow codec IDs,
+// the vocabulary sync decode.Coverage refuses for the same reason. The failure
+// mode is a whole format silently never re-analyzing.
 func effectiveVersion(fpAlgo int) int {
 	return fpAlgo*1_000_000 + loudness.AnalysisVersion*1_000 + peaks.Version
 }
@@ -83,8 +93,9 @@ type Result struct {
 	// MeasureFailed counts files that were stamped with a fingerprint but whose
 	// best-effort loudness/peaks decode failed: a damaged tail past the
 	// fingerprinted head, an undecodable input on an fpcalc host, or a transient
-	// read glitch. The file still groups and converges; this surfaces the missing
-	// measurement in a run summary without re-decoding the file forever.
+	// read glitch. The file still groups on its fingerprint, but its measurement is
+	// left unstamped, so the next run tries again. A permanently damaged tail
+	// therefore reports here every run instead of freezing unmeasured and unseen.
 	MeasureFailed int
 	// ReplayGainTagsWritten counts files whose computed ReplayGain was written back
 	// to disk (only when the write-back toggle is on; the facade fills this).
@@ -93,9 +104,11 @@ type Result struct {
 	// vanished path). It is not fatal, since the measurement is in the catalog either
 	// way, but a run where every write failed must not read as one with nothing to write.
 	ReplayGainTagsFailed int
-	// ReplayGainTagsUnrepresented counts files where the write succeeded but a gain
-	// value did not land as asked (the format could not store it). Such a write can
-	// report as a no-op, so it is counted separately from a failure.
+	// ReplayGainTagsUnrepresented counts files whose gain never reached the disk
+	// because the file could not hold it: a value the tag format dropped, or a
+	// container WaxLabel cannot write at all. Neither is worth retrying, and the
+	// first can even report as a landed no-op, so both are counted apart from
+	// failures.
 	ReplayGainTagsUnrepresented int
 }
 
@@ -172,10 +185,12 @@ func (a *Analyzer) Run(ctx context.Context, hb Heartbeat) (*Result, error) {
 // analyzeFile decodes one file, fingerprints it, measures loudness and peaks, and
 // stores the result atomically. An input this build cannot decode is skipped (algo
 // 0), so the pass still analyzes every format WaxFlow covers. Loudness and peaks
-// are best-effort: if measuring them fails (a damaged tail past the fingerprinted
-// head, a transient glitch, or an undecodable input on an fpcalc host), the
-// fingerprint is still stored so the file groups and converges, and the miss is
-// counted. Only a canceled context stamps nothing.
+// are best-effort: if measuring them fails, the fingerprint is still stored so the
+// file groups and converges, and the miss is counted. A retryable failure (a
+// damaged tail past the fingerprinted head, a transient glitch) leaves the
+// measurement stamp clear so the file re-selects; an undecodable input on an
+// fpcalc host settles instead, until a decoder change moves AnalysisVersion. Only
+// a canceled context stamps nothing.
 func (a *Analyzer) analyzeFile(ctx context.Context, f *model.File, res *Result) error {
 	sub, algo, fpDurationMS, err := a.fingerprintFile(ctx, f)
 	if err != nil {
@@ -214,11 +229,17 @@ func (a *Analyzer) analyzeFile(ctx context.Context, f *model.File, res *Result) 
 	}
 	// Loudness and peaks are best-effort. The fingerprint already stands (from the
 	// bounded decode above, or from fpcalc, independent of this whole-file read), so
-	// a failure measuring them must not discard it. Discarding it would drop a valid
-	// fingerprint over a damaged tail and re-decode the whole file every run without
-	// ever converging. Keep the fingerprint, null the loudness, count the miss.
-	// Only a canceled context aborts before stamping, so the file is retried.
+	// a failure measuring them must not discard it: the file groups and stays grouped
+	// while the measurement is retried. Keep the fingerprint, null the loudness, and
+	// count the miss. Whether the stamp clears depends on the failure: a retryable
+	// one leaves it clear so the file re-selects, while ErrUnsupported settles it,
+	// since on an fpcalc host the fingerprint comes from fpcalc and no decoder in
+	// this build can measure the input; re-selecting it would re-decode the file and
+	// churn its fingerprint rows on every run for an answer that cannot change until
+	// a decoder change moves AnalysisVersion. Only a canceled context aborts before
+	// stamping.
 	ld, pk, err := a.measure(ctx, f)
+	in.MeasureCompleted = measureSettled(err)
 	if err != nil {
 		if ctx.Err() != nil {
 			return err
@@ -317,11 +338,20 @@ func (a *Analyzer) measure(ctx context.Context, f *model.File) (*model.LoudnessD
 		}
 		// Any other failure (ErrUnsupported on an fpcalc host, a damaged file, or a
 		// transient read) is a best-effort miss the caller absorbs while keeping the
-		// fingerprint. It is not distinguished here; the caller does not need to.
+		// fingerprint; measureSettled decides which of them stamp the file.
 		return nil, nil, err
 	}
 	return loudnessData(loudness.FromMeasurement(m.IntegratedLUFS, m.SamplePeakDB)),
 		peaksData(acc.Peaks(), f.EssenceHash), nil
+}
+
+// measureSettled reports whether a measure outcome stamps the file as measured for
+// its current essence. A clean run settles, and so does ErrUnsupported: no decoder
+// in this build can read the input, so retrying cannot change the answer, and the
+// file re-selects when a decoder change moves AnalysisVersion. Anything else is
+// worth retrying and leaves the stamp clear.
+func measureSettled(err error) bool {
+	return err == nil || errors.Is(err, decode.ErrUnsupported)
 }
 
 // loudnessData converts a loudness.Result to the stored form. It returns nil for

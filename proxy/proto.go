@@ -490,7 +490,9 @@ type CreateUserParams struct {
 	Name string `json:"name"`
 }
 
-// MergeParams is the merge request payload.
+// MergeParams is the merge request payload. EntityType is a model.MergeEntity carried
+// as a plain string, so a server that predates a newly mergeable type refuses it with
+// CodeInvalid rather than mis-reading the frame.
 type MergeParams struct {
 	EntityType string   `json:"entityType"`
 	Survivor   string   `json:"survivor"`
@@ -516,7 +518,8 @@ type StarParams struct {
 }
 
 // EntityStarParams is the set_entity_star request payload: a per-user star on a catalog
-// entity (Kind is a model.MergeEntity: artist|release_group|album|genre). AsOfNS is the
+// entity (Kind is a model.MergeEntity, narrowed to the star-able ones:
+// artist|release_group|album|genre, which is less than merge accepts). AsOfNS is the
 // optional recorded-time stamp, the same encoding as StarParams (see asOfToWire).
 type EntityStarParams struct {
 	UserPID   string `json:"userPid"`

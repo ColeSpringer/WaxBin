@@ -88,6 +88,7 @@ var nspFieldToWB = map[string]string{
 	"year":        "year",
 	"tracknumber": "track_no",
 	"discnumber":  "disc_no",
+	"bpm":         "bpm",
 	"rating":      "rating",
 	"starred":     "starred",
 	"playcount":   "play_count",

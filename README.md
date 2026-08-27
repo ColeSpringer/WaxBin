@@ -108,8 +108,9 @@ listener. The server runs until interrupted (Ctrl-C / SIGTERM).
   drift. `--integrity` adds an on-disk bitrot (content-hash) and corrupt-audio
   pass. It reports only; it never deletes.
 - `waxbin merge <type> <survivor-pid> <loser-pid>...` collapses duplicate
-  artists / release-groups / albums / genres onto one survivor, re-pointing
-  children (so play state and provenance ride along) and recomputing rollups.
+  artists / release-groups / albums / genres / series onto one survivor,
+  re-pointing children (so play state and provenance ride along) and
+  recomputing rollups.
 - `waxbin upgrade` groups alt encodings of the same recording (by fingerprint),
   ranks each group by quality, and marks the keeper.
 - `waxbin db verify --fix` repairs derived-data drift (FTS, rollups, sort keys)

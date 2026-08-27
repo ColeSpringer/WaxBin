@@ -52,9 +52,11 @@ func TestEntityStarRateArgValidation(t *testing.T) {
 		args []string
 		want string
 	}{
-		// A non-star-able type is rejected before anything opens.
+		// A non-star-able type is rejected before anything opens. An unknown type and a
+		// known one that carries no per-user state (series merges, but nothing stars it)
+		// refuse on their own grounds.
 		{"bad star type", []string{"star", "bogus", "01J0X"}, "unknown entity type"},
-		{"bad rate type", []string{"rate", "series", "01J0X", "50"}, "unknown entity type"},
+		{"bad rate type", []string{"rate", "series", "01J0X", "50"}, "carries no per-user state"},
 		// A rating outside 0-100 (or a non-integer, non-"clear") is rejected.
 		{"rating over 100", []string{"rate", "album", "01J0X", "150"}, "0-100"},
 		{"rating not a number", []string{"rate", "album", "01J0X", "high"}, "0-100"},

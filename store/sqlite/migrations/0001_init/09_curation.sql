@@ -61,13 +61,13 @@ CREATE INDEX entity_curation_locked ON entity_curation(entity_type, entity_id) W
 
 -- Custom (non-standard) tags preserved per item: the tag frames a file carries that
 -- WaxBin's typed model does not map to a column, plus user-set custom tags. key is a
--- canonical uppercase-ASCII tag key (so BPM and bpm dedup to one), and position
+-- canonical uppercase-ASCII tag key (so KEY and key dedup to one), and position
 -- preserves the order of a multi-valued tag. The set is replaced wholesale on a scan
 -- (per key, unless that key is locked under field_provenance 'tag.<KEY>') or by the
 -- SetItemTag edit. It stays sparse: an item with no extra tags has no rows.
 CREATE TABLE item_tag (
   item_id  INTEGER NOT NULL REFERENCES playable_item(id) ON DELETE CASCADE,
-  key      TEXT    NOT NULL,        -- canonical uppercase tag key (e.g. MOOD, BPM)
+  key      TEXT    NOT NULL,        -- canonical uppercase tag key (e.g. MOOD, KEY)
   value    TEXT    NOT NULL,
   position INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (item_id, key, position)

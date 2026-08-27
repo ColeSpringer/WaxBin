@@ -10,6 +10,7 @@ import (
 	"github.com/colespringer/waxbin/loudness"
 	"github.com/colespringer/waxbin/meta"
 	"github.com/colespringer/waxbin/model"
+	"github.com/colespringer/waxbin/waxerr"
 )
 
 // writeReplayGainTags mirrors the catalog's computed ReplayGain (track + album, in
@@ -38,8 +39,35 @@ func (l *Library) writeReplayGainTags(ctx context.Context) (rgWriteCounts, error
 		edits := replayGainEdits(r)
 		res, err := w.Apply(ctx, string(r.Path), edits)
 		if err != nil {
-			l.log.Warn("replaygain tag write", "path", string(r.Path), "err", err)
-			c.failed++
+			if waxerr.Is(err, waxerr.CodeCanceled) || ctx.Err() != nil {
+				return c, err
+			}
+			if waxerr.Is(err, waxerr.CodeUnsupported) {
+				// A file WaxLabel refuses to write at all is not a failure to chase.
+				// WavPack, Monkey's Audio and WMA files gained loudness rows as soon as
+				// WaxFlow could decode them, and ReplayGainWriteback has no format gate,
+				// so every run would report the same file as a fresh write failure. The
+				// gain has nowhere to go, which is what an unrepresented value means, so
+				// it is counted and diagnosed as one. The refusal covers more than
+				// missing write support (a fragmented mp4, a chained ogg), so the detail
+				// blames the file's form, not the container format.
+				l.log.Warn("replaygain tag unwritable file", "path", string(r.Path), "err", err)
+				c.unrepresented++
+				diags := []model.FileDiagnostic{{
+					Code: model.DiagTagWriteLost, Severity: model.SeverityWarn,
+					Detail: "this file cannot take tag writes in its current form",
+				}}
+				if derr := l.store.PutFileDiagnostics(ctx, r.FilePID, model.OriginReplayGain, diags); derr != nil {
+					l.log.Warn("replaygain diagnostics", "path", string(r.Path), "err", derr)
+				}
+			} else {
+				// A hard failure landed nothing and proved nothing about the file, so
+				// any standing drift row still says what is true: the gain is not on
+				// disk. Clearing it here would let one transient lock or permission
+				// error hide a real unrepresented mark from audit until the next run.
+				l.log.Warn("replaygain tag write", "path", string(r.Path), "err", err)
+				c.failed++
+			}
 			continue
 		}
 		// Recorded before the Changed gate: a value the format could not store leaves
