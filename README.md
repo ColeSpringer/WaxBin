@@ -56,7 +56,7 @@ exit codes (`waxbin exit-codes`).
 | Area | Commands |
 | --- | --- |
 | **Lifecycle** | `init`, `library add`/`library list`, `scan`, `analyze`, `watch`, `serve`, `doctor`, `jobs`, `version`, `exit-codes` |
-| **Read / browse** | `query`/`ls` (incl. `--library`, `--tag KEY=VALUE`, `--tag-contains`, `--tag-present`/`--tag-missing`, `--limit-mode`/`--seed`), `browse <list>`, `facet --group-by` (incl. `tag.<KEY>`, `library`, `podcast`, `creditArtist`, `playlist`), `search` (incl. `--max-candidates`, `--library`, `--state`), `show`, `art` (incl. `--role`), `art roles`, `lyrics`, `stats [--year N]`, `provenance`, `acquisition`/`acquisition clear`, `lock`/`unlock`, `entity info`/`entity list` |
+| **Read / browse** | `query`/`ls` (incl. `--library`, `--tag KEY=VALUE`, `--tag-contains`, `--tag-present`/`--tag-missing`, `--limit-mode`/`--seed`), `browse <list>`, `facet --group-by` (incl. `tag.<KEY>`, `library`, `podcast`, `creditArtist`, `playlist`), `search` (incl. `--max-candidates`, `--library`, `--state`), `show`, `art` (incl. `--role`), `art roles`, `lyrics`, `stats [--year N]`, `provenance`, `acquisition`/`acquisition set`/`acquisition clear`, `lock`/`unlock`, `entity info`/`entity list` |
 | **Curation & editing** | `edit` (incl. `--batch`), `entity` (incl. `entity rename [--write-back]`), `credit` (incl. `--batch`), `tag`/`tag keys`, `lyrics set`, `chapters`, `art set` (incl. `--role`), `art lock`/`art unlock` (incl. `--role`), `detach [--write-back]` |
 | **Ingest / organize** | `inbox`, `import`, `organize`, `profiles` |
 | **Deletion / repair** | `trash`, `rm [--permanent]`, `mark-missing [--force]`, `merge`, `audit`, `diagnostics`, `upgrade` |
@@ -151,6 +151,8 @@ never alters the audio):
 - The curation edits above (`edit`, `entity`, `credit`, `tag`, `lyrics set`,
   `chapters`, `art set`) take `--write-back` to embed the committed change into the
   item's file(s).
+- `acquisition set`/`acquisition clear` take `--write-back` for the file's own
+  `SOURCE_URL`/`SOURCE_ID`/`ACQUISITION_DATE`.
 - `waxbin analyze --write-replaygain` (or `write_replaygain_tags` in config) writes
   computed track and album ReplayGain into files after album aggregation
   (`REPLAYGAIN_*`, or Opus `R128_*`).

@@ -145,6 +145,10 @@ import (
 // version bump would make an older server refuse every frame including ping, so a WaxDeck
 // talking to one would read it as absent; without the bump it gets "unknown method:
 // rename_entity" from the method switch, which names the one thing actually missing.
+// set_acquisition and clear_acquisition ride along on that same precedent. Both are new
+// methods that widen no existing struct, so a peer that knows nothing about them cannot
+// misread a frame it does understand, and the failure it gets is the method switch naming
+// the missing verb rather than the version gate reporting the whole server as absent.
 const ProtocolVersion = 15
 
 // Method names for the proxied operations: the fast request/response catalog
@@ -170,6 +174,8 @@ const (
 	MethodEditEntity       = "edit_entity"
 	MethodDetach           = "detach"
 	MethodRenameEntity     = "rename_entity"
+	MethodSetAcquisition   = "set_acquisition"
+	MethodClearAcquisition = "clear_acquisition"
 	MethodSetTag           = "set_tag"
 	MethodLock             = "lock"
 	MethodUnlock           = "unlock"
@@ -587,6 +593,48 @@ type DetachResult struct {
 	NewAlbumPID        string             `json:"newAlbumPid,omitempty"`
 	NewReleaseGroupPID string             `json:"newReleaseGroupPid,omitempty"`
 	WriteBackFailures  []WriteBackFailure `json:"writeBackFailures,omitempty"`
+}
+
+// SetAcquisitionParams is the set_acquisition request payload: an item's whole origin
+// row, replaced authoritatively. Every field travels, an empty one included, since that
+// is what separates this from the merge-wise recording path a client cannot reach.
+//
+// AcquiredAt keeps the "" omitempty off and rides as a decimal string, the way every
+// other unix-nanosecond field on this wire does: a JSON consumer parsing numbers as
+// float64 corrupts the value, and zero is the meaningful "keep the standing stamp"
+// sentinel rather than an absence to elide. Lock carries no omitempty either, so "" is an
+// explicit LockUnchanged rather than a field the server has to guess at.
+type SetAcquisitionParams struct {
+	ItemPID         string `json:"itemPid"`
+	SourceType      string `json:"sourceType"`
+	SourceURL       string `json:"sourceUrl"`
+	SourceID        string `json:"sourceId"`
+	Provider        string `json:"provider"`
+	ProviderVersion string `json:"providerVersion"`
+	AcquiredAt      int64  `json:"acquiredAt,string"`
+	OptionsJSON     string `json:"options"`
+	Lock            string `json:"lock"`
+	Force           bool   `json:"force"`
+	WriteBack       bool   `json:"writeBack"`
+}
+
+// ClearAcquisitionParams is the clear_acquisition request payload. An empty Lock is
+// LockUnchanged on the wire and resolves to a lock on the server, which is what makes a
+// clear survive the next scan of a file that still carries the tags it came from;
+// "unlock" is the explicit opt-out. With WriteBack the tags leave the file too.
+type ClearAcquisitionParams struct {
+	ItemPID   string `json:"itemPid"`
+	Lock      string `json:"lock"`
+	Force     bool   `json:"force"`
+	WriteBack bool   `json:"writeBack"`
+}
+
+// AcquisitionResult is the response payload shared by both acquisition curation verbs:
+// the files a write-back could not rewrite, empty without write-back or after a clean
+// one. It matches DetachResult, where a partial fan-out is a result rather than a
+// transport error because the catalog change stands either way.
+type AcquisitionResult struct {
+	WriteBackFailures []WriteBackFailure `json:"writeBackFailures,omitempty"`
 }
 
 // FieldsParams is the lock / unlock request payload.

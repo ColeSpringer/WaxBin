@@ -137,10 +137,7 @@ func (l *Library) writeBackEntity(ctx context.Context, entityType model.MergeEnt
 		}); err != nil {
 		return err
 	}
-	if len(wbErr.Failures) > 0 {
-		return wbErr
-	}
-	return nil
+	return wbErr.result()
 }
 
 // entityMBIDStripEdits returns the tag strips an mbid clear fans across the entity's

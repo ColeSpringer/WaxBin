@@ -268,7 +268,7 @@ func (s *Store) PutScannedTrack(ctx context.Context, in model.PutScannedTrackInp
 
 		// Origin evidence carried by the file's own tags, recorded only when the item
 		// has no acquisition row yet (an event-recorded origin always wins).
-		acqAdded, err := insertAcquisitionIfAbsentTx(ctx, tx, itemID, in.Acquisition)
+		acqAdded, err := insertAcquisitionIfAbsentTx(ctx, tx, itemID, in.Acquisition, in.PreserveLocks)
 		if err != nil {
 			return err
 		}

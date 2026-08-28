@@ -80,6 +80,12 @@ func (s SourceType) ValidShowSource() bool {
 	return s == SourceRSS || s == SourceYouTube || s == SourceManual
 }
 
+// ValidItemSource reports whether s is a valid source type on an item's acquisition
+// row. It delegates rather than repeating the list, which would drift. SourceLocal is
+// excluded here too: on an item it is the absence of a row, so asking for it is asking
+// for a clear.
+func (s SourceType) ValidItemSource() bool { return s.ValidShowSource() }
+
 // FileKind classifies a file on disk. Audio is the only decodable kind; the
 // rest are sidecars. "foreign" marks interop sidecars WaxBin recognizes but
 // does not own (they are never treated as orphans).

@@ -157,3 +157,16 @@ func TestGeneratedAcrossTheGates(t *testing.T) {
 		t.Error("a generated cover with a provider was accepted")
 	}
 }
+
+// TestAcquisitionIsLockOnly pins acquisition's place in the two whitelists: it may
+// carry a lock row, and it is never scalar-editable, so `edit --set acquisition=x` and
+// SetFieldProvenance are refused rather than writing a junk row beside a table that
+// holds the real value.
+func TestAcquisitionIsLockOnly(t *testing.T) {
+	if !IsCuratableField("acquisition") {
+		t.Error("acquisition is not curatable; the lock has nowhere to live")
+	}
+	if IsMetadataField("acquisition") {
+		t.Error("acquisition is scalar-editable; it has its own edit API")
+	}
+}

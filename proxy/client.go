@@ -334,6 +334,37 @@ func (c *Client) Detach(ctx context.Context, itemPID model.PID, writeBack bool) 
 	return &res, nil
 }
 
+// SetAcquisition proxies an authoritative replace of an item's origin provenance. Every
+// field travels, so a correction can empty the url, id, provider or options the standing
+// row holds; a zero acquiredAt keeps the stamp the row already carries.
+func (c *Client) SetAcquisition(ctx context.Context, itemPID model.PID, in model.AcquisitionInput, lock model.LockChange, force, writeBack bool) (*AcquisitionResult, error) {
+	var res AcquisitionResult
+	err := c.call(ctx, MethodSetAcquisition, SetAcquisitionParams{
+		ItemPID: string(itemPID), SourceType: string(in.SourceType), SourceURL: in.SourceURL,
+		SourceID: in.SourceID, Provider: in.Provider, ProviderVersion: in.ProviderVersion,
+		AcquiredAt: in.AcquiredAt, OptionsJSON: in.OptionsJSON,
+		Lock: string(lock), Force: force, WriteBack: writeBack,
+	}, &res)
+	if err != nil {
+		return nil, err
+	}
+	return &res, nil
+}
+
+// ClearAcquisition proxies removing an item's origin provenance. An unchanged lock
+// instruction locks the field on the server, which is what keeps the clear across a scan
+// of a file still carrying the tags; pass model.LockOff to opt out.
+func (c *Client) ClearAcquisition(ctx context.Context, itemPID model.PID, lock model.LockChange, force, writeBack bool) (*AcquisitionResult, error) {
+	var res AcquisitionResult
+	err := c.call(ctx, MethodClearAcquisition, ClearAcquisitionParams{
+		ItemPID: string(itemPID), Lock: string(lock), Force: force, WriteBack: writeBack,
+	}, &res)
+	if err != nil {
+		return nil, err
+	}
+	return &res, nil
+}
+
 // Lock proxies locking item fields.
 func (c *Client) Lock(ctx context.Context, itemPID model.PID, fields []string) error {
 	return c.call(ctx, MethodLock, FieldsParams{ItemPID: string(itemPID), Fields: fields}, nil)

@@ -1509,6 +1509,27 @@ type WriteBackError struct {
 	Failures []WriteBackFailure
 }
 
+// noFiles records that the item had no backing file to write to, and returns the error
+// to report. The catalog edit already committed, so an archived item's missing file has
+// to read as a skipped write-back rather than a silent success. The entity fan-outs
+// deliberately do not use it: an entity with no present member files has no target to
+// miss, so an empty set there is a clean no-op.
+func (e *WriteBackError) noFiles() error {
+	e.Failures = append(e.Failures, WriteBackFailure{Reason: "no backing files present to write"})
+	return e
+}
+
+// result is the outcome of a finished fan-out: the typed error when any file was refused
+// or failed, and nil when every one was written. It is the single place a partial on-disk
+// sync becomes the error a caller reports, so the same outcome cannot read as a success
+// at one write-back and a failure at the next.
+func (e *WriteBackError) result() error {
+	if len(e.Failures) > 0 {
+		return e
+	}
+	return nil
+}
+
 func (e *WriteBackError) Error() string {
 	paths := make([]string, 0, len(e.Failures))
 	for _, f := range e.Failures {
@@ -1516,6 +1537,31 @@ func (e *WriteBackError) Error() string {
 	}
 	return "catalog updated, but on-disk tag write-back failed for " +
 		strconv.Itoa(len(e.Failures)) + " file(s): " + strings.Join(paths, ", ")
+}
+
+// writeBackItemTags fans a set of tag edits across an item's own files, reporting a
+// missing file rather than a silent success. It is the whole shape of a write-back whose
+// edits are already computed and need nothing between the write and the report: the
+// detach's id strip and the acquisition tags. A caller with a step of its own in there,
+// such as the book identity re-anchor, drives writeBackFiles directly.
+func (l *Library) writeBackItemTags(ctx context.Context, op string, itemPID model.PID, tagEdits []meta.TagEdit) error {
+	// Everything here runs after the catalog change committed, so a lookup failure is a
+	// write-back failure to report rather than a hard error that would hide it.
+	files, err := l.store.ItemFiles(ctx, itemPID)
+	if err != nil {
+		return writeBackSetupFailure(itemPID, nil, err)
+	}
+	wbErr := &WriteBackError{ItemPID: itemPID}
+	if len(files) == 0 {
+		return wbErr.noFiles()
+	}
+	if err := l.writeBackFiles(ctx, op, files, wbErr,
+		func(w *meta.Writer, path string) (*meta.WriteResult, error) {
+			return w.Apply(ctx, path, tagEdits)
+		}); err != nil {
+		return err
+	}
+	return wbErr.result()
 }
 
 // writeBackFiles applies a per-file on-disk write across files, recording every refusal
@@ -1693,12 +1739,8 @@ func (l *Library) writeBackFields(ctx context.Context, itemPID model.PID, edits 
 	}
 
 	wbErr := &WriteBackError{ItemPID: itemPID, Edits: edits}
-	// A write-back on an item with no backing files, such as an archived item, has
-	// nothing to write, and the catalog edit already committed. Report a skipped
-	// write-back rather than a silent success, the same way refuseWriteBack does.
 	if len(files) == 0 {
-		wbErr.Failures = append(wbErr.Failures, WriteBackFailure{Reason: "no backing files present to write"})
-		return wbErr
+		return wbErr.noFiles()
 	}
 	if err := l.writeBackFiles(ctx, "waxbin.EditFields", files, wbErr,
 		func(w *meta.Writer, path string) (*meta.WriteResult, error) {
@@ -1714,10 +1756,7 @@ func (l *Library) writeBackFields(ctx context.Context, itemPID model.PID, edits 
 	if item.Kind == model.KindBook && len(files) > 0 && bookIdentityEdited(edits) {
 		l.reanchorBookIdentity(ctx, itemPID, files[0].FilePID)
 	}
-	if len(wbErr.Failures) > 0 {
-		return wbErr
-	}
-	return nil
+	return wbErr.result()
 }
 
 // appendDerivedSortClears adds the tag clears that keep a file's derived sort names in
@@ -2623,11 +2662,115 @@ func (l *Library) Acquisition(ctx context.Context, pid model.PID) (*model.Acquis
 	return l.store.AcquisitionByItem(ctx, pid)
 }
 
-// ClearAcquisition removes an item's origin provenance, returning it to source:local.
-// Recording is merge-wise and never lowers a field, so this is the only way to correct a
-// row downward. An item with no row is unaffected.
-func (l *Library) ClearAcquisition(ctx context.Context, pid model.PID) error {
-	return l.store.ClearAcquisition(ctx, pid)
+// AcquisitionEditOptions governs the two acquisition curation verbs: the lock to leave
+// behind, whether a standing lock is overridden, and whether the file's own acquisition
+// tags are rewritten to match.
+//
+// There is no attribution here, unlike the other curation options. AcquisitionInput
+// already carries a Provider, meaning the provider that acquired the item, and an
+// attribution Provider on the same call would mean the service that supplied the value.
+// Two meanings under one flag name on one command is worse than no attribution: the lock
+// row records model.SourceUser, the way SetArtLock does.
+type AcquisitionEditOptions struct {
+	Lock      model.LockChange
+	Force     bool
+	WriteBack bool
+}
+
+// SetAcquisition replaces an item's origin provenance with the row given. It is the
+// correction the merge-wise recording path cannot express, since that one never lowers a
+// field: every column here is written as given, so a wrong url, id or provider can be
+// emptied and a wrong type can be moved down.
+//
+// A zero AcquiredAt preserves the standing stamp and a non-zero one moves it. The lock is
+// left alone by default, matching every other curation verb; a standing lock refuses the
+// write with CodeLocked unless Force is set. With WriteBack the item's files also get the
+// matching SOURCE_URL/SOURCE_ID/ACQUISITION_DATE tags, which is what keeps the correction
+// across a rescan without leaning on the lock.
+func (l *Library) SetAcquisition(ctx context.Context, pid model.PID, in model.AcquisitionInput, opts AcquisitionEditOptions) error {
+	// Read the standing stamp before the write, since a zero AcquiredAt preserves it and
+	// the input alone would then strip a date the row still holds. A NotFound is the
+	// answer, not a failure: it says the store is about to mint one.
+	var priorAt int64
+	if opts.WriteBack {
+		prior, err := l.store.AcquisitionByItem(ctx, pid)
+		if err != nil && !waxerr.Is(err, waxerr.CodeNotFound) {
+			return err
+		}
+		if prior != nil {
+			priorAt = prior.AcquiredAt
+		}
+	}
+	if err := l.store.SetAcquisition(ctx, pid, in, opts.Lock, opts.Force); err != nil {
+		return err
+	}
+	if !opts.WriteBack {
+		return nil
+	}
+	// The stamp only reaches the file when someone actually knows it: the caller stated
+	// it, or the row already carried one. A brand-new row gets scan time, which the
+	// catalog holds as the approximation it is, and a file cannot say that. Writing it
+	// would state a wrong date with confidence and outlive the catalog that knew better,
+	// which is the trap insertAcquisitionIfAbsentTx refuses file mtime for.
+	acquiredAt := in.AcquiredAt
+	if acquiredAt == 0 {
+		acquiredAt = priorAt
+	}
+	return l.writeBackAcquisition(ctx, "waxbin.SetAcquisition", pid,
+		meta.AcquisitionTagEdits(in.SourceURL, in.SourceID, acquiredAt))
+}
+
+// ClearAcquisition removes an item's origin provenance, so the item falls back to the
+// source it reads without a row of its own: its show's type for an episode, and local for
+// everything else. Recording is merge-wise and never lowers a field, so this is the way to
+// take a wrong row off outright. An item with no row is unaffected.
+//
+// The signature gained options, and the default lock is what makes a clear stick. The
+// break is deliberate but it is not the fix on its own: AcquisitionEditOptions{} is
+// LockUnchanged, so a caller who mechanically added an empty struct to quiet the compiler
+// would have got the identical non-durable clear in silence. A clear leaves nothing
+// behind, and the file still carries the tags the wrong row came from, so the next full
+// scan re-derives it. LockUnchanged therefore means LockOn here, and LockOff is the
+// explicit opt-out. WriteBack is the other half: it strips the tags themselves, so the
+// origin stays gone with no lock holding it.
+func (l *Library) ClearAcquisition(ctx context.Context, pid model.PID, opts AcquisitionEditOptions) error {
+	if err := l.store.ClearAcquisition(ctx, pid, opts.Lock, opts.Force); err != nil {
+		return err
+	}
+	if !opts.WriteBack {
+		return nil
+	}
+	return l.writeBackAcquisition(ctx, "waxbin.ClearAcquisition", pid,
+		meta.AcquisitionTagEdits("", "", 0))
+}
+
+// writeBackAcquisition applies acquisition tag edits across an item's files.
+//
+// The lock is the catalog agreeing to ignore evidence that is still sitting in the file.
+// That evidence outlives the catalog: it survives an export, a copy, a rebuild, and any
+// other tool that reads the tags, and it is what makes a bare clear come back. Stripping
+// it is the durable half, and it is the same answer edit_entity's write-back gives to a
+// cleared MusicBrainz id.
+//
+// Only the url, id and date travel. The source type and provider have no tag to hold
+// them, so a re-derive from a stripped-of-its-row file reads 'manual' with no provider
+// whatever the catalog said, which is why a corrected type still wants its lock.
+//
+// An episode is refused. Its file is machine-owned and re-fetched on retention, so a tag
+// write would be undone by the next download while the catalog row is authoritative
+// either way. A book fans out across every part, like every other write-back here.
+func (l *Library) writeBackAcquisition(ctx context.Context, op string, itemPID model.PID, edits []meta.TagEdit) error {
+	// Everything below runs after the catalog write committed, so a lookup failure is a
+	// write-back failure to report rather than a hard error that would hide it.
+	item, err := l.store.ItemByPID(ctx, itemPID)
+	if err != nil {
+		return writeBackSetupFailure(itemPID, nil, err)
+	}
+	if item.Kind != model.KindTrack && item.Kind != model.KindBook {
+		return l.refuseWriteBack(ctx, itemPID, nil,
+			"on-disk tag write-back is not supported for "+string(item.Kind)+" items; the acquisition change was applied")
+	}
+	return l.writeBackItemTags(ctx, op, itemPID, edits)
 }
 
 // Backup writes a self-contained byte copy of the catalog to dest. The copy

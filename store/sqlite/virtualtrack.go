@@ -148,7 +148,7 @@ func (s *Store) PutScannedVirtualTracks(ctx context.Context, in model.PutScanned
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 			// Origin provenance from the file's tags, recorded per track when absent.
-			if _, err := insertAcquisitionIfAbsentTx(ctx, tx, itemID, in.Acquisition); err != nil {
+			if _, err := insertAcquisitionIfAbsentTx(ctx, tx, itemID, in.Acquisition, in.PreserveLocks); err != nil {
 				return err
 			}
 

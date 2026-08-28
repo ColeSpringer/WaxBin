@@ -46,24 +46,6 @@ func (l *Library) Detach(ctx context.Context, itemPID model.PID, opts DetachOpti
 // shared write-back engine like every other fan-out, which is what applies the
 // shared-file guard and records the drift a refusal leaves behind.
 func (l *Library) writeBackDetach(ctx context.Context, itemPID model.PID) error {
-	files, err := l.store.ItemFiles(ctx, itemPID)
-	if err != nil {
-		return writeBackSetupFailure(itemPID, nil, err)
-	}
-	wbErr := &WriteBackError{ItemPID: itemPID}
-	if len(files) == 0 {
-		wbErr.Failures = append(wbErr.Failures, WriteBackFailure{Reason: "no backing files present to write"})
-		return wbErr
-	}
-	edits := []meta.TagEdit{{Key: "MUSICBRAINZ_ALBUMID"}, {Key: "MUSICBRAINZ_RELEASEGROUPID"}}
-	if err := l.writeBackFiles(ctx, "waxbin.Detach", files, wbErr,
-		func(w *meta.Writer, path string) (*meta.WriteResult, error) {
-			return w.Apply(ctx, path, edits)
-		}); err != nil {
-		return err
-	}
-	if len(wbErr.Failures) > 0 {
-		return wbErr
-	}
-	return nil
+	return l.writeBackItemTags(ctx, "waxbin.Detach", itemPID,
+		[]meta.TagEdit{{Key: "MUSICBRAINZ_ALBUMID"}, {Key: "MUSICBRAINZ_RELEASEGROUPID"}})
 }

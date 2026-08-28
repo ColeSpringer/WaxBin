@@ -1424,3 +1424,72 @@ func TestServeProxiedRenameEntity(t *testing.T) {
 		t.Errorf("file ALBUM = %q, want the write-back to have followed", fm.Tags.Album)
 	}
 }
+
+// TestServeAcquisitionCuration runs both acquisition verbs end to end over the socket:
+// the correction, the clear's default lock, and the CodeLocked refusal surviving the
+// wire so the CLI's exit code matches a local run.
+func TestServeAcquisitionCuration(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	sock := testsock.Path(t)
+	src := filepath.Join(root, "song.mp3")
+	writeFile(t, src, testaudio.BuildMP3("Ripped", "Artist", "Album", 1))
+	if _, err := meta.NewWriter().Apply(ctx, src, []meta.TagEdit{
+		{Key: "SOURCE_URL", Values: []string{"https://wrong.test/x"}},
+		{Key: "SOURCE_ID", Values: []string{"wrong-1"}},
+	}); err != nil {
+		t.Fatalf("stamp acquisition tags: %v", err)
+	}
+
+	lib := openServed(t, ctx, db, root, sock)
+	pid := itemPIDByTitle(t, ctx, lib, "Ripped")
+	c := dialWhenReady(t, sock)
+
+	if a, err := lib.Acquisition(ctx, pid); err != nil || a.SourceURL != "https://wrong.test/x" {
+		t.Fatalf("scan did not derive the wrong origin first: %+v (err %v)", a, err)
+	}
+	if _, err := c.SetAcquisition(ctx, pid, model.AcquisitionInput{
+		SourceType: model.SourceManual, SourceURL: "https://right.test/y",
+	}, model.LockOn, false, false); err != nil {
+		t.Fatalf("proxied set_acquisition: %v", err)
+	}
+	a, err := lib.Acquisition(ctx, pid)
+	if err != nil {
+		t.Fatalf("Acquisition: %v", err)
+	}
+	if a.SourceType != model.SourceManual || a.SourceURL != "https://right.test/y" || a.SourceID != "" {
+		t.Errorf("proxied set = %+v, want the authoritative replace", a)
+	}
+
+	// The lock came back over the wire, so an unforced correction is refused with the
+	// same code a local one would give.
+	if _, err := c.SetAcquisition(ctx, pid, model.AcquisitionInput{SourceType: model.SourceRSS},
+		model.LockUnchanged, false, false); !waxerr.Is(err, waxerr.CodeLocked) {
+		t.Fatalf("proxied set over a lock = %v, want CodeLocked", err)
+	}
+	if _, err := c.ClearAcquisition(ctx, pid, model.LockUnchanged, false, false); !waxerr.Is(err, waxerr.CodeLocked) {
+		t.Fatalf("proxied clear over a lock = %v, want CodeLocked", err)
+	}
+
+	if _, err := c.ClearAcquisition(ctx, pid, model.LockUnchanged, true, false); err != nil {
+		t.Fatalf("proxied forced clear: %v", err)
+	}
+	if _, err := lib.Acquisition(ctx, pid); !waxerr.Is(err, waxerr.CodeNotFound) {
+		t.Errorf("proxied clear did not remove the row: %v", err)
+	}
+	// The clear's default lock reached the store, which is what keeps it across a scan.
+	rows, err := lib.Provenance(ctx, pid)
+	if err != nil {
+		t.Fatalf("Provenance: %v", err)
+	}
+	var locked bool
+	for _, r := range rows {
+		if r.Field == "acquisition" && r.Locked {
+			locked = true
+		}
+	}
+	if !locked {
+		t.Error("a proxied bare clear left the acquisition field unlocked")
+	}
+}

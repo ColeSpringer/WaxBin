@@ -53,7 +53,11 @@ func (s *Store) PutAcquisitionForFile(ctx context.Context, path []byte, in model
 }
 
 // putAcquisitionTx writes the acquisition row and emits an item update delta so a
-// delta-sync consumer refreshes the now-attributed item.
+// delta-sync consumer refreshes the now-attributed item. It is one of three writers
+// behind two gates: this one and insertAcquisitionIfAbsentTx are automatic, so a
+// standing lock makes them skip in silence the way attachArtRespectingLockTx does,
+// while the curation pair (SetAcquisition/ClearAcquisition) refuses a lock out loud
+// with CodeLocked unless forced.
 //
 // A re-record merges field by field: a non-empty incoming value replaces what stands,
 // and an empty one keeps it. Emptiness is not evidence. The rule matters because a host
@@ -76,6 +80,13 @@ func (s *Store) PutAcquisitionForFile(ctx context.Context, path []byte, in model
 // has said nothing to contradict.
 func putAcquisitionTx(ctx context.Context, tx *sql.Tx, itemID int64, itemPID model.PID, in model.AcquisitionInput) error {
 	const op = "store.PutAcquisition"
+	// A curated origin outranks an automatic event, so an import over a locked item
+	// leaves the curated row standing rather than merging into it.
+	if locked, err := acquisitionLockedTx(ctx, tx, itemID); err != nil {
+		return err
+	} else if locked {
+		return nil
+	}
 	// Zero is the documented "stamp it for me" sentinel, so it never reaches the NOT
 	// NULL column; a caller that knows the real acquisition time keeps it. The
 	// ON CONFLICT below omits acquired_at, so a re-record preserves the first one.
@@ -102,32 +113,144 @@ func putAcquisitionTx(ctx context.Context, tx *sql.Tx, itemID int64, itemPID mod
 	return appendChange(ctx, tx, "item", itemPID, model.OpUpdate)
 }
 
-// ClearAcquisition deletes an item's origin provenance, returning it to source:local.
-// It is the inverse a merge-wise upsert needs: putAcquisitionTx will not lower a field,
-// so without a way to remove the row outright a wrong one could only ever be written
-// over with something else wrong. Clearing an item that has no row is a no-op, not an
-// error, so a caller correcting a batch does not have to check first.
+// SetAcquisition replaces an item's origin provenance with the row it is given. It is
+// the corrective write the merge-wise recording path cannot express: putAcquisitionTx
+// never lowers a field, so before this the only way down was a clear followed by a
+// re-record, which is what the CLI's help text told people to do.
 //
-// It takes the whole row, acquired_at included, and there is no narrower knife. Lowering
-// one field therefore means reading the row first and passing its AcquiredAt back on the
-// re-record, which AcquisitionInput accepts for exactly this: the alternative, a per-field
-// clear, would need a sentinel for "make this empty" on a surface whose whole rule is that
-// empty is not a claim.
-func (s *Store) ClearAcquisition(ctx context.Context, itemPID model.PID) error {
-	const op = "store.ClearAcquisition"
+// The replace is authoritative. Every column is written as given, so a correction can
+// empty source_url, source_id, provider, provider_version and options_json. The merge
+// rule protects a standing row against a bare automatic event, not against a human who
+// typed the whole thing.
+//
+// acquired_at differs from every other column and from putAcquisitionTx, which omits it
+// from its DO UPDATE so a merge can never move the stamp. A correction has to be able to
+// move it, since fixing a row that already exists is the entire point of the verb. The
+// zero sentinel already means "stamp it for me" (model.AcquisitionInput), so a zero
+// preserves what stands and a non-zero moves it. The two surfaces differ deliberately:
+// do not make one match the other.
+//
+// A standing lock is refused with CodeLocked unless force is set, which is the loud gate
+// the curation surfaces use where the automatic writers skip in silence. lock is applied
+// after the write, and LockUnchanged is its zero value the way it is on every other
+// curation verb.
+func (s *Store) SetAcquisition(ctx context.Context, itemPID model.PID, in model.AcquisitionInput, lock model.LockChange, force bool) error {
+	const op = "store.SetAcquisition"
+	if err := checkLockChange(lock, op); err != nil {
+		return err
+	}
+	if in.SourceType == model.SourceLocal {
+		return waxerr.New(waxerr.CodeInvalid, op,
+			"local is the absence of an acquisition row, not a type: use acquisition clear")
+	}
+	if !in.SourceType.ValidItemSource() {
+		return waxerr.New(waxerr.CodeInvalid, op, "unknown acquisition source type: "+string(in.SourceType))
+	}
 	return s.writeTx(ctx, func(tx *sql.Tx) error {
-		itemID, err := idByPIDTx(ctx, tx, "playable_item", itemPID, op)
+		itemID, kind, err := itemIDKindByPIDTx(ctx, tx, itemPID, op)
 		if err != nil {
 			return err
 		}
-		res, err := tx.ExecContext(ctx, "DELETE FROM acquisition WHERE item_id = ?", itemID)
-		if err != nil {
+		if !curatableFieldForKind(kind, "acquisition") {
+			return waxerr.New(waxerr.CodeInvalid, op, "acquisition is not curatable on a "+kind+" item")
+		}
+		if !force {
+			locked, err := acquisitionLockedTx(ctx, tx, itemID)
+			if err != nil {
+				return err
+			}
+			if locked {
+				return waxerr.New(waxerr.CodeLocked, op, "acquisition is locked (use force to override)")
+			}
+		}
+		acquiredAt := in.AcquiredAt
+		if acquiredAt == 0 {
+			acquiredAt = nowNS()
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO acquisition
+			(item_id, source_type, source_url, source_id, provider, provider_version, acquired_at, options_json)
+			VALUES (?1,?2,?3,?4,?5,?6,?7,?8)
+			ON CONFLICT(item_id) DO UPDATE SET
+				source_type = ?2, source_url = ?3, source_id = ?4, provider = ?5,
+				provider_version = ?6, options_json = ?8,
+				acquired_at = CASE WHEN ?9 THEN ?7 ELSE acquisition.acquired_at END`,
+			itemID, string(in.SourceType), in.SourceURL, in.SourceID, in.Provider,
+			in.ProviderVersion, acquiredAt, in.OptionsJSON, boolInt(in.AcquiredAt != 0)); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
-		if n, err := res.RowsAffected(); err != nil {
+		if err := setCurationLockTx(ctx, tx, itemID, "acquisition",
+			model.Attribution{Source: model.SourceUser}, lock); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
-		} else if n == 0 {
+		}
+		return appendChange(ctx, tx, "item", itemPID, model.OpUpdate)
+	})
+}
+
+// ClearAcquisition deletes an item's origin provenance, so the item falls back to the
+// source it reads without a row of its own: its show's type for an episode, and local
+// for everything else. It is the inverse a merge-wise upsert needs: putAcquisitionTx
+// will not lower a field, so without a way to remove the row outright a wrong one could
+// only ever be written over with something else wrong. Clearing an item that already
+// reads the way a clear would leave it is a no-op, not an error, so a caller correcting
+// a batch does not have to check first and a repeated clear is not refused by the lock
+// its predecessor set.
+//
+// It takes the whole row, acquired_at included, and there is no narrower knife. Lowering
+// one field goes through SetAcquisition, the authoritative surface where an empty value
+// is a claim, rather than through a per-field clear here, which would need a sentinel for
+// "make this empty" on a path whose whole rule is that empty is not evidence. The two
+// coexist on purpose: this one takes the row off, that one states what it should say.
+//
+// LockUnchanged resolves to LockOn, which is the one place a curation verb's zero value
+// is not "leave the lock alone". A set leaves a row the merge rule already refuses to
+// lower, while a clear leaves nothing, so the next scan re-derives the same wrong origin
+// from the file's own tags. The clear is the one that gets undone by default, and
+// LockOff is the explicit opt-out. SetItemTag's clear is the precedent for a clear owning
+// its own lock rule, and it points the other way: a locked-empty custom tag would block a
+// later re-set from the file, while a locked-empty acquisition is exactly the point.
+func (s *Store) ClearAcquisition(ctx context.Context, itemPID model.PID, lock model.LockChange, force bool) error {
+	const op = "store.ClearAcquisition"
+	if err := checkLockChange(lock, op); err != nil {
+		return err
+	}
+	if lock == model.LockUnchanged {
+		lock = model.LockOn
+	}
+	return s.writeTx(ctx, func(tx *sql.Tx) error {
+		itemID, kind, err := itemIDKindByPIDTx(ctx, tx, itemPID, op)
+		if err != nil {
+			return err
+		}
+		if !curatableFieldForKind(kind, "acquisition") {
+			return waxerr.New(waxerr.CodeInvalid, op, "acquisition is not curatable on a "+kind+" item")
+		}
+		wasLocked, err := acquisitionLockedTx(ctx, tx, itemID)
+		if err != nil {
+			return err
+		}
+		var hasRow bool
+		if err := tx.QueryRowContext(ctx,
+			"SELECT EXISTS(SELECT 1 FROM acquisition WHERE item_id = ?)", itemID).Scan(&hasRow); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		// A clear that would remove no row and leave the lock where it stands is already
+		// done, so it returns before both the lock refusal and the delta. That keeps the
+		// verb idempotent, which the batch contract above promises and which the default
+		// lock would otherwise break: the first clear locks, and the second would meet its
+		// own predecessor's lock with CodeLocked. It is setLock's idempotence guard, on
+		// the pair of things this verb writes rather than on the lock alone.
+		if !hasRow && wasLocked == (lock == model.LockOn) {
 			return nil
+		}
+		if wasLocked && !force {
+			return waxerr.New(waxerr.CodeLocked, op, "acquisition is locked (use force to override)")
+		}
+		if _, err := tx.ExecContext(ctx, "DELETE FROM acquisition WHERE item_id = ?", itemID); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		if err := setCurationLockTx(ctx, tx, itemID, "acquisition",
+			model.Attribution{Source: model.SourceUser}, lock); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		return appendChange(ctx, tx, "item", itemPID, model.OpUpdate)
 	})
@@ -147,10 +270,24 @@ func (s *Store) ClearAcquisition(ctx context.Context, itemPID model.PID) error {
 // item arrived. A non-empty field of an event beats a tag; emptiness is never
 // evidence. The asymmetry with putAcquisitionTx is the point: that path merges an
 // event into a standing row, while this one only ever creates the first row.
-func insertAcquisitionIfAbsentTx(ctx context.Context, tx *sql.Tx, itemID int64, in model.TagAcquisition) (bool, error) {
+//
+// DO NOTHING protects a row that exists, and a cleared item has none, so the tags on
+// disk would re-establish the wrong origin on the next full scan. preserveLocks is what
+// makes a clear durable: with it set (every scan that is not --ignore-locks), a standing
+// acquisition lock stops the insert, so a curated absence is an absence that holds.
+func insertAcquisitionIfAbsentTx(ctx context.Context, tx *sql.Tx, itemID int64, in model.TagAcquisition, preserveLocks bool) (bool, error) {
 	const op = "store.insertAcquisitionIfAbsent"
 	if !in.Present() {
 		return false, nil
+	}
+	if preserveLocks {
+		locked, err := acquisitionLockedTx(ctx, tx, itemID)
+		if err != nil {
+			return false, err
+		}
+		if locked {
+			return false, nil
+		}
 	}
 	acquiredAt := in.AcquiredAt
 	if acquiredAt == 0 {
@@ -176,6 +313,13 @@ func insertAcquisitionIfAbsentTx(ctx context.Context, tx *sql.Tx, itemID int64, 
 		return false, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
 	return n > 0, nil
+}
+
+// acquisitionLockedTx reports whether an item's acquisition row is locked. The lock
+// lives in field_provenance under the field name "acquisition", which is where every
+// writer here already looks for the item-scoped locks beside it.
+func acquisitionLockedTx(ctx context.Context, q queryer, itemID int64) (bool, error) {
+	return fieldLockedTx(ctx, q, itemID, "acquisition")
 }
 
 // AcquisitionByItem returns an item's origin provenance, or CodeNotFound when the

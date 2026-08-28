@@ -310,7 +310,8 @@ func TestClearAcquisitionReturnsItemToLocal(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("PutAcquisition: %v", err)
 	}
-	if err := st.ClearAcquisition(ctx, res.ItemPID); err != nil {
+	// LockOff keeps this test about the delete: the default lock has its own test.
+	if err := st.ClearAcquisition(ctx, res.ItemPID, model.LockOff, false); err != nil {
 		t.Fatalf("ClearAcquisition: %v", err)
 	}
 	if _, err := st.AcquisitionByItem(ctx, res.ItemPID); !waxerr.Is(err, waxerr.CodeNotFound) {
@@ -325,7 +326,7 @@ func TestClearAcquisitionReturnsItemToLocal(t *testing.T) {
 	}
 	// Clearing again is a no-op rather than an error, so a batch correction need not
 	// check first.
-	if err := st.ClearAcquisition(ctx, res.ItemPID); err != nil {
+	if err := st.ClearAcquisition(ctx, res.ItemPID, model.LockOff, false); err != nil {
 		t.Errorf("second ClearAcquisition: %v", err)
 	}
 }
@@ -386,5 +387,438 @@ func TestTagDerivedSourceIDSurvivesAProvider(t *testing.T) {
 	}
 	if a, _ := st.AcquisitionByItem(ctx, res.ItemPID); a.SourceID != "tag-1" {
 		t.Errorf("source id = %q, want the tag-derived id kept", a.SourceID)
+	}
+}
+
+// TestAcquisitionLockAppliesToEveryKind pins acquisition's place in the lock
+// vocabulary. It is the first static curation field that covers episodes, so all three
+// kinds are checked, and a lock the plain command set carries no attribution, so an
+// unlock drops it through setLock's ordinary tag-sourced sparse delete.
+func TestAcquisitionLockAppliesToEveryKind(t *testing.T) {
+	ctx := context.Background()
+	st, lib := openTestStore(t)
+
+	track, err := st.PutScannedTrack(ctx, input(lib.ID, "/lib/a.mp3", "ess-a", "c-a", "Song"))
+	if err != nil {
+		t.Fatalf("PutScannedTrack: %v", err)
+	}
+	book, err := st.PutScannedBook(ctx, bookIn(lib.ID, "/lib/b.m4b", "ess-b", "Book", "Author X", "", "", ""))
+	if err != nil {
+		t.Fatalf("PutScannedBook: %v", err)
+	}
+	if _, err := st.UpsertFeed(ctx, oneEpisodeFeed("https://feed.test/f", "g-1", "Ep", "d", "l")); err != nil {
+		t.Fatalf("UpsertFeed: %v", err)
+	}
+	ep := episodePID(t, st)
+
+	for name, pid := range map[string]model.PID{"track": track.ItemPID, "book": book.ItemPID, "episode": ep} {
+		if err := st.LockField(ctx, pid, "acquisition"); err != nil {
+			t.Fatalf("LockField on a %s: %v", name, err)
+		}
+		if locked, err := st.IsFieldLocked(ctx, pid, "acquisition"); err != nil || !locked {
+			t.Fatalf("%s acquisition locked = %v (err %v), want true", name, locked, err)
+		}
+		if err := st.UnlockField(ctx, pid, "acquisition"); err != nil {
+			t.Fatalf("UnlockField on a %s: %v", name, err)
+		}
+		fields, err := st.FieldProvenance(ctx, pid)
+		if err != nil {
+			t.Fatalf("FieldProvenance for a %s: %v", name, err)
+		}
+		for _, f := range fields {
+			if f.Field == "acquisition" {
+				t.Errorf("%s kept an inert acquisition row after unlock: %+v", name, f)
+			}
+		}
+	}
+}
+
+// TestAcquisitionLockSurvivesRescan is the durability case the whole lock exists for.
+// The file still carries SOURCE_URL, and insertAcquisitionIfAbsentTx only ever protected
+// a row that exists, so without the lock a cleared origin comes straight back.
+func TestAcquisitionLockSurvivesRescan(t *testing.T) {
+	ctx := context.Background()
+	st, lib := openTestStore(t)
+
+	in := input(lib.ID, "/lib/a.mp3", "ess-a", "c-a", "Tagged")
+	in.Acquisition = model.TagAcquisition{SourceURL: "https://wrong.test/x", SourceID: "x"}
+	res, err := st.PutScannedTrack(ctx, in)
+	if err != nil {
+		t.Fatalf("PutScannedTrack: %v", err)
+	}
+	if _, err := st.AcquisitionByItem(ctx, res.ItemPID); err != nil {
+		t.Fatalf("the tag-derived row should exist first: %v", err)
+	}
+	// Locked through the plain lock command rather than the clear's default, so this
+	// pins the scan gate rather than the clear's lock rule.
+	if err := st.ClearAcquisition(ctx, res.ItemPID, model.LockOff, false); err != nil {
+		t.Fatalf("ClearAcquisition: %v", err)
+	}
+	if err := st.LockField(ctx, res.ItemPID, "acquisition"); err != nil {
+		t.Fatalf("LockField: %v", err)
+	}
+
+	rescan := input(lib.ID, "/lib/a.mp3", "ess-a", "c-a", "Tagged")
+	rescan.Acquisition = model.TagAcquisition{SourceURL: "https://wrong.test/x", SourceID: "x"}
+	rescan.PreserveLocks = true
+	if _, err := st.PutScannedTrack(ctx, rescan); err != nil {
+		t.Fatalf("rescan: %v", err)
+	}
+	if _, err := st.AcquisitionByItem(ctx, res.ItemPID); !waxerr.Is(err, waxerr.CodeNotFound) {
+		a, _ := st.AcquisitionByItem(ctx, res.ItemPID)
+		t.Fatalf("rescan re-derived a locked-away origin: %+v (err %v)", a, err)
+	}
+
+	// scan --force --ignore-locks drops PreserveLocks, and the acquisition lock has to
+	// give way with every other one rather than outliving them.
+	ignore := input(lib.ID, "/lib/a.mp3", "ess-a", "c-a", "Tagged")
+	ignore.Acquisition = model.TagAcquisition{SourceURL: "https://wrong.test/x", SourceID: "x"}
+	if _, err := st.PutScannedTrack(ctx, ignore); err != nil {
+		t.Fatalf("ignore-locks rescan: %v", err)
+	}
+	if _, err := st.AcquisitionByItem(ctx, res.ItemPID); err != nil {
+		t.Fatalf("ignore-locks rescan honoured the lock: %v", err)
+	}
+}
+
+// TestPutAcquisitionSkipsLockedItem: the automatic writers skip in silence, the way
+// attachArtRespectingLockTx does, rather than refusing an import outright.
+func TestPutAcquisitionSkipsLockedItem(t *testing.T) {
+	ctx := context.Background()
+	st, lib := openTestStore(t)
+
+	res, err := st.PutScannedTrack(ctx, input(lib.ID, "/lib/a.mp3", "ess-a", "c-a", "Song"))
+	if err != nil {
+		t.Fatalf("PutScannedTrack: %v", err)
+	}
+	if err := st.PutAcquisition(ctx, res.ItemPID, model.AcquisitionInput{
+		SourceType: model.SourceManual, SourceURL: "https://right.test/x",
+	}); err != nil {
+		t.Fatalf("PutAcquisition: %v", err)
+	}
+	if err := st.LockField(ctx, res.ItemPID, "acquisition"); err != nil {
+		t.Fatalf("LockField: %v", err)
+	}
+	if err := st.PutAcquisition(ctx, res.ItemPID, model.AcquisitionInput{
+		SourceType: model.SourceYouTube, SourceURL: "https://wrong.test/y", Provider: "waxtap",
+	}); err != nil {
+		t.Fatalf("PutAcquisition over a lock should be a silent no-op: %v", err)
+	}
+	a, err := st.AcquisitionByItem(ctx, res.ItemPID)
+	if err != nil {
+		t.Fatalf("AcquisitionByItem: %v", err)
+	}
+	if a.SourceType != model.SourceManual || a.SourceURL != "https://right.test/x" || a.Provider != "" {
+		t.Errorf("an automatic event wrote over a locked row: %+v", a)
+	}
+}
+
+// TestSetAcquisitionIsAuthoritative pins the difference from the merge-wise recording
+// path: every column is written as given, so a correction can empty a field that a bare
+// event could never lower.
+func TestSetAcquisitionIsAuthoritative(t *testing.T) {
+	ctx := context.Background()
+	st, lib := openTestStore(t)
+
+	res, err := st.PutScannedTrack(ctx, input(lib.ID, "/lib/a.mp3", "ess-a", "c-a", "Song"))
+	if err != nil {
+		t.Fatalf("PutScannedTrack: %v", err)
+	}
+	if err := st.PutAcquisition(ctx, res.ItemPID, model.AcquisitionInput{
+		SourceType: model.SourceYouTube, SourceURL: "https://y/watch?v=1", SourceID: "1",
+		Provider: "waxtap", ProviderVersion: "3", OptionsJSON: `{"q":"best"}`,
+	}); err != nil {
+		t.Fatalf("PutAcquisition: %v", err)
+	}
+	before, err := st.AcquisitionByItem(ctx, res.ItemPID)
+	if err != nil {
+		t.Fatalf("AcquisitionByItem: %v", err)
+	}
+
+	// The correction: a mis-tagged rip is manual with nothing else known.
+	if err := st.SetAcquisition(ctx, res.ItemPID,
+		model.AcquisitionInput{SourceType: model.SourceManual}, model.LockUnchanged, false); err != nil {
+		t.Fatalf("SetAcquisition: %v", err)
+	}
+	a, err := st.AcquisitionByItem(ctx, res.ItemPID)
+	if err != nil {
+		t.Fatalf("AcquisitionByItem after set: %v", err)
+	}
+	if a.SourceType != model.SourceManual {
+		t.Errorf("source type = %q, want manual", a.SourceType)
+	}
+	if a.SourceURL != "" || a.SourceID != "" || a.Provider != "" || a.ProviderVersion != "" || a.OptionsJSON != "" {
+		t.Errorf("an authoritative set left fields standing: %+v", a)
+	}
+	if a.AcquiredAt != before.AcquiredAt {
+		t.Errorf("acquired at = %d, want the stamp preserved by a zero AcquiredAt", a.AcquiredAt)
+	}
+
+	// A non-zero stamp moves it, which putAcquisitionTx can never do.
+	if err := st.SetAcquisition(ctx, res.ItemPID,
+		model.AcquisitionInput{SourceType: model.SourceManual, AcquiredAt: 1_700_000_000_000_000_000},
+		model.LockUnchanged, false); err != nil {
+		t.Fatalf("SetAcquisition with a stamp: %v", err)
+	}
+	if a, _ := st.AcquisitionByItem(ctx, res.ItemPID); a.AcquiredAt != 1_700_000_000_000_000_000 {
+		t.Errorf("acquired at = %d, want the given stamp", a.AcquiredAt)
+	}
+
+	// SetAcquisition leaves the lock alone by default, the way every other curation verb
+	// treats LockUnchanged.
+	if locked, _ := st.IsFieldLocked(ctx, res.ItemPID, "acquisition"); locked {
+		t.Error("a bare set locked the field; only a clear does that")
+	}
+}
+
+// TestSetAcquisitionRefusesLocalAndUnknown: local is the absence of a row, so asking
+// for it is asking for a clear.
+func TestSetAcquisitionRefusesLocalAndUnknown(t *testing.T) {
+	ctx := context.Background()
+	st, lib := openTestStore(t)
+	res, err := st.PutScannedTrack(ctx, input(lib.ID, "/lib/a.mp3", "ess-a", "c-a", "Song"))
+	if err != nil {
+		t.Fatalf("PutScannedTrack: %v", err)
+	}
+	for _, st2 := range []model.SourceType{model.SourceLocal, "", "bandcamp"} {
+		err := st.SetAcquisition(ctx, res.ItemPID,
+			model.AcquisitionInput{SourceType: st2}, model.LockUnchanged, false)
+		if !waxerr.Is(err, waxerr.CodeInvalid) {
+			t.Errorf("SetAcquisition with type %q = %v, want CodeInvalid", st2, err)
+		}
+	}
+}
+
+// TestAcquisitionCurationRefusesALock: the curation pair refuses out loud where the
+// automatic writers skip in silence, and force is the way through.
+func TestAcquisitionCurationRefusesALock(t *testing.T) {
+	ctx := context.Background()
+	st, lib := openTestStore(t)
+	res, err := st.PutScannedTrack(ctx, input(lib.ID, "/lib/a.mp3", "ess-a", "c-a", "Song"))
+	if err != nil {
+		t.Fatalf("PutScannedTrack: %v", err)
+	}
+	if err := st.SetAcquisition(ctx, res.ItemPID,
+		model.AcquisitionInput{SourceType: model.SourceManual, SourceURL: "https://one.test"},
+		model.LockOn, false); err != nil {
+		t.Fatalf("SetAcquisition: %v", err)
+	}
+	if err := st.SetAcquisition(ctx, res.ItemPID,
+		model.AcquisitionInput{SourceType: model.SourceRSS}, model.LockUnchanged, false); !waxerr.Is(err, waxerr.CodeLocked) {
+		t.Errorf("locked set = %v, want CodeLocked", err)
+	}
+	if err := st.ClearAcquisition(ctx, res.ItemPID, model.LockUnchanged, false); !waxerr.Is(err, waxerr.CodeLocked) {
+		t.Errorf("locked clear = %v, want CodeLocked", err)
+	}
+	if err := st.SetAcquisition(ctx, res.ItemPID,
+		model.AcquisitionInput{SourceType: model.SourceRSS}, model.LockUnchanged, true); err != nil {
+		t.Fatalf("forced set: %v", err)
+	}
+	if a, _ := st.AcquisitionByItem(ctx, res.ItemPID); a.SourceType != model.SourceRSS {
+		t.Errorf("forced set did not apply: %+v", a)
+	}
+	// The force overrode the lock without clearing it.
+	if locked, _ := st.IsFieldLocked(ctx, res.ItemPID, "acquisition"); !locked {
+		t.Error("a forced set dropped the lock; LockUnchanged leaves it standing")
+	}
+}
+
+// TestClearAcquisitionLocksByDefault is the asymmetry that makes a clear stick: the row
+// it removes is one the next scan would re-derive from the file's own tags.
+func TestClearAcquisitionLocksByDefault(t *testing.T) {
+	ctx := context.Background()
+	st, lib := openTestStore(t)
+
+	tagged := func(path, essence string) model.PutScannedTrackInput {
+		in := input(lib.ID, path, essence, "c-"+essence, "Tagged")
+		in.Acquisition = model.TagAcquisition{SourceURL: "https://wrong.test/x", SourceID: "x"}
+		in.PreserveLocks = true
+		return in
+	}
+	res, err := st.PutScannedTrack(ctx, tagged("/lib/a.mp3", "ess-a"))
+	if err != nil {
+		t.Fatalf("PutScannedTrack: %v", err)
+	}
+	if err := st.ClearAcquisition(ctx, res.ItemPID, model.LockUnchanged, false); err != nil {
+		t.Fatalf("ClearAcquisition: %v", err)
+	}
+	if locked, _ := st.IsFieldLocked(ctx, res.ItemPID, "acquisition"); !locked {
+		t.Fatal("a bare clear did not lock; without the lock it does not survive a rescan")
+	}
+	if _, err := st.PutScannedTrack(ctx, tagged("/lib/a.mp3", "ess-a")); err != nil {
+		t.Fatalf("rescan: %v", err)
+	}
+	if _, err := st.AcquisitionByItem(ctx, res.ItemPID); !waxerr.Is(err, waxerr.CodeNotFound) {
+		t.Errorf("the cleared origin came back across a rescan: %v", err)
+	}
+
+	// The explicit opt-out leaves the file's evidence free to re-derive.
+	other, err := st.PutScannedTrack(ctx, tagged("/lib/b.mp3", "ess-b"))
+	if err != nil {
+		t.Fatalf("PutScannedTrack: %v", err)
+	}
+	if err := st.ClearAcquisition(ctx, other.ItemPID, model.LockOff, false); err != nil {
+		t.Fatalf("unlocking clear: %v", err)
+	}
+	if locked, _ := st.IsFieldLocked(ctx, other.ItemPID, "acquisition"); locked {
+		t.Error("an explicit LockOff clear locked anyway")
+	}
+	if _, err := st.PutScannedTrack(ctx, tagged("/lib/b.mp3", "ess-b")); err != nil {
+		t.Fatalf("rescan: %v", err)
+	}
+	if _, err := st.AcquisitionByItem(ctx, other.ItemPID); err != nil {
+		t.Errorf("an unlocked clear should let the tags re-derive: %v", err)
+	}
+}
+
+// TestClearAcquisitionOfNothingEmitsNoDelta: a clear that removed no row and left the
+// lock where it stood did nothing, so it must not publish a change.
+func TestClearAcquisitionOfNothingEmitsNoDelta(t *testing.T) {
+	ctx := context.Background()
+	st, lib := openTestStore(t)
+	res, err := st.PutScannedTrack(ctx, input(lib.ID, "/lib/a.mp3", "ess-a", "c-a", "Song"))
+	if err != nil {
+		t.Fatalf("PutScannedTrack: %v", err)
+	}
+	before, err := st.LatestChangeSeq(ctx)
+	if err != nil {
+		t.Fatalf("LatestChangeSeq: %v", err)
+	}
+	if err := st.ClearAcquisition(ctx, res.ItemPID, model.LockOff, false); err != nil {
+		t.Fatalf("ClearAcquisition: %v", err)
+	}
+	after, err := st.LatestChangeSeq(ctx)
+	if err != nil {
+		t.Fatalf("LatestChangeSeq: %v", err)
+	}
+	if after != before {
+		t.Errorf("change seq moved from %d to %d for a clear that did nothing", before, after)
+	}
+	// A clear that only sets the lock still publishes: the item's origin now reads
+	// differently to a delta-sync consumer, because it will not come back.
+	if err := st.ClearAcquisition(ctx, res.ItemPID, model.LockUnchanged, false); err != nil {
+		t.Fatalf("locking clear: %v", err)
+	}
+	if seq, _ := st.LatestChangeSeq(ctx); seq == after {
+		t.Error("a clear that set the lock published no delta")
+	}
+}
+
+// TestSetAcquisitionOverridesAnEpisodeShowSource: an episode already reads its show's
+// type through the source COALESCE, so its own acquisition row is the only thing that
+// overrides it, and the lock is what keeps that override across a re-sync.
+func TestSetAcquisitionOverridesAnEpisodeShowSource(t *testing.T) {
+	ctx := context.Background()
+	st, _ := openTestStore(t)
+	if _, err := st.UpsertFeed(ctx, oneEpisodeFeed("https://feed.test/f", "g-1", "Ep", "d", "l")); err != nil {
+		t.Fatalf("UpsertFeed: %v", err)
+	}
+	ep := episodePID(t, st)
+	v, err := st.ItemByPID(ctx, ep)
+	if err != nil {
+		t.Fatalf("ItemByPID: %v", err)
+	}
+	if v.Source != model.SourceRSS {
+		t.Fatalf("episode source = %q with no row of its own, want the show's rss", v.Source)
+	}
+
+	if err := st.SetAcquisition(ctx, ep,
+		model.AcquisitionInput{SourceType: model.SourceManual}, model.LockOn, false); err != nil {
+		t.Fatalf("SetAcquisition on an episode: %v", err)
+	}
+	if v, _ := st.ItemByPID(ctx, ep); v.Source != model.SourceManual {
+		t.Errorf("episode source = %q after a curated set, want manual", v.Source)
+	}
+
+	// Clearing returns it to the show's type, not to local.
+	if err := st.ClearAcquisition(ctx, ep, model.LockUnchanged, true); err != nil {
+		t.Fatalf("ClearAcquisition on an episode: %v", err)
+	}
+	if v, _ := st.ItemByPID(ctx, ep); v.Source != model.SourceRSS {
+		t.Errorf("episode source = %q after a clear, want the show's rss rather than local", v.Source)
+	}
+}
+
+// TestUnlockKeepsCuratedAcquisitionProvenance: acquisition is not in setLock's
+// sparse-delete exception, and must not be. The exception exists for art, whose real
+// attribution is re-reported from art_map, so dropping the row loses nothing. An
+// acquisition row's "this origin was hand-set" has no such overlay, and the origin it
+// describes is still standing, so an unlock must leave the attribution behind.
+func TestUnlockKeepsCuratedAcquisitionProvenance(t *testing.T) {
+	ctx := context.Background()
+	st, lib := openTestStore(t)
+	res, err := st.PutScannedTrack(ctx, input(lib.ID, "/lib/a.mp3", "ess-a", "c-a", "Song"))
+	if err != nil {
+		t.Fatalf("PutScannedTrack: %v", err)
+	}
+	if err := st.SetAcquisition(ctx, res.ItemPID,
+		model.AcquisitionInput{SourceType: model.SourceManual, SourceURL: "https://right.test/y"},
+		model.LockOn, false); err != nil {
+		t.Fatalf("SetAcquisition: %v", err)
+	}
+	if err := st.UnlockField(ctx, res.ItemPID, "acquisition"); err != nil {
+		t.Fatalf("UnlockField: %v", err)
+	}
+	rows, err := st.FieldProvenance(ctx, res.ItemPID)
+	if err != nil {
+		t.Fatalf("FieldProvenance: %v", err)
+	}
+	var found bool
+	for _, r := range rows {
+		if r.Field == "acquisition" {
+			found = true
+			if r.Locked || r.Source != model.SourceUser {
+				t.Errorf("acquisition provenance = %+v, want an unlocked user row", r)
+			}
+		}
+	}
+	if !found {
+		t.Error("unlocking dropped the record that the origin was hand-set, which nothing else reports")
+	}
+	// The row it describes is still there, which is why the attribution is not inert.
+	if _, err := st.AcquisitionByItem(ctx, res.ItemPID); err != nil {
+		t.Errorf("the curated acquisition row went with the lock: %v", err)
+	}
+}
+
+// TestClearAcquisitionIsIdempotent: the default lock must not make the verb refuse its
+// own second run, which is what a batch correction over a mixed selection does.
+func TestClearAcquisitionIsIdempotent(t *testing.T) {
+	ctx := context.Background()
+	st, lib := openTestStore(t)
+
+	in := input(lib.ID, "/lib/a.mp3", "ess-a", "c-a", "Tagged")
+	in.Acquisition = model.TagAcquisition{SourceURL: "https://wrong.test/x", SourceID: "x"}
+	res, err := st.PutScannedTrack(ctx, in)
+	if err != nil {
+		t.Fatalf("PutScannedTrack: %v", err)
+	}
+	for i := 0; i < 3; i++ {
+		if err := st.ClearAcquisition(ctx, res.ItemPID, model.LockUnchanged, false); err != nil {
+			t.Fatalf("clear %d: %v", i, err)
+		}
+	}
+	if locked, _ := st.IsFieldLocked(ctx, res.ItemPID, "acquisition"); !locked {
+		t.Error("the repeated clear lost the lock")
+	}
+
+	// An item that never had a row and is not locked is left entirely alone: no delta,
+	// and no lock installed by a clear that had nothing to clear.
+	other, err := st.PutScannedTrack(ctx, input(lib.ID, "/lib/b.mp3", "ess-b", "c-b", "Plain"))
+	if err != nil {
+		t.Fatalf("PutScannedTrack: %v", err)
+	}
+	before, err := st.LatestChangeSeq(ctx)
+	if err != nil {
+		t.Fatalf("LatestChangeSeq: %v", err)
+	}
+	if err := st.ClearAcquisition(ctx, other.ItemPID, model.LockOff, false); err != nil {
+		t.Fatalf("clear of a row-less item: %v", err)
+	}
+	if seq, _ := st.LatestChangeSeq(ctx); seq != before {
+		t.Errorf("change seq moved from %d to %d for a clear that did nothing", before, seq)
+	}
+	if locked, _ := st.IsFieldLocked(ctx, other.ItemPID, "acquisition"); locked {
+		t.Error("an explicit LockOff clear installed a lock")
 	}
 }

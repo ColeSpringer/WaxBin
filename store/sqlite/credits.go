@@ -11,16 +11,22 @@ import (
 
 // staticCurationFieldKinds maps a non-scalar curation lock field to the item kinds it
 // applies to. Lyrics belong to tracks, chapters to books, art to either.
+//
+// Acquisition is the first to cover episodes, where art deliberately stops. An episode
+// reads its show's source type through the COALESCE in the item view, so its own
+// acquisition row is not mainly a record of an origin the show lacks: it is the only
+// thing that overrides the show's type. Locking it is how that override survives a sync.
 var staticCurationFieldKinds = map[string]map[model.Kind]bool{
-	"lyrics":   {model.KindTrack: true},
-	"chapters": {model.KindBook: true},
-	"art":      {model.KindTrack: true, model.KindBook: true},
+	"lyrics":      {model.KindTrack: true},
+	"chapters":    {model.KindBook: true},
+	"art":         {model.KindTrack: true, model.KindBook: true},
+	"acquisition": {model.KindTrack: true, model.KindBook: true, model.KindEpisode: true},
 }
 
 // curatableFieldForKind reports whether a provenance/lock field applies to the given
 // item kind: a scalar field from the kind's edit whitelist, a credit.<role> whose role
 // is valid for the kind, an art.<role> auxiliary-art lock, or a static curation field
-// (lyrics/chapters/art).
+// (lyrics/chapters/art/acquisition).
 func curatableFieldForKind(kind, field string) bool {
 	if allowed := editableFieldsForKind(kind); allowed != nil && allowed[field] {
 		return true

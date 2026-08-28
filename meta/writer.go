@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io/fs"
 	"os"
+	"time"
 
 	"github.com/colespringer/waxbin/identity"
 	"github.com/colespringer/waxbin/model"
@@ -61,6 +62,34 @@ var fieldTagKeys = map[string]string{
 func TagKeyForField(field string) (string, bool) {
 	k, ok := fieldTagKeys[field]
 	return k, ok
+}
+
+// AcquisitionTagEdits builds the tag edits for an item's origin provenance: the two
+// source keys plus the acquisition date. An empty or zero value clears its key rather
+// than writing a blank one, so a correction that emptied a field empties it on disk too
+// and a clear passes three zero values.
+//
+// It lives here, beside the reader that parses these keys back, for the reason
+// fieldTagKeys gives: one place for the correspondence so the two cannot drift. The
+// date carries that most directly. ACQUISITION_DATE is a partial-date key with no clock
+// and no zone, so a file holds day precision in UTC and nothing finer, and the layout
+// written is the one parseAcquiredAt reads.
+func AcquisitionTagEdits(sourceURL, sourceID string, acquiredAtNS int64) []TagEdit {
+	edits := []TagEdit{
+		{Key: string(tag.SourceURL)},
+		{Key: string(tag.SourceID)},
+		{Key: string(tag.AcquisitionDate)},
+	}
+	if sourceURL != "" {
+		edits[0].Values = []string{sourceURL}
+	}
+	if sourceID != "" {
+		edits[1].Values = []string{sourceID}
+	}
+	if acquiredAtNS != 0 {
+		edits[2].Values = []string{time.Unix(0, acquiredAtNS).UTC().Format(acquisitionDateLayouts[0])}
+	}
+	return edits
 }
 
 // DerivedSortPair names a display field whose edit regenerates a stored sort key:

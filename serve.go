@@ -116,6 +116,27 @@ func wireLock(op, lock string) (model.LockChange, error) {
 	return c, nil
 }
 
+// writeBackResponse folds a mutation's outcome into a proxy response. A *WriteBackError
+// is a result rather than a transport error: the catalog change committed and only the
+// on-disk tags did not follow, so the failures travel in the response and the client
+// rebuilds the same typed error the local path raises. Any other error is a real failure
+// and goes back as one.
+//
+// build receives the failures to carry, nil on a clean run, so each method spells its own
+// result shape once instead of once per outcome. It is the single place that decision is
+// made, which is what keeps a partial on-disk sync from reading as a failed call at one
+// method and a clean one at the next.
+func writeBackResponse[T any](err error, build func([]proxy.WriteBackFailure) T) (any, error) {
+	var wbErr *WriteBackError
+	if errors.As(err, &wbErr) {
+		return build(toProxyFailures(wbErr.Failures)), nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return build(nil), nil
+}
+
 // proxyHandlers builds the map of method names to handlers the proxy server
 // dispatches. Each handler unmarshals its params, calls the matching Library
 // operation, and returns a value to marshal into the response. Handlers run
@@ -136,17 +157,9 @@ func (l *Library) proxyHandlers() map[string]proxy.Handler {
 					WriteBack: p.WriteBack, Lock: lock, Force: p.Force,
 					Source: model.ProvenanceSource(p.Source), Provider: p.Provider,
 				})
-			// A write-back failure is a result, not a transport error: the catalog edit
-			// committed and only the on-disk tags did not follow. Return the failures in
-			// the response so the client rebuilds the same typed error the local path does.
-			var wbErr *WriteBackError
-			if errors.As(editErr, &wbErr) {
-				return proxy.EditFieldsResult{WriteBackFailures: toProxyFailures(wbErr.Failures)}, nil
-			}
-			if editErr != nil {
-				return nil, editErr
-			}
-			return proxy.EditFieldsResult{}, nil
+			return writeBackResponse(editErr, func(f []proxy.WriteBackFailure) proxy.EditFieldsResult {
+				return proxy.EditFieldsResult{WriteBackFailures: f}
+			})
 		},
 		proxy.MethodEditManyFields: func(ctx context.Context, raw json.RawMessage) (any, error) {
 			p, err := decodeParams[proxy.EditManyFieldsParams](raw)
@@ -208,17 +221,9 @@ func (l *Library) proxyHandlers() map[string]proxy.Handler {
 					WriteBack: p.WriteBack, Lock: lock, Force: p.Force, SkipLocked: p.SkipLocked,
 					Source: model.ProvenanceSource(p.Source), Provider: p.Provider,
 				})
-			// A write-back failure is a result, not a transport error (the catalog edit stands).
-			var wbErr *WriteBackError
-			if errors.As(editErr, &wbErr) {
-				return proxy.SetCreditsResult{
-					Stored: stored, Skipped: skipped, WriteBackFailures: toProxyFailures(wbErr.Failures),
-				}, nil
-			}
-			if editErr != nil {
-				return nil, editErr
-			}
-			return proxy.SetCreditsResult{Stored: stored, Skipped: skipped}, nil
+			return writeBackResponse(editErr, func(f []proxy.WriteBackFailure) proxy.SetCreditsResult {
+				return proxy.SetCreditsResult{Stored: stored, Skipped: skipped, WriteBackFailures: f}
+			})
 		},
 		proxy.MethodSetCreditsBatch: func(ctx context.Context, raw json.RawMessage) (any, error) {
 			p, err := decodeParams[proxy.SetCreditsBatchParams](raw)
@@ -287,15 +292,9 @@ func (l *Library) proxyHandlers() map[string]proxy.Handler {
 				Source: model.ProvenanceSource(p.Source), Provider: p.Provider, SourceURL: p.SourceURL,
 				Format: p.Format,
 			})
-			// A write-back failure is a result, not a transport error (the catalog edit stands).
-			var wbErr *WriteBackError
-			if errors.As(artErr, &wbErr) {
-				return proxy.SetItemArtResult{WriteBackFailures: toProxyFailures(wbErr.Failures)}, nil
-			}
-			if artErr != nil {
-				return nil, artErr
-			}
-			return proxy.SetItemArtResult{}, nil
+			return writeBackResponse(artErr, func(f []proxy.WriteBackFailure) proxy.SetItemArtResult {
+				return proxy.SetItemArtResult{WriteBackFailures: f}
+			})
 		},
 		proxy.MethodSetEntityArt: func(ctx context.Context, raw json.RawMessage) (any, error) {
 			p, err := decodeParams[proxy.SetEntityArtParams](raw)
@@ -315,14 +314,9 @@ func (l *Library) proxyHandlers() map[string]proxy.Handler {
 				Source: model.ProvenanceSource(p.Source), Provider: p.Provider, SourceURL: p.SourceURL,
 				Format: p.Format,
 			})
-			var wbErr *WriteBackError
-			if errors.As(artErr, &wbErr) {
-				return proxy.SetEntityArtResult{WriteBackFailures: toProxyFailures(wbErr.Failures)}, nil
-			}
-			if artErr != nil {
-				return nil, artErr
-			}
-			return proxy.SetEntityArtResult{}, nil
+			return writeBackResponse(artErr, func(f []proxy.WriteBackFailure) proxy.SetEntityArtResult {
+				return proxy.SetEntityArtResult{WriteBackFailures: f}
+			})
 		},
 		proxy.MethodSetArtLock: func(ctx context.Context, raw json.RawMessage) (any, error) {
 			p, err := decodeParams[proxy.SetArtLockParams](raw)
@@ -360,15 +354,10 @@ func (l *Library) proxyHandlers() map[string]proxy.Handler {
 			if rep != nil {
 				out.MergedInto = string(rep.MergedInto)
 			}
-			var wbErr *WriteBackError
-			if errors.As(editErr, &wbErr) {
-				out.WriteBackFailures = toProxyFailures(wbErr.Failures)
-				return out, nil
-			}
-			if editErr != nil {
-				return nil, editErr
-			}
-			return out, nil
+			return writeBackResponse(editErr, func(f []proxy.WriteBackFailure) proxy.EditEntityResult {
+				out.WriteBackFailures = f
+				return out
+			})
 		},
 		proxy.MethodRenameEntity: func(ctx context.Context, raw json.RawMessage) (any, error) {
 			p, err := decodeParams[proxy.RenameEntityParams](raw)
@@ -391,17 +380,10 @@ func (l *Library) proxyHandlers() map[string]proxy.Handler {
 					MovedAlbums: pidStrings(rep.MovedAlbums), Members: rep.Members,
 				}
 			}
-			// A write-back failure is a result, not a transport error: the rename
-			// committed and only the files' tags did not follow.
-			var wbErr *WriteBackError
-			if errors.As(renameErr, &wbErr) {
-				out.WriteBackFailures = toProxyFailures(wbErr.Failures)
-				return out, nil
-			}
-			if renameErr != nil {
-				return nil, renameErr
-			}
-			return out, nil
+			return writeBackResponse(renameErr, func(f []proxy.WriteBackFailure) proxy.RenameEntityResult {
+				out.WriteBackFailures = f
+				return out
+			})
 		},
 		proxy.MethodDetach: func(ctx context.Context, raw json.RawMessage) (any, error) {
 			p, err := decodeParams[proxy.DetachParams](raw)
@@ -409,17 +391,42 @@ func (l *Library) proxyHandlers() map[string]proxy.Handler {
 				return nil, err
 			}
 			rep, detachErr := l.Detach(ctx, model.PID(p.ItemPID), DetachOptions{WriteBack: p.WriteBack})
-			// A write-back failure is a result, not a transport error: the detach
-			// committed and only the file's tags did not follow, so the report still
-			// travels alongside the failed files.
-			var wbErr *WriteBackError
-			if errors.As(detachErr, &wbErr) {
-				return detachResult(rep, toProxyFailures(wbErr.Failures)), nil
+			return writeBackResponse(detachErr, func(f []proxy.WriteBackFailure) proxy.DetachResult {
+				return detachResult(rep, f)
+			})
+		},
+		proxy.MethodSetAcquisition: func(ctx context.Context, raw json.RawMessage) (any, error) {
+			p, err := decodeParams[proxy.SetAcquisitionParams](raw)
+			if err != nil {
+				return nil, err
 			}
-			if detachErr != nil {
-				return nil, detachErr
+			lock, lockErr := wireLock("serve.set_acquisition", p.Lock)
+			if lockErr != nil {
+				return nil, lockErr
 			}
-			return detachResult(rep, nil), nil
+			setErr := l.SetAcquisition(ctx, model.PID(p.ItemPID), model.AcquisitionInput{
+				SourceType: model.SourceType(p.SourceType), SourceURL: p.SourceURL,
+				SourceID: p.SourceID, Provider: p.Provider, ProviderVersion: p.ProviderVersion,
+				AcquiredAt: p.AcquiredAt, OptionsJSON: p.OptionsJSON,
+			}, AcquisitionEditOptions{Lock: lock, Force: p.Force, WriteBack: p.WriteBack})
+			return writeBackResponse(setErr, func(f []proxy.WriteBackFailure) proxy.AcquisitionResult {
+				return proxy.AcquisitionResult{WriteBackFailures: f}
+			})
+		},
+		proxy.MethodClearAcquisition: func(ctx context.Context, raw json.RawMessage) (any, error) {
+			p, err := decodeParams[proxy.ClearAcquisitionParams](raw)
+			if err != nil {
+				return nil, err
+			}
+			lock, lockErr := wireLock("serve.clear_acquisition", p.Lock)
+			if lockErr != nil {
+				return nil, lockErr
+			}
+			clearErr := l.ClearAcquisition(ctx, model.PID(p.ItemPID),
+				AcquisitionEditOptions{Lock: lock, Force: p.Force, WriteBack: p.WriteBack})
+			return writeBackResponse(clearErr, func(f []proxy.WriteBackFailure) proxy.AcquisitionResult {
+				return proxy.AcquisitionResult{WriteBackFailures: f}
+			})
 		},
 		proxy.MethodSetTag: func(ctx context.Context, raw json.RawMessage) (any, error) {
 			p, err := decodeParams[proxy.SetTagParams](raw)

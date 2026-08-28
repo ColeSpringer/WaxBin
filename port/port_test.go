@@ -46,8 +46,8 @@ func TestSnapshotRoundTrip(t *testing.T) {
 	if got.Manifest.Version != port.ExportVersion {
 		t.Errorf("manifest version = %d, want %d", got.Manifest.Version, port.ExportVersion)
 	}
-	if port.ExportVersion != 5 {
-		t.Errorf("ExportVersion = %d, want 5 now that bpm is carried", port.ExportVersion)
+	if port.ExportVersion != 6 {
+		t.Errorf("ExportVersion = %d, want 6 now that the acquisition source is carried", port.ExportVersion)
 	}
 	if got.PlayState[0].Rating == nil || *got.PlayState[0].Rating != 80 {
 		t.Fatalf("rating round-trip wrong: %+v", got.PlayState[0])
@@ -114,5 +114,41 @@ func TestValidateBackupRejectsNonCatalog(t *testing.T) {
 	}
 	if _, err := port.ValidateBackup(context.Background(), f); err == nil {
 		t.Fatal("validating a non-catalog file should fail")
+	}
+}
+
+// TestSnapshotCarriesAcquisitionSource pins both halves of the export's source field:
+// an acquired item carries its type, and a locally scanned one omits the key entirely.
+// The omission is the assertion that needs the explicit SourceLocal skip, since the read
+// side is a COALESCE ending in 'local' and so never hands back an empty string for
+// omitempty to drop.
+func TestSnapshotCarriesAcquisitionSource(t *testing.T) {
+	items := []*model.ItemView{
+		{PID: "I1", Kind: model.KindTrack, State: model.StatePresent, Title: "Acquired", Source: model.SourceYouTube},
+		{PID: "I2", Kind: model.KindTrack, State: model.StatePresent, Title: "Scanned", Source: model.SourceLocal},
+	}
+	snap := port.BuildSnapshot(12, 1700000000, nil, items, nil, nil)
+	if snap.Items[0].Source != string(model.SourceYouTube) {
+		t.Errorf("acquired item source = %q, want youtube", snap.Items[0].Source)
+	}
+	if snap.Items[1].Source != "" {
+		t.Errorf("scanned item source = %q, want the field left empty", snap.Items[1].Source)
+	}
+
+	var buf bytes.Buffer
+	if err := port.WriteSnapshot(&buf, snap); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	var raw struct {
+		Items []map[string]any `json:"items"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &raw); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if raw.Items[0]["source"] != string(model.SourceYouTube) {
+		t.Errorf("encoded acquired source = %v, want youtube", raw.Items[0]["source"])
+	}
+	if _, ok := raw.Items[1]["source"]; ok {
+		t.Errorf("a locally scanned item encoded a source key: %v", raw.Items[1])
 	}
 }

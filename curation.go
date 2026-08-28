@@ -190,11 +190,7 @@ func (l *Library) writeBackItemArt(ctx context.Context, itemPID model.PID, raw [
 		return writeBackSetupFailure(itemPID, edits, err)
 	}
 	if len(files) == 0 {
-		// An archived item has no file to embed into; report the skipped write-back so a
-		// caller does not read a silent success.
-		wbErr := &WriteBackError{ItemPID: itemPID, Edits: edits}
-		wbErr.Failures = append(wbErr.Failures, WriteBackFailure{Reason: "no backing files present to write"})
-		return wbErr
+		return (&WriteBackError{ItemPID: itemPID, Edits: edits}).noFiles()
 	}
 	return l.writeBackPicture(ctx, "waxbin.SetItemArt", itemPID, edits, files,
 		meta.PictureEdit{Clear: len(raw) == 0, Data: raw})
@@ -232,10 +228,7 @@ func (l *Library) writeBackPicture(ctx context.Context, op string, refPID model.
 		}); err != nil {
 		return err
 	}
-	if len(wbErr.Failures) > 0 {
-		return wbErr
-	}
-	return nil
+	return wbErr.result()
 }
 
 // artEditDesc is the WriteBackError.Edits record for a cover write-back (art has no

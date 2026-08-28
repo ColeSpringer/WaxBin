@@ -43,12 +43,7 @@ func (m *mutator) EditFields(ctx context.Context, pid model.PID, edits map[strin
 		if err != nil {
 			return err
 		}
-		// Rebuild the typed write-back error so the CLI reports a partial on-disk sync
-		// exactly as the local path does (catalog updated, tags not followed).
-		if len(res.WriteBackFailures) > 0 {
-			return &waxbin.WriteBackError{ItemPID: pid, Edits: edits, Failures: fromProxyFailures(res.WriteBackFailures)}
-		}
-		return nil
+		return writeBackErr(pid, edits, res.WriteBackFailures)
 	}
 	return m.lib.EditFields(ctx, pid, edits, opts)
 }
@@ -60,14 +55,7 @@ func (m *mutator) EditManyFields(ctx context.Context, pids []model.PID, edits ma
 			return nil, err
 		}
 		out := &waxbin.BatchEditResult{Edited: toPIDs(res.Edited), Skipped: toPIDs(res.Skipped)}
-		if len(res.WriteBackFailures) > 0 {
-			out.WriteBackErrors = make(map[model.PID]*waxbin.WriteBackError, len(res.WriteBackFailures))
-			for pid, fails := range res.WriteBackFailures {
-				out.WriteBackErrors[model.PID(pid)] = &waxbin.WriteBackError{
-					ItemPID: model.PID(pid), Edits: edits, Failures: fromProxyFailures(fails),
-				}
-			}
-		}
+		out.WriteBackErrors = writeBackErrs(res.WriteBackFailures, func(string) map[string]string { return edits })
 		return out, nil
 	}
 	return m.lib.EditManyFields(ctx, pids, edits, opts)
@@ -86,14 +74,9 @@ func (m *mutator) EditItemsFields(ctx context.Context, edits []model.ItemFieldEd
 			return nil, err
 		}
 		out := &waxbin.BatchEditResult{Edited: toPIDs(res.Edited), Skipped: toPIDs(res.Skipped)}
-		if len(res.WriteBackFailures) > 0 {
-			out.WriteBackErrors = make(map[model.PID]*waxbin.WriteBackError, len(res.WriteBackFailures))
-			for pid, fails := range res.WriteBackFailures {
-				out.WriteBackErrors[model.PID(pid)] = &waxbin.WriteBackError{
-					ItemPID: model.PID(pid), Edits: fieldsByPID[pid], Failures: fromProxyFailures(fails),
-				}
-			}
-		}
+		out.WriteBackErrors = writeBackErrs(res.WriteBackFailures, func(pid string) map[string]string {
+			return fieldsByPID[pid]
+		})
 		return out, nil
 	}
 	return m.lib.EditItemsFields(ctx, edits, opts)
@@ -106,11 +89,7 @@ func (m *mutator) SetCredits(ctx context.Context, pid model.PID, role model.Cont
 		if err != nil {
 			return 0, false, err
 		}
-		if len(res.WriteBackFailures) > 0 {
-			return res.Stored, res.Skipped,
-				&waxbin.WriteBackError{ItemPID: pid, Failures: fromProxyFailures(res.WriteBackFailures)}
-		}
-		return res.Stored, res.Skipped, nil
+		return res.Stored, res.Skipped, writeBackErr(pid, nil, res.WriteBackFailures)
 	}
 	return m.lib.SetCredits(ctx, pid, role, names, opts)
 }
@@ -129,14 +108,7 @@ func (m *mutator) SetCreditsBatch(ctx context.Context, edits []model.ItemCreditE
 			Edited:  toCreditEdits(res.Edited),
 			Skipped: toCreditEdits(res.Skipped),
 		}
-		if len(res.WriteBackFailures) > 0 {
-			out.WriteBackErrors = make(map[model.PID]*waxbin.WriteBackError, len(res.WriteBackFailures))
-			for pid, fails := range res.WriteBackFailures {
-				out.WriteBackErrors[model.PID(pid)] = &waxbin.WriteBackError{
-					ItemPID: model.PID(pid), Failures: fromProxyFailures(fails),
-				}
-			}
-		}
+		out.WriteBackErrors = writeBackErrs(res.WriteBackFailures, nil)
 		return out, nil
 	}
 	return m.lib.SetCreditsBatch(ctx, edits, opts)
@@ -176,12 +148,7 @@ func (m *mutator) SetItemArt(ctx context.Context, pid model.PID, role model.ArtR
 		if err != nil {
 			return err
 		}
-		// Rebuild the typed write-back error so the CLI reports a partial on-disk sync
-		// exactly as the local path does (catalog updated, cover not embedded).
-		if len(res.WriteBackFailures) > 0 {
-			return &waxbin.WriteBackError{ItemPID: pid, Failures: fromProxyFailures(res.WriteBackFailures)}
-		}
-		return nil
+		return writeBackErr(pid, nil, res.WriteBackFailures)
 	}
 	return m.lib.SetItemArt(ctx, pid, role, data, opts)
 }
@@ -193,10 +160,7 @@ func (m *mutator) SetEntityArt(ctx context.Context, entityType model.ArtEntity, 
 		if err != nil {
 			return err
 		}
-		if len(res.WriteBackFailures) > 0 {
-			return &waxbin.WriteBackError{ItemPID: entityPID, Failures: fromProxyFailures(res.WriteBackFailures)}
-		}
-		return nil
+		return writeBackErr(entityPID, nil, res.WriteBackFailures)
 	}
 	return m.lib.SetEntityArt(ctx, entityType, entityPID, role, data, opts)
 }
@@ -215,10 +179,7 @@ func (m *mutator) EditEntity(ctx context.Context, entityType model.MergeEntity, 
 			return nil, err
 		}
 		rep := &model.EntityEditReport{MergedInto: model.PID(res.MergedInto)}
-		if len(res.WriteBackFailures) > 0 {
-			return rep, &waxbin.WriteBackError{ItemPID: entityPID, Edits: edits, Failures: fromProxyFailures(res.WriteBackFailures)}
-		}
-		return rep, nil
+		return rep, writeBackErr(entityPID, edits, res.WriteBackFailures)
 	}
 	return m.lib.EditEntity(ctx, entityType, entityPID, edits, opts)
 }
@@ -236,12 +197,7 @@ func (m *mutator) RenameEntity(ctx context.Context, entityType model.MergeEntity
 			MergedInto: model.PID(res.MergedInto), MovedAlbums: toPIDs(res.MovedAlbums),
 			Members: res.Members,
 		}
-		if len(res.WriteBackFailures) > 0 {
-			return rep, &waxbin.WriteBackError{
-				ItemPID: entityPID, Edits: fields, Failures: fromProxyFailures(res.WriteBackFailures),
-			}
-		}
-		return rep, nil
+		return rep, writeBackErr(entityPID, fields, res.WriteBackFailures)
 	}
 	return m.lib.RenameEntity(ctx, entityType, entityPID, fields, opts)
 }
@@ -256,12 +212,31 @@ func (m *mutator) Detach(ctx context.Context, itemPID model.PID, opts waxbin.Det
 			ItemPID: itemPID, OldAlbumPID: model.PID(res.OldAlbumPID),
 			NewAlbumPID: model.PID(res.NewAlbumPID), NewReleaseGroupPID: model.PID(res.NewReleaseGroupPID),
 		}
-		if len(res.WriteBackFailures) > 0 {
-			return rep, &waxbin.WriteBackError{ItemPID: itemPID, Failures: fromProxyFailures(res.WriteBackFailures)}
-		}
-		return rep, nil
+		return rep, writeBackErr(itemPID, nil, res.WriteBackFailures)
 	}
 	return m.lib.Detach(ctx, itemPID, opts)
+}
+
+func (m *mutator) SetAcquisition(ctx context.Context, itemPID model.PID, in model.AcquisitionInput, opts waxbin.AcquisitionEditOptions) error {
+	if m.px != nil {
+		res, err := m.px.SetAcquisition(ctx, itemPID, in, opts.Lock, opts.Force, opts.WriteBack)
+		if err != nil {
+			return err
+		}
+		return writeBackErr(itemPID, nil, res.WriteBackFailures)
+	}
+	return m.lib.SetAcquisition(ctx, itemPID, in, opts)
+}
+
+func (m *mutator) ClearAcquisition(ctx context.Context, itemPID model.PID, opts waxbin.AcquisitionEditOptions) error {
+	if m.px != nil {
+		res, err := m.px.ClearAcquisition(ctx, itemPID, opts.Lock, opts.Force, opts.WriteBack)
+		if err != nil {
+			return err
+		}
+		return writeBackErr(itemPID, nil, res.WriteBackFailures)
+	}
+	return m.lib.ClearAcquisition(ctx, itemPID, opts)
 }
 
 func (m *mutator) SetItemTag(ctx context.Context, itemPID model.PID, key string, values []string, opts waxbin.TagEditOptions) (string, int, error) {
@@ -529,6 +504,40 @@ func toPIDs(ss []string) []model.PID {
 }
 
 // fromProxyFailures converts wire write-back failures back into the facade shape.
+// writeBackErr rebuilds the typed error a proxied write-back's failures stand for, or nil
+// when every file was written. It is the one place a proxied command turns a partial
+// on-disk sync back into what the local path raises, so the CLI reports the same thing
+// either way: catalog updated, tags not followed. edits is the field map to record on the
+// error, nil for a surface that has none.
+func writeBackErr(pid model.PID, edits map[string]string, failures []proxy.WriteBackFailure) error {
+	if len(failures) == 0 {
+		return nil
+	}
+	return &waxbin.WriteBackError{ItemPID: pid, Edits: edits, Failures: fromProxyFailures(failures)}
+}
+
+// writeBackErrs is the batch form: the per-item errors a proxied batch's failure map
+// stands for, nil when it is empty. editsOf names the edit map to record against one
+// item, and is nil for a surface with none (a credit carries its names on the entry
+// rather than in a field map).
+func writeBackErrs(failures map[string][]proxy.WriteBackFailure,
+	editsOf func(string) map[string]string) map[model.PID]*waxbin.WriteBackError {
+	if len(failures) == 0 {
+		return nil
+	}
+	out := make(map[model.PID]*waxbin.WriteBackError, len(failures))
+	for pid, fails := range failures {
+		var edits map[string]string
+		if editsOf != nil {
+			edits = editsOf(pid)
+		}
+		out[model.PID(pid)] = &waxbin.WriteBackError{
+			ItemPID: model.PID(pid), Edits: edits, Failures: fromProxyFailures(fails),
+		}
+	}
+	return out
+}
+
 func fromProxyFailures(failures []proxy.WriteBackFailure) []waxbin.WriteBackFailure {
 	out := make([]waxbin.WriteBackFailure, len(failures))
 	for i, f := range failures {

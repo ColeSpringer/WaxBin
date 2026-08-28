@@ -67,7 +67,9 @@ func (s *Store) setLock(ctx context.Context, itemPID model.PID, field string, lo
 		// it guesses "tag" where a curation set records what it was told. Without the
 		// exception an `art lock` followed by `unlock <pid> art` would strand an inert
 		// row claiming a cover that does not exist, and the same for a role slot after
-		// `unlock <pid> art.back`.
+		// `unlock <pid> art.back`. The exception stops at art: chapters, lyrics and
+		// acquisition record a real user attribution with no overlay to re-report it, so
+		// dropping their row would destroy the only record that the artifact was curated.
 		if !locked {
 			const sparse = `DELETE FROM field_provenance
 				WHERE item_id=? AND field=? AND locked=0 AND (value IS NULL OR value='')`

@@ -183,7 +183,7 @@ func (s *Store) PutScannedBook(ctx context.Context, in model.PutScannedBookInput
 		// Origin evidence from this part's own tags, recorded only when the book has no
 		// acquisition row yet. acquisition is item-level while tags are file-level, so
 		// for a multi-file book whichever part is scanned first supplies the row.
-		acqAdded, err := insertAcquisitionIfAbsentTx(ctx, tx, itemID, in.Acquisition)
+		acqAdded, err := insertAcquisitionIfAbsentTx(ctx, tx, itemID, in.Acquisition, in.PreserveLocks)
 		if err != nil {
 			return err
 		}

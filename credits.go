@@ -204,8 +204,7 @@ func (l *Library) writeBackCredit(ctx context.Context, itemPID model.PID, roles 
 	}
 
 	if len(files) == 0 {
-		wbErr.Failures = append(wbErr.Failures, WriteBackFailure{Reason: "no backing files present to write"})
-		return wbErr
+		return wbErr.noFiles()
 	}
 	if err := l.writeBackFiles(ctx, "waxbin.SetCredits", files, wbErr,
 		func(w *meta.Writer, path string) (*meta.WriteResult, error) {
@@ -221,10 +220,7 @@ func (l *Library) writeBackCredit(ctx context.Context, itemPID model.PID, roles 
 	if author {
 		l.reanchorBookIdentity(ctx, itemPID, files[0].FilePID)
 	}
-	if len(wbErr.Failures) > 0 {
-		return wbErr
-	}
-	return nil
+	return wbErr.result()
 }
 
 // bookRoleField maps a book contributor role to the book metadata field whose on-disk

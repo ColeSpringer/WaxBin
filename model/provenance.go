@@ -179,8 +179,8 @@ func ParseLockChange(s string) (LockChange, bool) {
 // field outside it is rejected rather than stored, so callers cannot create junk
 // provenance rows. Which fields actually apply to a given item is kind-specific, and
 // the editor enforces that. This is the union across track/book/episode. The
-// structured artifacts (lyrics/chapters/art) and credit roles are not here; they are
-// only lockable (see IsCuratableField), not scalar-editable.
+// structured artifacts (lyrics/chapters/art/acquisition) and credit roles are not here;
+// they are only lockable (see IsCuratableField), not scalar-editable.
 var MetadataFields = map[string]bool{
 	// Shared and track fields.
 	"title":         true,
@@ -219,28 +219,35 @@ var MetadataFields = map[string]bool{
 }
 
 // lockOnlyFields are structured artifacts that are lockable but NOT scalar-editable:
-// each has its own edit API (SetItemLyrics/SetItemChapters/SetItemArt), and the whole
-// artifact is locked as a unit. They belong to IsCuratableField (the lock whitelist)
-// but never to IsMetadataField (the scalar-edit gate), so a scalar `--set art=x` or a
-// SetFieldProvenance("art", ...) call is rejected instead of writing a junk row.
+// each has its own edit API (SetItemLyrics/SetItemChapters/SetItemArt/SetAcquisition),
+// and the whole artifact is locked as a unit. They belong to IsCuratableField (the lock
+// whitelist) but never to IsMetadataField (the scalar-edit gate), so a scalar
+// `--set art=x` or a SetFieldProvenance("art", ...) call is rejected instead of writing
+// a junk row.
+//
+// Acquisition is the one whose artifact is a whole row in another table rather than a
+// value: the lock says the item's recorded origin is curated, so a scan re-deriving
+// SOURCE_URL tags and an import event both leave it alone.
 var lockOnlyFields = map[string]bool{
-	"lyrics":   true,
-	"chapters": true,
-	"art":      true,
+	"lyrics":      true,
+	"chapters":    true,
+	"art":         true,
+	"acquisition": true,
 }
 
 // IsMetadataField reports whether field is a scalar, one-value curatable/editable
-// metadata field. The structured artifacts (lyrics/chapters/art) and namespaced
-// credit keys are NOT scalar fields; use IsCuratableField for the lock whitelist.
+// metadata field. The structured artifacts (lyrics/chapters/art/acquisition) and
+// namespaced credit keys are NOT scalar fields; use IsCuratableField for the lock
+// whitelist.
 func IsMetadataField(field string) bool { return MetadataFields[field] }
 
 // IsCuratableField reports whether field may carry a provenance/lock row. It is the
 // lock whitelist: the superset of IsMetadataField plus the structured lock-only
-// artifacts (lyrics/chapters/art), a namespaced credit key ("credit.<role>"), a
-// namespaced auxiliary-art key ("art.<role>"), and a namespaced custom-tag key
-// ("tag.<KEY>"). The scalar edit path stays on IsMetadataField so a credit key, an art
-// lock, or a custom tag cannot be set as if it were a scalar (those go through their
-// own APIs).
+// artifacts (lyrics/chapters/art/acquisition), a namespaced credit key
+// ("credit.<role>"), a namespaced auxiliary-art key ("art.<role>"), and a namespaced
+// custom-tag key ("tag.<KEY>"). The scalar edit path stays on IsMetadataField so a
+// credit key, an art lock, an acquisition row, or a custom tag cannot be set as if it
+// were a scalar (those go through their own APIs).
 func IsCuratableField(field string) bool {
 	if MetadataFields[field] || lockOnlyFields[field] {
 		return true

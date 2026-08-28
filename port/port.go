@@ -32,7 +32,8 @@ const ExportFormat = "waxbin-export"
 // purely additive: it parses identically under any consumer that handled version 2.
 // Version 4 adds the played/finished change stamp and is additive the same way.
 // Version 5 adds a track's bpm, additive again.
-const ExportVersion = 5
+// Version 6 adds the item's acquisition source type, additive again.
+const ExportVersion = 6
 
 // Manifest is the versioned header of a logical export.
 type Manifest struct {
@@ -82,6 +83,16 @@ type ItemExport struct {
 	// album or artist id here would denormalize entity identity into every row.
 	MBID string `json:"mbid,omitempty"`
 	ISRC string `json:"isrc,omitempty"`
+
+	// Source is the acquisition source type and nothing else: not the url, the
+	// provider-native id, the provider, the timestamp, or the lock. Those belong to the
+	// acquisition row, and this is a flat per-item record with no snapshot importer to
+	// consume them; a physical backup already carries every table verbatim.
+	//
+	// It is omitted for a locally scanned item, which is what "local" means here. The
+	// read side is a COALESCE ending in 'local', so the value is never the empty string
+	// and omitempty alone would put "source":"local" on every row.
+	Source string `json:"source,omitempty"`
 
 	// Artist is the combined display string, and the track's split artist credit is
 	// deliberately NOT carried alongside it. The credit is a relational fan-out (one
@@ -135,6 +146,9 @@ func BuildSnapshot(schemaVersion int, createdAt int64, libs []*model.Library, it
 			Artist: it.Artist, AlbumArtist: it.AlbumArtist, Album: it.Album,
 			TrackNo: it.TrackNo, DiscNo: it.DiscNo, Year: it.Year, Genre: it.Genre,
 			BPM: it.BPM, MBID: it.MBID, ISRC: it.ISRC,
+		}
+		if it.Source != model.SourceLocal {
+			ie.Source = string(it.Source)
 		}
 		if relPathOf != nil {
 			ie.RelPath = relPathOf(it.PID)

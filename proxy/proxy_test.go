@@ -821,3 +821,61 @@ func TestProvenanceRoundTripCarriesArtRow(t *testing.T) {
 		t.Errorf("scalar row picked up a source URL: %+v", rows[1])
 	}
 }
+
+// TestAcquisitionRoundTrip checks both acquisition curation verbs reach their handlers
+// whole. Every field on the set travels, an empty one included, since an emptied field
+// is the claim that separates this from the merge-wise recording path.
+func TestAcquisitionRoundTrip(t *testing.T) {
+	var setP proxy.SetAcquisitionParams
+	var clearP proxy.ClearAcquisitionParams
+	var setRaw json.RawMessage
+	handlers := map[string]proxy.Handler{
+		proxy.MethodSetAcquisition: func(_ context.Context, raw json.RawMessage) (any, error) {
+			setRaw = raw
+			_ = json.Unmarshal(raw, &setP)
+			return proxy.AcquisitionResult{
+				WriteBackFailures: []proxy.WriteBackFailure{{Path: "/x.mp3", Reason: "shared"}},
+			}, nil
+		},
+		proxy.MethodClearAcquisition: func(_ context.Context, raw json.RawMessage) (any, error) {
+			_ = json.Unmarshal(raw, &clearP)
+			return proxy.AcquisitionResult{}, nil
+		},
+	}
+	c := dial(t, startServer(t, handlers, nil))
+	ctx := context.Background()
+
+	res, err := c.SetAcquisition(ctx, "i1", model.AcquisitionInput{
+		SourceType: model.SourceManual, SourceURL: "https://right.test/y",
+		AcquiredAt: 1_700_000_000_000_000_000,
+	}, model.LockOn, true, true)
+	if err != nil {
+		t.Fatalf("set_acquisition: %v", err)
+	}
+	if setP.ItemPID != "i1" || setP.SourceType != "manual" || setP.SourceURL != "https://right.test/y" {
+		t.Errorf("set params = %+v", setP)
+	}
+	if setP.AcquiredAt != 1_700_000_000_000_000_000 {
+		t.Errorf("acquired at = %d, want the ns stamp intact across the wire", setP.AcquiredAt)
+	}
+	if setP.Lock != string(model.LockOn) || !setP.Force || !setP.WriteBack {
+		t.Errorf("set params lost the lock/force/write-back trio: %+v", setP)
+	}
+	// The emptied fields travel rather than being elided, which is what makes the
+	// replace authoritative on the far side.
+	for _, key := range []string{"sourceId", "provider", "providerVersion", "options"} {
+		if !rawHas(setRaw, key) {
+			t.Errorf("set frame elided %q; an emptied field is a claim here", key)
+		}
+	}
+	if len(res.WriteBackFailures) != 1 {
+		t.Errorf("write-back failures = %v, want the one the handler reported", res.WriteBackFailures)
+	}
+
+	if _, err := c.ClearAcquisition(ctx, "i2", model.LockUnchanged, false, false); err != nil {
+		t.Fatalf("clear_acquisition: %v", err)
+	}
+	if clearP.ItemPID != "i2" || clearP.Lock != "" || clearP.Force || clearP.WriteBack {
+		t.Errorf("clear params = %+v, want a bare clear on i2", clearP)
+	}
+}
