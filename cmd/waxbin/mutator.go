@@ -99,18 +99,61 @@ func (m *mutator) EditItemsFields(ctx context.Context, edits []model.ItemFieldEd
 	return m.lib.EditItemsFields(ctx, edits, opts)
 }
 
-func (m *mutator) SetCredits(ctx context.Context, pid model.PID, role model.ContributorRole, names []string, opts waxbin.CreditEditOptions) (int, error) {
+func (m *mutator) SetCredits(ctx context.Context, pid model.PID, role model.ContributorRole, names []string, opts waxbin.CreditEditOptions) (int, bool, error) {
 	if m.px != nil {
-		res, err := m.px.SetCredits(ctx, pid, string(role), names, opts.WriteBack, opts.Attribution(), opts.Lock, opts.Force)
+		res, err := m.px.SetCredits(ctx, pid, string(role), names,
+			opts.WriteBack, opts.Attribution(), opts.Lock, opts.Force, opts.SkipLocked)
 		if err != nil {
-			return 0, err
+			return 0, false, err
 		}
 		if len(res.WriteBackFailures) > 0 {
-			return res.Stored, &waxbin.WriteBackError{ItemPID: pid, Failures: fromProxyFailures(res.WriteBackFailures)}
+			return res.Stored, res.Skipped,
+				&waxbin.WriteBackError{ItemPID: pid, Failures: fromProxyFailures(res.WriteBackFailures)}
 		}
-		return res.Stored, nil
+		return res.Stored, res.Skipped, nil
 	}
 	return m.lib.SetCredits(ctx, pid, role, names, opts)
+}
+
+func (m *mutator) SetCreditsBatch(ctx context.Context, edits []model.ItemCreditEdit, opts waxbin.CreditEditOptions) (*waxbin.CreditBatchResult, error) {
+	if m.px != nil {
+		items := make([]proxy.ItemCreditsEdit, len(edits))
+		for i, e := range edits {
+			items[i] = proxy.ItemCreditsEdit{ItemPID: string(e.ItemPID), Role: string(e.Role), Names: e.Names}
+		}
+		res, err := m.px.SetCreditsBatch(ctx, items, opts.WriteBack, opts.Attribution(), opts.Lock, opts.Force, opts.SkipLocked)
+		if err != nil {
+			return nil, err
+		}
+		out := &waxbin.CreditBatchResult{
+			Edited:  toCreditEdits(res.Edited),
+			Skipped: toCreditEdits(res.Skipped),
+		}
+		if len(res.WriteBackFailures) > 0 {
+			out.WriteBackErrors = make(map[model.PID]*waxbin.WriteBackError, len(res.WriteBackFailures))
+			for pid, fails := range res.WriteBackFailures {
+				out.WriteBackErrors[model.PID(pid)] = &waxbin.WriteBackError{
+					ItemPID: model.PID(pid), Failures: fromProxyFailures(fails),
+				}
+			}
+		}
+		return out, nil
+	}
+	return m.lib.SetCreditsBatch(ctx, edits, opts)
+}
+
+// toCreditEdits converts wire credit entries back to the facade's own shape.
+func toCreditEdits(items []proxy.ItemCreditsEdit) []model.ItemCreditEdit {
+	if len(items) == 0 {
+		return nil
+	}
+	out := make([]model.ItemCreditEdit, len(items))
+	for i, it := range items {
+		out[i] = model.ItemCreditEdit{
+			ItemPID: model.PID(it.ItemPID), Role: model.ContributorRole(it.Role), Names: it.Names,
+		}
+	}
+	return out
 }
 
 func (m *mutator) SetLyrics(ctx context.Context, pid model.PID, ly *model.Lyrics, lock model.LockChange, force bool) error {

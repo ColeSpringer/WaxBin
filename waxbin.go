@@ -1355,6 +1355,17 @@ type BatchEditResult struct {
 	WriteBackErrors map[model.PID]*WriteBackError
 }
 
+// CreditBatchResult reports a batch credit edit's outcome, the credit twin of
+// BatchEditResult. Its two lists carry entries rather than pids because an entry is an
+// (item, role) pair: one item can be edited under two roles, which a pid list could not
+// tell apart. The write-back map still keys on the item alone, since an item's roles are
+// mirrored into its files in one pass.
+type CreditBatchResult struct {
+	Edited          []model.ItemCreditEdit
+	Skipped         []model.ItemCreditEdit
+	WriteBackErrors map[model.PID]*WriteBackError
+}
+
 // EditField edits one metadata field on a track or book item. See EditFields.
 func (l *Library) EditField(ctx context.Context, itemPID model.PID, field, value string, opts EditOptions) error {
 	return l.EditFields(ctx, itemPID, map[string]string{field: value}, opts)
@@ -1405,7 +1416,9 @@ func (l *Library) EditManyFields(ctx context.Context, itemPIDs []model.PID, edit
 	if !opts.WriteBack {
 		return out, nil
 	}
-	return out, l.batchWriteBack(ctx, out, func(model.PID) map[string]string { return edits })
+	return out, l.batchWriteBack(ctx, out, func(pid model.PID) error {
+		return l.writeBackFields(ctx, pid, edits)
+	})
 }
 
 // EditItemsFields applies a per-item field-edit map to several items in one atomic
@@ -1426,30 +1439,55 @@ func (l *Library) EditItemsFields(ctx context.Context, edits []model.ItemFieldEd
 	for _, e := range edits {
 		fieldsByPID[e.ItemPID] = e.Fields
 	}
-	return out, l.batchWriteBack(ctx, out, func(pid model.PID) map[string]string { return fieldsByPID[pid] })
+	return out, l.batchWriteBack(ctx, out, func(pid model.PID) error {
+		return l.writeBackFields(ctx, pid, fieldsByPID[pid])
+	})
 }
 
-// batchWriteBack mirrors a committed batch's edits into each item's on-disk tags,
-// recording a per-item WriteBackError on out instead of failing the rest. fieldsFor
-// supplies the map applied to a given item: the shared one for EditManyFields, the
-// item's own for EditItemsFields. Only a canceled context aborts the pass, and the
-// catalog batch has committed either way, so the caller hands out back alongside it.
-func (l *Library) batchWriteBack(ctx context.Context, out *BatchEditResult, fieldsFor func(model.PID) map[string]string) error {
+// batchWriteBack mirrors a committed batch into each edited item's on-disk tags,
+// recording a per-item WriteBackError on out instead of failing the rest. write is the
+// per-item on-disk pass: the writeBackFields closure both field-edit surfaces pass in.
+// Only a canceled context aborts the pass, and the catalog batch has committed either
+// way, so the caller hands out back alongside it.
+func (l *Library) batchWriteBack(ctx context.Context, out *BatchEditResult, write func(model.PID) error) error {
 	for _, pid := range out.Edited {
-		wberr := l.writeBackFields(ctx, pid, fieldsFor(pid))
-		if wberr == nil {
-			continue
+		if err := recordWriteBack(&out.WriteBackErrors, pid, write(pid)); err != nil {
+			return err
 		}
-		var wbe *WriteBackError
-		if errors.As(wberr, &wbe) {
-			if out.WriteBackErrors == nil {
-				out.WriteBackErrors = make(map[model.PID]*WriteBackError)
-			}
-			out.WriteBackErrors[pid] = wbe
-			continue
-		}
+	}
+	return nil
+}
+
+// recordWriteBack files one item's write-back outcome in dst, the result's per-item
+// error map. A typed write-back failure joins the map, merging with an earlier one for
+// the same item rather than dropping it: the failures concatenate and the edits union,
+// so a merged report still names every value whose write did not land. Anything else is
+// a hard error the caller aborts on.
+func recordWriteBack(dst *map[model.PID]*WriteBackError, pid model.PID, wberr error) error {
+	if wberr == nil {
+		return nil
+	}
+	var wbe *WriteBackError
+	if !errors.As(wberr, &wbe) {
 		return wberr
 	}
+	if *dst == nil {
+		*dst = make(map[model.PID]*WriteBackError)
+	}
+	if prev, ok := (*dst)[pid]; ok {
+		prev.Failures = append(prev.Failures, wbe.Failures...)
+		if prev.Edits == nil {
+			prev.Edits = wbe.Edits
+		} else {
+			for f, v := range wbe.Edits {
+				if _, held := prev.Edits[f]; !held {
+					prev.Edits[f] = v
+				}
+			}
+		}
+		return nil
+	}
+	(*dst)[pid] = wbe
 	return nil
 }
 
@@ -1807,16 +1845,23 @@ func (l *Library) refuseWriteBack(ctx context.Context, itemPID model.PID, edits 
 		// rather than a hard error that would mask it.
 		return writeBackSetupFailure(itemPID, edits, err)
 	}
+	l.noteRefusal(ctx, files, wbErr, reason)
+	return wbErr
+}
+
+// noteRefusal records one refusal reason against an item's files: a drift diagnostic
+// and a failure per file, or a single file-less failure for an archived item, so the
+// caller never reads a refusal as a silent success. It is the body refuseWriteBack
+// shares with the credit write-back, which refuses one role while writing another.
+func (l *Library) noteRefusal(ctx context.Context, files []model.ItemFileRef, wbErr *WriteBackError, reason string) {
+	if len(files) == 0 {
+		wbErr.Failures = append(wbErr.Failures, WriteBackFailure{Reason: reason})
+		return
+	}
 	for _, ref := range files {
 		l.recordWriteBackDrift(ctx, ref.FilePID, reason)
 		wbErr.Failures = append(wbErr.Failures, WriteBackFailure{FilePID: ref.FilePID, Path: string(ref.Path), Reason: reason})
 	}
-	if len(wbErr.Failures) == 0 {
-		// An archived item has no backing files. Still report the refusal so the caller
-		// does not read a silent success.
-		wbErr.Failures = append(wbErr.Failures, WriteBackFailure{Reason: reason})
-	}
-	return wbErr
 }
 
 // recordWriteBackDrift stamps a queryable diagnostic that a file's on-disk tags are

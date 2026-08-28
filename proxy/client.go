@@ -174,14 +174,33 @@ func (c *Client) EditBatch(ctx context.Context, items []ItemFieldsEdit, writeBac
 	return &res, nil
 }
 
-// SetCredits proxies a credit edit. The result carries the stored contributor count
-// and, for a committed edit whose music write-back partially failed, the failed files
-// (the transport error stays nil, matching edit_fields).
-func (c *Client) SetCredits(ctx context.Context, itemPID model.PID, role string, names []string, writeBack bool, attr model.Attribution, lock model.LockChange, force bool) (*SetCreditsResult, error) {
+// SetCredits proxies a credit edit. The result carries the stored contributor count,
+// whether skipLocked skipped a locked credit instead of setting it, and, for a committed
+// edit whose music write-back partially failed, the failed files (the transport error
+// stays nil, matching edit_fields).
+func (c *Client) SetCredits(ctx context.Context, itemPID model.PID, role string, names []string, writeBack bool, attr model.Attribution, lock model.LockChange, force, skipLocked bool) (*SetCreditsResult, error) {
 	var res SetCreditsResult
 	err := c.call(ctx, MethodSetCredits, SetCreditsParams{
 		ItemPID: string(itemPID), Role: role, Names: names, WriteBack: writeBack,
-		Source: string(attr.Source), Provider: attr.Provider, Lock: string(lock), Force: force,
+		Source: string(attr.Source), Provider: attr.Provider, Lock: string(lock),
+		Force: force, SkipLocked: skipLocked,
+	}, &res)
+	if err != nil {
+		return nil, err
+	}
+	return &res, nil
+}
+
+// SetCreditsBatch proxies a batch credit edit: each entry carries its own (item, role)
+// pair and names, applied atomically as one catalog batch. The result names the edited
+// and skipped entries by that same pair, and per-item write-back failures come back in
+// it rather than as a transport error, matching EditBatch.
+func (c *Client) SetCreditsBatch(ctx context.Context, items []ItemCreditsEdit, writeBack bool, attr model.Attribution, lock model.LockChange, force, skipLocked bool) (*SetCreditsBatchResult, error) {
+	var res SetCreditsBatchResult
+	err := c.call(ctx, MethodSetCreditsBatch, SetCreditsBatchParams{
+		Items: items, WriteBack: writeBack,
+		Source: string(attr.Source), Provider: attr.Provider,
+		Lock: string(lock), Force: force, SkipLocked: skipLocked,
 	}, &res)
 	if err != nil {
 		return nil, err

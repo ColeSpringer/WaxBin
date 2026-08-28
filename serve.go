@@ -203,20 +203,47 @@ func (l *Library) proxyHandlers() map[string]proxy.Handler {
 			if lockErr != nil {
 				return nil, lockErr
 			}
-			stored, editErr := l.SetCredits(ctx, model.PID(p.ItemPID), model.ContributorRole(p.Role), p.Names,
+			stored, skipped, editErr := l.SetCredits(ctx, model.PID(p.ItemPID), model.ContributorRole(p.Role), p.Names,
 				CreditEditOptions{
-					WriteBack: p.WriteBack, Lock: lock, Force: p.Force,
+					WriteBack: p.WriteBack, Lock: lock, Force: p.Force, SkipLocked: p.SkipLocked,
 					Source: model.ProvenanceSource(p.Source), Provider: p.Provider,
 				})
 			// A write-back failure is a result, not a transport error (the catalog edit stands).
 			var wbErr *WriteBackError
 			if errors.As(editErr, &wbErr) {
-				return proxy.SetCreditsResult{Stored: stored, WriteBackFailures: toProxyFailures(wbErr.Failures)}, nil
+				return proxy.SetCreditsResult{
+					Stored: stored, Skipped: skipped, WriteBackFailures: toProxyFailures(wbErr.Failures),
+				}, nil
 			}
 			if editErr != nil {
 				return nil, editErr
 			}
-			return proxy.SetCreditsResult{Stored: stored}, nil
+			return proxy.SetCreditsResult{Stored: stored, Skipped: skipped}, nil
+		},
+		proxy.MethodSetCreditsBatch: func(ctx context.Context, raw json.RawMessage) (any, error) {
+			p, err := decodeParams[proxy.SetCreditsBatchParams](raw)
+			if err != nil {
+				return nil, err
+			}
+			edits := make([]model.ItemCreditEdit, len(p.Items))
+			for i, it := range p.Items {
+				edits[i] = model.ItemCreditEdit{
+					ItemPID: model.PID(it.ItemPID), Role: model.ContributorRole(it.Role), Names: it.Names,
+				}
+			}
+			lock, lockErr := wireLock("serve.set_credits_batch", p.Lock)
+			if lockErr != nil {
+				return nil, lockErr
+			}
+			res, err := l.SetCreditsBatch(ctx, edits,
+				CreditEditOptions{
+					WriteBack: p.WriteBack, Lock: lock, Force: p.Force, SkipLocked: p.SkipLocked,
+					Source: model.ProvenanceSource(p.Source), Provider: p.Provider,
+				})
+			if err != nil {
+				return nil, err
+			}
+			return toProxyCreditBatchResult(res), nil
 		},
 		proxy.MethodSetLyrics: func(ctx context.Context, raw json.RawMessage) (any, error) {
 			p, err := decodeParams[proxy.SetLyricsParams](raw)
@@ -752,6 +779,34 @@ func toProxyBatchResult(res *BatchEditResult) proxy.EditManyFieldsResult {
 		for pid, wbe := range res.WriteBackErrors {
 			out.WriteBackFailures[string(pid)] = toProxyFailures(wbe.Failures)
 		}
+	}
+	return out
+}
+
+// toProxyCreditBatchResult converts a facade credit-batch result into its wire form,
+// keeping each entry's role: the batch's unit is the (item, role) pair, not the item.
+func toProxyCreditBatchResult(res *CreditBatchResult) proxy.SetCreditsBatchResult {
+	out := proxy.SetCreditsBatchResult{
+		Edited:  creditEntries(res.Edited),
+		Skipped: creditEntries(res.Skipped),
+	}
+	if len(res.WriteBackErrors) > 0 {
+		out.WriteBackFailures = make(map[string][]proxy.WriteBackFailure, len(res.WriteBackErrors))
+		for pid, wbe := range res.WriteBackErrors {
+			out.WriteBackFailures[string(pid)] = toProxyFailures(wbe.Failures)
+		}
+	}
+	return out
+}
+
+// creditEntries converts credit entries to their wire form.
+func creditEntries(edits []model.ItemCreditEdit) []proxy.ItemCreditsEdit {
+	if len(edits) == 0 {
+		return nil
+	}
+	out := make([]proxy.ItemCreditsEdit, len(edits))
+	for i, e := range edits {
+		out[i] = proxy.ItemCreditsEdit{ItemPID: string(e.ItemPID), Role: string(e.Role), Names: e.Names}
 	}
 	return out
 }

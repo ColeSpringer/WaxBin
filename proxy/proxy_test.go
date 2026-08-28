@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -162,6 +163,11 @@ func TestCurationRoundTrip(t *testing.T) {
 			if p.ItemPID != "i1" || p.Role != "producer" || len(p.Names) != 2 {
 				t.Errorf("credit params = %+v", p)
 			}
+			// The second call is the skip-locked probe: the flag rode the request, so
+			// answer with the skip the server would report.
+			if p.SkipLocked {
+				return proxy.SetCreditsResult{Skipped: true}, nil
+			}
 			return proxy.SetCreditsResult{Stored: 2, WriteBackFailures: []proxy.WriteBackFailure{{Path: "/x.mp3", Reason: "shared"}}}, nil
 		},
 		proxy.MethodSetLyrics: func(_ context.Context, raw json.RawMessage) (any, error) {
@@ -219,12 +225,21 @@ func TestCurationRoundTrip(t *testing.T) {
 	c := dial(t, startServer(t, handlers, nil))
 	ctx := context.Background()
 
-	res, err := c.SetCredits(ctx, "i1", "producer", []string{"A", "B"}, true, model.Attribution{}, model.LockOn, false)
+	res, err := c.SetCredits(ctx, "i1", "producer", []string{"A", "B"}, true, model.Attribution{}, model.LockOn, false, false)
 	if err != nil {
 		t.Fatalf("set credits: %v", err)
 	}
-	if res.Stored != 2 || len(res.WriteBackFailures) != 1 {
+	if res.Stored != 2 || res.Skipped || len(res.WriteBackFailures) != 1 {
 		t.Fatalf("credit result = %+v", res)
+	}
+	// skipLocked rides the request and the skipped answer rides the result, the two
+	// scalar fields the version-15 protocol added.
+	skipRes, err := c.SetCredits(ctx, "i1", "producer", []string{"A", "B"}, false, model.Attribution{}, model.LockOn, false, true)
+	if err != nil {
+		t.Fatalf("skip-locked set credits: %v", err)
+	}
+	if !skipRes.Skipped || skipRes.Stored != 0 {
+		t.Fatalf("skip-locked credit result = %+v, want the skip reported", skipRes)
 	}
 
 	ly := &model.Lyrics{Synced: []model.SyncedLine{{TimeMS: 10, Text: "hi"}}}
@@ -373,7 +388,10 @@ func TestUnknownMethod(t *testing.T) {
 	}
 }
 
-// TestProtocolVersionRejected checks a frame with the wrong version is refused.
+// TestProtocolVersionRejected checks a frame with the wrong version is refused, and
+// that the refusal names both versions under the stable prefix, which is what lets a
+// newer client tell this from a dead socket and tell the operator which side to
+// rebuild.
 func TestProtocolVersionRejected(t *testing.T) {
 	sock := startServer(t, map[string]proxy.Handler{}, nil)
 	conn, err := net.Dial("unix", sock)
@@ -392,6 +410,7 @@ func TestProtocolVersionRejected(t *testing.T) {
 		OK    bool `json:"ok"`
 		Error struct {
 			Code string `json:"code"`
+			Msg  string `json:"msg"`
 		} `json:"error"`
 	}
 	if err := json.Unmarshal([]byte(line), &resp); err != nil {
@@ -399,6 +418,10 @@ func TestProtocolVersionRejected(t *testing.T) {
 	}
 	if resp.OK || resp.Error.Code != string(waxerr.CodeInvalid) {
 		t.Fatalf("resp = %+v, want a CodeInvalid error", resp)
+	}
+	want := fmt.Sprintf("%s 99 (this server speaks %d)", proxy.VersionMismatchPrefix, proxy.ProtocolVersion)
+	if resp.Error.Msg != want {
+		t.Fatalf("refusal msg = %q, want %q", resp.Error.Msg, want)
 	}
 }
 

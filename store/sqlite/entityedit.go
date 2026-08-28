@@ -82,8 +82,14 @@ func entityColumnForField(field string) string {
 // The undo is only as durable as the tags on disk. The members still carry the release id,
 // so the next scan that re-resolves them, meaning a retag, move, or content change rather
 // than every scan, computes the mbid key again and forks a fresh identified chain while the
-// re-keyed row drains. Stripping those tags is the durable fix, and nothing here does it
-// (see DEFERRED.md).
+// re-keyed row drains. Stripping those tags is the durable fix and this edit is DB-only:
+// the strip belongs to the facade, which fans it across the member files when EditEntity is
+// asked for write-back.
+//
+// A release-group clear also settles each dependent album onto the chain its own members
+// compute, which sends a differently-titled edition to a group of its own. The report
+// names those albums, since their members are no longer under the edited group and a
+// caller fanning over its members would miss them.
 //
 // When that re-key lands on a key a heuristic twin already owns, the entity merges into
 // the twin and this edit's own entity ceases to exist. A clear that merges therefore has
@@ -266,9 +272,11 @@ func (s *Store) EditEntityFields(ctx context.Context, entityType model.MergeEnti
 				if err := deleteAuxArtMarkerTx(ctx, tx, entityID); err != nil {
 					return waxerr.Wrap(waxerr.CodeIO, op, err)
 				}
-				if survivor, err = rekeyReleaseGroupHeuristicTx(ctx, tx, entityID); err != nil {
+				var moved []model.PID
+				if survivor, moved, err = rekeyReleaseGroupHeuristicTx(ctx, tx, entityID); err != nil {
 					return waxerr.Wrap(waxerr.CodeIO, op, err)
 				}
+				rep.MovedAlbums = moved
 			}
 		}
 		// The sibling fields of a merging clear were written to a row that no longer
@@ -361,54 +369,62 @@ func rekeyAlbumHeuristicTx(ctx context.Context, tx *sql.Tx, albumID int64) (mode
 // no scan ever computes. A dependent whose members name a different group than the
 // representative's is re-parented onto that one, since the album title is part of a
 // heuristic group key and two titles cannot share it. It returns the surviving group's pid
-// when the re-key merged this group away, and an empty pid when the row is still there.
-func rekeyReleaseGroupHeuristicTx(ctx context.Context, tx *sql.Tx, rgID int64) (model.PID, error) {
+// when the re-key merged this group away, and an empty pid when the row is still there,
+// along with the pids of the albums it moved to a group of their own. Those albums'
+// members are no longer under this group, so a caller fanning over its members has to be
+// told where they went.
+func rekeyReleaseGroupHeuristicTx(ctx context.Context, tx *sql.Tx, rgID int64) (model.PID, []model.PID, error) {
 	var curKey, pid string
 	if err := tx.QueryRowContext(ctx,
 		"SELECT match_key, pid FROM release_group WHERE id=?", rgID).Scan(&curKey, &pid); err != nil {
-		return "", err
+		return "", nil, err
 	}
 	if !strings.HasPrefix(curKey, mbidKeyPrefix) {
-		return "", nil
+		return "", nil, nil
 	}
 	tr, filePath, _, err := representativeMemberTx(ctx, tx,
 		`SELECT t.item_id FROM track t JOIN album al ON al.id = t.album_id
 			JOIN item_file f ON f.item_id = t.item_id AND f.role = 'primary'
 			WHERE al.release_group_id=? ORDER BY t.item_id LIMIT 1`, rgID)
 	if err != nil || tr == nil {
-		return "", err
+		return "", nil, err
 	}
 	tr.MBReleaseGroupID = ""
 	_, newKey, _ := albumChainKeys(*tr, filePath)
 	if newKey == "" || newKey == curKey {
-		return "", nil
+		return "", nil, nil
 	}
 	// Collected before the group moves: a merge repoints the albums onto the incumbent,
 	// after which they are no longer this group's to find.
 	deps, err := dependentAlbumsTx(ctx, tx, rgID, curKey)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	survivor, err := rewriteOrMergeEntityKeyTx(ctx, tx, model.MergeReleaseGroup, rgID, model.PID(pid), newKey)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	affected := newAffectedRollups()
+	var moved []model.PID
 	// A dependent album folding into an incumbent is not this group disappearing, so its
 	// own merge is never the caller's answer.
 	for _, d := range deps {
-		if err := settleDependentAlbumTx(ctx, tx, d, newKey, affected); err != nil {
-			return "", err
+		away, err := settleDependentAlbumTx(ctx, tx, d, newKey, affected)
+		if err != nil {
+			return "", nil, err
+		}
+		if away != "" {
+			moved = append(moved, away)
 		}
 	}
 	// Non-empty only when an album changed groups, which moves a track count and a
 	// release-group count; a merge maintained its own on the way past.
 	if !affected.empty() {
 		if err := maintainRollupsTx(ctx, tx, affected, nowNS()); err != nil {
-			return "", err
+			return "", nil, err
 		}
 	}
-	return survivor, nil
+	return survivor, moved, nil
 }
 
 // settleDependentAlbumTx moves one dependent album onto the chain its own members
@@ -417,49 +433,65 @@ func rekeyReleaseGroupHeuristicTx(ctx context.Context, tx *sql.Tx, rgID int64) (
 // that shared the mbid) has that group found-or-created and is re-parented, since the
 // album title lives inside the group key. A key an album twin already owns merges, the
 // same as at every other re-key.
-func settleDependentAlbumTx(ctx context.Context, tx *sql.Tx, d dependentAlbum, groupKey string, affected *affectedRollups) error {
-	if d.rgKey != groupKey {
+//
+// It returns the pid the members of a re-parented album ended up under, which is that
+// album or the twin it merged into, and an empty pid for an album that stayed. Those
+// members are the ones the caller's own fan-out no longer reaches.
+func settleDependentAlbumTx(ctx context.Context, tx *sql.Tx, d dependentAlbum, groupKey string, affected *affectedRollups) (model.PID, error) {
+	reparented := d.rgKey != groupKey
+	if reparented {
 		var oldParent sql.NullInt64
 		if err := tx.QueryRowContext(ctx,
 			"SELECT release_group_id FROM album WHERE id=?", d.id).Scan(&oldParent); err != nil {
-			return err
+			return "", err
 		}
 		newRGID, err := resolveReleaseGroup(ctx, tx, d.rgKey, d.rgTitle, d.albumArtistID, "", affected)
 		if err != nil {
-			return err
+			return "", err
 		}
 		if _, err := tx.ExecContext(ctx,
 			"UPDATE album SET release_group_id=? WHERE id=?", newRGID, d.id); err != nil {
-			return err
+			return "", err
 		}
 		if oldParent.Valid {
 			if err := addRGChainToAffected(ctx, tx, oldParent.Int64, affected); err != nil {
-				return err
+				return "", err
 			}
 		}
 		if err := addRGChainToAffected(ctx, tx, newRGID, affected); err != nil {
-			return err
+			return "", err
 		}
 		// An item read serves its release group's pid, so these members changed even
 		// though no column of theirs did. The caller's own fan-out runs off the entity
 		// being edited and no longer reaches them.
 		items, err := affectedItemPIDs(ctx, tx, model.MergeAlbum, d.id)
 		if err != nil {
-			return err
+			return "", err
 		}
 		for _, pid := range items {
 			if err := appendChange(ctx, tx, "item", pid, model.OpUpdate); err != nil {
-				return err
+				return "", err
 			}
 		}
 	}
 	merged, err := rewriteOrMergeEntityKeyTx(ctx, tx, model.MergeAlbum, d.id, model.PID(d.pid), d.newKey)
 	if err != nil || merged != "" {
-		return err // a merge wrote its own deltas and rollups
+		if err == nil && reparented {
+			// A merge wrote its own deltas and rollups, and took the members with it, so
+			// the incumbent is the row they hang off now.
+			return merged, nil
+		}
+		return "", err
 	}
 	// The row is still there on a new key, and possibly under a new group, which entity
 	// info serves as the album's group pid, so a delta consumer has to refetch it.
-	return appendChange(ctx, tx, "album", model.PID(d.pid), model.OpUpdate)
+	if err := appendChange(ctx, tx, "album", model.PID(d.pid), model.OpUpdate); err != nil {
+		return "", err
+	}
+	if reparented {
+		return model.PID(d.pid), nil
+	}
+	return "", nil
 }
 
 // representativeMemberTx loads the member a chain re-key derives its heuristic keys from,

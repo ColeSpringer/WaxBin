@@ -149,8 +149,9 @@ func TestAuxBackfillSkippedWithoutCapableProvider(t *testing.T) {
 	}
 }
 
-// TestAuxBackfillMarkerStopsRepeat: a group no provider could serve is asked once, not
-// once per run. Force is the way back in.
+// TestAuxBackfillMarkerStopsRepeat: a group no provider could serve is asked once per
+// consulting pass (the release-group gather and the backfill), never again on a later
+// run. Force is the way back in.
 func TestAuxBackfillMarkerStopsRepeat(t *testing.T) {
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
@@ -171,8 +172,8 @@ func TestAuxBackfillMarkerStopsRepeat(t *testing.T) {
 	if first.AuxArtEnriched != 1 || first.AuxArtMatched != 0 {
 		t.Fatalf("run 1 aux = %d enriched/%d matched, want 1/0", first.AuxArtEnriched, first.AuxArtMatched)
 	}
-	if calls != 1 {
-		t.Fatalf("run 1 provider calls = %d, want 1", calls)
+	if calls != 2 {
+		t.Fatalf("run 1 provider calls = %d, want 2 (the release-group gather and the backfill)", calls)
 	}
 	db := roDB(t, dbPath)
 	if n := scalarInt(t, db,
@@ -187,16 +188,16 @@ func TestAuxBackfillMarkerStopsRepeat(t *testing.T) {
 	if second.AuxArtEnriched != 0 {
 		t.Errorf("run 2 aux entities = %d, want 0 (the marker holds)", second.AuxArtEnriched)
 	}
-	if calls != 1 {
-		t.Errorf("provider calls after run 2 = %d, want the marker to have prevented a second", calls)
+	if calls != 2 {
+		t.Errorf("provider calls after run 2 = %d, want the markers to have prevented more", calls)
 	}
 
 	forced, err := svc.Run(ctx, enrich.RunOptions{Force: true}, nil)
 	if err != nil {
 		t.Fatalf("forced run: %v", err)
 	}
-	if forced.AuxArtEnriched != 1 || calls != 2 {
-		t.Errorf("forced run aux = %d entities, %d calls, want 1 and 2", forced.AuxArtEnriched, calls)
+	if forced.AuxArtEnriched != 1 || calls != 4 {
+		t.Errorf("forced run aux = %d entities, %d calls, want 1 and 4", forced.AuxArtEnriched, calls)
 	}
 }
 

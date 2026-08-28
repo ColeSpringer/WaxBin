@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"slices"
+	"strings"
 
 	"github.com/colespringer/waxbin/identity"
 	"github.com/colespringer/waxbin/model"
@@ -48,6 +49,12 @@ import (
 // group merges into B first and B's group then fails the all-members check (its count
 // now includes A's members) and splits, so a swap can produce a merge-then-split, not
 // just a plain split for the second group.
+//
+// A fallback that drains its album is not left to ghost. The per-item resolve behind the
+// pre-pass runs the scan-side re-key reconciliation (scanreconcile.go), and an edit moves
+// no file, so both keys name the folder the item still sits in and the drained row
+// carries onto the new one with its pid and attachments. The swap's second group is not
+// one of those: the merge left it holding the first group's members, so it never drains.
 
 // renameMember is one pre-pass participant: the batch entry, the entity chain it
 // currently sits on, and the chain its overlaid edit implies.
@@ -222,7 +229,7 @@ func renameEntitiesForEditsTx(ctx context.Context, tx *sql.Tx, entries []editEnt
 	// the album groups and executes first, then the release-group stage (batch-level,
 	// since one group can back several of the batch's albums), then the album groups.
 	// The series stage follows the artist stage, the book chain's own second rung.
-	if err := renameArtistsForEditsTx(ctx, tx, members, books, groups, affected, op); err != nil {
+	if err := renameArtistsForEditsTx(ctx, tx, members, books, nil, groups, affected, op); err != nil {
 		return err
 	}
 	if err := renameSeriesForEditsTx(ctx, tx, books, op); err != nil {
@@ -244,33 +251,119 @@ func renameEntitiesForEditsTx(ctx context.Context, tx *sql.Tx, entries []editEnt
 	return nil
 }
 
-// renameArtistsForCreditEditTx runs the artist stage of the pre-pass alone, for the
-// one-entry batch a credit edit forms. The chain stages are deliberately absent: they
-// derive keys from the overlaid names and would fire whatever the artist stage decided,
-// and SetItemCredits re-resolves nothing behind them, so a moved release-group or album
-// key would name a credit the columns underneath it no longer spell. The album group is
-// still collected for a track, since the artist coverage check reads it to decide
-// whether a release group's own credit moved.
-func renameArtistsForCreditEditTx(ctx context.Context, tx *sql.Tx, e editEntry, affected *affectedRollups, op string) error {
-	switch e.kind {
-	case string(model.KindTrack):
-		m, err := buildRenameMember(ctx, tx, e, op)
-		if err != nil {
-			return err
-		}
-		groups := map[int64][]*renameMember{}
-		if m.curAlbumID != 0 {
-			groups[m.curAlbumID] = []*renameMember{m}
-		}
-		return renameArtistsForEditsTx(ctx, tx, []*renameMember{m}, nil, groups, affected, op)
-	case string(model.KindBook):
-		m, err := buildBookRenameMember(ctx, tx, e, op)
-		if err != nil {
-			return err
-		}
-		return renameArtistsForEditsTx(ctx, tx, nil, []*bookRenameMember{m}, nil, affected, op)
+// creditRenameMember is one contributor-role participant in the artist stage: a batch
+// credit entry on a role that backs no entity-key column of its own. It carries the
+// artist the role credits now and the single name the entry moves it to. That is a pair
+// only when exactly one artist holds the role and the entry names exactly one
+// replacement: several holders collapsing onto one name is not a rename, and the query
+// behind the holders has no order, so nothing could say which of them the pair meant.
+type creditRenameMember struct {
+	itemID  int64
+	role    model.ContributorRole
+	priorID int64    // the artist the role credits now, 0 when no pair can form
+	target  string   // the name the pair moves it to
+	names   []string // every name the entry credits, which the fold-back guard reads
+}
+
+// buildCreditRenameMember reads the artists a contributor role credits now and forms
+// the entry's rename pair under the cardinality rule above.
+func buildCreditRenameMember(ctx context.Context, tx *sql.Tx, e creditEntry, op string) (*creditRenameMember, error) {
+	m := &creditRenameMember{itemID: e.itemID, role: e.role, names: e.clean}
+	prior, err := contributorArtistIDsForRole(ctx, tx, e.itemID, e.role)
+	if err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
-	return nil
+	if len(prior) == 1 && len(e.clean) == 1 {
+		m.priorID, m.target = prior[0], e.clean[0]
+	}
+	return m, nil
+}
+
+// renameArtistsForCreditsTx runs the artist stage of the pre-pass over a batch of
+// credit entries. The chain stages are deliberately absent: they derive keys from the
+// overlaid names and would fire whatever the artist stage decided, the credit surfaces
+// re-resolve nothing behind them, so a moved release-group or album key would name a
+// credit the columns underneath it no longer spell, and duplicate members per track
+// would inflate a group's apparent size in the RG stage's coverage count. The album
+// group is still collected for a track, since the artist coverage check reads it to
+// decide whether a release group's own credit moved.
+//
+// Only the two roles backing an entity-key column build a chain member (a track's
+// performing credit, a book's author), and an item holds at most one entry for each, so
+// no item ever writes two values into the stage's per-item maps. Every other role
+// becomes a creditRenameMember, whose target is keyed by the (item, role) pair instead.
+func renameArtistsForCreditsTx(ctx context.Context, tx *sql.Tx, entries []creditEntry, affected *affectedRollups, op string) error {
+	// The display an overlay would store for every role the batch rewrites, per item, so
+	// a book member sees the credits the batch leaves behind rather than the ones it is
+	// about to replace.
+	byItemRole := map[int64]map[string]string{}
+	for _, e := range entries {
+		if byItemRole[e.itemID] == nil {
+			byItemRole[e.itemID] = map[string]string{}
+		}
+		// Joined with the separator the overlay's own split understands: applyBookEdit
+		// runs the value back through identity.SplitCredits, which never splits on a
+		// comma, so ", " would hand the member one bogus name made of two people.
+		byItemRole[e.itemID][string(e.role)] = strings.Join(e.clean, "; ")
+	}
+
+	var members []*renameMember
+	var books []*bookRenameMember
+	var credits []*creditRenameMember
+	for _, e := range entries {
+		renameField, keyed := creditRenameField(e.role)
+		if !keyed {
+			m, err := buildCreditRenameMember(ctx, tx, e, op)
+			if err != nil {
+				return err
+			}
+			credits = append(credits, m)
+			continue
+		}
+		entry := editEntry{
+			pid: e.pid, itemID: e.itemID, kind: e.kind,
+			fields:  []string{renameField},
+			norm:    map[string]string{renameField: strings.Join(e.clean, ", ")},
+			credits: e.clean,
+		}
+		if e.kind == string(model.KindBook) {
+			// A book credit role and the field a scan reads it back from share a name,
+			// and bookCreditFields is exactly the pair applyBookEdit can overlay; a
+			// translator or editor entry has no field to ride along on.
+			for role, v := range byItemRole[e.itemID] {
+				if role != string(e.role) && bookCreditFields[role] {
+					entry.fields = append(entry.fields, role)
+					entry.norm[role] = v
+				}
+			}
+			// The riders come out of a map, so the sort pins their order; only the
+			// narrator can ride today, but a wider bookCreditFields would otherwise
+			// hand this member a map-ordered list.
+			slices.Sort(entry.fields)
+			m, err := buildBookRenameMember(ctx, tx, entry, op)
+			if err != nil {
+				return err
+			}
+			books = append(books, m)
+			continue
+		}
+		m, err := buildRenameMember(ctx, tx, entry, op)
+		if err != nil {
+			return err
+		}
+		members = append(members, m)
+	}
+	if len(members) == 0 && len(books) == 0 && len(credits) == 0 {
+		return nil
+	}
+
+	groups := map[int64][]*renameMember{}
+	for _, m := range members {
+		if m.curAlbumID != 0 {
+			groups[m.curAlbumID] = append(groups[m.curAlbumID], m)
+		}
+	}
+	return renameArtistsForEditsTx(ctx, tx, members, books, credits, groups, affected, op)
 }
 
 // renameReleaseGroupsForEditsTx is the release-group stage of the pre-pass, planned
@@ -436,11 +529,12 @@ func renameReleaseGroupsForEditsTx(ctx context.Context, tx *sql.Tx, groups map[i
 // renames in place (or auto-merges into an incumbent) only when every reference to it
 // moves at once to one uniform target primary name: the pairs come from the artist
 // edits (via artist_id), from anchor moves (via album_artist_id where the overlaid
-// anchor primary differs from the entity's spelling), and from book author edits (via
-// book.author_id), and the coverage checks below require every reference the catalog
-// holds to be part of the move. Any failure falls back to today's split-and-ghost
-// behavior for that artist.
-func renameArtistsForEditsTx(ctx context.Context, tx *sql.Tx, members []*renameMember, books []*bookRenameMember, groups map[int64][]*renameMember, affected *affectedRollups, op string) error {
+// anchor primary differs from the entity's spelling), from book author edits (via
+// book.author_id), and from a credit batch's contributor-role entries (via the artist
+// the role credits now), and the coverage checks below require every reference the
+// catalog holds to be part of the move. Any failure falls back to today's
+// split-and-ghost behavior for that artist.
+func renameArtistsForEditsTx(ctx context.Context, tx *sql.Tx, members []*renameMember, books []*bookRenameMember, credits []*creditRenameMember, groups map[int64][]*renameMember, affected *affectedRollups, op string) error {
 	type artistRow struct {
 		name, matchKey, pid string
 	}
@@ -491,6 +585,9 @@ func renameArtistsForEditsTx(ctx context.Context, tx *sql.Tx, members []*renameM
 			addPair(m.curAuthorID, m.authorPrimary)
 		}
 	}
+	for _, m := range credits {
+		addPair(m.priorID, m.target)
+	}
 	if len(targets) == 0 {
 		return nil
 	}
@@ -498,17 +595,30 @@ func renameArtistsForEditsTx(ctx context.Context, tx *sql.Tx, members []*renameM
 	// Per-item targets for the coverage checks, and each album group's current RG
 	// with its uniform anchor target for the release_group reference check.
 	editArtistTarget := map[int64]string{}
+	editArtistNames := map[int64][]string{}
 	anchorTarget := map[int64]string{}
 	for _, m := range members {
 		anchorTarget[m.entry.itemID] = m.anchorPrimary
 		if m.editsArtist {
 			editArtistTarget[m.entry.itemID] = m.creditPrimary
+			editArtistNames[m.entry.itemID] = m.creditNames
 		}
 	}
 	bookAuthorTarget := map[int64]string{}
+	bookAuthorNames := map[int64][]string{}
 	for _, m := range books {
 		if m.editsAuthor {
 			bookAuthorTarget[m.entry.itemID] = m.authorPrimary
+			bookAuthorNames[m.entry.itemID] = m.b.Authors
+		}
+	}
+	// Contributor-role targets are keyed by the pair, since an item can be in the batch
+	// under two roles. Only a formed pair covers: an entry the cardinality rule refused
+	// names no single successor, so its credit rows block instead.
+	creditTarget := map[itemRoleKey]string{}
+	for _, m := range credits {
+		if m.priorID != 0 {
+			creditTarget[itemRoleKey{m.itemID, string(m.role)}] = m.target
 		}
 	}
 	// A release group can back several album groups, so the anchors accumulate with
@@ -545,9 +655,11 @@ func renameArtistsForEditsTx(ctx context.Context, tx *sql.Tx, members []*renameM
 	}
 
 	scope := artistRenameScope{
-		members: members, books: books,
-		editArtistTarget: editArtistTarget, anchorTarget: anchorTarget,
-		bookAuthorTarget: bookAuthorTarget, rgAnchors: rgAnchors,
+		members: members, books: books, credits: credits,
+		editArtistTarget: editArtistTarget, editArtistNames: editArtistNames,
+		anchorTarget:     anchorTarget,
+		bookAuthorTarget: bookAuthorTarget, bookAuthorNames: bookAuthorNames,
+		creditTarget: creditTarget, rgAnchors: rgAnchors,
 	}
 	ids := make([]int64, 0, len(targets))
 	for id := range targets {
@@ -582,10 +694,14 @@ func renameArtistsForEditsTx(ctx context.Context, tx *sql.Tx, members []*renameM
 type artistRenameScope struct {
 	members          []*renameMember
 	books            []*bookRenameMember
-	editArtistTarget map[int64]string // item -> overlaid performing-credit primary
-	anchorTarget     map[int64]string // item -> overlaid release-group anchor primary
-	bookAuthorTarget map[int64]string // book item -> overlaid author primary
-	rgAnchors        map[int64]string // release group -> its groups' uniform anchor target
+	credits          []*creditRenameMember
+	editArtistTarget map[int64]string       // item -> overlaid performing-credit primary
+	editArtistNames  map[int64][]string     // item -> every name the overlaid performing credit holds
+	anchorTarget     map[int64]string       // item -> overlaid release-group anchor primary
+	bookAuthorTarget map[int64]string       // book item -> overlaid author primary
+	bookAuthorNames  map[int64][]string     // book item -> every name the overlaid author credit holds
+	creditTarget     map[itemRoleKey]string // (item, contributor role) -> the name the pair moves it to
+	rgAnchors        map[int64]string       // release group -> its groups' uniform anchor target
 }
 
 // artistRenameCoveredTx runs the all-references-move checks for one artist rename
@@ -606,6 +722,13 @@ func artistRenameCoveredTx(ctx context.Context, tx *sql.Tx, id int64, n, curKey 
 		}
 		for _, m := range sc.books {
 			for _, nm := range m.overlaidCredits() {
+				if identity.MatchKey(nm) == curKey {
+					return false, nil
+				}
+			}
+		}
+		for _, m := range sc.credits {
+			for _, nm := range m.names {
 				if identity.MatchKey(nm) == curKey {
 					return false, nil
 				}
@@ -644,30 +767,32 @@ func artistRenameCoveredTx(ctx context.Context, tx *sql.Tx, id int64, n, curKey 
 			return false, nil
 		}
 	}
-	// Contributor rows: a performing credit on a batch track and an author credit on
-	// a batch book both get rewritten by the re-resolve that follows, so they cover.
-	// A narrator, translator, or editor credit blocks even on a batch book. Nothing
-	// on the edit path itself would misattribute it, since loadBookForEditTx reads
-	// those names back through the artist row and so follows a rename; the hazard is
-	// on disk, where the files still spell the old name, so the next content-changing
-	// rescan resolves the narrator to a fresh artist and the renamed entity keeps
-	// curation that no longer describes anyone. A producer credit, or any credit on
-	// an item outside the batch, blocks for the same reason.
+	// Contributor rows: a credit covers only when the batch rewrites that exact slot to
+	// this name. A performing credit on a batch track and an author credit on a batch book
+	// are rewritten as a whole field, so the reference moves wherever the artist sits in
+	// the new list, primary or not; the check is membership in the overlaid names. Every
+	// other role needs a credit-batch entry moving that (item, role) pair, and there the
+	// compare is against the pair's single target: membership alone would let a credit row
+	// belonging to an item renaming elsewhere pass, and the file behind it still spells the
+	// old name, so the next content-changing rescan would fork it straight back while the
+	// renamed entity kept curation describing nobody. A credit on an item outside the batch
+	// always blocks.
 	credits, err := contributorRefsTx(ctx, tx, id)
 	if err != nil {
 		return false, err
 	}
 	for _, c := range credits {
+		var covered bool
 		switch model.ContributorRole(c.role) {
 		case model.RoleArtist:
-			if _, ok := sc.editArtistTarget[c.itemID]; !ok {
-				return false, nil
-			}
+			covered = slices.Contains(sc.editArtistNames[c.itemID], n)
 		case model.RoleAuthor:
-			if _, ok := sc.bookAuthorTarget[c.itemID]; !ok {
-				return false, nil
-			}
+			covered = slices.Contains(sc.bookAuthorNames[c.itemID], n)
 		default:
+			t, ok := sc.creditTarget[itemRoleKey{c.itemID, c.role}]
+			covered = ok && t == n
+		}
+		if !covered {
 			return false, nil
 		}
 	}

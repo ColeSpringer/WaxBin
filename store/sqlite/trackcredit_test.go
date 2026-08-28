@@ -131,8 +131,8 @@ func TestRescanReplacesOnlyTheArtistRoleOnATrack(t *testing.T) {
 	}
 	res := putTrack(t, st, lib.ID, spec)
 
-	if _, err := st.SetItemCredits(ctx, res.ItemPID, model.RoleProducer,
-		[]string{"Rick Rubin"}, model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
+	if _, _, err := st.SetItemCredits(ctx, res.ItemPID, model.RoleProducer,
+		[]string{"Rick Rubin"}, model.Attribution{Source: model.SourceUser}, model.LockOf(false), false, false); err != nil {
 		t.Fatalf("set producer: %v", err)
 	}
 
@@ -175,8 +175,8 @@ func TestLockedArtistCreditSurvivesAForcedRescan(t *testing.T) {
 					t.Fatalf("edit artist: %v", err)
 				}
 			} else {
-				if _, err := st.SetItemCredits(ctx, res.ItemPID, model.RoleArtist,
-					[]string{"Jay-Z", "Alicia Keys"}, model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
+				if _, _, err := st.SetItemCredits(ctx, res.ItemPID, model.RoleArtist,
+					[]string{"Jay-Z", "Alicia Keys"}, model.Attribution{Source: model.SourceUser}, model.LockOf(true), false, false); err != nil {
 					t.Fatalf("set artist credit: %v", err)
 				}
 			}
@@ -300,8 +300,8 @@ func TestSetArtistCreditRewritesTheTrackDisplayAndItsArtistID(t *testing.T) {
 		path: "/lib/a/1.flac", essence: "e1", content: "c1", title: "Song",
 		artist: "Old Name", albumArt: "Old Name", album: "Album", durationMS: 100,
 	})
-	if _, err := st.SetItemCredits(ctx, res.ItemPID, model.RoleArtist,
-		[]string{"Jay-Z", "Alicia Keys"}, model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
+	if _, _, err := st.SetItemCredits(ctx, res.ItemPID, model.RoleArtist,
+		[]string{"Jay-Z", "Alicia Keys"}, model.Attribution{Source: model.SourceUser}, model.LockOf(false), false, false); err != nil {
 		t.Fatalf("set artist credit: %v", err)
 	}
 	if got := scalarStr(t, st, "SELECT artist FROM track"); got != "Jay-Z, Alicia Keys" {
@@ -330,8 +330,8 @@ func TestSetArtistCreditRefreshesTheOutgoingArtistRollup(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := st.SetItemCredits(ctx, res.ItemPID, model.RoleArtist,
-		[]string{"New Name"}, model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
+	if _, _, err := st.SetItemCredits(ctx, res.ItemPID, model.RoleArtist,
+		[]string{"New Name"}, model.Attribution{Source: model.SourceUser}, model.LockOf(false), false, false); err != nil {
 		t.Fatalf("set artist credit: %v", err)
 	}
 	if n := scalarInt(t, st,
@@ -359,8 +359,8 @@ func TestSetArtistCreditRefreshesTheTrackSearchRow(t *testing.T) {
 		path: "/lib/a/1.flac", essence: "e1", content: "c1", title: "Song",
 		artist: "Old Name", albumArt: "Old Name", album: "Album", durationMS: 100,
 	})
-	if _, err := st.SetItemCredits(ctx, res.ItemPID, model.RoleArtist,
-		[]string{"Jay-Z"}, model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
+	if _, _, err := st.SetItemCredits(ctx, res.ItemPID, model.RoleArtist,
+		[]string{"Jay-Z"}, model.Attribution{Source: model.SourceUser}, model.LockOf(false), false, false); err != nil {
 		t.Fatalf("set artist credit: %v", err)
 	}
 	got := scalarStr(t, st, "SELECT artist FROM search_fts WHERE rowid = (SELECT id FROM playable_item)")

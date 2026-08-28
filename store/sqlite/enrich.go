@@ -266,7 +266,9 @@ func (s *Store) AlbumsNeedingReleaseMatch(ctx context.Context, force bool, after
 	scopeClause, scopeArgs := enrichIDsFilter("al.id", ids)
 	stmt := `SELECT al.id, al.pid, al.title, rg.mbid, COALESCE(al.barcode,''), COALESCE(al.catalog_number,''),
 			COALESCE(al.media,''), COALESCE(al.country,''), COALESCE(ar.name,''),
-			CASE WHEN ` + albumResolvesFrontArt + ` THEN 1 ELSE 0 END
+			CASE WHEN ` + albumResolvesFrontArt + ` THEN 1 ELSE 0 END,
+			EXISTS(SELECT 1 FROM entity_curation ec WHERE ec.entity_type = 'album'
+			       AND ec.entity_id = al.id AND ec.field = 'art' AND ec.locked = 1)
 		FROM album al JOIN release_group rg ON rg.id = al.release_group_id
 		LEFT JOIN artist ar ON ar.id = rg.primary_artist_id
 		WHERE al.id > ?
@@ -285,13 +287,14 @@ func (s *Store) AlbumsNeedingReleaseMatch(ctx context.Context, force bool, after
 	for rows.Next() {
 		t := model.EnrichTarget{Type: model.EnrichAlbumType}
 		var pid string
-		var hasArt int
+		var hasArt, artLocked int
 		if err := rows.Scan(&t.ID, &pid, &t.Name, &t.ReleaseGroupMBID, &t.Barcode, &t.CatalogNumber,
-			&t.Media, &t.Country, &t.ArtistName, &hasArt); err != nil {
+			&t.Media, &t.Country, &t.ArtistName, &hasArt, &artLocked); err != nil {
 			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		t.PID = model.PID(pid)
 		t.HasArt = hasArt == 1
+		t.ArtLocked = artLocked == 1
 		out = append(out, t)
 	}
 	return out, rows.Err()

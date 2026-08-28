@@ -62,8 +62,15 @@ func ValidReleaseGroupType(s string) bool { return releaseGroupTypes[s] }
 // given. MergedInto names the survivor when clearing an mbid re-keyed the entity onto a
 // key a heuristic twin already owned, which is the one case where the entity the caller
 // named no longer exists afterwards. It is empty for every other edit.
+//
+// MovedAlbums names the albums a release-group clear settled onto a group of their own,
+// which a differently-titled edition sharing the id takes because the album title lives
+// inside a heuristic group key. Their members left the edited group, so a caller fanning
+// over that group's members no longer reaches them; write-back reads this to strip their
+// files too. It is empty for every other edit.
 type EntityEditReport struct {
-	MergedInto PID
+	MergedInto  PID
+	MovedAlbums []PID
 }
 
 // DetachReport records a per-member detach: the track pulled off an album keyed on a

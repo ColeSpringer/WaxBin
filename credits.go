@@ -20,6 +20,10 @@ type CreditEditOptions struct {
 	Lock model.LockChange
 	// Force overrides a locked credit role.
 	Force bool
+	// SkipLocked reports a locked credit instead of failing on it: a batch skips that
+	// entry and applies the rest, and the single-item surface reports the skip in place
+	// of a CodeLocked error.
+	SkipLocked bool
 	// Source is where the names came from; empty records a user edit.
 	Source model.ProvenanceSource
 	// Provider names the service that supplied an enrichment value, and is required
@@ -46,90 +50,159 @@ func (l *Library) Credits(ctx context.Context, itemPID model.PID) ([]model.Contr
 // refused (returned as a *WriteBackError) while the catalog edit stands. It returns the
 // number of contributor names actually stored (after trimming blanks and de-duplicating
 // by artist), so a caller does not report a wipe (an unresolvable name that cleared the
-// role) as a set.
-func (l *Library) SetCredits(ctx context.Context, itemPID model.PID, role model.ContributorRole, names []string, opts CreditEditOptions) (int, error) {
-	stored, err := l.store.SetItemCredits(ctx, itemPID, role, names, opts.Attribution(), opts.Lock, opts.Force)
+// role) as a set. It also reports whether opts.SkipLocked skipped a locked credit instead
+// of setting it; a skipped edit stores nothing, so nothing is written back either.
+func (l *Library) SetCredits(ctx context.Context, itemPID model.PID, role model.ContributorRole, names []string, opts CreditEditOptions) (int, bool, error) {
+	stored, skipped, err := l.store.SetItemCredits(ctx, itemPID, role, names, opts.Attribution(), opts.Lock, opts.Force, opts.SkipLocked)
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
-	if !opts.WriteBack {
-		return len(stored), nil
+	if skipped || !opts.WriteBack {
+		return len(stored), skipped, nil
 	}
-	// Write back the STORED names (deduped), so the on-disk tag matches the catalog.
-	return len(stored), l.writeBackCredit(ctx, itemPID, role, stored)
+	// Write back the stored names (deduped), so the on-disk tag matches the catalog.
+	return len(stored), false, l.writeBackCredit(ctx, itemPID, []creditRoleEdit{{role: role, names: stored}})
 }
 
-// writeBackCredit mirrors a committed credit edit into the backing files' on-disk tag.
-// It runs after the catalog edit committed, so a refusal or failure is reported as a
-// *WriteBackError rather than a hard error. A track writes the role's music tag
-// (RoleTagKey) to its file. A book writes an author credit to ALBUMARTIST and a narrator
-// credit to NARRATOR and COMPOSER across its parts. Those are the two roles a scan
-// reconstructs from a tag; a book translator or editor credit has no round-trippable tag,
-// so it is refused and stays DB-only. The catalog edit stands regardless.
-func (l *Library) writeBackCredit(ctx context.Context, itemPID model.PID, role model.ContributorRole, names []string) error {
-	edits := map[string]string{model.CreditField(role): strings.Join(names, "; ")}
+// SetCreditsBatch replaces one role's contributors on each of several items in one
+// atomic transaction, where SetCredits does a single item. An entry is an (item, role)
+// pair, so one item may take an author entry and a narrator entry in the same batch;
+// naming the same pair twice rejects it. The batch commits or rolls back as a whole,
+// and with opts.SkipLocked a locked credit role is skipped and reported instead of
+// failing it.
+//
+// Gathering the entries lets the rename pre-pass see every reference before the first
+// write, so an artist the whole batch moves is renamed in place (keeping its pid,
+// curation, star, and art) instead of being left behind while a fresh row takes its
+// credits. An entry naming several people renames onto the first of them and forks the
+// rest.
+//
+// Write-back is per entry and best-effort, mirroring each stored credit into the backing
+// files' tags exactly as SetCredits does: a failure lands in the result's
+// WriteBackErrors rather than failing the batch. A book translator or editor credit has
+// no round-trippable tag, so it is refused there and stays DB-only, which also means an
+// in-place rename on those roles is durable through the credit lock alone.
+func (l *Library) SetCreditsBatch(ctx context.Context, edits []model.ItemCreditEdit, opts CreditEditOptions) (*CreditBatchResult, error) {
+	res, err := l.store.SetItemCreditsBatch(ctx, edits, opts.Attribution(), opts.Lock, opts.Force, opts.SkipLocked)
+	if err != nil {
+		return nil, err
+	}
+	out := &CreditBatchResult{Edited: res.Edited, Skipped: res.Skipped}
+	if !opts.WriteBack {
+		return out, nil
+	}
+	// Write back the stored names, grouped by item: an item edited under two roles has
+	// both mirrored in one pass per file, where a per-entry loop would rewrite the same
+	// file twice. Items keep the order the entries applied in.
+	var order []model.PID
+	byItem := map[model.PID][]creditRoleEdit{}
+	for _, e := range res.Edited {
+		if _, seen := byItem[e.ItemPID]; !seen {
+			order = append(order, e.ItemPID)
+		}
+		byItem[e.ItemPID] = append(byItem[e.ItemPID], creditRoleEdit{role: e.Role, names: e.Names})
+	}
+	for _, pid := range order {
+		if err := recordWriteBack(&out.WriteBackErrors, pid, l.writeBackCredit(ctx, pid, byItem[pid])); err != nil {
+			return out, err
+		}
+	}
+	return out, nil
+}
+
+// creditRoleEdit is one role's stored names inside an item's grouped credit write-back.
+type creditRoleEdit struct {
+	role  model.ContributorRole
+	names []string
+}
+
+// writeBackCredit mirrors an item's committed credit edits into its backing files'
+// on-disk tags, every role in one pass per file so an item edited under two roles is not
+// rewritten twice. It runs after the catalog edit committed, so a refusal or failure is
+// reported as a *WriteBackError rather than a hard error. A track writes each role's
+// music tag (RoleTagKey) to its file. A book writes an author credit to ALBUMARTIST and a
+// narrator credit to NARRATOR and COMPOSER across its parts. Those are the two roles a
+// scan reconstructs from a tag; a book translator or editor credit has no round-trippable
+// tag, so that role is refused and stays DB-only while the roles beside it still write.
+// The catalog edit stands regardless.
+func (l *Library) writeBackCredit(ctx context.Context, itemPID model.PID, roles []creditRoleEdit) error {
+	edits := make(map[string]string, len(roles))
+	sortFields := make(map[string]string, len(roles))
+	for _, r := range roles {
+		edits[model.CreditField(r.role)] = strings.Join(r.names, "; ")
+		sortFields[string(r.role)] = ""
+	}
 
 	item, err := l.store.ItemByPID(ctx, itemPID)
 	if err != nil {
 		return writeBackSetupFailure(itemPID, edits, err)
 	}
+	if item.Kind != model.KindTrack && item.Kind != model.KindBook {
+		return l.refuseWriteBack(ctx, itemPID, edits,
+			"on-disk credit write-back is not supported for "+string(item.Kind)+" items; the catalog edit was applied")
+	}
 
 	var tagEdits []meta.TagEdit
-	var files []model.ItemFileRef
-	switch item.Kind {
-	case model.KindTrack:
-		key, ok := meta.RoleTagKey(role)
+	var refusals []string
+	author := false
+	for _, r := range roles {
+		if item.Kind == model.KindTrack {
+			key, ok := meta.RoleTagKey(r.role)
+			if !ok {
+				refusals = append(refusals,
+					"no on-disk tag key for role "+string(r.role)+"; the catalog edit was applied")
+				continue
+			}
+			te := meta.TagEdit{Key: key}
+			if len(r.names) > 0 {
+				te.Values = r.names
+			}
+			tagEdits = append(tagEdits, te)
+			continue
+		}
+		field, ok := bookRoleField(r.role)
 		if !ok {
-			return l.refuseWriteBack(ctx, itemPID, edits,
-				"no on-disk tag key for role "+string(role)+"; the catalog edit was applied")
+			refusals = append(refusals, "on-disk credit write-back for the "+string(r.role)+
+				" role is not supported for books; the catalog edit was applied")
+			continue
 		}
-		te := meta.TagEdit{Key: key}
-		if len(names) > 0 {
-			te.Values = names
-		}
-		tagEdits = []meta.TagEdit{te}
-		files, err = l.store.ItemFiles(ctx, itemPID)
-		if err != nil {
-			return writeBackSetupFailure(itemPID, edits, err)
-		}
-	case model.KindBook:
-		field, ok := bookRoleField(role)
-		if !ok {
-			return l.refuseWriteBack(ctx, itemPID, edits,
-				"on-disk credit write-back for the "+string(role)+" role is not supported for books; the catalog edit was applied")
-		}
+		author = author || r.role == model.RoleAuthor
 		keys, _ := meta.BookFieldTagKeys(field)
 		// Join with a separator the scanner splits back apart ("; ", not the ", " the
 		// display column uses), so a multi-name book credit round-trips through a rescan.
-		joined := strings.Join(names, "; ")
+		joined := strings.Join(r.names, "; ")
 		for _, k := range keys {
 			te := meta.TagEdit{Key: k}
-			if len(names) > 0 {
+			if len(r.names) > 0 {
 				te.Values = []string{joined}
 			}
 			tagEdits = append(tagEdits, te)
 		}
-		// Write every part: an author credit is ALBUMARTIST, the book's identity anchor, so
-		// writing it to one part alone would split a multi-file book on the next rescan (a
-		// narrator credit is inert on the non-primary parts but harmless there).
-		files, err = l.store.ItemFiles(ctx, itemPID)
-		if err != nil {
-			return writeBackSetupFailure(itemPID, edits, err)
-		}
-	default:
-		return l.refuseWriteBack(ctx, itemPID, edits,
-			"on-disk credit write-back is not supported for "+string(item.Kind)+" items; the catalog edit was applied")
+	}
+
+	// Write every part: an author credit is ALBUMARTIST, the book's identity anchor, so
+	// writing it to one part alone would split a multi-file book on the next rescan (a
+	// narrator credit is inert on the non-primary parts but harmless there).
+	files, err := l.store.ItemFiles(ctx, itemPID)
+	if err != nil {
+		return writeBackSetupFailure(itemPID, edits, err)
+	}
+	wbErr := &WriteBackError{ItemPID: itemPID, Edits: edits}
+	for _, reason := range refusals {
+		l.noteRefusal(ctx, files, wbErr, reason)
+	}
+	if len(tagEdits) == 0 {
+		return wbErr
 	}
 
 	// A credit edit regenerates the derived sort, so it needs the same sort-tag clears
 	// a field edit gets, or a stale ARTISTSORT reverts it on the next scan. Keyed by
 	// the display field ("artist"), not the credit.<role> spelling in edits.
-	tagEdits, err = l.appendDerivedSortClears(ctx, itemPID, map[string]string{string(role): ""}, tagEdits)
+	tagEdits, err = l.appendDerivedSortClears(ctx, itemPID, sortFields, tagEdits)
 	if err != nil {
 		return writeBackSetupFailure(itemPID, edits, err)
 	}
 
-	wbErr := &WriteBackError{ItemPID: itemPID, Edits: edits}
 	if len(files) == 0 {
 		wbErr.Failures = append(wbErr.Failures, WriteBackFailure{Reason: "no backing files present to write"})
 		return wbErr
@@ -145,7 +218,7 @@ func (l *Library) writeBackCredit(ctx context.Context, itemPID model.PID, role m
 	// EditFields path gives an author edit). reanchorBookIdentity reads the file's actual
 	// state, so it is a no-op if the write did not land. A narrator credit does not touch
 	// identity, so it needs none.
-	if item.Kind == model.KindBook && role == model.RoleAuthor && len(files) > 0 {
+	if author {
 		l.reanchorBookIdentity(ctx, itemPID, files[0].FilePID)
 	}
 	if len(wbErr.Failures) > 0 {

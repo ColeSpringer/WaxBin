@@ -457,10 +457,11 @@ func (s *Service) Run(ctx context.Context, opts RunOptions, hb Heartbeat) (*Resu
 		})
 	}
 	// The auxiliary-art backfill: release groups whose front is settled but whose back,
-	// disc, booklet, or background slots are empty. Neither pass above ever re-asks
-	// about those, because both pre-guard on the front. It runs only when some provider
-	// advertises CapAuxArt, which the built-in Cover Art Archive does not, so a stock
-	// install walks nothing and writes no markers.
+	// disc, booklet, or background slots are empty. The release-group pass above never
+	// re-asks about those, because it pre-guards on the front, and the album pass fills
+	// only the album's own rung. It runs only when some provider advertises CapAuxArt,
+	// which the built-in Cover Art Archive does not, so a stock install walks nothing and
+	// writes no markers.
 	//
 	// Coming after the release-group phase is load-bearing for the same reason the album
 	// phase above is: its queue requires a non-empty release_group.mbid, read live, and
@@ -761,24 +762,38 @@ func (s *Service) enrichAlbumRelease(ctx context.Context, st *runState, res *Res
 		// match needs to see that, and the reason was previously computed and discarded.
 		s.log.Info("enrichment: matched album release",
 			"album", t.PID, "mbid", m.MBID, "by", m.Reason, "provider", in.Provider)
-		// This pressing's own front cover. The album rung of the art chain has had no
+		// This pressing's own artwork. The album rung of the art chain has had no
 		// producer until now: the release-group pass fetches the group's cover, which is
 		// one edition's art standing in for all of them, and a matched release is the
-		// first time WaxBin knows which edition it actually holds. An album that already
-		// resolves art keeps it (the store fills only when empty), so asking a provider
-		// for one would spend a rate-limited request on a picture nothing would store.
-		// The aux roles ride this front-keyed gate too, so an album whose front is
-		// settled (an embedded cover included) is not asked here about its empty aux
-		// slots. Re-asking is the aux backfill phase's job, and that phase walks
-		// release groups only: an album matched while it already resolved a front
-		// keeps its own aux slots empty until someone fills them by hand.
-		if !t.HasArt {
-			art := s.gatherArt(ctx, st, Request{
-				Type: TargetRelease, Force: st.force, MBID: m.MBID,
-				Title: t.Name, Artist: t.ArtistName,
-			})
-			in.Art = art[model.ArtRoleFront]
-			in.AuxArt = auxArtRoles(art)
+		// first time WaxBin knows which edition it actually holds.
+		//
+		// An album that already resolves a front keeps it (the store fills only when
+		// empty), so asking for one would spend a rate-limited request on a picture
+		// nothing would store. Its auxiliary slots are a separate question, and this is
+		// the only pass that reaches the album's own rung to ask it: the aux backfill
+		// phase walks release groups. So a settled front redirects the ask rather than
+		// canceling it, and the whole-entity art lock, which the store answers to for
+		// every role at once, cancels both.
+		//
+		// The redirected ask is not rare. HasArt counts a member track's embedded cover,
+		// so in a library of ordinary rips it fires for close to every album this phase
+		// matches, once at match time and again on a forced run. It is bounded by who can
+		// answer it: only providers advertising CapAuxArt are consulted, and the built-in
+		// Cover Art Archive is not one, so a stock install makes no request at all.
+		if !t.ArtLocked {
+			if !t.HasArt {
+				art := s.gatherArt(ctx, st, Request{
+					Type: TargetRelease, Force: st.force, MBID: m.MBID,
+					Title: t.Name, Artist: t.ArtistName,
+				})
+				in.Art = art[model.ArtRoleFront]
+				in.AuxArt = auxArtRoles(art)
+			} else {
+				in.AuxArt, _ = s.gatherAuxArt(ctx, st, Request{
+					Type: TargetRelease, Force: st.force, MBID: m.MBID,
+					Title: t.Name, Artist: t.ArtistName,
+				})
+			}
 		}
 	}
 	if err := s.store.ApplyAlbumReleaseMatch(ctx, in); err != nil {
@@ -1062,13 +1077,15 @@ func (s *Service) gatherGenres(ctx context.Context, st *runState, rg *mbReleaseG
 	return names, primary
 }
 
-// gatherArt returns the first offered image per art role from the cover providers, in
-// priority order (injected first, then the Cover Art Archive). It asks under CapCover
-// and takes every role a cover provider offers, auxiliary ones included, so a provider
-// that has always served them under that one capability keeps working unchanged. What
-// CapCover does not do any more is speak for the auxiliary backfill: that pass consults
-// CapAuxArt providers alone, so a provider serving auxiliary roles here and not
-// advertising CapAuxArt contributes to this gather and nothing to the backfill.
+// gatherArt returns the first offered image per art role, in priority order (injected
+// first, then the Cover Art Archive). A cover provider is asked under CapCover and
+// every role it offers is taken, auxiliary ones included, so a provider that has
+// always served them under that one capability keeps working unchanged. A provider
+// advertising CapAuxArt without CapCover is asked too, under that capability, and only
+// its non-front roles are taken, the same front-drop gatherAuxArt applies: a target
+// this gather settles can leave its queue for good (a matched album keeps its mbid),
+// so leaving the aux-only providers to the backfill alone would never fill its
+// auxiliary slots. A provider with both capabilities is asked once, under CapCover.
 //
 // req names the rung: a release group, or the specific release an album was
 // matched to. Routing both through the provider list rather than reaching for the
@@ -1081,7 +1098,8 @@ func (s *Service) gatherGenres(ctx context.Context, st *runState, rg *mbReleaseG
 // front is filled. Providers after the front winner are not consulted: order is
 // caller-controlled (injected first), this preserves the pre-role call cadence, and
 // it avoids extra full-cover downloads such as CAA's up-to-24MiB fetch, so aux
-// coverage is opportunistic.
+// coverage is opportunistic. An aux-only provider is likewise skipped once every
+// auxiliary role is held, gatherAuxArt's stop at a full set.
 //
 // Every accepted image is stamped here rather than trusted from the provider, the
 // same way gatherGenres records which provider supplied the display-primary genre: an
@@ -1091,9 +1109,35 @@ func (s *Service) gatherGenres(ctx context.Context, st *runState, rg *mbReleaseG
 func (s *Service) gatherArt(ctx context.Context, st *runState, req Request) map[model.ArtRole]*model.ArtImage {
 	// Stamped on the value parameter, so both callers get it without repeating it.
 	req.Want = CapCover
+	auxReq := req
+	auxReq.Want = CapAuxArt
+	auxNeed := len(model.AuxArtRoles())
 	var out map[model.ArtRole]*model.ArtImage
 	for _, p := range s.providers {
-		if !p.Capabilities().Has(CapCover) {
+		caps := p.Capabilities()
+		if !caps.Has(CapCover) {
+			// out holds only auxiliary roles here, since a filled front ends the loop,
+			// so its length is the count of held aux slots.
+			if !caps.Has(CapAuxArt) || len(out) == auxNeed {
+				continue
+			}
+			cand, err := s.callProvider(ctx, p, auxReq)
+			if err != nil || cand == nil {
+				continue
+			}
+			for role, img := range cand.Art {
+				if role == model.ArtRoleFront || !role.Valid() || img == nil || len(img.Data) == 0 {
+					continue
+				}
+				if out[role] != nil {
+					continue
+				}
+				img.Source, img.Provider = model.SourceEnrichment, p.Name()
+				if out == nil {
+					out = make(map[model.ArtRole]*model.ArtImage, len(cand.Art))
+				}
+				out[role] = img
+			}
 			continue
 		}
 		cand, err := s.callProvider(ctx, p, req)

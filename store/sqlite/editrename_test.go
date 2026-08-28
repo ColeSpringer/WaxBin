@@ -353,12 +353,15 @@ func TestEditAlbumCollisionMergesIntoIncumbent(t *testing.T) {
 	assertVerifyClean(t, st)
 }
 
-// TestEditItemsFieldsNonUniformAlbumSplits: per-item maps with two different target
-// titles fail the uniformity check and fall back to today's split.
-func TestEditItemsFieldsNonUniformAlbumSplits(t *testing.T) {
+// TestEditItemsFieldsNonUniformAlbumCarries: per-item maps with two different target
+// titles fail the uniformity check, so the pre-pass falls back to the split. The old
+// row still drains, though, and the scan-side reconciliation carries it onto the last
+// member's new album: the edit never moved a file, so both keys name the same folder.
+func TestEditItemsFieldsNonUniformAlbumCarries(t *testing.T) {
 	st, _, pids := renameFixture(t)
 	ctx := context.Background()
 	albumID := scalarInt(t, st, "SELECT id FROM album")
+	albPID := albumPID(t, st)
 
 	if _, err := st.EditItemsFields(ctx, []model.ItemFieldEdit{
 		{ItemPID: pids[0], Fields: map[string]string{"album": "Beta"}},
@@ -366,14 +369,22 @@ func TestEditItemsFieldsNonUniformAlbumSplits(t *testing.T) {
 	}, model.Attribution{Source: model.SourceUser}, model.LockOf(true), false, false); err != nil {
 		t.Fatalf("edit: %v", err)
 	}
-	if n := scalarInt(t, st, "SELECT COUNT(*) FROM album"); n != 3 {
-		t.Fatalf("album rows = %d, want 3 (old ghost plus two new)", n)
+	if n := scalarInt(t, st, "SELECT COUNT(*) FROM album"); n != 2 {
+		t.Fatalf("album rows = %d, want 2 (one per target title, no ghost)", n)
 	}
-	if n := scalarInt(t, st, "SELECT COUNT(*) FROM track WHERE album_id=?", albumID); n != 0 {
-		t.Errorf("old album still has %d members, want 0", n)
+	if pid := scalarStr(t, st, "SELECT pid FROM album WHERE id=?", albumID); pid != string(albPID) {
+		t.Fatalf("carried album pid = %s, want kept %s", pid, albPID)
+	}
+	if id := memberAlbumID(t, st, pids[1]); id != albumID {
+		t.Errorf("last edited member sits on album %d, want the carried %d", id, albumID)
 	}
 	if a, b := memberAlbumID(t, st, pids[0]), memberAlbumID(t, st, pids[1]); a == b {
 		t.Errorf("members share album %d, want distinct", a)
+	}
+	wantRGKey := identity.ReleaseGroupKey("", identity.MatchKey("Alpha"), "Gamma")
+	wantKey := identity.AlbumKey("", wantRGKey, 2001, 0, "/lib/Alpha/One")
+	if k := scalarStr(t, st, "SELECT match_key FROM album WHERE id=?", albumID); k != wantKey {
+		t.Errorf("carried album match_key = %q, want %q", k, wantKey)
 	}
 	assertVerifyClean(t, st)
 }
@@ -783,8 +794,8 @@ func TestEditArtistOutsideReferenceBlocks(t *testing.T) {
 	pid1 := model.PID(scalarStr(t, st, "SELECT pid FROM playable_item WHERE title='S1'"))
 	pid2 := model.PID(scalarStr(t, st, "SELECT pid FROM playable_item WHERE title='S2'"))
 	alphaPID := entityPID(t, st, "artist", "Alpha")
-	if _, err := st.SetItemCredits(ctx, pid2, model.RoleProducer, []string{"Alpha"},
-		model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
+	if _, _, err := st.SetItemCredits(ctx, pid2, model.RoleProducer, []string{"Alpha"},
+		model.Attribution{Source: model.SourceUser}, model.LockOf(false), false, false); err != nil {
 		t.Fatalf("seed producer credit: %v", err)
 	}
 
@@ -805,6 +816,58 @@ func TestEditArtistOutsideReferenceBlocks(t *testing.T) {
 		JOIN playable_item pi ON pi.id=ic.item_id
 		WHERE a.name='Alpha' AND ic.role='producer' AND pi.pid=?`, string(pid2)); n != 1 {
 		t.Errorf("producer credit rows = %d, want the credit still on Alpha", n)
+	}
+	assertVerifyClean(t, st)
+}
+
+// TestEditBatchSecondaryCreditMovesWithItsField: an artist credited as a second name on
+// a batch item moves with that item's artist edit, because the edit rewrites the whole
+// credit rather than the primary alone. Guest holds the second credit on S1 and the only
+// credit on S2, both of which this batch rewrites, so every reference moves and Guest
+// renames in place instead of forking a fresh row and leaving a ghost behind.
+func TestEditBatchSecondaryCreditMovesWithItsField(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	putTrack(t, st, lib.ID, trackSpec{
+		path: "/lib/a/01.flac", essence: "e1", content: "c1",
+		title: "S1", artist: "Alpha; Guest", albumArt: "Alpha", album: "One", year: 2001,
+	})
+	putTrack(t, st, lib.ID, trackSpec{
+		path: "/lib/b/01.flac", essence: "e2", content: "c2",
+		title: "S2", artist: "Guest", albumArt: "Guest", album: "Two", year: 2002,
+	})
+	pid1 := model.PID(scalarStr(t, st, "SELECT pid FROM playable_item WHERE title='S1'"))
+	pid2 := model.PID(scalarStr(t, st, "SELECT pid FROM playable_item WHERE title='S2'"))
+	guestID := entityIDByCol(t, st, "artist", "name", "Guest")
+	guestPID := entityPID(t, st, "artist", "Guest")
+
+	if _, err := st.EditItemsFields(ctx, []model.ItemFieldEdit{
+		{ItemPID: pid1, Fields: map[string]string{"artist": "Alpha; Guest2"}},
+		{ItemPID: pid2, Fields: map[string]string{"artist": "Guest2", "album_artist": "Guest2"}},
+	}, model.Attribution{Source: model.SourceUser}, model.LockOf(true), false, false); err != nil {
+		t.Fatalf("edit: %v", err)
+	}
+
+	if n := scalarInt(t, st, "SELECT COUNT(*) FROM artist"); n != 2 {
+		t.Fatalf("artist rows = %d, want 2 (Alpha kept, Guest renamed in place)", n)
+	}
+	var name, gotPID string
+	if err := st.read.QueryRowContext(ctx, "SELECT name, pid FROM artist WHERE id=?", guestID).
+		Scan(&name, &gotPID); err != nil {
+		t.Fatalf("read Guest: %v", err)
+	}
+	if name != "Guest2" || gotPID != string(guestPID) {
+		t.Fatalf("Guest = %q/%s, want Guest2 with kept pid %s", name, gotPID, guestPID)
+	}
+	if id := entityIDByCol(t, st, "artist", "name", "Guest2"); id != guestID {
+		t.Fatalf("Guest2 id = %d, want the renamed row %d rather than a fresh one", id, guestID)
+	}
+	if n := scalarInt(t, st,
+		"SELECT COUNT(*) FROM artist_alias WHERE artist_id=? AND name='Guest' AND is_primary=0", guestID); n != 1 {
+		t.Errorf("alias rows = %d, want the old spelling recorded", n)
+	}
+	if n := scalarInt(t, st, "SELECT COUNT(*) FROM artist WHERE name='Guest'"); n != 0 {
+		t.Errorf("rows still named Guest = %d, want none left behind", n)
 	}
 	assertVerifyClean(t, st)
 }

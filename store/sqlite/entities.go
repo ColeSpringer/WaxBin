@@ -22,7 +22,12 @@ import (
 // maintenance then recomputes. It is not optional: a featured artist backs no
 // track's artist_id, so without a rollup row of its own db verify reads the missing
 // row as -1 against a recompute of 0 and reports permanent drift.
-func resolveAndLinkEntities(ctx context.Context, tx *sql.Tx, itemID int64, tr model.Track, filePath []byte, affected *affectedRollups) error {
+//
+// priorPath and fileID are what the album re-key reconciliation corroborates a folder
+// move with: the path this scan relinked the file from, empty when it was found where it
+// already was, and the file's id for the organize journal. An edit path has neither, and
+// passes "" and 0.
+func resolveAndLinkEntities(ctx context.Context, tx *sql.Tx, itemID int64, tr model.Track, filePath []byte, priorPath string, fileID int64, affected *affectedRollups) error {
 	artistID, err := resolveTrackArtists(ctx, tx, itemID, tr, affected)
 	if err != nil {
 		return err
@@ -77,7 +82,7 @@ func resolveAndLinkEntities(ctx context.Context, tx *sql.Tx, itemID int64, tr mo
 	// attachments onto the new one rather than leaving it to ghost (scanreconcile.go).
 	// The merge it may perform repoints this track's FK, so nothing below may hold on
 	// to albumID.
-	if err := reconcileAlbumRekeyTx(ctx, tx, priorAlbumID.Int64, albumID, affected); err != nil {
+	if err := reconcileAlbumRekeyTx(ctx, tx, priorAlbumID.Int64, albumID, priorPath, fileID, affected); err != nil {
 		return err
 	}
 

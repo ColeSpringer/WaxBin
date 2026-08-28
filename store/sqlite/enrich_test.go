@@ -907,13 +907,14 @@ func TestReleaseGroupsNeedingAuxArtGuards(t *testing.T) {
 	auxRGTrack(t, st, lib.ID, "NoID", "NoID", "")
 
 	// A ghost group: enriched into an mbid while it still had members, then stranded by
-	// a retag that moved its one track to another group. It qualifies on every other
-	// part of the gate, which is what makes it the likeliest thing the ghost heuristic
-	// has to catch here.
+	// a retag that cleared the album tag and left its one track ungrouped. It qualifies
+	// on every other part of the gate, which is what makes it the likeliest thing the
+	// ghost heuristic has to catch here. A retag onto another title would not do it any
+	// more: the scan-side re-key reconciliation carries the group onto the new one.
 	auxRGTrack(t, st, lib.ID, "Ghost", "Ghost", "")
 	ghostRGPID := scalarQueryStr(t, db, "SELECT pid FROM release_group WHERE title='Ghost'")
 	setEntityMBID(t, st, model.MergeReleaseGroup, ghostRGPID, auxRGMBID(6), false)
-	auxRGTrack(t, st, lib.ID, "Ghost", "Ghost Moved", "")
+	auxRGTrack(t, st, lib.ID, "Ghost", "", "")
 	if n := scalarQueryInt(t, db, `SELECT COUNT(*) FROM album al JOIN track t ON t.album_id = al.id
 		JOIN release_group rg ON rg.id = al.release_group_id WHERE rg.title='Ghost'`); n != 0 {
 		t.Fatalf("the Ghost group still backs %d tracks; the fixture did not strand it", n)
@@ -958,7 +959,7 @@ func TestReleaseGroupsNeedingAuxArtGuards(t *testing.T) {
 		}
 	}
 	want := map[string]bool{"Settled": true, "RoleLock": true}
-	for _, name := range append(names, "NoID", "Ghost", "Ghost Moved") {
+	for _, name := range append(names, "NoID", "Ghost") {
 		if got[name] != want[name] {
 			t.Errorf("%q queued = %v, want %v", name, got[name], want[name])
 		}

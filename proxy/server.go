@@ -134,12 +134,19 @@ func (s *Server) serveConn(ctx context.Context, conn net.Conn) {
 	}
 }
 
+// VersionMismatchPrefix opens the version gate's refusal message, which goes on to
+// name both versions. The prefix is stable so a client can tell this refusal from
+// every other CodeInvalid (a pre-16 client never inspects the message, so the added
+// tail costs it nothing).
+const VersionMismatchPrefix = "unsupported protocol version"
+
 // dispatch routes one request. Maintenance control is handled inline (it mutates
 // the Library the handlers close over); every other method is rejected while the
 // server is paused for maintenance.
 func (s *Server) dispatch(ctx context.Context, conn net.Conn, req request) response {
 	if req.V != ProtocolVersion {
-		return errResponse(waxerr.New(waxerr.CodeInvalid, "proxy.dispatch", "unsupported protocol version"))
+		return errResponse(waxerr.New(waxerr.CodeInvalid, "proxy.dispatch", fmt.Sprintf(
+			"%s %d (this server speaks %d)", VersionMismatchPrefix, req.V, ProtocolVersion)))
 	}
 	switch req.Method {
 	case MethodPing:

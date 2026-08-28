@@ -74,10 +74,11 @@ type EnrichTarget struct {
 	// rate-limited requests on covers the store would refuse to fill anyway.
 	HasArt bool
 	// ArtLocked reports whether the entity's whole "art" lock stands, the one that gates
-	// the front cover and every auxiliary role alike. It serves the release-group pass
-	// what HasArt serves the album pass: the store refuses the write, so fetching first
-	// would spend a rate-limited request on every locked cover, every forced run. A
-	// per-role lock is not a reason to skip the fetch, so it is checked at apply instead.
+	// the front cover and every auxiliary role alike. The release-group pass and the
+	// album release match both read it for the same reason: the store refuses the write,
+	// so fetching first would spend a rate-limited request on every locked cover, every
+	// forced run. A per-role lock is not a reason to skip the fetch, so it is checked at
+	// apply instead.
 	ArtLocked bool
 }
 

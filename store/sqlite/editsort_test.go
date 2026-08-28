@@ -177,7 +177,7 @@ func TestCreditEditRespectsSortLocks(t *testing.T) {
 	ctx := context.Background()
 
 	// Unlocked: the credit edit regenerates composer_sort from the new display.
-	if _, err := st.SetItemCredits(ctx, pid, model.RoleComposer, []string{"Anna Arranger"}, model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
+	if _, _, err := st.SetItemCredits(ctx, pid, model.RoleComposer, []string{"Anna Arranger"}, model.Attribution{Source: model.SourceUser}, model.LockOf(false), false, false); err != nil {
 		t.Fatalf("set composer credit: %v", err)
 	}
 	comp, sort := trackComposerRow(t, st, pid)
@@ -189,7 +189,7 @@ func TestCreditEditRespectsSortLocks(t *testing.T) {
 	if err := st.EditItemField(ctx, pid, "composer_sort", "Arranger, Anna", model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
 		t.Fatalf("lock composer_sort: %v", err)
 	}
-	if _, err := st.SetItemCredits(ctx, pid, model.RoleComposer, []string{"Bob Builder"}, model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
+	if _, _, err := st.SetItemCredits(ctx, pid, model.RoleComposer, []string{"Bob Builder"}, model.Attribution{Source: model.SourceUser}, model.LockOf(false), false, false); err != nil {
 		t.Fatalf("credit edit over locked sort: %v", err)
 	}
 	comp, sort = trackComposerRow(t, st, pid)
@@ -202,7 +202,7 @@ func TestCreditEditRespectsSortLocks(t *testing.T) {
 	if err := stB.EditItemField(ctx, bookPID, "author_sort", "Author, Jane", model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
 		t.Fatalf("lock author_sort: %v", err)
 	}
-	if _, err := stB.SetItemCredits(ctx, bookPID, model.RoleAuthor, []string{"New Author"}, model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
+	if _, _, err := stB.SetItemCredits(ctx, bookPID, model.RoleAuthor, []string{"New Author"}, model.Attribution{Source: model.SourceUser}, model.LockOf(false), false, false); err != nil {
 		t.Fatalf("author credit over locked sort: %v", err)
 	}
 	author, aSort := bookAuthorRow(t, stB, bookPID)

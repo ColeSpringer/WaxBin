@@ -159,7 +159,7 @@ func TestScanForcePreservesLockedCredits(t *testing.T) {
 	}
 	putTrack(t, st, lib.ID, orig)
 	tpid := itemPID(t, st)
-	if _, err := st.SetItemCredits(ctx, tpid, model.RoleComposer, []string{"Curated Composer"}, model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
+	if _, _, err := st.SetItemCredits(ctx, tpid, model.RoleComposer, []string{"Curated Composer"}, model.Attribution{Source: model.SourceUser}, model.LockOf(true), false, false); err != nil {
 		t.Fatalf("set composer credit: %v", err)
 	}
 	forced := orig
@@ -185,7 +185,7 @@ func TestScanForcePreservesLockedCredits(t *testing.T) {
 	if err := st.read.QueryRowContext(ctx, "SELECT pid FROM playable_item WHERE kind='book' LIMIT 1").Scan(&bpid); err != nil {
 		t.Fatalf("book pid: %v", err)
 	}
-	if _, err := st.SetItemCredits(ctx, model.PID(bpid), model.RoleTranslator, []string{"Terry Translator"}, model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
+	if _, _, err := st.SetItemCredits(ctx, model.PID(bpid), model.RoleTranslator, []string{"Terry Translator"}, model.Attribution{Source: model.SourceUser}, model.LockOf(true), false, false); err != nil {
 		t.Fatalf("set translator credit: %v", err)
 	}
 	rescanBookForce(t, st, lib.ID, "be1", "bc2")

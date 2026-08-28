@@ -219,6 +219,79 @@ func TestServeProxiedMutations(t *testing.T) {
 	}
 }
 
+// TestServeProxiedCreditsBatch drives set_credits_batch end to end: several credits
+// applied as one atomic batch over the wire, one item's two roles arriving as distinct
+// result entries, a repeated (item, role) pair refused, and a locked entry either
+// failing the batch or being reported as skipped with its role.
+func TestServeProxiedCreditsBatch(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	sock := testsock.Path(t)
+	writeFile(t, filepath.Join(root, "one.mp3"),
+		testaudio.BuildMP3WithAudio("One", "Old Artist", "Album", 1, testaudio.AudioWithSeed(1)))
+	writeFile(t, filepath.Join(root, "two.mp3"),
+		testaudio.BuildMP3WithAudio("Two", "Old Artist", "Album", 2, testaudio.AudioWithSeed(2)))
+
+	lib := openServed(t, ctx, db, root, sock)
+	p1 := itemPIDByTitle(t, ctx, lib, "One")
+	p2 := itemPIDByTitle(t, ctx, lib, "Two")
+	c := dialWhenReady(t, sock)
+
+	items := []proxy.ItemCreditsEdit{
+		{ItemPID: string(p1), Role: string(model.RoleArtist), Names: []string{"New Artist"}},
+		{ItemPID: string(p1), Role: string(model.RoleComposer), Names: []string{"New Composer"}},
+		{ItemPID: string(p2), Role: string(model.RoleArtist), Names: []string{"New Artist"}},
+	}
+	res, err := c.SetCreditsBatch(ctx, items, false, model.Attribution{}, model.LockOn, false, false)
+	if err != nil {
+		t.Fatalf("proxied credit batch: %v", err)
+	}
+	if len(res.Edited) != 3 || len(res.Skipped) != 0 {
+		t.Fatalf("result = %+v, want all three entries edited", res)
+	}
+	// The first item was edited under two roles: the wire result names each entry's
+	// role and stored names, which a pid list could not tell apart.
+	p1Names := map[string][]string{}
+	for _, e := range res.Edited {
+		if e.ItemPID == string(p1) {
+			p1Names[e.Role] = e.Names
+		}
+	}
+	if len(p1Names) != 2 || len(p1Names[string(model.RoleArtist)]) != 1 ||
+		len(p1Names[string(model.RoleComposer)]) != 1 || p1Names[string(model.RoleComposer)][0] != "New Composer" {
+		t.Fatalf("edited = %+v, want the first item's artist and composer entries distinct with their stored names", res.Edited)
+	}
+	for _, pid := range []model.PID{p1, p2} {
+		if v, err := lib.Get(ctx, pid); err != nil || v.Artist != "New Artist" {
+			t.Fatalf("%s artist = %q (err %v), want New Artist", pid, v.Artist, err)
+		}
+	}
+
+	// A repeated pair is a caller bug, refused before any write.
+	if _, err := c.SetCreditsBatch(ctx, []proxy.ItemCreditsEdit{items[0], items[0]},
+		false, model.Attribution{}, model.LockOn, true, false); !waxerr.Is(err, waxerr.CodeInvalid) {
+		t.Fatalf("repeated pair = %v, want CodeInvalid", err)
+	}
+
+	// The first batch locked credit.artist, so a second run is refused, and skipLocked
+	// reports it instead of failing.
+	relock := []proxy.ItemCreditsEdit{
+		{ItemPID: string(p1), Role: string(model.RoleArtist), Names: []string{"Another"}},
+	}
+	if _, err := c.SetCreditsBatch(ctx, relock, false, model.Attribution{}, model.LockOn, false, false); !waxerr.Is(err, waxerr.CodeLocked) {
+		t.Fatalf("locked entry = %v, want CodeLocked", err)
+	}
+	res, err = c.SetCreditsBatch(ctx, relock, false, model.Attribution{}, model.LockOn, false, true)
+	if err != nil {
+		t.Fatalf("proxied skip-locked batch: %v", err)
+	}
+	if len(res.Edited) != 0 || len(res.Skipped) != 1 ||
+		res.Skipped[0].ItemPID != string(p1) || res.Skipped[0].Role != string(model.RoleArtist) {
+		t.Fatalf("result = %+v, want the locked entry skipped with its role", res)
+	}
+}
+
 // albumPIDFromFacet returns the pid of the first album entity in the catalog, read
 // through the album facet, the same enumeration WaxDeck uses to find one.
 func albumPIDFromFacet(t *testing.T, ctx context.Context, lib *waxbin.Library) model.PID {

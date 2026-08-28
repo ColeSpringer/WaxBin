@@ -3,10 +3,12 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/colespringer/waxbin"
@@ -177,8 +179,16 @@ func (g *globals) openLib(cmd *cobra.Command, forceReadOnly bool) (*waxbin.Libra
 		// opens never take the lock, so they never reach here.
 		if !opts.ReadOnly && waxerr.Is(err, waxerr.CodeConflict) {
 			if sock := advertisedSocket(cfg.DBPath); sock != "" {
-				if lib2, err2 := g.openViaMaintenance(cmd, opts, sock); err2 == nil {
+				lib2, err2 := g.openViaMaintenance(cmd, opts, sock)
+				if err2 == nil {
 					return lib2, cfg, nil
+				}
+				// A failed hand-off normally defers to the original conflict, but a
+				// version refusal on the maintenance-begin frame means the server is
+				// alive and will refuse everything, so the held-lock message would only
+				// misdirect the operator at the flock.
+				if msg, ok := versionRefusal(err2); ok {
+					return nil, nil, protocolMismatch("cli.open", msg)
 				}
 			}
 		}
@@ -199,7 +209,11 @@ func (g *globals) openMutator(cmd *cobra.Command) (*mutator, *config.Config, err
 		return nil, nil, err
 	}
 	if !g.readOnly {
-		if px := dialServer(cfg.DBPath); px != nil {
+		px, err := dialServer(cfg.DBPath)
+		if err != nil {
+			return nil, nil, err
+		}
+		if px != nil {
 			return &mutator{px: px}, cfg, nil
 		}
 	}
@@ -293,17 +307,21 @@ func advertisedSocket(dbPath string) string {
 	return info.IPCSocket
 }
 
-// dialServer connects to an advertised server socket and confirms it is live,
-// returning a client or nil. A stale advertisement (the server died leaving its
-// owner record behind) yields nil, so the caller falls back to a direct open.
-func dialServer(dbPath string) *proxy.Client {
+// dialServer connects to an advertised server socket and confirms it is live. A nil
+// client with a nil error means no server to proxy through, so the caller falls back
+// to a direct open: no advertisement, a stale one (the server died leaving its owner
+// record behind), or a wedged server. A server that answers the ping by refusing this
+// client's protocol version is alive, and the fallback would only trip over its flock
+// with a misleading held-lock error, so that refusal comes back as a hard error
+// naming both versions instead.
+func dialServer(dbPath string) (*proxy.Client, error) {
 	sock := advertisedSocket(dbPath)
 	if sock == "" {
-		return nil
+		return nil, nil
 	}
 	px, err := proxy.Dial(sock)
 	if err != nil {
-		return nil
+		return nil, nil
 	}
 	// Bound the liveness probe: a stale or wedged server must not hang command
 	// startup. On timeout, fall back to a direct open.
@@ -311,9 +329,35 @@ func dialServer(dbPath string) *proxy.Client {
 	defer cancel()
 	if err := px.Ping(pctx); err != nil {
 		_ = px.Close()
-		return nil
+		if msg, ok := versionRefusal(err); ok {
+			return nil, protocolMismatch("cli.dialServer", msg)
+		}
+		return nil, nil
 	}
-	return px
+	return px, nil
+}
+
+// protocolMismatch is the operator-facing form of a server's version refusal: it names
+// this client's version, quotes the server's answer (which names the server's), and
+// says what to do about it.
+func protocolMismatch(op, msg string) error {
+	return waxerr.New(waxerr.CodeInvalid, op, fmt.Sprintf(
+		"the serving waxbin speaks a different protocol version than this client (version %d): %s; rebuild and restart the server so both sides match",
+		proxy.ProtocolVersion, msg))
+}
+
+// versionRefusal reports whether a proxied call's failure is the server's
+// protocol-version gate rather than a dead or wedged socket, returning the server's
+// own message when it is. The gate answers CodeInvalid under a stable prefix; matching
+// on both keeps every other invalid answer (and every transport failure) on the
+// fallback path.
+func versionRefusal(err error) (string, bool) {
+	var e *waxerr.Error
+	if !errors.As(err, &e) || e.Code != waxerr.CodeInvalid ||
+		!strings.HasPrefix(e.Msg, proxy.VersionMismatchPrefix) {
+		return "", false
+	}
+	return e.Msg, true
 }
 
 func (g *globals) logger(cfg *config.Config) *slog.Logger {

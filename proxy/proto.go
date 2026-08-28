@@ -112,7 +112,33 @@ import (
 // client with the generic edited-fields line it printed before. That is the house
 // precedent as well: set_art_lock landed at an already-committed version 10 and was left
 // there, with the bump taken later.
-const ProtocolVersion = 14
+//
+// Version 15 changed what an existing method does rather than what it carries: edit_entity
+// with WriteBack now strips the cleared id from the member files on an album or
+// release-group mbid clear, where before the clear was catalog-only. Nothing on the wire
+// says which behavior a peer has, so the mismatch misdrives silently in both directions. A
+// version-14 server takes a client's durable clear and leaves every member file naming the
+// id, so the identity forks back on the next scan while the client reports a clear that
+// held; a version-14 client asking a version-15 server for what it believes is a
+// catalog-only clear has those files rewritten instead. Both are the quiet wrong answer
+// the version gate exists to turn into a clean absence, and no added field would have
+// carried the difference.
+//
+// set_credits_batch and the newly mergeable series type ride the bump rather than earning
+// one. The batch is a new method, but the only peers without its handler are pre-15
+// builds, and the version gate refuses their every frame before the method switch is
+// reached, so the mismatch never even surfaces as an "unknown method" refusal. Merging a
+// series widens the value MergeParams.EntityType accepts, and the same gate stands in
+// front of the version-14 servers that would otherwise refuse it with CodeInvalid. Either
+// way the failure is a clean refusal rather than a quiet wrong answer, which is the
+// add_root precedent. set_credits rides along too: a multi-name credit now renames
+// onto the first name where it previously split, the batch-of-one delegation gives the
+// single-item surface that same in-place rename on a contributor role, and the request
+// gained skipLocked with the response gaining the skipped flag that answers it. Those two
+// fields are additive, and a version-14 server that ignores skipLocked answers a locked
+// credit with the CodeLocked it always did, which is a loud refusal rather than a quiet
+// wrong answer.
+const ProtocolVersion = 15
 
 // Method names for the proxied operations: the fast request/response catalog
 // mutations, the reads a mutating command needs for its confirmation output, the
@@ -128,6 +154,7 @@ const (
 	MethodEditManyFields   = "edit_many_fields"
 	MethodEditBatch        = "edit_batch"
 	MethodSetCredits       = "set_credits"
+	MethodSetCreditsBatch  = "set_credits_batch"
 	MethodSetLyrics        = "set_lyrics"
 	MethodSetChapters      = "set_chapters"
 	MethodSetItemArt       = "set_item_art"
@@ -304,24 +331,62 @@ type EditBatchParams struct {
 	SkipLocked bool             `json:"skipLocked"`
 }
 
-// SetCreditsParams is the set_credits request payload. Source, Provider and Lock carry
-// the same meaning as on EditFieldsParams.
+// SetCreditsParams is the set_credits request payload. Source, Provider, Lock and
+// SkipLocked carry the same meaning as on EditFieldsParams.
 type SetCreditsParams struct {
-	ItemPID   string   `json:"itemPid"`
-	Role      string   `json:"role"`
-	Names     []string `json:"names,omitempty"`
-	WriteBack bool     `json:"writeBack"`
-	Source    string   `json:"source,omitempty"`
-	Provider  string   `json:"provider,omitempty"`
-	Lock      string   `json:"lock"`
-	Force     bool     `json:"force"`
+	ItemPID    string   `json:"itemPid"`
+	Role       string   `json:"role"`
+	Names      []string `json:"names,omitempty"`
+	WriteBack  bool     `json:"writeBack"`
+	Source     string   `json:"source,omitempty"`
+	Provider   string   `json:"provider,omitempty"`
+	Lock       string   `json:"lock"`
+	Force      bool     `json:"force"`
+	SkipLocked bool     `json:"skipLocked"`
 }
 
 // SetCreditsResult is the set_credits response payload: the number of contributors
-// actually stored (after trim/dedup) and any music write-back failures.
+// actually stored (after trim/dedup), whether a locked credit was skipped rather than
+// set (skipLocked only, where the stored count is 0), and any music write-back failures.
 type SetCreditsResult struct {
 	Stored            int                `json:"stored"`
+	Skipped           bool               `json:"skipped,omitempty"`
 	WriteBackFailures []WriteBackFailure `json:"writeBackFailures,omitempty"`
+}
+
+// ItemCreditsEdit is one entry of a set_credits_batch request: an item, the role to
+// replace, and the names to credit in it.
+type ItemCreditsEdit struct {
+	ItemPID string   `json:"itemPid"`
+	Role    string   `json:"role"`
+	Names   []string `json:"names,omitempty"`
+}
+
+// SetCreditsBatchParams is the set_credits_batch request payload: several credit edits
+// applied as one atomic catalog batch, each entry naming its own (item, role) pair.
+// Source, Provider and Lock carry the same meaning as on EditFieldsParams.
+type SetCreditsBatchParams struct {
+	Items      []ItemCreditsEdit `json:"items"`
+	WriteBack  bool              `json:"writeBack"`
+	Source     string            `json:"source,omitempty"`
+	Provider   string            `json:"provider,omitempty"`
+	Lock       string            `json:"lock"`
+	Force      bool              `json:"force"`
+	SkipLocked bool              `json:"skipLocked"`
+}
+
+// SetCreditsBatchResult is the set_credits_batch response payload. It does not reuse
+// EditManyFieldsResult: that shape lists items, and a credit batch is a list of (item,
+// role) pairs, so an item edited under two roles would arrive as one pid twice with
+// nothing saying which slot each stood for. The entries reuse the request's shape, an
+// edited one carrying the names actually stored (after trim/dedup) and a skipped one
+// carrying none, so a client's result holds what the local call would have returned.
+// Write-back failures stay keyed by item pid, since an item's roles are mirrored into
+// its files in one pass.
+type SetCreditsBatchResult struct {
+	Edited            []ItemCreditsEdit             `json:"edited,omitempty"`
+	Skipped           []ItemCreditsEdit             `json:"skipped,omitempty"`
+	WriteBackFailures map[string][]WriteBackFailure `json:"writeBackFailures,omitempty"`
 }
 
 // SetLyricsParams is the set_lyrics request payload. A nil Lyrics clears the row.
@@ -454,6 +519,10 @@ type EditEntityParams struct {
 // transport error, matching edit_fields. MergedInto names the survivor when clearing an
 // mbid re-keyed the entity onto a key a heuristic twin already owned, so the edited pid
 // no longer exists; it is empty for every other edit.
+//
+// It carries what the client shows, not every field of model.EntityEditReport: the
+// report's moved albums exist to steer the member-file fan, which runs in the server's own
+// process, so putting them on the wire would give a client a list it has no use for.
 type EditEntityResult struct {
 	MergedInto        string             `json:"mergedInto,omitempty"`
 	WriteBackFailures []WriteBackFailure `json:"writeBackFailures,omitempty"`

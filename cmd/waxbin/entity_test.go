@@ -2,9 +2,11 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
+	"github.com/colespringer/waxbin"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/read"
 )
@@ -74,6 +76,54 @@ func TestEntityStarRateArgValidation(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), tc.want) {
 				t.Errorf("args %v: error = %q, want it to mention %q", tc.args, err, tc.want)
+			}
+		})
+	}
+}
+
+// TestEntityClearDurabilityWarning: the caveat rides on an album or release-group mbid
+// clear alone, and tracks whether the id actually came off the member files rather than
+// whether --write-back was asked for. A strip that reported failures is surfaced as a
+// warning and returns a nil error, which is the case where the identity forks back.
+func TestEntityClearDurabilityWarning(t *testing.T) {
+	stripFailed := &waxbin.WriteBackError{
+		ItemPID: "al1",
+		Failures: []waxbin.WriteBackFailure{{
+			Path:   "/lib/one/rip.flac",
+			Reason: "on-disk tag write-back is unavailable for a file shared by multiple items",
+		}},
+	}
+	clear := map[string]string{"mbid": ""}
+	for _, tc := range []struct {
+		name      string
+		et        model.MergeEntity
+		edits     map[string]string
+		writeBack bool
+		err       error
+		want      string
+	}{
+		{"no write-back", model.MergeAlbum, clear, false, nil, "pass --write-back"},
+		{"clean strip", model.MergeAlbum, clear, true, nil, ""},
+		{"failed strip", model.MergeAlbum, clear, true, error(stripFailed), "shared by several items"},
+		{"failed strip wrapped", model.MergeReleaseGroup, clear, true,
+			errors.Join(errors.New("ctx"), stripFailed), "shared by several items"},
+		{"release group without write-back", model.MergeReleaseGroup, clear, false, nil, "pass --write-back"},
+		// An artist mbid clear re-keys nothing, and a set is not a clear, so neither is
+		// the gesture the caveat is about.
+		{"artist clear", model.MergeArtist, clear, false, nil, ""},
+		{"mbid set", model.MergeAlbum, map[string]string{"mbid": "  " + strings.Repeat("a", 8) + "  "}, false, nil, ""},
+		{"other field", model.MergeAlbum, map[string]string{"label": ""}, false, nil, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := entityClearDurabilityWarning(tc.et, tc.edits, tc.writeBack, tc.err)
+			if tc.want == "" {
+				if got != "" {
+					t.Fatalf("warning = %q, want none", got)
+				}
+				return
+			}
+			if !strings.Contains(got, tc.want) {
+				t.Fatalf("warning = %q, want it to mention %q", got, tc.want)
 			}
 		})
 	}

@@ -26,7 +26,7 @@ func (g *globals) jobServer(cmd *cobra.Command) (*proxy.Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	return dialServer(cfg.DBPath), nil
+	return dialServer(cfg.DBPath)
 }
 
 // tailJob follows a server-run job to completion through a read-only catalog

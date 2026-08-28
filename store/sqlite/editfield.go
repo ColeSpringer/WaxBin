@@ -490,7 +490,9 @@ func editTrackFieldsTx(ctx context.Context, tx *sql.Tx, itemID int64, fields []s
 		if err := affected.collect(ctx, tx, itemID); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
-		if err := resolveAndLinkEntities(ctx, tx, itemID, tr, filePath, affected); err != nil {
+		// No prior path and no file id: an edit moves no file, so the folder the album
+		// key names is the one the item still sits in.
+		if err := resolveAndLinkEntities(ctx, tx, itemID, tr, filePath, "", 0, affected); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		if err := affected.collect(ctx, tx, itemID); err != nil {

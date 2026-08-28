@@ -320,6 +320,28 @@ type ItemFieldEdit struct {
 	Fields  map[string]string
 }
 
+// ItemCreditEdit is one entry of a batch credit edit: the item, the contributor role
+// being replaced, and the names to credit in it. A batch identifies an entry by the
+// (item, role) pair rather than the item alone, since one item legitimately takes an
+// author entry and a narrator entry in the same batch.
+type ItemCreditEdit struct {
+	ItemPID PID
+	Role    ContributorRole
+	Names   []string
+}
+
+// CreditBatchResult reports a batch credit edit's outcome: the entries whose edit
+// applied and, in skip-locked mode, the entries skipped because the credit role was
+// locked. Both lists name the (item, role) pair, since an item appearing under two roles
+// can appear twice in either and a pid alone would not say which slot moved. An applied
+// entry carries the names actually stored (trimmed, resolvable, de-duplicated by
+// artist), so a caller's tag write-back mirrors what the catalog holds; a skipped entry
+// carries no names, since nothing was stored for it.
+type CreditBatchResult struct {
+	Edited  []ItemCreditEdit
+	Skipped []ItemCreditEdit
+}
+
 // FieldProvenance is one provenance row: a field's source, lock state, the curated
 // value when a user set one, the provider that supplied an enrichment value, and the
 // URL it was fetched from where one exists. Only the overlaid artifact rows (art,

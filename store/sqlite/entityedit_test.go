@@ -490,6 +490,57 @@ func TestEntityEditClearAlbumMBIDKeepsRGCarryover(t *testing.T) {
 	assertVerifyClean(t, st)
 }
 
+// TestEntityEditClearAlbumMBIDRetagRescanReadopts pins the durability caveat this edit
+// carries on its own, the whole-album twin of TestDetachRetagRescanReadopts. The clear
+// re-keys the chain in the catalog, but the members' files still name the release, so a
+// scan that re-resolves one of them computes the mbid key again and forks a fresh
+// identified album. A byte-identical rescan re-resolves nothing and leaves the clear
+// standing; a retag puts the member straight back onto an identified row. Stripping the
+// tags is what closes that, and it belongs to the facade's write-back, not here.
+func TestEntityEditClearAlbumMBIDRetagRescanReadopts(t *testing.T) {
+	st, lib := entityFixture(t)
+	const relMBID = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+	first := trackSpec{
+		path: "/lib/Alpha/One/01.flac", essence: "eT1", content: "cT1", title: "T1",
+		artist: "Alpha", albumArt: "Alpha", album: "One", genre: "Rock",
+		year: 2001, mbRelease: relMBID, durationMS: 100,
+	}
+	putTrack(t, st, lib.ID, first)
+	putTrack(t, st, lib.ID, trackSpec{
+		path: "/lib/Alpha/One/02.flac", essence: "eT2", content: "cT2", title: "T2",
+		artist: "Alpha", albumArt: "Alpha", album: "One", genre: "Rock",
+		year: 2001, mbRelease: relMBID, durationMS: 100,
+	})
+	albumPID := entityPIDByCol(t, st, "album", "match_key", "mbid:"+relMBID)
+	albumID := entityIDByCol(t, st, "album", "match_key", "mbid:"+relMBID)
+
+	clearEntityMBID(t, st, model.MergeAlbum, albumPID)
+
+	// A byte-identical re-put: same path, essence, and content hash. The entity block
+	// never runs, so the release id still in the file's tags is not consulted.
+	putTrack(t, st, lib.ID, first)
+	if n := scalarInt(t, st, "SELECT COUNT(*) FROM album"); n != 1 {
+		t.Fatalf("album rows after a byte-identical rescan = %d, want the re-keyed row alone", n)
+	}
+
+	// A retag: the same audio essence with different bytes, which is what a tag write
+	// leaves behind. That re-resolves, and the release id in the file wins again.
+	first.content = "cT1-retagged"
+	putTrack(t, st, lib.ID, first)
+	pid1 := model.PID(scalarStr(t, st, "SELECT pid FROM playable_item WHERE title='T1'"))
+	readopted := memberAlbumID(t, st, pid1)
+	if readopted == int(albumID) {
+		t.Fatalf("the retagged member stayed on the re-keyed album %d, want a forked identified row", albumID)
+	}
+	if k := scalarStr(t, st, "SELECT match_key FROM album WHERE id=?", readopted); k != "mbid:"+relMBID {
+		t.Errorf("readopted album match_key = %q, want the release id key", k)
+	}
+	if n := scalarInt(t, st, "SELECT COUNT(*) FROM album"); n != 2 {
+		t.Errorf("album rows after the retag = %d, want the re-keyed row and the forked one", n)
+	}
+	assertVerifyClean(t, st)
+}
+
 // TestEntityEditClearAlbumMBIDMergesIntoHeuristicTwin covers the taken-key half of the
 // hatch: when a heuristic sibling already owns the key the clear derives, the disowned
 // album folds into it rather than being left on the id it just gave up.
@@ -770,7 +821,14 @@ func TestEntityEditClearRGMBIDReparentsDifferentlyTitledAlbum(t *testing.T) {
 		entityPIDByCol(t, st, "album", "match_key", deluxeKey0)
 	seq0 := latestSeq(t, st)
 
-	clearEntityMBID(t, st, model.MergeReleaseGroup, rgPID)
+	rep := clearEntityMBID(t, st, model.MergeReleaseGroup, rgPID)
+
+	// The re-parented album's members left the edited group, so the group's own member
+	// fan no longer reaches them. The report names it, which is what lets the facade's
+	// write-back strip their files too.
+	if got := rep.MovedAlbums; len(got) != 1 || got[0] != deluxePID {
+		t.Errorf("report moved albums = %v, want the re-parented %q alone", got, deluxePID)
+	}
 
 	plainRGKey := identity.ReleaseGroupKey("", identity.MatchKey("Alpha"), "One")
 	deluxeRGKey := identity.ReleaseGroupKey("", identity.MatchKey("Alpha"), "One (Deluxe Edition)")

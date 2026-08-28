@@ -534,7 +534,9 @@ func TestForcedRunBrowsesEachGroupOnce(t *testing.T) {
 
 // TestReleaseCoverIsSkippedWhenTheAlbumAlreadyHasArt: the store fills only when empty, so
 // asking a provider for a cover the album would keep spends a rate-limited request on a
-// picture nothing stores. Most rips carry embedded art, so this is the common case.
+// picture nothing stores. Most rips carry embedded art, so this is the common case. The
+// auxiliary roles are asked about all the same, since a settled front says nothing about
+// the empty slots beside it.
 func TestReleaseCoverIsSkippedWhenTheAlbumAlreadyHasArt(t *testing.T) {
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
@@ -543,6 +545,15 @@ func TestReleaseCoverIsSkippedWhenTheAlbumAlreadyHasArt(t *testing.T) {
 		Media: "CD", Country: "GB",
 	}, pngBytes(t))
 
+	// Offers nothing, so every assertion about what the album stores holds as it did.
+	var auxAsks []enrich.Request
+	aux := &enrich.Mock{ProviderName: "fanart", Caps: enrich.CapAuxArt,
+		EnrichFunc: func(_ context.Context, req enrich.Request) (*enrich.Candidate, error) {
+			if req.Type == enrich.TargetRelease {
+				auxAsks = append(auxAsks, req)
+			}
+			return nil, nil
+		}}
 	caa, hits := newReleaseCAAMock(t, pngBytes(t))
 	mb := newRelMock(t, "[]")
 	mb.browsePages = []string{browsePage(2,
@@ -551,6 +562,7 @@ func TestReleaseCoverIsSkippedWhenTheAlbumAlreadyHasArt(t *testing.T) {
 	)}
 	res, err := enrich.New(st, enrich.Config{
 		Contact: "test@example.com", MatchReleases: true, FetchCoverArt: true,
+		Providers:          []enrich.Provider{aux},
 		MinRequestInterval: time.Millisecond,
 		MusicBrainzBaseURL: mb.server.URL, CoverArtBaseURL: caa,
 	}, nil).Run(ctx, enrich.RunOptions{}, nil)
@@ -570,5 +582,273 @@ func TestReleaseCoverIsSkippedWhenTheAlbumAlreadyHasArt(t *testing.T) {
 	if n := scalarInt(t, roDB(t, dbPath),
 		"SELECT COUNT(*) FROM art_map WHERE entity_type='album'"); n != 0 {
 		t.Errorf("album art_map rows = %d, want 0 (the cover stays derived)", n)
+	}
+	if len(auxAsks) != 1 {
+		t.Fatalf("album aux asks = %d, want 1 (the front is settled, the aux slots are not)", len(auxAsks))
+	}
+	if auxAsks[0].MBID != edGBMBID || auxAsks[0].Want != enrich.CapAuxArt {
+		t.Errorf("aux ask = (%q, %v), want the matched release id and CapAuxArt",
+			auxAsks[0].MBID, auxAsks[0].Want)
+	}
+}
+
+// TestAlbumAuxArtFillsBesideASettledFront is the album rung of the aux backfill. That
+// phase walks release groups, so an album that matched its release while its front was
+// already answered had no way to be asked about the slots beside it. The settled front
+// stays the track's, and the front the provider offers here is dropped.
+func TestAlbumAuxArtFillsBesideASettledFront(t *testing.T) {
+	ctx := context.Background()
+	st, dbPath, lib := openStore(t)
+	seedAlbumTrackWithCover(t, st, lib.ID, "ess-a", model.Track{
+		Artist: "Pink Floyd", AlbumArtist: "Pink Floyd", Album: "Wish You Were Here", TrackNo: 1,
+		Media: "CD", Country: "GB",
+	}, pngBytes(t))
+
+	// Answers the album rung alone, so what lands there is not the release group's.
+	var asks []enrich.Request
+	aux := &enrich.Mock{ProviderName: "fanart", Caps: enrich.CapAuxArt,
+		EnrichFunc: func(_ context.Context, req enrich.Request) (*enrich.Candidate, error) {
+			if req.Type != enrich.TargetRelease {
+				return nil, nil
+			}
+			asks = append(asks, req)
+			return &enrich.Candidate{Art: map[model.ArtRole]*model.ArtImage{
+				model.ArtRoleFront: artImg(t, "late-front"),
+				model.ArtRoleBack:  artImg(t, "back-hash"),
+				model.ArtRoleDisc:  artImg(t, "disc-hash"),
+			}}, nil
+		}}
+	mb := newRelMock(t, "[]")
+	mb.browsePages = []string{browsePage(2,
+		browseDoc(edGBMBID, []string{"CD"}, "GB", ""),
+		browseDoc(edUSMBID, []string{"CD"}, "US", ""),
+	)}
+	res, err := enrich.New(st, enrich.Config{
+		Contact: "test@example.com", MatchReleases: true,
+		Providers:          []enrich.Provider{aux},
+		MinRequestInterval: time.Millisecond,
+		MusicBrainzBaseURL: mb.server.URL,
+	}, nil).Run(ctx, enrich.RunOptions{}, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got := albumMBID(t, dbPath); got != edGBMBID {
+		t.Fatalf("album mbid = %q, want %s", got, edGBMBID)
+	}
+	if len(asks) != 1 || asks[0].MBID != edGBMBID {
+		t.Fatalf("album aux asks = %+v, want one carrying the matched release id", asks)
+	}
+	if res.AuxArtFetched != 2 {
+		t.Errorf("aux images = %d, want 2 (the offered front is dropped)", res.AuxArtFetched)
+	}
+	db := roDB(t, dbPath)
+	for _, role := range []string{"back", "disc"} {
+		var hash, source, provider string
+		err := db.QueryRow(`SELECT am.source_hash, am.source, am.provider FROM art_map am
+			JOIN album al ON al.id = am.entity_id
+			WHERE am.entity_type = 'album' AND am.role = ?`, role).Scan(&hash, &source, &provider)
+		if err != nil {
+			t.Fatalf("read %s row: %v", role, err)
+		}
+		if hash != role+"-hash" || source != string(model.SourceEnrichment) || provider != "fanart" {
+			t.Errorf("%s slot = %q %q/%q, want %s-hash enrichment/fanart", role, hash, source, provider, role)
+		}
+	}
+	if n := scalarInt(t, db,
+		"SELECT COUNT(*) FROM art_map WHERE entity_type='album' AND role='front'"); n != 0 {
+		t.Errorf("album front rows = %d, want 0 (the front stays the track's)", n)
+	}
+}
+
+// TestAuxOnlyProviderFillsTheNoArtAlbum: an album with no art at all leaves the release
+// queue for good once its mbid lands, so the match is the only moment an aux-only
+// provider can be asked about the slots beside the front. The front itself still comes
+// from the cover providers, and the aux-only provider is asked exactly once, under the
+// one capability it advertises.
+func TestAuxOnlyProviderFillsTheNoArtAlbum(t *testing.T) {
+	ctx := context.Background()
+	st, dbPath, lib := openStore(t)
+	seedAlbumEdition(t, st, lib.ID, "ess-a", "CD", "GB")
+
+	var asks []enrich.Request
+	aux := &enrich.Mock{ProviderName: "fanart", Caps: enrich.CapAuxArt,
+		EnrichFunc: func(_ context.Context, req enrich.Request) (*enrich.Candidate, error) {
+			asks = append(asks, req)
+			if req.Type != enrich.TargetRelease {
+				return nil, nil
+			}
+			return &enrich.Candidate{Art: map[model.ArtRole]*model.ArtImage{
+				model.ArtRoleFront: artImg(t, "late-front"),
+				model.ArtRoleBack:  artImg(t, "back-hash"),
+				model.ArtRoleDisc:  artImg(t, "disc-hash"),
+			}}, nil
+		}}
+	caa, hits := newReleaseCAAMock(t, pngBytes(t))
+	mb := newRelMock(t, "[]")
+	mb.browsePages = []string{browsePage(2,
+		browseDoc(edGBMBID, []string{"CD"}, "GB", ""),
+		browseDoc(edUSMBID, []string{"CD"}, "US", ""),
+	)}
+	res, err := enrich.New(st, enrich.Config{
+		Contact: "test@example.com", MatchReleases: true, FetchCoverArt: true,
+		Providers:          []enrich.Provider{aux},
+		MinRequestInterval: time.Millisecond,
+		MusicBrainzBaseURL: mb.server.URL, CoverArtBaseURL: caa,
+	}, nil).Run(ctx, enrich.RunOptions{}, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got := albumMBID(t, dbPath); got != edGBMBID {
+		t.Fatalf("album mbid = %q, want %s", got, edGBMBID)
+	}
+	if *hits != 1 {
+		t.Errorf("release cover fetches = %d, want 1 (the front is the cover providers')", *hits)
+	}
+	if res.ArtFetched != 1 || res.AuxArtFetched != 2 {
+		t.Errorf("art fetched = %d/%d aux, want 1/2 (the offered front is dropped)", res.ArtFetched, res.AuxArtFetched)
+	}
+	var relAsks []enrich.Request
+	for _, a := range asks {
+		if a.Want != enrich.CapAuxArt {
+			t.Errorf("aux-only provider asked with Want %v, want CapAuxArt always", a.Want)
+		}
+		if a.Type == enrich.TargetRelease {
+			relAsks = append(relAsks, a)
+		}
+	}
+	if len(relAsks) != 1 || relAsks[0].MBID != edGBMBID {
+		t.Fatalf("album aux asks = %+v, want one carrying the matched release id", relAsks)
+	}
+	db := roDB(t, dbPath)
+	if p := scalarStr(t, db, `SELECT am.provider FROM art_map am JOIN album al ON al.id = am.entity_id
+		WHERE am.entity_type = 'album' AND am.role = 'front'`); p != "coverartarchive" {
+		t.Errorf("album front provider = %q, want coverartarchive", p)
+	}
+	for _, role := range []string{"back", "disc"} {
+		var hash, source, provider string
+		err := db.QueryRow(`SELECT am.source_hash, am.source, am.provider FROM art_map am
+			JOIN album al ON al.id = am.entity_id
+			WHERE am.entity_type = 'album' AND am.role = ?`, role).Scan(&hash, &source, &provider)
+		if err != nil {
+			t.Fatalf("read %s row: %v", role, err)
+		}
+		if hash != role+"-hash" || source != string(model.SourceEnrichment) || provider != "fanart" {
+			t.Errorf("%s slot = %q %q/%q, want %s-hash enrichment/fanart", role, hash, source, provider, role)
+		}
+	}
+}
+
+// TestDualCapProviderIsAskedOnceForTheNoArtAlbum: a provider advertising cover and aux
+// together answers the whole gather under one CapCover request, so the aux-only leg
+// must not ask it again.
+func TestDualCapProviderIsAskedOnceForTheNoArtAlbum(t *testing.T) {
+	ctx := context.Background()
+	st, dbPath, lib := openStore(t)
+	seedAlbumEdition(t, st, lib.ID, "ess-a", "CD", "GB")
+
+	var relAsks []enrich.Request
+	dual := &enrich.Mock{ProviderName: "fanart", Caps: enrich.CapCover | enrich.CapAuxArt,
+		EnrichFunc: func(_ context.Context, req enrich.Request) (*enrich.Candidate, error) {
+			if req.Type != enrich.TargetRelease {
+				return nil, nil
+			}
+			relAsks = append(relAsks, req)
+			return &enrich.Candidate{Art: map[model.ArtRole]*model.ArtImage{
+				model.ArtRoleFront: artImg(t, "front-hash"),
+				model.ArtRoleBack:  artImg(t, "back-hash"),
+			}}, nil
+		}}
+	mb := newRelMock(t, "[]")
+	mb.browsePages = []string{browsePage(2,
+		browseDoc(edGBMBID, []string{"CD"}, "GB", ""),
+		browseDoc(edUSMBID, []string{"CD"}, "US", ""),
+	)}
+	res, err := enrich.New(st, enrich.Config{
+		Contact: "test@example.com", MatchReleases: true,
+		Providers:          []enrich.Provider{dual},
+		MinRequestInterval: time.Millisecond,
+		MusicBrainzBaseURL: mb.server.URL,
+	}, nil).Run(ctx, enrich.RunOptions{}, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got := albumMBID(t, dbPath); got != edGBMBID {
+		t.Fatalf("album mbid = %q, want %s", got, edGBMBID)
+	}
+	if len(relAsks) != 1 || relAsks[0].Want != enrich.CapCover {
+		t.Fatalf("album asks = %+v, want exactly one under CapCover", relAsks)
+	}
+	if res.ArtFetched != 1 || res.AuxArtFetched != 1 {
+		t.Errorf("art fetched = %d/%d aux, want 1/1", res.ArtFetched, res.AuxArtFetched)
+	}
+	db := roDB(t, dbPath)
+	for role, hash := range map[string]string{"front": "front-hash", "back": "back-hash"} {
+		if got := scalarStr(t, db, `SELECT am.source_hash FROM art_map am JOIN album al ON al.id = am.entity_id
+			WHERE am.entity_type = 'album' AND am.role = ?`, role); got != hash {
+			t.Errorf("album %s hash = %q, want %s", role, got, hash)
+		}
+	}
+}
+
+// TestLockedAlbumArtIsNeverAskedAbout: the whole-entity art lock covers the front and
+// every auxiliary role, so the store would refuse both writes. Fetching first would spend
+// a request per locked album on every forced run. The bare album pins the front half of
+// the gate and the one carrying an embedded cover pins the aux half.
+func TestLockedAlbumArtIsNeverAskedAbout(t *testing.T) {
+	ctx := context.Background()
+	st, dbPath, lib := openStore(t)
+	seedAlbumTrack(t, st, lib.ID, "ess-a", model.Track{
+		Artist: "Pink Floyd", AlbumArtist: "Pink Floyd", Album: "Wish You Were Here", TrackNo: 1,
+		Media: "CD", Country: "GB",
+	})
+	seedAlbumTrackWithCover(t, st, lib.ID, "ess-b", model.Track{
+		Artist: "Pink Floyd", AlbumArtist: "Pink Floyd", Album: "Wish You Were Here", TrackNo: 1,
+		Media: "CD", Country: "JP",
+	}, pngBytes(t))
+
+	db := roDB(t, dbPath)
+	for _, country := range []string{"GB", "JP"} {
+		pid := scalarStr(t, db, "SELECT pid FROM album WHERE country = ?", country)
+		if err := st.SetArtLock(ctx, model.ArtAlbum, model.PID(pid), model.ArtRoleFront, true); err != nil {
+			t.Fatalf("lock %s album art: %v", country, err)
+		}
+	}
+
+	var asks []enrich.Request
+	aux := &enrich.Mock{ProviderName: "fanart", Caps: enrich.CapAuxArt,
+		EnrichFunc: func(_ context.Context, req enrich.Request) (*enrich.Candidate, error) {
+			if req.Type == enrich.TargetRelease {
+				asks = append(asks, req)
+			}
+			return nil, nil
+		}}
+	caa, hits := newReleaseCAAMock(t, pngBytes(t))
+	mb := newRelMock(t, "[]")
+	mb.browsePages = []string{browsePage(3,
+		browseDoc(edGBMBID, []string{"CD"}, "GB", ""),
+		browseDoc(edUSMBID, []string{"CD"}, "US", ""),
+		browseDoc(edJPMBID, []string{"CD"}, "JP", ""),
+	)}
+	res, err := enrich.New(st, enrich.Config{
+		Contact: "test@example.com", MatchReleases: true, FetchCoverArt: true,
+		Providers:          []enrich.Provider{aux},
+		MinRequestInterval: time.Millisecond,
+		MusicBrainzBaseURL: mb.server.URL, CoverArtBaseURL: caa,
+	}, nil).Run(ctx, enrich.RunOptions{}, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	// Both ids still land: the lock holds the artwork, not the identity.
+	if res.AlbumsMatched != 2 {
+		t.Fatalf("albums matched = %d, want 2", res.AlbumsMatched)
+	}
+	if *hits != 0 {
+		t.Errorf("release cover fetches = %d, want 0 under a locked front", *hits)
+	}
+	if len(asks) != 0 {
+		t.Errorf("album aux asks = %+v, want none under the whole-entity lock", asks)
+	}
+	if n := scalarInt(t, db, "SELECT COUNT(*) FROM art_map WHERE entity_type='album'"); n != 0 {
+		t.Errorf("album art_map rows = %d, want 0", n)
 	}
 }

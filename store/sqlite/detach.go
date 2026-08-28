@@ -118,7 +118,7 @@ func (s *Store) DetachItemFromMBIDAlbum(ctx context.Context, itemPID model.PID) 
 		if err := affected.collect(ctx, tx, itemID); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
-		if err := resolveAndLinkEntities(ctx, tx, itemID, tr, filePath, affected); err != nil {
+		if err := resolveAndLinkEntities(ctx, tx, itemID, tr, filePath, "", 0, affected); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		if err := affected.collect(ctx, tx, itemID); err != nil {

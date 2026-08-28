@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -109,12 +110,15 @@ func newEntityEditCmd(g *globals) *cobra.Command {
 		Long: "Edit identifiers and sort-name overrides on a shared entity. --write-back also " +
 			"fans the values that round-trip through a scan across the entity's member files' " +
 			"on-disk tags: an album's BARCODE, LABEL, CATALOGNUMBER, RELEASECOUNTRY, and " +
-			"ALBUMSORT, and an artist's ARTISTSORT. A release-group field, a type, an entity " +
+			"ALBUMSORT, and an artist's ARTISTSORT. A release-group field, a type, a set entity " +
 			"MBID, and an album's media stay catalog-only.\n\n" +
 			"Clearing an album's or release group's mbid with `--set mbid=` re-keys the chain, " +
-			"but the member files still name the id, so the clear lasts only until a scan " +
+			"but the member files still name the id, so a catalog-only clear lasts until a scan " +
 			"re-resolves them: their next retag, move, or content change, and not every scan. " +
-			"Stripping the tags from those files is what makes it durable.",
+			"With --write-back the clear also strips that one id from every member file, which " +
+			"is what makes it durable. An album clear strips MUSICBRAINZ_ALBUMID and a " +
+			"release-group clear strips MUSICBRAINZ_RELEASEGROUPID; neither takes the other's, " +
+			"since the identity the clear left standing still has to resolve.",
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			et := model.MergeEntity(args[0])
@@ -134,8 +138,13 @@ func newEntityEditCmd(g *globals) *cobra.Command {
 			rep, err := m.EditEntity(ctx(cmd), et, pid, edits, waxbin.EntityEditOptions{
 				WriteBack: writeBack, Lock: lockChange(noLock, keepLock), Force: force,
 			})
+			// Classified before surfacing, which reports the failures and returns nil.
+			warning := entityClearDurabilityWarning(et, edits, writeBack, err)
 			if err := surfaceWriteBack(cmd, err); err != nil {
 				return err
+			}
+			if warning != "" {
+				fmt.Fprintln(errOut(cmd), warning)
 			}
 			// A clear that re-keyed onto a twin took this entity with it, so naming the
 			// pid the user typed would name a row that no longer exists.
@@ -155,6 +164,34 @@ func newEntityEditCmd(g *globals) *cobra.Command {
 	f.BoolVar(&force, "force", false, "override a locked entity field")
 	f.BoolVar(&writeBack, "write-back", false, "also fan the values across the entity's member files' on-disk tags")
 	return cmd
+}
+
+// entityClearDurabilityWarning returns the caveat to print after an album or release-group
+// mbid clear, or "" when there is none. The chain the members resolve onto comes from the
+// ids in their files, so a clear those files still name is undone by the next scan that
+// re-resolves them. Any other edit, and an artist clear (which re-keys nothing), gets no
+// caveat.
+func entityClearDurabilityWarning(et model.MergeEntity, edits map[string]string, writeBack bool, err error) string {
+	if et != model.MergeAlbum && et != model.MergeReleaseGroup {
+		return ""
+	}
+	if v, ok := edits["mbid"]; !ok || strings.TrimSpace(v) != "" {
+		return ""
+	}
+	if !writeBack {
+		return "warning: the member files still name the id, so the linkage returns on their " +
+			"next retag, move, or content change; pass --write-back to strip it"
+	}
+	// A refused or failed strip is reported as a warning and leaves a nil error behind,
+	// so without this the caveat would be silent in the one case it matters most.
+	var wbErr *waxbin.WriteBackError
+	if errors.As(err, &wbErr) {
+		return "warning: the strip did not reach every member, so those files still name the " +
+			"id and re-fork the identity on their next retag, move, or content change. A file " +
+			"shared by several items or carrying offset windows is refused every time, so an " +
+			"album ripped to one backing file with a cue sheet cannot be made durable this way"
+	}
+	return ""
 }
 
 func newEntityShowCmd(g *globals) *cobra.Command {
