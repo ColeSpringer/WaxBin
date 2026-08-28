@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"strings"
 
 	"github.com/colespringer/waxbin/internal/pathx"
 	"github.com/colespringer/waxbin/model"
@@ -647,6 +648,17 @@ func nullStr(s string) any {
 		return nil
 	}
 	return s
+}
+
+// normMBID canonicalizes a MusicBrainz id for the column: trimmed and lowercased.
+// The identity keys already lowercase (identity.ArtistKey and its siblings) while
+// model.IsMBID accepts either case, so a column written verbatim can hold a spelling
+// no key ever computes and no probe comparing with a bare = ever finds. Folding on
+// write instead of on read keeps the partial mbid indexes usable and lets the
+// duplicate finders group on the column directly. A UUID's canonical form is
+// lowercase, so nothing is lost.
+func normMBID(s string) string {
+	return strings.ToLower(strings.TrimSpace(s))
 }
 
 func nullInt(n int) any {

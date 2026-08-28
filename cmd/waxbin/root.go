@@ -87,6 +87,7 @@ func newRootCmd(g *globals) *cobra.Command {
 		newLockCmd(g),
 		newUnlockCmd(g),
 		newProvenanceCmd(g),
+		newAcquisitionCmd(g),
 		newUserCmd(g),
 		newStateCmd(g),
 		newStatsCmd(g),

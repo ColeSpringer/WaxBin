@@ -344,3 +344,90 @@ func TestItemsMissingMBID(t *testing.T) {
 		t.Errorf("limited call = %d sampled of %d, want 1 of 2", len(sample), total)
 	}
 }
+
+// TestDuplicateEntitiesByEffectiveMBID builds the split the resolve-time adoption
+// exists to prevent, one row holding the id in its column and its twin holding it in an
+// mbid: match_key, and asserts both finders group them. Grouping on the column alone
+// reports nothing here, which is the whole reason the effective-id expression exists.
+func TestDuplicateEntitiesByEffectiveMBID(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	const rgMBID = "11111111-2222-3333-4444-555555555555"
+	const relMBID = "66666666-7777-8888-9999-aaaaaaaaaaaa"
+
+	// The heuristic pair enrichment later stamped.
+	putTrack(t, st, lib.ID, trackSpec{
+		path: "/lib/Band/Album/01.flac", essence: "e1", content: "c1", title: "One",
+		artist: "Band", album: "Album",
+	})
+	if _, err := st.write.ExecContext(ctx,
+		"UPDATE album SET mbid=? WHERE title='Album'", relMBID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.write.ExecContext(ctx,
+		"UPDATE release_group SET mbid=? WHERE title='Album'", rgMBID); err != nil {
+		t.Fatal(err)
+	}
+	// The mbid-keyed twin a pre-adoption build would have forked.
+	if _, err := st.write.ExecContext(ctx, `INSERT INTO release_group(pid, title, sort_key, type, match_key)
+		VALUES ('rg-twin','Album','album','album',?)`, "mbid:"+rgMBID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.write.ExecContext(ctx, `INSERT INTO album(pid, title, sort_key, match_key)
+		VALUES ('al-twin','Album','album',?)`, "mbid:"+relMBID); err != nil {
+		t.Fatal(err)
+	}
+
+	albums, err := st.DuplicateAlbums(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(albums) != 1 || len(albums[0].Members) != 2 {
+		t.Fatalf("DuplicateAlbums = %+v, want one pair", albums)
+	}
+	if albums[0].EntityType != model.MergeAlbum {
+		t.Errorf("album set type = %q, want album", albums[0].EntityType)
+	}
+	// Survivor first: the row backing a track, not the childless twin.
+	if albums[0].Members[0].PID == "al-twin" {
+		t.Errorf("survivor = %s, want the album holding the track", albums[0].Members[0].PID)
+	}
+
+	groups, err := st.DuplicateReleaseGroups(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(groups) != 1 || len(groups[0].Members) != 2 {
+		t.Fatalf("DuplicateReleaseGroups = %+v, want one pair", groups)
+	}
+	if groups[0].EntityType != model.MergeReleaseGroup {
+		t.Errorf("group set type = %q, want release_group", groups[0].EntityType)
+	}
+	if groups[0].Members[0].PID == "rg-twin" {
+		t.Errorf("survivor = %s, want the group holding the album", groups[0].Members[0].PID)
+	}
+}
+
+// TestDuplicateFindersIgnoreDistinctIDs guards the effective-id expression against
+// pairing rows that merely both lack an id, which a COALESCE to ” would do.
+func TestDuplicateFindersIgnoreDistinctIDs(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	putTrack(t, st, lib.ID, trackSpec{
+		path: "/lib/A/One/01.flac", essence: "e1", content: "c1", title: "One", artist: "A", album: "One",
+	})
+	putTrack(t, st, lib.ID, trackSpec{
+		path: "/lib/B/Two/02.flac", essence: "e2", content: "c2", title: "Two", artist: "B", album: "Two",
+	})
+	albums, err := st.DuplicateAlbums(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	groups, err := st.DuplicateReleaseGroups(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(albums) != 0 || len(groups) != 0 {
+		t.Errorf("unenriched rows reported as duplicates: albums=%+v groups=%+v", albums, groups)
+	}
+}

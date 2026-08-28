@@ -190,7 +190,7 @@ func (m *bookRenameMember) overlaidCredits() []string {
 // per-group reads, so an earlier group's rename or merge is visible to later ones; a
 // cross-rename swap inside one batch therefore falls back to split for the second
 // group (documented above, not optimized).
-func renameEntitiesForEditsTx(ctx context.Context, tx *sql.Tx, entries []editEntry, affected *affectedRollups, op string) error {
+func renameEntitiesForEditsTx(ctx context.Context, tx *sql.Tx, log logger, entries []editEntry, affected *affectedRollups, op string) error {
 	var members []*renameMember
 	var books []*bookRenameMember
 	for _, e := range entries {
@@ -244,7 +244,7 @@ func renameEntitiesForEditsTx(ctx context.Context, tx *sql.Tx, entries []editEnt
 	}
 	slices.Sort(ids)
 	for _, id := range ids {
-		if err := renameAlbumChainTx(ctx, tx, id, groups[id], affected, op); err != nil {
+		if err := renameAlbumChainTx(ctx, tx, log, id, groups[id], affected, op); err != nil {
 			return err
 		}
 	}
@@ -1080,7 +1080,7 @@ func uniformValue[T comparable](group []*renameMember, proj func(*renameMember) 
 // returns nil, and the per-item apply loop afterwards splits the members off exactly
 // as it does today; on success that loop is transparent, since it computes the same
 // keys through the same helpers and hits the renamed or merged rows.
-func renameAlbumChainTx(ctx context.Context, tx *sql.Tx, albumID int64, group []*renameMember, affected *affectedRollups, op string) error {
+func renameAlbumChainTx(ctx context.Context, tx *sql.Tx, log logger, albumID int64, group []*renameMember, affected *affectedRollups, op string) error {
 	// All-members: the batch must cover every track the album has.
 	var total int
 	if err := tx.QueryRowContext(ctx,
@@ -1158,7 +1158,7 @@ func renameAlbumChainTx(ctx context.Context, tx *sql.Tx, albumID int64, group []
 		if titleEdited {
 			rgTitle = newTitle
 		}
-		newID, err := resolveReleaseGroup(ctx, tx, newRGKey, rgTitle, 0, group[0].tr.MBReleaseGroupID, affected)
+		newID, err := resolveReleaseGroup(ctx, tx, log, newRGKey, rgTitle, 0, group[0].tr.MBReleaseGroupID, affected)
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}

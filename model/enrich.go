@@ -96,6 +96,13 @@ type ArtistEnrichment struct {
 	// store resolves each target MBID to an existing catalog artist and skips the
 	// ones not present (no stub artists are created).
 	Relations []ArtistRelationInput
+	// Art is the artist's front image and AuxArt its role-tagged others, background
+	// most of all, which is where artist imagery lands. Both are applied fill-when-empty
+	// per role at the artist's own rung and skipped entirely under its art lock, exactly
+	// as at the release-group rung. No built-in provider answers either: the Cover Art
+	// Archive is release-group keyed, so these fill only for an injected provider.
+	Art    *ArtImage
+	AuxArt map[ArtRole]*ArtImage
 }
 
 // ArtistRelationInput is one directed artist relation to persist. Inbound reverses

@@ -1,8 +1,8 @@
 -- Sparse item-level origin provenance. A row exists only for an item with
 -- evidence of external origin: either an acquisition WaxBin performed, or the
--- file's own SOURCE_URL/SOURCE_ID tags. Evidence from an event always wins
--- over evidence from a tag. An item with neither has no row and reads as
--- source:local. This is the historical attribution record, distinct from an
+-- file's own SOURCE_URL/SOURCE_ID tags. A non-empty field of an event beats a
+-- tag; emptiness is never evidence, so a re-record merges field by field rather
+-- than clobbering. An item with neither has no row and reads as source:local. This is the historical attribution record, distinct from an
 -- episode's live enclosure_url (the download pointer retention uses later).
 CREATE TABLE acquisition (
   item_id          INTEGER PRIMARY KEY REFERENCES playable_item(id) ON DELETE CASCADE,

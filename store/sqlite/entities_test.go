@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/colespringer/waxbin/identity"
@@ -616,4 +617,170 @@ func TestAlbumIdentifierBackfill(t *testing.T) {
 func albumChanges(t *testing.T, st *Store) int {
 	t.Helper()
 	return scalarInt(t, st, "SELECT COUNT(*) FROM change_log WHERE entity_type = 'album'")
+}
+
+// TestMBIDAdoptionJoinsEnrichedEntity covers the resolve-time adoption: enrichment
+// fills the album and release-group mbid columns without moving either match_key, so a
+// file that later arrives tagged with those ids computes an mbid: key that matches
+// nothing. It must join the rows already holding its identity, keeping their pids and
+// everything attached to them, rather than forking a second pair.
+func TestMBIDAdoptionJoinsEnrichedEntity(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+
+	putTrack(t, st, lib.ID, trackSpec{
+		path: "/lib/Band/Album/01.flac", essence: "e1", content: "c1", title: "One",
+		artist: "Band", album: "Album", year: 2001,
+	})
+	albumPID := model.PID(scalarStr(t, st, "SELECT pid FROM album WHERE title='Album'"))
+	rgPID := model.PID(scalarStr(t, st, "SELECT pid FROM release_group WHERE title='Album'"))
+	albumID := int64(scalarInt(t, st, "SELECT id FROM album WHERE pid=?", string(albumPID)))
+	rgID := int64(scalarInt(t, st, "SELECT id FROM release_group WHERE pid=?", string(rgPID)))
+
+	if _, err := st.SetEntityStar(ctx, "", model.MergeAlbum, albumPID, true, nil); err != nil {
+		t.Fatalf("star album: %v", err)
+	}
+	if err := st.SetEntityArt(ctx, model.ArtAlbum, albumPID, model.ArtRoleFront, tinyPNG(t), "image/png",
+		model.Attribution{}, model.LockUnchanged, false); err != nil {
+		t.Fatalf("set album art: %v", err)
+	}
+	if _, err := st.EditEntityFields(ctx, model.MergeAlbum, albumPID,
+		map[string]string{"label": "Curated Label"}, model.Attribution{}, model.LockUnchanged, false); err != nil {
+		t.Fatalf("curate album: %v", err)
+	}
+
+	// Exactly what enrichment does: the column moves, the key does not. Uppercase on
+	// the way in, so the folding on write is under test too.
+	const rgMBID = "A1B2C3D4-1111-2222-3333-444455556666"
+	const relMBID = "B2C3D4E5-1111-2222-3333-444455556666"
+	if err := st.ApplyReleaseGroupEnrichment(ctx, model.ReleaseGroupEnrichment{
+		ReleaseGroupID: rgID, PID: rgPID, Matched: true, MBID: rgMBID,
+	}); err != nil {
+		t.Fatalf("enrich release group: %v", err)
+	}
+	if err := st.ApplyAlbumReleaseMatch(ctx, model.AlbumReleaseMatch{
+		AlbumID: albumID, PID: albumPID, Matched: true, MBID: relMBID, Provider: "musicbrainz",
+	}); err != nil {
+		t.Fatalf("enrich album: %v", err)
+	}
+	if got := scalarStr(t, st, "SELECT mbid FROM album WHERE pid=?", string(albumPID)); got != strings.ToLower(relMBID) {
+		t.Fatalf("album mbid = %q, want the lowercased id", got)
+	}
+
+	// A second file, in a folder of its own so no heuristic key could unify it, tagged
+	// with the same ids in the casing MusicBrainz hands out.
+	putTrack(t, st, lib.ID, trackSpec{
+		path: "/lib/Band/Other Folder/02.flac", essence: "e2", content: "c2", title: "Two",
+		artist: "Band", album: "Album", year: 2001,
+		mbReleaseGroup: strings.ToLower(rgMBID), mbRelease: strings.ToLower(relMBID),
+	})
+
+	if n := scalarInt(t, st, "SELECT COUNT(*) FROM album"); n != 1 {
+		t.Errorf("album count = %d, want 1 (the tagged file adopts the enriched row)", n)
+	}
+	if n := scalarInt(t, st, "SELECT COUNT(*) FROM release_group"); n != 1 {
+		t.Errorf("release_group count = %d, want 1", n)
+	}
+	if got := scalarStr(t, st, "SELECT pid FROM album"); got != string(albumPID) {
+		t.Errorf("album pid = %s, want the original %s", got, albumPID)
+	}
+	if got := scalarStr(t, st, "SELECT pid FROM release_group"); got != string(rgPID) {
+		t.Errorf("release_group pid = %s, want the original %s", got, rgPID)
+	}
+	if n := scalarInt(t, st, "SELECT COUNT(*) FROM track WHERE album_id=?", albumID); n != 2 {
+		t.Errorf("tracks on the album = %d, want 2", n)
+	}
+	// Everything hanging off the adopted row survived, which is the point of adopting
+	// rather than forking.
+	state, err := st.EntityPlayState(ctx, "", model.MergeAlbum, albumPID)
+	if err != nil {
+		t.Fatalf("read album state: %v", err)
+	}
+	if !state.Starred {
+		t.Error("album star did not survive adoption")
+	}
+	if n := scalarInt(t, st,
+		"SELECT COUNT(*) FROM art_map WHERE entity_type='album' AND entity_id=?", albumID); n == 0 {
+		t.Error("album art did not survive adoption")
+	}
+	if got := scalarStr(t, st, "SELECT COALESCE(label,'') FROM album WHERE id=?", albumID); got != "Curated Label" {
+		t.Errorf("album label = %q, want the curated value to survive adoption", got)
+	}
+}
+
+// TestMBIDAdoptionFoldsTagCasing pins the other half of the casing rule: the column
+// holds the canonical lowercase id, and a file tagged with the uppercase spelling still
+// adopts, because identity's keys lowercase before the probe compares.
+func TestMBIDAdoptionFoldsTagCasing(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	const relMBID = "c3d4e5f6-1111-2222-3333-444455556666"
+
+	putTrack(t, st, lib.ID, trackSpec{
+		path: "/lib/Band/Album/01.flac", essence: "e1", content: "c1", title: "One",
+		artist: "Band", album: "Album",
+	})
+	albumPID := scalarStr(t, st, "SELECT pid FROM album WHERE title='Album'")
+	if _, err := st.write.ExecContext(ctx, "UPDATE album SET mbid=? WHERE pid=?", relMBID, albumPID); err != nil {
+		t.Fatal(err)
+	}
+	putTrack(t, st, lib.ID, trackSpec{
+		path: "/lib/Band/Elsewhere/02.flac", essence: "e2", content: "c2", title: "Two",
+		artist: "Band", album: "Album", mbRelease: strings.ToUpper(relMBID),
+	})
+	if n := scalarInt(t, st, "SELECT COUNT(*) FROM album"); n != 1 {
+		t.Errorf("album count = %d, want 1 (an uppercase tag names the same release)", n)
+	}
+	if got := scalarStr(t, st, "SELECT pid FROM album"); got != albumPID {
+		t.Errorf("album pid = %s, want the original %s", got, albumPID)
+	}
+}
+
+// TestAdoptedMemberSurvivesAnEdit closes the other half of resolve-time adoption. A member
+// joined to a heuristically keyed album by the id in its own file has no release id
+// anywhere in the catalog except that album's column, and the edit path rebuilds a track's
+// tags from the catalog. Reading only the match_key prefix left the member with no id, so
+// re-resolution computed its own folder's heuristic key, missed, and forked it onto an
+// album of its own on any entity-touching edit.
+func TestAdoptedMemberSurvivesAnEdit(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	const relMBID = "eeeeeeee-1111-2222-3333-444444444444"
+
+	putTrack(t, st, lib.ID, trackSpec{
+		path: "/lib/Band/Album/01.flac", essence: "e1", content: "c1", title: "One",
+		artist: "Band", album: "Album",
+	})
+	albumPID := scalarStr(t, st, "SELECT pid FROM album")
+	if _, err := st.write.ExecContext(ctx, "UPDATE album SET mbid=? WHERE pid=?", relMBID, albumPID); err != nil {
+		t.Fatal(err)
+	}
+	// A member in another folder, joined to that album only through the id in its file.
+	adopted := putTrack(t, st, lib.ID, trackSpec{
+		path: "/lib/Band/Elsewhere/02.flac", essence: "e2", content: "c2", title: "Two",
+		artist: "Band", album: "Album", mbRelease: relMBID,
+	})
+	if n := scalarInt(t, st, "SELECT COUNT(*) FROM album"); n != 1 {
+		t.Fatalf("album count = %d, want the adopted member on one album", n)
+	}
+
+	if err := st.EditItemFields(ctx, adopted.ItemPID, map[string]string{"genre": "Rock"},
+		model.Attribution{}, model.LockUnchanged, false); err != nil {
+		t.Fatalf("edit the adopted member: %v", err)
+	}
+	if n := scalarInt(t, st, "SELECT COUNT(*) FROM album"); n != 1 {
+		t.Errorf("album count after the edit = %d, want the member to have stayed put", n)
+	}
+	if got := scalarStr(t, st, "SELECT pid FROM album"); got != albumPID {
+		t.Errorf("album pid = %s, want the original %s", got, albumPID)
+	}
+	// And the escape hatch still works for it: detach is how one member comes off an
+	// album an id ties it to, adopted or keyed.
+	rep, err := st.DetachItemFromMBIDAlbum(ctx, adopted.ItemPID)
+	if err != nil {
+		t.Fatalf("detach the adopted member: %v", err)
+	}
+	if rep.NewAlbumPID == "" || rep.NewAlbumPID == rep.OldAlbumPID {
+		t.Errorf("detach report = %+v, want the member on an album of its own", rep)
+	}
 }

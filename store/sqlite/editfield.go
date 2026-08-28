@@ -160,11 +160,11 @@ func (s *Store) EditItemFields(ctx context.Context, itemPID model.PID, edits map
 			return err
 		}
 		affected := newAffectedRollups()
-		if err := renameEntitiesForEditsTx(ctx, tx, entries, affected, op); err != nil {
+		if err := renameEntitiesForEditsTx(ctx, tx, s.log, entries, affected, op); err != nil {
 			return err
 		}
 		for _, e := range entries {
-			if err := applyItemEditTx(ctx, tx, e.pid, e.itemID, e.kind, e.fields, e.norm, attr, lock, op, affected); err != nil {
+			if err := applyItemEditTx(ctx, tx, s.log, e.pid, e.itemID, e.kind, e.fields, e.norm, attr, lock, op, affected); err != nil {
 				return err
 			}
 		}
@@ -257,10 +257,10 @@ func validateEditTargetTx(ctx context.Context, tx *sql.Tx, itemID int64, kind st
 // kind-specific columns and re-resolves entities into the shared affected set (the
 // caller finalizes the rollups so a batch can union them once), records a provenance
 // row per field, and emits one item change delta. It does NOT call maintainRollupsTx.
-func applyItemEditTx(ctx context.Context, tx *sql.Tx, itemPID model.PID, itemID int64, kind string, fields []string, norm map[string]string, attr model.Attribution, lock model.LockChange, op string, affected *affectedRollups) error {
+func applyItemEditTx(ctx context.Context, tx *sql.Tx, log logger, itemPID model.PID, itemID int64, kind string, fields []string, norm map[string]string, attr model.Attribution, lock model.LockChange, op string, affected *affectedRollups) error {
 	switch kind {
 	case string(model.KindTrack):
-		if err := editTrackFieldsTx(ctx, tx, itemID, fields, norm, op, affected); err != nil {
+		if err := editTrackFieldsTx(ctx, tx, log, itemID, fields, norm, op, affected); err != nil {
 			return err
 		}
 	case string(model.KindBook):
@@ -332,11 +332,11 @@ func (s *Store) EditManyFields(ctx context.Context, itemPIDs []model.PID, edits 
 			return err
 		}
 		affected := newAffectedRollups()
-		if err := renameEntitiesForEditsTx(ctx, tx, entries, affected, op); err != nil {
+		if err := renameEntitiesForEditsTx(ctx, tx, s.log, entries, affected, op); err != nil {
 			return err
 		}
 		for _, e := range entries {
-			if err := applyItemEditTx(ctx, tx, e.pid, e.itemID, e.kind, e.fields, e.norm, attr, lock, op, affected); err != nil {
+			if err := applyItemEditTx(ctx, tx, s.log, e.pid, e.itemID, e.kind, e.fields, e.norm, attr, lock, op, affected); err != nil {
 				return err
 			}
 			res.Edited = append(res.Edited, e.pid)
@@ -400,11 +400,11 @@ func (s *Store) EditItemsFields(ctx context.Context, edits []model.ItemFieldEdit
 			return err
 		}
 		affected := newAffectedRollups()
-		if err := renameEntitiesForEditsTx(ctx, tx, entries, affected, op); err != nil {
+		if err := renameEntitiesForEditsTx(ctx, tx, s.log, entries, affected, op); err != nil {
 			return err
 		}
 		for _, e := range entries {
-			if err := applyItemEditTx(ctx, tx, e.pid, e.itemID, e.kind, e.fields, e.norm, attr, lock, op, affected); err != nil {
+			if err := applyItemEditTx(ctx, tx, s.log, e.pid, e.itemID, e.kind, e.fields, e.norm, attr, lock, op, affected); err != nil {
 				return err
 			}
 			res.Edited = append(res.Edited, e.pid)
@@ -425,7 +425,7 @@ func (s *Store) EditItemsFields(ctx context.Context, edits []model.ItemFieldEdit
 // editTrackFieldsTx applies the edits to a track item. It mutates the loaded track,
 // updates the title on playable_item, and when an entity field changed re-resolves
 // the entities and their rollups and rebuilds the FTS row.
-func editTrackFieldsTx(ctx context.Context, tx *sql.Tx, itemID int64, fields []string, edits map[string]string, op string, affected *affectedRollups) error {
+func editTrackFieldsTx(ctx context.Context, tx *sql.Tx, log logger, itemID int64, fields []string, edits map[string]string, op string, affected *affectedRollups) error {
 	tr, title, filePath, err := loadTrackForEditTx(ctx, tx, itemID)
 	if err != nil {
 		return err
@@ -492,7 +492,7 @@ func editTrackFieldsTx(ctx context.Context, tx *sql.Tx, itemID int64, fields []s
 		}
 		// No prior path and no file id: an edit moves no file, so the folder the album
 		// key names is the one the item still sits in.
-		if err := resolveAndLinkEntities(ctx, tx, itemID, tr, filePath, "", 0, affected); err != nil {
+		if err := resolveAndLinkEntities(ctx, tx, log, itemID, tr, filePath, "", 0, affected); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		if err := affected.collect(ctx, tx, itemID); err != nil {
@@ -844,22 +844,23 @@ func loadTrackForEditTx(ctx context.Context, tx *sql.Tx, itemID int64) (model.Tr
 		tr.Artists = nil
 	}
 
-	if err := adoptEntityKeyMBIDs(ctx, tx, itemID, &tr); err != nil {
+	// The primary file's path anchors the folder-keyed album identity. A missing primary
+	// (an archived item) is fine here. Re-resolution then keys the album by folder ".",
+	// the same as a fully rootless scan would. It is read before the id adoption below,
+	// which needs it to work out which key this member computes on its own.
+	var path []byte
+	err = tx.QueryRowContext(ctx, `SELECT f.path FROM item_file itf JOIN file f ON f.id = itf.file_id
+		WHERE itf.item_id = ? AND itf.role = 'primary'`, itemID).Scan(&path)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return tr, "", nil, waxerr.Wrap(waxerr.CodeIO, "store.EditItemFields", err)
+	}
+
+	if err := adoptEntityKeyMBIDs(ctx, tx, itemID, path, &tr); err != nil {
 		return tr, "", nil, waxerr.Wrap(waxerr.CodeIO, "store.EditItemFields", err)
 	}
 
 	var title string
 	if err := tx.QueryRowContext(ctx, "SELECT title FROM playable_item WHERE id = ?", itemID).Scan(&title); err != nil {
-		return tr, "", nil, waxerr.Wrap(waxerr.CodeIO, "store.EditItemFields", err)
-	}
-
-	// The primary file's path anchors the folder-keyed album identity. A missing primary
-	// (an archived item) is fine here. Re-resolution then keys the album by folder ".",
-	// the same as a fully rootless scan would.
-	var path []byte
-	err = tx.QueryRowContext(ctx, `SELECT f.path FROM item_file itf JOIN file f ON f.id = itf.file_id
-		WHERE itf.item_id = ? AND itf.role = 'primary'`, itemID).Scan(&path)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return tr, "", nil, waxerr.Wrap(waxerr.CodeIO, "store.EditItemFields", err)
 	}
 	return tr, title, path, nil
@@ -881,29 +882,44 @@ func artistListDerived(names, split []string) bool {
 
 // adoptEntityKeyMBIDs carries the release ids an item's current album and release_group
 // rows are keyed on into the loaded track, so re-resolution computes the keys those rows
-// actually own and an MBID-identified album is never re-keyed heuristically. It reads the
-// match_key prefix, not the mbid columns: enrichment fills those columns on heuristically
-// keyed rows too, and using the column would compute an mbid: key no row owns and fork
-// the member off its album. Keys store the id lowercase and the identity functions
-// lowercase again, so the round trip is stable. An item with no album is a no-op.
+// actually own and an MBID-identified album is never re-keyed heuristically. Keys store
+// the id lowercase and the identity functions lowercase again, so the round trip is
+// stable. An item with no album is a no-op.
+//
+// It reads the match_key prefix first, and the mbid column only as a fallback, for a
+// member whose own computed key would not find the album it is on. The column alone is
+// not enough evidence: enrichment fills it on heuristically keyed rows too, and lending
+// it to every member would make the whole album compute an mbid: key, which the chain
+// rename would then write onto the row, and the album's untagged members would miss it
+// forever. Lending it only where the heuristic key misses is exactly the population
+// resolve-time adoption creates, a member joined to a heuristically keyed album by the id
+// in its own file. Without the fallback that member drops its ids on any entity-touching
+// edit and forks onto an album of its own until something re-resolves it.
 //
 // Taking one member out of an identified album is therefore a gesture of its own rather
 // than something an edit can express: DetachItemFromMBIDAlbum (detach.go) re-resolves the
 // member with both ids emptied.
-func adoptEntityKeyMBIDs(ctx context.Context, tx *sql.Tx, itemID int64, tr *model.Track) error {
-	var albumKey, rgKey sql.NullString
-	err := tx.QueryRowContext(ctx, `SELECT al.match_key, rg.match_key FROM track t
+func adoptEntityKeyMBIDs(ctx context.Context, tx *sql.Tx, itemID int64, path []byte, tr *model.Track) error {
+	var albumKey, rgKey, albumMBID sql.NullString
+	err := tx.QueryRowContext(ctx, `SELECT al.match_key, rg.match_key, al.mbid FROM track t
 		LEFT JOIN album al ON al.id = t.album_id
 		LEFT JOIN release_group rg ON rg.id = al.release_group_id
-		WHERE t.item_id = ?`, itemID).Scan(&albumKey, &rgKey)
+		WHERE t.item_id = ?`, itemID).Scan(&albumKey, &rgKey, &albumMBID)
 	if err != nil {
 		return err
 	}
-	if id, ok := strings.CutPrefix(albumKey.String, "mbid:"); ok {
-		tr.MBReleaseID = id
-	}
 	if id, ok := strings.CutPrefix(rgKey.String, "mbid:"); ok {
 		tr.MBReleaseGroupID = id
+	}
+	if id, ok := strings.CutPrefix(albumKey.String, "mbid:"); ok {
+		tr.MBReleaseID = id
+		return nil
+	}
+	if albumKey.String == "" || albumMBID.String == "" {
+		return nil
+	}
+	if _, _, own := albumChainKeys(*tr, path); own != albumKey.String {
+		tr.MBReleaseID = albumMBID.String
 	}
 	return nil
 }

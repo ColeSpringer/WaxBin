@@ -2455,9 +2455,11 @@ type AcquiredFile struct {
 // AcquiredMeta carries the origin provenance recorded against an acquired item plus
 // the per-kind ingest options.
 type AcquiredMeta struct {
-	// Origin provenance recorded in the acquisition table. SourceType defaults to
-	// manual when empty; an explicitly acquired item is never plain local. Local is
-	// the read-side default for an item with no acquisition row.
+	// Origin provenance recorded in the acquisition table. An empty SourceType makes no
+	// claim about the mechanism: the store writes manual when it first records the row,
+	// since an explicitly acquired item is never plain local, and leaves a standing type
+	// alone on a re-record. Passing manual is a claim and does replace one. Local is the
+	// read-side default for an item with no acquisition row.
 	SourceType      model.SourceType
 	SourceURL       string
 	SourceID        string
@@ -2603,15 +2605,14 @@ func (l *Library) importAcquiredEpisode(ctx context.Context, file AcquiredFile, 
 	return out, nil
 }
 
-// acquisitionInput builds the provenance row input from acquired metadata, defaulting
-// the source type to manual (an explicitly acquired item is never plain local).
+// acquisitionInput builds the provenance row input from acquired metadata. The source
+// type is carried through as given, empty included: the store supplies 'manual' when it
+// first records a row, and reads an empty type on a re-record as "no claim about the
+// mechanism" rather than as a downgrade. Defaulting here would make an unstated type
+// indistinguishable from a stated 'manual' before the store ever saw it.
 func acquisitionInput(meta AcquiredMeta) *model.AcquisitionInput {
-	st := meta.SourceType
-	if st == "" {
-		st = model.SourceManual
-	}
 	return &model.AcquisitionInput{
-		SourceType: st, SourceURL: meta.SourceURL, SourceID: meta.SourceID,
+		SourceType: meta.SourceType, SourceURL: meta.SourceURL, SourceID: meta.SourceID,
 		Provider: meta.Provider, ProviderVersion: meta.ProviderVersion, OptionsJSON: meta.OptionsJSON,
 	}
 }
@@ -2620,6 +2621,13 @@ func acquisitionInput(meta AcquiredMeta) *model.AcquisitionInput {
 // locally scanned (no acquisition row).
 func (l *Library) Acquisition(ctx context.Context, pid model.PID) (*model.Acquisition, error) {
 	return l.store.AcquisitionByItem(ctx, pid)
+}
+
+// ClearAcquisition removes an item's origin provenance, returning it to source:local.
+// Recording is merge-wise and never lowers a field, so this is the only way to correct a
+// row downward. An item with no row is unaffected.
+func (l *Library) ClearAcquisition(ctx context.Context, pid model.PID) error {
+	return l.store.ClearAcquisition(ctx, pid)
 }
 
 // Backup writes a self-contained byte copy of the catalog to dest. The copy

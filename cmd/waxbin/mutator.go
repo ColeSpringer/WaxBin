@@ -223,6 +223,29 @@ func (m *mutator) EditEntity(ctx context.Context, entityType model.MergeEntity, 
 	return m.lib.EditEntity(ctx, entityType, entityPID, edits, opts)
 }
 
+func (m *mutator) RenameEntity(ctx context.Context, entityType model.MergeEntity, entityPID model.PID,
+	fields map[string]string, opts waxbin.RenameOptions) (*model.EntityRenameReport, error) {
+	if m.px != nil {
+		res, err := m.px.RenameEntity(ctx, entityType, entityPID, fields, opts.WriteBack,
+			opts.Attribution(), opts.Lock, opts.Force)
+		if err != nil {
+			return nil, err
+		}
+		rep := &model.EntityRenameReport{
+			EntityPID: entityPID, Outcome: model.EntityRenameOutcome(res.Outcome),
+			MergedInto: model.PID(res.MergedInto), MovedAlbums: toPIDs(res.MovedAlbums),
+			Members: res.Members,
+		}
+		if len(res.WriteBackFailures) > 0 {
+			return rep, &waxbin.WriteBackError{
+				ItemPID: entityPID, Edits: fields, Failures: fromProxyFailures(res.WriteBackFailures),
+			}
+		}
+		return rep, nil
+	}
+	return m.lib.RenameEntity(ctx, entityType, entityPID, fields, opts)
+}
+
 func (m *mutator) Detach(ctx context.Context, itemPID model.PID, opts waxbin.DetachOptions) (*model.DetachReport, error) {
 	if m.px != nil {
 		res, err := m.px.Detach(ctx, itemPID, opts.WriteBack)

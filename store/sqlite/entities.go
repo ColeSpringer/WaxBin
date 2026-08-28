@@ -27,7 +27,7 @@ import (
 // move with: the path this scan relinked the file from, empty when it was found where it
 // already was, and the file's id for the organize journal. An edit path has neither, and
 // passes "" and 0.
-func resolveAndLinkEntities(ctx context.Context, tx *sql.Tx, itemID int64, tr model.Track, filePath []byte, priorPath string, fileID int64, affected *affectedRollups) error {
+func resolveAndLinkEntities(ctx context.Context, tx *sql.Tx, log logger, itemID int64, tr model.Track, filePath []byte, priorPath string, fileID int64, affected *affectedRollups) error {
 	artistID, err := resolveTrackArtists(ctx, tx, itemID, tr, affected)
 	if err != nil {
 		return err
@@ -59,7 +59,7 @@ func resolveAndLinkEntities(ctx context.Context, tx *sql.Tx, itemID int64, tr mo
 		}
 	}
 
-	albumID, err := resolveAlbumChain(ctx, tx, tr, rgKey, albumKey, albumArtistID, affected)
+	albumID, err := resolveAlbumChain(ctx, tx, log, tr, rgKey, albumKey, albumArtistID, affected)
 	if err != nil {
 		return err
 	}
@@ -217,15 +217,15 @@ func albumChainKeys(tr model.Track, filePath []byte) (anchor, rgKey, albumKey st
 // The keys carry the RAW anchor credit while albumArtistID is the entity its primary
 // resolved to. Keeping them separate is what let the album-artist credit split
 // without re-keying anything: only the name reaches ReleaseGroupKey.
-func resolveAlbumChain(ctx context.Context, tx *sql.Tx, tr model.Track, rgKey, albumKey string, albumArtistID int64, affected *affectedRollups) (int64, error) {
+func resolveAlbumChain(ctx context.Context, tx *sql.Tx, log logger, tr model.Track, rgKey, albumKey string, albumArtistID int64, affected *affectedRollups) (int64, error) {
 	if rgKey == "" {
 		return 0, nil
 	}
-	rgID, err := resolveReleaseGroup(ctx, tx, rgKey, tr.Album, albumArtistID, tr.MBReleaseGroupID, affected)
+	rgID, err := resolveReleaseGroup(ctx, tx, log, rgKey, tr.Album, albumArtistID, tr.MBReleaseGroupID, affected)
 	if err != nil {
 		return 0, err
 	}
-	return resolveAlbum(ctx, tx, albumKey, rgID, tr)
+	return resolveAlbum(ctx, tx, log, albumKey, rgID, tr)
 }
 
 // resolveArtist finds-or-creates an artist by normalized match key, returning
@@ -259,7 +259,7 @@ func resolveArtist(ctx context.Context, tx *sql.Tx, name, mbid string) (int64, e
 	if mk == "" {
 		return 0, nil
 	}
-	mbid = strings.TrimSpace(mbid)
+	mbid = normMBID(mbid)
 	var id int64
 	var pid, cur string
 	err := tx.QueryRowContext(ctx,
@@ -298,7 +298,8 @@ func resolveArtist(ctx context.Context, tx *sql.Tx, name, mbid string) (int64, e
 	return id, appendChange(ctx, tx, "artist", newPID, model.OpCreate)
 }
 
-// resolveReleaseGroup finds-or-creates a release group by its identity key.
+// resolveReleaseGroup finds-or-creates a release group by its identity key, adopting a
+// row that already holds the key's MusicBrainz id when the key itself misses.
 //
 // An existing row adopts the newly resolved primary artist when it differs. It has to:
 // before the album-artist credit split, a joint credit resolved to one entity named
@@ -309,11 +310,27 @@ func resolveArtist(ctx context.Context, tx *sql.Tx, name, mbid string) (int64, e
 // Last-writer-wins is deliberate for the one case where tracks can disagree, an
 // MBID-keyed group whose members carry different ALBUMARTIST tags. Under a heuristic
 // key they cannot disagree, since the album-artist name is part of the key.
-func resolveReleaseGroup(ctx context.Context, tx *sql.Tx, key, title string, primaryArtistID int64, mbid string, affected *affectedRollups) (int64, error) {
+//
+// The secondary lookup exists because enrichment fills the mbid column without moving
+// the row's key, so a file that later arrives carrying that id computes an mbid: key
+// that no row has. Adoption joins it to the row already holding its identity instead of
+// forking a second one, and writes nothing, so there is no delta to reconcile. See
+// adoptEntityByMBIDTx for why forward re-keying is not the answer.
+func resolveReleaseGroup(ctx context.Context, tx *sql.Tx, log logger, key, title string, primaryArtistID int64, mbid string, affected *affectedRollups) (int64, error) {
 	var id int64
 	var curPrimary sql.NullInt64
 	err := tx.QueryRowContext(ctx,
 		"SELECT id, primary_artist_id FROM release_group WHERE match_key = ?", key).Scan(&id, &curPrimary)
+	if errors.Is(err, sql.ErrNoRows) {
+		adopted, aerr := adoptEntityByMBIDTx(ctx, tx, log, "release_group", key)
+		if aerr != nil {
+			return 0, aerr
+		}
+		if adopted != 0 {
+			err = tx.QueryRowContext(ctx,
+				"SELECT id, primary_artist_id FROM release_group WHERE id = ?", adopted).Scan(&id, &curPrimary)
+		}
+	}
 	if err == nil {
 		if primaryArtistID != 0 && curPrimary.Int64 != primaryArtistID {
 			if _, err := tx.ExecContext(ctx,
@@ -325,6 +342,17 @@ func resolveReleaseGroup(ctx context.Context, tx *sql.Tx, key, title string, pri
 				affected.artists[curPrimary.Int64] = true
 			}
 			affected.artists[primaryArtistID] = true
+			// The group's artist is readable state (entity info serves it, and browse
+			// keys on it), so a delta-sync consumer needs to be told it moved. Only the
+			// transition reaches here, so a settled catalog stays change_log-silent.
+			var pid string
+			if err := tx.QueryRowContext(ctx,
+				"SELECT pid FROM release_group WHERE id = ?", id).Scan(&pid); err != nil {
+				return 0, err
+			}
+			if err := appendChange(ctx, tx, "release_group", model.PID(pid), model.OpUpdate); err != nil {
+				return 0, err
+			}
 		}
 		return id, nil
 	}
@@ -334,7 +362,7 @@ func resolveReleaseGroup(ctx context.Context, tx *sql.Tx, key, title string, pri
 	pid := model.NewPID()
 	r, err := tx.ExecContext(ctx,
 		"INSERT INTO release_group(pid, title, sort_key, primary_artist_id, type, match_key, mbid) VALUES (?,?,?,?,?,?,?)",
-		string(pid), title, model.SortKey(title), nullInt64(primaryArtistID), "album", key, nullStr(strings.TrimSpace(mbid)))
+		string(pid), title, model.SortKey(title), nullInt64(primaryArtistID), "album", key, nullStr(normMBID(mbid)))
 	if err != nil {
 		return 0, err
 	}
@@ -346,13 +374,26 @@ func resolveReleaseGroup(ctx context.Context, tx *sql.Tx, key, title string, pri
 }
 
 // resolveAlbum finds-or-creates a specific release/edition by its identity key,
-// recording its disc total and MusicBrainz release id when known.
+// recording its disc total and MusicBrainz release id when known. As at the group rung,
+// a key carrying a release id that matches nothing adopts the row already holding that
+// id in its column rather than forking a second one.
 //
 // An existing row takes any of barcode/label/catalog_number/media/country it still
 // lacks from tags that now supply them: they are not part of identity.AlbumKey, so a
 // late tag pass hits the row already there. The mbid is not filled here because it IS
-// part of the key, so a newly MBID-tagged release inserts its own row instead;
-// collapsing that pair is merge's job.
+// part of the key.
+//
+// Two shapes still fork, and both are narrower than what adoption closes. A file
+// carrying a release-group id but no release id computes al:mbid:<group>\x1f…, which is
+// not an mbid: key, so it lands on an album row of its own under the right group. And a
+// partial retag splits as it always has, since the untagged members keep computing the
+// heuristic key. The common Picard case carries both ids and adopts at both rungs.
+//
+// Adopting here can also leave a childless release group behind: if the file's anchor
+// resolves a different group, resolveReleaseGroup mints one, then the album adopted here
+// belongs to another group and a hit never repoints release_group_id. orphan.go sweeps
+// the empty group (album before release_group), so it costs a create/delete delta pair
+// per scan rather than leaking a row.
 //
 // media is first-scanned-file-wins, so a CD+DVD set whose CD track scanned first reads
 // "CD". That is acceptable, not merely unfixed: the release matcher accepts a release
@@ -361,15 +402,26 @@ func resolveReleaseGroup(ctx context.Context, tx *sql.Tx, key, title string, pri
 // the editions MusicBrainz knows. Aggregating the album's distinct media would not help,
 // since discriminating on the SET means requiring a release to cover every value, and
 // narrowing is the shape the matcher rejects.
-func resolveAlbum(ctx context.Context, tx *sql.Tx, key string, releaseGroupID int64, tr model.Track) (int64, error) {
+func resolveAlbum(ctx context.Context, tx *sql.Tx, log logger, key string, releaseGroupID int64, tr model.Track) (int64, error) {
 	if key == "" {
 		return 0, nil
 	}
+	const sel = `SELECT id, pid, COALESCE(barcode,''), COALESCE(label,''),
+		COALESCE(catalog_number,''), COALESCE(media,''), COALESCE(country,'') FROM album WHERE `
 	var id int64
 	var pid, curBarcode, curLabel, curCatNo, curMedia, curCountry string
-	err := tx.QueryRowContext(ctx, `SELECT id, pid, COALESCE(barcode,''), COALESCE(label,''),
-		COALESCE(catalog_number,''), COALESCE(media,''), COALESCE(country,'') FROM album WHERE match_key = ?`, key).
+	err := tx.QueryRowContext(ctx, sel+"match_key = ?", key).
 		Scan(&id, &pid, &curBarcode, &curLabel, &curCatNo, &curMedia, &curCountry)
+	if errors.Is(err, sql.ErrNoRows) {
+		adopted, aerr := adoptEntityByMBIDTx(ctx, tx, log, "album", key)
+		if aerr != nil {
+			return 0, aerr
+		}
+		if adopted != 0 {
+			err = tx.QueryRowContext(ctx, sel+"id = ?", adopted).
+				Scan(&id, &pid, &curBarcode, &curLabel, &curCatNo, &curMedia, &curCountry)
+		}
+	}
 	if err == nil {
 		return id, fillAlbumIdentifiersTx(ctx, tx, id, model.PID(pid), tr,
 			curBarcode, curLabel, curCatNo, curMedia, curCountry)
@@ -382,7 +434,7 @@ func resolveAlbum(ctx context.Context, tx *sql.Tx, key string, releaseGroupID in
 		`INSERT INTO album(pid, release_group_id, title, sort_key, year, disc_total, mbid,
 			barcode, label, catalog_number, media, country, match_key) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		string(newPID), nullInt64(releaseGroupID), tr.Album, model.SortKey(tr.Album), nullInt(tr.Year),
-		nullInt(tr.DiscTotal), nullStr(strings.TrimSpace(tr.MBReleaseID)),
+		nullInt(tr.DiscTotal), nullStr(normMBID(tr.MBReleaseID)),
 		nullStr(strings.TrimSpace(tr.Barcode)), nullStr(strings.TrimSpace(tr.Label)),
 		nullStr(strings.TrimSpace(tr.CatalogNumber)), nullStr(strings.TrimSpace(tr.Media)),
 		nullStr(strings.TrimSpace(tr.Country)), key)
@@ -394,6 +446,67 @@ func resolveAlbum(ctx context.Context, tx *sql.Tx, key string, releaseGroupID in
 		return 0, err
 	}
 	return id, appendChange(ctx, tx, "album", newPID, model.OpCreate)
+}
+
+// adoptEntityByMBIDTx looks a release group or album up by its mbid column when an
+// mbid:-form identity key found nothing, returning 0 when no row holds that id. table
+// is a caller constant, never caller text.
+//
+// The invariant it establishes: match_key is the primary identity index, and the mbid
+// column is a secondary one, consulted only when an mbid: key misses. db verify does not
+// compare the two, so nothing else has to be taught the rule.
+//
+// Adoption, not a forward re-key onto the mbid key, and the difference is not a
+// preference:
+//
+//   - At the album rung a forward re-key is a permanent fork. reconcileAlbumRekeyTx
+//     refuses to carry it back (scanreconcile.go requires both keys to be heuristic,
+//     since an mbid-keyed album carries no folder segment), so the album's untagged
+//     members would compute the heuristic key, miss the now-mbid-keyed row, and mint a
+//     fresh album that keeps accumulating them.
+//   - At the group rung it churns forever. An untagged member computes rg:…, misses, and
+//     inserts a new release group, while resolveAlbum still hits its album by that
+//     album's unchanged al:rg:… key and a hit never repoints release_group_id. The new
+//     group is born childless, orphan.go sweeps it, and the next scan mints it again.
+//
+// Nothing enforces uniqueness on either mbid column (see 03_entities.sql), so more than
+// one row can answer. The lowest id wins for determinism and the extra hits are logged,
+// which is the shape setAlbumMBIDTx already uses for its own collision; audit's
+// duplicate_album and duplicate_release_group report the pair for merge to collapse.
+//
+// It writes nothing, so it needs no lock check: the EditEntityFields clear escape hatch
+// empties the column, which makes a cleared-and-locked entity invisible here by
+// construction.
+func adoptEntityByMBIDTx(ctx context.Context, tx *sql.Tx, log logger, table, key string) (int64, error) {
+	mbid, ok := strings.CutPrefix(key, mbidKeyPrefix)
+	if !ok || mbid == "" {
+		return 0, nil
+	}
+	rows, err := tx.QueryContext(ctx,
+		"SELECT id FROM "+table+" WHERE mbid = ? ORDER BY id LIMIT 2", mbid)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return 0, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	if len(ids) > 1 {
+		log.Warn("scan: MBID held by more than one entity; adopting the lowest",
+			"table", table, "mbid", mbid, "adopted", ids[0], "other", ids[1])
+	}
+	return ids[0], nil
 }
 
 // fillEntityFieldTx fills one empty entity column and reports whether it wrote. The

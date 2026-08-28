@@ -426,7 +426,9 @@ func (s *Service) Run(ctx context.Context, opts RunOptions, hb Heartbeat) (*Resu
 			fetch: func(ctx context.Context, after int64, lim int) ([]model.EnrichTarget, error) {
 				return s.store.ArtistsNeedingEnrichment(ctx, st.force, after, lim, artistIDs)
 			},
-			enrich: func(ctx context.Context, t model.EnrichTarget) (bool, error) { return s.enrichArtist(ctx, st, t) },
+			enrich: func(ctx context.Context, t model.EnrichTarget) (bool, error) {
+				return s.enrichArtist(ctx, st, res, t)
+			},
 		})
 	}
 	if phaseRuns(rgIDs) {
@@ -581,7 +583,23 @@ func (s *Service) runPhase(ctx context.Context, p phase, beat func(string) error
 // enrichArtist resolves one artist against MusicBrainz and applies the result. A
 // miss (no MBID and no confident search hit) is still applied as a no-match marker
 // so the artist is not retried every run. Returns whether a provider matched.
-func (s *Service) enrichArtist(ctx context.Context, st *runState, t model.EnrichTarget) (bool, error) {
+//
+// It also asks the art providers for the artist's own imagery, mirroring the
+// release-group rung: a front when the artist has none, and the auxiliary roles either
+// way, since a settled front says nothing about the background where artist imagery
+// actually lands. A locked artist art cancels both, because the store would refuse the
+// write and a forced run would otherwise re-download one picture per locked artist.
+//
+// No built-in provider answers at this rung. The Cover Art Archive is release-group
+// keyed, and ListenBrainz and LRCLIB answer neither, so a stock install spends no
+// requests here; this exists for an injected provider advertising CapCover or CapAuxArt.
+//
+// The art rides the identity pass, so it only reaches artists that pass is still queued
+// for. An artist already carrying an enrichment marker is out of the queue and gets no
+// art until a --force run, and there is no artist analogue of the release group's aux-art
+// backfill phase to re-ask about one whose front is settled. Injecting an art provider
+// into a library already enriched therefore wants one --force pass; see DEFERRED.md.
+func (s *Service) enrichArtist(ctx context.Context, st *runState, res *Result, t model.EnrichTarget) (bool, error) {
 	enr := model.ArtistEnrichment{ArtistID: t.ID, PID: t.PID}
 	a, err := s.resolveArtist(ctx, st, t)
 	if err != nil {
@@ -597,10 +615,24 @@ func (s *Service) enrichArtist(ctx context.Context, st *runState, t model.Enrich
 		}
 		enr.Aliases = artistAliasNames(a)
 		enr.Relations = artistRelations(a)
+		if !t.ArtLocked {
+			req := Request{Type: TargetArtist, Force: st.force, Artist: t.Name, MBID: a.ID}
+			if !t.HasArt {
+				art := s.gatherArt(ctx, st, req)
+				enr.Art = art[model.ArtRoleFront]
+				enr.AuxArt = auxArtRoles(art)
+			} else {
+				enr.AuxArt, _ = s.gatherAuxArt(ctx, st, req)
+			}
+		}
 	}
 	if err := s.store.ApplyArtistEnrichment(ctx, enr); err != nil {
 		return false, err
 	}
+	if enr.Art != nil {
+		res.ArtFetched++
+	}
+	res.AuxArtFetched += len(enr.AuxArt)
 	return enr.Matched, nil
 }
 
@@ -990,7 +1022,7 @@ func (s *Service) enrichLyrics(ctx context.Context, st *runState, t model.Enrich
 			continue
 		}
 		got, provider = cand.Lyrics, p.Name()
-		// Stamped here, not trusted from the provider, the same way gatherCover stamps a
+		// Stamped here, not trusted from the provider, the same way gatherArt stamps a
 		// cover: an injected provider cannot claim its words came off the file's tags,
 		// and one that stamps nothing at all cannot reach putLyricsTx unattributed,
 		// where an empty source reads as "no lyrics" and drops them silently.

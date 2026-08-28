@@ -31,11 +31,14 @@ func newEntityCmd(g *globals) *cobra.Command {
 			"Artist fields: sort, mbid.\n" +
 			"Release-group fields: sort, mbid, type (album|ep|single|compilation|audiobook).\n" +
 			"Album fields: sort, mbid, barcode, label, catalog_number, media, country.\n" +
+			"`entity rename` is the other verb: those fields never key an entity, while a " +
+			"rename moves the key itself. Renamable types: album, release_group, artist.\n" +
 			"`entity info` reads those three plus genre and series.\n" +
 			"Star-able types (star/rate/state/stars): artist, release_group, album, genre.",
 	}
 	cmd.AddCommand(
-		newEntityEditCmd(g), newEntityShowCmd(g), newEntityInfoCmd(g), newEntityListCmd(g),
+		newEntityEditCmd(g), newEntityRenameCmd(g), newEntityShowCmd(g), newEntityInfoCmd(g),
+		newEntityListCmd(g),
 		newEntityStarCmd(g), newEntityRateCmd(g), newEntityStateCmd(g), newEntityStarsCmd(g),
 	)
 	return cmd
@@ -164,6 +167,149 @@ func newEntityEditCmd(g *globals) *cobra.Command {
 	f.BoolVar(&force, "force", false, "override a locked entity field")
 	f.BoolVar(&writeBack, "write-back", false, "also fan the values across the entity's member files' on-disk tags")
 	return cmd
+}
+
+// renameOutcomeLine is the one-line report a rename prints. Each outcome needs its own
+// sentence: merged means the pid the user typed is gone, and refreshed means the key did
+// not move at all, which is worth saying so a case-only rename does not read as a no-op.
+func renameOutcomeLine(et model.MergeEntity, pid model.PID, rep *model.EntityRenameReport) string {
+	switch rep.Outcome {
+	case model.EntityRenameMerged:
+		return fmt.Sprintf("renamed %d member(s); %s %s merged into %s",
+			rep.Members, et, pid, rep.MergedInto)
+	case model.EntityRenameRefreshed:
+		return fmt.Sprintf("renamed %d member(s); %s %s kept its key and refreshed its display",
+			rep.Members, et, pid)
+	default:
+		return fmt.Sprintf("renamed %d member(s); %s %s kept its pid on a new key",
+			rep.Members, et, pid)
+	}
+}
+
+func newEntityRenameCmd(g *globals) *cobra.Command {
+	var (
+		sets      []string
+		noLock    bool
+		keepLock  bool
+		force     bool
+		writeBack bool
+	)
+	cmd := &cobra.Command{
+		Use:   "rename <type> <pid> --set field=value [--set field=value ...]",
+		Short: "Rename a whole album or release group, keeping its row",
+		Long: "Renames a shared entity by editing the keying fields of every one of its members " +
+			"at once, so the entity's identity key moves and the row stays: its pid, artwork, " +
+			"curation, stars, and enrichment marker all survive. This is what `edit` cannot do, " +
+			"since the fields `edit` writes never key an entity.\n\n" +
+			"Renamable types and their fields: album (album, album_artist, year), release_group " +
+			"(album, album_artist), artist (name). The artist rung takes one field because the " +
+			"item-level tag it writes differs per reference: a track credits an artist through " +
+			"ARTIST or ALBUMARTIST, a book through its author, and each referring credit list " +
+			"keeps its other names. An artist holding a non-artist, non-author contributor " +
+			"credit is refused, since that credit lives on `waxbin credit set` instead.\n\n" +
+			"Renaming a name to nothing is refused, as is a member with a locked keying field " +
+			"(use --force), an archived member with no file on disk, members whose files sit in " +
+			"different folders (the album key carries the folder, so no one key covers them), " +
+			"and a release group whose albums are titled apart. Each of those would otherwise " +
+			"leave the entity split in two with nothing saying so.\n\n" +
+			"An album whose members carry no ALBUMARTIST is anchored on the first credited " +
+			"artist, so renaming album_artist there moves the release-group anchor with it and " +
+			"the album can come out under a different group. The report names any album that " +
+			"moved.\n\n" +
+			"The rename is catalog-only by default, and a member's chain comes from the tags in " +
+			"its file, so it lasts until a scan re-resolves those members: their next retag, " +
+			"move, or content change. --write-back writes the new values into every member " +
+			"file's tags, which is what makes it durable.",
+		Args: cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			et := model.MergeEntity(args[0])
+			if !model.EntityRenamable(et) {
+				return fmt.Errorf("cannot rename a %q entity (want album, release_group, or artist)", args[0])
+			}
+			pid := model.PID(args[1])
+			fields, err := parseSetFlags(sets)
+			if err != nil {
+				return err
+			}
+			m, _, err := g.openMutator(cmd)
+			if err != nil {
+				return err
+			}
+			defer m.Close()
+			rep, err := m.RenameEntity(ctx(cmd), et, pid, fields, waxbin.RenameOptions{
+				WriteBack: writeBack, Lock: lockChange(noLock, keepLock), Force: force,
+			})
+			// Classified before surfacing, which reports the failures and returns nil.
+			warning := renameDurabilityWarning(writeBack, err)
+			if err := surfaceWriteBack(cmd, err); err != nil {
+				return err
+			}
+			if warning != "" {
+				fmt.Fprintln(errOut(cmd), warning)
+			}
+			if g.jsonOut {
+				return printJSON(cmd, entityRenameView{
+					EntityPID: string(rep.EntityPID), Outcome: string(rep.Outcome),
+					MergedInto: string(rep.MergedInto), MovedAlbums: movedAlbumStrings(rep.MovedAlbums),
+					Members: rep.Members,
+				})
+			}
+			fmt.Fprintln(out(cmd), renameOutcomeLine(et, pid, rep))
+			for _, album := range rep.MovedAlbums {
+				fmt.Fprintf(out(cmd), "  album %s moved to a different release group\n", album)
+			}
+			return nil
+		},
+	}
+	f := cmd.Flags()
+	f.StringArrayVar(&sets, "set", nil, "field=value to rename to (repeatable)")
+	f.BoolVar(&noLock, "no-lock", false, "unlock the renamed fields on every member (they default to locked)")
+	f.BoolVar(&keepLock, "keep-lock", false, keepLockUsage("the renamed fields"))
+	cmd.MarkFlagsMutuallyExclusive("no-lock", "keep-lock")
+	f.BoolVar(&force, "force", false, "override a locked keying field on a member")
+	f.BoolVar(&writeBack, "write-back", false, "also write the new values into every member file's tags")
+	// No --dry-run. Every interesting answer this command has (whether the entity moves,
+	// merges, or is refused for an uncovered reference) is decided inside the write
+	// transaction, so a preview that stopped short of it could only restate the flags
+	// back and would read as an approval the store had not given.
+	return cmd
+}
+
+// movedAlbumStrings renders the report's moved-album pids for JSON.
+func movedAlbumStrings(pids []model.PID) []string {
+	if len(pids) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(pids))
+	for _, p := range pids {
+		out = append(out, string(p))
+	}
+	return out
+}
+
+// entityRenameView is the --json shape of a rename report.
+type entityRenameView struct {
+	EntityPID   string   `json:"entityPid"`
+	Outcome     string   `json:"outcome"`
+	MergedInto  string   `json:"mergedInto,omitempty"`
+	MovedAlbums []string `json:"movedAlbums,omitempty"`
+	Members     int      `json:"members"`
+}
+
+// renameDurabilityWarning returns the caveat to print after a rename, or "" when there is
+// none. A member's chain is derived from the tags in its file, so a catalog-only rename is
+// undone by the next scan that re-resolves it.
+func renameDurabilityWarning(writeBack bool, err error) string {
+	if !writeBack {
+		return "warning: the member files still carry the old values, so the rename is undone " +
+			"on their next retag, move, or content change; pass --write-back to make it stick"
+	}
+	var wbErr *waxbin.WriteBackError
+	if errors.As(err, &wbErr) {
+		return "warning: the write-back did not reach every member, so those files still carry " +
+			"the old values and re-split the entity on their next retag, move, or content change"
+	}
+	return ""
 }
 
 // entityClearDurabilityWarning returns the caveat to print after an album or release-group

@@ -138,6 +138,13 @@ import (
 // fields are additive, and a version-14 server that ignores skipLocked answers a locked
 // credit with the CodeLocked it always did, which is a loud refusal rather than a quiet
 // wrong answer.
+// rename_entity does not bump it either, on the add_root/detach/put_transcript
+// precedent: it widens no existing struct, so a peer that knows nothing about it is not
+// at risk of misreading a frame it does understand. The affirmative case is worth stating
+// rather than leaving as an absence of reasons, because the verb is destructive. A
+// version bump would make an older server refuse every frame including ping, so a WaxDeck
+// talking to one would read it as absent; without the bump it gets "unknown method:
+// rename_entity" from the method switch, which names the one thing actually missing.
 const ProtocolVersion = 15
 
 // Method names for the proxied operations: the fast request/response catalog
@@ -162,6 +169,7 @@ const (
 	MethodSetArtLock       = "set_art_lock"
 	MethodEditEntity       = "edit_entity"
 	MethodDetach           = "detach"
+	MethodRenameEntity     = "rename_entity"
 	MethodSetTag           = "set_tag"
 	MethodLock             = "lock"
 	MethodUnlock           = "unlock"
@@ -525,6 +533,39 @@ type EditEntityParams struct {
 // process, so putting them on the wire would give a client a list it has no use for.
 type EditEntityResult struct {
 	MergedInto        string             `json:"mergedInto,omitempty"`
+	WriteBackFailures []WriteBackFailure `json:"writeBackFailures,omitempty"`
+}
+
+// RenameEntityParams is the rename_entity request payload: the keying fields of a whole
+// album or release group, applied to every one of its members at once so the entity's
+// identity key moves and its row stays. With WriteBack the new values are also written
+// into each member file's tags. Source, Provider and Lock carry the same meaning as on
+// EditFieldsParams. There is no skipLocked: skipping a locked member would break the
+// coverage the in-place rename needs and split the entity instead.
+type RenameEntityParams struct {
+	EntityType string            `json:"entityType"`
+	EntityPID  string            `json:"entityPid"`
+	Fields     map[string]string `json:"fields"`
+	Source     string            `json:"source,omitempty"`
+	Provider   string            `json:"provider,omitempty"`
+	Lock       string            `json:"lock"`
+	Force      bool              `json:"force"`
+	WriteBack  bool              `json:"writeBack"`
+}
+
+// RenameEntityResult is the rename_entity response payload. Outcome is renamed, merged
+// or refreshed. MergedInto names the survivor when a taken key folded the entity into an
+// incumbent, so the pid the caller named no longer exists. MovedAlbums names albums that
+// came out under a different release group than they went in under, which unlike
+// EditEntityResult's omission a client does need: those albums' pids are what it has to
+// refetch to see where they went. A committed rename whose file write-back partially
+// failed returns the failed files here rather than as a transport error, matching
+// edit_fields.
+type RenameEntityResult struct {
+	Outcome           string             `json:"outcome"`
+	MergedInto        string             `json:"mergedInto,omitempty"`
+	MovedAlbums       []string           `json:"movedAlbums,omitempty"`
+	Members           int                `json:"members"`
 	WriteBackFailures []WriteBackFailure `json:"writeBackFailures,omitempty"`
 }
 

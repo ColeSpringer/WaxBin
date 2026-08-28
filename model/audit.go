@@ -4,20 +4,23 @@ package model
 type AuditCheck string
 
 const (
-	CheckDuplicateArtist   AuditCheck = "duplicate_artist"
-	CheckDuplicateGenre    AuditCheck = "duplicate_genre"
-	CheckDuplicateAlbum    AuditCheck = "duplicate_album"
-	CheckSplitAlbum        AuditCheck = "split_album"
-	CheckInconsistentMeta  AuditCheck = "inconsistent_metadata"
-	CheckMissingArt        AuditCheck = "missing_art"
-	CheckMissingReplayGain AuditCheck = "missing_replaygain"
-	CheckBadFilename       AuditCheck = "bad_filename"
-	CheckOrphanSidecar     AuditCheck = "orphan_sidecar"
-	CheckPathConflict      AuditCheck = "path_conflict"
-	CheckInvalidFeed       AuditCheck = "invalid_feed"
-	CheckDerivedData       AuditCheck = "derived_data"
-	CheckIntegrity         AuditCheck = "integrity"
-	CheckCorruptAudio      AuditCheck = "corrupt_audio"
+	CheckDuplicateArtist AuditCheck = "duplicate_artist"
+	CheckDuplicateGenre  AuditCheck = "duplicate_genre"
+	CheckDuplicateAlbum  AuditCheck = "duplicate_album"
+	// CheckDuplicateReleaseGroup reports release groups sharing one MusicBrainz id,
+	// the group-rung sibling of duplicate_album.
+	CheckDuplicateReleaseGroup AuditCheck = "duplicate_release_group"
+	CheckSplitAlbum            AuditCheck = "split_album"
+	CheckInconsistentMeta      AuditCheck = "inconsistent_metadata"
+	CheckMissingArt            AuditCheck = "missing_art"
+	CheckMissingReplayGain     AuditCheck = "missing_replaygain"
+	CheckBadFilename           AuditCheck = "bad_filename"
+	CheckOrphanSidecar         AuditCheck = "orphan_sidecar"
+	CheckPathConflict          AuditCheck = "path_conflict"
+	CheckInvalidFeed           AuditCheck = "invalid_feed"
+	CheckDerivedData           AuditCheck = "derived_data"
+	CheckIntegrity             AuditCheck = "integrity"
+	CheckCorruptAudio          AuditCheck = "corrupt_audio"
 	// CheckFileDiagnostic reports the diagnostics the scan and tag writers persisted
 	// (unsupported containers, legacy-only tag fallbacks, partial lyrics, lost tag
 	// writes). Corrupt-audio diagnostics belong to CheckCorruptAudio instead, so that
@@ -37,7 +40,8 @@ const (
 // AuditChecks returns every known audit check, for validation and help text.
 func AuditChecks() []AuditCheck {
 	return []AuditCheck{
-		CheckDuplicateArtist, CheckDuplicateGenre, CheckDuplicateAlbum, CheckSplitAlbum,
+		CheckDuplicateArtist, CheckDuplicateGenre, CheckDuplicateAlbum,
+		CheckDuplicateReleaseGroup, CheckSplitAlbum,
 		CheckInconsistentMeta, CheckMissingArt, CheckMissingReplayGain, CheckBadFilename,
 		CheckOrphanSidecar, CheckPathConflict, CheckInvalidFeed, CheckDerivedData,
 		CheckIntegrity, CheckCorruptAudio, CheckFileDiagnostic, CheckMissingMBID,

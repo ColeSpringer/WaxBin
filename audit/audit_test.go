@@ -19,6 +19,7 @@ type fakeStore struct {
 	dupArtists   []model.DuplicateSet
 	dupGenres    []model.DuplicateSet
 	dupAlbums    []model.DuplicateSet
+	dupRGs       []model.DuplicateSet
 	splits       []model.SplitAlbum
 	inconsist    []model.AlbumIssue
 	missingArt   []model.ItemRef
@@ -43,6 +44,9 @@ func (f *fakeStore) DuplicateGenres(context.Context) ([]model.DuplicateSet, erro
 }
 func (f *fakeStore) DuplicateAlbums(context.Context) ([]model.DuplicateSet, error) {
 	return f.dupAlbums, nil
+}
+func (f *fakeStore) DuplicateReleaseGroups(context.Context) ([]model.DuplicateSet, error) {
+	return f.dupRGs, nil
 }
 func (f *fakeStore) SplitAlbums(context.Context) ([]model.SplitAlbum, error) { return f.splits, nil }
 func (f *fakeStore) InconsistentAlbums(context.Context) ([]model.AlbumIssue, error) {

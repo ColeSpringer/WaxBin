@@ -217,3 +217,174 @@ func TestAcquisitionFromTagsNeverClobbersEvent(t *testing.T) {
 		t.Errorf("acquiredAt moved: %d -> %d", before.AcquiredAt, after.AcquiredAt)
 	}
 }
+
+// TestAcquisitionReRecordIsMergeWise covers the ON CONFLICT branch, which stood
+// untested while it clobbered every column unconditionally. A field an event does not
+// name keeps what stands, so a bare event can neither erase what a tag established nor
+// downgrade a real acquisition to manual.
+func TestAcquisitionReRecordIsMergeWise(t *testing.T) {
+	ctx := context.Background()
+	st, lib := openTestStore(t)
+
+	// A tag-derived row: url and id, mechanism unstated, so type is manual.
+	in := input(lib.ID, "/lib/a.mp3", "ess-a", "c-a", "Tagged Song")
+	in.Acquisition = model.TagAcquisition{SourceURL: "https://tagged.test/x", SourceID: "tag-1"}
+	res, err := st.PutScannedTrack(ctx, in)
+	if err != nil {
+		t.Fatalf("PutScannedTrack: %v", err)
+	}
+	first, err := st.AcquisitionByItem(ctx, res.ItemPID)
+	if err != nil {
+		t.Fatalf("AcquisitionByItem: %v", err)
+	}
+	if first.SourceURL != "https://tagged.test/x" || first.SourceType != model.SourceManual {
+		t.Fatalf("tag-derived row = %+v", first)
+	}
+
+	// A bare event: it names no url, no id and no mechanism. Everything survives, and
+	// the original acquisition time with it.
+	if err := st.PutAcquisition(ctx, res.ItemPID, model.AcquisitionInput{}); err != nil {
+		t.Fatalf("bare PutAcquisition: %v", err)
+	}
+	after, err := st.AcquisitionByItem(ctx, res.ItemPID)
+	if err != nil {
+		t.Fatalf("AcquisitionByItem: %v", err)
+	}
+	if after.SourceURL != "https://tagged.test/x" || after.SourceID != "tag-1" {
+		t.Errorf("bare event erased tag-derived evidence: %+v", after)
+	}
+	if after.AcquiredAt != first.AcquiredAt {
+		t.Errorf("acquired_at = %d, want the first stamp %d", after.AcquiredAt, first.AcquiredAt)
+	}
+
+	// A real acquisition replaces field for field.
+	if err := st.PutAcquisition(ctx, res.ItemPID, model.AcquisitionInput{
+		SourceType: model.SourceRSS, SourceURL: "https://feed.test/ep", SourceID: "ep-9",
+		Provider: "rss", ProviderVersion: "1.2", OptionsJSON: `{"q":"best"}`,
+	}); err != nil {
+		t.Fatalf("full PutAcquisition: %v", err)
+	}
+	full, _ := st.AcquisitionByItem(ctx, res.ItemPID)
+	if full.SourceType != model.SourceRSS || full.SourceURL != "https://feed.test/ep" ||
+		full.SourceID != "ep-9" || full.Provider != "rss" || full.ProviderVersion != "1.2" ||
+		full.OptionsJSON != `{"q":"best"}` {
+		t.Fatalf("full event did not replace field for field: %+v", full)
+	}
+
+	// A bare event over the rss row does not downgrade it.
+	if err := st.PutAcquisition(ctx, res.ItemPID, model.AcquisitionInput{}); err != nil {
+		t.Fatalf("bare PutAcquisition over rss: %v", err)
+	}
+	kept, _ := st.AcquisitionByItem(ctx, res.ItemPID)
+	if kept.SourceType != model.SourceRSS || kept.Provider != "rss" {
+		t.Errorf("bare event downgraded a real acquisition: %+v", kept)
+	}
+
+	// An explicitly passed manual is a claim about the mechanism, so it does replace.
+	if err := st.PutAcquisition(ctx, res.ItemPID, model.AcquisitionInput{
+		SourceType: model.SourceManual,
+	}); err != nil {
+		t.Fatalf("manual PutAcquisition: %v", err)
+	}
+	manual, _ := st.AcquisitionByItem(ctx, res.ItemPID)
+	if manual.SourceType != model.SourceManual {
+		t.Errorf("source type = %q, want an explicit manual to win", manual.SourceType)
+	}
+	if manual.SourceURL != "https://feed.test/ep" {
+		t.Errorf("an explicit type also cleared the url: %+v", manual)
+	}
+}
+
+// TestClearAcquisitionReturnsItemToLocal pins the inverse the merge-wise upsert needs:
+// nothing else can lower a field, so removing the row is the only correction downward.
+func TestClearAcquisitionReturnsItemToLocal(t *testing.T) {
+	ctx := context.Background()
+	st, lib := openTestStore(t)
+
+	res, err := st.PutScannedTrack(ctx, input(lib.ID, "/lib/a.mp3", "ess-a", "c-a", "Song"))
+	if err != nil {
+		t.Fatalf("PutScannedTrack: %v", err)
+	}
+	if err := st.PutAcquisition(ctx, res.ItemPID, model.AcquisitionInput{
+		SourceType: model.SourceYouTube, SourceURL: "https://y/watch?v=1", Provider: "waxtap",
+	}); err != nil {
+		t.Fatalf("PutAcquisition: %v", err)
+	}
+	if err := st.ClearAcquisition(ctx, res.ItemPID); err != nil {
+		t.Fatalf("ClearAcquisition: %v", err)
+	}
+	if _, err := st.AcquisitionByItem(ctx, res.ItemPID); !waxerr.Is(err, waxerr.CodeNotFound) {
+		t.Fatalf("AcquisitionByItem after clear = %v, want CodeNotFound", err)
+	}
+	v, err := st.ItemByPID(ctx, res.ItemPID)
+	if err != nil {
+		t.Fatalf("ItemByPID: %v", err)
+	}
+	if v.Source != model.SourceLocal {
+		t.Errorf("source after clear = %q, want local", v.Source)
+	}
+	// Clearing again is a no-op rather than an error, so a batch correction need not
+	// check first.
+	if err := st.ClearAcquisition(ctx, res.ItemPID); err != nil {
+		t.Errorf("second ClearAcquisition: %v", err)
+	}
+}
+
+// TestAcquisitionSourceIDFollowsProvider: source_id is a provider-native id, so it means
+// nothing under a different provider's name. An event that switches the provider without
+// naming an id of its own drops the standing one rather than mislabelling it.
+func TestAcquisitionSourceIDFollowsProvider(t *testing.T) {
+	ctx := context.Background()
+	st, lib := openTestStore(t)
+	res, err := st.PutScannedTrack(ctx, input(lib.ID, "/lib/a.mp3", "ess-a", "c-a", "Song"))
+	if err != nil {
+		t.Fatalf("PutScannedTrack: %v", err)
+	}
+	if err := st.PutAcquisition(ctx, res.ItemPID, model.AcquisitionInput{
+		SourceType: model.SourceRSS, SourceURL: "https://feed.test/ep", SourceID: "ep-9", Provider: "rss",
+	}); err != nil {
+		t.Fatalf("PutAcquisition: %v", err)
+	}
+	// A different provider, no id: the rss id would be a lie under it.
+	if err := st.PutAcquisition(ctx, res.ItemPID, model.AcquisitionInput{Provider: "waxtap"}); err != nil {
+		t.Fatalf("provider switch: %v", err)
+	}
+	a, _ := st.AcquisitionByItem(ctx, res.ItemPID)
+	if a.Provider != "waxtap" || a.SourceID != "" {
+		t.Errorf("acquisition = %+v, want provider waxtap with the rss id dropped", a)
+	}
+	if a.SourceURL != "https://feed.test/ep" || a.SourceType != model.SourceRSS {
+		t.Errorf("acquisition = %+v, want the url and type still standing", a)
+	}
+	// The same provider re-recording keeps its own id.
+	if err := st.PutAcquisition(ctx, res.ItemPID, model.AcquisitionInput{
+		SourceID: "tap-1", Provider: "waxtap",
+	}); err != nil {
+		t.Fatalf("same-provider re-record: %v", err)
+	}
+	if err := st.PutAcquisition(ctx, res.ItemPID, model.AcquisitionInput{Provider: "waxtap"}); err != nil {
+		t.Fatalf("bare same-provider event: %v", err)
+	}
+	if a, _ := st.AcquisitionByItem(ctx, res.ItemPID); a.SourceID != "tap-1" {
+		t.Errorf("source id = %q, want the same provider's id kept", a.SourceID)
+	}
+}
+
+// TestTagDerivedSourceIDSurvivesAProvider: a tag-derived row names no provider, so a later
+// event that names one is not contradicting anything and the tag's id stands.
+func TestTagDerivedSourceIDSurvivesAProvider(t *testing.T) {
+	ctx := context.Background()
+	st, lib := openTestStore(t)
+	in := input(lib.ID, "/lib/a.mp3", "ess-a", "c-a", "Tagged")
+	in.Acquisition = model.TagAcquisition{SourceURL: "https://tagged.test/x", SourceID: "tag-1"}
+	res, err := st.PutScannedTrack(ctx, in)
+	if err != nil {
+		t.Fatalf("PutScannedTrack: %v", err)
+	}
+	if err := st.PutAcquisition(ctx, res.ItemPID, model.AcquisitionInput{Provider: "waxtap"}); err != nil {
+		t.Fatalf("PutAcquisition: %v", err)
+	}
+	if a, _ := st.AcquisitionByItem(ctx, res.ItemPID); a.SourceID != "tag-1" {
+		t.Errorf("source id = %q, want the tag-derived id kept", a.SourceID)
+	}
+}

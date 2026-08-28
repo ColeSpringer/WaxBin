@@ -230,7 +230,7 @@ func (s *Store) PutScannedTrack(ctx context.Context, in model.PutScannedTrackInp
 			if err := affected.collect(ctx, tx, itemID); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
-			if err := resolveAndLinkEntities(ctx, tx, itemID, in.Track, in.File.Path, res.RelinkedFrom, fileID, affected); err != nil {
+			if err := resolveAndLinkEntities(ctx, tx, s.log, itemID, in.Track, in.File.Path, res.RelinkedFrom, fileID, affected); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 			if err := affected.collect(ctx, tx, itemID); err != nil {

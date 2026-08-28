@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"image"
 	"image/png"
 	"path/filepath"
@@ -1434,5 +1435,56 @@ func TestDetachWriteBackRefusedKeepsTheTags(t *testing.T) {
 	}
 	if fm.Tags.MBReleaseID != relMBID {
 		t.Errorf("release id on disk = %q, want it still there after the refused strip", fm.Tags.MBReleaseID)
+	}
+}
+
+// TestRenameEntityWriteBackSurvivesRescan is the durable half of an entity rename. The
+// catalog move alone leaves the old title in every member's tags, so the next scan that
+// re-resolves them splits the album back apart; with write-back the files carry the new
+// name and a forced rescan lands on the same row, pid and all.
+func TestRenameEntityWriteBackSurvivesRescan(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	for i, title := range []string{"One", "Two"} {
+		writeFile(t, filepath.Join(root, fmt.Sprintf("0%d.mp3", i+1)), testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
+			Title: title, Artist: "Alpha", AlbumArtist: "Alpha", Album: "Old Title", Track: i + 1,
+			Audio: testaudio.AudioWithSeed(byte(i + 1)),
+		}))
+	}
+	lib := openManaged(t, ctx, db, root)
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	albumPID := model.PID(catalogScalar[string](t, ctx, db, "SELECT pid FROM album"))
+
+	rep, err := lib.RenameEntity(ctx, model.MergeAlbum, albumPID,
+		map[string]string{"album": "New Title"}, waxbin.RenameOptions{WriteBack: true})
+	if err != nil {
+		t.Fatalf("rename with write-back: %v", err)
+	}
+	if rep.Outcome != model.EntityRenamed || rep.Members != 2 {
+		t.Fatalf("report = %+v, want a two-member rename in place", rep)
+	}
+
+	r := meta.NewReader()
+	for _, name := range []string{"01.mp3", "02.mp3"} {
+		fm, err := r.Read(ctx, filepath.Join(root, name))
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		if fm.Tags.Album != "New Title" {
+			t.Errorf("%s ALBUM = %q, want the renamed title", name, fm.Tags.Album)
+		}
+	}
+
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{Force: true}); err != nil {
+		t.Fatalf("forced rescan: %v", err)
+	}
+	if n := catalogScalar[int](t, ctx, db, "SELECT COUNT(*) FROM album"); n != 1 {
+		t.Errorf("album rows after the rescan = %d, want the one renamed row", n)
+	}
+	if after := catalogScalar[string](t, ctx, db, "SELECT pid FROM album"); model.PID(after) != albumPID {
+		t.Errorf("album pid after the rescan = %q, want the original %q", after, albumPID)
 	}
 }

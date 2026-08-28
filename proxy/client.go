@@ -304,6 +304,24 @@ func (c *Client) EditEntity(ctx context.Context, entityType model.MergeEntity, e
 	return &res, nil
 }
 
+// RenameEntity proxies renaming a whole album or release group by editing the keying
+// fields of every member at once. A committed rename whose file write-back partially
+// failed returns the failed files in the result; the transport error stays nil, matching
+// edit_fields.
+func (c *Client) RenameEntity(ctx context.Context, entityType model.MergeEntity, entityPID model.PID,
+	fields map[string]string, writeBack bool, attr model.Attribution, lock model.LockChange, force bool) (*RenameEntityResult, error) {
+	var res RenameEntityResult
+	err := c.call(ctx, MethodRenameEntity, RenameEntityParams{
+		EntityType: string(entityType), EntityPID: string(entityPID), Fields: fields,
+		Source: string(attr.Source), Provider: attr.Provider,
+		Lock: string(lock), Force: force, WriteBack: writeBack,
+	}, &res)
+	if err != nil {
+		return nil, err
+	}
+	return &res, nil
+}
+
 // Detach proxies pulling one member off an album identified by a release id. A
 // committed detach whose file write-back partially failed returns the failed files in
 // the result; the transport error stays nil, matching edit_fields.

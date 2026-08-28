@@ -66,7 +66,12 @@ const (
 	SourceLocal   SourceType = "local"   // locally scanned/imported without a remote origin
 	SourceRSS     SourceType = "rss"     // an HTTP podcast feed (the built-in provider)
 	SourceYouTube SourceType = "youtube" // an injected YouTube provider
-	SourceManual  SourceType = "manual"  // a user-curated show with no feed to sync
+	// SourceManual reads two ways by rung. A show carries it when it is user-curated
+	// with no feed to sync. An item carries it when it was acquired by unspecified
+	// means, which is what the store records for an event that named no mechanism and
+	// for tag-derived origin. Passing it explicitly is a claim, and beats a standing
+	// type on a re-record; leaving the type empty is not.
+	SourceManual SourceType = "manual"
 )
 
 // ValidShowSource reports whether s is a valid podcast (show) source type. A show

@@ -24,6 +24,7 @@ type Store interface {
 	DuplicateArtists(ctx context.Context) ([]model.DuplicateSet, error)
 	DuplicateGenres(ctx context.Context) ([]model.DuplicateSet, error)
 	DuplicateAlbums(ctx context.Context) ([]model.DuplicateSet, error)
+	DuplicateReleaseGroups(ctx context.Context) ([]model.DuplicateSet, error)
 	SplitAlbums(ctx context.Context) ([]model.SplitAlbum, error)
 	InconsistentAlbums(ctx context.Context) ([]model.AlbumIssue, error)
 	ItemsMissingArt(ctx context.Context, limit int) ([]model.ItemRef, int, error)
@@ -131,6 +132,11 @@ func (a *Auditor) Run(ctx context.Context, cfg Config) (*Report, error) {
 	}
 	if a.runs(cfg, model.CheckDuplicateAlbum) {
 		if err := a.checkDuplicates(ctx, a.store.DuplicateAlbums, model.CheckDuplicateAlbum, add); err != nil {
+			return nil, err
+		}
+	}
+	if a.runs(cfg, model.CheckDuplicateReleaseGroup) {
+		if err := a.checkDuplicates(ctx, a.store.DuplicateReleaseGroups, model.CheckDuplicateReleaseGroup, add); err != nil {
 			return nil, err
 		}
 	}

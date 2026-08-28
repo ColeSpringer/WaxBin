@@ -56,6 +56,21 @@ CREATE TABLE release_group (
 );
 CREATE INDEX release_group_sort   ON release_group(sort_key);
 CREATE INDEX release_group_artist ON release_group(primary_artist_id);
+-- The mbid column is the secondary identity index: resolveReleaseGroup consults it when
+-- an mbid: match_key misses, and the enrichment setter probes it before claiming an id.
+-- Both were full table scans without this. Not unique, because uniqueness would only turn
+-- the duplicate insert it exists to prevent into a failed scan; audit's
+-- duplicate_release_group reports the pair and merge collapses it. artist(mbid) gets no
+-- index for the reason at the top of this file: duplicates there are tolerated by design,
+-- so nothing probes the column on a hot path.
+--
+-- The partial predicate is IS NOT NULL and nothing more. Adding "AND mbid <> ''" would
+-- read as tighter but makes the index unusable: SQLite only takes a partial index when
+-- the query's WHERE clause implies the index's, and while "mbid = ?" implies IS NOT NULL
+-- it cannot imply <> '' (the bound value could be empty), so every probe would go back to
+-- the full scan this exists to remove. Empty never reaches the column anyway; both
+-- writers pass the value through nullStr.
+CREATE INDEX release_group_mbid ON release_group(mbid) WHERE mbid IS NOT NULL;
 
 -- A specific release/edition under a release_group.
 CREATE TABLE album (
@@ -76,6 +91,9 @@ CREATE TABLE album (
 );
 CREATE INDEX album_rg   ON album(release_group_id);
 CREATE INDEX album_sort ON album(sort_key);
+-- See release_group_mbid: same role, same reason for staying non-unique and for the
+-- predicate stopping at IS NOT NULL.
+CREATE INDEX album_mbid ON album(mbid) WHERE mbid IS NOT NULL;
 
 -- Normalized genre/mood entity. One table serves both facets, with uniqueness
 -- scoped by facet and match_key rather than by display name.

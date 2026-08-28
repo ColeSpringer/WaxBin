@@ -77,7 +77,8 @@ func newImportCmd(g *globals) *cobra.Command {
 	}
 	f := cmd.Flags()
 	f.StringVar(&as, "as", "", "media kind: track|book|episode (required)")
-	f.StringVar(&sourceType, "source-type", "", "acquisition source: rss|youtube|manual (default manual)")
+	f.StringVar(&sourceType, "source-type", "", "acquisition source: rss|youtube|manual "+
+		"(unset makes no claim: a new row records manual, an existing one keeps its type)")
 	f.StringVar(&sourceURL, "source-url", "", "origin URL for provenance; for episodes, the enclosure URL")
 	f.StringVar(&sourceID, "source-id", "", "provider-native source id recorded as provenance")
 	f.StringVar(&provider, "provider", "", "provider name recorded as provenance")

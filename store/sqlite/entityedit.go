@@ -141,6 +141,9 @@ func (s *Store) EditEntityFields(ctx context.Context, entityType model.MergeEnti
 			if err := validateMBIDField(v, op); err != nil {
 				return nil, err
 			}
+			// Folded here, like barcode below, so the column, the duplicate probe two
+			// screens down, and any key later derived from it all read the same spelling.
+			v = normMBID(v)
 		case "type":
 			if v != "" && !model.ValidReleaseGroupType(v) {
 				return nil, waxerr.New(waxerr.CodeInvalid, op, "invalid release-group type: "+v)
@@ -273,7 +276,7 @@ func (s *Store) EditEntityFields(ctx context.Context, entityType model.MergeEnti
 					return waxerr.Wrap(waxerr.CodeIO, op, err)
 				}
 				var moved []model.PID
-				if survivor, moved, err = rekeyReleaseGroupHeuristicTx(ctx, tx, entityID); err != nil {
+				if survivor, moved, err = rekeyReleaseGroupHeuristicTx(ctx, tx, s.log, entityID); err != nil {
 					return waxerr.Wrap(waxerr.CodeIO, op, err)
 				}
 				rep.MovedAlbums = moved
@@ -373,7 +376,7 @@ func rekeyAlbumHeuristicTx(ctx context.Context, tx *sql.Tx, albumID int64) (mode
 // along with the pids of the albums it moved to a group of their own. Those albums'
 // members are no longer under this group, so a caller fanning over its members has to be
 // told where they went.
-func rekeyReleaseGroupHeuristicTx(ctx context.Context, tx *sql.Tx, rgID int64) (model.PID, []model.PID, error) {
+func rekeyReleaseGroupHeuristicTx(ctx context.Context, tx *sql.Tx, log logger, rgID int64) (model.PID, []model.PID, error) {
 	var curKey, pid string
 	if err := tx.QueryRowContext(ctx,
 		"SELECT match_key, pid FROM release_group WHERE id=?", rgID).Scan(&curKey, &pid); err != nil {
@@ -409,7 +412,7 @@ func rekeyReleaseGroupHeuristicTx(ctx context.Context, tx *sql.Tx, rgID int64) (
 	// A dependent album folding into an incumbent is not this group disappearing, so its
 	// own merge is never the caller's answer.
 	for _, d := range deps {
-		away, err := settleDependentAlbumTx(ctx, tx, d, newKey, affected)
+		away, err := settleDependentAlbumTx(ctx, tx, log, d, newKey, affected)
 		if err != nil {
 			return "", nil, err
 		}
@@ -437,7 +440,7 @@ func rekeyReleaseGroupHeuristicTx(ctx context.Context, tx *sql.Tx, rgID int64) (
 // It returns the pid the members of a re-parented album ended up under, which is that
 // album or the twin it merged into, and an empty pid for an album that stayed. Those
 // members are the ones the caller's own fan-out no longer reaches.
-func settleDependentAlbumTx(ctx context.Context, tx *sql.Tx, d dependentAlbum, groupKey string, affected *affectedRollups) (model.PID, error) {
+func settleDependentAlbumTx(ctx context.Context, tx *sql.Tx, log logger, d dependentAlbum, groupKey string, affected *affectedRollups) (model.PID, error) {
 	reparented := d.rgKey != groupKey
 	if reparented {
 		var oldParent sql.NullInt64
@@ -445,7 +448,7 @@ func settleDependentAlbumTx(ctx context.Context, tx *sql.Tx, d dependentAlbum, g
 			"SELECT release_group_id FROM album WHERE id=?", d.id).Scan(&oldParent); err != nil {
 			return "", err
 		}
-		newRGID, err := resolveReleaseGroup(ctx, tx, d.rgKey, d.rgTitle, d.albumArtistID, "", affected)
+		newRGID, err := resolveReleaseGroup(ctx, tx, log, d.rgKey, d.rgTitle, d.albumArtistID, "", affected)
 		if err != nil {
 			return "", err
 		}

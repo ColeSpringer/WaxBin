@@ -135,7 +135,16 @@ func enrichIDsFilter(col string, ids []int64) (string, []any) {
 func (s *Store) ArtistsNeedingEnrichment(ctx context.Context, force bool, afterID int64, limit int, ids []int64) ([]model.EnrichTarget, error) {
 	const op = "store.ArtistsNeedingEnrichment"
 	scopeClause, scopeArgs := enrichIDsFilter("a.id", ids)
-	stmt := `SELECT a.id, a.pid, a.name, COALESCE(a.mbid,'')
+	// HasArt is a plain art_map probe, deliberately not albumResolvesFrontArt's shape. An
+	// album consumes the fallback chain, so a member track's embedded cover answers its
+	// front and there is nothing to fetch. An artist is a source in that chain (track,
+	// album, release group, artist, genre), so what a track under it happens to carry says
+	// nothing about whether the artist has a picture of its own.
+	stmt := `SELECT a.id, a.pid, a.name, COALESCE(a.mbid,''),
+		EXISTS(SELECT 1 FROM art_map am WHERE am.entity_type = 'artist'
+		       AND am.entity_id = a.id AND am.role = 'front'),
+		EXISTS(SELECT 1 FROM entity_curation ec WHERE ec.entity_type = 'artist'
+		       AND ec.entity_id = a.id AND ec.field = 'art' AND ec.locked = 1)
 		FROM artist a
 		WHERE a.id > ? AND ` + enrichBacksFilter(enrichArtistBacksItems, ids) + ` AND ` + notEnriched(model.EnrichArtistType, "a.id", force) + scopeClause + `
 		ORDER BY a.id LIMIT ?`
@@ -149,7 +158,7 @@ func (s *Store) ArtistsNeedingEnrichment(ctx context.Context, force bool, afterI
 	for rows.Next() {
 		t := model.EnrichTarget{Type: model.EnrichArtistType}
 		var pid string
-		if err := rows.Scan(&t.ID, &pid, &t.Name, &t.MBID); err != nil {
+		if err := rows.Scan(&t.ID, &pid, &t.Name, &t.MBID, &t.HasArt, &t.ArtLocked); err != nil {
 			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		t.PID = model.PID(pid)
@@ -371,13 +380,22 @@ func (s *Store) ApplyArtistEnrichment(ctx context.Context, in model.ArtistEnrich
 		// Shares the fill-when-empty rule with the scan path, lock probe included, so a
 		// curated (or deliberately locked-empty) artist MBID survives either writer.
 		if _, err := fillEntityFieldTx(ctx, tx, model.MergeArtist, "artist", "mbid",
-			in.ArtistID, in.MBID); err != nil {
+			in.ArtistID, normMBID(in.MBID)); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		if err := insertAliasesTx(ctx, tx, in.ArtistID, in.SortName, in.Aliases); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		if err := insertRelationsTx(ctx, tx, in.ArtistID, in.Relations); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		// The same two helpers the release-group rung applies its art with, so the
+		// fill-when-empty rule, the per-role locks and the provenance stamp are the same
+		// ones by construction rather than by restatement.
+		if err := attachEntityArtUnlessLockedTx(ctx, tx, model.ArtArtist, in.ArtistID, in.Art); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		if _, err := fillEntityAuxArtTx(ctx, tx, model.ArtArtist, in.ArtistID, in.AuxArt); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		if err := markEnrichedTx(ctx, tx, model.EnrichArtistType, in.ArtistID, enrichProviderMusicBrainz, true, in.MBID); err != nil {
@@ -502,6 +520,7 @@ func (s *Store) ApplyReleaseGroupEnrichment(ctx context.Context, in model.Releas
 // resolved to one MBID; unifying them is the merge primitive's job (a later gate),
 // so here it is logged and left, never forced into a duplicate key.
 func setReleaseGroupMBIDTx(ctx context.Context, tx *sql.Tx, log logger, rgID int64, mbid string) error {
+	mbid = normMBID(mbid)
 	if mbid == "" {
 		return nil
 	}
@@ -727,6 +746,7 @@ func (s *Store) ApplyAlbumReleaseMatch(ctx context.Context, in model.AlbumReleas
 // The bool exists because a caller may have more to write than the id (the matched
 // pressing's cover), and everything downstream of a declined write is equally wrong.
 func setAlbumMBIDTx(ctx context.Context, tx *sql.Tx, log logger, albumID int64, mbid string) (bool, error) {
+	mbid = normMBID(mbid)
 	if mbid == "" {
 		return false, nil
 	}

@@ -73,6 +73,59 @@ type EntityEditReport struct {
 	MovedAlbums []PID
 }
 
+// EntityRenamable reports whether an entity type can be renamed, which means it has
+// keying fields its members carry. Genre is out: its key is its own name, with no member
+// field spelling it.
+func EntityRenamable(et MergeEntity) bool {
+	switch et {
+	case MergeAlbum, MergeReleaseGroup, MergeArtist:
+		return true
+	default:
+		return false
+	}
+}
+
+// EntityRenameOutcome names what a rename did to the entity's identity key. It is a
+// string rather than a bool because a bool would say no more than MergedInto == "", and
+// because a fourth outcome is conceivable if split is ever allowed back.
+type EntityRenameOutcome string
+
+const (
+	// EntityRenamed means the key moved and the row stayed, keeping its pid and
+	// everything attached to it.
+	EntityRenamed EntityRenameOutcome = "renamed"
+	// EntityRenameMerged means the new key was already taken, so the row folded into
+	// the incumbent and the named entity no longer exists.
+	EntityRenameMerged EntityRenameOutcome = "merged"
+	// EntityRenameRefreshed means the new key equals the old one, so only the display
+	// columns moved. A case-only rename lands here.
+	EntityRenameRefreshed EntityRenameOutcome = "refreshed"
+)
+
+// EntityRenameReport records what renaming a whole entity did. Members is how many items
+// carried the rename, which is every member the entity had: coverage is what makes the
+// in-place branch fire instead of the split an under-covered batch falls back to.
+//
+// MergedInto names the survivor when Outcome is merged, for the same reason
+// EntityEditReport carries it: the caller's pid is gone and it needs somewhere to go on
+// talking about. MovedAlbums names albums that came out under a different release group
+// than they went in under, which an album rename can do when its new anchor or title
+// implies a group the album was not in.
+type EntityRenameReport struct {
+	EntityPID   PID
+	Outcome     EntityRenameOutcome
+	MergedInto  PID
+	MovedAlbums []PID
+	Members     int
+	// MemberEdits is what the rename actually wrote, per member: the item and the field
+	// values that landed in its columns. Write-back sends exactly this rather than
+	// re-deriving the member list afterwards, which would reach for the surviving entity
+	// after a merge and rewrite files that were never part of the rename. It is local to
+	// the process that ran the rename and is not carried on the wire; a proxied caller's
+	// write-back runs on the server, which has it.
+	MemberEdits []ItemFieldEdit
+}
+
 // DetachReport records a per-member detach: the track pulled off an album keyed on a
 // MusicBrainz release id, the album it left, and the album and release group it landed
 // on. The two new pids are empty when the member's own tags carry no grouping evidence

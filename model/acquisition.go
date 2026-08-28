@@ -5,9 +5,10 @@ package model
 // remains the download pointer retention uses later.
 //
 // A row exists only for an item with evidence of external origin: either an
-// acquisition WaxBin performed, or the file's own SOURCE_URL/SOURCE_ID tags.
-// Evidence from an event always wins over evidence from a tag. An item with neither
-// has no row and reads as source:local.
+// acquisition WaxBin performed, or the file's own SOURCE_URL/SOURCE_ID tags. A
+// non-empty field of an event beats a tag; emptiness is never evidence, so a bare
+// re-record keeps what stands. An item with neither has no row and reads as
+// source:local, which is also where ClearAcquisition returns one.
 //
 // The older phrasing, "a locally scanned file never has an acquisition row", assumed
 // origin could only be learned from an acquisition event. A scanned file carrying

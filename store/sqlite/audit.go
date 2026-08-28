@@ -53,19 +53,47 @@ func (s *Store) DuplicateGenres(ctx context.Context) ([]model.DuplicateSet, erro
 	return s.scanDupSets(ctx, q, model.MergeGenre, "same collation key")
 }
 
-// DuplicateAlbums finds album entities that share an MBID (two heuristic album
-// rows enrichment resolved to one release).
+// DuplicateAlbums finds album entities that share a MusicBrainz release id.
 func (s *Store) DuplicateAlbums(ctx context.Context) ([]model.DuplicateSet, error) {
-	// Order each MBID group by track count DESC so scanDupSets picks the album with
-	// the most tracks as the survivor (re-pointing the fewest tracks), matching the
+	// Order each group by track count DESC so scanDupSets picks the album with the
+	// most tracks as the survivor (re-pointing the fewest tracks), matching the
 	// "survivor = most tracks" contract the artist/genre queries honor.
-	q := `SELECT e.mbid, e.pid, e.title, (SELECT COUNT(*) FROM track t WHERE t.album_id = e.id) AS tc
-		FROM album e
-		WHERE e.mbid IN (
-			SELECT mbid FROM album WHERE mbid IS NOT NULL AND mbid <> ''
-			GROUP BY mbid HAVING COUNT(*) > 1)
-		ORDER BY e.mbid, tc DESC, e.pid`
-	return s.scanDupSets(ctx, q, model.MergeAlbum, "shared MBID")
+	return s.scanDupSets(ctx, effectiveMBIDDupQuery("album",
+		"(SELECT COUNT(*) FROM track t WHERE t.album_id = k.id)"),
+		model.MergeAlbum, "shared MBID")
+}
+
+// DuplicateReleaseGroups finds release-group entities that share a MusicBrainz
+// release-group id. Ordered by member-album count DESC, which is the group rung's
+// reading of "survivor = the row holding the most", so a merge repoints the fewest
+// albums.
+func (s *Store) DuplicateReleaseGroups(ctx context.Context) ([]model.DuplicateSet, error) {
+	return s.scanDupSets(ctx, effectiveMBIDDupQuery("release_group",
+		"(SELECT COUNT(*) FROM album a WHERE a.release_group_id = k.id)"),
+		model.MergeReleaseGroup, "shared MBID")
+}
+
+// effectiveMBIDDupQuery builds the duplicate scan for an entity that keys MBID-first,
+// grouping on an EFFECTIVE id: the mbid column when it is filled, otherwise the id
+// carried in an mbid: match_key. Grouping on the column alone would miss exactly the
+// population these finders exist for, a pair where one row holds the id in its column
+// (enrichment put it there without moving the key) and the other in its key.
+//
+// The bare = grouping is only right because every write site folds the id to lowercase
+// (normMBID) and identity's keys already do; a case-divergent spelling would read here
+// as a different identity. table and count are caller constants, never caller text.
+func effectiveMBIDDupQuery(table, count string) string {
+	return `WITH keyed AS (
+			SELECT id, pid, title,
+				COALESCE(NULLIF(mbid,''),
+					CASE WHEN match_key LIKE 'mbid:%' THEN substr(match_key, 6) END) AS mb
+			FROM ` + table + `)
+		SELECT k.mb, k.pid, k.title, ` + count + ` AS n
+		FROM keyed k
+		WHERE k.mb IS NOT NULL AND k.mb <> '' AND k.mb IN (
+			SELECT mb FROM keyed WHERE mb IS NOT NULL AND mb <> ''
+			GROUP BY mb HAVING COUNT(*) > 1)
+		ORDER BY k.mb, n DESC, k.pid`
 }
 
 // scanDupSets buckets rows ordered by a group key into DuplicateSets. Each row is

@@ -81,7 +81,7 @@ func (p *caaProvider) Enrich(ctx context.Context, req Request) (*Candidate, erro
 		}
 		return nil, err // transient: the Service logs and skips
 	}
-	// gatherCover stamps Source and Provider on the winner; the URL is the provider's
+	// gatherArt stamps Source and Provider on the winner; the URL is the provider's
 	// to report, since only it knows where it fetched.
 	// An ISOBMFF cover (AVIF/HEIC) has no pure-Go decoder, so it describes with a
 	// sniffed format and no dimensions while still being a perfectly good image to

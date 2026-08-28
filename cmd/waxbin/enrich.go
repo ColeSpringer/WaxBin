@@ -30,6 +30,11 @@ func newEnrichCmd(g *globals) *cobra.Command {
 			"gracefully offline. Requires a MusicBrainz contact (config enrichment.contact or " +
 			"WAXBIN_ENRICH_CONTACT). The optional AcoustID fallback additionally needs an API " +
 			"key and fpcalc. An embedder can inject further providers via Options.\n\n" +
+			"An injected provider can also fill role-tagged art (back, disc, booklet, " +
+			"background) and imagery at the artist rung, which no built-in provider answers. " +
+			"Giving an artist a front cover changes what unrelated tracks show: art resolves " +
+			"track, then album, then release group, then artist, so a track whose album has no " +
+			"cover starts rendering the artist's photo as its own.\n\n" +
 			"--item or --entity (mutually exclusive) scope the pass to one item's or entity's " +
 			"targets: a track's artist, album artist, release group, and lyrics, a book's " +
 			"contributors and identifiers, or the named artist/release_group/album (an album " +

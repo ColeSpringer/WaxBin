@@ -370,6 +370,39 @@ func (l *Library) proxyHandlers() map[string]proxy.Handler {
 			}
 			return out, nil
 		},
+		proxy.MethodRenameEntity: func(ctx context.Context, raw json.RawMessage) (any, error) {
+			p, err := decodeParams[proxy.RenameEntityParams](raw)
+			if err != nil {
+				return nil, err
+			}
+			lock, lockErr := wireLock("serve.rename_entity", p.Lock)
+			if lockErr != nil {
+				return nil, lockErr
+			}
+			rep, renameErr := l.RenameEntity(ctx, model.MergeEntity(p.EntityType), model.PID(p.EntityPID), p.Fields,
+				RenameOptions{
+					WriteBack: p.WriteBack, Lock: lock, Force: p.Force,
+					Source: model.ProvenanceSource(p.Source), Provider: p.Provider,
+				})
+			out := proxy.RenameEntityResult{}
+			if rep != nil {
+				out = proxy.RenameEntityResult{
+					Outcome: string(rep.Outcome), MergedInto: string(rep.MergedInto),
+					MovedAlbums: pidStrings(rep.MovedAlbums), Members: rep.Members,
+				}
+			}
+			// A write-back failure is a result, not a transport error: the rename
+			// committed and only the files' tags did not follow.
+			var wbErr *WriteBackError
+			if errors.As(renameErr, &wbErr) {
+				out.WriteBackFailures = toProxyFailures(wbErr.Failures)
+				return out, nil
+			}
+			if renameErr != nil {
+				return nil, renameErr
+			}
+			return out, nil
+		},
 		proxy.MethodDetach: func(ctx context.Context, raw json.RawMessage) (any, error) {
 			p, err := decodeParams[proxy.DetachParams](raw)
 			if err != nil {

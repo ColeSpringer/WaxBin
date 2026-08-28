@@ -1383,3 +1383,44 @@ func TestServeProxiedPlaylistLifecycle(t *testing.T) {
 		t.Fatalf("get after proxied delete = %v, want CodeNotFound", err)
 	}
 }
+
+// TestServeProxiedRenameEntity checks the rename params reach the handler and the report
+// comes back over the wire, including the outcome and member count a client reads to know
+// which branch ran.
+func TestServeProxiedRenameEntity(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	sock := testsock.Path(t)
+	for i, title := range []string{"One", "Two"} {
+		writeFile(t, filepath.Join(root, fmt.Sprintf("0%d.mp3", i+1)), testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
+			Title: title, Artist: "Alpha", AlbumArtist: "Alpha", Album: "Old Title", Track: i + 1,
+			Audio: testaudio.AudioWithSeed(byte(i + 1)),
+		}))
+	}
+	openServed(t, ctx, db, root, sock)
+	albumPID := model.PID(catalogScalar[string](t, ctx, db, "SELECT pid FROM album"))
+	c := dialWhenReady(t, sock)
+
+	res, err := c.RenameEntity(ctx, model.MergeAlbum, albumPID,
+		map[string]string{"album": "New Title"}, true, model.Attribution{}, model.LockUnchanged, false)
+	if err != nil {
+		t.Fatalf("proxied rename: %v", err)
+	}
+	if len(res.WriteBackFailures) != 0 {
+		t.Fatalf("unexpected write-back failures: %+v", res.WriteBackFailures)
+	}
+	if res.Outcome != string(model.EntityRenamed) || res.Members != 2 {
+		t.Fatalf("rename result = %+v, want a two-member rename in place", res)
+	}
+	if title := catalogScalar[string](t, ctx, db, "SELECT title FROM album WHERE pid = ?", string(albumPID)); title != "New Title" {
+		t.Errorf("catalog album title = %q, want the renamed one", title)
+	}
+	fm, err := meta.NewReader().Read(ctx, filepath.Join(root, "01.mp3"))
+	if err != nil {
+		t.Fatalf("read the renamed file: %v", err)
+	}
+	if fm.Tags.Album != "New Title" {
+		t.Errorf("file ALBUM = %q, want the write-back to have followed", fm.Tags.Album)
+	}
+}

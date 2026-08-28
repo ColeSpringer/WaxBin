@@ -64,12 +64,12 @@ func (s *Store) DetachItemFromMBIDAlbum(ctx context.Context, itemPID model.PID) 
 		}
 
 		var albumID sql.NullInt64
-		var albumPID, albumKey, rgPID sql.NullString
-		err = tx.QueryRowContext(ctx, `SELECT al.id, al.pid, al.match_key, rg.pid FROM track t
+		var albumPID, albumKey, rgPID, albumMBID sql.NullString
+		err = tx.QueryRowContext(ctx, `SELECT al.id, al.pid, al.match_key, rg.pid, al.mbid FROM track t
 			LEFT JOIN album al ON al.id = t.album_id
 			LEFT JOIN release_group rg ON rg.id = al.release_group_id
 			WHERE t.item_id = ?`, itemID).
-			Scan(&albumID, &albumPID, &albumKey, &rgPID)
+			Scan(&albumID, &albumPID, &albumKey, &rgPID, &albumMBID)
 		if errors.Is(err, sql.ErrNoRows) {
 			return waxerr.New(waxerr.CodeNotFound, op, "item has no track row")
 		}
@@ -79,13 +79,17 @@ func (s *Store) DetachItemFromMBIDAlbum(ctx context.Context, itemPID model.PID) 
 		if !albumID.Valid {
 			return waxerr.New(waxerr.CodeInvalid, op, "this item sits on no album, so there is nothing to detach it from")
 		}
-		// Two key shapes carry a MusicBrainz identifier down to the member: the album's
-		// own release id, and a heuristic album key whose group segment is the group's id
-		// (the shape a file tagged with a release-group id alone produces). Both are
-		// re-pinned on every re-resolve, so both are detachable.
+		// Three shapes carry a MusicBrainz identifier down to the member: the album's own
+		// release id, a heuristic album key whose group segment is the group's id (the
+		// shape a file tagged with a release-group id alone produces), and a heuristically
+		// keyed album that holds a release id in its column, which is what a member
+		// adopted at resolve time is pinned to. All three are re-pinned on every
+		// re-resolve, so all three are detachable; without the third the documented escape
+		// hatch would be missing for exactly the members adoption creates.
 		albumKeyed := strings.HasPrefix(albumKey.String, mbidKeyPrefix)
 		groupKeyed := strings.HasPrefix(albumKey.String, heuristicAlbumKeyPrefix+mbidKeyPrefix)
-		if !albumKeyed && !groupKeyed {
+		columnKeyed := albumMBID.String != ""
+		if !albumKeyed && !groupKeyed && !columnKeyed {
 			return waxerr.New(waxerr.CodeInvalid, op,
 				"this item's album chain carries no MusicBrainz id, so its members already resolve from their own tags")
 		}
@@ -118,7 +122,7 @@ func (s *Store) DetachItemFromMBIDAlbum(ctx context.Context, itemPID model.PID) 
 		if err := affected.collect(ctx, tx, itemID); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
-		if err := resolveAndLinkEntities(ctx, tx, itemID, tr, filePath, "", 0, affected); err != nil {
+		if err := resolveAndLinkEntities(ctx, tx, s.log, itemID, tr, filePath, "", 0, affected); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		if err := affected.collect(ctx, tx, itemID); err != nil {
