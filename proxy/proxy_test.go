@@ -1057,6 +1057,14 @@ func TestServerCloseMidCallDoesNotHang(t *testing.T) {
 // in the protocol pairs a response with its request. The Client refuses further calls
 // with a reason instead of appending a second request onto the stump of the first.
 func TestCanceledPartialWriteRetiresTheConnection(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// AF_UNIX there gives the sender no backpressure: it took a 256MB write whole
+		// while the peer had read 4KB, so the frame this tears on other platforms always
+		// goes out intact and the call that follows waits on the answer the stalled
+		// server never sends. TestTornWriteRetiresTheConnection covers the refusal
+		// itself without a socket.
+		t.Skip("no write backpressure to interrupt")
+	}
 	// The cancel has to land while the write is in flight, so the server reads enough to
 	// prove it started and then stops, leaving the rest of an oversized frame to fill the
 	// socket buffer and block. A timer alone races the write and, losing, cancels a call

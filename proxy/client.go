@@ -53,9 +53,15 @@ func Dial(path string) (*Client, error) {
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
+	return newClient(conn), nil
+}
+
+// newClient wires a Client onto an established connection. The response reader holds a
+// back reference to the Client it reads for, so nothing assembles one by hand.
+func newClient(conn net.Conn) *Client {
 	c := &Client{conn: conn}
 	c.br = bufio.NewReader(clientReader{c})
-	return c, nil
+	return c
 }
 
 // Close closes the underlying connection. If this connection held a maintenance
