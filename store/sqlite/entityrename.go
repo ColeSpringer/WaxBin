@@ -6,6 +6,7 @@ import (
 	"errors"
 	"maps"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/colespringer/waxbin/identity"
@@ -91,6 +92,17 @@ func (s *Store) RenameEntity(ctx context.Context, entityType model.MergeEntity, 
 				"cannot rename "+f+" to nothing: that un-groups every member rather than moving the entity")
 		}
 	}
+	// A name of nothing but punctuation ("???", "---") survives the check above and then
+	// folds to an empty match key, which is not a name this catalog can hold. The artist
+	// stage skips such a target, so the row stays put while the applies below still run:
+	// resolveArtist drops every name it cannot key, so the credits are deleted and not
+	// rebuilt. The member-key check catches this for an artist with field references, and
+	// reaches nothing for one held by credits alone.
+	if entityType == model.MergeArtist && identity.MatchKey(fields["name"]) == "" {
+		return nil, waxerr.New(waxerr.CodeInvalid, op,
+			"cannot rename to "+strconv.Quote(fields["name"])+
+				": it carries no letters or digits, so it folds to an empty key that groups nothing")
+	}
 
 	attr, err := checkFieldAttribution(attr, op)
 	if err != nil {
@@ -107,8 +119,9 @@ func (s *Store) RenameEntity(ctx context.Context, entityType model.MergeEntity, 
 			return err
 		}
 		var targets []editEntry
+		var creditTargets []creditEntry
 		if entityType == model.MergeArtist {
-			targets, err = artistRenameTargetsTx(ctx, tx, entityID, fields["name"], op)
+			targets, creditTargets, err = artistRenameTargetsTx(ctx, tx, entityID, fields["name"], force, op)
 		} else {
 			var members []model.PID
 			members, err = renameMemberPIDsTx(ctx, tx, entityType, entityID, op)
@@ -119,7 +132,7 @@ func (s *Store) RenameEntity(ctx context.Context, entityType model.MergeEntity, 
 		if err != nil {
 			return err
 		}
-		if len(targets) == 0 {
+		if len(targets) == 0 && len(creditTargets) == 0 {
 			return waxerr.New(waxerr.CodeInvalid, op,
 				"entity has no members to carry the rename; its identity comes from its members' tags")
 		}
@@ -154,7 +167,7 @@ func (s *Store) RenameEntity(ctx context.Context, entityType model.MergeEntity, 
 			return err
 		}
 		affected := newAffectedRollups()
-		if err := renameEntitiesForEditsTx(ctx, tx, s.log, entries, affected, op); err != nil {
+		if err := renameEntitiesForEditsTx(ctx, tx, s.log, entries, creditTargets, affected, op); err != nil {
 			return err
 		}
 		rep.MemberEdits = make([]model.ItemFieldEdit, 0, len(entries))
@@ -165,6 +178,18 @@ func (s *Store) RenameEntity(ctx context.Context, entityType model.MergeEntity, 
 			}
 			rep.MemberEdits = append(rep.MemberEdits, model.ItemFieldEdit{ItemPID: e.pid, Fields: e.norm})
 		}
+		// The credit half rides the same affected set, so the one maintainRollupsTx below
+		// still covers both. applyItemCreditsTx deliberately does not call it itself.
+		rep.CreditEdits = make([]model.ItemCreditEdit, 0, len(creditTargets))
+		for _, e := range creditTargets {
+			stored, err := applyItemCreditsTx(ctx, tx, e, attr, lock, affected, op)
+			if err != nil {
+				return err
+			}
+			rep.CreditEdits = append(rep.CreditEdits,
+				model.ItemCreditEdit{ItemPID: e.pid, Role: e.role, Names: stored})
+		}
+		rep.Credits = len(rep.CreditEdits)
 		if !affected.empty() {
 			if err := maintainRollupsTx(ctx, tx, affected, nowNS()); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
@@ -212,7 +237,8 @@ func renameMemberPIDsTx(ctx context.Context, tx *sql.Tx, entityType model.MergeE
 }
 
 // artistRenameTargetsTx derives the per-item edits an artist rename needs, one entry per
-// referring item carrying every field that item credits the artist through.
+// referring item carrying every field that item credits the artist through, plus one
+// credit entry per contributor role that backs no field of its own.
 //
 // An artist is referenced five ways and artistRenameCoveredTx checks all five before the
 // pre-pass will move the row: track.artist_id, track.album_artist_id, book.author_id, the
@@ -230,31 +256,33 @@ func renameMemberPIDsTx(ctx context.Context, tx *sql.Tx, entityType model.MergeE
 // set even when it points at this artist: the anchor falls back to the track artist when
 // the column is blank, so editing artist already moves it, and writing an album_artist
 // that was never there would change the album's key shape rather than its name.
-func artistRenameTargetsTx(ctx context.Context, tx *sql.Tx, artistID int64, newName, op string) ([]editEntry, error) {
-	credits, err := contributorRefsTx(ctx, tx, artistID)
+func artistRenameTargetsTx(ctx context.Context, tx *sql.Tx, artistID int64, newName string,
+	force bool, op string) ([]editEntry, []creditEntry, error) {
+	refs, err := contributorRefsTx(ctx, tx, artistID)
 	if err != nil {
-		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+		return nil, nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
-	// A non-artist, non-author credit lives on a different edit surface
-	// (SetItemCreditsBatch), whose apply has never shared a transaction with this one.
-	// Renaming past it would move the artist's curation while the credit row kept
-	// referencing it under the old spelling, so it is a refusal rather than a split.
+	curKey, err := entityMatchKeyTx(ctx, tx, "artist", artistID)
+	if err != nil {
+		return nil, nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	// The two roles that back an item field ride that field. Every other role has no
+	// field to ride, so it becomes an entry on the credit surface, applied in this same
+	// transaction beside the field edits.
 	byItem := map[int64]map[string]bool{}
-	for _, c := range credits {
+	var credits []creditEntry
+	for _, c := range refs {
 		switch model.ContributorRole(c.role) {
 		case model.RoleArtist:
 			addRenameField(byItem, c.itemID, "artist")
 		case model.RoleAuthor:
 			addRenameField(byItem, c.itemID, "author")
 		default:
-			pid, perr := pidByIDTx(ctx, tx, "playable_item", c.itemID)
-			if perr != nil {
-				return nil, waxerr.Wrap(waxerr.CodeIO, op, perr)
+			e, err := creditRenameEntryTx(ctx, tx, c, artistID, curKey, newName, force, op)
+			if err != nil {
+				return nil, nil, err
 			}
-			return nil, waxerr.New(waxerr.CodeConflict, op,
-				"artist holds a "+c.role+" credit on item "+string(pid)+
-					", which lives on the credit edit surface rather than this one; "+
-					"move that credit with `waxbin credit <pid> --role "+c.role+" --name <new name>` first")
+			credits = append(credits, e)
 		}
 	}
 	for _, ref := range []struct {
@@ -267,29 +295,25 @@ func artistRenameTargetsTx(ctx context.Context, tx *sql.Tx, artistID int64, newN
 	} {
 		ids, err := queryInt64sTx(ctx, tx, ref.q, artistID)
 		if err != nil {
-			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+			return nil, nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		for _, id := range ids {
 			addRenameField(byItem, id, ref.field)
 		}
 	}
 
-	curKey, err := entityMatchKeyTx(ctx, tx, "artist", artistID)
-	if err != nil {
-		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
-	}
 	out := make([]editEntry, 0, len(byItem))
 	for _, itemID := range slices.Sorted(maps.Keys(byItem)) {
 		pid, err := pidByIDTx(ctx, tx, "playable_item", itemID)
 		if err != nil {
-			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+			return nil, nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		fields := make([]string, 0, len(byItem[itemID]))
 		norm := make(map[string]string, len(byItem[itemID]))
 		for _, f := range slices.Sorted(maps.Keys(byItem[itemID])) {
 			names, err := renameCreditListTx(ctx, tx, itemID, f)
 			if err != nil {
-				return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+				return nil, nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 			v, ok := substituteCredit(names, curKey, newName)
 			if !ok {
@@ -300,7 +324,7 @@ func artistRenameTargetsTx(ctx context.Context, tx *sql.Tx, artistID int64, newN
 				if f == "album_artist" {
 					continue
 				}
-				return nil, waxerr.New(waxerr.CodeConflict, op,
+				return nil, nil, waxerr.New(waxerr.CodeConflict, op,
 					"item "+string(pid)+" credits this artist through "+f+
 						", but its "+f+" list does not name it, so the rename cannot be written there")
 			}
@@ -312,7 +336,55 @@ func artistRenameTargetsTx(ctx context.Context, tx *sql.Tx, artistID int64, newN
 		}
 		out = append(out, editEntry{pid: pid, fields: fields, norm: norm})
 	}
-	return out, nil
+	return out, credits, nil
+}
+
+// creditRenameEntryTx turns one contributor row into the credit-surface entry that moves
+// it, its names being the role's current credit list with the old spelling substituted so
+// the role's other credits survive. It is the credit twin of the field entries above.
+//
+// The lock is checked here rather than at apply because collectEditEntriesTx already
+// checks the field half up front, and a rename that refused halfway would have moved some
+// of an artist's references and not others. skipLocked has no counterpart: a skipped
+// credit leaves a reference behind, which is the split this verb exists to prevent.
+func creditRenameEntryTx(ctx context.Context, tx *sql.Tx, c contributorRef, artistID int64,
+	curKey, newName string, force bool, op string) (creditEntry, error) {
+	pid, err := pidByIDTx(ctx, tx, "playable_item", c.itemID)
+	if err != nil {
+		return creditEntry{}, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	role := model.ContributorRole(c.role)
+	if !force {
+		locked, err := fieldLockedTx(ctx, tx, c.itemID, model.CreditField(role))
+		if err != nil {
+			return creditEntry{}, err
+		}
+		if locked {
+			return creditEntry{}, waxerr.New(waxerr.CodeLocked, op,
+				"item "+string(pid)+" has a locked "+c.role+" credit (use force to override)")
+		}
+	}
+	var kind string
+	if err := tx.QueryRowContext(ctx,
+		"SELECT kind FROM playable_item WHERE id=?", c.itemID).Scan(&kind); err != nil {
+		return creditEntry{}, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	names, err := contributorNamesForRoleTx(ctx, tx, c.itemID, role)
+	if err != nil {
+		return creditEntry{}, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	clean, ok := substituteCreditNames(names, curKey, newName)
+	if !ok {
+		// The row says this item credits the artist in this role, but the role's own list
+		// does not name it. Same disagreement the field half refuses on.
+		return creditEntry{}, waxerr.New(waxerr.CodeConflict, op,
+			"item "+string(pid)+" credits this artist as "+c.role+
+				", but its "+c.role+" list does not name it, so the rename cannot be written there")
+	}
+	return creditEntry{
+		pid: pid, itemID: c.itemID, kind: kind, role: role, clean: clean,
+		renamePriorID: artistID, renameTarget: newName,
+	}, nil
 }
 
 // pidByIDTx is the inverse of idByPIDTx, for the reference enumerations that come back
@@ -371,6 +443,16 @@ func renameCreditListTx(ctx context.Context, tx *sql.Tx, itemID int64, field str
 // comes back semicolon-joined; that is a visible change to the credit's punctuation, and
 // the only spelling of it this surface can store without losing a name.
 func substituteCredit(names []string, curKey, newName string) (string, bool) {
+	out, ok := substituteCreditNames(names, curKey, newName)
+	if !ok {
+		return "", false
+	}
+	return strings.Join(out, "; "), true
+}
+
+// substituteCreditNames is the same substitution kept as a list, for the credit surface,
+// which stores the names rather than a joined display and does its own resolution.
+func substituteCreditNames(names []string, curKey, newName string) ([]string, bool) {
 	out := make([]string, len(names))
 	replaced := false
 	for i, n := range names {
@@ -382,9 +464,9 @@ func substituteCredit(names []string, curKey, newName string) (string, bool) {
 		out[i] = n
 	}
 	if !replaced {
-		return "", false
+		return nil, false
 	}
-	return strings.Join(out, "; "), true
+	return out, true
 }
 
 // checkRenameMembersTx refuses the conditions that would otherwise make the rename fall

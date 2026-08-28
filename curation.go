@@ -222,7 +222,7 @@ func (l *Library) writeBackPicture(ctx context.Context, op string, refPID model.
 		return nil
 	}
 	wbErr := &WriteBackError{ItemPID: refPID, Edits: edits}
-	if err := l.writeBackFiles(ctx, op, files, wbErr,
+	if err := l.writeBackFiles(ctx, op, files, wbErr, nil,
 		func(w *meta.Writer, path string) (*meta.WriteResult, error) {
 			return w.ApplyPicture(ctx, path, pedit)
 		}); err != nil {

@@ -195,7 +195,7 @@ func (m *mutator) RenameEntity(ctx context.Context, entityType model.MergeEntity
 		rep := &model.EntityRenameReport{
 			EntityPID: entityPID, Outcome: model.EntityRenameOutcome(res.Outcome),
 			MergedInto: model.PID(res.MergedInto), MovedAlbums: toPIDs(res.MovedAlbums),
-			Members: res.Members,
+			Members: res.Members, Credits: res.Credits,
 		}
 		return rep, writeBackErr(entityPID, fields, res.WriteBackFailures)
 	}

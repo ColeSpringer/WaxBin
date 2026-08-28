@@ -217,7 +217,7 @@ func BookKey(asin, isbn, author, title, edition string) string {
 	if a := strings.TrimSpace(asin); a != "" {
 		return "asin:" + strings.ToLower(a)
 	}
-	if i := normalizeISBN(isbn); i != "" {
+	if i := ISBNKey(isbn); i != "" {
 		return "isbn:" + i
 	}
 	t := MatchKey(title)
@@ -326,10 +326,15 @@ func VirtualTrackKey(fileEssence string, trackNumber int, startFrames int64) str
 	return "vtrack:" + fileEssence + "\x1f" + strconv.Itoa(trackNumber) + "\x1f" + strconv.FormatInt(startFrames, 10)
 }
 
-// normalizeISBN keeps only the digits and the ISBN-10 check character 'X' (folded
-// to lowercase), so "978-0-13-468599-1" and "9780134685991" key the same. It
+// ISBNKey is the canonical form of an ISBN: the digits and the ISBN-10 check
+// character 'X' (folded to lowercase) alone, so "978-0-13-468599-1" and
+// "9780134685991" key the same, and so does a value carrying an "ISBN " prefix. It
 // returns "" for a value with no usable characters.
-func normalizeISBN(isbn string) string {
+//
+// It is exported because the catalog stores it beside the raw value (book.isbn_key)
+// and looks books up by it. The raw column keeps what the tag said, since that is what
+// an on-disk write-back puts back; the key is what compares.
+func ISBNKey(isbn string) string {
 	var b strings.Builder
 	for _, r := range isbn {
 		switch {

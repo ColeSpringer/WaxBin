@@ -104,7 +104,7 @@ func (s *Store) PutScannedVirtualTracks(ctx context.Context, in model.PutScanned
 			// counts a locked-field .cue change as a reason to rewrite the track. vt is a
 			// loop-local copy, so mutating it is safe.
 			if in.PreserveLocks {
-				if err := preserveLockedTrackFieldsTx(ctx, tx, &vt.Track, &vt.Item); err != nil {
+				if err := preserveLockedTrackFieldsTx(ctx, tx, s.log, &vt.Track, &vt.Item); err != nil {
 					return waxerr.Wrap(waxerr.CodeIO, op, err)
 				}
 			}
@@ -115,7 +115,7 @@ func (s *Store) PutScannedVirtualTracks(ctx context.Context, in model.PutScanned
 				continue // an unchanged virtual track (a forced rescan of a stable rip)
 			}
 
-			itemID, itemPID, created, _, err := upsertItem(ctx, tx, vt.Item, now, "")
+			itemID, itemPID, created, _, err := upsertItem(ctx, tx, s.log, vt.Item, bookAdoptKey{}, now, "")
 			if err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}

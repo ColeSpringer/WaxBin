@@ -3,8 +3,10 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"strings"
 
+	"github.com/colespringer/waxbin/identity"
 	"github.com/colespringer/waxbin/internal/pathx"
 	"github.com/colespringer/waxbin/model"
 )
@@ -440,17 +442,122 @@ func updateFileRow(ctx context.Context, tx *sql.Tx, id int64, f model.File, now 
 	return err
 }
 
+// The prefixes identity.BookKey puts on a book key anchored to a strong identifier. Both
+// are emitted in the canonical form the catalog stores: an ASIN lowercased, an ISBN run
+// through identity.ISBNKey.
+const (
+	bookASINKeyPrefix = "asin:"
+	bookISBNKeyPrefix = "isbn:"
+)
+
+// bookAdoptKey is the descriptive evidence an ASIN adoption corroborates against: the
+// author and title the arriving file states. Zero for a track, which never adopts.
+type bookAdoptKey struct{ author, title string }
+
+// adoptBookItemByIdentTx resolves the book item already holding the strong identifier a
+// key is built on, returning 0 when none does. It is the item-scoped twin of
+// adoptEntityByMBIDTx: BookEnrichment fills book.asin and book.isbn without moving the
+// item's identity_key, so a part that later arrives tagged with one computes a key no row
+// has and forks a second book.
+//
+// The ISBN arm compares book.isbn_key rather than the raw column, since identity.BookKey
+// strips an ISBN's separators and the column keeps them.
+//
+// Unlike the entity version it corroborates, because these identifiers arrive in tags
+// anyone can write and this join links the file as a part, moving total_duration_ms, the
+// part ordering and the lock overlay with it. The author must agree, and the title too
+// unless the standing title is locked, which means it no longer describes what its files
+// say. Undoing a wrong adoption means retagging and rescanning; detach is album-member
+// scoped and will not split a part back out.
+//
+// It writes nothing, so there is no delta and no forward re-key, and the lowest
+// corroborating id wins a tie with a warn for audit.
+func adoptBookItemByIdentTx(ctx context.Context, tx *sql.Tx, log logger, identityKey string, k bookAdoptKey) (int64, error) {
+	var column, ident, label string
+	switch {
+	case strings.HasPrefix(identityKey, bookASINKeyPrefix):
+		column, ident, label = "b.asin COLLATE NOCASE", strings.TrimPrefix(identityKey, bookASINKeyPrefix), "asin"
+	case strings.HasPrefix(identityKey, bookISBNKeyPrefix):
+		column, ident, label = "b.isbn_key", strings.TrimPrefix(identityKey, bookISBNKeyPrefix), "isbn"
+	}
+	if ident == "" {
+		return 0, nil
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT b.item_id, b.author, pi.title
+		FROM book b JOIN playable_item pi ON pi.id = b.item_id
+		WHERE `+column+` = ? ORDER BY b.item_id`, ident)
+	if err != nil {
+		return 0, err
+	}
+	type holder struct {
+		id            int64
+		author, title string
+	}
+	var holders []holder
+	for rows.Next() {
+		var h holder
+		if err := rows.Scan(&h.id, &h.author, &h.title); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		holders = append(holders, h)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+
+	var ids []int64
+	for _, h := range holders {
+		if identity.MatchKey(h.author) != identity.MatchKey(k.author) {
+			continue
+		}
+		if identity.MatchKey(h.title) != identity.MatchKey(k.title) {
+			locked, err := fieldLockedTx(ctx, tx, h.id, "title")
+			if err != nil {
+				return 0, err
+			}
+			if !locked {
+				continue
+			}
+		}
+		ids = append(ids, h.id)
+	}
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	if len(ids) > 1 {
+		log.Warn("scan: book identifier held by more than one matching book; adopting the lowest",
+			label, ident, "adopted", ids[0], "other", ids[1])
+	}
+	return ids[0], nil
+}
+
 // upsertItem finds-or-creates the logical item, returning its id, pid, whether it
 // was created, and whether an existing item's state transitioned (e.g. missing ->
 // present when a file is restored) so the caller can emit a change_log delta for the
 // transition even when the audio content is unchanged.
-func upsertItem(ctx context.Context, tx *sql.Tx, item model.PlayableItem, now int64, preferredPID model.PID) (id int64, pid model.PID, created, stateChanged bool, err error) {
+//
+// A book whose key matches nothing gets a second look by its strong identifier, so an
+// enrichment-derived ASIN or ISBN joins the standing book rather than forking a new one.
+// See adoptBookItemByIdentTx.
+func upsertItem(ctx context.Context, tx *sql.Tx, log logger, item model.PlayableItem, adopt bookAdoptKey, now int64, preferredPID model.PID) (id int64, pid model.PID, created, stateChanged bool, err error) {
 	if item.IdentityKey != "" {
 		var rid int64
 		var rpid, curState string
 		qerr := tx.QueryRowContext(ctx,
 			"SELECT id, pid, state FROM playable_item WHERE kind = ? AND identity_key = ?",
 			string(item.Kind), item.IdentityKey).Scan(&rid, &rpid, &curState)
+		if errors.Is(qerr, sql.ErrNoRows) && item.Kind == model.KindBook {
+			adopted, aerr := adoptBookItemByIdentTx(ctx, tx, log, item.IdentityKey, adopt)
+			if aerr != nil {
+				return 0, "", false, false, aerr
+			}
+			if adopted != 0 {
+				qerr = tx.QueryRowContext(ctx,
+					"SELECT id, pid, state FROM playable_item WHERE id = ?", adopted).Scan(&rid, &rpid, &curState)
+			}
+		}
 		switch {
 		case qerr == nil:
 			if _, uerr := tx.ExecContext(ctx,
@@ -459,7 +566,7 @@ func upsertItem(ctx context.Context, tx *sql.Tx, item model.PlayableItem, now in
 				return 0, "", false, false, uerr
 			}
 			return rid, model.PID(rpid), false, curState != string(item.State), nil
-		case qerr != sql.ErrNoRows:
+		case !errors.Is(qerr, sql.ErrNoRows):
 			return 0, "", false, false, qerr
 		}
 	}

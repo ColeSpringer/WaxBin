@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/colespringer/waxbin/identity"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/read"
 	"github.com/colespringer/waxbin/waxerr"
@@ -40,6 +41,11 @@ const (
 	// the row outlives the entity unless someone deletes it, which is what
 	// deleteAuxArtMarkerTx is for.
 	enrichEntityAuxArt = "aux_art"
+	// enrichEntityArtistArt is the entity_enrichment.entity_type for the artist-art
+	// backfill, keyed by the artist's own id. Its own value for the reason above: sharing
+	// the artist entity's type would let the identity pass's marker silence this queue,
+	// which is the bug the backfill exists to fix.
+	enrichEntityArtistArt = "artist_art"
 	// enrichProviderNone labels a marker no provider answered. entity_enrichment.provider
 	// is NOT NULL and an aux backfill regularly completes with nothing offered, so the row
 	// names the outcome rather than storing an empty string a reader would take for a
@@ -310,14 +316,11 @@ func (s *Store) AlbumsNeedingReleaseMatch(ctx context.Context, force bool, after
 }
 
 // CountEntitiesNeedingEnrichment totals the artists, release groups, and books the
-// pass would process, plus the albums needing a release match (when includeAlbums is
-// set), the release groups needing an auxiliary-art backfill (includeAuxArt), and the
-// tracks needing a lyrics lookup (includeLyrics), so the heartbeat can report a real
-// ratio. Every flag must mirror whether the run actually runs that phase, or the ratio
-// drifts. A non-nil scope filters each per-type count to its id list, and a type with
-// an empty list contributes zero, because the scoped run skips that phase entirely;
+// pass would process, plus each optional phase opts selects, so the heartbeat can report
+// a real ratio. A non-nil scope filters each per-type count to its id list, and a type
+// with an empty list contributes zero, because the scoped run skips that phase entirely;
 // the denominator stays in lockstep with the work that actually runs.
-func (s *Store) CountEntitiesNeedingEnrichment(ctx context.Context, force, includeAlbums, includeAuxArt, includeLyrics bool, scope *model.EnrichScope) (int, error) {
+func (s *Store) CountEntitiesNeedingEnrichment(ctx context.Context, force bool, opts model.EnrichCountOptions, scope *model.EnrichScope) (int, error) {
 	const op = "store.CountEntitiesNeedingEnrichment"
 	type countQuery struct {
 		stmt string
@@ -338,7 +341,7 @@ func (s *Store) CountEntitiesNeedingEnrichment(ctx context.Context, force, inclu
 	}
 	add(`SELECT COUNT(*) FROM artist a WHERE `+enrichBacksFilter(enrichArtistBacksItems, artistIDs)+` AND `+notEnriched(model.EnrichArtistType, "a.id", force), "a.id", artistIDs)
 	add(`SELECT COUNT(*) FROM release_group rg WHERE `+enrichBacksFilter(enrichRGBacksItems, rgIDs)+` AND `+notEnriched(model.EnrichReleaseGroupType, "rg.id", force), "rg.id", rgIDs)
-	if includeAlbums {
+	if opts.Albums {
 		add(`SELECT COUNT(*) FROM album al JOIN release_group rg ON rg.id = al.release_group_id
 			WHERE (al.mbid IS NULL OR al.mbid = '') AND rg.mbid IS NOT NULL AND rg.mbid <> ''
 			  AND `+albumMatchEvidencePredicate("al")+`
@@ -346,13 +349,20 @@ func (s *Store) CountEntitiesNeedingEnrichment(ctx context.Context, force, inclu
 	}
 	// The aux backfill walks release groups, so it counts under the release-group scope
 	// list, the ghost heuristic included, the way its queue does.
-	if includeAuxArt {
+	if opts.AuxArt {
 		add(`SELECT COUNT(*) FROM release_group rg WHERE `+enrichBacksFilter(enrichRGBacksItems, rgIDs)+`
 			  AND `+auxArtNeededPredicate+`
 			  AND `+notEnriched(enrichEntityAuxArt, "rg.id", force), "rg.id", rgIDs)
 	}
+	// The artist backfill walks artists, so it counts under the artist scope list, the
+	// ghost heuristic included, the way its queue does.
+	if opts.ArtistArt {
+		add(`SELECT COUNT(*) FROM artist a WHERE `+enrichBacksFilter(enrichArtistBacksItems, artistIDs)+`
+			  AND `+artistArtNeededPredicate+`
+			  AND `+notEnriched(enrichEntityArtistArt, "a.id", force), "a.id", artistIDs)
+	}
 	add(`SELECT COUNT(*) FROM book b WHERE b.mbid IS NOT NULL AND b.mbid <> '' AND `+notEnriched(model.EnrichBookType, "b.item_id", force), "b.item_id", bookIDs)
-	if includeLyrics {
+	if opts.Lyrics {
 		add(`SELECT COUNT(*) FROM playable_item pi JOIN track t ON t.item_id = pi.id
 			WHERE `+lyricsNeededPredicate+` AND `+notEnriched(enrichEntityLyrics, "pi.id", force), "pi.id", lyricsIDs)
 	}
@@ -578,6 +588,170 @@ func buildAuxArtNeededPredicate() string {
 	AND (SELECT COUNT(*) FROM art_map am WHERE am.entity_type = 'release_group'
 		AND am.entity_id = rg.id AND am.role IN (` + strings.Join(quoted, ",") + `)) < ` +
 		strconv.Itoa(len(roles))
+}
+
+// artistArtNeededPredicate selects the artists the artist-art backfill should ask about,
+// reading the artist as a. It carries an MBID, since the pass resolves no identity of its
+// own; its whole-entity "art" lock does not stand; and either its front is empty or some
+// auxiliary slot is.
+//
+// The front clause is what separates this from auxArtNeededPredicate, which never
+// consults the front because a settled front is exactly the population that pass exists
+// for. Here the front is the usual gap: artist-rung art is fetched inside the identity
+// pass, so an artist already marked enriched never gets a picture at all. The apply side
+// handles both halves, so asking about both is one queue rather than two.
+//
+// The auxiliary vacancy test is as approximate as the release-group one: a slot held
+// empty by its own "art.<role>" lock reads here as a vacancy and is dropped at apply,
+// costing one marked pass rather than a per-role lock join in the queue.
+var artistArtNeededPredicate = buildArtistArtNeededPredicate()
+
+func buildArtistArtNeededPredicate() string {
+	roles := model.AuxArtRoles()
+	quoted := make([]string, len(roles))
+	for i, r := range roles {
+		quoted[i] = "'" + string(r) + "'"
+	}
+	return `a.mbid IS NOT NULL AND a.mbid <> ''
+	AND NOT EXISTS (SELECT 1 FROM entity_curation ec WHERE ec.entity_type = 'artist'
+		AND ec.entity_id = a.id AND ec.field = 'art' AND ec.locked = 1)
+	AND (NOT EXISTS (SELECT 1 FROM art_map am WHERE am.entity_type = 'artist'
+			AND am.entity_id = a.id AND am.role = 'front')
+		OR (SELECT COUNT(*) FROM art_map am WHERE am.entity_type = 'artist'
+			AND am.entity_id = a.id AND am.role IN (` + strings.Join(quoted, ",") + `)) < ` +
+		strconv.Itoa(len(roles)) + `)`
+}
+
+// ArtistsNeedingArtBackfill returns the next keyset page of artists with an empty art
+// slot, front or auxiliary, for the artist-art backfill. It is the artist twin of
+// ReleaseGroupsNeedingAuxArt: same keyset shape, same ghost heuristic, same live read of
+// the mbid column so a run after the identity phase picks up the ids that phase filled.
+//
+// HasArt rides along so the apply's caller can tell a front fill from an auxiliary-only
+// one without a second query.
+func (s *Store) ArtistsNeedingArtBackfill(ctx context.Context, force bool, afterID int64, limit int, ids []int64) ([]model.EnrichTarget, error) {
+	const op = "store.ArtistsNeedingArtBackfill"
+	scopeClause, scopeArgs := enrichIDsFilter("a.id", ids)
+	stmt := `SELECT a.id, a.pid, a.name, COALESCE(a.mbid,''),
+		EXISTS(SELECT 1 FROM art_map am WHERE am.entity_type = 'artist'
+		       AND am.entity_id = a.id AND am.role = 'front')
+		FROM artist a
+		WHERE a.id > ? AND ` + enrichBacksFilter(enrichArtistBacksItems, ids) + ` AND ` + artistArtNeededPredicate + `
+		  AND ` + notEnriched(enrichEntityArtistArt, "a.id", force) + scopeClause + `
+		ORDER BY a.id LIMIT ?`
+	args := append(append([]any{afterID}, scopeArgs...), limitOr(limit))
+	rows, err := s.read.QueryContext(ctx, stmt, args...)
+	if err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	defer rows.Close()
+	var out []model.EnrichTarget
+	for rows.Next() {
+		t := model.EnrichTarget{Type: enrichEntityArtistArt}
+		var pid string
+		if err := rows.Scan(&t.ID, &pid, &t.Name, &t.MBID, &t.HasArt); err != nil {
+			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		t.PID = model.PID(pid)
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// ApplyArtistArtBackfill fills an artist's empty art roles and records the backfill
+// marker, the artist twin of ApplyReleaseGroupAuxArt. It runs the fill on the images the
+// caller brought rather than on the match flag, for the same reason: an exported port
+// with pictures and no match would otherwise take a permanent marker and store nothing.
+//
+// The auxiliary half goes through the helper ApplyArtistEnrichment uses, so its
+// fill-when-empty rule, per-role locks and provenance stamp are the same by construction.
+// The front does NOT: attachEntityArtUnlessLockedTx re-points the front past its lock,
+// which is right for a pass that owns the slot and wrong for a backfill that only fills a
+// gap. So the gap is re-read here, inside the write, rather than trusted from the queue
+// page's HasArt: a cover set by hand between the page and this write would otherwise be
+// overwritten by an answer that predates it.
+//
+// The entity delta rides on an image landing rather than on the match: a matched gather
+// can still write nothing, its roles locked or already filled, and a delta then would send
+// every ChangesSince tailer to re-fetch an unchanged artist.
+func (s *Store) ApplyArtistArtBackfill(ctx context.Context, in model.ArtistArtBackfill) error {
+	const op = "store.ApplyArtistArtBackfill"
+	provider := strings.TrimSpace(in.Provider)
+	if provider == "" {
+		provider = enrichProviderNone
+	}
+	return s.writeTx(ctx, func(tx *sql.Tx) error {
+		var wrote int
+		if in.Art != nil {
+			held, err := entityHoldsArtRoleTx(ctx, tx, model.ArtArtist, in.ArtistID, model.ArtRoleFront)
+			if err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+			blocked, err := artFillBlockedTx(ctx, tx, model.ArtArtist, in.ArtistID, model.ArtRoleFront)
+			if err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+			if !held && !blocked {
+				changed, err := attachEntityArtTxChanged(ctx, tx, string(model.ArtArtist), in.ArtistID, in.Art)
+				if err != nil {
+					return waxerr.Wrap(waxerr.CodeIO, op, err)
+				}
+				if changed {
+					wrote++
+				}
+			}
+		}
+		if len(in.AuxArt) > 0 {
+			n, err := fillEntityAuxArtTx(ctx, tx, model.ArtArtist, in.ArtistID, in.AuxArt)
+			if err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+			wrote += n
+		}
+		if err := markEnrichedTx(ctx, tx, enrichEntityArtistArt, in.ArtistID, provider, in.Matched, ""); err != nil {
+			return err
+		}
+		if wrote == 0 {
+			return nil
+		}
+		return appendChange(ctx, tx, "artist", in.PID, model.OpUpdate)
+	})
+}
+
+// entityHoldsArtRoleTx reports whether an entity already has an image in one role, which
+// is the fill-when-empty question the backfill has to ask inside its own write.
+func entityHoldsArtRoleTx(ctx context.Context, tx *sql.Tx, entityType model.ArtEntity, entityID int64, role model.ArtRole) (bool, error) {
+	var has int
+	err := tx.QueryRowContext(ctx,
+		"SELECT EXISTS(SELECT 1 FROM art_map WHERE entity_type = ? AND entity_id = ? AND role = ?)",
+		string(entityType), entityID, string(role)).Scan(&has)
+	return has == 1, err
+}
+
+// deleteArtistArtMarkerTx drops one artist's art-backfill marker, the twin of
+// deleteAuxArtMarkerTx and wired into the same sites. The marker lives under its own
+// entity_type, so neither the orphan sweep's delete nor a merge's marker union reaches
+// it, and an artist rowid is reused: without this a new artist inheriting the id would be
+// silently skipped by a dead artist's marker. The curation side calls it for the same
+// reason too, since a clear or an unlock is what opens a vacancy the marker says was
+// already asked about.
+func deleteArtistArtMarkerTx(ctx context.Context, tx *sql.Tx, artistID int64) error {
+	_, err := tx.ExecContext(ctx,
+		"DELETE FROM entity_enrichment WHERE entity_type = ? AND entity_id = ?", enrichEntityArtistArt, artistID)
+	return err
+}
+
+// deleteArtBackfillMarkerTx drops whichever art backfill marker an entity type carries,
+// so the curation writers that open a vacancy do not have to know which rung they are on.
+// A type with no backfill of its own is a no-op.
+func deleteArtBackfillMarkerTx(ctx context.Context, tx *sql.Tx, entityType model.ArtEntity, entityID int64) error {
+	switch entityType {
+	case model.ArtReleaseGroup:
+		return deleteAuxArtMarkerTx(ctx, tx, entityID)
+	case model.ArtArtist:
+		return deleteArtistArtMarkerTx(ctx, tx, entityID)
+	}
+	return nil
 }
 
 // ReleaseGroupsNeedingAuxArt returns the next keyset page of release groups whose
@@ -905,9 +1079,18 @@ func (s *Store) ApplyBookEnrichment(ctx context.Context, in model.BookEnrichment
 			if locked {
 				continue
 			}
+			// isbn carries a derived key column that every lookup compares on, so the two
+			// move together or a filled ISBN is invisible to the book resolver.
+			set := f.col + " = ?"
+			args := []any{norm}
+			if f.col == "isbn" {
+				set += ", isbn_key = ?"
+				args = append(args, identity.ISBNKey(norm))
+			}
+			args = append(args, in.BookItemID)
 			r, err := tx.ExecContext(ctx,
-				"UPDATE book SET "+f.col+" = ? WHERE item_id = ? AND ("+f.col+" = '' OR "+f.col+" IS NULL)",
-				norm, in.BookItemID)
+				"UPDATE book SET "+set+" WHERE item_id = ? AND ("+f.col+" = '' OR "+f.col+" IS NULL)",
+				args...)
 			if err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
@@ -1054,10 +1237,10 @@ func (s *Store) EnrichmentCachePut(ctx context.Context, key string, payload []by
 func (s *Store) EnrichmentCoverage(ctx context.Context) (model.EnrichmentCoverage, error) {
 	const op = "store.EnrichmentCoverage"
 	var cov model.EnrichmentCoverage
-	// Only the three entity types are coverage-reported. The other markers sharing the
-	// table (the per-recording lyrics lookup, the per-album release match) are
-	// fill-when-empty side channels rather than entity coverage, and the WHERE already
-	// excludes them.
+	// Only the three entity types are coverage-reported. The per-pass markers sharing the
+	// table (the per-recording lyrics lookup, the per-album release match, the two art
+	// backfills) are fill-when-empty side channels rather than entity coverage, and the
+	// WHERE already excludes them.
 	rows, err := s.read.QueryContext(ctx,
 		`SELECT entity_type, COUNT(*), COALESCE(SUM(matched),0) FROM entity_enrichment
 		 WHERE entity_type IN ('artist','release_group','book') GROUP BY entity_type`)

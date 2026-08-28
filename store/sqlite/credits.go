@@ -112,6 +112,13 @@ type creditEntry struct {
 	kind   string
 	role   model.ContributorRole
 	clean  []string
+	// renamePriorID and renameTarget are the rename path's known pair: the artist whose
+	// references are all moving, and the one name they move to. The batch surface leaves
+	// them zero and the pair is derived from the row instead, under a cardinality rule
+	// that cannot answer for a role two artists share. A rename knows which of the two it
+	// is moving, so it says rather than leaving the rule to guess.
+	renamePriorID int64
+	renameTarget  string
 }
 
 // itemRoleKey identifies one credit slot: the item and the role credited on it. The

@@ -378,6 +378,7 @@ func (l *Library) proxyHandlers() map[string]proxy.Handler {
 				out = proxy.RenameEntityResult{
 					Outcome: string(rep.Outcome), MergedInto: string(rep.MergedInto),
 					MovedAlbums: pidStrings(rep.MovedAlbums), Members: rep.Members,
+					Credits: rep.Credits,
 				}
 			}
 			return writeBackResponse(renameErr, func(f []proxy.WriteBackFailure) proxy.RenameEntityResult {

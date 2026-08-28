@@ -395,5 +395,6 @@ func (s *Store) DerivedDrift(ctx context.Context) (model.DerivedDrift, error) {
 		ReleaseGroupRollupDrift: rep.ReleaseGroupRollupDrift,
 		SortKeyDrift:            rep.SortKeyDrift,
 		BookDurationDrift:       rep.BookDurationDrift,
+		BookISBNKeyDrift:        rep.BookISBNKeyDrift,
 	}, nil
 }

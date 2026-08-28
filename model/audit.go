@@ -152,6 +152,7 @@ type DerivedDrift struct {
 	ReleaseGroupRollupDrift int
 	SortKeyDrift            int
 	BookDurationDrift       int
+	BookISBNKeyDrift        int
 }
 
 // Consistent reports whether the derived data is drift-free.
@@ -159,5 +160,5 @@ func (d DerivedDrift) Consistent() bool {
 	return d.ItemsMissingFTS == 0 && d.OrphanFTSRows == 0 &&
 		d.ArtistRollupDrift == 0 && d.GenreRollupDrift == 0 &&
 		d.ReleaseGroupRollupDrift == 0 && d.SortKeyDrift == 0 &&
-		d.BookDurationDrift == 0
+		d.BookDurationDrift == 0 && d.BookISBNKeyDrift == 0
 }

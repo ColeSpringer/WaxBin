@@ -51,7 +51,7 @@ func (s *Store) PutScannedBook(ctx context.Context, in model.PutScannedBookInput
 		// curated edit survives a re-derive-from-disk `scan --force`. Off only for
 		// `scan --force --ignore-locks`.
 		if in.PreserveLocks {
-			if err := preserveLockedBookFieldsTx(ctx, tx, &in.Book, &in.Item); err != nil {
+			if err := preserveLockedBookFieldsTx(ctx, tx, s.log, &in.Book, &in.Item); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 		}
@@ -60,7 +60,7 @@ func (s *Store) PutScannedBook(ctx context.Context, in model.PutScannedBookInput
 		// restore the book's original identity; identity stays essence-first, so a taken or
 		// invalid hint falls back to a fresh PID. Parts of one book share the stamp: the
 		// first to create the item adopts it, the rest join it by book key.
-		itemID, itemPID, created, stateChanged, err := upsertItem(ctx, tx, in.Item, now, in.PreferredItemPID)
+		itemID, itemPID, created, stateChanged, err := upsertItem(ctx, tx, s.log, in.Item, bookAdoptKey{author: in.Book.Author, title: in.Item.Title}, now, in.PreferredItemPID)
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
@@ -291,17 +291,19 @@ func upsertBook(ctx context.Context, tx *sql.Tx, itemID int64, b model.Book, aff
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO book
 		(item_id, subtitle, author, author_sort, author_id, narrator, series_id, series_seq,
-		 series_seq_sort, year, publisher, asin, isbn, edition, abridged, description, genre, mbid)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		 series_seq_sort, year, publisher, asin, isbn, isbn_key, edition, abridged, description, genre, mbid)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(item_id) DO UPDATE SET
 			subtitle=excluded.subtitle, author=excluded.author, author_sort=excluded.author_sort,
 			author_id=excluded.author_id, narrator=excluded.narrator, series_id=excluded.series_id,
 			series_seq=excluded.series_seq, series_seq_sort=excluded.series_seq_sort, year=excluded.year,
-			publisher=excluded.publisher, asin=excluded.asin, isbn=excluded.isbn, edition=excluded.edition,
+			publisher=excluded.publisher, asin=excluded.asin, isbn=excluded.isbn,
+			isbn_key=excluded.isbn_key, edition=excluded.edition,
 			abridged=excluded.abridged, description=excluded.description, genre=excluded.genre, mbid=excluded.mbid`,
 		itemID, b.Subtitle, author, authorSort, nullInt64(authorID), b.Narrator, nullInt64(seriesID),
 		b.SeriesSeq, model.SortKey(b.SeriesSeq), nullInt(b.Year), b.Publisher, b.ASIN, b.ISBN,
-		b.Edition, nullBool(b.Abridged), b.Description, b.Genre, nullStr(b.MBID)); err != nil {
+		identity.ISBNKey(b.ISBN), b.Edition, nullBool(b.Abridged), b.Description, b.Genre,
+		nullStr(b.MBID)); err != nil {
 		return err
 	}
 	if err := syncItemGenres(ctx, tx, itemID, b.Genres, b.Genre); err != nil {

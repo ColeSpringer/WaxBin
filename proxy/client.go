@@ -1,9 +1,12 @@
 package proxy
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
+	"os"
 	"sync"
 	"time"
 
@@ -17,9 +20,24 @@ import (
 // not meant to be shared across concurrent callers.
 type Client struct {
 	conn net.Conn
-	enc  *json.Encoder
-	dec  *json.Decoder
-	mu   sync.Mutex // serializes request/response round-trips on the one connection
+	// br reads responses a frame at a time, and writeFrame writes requests the same way.
+	// Neither half uses encoding/json's stream types: both remember their first I/O error
+	// and answer every later call with it, so one canceled call would end a connection
+	// with nothing wrong with it. The writer also discards its byte count, which is the
+	// only thing that says whether a failed write left a partial frame on the wire.
+	br *bufio.Reader
+	mu sync.Mutex // serializes request/response round-trips on the one connection
+	// callCtx is the context of the call in flight, read by clientReader to tell its
+	// own probe expiring apart from the cancel watcher cutting the call short. It is
+	// written and read only on the one goroutine c.mu admits.
+	callCtx context.Context
+	// owed counts responses the server still has to send for calls that gave up
+	// waiting. Nothing in the protocol pairs a response with its request, so the next
+	// call discards that many frames before reading its own.
+	owed int
+	// broken records that a request went out in part, which leaves the framing
+	// unknowable. owed cannot resynchronize past it.
+	broken bool
 }
 
 // Dial connects to a proxy server listening on the unix socket at path. A path
@@ -35,7 +53,9 @@ func Dial(path string) (*Client, error) {
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
-	return &Client{conn: conn, enc: json.NewEncoder(conn), dec: json.NewDecoder(conn)}, nil
+	c := &Client{conn: conn}
+	c.br = bufio.NewReader(clientReader{c})
+	return c, nil
 }
 
 // Close closes the underlying connection. If this connection held a maintenance
@@ -47,17 +67,20 @@ func (c *Client) Close() error { return c.conn.Close() }
 // back to a waxerr the caller can classify. out, when non-nil, receives the
 // response data.
 //
-// The blocking Encode/Decode honor ctx: a watcher sets an immediate I/O deadline on
+// The blocking encode and read honor ctx: a watcher sets an immediate I/O deadline on
 // the connection when ctx is canceled, so a wedged or slow server (e.g. one mid
 // Reopen) does not hang the caller and a user's Ctrl-C returns promptly. On any
-// error after cancellation the result is reported as CodeCanceled; on a clean call
-// the deadline is cleared so the connection stays usable for the next call.
+// error after cancellation the result is reported as CodeCanceled; the deadline is
+// then cleared so the connection stays usable for the next call. The answer the
+// abandoned call never read is discarded by the next one, which is why giving up on a
+// call does not retire the Client.
 func (c *Client) call(ctx context.Context, method string, params, out any) error {
 	if err := ctx.Err(); err != nil {
 		return waxerr.FromContext("proxy.call", err, waxerr.CodeCanceled)
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.callCtx = ctx
 
 	stop := make(chan struct{})
 	watcherDone := make(chan struct{})
@@ -78,45 +101,142 @@ func (c *Client) call(ctx context.Context, method string, params, out any) error
 	// SetDeadline (if ctx fired) cannot land after we clear the deadline below and
 	// leave a stale one on a reused connection.
 	<-watcherDone
+	// Clear any deadline the watcher set before returning on any path. A wire error is
+	// an ordinary outcome on a healthy connection (CodeLocked answers a well-formed
+	// call), so leaving the clear on the success path alone would strand a canceled
+	// call's expired deadline on a Client its embedder goes on using, and every later
+	// Encode would fail instantly.
+	_ = c.conn.SetDeadline(time.Time{})
 	if err != nil {
 		if ctx.Err() != nil {
 			return waxerr.FromContext("proxy.call", ctx.Err(), waxerr.CodeCanceled)
 		}
 		return err
 	}
-	// Clear any deadline the watcher set so the reused connection has none for the
-	// next call.
-	_ = c.conn.SetDeadline(time.Time{})
 	return nil
 }
 
-// roundtrip performs the marshal/encode/decode of one call, without ctx handling.
+// clientReader gives the response read the same reissue the server's probeReader
+// gives its request read, for the same Windows reason: an AF_UNIX read already
+// pending when the peer closed can lose its completion, so a server that dies mid
+// call would leave roundtrip's Decode blocked for good.
+//
+// It reissues conditionally where the server's does not, because the deadline here
+// serves two purposes. call's watcher arms one to cut a canceled call short, and the
+// rearm below clobbers it, so the context is asked directly instead. That happens before
+// every read rather than only after a probe expired: a server trickling one byte per
+// interval keeps the read returning normally, and a check on the expiry path alone would
+// never run. Cancellation is then seen within one readProbeInterval of the watcher firing,
+// whatever the peer is doing.
+type clientReader struct{ c *Client }
+
+func (r clientReader) Read(p []byte) (int, error) {
+	for {
+		if err := r.c.callCtxErr(); err != nil {
+			return 0, err // call maps this to CodeCanceled.
+		}
+		// SetReadDeadline, not SetDeadline, so the probe never stomps the write side.
+		if err := r.c.conn.SetReadDeadline(time.Now().Add(readProbeInterval)); err != nil {
+			// A connection with no deadlines to arm (os.ErrNoDeadline) is read without the
+			// probe, which costs it the two things the probe buys: a dropped peer is not
+			// turned back into an EOF, and a blocked read cannot be interrupted. Dial's
+			// connections all take deadlines, so this is reachable only for a conn some
+			// future constructor supplies.
+			return r.c.conn.Read(p)
+		}
+		n, err := r.c.conn.Read(p)
+		if errors.Is(err, os.ErrDeadlineExceeded) {
+			if n == 0 {
+				continue
+			}
+			// Hand back what arrived and let the next read wait for the rest. Returning a
+			// deadline error with bytes in flight is what poisons the reader.
+			err = nil
+		}
+		return n, err
+	}
+}
+
+// callCtxErr reports the in-flight call's cancellation, if any. A Client that has never
+// been called has no context and nothing to report.
+func (c *Client) callCtxErr() error {
+	if c.callCtx == nil {
+		return nil
+	}
+	return c.callCtx.Err()
+}
+
+// roundtrip performs the marshal/encode/read of one call, without ctx handling.
 func (c *Client) roundtrip(method string, params, out any) error {
+	const op = "proxy.call"
+	if c.broken {
+		return waxerr.New(waxerr.CodeIO, op,
+			"connection framing was lost by an interrupted request; reconnect to use it again")
+	}
+	// Clear the wire of answers to calls that gave up waiting, or every response from
+	// here on arrives one behind the call that asked for it.
+	for c.owed > 0 {
+		if _, err := c.readFrame(); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		c.owed--
+	}
 	var raw json.RawMessage
 	if params != nil {
 		b, err := json.Marshal(params)
 		if err != nil {
-			return waxerr.Wrap(waxerr.CodeInternal, "proxy.call", err)
+			return waxerr.Wrap(waxerr.CodeInternal, op, err)
 		}
 		raw = b
 	}
-	if err := c.enc.Encode(request{V: ProtocolVersion, Method: method, Params: raw}); err != nil {
-		return waxerr.Wrap(waxerr.CodeIO, "proxy.call", err)
+	sent, err := c.writeFrame(request{V: ProtocolVersion, Method: method, Params: raw})
+	if err != nil {
+		// Only a request that reached the wire in part breaks the framing. One the
+		// deadline turned away before a byte left leaves the connection as it was, which
+		// is the common case for a call canceled between the entry check and the write.
+		c.broken = sent
+		return waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
+	c.owed++
+	line, err := c.readFrame()
+	if err != nil {
+		return waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	c.owed--
 	var resp response
-	if err := c.dec.Decode(&resp); err != nil {
-		return waxerr.Wrap(waxerr.CodeIO, "proxy.call", err)
+	if err := json.Unmarshal(line, &resp); err != nil {
+		return waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
 	if !resp.OK {
 		return fromWireError(resp.Error)
 	}
 	if out != nil && len(resp.Data) > 0 {
 		if err := json.Unmarshal(resp.Data, out); err != nil {
-			return waxerr.Wrap(waxerr.CodeInternal, "proxy.call", err)
+			return waxerr.Wrap(waxerr.CodeInternal, op, err)
 		}
 	}
 	return nil
 }
+
+// writeFrame writes one newline-terminated request frame, reporting whether any of it
+// reached the wire. That report is the whole reason this does not use a json.Encoder:
+// Encode discards its Write's byte count, so a failure could not be told apart from one
+// that left half a frame behind, and it caches that failure for the connection's life.
+func (c *Client) writeFrame(v any) (sent bool, err error) {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return false, err
+	}
+	n, err := c.conn.Write(append(b, '\n'))
+	return n > 0, err
+}
+
+// readFrame reads one newline-terminated response frame. The server writes each
+// through a json.Encoder, which emits one compact line apiece, so a line is a frame.
+// An error means the frame was short, and the bytes read so far are dropped: the read
+// that follows finishes that same frame off the wire, which is what lets owed count
+// whole frames rather than bytes.
+func (c *Client) readFrame() ([]byte, error) { return c.br.ReadBytes('\n') }
 
 // Ping checks the server is reachable and speaks the protocol.
 func (c *Client) Ping(ctx context.Context) error {

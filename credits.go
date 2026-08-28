@@ -2,9 +2,7 @@ package waxbin
 
 import (
 	"context"
-	"strings"
 
-	"github.com/colespringer/waxbin/meta"
 	"github.com/colespringer/waxbin/model"
 )
 
@@ -126,101 +124,7 @@ type creditRoleEdit struct {
 // tag, so that role is refused and stays DB-only while the roles beside it still write.
 // The catalog edit stands regardless.
 func (l *Library) writeBackCredit(ctx context.Context, itemPID model.PID, roles []creditRoleEdit) error {
-	edits := make(map[string]string, len(roles))
-	sortFields := make(map[string]string, len(roles))
-	for _, r := range roles {
-		edits[model.CreditField(r.role)] = strings.Join(r.names, "; ")
-		sortFields[string(r.role)] = ""
-	}
-
-	item, err := l.store.ItemByPID(ctx, itemPID)
-	if err != nil {
-		return writeBackSetupFailure(itemPID, edits, err)
-	}
-	if item.Kind != model.KindTrack && item.Kind != model.KindBook {
-		return l.refuseWriteBack(ctx, itemPID, edits,
-			"on-disk credit write-back is not supported for "+string(item.Kind)+" items; the catalog edit was applied")
-	}
-
-	var tagEdits []meta.TagEdit
-	var refusals []string
-	author := false
-	for _, r := range roles {
-		if item.Kind == model.KindTrack {
-			key, ok := meta.RoleTagKey(r.role)
-			if !ok {
-				refusals = append(refusals,
-					"no on-disk tag key for role "+string(r.role)+"; the catalog edit was applied")
-				continue
-			}
-			te := meta.TagEdit{Key: key}
-			if len(r.names) > 0 {
-				te.Values = r.names
-			}
-			tagEdits = append(tagEdits, te)
-			continue
-		}
-		field, ok := bookRoleField(r.role)
-		if !ok {
-			refusals = append(refusals, "on-disk credit write-back for the "+string(r.role)+
-				" role is not supported for books; the catalog edit was applied")
-			continue
-		}
-		author = author || r.role == model.RoleAuthor
-		keys, _ := meta.BookFieldTagKeys(field)
-		// Join with a separator the scanner splits back apart ("; ", not the ", " the
-		// display column uses), so a multi-name book credit round-trips through a rescan.
-		joined := strings.Join(r.names, "; ")
-		for _, k := range keys {
-			te := meta.TagEdit{Key: k}
-			if len(r.names) > 0 {
-				te.Values = []string{joined}
-			}
-			tagEdits = append(tagEdits, te)
-		}
-	}
-
-	// Write every part: an author credit is ALBUMARTIST, the book's identity anchor, so
-	// writing it to one part alone would split a multi-file book on the next rescan (a
-	// narrator credit is inert on the non-primary parts but harmless there).
-	files, err := l.store.ItemFiles(ctx, itemPID)
-	if err != nil {
-		return writeBackSetupFailure(itemPID, edits, err)
-	}
-	wbErr := &WriteBackError{ItemPID: itemPID, Edits: edits}
-	for _, reason := range refusals {
-		l.noteRefusal(ctx, files, wbErr, reason)
-	}
-	if len(tagEdits) == 0 {
-		return wbErr
-	}
-
-	// A credit edit regenerates the derived sort, so it needs the same sort-tag clears
-	// a field edit gets, or a stale ARTISTSORT reverts it on the next scan. Keyed by
-	// the display field ("artist"), not the credit.<role> spelling in edits.
-	tagEdits, err = l.appendDerivedSortClears(ctx, itemPID, sortFields, tagEdits)
-	if err != nil {
-		return writeBackSetupFailure(itemPID, edits, err)
-	}
-
-	if len(files) == 0 {
-		return wbErr.noFiles()
-	}
-	if err := l.writeBackFiles(ctx, "waxbin.SetCredits", files, wbErr,
-		func(w *meta.Writer, path string) (*meta.WriteResult, error) {
-			return w.Apply(ctx, path, tagEdits)
-		}); err != nil {
-		return err
-	}
-	// A book author credit writes ALBUMARTIST, a book identity field, so re-anchor the
-	// catalog's identity key to the file's post-write value (the same protection the
-	// EditFields path gives an author edit). reanchorBookIdentity reads the file's actual
-	// state, so it is a no-op if the write did not land. A narrator credit does not touch
-	// identity, so it needs none.
-	if author {
-		l.reanchorBookIdentity(ctx, itemPID, files[0].FilePID)
-	}
-	return wbErr.result()
+	return l.writeBackItemEdits(ctx, "waxbin.SetCredits", itemPID, nil, roles)
 }
 
 // bookRoleField maps a book contributor role to the book metadata field whose on-disk

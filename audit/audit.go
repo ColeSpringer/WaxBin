@@ -417,6 +417,7 @@ func driftParts(d model.DerivedDrift) []string {
 	addPart(d.ReleaseGroupRollupDrift, "release-group rollup")
 	addPart(d.SortKeyDrift, "sort-key")
 	addPart(d.BookDurationDrift, "book-duration")
+	addPart(d.BookISBNKeyDrift, "book-isbn-key")
 	return p
 }
 

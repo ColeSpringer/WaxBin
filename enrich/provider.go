@@ -87,6 +87,13 @@ const (
 	// CapAuxArt with the non-front roles it has (the front is ignored there; the
 	// release-group pass owns that slot).
 	CapAuxArt
+	// CapArtistArt supplies art for an artist, front and auxiliary roles alike, and gates
+	// the artist backfill. It is its own bit because the Cover Art Archive advertises
+	// CapCover and answers nothing for an artist: gating there would walk every artist on
+	// a stock install and mark each a permanent no-match, which is the bug the backfill
+	// exists to remove. Like CapAuxArt, a provider written before it advertises CapCover
+	// alone and has to add this to be queued.
+	CapArtistArt
 )
 
 // Has reports whether c advertises want.

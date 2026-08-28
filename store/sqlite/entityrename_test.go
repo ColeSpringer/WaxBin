@@ -330,10 +330,11 @@ func TestRenameArtistKeepsJointCreditNames(t *testing.T) {
 	}
 }
 
-// TestRenameArtistRefusesContributorRole pins the 4b boundary: a producer credit lives on
-// a different edit surface, so renaming past it would leave that row naming the old
-// spelling while the artist's curation moved.
-func TestRenameArtistRefusesContributorRole(t *testing.T) {
+// TestRenameArtistMovesContributorRole: a producer credit has no item field to ride, so
+// it moves on the credit surface inside the rename's own transaction. Leaving it behind
+// would keep the row naming the old spelling while the artist's curation moved, which is
+// why this used to be a refusal.
+func TestRenameArtistMovesContributorRole(t *testing.T) {
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{
@@ -346,14 +347,117 @@ func TestRenameArtistRefusesContributorRole(t *testing.T) {
 		t.Fatalf("credit Alpha as producer: %v", err)
 	}
 	artistPID := entityPID(t, st, "artist", "Alpha")
+	rep, err := st.RenameEntity(ctx, model.MergeArtist, artistPID,
+		map[string]string{"name": "Alpha Prime"}, model.Attribution{}, model.LockUnchanged, false)
+	if err != nil {
+		t.Fatalf("RenameEntity: %v", err)
+	}
+	if rep.Outcome != model.EntityRenamed {
+		t.Fatalf("outcome = %s, want the row moved in place", rep.Outcome)
+	}
+	if rep.Credits != 1 || len(rep.CreditEdits) != 1 {
+		t.Fatalf("credits = %d, edits = %+v, want the producer credit reported", rep.Credits, rep.CreditEdits)
+	}
+	if rep.CreditEdits[0].Role != model.RoleProducer || rep.CreditEdits[0].ItemPID != itemPID {
+		t.Errorf("credit edit = %+v, want the producer role on %s", rep.CreditEdits[0], itemPID)
+	}
+	if got := scalarStr(t, st, "SELECT name FROM artist WHERE pid='"+string(artistPID)+"'"); got != "Alpha Prime" {
+		t.Errorf("artist name = %q, want the row renamed rather than ghosted", got)
+	}
+	// The one artist row now backs both references, so nothing is left spelling the old
+	// name for a rescan to fork back.
+	if n := scalarInt(t, st, "SELECT COUNT(*) FROM artist WHERE name='Alpha'"); n != 0 {
+		t.Errorf("%d artist rows still spell the old name", n)
+	}
+	if n := scalarInt(t, st, `SELECT COUNT(*) FROM item_contributor ic
+		JOIN artist a ON a.id = ic.artist_id
+		WHERE ic.role='producer' AND a.pid='`+string(artistPID)+`'`); n != 1 {
+		t.Errorf("producer rows pointing at the renamed artist = %d, want 1", n)
+	}
+}
+
+// TestRenameArtistRefusesLockedCredit: the credit half checks its lock up front, with the
+// field half, so a rename cannot move some of an artist's references and refuse the rest.
+func TestRenameArtistRefusesLockedCredit(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	putTrack(t, st, lib.ID, trackSpec{
+		path: "/lib/Alpha/Album/01.flac", essence: "e1", content: "c1", title: "One",
+		artist: "Alpha", album: "Album",
+	})
+	itemPID := model.PID(scalarStr(t, st, "SELECT pid FROM playable_item"))
+	if _, _, err := st.SetItemCredits(ctx, itemPID, model.RoleProducer, []string{"Alpha"},
+		model.Attribution{Source: model.SourceUser}, model.LockOf(true), false, false); err != nil {
+		t.Fatalf("credit Alpha as producer: %v", err)
+	}
+	artistPID := entityPID(t, st, "artist", "Alpha")
 	_, err := st.RenameEntity(ctx, model.MergeArtist, artistPID,
 		map[string]string{"name": "Alpha Prime"}, model.Attribution{}, model.LockUnchanged, false)
-	if !waxerr.Is(err, waxerr.CodeConflict) {
-		t.Fatalf("rename over a producer credit = %v, want CodeConflict", err)
+	if !waxerr.Is(err, waxerr.CodeLocked) {
+		t.Fatalf("rename over a locked producer credit = %v, want CodeLocked", err)
 	}
 	if !strings.Contains(err.Error(), string(itemPID)) {
 		t.Errorf("refusal %q does not name the item holding the credit", err)
 	}
+	if got := scalarStr(t, st, "SELECT name FROM artist WHERE pid='"+string(artistPID)+"'"); got != "Alpha" {
+		t.Errorf("artist name = %q, want the refused rename to have written nothing", got)
+	}
+	// Force overrides it, the way it overrides a locked keying field.
+	if _, err := st.RenameEntity(ctx, model.MergeArtist, artistPID,
+		map[string]string{"name": "Alpha Prime"}, model.Attribution{}, model.LockUnchanged, true); err != nil {
+		t.Fatalf("forced rename: %v", err)
+	}
+	if got := scalarStr(t, st, "SELECT name FROM artist WHERE pid='"+string(artistPID)+"'"); got != "Alpha Prime" {
+		t.Errorf("artist name after force = %q, want the rename to have landed", got)
+	}
+}
+
+// TestRenameArtistMovesFieldAndCreditTogether: an artist performing on one track and
+// producing another moves both references in one transaction, which is what makes the
+// coverage check pass and the row rename in place rather than ghost.
+func TestRenameArtistMovesFieldAndCreditTogether(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	putTrack(t, st, lib.ID, trackSpec{
+		path: "/lib/Alpha/Album/01.flac", essence: "e1", content: "c1", title: "One",
+		artist: "Alpha", album: "Album",
+	})
+	putTrack(t, st, lib.ID, trackSpec{
+		path: "/lib/Other/Album/01.flac", essence: "e2", content: "c2", title: "Two",
+		artist: "Gamma", album: "Other",
+	})
+	produced := model.PID(scalarStr(t, st, "SELECT pi.pid FROM playable_item pi JOIN track t ON t.item_id=pi.id WHERE t.artist='Gamma'"))
+	if _, _, err := st.SetItemCredits(ctx, produced, model.RoleProducer, []string{"Alpha"},
+		model.Attribution{Source: model.SourceUser}, model.LockUnchanged, false, false); err != nil {
+		t.Fatalf("credit Alpha as producer: %v", err)
+	}
+	artistPID := entityPID(t, st, "artist", "Alpha")
+	rep, err := st.RenameEntity(ctx, model.MergeArtist, artistPID,
+		map[string]string{"name": "Alpha Prime"}, model.Attribution{}, model.LockUnchanged, false)
+	if err != nil {
+		t.Fatalf("RenameEntity: %v", err)
+	}
+	if rep.Outcome != model.EntityRenamed {
+		t.Fatalf("outcome = %s, want the row moved in place", rep.Outcome)
+	}
+	if rep.Members != 1 || rep.Credits != 1 {
+		t.Errorf("members = %d, credits = %d, want one of each", rep.Members, rep.Credits)
+	}
+	if got := scalarStr(t, st, `SELECT t.artist FROM track t
+		JOIN playable_item pi ON pi.id = t.item_id WHERE pi.title='One'`); got != "Alpha Prime" {
+		t.Errorf("performing credit = %q", got)
+	}
+	// producer carries no denormalized column, so the credit row is where it shows.
+	if got := scalarStr(t, st, `SELECT a.name FROM item_contributor ic
+		JOIN artist a ON a.id = ic.artist_id
+		JOIN playable_item pi ON pi.id = ic.item_id
+		WHERE ic.role='producer' AND pi.title='Two'`); got != "Alpha Prime" {
+		t.Errorf("producer credit = %q", got)
+	}
+	if n := scalarInt(t, st, "SELECT COUNT(*) FROM artist WHERE name IN ('Alpha','Alpha Prime')"); n != 1 {
+		t.Errorf("artist rows spelling either name = %d, want the one renamed row", n)
+	}
+	assertVerifyClean(t, st)
 }
 
 // TestRenameEntityRefusesSplitAcrossFolders is the last silent fallback closed. Coverage
@@ -531,5 +635,69 @@ func TestRenameArtistRefusedWhenPrePassDeclines(t *testing.T) {
 	}
 	if got := scalarStr(t, st, "SELECT name FROM artist WHERE pid=?", string(pid)); got != "Alpha" {
 		t.Errorf("artist name = %q, want the refusal to have written nothing", got)
+	}
+}
+
+// TestRenameArtistMovesASharedRole: two producers on one item. The credit surface's
+// cardinality rule cannot say which of them a batch means, but a rename names one artist
+// and one target, so it states the pair rather than leaving the rule to guess. Before
+// that, this failed the coverage check and rolled back reporting an uncovered reference,
+// which was not the reason.
+func TestRenameArtistMovesASharedRole(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	putTrack(t, st, lib.ID, trackSpec{
+		path: "/lib/G/Album/01.flac", essence: "e1", content: "c1", title: "One",
+		artist: "Gamma", album: "Album",
+	})
+	itemPID := model.PID(scalarStr(t, st, "SELECT pid FROM playable_item"))
+	if _, _, err := st.SetItemCredits(ctx, itemPID, model.RoleProducer, []string{"Alpha", "Beta"},
+		model.Attribution{Source: model.SourceUser}, model.LockUnchanged, false, false); err != nil {
+		t.Fatalf("credit two producers: %v", err)
+	}
+	artistPID := entityPID(t, st, "artist", "Alpha")
+	rep, err := st.RenameEntity(ctx, model.MergeArtist, artistPID,
+		map[string]string{"name": "Alpha Prime"}, model.Attribution{}, model.LockUnchanged, false)
+	if err != nil {
+		t.Fatalf("RenameEntity: %v", err)
+	}
+	if rep.Outcome != model.EntityRenamed || rep.Credits != 1 {
+		t.Fatalf("report = %+v, want the row moved with its one credit", rep)
+	}
+	if len(rep.CreditEdits) != 1 || len(rep.CreditEdits[0].Names) != 2 ||
+		rep.CreditEdits[0].Names[0] != "Alpha Prime" || rep.CreditEdits[0].Names[1] != "Beta" {
+		t.Fatalf("credit edit = %+v, want only Alpha replaced", rep.CreditEdits)
+	}
+	if n := scalarInt(t, st, "SELECT COUNT(*) FROM artist WHERE name='Beta'"); n != 1 {
+		t.Error("Beta did not survive the rename of the artist sharing its role")
+	}
+	assertVerifyClean(t, st)
+}
+
+// TestRenameArtistRefusesAKeylessName: a name of nothing but punctuation passes the
+// empty check and then folds to an empty match key. The artist stage skips such a target
+// while the applies still run, and resolveArtist drops every name it cannot key, so the
+// credits would be deleted and not rebuilt with the rename reporting success. An artist
+// held by credits alone has no member for the member-key check to catch this on.
+func TestRenameArtistRefusesAKeylessName(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	putTrack(t, st, lib.ID, trackSpec{
+		path: "/lib/G/Album/01.flac", essence: "e1", content: "c1", title: "One",
+		artist: "Gamma", album: "Album",
+	})
+	itemPID := model.PID(scalarStr(t, st, "SELECT pid FROM playable_item"))
+	if _, _, err := st.SetItemCredits(ctx, itemPID, model.RoleProducer, []string{"Alpha"},
+		model.Attribution{Source: model.SourceUser}, model.LockUnchanged, false, false); err != nil {
+		t.Fatalf("credit: %v", err)
+	}
+	artistPID := entityPID(t, st, "artist", "Alpha")
+	_, err := st.RenameEntity(ctx, model.MergeArtist, artistPID,
+		map[string]string{"name": "???"}, model.Attribution{}, model.LockUnchanged, false)
+	if !waxerr.Is(err, waxerr.CodeInvalid) {
+		t.Fatalf("rename to a keyless name = %v, want CodeInvalid", err)
+	}
+	if n := scalarInt(t, st, "SELECT COUNT(*) FROM item_contributor"); n != 2 {
+		t.Errorf("contributor rows = %d, want both kept: the refusal must write nothing", n)
 	}
 }

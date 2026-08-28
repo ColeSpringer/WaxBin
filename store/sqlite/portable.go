@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 
+	"github.com/colespringer/waxbin/identity"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/waxerr"
 )
@@ -113,11 +114,10 @@ func (s *Store) ItemsByArtistKey(ctx context.Context, artistMatchKey string) ([]
 
 // ItemByBookIdent returns the single book item matching any of the supplied strong ids
 // (release MBID, ASIN, ISBN), each compared case-insensitively and only when non-empty.
-// Like ItemByRecordingMBID it returns CodeNotFound for zero or more than one match.
-// MBID and ASIN match reliably cross-catalog (case is the only variance); ISBN is
-// best-effort because book.isbn stores the raw as-scanned value while identity
-// canonicalizes it (hyphens stripped), so a hyphenated and an unhyphenated ISBN of the
-// same book will not compare equal here and fall to the descriptive rung.
+// Like ItemByRecordingMBID it returns CodeNotFound for zero or more than one match. All
+// three match reliably cross-catalog: MBID and ASIN vary only by case, and the ISBN is
+// compared on book.isbn_key, the canonical form stored beside the raw value, so a
+// hyphenated and an unhyphenated spelling of one book do compare equal.
 func (s *Store) ItemByBookIdent(ctx context.Context, mbid, asin, isbn string) (*model.ItemView, error) {
 	const op = "store.ItemByBookIdent"
 	if mbid == "" && asin == "" && isbn == "" {
@@ -127,8 +127,8 @@ func (s *Store) ItemByBookIdent(ctx context.Context, mbid, asin, isbn string) (*
 		itemSelect+` WHERE pi.kind = 'book' AND (
 			 (? <> '' AND bk.mbid = ? COLLATE NOCASE)
 		  OR (? <> '' AND bk.asin = ? COLLATE NOCASE)
-		  OR (? <> '' AND bk.isbn = ? COLLATE NOCASE)) LIMIT 2`,
-		mbid, mbid, asin, asin, isbn, isbn)
+		  OR (? <> '' AND bk.isbn_key = ?)) LIMIT 2`,
+		mbid, mbid, asin, asin, identity.ISBNKey(isbn), identity.ISBNKey(isbn))
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}

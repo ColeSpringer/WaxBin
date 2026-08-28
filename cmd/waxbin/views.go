@@ -578,6 +578,7 @@ type derivedView struct {
 	ReleaseGroupRollupDrift int `json:"releaseGroupRollupDrift"`
 	SortKeyDrift            int `json:"sortKeyDrift"`
 	BookDurationDrift       int `json:"bookDurationDrift"`
+	BookISBNKeyDrift        int `json:"bookIsbnKeyDrift"`
 	OrphanArtSources        int `json:"orphanArtSources"`
 	OrphanThumbnails        int `json:"orphanThumbnails"`
 	// Custom-tag provenance rows under a key WaxBin has since reserved.
@@ -592,8 +593,8 @@ func toDerivedView(r *sqlite.DerivedReport) derivedView {
 		ItemsMissingFTS: r.ItemsMissingFTS, OrphanFTSRows: r.OrphanFTSRows,
 		ArtistRollupDrift: r.ArtistRollupDrift, GenreRollupDrift: r.GenreRollupDrift,
 		ReleaseGroupRollupDrift: r.ReleaseGroupRollupDrift, SortKeyDrift: r.SortKeyDrift,
-		BookDurationDrift: r.BookDurationDrift,
-		OrphanArtSources:  r.OrphanArtSources, OrphanThumbnails: r.OrphanThumbnails,
+		BookDurationDrift: r.BookDurationDrift, BookISBNKeyDrift: r.BookISBNKeyDrift,
+		OrphanArtSources: r.OrphanArtSources, OrphanThumbnails: r.OrphanThumbnails,
 		OrphanReservedTagProvenance: r.OrphanReservedTagProvenance,
 		Consistent:                  r.Consistent(),
 	}
@@ -634,10 +635,12 @@ type enrichView struct {
 	BooksMatched          int `json:"booksMatched"`
 	LyricsEnriched        int `json:"lyricsEnriched"`
 	LyricsMatched         int `json:"lyricsMatched"`
-	// The aux backfill phase is gated on an injected provider, so its counts are
-	// omitted when it did not run and the stock payload keeps the shape it had.
+	// Both art backfill phases are gated on an injected provider, so their counts are
+	// omitted when they did not run and the stock payload keeps the shape it had.
 	AuxArtEnriched    int    `json:"auxArtEnriched,omitempty"`
 	AuxArtMatched     int    `json:"auxArtMatched,omitempty"`
+	ArtistArtEnriched int    `json:"artistArtEnriched,omitempty"`
+	ArtistArtMatched  int    `json:"artistArtMatched,omitempty"`
 	ArtFetched        int    `json:"artFetched"`
 	AuxArtFetched     int    `json:"auxArtFetched,omitempty"`
 	TagsWritten       int    `json:"tagsWritten,omitempty"`
@@ -655,6 +658,7 @@ func toEnrichView(r *waxbin.EnrichResult) enrichView {
 		BooksEnriched: r.Result.BooksEnriched, BooksMatched: r.Result.BooksMatched,
 		LyricsEnriched: r.Result.LyricsEnriched, LyricsMatched: r.Result.LyricsMatched,
 		AuxArtEnriched: r.Result.AuxArtEnriched, AuxArtMatched: r.Result.AuxArtMatched,
+		ArtistArtEnriched: r.Result.ArtistArtEnriched, ArtistArtMatched: r.Result.ArtistArtMatched,
 		ArtFetched: r.Result.ArtFetched, AuxArtFetched: r.Result.AuxArtFetched,
 		TagsWritten: r.Result.TagsWritten, TagsFailed: r.Result.TagsFailed,
 		TagsUnrepresented: r.Result.TagsUnrepresented, TagsSkipped: r.Result.TagsSkipped,

@@ -158,6 +158,41 @@ type ReleaseGroupAuxArt struct {
 	AuxArt         map[ArtRole]*ArtImage
 }
 
+// EnrichCountOptions selects the optional phases a heartbeat denominator should count.
+// Each flag mirrors whether the run actually runs that phase (a toggle for the album
+// release match, a registered capability for the rest), because a denominator counting
+// work the run will not do reports a ratio that never reaches one.
+type EnrichCountOptions struct {
+	Albums    bool // albums needing a release match
+	AuxArt    bool // release groups needing an auxiliary-art backfill
+	ArtistArt bool // artists needing an art backfill
+	Lyrics    bool // tracks needing a lyrics lookup
+}
+
+// ArtistArtBackfill is the art one artist-art backfill pass gathered. It is the artist
+// twin of ReleaseGroupAuxArt, and separate from ArtistEnrichment for the same reason:
+// that one resolves identity and fetches art on the way past, so an artist it has
+// already marked never gets asked again, while this one asks only about the empty slots
+// of an artist whose identity is settled.
+//
+// Unlike the release-group backfill it does carry a front. Artist-rung art is fetched
+// inside the identity pass, so an already-marked artist has no picture at all, and the
+// front is the usual gap rather than the settled slot. Art is nil when the front is
+// already held or nothing offered one.
+//
+// Matched=false records a completed lookup nothing answered, so the artist is not
+// re-asked every run. Provider names who supplied the first image, and the marker
+// carries it; the store substitutes its own label when there is none, since the column
+// is NOT NULL.
+type ArtistArtBackfill struct {
+	ArtistID int64
+	PID      PID
+	Matched  bool
+	Provider string
+	Art      *ArtImage
+	AuxArt   map[ArtRole]*ArtImage
+}
+
 // LyricsEnrichment is the resolved lyrics for one recording (track). Lyrics are
 // filled only when the item has none, so a sidecar/embedded copy is never overwritten.
 // Matched=false records a completed no-match so the track is not re-queried each run.

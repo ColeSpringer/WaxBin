@@ -192,12 +192,12 @@ func (s *Store) PutScannedTrack(ctx context.Context, in model.PutScannedTrackInp
 		// after the essence-algorithm re-key above so it resolves the (possibly re-keyed)
 		// existing item. Off only for `scan --force --ignore-locks`.
 		if in.PreserveLocks {
-			if err := preserveLockedTrackFieldsTx(ctx, tx, &in.Track, &in.Item); err != nil {
+			if err := preserveLockedTrackFieldsTx(ctx, tx, s.log, &in.Track, &in.Item); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 		}
 
-		itemID, itemPID, created, stateChanged, err := upsertItem(ctx, tx, in.Item, now, in.PreferredItemPID)
+		itemID, itemPID, created, stateChanged, err := upsertItem(ctx, tx, s.log, in.Item, bookAdoptKey{}, now, in.PreferredItemPID)
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}

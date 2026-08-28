@@ -118,12 +118,15 @@ func renderEnrichResult(cmd *cobra.Command, g *globals, res *waxbin.EnrichResult
 	fmt.Fprintf(w, "album releases: %d searched (%d matched)\n", r.AlbumsSearched, r.AlbumsMatched)
 	fmt.Fprintf(w, "books:          %d enriched (%d matched)\n", r.BooksEnriched, r.BooksMatched)
 	fmt.Fprintf(w, "lyrics:         %d looked up (%d matched)\n", r.LyricsEnriched, r.LyricsMatched)
-	// The auxiliary-art backfill runs only when an injected provider advertises it, so
-	// its line appears only when the phase ran. It has to appear then: the phase spends
-	// the same --limit budget as the ones above, and a summary that never mentions it
-	// leaves a capped run looking like it did less than it did.
+	// Both art backfills run only when an injected provider advertises them, so each line
+	// appears only when its phase ran. It has to appear then: the phase spends the same
+	// --limit budget as the ones above, and a summary that never mentions it leaves a
+	// capped run looking like it did less than it did.
 	if r.AuxArtEnriched > 0 {
 		fmt.Fprintf(w, "aux art:        %d backfilled (%d matched)\n", r.AuxArtEnriched, r.AuxArtMatched)
+	}
+	if r.ArtistArtEnriched > 0 {
+		fmt.Fprintf(w, "artist art:     %d backfilled (%d matched)\n", r.ArtistArtEnriched, r.ArtistArtMatched)
 	}
 	fmt.Fprintf(w, "cover art:      %d fetched\n", r.ArtFetched)
 	// Only when a provider offered auxiliary roles, keeping the summary shape stable

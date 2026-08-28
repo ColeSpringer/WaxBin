@@ -6,8 +6,10 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -1555,7 +1557,7 @@ func (l *Library) writeBackItemTags(ctx context.Context, op string, itemPID mode
 	if len(files) == 0 {
 		return wbErr.noFiles()
 	}
-	if err := l.writeBackFiles(ctx, op, files, wbErr,
+	if err := l.writeBackFiles(ctx, op, files, wbErr, nil,
 		func(w *meta.Writer, path string) (*meta.WriteResult, error) {
 			return w.Apply(ctx, path, tagEdits)
 		}); err != nil {
@@ -1571,7 +1573,7 @@ func (l *Library) writeBackItemTags(ctx context.Context, op string, itemPID mode
 // warning, and the optimistic file-state update, and writes a file backing several
 // members once. Only a context cancellation is a hard error, and op names the caller
 // in it.
-func (l *Library) writeBackFiles(ctx context.Context, op string, files []model.ItemFileRef, wbErr *WriteBackError, apply func(w *meta.Writer, path string) (*meta.WriteResult, error)) error {
+func (l *Library) writeBackFiles(ctx context.Context, op string, files []model.ItemFileRef, wbErr *WriteBackError, refusals []string, apply func(w *meta.Writer, path string) (*meta.WriteResult, error)) error {
 	w := meta.NewWriter()
 	seen := make(map[model.PID]bool, len(files))
 	for _, ref := range files {
@@ -1626,7 +1628,18 @@ func (l *Library) writeBackFiles(ctx context.Context, op string, files []model.I
 		// a real loss, and WaxLabel reports it as an unrepresented warning even on a
 		// no-op. Read the warnings before the no-op gate below so a lost value is recorded
 		// as a drift diagnostic and a write-back failure instead of cleared as a clean sync.
-		var lost []model.FileDiagnostic
+		// Seeded with what this item refused to write at all, because a clean write below
+		// replaces the file's whole edit-origin diagnostic set: stamping the refusals
+		// separately would have this clear them again, and the review queue would read a
+		// partly-refused file as fully synced. The early continues above keep their own
+		// single reason, which still puts the file in the queue.
+		lost := make([]model.FileDiagnostic, 0, len(refusals)+len(res.Warnings))
+		for _, reason := range refusals {
+			lost = append(lost, model.FileDiagnostic{
+				Code: model.DiagTagWriteUnsynced, Severity: model.SeverityWarn, Detail: reason,
+			})
+		}
+		var unrepresented bool
 		for _, wn := range res.Warnings {
 			// A landed write whose post-commit step failed: worth a log line, but the
 			// tags are on disk and match the catalog, so it is neither a lost value
@@ -1635,6 +1648,7 @@ func (l *Library) writeBackFiles(ctx context.Context, op string, files []model.I
 				l.log.Warn("tag write-back post-write", "path", path, "warning", wn.Message)
 			}
 			if wn.Unrepresented {
+				unrepresented = true
 				lost = append(lost, model.FileDiagnostic{
 					Code: model.DiagTagWriteLost, Severity: model.SeverityWarn,
 					TagKey: wn.Key, Detail: wn.Message,
@@ -1642,15 +1656,23 @@ func (l *Library) writeBackFiles(ctx context.Context, op string, files []model.I
 			}
 		}
 		if len(lost) > 0 {
-			l.log.Warn("tag value unrepresented", "path", path)
 			if derr := l.store.PutFileDiagnostics(ctx, ref.FilePID, model.OriginEdit, lost); derr != nil {
 				l.log.Warn("edit diagnostics", "path", path, "err", derr)
 			}
+		}
+		// Only a value this write lost is reported here. A refusal seeded above was
+		// already reported by the caller that refused it, and counting it again would
+		// name the same file twice for one cause.
+		if unrepresented {
+			l.log.Warn("tag value unrepresented", "path", path)
 			wbErr.Failures = append(wbErr.Failures, WriteBackFailure{FilePID: ref.FilePID, Path: path,
 				Reason: "some values could not be stored in this file's tag format"})
-		} else if derr := l.store.PutFileDiagnostics(ctx, ref.FilePID, model.OriginEdit, nil); derr != nil {
-			// The tags now match the catalog: clear any drift this file's edit left before.
-			l.log.Warn("edit diagnostics clear", "path", path, "err", derr)
+		}
+		if len(lost) == 0 {
+			if derr := l.store.PutFileDiagnostics(ctx, ref.FilePID, model.OriginEdit, nil); derr != nil {
+				// The tags now match the catalog: clear any drift this edit left before.
+				l.log.Warn("edit diagnostics clear", "path", path, "err", derr)
+			}
 		}
 		if !res.Changed {
 			continue
@@ -1671,10 +1693,10 @@ func (l *Library) writeBackFiles(ctx context.Context, op string, files []model.I
 	return nil
 }
 
-// writeBackFields mirrors committed catalog edits into the backing files' tags. Each
-// file is written on its own; a refusal or failure records a drift diagnostic and joins
-// a WriteBackError rather than aborting the rest, and a clean write clears any drift the
-// file carried before.
+// writeBackFields mirrors committed catalog field edits into the backing files' tags.
+// Each file is written on its own; a refusal or failure records a drift diagnostic and
+// joins a WriteBackError rather than aborting the rest, and a clean write clears any
+// drift the file carried before.
 //
 // A track writes every edited scalar to its file (tagEditsForFields). A book writes the
 // audiobook tags the scanner reads back (bookTagEditsForFields) across all of its parts,
@@ -1683,66 +1705,138 @@ func (l *Library) writeBackFiles(ctx context.Context, op string, files []model.I
 // reconstruct from a tag (subtitle, asin, isbn, publisher, edition, description, mbid)
 // stay DB-only, so a rescan can never undo them. An episode is refused.
 func (l *Library) writeBackFields(ctx context.Context, itemPID model.PID, edits map[string]string) error {
+	return l.writeBackItemEdits(ctx, "waxbin.EditFields", itemPID, edits, nil)
+}
+
+// writeBackItemEdits mirrors one item's committed field edits and credit edits into its
+// backing files, in a single pass per file. The two halves share a pass because an artist
+// rename can produce both on one item (its performing credit and its producer credit), and
+// writing them separately would rewrite every file twice, doubling the mtime churn and the
+// next scan's work. Either half may be empty; op names the verb for the drift diagnostics.
+func (l *Library) writeBackItemEdits(ctx context.Context, op string, itemPID model.PID,
+	edits map[string]string, roles []creditRoleEdit) error {
+	// The reported edit map is both halves: a caller reading it back has to see every
+	// value the pass meant to write, whichever surface produced it.
+	all := make(map[string]string, len(edits)+len(roles))
+	maps.Copy(all, edits)
+	// sortFields is keyed by the display field a derived sort hangs off ("artist"), not
+	// the credit.<role> spelling, so a credit edit clears a stale ARTISTSORT the way a
+	// field edit does.
+	sortFields := make(map[string]string, len(edits)+len(roles))
+	maps.Copy(sortFields, edits)
+	for _, r := range roles {
+		all[model.CreditField(r.role)] = strings.Join(r.names, "; ")
+		sortFields[string(r.role)] = ""
+	}
+
 	// Everything below runs after the catalog edit committed. A setup-lookup error is
 	// therefore a write-back failure to report, not a hard error that would make the CLI
 	// hide the committed catalog change.
 	item, err := l.store.ItemByPID(ctx, itemPID)
 	if err != nil {
-		return writeBackSetupFailure(itemPID, edits, err)
+		return writeBackSetupFailure(itemPID, all, err)
 	}
 
 	var tagEdits []meta.TagEdit
-	var files []model.ItemFileRef
+	var refusals []string
 	switch item.Kind {
 	case model.KindTrack:
-		tagEdits, err = tagEditsForFields(edits)
-		if err != nil {
-			return err
+		if len(edits) > 0 {
+			tagEdits, err = tagEditsForFields(edits)
+			if err != nil {
+				return err
+			}
 		}
-		files, err = l.store.ItemFiles(ctx, itemPID)
-		if err != nil {
-			return writeBackSetupFailure(itemPID, edits, err)
+		for _, r := range roles {
+			key, ok := meta.RoleTagKey(r.role)
+			if !ok {
+				refusals = append(refusals,
+					"no on-disk tag key for role "+string(r.role)+"; the catalog edit was applied")
+				continue
+			}
+			te := meta.TagEdit{Key: key}
+			if len(r.names) > 0 {
+				te.Values = r.names
+			}
+			tagEdits = append(tagEdits, te)
 		}
 	case model.KindBook:
-		// The series name shares its GROUPING tag with the sequence, so read the book's
-		// current sequence when the series is edited, to write "<series> #<seq>" and keep
-		// the sequence on disk.
-		seriesSeq := ""
-		if _, editingSeries := edits["series"]; editingSeries {
-			detail, derr := l.store.BookByPID(ctx, itemPID)
-			if derr != nil {
-				return writeBackSetupFailure(itemPID, edits, derr)
+		if len(edits) > 0 {
+			// The series name shares its GROUPING tag with the sequence, so read the book's
+			// current sequence when the series is edited, to write "<series> #<seq>" and keep
+			// the sequence on disk.
+			seriesSeq := ""
+			if _, editingSeries := edits["series"]; editingSeries {
+				detail, derr := l.store.BookByPID(ctx, itemPID)
+				if derr != nil {
+					return writeBackSetupFailure(itemPID, all, derr)
+				}
+				seriesSeq = detail.SeriesSeq
 			}
-			seriesSeq = detail.SeriesSeq
+			tagEdits = bookTagEditsForFields(edits, seriesSeq)
 		}
-		tagEdits = bookTagEditsForFields(edits, seriesSeq)
+		for _, r := range roles {
+			field, ok := bookRoleField(r.role)
+			if !ok {
+				refusals = append(refusals, "on-disk credit write-back for the "+string(r.role)+
+					" role is not supported for books; the catalog edit was applied")
+				continue
+			}
+			keys, _ := meta.BookFieldTagKeys(field)
+			// Join with a separator the scanner splits back apart ("; ", not the ", " the
+			// display column uses), so a multi-name book credit round-trips through a rescan.
+			joined := strings.Join(r.names, "; ")
+			for _, k := range keys {
+				te := meta.TagEdit{Key: k}
+				if len(r.names) > 0 {
+					te.Values = []string{joined}
+				}
+				tagEdits = append(tagEdits, te)
+			}
+		}
 		// A book edit that touched only DB-only fields has no on-disk representation; the
 		// catalog edit stands and those fields are DB-only by design, so there is no drift.
-		if len(tagEdits) == 0 {
+		if len(tagEdits) == 0 && len(refusals) == 0 {
 			return nil
 		}
-		// Every part, not just the primary: a book's title and author are the key the
-		// scanner groups its parts by, so writing them to one part alone would split a
-		// multi-file book on the next rescan. The catalog reads a book's metadata from the
-		// primary, so the same tags elsewhere are inert but keep every part on one key.
-		files, err = l.store.ItemFiles(ctx, itemPID)
-		if err != nil {
-			return writeBackSetupFailure(itemPID, edits, err)
-		}
 	default:
-		return l.refuseWriteBack(ctx, itemPID, edits,
-			"on-disk tag write-back is not supported for "+string(item.Kind)+" items; the catalog edit was applied")
-	}
-	tagEdits, err = l.appendDerivedSortClears(ctx, itemPID, edits, tagEdits)
-	if err != nil {
-		return writeBackSetupFailure(itemPID, edits, err)
+		what := "tag"
+		if len(edits) == 0 {
+			what = "credit"
+		}
+		return l.refuseWriteBack(ctx, itemPID, all,
+			"on-disk "+what+" write-back is not supported for "+string(item.Kind)+" items; the catalog edit was applied")
 	}
 
-	wbErr := &WriteBackError{ItemPID: itemPID, Edits: edits}
+	// Every part of a book, not just the primary: its title and author are the key the
+	// scanner groups its parts by, so writing them to one part alone would split a
+	// multi-file book on the next rescan. The catalog reads a book's metadata from the
+	// primary, so the same tags elsewhere are inert but keep every part on one key.
+	files, err := l.store.ItemFiles(ctx, itemPID)
+	if err != nil {
+		return writeBackSetupFailure(itemPID, all, err)
+	}
+	wbErr := &WriteBackError{ItemPID: itemPID, Edits: all}
+	if len(tagEdits) == 0 {
+		// Nothing to write, so the refusals are the whole outcome and stamp their own
+		// drift. With a write to follow they instead ride into it, since that write
+		// replaces the file's edit-origin diagnostics wholesale.
+		for _, reason := range refusals {
+			l.noteRefusal(ctx, files, wbErr, reason)
+		}
+		return wbErr.result()
+	}
+	for _, reason := range refusals {
+		noteRefusalFailures(files, wbErr, reason)
+	}
+	tagEdits, err = l.appendDerivedSortClears(ctx, itemPID, sortFields, tagEdits)
+	if err != nil {
+		return writeBackSetupFailure(itemPID, all, err)
+	}
 	if len(files) == 0 {
 		return wbErr.noFiles()
 	}
-	if err := l.writeBackFiles(ctx, "waxbin.EditFields", files, wbErr,
+	if err := l.writeBackFiles(ctx, op, files, wbErr, refusals,
 		func(w *meta.Writer, path string) (*meta.WriteResult, error) {
 			return w.Apply(ctx, path, tagEdits)
 		}); err != nil {
@@ -1750,13 +1844,19 @@ func (l *Library) writeBackFields(ctx context.Context, itemPID model.PID, edits 
 	}
 	// A book's title and author are its identity anchor, unlike a track's essence, so
 	// writing them to disk would make the next scan --force re-key the book to a new pid
-	// and drop its locks. Re-anchor to the file's post-write value instead. It reads the
-	// file's actual state, so a partial write-back failure is safe: a part still holding
-	// the old value re-anchors to a no-op.
-	if item.Kind == model.KindBook && len(files) > 0 && bookIdentityEdited(edits) {
+	// and drop its locks. An author credit writes the same ALBUMARTIST. Re-anchor to the
+	// file's post-write value instead: it reads the file's actual state, so a partial
+	// write-back failure is safe and a part still holding the old value is a no-op.
+	if item.Kind == model.KindBook && (bookIdentityEdited(edits) || hasAuthorCredit(roles)) {
 		l.reanchorBookIdentity(ctx, itemPID, files[0].FilePID)
 	}
 	return wbErr.result()
+}
+
+// hasAuthorCredit reports whether a credit pass writes the book author, which is the one
+// role whose tag is also the book's identity anchor.
+func hasAuthorCredit(roles []creditRoleEdit) bool {
+	return slices.ContainsFunc(roles, func(r creditRoleEdit) bool { return r.role == model.RoleAuthor })
 }
 
 // appendDerivedSortClears adds the tag clears that keep a file's derived sort names in
@@ -1893,12 +1993,21 @@ func (l *Library) refuseWriteBack(ctx context.Context, itemPID model.PID, edits 
 // caller never reads a refusal as a silent success. It is the body refuseWriteBack
 // shares with the credit write-back, which refuses one role while writing another.
 func (l *Library) noteRefusal(ctx context.Context, files []model.ItemFileRef, wbErr *WriteBackError, reason string) {
+	for _, ref := range files {
+		l.recordWriteBackDrift(ctx, ref.FilePID, reason)
+	}
+	noteRefusalFailures(files, wbErr, reason)
+}
+
+// noteRefusalFailures is noteRefusal's reporting half alone, for a caller that goes on to
+// write the same files: writeBackFiles replaces a file's edit-origin diagnostics, so the
+// drift has to be handed to it rather than stamped ahead of it and cleared.
+func noteRefusalFailures(files []model.ItemFileRef, wbErr *WriteBackError, reason string) {
 	if len(files) == 0 {
 		wbErr.Failures = append(wbErr.Failures, WriteBackFailure{Reason: reason})
 		return
 	}
 	for _, ref := range files {
-		l.recordWriteBackDrift(ctx, ref.FilePID, reason)
 		wbErr.Failures = append(wbErr.Failures, WriteBackFailure{FilePID: ref.FilePID, Path: string(ref.Path), Reason: reason})
 	}
 }

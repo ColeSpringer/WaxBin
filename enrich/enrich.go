@@ -54,10 +54,16 @@ type Store interface {
 	// yet (and, unless force, have not already been looked up), each with the title,
 	// artist, album, and duration a lyrics provider keys on.
 	ItemsNeedingLyrics(ctx context.Context, force bool, afterID int64, limit int, ids []int64) ([]model.EnrichTarget, error)
+	// ArtistsNeedingArtBackfill returns the next keyset page of artists with an empty
+	// art slot, front or auxiliary. Unlike ReleaseGroupsNeedingAuxArt it does consult
+	// the front, because artist art is fetched inside the identity pass and an already
+	// marked artist has none at all, which is the gap this phase exists for.
+	ArtistsNeedingArtBackfill(ctx context.Context, force bool, afterID int64, limit int, ids []int64) ([]model.EnrichTarget, error)
 	// CountEntitiesNeedingEnrichment mirrors the phases a run would execute: a nil
 	// scope counts everything, a scoped count covers only the scoped ids, and a
-	// phase the scoped run skips (an empty id list) contributes zero.
-	CountEntitiesNeedingEnrichment(ctx context.Context, force, includeAlbums, includeAuxArt, includeLyrics bool, scope *model.EnrichScope) (int, error)
+	// phase the scoped run skips (an empty id list) contributes zero. Each optional
+	// phase's flag must mirror whether the run actually runs it, or the ratio drifts.
+	CountEntitiesNeedingEnrichment(ctx context.Context, force bool, opts model.EnrichCountOptions, scope *model.EnrichScope) (int, error)
 
 	ApplyArtistEnrichment(ctx context.Context, in model.ArtistEnrichment) error
 	ApplyReleaseGroupEnrichment(ctx context.Context, in model.ReleaseGroupEnrichment) error
@@ -66,6 +72,10 @@ type Store interface {
 	// whether or not anything was found, so a group no provider serves is not re-asked
 	// every run.
 	ApplyReleaseGroupAuxArt(ctx context.Context, in model.ReleaseGroupAuxArt) error
+	// ApplyArtistArtBackfill fills an artist's empty art roles, front and auxiliary
+	// (fill-when-empty, lock-respecting per role), and records the backfill marker
+	// whether or not anything was found.
+	ApplyArtistArtBackfill(ctx context.Context, in model.ArtistArtBackfill) error
 	// ApplyAlbumReleaseMatch fills an album's release MBID when it has none, attaches
 	// that pressing's own cover when one came back, and records the marker either way
 	// (under the deciding tier's provider) so a no-match is not re-searched every run.
@@ -319,6 +329,11 @@ type Result struct {
 	// can report AuxArtEnriched=40 with AuxArtFetched=6.
 	AuxArtEnriched int
 	AuxArtMatched  int
+	// ArtistArtEnriched and ArtistArtMatched are the same pair for the artist-art
+	// backfill, counting artists walked and artists some provider answered for. The
+	// images themselves land in ArtFetched and AuxArtFetched with every other pass's.
+	ArtistArtEnriched int
+	ArtistArtMatched  int
 	// ArtFetched counts front covers gathered and handed to the store, not covers
 	// actually applied (the store's fill-when-empty and lock guards decide that);
 	// AuxArtFetched counts the non-front role images the same way, in whichever pass
@@ -344,7 +359,7 @@ type Result struct {
 // numerator against CountEntitiesNeedingEnrichment.
 func (r *Result) total() int {
 	return r.ArtistsEnriched + r.ReleaseGroupsEnriched + r.AlbumsSearched +
-		r.AuxArtEnriched + r.BooksEnriched + r.LyricsEnriched
+		r.AuxArtEnriched + r.ArtistArtEnriched + r.BooksEnriched + r.LyricsEnriched
 }
 
 // Heartbeat reports progress; it may be nil.
@@ -379,12 +394,16 @@ func (s *Service) Run(ctx context.Context, opts RunOptions, hb Heartbeat) (*Resu
 	// counting queries entirely when there is no heartbeat.
 	var total int
 	if hb != nil {
-		// The three flags and the scope must match the phase list below, which adds the
-		// album phase only when the toggle is on, adds the aux-art and lyrics phases only
+		// The flags and the scope must match the phase list below, which adds the album
+		// phase only when the toggle is on, adds the art-backfill and lyrics phases only
 		// when a capable provider is registered, and skips a phase the scope leaves
 		// empty, so the denominator counts exactly the work that will run.
-		n, err := s.store.CountEntitiesNeedingEnrichment(ctx, st.force, s.cfg.MatchReleases,
-			s.hasCapability(CapAuxArt), s.hasCapability(CapLyrics), scope)
+		n, err := s.store.CountEntitiesNeedingEnrichment(ctx, st.force, model.EnrichCountOptions{
+			Albums:    s.cfg.MatchReleases,
+			AuxArt:    s.hasCapability(CapAuxArt),
+			ArtistArt: s.hasCapability(CapArtistArt),
+			Lyrics:    s.hasCapability(CapLyrics),
+		}, scope)
 		if err != nil {
 			return res, err
 		}
@@ -480,6 +499,27 @@ func (s *Service) Run(ctx context.Context, opts RunOptions, hb Heartbeat) (*Resu
 			},
 			enrich: func(ctx context.Context, t model.EnrichTarget) (bool, error) {
 				return s.enrichAuxArt(ctx, st, res, t)
+			},
+		})
+	}
+	// The artist-art backfill: artists whose front or auxiliary slots are empty. The
+	// identity phase above fetches artist art on the way past, so an artist it has
+	// already marked never gets asked again, which is the gap this closes without a
+	// --force run that re-searches MusicBrainz for every artist. It runs only when some
+	// provider advertises CapArtistArt, which neither built-in does, so a stock install
+	// walks nothing and writes no markers.
+	//
+	// After the identity phase for the reason the aux backfill is after the release-group
+	// one: its queue requires a non-empty artist.mbid, read live, and that phase is what
+	// fills it. Its place among the art phases is otherwise free.
+	if s.hasCapability(CapArtistArt) && phaseRuns(artistIDs) {
+		phases = append(phases, phase{
+			label: "artist art", enriched: &res.ArtistArtEnriched, matched: &res.ArtistArtMatched,
+			fetch: func(ctx context.Context, after int64, lim int) ([]model.EnrichTarget, error) {
+				return s.store.ArtistsNeedingArtBackfill(ctx, st.force, after, lim, artistIDs)
+			},
+			enrich: func(ctx context.Context, t model.EnrichTarget) (bool, error) {
+				return s.enrichArtistArt(ctx, st, res, t)
 			},
 		})
 	}
@@ -595,10 +635,8 @@ func (s *Service) runPhase(ctx context.Context, p phase, beat func(string) error
 // requests here; this exists for an injected provider advertising CapCover or CapAuxArt.
 //
 // The art rides the identity pass, so it only reaches artists that pass is still queued
-// for. An artist already carrying an enrichment marker is out of the queue and gets no
-// art until a --force run, and there is no artist analogue of the release group's aux-art
-// backfill phase to re-ask about one whose front is settled. Injecting an art provider
-// into a library already enriched therefore wants one --force pass; see DEFERRED.md.
+// for. An artist already carrying an enrichment marker is out of this queue, which is
+// what the artist-art backfill phase exists to re-ask about; see enrichArtistArt.
 func (s *Service) enrichArtist(ctx context.Context, st *runState, res *Result, t model.EnrichTarget) (bool, error) {
 	enr := model.ArtistEnrichment{ArtistID: t.ID, PID: t.PID}
 	a, err := s.resolveArtist(ctx, st, t)
@@ -860,6 +898,78 @@ func (s *Service) enrichAuxArt(ctx context.Context, st *runState, res *Result, t
 	}
 	res.AuxArtFetched += len(in.AuxArt)
 	return in.Matched, nil
+}
+
+// enrichArtistArt gathers art for one artist whose identity is already settled, filling
+// the front when it has none and the auxiliary roles either way, and marks it so the
+// walk does not repeat. It asks only the providers advertising CapArtistArt, which is
+// what keeps a stock install (whose Cover Art Archive answers nothing for an artist) from
+// stamping a permanent no-match on every artist it holds.
+func (s *Service) enrichArtistArt(ctx context.Context, st *runState, res *Result, t model.EnrichTarget) (bool, error) {
+	in := model.ArtistArtBackfill{ArtistID: t.ID, PID: t.PID}
+	art, provider := s.gatherArtistArt(ctx, st, Request{
+		Type: TargetArtist, Force: st.force, Artist: t.Name, MBID: t.MBID,
+	}, t.HasArt)
+	if len(art) > 0 {
+		in.Matched, in.Provider = true, provider
+		in.Art = art[model.ArtRoleFront]
+		in.AuxArt = auxArtRoles(art)
+	}
+	if err := s.store.ApplyArtistArtBackfill(ctx, in); err != nil {
+		return false, err
+	}
+	if in.Art != nil {
+		res.ArtFetched++
+	}
+	res.AuxArtFetched += len(in.AuxArt)
+	return in.Matched, nil
+}
+
+// gatherArtistArt returns the first offered image per role, plus the name of the first
+// provider to contribute one. hasFront drops the front from what it keeps: unlike the
+// release-group backfill this pass does ask about the front, but only for an artist that
+// has none, so an artist queued for an auxiliary vacancy alone does not put a second
+// writer on a slot that is already decided.
+func (s *Service) gatherArtistArt(ctx context.Context, st *runState, req Request, hasFront bool) (map[model.ArtRole]*model.ArtImage, string) {
+	req.Want = CapArtistArt
+	need := len(model.AuxArtRoles())
+	if !hasFront {
+		need++
+	}
+	var out map[model.ArtRole]*model.ArtImage
+	var provider string
+	for _, p := range s.providers {
+		if !p.Capabilities().Has(CapArtistArt) {
+			continue
+		}
+		cand, err := s.callProvider(ctx, p, req)
+		if err != nil || cand == nil {
+			continue
+		}
+		for role, img := range cand.Art {
+			if !role.Valid() || img == nil || len(img.Data) == 0 {
+				continue
+			}
+			if role == model.ArtRoleFront && hasFront {
+				continue
+			}
+			if out[role] != nil {
+				continue
+			}
+			img.Source, img.Provider = model.SourceEnrichment, p.Name()
+			if out == nil {
+				out = make(map[model.ArtRole]*model.ArtImage, len(cand.Art))
+				provider = p.Name()
+			}
+			out[role] = img
+		}
+		// Every slot this pass can fill is held, so a further provider could only have its
+		// images dropped by the guard above, after downloading them.
+		if len(out) == need {
+			break
+		}
+	}
+	return out, provider
 }
 
 // gatherAuxArt returns the first offered image per auxiliary role, plus the name of the

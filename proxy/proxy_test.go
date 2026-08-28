@@ -321,6 +321,43 @@ func TestEditEntityRoundTrip(t *testing.T) {
 	}
 }
 
+// TestRenameEntityRoundTrip checks the credit half of an artist rename crosses the wire.
+// The count is what the protocol carries: the per-item credit edits behind it stay on the
+// server, which is where a proxied write-back runs.
+func TestRenameEntityRoundTrip(t *testing.T) {
+	var got proxy.RenameEntityParams
+	handlers := map[string]proxy.Handler{
+		proxy.MethodRenameEntity: func(_ context.Context, raw json.RawMessage) (any, error) {
+			_ = json.Unmarshal(raw, &got)
+			return proxy.RenameEntityResult{Outcome: "renamed", Members: 2, Credits: 3}, nil
+		},
+	}
+	c := dial(t, startServer(t, handlers, nil))
+
+	res, err := c.RenameEntity(context.Background(), model.MergeArtist, "ar-1",
+		map[string]string{"name": "Alpha Prime"}, true,
+		model.Attribution{Source: model.SourceUser}, model.LockOn, false)
+	if err != nil {
+		t.Fatalf("rename entity: %v", err)
+	}
+	if got.EntityType != string(model.MergeArtist) || got.EntityPID != "ar-1" || got.Fields["name"] != "Alpha Prime" {
+		t.Errorf("rename_entity params = %+v", got)
+	}
+	if res.Members != 2 || res.Credits != 3 {
+		t.Errorf("result = %+v, want both halves of the count", res)
+	}
+
+	// A rename that moved no credit leaves the key out of the frame, so a peer that
+	// never sets it decodes to the same zero.
+	b, err := json.Marshal(proxy.RenameEntityResult{Outcome: "renamed", Members: 1})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if rawHas(b, "credits") {
+		t.Errorf("result frame = %s, want no credits key when none moved", b)
+	}
+}
+
 // TestDetachRoundTrip checks the detach params reach the handler and the report comes
 // back whole, including the write-back failures a partial tag strip reports as a result
 // rather than a transport error.
@@ -752,7 +789,9 @@ func TestDialMissingSocket(t *testing.T) {
 
 // TestCallHonorsContextCancel checks a call against an unresponsive server returns
 // promptly when its context is canceled, instead of blocking forever on the read.
-// A wedged server must not hang the CLI, and Ctrl-C must work.
+// A wedged server must not hang the CLI, and Ctrl-C must work. The bound below leaves
+// a probe interval of slack: a watcher deadline landing just as the read probe rearms
+// is clobbered, and the cancellation is seen on the following probe instead.
 func TestCallHonorsContextCancel(t *testing.T) {
 	block := make(chan struct{})
 	handlers := map[string]proxy.Handler{
@@ -877,5 +916,178 @@ func TestAcquisitionRoundTrip(t *testing.T) {
 	}
 	if clearP.ItemPID != "i2" || clearP.Lock != "" || clearP.Force || clearP.WriteBack {
 		t.Errorf("clear params = %+v, want a bare clear on i2", clearP)
+	}
+}
+
+// pastReadProbe outlasts the client's read probe interval, so a test that sleeps this
+// long forces the reader through a reissue. The interval itself is a second, and it is
+// unexported, so this tracks it by hand.
+const pastReadProbe = 1200 * time.Millisecond
+
+// startRawServer runs a bare listener speaking the wire protocol by hand, so a test can
+// control exactly how, when, and whether a response reaches the socket. handle gets the
+// one accepted connection and may close it.
+func startRawServer(t *testing.T, handle func(net.Conn)) string {
+	t.Helper()
+	sock := testsock.Path(t)
+	ln, err := proxy.Listen(sock)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		handle(conn)
+	}()
+	t.Cleanup(func() {
+		_ = ln.Close()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("raw server did not stop")
+		}
+	})
+	return sock
+}
+
+// TestSlowResponseOutlastsTheReadProbe checks the client reissues rather than failing a
+// call whose server simply took its time. The probe is a liveness check, not a timeout.
+func TestSlowResponseOutlastsTheReadProbe(t *testing.T) {
+	sock := startRawServer(t, func(conn net.Conn) {
+		br := bufio.NewReader(conn)
+		if _, err := br.ReadString('\n'); err != nil {
+			return
+		}
+		time.Sleep(pastReadProbe)
+		_, _ = conn.Write([]byte("{\"ok\":true}\n"))
+	})
+	if err := dial(t, sock).Ping(context.Background()); err != nil {
+		t.Fatalf("ping over a slow response: %v", err)
+	}
+}
+
+// TestSplitResponseDecodesIntact pins the partial-read branch: a frame whose halves
+// straddle a probe boundary comes back whole. Returning the deadline error with bytes
+// already in flight would poison the decoder instead, and the timeout would stick.
+func TestSplitResponseDecodesIntact(t *testing.T) {
+	const frame = `{"ok":true,"data":[{"Field":"title","Value":"Kid A","Locked":true}]}` + "\n"
+	half := len(frame) / 2
+	sock := startRawServer(t, func(conn net.Conn) {
+		br := bufio.NewReader(conn)
+		if _, err := br.ReadString('\n'); err != nil {
+			return
+		}
+		_, _ = conn.Write([]byte(frame[:half]))
+		time.Sleep(pastReadProbe)
+		_, _ = conn.Write([]byte(frame[half:]))
+	})
+	rows, err := dial(t, sock).Provenance(context.Background(), "i1")
+	if err != nil {
+		t.Fatalf("provenance across a probe boundary: %v", err)
+	}
+	if len(rows) != 1 || rows[0].Field != "title" || rows[0].Value != "Kid A" || !rows[0].Locked {
+		t.Fatalf("rows = %+v, want the split frame decoded whole", rows)
+	}
+}
+
+// TestCanceledCallLeavesTheConnectionUsable covers a Client an embedder keeps after a
+// caller gave up on one call. Two things used to retire it: the cancel watcher's
+// deadline was cleared only on the success path, so every later write failed instantly,
+// and the json.Decoder remembered the read error forever. The late answer to the
+// abandoned call is on the wire too, so the call that follows has to discard it rather
+// than read it as its own.
+func TestCanceledCallLeavesTheConnectionUsable(t *testing.T) {
+	sock := startRawServer(t, func(conn net.Conn) {
+		br := bufio.NewReader(conn)
+		if _, err := br.ReadString('\n'); err != nil {
+			return
+		}
+		// Answer the first call after its caller has already given up on it.
+		time.Sleep(150 * time.Millisecond)
+		_, _ = conn.Write([]byte("{\"ok\":true}\n"))
+		if _, err := br.ReadString('\n'); err != nil {
+			return
+		}
+		_, _ = conn.Write([]byte(`{"ok":true,"data":[{"Field":"title"}]}` + "\n"))
+	})
+	cl := dial(t, sock)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { time.Sleep(50 * time.Millisecond); cancel() }()
+	if err := cl.Ping(ctx); !waxerr.Is(err, waxerr.CodeCanceled) {
+		t.Fatalf("first ping = %v (code %s), want CodeCanceled", err, waxerr.CodeOf(err))
+	}
+	rows, err := cl.Provenance(context.Background(), "i1")
+	if err != nil {
+		t.Fatalf("second call on the same client: %v", err)
+	}
+	if len(rows) != 1 || rows[0].Field != "title" {
+		t.Fatalf("rows = %+v, want this call's own answer and not the abandoned one", rows)
+	}
+}
+
+// TestServerCloseMidCallDoesNotHang covers a server that dies holding a call. Windows'
+// AF_UNIX can drop the completion of the read that was already pending, so without the
+// reissue this blocks for good instead of reporting the drop.
+func TestServerCloseMidCallDoesNotHang(t *testing.T) {
+	sock := startRawServer(t, func(conn net.Conn) {
+		_, _ = bufio.NewReader(conn).ReadString('\n')
+		_ = conn.Close()
+	})
+	cl := dial(t, sock)
+	done := make(chan error, 1)
+	go func() { done <- cl.Ping(context.Background()) }()
+	select {
+	case err := <-done:
+		if !waxerr.Is(err, waxerr.CodeIO) {
+			t.Fatalf("err = %v (code %s), want CodeIO", err, waxerr.CodeOf(err))
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a call outliving its server hung instead of failing")
+	}
+}
+
+// TestCanceledPartialWriteRetiresTheConnection: a request the cancel deadline cut off
+// halfway leaves bytes on the wire with no way to say where the frame ended, and nothing
+// in the protocol pairs a response with its request. The Client refuses further calls
+// with a reason instead of appending a second request onto the stump of the first.
+func TestCanceledPartialWriteRetiresTheConnection(t *testing.T) {
+	// The cancel has to land while the write is in flight, so the server reads enough to
+	// prove it started and then stops, leaving the rest of an oversized frame to fill the
+	// socket buffer and block. A timer alone races the write and, losing, cancels a call
+	// that never reached the wire at all.
+	started := make(chan struct{})
+	sock := startRawServer(t, func(conn net.Conn) {
+		if _, err := io.ReadFull(conn, make([]byte, 4096)); err != nil {
+			return
+		}
+		close(started)
+		<-t.Context().Done()
+	})
+	cl := dial(t, sock)
+
+	huge := make([]string, 512)
+	for i := range huge {
+		huge[i] = strings.Repeat("x", 16*1024)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { <-started; cancel() }()
+	if err := cl.Lock(ctx, "i1", huge); !waxerr.Is(err, waxerr.CodeCanceled) {
+		t.Fatalf("canceled oversized call = %v (code %s), want CodeCanceled", err, waxerr.CodeOf(err))
+	}
+
+	// Bounded, so a Client that wrongly carried on reports a timeout here rather than
+	// hanging the package until the test binary's own alarm.
+	next, stop := context.WithTimeout(context.Background(), 2*time.Second)
+	defer stop()
+	err := cl.Ping(next)
+	if !waxerr.Is(err, waxerr.CodeIO) || !strings.Contains(err.Error(), "framing") {
+		t.Fatalf("call after a torn request = %v (code %s), want a CodeIO framing refusal",
+			err, waxerr.CodeOf(err))
 	}
 }

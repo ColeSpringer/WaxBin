@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"maps"
 	"slices"
 	"strings"
 
@@ -183,6 +184,52 @@ func (m *bookRenameMember) overlaidCredits() []string {
 	return append(out, m.b.Narrators...)
 }
 
+// creditOverlayByItem is the display a credit batch would store for every role it
+// rewrites, per item. A book member built from another entry in the same batch reads it
+// so it sees the credits the batch leaves behind rather than the ones it is replacing.
+//
+// Joined with the separator the overlay's own split understands: applyBookEdit runs the
+// value back through identity.SplitCredits, which never splits on a comma, so ", " would
+// hand the member one bogus name made of two people.
+func creditOverlayByItem(credits []creditEntry) map[int64]map[string]string {
+	if len(credits) == 0 {
+		return nil
+	}
+	out := map[int64]map[string]string{}
+	for _, e := range credits {
+		if out[e.itemID] == nil {
+			out[e.itemID] = map[string]string{}
+		}
+		out[e.itemID][string(e.role)] = strings.Join(e.clean, "; ")
+	}
+	return out
+}
+
+// withCreditRiders copies an edit entry with the batch's other book credits on the same
+// item added as fields, so the member built from it overlays them too. bookCreditFields
+// is exactly the pair applyBookEdit can overlay; a translator or editor entry has no
+// field to ride along on. The copy matters: the entry itself goes on to applyItemEditTx,
+// which would otherwise write a scalar the credit surface is already writing.
+func withCreditRiders(e editEntry, byItemRole map[int64]map[string]string) editEntry {
+	roles := byItemRole[e.itemID]
+	if len(roles) == 0 {
+		return e
+	}
+	out := e
+	out.fields = slices.Clone(e.fields)
+	out.norm = maps.Clone(e.norm)
+	for role, v := range roles {
+		if !bookCreditFields[role] || slices.Contains(out.fields, role) {
+			continue
+		}
+		out.fields = append(out.fields, role)
+		out.norm[role] = v
+	}
+	// The riders come out of a map, so the sort pins their order.
+	slices.Sort(out.fields)
+	return out
+}
+
 // renameEntitiesForEditsTx runs the pre-pass over the batch: it builds the
 // participants (track entries editing a chain-key field, book entries editing an
 // author or series), groups the tracks by their current album, and renames or merges
@@ -190,7 +237,16 @@ func (m *bookRenameMember) overlaidCredits() []string {
 // per-group reads, so an earlier group's rename or merge is visible to later ones; a
 // cross-rename swap inside one batch therefore falls back to split for the second
 // group (documented above, not optimized).
-func renameEntitiesForEditsTx(ctx context.Context, tx *sql.Tx, log logger, entries []editEntry, affected *affectedRollups, op string) error {
+//
+// credits is the contributor-role half of the same batch, which only RenameEntity has:
+// roles that back no entity-key column of their own, applied on the credit surface in the
+// same transaction. It is nil on the ordinary item-edit path. The roles it carries also
+// overlay the book members built here, for the reason renameArtistsForCreditsTx overlays
+// its own: without it the fold-back guard reads a narrator list the batch is about to
+// replace, still spelling the old name, and refuses a rename that is in fact covered.
+func renameEntitiesForEditsTx(ctx context.Context, tx *sql.Tx, log logger, entries []editEntry,
+	credits []creditEntry, affected *affectedRollups, op string) error {
+	byItemRole := creditOverlayByItem(credits)
 	var members []*renameMember
 	var books []*bookRenameMember
 	for _, e := range entries {
@@ -208,14 +264,22 @@ func renameEntitiesForEditsTx(ctx context.Context, tx *sql.Tx, log logger, entri
 			if !slices.ContainsFunc(e.fields, func(f string) bool { return bookKeyFields[f] }) {
 				continue
 			}
-			m, err := buildBookRenameMember(ctx, tx, e, op)
+			m, err := buildBookRenameMember(ctx, tx, withCreditRiders(e, byItemRole), op)
 			if err != nil {
 				return err
 			}
 			books = append(books, m)
 		}
 	}
-	if len(members) == 0 && len(books) == 0 {
+	var creditMembers []*creditRenameMember
+	for _, e := range credits {
+		m, err := buildCreditRenameMember(ctx, tx, e, op)
+		if err != nil {
+			return err
+		}
+		creditMembers = append(creditMembers, m)
+	}
+	if len(members) == 0 && len(books) == 0 && len(creditMembers) == 0 {
 		return nil
 	}
 
@@ -229,7 +293,7 @@ func renameEntitiesForEditsTx(ctx context.Context, tx *sql.Tx, log logger, entri
 	// the album groups and executes first, then the release-group stage (batch-level,
 	// since one group can back several of the batch's albums), then the album groups.
 	// The series stage follows the artist stage, the book chain's own second rung.
-	if err := renameArtistsForEditsTx(ctx, tx, members, books, nil, groups, affected, op); err != nil {
+	if err := renameArtistsForEditsTx(ctx, tx, members, books, creditMembers, groups, affected, op); err != nil {
 		return err
 	}
 	if err := renameSeriesForEditsTx(ctx, tx, books, op); err != nil {
@@ -269,6 +333,13 @@ type creditRenameMember struct {
 // the entry's rename pair under the cardinality rule above.
 func buildCreditRenameMember(ctx context.Context, tx *sql.Tx, e creditEntry, op string) (*creditRenameMember, error) {
 	m := &creditRenameMember{itemID: e.itemID, role: e.role, names: e.clean}
+	// A rename states its own pair, so a role two artists share still moves. The
+	// cardinality rule below exists because a user-supplied batch names no one artist,
+	// which is not a question the rename has to leave open.
+	if e.renamePriorID != 0 {
+		m.priorID, m.target = e.renamePriorID, e.renameTarget
+		return m, nil
+	}
 	prior, err := contributorArtistIDsForRole(ctx, tx, e.itemID, e.role)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
@@ -293,19 +364,7 @@ func buildCreditRenameMember(ctx context.Context, tx *sql.Tx, e creditEntry, op 
 // no item ever writes two values into the stage's per-item maps. Every other role
 // becomes a creditRenameMember, whose target is keyed by the (item, role) pair instead.
 func renameArtistsForCreditsTx(ctx context.Context, tx *sql.Tx, entries []creditEntry, affected *affectedRollups, op string) error {
-	// The display an overlay would store for every role the batch rewrites, per item, so
-	// a book member sees the credits the batch leaves behind rather than the ones it is
-	// about to replace.
-	byItemRole := map[int64]map[string]string{}
-	for _, e := range entries {
-		if byItemRole[e.itemID] == nil {
-			byItemRole[e.itemID] = map[string]string{}
-		}
-		// Joined with the separator the overlay's own split understands: applyBookEdit
-		// runs the value back through identity.SplitCredits, which never splits on a
-		// comma, so ", " would hand the member one bogus name made of two people.
-		byItemRole[e.itemID][string(e.role)] = strings.Join(e.clean, "; ")
-	}
+	byItemRole := creditOverlayByItem(entries)
 
 	var members []*renameMember
 	var books []*bookRenameMember
@@ -327,20 +386,9 @@ func renameArtistsForCreditsTx(ctx context.Context, tx *sql.Tx, entries []credit
 			credits: e.clean,
 		}
 		if e.kind == string(model.KindBook) {
-			// A book credit role and the field a scan reads it back from share a name,
-			// and bookCreditFields is exactly the pair applyBookEdit can overlay; a
-			// translator or editor entry has no field to ride along on.
-			for role, v := range byItemRole[e.itemID] {
-				if role != string(e.role) && bookCreditFields[role] {
-					entry.fields = append(entry.fields, role)
-					entry.norm[role] = v
-				}
-			}
-			// The riders come out of a map, so the sort pins their order; only the
-			// narrator can ride today, but a wider bookCreditFields would otherwise
-			// hand this member a map-ordered list.
-			slices.Sort(entry.fields)
-			m, err := buildBookRenameMember(ctx, tx, entry, op)
+			// The entry's own role is already the field it rides, so withCreditRiders adds
+			// only the batch's other book credits on this item.
+			m, err := buildBookRenameMember(ctx, tx, withCreditRiders(entry, byItemRole), op)
 			if err != nil {
 				return err
 			}
@@ -823,7 +871,11 @@ type contributorRef struct {
 // before returning so the caller can keep querying the same single-connection
 // transaction.
 func contributorRefsTx(ctx context.Context, tx *sql.Tx, artistID int64) ([]contributorRef, error) {
-	rows, err := tx.QueryContext(ctx, "SELECT item_id, role FROM item_contributor WHERE artist_id=?", artistID)
+	// Ordered for the same reason the field half sorts its targets: a rename derives its
+	// credit entries from this, and an unordered walk would name a different item in the
+	// refusal, the write-back fan-out, and the report from one run to the next.
+	rows, err := tx.QueryContext(ctx,
+		"SELECT item_id, role FROM item_contributor WHERE artist_id=? ORDER BY item_id, role", artistID)
 	if err != nil {
 		return nil, err
 	}

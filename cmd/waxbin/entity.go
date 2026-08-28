@@ -173,16 +173,19 @@ func newEntityEditCmd(g *globals) *cobra.Command {
 // sentence: merged means the pid the user typed is gone, and refreshed means the key did
 // not move at all, which is worth saying so a case-only rename does not read as a no-op.
 func renameOutcomeLine(et model.MergeEntity, pid model.PID, rep *model.EntityRenameReport) string {
+	// The credit half is named separately because it is a different edit surface, and a
+	// rename that moved a producer credit reads as having moved nothing without it.
+	moved := fmt.Sprintf("%d member(s)", rep.Members)
+	if rep.Credits > 0 {
+		moved += fmt.Sprintf(" and %d credit(s)", rep.Credits)
+	}
 	switch rep.Outcome {
 	case model.EntityRenameMerged:
-		return fmt.Sprintf("renamed %d member(s); %s %s merged into %s",
-			rep.Members, et, pid, rep.MergedInto)
+		return fmt.Sprintf("renamed %s; %s %s merged into %s", moved, et, pid, rep.MergedInto)
 	case model.EntityRenameRefreshed:
-		return fmt.Sprintf("renamed %d member(s); %s %s kept its key and refreshed its display",
-			rep.Members, et, pid)
+		return fmt.Sprintf("renamed %s; %s %s kept its key and refreshed its display", moved, et, pid)
 	default:
-		return fmt.Sprintf("renamed %d member(s); %s %s kept its pid on a new key",
-			rep.Members, et, pid)
+		return fmt.Sprintf("renamed %s; %s %s kept its pid on a new key", moved, et, pid)
 	}
 }
 
@@ -205,8 +208,11 @@ func newEntityRenameCmd(g *globals) *cobra.Command {
 			"(album, album_artist), artist (name). The artist rung takes one field because the " +
 			"item-level tag it writes differs per reference: a track credits an artist through " +
 			"ARTIST or ALBUMARTIST, a book through its author, and each referring credit list " +
-			"keeps its other names. An artist holding a non-artist, non-author contributor " +
-			"credit is refused, since that credit lives on `waxbin credit set` instead.\n\n" +
+			"keeps its other names. A contributor credit in any other role (producer, composer, " +
+			"narrator, translator, editor) has no field to ride, so it moves on the credit " +
+			"surface in the same transaction and is counted separately. A rename locks what " +
+			"it wrote on both surfaces, so by default every item whose credit moved comes out " +
+			"with that credit.<role> locked; --no-lock leaves them all writable.\n\n" +
 			"Renaming a name to nothing is refused, as is a member with a locked keying field " +
 			"(use --force), an archived member with no file on disk, members whose files sit in " +
 			"different folders (the album key carries the folder, so no one key covers them), " +
@@ -251,7 +257,7 @@ func newEntityRenameCmd(g *globals) *cobra.Command {
 				return printJSON(cmd, entityRenameView{
 					EntityPID: string(rep.EntityPID), Outcome: string(rep.Outcome),
 					MergedInto: string(rep.MergedInto), MovedAlbums: movedAlbumStrings(rep.MovedAlbums),
-					Members: rep.Members,
+					Members: rep.Members, Credits: rep.Credits,
 				})
 			}
 			fmt.Fprintln(out(cmd), renameOutcomeLine(et, pid, rep))
@@ -263,10 +269,11 @@ func newEntityRenameCmd(g *globals) *cobra.Command {
 	}
 	f := cmd.Flags()
 	f.StringArrayVar(&sets, "set", nil, "field=value to rename to (repeatable)")
-	f.BoolVar(&noLock, "no-lock", false, "unlock the renamed fields on every member (they default to locked)")
-	f.BoolVar(&keepLock, "keep-lock", false, keepLockUsage("the renamed fields"))
+	f.BoolVar(&noLock, "no-lock", false,
+		"unlock the renamed fields and credits on every member (they default to locked)")
+	f.BoolVar(&keepLock, "keep-lock", false, keepLockUsage("the renamed fields and credits"))
 	cmd.MarkFlagsMutuallyExclusive("no-lock", "keep-lock")
-	f.BoolVar(&force, "force", false, "override a locked keying field on a member")
+	f.BoolVar(&force, "force", false, "override a locked keying field or credit on a member")
 	f.BoolVar(&writeBack, "write-back", false, "also write the new values into every member file's tags")
 	// No --dry-run. Every interesting answer this command has (whether the entity moves,
 	// merges, or is refused for an uncovered reference) is decided inside the write
@@ -294,6 +301,7 @@ type entityRenameView struct {
 	MergedInto  string   `json:"mergedInto,omitempty"`
 	MovedAlbums []string `json:"movedAlbums,omitempty"`
 	Members     int      `json:"members"`
+	Credits     int      `json:"credits,omitempty"`
 }
 
 // renameDurabilityWarning returns the caveat to print after a rename, or "" when there is

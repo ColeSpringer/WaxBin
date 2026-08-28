@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 
+	"github.com/colespringer/waxbin/identity"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/waxerr"
 )
@@ -20,6 +21,7 @@ type DerivedReport struct {
 	ReleaseGroupRollupDrift int
 	SortKeyDrift            int // entities whose stored sort_key != regenerated
 	BookDurationDrift       int // books whose stored total_duration_ms != summed parts
+	BookISBNKeyDrift        int // books whose stored isbn_key != identity.ISBNKey(isbn)
 	OrphanArtSources        int // art_source images with no live art_map references
 	OrphanThumbnails        int // thumb_cache rows whose source is unreferenced
 	// field_provenance rows under a "tag.<KEY>" whose key WaxBin has since reserved.
@@ -46,7 +48,8 @@ func (r DerivedReport) SortKeyDriftOnly() bool {
 func (r DerivedReport) consistentApartFromSortKeys() bool {
 	return r.ItemsMissingFTS == 0 && r.OrphanFTSRows == 0 &&
 		r.ArtistRollupDrift == 0 && r.GenreRollupDrift == 0 &&
-		r.ReleaseGroupRollupDrift == 0 && r.BookDurationDrift == 0
+		r.ReleaseGroupRollupDrift == 0 && r.BookDurationDrift == 0 &&
+		r.BookISBNKeyDrift == 0
 }
 
 // Reclaimable reports whether `db verify --fix` would reclaim space: orphaned art
@@ -96,12 +99,43 @@ func (s *Store) VerifyDerived(ctx context.Context) (*DerivedReport, error) {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
 
+	isbnDrift, err := s.bookISBNKeyDrift(ctx)
+	if err != nil {
+		return nil, err
+	}
+	rep.BookISBNKeyDrift = isbnDrift
+
 	drift, err := s.sortKeyDrift(ctx)
 	if err != nil {
 		return nil, err
 	}
 	rep.SortKeyDrift = drift
 	return rep, nil
+}
+
+// bookISBNKeyDrift counts books whose stored isbn_key does not match recomputing it from
+// the raw column. Like the sort keys it is generated in Go, so the comparison streams
+// rather than running in SQL, and only rows with something in either column are read. A
+// rescan rewrites the pair through upsertBook, which is the repair.
+func (s *Store) bookISBNKeyDrift(ctx context.Context) (int, error) {
+	const op = "store.VerifyDerived"
+	rows, err := s.read.QueryContext(ctx,
+		"SELECT isbn, isbn_key FROM book WHERE isbn <> '' OR isbn_key <> ''")
+	if err != nil {
+		return 0, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	defer rows.Close()
+	drift := 0
+	for rows.Next() {
+		var isbn, key string
+		if err := rows.Scan(&isbn, &key); err != nil {
+			return 0, waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		if identity.ISBNKey(isbn) != key {
+			drift++
+		}
+	}
+	return drift, waxerr.Wrap(waxerr.CodeIO, op, rows.Err())
 }
 
 // sortKeyDrift counts rows whose stored sort key differs from regenerating it. It

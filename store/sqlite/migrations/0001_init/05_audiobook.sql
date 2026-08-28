@@ -40,7 +40,8 @@ CREATE TABLE book (
   year            INTEGER,
   publisher       TEXT    NOT NULL DEFAULT '',
   asin            TEXT    NOT NULL DEFAULT '',
-  isbn            TEXT    NOT NULL DEFAULT '',
+  isbn            TEXT    NOT NULL DEFAULT '',   -- raw, as the tag spelled it
+  isbn_key        TEXT    NOT NULL DEFAULT '',   -- identity.ISBNKey(isbn): what lookups compare
   edition         TEXT    NOT NULL DEFAULT '',
   abridged        INTEGER,                        -- NULL unknown, 0 unabridged, 1 abridged
   description     TEXT    NOT NULL DEFAULT '',
@@ -59,7 +60,10 @@ CREATE INDEX book_author ON book(author_id);
 -- full indexes; the empty-string rows sort together and an equality seek skips past them.
 CREATE INDEX book_mbid ON book(mbid COLLATE NOCASE) WHERE mbid IS NOT NULL;
 CREATE INDEX book_asin ON book(asin COLLATE NOCASE);
-CREATE INDEX book_isbn ON book(isbn COLLATE NOCASE);
+-- On the canonical key, not the raw column: identity.BookKey strips an ISBN's separators
+-- while the column keeps them, so a hyphenated and an unhyphenated spelling of one book
+-- would not compare equal. Wrapping the raw column in REPLACE() would forfeit the index.
+CREATE INDEX book_isbn_key ON book(isbn_key);
 
 -- Navigation chapters within a book or episode. start_ms/end_ms are offsets
 -- within file_id (a single-file book has all chapters on one file; a

@@ -47,13 +47,26 @@ func lockedFieldSetTx(ctx context.Context, tx *sql.Tx, itemID int64) (map[string
 
 // existingItemIDByIdentityTx resolves an item's rowid by (kind, identity_key),
 // returning ok=false when no such item exists yet (a brand-new item has no locks).
-func existingItemIDByIdentityTx(ctx context.Context, tx *sql.Tx, kind model.Kind, identityKey string) (int64, bool, error) {
+//
+// A book falls through to the same identifier adoption upsertItem uses, and has to: this
+// runs first, so without it the part about to be adopted misses its lock overlay and a
+// forced rescan clobbers the curated fields of the book it is joining.
+func existingItemIDByIdentityTx(ctx context.Context, tx *sql.Tx, log logger, kind model.Kind, identityKey string, adopt bookAdoptKey) (int64, bool, error) {
 	if identityKey == "" {
 		return 0, false, nil
 	}
 	var id int64
 	err := tx.QueryRowContext(ctx,
 		"SELECT id FROM playable_item WHERE kind=? AND identity_key=?", string(kind), identityKey).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) && kind == model.KindBook {
+		adopted, aerr := adoptBookItemByIdentTx(ctx, tx, log, identityKey, adopt)
+		if aerr != nil {
+			return 0, false, aerr
+		}
+		if adopted != 0 {
+			return adopted, true, nil
+		}
+	}
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, false, nil
 	}
@@ -67,8 +80,8 @@ func existingItemIDByIdentityTx(ctx context.Context, tx *sql.Tx, kind model.Kind
 // values onto the scanned track and item before they are written, so a forced
 // rescan cannot clobber a curated edit. It is a no-op for a new item or one with no
 // locked fields. It must run before upsertItem (which writes the title).
-func preserveLockedTrackFieldsTx(ctx context.Context, tx *sql.Tx, tr *model.Track, item *model.PlayableItem) error {
-	id, ok, err := existingItemIDByIdentityTx(ctx, tx, item.Kind, item.IdentityKey)
+func preserveLockedTrackFieldsTx(ctx context.Context, tx *sql.Tx, log logger, tr *model.Track, item *model.PlayableItem) error {
+	id, ok, err := existingItemIDByIdentityTx(ctx, tx, log, item.Kind, item.IdentityKey, bookAdoptKey{})
 	if err != nil || !ok {
 		return err
 	}
@@ -149,8 +162,9 @@ func preserveLockedTrackFieldsTx(ctx context.Context, tx *sql.Tx, tr *model.Trac
 // values onto the scanned book and item before they are written. Author and narrator
 // preserve their split lists so upsertBook re-resolves the same contributor entities.
 // It must run before upsertItem/upsertBook.
-func preserveLockedBookFieldsTx(ctx context.Context, tx *sql.Tx, b *model.Book, item *model.PlayableItem) error {
-	id, ok, err := existingItemIDByIdentityTx(ctx, tx, item.Kind, item.IdentityKey)
+func preserveLockedBookFieldsTx(ctx context.Context, tx *sql.Tx, log logger, b *model.Book, item *model.PlayableItem) error {
+	id, ok, err := existingItemIDByIdentityTx(ctx, tx, log, item.Kind, item.IdentityKey,
+		bookAdoptKey{author: b.Author, title: item.Title})
 	if err != nil || !ok {
 		return err
 	}

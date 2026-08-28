@@ -165,15 +165,19 @@ func mergeEntityTx(ctx context.Context, tx *sql.Tx, et model.MergeEntity, table 
 			return nil, err
 		}
 	}
-	// The aux-art backfill marker is dropped rather than inherited. It records an answer
-	// about the loser's vacancy, and the loser's images have just moved into whichever of
-	// the survivor's roles were empty, so it says nothing about the survivor: a survivor
-	// never asked stays queued, and one already asked keeps its own row. Dropping it is
-	// also what keeps a reused release-group rowid from inheriting a dead group's answer,
-	// since the marker sits under that pass's own entity_type and the union above never
-	// reached it.
-	if et == model.MergeReleaseGroup {
+	// An art backfill marker is dropped rather than inherited. It records an answer about
+	// the loser's vacancy, and the loser's images have just moved into whichever of the
+	// survivor's roles were empty, so it says nothing about the survivor: a survivor never
+	// asked stays queued, and one already asked keeps its own row. Dropping it is also
+	// what keeps a reused rowid from inheriting a dead entity's answer, since the marker
+	// sits under that pass's own entity_type and the union above never reached it.
+	switch et {
+	case model.MergeReleaseGroup:
 		if err := deleteAuxArtMarkerTx(ctx, tx, lid); err != nil {
+			return nil, err
+		}
+	case model.MergeArtist:
+		if err := deleteArtistArtMarkerTx(ctx, tx, lid); err != nil {
 			return nil, err
 		}
 	}

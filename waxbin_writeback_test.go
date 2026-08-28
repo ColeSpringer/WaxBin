@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"image"
 	"image/png"
+	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -1486,5 +1488,175 @@ func TestRenameEntityWriteBackSurvivesRescan(t *testing.T) {
 	}
 	if after := catalogScalar[string](t, ctx, db, "SELECT pid FROM album"); model.PID(after) != albumPID {
 		t.Errorf("album pid after the rescan = %q, want the original %q", after, albumPID)
+	}
+}
+
+// TestRenameArtistWriteBackCarriesTheCreditHalf: an artist performing on a track and
+// producing it holds two references, one on a field and one on the credit surface. The
+// rename moves both, and with write-back both reach the file, so the forced rescan that
+// re-derives them does not fork the old spelling back.
+func TestRenameArtistWriteBackCarriesTheCreditHalf(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	src := filepath.Join(root, "song.mp3")
+	writeFile(t, src, testaudio.BuildMP3("One", "Alpha", "Album", 1))
+
+	lib := openManaged(t, ctx, db, root)
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	pid := itemPIDByTitle(t, ctx, lib, "One")
+	if _, _, err := lib.SetCredits(ctx, pid, model.RoleProducer, []string{"Alpha"},
+		waxbin.CreditEditOptions{WriteBack: true, Lock: model.LockOff}); err != nil {
+		t.Fatalf("producer credit: %v", err)
+	}
+
+	artistPID := artistPIDByName(t, ctx, db, "Alpha")
+	rep, err := lib.RenameEntity(ctx, model.MergeArtist, artistPID,
+		map[string]string{"name": "Alpha Prime"}, waxbin.RenameOptions{WriteBack: true, Lock: model.LockOff})
+	if err != nil {
+		t.Fatalf("rename with write-back: %v", err)
+	}
+	if rep.Members != 1 || rep.Credits != 1 {
+		t.Fatalf("report = %+v, want one member and one credit", rep)
+	}
+
+	fm, err := meta.NewReader().Read(ctx, src)
+	if err != nil {
+		t.Fatalf("read tags: %v", err)
+	}
+	if fm.Tags.Artist != "Alpha Prime" {
+		t.Errorf("on-disk ARTIST = %q, want the renamed artist", fm.Tags.Artist)
+	}
+
+	// The producer tag has no catalog column, so the rescan is what proves it landed.
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{Force: true}); err != nil {
+		t.Fatalf("scan --force: %v", err)
+	}
+	credits, err := lib.Credits(ctx, pid)
+	if err != nil {
+		t.Fatalf("credits: %v", err)
+	}
+	var producers []string
+	for _, c := range credits {
+		if c.Role == model.RoleProducer {
+			producers = append(producers, c.Name)
+		}
+	}
+	if len(producers) != 1 || producers[0] != "Alpha Prime" {
+		t.Errorf("producer credits after the rescan = %v, want [Alpha Prime]", producers)
+	}
+	if n := catalogScalar[int](t, ctx, db, "SELECT COUNT(*) FROM artist WHERE name = 'Alpha'"); n != 0 {
+		t.Errorf("%d artist rows still spell the old name after the rescan", n)
+	}
+}
+
+// TestRenameArtistWriteBackWritesEachFileOnce pins the grouping. An item carrying both a
+// field edit and a credit edit is one write-back pass, so an unwritable file is one
+// failure; fanning the halves out separately would rewrite the file twice and report the
+// same file twice.
+func TestRenameArtistWriteBackWritesEachFileOnce(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	src := filepath.Join(root, "song.mp3")
+	writeFile(t, src, testaudio.BuildMP3("One", "Alpha", "Album", 1))
+
+	lib := openManaged(t, ctx, db, root)
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	pid := itemPIDByTitle(t, ctx, lib, "One")
+	if _, _, err := lib.SetCredits(ctx, pid, model.RoleProducer, []string{"Alpha"},
+		waxbin.CreditEditOptions{Lock: model.LockOff}); err != nil {
+		t.Fatalf("producer credit: %v", err)
+	}
+
+	// The write is atomic (a rewrite into the directory), so removing the directory's
+	// write bit is what makes it fail. Windows ignores that bit on a directory, so there
+	// the blocker is an open handle on the target, which fails the replacing rename.
+	if err := os.Chmod(root, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(root, 0o755) })
+	if runtime.GOOS == "windows" {
+		h, err := os.Open(src)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = h.Close() })
+	}
+
+	artistPID := artistPIDByName(t, ctx, db, "Alpha")
+	_, err := lib.RenameEntity(ctx, model.MergeArtist, artistPID,
+		map[string]string{"name": "Alpha Prime"}, waxbin.RenameOptions{WriteBack: true, Lock: model.LockOff})
+	var wbErr *waxbin.WriteBackError
+	if !errors.As(err, &wbErr) {
+		t.Fatalf("rename into a read-only directory = %v, want *WriteBackError", err)
+	}
+	if len(wbErr.Failures) != 1 {
+		t.Fatalf("failures = %d (%+v), want the one file reported once", len(wbErr.Failures), wbErr.Failures)
+	}
+}
+
+// TestRenameArtistWriteBackRefusesBookTranslator: a translator credit has no tag a scan
+// reconstructs, so the rename's write-back refuses that half while the author's write
+// beside it lands and the catalog rename stands.
+func TestRenameArtistWriteBackRefusesBookTranslator(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	src := filepath.Join(root, "book.m4b")
+	writeFile(t, src, testaudio.BuildMP3("The Hobbit", "Tolkien", "The Hobbit", 1))
+
+	lib := openManaged(t, ctx, db, root)
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	books, err := lib.Query(ctx, query.New(query.EntityItems).Where("kind", query.OpIs, "book").Build(), "")
+	if err != nil || len(books) != 1 {
+		t.Fatalf("book query: %d books (err %v)", len(books), err)
+	}
+	pid := books[0].PID
+	if _, _, err := lib.SetCredits(ctx, pid, model.RoleTranslator, []string{"Tolkien"},
+		waxbin.CreditEditOptions{Lock: model.LockOff}); err != nil {
+		t.Fatalf("translator credit: %v", err)
+	}
+
+	artistPID := artistPIDByName(t, ctx, db, "Tolkien")
+	rep, err := lib.RenameEntity(ctx, model.MergeArtist, artistPID,
+		map[string]string{"name": "J.R.R. Tolkien"}, waxbin.RenameOptions{WriteBack: true, Lock: model.LockOff})
+	var wbErr *waxbin.WriteBackError
+	if !errors.As(err, &wbErr) {
+		t.Fatalf("rename over a book translator credit = %v, want *WriteBackError", err)
+	}
+	if len(wbErr.Failures) != 1 || !strings.Contains(wbErr.Failures[0].Reason, "translator") {
+		t.Fatalf("failures = %+v, want the translator role refused", wbErr.Failures)
+	}
+	// The catalog rename stands, both halves of it.
+	if rep == nil || rep.Members != 1 || rep.Credits != 1 {
+		t.Fatalf("report = %+v, want the rename to stand with one member and one credit", rep)
+	}
+	if got := catalogScalar[string](t, ctx, db, "SELECT name FROM artist WHERE pid = ?", string(artistPID)); got != "J.R.R. Tolkien" {
+		t.Errorf("artist name = %q, want the rename to stand", got)
+	}
+	fm, err := meta.NewReader().Read(ctx, src)
+	if err != nil {
+		t.Fatalf("read tags: %v", err)
+	}
+	if fm.Tags.AlbumArtist != "J.R.R. Tolkien" {
+		t.Errorf("on-disk ALBUMARTIST = %q, want the author half written beside the refusal", fm.Tags.AlbumArtist)
+	}
+	// The refusal has to reach the review queue, not just the returned error. The author
+	// write that landed on the same file replaces its edit-origin diagnostics wholesale,
+	// so a refusal stamped ahead of that write would be cleared by it and the file would
+	// read as fully synced.
+	diags, err := lib.FileDiagnostics(ctx, model.DiagnosticFilter{ItemPID: pid, Code: model.DiagTagWriteUnsynced})
+	if err != nil {
+		t.Fatalf("file diagnostics: %v", err)
+	}
+	if len(diags) != 1 || !strings.Contains(diags[0].Detail, "translator") {
+		t.Errorf("drift diagnostics = %+v, want the translator refusal still queryable", diags)
 	}
 }

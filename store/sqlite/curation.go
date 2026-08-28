@@ -465,18 +465,23 @@ func (s *Store) SetEntityArt(ctx context.Context, entityType model.ArtEntity, en
 		// first. A --no-lock set on an already-unlocked group therefore clears it too,
 		// which costs one re-ask. SetArtLock reaches the same rule from the other side,
 		// but only past its idempotency return, so it clears on the transition alone.
-		if entityType == model.ArtReleaseGroup {
+		if entityType == model.ArtReleaseGroup || entityType == model.ArtArtist {
 			whole := artRoleLockField(role) == "art"
 			drop := whole && lock == model.LockOff
-			if !whole && img == nil {
+			// A cleared role opens a vacancy the marker says was already asked about. At
+			// the release-group rung only an auxiliary role can, since that predicate
+			// never consults the front; the artist one does, so its front counts too, and
+			// without this a cleared artist front with the lock left alone is never
+			// backfilled again short of a forced run.
+			if img == nil && (!whole || entityType == model.ArtArtist) {
 				blocked, err := artFillBlockedTx(ctx, tx, entityType, entityID, role)
 				if err != nil {
 					return waxerr.Wrap(waxerr.CodeIO, op, err)
 				}
-				drop = !blocked
+				drop = drop || !blocked
 			}
 			if drop {
-				if err := deleteAuxArtMarkerTx(ctx, tx, entityID); err != nil {
+				if err := deleteArtBackfillMarkerTx(ctx, tx, entityType, entityID); err != nil {
 					return waxerr.Wrap(waxerr.CodeIO, op, err)
 				}
 			}
@@ -576,7 +581,7 @@ func (s *Store) SetArtLock(ctx context.Context, entityType model.ArtEntity, pid 
 		// clears it outright, since any role may now be fillable and over-clearing costs
 		// one re-ask; releasing a single role clears it only when that role really ended
 		// up open, which a standing whole lock prevents.
-		if !lock && entityType == model.ArtReleaseGroup {
+		if !lock && (entityType == model.ArtReleaseGroup || entityType == model.ArtArtist) {
 			drop := artRoleLockField(role) == "art"
 			if !drop {
 				blocked, err := artFillBlockedTx(ctx, tx, entityType, entityID, role)
@@ -586,7 +591,7 @@ func (s *Store) SetArtLock(ctx context.Context, entityType model.ArtEntity, pid 
 				drop = !blocked
 			}
 			if drop {
-				if err := deleteAuxArtMarkerTx(ctx, tx, entityID); err != nil {
+				if err := deleteArtBackfillMarkerTx(ctx, tx, entityType, entityID); err != nil {
 					return waxerr.Wrap(waxerr.CodeIO, op, err)
 				}
 			}

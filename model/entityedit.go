@@ -117,6 +117,11 @@ type EntityRenameReport struct {
 	MergedInto  PID
 	MovedAlbums []PID
 	Members     int
+	// Credits is how many contributor-role credits moved with the rename: the roles that
+	// back no item field of their own (producer, composer, narrator, translator, editor),
+	// applied on the credit surface inside the same transaction. Members counts the field
+	// half, and an item can be in both.
+	Credits int
 	// MemberEdits is what the rename actually wrote, per member: the item and the field
 	// values that landed in its columns. Write-back sends exactly this rather than
 	// re-deriving the member list afterwards, which would reach for the surviving entity
@@ -124,6 +129,11 @@ type EntityRenameReport struct {
 	// the process that ran the rename and is not carried on the wire; a proxied caller's
 	// write-back runs on the server, which has it.
 	MemberEdits []ItemFieldEdit
+	// CreditEdits is the credit half of the same record: what each contributor role now
+	// holds, per item and role. Like MemberEdits it is local to the process that ran the
+	// rename and is not carried on the wire, so a proxied caller's write-back runs on the
+	// server, which has it. Sending it would silently write back nothing.
+	CreditEdits []ItemCreditEdit
 }
 
 // DetachReport records a per-member detach: the track pulled off an album keyed on a

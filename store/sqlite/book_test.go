@@ -18,6 +18,7 @@ type bookSpec struct {
 	series, seq            string
 	asin, isbn, edition    string
 	mbid                   string
+	preserveLocks          bool
 	year                   int
 	genres                 []string
 	position               int
@@ -53,8 +54,9 @@ func putBook(t *testing.T, st *Store, libID int64, s bookSpec) *model.ScanItemRe
 			ASIN: s.asin, ISBN: s.isbn, Edition: s.edition, MBID: s.mbid, Year: s.year,
 			Genres: s.genres, Genre: genre,
 		},
-		Position: s.position,
-		Chapters: s.chapters,
+		Position:      s.position,
+		Chapters:      s.chapters,
+		PreserveLocks: s.preserveLocks,
 	}
 	res, err := st.PutScannedBook(context.Background(), in)
 	if err != nil {

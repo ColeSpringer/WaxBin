@@ -160,7 +160,7 @@ func (s *Store) EditItemFields(ctx context.Context, itemPID model.PID, edits map
 			return err
 		}
 		affected := newAffectedRollups()
-		if err := renameEntitiesForEditsTx(ctx, tx, s.log, entries, affected, op); err != nil {
+		if err := renameEntitiesForEditsTx(ctx, tx, s.log, entries, nil, affected, op); err != nil {
 			return err
 		}
 		for _, e := range entries {
@@ -332,7 +332,7 @@ func (s *Store) EditManyFields(ctx context.Context, itemPIDs []model.PID, edits 
 			return err
 		}
 		affected := newAffectedRollups()
-		if err := renameEntitiesForEditsTx(ctx, tx, s.log, entries, affected, op); err != nil {
+		if err := renameEntitiesForEditsTx(ctx, tx, s.log, entries, nil, affected, op); err != nil {
 			return err
 		}
 		for _, e := range entries {
@@ -400,7 +400,7 @@ func (s *Store) EditItemsFields(ctx context.Context, edits []model.ItemFieldEdit
 			return err
 		}
 		affected := newAffectedRollups()
-		if err := renameEntitiesForEditsTx(ctx, tx, s.log, entries, affected, op); err != nil {
+		if err := renameEntitiesForEditsTx(ctx, tx, s.log, entries, nil, affected, op); err != nil {
 			return err
 		}
 		for _, e := range entries {

@@ -583,7 +583,7 @@ func TestScopedEnrichmentQueries(t *testing.T) {
 	// The scoped count covers exactly the phases a scoped run executes: one
 	// artist + one release group here, and the empty album/book/lyrics lists add zero.
 	scope := &model.EnrichScope{ArtistIDs: []int64{oneID}, ReleaseGroupIDs: []int64{rgOneID}}
-	n, err := st.CountEntitiesNeedingEnrichment(ctx, true, true, false, true, scope)
+	n, err := st.CountEntitiesNeedingEnrichment(ctx, true, model.EnrichCountOptions{Albums: true, Lyrics: true}, scope)
 	if err != nil {
 		t.Fatalf("scoped count: %v", err)
 	}
@@ -592,7 +592,7 @@ func TestScopedEnrichmentQueries(t *testing.T) {
 	}
 	// The unscoped count still covers the catalog (2 artists + 2 rgs; the tracks
 	// need lyrics lookups too under includeLyrics).
-	un, err := st.CountEntitiesNeedingEnrichment(ctx, true, false, false, false, nil)
+	un, err := st.CountEntitiesNeedingEnrichment(ctx, true, model.EnrichCountOptions{}, nil)
 	if err != nil || un != 4 {
 		t.Fatalf("unscoped count = %d (err %v), want 4", un, err)
 	}
@@ -670,7 +670,7 @@ func TestScopedEnrichmentReachesGhostEntities(t *testing.T) {
 	}
 
 	// The scoped count stays in lockstep with the relaxed walk.
-	n, err := st.CountEntitiesNeedingEnrichment(ctx, true, false, false, false, &model.EnrichScope{ArtistIDs: []int64{ghostID}})
+	n, err := st.CountEntitiesNeedingEnrichment(ctx, true, model.EnrichCountOptions{}, &model.EnrichScope{ArtistIDs: []int64{ghostID}})
 	if err != nil || n != 1 {
 		t.Fatalf("scoped ghost count = %d (err %v), want 1", n, err)
 	}
@@ -967,11 +967,11 @@ func TestReleaseGroupsNeedingAuxArtGuards(t *testing.T) {
 
 	// The heartbeat denominator is built from the same gate, so turning the phase on
 	// adds exactly the queued groups and nothing else.
-	withAux, err := st.CountEntitiesNeedingEnrichment(ctx, false, false, true, false, nil)
+	withAux, err := st.CountEntitiesNeedingEnrichment(ctx, false, model.EnrichCountOptions{AuxArt: true}, nil)
 	if err != nil {
 		t.Fatalf("count with aux: %v", err)
 	}
-	withoutAux, err := st.CountEntitiesNeedingEnrichment(ctx, false, false, false, false, nil)
+	withoutAux, err := st.CountEntitiesNeedingEnrichment(ctx, false, model.EnrichCountOptions{}, nil)
 	if err != nil {
 		t.Fatalf("count without aux: %v", err)
 	}

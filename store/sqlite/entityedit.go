@@ -236,6 +236,24 @@ func (s *Store) EditEntityFields(ctx context.Context, entityType model.MergeEnti
 		// untouched, so the entity falls back to what it showed before, and a hand-set
 		// auxiliary cover on a group stays. And the match key goes back to its heuristic
 		// form, so the members follow the row rather than staying pinned to the id.
+		// An art backfill's marker goes on ANY mbid edit, not just a clear. Those queues
+		// require a non-empty mbid and key the provider lookup on it, so a corrected id has
+		// never been asked about and a marker naming the old one would suppress it for good.
+		// The identity markers below are a different question, settled only by a clear.
+		// Before the re-key, so the in-place and guard-skip paths are covered too; a merge
+		// deletes it again for nothing.
+		if _, edited := norm["mbid"]; edited {
+			switch entityType {
+			case model.MergeReleaseGroup:
+				if err := deleteAuxArtMarkerTx(ctx, tx, entityID); err != nil {
+					return waxerr.Wrap(waxerr.CodeIO, op, err)
+				}
+			case model.MergeArtist:
+				if err := deleteArtistArtMarkerTx(ctx, tx, entityID); err != nil {
+					return waxerr.Wrap(waxerr.CodeIO, op, err)
+				}
+			}
+		}
 		var survivor model.PID
 		if v, edited := norm["mbid"]; edited && v == "" {
 			switch entityType {
@@ -266,13 +284,6 @@ func (s *Store) EditEntityFields(ctx context.Context, entityType model.MergeEnti
 					}
 				}
 				if err := clearEntityMarkerTx(ctx, tx, model.EnrichReleaseGroupType, entityID); err != nil {
-					return waxerr.Wrap(waxerr.CodeIO, op, err)
-				}
-				// The aux-art backfill marker gates the same queue from under its own
-				// entity type, so it goes with the rest. Before the re-key, so the
-				// in-place and guard-skip paths are covered too; a merge deletes it
-				// again for nothing.
-				if err := deleteAuxArtMarkerTx(ctx, tx, entityID); err != nil {
 					return waxerr.Wrap(waxerr.CodeIO, op, err)
 				}
 				var moved []model.PID

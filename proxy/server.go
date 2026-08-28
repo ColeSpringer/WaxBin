@@ -138,6 +138,8 @@ func (s *Server) serveConn(ctx context.Context, conn net.Conn) {
 // readProbeInterval is how long a read on an idle connection waits before it is
 // reissued. It is not a timeout: an idle connection is expected, and a
 // maintenance hand-off can hold one open for as long as the foreground CLI runs.
+// Both ends reissue for the same Windows reason, the client's conditionally (see
+// clientReader) where this one is not.
 const readProbeInterval = time.Second
 
 // probeReader reissues a read that only its own deadline ended, so the decoder
@@ -172,9 +174,10 @@ func (r probeReader) Read(p []byte) (int, error) {
 }
 
 // VersionMismatchPrefix opens the version gate's refusal message, which goes on to
-// name both versions. The prefix is stable so a client can tell this refusal from
-// every other CodeInvalid (a pre-16 client never inspects the message, so the added
-// tail costs it nothing).
+// name both versions. The prefix is stable across protocol versions, so a client can
+// tell this refusal from every other CodeInvalid however far apart the two ends have
+// drifted; a client old enough to predate the version-naming tail reads no part of the
+// message, so the tail costs it nothing either.
 const VersionMismatchPrefix = "unsupported protocol version"
 
 // dispatch routes one request. Maintenance control is handled inline (it mutates

@@ -149,7 +149,12 @@ import (
 // methods that widen no existing struct, so a peer that knows nothing about them cannot
 // misread a frame it does understand, and the failure it gets is the method switch naming
 // the missing verb rather than the version gate reporting the whole server as absent.
-const ProtocolVersion = 15
+// Version 16 added RenameEntityResult.Credits, once an artist rename began moving the
+// contributor roles it used to refuse. This one does widen an existing struct, and the
+// field is not cosmetic: a version-15 client drops it and reports a rename that moved a
+// producer credit as having moved nothing but its members, which understates a
+// destructive verb.
+const ProtocolVersion = 16
 
 // Method names for the proxied operations: the fast request/response catalog
 // mutations, the reads a mutating command needs for its confirmation output, the
@@ -568,10 +573,14 @@ type RenameEntityParams struct {
 // failed returns the failed files here rather than as a transport error, matching
 // edit_fields.
 type RenameEntityResult struct {
-	Outcome           string             `json:"outcome"`
-	MergedInto        string             `json:"mergedInto,omitempty"`
-	MovedAlbums       []string           `json:"movedAlbums,omitempty"`
-	Members           int                `json:"members"`
+	Outcome     string   `json:"outcome"`
+	MergedInto  string   `json:"mergedInto,omitempty"`
+	MovedAlbums []string `json:"movedAlbums,omitempty"`
+	Members     int      `json:"members"`
+	// Credits is how many contributor-role credits moved with the rename. The per-item
+	// credit edits behind it are not carried: like MemberEdits they are local to the
+	// process that ran the rename, and a proxied write-back runs on the server.
+	Credits           int                `json:"credits,omitempty"`
 	WriteBackFailures []WriteBackFailure `json:"writeBackFailures,omitempty"`
 }
 
