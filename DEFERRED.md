@@ -54,3 +54,21 @@ with an mbid, no whole-entity art lock, and an empty slot, and ask only the art 
 It was not built with the rung itself because the release-group phase's marker vocabulary
 (`aux_art`) and its ghost heuristics would need an artist-scoped twin, which is more new
 machinery than the rung it would serve.
+
+## A dropped server leaves the client's read waiting on Windows
+
+The server half of this is closed. `probeReader` reissues a read that only its own deadline
+ended, because Windows' AF_UNIX drops the completion of a read that was already pending when
+the peer closed, and a read issued afterwards reports the drop every time. The client has the
+same exposure pointing the other way: `Client.call` waits for the response frame in a bare
+`dec.Decode`, so a server that dies or shuts down with a call in flight can leave that read
+blocked for good and hang the command.
+
+It is not the same fix twice. The client already arms a deadline for a different purpose: a
+watcher sets one when the caller's context is canceled, which is how a wedged server does not
+hang a Ctrl-C. A probe that rearms the deadline before every read would clear the watcher's
+and defeat cancellation, so the client's reader has to tell its own probe expiring apart from
+the watcher cutting the call short. The exposure is also narrower than the server's was, since
+most commands hold the connection only for the moment of one call, and the process still dies
+on an interrupt because nothing installs a handler. It was left for its own change rather than
+folded into a server fix it does not share code with.

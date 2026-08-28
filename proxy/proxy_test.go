@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -526,8 +527,10 @@ func TestMaintenanceAutoReopenOnDrop(t *testing.T) {
 	// Simulate a crashed client: close the connection without ending maintenance.
 	_ = c.Close()
 
-	// The server should detect the drop and reopen.
-	deadline := time.Now().Add(2 * time.Second)
+	// The server should detect the drop and reopen. The bound is loose because a
+	// drop the platform never delivers to the waiting read is only seen when that
+	// read is reissued, one probe interval later.
+	deadline := time.Now().Add(5 * time.Second)
 	for {
 		if _, ends := maint.counts(); ends == 1 {
 			break
@@ -537,6 +540,159 @@ func TestMaintenanceAutoReopenOnDrop(t *testing.T) {
 			t.Fatalf("server did not auto-reopen after a dropped session (begins=%d ends=%d)", b, e)
 		}
 		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// lostCloseConn models what Windows' AF_UNIX does to a small share of closes: the
+// read already pending when the peer drops never completes, and only a read issued
+// after it reports the drop. It hands over one request frame first.
+type lostCloseConn struct {
+	mu         sync.Mutex
+	req        []byte
+	noDeadline bool // refuse deadlines, the way a conn that has none would
+	pending    bool // the read whose completion the platform swallowed
+	deadline   time.Time
+	closed     chan struct{}
+	once       sync.Once
+}
+
+func (c *lostCloseConn) Read(p []byte) (int, error) {
+	c.mu.Lock()
+	if len(c.req) > 0 {
+		n := copy(p, c.req)
+		c.req = c.req[n:]
+		c.mu.Unlock()
+		return n, nil
+	}
+	first := !c.pending
+	c.pending = true
+	deadline := c.deadline
+	noDeadline := c.noDeadline
+	c.mu.Unlock()
+	if noDeadline {
+		return 0, io.EOF // A conn with no deadlines to arm is an ordinary one.
+	}
+	if !first {
+		return 0, io.EOF // A reissued read sees the peer is gone.
+	}
+	if deadline.IsZero() {
+		<-c.closed // Nothing but a close ends a read waiting on a swallowed drop.
+		return 0, net.ErrClosed
+	}
+	// The deadline fires; the test does not wait out the real interval.
+	return 0, os.ErrDeadlineExceeded
+}
+
+func (c *lostCloseConn) Write(p []byte) (int, error)      { return len(p), nil }
+func (c *lostCloseConn) Close() error                     { c.once.Do(func() { close(c.closed) }); return nil }
+func (c *lostCloseConn) LocalAddr() net.Addr              { return testAddr{} }
+func (c *lostCloseConn) RemoteAddr() net.Addr             { return testAddr{} }
+func (c *lostCloseConn) SetWriteDeadline(time.Time) error { return nil }
+func (c *lostCloseConn) SetDeadline(t time.Time) error    { return c.SetReadDeadline(t) }
+func (c *lostCloseConn) SetReadDeadline(t time.Time) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.noDeadline {
+		return os.ErrNoDeadline
+	}
+	c.deadline = t
+	return nil
+}
+
+// oneConnListener hands the server a single connection, then waits to be closed.
+type oneConnListener struct {
+	conn   net.Conn
+	handed bool
+	closed chan struct{}
+	once   sync.Once
+}
+
+func (l *oneConnListener) Accept() (net.Conn, error) {
+	if !l.handed {
+		l.handed = true
+		return l.conn, nil
+	}
+	<-l.closed
+	return nil, net.ErrClosed
+}
+func (l *oneConnListener) Close() error   { l.once.Do(func() { close(l.closed) }); return nil }
+func (l *oneConnListener) Addr() net.Addr { return testAddr{} }
+
+type testAddr struct{}
+
+func (testAddr) Network() string { return "unix" }
+func (testAddr) String() string  { return "test" }
+
+// TestMaintenanceReopensOnAnUndeliveredDrop covers the same crash-safety net over a
+// connection whose drop is never delivered to the read waiting on it. Waiting on
+// that one read leaves the server paused for good, so it has to be reissued.
+func TestMaintenanceReopensOnAnUndeliveredDrop(t *testing.T) {
+	maint := &fakeMaintainer{}
+	conn := &lostCloseConn{
+		req:    fmt.Appendf(nil, "{\"v\":%d,\"method\":%q}\n", proxy.ProtocolVersion, proxy.MethodMaintenanceBegin),
+		closed: make(chan struct{}),
+	}
+	ln := &oneConnListener{conn: conn, closed: make(chan struct{})}
+	srv := proxy.NewServer(map[string]proxy.Handler{}, maint, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- srv.Serve(ctx, ln) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Error("server did not stop")
+		}
+	})
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		b, e := maint.counts()
+		if b == 1 && e == 1 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("undelivered drop left the server paused (begins=%d ends=%d)", b, e)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// TestServesAConnectionThatHasNoDeadlines covers a listener Serve was handed from
+// outside this package, whose connections answer os.ErrNoDeadline. The probe cannot
+// run on one, so it steps aside rather than taking the connection down with it.
+func TestServesAConnectionThatHasNoDeadlines(t *testing.T) {
+	maint := &fakeMaintainer{}
+	conn := &lostCloseConn{
+		req:        fmt.Appendf(nil, "{\"v\":%d,\"method\":%q}\n", proxy.ProtocolVersion, proxy.MethodMaintenanceBegin),
+		noDeadline: true,
+		closed:     make(chan struct{}),
+	}
+	ln := &oneConnListener{conn: conn, closed: make(chan struct{})}
+	srv := proxy.NewServer(map[string]proxy.Handler{}, maint, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- srv.Serve(ctx, ln) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Error("server did not stop")
+		}
+	})
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		b, e := maint.counts()
+		if b == 1 && e == 1 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("a connection without deadlines was not served (begins=%d ends=%d)", b, e)
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
 

@@ -11,6 +11,7 @@ import (
 	"os"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/colespringer/waxbin/waxerr"
 )
@@ -120,7 +121,7 @@ func (s *Server) serveConn(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
 	defer s.releaseMaintenanceIfHeld(ctx, conn)
 
-	dec := json.NewDecoder(conn)
+	dec := json.NewDecoder(probeReader{conn})
 	enc := json.NewEncoder(conn)
 	for {
 		var req request
@@ -131,6 +132,42 @@ func (s *Server) serveConn(ctx context.Context, conn net.Conn) {
 		if err := enc.Encode(&resp); err != nil {
 			return
 		}
+	}
+}
+
+// readProbeInterval is how long a read on an idle connection waits before it is
+// reissued. It is not a timeout: an idle connection is expected, and a
+// maintenance hand-off can hold one open for as long as the foreground CLI runs.
+const readProbeInterval = time.Second
+
+// probeReader reissues a read that only its own deadline ended, so the decoder
+// sees real bytes or a real end of connection and never a timeout (a timeout is
+// sticky in a json.Decoder and would end the connection on the first idle
+// interval). Windows' AF_UNIX sometimes drops the completion of a read that was
+// already pending when the peer closed, leaving that read blocked for good; a
+// read issued after the close reports it every time, so reissuing is what turns a
+// dropped connection back into an EOF. Without it a crashed CLI leaves the server
+// paused for maintenance forever, which is the case releaseMaintenanceIfHeld
+// exists to cover. The write side needs no counterpart: a write blocked on a full
+// buffer is ended by the peer's close on both platforms, so a read is the only
+// thing a drop can orphan.
+type probeReader struct{ conn net.Conn }
+
+func (r probeReader) Read(p []byte) (int, error) {
+	for {
+		if err := r.conn.SetReadDeadline(time.Now().Add(readProbeInterval)); err != nil {
+			// A connection that has no deadlines to arm (os.ErrNoDeadline) can still be
+			// served, just without the probe, so read it the way this did before.
+			return r.conn.Read(p)
+		}
+		n, err := r.conn.Read(p)
+		if errors.Is(err, os.ErrDeadlineExceeded) {
+			if n == 0 {
+				continue
+			}
+			err = nil // Hand back what arrived; the next read waits for the rest.
+		}
+		return n, err
 	}
 }
 
