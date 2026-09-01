@@ -21,6 +21,7 @@ import (
 	"github.com/colespringer/waxbin/query"
 	"github.com/colespringer/waxbin/waxerr"
 	waxlabel "github.com/colespringer/waxlabel"
+	"github.com/colespringer/waxlabel/tag"
 	"golang.org/x/image/bmp"
 )
 
@@ -1658,5 +1659,51 @@ func TestRenameArtistWriteBackRefusesBookTranslator(t *testing.T) {
 	}
 	if len(diags) != 1 || !strings.Contains(diags[0].Detail, "translator") {
 		t.Errorf("drift diagnostics = %+v, want the translator refusal still queryable", diags)
+	}
+}
+
+// TestSetCreditsShapesSingleValuedRoles: a two-holder conductor credit lands on disk
+// as one joined value rather than two, so the write reports clean and the typed
+// projection reads both names, while a producer credit keeps one value per holder.
+func TestSetCreditsShapesSingleValuedRoles(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	src := filepath.Join(root, "song.mp3")
+	writeFile(t, src, testaudio.BuildMP3("Symphony", "Orchestra", "Live", 1))
+
+	lib := openManaged(t, ctx, db, root)
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	pid := itemPIDByTitle(t, ctx, lib, "Symphony")
+
+	conductors := []string{"Ana Conductor", "Ben Conductor"}
+	if _, _, err := lib.SetCredits(ctx, pid, model.RoleConductor, conductors,
+		waxbin.CreditEditOptions{WriteBack: true, Lock: model.LockOff}); err != nil {
+		t.Fatalf("conductor credit write-back: %v", err)
+	}
+	producers := []string{"Pat Producer", "Quinn Producer"}
+	if _, _, err := lib.SetCredits(ctx, pid, model.RoleProducer, producers,
+		waxbin.CreditEditOptions{WriteBack: true, Lock: model.LockOff}); err != nil {
+		t.Fatalf("producer credit write-back: %v", err)
+	}
+
+	doc, err := waxlabel.ParseFile(ctx, src)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if got, _ := doc.Get(tag.Conductor); len(got) != 1 || got[0] != "Ana Conductor; Ben Conductor" {
+		t.Errorf("CONDUCTOR on disk = %v, want the two names joined", got)
+	}
+	if got, _ := doc.Get(tag.Producer); len(got) != 2 || got[0] != producers[0] || got[1] != producers[1] {
+		t.Errorf("PRODUCER on disk = %v, want %v", got, producers)
+	}
+	diags, err := lib.FileDiagnostics(ctx, model.DiagnosticFilter{Code: model.DiagTagWriteLost})
+	if err != nil {
+		t.Fatalf("diagnostics: %v", err)
+	}
+	if len(diags) != 0 {
+		t.Errorf("tag_write_lost diagnostics = %+v, want none for shaped credits", diags)
 	}
 }

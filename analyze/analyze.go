@@ -104,10 +104,10 @@ type Result struct {
 	// vanished path). It is not fatal, since the measurement is in the catalog either
 	// way, but a run where every write failed must not read as one with nothing to write.
 	ReplayGainTagsFailed int
-	// ReplayGainTagsUnrepresented counts files whose gain never reached the disk
-	// because the file could not hold it: a value the tag format dropped, or a
-	// container WaxLabel cannot write at all. Neither is worth retrying, and the
-	// first can even report as a landed no-op, so both are counted apart from
+	// ReplayGainTagsUnrepresented counts files whose write was lossy: a value the
+	// tag format dropped, a container WaxLabel cannot write at all, or a rewrite
+	// that could not carry content the file held. None is worth retrying, and the
+	// first can even report as a landed no-op, so they are counted apart from
 	// failures.
 	ReplayGainTagsUnrepresented int
 }

@@ -7,25 +7,26 @@ import (
 	"testing"
 	"time"
 
-	"github.com/colespringer/waxbin/config"
 	"github.com/colespringer/waxbin/decode"
 	"github.com/colespringer/waxbin/internal/testaudio"
 	"github.com/colespringer/waxbin/meta"
 	"github.com/colespringer/waxbin/model"
-	"github.com/colespringer/waxbin/query"
 )
 
-// TestAuditProbeDecodesUnparsedContainers: the corrupt-audio probe was a WaxLabel
-// parse, and WaxLabel reports success for a container it has no parser for, so a
-// bit-rotted WavPack sailed through the one check meant to catch it. Decoding is
-// the only read of such a file that can fail on damage.
+// TestAuditProbeDecodesEveryContainer: the corrupt-audio probe was a WaxLabel parse,
+// with a decode only for a container WaxLabel could not read. WaxLabel 1.6 reads
+// WavPack and Monkey's Audio, and a parse reads headers and tag blocks, so a
+// bit-rotted WavPack block and a Monkey's Audio file cut short both sail through it.
+// Decoding is the only read that fails on the damage, so the probe decodes whatever
+// the decoder opens, parsed or not.
 //
 // The two damage forms are chosen from what WaxFlow's tolerant demuxers actually
 // report. Rot inside a WavPack block fails that block's CRC; a truncated Monkey's
-// Audio frame runs out of coded data. A WavPack file simply cut short is not here
-// on purpose: its last partial block is discarded and the rest decodes clean, so
-// nothing detects it and the probe must not be sold as if it did.
-func TestAuditProbeDecodesUnparsedContainers(t *testing.T) {
+// Audio frame runs out of coded data. A WavPack file simply cut short is not here on
+// purpose: the parse takes the header's total on trust, and the demuxer notes the
+// shortfall, drops the partial block, and decodes the rest clean, so nothing detects
+// it and the probe must not be sold as if it did.
+func TestAuditProbeDecodesEveryContainer(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
 	const rate = 8000
@@ -49,8 +50,8 @@ func TestAuditProbeDecodesUnparsedContainers(t *testing.T) {
 		{"cut.ape", ape[:len(ape)*60/100], true},
 	}
 
-	// The old probe was the WaxLabel read on its own, and it passes every one of
-	// these. That is the blind spot: it cannot judge a container it has no parser for.
+	// The parse on its own passes every one of these. That is the blind spot the
+	// decode closes, and it has to stay one for the test to mean anything.
 	reader := meta.NewReader()
 	for _, f := range files {
 		p := filepath.Join(dir, f.name)
@@ -59,8 +60,11 @@ func TestAuditProbeDecodesUnparsedContainers(t *testing.T) {
 		if err != nil {
 			t.Fatalf("parse of %s: %v", f.name, err)
 		}
-		if !hasDiag(fm.Diagnostics, model.DiagUnsupportedFormat) {
-			t.Fatalf("%s parsed after all; this test needs a container WaxLabel does not read", f.name)
+		if hasDiag(fm.Diagnostics, model.DiagUnsupportedFormat) {
+			t.Fatalf("%s did not parse; this test needs a container WaxLabel reads", f.name)
+		}
+		if hasDiag(fm.Diagnostics, model.DiagCorruptAudio) {
+			t.Fatalf("%s: the parse flagged it; this test needs damage only a decode finds", f.name)
 		}
 	}
 
@@ -73,6 +77,29 @@ func TestAuditProbeDecodesUnparsedContainers(t *testing.T) {
 		if !f.corrupt && err != nil {
 			t.Errorf("intact %s failed the corrupt-audio probe: %v", f.name, err)
 		}
+	}
+}
+
+// TestAuditProbeFailsOnParseTimeTruncation: a FLAC cut short is named by the parse,
+// which walks the frame tail against STREAMINFO's declared total, whether or not the
+// decoder objects to the partial last frame. The probe reads the parse's verdict as
+// well as the decoder's.
+func TestAuditProbeFailsOnParseTimeTruncation(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	const rate = 8000
+	flac := testaudio.EncodeAs(t, "flac", "", rate, testaudio.ReferenceSignal(rate, 4*time.Second))
+	good := filepath.Join(dir, "good.flac")
+	cut := filepath.Join(dir, "cut.flac")
+	writeRaw(t, good, flac)
+	writeRaw(t, cut, flac[:len(flac)*60/100])
+
+	probe := auditProbe(meta.NewReader(), decode.New(slog.New(slog.DiscardHandler)))
+	if err := probe(ctx, good); err != nil {
+		t.Errorf("intact flac failed the corrupt-audio probe: %v", err)
+	}
+	if err := probe(ctx, cut); err == nil {
+		t.Error("a flac cut short passed the corrupt-audio probe")
 	}
 }
 
@@ -90,51 +117,12 @@ func TestAuditProbeIgnoresUndecodableInput(t *testing.T) {
 	}
 }
 
-// TestScanFillsPropertiesForUnparsedContainers: a .wv used to catalog with a zero
-// duration, sample rate, and bit depth, because no tag parser reads the container.
-// Those zeroes blank the display, drop the file out of duration rollups, and rank a
-// 24/96 lossless file below a 16/44.1 one in the upgrade scan. The scanner asks the
-// decoder for the header instead, which decodes no PCM.
-func TestScanFillsPropertiesForUnparsedContainers(t *testing.T) {
-	ctx := context.Background()
-	root := t.TempDir()
-	db := filepath.Join(t.TempDir(), "catalog.db")
-	lib, err := Open(ctx, Options{
-		DBPath: db,
-		Roots:  []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}},
-	})
-	if err != nil {
-		t.Fatalf("open: %v", err)
+// hasDiag reports whether the set carries a diagnostic with this code.
+func hasDiag(diags []model.FileDiagnostic, code model.DiagnosticCode) bool {
+	for _, d := range diags {
+		if d.Code == code {
+			return true
+		}
 	}
-	defer lib.Close()
-
-	const rate = 44100
-	writeRaw(t, filepath.Join(root, "a.wv"),
-		testaudio.EncodeAs(t, "wavpack", "", rate, testaudio.ReferenceSignal(rate, 2*time.Second)))
-	if _, err := lib.Scan(ctx, ScanRequest{}); err != nil {
-		t.Fatalf("scan: %v", err)
-	}
-	items, err := lib.Query(ctx, query.New(query.EntityItems).Build(), "")
-	if err != nil || len(items) != 1 {
-		t.Fatalf("query items: %v (n=%d)", err, len(items))
-	}
-	f, err := lib.store.FileByPID(ctx, items[0].FilePID)
-	if err != nil {
-		t.Fatalf("file by pid: %v", err)
-	}
-	if f.SampleRate != rate || f.Channels != 1 || f.BitDepth != 16 {
-		t.Errorf("file = {rate:%d channels:%d depth:%d}, want {%d 1 16} from the container header",
-			f.SampleRate, f.Channels, f.BitDepth, rate)
-	}
-	if f.DurationMS < 1900 || f.DurationMS > 2100 {
-		t.Errorf("durationMS = %d, want about 2000", f.DurationMS)
-	}
-	if f.Bitrate <= 0 {
-		t.Errorf("bitrate = %d, want a real kbps figure derived from size over duration", f.Bitrate)
-	}
-	// The extension-derived codec label still stands; the probe deliberately does not
-	// report one, so a WaxFlow codec ID can never leak into the catalog vocabulary.
-	if f.Codec != "wavpack" {
-		t.Errorf("codec = %q, want the extension-derived wavpack", f.Codec)
-	}
+	return false
 }

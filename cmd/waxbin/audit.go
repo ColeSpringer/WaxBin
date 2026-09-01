@@ -32,10 +32,11 @@ func newAuditCmd(g *globals) *cobra.Command {
 			"invalid feeds, derived-data drift, and the diagnostics recorded during " +
 			"scanning and tag write-back. " +
 			"Corrupt-audio reporting comes in two halves. The free half reads signals the " +
-			"scan already derived, and covers MP3, AAC, AIFF, MP4, and WAV only. It is a " +
-			"true positive when it fires and proves nothing when it does not, so a quiet " +
-			"run is not a clean bill of health; FLAC, Opus, Vorbis, and Matroska need the " +
-			"decode probe. --integrity adds that probe plus an on-disk bitrot " +
+			"scan already derived: truncation for MP3, FLAC, AIFF, MP4, and WAV, and missing " +
+			"audio for MP3, AAC, WavPack, and Monkey's Audio. It is a true positive " +
+			"when it fires and proves nothing when it does not, so a quiet run is not a clean " +
+			"bill of health; damage inside the audio, and any damage to Ogg, Matroska, or WMA, " +
+			"needs the decode probe. --integrity adds that probe plus an on-disk bitrot " +
 			"(content-hash) pass, both of which re-read every audio file. " +
 			"--check <name> (repeatable) restricts the run; valid " +
 			"names: " + strings.Join(names, ", ") + ". Exits non-zero when any error-severity " +

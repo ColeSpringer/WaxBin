@@ -10,8 +10,9 @@ WaxDeck.
 
 - **No CGO, no external binaries.** Cataloging is pure Go for every format via
   [WaxLabel], and so is the analysis pass (decode, loudness, fingerprint, and
-  waveforms) via [WaxFlow]. The two libraries cover the same eight containers, so
-  WaxBin can decode every format it can tag-read, on every host. `fpcalc` is the
+  waveforms) via [WaxFlow]. The two libraries cover the same containers, so
+  WaxBin can decode every format it catalogs, on every host, apart from the rarer
+  WMA profiles (Pro, Lossless, Voice) that WaxFlow does not decode. `fpcalc` is the
   sole remaining optional subprocess, used only for AcoustID lookups in enrichment.
 - **Hard scan/analyze boundary.** Scanning is I/O-bound and never decodes PCM;
   loudness, fingerprinting, and peaks live only in a resumable analyze pass.

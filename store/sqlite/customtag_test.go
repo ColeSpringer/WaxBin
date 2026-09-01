@@ -460,3 +460,68 @@ func TestGCReservedTagProvenanceKeepsLiveLocks(t *testing.T) {
 		t.Errorf("a live tag.MOOD lock counted as orphaned (%d)", rep.OrphanReservedTagProvenance)
 	}
 }
+
+// TestVerifyReclaimsStrandedTagKeys: tightening the key rule (WaxLabel 1.6 dropped
+// '~') leaves rows under a key nothing can query, edit, or unlock, and the scan keeps a
+// locked one on purpose. db verify reports them as reclaimable garbage, not corruption,
+// and --fix removes them without touching a live curated tag.
+func TestVerifyReclaimsStrandedTagKeys(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	res := putTrackCustom(t, st, lib.ID, "/lib/1.mp3", "e1", "c1", "One",
+		map[string][]string{"MOOD": {"chill"}}, true)
+	pid := res.ItemPID
+
+	var itemID int64
+	if err := st.read.QueryRowContext(ctx,
+		"SELECT id FROM playable_item WHERE pid = ?", string(pid)).Scan(&itemID); err != nil {
+		t.Fatalf("resolve item: %v", err)
+	}
+	// Seeded raw: SetItemTag refuses the key now, which is the point.
+	err := st.writeTx(ctx, func(tx *sql.Tx) error {
+		for i, v := range []string{"a", "b"} {
+			if _, err := tx.ExecContext(ctx,
+				"INSERT INTO item_tag(item_id, key, value, position) VALUES (?,?,?,?)", itemID, "ODD~KEY", v, i); err != nil {
+				return err
+			}
+		}
+		_, err := tx.ExecContext(ctx, `INSERT INTO field_provenance(item_id, field, source, locked, updated_at)
+			VALUES (?, 'tag.ODD~KEY', 'user', 1, ?)`, itemID, nowNS())
+		return err
+	})
+	if err != nil {
+		t.Fatalf("seed the stranded rows: %v", err)
+	}
+
+	rep, err := st.VerifyDerived(ctx)
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if rep.StrandedTagKeyRows != 3 {
+		t.Errorf("stranded tag key rows = %d, want 3 (two values and a lock)", rep.StrandedTagKeyRows)
+	}
+	if !rep.Consistent() {
+		t.Errorf("stranded rows made the catalog report inconsistent: %+v", rep)
+	}
+	if !rep.Reclaimable() {
+		t.Error("stranded rows should be reported as reclaimable")
+	}
+
+	n, err := st.GCStrandedTagKeys(ctx)
+	if err != nil {
+		t.Fatalf("gc: %v", err)
+	}
+	if n != 3 {
+		t.Errorf("GCStrandedTagKeys = %d, want 3", n)
+	}
+	rep, err = st.VerifyDerived(ctx)
+	if err != nil {
+		t.Fatalf("verify after gc: %v", err)
+	}
+	if rep.StrandedTagKeyRows != 0 || rep.Reclaimable() {
+		t.Errorf("after gc: stranded = %d, reclaimable = %t; want 0 and false", rep.StrandedTagKeyRows, rep.Reclaimable())
+	}
+	if got := tagValues(t, st, pid, "MOOD"); len(got) != 1 || got[0] != "chill" {
+		t.Errorf("MOOD = %v, want the live tag untouched", got)
+	}
+}

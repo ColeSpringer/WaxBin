@@ -1410,7 +1410,7 @@ func unsupportedFormat(diags []model.FileDiagnostic) bool {
 // probeProperties fills the stream properties no tag parser could read, from the
 // decoder's own view of the container header. Left at zero they blank the display,
 // drop the file out of duration rollups, and make the upgrade scan rank a 24/96
-// WavPack below a 16/44.1 FLAC. A container the decoder cannot open either keeps
+// file below a 16/44.1 one. A container the decoder cannot open either keeps
 // the zeroes; there is nothing better to say about it, and a damaged file must
 // still catalog so audit can name it. Only cancellation returns an error: the
 // size+mtime fast path would freeze zeroes committed by an interrupted probe, so
@@ -1430,12 +1430,28 @@ func (s *Scanner) probeProperties(ctx context.Context, path string, tags *model.
 	return nil
 }
 
+// audioExts is the set of extensions the scanner picks up: what the tag library
+// claims, minus excludedExts. A test pins the two against the library's own list, so a
+// format added upstream surfaces here instead of being skipped in silence.
 var audioExts = map[string]bool{
-	".mp3": true, ".flac": true, ".wav": true, ".ogg": true, ".oga": true,
-	".opus": true, ".m4a": true, ".m4b": true, ".aac": true, ".mp4": true,
-	".wma": true, ".aiff": true, ".aif": true, ".ape": true, ".wv": true,
-	// .mka only. .mkv and .webm share the container but routinely carry video.
+	".mp3": true, ".mpga": true, ".flac": true, ".wav": true, ".wave": true,
+	".ogg": true, ".oga": true, ".opus": true,
+	".m4a": true, ".m4b": true, ".m4r": true, ".mp4": true, ".alac": true,
+	".aac": true, ".adts": true,
+	".wma": true, ".aiff": true, ".aif": true, ".aifc": true, ".afc": true,
+	".ape": true, ".wv": true,
 	".mka": true,
+}
+
+// excludedExts are extensions the tag library claims that the scanner leaves alone.
+// .mkv, .webm, .mk3d, .mks, .mov, and .asf share a container with an audio-only
+// spelling but routinely carry video. Musepack (.mpc, .mp+) reads and writes upstream
+// but WaxFlow has no decoder for it, so every such file would sit in the analyze pass's
+// retry set for good. (.wma stays: WaxFlow decodes the common v1 and v2 generations, and
+// a Pro, Lossless, or Voice stream is skipped the way any undecodable file is.)
+var excludedExts = map[string]bool{
+	".mkv": true, ".webm": true, ".mk3d": true, ".mks": true, ".mov": true, ".asf": true,
+	".mpc": true, ".mp+": true,
 }
 
 func isAudio(path string) bool { return audioExts[strings.ToLower(filepath.Ext(path))] }

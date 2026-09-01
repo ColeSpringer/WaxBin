@@ -198,39 +198,40 @@ func Open(ctx context.Context, opts Options) (*Library, error) {
 	return l, nil
 }
 
-// auditProbe builds the auditor's corrupt-audio probe: a WaxLabel parse, falling
-// back to a decode for a container WaxLabel has no parser for.
+// auditProbe builds the auditor's corrupt-audio probe: a WaxLabel parse, then a
+// decode of whatever the decoder can open.
 //
-// The parse on its own is a blind spot. It reports success for anything it cannot
-// parse, so a bit-rotted WavPack sailed through the check that exists to catch
-// exactly that. Decoding is the only read of such a file that can fail on damage.
-// It is not free: the integrity pass already streamed the file to re-hash it, and
-// on anything larger than the page cache this decode streams it again. One
-// limitation is accepted: the decoder reports damage and a failed read with the
-// same error code, so a transient read error during the decode counts as damage,
-// as it always has on the parse path. A file neither reader can open at all is
-// not evidence of damage, so ErrUnsupported passes.
-func auditProbe(r meta.Reader, eng *decode.Engine) func(context.Context, string) error {
+// The parse on its own is a blind spot. It reads headers and tag blocks, so a
+// bit-rotted WavPack block or a Monkey's Audio frame cut short sails through it, and
+// it used to decode only a container it had no parser for, a set WaxLabel 1.6 emptied.
+// Decoding is the only read that fails on damage inside the audio, and --integrity
+// promises exactly that read of every file. It is not free: the integrity pass
+// already streamed the file to re-hash it, and on anything larger than the page cache
+// this decode streams it again. The parse in between skips the essence hash, so the
+// file is read twice rather than three times. One limitation is accepted: the
+// decoder reports damage and a failed read with the same error code, so a transient
+// read error during the decode counts as damage, as it always has on the parse path.
+// A file neither reader can open at all is not evidence of damage, so ErrUnsupported
+// passes.
+//
+// A parse that succeeds but reports the audio truncated fails the probe too, since
+// the decoder tolerates a tail the container's own header says is short.
+func auditProbe(r meta.Inspector, eng *decode.Engine) func(context.Context, string) error {
 	return func(ctx context.Context, p string) error {
-		fm, err := r.Read(ctx, p)
-		if err != nil || !hasDiag(fm.Diagnostics, model.DiagUnsupportedFormat) {
+		fm, err := r.Inspect(ctx, p)
+		if err != nil {
 			return err
+		}
+		for _, d := range fm.Diagnostics {
+			if d.Code == model.DiagCorruptAudio && d.Severity == model.SeverityError {
+				return waxerr.New(waxerr.CodeInvalid, "audit probe", d.Detail)
+			}
 		}
 		if _, err := eng.Measure(ctx, p, nil); err != nil && !errors.Is(err, decode.ErrUnsupported) {
 			return err
 		}
 		return nil
 	}
-}
-
-// hasDiag reports whether the set carries a diagnostic with this code.
-func hasDiag(diags []model.FileDiagnostic, code model.DiagnosticCode) bool {
-	for _, d := range diags {
-		if d.Code == code {
-			return true
-		}
-	}
-	return false
 }
 
 // Close flushes buffered playback progress, then releases the catalog and write lock.
@@ -498,6 +499,13 @@ func (l *Library) GCArt(ctx context.Context) (sources, thumbnails int, err error
 // VerifyDerived reports.
 func (l *Library) GCReservedTagProvenance(ctx context.Context) (int, error) {
 	return l.store.GCReservedTagProvenance(ctx)
+}
+
+// GCStrandedTagKeys deletes the custom-tag rows and locks whose key the key rule no
+// longer accepts, returning how many went. A scan keeps a locked one, since its value
+// has no other home, so this is the repair for the count VerifyDerived reports.
+func (l *Library) GCStrandedTagKeys(ctx context.Context) (int, error) {
+	return l.store.GCStrandedTagKeys(ctx)
 }
 
 // Lyrics returns an item's structured lyrics (synced timed lines and/or an
@@ -1656,7 +1664,7 @@ func (l *Library) writeBackFiles(ctx context.Context, op string, files []model.I
 			}
 		}
 		if len(lost) > 0 {
-			if derr := l.store.PutFileDiagnostics(ctx, ref.FilePID, model.OriginEdit, lost); derr != nil {
+			if derr := l.store.PutFileDiagnostics(ctx, ref.FilePID, model.OriginEdit, meta.MergeKeylessDiagnostics(lost)); derr != nil {
 				l.log.Warn("edit diagnostics", "path", path, "err", derr)
 			}
 		}
@@ -1666,7 +1674,7 @@ func (l *Library) writeBackFiles(ctx context.Context, op string, files []model.I
 		if unrepresented {
 			l.log.Warn("tag value unrepresented", "path", path)
 			wbErr.Failures = append(wbErr.Failures, WriteBackFailure{FilePID: ref.FilePID, Path: path,
-				Reason: "some values could not be stored in this file's tag format"})
+				Reason: "this file's tags could not be written without loss"})
 		}
 		if len(lost) == 0 {
 			if derr := l.store.PutFileDiagnostics(ctx, ref.FilePID, model.OriginEdit, nil); derr != nil {
@@ -1756,7 +1764,7 @@ func (l *Library) writeBackItemEdits(ctx context.Context, op string, itemPID mod
 			}
 			te := meta.TagEdit{Key: key}
 			if len(r.names) > 0 {
-				te.Values = r.names
+				te.Values = meta.CreditTagValues(key, r.names)
 			}
 			tagEdits = append(tagEdits, te)
 		}

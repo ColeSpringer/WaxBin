@@ -14,6 +14,7 @@ import (
 var losslessCodecs = map[string]bool{
 	"flac": true, "alac": true, "pcm": true, "wav": true, "aiff": true,
 	"ape": true, "wavpack": true, "tak": true, "tta": true, "dsd": true,
+	"wma lossless": true,
 }
 
 // UpgradeCandidate is one encoding of a recording, with the quality fields the

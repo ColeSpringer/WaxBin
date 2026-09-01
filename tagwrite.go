@@ -44,13 +44,13 @@ func (l *Library) writeReplayGainTags(ctx context.Context) (rgWriteCounts, error
 			}
 			if waxerr.Is(err, waxerr.CodeUnsupported) {
 				// A file WaxLabel refuses to write at all is not a failure to chase.
-				// WavPack, Monkey's Audio and WMA files gained loudness rows as soon as
-				// WaxFlow could decode them, and ReplayGainWriteback has no format gate,
-				// so every run would report the same file as a fresh write failure. The
-				// gain has nowhere to go, which is what an unrepresented value means, so
-				// it is counted and diagnosed as one. The refusal covers more than
-				// missing write support (a fragmented mp4, a chained ogg), so the detail
-				// blames the file's form, not the container format.
+				// WaxLabel reads WMA but never writes it, and WMA files gained loudness
+				// rows as soon as WaxFlow could decode them; ReplayGainWriteback has no
+				// format gate, so every run would report the same file as a fresh write
+				// failure. The gain has nowhere to go, which is what an unrepresented
+				// value means, so it is counted and diagnosed as one. The refusal covers
+				// more than missing write support (a fragmented mp4, a chained ogg), so
+				// the detail blames the file's form, not the container format.
 				l.log.Warn("replaygain tag unwritable file", "path", string(r.Path), "err", err)
 				c.unrepresented++
 				diags := []model.FileDiagnostic{{
@@ -100,7 +100,7 @@ func (l *Library) writeReplayGainTags(ctx context.Context) (rgWriteCounts, error
 		}
 		// Always called, even with no diagnostics: this writer replaces its own rows
 		// wholesale, so a run that comes back clean clears its own stale ones.
-		if err := l.store.PutFileDiagnostics(ctx, r.FilePID, model.OriginReplayGain, diags); err != nil {
+		if err := l.store.PutFileDiagnostics(ctx, r.FilePID, model.OriginReplayGain, meta.MergeKeylessDiagnostics(diags)); err != nil {
 			l.log.Warn("replaygain diagnostics", "path", string(r.Path), "err", err)
 		}
 		if !res.Changed {
@@ -275,7 +275,7 @@ func (l *Library) writeEnrichmentTags(ctx context.Context, sinceNS int64) (enric
 		if lost {
 			c.unrepresented++
 		}
-		if err := l.store.PutFileDiagnostics(ctx, r.FilePID, model.OriginEnrichment, diags); err != nil {
+		if err := l.store.PutFileDiagnostics(ctx, r.FilePID, model.OriginEnrichment, meta.MergeKeylessDiagnostics(diags)); err != nil {
 			l.log.Warn("enrichment diagnostics", "path", string(r.Path), "err", err)
 		}
 		if !res.Changed {

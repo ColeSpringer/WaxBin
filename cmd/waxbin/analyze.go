@@ -80,7 +80,7 @@ func renderAnalyzeResult(cmd *cobra.Command, g *globals, res *waxbin.AnalyzeResu
 		fmt.Fprintf(w, "rg tags:    %d failed to write\n", res.Result.ReplayGainTagsFailed)
 	}
 	if res.Result.ReplayGainTagsUnrepresented > 0 {
-		fmt.Fprintf(w, "rg tags:    %d files with a value the format could not store\n", res.Result.ReplayGainTagsUnrepresented)
+		fmt.Fprintf(w, "rg tags:    %d files whose tags could not be written without loss\n", res.Result.ReplayGainTagsUnrepresented)
 	}
 	fmt.Fprintf(w, "skipped:    %d (cannot decode; retried later)\n", res.Result.Skipped)
 	if res.Result.MeasureFailed > 0 {

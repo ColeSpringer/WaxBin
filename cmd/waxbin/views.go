@@ -582,8 +582,10 @@ type derivedView struct {
 	OrphanArtSources        int `json:"orphanArtSources"`
 	OrphanThumbnails        int `json:"orphanThumbnails"`
 	// Custom-tag provenance rows under a key WaxBin has since reserved.
-	OrphanReservedTagProvenance int  `json:"orphanReservedTagProvenance"`
-	Consistent                  bool `json:"consistent"`
+	OrphanReservedTagProvenance int `json:"orphanReservedTagProvenance"`
+	// Custom-tag rows and locks under a key the key rule no longer accepts.
+	StrandedTagKeyRows int  `json:"strandedTagKeyRows"`
+	Consistent         bool `json:"consistent"`
 	// Present only when --fix rewrote sort keys, which invalidates open page cursors.
 	SortKeysRewritten int `json:"sortKeysRewritten,omitempty"`
 }
@@ -596,6 +598,7 @@ func toDerivedView(r *sqlite.DerivedReport) derivedView {
 		BookDurationDrift: r.BookDurationDrift, BookISBNKeyDrift: r.BookISBNKeyDrift,
 		OrphanArtSources: r.OrphanArtSources, OrphanThumbnails: r.OrphanThumbnails,
 		OrphanReservedTagProvenance: r.OrphanReservedTagProvenance,
+		StrandedTagKeyRows:          r.StrandedTagKeyRows,
 		Consistent:                  r.Consistent(),
 	}
 }

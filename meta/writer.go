@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io/fs"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/colespringer/waxbin/identity"
@@ -144,6 +145,22 @@ func RoleTagKey(role model.ContributorRole) (string, bool) {
 	return k, ok
 }
 
+// CreditTagValues shapes a track credit's names for its on-disk key. A multivalued
+// key (ARTIST, PERFORMER, PRODUCER) takes one value per holder, which is what the key
+// means and what every reader expects. A single-valued key (CONDUCTOR, REMIXER,
+// NARRATOR) takes the names joined with "; ", the separator identity.SplitCredits
+// splits back apart: the tag library stores several values on such a key faithfully,
+// but its typed projection, WaxBin's own reader included, sees only the first, so two
+// conductors written as two values read back as one. The book path joins every key
+// the same way for its own reason (its scanner reads a single string), see the
+// KindBook arm of writeBackItemEdits.
+func CreditTagValues(key string, names []string) []string {
+	if len(names) <= 1 || tag.Key(key).Multivalued() {
+		return names
+	}
+	return []string{strings.Join(names, "; ")}
+}
+
 // bookFieldTagKeys maps a book metadata field to the on-disk tag key(s) the audiobook
 // scanner reads back for it, so a book edit round-trips through a rescan. It is a
 // separate map from fieldTagKeys because a book reconstructs the same catalog fields
@@ -261,19 +278,41 @@ type WriteResult struct {
 	Warnings    []model.TagWriteWarning
 }
 
-// unrepresentedCodes are the WaxLabel warning codes that mean the value did not
-// land, so the key does not hold what was asked for. These three are the ones
-// WaxLabel's own CLI escalates under --strict. The rest of its vocabulary is
-// documented as advisory (a number/total conflict, an MP4 multi-value note) and
-// carries no loss.
+// unrepresentedCodes are the WaxLabel warning codes that mean the write was lossy:
+// the key does not hold what was asked for, or the rewrite could not carry content
+// the file held. They are the codes WaxLabel's own CLI refuses under --strict,
+// narrowed to the edits this writer makes (tag values and a front cover; chapters and
+// synced lyrics are never written here). The rest of the vocabulary is advisory (a
+// number/total conflict, an MP4 multi-atom note) and carries no loss.
 //
 // It is an allowlist rather than a denylist for a reason: an unclassified future code
 // falls back to today's silence instead of raising a false alarm about a value that
-// was written correctly.
+// was written correctly. WarnPictureSelectorMiss stays out on purpose: the CLI
+// escalates it for a picture removal that matched nothing, but ApplyPicture removes
+// the front cover before every embed, so on a coverless file the miss is the normal
+// path rather than a loss.
 var unrepresentedCodes = map[waxlabel.WarningCode]bool{
-	waxlabel.WarnValueDropped: true,
-	waxlabel.WarnValueCoerced: true,
-	waxlabel.WarnValueReduced: true,
+	// The value did not land as given: dropped, normalized, stored with less
+	// precision, or a numeric GENRE read back as a name on an ID3-based format.
+	// Several values on a key whose canonical reading is one count too: the file
+	// keeps them all and every typed reader sees the first alone. WaxBin's own credit
+	// write-back joins such names (CreditTagValues), so this guards the other routes.
+	waxlabel.WarnValueDropped:      true,
+	waxlabel.WarnValueCoerced:      true,
+	waxlabel.WarnValueReduced:      true,
+	waxlabel.WarnNumericGenre:      true,
+	waxlabel.WarnSingleValuedMulti: true,
+	// Structure around the value the destination could not keep, or a picture it
+	// cannot store at all.
+	waxlabel.WarnTagStructureDropped:       true,
+	waxlabel.WarnCommentDescriptionDropped: true,
+	waxlabel.WarnPictureMetadataDropped:    true,
+	waxlabel.WarnPictureUnsupported:        true,
+	// Content the rewrite destroyed that the edit never named. Keyless apart from a
+	// legacy strip naming the keys it took, so the diagnostic carries the loss in prose.
+	waxlabel.WarnDuplicateTagBlockDropped: true,
+	waxlabel.WarnMalformedTagEntryDropped: true,
+	waxlabel.WarnLegacyStripDropped:       true,
 }
 
 // PostWriteWarningCode marks a write whose bytes landed but whose post-commit step
@@ -348,9 +387,9 @@ func commitPlan(ctx context.Context, plan *waxlabel.Plan, op, path, what string,
 //
 // A warning naming several keys fans out to one entry per key, so a consumer can
 // match a warning to a field without parsing prose. Warning.Keys is documented as
-// empty for a warning that names no specific key. All three allowlisted codes are
-// documented as keyed, but this cannot rely on that, so a keyless warning is carried
-// with an empty Key rather than indexed into or dropped.
+// empty for a warning that names no specific key: the value-level codes are keyed
+// and the rewrite-loss codes mostly are not, so a keyless warning is carried with an
+// empty Key rather than indexed into or dropped.
 func writeWarnings(ws []waxlabel.Warning) []model.TagWriteWarning {
 	if len(ws) == 0 {
 		return nil
@@ -495,4 +534,37 @@ func (w *Writer) ApplyPicture(ctx context.Context, path string, edit PictureEdit
 		return &WriteResult{Changed: false, Warnings: warnings}, nil
 	}
 	return commitPlan(ctx, plan, op, path, "cover", warnings)
+}
+
+// MergeKeylessDiagnostics folds diagnostics that share a code and name no tag key into
+// one row per code, joining their details and keeping the worst severity. The
+// file_diagnostic key is (file, origin, code, tag_key), so two keyless losses on one
+// file would otherwise collapse to whichever was written last. Keyed rows and the
+// order of first appearance are left alone.
+func MergeKeylessDiagnostics(ds []model.FileDiagnostic) []model.FileDiagnostic {
+	out := make([]model.FileDiagnostic, 0, len(ds))
+	at := map[model.DiagnosticCode]int{}
+	for _, d := range ds {
+		if d.TagKey != "" {
+			out = append(out, d)
+			continue
+		}
+		i, seen := at[d.Code]
+		if !seen {
+			at[d.Code] = len(out)
+			out = append(out, d)
+			continue
+		}
+		switch {
+		case d.Detail == "":
+		case out[i].Detail == "":
+			out[i].Detail = d.Detail
+		default:
+			out[i].Detail = capDetail(out[i].Detail + "; " + d.Detail)
+		}
+		if severityRank(d.Severity) > severityRank(out[i].Severity) {
+			out[i].Severity = d.Severity
+		}
+	}
+	return out
 }

@@ -280,10 +280,12 @@ func (a TagAcquisition) Present() bool {
 // independent of it. Key is the canonical tag key the warning concerns, or "" for a
 // warning that names no specific key. Message is pre-sanitized for display.
 //
-// Unrepresented marks the subset that means the value did not land: the write itself
-// succeeded, but the key does not hold what the caller asked for. It is the only
-// field a consumer should branch on. An advisory warning, such as a benign format
-// note, carries Unrepresented=false and must not gate anything.
+// Unrepresented marks the subset that means the write was lossy: it succeeded, but
+// the key does not hold what the caller asked for, or the rewrite dropped content
+// the file held (a duplicate tag block, an unreadable tag region), in which case Key
+// is usually empty and Message names the loss. It is the only field a consumer should
+// branch on. An advisory warning, such as a benign format note, carries
+// Unrepresented=false and must not gate anything.
 type TagWriteWarning struct {
 	Key           string
 	Code          string

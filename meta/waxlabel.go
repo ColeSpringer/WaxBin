@@ -29,6 +29,7 @@ type Adapter struct{}
 func NewReader() *Adapter { return &Adapter{} }
 
 var _ Reader = (*Adapter)(nil)
+var _ Inspector = (*Adapter)(nil)
 
 // fileSource adapts an *os.File to waxlabel.ReaderAtSized (positioned reads plus
 // a fixed size), so one open file feeds both the parse and the essence hash.
@@ -45,7 +46,17 @@ func (s *fileSource) Size() int64                             { return s.size }
 // carries no hashable essence yields a populated FileMeta with an empty
 // EssenceHash (the scanner falls back to the content hash).
 func (a *Adapter) Read(ctx context.Context, path string) (*FileMeta, error) {
-	const op = "meta.Read"
+	return a.read(ctx, path, "meta.Read", true)
+}
+
+// Inspect is Read without the essence hash, which is a read of the whole audio
+// region. The audit's corrupt-audio probe wants the parse verdict and the
+// diagnostics, not the identity, and it goes on to decode the audio anyway.
+func (a *Adapter) Inspect(ctx context.Context, path string) (*FileMeta, error) {
+	return a.read(ctx, path, "meta.Inspect", false)
+}
+
+func (a *Adapter) read(ctx context.Context, path, op string, hashEssence bool) (*FileMeta, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
@@ -103,9 +114,16 @@ func (a *Adapter) Read(ctx context.Context, path string) (*FileMeta, error) {
 	applyBookFields(&fm.Tags, fields, path)
 	fm.Diagnostics = append(fm.Diagnostics, audioDiagnostics(doc)...)
 
+	if !hashEssence {
+		return fm, nil
+	}
 	// HashAudioEssence covers encoded packets plus decoder-critical config, making
 	// it stable across retags. Files with no audio frames fall back to the content
-	// hash through an empty EssenceHash.
+	// hash through an empty EssenceHash. The string carries the library's algorithm
+	// and extent version, so a WaxLabel bump can rename it for a whole format (1.6
+	// moved FLAC to flac-frames-v2) and an unchanged file then re-keys on its next
+	// full parse; currentDiagVersion is bumped alongside so audit points at
+	// scan --force.
 	if dig, herr := doc.HashAudioEssence(ctx, waxlabel.WithHashSource(src)); herr == nil {
 		fm.EssenceHash = dig.String()
 	} else if !errors.Is(herr, wlerr.ErrInvalidData) {
@@ -156,7 +174,7 @@ func tagsFromDoc(doc *waxlabel.Document, fields tag.Tags) model.Tags {
 		MBArtistIDs:      trimAll(fields.MusicBrainz.ArtistID),
 		MBAlbumArtistIDs: trimAll(fields.MusicBrainz.AlbumArtistID),
 
-		Container:  strings.ToLower(strings.TrimSpace(props.Container)),
+		Container:  normalizeContainer(props.Container),
 		Codec:      normalizeCodec(at.Codec),
 		DurationMS: props.Duration().Milliseconds(),
 		SampleRate: at.SampleRate,
@@ -311,10 +329,12 @@ func severityRank(s model.AuditSeverity) int {
 // tag-only or truncated"), so an unconditional error would permanently flag a
 // legitimately tag-only MP3 as broken.
 //
-// Coverage is format-partial, and callers have to say so. The underlying signals
-// exist for MP3, AAC, AIFF, MP4, and WAV, and not for FLAC, Opus, Vorbis, or
-// Matroska. They are true positives when they fire and prove nothing when they do
-// not.
+// Coverage is format-partial, and callers have to say so. Truncated audio is
+// detected for MP3, WAV (RF64 and BW64 included), AIFF, MP4, and, since WaxLabel
+// 1.6, FLAC, from a walk over the frame tail; no-audio-frames for MP3, AAC,
+// WavPack, and Monkey's Audio (and Musepack, which the scanner does not pick up).
+// Neither signal exists for Ogg (Vorbis, Opus, or FLAC), Matroska, or WMA. They
+// are true positives when they fire and prove nothing when they do not.
 func audioDiagnostics(doc *waxlabel.Document) []model.FileDiagnostic {
 	// One corrupt_audio row per file at most. The primary key is
 	// (file_id, origin, code, tag_key) and neither warning names a key, so two rows

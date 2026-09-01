@@ -403,6 +403,11 @@ func newDBVerifyCmd(g *globals) *cobra.Command {
 				if _, err := lib.GCReservedTagProvenance(ctx(cmd)); err != nil {
 					return err
 				}
+				// Custom-tag rows and locks under a key the key rule has since stopped
+				// accepting, which nothing can reach and a scan leaves alone when locked.
+				if _, err := lib.GCStrandedTagKeys(ctx(cmd)); err != nil {
+					return err
+				}
 			}
 
 			rep, err := lib.VerifyDerived(ctx(cmd))
@@ -429,6 +434,7 @@ func newDBVerifyCmd(g *globals) *cobra.Command {
 				fmt.Fprintf(w, "orphan art sources:       %d\n", rep.OrphanArtSources)
 				fmt.Fprintf(w, "orphan thumbnails:        %d\n", rep.OrphanThumbnails)
 				fmt.Fprintf(w, "orphan tag provenance:    %d\n", rep.OrphanReservedTagProvenance)
+				fmt.Fprintf(w, "stranded tag keys:        %d\n", rep.StrandedTagKeyRows)
 				fmt.Fprintf(w, "consistent:               %t\n", rep.Consistent())
 				// A refold moves the keys page cursors resume against.
 				if resorted > 0 {

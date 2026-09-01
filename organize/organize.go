@@ -453,7 +453,7 @@ func (o *Organizer) noteUnrepresented(ctx context.Context, a *Action, retag *met
 	//
 	// Keyed by FilePID rather than path, since the file has just moved and
 	// file_diagnostic is keyed by file_id, which follows the move on its own.
-	if err := o.cat.PutFileDiagnostics(ctx, a.FilePID, model.OriginOrganize, diags); err != nil {
+	if err := o.cat.PutFileDiagnostics(ctx, a.FilePID, model.OriginOrganize, meta.MergeKeylessDiagnostics(diags)); err != nil {
 		o.log.Warn("organize diagnostics", "file", a.FilePID, "err", err)
 	}
 	return lost

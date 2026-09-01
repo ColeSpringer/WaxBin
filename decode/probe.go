@@ -34,8 +34,9 @@ var probeEngine = sync.OnceValue(func() *Engine { return New(slog.New(slog.Disca
 //
 // It is here for files no tag parser covers, which otherwise catalog with a zero
 // duration, sample rate, and bit depth. Those zeroes blank the display, drop the
-// file out of duration rollups, and rank a 24/96 WavPack below a 16/44.1 FLAC in
-// the upgrade scan.
+// file out of duration rollups, and rank a 24/96 file below a 16/44.1 one in the
+// upgrade scan. As of WaxLabel 1.6 every container WaxFlow decodes also parses, so
+// this serves the next format the decoder learns first, as WavPack once was.
 //
 // ErrUnsupported means this build cannot decode the input either, so there is
 // nothing to report.

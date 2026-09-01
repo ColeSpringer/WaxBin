@@ -28,6 +28,10 @@ type DerivedReport struct {
 	// Nothing can read, edit, or unlock one, and the scan's own sweep cannot reach the
 	// row on an item that holds no custom tags at all.
 	OrphanReservedTagProvenance int
+	// item_tag rows and "tag.<KEY>" provenance rows under a key the key rule no longer
+	// accepts as stored. Nothing can query, edit, or unlock one, and the scan keeps a
+	// locked one on purpose, since its value has no other home.
+	StrandedTagKeyRows int
 }
 
 // Consistent reports whether the writer-maintained derived data is correct: FTS
@@ -56,7 +60,8 @@ func (r DerivedReport) consistentApartFromSortKeys() bool {
 // sources or thumbnails with no live entity references, or provenance rows under a
 // reserved tag key. It is informational, and independent of Consistent.
 func (r DerivedReport) Reclaimable() bool {
-	return r.OrphanArtSources > 0 || r.OrphanThumbnails > 0 || r.OrphanReservedTagProvenance > 0
+	return r.OrphanArtSources > 0 || r.OrphanThumbnails > 0 || r.OrphanReservedTagProvenance > 0 ||
+		r.StrandedTagKeyRows > 0
 }
 
 // VerifyDerived checks FTS coverage, the maintained rollups, and the generated
@@ -98,6 +103,11 @@ func (s *Store) VerifyDerived(ctx context.Context) (*DerivedReport, error) {
 	if err := s.read.QueryRowContext(ctx, q, args...).Scan(&rep.OrphanReservedTagProvenance); err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
+	stranded, err := s.countStrandedTagKeyRows(ctx)
+	if err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	rep.StrandedTagKeyRows = stranded
 
 	isbnDrift, err := s.bookISBNKeyDrift(ctx)
 	if err != nil {

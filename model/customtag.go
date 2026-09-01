@@ -105,7 +105,9 @@ func ReservedTagKeys() []string {
 // reports whether it is valid, mirroring the tag library's key rules so a key that
 // passes here also survives an on-disk write. It trims surrounding whitespace, rejects
 // empty or non-ASCII input, uppercases (so "key" and "KEY" dedup), and rejects a byte
-// outside printable ASCII or a literal '=' (which the tag wire format reserves).
+// outside 0x20-0x7D or a literal '=' (which the tag wire format reserves). The range
+// stops one short of printable ASCII because the Vorbis comment specification does,
+// so a '~' would write everywhere except there; meta pins the two rules together.
 func CanonicalTagKey(s string) (string, bool) {
 	s = strings.TrimSpace(s)
 	if s == "" {
@@ -121,7 +123,7 @@ func CanonicalTagKey(s string) (string, bool) {
 			c -= 'a' - 'A' // uppercase
 			b[i] = c
 		}
-		if c < 0x20 || c > 0x7E || c == '=' {
+		if c < 0x20 || c > 0x7D || c == '=' {
 			return "", false
 		}
 	}

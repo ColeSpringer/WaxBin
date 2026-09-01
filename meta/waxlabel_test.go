@@ -922,3 +922,232 @@ func TestReservedWireSpellingsAreFolded(t *testing.T) {
 		}
 	}
 }
+
+// TestReadFoldsFormatLabels pins the catalog vocabulary for two containers WaxLabel
+// 1.6 started parsing. Monkey's Audio reports itself by name; the catalog keeps the
+// "ape" key the extension fallback always gave it and the upgrade policy ranks as
+// lossless. WavPack already matched. Both parse natively now, with properties and an
+// essence hash from the tag library rather than the decoder's header probe.
+func TestReadFoldsFormatLabels(t *testing.T) {
+	const rate = 8000
+	sig := testaudio.ReferenceSignal(rate, time.Second)
+	for _, c := range []struct{ name, format, container, codec string }{
+		{"a.ape", "ape", "ape", "ape"},
+		{"a.wv", "wavpack", "wavpack", "wavpack"},
+	} {
+		p := writeTemp(t, c.name, testaudio.EncodeAs(t, c.format, "", rate, sig))
+		fm, err := NewReader().Read(context.Background(), p)
+		if err != nil {
+			t.Fatalf("Read %s: %v", c.name, err)
+		}
+		if fm.Tags.Container != c.container || fm.Tags.Codec != c.codec {
+			t.Errorf("%s labels = %q/%q, want %q/%q", c.name, fm.Tags.Container, fm.Tags.Codec, c.container, c.codec)
+		}
+		if fm.Tags.SampleRate != rate || fm.Tags.Channels != 1 || fm.Tags.BitDepth != 16 ||
+			fm.Tags.DurationMS < 900 || fm.Tags.DurationMS > 1100 {
+			t.Errorf("%s properties = {rate:%d channels:%d depth:%d dur:%d}, want {%d 1 16 ~1000}",
+				c.name, fm.Tags.SampleRate, fm.Tags.Channels, fm.Tags.BitDepth, fm.Tags.DurationMS, rate)
+		}
+		if fm.EssenceHash == "" || len(fm.Diagnostics) != 0 {
+			t.Errorf("%s: essence %q, diagnostics %+v; want a native parse", c.name, fm.EssenceHash, fm.Diagnostics)
+		}
+	}
+}
+
+// TestNormalizeFormatLabels covers the folds the fixtures above cannot reach: WaxLabel
+// names WMA by generation and Musepack by stream version, and labels an extensible WAV
+// header apart from plain PCM.
+func TestNormalizeFormatLabels(t *testing.T) {
+	codecs := map[string]string{
+		"Monkey's Audio": "ape", "WavPack": "wavpack", "WMA v1": "wma", "WMA v2": "wma",
+		"WMA Pro": "wma", "WMA Voice": "wma", "WMA Lossless": "wma lossless",
+		"Musepack SV8": "musepack", "PCM": "pcm", "PCM (extensible)": "pcm",
+		"FLAC": "flac", "MPEG Audio": "mp3", "Vorbis": "vorbis",
+	}
+	for in, want := range codecs {
+		if got := normalizeCodec(in); got != want {
+			t.Errorf("normalizeCodec(%q) = %q, want %q", in, got, want)
+		}
+	}
+	containers := map[string]string{
+		"Monkey's Audio": "ape", "WavPack": "wavpack", "ASF": "asf", "RF64": "rf64", "Ogg": "ogg",
+	}
+	for in, want := range containers {
+		if got := normalizeContainer(in); got != want {
+			t.Errorf("normalizeContainer(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// TestCanonicalTagKeyMatchesTagLibrary pins model.CanonicalTagKey to the tag library's
+// key rule byte for byte: whatever passes here must survive an on-disk write, and
+// whatever the library accepts must not be refused here. The library stops at 0x7D,
+// the Vorbis comment ceiling, so '~' is out on both sides.
+func TestCanonicalTagKeyMatchesTagLibrary(t *testing.T) {
+	for b := 0; b < 256; b++ {
+		key := "K" + string([]byte{byte(b)}) + "Y"
+		got, ok := model.CanonicalTagKey(key)
+		if ok && !tag.Key(got).Valid() {
+			t.Errorf("CanonicalTagKey(%q) = %q passes here and fails the tag library", key, got)
+		}
+		if !ok && tag.Key(key).Valid() {
+			t.Errorf("CanonicalTagKey(%q) refuses a key the tag library accepts", key)
+		}
+	}
+}
+
+// TestReadDiagnosesTruncatedFLAC: WaxLabel 1.6 walks a FLAC's frame tail against
+// STREAMINFO's declared total, so a file cut short carries the truncated-audio
+// warning the MP3 and WAV parsers already raised, and the adapter projects it as an
+// error-severity corrupt-audio diagnostic.
+func TestReadDiagnosesTruncatedFLAC(t *testing.T) {
+	const rate = 8000
+	flac := testaudio.EncodeAs(t, "flac", "", rate, testaudio.ReferenceSignal(rate, 4*time.Second))
+	fm, err := NewReader().Read(context.Background(), writeTemp(t, "good.flac", flac))
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if len(fm.Diagnostics) != 0 {
+		t.Errorf("intact flac diagnostics = %+v, want none", fm.Diagnostics)
+	}
+	fm, err = NewReader().Read(context.Background(), writeTemp(t, "cut.flac", flac[:len(flac)*60/100]))
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if len(fm.Diagnostics) != 1 || fm.Diagnostics[0].Code != model.DiagCorruptAudio ||
+		fm.Diagnostics[0].Severity != model.SeverityError {
+		t.Fatalf("cut flac diagnostics = %+v, want one error-severity corrupt_audio", fm.Diagnostics)
+	}
+}
+
+// TestWriteWarningsClassifyRewriteLosses pins the widened allowlist: a keyless
+// warning about content the rewrite destroyed is a lossy write and rides with an
+// empty Key, a keyed value loss fans out per key, and a picture-removal miss stays
+// advisory because ApplyPicture clears the front cover before every embed.
+func TestWriteWarningsClassifyRewriteLosses(t *testing.T) {
+	got := writeWarnings([]waxlabel.Warning{
+		{Code: waxlabel.WarnDuplicateTagBlockDropped, Message: "a second LIST/INFO chunk was dropped"},
+		{Code: waxlabel.WarnNumericGenre, Message: "GENRE reads back as a name", Keys: []tag.Key{tag.Genre}},
+		{Code: waxlabel.WarnPictureSelectorMiss, Message: "no front picture to remove"},
+		{Code: waxlabel.WarnSingleValuedMulti, Message: "CONDUCTOR holds 2 values", Keys: []tag.Key{tag.Conductor}},
+	})
+	if len(got) != 4 {
+		t.Fatalf("warnings = %+v, want 4", got)
+	}
+	if !got[3].Unrepresented || got[3].Key != "CONDUCTOR" {
+		t.Errorf("single-valued-multi = %+v, want unrepresented under CONDUCTOR", got[3])
+	}
+	if !got[0].Unrepresented || got[0].Key != "" {
+		t.Errorf("duplicate-tag-block-dropped = %+v, want unrepresented and keyless", got[0])
+	}
+	if !got[1].Unrepresented || got[1].Key != "GENRE" {
+		t.Errorf("numeric-genre = %+v, want unrepresented under GENRE", got[1])
+	}
+	if got[2].Unrepresented {
+		t.Errorf("picture-selector-miss = %+v, want advisory", got[2])
+	}
+}
+
+// TestInspectSkipsEssence: Inspect is the parse the audit probe runs, so it must carry
+// the same verdict as Read (here a truncated FLAC's corrupt-audio diagnostic) without
+// the whole-audio read the essence hash costs.
+func TestInspectSkipsEssence(t *testing.T) {
+	const rate = 8000
+	flac := testaudio.EncodeAs(t, "flac", "", rate, testaudio.ReferenceSignal(rate, 4*time.Second))
+	p := writeTemp(t, "cut.flac", flac[:len(flac)*60/100])
+	fm, err := NewReader().Inspect(context.Background(), p)
+	if err != nil {
+		t.Fatalf("Inspect: %v", err)
+	}
+	if fm.EssenceHash != "" {
+		t.Errorf("Inspect hashed the essence: %q", fm.EssenceHash)
+	}
+	if len(fm.Diagnostics) != 1 || fm.Diagnostics[0].Code != model.DiagCorruptAudio {
+		t.Errorf("Inspect diagnostics = %+v, want the same truncated-audio verdict Read gives", fm.Diagnostics)
+	}
+	if fm.Tags.Codec != "flac" || fm.Tags.SampleRate != rate {
+		t.Errorf("Inspect tags = codec %q rate %d, want flac at %d", fm.Tags.Codec, fm.Tags.SampleRate, rate)
+	}
+}
+
+// TestMergeKeylessDiagnostics: two keyless losses under one code on one file share a
+// file_diagnostic primary key, so they merge into one row that names both, at the worse
+// severity, while keyed rows and a different code stay separate.
+func TestMergeKeylessDiagnostics(t *testing.T) {
+	got := MergeKeylessDiagnostics([]model.FileDiagnostic{
+		{Code: model.DiagTagWriteUnsynced, Severity: model.SeverityWarn, Detail: "refused a"},
+		{Code: model.DiagTagWriteLost, Severity: model.SeverityWarn, TagKey: "GENRE", Detail: "numeric"},
+		{Code: model.DiagTagWriteLost, Severity: model.SeverityWarn, Detail: "dropped a duplicate block"},
+		{Code: model.DiagTagWriteLost, Severity: model.SeverityError, Detail: "dropped an unreadable region"},
+		{Code: model.DiagTagWriteUnsynced, Severity: model.SeverityWarn, Detail: "refused b"},
+	})
+	if len(got) != 3 {
+		t.Fatalf("merged = %+v, want 3 rows", got)
+	}
+	if got[0].Code != model.DiagTagWriteUnsynced || got[0].Detail != "refused a; refused b" {
+		t.Errorf("unsynced row = %+v, want both refusals joined", got[0])
+	}
+	if got[1].TagKey != "GENRE" || got[1].Detail != "numeric" {
+		t.Errorf("keyed row = %+v, want left alone", got[1])
+	}
+	if got[2].TagKey != "" || got[2].Detail != "dropped a duplicate block; dropped an unreadable region" ||
+		got[2].Severity != model.SeverityError {
+		t.Errorf("keyless lost row = %+v, want both losses joined at error severity", got[2])
+	}
+}
+
+// TestCreditTagValues pins the write shape of a track credit to its key's cardinality:
+// a multivalued key keeps one value per holder, a single-valued key gets the names
+// joined with the separator identity.SplitCredits reads back, and a single name is
+// left alone either way.
+func TestCreditTagValues(t *testing.T) {
+	two := []string{"Ana Conductor", "Ben Conductor"}
+	if got := CreditTagValues(string(tag.Performer), two); len(got) != 2 {
+		t.Errorf("PERFORMER values = %v, want one per holder", got)
+	}
+	got := CreditTagValues(string(tag.Conductor), two)
+	if len(got) != 1 || got[0] != "Ana Conductor; Ben Conductor" {
+		t.Errorf("CONDUCTOR values = %v, want the names joined", got)
+	}
+	if back := identity.SplitCredits(got[0]); len(back) != 2 || back[0] != two[0] || back[1] != two[1] {
+		t.Errorf("joined value splits back to %v, want %v", back, two)
+	}
+	if got := CreditTagValues(string(tag.Conductor), two[:1]); len(got) != 1 || got[0] != two[0] {
+		t.Errorf("single name = %v, want it untouched", got)
+	}
+}
+
+// TestCreditWriteShapesFollowKeyCardinality writes a two-holder credit through the
+// writer on the two shapes: PERFORMER lands as two values and CONDUCTOR as one joined
+// value, on FLAC and MP3 alike, with no lossy-write warning on either.
+func TestCreditWriteShapesFollowKeyCardinality(t *testing.T) {
+	ctx := context.Background()
+	const rate = 8000
+	sig := testaudio.ReferenceSignal(rate, time.Second)
+	names := []string{"Ana", "Ben"}
+	for _, c := range []struct{ name, format string }{{"a.flac", "flac"}, {"a.mp3", "mp3"}} {
+		p := writeTemp(t, c.name, testaudio.EncodeAs(t, c.format, "", rate, sig))
+		res, err := NewWriter().Apply(ctx, p, []TagEdit{
+			{Key: string(tag.Performer), Values: CreditTagValues(string(tag.Performer), names)},
+			{Key: string(tag.Conductor), Values: CreditTagValues(string(tag.Conductor), names)},
+		})
+		if err != nil {
+			t.Fatalf("%s: Apply: %v", c.name, err)
+		}
+		for _, w := range res.Warnings {
+			if w.Unrepresented {
+				t.Errorf("%s: lossy-write warning on a shaped credit: %+v", c.name, w)
+			}
+		}
+		doc, err := waxlabel.ParseFile(ctx, p)
+		if err != nil {
+			t.Fatalf("%s: parse back: %v", c.name, err)
+		}
+		if got, _ := doc.Get(tag.Performer); len(got) != 2 || got[0] != "Ana" || got[1] != "Ben" {
+			t.Errorf("%s: PERFORMER on disk = %v, want [Ana Ben]", c.name, got)
+		}
+		if got, _ := doc.Get(tag.Conductor); len(got) != 1 || got[0] != "Ana; Ben" {
+			t.Errorf("%s: CONDUCTOR on disk = %v, want [Ana; Ben]", c.name, got)
+		}
+	}
+}

@@ -372,3 +372,118 @@ func rebuildItemSearchFTSTx(ctx context.Context, tx *sql.Tx, itemID int64, kind 
 		return nil
 	}
 }
+
+// strandedTagKeys returns the item_tag keys and "tag.<KEY>" provenance fields that
+// model.CanonicalTagKey no longer accepts as stored. The key rule follows the tag
+// library's, so a tightening (1.6 dropped '~') leaves rows nothing can query, edit, or
+// unlock. syncItemTagsTx keeps a locked one on purpose, since its value has no other
+// home, so db verify reports them and --fix reclaims them here.
+func (s *Store) strandedTagKeys(ctx context.Context) (keys, fields []string, err error) {
+	rows, err := s.read.QueryContext(ctx, "SELECT DISTINCT key FROM item_tag")
+	if err != nil {
+		return nil, nil, err
+	}
+	for rows.Next() {
+		var k string
+		if err := rows.Scan(&k); err != nil {
+			rows.Close()
+			return nil, nil, err
+		}
+		if canon, ok := model.CanonicalTagKey(k); !ok || canon != k {
+			keys = append(keys, k)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, nil, err
+	}
+	rows.Close()
+
+	rows, err = s.read.QueryContext(ctx, "SELECT DISTINCT field FROM field_provenance WHERE field LIKE 'tag.%'")
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var f string
+		if err := rows.Scan(&f); err != nil {
+			return nil, nil, err
+		}
+		k, ok := model.CutTagPrefix(f)
+		if canon, valid := model.CanonicalTagKey(k); !ok || !valid || canon != k {
+			fields = append(fields, f)
+		}
+	}
+	return keys, fields, rows.Err()
+}
+
+// countStrandedTagKeyRows counts the rows strandedTagKeys names, for db verify.
+func (s *Store) countStrandedTagKeyRows(ctx context.Context) (int, error) {
+	keys, fields, err := s.strandedTagKeys(ctx)
+	if err != nil {
+		return 0, err
+	}
+	n := 0
+	if len(keys) > 0 {
+		var c int
+		if err := s.read.QueryRowContext(ctx, "SELECT COUNT(*) FROM item_tag WHERE key IN "+placeholders(len(keys)),
+			anySlice(keys)...).Scan(&c); err != nil {
+			return 0, err
+		}
+		n += c
+	}
+	if len(fields) > 0 {
+		var c int
+		if err := s.read.QueryRowContext(ctx, "SELECT COUNT(*) FROM field_provenance WHERE field IN "+placeholders(len(fields)),
+			anySlice(fields)...).Scan(&c); err != nil {
+			return 0, err
+		}
+		n += c
+	}
+	return n, nil
+}
+
+// GCStrandedTagKeys deletes the rows strandedTagKeys names, returning how many went.
+// The search text of an affected item catches up on its next scan.
+func (s *Store) GCStrandedTagKeys(ctx context.Context) (int, error) {
+	const op = "store.GCStrandedTagKeys"
+	keys, fields, err := s.strandedTagKeys(ctx)
+	if err != nil {
+		return 0, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	if len(keys) == 0 && len(fields) == 0 {
+		return 0, nil
+	}
+	var n int64
+	err = s.writeTx(ctx, func(tx *sql.Tx) error {
+		if len(keys) > 0 {
+			r, err := tx.ExecContext(ctx, "DELETE FROM item_tag WHERE key IN "+placeholders(len(keys)), anySlice(keys)...)
+			if err != nil {
+				return err
+			}
+			c, _ := r.RowsAffected()
+			n += c
+		}
+		if len(fields) > 0 {
+			r, err := tx.ExecContext(ctx, "DELETE FROM field_provenance WHERE field IN "+placeholders(len(fields)), anySlice(fields)...)
+			if err != nil {
+				return err
+			}
+			c, _ := r.RowsAffected()
+			n += c
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	return int(n), nil
+}
+
+func anySlice(ss []string) []any {
+	out := make([]any, len(ss))
+	for i, s := range ss {
+		out[i] = s
+	}
+	return out
+}

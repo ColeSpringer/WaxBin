@@ -51,25 +51,55 @@ type Reader interface {
 	Read(ctx context.Context, path string) (*FileMeta, error)
 }
 
+// Inspector is the parse-only half of Reader: the same parse and diagnostics with the
+// essence hash skipped, for a caller that wants a verdict on the file rather than its
+// identity.
+type Inspector interface {
+	Inspect(ctx context.Context, path string) (*FileMeta, error)
+}
+
 // normalizeCodec folds WaxLabel's canonical codec name to WaxBin's lowercase
 // catalog key. WaxLabel reports names such as "PCM", "MP3", and "Vorbis"; the
 // catalog stores "pcm", "mp3", and "vorbis".
 //
-// PCM keeps the plain "pcm" key regardless of container. Nothing routes on the
-// codec any more (WaxFlow sniffs the container's content and decodes it directly),
-// so PCM in AIFF or MP4 is "pcm" and decodes like any other input. Non-WAV PCM was
-// previously keyed by container to steer it to the ffmpeg subprocess; that, and the
-// bug where PCM-in-MP4 keyed to an un-analyzable "mp4", are both gone.
+// PCM keeps the plain "pcm" key regardless of container, and the WAVE_FORMAT_EXTENSIBLE
+// spelling folds onto it. Nothing routes on the codec any more (WaxFlow sniffs the
+// container's content and decodes it directly), so PCM in AIFF or MP4 is "pcm" and
+// decodes like any other input. Non-WAV PCM was previously keyed by container to steer
+// it to the ffmpeg subprocess; that, and the bug where PCM-in-MP4 keyed to an
+// un-analyzable "mp4", are both gone.
+//
+// The other folds keep the catalog vocabulary stable across the tag library's own
+// spellings. Monkey's Audio is "ape", the key the extension fallback always gave it and
+// the one the upgrade policy ranks as lossless; the lossy WMA generations the library
+// names today are "wma", spelled out rather than matched by prefix so an unfamiliar
+// WMA spelling (WMA Lossless among them) passes through unfolded instead of being
+// called lossy; a Musepack stream version is "musepack".
 func normalizeCodec(c string) string {
 	s := strings.ToLower(strings.TrimSpace(c))
-	switch s {
-	case "mpeg audio", "mpeg", "mp2": // pre-frame-sync fallback labeling
+	switch {
+	case s == "mpeg audio" || s == "mpeg" || s == "mp2": // pre-frame-sync fallback labeling
 		return "mp3"
-	case "pcm":
+	case s == "pcm" || s == "pcm (extensible)":
 		return "pcm"
-	default:
-		return s
+	case s == "monkey's audio":
+		return "ape"
+	case s == "wma v1" || s == "wma v2" || s == "wma pro" || s == "wma voice":
+		return "wma"
+	case strings.HasPrefix(s, "musepack"):
+		return "musepack"
 	}
+	return s
+}
+
+// normalizeContainer lowercases the tag library's container label and folds Monkey's
+// Audio onto "ape", matching its codec key and the label extFormat gives the format.
+func normalizeContainer(c string) string {
+	s := strings.ToLower(strings.TrimSpace(c))
+	if s == "monkey's audio" {
+		return "ape"
+	}
+	return s
 }
 
 // firstYear returns the leading 4-digit year of the first non-empty date string,

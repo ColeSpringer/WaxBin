@@ -16,6 +16,7 @@ func TestCanonicalTagKey(t *testing.T) {
 		{"  ", "", false},
 		{"bad=key", "", false}, // '=' is reserved
 		{"héllo", "", false},   // non-ASCII
+		{"odd~key", "", false}, // '~' sits past the Vorbis key range
 	}
 	for _, c := range cases {
 		got, ok := CanonicalTagKey(c.in)
