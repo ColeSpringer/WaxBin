@@ -332,9 +332,9 @@ func severityRank(s model.AuditSeverity) int {
 // Coverage is format-partial, and callers have to say so. Truncated audio is
 // detected for MP3, WAV (RF64 and BW64 included), AIFF, MP4, and, since WaxLabel
 // 1.6, FLAC, from a walk over the frame tail; no-audio-frames for MP3, AAC,
-// WavPack, and Monkey's Audio (and Musepack, which the scanner does not pick up).
-// Neither signal exists for Ogg (Vorbis, Opus, or FLAC), Matroska, or WMA. They
-// are true positives when they fire and prove nothing when they do not.
+// WavPack, Monkey's Audio, and Musepack. Neither signal exists for Ogg (Vorbis,
+// Opus, or FLAC), Matroska, or WMA. They are true positives when they fire and
+// prove nothing when they do not.
 func audioDiagnostics(doc *waxlabel.Document) []model.FileDiagnostic {
 	// One corrupt_audio row per file at most. The primary key is
 	// (file_id, origin, code, tag_key) and neither warning names a key, so two rows
@@ -681,9 +681,10 @@ func LRCPartial(lines []model.SyncedLine, dropped []int) bool {
 }
 
 // chaptersFromDoc projects a Document's embedded navigation chapters (M4B Nero/
-// QuickTime, Matroska, MP3 CHAP, read by WaxLabel) into WaxBin's model in file
-// order, as file-relative offsets. The scanner persists them only for books; a
-// music file with stray chapters keeps them unused. It returns nil for none.
+// QuickTime, Matroska, ID3 CHAP, Vorbis CHAPTERxxx, Musepack SV8 packets, and WMA
+// markers, read by WaxLabel) into WaxBin's model in start order, as file-relative
+// offsets; a start-only form leaves the end open. The scanner persists them only for
+// books; a music file with stray chapters keeps them unused. It returns nil for none.
 func chaptersFromDoc(doc *waxlabel.Document) []model.Chapter {
 	chs := doc.Chapters()
 	if len(chs) == 0 {
@@ -864,6 +865,8 @@ func extFormat(path string) (container, codec string) {
 		return "ape", "ape"
 	case ".wv":
 		return "wavpack", "wavpack"
+	case ".mpc", ".mp+":
+		return "musepack", "musepack"
 	default:
 		return "", strings.TrimPrefix(strings.ToLower(filepath.Ext(path)), ".")
 	}

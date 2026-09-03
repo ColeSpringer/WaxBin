@@ -1439,19 +1439,18 @@ var audioExts = map[string]bool{
 	".m4a": true, ".m4b": true, ".m4r": true, ".mp4": true, ".alac": true,
 	".aac": true, ".adts": true,
 	".wma": true, ".aiff": true, ".aif": true, ".aifc": true, ".afc": true,
-	".ape": true, ".wv": true,
+	".ape": true, ".wv": true, ".mpc": true, ".mp+": true,
 	".mka": true,
 }
 
 // excludedExts are extensions the tag library claims that the scanner leaves alone.
 // .mkv, .webm, .mk3d, .mks, .mov, and .asf share a container with an audio-only
-// spelling but routinely carry video. Musepack (.mpc, .mp+) reads and writes upstream
-// but WaxFlow has no decoder for it, so every such file would sit in the analyze pass's
-// retry set for good. (.wma stays: WaxFlow decodes the common v1 and v2 generations, and
-// a Pro, Lossless, or Voice stream is skipped the way any undecodable file is.)
+// spelling but routinely carry video. A format WaxFlow could not decode at all would
+// belong here too, since its files would sit in the analyze pass's retry set for good;
+// .wma is not one, because the common v1 and v2 generations decode and a Pro, Lossless,
+// or Voice stream is skipped the way any undecodable file is.
 var excludedExts = map[string]bool{
 	".mkv": true, ".webm": true, ".mk3d": true, ".mks": true, ".mov": true, ".asf": true,
-	".mpc": true, ".mp+": true,
 }
 
 func isAudio(path string) bool { return audioExts[strings.ToLower(filepath.Ext(path))] }

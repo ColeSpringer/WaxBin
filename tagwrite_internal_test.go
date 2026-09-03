@@ -237,7 +237,7 @@ func TestReplayGainWriteBackUnwritableContainer(t *testing.T) {
 	defer lib.Close()
 
 	path := filepath.Join(root, "a.wma")
-	writeRaw(t, path, readFixture(t, filepath.Join("decode", "testdata", "mono-8k.wma")))
+	writeRaw(t, path, testaudio.Fixture(t, "mono-8k.wma"))
 	if _, err := lib.Scan(ctx, ScanRequest{}); err != nil {
 		t.Fatalf("scan: %v", err)
 	}
@@ -571,13 +571,4 @@ func TestReplayGainWriteBackLandsOnWavPack(t *testing.T) {
 	if len(diags) != 0 {
 		t.Errorf("diagnostics = %+v, want none for a write that landed whole", diags)
 	}
-}
-
-func readFixture(t *testing.T, path string) []byte {
-	t.Helper()
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return data
 }

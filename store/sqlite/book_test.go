@@ -877,3 +877,40 @@ func TestStatsArtistCountMatchesFacet(t *testing.T) {
 		t.Errorf("artist count %d != artist facet bucket count %d", stats.Artists, nonUnknown)
 	}
 }
+
+// TestEqualStartChaptersCollapse: two scanned chapters at one instant keep only the
+// last, the one the read path would have given the span to, so every chapter reads
+// back with a real [start, end) span and the list round-trips through
+// SetItemChapters, which refuses equal starts.
+func TestEqualStartChaptersCollapse(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	r := putBook(t, st, lib.ID, bookSpec{
+		path: "/lib/marked.wma", essence: "eq1", content: "eqc1", title: "Marked", author: "Auth",
+		asin: "BEQ", durationMS: 2000,
+		chapters: []model.Chapter{
+			{Position: 0, Title: "Preroll"},
+			{Position: 1, Title: "Intro"},
+			{Position: 2, Title: "Middle", FileStartMS: 750},
+		},
+	})
+	chs, err := st.Chapters(ctx, r.ItemPID)
+	if err != nil {
+		t.Fatalf("chapters: %v", err)
+	}
+	want := []model.Chapter{
+		{Title: "Intro", StartMS: 0, EndMS: 750},
+		{Title: "Middle", StartMS: 750, EndMS: 2000},
+	}
+	if len(chs) != len(want) {
+		t.Fatalf("chapters = %+v, want %+v", chs, want)
+	}
+	for i, w := range want {
+		if chs[i].Title != w.Title || chs[i].StartMS != w.StartMS || chs[i].EndMS != w.EndMS {
+			t.Errorf("chapter %d = %q [%d, %d), want %q [%d, %d)", i, chs[i].Title, chs[i].StartMS, chs[i].EndMS, w.Title, w.StartMS, w.EndMS)
+		}
+	}
+	if err := st.SetItemChapters(ctx, r.ItemPID, chs, model.LockUnchanged, false); err != nil {
+		t.Errorf("round trip through SetItemChapters: %v", err)
+	}
+}

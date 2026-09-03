@@ -12,8 +12,8 @@ import (
 )
 
 // codecFixture says how to get a decodable file for one codec: an EncodeAs format
-// name where WaxFlow can encode the codec, or a file under testdata where it only
-// decodes it.
+// name where WaxFlow can encode the codec, or one of testaudio's checked-in fixtures
+// where it only decodes it.
 type codecFixture struct {
 	format string
 	file   string
@@ -33,21 +33,22 @@ var codecFixtures = map[string]codecFixture{
 	"opus":    {format: "opus"},
 	"wavpack": {format: "wavpack"},
 	"ape":     {format: "ape"},
-	// WaxFlow decodes WMA but has no WMA encoder, so this one is checked in:
-	// container/asf/testdata/mono-8k.wma from WaxFlow at 192e0e1, a 3.7 KB WMAv2
-	// stream at 8 kHz mono.
-	"wma": {file: "mono-8k.wma"},
+	// WaxFlow decodes WMA and Musepack but encodes neither; testaudio.Fixture says
+	// where each checked-in file came from.
+	"wma":      {file: "mono-8k.wma"},
+	"musepack": {file: "ref-2s-sv8-chapters.mpc"},
 }
 
 // path returns a decodable file for the fixture, encoding one into dir when the
 // codec has an encoder.
 func (fx codecFixture) path(tb testing.TB, dir, name string, rate int, sig []float32) string {
 	tb.Helper()
-	if fx.format == "" {
-		return filepath.Join("testdata", fx.file)
+	data := testaudio.Fixture
+	if fx.format != "" {
+		data = func(tb testing.TB, _ string) []byte { return testaudio.EncodeAs(tb, fx.format, "", rate, sig) }
 	}
 	p := filepath.Join(dir, name)
-	if err := os.WriteFile(p, testaudio.EncodeAs(tb, fx.format, "", rate, sig), 0o644); err != nil {
+	if err := os.WriteFile(p, data(tb, fx.file), 0o644); err != nil {
 		tb.Fatal(err)
 	}
 	return p
@@ -76,6 +77,45 @@ func TestCoverageDecodesEveryCodec(t *testing.T) {
 		}
 		if pcm.Frames() == 0 {
 			t.Errorf("codec %q decoded to zero frames", fs.Codec)
+		}
+	}
+}
+
+// TestMusepackStreamVersionsDecode: the SV7 frame stream and the SV8 packet stream
+// are separate demuxer paths upstream behind the one "musepack" codec the coverage
+// table names, so both fixtures decode here. Each is compared with the WAV of the
+// same signal by the level of its mono decode, which does not care that mppenc
+// wrote the mono source as two channels; matching within a decibel says the decode
+// is right rather than merely non-empty.
+func TestMusepackStreamVersionsDecode(t *testing.T) {
+	const rate = 44100
+	eng := New(nil)
+	dir := t.TempDir()
+	write := func(name string, data []byte) string {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	level := func(path string) float64 {
+		pcm, err := eng.Mono(context.Background(), path, 11025, 0)
+		if err != nil {
+			t.Fatalf("%s: decode: %v", filepath.Base(path), err)
+		}
+		if pcm.Frames() == 0 {
+			t.Fatalf("%s: decoded to no frames", filepath.Base(path))
+		}
+		var sum float64
+		for _, v := range pcm.Samples {
+			sum += float64(v) * float64(v)
+		}
+		return 10 * math.Log10(sum/float64(len(pcm.Samples)))
+	}
+	ref := level(write("ref.wav", testaudio.EncodeAs(t, "wav", "", rate, testaudio.ReferenceSignal(rate, 2*time.Second))))
+	for _, name := range []string{"ref-2s-sv7.mpc", "ref-2s-sv8-chapters.mpc"} {
+		if got := level(write(name, testaudio.Fixture(t, name))); math.Abs(got-ref) > 1 {
+			t.Errorf("%s decodes at %.2f dB, want within 1 dB of the wav's %.2f", name, got, ref)
 		}
 	}
 }

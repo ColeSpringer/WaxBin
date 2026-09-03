@@ -923,19 +923,28 @@ func TestReservedWireSpellingsAreFolded(t *testing.T) {
 	}
 }
 
-// TestReadFoldsFormatLabels pins the catalog vocabulary for two containers WaxLabel
+// TestReadFoldsFormatLabels pins the catalog vocabulary for the containers WaxLabel
 // 1.6 started parsing. Monkey's Audio reports itself by name; the catalog keeps the
 // "ape" key the extension fallback always gave it and the upgrade policy ranks as
-// lossless. WavPack already matched. Both parse natively now, with properties and an
-// essence hash from the tag library rather than the decoder's header probe.
+// lossless. WavPack already matched. Musepack names its stream version and folds to
+// "musepack" on both labels, for the SV7 frame stream and the SV8 packet stream
+// alike. All parse natively, with properties and an essence hash from the tag library
+// rather than the decoder's header probe.
 func TestReadFoldsFormatLabels(t *testing.T) {
 	const rate = 8000
 	sig := testaudio.ReferenceSignal(rate, time.Second)
-	for _, c := range []struct{ name, format, container, codec string }{
-		{"a.ape", "ape", "ape", "ape"},
-		{"a.wv", "wavpack", "wavpack", "wavpack"},
+	for _, c := range []struct {
+		name, container, codec string
+		data                   []byte
+		rate, channels, depth  int
+		durationMS             int64
+	}{
+		{"a.ape", "ape", "ape", testaudio.EncodeAs(t, "ape", "", rate, sig), rate, 1, 16, 1000},
+		{"a.wv", "wavpack", "wavpack", testaudio.EncodeAs(t, "wavpack", "", rate, sig), rate, 1, 16, 1000},
+		{"a.mpc", "musepack", "musepack", testaudio.Fixture(t, "ref-2s-sv7.mpc"), 44100, 2, 0, 2000},
+		{"a.mp+", "musepack", "musepack", testaudio.Fixture(t, "ref-2s-sv8-chapters.mpc"), 44100, 1, 0, 2000},
 	} {
-		p := writeTemp(t, c.name, testaudio.EncodeAs(t, c.format, "", rate, sig))
+		p := writeTemp(t, c.name, c.data)
 		fm, err := NewReader().Read(context.Background(), p)
 		if err != nil {
 			t.Fatalf("Read %s: %v", c.name, err)
@@ -943,10 +952,11 @@ func TestReadFoldsFormatLabels(t *testing.T) {
 		if fm.Tags.Container != c.container || fm.Tags.Codec != c.codec {
 			t.Errorf("%s labels = %q/%q, want %q/%q", c.name, fm.Tags.Container, fm.Tags.Codec, c.container, c.codec)
 		}
-		if fm.Tags.SampleRate != rate || fm.Tags.Channels != 1 || fm.Tags.BitDepth != 16 ||
-			fm.Tags.DurationMS < 900 || fm.Tags.DurationMS > 1100 {
-			t.Errorf("%s properties = {rate:%d channels:%d depth:%d dur:%d}, want {%d 1 16 ~1000}",
-				c.name, fm.Tags.SampleRate, fm.Tags.Channels, fm.Tags.BitDepth, fm.Tags.DurationMS, rate)
+		if fm.Tags.SampleRate != c.rate || fm.Tags.Channels != c.channels || fm.Tags.BitDepth != c.depth ||
+			fm.Tags.DurationMS < c.durationMS*9/10 || fm.Tags.DurationMS > c.durationMS*11/10 {
+			t.Errorf("%s properties = {rate:%d channels:%d depth:%d dur:%d}, want {%d %d %d ~%d}",
+				c.name, fm.Tags.SampleRate, fm.Tags.Channels, fm.Tags.BitDepth, fm.Tags.DurationMS,
+				c.rate, c.channels, c.depth, c.durationMS)
 		}
 		if fm.EssenceHash == "" || len(fm.Diagnostics) != 0 {
 			t.Errorf("%s: essence %q, diagnostics %+v; want a native parse", c.name, fm.EssenceHash, fm.Diagnostics)
@@ -961,7 +971,7 @@ func TestNormalizeFormatLabels(t *testing.T) {
 	codecs := map[string]string{
 		"Monkey's Audio": "ape", "WavPack": "wavpack", "WMA v1": "wma", "WMA v2": "wma",
 		"WMA Pro": "wma", "WMA Voice": "wma", "WMA Lossless": "wma lossless",
-		"Musepack SV8": "musepack", "PCM": "pcm", "PCM (extensible)": "pcm",
+		"Musepack SV7": "musepack", "Musepack SV8": "musepack", "PCM": "pcm", "PCM (extensible)": "pcm",
 		"FLAC": "flac", "MPEG Audio": "mp3", "Vorbis": "vorbis",
 	}
 	for in, want := range codecs {
@@ -970,7 +980,7 @@ func TestNormalizeFormatLabels(t *testing.T) {
 		}
 	}
 	containers := map[string]string{
-		"Monkey's Audio": "ape", "WavPack": "wavpack", "ASF": "asf", "RF64": "rf64", "Ogg": "ogg",
+		"Monkey's Audio": "ape", "WavPack": "wavpack", "Musepack": "musepack", "ASF": "asf", "RF64": "rf64", "Ogg": "ogg",
 	}
 	for in, want := range containers {
 		if got := normalizeContainer(in); got != want {

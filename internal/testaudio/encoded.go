@@ -26,8 +26,8 @@ func ReferenceSignal(rate int, dur time.Duration) []float32 {
 // "aiff", "flac", "alac", "mp3", "aac", "he-aac", "opus", "vorbis", "wavpack", or
 // "ape"; container overrides the format default where one exists ("adts" for a raw
 // AAC elementary stream, "fragmented" or "progressive" for an MP4 box shape) and is
-// empty for the default. WMA is decode-only upstream, so its fixture is checked in
-// rather than encoded here.
+// empty for the default. WMA and Musepack are decode-only upstream, so their fixtures
+// are checked in and served by Fixture rather than encoded here.
 //
 // It sets no GainDB, Channels, or Dynamics, so the transcode has no mix stage, no
 // matrix, and no true-peak limiter, the same ChainSpec{Channels:1} trap the decode

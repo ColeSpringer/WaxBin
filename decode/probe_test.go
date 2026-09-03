@@ -43,7 +43,11 @@ func TestProbeReadsHeaderProperties(t *testing.T) {
 // would put a number in the catalog the file does not hold, and rank a WMA above an
 // MP3 in the upgrade scan on the strength of it.
 func TestProbeOmitsBitDepthWithoutOne(t *testing.T) {
-	got, err := Probe(context.Background(), filepath.Join("testdata", "mono-8k.wma"))
+	p := filepath.Join(t.TempDir(), "mono-8k.wma")
+	if err := os.WriteFile(p, testaudio.Fixture(t, "mono-8k.wma"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Probe(context.Background(), p)
 	if err != nil {
 		t.Fatalf("Probe: %v", err)
 	}

@@ -21,6 +21,8 @@
 *.m4a  binary
 *.m4b  binary
 *.mp3  binary
+*.mpc  binary
+*.mp+  binary
 *.ogg  binary
 *.opus binary
 *.wav  binary

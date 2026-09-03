@@ -33,7 +33,7 @@ func newAuditCmd(g *globals) *cobra.Command {
 			"scanning and tag write-back. " +
 			"Corrupt-audio reporting comes in two halves. The free half reads signals the " +
 			"scan already derived: truncation for MP3, FLAC, AIFF, MP4, and WAV, and missing " +
-			"audio for MP3, AAC, WavPack, and Monkey's Audio. It is a true positive " +
+			"audio for MP3, AAC, WavPack, Monkey's Audio, and Musepack. It is a true positive " +
 			"when it fires and proves nothing when it does not, so a quiet run is not a clean " +
 			"bill of health; damage inside the audio, and any damage to Ogg, Matroska, or WMA, " +
 			"needs the decode probe. --integrity adds that probe plus an on-disk bitrot " +

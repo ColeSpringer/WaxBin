@@ -1,10 +1,12 @@
 package sqlite
 
 import (
+	"cmp"
 	"context"
 	"database/sql"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 
@@ -628,6 +630,7 @@ func syncChaptersForFileSource(ctx context.Context, tx *sql.Tx, bookItemID, file
 // rows for the file. It no-ops (no write, no change) when the stored rows already
 // match, so a no-op rescan stays change_log-silent.
 func syncChapters(ctx context.Context, tx *sql.Tx, bookItemID, fileID int64, source string, chapters []model.Chapter, scopeToSource bool) (bool, error) {
+	chapters = normalizeChapterStarts(chapters)
 	if same, err := chaptersInSync(ctx, tx, bookItemID, fileID, source, chapters, scopeToSource); err != nil {
 		return false, err
 	} else if same {
@@ -654,6 +657,32 @@ func syncChapters(ctx context.Context, tx *sql.Tx, bookItemID, fileID int64, sou
 		}
 	}
 	return true, nil
+}
+
+// normalizeChapterStarts puts one file's chapters in start order and collapses any
+// that share a start, keeping the last of them. The read path spans each chapter to
+// the next start, so an earlier chapter at the same instant would have no span, and
+// at offset 0 it would read back as open-ended. Start-only sources make the collision
+// real (an ASF marker inside the preroll lands at 0 beside the first real one), and
+// SetItemChapters refuses such a list, so the stored rows must never hold one. A
+// curated list arrives already ordered and distinct, so this leaves it as it is.
+func normalizeChapterStarts(chs []model.Chapter) []model.Chapter {
+	out := slices.Clone(chs)
+	slices.SortStableFunc(out, func(a, b model.Chapter) int { return cmp.Compare(a.FileStartMS, b.FileStartMS) })
+	n := 0
+	for _, c := range out {
+		if n > 0 && out[n-1].FileStartMS == c.FileStartMS {
+			out[n-1] = c
+			continue
+		}
+		out[n] = c
+		n++
+	}
+	out = out[:n]
+	for i := range out {
+		out[i].Position = i
+	}
+	return out
 }
 
 // chaptersInSync reports whether the stored chapters already equal want (count,
@@ -1030,7 +1059,8 @@ func (s *Store) bookChapters(ctx context.Context, bookItemID int64, parts []book
 		cum += eff
 	}
 	// Fill open-ended chapters from the next chapter's start, and the last from the
-	// total book duration, so each chapter has a concrete [start, end) span.
+	// total book duration, so each chapter has a concrete [start, end) span. Starts
+	// are distinct within a file (normalizeChapterStarts), so the span is never empty.
 	for i := range out {
 		if out[i].EndMS != 0 {
 			continue
