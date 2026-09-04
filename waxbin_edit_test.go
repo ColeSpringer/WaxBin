@@ -288,22 +288,24 @@ func TestEditBookFacade(t *testing.T) {
 		t.Fatalf("provenance = %+v, want one locked author row", prov)
 	}
 
-	// subtitle is a DB-only book field (no tag a scan reconstructs it from), so a
-	// write-back writes nothing on disk and returns no error while the edit stands.
+	// A subtitle write-back lands its own SUBTITLE key, while the catalog-only author
+	// edit before it left the on-disk ALBUMARTIST alone.
 	if err := lib.EditField(ctx, pid, "subtitle", "There and Back Again", waxbin.EditOptions{Lock: model.LockOn, WriteBack: true}); err != nil {
-		t.Fatalf("book subtitle write-back should be a clean no-op, got %v", err)
+		t.Fatalf("book subtitle write-back: %v", err)
 	}
 	d, _ = lib.Book(ctx, pid)
 	if d.Subtitle != "There and Back Again" {
 		t.Fatalf("subtitle = %q, want the edit applied", d.Subtitle)
 	}
-	// The on-disk book title (ALBUM) is untouched: the edited fields so far are DB-only.
 	fm, err := meta.NewReader().Read(ctx, src)
 	if err != nil {
 		t.Fatalf("read tags: %v", err)
 	}
-	if fm.Tags.Album != "The Hobbit" {
-		t.Fatalf("on-disk ALBUM = %q, want The Hobbit (DB-only edits must not write tags)", fm.Tags.Album)
+	if fm.Tags.Subtitle != "There and Back Again" {
+		t.Errorf("on-disk SUBTITLE = %q, want the edited subtitle", fm.Tags.Subtitle)
+	}
+	if fm.Tags.AlbumArtist != "JRR Tolkien" {
+		t.Errorf("on-disk ALBUMARTIST = %q, want JRR Tolkien (a catalog-only edit must not write tags)", fm.Tags.AlbumArtist)
 	}
 }
 
@@ -647,6 +649,60 @@ func TestEditBookIdentifierReanchors(t *testing.T) {
 	}
 	if d.ISBN != "9780261102217" {
 		t.Errorf("isbn after rescan = %q, want it preserved", d.ISBN)
+	}
+	items, err := lib.Query(ctx, query.New(query.EntityItems).Where("kind", query.OpIs, "book").Build(), "")
+	if err != nil {
+		t.Fatalf("query books: %v", err)
+	}
+	if len(items) != 1 {
+		t.Errorf("book count after rescan = %d, want 1 (a re-key would leave two)", len(items))
+	}
+}
+
+// TestEditBookEditionWriteBackReanchors is the edition twin of the identifier test:
+// edition feeds identity.BookKey too, so once it reaches disk the stored key has to
+// follow or the next forced scan resolves a different item. The subtitle and description
+// written beside it read back through a fresh scan of the file.
+func TestEditBookEditionWriteBackReanchors(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	src := filepath.Join(root, "hobbit.m4b")
+	writeFile(t, src, testaudio.BuildMP3("The Hobbit", "J.R.R. Tolkien", "The Hobbit", 1))
+
+	lib := openManaged(t, ctx, db, root)
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	pid := itemPIDByTitle(t, ctx, lib, "The Hobbit")
+
+	const blurb = "Bilbo Baggins is a hobbit who enjoys a comfortable life."
+	if err := lib.EditFields(ctx, pid, map[string]string{
+		"edition":     "75th Anniversary Edition",
+		"subtitle":    "There and Back Again",
+		"description": blurb,
+	}, waxbin.EditOptions{WriteBack: true}); err != nil {
+		t.Fatalf("edit: %v", err)
+	}
+	fm, err := meta.NewReader().Read(ctx, src)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if fm.Tags.Edition != "75th Anniversary Edition" || fm.Tags.Subtitle != "There and Back Again" || fm.Tags.Description != blurb {
+		t.Errorf("on-disk edition/subtitle/description = %q/%q/%q, want the edited values",
+			fm.Tags.Edition, fm.Tags.Subtitle, fm.Tags.Description)
+	}
+
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{Force: true}); err != nil {
+		t.Fatalf("forced rescan: %v", err)
+	}
+	d, err := lib.Book(ctx, pid)
+	if err != nil {
+		t.Fatalf("book after a forced rescan (the edition moved the key without a re-anchor): %v", err)
+	}
+	if d.Edition != "75th Anniversary Edition" || d.Subtitle != "There and Back Again" || d.Description != blurb {
+		t.Errorf("after the rescan edition/subtitle/description = %q/%q/%q, want the values read back from the file",
+			d.Edition, d.Subtitle, d.Description)
 	}
 	items, err := lib.Query(ctx, query.New(query.EntityItems).Where("kind", query.OpIs, "book").Build(), "")
 	if err != nil {

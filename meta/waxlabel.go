@@ -708,14 +708,17 @@ func chaptersFromDoc(doc *waxlabel.Document) []model.Chapter {
 // (stik=2), or it carries a narrator credit. Series/sequence and abridged/edition come
 // from conventional tag patterns.
 //
-// The three identifier fields are read here rather than globally because they are
-// kind-dependent. Publisher rides the same frame as an album's label (TPUB, Vorbis and
-// Matroska PUBLISHER), which the projection hands over as fields.Label; for a book that
-// value is the publisher, and a book consumes no album label, so the two never collide.
-// ASIN and ISBN have no typed key in the tag library, so they arrive as custom tags and
-// are promoted out of that map here. They stay reserved for a book alone: a music
-// release can carry an ASIN too, and reserving the key globally would drop it from
-// every track that has one, since this function returns early for a non-book.
+// The identifier and descriptive fields are read here rather than globally because they
+// are kind-dependent. Publisher rides the same frame as an album's label (TPUB, Vorbis
+// and Matroska PUBLISHER), which the projection hands over as fields.Label; for a book
+// that value is the publisher, and a book consumes no album label, so the two never
+// collide. ASIN, ISBN, SUBTITLE, and EDITION have no typed key in the tag library, so
+// they arrive as custom tags and are promoted out of that map here, as does TIT3, the
+// ID3 subtitle frame other taggers write, which surfaces under its frame id. They stay
+// reserved for a book alone (model.BookOwnedTagKeys is the list the store refuses as
+// custom tags on a book): a music release can carry an ASIN or a subtitle too, and
+// reserving the key globally would drop it from every track that has one, since this
+// function returns early for a non-book.
 //
 // Reading them is what lets enrichment write them back to disk and survive a rescan:
 // a field the reader ignores is one the scanner clears from an empty value on every
@@ -740,6 +743,15 @@ func applyBookFields(t *model.Tags, fields tag.Tags, path string) {
 	t.Description = firstNonEmpty(fields.Description, fields.LongDescription)
 	t.Series, t.SeriesSeq = parseSeries(fields.Grouping)
 	t.Abridged, t.Edition = parseAbridged(t.Album, t.Title, t.Comment)
+	if e := takeCustom(t, "EDITION"); e != "" {
+		// An explicit edition outranks the one the abridged marker implies, and carries
+		// the flag with it when it is the abridged word itself.
+		t.Edition = e
+		if flag, ok := abridgedWord(e); ok {
+			t.Abridged = &flag
+		}
+	}
+	t.Subtitle = firstNonEmpty(takeCustom(t, "SUBTITLE"), takeCustom(t, "TIT3"))
 	t.Publisher = strings.TrimSpace(fields.Label)
 	t.ASIN = takeCustom(t, "ASIN")
 	t.ISBN = takeCustom(t, "ISBN")
@@ -838,6 +850,18 @@ func parseAbridged(texts ...string) (*bool, string) {
 	}
 	yes := true
 	return &yes, "Abridged"
+}
+
+// abridgedWord reads an edition that is itself the abridged word, so an explicit EDITION
+// carries the flag parseAbridged pairs with its marker.
+func abridgedWord(edition string) (abridged, ok bool) {
+	switch strings.ToLower(strings.TrimSpace(edition)) {
+	case "abridged":
+		return true, true
+	case "unabridged":
+		return false, true
+	}
+	return false, false
 }
 
 // trimAll trims each element and drops the empties, preserving order.

@@ -29,11 +29,14 @@ func tinyPNG(t *testing.T) []byte {
 // author→ALBUMARTIST), so the two maps must stay distinct.
 func TestBookFieldTagKeys(t *testing.T) {
 	want := map[string][]string{
-		"title":    {"ALBUM"},
-		"author":   {"ALBUMARTIST"},
-		"narrator": {"NARRATOR", "COMPOSER"},
-		"genre":    {"GENRE"},
-		"year":     {"DATE"},
+		"title":       {"ALBUM"},
+		"author":      {"ALBUMARTIST"},
+		"narrator":    {"NARRATOR", "COMPOSER"},
+		"genre":       {"GENRE"},
+		"year":        {"DATE"},
+		"subtitle":    {"SUBTITLE"},
+		"edition":     {"EDITION"},
+		"description": {"DESCRIPTION"},
 	}
 	for field, wantKeys := range want {
 		got, ok := BookFieldTagKeys(field)
@@ -55,13 +58,11 @@ func TestBookFieldTagKeys(t *testing.T) {
 	if k, _ := BookFieldTagKeys("title"); k[0] == "TITLE" {
 		t.Error("book title must map to ALBUM, not TITLE")
 	}
-	// DB-only book fields (and series, handled separately) have no key here. asin,
-	// isbn and publisher left this set when applyBookFields learned to read them: a
-	// field is DB-only because the reader ignores it, not because it is an identifier.
-	for _, f := range []string{"subtitle", "edition", "description", "series"} {
-		if _, ok := BookFieldTagKeys(f); ok {
-			t.Errorf("BookFieldTagKeys(%q): want no mapping (DB-only or series)", f)
-		}
+	// series alone has no key here: it packs a name and a sequence into one GROUPING
+	// value through BookSeriesTagKey. Every other book field round-trips; subtitle,
+	// edition, and description were the last to gain a key applyBookFields reads back.
+	if _, ok := BookFieldTagKeys("series"); ok {
+		t.Error("BookFieldTagKeys(series): want no mapping (BookSeriesTagKey carries it)")
 	}
 	// The identifier trio must round-trip: every key written here is one
 	// applyBookFields reads back, or a rescan silently clears the value.

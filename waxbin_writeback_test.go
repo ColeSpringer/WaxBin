@@ -1707,3 +1707,65 @@ func TestSetCreditsShapesSingleValuedRoles(t *testing.T) {
 		t.Errorf("tag_write_lost diagnostics = %+v, want none for shaped credits", diags)
 	}
 }
+
+// TestEditBookDescriptionClearReachesTheLongForm: a file's LONGDESCRIPTION reads as the
+// book's description when it has no DESCRIPTION, so clearing the description has to empty
+// both keys, or a rescan reads the old blurb back. A set leaves the long form alone.
+func TestEditBookDescriptionClearReachesTheLongForm(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	src := filepath.Join(root, "hobbit.m4b")
+	writeFile(t, src, testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
+		Title: "The Hobbit", Artist: "J.R.R. Tolkien", AlbumArtist: "J.R.R. Tolkien",
+		Album: "The Hobbit",
+		TXXX:  []testaudio.TXXXFrame{{Desc: "LONGDESCRIPTION", Value: "A long blurb."}},
+	}))
+
+	lib := openManaged(t, ctx, db, root)
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	pid := itemPIDByTitle(t, ctx, lib, "The Hobbit")
+	d, err := lib.Book(ctx, pid)
+	if err != nil {
+		t.Fatalf("Book: %v", err)
+	}
+	if d.Description != "A long blurb." {
+		t.Fatalf("description = %q, want the long form read as the description", d.Description)
+	}
+
+	if err := lib.EditField(ctx, pid, "description", "Short.", waxbin.EditOptions{WriteBack: true}); err != nil {
+		t.Fatalf("set description: %v", err)
+	}
+	doc, err := waxlabel.ParseFile(ctx, src)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if v, ok := doc.Get("LONGDESCRIPTION"); !ok || len(v) != 1 || v[0] != "A long blurb." {
+		t.Errorf("LONGDESCRIPTION after a set = %v, want the long form left in place", v)
+	}
+	fm, err := meta.NewReader().Read(ctx, src)
+	if err != nil {
+		t.Fatalf("read tags: %v", err)
+	}
+	if fm.Tags.Description != "Short." {
+		t.Errorf("description after a set = %q, want the short key to win", fm.Tags.Description)
+	}
+
+	if err := lib.EditField(ctx, pid, "description", "", waxbin.EditOptions{WriteBack: true}); err != nil {
+		t.Fatalf("clear description: %v", err)
+	}
+	db2 := filepath.Join(t.TempDir(), "catalog2.db")
+	lib2 := openManaged(t, ctx, db2, root)
+	if _, err := lib2.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("rescan: %v", err)
+	}
+	d2, err := lib2.Book(ctx, itemPIDByTitle(t, ctx, lib2, "The Hobbit"))
+	if err != nil {
+		t.Fatalf("Book after the clear: %v", err)
+	}
+	if d2.Description != "" {
+		t.Errorf("description after a clear and a fresh scan = %q, want empty", d2.Description)
+	}
+}

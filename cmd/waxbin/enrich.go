@@ -103,8 +103,7 @@ func newEnrichCmd(g *globals) *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&writeTags, "write-tags", false,
-		"write what the pass filled back into the files on disk; fields with no tag key "+
-			"(a book's description, subtitle, edition) stay in the catalog")
+		"write what the pass filled back into the files on disk")
 	cmd.Flags().BoolVar(&force, "force", false, "re-enrich entities already looked up")
 	cmd.Flags().IntVar(&limit, "limit", 0, "cap the number of entities processed (0 = all)")
 	cmd.Flags().StringVar(&item, "item", "", "scope the pass to one item's targets (item pid; implies --force)")

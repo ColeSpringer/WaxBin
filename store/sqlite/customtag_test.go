@@ -99,6 +99,29 @@ func TestSetItemTag(t *testing.T) {
 	}
 }
 
+// TestSetItemTagRefusesBookOwnedKeysOnBooks: a key the scanner reads into a book field
+// is refused as a custom tag on a book, where the scalar edit owns it, and stays a
+// plain custom tag on a track.
+func TestSetItemTagRefusesBookOwnedKeysOnBooks(t *testing.T) {
+	ctx := context.Background()
+	st, lib := entityFixture(t)
+	book := putBook(t, st, lib.ID, bookSpec{
+		path: "/lib/hobbit.m4b", essence: "be1", content: "bc1",
+		title: "The Hobbit", author: "J.R.R. Tolkien", durationMS: 1000, position: 1,
+	})
+	attr := model.Attribution{Source: model.SourceUser}
+	for _, k := range []string{"SUBTITLE", "edition", "ASIN"} {
+		_, _, err := st.SetItemTag(ctx, book.ItemPID, k, []string{"x"}, attr, model.LockOf(false), false)
+		if !waxerr.Is(err, waxerr.CodeInvalid) {
+			t.Errorf("SetItemTag(book, %s) = %v, want CodeInvalid", k, err)
+		}
+	}
+	track := putTrackCustom(t, st, lib.ID, "/lib/song.mp3", "te1", "tc1", "Airbag", nil, false)
+	if _, n, err := st.SetItemTag(ctx, track.ItemPID, "SUBTITLE", []string{"Live"}, attr, model.LockOf(false), false); err != nil || n != 1 {
+		t.Errorf("SetItemTag(track, SUBTITLE) = (%d, %v), want the tag stored", n, err)
+	}
+}
+
 func TestScanPreservesLockedCustomTag(t *testing.T) {
 	st, lib := entityFixture(t)
 	ctx := context.Background()

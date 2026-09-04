@@ -88,8 +88,9 @@ type Store interface {
 	ApplyItemFields(ctx context.Context, in model.ItemFieldsEnrichment) error
 	// ApplyAlbumFields writes an album's label on the album row and its year across
 	// every member at once, both fill-when-empty and lock-respecting, and records the
-	// album fields marker. The year fill is vetoed unless every member is present,
-	// year-less, and unlocked, since it moves the album identity key.
+	// album fields marker. The year fill is vetoed unless the album has no year and
+	// every member is present, year-less, and unlocked, since it moves the album
+	// identity key.
 	ApplyAlbumFields(ctx context.Context, in model.AlbumFieldsEnrichment) error
 
 	ApplyArtistEnrichment(ctx context.Context, in model.ArtistEnrichment) error

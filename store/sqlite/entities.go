@@ -6,6 +6,7 @@ import (
 	"errors"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/colespringer/waxbin/identity"
@@ -385,8 +386,10 @@ func resolveReleaseGroup(ctx context.Context, tx *sql.Tx, log logger, key, title
 //
 // An existing row takes any of barcode/label/catalog_number/media/country it still
 // lacks from tags that now supply them: they are not part of identity.AlbumKey, so a
-// late tag pass hits the row already there. The mbid is not filled here because it IS
-// part of the key.
+// late tag pass hits the row already there. The year is topped up the same way even
+// though it is a key segment, because an mbid key ignores it: without the top-up a
+// year-less first file left the column NULL over members that carried theirs. The mbid
+// is not filled here because it IS part of the key.
 //
 // Two shapes still fork, and both are narrower than what adoption closes. A file
 // carrying a release-group id but no release id computes al:mbid:<group>\x1f…, which is
@@ -412,11 +415,13 @@ func resolveAlbum(ctx context.Context, tx *sql.Tx, log logger, key string, relea
 		return 0, nil
 	}
 	const sel = `SELECT id, pid, COALESCE(barcode,''), COALESCE(label,''),
-		COALESCE(catalog_number,''), COALESCE(media,''), COALESCE(country,'') FROM album WHERE `
+		COALESCE(catalog_number,''), COALESCE(media,''), COALESCE(country,''), COALESCE(year,0)
+		FROM album WHERE `
 	var id int64
 	var pid, curBarcode, curLabel, curCatNo, curMedia, curCountry string
+	var curYear int
 	err := tx.QueryRowContext(ctx, sel+"match_key = ?", key).
-		Scan(&id, &pid, &curBarcode, &curLabel, &curCatNo, &curMedia, &curCountry)
+		Scan(&id, &pid, &curBarcode, &curLabel, &curCatNo, &curMedia, &curCountry, &curYear)
 	if errors.Is(err, sql.ErrNoRows) {
 		adopted, aerr := adoptEntityByMBIDTx(ctx, tx, log, "album", key)
 		if aerr != nil {
@@ -424,12 +429,12 @@ func resolveAlbum(ctx context.Context, tx *sql.Tx, log logger, key string, relea
 		}
 		if adopted != 0 {
 			err = tx.QueryRowContext(ctx, sel+"id = ?", adopted).
-				Scan(&id, &pid, &curBarcode, &curLabel, &curCatNo, &curMedia, &curCountry)
+				Scan(&id, &pid, &curBarcode, &curLabel, &curCatNo, &curMedia, &curCountry, &curYear)
 		}
 	}
 	if err == nil {
 		return id, fillAlbumIdentifiersTx(ctx, tx, id, model.PID(pid), tr,
-			curBarcode, curLabel, curCatNo, curMedia, curCountry)
+			curBarcode, curLabel, curCatNo, curMedia, curCountry, curYear)
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
 		return 0, err
@@ -536,9 +541,14 @@ func fillEntityFieldTx(ctx context.Context, tx *sql.Tx, entityType model.MergeEn
 	return n > 0, err
 }
 
-// fillAlbumIdentifiersTx tops up an existing album's release identifiers and the two
-// descriptive edition columns, emitting one delta if anything landed. The cur values
-// come from resolveAlbum's own lookup, so the common no-op costs nothing extra.
+// fillAlbumIdentifiersTx tops up an existing album's release identifiers, the two
+// descriptive edition columns, and the year, emitting one delta if anything landed. The
+// cur values come from resolveAlbum's own lookup, so the common no-op costs nothing extra.
+//
+// The year goes through the same fill as the identifiers, so a curation lock on it would
+// hold if one were ever written; today an album's year is curated through its members,
+// whose locks the album fields walk reads. The column has integer affinity, so the text
+// the shared fill binds is stored as the integer.
 //
 // A column the release matcher can decide on also clears a stale no-match marker, since
 // a retag that adds a barcode must re-queue an album the weak edition tier failed on and
@@ -548,7 +558,7 @@ func fillEntityFieldTx(ctx context.Context, tx *sql.Tx, entityType model.MergeEn
 // which tier decided it. Undoing a match is a deliberate act, and clearing the album's
 // mbid through the entity-edit surface is what does it.
 func fillAlbumIdentifiersTx(ctx context.Context, tx *sql.Tx, id int64, pid model.PID,
-	tr model.Track, curBarcode, curLabel, curCatNo, curMedia, curCountry string) error {
+	tr model.Track, curBarcode, curLabel, curCatNo, curMedia, curCountry string, curYear int) error {
 	var wrote, newEvidence bool
 	for _, f := range []struct{ column, cur, val string }{
 		{"barcode", curBarcode, tr.Barcode},
@@ -574,6 +584,13 @@ func fillAlbumIdentifiersTx(ctx context.Context, tx *sql.Tx, id int64, pid model
 		if err := clearUnmatchedAlbumMarkerTx(ctx, tx, id); err != nil {
 			return err
 		}
+	}
+	if curYear == 0 && tr.Year != 0 {
+		w, err := fillEntityFieldTx(ctx, tx, model.MergeAlbum, "album", "year", id, strconv.Itoa(tr.Year))
+		if err != nil {
+			return err
+		}
+		wrote = wrote || w
 	}
 	if !wrote {
 		return nil

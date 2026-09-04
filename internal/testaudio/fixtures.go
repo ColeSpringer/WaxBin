@@ -21,6 +21,10 @@ var fixtures embed.FS
 //	ref-2s-sv8-chapters.mpc  the same signal through mpcenc r475 --thumb: Musepack SV8,
 //	                         mono, with chapter packets Intro, Middle, and Coda at 0,
 //	                         750, and 1500 ms written by mpcchap.
+//	sample.m4a               WaxLabel v1.6.2 testdata/sample.m4a: a 10 KB AAC file tagged
+//	                         by ffmpeg (title, artist, album, genre, track 2 of 10), the
+//	                         one MP4 container here, for the freeform-atom tag paths the
+//	                         MP3-bytes-named-.m4b fixtures never reach.
 //
 // The Musepack tools are the reference encoders WaxFlow builds with make mpc-tools.
 func Fixture(tb testing.TB, name string) []byte {

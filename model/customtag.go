@@ -83,6 +83,33 @@ var reservedTagKeys = map[string]bool{
 	TagWaxbinItemPID: true,
 }
 
+// bookOwnedTagKeys are the custom-key spellings the audiobook reader promotes into a
+// book's typed fields, each with the field it feeds. They are not reserved globally,
+// since a music release carries an ASIN or a subtitle as a plain custom tag and reserving
+// the key would drop it from every track; on a book the scalar edit owns the field, so
+// SetItemTag refuses them there. TIT3 is the ID3 subtitle frame, which the tag library
+// surfaces under its frame id. DESCRIPTION is reserved outright and so is absent here.
+var bookOwnedTagKeys = map[string]string{
+	"ASIN": "asin", "ISBN": "isbn", "SUBTITLE": "subtitle", "TIT3": "subtitle", "EDITION": "edition",
+}
+
+// BookOwnedTagField returns the book field a custom tag key (canonical uppercase) feeds
+// on a book, and whether it is one of those keys.
+func BookOwnedTagField(key string) (string, bool) {
+	f, ok := bookOwnedTagKeys[key]
+	return f, ok
+}
+
+// BookOwnedTagKeys returns the keys BookOwnedTagField knows, sorted.
+func BookOwnedTagKeys() []string {
+	out := make([]string, 0, len(bookOwnedTagKeys))
+	for k := range bookOwnedTagKeys {
+		out = append(out, k)
+	}
+	slices.Sort(out)
+	return out
+}
+
 // IsReservedTagKey reports whether key (canonical uppercase) is one WaxBin owns through
 // another surface, so it may not be used as a custom tag. It is the single source of
 // truth shared by the scan-time custom-tag collector (which skips these) and the

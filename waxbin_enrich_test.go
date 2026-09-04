@@ -17,6 +17,7 @@ import (
 	"github.com/colespringer/waxbin/meta"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/proxy"
+	"github.com/colespringer/waxbin/query"
 	"github.com/colespringer/waxbin/read"
 	"github.com/colespringer/waxbin/waxerr"
 )
@@ -564,9 +565,11 @@ func TestEnrichmentWritesTheNewFillsToDisk(t *testing.T) {
 	}
 }
 
-// TestEnrichmentWritesBookFieldsToDisk: a book's year and narrator reach the file, and
-// the fields with no tag key stay catalog-only.
+// TestEnrichmentWritesBookFieldsToDisk: every book field the walk fills reaches the file,
+// and a forced rescan reads them back onto the same item. edition feeds the identity key,
+// so the write has to re-anchor the book or the rescan would resolve a fresh one.
 func TestEnrichmentWritesBookFieldsToDisk(t *testing.T) {
+	const blurb = "Bilbo Baggins is a hobbit who enjoys a comfortable life."
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -585,7 +588,8 @@ func TestEnrichmentWritesBookFieldsToDisk(t *testing.T) {
 				Publisher: "HarperCollins",
 				Fields: map[string]string{
 					"year": "1937-09-21", "narrator": "Rob Inglis",
-					"subtitle": "There and Back Again",
+					"subtitle": "There and Back Again", "edition": "75th Anniversary Edition",
+					"description": blurb,
 				},
 			}, nil
 		}}
@@ -620,12 +624,31 @@ func TestEnrichmentWritesBookFieldsToDisk(t *testing.T) {
 	if len(fm.Tags.Narrators) == 0 || fm.Tags.Narrators[0] != "Rob Inglis" {
 		t.Errorf("file narrators = %v, want the enriched narrator", fm.Tags.Narrators)
 	}
-	// subtitle has no tag key, so it stays in the catalog alone.
+	if fm.Tags.Subtitle != "There and Back Again" {
+		t.Errorf("file subtitle = %q, want the enriched value", fm.Tags.Subtitle)
+	}
+	if fm.Tags.Edition != "75th Anniversary Edition" {
+		t.Errorf("file edition = %q, want the enriched value", fm.Tags.Edition)
+	}
+	if fm.Tags.Description != blurb {
+		t.Errorf("file description = %q, want the enriched value", fm.Tags.Description)
+	}
+
+	// Forced, which is the scan that recomputes identity from tags and rebuilds the
+	// unlocked columns from them.
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{Force: true}); err != nil {
+		t.Fatalf("forced rescan: %v", err)
+	}
 	d, err := lib.Book(ctx, pid)
 	if err != nil {
-		t.Fatalf("Book: %v", err)
+		t.Fatalf("book pid did not survive scan --force (the written edition moved the key): %v", err)
 	}
-	if d.Subtitle != "There and Back Again" {
-		t.Errorf("catalog subtitle = %q, want the enriched value held in the catalog", d.Subtitle)
+	if d.Subtitle != "There and Back Again" || d.Edition != "75th Anniversary Edition" || d.Description != blurb {
+		t.Errorf("after the rescan subtitle/edition/description = %q/%q/%q, want the values read back from the file",
+			d.Subtitle, d.Edition, d.Description)
+	}
+	items, err := lib.Query(ctx, query.New(query.EntityItems).Where("kind", query.OpIs, "book").Build(), "")
+	if err != nil || len(items) != 1 {
+		t.Fatalf("books after the rescan = %d (err %v), want the one re-anchored", len(items), err)
 	}
 }

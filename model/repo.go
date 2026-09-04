@@ -271,8 +271,7 @@ type SidecarUpdate struct {
 // write, which is not the same as one to clear: this pass mirrors what a provider
 // supplied and is not the authority on what a file should not contain.
 //
-// Only fields with an on-disk tag key reach it. A catalog field the scanner cannot read
-// back (a book's description, subtitle, or edition) stays DB-only by design.
+// Every field in it has an on-disk tag key the scanner reads back.
 type EnrichedTagRow struct {
 	ItemPID   PID
 	FilePID   PID

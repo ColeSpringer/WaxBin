@@ -1,6 +1,9 @@
 package model
 
-import "testing"
+import (
+	"slices"
+	"testing"
+)
 
 func TestCanonicalTagKey(t *testing.T) {
 	cases := []struct {
@@ -61,6 +64,32 @@ func TestFoldedWireSpellingsAreReserved(t *testing.T) {
 		if IsCuratableField(TagLockField(k)) {
 			t.Errorf("tag.%s should not be curatable", k)
 		}
+	}
+}
+
+// TestBookOwnedTagField pins the custom keys a book reads into typed fields. None is
+// reserved globally, since a music release carries an ASIN or a subtitle as a plain
+// custom tag; DESCRIPTION is reserved outright and so is not listed here.
+func TestBookOwnedTagField(t *testing.T) {
+	want := map[string]string{
+		"ASIN": "asin", "ISBN": "isbn", "SUBTITLE": "subtitle", "TIT3": "subtitle", "EDITION": "edition",
+	}
+	for key, field := range want {
+		if got, ok := BookOwnedTagField(key); !ok || got != field {
+			t.Errorf("BookOwnedTagField(%s) = (%q, %v), want (%q, true)", key, got, ok, field)
+		}
+		if IsReservedTagKey(key) {
+			t.Errorf("%s is reserved globally; a track would lose it as a custom tag", key)
+		}
+	}
+	for _, key := range []string{"MOOD", "DESCRIPTION", "NARRATOR"} {
+		if _, ok := BookOwnedTagField(key); ok {
+			t.Errorf("BookOwnedTagField(%s) = ok, want none", key)
+		}
+	}
+	keys := BookOwnedTagKeys()
+	if len(keys) != len(want) || !slices.IsSorted(keys) {
+		t.Errorf("BookOwnedTagKeys() = %v, want the %d keys sorted", keys, len(want))
 	}
 }
 

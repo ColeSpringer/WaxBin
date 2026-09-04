@@ -257,6 +257,25 @@ func setEntityMBID(t *testing.T, st *sqlite.Store, et model.MergeEntity, pid, mb
 // TestAlbumsNeedingReleaseMatchGatesOnIdentifiers pins the four-part queue gate: an
 // album is queued only when it has no mbid of its own, its release group has one, and
 // it carries a barcode or a catalog number.
+// TestApplyAlbumFieldsIgnoresAVanishedAlbum: the album can go away between the queue
+// page and the apply (a merge or an orphan sweep in another writer), and a dead rowid
+// gets nothing rather than failing the run or stranding a marker.
+func TestApplyAlbumFieldsIgnoresAVanishedAlbum(t *testing.T) {
+	ctx := context.Background()
+	st, dbPath, _ := openStoreAt(t)
+	err := st.ApplyAlbumFields(ctx, model.AlbumFieldsEnrichment{
+		AlbumID: 424242, PID: model.NewPID(), Matched: true, Provider: "discogs",
+		Fields: map[string]string{"year": "1975", "label": "Harvest"},
+	})
+	if err != nil {
+		t.Fatalf("ApplyAlbumFields on a vanished album: %v", err)
+	}
+	db := roConn(t, dbPath)
+	if n := scalarQueryInt(t, db, "SELECT COUNT(*) FROM entity_enrichment WHERE entity_type = 'fields_album'"); n != 0 {
+		t.Errorf("stranded fields_album markers = %d, want none", n)
+	}
+}
+
 func TestAlbumsNeedingReleaseMatchGatesOnIdentifiers(t *testing.T) {
 	ctx := context.Background()
 	st, dbPath, lib := openStoreAt(t)

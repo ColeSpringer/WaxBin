@@ -1394,9 +1394,8 @@ func (l *Library) EditField(ctx context.Context, itemPID model.PID, field, value
 // With opts.WriteBack set, the values are also written into the backing files' on-disk
 // tags. A track writes every edited scalar to its file; a book writes the audiobook
 // tags a scan reads back (title to ALBUM, author to ALBUMARTIST, narrator to NARRATOR
-// and COMPOSER, series and sequence to GROUPING, plus genre and year) across all its
-// parts, leaving the enrichment-only fields (subtitle, identifiers, publisher,
-// description) DB-only.
+// and COMPOSER, series and sequence to GROUPING, the rest under the keys
+// meta.BookFieldTagKeys names) across all its parts.
 //
 // Write-back runs after the catalog edit has committed, so a file that cannot be
 // written (a read-only mount, a permission error, an unrepresentable value, a file
@@ -1719,9 +1718,7 @@ func (l *Library) writeBackFiles(ctx context.Context, op string, origin model.Di
 // A track writes every edited scalar to its file (tagEditsForFields). A book writes the
 // audiobook tags the scanner reads back (bookTagEditsForFields) across all of its parts,
 // because a book's title and author are the key its parts group by and writing them to
-// one part alone would split the book on rescan. Book fields the scanner cannot
-// reconstruct from a tag (subtitle, asin, isbn, publisher, edition, description, mbid)
-// stay DB-only, so a rescan can never undo them. An episode is refused.
+// one part alone would split the book on rescan. An episode is refused.
 func (l *Library) writeBackFields(ctx context.Context, itemPID model.PID, edits map[string]string) error {
 	return l.writeBackItemEdits(ctx, "waxbin.EditFields", itemPID, edits, nil)
 }
@@ -1812,11 +1809,6 @@ func (l *Library) writeBackItemEdits(ctx context.Context, op string, itemPID mod
 				tagEdits = append(tagEdits, te)
 			}
 		}
-		// A book edit that touched only DB-only fields has no on-disk representation; the
-		// catalog edit stands and those fields are DB-only by design, so there is no drift.
-		if len(tagEdits) == 0 && len(refusals) == 0 {
-			return nil
-		}
 	default:
 		what := "tag"
 		if len(edits) == 0 {
@@ -1905,17 +1897,13 @@ func (l *Library) appendDerivedSortClears(ctx context.Context, itemPID model.PID
 	return tagEdits, nil
 }
 
-// bookIdentityEdited reports whether an edit touched a book field that participates in
-// the book's identity key (title or author), so its on-disk write-back needs an identity
-// re-anchor. The other identity-key inputs (asin/isbn/edition) are DB-only and never
-// written to disk, so they cannot move the on-disk-derived key.
+// bookIdentityEdited reports whether an edit touched a field identity.BookKey reads, so
+// its on-disk write-back needs an identity re-anchor. Every one of them reaches disk:
+// without the re-anchor an edit stamps a new value onto the files while the stored key
+// stays behind, so the next scan resolves a different item and orphans this one's pid,
+// play state, and locks.
 func bookIdentityEdited(edits map[string]string) bool {
-	// Every field identity.BookKey reads that also reaches disk. Without asin and isbn
-	// here, an edit stamps a new identifier onto the files while the stored key stays
-	// behind, so the next scan resolves a different item and orphans this one's pid,
-	// play state, and locks. edition is a BookKey input but nothing writes it to disk;
-	// adding it there means adding it here.
-	for _, f := range []string{"title", "author", "asin", "isbn"} {
+	for _, f := range []string{"title", "author", "asin", "isbn", "edition"} {
 		if _, ok := edits[f]; ok {
 			return true
 		}
@@ -1952,10 +1940,10 @@ func (l *Library) reanchorBookIdentity(ctx context.Context, itemPID, filePID mod
 }
 
 // bookTagEditsForFields maps committed book field edits to the on-disk tags the
-// audiobook scanner reads back, so a book edit round-trips through a rescan. It covers
-// only the fields the scanner reconstructs from a tag; the rest stay DB-only. seriesSeq
+// audiobook scanner reads back, so a book edit round-trips through a rescan. seriesSeq
 // is the book's current sequence, folded into the GROUPING value only when "series" is
-// among the edits. A value empty after trimming clears its tag.
+// among the edits. A value empty after trimming clears its tag, and with it any key the
+// reader folds into the same field (meta.BookFieldClearKeys).
 func bookTagEditsForFields(edits map[string]string, seriesSeq string) []meta.TagEdit {
 	out := make([]meta.TagEdit, 0, len(edits))
 	add := func(key, value string) {
@@ -1981,10 +1969,15 @@ func bookTagEditsForFields(edits map[string]string, seriesSeq string) []meta.Tag
 		}
 		keys, ok := meta.BookFieldTagKeys(field)
 		if !ok {
-			continue // a DB-only book field: subtitle, asin, isbn, publisher, edition, description, mbid
+			continue
 		}
 		for _, k := range keys {
 			add(k, value)
+		}
+		if strings.TrimSpace(value) == "" {
+			for _, k := range meta.BookFieldClearKeys(field) {
+				add(k, "")
+			}
 		}
 	}
 	return out

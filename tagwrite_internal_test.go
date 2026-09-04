@@ -18,6 +18,27 @@ import (
 	"github.com/colespringer/waxlabel/tag"
 )
 
+// TestBookTagEditsClearDescriptionClearsTheLongForm: the reader folds DESCRIPTION and
+// LONGDESCRIPTION into one description, so a clear has to empty both or the long form
+// reads back as the old value. A set writes the short key alone and leaves the long
+// form, which may hold a fuller text, in place.
+func TestBookTagEditsClearDescriptionClearsTheLongForm(t *testing.T) {
+	cleared := map[string]bool{}
+	for _, e := range bookTagEditsForFields(map[string]string{"description": ""}, "") {
+		if len(e.Values) != 0 {
+			t.Errorf("clear wrote %s=%v, want an empty edit", e.Key, e.Values)
+		}
+		cleared[e.Key] = true
+	}
+	if !cleared["DESCRIPTION"] || !cleared["LONGDESCRIPTION"] || len(cleared) != 2 {
+		t.Errorf("a description clear touched %v, want DESCRIPTION and LONGDESCRIPTION", cleared)
+	}
+	set := bookTagEditsForFields(map[string]string{"description": "Short."}, "")
+	if len(set) != 1 || set[0].Key != "DESCRIPTION" || len(set[0].Values) != 1 || set[0].Values[0] != "Short." {
+		t.Errorf("a description set produced %+v, want DESCRIPTION alone", set)
+	}
+}
+
 func TestReplayGainEdits(t *testing.T) {
 	// A standalone track (no album) writes track keys and CLEARS the album keys, so
 	// stale album gain from a former album membership is removed on disk.

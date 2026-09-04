@@ -655,6 +655,220 @@ func TestReadsBookIdentifierTags(t *testing.T) {
 	}
 }
 
+// TestReadsBookDescriptiveTags covers subtitle, edition, and description, the last book
+// fields the reader left out. SUBTITLE and EDITION ride custom keys the book path
+// promotes; DESCRIPTION is the typed key. An explicit EDITION outranks the edition the
+// bracketed abridged marker derives, while the marker still decides the flag.
+func TestReadsBookDescriptiveTags(t *testing.T) {
+	const blurb = "Bilbo Baggins is a hobbit who enjoys a comfortable life."
+	p := writeTemp(t, "book.m4b", testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
+		Title: "The Hobbit", Artist: "J.R.R. Tolkien", AlbumArtist: "J.R.R. Tolkien",
+		Album: "The Hobbit (Unabridged)",
+		TXXX: []testaudio.TXXXFrame{
+			{Desc: "SUBTITLE", Value: "There and Back Again"},
+			{Desc: "EDITION", Value: "75th Anniversary Edition"},
+			{Desc: "DESCRIPTION", Value: blurb},
+		},
+	}))
+	fm, err := NewReader().Read(context.Background(), p)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if !fm.Tags.IsAudiobook {
+		t.Fatal("fixture did not classify as a book")
+	}
+	if fm.Tags.Subtitle != "There and Back Again" {
+		t.Errorf("subtitle = %q, want the SUBTITLE value", fm.Tags.Subtitle)
+	}
+	if fm.Tags.Edition != "75th Anniversary Edition" {
+		t.Errorf("edition = %q, want the explicit EDITION over the marker's Unabridged", fm.Tags.Edition)
+	}
+	if fm.Tags.Abridged == nil || *fm.Tags.Abridged {
+		t.Errorf("abridged = %v, want the marker still read as unabridged", fm.Tags.Abridged)
+	}
+	if fm.Tags.Description != blurb {
+		t.Errorf("description = %q, want the DESCRIPTION value", fm.Tags.Description)
+	}
+	for _, k := range []string{"SUBTITLE", "EDITION"} {
+		if v, ok := fm.Tags.Custom[k]; ok {
+			t.Errorf("custom[%s] = %v, want it promoted to the typed field", k, v)
+		}
+	}
+
+	// A track keeps both as custom tags, as it keeps an ASIN.
+	p = writeTemp(t, "song.mp3", testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
+		Title: "Airbag", Artist: "Radiohead", Album: "OK Computer",
+		TXXX: []testaudio.TXXXFrame{
+			{Desc: "SUBTITLE", Value: "Live"},
+			{Desc: "EDITION", Value: "Collector's"},
+		},
+	}))
+	fm, err = NewReader().Read(context.Background(), p)
+	if err != nil {
+		t.Fatalf("Read track: %v", err)
+	}
+	if fm.Tags.Subtitle != "" || fm.Tags.Edition != "" {
+		t.Errorf("track subtitle/edition = %q/%q, want empty (books only)", fm.Tags.Subtitle, fm.Tags.Edition)
+	}
+	if got := fm.Tags.Custom["SUBTITLE"]; len(got) != 1 || got[0] != "Live" {
+		t.Errorf("track custom[SUBTITLE] = %v, want the tagged value preserved", got)
+	}
+	if got := fm.Tags.Custom["EDITION"]; len(got) != 1 || got[0] != "Collector's" {
+		t.Errorf("track custom[EDITION] = %v, want the tagged value preserved", got)
+	}
+}
+
+// TestBookEditionTagSetsAbridgedFlag: an explicit EDITION that is itself the abridged
+// word sets the flag the marker would have, so the pair parseAbridged returns together
+// stays a pair; any other edition leaves the flag to the marker.
+func TestBookEditionTagSetsAbridgedFlag(t *testing.T) {
+	read := func(edition string) model.Tags {
+		t.Helper()
+		p := writeTemp(t, "book.m4b", testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
+			Title: "The Hobbit", Artist: "J.R.R. Tolkien", AlbumArtist: "J.R.R. Tolkien",
+			Album: "The Hobbit",
+			TXXX:  []testaudio.TXXXFrame{{Desc: "EDITION", Value: edition}},
+		}))
+		fm, err := NewReader().Read(context.Background(), p)
+		if err != nil {
+			t.Fatalf("Read: %v", err)
+		}
+		return fm.Tags
+	}
+	if got := read("Abridged"); got.Edition != "Abridged" || got.Abridged == nil || !*got.Abridged {
+		t.Errorf("EDITION=Abridged read as edition %q, abridged %v; want the flag set", got.Edition, got.Abridged)
+	}
+	if got := read("unabridged"); got.Edition != "unabridged" || got.Abridged == nil || *got.Abridged {
+		t.Errorf("EDITION=unabridged read as edition %q, abridged %v; want the flag cleared", got.Edition, got.Abridged)
+	}
+	if got := read("75th Anniversary Edition"); got.Abridged != nil {
+		t.Errorf("a named edition set abridged=%v, want the flag left unknown", *got.Abridged)
+	}
+}
+
+// TestBookSubtitleFallsBackToTIT3: Mp3tag and Picard write a SUBTITLE field to the ID3
+// TIT3 frame, which the tag library surfaces as a custom key of that name, so a book
+// reads it when no SUBTITLE key is present. SUBTITLE wins when both are, since it is the
+// key the write-back writes. A track keeps TIT3 as the custom tag it always was.
+func TestBookSubtitleFallsBackToTIT3(t *testing.T) {
+	p := writeTemp(t, "book.m4b", testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
+		Title: "The Hobbit", Artist: "J.R.R. Tolkien", AlbumArtist: "J.R.R. Tolkien",
+		Album: "The Hobbit", Subtitle: "There and Back Again",
+	}))
+	fm, err := NewReader().Read(context.Background(), p)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if fm.Tags.Subtitle != "There and Back Again" {
+		t.Errorf("subtitle = %q, want the TIT3 value", fm.Tags.Subtitle)
+	}
+	if v, ok := fm.Tags.Custom["TIT3"]; ok {
+		t.Errorf("custom[TIT3] = %v, want it promoted to the subtitle", v)
+	}
+
+	p = writeTemp(t, "book.m4b", testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
+		Title: "The Hobbit", Artist: "J.R.R. Tolkien", AlbumArtist: "J.R.R. Tolkien",
+		Album: "The Hobbit", Subtitle: "From TIT3",
+		TXXX: []testaudio.TXXXFrame{{Desc: "SUBTITLE", Value: "From SUBTITLE"}},
+	}))
+	if fm, err = NewReader().Read(context.Background(), p); err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if fm.Tags.Subtitle != "From SUBTITLE" {
+		t.Errorf("subtitle = %q, want SUBTITLE to outrank TIT3", fm.Tags.Subtitle)
+	}
+
+	p = writeTemp(t, "song.mp3", testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
+		Title: "Airbag", Artist: "Radiohead", Album: "OK Computer", Subtitle: "Live",
+	}))
+	if fm, err = NewReader().Read(context.Background(), p); err != nil {
+		t.Fatalf("Read track: %v", err)
+	}
+	if got := fm.Tags.Custom["TIT3"]; len(got) != 1 || got[0] != "Live" {
+		t.Errorf("track custom[TIT3] = %v, want the frame kept as a custom tag", got)
+	}
+}
+
+// TestBookOwnedTagKeysPromote ties the reader to model.BookOwnedTagKeys, the list the
+// store refuses as custom tags on a book: every key in it must be one applyBookFields
+// promotes out of the custom map, or the store would refuse a tag the reader then stores.
+func TestBookOwnedTagKeysPromote(t *testing.T) {
+	keys := model.BookOwnedTagKeys()
+	if len(keys) == 0 {
+		t.Fatal("BookOwnedTagKeys is empty")
+	}
+	var frames []testaudio.TXXXFrame
+	for _, k := range keys {
+		frames = append(frames, testaudio.TXXXFrame{Desc: k, Value: "value for " + k})
+	}
+	p := writeTemp(t, "book.m4b", testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
+		Title: "The Hobbit", Artist: "J.R.R. Tolkien", AlbumArtist: "J.R.R. Tolkien",
+		Album: "The Hobbit", TXXX: frames,
+	}))
+	fm, err := NewReader().Read(context.Background(), p)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	for _, k := range keys {
+		if v, ok := fm.Tags.Custom[k]; ok {
+			t.Errorf("book custom[%s] = %v, want the key promoted to its typed field", k, v)
+		}
+	}
+	p = writeTemp(t, "song.mp3", testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
+		Title: "Airbag", Artist: "Radiohead", Album: "OK Computer", TXXX: frames,
+	}))
+	if fm, err = NewReader().Read(context.Background(), p); err != nil {
+		t.Fatalf("Read track: %v", err)
+	}
+	for _, k := range keys {
+		if _, ok := fm.Tags.Custom[k]; !ok {
+			t.Errorf("track custom[%s] missing, want a book-owned key kept as a custom tag on a track", k)
+		}
+	}
+}
+
+// TestMP4BookDescriptiveRoundTrip writes the three descriptive keys into a real MP4
+// container and reads them back: DESCRIPTION has a dedicated atom, SUBTITLE and EDITION
+// go through freeform atoms, and neither path is reached by the MP3 bytes the other book
+// fixtures wrap in a .m4b name.
+func TestMP4BookDescriptiveRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	p := writeTemp(t, "book.m4b", testaudio.Fixture(t, "sample.m4a"))
+	const blurb = "Bilbo Baggins is a hobbit who enjoys a comfortable life."
+	res, err := NewWriter().Apply(ctx, p, []TagEdit{
+		{Key: "SUBTITLE", Values: []string{"There and Back Again"}},
+		{Key: "EDITION", Values: []string{"75th Anniversary Edition"}},
+		{Key: "DESCRIPTION", Values: []string{blurb}},
+	})
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if !res.Changed {
+		t.Fatal("Apply reported no change")
+	}
+	for _, w := range res.Warnings {
+		if w.Unrepresented {
+			t.Errorf("unrepresented on MP4: %s %s", w.Key, w.Message)
+		}
+	}
+	fm, err := NewReader().Read(ctx, p)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if !fm.Tags.IsAudiobook {
+		t.Fatal("fixture did not classify as a book")
+	}
+	if fm.Tags.Subtitle != "There and Back Again" || fm.Tags.Edition != "75th Anniversary Edition" || fm.Tags.Description != blurb {
+		t.Errorf("subtitle/edition/description = %q/%q/%q, want the written values back from the MP4 atoms",
+			fm.Tags.Subtitle, fm.Tags.Edition, fm.Tags.Description)
+	}
+	for _, k := range []string{"SUBTITLE", "EDITION"} {
+		if v, ok := fm.Tags.Custom[k]; ok {
+			t.Errorf("custom[%s] = %v, want it promoted", k, v)
+		}
+	}
+}
+
 // TestTrackKeepsLabelAsLabel: the shared frame must still mean "label" for music.
 func TestTrackKeepsLabelAsLabel(t *testing.T) {
 	p := writeTemp(t, "song.mp3", testaudio.BuildMP3FromSpec(testaudio.MP3Spec{

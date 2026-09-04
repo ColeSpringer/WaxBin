@@ -168,21 +168,23 @@ func CreditTagValues(key string, names []string) []string {
 // TITLE holds a part or chapter name) and its author is ALBUMARTIST, so its author
 // sort is ALBUMARTISTSORT (the first key the scanner's author_sort derive reads).
 // narrator maps to two keys, NARRATOR and the COMPOSER fallback the scanner also reads
-// (the Audiobookshelf convention), so both stay in step. A book field absent here
-// (subtitle, edition, description) is one the reader does not fill, so writing it to
-// disk could not survive a rescan. series is deliberately not in this map. It packs a
-// name and a sequence into one GROUPING value, so the caller builds that through
-// BookSeriesTagKey and PackSeriesGrouping.
+// (the Audiobookshelf convention), so both stay in step. series is deliberately not in
+// this map. It packs a name and a sequence into one GROUPING value, so the caller builds
+// that through BookSeriesTagKey and PackSeriesGrouping.
 //
-// asin/isbn/publisher round-trip now that applyBookFields reads them back. publisher
-// writes the LABEL key because that is the frame it is read from (TPUB, or PUBLISHER on
-// Vorbis and Matroska), which a book does not otherwise use.
+// Every key here is one applyBookFields reads back, and that is the rule for adding one:
+// a key only the writer knows is cleared by the next content-changed rescan, which is the
+// loss the write-back exists to prevent. publisher writes the LABEL key because that is
+// the frame it is read from (TPUB, or PUBLISHER on Vorbis and Matroska), which a book
+// does not otherwise use. subtitle and edition have no key in the tag library, so they
+// ride custom keys of their own names (a TXXX user frame on ID3, a freeform atom on MP4)
+// that the reader promotes for a book alone; description is the typed DESCRIPTION key.
 //
-// asin and isbn are identity inputs (identity.BookKey), unlike every other entry here
-// except title and author. A caller that writes them must re-anchor the book's stored
-// identity key from the file's post-write tags, or the next scan resolves a different
-// item; see reanchorBookIdentity and bookIdentityEdited. mbid is not an identity input,
-// so it needs no re-anchor.
+// asin, isbn, and edition are identity inputs (identity.BookKey), unlike every other
+// entry here except title and author. A caller that writes them must re-anchor the
+// book's stored identity key from the file's post-write tags, or the next scan resolves
+// a different item; see reanchorBookIdentity and bookIdentityEdited. mbid is not an
+// identity input, so it needs no re-anchor.
 //
 // author_sort round-trips with a caveat: the scanner folds the tag through
 // model.SortKey on an unlocked rescan, so what the written literal preserves is
@@ -199,15 +201,28 @@ var bookFieldTagKeys = map[string][]string{
 	"isbn":        {"ISBN"},
 	"publisher":   {string(tag.Label)},
 	"mbid":        {"MUSICBRAINZ_ALBUMID"}, // a book's release id, read back by bookInput
+	"subtitle":    {"SUBTITLE"},
+	"edition":     {"EDITION"},
+	"description": {string(tag.Description)},
 }
 
 // BookFieldTagKeys returns the on-disk tag keys the audiobook scanner reads back for a
-// book metadata field, and whether the field round-trips through a tag at all. A field
-// with no keys is DB-only by design; see bookFieldTagKeys. series is handled through
-// BookSeriesTagKey, not here.
+// book metadata field, and whether the field has any. Only series has none; it is
+// handled through BookSeriesTagKey.
 func BookFieldTagKeys(field string) ([]string, bool) {
 	k, ok := bookFieldTagKeys[field]
 	return k, ok
+}
+
+// BookFieldClearKeys returns the keys a clear of a book field must empty besides the ones
+// it writes. The reader folds DESCRIPTION and LONGDESCRIPTION into one description, so
+// clearing the short key alone lets the long one read back as the old value; a set leaves
+// the long form alone, since it may hold a fuller text than the one being set.
+func BookFieldClearKeys(field string) []string {
+	if field == "description" {
+		return []string{string(tag.LongDescription)}
+	}
+	return nil
 }
 
 // BookSeriesTagKey is the single tag that carries a book's series and sequence. The

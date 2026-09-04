@@ -22,7 +22,9 @@ import (
 // later scan re-derives it: a clear is a full forget, never a locked-empty tag. The key
 // is normalized to canonical uppercase, so KEY and key are one tag. A reserved key (one
 // WaxBin owns through the scalar, credit, or identifier APIs) is rejected with
-// CodeInvalid so the caller reaches for the right surface instead. A locked tag is
+// CodeInvalid so the caller reaches for the right surface instead, and so is a key the
+// scanner reads into a book field (model.BookOwnedTagField) when the item is a book,
+// since a custom value under it would reach the file and shadow the field. A locked tag is
 // refused with CodeLocked unless force is set. It returns the canonical key stored and
 // the number of values stored after trimming (0 means the tag was cleared), so a caller
 // does not report a whitespace-only clear as a set.
@@ -60,6 +62,12 @@ func (s *Store) SetItemTag(ctx context.Context, itemPID model.PID, key string, v
 		}
 		if !curatableFieldForKind(kind, field) {
 			return waxerr.New(waxerr.CodeInvalid, op, "custom tags are not editable on a "+kind+" item")
+		}
+		if kind == string(model.KindBook) {
+			if f, ok := model.BookOwnedTagField(canon); ok {
+				return waxerr.New(waxerr.CodeInvalid, op,
+					"tag key "+canon+" is the "+f+" field on a book; set it through the scalar edit API")
+			}
 		}
 		if !force {
 			locked, err := fieldLockedTx(ctx, tx, itemID, field)

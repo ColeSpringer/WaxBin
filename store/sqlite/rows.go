@@ -450,6 +450,13 @@ const (
 	bookISBNKeyPrefix = "isbn:"
 )
 
+// The shape of a heuristic book key: the prefix, then the author, title, and edition
+// match keys joined by the separator, the last segment empty for a book with no edition.
+const (
+	bookKeyPrefix = "book:"
+	bookKeySep    = '\x1f'
+)
+
 // bookAdoptKey is the descriptive evidence an ASIN adoption corroborates against: the
 // author and title the arriving file states. Zero for a track, which never adopts.
 type bookAdoptKey struct{ author, title string }
@@ -481,7 +488,7 @@ func adoptBookItemByIdentTx(ctx context.Context, tx *sql.Tx, log logger, identit
 		column, ident, label = "b.isbn_key", strings.TrimPrefix(identityKey, bookISBNKeyPrefix), "isbn"
 	}
 	if ident == "" {
-		return 0, nil
+		return adoptBookItemByEditionTx(ctx, tx, identityKey)
 	}
 	rows, err := tx.QueryContext(ctx, `SELECT b.item_id, b.author, pi.title
 		FROM book b JOIN playable_item pi ON pi.id = b.item_id
@@ -533,14 +540,47 @@ func adoptBookItemByIdentTx(ctx context.Context, tx *sql.Tx, log logger, identit
 	return ids[0], nil
 }
 
+// adoptBookItemByEditionTx is the edition arm of adoptBookItemByIdentTx. An edition can
+// sit in book.edition while the stored key stays edition-less: an edit that never reached
+// disk, or a file tagged before the reader knew the EDITION key. A rescan of that file
+// computes the key with the edition segment, which matches nothing, and would fork. The
+// book keyed by the same author and title with no edition segment is adopted when its
+// column folds to the same edition, since that row already describes itself as this
+// edition; any other edition is a different book. Like the identifier arms it writes
+// nothing, so the file keeps adopting until a write-back re-anchors the key.
+func adoptBookItemByEditionTx(ctx context.Context, tx *sql.Tx, identityKey string) (int64, error) {
+	if !strings.HasPrefix(identityKey, bookKeyPrefix) {
+		return 0, nil
+	}
+	i := strings.LastIndexByte(identityKey, bookKeySep)
+	if i < 0 || i == len(identityKey)-1 {
+		return 0, nil
+	}
+	var id int64
+	var edition string
+	err := tx.QueryRowContext(ctx, `SELECT b.item_id, COALESCE(b.edition,'') FROM book b
+		JOIN playable_item pi ON pi.id = b.item_id
+		WHERE pi.kind = 'book' AND pi.identity_key = ?`, identityKey[:i+1]).Scan(&id, &edition)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	if identity.MatchKey(edition) != identityKey[i+1:] {
+		return 0, nil
+	}
+	return id, nil
+}
+
 // upsertItem finds-or-creates the logical item, returning its id, pid, whether it
 // was created, and whether an existing item's state transitioned (e.g. missing ->
 // present when a file is restored) so the caller can emit a change_log delta for the
 // transition even when the audio content is unchanged.
 //
 // A book whose key matches nothing gets a second look by its strong identifier, so an
-// enrichment-derived ASIN or ISBN joins the standing book rather than forking a new one.
-// See adoptBookItemByIdentTx.
+// enrichment-derived ASIN or ISBN joins the standing book rather than forking a new one,
+// and by its edition column for the same reason. See adoptBookItemByIdentTx.
 func upsertItem(ctx context.Context, tx *sql.Tx, log logger, item model.PlayableItem, adopt bookAdoptKey, now int64, preferredPID model.PID) (id int64, pid model.PID, created, stateChanged bool, err error) {
 	if item.IdentityKey != "" {
 		var rid int64

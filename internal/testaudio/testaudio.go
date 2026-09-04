@@ -85,7 +85,10 @@ type MP3Spec struct {
 	// Label is the release label, which ID3 carries in TPUB rather than a TXXX. Its
 	// two siblings, BARCODE and CATALOGNUMBER, have no dedicated frame and go through
 	// TXXX instead.
-	Label             string
+	Label string
+	// Subtitle is written to TIT3, the ID3 subtitle frame Mp3tag and Picard write for a
+	// SUBTITLE field, which the tag library reads as a custom key of that frame id.
+	Subtitle          string
 	Track, Disc, Year int
 	Compilation       bool
 	// BPM is written verbatim into TBPM. It is a string because ID3 stores the text a
@@ -114,6 +117,7 @@ func BuildMP3FromSpec(s MP3Spec) []byte {
 	add("TCON", s.Genre)
 	add("TPUB", s.Label)
 	add("TCOM", s.Composer)
+	add("TIT3", s.Subtitle)
 	add("TBPM", s.BPM)
 	if s.Track > 0 {
 		add("TRCK", strconv.Itoa(s.Track))

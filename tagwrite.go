@@ -215,8 +215,8 @@ func r128Gain(rgDB float64) string {
 // skips a marked entity, so nothing refilled what the retag cleared. It reaches only
 // fields the reader fills; bookFieldTagKeys records which book fields those are.
 //
-// ASIN and ISBN feed identity.BookKey, so a book whose parts were written is re-anchored
-// from its primary part's post-write tags. Without that the next scan computes a
+// ASIN, ISBN, and edition feed identity.BookKey, so a book whose parts were written is
+// re-anchored from its primary part's post-write tags. Without that the next scan computes a
 // different identity key and resolves a different item, orphaning the book's pid, play
 // state and locks. reanchorBookIdentity re-reads the file, so it self-corrects when a
 // write did not land.
@@ -445,12 +445,11 @@ type enrichWriteCounts struct {
 }
 
 // enrichmentTagFields is the fixed per-kind order enrichmentEdits walks, so one file's
-// write is reproducible regardless of Go's map ordering. It lists only fields with an
-// on-disk tag key: a book's description, subtitle, and edition have none, so they stay
-// catalog-only and a rescan can never undo them.
+// write is reproducible regardless of Go's map ordering. Every field listed has an
+// on-disk tag key the scanner reads back.
 var enrichmentTagFields = map[model.Kind][]string{
 	model.KindTrack: {"bpm", "composer", "genre", "isrc", "year"},
-	model.KindBook:  {"asin", "genre", "isbn", "narrator", "publisher", "year"},
+	model.KindBook:  {"asin", "description", "edition", "genre", "isbn", "narrator", "publisher", "subtitle", "year"},
 }
 
 // enrichmentEdits builds the tag edits for one file. Every key comes from

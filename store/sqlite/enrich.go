@@ -1514,8 +1514,8 @@ type logger interface {
 
 // enrichedTagSelect finds every file an enrichment write-back should stamp: the items
 // carrying a field_provenance row this pass wrote, joined to their backing files. A
-// book repeats across its parts because asin and isbn feed identity.BookKey, so parts
-// disagreeing on them would not group on the next scan; a track has one file. The
+// book repeats across its parts because asin, isbn, and edition feed identity.BookKey, so
+// parts disagreeing on them would not group on the next scan; a track has one file. The
 // primary part sorts first, so a caller can abandon a book whose primary fails before
 // touching the rest.
 //
@@ -1546,7 +1546,8 @@ const enrichedTagSelect = `SELECT pi.pid, f.pid, pi.kind, f.path, f.size, f.mtim
 		COALESCE(t.genre,''), COALESCE(NULLIF(CAST(t.bpm AS TEXT),'0'),''),
 		COALESCE(t.isrc,''), COALESCE(t.composer,''), COALESCE(NULLIF(CAST(t.year AS TEXT),'0'),''),
 		COALESCE(bk.asin,''), COALESCE(bk.isbn,''), COALESCE(bk.publisher,''),
-		COALESCE(bk.genre,''), COALESCE(NULLIF(CAST(bk.year AS TEXT),'0'),''), COALESCE(bk.narrator,'')
+		COALESCE(bk.genre,''), COALESCE(NULLIF(CAST(bk.year AS TEXT),'0'),''), COALESCE(bk.narrator,''),
+		COALESCE(bk.subtitle,''), COALESCE(bk.edition,''), COALESCE(bk.description,'')
 	FROM playable_item pi
 	JOIN item_file itf ON itf.item_id = pi.id AND itf.start_frames IS NULL
 	JOIN file f ON f.id = itf.file_id
@@ -1562,7 +1563,7 @@ const enrichedTagSelect = `SELECT pi.pid, f.pid, pi.kind, f.path, f.size, f.mtim
 // is the one place the select's column order and the field names are tied together.
 var enrichedTagFieldOrder = map[model.Kind][]string{
 	model.KindTrack: {"genre", "bpm", "isrc", "composer", "year"},
-	model.KindBook:  {"asin", "isbn", "publisher", "genre", "year", "narrator"},
+	model.KindBook:  {"asin", "isbn", "publisher", "genre", "year", "narrator", "subtitle", "edition", "description"},
 }
 
 // EnrichmentWriteback returns the files an enrichment write-back should stamp, with the
@@ -1584,17 +1585,18 @@ func (s *Store) EnrichmentWriteback(ctx context.Context, sinceNS int64) ([]model
 		var primary int
 		var written string
 		var trackGenre, bpm, isrc, composer, trackYear string
-		var asin, isbn, publisher, bookGenre, bookYear, narrator string
+		var asin, isbn, publisher, bookGenre, bookYear, narrator, subtitle, edition, description string
 		if err := rows.Scan(&r.ItemPID, &r.FilePID, &r.Kind, &r.Path, &r.Size, &r.MTimeNS,
 			&primary, &written,
 			&trackGenre, &bpm, &isrc, &composer, &trackYear,
-			&asin, &isbn, &publisher, &bookGenre, &bookYear, &narrator); err != nil {
+			&asin, &isbn, &publisher, &bookGenre, &bookYear, &narrator,
+			&subtitle, &edition, &description); err != nil {
 			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		r.IsPrimary = primary == 1
 		values := []string{trackGenre, bpm, isrc, composer, trackYear}
 		if r.Kind == model.KindBook {
-			values = []string{asin, isbn, publisher, bookGenre, bookYear, narrator}
+			values = []string{asin, isbn, publisher, bookGenre, bookYear, narrator, subtitle, edition, description}
 		}
 		enriched := make(map[string]bool, 8)
 		for _, f := range strings.Split(written, ",") {
@@ -1966,12 +1968,14 @@ func (s *Store) AlbumsNeedingFields(ctx context.Context, force bool, afterID int
 //
 // year participates in the album identity key, so it cannot be written per member without
 // forking the album. It goes through the uniform whole-album edit instead, which moves the
-// album and its release group in place. That path is vetoed unless every member agrees:
-// any member already carrying a year, any member not present (an archived member vetoes
-// the in-place rewrite and the fallback would split the album), or any member whose locks
-// make it unwritable. The member-level test is the load-bearing one: the scan writes
-// album.year at insert and never tops it up, so an mbid-keyed album can hold a NULL year
-// over members that carry theirs, and the uniform edit would overwrite them.
+// album and its release group in place. The album row is the first fill-when-empty test:
+// the scan tops its year up from any member carrying one, and a member's year cleared
+// later leaves the column set over year-less members, which is an album that has its year
+// and must not take a provider's. The members are the second, because that is where the
+// value lands: any member already carrying a year vetoes (a merge keeps a survivor's NULL
+// year over the loser's tagged members), as does any member not present (an archived
+// member vetoes the in-place rewrite and the fallback would split the album) or any member
+// whose locks make it unwritable.
 //
 // Unlike label, a filled year does not survive a forced rescan without write-back. Only
 // locked fields are overlaid, so each member's year reverts to the tag, the heuristic key
@@ -1987,12 +1991,23 @@ func (s *Store) ApplyAlbumFields(ctx context.Context, in model.AlbumFieldsEnrich
 		provider = enrichProviderNone
 	}
 	return s.writeTx(ctx, func(tx *sql.Tx) error {
+		// The album can vanish between the queue page and this write (a merge or an orphan
+		// sweep in another writer), and a dead rowid gets nothing: no fill, no marker, no
+		// delta.
+		var curYear sql.NullInt64
+		err := tx.QueryRowContext(ctx, "SELECT year FROM album WHERE id = ?", in.AlbumID).Scan(&curYear)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
 		wrote, alive := false, true
 		// The year goes FIRST, because it is the one fill that can move the album onto a
 		// key another album already holds, which merges this row away. A label written
 		// before that would go down with the row: the column is on the album, and the
 		// merge does not carry it to the survivor.
-		if v := strings.TrimSpace(in.Fields["year"]); v != "" {
+		if v := strings.TrimSpace(in.Fields["year"]); v != "" && !curYear.Valid {
 			did, stillThere, err := s.applyAlbumYearTx(ctx, tx, in, leadingYear(v), provider, op)
 			if err != nil {
 				return err
@@ -2035,9 +2050,10 @@ func (s *Store) ApplyAlbumFields(ctx context.Context, in model.AlbumFieldsEnrich
 	})
 }
 
-// applyAlbumYearTx runs the whole-album year fill, reporting whether it wrote and whether
-// the album row still exists afterwards (a taken key merges this album into the incumbent
-// and the row is gone). See ApplyAlbumFields for why the veto is member-level.
+// applyAlbumYearTx runs the whole-album year fill for an album the caller found year-less,
+// reporting whether it wrote and whether the album row still exists afterwards (a taken
+// key merges this album into the incumbent and the row is gone). See ApplyAlbumFields for
+// why the veto is member-level.
 func (s *Store) applyAlbumYearTx(ctx context.Context, tx *sql.Tx, in model.AlbumFieldsEnrichment, year, provider, op string) (bool, bool, error) {
 	var members []model.PID
 	rows, err := tx.QueryContext(ctx, `SELECT pi.pid, pi.state, COALESCE(t.year, 0)

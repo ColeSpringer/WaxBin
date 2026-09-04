@@ -8,21 +8,21 @@ Everything here is work still to do. Reasoning about work deliberately not done
 belongs in the doc comment beside the code it constrains, not in this file, since
 that is where someone about to get it wrong will actually read it.
 
-## A book's description, subtitle, and edition have no on-disk tag key
+## A failed enrichment tag write is not retried
 
-The book fields walk fills all three, and `meta.BookFieldTagKeys` has no entry for any
-of them, so `enrich --write-tags` leaves them in the catalog alone. A retag that forces
-a full rescan therefore clears them, which is exactly the loss the write-back exists to
-prevent for the fields beside them. Fixing it means picking keys the audiobook scanner
-would read back (a TXXX/freeform pair per field) and wiring both halves, reader and
-writer, since a key only the writer knows is worse than none.
+`writeEnrichmentTags` reopens only the items whose newest enrichment provenance is at or
+after the pass start (`enrichedTagSelect`), and an album label folded into a member's
+write is struck from the label fan-out before that write is attempted. A file whose write
+fails (a read-only mount, a transient error) therefore keeps its values catalog-only until
+some later pass happens to write that item again, and `--force` does not reach it, since
+the fills are fill-when-empty and a filled field's `updated_at` never moves. Fixing it
+means recording the pending write per file, a diagnostic the next pass reads or a marker
+the successful write clears, rather than inferring it from provenance timestamps.
 
-## `album.year` is written at insert and never topped up
+## The album label fan-out plans every enriched album on every write-tags pass
 
-The scan sets `album.year` when it creates the row and no later member updates it, so an
-mbid-keyed album (whose key ignores the year) can hold a NULL year over members that all
-carry one. Found while designing the album fields walk's year veto, which works around
-it: the walk refuses to fill a year when any member already has one, because the uniform
-whole-album edit it would use would overwrite those tagged years. A scan-side fix would
-top the column up from the members the way the other denormalized album columns are
-maintained, and the veto could then read the column alone.
+`enrichmentAlbumLabelEdits` fetches every enrichment label ever written and runs one
+`EntityMemberFiles` query per album to build the fold-in plan, then fans out only the
+recent ones on their own. The plan is deliberate (a file being rewritten anyway takes its
+album label for free), but it costs a query per enriched album per pass. One query joining
+the label curation rows to their member files would replace the loop.

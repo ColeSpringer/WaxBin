@@ -59,6 +59,45 @@ func TestBookPartAdoptsEnrichedASIN(t *testing.T) {
 	assertVerifyClean(t, st)
 }
 
+// TestBookAdoptsByEditionColumn: an edition edited in the catalog alone, or read from a
+// file tagged before the reader learned the EDITION key, sits in the column while the
+// stored key stays edition-less. A rescan of the file computes the key with the edition
+// segment, which matches nothing, so it joins the standing book whose column already
+// names that edition rather than forking. A different edition is a different book.
+func TestBookAdoptsByEditionColumn(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+
+	first := putBook(t, st, lib.ID, bookSpec{
+		path: "/lib/Tolkien/hobbit.m4b", essence: "be1", content: "bc1",
+		title: "The Hobbit", author: "J.R.R. Tolkien", durationMS: 1000, position: 1,
+	})
+	if err := st.EditItemField(ctx, first.ItemPID, "edition", "75th Anniversary Edition",
+		model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
+		t.Fatalf("edit edition: %v", err)
+	}
+
+	again := putBook(t, st, lib.ID, bookSpec{
+		path: "/lib/Tolkien/hobbit.m4b", essence: "be1", content: "bc2",
+		title: "The Hobbit", author: "J.R.R. Tolkien", edition: "75th Anniversary Edition",
+		durationMS: 1000, position: 1,
+	})
+	if again.ItemCreated || again.ItemPID != first.ItemPID {
+		t.Fatalf("the retagged file resolved %s (created=%v), want the standing book %s",
+			again.ItemPID, again.ItemCreated, first.ItemPID)
+	}
+
+	other := putBook(t, st, lib.ID, bookSpec{
+		path: "/lib/Tolkien/hobbit-abridged.m4b", essence: "be2", content: "bc3",
+		title: "The Hobbit", author: "J.R.R. Tolkien", edition: "Abridged",
+		durationMS: 900, position: 1,
+	})
+	if !other.ItemCreated || other.ItemPID == first.ItemPID {
+		t.Fatalf("a differently-edited file joined the standing book %s", first.ItemPID)
+	}
+	assertVerifyClean(t, st)
+}
+
 // TestAdoptedBookPartSeesTheLockOverlay pins the second wiring. The overlay runs before
 // upsertItem, so without adoption there too the adopted part's scanned title overwrites
 // the curated one on the book it is joining.
