@@ -732,13 +732,15 @@ func (s *Store) ArtRoles(ctx context.Context, ref model.EntityRef) ([]model.ArtR
 	}
 	whole := locks["art"]
 	for i := range out {
-		out[i].Locked = whole.Locked || locks[artRoleLockField(out[i].Role)].Locked
+		own := locks[artRoleLockField(out[i].Role)].Locked
+		out[i].RoleLocked = own
+		out[i].Locked = whole.Locked || own
 	}
 	// A lock with nothing attached. Synthesize the entry from the lock row alone,
 	// carrying its recorded source and timestamp rather than zero values, the way
 	// FieldProvenance does for a lock-only row. The whole-entity lock synthesizes a
 	// front entry, since that is the slot it belongs to; a role lock synthesizes its
-	// own.
+	// own. Either way the row being walked is the slot's own pin, so RoleLocked holds.
 	stored := make(map[model.ArtRole]bool, len(out))
 	for i := range out {
 		stored[out[i].Role] = true
@@ -758,7 +760,7 @@ func (s *Store) ArtRoles(ctx context.Context, ref model.EntityRef) ([]model.ArtR
 		out = append(out, model.ArtRoleInfo{
 			Role:        role,
 			Attribution: lock.Attribution,
-			UpdatedAt:   lock.UpdatedAt, Locked: true,
+			UpdatedAt:   lock.UpdatedAt, Locked: true, RoleLocked: true,
 		})
 	}
 	// Role order, which the SQL already gave the stored rows and the synthesized ones

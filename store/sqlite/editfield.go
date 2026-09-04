@@ -159,22 +159,37 @@ func (s *Store) EditItemFields(ctx context.Context, itemPID model.PID, edits map
 		if err != nil {
 			return err
 		}
-		affected := newAffectedRollups()
-		if err := renameEntitiesForEditsTx(ctx, tx, s.log, entries, nil, affected, op); err != nil {
-			return err
-		}
-		for _, e := range entries {
-			if err := applyItemEditTx(ctx, tx, s.log, e.pid, e.itemID, e.kind, e.fields, e.norm, attr, lock, op, affected); err != nil {
-				return err
-			}
-		}
-		if !affected.empty() {
-			if err := maintainRollupsTx(ctx, tx, affected, nowNS()); err != nil {
-				return waxerr.Wrap(waxerr.CodeIO, op, err)
-			}
-		}
-		return nil
+		_, err = applyEditEntriesTx(ctx, tx, s.log, entries, attr, lock, op)
+		return err
 	})
+}
+
+// applyEditEntriesTx is the shared tail of the three item-edit surfaces and the album
+// fields walk: the rename pre-pass over the whole batch, then one apply per entry, then
+// the union rollup refresh. It returns the pids it edited in entry order, which is what
+// a batch surface reports back.
+//
+// The pre-pass runs first and once, over every entry, which is what lets a batch moving
+// several members of an album onto one new key rewrite the entity in place rather than
+// splitting it per item.
+func applyEditEntriesTx(ctx context.Context, tx *sql.Tx, log logger, entries []editEntry, attr model.Attribution, lock model.LockChange, op string) ([]model.PID, error) {
+	affected := newAffectedRollups()
+	if err := renameEntitiesForEditsTx(ctx, tx, log, entries, nil, affected, op); err != nil {
+		return nil, err
+	}
+	edited := make([]model.PID, 0, len(entries))
+	for _, e := range entries {
+		if err := applyItemEditTx(ctx, tx, log, e.pid, e.itemID, e.kind, e.fields, e.norm, attr, lock, op, affected); err != nil {
+			return nil, err
+		}
+		edited = append(edited, e.pid)
+	}
+	if !affected.empty() {
+		if err := maintainRollupsTx(ctx, tx, affected, nowNS()); err != nil {
+			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+	}
+	return edited, nil
 }
 
 // editEntry is one resolved and validated batch-edit target: the item, the sorted
@@ -331,21 +346,11 @@ func (s *Store) EditManyFields(ctx context.Context, itemPIDs []model.PID, edits 
 		if err != nil {
 			return err
 		}
-		affected := newAffectedRollups()
-		if err := renameEntitiesForEditsTx(ctx, tx, s.log, entries, nil, affected, op); err != nil {
+		edited, err := applyEditEntriesTx(ctx, tx, s.log, entries, attr, lock, op)
+		if err != nil {
 			return err
 		}
-		for _, e := range entries {
-			if err := applyItemEditTx(ctx, tx, s.log, e.pid, e.itemID, e.kind, e.fields, e.norm, attr, lock, op, affected); err != nil {
-				return err
-			}
-			res.Edited = append(res.Edited, e.pid)
-		}
-		if !affected.empty() {
-			if err := maintainRollupsTx(ctx, tx, affected, nowNS()); err != nil {
-				return waxerr.Wrap(waxerr.CodeIO, op, err)
-			}
-		}
+		res.Edited = append(res.Edited, edited...)
 		return nil
 	})
 	if err != nil {
@@ -399,21 +404,11 @@ func (s *Store) EditItemsFields(ctx context.Context, edits []model.ItemFieldEdit
 		if err != nil {
 			return err
 		}
-		affected := newAffectedRollups()
-		if err := renameEntitiesForEditsTx(ctx, tx, s.log, entries, nil, affected, op); err != nil {
+		edited, err := applyEditEntriesTx(ctx, tx, s.log, entries, attr, lock, op)
+		if err != nil {
 			return err
 		}
-		for _, e := range entries {
-			if err := applyItemEditTx(ctx, tx, s.log, e.pid, e.itemID, e.kind, e.fields, e.norm, attr, lock, op, affected); err != nil {
-				return err
-			}
-			res.Edited = append(res.Edited, e.pid)
-		}
-		if !affected.empty() {
-			if err := maintainRollupsTx(ctx, tx, affected, nowNS()); err != nil {
-				return waxerr.Wrap(waxerr.CodeIO, op, err)
-			}
-		}
+		res.Edited = append(res.Edited, edited...)
 		return nil
 	})
 	if err != nil {

@@ -131,7 +131,7 @@ func (l *Library) writeBackEntity(ctx context.Context, entityType model.MergeEnt
 		return nil
 	}
 	wbErr := &WriteBackError{ItemPID: entityPID, Edits: edits}
-	if err := l.writeBackFiles(ctx, "waxbin.EditEntity", files, wbErr, nil,
+	if err := l.writeBackFiles(ctx, "waxbin.EditEntity", model.OriginEdit, files, wbErr, nil,
 		func(w *meta.Writer, path string) (*meta.WriteResult, error) {
 			return w.Apply(ctx, path, tagEdits)
 		}); err != nil {

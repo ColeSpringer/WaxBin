@@ -334,7 +334,11 @@ func (l *Library) proxyHandlers() map[string]proxy.Handler {
 			if !ok {
 				return nil, waxerr.New(waxerr.CodeInvalid, "serve.set_art_lock", "unknown art role: "+p.Role)
 			}
-			return nil, l.SetArtLock(ctx, model.ArtEntity(p.EntityType), model.PID(p.EntityPID), role, p.Lock)
+			change, err := l.SetArtLock(ctx, model.ArtEntity(p.EntityType), model.PID(p.EntityPID), role, p.Lock)
+			if err != nil {
+				return nil, err
+			}
+			return proxy.SetArtLockResult{Changed: change.Changed, StillLocked: change.StillLocked}, nil
 		},
 		proxy.MethodEditEntity: func(ctx context.Context, raw json.RawMessage) (any, error) {
 			p, err := decodeParams[proxy.EditEntityParams](raw)

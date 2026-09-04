@@ -14,10 +14,12 @@ import (
 // concurrent use.
 //
 // The MusicBrainz + AcoustID identity spine is NOT expressed through this port. It
-// resolves the MBID that anchors every entity and is always tried first (see
-// Service.Run). This port carries the layerable candidates that fill gaps on top of
-// that anchor (genres, cover art, lyrics, book identifiers, and generic curated
-// fields), so an embedder can add a provider without touching identity resolution.
+// resolves the MBID that anchors every entity and is tried first when a contact is
+// configured (see Service.Run). This port carries the layerable candidates that fill
+// gaps on top of that anchor (genres, cover art, lyrics, book identifiers, and the
+// scalar fields the track, book, and album fields walks apply), so an embedder can add
+// a provider without touching identity resolution. A provider's own phases run with or
+// without a contact, since it brings its own credentials.
 //
 // Rate limiting is the provider's own responsibility. The Service calls Enrich
 // sequentially within a single-goroutine pass, so a provider is never invoked
@@ -71,7 +73,10 @@ const (
 	CapCover
 	// CapLyrics supplies a recording's lyrics.
 	CapLyrics
-	// CapBookMeta supplies an audiobook's identifiers and publisher.
+	// CapBookMeta supplies an audiobook's identifiers and publisher, and gates the book
+	// fields walk. That walk reads Candidate.Fields for the book's fill set alongside
+	// the dedicated Publisher/ASIN/ISBN slots, which stay as the shorthand for the three
+	// fields every book provider answers.
 	CapBookMeta
 	// CapAuxArt supplies the auxiliary art roles (back, disc, booklet, background) for
 	// a release group, in Candidate.Art. It is separate from CapCover because it gates
@@ -86,6 +91,13 @@ const (
 	// it advertises this alongside CapCover, and answers a request whose Want is
 	// CapAuxArt with the non-front roles it has (the front is ignored there; the
 	// release-group pass owns that slot).
+	//
+	// The request carries the group's Title and Artist, with MBID only when the catalog
+	// has one, since the walk is keyed on the title rather than the id. A provider keyed
+	// on ids alone answers a nil candidate for an id-less request rather than an error:
+	// callProvider logs an error once per entity per run, so a miss reported as one is
+	// noise on a population that is mostly id-less. The built-in archive already does
+	// this (see enrich/coverart.go).
 	CapAuxArt
 	// CapArtistArt supplies art for an artist, front and auxiliary roles alike, and gates
 	// the artist backfill. It is its own bit because the Cover Art Archive advertises
@@ -93,7 +105,24 @@ const (
 	// a stock install and mark each a permanent no-match, which is the bug the backfill
 	// exists to remove. Like CapAuxArt, a provider written before it advertises CapCover
 	// alone and has to add this to be queued.
+	//
+	// The request carries the artist's name in Artist, with MBID only when the catalog
+	// has one. The walk is keyed on the name, so a local band or a mis-tagged name is
+	// asked about too, and a provider keyed on ids alone answers a nil candidate for an
+	// id-less request rather than an error.
 	CapArtistArt
+	// CapFields supplies scalar metadata fields in Candidate.Fields, and gates the track
+	// and album fields walks. The rung is the request type rather than a second bit:
+	// TargetRecording asks about one track and its answer lands on that item alone,
+	// while TargetRelease asks about an album and its answer lands on the album row and,
+	// for year, on every member at once. A provider that only knows one of the two
+	// answers nothing for the other.
+	//
+	// The engine applies only the keys in the target's fill set (model.EnrichFillFields
+	// for an item, model.AlbumFillFields for an album), fill-when-empty, lock-respecting,
+	// and stamped with the provider's name; everything else in the map is ignored, so a
+	// provider returns what it found rather than pre-filtering.
+	CapFields
 )
 
 // Has reports whether c advertises want.
@@ -125,13 +154,18 @@ type Request struct {
 	// (the pre-Want contract, so existing providers and embedders are untouched). A
 	// provider may skip work whose results serve only capabilities absent from Want;
 	// anything extra it returns is ignored by the Service.
-	Want        Capability
-	Title       string // artist name | release-group title | track title | book title
-	Artist      string // disambiguating primary artist (release group / recording / book)
-	Album       string // album title, for a recording lyrics lookup
-	MBID        string // known identity anchor (artist / release-group / recording MBID)
-	ASIN        string
-	ISBN        string
+	Want   Capability
+	Title  string // artist name | release-group title | track title | book title
+	Artist string // disambiguating primary artist (release group / recording / book)
+	Album  string // album title, for a recording lyrics lookup
+	MBID   string // known identity anchor (artist / release-group / recording MBID)
+	ASIN   string
+	ISBN   string
+	// ISRC is the recording's identifier and Barcode the release's, carried by the
+	// fields walks so a provider keyed on one can answer without a text match. Each is
+	// empty when the catalog holds none.
+	ISRC        string
+	Barcode     string
 	DurationSec int // track duration, for a duration-disambiguated lyrics match
 }
 
@@ -168,9 +202,13 @@ type Candidate struct {
 	// Recording fields.
 	Lyrics *model.Lyrics
 
-	// Fields carries generic curated values keyed by the metadata vocabulary
+	// Fields carries scalar values keyed by the metadata vocabulary
 	// (model.MetadataFields), for a provider that supplies a field with no dedicated
-	// slot above. Reserved for injected providers; the built-ins leave it nil.
+	// slot above. The engine applies only the keys in the target's fill set
+	// (model.EnrichFillFields for a recording or a book, model.AlbumFillFields for a
+	// release) and ignores the rest, so a provider fills in what it found without
+	// knowing which fields the catalog will take. Reserved for injected providers; the
+	// built-ins leave it nil.
 	Fields map[string]string
 }
 

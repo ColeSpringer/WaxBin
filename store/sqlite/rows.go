@@ -726,14 +726,14 @@ func deleteItemCascade(ctx context.Context, tx *sql.Tx, itemID int64) (model.PID
 	if _, err := tx.ExecContext(ctx, "DELETE FROM search_fts WHERE rowid = ?", itemID); err != nil {
 		return "", err
 	}
-	// entity_enrichment is polymorphic (no FK cascade). A book's marker and a track's
-	// lyrics marker are both keyed by the item id, so drop them here. Because
-	// playable_item.id is not AUTOINCREMENT, a reused rowid could otherwise inherit a
-	// stale "already enriched" marker and skip a new book, or skip lyrics for a new
-	// track. Artist and release-group markers have no delete path in v1.0; their
-	// cleanup rides with the future entity-merge/GC gate.
+	// entity_enrichment is polymorphic (no FK cascade). A book's marker, a track's
+	// lyrics marker, and the fields walk's are all keyed by the item id, so drop them
+	// here. Because playable_item.id is not AUTOINCREMENT, a reused rowid could
+	// otherwise inherit a stale "already enriched" marker and skip a new book, or skip
+	// lyrics or fields for a new track. Artist and release-group markers have no delete
+	// path here; the merge primitive and the orphan sweep own their cleanup.
 	if _, err := tx.ExecContext(ctx,
-		"DELETE FROM entity_enrichment WHERE entity_type IN ('book','lyrics') AND entity_id = ?", itemID); err != nil {
+		"DELETE FROM entity_enrichment WHERE entity_type IN ('book','lyrics','fields') AND entity_id = ?", itemID); err != nil {
 		return "", err
 	}
 	// art_map is polymorphic too, and a reused rowid would inherit the old item's cover

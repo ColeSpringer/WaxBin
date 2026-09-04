@@ -142,6 +142,7 @@ type artRoleView struct {
 	SourceURL  string `json:"sourceUrl,omitempty"`
 	Updated    int64  `json:"updatedAt,string"` // unix ns; a string, see playStateView
 	Locked     bool   `json:"locked"`
+	RoleLocked bool   `json:"roleLocked"`
 }
 
 // artRoleViews renders the slots for --json. Everything but the role, the timestamp,
@@ -153,7 +154,8 @@ func artRoleViews(roles []model.ArtRoleInfo) []artRoleView {
 		out[i] = artRoleView{
 			Role: string(r.Role), Format: r.Format, Width: r.Width, Height: r.Height,
 			SourceHash: r.SourceHash, Source: string(r.Source), Provider: r.Provider,
-			SourceURL: r.SourceURL, Updated: r.UpdatedAt, Locked: r.Locked,
+			SourceURL: r.SourceURL, Updated: r.UpdatedAt,
+			Locked: r.Locked, RoleLocked: r.RoleLocked,
 		}
 	}
 	return out
@@ -257,9 +259,14 @@ func newArtRolesCmd(g *globals) *cobra.Command {
 				if r.SourceHash != "" {
 					desc = fmt.Sprintf("%s %dx%d", r.Format, r.Width, r.Height)
 				}
+				// Which pin is standing, since only the role's own one answers to
+				// `art unlock --role`.
 				lock := ""
-				if r.Locked {
+				switch {
+				case r.RoleLocked:
 					lock = " [locked]"
+				case r.Locked:
+					lock = " [locked by the front cover's lock]"
 				}
 				fmt.Fprintf(w, "%-11s %s %s%s\n",
 					r.Role, desc, attribution(r.Source, r.Provider, r.SourceURL), lock)
@@ -275,11 +282,13 @@ func newArtRolesCmd(g *globals) *cobra.Command {
 // requested slot is locked with nothing attached. That state is invisible otherwise,
 // and it holds the slot empty against every automatic fill, so the error names it and
 // the way out. The lock it reads is the effective one, so an auxiliary slot held open by
-// the entity's whole front-cover lock is diagnosed too; the two are not distinguishable
-// from here, so a non-front role gets both commands, each runnable as printed rather than
-// one command with a caveat glued into it. It does not claim the image was
+// the entity's whole front-cover lock is diagnosed too. It does not claim the image was
 // cleared: `lock <pid> art` on a coverless item reaches the same state without one. Any
 // other failure passes straight through.
+//
+// The hint names every unlock the slot actually needs. Both pins can stand at once, and
+// naming only the role's own would hand back a command that runs clean and leaves the
+// slot exactly as shut as it was.
 func explainMissingArt(cmd *cobra.Command, lib *waxbin.Library, et model.ArtEntity, pid model.PID, r model.ArtRole, err error) error {
 	if !waxerr.Is(err, waxerr.CodeNotFound) {
 		return err
@@ -289,16 +298,42 @@ func explainMissingArt(cmd *cobra.Command, lib *waxbin.Library, et model.ArtEnti
 		return err
 	}
 	unlock := fmt.Sprintf("waxbin art unlock %s --type %s", pid, et)
-	hint := "(" + unlock + ")"
-	if r != model.ArtRoleFront {
-		// Either lock can be the one holding the slot and this side cannot tell them
-		// apart, so both commands are offered whole rather than described.
-		hint = fmt.Sprintf("(%s --role %s)\nor, if the entity's whole art lock is the one standing:\n(%s)",
-			unlock, r, unlock)
+	rolePin, wholePin := artPinsStanding(cmd, lib, et, pid, r)
+	var hint string
+	switch {
+	case r == model.ArtRoleFront || !rolePin:
+		hint = "(" + unlock + ")"
+	case !wholePin:
+		hint = fmt.Sprintf("(%s --role %s)", unlock, r)
+	default:
+		// Both, so both have to go, and the order does not matter.
+		hint = fmt.Sprintf("(%s --role %s)\n(%s)", unlock, r, unlock)
 	}
 	return waxerr.New(waxerr.CodeNotFound, "art", fmt.Sprintf(
 		"no %s art for %s %s: the %s slot is locked with nothing attached\n%s",
 		r, et, pid, r, hint))
+}
+
+// artPinsStanding reports which pins hold one slot: the role's own "art.<role>" row, and
+// the entity's whole "art" row. The second is read off the front entry, whose own pin IS
+// that row (see model.ArtRoleInfo), and a standing whole pin always synthesizes a front
+// entry even on an entity with no cover. A read that fails answers false for both, so the
+// caller falls back to the whole-artwork unlock: that one lifts either pin and is never
+// the wrong advice, only the broader one.
+func artPinsStanding(cmd *cobra.Command, lib *waxbin.Library, et model.ArtEntity, pid model.PID, r model.ArtRole) (rolePin, wholePin bool) {
+	roles, err := lib.ArtRoles(ctx(cmd), model.EntityRef{Type: et, PID: pid})
+	if err != nil {
+		return false, false
+	}
+	for _, got := range roles {
+		if got.Role == r {
+			rolePin = got.RoleLocked
+		}
+		if got.Role == model.ArtRoleFront {
+			wholePin = got.RoleLocked
+		}
+	}
+	return rolePin, wholePin
 }
 
 // newArtLockCmd builds `art lock` or `art unlock`, the lock-only mutation `art set`
@@ -342,16 +377,45 @@ func newArtLockCmd(g *globals, lock bool) *cobra.Command {
 			defer m.Close()
 
 			pid := model.PID(args[0])
-			if err := m.SetArtLock(ctx(cmd), et, pid, r, lock); err != nil {
+			change, err := m.SetArtLock(ctx(cmd), et, pid, r, lock)
+			if err != nil {
 				return err
 			}
-			fmt.Fprintf(out(cmd), "%s %s %s art for %s\n", past, et, r, pid)
+			fmt.Fprint(out(cmd), artLockLine(change, lock, past, et, r, pid))
 			return nil
 		},
 	}
 	cmd.Flags().StringVar(&entType, "type", "track", "entity type: "+artTypeList)
 	cmd.Flags().StringVar(&role, "role", "", "auxiliary role to "+verb+" alone: back|disc|booklet|background (default the front cover)")
 	return cmd
+}
+
+// artLockLine renders what `art lock`/`art unlock` did. The plain past-tense line was
+// misleading in one reachable case: unlocking an auxiliary role that never had its own
+// pin releases nothing, and the slot stays shut behind the entity's whole "art" pin,
+// which is the one thing gating enrichment in every role. Reporting "unlocked" there
+// sends someone off to wonder why the backfill still skips the slot.
+//
+// So an unlock says which of the three happened: it opened the slot, it changed nothing
+// because the role's own pin was already clear, or it released that pin while the whole
+// one still holds the slot. The last two name the command that would actually open it. A
+// lock is unambiguous and keeps its line, with an already-locked slot saying so.
+func artLockLine(change model.ArtLockChange, lock bool, past string, et model.ArtEntity, r model.ArtRole, pid model.PID) string {
+	if lock {
+		if !change.Changed {
+			return fmt.Sprintf("%s %s art for %s was already locked\n", et, r, pid)
+		}
+		return fmt.Sprintf("%s %s %s art for %s\n", past, et, r, pid)
+	}
+	head := fmt.Sprintf("%s %s %s art for %s", past, et, r, pid)
+	if !change.Changed {
+		head = fmt.Sprintf("%s %s art for %s had no lock of its own", et, r, pid)
+	}
+	if !change.StillLocked {
+		return head + "\n"
+	}
+	return head + fmt.Sprintf("; the slot is still locked by the entity's whole art lock\n"+
+		"(waxbin art unlock %s --type %s)\n", pid, et)
 }
 
 // parseArtLockRole parses the --role flag on `art lock`/`art unlock`, where verb is the

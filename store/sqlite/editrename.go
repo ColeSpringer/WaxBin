@@ -566,6 +566,11 @@ func renameReleaseGroupsForEditsTx(ctx context.Context, tx *sql.Tx, groups map[i
 			if err := clearUnmatchedEntityMarkerTx(ctx, tx, model.EnrichReleaseGroupType, rgID); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
+			// The aux-art backfill keys on the title, so a key move is new evidence for
+			// it whether or not the group carries an mbid, and its marker is permanent.
+			if err := deleteAuxArtMarkerTx(ctx, tx, rgID); err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
 		default:
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
@@ -936,7 +941,8 @@ func renameArtistTx(ctx context.Context, tx *sql.Tx, id int64, curName, curKey, 
 
 // finishArtistRenameTx is the shared tail of the two name-writing branches: sort
 // refresh, one artist OpUpdate, and a rollup refresh. requeue deletes the unmatched
-// enrichment marker; only a key move sets it (see renameArtistTx).
+// enrichment marker and the art backfill's, since both passes key on the name and a key
+// move is new evidence for either; only a key move sets it (see renameArtistTx).
 func finishArtistRenameTx(ctx context.Context, tx *sql.Tx, id int64, pid string, requeue bool, affected *affectedRollups, op string) error {
 	if err := refreshEntitySortKeyTx(ctx, tx, model.MergeArtist, "artist", id); err != nil {
 		return waxerr.Wrap(waxerr.CodeIO, op, err)
@@ -946,6 +952,9 @@ func finishArtistRenameTx(ctx context.Context, tx *sql.Tx, id int64, pid string,
 	}
 	if requeue {
 		if err := clearUnmatchedEntityMarkerTx(ctx, tx, model.EnrichArtistType, id); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		if err := deleteArtistArtMarkerTx(ctx, tx, id); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 	}

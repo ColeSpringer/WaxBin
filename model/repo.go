@@ -265,9 +265,14 @@ type SidecarUpdate struct {
 // per file: a multi-part book repeats its values across every part, since the parts
 // must agree on the identity-bearing ones.
 //
-// Only fields enrichment actually wrote are set (field_provenance source), so a
-// tagged value is never rewritten back over itself. Empty means "nothing to write for
-// this field", not "clear it".
+// Fields holds only what enrichment actually wrote (field_provenance source), keyed by
+// the catalog field name and carrying the live column value, so a tagged value is never
+// rewritten back over itself. A field absent from the map is one enrichment did not
+// write, which is not the same as one to clear: this pass mirrors what a provider
+// supplied and is not the authority on what a file should not contain.
+//
+// Only fields with an on-disk tag key reach it. A catalog field the scanner cannot read
+// back (a book's description, subtitle, or edition) stays DB-only by design.
 type EnrichedTagRow struct {
 	ItemPID   PID
 	FilePID   PID
@@ -277,10 +282,7 @@ type EnrichedTagRow struct {
 	MTimeNS   int64
 	IsPrimary bool // the part a book re-anchor should read back from
 
-	ASIN      string
-	ISBN      string
-	Publisher string
-	Genre     string
+	Fields map[string]string
 }
 
 // ReplayGainRow is one file's current ReplayGain measurement plus the on-disk file
@@ -465,4 +467,16 @@ type JobStore interface {
 	// write flock: any still-running job/lease belongs to a dead prior owner, so
 	// mark those jobs crashed and drop their leases. Returns the count reclaimed.
 	ReclaimOrphans(ctx context.Context, ts int64) (int, error)
+}
+
+// EntityFieldValue is one entity-level field an enrichment write-back should fan across
+// the entity's member files: which entity, which field, and the value the catalog holds.
+// It exists because an entity field lives on the entity row rather than on any item, so
+// it has no field_provenance row and cannot ride the per-item write-back select.
+type EntityFieldValue struct {
+	EntityType MergeEntity
+	PID        PID
+	Field      string
+	Value      string
+	UpdatedAt  int64 // unix ns the curation row was written
 }

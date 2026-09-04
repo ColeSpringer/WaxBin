@@ -435,3 +435,197 @@ func mergeTags(t *testing.T, path string, spec testaudio.MP3Spec) []byte {
 		testaudio.TXXXFrame{Desc: "ISBN", Value: fm.Tags.ISBN})
 	return testaudio.BuildMP3FromSpec(spec)
 }
+
+// TestEnrichWithoutContactRunsInjectedProvider: an embedder that ships its own provider
+// gets a working pass with no MusicBrainz contact configured, which is the contact-less
+// half of retiring a downstream by-name sweep. The identity phases stay off, so nothing
+// reaches MusicBrainz, and the artist is reached by name.
+func TestEnrichWithoutContactRunsInjectedProvider(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	writeFile(t, filepath.Join(root, "a.mp3"), testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
+		Title: "One", Artist: "The Local Band", Album: "Demo", Audio: testaudio.AudioWithSeed(1)}))
+
+	var asked []enrich.Request
+	art := &enrich.Mock{ProviderName: "deezer", Caps: enrich.CapArtistArt,
+		EnrichFunc: func(_ context.Context, req enrich.Request) (*enrich.Candidate, error) {
+			asked = append(asked, req)
+			if req.Type != enrich.TargetArtist {
+				return nil, nil
+			}
+			return &enrich.Candidate{Art: map[model.ArtRole]*model.ArtImage{
+				model.ArtRoleFront: {Data: coverPNG(t), Format: "png", Width: 4, Height: 4},
+			}}, nil
+		}}
+	lib, err := waxbin.Open(ctx, waxbin.Options{
+		DBPath:              db,
+		Roots:               []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}},
+		Enrichment:          config.EnrichConfig{}, // no contact
+		EnrichmentProviders: []enrich.Provider{art},
+	})
+	if err != nil {
+		t.Fatalf("open library: %v", err)
+	}
+	t.Cleanup(func() { _ = lib.Close() })
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+
+	res, err := lib.Enrich(ctx, waxbin.EnrichOptions{})
+	if err != nil {
+		t.Fatalf("contact-less Enrich: %v", err)
+	}
+	if res.Result.ArtistsEnriched != 0 || res.Result.ReleaseGroupsEnriched != 0 {
+		t.Errorf("identity phases walked %+v, want none without a contact", res.Result)
+	}
+	if res.Result.ArtistArtEnriched != 1 || res.Result.ArtistArtMatched != 1 {
+		t.Fatalf("artist-art backfill = %d walked / %d matched, want 1 and 1",
+			res.Result.ArtistArtEnriched, res.Result.ArtistArtMatched)
+	}
+	if len(asked) != 1 || asked[0].Artist != "The Local Band" || asked[0].MBID != "" {
+		t.Fatalf("provider asked %+v, want one request keyed on the name alone", asked)
+	}
+}
+
+// TestEnrichmentWritesTheNewFillsToDisk: the write-back reaches every field the fields
+// walks fill and the scanner reads back. A track's BPM and ISRC land on its own file, an
+// album's LABEL fans across every member (it lives on the album row, so it rides its own
+// path), and a book's DATE and narrator land on the book's file.
+func TestEnrichmentWritesTheNewFillsToDisk(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	pathA := filepath.Join(root, "a.mp3")
+	pathB := filepath.Join(root, "b.mp3")
+	writeFile(t, pathA, testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
+		Title: "One", Artist: "Pink Floyd", AlbumArtist: "Pink Floyd", Album: "Animals",
+		Audio: testaudio.AudioWithSeed(1)}))
+	writeFile(t, pathB, testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
+		Title: "Two", Artist: "Pink Floyd", AlbumArtist: "Pink Floyd", Album: "Animals",
+		Audio: testaudio.AudioWithSeed(2)}))
+
+	fields := &enrich.Mock{ProviderName: "discogs", Caps: enrich.CapFields,
+		EnrichFunc: func(_ context.Context, req enrich.Request) (*enrich.Candidate, error) {
+			switch req.Type {
+			case enrich.TargetRecording:
+				return &enrich.Candidate{Fields: map[string]string{
+					"bpm": "120", "isrc": "GBAYA7500098",
+				}}, nil
+			case enrich.TargetRelease:
+				return &enrich.Candidate{Fields: map[string]string{"label": "Harvest"}}, nil
+			}
+			return nil, nil
+		}}
+	lib, err := waxbin.Open(ctx, waxbin.Options{
+		DBPath:              db,
+		Roots:               []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}},
+		EnrichmentProviders: []enrich.Provider{fields},
+		WriteEnrichmentTags: true,
+	})
+	if err != nil {
+		t.Fatalf("open library: %v", err)
+	}
+	t.Cleanup(func() { _ = lib.Close() })
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+
+	res, err := lib.Enrich(ctx, waxbin.EnrichOptions{})
+	if err != nil {
+		t.Fatalf("enrich: %v", err)
+	}
+	if res.Result.TagsFailed != 0 {
+		t.Fatalf("write-back failed on %d files", res.Result.TagsFailed)
+	}
+	// Two member files, each carrying its own enriched fields and its album's label, so
+	// each is opened once and counted once. Fanning the label separately would rewrite
+	// both files a second time and report four writes for two files.
+	if res.Result.TagsWritten != 2 {
+		t.Fatalf("wrote %d files, want the 2 members written once each", res.Result.TagsWritten)
+	}
+
+	r := meta.NewReader()
+	for _, p := range []string{pathA, pathB} {
+		fm, err := r.Read(ctx, p)
+		if err != nil {
+			t.Fatalf("re-read %s: %v", p, err)
+		}
+		if fm.Tags.BPM != 120 {
+			t.Errorf("%s BPM = %d, want 120", filepath.Base(p), fm.Tags.BPM)
+		}
+		if fm.Tags.ISRC != "GBAYA7500098" {
+			t.Errorf("%s ISRC = %q, want the enriched identifier", filepath.Base(p), fm.Tags.ISRC)
+		}
+		// The album label reached every member, not just the first.
+		if fm.Tags.Label != "Harvest" {
+			t.Errorf("%s LABEL = %q, want the album's label fanned out", filepath.Base(p), fm.Tags.Label)
+		}
+	}
+}
+
+// TestEnrichmentWritesBookFieldsToDisk: a book's year and narrator reach the file, and
+// the fields with no tag key stay catalog-only.
+func TestEnrichmentWritesBookFieldsToDisk(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	path := filepath.Join(root, "hobbit.m4b")
+	writeFile(t, path, testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
+		Title: "The Hobbit", Artist: "J.R.R. Tolkien", AlbumArtist: "J.R.R. Tolkien",
+		Album: "The Hobbit",
+	}))
+
+	books := &enrich.Mock{ProviderName: "audnexus", Caps: enrich.CapBookMeta,
+		EnrichFunc: func(_ context.Context, req enrich.Request) (*enrich.Candidate, error) {
+			if req.Type != enrich.TargetBook {
+				return nil, nil
+			}
+			return &enrich.Candidate{
+				Publisher: "HarperCollins",
+				Fields: map[string]string{
+					"year": "1937-09-21", "narrator": "Rob Inglis",
+					"subtitle": "There and Back Again",
+				},
+			}, nil
+		}}
+	lib, err := waxbin.Open(ctx, waxbin.Options{
+		DBPath:              db,
+		Roots:               []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}},
+		EnrichmentProviders: []enrich.Provider{books},
+		WriteEnrichmentTags: true,
+	})
+	if err != nil {
+		t.Fatalf("open library: %v", err)
+	}
+	t.Cleanup(func() { _ = lib.Close() })
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	pid := itemPIDByTitle(t, ctx, lib, "The Hobbit")
+
+	if _, err := lib.Enrich(ctx, waxbin.EnrichOptions{}); err != nil {
+		t.Fatalf("enrich: %v", err)
+	}
+	fm, err := meta.NewReader().Read(ctx, path)
+	if err != nil {
+		t.Fatalf("re-read file: %v", err)
+	}
+	if fm.Tags.Year != 1937 {
+		t.Errorf("file year = %d, want the folded 1937", fm.Tags.Year)
+	}
+	if fm.Tags.Publisher != "HarperCollins" {
+		t.Errorf("file publisher = %q, want the enriched value", fm.Tags.Publisher)
+	}
+	if len(fm.Tags.Narrators) == 0 || fm.Tags.Narrators[0] != "Rob Inglis" {
+		t.Errorf("file narrators = %v, want the enriched narrator", fm.Tags.Narrators)
+	}
+	// subtitle has no tag key, so it stays in the catalog alone.
+	d, err := lib.Book(ctx, pid)
+	if err != nil {
+		t.Fatalf("Book: %v", err)
+	}
+	if d.Subtitle != "There and Back Again" {
+		t.Errorf("catalog subtitle = %q, want the enriched value held in the catalog", d.Subtitle)
+	}
+}

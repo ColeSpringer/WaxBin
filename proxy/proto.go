@@ -154,7 +154,16 @@ import (
 // field is not cosmetic: a version-15 client drops it and reports a rename that moved a
 // producer credit as having moved nothing but its members, which understates a
 // destructive verb.
-const ProtocolVersion = 16
+//
+// Version 17 added SetArtLockResult, and it forces the bump rather than riding along the
+// way EditEntityResult.MergedInto did at 14. The difference is what the zero value says.
+// A dropped MergedInto leaves a client with the generic line it printed before, which is
+// an absence of information; a dropped SetArtLockResult leaves Changed and StillLocked
+// both false, and the client renders that as "was already locked" or "had no lock of its
+// own" for a call that did change the pin. That is an affirmatively false statement about
+// a mutation, which is the quiet wrong answer the gate exists to turn into a clean
+// absence.
+const ProtocolVersion = 17
 
 // Method names for the proxied operations: the fast request/response catalog
 // mutations, the reads a mutating command needs for its confirmation output, the
@@ -495,6 +504,21 @@ type SetArtLockParams struct {
 	EntityPID  string `json:"entityPid"`
 	Role       string `json:"role,omitempty"`
 	Lock       bool   `json:"lock"`
+}
+
+// SetArtLockResult is the set_art_lock response payload: what the call actually did.
+// Changed is false when the slot's own pin already said what was asked. StillLocked is
+// the effective lock after the call, which on an unlock is what a caller cannot work out
+// for itself: releasing one auxiliary role's pin opens nothing while the entity's whole
+// "art" pin stands.
+//
+// The zero value is not a safe fallback, which is why this earned a protocol bump: both
+// fields false is a real answer ("nothing moved, nothing holds it"), so a client that got
+// no payload at all cannot tell it from one. The version gate is what keeps a peer
+// without this from being asked in the first place.
+type SetArtLockResult struct {
+	Changed     bool `json:"changed"`
+	StillLocked bool `json:"stillLocked"`
 }
 
 // SetTagParams is the set_tag request payload: a custom tag's ordered values on an

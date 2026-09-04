@@ -640,17 +640,24 @@ type enrichView struct {
 	LyricsMatched         int `json:"lyricsMatched"`
 	// Both art backfill phases are gated on an injected provider, so their counts are
 	// omitted when they did not run and the stock payload keeps the shape it had.
-	AuxArtEnriched    int    `json:"auxArtEnriched,omitempty"`
-	AuxArtMatched     int    `json:"auxArtMatched,omitempty"`
-	ArtistArtEnriched int    `json:"artistArtEnriched,omitempty"`
-	ArtistArtMatched  int    `json:"artistArtMatched,omitempty"`
-	ArtFetched        int    `json:"artFetched"`
-	AuxArtFetched     int    `json:"auxArtFetched,omitempty"`
-	TagsWritten       int    `json:"tagsWritten,omitempty"`
-	TagsFailed        int    `json:"tagsFailed,omitempty"`
-	TagsUnrepresented int    `json:"tagsUnrepresented,omitempty"`
-	TagsSkipped       int    `json:"tagsSkipped,omitempty"`
-	JobPID            string `json:"jobPid,omitempty"`
+	AuxArtEnriched    int `json:"auxArtEnriched,omitempty"`
+	AuxArtMatched     int `json:"auxArtMatched,omitempty"`
+	ArtistArtEnriched int `json:"artistArtEnriched,omitempty"`
+	ArtistArtMatched  int `json:"artistArtMatched,omitempty"`
+	// The fields walks are gated the same way, so their counts are omitted too.
+	TrackFieldsEnriched int    `json:"trackFieldsEnriched,omitempty"`
+	TrackFieldsMatched  int    `json:"trackFieldsMatched,omitempty"`
+	BookFieldsEnriched  int    `json:"bookFieldsEnriched,omitempty"`
+	BookFieldsMatched   int    `json:"bookFieldsMatched,omitempty"`
+	AlbumFieldsEnriched int    `json:"albumFieldsEnriched,omitempty"`
+	AlbumFieldsMatched  int    `json:"albumFieldsMatched,omitempty"`
+	ArtFetched          int    `json:"artFetched"`
+	AuxArtFetched       int    `json:"auxArtFetched,omitempty"`
+	TagsWritten         int    `json:"tagsWritten,omitempty"`
+	TagsFailed          int    `json:"tagsFailed,omitempty"`
+	TagsUnrepresented   int    `json:"tagsUnrepresented,omitempty"`
+	TagsSkipped         int    `json:"tagsSkipped,omitempty"`
+	JobPID              string `json:"jobPid,omitempty"`
 }
 
 func toEnrichView(r *waxbin.EnrichResult) enrichView {
@@ -662,6 +669,9 @@ func toEnrichView(r *waxbin.EnrichResult) enrichView {
 		LyricsEnriched: r.Result.LyricsEnriched, LyricsMatched: r.Result.LyricsMatched,
 		AuxArtEnriched: r.Result.AuxArtEnriched, AuxArtMatched: r.Result.AuxArtMatched,
 		ArtistArtEnriched: r.Result.ArtistArtEnriched, ArtistArtMatched: r.Result.ArtistArtMatched,
+		TrackFieldsEnriched: r.Result.TrackFieldsEnriched, TrackFieldsMatched: r.Result.TrackFieldsMatched,
+		BookFieldsEnriched: r.Result.BookFieldsEnriched, BookFieldsMatched: r.Result.BookFieldsMatched,
+		AlbumFieldsEnriched: r.Result.AlbumFieldsEnriched, AlbumFieldsMatched: r.Result.AlbumFieldsMatched,
 		ArtFetched: r.Result.ArtFetched, AuxArtFetched: r.Result.AuxArtFetched,
 		TagsWritten: r.Result.TagsWritten, TagsFailed: r.Result.TagsFailed,
 		TagsUnrepresented: r.Result.TagsUnrepresented, TagsSkipped: r.Result.TagsSkipped,

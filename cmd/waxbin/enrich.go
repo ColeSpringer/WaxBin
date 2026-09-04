@@ -27,11 +27,16 @@ func newEnrichCmd(g *globals) *cobra.Command {
 			"ListenBrainz), release-group cover art from the Cover Art Archive, and lyrics for " +
 			"tracks that have none from LRCLIB. It is lock-respecting (never overwriting a " +
 			"tagged or user-locked field), records the provider behind each value, and degrades " +
-			"gracefully offline. Requires a MusicBrainz contact (config enrichment.contact or " +
-			"WAXBIN_ENRICH_CONTACT). The optional AcoustID fallback additionally needs an API " +
-			"key and fpcalc. An embedder can inject further providers via Options.\n\n" +
+			"gracefully offline. The MusicBrainz passes and the key-free built-ins need a " +
+			"contact (config enrichment.contact or WAXBIN_ENRICH_CONTACT); an injected " +
+			"provider's own passes run without one. The optional AcoustID fallback " +
+			"additionally needs an API key and fpcalc. An embedder can inject further " +
+			"providers via Options.\n\n" +
 			"An injected provider can also fill role-tagged art (back, disc, booklet, " +
-			"background) and imagery at the artist rung, which no built-in provider answers. " +
+			"background) and imagery at the artist rung, which no built-in provider answers, " +
+			"and scalar fields a track or a book has left empty: a CapFields provider fills " +
+			"bpm, isrc, and composer per track, and a CapBookMeta provider fills a book's " +
+			"publisher, year, narrator, subtitle, edition, description, and identifiers. " +
 			"Giving an artist a front cover changes what unrelated tracks show: art resolves " +
 			"track, then album, then release group, then artist, so a track whose album has no " +
 			"cover starts rendering the artist's photo as its own.\n\n" +
@@ -97,7 +102,9 @@ func newEnrichCmd(g *globals) *cobra.Command {
 			return renderEnrichResult(cmd, g, res)
 		},
 	}
-	cmd.Flags().BoolVar(&writeTags, "write-tags", false, "write what the pass filled back into the files on disk")
+	cmd.Flags().BoolVar(&writeTags, "write-tags", false,
+		"write what the pass filled back into the files on disk; fields with no tag key "+
+			"(a book's description, subtitle, edition) stay in the catalog")
 	cmd.Flags().BoolVar(&force, "force", false, "re-enrich entities already looked up")
 	cmd.Flags().IntVar(&limit, "limit", 0, "cap the number of entities processed (0 = all)")
 	cmd.Flags().StringVar(&item, "item", "", "scope the pass to one item's targets (item pid; implies --force)")
@@ -118,15 +125,24 @@ func renderEnrichResult(cmd *cobra.Command, g *globals, res *waxbin.EnrichResult
 	fmt.Fprintf(w, "album releases: %d searched (%d matched)\n", r.AlbumsSearched, r.AlbumsMatched)
 	fmt.Fprintf(w, "books:          %d enriched (%d matched)\n", r.BooksEnriched, r.BooksMatched)
 	fmt.Fprintf(w, "lyrics:         %d looked up (%d matched)\n", r.LyricsEnriched, r.LyricsMatched)
-	// Both art backfills run only when an injected provider advertises them, so each line
-	// appears only when its phase ran. It has to appear then: the phase spends the same
-	// --limit budget as the ones above, and a summary that never mentions it leaves a
-	// capped run looking like it did less than it did.
+	// The art backfills and the fields walks run only when an injected provider
+	// advertises them, so each line appears only when its phase ran. It has to appear
+	// then: the phase spends the same --limit budget as the ones above, and a summary
+	// that never mentions it leaves a capped run looking like it did less than it did.
 	if r.AuxArtEnriched > 0 {
 		fmt.Fprintf(w, "aux art:        %d backfilled (%d matched)\n", r.AuxArtEnriched, r.AuxArtMatched)
 	}
 	if r.ArtistArtEnriched > 0 {
 		fmt.Fprintf(w, "artist art:     %d backfilled (%d matched)\n", r.ArtistArtEnriched, r.ArtistArtMatched)
+	}
+	if r.TrackFieldsEnriched > 0 {
+		fmt.Fprintf(w, "track fields:   %d looked up (%d matched)\n", r.TrackFieldsEnriched, r.TrackFieldsMatched)
+	}
+	if r.BookFieldsEnriched > 0 {
+		fmt.Fprintf(w, "book fields:    %d looked up (%d matched)\n", r.BookFieldsEnriched, r.BookFieldsMatched)
+	}
+	if r.AlbumFieldsEnriched > 0 {
+		fmt.Fprintf(w, "album fields:   %d looked up (%d matched)\n", r.AlbumFieldsEnriched, r.AlbumFieldsMatched)
 	}
 	fmt.Fprintf(w, "cover art:      %d fetched\n", r.ArtFetched)
 	// Only when a provider offered auxiliary roles, keeping the summary shape stable

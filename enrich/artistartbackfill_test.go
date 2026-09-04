@@ -2,7 +2,10 @@ package enrich_test
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/colespringer/waxbin/enrich"
 	"github.com/colespringer/waxbin/model"
@@ -154,7 +157,7 @@ func TestArtistArtBackfillSkipsALockedArtist(t *testing.T) {
 		t.Fatalf("identity run: %v", err)
 	}
 	artistPID := model.PID(scalarStr(t, roDB(t, dbPath), "SELECT pid FROM artist WHERE name = 'Pink Floyd'"))
-	if err := st.SetArtLock(ctx, model.ArtArtist, artistPID, model.ArtRoleFront, true); err != nil {
+	if _, err := st.SetArtLock(ctx, model.ArtArtist, artistPID, model.ArtRoleFront, true); err != nil {
 		t.Fatalf("lock the artist art: %v", err)
 	}
 
@@ -190,7 +193,7 @@ func TestArtistArtBackfillDropsARoleHeldEmptyByItsLock(t *testing.T) {
 		t.Fatalf("identity run: %v", err)
 	}
 	artistPID := model.PID(scalarStr(t, roDB(t, dbPath), "SELECT pid FROM artist WHERE name = 'Pink Floyd'"))
-	if err := st.SetArtLock(ctx, model.ArtArtist, artistPID, model.ArtRoleBackground, true); err != nil {
+	if _, err := st.SetArtLock(ctx, model.ArtArtist, artistPID, model.ArtRoleBackground, true); err != nil {
 		t.Fatalf("lock the background role: %v", err)
 	}
 
@@ -237,5 +240,86 @@ func TestArtistArtBackfillIsSilentWithoutTheCapability(t *testing.T) {
 	}
 	if m := artistArtMarker(t, dbPath); m != "" {
 		t.Errorf("marker provider = %q, want no marker when the phase did not run", m)
+	}
+}
+
+// mbMockNoArtist is a MusicBrainz that finds nothing. It is what a local band, a
+// misspelled name, or an offline-only artist looks like to the identity pass.
+func mbMockNoArtist(t *testing.T) *httptest.Server {
+	t.Helper()
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/artist":
+			io(w, `{"artists":[]}`)
+		case "/release-group":
+			io(w, `{"release-groups":[]}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(s.Close)
+	return s
+}
+
+// TestArtistArtBackfillQueuesAnUnmatchedArtistByName is the first WaxDeck ask: the queue
+// used to require artist.mbid, which only the identity phase fills, so the artists most
+// likely to have no portrait (a local band, a mis-tagged name) were never asked about at
+// all. The walk is keyed on the name now, and the request carries the name with an empty
+// MBID so a name-keyed provider has something to work with.
+func TestArtistArtBackfillQueuesAnUnmatchedArtistByName(t *testing.T) {
+	ctx := context.Background()
+	st, dbPath, lib := openStore(t)
+	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Basement Tape", "The Local Band", "Demo")
+
+	var reqs []enrich.Request
+	art := &enrich.Mock{ProviderName: "deezer", Caps: enrich.CapArtistArt,
+		EnrichFunc: func(_ context.Context, req enrich.Request) (*enrich.Candidate, error) {
+			if req.Type != enrich.TargetArtist {
+				return nil, nil
+			}
+			reqs = append(reqs, req)
+			return &enrich.Candidate{Art: map[model.ArtRole]*model.ArtImage{
+				model.ArtRoleFront: artImg(t, "local-front"),
+			}}, nil
+		}}
+	svc := enrich.New(st, enrich.Config{
+		Contact: "t@e.com", MinRequestInterval: time.Millisecond,
+		MusicBrainzBaseURL: mbMockNoArtist(t).URL, ListenBrainzBaseURL: deadURL(t),
+		Providers: []enrich.Provider{art},
+	}, nil)
+
+	res, err := svc.Run(ctx, enrich.RunOptions{}, nil)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if res.ArtistsMatched != 0 {
+		t.Fatalf("MusicBrainz matched %d artists; the fixture is supposed to miss", res.ArtistsMatched)
+	}
+	if res.ArtistArtEnriched != 1 || res.ArtistArtMatched != 1 {
+		t.Fatalf("backfill = %d walked / %d matched, want 1 and 1 for an unmatched artist",
+			res.ArtistArtEnriched, res.ArtistArtMatched)
+	}
+	if len(reqs) != 1 {
+		t.Fatalf("provider asked %d times, want once", len(reqs))
+	}
+	if reqs[0].Artist != "The Local Band" || reqs[0].MBID != "" {
+		t.Errorf("request = artist %q / mbid %q, want the name alone", reqs[0].Artist, reqs[0].MBID)
+	}
+	if reqs[0].Want != enrich.CapArtistArt {
+		t.Errorf("request Want = %v, want CapArtistArt", reqs[0].Want)
+	}
+	if h := artistArtHash(t, dbPath, "front"); h != "local-front" {
+		t.Errorf("artist front hash = %q, want the name-keyed fill", h)
+	}
+
+	// The marker is permanent, so an artist no provider serves costs one request rather
+	// than one every run.
+	again, err := svc.Run(ctx, enrich.RunOptions{}, nil)
+	if err != nil {
+		t.Fatalf("second run: %v", err)
+	}
+	if again.ArtistArtEnriched != 0 {
+		t.Errorf("second run walked %d artists; the marker should have held", again.ArtistArtEnriched)
 	}
 }

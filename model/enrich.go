@@ -33,6 +33,9 @@ type EnrichScope struct {
 	AlbumIDs        []int64
 	BookItemIDs     []int64
 	LyricsItemIDs   []int64
+	// FieldsItemIDs are the items the fields walks should ask about. Tracks and books
+	// share the item id space, so one list covers both walks.
+	FieldsItemIDs []int64
 }
 
 // EnrichTarget is one entity the enrichment pass should look up. Type selects the
@@ -41,7 +44,11 @@ type EnrichScope struct {
 // (the enrich Store port is implemented only by store/sqlite, so it exchanges
 // rowids like the analyze port does).
 type EnrichTarget struct {
-	Type       string // artist | release_group | album | book, plus the lyrics and aux_art pass markers
+	// Type is the entity type or the pass marker this target belongs to: artist,
+	// release_group, album, or book for the identity phases, and lyrics, aux_art,
+	// artist_art, fields, or fields_album for the passes that borrow the marker table
+	// for their own granularity.
+	Type       string
 	ID         int64
 	PID        PID
 	Name       string // artist name / release-group title / book/track title
@@ -54,6 +61,13 @@ type EnrichTarget struct {
 	// DurationSec also disambiguates a per-track lyrics lookup.
 	FilePath    string
 	DurationSec int
+
+	// The fields walks carry whichever identifiers the item already holds, so a
+	// provider keyed on one can use it instead of a text match. ISRC is a recording's,
+	// ASIN and ISBN a book's; each is empty when the catalog has none.
+	ISRC string
+	ASIN string
+	ISBN string
 
 	// The album release match keys on these. Barcode and CatalogNumber are the
 	// identifiers it searches by, verbatim as a scan stored them, so a consumer
@@ -163,10 +177,17 @@ type ReleaseGroupAuxArt struct {
 // release match, a registered capability for the rest), because a denominator counting
 // work the run will not do reports a ratio that never reaches one.
 type EnrichCountOptions struct {
-	Albums    bool // albums needing a release match
-	AuxArt    bool // release groups needing an auxiliary-art backfill
-	ArtistArt bool // artists needing an art backfill
-	Lyrics    bool // tracks needing a lyrics lookup
+	// Identity covers the MusicBrainz-backed phases (artist, release group, book).
+	// They run only with a contact configured, so a contact-less run counts none of
+	// them; Albums is the release match, which needs the toggle as well.
+	Identity    bool
+	Albums      bool // albums needing a release match
+	AuxArt      bool // release groups needing an auxiliary-art backfill
+	ArtistArt   bool // artists needing an art backfill
+	Lyrics      bool // tracks needing a lyrics lookup
+	TrackFields bool // tracks needing a scalar-fields lookup
+	BookFields  bool // books needing a scalar-fields lookup
+	AlbumFields bool // albums needing a scalar-fields lookup
 }
 
 // ArtistArtBackfill is the art one artist-art backfill pass gathered. It is the artist
@@ -239,6 +260,74 @@ type BookEnrichment struct {
 	ASIN       string
 	ISBN       string
 	Publisher  string
+}
+
+// ItemFieldsEnrichment is the scalar fields a provider supplied for one item, track or
+// book. Fields carries the metadata vocabulary keyed the way an edit does; the store
+// keeps only the keys in the kind's EnrichFillFields set that are currently empty and
+// unlocked, so a provider returns everything it found and the store decides what lands.
+// Matched=false records a completed lookup nothing answered, so the item is not re-asked
+// every run.
+type ItemFieldsEnrichment struct {
+	ItemID  int64
+	PID     PID
+	Matched bool
+	// Provider names the marker's provider: who answered at all. Providers names the
+	// provider per field, since two of them commonly split a set (one knows the bpm,
+	// another the isrc) and the provenance row is where a consumer attributes a value.
+	// A field absent from Providers falls back to Provider.
+	Provider  string
+	Providers map[string]string
+	Fields    map[string]string
+}
+
+// AlbumFieldsEnrichment is the scalar fields a provider supplied for one album, the
+// entity rung of the same walk. Only AlbumFillFields keys are applied: label lands on
+// the album row itself, year on every member at once through the uniform whole-album
+// edit, since year participates in the album identity key and a per-member write would
+// fork the album.
+type AlbumFieldsEnrichment struct {
+	AlbumID int64
+	PID     PID
+	Matched bool
+	// Provider and Providers split the same way ItemFieldsEnrichment's do: the marker's
+	// provider, and the provider behind each field for its curation row.
+	Provider  string
+	Providers map[string]string
+	Fields    map[string]string
+}
+
+// EnrichFillFields is the set of scalar fields an item-rung enrichment walk may fill for
+// a kind, and the port's answer to which keys in a Candidate.Fields map are applied.
+//
+// The rule is the kind's editable scalar fields minus everything a provider's guess has
+// no business deciding: the identity keys (a per-member write forks the entity off its
+// album or its author), the title, genre (CapGenres owns that), the recording MBID
+// (identity), the positions and flags a file's own tags settle (track_no, disc_no,
+// compilation), the derived sort fields (an edit of the display field regenerates them,
+// so filling one would be undone and could restore a locked value), and comment, which
+// is the listener's own note rather than a fact about the recording.
+//
+// A kind with no fields walk returns nil.
+func EnrichFillFields(kind Kind) map[string]bool {
+	switch kind {
+	case KindTrack:
+		return map[string]bool{"bpm": true, "isrc": true, "composer": true}
+	case KindBook:
+		return map[string]bool{
+			"publisher": true, "year": true, "description": true, "narrator": true,
+			"subtitle": true, "edition": true, "asin": true, "isbn": true,
+		}
+	}
+	return nil
+}
+
+// AlbumFillFields is the entity-rung twin of EnrichFillFields: the album fields a
+// provider may fill. The release identifiers (barcode, catalog number, media, country)
+// are refused on purpose, since they are the evidence the MusicBrainz release matcher
+// searches by and a provider's guess must not drive it.
+func AlbumFillFields() map[string]bool {
+	return map[string]bool{"label": true, "year": true}
 }
 
 // EnrichmentCoverage reports how many entities of each type have been enriched,

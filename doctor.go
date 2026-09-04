@@ -34,7 +34,8 @@ type DoctorReport struct {
 	// non-zero DiagnosticsStale is why "no diagnostics" must not be read as "clean".
 	DiagnosticCount  int
 	DiagnosticsStale int
-	// EnrichmentEnabled reports whether a MusicBrainz contact is configured.
+	// EnrichmentEnabled reports whether any enrichment phase can run: a MusicBrainz
+	// contact is configured, or an injected provider gates a phase of its own.
 	EnrichmentEnabled bool
 
 	// Fpcalc is the sole remaining optional helper (Chromaprint for AcoustID); it is

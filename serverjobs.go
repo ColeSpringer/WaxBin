@@ -203,7 +203,8 @@ func (l *Library) enrichWork(opts EnrichOptions, scope *model.EnrichScope, out *
 func (l *Library) StartEnrich(ctx context.Context, opts EnrichOptions) (model.PID, error) {
 	if !l.enricher.Enabled() {
 		return "", waxerr.New(waxerr.CodeUnsupported, "waxbin.StartEnrich",
-			"enrichment needs a MusicBrainz contact (set enrichment.contact / WAXBIN_ENRICH_CONTACT)")
+			"enrichment needs a MusicBrainz contact "+
+				"(set enrichment.contact / WAXBIN_ENRICH_CONTACT) or an injected provider")
 	}
 	scope, err := l.enrichScope(ctx, "waxbin.StartEnrich", opts)
 	if err != nil {

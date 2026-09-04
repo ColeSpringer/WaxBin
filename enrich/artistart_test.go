@@ -101,7 +101,7 @@ func TestArtistArtSkippedWhenLocked(t *testing.T) {
 	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
 	artistPID := model.PID(scalarStr(t, roDB(t, dbPath),
 		"SELECT pid FROM artist WHERE name = 'Pink Floyd'"))
-	if err := st.SetArtLock(ctx, model.ArtArtist, artistPID, model.ArtRoleFront, true); err != nil {
+	if _, err := st.SetArtLock(ctx, model.ArtArtist, artistPID, model.ArtRoleFront, true); err != nil {
 		t.Fatalf("lock the artist art: %v", err)
 	}
 

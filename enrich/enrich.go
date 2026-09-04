@@ -8,6 +8,11 @@
 // answers instead of re-hitting a rate-limited API. It requires no bundled dataset
 // and degrades gracefully when a provider is unreachable.
 //
+// Beside the MusicBrainz spine sit the port phases, each gated by an injected provider's
+// capability and each running with or without a MusicBrainz contact: the two art
+// backfills, lyrics, and the fields walks that fill a track's, a book's, or an album's
+// empty scalar fields from Candidate.Fields.
+//
 // It is the "metadata brain" enrichment half; the WaxLabel tag adapter lives in
 // package meta. This package defines its own Store port (implemented by
 // store/sqlite) so it depends on the domain model, not on SQLite.
@@ -17,6 +22,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -45,9 +51,10 @@ type Store interface {
 	// MBID, under a release group that has one.
 	AlbumsNeedingReleaseMatch(ctx context.Context, force bool, afterID int64, limit int, ids []int64) ([]model.EnrichTarget, error)
 	// ReleaseGroupsNeedingAuxArt returns the next keyset page of release groups the
-	// auxiliary-art backfill should ask about: they carry an MBID, no whole-entity art
+	// auxiliary-art backfill should ask about: they carry a title, no whole-entity art
 	// lock, and at least one empty auxiliary slot. Their front covers are deliberately
-	// not consulted, since a settled front is the population the phase exists for.
+	// not consulted, since a settled front is the population the phase exists for. An
+	// MBID rides along when the catalog has one but does not gate the walk.
 	ReleaseGroupsNeedingAuxArt(ctx context.Context, force bool, afterID int64, limit int, ids []int64) ([]model.EnrichTarget, error)
 	BooksNeedingEnrichment(ctx context.Context, force bool, afterID int64, limit int, ids []int64) ([]model.EnrichTarget, error)
 	// ItemsNeedingLyrics returns the next keyset page of tracks that carry no lyrics
@@ -57,13 +64,33 @@ type Store interface {
 	// ArtistsNeedingArtBackfill returns the next keyset page of artists with an empty
 	// art slot, front or auxiliary. Unlike ReleaseGroupsNeedingAuxArt it does consult
 	// the front, because artist art is fetched inside the identity pass and an already
-	// marked artist has none at all, which is the gap this phase exists for.
+	// marked artist has none at all, which is the gap this phase exists for. It walks by
+	// name, so an artist MusicBrainz never matched is asked about too.
 	ArtistsNeedingArtBackfill(ctx context.Context, force bool, afterID int64, limit int, ids []int64) ([]model.EnrichTarget, error)
+	// ItemsNeedingFields returns the next keyset page of items of one kind whose fill
+	// set (model.EnrichFillFields) still has a gap, each carrying the title, credit,
+	// duration, and identifiers a provider keys on.
+	ItemsNeedingFields(ctx context.Context, force bool, afterID int64, limit int, kind model.Kind, ids []int64) ([]model.EnrichTarget, error)
+	// AlbumsNeedingFields returns the next keyset page of albums missing a label or a
+	// year, the entity rung of the same walk.
+	AlbumsNeedingFields(ctx context.Context, force bool, afterID int64, limit int, ids []int64) ([]model.EnrichTarget, error)
 	// CountEntitiesNeedingEnrichment mirrors the phases a run would execute: a nil
 	// scope counts everything, a scoped count covers only the scoped ids, and a
 	// phase the scoped run skips (an empty id list) contributes zero. Each optional
 	// phase's flag must mirror whether the run actually runs it, or the ratio drifts.
 	CountEntitiesNeedingEnrichment(ctx context.Context, force bool, opts model.EnrichCountOptions, scope *model.EnrichScope) (int, error)
+
+	// ApplyItemFields writes the scalar fields a provider supplied for one item and
+	// records the fields marker. Only the keys in the kind's fill set that are empty and
+	// unlocked land, each stamped with the provider's name; a value that fails
+	// validation is skipped rather than failing the pass, and nothing surviving writes
+	// the marker alone.
+	ApplyItemFields(ctx context.Context, in model.ItemFieldsEnrichment) error
+	// ApplyAlbumFields writes an album's label on the album row and its year across
+	// every member at once, both fill-when-empty and lock-respecting, and records the
+	// album fields marker. The year fill is vetoed unless every member is present,
+	// year-less, and unlocked, since it moves the album identity key.
+	ApplyAlbumFields(ctx context.Context, in model.AlbumFieldsEnrichment) error
 
 	ApplyArtistEnrichment(ctx context.Context, in model.ArtistEnrichment) error
 	ApplyReleaseGroupEnrichment(ctx context.Context, in model.ReleaseGroupEnrichment) error
@@ -90,13 +117,15 @@ type Store interface {
 	EnrichmentCoverage(ctx context.Context) (model.EnrichmentCoverage, error)
 }
 
-// Config tunes the enrichment service: the mandatory MusicBrainz contact, the
-// network policy, provider endpoints (overridable for tests), the optional
-// AcoustID key, and toggles. Enrichment is disabled unless a contact is set, since
-// MusicBrainz requires an identifying User-Agent.
+// Config tunes the enrichment service: the MusicBrainz contact, the network policy,
+// provider endpoints (overridable for tests), the optional AcoustID key, and toggles.
+// The contact gates the MusicBrainz spine and the key-free built-ins, which are public
+// services that require an identifying User-Agent; an injected provider brings its own
+// and runs without one.
 type Config struct {
 	// Contact is the operator contact (email or URL) folded into the User-Agent, as
-	// MusicBrainz requires. When empty (and UserAgent is empty) enrichment is disabled.
+	// MusicBrainz requires. When empty (and UserAgent is empty) the identity phases and
+	// the key-free built-ins do not run; a registered provider's own phases still do.
 	Contact string
 	// UserAgent overrides the full User-Agent string; when empty one is built from
 	// the app name and Contact.
@@ -248,6 +277,16 @@ func New(store Store, cfg Config, log *slog.Logger) *Service {
 	}
 	s.numInjected = len(s.providers)
 
+	// The built-ins are public services that demand an identifying User-Agent, and the
+	// contact is what supplies it, so they are registered only when one is configured.
+	// The guard is load-bearing rather than tidiness: enrichConfig defaults cover art,
+	// lyrics, and community genres on regardless of the contact, so without it a
+	// contact-less run would walk every track against LRCLIB under the default
+	// User-Agent, which is exactly what those services ask callers not to do.
+	if !s.spineEnabled() {
+		return s
+	}
+
 	// The key-free built-ins. The Cover Art Archive shares the MusicBrainz client (a
 	// different host, so its pacing is independent anyway); the rate-limited lyrics/
 	// genre built-ins each get their own paced client.
@@ -285,11 +324,33 @@ func baseOr(v, def string) string {
 	return strings.TrimRight(v, "/")
 }
 
-// Enabled reports whether enrichment is configured. MusicBrainz requires an
-// identifying contact, so without one the pass refuses to run rather than send
-// requests the service would reject.
-func (s *Service) Enabled() bool {
+// spineEnabled reports whether the MusicBrainz identity spine and the key-free
+// built-ins may run. Those are public services that require an identifying contact in
+// the User-Agent, so the contact is the operator's consent to talk to them at all.
+func (s *Service) spineEnabled() bool {
 	return s.cfg.Contact != "" || s.cfg.UserAgent != ""
+}
+
+// enrichDisabledMessage names both routes to a runnable pass. A contact enables the
+// MusicBrainz identity phases and the key-free built-ins; an injected provider enables
+// the phase its capability gates, without one.
+const enrichDisabledMessage = "enrichment needs a MusicBrainz contact " +
+	"(set enrichment.contact) or an injected provider"
+
+// Enabled reports whether any phase can run: the spine is configured, or a registered
+// provider advertises a capability that gates a phase of its own. An injected provider
+// brings its own credentials and its own service agreement, so a catalog with one and no
+// contact still has work to do.
+func (s *Service) Enabled() bool {
+	if s.spineEnabled() {
+		return true
+	}
+	for _, c := range []Capability{CapAuxArt, CapArtistArt, CapLyrics, CapFields, CapBookMeta} {
+		if s.hasCapability(c) {
+			return true
+		}
+	}
+	return false
 }
 
 // acoustEnabled reports whether the AcoustID fingerprint fallback is usable: a key
@@ -334,6 +395,15 @@ type Result struct {
 	// images themselves land in ArtFetched and AuxArtFetched with every other pass's.
 	ArtistArtEnriched int
 	ArtistArtMatched  int
+	// The three fields walks, each counting the targets it walked and the ones some
+	// provider answered for. TrackFields and BookFields are the item rung, one per kind
+	// because each is gated by a different capability; AlbumFields is the entity rung.
+	TrackFieldsEnriched int
+	TrackFieldsMatched  int
+	BookFieldsEnriched  int
+	BookFieldsMatched   int
+	AlbumFieldsEnriched int
+	AlbumFieldsMatched  int
 	// ArtFetched counts front covers gathered and handed to the store, not covers
 	// actually applied (the store's fill-when-empty and lock guards decide that);
 	// AuxArtFetched counts the non-front role images the same way, in whichever pass
@@ -360,7 +430,8 @@ type Result struct {
 // numerator against CountEntitiesNeedingEnrichment.
 func (r *Result) total() int {
 	return r.ArtistsEnriched + r.ReleaseGroupsEnriched + r.AlbumsSearched +
-		r.AuxArtEnriched + r.ArtistArtEnriched + r.BooksEnriched + r.LyricsEnriched
+		r.AuxArtEnriched + r.ArtistArtEnriched + r.BooksEnriched + r.LyricsEnriched +
+		r.TrackFieldsEnriched + r.BookFieldsEnriched + r.AlbumFieldsEnriched
 }
 
 // Heartbeat reports progress; it may be nil.
@@ -378,32 +449,36 @@ func (s *Service) Run(ctx context.Context, opts RunOptions, hb Heartbeat) (*Resu
 	const op = "enrich.Run"
 	res := &Result{}
 	if !s.Enabled() {
-		return res, waxerr.New(waxerr.CodeUnsupported, op,
-			"enrichment needs a MusicBrainz contact (set enrichment.contact)")
+		return res, waxerr.New(waxerr.CodeUnsupported, op, enrichDisabledMessage)
 	}
 	// A scoped run implies force: the caller pointed at these targets, so markers
 	// and cached provider responses are bypassed and the lookup actually re-runs.
 	scope := opts.Scope
 	st := &runState{force: opts.Force || scope != nil, browsedGroups: map[string]bool{}}
-	var artistIDs, rgIDs, albumIDs, bookIDs, lyricsIDs []int64
+	var artistIDs, rgIDs, albumIDs, bookIDs, lyricsIDs, fieldsIDs []int64
 	if scope != nil {
 		artistIDs, rgIDs, albumIDs = scope.ArtistIDs, scope.ReleaseGroupIDs, scope.AlbumIDs
-		bookIDs, lyricsIDs = scope.BookItemIDs, scope.LyricsItemIDs
+		bookIDs, lyricsIDs, fieldsIDs = scope.BookItemIDs, scope.LyricsItemIDs, scope.FieldsItemIDs
 	}
 
 	// The total is only needed to report a heartbeat ratio, so skip the three
 	// counting queries entirely when there is no heartbeat.
 	var total int
 	if hb != nil {
-		// The flags and the scope must match the phase list below, which adds the album
-		// phase only when the toggle is on, adds the art-backfill and lyrics phases only
-		// when a capable provider is registered, and skips a phase the scope leaves
-		// empty, so the denominator counts exactly the work that will run.
+		// The flags and the scope must match the phase list below, which adds the
+		// identity phases only with a MusicBrainz contact, the album phase only when the
+		// toggle is on too, the art-backfill and lyrics phases only when a capable
+		// provider is registered, and skips a phase the scope leaves empty, so the
+		// denominator counts exactly the work that will run.
 		n, err := s.store.CountEntitiesNeedingEnrichment(ctx, st.force, model.EnrichCountOptions{
-			Albums:    s.cfg.MatchReleases,
-			AuxArt:    s.hasCapability(CapAuxArt),
-			ArtistArt: s.hasCapability(CapArtistArt),
-			Lyrics:    s.hasCapability(CapLyrics),
+			Identity:    s.spineEnabled(),
+			Albums:      s.cfg.MatchReleases && s.spineEnabled(),
+			AuxArt:      s.hasCapability(CapAuxArt),
+			ArtistArt:   s.hasCapability(CapArtistArt),
+			Lyrics:      s.hasCapability(CapLyrics),
+			TrackFields: s.hasCapability(CapFields),
+			BookFields:  s.hasCapability(CapBookMeta),
+			AlbumFields: s.hasCapability(CapFields),
 		}, scope)
 		if err != nil {
 			return res, err
@@ -437,10 +512,17 @@ func (s *Service) Run(ctx context.Context, opts RunOptions, hb Heartbeat) (*Resu
 	// scoped phase with nothing to do is skipped outright (no fetch, no count).
 	phaseRuns := func(ids []int64) bool { return scope == nil || len(ids) > 0 }
 
+	// The identity phases talk to MusicBrainz, so they run only with a contact. The
+	// port phases below answer to their providers instead and run either way, which is
+	// what lets an install with an injected provider and no contact enrich anything at
+	// all.
+	spine := s.spineEnabled()
+	identityRuns := func(ids []int64) bool { return spine && phaseRuns(ids) }
+
 	// Artists first: a release group's artist credit is more useful once its primary
 	// artist carries an MBID.
 	var phases []phase
-	if phaseRuns(artistIDs) {
+	if identityRuns(artistIDs) {
 		phases = append(phases, phase{
 			label: "artist", enriched: &res.ArtistsEnriched, matched: &res.ArtistsMatched,
 			fetch: func(ctx context.Context, after int64, lim int) ([]model.EnrichTarget, error) {
@@ -451,7 +533,7 @@ func (s *Service) Run(ctx context.Context, opts RunOptions, hb Heartbeat) (*Resu
 			},
 		})
 	}
-	if phaseRuns(rgIDs) {
+	if identityRuns(rgIDs) {
 		phases = append(phases, phase{
 			label: "album", enriched: &res.ReleaseGroupsEnriched, matched: &res.ReleaseGroupsMatched,
 			fetch: func(ctx context.Context, after int64, lim int) ([]model.EnrichTarget, error) {
@@ -466,7 +548,7 @@ func (s *Service) Run(ctx context.Context, opts RunOptions, hb Heartbeat) (*Resu
 	// query requires a non-empty release_group.mbid, and the phase above is what fills
 	// it. Running them the other way round would leave a freshly-enriched group's
 	// albums unqueued until the next pass.
-	if s.cfg.MatchReleases && phaseRuns(albumIDs) {
+	if s.cfg.MatchReleases && identityRuns(albumIDs) {
 		phases = append(phases, phase{
 			// Not "release": the phase above is already labelled "album".
 			label: "album release", enriched: &res.AlbumsSearched, matched: &res.AlbumsMatched,
@@ -485,13 +567,13 @@ func (s *Service) Run(ctx context.Context, opts RunOptions, hb Heartbeat) (*Resu
 	// which the built-in Cover Art Archive does not, so a stock install walks nothing and
 	// writes no markers.
 	//
-	// Coming after the release-group phase is load-bearing for the same reason the album
-	// phase above is: its queue requires a non-empty release_group.mbid, read live, and
-	// that phase is what fills it. Ahead of it, a freshly-enriched group would wait a
-	// whole pass to be asked about its empty slots.
+	// Coming after the release-group phase means an id that phase just filled rides
+	// along with the request, since the queue reads release_group.mbid live. Nothing
+	// gates on it any more, so this is an ordering preference rather than a requirement:
+	// a group with no id is asked about by title and primary-artist name.
 	//
-	// Sitting after "album release" and therefore before the book and lyrics phases is
-	// not: it keeps the art-fetching phases together and nothing else depends on it.
+	// Sitting after "album release" and therefore before the book and lyrics phases
+	// keeps the art-fetching phases together and nothing else depends on it.
 	if s.hasCapability(CapAuxArt) && phaseRuns(rgIDs) {
 		phases = append(phases, phase{
 			label: "aux art", enriched: &res.AuxArtEnriched, matched: &res.AuxArtMatched,
@@ -511,8 +593,9 @@ func (s *Service) Run(ctx context.Context, opts RunOptions, hb Heartbeat) (*Resu
 	// walks nothing and writes no markers.
 	//
 	// After the identity phase for the reason the aux backfill is after the release-group
-	// one: its queue requires a non-empty artist.mbid, read live, and that phase is what
-	// fills it. Its place among the art phases is otherwise free.
+	// one: the queue reads artist.mbid live, so an id that phase just filled rides along
+	// with the request. The walk is keyed on the name, so an unmatched artist is reached
+	// either way. Its place among the art phases is otherwise free.
 	if s.hasCapability(CapArtistArt) && phaseRuns(artistIDs) {
 		phases = append(phases, phase{
 			label: "artist art", enriched: &res.ArtistArtEnriched, matched: &res.ArtistArtMatched,
@@ -524,7 +607,7 @@ func (s *Service) Run(ctx context.Context, opts RunOptions, hb Heartbeat) (*Resu
 			},
 		})
 	}
-	if phaseRuns(bookIDs) {
+	if identityRuns(bookIDs) {
 		phases = append(phases, phase{
 			label: "book", enriched: &res.BooksEnriched, matched: &res.BooksMatched,
 			fetch: func(ctx context.Context, after int64, lim int) ([]model.EnrichTarget, error) {
@@ -543,6 +626,46 @@ func (s *Service) Run(ctx context.Context, opts RunOptions, hb Heartbeat) (*Resu
 				return s.store.ItemsNeedingLyrics(ctx, st.force, after, lim, lyricsIDs)
 			},
 			enrich: func(ctx context.Context, t model.EnrichTarget) (bool, error) { return s.enrichLyrics(ctx, st, t) },
+		})
+	}
+	// The item-rung fields walks. Each is gated by the capability that owns its rung,
+	// so a stock install (which registers no fields provider) walks neither and writes
+	// no markers. They come after lyrics for the reason the art backfills sit where they
+	// do: nothing downstream depends on the order, and keeping the per-item phases
+	// together is the readable arrangement.
+	if s.hasCapability(CapFields) && phaseRuns(fieldsIDs) {
+		phases = append(phases, phase{
+			label: "track fields", enriched: &res.TrackFieldsEnriched, matched: &res.TrackFieldsMatched,
+			fetch: func(ctx context.Context, after int64, lim int) ([]model.EnrichTarget, error) {
+				return s.store.ItemsNeedingFields(ctx, st.force, after, lim, model.KindTrack, fieldsIDs)
+			},
+			enrich: func(ctx context.Context, t model.EnrichTarget) (bool, error) {
+				return s.enrichTrackFields(ctx, st, t)
+			},
+		})
+	}
+	if s.hasCapability(CapBookMeta) && phaseRuns(fieldsIDs) {
+		phases = append(phases, phase{
+			label: "book fields", enriched: &res.BookFieldsEnriched, matched: &res.BookFieldsMatched,
+			fetch: func(ctx context.Context, after int64, lim int) ([]model.EnrichTarget, error) {
+				return s.store.ItemsNeedingFields(ctx, st.force, after, lim, model.KindBook, fieldsIDs)
+			},
+			enrich: func(ctx context.Context, t model.EnrichTarget) (bool, error) {
+				return s.enrichBookFields(ctx, st, t)
+			},
+		})
+	}
+	// The album rung of the same walk. It shares the album scope list with the release
+	// match, and comes after the track walk so the two fields phases read together.
+	if s.hasCapability(CapFields) && phaseRuns(albumIDs) {
+		phases = append(phases, phase{
+			label: "album fields", enriched: &res.AlbumFieldsEnriched, matched: &res.AlbumFieldsMatched,
+			fetch: func(ctx context.Context, after int64, lim int) ([]model.EnrichTarget, error) {
+				return s.store.AlbumsNeedingFields(ctx, st.force, after, lim, albumIDs)
+			},
+			enrich: func(ctx context.Context, t model.EnrichTarget) (bool, error) {
+				return s.enrichAlbumFields(ctx, st, t)
+			},
 		})
 	}
 	for i := range phases {
@@ -636,8 +759,9 @@ func (s *Service) runPhase(ctx context.Context, p phase, beat func(string) error
 // requests here; this exists for an injected provider advertising CapCover or CapAuxArt.
 //
 // The art rides the identity pass, so it only reaches artists that pass is still queued
-// for. An artist already carrying an enrichment marker is out of this queue, which is
-// what the artist-art backfill phase exists to re-ask about; see enrichArtistArt.
+// for, and only artists MusicBrainz matched at all. An artist already carrying an
+// enrichment marker, or one no search ever resolved, is out of this queue; the
+// artist-art backfill phase walks by name and reaches both. See enrichArtistArt.
 func (s *Service) enrichArtist(ctx context.Context, st *runState, res *Result, t model.EnrichTarget) (bool, error) {
 	enr := model.ArtistEnrichment{ArtistID: t.ID, PID: t.PID}
 	a, err := s.resolveArtist(ctx, st, t)
@@ -1111,6 +1235,134 @@ func (s *Service) enrichBook(ctx context.Context, st *runState, t model.EnrichTa
 		return false, err
 	}
 	return enr.Matched, nil
+}
+
+// enrichTrackFields fills one track's empty scalar fields from the providers advertising
+// CapFields and marks it so the walk does not repeat. The rung is the request type: a
+// recording target's answer lands on this one item, which is what separates it from the
+// album walk, whose year fans across every member.
+func (s *Service) enrichTrackFields(ctx context.Context, st *runState, t model.EnrichTarget) (bool, error) {
+	in := model.ItemFieldsEnrichment{ItemID: t.ID, PID: t.PID}
+	fields, providers := s.gatherFields(ctx, Request{
+		Type: TargetRecording, Force: st.force, Want: CapFields,
+		Title: t.Name, Artist: t.ArtistName, Album: t.Album,
+		DurationSec: t.DurationSec, ISRC: t.ISRC, MBID: t.MBID,
+	}, CapFields, model.EnrichFillFields(model.KindTrack))
+	if len(fields) > 0 {
+		in.Matched, in.Fields, in.Providers = true, fields, providers
+		in.Provider = firstFieldProvider(providers)
+	}
+	if err := s.store.ApplyItemFields(ctx, in); err != nil {
+		return false, err
+	}
+	return in.Matched, nil
+}
+
+// enrichBookFields is the book twin, gated by CapBookMeta so the book providers an
+// embedder registers are actually asked: before this walk existed, enrichBook consulted
+// only the MusicBrainz spine and no CapBookMeta provider was ever dispatched to.
+//
+// The dedicated Publisher/ASIN/ISBN slots fold in as fallbacks for their own keys, so a
+// provider written against those alone contributes without changing.
+func (s *Service) enrichBookFields(ctx context.Context, st *runState, t model.EnrichTarget) (bool, error) {
+	in := model.ItemFieldsEnrichment{ItemID: t.ID, PID: t.PID}
+	fields, providers := s.gatherFields(ctx, Request{
+		Type: TargetBook, Force: st.force, Want: CapBookMeta,
+		Title: t.Name, Artist: t.ArtistName,
+		ASIN: t.ASIN, ISBN: t.ISBN, MBID: t.MBID,
+	}, CapBookMeta, model.EnrichFillFields(model.KindBook))
+	if len(fields) > 0 {
+		in.Matched, in.Fields, in.Providers = true, fields, providers
+		in.Provider = firstFieldProvider(providers)
+	}
+	if err := s.store.ApplyItemFields(ctx, in); err != nil {
+		return false, err
+	}
+	return in.Matched, nil
+}
+
+// enrichAlbumFields fills one album's empty label and year from the providers advertising
+// CapFields. The rung is the request type: a release target's answer lands on the album
+// row and, for year, on every member at once, which is what separates it from the
+// recording walk above.
+func (s *Service) enrichAlbumFields(ctx context.Context, st *runState, t model.EnrichTarget) (bool, error) {
+	in := model.AlbumFieldsEnrichment{AlbumID: t.ID, PID: t.PID}
+	fields, providers := s.gatherFields(ctx, Request{
+		Type: TargetRelease, Force: st.force, Want: CapFields,
+		Title: t.Name, Artist: t.ArtistName, MBID: t.MBID, Barcode: t.Barcode,
+	}, CapFields, model.AlbumFillFields())
+	if len(fields) > 0 {
+		in.Matched, in.Fields, in.Providers = true, fields, providers
+		in.Provider = firstFieldProvider(providers)
+	}
+	if err := s.store.ApplyAlbumFields(ctx, in); err != nil {
+		return false, err
+	}
+	return in.Matched, nil
+}
+
+// gatherFields asks every provider advertising want for scalar fields, keeping the first
+// offer per key. Keys outside allowed are dropped here rather than at apply, so a
+// provider answering a field the catalog will never take does not decide anything.
+//
+// It returns the provider name PER KEY, not one name for the batch. Two providers
+// commonly split a set (one knows the bpm, another the isrc), and the provenance row is
+// where a consumer attributes a value and reasons about a conflict, so stamping the
+// second provider's value with the first's name is a lie in exactly the field WaxDeck
+// asked for. The marker takes the first contributor's name, which is all it claims.
+//
+// The loop stops once every allowed key is held, so a further provider is not called for
+// answers that would be discarded. For a book request the dedicated Publisher/ASIN/ISBN
+// slots fill their keys when Fields did not.
+func (s *Service) gatherFields(ctx context.Context, req Request, want Capability, allowed map[string]bool) (values, providers map[string]string) {
+	take := func(name, key, value string) {
+		if !allowed[key] || strings.TrimSpace(value) == "" || values[key] != "" {
+			return
+		}
+		if values == nil {
+			values = make(map[string]string, len(allowed))
+			providers = make(map[string]string, len(allowed))
+		}
+		values[key], providers[key] = value, name
+	}
+	for _, p := range s.providers {
+		if !p.Capabilities().Has(want) {
+			continue
+		}
+		cand, err := s.callProvider(ctx, p, req)
+		if err != nil || cand == nil {
+			continue
+		}
+		for key, value := range cand.Fields {
+			take(p.Name(), key, value)
+		}
+		if req.Type == TargetBook {
+			take(p.Name(), "publisher", cand.Publisher)
+			take(p.Name(), "asin", cand.ASIN)
+			take(p.Name(), "isbn", cand.ISBN)
+		}
+		if len(values) == len(allowed) {
+			break
+		}
+	}
+	return values, providers
+}
+
+// firstFieldProvider names the provider a marker should credit: the one behind the
+// first key in sorted order, so the choice is stable rather than map-order noise. The
+// per-key names are what the provenance rows carry.
+func firstFieldProvider(providers map[string]string) string {
+	keys := make([]string, 0, len(providers))
+	for k := range providers {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		if providers[k] != "" {
+			return providers[k]
+		}
+	}
+	return ""
 }
 
 // enrichLyrics fills one track's lyrics from the first lyrics provider to answer

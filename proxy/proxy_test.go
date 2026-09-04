@@ -220,7 +220,9 @@ func TestCurationRoundTrip(t *testing.T) {
 			if ok := rawHas(raw, "role"); ok != (p.Role != "") {
 				t.Errorf("role key present = %v with role %q, want them to agree", ok, p.Role)
 			}
-			return nil, nil
+			// The outcome rides back: an auxiliary unlock that released nothing while the
+			// whole art pin stands is the case a caller cannot reconstruct from the request.
+			return proxy.SetArtLockResult{Changed: p.Lock, StillLocked: true}, nil
 		},
 	}
 	c := dial(t, startServer(t, handlers, nil))
@@ -267,16 +269,20 @@ func TestCurationRoundTrip(t *testing.T) {
 		t.Fatalf("set entity art: %v", err)
 	}
 
-	// set_art_lock carries no result payload; the unlock direction is the one that
-	// matters, since it is the way out of a cleared and locked cover.
-	if err := c.SetArtLock(ctx, model.ArtPodcast, "pod1", model.ArtRoleFront, false); err != nil {
+	// The unlock direction is the one that matters, since it is the way out of a cleared
+	// and locked cover, and its result is what tells the caller whether the slot opened.
+	change, err := c.SetArtLock(ctx, model.ArtPodcast, "pod1", model.ArtRoleFront, false)
+	if err != nil {
 		t.Fatalf("set art lock: %v", err)
 	}
+	if change.Changed || !change.StillLocked {
+		t.Errorf("unlock result = %+v, want the handler's no-change-still-locked answer", change)
+	}
 	// An auxiliary role names itself; the front cover does not, in either spelling.
-	if err := c.SetArtLock(ctx, model.ArtPodcast, "pod1", model.ArtRoleBack, true); err != nil {
+	if _, err := c.SetArtLock(ctx, model.ArtPodcast, "pod1", model.ArtRoleBack, true); err != nil {
 		t.Fatalf("set art lock (back): %v", err)
 	}
-	if err := c.SetArtLock(ctx, model.ArtPodcast, "pod1", "", true); err != nil {
+	if _, err := c.SetArtLock(ctx, model.ArtPodcast, "pod1", "", true); err != nil {
 		t.Fatalf("set art lock (empty role): %v", err)
 	}
 	if want := []string{"", "back", ""}; !slices.Equal(gotLockRoles, want) {

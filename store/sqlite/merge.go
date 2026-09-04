@@ -180,6 +180,12 @@ func mergeEntityTx(ctx context.Context, tx *sql.Tx, et model.MergeEntity, table 
 		if err := deleteArtistArtMarkerTx(ctx, tx, lid); err != nil {
 			return nil, err
 		}
+	case model.MergeAlbum:
+		// The album fields walk's marker, for the same reason: it says what a provider
+		// answered about the loser, and the row is keyed by the loser's rowid.
+		if err := deleteAlbumFieldsMarkerTx(ctx, tx, lid); err != nil {
+			return nil, err
+		}
 	}
 
 	// An orphan_candidate row the loser earned from an earlier sweep goes with it. The

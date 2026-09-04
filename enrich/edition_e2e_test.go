@@ -809,7 +809,7 @@ func TestLockedAlbumArtIsNeverAskedAbout(t *testing.T) {
 	db := roDB(t, dbPath)
 	for _, country := range []string{"GB", "JP"} {
 		pid := scalarStr(t, db, "SELECT pid FROM album WHERE country = ?", country)
-		if err := st.SetArtLock(ctx, model.ArtAlbum, model.PID(pid), model.ArtRoleFront, true); err != nil {
+		if _, err := st.SetArtLock(ctx, model.ArtAlbum, model.PID(pid), model.ArtRoleFront, true); err != nil {
 			t.Fatalf("lock %s album art: %v", country, err)
 		}
 	}

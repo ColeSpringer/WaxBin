@@ -63,7 +63,7 @@ exit codes (`waxbin exit-codes`).
 | **Deletion / repair** | `trash`, `rm [--permanent]`, `mark-missing [--force]`, `merge`, `audit`, `diagnostics`, `upgrade` |
 | **Portability** | `backup`, `restore`, `export`, `manifest`, `rebuild` |
 | **Playlists / podcasts** | `playlist`, `smartplaylist`, `podcast`, `opml` |
-| **Enrichment** | `enrich` (MusicBrainz + Cover Art Archive; optional AcoustID; incl. `--item`/`--entity`; an injected provider can also fill role-tagged and artist art) |
+| **Enrichment** | `enrich` (MusicBrainz + Cover Art Archive, which need a contact; optional AcoustID; incl. `--item`/`--entity`; an injected provider can also fill role-tagged and artist art, and its passes run without a contact) |
 | **Maintenance** | `db verify [--fix]`, `db vacuum [--integrity]`, `db thumbs [--older-than/--max-bytes]`, `db migrate`, `db reset --yes`, `user`, `state` |
 
 ### Watching for changes
@@ -158,9 +158,11 @@ never alters the audio):
   computed track and album ReplayGain into files after album aggregation
   (`REPLAYGAIN_*`, or Opus `R128_*`).
 - `waxbin enrich --write-tags` (or `write_enrichment_tags` in config) writes what the
-  pass filled into files: a book's `ASIN`/`ISBN`/`PUBLISHER` and a track's `GENRE`.
-  Without it those values live only in the catalog, which a rescan rebuilds from the
-  file's tags, so the next retag clears them.
+  pass filled into files: every field with a tag key the scanner reads back (a track's
+  `GENRE`/`BPM`/`ISRC`/`COMPOSER`/`DATE`, a book's `ASIN`/`ISBN`/`PUBLISHER`/`GENRE`/
+  `DATE`/narrator) plus an album's `LABEL` across its members. Without it those values
+  live only in the catalog, which a rescan rebuilds from the file's tags, so the next
+  retag clears them.
 - An organize profile with `tag_write` corrects `albumArtist` (literal
   `Various Artists` for compilations) and disc/track numbering on disk as it moves
   files, skipping locked fields and re-tagging before the move so a failure aborts

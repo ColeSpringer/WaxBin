@@ -640,13 +640,13 @@ func TestServeProxiedArtAttribution(t *testing.T) {
 		}
 		return false
 	}
-	if err := c.SetArtLock(ctx, model.ArtPlaylist, pid, model.ArtRoleBack, true); err != nil {
+	if _, err := c.SetArtLock(ctx, model.ArtPlaylist, pid, model.ArtRoleBack, true); err != nil {
 		t.Fatalf("proxied back lock: %v", err)
 	}
 	if !hasBackLock() {
 		t.Error("the proxied back lock wrote no locked back slot")
 	}
-	if err := c.SetArtLock(ctx, model.ArtPlaylist, pid, model.ArtRoleBack, false); err != nil {
+	if _, err := c.SetArtLock(ctx, model.ArtPlaylist, pid, model.ArtRoleBack, false); err != nil {
 		t.Fatalf("proxied back unlock: %v", err)
 	}
 	if hasBackLock() {

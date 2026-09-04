@@ -776,3 +776,53 @@ func TestMergeErrors(t *testing.T) {
 		t.Errorf("same series pid: got %v, want CodeInvalid", err)
 	}
 }
+
+// TestMergeAlbumDropsFieldsMarker: the album fields walk's marker is keyed by the album's
+// own rowid under its own entity_type, so the merge's marker union never reaches it. It
+// records an answer about the loser, and album rowids are reused, so it goes with the
+// loser rather than being inherited.
+func TestMergeAlbumDropsFieldsMarker(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	putTrack(t, st, lib.ID, trackSpec{
+		path: "/lib/Band/Surv/01.flac", essence: "e1", content: "c1", title: "One",
+		artist: "Band", album: "SurvAl",
+	})
+	putTrack(t, st, lib.ID, trackSpec{
+		path: "/lib/Band/Lose/01.flac", essence: "e2", content: "c2", title: "Two",
+		artist: "Band", album: "LoseAl",
+	})
+	al := func(title string) (int64, model.PID) {
+		t.Helper()
+		var id int64
+		var pid string
+		if err := st.read.QueryRowContext(ctx,
+			"SELECT id, pid FROM album WHERE title = ?", title).Scan(&id, &pid); err != nil {
+			t.Fatalf("no album titled %q: %v", title, err)
+		}
+		return id, model.PID(pid)
+	}
+	survID, survPID := al("SurvAl")
+	loseID, losePID := al("LoseAl")
+	for _, e := range []struct {
+		id  int64
+		pid model.PID
+	}{{survID, survPID}, {loseID, losePID}} {
+		if err := st.ApplyAlbumFields(ctx, model.AlbumFieldsEnrichment{AlbumID: e.id, PID: e.pid}); err != nil {
+			t.Fatalf("mark %s: %v", e.pid, err)
+		}
+	}
+
+	if _, err := st.MergeEntity(ctx, model.MergeAlbum, survPID, losePID); err != nil {
+		t.Fatalf("merge: %v", err)
+	}
+	if n := scalarInt(t, st,
+		"SELECT COUNT(*) FROM entity_enrichment WHERE entity_type='fields_album' AND entity_id=?", loseID); n != 0 {
+		t.Errorf("loser fields_album rows = %d, want 0 (a reused rowid would inherit it)", n)
+	}
+	if n := scalarInt(t, st,
+		"SELECT COUNT(*) FROM entity_enrichment WHERE entity_type='fields_album' AND entity_id=?", survID); n != 1 {
+		t.Errorf("survivor fields_album rows = %d, want its own kept", n)
+	}
+	assertVerifyClean(t, st)
+}

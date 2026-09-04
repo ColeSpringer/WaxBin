@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -46,6 +47,15 @@ const (
 	// the artist entity's type would let the identity pass's marker silence this queue,
 	// which is the bug the backfill exists to fix.
 	enrichEntityArtistArt = "artist_art"
+	// enrichEntityFields is the entity_enrichment.entity_type for the item-rung fields
+	// walk, keyed by the item id. Tracks and books share the id space and share this
+	// marker, which is right: an item is one kind and only ever walks one of the two
+	// phases. Its own value for the reason above.
+	enrichEntityFields = "fields"
+	// enrichEntityAlbumFields is the entity_enrichment.entity_type for the album-rung
+	// fields walk, keyed by the album's own id. Separate from the album release match's
+	// "album" type so neither pass's no-match silences the other's queue.
+	enrichEntityAlbumFields = "fields_album"
 	// enrichProviderNone labels a marker no provider answered. entity_enrichment.provider
 	// is NOT NULL and an aux backfill regularly completes with nothing offered, so the row
 	// names the outcome rather than storing an empty string a reader would take for a
@@ -315,11 +325,12 @@ func (s *Store) AlbumsNeedingReleaseMatch(ctx context.Context, force bool, after
 	return out, rows.Err()
 }
 
-// CountEntitiesNeedingEnrichment totals the artists, release groups, and books the
-// pass would process, plus each optional phase opts selects, so the heartbeat can report
-// a real ratio. A non-nil scope filters each per-type count to its id list, and a type
-// with an empty list contributes zero, because the scoped run skips that phase entirely;
-// the denominator stays in lockstep with the work that actually runs.
+// CountEntitiesNeedingEnrichment totals the entities every phase opts selects would
+// process, so the heartbeat can report a real ratio. Every phase is optional, the
+// MusicBrainz-backed ones included: they run only with a contact configured, which
+// opts.Identity mirrors. A non-nil scope filters each per-type count to its id list, and
+// a type with an empty list contributes zero, because the scoped run skips that phase
+// entirely; the denominator stays in lockstep with the work that actually runs.
 func (s *Store) CountEntitiesNeedingEnrichment(ctx context.Context, force bool, opts model.EnrichCountOptions, scope *model.EnrichScope) (int, error) {
 	const op = "store.CountEntitiesNeedingEnrichment"
 	type countQuery struct {
@@ -334,13 +345,17 @@ func (s *Store) CountEntitiesNeedingEnrichment(ctx context.Context, force bool, 
 		clause, args := enrichIDsFilter(idCol, ids)
 		queries = append(queries, countQuery{stmt + clause, args})
 	}
-	var artistIDs, rgIDs, albumIDs, bookIDs, lyricsIDs []int64
+	var artistIDs, rgIDs, albumIDs, bookIDs, lyricsIDs, fieldsIDs []int64
 	if scope != nil {
 		artistIDs, rgIDs, albumIDs = scope.ArtistIDs, scope.ReleaseGroupIDs, scope.AlbumIDs
-		bookIDs, lyricsIDs = scope.BookItemIDs, scope.LyricsItemIDs
+		bookIDs, lyricsIDs, fieldsIDs = scope.BookItemIDs, scope.LyricsItemIDs, scope.FieldsItemIDs
 	}
-	add(`SELECT COUNT(*) FROM artist a WHERE `+enrichBacksFilter(enrichArtistBacksItems, artistIDs)+` AND `+notEnriched(model.EnrichArtistType, "a.id", force), "a.id", artistIDs)
-	add(`SELECT COUNT(*) FROM release_group rg WHERE `+enrichBacksFilter(enrichRGBacksItems, rgIDs)+` AND `+notEnriched(model.EnrichReleaseGroupType, "rg.id", force), "rg.id", rgIDs)
+	// The MusicBrainz-backed phases, counted only when the run will execute them: a
+	// contact-less run walks the port phases alone.
+	if opts.Identity {
+		add(`SELECT COUNT(*) FROM artist a WHERE `+enrichBacksFilter(enrichArtistBacksItems, artistIDs)+` AND `+notEnriched(model.EnrichArtistType, "a.id", force), "a.id", artistIDs)
+		add(`SELECT COUNT(*) FROM release_group rg WHERE `+enrichBacksFilter(enrichRGBacksItems, rgIDs)+` AND `+notEnriched(model.EnrichReleaseGroupType, "rg.id", force), "rg.id", rgIDs)
+	}
 	if opts.Albums {
 		add(`SELECT COUNT(*) FROM album al JOIN release_group rg ON rg.id = al.release_group_id
 			WHERE (al.mbid IS NULL OR al.mbid = '') AND rg.mbid IS NOT NULL AND rg.mbid <> ''
@@ -361,10 +376,32 @@ func (s *Store) CountEntitiesNeedingEnrichment(ctx context.Context, force bool, 
 			  AND `+artistArtNeededPredicate+`
 			  AND `+notEnriched(enrichEntityArtistArt, "a.id", force), "a.id", artistIDs)
 	}
-	add(`SELECT COUNT(*) FROM book b WHERE b.mbid IS NOT NULL AND b.mbid <> '' AND `+notEnriched(model.EnrichBookType, "b.item_id", force), "b.item_id", bookIDs)
+	if opts.Identity {
+		add(`SELECT COUNT(*) FROM book b WHERE b.mbid IS NOT NULL AND b.mbid <> '' AND `+notEnriched(model.EnrichBookType, "b.item_id", force), "b.item_id", bookIDs)
+	}
 	if opts.Lyrics {
 		add(`SELECT COUNT(*) FROM playable_item pi JOIN track t ON t.item_id = pi.id
 			WHERE `+lyricsNeededPredicate+` AND `+notEnriched(enrichEntityLyrics, "pi.id", force), "pi.id", lyricsIDs)
+	}
+	// The two fields walks share a marker and a scope list but count separately, since
+	// each is gated by its own capability and either can run without the other.
+	if opts.TrackFields {
+		add(`SELECT COUNT(*) FROM playable_item pi JOIN track t ON t.item_id = pi.id
+			WHERE pi.kind = 'track' AND pi.state = 'present' AND pi.title <> '' AND t.artist <> ''
+			  AND `+trackFieldsVacancy+` AND `+notEnriched(enrichEntityFields, "pi.id", force), "pi.id", fieldsIDs)
+	}
+	if opts.BookFields {
+		add(`SELECT COUNT(*) FROM playable_item pi JOIN book bk ON bk.item_id = pi.id
+			WHERE pi.kind = 'book' AND pi.state = 'present' AND pi.title <> ''
+			  AND (bk.author <> '' OR bk.asin <> '' OR bk.isbn <> '')
+			  AND `+bookFieldsVacancy+` AND `+notEnriched(enrichEntityFields, "pi.id", force), "pi.id", fieldsIDs)
+	}
+	// The album fields walk counts under the album scope list, which it shares with the
+	// release match.
+	if opts.AlbumFields {
+		add(`SELECT COUNT(*) FROM album al WHERE al.title <> ''
+			  AND (COALESCE(al.label,'') = '' OR al.year IS NULL)
+			  AND `+notEnriched(enrichEntityAlbumFields, "al.id", force), "al.id", albumIDs)
 	}
 	var total int
 	for _, q := range queries {
@@ -389,9 +426,15 @@ func (s *Store) ApplyArtistEnrichment(ctx context.Context, in model.ArtistEnrich
 		}
 		// Shares the fill-when-empty rule with the scan path, lock probe included, so a
 		// curated (or deliberately locked-empty) artist MBID survives either writer.
-		if _, err := fillEntityFieldTx(ctx, tx, model.MergeArtist, "artist", "mbid",
-			in.ArtistID, normMBID(in.MBID)); err != nil {
+		wroteMBID, err := fillEntityFieldTx(ctx, tx, model.MergeArtist, "artist", "mbid",
+			in.ArtistID, normMBID(in.MBID))
+		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		if wroteMBID {
+			if err := artistMBIDLandedTx(ctx, tx, in.ArtistID); err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
 		}
 		if err := insertAliasesTx(ctx, tx, in.ArtistID, in.SortName, in.Aliases); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
@@ -482,8 +525,16 @@ func (s *Store) ApplyReleaseGroupEnrichment(ctx context.Context, in model.Releas
 		if !in.Matched {
 			return markEnrichedTx(ctx, tx, model.EnrichReleaseGroupType, in.ReleaseGroupID, enrichProviderMusicBrainz, false, "")
 		}
-		if err := setReleaseGroupMBIDTx(ctx, tx, s.log, in.ReleaseGroupID, in.MBID); err != nil {
+		wroteMBID, err := setReleaseGroupMBIDTx(ctx, tx, s.log, in.ReleaseGroupID, in.MBID)
+		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		// A landed id is new evidence for the aux-art backfill, which walks by title and
+		// may already hold a no-match from an id-less request.
+		if wroteMBID {
+			if err := deleteAuxArtMarkerTx(ctx, tx, in.ReleaseGroupID); err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
 		}
 		if in.Type != "" {
 			// release_group.type is the one entity field enrichment overwrites
@@ -526,40 +577,55 @@ func (s *Store) ApplyReleaseGroupEnrichment(ctx context.Context, in model.Releas
 }
 
 // setReleaseGroupMBIDTx sets a release group's MBID only when it has none and the
-// id is not already held by another group. A collision means two heuristic groups
-// resolved to one MBID; unifying them is the merge primitive's job (a later gate),
-// so here it is logged and left, never forced into a duplicate key.
-func setReleaseGroupMBIDTx(ctx context.Context, tx *sql.Tx, log logger, rgID int64, mbid string) error {
+// id is not already held by another group, reporting whether the row actually took it.
+// A collision means two heuristic groups resolved to one MBID; unifying them is the
+// merge primitive's job, so here it is logged and left, never forced into a duplicate
+// key.
+//
+// The bool is what the aux-art marker hangs off, the way setAlbumMBIDTx's is: the
+// backfill walks by title and a standing no-match marker may predate the id, so a landed
+// id re-opens the ask.
+func setReleaseGroupMBIDTx(ctx context.Context, tx *sql.Tx, log logger, rgID int64, mbid string) (bool, error) {
 	mbid = normMBID(mbid)
 	if mbid == "" {
-		return nil
+		return false, nil
 	}
 	// A curated (locked) release-group MBID is left untouched, including a locked-empty
 	// one the fill-when-empty guard below would otherwise refill.
 	if locked, err := entityFieldLockedTx(ctx, tx, string(model.MergeReleaseGroup), rgID, "mbid"); err != nil {
-		return err
+		return false, err
 	} else if locked {
-		return nil
+		return false, nil
 	}
 	var other int64
 	err := tx.QueryRowContext(ctx, "SELECT id FROM release_group WHERE mbid = ? AND id <> ?", mbid, rgID).Scan(&other)
 	if err == nil {
 		log.Warn("enrichment: release-group MBID already used by another group; leaving unmerged", "mbid", mbid, "rg", rgID, "other", other)
-		return nil
+		return false, nil
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
-		return err
+		return false, err
 	}
-	_, err = tx.ExecContext(ctx, "UPDATE release_group SET mbid = ? WHERE id = ? AND (mbid IS NULL OR mbid = '')", mbid, rgID)
-	return err
+	r, err := tx.ExecContext(ctx, "UPDATE release_group SET mbid = ? WHERE id = ? AND (mbid IS NULL OR mbid = '')", mbid, rgID)
+	if err != nil {
+		return false, err
+	}
+	n, err := r.RowsAffected()
+	return n > 0, err
 }
 
 // auxArtNeededPredicate selects the release groups the auxiliary-art backfill should
-// ask about, reading the group as rg. Three parts: it carries an MBID, since the pass
-// resolves no identity of its own and a provider keyed on one has nothing to answer
-// without it; its whole-entity "art" lock does not stand, which is the one lock cheap
-// enough to test in SQL and the one that skips every role at apply anyway; and at
-// least one auxiliary slot is still empty.
+// ask about, reading the group as rg. Three parts: it carries a title, which is what a
+// provider is asked with; its whole-entity "art" lock does not stand, which is the one
+// lock cheap enough to test in SQL and the one that skips every role at apply anyway;
+// and at least one auxiliary slot is still empty.
+//
+// The MBID is a hint the request carries when the catalog has one, not a gate. Gating on
+// it skipped every group MusicBrainz never matched, which is the population most likely
+// to have no auxiliary art in the first place. A provider keyed on ids alone answers a
+// clean miss for an id-less request and the marker records that once, so the cost of
+// asking is one request per group rather than one every run. The title requirement is the
+// lyrics queue's rule: an entity with nothing to ask with never takes a permanent marker.
 //
 // The vacancy test is deliberately approximate. It counts stored rows against the
 // closed non-front vocabulary, both the list and the count derived from
@@ -582,7 +648,7 @@ func buildAuxArtNeededPredicate() string {
 	for i, r := range roles {
 		quoted[i] = "'" + string(r) + "'"
 	}
-	return `rg.mbid IS NOT NULL AND rg.mbid <> ''
+	return `rg.title <> ''
 	AND NOT EXISTS (SELECT 1 FROM entity_curation ec WHERE ec.entity_type = 'release_group'
 		AND ec.entity_id = rg.id AND ec.field = 'art' AND ec.locked = 1)
 	AND (SELECT COUNT(*) FROM art_map am WHERE am.entity_type = 'release_group'
@@ -591,9 +657,14 @@ func buildAuxArtNeededPredicate() string {
 }
 
 // artistArtNeededPredicate selects the artists the artist-art backfill should ask about,
-// reading the artist as a. It carries an MBID, since the pass resolves no identity of its
-// own; its whole-entity "art" lock does not stand; and either its front is empty or some
-// auxiliary slot is.
+// reading the artist as a. It carries a name, which is what a provider is asked with; its
+// whole-entity "art" lock does not stand; and either its front is empty or some auxiliary
+// slot is.
+//
+// As with the release-group twin, the MBID is a hint rather than a gate. A local band or
+// a mis-tagged name never reaches MusicBrainz, so gating on the id skipped exactly the
+// artists least likely to have a portrait. A provider keyed on ids alone answers a nil
+// candidate for an id-less request and the marker records the miss once.
 //
 // The front clause is what separates this from auxArtNeededPredicate, which never
 // consults the front because a settled front is exactly the population that pass exists
@@ -612,7 +683,7 @@ func buildArtistArtNeededPredicate() string {
 	for i, r := range roles {
 		quoted[i] = "'" + string(r) + "'"
 	}
-	return `a.mbid IS NOT NULL AND a.mbid <> ''
+	return `a.name <> ''
 	AND NOT EXISTS (SELECT 1 FROM entity_curation ec WHERE ec.entity_type = 'artist'
 		AND ec.entity_id = a.id AND ec.field = 'art' AND ec.locked = 1)
 	AND (NOT EXISTS (SELECT 1 FROM art_map am WHERE am.entity_type = 'artist'
@@ -625,7 +696,9 @@ func buildArtistArtNeededPredicate() string {
 // ArtistsNeedingArtBackfill returns the next keyset page of artists with an empty art
 // slot, front or auxiliary, for the artist-art backfill. It is the artist twin of
 // ReleaseGroupsNeedingAuxArt: same keyset shape, same ghost heuristic, same live read of
-// the mbid column so a run after the identity phase picks up the ids that phase filled.
+// the mbid column so a run after the identity phase sends the ids that phase filled
+// along with the request, and the same name-keyed gate, so an artist MusicBrainz never
+// matched is asked about by name.
 //
 // HasArt rides along so the apply's caller can tell a front fill from an auxiliary-only
 // one without a second query.
@@ -741,6 +814,33 @@ func deleteArtistArtMarkerTx(ctx context.Context, tx *sql.Tx, artistID int64) er
 	return err
 }
 
+// artistMBIDLandedTx re-opens the artist-art backfill for an artist whose MBID has just
+// been filled in. The walk is keyed on the name, so a no-match marker can be standing on
+// an artist that has since acquired an id: the request that earned the marker went out
+// without one, and a provider keyed on ids alone answered nothing it could have answered
+// with the id in hand. A landed id is therefore new evidence, and it is the one re-ask
+// trigger with three writers (the scan's tag fill, the identity phase's fill, and the
+// entity edit), so the rule lives here rather than three times over.
+//
+// The identity phase's call matters most after a contact-less run: those runs ask by name
+// and leave an art marker with no identity marker beside it, so the first run with a
+// contact configured is exactly where an id lands on a marked artist. The identity phase
+// runs before the backfill in the same pass, so that artist is re-asked with its id in
+// the same run.
+func artistMBIDLandedTx(ctx context.Context, tx *sql.Tx, artistID int64) error {
+	return deleteArtistArtMarkerTx(ctx, tx, artistID)
+}
+
+// deleteAlbumFieldsMarkerTx drops one album's fields-walk marker. It is keyed by an album
+// rowid under its own entity_type, so neither the orphan sweep's delete nor a merge's
+// marker union reaches it, and album rowids are reused: without this a new album
+// inheriting the id would be silently skipped by a dead album's answer.
+func deleteAlbumFieldsMarkerTx(ctx context.Context, tx *sql.Tx, albumID int64) error {
+	_, err := tx.ExecContext(ctx,
+		"DELETE FROM entity_enrichment WHERE entity_type = ? AND entity_id = ?", enrichEntityAlbumFields, albumID)
+	return err
+}
+
 // deleteArtBackfillMarkerTx drops whichever art backfill marker an entity type carries,
 // so the curation writers that open a vacancy do not have to know which rung they are on.
 // A type with no backfill of its own is a no-op.
@@ -755,16 +855,16 @@ func deleteArtBackfillMarkerTx(ctx context.Context, tx *sql.Tx, entityType model
 }
 
 // ReleaseGroupsNeedingAuxArt returns the next keyset page of release groups whose
-// auxiliary art slots are not all filled, each with its primary-artist name for a
-// provider that keys on more than the MBID. A non-nil ids list scopes the walk to
-// those release-group rowids and, as with the release-group pass, drops the
-// backs-items ghost heuristic for the explicit targets; the rest of the gate still
-// applies, since without an MBID or a vacancy there is nothing for the pass to do even
-// where a caller pointed at it.
+// auxiliary art slots are not all filled, each with its title and primary-artist name,
+// which is what a name-keyed provider is asked with, and its MBID when the catalog has
+// one. A non-nil ids list scopes the walk to those release-group rowids and, as with the
+// release-group pass, drops the backs-items ghost heuristic for the explicit targets;
+// the rest of the gate still applies, since without a title or a vacancy there is
+// nothing for the pass to do even where a caller pointed at it.
 //
 // It reads rg.mbid live rather than from a snapshot, the way AlbumsNeedingReleaseMatch
-// does, so running this after the release-group phase in the same pass picks up the ids
-// that phase just filled.
+// does, so running this after the release-group phase in the same pass sends the ids
+// that phase just filled along with the request.
 func (s *Store) ReleaseGroupsNeedingAuxArt(ctx context.Context, force bool, afterID int64, limit int, ids []int64) ([]model.EnrichTarget, error) {
 	const op = "store.ReleaseGroupsNeedingAuxArt"
 	scopeClause, scopeArgs := enrichIDsFilter("rg.id", ids)
@@ -1315,6 +1415,7 @@ func (s *Store) EnrichScopeForItem(ctx context.Context, itemPID model.PID) (*mod
 			}
 		}
 		scope.LyricsItemIDs = append(scope.LyricsItemIDs, itemID)
+		scope.FieldsItemIDs = append(scope.FieldsItemIDs, itemID)
 	case model.KindBook:
 		rows, err := s.read.QueryContext(ctx,
 			"SELECT DISTINCT artist_id FROM item_contributor WHERE item_id = ? ORDER BY artist_id", itemID)
@@ -1333,6 +1434,7 @@ func (s *Store) EnrichScopeForItem(ctx context.Context, itemPID model.PID) (*mod
 			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		scope.BookItemIDs = append(scope.BookItemIDs, itemID)
+		scope.FieldsItemIDs = append(scope.FieldsItemIDs, itemID)
 	default:
 		return nil, waxerr.New(waxerr.CodeUnsupported, op,
 			"cannot scope enrichment to a "+kind+" (episode metadata is feed-owned)")
@@ -1422,36 +1524,46 @@ type logger interface {
 // enriched. A --force run refills the values, which moves updated_at, so it re-writes
 // them too.
 //
-// Each value is gated on its own provenance row, so a field the user tagged (or edited)
-// is never rewritten from the catalog, and a locked row is excluded because a curated
-// value did not come from the file.
+// One aggregated subquery names an item's enrichment-written fields, rather than a LEFT
+// JOIN per field: the fields walks made that list open-ended, and the columns are read
+// unconditionally with Go keeping only the ones the concat names. Locked rows are
+// excluded because a curated value did not come from the file, and a field the user
+// tagged or edited carries a different source and never appears.
+//
+// The ?1 bound decides which ITEMS are reopened, not which of their fields are written,
+// which is why the subquery collects every enrichment field and the outer clause tests
+// the newest of them. A file being rewritten anyway costs nothing more to stamp fully,
+// and stamping fully is what heals an earlier pass whose write failed or ran with
+// write-tags off; bounding each field separately would leave that value catalog-only for
+// good, which is the loss this pass exists to prevent.
 //
 // The item_file join drops virtual tracks (start_frames IS NULL): one shared file backs
 // N cue-carved tracks, so an ungated join would rewrite that file once per track, each
 // after the first carrying a stale size/mtime for the optimistic update.
 const enrichedTagSelect = `SELECT pi.pid, f.pid, pi.kind, f.path, f.size, f.mtime_ns,
 		CASE WHEN itf.role = 'primary' THEN 1 ELSE 0 END,
-		CASE WHEN fp_asin.item_id IS NOT NULL THEN COALESCE(bk.asin,'') ELSE '' END,
-		CASE WHEN fp_isbn.item_id IS NOT NULL THEN COALESCE(bk.isbn,'') ELSE '' END,
-		CASE WHEN fp_pub.item_id IS NOT NULL THEN COALESCE(bk.publisher,'') ELSE '' END,
-		CASE WHEN fp_genre.item_id IS NOT NULL THEN COALESCE(NULLIF(t.genre,''), bk.genre, '') ELSE '' END
+		fpw.fields,
+		COALESCE(t.genre,''), COALESCE(NULLIF(CAST(t.bpm AS TEXT),'0'),''),
+		COALESCE(t.isrc,''), COALESCE(t.composer,''), COALESCE(NULLIF(CAST(t.year AS TEXT),'0'),''),
+		COALESCE(bk.asin,''), COALESCE(bk.isbn,''), COALESCE(bk.publisher,''),
+		COALESCE(bk.genre,''), COALESCE(NULLIF(CAST(bk.year AS TEXT),'0'),''), COALESCE(bk.narrator,'')
 	FROM playable_item pi
 	JOIN item_file itf ON itf.item_id = pi.id AND itf.start_frames IS NULL
 	JOIN file f ON f.id = itf.file_id
+	JOIN (SELECT item_id, GROUP_CONCAT(field) AS fields, MAX(updated_at) AS newest
+	      FROM field_provenance WHERE source = 'enrichment' AND locked = 0
+	      GROUP BY item_id) fpw ON fpw.item_id = pi.id
 	LEFT JOIN book bk ON bk.item_id = pi.id
 	LEFT JOIN track t ON t.item_id = pi.id
-	LEFT JOIN field_provenance fp_asin ON fp_asin.item_id = pi.id AND fp_asin.field = 'asin'
-		AND fp_asin.source = 'enrichment' AND fp_asin.locked = 0
-	LEFT JOIN field_provenance fp_isbn ON fp_isbn.item_id = pi.id AND fp_isbn.field = 'isbn'
-		AND fp_isbn.source = 'enrichment' AND fp_isbn.locked = 0
-	LEFT JOIN field_provenance fp_pub ON fp_pub.item_id = pi.id AND fp_pub.field = 'publisher'
-		AND fp_pub.source = 'enrichment' AND fp_pub.locked = 0
-	LEFT JOIN field_provenance fp_genre ON fp_genre.item_id = pi.id AND fp_genre.field = 'genre'
-		AND fp_genre.source = 'enrichment' AND fp_genre.locked = 0
-	WHERE pi.state = 'present' AND pi.kind IN ('track','book')
-	  AND (fp_asin.updated_at >= ?1 OR fp_isbn.updated_at >= ?1
-	       OR fp_pub.updated_at >= ?1 OR fp_genre.updated_at >= ?1)
+	WHERE pi.state = 'present' AND pi.kind IN ('track','book') AND fpw.newest >= ?1
 	ORDER BY pi.id, CASE WHEN itf.role = 'primary' THEN 0 ELSE 1 END, itf.position, f.id`
+
+// enrichedTagFieldOrder is the field each scanned value column belongs to, per kind. It
+// is the one place the select's column order and the field names are tied together.
+var enrichedTagFieldOrder = map[model.Kind][]string{
+	model.KindTrack: {"genre", "bpm", "isrc", "composer", "year"},
+	model.KindBook:  {"asin", "isbn", "publisher", "genre", "year", "narrator"},
+}
 
 // EnrichmentWriteback returns the files an enrichment write-back should stamp, with the
 // values to write. sinceNS bounds it to the values written at or after that time, which
@@ -1470,12 +1582,36 @@ func (s *Store) EnrichmentWriteback(ctx context.Context, sinceNS int64) ([]model
 	for rows.Next() {
 		var r model.EnrichedTagRow
 		var primary int
+		var written string
+		var trackGenre, bpm, isrc, composer, trackYear string
+		var asin, isbn, publisher, bookGenre, bookYear, narrator string
 		if err := rows.Scan(&r.ItemPID, &r.FilePID, &r.Kind, &r.Path, &r.Size, &r.MTimeNS,
-			&primary, &r.ASIN, &r.ISBN, &r.Publisher, &r.Genre); err != nil {
+			&primary, &written,
+			&trackGenre, &bpm, &isrc, &composer, &trackYear,
+			&asin, &isbn, &publisher, &bookGenre, &bookYear, &narrator); err != nil {
 			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		r.IsPrimary = primary == 1
-		if r.ASIN == "" && r.ISBN == "" && r.Publisher == "" && r.Genre == "" {
+		values := []string{trackGenre, bpm, isrc, composer, trackYear}
+		if r.Kind == model.KindBook {
+			values = []string{asin, isbn, publisher, bookGenre, bookYear, narrator}
+		}
+		enriched := make(map[string]bool, 8)
+		for _, f := range strings.Split(written, ",") {
+			enriched[f] = true
+		}
+		// A named field with an empty value means the provenance row outlived the value
+		// (a rescan cleared it), and writing nothing is not the same as clearing the tag.
+		for i, f := range enrichedTagFieldOrder[r.Kind] {
+			if !enriched[f] || values[i] == "" {
+				continue
+			}
+			if r.Fields == nil {
+				r.Fields = make(map[string]string, len(values))
+			}
+			r.Fields[f] = values[i]
+		}
+		if len(r.Fields) == 0 {
 			continue
 		}
 		out = append(out, r)
@@ -1484,4 +1620,517 @@ func (s *Store) EnrichmentWriteback(ctx context.Context, sinceNS int64) ([]model
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
 	return out, nil
+}
+
+// itemFieldsVacancy is the per-kind vacancy predicate for the fields walk: an item is
+// worth asking about while any field in its fill set is still empty. The two halves are
+// derived from model.EnrichFillFields rather than restated, so a field added there
+// widens the queue with it and one removed narrows it.
+//
+// It reads the track as t and the book as bk. A column with no entry here is a field the
+// fill set names and this table does not, which is a build-time gap rather than a silent
+// skip: buildItemFieldsVacancy panics on it, at package init, where a test run sees it.
+var itemFieldVacancyCols = map[string]string{
+	"bpm":         "(t.bpm IS NULL OR t.bpm = 0)",
+	"isrc":        "t.isrc = ''",
+	"composer":    "t.composer = ''",
+	"publisher":   "bk.publisher = ''",
+	"year":        "bk.year IS NULL",
+	"description": "bk.description = ''",
+	"narrator":    "bk.narrator = ''",
+	"subtitle":    "bk.subtitle = ''",
+	"edition":     "bk.edition = ''",
+	"asin":        "bk.asin = ''",
+	"isbn":        "bk.isbn = ''",
+}
+
+var (
+	trackFieldsVacancy = buildItemFieldsVacancy(model.KindTrack)
+	bookFieldsVacancy  = buildItemFieldsVacancy(model.KindBook)
+)
+
+func buildItemFieldsVacancy(kind model.Kind) string {
+	fields := make([]string, 0, 8)
+	for f := range model.EnrichFillFields(kind) {
+		fields = append(fields, f)
+	}
+	sort.Strings(fields)
+	parts := make([]string, len(fields))
+	for i, f := range fields {
+		expr, ok := itemFieldVacancyCols[f]
+		if !ok {
+			panic("no vacancy column for the " + string(kind) + " fill field " + f)
+		}
+		parts[i] = expr
+	}
+	return "(" + strings.Join(parts, " OR ") + ")"
+}
+
+// ItemsNeedingFields returns the next keyset page of items whose fill set still has a
+// gap, for the item-rung fields walk. kind selects the track or the book walk; they
+// share a marker and an id space but not a vacancy test or a set of hints.
+//
+// The guards are the lyrics queue's, for its reason: a present item, a non-empty title,
+// and enough identity for a provider to key on (a track's artist, or one of a book's
+// author, asin, isbn). An item with nothing to ask with would only ever miss, and a
+// permanent marker recording that would then wrongly skip it once it is retagged.
+func (s *Store) ItemsNeedingFields(ctx context.Context, force bool, afterID int64, limit int, kind model.Kind, ids []int64) ([]model.EnrichTarget, error) {
+	const op = "store.ItemsNeedingFields"
+	scopeClause, scopeArgs := enrichIDsFilter("pi.id", ids)
+	var stmt string
+	switch kind {
+	case model.KindTrack:
+		stmt = `SELECT pi.id, pi.pid, pi.title, COALESCE(t.artist,''), COALESCE(t.album,''),
+				COALESCE(` + itemEffectiveDurationExpr + `, 0), t.isrc, COALESCE(t.mbid,''), '', ''
+			FROM playable_item pi
+			JOIN track t ON t.item_id = pi.id
+			LEFT JOIN item_file pf ON pf.item_id = pi.id AND pf.role = 'primary'
+			LEFT JOIN file f ON f.id = pf.file_id
+			WHERE pi.id > ? AND pi.kind = 'track' AND pi.state = 'present' AND pi.title <> ''
+			  AND t.artist <> '' AND ` + trackFieldsVacancy + `
+			  AND ` + notEnriched(enrichEntityFields, "pi.id", force) + scopeClause + `
+			ORDER BY pi.id LIMIT ?`
+	case model.KindBook:
+		// No duration and no file joins for it: enrichBookFields keys on the title, the
+		// author, and the identifiers, so computing an effective duration here would be
+		// two joins per page for a value nothing sends.
+		stmt = `SELECT pi.id, pi.pid, pi.title, COALESCE(bk.author,''), '',
+				0, '', COALESCE(bk.mbid,''), bk.asin, bk.isbn
+			FROM playable_item pi
+			JOIN book bk ON bk.item_id = pi.id
+			WHERE pi.id > ? AND pi.kind = 'book' AND pi.state = 'present' AND pi.title <> ''
+			  AND (bk.author <> '' OR bk.asin <> '' OR bk.isbn <> '') AND ` + bookFieldsVacancy + `
+			  AND ` + notEnriched(enrichEntityFields, "pi.id", force) + scopeClause + `
+			ORDER BY pi.id LIMIT ?`
+	default:
+		return nil, waxerr.New(waxerr.CodeInvalid, op, "no fields walk for kind "+string(kind))
+	}
+	args := append(append([]any{afterID}, scopeArgs...), limitOr(limit))
+	rows, err := s.read.QueryContext(ctx, stmt, args...)
+	if err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	defer rows.Close()
+	var out []model.EnrichTarget
+	for rows.Next() {
+		t := model.EnrichTarget{Type: enrichEntityFields}
+		var pid string
+		var durMS int64
+		if err := rows.Scan(&t.ID, &pid, &t.Name, &t.ArtistName, &t.Album, &durMS,
+			&t.ISRC, &t.MBID, &t.ASIN, &t.ISBN); err != nil {
+			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		t.PID = model.PID(pid)
+		t.DurationSec = int(durMS / 1000)
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// ApplyItemFields writes the scalar fields a provider supplied for one track or book and
+// records the fields marker. It keeps only the keys in the kind's fill set that are
+// currently empty and unlocked, both re-read inside the transaction so a value tagged or
+// locked since the queue page is never overwritten.
+//
+// Each survivor is normalized and validated one key at a time. normalizeEdits trims,
+// folds an identifier, and rejects per key, and a value that fails validation is logged
+// and skipped rather than aborting: an enrichment pass answers for many items and one
+// provider's malformed bpm must not cost the rest of the batch, which is the rule
+// ApplyBookEnrichment already follows for a malformed identifier. Nothing surviving
+// writes the marker alone, so the item is not re-asked every run.
+//
+// No rename pre-pass runs, and none is needed: the fill sets exclude every identity key
+// by construction, so a fill can never move an item onto another entity chain.
+func (s *Store) ApplyItemFields(ctx context.Context, in model.ItemFieldsEnrichment) error {
+	const op = "store.ApplyItemFields"
+	provider := strings.TrimSpace(in.Provider)
+	if provider == "" {
+		provider = enrichProviderNone
+	}
+	return s.writeTx(ctx, func(tx *sql.Tx) error {
+		kind, fields, norm, err := s.acceptedItemFieldsTx(ctx, tx, in, op)
+		if err != nil {
+			return err
+		}
+		if len(fields) > 0 {
+			affected := newAffectedRollups()
+			attr := model.Attribution{Source: model.SourceEnrichment, Provider: provider}
+			if err := applyItemEditTx(ctx, tx, s.log, in.PID, in.ItemID, kind,
+				fields, norm, attr, model.LockUnchanged, op, affected); err != nil {
+				return err
+			}
+			// applyItemEditTx stamps one attribution across the batch, and two providers
+			// commonly split a fields answer, so re-stamp the rows whose own provider
+			// differs. Same upsert, so this only rewrites the provider on those rows.
+			now := nowNS()
+			for _, f := range fields {
+				p := in.Providers[f]
+				if p == "" || p == provider {
+					continue
+				}
+				fa := model.Attribution{Source: model.SourceEnrichment, Provider: p}
+				if err := upsertEditProvenanceTx(ctx, tx, in.ItemID, f, fa, norm[f], model.LockUnchanged, now); err != nil {
+					return waxerr.Wrap(waxerr.CodeIO, op, err)
+				}
+			}
+			if !affected.empty() {
+				if err := maintainRollupsTx(ctx, tx, affected, nowNS()); err != nil {
+					return waxerr.Wrap(waxerr.CodeIO, op, err)
+				}
+			}
+		}
+		return markEnrichedTx(ctx, tx, enrichEntityFields, in.ItemID, provider, in.Matched, "")
+	})
+}
+
+// acceptedItemFieldsTx narrows a provider's offer to the keys this item will actually
+// take: in the kind's fill set, currently empty, not locked, normalizing and validating
+// each survivor on a scratch copy of the row. A key that fails any of those is dropped
+// with a Warn rather than failing the pass. It returns the item's kind plus the sorted
+// field names and normalized values applyItemEditTx expects.
+func (s *Store) acceptedItemFieldsTx(ctx context.Context, tx *sql.Tx, in model.ItemFieldsEnrichment, op string) (string, []string, map[string]string, error) {
+	if len(in.Fields) == 0 {
+		return "", nil, nil, nil
+	}
+	var kind string
+	if err := tx.QueryRowContext(ctx, "SELECT kind FROM playable_item WHERE id = ?", in.ItemID).Scan(&kind); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", nil, nil, waxerr.New(waxerr.CodeNotFound, op, "no such item")
+		}
+		return "", nil, nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	fill := model.EnrichFillFields(model.Kind(kind))
+	if len(fill) == 0 {
+		return kind, nil, nil, nil
+	}
+	locked, err := lockedFieldSetTx(ctx, tx, in.ItemID)
+	if err != nil {
+		return "", nil, nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	// The current row, both to test the vacancy the queue only approximated and as the
+	// scratch copy each candidate value is validated against.
+	var track model.Track
+	var book model.Book
+	switch kind {
+	case string(model.KindTrack):
+		track, _, _, err = loadTrackForEditTx(ctx, tx, in.ItemID)
+	case string(model.KindBook):
+		book, _, err = loadBookForEditTx(ctx, tx, in.ItemID)
+	}
+	if err != nil {
+		return "", nil, nil, err
+	}
+
+	fields := make([]string, 0, len(in.Fields))
+	norm := make(map[string]string, len(in.Fields))
+	for f, v := range in.Fields {
+		if !fill[f] || locked[f] || strings.TrimSpace(v) == "" {
+			continue
+		}
+		if !itemFieldEmpty(kind, f, &track, &book) {
+			continue
+		}
+		// A provider handing back a full release date must not burn the marker on a
+		// parse failure, so a leading four-digit year is folded out before the edit
+		// vocabulary sees it.
+		if f == "year" {
+			v = leadingYear(v)
+		}
+		// One key at a time: normalizeEdits rejects the whole map on a malformed
+		// identifier, which for a batch of provider guesses should cost that key alone.
+		names, one, err := normalizeEdits(map[string]string{f: v}, op)
+		if err != nil || len(names) == 0 {
+			s.log.Warn("enrichment: skipping a malformed field value", "field", f, "value", v, "item", in.PID, "err", err)
+			continue
+		}
+		scratchTrack, scratchBook := track, book
+		switch kind {
+		case string(model.KindTrack):
+			err = applyTrackEdit(&scratchTrack, f, one[f], op)
+		case string(model.KindBook):
+			err = applyBookEdit(&scratchBook, f, one[f], op)
+		}
+		if err != nil {
+			s.log.Warn("enrichment: skipping an invalid field value", "field", f, "value", one[f], "item", in.PID, "err", err)
+			continue
+		}
+		fields = append(fields, f)
+		norm[f] = one[f]
+	}
+	sort.Strings(fields)
+	return kind, fields, norm, nil
+}
+
+// itemFieldEmpty re-reads one fill field's vacancy from the loaded row, inside the
+// write. The queue's predicate said the item had some gap; this says whether this
+// particular field is the gap, so a value tagged since the queue page is not overwritten.
+func itemFieldEmpty(kind, field string, tr *model.Track, bk *model.Book) bool {
+	switch kind {
+	case string(model.KindTrack):
+		switch field {
+		case "bpm":
+			return tr.BPM == 0
+		case "isrc":
+			return tr.ISRC == ""
+		case "composer":
+			return tr.Composer == ""
+		}
+	case string(model.KindBook):
+		switch field {
+		case "publisher":
+			return bk.Publisher == ""
+		case "year":
+			return bk.Year == 0
+		case "description":
+			return bk.Description == ""
+		case "narrator":
+			return bk.Narrator == ""
+		case "subtitle":
+			return bk.Subtitle == ""
+		case "edition":
+			return bk.Edition == ""
+		case "asin":
+			return bk.ASIN == ""
+		case "isbn":
+			return bk.ISBN == ""
+		}
+	}
+	return false
+}
+
+// leadingYear folds a provider's release date down to the year the edit vocabulary
+// parses. A four-digit prefix is taken as the year ("1975-09-12" is 1975); anything else
+// passes through unchanged so a genuinely malformed value still fails validation and is
+// reported as one.
+func leadingYear(v string) string {
+	v = strings.TrimSpace(v)
+	if len(v) < 4 {
+		return v
+	}
+	for i := 0; i < 4; i++ {
+		if v[i] < '0' || v[i] > '9' {
+			return v
+		}
+	}
+	if len(v) == 4 {
+		return v
+	}
+	if c := v[4]; c >= '0' && c <= '9' {
+		return v
+	}
+	return v[:4]
+}
+
+// AlbumsNeedingFields returns the next keyset page of albums missing a label or a year,
+// for the album-rung fields walk, each with the title, primary-artist name, mbid, and
+// barcode a provider keys on. A title is required for the reason the art queues require
+// one: an album with nothing to ask with would only ever miss.
+func (s *Store) AlbumsNeedingFields(ctx context.Context, force bool, afterID int64, limit int, ids []int64) ([]model.EnrichTarget, error) {
+	const op = "store.AlbumsNeedingFields"
+	scopeClause, scopeArgs := enrichIDsFilter("al.id", ids)
+	stmt := `SELECT al.id, al.pid, al.title, COALESCE(ar.name,''), COALESCE(al.mbid,''),
+			COALESCE(al.barcode,'')
+		FROM album al
+		LEFT JOIN release_group rg ON rg.id = al.release_group_id
+		LEFT JOIN artist ar ON ar.id = rg.primary_artist_id
+		WHERE al.id > ? AND al.title <> ''
+		  AND (COALESCE(al.label,'') = '' OR al.year IS NULL)
+		  AND ` + notEnriched(enrichEntityAlbumFields, "al.id", force) + scopeClause + `
+		ORDER BY al.id LIMIT ?`
+	args := append(append([]any{afterID}, scopeArgs...), limitOr(limit))
+	rows, err := s.read.QueryContext(ctx, stmt, args...)
+	if err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	defer rows.Close()
+	var out []model.EnrichTarget
+	for rows.Next() {
+		t := model.EnrichTarget{Type: enrichEntityAlbumFields}
+		var pid string
+		if err := rows.Scan(&t.ID, &pid, &t.Name, &t.ArtistName, &t.MBID, &t.Barcode); err != nil {
+			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		t.PID = model.PID(pid)
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// ApplyAlbumFields writes the scalar fields a provider supplied for one album and records
+// the album fields marker. Only label and year are accepted (model.AlbumFillFields), and
+// the two land by different routes because they sit at different rungs.
+//
+// label is an album column: a fill-when-empty write plus a curation row naming the
+// provider, the way every other entity-rung enrichment value lands. It survives a forced
+// rescan, since the scan's own top-up is fill-when-empty and never clears it.
+//
+// year participates in the album identity key, so it cannot be written per member without
+// forking the album. It goes through the uniform whole-album edit instead, which moves the
+// album and its release group in place. That path is vetoed unless every member agrees:
+// any member already carrying a year, any member not present (an archived member vetoes
+// the in-place rewrite and the fallback would split the album), or any member whose locks
+// make it unwritable. The member-level test is the load-bearing one: the scan writes
+// album.year at insert and never tops it up, so an mbid-keyed album can hold a NULL year
+// over members that carry theirs, and the uniform edit would overwrite them.
+//
+// Unlike label, a filled year does not survive a forced rescan without write-back. Only
+// locked fields are overlaid, so each member's year reverts to the tag, the heuristic key
+// reverts with it, and the album keeps its pid through the scan's reconcile path.
+//
+// Barcode, catalog number, media, and country are refused on purpose: they are the
+// evidence the MusicBrainz release matcher searches by, and a provider's guess must not
+// drive it (the reasoning ApplyAlbumReleaseMatch already carries).
+func (s *Store) ApplyAlbumFields(ctx context.Context, in model.AlbumFieldsEnrichment) error {
+	const op = "store.ApplyAlbumFields"
+	provider := strings.TrimSpace(in.Provider)
+	if provider == "" {
+		provider = enrichProviderNone
+	}
+	return s.writeTx(ctx, func(tx *sql.Tx) error {
+		wrote, alive := false, true
+		// The year goes FIRST, because it is the one fill that can move the album onto a
+		// key another album already holds, which merges this row away. A label written
+		// before that would go down with the row: the column is on the album, and the
+		// merge does not carry it to the survivor.
+		if v := strings.TrimSpace(in.Fields["year"]); v != "" {
+			did, stillThere, err := s.applyAlbumYearTx(ctx, tx, in, leadingYear(v), provider, op)
+			if err != nil {
+				return err
+			}
+			wrote, alive = did, stillThere
+		}
+		// A merged-away album's rowid names a row that no longer exists, so nothing more
+		// belongs on the dead id: no label, no marker, no delta. The merge emitted the
+		// survivor's delta, and the survivor carries its own label state and its own
+		// marker, so it is asked about a label on its own terms rather than inheriting an
+		// answer aimed at the row that just disappeared.
+		if !alive {
+			return nil
+		}
+		if v := strings.TrimSpace(in.Fields["label"]); v != "" {
+			ok, err := fillEntityFieldTx(ctx, tx, model.MergeAlbum, "album", "label", in.AlbumID, v)
+			if err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+			if ok {
+				lp := in.Providers["label"]
+				if lp == "" {
+					lp = provider
+				}
+				if err := upsertEntityCurationTx(ctx, tx, string(model.MergeAlbum), in.AlbumID, "label",
+					model.Attribution{Source: model.SourceEnrichment, Provider: lp}, v,
+					model.LockUnchanged, nowNS()); err != nil {
+					return waxerr.Wrap(waxerr.CodeIO, op, err)
+				}
+				wrote = true
+			}
+		}
+		if err := markEnrichedTx(ctx, tx, enrichEntityAlbumFields, in.AlbumID, provider, in.Matched, ""); err != nil {
+			return err
+		}
+		if wrote {
+			return appendChange(ctx, tx, "album", in.PID, model.OpUpdate)
+		}
+		return nil
+	})
+}
+
+// applyAlbumYearTx runs the whole-album year fill, reporting whether it wrote and whether
+// the album row still exists afterwards (a taken key merges this album into the incumbent
+// and the row is gone). See ApplyAlbumFields for why the veto is member-level.
+func (s *Store) applyAlbumYearTx(ctx context.Context, tx *sql.Tx, in model.AlbumFieldsEnrichment, year, provider, op string) (bool, bool, error) {
+	var members []model.PID
+	rows, err := tx.QueryContext(ctx, `SELECT pi.pid, pi.state, COALESCE(t.year, 0)
+		FROM track t JOIN playable_item pi ON pi.id = t.item_id
+		WHERE t.album_id = ? ORDER BY pi.id`, in.AlbumID)
+	if err != nil {
+		return false, true, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var pid, state string
+		var y int
+		if err := rows.Scan(&pid, &state, &y); err != nil {
+			return false, true, waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		if y != 0 || state != string(model.StatePresent) {
+			return false, true, nil
+		}
+		members = append(members, model.PID(pid))
+	}
+	if err := rows.Err(); err != nil {
+		return false, true, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	if len(members) == 0 {
+		return false, true, nil
+	}
+
+	names, norm, err := normalizeEdits(map[string]string{"year": year}, op)
+	if err != nil {
+		s.log.Warn("enrichment: skipping a malformed album year", "value", year, "album", in.PID, "err", err)
+		return false, true, nil
+	}
+	targets := make([]editEntry, 0, len(members))
+	for _, pid := range members {
+		targets = append(targets, editEntry{pid: pid, fields: names, norm: norm})
+	}
+	// skipLocked probes each member's locks as it validates, so a locked year anywhere
+	// under the album vetoes the fill without a separate per-member lock read.
+	var skipped []model.PID
+	entries, err := collectEditEntriesTx(ctx, tx, targets, false, true, op, &skipped)
+	if err != nil {
+		return false, true, err
+	}
+	if len(skipped) > 0 || len(entries) != len(members) {
+		return false, true, nil
+	}
+	attr := model.Attribution{Source: model.SourceEnrichment, Provider: provider}
+	if _, err := applyEditEntriesTx(ctx, tx, s.log, entries, attr, model.LockUnchanged, op); err != nil {
+		if waxerr.Is(err, waxerr.CodeInvalid) {
+			s.log.Warn("enrichment: skipping an invalid album year", "value", year, "album", in.PID, "err", err)
+			return false, true, nil
+		}
+		return false, true, err
+	}
+	var alive int
+	if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM album WHERE id = ?", in.AlbumID).Scan(&alive); err != nil {
+		return false, true, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	return true, alive > 0, nil
+}
+
+// EnrichedAlbumLabels returns the albums whose label enrichment wrote at or after
+// sinceNS, each with the timestamp of that write, for the album write-back fan-out. The
+// label lands on the album row rather than on any item, so it carries no
+// field_provenance row and never reaches EnrichmentWriteback; its curation row is what
+// records the write.
+//
+// The caller passes 0 when it wants every enrichment label rather than a recent one, and
+// uses UpdatedAt to decide which of them are worth opening a file for on their own.
+//
+// A locked row is excluded for the reason the item select excludes one: a curated value
+// did not come from the file.
+func (s *Store) EnrichedAlbumLabels(ctx context.Context, sinceNS int64) ([]model.EntityFieldValue, error) {
+	const op = "store.EnrichedAlbumLabels"
+	rows, err := s.read.QueryContext(ctx, `SELECT al.pid, COALESCE(al.label,''), ec.updated_at
+		FROM entity_curation ec JOIN album al ON al.id = ec.entity_id
+		WHERE ec.entity_type = 'album' AND ec.field = 'label'
+		  AND ec.source = 'enrichment' AND ec.locked = 0 AND ec.updated_at >= ?
+		  AND COALESCE(al.label,'') <> ''
+		ORDER BY al.id`, sinceNS)
+	if err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	defer rows.Close()
+	var out []model.EntityFieldValue
+	for rows.Next() {
+		v := model.EntityFieldValue{EntityType: model.MergeAlbum, Field: "label"}
+		var pid string
+		if err := rows.Scan(&pid, &v.Value, &v.UpdatedAt); err != nil {
+			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		v.PID = model.PID(pid)
+		out = append(out, v)
+	}
+	return out, rows.Err()
 }

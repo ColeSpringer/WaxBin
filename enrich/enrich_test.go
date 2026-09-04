@@ -469,15 +469,80 @@ func TestEnrichDoesNotCachePoisonedResponse(t *testing.T) {
 	}
 }
 
+// TestEnrichDisabledWithoutContact: with neither route to a runnable phase, the pass
+// still refuses outright rather than walking queues nothing can serve.
 func TestEnrichDisabledWithoutContact(t *testing.T) {
 	st, _, _ := openStore(t)
-	svc := enrich.New(st, enrich.Config{}, nil) // no contact
+	svc := enrich.New(st, enrich.Config{}, nil) // no contact, no providers
 	if svc.Enabled() {
-		t.Fatal("service should be disabled without a contact")
+		t.Fatal("service should be disabled without a contact or a provider")
 	}
 	_, err := svc.Run(context.Background(), enrich.RunOptions{}, nil)
 	if !waxerr.Is(err, waxerr.CodeUnsupported) {
 		t.Fatalf("Run without contact err = %v, want CodeUnsupported", err)
+	}
+}
+
+// TestEnrichRunsInjectedPhasesWithoutContact: the contact is what MusicBrainz and the
+// key-free built-ins demand, and it says nothing about a provider that brings its own
+// credentials. Without one the identity phases are skipped and the injected provider's
+// phase walks anyway, which is what makes a contact-less install worth running at all.
+// The FetchLyrics default is on regardless of the contact, so this also pins that no
+// built-in is registered: an unpaced walk of every track against LRCLIB under the
+// default User-Agent is exactly what the guard exists to prevent.
+func TestEnrichRunsInjectedPhasesWithoutContact(t *testing.T) {
+	ctx := context.Background()
+	st, dbPath, lib := openStore(t)
+	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Basement Tape", "The Local Band", "Demo")
+
+	var reqs []enrich.Request
+	art := &enrich.Mock{ProviderName: "deezer", Caps: enrich.CapArtistArt,
+		EnrichFunc: func(_ context.Context, req enrich.Request) (*enrich.Candidate, error) {
+			reqs = append(reqs, req)
+			if req.Type != enrich.TargetArtist {
+				return nil, nil
+			}
+			return &enrich.Candidate{Art: map[model.ArtRole]*model.ArtImage{
+				model.ArtRoleFront: artImg(t, "local-front"),
+			}}, nil
+		}}
+	svc := enrich.New(st, enrich.Config{
+		// No contact. The three built-in toggles are on the way the facade defaults
+		// them, so nothing but the guard keeps LRCLIB and the rest out.
+		FetchCoverArt: true, FetchLyrics: true, FetchCommunityGenres: true,
+		MinRequestInterval: time.Millisecond,
+		MusicBrainzBaseURL: deadURL(t), ListenBrainzBaseURL: deadURL(t), LRCLibBaseURL: deadURL(t),
+		Providers: []enrich.Provider{art},
+	}, nil)
+	if !svc.Enabled() {
+		t.Fatal("a registered CapArtistArt provider should enable the pass without a contact")
+	}
+
+	var beats int
+	res, err := svc.Run(ctx, enrich.RunOptions{}, func(float64, string) error { beats++; return nil })
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if res.ArtistsEnriched != 0 || res.ReleaseGroupsEnriched != 0 || res.BooksEnriched != 0 {
+		t.Errorf("identity phases walked %d artists / %d groups / %d books, want none without a contact",
+			res.ArtistsEnriched, res.ReleaseGroupsEnriched, res.BooksEnriched)
+	}
+	if res.LyricsEnriched != 0 {
+		t.Errorf("lyrics walked %d tracks; no built-in should be registered without a contact",
+			res.LyricsEnriched)
+	}
+	if res.ArtistArtEnriched != 1 || res.ArtistArtMatched != 1 {
+		t.Fatalf("artist-art backfill = %d walked / %d matched, want 1 and 1",
+			res.ArtistArtEnriched, res.ArtistArtMatched)
+	}
+	// The one ask is the artist backfill's, by name: nothing reached MusicBrainz to
+	// give the artist an id.
+	if len(reqs) != 1 || reqs[0].Type != enrich.TargetArtist ||
+		reqs[0].Artist != "The Local Band" || reqs[0].MBID != "" {
+		t.Fatalf("provider asked %+v, want one artist request keyed on the name alone", reqs)
+	}
+	if h := artistArtHash(t, dbPath, "front"); h != "local-front" {
+		t.Errorf("artist front hash = %q, want the name-keyed fill", h)
 	}
 }
 

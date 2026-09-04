@@ -237,8 +237,9 @@ func (s *Store) EditEntityFields(ctx context.Context, entityType model.MergeEnti
 		// auxiliary cover on a group stays. And the match key goes back to its heuristic
 		// form, so the members follow the row rather than staying pinned to the id.
 		// An art backfill's marker goes on ANY mbid edit, not just a clear. Those queues
-		// require a non-empty mbid and key the provider lookup on it, so a corrected id has
-		// never been asked about and a marker naming the old one would suppress it for good.
+		// walk by name, but the id rides the request when there is one, so a corrected or
+		// newly-supplied id is an answer no provider has been asked with and a marker
+		// naming the old state would suppress it for good.
 		// The identity markers below are a different question, settled only by a clear.
 		// Before the re-key, so the in-place and guard-skip paths are covered too; a merge
 		// deletes it again for nothing.
@@ -249,7 +250,7 @@ func (s *Store) EditEntityFields(ctx context.Context, entityType model.MergeEnti
 					return waxerr.Wrap(waxerr.CodeIO, op, err)
 				}
 			case model.MergeArtist:
-				if err := deleteArtistArtMarkerTx(ctx, tx, entityID); err != nil {
+				if err := artistMBIDLandedTx(ctx, tx, entityID); err != nil {
 					return waxerr.Wrap(waxerr.CodeIO, op, err)
 				}
 			}

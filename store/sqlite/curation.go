@@ -502,6 +502,10 @@ func (s *Store) SetEntityArt(ctx context.Context, entityType model.ArtEntity, en
 // to explain a cover that resolves to nothing, and on an entity with no art at all the
 // lock is otherwise only visible through ArtRoles.
 //
+// It cannot say which of the two pins is standing. A caller that needs to know, to
+// offer the unlock that would actually change something, reads the slot's own pin
+// from ArtRoleInfo.RoleLocked instead.
+//
 // A user's own art set is not gated on this. SetEntityArt and SetItemArt still consult
 // the role's own lock alone, so a locked reading here does not always mean the next
 // hand-set image in that role will be refused.
@@ -538,24 +542,30 @@ func (s *Store) ArtLocked(ctx context.Context, entityType model.ArtEntity, pid m
 // alone. Callers at an input boundary refuse an explicitly spelled "front" and point
 // at the plain form, so there is one way to say it.
 //
+// It reports what the call did (model.ArtLockChange): whether the slot's own pin moved,
+// and whether the slot is still locked afterwards. The second is the one an unlock's
+// caller cannot work out for itself, since releasing one auxiliary role opens nothing
+// while the entity's whole "art" pin stands.
+//
 // It inherits SetEntityArt's behavior exactly otherwise: the lock lands in whichever
 // table governs the entity type (artLockIsItemScoped), so a track's shares one home
 // with `lock <pid> art`, and the change delta has the same shape. Like SetEntityArt,
 // and unlike SetItemArt, it does not run the curatableFieldForKind check; that is
 // deliberate, not an oversight, since the art lock is keyed by art entity type rather
 // than by item kind.
-func (s *Store) SetArtLock(ctx context.Context, entityType model.ArtEntity, pid model.PID, role model.ArtRole, lock bool) error {
+func (s *Store) SetArtLock(ctx context.Context, entityType model.ArtEntity, pid model.PID, role model.ArtRole, lock bool) (model.ArtLockChange, error) {
 	const op = "store.SetArtLock"
+	var out model.ArtLockChange
 	if !entityType.Valid() {
-		return waxerr.New(waxerr.CodeInvalid, op, "unknown art entity type: "+string(entityType))
+		return out, waxerr.New(waxerr.CodeInvalid, op, "unknown art entity type: "+string(entityType))
 	}
 	if role == "" {
 		role = model.ArtRoleFront
 	}
 	if !role.Valid() {
-		return waxerr.New(waxerr.CodeInvalid, op, "unknown art role: "+string(role))
+		return out, waxerr.New(waxerr.CodeInvalid, op, "unknown art role: "+string(role))
 	}
-	return s.writeTx(ctx, func(tx *sql.Tx) error {
+	err := s.writeTx(ctx, func(tx *sql.Tx) error {
 		entityID, err := artEntityIDTx(ctx, tx, entityType, pid, op)
 		if err != nil {
 			return err
@@ -567,9 +577,26 @@ func (s *Store) SetArtLock(ctx context.Context, entityType model.ArtEntity, pid 
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
-		if cur == lock {
+		// What the slot looks like to an automatic writer once this call is done, which
+		// on an unlock is the part the caller cannot work out from the request: releasing
+		// one auxiliary role opens nothing while the whole "art" pin stands. Read after
+		// the early return below as well, so a no-op unlock still reports the truth.
+		stillBlocked := func() error {
+			if lock {
+				out.StillLocked = true
+				return nil
+			}
+			blocked, err := artFillBlockedTx(ctx, tx, entityType, entityID, role)
+			if err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+			out.StillLocked = blocked
 			return nil
 		}
+		if cur == lock {
+			return stillBlocked()
+		}
+		out.Changed = true
 		// The lock is the write here, not an instruction accompanying one, so it carries the
 		// only attribution there is: a user asking for it.
 		if err := setArtLockTx(ctx, tx, entityType, entityID, artRoleLockField(role),
@@ -596,11 +623,18 @@ func (s *Store) SetArtLock(ctx context.Context, entityType model.ArtEntity, pid 
 				}
 			}
 		}
+		if err := stillBlocked(); err != nil {
+			return err
+		}
 		if entityType == model.ArtTrack || entityType == model.ArtEpisode {
 			return appendChange(ctx, tx, "item", pid, model.OpUpdate)
 		}
 		return appendChange(ctx, tx, string(entityType), pid, model.OpUpdate)
 	})
+	if err != nil {
+		return model.ArtLockChange{}, err
+	}
+	return out, nil
 }
 
 // setEntityArtRoleTx replaces one (entity, role) art mapping, storing the source, its

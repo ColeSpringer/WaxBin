@@ -481,6 +481,9 @@ func (l *Library) ArtProvenance(ctx context.Context, ref model.EntityRef, role m
 // check SourceHash before trying to fetch bytes. That is what a cleared and locked
 // cover looks like, and reporting it is the only way that state is visible. An entity
 // with no art returns an empty list only when it is also unlocked.
+//
+// Locked is the effective pin and RoleLocked the slot's own, so a per-role pin control
+// reads RoleLocked to know whether unpinning that role would change anything.
 func (l *Library) ArtRoles(ctx context.Context, ref model.EntityRef) ([]model.ArtRoleInfo, error) {
 	return l.store.ArtRoles(ctx, ref)
 }
@@ -989,13 +992,15 @@ func (l *Library) enrichScope(ctx context.Context, op string, opts EnrichOptions
 // release-group/artist/genre resolution (MBID-first), Cover Art Archive covers, and
 // the optional AcoustID fallback. It is resumable and lock-respecting, caches provider
 // responses, and degrades gracefully offline. It needs a MusicBrainz contact
-// (Options.Enrichment.Contact) or returns CodeUnsupported. A scoped run holds the same
-// lease as a full pass, so the two exclude each other.
+// (Options.Enrichment.Contact) for the MusicBrainz passes, or an injected provider
+// (Options.EnrichmentProviders) for its own; with neither it returns CodeUnsupported.
+// A scoped run holds the same lease as a full pass, so the two exclude each other.
 func (l *Library) Enrich(ctx context.Context, opts EnrichOptions) (*EnrichResult, error) {
 	out := &EnrichResult{}
 	if !l.enricher.Enabled() {
 		return out, waxerr.New(waxerr.CodeUnsupported, "waxbin.Enrich",
-			"enrichment needs a MusicBrainz contact (set enrichment.contact / WAXBIN_ENRICH_CONTACT)")
+			"enrichment needs a MusicBrainz contact "+
+				"(set enrichment.contact / WAXBIN_ENRICH_CONTACT) or an injected provider")
 	}
 	scope, err := l.enrichScope(ctx, "waxbin.Enrich", opts)
 	if err != nil {
@@ -1565,7 +1570,7 @@ func (l *Library) writeBackItemTags(ctx context.Context, op string, itemPID mode
 	if len(files) == 0 {
 		return wbErr.noFiles()
 	}
-	if err := l.writeBackFiles(ctx, op, files, wbErr, nil,
+	if err := l.writeBackFiles(ctx, op, model.OriginEdit, files, wbErr, nil,
 		func(w *meta.Writer, path string) (*meta.WriteResult, error) {
 			return w.Apply(ctx, path, tagEdits)
 		}); err != nil {
@@ -1581,7 +1586,12 @@ func (l *Library) writeBackItemTags(ctx context.Context, op string, itemPID mode
 // warning, and the optimistic file-state update, and writes a file backing several
 // members once. Only a context cancellation is a hard error, and op names the caller
 // in it.
-func (l *Library) writeBackFiles(ctx context.Context, op string, files []model.ItemFileRef, wbErr *WriteBackError, refusals []string, apply func(w *meta.Writer, path string) (*meta.WriteResult, error)) error {
+//
+// origin is the diagnostic writer these rows belong to, and it has to be the caller's
+// own: a clean write CLEARS that origin's whole set for the file, so a pass borrowing
+// another writer's origin would wipe drift it knows nothing about and file its own losses
+// where nobody looks for them.
+func (l *Library) writeBackFiles(ctx context.Context, op string, origin model.DiagnosticOrigin, files []model.ItemFileRef, wbErr *WriteBackError, refusals []string, apply func(w *meta.Writer, path string) (*meta.WriteResult, error)) error {
 	w := meta.NewWriter()
 	seen := make(map[model.PID]bool, len(files))
 	for _, ref := range files {
@@ -1664,8 +1674,8 @@ func (l *Library) writeBackFiles(ctx context.Context, op string, files []model.I
 			}
 		}
 		if len(lost) > 0 {
-			if derr := l.store.PutFileDiagnostics(ctx, ref.FilePID, model.OriginEdit, meta.MergeKeylessDiagnostics(lost)); derr != nil {
-				l.log.Warn("edit diagnostics", "path", path, "err", derr)
+			if derr := l.store.PutFileDiagnostics(ctx, ref.FilePID, origin, meta.MergeKeylessDiagnostics(lost)); derr != nil {
+				l.log.Warn("write-back diagnostics", "path", path, "err", derr)
 			}
 		}
 		// Only a value this write lost is reported here. A refusal seeded above was
@@ -1677,9 +1687,9 @@ func (l *Library) writeBackFiles(ctx context.Context, op string, files []model.I
 				Reason: "this file's tags could not be written without loss"})
 		}
 		if len(lost) == 0 {
-			if derr := l.store.PutFileDiagnostics(ctx, ref.FilePID, model.OriginEdit, nil); derr != nil {
-				// The tags now match the catalog: clear any drift this edit left before.
-				l.log.Warn("edit diagnostics clear", "path", path, "err", derr)
+			if derr := l.store.PutFileDiagnostics(ctx, ref.FilePID, origin, nil); derr != nil {
+				// The tags now match the catalog: clear any drift this writer left before.
+				l.log.Warn("write-back diagnostics clear", "path", path, "err", derr)
 			}
 		}
 		if !res.Changed {
@@ -1844,7 +1854,7 @@ func (l *Library) writeBackItemEdits(ctx context.Context, op string, itemPID mod
 	if len(files) == 0 {
 		return wbErr.noFiles()
 	}
-	if err := l.writeBackFiles(ctx, op, files, wbErr, refusals,
+	if err := l.writeBackFiles(ctx, op, model.OriginEdit, files, wbErr, refusals,
 		func(w *meta.Writer, path string) (*meta.WriteResult, error) {
 			return w.Apply(ctx, path, tagEdits)
 		}); err != nil {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -192,10 +193,19 @@ func r128Gain(rgDB float64) string {
 }
 
 // writeEnrichmentTags mirrors what the enrichment pass filled into the backing files:
-// a book's ASIN/ISBN/PUBLISHER and a track's GENRE. Off by default, and it runs at the
-// end of an enrich pass. It shares writeReplayGainTags' shape (disk I/O outside any
-// transaction, an optimistic file-state update that a concurrent scan or move makes a
-// no-op, per-file counts and diagnostics), so read that first.
+// every item field with an on-disk tag key (a track's genre, bpm, isrc, composer and
+// year, a book's asin, isbn, publisher, genre, year and narrator) plus an album's label
+// fanned across its members. Off by default, and it runs at the end of an enrich pass.
+// It shares writeReplayGainTags' shape (disk I/O outside any transaction, an optimistic
+// file-state update that a concurrent scan or move makes a no-op, per-file counts and
+// diagnostics), so read that first.
+//
+// An album's label is collected before the item walk and folded into the edits of any
+// member file that walk is already rewriting, so a file carrying both an enriched field
+// and an enriched album label is opened once rather than twice. The members left over
+// (a file with no enriched field of its own, or one the item select drops as shared or
+// virtual) are fanned out afterwards through writeBackFiles, which carries the guard
+// those files need.
 //
 // Why it exists rather than the catalog simply keeping the values: the scanner rebuilds
 // these columns from the file's tags on every content-changed rescan, so a value living
@@ -213,6 +223,12 @@ func r128Gain(rgDB float64) string {
 func (l *Library) writeEnrichmentTags(ctx context.Context, sinceNS int64) (enrichWriteCounts, error) {
 	var c enrichWriteCounts
 	rows, err := l.store.EnrichmentWriteback(ctx, sinceNS)
+	if err != nil {
+		return c, err
+	}
+	// Album labels first, as a plan rather than a write: the item walk below folds each
+	// one into the file it is already rewriting, and only what is left over is fanned out.
+	labels, err := l.enrichmentAlbumLabelEdits(ctx, sinceNS)
 	if err != nil {
 		return c, err
 	}
@@ -244,55 +260,13 @@ func (l *Library) writeEnrichmentTags(ctx context.Context, sinceNS int64) (enric
 				}
 			}
 		}
-		edits := enrichmentEdits(r)
-		if len(edits) == 0 {
-			continue
-		}
-		res, err := w.Apply(ctx, string(r.Path), edits)
-		if err != nil {
-			l.log.Warn("enrichment tag write", "path", string(r.Path), "err", err)
-			c.failed++
-			if r.Kind == model.KindBook && r.IsPrimary {
-				abandoned[r.ItemPID] = true
-			}
-			continue
-		}
-		var diags []model.FileDiagnostic
-		lost := false
-		for _, wn := range res.Warnings {
-			if wn.Code == meta.PostWriteWarningCode {
-				l.log.Warn("enrichment tag post-write", "path", string(r.Path), "warning", wn.Message)
-			}
-			if wn.Unrepresented {
-				l.log.Warn("enrichment tag unrepresented", "path", string(r.Path), "key", wn.Key, "warning", wn.Message)
-				lost = true
-				diags = append(diags, model.FileDiagnostic{
-					Code: model.DiagTagWriteLost, Severity: model.SeverityWarn,
-					TagKey: wn.Key, Detail: wn.Message,
-				})
-			}
-		}
-		if lost {
-			c.unrepresented++
-		}
-		if err := l.store.PutFileDiagnostics(ctx, r.FilePID, model.OriginEnrichment, meta.MergeKeylessDiagnostics(diags)); err != nil {
-			l.log.Warn("enrichment diagnostics", "path", string(r.Path), "err", err)
-		}
-		if !res.Changed {
-			continue
-		}
-		c.written++
-		if _, err := l.store.UpdateFileStateIfUnchanged(ctx, model.FileStateUpdate{
-			FilePID:         r.FilePID,
-			ExpectedSize:    r.Size,
-			ExpectedMTimeNS: r.MTimeNS,
-			NewSize:         res.Size,
-			NewMTimeNS:      res.MTimeNS,
-			NewContentHash:  res.ContentHash,
-		}); err != nil {
-			// The tags landed; only the file row's size/mtime/hash did not follow, which
-			// the next scan repairs. Not a write failure.
-			l.log.Warn("enrichment file-state update", "path", string(r.Path), "err", err)
+		// A file this walk is about to rewrite takes its album's label in the same pass,
+		// and is struck from the fan-out below. Only a track is ever an album member, so
+		// a book row never finds one here.
+		extra := labels[r.FilePID].edits
+		delete(labels, r.FilePID)
+		if ok := l.writeEnrichmentFile(ctx, w, r, extra, &c); !ok && r.Kind == model.KindBook && r.IsPrimary {
+			abandoned[r.ItemPID] = true
 		}
 	}
 	// Unconditional per book, like the edit write-back: reanchorBookIdentity re-reads
@@ -301,7 +275,164 @@ func (l *Library) writeEnrichmentTags(ctx context.Context, sinceNS int64) (enric
 	for _, itemPID := range books {
 		l.reanchorBookIdentity(ctx, itemPID, primaryOf[itemPID])
 	}
+	if err := l.writeEnrichmentAlbumLabels(ctx, labels, &c); err != nil {
+		return c, err
+	}
 	return c, nil
+}
+
+// writeEnrichmentFile applies one row's tag edits, plus any extra edits the caller folded
+// in for this same file, and records the outcome in c: the unrepresented-value
+// diagnostics, the write count, and the optimistic file-state update. It reports whether
+// the write itself succeeded, which is what tells a book's caller to abandon the
+// remaining parts when the primary failed. A row with nothing to write is a success that
+// changed nothing.
+//
+// extra is how an album's label reaches a member file without a second full rewrite of
+// that file.
+func (l *Library) writeEnrichmentFile(ctx context.Context, w *meta.Writer, r model.EnrichedTagRow, extra []meta.TagEdit, c *enrichWriteCounts) bool {
+	edits := append(enrichmentEdits(r), extra...)
+	if len(edits) == 0 {
+		return true
+	}
+	res, err := w.Apply(ctx, string(r.Path), edits)
+	if err != nil {
+		l.log.Warn("enrichment tag write", "path", string(r.Path), "err", err)
+		c.failed++
+		return false
+	}
+	var diags []model.FileDiagnostic
+	lost := false
+	for _, wn := range res.Warnings {
+		if wn.Code == meta.PostWriteWarningCode {
+			l.log.Warn("enrichment tag post-write", "path", string(r.Path), "warning", wn.Message)
+		}
+		if wn.Unrepresented {
+			l.log.Warn("enrichment tag unrepresented", "path", string(r.Path), "key", wn.Key, "warning", wn.Message)
+			lost = true
+			diags = append(diags, model.FileDiagnostic{
+				Code: model.DiagTagWriteLost, Severity: model.SeverityWarn,
+				TagKey: wn.Key, Detail: wn.Message,
+			})
+		}
+	}
+	if lost {
+		c.unrepresented++
+	}
+	if err := l.store.PutFileDiagnostics(ctx, r.FilePID, model.OriginEnrichment, meta.MergeKeylessDiagnostics(diags)); err != nil {
+		l.log.Warn("enrichment diagnostics", "path", string(r.Path), "err", err)
+	}
+	if !res.Changed {
+		return true
+	}
+	c.written++
+	if _, err := l.store.UpdateFileStateIfUnchanged(ctx, model.FileStateUpdate{
+		FilePID:         r.FilePID,
+		ExpectedSize:    r.Size,
+		ExpectedMTimeNS: r.MTimeNS,
+		NewSize:         res.Size,
+		NewMTimeNS:      res.MTimeNS,
+		NewContentHash:  res.ContentHash,
+	}); err != nil {
+		// The tags landed; only the file row's size/mtime/hash did not follow, which
+		// the next scan repairs. Not a write failure.
+		l.log.Warn("enrichment file-state update", "path", string(r.Path), "err", err)
+	}
+	return true
+}
+
+// enrichmentAlbumLabelEdits plans the album-label fan-out: the tag edit each member file
+// should receive, keyed by file pid. The label lives on the album row, so it carries no
+// field_provenance row and never appears in the per-item write-back select.
+//
+// It is a plan rather than a write so the item walk can fold a file's label into the one
+// rewrite it was already going to do. Every enrichment label is collected, not just this
+// pass's, for the reason the item select emits every enrichment field: a file being
+// opened anyway costs nothing more to stamp fully, and stamping fully heals an earlier
+// pass whose write failed. sinceNS marks which are recent enough to be worth opening a
+// file for on their own; see albumLabelPlan.
+func (l *Library) enrichmentAlbumLabelEdits(ctx context.Context, sinceNS int64) (map[model.PID]albumLabelPlan, error) {
+	labels, err := l.store.EnrichedAlbumLabels(ctx, 0)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[model.PID]albumLabelPlan, len(labels))
+	for _, v := range labels {
+		key, ok := meta.EntityFieldTagKey(v.EntityType, v.Field)
+		if !ok {
+			continue
+		}
+		files, err := l.store.EntityMemberFiles(ctx, v.EntityType, v.PID)
+		if err != nil {
+			l.log.Warn("enrichment album write-back members", "album", v.PID, "err", err)
+			continue
+		}
+		for _, f := range files {
+			// First album wins for a file two of them somehow claim, which cannot happen
+			// through a track's single album_id but costs nothing to be explicit about.
+			if _, seen := out[f.FilePID]; !seen {
+				out[f.FilePID] = albumLabelPlan{
+					edits:  []meta.TagEdit{{Key: key, Values: []string{v.Value}}},
+					recent: v.UpdatedAt >= sinceNS,
+				}
+			}
+		}
+	}
+	return out, nil
+}
+
+// albumLabelPlan is one member file's pending album label. recent says the label was
+// written by the pass now finishing, which is what decides whether it is worth opening a
+// file for on its own: an older label still rides along free when the item walk is
+// opening that file anyway, and is otherwise left for the pass that refills it.
+type albumLabelPlan struct {
+	edits  []meta.TagEdit
+	recent bool
+}
+
+// writeEnrichmentAlbumLabels writes the album labels the item walk did not already fold
+// into a file it was rewriting: a member with no enriched field of its own, or one the
+// item select drops because it is shared or carries an offset window. Only the labels
+// this pass wrote are written here, since these open a file for the label alone and an
+// unbounded fan-out would reopen every enriched album's members every run.
+//
+// It goes through writeBackFiles rather than writeEnrichmentFile precisely for those
+// dropped files: the item select excludes them with its start_frames join, whereas
+// EntityMemberFiles returns them on purpose and expects the caller's guard, which
+// writeBackFiles carries along with the drift rows and the per-file failure accounting.
+// It passes the enrichment origin, since a clean write clears that origin's whole set for
+// the file and borrowing the edit origin would wipe drift a user's own edit recorded.
+//
+// An album's year needs nothing here: it lands as each member's own year provenance and
+// rides the item path as DATE.
+func (l *Library) writeEnrichmentAlbumLabels(ctx context.Context, plan map[model.PID]albumLabelPlan, c *enrichWriteCounts) error {
+	const op = "waxbin.writeEnrichmentAlbumLabels"
+	// Sorted, so one pass writes the leftovers in a stable order.
+	pids := make([]model.PID, 0, len(plan))
+	for pid := range plan {
+		if plan[pid].recent {
+			pids = append(pids, pid)
+		}
+	}
+	sort.Slice(pids, func(i, j int) bool { return pids[i] < pids[j] })
+	for _, pid := range pids {
+		edits := plan[pid].edits
+		wbErr := &WriteBackError{}
+		err := l.writeBackFiles(ctx, op, model.OriginEnrichment,
+			[]model.ItemFileRef{{FilePID: pid}}, wbErr, nil,
+			func(w *meta.Writer, path string) (*meta.WriteResult, error) {
+				res, err := w.Apply(ctx, path, edits)
+				if err == nil && res.Changed {
+					c.written++
+				}
+				return res, err
+			})
+		if err != nil {
+			return err
+		}
+		c.failed += len(wbErr.Failures)
+	}
+	return nil
 }
 
 // enrichWriteCounts tallies one enrichment write-back pass.
@@ -311,6 +442,15 @@ type enrichWriteCounts struct {
 	unrepresented int
 	// skipped counts parts left unwritten because their book's primary part failed.
 	skipped int
+}
+
+// enrichmentTagFields is the fixed per-kind order enrichmentEdits walks, so one file's
+// write is reproducible regardless of Go's map ordering. It lists only fields with an
+// on-disk tag key: a book's description, subtitle, and edition have none, so they stay
+// catalog-only and a rescan can never undo them.
+var enrichmentTagFields = map[model.Kind][]string{
+	model.KindTrack: {"bpm", "composer", "genre", "isrc", "year"},
+	model.KindBook:  {"asin", "genre", "isbn", "narrator", "publisher", "year"},
 }
 
 // enrichmentEdits builds the tag edits for one file. Every key comes from
@@ -328,18 +468,16 @@ func enrichmentEdits(r model.EnrichedTagRow) []meta.TagEdit {
 			out = append(out, meta.TagEdit{Key: k, Values: []string{value}})
 		}
 	}
-	if r.Kind != model.KindBook {
-		if key, ok := meta.TagKeyForField("genre"); ok {
-			add([]string{key}, r.Genre)
+	for _, field := range enrichmentTagFields[r.Kind] {
+		value := r.Fields[field]
+		if r.Kind == model.KindBook {
+			if keys, ok := meta.BookFieldTagKeys(field); ok {
+				add(keys, value)
+			}
+			continue
 		}
-		return out
-	}
-	// Ordered, so one file's write is reproducible.
-	for _, f := range []struct{ field, value string }{
-		{"asin", r.ASIN}, {"genre", r.Genre}, {"isbn", r.ISBN}, {"publisher", r.Publisher},
-	} {
-		if keys, ok := meta.BookFieldTagKeys(f.field); ok {
-			add(keys, f.value)
+		if key, ok := meta.TagKeyForField(field); ok {
+			add([]string{key}, value)
 		}
 	}
 	return out

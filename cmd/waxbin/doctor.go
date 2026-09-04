@@ -73,7 +73,7 @@ func enabledLabel(ok bool) string {
 	if ok {
 		return "enabled"
 	}
-	return "disabled (set enrichment.contact)"
+	return "disabled (set enrichment.contact, or inject a provider)"
 }
 
 func yesNo(ok bool) string {

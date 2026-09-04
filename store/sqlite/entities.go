@@ -276,7 +276,12 @@ func resolveArtist(ctx context.Context, tx *sql.Tx, name, mbid string) (int64, e
 			return 0, err
 		}
 		// Only a real write emits a delta, so a no-op rescan stays change_log-silent.
+		// A Picard retag is the most common way an id lands on an artist that already
+		// took a name-keyed art no-match, so the marker is re-opened here too.
 		if wrote {
+			if err := artistMBIDLandedTx(ctx, tx, id); err != nil {
+				return 0, err
+			}
 			return id, appendChange(ctx, tx, "artist", model.PID(pid), model.OpUpdate)
 		}
 		return id, nil

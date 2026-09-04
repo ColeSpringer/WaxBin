@@ -16,21 +16,24 @@ import (
 // artifact readable: it arrives as a locked role with no image rather than one
 // wearing a zero size and an empty format, which is the state the command exists to
 // report and the only one no other JSON read can reach for a playlist or a podcast.
+// roleLocked rides beside locked so a per-role pin control can tell an auxiliary slot
+// held by its own pin from one held by the front cover's.
 func TestArtRoleViewsJSON(t *testing.T) {
 	b, err := json.Marshal(artRoleViews([]model.ArtRoleInfo{
 		{
 			Role: model.ArtRoleBack, Format: "png", Width: 500, Height: 500,
 			SourceHash: "h1", Attribution: model.Attribution{Source: model.SourceUser}, UpdatedAt: 7,
+			Locked: true,
 		},
 		{Role: model.ArtRoleFront, Attribution: model.Attribution{Source: model.SourceUser},
-			UpdatedAt: 9, Locked: true},
+			UpdatedAt: 9, Locked: true, RoleLocked: true},
 	}))
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := `[{"role":"back","format":"png","width":500,"height":500,"sourceHash":"h1",` +
-		`"source":"user","updatedAt":"7","locked":false},` +
-		`{"role":"front","source":"user","updatedAt":"9","locked":true}]`
+		`"source":"user","updatedAt":"7","locked":true,"roleLocked":false},` +
+		`{"role":"front","source":"user","updatedAt":"9","locked":true,"roleLocked":true}]`
 	if string(b) != want {
 		t.Errorf("json = %s\nwant %s", b, want)
 	}
@@ -96,5 +99,65 @@ func TestParseArtLockRole(t *testing.T) {
 	}
 	if _, err := parseArtLockRole("unlock", "sleeve"); !waxerr.Is(err, waxerr.CodeInvalid) {
 		t.Errorf("--role sleeve = %v, want CodeInvalid", err)
+	}
+}
+
+// TestArtLockLine pins what `art lock`/`art unlock` reports. The unlock cases are the
+// point: releasing an auxiliary role's pin while the entity's whole art pin stands opens
+// nothing, and saying "unlocked" there leaves a user wondering why enrichment still skips
+// the slot. Each such line names the command that would actually open it.
+func TestArtLockLine(t *testing.T) {
+	const pid = model.PID("01ABC")
+	cases := []struct {
+		name   string
+		change model.ArtLockChange
+		lock   bool
+		role   model.ArtRole
+		want   string
+	}{
+		{
+			name: "lock", change: model.ArtLockChange{Changed: true, StillLocked: true},
+			lock: true, role: model.ArtRoleBack,
+			want: "locked release_group back art for 01ABC\n",
+		},
+		{
+			name: "lock again", change: model.ArtLockChange{StillLocked: true},
+			lock: true, role: model.ArtRoleBack,
+			want: "release_group back art for 01ABC was already locked\n",
+		},
+		{
+			name: "unlock opens the slot", change: model.ArtLockChange{Changed: true},
+			role: model.ArtRoleBack,
+			want: "unlocked release_group back art for 01ABC\n",
+		},
+		{
+			name: "unlock under the whole pin", change: model.ArtLockChange{Changed: true, StillLocked: true},
+			role: model.ArtRoleBack,
+			want: "unlocked release_group back art for 01ABC; the slot is still locked by the entity's whole art lock\n" +
+				"(waxbin art unlock 01ABC --type release_group)\n",
+		},
+		{
+			name: "unlock a role with no pin of its own", change: model.ArtLockChange{StillLocked: true},
+			role: model.ArtRoleBack,
+			want: "release_group back art for 01ABC had no lock of its own; the slot is still locked by the entity's whole art lock\n" +
+				"(waxbin art unlock 01ABC --type release_group)\n",
+		},
+		{
+			name: "unlock an already-open slot", change: model.ArtLockChange{},
+			role: model.ArtRoleBack,
+			want: "release_group back art for 01ABC had no lock of its own\n",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			past := "unlocked"
+			if c.lock {
+				past = "locked"
+			}
+			got := artLockLine(c.change, c.lock, past, model.ArtReleaseGroup, c.role, pid)
+			if got != c.want {
+				t.Errorf("line = %q\nwant %q", got, c.want)
+			}
+		})
 	}
 }

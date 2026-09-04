@@ -93,6 +93,17 @@ func TestOrphanRGSweepDropsAuxMarker(t *testing.T) {
 		model.ReleaseGroupAuxArt{ReleaseGroupID: rgID, PID: model.PID(rgPID)}); err != nil {
 		t.Fatalf("mark: %v", err)
 	}
+	// The album fields marker sits the same way, under its own entity_type on an album
+	// rowid, so it is swept here too.
+	var albumID int64
+	var albumPID string
+	if err := st.read.QueryRowContext(ctx, "SELECT id, pid FROM album").Scan(&albumID, &albumPID); err != nil {
+		t.Fatalf("resolve album: %v", err)
+	}
+	if err := st.ApplyAlbumFields(ctx,
+		model.AlbumFieldsEnrichment{AlbumID: albumID, PID: model.PID(albumPID)}); err != nil {
+		t.Fatalf("mark album fields: %v", err)
+	}
 
 	// Through the cascade helper, as the real prune path does: a raw DELETE strands the
 	// item's FTS row and the verify below would fail for an unrelated reason.
@@ -111,6 +122,9 @@ func TestOrphanRGSweepDropsAuxMarker(t *testing.T) {
 	}
 	if n := scalarInt(t, st, "SELECT COUNT(*) FROM entity_enrichment WHERE entity_type='aux_art'"); n != 0 {
 		t.Errorf("aux_art marker rows after sweep = %d, want 0", n)
+	}
+	if n := scalarInt(t, st, "SELECT COUNT(*) FROM entity_enrichment WHERE entity_type='fields_album'"); n != 0 {
+		t.Errorf("fields_album marker rows after sweep = %d, want 0", n)
 	}
 	assertVerifyClean(t, st)
 }

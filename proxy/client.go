@@ -389,15 +389,19 @@ func (c *Client) SetEntityArt(ctx context.Context, entityType model.ArtEntity, e
 // sent before roles existed. The server refuses a literal "front" and points at the
 // omitted form; normalizing here means our own callers never meet that refusal, and it
 // still stands for a client that assembles the frame itself.
-func (c *Client) SetArtLock(ctx context.Context, entityType model.ArtEntity, entityPID model.PID, role model.ArtRole, lock bool) error {
+func (c *Client) SetArtLock(ctx context.Context, entityType model.ArtEntity, entityPID model.PID, role model.ArtRole, lock bool) (model.ArtLockChange, error) {
 	wireRole := string(role)
 	if role == model.ArtRoleFront {
 		wireRole = ""
 	}
-	return c.call(ctx, MethodSetArtLock, SetArtLockParams{
+	var res SetArtLockResult
+	if err := c.call(ctx, MethodSetArtLock, SetArtLockParams{
 		EntityType: string(entityType), EntityPID: string(entityPID),
 		Role: wireRole, Lock: lock,
-	}, nil)
+	}, &res); err != nil {
+		return model.ArtLockChange{}, err
+	}
+	return model.ArtLockChange{Changed: res.Changed, StillLocked: res.StillLocked}, nil
 }
 
 // SetTag proxies a custom-tag edit, returning the canonical key stored and the number

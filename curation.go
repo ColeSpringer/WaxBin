@@ -172,7 +172,11 @@ func (l *Library) ArtLocked(ctx context.Context, entityType model.ArtEntity, ent
 // front cover, whose lock also gates enrichment's fills in the other roles; for a track
 // entity that is the same row `Lock(pid, "art")` writes, and an auxiliary role is the
 // row `Lock(pid, "art.<role>")` writes.
-func (l *Library) SetArtLock(ctx context.Context, entityType model.ArtEntity, entityPID model.PID, role model.ArtRole, lock bool) error {
+//
+// The report says whether the slot's own pin actually moved and whether the slot is
+// still locked afterwards, so a caller can tell an unlock that opened the slot from one
+// that released a role's pin while the entity's whole art pin kept it shut.
+func (l *Library) SetArtLock(ctx context.Context, entityType model.ArtEntity, entityPID model.PID, role model.ArtRole, lock bool) (model.ArtLockChange, error) {
 	return l.store.SetArtLock(ctx, entityType, entityPID, role, lock)
 }
 
@@ -222,7 +226,7 @@ func (l *Library) writeBackPicture(ctx context.Context, op string, refPID model.
 		return nil
 	}
 	wbErr := &WriteBackError{ItemPID: refPID, Edits: edits}
-	if err := l.writeBackFiles(ctx, op, files, wbErr, nil,
+	if err := l.writeBackFiles(ctx, op, model.OriginEdit, files, wbErr, nil,
 		func(w *meta.Writer, path string) (*meta.WriteResult, error) {
 			return w.ApplyPicture(ctx, path, pedit)
 		}); err != nil {

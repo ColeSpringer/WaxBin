@@ -270,3 +270,65 @@ func TestAuxBackfillHeartbeatDenominator(t *testing.T) {
 		t.Errorf("final heartbeat = %v, want 1", beats[len(beats)-1])
 	}
 }
+
+// TestAuxBackfillQueuesAnUnmatchedGroupByTitle: the release-group twin of the
+// name-keyed artist walk. The queue used to require release_group.mbid, so a group
+// MusicBrainz never matched was never asked about its empty auxiliary slots. It walks by
+// title now, and the request carries the title and primary-artist name with an empty
+// MBID.
+func TestAuxBackfillQueuesAnUnmatchedGroupByTitle(t *testing.T) {
+	ctx := context.Background()
+	st, dbPath, lib := openStore(t)
+	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Basement Tape", "The Local Band", "Demo")
+
+	var reqs []enrich.Request
+	aux := &enrich.Mock{ProviderName: "fanart", Caps: enrich.CapAuxArt,
+		EnrichFunc: func(_ context.Context, req enrich.Request) (*enrich.Candidate, error) {
+			if req.Type != enrich.TargetReleaseGroup {
+				return nil, nil
+			}
+			reqs = append(reqs, req)
+			return &enrich.Candidate{Art: map[model.ArtRole]*model.ArtImage{
+				model.ArtRoleBack: artImg(t, "demo-back"),
+			}}, nil
+		}}
+	svc := enrich.New(st, enrich.Config{
+		Contact: "t@e.com", MinRequestInterval: time.Millisecond,
+		MusicBrainzBaseURL: mbMockNoArtist(t).URL, ListenBrainzBaseURL: deadURL(t),
+		Providers: []enrich.Provider{aux},
+	}, nil)
+
+	res, err := svc.Run(ctx, enrich.RunOptions{}, nil)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if res.ReleaseGroupsMatched != 0 {
+		t.Fatalf("MusicBrainz matched %d groups; the fixture is supposed to miss", res.ReleaseGroupsMatched)
+	}
+	if res.AuxArtEnriched != 1 || res.AuxArtMatched != 1 {
+		t.Fatalf("backfill = %d walked / %d matched, want 1 and 1 for an unmatched group",
+			res.AuxArtEnriched, res.AuxArtMatched)
+	}
+	if len(reqs) != 1 {
+		t.Fatalf("provider asked %d times, want once", len(reqs))
+	}
+	if reqs[0].Title != "Demo" || reqs[0].Artist != "The Local Band" || reqs[0].MBID != "" {
+		t.Errorf("request = title %q / artist %q / mbid %q, want the title and artist alone",
+			reqs[0].Title, reqs[0].Artist, reqs[0].MBID)
+	}
+	if reqs[0].Want != enrich.CapAuxArt {
+		t.Errorf("request Want = %v, want CapAuxArt", reqs[0].Want)
+	}
+	if h := scalarStr(t, roDB(t, dbPath), `SELECT COALESCE((SELECT source_hash FROM art_map
+		WHERE entity_type='release_group' AND role='back'), '')`); h != "demo-back" {
+		t.Errorf("back hash = %q, want the title-keyed fill", h)
+	}
+
+	again, err := svc.Run(ctx, enrich.RunOptions{}, nil)
+	if err != nil {
+		t.Fatalf("second run: %v", err)
+	}
+	if again.AuxArtEnriched != 0 {
+		t.Errorf("second run walked %d groups; the marker should have held", again.AuxArtEnriched)
+	}
+}

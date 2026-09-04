@@ -107,6 +107,12 @@ func ParseArtRole(s string) (ArtRole, bool) {
 // cover's own lock and also gates enrichment's fills in every role, or the role's own
 // "art.<role>" lock, which gates that one slot alone.
 //
+// RoleLocked is the slot's own pin alone: the "art.<role>" row, or for the front the
+// plain "art" row, so a front entry always has RoleLocked equal to Locked. An
+// auxiliary entry with Locked and not RoleLocked is held by the whole-artwork pin
+// alone, and unpinning the role changes nothing. A per-role pin control reads this
+// one rather than Locked.
+//
 // A Locked entry with an empty SourceHash is a lock with no artifact behind it, which
 // is what a cleared and locked slot looks like in any role. Check SourceHash before
 // trying to fetch bytes for an entry.
@@ -117,8 +123,23 @@ type ArtRoleInfo struct {
 	Height     int
 	SourceHash string
 	Attribution
-	UpdatedAt int64 // unix nanoseconds
-	Locked    bool
+	UpdatedAt  int64 // unix nanoseconds
+	Locked     bool
+	RoleLocked bool
+}
+
+// ArtLockChange is what one SetArtLock call did, so a caller can say whether anything
+// moved rather than reporting the request back as if it were the outcome.
+//
+// Changed is false when the slot's own pin already said what was asked, which the call
+// treats as a no-op down to the change delta. StillLocked is the effective lock AFTER
+// the call: an unlock of one auxiliary role leaves it true when the entity's whole "art"
+// pin is standing, since that one gates every role and releasing the role's own pin
+// opens nothing. For the front the two pins are one field, so an unlock that changed
+// anything always leaves StillLocked false.
+type ArtLockChange struct {
+	Changed     bool
+	StillLocked bool
 }
 
 // ArtImage is a source cover image plus its content hash, decoded dimensions, and

@@ -751,3 +751,61 @@ func TestEditArtistSameValueKeepsRawAnchor(t *testing.T) {
 		t.Fatalf("db verify not clean: %+v (err %v)", rep, err)
 	}
 }
+
+// TestEnrichFillFieldsFollowTheEditVocabulary pins the rule the fill sets are derived
+// from, against the edit vocabularies they are carved out of. The two live in different
+// packages, so a field added to trackEditFields or bookEditFields silently widens what an
+// edit can write and would otherwise silently NOT widen what a provider may fill; this
+// test is where that divergence surfaces.
+//
+// The rule: a kind's editable scalar fields, minus its own identity keys (a per-member
+// write forks the entity), the title, genre (CapGenres owns it), the recording mbid
+// (identity), the positions and flags a file's tags settle, the derived sorts, and
+// comment.
+func TestEnrichFillFieldsFollowTheEditVocabulary(t *testing.T) {
+	excluded := map[string]bool{
+		"title": true, "genre": true, "mbid": true,
+		"track_no": true, "disc_no": true, "compilation": true,
+		"composer_sort": true, "author_sort": true, "comment": true,
+	}
+	cases := []struct {
+		kind model.Kind
+		keys map[string]bool
+	}{
+		{model.KindTrack, editKeyFields},
+		{model.KindBook, bookKeyFields},
+	}
+	for _, c := range cases {
+		want := map[string]bool{}
+		for f := range editableFieldsForKind(string(c.kind)) {
+			if !excluded[f] && !c.keys[f] {
+				want[f] = true
+			}
+		}
+		got := model.EnrichFillFields(c.kind)
+		if len(got) != len(want) {
+			t.Errorf("%s fill set = %v, want %v", c.kind, sortedKeys(got), sortedKeys(want))
+			continue
+		}
+		for f := range want {
+			if !got[f] {
+				t.Errorf("%s fill set is missing %q", c.kind, f)
+			}
+		}
+	}
+	// An episode has no fields walk: its metadata is feed-owned.
+	if got := model.EnrichFillFields(model.KindEpisode); got != nil {
+		t.Errorf("episode fill set = %v, want nil", got)
+	}
+	// The album rung refuses the release identifiers on purpose: they are the evidence
+	// the release matcher searches by.
+	album := model.AlbumFillFields()
+	for _, f := range []string{"barcode", "catalog_number", "media", "country"} {
+		if album[f] {
+			t.Errorf("album fill set contains %q; a provider guess must not drive the release matcher", f)
+		}
+	}
+	if !album["label"] || !album["year"] || len(album) != 2 {
+		t.Errorf("album fill set = %v, want label + year", sortedKeys(album))
+	}
+}
