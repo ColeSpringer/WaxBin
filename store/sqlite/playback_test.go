@@ -43,13 +43,13 @@ func TestPlayStateLifecycle(t *testing.T) {
 	}
 
 	// Progress, two plays (one finishing), a rating, and a star accumulate.
-	if err := st.SetProgress(ctx, "", item, 42000); err != nil {
+	if err := st.SetProgress(ctx, "", item, 42000, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.MarkPlayed(ctx, "", item, false); err != nil {
+	if err := st.MarkPlayed(ctx, "", item, false, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.MarkPlayed(ctx, "", item, true); err != nil {
+	if err := st.MarkPlayed(ctx, "", item, true, nil); err != nil {
 		t.Fatal(err)
 	}
 	r := 80
@@ -564,10 +564,10 @@ func TestStampsUntouchedByProgressAndPlays(t *testing.T) {
 	}
 	before, _ := st.PlayStateFor(ctx, "", item)
 
-	if err := st.SetProgress(ctx, "", item, 42000); err != nil {
+	if err := st.SetProgress(ctx, "", item, 42000, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.MarkPlayed(ctx, "", item, true); err != nil {
+	if err := st.MarkPlayed(ctx, "", item, true, nil); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := st.SetPlayed(ctx, "", item, false, false, ptrInt(0), nil); err != nil {
@@ -591,7 +591,7 @@ func TestLastProgressStampedByPlaybackWritesOnly(t *testing.T) {
 	ctx := context.Background()
 	item := seedItem(t, st, lib)
 
-	if err := st.SetProgress(ctx, "", item, 42000); err != nil {
+	if err := st.SetProgress(ctx, "", item, 42000, nil); err != nil {
 		t.Fatal(err)
 	}
 	afterProgress, _ := st.PlayStateFor(ctx, "", item)
@@ -602,7 +602,7 @@ func TestLastProgressStampedByPlaybackWritesOnly(t *testing.T) {
 		t.Errorf("SetProgress stamped last_played_at = %d, want 0", afterProgress.LastPlayedAt)
 	}
 
-	if err := st.MarkPlayed(ctx, "", item, false); err != nil {
+	if err := st.MarkPlayed(ctx, "", item, false, nil); err != nil {
 		t.Fatal(err)
 	}
 	afterPlay, _ := st.PlayStateFor(ctx, "", item)

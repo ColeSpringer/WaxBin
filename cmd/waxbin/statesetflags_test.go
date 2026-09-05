@@ -17,8 +17,8 @@ func TestStateSetFlagValidation(t *testing.T) {
 	}{
 		// star and unstar are mutually exclusive (cobra names both flags in the error).
 		{"star and unstar", []string{"set", "01J0X", "--star", "--unstar"}, "unstar"},
-		// --as-of with no stamp-writing operation would be silently ignored.
-		{"as-of without op", []string{"set", "01J0X", "--played", "--as-of", "1770000000000000000"}, "--as-of applies only"},
+		// --as-of with nothing to record would be silently ignored.
+		{"as-of without op", []string{"set", "01J0X", "--as-of", "1770000000000000000"}, "--as-of needs"},
 		// --unplayed clears finished too, so it contradicts both flags.
 		{"played and unplayed", []string{"set", "01J0X", "--played", "--unplayed"}, "unplayed"},
 		{"finished and unplayed", []string{"set", "01J0X", "--finished", "--unplayed"}, "unplayed"},

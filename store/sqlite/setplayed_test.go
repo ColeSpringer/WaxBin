@@ -26,10 +26,10 @@ func TestSetPlayedUndoesAPlay(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			st, lib := entityFixture(t)
 			item := seedItem(t, st, lib)
-			if err := st.MarkPlayed(ctx, "", item, false); err != nil {
+			if err := st.MarkPlayed(ctx, "", item, false, nil); err != nil {
 				t.Fatal(err)
 			}
-			if err := st.MarkPlayed(ctx, "", item, true); err != nil {
+			if err := st.MarkPlayed(ctx, "", item, true, nil); err != nil {
 				t.Fatal(err)
 			}
 
@@ -76,7 +76,7 @@ func TestSetPlayedKeepsCountConsistentWithPlayed(t *testing.T) {
 	t.Run("row created by a checkpoint", func(t *testing.T) {
 		st, lib := entityFixture(t)
 		item := seedItem(t, st, lib)
-		if err := st.SetProgress(ctx, "", item, 500); err != nil {
+		if err := st.SetProgress(ctx, "", item, 500, nil); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := st.SetPlayed(ctx, "", item, true, true, nil, nil); err != nil {
@@ -104,7 +104,7 @@ func TestSetPlayedKeepsCountConsistentWithPlayed(t *testing.T) {
 		st, lib := entityFixture(t)
 		item := seedItem(t, st, lib)
 		for i := 0; i < 3; i++ {
-			if err := st.MarkPlayed(ctx, "", item, false); err != nil {
+			if err := st.MarkPlayed(ctx, "", item, false, nil); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -159,7 +159,7 @@ func TestSetPlayedNoOpIsSilent(t *testing.T) {
 		t.Errorf("clearing an untouched item reported changed=%v and moved the delta count", changed)
 	}
 
-	if err := st.MarkPlayed(ctx, "", item, true); err != nil {
+	if err := st.MarkPlayed(ctx, "", item, true, nil); err != nil {
 		t.Fatal(err)
 	}
 	stamped, _ := st.PlayStateFor(ctx, "", item)
@@ -284,7 +284,7 @@ func TestMarkPlayedOrdersAgainstSetPlayed(t *testing.T) {
 	ctx := context.Background()
 	item := seedItem(t, st, lib)
 
-	if err := st.MarkPlayed(ctx, "", item, true); err != nil {
+	if err := st.MarkPlayed(ctx, "", item, true, nil); err != nil {
 		t.Fatal(err)
 	}
 	played, _ := st.PlayStateFor(ctx, "", item)
@@ -313,7 +313,7 @@ func TestMarkPlayedStampIsMonotonic(t *testing.T) {
 	t.Run("first play on a fresh row", func(t *testing.T) {
 		st, lib := entityFixture(t)
 		item := seedItem(t, st, lib)
-		if err := st.MarkPlayed(ctx, "", item, false); err != nil {
+		if err := st.MarkPlayed(ctx, "", item, false, nil); err != nil {
 			t.Fatal(err)
 		}
 		got, _ := st.PlayStateFor(ctx, "", item)
@@ -327,10 +327,10 @@ func TestMarkPlayedStampIsMonotonic(t *testing.T) {
 		item := seedItem(t, st, lib)
 		// A progress checkpoint creates the row with played_changed_at still NULL,
 		// which is where the bare MAX() would wipe the stamp.
-		if err := st.SetProgress(ctx, "", item, 1000); err != nil {
+		if err := st.SetProgress(ctx, "", item, 1000, nil); err != nil {
 			t.Fatal(err)
 		}
-		if err := st.MarkPlayed(ctx, "", item, false); err != nil {
+		if err := st.MarkPlayed(ctx, "", item, false, nil); err != nil {
 			t.Fatal(err)
 		}
 		got, _ := st.PlayStateFor(ctx, "", item)
@@ -346,7 +346,7 @@ func TestMarkPlayedStampIsMonotonic(t *testing.T) {
 		if _, err := st.SetPlayed(ctx, "", item, true, false, nil, ptrNS(future)); err != nil {
 			t.Fatal(err)
 		}
-		if err := st.MarkPlayed(ctx, "", item, true); err != nil {
+		if err := st.MarkPlayed(ctx, "", item, true, nil); err != nil {
 			t.Fatal(err)
 		}
 		got, _ := st.PlayStateFor(ctx, "", item)

@@ -618,16 +618,20 @@ func (c *Client) SetEntityRating(ctx context.Context, userPID model.PID, kind mo
 }
 
 // MarkPlayed proxies marking an item played (and optionally finished) for a user.
-func (c *Client) MarkPlayed(ctx context.Context, userPID, itemPID model.PID, finished bool) error {
+// asOf (nil = server now) is the recorded play time; it travels as asOfNs and lets
+// the server count a replayed or imported play at its own time without moving any
+// stamp backwards.
+func (c *Client) MarkPlayed(ctx context.Context, userPID, itemPID model.PID, finished bool, asOf *int64) error {
 	return c.call(ctx, MethodMarkPlayed, PlayedParams{
-		UserPID: string(userPID), ItemPID: string(itemPID), Finished: finished,
+		UserPID: string(userPID), ItemPID: string(itemPID), Finished: finished, AsOfNS: asOfToWire(asOf),
 	}, nil)
 }
 
-// SetProgress proxies persisting a user's resume position for an item.
-func (c *Client) SetProgress(ctx context.Context, userPID, itemPID model.PID, positionMS int64) error {
+// SetProgress proxies persisting a user's resume position for an item. asOf (nil =
+// server now) is the recorded checkpoint time; see MarkPlayed.
+func (c *Client) SetProgress(ctx context.Context, userPID, itemPID model.PID, positionMS int64, asOf *int64) error {
 	return c.call(ctx, MethodSetProgress, ProgressParams{
-		UserPID: string(userPID), ItemPID: string(itemPID), PositionMS: positionMS,
+		UserPID: string(userPID), ItemPID: string(itemPID), PositionMS: positionMS, AsOfNS: asOfToWire(asOf),
 	}, nil)
 }
 

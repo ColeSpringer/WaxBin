@@ -216,12 +216,12 @@ func TestBrowseMostPlayedAndStarred(t *testing.T) {
 	}
 	// Two plays for Two, three for Three, none for One.
 	for i := 0; i < 2; i++ {
-		if err := st.MarkPlayed(ctx, "", ids["Two"], false); err != nil {
+		if err := st.MarkPlayed(ctx, "", ids["Two"], false, nil); err != nil {
 			t.Fatalf("mark played: %v", err)
 		}
 	}
 	for i := 0; i < 3; i++ {
-		if err := st.MarkPlayed(ctx, "", ids["Three"], false); err != nil {
+		if err := st.MarkPlayed(ctx, "", ids["Three"], false, nil); err != nil {
 			t.Fatalf("mark played: %v", err)
 		}
 	}
@@ -253,7 +253,7 @@ func TestBrowseRecentlyPlayed(t *testing.T) {
 		ids[title] = res.ItemPID
 	}
 	for _, title := range []string{"One", "Three", "Two"} {
-		if err := st.MarkPlayed(ctx, "", ids[title], false); err != nil {
+		if err := st.MarkPlayed(ctx, "", ids[title], false, nil); err != nil {
 			t.Fatalf("mark played %s: %v", title, err)
 		}
 	}
@@ -266,11 +266,59 @@ func TestBrowseRecentlyPlayed(t *testing.T) {
 	// this list.
 	four := putTrack(t, st, lib.ID, trackSpec{path: "/lib/Four.flac", essence: "eFour",
 		content: "cFour", title: "Four", artist: "X", album: "Al"})
-	if err := st.SetProgress(ctx, "", four.ItemPID, 60_000); err != nil {
+	if err := st.SetProgress(ctx, "", four.ItemPID, 60_000, nil); err != nil {
 		t.Fatalf("set progress: %v", err)
 	}
 	if order := drainBrowse(t, st, read.ListRecentlyPlayed, read.BrowseOptions{}, 5); strings.Join(order, ",") != "Two,Three,One" {
 		t.Errorf("recently-played after a checkpoint = %v, want the play order unchanged", order)
+	}
+}
+
+// TestBrowseRecentlyPlayedOrdersByRecordedTime pins what an import gets: plays
+// carrying their own times order by those times, not by the order they arrived.
+func TestBrowseRecentlyPlayedOrdersByRecordedTime(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	ids := map[string]model.PID{}
+	for _, title := range []string{"One", "Two", "Three"} {
+		res := putTrack(t, st, lib.ID, trackSpec{path: "/lib/" + title + ".flac",
+			essence: "e" + title, content: "c" + title, title: title, artist: "X", album: "Al"})
+		ids[title] = res.ItemPID
+	}
+	for _, p := range []struct {
+		title string
+		at    int64
+	}{{"Three", 3000}, {"One", 1000}, {"Two", 2000}} {
+		if err := st.MarkPlayed(ctx, "", ids[p.title], false, ptrNS(p.at)); err != nil {
+			t.Fatalf("mark played %s: %v", p.title, err)
+		}
+	}
+	if order := drainBrowse(t, st, read.ListRecentlyPlayed, read.BrowseOptions{}, 2); strings.Join(order, ",") != "Three,Two,One" {
+		t.Errorf("recently-played = %v, want the recorded order Three,Two,One", order)
+	}
+}
+
+// TestBrowseInProgressOrdersByRecordedTime is the checkpoint twin: an imported
+// resume position sits where its recorded time puts it, not at the head.
+func TestBrowseInProgressOrdersByRecordedTime(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	ids := map[string]model.PID{}
+	for _, title := range []string{"One", "Two", "Three"} {
+		res := putTrack(t, st, lib.ID, trackSpec{path: "/lib/" + title + ".flac",
+			essence: "e" + title, content: "c" + title, title: title, artist: "X", album: "Al"})
+		ids[title] = res.ItemPID
+	}
+	for _, p := range []struct {
+		title string
+		at    int64
+	}{{"Three", 3000}, {"One", 1000}, {"Two", 2000}} {
+		if err := st.SetProgress(ctx, "", ids[p.title], 60_000, ptrNS(p.at)); err != nil {
+			t.Fatalf("set progress %s: %v", p.title, err)
+		}
+	}
+	if order := drainBrowse(t, st, read.ListInProgress, read.BrowseOptions{}, 2); strings.Join(order, ",") != "Three,Two,One" {
+		t.Errorf("in-progress = %v, want the recorded order Three,Two,One", order)
 	}
 }
 
@@ -286,16 +334,16 @@ func TestBrowseInProgress(t *testing.T) {
 		ids[title] = res.ItemPID
 	}
 	for _, title := range []string{"One", "Three", "Two"} {
-		if err := st.SetProgress(ctx, "", ids[title], 60_000); err != nil {
+		if err := st.SetProgress(ctx, "", ids[title], 60_000, nil); err != nil {
 			t.Fatalf("set progress %s: %v", title, err)
 		}
 	}
 	// A finished item with a non-zero position is excluded; an untouched one has no
 	// row to be excluded by.
-	if err := st.SetProgress(ctx, "", ids["Done"], 90_000); err != nil {
+	if err := st.SetProgress(ctx, "", ids["Done"], 90_000, nil); err != nil {
 		t.Fatalf("set progress Done: %v", err)
 	}
-	if err := st.MarkPlayed(ctx, "", ids["Done"], true); err != nil {
+	if err := st.MarkPlayed(ctx, "", ids["Done"], true, nil); err != nil {
 		t.Fatalf("mark Done finished: %v", err)
 	}
 
@@ -336,23 +384,23 @@ func TestBrowseInProgressBoundaries(t *testing.T) {
 		res := putTrack(t, st, lib.ID, trackSpec{path: "/lib/" + title + ".flac",
 			essence: "e" + title, content: "c" + title, title: title, artist: "X", album: "Al"})
 		ids[title] = res.ItemPID
-		if err := st.SetProgress(ctx, "", res.ItemPID, 60_000); err != nil {
+		if err := st.SetProgress(ctx, "", res.ItemPID, 60_000, nil); err != nil {
 			t.Fatalf("set progress %s: %v", title, err)
 		}
 	}
 
 	// Checkpointing back to 0 stamps the write and drops the item off the list.
-	if err := st.SetProgress(ctx, "", ids["Reset"], 0); err != nil {
+	if err := st.SetProgress(ctx, "", ids["Reset"], 0, nil); err != nil {
 		t.Fatalf("reset progress: %v", err)
 	}
 	// MarkPlayed(finished=true) stamps it, and finished keeps it off.
-	if err := st.MarkPlayed(ctx, "", ids["Finished"], true); err != nil {
+	if err := st.MarkPlayed(ctx, "", ids["Finished"], true, nil); err != nil {
 		t.Fatalf("mark finished: %v", err)
 	}
 	// MarkPlayed(finished=false) on a stale non-zero position keeps it on the list, at
 	// the head. Nothing here clears a resume position, so a client that scrobbles a
 	// fully-played track without passing finished pins it until something resets it.
-	if err := st.MarkPlayed(ctx, "", ids["Stale"], false); err != nil {
+	if err := st.MarkPlayed(ctx, "", ids["Stale"], false, nil); err != nil {
 		t.Fatalf("mark played: %v", err)
 	}
 
@@ -381,7 +429,7 @@ func TestBrowseInProgressPlanUsesProgressIndex(t *testing.T) {
 	for _, title := range []string{"One", "Two"} {
 		res := putTrack(t, st, lib.ID, trackSpec{path: "/lib/" + title + ".flac",
 			essence: "e" + title, content: "c" + title, title: title, artist: "X", album: "Al"})
-		if err := st.SetProgress(ctx, "", res.ItemPID, 60_000); err != nil {
+		if err := st.SetProgress(ctx, "", res.ItemPID, 60_000, nil); err != nil {
 			t.Fatalf("set progress: %v", err)
 		}
 	}
@@ -708,14 +756,14 @@ func TestBrowseQueryUserFieldBindsUserJoin(t *testing.T) {
 		t.Fatalf("create user: %v", err)
 	}
 	// The default user played One and starred Two; Bob played both and starred One.
-	if err := st.MarkPlayed(ctx, "", ids["One"], false); err != nil {
+	if err := st.MarkPlayed(ctx, "", ids["One"], false, nil); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := st.SetStar(ctx, "", ids["Two"], true, nil); err != nil {
 		t.Fatal(err)
 	}
 	for _, title := range []string{"One", "Two"} {
-		if err := st.MarkPlayed(ctx, bob.PID, ids[title], false); err != nil {
+		if err := st.MarkPlayed(ctx, bob.PID, ids[title], false, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -794,7 +842,7 @@ func TestBrowseQueryBindOrder(t *testing.T) {
 
 	// A play-derived list's own join plus compiled tag args.
 	for _, title := range []string{"One", "Two"} {
-		if err := st.MarkPlayed(ctx, "", ids[title], false); err != nil {
+		if err := st.MarkPlayed(ctx, "", ids[title], false, nil); err != nil {
 			t.Fatal(err)
 		}
 	}

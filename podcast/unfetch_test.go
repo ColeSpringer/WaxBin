@@ -82,7 +82,7 @@ func TestUnfetchReclaimsAndPreservesPlayState(t *testing.T) {
 		t.Fatal(err)
 	}
 	pb := playback.New(st)
-	if err := pb.MarkPlayed(ctx, user.PID, ep.PID, true); err != nil {
+	if err := pb.MarkPlayed(ctx, user.PID, ep.PID, true, nil); err != nil {
 		t.Fatalf("mark played: %v", err)
 	}
 

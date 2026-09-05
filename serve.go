@@ -551,7 +551,7 @@ func (l *Library) proxyHandlers() map[string]proxy.Handler {
 			if err != nil {
 				return nil, err
 			}
-			return nil, l.playback.MarkPlayed(ctx, model.PID(p.UserPID), model.PID(p.ItemPID), p.Finished)
+			return nil, l.playback.MarkPlayed(ctx, model.PID(p.UserPID), model.PID(p.ItemPID), p.Finished, proxy.AsOf(p.AsOfNS))
 		},
 		proxy.MethodSetPlayed: func(ctx context.Context, raw json.RawMessage) (any, error) {
 			p, err := decodeParams[proxy.SetPlayedParams](raw)
@@ -570,7 +570,7 @@ func (l *Library) proxyHandlers() map[string]proxy.Handler {
 			if err != nil {
 				return nil, err
 			}
-			return nil, l.playback.Checkpoint(ctx, model.PID(p.UserPID), model.PID(p.ItemPID), p.PositionMS)
+			return nil, l.playback.Checkpoint(ctx, model.PID(p.UserPID), model.PID(p.ItemPID), p.PositionMS, proxy.AsOf(p.AsOfNS))
 		},
 		proxy.MethodPlayState: func(ctx context.Context, raw json.RawMessage) (any, error) {
 			p, err := decodeParams[proxy.StateParams](raw)

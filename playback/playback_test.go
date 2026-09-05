@@ -15,6 +15,7 @@ type fakeStore struct {
 	mu       sync.Mutex
 	progress []int64 // positions written, in order
 	last     map[string]int64
+	asOf     map[string]*int64    // the recorded time each item's last write carried
 	fail     error                // when set, SetProgress fails with it
 	onWrite  func(item model.PID) // hook invoked inside SetProgress (for race simulation)
 
@@ -25,9 +26,9 @@ type fakeStore struct {
 	defaultPID model.PID
 }
 
-func newFake() *fakeStore { return &fakeStore{last: map[string]int64{}} }
+func newFake() *fakeStore { return &fakeStore{last: map[string]int64{}, asOf: map[string]*int64{}} }
 
-func (f *fakeStore) SetProgress(_ context.Context, _, item model.PID, pos int64) error {
+func (f *fakeStore) SetProgress(_ context.Context, _, item model.PID, pos int64, asOf *int64) error {
 	if f.onWrite != nil {
 		f.onWrite(item)
 	}
@@ -38,6 +39,7 @@ func (f *fakeStore) SetProgress(_ context.Context, _, item model.PID, pos int64)
 	}
 	f.progress = append(f.progress, pos)
 	f.last[string(item)] = pos
+	f.asOf[string(item)] = asOf
 	return nil
 }
 func (f *fakeStore) writes() int {
@@ -73,7 +75,7 @@ func (f *fakeStore) DefaultUser(context.Context) (*model.User, error) {
 }
 
 // Unused-by-these-tests methods.
-func (f *fakeStore) MarkPlayed(context.Context, model.PID, model.PID, bool) error { return nil }
+func (f *fakeStore) MarkPlayed(context.Context, model.PID, model.PID, bool, *int64) error { return nil }
 func (f *fakeStore) SetRating(context.Context, model.PID, model.PID, *int, *int64) (bool, error) {
 	return false, nil
 }
@@ -196,7 +198,7 @@ func TestCheckpointFlushesAll(t *testing.T) {
 	svc := New(fake)
 	ctx := context.Background()
 	svc.Progress("", "other", 1000) // buffered, different item
-	if err := svc.Checkpoint(ctx, "", "item-1", 7000); err != nil {
+	if err := svc.Checkpoint(ctx, "", "item-1", 7000, nil); err != nil {
 		t.Fatal(err)
 	}
 	// Both the checkpointed item and the previously buffered one are now persisted.
@@ -212,7 +214,7 @@ func TestCheckpointWritesImmediately(t *testing.T) {
 	const item model.PID = "item-1"
 
 	svc.Progress("", item, 5000) // buffered
-	if err := svc.Checkpoint(ctx, "", item, 7000); err != nil {
+	if err := svc.Checkpoint(ctx, "", item, 7000, nil); err != nil {
 		t.Fatal(err)
 	}
 	if fake.writes() != 1 || fake.last[string(item)] != 7000 {
@@ -225,6 +227,93 @@ func TestCheckpointWritesImmediately(t *testing.T) {
 	}
 	if fake.writes() != 1 {
 		t.Errorf("flush re-wrote a superseded tick (%d writes)", fake.writes())
+	}
+}
+
+// TestCheckpointCarriesRecordedTime pins that a checkpoint's recorded time is what
+// the overlay shows and what reaches the store, that it survives a failed flush's
+// re-queue, and that a live tick carries none.
+func TestCheckpointCarriesRecordedTime(t *testing.T) {
+	fake := newFake()
+	svc := New(fake)
+	ctx := context.Background()
+	const item model.PID = "item-1"
+	at := int64(1_700_000_000_000_000_000)
+
+	fake.fail = errors.New("database is locked")
+	if err := svc.Checkpoint(ctx, "", item, 7000, &at); err == nil {
+		t.Fatal("checkpoint should return the write error")
+	}
+	st, err := svc.State(ctx, "", item)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.PositionMS != 7000 || st.LastProgressAt != at {
+		t.Errorf("overlay = pos %d stamp %d, want the re-queued checkpoint at its recorded time %d",
+			st.PositionMS, st.LastProgressAt, at)
+	}
+
+	fake.fail = nil
+	if err := svc.Flush(ctx); err != nil {
+		t.Fatalf("recovery flush: %v", err)
+	}
+	if got := fake.asOf[string(item)]; got == nil || *got != at {
+		t.Errorf("re-queued checkpoint reached the store with as-of %v, want %d", got, at)
+	}
+
+	svc.Progress("", item, 8000)
+	if err := svc.Flush(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if fake.asOf[string(item)] != nil {
+		t.Error("a live tick reached the store with a recorded time")
+	}
+}
+
+// TestCheckpointKeepsNewerBufferedTick pins the import-while-listening case: a
+// recorded checkpoint older than a buffered live tick is written on its own and the
+// live position still lands last.
+func TestCheckpointKeepsNewerBufferedTick(t *testing.T) {
+	fake := newFake()
+	svc := New(fake)
+	ctx := context.Background()
+	const item model.PID = "item-1"
+
+	svc.Progress("", item, 9000)
+	old := int64(1_000_000_000_000_000_000)
+	if err := svc.Checkpoint(ctx, "", item, 5000, &old); err != nil {
+		t.Fatal(err)
+	}
+	if fake.writes() != 2 || fake.progress[0] != 5000 || fake.last[string(item)] != 9000 {
+		t.Fatalf("writes = %v, want the recorded 5000 first and the live 9000 last", fake.progress)
+	}
+	if fake.asOf[string(item)] != nil {
+		t.Error("the live tick reached the store with the import's recorded time")
+	}
+}
+
+// TestOverlayRaisesRecordedStampToFlushed pins the overlay's promise: an unflushed
+// recorded checkpoint older than the flushed stamp reads back with the flushed
+// stamp, which is what the store's write will keep.
+func TestOverlayRaisesRecordedStampToFlushed(t *testing.T) {
+	fake := newFake()
+	fake.flushed = map[model.PID][]model.PlayState{
+		"item-1": {{UserPID: "u-alice", ItemPID: "item-1", PositionMS: 1000, LastProgressAt: 5000}},
+	}
+	svc := New(fake)
+	ctx := context.Background()
+
+	fake.fail = errors.New("database is locked")
+	old := int64(1000)
+	if err := svc.Checkpoint(ctx, "u-alice", "item-1", 7000, &old); err == nil {
+		t.Fatal("checkpoint should return the write error")
+	}
+	got, err := svc.StatesForItems(ctx, []model.PID{"item-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got["item-1"]) != 1 || got["item-1"][0].PositionMS != 7000 || got["item-1"][0].LastProgressAt != 5000 {
+		t.Errorf("overlay = %+v, want the buffered position 7000 with the flushed stamp 5000 kept", got["item-1"])
 	}
 }
 

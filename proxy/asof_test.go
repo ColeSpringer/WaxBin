@@ -50,3 +50,37 @@ func TestAsOfWireRoundTrip(t *testing.T) {
 		t.Errorf("as-of round-trip = %v, want %d", got, stamp)
 	}
 }
+
+// TestPlaybackWritesCarryAsOf pins that the two playback payloads encode the
+// recorded time exactly as the star and rating payloads do: omitted when absent, a
+// quoted decimal string when present.
+func TestPlaybackWritesCarryAsOf(t *testing.T) {
+	const stamp int64 = 1 << 60
+	v := stamp
+	for _, tc := range []struct {
+		name          string
+		with, without any
+	}{
+		{"mark_played",
+			PlayedParams{UserPID: "u", ItemPID: "i", AsOfNS: asOfToWire(&v)},
+			PlayedParams{UserPID: "u", ItemPID: "i", AsOfNS: asOfToWire(nil)}},
+		{"set_progress",
+			ProgressParams{UserPID: "u", ItemPID: "i", PositionMS: 5, AsOfNS: asOfToWire(&v)},
+			ProgressParams{UserPID: "u", ItemPID: "i", PositionMS: 5, AsOfNS: asOfToWire(nil)}},
+	} {
+		b, err := json.Marshal(tc.without)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(b), "asOfNs") {
+			t.Errorf("%s: a nil as-of must omit asOfNs, got %s", tc.name, b)
+		}
+		b, err = json.Marshal(tc.with)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := `"asOfNs":"` + strconv.FormatInt(stamp, 10) + `"`; !strings.Contains(string(b), want) {
+			t.Errorf("%s: as-of encoding = %s, want a quoted decimal string containing %s", tc.name, b, want)
+		}
+	}
+}

@@ -26,7 +26,7 @@ func seedPlayState(t *testing.T, ctx context.Context, st *sqlite.Store, itemPID 
 	if _, err := st.SetStar(ctx, "", itemPID, true, nil); err != nil {
 		t.Fatalf("SetStar: %v", err)
 	}
-	if err := st.MarkPlayed(ctx, "", itemPID, false); err != nil {
+	if err := st.MarkPlayed(ctx, "", itemPID, false, nil); err != nil {
 		t.Fatalf("MarkPlayed: %v", err)
 	}
 }

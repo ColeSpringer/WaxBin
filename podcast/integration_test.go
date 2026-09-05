@@ -188,7 +188,7 @@ func TestPodcastEndToEnd(t *testing.T) {
 		t.Fatalf("default user: %v", err)
 	}
 	pb := playback.New(st)
-	if err := pb.MarkPlayed(ctx, user.PID, ep1.PID, true); err != nil {
+	if err := pb.MarkPlayed(ctx, user.PID, ep1.PID, true, nil); err != nil {
 		t.Fatalf("mark played: %v", err)
 	}
 

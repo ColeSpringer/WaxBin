@@ -16,15 +16,20 @@ import (
 
 // Store is the persistence the playback service needs (satisfied by store/sqlite).
 type Store interface {
-	SetProgress(ctx context.Context, userPID, itemPID model.PID, positionMS int64) error
-	MarkPlayed(ctx context.Context, userPID, itemPID model.PID, finished bool) error
+	// SetProgress and MarkPlayed are the two playback writes. Both take an optional
+	// recorded time asOf (unix ns, nil = server now) for a replayed or imported
+	// checkpoint or play: the stamps land in recorded time and never move backwards,
+	// a play's count always increments, and a play's flags obey the recorded-time
+	// ordering SetPlayed enforces. Both always write, so neither reports a change.
+	SetProgress(ctx context.Context, userPID, itemPID model.PID, positionMS int64, asOf *int64) error
+	MarkPlayed(ctx context.Context, userPID, itemPID model.PID, finished bool, asOf *int64) error
 	// SetRating/SetStar take an optional recorded time asOf (unix ns, nil = server
 	// now); when supplied the store stamps the change in recorded time and enforces
 	// recorded-time last-writer-wins, so an import or replayed offline toggle orders
 	// correctly against an out-of-band change. Both report whether the write changed
 	// anything: false means the store suppressed the change-feed delta because the
 	// call was value-identical, cleared something never set, or lost to a stale
-	// replay. SetProgress and MarkPlayed always write, so neither returns it.
+	// replay.
 	SetRating(ctx context.Context, userPID, itemPID model.PID, rating *int, asOf *int64) (bool, error)
 	SetStar(ctx context.Context, userPID, itemPID model.PID, starred bool, asOf *int64) (bool, error)
 	// SetPlayed sets played/finished directly, the undo MarkPlayed lacks, with the
@@ -63,12 +68,15 @@ type progressKey struct {
 	item model.PID
 }
 
-// tick is one buffered resume position and when it was buffered. The time is for
-// the overlay only, so an unflushed position comes back with a matching stamp
-// instead of contradicting it; the write stamps at the store's own now.
+// tick is one buffered resume position and when it was buffered, or for a
+// checkpoint carrying a recorded time, that time clamped to now. The time is for
+// the overlay only, which raises it to the flushed stamp the way the store will,
+// so an unflushed position comes back with the stamp its write is going to leave;
+// the write itself stamps at the store's own now unless asOf is set.
 type tick struct {
 	positionMS int64
 	atNS       int64
+	asOf       *int64 // recorded time of a checkpoint; nil for a live tick
 }
 
 // New builds a playback service over a store.
@@ -81,16 +89,41 @@ func New(store Store) *Service {
 // collapses to one write. The newest position for an item wins.
 func (s *Service) Progress(userPID, itemPID model.PID, positionMS int64) {
 	s.mu.Lock()
-	s.pending[progressKey{userPID, itemPID}] = tick{positionMS, time.Now().UnixNano()}
+	s.pending[progressKey{userPID, itemPID}] = tick{positionMS: positionMS, atNS: time.Now().UnixNano()}
 	s.mu.Unlock()
 }
 
 // Checkpoint persists an item's resume position immediately, usually on pause,
 // seek, or track change. It writes through the same serialized path as Flush so a
-// concurrent flush cannot overwrite the newer checkpoint with an older tick.
-func (s *Service) Checkpoint(ctx context.Context, userPID, itemPID model.PID, positionMS int64) error {
+// concurrent flush cannot overwrite the newer checkpoint with an older tick. asOf
+// (unix ns, nil = now) is the recorded time of a replayed or imported checkpoint:
+// the store stamps it in recorded time and never moves the stamp backwards, while
+// the position itself always applies (see the store's SetProgress).
+//
+// A recorded checkpoint older than a tick already buffered for the item (an import
+// landing while the same user is listening) does not replace it, or the live
+// position would be lost: it is written on its own, ahead of the flush that lands
+// the buffered one. A failure on that path is returned without a re-queue, since
+// the checkpoint never entered the buffer.
+func (s *Service) Checkpoint(ctx context.Context, userPID, itemPID model.PID, positionMS int64, asOf *int64) error {
+	now := time.Now().UnixNano()
+	at := now
+	if asOf != nil && *asOf != 0 { // 0 is the wire's not-provided sentinel, as in the store
+		at = min(*asOf, now)
+	}
+	key := progressKey{userPID, itemPID}
 	s.mu.Lock()
-	s.pending[progressKey{userPID, itemPID}] = tick{positionMS, time.Now().UnixNano()}
+	if prev, ok := s.pending[key]; ok && prev.atNS > at {
+		s.mu.Unlock()
+		s.flushMu.Lock()
+		err := s.store.SetProgress(ctx, key.user, key.item, positionMS, asOf)
+		s.flushMu.Unlock()
+		if err != nil {
+			return err
+		}
+		return s.flush(ctx)
+	}
+	s.pending[key] = tick{positionMS, at, asOf}
 	s.mu.Unlock()
 	return s.flush(ctx)
 }
@@ -124,7 +157,7 @@ func (s *Service) flush(ctx context.Context) error {
 
 	var firstErr error
 	for k, t := range batch {
-		if err := s.store.SetProgress(ctx, k.user, k.item, t.positionMS); err != nil {
+		if err := s.store.SetProgress(ctx, k.user, k.item, t.positionMS, t.asOf); err != nil {
 			if firstErr == nil {
 				firstErr = err
 			}
@@ -141,9 +174,13 @@ func (s *Service) flush(ctx context.Context) error {
 	return firstErr
 }
 
-// MarkPlayed records a play (and optionally that it finished).
-func (s *Service) MarkPlayed(ctx context.Context, userPID, itemPID model.PID, finished bool) error {
-	return s.store.MarkPlayed(ctx, userPID, itemPID, finished)
+// MarkPlayed records a play (and optionally that it finished). asOf (unix ns, nil
+// = now) is the recorded time of a replayed or imported play: the count always
+// increments, the stamps never move backwards, and the flags obey recorded-time
+// ordering against a later SetPlayed, so history fills in without rewriting the
+// present. A live play passes nil.
+func (s *Service) MarkPlayed(ctx context.Context, userPID, itemPID model.PID, finished bool, asOf *int64) error {
+	return s.store.MarkPlayed(ctx, userPID, itemPID, finished, asOf)
 }
 
 // SetRating sets (0..100) or clears (nil) a user's rating for an item. asOf (unix
@@ -185,7 +222,7 @@ func (s *Service) State(ctx context.Context, userPID, itemPID model.PID) (*model
 	}
 	s.mu.Lock()
 	if t, ok := s.pending[progressKey{userPID, itemPID}]; ok {
-		st.PositionMS, st.LastProgressAt = t.positionMS, t.atNS
+		st.PositionMS, st.LastProgressAt = t.positionMS, max(st.LastProgressAt, t.atNS)
 	}
 	s.mu.Unlock()
 	return st, nil
@@ -254,7 +291,7 @@ func (s *Service) StatesForItems(ctx context.Context, itemPIDs []model.PID) (map
 		hit := false
 		for i := range list {
 			if list[i].UserPID == k.user {
-				list[i].PositionMS, list[i].LastProgressAt = t.positionMS, t.atNS
+				list[i].PositionMS, list[i].LastProgressAt = t.positionMS, max(list[i].LastProgressAt, t.atNS)
 				hit = true
 				break
 			}

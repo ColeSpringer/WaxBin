@@ -387,7 +387,7 @@ func TestPlaybackAndChangeBus(t *testing.T) {
 	if _, err := pb.SetRating(ctx, "", item, &r, nil); err != nil {
 		t.Fatalf("rate: %v", err)
 	}
-	if err := pb.MarkPlayed(ctx, "", item, true); err != nil {
+	if err := pb.MarkPlayed(ctx, "", item, true, nil); err != nil {
 		t.Fatalf("played: %v", err)
 	}
 
@@ -481,7 +481,7 @@ func TestStatsOnFacet(t *testing.T) {
 	}
 	pb := lib.Playback()
 	for i := 0; i < 3; i++ {
-		if err := pb.MarkPlayed(ctx, "", items[0].PID, i == 2); err != nil {
+		if err := pb.MarkPlayed(ctx, "", items[0].PID, i == 2, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -1740,7 +1740,7 @@ func TestEndToEndAudiobook(t *testing.T) {
 	}
 
 	// Chapter-level resume: a recorded position resolves to a chapter.
-	if err := lib.Playback().Checkpoint(ctx, "", bookPID, 10); err != nil {
+	if err := lib.Playback().Checkpoint(ctx, "", bookPID, 10, nil); err != nil {
 		t.Fatalf("checkpoint: %v", err)
 	}
 	st, ch, err := lib.BookResume(ctx, "", bookPID)

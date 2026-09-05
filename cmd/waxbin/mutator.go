@@ -334,18 +334,18 @@ func (m *mutator) SetPlayed(ctx context.Context, userPID, itemPID model.PID,
 	return m.lib.Playback().SetPlayed(ctx, userPID, itemPID, played, finished, playCount, asOf)
 }
 
-func (m *mutator) MarkPlayed(ctx context.Context, userPID, itemPID model.PID, finished bool) error {
+func (m *mutator) MarkPlayed(ctx context.Context, userPID, itemPID model.PID, finished bool, asOf *int64) error {
 	if m.px != nil {
-		return m.px.MarkPlayed(ctx, userPID, itemPID, finished)
+		return m.px.MarkPlayed(ctx, userPID, itemPID, finished, asOf)
 	}
-	return m.lib.Playback().MarkPlayed(ctx, userPID, itemPID, finished)
+	return m.lib.Playback().MarkPlayed(ctx, userPID, itemPID, finished, asOf)
 }
 
-func (m *mutator) Checkpoint(ctx context.Context, userPID, itemPID model.PID, positionMS int64) error {
+func (m *mutator) Checkpoint(ctx context.Context, userPID, itemPID model.PID, positionMS int64, asOf *int64) error {
 	if m.px != nil {
-		return m.px.SetProgress(ctx, userPID, itemPID, positionMS)
+		return m.px.SetProgress(ctx, userPID, itemPID, positionMS, asOf)
 	}
-	return m.lib.Playback().Checkpoint(ctx, userPID, itemPID, positionMS)
+	return m.lib.Playback().Checkpoint(ctx, userPID, itemPID, positionMS, asOf)
 }
 
 func (m *mutator) PlayState(ctx context.Context, userPID, itemPID model.PID) (*model.PlayState, error) {

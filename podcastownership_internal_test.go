@@ -223,7 +223,7 @@ func TestUnfetchStillLeavesTheEpisodeRemote(t *testing.T) {
 	lib, _, _, episodePID := ownershipFixture(t)
 	ctx := context.Background()
 
-	if err := lib.Playback().MarkPlayed(ctx, "", episodePID, true); err != nil {
+	if err := lib.Playback().MarkPlayed(ctx, "", episodePID, true, nil); err != nil {
 		t.Fatalf("mark played: %v", err)
 	}
 	before, err := lib.Podcasts().Episode(ctx, episodePID)

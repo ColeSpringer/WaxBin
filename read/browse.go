@@ -30,9 +30,10 @@ const (
 	ListRecentEpisodes DiscoveryList = "recent-episodes"
 	// Started and not finished, most recently progressed first (per user). The
 	// "where was I" list: membership is a resume position on an unfinished item,
-	// ordering is the last playback write, so a checkpoint counts and a star does
-	// not. Spans every kind, since a half-read audiobook belongs here as much as a
-	// half-heard episode.
+	// ordering is the latest playback time, so a checkpoint counts and a star does
+	// not, and a replay carrying an older recorded time does not move an item. Spans
+	// every kind, since a half-read audiobook belongs here as much as a half-heard
+	// episode.
 	//
 	// Membership is only as good as the client's reset or finish call. Nothing here
 	// clears a resume position: MarkPlayed leaves position_ms alone and never

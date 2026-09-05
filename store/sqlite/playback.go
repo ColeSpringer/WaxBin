@@ -14,40 +14,62 @@ import (
 // is called on checkpoints, not every tick. It stamps last_progress_at, which is
 // what puts a checkpointed-but-never-played item on the in-progress list, and it
 // never touches the star/rating change stamps.
-func (s *Store) SetProgress(ctx context.Context, userPID, itemPID model.PID, positionMS int64) error {
+//
+// asOf (unix nanoseconds, nil = server now) is the recorded time of the checkpoint,
+// for a replayed or imported position. The position itself always applies: the
+// engine does not order resume points (a further-but-older replay is the right
+// answer for an audiobook), so the caller holding the recorded times decides what
+// to send, as it did before the stamp existed. What the engine guarantees is that
+// the stamp never moves backwards, so an old position cannot put its item at the
+// head of the in-progress list.
+func (s *Store) SetProgress(ctx context.Context, userPID, itemPID model.PID, positionMS int64, asOf *int64) error {
 	_, err := s.playStateWrite(ctx, "store.SetProgress", userPID, itemPID, func(ctx context.Context, tx *sql.Tx, userID, itemID, now int64) (bool, error) {
 		_, err := tx.ExecContext(ctx,
 			`INSERT INTO play_state(user_id, item_id, position_ms, last_progress_at, updated_at) VALUES (?,?,?,?,?)
 			 ON CONFLICT(user_id, item_id) DO UPDATE SET position_ms=excluded.position_ms,
-			   last_progress_at=excluded.last_progress_at, updated_at=excluded.updated_at`,
-			userID, itemID, positionMS, now, now)
+			   last_progress_at=MAX(COALESCE(last_progress_at, 0), excluded.last_progress_at),
+			   updated_at=excluded.updated_at`,
+			userID, itemID, positionMS, recencyFor(asOf, now), now)
 		return true, err
 	})
 	return err
 }
 
-// MarkPlayed increments a user's play count for an item, sets it played (and
-// finished when finished is true), and stamps last_played_at, last_progress_at
-// and played_changed_at. It never touches the star/rating change stamps. It means
-// "a play happened, now", so it takes no asOf; replaying a recorded play is
-// SetPlayed's job.
+// MarkPlayed records a play: it increments a user's play count for an item, sets
+// it played (and finished when finished is true), and stamps last_played_at,
+// last_progress_at and played_changed_at. It never touches the star/rating change
+// stamps.
 //
-// It stamps played_changed_at because a stamp that orders only one of the two
-// writers orders nothing. Monotonically, so a SetPlayed carrying a future-skewed
-// asOf cannot be regressed by the next play; the COALESCE is required because
-// SQLite's MAX() returns NULL if any argument is NULL, which would wipe the stamp
-// on an item's first play.
-func (s *Store) MarkPlayed(ctx context.Context, userPID, itemPID model.PID, finished bool) error {
+// asOf (unix nanoseconds, nil = server now) is the recorded time of the play, for
+// a replayed offline play or imported listening history; a live play passes nil.
+// A replay fills in history without rewriting the present: the count always
+// increments, none of the three stamps moves backwards (an old play cannot push
+// its item past a later one on the recently-played or in-progress lists), and the
+// flags follow SetPlayed's recorded-time ordering, so a play recorded before an
+// un-mark that came later does not resurrect the state the user undid. That case
+// leaves the cleared flags beside a raised count, the state an un-mark with a kept
+// count leaves on purpose. Unlike a SetPlayed replay, a play loses only to a flag
+// change recorded strictly after it: a same-time play has no duplicate to guard
+// against (the count moves either way), and a caller composing a clear and a play
+// at one recorded time means the play to land. The COALESCE is required because
+// SQLite's MAX() returns NULL if any argument is NULL, which would wipe a stamp on
+// an item's first play; the CASE needs none, since a NULL played_changed_at
+// compares as neither newer nor older and falls through to the play.
+func (s *Store) MarkPlayed(ctx context.Context, userPID, itemPID model.PID, finished bool, asOf *int64) error {
 	_, err := s.playStateWrite(ctx, "store.MarkPlayed", userPID, itemPID, func(ctx context.Context, tx *sql.Tx, userID, itemID, now int64) (bool, error) {
+		recorded, _ := asOfRecorded(asOf)
 		_, err := tx.ExecContext(ctx,
 			`INSERT INTO play_state(user_id, item_id, played, finished, play_count, last_played_at, last_progress_at, played_changed_at, updated_at)
-			 VALUES (?,?,1,?,1,?,?,?,?)
+			 VALUES (?1, ?2, 1, ?3, 1, ?4, ?4, ?5, ?6)
 			 ON CONFLICT(user_id, item_id) DO UPDATE SET
-			   played=1, finished=MAX(finished, excluded.finished), play_count=play_count+1,
-			   last_played_at=excluded.last_played_at, last_progress_at=excluded.last_progress_at,
-			   played_changed_at=MAX(COALESCE(played_changed_at, 0), excluded.played_changed_at),
-			   updated_at=excluded.updated_at`,
-			userID, itemID, boolInt(finished), now, now, now, now)
+			   played = CASE WHEN ?7 <> 0 AND played_changed_at > ?7 THEN played ELSE 1 END,
+			   finished = CASE WHEN ?7 <> 0 AND played_changed_at > ?7 THEN finished ELSE MAX(finished, excluded.finished) END,
+			   play_count = play_count + 1,
+			   last_played_at = MAX(COALESCE(last_played_at, 0), excluded.last_played_at),
+			   last_progress_at = MAX(COALESCE(last_progress_at, 0), excluded.last_progress_at),
+			   played_changed_at = MAX(COALESCE(played_changed_at, 0), excluded.played_changed_at),
+			   updated_at = excluded.updated_at`,
+			userID, itemID, boolInt(finished), recencyFor(asOf, now), stampFor(asOf, now), now, recorded)
 		return true, err
 	})
 	return err
@@ -78,6 +100,14 @@ func stampFor(asOf *int64, now int64) int64 {
 	}
 	return now
 }
+
+// recencyFor is the stamp a playback write records on the two recency columns,
+// last_played_at and last_progress_at: the recorded time, clamped to now. A play or
+// checkpoint cannot have happened after the write reporting it, and a future-skewed
+// replay must not pin an item at the head of a recency list until the wall clock
+// catches up. played_changed_at keeps the raw stamp (stampFor) so later replays keep
+// ordering against it.
+func recencyFor(asOf *int64, now int64) int64 { return min(stampFor(asOf, now), now) }
 
 // staleReplay reports whether a value change carrying a recorded time asOf loses to
 // the change already recorded at stored: a replay whose recorded time is not newer
@@ -329,11 +359,10 @@ func nullableInt64(v sql.NullInt64) any {
 // that made it.
 //
 // Only the star and rating mutations expose it, and the asymmetry is deliberate.
-// SetProgress and MarkPlayed always write (an unconditional upsert, and a play_count
-// increment), so they hardcode changed=true and discard it here; returning a
-// constant would invite a branch no call can ever take. A caller that wants
-// applied-or-skipped for a checkpoint has the position stamp it just sent to compare
-// against, and one gating a play already reads the state first.
+// SetProgress and MarkPlayed always write (the position lands unconditionally, and
+// the count increments even when a stale play leaves the flags alone), so they
+// hardcode changed=true and discard it here; returning a constant would invite a
+// branch no call can ever take.
 func (s *Store) playStateWrite(ctx context.Context, op string, userPID, itemPID model.PID, mut func(context.Context, *sql.Tx, int64, int64, int64) (bool, error)) (bool, error) {
 	var changed bool
 	err := s.writeTx(ctx, func(tx *sql.Tx) error {

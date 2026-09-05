@@ -95,13 +95,10 @@ func newStateCmd(g *globals) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			// --as-of only reaches the setters that write a change stamp. --played and
-			// --finished go through MarkPlayed, which carries no recorded time, so
-			// --as-of alongside only those would be silently ignored.
-			if flags.Changed("as-of") && !star && !unstar && !unplayed && !unfinished &&
-				!resetCount && !flags.Changed("rating") {
-				return waxerr.New(waxerr.CodeInvalid, "cli.state",
-					"--as-of applies only to --rating, --star, --unstar, --unplayed, --unfinished, or --reset-count")
+			// --as-of records a time for a change, so it needs a change to record.
+			if flags.Changed("as-of") && !star && !unstar && !played && !finished && !unplayed &&
+				!unfinished && !resetCount && !flags.Changed("rating") && !flags.Changed("position") {
+				return waxerr.New(waxerr.CodeInvalid, "cli.state", "--as-of needs a change to record")
 			}
 
 			m, _, err := g.openMutator(cmd)
@@ -164,12 +161,12 @@ func newStateCmd(g *globals) *cobra.Command {
 				}
 			}
 			if played || finished {
-				if err := m.MarkPlayed(ctx(cmd), uPID, item, finished); err != nil {
+				if err := m.MarkPlayed(ctx(cmd), uPID, item, finished, asOfNS); err != nil {
 					return err
 				}
 			}
 			if flags.Changed("position") {
-				if err := m.Checkpoint(ctx(cmd), uPID, item, position); err != nil {
+				if err := m.Checkpoint(ctx(cmd), uPID, item, position, asOfNS); err != nil {
 					return err
 				}
 			}
@@ -197,7 +194,7 @@ func newStateCmd(g *globals) *cobra.Command {
 	pf.BoolVar(&resetCount, "reset-count", false, "zero the play count, clearing played and finished with it")
 	pf.Int64Var(&position, "position", 0, "set resume position in milliseconds")
 	pf.StringVar(&asOf, "as-of", "",
-		"record the rating/star/unplayed/unfinished/reset-count change at this time (unix ns or RFC3339); default is now")
+		"record every change this command makes at this time (unix ns or RFC3339); default is now")
 	// star and unstar are contradictory. Rejecting the pair avoids the order-dependent
 	// outcome of applying both, which a shared --as-of makes worse: the second flip
 	// carries the same recorded time as the first and loses the stale-replay comparison.

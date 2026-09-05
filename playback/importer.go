@@ -17,10 +17,15 @@ import (
 // asOf argument (the address of the changed-at field), and the engine then enforces
 // recorded-time last-writer-wins: a record older than local state is skipped. The
 // comparison is the engine's once the adapter supplies the recorded time, so this
-// seam no longer holds the replay guard itself. The engine treats a 0 stamp (the
-// seam's "unknown" value) as no recorded time, stamping at server-now and ordering
-// against nothing, so an adapter can pass every record's stamp straight through
-// without special-casing the unknown ones.
+// seam no longer holds the replay guard itself. The played pair takes one route or
+// the other: a record that says the item was played goes through MarkPlayed with
+// LastPlayedNS as asOf (the play lands in history in order, and the flags with it),
+// and only a record that says it was not goes through SetPlayed with PlayedChangedNS.
+// PositionMS goes through Checkpoint with LastPlayedNS, so an imported resume point
+// sits where its time puts it on the in-progress list. The engine treats a 0 stamp
+// (the seam's "unknown" value) as no recorded time, stamping at server-now and
+// ordering against nothing, so an adapter can pass every record's stamp straight
+// through without special-casing the unknown ones.
 type PlayStateRecord struct {
 	UserPID    model.PID
 	ItemPID    model.PID

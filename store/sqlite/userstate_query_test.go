@@ -63,14 +63,14 @@ func TestQueryUserStateFields(t *testing.T) {
 		t.Fatal(err)
 	}
 	for i := 0; i < 2; i++ {
-		if err := st.MarkPlayed(ctx, "", ids["Alpha"], true); err != nil {
+		if err := st.MarkPlayed(ctx, "", ids["Alpha"], true, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
 	if _, err := st.SetRating(ctx, "", ids["Bravo"], &r20, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.SetProgress(ctx, "", ids["Charlie"], 30_000); err != nil {
+	if err := st.SetProgress(ctx, "", ids["Charlie"], 30_000, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -110,7 +110,7 @@ func TestQueryUserStateLeftJoinVisibility(t *testing.T) {
 	ctx := context.Background()
 
 	// Only Alpha gets a play_state row; Bravo and Charlie have none at all.
-	if err := st.MarkPlayed(ctx, "", ids["Alpha"], false); err != nil {
+	if err := st.MarkPlayed(ctx, "", ids["Alpha"], false, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -148,7 +148,7 @@ func TestQueryUserStateCrossUserIsolation(t *testing.T) {
 
 	// Alpha is played + rated for the DEFAULT user only.
 	r90 := 90
-	if err := st.MarkPlayed(ctx, "", ids["Alpha"], false); err != nil {
+	if err := st.MarkPlayed(ctx, "", ids["Alpha"], false, nil); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := st.SetRating(ctx, "", ids["Alpha"], &r90, nil); err != nil {
@@ -194,10 +194,10 @@ func TestPositionField(t *testing.T) {
 
 	// Alpha is 60s in for the default user. Bravo is played but never seeked, so it
 	// has a play_state row with position 0. Charlie has no row at all.
-	if err := st.SetProgress(ctx, "", ids["Alpha"], 60_000); err != nil {
+	if err := st.SetProgress(ctx, "", ids["Alpha"], 60_000, nil); err != nil {
 		t.Fatalf("set progress: %v", err)
 	}
-	if err := st.MarkPlayed(ctx, "", ids["Bravo"], false); err != nil {
+	if err := st.MarkPlayed(ctx, "", ids["Bravo"], false, nil); err != nil {
 		t.Fatalf("mark played: %v", err)
 	}
 
@@ -234,10 +234,10 @@ func TestPositionField(t *testing.T) {
 func TestCountItemsUserState(t *testing.T) {
 	st, ids := userStateFixture(t)
 	ctx := context.Background()
-	if err := st.MarkPlayed(ctx, "", ids["Alpha"], false); err != nil {
+	if err := st.MarkPlayed(ctx, "", ids["Alpha"], false, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.MarkPlayed(ctx, "", ids["Bravo"], false); err != nil {
+	if err := st.MarkPlayed(ctx, "", ids["Bravo"], false, nil); err != nil {
 		t.Fatal(err)
 	}
 	n, err := st.CountItems(ctx, query.New(query.EntityItems).Where("play_count", query.OpGt, 0).Build(), "")
@@ -263,7 +263,7 @@ func TestQueryPageUserState(t *testing.T) {
 	st, ids := userStateFixture(t)
 	ctx := context.Background()
 	for _, title := range []string{"Alpha", "Charlie"} {
-		if err := st.MarkPlayed(ctx, "", ids[title], false); err != nil {
+		if err := st.MarkPlayed(ctx, "", ids[title], false, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -419,7 +419,7 @@ func TestFacetUserState(t *testing.T) {
 	ctx := context.Background()
 	a := putTrack(t, st, lib.ID, trackSpec{path: "/l/a.flac", essence: "ea", content: "ca", title: "A", artist: "X", album: "Al", genre: "Rock"})
 	putTrack(t, st, lib.ID, trackSpec{path: "/l/b.flac", essence: "eb", content: "cb", title: "B", artist: "Y", album: "Bl", genre: "Jazz"})
-	if err := st.MarkPlayed(ctx, "", a.ItemPID, false); err != nil {
+	if err := st.MarkPlayed(ctx, "", a.ItemPID, false, nil); err != nil {
 		t.Fatal(err)
 	}
 

@@ -725,7 +725,7 @@ func TestStatsAndBrowseIncludeBooks(t *testing.T) {
 	})
 
 	// Stats acknowledges the book and a played book shows its author, not a blank.
-	if err := st.MarkPlayed(ctx, "", res.ItemPID, true); err != nil {
+	if err := st.MarkPlayed(ctx, "", res.ItemPID, true, nil); err != nil {
 		t.Fatalf("mark played: %v", err)
 	}
 	stats, err := st.Stats(ctx, "", 10)

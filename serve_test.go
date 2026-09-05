@@ -356,6 +356,37 @@ func TestServeProxiedEntityStar(t *testing.T) {
 	}
 }
 
+// TestServeProxiedRecordedTime drives the two playback writes' as-of stamp over the
+// wire: a recorded play time lands on last_played_at and a recorded checkpoint on
+// last_progress_at, which is what the protocol bump to 18 protects.
+func TestServeProxiedRecordedTime(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	sock := testsock.Path(t)
+	writeFile(t, filepath.Join(root, "song.mp3"), testaudio.BuildMP3("Original", "Old Artist", "Album", 1))
+
+	lib := openServed(t, ctx, db, root, sock)
+	pid := itemPIDByTitle(t, ctx, lib, "Original")
+	c := dialWhenReady(t, sock)
+
+	played := int64(1_600_000_000_000_000_000)
+	if err := c.MarkPlayed(ctx, "", pid, true, &played); err != nil {
+		t.Fatalf("proxied mark_played: %v", err)
+	}
+	progress := played + 1_000_000_000
+	if err := c.SetProgress(ctx, "", pid, 5000, &progress); err != nil {
+		t.Fatalf("proxied set_progress: %v", err)
+	}
+	st, err := c.PlayState(ctx, "", pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.PlayCount != 1 || !st.Finished || st.LastPlayedAt != played || st.PositionMS != 5000 || st.LastProgressAt != progress {
+		t.Errorf("state over the wire = %+v, want the play at %d and the checkpoint at %d", st, played, progress)
+	}
+}
+
 // TestServeProxiedChangedBool drives the changed bool of the star/rating methods and
 // set_played over the wire: a real flip reports true, an immediate value-identical
 // repeat reports false, for both the item and the entity twins. It also pins why the

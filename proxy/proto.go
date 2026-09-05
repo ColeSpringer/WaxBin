@@ -163,7 +163,12 @@ import (
 // own" for a call that did change the pin. That is an affirmatively false statement about
 // a mutation, which is the quiet wrong answer the gate exists to turn into a clean
 // absence.
-const ProtocolVersion = 17
+//
+// Version 18 added the PlayedParams/ProgressParams as-of stamp, for the reason
+// version 4 gave: a version-17 server drops the field and lands an imported play or
+// resume position at server-now, so what sorts by recency after an import is the
+// import itself, and nothing in the response says so.
+const ProtocolVersion = 18
 
 // Method names for the proxied operations: the fast request/response catalog
 // mutations, the reads a mutating command needs for its confirmation output, the
@@ -780,11 +785,13 @@ func AsOf(ns int64) *int64 {
 	return &ns
 }
 
-// PlayedParams is the mark_played request payload.
+// PlayedParams is the mark_played request payload. AsOfNS is the optional
+// recorded-time stamp of the play (see asOfToWire).
 type PlayedParams struct {
 	UserPID  string `json:"userPid"`
 	ItemPID  string `json:"itemPid"`
 	Finished bool   `json:"finished"`
+	AsOfNS   int64  `json:"asOfNs,string,omitempty"`
 }
 
 // SetPlayedParams is the set_played request payload: played/finished set directly
@@ -805,6 +812,7 @@ type ProgressParams struct {
 	UserPID    string `json:"userPid"`
 	ItemPID    string `json:"itemPid"`
 	PositionMS int64  `json:"positionMs"`
+	AsOfNS     int64  `json:"asOfNs,string,omitempty"` // optional recorded time (see asOfToWire)
 }
 
 // StateParams is the play_state request payload.

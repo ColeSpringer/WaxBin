@@ -265,7 +265,7 @@ func TestPodcastPIDField(t *testing.T) {
 	if err != nil || len(eps) != 3 {
 		t.Fatalf("episodes = %v (err %v), want 3", eps, err)
 	}
-	if err := st.MarkPlayed(ctx, "", eps[0].PID, true); err != nil {
+	if err := st.MarkPlayed(ctx, "", eps[0].PID, true, nil); err != nil {
 		t.Fatalf("mark played: %v", err)
 	}
 	if n := unplayed(); n != 2 {
