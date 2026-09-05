@@ -385,6 +385,23 @@ func TestServeProxiedRecordedTime(t *testing.T) {
 	if st.PlayCount != 1 || !st.Finished || st.LastPlayedAt != played || st.PositionMS != 5000 || st.LastProgressAt != progress {
 		t.Errorf("state over the wire = %+v, want the play at %d and the checkpoint at %d", st, played, progress)
 	}
+
+	// The listening log takes the same recorded time: a session logged at the play's
+	// start lands in that year's review, not the current one.
+	sess, err := c.RecordSession(ctx, "", pid, "test", played, 0, 240000)
+	if err != nil {
+		t.Fatalf("proxied record_session: %v", err)
+	}
+	if sess == "" {
+		t.Fatal("proxied record_session returned no session pid")
+	}
+	yr, err := lib.YearInReview(ctx, "", time.Unix(0, played).UTC().Year(), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if yr.Sessions != 1 || yr.MinutesPlayed != 4 {
+		t.Errorf("year in review over the wire = %d sessions, %d minutes; want 1 session, 4 minutes", yr.Sessions, yr.MinutesPlayed)
+	}
 }
 
 // TestServeProxiedChangedBool drives the changed bool of the star/rating methods and

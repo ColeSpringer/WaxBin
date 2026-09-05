@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	"github.com/colespringer/waxbin/config"
 	"github.com/colespringer/waxbin/internal/testaudio"
 	"github.com/colespringer/waxbin/model"
+	"github.com/colespringer/waxbin/podcast"
 	"github.com/colespringer/waxbin/port"
 	"github.com/colespringer/waxbin/query"
 	"github.com/colespringer/waxbin/read"
@@ -1436,14 +1438,18 @@ func TestLogicalExport(t *testing.T) {
 	if err := lib.SetSecret(ctx, "musicbrainz", "token-xyz"); err != nil {
 		t.Fatalf("secret: %v", err)
 	}
+	const listened = int64(1_600_000_000_000_000_000)
+	if _, err := lib.Playback().RecordSession(ctx, "", items[0].PID, "lastfm", listened, 0, 240000); err != nil {
+		t.Fatalf("record session: %v", err)
+	}
 
 	var buf bytes.Buffer
 	man, err := lib.Export(ctx, &buf)
 	if err != nil {
 		t.Fatalf("export: %v", err)
 	}
-	if man.Format != port.ExportFormat || man.Items != 1 || man.PlayStates < 1 {
-		t.Fatalf("manifest = %+v, want 1 item / >=1 play state", man)
+	if man.Format != port.ExportFormat || man.Items != 1 || man.PlayStates < 1 || man.PlaySessions != 1 {
+		t.Fatalf("manifest = %+v, want 1 item / >=1 play state / 1 play session", man)
 	}
 	if strings.Contains(buf.String(), "token-xyz") {
 		t.Fatal("logical export must never contain secrets")
@@ -1451,7 +1457,7 @@ func TestLogicalExport(t *testing.T) {
 	// Unix-ns timestamps ride the export as decimal strings (export version 2):
 	// they exceed double precision, so bare numbers would corrupt in loose
 	// parsers. Pin the quoting on the raw document.
-	for _, quoted := range []string{`"createdAt": "`, `"starredChangedNs": "`, `"ratingChangedNs": "`} {
+	for _, quoted := range []string{`"createdAt": "`, `"starredChangedNs": "`, `"ratingChangedNs": "`, `"startedAtNs": "`} {
 		if !strings.Contains(buf.String(), quoted) {
 			t.Errorf("export lacks %s...: ns timestamps must encode as strings", quoted)
 		}
@@ -1471,6 +1477,76 @@ func TestLogicalExport(t *testing.T) {
 	// order the values against state it already holds.
 	if ps := snap.PlayState[0]; ps.StarredChangedNS == 0 || ps.RatingChangedNS == 0 {
 		t.Fatalf("exported play state missing change stamps: %+v", ps)
+	}
+	// The listening log rides along at its recorded times, so a household moving on
+	// takes its history with it the way it arrived.
+	if len(snap.PlaySessions) != 1 {
+		t.Fatalf("exported sessions = %+v, want the one recorded", snap.PlaySessions)
+	}
+	if s := snap.PlaySessions[0]; s.ItemPID != string(items[0].PID) || s.UserPID == "" || s.StartedAtNS != listened ||
+		s.EndedAtNS != listened+240_000_000_000 || s.MsPlayed != 240000 || s.Client != "lastfm" {
+		t.Fatalf("exported session = %+v, want the recorded values under the item and user pids", s)
+	}
+}
+
+// TestManifestMatchesExport pins Manifest to Export: the header answered from count
+// queries carries exactly what the written document's does, with a podcast library,
+// an episode, and play state and a session on that episode all present to be
+// filtered out.
+func TestManifestMatchesExport(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	writeFile(t, filepath.Join(root, "a.mp3"), testaudio.BuildMP3("Song", "Artist", "Album", 1))
+	lib, err := waxbin.Open(ctx, waxbin.Options{
+		DBPath:   db,
+		Roots:    []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}},
+		Podcasts: config.PodcastConfig{Dir: filepath.Join(t.TempDir(), "podcasts")},
+	})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = lib.Close() })
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	show, err := lib.Podcasts().AddManual(ctx, "Show", podcast.ManualOptions{})
+	if err != nil {
+		t.Fatalf("add show: %v", err)
+	}
+	epRes, err := lib.Podcasts().AddEpisode(ctx, show.PID, model.FeedEpisode{Title: "Ep", GUID: "g1"}, true)
+	if err != nil {
+		t.Fatalf("add episode: %v", err)
+	}
+	src := filepath.Join(t.TempDir(), "ep.mp3")
+	writeFile(t, src, testaudio.BuildMP3("Ep", "Host", "Show", 1))
+	if _, err := lib.Podcasts().ImportEpisodeFile(ctx, epRes.EpisodePID, src, false); err != nil {
+		t.Fatalf("import episode file: %v", err)
+	}
+	for _, pid := range []model.PID{itemPIDByTitle(t, ctx, lib, "Song"), epRes.EpisodePID} {
+		if _, err := lib.Playback().SetStar(ctx, "", pid, true, nil); err != nil {
+			t.Fatalf("star: %v", err)
+		}
+		if _, err := lib.Playback().RecordSession(ctx, "", pid, "test", 1_600_000_000_000_000_000, 0, 1000); err != nil {
+			t.Fatalf("record session: %v", err)
+		}
+	}
+
+	man, err := lib.Manifest(ctx)
+	if err != nil {
+		t.Fatalf("manifest: %v", err)
+	}
+	full, err := lib.Export(ctx, io.Discard)
+	if err != nil {
+		t.Fatalf("export: %v", err)
+	}
+	if man.Format != full.Format || man.Version != full.Version || man.SchemaVersion != full.SchemaVersion ||
+		man.Libraries != full.Libraries || man.Items != full.Items ||
+		man.PlayStates != full.PlayStates || man.PlaySessions != full.PlaySessions {
+		t.Fatalf("manifest = %+v, want the export's header %+v", man, full)
+	}
+	if man.Libraries != 1 || man.Items != 1 || man.PlayStates != 1 || man.PlaySessions != 1 {
+		t.Errorf("manifest = %+v, want the podcast side filtered out of every count", man)
 	}
 }
 

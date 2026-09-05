@@ -635,6 +635,21 @@ func (c *Client) SetProgress(ctx context.Context, userPID, itemPID model.PID, po
 	}, nil)
 }
 
+// RecordSession proxies logging a finished session at its recorded times (unix ns; an
+// endedAt of 0 is the start plus the play time), returning the session pid. See
+// playback.Service.RecordSession.
+func (c *Client) RecordSession(ctx context.Context, userPID, itemPID model.PID, client string, startedAt, endedAt, msPlayed int64) (model.PID, error) {
+	var res RecordSessionResult
+	err := c.call(ctx, MethodRecordSession, RecordSessionParams{
+		UserPID: string(userPID), ItemPID: string(itemPID), Client: client,
+		StartedAtNS: startedAt, EndedAtNS: endedAt, MsPlayed: msPlayed,
+	}, &res)
+	if err != nil {
+		return "", err
+	}
+	return model.PID(res.SessionPID), nil
+}
+
 // PlayState proxies reading a user's play state for an item.
 func (c *Client) PlayState(ctx context.Context, userPID, itemPID model.PID) (*model.PlayState, error) {
 	var st model.PlayState

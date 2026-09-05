@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/colespringer/waxbin/model"
+	"github.com/colespringer/waxbin/read"
 	"github.com/colespringer/waxbin/waxerr"
 )
 
@@ -124,6 +125,96 @@ func (s *Store) AllPlayStates(ctx context.Context) ([]model.PlayState, error) {
 		out = append(out, ps)
 	}
 	return out, rows.Err()
+}
+
+// ExportCounts counts what Export would write, under its filters (no podcast
+// library, no episodes, and no play state or session on one), in one statement so
+// the four figures come from one snapshot. It is the manifest's source when the
+// body is not wanted.
+func (s *Store) ExportCounts(ctx context.Context) (read.ExportCounts, error) {
+	const op = "store.ExportCounts"
+	var c read.ExportCounts
+	err := s.read.QueryRowContext(ctx, `
+		SELECT (SELECT COUNT(*) FROM library WHERE mode != ?),
+		       (SELECT COUNT(*) FROM playable_item WHERE kind != ?),
+		       (SELECT COUNT(*) FROM play_state ps JOIN playable_item pi ON pi.id = ps.item_id WHERE pi.kind != ?),
+		       (SELECT COUNT(*) FROM play_session ps JOIN playable_item pi ON pi.id = ps.item_id WHERE pi.kind != ?)`,
+		string(model.ModePodcast), string(model.KindEpisode), string(model.KindEpisode), string(model.KindEpisode)).
+		Scan(&c.Libraries, &c.Items, &c.PlayStates, &c.PlaySessions)
+	if err != nil {
+		return read.ExportCounts{}, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	return c, nil
+}
+
+// ExportSessions streams the listening log for the export from one read snapshot.
+// counted receives, before any row, the number of sessions keep admits, so the
+// manifest can be written ahead of them; each admitted session then arrives in
+// export order (user, start, pid), an open one with a zero EndedAt. The count and
+// the rows come from one read transaction, so they cannot disagree, and the log is
+// never held whole: it is the one exported table that grows with listening rather
+// than with the catalog.
+func (s *Store) ExportSessions(ctx context.Context, keep func(itemPID model.PID) bool, counted func(n int) error, each func(model.PlaySession) error) error {
+	const op = "store.ExportSessions"
+	conn, err := s.read.Conn(ctx)
+	if err != nil {
+		return waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	defer conn.Close()
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		return waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	defer tx.Rollback()
+	const from = ` FROM play_session ps
+		JOIN user u ON u.id = ps.user_id
+		JOIN playable_item pi ON pi.id = ps.item_id
+		ORDER BY u.pid, ps.started_at, ps.pid`
+
+	n := 0
+	rows, err := tx.QueryContext(ctx, "SELECT pi.pid"+from)
+	if err != nil {
+		return waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	for rows.Next() {
+		var pid string
+		if err := rows.Scan(&pid); err != nil {
+			rows.Close()
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		if keep(model.PID(pid)) {
+			n++
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	if err := counted(n); err != nil {
+		return err
+	}
+
+	rows, err = tx.QueryContext(ctx,
+		"SELECT ps.pid, u.pid, pi.pid, ps.started_at, ps.ended_at, ps.ms_played, ps.client"+from)
+	if err != nil {
+		return waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var ps model.PlaySession
+		var ended sql.NullInt64
+		if err := rows.Scan(&ps.PID, &ps.UserPID, &ps.ItemPID, &ps.StartedAt, &ended, &ps.MsPlayed, &ps.Client); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		if !keep(ps.ItemPID) {
+			continue
+		}
+		ps.EndedAt = ended.Int64
+		if err := each(ps); err != nil {
+			return err
+		}
+	}
+	return waxerr.Wrap(waxerr.CodeIO, op, rows.Err())
 }
 
 // RelocateLibraryRoot re-points a library (and every file under it) at a new root

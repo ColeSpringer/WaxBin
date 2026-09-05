@@ -5,6 +5,7 @@
 package port
 
 import (
+	"bufio"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -33,7 +34,8 @@ const ExportFormat = "waxbin-export"
 // Version 4 adds the played/finished change stamp and is additive the same way.
 // Version 5 adds a track's bpm, additive again.
 // Version 6 adds the item's acquisition source type, additive again.
-const ExportVersion = 6
+// Version 7 adds the listening log (play sessions), additive again.
+const ExportVersion = 7
 
 // Manifest is the versioned header of a logical export.
 type Manifest struct {
@@ -44,15 +46,28 @@ type Manifest struct {
 	Items         int    `json:"items"`
 	Libraries     int    `json:"libraries"`
 	PlayStates    int    `json:"playStates"`
+	PlaySessions  int    `json:"playSessions"`
 }
 
-// Snapshot is a logical export: catalog metadata plus per-user playback state.
-// It never contains secrets.
+// NewManifest builds the export header for the given counts, the one place the
+// format and version are stamped, whether the manifest heads a written Snapshot or
+// answers `waxbin manifest` from counts alone.
+func NewManifest(schemaVersion int, createdAt int64, libraries, items, playStates, playSessions int) Manifest {
+	return Manifest{
+		Format: ExportFormat, Version: ExportVersion, CreatedAt: createdAt,
+		SchemaVersion: schemaVersion, Items: items, Libraries: libraries,
+		PlayStates: playStates, PlaySessions: playSessions,
+	}
+}
+
+// Snapshot is a logical export: catalog metadata, per-user playback state, and the
+// listening log. It never contains secrets.
 type Snapshot struct {
-	Manifest  Manifest          `json:"manifest"`
-	Libraries []LibraryExport   `json:"libraries"`
-	Items     []ItemExport      `json:"items"`
-	PlayState []PlayStateExport `json:"playState"`
+	Manifest     Manifest            `json:"manifest"`
+	Libraries    []LibraryExport     `json:"libraries"`
+	Items        []ItemExport        `json:"items"`
+	PlayState    []PlayStateExport   `json:"playState"`
+	PlaySessions []PlaySessionExport `json:"playSessions"`
 }
 
 // LibraryExport is a registered root in an export.
@@ -127,9 +142,24 @@ type PlayStateExport struct {
 	PlayedChangedNS  int64  `json:"playedChangedNs,string,omitempty"`
 }
 
+// PlaySessionExport is one entry of the listening log: a user's play of an item, the
+// history the year in review is built from. The times are unix nanoseconds as decimal
+// strings, like PlayStateExport's stamps; EndedAtNS is absent for a session never
+// closed. PID is the row's identity, the key a consumer keeps so a second pass over
+// the same export can skip the rows it already took.
+type PlaySessionExport struct {
+	PID         string `json:"pid"`
+	UserPID     string `json:"userPid"`
+	ItemPID     string `json:"itemPid"`
+	StartedAtNS int64  `json:"startedAtNs,string"`
+	EndedAtNS   int64  `json:"endedAtNs,string,omitempty"`
+	MsPlayed    int64  `json:"msPlayed,omitempty"`
+	Client      string `json:"client,omitempty"`
+}
+
 // BuildSnapshot assembles a logical export from already-read data. relPathOf maps
 // an item pid to its primary file's rel path (empty if none); pass nil to omit.
-func BuildSnapshot(schemaVersion int, createdAt int64, libs []*model.Library, items []*model.ItemView, plays []model.PlayState, relPathOf func(model.PID) string) *Snapshot {
+func BuildSnapshot(schemaVersion int, createdAt int64, libs []*model.Library, items []*model.ItemView, plays []model.PlayState, sessions []model.PlaySession, relPathOf func(model.PID) string) *Snapshot {
 	snap := &Snapshot{}
 	for _, l := range libs {
 		root := l.DisplayRoot
@@ -168,22 +198,124 @@ func BuildSnapshot(schemaVersion int, createdAt int64, libs []*model.Library, it
 		}
 		snap.PlayState = append(snap.PlayState, pe)
 	}
-	snap.Manifest = Manifest{
-		Format: ExportFormat, Version: ExportVersion, CreatedAt: createdAt,
-		SchemaVersion: schemaVersion, Items: len(snap.Items),
-		Libraries: len(snap.Libraries), PlayStates: len(snap.PlayState),
+	for _, ps := range sessions {
+		snap.PlaySessions = append(snap.PlaySessions, SessionExport(ps))
 	}
+	snap.Manifest = NewManifest(schemaVersion, createdAt, len(snap.Libraries), len(snap.Items), len(snap.PlayState), len(snap.PlaySessions))
 	return snap
 }
 
-// WriteSnapshot writes a snapshot as indented JSON.
-func WriteSnapshot(w io.Writer, snap *Snapshot) error {
-	enc := json.NewEncoder(w)
-	enc.SetIndent("", "  ")
-	if err := enc.Encode(snap); err != nil {
-		return waxerr.Wrap(waxerr.CodeInternal, "port.WriteSnapshot", err)
+// SessionExport is the export row for one session.
+func SessionExport(ps model.PlaySession) PlaySessionExport {
+	return PlaySessionExport{
+		PID: string(ps.PID), UserPID: string(ps.UserPID), ItemPID: string(ps.ItemPID),
+		StartedAtNS: ps.StartedAt, EndedAtNS: ps.EndedAt, MsPlayed: ps.MsPlayed, Client: ps.Client,
 	}
-	return nil
+}
+
+// WriteSnapshot writes a whole snapshot as indented JSON, through the same writer
+// the streaming export uses, so the two produce one document shape.
+func WriteSnapshot(w io.Writer, snap *Snapshot) error {
+	sw := NewSnapshotWriter(w)
+	if err := sw.Begin(snap); err != nil {
+		return err
+	}
+	for _, row := range snap.PlaySessions {
+		if err := sw.Session(row); err != nil {
+			return err
+		}
+	}
+	return sw.Close()
+}
+
+// SnapshotWriter writes a logical export incrementally: the header and the
+// catalog-sized arrays at once, then the listening log one session at a time, so
+// the one table that grows with listening rather than with the catalog is never
+// held whole. The manifest's session count is the caller's to know before the rows,
+// and Close refuses a document whose rows disagree with it.
+type SnapshotWriter struct {
+	w        *bufio.Writer
+	err      error
+	expected int
+	written  int
+}
+
+// NewSnapshotWriter returns a writer over w; Begin starts the document.
+func NewSnapshotWriter(w io.Writer) *SnapshotWriter {
+	return &SnapshotWriter{w: bufio.NewWriter(w)}
+}
+
+// Begin writes everything up to the listening log. snap.PlaySessions is not read;
+// the rows come through Session, in the number snap.Manifest.PlaySessions announces.
+func (sw *SnapshotWriter) Begin(snap *Snapshot) error {
+	sw.expected = snap.Manifest.PlaySessions
+	sw.write("{\n")
+	sw.field("manifest", snap.Manifest)
+	sw.field("libraries", snap.Libraries)
+	sw.field("items", snap.Items)
+	sw.field("playState", snap.PlayState)
+	sw.write(`  "playSessions": [`)
+	return sw.err
+}
+
+// Session writes one listening-log row.
+func (sw *SnapshotWriter) Session(row PlaySessionExport) error {
+	if sw.written > 0 {
+		sw.write(",")
+	}
+	sw.write("\n    ")
+	sw.marshal(row, "    ")
+	sw.written++
+	return sw.err
+}
+
+// Close ends the document and flushes it.
+func (sw *SnapshotWriter) Close() error {
+	if sw.err != nil {
+		return sw.err
+	}
+	if sw.written != sw.expected {
+		return waxerr.New(waxerr.CodeInternal, "port.SnapshotWriter",
+			fmt.Sprintf("wrote %d sessions under a manifest announcing %d", sw.written, sw.expected))
+	}
+	if sw.written > 0 {
+		sw.write("\n  ")
+	}
+	sw.write("]\n}\n")
+	if sw.err == nil {
+		sw.err = waxerr.Wrap(waxerr.CodeIO, "port.SnapshotWriter", sw.w.Flush())
+	}
+	return sw.err
+}
+
+// field writes one top-level array or object member followed by its separator.
+func (sw *SnapshotWriter) field(name string, v any) {
+	sw.write("  \"" + name + "\": ")
+	sw.marshal(v, "  ")
+	sw.write(",\n")
+}
+
+// marshal writes v indented as a value nested under prefix, the layout json.Encoder
+// gives a member at that depth.
+func (sw *SnapshotWriter) marshal(v any, prefix string) {
+	if sw.err != nil {
+		return
+	}
+	b, err := json.MarshalIndent(v, prefix, "  ")
+	if err != nil {
+		sw.err = waxerr.Wrap(waxerr.CodeInternal, "port.SnapshotWriter", err)
+		return
+	}
+	_, err = sw.w.Write(b)
+	sw.err = waxerr.Wrap(waxerr.CodeIO, "port.SnapshotWriter", err)
+}
+
+func (sw *SnapshotWriter) write(s string) {
+	if sw.err != nil {
+		return
+	}
+	_, err := sw.w.WriteString(s)
+	sw.err = waxerr.Wrap(waxerr.CodeIO, "port.SnapshotWriter", err)
 }
 
 // ReadSnapshot parses a logical export, rejecting an unrecognized format.
@@ -268,6 +400,7 @@ func ValidateBackup(ctx context.Context, path string) (int, error) {
 type Census struct {
 	Items        int
 	PlayStates   int
+	PlaySessions int
 	Playlists    int
 	Podcasts     int
 	TrashEntries int
@@ -305,6 +438,7 @@ func ReadCensus(ctx context.Context, path string) (*Census, error) {
 	}{
 		{"SELECT COUNT(*) FROM playable_item", &c.Items},
 		{"SELECT COUNT(*) FROM play_state", &c.PlayStates},
+		{"SELECT COUNT(*) FROM play_session", &c.PlaySessions},
 		{"SELECT COUNT(*) FROM playlist", &c.Playlists},
 		{"SELECT COUNT(*) FROM podcast", &c.Podcasts},
 		// Restorable entries only, matching what `trash list` shows: a restored row

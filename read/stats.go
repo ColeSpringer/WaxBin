@@ -40,6 +40,17 @@ type PlayedItem struct {
 	PlayCount int
 }
 
+// ExportCounts is what a logical export would carry, counted rather than read: the
+// libraries, items, play states, and play sessions the document would hold under
+// the export's own filters. It answers the export manifest without building the
+// document.
+type ExportCounts struct {
+	Libraries    int
+	Items        int
+	PlayStates   int
+	PlaySessions int
+}
+
 // YearReview is a per-user listening recap for one calendar year (UTC), derived
 // from play_session history. The top lists rank by play count within the year;
 // NewInLibrary counts items catalogued that year (catalog-structural). It

@@ -23,6 +23,9 @@ func TestStateSetFlagValidation(t *testing.T) {
 		{"played and unplayed", []string{"set", "01J0X", "--played", "--unplayed"}, "unplayed"},
 		{"finished and unplayed", []string{"set", "01J0X", "--finished", "--unplayed"}, "unplayed"},
 		{"finished and unfinished", []string{"set", "01J0X", "--finished", "--unfinished"}, "unfinished"},
+		// A session is a record of a past play, so it needs its start time and a length.
+		{"session without as-of", []string{"set", "01J0X", "--session", "1000"}, "--session needs --as-of"},
+		{"session without length", []string{"set", "01J0X", "--session", "0", "--as-of", "1770000000000000000"}, "positive"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -348,6 +348,13 @@ func (m *mutator) Checkpoint(ctx context.Context, userPID, itemPID model.PID, po
 	return m.lib.Playback().Checkpoint(ctx, userPID, itemPID, positionMS, asOf)
 }
 
+func (m *mutator) RecordSession(ctx context.Context, userPID, itemPID model.PID, client string, startedAt, endedAt, msPlayed int64) (model.PID, error) {
+	if m.px != nil {
+		return m.px.RecordSession(ctx, userPID, itemPID, client, startedAt, endedAt, msPlayed)
+	}
+	return m.lib.Playback().RecordSession(ctx, userPID, itemPID, client, startedAt, endedAt, msPlayed)
+}
+
 func (m *mutator) PlayState(ctx context.Context, userPID, itemPID model.PID) (*model.PlayState, error) {
 	if m.px != nil {
 		return m.px.PlayState(ctx, userPID, itemPID)

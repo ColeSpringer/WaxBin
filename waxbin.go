@@ -2911,10 +2911,10 @@ func (l *Library) Backup(ctx context.Context, dest string, redact bool) error {
 	return nil
 }
 
-// Export writes a versioned logical JSON export of catalog metadata plus critical
-// per-user playback state. It never contains secrets and is for inspection and
-// cross-tool portability; a byte Backup is the disaster-recovery path. It
-// returns the export manifest.
+// Export writes a versioned logical JSON export of catalog metadata, critical
+// per-user playback state, and the listening log. It never contains secrets and is
+// for inspection and cross-tool portability; a byte Backup is the disaster-recovery
+// path. It returns the export manifest.
 func (l *Library) Export(ctx context.Context, w io.Writer) (*port.Manifest, error) {
 	allLibs, err := l.store.Libraries(ctx)
 	if err != nil {
@@ -2945,7 +2945,8 @@ func (l *Library) Export(ctx context.Context, w io.Writer) (*port.Manifest, erro
 		return nil, err
 	}
 	// Drop play states for items the export omits (episodes), so the manifest never
-	// carries a play state referencing an item that is not in it.
+	// carries a row referencing an item that is not in it; the session stream below
+	// is filtered the same way.
 	plays := make([]model.PlayState, 0, len(allPlays))
 	for _, ps := range allPlays {
 		if exported[ps.ItemPID] {
@@ -2976,11 +2977,43 @@ func (l *Library) Export(ctx context.Context, w io.Writer) (*port.Manifest, erro
 	}
 	relOf := func(pid model.PID) string { return relByPID[pid] }
 
-	snap := port.BuildSnapshot(schema, time.Now().UnixNano(), libs, items, plays, relOf)
-	if err := port.WriteSnapshot(w, snap); err != nil {
+	// The listening log grows with listening rather than with the catalog, so it is
+	// not built into the snapshot: the store counts it first, the manifest goes out
+	// ahead of the rows with that exact number, and each row is written as it is
+	// read.
+	snap := port.BuildSnapshot(schema, time.Now().UnixNano(), libs, items, plays, nil, relOf)
+	sw := port.NewSnapshotWriter(w)
+	err = l.store.ExportSessions(ctx,
+		func(pid model.PID) bool { return exported[pid] },
+		func(n int) error {
+			snap.Manifest.PlaySessions = n
+			return sw.Begin(snap)
+		},
+		func(ps model.PlaySession) error { return sw.Session(port.SessionExport(ps)) })
+	if err != nil {
+		return nil, err
+	}
+	if err := sw.Close(); err != nil {
 		return nil, err
 	}
 	return &snap.Manifest, nil
+}
+
+// Manifest returns the header an Export would carry, from count queries rather than
+// the document: the same format, version, and counts under the same filters, without
+// reading every item and the whole listening log to discard them. The store's
+// ExportCounts mirrors Export's filters, and a test holds the two together.
+func (l *Library) Manifest(ctx context.Context) (*port.Manifest, error) {
+	counts, err := l.store.ExportCounts(ctx)
+	if err != nil {
+		return nil, err
+	}
+	schema, err := l.store.CatalogVersion(ctx)
+	if err != nil {
+		return nil, err
+	}
+	m := port.NewManifest(schema, time.Now().UnixNano(), counts.Libraries, counts.Items, counts.PlayStates, counts.PlaySessions)
+	return &m, nil
 }
 
 // RelocateRoot re-points a library and every file under it at a new root path, for a

@@ -25,7 +25,9 @@ import (
 // sits where its time puts it on the in-progress list. The engine treats a 0 stamp
 // (the seam's "unknown" value) as no recorded time, stamping at server-now and
 // ordering against nothing, so an adapter can pass every record's stamp straight
-// through without special-casing the unknown ones.
+// through without special-casing the unknown ones. A per-play listening history
+// (scrobbles) is not this record: each listen goes through RecordSession at its own
+// time, which is what the year in review counts.
 type PlayStateRecord struct {
 	UserPID    model.PID
 	ItemPID    model.PID

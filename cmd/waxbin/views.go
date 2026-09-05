@@ -337,6 +337,8 @@ type playStateView struct {
 	RatingChangedAt  int64 `json:"ratingChangedAt,string,omitempty"`
 	StarredChangedAt int64 `json:"starredChangedAt,string,omitempty"`
 	PlayedChangedAt  int64 `json:"playedChangedAt,string,omitempty"`
+	// SessionPID is the session `state set --session` logged, absent otherwise.
+	SessionPID string `json:"sessionPid,omitempty"`
 }
 
 func toPlayStateView(st *model.PlayState) playStateView {

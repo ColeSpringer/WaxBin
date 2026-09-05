@@ -53,23 +53,25 @@ func TestCensusExcludesThePodcastLibrary(t *testing.T) {
 	}
 }
 
-// TestCensusCountsOnlyRestorableTrash matches what `trash list` shows: a restored
-// entry is journal history, and nothing is at stake in discarding it.
-func TestCensusCountsOnlyRestorableTrash(t *testing.T) {
-	ctx := context.Background()
-	db := filepath.Join(t.TempDir(), "catalog.db")
+// openWithTracks opens a fresh catalog at db with one managed library and a scanned
+// track per name, returning the store and each track's put result.
+func openWithTracks(t *testing.T, ctx context.Context, db string, names ...string) (*sqlite.Store, []*model.ScanItemResult) {
+	t.Helper()
 	st, err := sqlite.Open(ctx, sqlite.OpenOptions{Path: db, Owner: "test"})
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
+	// The tests close the store themselves before the census reads the file; the
+	// cleanup covers a failure before they get there.
+	t.Cleanup(func() { _ = st.Close() })
 	lib, err := st.EnsureLibrary(ctx, &model.Library{
 		Root: []byte("/music"), DisplayRoot: "/music", Mode: model.ModeManaged, Profile: "waxbin-native",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	var trashPIDs []model.PID
-	for _, name := range []string{"a", "b"} {
+	var out []*model.ScanItemResult
+	for _, name := range names {
 		path := "/music/" + name + ".mp3"
 		res, err := st.PutScannedTrack(ctx, model.PutScannedTrackInput{
 			LibraryID: lib.ID,
@@ -87,6 +89,20 @@ func TestCensusCountsOnlyRestorableTrash(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		out = append(out, res)
+	}
+	return st, out
+}
+
+// TestCensusCountsOnlyRestorableTrash matches what `trash list` shows: a restored
+// entry is journal history, and nothing is at stake in discarding it.
+func TestCensusCountsOnlyRestorableTrash(t *testing.T) {
+	ctx := context.Background()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	st, tracks := openWithTracks(t, ctx, db, "a", "b")
+	var trashPIDs []model.PID
+	for i, name := range []string{"a", "b"} {
+		res := tracks[i]
 		tpid, err := st.TrashFile(ctx, model.TrashFileInput{
 			FilePID: res.FilePID, TrashPath: []byte("/t/" + name), TrashDisplay: "/t/" + name,
 		})
@@ -124,5 +140,32 @@ func TestCensusReportsAnUnreadableCatalogAsPartial(t *testing.T) {
 	}
 	if !c.Partial {
 		t.Errorf("census = %+v, want Partial so the zeros are not read as contents", c)
+	}
+}
+
+// TestCensusCountsPlaySessions keeps the listening log in what `db reset` says it is
+// about to discard: play state is what an item is worth to a user now, and the
+// sessions are the years of history behind stats --year.
+func TestCensusCountsPlaySessions(t *testing.T) {
+	ctx := context.Background()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	st, tracks := openWithTracks(t, ctx, db, "a")
+	res := tracks[0]
+	if _, err := st.RecordSession(ctx, "", res.ItemPID, "test", 1_600_000_000_000_000_000, 0, 1000); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.StartSession(ctx, "", res.ItemPID, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	c, err := port.ReadCensus(ctx, db)
+	if err != nil {
+		t.Fatalf("ReadCensus: %v", err)
+	}
+	if c.PlaySessions != 2 {
+		t.Errorf("play sessions = %d, want 2 (the recorded one and the open one)", c.PlaySessions)
 	}
 }

@@ -84,3 +84,35 @@ func TestPlaybackWritesCarryAsOf(t *testing.T) {
 		}
 	}
 }
+
+// TestRecordSessionCarriesRecordedTimes pins the record_session payload's times: both
+// travel as quoted decimal strings like asOfNs, and an omitted end (0, the start plus
+// the play time) leaves the frame, so the field is absent rather than a zero the server
+// would have to read as "not provided" anyway.
+func TestRecordSessionCarriesRecordedTimes(t *testing.T) {
+	const stamp int64 = 1 << 60
+	b, err := json.Marshal(RecordSessionParams{UserPID: "u", ItemPID: "i", StartedAtNS: stamp, MsPlayed: 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := `"startedAtNs":"` + strconv.FormatInt(stamp, 10) + `"`; !strings.Contains(string(b), want) {
+		t.Errorf("start encoding = %s, want a quoted decimal string containing %s", b, want)
+	}
+	if strings.Contains(string(b), "endedAtNs") {
+		t.Errorf("an omitted end must leave the frame, got %s", b)
+	}
+	var back RecordSessionParams
+	if err := json.Unmarshal(b, &back); err != nil {
+		t.Fatal(err)
+	}
+	if back.StartedAtNS != stamp || back.EndedAtNS != 0 || back.MsPlayed != 5 {
+		t.Errorf("round trip = %+v, want start %d, no end, 5 ms", back, stamp)
+	}
+	b, err = json.Marshal(RecordSessionParams{UserPID: "u", ItemPID: "i", StartedAtNS: stamp, EndedAtNS: stamp + 1, MsPlayed: 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := `"endedAtNs":"` + strconv.FormatInt(stamp+1, 10) + `"`; !strings.Contains(string(b), want) {
+		t.Errorf("end encoding = %s, want a quoted decimal string containing %s", b, want)
+	}
+}

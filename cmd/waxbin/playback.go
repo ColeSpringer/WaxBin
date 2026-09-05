@@ -81,6 +81,8 @@ func newStateCmd(g *globals) *cobra.Command {
 		unfinished bool
 		resetCount bool
 		position   int64
+		session    int64
+		client     string
 		asOf       string
 	)
 	set := &cobra.Command{
@@ -95,9 +97,19 @@ func newStateCmd(g *globals) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			// A session is a record of a past play, so it needs its start time and a length.
+			if flags.Changed("session") {
+				if session <= 0 {
+					return waxerr.New(waxerr.CodeInvalid, "cli.state", "--session needs a positive number of milliseconds")
+				}
+				if asOfNS == nil {
+					return waxerr.New(waxerr.CodeInvalid, "cli.state", "--session needs --as-of (the time the play started)")
+				}
+			}
 			// --as-of records a time for a change, so it needs a change to record.
 			if flags.Changed("as-of") && !star && !unstar && !played && !finished && !unplayed &&
-				!unfinished && !resetCount && !flags.Changed("rating") && !flags.Changed("position") {
+				!unfinished && !resetCount && !flags.Changed("rating") && !flags.Changed("position") &&
+				!flags.Changed("session") {
 				return waxerr.New(waxerr.CodeInvalid, "cli.state", "--as-of needs a change to record")
 			}
 
@@ -165,6 +177,13 @@ func newStateCmd(g *globals) *cobra.Command {
 					return err
 				}
 			}
+			var sessionPID model.PID
+			if flags.Changed("session") {
+				sessionPID, err = m.RecordSession(ctx(cmd), uPID, item, client, *asOfNS, 0, session)
+				if err != nil {
+					return err
+				}
+			}
 			if flags.Changed("position") {
 				if err := m.Checkpoint(ctx(cmd), uPID, item, position, asOfNS); err != nil {
 					return err
@@ -175,10 +194,19 @@ func newStateCmd(g *globals) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			// The play state cannot show a logged session, so the command reports its pid.
 			if g.jsonOut {
-				return printJSON(cmd, toPlayStateView(st))
+				v := toPlayStateView(st)
+				v.SessionPID = string(sessionPID)
+				return printJSON(cmd, v)
 			}
-			return printPlayState(cmd, st)
+			if err := printPlayState(cmd, st); err != nil {
+				return err
+			}
+			if sessionPID != "" {
+				fmt.Fprintf(out(cmd), "session:   %s\n", sessionPID)
+			}
+			return nil
 		},
 	}
 	pf := set.Flags()
@@ -193,6 +221,9 @@ func newStateCmd(g *globals) *cobra.Command {
 	pf.BoolVar(&unfinished, "unfinished", false, "clear finished, leaving played alone")
 	pf.BoolVar(&resetCount, "reset-count", false, "zero the play count, clearing played and finished with it")
 	pf.Int64Var(&position, "position", 0, "set resume position in milliseconds")
+	pf.Int64Var(&session, "session", 0,
+		"log a listening session of this many milliseconds, starting at --as-of (what stats --year counts)")
+	pf.StringVar(&client, "client", "waxbin-cli", "the client recorded on the session logged by --session")
 	pf.StringVar(&asOf, "as-of", "",
 		"record every change this command makes at this time (unix ns or RFC3339); default is now")
 	// star and unstar are contradictory. Rejecting the pair avoids the order-dependent
@@ -242,16 +273,19 @@ func newStateCmd(g *globals) *cobra.Command {
 // instant after the epoch and be silently discarded as a stale replay. 1e17 ns is
 // early 1973, so every real recorded-time stamp clears it while every plausible
 // wrong-unit value (a modern seconds/ms/micros timestamp) falls below it. RFC3339
-// input is exempt: a date typed out carries its own unambiguous intent.
+// input is exempt: a date typed out carries its own unambiguous intent, though it
+// still has to land after the epoch, since 0 is the sentinel the engine reads as
+// "no recorded time" and nothing was played before 1970.
 const asOfNSFloor = 100_000_000_000_000_000 // 1e17 ns, ~1973
 
 // parseAsOf parses a --as-of flag into an optional recorded-time stamp (unix
 // nanoseconds): the empty string yields nil (stamp at server now), a bare integer
 // is taken as unix nanoseconds, and anything else is parsed as RFC3339. A bare
 // integer below asOfNSFloor is rejected rather than silently read as an
-// epoch-adjacent (stale) time, catching a seconds/milliseconds unit mix-up. It is
-// the one shared parser for every --as-of flag so the item and entity mutations read
-// the flag identically.
+// epoch-adjacent (stale) time, catching a seconds/milliseconds unit mix-up, and an
+// RFC3339 time at or before the epoch is rejected for the reason asOfNSFloor gives.
+// It is the one shared parser for every --as-of flag so the item and entity
+// mutations read the flag identically.
 func parseAsOf(s string) (*int64, error) {
 	if s == "" {
 		return nil, nil
@@ -274,6 +308,9 @@ func parseAsOf(s string) (*int64, error) {
 			"--as-of "+s+" is outside the representable range (about 1678 to 2262)")
 	}
 	ns := t.UnixNano()
+	if ns <= 0 {
+		return nil, waxerr.New(waxerr.CodeInvalid, "cli.state", "--as-of "+s+" is at or before the epoch; pass the time the change was made")
+	}
 	return &ns, nil
 }
 

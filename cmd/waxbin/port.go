@@ -119,9 +119,9 @@ func newExportCmd(g *globals) *cobra.Command {
 	return &cobra.Command{
 		Use:   "export [file.json]",
 		Short: "Write a logical JSON export of metadata and user state (no secrets)",
-		Long: "Exports catalog metadata plus critical per-user playback state as versioned " +
-			"JSON. It never contains secrets and is for inspection/portability; the byte " +
-			"backup is the disaster-recovery path. Writes to the file or, if omitted, stdout.",
+		Long: "Exports catalog metadata, critical per-user playback state, and the listening " +
+			"log as versioned JSON. It never contains secrets and is for inspection/portability; " +
+			"the byte backup is the disaster-recovery path. Writes to the file or, if omitted, stdout.",
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			lib, _, err := g.openRead(cmd)
@@ -148,8 +148,8 @@ func newExportCmd(g *globals) *cobra.Command {
 				if g.jsonOut {
 					return printJSON(cmd, man)
 				}
-				fmt.Fprintf(out(cmd), "Exported %d items, %d play states (v%d) to %s\n",
-					man.Items, man.PlayStates, man.Version, args[0])
+				fmt.Fprintf(out(cmd), "Exported %d items, %d play states, %d play sessions (v%d) to %s\n",
+					man.Items, man.PlayStates, man.PlaySessions, man.Version, args[0])
 			}
 			return nil
 		},
@@ -166,7 +166,7 @@ func newManifestCmd(g *globals) *cobra.Command {
 				return err
 			}
 			defer lib.Close()
-			man, err := lib.Export(ctx(cmd), io.Discard)
+			man, err := lib.Manifest(ctx(cmd))
 			if err != nil {
 				return err
 			}
@@ -180,6 +180,7 @@ func newManifestCmd(g *globals) *cobra.Command {
 			fmt.Fprintf(w, "libraries:      %d\n", man.Libraries)
 			fmt.Fprintf(w, "items:          %d\n", man.Items)
 			fmt.Fprintf(w, "play states:    %d\n", man.PlayStates)
+			fmt.Fprintf(w, "play sessions:  %d\n", man.PlaySessions)
 			return nil
 		},
 	}

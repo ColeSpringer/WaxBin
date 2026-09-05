@@ -41,6 +41,14 @@ func TestParseAsOf(t *testing.T) {
 		t.Errorf("parseAsOf(garbage) err = %v, want CodeInvalid", err)
 	}
 
+	// An RFC3339 time at or before the epoch is rejected: 0 is the not-provided
+	// sentinel the store reads as "stamp at now", and nothing was played before 1970.
+	for _, early := range []string{"1970-01-01T00:00:00Z", "1969-12-31T23:59:59Z"} {
+		if _, err := parseAsOf(early); !waxerr.Is(err, waxerr.CodeInvalid) {
+			t.Errorf("parseAsOf(%q) err = %v, want CodeInvalid (at or before the epoch)", early, err)
+		}
+	}
+
 	// An RFC3339 date outside the int64-nanosecond range (~1678..2262) is rejected
 	// rather than silently overflowing UnixNano to a garbage stamp.
 	for _, oob := range []string{"3000-01-01T00:00:00Z", "1000-01-01T00:00:00Z"} {

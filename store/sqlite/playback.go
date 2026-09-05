@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"math"
+	"time"
 
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/waxerr"
@@ -615,7 +617,48 @@ func (s *Store) Queue(ctx context.Context, userPID model.PID) ([]*model.ItemView
 // StartSession opens a play_session and returns its pid; EndSession closes it
 // with the elapsed play time. Stats are built from session history.
 func (s *Store) StartSession(ctx context.Context, userPID, itemPID model.PID, client string) (model.PID, error) {
-	const op = "store.StartSession"
+	return s.insertSession(ctx, "store.StartSession", userPID, itemPID, client, nowNS(), sql.NullInt64{}, 0)
+}
+
+// RecordSession logs a session whose times are already known, for a replayed or
+// imported listen: startedAt and endedAt are unix nanoseconds and msPlayed the
+// milliseconds heard, all taken as recorded, so imported history reaches the log the
+// year in review reads instead of landing at the import instant. An endedAt of 0 is
+// the start plus the play time, since a scrobble carries a start and a length but no
+// end. The row is independent of play_state, as it is for the live pair: the play
+// itself goes through MarkPlayed with the same recorded time.
+//
+// A user cannot start the same item twice in one nanosecond, so a session the log
+// already holds for the user, item, and start is the same listen: it is not written
+// again and its pid comes back, which keeps a retried call or a re-run import from
+// doubling the log. The check runs inside the write transaction, which is the one
+// writer, so it needs no index of its own.
+func (s *Store) RecordSession(ctx context.Context, userPID, itemPID model.PID, client string, startedAt, endedAt, msPlayed int64) (model.PID, error) {
+	const op = "store.RecordSession"
+	if startedAt <= 0 {
+		return "", waxerr.New(waxerr.CodeInvalid, op, "a recorded session needs its start time (unix nanoseconds after the epoch)")
+	}
+	if msPlayed < 0 {
+		return "", waxerr.New(waxerr.CodeInvalid, op, "play time cannot be negative")
+	}
+	if endedAt == 0 {
+		// The derived end has to fit in the nanosecond range, or the multiplication
+		// wraps and a nonsense length lands as a plausible-looking row.
+		if msPlayed > (math.MaxInt64-startedAt)/int64(time.Millisecond) {
+			return "", waxerr.New(waxerr.CodeInvalid, op, "play time is too long to record")
+		}
+		endedAt = startedAt + msPlayed*int64(time.Millisecond)
+	}
+	if endedAt < startedAt {
+		return "", waxerr.New(waxerr.CodeInvalid, op, "a session cannot end before it starts")
+	}
+	return s.insertSession(ctx, op, userPID, itemPID, client, startedAt, sql.NullInt64{Int64: endedAt, Valid: true}, msPlayed)
+}
+
+// insertSession resolves the user and item and writes one play_session row, unless
+// the log already holds one for the user, item, and start, whose pid it returns
+// instead. An invalid endedAt leaves the session open.
+func (s *Store) insertSession(ctx context.Context, op string, userPID, itemPID model.PID, client string, startedAt int64, endedAt sql.NullInt64, msPlayed int64) (model.PID, error) {
 	pid := model.NewPID()
 	err := s.writeTx(ctx, func(tx *sql.Tx) error {
 		userID, err := userIDByPID(ctx, tx, userPID, op)
@@ -626,9 +669,20 @@ func (s *Store) StartSession(ctx context.Context, userPID, itemPID model.PID, cl
 		if err != nil {
 			return err
 		}
+		var held string
+		err = tx.QueryRowContext(ctx,
+			"SELECT pid FROM play_session WHERE user_id = ? AND item_id = ? AND started_at = ?",
+			userID, itemID, startedAt).Scan(&held)
+		if err == nil {
+			pid = model.PID(held)
+			return nil
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
 		if _, err := tx.ExecContext(ctx,
-			"INSERT INTO play_session(pid, user_id, item_id, started_at, client) VALUES (?,?,?,?,?)",
-			string(pid), userID, itemID, nowNS(), client); err != nil {
+			"INSERT INTO play_session(pid, user_id, item_id, started_at, ended_at, ms_played, client) VALUES (?,?,?,?,?,?,?)",
+			string(pid), userID, itemID, startedAt, nullableInt64(endedAt), msPlayed, client); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		return nil
@@ -639,20 +693,36 @@ func (s *Store) StartSession(ctx context.Context, userPID, itemPID model.PID, cl
 	return pid, nil
 }
 
-// EndSession closes a session with the milliseconds played.
-func (s *Store) EndSession(ctx context.Context, sessionPID model.PID, msPlayed int64) error {
+// EndSession closes a session with the milliseconds played and reports whether it
+// did. A closed session is history and keeps its end and play time, so a retried
+// close cannot move the log and a recorded session cannot be re-stamped at the wall
+// clock; closing one again reports false, the only way a caller can learn that a
+// corrected play time was dropped, since sessions have no read of their own.
+func (s *Store) EndSession(ctx context.Context, sessionPID model.PID, msPlayed int64) (bool, error) {
 	const op = "store.EndSession"
-	return s.writeTx(ctx, func(tx *sql.Tx) error {
+	if msPlayed < 0 {
+		return false, waxerr.New(waxerr.CodeInvalid, op, "play time cannot be negative")
+	}
+	var closed bool
+	err := s.writeTx(ctx, func(tx *sql.Tx) error {
 		r, err := tx.ExecContext(ctx,
-			"UPDATE play_session SET ended_at = ?, ms_played = ? WHERE pid = ?", nowNS(), msPlayed, string(sessionPID))
+			"UPDATE play_session SET ended_at = ?, ms_played = ? WHERE pid = ? AND ended_at IS NULL",
+			nowNS(), msPlayed, string(sessionPID))
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
-		if n, _ := r.RowsAffected(); n == 0 {
+		if n, _ := r.RowsAffected(); n > 0 {
+			closed = true
+			return nil
+		}
+		var one int
+		err = tx.QueryRowContext(ctx, "SELECT 1 FROM play_session WHERE pid = ?", string(sessionPID)).Scan(&one)
+		if errors.Is(err, sql.ErrNoRows) {
 			return waxerr.New(waxerr.CodeNotFound, op, "no such session: "+string(sessionPID))
 		}
-		return nil
+		return waxerr.Wrap(waxerr.CodeIO, op, err)
 	})
+	return closed, err
 }
 
 // itemIDByPIDRead resolves an item pid to its rowid on a read connection.

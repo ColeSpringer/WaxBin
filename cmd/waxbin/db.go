@@ -90,9 +90,8 @@ func newDBResetCmd(g *globals) *cobra.Command {
 					data["discardedUnknown"] = census.Partial
 					if !census.Partial {
 						data["discarded"] = map[string]int{
-							"items": census.Items, "playStates": census.PlayStates,
-							"playlists": census.Playlists, "podcasts": census.Podcasts,
-							"trashEntries": census.TrashEntries,
+							"items": census.Items, "playStates": census.PlayStates, "playSessions": census.PlaySessions,
+							"playlists": census.Playlists, "podcasts": census.Podcasts, "trashEntries": census.TrashEntries,
 						}
 					}
 					data["rootsNotInConfig"] = extraRoots
@@ -113,8 +112,8 @@ func newDBResetCmd(g *globals) *cobra.Command {
 				// they do not mean.
 				fmt.Fprintln(w, "Discarded: contents unknown (the previous catalog could not be read)")
 			default:
-				fmt.Fprintf(w, "Discarded: %d items, %d play states, %d playlists, %d podcasts, %d trash entries\n",
-					census.Items, census.PlayStates, census.Playlists, census.Podcasts, census.TrashEntries)
+				fmt.Fprintf(w, "Discarded: %d items, %d play states, %d play sessions, %d playlists, %d podcasts, %d trash entries\n",
+					census.Items, census.PlayStates, census.PlaySessions, census.Playlists, census.Podcasts, census.TrashEntries)
 			}
 			if len(extraRoots) > 0 {
 				fmt.Fprintf(w, "Roots not in config (re-add with `waxbin library add`): %s\n",

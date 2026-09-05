@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"testing"
+	"time"
 
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/waxerr"
@@ -148,8 +149,8 @@ func TestSessions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("start session: %v", err)
 	}
-	if err := st.EndSession(ctx, sess, 123000); err != nil {
-		t.Fatalf("end session: %v", err)
+	if closed, err := st.EndSession(ctx, sess, 123000); err != nil || !closed {
+		t.Fatalf("end session = (%t, %v), want (true, nil)", closed, err)
 	}
 	var msPlayed int64
 	var ended sql.NullInt64
@@ -160,8 +161,189 @@ func TestSessions(t *testing.T) {
 	if msPlayed != 123000 || !ended.Valid {
 		t.Errorf("session not closed: ms=%d ended=%v", msPlayed, ended.Valid)
 	}
-	if err := st.EndSession(ctx, "01J0NONEXISTENT0000000000", 1); !waxerr.Is(err, waxerr.CodeNotFound) {
+	// A closed session is history: closing it again keeps the first close's end and
+	// play time, so a retried close cannot move the log, and reports that it did
+	// nothing, the only way a caller can learn a corrected play time was dropped.
+	if closed, err := st.EndSession(ctx, sess, 999); err != nil || closed {
+		t.Fatalf("closing a closed session = (%t, %v), want (false, nil)", closed, err)
+	}
+	var msAgain int64
+	var endedAgain sql.NullInt64
+	if err := st.read.QueryRowContext(ctx,
+		"SELECT ms_played, ended_at FROM play_session WHERE pid = ?", string(sess)).Scan(&msAgain, &endedAgain); err != nil {
+		t.Fatal(err)
+	}
+	if msAgain != 123000 || endedAgain != ended {
+		t.Errorf("second close moved the session: ms=%d ended=%v, want the first close kept", msAgain, endedAgain)
+	}
+	if _, err := st.EndSession(ctx, "01J0NONEXISTENT0000000000", 1); !waxerr.Is(err, waxerr.CodeNotFound) {
 		t.Errorf("ending an unknown session: want CodeNotFound, got %v", err)
+	}
+}
+
+// TestRecordSession pins the recorded-time session write: the three recorded values
+// land as given, an omitted end is the start plus the play time, the row reaches the
+// year in review, and a session with no start, an end before its start, or a negative
+// play time is refused. EndSession shares the play-time guard.
+func TestRecordSession(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	item := seedItem(t, st, lib)
+	started := time.Date(2019, 3, 4, 5, 6, 7, 0, time.UTC).UnixNano()
+	ended := started + int64(5*time.Minute)
+
+	sess, err := st.RecordSession(ctx, "", item, "lastfm", started, ended, 200000)
+	if err != nil {
+		t.Fatalf("record session: %v", err)
+	}
+	row := func(pid model.PID) (startedAt, endedAt, msPlayed int64, client string) {
+		t.Helper()
+		if err := st.read.QueryRowContext(ctx,
+			"SELECT started_at, ended_at, ms_played, client FROM play_session WHERE pid = ?", string(pid)).
+			Scan(&startedAt, &endedAt, &msPlayed, &client); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	if s, e, ms, c := row(sess); s != started || e != ended || ms != 200000 || c != "lastfm" {
+		t.Errorf("recorded session = (%d, %d, %d, %q), want (%d, %d, 200000, lastfm)", s, e, ms, c, started, ended)
+	}
+	// The same listen recorded again (a retried call, a re-run import) is the row
+	// already held: the same pid comes back and the log does not double.
+	if again, err := st.RecordSession(ctx, "", item, "other", started, ended, 200000); err != nil || again != sess {
+		t.Fatalf("recording the same listen again = (%s, %v), want the existing pid %s", again, err, sess)
+	}
+	if n := scalarInt(t, st, "SELECT COUNT(*) FROM play_session"); n != 1 {
+		t.Fatalf("log holds %d sessions after a repeated record, want 1", n)
+	}
+
+	derived, err := st.RecordSession(ctx, "", item, "", started+1, 0, 240000)
+	if err != nil {
+		t.Fatalf("record session without an end: %v", err)
+	}
+	if _, e, _, _ := row(derived); e != started+1+int64(240*time.Second) {
+		t.Errorf("omitted end = %d, want the start plus the play time %d", e, started+1+int64(240*time.Second))
+	}
+
+	yr, err := st.YearInReview(ctx, "", 2019, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if yr.Sessions != 2 || yr.MinutesPlayed != 7 {
+		t.Errorf("2019 in review = %d sessions, %d minutes; want 2 sessions, 7 minutes", yr.Sessions, yr.MinutesPlayed)
+	}
+
+	for name, c := range map[string]struct{ start, end, ms int64 }{
+		"no start":           {0, 0, 1000},
+		"start before epoch": {-1, 0, 1000},
+		"end before start":   {started, started - 1, 1000},
+		"negative play time": {started, 0, -1},
+		// Long enough that the derived end wraps around the int64 nanosecond range
+		// to a moment just after the start.
+		"play time too long": {started, 0, 18_446_744_073_710},
+	} {
+		if _, err := st.RecordSession(ctx, "", item, "", c.start, c.end, c.ms); !waxerr.Is(err, waxerr.CodeInvalid) {
+			t.Errorf("%s: got %v, want CodeInvalid", name, err)
+		}
+	}
+	if _, err := st.RecordSession(ctx, "", "01J0NONEXISTENT0000000000", "", started, 0, 1000); !waxerr.Is(err, waxerr.CodeNotFound) {
+		t.Errorf("recording against an unknown item: want CodeNotFound, got %v", err)
+	}
+	if _, err := st.EndSession(ctx, sess, -1); !waxerr.Is(err, waxerr.CodeInvalid) {
+		t.Errorf("ending a session with negative play time: want CodeInvalid, got %v", err)
+	}
+	// A recorded session is already closed, so a stray close leaves its values alone.
+	if closed, err := st.EndSession(ctx, sess, 5); err != nil || closed {
+		t.Fatalf("closing a recorded session = (%t, %v), want (false, nil)", closed, err)
+	}
+	if s, e, ms, _ := row(sess); s != started || e != ended || ms != 200000 {
+		t.Errorf("close moved a recorded session to (%d, %d, %d), want (%d, %d, 200000)", s, e, ms, started, ended)
+	}
+}
+
+// TestExportSessions pins the export's streaming read of the listening log: the
+// count of the sessions the filter admits arrives before any row, then those rows in
+// a stable order, every user's, an open session reading back with no end and a
+// filtered item's sessions neither counted nor delivered.
+func TestExportSessions(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	item := seedItem(t, st, lib)
+	skipped := putTrack(t, st, lib.ID, trackSpec{
+		path: "/lib/a/2.flac", essence: "e2", content: "c2", title: "Skipped", artist: "X", album: "Al",
+	}).ItemPID
+	other, err := st.CreateUser(ctx, "other")
+	if err != nil {
+		t.Fatal(err)
+	}
+	def, err := st.DefaultUser(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := time.Date(2019, 3, 4, 5, 6, 7, 0, time.UTC).UnixNano()
+	late, err := st.RecordSession(ctx, "", item, "lastfm", started+1, 0, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	early, err := st.RecordSession(ctx, "", item, "lastfm", started, started+5, 2000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	open, err := st.StartSession(ctx, other.PID, item, "live")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.RecordSession(ctx, "", skipped, "lastfm", started, 0, 1000); err != nil {
+		t.Fatal(err)
+	}
+
+	counted := -1
+	var got []model.PlaySession
+	err = st.ExportSessions(ctx,
+		func(pid model.PID) bool { return pid == item },
+		func(n int) error {
+			if len(got) != 0 {
+				t.Error("the count arrived after a row")
+			}
+			counted = n
+			return nil
+		},
+		func(ps model.PlaySession) error {
+			got = append(got, ps)
+			return nil
+		})
+	if err != nil {
+		t.Fatalf("ExportSessions: %v", err)
+	}
+	if counted != 3 || len(got) != 3 {
+		t.Fatalf("counted %d and delivered %d sessions, want 3 and 3: %+v", counted, len(got), got)
+	}
+	want := map[model.PID]model.PlaySession{
+		early: {PID: early, UserPID: def.PID, ItemPID: item, StartedAt: started, EndedAt: started + 5, MsPlayed: 2000, Client: "lastfm"},
+		late:  {PID: late, UserPID: def.PID, ItemPID: item, StartedAt: started + 1, EndedAt: started + 1 + int64(time.Second), MsPlayed: 1000, Client: "lastfm"},
+	}
+	for _, s := range got {
+		if s.PID == open {
+			if s.UserPID != other.PID || s.EndedAt != 0 || s.MsPlayed != 0 || s.StartedAt == 0 || s.Client != "live" {
+				t.Errorf("open session = %+v, want the other user's, started, with no end", s)
+			}
+			continue
+		}
+		if s != want[s.PID] {
+			t.Errorf("session = %+v, want %+v", s, want[s.PID])
+		}
+	}
+	// Ordered by user pid, then start time, so a re-export of an unchanged log is
+	// byte-identical.
+	first, second := def.PID, other.PID
+	if first > second {
+		first, second = second, first
+	}
+	if got[0].UserPID != first || got[2].UserPID != second {
+		t.Errorf("user order = %s, %s, %s; want %s first and %s last", got[0].UserPID, got[1].UserPID, got[2].UserPID, first, second)
+	}
+	if got[0].UserPID == got[1].UserPID && got[0].StartedAt > got[1].StartedAt {
+		t.Errorf("sessions of one user not in start order: %+v", got[:2])
 	}
 }
 

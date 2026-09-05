@@ -78,6 +78,7 @@ type Bookmark struct {
 // PlaySession is one play of an item, the history that feeds stats.
 type PlaySession struct {
 	PID       PID
+	UserPID   PID
 	ItemPID   PID
 	StartedAt int64 // unix nanoseconds
 	EndedAt   int64 // unix nanoseconds; 0 while open

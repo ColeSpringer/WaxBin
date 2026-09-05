@@ -50,7 +50,10 @@ type Store interface {
 	SetQueue(ctx context.Context, userPID model.PID, itemPIDs []model.PID) error
 	Queue(ctx context.Context, userPID model.PID) ([]*model.ItemView, error)
 	StartSession(ctx context.Context, userPID, itemPID model.PID, client string) (model.PID, error)
-	EndSession(ctx context.Context, sessionPID model.PID, msPlayed int64) error
+	EndSession(ctx context.Context, sessionPID model.PID, msPlayed int64) (bool, error)
+	// RecordSession logs an already-finished session at its recorded times, the
+	// listening-log side of an import whose plays go through MarkPlayed with asOf.
+	RecordSession(ctx context.Context, userPID, itemPID model.PID, client string, startedAt, endedAt, msPlayed int64) (model.PID, error)
 }
 
 // Service buffers playback progress and delegates the rest of playback state to
@@ -336,7 +339,15 @@ func (s *Service) StartSession(ctx context.Context, userPID, itemPID model.PID, 
 	return s.store.StartSession(ctx, userPID, itemPID, client)
 }
 
-// EndSession closes a session with the milliseconds played.
-func (s *Service) EndSession(ctx context.Context, sessionPID model.PID, msPlayed int64) error {
+// EndSession closes a session with the milliseconds played, reporting false when
+// the session was already closed and kept its own end and play time.
+func (s *Service) EndSession(ctx context.Context, sessionPID model.PID, msPlayed int64) (bool, error) {
 	return s.store.EndSession(ctx, sessionPID, msPlayed)
+}
+
+// RecordSession logs a session whose times are already known (a replayed or
+// imported listen) at those times; the store documents the argument rules. The play
+// itself goes through MarkPlayed with the same recorded time.
+func (s *Service) RecordSession(ctx context.Context, userPID, itemPID model.PID, client string, startedAt, endedAt, msPlayed int64) (model.PID, error) {
+	return s.store.RecordSession(ctx, userPID, itemPID, client, startedAt, endedAt, msPlayed)
 }

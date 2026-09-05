@@ -168,7 +168,12 @@ import (
 // version 4 gave: a version-17 server drops the field and lands an imported play or
 // resume position at server-now, so what sorts by recency after an import is the
 // import itself, and nothing in the response says so.
-const ProtocolVersion = 18
+//
+// Version 19 added record_session, the listening-log write an import makes beside
+// mark_played, bumped the way set_played was: `state set --played --session` would
+// land its play on a version-18 server and then fail on the unknown method partway
+// through the command.
+const ProtocolVersion = 19
 
 // Method names for the proxied operations: the fast request/response catalog
 // mutations, the reads a mutating command needs for its confirmation output, the
@@ -209,6 +214,7 @@ const (
 	MethodMarkPlayed       = "mark_played"
 	MethodSetPlayed        = "set_played"
 	MethodSetProgress      = "set_progress"
+	MethodRecordSession    = "record_session"
 	MethodPlayState        = "play_state"
 	MethodProvenance       = "provenance"
 	MethodPlaylistCreate   = "playlist_create"
@@ -813,6 +819,26 @@ type ProgressParams struct {
 	ItemPID    string `json:"itemPid"`
 	PositionMS int64  `json:"positionMs"`
 	AsOfNS     int64  `json:"asOfNs,string,omitempty"` // optional recorded time (see asOfToWire)
+}
+
+// RecordSessionParams is the record_session request payload: a finished session at
+// its recorded times. StartedAtNS and EndedAtNS are unix nanoseconds as quoted decimal
+// strings, the encoding every ns field on the wire uses (asOfToWire says why). Unlike
+// an as-of stamp, StartedAtNS is required and a zero is refused rather than read as
+// server-now; an EndedAtNS of 0 is omitted and means the start plus the play time.
+// The result is a RecordSessionResult.
+type RecordSessionParams struct {
+	UserPID     string `json:"userPid"`
+	ItemPID     string `json:"itemPid"`
+	Client      string `json:"client,omitempty"`
+	StartedAtNS int64  `json:"startedAtNs,string"`
+	EndedAtNS   int64  `json:"endedAtNs,string,omitempty"`
+	MsPlayed    int64  `json:"msPlayed"`
+}
+
+// RecordSessionResult is the record_session response: the pid of the logged session.
+type RecordSessionResult struct {
+	SessionPID string `json:"sessionPid"`
 }
 
 // StateParams is the play_state request payload.

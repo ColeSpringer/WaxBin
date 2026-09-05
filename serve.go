@@ -572,6 +572,17 @@ func (l *Library) proxyHandlers() map[string]proxy.Handler {
 			}
 			return nil, l.playback.Checkpoint(ctx, model.PID(p.UserPID), model.PID(p.ItemPID), p.PositionMS, proxy.AsOf(p.AsOfNS))
 		},
+		proxy.MethodRecordSession: func(ctx context.Context, raw json.RawMessage) (any, error) {
+			p, err := decodeParams[proxy.RecordSessionParams](raw)
+			if err != nil {
+				return nil, err
+			}
+			pid, err := l.playback.RecordSession(ctx, model.PID(p.UserPID), model.PID(p.ItemPID), p.Client, p.StartedAtNS, p.EndedAtNS, p.MsPlayed)
+			if err != nil {
+				return nil, err
+			}
+			return proxy.RecordSessionResult{SessionPID: string(pid)}, nil
+		},
 		proxy.MethodPlayState: func(ctx context.Context, raw json.RawMessage) (any, error) {
 			p, err := decodeParams[proxy.StateParams](raw)
 			if err != nil {

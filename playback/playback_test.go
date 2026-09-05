@@ -24,6 +24,7 @@ type fakeStore struct {
 	flushed map[model.PID][]model.PlayState
 	// defaultPID is what DefaultUser answers ("u-default" unless a test overrides).
 	defaultPID model.PID
+	session    *recorded // the last RecordSession call
 }
 
 func newFake() *fakeStore { return &fakeStore{last: map[string]int64{}, asOf: map[string]*int64{}} }
@@ -97,7 +98,37 @@ func (f *fakeStore) Queue(context.Context, model.PID) ([]*model.ItemView, error)
 func (f *fakeStore) StartSession(context.Context, model.PID, model.PID, string) (model.PID, error) {
 	return "", nil
 }
-func (f *fakeStore) EndSession(context.Context, model.PID, int64) error { return nil }
+func (f *fakeStore) EndSession(context.Context, model.PID, int64) (bool, error) { return true, nil }
+
+// recorded is the last RecordSession call, so a test can see the service forwards
+// the recorded values untouched.
+type recorded struct {
+	user, item                   model.PID
+	client                       string
+	startedAt, endedAt, msPlayed int64
+}
+
+func (f *fakeStore) RecordSession(_ context.Context, user, item model.PID, client string, startedAt, endedAt, msPlayed int64) (model.PID, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.session = &recorded{user, item, client, startedAt, endedAt, msPlayed}
+	return "sess-1", nil
+}
+
+// TestRecordSessionPassesThrough pins that the service hands a recorded session to
+// the store as given, with no buffering or clamping of its times.
+func TestRecordSessionPassesThrough(t *testing.T) {
+	fake := newFake()
+	svc := New(fake)
+	pid, err := svc.RecordSession(context.Background(), "u", "item-1", "lastfm", 100, 200, 300)
+	if err != nil || pid != "sess-1" {
+		t.Fatalf("RecordSession = (%q, %v), want (sess-1, nil)", pid, err)
+	}
+	want := recorded{"u", "item-1", "lastfm", 100, 200, 300}
+	if fake.session == nil || *fake.session != want {
+		t.Errorf("store received %+v, want %+v", fake.session, want)
+	}
+}
 
 func TestProgressCoalesces(t *testing.T) {
 	fake := newFake()
