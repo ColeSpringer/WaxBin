@@ -2,6 +2,7 @@ package waxbin
 
 import (
 	"context"
+	"database/sql"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -591,5 +592,271 @@ func TestReplayGainWriteBackLandsOnWavPack(t *testing.T) {
 	}
 	if len(diags) != 0 {
 		t.Errorf("diagnostics = %+v, want none for a write that landed whole", diags)
+	}
+}
+
+// enrichItemFields fills one item's fields as an enrichment pass would, so a write-back
+// test can seed catalog-only values without a provider.
+func enrichItemFields(t *testing.T, ctx context.Context, lib *Library, dbPath string, pid model.PID, fields map[string]string) {
+	t.Helper()
+	raw, err := sql.Open("sqlite", "file:"+dbPath+"?mode=ro")
+	if err != nil {
+		t.Fatalf("open raw db: %v", err)
+	}
+	defer raw.Close()
+	var id int64
+	if err := raw.QueryRowContext(ctx, "SELECT id FROM playable_item WHERE pid = ?", string(pid)).Scan(&id); err != nil {
+		t.Fatalf("item rowid: %v", err)
+	}
+	if err := lib.store.ApplyItemFields(ctx, model.ItemFieldsEnrichment{
+		ItemID: id, PID: pid, Matched: true, Provider: "test", Fields: fields,
+	}); err != nil {
+		t.Fatalf("ApplyItemFields: %v", err)
+	}
+}
+
+// TestEnrichmentWriteBackUnwritableContainer: a file WaxLabel refuses to write at all
+// (it reads ASF and never writes it) cannot be retried into success, so it is counted
+// and diagnosed as unrepresented rather than failed, and the next pass leaves it alone
+// instead of reporting the same file as a fresh failure every run.
+func TestEnrichmentWriteBackUnwritableContainer(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	lib, err := Open(ctx, Options{
+		DBPath: db, WriteEnrichmentTags: true,
+		Roots: []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}},
+	})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer lib.Close()
+
+	writeRaw(t, filepath.Join(root, "a.wma"), testaudio.Fixture(t, "mono-8k.wma"))
+	if _, err := lib.Scan(ctx, ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	items, err := lib.Query(ctx, query.New(query.EntityItems).Build(), "")
+	if err != nil || len(items) != 1 {
+		t.Fatalf("query items: %v (n=%d)", err, len(items))
+	}
+	enrichItemFields(t, ctx, lib, db, items[0].PID, map[string]string{"composer": "Someone"})
+
+	c, err := lib.writeEnrichmentTags(ctx, nil)
+	if err != nil {
+		t.Fatalf("write enrichment tags: %v", err)
+	}
+	if c.written != 0 || c.failed != 0 || c.unrepresented != 1 {
+		t.Fatalf("counts = {written:%d failed:%d unrepresented:%d}, want {0 0 1}: a container that cannot take the write is not a failure",
+			c.written, c.failed, c.unrepresented)
+	}
+	diags, err := lib.store.FileDiagnostics(ctx, model.DiagnosticFilter{FilePID: items[0].FilePID, Origin: model.OriginEnrichment})
+	if err != nil {
+		t.Fatalf("diagnostics: %v", err)
+	}
+	if len(diags) != 1 || diags[0].Code != model.DiagTagWriteLost {
+		t.Fatalf("diagnostics = %+v, want one tag_write_lost", diags)
+	}
+
+	// A lost value is settled, so the next pass does not reopen the file.
+	c, err = lib.writeEnrichmentTags(ctx, nil)
+	if err != nil {
+		t.Fatalf("write enrichment tags again: %v", err)
+	}
+	if c.written+c.failed+c.unrepresented != 0 {
+		t.Fatalf("counts on the next pass = {written:%d failed:%d unrepresented:%d}, want all zero", c.written, c.failed, c.unrepresented)
+	}
+}
+
+// TestEnrichmentWriteBackMarksAbandonedParts: when a book's primary part cannot be
+// written, the parts skipped behind it stay owed and take the same drift row, so the
+// next pass reopens the whole book rather than the primary alone. Written apart, the primary
+// would carry an identifier the parts lack, and identity.BookKey would split the book
+// on the next scan.
+func TestEnrichmentWriteBackMarksAbandonedParts(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	lib, err := Open(ctx, Options{
+		DBPath: db, WriteEnrichmentTags: true,
+		Roots: []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}},
+	})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer lib.Close()
+
+	bytesOf := map[string][]byte{}
+	for i, seed := range []byte{11, 12, 13} {
+		p := filepath.Join(root, "part"+string(rune('1'+i))+".m4b")
+		bytesOf[p] = testaudio.BuildMP3WithAudio("Chapter "+string(rune('1'+i)), "Tolkien", "The Hobbit", i+1, testaudio.AudioWithSeed(seed))
+		writeRaw(t, p, bytesOf[p])
+	}
+	if _, err := lib.Scan(ctx, ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	books, err := lib.Query(ctx, query.New(query.EntityItems).Where("kind", query.OpIs, "book").Build(), "")
+	if err != nil || len(books) != 1 {
+		t.Fatalf("book query: %d books (err %v), want 1", len(books), err)
+	}
+	pid := books[0].PID
+	enrichItemFields(t, ctx, lib, db, pid, map[string]string{"asin": "B002V0QUOC"})
+
+	parts, err := lib.store.ItemFiles(ctx, pid)
+	if err != nil || len(parts) != 3 {
+		t.Fatalf("book parts: %d (err %v), want 3", len(parts), err)
+	}
+	var primary string
+	for _, p := range parts {
+		if p.Role == "primary" {
+			primary = p.DisplayPath
+		}
+	}
+	if primary == "" {
+		t.Fatal("no primary part")
+	}
+	// The primary vanishes, so its write fails and the parts behind it are skipped.
+	if err := os.Remove(primary); err != nil {
+		t.Fatal(err)
+	}
+	c, err := lib.writeEnrichmentTags(ctx, nil)
+	if err != nil {
+		t.Fatalf("write enrichment tags: %v", err)
+	}
+	if c.written != 0 || c.failed != 1 || c.skipped != 2 {
+		t.Fatalf("counts = {written:%d failed:%d skipped:%d}, want {0 1 2}", c.written, c.failed, c.skipped)
+	}
+	diags, err := lib.store.FileDiagnostics(ctx, model.DiagnosticFilter{ItemPID: pid, Origin: model.OriginEnrichment})
+	if err != nil {
+		t.Fatalf("diagnostics: %v", err)
+	}
+	if len(diags) != 3 {
+		t.Fatalf("diagnostics = %+v, want every part marked, the skipped ones included", diags)
+	}
+	for _, d := range diags {
+		if d.Code != model.DiagTagWriteUnsynced {
+			t.Errorf("%s: code %s, want tag_write_unsynced", d.DisplayPath, d.Code)
+		}
+	}
+
+	// The primary is back. Nothing was settled, so the next pass brings the whole book
+	// in, primary first.
+	writeRaw(t, primary, bytesOf[primary])
+	c, err = lib.writeEnrichmentTags(ctx, nil)
+	if err != nil {
+		t.Fatalf("write enrichment tags again: %v", err)
+	}
+	if c.written != 3 || c.failed != 0 || c.skipped != 0 {
+		t.Fatalf("counts on retry = {written:%d failed:%d skipped:%d}, want {3 0 0}", c.written, c.failed, c.skipped)
+	}
+	diags, err = lib.store.FileDiagnostics(ctx, model.DiagnosticFilter{ItemPID: pid, Origin: model.OriginEnrichment})
+	if err != nil {
+		t.Fatalf("diagnostics after retry: %v", err)
+	}
+	if len(diags) != 0 {
+		t.Errorf("diagnostics after retry = %+v, want none", diags)
+	}
+	for p := range bytesOf {
+		fm, err := meta.NewReader().Read(ctx, p)
+		if err != nil {
+			t.Fatalf("re-read %s: %v", p, err)
+		}
+		if fm.Tags.ASIN != "B002V0QUOC" {
+			t.Errorf("%s ASIN = %q, want the enriched identifier on every part", filepath.Base(p), fm.Tags.ASIN)
+		}
+	}
+	// The book stays whole through the scan that recomputes identity from the tags.
+	if _, err := lib.Scan(ctx, ScanRequest{Force: true}); err != nil {
+		t.Fatalf("scan --force: %v", err)
+	}
+	books, err = lib.Query(ctx, query.New(query.EntityItems).Where("kind", query.OpIs, "book").Build(), "")
+	if err != nil || len(books) != 1 || books[0].PID != pid {
+		t.Fatalf("after the rescan: %d books (err %v), want the one re-anchored book %s", len(books), err, pid)
+	}
+}
+
+// TestEnrichmentWriteBackSettlesAClearedValue: a value whose write failed stays owed,
+// and if a retag and rescan clear it from the catalog before the retry, the next pass
+// finds nothing to write. That settles the file and clears the drift row rather than
+// leaving a stale mark that every later pass would scan past.
+func TestEnrichmentWriteBackSettlesAClearedValue(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores the read-only bit, so the write would succeed")
+	}
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	lib, err := Open(ctx, Options{
+		DBPath: db, WriteEnrichmentTags: true,
+		Roots: []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}},
+	})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer lib.Close()
+
+	path := filepath.Join(root, "a.mp3")
+	audio := testaudio.AudioWithSeed(1)
+	writeRaw(t, path, testaudio.BuildMP3WithAudio("A", "The Band", "One", 1, audio))
+	if _, err := lib.Scan(ctx, ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	items, err := lib.Query(ctx, query.New(query.EntityItems).Build(), "")
+	if err != nil || len(items) != 1 {
+		t.Fatalf("query items: %v (n=%d)", err, len(items))
+	}
+	enrichItemFields(t, ctx, lib, db, items[0].PID, map[string]string{"composer": "Someone"})
+
+	if err := os.Chmod(root, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(root, 0o755) })
+	var handle *os.File
+	if runtime.GOOS == "windows" {
+		if handle, err = os.Open(path); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c, err := lib.writeEnrichmentTags(ctx, nil)
+	if err != nil {
+		t.Fatalf("write enrichment tags: %v", err)
+	}
+	if c.failed != 1 {
+		t.Fatalf("failed = %d, want the read-only write counted", c.failed)
+	}
+	if handle != nil {
+		_ = handle.Close()
+	}
+	if err := os.Chmod(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Retagged by another tool and rescanned: the composer column is rebuilt from a
+	// file that never carried it, and the enrichment provenance row outlives the value.
+	writeRaw(t, path, testaudio.BuildMP3WithAudio("A (remaster)", "The Band", "One", 1, audio))
+	if _, err := lib.Scan(ctx, ScanRequest{}); err != nil {
+		t.Fatalf("rescan: %v", err)
+	}
+	c, err = lib.writeEnrichmentTags(ctx, nil)
+	if err != nil {
+		t.Fatalf("write enrichment tags after the rescan: %v", err)
+	}
+	if c.written+c.failed+c.unrepresented != 0 {
+		t.Fatalf("counts = {written:%d failed:%d unrepresented:%d}, want all zero with nothing left to write",
+			c.written, c.failed, c.unrepresented)
+	}
+	diags, err := lib.store.FileDiagnostics(ctx, model.DiagnosticFilter{FilePID: items[0].FilePID, Origin: model.OriginEnrichment})
+	if err != nil {
+		t.Fatalf("diagnostics: %v", err)
+	}
+	if len(diags) != 0 {
+		t.Errorf("diagnostics = %+v, want the drift cleared once nothing is owed", diags)
+	}
+	rows, err := lib.store.EnrichmentWriteback(ctx, nil)
+	if err != nil {
+		t.Fatalf("EnrichmentWriteback: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Errorf("owed rows = %+v, want the file settled", rows)
 	}
 }

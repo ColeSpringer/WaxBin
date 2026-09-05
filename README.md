@@ -162,7 +162,9 @@ never alters the audio):
   `GENRE`/`BPM`/`ISRC`/`COMPOSER`/`DATE`, a book's `ASIN`/`ISBN`/`PUBLISHER`/`GENRE`/
   `DATE`/narrator) plus an album's `LABEL` across its members. Without it those values
   live only in the catalog, which a rescan rebuilds from the file's tags, so the next
-  retag clears them.
+  retag clears them. An unlimited pass writes every value not yet on its file, so the
+  first pass with it on catches up on earlier passes, and a write that fails is retried
+  by the next; a scoped or `--limit` pass writes only within what it looked up.
 - An organize profile with `tag_write` corrects `albumArtist` (literal
   `Various Artists` for compilations) and disc/track numbering on disk as it moves
   files, skipping locked fields and re-tagging before the move so a failure aborts

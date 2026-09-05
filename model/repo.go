@@ -280,6 +280,15 @@ type EnrichedTagRow struct {
 	Size      int64
 	MTimeNS   int64
 	IsPrimary bool // the part a book re-anchor should read back from
+	// Newest is the unix ns of the newest enrichment value on the item, which is what
+	// a settled write records against the file. Fields may be empty when a rescan
+	// cleared the values the provenance rows still name; the file is settled either way.
+	Newest int64
+	// Label is the track's album label when enrichment wrote it, with the unix ns of
+	// that write, so the one rewrite carries it; both are zero for a book or an album
+	// with no enrichment label.
+	Label          string
+	LabelUpdatedAt int64
 
 	Fields map[string]string
 }
@@ -468,14 +477,21 @@ type JobStore interface {
 	ReclaimOrphans(ctx context.Context, ts int64) (int, error)
 }
 
-// EntityFieldValue is one entity-level field an enrichment write-back should fan across
-// the entity's member files: which entity, which field, and the value the catalog holds.
-// It exists because an entity field lives on the entity row rather than on any item, so
-// it has no field_provenance row and cannot ride the per-item write-back select.
-type EntityFieldValue struct {
+// EntityFieldFile is one member file still owed an entity-level enrichment value: which
+// entity and field, the value the catalog holds, when enrichment wrote it, and the file
+// as a write needs it. It exists because an entity field lives on the entity row rather
+// than on any item, so it has no field_provenance row of its own to ride the per-item
+// write-back select on.
+type EntityFieldFile struct {
 	EntityType MergeEntity
-	PID        PID
 	Field      string
 	Value      string
 	UpdatedAt  int64 // unix ns the curation row was written
+	FilePID    PID
+	Path       []byte
+	Size       int64
+	MTimeNS    int64
+	// Shared says the file backs several items or carries an offset window, which the
+	// write-back refuses rather than rewrites for one of them.
+	Shared bool
 }

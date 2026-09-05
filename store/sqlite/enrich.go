@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -1513,36 +1514,42 @@ type logger interface {
 }
 
 // enrichedTagSelect finds every file an enrichment write-back should stamp: the items
-// carrying a field_provenance row this pass wrote, joined to their backing files. A
-// book repeats across its parts because asin, isbn, and edition feed identity.BookKey, so
-// parts disagreeing on them would not group on the next scan; a track has one file. The
-// primary part sorts first, so a caller can abandon a book whose primary fails before
-// touching the rest.
+// carrying enrichment field_provenance rows, joined to their backing files, for each file
+// whose settle stamp is older than the newest of those rows. A book repeats across its
+// parts because asin, isbn, and edition feed identity.BookKey, so parts disagreeing on
+// them would not group on the next scan; a track has one file. The primary part sorts
+// first, so a caller can abandon a book whose primary fails before touching the rest.
 //
-// The ?1 bound is the pass's start, and it is what keeps this from being a full-library
-// rewrite: without it every run reopens and reparses every file any past pass ever
-// enriched. A --force run refills the values, which moves updated_at, so it re-writes
-// them too.
+// The settle stamp (file.enrich_settled_at) is what keeps this from being a full-library
+// rewrite, and what makes it complete: a landed write settles the file at the newest
+// value it carried, so nothing reopens it until enrichment fills something newer, while
+// a write that failed, a pass that was canceled, or a pass that ran with write-tags off
+// leaves the file owed. Inferring the set from a pass's start time instead lost every
+// one of those, since the fills are fill-when-empty and a filled field's updated_at never
+// moves again.
 //
 // One aggregated subquery names an item's enrichment-written fields, rather than a LEFT
 // JOIN per field: the fields walks made that list open-ended, and the columns are read
 // unconditionally with Go keeping only the ones the concat names. Locked rows are
 // excluded because a curated value did not come from the file, and a field the user
-// tagged or edited carries a different source and never appears.
+// tagged or edited carries a different source and never appears. Every enrichment field
+// on an owed item is written, the older ones along with the newest: a file being
+// rewritten anyway costs nothing more to stamp fully.
 //
-// The ?1 bound decides which ITEMS are reopened, not which of their fields are written,
-// which is why the subquery collects every enrichment field and the outer clause tests
-// the newest of them. A file being rewritten anyway costs nothing more to stamp fully,
-// and stamping fully is what heals an earlier pass whose write failed or ran with
-// write-tags off; bounding each field separately would leave that value catalog-only for
-// good, which is the loss this pass exists to prevent.
+// A track's row also carries its album's enrichment label and when it was written, so
+// the one rewrite stamps both and the file is owed by whichever is newer than the stamp.
+// The label lives on the album row, so it has no field_provenance row of its own; the
+// members with no enrichment field to carry it on are EnrichedAlbumLabelFiles' to write.
 //
 // The item_file join drops virtual tracks (start_frames IS NULL): one shared file backs
 // N cue-carved tracks, so an ungated join would rewrite that file once per track, each
 // after the first carrying a stale size/mtime for the optimistic update.
+//
+// The /*SCOPE*/ marker takes a scoped run's reach clause; see enrichWriteScopeClause.
 const enrichedTagSelect = `SELECT pi.pid, f.pid, pi.kind, f.path, f.size, f.mtime_ns,
 		CASE WHEN itf.role = 'primary' THEN 1 ELSE 0 END,
-		fpw.fields,
+		fpw.fields, fpw.newest,
+		CASE WHEN lab.entity_id IS NULL THEN '' ELSE COALESCE(al.label,'') END, COALESCE(lab.updated_at, 0),
 		COALESCE(t.genre,''), COALESCE(NULLIF(CAST(t.bpm AS TEXT),'0'),''),
 		COALESCE(t.isrc,''), COALESCE(t.composer,''), COALESCE(NULLIF(CAST(t.year AS TEXT),'0'),''),
 		COALESCE(bk.asin,''), COALESCE(bk.isbn,''), COALESCE(bk.publisher,''),
@@ -1556,8 +1563,56 @@ const enrichedTagSelect = `SELECT pi.pid, f.pid, pi.kind, f.path, f.size, f.mtim
 	      GROUP BY item_id) fpw ON fpw.item_id = pi.id
 	LEFT JOIN book bk ON bk.item_id = pi.id
 	LEFT JOIN track t ON t.item_id = pi.id
-	WHERE pi.state = 'present' AND pi.kind IN ('track','book') AND fpw.newest >= ?1
+	LEFT JOIN album al ON al.id = t.album_id
+	LEFT JOIN entity_curation lab ON ` + enrichmentLabelRowJoin + `
+	WHERE pi.state = 'present' AND pi.kind IN ('track','book')
+	  AND (fpw.newest > f.enrich_settled_at OR COALESCE(lab.updated_at, 0) > f.enrich_settled_at)/*SCOPE*/
 	ORDER BY pi.id, CASE WHEN itf.role = 'primary' THEN 0 ELSE 1 END, itf.position, f.id`
+
+// enrichmentLabelRowJoin joins an album alias al to its enrichment-written, unlocked
+// label curation row as lab. A locked row is left out for the reason the item select
+// leaves one out: a curated value did not come from the file.
+const enrichmentLabelRowJoin = `lab.entity_type = 'album' AND lab.entity_id = al.id AND lab.field = 'label'
+	  AND lab.source = 'enrichment' AND lab.locked = 0`
+
+// enrichWriteScopeClause is the reach of a scoped enrichment run, for the write-back
+// selects: the run's items, the members of its albums, and the members of its release
+// groups' albums, which together are every item the run could have filled a written
+// field or an album label on. Artists are left out on purpose, since artist enrichment
+// fills nothing the write-back writes and an artist reaches every track it is credited
+// on. A nil scope is a full run and reaches everything.
+func enrichWriteScopeClause(scope *model.EnrichScope, itemCol, albumCol string) (string, []any) {
+	if scope == nil {
+		return "", nil
+	}
+	var parts []string
+	var args []any
+	bind := func(ids []int64) {
+		for _, id := range ids {
+			args = append(args, id)
+		}
+	}
+	// One item list: a scope names the same item for its fields and its lyrics.
+	items := slices.Compact(slices.Sorted(slices.Values(
+		slices.Concat(scope.FieldsItemIDs, scope.BookItemIDs, scope.LyricsItemIDs))))
+	if len(items) > 0 {
+		parts = append(parts, itemCol+" IN "+placeholders(len(items)))
+		bind(items)
+	}
+	if len(scope.AlbumIDs) > 0 {
+		parts = append(parts, albumCol+" IN "+placeholders(len(scope.AlbumIDs)))
+		bind(scope.AlbumIDs)
+	}
+	if len(scope.ReleaseGroupIDs) > 0 {
+		parts = append(parts, albumCol+" IN (SELECT id FROM album WHERE release_group_id IN "+
+			placeholders(len(scope.ReleaseGroupIDs))+")")
+		bind(scope.ReleaseGroupIDs)
+	}
+	if len(parts) == 0 {
+		return " AND 1=0", nil
+	}
+	return " AND (" + strings.Join(parts, " OR ") + ")", args
+}
 
 // enrichedTagFieldOrder is the field each scanned value column belongs to, per kind. It
 // is the one place the select's column order and the field names are tied together.
@@ -1566,15 +1621,17 @@ var enrichedTagFieldOrder = map[model.Kind][]string{
 	model.KindBook:  {"asin", "isbn", "publisher", "genre", "year", "narrator", "subtitle", "edition", "description"},
 }
 
-// EnrichmentWriteback returns the files an enrichment write-back should stamp, with the
-// values to write. sinceNS bounds it to the values written at or after that time, which
-// a caller stamps before the pass it is about to mirror. A row with every value empty is
-// filtered out here rather than left for the caller: it means the provenance row
-// outlived the value (a rescan cleared it), and writing nothing is not the same as
-// clearing the tag.
-func (s *Store) EnrichmentWriteback(ctx context.Context, sinceNS int64) ([]model.EnrichedTagRow, error) {
+// EnrichmentWriteback returns the files owed an enrichment write, with the values to
+// write: every file whose item carries an enrichment value newer than the file's settle
+// stamp, or only those within scope's reach when scope is not nil. A row with every value
+// empty is returned rather than dropped: the provenance rows outlived the values (a
+// rescan cleared them), and the caller settles the file with nothing to write, since
+// writing nothing is not the same as clearing the tag and a file left owed would be
+// scanned past on every pass.
+func (s *Store) EnrichmentWriteback(ctx context.Context, scope *model.EnrichScope) ([]model.EnrichedTagRow, error) {
 	const op = "store.EnrichmentWriteback"
-	rows, err := s.read.QueryContext(ctx, enrichedTagSelect, sinceNS)
+	clause, args := enrichWriteScopeClause(scope, "pi.id", "t.album_id")
+	rows, err := s.read.QueryContext(ctx, strings.Replace(enrichedTagSelect, "/*SCOPE*/", clause, 1), args...)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
@@ -1587,7 +1644,7 @@ func (s *Store) EnrichmentWriteback(ctx context.Context, sinceNS int64) ([]model
 		var trackGenre, bpm, isrc, composer, trackYear string
 		var asin, isbn, publisher, bookGenre, bookYear, narrator, subtitle, edition, description string
 		if err := rows.Scan(&r.ItemPID, &r.FilePID, &r.Kind, &r.Path, &r.Size, &r.MTimeNS,
-			&primary, &written,
+			&primary, &written, &r.Newest, &r.Label, &r.LabelUpdatedAt,
 			&trackGenre, &bpm, &isrc, &composer, &trackYear,
 			&asin, &isbn, &publisher, &bookGenre, &bookYear, &narrator,
 			&subtitle, &edition, &description); err != nil {
@@ -1612,9 +1669,6 @@ func (s *Store) EnrichmentWriteback(ctx context.Context, sinceNS int64) ([]model
 				r.Fields = make(map[string]string, len(values))
 			}
 			r.Fields[f] = values[i]
-		}
-		if len(r.Fields) == 0 {
-			continue
 		}
 		out = append(out, r)
 	}
@@ -2115,38 +2169,67 @@ func (s *Store) applyAlbumYearTx(ctx context.Context, tx *sql.Tx, in model.Album
 	return true, alive > 0, nil
 }
 
-// EnrichedAlbumLabels returns the albums whose label enrichment wrote at or after
-// sinceNS, each with the timestamp of that write, for the album write-back fan-out. The
-// label lands on the album row rather than on any item, so it carries no
-// field_provenance row and never reaches EnrichmentWriteback; its curation row is what
-// records the write.
+// EnrichedAlbumLabelFiles returns the member files still owed an enrichment-written
+// album label, from one query over the label curation rows and their members: the
+// label, when enrichment wrote it, and the file as a write needs it. A file is owed
+// while the label is newer than its settle stamp; scope, when not nil, bounds the
+// members to a scoped run's reach. The label lands on the album row rather than on any
+// item, so it carries no field_provenance row; a member with enrichment fields of its
+// own takes the label through EnrichmentWriteback instead, and the caller strikes
+// those from this set.
 //
-// The caller passes 0 when it wants every enrichment label rather than a recent one, and
-// uses UpdatedAt to decide which of them are worth opening a file for on their own.
-//
-// A locked row is excluded for the reason the item select excludes one: a curated value
-// did not come from the file.
-func (s *Store) EnrichedAlbumLabels(ctx context.Context, sinceNS int64) ([]model.EntityFieldValue, error) {
-	const op = "store.EnrichedAlbumLabels"
-	rows, err := s.read.QueryContext(ctx, `SELECT al.pid, COALESCE(al.label,''), ec.updated_at
-		FROM entity_curation ec JOIN album al ON al.id = ec.entity_id
-		WHERE ec.entity_type = 'album' AND ec.field = 'label'
-		  AND ec.source = 'enrichment' AND ec.locked = 0 AND ec.updated_at >= ?
-		  AND COALESCE(al.label,'') <> ''
-		ORDER BY al.id`, sinceNS)
+// Only a present item's file is returned, since a missing one's write would fail on
+// every pass and never settle. A shared or virtual file is returned and flagged, since
+// the caller records the refusal and settles it; it is never opened. The rows come in
+// album order, so a file two albums somehow claim is planned for the lower one.
+func (s *Store) EnrichedAlbumLabelFiles(ctx context.Context, scope *model.EnrichScope) ([]model.EntityFieldFile, error) {
+	const op = "store.EnrichedAlbumLabelFiles"
+	clause, args := enrichWriteScopeClause(scope, "pi.id", "al.id")
+	rows, err := s.read.QueryContext(ctx, `SELECT DISTINCT al.id, f.pid, f.path, f.size, f.mtime_ns,
+			COALESCE(al.label,''), lab.updated_at,
+			CASE WHEN `+fileSharedOrVirtualExpr+` THEN 1 ELSE 0 END
+		FROM entity_curation lab
+		JOIN album al ON `+enrichmentLabelRowJoin+`
+		JOIN track t ON t.album_id = al.id
+		JOIN playable_item pi ON pi.id = t.item_id AND pi.state = 'present'
+		JOIN item_file itf ON itf.item_id = t.item_id AND itf.role = 'primary'
+		JOIN file f ON f.id = itf.file_id
+		WHERE COALESCE(al.label,'') <> '' AND lab.updated_at > f.enrich_settled_at`+clause+`
+		ORDER BY al.id, f.pid`, args...)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
 	defer rows.Close()
-	var out []model.EntityFieldValue
+	var out []model.EntityFieldFile
 	for rows.Next() {
-		v := model.EntityFieldValue{EntityType: model.MergeAlbum, Field: "label"}
-		var pid string
-		if err := rows.Scan(&pid, &v.Value, &v.UpdatedAt); err != nil {
+		v := model.EntityFieldFile{EntityType: model.MergeAlbum, Field: "label"}
+		var albumID int64
+		var shared int
+		if err := rows.Scan(&albumID, &v.FilePID, &v.Path, &v.Size, &v.MTimeNS, &v.Value, &v.UpdatedAt, &shared); err != nil {
 			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
-		v.PID = model.PID(pid)
+		v.Shared = shared == 1
 		out = append(out, v)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	return out, nil
+}
+
+// SettleEnrichmentWrite records that the enrichment tag write-back has settled every
+// enrichment value on a file up to upTo (the newest one it carried, or recorded as
+// unable to land), so only a newer value reopens the file. The stamp never moves back,
+// and a file that vanished since the select is not an error: there is nothing left to
+// settle.
+func (s *Store) SettleEnrichmentWrite(ctx context.Context, filePID model.PID, upTo int64) error {
+	const op = "store.SettleEnrichmentWrite"
+	return s.writeTx(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx,
+			"UPDATE file SET enrich_settled_at = MAX(enrich_settled_at, ?) WHERE pid = ?",
+			upTo, string(filePID)); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		return nil
+	})
 }

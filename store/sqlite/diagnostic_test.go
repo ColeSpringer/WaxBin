@@ -469,3 +469,57 @@ func TestDiagnosticCoverageReflectsScan(t *testing.T) {
 		t.Errorf("stale = %d, want 0: a full-path scan stamps diag_version", stale)
 	}
 }
+
+// TestAddFileDiagnosticKeepsTheStandingRows: a write that fails lands nothing and proves
+// nothing about the file, so the rows a landed write left (a value the format could not
+// store) still hold. Adding the failure's own row leaves them in place, where the
+// wholesale replace would erase them, and adding the same row again updates it rather
+// than doubling it.
+func TestAddFileDiagnosticKeepsTheStandingRows(t *testing.T) {
+	ctx := context.Background()
+	st, lib := openTestStore(t)
+	res, err := st.PutScannedTrack(ctx, input(lib.ID, "/lib/x.mp3", "ess-x", "c-x", "X"))
+	if err != nil {
+		t.Fatalf("PutScannedTrack: %v", err)
+	}
+	lost := []model.FileDiagnostic{{Code: model.DiagTagWriteLost, TagKey: "BPM", Detail: "cannot store"}}
+	if err := st.PutFileDiagnostics(ctx, res.FilePID, model.OriginEnrichment, lost); err != nil {
+		t.Fatalf("PutFileDiagnostics: %v", err)
+	}
+	unsynced := model.FileDiagnostic{Code: model.DiagTagWriteUnsynced, Detail: "read-only"}
+	if err := st.AddFileDiagnostic(ctx, res.FilePID, model.OriginEnrichment, unsynced); err != nil {
+		t.Fatalf("AddFileDiagnostic: %v", err)
+	}
+	unsynced.Detail = "permission denied"
+	if err := st.AddFileDiagnostic(ctx, res.FilePID, model.OriginEnrichment, unsynced); err != nil {
+		t.Fatalf("AddFileDiagnostic again: %v", err)
+	}
+	ds, err := st.FileDiagnostics(ctx, model.DiagnosticFilter{FilePID: res.FilePID, Origin: model.OriginEnrichment})
+	if err != nil {
+		t.Fatalf("FileDiagnostics: %v", err)
+	}
+	if len(ds) != 2 {
+		t.Fatalf("rows = %+v, want the standing lost row beside one unsynced row", ds)
+	}
+	byCode := map[model.DiagnosticCode]model.FileDiagnostic{}
+	for _, d := range ds {
+		byCode[d.Code] = d
+	}
+	if d, ok := byCode[model.DiagTagWriteLost]; !ok || d.TagKey != "BPM" {
+		t.Errorf("lost row = %+v, want it kept", d)
+	}
+	if d, ok := byCode[model.DiagTagWriteUnsynced]; !ok || d.Detail != "permission denied" || d.Severity != model.SeverityWarn {
+		t.Errorf("unsynced row = %+v, want the latest detail at warn severity", d)
+	}
+	// The origin's replace still owns the whole set, so a clean write clears both.
+	if err := st.PutFileDiagnostics(ctx, res.FilePID, model.OriginEnrichment, nil); err != nil {
+		t.Fatalf("clear: %v", err)
+	}
+	ds, err = st.FileDiagnostics(ctx, model.DiagnosticFilter{FilePID: res.FilePID})
+	if err != nil {
+		t.Fatalf("FileDiagnostics after clear: %v", err)
+	}
+	if len(ds) != 0 {
+		t.Errorf("rows after a clean write = %+v, want none", ds)
+	}
+}

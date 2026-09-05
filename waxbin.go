@@ -955,8 +955,10 @@ type EnrichOptions struct {
 	EntityType read.EntityKind // with EntityPID: scope to one entity
 	EntityPID  model.PID
 
-	// WriteTags writes what the pass filled back into the backing files, ORed with
-	// the library's WriteEnrichmentTags option so a run can opt in without config.
+	// WriteTags writes what enrichment filled back into the backing files: everything
+	// not yet on disk for an unlimited full run, the scope's share of it for a scoped
+	// one, and what a limited run looked up. It is ORed with the library's
+	// WriteEnrichmentTags option so a run can opt in without config.
 	WriteTags bool
 }
 
@@ -1611,7 +1613,7 @@ func (l *Library) writeBackFiles(ctx context.Context, op string, origin model.Di
 		file, err := l.store.FileByPID(ctx, ref.FilePID)
 		if err != nil {
 			l.log.Warn("write-back file lookup", "file", ref.FilePID, "err", err)
-			l.recordWriteBackDrift(ctx, ref.FilePID, err.Error())
+			l.recordWriteBackDrift(ctx, origin, ref.FilePID, err.Error())
 			wbErr.Failures = append(wbErr.Failures, WriteBackFailure{FilePID: ref.FilePID, Path: string(ref.Path), Reason: err.Error()})
 			continue
 		}
@@ -1623,13 +1625,13 @@ func (l *Library) writeBackFiles(ctx context.Context, op string, origin model.Di
 		shared, err := l.store.FileSharedOrVirtual(ctx, ref.FilePID)
 		if err != nil {
 			l.log.Warn("write-back share check", "path", path, "err", err)
-			l.recordWriteBackDrift(ctx, ref.FilePID, err.Error())
+			l.recordWriteBackDrift(ctx, origin, ref.FilePID, err.Error())
 			wbErr.Failures = append(wbErr.Failures, WriteBackFailure{FilePID: ref.FilePID, Path: path, Reason: err.Error()})
 			continue
 		}
 		if shared {
 			const reason = "on-disk tag write-back is unavailable for a file shared by multiple items"
-			l.recordWriteBackDrift(ctx, ref.FilePID, reason)
+			l.recordWriteBackDrift(ctx, origin, ref.FilePID, reason)
 			wbErr.Failures = append(wbErr.Failures, WriteBackFailure{FilePID: ref.FilePID, Path: path, Reason: reason})
 			continue
 		}
@@ -1637,7 +1639,7 @@ func (l *Library) writeBackFiles(ctx context.Context, op string, origin model.Di
 		res, err := apply(w, path)
 		if err != nil {
 			l.log.Warn("tag write-back", "path", path, "err", err)
-			l.recordWriteBackDrift(ctx, ref.FilePID, err.Error())
+			l.recordWriteBackDrift(ctx, origin, ref.FilePID, err.Error())
 			wbErr.Failures = append(wbErr.Failures, WriteBackFailure{FilePID: ref.FilePID, Path: path, Reason: err.Error()})
 			continue
 		}
@@ -2005,7 +2007,7 @@ func (l *Library) refuseWriteBack(ctx context.Context, itemPID model.PID, edits 
 // shares with the credit write-back, which refuses one role while writing another.
 func (l *Library) noteRefusal(ctx context.Context, files []model.ItemFileRef, wbErr *WriteBackError, reason string) {
 	for _, ref := range files {
-		l.recordWriteBackDrift(ctx, ref.FilePID, reason)
+		l.recordWriteBackDrift(ctx, model.OriginEdit, ref.FilePID, reason)
 	}
 	noteRefusalFailures(files, wbErr, reason)
 }
@@ -2025,16 +2027,18 @@ func noteRefusalFailures(files []model.ItemFileRef, wbErr *WriteBackError, reaso
 
 // recordWriteBackDrift stamps a queryable diagnostic that a file's on-disk tags are
 // out of sync with the catalog because write-back did not apply, so WaxDeck's review
-// queue can find it. It is best-effort, and a diagnostic write failure is logged
-// rather than surfaced.
-func (l *Library) recordWriteBackDrift(ctx context.Context, filePID model.PID, detail string) {
-	diags := []model.FileDiagnostic{{
+// queue can find it. It is recorded under the writer's origin, beside whatever that
+// writer's last landed write left, since a write that did not apply proves nothing
+// about the file. It is best-effort, and a diagnostic write failure is logged rather
+// than surfaced.
+func (l *Library) recordWriteBackDrift(ctx context.Context, origin model.DiagnosticOrigin, filePID model.PID, detail string) {
+	d := model.FileDiagnostic{
 		Code:     model.DiagTagWriteUnsynced,
 		Severity: model.SeverityWarn,
 		Detail:   detail,
-	}}
-	if err := l.store.PutFileDiagnostics(ctx, filePID, model.OriginEdit, diags); err != nil {
-		l.log.Warn("edit drift diagnostic", "file", filePID, "err", err)
+	}
+	if err := l.store.AddFileDiagnostic(ctx, filePID, origin, d); err != nil {
+		l.log.Warn("write-back drift diagnostic", "file", filePID, "err", err)
 	}
 }
 

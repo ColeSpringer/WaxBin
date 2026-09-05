@@ -416,14 +416,21 @@ type Result struct {
 	// On-disk write-back tallies, all zero unless the run wrote tags. They live here
 	// rather than on the facade's wrapper because a background job serializes this
 	// struct alone, and a run where every write failed must not read the same as one
-	// with nothing to write. Unrepresented counts files whose write was lossy (a key
-	// the format could not store, or content the rewrite dropped), which is not a
-	// failure. Skipped counts parts left unwritten because their book's primary part
-	// failed.
+	// with nothing to write. Unrepresented counts files whose value cannot land and is
+	// not retried: a lossy write (a key the format could not store, or content the
+	// rewrite dropped), a file the tag library refuses to write, or a shared file
+	// refused for an album label. Failed counts files the next pass that writes tags
+	// retries. Skipped counts parts left unwritten because their book's primary part
+	// could not be written.
 	TagsWritten       int
 	TagsFailed        int
 	TagsUnrepresented int
 	TagsSkipped       int
+
+	// Reach is every target the run looked up, by phase, in the scope shape. A
+	// limited run's tag write-back bounds itself to it, so --limit caps that work
+	// too. It is this run's bookkeeping, not part of the serialized result.
+	Reach *model.EnrichScope `json:"-"`
 }
 
 // total counts the entities a run has processed, one term per phase. Every phase that
@@ -456,6 +463,7 @@ func (s *Service) Run(ctx context.Context, opts RunOptions, hb Heartbeat) (*Resu
 	// and cached provider responses are bypassed and the lookup actually re-runs.
 	scope := opts.Scope
 	st := &runState{force: opts.Force || scope != nil, browsedGroups: map[string]bool{}}
+	res.Reach = &model.EnrichScope{}
 	var artistIDs, rgIDs, albumIDs, bookIDs, lyricsIDs, fieldsIDs []int64
 	if scope != nil {
 		artistIDs, rgIDs, albumIDs = scope.ArtistIDs, scope.ReleaseGroupIDs, scope.AlbumIDs
@@ -525,7 +533,7 @@ func (s *Service) Run(ctx context.Context, opts RunOptions, hb Heartbeat) (*Resu
 	var phases []phase
 	if identityRuns(artistIDs) {
 		phases = append(phases, phase{
-			label: "artist", enriched: &res.ArtistsEnriched, matched: &res.ArtistsMatched,
+			label: "artist", enriched: &res.ArtistsEnriched, matched: &res.ArtistsMatched, reach: &res.Reach.ArtistIDs,
 			fetch: func(ctx context.Context, after int64, lim int) ([]model.EnrichTarget, error) {
 				return s.store.ArtistsNeedingEnrichment(ctx, st.force, after, lim, artistIDs)
 			},
@@ -536,7 +544,7 @@ func (s *Service) Run(ctx context.Context, opts RunOptions, hb Heartbeat) (*Resu
 	}
 	if identityRuns(rgIDs) {
 		phases = append(phases, phase{
-			label: "album", enriched: &res.ReleaseGroupsEnriched, matched: &res.ReleaseGroupsMatched,
+			label: "album", enriched: &res.ReleaseGroupsEnriched, matched: &res.ReleaseGroupsMatched, reach: &res.Reach.ReleaseGroupIDs,
 			fetch: func(ctx context.Context, after int64, lim int) ([]model.EnrichTarget, error) {
 				return s.store.ReleaseGroupsNeedingEnrichment(ctx, st.force, after, lim, s.acoustEnabled(), rgIDs)
 			},
@@ -552,7 +560,7 @@ func (s *Service) Run(ctx context.Context, opts RunOptions, hb Heartbeat) (*Resu
 	if s.cfg.MatchReleases && identityRuns(albumIDs) {
 		phases = append(phases, phase{
 			// Not "release": the phase above is already labelled "album".
-			label: "album release", enriched: &res.AlbumsSearched, matched: &res.AlbumsMatched,
+			label: "album release", enriched: &res.AlbumsSearched, matched: &res.AlbumsMatched, reach: &res.Reach.AlbumIDs,
 			fetch: func(ctx context.Context, after int64, lim int) ([]model.EnrichTarget, error) {
 				return s.store.AlbumsNeedingReleaseMatch(ctx, st.force, after, lim, albumIDs)
 			},
@@ -577,7 +585,7 @@ func (s *Service) Run(ctx context.Context, opts RunOptions, hb Heartbeat) (*Resu
 	// keeps the art-fetching phases together and nothing else depends on it.
 	if s.hasCapability(CapAuxArt) && phaseRuns(rgIDs) {
 		phases = append(phases, phase{
-			label: "aux art", enriched: &res.AuxArtEnriched, matched: &res.AuxArtMatched,
+			label: "aux art", enriched: &res.AuxArtEnriched, matched: &res.AuxArtMatched, reach: &res.Reach.ReleaseGroupIDs,
 			fetch: func(ctx context.Context, after int64, lim int) ([]model.EnrichTarget, error) {
 				return s.store.ReleaseGroupsNeedingAuxArt(ctx, st.force, after, lim, rgIDs)
 			},
@@ -599,7 +607,7 @@ func (s *Service) Run(ctx context.Context, opts RunOptions, hb Heartbeat) (*Resu
 	// either way. Its place among the art phases is otherwise free.
 	if s.hasCapability(CapArtistArt) && phaseRuns(artistIDs) {
 		phases = append(phases, phase{
-			label: "artist art", enriched: &res.ArtistArtEnriched, matched: &res.ArtistArtMatched,
+			label: "artist art", enriched: &res.ArtistArtEnriched, matched: &res.ArtistArtMatched, reach: &res.Reach.ArtistIDs,
 			fetch: func(ctx context.Context, after int64, lim int) ([]model.EnrichTarget, error) {
 				return s.store.ArtistsNeedingArtBackfill(ctx, st.force, after, lim, artistIDs)
 			},
@@ -610,7 +618,7 @@ func (s *Service) Run(ctx context.Context, opts RunOptions, hb Heartbeat) (*Resu
 	}
 	if identityRuns(bookIDs) {
 		phases = append(phases, phase{
-			label: "book", enriched: &res.BooksEnriched, matched: &res.BooksMatched,
+			label: "book", enriched: &res.BooksEnriched, matched: &res.BooksMatched, reach: &res.Reach.BookItemIDs,
 			fetch: func(ctx context.Context, after int64, lim int) ([]model.EnrichTarget, error) {
 				return s.store.BooksNeedingEnrichment(ctx, st.force, after, lim, bookIDs)
 			},
@@ -622,7 +630,7 @@ func (s *Service) Run(ctx context.Context, opts RunOptions, hb Heartbeat) (*Resu
 	// tracks that carry no lyrics yet, filling from LRCLIB (or an injected provider).
 	if s.hasCapability(CapLyrics) && phaseRuns(lyricsIDs) {
 		phases = append(phases, phase{
-			label: "lyrics", enriched: &res.LyricsEnriched, matched: &res.LyricsMatched,
+			label: "lyrics", enriched: &res.LyricsEnriched, matched: &res.LyricsMatched, reach: &res.Reach.LyricsItemIDs,
 			fetch: func(ctx context.Context, after int64, lim int) ([]model.EnrichTarget, error) {
 				return s.store.ItemsNeedingLyrics(ctx, st.force, after, lim, lyricsIDs)
 			},
@@ -636,7 +644,7 @@ func (s *Service) Run(ctx context.Context, opts RunOptions, hb Heartbeat) (*Resu
 	// together is the readable arrangement.
 	if s.hasCapability(CapFields) && phaseRuns(fieldsIDs) {
 		phases = append(phases, phase{
-			label: "track fields", enriched: &res.TrackFieldsEnriched, matched: &res.TrackFieldsMatched,
+			label: "track fields", enriched: &res.TrackFieldsEnriched, matched: &res.TrackFieldsMatched, reach: &res.Reach.FieldsItemIDs,
 			fetch: func(ctx context.Context, after int64, lim int) ([]model.EnrichTarget, error) {
 				return s.store.ItemsNeedingFields(ctx, st.force, after, lim, model.KindTrack, fieldsIDs)
 			},
@@ -647,7 +655,7 @@ func (s *Service) Run(ctx context.Context, opts RunOptions, hb Heartbeat) (*Resu
 	}
 	if s.hasCapability(CapBookMeta) && phaseRuns(fieldsIDs) {
 		phases = append(phases, phase{
-			label: "book fields", enriched: &res.BookFieldsEnriched, matched: &res.BookFieldsMatched,
+			label: "book fields", enriched: &res.BookFieldsEnriched, matched: &res.BookFieldsMatched, reach: &res.Reach.FieldsItemIDs,
 			fetch: func(ctx context.Context, after int64, lim int) ([]model.EnrichTarget, error) {
 				return s.store.ItemsNeedingFields(ctx, st.force, after, lim, model.KindBook, fieldsIDs)
 			},
@@ -660,7 +668,7 @@ func (s *Service) Run(ctx context.Context, opts RunOptions, hb Heartbeat) (*Resu
 	// match, and comes after the track walk so the two fields phases read together.
 	if s.hasCapability(CapFields) && phaseRuns(albumIDs) {
 		phases = append(phases, phase{
-			label: "album fields", enriched: &res.AlbumFieldsEnriched, matched: &res.AlbumFieldsMatched,
+			label: "album fields", enriched: &res.AlbumFieldsEnriched, matched: &res.AlbumFieldsMatched, reach: &res.Reach.AlbumIDs,
 			fetch: func(ctx context.Context, after int64, lim int) ([]model.EnrichTarget, error) {
 				return s.store.AlbumsNeedingFields(ctx, st.force, after, lim, albumIDs)
 			},
@@ -694,12 +702,13 @@ type runState struct {
 }
 
 // phase describes one entity type's enrichment for the shared keyset runner: how to
-// fetch a page, how to enrich one target (returning whether a provider matched), and
-// the counters to bump.
+// fetch a page, how to enrich one target (returning whether a provider matched), the
+// counters to bump, and the Result.Reach list its targets are recorded in.
 type phase struct {
 	label    string
 	enriched *int
 	matched  *int
+	reach    *[]int64
 	fetch    func(ctx context.Context, afterID int64, limit int) ([]model.EnrichTarget, error)
 	enrich   func(ctx context.Context, t model.EnrichTarget) (matched bool, err error)
 }
@@ -734,6 +743,7 @@ func (s *Service) runPhase(ctx context.Context, p phase, beat func(string) error
 			if matched {
 				(*p.matched)++
 			}
+			*p.reach = append(*p.reach, t.ID)
 			if err := beat("enriched " + p.label + " " + t.Name); err != nil {
 				return err
 			}

@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -650,5 +652,349 @@ func TestEnrichmentWritesBookFieldsToDisk(t *testing.T) {
 	items, err := lib.Query(ctx, query.New(query.EntityItems).Where("kind", query.OpIs, "book").Build(), "")
 	if err != nil || len(items) != 1 {
 		t.Fatalf("books after the rescan = %d (err %v), want the one re-anchored", len(items), err)
+	}
+}
+
+// TestEnrichmentWriteBackRetriesOnTheNextPass: a pass whose writes fail (a read-only
+// library) leaves the values catalog-only, and the next pass has nothing new to fill,
+// since every item is already marked. The failed files still have to be written then,
+// which the write-back's own drift rows arrange: one file through the item path with
+// its bpm and the album label folded in, the other through the label fan-out alone.
+func TestEnrichmentWriteBackRetriesOnTheNextPass(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores the read-only bit, so the writes would succeed")
+	}
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	pathA := filepath.Join(root, "a.mp3")
+	pathB := filepath.Join(root, "b.mp3")
+	writeFile(t, pathA, testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
+		Title: "One", Artist: "Pink Floyd", AlbumArtist: "Pink Floyd", Album: "Animals",
+		Audio: testaudio.AudioWithSeed(1)}))
+	writeFile(t, pathB, testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
+		Title: "Two", Artist: "Pink Floyd", AlbumArtist: "Pink Floyd", Album: "Animals",
+		Audio: testaudio.AudioWithSeed(2)}))
+
+	fields := &enrich.Mock{ProviderName: "discogs", Caps: enrich.CapFields,
+		EnrichFunc: func(_ context.Context, req enrich.Request) (*enrich.Candidate, error) {
+			switch req.Type {
+			case enrich.TargetRecording:
+				if req.Title == "One" {
+					return &enrich.Candidate{Fields: map[string]string{"bpm": "120"}}, nil
+				}
+			case enrich.TargetRelease:
+				return &enrich.Candidate{Fields: map[string]string{"label": "Harvest"}}, nil
+			}
+			return nil, nil
+		}}
+	lib, err := waxbin.Open(ctx, waxbin.Options{
+		DBPath:              db,
+		Roots:               []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}},
+		EnrichmentProviders: []enrich.Provider{fields},
+		WriteEnrichmentTags: true,
+	})
+	if err != nil {
+		t.Fatalf("open library: %v", err)
+	}
+	t.Cleanup(func() { _ = lib.Close() })
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+
+	// The write is a rewrite into the directory, so removing the directory's write bit
+	// is what makes it fail. Windows ignores that bit on a directory, so there an open
+	// handle on each target blocks the replacing rename instead.
+	if err := os.Chmod(root, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(root, 0o755) })
+	var handles []*os.File
+	if runtime.GOOS == "windows" {
+		for _, p := range []string{pathA, pathB} {
+			h, err := os.Open(p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			handles = append(handles, h)
+		}
+	}
+	res, err := lib.Enrich(ctx, waxbin.EnrichOptions{})
+	if err != nil {
+		t.Fatalf("enrich: %v", err)
+	}
+	if res.Result.TagsFailed != 2 || res.Result.TagsWritten != 0 {
+		t.Fatalf("read-only pass wrote %d and failed %d, want 0 written and both files failed",
+			res.Result.TagsWritten, res.Result.TagsFailed)
+	}
+	drift, err := lib.FileDiagnostics(ctx, model.DiagnosticFilter{Origin: model.OriginEnrichment, Code: model.DiagTagWriteUnsynced})
+	if err != nil {
+		t.Fatalf("diagnostics: %v", err)
+	}
+	if len(drift) != 2 {
+		t.Fatalf("drift rows = %+v, want one per failed file", drift)
+	}
+
+	// Writable again. Nothing is left to fill, so this pass has only the retries.
+	for _, h := range handles {
+		_ = h.Close()
+	}
+	if err := os.Chmod(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	res, err = lib.Enrich(ctx, waxbin.EnrichOptions{})
+	if err != nil {
+		t.Fatalf("enrich again: %v", err)
+	}
+	if res.Result.TagsWritten != 2 || res.Result.TagsFailed != 0 {
+		t.Fatalf("retry pass wrote %d and failed %d, want both files written", res.Result.TagsWritten, res.Result.TagsFailed)
+	}
+	r := meta.NewReader()
+	fa, err := r.Read(ctx, pathA)
+	if err != nil {
+		t.Fatalf("re-read a: %v", err)
+	}
+	if fa.Tags.BPM != 120 || fa.Tags.Label != "Harvest" {
+		t.Errorf("a.mp3 BPM/LABEL = %d/%q, want 120/Harvest from the retried item write", fa.Tags.BPM, fa.Tags.Label)
+	}
+	fb, err := r.Read(ctx, pathB)
+	if err != nil {
+		t.Fatalf("re-read b: %v", err)
+	}
+	if fb.Tags.Label != "Harvest" {
+		t.Errorf("b.mp3 LABEL = %q, want Harvest from the retried label fan-out", fb.Tags.Label)
+	}
+	drift, err = lib.FileDiagnostics(ctx, model.DiagnosticFilter{Origin: model.OriginEnrichment})
+	if err != nil {
+		t.Fatalf("diagnostics after retry: %v", err)
+	}
+	if len(drift) != 0 {
+		t.Errorf("diagnostics after retry = %+v, want the drift cleared by the landed writes", drift)
+	}
+}
+
+// TestEnrichmentWriteTagsCatchesUpAfterAPassWithoutIt: write-tags mirrors what
+// enrichment filled, not only what the pass now finishing filled. A library enriched
+// with it off has nothing new to fill when it is turned on, and the pass still writes
+// every value that never reached its file, once.
+func TestEnrichmentWriteTagsCatchesUpAfterAPassWithoutIt(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	pathA := filepath.Join(root, "a.mp3")
+	pathB := filepath.Join(root, "b.mp3")
+	writeFile(t, pathA, testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
+		Title: "One", Artist: "Pink Floyd", AlbumArtist: "Pink Floyd", Album: "Animals",
+		Audio: testaudio.AudioWithSeed(1)}))
+	writeFile(t, pathB, testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
+		Title: "Two", Artist: "Pink Floyd", AlbumArtist: "Pink Floyd", Album: "Animals",
+		Audio: testaudio.AudioWithSeed(2)}))
+	fields := &enrich.Mock{ProviderName: "discogs", Caps: enrich.CapFields,
+		EnrichFunc: func(_ context.Context, req enrich.Request) (*enrich.Candidate, error) {
+			switch req.Type {
+			case enrich.TargetRecording:
+				return &enrich.Candidate{Fields: map[string]string{"bpm": "120"}}, nil
+			case enrich.TargetRelease:
+				return &enrich.Candidate{Fields: map[string]string{"label": "Harvest"}}, nil
+			}
+			return nil, nil
+		}}
+	lib, err := waxbin.Open(ctx, waxbin.Options{
+		DBPath:              db,
+		Roots:               []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}},
+		EnrichmentProviders: []enrich.Provider{fields},
+	})
+	if err != nil {
+		t.Fatalf("open library: %v", err)
+	}
+	t.Cleanup(func() { _ = lib.Close() })
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+
+	res, err := lib.Enrich(ctx, waxbin.EnrichOptions{})
+	if err != nil {
+		t.Fatalf("enrich: %v", err)
+	}
+	if res.Result.TrackFieldsMatched != 2 || res.Result.TagsWritten != 0 {
+		t.Fatalf("pass without write-tags: %d matched, %d written, want 2 matched and nothing written",
+			res.Result.TrackFieldsMatched, res.Result.TagsWritten)
+	}
+	res, err = lib.Enrich(ctx, waxbin.EnrichOptions{WriteTags: true})
+	if err != nil {
+		t.Fatalf("enrich --write-tags: %v", err)
+	}
+	if res.Result.TrackFieldsEnriched != 0 {
+		t.Fatalf("second pass looked up %d tracks, want none: every item is marked", res.Result.TrackFieldsEnriched)
+	}
+	if res.Result.TagsWritten != 2 || res.Result.TagsFailed != 0 {
+		t.Fatalf("second pass wrote %d files (failed %d), want the 2 left catalog-only by the first",
+			res.Result.TagsWritten, res.Result.TagsFailed)
+	}
+	r := meta.NewReader()
+	for _, p := range []string{pathA, pathB} {
+		fm, err := r.Read(ctx, p)
+		if err != nil {
+			t.Fatalf("re-read %s: %v", p, err)
+		}
+		if fm.Tags.BPM != 120 || fm.Tags.Label != "Harvest" {
+			t.Errorf("%s BPM/LABEL = %d/%q, want 120/Harvest written by the catch-up pass", filepath.Base(p), fm.Tags.BPM, fm.Tags.Label)
+		}
+	}
+	// Settled: a third pass has nothing to write.
+	res, err = lib.Enrich(ctx, waxbin.EnrichOptions{WriteTags: true})
+	if err != nil {
+		t.Fatalf("third enrich: %v", err)
+	}
+	if res.Result.TagsWritten+res.Result.TagsFailed+res.Result.TagsUnrepresented != 0 {
+		t.Errorf("third pass wrote %d, failed %d, unrepresented %d, want nothing left",
+			res.Result.TagsWritten, res.Result.TagsFailed, res.Result.TagsUnrepresented)
+	}
+}
+
+// TestEnrichmentScopedWriteTagsStaysScoped: a scoped run writes what is owed within its
+// scope and nothing beyond it, so an item's "enrich now" cannot turn into a rewrite of
+// every catalog-only value in the library. The rest stays owed for a full run.
+func TestEnrichmentScopedWriteTagsStaysScoped(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	pathA := filepath.Join(root, "a.mp3")
+	pathB := filepath.Join(root, "b.mp3")
+	// Different albums, same artist: an artist reaches nothing the write-back writes.
+	writeFile(t, pathA, testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
+		Title: "One", Artist: "Pink Floyd", AlbumArtist: "Pink Floyd", Album: "Animals",
+		Audio: testaudio.AudioWithSeed(1)}))
+	writeFile(t, pathB, testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
+		Title: "Two", Artist: "Pink Floyd", AlbumArtist: "Pink Floyd", Album: "Meddle",
+		Audio: testaudio.AudioWithSeed(2)}))
+	fields := &enrich.Mock{ProviderName: "discogs", Caps: enrich.CapFields,
+		EnrichFunc: func(_ context.Context, req enrich.Request) (*enrich.Candidate, error) {
+			if req.Type == enrich.TargetRecording {
+				return &enrich.Candidate{Fields: map[string]string{"bpm": "120"}}, nil
+			}
+			return nil, nil
+		}}
+	lib, err := waxbin.Open(ctx, waxbin.Options{
+		DBPath:              db,
+		Roots:               []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}},
+		EnrichmentProviders: []enrich.Provider{fields},
+	})
+	if err != nil {
+		t.Fatalf("open library: %v", err)
+	}
+	t.Cleanup(func() { _ = lib.Close() })
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if _, err := lib.Enrich(ctx, waxbin.EnrichOptions{}); err != nil {
+		t.Fatalf("enrich: %v", err)
+	}
+
+	res, err := lib.Enrich(ctx, waxbin.EnrichOptions{ItemPID: itemPIDByTitle(t, ctx, lib, "One"), WriteTags: true})
+	if err != nil {
+		t.Fatalf("scoped enrich: %v", err)
+	}
+	if res.Result.TagsWritten != 1 || res.Result.TagsFailed != 0 {
+		t.Fatalf("scoped pass wrote %d files (failed %d), want the scoped item's file alone",
+			res.Result.TagsWritten, res.Result.TagsFailed)
+	}
+	r := meta.NewReader()
+	fa, err := r.Read(ctx, pathA)
+	if err != nil {
+		t.Fatalf("re-read a: %v", err)
+	}
+	fb, err := r.Read(ctx, pathB)
+	if err != nil {
+		t.Fatalf("re-read b: %v", err)
+	}
+	if fa.Tags.BPM != 120 || fb.Tags.BPM != 0 {
+		t.Fatalf("BPM a/b = %d/%d, want the scoped file written and the other left alone", fa.Tags.BPM, fb.Tags.BPM)
+	}
+	res, err = lib.Enrich(ctx, waxbin.EnrichOptions{WriteTags: true})
+	if err != nil {
+		t.Fatalf("full enrich: %v", err)
+	}
+	if res.Result.TagsWritten != 1 {
+		t.Fatalf("full pass wrote %d files, want the one still owed", res.Result.TagsWritten)
+	}
+	if fb, err = r.Read(ctx, pathB); err != nil || fb.Tags.BPM != 120 {
+		t.Errorf("b.mp3 BPM = %d (err %v), want 120 from the full pass", fb.Tags.BPM, err)
+	}
+}
+
+// TestEnrichmentLimitedWriteTagsWritesWhatItLookedUp: --limit caps a run's work, and
+// the write-back is part of it. A limited run writes what is owed on the entities it
+// looked up and nothing beyond them, so a pacing run cannot turn into a rewrite of
+// every catalog-only value in the library. The rest waits for an unlimited run.
+func TestEnrichmentLimitedWriteTagsWritesWhatItLookedUp(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	pathA := filepath.Join(root, "a.mp3")
+	pathB := filepath.Join(root, "b.mp3")
+	writeFile(t, pathA, testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
+		Title: "One", Artist: "Pink Floyd", AlbumArtist: "Pink Floyd", Album: "Animals",
+		Audio: testaudio.AudioWithSeed(1)}))
+	writeFile(t, pathB, testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
+		Title: "Two", Artist: "Pink Floyd", AlbumArtist: "Pink Floyd", Album: "Meddle",
+		Audio: testaudio.AudioWithSeed(2)}))
+	fields := &enrich.Mock{ProviderName: "discogs", Caps: enrich.CapFields,
+		EnrichFunc: func(_ context.Context, req enrich.Request) (*enrich.Candidate, error) {
+			if req.Type == enrich.TargetRecording {
+				return &enrich.Candidate{Fields: map[string]string{"bpm": "120"}}, nil
+			}
+			return nil, nil
+		}}
+	lib, err := waxbin.Open(ctx, waxbin.Options{
+		DBPath:              db,
+		Roots:               []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}},
+		EnrichmentProviders: []enrich.Provider{fields},
+	})
+	if err != nil {
+		t.Fatalf("open library: %v", err)
+	}
+	t.Cleanup(func() { _ = lib.Close() })
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	// Both filled, neither written.
+	if _, err := lib.Enrich(ctx, waxbin.EnrichOptions{}); err != nil {
+		t.Fatalf("enrich: %v", err)
+	}
+
+	// Forced so the limited run looks something up at all; the cap stops it after one.
+	res, err := lib.Enrich(ctx, waxbin.EnrichOptions{Force: true, Limit: 1, WriteTags: true})
+	if err != nil {
+		t.Fatalf("limited enrich: %v", err)
+	}
+	if res.Result.TrackFieldsEnriched != 1 {
+		t.Fatalf("limited run looked up %d tracks, want 1", res.Result.TrackFieldsEnriched)
+	}
+	if res.Result.TagsWritten != 1 || res.Result.TagsFailed != 0 {
+		t.Fatalf("limited run wrote %d files (failed %d), want only the one it looked up",
+			res.Result.TagsWritten, res.Result.TagsFailed)
+	}
+	r := meta.NewReader()
+	withBPM := 0
+	for _, p := range []string{pathA, pathB} {
+		fm, err := r.Read(ctx, p)
+		if err != nil {
+			t.Fatalf("re-read %s: %v", p, err)
+		}
+		if fm.Tags.BPM == 120 {
+			withBPM++
+		}
+	}
+	if withBPM != 1 {
+		t.Fatalf("%d files carry the bpm after the limited run, want exactly 1", withBPM)
+	}
+	// An unlimited run writes what the limited one left owed.
+	res, err = lib.Enrich(ctx, waxbin.EnrichOptions{WriteTags: true})
+	if err != nil {
+		t.Fatalf("unlimited enrich: %v", err)
+	}
+	if res.Result.TagsWritten != 1 {
+		t.Fatalf("unlimited run wrote %d files, want the one still owed", res.Result.TagsWritten)
 	}
 }

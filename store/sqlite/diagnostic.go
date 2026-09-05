@@ -25,27 +25,33 @@ func replaceFileDiagnosticsTx(ctx context.Context, tx *sql.Tx, fileID int64, ori
 	}
 	now := nowNS()
 	for _, d := range ds {
-		sev := d.Severity
-		if sev == "" {
-			sev = model.SeverityWarn
-		}
-		seen := d.SeenAt
-		if seen == 0 {
-			seen = now
-		}
-		// The primary key is (file_id, origin, code, tag_key), so one writer reporting
-		// the same code for the same key twice collapses to the last one rather than
-		// failing the whole scan transaction.
-		if _, err := tx.ExecContext(ctx, `INSERT INTO file_diagnostic
-			(file_id, origin, code, severity, tag_key, detail, seen_at)
-			VALUES (?,?,?,?,?,?,?)
-			ON CONFLICT(file_id, origin, code, tag_key) DO UPDATE SET
-				severity=excluded.severity, detail=excluded.detail, seen_at=excluded.seen_at`,
-			fileID, string(origin), string(d.Code), string(sev), d.TagKey, d.Detail, seen); err != nil {
+		if err := upsertFileDiagnosticTx(ctx, tx, fileID, origin, d, now); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// upsertFileDiagnosticTx writes one diagnostic row, defaulting the severity to warn and
+// the seen time to now. The primary key is (file_id, origin, code, tag_key), so one
+// writer reporting the same code for the same key twice collapses to the last one
+// rather than failing the whole scan transaction.
+func upsertFileDiagnosticTx(ctx context.Context, tx *sql.Tx, fileID int64, origin model.DiagnosticOrigin, d model.FileDiagnostic, now int64) error {
+	sev := d.Severity
+	if sev == "" {
+		sev = model.SeverityWarn
+	}
+	seen := d.SeenAt
+	if seen == 0 {
+		seen = now
+	}
+	_, err := tx.ExecContext(ctx, `INSERT INTO file_diagnostic
+		(file_id, origin, code, severity, tag_key, detail, seen_at)
+		VALUES (?,?,?,?,?,?,?)
+		ON CONFLICT(file_id, origin, code, tag_key) DO UPDATE SET
+			severity=excluded.severity, detail=excluded.detail, seen_at=excluded.seen_at`,
+		fileID, string(origin), string(d.Code), string(sev), d.TagKey, d.Detail, seen)
+	return err
 }
 
 // stampDiagVersionTx records that a file's diagnostics were derived under the
@@ -89,6 +95,25 @@ func (s *Store) PutFileDiagnostics(ctx context.Context, filePID model.PID, origi
 			return err
 		}
 		if err := replaceFileDiagnosticsTx(ctx, tx, fileID, origin, ds); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		return nil
+	})
+}
+
+// AddFileDiagnostic records one diagnostic for a file under one writer, leaving that
+// writer's other rows as they are. It is for a write that failed: a failure lands
+// nothing and proves nothing about the file, so what a landed write recorded (a value
+// the format could not store) still holds and must not be replaced away with it. The
+// same code and key updates in place.
+func (s *Store) AddFileDiagnostic(ctx context.Context, filePID model.PID, origin model.DiagnosticOrigin, d model.FileDiagnostic) error {
+	const op = "store.AddFileDiagnostic"
+	return s.writeTx(ctx, func(tx *sql.Tx) error {
+		fileID, err := idByPIDTx(ctx, tx, "file", filePID, op)
+		if err != nil {
+			return err
+		}
+		if err := upsertFileDiagnosticTx(ctx, tx, fileID, origin, d, nowNS()); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		return nil

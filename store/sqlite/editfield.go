@@ -1066,14 +1066,20 @@ func itemIDKindByPIDTx(ctx context.Context, tx *sql.Tx, pid model.PID, op string
 // before a tag write-back. A file with no edges (an orphan) is not shared.
 func (s *Store) FileSharedOrVirtual(ctx context.Context, filePID model.PID) (bool, error) {
 	const op = "store.FileSharedOrVirtual"
-	var distinctItems, hasOffsets int
-	err := s.read.QueryRowContext(ctx, `SELECT
-		COUNT(DISTINCT itf.item_id),
-		COALESCE(MAX(CASE WHEN itf.start_frames IS NOT NULL OR itf.end_frames IS NOT NULL THEN 1 ELSE 0 END), 0)
-		FROM item_file itf JOIN file f ON f.id = itf.file_id
-		WHERE f.pid = ?`, string(filePID)).Scan(&distinctItems, &hasOffsets)
+	var shared int
+	err := s.read.QueryRowContext(ctx,
+		"SELECT "+fileSharedOrVirtualExpr+" FROM file f WHERE f.pid = ?", string(filePID)).Scan(&shared)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
 	if err != nil {
 		return false, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
-	return distinctItems > 1 || hasOffsets == 1, nil
+	return shared == 1, nil
 }
+
+// fileSharedOrVirtualExpr is FileSharedOrVirtual's test as a predicate over the file
+// alias f, for a select that has to apply it per row.
+const fileSharedOrVirtualExpr = `((SELECT COUNT(DISTINCT o.item_id) FROM item_file o WHERE o.file_id = f.id) > 1
+	OR EXISTS (SELECT 1 FROM item_file o WHERE o.file_id = f.id
+	           AND (o.start_frames IS NOT NULL OR o.end_frames IS NOT NULL)))`

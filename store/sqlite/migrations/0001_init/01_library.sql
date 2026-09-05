@@ -48,6 +48,10 @@ CREATE TABLE file (
   analysis_version INTEGER,
   measured_essence TEXT,
   diag_version INTEGER NOT NULL DEFAULT 0,
+  -- The newest enrichment value (a field_provenance or entity_curation updated_at)
+  -- the enrichment tag write-back has settled for this file, by landing it or by
+  -- recording why it cannot land. A newer value is owed a write.
+  enrich_settled_at INTEGER NOT NULL DEFAULT 0,
   container    TEXT,
   codec        TEXT,
   duration_ms  INTEGER,

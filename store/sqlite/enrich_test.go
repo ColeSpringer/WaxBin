@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/colespringer/waxbin/identity"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/read"
 	"github.com/colespringer/waxbin/store/sqlite"
@@ -1440,59 +1441,6 @@ func retagArtistMBID(t *testing.T, st *sqlite.Store, libID int64, name, mbid str
 	}
 }
 
-// TestEnrichmentWritebackCarriesEarlierFields: the sinceNS bound decides which items are
-// reopened, not which of their fields are written. A value an earlier pass filled but
-// never got onto disk (the write failed, or write-tags was off) has to ride the next pass
-// that reopens the file, or it stays catalog-only for good, which is the loss the
-// write-back exists to prevent.
-func TestEnrichmentWritebackCarriesEarlierFields(t *testing.T) {
-	ctx := context.Background()
-	st, dbPath, lib := openStoreAt(t)
-	db := roConn(t, dbPath)
-	pid := seedEnrichTrack(t, st, lib.ID)
-
-	// An earlier pass fills the composer, then time moves on.
-	if err := st.ApplyItemFields(ctx, model.ItemFieldsEnrichment{
-		ItemID: itemRowID(t, db, pid), PID: pid, Matched: true, Provider: "early",
-		Fields: map[string]string{"composer": "Roger Waters"},
-	}); err != nil {
-		t.Fatalf("first pass: %v", err)
-	}
-	between := scalarQueryInt(t, db,
-		"SELECT updated_at FROM field_provenance WHERE field='composer'") + 1
-
-	// Nothing since that point: the item is not reopened at all.
-	rows, err := st.EnrichmentWriteback(ctx, int64(between))
-	if err != nil {
-		t.Fatalf("writeback (nothing new): %v", err)
-	}
-	if len(rows) != 0 {
-		t.Fatalf("rows = %d, want none: no field was written since the bound", len(rows))
-	}
-
-	// A later pass fills the bpm. The item is reopened for it, and the composer the
-	// earlier pass filled rides along rather than being left behind.
-	if err := st.ApplyItemFields(ctx, model.ItemFieldsEnrichment{
-		ItemID: itemRowID(t, db, pid), PID: pid, Matched: true, Provider: "late",
-		Fields: map[string]string{"bpm": "128"},
-	}); err != nil {
-		t.Fatalf("second pass: %v", err)
-	}
-	rows, err = st.EnrichmentWriteback(ctx, int64(between))
-	if err != nil {
-		t.Fatalf("writeback: %v", err)
-	}
-	if len(rows) != 1 {
-		t.Fatalf("rows = %d, want the one reopened item", len(rows))
-	}
-	if got := rows[0].Fields["bpm"]; got != "128" {
-		t.Errorf("bpm = %q, want the field this pass wrote", got)
-	}
-	if got := rows[0].Fields["composer"]; got != "Roger Waters" {
-		t.Errorf("composer = %q, want the earlier pass's value carried along", got)
-	}
-}
-
 // TestApplyItemFieldsStampsEachProviderSeparately: two providers commonly split a fields
 // answer, and the provenance row is where a consumer attributes a value, so each field
 // names the provider that actually supplied it rather than whichever answered first.
@@ -1527,7 +1475,16 @@ func TestApplyItemFieldsStampsEachProviderSeparately(t *testing.T) {
 // seedEnrichTrack persists one plain track and returns its pid.
 func seedEnrichTrack(t *testing.T, st *sqlite.Store, libID int64) model.PID {
 	t.Helper()
-	res, err := st.PutScannedTrack(context.Background(), model.PutScannedTrackInput{
+	res, err := st.PutScannedTrack(context.Background(), seedEnrichTrackInput(libID))
+	if err != nil {
+		t.Fatalf("PutScannedTrack: %v", err)
+	}
+	return res.ItemPID
+}
+
+// seedEnrichTrackInput is seedEnrichTrack's scan input, so a test can rescan the file.
+func seedEnrichTrackInput(libID int64) model.PutScannedTrackInput {
+	return model.PutScannedTrackInput{
 		LibraryID: libID,
 		File: model.File{
 			Path: []byte("/lib/a.mp3"), DisplayPath: "/lib/a.mp3", RelPath: []byte("a.mp3"),
@@ -1539,9 +1496,289 @@ func seedEnrichTrack(t *testing.T, st *sqlite.Store, libID int64) model.PID {
 			SortKey: model.SortKey("Shine On"), IdentityKey: "essence:ess-a",
 		},
 		Track: model.Track{Artist: "Pink Floyd", AlbumArtist: "Pink Floyd", Album: "WYWH", TrackNo: 1},
-	})
-	if err != nil {
-		t.Fatalf("PutScannedTrack: %v", err)
 	}
-	return res.ItemPID
+}
+
+// TestEnrichmentWritebackOwedUntilSettled: a file is owed a write while any enrichment
+// value on its item is newer than the file's settle stamp, whatever pass filled it, and
+// stops being owed once the write-back settles the stamp at that value's time. A later
+// fill reopens the file with every field, so a value an earlier pass could not land rides
+// along rather than being left behind. A value a rescan cleared still comes back, with
+// nothing to write, so the caller can settle it instead of scanning it forever.
+func TestEnrichmentWritebackOwedUntilSettled(t *testing.T) {
+	ctx := context.Background()
+	st, dbPath, lib := openStoreAt(t)
+	db := roConn(t, dbPath)
+	pid := seedEnrichTrack(t, st, lib.ID)
+	filePID := model.PID(scalarQueryStr(t, db, "SELECT pid FROM file"))
+	itemID := itemRowID(t, db, pid)
+
+	owed := func(t *testing.T, scope *model.EnrichScope) []model.EnrichedTagRow {
+		t.Helper()
+		rows, err := st.EnrichmentWriteback(ctx, scope)
+		if err != nil {
+			t.Fatalf("writeback: %v", err)
+		}
+		return rows
+	}
+	if rows := owed(t, nil); len(rows) != 0 {
+		t.Fatalf("rows = %d, want none before enrichment filled anything", len(rows))
+	}
+	if err := st.ApplyItemFields(ctx, model.ItemFieldsEnrichment{
+		ItemID: itemID, PID: pid, Matched: true, Provider: "early",
+		Fields: map[string]string{"composer": "Roger Waters"},
+	}); err != nil {
+		t.Fatalf("first fill: %v", err)
+	}
+	first := int64(scalarQueryInt(t, db, "SELECT updated_at FROM field_provenance WHERE field='composer'"))
+	rows := owed(t, nil)
+	if len(rows) != 1 || rows[0].FilePID != filePID || rows[0].Newest != first || rows[0].Fields["composer"] != "Roger Waters" {
+		t.Fatalf("rows = %+v, want the file owed its composer at the fill's time", rows)
+	}
+
+	// A scoped run reaches only the files within its scope.
+	if rows := owed(t, &model.EnrichScope{FieldsItemIDs: []int64{itemID + 1}}); len(rows) != 0 {
+		t.Fatalf("rows = %d, want none for a scope that does not reach the item", len(rows))
+	}
+	if rows := owed(t, &model.EnrichScope{FieldsItemIDs: []int64{itemID}}); len(rows) != 1 {
+		t.Fatalf("rows = %d, want the one file the scope reaches", len(rows))
+	}
+
+	// Settled at the fill's time, the file is no longer owed.
+	if err := st.SettleEnrichmentWrite(ctx, filePID, first); err != nil {
+		t.Fatalf("settle: %v", err)
+	}
+	if rows := owed(t, nil); len(rows) != 0 {
+		t.Fatalf("rows = %d, want none once settled", len(rows))
+	}
+	// A later fill reopens it, and the earlier composer rides along.
+	if err := st.ApplyItemFields(ctx, model.ItemFieldsEnrichment{
+		ItemID: itemID, PID: pid, Matched: true, Provider: "late",
+		Fields: map[string]string{"bpm": "128"},
+	}); err != nil {
+		t.Fatalf("second fill: %v", err)
+	}
+	rows = owed(t, nil)
+	if len(rows) != 1 || rows[0].Newest <= first {
+		t.Fatalf("rows = %+v, want the file owed again at the later fill's time", rows)
+	}
+	if rows[0].Fields["bpm"] != "128" || rows[0].Fields["composer"] != "Roger Waters" {
+		t.Errorf("fields = %v, want both the new bpm and the earlier composer", rows[0].Fields)
+	}
+	// Settling below the newest value leaves the file owed; settling at it does not.
+	if err := st.SettleEnrichmentWrite(ctx, filePID, first); err != nil {
+		t.Fatalf("settle again: %v", err)
+	}
+	if rows := owed(t, nil); len(rows) != 1 {
+		t.Fatalf("rows = %d, want the file still owed the later fill", len(rows))
+	}
+
+	// A rescan that rebuilt the columns from a file without the values leaves the
+	// provenance rows behind: the file comes back with nothing to write.
+	in := seedEnrichTrackInput(lib.ID)
+	in.File.ContentHash = "c-a2"
+	in.File.MTimeNS = 2
+	if _, err := st.PutScannedTrack(ctx, in); err != nil {
+		t.Fatalf("rescan: %v", err)
+	}
+	rows = owed(t, nil)
+	if len(rows) != 1 || len(rows[0].Fields) != 0 {
+		t.Fatalf("rows = %+v, want the file owed with nothing left to write", rows)
+	}
+	if err := st.SettleEnrichmentWrite(ctx, filePID, rows[0].Newest); err != nil {
+		t.Fatalf("settle cleared: %v", err)
+	}
+	if rows := owed(t, nil); len(rows) != 0 {
+		t.Fatalf("rows = %d, want none after settling the cleared value", len(rows))
+	}
+}
+
+// TestEnrichedAlbumLabelFiles: the album label fan-out is planned by one query joining
+// the enrichment label rows to the member files still owed the label, not by a member
+// lookup per enriched album. Each such file comes back once with the label, when
+// enrichment wrote it, and what the write needs (the path and the on-disk state for the
+// optimistic update). A settled file drops out; a non-present item's file never
+// appears, since its write would fail on every pass; a shared or virtual file is
+// flagged so the caller refuses it and settles the refusal rather than opening it. A
+// member with enrichment fields of its own gets the label through the item select
+// instead, folded into the one rewrite. A user-curated label is not the enrichment
+// write-back's to write.
+func TestEnrichedAlbumLabelFiles(t *testing.T) {
+	ctx := context.Background()
+	st, dbPath, lib := openStoreAt(t)
+	db := roConn(t, dbPath)
+	files := map[string]model.PID{}
+	for _, p := range []string{"a", "b"} {
+		res, err := st.PutScannedTrack(ctx, model.PutScannedTrackInput{
+			LibraryID: lib.ID,
+			File: model.File{
+				Path: []byte("/lib/" + p + ".mp3"), DisplayPath: "/lib/" + p + ".mp3", RelPath: []byte(p + ".mp3"),
+				Kind: model.FileAudio, Size: 100, MTimeNS: 7,
+				ContentHash: "c-" + p, EssenceHash: "ess-" + p, ScanState: model.ScanIndexed,
+			},
+			Item: model.PlayableItem{
+				Kind: model.KindTrack, State: model.StatePresent, Title: "Track " + p,
+				SortKey: model.SortKey("Track " + p), IdentityKey: "essence:ess-" + p,
+			},
+			Track: model.Track{Artist: "Pink Floyd", AlbumArtist: "Pink Floyd", Album: "Animals", TrackNo: 1},
+		})
+		if err != nil {
+			t.Fatalf("PutScannedTrack %s: %v", p, err)
+		}
+		files[p] = res.FilePID
+	}
+	// One shared rip carved into two more members of the same album.
+	var vts []model.VirtualTrack
+	for i, title := range []string{"Rip 1", "Rip 2"} {
+		start := int64(i) * 750
+		var end int64
+		if i == 0 {
+			end = 750
+		}
+		vts = append(vts, model.VirtualTrack{
+			Item: model.PlayableItem{
+				Kind: model.KindTrack, State: model.StatePresent, Title: title,
+				SortKey: model.SortKey(title), IdentityKey: identity.VirtualTrackKey("rip-e", i+1, start),
+			},
+			Track:       model.Track{Artist: "Pink Floyd", AlbumArtist: "Pink Floyd", Album: "Animals", TrackNo: i + 3},
+			StartFrames: start, EndFrames: end,
+		})
+	}
+	if _, err := st.PutScannedVirtualTracks(ctx, model.PutScannedVirtualTracksInput{
+		LibraryID: lib.ID,
+		File: model.File{
+			Path: []byte("/lib/rip.flac"), DisplayPath: "/lib/rip.flac", RelPath: []byte("rip.flac"),
+			Kind: model.FileAudio, Size: 600_000, MTimeNS: 1,
+			ContentHash: "rip-c", EssenceHash: "rip-e", DurationMS: 30_000, ScanState: model.ScanIndexed,
+		},
+		Tracks: vts,
+	}); err != nil {
+		t.Fatalf("put virtual rip: %v", err)
+	}
+	ripPID := model.PID(scalarQueryStr(t, db, "SELECT pid FROM file WHERE display_path = '/lib/rip.flac'"))
+	if n := scalarQueryInt(t, db, "SELECT COUNT(*) FROM album"); n != 1 {
+		t.Fatalf("albums = %d, want the rip's members on the same album as the files", n)
+	}
+	albumID := int64(scalarQueryInt(t, db, "SELECT id FROM album"))
+	albumPID := model.PID(scalarQueryStr(t, db, "SELECT pid FROM album"))
+
+	plan := func(t *testing.T, scope *model.EnrichScope) map[model.PID]model.EntityFieldFile {
+		t.Helper()
+		rows, err := st.EnrichedAlbumLabelFiles(ctx, scope)
+		if err != nil {
+			t.Fatalf("EnrichedAlbumLabelFiles: %v", err)
+		}
+		out := map[model.PID]model.EntityFieldFile{}
+		for _, r := range rows {
+			if _, dup := out[r.FilePID]; dup {
+				t.Fatalf("file %s planned twice: a shared file appears once", r.FilePID)
+			}
+			out[r.FilePID] = r
+		}
+		return out
+	}
+	if got := plan(t, nil); len(got) != 0 {
+		t.Fatalf("planned %d files before any label was filled", len(got))
+	}
+	if err := st.ApplyAlbumFields(ctx, model.AlbumFieldsEnrichment{
+		AlbumID: albumID, PID: albumPID,
+		Matched: true, Provider: "discogs", Fields: map[string]string{"label": "Harvest"},
+	}); err != nil {
+		t.Fatalf("ApplyAlbumFields: %v", err)
+	}
+	got := plan(t, nil)
+	if len(got) != 3 {
+		t.Fatalf("planned files = %d, want the two members and the shared rip", len(got))
+	}
+	for _, pid := range []model.PID{files["a"], files["b"], ripPID} {
+		r, ok := got[pid]
+		if !ok {
+			t.Fatalf("file %s missing from the plan", pid)
+		}
+		if r.EntityType != model.MergeAlbum || r.Field != "label" || r.Value != "Harvest" || r.UpdatedAt == 0 {
+			t.Errorf("file %s planned as %+v, want the album's label with its write time", pid, r)
+		}
+		if len(r.Path) == 0 || r.Size == 0 || r.MTimeNS == 0 {
+			t.Errorf("file %s planned without its on-disk state: %+v", pid, r)
+		}
+		if r.Shared != (pid == ripPID) {
+			t.Errorf("file %s shared = %v, want only the rip flagged", pid, r.Shared)
+		}
+	}
+	labelAt := got[files["a"]].UpdatedAt
+
+	// Settling a file at the label's time takes it out of the plan.
+	if err := st.SettleEnrichmentWrite(ctx, files["a"], labelAt); err != nil {
+		t.Fatalf("settle: %v", err)
+	}
+	if err := st.SettleEnrichmentWrite(ctx, ripPID, labelAt); err != nil {
+		t.Fatalf("settle rip: %v", err)
+	}
+	got = plan(t, nil)
+	if len(got) != 1 || got[files["b"]].Value != "Harvest" {
+		t.Fatalf("planned files after settling = %v, want b.mp3 alone", got)
+	}
+
+	// A scoped run plans only the files within its scope: its items, its albums'
+	// members, and its release groups' albums' members.
+	itemB := itemRowID(t, db, model.PID(scalarQueryStr(t, db, "SELECT pid FROM playable_item WHERE title = 'Track b'")))
+	if got := plan(t, &model.EnrichScope{FieldsItemIDs: []int64{itemB + 1000}}); len(got) != 0 {
+		t.Errorf("a scope reaching nothing planned %d files", len(got))
+	}
+	if got := plan(t, &model.EnrichScope{FieldsItemIDs: []int64{itemB}}); len(got) != 1 {
+		t.Errorf("an item scope planned %d files, want b.mp3 alone", len(got))
+	}
+	if got := plan(t, &model.EnrichScope{AlbumIDs: []int64{albumID}}); len(got) != 1 {
+		t.Errorf("an album scope planned %d files, want the one member still owed", len(got))
+	}
+	rgID := int64(scalarQueryInt(t, db, "SELECT release_group_id FROM album"))
+	if got := plan(t, &model.EnrichScope{ReleaseGroupIDs: []int64{rgID}}); len(got) != 1 {
+		t.Errorf("a release-group scope planned %d files, want the one member still owed", len(got))
+	}
+
+	// A member with enrichment fields of its own is the item select's to write: the
+	// label rides that row, so one rewrite carries both.
+	pidA := model.PID(scalarQueryStr(t, db, "SELECT pid FROM playable_item WHERE title = 'Track a'"))
+	if err := st.ApplyItemFields(ctx, model.ItemFieldsEnrichment{
+		ItemID: itemRowID(t, db, pidA), PID: pidA, Matched: true, Provider: "discogs",
+		Fields: map[string]string{"bpm": "120"},
+	}); err != nil {
+		t.Fatalf("ApplyItemFields: %v", err)
+	}
+	rows, err := st.EnrichmentWriteback(ctx, nil)
+	if err != nil {
+		t.Fatalf("EnrichmentWriteback: %v", err)
+	}
+	if len(rows) != 1 || rows[0].FilePID != files["a"] || rows[0].Label != "Harvest" || rows[0].LabelUpdatedAt != labelAt {
+		t.Fatalf("item rows = %+v, want a.mp3 owed its bpm with the album label riding along", rows)
+	}
+	if rows[0].Fields["bpm"] != "120" {
+		t.Errorf("a.mp3 fields = %v, want the bpm", rows[0].Fields)
+	}
+
+	// A file whose item is no longer present is not planned: the write would fail on
+	// every pass and could never settle.
+	if _, err := st.MarkItemMissing(ctx, model.PID(scalarQueryStr(t, db, "SELECT pid FROM playable_item WHERE title = 'Track b'"))); err != nil {
+		t.Fatalf("MarkItemMissing: %v", err)
+	}
+	if got := plan(t, nil); len(got) != 0 {
+		t.Errorf("planned %d files with the only owed member missing, want none", len(got))
+	}
+
+	// A user's edit takes the label out of the enrichment write-back's hands, on the
+	// item select's rows as much as the plan's.
+	if _, err := st.EditEntityFields(ctx, model.MergeAlbum, albumPID, map[string]string{"label": "Harvest Records"},
+		model.Attribution{Source: model.SourceUser}, model.LockUnchanged, false); err != nil {
+		t.Fatalf("EditEntityFields: %v", err)
+	}
+	if got = plan(t, nil); len(got) != 0 {
+		t.Errorf("planned %d files for a user-curated label, want none", len(got))
+	}
+	rows, err = st.EnrichmentWriteback(ctx, nil)
+	if err != nil {
+		t.Fatalf("EnrichmentWriteback after the edit: %v", err)
+	}
+	if len(rows) != 1 || rows[0].Label != "" || rows[0].LabelUpdatedAt != 0 {
+		t.Errorf("item rows after the edit = %+v, want a.mp3 with no label riding along", rows)
+	}
 }
