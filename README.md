@@ -1,6 +1,6 @@
 # WaxBin
 
-WaxBin is a Go library and `waxbin` CLI that owns the catalog database
+WaxBin is a Go library and CLI that owns the catalog database
 and is the single source of truth for an audio collection. It indexes, organizes,
 searches, browses, and tracks per-user state across **music, audiobooks, and
 podcasts**.
