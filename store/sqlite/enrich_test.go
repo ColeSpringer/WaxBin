@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"path/filepath"
+	"strconv"
 	"testing"
 
 	"github.com/colespringer/waxbin/identity"
@@ -19,7 +20,7 @@ import (
 func openStoreAt(t *testing.T) (*sqlite.Store, string, *model.Library) {
 	t.Helper()
 	ctx := context.Background()
-	dbPath := filepath.Join(t.TempDir(), "catalog.db")
+	dbPath := sqlite.SeedCatalog(t, filepath.Join(t.TempDir(), "catalog.db"))
 	st, err := sqlite.Open(ctx, sqlite.OpenOptions{Path: dbPath, Owner: "test"})
 	if err != nil {
 		t.Fatalf("open store: %v", err)
@@ -1780,5 +1781,149 @@ func TestEnrichedAlbumLabelFiles(t *testing.T) {
 	}
 	if len(rows) != 1 || rows[0].Label != "" || rows[0].LabelUpdatedAt != 0 {
 		t.Errorf("item rows after the edit = %+v, want a.mp3 with no label riding along", rows)
+	}
+}
+
+// TestEnrichmentWritebackDropsALabelTheAlbumNoLongerHolds: the owed test's label term
+// counts only while the album still holds a label. Merging an enriched album into one
+// with no label of its own moves the label's curation row onto the survivor and leaves
+// its label column empty, and a write settles a file at the label's time only when there
+// is a label to write, so an unguarded term hands the same file back on every pass for
+// good.
+func TestEnrichmentWritebackDropsALabelTheAlbumNoLongerHolds(t *testing.T) {
+	ctx := context.Background()
+	st, dbPath, lib := openStoreAt(t)
+	db := roConn(t, dbPath)
+
+	itemOf := map[string]model.PID{}
+	for _, a := range []struct{ file, album string }{{"a", "Animals"}, {"b", "Meddle"}} {
+		res, err := st.PutScannedTrack(ctx, model.PutScannedTrackInput{
+			LibraryID: lib.ID,
+			File: model.File{
+				Path: []byte("/lib/" + a.file + ".mp3"), DisplayPath: "/lib/" + a.file + ".mp3",
+				RelPath: []byte(a.file + ".mp3"), Kind: model.FileAudio, Size: 100, MTimeNS: 7,
+				ContentHash: "c-" + a.file, EssenceHash: "ess-" + a.file, ScanState: model.ScanIndexed,
+			},
+			Item: model.PlayableItem{
+				Kind: model.KindTrack, State: model.StatePresent, Title: "Track " + a.file,
+				SortKey: model.SortKey("Track " + a.file), IdentityKey: "essence:ess-" + a.file,
+			},
+			Track: model.Track{Artist: "Pink Floyd", AlbumArtist: "Pink Floyd", Album: a.album, TrackNo: 1},
+		})
+		if err != nil {
+			t.Fatalf("PutScannedTrack %s: %v", a.file, err)
+		}
+		itemOf[a.album] = res.ItemPID
+	}
+	albumPID := func(name string) model.PID {
+		return model.PID(scalarQueryStr(t, db, "SELECT pid FROM album WHERE title = '"+name+"'"))
+	}
+	albumID := func(name string) int64 {
+		return int64(scalarQueryInt(t, db, "SELECT id FROM album WHERE title = '"+name+"'"))
+	}
+
+	// Both items carry an enrichment field, so both files reach the item select.
+	for album, pid := range itemOf {
+		if err := st.ApplyItemFields(ctx, model.ItemFieldsEnrichment{
+			ItemID: itemRowID(t, db, pid), PID: pid, Matched: true, Provider: "p",
+			Fields: map[string]string{"composer": "Roger Waters"},
+		}); err != nil {
+			t.Fatalf("fill %s: %v", album, err)
+		}
+	}
+	// Only Animals is given a label.
+	if err := st.ApplyAlbumFields(ctx, model.AlbumFieldsEnrichment{
+		AlbumID: albumID("Animals"), PID: albumPID("Animals"),
+		Matched: true, Provider: "discogs", Fields: map[string]string{"label": "Harvest"},
+	}); err != nil {
+		t.Fatalf("ApplyAlbumFields: %v", err)
+	}
+	if _, err := st.MergeEntity(ctx, model.MergeAlbum, albumPID("Meddle"), albumPID("Animals")); err != nil {
+		t.Fatalf("merge: %v", err)
+	}
+
+	// The state the guard is about: the survivor holds the enrichment label row with no
+	// label of its own.
+	survivor := albumID("Meddle")
+	if got := scalarQueryStr(t, db, "SELECT COALESCE(label,'') FROM album WHERE id = "+strconv.FormatInt(survivor, 10)); got != "" {
+		t.Fatalf("survivor label = %q, want the merge to leave it empty", got)
+	}
+	if n := scalarQueryInt(t, db, "SELECT COUNT(*) FROM entity_curation WHERE entity_type='album' AND field='label'"+
+		" AND source='enrichment' AND entity_id = "+strconv.FormatInt(survivor, 10)); n != 1 {
+		t.Fatalf("enrichment label rows on the survivor = %d, want the merge to have moved the loser's", n)
+	}
+
+	rows, err := st.EnrichmentWriteback(ctx, nil)
+	if err != nil {
+		t.Fatalf("writeback: %v", err)
+	}
+	if len(rows) == 0 {
+		t.Fatal("no files owed their composer")
+	}
+	// Settle each file the way the write-back does: at the newest value it could write,
+	// which is the item's own, since there is no label to carry.
+	for _, r := range rows {
+		if r.Label != "" {
+			t.Fatalf("row %s carries label %q, want none from an album with an empty label", r.FilePID, r.Label)
+		}
+		if err := st.SettleEnrichmentWrite(ctx, r.FilePID, r.Newest); err != nil {
+			t.Fatalf("settle %s: %v", r.FilePID, err)
+		}
+	}
+	again, err := st.EnrichmentWriteback(ctx, nil)
+	if err != nil {
+		t.Fatalf("writeback again: %v", err)
+	}
+	if len(again) != 0 {
+		t.Errorf("still owed %+v after settling every writable value, want nothing", again)
+	}
+}
+
+// TestEnrichmentWritebackFlagsASharedFile: a file several items back, or one carrying an
+// offset window on the edge the select walks, survives the virtual-track gate and comes
+// back flagged so the caller refuses it once. The settle stamp is per file while the
+// newest value is per item, so rewriting the file for one item would settle it past the
+// other's value and lose it.
+func TestEnrichmentWritebackFlagsASharedFile(t *testing.T) {
+	ctx := context.Background()
+	st, dbPath, lib := openStoreAt(t)
+	db := roConn(t, dbPath)
+	rw := writeConn(t, dbPath)
+	pid := seedEnrichTrack(t, st, lib.ID)
+	itemID := itemRowID(t, db, pid)
+	if err := st.ApplyItemFields(ctx, model.ItemFieldsEnrichment{
+		ItemID: itemID, PID: pid, Matched: true, Provider: "p",
+		Fields: map[string]string{"composer": "Roger Waters"},
+	}); err != nil {
+		t.Fatalf("fill: %v", err)
+	}
+	owed := func(t *testing.T) model.EnrichedTagRow {
+		t.Helper()
+		rows, err := st.EnrichmentWriteback(ctx, nil)
+		if err != nil {
+			t.Fatalf("writeback: %v", err)
+		}
+		if len(rows) != 1 {
+			t.Fatalf("rows = %d, want the one owed file", len(rows))
+		}
+		return rows[0]
+	}
+	if r := owed(t); r.Shared {
+		t.Fatalf("a file backing one whole item reported shared")
+	}
+
+	// A second item on the same file. Its edge carries no offset, so the select's own
+	// gate lets it through and only the shared test catches it.
+	fileID := int64(scalarQueryInt(t, db, "SELECT id FROM file"))
+	if _, err := rw.ExecContext(ctx, `INSERT INTO playable_item(pid, kind, state, title, sort_key, identity_key, created_at, updated_at)
+		VALUES ('01J0SHARED0000000000000000','track','present','Second','second','essence:shared',1,1)`); err != nil {
+		t.Fatalf("insert second item: %v", err)
+	}
+	if _, err := rw.ExecContext(ctx, `INSERT INTO item_file(item_id, file_id, role, position)
+		SELECT id, ?, 'primary', 0 FROM playable_item WHERE pid = '01J0SHARED0000000000000000'`, fileID); err != nil {
+		t.Fatalf("insert second edge: %v", err)
+	}
+	if r := owed(t); !r.Shared {
+		t.Errorf("a file two items back reported unshared, so the write-back would rewrite it per item")
 	}
 }

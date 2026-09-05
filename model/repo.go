@@ -280,6 +280,10 @@ type EnrichedTagRow struct {
 	Size      int64
 	MTimeNS   int64
 	IsPrimary bool // the part a book re-anchor should read back from
+	// Shared reports a file several items back, or one carrying an offset window. Its
+	// tags belong to every item that shares it, so the write-back refuses it the way the
+	// album-label pass and the edit write-back do.
+	Shared bool
 	// Newest is the unix ns of the newest enrichment value on the item, which is what
 	// a settled write records against the file. Fields may be empty when a rescan
 	// cleared the values the provenance rows still name; the file is settled either way.

@@ -20,7 +20,7 @@ import (
 func openTestStore(t *testing.T) (*sqlite.Store, *model.Library) {
 	t.Helper()
 	ctx := context.Background()
-	db := filepath.Join(t.TempDir(), "catalog.db")
+	db := sqlite.SeedCatalog(t, filepath.Join(t.TempDir(), "catalog.db"))
 	st, err := sqlite.Open(ctx, sqlite.OpenOptions{Path: db, Owner: "test"})
 	if err != nil {
 		t.Fatalf("open store: %v", err)

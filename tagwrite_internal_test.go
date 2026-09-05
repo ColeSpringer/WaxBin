@@ -860,3 +860,120 @@ func TestEnrichmentWriteBackSettlesAClearedValue(t *testing.T) {
 		t.Errorf("owed rows = %+v, want the file settled", rows)
 	}
 }
+
+// TestLostBookIdentityReadsOnlyTheIdentifierKeys: a landed write that dropped an
+// identifier is still a failure to the caller, since asin, isbn and edition feed
+// identity.BookKey and a part written with one the primary lacks keys apart on the next
+// scan. The classification is tested on its own because no container this suite can build
+// refuses those keys, so there is no file that would drive the warning end to end.
+func TestLostBookIdentityReadsOnlyTheIdentifierKeys(t *testing.T) {
+	lostASIN := []model.TagWriteWarning{{Key: "ASIN", Unrepresented: true, Message: "dropped"}}
+	if !lostBookIdentity(model.KindBook, lostASIN) {
+		t.Errorf("a book that lost its ASIN read as a clean write")
+	}
+	for _, key := range []string{"ISBN", "EDITION"} {
+		if !lostBookIdentity(model.KindBook, []model.TagWriteWarning{{Key: key, Unrepresented: true}}) {
+			t.Errorf("a book that lost its %s read as a clean write", key)
+		}
+	}
+	// A track has no book key to split, and the label pass borrows this same path.
+	if lostBookIdentity(model.KindTrack, lostASIN) {
+		t.Errorf("a track was read as having lost a book identifier")
+	}
+	// A key outside the three leaves the book keying the way its siblings do, and a
+	// keyless loss names content the rewrite destroyed rather than a value it was given.
+	if lostBookIdentity(model.KindBook, []model.TagWriteWarning{{Key: "GENRE", Unrepresented: true}}) {
+		t.Errorf("a lost genre abandoned the book's remaining parts")
+	}
+	if lostBookIdentity(model.KindBook, []model.TagWriteWarning{{Key: "", Unrepresented: true, Message: "a second LIST/INFO chunk was dropped"}}) {
+		t.Errorf("a keyless rewrite loss abandoned the book's remaining parts")
+	}
+	// An advisory warning on an identifier key is not a loss.
+	if lostBookIdentity(model.KindBook, []model.TagWriteWarning{{Key: "ASIN"}}) {
+		t.Errorf("an advisory warning on ASIN read as a loss")
+	}
+}
+
+// TestEnrichmentWriteBackRefusesASharedFile: a file whose edge carries an offset window,
+// or that several items back, survives the item select's virtual-track gate. Its tags
+// belong to the whole file, so the write-back refuses it the way the album-label pass and
+// the edit write-back do rather than rewriting it for one item: the settle stamp is per
+// file while the newest value is per item, so a rewrite would settle the file past the
+// other item's value and lose it.
+func TestEnrichmentWriteBackRefusesASharedFile(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	lib, err := Open(ctx, Options{
+		DBPath: db, WriteEnrichmentTags: true,
+		Roots: []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}},
+	})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer lib.Close()
+
+	path := filepath.Join(root, "a.mp3")
+	writeRaw(t, path, testaudio.BuildMP3("Dogs", "Pink Floyd", "Animals", 1))
+	if _, err := lib.Scan(ctx, ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	items, err := lib.Query(ctx, query.New(query.EntityItems).Build(), "")
+	if err != nil || len(items) != 1 {
+		t.Fatalf("items = %d (err %v), want 1", len(items), err)
+	}
+	pid := items[0].PID
+	enrichItemFields(t, ctx, lib, db, pid, map[string]string{"composer": "Roger Waters"})
+
+	// The edge takes an offset window, which is what makes the file unsafe to write per
+	// item while leaving it in the select the item walk reads.
+	raw, err := sql.Open("sqlite", "file:"+db+"?_pragma=busy_timeout(10000)")
+	if err != nil {
+		t.Fatalf("open raw db: %v", err)
+	}
+	defer raw.Close()
+	res, err := raw.ExecContext(ctx, `UPDATE item_file SET end_frames = 75
+		WHERE item_id = (SELECT id FROM playable_item WHERE pid = ?)`, string(pid))
+	if err != nil {
+		t.Fatalf("mark shared: %v", err)
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		t.Fatalf("marked %d edges, want 1", n)
+	}
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	c, err := lib.writeEnrichmentTags(ctx, nil)
+	if err != nil {
+		t.Fatalf("write enrichment tags: %v", err)
+	}
+	if c.written != 0 || c.failed != 0 || c.unrepresented != 1 {
+		t.Fatalf("counts = {written:%d failed:%d unrepresented:%d}, want the file refused once",
+			c.written, c.failed, c.unrepresented)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(before) != string(after) {
+		t.Errorf("the shared file was rewritten")
+	}
+	diags, err := lib.store.FileDiagnostics(ctx, model.DiagnosticFilter{ItemPID: pid, Origin: model.OriginEnrichment})
+	if err != nil {
+		t.Fatalf("diagnostics: %v", err)
+	}
+	if len(diags) != 1 || diags[0].Code != model.DiagTagWriteUnsynced {
+		t.Fatalf("diagnostics = %+v, want the one drift row naming the refusal", diags)
+	}
+
+	// Settled by the refusal, so the next pass does not walk it again.
+	c, err = lib.writeEnrichmentTags(ctx, nil)
+	if err != nil {
+		t.Fatalf("write enrichment tags again: %v", err)
+	}
+	if c.written != 0 || c.unrepresented != 0 {
+		t.Errorf("counts on the next pass = %+v, want the refusal settled rather than repeated", c)
+	}
+}

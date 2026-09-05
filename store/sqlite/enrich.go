@@ -1540,14 +1540,24 @@ type logger interface {
 // the one rewrite stamps both and the file is owed by whichever is newer than the stamp.
 // The label lives on the album row, so it has no field_provenance row of its own; the
 // members with no enrichment field to carry it on are EnrichedAlbumLabelFiles' to write.
+// The label term counts only while the album still holds a label, the guard the label
+// select applies for the same reason: a merge moves the loser's curation row onto a
+// survivor whose own label column is empty, and the write settles at the label's stamp
+// only when there is a label to write, so an unguarded term would leave that file owed on
+// every pass for good.
 //
 // The item_file join drops virtual tracks (start_frames IS NULL): one shared file backs
 // N cue-carved tracks, so an ungated join would rewrite that file once per track, each
-// after the first carrying a stale size/mtime for the optimistic update.
+// after the first carrying a stale size/mtime for the optimistic update. A file several
+// items share survives that join, so it comes back carrying the label select's shared
+// flag and the caller refuses it once rather than rewriting it per item. The settle stamp
+// is per file while the newest value is per item, so writing one item's values would
+// settle the file past the other's and lose them.
 //
 // The /*SCOPE*/ marker takes a scoped run's reach clause; see enrichWriteScopeClause.
 const enrichedTagSelect = `SELECT pi.pid, f.pid, pi.kind, f.path, f.size, f.mtime_ns,
 		CASE WHEN itf.role = 'primary' THEN 1 ELSE 0 END,
+		CASE WHEN ` + fileSharedOrVirtualExpr + ` THEN 1 ELSE 0 END,
 		fpw.fields, fpw.newest,
 		CASE WHEN lab.entity_id IS NULL THEN '' ELSE COALESCE(al.label,'') END, COALESCE(lab.updated_at, 0),
 		COALESCE(t.genre,''), COALESCE(NULLIF(CAST(t.bpm AS TEXT),'0'),''),
@@ -1566,7 +1576,8 @@ const enrichedTagSelect = `SELECT pi.pid, f.pid, pi.kind, f.path, f.size, f.mtim
 	LEFT JOIN album al ON al.id = t.album_id
 	LEFT JOIN entity_curation lab ON ` + enrichmentLabelRowJoin + `
 	WHERE pi.state = 'present' AND pi.kind IN ('track','book')
-	  AND (fpw.newest > f.enrich_settled_at OR COALESCE(lab.updated_at, 0) > f.enrich_settled_at)/*SCOPE*/
+	  AND (fpw.newest > f.enrich_settled_at
+	       OR (COALESCE(al.label,'') <> '' AND COALESCE(lab.updated_at, 0) > f.enrich_settled_at))/*SCOPE*/
 	ORDER BY pi.id, CASE WHEN itf.role = 'primary' THEN 0 ELSE 1 END, itf.position, f.id`
 
 // enrichmentLabelRowJoin joins an album alias al to its enrichment-written, unlocked
@@ -1585,6 +1596,21 @@ func enrichWriteScopeClause(scope *model.EnrichScope, itemCol, albumCol string) 
 	if scope == nil {
 		return "", nil
 	}
+	uniq := func(lists ...[]int64) []int64 {
+		return slices.Compact(slices.Sorted(slices.Values(slices.Concat(lists...))))
+	}
+	// One item list: a scope names the same item for its fields and its lyrics. Albums
+	// and release groups each come from two phases, so they repeat before this.
+	items := uniq(scope.FieldsItemIDs, scope.BookItemIDs, scope.LyricsItemIDs)
+	albums := uniq(scope.AlbumIDs)
+	groups := uniq(scope.ReleaseGroupIDs)
+	if len(items)+len(albums)+len(groups) > maxScopeBinds {
+		// A reach this wide came from a --limit high enough to be a full pass in all but
+		// name. Reading it as one widens the write-back to everything owed, a superset of
+		// what the run reached and exactly what an unlimited pass writes; the alternative
+		// is a statement SQLite refuses outright.
+		return "", nil
+	}
 	var parts []string
 	var args []any
 	bind := func(ids []int64) {
@@ -1592,27 +1618,30 @@ func enrichWriteScopeClause(scope *model.EnrichScope, itemCol, albumCol string) 
 			args = append(args, id)
 		}
 	}
-	// One item list: a scope names the same item for its fields and its lyrics.
-	items := slices.Compact(slices.Sorted(slices.Values(
-		slices.Concat(scope.FieldsItemIDs, scope.BookItemIDs, scope.LyricsItemIDs))))
 	if len(items) > 0 {
 		parts = append(parts, itemCol+" IN "+placeholders(len(items)))
 		bind(items)
 	}
-	if len(scope.AlbumIDs) > 0 {
-		parts = append(parts, albumCol+" IN "+placeholders(len(scope.AlbumIDs)))
-		bind(scope.AlbumIDs)
+	if len(albums) > 0 {
+		parts = append(parts, albumCol+" IN "+placeholders(len(albums)))
+		bind(albums)
 	}
-	if len(scope.ReleaseGroupIDs) > 0 {
+	if len(groups) > 0 {
 		parts = append(parts, albumCol+" IN (SELECT id FROM album WHERE release_group_id IN "+
-			placeholders(len(scope.ReleaseGroupIDs))+")")
-		bind(scope.ReleaseGroupIDs)
+			placeholders(len(groups))+")")
+		bind(groups)
 	}
 	if len(parts) == 0 {
 		return " AND 1=0", nil
 	}
 	return " AND (" + strings.Join(parts, " OR ") + ")", args
 }
+
+// maxScopeBinds caps the ids one write-back statement binds for a run's reach, under
+// SQLite's 32766-value ceiling with room to spare. The reach is not chunkable the way
+// ItemsByPIDs is: its three lists are ORed inside one statement, so a chunk of one would
+// re-return every row the other two already match.
+const maxScopeBinds = 32000
 
 // enrichedTagFieldOrder is the field each scanned value column belongs to, per kind. It
 // is the one place the select's column order and the field names are tied together.
@@ -1639,18 +1668,19 @@ func (s *Store) EnrichmentWriteback(ctx context.Context, scope *model.EnrichScop
 	var out []model.EnrichedTagRow
 	for rows.Next() {
 		var r model.EnrichedTagRow
-		var primary int
+		var primary, shared int
 		var written string
 		var trackGenre, bpm, isrc, composer, trackYear string
 		var asin, isbn, publisher, bookGenre, bookYear, narrator, subtitle, edition, description string
 		if err := rows.Scan(&r.ItemPID, &r.FilePID, &r.Kind, &r.Path, &r.Size, &r.MTimeNS,
-			&primary, &written, &r.Newest, &r.Label, &r.LabelUpdatedAt,
+			&primary, &shared, &written, &r.Newest, &r.Label, &r.LabelUpdatedAt,
 			&trackGenre, &bpm, &isrc, &composer, &trackYear,
 			&asin, &isbn, &publisher, &bookGenre, &bookYear, &narrator,
 			&subtitle, &edition, &description); err != nil {
 			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		r.IsPrimary = primary == 1
+		r.Shared = shared == 1
 		values := []string{trackGenre, bpm, isrc, composer, trackYear}
 		if r.Kind == model.KindBook {
 			values = []string{asin, isbn, publisher, bookGenre, bookYear, narrator, subtitle, edition, description}

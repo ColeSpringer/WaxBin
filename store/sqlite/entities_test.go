@@ -16,7 +16,7 @@ import (
 func entityFixture(t *testing.T) (*Store, *model.Library) {
 	t.Helper()
 	ctx := context.Background()
-	st, err := Open(ctx, OpenOptions{Path: filepath.Join(t.TempDir(), "c.db"), Owner: "test"})
+	st, err := Open(ctx, OpenOptions{Path: seedCatalog(t, filepath.Join(t.TempDir(), "c.db")), Owner: "test"})
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}

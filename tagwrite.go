@@ -211,8 +211,11 @@ func r128Gain(rgDB float64) string {
 //
 // An album's label rides the item rows, so a file carrying both an enriched field and
 // an enriched album label is opened once rather than twice. The members still owed the
-// label that the item walk does not open (a file with no enriched field of its own, or
-// one the item select drops as shared or virtual) are written afterwards on their own.
+// label that the item walk does not open (a file with no enriched field of its own, or a
+// virtual track's, which the item select drops) are written afterwards on their own. A
+// file several items share is refused wherever it is met, by the item walk when it
+// carries an enriched field of its own and by the label pass otherwise, so it is counted
+// and settled once either way.
 //
 // Why it exists rather than the catalog simply keeping the values: the scanner rebuilds
 // these columns from the file's tags on every content-changed rescan, so a value living
@@ -261,6 +264,9 @@ func (l *Library) writeEnrichmentTags(ctx context.Context, scope *model.EnrichSc
 	// the book with no way back. Re-anchoring cannot repair that, since it can only
 	// follow one file.
 	abandoned := map[model.PID]model.FileDiagnostic{}
+	// One shared file arrives once per item that shares it, and the refusal below is per
+	// file: the count and the drift row would otherwise repeat for the same file.
+	refused := map[model.PID]bool{}
 	for _, r := range rows {
 		if ctx.Err() != nil {
 			return c, ctx.Err()
@@ -294,6 +300,26 @@ func (l *Library) writeEnrichmentTags(ctx context.Context, scope *model.EnrichSc
 			settleAt = max(settleAt, r.LabelUpdatedAt)
 		}
 		delete(leftover, r.FilePID)
+		if r.Shared {
+			// Its tags belong to every item that shares it, so no per-item rewrite is
+			// safe. Refuse it the way the label pass and the edit write-back do, and
+			// settle it so the refusal is not repeated every pass. The settle runs per
+			// row, so the stamp lands on the newest value any of the sharing items
+			// carried rather than on whichever row came first.
+			if !refused[r.FilePID] {
+				refused[r.FilePID] = true
+				c.unrepresented++
+				l.noteEnrichmentDrift(ctx, r.FilePID, string(r.Path), sharedFileRefusal)
+			}
+			l.settleEnrichmentWrite(ctx, r.FilePID, string(r.Path), settleAt)
+			if r.Kind == model.KindBook && r.IsPrimary {
+				abandoned[r.ItemPID] = model.FileDiagnostic{
+					Code: model.DiagTagWriteLost, Severity: model.SeverityWarn,
+					Detail: "skipped behind the book's primary part, which could not be written",
+				}
+			}
+			continue
+		}
 		failure, err := l.writeEnrichmentFile(ctx, w, r, extra, settleAt, &c)
 		if err != nil {
 			return c, err
@@ -314,6 +340,45 @@ func (l *Library) writeEnrichmentTags(ctx context.Context, scope *model.EnrichSc
 	return c, l.writeEnrichmentAlbumLabels(ctx, w, leftover, &c)
 }
 
+// sharedFileRefusal is why a file several items back, or one carrying an offset window,
+// takes no tag write: its tags belong to the whole file rather than to the item being
+// written. The edit write-back refuses the same shape for the same reason.
+const sharedFileRefusal = "on-disk tag write-back is unavailable for a file shared by multiple items"
+
+// bookIdentityTagKeys are the on-disk keys whose values feed identity.BookKey, upper
+// cased for the lookup. A write that landed without one of them leaves the file outside
+// the book its siblings key to, which is why the write-back reads it as a failure rather
+// than as a landed write.
+var bookIdentityTagKeys = func() map[string]bool {
+	out := map[string]bool{}
+	for _, field := range []string{"asin", "isbn", "edition"} {
+		keys, ok := meta.BookFieldTagKeys(field)
+		if !ok {
+			panic("no tag keys for the book identity field " + field)
+		}
+		for _, k := range keys {
+			out[strings.ToUpper(k)] = true
+		}
+	}
+	return out
+}()
+
+// lostBookIdentity reports a landed write that dropped a value feeding identity.BookKey.
+// Only a keyed loss counts: the keyless codes name content the rewrite destroyed around
+// the edit rather than a value the edit asked for, and a key outside the three leaves the
+// book keying the way its siblings do.
+func lostBookIdentity(kind model.Kind, warnings []model.TagWriteWarning) bool {
+	if kind != model.KindBook {
+		return false
+	}
+	for _, wn := range warnings {
+		if wn.Unrepresented && bookIdentityTagKeys[strings.ToUpper(wn.Key)] {
+			return true
+		}
+	}
+	return false
+}
+
 // albumLabelTagKey is the on-disk key an album label is written under, from the same
 // map the entity edit write-back reads.
 var albumLabelTagKey = func() string {
@@ -328,9 +393,10 @@ var albumLabelTagKey = func() string {
 // in for this same file, and records the outcome in c: the diagnostics, the write count,
 // the settle stamp, and the optimistic file-state update. A write that did not land comes
 // back as the diagnostic recorded for it, which is what tells a book's caller to abandon
-// the remaining parts and how to mark them; a landed write, or a row with nothing to
-// write, comes back nil. A cancellation is returned rather than recorded, since it says
-// nothing about the file.
+// the remaining parts and how to mark them, and so does a write that landed without a
+// book identifier the container could not hold, since that splits the book the same way.
+// A clean write, or a row with nothing to write, comes back nil. A cancellation is
+// returned rather than recorded, since it says nothing about the file.
 //
 // settleAt is the newest enrichment value the edits carry, which is what the file is
 // settled at once they land or are found unable to. extra is how an album's label
@@ -399,8 +465,20 @@ func (l *Library) writeEnrichmentFile(ctx context.Context, w *meta.Writer, r mod
 		l.log.Warn("enrichment diagnostics", "path", path, "err", err)
 	}
 	l.settleEnrichmentWrite(ctx, r.FilePID, path, settleAt)
+	// The bytes landed, so the settle and the state update below are earned, but a book
+	// identifier the container could not represent is still a failure to the caller: asin,
+	// isbn and edition feed identity.BookKey, so parts written with one the primary lacks
+	// key apart on the next scan and split the book. A keyless loss, or a lost value that
+	// is not one of those three, leaves the book whole and reports nothing here.
+	var outcome *model.FileDiagnostic
+	if lostBookIdentity(r.Kind, res.Warnings) {
+		outcome = &model.FileDiagnostic{
+			Code: model.DiagTagWriteLost, Severity: model.SeverityWarn,
+			Detail: "this file cannot represent the book identifier the write carried",
+		}
+	}
 	if !res.Changed {
-		return nil, nil
+		return outcome, nil
 	}
 	c.written++
 	if _, err := l.store.UpdateFileStateIfUnchanged(ctx, model.FileStateUpdate{
@@ -415,7 +493,7 @@ func (l *Library) writeEnrichmentFile(ctx context.Context, w *meta.Writer, r mod
 		// the next scan repairs. Not a write failure.
 		l.log.Warn("enrichment file-state update", "path", path, "err", err)
 	}
-	return nil, nil
+	return outcome, nil
 }
 
 // noteEnrichmentDrift records a write that did not land, beside the rows a landed write
@@ -446,8 +524,8 @@ func (l *Library) settleEnrichmentWrite(ctx context.Context, filePID model.PID, 
 }
 
 // writeEnrichmentAlbumLabels writes the album labels still owed to files the item walk
-// did not open: a member with no enriched field of its own, or one the item select drops
-// because it is shared or carries an offset window.
+// did not open: a member with no enriched field of its own, or a virtual track's file,
+// which the item select drops.
 //
 // A shared or virtual file is refused rather than opened: its tags belong to every item
 // that shares it, so the label is recorded as unsynced drift, counted as unrepresented,
@@ -471,7 +549,7 @@ func (l *Library) writeEnrichmentAlbumLabels(ctx context.Context, w *meta.Writer
 		path := string(f.Path)
 		if f.Shared {
 			c.unrepresented++
-			l.noteEnrichmentDrift(ctx, pid, path, "on-disk tag write-back is unavailable for a file shared by multiple items")
+			l.noteEnrichmentDrift(ctx, pid, path, sharedFileRefusal)
 			l.settleEnrichmentWrite(ctx, pid, path, f.UpdatedAt)
 			continue
 		}
