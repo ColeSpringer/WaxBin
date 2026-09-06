@@ -8,10 +8,12 @@
 // answers instead of re-hitting a rate-limited API. It requires no bundled dataset
 // and degrades gracefully when a provider is unreachable.
 //
-// Beside the MusicBrainz spine sit the port phases, each gated by an injected provider's
-// capability and each running with or without a MusicBrainz contact: the two art
-// backfills, lyrics, and the fields walks that fill a track's, a book's, or an album's
-// empty scalar fields from Candidate.Fields.
+// Beside the MusicBrainz spine sit the port phases, each gated by a registered
+// provider's capability and each running with or without a MusicBrainz contact: the
+// three art backfills (release-group auxiliary, artist, album), lyrics, and the fields
+// walks that fill a track's, a book's, or an album's empty scalar fields from
+// Candidate.Fields. The album one is the phase a stock install still runs, since the
+// Cover Art Archive answers at the release rung.
 //
 // It is the "metadata brain" enrichment half; the WaxLabel tag adapter lives in
 // package meta. This package defines its own Store port (implemented by
@@ -40,45 +42,61 @@ import (
 // forced re-run, which rewrites the marker rather than removing the entity from the
 // set, still advances and terminates. Each takes an optional ids list (nil = the
 // full pass) that scopes the walk to explicit rowids, keeping the keyset shape.
+//
+// Every queue takes model.EnrichQueueOptions, which names the sweep it should walk:
+// the targets no marker covers (SweepFresh, the zero value and the ordinary run), the
+// ones whose no-match marker has expired against MissCutoff (SweepRetry), their union
+// (SweepDue, which only the count asks for), or everything (SweepAll, the forced run).
+// A run walks its whole phase list fresh, then walks it again for the expired misses,
+// so a capped run reaches the new files of every phase before it re-asks about
+// anything.
 type Store interface {
-	ArtistsNeedingEnrichment(ctx context.Context, force bool, afterID int64, limit int, ids []int64) ([]model.EnrichTarget, error)
+	ArtistsNeedingEnrichment(ctx context.Context, opts model.EnrichQueueOptions, afterID int64, limit int, ids []int64) ([]model.EnrichTarget, error)
 	// ReleaseGroupsNeedingEnrichment populates each target's representative file only
 	// when includeRepFile is set (the AcoustID fallback needs it), so the correlated
 	// lookup is skipped on the common path where AcoustID is off.
-	ReleaseGroupsNeedingEnrichment(ctx context.Context, force bool, afterID int64, limit int, includeRepFile bool, ids []int64) ([]model.EnrichTarget, error)
+	ReleaseGroupsNeedingEnrichment(ctx context.Context, opts model.EnrichQueueOptions, afterID int64, limit int, includeRepFile bool, ids []int64) ([]model.EnrichTarget, error)
 	// AlbumsNeedingReleaseMatch returns the next keyset page of albums that carry some
 	// matchable evidence (a release identifier, or a medium or country) but no release
 	// MBID, under a release group that has one.
-	AlbumsNeedingReleaseMatch(ctx context.Context, force bool, afterID int64, limit int, ids []int64) ([]model.EnrichTarget, error)
+	AlbumsNeedingReleaseMatch(ctx context.Context, opts model.EnrichQueueOptions, afterID int64, limit int, ids []int64) ([]model.EnrichTarget, error)
 	// ReleaseGroupsNeedingAuxArt returns the next keyset page of release groups the
 	// auxiliary-art backfill should ask about: they carry a title, no whole-entity art
 	// lock, and at least one empty auxiliary slot. Their front covers are deliberately
 	// not consulted, since a settled front is the population the phase exists for. An
 	// MBID rides along when the catalog has one but does not gate the walk.
-	ReleaseGroupsNeedingAuxArt(ctx context.Context, force bool, afterID int64, limit int, ids []int64) ([]model.EnrichTarget, error)
-	BooksNeedingEnrichment(ctx context.Context, force bool, afterID int64, limit int, ids []int64) ([]model.EnrichTarget, error)
+	ReleaseGroupsNeedingAuxArt(ctx context.Context, opts model.EnrichQueueOptions, afterID int64, limit int, ids []int64) ([]model.EnrichTarget, error)
+	BooksNeedingEnrichment(ctx context.Context, opts model.EnrichQueueOptions, afterID int64, limit int, ids []int64) ([]model.EnrichTarget, error)
 	// ItemsNeedingLyrics returns the next keyset page of tracks that carry no lyrics
-	// yet (and, unless force, have not already been looked up), each with the title,
-	// artist, album, and duration a lyrics provider keys on.
-	ItemsNeedingLyrics(ctx context.Context, force bool, afterID int64, limit int, ids []int64) ([]model.EnrichTarget, error)
+	// yet and that the sweep selects, each with the title, artist, album, and duration
+	// a lyrics provider keys on.
+	ItemsNeedingLyrics(ctx context.Context, opts model.EnrichQueueOptions, afterID int64, limit int, ids []int64) ([]model.EnrichTarget, error)
 	// ArtistsNeedingArtBackfill returns the next keyset page of artists with an empty
 	// art slot, front or auxiliary. Unlike ReleaseGroupsNeedingAuxArt it does consult
 	// the front, because artist art is fetched inside the identity pass and an already
 	// marked artist has none at all, which is the gap this phase exists for. It walks by
 	// name, so an artist MusicBrainz never matched is asked about too.
-	ArtistsNeedingArtBackfill(ctx context.Context, force bool, afterID int64, limit int, ids []int64) ([]model.EnrichTarget, error)
+	ArtistsNeedingArtBackfill(ctx context.Context, opts model.EnrichQueueOptions, afterID int64, limit int, ids []int64) ([]model.EnrichTarget, error)
+	// AlbumsNeedingArt returns the next keyset page of albums with an empty art slot the
+	// slots argument names as askable. Unlike the two backfills above it walks by
+	// identifier rather than by name: the releases of one group share a title, so an
+	// album carrying no release mbid, barcode or catalog number is skipped rather than
+	// asked about with a title that can only return the wrong edition.
+	AlbumsNeedingArt(ctx context.Context, opts model.EnrichQueueOptions, afterID int64, limit int, slots model.AlbumArtSlots, ids []int64) ([]model.EnrichTarget, error)
 	// ItemsNeedingFields returns the next keyset page of items of one kind whose fill
 	// set (model.EnrichFillFields) still has a gap, each carrying the title, credit,
 	// duration, and identifiers a provider keys on.
-	ItemsNeedingFields(ctx context.Context, force bool, afterID int64, limit int, kind model.Kind, ids []int64) ([]model.EnrichTarget, error)
+	ItemsNeedingFields(ctx context.Context, opts model.EnrichQueueOptions, afterID int64, limit int, kind model.Kind, ids []int64) ([]model.EnrichTarget, error)
 	// AlbumsNeedingFields returns the next keyset page of albums missing a label or a
 	// year, the entity rung of the same walk.
-	AlbumsNeedingFields(ctx context.Context, force bool, afterID int64, limit int, ids []int64) ([]model.EnrichTarget, error)
+	AlbumsNeedingFields(ctx context.Context, opts model.EnrichQueueOptions, afterID int64, limit int, ids []int64) ([]model.EnrichTarget, error)
 	// CountEntitiesNeedingEnrichment mirrors the phases a run would execute: a nil
 	// scope counts everything, a scoped count covers only the scoped ids, and a
 	// phase the scoped run skips (an empty id list) contributes zero. Each optional
 	// phase's flag must mirror whether the run actually runs it, or the ratio drifts.
-	CountEntitiesNeedingEnrichment(ctx context.Context, force bool, opts model.EnrichCountOptions, scope *model.EnrichScope) (int, error)
+	// It is asked for SweepDue when the run walks two sweeps, so the denominator covers
+	// both of them.
+	CountEntitiesNeedingEnrichment(ctx context.Context, q model.EnrichQueueOptions, opts model.EnrichCountOptions, scope *model.EnrichScope) (int, error)
 
 	// ApplyItemFields writes the scalar fields a provider supplied for one item and
 	// records the fields marker. Only the keys in the kind's fill set that are empty and
@@ -104,14 +122,25 @@ type Store interface {
 	// (fill-when-empty, lock-respecting per role), and records the backfill marker
 	// whether or not anything was found.
 	ApplyArtistArtBackfill(ctx context.Context, in model.ArtistArtBackfill) error
-	// ApplyAlbumReleaseMatch fills an album's release MBID when it has none, attaches
-	// that pressing's own cover when one came back, and records the marker either way
-	// (under the deciding tier's provider) so a no-match is not re-searched every run.
+	// ApplyAlbumArtBackfill is the album twin: it fills the album's own art rung,
+	// fill-when-empty against what the art chain already resolves, and records the
+	// marker whether or not anything was found. An album that has vanished since the
+	// queue page takes neither the fill nor the marker.
+	ApplyAlbumArtBackfill(ctx context.Context, in model.AlbumArtBackfill) error
+	// ApplyAlbumReleaseMatch fills an album's release MBID when it has none and records
+	// the marker either way (under the deciding tier's provider) so a no-match is not
+	// re-searched every run. It writes no art: the album-art phase keys on the stored
+	// identifiers instead.
 	ApplyAlbumReleaseMatch(ctx context.Context, in model.AlbumReleaseMatch) error
 	ApplyBookEnrichment(ctx context.Context, in model.BookEnrichment) error
 	// ApplyLyricsEnrichment attaches a track's resolved lyrics, only when it has none
 	// (fill-when-empty), and records the per-recording enrichment marker.
 	ApplyLyricsEnrichment(ctx context.Context, in model.LyricsEnrichment) error
+
+	// ExpiredMissesExist reports whether any no-match marker predates cutoff, so a run
+	// can skip the retry sweep entirely rather than have every phase re-query its base
+	// table for a population that is usually empty.
+	ExpiredMissesExist(ctx context.Context, cutoff int64) (bool, error)
 
 	EnrichmentCacheGet(ctx context.Context, key string) ([]byte, bool, error)
 	EnrichmentCachePut(ctx context.Context, key string, payload []byte) error
@@ -152,6 +181,12 @@ type Config struct {
 	// through to the medium/country tier costs a whole-group browse, but the projected
 	// result is cached per group, so a group's second album is free.
 	MatchReleases bool
+	// RetryMissesAfter is how old a no-match marker has to be before the pass asks
+	// about that target again. Zero never retries, which is what a caller building this
+	// struct directly gets; the facade resolves the config key to 30 days by default,
+	// the way it supplies FetchCoverArt. A matched marker is durable regardless: the
+	// provider answered, and a provider registered later needs one forced run.
+	RetryMissesAfter time.Duration
 
 	// Providers are injected candidate providers supplied by an embedder (Discogs,
 	// Last.fm, Audnexus, ...). They take priority over the built-in field/genre/cover/
@@ -346,7 +381,9 @@ func (s *Service) Enabled() bool {
 	if s.spineEnabled() {
 		return true
 	}
-	for _, c := range []Capability{CapAuxArt, CapArtistArt, CapLyrics, CapFields, CapBookMeta} {
+	// CapCover gates a phase of its own now (the album-art backfill), so an injected
+	// cover-only provider with no contact configured is a runnable install.
+	for _, c := range []Capability{CapCover, CapAuxArt, CapArtistArt, CapLyrics, CapFields, CapBookMeta} {
 		if s.hasCapability(c) {
 			return true
 		}
@@ -396,6 +433,10 @@ type Result struct {
 	// images themselves land in ArtFetched and AuxArtFetched with every other pass's.
 	ArtistArtEnriched int
 	ArtistArtMatched  int
+	// AlbumArtEnriched and AlbumArtMatched are the same pair for the album-art backfill,
+	// counting albums walked and albums some provider answered for.
+	AlbumArtEnriched int
+	AlbumArtMatched  int
 	// The three fields walks, each counting the targets it walked and the ones some
 	// provider answered for. TrackFields and BookFields are the item rung, one per kind
 	// because each is gated by a different capability; AlbumFields is the entity rung.
@@ -405,6 +446,12 @@ type Result struct {
 	BookFieldsMatched   int
 	AlbumFieldsEnriched int
 	AlbumFieldsMatched  int
+	// Retried counts the targets the retry sweep walked: earlier misses whose marker
+	// had expired against the configured window. They are counted in the phase totals
+	// beside it too, since a re-ask spends the same budget as a first ask; this says how
+	// much of the run was re-asking. A forced run walks one sweep and leaves it zero.
+	Retried int
+
 	// ArtFetched counts front covers gathered and handed to the store, not covers
 	// actually applied (the store's fill-when-empty and lock guards decide that);
 	// AuxArtFetched counts the non-front role images the same way, in whichever pass
@@ -438,8 +485,8 @@ type Result struct {
 // numerator against CountEntitiesNeedingEnrichment.
 func (r *Result) total() int {
 	return r.ArtistsEnriched + r.ReleaseGroupsEnriched + r.AlbumsSearched +
-		r.AuxArtEnriched + r.ArtistArtEnriched + r.BooksEnriched + r.LyricsEnriched +
-		r.TrackFieldsEnriched + r.BookFieldsEnriched + r.AlbumFieldsEnriched
+		r.AuxArtEnriched + r.ArtistArtEnriched + r.AlbumArtEnriched + r.BooksEnriched +
+		r.LyricsEnriched + r.TrackFieldsEnriched + r.BookFieldsEnriched + r.AlbumFieldsEnriched
 }
 
 // Heartbeat reports progress; it may be nil.
@@ -462,7 +509,35 @@ func (s *Service) Run(ctx context.Context, opts RunOptions, hb Heartbeat) (*Resu
 	// A scoped run implies force: the caller pointed at these targets, so markers
 	// and cached provider responses are bypassed and the lookup actually re-runs.
 	scope := opts.Scope
-	st := &runState{force: opts.Force || scope != nil, browsedGroups: map[string]bool{}}
+	st := &runState{
+		force:           opts.Force || scope != nil,
+		browsedGroups:   map[string]bool{},
+		refreshedGroups: map[string]bool{},
+	}
+	// The retry window, resolved once so every phase measures against the same instant.
+	// A forced run has one sweep that takes everything, so no cutoff applies; otherwise
+	// the fresh targets are walked first and the expired misses after them.
+	countSweep := model.SweepAll
+	st.sweeps = []model.EnrichSweep{model.SweepAll}
+	if !st.force {
+		st.sweeps = []model.EnrichSweep{model.SweepFresh}
+		countSweep = model.SweepFresh
+		if s.cfg.RetryMissesAfter > 0 {
+			st.missCutoff = time.Now().Add(-s.cfg.RetryMissesAfter).UnixNano()
+			// One scan of the marker table decides whether the second sweep is worth
+			// walking. Most nights nothing is due, and adding the sweep regardless makes
+			// every phase re-query its own base table for an empty answer.
+			due, err := s.store.ExpiredMissesExist(ctx, st.missCutoff)
+			if err != nil {
+				return res, err
+			}
+			if due {
+				st.sweeps = append(st.sweeps, model.SweepRetry)
+				countSweep = model.SweepDue
+			}
+		}
+	}
+	countQuery := model.EnrichQueueOptions{Sweep: countSweep, MissCutoff: st.missCutoff}
 	res.Reach = &model.EnrichScope{}
 	var artistIDs, rgIDs, albumIDs, bookIDs, lyricsIDs, fieldsIDs []int64
 	if scope != nil {
@@ -479,11 +554,12 @@ func (s *Service) Run(ctx context.Context, opts RunOptions, hb Heartbeat) (*Resu
 		// toggle is on too, the art-backfill and lyrics phases only when a capable
 		// provider is registered, and skips a phase the scope leaves empty, so the
 		// denominator counts exactly the work that will run.
-		n, err := s.store.CountEntitiesNeedingEnrichment(ctx, st.force, model.EnrichCountOptions{
+		n, err := s.store.CountEntitiesNeedingEnrichment(ctx, countQuery, model.EnrichCountOptions{
 			Identity:    s.spineEnabled(),
 			Albums:      s.cfg.MatchReleases && s.spineEnabled(),
 			AuxArt:      s.hasCapability(CapAuxArt),
 			ArtistArt:   s.hasCapability(CapArtistArt),
+			AlbumArt:    s.albumArtSlots(),
 			Lyrics:      s.hasCapability(CapLyrics),
 			TrackFields: s.hasCapability(CapFields),
 			BookFields:  s.hasCapability(CapBookMeta),
@@ -534,8 +610,8 @@ func (s *Service) Run(ctx context.Context, opts RunOptions, hb Heartbeat) (*Resu
 	if identityRuns(artistIDs) {
 		phases = append(phases, phase{
 			label: "artist", enriched: &res.ArtistsEnriched, matched: &res.ArtistsMatched, reach: &res.Reach.ArtistIDs,
-			fetch: func(ctx context.Context, after int64, lim int) ([]model.EnrichTarget, error) {
-				return s.store.ArtistsNeedingEnrichment(ctx, st.force, after, lim, artistIDs)
+			fetch: func(ctx context.Context, q model.EnrichQueueOptions, after int64, lim int) ([]model.EnrichTarget, error) {
+				return s.store.ArtistsNeedingEnrichment(ctx, q, after, lim, artistIDs)
 			},
 			enrich: func(ctx context.Context, t model.EnrichTarget) (bool, error) {
 				return s.enrichArtist(ctx, st, res, t)
@@ -545,8 +621,8 @@ func (s *Service) Run(ctx context.Context, opts RunOptions, hb Heartbeat) (*Resu
 	if identityRuns(rgIDs) {
 		phases = append(phases, phase{
 			label: "album", enriched: &res.ReleaseGroupsEnriched, matched: &res.ReleaseGroupsMatched, reach: &res.Reach.ReleaseGroupIDs,
-			fetch: func(ctx context.Context, after int64, lim int) ([]model.EnrichTarget, error) {
-				return s.store.ReleaseGroupsNeedingEnrichment(ctx, st.force, after, lim, s.acoustEnabled(), rgIDs)
+			fetch: func(ctx context.Context, q model.EnrichQueueOptions, after int64, lim int) ([]model.EnrichTarget, error) {
+				return s.store.ReleaseGroupsNeedingEnrichment(ctx, q, after, lim, s.acoustEnabled(), rgIDs)
 			},
 			enrich: func(ctx context.Context, t model.EnrichTarget) (bool, error) {
 				return s.enrichReleaseGroup(ctx, st, res, t)
@@ -561,20 +637,20 @@ func (s *Service) Run(ctx context.Context, opts RunOptions, hb Heartbeat) (*Resu
 		phases = append(phases, phase{
 			// Not "release": the phase above is already labelled "album".
 			label: "album release", enriched: &res.AlbumsSearched, matched: &res.AlbumsMatched, reach: &res.Reach.AlbumIDs,
-			fetch: func(ctx context.Context, after int64, lim int) ([]model.EnrichTarget, error) {
-				return s.store.AlbumsNeedingReleaseMatch(ctx, st.force, after, lim, albumIDs)
+			fetch: func(ctx context.Context, q model.EnrichQueueOptions, after int64, lim int) ([]model.EnrichTarget, error) {
+				return s.store.AlbumsNeedingReleaseMatch(ctx, q, after, lim, albumIDs)
 			},
 			enrich: func(ctx context.Context, t model.EnrichTarget) (bool, error) {
-				return s.enrichAlbumRelease(ctx, st, res, t)
+				return s.enrichAlbumRelease(ctx, st, t)
 			},
 		})
 	}
 	// The auxiliary-art backfill: release groups whose front is settled but whose back,
 	// disc, booklet, or background slots are empty. The release-group pass above never
-	// re-asks about those, because it pre-guards on the front, and the album pass fills
-	// only the album's own rung. It runs only when some provider advertises CapAuxArt,
-	// which the built-in Cover Art Archive does not, so a stock install walks nothing and
-	// writes no markers.
+	// re-asks about those, because it pre-guards on the front, and the album-art phase
+	// below fills only the album's own rung. It runs only when some provider advertises
+	// CapAuxArt, which the built-in Cover Art Archive does not, so a stock install walks
+	// nothing and writes no markers.
 	//
 	// Coming after the release-group phase means an id that phase just filled rides
 	// along with the request, since the queue reads release_group.mbid live. Nothing
@@ -586,8 +662,8 @@ func (s *Service) Run(ctx context.Context, opts RunOptions, hb Heartbeat) (*Resu
 	if s.hasCapability(CapAuxArt) && phaseRuns(rgIDs) {
 		phases = append(phases, phase{
 			label: "aux art", enriched: &res.AuxArtEnriched, matched: &res.AuxArtMatched, reach: &res.Reach.ReleaseGroupIDs,
-			fetch: func(ctx context.Context, after int64, lim int) ([]model.EnrichTarget, error) {
-				return s.store.ReleaseGroupsNeedingAuxArt(ctx, st.force, after, lim, rgIDs)
+			fetch: func(ctx context.Context, q model.EnrichQueueOptions, after int64, lim int) ([]model.EnrichTarget, error) {
+				return s.store.ReleaseGroupsNeedingAuxArt(ctx, q, after, lim, rgIDs)
 			},
 			enrich: func(ctx context.Context, t model.EnrichTarget) (bool, error) {
 				return s.enrichAuxArt(ctx, st, res, t)
@@ -608,19 +684,40 @@ func (s *Service) Run(ctx context.Context, opts RunOptions, hb Heartbeat) (*Resu
 	if s.hasCapability(CapArtistArt) && phaseRuns(artistIDs) {
 		phases = append(phases, phase{
 			label: "artist art", enriched: &res.ArtistArtEnriched, matched: &res.ArtistArtMatched, reach: &res.Reach.ArtistIDs,
-			fetch: func(ctx context.Context, after int64, lim int) ([]model.EnrichTarget, error) {
-				return s.store.ArtistsNeedingArtBackfill(ctx, st.force, after, lim, artistIDs)
+			fetch: func(ctx context.Context, q model.EnrichQueueOptions, after int64, lim int) ([]model.EnrichTarget, error) {
+				return s.store.ArtistsNeedingArtBackfill(ctx, q, after, lim, artistIDs)
 			},
 			enrich: func(ctx context.Context, t model.EnrichTarget) (bool, error) {
 				return s.enrichArtistArt(ctx, st, res, t)
 			},
 		})
 	}
+	// The album-art backfill: albums with an empty front or auxiliary slot that carry an
+	// identifier a provider can key on. It sits right after the release match so an id
+	// that phase just landed rides along with the request, since the queue reads
+	// album.mbid live, the same ordering argument the aux backfill uses.
+	//
+	// Its front half is the one art phase a stock install runs, because the Cover Art
+	// Archive serves the release rung. An album whose members carry no embedded cover
+	// otherwise shows the release group's picture, one edition standing in for all of
+	// them, which is the failure a per-release ask exists to avoid. The aux half needs
+	// an injected CapAuxArt provider, as at the other rungs.
+	if slots := s.albumArtSlots(); slots.Any() && phaseRuns(albumIDs) {
+		phases = append(phases, phase{
+			label: "album art", enriched: &res.AlbumArtEnriched, matched: &res.AlbumArtMatched, reach: &res.Reach.AlbumIDs,
+			fetch: func(ctx context.Context, q model.EnrichQueueOptions, after int64, lim int) ([]model.EnrichTarget, error) {
+				return s.store.AlbumsNeedingArt(ctx, q, after, lim, slots, albumIDs)
+			},
+			enrich: func(ctx context.Context, t model.EnrichTarget) (bool, error) {
+				return s.enrichAlbumArt(ctx, st, res, t)
+			},
+		})
+	}
 	if identityRuns(bookIDs) {
 		phases = append(phases, phase{
 			label: "book", enriched: &res.BooksEnriched, matched: &res.BooksMatched, reach: &res.Reach.BookItemIDs,
-			fetch: func(ctx context.Context, after int64, lim int) ([]model.EnrichTarget, error) {
-				return s.store.BooksNeedingEnrichment(ctx, st.force, after, lim, bookIDs)
+			fetch: func(ctx context.Context, q model.EnrichQueueOptions, after int64, lim int) ([]model.EnrichTarget, error) {
+				return s.store.BooksNeedingEnrichment(ctx, q, after, lim, bookIDs)
 			},
 			enrich: func(ctx context.Context, t model.EnrichTarget) (bool, error) { return s.enrichBook(ctx, st, t) },
 		})
@@ -631,8 +728,8 @@ func (s *Service) Run(ctx context.Context, opts RunOptions, hb Heartbeat) (*Resu
 	if s.hasCapability(CapLyrics) && phaseRuns(lyricsIDs) {
 		phases = append(phases, phase{
 			label: "lyrics", enriched: &res.LyricsEnriched, matched: &res.LyricsMatched, reach: &res.Reach.LyricsItemIDs,
-			fetch: func(ctx context.Context, after int64, lim int) ([]model.EnrichTarget, error) {
-				return s.store.ItemsNeedingLyrics(ctx, st.force, after, lim, lyricsIDs)
+			fetch: func(ctx context.Context, q model.EnrichQueueOptions, after int64, lim int) ([]model.EnrichTarget, error) {
+				return s.store.ItemsNeedingLyrics(ctx, q, after, lim, lyricsIDs)
 			},
 			enrich: func(ctx context.Context, t model.EnrichTarget) (bool, error) { return s.enrichLyrics(ctx, st, t) },
 		})
@@ -645,8 +742,8 @@ func (s *Service) Run(ctx context.Context, opts RunOptions, hb Heartbeat) (*Resu
 	if s.hasCapability(CapFields) && phaseRuns(fieldsIDs) {
 		phases = append(phases, phase{
 			label: "track fields", enriched: &res.TrackFieldsEnriched, matched: &res.TrackFieldsMatched, reach: &res.Reach.FieldsItemIDs,
-			fetch: func(ctx context.Context, after int64, lim int) ([]model.EnrichTarget, error) {
-				return s.store.ItemsNeedingFields(ctx, st.force, after, lim, model.KindTrack, fieldsIDs)
+			fetch: func(ctx context.Context, q model.EnrichQueueOptions, after int64, lim int) ([]model.EnrichTarget, error) {
+				return s.store.ItemsNeedingFields(ctx, q, after, lim, model.KindTrack, fieldsIDs)
 			},
 			enrich: func(ctx context.Context, t model.EnrichTarget) (bool, error) {
 				return s.enrichTrackFields(ctx, st, t)
@@ -656,8 +753,8 @@ func (s *Service) Run(ctx context.Context, opts RunOptions, hb Heartbeat) (*Resu
 	if s.hasCapability(CapBookMeta) && phaseRuns(fieldsIDs) {
 		phases = append(phases, phase{
 			label: "book fields", enriched: &res.BookFieldsEnriched, matched: &res.BookFieldsMatched, reach: &res.Reach.FieldsItemIDs,
-			fetch: func(ctx context.Context, after int64, lim int) ([]model.EnrichTarget, error) {
-				return s.store.ItemsNeedingFields(ctx, st.force, after, lim, model.KindBook, fieldsIDs)
+			fetch: func(ctx context.Context, q model.EnrichQueueOptions, after int64, lim int) ([]model.EnrichTarget, error) {
+				return s.store.ItemsNeedingFields(ctx, q, after, lim, model.KindBook, fieldsIDs)
 			},
 			enrich: func(ctx context.Context, t model.EnrichTarget) (bool, error) {
 				return s.enrichBookFields(ctx, st, t)
@@ -669,18 +766,33 @@ func (s *Service) Run(ctx context.Context, opts RunOptions, hb Heartbeat) (*Resu
 	if s.hasCapability(CapFields) && phaseRuns(albumIDs) {
 		phases = append(phases, phase{
 			label: "album fields", enriched: &res.AlbumFieldsEnriched, matched: &res.AlbumFieldsMatched, reach: &res.Reach.AlbumIDs,
-			fetch: func(ctx context.Context, after int64, lim int) ([]model.EnrichTarget, error) {
-				return s.store.AlbumsNeedingFields(ctx, st.force, after, lim, albumIDs)
+			fetch: func(ctx context.Context, q model.EnrichQueueOptions, after int64, lim int) ([]model.EnrichTarget, error) {
+				return s.store.AlbumsNeedingFields(ctx, q, after, lim, albumIDs)
 			},
 			enrich: func(ctx context.Context, t model.EnrichTarget) (bool, error) {
 				return s.enrichAlbumFields(ctx, st, t)
 			},
 		})
 	}
-	for i := range phases {
-		if err := s.runPhase(ctx, phases[i], beat, remaining, limitReached); err != nil {
-			return res, err
+	// Sweeps outside phases, not inside: --limit is one budget for the run, and a capped
+	// nightly pass has to reach the files nothing has looked at yet in EVERY phase
+	// before it spends anything on re-asking. Nesting the sweeps inside a phase would
+	// let one phase's expired population starve every phase after it, night after night.
+	//
+	// The price is one night of convergence in a narrow case. The phase order is
+	// load-bearing (an album needs its group's mbid, and the art rungs read the ids the
+	// phase above just landed), and that still holds within each sweep; what no longer
+	// holds is across them, so an entity whose identity lands on a retry leaves the next
+	// phase's FRESH queue unserved until the following run.
+	for _, sweep := range st.sweeps {
+		st.retrying = sweep == model.SweepRetry
+		q := model.EnrichQueueOptions{Sweep: sweep, MissCutoff: st.missCutoff}
+		for i := range phases {
+			if err := s.runSweep(ctx, st, phases[i], res, q, beat, remaining, limitReached); err != nil {
+				return res, err
+			}
 		}
+		st.retrying = false
 	}
 	_ = beat("enriched " + strconv.Itoa(res.total()) + " entities")
 	return res, nil
@@ -693,13 +805,33 @@ func (s *Service) Run(ctx context.Context, opts RunOptions, hb Heartbeat) (*Resu
 type runState struct {
 	force     bool
 	acoustOff bool
+	// sweeps are the queue walks the run makes over its whole phase list, in order, and
+	// missCutoff is the instant a no-match marker has to predate to be re-asked. An
+	// ordinary run walks every phase fresh, then every phase again for the expired
+	// misses; a forced or scoped run walks SweepAll alone.
+	sweeps     []model.EnrichSweep
+	missCutoff int64
+	// retrying is set while a phase walks its retry sweep, and forced() folds it into
+	// force: a target whose marker already says nothing answered has to be asked the way
+	// a forced run asks, or the MusicBrainz cache and a provider that caches its own
+	// misses would just serve the answer that earned the marker.
+	retrying bool
 	// browsedGroups records, per release group this run attempted, whether the browse
 	// produced a usable edition set. It does two jobs: a forced or scoped run (both bypass
 	// the per-group cache read) refreshes a group once rather than once per album under
 	// it, and a group whose browse never reconciles costs one attempt per run instead of
 	// one per album. The pass is single-goroutine, so no lock is needed.
 	browsedGroups map[string]bool
+	// refreshedGroups records which groups this run has actually re-browsed. It is
+	// separate from browsedGroups because a retried album can arrive under a group a
+	// fresh sibling browsed earlier in the same run: that group is "attempted", so
+	// without this it would read the stale edition set the fresh pass cached.
+	refreshedGroups map[string]bool
 }
+
+// forced reports whether this target should be asked the way a forced run asks:
+// bypassing the MusicBrainz cache and telling a caching provider to do the same.
+func (st *runState) forced() bool { return st.force || st.retrying }
 
 // phase describes one entity type's enrichment for the shared keyset runner: how to
 // fetch a page, how to enrich one target (returning whether a provider matched), the
@@ -709,22 +841,23 @@ type phase struct {
 	enriched *int
 	matched  *int
 	reach    *[]int64
-	fetch    func(ctx context.Context, afterID int64, limit int) ([]model.EnrichTarget, error)
+	fetch    func(ctx context.Context, q model.EnrichQueueOptions, afterID int64, limit int) ([]model.EnrichTarget, error)
 	enrich   func(ctx context.Context, t model.EnrichTarget) (matched bool, err error)
 }
 
-// runPhase walks one entity type in keyset pages, enriching each target. It is the
-// one loop behind artists, release groups, and books. A MusicBrainz or cancellation
+// runSweep walks one sweep of one phase in keyset pages, enriching each target. It is
+// the one loop behind artists, release groups, and books. A MusicBrainz or cancellation
 // error aborts; a per-entity miss is marked by the enrich callback and the walk
-// continues. Counters live on the phase (pointers into the Result), so the loop
-// needs no Result of its own.
-func (s *Service) runPhase(ctx context.Context, p phase, beat func(string) error, remaining func() int, limitReached func() bool) error {
+// continues. The phase counters are pointers into the Result, and the retry tally is the
+// Result's own, since it spans every phase.
+func (s *Service) runSweep(ctx context.Context, st *runState, p phase, res *Result, q model.EnrichQueueOptions,
+	beat func(string) error, remaining func() int, limitReached func() bool) error {
 	var afterID int64
 	for {
 		if limitReached() {
 			return nil
 		}
-		batch, err := p.fetch(ctx, afterID, remaining())
+		batch, err := p.fetch(ctx, q, afterID, remaining())
 		if err != nil {
 			return err
 		}
@@ -743,8 +876,13 @@ func (s *Service) runPhase(ctx context.Context, p phase, beat func(string) error
 			if matched {
 				(*p.matched)++
 			}
+			verb := "enriched "
+			if st.retrying {
+				res.Retried++
+				verb = "retried "
+			}
 			*p.reach = append(*p.reach, t.ID)
-			if err := beat("enriched " + p.label + " " + t.Name); err != nil {
+			if err := beat(verb + p.label + " " + t.Name); err != nil {
 				return err
 			}
 			if limitReached() {
@@ -790,9 +928,9 @@ func (s *Service) enrichArtist(ctx context.Context, st *runState, res *Result, t
 		enr.Aliases = artistAliasNames(a)
 		enr.Relations = artistRelations(a)
 		if !t.ArtLocked {
-			req := Request{Type: TargetArtist, Force: st.force, Artist: t.Name, MBID: a.ID}
+			req := Request{Type: TargetArtist, Force: st.forced(), Artist: t.Name, MBID: a.ID}
 			if !t.HasArt {
-				art := s.gatherArt(ctx, st, req)
+				art, _ := s.gatherArt(ctx, st, req, false)
 				enr.Art = art[model.ArtRoleFront]
 				enr.AuxArt = auxArtRoles(art)
 			} else {
@@ -815,7 +953,7 @@ func (s *Service) enrichArtist(ctx context.Context, st *runState, res *Result, t
 // (searchArtist itself returns no match for an empty/symbol-only name).
 func (s *Service) resolveArtist(ctx context.Context, st *runState, t model.EnrichTarget) (*mbArtist, error) {
 	if t.MBID != "" {
-		a, err := s.mb.lookupArtist(ctx, st.force, t.MBID)
+		a, err := s.mb.lookupArtist(ctx, st.forced(), t.MBID)
 		if err == nil {
 			return a, nil
 		}
@@ -823,7 +961,7 @@ func (s *Service) resolveArtist(ctx context.Context, st *runState, t model.Enric
 			return nil, err
 		}
 	}
-	return s.mb.searchArtist(ctx, st.force, t.Name)
+	return s.mb.searchArtist(ctx, st.forced(), t.Name)
 }
 
 // enrichReleaseGroup resolves one release group (MBID lookup, else text search, else
@@ -849,10 +987,10 @@ func (s *Service) enrichReleaseGroup(ctx context.Context, st *runState, res *Res
 		// never aborts. Skipped for a locked cover, which the store would refuse to
 		// replace, so a forced re-run does not re-download one picture per locked group.
 		if !t.ArtLocked {
-			art := s.gatherArt(ctx, st, Request{
-				Type: TargetReleaseGroup, Force: st.force,
+			art, _ := s.gatherArt(ctx, st, Request{
+				Type: TargetReleaseGroup, Force: st.forced(),
 				Title: rg.Title, Artist: releaseGroupArtistName(rg), MBID: rg.ID,
-			})
+			}, false)
 			enr.Art = art[model.ArtRoleFront]
 			enr.AuxArt = auxArtRoles(art)
 		}
@@ -872,7 +1010,7 @@ func (s *Service) enrichReleaseGroup(ctx context.Context, st *runState, res *Res
 // fingerprint.
 func (s *Service) resolveReleaseGroup(ctx context.Context, st *runState, t model.EnrichTarget) (*mbReleaseGroup, error) {
 	if t.MBID != "" {
-		rg, err := s.mb.lookupReleaseGroup(ctx, st.force, t.MBID)
+		rg, err := s.mb.lookupReleaseGroup(ctx, st.forced(), t.MBID)
 		if err == nil {
 			return rg, nil
 		}
@@ -881,7 +1019,7 @@ func (s *Service) resolveReleaseGroup(ctx context.Context, st *runState, t model
 		}
 	}
 	if t.Name != "" {
-		rg, err := s.mb.searchReleaseGroup(ctx, st.force, t.Name, t.ArtistName)
+		rg, err := s.mb.searchReleaseGroup(ctx, st.forced(), t.Name, t.ArtistName)
 		if err != nil {
 			return nil, err
 		}
@@ -891,7 +1029,7 @@ func (s *Service) resolveReleaseGroup(ctx context.Context, st *runState, t model
 	}
 	if s.acoustEnabled() && !st.acoustOff && t.FilePath != "" {
 		if mbid := s.acoustResolveReleaseGroup(ctx, st, t); mbid != "" {
-			rg, err := s.mb.lookupReleaseGroup(ctx, st.force, mbid)
+			rg, err := s.mb.lookupReleaseGroup(ctx, st.forced(), mbid)
 			if err != nil && !waxerr.Is(err, waxerr.CodeNotFound) {
 				return nil, err
 			}
@@ -936,7 +1074,12 @@ func (s *Service) acoustResolveReleaseGroup(ctx context.Context, st *runState, t
 // The album's own title, year, and track count are never consulted, because the
 // releases of one group share them. The evidence that does decide, and how the weak
 // third tier differs from the two identifier tiers, is release.go's subject.
-func (s *Service) enrichAlbumRelease(ctx context.Context, st *runState, res *Result, t model.EnrichTarget) (bool, error) {
+//
+// It fetches no art. The album-art phase below walks by stored identifier, so it reaches
+// the id this phase just landed in the same pass, and reaches the albums this phase
+// never queues at all: a Picard-tagged album whose id came off the tags, and one whose
+// id a user curated.
+func (s *Service) enrichAlbumRelease(ctx context.Context, st *runState, t model.EnrichTarget) (bool, error) {
 	// A scan stores identifiers verbatim, so this column holds whatever a tag said, and
 	// a malformed value would make a garbage query rather than a clean miss. No marker
 	// either: "could not search" must stay re-queueable, and the recheck costs nothing
@@ -968,41 +1111,56 @@ func (s *Service) enrichAlbumRelease(ctx context.Context, st *runState, res *Res
 		// match needs to see that, and the reason was previously computed and discarded.
 		s.log.Info("enrichment: matched album release",
 			"album", t.PID, "mbid", m.MBID, "by", m.Reason, "provider", in.Provider)
-		// This pressing's own artwork. The album rung of the art chain has had no
-		// producer until now: the release-group pass fetches the group's cover, which is
-		// one edition's art standing in for all of them, and a matched release is the
-		// first time WaxBin knows which edition it actually holds.
-		//
-		// An album that already resolves a front keeps it (the store fills only when
-		// empty), so asking for one would spend a rate-limited request on a picture
-		// nothing would store. Its auxiliary slots are a separate question, and this is
-		// the only pass that reaches the album's own rung to ask it: the aux backfill
-		// phase walks release groups. So a settled front redirects the ask rather than
-		// canceling it, and the whole-entity art lock, which the store answers to for
-		// every role at once, cancels both.
-		//
-		// The redirected ask is not rare. HasArt counts a member track's embedded cover,
-		// so in a library of ordinary rips it fires for close to every album this phase
-		// matches, once at match time and again on a forced run. It is bounded by who can
-		// answer it: only providers advertising CapAuxArt are consulted, and the built-in
-		// Cover Art Archive is not one, so a stock install makes no request at all.
-		if !t.ArtLocked {
-			if !t.HasArt {
-				art := s.gatherArt(ctx, st, Request{
-					Type: TargetRelease, Force: st.force, MBID: m.MBID,
-					Title: t.Name, Artist: t.ArtistName,
-				})
-				in.Art = art[model.ArtRoleFront]
-				in.AuxArt = auxArtRoles(art)
-			} else {
-				in.AuxArt, _ = s.gatherAuxArt(ctx, st, Request{
-					Type: TargetRelease, Force: st.force, MBID: m.MBID,
-					Title: t.Name, Artist: t.ArtistName,
-				})
-			}
-		}
 	}
 	if err := s.store.ApplyAlbumReleaseMatch(ctx, in); err != nil {
+		return false, err
+	}
+	return in.Matched, nil
+}
+
+// enrichAlbumArt fills one album's empty art roles from the providers that can serve the
+// release rung, and marks it so the walk does not repeat. It is the album twin of
+// enrichArtistArt: the queue hands it an album carrying a release mbid, a barcode or a
+// catalog number, so this is a gather and an apply with no MusicBrainz round trip
+// between them.
+//
+// The identifiers are what make the ask answerable. The releases of one group share a
+// title, so a provider given only that can return some edition's picture and never this
+// pressing's; a barcode or a catalog number names the pressing outright, and the Cover
+// Art Archive keys on the release mbid.
+//
+// A run that gathered nothing still applies, because the marker is what stops the album
+// being asked again next run. The store decides what actually lands: the queue's vacancy
+// test is approximate, and a per-role lock is re-checked there.
+func (s *Service) enrichAlbumArt(ctx context.Context, st *runState, res *Result, t model.EnrichTarget) (bool, error) {
+	in := model.AlbumArtBackfill{AlbumID: t.ID, PID: t.PID}
+	req := Request{
+		Type: TargetRelease, Force: st.forced(),
+		Title: t.Name, Artist: t.ArtistName, MBID: t.MBID,
+		Barcode: t.Barcode, CatalogNumber: t.CatalogNumber,
+	}
+	// A scan stores MUSICBRAINZ_ALBUMID lowercased but unvalidated, so the column can
+	// hold something no provider will accept. Blanking it leaves the printed identifiers
+	// to carry the ask rather than failing it outright; the edit path validates, so only
+	// the scan path reaches this.
+	if req.MBID != "" && !model.IsMBID(req.MBID) {
+		s.log.Debug("enrichment: album art request dropping a non-UUID release mbid",
+			"album", t.PID, "mbid", req.MBID)
+		req.MBID = ""
+	}
+	var art map[model.ArtRole]*model.ArtImage
+	var provider string
+	if !t.HasArt {
+		art, provider = s.gatherArt(ctx, st, req, true)
+		in.Art = art[model.ArtRoleFront]
+		in.AuxArt = auxArtRoles(art)
+	} else {
+		in.AuxArt, provider = s.gatherAuxArt(ctx, st, req)
+	}
+	if in.Art != nil || len(in.AuxArt) > 0 {
+		in.Matched, in.Provider = true, provider
+	}
+	if err := s.store.ApplyAlbumArtBackfill(ctx, in); err != nil {
 		return false, err
 	}
 	if in.Art != nil {
@@ -1023,7 +1181,7 @@ func (s *Service) enrichAlbumRelease(ctx context.Context, st *runState, res *Res
 func (s *Service) enrichAuxArt(ctx context.Context, st *runState, res *Result, t model.EnrichTarget) (bool, error) {
 	in := model.ReleaseGroupAuxArt{ReleaseGroupID: t.ID, PID: t.PID}
 	aux, provider := s.gatherAuxArt(ctx, st, Request{
-		Type: TargetReleaseGroup, Force: st.force,
+		Type: TargetReleaseGroup, Force: st.forced(),
 		Title: t.Name, Artist: t.ArtistName, MBID: t.MBID,
 	})
 	if len(aux) > 0 {
@@ -1044,7 +1202,7 @@ func (s *Service) enrichAuxArt(ctx context.Context, st *runState, res *Result, t
 func (s *Service) enrichArtistArt(ctx context.Context, st *runState, res *Result, t model.EnrichTarget) (bool, error) {
 	in := model.ArtistArtBackfill{ArtistID: t.ID, PID: t.PID}
 	art, provider := s.gatherArtistArt(ctx, st, Request{
-		Type: TargetArtist, Force: st.force, Artist: t.Name, MBID: t.MBID,
+		Type: TargetArtist, Force: st.forced(), Artist: t.Name, MBID: t.MBID,
 	}, t.HasArt)
 	if len(art) > 0 {
 		in.Matched, in.Provider = true, provider
@@ -1182,7 +1340,7 @@ type albumMatch struct {
 // evidence is MEDIA=FLAC would spend a request to discover it has nothing to say.
 func (s *Service) matchAlbumRelease(ctx context.Context, st *runState, t model.EnrichTarget) (albumMatch, error) {
 	if spellings := barcodeSpellings(t.Barcode); len(spellings) > 0 {
-		byBarcode, err := s.mb.searchReleaseByIdentifier(ctx, st.force, t.ReleaseGroupMBID, "barcode", spellings)
+		byBarcode, err := s.mb.searchReleaseByIdentifier(ctx, st.forced(), t.ReleaseGroupMBID, "barcode", spellings)
 		if err != nil {
 			return albumMatch{}, err
 		}
@@ -1191,7 +1349,7 @@ func (s *Service) matchAlbumRelease(ctx context.Context, st *runState, t model.E
 		}
 	}
 	if cat := strings.TrimSpace(t.CatalogNumber); cat != "" {
-		byCatNo, err := s.mb.searchReleaseByIdentifier(ctx, st.force, t.ReleaseGroupMBID, "catno", []string{cat})
+		byCatNo, err := s.mb.searchReleaseByIdentifier(ctx, st.forced(), t.ReleaseGroupMBID, "catno", []string{cat})
 		if err != nil {
 			return albumMatch{}, err
 		}
@@ -1202,16 +1360,26 @@ func (s *Service) matchAlbumRelease(ctx context.Context, st *runState, t model.E
 	if !editionEvidence(t) {
 		return albumMatch{}, nil
 	}
-	// One browse per group per run. A group already attempted and found unusable is not
-	// re-paged for each of its remaining albums, and a forced run refreshes a group once
-	// and lets every later album under it read what that refresh cached.
+	// One browse per group per run, and one refresh per group per run. A group already
+	// attempted and found unusable is not re-paged for each of its remaining albums, and
+	// a forced run refreshes a group once and lets every later album under it read what
+	// that refresh cached.
+	//
+	// A retried album is the case the refreshed set exists for: it can arrive under a
+	// group a fresh sibling already browsed this run, which makes the group "attempted"
+	// off a cache read that predates the re-ask. So the refresh is keyed on whether this
+	// run actually re-browsed the group, and an unusable attempt yields to one.
 	usable, attempted := st.browsedGroups[t.ReleaseGroupMBID]
-	if attempted && !usable {
+	refresh := st.forced() && !st.refreshedGroups[t.ReleaseGroupMBID]
+	if attempted && !usable && !refresh {
 		return albumMatch{Skip: true}, nil
 	}
-	group, ok, err := s.mb.releaseEditions(ctx, st.force && !attempted, t.ReleaseGroupMBID)
+	group, ok, err := s.mb.releaseEditions(ctx, refresh, t.ReleaseGroupMBID)
 	if err != nil {
 		return albumMatch{}, err
+	}
+	if refresh {
+		st.refreshedGroups[t.ReleaseGroupMBID] = true
 	}
 	st.browsedGroups[t.ReleaseGroupMBID] = ok
 	if !ok {
@@ -1228,7 +1396,7 @@ func (s *Service) matchAlbumRelease(ctx context.Context, st *runState, t model.E
 func (s *Service) enrichBook(ctx context.Context, st *runState, t model.EnrichTarget) (bool, error) {
 	enr := model.BookEnrichment{BookItemID: t.ID, PID: t.PID}
 	if t.MBID != "" {
-		r, err := s.mb.lookupRelease(ctx, st.force, t.MBID)
+		r, err := s.mb.lookupRelease(ctx, st.forced(), t.MBID)
 		if err != nil && !waxerr.Is(err, waxerr.CodeNotFound) {
 			return false, err
 		}
@@ -1255,7 +1423,7 @@ func (s *Service) enrichBook(ctx context.Context, st *runState, t model.EnrichTa
 func (s *Service) enrichTrackFields(ctx context.Context, st *runState, t model.EnrichTarget) (bool, error) {
 	in := model.ItemFieldsEnrichment{ItemID: t.ID, PID: t.PID}
 	fields, providers := s.gatherFields(ctx, Request{
-		Type: TargetRecording, Force: st.force, Want: CapFields,
+		Type: TargetRecording, Force: st.forced(), Want: CapFields,
 		Title: t.Name, Artist: t.ArtistName, Album: t.Album,
 		DurationSec: t.DurationSec, ISRC: t.ISRC, MBID: t.MBID,
 	}, CapFields, model.EnrichFillFields(model.KindTrack))
@@ -1278,7 +1446,7 @@ func (s *Service) enrichTrackFields(ctx context.Context, st *runState, t model.E
 func (s *Service) enrichBookFields(ctx context.Context, st *runState, t model.EnrichTarget) (bool, error) {
 	in := model.ItemFieldsEnrichment{ItemID: t.ID, PID: t.PID}
 	fields, providers := s.gatherFields(ctx, Request{
-		Type: TargetBook, Force: st.force, Want: CapBookMeta,
+		Type: TargetBook, Force: st.forced(), Want: CapBookMeta,
 		Title: t.Name, Artist: t.ArtistName,
 		ASIN: t.ASIN, ISBN: t.ISBN, MBID: t.MBID,
 	}, CapBookMeta, model.EnrichFillFields(model.KindBook))
@@ -1299,8 +1467,9 @@ func (s *Service) enrichBookFields(ctx context.Context, st *runState, t model.En
 func (s *Service) enrichAlbumFields(ctx context.Context, st *runState, t model.EnrichTarget) (bool, error) {
 	in := model.AlbumFieldsEnrichment{AlbumID: t.ID, PID: t.PID}
 	fields, providers := s.gatherFields(ctx, Request{
-		Type: TargetRelease, Force: st.force, Want: CapFields,
-		Title: t.Name, Artist: t.ArtistName, MBID: t.MBID, Barcode: t.Barcode,
+		Type: TargetRelease, Force: st.forced(), Want: CapFields,
+		Title: t.Name, Artist: t.ArtistName, MBID: t.MBID,
+		Barcode: t.Barcode, CatalogNumber: t.CatalogNumber,
 	}, CapFields, model.AlbumFillFields())
 	if len(fields) > 0 {
 		in.Matched, in.Fields, in.Providers = true, fields, providers
@@ -1382,7 +1551,7 @@ func firstFieldProvider(providers map[string]string) string {
 // not re-queried every run. Returns whether a provider matched.
 func (s *Service) enrichLyrics(ctx context.Context, st *runState, t model.EnrichTarget) (bool, error) {
 	req := Request{
-		Type: TargetRecording, Force: st.force, Want: CapLyrics,
+		Type: TargetRecording, Force: st.forced(), Want: CapLyrics,
 		Title: t.Name, Artist: t.ArtistName, Album: t.Album, DurationSec: t.DurationSec,
 	}
 	var got *model.Lyrics
@@ -1427,7 +1596,7 @@ type genreCandidate struct {
 // found.
 func (s *Service) gatherGenres(ctx context.Context, st *runState, rg *mbReleaseGroup, mbBaseline []string) ([]string, string) {
 	req := Request{
-		Type: TargetReleaseGroup, Force: st.force, Want: CapGenres,
+		Type: TargetReleaseGroup, Force: st.forced(), Want: CapGenres,
 		Title: rg.Title, Artist: releaseGroupArtistName(rg), MBID: rg.ID,
 	}
 	var cands []genreCandidate
@@ -1484,7 +1653,10 @@ func (s *Service) gatherGenres(ctx context.Context, st *runState, rg *mbReleaseG
 }
 
 // gatherArt returns the first offered image per art role, in priority order (injected
-// first, then the Cover Art Archive). A cover provider is asked under CapCover and
+// first, then the Cover Art Archive), plus the name of the first provider to contribute
+// one, which is what a marker credits at the rungs that write one.
+//
+// A cover provider is asked under CapCover and
 // every role it offers is taken, auxiliary ones included, so a provider that has
 // always served them under that one capability keeps working unchanged. A provider
 // advertising CapAuxArt without CapCover is asked too, under that capability, and only
@@ -1500,53 +1672,51 @@ func (s *Service) gatherGenres(ctx context.Context, st *runState, rg *mbReleaseG
 // or a missing cover is skipped, never aborting the run.
 //
 // Per consulted provider the offered roles merge first-offer-wins per role (nil
-// images, empty data, and invalid roles are skipped), and the loop stops once the
-// front is filled. Providers after the front winner are not consulted: order is
-// caller-controlled (injected first), this preserves the pre-role call cadence, and
-// it avoids extra full-cover downloads such as CAA's up-to-24MiB fetch, so aux
-// coverage is opportunistic. An aux-only provider is likewise skipped once every
-// auxiliary role is held, gatherAuxArt's stop at a full set.
+// images, empty data, and invalid roles are skipped). A provider is asked only for
+// something it could still contribute, and under the capability that names it, so a
+// provider whose every slot is held is never called.
+//
+// wantAux decides what happens once the front lands. False stops there: providers after
+// the front winner are not consulted, which preserves the pre-role call cadence and
+// avoids extra full-cover downloads such as CAA's up-to-24MiB fetch, so aux coverage is
+// opportunistic. The artist and release-group rungs pass false because a backfill phase
+// behind them asks the same auxiliary providers later; consulting them here as well
+// would be one duplicate request per entity per run.
+//
+// True keeps the walk going for the auxiliary roles alone, asking each remaining
+// provider under CapAuxArt. The album rung passes true because it IS the backfill:
+// nothing runs after it, and its marker is durable, so an auxiliary slot skipped here is
+// skipped for good.
 //
 // Every accepted image is stamped here rather than trusted from the provider, the
 // same way gatherGenres records which provider supplied the display-primary genre: an
 // injected provider cannot claim a cover came from the tags. SourceURL is left as the
 // provider set it, since only the provider knows where it fetched, so an injected
 // provider can be named one thing and point at another.
-func (s *Service) gatherArt(ctx context.Context, st *runState, req Request) map[model.ArtRole]*model.ArtImage {
+func (s *Service) gatherArt(ctx context.Context, st *runState, req Request, wantAux bool) (map[model.ArtRole]*model.ArtImage, string) {
 	// Stamped on the value parameter, so both callers get it without repeating it.
 	req.Want = CapCover
 	auxReq := req
 	auxReq.Want = CapAuxArt
 	auxNeed := len(model.AuxArtRoles())
 	var out map[model.ArtRole]*model.ArtImage
+	var provider string
+	auxHeld := 0
 	for _, p := range s.providers {
 		caps := p.Capabilities()
-		if !caps.Has(CapCover) {
-			// out holds only auxiliary roles here, since a filled front ends the loop,
-			// so its length is the count of held aux slots.
-			if !caps.Has(CapAuxArt) || len(out) == auxNeed {
-				continue
-			}
-			cand, err := s.callProvider(ctx, p, auxReq)
-			if err != nil || cand == nil {
-				continue
-			}
-			for role, img := range cand.Art {
-				if role == model.ArtRoleFront || !role.Valid() || img == nil || len(img.Data) == 0 {
-					continue
-				}
-				if out[role] != nil {
-					continue
-				}
-				img.Source, img.Provider = model.SourceEnrichment, p.Name()
-				if out == nil {
-					out = make(map[model.ArtRole]*model.ArtImage, len(cand.Art))
-				}
-				out[role] = img
-			}
+		// A provider is consulted only for something it could still contribute, and
+		// under the capability that names it: the front while the front is open, else
+		// the auxiliary roles while any is.
+		askFront := caps.Has(CapCover) && out[model.ArtRoleFront] == nil
+		askAux := caps.Has(CapAuxArt) && auxHeld < auxNeed
+		if !askFront && !askAux {
 			continue
 		}
-		cand, err := s.callProvider(ctx, p, req)
+		ask := auxReq
+		if askFront {
+			ask = req
+		}
+		cand, err := s.callProvider(ctx, p, ask)
 		if err != nil || cand == nil {
 			continue
 		}
@@ -1556,9 +1726,14 @@ func (s *Service) gatherArt(ctx context.Context, st *runState, req Request) map[
 		}
 		// "Present" means usable: a role-map front carrying no bytes must not
 		// suppress the Cover alias and then be dropped by the empty-data skip below,
-		// which would lose a cover the provider did answer with.
-		if f := offered[model.ArtRoleFront]; f == nil || len(f.Data) == 0 {
-			offered[model.ArtRoleFront] = cand.Cover
+		// which would lose a cover the provider did answer with. The alias belongs to a
+		// cover request alone; an auxiliary ask never writes the front.
+		if askFront {
+			if f := offered[model.ArtRoleFront]; f == nil || len(f.Data) == 0 {
+				offered[model.ArtRoleFront] = cand.Cover
+			}
+		} else {
+			delete(offered, model.ArtRoleFront)
 		}
 		for role, img := range offered {
 			if !role.Valid() || img == nil || len(img.Data) == 0 {
@@ -1570,14 +1745,18 @@ func (s *Service) gatherArt(ctx context.Context, st *runState, req Request) map[
 			img.Source, img.Provider = model.SourceEnrichment, p.Name()
 			if out == nil {
 				out = make(map[model.ArtRole]*model.ArtImage, len(offered))
+				provider = p.Name()
 			}
 			out[role] = img
+			if role != model.ArtRoleFront {
+				auxHeld++
+			}
 		}
-		if out[model.ArtRoleFront] != nil {
+		if !wantAux && out[model.ArtRoleFront] != nil {
 			break
 		}
 	}
-	return out
+	return out, provider
 }
 
 // auxArtRoles splits the non-front roles out of a gathered art map, nil when there
@@ -1600,7 +1779,7 @@ func auxArtRoles(art map[model.ArtRole]*model.ArtImage) map[model.ArtRole]*model
 // a slow optional provider cannot stall the pass. It is best-effort: an error is
 // logged and returned for the caller to skip past. Only the identity spine (mb/aid)
 // aborts a run; every port provider is optional. Run cancellation still propagates,
-// because the next store write (or the runPhase loop's context check) observes it.
+// because the next store write (or the runSweep loop's context check) observes it.
 func (s *Service) callProvider(ctx context.Context, p Provider, req Request) (*Candidate, error) {
 	cctx, cancel := context.WithTimeout(ctx, providerTimeout)
 	defer cancel()
@@ -1610,6 +1789,17 @@ func (s *Service) callProvider(ctx context.Context, p Provider, req Request) (*C
 		return nil, err
 	}
 	return cand, nil
+}
+
+// albumArtSlots reports which album art vacancies the registered providers could
+// actually fill. A slot no provider serves is left out, so a stock install never marks
+// an album for an auxiliary vacancy nothing could have answered, and an install with
+// neither capability skips the phase and its count outright.
+func (s *Service) albumArtSlots() model.AlbumArtSlots {
+	return model.AlbumArtSlots{
+		Front: s.hasCapability(CapCover),
+		Aux:   s.hasCapability(CapAuxArt),
+	}
 }
 
 // hasCapability reports whether any registered provider advertises c, so an

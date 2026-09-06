@@ -21,13 +21,17 @@ CREATE INDEX acquisition_source ON acquisition(source_type);
 -- when. Absence means "not yet enriched" (the iteration queue); matched=0
 -- records a completed lookup that found nothing, so an unmatchable entity is
 -- not retried every run (a forced re-enrich ignores the marker).
+-- A matched=0 marker is retried once it is older than the configured window
+-- (enrichment.retry_misses_after_days), so a provider that gains coverage is
+-- asked again; matched=1 is durable. enriched_at is the last lookup rather than
+-- the first, since the marker's upsert refreshes it on every re-ask.
 -- entity_type carries two vocabularies at once: four values name an entity the coverage
 -- report counts or an album's release match, and the rest are per-pass markers keyed by
 -- whatever id that pass walks. See the enrichEntity* constants for why a new pass takes
 -- its own value.
 CREATE TABLE entity_enrichment (
   entity_type TEXT    NOT NULL,           -- artist|release_group|book|album|lyrics|aux_art|
-                                          -- artist_art|fields|fields_album
+                                          -- artist_art|album_art|fields|fields_album
   entity_id   INTEGER NOT NULL,
   provider    TEXT    NOT NULL,           -- what decided it: musicbrainz, musicbrainz:edition,
                                           -- an injected provider's name, or none

@@ -114,10 +114,13 @@ func openStore(t *testing.T) (*sqlite.Store, string, *model.Library) {
 	return st, dbPath, lib
 }
 
-// seedTrack persists one track (creating its artist/release-group/album entities).
-func seedTrack(t *testing.T, st *sqlite.Store, libID int64, path, essence, title, artist, album string) model.PID {
+// seedTrackWith persists one track at path, with whatever else the caller put on tr.
+// Artist, AlbumArtist, Album and TrackNo are the caller's to set; everything else about
+// the file and the item follows from path, essence and title, which is the part every
+// seeder in this package shares.
+func seedTrackWith(t *testing.T, st *sqlite.Store, libID int64, path, essence, title string, tr model.Track) model.PID {
 	t.Helper()
-	in := model.PutScannedTrackInput{
+	res, err := st.PutScannedTrack(context.Background(), model.PutScannedTrackInput{
 		LibraryID: libID,
 		File: model.File{
 			Path: []byte(path), DisplayPath: path, RelPath: []byte(filepath.Base(path)),
@@ -128,13 +131,19 @@ func seedTrack(t *testing.T, st *sqlite.Store, libID int64, path, essence, title
 			Kind: model.KindTrack, State: model.StatePresent, Title: title,
 			SortKey: model.SortKey(title), IdentityKey: "essence:" + essence,
 		},
-		Track: model.Track{Artist: artist, AlbumArtist: artist, Album: album, TrackNo: 1},
-	}
-	res, err := st.PutScannedTrack(context.Background(), in)
+		Track: tr,
+	})
 	if err != nil {
 		t.Fatalf("PutScannedTrack: %v", err)
 	}
 	return res.ItemPID
+}
+
+// seedTrack persists one track (creating its artist/release-group/album entities).
+func seedTrack(t *testing.T, st *sqlite.Store, libID int64, path, essence, title, artist, album string) model.PID {
+	t.Helper()
+	return seedTrackWith(t, st, libID, path, essence, title,
+		model.Track{Artist: artist, AlbumArtist: artist, Album: album, TrackNo: 1})
 }
 
 // roDB opens a read-only connection for assertion queries against the live catalog.

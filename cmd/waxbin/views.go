@@ -640,26 +640,31 @@ type enrichView struct {
 	BooksMatched          int `json:"booksMatched"`
 	LyricsEnriched        int `json:"lyricsEnriched"`
 	LyricsMatched         int `json:"lyricsMatched"`
-	// Both art backfill phases are gated on an injected provider, so their counts are
-	// omitted when they did not run and the stock payload keeps the shape it had.
+	// The art backfill phases print only when they walked something, so a payload from an
+	// install whose providers gate one off keeps the shape it had.
 	AuxArtEnriched    int `json:"auxArtEnriched,omitempty"`
 	AuxArtMatched     int `json:"auxArtMatched,omitempty"`
 	ArtistArtEnriched int `json:"artistArtEnriched,omitempty"`
 	ArtistArtMatched  int `json:"artistArtMatched,omitempty"`
+	AlbumArtEnriched  int `json:"albumArtEnriched,omitempty"`
+	AlbumArtMatched   int `json:"albumArtMatched,omitempty"`
 	// The fields walks are gated the same way, so their counts are omitted too.
-	TrackFieldsEnriched int    `json:"trackFieldsEnriched,omitempty"`
-	TrackFieldsMatched  int    `json:"trackFieldsMatched,omitempty"`
-	BookFieldsEnriched  int    `json:"bookFieldsEnriched,omitempty"`
-	BookFieldsMatched   int    `json:"bookFieldsMatched,omitempty"`
-	AlbumFieldsEnriched int    `json:"albumFieldsEnriched,omitempty"`
-	AlbumFieldsMatched  int    `json:"albumFieldsMatched,omitempty"`
-	ArtFetched          int    `json:"artFetched"`
-	AuxArtFetched       int    `json:"auxArtFetched,omitempty"`
-	TagsWritten         int    `json:"tagsWritten,omitempty"`
-	TagsFailed          int    `json:"tagsFailed,omitempty"`
-	TagsUnrepresented   int    `json:"tagsUnrepresented,omitempty"`
-	TagsSkipped         int    `json:"tagsSkipped,omitempty"`
-	JobPID              string `json:"jobPid,omitempty"`
+	TrackFieldsEnriched int `json:"trackFieldsEnriched,omitempty"`
+	TrackFieldsMatched  int `json:"trackFieldsMatched,omitempty"`
+	BookFieldsEnriched  int `json:"bookFieldsEnriched,omitempty"`
+	BookFieldsMatched   int `json:"bookFieldsMatched,omitempty"`
+	AlbumFieldsEnriched int `json:"albumFieldsEnriched,omitempty"`
+	AlbumFieldsMatched  int `json:"albumFieldsMatched,omitempty"`
+	// Retried is the retry sweep's share of the phase counts above, omitted on a run
+	// that re-asked nothing (a forced run, or a catalog with no expired misses).
+	Retried           int    `json:"retried,omitempty"`
+	ArtFetched        int    `json:"artFetched"`
+	AuxArtFetched     int    `json:"auxArtFetched,omitempty"`
+	TagsWritten       int    `json:"tagsWritten,omitempty"`
+	TagsFailed        int    `json:"tagsFailed,omitempty"`
+	TagsUnrepresented int    `json:"tagsUnrepresented,omitempty"`
+	TagsSkipped       int    `json:"tagsSkipped,omitempty"`
+	JobPID            string `json:"jobPid,omitempty"`
 }
 
 func toEnrichView(r *waxbin.EnrichResult) enrichView {
@@ -671,9 +676,11 @@ func toEnrichView(r *waxbin.EnrichResult) enrichView {
 		LyricsEnriched: r.Result.LyricsEnriched, LyricsMatched: r.Result.LyricsMatched,
 		AuxArtEnriched: r.Result.AuxArtEnriched, AuxArtMatched: r.Result.AuxArtMatched,
 		ArtistArtEnriched: r.Result.ArtistArtEnriched, ArtistArtMatched: r.Result.ArtistArtMatched,
+		AlbumArtEnriched: r.Result.AlbumArtEnriched, AlbumArtMatched: r.Result.AlbumArtMatched,
 		TrackFieldsEnriched: r.Result.TrackFieldsEnriched, TrackFieldsMatched: r.Result.TrackFieldsMatched,
 		BookFieldsEnriched: r.Result.BookFieldsEnriched, BookFieldsMatched: r.Result.BookFieldsMatched,
 		AlbumFieldsEnriched: r.Result.AlbumFieldsEnriched, AlbumFieldsMatched: r.Result.AlbumFieldsMatched,
+		Retried:    r.Result.Retried,
 		ArtFetched: r.Result.ArtFetched, AuxArtFetched: r.Result.AuxArtFetched,
 		TagsWritten: r.Result.TagsWritten, TagsFailed: r.Result.TagsFailed,
 		TagsUnrepresented: r.Result.TagsUnrepresented, TagsSkipped: r.Result.TagsSkipped,

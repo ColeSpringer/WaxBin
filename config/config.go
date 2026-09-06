@@ -55,15 +55,20 @@ type PodcastConfig struct {
 // base-URL fields default to the public services and exist mainly for tests and
 // private mirrors.
 type EnrichConfig struct {
-	Contact         string `json:"contact,omitempty"`           // MB contact (email/URL); enables enrichment
-	UserAgent       string `json:"user_agent,omitempty"`        // overrides the built User-Agent
-	AcoustIDKey     string `json:"acoustid_key,omitempty"`      // enables the AcoustID fallback (needs fpcalc)
-	CoverArt        *bool  `json:"cover_art,omitempty"`         // fetch release-group covers (default on)
-	Lyrics          *bool  `json:"lyrics,omitempty"`            // fill lyrics from LRCLIB (default on)
-	CommunityGenres *bool  `json:"community_genres,omitempty"`  // fetch community genres from ListenBrainz (default on)
-	MatchReleases   *bool  `json:"match_releases,omitempty"`    // resolve album.mbid from a barcode/catalog number (default on)
-	BlockPrivateIPs bool   `json:"block_private_ips,omitempty"` // SSRF guard for provider requests
-	TimeoutSeconds  int    `json:"timeout_seconds,omitempty"`   // per-request timeout (0 = default)
+	Contact         string `json:"contact,omitempty"`          // MB contact (email/URL); enables enrichment
+	UserAgent       string `json:"user_agent,omitempty"`       // overrides the built User-Agent
+	AcoustIDKey     string `json:"acoustid_key,omitempty"`     // enables the AcoustID fallback (needs fpcalc)
+	CoverArt        *bool  `json:"cover_art,omitempty"`        // fetch covers from the Cover Art Archive, release-group and per-release alike (default on)
+	Lyrics          *bool  `json:"lyrics,omitempty"`           // fill lyrics from LRCLIB (default on)
+	CommunityGenres *bool  `json:"community_genres,omitempty"` // fetch community genres from ListenBrainz (default on)
+	MatchReleases   *bool  `json:"match_releases,omitempty"`   // resolve album.mbid from a barcode/catalog number (default on)
+	// RetryMissesAfterDays is how old a no-match marker has to be before the pass asks
+	// about that target again, which is what lets a provider that has since gained
+	// coverage be reached without a --force run re-asking about everything. Unset is 30
+	// days; 0 never retries. A matched marker is durable either way.
+	RetryMissesAfterDays *int `json:"retry_misses_after_days,omitempty"`
+	BlockPrivateIPs      bool `json:"block_private_ips,omitempty"` // SSRF guard for provider requests
+	TimeoutSeconds       int  `json:"timeout_seconds,omitempty"`   // per-request timeout (0 = default)
 
 	MusicBrainzBaseURL  string `json:"musicbrainz_base_url,omitempty"`
 	CoverArtBaseURL     string `json:"cover_art_base_url,omitempty"`

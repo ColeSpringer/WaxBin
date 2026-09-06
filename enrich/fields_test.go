@@ -409,15 +409,28 @@ func albumFieldsMock(t *testing.T, fields map[string]string, seen *[]enrich.Requ
 		}}
 }
 
+// seedTrackIdentified is seedTrack with the release identifiers a ripper reads off the
+// disc, which is what the album rung sends a provider keyed on them.
+func seedTrackIdentified(t *testing.T, st *sqlite.Store, libID int64, path, essence, title, artist, album, barcode, catNo string) {
+	t.Helper()
+	seedTrackWith(t, st, libID, path, essence, title, model.Track{
+		Artist: artist, AlbumArtist: artist, Album: album, TrackNo: 1,
+		Barcode: barcode, CatalogNumber: catNo,
+	})
+}
+
 // TestAlbumFieldsFillsLabelAndYear: the label lands on the album row with a curation row
 // naming the provider, and the year lands on every member at once through the uniform
-// edit, leaving one album row with the pid it had. The release identifiers a provider
-// also offered are refused: they are the release matcher's evidence.
+// edit, leaving one album row with the pid it had. The request carries both printed
+// identifiers, so a provider keyed on one can answer without a text match, and the
+// identifiers a provider offers back are refused: they are the release matcher's evidence.
 func TestAlbumFieldsFillsLabelAndYear(t *testing.T) {
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
-	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "One", "Pink Floyd", "Wish You Were Here")
-	seedTrack(t, st, lib.ID, "/lib/b.mp3", "ess-b", "Two", "Pink Floyd", "Wish You Were Here")
+	seedTrackIdentified(t, st, lib.ID, "/lib/a.mp3", "ess-a", "One", "Pink Floyd", "Wish You Were Here",
+		"0075992739429", "SHVL 804")
+	seedTrackIdentified(t, st, lib.ID, "/lib/b.mp3", "ess-b", "Two", "Pink Floyd", "Wish You Were Here",
+		"0075992739429", "SHVL 804")
 	db := roDB(t, dbPath)
 	beforePID := scalarStr(t, db, "SELECT pid FROM album")
 
@@ -425,7 +438,7 @@ func TestAlbumFieldsFillsLabelAndYear(t *testing.T) {
 	mock := albumFieldsMock(t, map[string]string{
 		"label": "Harvest", "year": "1975-09-12",
 		// Refused: the release matcher searches by these.
-		"barcode": "0075992739429", "media": "12\" Vinyl", "country": "GB",
+		"barcode": "5099902154251", "media": "12\" Vinyl", "country": "GB",
 	}, &reqs)
 	res, err := fieldsService(t, st, mock).Run(ctx, enrich.RunOptions{}, nil)
 	if err != nil {
@@ -437,6 +450,10 @@ func TestAlbumFieldsFillsLabelAndYear(t *testing.T) {
 	}
 	if len(reqs) != 1 || reqs[0].Title != "Wish You Were Here" || reqs[0].Artist != "Pink Floyd" {
 		t.Fatalf("provider asked %+v, want one release request keyed on the album", reqs)
+	}
+	if reqs[0].Barcode != "0075992739429" || reqs[0].CatalogNumber != "SHVL 804" {
+		t.Errorf("request identifiers = %q/%q, want the album's barcode and catalog number",
+			reqs[0].Barcode, reqs[0].CatalogNumber)
 	}
 
 	if got := scalarStr(t, db, "SELECT COALESCE(label,'') FROM album"); got != "Harvest" {
@@ -466,10 +483,13 @@ func TestAlbumFieldsFillsLabelAndYear(t *testing.T) {
 	if got := scalarStr(t, db, "SELECT pid FROM album"); got != beforePID {
 		t.Errorf("album pid = %q, want the original %q kept", got, beforePID)
 	}
-	for _, f := range []string{"barcode", "media", "country"} {
+	for _, f := range []string{"media", "country"} {
 		if got := scalarStr(t, db, "SELECT COALESCE("+f+",'') FROM album"); got != "" {
 			t.Errorf("album %s = %q, want a provider guess refused there", f, got)
 		}
+	}
+	if got := scalarStr(t, db, "SELECT COALESCE(barcode,'') FROM album"); got != "0075992739429" {
+		t.Errorf("album barcode = %q, want the tagged one kept over the provider's guess", got)
 	}
 	assertFieldsVerifyClean(t, st)
 
@@ -726,49 +746,18 @@ func TestAlbumFieldsScopedToOneEntity(t *testing.T) {
 // otherwise share a title and an artist.
 func seedTrackYear(t *testing.T, st *sqlite.Store, libID int64, path, essence, title, artist, album string, year int) model.PID {
 	t.Helper()
-	res, err := st.PutScannedTrack(context.Background(), model.PutScannedTrackInput{
-		LibraryID: libID,
-		File: model.File{
-			Path: []byte(path), DisplayPath: path, RelPath: []byte(filepath.Base(path)),
-			Kind: model.FileAudio, Size: 100, MTimeNS: 1, DurationMS: 300000,
-			ContentHash: "c-" + essence, EssenceHash: essence, ScanState: model.ScanIndexed,
-		},
-		Item: model.PlayableItem{
-			Kind: model.KindTrack, State: model.StatePresent, Title: title,
-			SortKey: model.SortKey(title), IdentityKey: "essence:" + essence,
-		},
-		Track: model.Track{Artist: artist, AlbumArtist: artist, Album: album, TrackNo: 1, Year: year},
-	})
-	if err != nil {
-		t.Fatalf("PutScannedTrack: %v", err)
-	}
-	return res.ItemPID
+	return seedTrackWith(t, st, libID, path, essence, title,
+		model.Track{Artist: artist, AlbumArtist: artist, Album: album, TrackNo: 1, Year: year})
 }
 
 // seedTrackRelease is seedTrack with an album release MBID, which makes the album key
 // mbid-based and therefore blind to the year.
 func seedTrackRelease(t *testing.T, st *sqlite.Store, libID int64, path, essence, title, artist, album, relMBID string, year int) model.PID {
 	t.Helper()
-	res, err := st.PutScannedTrack(context.Background(), model.PutScannedTrackInput{
-		LibraryID: libID,
-		File: model.File{
-			Path: []byte(path), DisplayPath: path, RelPath: []byte(filepath.Base(path)),
-			Kind: model.FileAudio, Size: 100, MTimeNS: 1, DurationMS: 300000,
-			ContentHash: "c-" + essence, EssenceHash: essence, ScanState: model.ScanIndexed,
-		},
-		Item: model.PlayableItem{
-			Kind: model.KindTrack, State: model.StatePresent, Title: title,
-			SortKey: model.SortKey(title), IdentityKey: "essence:" + essence,
-		},
-		Track: model.Track{
-			Artist: artist, AlbumArtist: artist, Album: album, TrackNo: 1,
-			Year: year, MBReleaseID: relMBID,
-		},
+	return seedTrackWith(t, st, libID, path, essence, title, model.Track{
+		Artist: artist, AlbumArtist: artist, Album: album, TrackNo: 1,
+		Year: year, MBReleaseID: relMBID,
 	})
-	if err != nil {
-		t.Fatalf("PutScannedTrack: %v", err)
-	}
-	return res.ItemPID
 }
 
 // TestAlbumFieldsLabelSurvivesTheYearMerge: the year is the one fill that can move an

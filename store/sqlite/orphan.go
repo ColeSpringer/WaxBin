@@ -257,6 +257,9 @@ func deleteOrphanEntity(ctx context.Context, tx *sql.Tx, k orphanKind, o orphanR
 		if err := deleteAlbumFieldsMarkerTx(ctx, tx, o.id); err != nil {
 			return err
 		}
+		if err := deleteAlbumArtMarkerTx(ctx, tx, o.id); err != nil {
+			return err
+		}
 	}
 	if _, err := tx.ExecContext(ctx,
 		"DELETE FROM entity_curation WHERE entity_type = ? AND entity_id = ?", k.entityType, o.id); err != nil {

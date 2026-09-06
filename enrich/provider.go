@@ -69,7 +69,12 @@ const (
 	CapIdentity Capability = 1 << iota
 	// CapGenres supplies genres/tags for a release group.
 	CapGenres
-	// CapCover supplies release-group cover-art bytes.
+	// CapCover supplies cover-art bytes for a release group or for one release, and
+	// gates the album-art backfill's front half. The rung is the request type: a
+	// TargetReleaseGroup answer is one edition's art standing in for the whole group,
+	// while a TargetRelease answer is the pressing an album actually is, which is what
+	// that backfill asks for. The built-in Cover Art Archive serves both, so the album
+	// front half is the one art backfill a stock install runs.
 	CapCover
 	// CapLyrics supplies a recording's lyrics.
 	CapLyrics
@@ -139,6 +144,10 @@ const (
 	// pressing an album actually is. It is separate from TargetReleaseGroup because the
 	// group's cover is one edition's art standing in for all of them, and a provider that
 	// only knows groups should answer nothing rather than the wrong picture.
+	//
+	// The request carries whichever of MBID, Barcode and CatalogNumber the catalog holds.
+	// A provider keyed on an identifier answers for the pressing; one keyed on a title
+	// alone answers nothing here, since the titles of a group's releases are the same.
 	TargetRelease   TargetType = "release"
 	TargetBook      TargetType = "book"      // one audiobook (identifiers, publisher)
 	TargetRecording TargetType = "recording" // one track (lyrics)
@@ -161,12 +170,17 @@ type Request struct {
 	MBID   string // known identity anchor (artist / release-group / recording MBID)
 	ASIN   string
 	ISBN   string
-	// ISRC is the recording's identifier and Barcode the release's, carried by the
-	// fields walks so a provider keyed on one can answer without a text match. Each is
-	// empty when the catalog holds none.
-	ISRC        string
-	Barcode     string
-	DurationSec int // track duration, for a duration-disambiguated lyrics match
+	// ISRC is the recording's identifier, carried by the fields walks so a provider
+	// keyed on it can answer without a text match. It is empty when the catalog holds
+	// none.
+	ISRC string
+	// Barcode and CatalogNumber are the release's printed identifiers, verbatim as the
+	// tags spelled them, so a provider normalizes before comparing (model.NormalizeBarcode
+	// is exported for it). Every TargetRelease request carries them, art and fields
+	// alike, and each is empty when the catalog holds none.
+	Barcode       string
+	CatalogNumber string
+	DurationSec   int // track duration, for a duration-disambiguated lyrics match
 }
 
 // Wants reports whether this request's pass will use an answer for c. Capability.Has

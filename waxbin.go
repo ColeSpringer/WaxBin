@@ -52,7 +52,19 @@ var _ audit.Store = (*sqlite.Store)(nil)
 // Config, resolving the cover-art and lyrics defaults (each on unless explicitly
 // disabled) and attaching any injected providers. The injected providers outrank the
 // key-free built-ins for a value conflict.
+//
+// The retry window is resolved the same way: unset means 30 days, and anything not
+// positive means never. The default lives here rather than in enrich.Config so an
+// embedder building that struct itself keeps the old behaviour, which is where
+// FetchCoverArt puts its default too.
 func enrichConfig(c config.EnrichConfig, providers []enrich.Provider) enrich.Config {
+	retryMisses := 30 * 24 * time.Hour
+	if d := c.RetryMissesAfterDays; d != nil {
+		retryMisses = 0
+		if *d > 0 {
+			retryMisses = time.Duration(*d) * 24 * time.Hour
+		}
+	}
 	return enrich.Config{
 		Contact:              c.Contact,
 		UserAgent:            c.UserAgent,
@@ -61,6 +73,7 @@ func enrichConfig(c config.EnrichConfig, providers []enrich.Provider) enrich.Con
 		FetchLyrics:          c.Lyrics == nil || *c.Lyrics,
 		FetchCommunityGenres: c.CommunityGenres == nil || *c.CommunityGenres,
 		MatchReleases:        c.MatchReleases == nil || *c.MatchReleases,
+		RetryMissesAfter:     retryMisses,
 		Providers:            providers,
 		BlockPrivateIPs:      c.BlockPrivateIPs,
 		Timeout:              time.Duration(c.TimeoutSeconds) * time.Second,
@@ -946,7 +959,8 @@ func (e *watchEngine) SyncSources(ctx context.Context) error {
 // (mutually exclusive) scope the pass to one item's or entity's enrichable targets: a
 // track to its artist, album artist, release group, and lyrics; a book to its
 // contributors and identifier fill; an entity to artist, release_group, or album (an
-// album resolves to its parent release group). A scoped run implies Force.
+// album resolves to itself for the release match, the fields walk and the art backfill,
+// and to its parent release group). A scoped run implies Force.
 type EnrichOptions struct {
 	Force bool // re-enrich already-enriched entities
 	Limit int  // cap on entities processed (0 = all needing enrichment)

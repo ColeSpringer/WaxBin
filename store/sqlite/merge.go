@@ -145,10 +145,13 @@ func mergeEntityTx(ctx context.Context, tx *sql.Tx, et model.MergeEntity, table 
 	}
 	// Union the MBID: a merge driven by enrichment (two heuristic rows sharing an
 	// MBID) should leave the survivor carrying that MBID.
+	var gainedMBID bool
 	if et.HasMBID() {
-		if err := unionMBID(ctx, tx, table, sid, lid); err != nil {
+		g, err := unionMBID(ctx, tx, table, sid, lid)
+		if err != nil {
 			return nil, err
 		}
+		gainedMBID = g
 	}
 	// Adopt the loser's more-specific release-group type (ep/single/compilation/…)
 	// when the survivor only carries the default 'album'.
@@ -185,6 +188,27 @@ func mergeEntityTx(ctx context.Context, tx *sql.Tx, et model.MergeEntity, table 
 		// answered about the loser, and the row is keyed by the loser's rowid.
 		if err := deleteAlbumFieldsMarkerTx(ctx, tx, lid); err != nil {
 			return nil, err
+		}
+		if err := deleteAlbumArtMarkerTx(ctx, tx, lid); err != nil {
+			return nil, err
+		}
+	}
+	// A survivor that took the loser's MBID has an identifier no provider was ever asked
+	// with, which is the same "landed id is new evidence" rule the enrichment applies and
+	// the entity edit follow. Only the loser's marker goes above, so without this the
+	// survivor's own marker names the state before the union and suppresses the re-ask
+	// for good. The album rung gates on the identifier outright; the artist one carries
+	// it as a hint, and artistMBIDLandedTx exists for exactly this.
+	if gainedMBID {
+		switch et {
+		case model.MergeAlbum:
+			if err := deleteAlbumArtMarkerTx(ctx, tx, sid); err != nil {
+				return nil, err
+			}
+		case model.MergeArtist:
+			if err := artistMBIDLandedTx(ctx, tx, sid); err != nil {
+				return nil, err
+			}
 		}
 	}
 
@@ -564,19 +588,25 @@ func repointEntityPlayState(ctx context.Context, tx *sql.Tx, entityType string, 
 }
 
 // unionMBID copies the loser's MBID onto the survivor when the survivor has none,
-// so a merge that unifies a heuristic row with an MBID-carrying one keeps the id.
-func unionMBID(ctx context.Context, tx *sql.Tx, table string, sid, lid int64) error {
+// so a merge that unifies a heuristic row with an MBID-carrying one keeps the id. It
+// reports whether the survivor actually took one, which is new evidence for the walks
+// keyed on an identifier.
+func unionMBID(ctx context.Context, tx *sql.Tx, table string, sid, lid int64) (bool, error) {
 	var loserMBID sql.NullString
 	if err := tx.QueryRowContext(ctx, "SELECT mbid FROM "+table+" WHERE id = ?", lid).Scan(&loserMBID); err != nil {
-		return err
+		return false, err
 	}
 	if !loserMBID.Valid || loserMBID.String == "" {
-		return nil
+		return false, nil
 	}
-	_, err := tx.ExecContext(ctx,
+	r, err := tx.ExecContext(ctx,
 		"UPDATE "+table+" SET mbid = ? WHERE id = ? AND (mbid IS NULL OR mbid = '')",
 		loserMBID.String, sid)
-	return err
+	if err != nil {
+		return false, err
+	}
+	n, err := r.RowsAffected()
+	return n > 0, err
 }
 
 // unionReleaseGroupType adopts the loser's release-group type onto the survivor

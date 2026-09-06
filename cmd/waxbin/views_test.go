@@ -184,3 +184,40 @@ func lineWith(t *testing.T, out, want string) string {
 	}
 	return found
 }
+
+// TestEnrichViewRetriedCount: the retry tally rides the same rule as the gated phases.
+// It is absent from a run that re-asked nothing, so the ordinary payload keeps its
+// shape, and present when it did, because those targets spent the --limit budget too.
+func TestEnrichViewRetriedCount(t *testing.T) {
+	b, err := json.Marshal(toEnrichView(&waxbin.EnrichResult{
+		Result: enrich.Result{ArtistsEnriched: 1, ArtistsMatched: 1},
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "retried") {
+		t.Errorf("a run that re-asked nothing emitted a retry count: %s", b)
+	}
+
+	b, err = json.Marshal(toEnrichView(&waxbin.EnrichResult{
+		Result: enrich.Result{ArtistsEnriched: 4, Retried: 3},
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"retried":3`) {
+		t.Errorf("json = %s\nwant it to carry the retry count", b)
+	}
+
+	cmd := &cobra.Command{}
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	if err := renderEnrichResult(cmd, &globals{}, &waxbin.EnrichResult{
+		Result: enrich.Result{ArtistsEnriched: 4, Retried: 3},
+	}); err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	if !strings.Contains(buf.String(), "retried:        3 earlier misses") {
+		t.Errorf("summary is missing the retry line:\n%s", buf.String())
+	}
+}

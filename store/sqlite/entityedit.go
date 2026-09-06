@@ -219,9 +219,14 @@ func (s *Store) EditEntityFields(ctx context.Context, entityType model.MergeEnti
 			}
 		}
 		// Re-queues an album a past pass failed to match, as the scan top-up does; a
-		// matched marker is left alone. See fillAlbumIdentifiersTx.
+		// matched marker is left alone. The art rung's marker goes with it, matched or
+		// not, since that walk keys on the identifier just edited. See
+		// fillAlbumIdentifiersTx.
 		if newEvidence {
 			if err := clearUnmatchedAlbumMarkerTx(ctx, tx, entityID); err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+			if err := deleteAlbumArtMarkerTx(ctx, tx, entityID); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 		}
@@ -231,11 +236,11 @@ func (s *Store) EditEntityFields(ctx context.Context, entityType model.MergeEnti
 		// The marker must, matched or not, because the queue skips a marked entity and
 		// leaving it would mean the undo silently prevented the entity from ever being
 		// re-decided; a group carries the aux-art backfill's separate marker as well. The
-		// art goes only when a matched marker was there to have written it, since it came
-		// from the identity now being disowned; the member tracks' embedded covers are
-		// untouched, so the entity falls back to what it showed before, and a hand-set
-		// auxiliary cover on a group stays. And the match key goes back to its heuristic
-		// form, so the members follow the row rather than staying pinned to the id.
+		// art goes because it came from the identity now being disowned, and only
+		// enrichment's own rows go, so the member tracks' embedded covers and a hand-set
+		// cover are untouched and the entity falls back to what it showed before. And the
+		// match key goes back to its heuristic form, so the members follow the row rather
+		// than staying pinned to the id.
 		// An art backfill's marker goes on ANY mbid edit, not just a clear. Those queues
 		// walk by name, but the id rides the request when there is one, so a corrected or
 		// newly-supplied id is an answer no provider has been asked with and a marker
@@ -253,24 +258,29 @@ func (s *Store) EditEntityFields(ctx context.Context, entityType model.MergeEnti
 				if err := artistMBIDLandedTx(ctx, tx, entityID); err != nil {
 					return waxerr.Wrap(waxerr.CodeIO, op, err)
 				}
+			case model.MergeAlbum:
+				if err := deleteAlbumArtMarkerTx(ctx, tx, entityID); err != nil {
+					return waxerr.Wrap(waxerr.CodeIO, op, err)
+				}
+				// The cover goes with the marker, on any mbid edit and not only a clear.
+				// It was fetched for the release the album is no longer claiming to be,
+				// and leaving it would close the front vacancy the marker delete just
+				// opened, so the re-ask would find nothing to do and the wrong pressing's
+				// picture would stand forever. The delete names enrichment's own row, so
+				// a hand-set cover and a member track's embedded one are untouched.
+				if err := clearAlbumArtTx(ctx, tx, entityID); err != nil {
+					return waxerr.Wrap(waxerr.CodeIO, op, err)
+				}
 			}
 		}
 		var survivor model.PID
 		if v, edited := norm["mbid"]; edited && v == "" {
 			switch entityType {
 			case model.MergeAlbum:
-				matched, err := albumMarkerMatchedTx(ctx, tx, entityID)
-				if err != nil {
-					return waxerr.Wrap(waxerr.CodeIO, op, err)
-				}
 				if err := clearAlbumMarkerTx(ctx, tx, entityID); err != nil {
 					return waxerr.Wrap(waxerr.CodeIO, op, err)
 				}
-				if matched {
-					if err := clearAlbumArtTx(ctx, tx, entityID); err != nil {
-						return waxerr.Wrap(waxerr.CodeIO, op, err)
-					}
-				}
+				var err error
 				if survivor, err = rekeyAlbumHeuristicTx(ctx, tx, entityID); err != nil {
 					return waxerr.Wrap(waxerr.CodeIO, op, err)
 				}

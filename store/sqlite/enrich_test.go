@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/colespringer/waxbin/identity"
 	"github.com/colespringer/waxbin/model"
@@ -75,7 +76,7 @@ func TestApplyArtistEnrichmentRelationDirection(t *testing.T) {
 		t.Fatalf("seed member: %v", err)
 	}
 
-	targets, err := st.ArtistsNeedingEnrichment(ctx, false, 0, 100, nil)
+	targets, err := st.ArtistsNeedingEnrichment(ctx, model.EnrichQueueOptions{}, 0, 100, nil)
 	if err != nil {
 		t.Fatalf("ArtistsNeedingEnrichment: %v", err)
 	}
@@ -287,7 +288,7 @@ func TestAlbumsNeedingReleaseMatchGatesOnIdentifiers(t *testing.T) {
 	albumTrack(t, st, lib.ID, "ess-b", "Has CatNo", "", "SHVL 804")
 	albumTrack(t, st, lib.ID, "ess-c", "Has Neither", "", "")
 
-	queued, err := st.AlbumsNeedingReleaseMatch(ctx, false, 0, 100, nil)
+	queued, err := st.AlbumsNeedingReleaseMatch(ctx, model.EnrichQueueOptions{}, 0, 100, nil)
 	if err != nil {
 		t.Fatalf("AlbumsNeedingReleaseMatch: %v", err)
 	}
@@ -306,7 +307,7 @@ func TestAlbumsNeedingReleaseMatchGatesOnIdentifiers(t *testing.T) {
 	// empty, so there is nothing left for a match to write.
 	setEntityMBID(t, st, model.MergeAlbum,
 		scalarQueryStr(t, db, "SELECT pid FROM album WHERE title='Has Barcode'"), relTestOneMBID, false)
-	queued, err = st.AlbumsNeedingReleaseMatch(ctx, false, 0, 100, nil)
+	queued, err = st.AlbumsNeedingReleaseMatch(ctx, model.EnrichQueueOptions{}, 0, 100, nil)
 	if err != nil {
 		t.Fatalf("AlbumsNeedingReleaseMatch: %v", err)
 	}
@@ -317,7 +318,7 @@ func TestAlbumsNeedingReleaseMatchGatesOnIdentifiers(t *testing.T) {
 	// Clearing the shared group's mbid leaves nothing to constrain a search to.
 	setEntityMBID(t, st, model.MergeReleaseGroup,
 		scalarQueryStr(t, db, "SELECT pid FROM release_group LIMIT 1"), "", false)
-	queued, err = st.AlbumsNeedingReleaseMatch(ctx, false, 0, 100, nil)
+	queued, err = st.AlbumsNeedingReleaseMatch(ctx, model.EnrichQueueOptions{}, 0, 100, nil)
 	if err != nil {
 		t.Fatalf("AlbumsNeedingReleaseMatch: %v", err)
 	}
@@ -564,20 +565,20 @@ func TestScopedEnrichmentQueries(t *testing.T) {
 	}
 
 	// Scoped iteration returns only the scoped artist; nil ids returns both.
-	scoped, err := st.ArtistsNeedingEnrichment(ctx, false, 0, 100, []int64{oneID})
+	scoped, err := st.ArtistsNeedingEnrichment(ctx, model.EnrichQueueOptions{}, 0, 100, []int64{oneID})
 	if err != nil {
 		t.Fatalf("scoped ArtistsNeedingEnrichment: %v", err)
 	}
 	if len(scoped) != 1 || scoped[0].ID != oneID {
 		t.Fatalf("scoped artists = %+v, want only artist one", scoped)
 	}
-	all, err := st.ArtistsNeedingEnrichment(ctx, false, 0, 100, nil)
+	all, err := st.ArtistsNeedingEnrichment(ctx, model.EnrichQueueOptions{}, 0, 100, nil)
 	if err != nil || len(all) != 2 {
 		t.Fatalf("unscoped artists = %d (err %v), want 2", len(all), err)
 	}
 
 	// The keyset shape holds under a scope: pages advance past the last id.
-	page, err := st.ArtistsNeedingEnrichment(ctx, false, oneID, 100, []int64{oneID, twoID})
+	page, err := st.ArtistsNeedingEnrichment(ctx, model.EnrichQueueOptions{}, oneID, 100, []int64{oneID, twoID})
 	if err != nil {
 		t.Fatalf("keyset page: %v", err)
 	}
@@ -590,10 +591,10 @@ func TestScopedEnrichmentQueries(t *testing.T) {
 	if err := st.ApplyArtistEnrichment(ctx, model.ArtistEnrichment{ArtistID: oneID, PID: scoped[0].PID, Matched: false}); err != nil {
 		t.Fatalf("mark artist one: %v", err)
 	}
-	if got, err := st.ArtistsNeedingEnrichment(ctx, false, 0, 100, []int64{oneID}); err != nil || len(got) != 0 {
+	if got, err := st.ArtistsNeedingEnrichment(ctx, model.EnrichQueueOptions{}, 0, 100, []int64{oneID}); err != nil || len(got) != 0 {
 		t.Fatalf("scoped unforced after mark = %+v (err %v), want empty", got, err)
 	}
-	if got, err := st.ArtistsNeedingEnrichment(ctx, true, 0, 100, []int64{oneID}); err != nil || len(got) != 1 {
+	if got, err := st.ArtistsNeedingEnrichment(ctx, model.EnrichQueueOptions{Sweep: model.SweepAll}, 0, 100, []int64{oneID}); err != nil || len(got) != 1 {
 		t.Fatalf("scoped forced after mark = %+v (err %v), want artist one", got, err)
 	}
 
@@ -602,7 +603,7 @@ func TestScopedEnrichmentQueries(t *testing.T) {
 	if err := db.QueryRow("SELECT id FROM release_group WHERE title='Album One'").Scan(&rgOneID); err != nil {
 		t.Fatalf("resolve rg one: %v", err)
 	}
-	rgs, err := st.ReleaseGroupsNeedingEnrichment(ctx, false, 0, 100, false, []int64{rgOneID})
+	rgs, err := st.ReleaseGroupsNeedingEnrichment(ctx, model.EnrichQueueOptions{}, 0, 100, false, []int64{rgOneID})
 	if err != nil || len(rgs) != 1 || rgs[0].ID != rgOneID {
 		t.Fatalf("scoped rgs = %+v (err %v), want only rg one", rgs, err)
 	}
@@ -610,7 +611,7 @@ func TestScopedEnrichmentQueries(t *testing.T) {
 	// The scoped count covers exactly the phases a scoped run executes: one
 	// artist + one release group here, and the empty album/book/lyrics lists add zero.
 	scope := &model.EnrichScope{ArtistIDs: []int64{oneID}, ReleaseGroupIDs: []int64{rgOneID}}
-	n, err := st.CountEntitiesNeedingEnrichment(ctx, true, model.EnrichCountOptions{Identity: true, Albums: true, Lyrics: true}, scope)
+	n, err := st.CountEntitiesNeedingEnrichment(ctx, model.EnrichQueueOptions{Sweep: model.SweepAll}, model.EnrichCountOptions{Identity: true, Albums: true, Lyrics: true}, scope)
 	if err != nil {
 		t.Fatalf("scoped count: %v", err)
 	}
@@ -619,7 +620,7 @@ func TestScopedEnrichmentQueries(t *testing.T) {
 	}
 	// The unscoped count still covers the catalog (2 artists + 2 rgs; the tracks
 	// need lyrics lookups too under includeLyrics).
-	un, err := st.CountEntitiesNeedingEnrichment(ctx, true, model.EnrichCountOptions{Identity: true}, nil)
+	un, err := st.CountEntitiesNeedingEnrichment(ctx, model.EnrichQueueOptions{Sweep: model.SweepAll}, model.EnrichCountOptions{Identity: true}, nil)
 	if err != nil || un != 4 {
 		t.Fatalf("unscoped count = %d (err %v), want 4", un, err)
 	}
@@ -630,7 +631,7 @@ func TestScopedEnrichmentQueries(t *testing.T) {
 	if err := db.QueryRow("SELECT pi.id FROM playable_item pi WHERE pi.title='A'").Scan(&itemAID); err != nil {
 		t.Fatalf("resolve item A: %v", err)
 	}
-	ly, err := st.ItemsNeedingLyrics(ctx, false, 0, 100, []int64{itemAID})
+	ly, err := st.ItemsNeedingLyrics(ctx, model.EnrichQueueOptions{}, 0, 100, []int64{itemAID})
 	if err != nil || len(ly) != 1 || ly[0].ID != itemAID {
 		t.Fatalf("scoped lyrics = %+v (err %v), want item A", ly, err)
 	}
@@ -638,10 +639,10 @@ func TestScopedEnrichmentQueries(t *testing.T) {
 	// An EMPTY non-nil ids list is a scope with no targets and matches nothing;
 	// only nil means "no scope". A scoped-to-nothing walk must not silently widen
 	// into the full catalog.
-	if got, err := st.ArtistsNeedingEnrichment(ctx, true, 0, 100, []int64{}); err != nil || len(got) != 0 {
+	if got, err := st.ArtistsNeedingEnrichment(ctx, model.EnrichQueueOptions{Sweep: model.SweepAll}, 0, 100, []int64{}); err != nil || len(got) != 0 {
 		t.Errorf("empty-scope artists = %+v (err %v), want none", got, err)
 	}
-	if got, err := st.ItemsNeedingLyrics(ctx, true, 0, 100, []int64{}); err != nil || len(got) != 0 {
+	if got, err := st.ItemsNeedingLyrics(ctx, model.EnrichQueueOptions{Sweep: model.SweepAll}, 0, 100, []int64{}); err != nil || len(got) != 0 {
 		t.Errorf("empty-scope lyrics = %+v (err %v), want none", got, err)
 	}
 }
@@ -682,7 +683,7 @@ func TestScopedEnrichmentReachesGhostEntities(t *testing.T) {
 	}
 
 	// The full pass skips the ghost; the scoped walk reaches it.
-	all, err := st.ArtistsNeedingEnrichment(ctx, false, 0, 100, nil)
+	all, err := st.ArtistsNeedingEnrichment(ctx, model.EnrichQueueOptions{}, 0, 100, nil)
 	if err != nil {
 		t.Fatalf("unscoped artists: %v", err)
 	}
@@ -691,13 +692,13 @@ func TestScopedEnrichmentReachesGhostEntities(t *testing.T) {
 			t.Fatalf("unscoped walk returned the ghost artist %+v", a)
 		}
 	}
-	scoped, err := st.ArtistsNeedingEnrichment(ctx, false, 0, 100, []int64{ghostID})
+	scoped, err := st.ArtistsNeedingEnrichment(ctx, model.EnrichQueueOptions{}, 0, 100, []int64{ghostID})
 	if err != nil || len(scoped) != 1 || scoped[0].ID != ghostID {
 		t.Fatalf("scoped ghost walk = %+v (err %v), want the ghost artist", scoped, err)
 	}
 
 	// The scoped count stays in lockstep with the relaxed walk.
-	n, err := st.CountEntitiesNeedingEnrichment(ctx, true, model.EnrichCountOptions{Identity: true}, &model.EnrichScope{ArtistIDs: []int64{ghostID}})
+	n, err := st.CountEntitiesNeedingEnrichment(ctx, model.EnrichQueueOptions{Sweep: model.SweepAll}, model.EnrichCountOptions{Identity: true}, &model.EnrichScope{ArtistIDs: []int64{ghostID}})
 	if err != nil || n != 1 {
 		t.Fatalf("scoped ghost count = %d (err %v), want 1", n, err)
 	}
@@ -797,72 +798,70 @@ func TestApplyReleaseGroupEnrichmentAuxRoles(t *testing.T) {
 	}
 }
 
-// TestApplyAlbumReleaseMatchAuxRidesOnID: aux art rides on the mbid landing the same
-// way the front does; a declined write (a locked mbid) applies neither.
-func TestApplyAlbumReleaseMatchAuxRidesOnID(t *testing.T) {
+// TestApplyAlbumArtBackfillRespectsLocks: the album's whole "art" lock gates the front
+// and every auxiliary role at once, and a per-role lock takes only its own slot, which is
+// the approximation the queue's vacancy test leaves for the apply to settle.
+func TestApplyAlbumArtBackfillRespectsLocks(t *testing.T) {
 	ctx := context.Background()
 	st, dbPath, lib := openStoreAt(t)
 	db := roConn(t, dbPath)
-	albumTrack(t, st, lib.ID, "ess-a", "Declined", "0075992739429", "")
-	albumTrack(t, st, lib.ID, "ess-b", "Landed", "5099902154251", "")
-	declinedPID := scalarQueryStr(t, db, "SELECT pid FROM album WHERE title='Declined'")
-	landedPID := scalarQueryStr(t, db, "SELECT pid FROM album WHERE title='Landed'")
+	albumTrack(t, st, lib.ID, "ess-a", "WholeLock", "0075992739429", "")
+	albumTrack(t, st, lib.ID, "ess-b", "RoleLock", "5099902154251", "")
 
-	// A locked-empty mbid declines the write; neither front nor aux lands.
-	setEntityMBID(t, st, model.MergeAlbum, declinedPID, "", true)
-	declinedID := albumIDByTitle(t, db, "Declined")
-	err := st.ApplyAlbumReleaseMatch(ctx, model.AlbumReleaseMatch{
-		AlbumID: declinedID, PID: model.PID(declinedPID), Matched: true, MBID: relTestOneMBID, Reason: "barcode",
-		Art:    enrichArtImg("front-a", "mock"),
-		AuxArt: map[model.ArtRole]*model.ArtImage{model.ArtRoleBack: enrichArtImg("back-a", "mock")},
-	})
-	if err != nil {
-		t.Fatalf("apply declined: %v", err)
-	}
-	if n := scalarQueryInt(t, db,
-		"SELECT COUNT(*) FROM art_map WHERE entity_type='album' AND entity_id=?", declinedID); n != 0 {
-		t.Errorf("declined album art rows = %d, want 0 (aux rides on the id landing)", n)
-	}
-
-	// A landed id applies both.
-	landedID := albumIDByTitle(t, db, "Landed")
-	err = st.ApplyAlbumReleaseMatch(ctx, model.AlbumReleaseMatch{
-		AlbumID: landedID, PID: model.PID(landedPID), Matched: true, MBID: relTestTwoMBID, Reason: "barcode",
-		Art:    enrichArtImg("front-b", "mock"),
-		AuxArt: map[model.ArtRole]*model.ArtImage{model.ArtRoleBack: enrichArtImg("back-b", "mock")},
-	})
-	if err != nil {
-		t.Fatalf("apply landed: %v", err)
-	}
-	for _, role := range []string{"front", "back"} {
-		if n := scalarQueryInt(t, db,
-			"SELECT COUNT(*) FROM art_map WHERE entity_type='album' AND entity_id=? AND role=?", landedID, role); n != 1 {
-			t.Errorf("landed album %s rows = %d, want 1", role, n)
+	apply := func(title string) int64 {
+		t.Helper()
+		id := albumIDByTitle(t, db, title)
+		pid := scalarQueryStr(t, db, "SELECT pid FROM album WHERE title = ?", title)
+		err := st.ApplyAlbumArtBackfill(ctx, model.AlbumArtBackfill{
+			AlbumID: id, PID: model.PID(pid), Matched: true, Provider: "mock",
+			Art: enrichArtImg("front-"+title, "mock"),
+			AuxArt: map[model.ArtRole]*model.ArtImage{
+				model.ArtRoleBack: enrichArtImg("back-"+title, "mock"),
+				model.ArtRoleDisc: enrichArtImg("disc-"+title, "mock"),
+			},
+		})
+		if err != nil {
+			t.Fatalf("ApplyAlbumArtBackfill(%s): %v", title, err)
 		}
+		return id
+	}
+	rows := func(id int64, role string) int {
+		t.Helper()
+		return scalarQueryInt(t, db,
+			"SELECT COUNT(*) FROM art_map WHERE entity_type='album' AND entity_id=? AND role=?", id, role)
 	}
 
-	// The album's own art lock skips front and aux even when the mbid lands.
-	albumTrack(t, st, lib.ID, "ess-c", "LockedArt", "", "SHVL 804")
-	lockedArtPID := scalarQueryStr(t, db, "SELECT pid FROM album WHERE title='LockedArt'")
-	if _, err := st.SetArtLock(ctx, model.ArtAlbum, model.PID(lockedArtPID), model.ArtRoleFront, true); err != nil {
+	wholePID := scalarQueryStr(t, db, "SELECT pid FROM album WHERE title='WholeLock'")
+	if _, err := st.SetArtLock(ctx, model.ArtAlbum, model.PID(wholePID), model.ArtRoleFront, true); err != nil {
 		t.Fatalf("lock art: %v", err)
 	}
-	lockedArtID := albumIDByTitle(t, db, "LockedArt")
-	err = st.ApplyAlbumReleaseMatch(ctx, model.AlbumReleaseMatch{
-		AlbumID: lockedArtID, PID: model.PID(lockedArtPID), Matched: true, MBID: relTestRGMBID, Reason: "catalog number",
-		Art:    enrichArtImg("front-c", "mock"),
-		AuxArt: map[model.ArtRole]*model.ArtImage{model.ArtRoleBack: enrichArtImg("back-c", "mock")},
-	})
-	if err != nil {
-		t.Fatalf("apply locked art: %v", err)
-	}
-	if got := scalarQueryStr(t, db, "SELECT COALESCE(mbid,'') FROM album WHERE id=?", lockedArtID); got != relTestRGMBID {
-		t.Errorf("locked-art album mbid = %q, want the id landed", got)
-	}
+	wholeID := apply("WholeLock")
 	if n := scalarQueryInt(t, db,
-		"SELECT COUNT(*) FROM art_map WHERE entity_type='album' AND entity_id=?", lockedArtID); n != 0 {
-		t.Errorf("locked-art album art rows = %d, want 0 (the art lock gates front and aux)", n)
+		"SELECT COUNT(*) FROM art_map WHERE entity_type='album' AND entity_id=?", wholeID); n != 0 {
+		t.Errorf("whole-locked album art rows = %d, want 0 (the lock gates front and aux)", n)
 	}
+
+	rolePID := scalarQueryStr(t, db, "SELECT pid FROM album WHERE title='RoleLock'")
+	if _, err := st.SetArtLock(ctx, model.ArtAlbum, model.PID(rolePID), model.ArtRoleBack, true); err != nil {
+		t.Fatalf("lock back: %v", err)
+	}
+	roleID := apply("RoleLock")
+	if rows(roleID, "back") != 0 {
+		t.Error("the locked back role took an image")
+	}
+	if rows(roleID, "front") != 1 || rows(roleID, "disc") != 1 {
+		t.Errorf("front/disc rows = %d/%d, want 1 each beside the locked role",
+			rows(roleID, "front"), rows(roleID, "disc"))
+	}
+
+	// The marker is written either way, so an album nothing serves costs one pass.
+	for _, id := range []int64{wholeID, roleID} {
+		if n := scalarQueryInt(t, db,
+			"SELECT COUNT(*) FROM entity_enrichment WHERE entity_type='album_art' AND entity_id=?", id); n != 1 {
+			t.Errorf("album %d art markers = %d, want 1", id, n)
+		}
+	}
+	assertStoreVerifyClean(t, st)
 }
 
 // auxRGTrack persists one track under its own artist, album, and release group, so
@@ -974,7 +973,7 @@ func TestReleaseGroupsNeedingAuxArtGuards(t *testing.T) {
 		t.Fatalf("lock back: %v", err)
 	}
 
-	queued, err := st.ReleaseGroupsNeedingAuxArt(ctx, false, 0, 100, nil)
+	queued, err := st.ReleaseGroupsNeedingAuxArt(ctx, model.EnrichQueueOptions{}, 0, 100, nil)
 	if err != nil {
 		t.Fatalf("ReleaseGroupsNeedingAuxArt: %v", err)
 	}
@@ -996,11 +995,11 @@ func TestReleaseGroupsNeedingAuxArtGuards(t *testing.T) {
 
 	// The heartbeat denominator is built from the same gate, so turning the phase on
 	// adds exactly the queued groups and nothing else.
-	withAux, err := st.CountEntitiesNeedingEnrichment(ctx, false, model.EnrichCountOptions{AuxArt: true}, nil)
+	withAux, err := st.CountEntitiesNeedingEnrichment(ctx, model.EnrichQueueOptions{}, model.EnrichCountOptions{AuxArt: true}, nil)
 	if err != nil {
 		t.Fatalf("count with aux: %v", err)
 	}
-	withoutAux, err := st.CountEntitiesNeedingEnrichment(ctx, false, model.EnrichCountOptions{}, nil)
+	withoutAux, err := st.CountEntitiesNeedingEnrichment(ctx, model.EnrichQueueOptions{}, model.EnrichCountOptions{}, nil)
 	if err != nil {
 		t.Fatalf("count without aux: %v", err)
 	}
@@ -1009,7 +1008,7 @@ func TestReleaseGroupsNeedingAuxArtGuards(t *testing.T) {
 	}
 
 	// Force is what re-asks a marked group, mirroring every other queue.
-	forced, err := st.ReleaseGroupsNeedingAuxArt(ctx, true, 0, 100, nil)
+	forced, err := st.ReleaseGroupsNeedingAuxArt(ctx, model.EnrichQueueOptions{Sweep: model.SweepAll}, 0, 100, nil)
 	if err != nil {
 		t.Fatalf("forced walk: %v", err)
 	}
@@ -1063,7 +1062,7 @@ func auxMarkerFixture(t *testing.T, title string, mbidN int) (*sqlite.Store, int
 	}
 	queued := func() bool {
 		t.Helper()
-		targets, err := st.ReleaseGroupsNeedingAuxArt(ctx, false, 0, 100, nil)
+		targets, err := st.ReleaseGroupsNeedingAuxArt(ctx, model.EnrichQueueOptions{}, 0, 100, nil)
 		if err != nil {
 			t.Fatalf("queue walk: %v", err)
 		}
@@ -1926,4 +1925,580 @@ func TestEnrichmentWritebackFlagsASharedFile(t *testing.T) {
 	if r := owed(t); !r.Shared {
 		t.Errorf("a file two items back reported unshared, so the write-back would rewrite it per item")
 	}
+}
+
+// backdateMisses ages every no-match marker in one catalog and returns the stamp it
+// wrote, so a test can pin a cutoff exactly against it. Never a sleep: the coarse
+// Windows clock makes two stamps taken in one run equal.
+func backdateMisses(t *testing.T, db *sql.DB, age time.Duration) int64 {
+	t.Helper()
+	stamp := time.Now().Add(-age).UnixNano()
+	if _, err := db.Exec("UPDATE entity_enrichment SET enriched_at = ? WHERE matched = 0", stamp); err != nil {
+		t.Fatalf("backdate misses: %v", err)
+	}
+	return stamp
+}
+
+// TestEnrichQueuesRetryAnExpiredMiss walks every queue through the four sweeps. The
+// point of the window is that a no-match marker stops being permanent: a provider that
+// had no picture of an artist last month is asked again this month, without the forced
+// run that would re-ask about every matched entity too.
+func TestEnrichQueuesRetryAnExpiredMiss(t *testing.T) {
+	ctx := context.Background()
+	st, dbPath, lib := openStoreAt(t)
+	db := roConn(t, dbPath)
+	albumTrack(t, st, lib.ID, "ess-a", "Wish You Were Here", "0075992739429", "")
+
+	artistID := int64(scalarQueryInt(t, db, "SELECT id FROM artist WHERE name='PF'"))
+	artistPID := model.PID(scalarQueryStr(t, db, "SELECT pid FROM artist WHERE name='PF'"))
+	rgID := int64(scalarQueryInt(t, db, "SELECT id FROM release_group"))
+	rgPID := model.PID(scalarQueryStr(t, db, "SELECT pid FROM release_group"))
+	albumID := albumIDByTitle(t, db, "Wish You Were Here")
+	albumPID := model.PID(scalarQueryStr(t, db, "SELECT pid FROM album WHERE title='Wish You Were Here'"))
+	itemID := int64(scalarQueryInt(t, db, "SELECT id FROM playable_item"))
+	itemPID := model.PID(scalarQueryStr(t, db, "SELECT pid FROM playable_item"))
+
+	// One queue per marker type, so a sweep that misses one of them is visible by name
+	// rather than as a count that happens to add up.
+	queues := []struct {
+		name string
+		walk func(q model.EnrichQueueOptions) ([]model.EnrichTarget, error)
+	}{
+		{"artist", func(q model.EnrichQueueOptions) ([]model.EnrichTarget, error) {
+			return st.ArtistsNeedingEnrichment(ctx, q, 0, 100, nil)
+		}},
+		{"release group", func(q model.EnrichQueueOptions) ([]model.EnrichTarget, error) {
+			return st.ReleaseGroupsNeedingEnrichment(ctx, q, 0, 100, false, nil)
+		}},
+		{"album release", func(q model.EnrichQueueOptions) ([]model.EnrichTarget, error) {
+			return st.AlbumsNeedingReleaseMatch(ctx, q, 0, 100, nil)
+		}},
+		{"aux art", func(q model.EnrichQueueOptions) ([]model.EnrichTarget, error) {
+			return st.ReleaseGroupsNeedingAuxArt(ctx, q, 0, 100, nil)
+		}},
+		{"artist art", func(q model.EnrichQueueOptions) ([]model.EnrichTarget, error) {
+			return st.ArtistsNeedingArtBackfill(ctx, q, 0, 100, nil)
+		}},
+		{"lyrics", func(q model.EnrichQueueOptions) ([]model.EnrichTarget, error) {
+			return st.ItemsNeedingLyrics(ctx, q, 0, 100, nil)
+		}},
+		{"track fields", func(q model.EnrichQueueOptions) ([]model.EnrichTarget, error) {
+			return st.ItemsNeedingFields(ctx, q, 0, 100, model.KindTrack, nil)
+		}},
+		{"album fields", func(q model.EnrichQueueOptions) ([]model.EnrichTarget, error) {
+			return st.AlbumsNeedingFields(ctx, q, 0, 100, nil)
+		}},
+	}
+	countAll := model.EnrichCountOptions{
+		Identity: true, Albums: true, AuxArt: true, ArtistArt: true,
+		Lyrics: true, TrackFields: true, AlbumFields: true,
+	}
+	walked := func(t *testing.T, q model.EnrichQueueOptions) map[string]int {
+		t.Helper()
+		got := map[string]int{}
+		for _, queue := range queues {
+			targets, err := queue.walk(q)
+			if err != nil {
+				t.Fatalf("%s queue: %v", queue.name, err)
+			}
+			got[queue.name] = len(targets)
+		}
+		return got
+	}
+	assertEach := func(t *testing.T, got map[string]int, want int, why string) {
+		t.Helper()
+		for _, queue := range queues {
+			if got[queue.name] != want {
+				t.Errorf("%s queue returned %d, want %d (%s)", queue.name, got[queue.name], want, why)
+			}
+		}
+	}
+
+	assertEach(t, walked(t, model.EnrichQueueOptions{}), 1, "nothing has been looked up yet")
+
+	misses := []struct {
+		name  string
+		apply func() error
+	}{
+		{"artist", func() error {
+			return st.ApplyArtistEnrichment(ctx, model.ArtistEnrichment{ArtistID: artistID, PID: artistPID})
+		}},
+		{"release group", func() error {
+			return st.ApplyReleaseGroupEnrichment(ctx, model.ReleaseGroupEnrichment{ReleaseGroupID: rgID, PID: rgPID})
+		}},
+		{"album release", func() error {
+			return st.ApplyAlbumReleaseMatch(ctx, model.AlbumReleaseMatch{AlbumID: albumID, PID: albumPID})
+		}},
+		{"aux art", func() error {
+			return st.ApplyReleaseGroupAuxArt(ctx, model.ReleaseGroupAuxArt{ReleaseGroupID: rgID, PID: rgPID})
+		}},
+		{"artist art", func() error {
+			return st.ApplyArtistArtBackfill(ctx, model.ArtistArtBackfill{ArtistID: artistID, PID: artistPID})
+		}},
+		{"lyrics", func() error {
+			return st.ApplyLyricsEnrichment(ctx, model.LyricsEnrichment{ItemID: itemID, PID: itemPID})
+		}},
+		{"track fields", func() error {
+			return st.ApplyItemFields(ctx, model.ItemFieldsEnrichment{ItemID: itemID, PID: itemPID})
+		}},
+		{"album fields", func() error {
+			return st.ApplyAlbumFields(ctx, model.AlbumFieldsEnrichment{AlbumID: albumID, PID: albumPID})
+		}},
+	}
+	markMisses := func(t *testing.T) {
+		t.Helper()
+		for _, m := range misses {
+			if err := m.apply(); err != nil {
+				t.Fatalf("mark %s miss: %v", m.name, err)
+			}
+		}
+	}
+	markMisses(t)
+	assertEach(t, walked(t, model.EnrichQueueOptions{}), 0, "every target carries a marker")
+
+	rw := writeConn(t, dbPath)
+	stamp := backdateMisses(t, rw, 40*24*time.Hour)
+	cutoff := time.Now().Add(-30 * 24 * time.Hour).UnixNano()
+	retry := model.EnrichQueueOptions{Sweep: model.SweepRetry, MissCutoff: cutoff}
+	due := model.EnrichQueueOptions{Sweep: model.SweepDue, MissCutoff: cutoff}
+
+	assertEach(t, walked(t, retry), 1, "the markers are older than the cutoff")
+	assertEach(t, walked(t, due), 1, "due is the two sweeps' union")
+	assertEach(t, walked(t, model.EnrichQueueOptions{Sweep: model.SweepFresh, MissCutoff: cutoff}), 0,
+		"the fresh sweep never looks at markers")
+	assertEach(t, walked(t, model.EnrichQueueOptions{Sweep: model.SweepRetry}), 0,
+		"a zero cutoff expires nothing")
+
+	// The count shares the predicate with the queues, so the denominator a heartbeat
+	// divides by has to equal what the sweeps will actually walk.
+	dueCount, err := st.CountEntitiesNeedingEnrichment(ctx, due, countAll, nil)
+	if err != nil {
+		t.Fatalf("due count: %v", err)
+	}
+	if dueCount != len(queues) {
+		t.Errorf("SweepDue count = %d, want %d (one per queue)", dueCount, len(queues))
+	}
+
+	// The boundary: a marker stamped exactly at the cutoff has expired.
+	assertEach(t, walked(t, model.EnrichQueueOptions{Sweep: model.SweepRetry, MissCutoff: stamp}), 1,
+		"a stamp equal to the cutoff expires")
+	assertEach(t, walked(t, model.EnrichQueueOptions{Sweep: model.SweepRetry, MissCutoff: stamp - 1}), 0,
+		"a stamp one nanosecond after the cutoff is still inside the window")
+
+	// Re-asking rewrites enriched_at, which is what re-arms the window: the same cutoff
+	// stops selecting a target the run just asked about again.
+	markMisses(t)
+	assertEach(t, walked(t, retry), 0, "the re-ask refreshed every stamp")
+	assertEach(t, walked(t, due), 0, "due follows the refreshed stamps")
+
+	// A matched marker is durable. The artist-art backfill shows it without a second
+	// fixture: a provider that answered but filled no slot leaves the vacancy the queue
+	// gates on standing, so only the marker separates the sweeps here.
+	if err := st.ApplyArtistArtBackfill(ctx, model.ArtistArtBackfill{
+		ArtistID: artistID, PID: artistPID, Matched: true, Provider: "deezer",
+	}); err != nil {
+		t.Fatalf("mark an artist-art match: %v", err)
+	}
+	if _, err := rw.Exec("UPDATE entity_enrichment SET enriched_at = ? WHERE matched = 1", stamp); err != nil {
+		t.Fatalf("backdate the match: %v", err)
+	}
+	if got := walked(t, retry)["artist art"]; got != 0 {
+		t.Errorf("retry sweep returned %d matched artist-art targets, want 0 (a match is durable)", got)
+	}
+	if got := walked(t, due)["artist art"]; got != 0 {
+		t.Errorf("due sweep returned %d matched artist-art targets, want 0", got)
+	}
+	if got := walked(t, model.EnrichQueueOptions{Sweep: model.SweepAll})["artist art"]; got != 1 {
+		t.Errorf("forced sweep returned %d artist-art targets, want 1", got)
+	}
+	assertStoreVerifyClean(t, st)
+}
+
+// folderTrack persists one track at an explicit path and with no release-group mbid, so
+// the album title is what keys its group and a test can put two albums in one folder.
+// The album identity key embeds the folder, which is what lets a retag move the file onto
+// a sibling album there and strand the one it left.
+func folderTrack(t *testing.T, st *sqlite.Store, libID int64, path, essence string, rev int, tr model.Track) {
+	t.Helper()
+	tr.Artist, tr.AlbumArtist = "PF", "PF"
+	tr.TrackNo = 1
+	_, err := st.PutScannedTrack(context.Background(), model.PutScannedTrackInput{
+		LibraryID: libID,
+		File: model.File{
+			Path: []byte(path), DisplayPath: path, RelPath: []byte(filepath.Base(path)),
+			Kind: model.FileAudio, Size: 100, MTimeNS: int64(rev),
+			ContentHash: "c-" + essence + "-" + strconv.Itoa(rev), EssenceHash: essence,
+			ScanState: model.ScanIndexed,
+		},
+		Item: model.PlayableItem{
+			Kind: model.KindTrack, State: model.StatePresent, Title: "T-" + essence,
+			SortKey: model.SortKey("T-" + essence), IdentityKey: "essence:" + essence,
+		},
+		Track: tr,
+	})
+	if err != nil {
+		t.Fatalf("PutScannedTrack: %v", err)
+	}
+}
+
+// albumArtMarkers counts one album's art-backfill markers.
+func albumArtMarkers(t *testing.T, db *sql.DB, albumID int64) int {
+	t.Helper()
+	return scalarQueryInt(t, db,
+		"SELECT COUNT(*) FROM entity_enrichment WHERE entity_type='album_art' AND entity_id=?", albumID)
+}
+
+// TestAlbumsNeedingArtGuards pins the album-art queue's gate. An album is asked about
+// only when it carries an identifier a provider can key on, since the releases of one
+// group share a title and a title-keyed ask can only return the wrong edition; the
+// vacancy it is asked about is per slot, so an install with no aux-capable provider does
+// not mark an album for a slot nothing could answer; and a settled front (a member
+// track's embedded cover included), a whole art lock, an existing marker, and the ghost
+// heuristic each keep it out.
+func TestAlbumsNeedingArtGuards(t *testing.T) {
+	ctx := context.Background()
+	st, dbPath, lib := openStoreAt(t)
+	db := roConn(t, dbPath)
+
+	editionTrack(t, st, lib.ID, "ess-mbid", "ByMBID", 1, model.Track{})
+	editionTrack(t, st, lib.ID, "ess-bc", "ByBarcode", 1, model.Track{Barcode: "0075992739429"})
+	editionTrack(t, st, lib.ID, "ess-cat", "ByCatNo", 1, model.Track{CatalogNumber: "SHVL 804"})
+	editionTrack(t, st, lib.ID, "ess-plain", "TitleOnly", 1, model.Track{})
+	editionTrackWithCover(t, st, lib.ID, "ess-emb", "Embedded", 1,
+		model.Track{Barcode: "5099902154251"}, pngFixture())
+	editionTrack(t, st, lib.ID, "ess-lock", "Locked", 1, model.Track{Barcode: "0724382955528"})
+	editionTrack(t, st, lib.ID, "ess-mark", "Marked", 1, model.Track{Barcode: "0724383024124"})
+	// A ghost: identified while it had members, then stranded by a retag that cleared the
+	// album tag and left its one track ungrouped. It qualifies on every other part of the
+	// gate, which is what makes it the likeliest thing the heuristic has to catch.
+	folderTrack(t, st, lib.ID, "/lib/ghost/1.mp3", "ess-ghost", 1,
+		model.Track{Album: "Ghost", Barcode: "0724383024131"})
+	folderTrack(t, st, lib.ID, "/lib/ghost/1.mp3", "ess-ghost", 2, model.Track{})
+	if n := scalarQueryInt(t, db,
+		`SELECT COUNT(*) FROM track t JOIN album al ON al.id = t.album_id WHERE al.title='Ghost'`); n != 0 {
+		t.Fatalf("the Ghost album still backs %d tracks; the fixture did not strand it", n)
+	}
+	if n := scalarQueryInt(t, db,
+		"SELECT COUNT(*) FROM album WHERE title='Ghost' AND COALESCE(barcode,'') <> ''"); n != 1 {
+		t.Fatalf("the Ghost album row is gone; only the heuristic should be keeping it out")
+	}
+
+	albumPID := func(title string) model.PID {
+		return model.PID(scalarQueryStr(t, db, "SELECT pid FROM album WHERE title=?", title))
+	}
+	setEntityMBID(t, st, model.MergeAlbum, string(albumPID("ByMBID")), relTestOneMBID, false)
+	if _, err := st.SetArtLock(ctx, model.ArtAlbum, albumPID("Locked"), model.ArtRoleFront, true); err != nil {
+		t.Fatalf("lock art: %v", err)
+	}
+	markedID := albumIDByTitle(t, db, "Marked")
+	if err := st.ApplyAlbumArtBackfill(ctx, model.AlbumArtBackfill{
+		AlbumID: markedID, PID: albumPID("Marked"),
+	}); err != nil {
+		t.Fatalf("mark: %v", err)
+	}
+
+	queued := func(slots model.AlbumArtSlots, q model.EnrichQueueOptions) map[string]bool {
+		t.Helper()
+		targets, err := st.AlbumsNeedingArt(ctx, q, 0, 100, slots, nil)
+		if err != nil {
+			t.Fatalf("AlbumsNeedingArt: %v", err)
+		}
+		got := map[string]bool{}
+		for _, target := range targets {
+			got[target.Name] = true
+		}
+		// The count is built from the same gate, so it has to agree exactly.
+		n, err := st.CountEntitiesNeedingEnrichment(ctx, q, model.EnrichCountOptions{AlbumArt: slots}, nil)
+		if err != nil {
+			t.Fatalf("count: %v", err)
+		}
+		if n != len(targets) {
+			t.Errorf("count = %d for %d queued albums at slots %+v", n, len(targets), slots)
+		}
+		return got
+	}
+
+	front := queued(model.AlbumArtSlots{Front: true}, model.EnrichQueueOptions{})
+	wantFront := map[string]bool{"ByMBID": true, "ByBarcode": true, "ByCatNo": true}
+	for _, title := range []string{"ByMBID", "ByBarcode", "ByCatNo", "TitleOnly", "Embedded", "Locked", "Marked", "Ghost"} {
+		if front[title] != wantFront[title] {
+			t.Errorf("front sweep queued %q = %v, want %v", title, front[title], wantFront[title])
+		}
+	}
+
+	// The embedded cover settles the front and nothing else, so the aux slots are still
+	// a question worth asking.
+	aux := queued(model.AlbumArtSlots{Aux: true}, model.EnrichQueueOptions{})
+	if !aux["Embedded"] {
+		t.Error("the aux sweep skipped an album whose front is settled but whose aux slots are empty")
+	}
+	for _, title := range []string{"TitleOnly", "Locked", "Marked", "Ghost"} {
+		if aux[title] {
+			t.Errorf("the aux sweep queued %q", title)
+		}
+	}
+
+	// Neither slot askable is the phase not running at all.
+	if got := queued(model.AlbumArtSlots{}, model.EnrichQueueOptions{}); len(got) != 0 {
+		t.Errorf("queued %v with no askable slot, want none", got)
+	}
+
+	// A forced run reaches the marked album; only its marker was keeping it out.
+	if !queued(model.AlbumArtSlots{Front: true}, model.EnrichQueueOptions{Sweep: model.SweepAll})["Marked"] {
+		t.Error("a forced sweep did not re-queue the marked album")
+	}
+
+	// The request carries the identifiers, which is what the walk exists to send.
+	targets, err := st.AlbumsNeedingArt(ctx, model.EnrichQueueOptions{}, 0, 100, model.AlbumArtSlots{Front: true}, nil)
+	if err != nil {
+		t.Fatalf("AlbumsNeedingArt: %v", err)
+	}
+	for _, target := range targets {
+		if target.MBID == "" && target.Barcode == "" && target.CatalogNumber == "" {
+			t.Errorf("queued %q with no identifier at all", target.Name)
+		}
+		if target.HasArt {
+			t.Errorf("queued %q with HasArt set on the front sweep", target.Name)
+		}
+	}
+}
+
+// TestApplyAlbumArtBackfillFillsAndMarks: the front lands only where the art chain
+// resolves nothing, so a member track's embedded cover stays the album's picture; the
+// marker is written either way, so an album nothing serves costs one pass; the entity
+// delta rides on an image actually landing; and an album merged away between the queue
+// page and the write gets neither.
+func TestApplyAlbumArtBackfillFillsAndMarks(t *testing.T) {
+	ctx := context.Background()
+	st, dbPath, lib := openStoreAt(t)
+	db := roConn(t, dbPath)
+	editionTrack(t, st, lib.ID, "ess-bare", "Bare", 1, model.Track{Barcode: "0075992739429"})
+	editionTrackWithCover(t, st, lib.ID, "ess-emb", "Embedded", 1,
+		model.Track{Barcode: "5099902154251"}, pngFixture())
+
+	albumDeltas := func() int {
+		t.Helper()
+		return scalarQueryInt(t, db, "SELECT COUNT(*) FROM change_log WHERE entity_type='album' AND op='update'")
+	}
+	before := albumDeltas()
+
+	bareID := albumIDByTitle(t, db, "Bare")
+	barePID := model.PID(scalarQueryStr(t, db, "SELECT pid FROM album WHERE title='Bare'"))
+	if err := st.ApplyAlbumArtBackfill(ctx, model.AlbumArtBackfill{
+		AlbumID: bareID, PID: barePID, Matched: true, Provider: "coverartarchive",
+		Art: enrichArtImg("bare-front", "coverartarchive"),
+	}); err != nil {
+		t.Fatalf("ApplyAlbumArtBackfill(Bare): %v", err)
+	}
+	if got := scalarQueryStr(t, db,
+		"SELECT source_hash FROM art_map WHERE entity_type='album' AND entity_id=? AND role='front'", bareID); got != "bare-front" {
+		t.Errorf("bare album front = %q, want the fetched cover", got)
+	}
+	if albumDeltas() != before+1 {
+		t.Error("a landed cover emitted no album delta")
+	}
+
+	// The embedded cover already answers, so the front is dropped and only the aux role
+	// lands, and the album keeps deriving its picture from the track.
+	embID := albumIDByTitle(t, db, "Embedded")
+	embPID := model.PID(scalarQueryStr(t, db, "SELECT pid FROM album WHERE title='Embedded'"))
+	if err := st.ApplyAlbumArtBackfill(ctx, model.AlbumArtBackfill{
+		AlbumID: embID, PID: embPID, Matched: true, Provider: "fanart",
+		Art:    enrichArtImg("late-front", "fanart"),
+		AuxArt: map[model.ArtRole]*model.ArtImage{model.ArtRoleBack: enrichArtImg("emb-back", "fanart")},
+	}); err != nil {
+		t.Fatalf("ApplyAlbumArtBackfill(Embedded): %v", err)
+	}
+	if n := scalarQueryInt(t, db,
+		"SELECT COUNT(*) FROM art_map WHERE entity_type='album' AND entity_id=? AND role='front'", embID); n != 0 {
+		t.Errorf("the album stored %d front rows; the track's cover already answers for it", n)
+	}
+	if got := scalarQueryStr(t, db,
+		"SELECT source_hash FROM art_map WHERE entity_type='album' AND entity_id=? AND role='back'", embID); got != "emb-back" {
+		t.Errorf("album back = %q, want the offered one beside the settled front", got)
+	}
+
+	// Nothing offered still marks, and writes no delta.
+	editionTrack(t, st, lib.ID, "ess-miss", "Missed", 1, model.Track{Barcode: "0724382955528"})
+	missID := albumIDByTitle(t, db, "Missed")
+	missPID := model.PID(scalarQueryStr(t, db, "SELECT pid FROM album WHERE title='Missed'"))
+	deltas := albumDeltas()
+	if err := st.ApplyAlbumArtBackfill(ctx, model.AlbumArtBackfill{AlbumID: missID, PID: missPID}); err != nil {
+		t.Fatalf("ApplyAlbumArtBackfill(Missed): %v", err)
+	}
+	if albumArtMarkers(t, db, missID) != 1 {
+		t.Error("a no-match wrote no marker; the album would be asked again every run")
+	}
+	if albumDeltas() != deltas {
+		t.Error("a no-match emitted an album delta")
+	}
+	if got := scalarQueryStr(t, db,
+		"SELECT provider FROM entity_enrichment WHERE entity_type='album_art' AND entity_id=?", missID); got != "none" {
+		t.Errorf("no-match marker provider = %q, want none", got)
+	}
+
+	// A rowid that went away between the queue page and the write takes nothing at all:
+	// a marker there would silence whatever album inherits the id.
+	if err := st.ApplyAlbumArtBackfill(ctx, model.AlbumArtBackfill{
+		AlbumID: 424242, PID: model.NewPID(), Matched: true, Provider: "mock",
+		Art: enrichArtImg("ghost-front", "mock"),
+	}); err != nil {
+		t.Fatalf("ApplyAlbumArtBackfill on a vanished album: %v", err)
+	}
+	if albumArtMarkers(t, db, 424242) != 0 {
+		t.Error("a vanished album took a stranded marker")
+	}
+	assertStoreVerifyClean(t, st)
+}
+
+// TestAlbumArtMarkerLifecycle walks every writer that has to drop the marker, because
+// each one either opens a vacancy the marker says was asked about or hands a dead rowid
+// to a new album.
+func TestAlbumArtMarkerLifecycle(t *testing.T) {
+	ctx := context.Background()
+	st, dbPath, lib := openStoreAt(t)
+	db := roConn(t, dbPath)
+
+	mark := func(title string) int64 {
+		t.Helper()
+		id := albumIDByTitle(t, db, title)
+		pid := model.PID(scalarQueryStr(t, db, "SELECT pid FROM album WHERE title=?", title))
+		if err := st.ApplyAlbumArtBackfill(ctx, model.AlbumArtBackfill{AlbumID: id, PID: pid}); err != nil {
+			t.Fatalf("mark %s: %v", title, err)
+		}
+		if albumArtMarkers(t, db, id) != 1 {
+			t.Fatalf("%s did not take a marker", title)
+		}
+		return id
+	}
+
+	// A retag that lands a barcode is new evidence: the earlier ask went out without one.
+	editionTrack(t, st, lib.ID, "ess-scan", "Scanned", 1, model.Track{})
+	scanID := mark("Scanned")
+	editionTrack(t, st, lib.ID, "ess-scan", "Scanned", 2, model.Track{Barcode: "0075992739429"})
+	if albumArtMarkers(t, db, scanID) != 0 {
+		t.Error("a scan that filled the barcode left the art marker standing")
+	}
+
+	// So is an edited identifier, and an edited mbid on either side of the switch.
+	editionTrack(t, st, lib.ID, "ess-edit", "Edited", 1, model.Track{})
+	editID := mark("Edited")
+	editPID := model.PID(scalarQueryStr(t, db, "SELECT pid FROM album WHERE title='Edited'"))
+	if _, err := st.EditEntityFields(ctx, model.MergeAlbum, editPID,
+		map[string]string{"barcode": "5099902154251"}, model.Attribution{Source: model.SourceUser},
+		model.LockOf(false), false); err != nil {
+		t.Fatalf("edit barcode: %v", err)
+	}
+	if albumArtMarkers(t, db, editID) != 0 {
+		t.Error("an edited barcode left the art marker standing")
+	}
+	mark("Edited")
+	setEntityMBID(t, st, model.MergeAlbum, string(editPID), relTestOneMBID, false)
+	if albumArtMarkers(t, db, editID) != 0 {
+		t.Error("an edited mbid left the art marker standing")
+	}
+
+	// Clearing the album's own front, and releasing its art lock, each open a vacancy.
+	editionTrack(t, st, lib.ID, "ess-clear", "Cleared", 1, model.Track{Barcode: "0724382955528"})
+	clearID := albumIDByTitle(t, db, "Cleared")
+	clearPID := model.PID(scalarQueryStr(t, db, "SELECT pid FROM album WHERE title='Cleared'"))
+	if err := st.SetEntityArt(ctx, model.ArtAlbum, clearPID, model.ArtRoleFront, pngFixture(), "",
+		model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
+		t.Fatalf("set album art: %v", err)
+	}
+	mark("Cleared")
+	if err := st.SetEntityArt(ctx, model.ArtAlbum, clearPID, model.ArtRoleFront, nil, "",
+		model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
+		t.Fatalf("clear album art: %v", err)
+	}
+	if albumArtMarkers(t, db, clearID) != 0 {
+		t.Error("a cleared album front left the art marker standing")
+	}
+	if _, err := st.SetArtLock(ctx, model.ArtAlbum, clearPID, model.ArtRoleFront, true); err != nil {
+		t.Fatalf("lock art: %v", err)
+	}
+	mark("Cleared")
+	if _, err := st.SetArtLock(ctx, model.ArtAlbum, clearPID, model.ArtRoleFront, false); err != nil {
+		t.Fatalf("unlock art: %v", err)
+	}
+	if albumArtMarkers(t, db, clearID) != 0 {
+		t.Error("an unlocked album art field left the art marker standing")
+	}
+
+	// A member track's embedded cover is usually what answers the album's front, so
+	// clearing one opens the album's vacancy too. Both writers of a track's front have
+	// to do it: the CLI clears a track through SetItemArt and the proxy hands a track
+	// type to SetEntityArt, so a rule in one of them alone fires for one client only.
+	trackFrontPID := func(album string) model.PID {
+		t.Helper()
+		return model.PID(scalarQueryStr(t, db,
+			`SELECT pi.pid FROM playable_item pi JOIN track t ON t.item_id = pi.id
+			 JOIN album al ON al.id = t.album_id WHERE al.title = ?`, album))
+	}
+	editionTrackWithCover(t, st, lib.ID, "ess-memb", "Member", 1,
+		model.Track{Barcode: "0724383024124"}, pngFixture())
+	membID := mark("Member")
+	if err := st.SetEntityArt(ctx, model.ArtTrack, trackFrontPID("Member"), model.ArtRoleFront, nil, "",
+		model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
+		t.Fatalf("clear track art through SetEntityArt: %v", err)
+	}
+	if albumArtMarkers(t, db, membID) != 0 {
+		t.Error("a cleared member front left the album's art marker standing (SetEntityArt)")
+	}
+
+	editionTrackWithCover(t, st, lib.ID, "ess-item", "ItemSurface", 1,
+		model.Track{Barcode: "0724383024148"}, pngFixture())
+	itemID := mark("ItemSurface")
+	if err := st.SetItemArt(ctx, trackFrontPID("ItemSurface"), model.ArtRoleFront, nil, "",
+		model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
+		t.Fatalf("clear track art through SetItemArt: %v", err)
+	}
+	if albumArtMarkers(t, db, itemID) != 0 {
+		t.Error("a cleared member front left the album's art marker standing (SetItemArt)")
+	}
+
+	// A merge and the orphan sweep both hand the rowid on, so neither may leave a row.
+	editionTrack(t, st, lib.ID, "ess-lose", "Loser", 1, model.Track{Barcode: "0724383024131"})
+	loserID := mark("Loser")
+	loserPID := model.PID(scalarQueryStr(t, db, "SELECT pid FROM album WHERE title='Loser'"))
+	winnerPID := model.PID(scalarQueryStr(t, db, "SELECT pid FROM album WHERE title='Scanned'"))
+	if _, err := st.MergeEntities(ctx, model.MergeAlbum, winnerPID, []model.PID{loserPID}); err != nil {
+		t.Fatalf("merge: %v", err)
+	}
+	if albumArtMarkers(t, db, loserID) != 0 {
+		t.Error("a merged-away album left its art marker behind for the next rowid")
+	}
+	assertStoreVerifyClean(t, st)
+}
+
+// TestMergeReopensTheSurvivorsArtQueue: a merge can hand the survivor the loser's release
+// id, and the album-art walk gates on exactly that identifier. Only the loser's marker is
+// dropped by the merge itself, so without this the survivor's own marker names the state
+// before the union and it is never asked with the id it just gained.
+func TestMergeReopensTheSurvivorsArtQueue(t *testing.T) {
+	ctx := context.Background()
+	st, dbPath, lib := openStoreAt(t)
+	db := roConn(t, dbPath)
+	editionTrack(t, st, lib.ID, "ess-win", "Survivor", 1, model.Track{Barcode: "0075992739429"})
+	editionTrack(t, st, lib.ID, "ess-lose", "Loser", 1, model.Track{Media: "CD"})
+
+	winPID := model.PID(scalarQueryStr(t, db, "SELECT pid FROM album WHERE title='Survivor'"))
+	losePID := model.PID(scalarQueryStr(t, db, "SELECT pid FROM album WHERE title='Loser'"))
+	winID := albumIDByTitle(t, db, "Survivor")
+	setEntityMBID(t, st, model.MergeAlbum, string(losePID), relTestOneMBID, false)
+
+	// The survivor was asked about while it carried only a barcode, and nothing answered.
+	if err := st.ApplyAlbumArtBackfill(ctx, model.AlbumArtBackfill{AlbumID: winID, PID: winPID}); err != nil {
+		t.Fatalf("mark survivor: %v", err)
+	}
+	if _, err := st.MergeEntities(ctx, model.MergeAlbum, winPID, []model.PID{losePID}); err != nil {
+		t.Fatalf("merge: %v", err)
+	}
+	if got := scalarQueryStr(t, db, "SELECT COALESCE(mbid,'') FROM album WHERE id=?", winID); got != relTestOneMBID {
+		t.Fatalf("survivor mbid = %q, want the loser's id unioned on", got)
+	}
+	if albumArtMarkers(t, db, winID) != 0 {
+		t.Error("the survivor kept a marker naming the state before it gained the id")
+	}
+	assertStoreVerifyClean(t, st)
 }

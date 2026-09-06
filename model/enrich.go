@@ -20,6 +20,40 @@ const (
 	RelationSimilar  = "similar"
 )
 
+// EnrichSweep names which targets a queue walk selects, so one pass can walk the
+// entities nothing has asked about yet and, separately, the ones a past lookup found
+// nothing for and whose marker has since expired.
+type EnrichSweep int
+
+const (
+	// SweepFresh selects targets carrying no marker at all. It is the zero value, so a
+	// caller that names no sweep keeps the meaning the queue methods always had.
+	SweepFresh EnrichSweep = iota
+	// SweepRetry selects targets whose marker records a no-match stamped at or before
+	// the cutoff. A matched marker is never selected: the provider answered, and
+	// re-asking about the slots it left empty would repeat one request per entity per
+	// window for roles most providers never serve (Deezer serves an artist front and
+	// never a background). Registering a provider that fills those is what a forced run
+	// is for.
+	SweepRetry
+	// SweepDue is the union of the two, which is what one run's count has to report:
+	// everything a full pass will walk, whether it arrives on the fresh sweep or the
+	// retry one.
+	SweepDue
+	// SweepAll selects every target, marker or none. It is the forced run, and a scoped
+	// run, which implies force.
+	SweepAll
+)
+
+// EnrichQueueOptions selects what one queue walk (or the count that mirrors it) should
+// return. MissCutoff is a unix-ns instant: a no-match marker stamped at or before it has
+// expired and is walked again. Zero means no miss ever expires, so SweepRetry selects
+// nothing and SweepDue equals SweepFresh.
+type EnrichQueueOptions struct {
+	Sweep      EnrichSweep
+	MissCutoff int64
+}
+
 // EnrichScope narrows one enrichment pass to explicit targets, per phase. The id
 // slices are internal store rowids (the same currency the port queries iterate),
 // resolved from a public pid by the store's EnrichScopeForItem and
@@ -46,8 +80,8 @@ type EnrichScope struct {
 type EnrichTarget struct {
 	// Type is the entity type or the pass marker this target belongs to: artist,
 	// release_group, album, or book for the identity phases, and lyrics, aux_art,
-	// artist_art, fields, or fields_album for the passes that borrow the marker table
-	// for their own granularity.
+	// artist_art, album_art, fields, or fields_album for the passes that borrow the
+	// marker table for their own granularity.
 	Type       string
 	ID         int64
 	PID        PID
@@ -82,17 +116,21 @@ type EnrichTarget struct {
 	Media            string
 	Country          string
 	ReleaseGroupMBID string
-	// HasArt reports whether the album already resolves a front cover, its own or one
-	// derived from a member track's. The release match fetches a matched pressing's cover
-	// only when it does not, so a library whose rips carry embedded art spends no
+	// HasArt reports whether the target already holds a front image, and the walks that
+	// set it are the artist identity queue, the artist-art backfill, and the album-art
+	// backfill. What counts as held differs by rung: an album consumes the art fallback
+	// chain, so a member track's embedded cover answers its front, while an artist is a
+	// source in that chain and only its own row counts. A pass asks for a front only
+	// when this is false, so a library whose rips carry embedded art spends no
 	// rate-limited requests on covers the store would refuse to fill anyway.
 	HasArt bool
 	// ArtLocked reports whether the entity's whole "art" lock stands, the one that gates
-	// the front cover and every auxiliary role alike. The release-group pass and the
-	// album release match both read it for the same reason: the store refuses the write,
-	// so fetching first would spend a rate-limited request on every locked cover, every
+	// the front cover and every auxiliary role alike. The artist identity queue and the
+	// release-group queue set it for the same reason: the store refuses the write, so
+	// fetching first would spend a rate-limited request on every locked cover, every
 	// forced run. A per-role lock is not a reason to skip the fetch, so it is checked at
-	// apply instead.
+	// apply instead. The art backfill queues carry the whole-entity lock in their
+	// predicates rather than here, since a locked entity has nothing for them to do.
 	ArtLocked bool
 }
 
@@ -180,10 +218,13 @@ type EnrichCountOptions struct {
 	// Identity covers the MusicBrainz-backed phases (artist, release group, book).
 	// They run only with a contact configured, so a contact-less run counts none of
 	// them; Albums is the release match, which needs the toggle as well.
-	Identity    bool
-	Albums      bool // albums needing a release match
-	AuxArt      bool // release groups needing an auxiliary-art backfill
-	ArtistArt   bool // artists needing an art backfill
+	Identity  bool
+	Albums    bool // albums needing a release match
+	AuxArt    bool // release groups needing an auxiliary-art backfill
+	ArtistArt bool // artists needing an art backfill
+	// AlbumArt counts albums needing an art backfill, per askable slot. The zero value
+	// counts none, mirroring a run whose providers gate the phase off entirely.
+	AlbumArt    AlbumArtSlots
 	Lyrics      bool // tracks needing a lyrics lookup
 	TrackFields bool // tracks needing a scalar-fields lookup
 	BookFields  bool // books needing a scalar-fields lookup
@@ -233,8 +274,9 @@ type LyricsEnrichment struct {
 //
 // Provider is the enrichment marker's provider string, and it carries meaning: the
 // weaker edition tier records its own value so an edition match stays findable,
-// reviewable, and undoable afterwards. Art is that specific pressing's front cover,
-// which only a matched release has (the release-group pass fetches the group's).
+// reviewable, and undoable afterwards. It carries no art: the album-art backfill keys
+// on the stored identifiers, so the pressing's own cover is fetched there instead of
+// riding the moment an id lands.
 type AlbumReleaseMatch struct {
 	AlbumID  int64
 	PID      PID
@@ -242,12 +284,44 @@ type AlbumReleaseMatch struct {
 	MBID     string
 	Reason   string
 	Provider string
-	// Art keeps meaning the front cover. AuxArt carries the role-tagged images
-	// excluding front, applied fill-when-empty per role at the album's own rung and
-	// skipped entirely under the album's art lock.
-	Art    *ArtImage
-	AuxArt map[ArtRole]*ArtImage
 }
+
+// AlbumArtBackfill is the art one album-art backfill pass gathered, the album twin of
+// ArtistArtBackfill. It is keyed on the album's printed identifiers rather than on a
+// name, because the releases of one group share a title and the wrong edition's picture
+// is the failure this rung exists to avoid.
+//
+// It carries a front for the reason the artist backfill does: the album rung has no
+// other producer, so an album whose members carry no embedded cover has nothing at all
+// there, and the group's cover standing in for every edition is what a per-release ask
+// replaces. Art is nil when the album already resolves a front or nothing offered one.
+//
+// Matched=false records a completed lookup nothing answered, so the album is not
+// re-asked every run. Provider names who supplied the first image, and the marker
+// carries it; the store substitutes its own label when there is none, since the column
+// is NOT NULL.
+type AlbumArtBackfill struct {
+	AlbumID  int64
+	PID      PID
+	Matched  bool
+	Provider string
+	Art      *ArtImage
+	AuxArt   map[ArtRole]*ArtImage
+}
+
+// AlbumArtSlots names which album art vacancies a walk may ask about. Front needs a
+// provider advertising CapCover, which the built-in Cover Art Archive does at the
+// release rung, so a stock install asks it; Aux needs one advertising CapAuxArt, which
+// no built-in does. A slot no registered provider can fill is left out of the vacancy
+// test, so a stock install never marks an album for a vacancy nothing could have
+// answered. Both false means the phase does not run at all.
+type AlbumArtSlots struct {
+	Front bool
+	Aux   bool
+}
+
+// Any reports whether either slot is askable, which is the phase's own gate.
+func (s AlbumArtSlots) Any() bool { return s.Front || s.Aux }
 
 // BookEnrichment is the resolved data for one audiobook: external identifiers and
 // the publisher, filled only when the corresponding field is currently empty so a

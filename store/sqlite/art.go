@@ -454,41 +454,52 @@ func refreshArtProvenanceTx(ctx context.Context, tx *sql.Tx, entityType string, 
 // therefore call almost every album empty and quietly replace the file's own artwork with
 // the Cover Art Archive's on the first release match.
 //
-// It is separate from attachEntityArtTxChanged, which re-points on any differing hash,
-// because that behaviour belongs to the writers whose source is the file itself: a scan's
-// embedded cover should follow a retag.
-func fillAlbumArtTx(ctx context.Context, tx *sql.Tx, albumID int64, img *model.ArtImage) error {
+// It is separate from attachEntityArtTxChanged's re-point-on-any-differing-hash rule,
+// which belongs to the writers whose source is the file itself: a scan's embedded cover
+// should follow a retag. It does use that helper to do the writing, so its caller can
+// tell an image that landed from one the guards dropped, which is what an entity delta
+// rides on.
+func fillAlbumArtTx(ctx context.Context, tx *sql.Tx, albumID int64, img *model.ArtImage) (bool, error) {
 	var resolves int
 	if err := tx.QueryRowContext(ctx,
 		`SELECT CASE WHEN `+albumResolvesFrontArt+` THEN 1 ELSE 0 END FROM album al WHERE al.id = ?`,
 		albumID).Scan(&resolves); err != nil {
-		return err
+		return false, err
 	}
 	if resolves == 1 {
-		return nil
+		return false, nil
 	}
-	return attachEntityArtUnlessLockedTx(ctx, tx, model.ArtAlbum, albumID, img)
+	blocked, err := artFillBlockedTx(ctx, tx, model.ArtAlbum, albumID, model.ArtRoleFront)
+	if err != nil || blocked {
+		return false, err
+	}
+	return attachEntityArtTxChanged(ctx, tx, string(model.ArtAlbum), albumID, img)
 }
 
-// clearAlbumArtTx drops an album's own front-cover row, returning it to whatever the
-// derived rung answers. It undoes a release match's cover; a member track's embedded
-// cover is untouched, since nothing here wrote it.
+// clearAlbumArtTx drops the front cover enrichment gave an album, returning it to
+// whatever the derived rung answers. It undoes the cover a release identity earned,
+// whether the release match landed the id or the album carried one already; a member
+// track's embedded cover is untouched, since nothing here wrote it.
+//
+// The source filter is what keeps the undo from reaching a picture the user chose. A
+// matched marker does not mean enrichment wrote the front: the fill is fill-when-empty,
+// so an album that already had a hand-set cover keeps it and still takes the marker, and
+// the album-art backfill can match on an auxiliary role alone.
 func clearAlbumArtTx(ctx context.Context, tx *sql.Tx, albumID int64) error {
 	_, err := tx.ExecContext(ctx,
-		"DELETE FROM art_map WHERE entity_type = ? AND entity_id = ? AND role = 'front'",
-		string(model.ArtAlbum), albumID)
+		"DELETE FROM art_map WHERE entity_type = ? AND entity_id = ? AND role = 'front' AND source = ?",
+		string(model.ArtAlbum), albumID, string(model.SourceEnrichment))
 	return err
 }
 
 // clearReleaseGroupEnrichmentArtTx drops the art a release-group match wrote: the front
-// cover, the mirror of clearAlbumArtTx, and the auxiliary rows enrichment filled. An
-// auxiliary slot can hold a picture the user chose, so only enrichment-sourced rows go
-// there; the front follows the album's rule instead, since a matched marker is what put
-// it where it is.
+// cover, the mirror of clearAlbumArtTx, and the auxiliary rows enrichment filled. Every
+// slot here can hold a picture the user chose, the front included, so only
+// enrichment-sourced rows go.
 func clearReleaseGroupEnrichmentArtTx(ctx context.Context, tx *sql.Tx, rgID int64) error {
 	if _, err := tx.ExecContext(ctx,
-		"DELETE FROM art_map WHERE entity_type = ? AND entity_id = ? AND role = 'front'",
-		string(model.ArtReleaseGroup), rgID); err != nil {
+		"DELETE FROM art_map WHERE entity_type = ? AND entity_id = ? AND role = 'front' AND source = ?",
+		string(model.ArtReleaseGroup), rgID, string(model.SourceEnrichment)); err != nil {
 		return err
 	}
 	_, err := tx.ExecContext(ctx,

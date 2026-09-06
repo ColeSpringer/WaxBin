@@ -49,7 +49,7 @@ func TestEnrichScopeFlagValidation(t *testing.T) {
 func TestEnrichSummaryCoversEveryPhase(t *testing.T) {
 	res := &waxbin.EnrichResult{Result: enrich.Result{
 		ArtistsEnriched: 1, ReleaseGroupsEnriched: 1, AlbumsSearched: 1, BooksEnriched: 1,
-		LyricsEnriched: 1, AuxArtEnriched: 1, ArtistArtEnriched: 1,
+		LyricsEnriched: 1, AuxArtEnriched: 1, ArtistArtEnriched: 1, AlbumArtEnriched: 1,
 		TrackFieldsEnriched: 1, BookFieldsEnriched: 1, AlbumFieldsEnriched: 1,
 	}}
 	cmd := &cobra.Command{}
@@ -60,7 +60,7 @@ func TestEnrichSummaryCoversEveryPhase(t *testing.T) {
 	}
 	for _, want := range []string{
 		"artists:", "release groups:", "album releases:", "books:", "lyrics:",
-		"aux art:", "artist art:", "track fields:", "book fields:", "album fields:",
+		"aux art:", "artist art:", "album art:", "track fields:", "book fields:", "album fields:",
 	} {
 		if !strings.Contains(buf.String(), want) {
 			t.Errorf("summary is missing the %q line:\n%s", want, buf.String())

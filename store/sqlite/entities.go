@@ -584,6 +584,12 @@ func fillAlbumIdentifiersTx(ctx context.Context, tx *sql.Tx, id int64, pid model
 		if err := clearUnmatchedAlbumMarkerTx(ctx, tx, id); err != nil {
 			return err
 		}
+		// A landed identifier is new evidence for the art rung too, which walks by
+		// identifier and may have asked while the album carried none. Media and country
+		// over-clear it, costing one re-ask, the same tolerance the curation sites take.
+		if err := deleteAlbumArtMarkerTx(ctx, tx, id); err != nil {
+			return err
+		}
 	}
 	if curYear == 0 && tr.Year != 0 {
 		w, err := fillEntityFieldTx(ctx, tx, model.MergeAlbum, "album", "year", id, strconv.Itoa(tr.Year))
@@ -625,12 +631,6 @@ func entityMarkerMatchedTx(ctx context.Context, tx *sql.Tx, entityType string, e
 		return false, nil
 	}
 	return matched == 1, err
-}
-
-// albumMarkerMatchedTx reports whether an album's enrichment marker records a match; see
-// entityMarkerMatchedTx.
-func albumMarkerMatchedTx(ctx context.Context, tx *sql.Tx, albumID int64) (bool, error) {
-	return entityMarkerMatchedTx(ctx, tx, model.EnrichAlbumType, albumID)
 }
 
 // clearEntityMarkerTx removes an entity's enrichment marker whatever it recorded, for the

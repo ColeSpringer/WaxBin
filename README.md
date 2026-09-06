@@ -62,7 +62,7 @@ exit codes (`waxbin exit-codes`).
 | **Deletion / repair** | `trash`, `rm [--permanent]`, `mark-missing [--force]`, `merge`, `audit`, `diagnostics`, `upgrade` |
 | **Portability** | `backup`, `restore`, `export`, `manifest`, `rebuild` |
 | **Playlists / podcasts** | `playlist`, `smartplaylist`, `podcast`, `opml` |
-| **Enrichment** | `enrich` (MusicBrainz + Cover Art Archive, which need a contact; optional AcoustID; incl. `--item`/`--entity`; an injected provider can also fill role-tagged and artist art, and its passes run without a contact) |
+| **Enrichment** | `enrich` (MusicBrainz + Cover Art Archive, which need a contact; optional AcoustID; incl. `--item`/`--entity`; per-release album art; misses re-asked after `enrichment.retry_misses_after_days`; an injected provider can also fill role-tagged and artist art, and its passes run without a contact) |
 | **Maintenance** | `db verify [--fix]`, `db vacuum [--integrity]`, `db thumbs [--older-than/--max-bytes]`, `db migrate`, `db reset --yes`, `user`, `state` |
 
 ### Watching for changes

@@ -165,7 +165,7 @@ func TestAlbumsNeedingReleaseMatchIncludesEditionEvidence(t *testing.T) {
 	editionTrack(t, st, lib.ID, "ess-c", "Label Only", 1, model.Track{Label: "Harvest"})
 	editionTrack(t, st, lib.ID, "ess-d", "Nothing", 1, model.Track{})
 
-	queued, err := st.AlbumsNeedingReleaseMatch(ctx, false, 0, 100, nil)
+	queued, err := st.AlbumsNeedingReleaseMatch(ctx, model.EnrichQueueOptions{}, 0, 100, nil)
 	if err != nil {
 		t.Fatalf("AlbumsNeedingReleaseMatch: %v", err)
 	}
@@ -194,11 +194,11 @@ func TestAlbumsNeedingReleaseMatchIncludesEditionEvidence(t *testing.T) {
 	}
 
 	// The heartbeat denominator is built from the same list and must agree.
-	n, err := st.CountEntitiesNeedingEnrichment(ctx, false, model.EnrichCountOptions{Albums: true}, nil)
+	n, err := st.CountEntitiesNeedingEnrichment(ctx, model.EnrichQueueOptions{}, model.EnrichCountOptions{Albums: true}, nil)
 	if err != nil {
 		t.Fatalf("CountEntitiesNeedingEnrichment: %v", err)
 	}
-	albums, err := st.AlbumsNeedingReleaseMatch(ctx, false, 0, 100, nil)
+	albums, err := st.AlbumsNeedingReleaseMatch(ctx, model.EnrichQueueOptions{}, 0, 100, nil)
 	if err != nil {
 		t.Fatalf("AlbumsNeedingReleaseMatch: %v", err)
 	}
@@ -225,7 +225,7 @@ func TestScanClearsAnUnmatchedAlbumMarker(t *testing.T) {
 	if n, provider, matched := markerRows(t, db, id); n != 1 || provider != "musicbrainz:edition" || matched != 0 {
 		t.Fatalf("marker = (%d, %q, %d), want one unmatched edition marker", n, provider, matched)
 	}
-	if queued, _ := st.AlbumsNeedingReleaseMatch(ctx, false, 0, 100, nil); len(queued) != 0 {
+	if queued, _ := st.AlbumsNeedingReleaseMatch(ctx, model.EnrichQueueOptions{}, 0, 100, nil); len(queued) != 0 {
 		t.Fatalf("queued %d albums, want 0 while the marker stands", len(queued))
 	}
 
@@ -234,7 +234,7 @@ func TestScanClearsAnUnmatchedAlbumMarker(t *testing.T) {
 	if n, _, _ := markerRows(t, db, id); n != 0 {
 		t.Errorf("marker rows = %d, want 0 (new evidence must re-queue the album)", n)
 	}
-	queued, err := st.AlbumsNeedingReleaseMatch(ctx, false, 0, 100, nil)
+	queued, err := st.AlbumsNeedingReleaseMatch(ctx, model.EnrichQueueOptions{}, 0, 100, nil)
 	if err != nil {
 		t.Fatalf("AlbumsNeedingReleaseMatch: %v", err)
 	}
@@ -386,10 +386,11 @@ func TestEntityInfoReadsEditionColumns(t *testing.T) {
 	}
 }
 
-// TestDeclinedMBIDWriteTakesNoArt: the cover rides on the id landing. A locked mbid and
-// a collision both leave album.mbid alone, and stamping the matched pressing's art on a
-// row that never took its id would be the wrong picture with nothing recording why.
-func TestDeclinedMBIDWriteTakesNoArt(t *testing.T) {
+// TestLandedMBIDWriteReOpensTheArtQueue: the album-art walk keys on the stored release
+// id, so an id landing is new evidence there and clears its marker. A declined write is
+// the opposite case: the album is not (or is not yet known to be) that pressing, so the
+// marker stands and it is not re-asked with an id it does not hold.
+func TestLandedMBIDWriteReOpensTheArtQueue(t *testing.T) {
 	ctx := context.Background()
 	st, dbPath, lib := openStoreAt(t)
 	db := roConn(t, dbPath)
@@ -403,47 +404,55 @@ func TestDeclinedMBIDWriteTakesNoArt(t *testing.T) {
 	setEntityMBID(t, st, model.MergeAlbum, lockedPID, "", true)
 	setEntityMBID(t, st, model.MergeAlbum, holderPID, relTestOneMBID, false)
 
-	cover := &model.ArtImage{Data: []byte("cover-bytes"), Hash: "h-cover", Format: "png", Width: 4, Height: 4,
-		Attribution: model.Attribution{Source: model.SourceEnrichment, Provider: "musicbrainz"}}
+	artMarkers := func(albumID int64) int {
+		t.Helper()
+		return scalarQueryInt(t, db,
+			"SELECT COUNT(*) FROM entity_enrichment WHERE entity_type='album_art' AND entity_id=?", albumID)
+	}
+	markArt := func(title string) int64 {
+		t.Helper()
+		id := albumIDByTitle(t, db, title)
+		pid := scalarQueryStr(t, db, "SELECT pid FROM album WHERE title = ?", title)
+		if err := st.ApplyAlbumArtBackfill(ctx, model.AlbumArtBackfill{AlbumID: id, PID: model.PID(pid)}); err != nil {
+			t.Fatalf("mark %s art: %v", title, err)
+		}
+		return id
+	}
 	for _, tc := range []struct{ title, mbid string }{
 		{"Locked", relTestTwoMBID},
 		{"Taken", relTestOneMBID}, // already held by Holder
 	} {
-		id := albumIDByTitle(t, db, tc.title)
+		id := markArt(tc.title)
 		pid := scalarQueryStr(t, db, "SELECT pid FROM album WHERE title = ?", tc.title)
 		if err := st.ApplyAlbumReleaseMatch(ctx, model.AlbumReleaseMatch{
-			AlbumID: id, PID: model.PID(pid), Matched: true, MBID: tc.mbid,
-			Reason: "medium", Art: cover,
+			AlbumID: id, PID: model.PID(pid), Matched: true, MBID: tc.mbid, Reason: "medium",
 		}); err != nil {
 			t.Fatalf("ApplyAlbumReleaseMatch(%s): %v", tc.title, err)
 		}
-		if n := scalarQueryInt(t, db,
-			"SELECT COUNT(*) FROM art_map WHERE entity_type='album' AND entity_id=?", id); n != 0 {
-			t.Errorf("%s took %d art rows despite a declined mbid write", tc.title, n)
+		if artMarkers(id) != 1 {
+			t.Errorf("%s lost its art marker on a declined mbid write", tc.title)
 		}
 	}
 
-	// A write that does land still takes its cover, so the gate is specific.
+	// A write that does land re-opens the art queue, so the gate is specific.
 	editionTrack(t, st, lib.ID, "ess-d", "Fresh", 1, model.Track{Media: "CD"})
-	freshID := albumIDByTitle(t, db, "Fresh")
+	freshID := markArt("Fresh")
 	freshPID := scalarQueryStr(t, db, "SELECT pid FROM album WHERE title='Fresh'")
 	if err := st.ApplyAlbumReleaseMatch(ctx, model.AlbumReleaseMatch{
-		AlbumID: freshID, PID: model.PID(freshPID), Matched: true, MBID: relTestTwoMBID,
-		Reason: "medium", Art: cover,
+		AlbumID: freshID, PID: model.PID(freshPID), Matched: true, MBID: relTestTwoMBID, Reason: "medium",
 	}); err != nil {
 		t.Fatalf("ApplyAlbumReleaseMatch(Fresh): %v", err)
 	}
-	if n := scalarQueryInt(t, db,
-		"SELECT COUNT(*) FROM art_map WHERE entity_type='album' AND entity_id=?", freshID); n != 1 {
-		t.Errorf("a landed match stored %d art rows, want 1", n)
+	if artMarkers(freshID) != 0 {
+		t.Error("a landed mbid left the art marker standing; the album is never asked with its id")
 	}
 }
 
-// TestReleaseCoverDoesNotOverwriteADerivedTrackCover is the case that matters, because
+// TestAlbumArtDoesNotOverwriteADerivedTrackCover is the case that matters, because
 // an album normally owns no art_map row at all and answers from a member track's embedded
 // cover. Probing only for the album's own row would call almost every album empty and
-// quietly replace the file's own artwork on the first release match.
-func TestReleaseCoverDoesNotOverwriteADerivedTrackCover(t *testing.T) {
+// quietly replace the file's own artwork on the first backfill.
+func TestAlbumArtDoesNotOverwriteADerivedTrackCover(t *testing.T) {
 	ctx := context.Background()
 	st, dbPath, lib := openStoreAt(t)
 	db := roConn(t, dbPath)
@@ -452,12 +461,12 @@ func TestReleaseCoverDoesNotOverwriteADerivedTrackCover(t *testing.T) {
 	id := albumIDByTitle(t, db, "Embedded")
 	pid := scalarQueryStr(t, db, "SELECT pid FROM album WHERE title='Embedded'")
 
-	if err := st.ApplyAlbumReleaseMatch(ctx, model.AlbumReleaseMatch{
-		AlbumID: id, PID: model.PID(pid), Matched: true, MBID: relTestOneMBID, Reason: "medium",
+	if err := st.ApplyAlbumArtBackfill(ctx, model.AlbumArtBackfill{
+		AlbumID: id, PID: model.PID(pid), Matched: true, Provider: "musicbrainz",
 		Art: &model.ArtImage{Data: []byte("provider-bytes"), Hash: "h-provider", Format: "png", Width: 4, Height: 4,
 			Attribution: model.Attribution{Source: model.SourceEnrichment, Provider: "musicbrainz"}},
 	}); err != nil {
-		t.Fatalf("ApplyAlbumReleaseMatch: %v", err)
+		t.Fatalf("ApplyAlbumArtBackfill: %v", err)
 	}
 	if n := scalarQueryInt(t, db,
 		"SELECT COUNT(*) FROM art_map WHERE entity_type='album' AND entity_id=?", id); n != 0 {
@@ -476,12 +485,12 @@ func TestReleaseCoverDoesNotOverwriteADerivedTrackCover(t *testing.T) {
 	editionTrack(t, st, lib.ID, "ess-b", "Bare", 1, model.Track{Media: "CD"})
 	bareID := albumIDByTitle(t, db, "Bare")
 	barePID := scalarQueryStr(t, db, "SELECT pid FROM album WHERE title='Bare'")
-	if err := st.ApplyAlbumReleaseMatch(ctx, model.AlbumReleaseMatch{
-		AlbumID: bareID, PID: model.PID(barePID), Matched: true, MBID: relTestTwoMBID, Reason: "medium",
+	if err := st.ApplyAlbumArtBackfill(ctx, model.AlbumArtBackfill{
+		AlbumID: bareID, PID: model.PID(barePID), Matched: true, Provider: "musicbrainz",
 		Art: &model.ArtImage{Data: []byte("provider-bytes"), Hash: "h-provider", Format: "png", Width: 4, Height: 4,
 			Attribution: model.Attribution{Source: model.SourceEnrichment, Provider: "musicbrainz"}},
 	}); err != nil {
-		t.Fatalf("ApplyAlbumReleaseMatch(Bare): %v", err)
+		t.Fatalf("ApplyAlbumArtBackfill(Bare): %v", err)
 	}
 	if n := scalarQueryInt(t, db,
 		"SELECT COUNT(*) FROM art_map WHERE entity_type='album' AND entity_id=?", bareID); n != 1 {
@@ -489,10 +498,10 @@ func TestReleaseCoverDoesNotOverwriteADerivedTrackCover(t *testing.T) {
 	}
 }
 
-// TestReleaseCoverDoesNotOverwriteACuratedOne: entity art takes no lock, so
+// TestAlbumArtDoesNotOverwriteACuratedCover: entity art takes no lock, so
 // fill-when-empty is the only thing protecting a cover a user deliberately set, which is
 // what SetEntityArt's own doc promises of enrichment.
-func TestReleaseCoverDoesNotOverwriteACuratedOne(t *testing.T) {
+func TestAlbumArtDoesNotOverwriteACuratedCover(t *testing.T) {
 	ctx := context.Background()
 	st, dbPath, lib := openStoreAt(t)
 	db := roConn(t, dbPath)
@@ -507,12 +516,12 @@ func TestReleaseCoverDoesNotOverwriteACuratedOne(t *testing.T) {
 		WHERE am.entity_type='album' AND am.role='front' AND al.title='Curated'`)
 
 	id := albumIDByTitle(t, db, "Curated")
-	if err := st.ApplyAlbumReleaseMatch(ctx, model.AlbumReleaseMatch{
-		AlbumID: id, PID: pid, Matched: true, MBID: relTestOneMBID, Reason: "medium",
+	if err := st.ApplyAlbumArtBackfill(ctx, model.AlbumArtBackfill{
+		AlbumID: id, PID: pid, Matched: true, Provider: "musicbrainz",
 		Art: &model.ArtImage{Data: []byte("provider-bytes"), Hash: "h-provider", Format: "png", Width: 4, Height: 4,
 			Attribution: model.Attribution{Source: model.SourceEnrichment, Provider: "musicbrainz"}},
 	}); err != nil {
-		t.Fatalf("ApplyAlbumReleaseMatch: %v", err)
+		t.Fatalf("ApplyAlbumArtBackfill: %v", err)
 	}
 	after := scalarQueryStr(t, db, `SELECT am.source_hash FROM art_map am
 		JOIN album al ON al.id = am.entity_id
@@ -539,7 +548,7 @@ func TestClearingAnAlbumMBIDUndoesTheMatch(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("ApplyAlbumReleaseMatch: %v", err)
 	}
-	if queued, _ := st.AlbumsNeedingReleaseMatch(ctx, false, 0, 100, nil); len(queued) != 0 {
+	if queued, _ := st.AlbumsNeedingReleaseMatch(ctx, model.EnrichQueueOptions{}, 0, 100, nil); len(queued) != 0 {
 		t.Fatalf("queued %d albums while matched, want 0", len(queued))
 	}
 
@@ -550,7 +559,7 @@ func TestClearingAnAlbumMBIDUndoesTheMatch(t *testing.T) {
 	if n, _, _ := markerRows(t, db, id); n != 0 {
 		t.Errorf("marker rows after the undo = %d, want 0", n)
 	}
-	queued, err := st.AlbumsNeedingReleaseMatch(ctx, false, 0, 100, nil)
+	queued, err := st.AlbumsNeedingReleaseMatch(ctx, model.EnrichQueueOptions{}, 0, 100, nil)
 	if err != nil {
 		t.Fatalf("AlbumsNeedingReleaseMatch: %v", err)
 	}
@@ -559,9 +568,9 @@ func TestClearingAnAlbumMBIDUndoesTheMatch(t *testing.T) {
 	}
 }
 
-// TestUndoTakesTheMatchedCoverWithIt: the cover came from the pressing being disowned, so
-// leaving it would make the undo cosmetic. A member track's embedded cover is untouched,
-// since nothing here wrote it.
+// TestUndoTakesTheMatchedCoverWithIt: the cover the album-art backfill stored came from
+// the pressing being disowned, so leaving it would make the undo cosmetic. A member
+// track's embedded cover is untouched, since nothing here wrote it.
 func TestUndoTakesTheMatchedCoverWithIt(t *testing.T) {
 	ctx := context.Background()
 	st, dbPath, lib := openStoreAt(t)
@@ -573,14 +582,19 @@ func TestUndoTakesTheMatchedCoverWithIt(t *testing.T) {
 	if err := st.ApplyAlbumReleaseMatch(ctx, model.AlbumReleaseMatch{
 		AlbumID: id, PID: model.PID(pid), Matched: true, MBID: relTestOneMBID,
 		Reason: "medium", Provider: "musicbrainz:edition",
-		Art: &model.ArtImage{Data: []byte("provider-bytes"), Hash: "h-provider", Format: "png", Width: 4, Height: 4,
-			Attribution: model.Attribution{Source: model.SourceEnrichment, Provider: "musicbrainz"}},
 	}); err != nil {
 		t.Fatalf("ApplyAlbumReleaseMatch: %v", err)
 	}
+	if err := st.ApplyAlbumArtBackfill(ctx, model.AlbumArtBackfill{
+		AlbumID: id, PID: model.PID(pid), Matched: true, Provider: "musicbrainz",
+		Art: &model.ArtImage{Data: []byte("provider-bytes"), Hash: "h-provider", Format: "png", Width: 4, Height: 4,
+			Attribution: model.Attribution{Source: model.SourceEnrichment, Provider: "musicbrainz"}},
+	}); err != nil {
+		t.Fatalf("ApplyAlbumArtBackfill: %v", err)
+	}
 	if n := scalarQueryInt(t, db,
 		"SELECT COUNT(*) FROM art_map WHERE entity_type='album' AND entity_id=?", id); n != 1 {
-		t.Fatalf("the match stored %d art rows, want 1", n)
+		t.Fatalf("the backfill stored %d art rows, want 1", n)
 	}
 
 	if _, err := st.EditEntityFields(ctx, model.MergeAlbum, model.PID(pid),
@@ -629,4 +643,184 @@ func pngFixture() []byte {
 	img.Set(0, 0, color.RGBA{R: 200, G: 10, B: 10, A: 255})
 	_ = png.Encode(&buf, img)
 	return buf.Bytes()
+}
+
+// TestUndoTakesATaggedAlbumsCoverToo: the album-art backfill fetches a pressing's cover
+// from the identifiers the album already holds, so an album whose release id came off its
+// own tags never passes through the release match and carries no marker from it. Its own
+// marker is what says a provider answered, and the undo has to read that one or it leaves
+// the disowned pressing's picture standing.
+func TestUndoTakesATaggedAlbumsCoverToo(t *testing.T) {
+	ctx := context.Background()
+	st, dbPath, lib := openStoreAt(t)
+	db := roConn(t, dbPath)
+
+	editionTrack(t, st, lib.ID, "ess-a", "Tagged", 1, model.Track{Media: "CD"})
+	id := albumIDByTitle(t, db, "Tagged")
+	pid := model.PID(scalarQueryStr(t, db, "SELECT pid FROM album WHERE title='Tagged'"))
+	setEntityMBID(t, st, model.MergeAlbum, string(pid), relTestOneMBID, false)
+	if err := st.ApplyAlbumArtBackfill(ctx, model.AlbumArtBackfill{
+		AlbumID: id, PID: pid, Matched: true, Provider: "coverartarchive",
+		Art: enrichArtImg("tagged-front", "coverartarchive"),
+	}); err != nil {
+		t.Fatalf("ApplyAlbumArtBackfill: %v", err)
+	}
+	if n, _, _ := markerRows(t, db, id); n != 0 {
+		t.Fatalf("the album took %d release-match markers; the fixture needs none", n)
+	}
+
+	if _, err := st.EditEntityFields(ctx, model.MergeAlbum, pid,
+		map[string]string{"mbid": ""}, model.Attribution{Source: model.SourceUser}, model.LockOf(false), true); err != nil {
+		t.Fatalf("clear mbid: %v", err)
+	}
+	if n := scalarQueryInt(t, db,
+		"SELECT COUNT(*) FROM art_map WHERE entity_type='album' AND entity_id=?", id); n != 0 {
+		t.Errorf("album art rows after the undo = %d, want 0", n)
+	}
+}
+
+// TestUndoReadsTheArtMarkerBeforeTheEvidenceClear: --set is repeatable, so one edit can
+// clear the release id and fill a barcode at once. The new-evidence branch drops the
+// art marker before the undo below would read it, so the undo has to have read it first
+// or it decides the cover was nobody's.
+func TestUndoReadsTheArtMarkerBeforeTheEvidenceClear(t *testing.T) {
+	ctx := context.Background()
+	st, dbPath, lib := openStoreAt(t)
+	db := roConn(t, dbPath)
+
+	editionTrack(t, st, lib.ID, "ess-a", "Tagged", 1, model.Track{Media: "CD"})
+	id := albumIDByTitle(t, db, "Tagged")
+	pid := model.PID(scalarQueryStr(t, db, "SELECT pid FROM album WHERE title='Tagged'"))
+	setEntityMBID(t, st, model.MergeAlbum, string(pid), relTestOneMBID, false)
+	if err := st.ApplyAlbumArtBackfill(ctx, model.AlbumArtBackfill{
+		AlbumID: id, PID: pid, Matched: true, Provider: "coverartarchive",
+		Art: enrichArtImg("tagged-front", "coverartarchive"),
+	}); err != nil {
+		t.Fatalf("ApplyAlbumArtBackfill: %v", err)
+	}
+
+	// One call, both edits: the barcode is release-match evidence and the mbid is the undo.
+	if _, err := st.EditEntityFields(ctx, model.MergeAlbum, pid,
+		map[string]string{"mbid": "", "barcode": "0075992739429"},
+		model.Attribution{Source: model.SourceUser}, model.LockOf(false), true); err != nil {
+		t.Fatalf("clear mbid and set barcode: %v", err)
+	}
+	if n := scalarQueryInt(t, db,
+		"SELECT COUNT(*) FROM art_map WHERE entity_type='album' AND entity_id=?", id); n != 0 {
+		t.Errorf("album art rows after the undo = %d, want 0", n)
+	}
+}
+
+// TestAnMBIDChangeTakesTheOldPressingsCover: the marker delete on an mbid edit exists to
+// get the album re-asked, and the front vacancy is what the queue gates on. Leaving the
+// old release's cover in place closes that vacancy, so the re-ask would find nothing to
+// do and the wrong pressing's picture would stand for good.
+func TestAnMBIDChangeTakesTheOldPressingsCover(t *testing.T) {
+	ctx := context.Background()
+	st, dbPath, lib := openStoreAt(t)
+	db := roConn(t, dbPath)
+
+	editionTrack(t, st, lib.ID, "ess-a", "Corrected", 1, model.Track{Media: "CD"})
+	id := albumIDByTitle(t, db, "Corrected")
+	pid := model.PID(scalarQueryStr(t, db, "SELECT pid FROM album WHERE title='Corrected'"))
+	setEntityMBID(t, st, model.MergeAlbum, string(pid), relTestOneMBID, false)
+	if err := st.ApplyAlbumArtBackfill(ctx, model.AlbumArtBackfill{
+		AlbumID: id, PID: pid, Matched: true, Provider: "coverartarchive",
+		Art: enrichArtImg("old-pressing", "coverartarchive"),
+	}); err != nil {
+		t.Fatalf("ApplyAlbumArtBackfill: %v", err)
+	}
+
+	// Corrected to a different release, not cleared.
+	setEntityMBID(t, st, model.MergeAlbum, string(pid), relTestTwoMBID, false)
+	if n := scalarQueryInt(t, db,
+		"SELECT COUNT(*) FROM art_map WHERE entity_type='album' AND entity_id=? AND role='front'", id); n != 0 {
+		t.Errorf("the old release's cover survived the correction (%d rows)", n)
+	}
+	// And the album is genuinely back in the queue rather than merely unmarked.
+	queued, err := st.AlbumsNeedingArt(ctx, model.EnrichQueueOptions{}, 0, 100, model.AlbumArtSlots{Front: true}, nil)
+	if err != nil {
+		t.Fatalf("AlbumsNeedingArt: %v", err)
+	}
+	var found bool
+	for _, q := range queued {
+		found = found || q.Name == "Corrected"
+	}
+	if !found {
+		t.Errorf("queued = %+v, want the corrected album back for a re-ask", queued)
+	}
+}
+
+// TestUndoSurvivesAMarkerAnotherWriterDropped: the art marker and the release-match one
+// are both deleted routinely by other writers (a scan or an edit that fills an
+// identifier), so gating the undo's art clear on either of them left a disowned
+// pressing's cover standing whenever one had already gone.
+func TestUndoSurvivesAMarkerAnotherWriterDropped(t *testing.T) {
+	ctx := context.Background()
+	st, dbPath, lib := openStoreAt(t)
+	db := roConn(t, dbPath)
+
+	editionTrack(t, st, lib.ID, "ess-a", "Tagged", 1, model.Track{Media: "CD"})
+	id := albumIDByTitle(t, db, "Tagged")
+	pid := model.PID(scalarQueryStr(t, db, "SELECT pid FROM album WHERE title='Tagged'"))
+	setEntityMBID(t, st, model.MergeAlbum, string(pid), relTestOneMBID, false)
+	if err := st.ApplyAlbumArtBackfill(ctx, model.AlbumArtBackfill{
+		AlbumID: id, PID: pid, Matched: true, Provider: "coverartarchive",
+		Art: enrichArtImg("tagged-front", "coverartarchive"),
+	}); err != nil {
+		t.Fatalf("ApplyAlbumArtBackfill: %v", err)
+	}
+	// A later scan fills the barcode, which drops both markers as new evidence.
+	editionTrack(t, st, lib.ID, "ess-a", "Tagged", 2, model.Track{Media: "CD", Barcode: "0075992739429"})
+	if n := albumArtMarkers(t, db, id); n != 0 {
+		t.Fatalf("the scan left %d art markers; the fixture needs them gone", n)
+	}
+
+	if _, err := st.EditEntityFields(ctx, model.MergeAlbum, pid,
+		map[string]string{"mbid": ""}, model.Attribution{Source: model.SourceUser}, model.LockOf(false), true); err != nil {
+		t.Fatalf("clear mbid: %v", err)
+	}
+	if n := scalarQueryInt(t, db,
+		"SELECT COUNT(*) FROM art_map WHERE entity_type='album' AND entity_id=?", id); n != 0 {
+		t.Errorf("album art rows after the undo = %d, want 0", n)
+	}
+}
+
+// TestUndoKeepsACuratedCover: a matched art marker says a provider answered, not that
+// enrichment wrote the front. The backfill can match on an auxiliary role alone while
+// the front stays the user's, and the fill is fill-when-empty either way, so an
+// unfiltered delete here would destroy a cover the user chose.
+func TestUndoKeepsACuratedCover(t *testing.T) {
+	ctx := context.Background()
+	st, dbPath, lib := openStoreAt(t)
+	db := roConn(t, dbPath)
+
+	editionTrack(t, st, lib.ID, "ess-a", "Curated", 1, model.Track{Media: "CD"})
+	id := albumIDByTitle(t, db, "Curated")
+	pid := model.PID(scalarQueryStr(t, db, "SELECT pid FROM album WHERE title='Curated'"))
+	setEntityMBID(t, st, model.MergeAlbum, string(pid), relTestOneMBID, false)
+	if err := st.SetEntityArt(ctx, model.ArtAlbum, pid, model.ArtRoleFront, pngFixture(), "",
+		model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
+		t.Fatalf("SetEntityArt: %v", err)
+	}
+	before := scalarQueryStr(t, db,
+		"SELECT source_hash FROM art_map WHERE entity_type='album' AND entity_id=? AND role='front'", id)
+
+	// The backfill answers with an auxiliary role only, which still marks a match.
+	if err := st.ApplyAlbumArtBackfill(ctx, model.AlbumArtBackfill{
+		AlbumID: id, PID: pid, Matched: true, Provider: "fanart",
+		AuxArt: map[model.ArtRole]*model.ArtImage{model.ArtRoleBack: enrichArtImg("aux-back", "fanart")},
+	}); err != nil {
+		t.Fatalf("ApplyAlbumArtBackfill: %v", err)
+	}
+
+	if _, err := st.EditEntityFields(ctx, model.MergeAlbum, pid,
+		map[string]string{"mbid": ""}, model.Attribution{Source: model.SourceUser}, model.LockOf(false), true); err != nil {
+		t.Fatalf("clear mbid: %v", err)
+	}
+	after := scalarQueryStr(t, db,
+		`SELECT COALESCE((SELECT source_hash FROM art_map WHERE entity_type='album' AND entity_id=? AND role='front'), '')`, id)
+	if after != before {
+		t.Errorf("curated album cover went from %q to %q; the undo drops enrichment's front alone", before, after)
+	}
 }

@@ -40,10 +40,25 @@ func newEnrichCmd(g *globals) *cobra.Command {
 			"Giving an artist a front cover changes what unrelated tracks show: art resolves " +
 			"track, then album, then release group, then artist, so a track whose album has no " +
 			"cover starts rendering the artist's photo as its own.\n\n" +
+			"An album carrying a release mbid, a barcode or a catalog number is asked about " +
+			"its own cover, so the picture is that pressing's rather than one edition of the " +
+			"group standing in for all of them. That half runs on a stock install, since the " +
+			"Cover Art Archive serves the release rung: it costs one release-cover download " +
+			"per identified album that has no front, usually the same bytes as the group " +
+			"cover already fetched, and the content-addressed store dedups the bytes rather " +
+			"than the download.\n\n" +
+			"A lookup that found nothing is asked again once its marker is " +
+			"enrichment.retry_misses_after_days old (default 30, 0 never), after the fresh " +
+			"targets so a capped run reaches new files first. The first run after upgrading " +
+			"retries every historical miss, and they all fall due together every window; " +
+			"lyrics misses are usually the largest population, at roughly half a second each " +
+			"at LRCLIB pacing, so a library with thousands of tracks LRCLIB lacks spends that " +
+			"long per window unless --limit spreads it.\n\n" +
 			"--item or --entity (mutually exclusive) scope the pass to one item's or entity's " +
-			"targets: a track's artist, album artist, release group, and lyrics, a book's " +
-			"contributors and identifiers, or the named artist/release_group/album (an album " +
-			"resolves to its release group). A scoped run implies --force.",
+			"targets: a track's artist, album artist, release group, album (its release " +
+			"match, fields and art) and lyrics, a book's contributors and identifiers, or " +
+			"the named artist/release_group/album (an album resolves to itself and to its " +
+			"release group). A scoped run implies --force.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			// Flag-shape errors fail here, before the write lock is taken or the
 			// server dialed; the facade re-validates for embedders and the proxy.
@@ -134,6 +149,9 @@ func renderEnrichResult(cmd *cobra.Command, g *globals, res *waxbin.EnrichResult
 	if r.ArtistArtEnriched > 0 {
 		fmt.Fprintf(w, "artist art:     %d backfilled (%d matched)\n", r.ArtistArtEnriched, r.ArtistArtMatched)
 	}
+	if r.AlbumArtEnriched > 0 {
+		fmt.Fprintf(w, "album art:      %d backfilled (%d matched)\n", r.AlbumArtEnriched, r.AlbumArtMatched)
+	}
 	if r.TrackFieldsEnriched > 0 {
 		fmt.Fprintf(w, "track fields:   %d looked up (%d matched)\n", r.TrackFieldsEnriched, r.TrackFieldsMatched)
 	}
@@ -142,6 +160,11 @@ func renderEnrichResult(cmd *cobra.Command, g *globals, res *waxbin.EnrichResult
 	}
 	if r.AlbumFieldsEnriched > 0 {
 		fmt.Fprintf(w, "album fields:   %d looked up (%d matched)\n", r.AlbumFieldsEnriched, r.AlbumFieldsMatched)
+	}
+	// The retry sweep's share of the phase lines above, so a run that looks like it
+	// walked entities it already knew about says which ones and why.
+	if r.Retried > 0 {
+		fmt.Fprintf(w, "retried:        %d earlier misses\n", r.Retried)
 	}
 	fmt.Fprintf(w, "cover art:      %d fetched\n", r.ArtFetched)
 	// Only when a provider offered auxiliary roles, keeping the summary shape stable
