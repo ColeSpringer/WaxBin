@@ -119,9 +119,11 @@ func DerivedSortPairs() []DerivedSortPair {
 }
 
 // roleTagKeys maps a contributor role to its canonical WaxLabel tag key for on-disk
-// write-back. The music roles (v1.2.0 keys) drive track credit write-back; the book
-// roles are present for completeness but audiobook credit write-back is not wired
-// through the writer yet (a book's tags follow their own conventions).
+// write-back. Only a track's credit write-back reads it (writeBackItemEdits, the track
+// branch). A book's credits never come here: they write through the book field path
+// (bookRoleField in credits.go), where author rides ALBUMARTIST, narrator NARRATOR and
+// COMPOSER, and translator or editor are refused. The narrator entry stays so every role
+// with a canonical key is listed, and nothing reaches it.
 var roleTagKeys = map[model.ContributorRole]string{
 	model.RoleArtist:    string(tag.Artist),
 	model.RoleComposer:  string(tag.Composer),
@@ -139,7 +141,8 @@ var roleTagKeys = map[model.ContributorRole]string{
 }
 
 // RoleTagKey returns the canonical WaxLabel tag key an on-disk write uses for a
-// contributor role, and whether the role has one wired for write-back.
+// contributor role, and whether the role has one wired for write-back. Only a track's
+// credits are written through it; a book's go through the book field path instead.
 func RoleTagKey(role model.ContributorRole) (string, bool) {
 	k, ok := roleTagKeys[role]
 	return k, ok

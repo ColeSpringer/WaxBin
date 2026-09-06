@@ -35,7 +35,8 @@ const ExportFormat = "waxbin-export"
 // Version 5 adds a track's bpm, additive again.
 // Version 6 adds the item's acquisition source type, additive again.
 // Version 7 adds the listening log (play sessions), additive again.
-const ExportVersion = 7
+// Version 8 adds the item's credits, additive again.
+const ExportVersion = 8
 
 // Manifest is the versioned header of a logical export.
 type Manifest struct {
@@ -109,17 +110,20 @@ type ItemExport struct {
 	// and omitempty alone would put "source":"local" on every row.
 	Source string `json:"source,omitempty"`
 
-	// Artist is the combined display string, and the track's split artist credit is
-	// deliberately NOT carried alongside it. The credit is a relational fan-out (one
-	// item_contributor row per artist), which is the thing this record does not carry,
-	// and a consumer rebuilding a catalog from a snapshot re-derives it from Artist the
-	// same way a scan does.
+	// Artist is the combined display string.
 	//
-	// That re-derive is lossy in one case worth naming: a credit the user curated
-	// stores as a comma-joined display, and the splitter does not split on a comma, so
-	// a rebuilt catalog would collapse it back to one artist. Carrying the list would
-	// need an importer that writes contributor rows, and there is none: Restore below
-	// restores a physical backup, not a snapshot.
+	// Credits are the item's role-tagged contributors (the split artist credit, the
+	// composer, a book's narrator), in role then position order. They carry what
+	// Artist's combined display cannot bring back: a curated credit joins with a comma,
+	// which the splitter never splits on, so a consumer re-deriving credits from Artist
+	// would collapse it to one name. Omitted when the item has none.
+	Credits []CreditExport `json:"credits,omitempty"`
+}
+
+// CreditExport is one role-tagged credit of an item.
+type CreditExport struct {
+	Role string `json:"role"`
+	Name string `json:"name"`
 }
 
 // PlayStateExport is one user's critical state for one item. The changed-at
@@ -157,9 +161,10 @@ type PlaySessionExport struct {
 	Client      string `json:"client,omitempty"`
 }
 
-// BuildSnapshot assembles a logical export from already-read data. relPathOf maps
-// an item pid to its primary file's rel path (empty if none); pass nil to omit.
-func BuildSnapshot(schemaVersion int, createdAt int64, libs []*model.Library, items []*model.ItemView, plays []model.PlayState, sessions []model.PlaySession, relPathOf func(model.PID) string) *Snapshot {
+// BuildSnapshot assembles a logical export from already-read data. relPathOf maps an
+// item pid to its primary file's rel path (empty if none) and creditsOf to its
+// role-tagged credits; pass nil for either to omit it.
+func BuildSnapshot(schemaVersion int, createdAt int64, libs []*model.Library, items []*model.ItemView, plays []model.PlayState, sessions []model.PlaySession, relPathOf func(model.PID) string, creditsOf func(model.PID) []CreditExport) *Snapshot {
 	snap := &Snapshot{}
 	for _, l := range libs {
 		root := l.DisplayRoot
@@ -182,6 +187,9 @@ func BuildSnapshot(schemaVersion int, createdAt int64, libs []*model.Library, it
 		}
 		if relPathOf != nil {
 			ie.RelPath = relPathOf(it.PID)
+		}
+		if creditsOf != nil {
+			ie.Credits = creditsOf(it.PID)
 		}
 		snap.Items = append(snap.Items, ie)
 	}

@@ -36,7 +36,9 @@ import (
 // Folding format.DecoderVersion in per codec would automate that, and it is
 // deliberately not done: it would key catalog codec strings to WaxFlow codec IDs,
 // the vocabulary sync decode.Coverage refuses for the same reason. The failure
-// mode is a whole format silently never re-analyzing.
+// mode is a whole format silently never re-analyzing, so decode's
+// TestWaxFlowDecoderVersionsPinned fails when one of them moves and the question is
+// asked on every bump.
 func effectiveVersion(fpAlgo int) int {
 	return fpAlgo*1_000_000 + loudness.AnalysisVersion*1_000 + peaks.Version
 }

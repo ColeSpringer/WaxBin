@@ -414,7 +414,7 @@ func (m *musicBrainz) releaseEditions(ctx context.Context, force bool, rgMBID st
 
 // cacheEditions stores a projected edition set. The projection is ~30x smaller than the
 // raw pages and is exactly what the matcher consumes, which matters because
-// enrichment_cache has no TTL and no prune.
+// enrichment_cache has no TTL; `waxbin db enrich-cache` is the prune.
 func (m *musicBrainz) cacheEditions(ctx context.Context, key string, g releaseGroupEditions) error {
 	payload, err := json.Marshal(g)
 	if err != nil {

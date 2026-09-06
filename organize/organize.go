@@ -13,6 +13,7 @@ import (
 	"github.com/colespringer/waxbin/internal/pathx"
 	"github.com/colespringer/waxbin/meta"
 	"github.com/colespringer/waxbin/model"
+	"github.com/colespringer/waxbin/scan"
 	"github.com/colespringer/waxbin/waxerr"
 )
 
@@ -300,8 +301,16 @@ func markCollisions(plan *Plan) {
 func (o *Organizer) Execute(ctx context.Context, plan *Plan, jobPID model.PID, hb func(progress float64, msg string) error) (*Report, error) {
 	rep := &Report{}
 	total := len(plan.Actions)
+	// The directory covers are planned once the audio has actually moved, from what left
+	// each directory and where it landed, so a split album gets a cover in each
+	// destination and an emptied directory is not left holding one.
+	// It runs on the cancellation path too: the audio already moved, so a directory
+	// emptied before the cancel would otherwise keep a cover with nothing to hold it.
+	var moved []SidecarMove
+	placeCovers := func() { rep.SidecarsMoved += o.applyCoverMoves(CoverMoves(moved, scan.IsAudio)) }
 	for i := range plan.Actions {
 		if ctx.Err() != nil {
+			placeCovers()
 			return rep, waxerr.FromContext("organize.Execute", ctx.Err(), waxerr.CodeIO)
 		}
 		a := &plan.Actions[i]
@@ -315,16 +324,17 @@ func (o *Organizer) Execute(ctx context.Context, plan *Plan, jobPID model.PID, h
 			o.log.Warn("organize action failed", "src", a.Src, "dst", a.Dst, "err", err)
 		} else {
 			rep.Moved++
-			// The audio is moved and recorded; now carry its sidecars (same-basename
-			// lyrics/cue/art plus directory cover art) so a move does not leave them
-			// behind.
-			// Sidecars are not cataloged, so a failure here is logged, not fatal.
+			// The audio is moved and recorded; now carry its own companions (same-basename
+			// lyrics/cue/art) so a move does not leave them behind. Sidecars are not
+			// cataloged, so a failure here is logged, not fatal.
 			rep.SidecarsMoved += o.moveSidecars(a.Src, a.Dst)
+			moved = append(moved, SidecarMove{Src: a.Src, Dst: a.Dst})
 		}
 		if hb != nil {
 			_ = hb(float64(i+1)/float64(max(total, 1)), "organized "+strconv.Itoa(i+1)+"/"+strconv.Itoa(total))
 		}
 	}
+	placeCovers()
 	return rep, nil
 }
 

@@ -363,8 +363,16 @@ func (s *Service) Execute(ctx context.Context, plan *Plan) (*Report, error) {
 	}
 	rep := &Report{BatchPID: batch.PID}
 
+	// The staging directories' covers are planned once the audio has landed, so a folder
+	// routed to more than one library leaves a cover in each destination.
+	// It runs on the cancellation path too, before the batch is finalized: the audio
+	// already landed, so a staging directory emptied before the cancel would otherwise
+	// keep a cover with nothing to hold it.
+	var placed []organize.SidecarMove
+	placeCovers := func() { rep.Sidecars += s.placeCovers(organize.CoverMoves(placed, scan.IsAudio), plan.Copy) }
 	for i := range plan.Actions {
 		if ctx.Err() != nil {
+			placeCovers()
 			s.finalize(ctx, batch, rep, model.ImportFailed)
 			return rep, waxerr.FromContext(op, ctx.Err(), waxerr.CodeIO)
 		}
@@ -385,10 +393,30 @@ func (s *Service) Execute(ctx context.Context, plan *Plan) (*Report, error) {
 			rep.Imported++
 			rep.Bytes += a.Size
 			rep.Sidecars += sidecars
+			placed = append(placed, organize.SidecarMove{Src: a.Src, Dst: a.Dst})
 		}
 	}
+	placeCovers()
 	s.finalize(ctx, batch, rep, model.ImportDone)
 	return rep, nil
+}
+
+// placeCovers carries the staging directories' covers into the managed tree. A
+// copy-mode import never removes a staging cover, so the plan's copy flag overrides the
+// move the batch plan would otherwise make.
+func (s *Service) placeCovers(moves []organize.CoverMove, copyMode bool) int {
+	moved := 0
+	for _, m := range moves {
+		switch err := fsx.MoveOrCopy(m.Src, m.Dst, m.Copy || copyMode); {
+		case err == nil:
+			moved++
+		case errors.Is(err, fsx.ErrExist):
+			s.log.Warn("inbox cover not placed: destination exists", "src", m.Src, "dst", m.Dst)
+		default:
+			s.log.Warn("inbox cover placement failed", "src", m.Src, "dst", m.Dst, "err", err)
+		}
+	}
+	return moved
 }
 
 // importOne places one file in the managed tree, catalogs it under its target
@@ -447,11 +475,12 @@ func preflightPlan(plan *Plan) error {
 	return nil
 }
 
-// relocateSidecars carries an imported file's companions (same-basename
-// lyrics/art, directory cover art) into the managed tree, moving or copying them
-// to match the audio. Sidecars are not cataloged, so a conflict or failure is
-// logged and skipped, never fatal (the audio is already imported). The same
-// discovery as organize is used, so import and organize keep one sidecar set.
+// relocateSidecars carries an imported file's own companions (same-basename lyrics and
+// art) into the managed tree, moving or copying them to match the audio. Sidecars are
+// not cataloged, so a conflict or failure is logged and skipped, never fatal (the audio
+// is already imported). The same discovery as organize is used, so import and organize
+// keep one sidecar set; the directory's own cover is carried by placeCovers once the
+// batch is done.
 func (s *Service) relocateSidecars(plan *Plan, a *Action) int {
 	moved := 0
 	for _, m := range organize.SidecarMoves(a.Src, a.Dst) {

@@ -2502,3 +2502,257 @@ func TestMergeReopensTheSurvivorsArtQueue(t *testing.T) {
 	}
 	assertStoreVerifyClean(t, st)
 }
+
+// TestCountEntitiesNeedingEnrichmentCountsAForcedPhaseUnderSweepAll: the heartbeat
+// denominator has to cover a phase-scoped force's own walk, or the ratio never reaches
+// one; the phases it does not name stay on the run's sweep.
+func TestCountEntitiesNeedingEnrichmentCountsAForcedPhaseUnderSweepAll(t *testing.T) {
+	ctx := context.Background()
+	st, dbPath, lib := openStoreAt(t)
+	db := roConn(t, dbPath)
+
+	auxRGTrack(t, st, lib.ID, "Matched", "Matched Album", "")
+	auxRGTrack(t, st, lib.ID, "Missed", "Missed Album", "")
+	artistID := func(name string) int64 {
+		return int64(scalarQueryInt(t, db, "SELECT id FROM artist WHERE name = ?", name))
+	}
+	artistPID := func(name string) model.PID {
+		return model.PID(scalarQueryStr(t, db, "SELECT pid FROM artist WHERE name = ?", name))
+	}
+	for _, in := range []model.ArtistArtBackfill{
+		{ArtistID: artistID("Matched"), PID: artistPID("Matched"), Matched: true, Provider: "deezer"},
+		{ArtistID: artistID("Missed"), PID: artistPID("Missed")},
+	} {
+		if err := st.ApplyArtistArtBackfill(ctx, in); err != nil {
+			t.Fatalf("mark artist art: %v", err)
+		}
+	}
+
+	fresh := model.EnrichQueueOptions{Sweep: model.SweepFresh}
+	count := func(t *testing.T, opts model.EnrichCountOptions) int {
+		t.Helper()
+		n, err := st.CountEntitiesNeedingEnrichment(ctx, fresh, opts, nil)
+		if err != nil {
+			t.Fatalf("count: %v", err)
+		}
+		return n
+	}
+	if n := count(t, model.EnrichCountOptions{ArtistArt: true}); n != 0 {
+		t.Errorf("fresh count = %d, want 0: both artists carry a marker", n)
+	}
+	if n := count(t, model.EnrichCountOptions{ArtistArt: true,
+		Forced: []model.EnrichPhase{model.EnrichPhaseArtistArt}}); n != 2 {
+		t.Errorf("forced count = %d, want 2 (matched and missed alike)", n)
+	}
+	if n := count(t, model.EnrichCountOptions{ArtistArt: true,
+		Forced: []model.EnrichPhase{model.EnrichPhaseLyrics}}); n != 0 {
+		t.Errorf("count with an unrelated phase forced = %d, want 0", n)
+	}
+}
+
+// TestApplyAlbumArtBackfillCopiesTheGroupFront: the album takes the group's row rather
+// than a picture, under the same guards a fetched cover passes, and a copy that finds
+// nothing leaves the marker unmatched so a still-vacant album is asked again.
+func TestApplyAlbumArtBackfillCopiesTheGroupFront(t *testing.T) {
+	ctx := context.Background()
+	st, dbPath, lib := openStoreAt(t)
+	db := roConn(t, dbPath)
+	editionTrack(t, st, lib.ID, "ess-a", "Taken", 1, model.Track{Barcode: "0075992739429"})
+	editionTrack(t, st, lib.ID, "ess-b", "Locked", 1, model.Track{Barcode: "5099902154251"})
+
+	rgID := int64(scalarQueryInt(t, db, "SELECT id FROM release_group WHERE mbid = ?", relTestRGMBID))
+	rgPID := model.PID(scalarQueryStr(t, db, "SELECT pid FROM release_group WHERE mbid = ?", relTestRGMBID))
+	if err := st.ApplyReleaseGroupEnrichment(ctx, model.ReleaseGroupEnrichment{
+		ReleaseGroupID: rgID, PID: rgPID, Matched: true, MBID: relTestRGMBID,
+		Art: enrichArtImg("group-front", "coverartarchive"),
+	}); err != nil {
+		t.Fatalf("ApplyReleaseGroupEnrichment: %v", err)
+	}
+
+	albumDeltas := func() int {
+		t.Helper()
+		return scalarQueryInt(t, db, "SELECT COUNT(*) FROM change_log WHERE entity_type='album' AND op='update'")
+	}
+	takenID := albumIDByTitle(t, db, "Taken")
+	takenPID := model.PID(scalarQueryStr(t, db, "SELECT pid FROM album WHERE title='Taken'"))
+	copyIn := model.AlbumArtBackfill{
+		AlbumID: takenID, PID: takenPID, Matched: true, Provider: "coverartarchive",
+		FrontFromGroup: true, GroupFrontHash: "group-front",
+	}
+	before := albumDeltas()
+	if err := st.ApplyAlbumArtBackfill(ctx, copyIn); err != nil {
+		t.Fatalf("ApplyAlbumArtBackfill(Taken): %v", err)
+	}
+	if got := scalarQueryStr(t, db,
+		`SELECT source_hash||'/'||source||'/'||provider FROM art_map
+			WHERE entity_type='album' AND entity_id=? AND role='front'`, takenID); got != "group-front/enrichment/coverartarchive" {
+		t.Errorf("album front = %q, want the group's row copied whole", got)
+	}
+	if albumDeltas() != before+1 {
+		t.Error("the copied cover emitted no album delta")
+	}
+	if n := scalarQueryInt(t, db,
+		"SELECT COUNT(*) FROM entity_enrichment WHERE entity_type='album_art' AND entity_id=? AND matched=1", takenID); n != 1 {
+		t.Error("the copy wrote an unmatched marker")
+	}
+
+	// A second call has nothing to copy: the album already resolves a front.
+	before = albumDeltas()
+	if err := st.ApplyAlbumArtBackfill(ctx, copyIn); err != nil {
+		t.Fatalf("second ApplyAlbumArtBackfill(Taken): %v", err)
+	}
+	if n := scalarQueryInt(t, db,
+		"SELECT COUNT(*) FROM art_map WHERE entity_type='album' AND entity_id=? AND role='front'", takenID); n != 1 {
+		t.Errorf("album front rows = %d, want the one copy", n)
+	}
+	if albumDeltas() != before {
+		t.Error("a copy that wrote nothing still emitted a delta")
+	}
+
+	// A hash the group no longer holds copies nothing and leaves the marker unmatched.
+	editionTrack(t, st, lib.ID, "ess-c", "Stale", 1, model.Track{Barcode: "0724382955528"})
+	staleID := albumIDByTitle(t, db, "Stale")
+	stalePID := model.PID(scalarQueryStr(t, db, "SELECT pid FROM album WHERE title='Stale'"))
+	if err := st.ApplyAlbumArtBackfill(ctx, model.AlbumArtBackfill{
+		AlbumID: staleID, PID: stalePID, Matched: true, Provider: "coverartarchive",
+		FrontFromGroup: true, GroupFrontHash: "stale",
+	}); err != nil {
+		t.Fatalf("ApplyAlbumArtBackfill(Stale): %v", err)
+	}
+	if n := scalarQueryInt(t, db,
+		"SELECT COUNT(*) FROM art_map WHERE entity_type='album' AND entity_id=? AND role='front'", staleID); n != 0 {
+		t.Errorf("stale album front rows = %d, want none", n)
+	}
+	if n := scalarQueryInt(t, db,
+		"SELECT COUNT(*) FROM entity_enrichment WHERE entity_type='album_art' AND entity_id=? AND matched=1", staleID); n != 0 {
+		t.Error("a copy that found nothing wrote a matched marker; the album would never be asked again")
+	}
+
+	// A stale hash beside a landed auxiliary role still marks unmatched, since the front
+	// the album was queued for is still vacant. The aux row lands either way.
+	if err := st.ApplyAlbumArtBackfill(ctx, model.AlbumArtBackfill{
+		AlbumID: staleID, PID: stalePID, Matched: true, Provider: "coverartarchive",
+		FrontFromGroup: true, GroupFrontHash: "stale",
+		AuxArt: map[model.ArtRole]*model.ArtImage{model.ArtRoleBack: enrichArtImg("stale-back", "fanart")},
+	}); err != nil {
+		t.Fatalf("ApplyAlbumArtBackfill(Stale, with aux): %v", err)
+	}
+	if got := scalarQueryStr(t, db,
+		"SELECT source_hash FROM art_map WHERE entity_type='album' AND entity_id=? AND role='back'", staleID); got != "stale-back" {
+		t.Errorf("album back = %q, want the offered one", got)
+	}
+	if n := scalarQueryInt(t, db,
+		"SELECT COUNT(*) FROM entity_enrichment WHERE entity_type='album_art' AND entity_id=? AND matched=1", staleID); n != 0 {
+		t.Error("a still-vacant front wrote a matched marker beside the aux fill; it would never be asked again")
+	}
+
+	// A front no longer open leaves no vacancy, so the marker stands on what the caller
+	// said, the way a fetched cover the same guards drop already does.
+	lockedID := albumIDByTitle(t, db, "Locked")
+	lockedPID := model.PID(scalarQueryStr(t, db, "SELECT pid FROM album WHERE title='Locked'"))
+	if _, err := st.SetArtLock(ctx, model.ArtAlbum, lockedPID, model.ArtRoleFront, true); err != nil {
+		t.Fatalf("SetArtLock: %v", err)
+	}
+	if err := st.ApplyAlbumArtBackfill(ctx, model.AlbumArtBackfill{
+		AlbumID: lockedID, PID: lockedPID, Matched: true, Provider: "coverartarchive",
+		FrontFromGroup: true, GroupFrontHash: "group-front",
+	}); err != nil {
+		t.Fatalf("ApplyAlbumArtBackfill(Locked): %v", err)
+	}
+	if n := scalarQueryInt(t, db,
+		"SELECT COUNT(*) FROM art_map WHERE entity_type='album' AND entity_id=? AND role='front'", lockedID); n != 0 {
+		t.Errorf("locked album front rows = %d, want none", n)
+	}
+	if n := scalarQueryInt(t, db,
+		"SELECT COUNT(*) FROM entity_enrichment WHERE entity_type='album_art' AND entity_id=? AND matched=1", lockedID); n != 1 {
+		t.Error("a locked album left the marker unmatched; there is no vacancy to re-ask about")
+	}
+}
+
+// TestAlbumsNeedingArtCarriesTheGroupFrontHash: the queue hands a provider its group's
+// id and the hash of the front the catalog holds, so it can offer the reuse; a cover
+// chosen by hand carries no hash, since it is nothing the provider fetched.
+func TestAlbumsNeedingArtCarriesTheGroupFrontHash(t *testing.T) {
+	ctx := context.Background()
+	st, dbPath, lib := openStoreAt(t)
+	db := roConn(t, dbPath)
+	editionTrack(t, st, lib.ID, "ess-a", "Queued", 1, model.Track{Barcode: "0075992739429"})
+
+	slots := model.AlbumArtSlots{Front: true}
+	only := func(t *testing.T) model.EnrichTarget {
+		t.Helper()
+		got, err := st.AlbumsNeedingArt(ctx, model.EnrichQueueOptions{Sweep: model.SweepAll}, 0, 10, slots, nil)
+		if err != nil {
+			t.Fatalf("AlbumsNeedingArt: %v", err)
+		}
+		if len(got) != 1 {
+			t.Fatalf("queued %d albums, want 1", len(got))
+		}
+		return got[0]
+	}
+	if tgt := only(t); tgt.ReleaseGroupMBID != relTestRGMBID || tgt.GroupFrontHash != "" {
+		t.Errorf("with no group front: mbid %q / hash %q, want the mbid and an empty hash",
+			tgt.ReleaseGroupMBID, tgt.GroupFrontHash)
+	}
+
+	rgID := int64(scalarQueryInt(t, db, "SELECT id FROM release_group WHERE mbid = ?", relTestRGMBID))
+	rgPID := model.PID(scalarQueryStr(t, db, "SELECT pid FROM release_group WHERE mbid = ?", relTestRGMBID))
+	if err := st.ApplyReleaseGroupEnrichment(ctx, model.ReleaseGroupEnrichment{
+		ReleaseGroupID: rgID, PID: rgPID, Matched: true, MBID: relTestRGMBID,
+		Art: enrichArtImg("group-front", "coverartarchive"),
+	}); err != nil {
+		t.Fatalf("ApplyReleaseGroupEnrichment: %v", err)
+	}
+	if tgt := only(t); tgt.GroupFrontHash != "group-front" {
+		t.Errorf("with an enrichment front: hash %q, want group-front", tgt.GroupFrontHash)
+	}
+
+	if err := st.SetEntityArt(ctx, model.ArtReleaseGroup, rgPID, model.ArtRoleFront, pngFixture(), "",
+		model.Attribution{Source: model.SourceUser}, model.LockOff, false); err != nil {
+		t.Fatalf("hand-set the group front: %v", err)
+	}
+	if tgt := only(t); tgt.GroupFrontHash != "" {
+		t.Errorf("with a user-set front: hash %q, want empty", tgt.GroupFrontHash)
+	}
+}
+
+// TestReleaseGroupsNeedingEnrichmentCarriesTheGroupFrontHash: the identity queue carries
+// the hash of the front the catalog holds, which is what lets a forced re-fetch ask the
+// archive conditionally; a hand-set cover carries none, so it is fetched plainly.
+func TestReleaseGroupsNeedingEnrichmentCarriesTheGroupFrontHash(t *testing.T) {
+	ctx := context.Background()
+	st, dbPath, lib := openStoreAt(t)
+	db := roConn(t, dbPath)
+	editionTrack(t, st, lib.ID, "ess-a", "Queued", 1, model.Track{Barcode: "0075992739429"})
+
+	rgID := int64(scalarQueryInt(t, db, "SELECT id FROM release_group WHERE mbid = ?", relTestRGMBID))
+	rgPID := model.PID(scalarQueryStr(t, db, "SELECT pid FROM release_group WHERE mbid = ?", relTestRGMBID))
+	only := func(t *testing.T) model.EnrichTarget {
+		t.Helper()
+		got, err := st.ReleaseGroupsNeedingEnrichment(ctx, model.EnrichQueueOptions{Sweep: model.SweepAll}, 0, 10, false, nil)
+		if err != nil {
+			t.Fatalf("ReleaseGroupsNeedingEnrichment: %v", err)
+		}
+		if len(got) != 1 {
+			t.Fatalf("queued %d groups, want 1", len(got))
+		}
+		return got[0]
+	}
+	if err := st.ApplyReleaseGroupEnrichment(ctx, model.ReleaseGroupEnrichment{
+		ReleaseGroupID: rgID, PID: rgPID, Matched: true, MBID: relTestRGMBID,
+		Art: enrichArtImg("group-front", "coverartarchive"),
+	}); err != nil {
+		t.Fatalf("ApplyReleaseGroupEnrichment: %v", err)
+	}
+	if tgt := only(t); tgt.GroupFrontHash != "group-front" {
+		t.Errorf("with an enrichment front: hash %q, want group-front", tgt.GroupFrontHash)
+	}
+
+	if err := st.SetEntityArt(ctx, model.ArtReleaseGroup, rgPID, model.ArtRoleFront, pngFixture(), "",
+		model.Attribution{Source: model.SourceUser}, model.LockOff, false); err != nil {
+		t.Fatalf("hand-set the group front: %v", err)
+	}
+	if tgt := only(t); tgt.GroupFrontHash != "" {
+		t.Errorf("with a user-set front: hash %q, want empty", tgt.GroupFrontHash)
+	}
+}

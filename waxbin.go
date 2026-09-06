@@ -293,9 +293,8 @@ func (l *Library) Libraries(ctx context.Context) ([]*model.Library, error) {
 //
 // The store is the single source of truth for roots, so scan, organize, and import
 // pick the new root up immediately and the row survives a restart even if the embedder
-// never adds it to its own configuration. A running Watch does not pick it up, since
-// watch snapshots its roots at start; the create delta on the change feed is the signal
-// to restart the watcher.
+// never adds it to its own configuration. A running Watch follows it on its next
+// scheduled tick.
 func (l *Library) AddRoot(ctx context.Context, spec config.Root) (*model.Library, error) {
 	if l.ReadOnly() {
 		return nil, waxerr.New(waxerr.CodeUnsupported, "Library.AddRoot", "adding a root requires a read-write library")
@@ -860,9 +859,9 @@ type WatchOptions struct {
 // Stop the watcher to mutate manually, or run waxbin serve, which proxies mutations
 // over a local control socket. Idle lock release is deliberately post-1.0.
 //
-// The watched roots are snapshotted at start. A root registered later through AddRoot
-// is scanned and organized but not watched until the watcher restarts; its create
-// delta on the change feed is the signal to do so.
+// The watched roots are re-read from the catalog on every scheduled tick, so a root
+// registered through AddRoot or moved by RelocateRoot is followed without a restart, and
+// with Live its tree is armed then too.
 func (l *Library) Watch(ctx context.Context, opts WatchOptions) error {
 	if l.ReadOnly() {
 		return waxerr.New(waxerr.CodeUnsupported, "Library.Watch", "watch requires a read-write library")
@@ -871,15 +870,11 @@ func (l *Library) Watch(ctx context.Context, opts WatchOptions) error {
 	if err != nil {
 		return err
 	}
-	roots := make([]watch.Root, 0, len(libs))
-	for _, lib := range libs {
-		roots = append(roots, watch.Root{LibraryPID: lib.PID, Path: string(lib.Root)})
-	}
 	var notify func(watch.Activity)
 	if opts.OnActivity != nil {
 		notify = func(a watch.Activity) { opts.OnActivity(WatchActivity{Trigger: a.Trigger, Changed: a.Changed}) }
 	}
-	w := watch.New(&watchEngine{lib: l}, roots, watch.Options{
+	w := watch.New(&watchEngine{lib: l, libPID: opts.LibraryPID}, watchRoots(libs), watch.Options{
 		Interval:           opts.Interval,
 		FullRescanInterval: opts.FullRescanInterval,
 		Live:               opts.Live,
@@ -893,8 +888,31 @@ func (l *Library) Watch(ctx context.Context, opts WatchOptions) error {
 }
 
 // watchEngine adapts the facade to the watch.Engine port, so the watch package need
-// not import waxbin.
-type watchEngine struct{ lib *Library }
+// not import waxbin. libPID is the scope Watch was given, re-resolved each time the
+// watcher asks for its roots.
+type watchEngine struct {
+	lib    *Library
+	libPID model.PID
+}
+
+// Roots re-resolves the watched libraries from the catalog, which is where a runtime
+// AddRoot or RelocateRoot lands.
+func (e *watchEngine) Roots(ctx context.Context) ([]watch.Root, error) {
+	libs, err := e.lib.resolveLibraries(ctx, e.libPID)
+	if err != nil {
+		return nil, err
+	}
+	return watchRoots(libs), nil
+}
+
+// watchRoots maps resolved libraries to the watcher's root shape.
+func watchRoots(libs []*model.Library) []watch.Root {
+	roots := make([]watch.Root, 0, len(libs))
+	for _, lib := range libs {
+		roots = append(roots, watch.Root{LibraryPID: lib.PID, Path: string(lib.Root)})
+	}
+	return roots
+}
 
 func (e *watchEngine) Rescan(ctx context.Context, libPID model.PID, subPath string, force bool) (bool, error) {
 	res, err := e.lib.Scan(ctx, ScanRequest{LibraryPID: libPID, SubPath: subPath, Force: force})
@@ -964,6 +982,9 @@ func (e *watchEngine) SyncSources(ctx context.Context) error {
 type EnrichOptions struct {
 	Force bool // re-enrich already-enriched entities
 	Limit int  // cap on entities processed (0 = all needing enrichment)
+	// ForcePhases re-asks the named phases alone, marker or none; see
+	// enrich.RunOptions.ForcePhases. Exclusive with Force and with a scope.
+	ForcePhases []model.EnrichPhase
 
 	ItemPID    model.PID       // scope to one item's targets ("" = no item scope)
 	EntityType read.EntityKind // with EntityPID: scope to one entity
@@ -990,6 +1011,21 @@ type EnrichResult struct {
 func (l *Library) enrichScope(ctx context.Context, op string, opts EnrichOptions) (*model.EnrichScope, error) {
 	hasItem := opts.ItemPID != ""
 	hasEntity := opts.EntityType != "" || opts.EntityPID != ""
+	if len(opts.ForcePhases) > 0 {
+		if opts.Force || hasItem || hasEntity {
+			return nil, waxerr.New(waxerr.CodeInvalid, op, "a phase-scoped force cannot combine with --force or a scope, which already force every phase they walk")
+		}
+		for _, p := range opts.ForcePhases {
+			if !p.Valid() {
+				return nil, waxerr.New(waxerr.CodeInvalid, op, "unknown enrichment phase "+strconv.Quote(string(p)))
+			}
+		}
+		// The engine owns the install gate, since only it knows the registered
+		// providers, and it is asked here so the refusal precedes the job.
+		if err := l.enricher.CheckPhases(opts.ForcePhases); err != nil {
+			return nil, err
+		}
+	}
 	switch {
 	case hasItem && hasEntity:
 		return nil, waxerr.New(waxerr.CodeInvalid, op, "scope by item or by entity, not both")
@@ -1279,6 +1315,36 @@ func (l *Library) PruneThumbnails(ctx context.Context, p ThumbPrunePolicy) (remo
 		maxBytes = *p.MaxBytes
 	}
 	return l.store.PruneThumbnails(ctx, olderThan, maxBytes)
+}
+
+// EnrichmentCachePrunePolicy bounds an enrichment-cache prune. Its bounds are pointers
+// and its zero value is refused for ThumbPrunePolicy's reason: zero means something on
+// either axis, so absence needs a value of its own.
+type EnrichmentCachePrunePolicy struct {
+	OlderThan *time.Duration // drop entries fetched at least this long ago; nil leaves the age unbounded
+	MaxBytes  *int64         // evict oldest first until the prunable rows fit; nil leaves the size unbounded
+}
+
+// EnrichmentCacheStats censuses the enrichment response cache: what it holds, when it
+// was fetched, and a breakdown by request kind. It is read-only.
+func (l *Library) EnrichmentCacheStats(ctx context.Context) (*model.EnrichmentCacheReport, error) {
+	return l.store.EnrichmentCacheStats(ctx)
+}
+
+// PruneEnrichmentCache drops cached provider responses to fit the policy, returning how
+// many rows went and how many bytes they held. A pruned answer costs one request the
+// next time its target is re-asked, never a catalog value; the Cover Art Archive's
+// group records are exempt, since losing one costs a cover download. The rows are freed
+// inside the catalog file; returning that space to the filesystem takes a vacuum.
+func (l *Library) PruneEnrichmentCache(ctx context.Context, p EnrichmentCachePrunePolicy) (removed int, freed int64, err error) {
+	olderThan, maxBytes := int64(-1), int64(-1)
+	if p.OlderThan != nil {
+		olderThan = p.OlderThan.Nanoseconds()
+	}
+	if p.MaxBytes != nil {
+		maxBytes = *p.MaxBytes
+	}
+	return l.store.PruneEnrichmentCache(ctx, olderThan, maxBytes)
 }
 
 // PruneChangeLog trims the change_log to its newest keep rows, returning how many
@@ -2991,11 +3057,26 @@ func (l *Library) Export(ctx context.Context, w io.Writer) (*port.Manifest, erro
 	}
 	relOf := func(pid model.PID) string { return relByPID[pid] }
 
+	// The credits, folded per item in one query. They are the one relational fan-out the
+	// export carries, because a curated credit joins with a comma the splitter never
+	// splits on, so Artist alone cannot bring it back.
+	creditsByPID := map[model.PID][]port.CreditExport{}
+	err = l.store.ExportCredits(ctx,
+		func(pid model.PID) bool { return exported[pid] },
+		func(pid model.PID, c model.Contributor) error {
+			creditsByPID[pid] = append(creditsByPID[pid], port.CreditExport{Role: string(c.Role), Name: c.Name})
+			return nil
+		})
+	if err != nil {
+		return nil, err
+	}
+	creditsOf := func(pid model.PID) []port.CreditExport { return creditsByPID[pid] }
+
 	// The listening log grows with listening rather than with the catalog, so it is
 	// not built into the snapshot: the store counts it first, the manifest goes out
 	// ahead of the rows with that exact number, and each row is written as it is
 	// read.
-	snap := port.BuildSnapshot(schema, time.Now().UnixNano(), libs, items, plays, nil, relOf)
+	snap := port.BuildSnapshot(schema, time.Now().UnixNano(), libs, items, plays, nil, relOf, creditsOf)
 	sw := port.NewSnapshotWriter(w)
 	err = l.store.ExportSessions(ctx,
 		func(pid model.PID) bool { return exported[pid] },

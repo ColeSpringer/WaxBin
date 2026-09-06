@@ -171,7 +171,7 @@ func (l *Library) StartAnalyze(ctx context.Context, opts AnalyzeOptions) (model.
 // bad scope never starts a job.
 func (l *Library) enrichWork(opts EnrichOptions, scope *model.EnrichScope, out *EnrichResult) jobFn {
 	return func(ctx context.Context, h *jobs.Handle) error {
-		r, err := l.enricher.Run(ctx, enrich.RunOptions{Force: opts.Force, Limit: opts.Limit, Scope: scope},
+		r, err := l.enricher.Run(ctx, enrich.RunOptions{Force: opts.Force, Limit: opts.Limit, ForcePhases: opts.ForcePhases, Scope: scope},
 			func(p float64, msg string) error { return h.Heartbeat(ctx, p, msg) })
 		if r != nil {
 			out.Result = *r

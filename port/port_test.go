@@ -25,7 +25,7 @@ func TestSnapshotRoundTrip(t *testing.T) {
 		{PID: "S2", UserPID: "U1", ItemPID: "I1", StartedAt: 1<<60 + 9}, // still open
 	}
 
-	snap := port.BuildSnapshot(12, 1700000000, libs, items, plays, sessions, nil)
+	snap := port.BuildSnapshot(12, 1700000000, libs, items, plays, sessions, nil, nil)
 	if snap.Manifest.Format != port.ExportFormat || snap.Manifest.Items != 1 || snap.Manifest.PlayStates != 1 || snap.Manifest.PlaySessions != 2 {
 		t.Fatalf("manifest wrong: %+v", snap.Manifest)
 	}
@@ -50,8 +50,8 @@ func TestSnapshotRoundTrip(t *testing.T) {
 	if got.Manifest.Version != port.ExportVersion {
 		t.Errorf("manifest version = %d, want %d", got.Manifest.Version, port.ExportVersion)
 	}
-	if port.ExportVersion != 7 {
-		t.Errorf("ExportVersion = %d, want 7 now that the listening log is carried", port.ExportVersion)
+	if port.ExportVersion != 8 {
+		t.Errorf("ExportVersion = %d, want 8 now that the credits are carried", port.ExportVersion)
 	}
 	if got.PlayState[0].Rating == nil || *got.PlayState[0].Rating != 80 {
 		t.Fatalf("rating round-trip wrong: %+v", got.PlayState[0])
@@ -76,7 +76,7 @@ func TestSnapshotSessionTimesEncodeAsStrings(t *testing.T) {
 		{PID: "S1", UserPID: "U1", ItemPID: "I1", StartedAt: 1 << 60, EndedAt: 1<<60 + 5, MsPlayed: 10},
 		{PID: "S2", UserPID: "U1", ItemPID: "I1", StartedAt: 1<<60 + 9},
 	}
-	snap := port.BuildSnapshot(12, 1700000000, nil, nil, nil, sessions, nil)
+	snap := port.BuildSnapshot(12, 1700000000, nil, nil, nil, sessions, nil, nil)
 	var buf bytes.Buffer
 	if err := port.WriteSnapshot(&buf, snap); err != nil {
 		t.Fatalf("write: %v", err)
@@ -103,7 +103,7 @@ func TestItemExportCarriesNoLibraryHandle(t *testing.T) {
 	items := []*model.ItemView{{PID: "I1", Kind: model.KindTrack, State: model.StatePresent,
 		Title: "Song", LibraryPID: "L1"}}
 
-	snap := port.BuildSnapshot(12, 1700000000, libs, items, nil, nil, nil)
+	snap := port.BuildSnapshot(12, 1700000000, libs, items, nil, nil, nil, nil)
 	// Marshal the items alone, so the library pid in the top-level Libraries array
 	// cannot mask a leak here.
 	encoded, err := json.Marshal(snap.Items)
@@ -126,7 +126,7 @@ func TestItemExportCarriesNoSplitArtistCredit(t *testing.T) {
 	items := []*model.ItemView{{PID: "I1", Kind: model.KindTrack, State: model.StatePresent,
 		Title: "Empire State of Mind", Artist: "Jay-Z feat. Alicia Keys"}}
 
-	snap := port.BuildSnapshot(12, 1700000000, nil, items, nil, nil, nil)
+	snap := port.BuildSnapshot(12, 1700000000, nil, items, nil, nil, nil, nil)
 	encoded, err := json.Marshal(snap.Items)
 	if err != nil {
 		t.Fatalf("marshal items: %v", err)
@@ -168,7 +168,7 @@ func TestSnapshotCarriesAcquisitionSource(t *testing.T) {
 		{PID: "I1", Kind: model.KindTrack, State: model.StatePresent, Title: "Acquired", Source: model.SourceYouTube},
 		{PID: "I2", Kind: model.KindTrack, State: model.StatePresent, Title: "Scanned", Source: model.SourceLocal},
 	}
-	snap := port.BuildSnapshot(12, 1700000000, nil, items, nil, nil, nil)
+	snap := port.BuildSnapshot(12, 1700000000, nil, items, nil, nil, nil, nil)
 	if snap.Items[0].Source != string(model.SourceYouTube) {
 		t.Errorf("acquired item source = %q, want youtube", snap.Items[0].Source)
 	}
@@ -207,11 +207,11 @@ func TestSnapshotWriterStreamsSessions(t *testing.T) {
 		{PID: "S2", UserPID: "U1", ItemPID: "I1", StartedAt: 1<<60 + 9},
 	}
 	var whole bytes.Buffer
-	if err := port.WriteSnapshot(&whole, port.BuildSnapshot(12, 1700000000, libs, items, plays, sessions, nil)); err != nil {
+	if err := port.WriteSnapshot(&whole, port.BuildSnapshot(12, 1700000000, libs, items, plays, sessions, nil, nil)); err != nil {
 		t.Fatalf("write whole: %v", err)
 	}
 
-	head := port.BuildSnapshot(12, 1700000000, libs, items, plays, nil, nil)
+	head := port.BuildSnapshot(12, 1700000000, libs, items, plays, nil, nil, nil)
 	head.Manifest.PlaySessions = len(sessions)
 	var streamed bytes.Buffer
 	sw := port.NewSnapshotWriter(&streamed)
@@ -238,7 +238,7 @@ func TestSnapshotWriterStreamsSessions(t *testing.T) {
 	}
 
 	var empty bytes.Buffer
-	if err := port.WriteSnapshot(&empty, port.BuildSnapshot(12, 1700000000, libs, items, plays, nil, nil)); err != nil {
+	if err := port.WriteSnapshot(&empty, port.BuildSnapshot(12, 1700000000, libs, items, plays, nil, nil, nil)); err != nil {
 		t.Fatalf("write empty: %v", err)
 	}
 	if !strings.Contains(empty.String(), `"playSessions": []`) {
@@ -255,5 +255,51 @@ func TestSnapshotWriterStreamsSessions(t *testing.T) {
 	}
 	if err := sw.Close(); !waxerr.Is(err, waxerr.CodeInternal) {
 		t.Errorf("closing with one row under a manifest announcing two: got %v, want CodeInternal", err)
+	}
+}
+
+// TestBuildSnapshotCarriesCredits: the credit list is the item's own attribute, so it
+// rides beside Artist rather than as a relational handle, and an item with none keeps
+// the shape it had.
+func TestBuildSnapshotCarriesCredits(t *testing.T) {
+	items := []*model.ItemView{
+		{PID: "I1", Kind: model.KindTrack, State: model.StatePresent, Title: "Song", Artist: "A & B"},
+		{PID: "I2", Kind: model.KindTrack, State: model.StatePresent, Title: "Bare"},
+	}
+	credits := map[model.PID][]port.CreditExport{
+		"I1": {{Role: "artist", Name: "A"}, {Role: "artist", Name: "B"}, {Role: "producer", Name: "P"}},
+	}
+	snap := port.BuildSnapshot(12, 1700000000, nil, items, nil, nil, nil,
+		func(pid model.PID) []port.CreditExport { return credits[pid] })
+	if snap.Manifest.Version != 8 {
+		t.Errorf("manifest version = %d, want 8", snap.Manifest.Version)
+	}
+
+	var buf bytes.Buffer
+	if err := port.WriteSnapshot(&buf, snap); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if !strings.Contains(buf.String(), `"credits"`) {
+		t.Fatalf("the export carries no credits:\n%s", buf.String())
+	}
+	got, err := port.ReadSnapshot(bytes.NewReader(buf.Bytes()))
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	want := []port.CreditExport{{Role: "artist", Name: "A"}, {Role: "artist", Name: "B"}, {Role: "producer", Name: "P"}}
+	if len(got.Items[0].Credits) != len(want) {
+		t.Fatalf("credits = %+v, want %+v", got.Items[0].Credits, want)
+	}
+	for i := range want {
+		if got.Items[0].Credits[i] != want[i] {
+			t.Errorf("credits[%d] = %+v, want %+v", i, got.Items[0].Credits[i], want[i])
+		}
+	}
+	if got.Items[1].Credits != nil {
+		t.Errorf("an item with no credits carries %+v, want none", got.Items[1].Credits)
+	}
+	// A credit-less item must not gain a key, so an older consumer sees no change.
+	if strings.Count(buf.String(), `"credits"`) != 1 {
+		t.Errorf("the credits key appears more than once:\n%s", buf.String())
 	}
 }

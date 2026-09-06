@@ -114,6 +114,36 @@ func TestWatchScheduledCatalogsAndReconciles(t *testing.T) {
 	waitFor(t, 4*time.Second, func() bool { return itemState(t, lib, "Dropped") == model.StateMissing })
 }
 
+// TestWatchFollowsAddRoot: a root registered while the watcher runs is followed on its
+// next scheduled tick, so its files are cataloged without a restart.
+func TestWatchFollowsAddRoot(t *testing.T) {
+	ctx := context.Background()
+	rootA, rootB := t.TempDir(), t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	lib := openManaged(t, ctx, db, rootA)
+
+	writeFile(t, filepath.Join(rootA, "seed.mp3"), testaudio.BuildMP3WithAudio("Seed", "Artist", "Album", 1, testaudio.AudioWithSeed(9)))
+	writeFile(t, filepath.Join(rootB, "later.mp3"), testaudio.BuildMP3WithAudio("Later", "Artist", "Album", 2, testaudio.AudioWithSeed(3)))
+
+	runCtx, cancel := context.WithCancel(ctx)
+	done := make(chan error, 1)
+	go func() {
+		done <- lib.Watch(runCtx, waxbin.WatchOptions{Interval: 80 * time.Millisecond, FullRescanInterval: -1})
+	}()
+	defer func() {
+		cancel()
+		if err := <-done; !waxerr.Is(err, waxerr.CodeCanceled) {
+			t.Errorf("watch exit = %v, want CodeCanceled", err)
+		}
+	}()
+
+	waitFor(t, 4*time.Second, func() bool { return itemCount(t, lib, "Seed") == 1 })
+	if _, err := lib.AddRoot(ctx, config.Root{Path: rootB, Mode: model.ModeManaged, Profile: "waxbin-native"}); err != nil {
+		t.Fatalf("AddRoot: %v", err)
+	}
+	waitFor(t, 4*time.Second, func() bool { return itemCount(t, lib, "Later") == 1 })
+}
+
 func itemCount(t *testing.T, lib *waxbin.Library, title string) int {
 	t.Helper()
 	items, err := lib.Query(context.Background(), query.New(query.EntityItems).Where("title", query.OpIs, title).Build(), "")

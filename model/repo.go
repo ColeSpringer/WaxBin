@@ -354,6 +354,32 @@ type ThumbRung struct {
 	Bytes int64
 }
 
+// EnrichmentCacheReport is a size census of the enrichment response cache: what it
+// holds, when it was fetched, and a breakdown by request kind, the key's provider and
+// endpoint prefix ("mb:artist-search", "mb:rg-editions", "caa:rg-front"). The kinds are
+// what a prune decision reads: searches and edition browses are the bulk, and a matched
+// entity's cached lookup is read again only by a forced run.
+type EnrichmentCacheReport struct {
+	Rows     int
+	Bytes    int64
+	OldestAt int64 // unix ns of the oldest entry; 0 when the cache is empty
+	NewestAt int64
+	Kinds    []EnrichmentCacheKind // largest first
+	// ExemptRows and ExemptBytes are the share a prune leaves alone: the Cover Art
+	// Archive's group records, which are facts about stored covers rather than cached
+	// answers. They are counted in Rows and Bytes above and listed among Kinds.
+	ExemptRows  int
+	ExemptBytes int64
+}
+
+// EnrichmentCacheKind is one request kind's share of the enrichment cache.
+type EnrichmentCacheKind struct {
+	Kind   string
+	Rows   int
+	Bytes  int64
+	Exempt bool // never pruned; see EnrichmentCacheReport.ExemptRows
+}
+
 // FileStateUpdate records the result of an on-disk tag write so the catalog's file
 // row matches the bytes now on disk. It is applied only when the stored size and
 // mtime still match ExpectedSize/ExpectedMTimeNS (optimistic concurrency): a match

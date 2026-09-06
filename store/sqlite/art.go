@@ -460,6 +460,17 @@ func refreshArtProvenanceTx(ctx context.Context, tx *sql.Tx, entityType string, 
 // tell an image that landed from one the guards dropped, which is what an entity delta
 // rides on.
 func fillAlbumArtTx(ctx context.Context, tx *sql.Tx, albumID int64, img *model.ArtImage) (bool, error) {
+	open, err := albumFrontOpenTx(ctx, tx, albumID)
+	if err != nil || !open {
+		return false, err
+	}
+	return attachEntityArtTxChanged(ctx, tx, string(model.ArtAlbum), albumID, img)
+}
+
+// albumFrontOpenTx reports whether an enrichment front may land on the album: it
+// resolves no front at all, neither a row of its own nor a member track's cover through
+// the derived rung, and its art lock does not stand.
+func albumFrontOpenTx(ctx context.Context, tx *sql.Tx, albumID int64) (bool, error) {
 	var resolves int
 	if err := tx.QueryRowContext(ctx,
 		`SELECT CASE WHEN `+albumResolvesFrontArt+` THEN 1 ELSE 0 END FROM album al WHERE al.id = ?`,
@@ -470,10 +481,37 @@ func fillAlbumArtTx(ctx context.Context, tx *sql.Tx, albumID int64, img *model.A
 		return false, nil
 	}
 	blocked, err := artFillBlockedTx(ctx, tx, model.ArtAlbum, albumID, model.ArtRoleFront)
-	if err != nil || blocked {
+	if err != nil {
 		return false, err
 	}
-	return attachEntityArtTxChanged(ctx, tx, string(model.ArtAlbum), albumID, img)
+	return !blocked, nil
+}
+
+// fillAlbumArtFromGroupTx attaches the album's release group's enrichment front at the
+// album rung, under fillAlbumArtTx's guards, without a picture in hand: the provider that
+// fetched the group's front reported those bytes are this pressing's own. Only the row
+// still holding hash is copied, whole, attribution included, since the bytes did come
+// from where it says.
+//
+// It reports whether a row landed and whether the album's front was open to one. The two
+// answers differ where it matters: a copy refused because the front is no longer open
+// leaves no vacancy, while one refused because the group's front moved out from under the
+// hash leaves the album as bare as it was, which is what decides the marker.
+func fillAlbumArtFromGroupTx(ctx context.Context, tx *sql.Tx, albumID int64, hash string) (copied, wasOpen bool, err error) {
+	open, err := albumFrontOpenTx(ctx, tx, albumID)
+	if err != nil || !open {
+		return false, false, err
+	}
+	r, err := tx.ExecContext(ctx, `INSERT INTO art_map(entity_type, entity_id, source_hash, role, source, provider, source_url, updated_at)
+		SELECT 'album', al.id, am.source_hash, 'front', am.source, am.provider, am.source_url, ?
+		FROM album al JOIN art_map am ON am.entity_type = 'release_group' AND am.entity_id = al.release_group_id
+			AND am.role = 'front' AND am.source = ? AND am.source_hash = ?
+		WHERE al.id = ?`, nowNS(), string(model.SourceEnrichment), hash, albumID)
+	if err != nil {
+		return false, true, err
+	}
+	n, err := r.RowsAffected()
+	return n > 0, true, err
 }
 
 // clearAlbumArtTx drops the front cover enrichment gave an album, returning it to

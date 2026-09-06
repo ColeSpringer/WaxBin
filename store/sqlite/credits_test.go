@@ -836,3 +836,56 @@ func TestLockCreditRole(t *testing.T) {
 		t.Fatalf("lock credit.narrator on track = %v, want CodeInvalid", err)
 	}
 }
+
+// TestExportCreditsStreamsInItemOrder: the export folds credits per item from one
+// query, so they have to arrive grouped by item and ordered within it, and an item the
+// filter drops must not appear at all.
+func TestExportCreditsStreamsInItemOrder(t *testing.T) {
+	ctx := context.Background()
+	st, lib := entityFixture(t)
+	kept := putTrack(t, st, lib.ID, trackSpec{
+		path: "/lib/a/1.flac", essence: "e1", content: "c1", title: "Kept", artist: "X", album: "Al",
+	}).ItemPID
+	skipped := putTrack(t, st, lib.ID, trackSpec{
+		path: "/lib/a/2.flac", essence: "e2", content: "c2", title: "Skipped", artist: "X", album: "Al",
+	}).ItemPID
+
+	for _, in := range []struct {
+		item  model.PID
+		role  model.ContributorRole
+		names []string
+	}{
+		{kept, model.RoleArtist, []string{"A", "B"}},
+		{kept, model.RoleProducer, []string{"Smith, John"}},
+		{skipped, model.RoleArtist, []string{"Nope"}},
+	} {
+		if _, _, err := st.SetItemCredits(ctx, in.item, in.role, in.names,
+			model.Attribution{Source: model.SourceUser}, model.LockUnchanged, false, false); err != nil {
+			t.Fatalf("SetItemCredits(%s, %s): %v", in.item, in.role, err)
+		}
+	}
+
+	var got []string
+	err := st.ExportCredits(ctx,
+		func(pid model.PID) bool { return pid == kept },
+		func(pid model.PID, c model.Contributor) error {
+			got = append(got, string(pid)+" "+string(c.Role)+" "+c.Name)
+			return nil
+		})
+	if err != nil {
+		t.Fatalf("ExportCredits: %v", err)
+	}
+	want := []string{
+		string(kept) + " artist A",
+		string(kept) + " artist B",
+		string(kept) + " producer Smith, John",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("credits = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("credits[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}

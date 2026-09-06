@@ -10,6 +10,8 @@ package watch
 import (
 	"context"
 	"log/slog"
+	"slices"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -84,12 +86,19 @@ type Engine interface {
 	// SyncSources runs podcast/source acquisition (feed sync, downloads, retention).
 	// Best-effort; a nil implementation is fine when the deployment has no sources.
 	SyncSources(ctx context.Context) error
+	// Roots returns the roots to watch as of now. The watcher asks at every scheduled
+	// tick, so a root registered or relocated while it runs is picked up on the next
+	// tick without a restart. An error keeps the current set.
+	Roots(ctx context.Context) ([]Root, error)
 }
 
 // Watcher keeps the catalog in sync with a set of roots until its context is
 // canceled.
 type Watcher struct {
-	engine   Engine
+	engine Engine
+	// roots is re-read from the engine on every scheduled tick, so it is guarded: the
+	// debouncer goroutine resolves an event's library against it.
+	rootsMu  sync.RWMutex
 	roots    []Root
 	opts     Options
 	log      *slog.Logger
@@ -136,8 +145,10 @@ func (w *Watcher) Run(ctx context.Context) error {
 	// rescan requests here, so all rescans run on this single loop (never two at once,
 	// which would self-conflict on the shared filesystem-mutator lease).
 	reqs := make(chan rescanReq, 128)
+	var added chan Root
 	if w.opts.Live {
-		go w.runLive(ctx, reqs)
+		added = make(chan Root, 16)
+		go w.runLive(ctx, reqs, added)
 	}
 
 	for {
@@ -145,14 +156,58 @@ func (w *Watcher) Run(ctx context.Context) error {
 		case <-ctx.Done():
 			return waxerr.New(waxerr.CodeCanceled, "watch.Run", "watch canceled")
 		case <-interval.C:
+			w.refreshRoots(ctx, added)
 			w.rescanAll(ctx, false, "scheduled")
 		case <-fullC:
 			w.log.Info("watch: full-content rescan")
+			w.refreshRoots(ctx, added)
 			w.rescanAll(ctx, true, "full")
 		case r := <-reqs:
 			w.rescanOne(ctx, r)
 		}
 	}
+}
+
+// refreshRoots re-reads the root set from the engine and swaps it in, handing each root
+// not in the old set (a new library, or one whose path moved) to the live layer to arm.
+// A read failure or an empty answer keeps the current set: a library that had roots when
+// the watcher started has not lost them all.
+//
+// A watch armed on a root later relocated or removed stays armed until exit. Its events
+// resolve to no library and are dropped.
+func (w *Watcher) refreshRoots(ctx context.Context, added chan<- Root) {
+	roots, err := w.engine.Roots(ctx)
+	if err != nil {
+		w.log.Warn("watch: roots unreadable, keeping the current set", "err", err)
+		return
+	}
+	if len(roots) == 0 {
+		return
+	}
+	w.rootsMu.Lock()
+	old := w.roots
+	w.roots = roots
+	w.rootsMu.Unlock()
+	for _, r := range roots {
+		if slices.Contains(old, r) {
+			continue
+		}
+		w.log.Info("watch: following a root", "library", r.LibraryPID, "root", r.Path)
+		if added != nil {
+			select {
+			case added <- r:
+			default: // the live layer is behind; its next scheduled rescan covers the root anyway
+			}
+		}
+	}
+}
+
+// rootSet returns a copy of the current roots, for a caller that iterates them off the
+// lock.
+func (w *Watcher) rootSet() []Root {
+	w.rootsMu.RLock()
+	defer w.rootsMu.RUnlock()
+	return slices.Clone(w.roots)
 }
 
 // rescanReq is a coalesced live rescan of one directory under a library.
@@ -168,7 +223,7 @@ func (w *Watcher) rescanAll(ctx context.Context, force bool, trigger string) {
 		return
 	}
 	changed := false
-	for _, r := range w.roots {
+	for _, r := range w.rootSet() {
 		c, _ := w.rescan(ctx, r.LibraryPID, "", force)
 		changed = changed || c
 	}
@@ -236,6 +291,8 @@ func (w *Watcher) runSchedulers(ctx context.Context, changed bool) {
 // libraryForPath returns the library PID whose root contains path, or "" when none
 // does (an event outside every watched root).
 func (w *Watcher) libraryForPath(path string) model.PID {
+	w.rootsMu.RLock()
+	defer w.rootsMu.RUnlock()
 	best := ""
 	var bestPID model.PID
 	for _, r := range w.roots {

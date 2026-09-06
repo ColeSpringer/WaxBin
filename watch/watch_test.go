@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -15,7 +16,9 @@ import (
 	"github.com/fsnotify/fsnotify"
 )
 
-// mockEngine records the operations the watcher drives.
+// mockEngine records the operations the watcher drives. roots is what its Roots
+// answers, which the watcher re-reads on every scheduled tick, so a test moves a root
+// under a running watcher by setting it.
 type mockEngine struct {
 	mu        sync.Mutex
 	rescans   []rescanCall
@@ -23,6 +26,8 @@ type mockEngine struct {
 	syncs     int
 	changed   bool
 	rescanErr error
+	roots     []Root
+	rootsErr  error
 }
 
 type rescanCall struct {
@@ -52,6 +57,28 @@ func (m *mockEngine) SyncSources(ctx context.Context) error {
 	return nil
 }
 
+func (m *mockEngine) Roots(ctx context.Context) ([]Root, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.rootsErr != nil {
+		return nil, m.rootsErr
+	}
+	return slices.Clone(m.roots), nil
+}
+
+func (m *mockEngine) setRoots(roots ...Root) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.roots = roots
+}
+
+// newWatcher builds a watcher whose engine reports the roots it starts with, the way
+// the facade's does.
+func newWatcher(eng *mockEngine, roots []Root, opts Options) *Watcher {
+	eng.setRoots(roots...)
+	return New(eng, roots, opts, nil)
+}
+
 func (m *mockEngine) rescanCount() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -70,7 +97,7 @@ func TestWatcherScheduledRescan(t *testing.T) {
 	roots := []Root{{LibraryPID: "L1", Path: "/lib"}}
 	var acts []Activity
 	var mu sync.Mutex
-	w := New(eng, roots, Options{
+	w := newWatcher(eng, roots, Options{
 		Interval:           40 * time.Millisecond,
 		FullRescanInterval: -1, // disable the full ticker for this test
 		Analyze:            true,
@@ -79,7 +106,7 @@ func TestWatcherScheduledRescan(t *testing.T) {
 			acts = append(acts, a)
 			mu.Unlock()
 		},
-	}, nil)
+	})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -118,10 +145,10 @@ func TestWatcherScheduledRescan(t *testing.T) {
 // TestWatcherFullRescan confirms the long-cadence ticker forces a rescan.
 func TestWatcherFullRescan(t *testing.T) {
 	eng := &mockEngine{}
-	w := New(eng, []Root{{LibraryPID: "L1", Path: "/lib"}}, Options{
+	w := newWatcher(eng, []Root{{LibraryPID: "L1", Path: "/lib"}}, Options{
 		Interval:           time.Hour, // keep the fast ticker out of the way
 		FullRescanInterval: 40 * time.Millisecond,
-	}, nil)
+	})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -153,7 +180,7 @@ func TestWatcherFullRescan(t *testing.T) {
 // the watcher keeps running.
 func TestRescanSkipsOnConflict(t *testing.T) {
 	eng := &mockEngine{rescanErr: waxerr.New(waxerr.CodeConflict, "test", "busy")}
-	w := New(eng, []Root{{LibraryPID: "L1", Path: "/lib"}}, Options{Interval: time.Hour, FullRescanInterval: -1}, nil)
+	w := newWatcher(eng, []Root{{LibraryPID: "L1", Path: "/lib"}}, Options{Interval: time.Hour, FullRescanInterval: -1})
 	changed, err := w.rescan(context.Background(), "L1", "", false)
 	if err != nil || changed {
 		t.Fatalf("conflict rescan = (%v, %v), want (false, nil)", changed, err)
@@ -194,12 +221,12 @@ func TestDebouncerCoalesces(t *testing.T) {
 func TestWatcherLive(t *testing.T) {
 	dir := t.TempDir()
 	eng := &mockEngine{changed: true}
-	w := New(eng, []Root{{LibraryPID: "L1", Path: dir}}, Options{
+	w := newWatcher(eng, []Root{{LibraryPID: "L1", Path: dir}}, Options{
 		Interval:           time.Hour, // keep the scheduled ticker out of the way
 		FullRescanInterval: -1,
 		Live:               true,
 		WriteSettle:        30 * time.Millisecond,
-	}, nil)
+	})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -316,10 +343,10 @@ func TestWithDefaultsFullRescanDisable(t *testing.T) {
 }
 
 func TestLibraryForPath(t *testing.T) {
-	w := New(&mockEngine{}, []Root{
+	w := newWatcher(&mockEngine{}, []Root{
 		{LibraryPID: "MUSIC", Path: "/lib/music"},
 		{LibraryPID: "BOOKS", Path: "/lib/books"},
-	}, Options{}, nil)
+	}, Options{})
 	if got := w.libraryForPath("/lib/music/artist/a.mp3"); got != "MUSIC" {
 		t.Errorf("libraryForPath music = %q, want MUSIC", got)
 	}
@@ -329,4 +356,136 @@ func TestLibraryForPath(t *testing.T) {
 	if got := w.libraryForPath("/elsewhere/x.mp3"); got != "" {
 		t.Errorf("libraryForPath outside = %q, want empty", got)
 	}
+}
+
+// waitFor polls until cond holds, failing with why rather than sleeping a fixed length,
+// which the coarse Windows clock makes unreliable.
+func waitFor(t *testing.T, why string, cond func() bool) {
+	t.Helper()
+	deadline := time.After(3 * time.Second)
+	for !cond() {
+		select {
+		case <-deadline:
+			t.Fatal(why)
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
+// TestWatcherFollowsARootAddedLater: a root registered while the watcher runs is picked
+// up on the next scheduled tick, and that tick's rescan is its catch-up.
+func TestWatcherFollowsARootAddedLater(t *testing.T) {
+	eng := &mockEngine{}
+	w := newWatcher(eng, []Root{{LibraryPID: "L1", Path: "/lib"}}, Options{
+		Interval: 30 * time.Millisecond, FullRescanInterval: -1,
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- w.Run(ctx) }()
+	defer func() { cancel(); <-done }()
+
+	waitFor(t, "the initial rescan never ran", func() bool { return eng.rescanCount() > 0 })
+	eng.setRoots(Root{LibraryPID: "L1", Path: "/lib"}, Root{LibraryPID: "L2", Path: "/lib2"})
+
+	waitFor(t, "the new root was never rescanned", func() bool {
+		eng.mu.Lock()
+		defer eng.mu.Unlock()
+		for _, r := range eng.rescans {
+			if r.libPID == "L2" && r.subPath == "" {
+				return true
+			}
+		}
+		return false
+	})
+}
+
+// TestWatcherFollowsARelocatedRoot: a root moved under the running watcher resolves
+// events at its new path and stops claiming its old one.
+func TestWatcherFollowsARelocatedRoot(t *testing.T) {
+	eng := &mockEngine{}
+	w := newWatcher(eng, []Root{{LibraryPID: "L1", Path: "/lib"}}, Options{
+		Interval: 30 * time.Millisecond, FullRescanInterval: -1,
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- w.Run(ctx) }()
+	defer func() { cancel(); <-done }()
+
+	waitFor(t, "the initial rescan never ran", func() bool { return eng.rescanCount() > 0 })
+	eng.setRoots(Root{LibraryPID: "L1", Path: "/moved"})
+
+	waitFor(t, "the relocated root was never followed", func() bool {
+		return w.libraryForPath("/moved/a.mp3") == "L1"
+	})
+	if got := w.libraryForPath("/lib/a.mp3"); got != "" {
+		t.Errorf("the old path still resolves to %q, want nothing", got)
+	}
+}
+
+// TestWatcherKeepsRootsWhenTheEngineFails: a read failure is not evidence that a library
+// lost its roots, so the current set stands and the rescans keep coming.
+func TestWatcherKeepsRootsWhenTheEngineFails(t *testing.T) {
+	eng := &mockEngine{rootsErr: waxerr.New(waxerr.CodeIO, "test", "unreadable")}
+	w := newWatcher(eng, []Root{{LibraryPID: "L1", Path: "/lib"}}, Options{
+		Interval: 30 * time.Millisecond, FullRescanInterval: -1,
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- w.Run(ctx) }()
+	defer func() { cancel(); <-done }()
+
+	waitFor(t, "the rescans stopped after a roots read failure", func() bool { return eng.rescanCount() >= 3 })
+	eng.mu.Lock()
+	defer eng.mu.Unlock()
+	for _, r := range eng.rescans {
+		if r.libPID != "L1" {
+			t.Fatalf("rescanned %q, want only the root the watcher started with", r.libPID)
+		}
+	}
+}
+
+// TestLiveWatchArmsARootAddedLater: the live layer arms a new root's tree too, so a file
+// dropped into it is picked up between ticks rather than at the next one.
+func TestLiveWatchArmsARootAddedLater(t *testing.T) {
+	first, second := t.TempDir(), t.TempDir()
+	eng := &mockEngine{changed: true}
+	w := newWatcher(eng, []Root{{LibraryPID: "L1", Path: first}}, Options{
+		Interval: 60 * time.Millisecond, FullRescanInterval: -1,
+		Live: true, WriteSettle: 30 * time.Millisecond,
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- w.Run(ctx) }()
+	defer func() { cancel(); <-done }()
+
+	time.Sleep(200 * time.Millisecond)
+	if w.Degraded() {
+		t.Skip("filesystem watches unavailable in this environment")
+	}
+
+	eng.setRoots(Root{LibraryPID: "L1", Path: first}, Root{LibraryPID: "L2", Path: second})
+	waitFor(t, "the new root was never followed", func() bool {
+		return w.libraryForPath(filepath.Join(second, "x.mp3")) == "L2"
+	})
+	// The arm rides the same tick, on the event worker; give it a moment to land before
+	// the write, or the event has no watch to fire on.
+	time.Sleep(200 * time.Millisecond)
+
+	if err := os.WriteFile(filepath.Join(second, "new.mp3"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "a file dropped into the new root triggered no live rescan", func() bool {
+		eng.mu.Lock()
+		defer eng.mu.Unlock()
+		for _, r := range eng.rescans {
+			if r.libPID == "L2" && r.subPath == second {
+				return true
+			}
+		}
+		return false
+	})
 }

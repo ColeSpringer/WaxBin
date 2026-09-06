@@ -659,6 +659,7 @@ type enrichView struct {
 	// that re-asked nothing (a forced run, or a catalog with no expired misses).
 	Retried           int    `json:"retried,omitempty"`
 	ArtFetched        int    `json:"artFetched"`
+	ArtReused         int    `json:"artReused,omitempty"`
 	AuxArtFetched     int    `json:"auxArtFetched,omitempty"`
 	TagsWritten       int    `json:"tagsWritten,omitempty"`
 	TagsFailed        int    `json:"tagsFailed,omitempty"`
@@ -681,8 +682,9 @@ func toEnrichView(r *waxbin.EnrichResult) enrichView {
 		BookFieldsEnriched: r.Result.BookFieldsEnriched, BookFieldsMatched: r.Result.BookFieldsMatched,
 		AlbumFieldsEnriched: r.Result.AlbumFieldsEnriched, AlbumFieldsMatched: r.Result.AlbumFieldsMatched,
 		Retried:    r.Result.Retried,
-		ArtFetched: r.Result.ArtFetched, AuxArtFetched: r.Result.AuxArtFetched,
-		TagsWritten: r.Result.TagsWritten, TagsFailed: r.Result.TagsFailed,
+		ArtFetched: r.Result.ArtFetched, ArtReused: r.Result.ArtReused,
+		AuxArtFetched: r.Result.AuxArtFetched,
+		TagsWritten:   r.Result.TagsWritten, TagsFailed: r.Result.TagsFailed,
 		TagsUnrepresented: r.Result.TagsUnrepresented, TagsSkipped: r.Result.TagsSkipped,
 		JobPID: string(r.JobPID),
 	}

@@ -180,7 +180,18 @@ type Request struct {
 	// alike, and each is empty when the catalog holds none.
 	Barcode       string
 	CatalogNumber string
-	DurationSec   int // track duration, for a duration-disambiguated lyrics match
+	// ReleaseGroupMBID is the group a TargetRelease request's release belongs to, when
+	// the catalog holds it. GroupFrontHash is the content hash of the group's enrichment
+	// front as the catalog holds it now (the group's own on a TargetReleaseGroup
+	// request, the parent group's on a TargetRelease one), or empty when that front is
+	// absent or was chosen by hand. A provider that knows those bytes are this very
+	// release's may answer a cover request with Candidate.FrontIsGroupFront instead of
+	// bytes, since the caller can reuse the picture it already holds; one that recorded
+	// a validator for them may ask the service conditionally and answer nil when it says
+	// they are unchanged, which at the group rung keeps the cover in place.
+	ReleaseGroupMBID string
+	GroupFrontHash   string
+	DurationSec      int // track duration, for a duration-disambiguated lyrics match
 }
 
 // Wants reports whether this request's pass will use an answer for c. Capability.Has
@@ -209,6 +220,12 @@ type Candidate struct {
 	// fill-when-empty at the target entity's own level.
 	Cover *model.ArtImage
 	Art   map[model.ArtRole]*model.ArtImage
+	// FrontIsGroupFront says the release group's front cover the caller holds (the bytes
+	// behind Request.GroupFrontHash) is this release's own. It answers a TargetRelease
+	// request with Cover left nil: the caller attaches the group's picture at the release
+	// rung without a second download. Bytes offered for the front alongside it are
+	// dropped, since the two answer the same slot; the auxiliary roles are unaffected.
+	FrontIsGroupFront bool
 
 	// Book fields.
 	Publisher string

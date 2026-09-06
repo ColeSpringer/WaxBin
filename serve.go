@@ -767,7 +767,7 @@ func (l *Library) proxyHandlers() map[string]proxy.Handler {
 				return nil, err
 			}
 			pid, err := l.StartEnrich(ctx, EnrichOptions{WriteTags: p.WriteTags,
-				Force: p.Force, Limit: p.Limit,
+				Force: p.Force, Limit: p.Limit, ForcePhases: model.EnrichPhasesOf(p.ForcePhases),
 				ItemPID: model.PID(p.ItemPID), EntityType: read.EntityKind(p.EntityType), EntityPID: model.PID(p.EntityPID),
 			})
 			if err != nil {

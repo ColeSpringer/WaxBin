@@ -147,6 +147,41 @@ func (s *Store) ExportCounts(ctx context.Context) (read.ExportCounts, error) {
 	return c, nil
 }
 
+// ExportCredits streams every credit of the items keep accepts, in item, role, then
+// position order, so the export folds them per item in one query rather than one per
+// item. It mirrors ItemCredits' join.
+func (s *Store) ExportCredits(ctx context.Context, keep func(itemPID model.PID) bool, each func(itemPID model.PID, c model.Contributor) error) error {
+	const op = "store.ExportCredits"
+	rows, err := s.read.QueryContext(ctx, `SELECT pi.pid, a.pid, a.name, ic.role, ic.position
+		FROM item_contributor ic
+		JOIN playable_item pi ON pi.id = ic.item_id
+		JOIN artist a ON a.id = ic.artist_id
+		ORDER BY ic.item_id, ic.role, ic.position`)
+	if err != nil {
+		return waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var itemPID, artistPID, role string
+		var c model.Contributor
+		if err := rows.Scan(&itemPID, &artistPID, &c.Name, &role, &c.Position); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		if keep != nil && !keep(model.PID(itemPID)) {
+			continue
+		}
+		c.ArtistPID = model.PID(artistPID)
+		c.Role = model.ContributorRole(role)
+		if err := each(model.PID(itemPID), c); err != nil {
+			return err
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	return nil
+}
+
 // ExportSessions streams the listening log for the export from one read snapshot.
 // counted receives, before any row, the number of sessions keep admits, so the
 // manifest can be written ahead of them; each admitted session then arrives in

@@ -191,6 +191,68 @@ func TestServeProxiedScopedEnrich(t *testing.T) {
 	}
 }
 
+// TestServeProxiedForcePhase round-trips EnrichParams.ForcePhases: the two refusals
+// keep their class across the wire and start no job, and a named phase re-asks every
+// target it could serve while the phases nobody named stay put.
+func TestServeProxiedForcePhase(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	sock := testsock.Path(t)
+	writeFile(t, filepath.Join(root, "a.mp3"), testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
+		Title: "One", Artist: "Artist One", Album: "Album One", Audio: testaudio.AudioWithSeed(1)}))
+	writeFile(t, filepath.Join(root, "b.mp3"), testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
+		Title: "Two", Artist: "Artist Two", Album: "Album Two", Audio: testaudio.AudioWithSeed(2)}))
+
+	mb := enrichMBMock(t)
+	lib, err := waxbin.Open(ctx, waxbin.Options{
+		DBPath:     db,
+		Roots:      []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}},
+		IPCSocket:  sock,
+		Enrichment: enrichTestConfig(mb.URL),
+	})
+	if err != nil {
+		t.Fatalf("open served library: %v", err)
+	}
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		_ = lib.Close()
+		t.Fatalf("scan: %v", err)
+	}
+	serveLib(t, ctx, lib, sock)
+	c := dialWhenReady(t, sock)
+
+	if _, err := c.RunEnrich(ctx, proxy.EnrichParams{ForcePhases: []string{"nope"}}); !waxerr.Is(err, waxerr.CodeInvalid) {
+		t.Errorf("proxied unknown phase err = %v, want CodeInvalid", err)
+	}
+	if _, err := c.RunEnrich(ctx, proxy.EnrichParams{Force: true, ForcePhases: []string{"artist"}}); !waxerr.Is(err, waxerr.CodeInvalid) {
+		t.Errorf("proxied --force plus a phase err = %v, want CodeInvalid", err)
+	}
+	// This fixture has lyrics off and no injected provider, so the lyrics phase is not
+	// one it builds; forcing it is refused rather than reported as a complete run.
+	if _, err := c.RunEnrich(ctx, proxy.EnrichParams{ForcePhases: []string{"lyrics"}}); !waxerr.Is(err, waxerr.CodeUnsupported) {
+		t.Errorf("proxied lyrics phase err = %v, want CodeUnsupported", err)
+	}
+
+	first, err := c.RunEnrich(ctx, proxy.EnrichParams{})
+	if err != nil {
+		t.Fatalf("proxied full enrich: %v", err)
+	}
+	waitForJobDone(t, ctx, lib, first)
+
+	jobPID, err := c.RunEnrich(ctx, proxy.EnrichParams{ForcePhases: []string{"artist"}})
+	if err != nil {
+		t.Fatalf("proxied phase-scoped force: %v", err)
+	}
+	job := waitForJobDone(t, ctx, lib, jobPID)
+	var r enrich.Result
+	if err := json.Unmarshal([]byte(job.Result), &r); err != nil {
+		t.Fatalf("decode job result %q: %v", job.Result, err)
+	}
+	if r.ArtistsEnriched != 2 || r.ReleaseGroupsEnriched != 0 {
+		t.Fatalf("forced-phase result = %+v, want both artists re-asked and no release groups", r)
+	}
+}
+
 // TestScannedBookEnriches covers the book arm of enrichment, which
 // BooksNeedingEnrichment gates on a non-empty book.mbid. Until the scanner copied the
 // release id off a file's tags, that gate was never satisfied on a scanned library.

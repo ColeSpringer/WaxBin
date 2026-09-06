@@ -173,7 +173,12 @@ import (
 // mark_played, bumped the way set_played was: `state set --played --session` would
 // land its play on a version-18 server and then fail on the unknown method partway
 // through the command.
-const ProtocolVersion = 19
+//
+// Version 20 added EnrichParams.ForcePhases, for the reason version 3 gave: a
+// version-19 server drops the field and runs an ordinary pass where the client asked
+// for one phase to be re-asked, and the result reads as a pass that found nothing new
+// rather than as a refusal.
+const ProtocolVersion = 20
 
 // Method names for the proxied operations: the fast request/response catalog
 // mutations, the reads a mutating command needs for its confirmation output, the
@@ -1006,6 +1011,9 @@ type EnrichParams struct {
 	ItemPID    string `json:"itemPid,omitempty"`
 	EntityType string `json:"entityType,omitempty"`
 	EntityPID  string `json:"entityPid,omitempty"`
+	// ForcePhases are the phases to re-ask alone, by model.EnrichPhase key; the server
+	// validates.
+	ForcePhases []string `json:"forcePhases,omitempty"`
 	// WriteTags asks the server to write what the pass filled back into the files.
 	// Additive: an older server drops it and runs without the write-back, which is
 	// the same as the default.

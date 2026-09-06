@@ -38,7 +38,9 @@ func underRoot(root, path string) bool { return pathx.UnderRoot(root, path) }
 // sidesteps the "a .lrc path is not an audio path" problem: a directory rescan
 // picks up whatever landed. If no watch can be armed (ENOSPC, unsupported fs), it
 // marks the watcher degraded and returns, leaving scheduled rescans as the mechanism.
-func (w *Watcher) runLive(ctx context.Context, reqs chan<- rescanReq) {
+// added carries roots registered or relocated while the watcher runs, which the event
+// worker arms.
+func (w *Watcher) runLive(ctx context.Context, reqs chan<- rescanReq, added <-chan Root) {
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		w.degraded.Store(true)
@@ -49,7 +51,7 @@ func (w *Watcher) runLive(ctx context.Context, reqs chan<- rescanReq) {
 
 	lw := &liveWatch{watcher: watcher, log: w.log, max: w.opts.MaxWatchDirs}
 	exhausted := false
-	for _, r := range w.roots {
+	for _, r := range w.rootSet() {
 		if _, ex := lw.addTree(r.Path); ex {
 			exhausted = true
 		}
@@ -87,10 +89,23 @@ func (w *Watcher) runLive(ctx context.Context, reqs chan<- rescanReq) {
 	// overflow fsnotify's internal queue (dropping events). A worker drains a buffered
 	// channel; if it backs up, the reader schedules the directory directly rather than
 	// blocking, so reading from watcher.Events always stays fast.
+	// A root registered while the watcher runs is armed on this worker too, not on the
+	// read loop: arming a large tree is the same walk handleEvent makes, and the read
+	// loop exists to stay clear of it.
 	events := make(chan fsnotify.Event, liveEventBuffer)
 	go func() {
-		for ev := range events {
-			w.handleEvent(lw, deb, ev)
+		for {
+			select {
+			case ev, ok := <-events:
+				if !ok {
+					return
+				}
+				w.handleEvent(lw, deb, ev)
+			case r := <-added:
+				if _, ex := lw.addTree(r.Path); ex {
+					w.degraded.Store(true)
+				}
+			}
 		}
 	}()
 

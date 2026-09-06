@@ -1,5 +1,7 @@
 package model
 
+import "strings"
+
 // Enrichment types cross the port between the enrich package (which talks to
 // MusicBrainz / Cover Art Archive) and store/sqlite (which persists results). The
 // enrich pass reads targets, resolves them against a provider, then hands back a
@@ -33,17 +35,83 @@ const (
 	// the cutoff. A matched marker is never selected: the provider answered, and
 	// re-asking about the slots it left empty would repeat one request per entity per
 	// window for roles most providers never serve (Deezer serves an artist front and
-	// never a background). Registering a provider that fills those is what a forced run
-	// is for.
+	// never a background). Registering a provider that fills those is what a phase-scoped
+	// force is for.
 	SweepRetry
 	// SweepDue is the union of the two, which is what one run's count has to report:
 	// everything a full pass will walk, whether it arrives on the fresh sweep or the
 	// retry one.
 	SweepDue
-	// SweepAll selects every target, marker or none. It is the forced run, and a scoped
-	// run, which implies force.
+	// SweepAll selects every target, marker or none. It is the forced run, a scoped
+	// run, which implies force, and the phases a phase-scoped force names.
 	SweepAll
 )
+
+// EnrichPhase names one phase of the enrichment pass, in the run's own order. The keys
+// are the vocabulary a phase-scoped force takes, over the proxy and at the CLI, and the
+// heartbeat labels a phase by its key too.
+type EnrichPhase string
+
+const (
+	EnrichPhaseArtist       EnrichPhase = "artist"
+	EnrichPhaseReleaseGroup EnrichPhase = "release-group"
+	EnrichPhaseAlbumRelease EnrichPhase = "album-release"
+	EnrichPhaseAuxArt       EnrichPhase = "aux-art"
+	EnrichPhaseArtistArt    EnrichPhase = "artist-art"
+	EnrichPhaseAlbumArt     EnrichPhase = "album-art"
+	EnrichPhaseBook         EnrichPhase = "book"
+	EnrichPhaseLyrics       EnrichPhase = "lyrics"
+	EnrichPhaseTrackFields  EnrichPhase = "track-fields"
+	EnrichPhaseBookFields   EnrichPhase = "book-fields"
+	EnrichPhaseAlbumFields  EnrichPhase = "album-fields"
+)
+
+// EnrichPhases returns every phase in run order, for validation and help text.
+func EnrichPhases() []EnrichPhase {
+	return []EnrichPhase{
+		EnrichPhaseArtist,
+		EnrichPhaseReleaseGroup,
+		EnrichPhaseAlbumRelease,
+		EnrichPhaseAuxArt,
+		EnrichPhaseArtistArt,
+		EnrichPhaseAlbumArt,
+		EnrichPhaseBook,
+		EnrichPhaseLyrics,
+		EnrichPhaseTrackFields,
+		EnrichPhaseBookFields,
+		EnrichPhaseAlbumFields,
+	}
+}
+
+// Valid reports whether p names a phase. It is a switch rather than a scan of
+// EnrichPhases, which hands out a fresh slice per call so a caller cannot edit the
+// vocabulary.
+func (p EnrichPhase) Valid() bool {
+	switch p {
+	case EnrichPhaseArtist, EnrichPhaseReleaseGroup, EnrichPhaseAlbumRelease,
+		EnrichPhaseAuxArt, EnrichPhaseArtistArt, EnrichPhaseAlbumArt,
+		EnrichPhaseBook, EnrichPhaseLyrics, EnrichPhaseTrackFields,
+		EnrichPhaseBookFields, EnrichPhaseAlbumFields:
+		return true
+	}
+	return false
+}
+
+// EnrichPhasesOf converts wire or flag keys to phases, unvalidated: the engine refuses
+// an unknown one, and both the CLI and the proxy handler take that answer.
+func EnrichPhasesOf(keys []string) []EnrichPhase {
+	if len(keys) == 0 {
+		return nil
+	}
+	out := make([]EnrichPhase, len(keys))
+	for i, k := range keys {
+		out[i] = EnrichPhase(k)
+	}
+	return out
+}
+
+// Label renders the phase for a message, the key with its hyphens as spaces.
+func (p EnrichPhase) Label() string { return strings.ReplaceAll(string(p), "-", " ") }
 
 // EnrichQueueOptions selects what one queue walk (or the count that mirrors it) should
 // return. MissCutoff is a unix-ns instant: a no-match marker stamped at or before it has
@@ -109,8 +177,10 @@ type EnrichTarget struct {
 	// naming it and feed the weaker third tier, also verbatim and in the tags' own
 	// vocabulary ("2xCD", "US & Europe"), so that tier does its own folding.
 	// ReleaseGroupMBID is the group the answer must belong to, and is separate from
-	// MBID because MBID names the target's own id, which for an album target is empty
-	// by construction: an album that already has one is not queued.
+	// MBID because MBID names the target's own id. The release-match queue leaves that
+	// empty by construction, since an album carrying one is not queued there; the art
+	// queue fills both, the release id included, because a provider needs it to know
+	// whose pressing it is being asked about.
 	Barcode          string
 	CatalogNumber    string
 	Media            string
@@ -132,6 +202,12 @@ type EnrichTarget struct {
 	// apply instead. The art backfill queues carry the whole-entity lock in their
 	// predicates rather than here, since a locked entity has nothing for them to do.
 	ArtLocked bool
+	// GroupFrontHash is the content hash of the release group's enrichment front, set by
+	// the album-art queue (the parent group's) and the release-group queue (the group's
+	// own), and empty when that front is absent or was chosen by hand, so a provider can
+	// be offered the reuse of bytes it recognizes, or ask about them conditionally.
+	// ReleaseGroupMBID rides beside it for the album ask.
+	GroupFrontHash string
 }
 
 // ArtistEnrichment is the resolved data for one artist, applied in a single
@@ -229,6 +305,9 @@ type EnrichCountOptions struct {
 	TrackFields bool // tracks needing a scalar-fields lookup
 	BookFields  bool // books needing a scalar-fields lookup
 	AlbumFields bool // albums needing a scalar-fields lookup
+	// Forced names the phases a phase-scoped force walks under SweepAll, so their count
+	// takes every target while the rest are counted under the run's own sweep.
+	Forced []EnrichPhase
 }
 
 // ArtistArtBackfill is the art one artist-art backfill pass gathered. It is the artist
@@ -307,6 +386,14 @@ type AlbumArtBackfill struct {
 	Provider string
 	Art      *ArtImage
 	AuxArt   map[ArtRole]*ArtImage
+	// FrontFromGroup says the group's enrichment front, the row whose source hash is
+	// GroupFrontHash, is this pressing's own per the provider that fetched it, so the
+	// store attaches that picture at the album rung from the row it already holds. Art is
+	// nil then. A copy that finds no such row (the group's front moved between the queue
+	// page and the write) leaves the marker unmatched, since the album is still vacant
+	// and a durable match would never ask again.
+	FrontFromGroup bool
+	GroupFrontHash string
 }
 
 // AlbumArtSlots names which album art vacancies a walk may ask about. Front needs a

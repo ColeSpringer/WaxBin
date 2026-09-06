@@ -246,7 +246,8 @@ func (s *Store) ReleaseGroupsNeedingEnrichment(ctx context.Context, opts model.E
 	scopeClause, scopeArgs := enrichIDsFilter("rg.id", ids)
 	stmt := `SELECT rg.id, rg.pid, rg.title, COALESCE(rg.mbid,''), COALESCE(ar.name,''), ` + repCols + `,
 		EXISTS(SELECT 1 FROM entity_curation ec WHERE ec.entity_type = 'release_group'
-		       AND ec.entity_id = rg.id AND ec.field = 'art' AND ec.locked = 1)
+		       AND ec.entity_id = rg.id AND ec.field = 'art' AND ec.locked = 1),
+		` + groupEnrichmentFrontHash("rg.id") + `
 		FROM release_group rg
 		LEFT JOIN artist ar ON ar.id = rg.primary_artist_id` + repJoin + `
 		WHERE rg.id > ? AND ` + enrichBacksFilter(enrichRGBacksItems, ids) + ` AND ` + notEnriched(model.EnrichReleaseGroupType, "rg.id", opts) + scopeClause + `
@@ -264,7 +265,8 @@ func (s *Store) ReleaseGroupsNeedingEnrichment(ctx context.Context, opts model.E
 		var path []byte
 		var durMS int64
 		var artLocked int
-		if err := rows.Scan(&t.ID, &pid, &t.Name, &t.MBID, &t.ArtistName, &path, &durMS, &artLocked); err != nil {
+		if err := rows.Scan(&t.ID, &pid, &t.Name, &t.MBID, &t.ArtistName, &path, &durMS, &artLocked,
+			&t.GroupFrontHash); err != nil {
 			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		t.PID = model.PID(pid)
@@ -384,65 +386,73 @@ func (s *Store) CountEntitiesNeedingEnrichment(ctx context.Context, q model.Enri
 		artistIDs, rgIDs, albumIDs = scope.ArtistIDs, scope.ReleaseGroupIDs, scope.AlbumIDs
 		bookIDs, lyricsIDs, fieldsIDs = scope.BookItemIDs, scope.LyricsItemIDs, scope.FieldsItemIDs
 	}
+	// A phase a phase-scoped force names walks every target, so its count has to as
+	// well; the rest are counted under the run's own sweep.
+	qFor := func(p model.EnrichPhase) model.EnrichQueueOptions {
+		if slices.Contains(opts.Forced, p) {
+			return model.EnrichQueueOptions{Sweep: model.SweepAll}
+		}
+		return q
+	}
 	// The MusicBrainz-backed phases, counted only when the run will execute them: a
 	// contact-less run walks the port phases alone.
 	if opts.Identity {
-		add(`SELECT COUNT(*) FROM artist a WHERE `+enrichBacksFilter(enrichArtistBacksItems, artistIDs)+` AND `+notEnriched(model.EnrichArtistType, "a.id", q), "a.id", artistIDs)
-		add(`SELECT COUNT(*) FROM release_group rg WHERE `+enrichBacksFilter(enrichRGBacksItems, rgIDs)+` AND `+notEnriched(model.EnrichReleaseGroupType, "rg.id", q), "rg.id", rgIDs)
+		add(`SELECT COUNT(*) FROM artist a WHERE `+enrichBacksFilter(enrichArtistBacksItems, artistIDs)+` AND `+notEnriched(model.EnrichArtistType, "a.id", qFor(model.EnrichPhaseArtist)), "a.id", artistIDs)
+		add(`SELECT COUNT(*) FROM release_group rg WHERE `+enrichBacksFilter(enrichRGBacksItems, rgIDs)+` AND `+notEnriched(model.EnrichReleaseGroupType, "rg.id", qFor(model.EnrichPhaseReleaseGroup)), "rg.id", rgIDs)
 	}
 	if opts.Albums {
 		add(`SELECT COUNT(*) FROM album al JOIN release_group rg ON rg.id = al.release_group_id
 			WHERE (al.mbid IS NULL OR al.mbid = '') AND rg.mbid IS NOT NULL AND rg.mbid <> ''
 			  AND `+albumMatchEvidencePredicate("al")+`
-			  AND `+notEnriched(model.EnrichAlbumType, "al.id", q), "al.id", albumIDs)
+			  AND `+notEnriched(model.EnrichAlbumType, "al.id", qFor(model.EnrichPhaseAlbumRelease)), "al.id", albumIDs)
 	}
 	// The aux backfill walks release groups, so it counts under the release-group scope
 	// list, the ghost heuristic included, the way its queue does.
 	if opts.AuxArt {
 		add(`SELECT COUNT(*) FROM release_group rg WHERE `+enrichBacksFilter(enrichRGBacksItems, rgIDs)+`
 			  AND `+auxArtNeededPredicate+`
-			  AND `+notEnriched(enrichEntityAuxArt, "rg.id", q), "rg.id", rgIDs)
+			  AND `+notEnriched(enrichEntityAuxArt, "rg.id", qFor(model.EnrichPhaseAuxArt)), "rg.id", rgIDs)
 	}
 	// The artist backfill walks artists, so it counts under the artist scope list, the
 	// ghost heuristic included, the way its queue does.
 	if opts.ArtistArt {
 		add(`SELECT COUNT(*) FROM artist a WHERE `+enrichBacksFilter(enrichArtistBacksItems, artistIDs)+`
 			  AND `+artistArtNeededPredicate+`
-			  AND `+notEnriched(enrichEntityArtistArt, "a.id", q), "a.id", artistIDs)
+			  AND `+notEnriched(enrichEntityArtistArt, "a.id", qFor(model.EnrichPhaseArtistArt)), "a.id", artistIDs)
 	}
 	// The album-art backfill walks albums, so it counts under the album scope list, the
 	// ghost heuristic and the askable slots included, the way its queue does.
 	if opts.AlbumArt.Any() {
 		add(`SELECT COUNT(*) FROM album al WHERE `+enrichBacksFilter(enrichAlbumBacksItems, albumIDs)+`
 			  AND `+albumArtNeededPredicate(opts.AlbumArt)+`
-			  AND `+notEnriched(enrichEntityAlbumArt, "al.id", q), "al.id", albumIDs)
+			  AND `+notEnriched(enrichEntityAlbumArt, "al.id", qFor(model.EnrichPhaseAlbumArt)), "al.id", albumIDs)
 	}
 	if opts.Identity {
-		add(`SELECT COUNT(*) FROM book b WHERE b.mbid IS NOT NULL AND b.mbid <> '' AND `+notEnriched(model.EnrichBookType, "b.item_id", q), "b.item_id", bookIDs)
+		add(`SELECT COUNT(*) FROM book b WHERE b.mbid IS NOT NULL AND b.mbid <> '' AND `+notEnriched(model.EnrichBookType, "b.item_id", qFor(model.EnrichPhaseBook)), "b.item_id", bookIDs)
 	}
 	if opts.Lyrics {
 		add(`SELECT COUNT(*) FROM playable_item pi JOIN track t ON t.item_id = pi.id
-			WHERE `+lyricsNeededPredicate+` AND `+notEnriched(enrichEntityLyrics, "pi.id", q), "pi.id", lyricsIDs)
+			WHERE `+lyricsNeededPredicate+` AND `+notEnriched(enrichEntityLyrics, "pi.id", qFor(model.EnrichPhaseLyrics)), "pi.id", lyricsIDs)
 	}
 	// The two fields walks share a marker and a scope list but count separately, since
 	// each is gated by its own capability and either can run without the other.
 	if opts.TrackFields {
 		add(`SELECT COUNT(*) FROM playable_item pi JOIN track t ON t.item_id = pi.id
 			WHERE pi.kind = 'track' AND pi.state = 'present' AND pi.title <> '' AND t.artist <> ''
-			  AND `+trackFieldsVacancy+` AND `+notEnriched(enrichEntityFields, "pi.id", q), "pi.id", fieldsIDs)
+			  AND `+trackFieldsVacancy+` AND `+notEnriched(enrichEntityFields, "pi.id", qFor(model.EnrichPhaseTrackFields)), "pi.id", fieldsIDs)
 	}
 	if opts.BookFields {
 		add(`SELECT COUNT(*) FROM playable_item pi JOIN book bk ON bk.item_id = pi.id
 			WHERE pi.kind = 'book' AND pi.state = 'present' AND pi.title <> ''
 			  AND (bk.author <> '' OR bk.asin <> '' OR bk.isbn <> '')
-			  AND `+bookFieldsVacancy+` AND `+notEnriched(enrichEntityFields, "pi.id", q), "pi.id", fieldsIDs)
+			  AND `+bookFieldsVacancy+` AND `+notEnriched(enrichEntityFields, "pi.id", qFor(model.EnrichPhaseBookFields)), "pi.id", fieldsIDs)
 	}
 	// The album fields walk counts under the album scope list, which it shares with the
 	// release match.
 	if opts.AlbumFields {
 		add(`SELECT COUNT(*) FROM album al WHERE al.title <> ''
 			  AND (COALESCE(al.label,'') = '' OR al.year IS NULL)
-			  AND `+notEnriched(enrichEntityAlbumFields, "al.id", q), "al.id", albumIDs)
+			  AND `+notEnriched(enrichEntityAlbumFields, "al.id", qFor(model.EnrichPhaseAlbumFields)), "al.id", albumIDs)
 	}
 	var total int
 	for _, cq := range queries {
@@ -794,6 +804,14 @@ func buildAlbumArtNeededPredicate(slots model.AlbumArtSlots) string {
 }
 
 // AlbumsNeedingArt returns the next keyset page of albums with an empty art slot the
+// groupEnrichmentFrontHash is the correlated read of a release group's enrichment front
+// hash, empty when it has none or its front was chosen by hand. Both art queues select
+// it so a provider can be offered the reuse of bytes it recognizes.
+func groupEnrichmentFrontHash(groupIDCol string) string {
+	return `COALESCE((SELECT am.source_hash FROM art_map am WHERE am.entity_type = 'release_group'
+		AND am.entity_id = ` + groupIDCol + ` AND am.role = 'front' AND am.source = 'enrichment'), '')`
+}
+
 // registered providers could fill, for the album-art backfill. It is the album twin of
 // ArtistsNeedingArtBackfill: same keyset shape, same ghost heuristic, and the same live
 // read of the mbid column, so a run after the release match sends the ids that phase
@@ -807,7 +825,9 @@ func (s *Store) AlbumsNeedingArt(ctx context.Context, opts model.EnrichQueueOpti
 	scopeClause, scopeArgs := enrichIDsFilter("al.id", ids)
 	stmt := `SELECT al.id, al.pid, al.title, COALESCE(ar.name,''), COALESCE(al.mbid,''),
 			COALESCE(al.barcode,''), COALESCE(al.catalog_number,''),
-			CASE WHEN ` + albumResolvesFrontArt + ` THEN 1 ELSE 0 END
+			CASE WHEN ` + albumResolvesFrontArt + ` THEN 1 ELSE 0 END,
+			COALESCE(rg.mbid, ''),
+			` + groupEnrichmentFrontHash("rg.id") + `
 		FROM album al
 		LEFT JOIN release_group rg ON rg.id = al.release_group_id
 		LEFT JOIN artist ar ON ar.id = rg.primary_artist_id
@@ -827,7 +847,7 @@ func (s *Store) AlbumsNeedingArt(ctx context.Context, opts model.EnrichQueueOpti
 		var pid string
 		var hasArt int
 		if err := rows.Scan(&t.ID, &pid, &t.Name, &t.ArtistName, &t.MBID,
-			&t.Barcode, &t.CatalogNumber, &hasArt); err != nil {
+			&t.Barcode, &t.CatalogNumber, &hasArt, &t.ReleaseGroupMBID, &t.GroupFrontHash); err != nil {
 			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		t.PID = model.PID(pid)
@@ -871,6 +891,28 @@ func (s *Store) ApplyAlbumArtBackfill(ctx context.Context, in model.AlbumArtBack
 			return nil
 		}
 		var wrote int
+		matched := in.Matched
+		if in.FrontFromGroup {
+			// The group's row is copied whole rather than a picture stored: the bytes are
+			// already in the store, and the provider said they are this pressing's.
+			copied, wasOpen, err := fillAlbumArtFromGroupTx(ctx, tx, in.AlbumID, in.GroupFrontHash)
+			if err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+			switch {
+			case copied:
+				wrote++
+			case wasOpen:
+				// The group's front moved out from under the hash between the queue page
+				// and here, so the album is as bare as it was. An unmatched marker asks
+				// again next run; a matched one would silence it over a vacancy, whatever
+				// else this call filled.
+				matched = false
+			}
+			// A front no longer open (a cover landed by hand, or a lock) leaves no vacancy,
+			// so the marker stands on what the rest of this call did, the way a fetched
+			// cover the same guards drop already does.
+		}
 		if in.Art != nil {
 			changed, err := fillAlbumArtTx(ctx, tx, in.AlbumID, in.Art)
 			if err != nil {
@@ -887,7 +929,7 @@ func (s *Store) ApplyAlbumArtBackfill(ctx context.Context, in model.AlbumArtBack
 			}
 			wrote += n
 		}
-		if err := markEnrichedTx(ctx, tx, enrichEntityAlbumArt, in.AlbumID, provider, in.Matched, ""); err != nil {
+		if err := markEnrichedTx(ctx, tx, enrichEntityAlbumArt, in.AlbumID, provider, matched, ""); err != nil {
 			return err
 		}
 		if wrote == 0 {

@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1442,6 +1443,12 @@ func TestLogicalExport(t *testing.T) {
 	if _, err := lib.Playback().RecordSession(ctx, "", items[0].PID, "lastfm", listened, 0, 240000); err != nil {
 		t.Fatalf("record session: %v", err)
 	}
+	// A comma-bearing producer name, which the artist splitter never splits on, so
+	// re-deriving credits from the combined Artist string would lose it.
+	if _, _, err := lib.SetCredits(ctx, items[0].PID, model.RoleProducer, []string{"Smith, John"},
+		waxbin.CreditEditOptions{}); err != nil {
+		t.Fatalf("set credits: %v", err)
+	}
 
 	var buf bytes.Buffer
 	man, err := lib.Export(ctx, &buf)
@@ -1469,6 +1476,15 @@ func TestLogicalExport(t *testing.T) {
 	}
 	if len(snap.Items) != 1 || snap.Items[0].Title != "Song" {
 		t.Fatalf("exported item wrong: %+v", snap.Items)
+	}
+	producer := false
+	for _, c := range snap.Items[0].Credits {
+		if c.Role == string(model.RoleProducer) && c.Name == "Smith, John" {
+			producer = true
+		}
+	}
+	if !producer {
+		t.Errorf("exported credits = %+v, want the comma-bearing producer whole", snap.Items[0].Credits)
 	}
 	if len(snap.PlayState) < 1 || !snap.PlayState[0].Starred {
 		t.Fatalf("exported play state should carry the star: %+v", snap.PlayState)
@@ -1658,6 +1674,68 @@ func secretCount(t *testing.T, dbPath string) int {
 		t.Fatalf("count secrets in %s: %v", dbPath, err)
 	}
 	return n
+}
+
+// TestInboxImportSplitsADirectoryCover: a staging folder routed to more than one
+// managed root leaves a cover in each destination, where the first destination used to
+// take the only copy. A copy-mode import leaves the staging cover in place besides.
+func TestInboxImportSplitsADirectoryCover(t *testing.T) {
+	ctx := context.Background()
+	musicRoot, bookRoot, podDir := t.TempDir(), t.TempDir(), t.TempDir()
+	inboxDir := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	lib := openMediaTyped(t, ctx, db, musicRoot, bookRoot, podDir)
+
+	writeFile(t, filepath.Join(inboxDir, "song.mp3"),
+		testaudio.BuildMP3WithAudio("Song", "Artist", "Album", 1, testaudio.AudioWithSeed(1)))
+	writeFile(t, filepath.Join(inboxDir, "book.m4b"), testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
+		Title: "The Book", Artist: "Author", AlbumArtist: "Author", Album: "The Book",
+		Audio: testaudio.AudioWithSeed(2),
+	}))
+	writeFile(t, filepath.Join(inboxDir, "cover.jpg"), []byte("img"))
+
+	plan, err := lib.PlanImport(ctx, waxbin.ImportRequest{Source: inboxDir, Copy: true})
+	if err != nil {
+		t.Fatalf("plan import: %v", err)
+	}
+	rep, err := lib.ApplyImport(ctx, plan)
+	if err != nil {
+		t.Fatalf("apply import: %v", err)
+	}
+	if rep.Imported != 2 {
+		t.Fatalf("import report = %+v, want two imports", rep)
+	}
+
+	if !fileExists(filepath.Join(musicRoot, "Artist", "Album", "cover.jpg")) {
+		t.Error("the music destination has no cover")
+	}
+	// The audiobook template's own author segment is not what is under test, so the
+	// cover is looked for beside the book itself.
+	if !fileExists(filepath.Join(filepath.Dir(bookPath(t, bookRoot)), "cover.jpg")) {
+		t.Error("the audiobook destination has no cover")
+	}
+	if !fileExists(filepath.Join(inboxDir, "cover.jpg")) {
+		t.Error("a copy-mode import removed the staging cover")
+	}
+}
+
+// bookPath finds the single .m4b under root, so a test need not spell out the audiobook
+// template's own path segments.
+func bookPath(t *testing.T, root string) string {
+	t.Helper()
+	var found string
+	if err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err == nil && !d.IsDir() && filepath.Ext(p) == ".m4b" {
+			found = p
+		}
+		return err
+	}); err != nil {
+		t.Fatalf("walk %s: %v", root, err)
+	}
+	if found == "" {
+		t.Fatalf("no .m4b under %s", root)
+	}
+	return found
 }
 
 // TestInboxImportCarriesSidecars verifies an import brings a file's sidecars

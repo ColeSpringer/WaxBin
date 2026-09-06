@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -24,6 +25,9 @@ func TestEnrichScopeFlagValidation(t *testing.T) {
 		{"both scopes", []string{"--item", "01J0X", "--entity", "artist:01J0Y"}, "not both"},
 		{"malformed entity", []string{"--entity", "artistonly"}, "wants type:pid"},
 		{"non-enrichable entity type", []string{"--entity", "genre:01J0Y"}, "non-enrichable entity type"},
+		{"unknown phase", []string{"--force-phase", "nope"}, "unknown enrichment phase"},
+		{"phase with force", []string{"--force", "--force-phase", "artist"}, "exclusive"},
+		{"phase with a scope", []string{"--item", "01J0X", "--force-phase", "lyrics"}, "cannot combine"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -51,6 +55,7 @@ func TestEnrichSummaryCoversEveryPhase(t *testing.T) {
 		ArtistsEnriched: 1, ReleaseGroupsEnriched: 1, AlbumsSearched: 1, BooksEnriched: 1,
 		LyricsEnriched: 1, AuxArtEnriched: 1, ArtistArtEnriched: 1, AlbumArtEnriched: 1,
 		TrackFieldsEnriched: 1, BookFieldsEnriched: 1, AlbumFieldsEnriched: 1,
+		ArtFetched: 1, ArtReused: 1,
 	}}
 	cmd := &cobra.Command{}
 	var buf bytes.Buffer
@@ -61,9 +66,29 @@ func TestEnrichSummaryCoversEveryPhase(t *testing.T) {
 	for _, want := range []string{
 		"artists:", "release groups:", "album releases:", "books:", "lyrics:",
 		"aux art:", "artist art:", "album art:", "track fields:", "book fields:", "album fields:",
+		"reused from the group cover",
 	} {
 		if !strings.Contains(buf.String(), want) {
 			t.Errorf("summary is missing the %q line:\n%s", want, buf.String())
 		}
+	}
+}
+
+// TestEnrichViewOmitsArtReusedAtZero: the reuse count is new, so a payload from a run
+// that reused nothing has to keep the shape it had.
+func TestEnrichViewOmitsArtReusedAtZero(t *testing.T) {
+	zero, err := json.Marshal(toEnrichView(&waxbin.EnrichResult{}))
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(zero), "artReused") {
+		t.Errorf("zero payload = %s, want no artReused key", zero)
+	}
+	one, err := json.Marshal(toEnrichView(&waxbin.EnrichResult{Result: enrich.Result{ArtReused: 1}}))
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(one), `"artReused":1`) {
+		t.Errorf("payload = %s, want artReused 1", one)
 	}
 }

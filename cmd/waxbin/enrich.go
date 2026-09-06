@@ -18,6 +18,8 @@ func newEnrichCmd(g *globals) *cobra.Command {
 	var limit int
 	var item string
 	var entity string
+	var forcePhases []string
+	phaseList := enrichPhaseList()
 	cmd := &cobra.Command{
 		Use:   "enrich",
 		Short: "Enrich catalog metadata from MusicBrainz and key-free providers",
@@ -44,9 +46,9 @@ func newEnrichCmd(g *globals) *cobra.Command {
 			"its own cover, so the picture is that pressing's rather than one edition of the " +
 			"group standing in for all of them. That half runs on a stock install, since the " +
 			"Cover Art Archive serves the release rung: it costs one release-cover download " +
-			"per identified album that has no front, usually the same bytes as the group " +
-			"cover already fetched, and the content-addressed store dedups the bytes rather " +
-			"than the download.\n\n" +
+			"per identified album that has no front, and when the group cover already " +
+			"fetched is that very pressing's, the album reuses it instead of downloading " +
+			"the same picture again.\n\n" +
 			"A lookup that found nothing is asked again once its marker is " +
 			"enrichment.retry_misses_after_days old (default 30, 0 never), after the fresh " +
 			"targets so a capped run reaches new files first. The first run after upgrading " +
@@ -58,15 +60,36 @@ func newEnrichCmd(g *globals) *cobra.Command {
 			"targets: a track's artist, album artist, release group, album (its release " +
 			"match, fields and art) and lyrics, a book's contributors and identifiers, or " +
 			"the named artist/release_group/album (an album resolves to itself and to its " +
-			"release group). A scoped run implies --force.",
+			"release group). A scoped run implies --force.\n\n" +
+			"--force-phase re-asks one phase alone, marker or none: registering a provider " +
+			"after the markers settled is what it is for, since a matched marker never " +
+			"expires and --force re-asks every phase, MusicBrainz identity included. A phase " +
+			"this install cannot run is refused. Names: " + phaseList + ". Forcing release-group " +
+			"re-resolves every group against MusicBrainz first, one lookup per group at a " +
+			"request per second, and only then re-asks for its cover, which costs a " +
+			"conditional request and no download once the group has a record; that walk is " +
+			"also how a group enriched before records existed gets one.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			// Flag-shape errors fail here, before the write lock is taken or the
 			// server dialed; the facade re-validates for embedders and the proxy.
 			if item != "" && entity != "" {
 				return fmt.Errorf("scope by --item or --entity, not both")
 			}
-			opts := waxbin.EnrichOptions{Force: force, Limit: limit, ItemPID: model.PID(item), WriteTags: writeTags}
-			params := proxy.EnrichParams{Force: force, Limit: limit, ItemPID: item, WriteTags: writeTags}
+			if len(forcePhases) > 0 {
+				if force {
+					return fmt.Errorf("--force-phase and --force are exclusive; --force already re-asks every phase")
+				}
+				if item != "" || entity != "" {
+					return fmt.Errorf("--force-phase cannot combine with --item or --entity, which already force every phase they walk")
+				}
+				for _, p := range forcePhases {
+					if !model.EnrichPhase(p).Valid() {
+						return fmt.Errorf("unknown enrichment phase %q (want one of %s)", p, phaseList)
+					}
+				}
+			}
+			opts := waxbin.EnrichOptions{Force: force, Limit: limit, ForcePhases: model.EnrichPhasesOf(forcePhases), ItemPID: model.PID(item), WriteTags: writeTags}
+			params := proxy.EnrichParams{Force: force, Limit: limit, ForcePhases: forcePhases, ItemPID: item, WriteTags: writeTags}
 			if entity != "" {
 				typ, pid, ok := strings.Cut(entity, ":")
 				if !ok || typ == "" || pid == "" {
@@ -123,7 +146,19 @@ func newEnrichCmd(g *globals) *cobra.Command {
 	cmd.Flags().IntVar(&limit, "limit", 0, "cap the number of entities processed (0 = all)")
 	cmd.Flags().StringVar(&item, "item", "", "scope the pass to one item's targets (item pid; implies --force)")
 	cmd.Flags().StringVar(&entity, "entity", "", "scope the pass to one entity, as type:pid (artist, release_group, or album; implies --force)")
+	cmd.Flags().StringSliceVar(&forcePhases, "force-phase", nil,
+		"re-ask one phase alone for every target that still has a slot to fill, marker or none (repeatable or comma-separated): "+phaseList)
 	return cmd
+}
+
+// enrichPhaseList renders the phase vocabulary for the flag help and its refusals.
+func enrichPhaseList() string {
+	keys := model.EnrichPhases()
+	names := make([]string, len(keys))
+	for i, k := range keys {
+		names[i] = string(k)
+	}
+	return strings.Join(names, "|")
 }
 
 // renderEnrichResult prints an enrichment pass's totals, shared by the direct run
@@ -166,7 +201,11 @@ func renderEnrichResult(cmd *cobra.Command, g *globals, res *waxbin.EnrichResult
 	if r.Retried > 0 {
 		fmt.Fprintf(w, "retried:        %d earlier misses\n", r.Retried)
 	}
-	fmt.Fprintf(w, "cover art:      %d fetched\n", r.ArtFetched)
+	if r.ArtReused > 0 {
+		fmt.Fprintf(w, "cover art:      %d fetched (%d reused from the group cover)\n", r.ArtFetched, r.ArtReused)
+	} else {
+		fmt.Fprintf(w, "cover art:      %d fetched\n", r.ArtFetched)
+	}
 	// Only when a provider offered auxiliary roles, keeping the summary shape stable
 	// for the common built-ins-only run. It counts images, so it names them: the line
 	// above counts the release groups the backfill phase walked.
