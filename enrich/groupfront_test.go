@@ -107,8 +107,9 @@ func seedWYWH(t *testing.T, st *sqlite.Store, libID int64, essence, releaseID st
 	})
 }
 
-// TestAlbumArtReusesTheGroupCoverForItsOwnRelease is the DEFERRED entry's case: the
-// group's front is this pressing's, so the album takes the row rather than the picture.
+// TestAlbumArtReusesTheGroupCoverForItsOwnRelease is the case the deferred-work
+// entry described: the group's front is this pressing's, so the album takes the
+// row rather than the picture.
 func TestAlbumArtReusesTheGroupCoverForItsOwnRelease(t *testing.T) {
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)

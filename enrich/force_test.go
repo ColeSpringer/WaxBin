@@ -23,9 +23,9 @@ func forceService(st enrich.Store, mbURL string, window time.Duration, providers
 	}, nil)
 }
 
-// TestForcePhaseReAsksTheNamedPhaseAlone is the DEFERRED entry's case: a provider
-// registered after the markers settled is asked about them, and the identity phase
-// nobody named is left alone.
+// TestForcePhaseReAsksTheNamedPhaseAlone is the case the deferred-work entry
+// described: a provider registered after the markers settled is asked about them,
+// and the identity phase nobody named is left alone.
 func TestForcePhaseReAsksTheNamedPhaseAlone(t *testing.T) {
 	ctx := context.Background()
 	st, _, lib := openStore(t)
