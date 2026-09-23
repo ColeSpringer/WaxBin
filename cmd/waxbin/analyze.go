@@ -19,7 +19,8 @@ func newAnalyzeCmd(g *globals) *cobra.Command {
 			"does. Files whose codec this build cannot decode are reported as skipped.\n\n" +
 			"With --write-replaygain, the computed track and album ReplayGain is also " +
 			"written back into the files on disk after album aggregation (off by default; " +
-			"the catalog is always authoritative, and the audio essence is preserved).",
+			"the catalog is always authoritative, and the audio essence is preserved); " +
+			"an Ogg Opus file also gets its header output gain.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			// Submit to a running server so the analyze pass runs in the server's process
 			// (it stays available) and we tail the job, rather than pausing it.

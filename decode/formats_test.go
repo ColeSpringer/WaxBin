@@ -33,10 +33,17 @@ var codecFixtures = map[string]codecFixture{
 	"opus":    {format: "opus"},
 	"wavpack": {format: "wavpack"},
 	"ape":     {format: "ape"},
-	// WaxFlow decodes WMA and Musepack but encodes neither; testaudio.Fixture says
-	// where each checked-in file came from.
-	"wma":      {file: "mono-8k.wma"},
-	"musepack": {file: "ref-2s-sv8-chapters.mpc"},
+	// WaxFlow decodes these but encodes none of them; testaudio.Fixture says where
+	// each checked-in file came from.
+	"wma":         {file: "mono-8k.wma"},
+	"wmalossless": {file: "lossless-s16.wma"},
+	"wmapro":      {file: "pro-s16.wma"},
+	"wmavoice":    {file: "voice-mono.wma"},
+	"musepack":    {file: "ref-2s-sv8-chapters.mpc"},
+	"alaw":        {file: "ref-1s-alaw.wav"},
+	"mulaw":       {file: "ref-1s-mulaw.wav"},
+	"ima-adpcm":   {file: "ref-1s-ima-adpcm.wav"},
+	"ms-adpcm":    {file: "ref-1s-ms-adpcm.wav"},
 }
 
 // path returns a decodable file for the fixture, encoding one into dir when the
@@ -90,32 +97,56 @@ func TestCoverageDecodesEveryCodec(t *testing.T) {
 func TestMusepackStreamVersionsDecode(t *testing.T) {
 	const rate = 44100
 	eng := New(nil)
-	dir := t.TempDir()
-	write := func(name string, data []byte) string {
-		p := filepath.Join(dir, name)
-		if err := os.WriteFile(p, data, 0o644); err != nil {
-			t.Fatal(err)
-		}
-		return p
-	}
-	level := func(path string) float64 {
-		pcm, err := eng.Mono(context.Background(), path, 11025, 0)
-		if err != nil {
-			t.Fatalf("%s: decode: %v", filepath.Base(path), err)
-		}
-		if pcm.Frames() == 0 {
-			t.Fatalf("%s: decoded to no frames", filepath.Base(path))
-		}
-		var sum float64
-		for _, v := range pcm.Samples {
-			sum += float64(v) * float64(v)
-		}
-		return 10 * math.Log10(sum/float64(len(pcm.Samples)))
-	}
-	ref := level(write("ref.wav", testaudio.EncodeAs(t, "wav", "", rate, testaudio.ReferenceSignal(rate, 2*time.Second))))
+	level := func(path string) float64 { return monoLevelDB(t, eng, path) }
+	ref := level(writeBytes(t, "ref.wav", testaudio.EncodeAs(t, "wav", "", rate, testaudio.ReferenceSignal(rate, 2*time.Second))))
 	for _, name := range []string{"ref-2s-sv7.mpc", "ref-2s-sv8-chapters.mpc"} {
-		if got := level(write(name, testaudio.Fixture(t, name))); math.Abs(got-ref) > 1 {
+		if got := level(writeBytes(t, name, testaudio.Fixture(t, name))); math.Abs(got-ref) > 1 {
 			t.Errorf("%s decodes at %.2f dB, want within 1 dB of the wav's %.2f", name, got, ref)
+		}
+	}
+}
+
+// monoLevelDB is the RMS level of path's whole mono decode, the comparison the
+// fixture tests make against the WAV of the same reference signal.
+func monoLevelDB(tb testing.TB, eng *Engine, path string) float64 {
+	tb.Helper()
+	pcm, err := eng.Mono(context.Background(), path, 11025, 0)
+	if err != nil {
+		tb.Fatalf("%s: decode: %v", filepath.Base(path), err)
+	}
+	if pcm.Frames() == 0 {
+		tb.Fatalf("%s: decoded to no frames", filepath.Base(path))
+	}
+	var sum float64
+	for _, v := range pcm.Samples {
+		sum += float64(v) * float64(v)
+	}
+	return 10 * math.Log10(sum/float64(len(pcm.Samples)))
+}
+
+// TestTelephonyCodecsDecodeToTheReferenceLevel: G.711 and both ADPCM families are
+// checked-in fixtures, so the coverage test alone would only prove they are
+// non-empty. Each was encoded from a ReferenceSignal WAV, so comparing the level
+// of its decode with the level of that same WAV says the decode is right.
+func TestTelephonyCodecsDecodeToTheReferenceLevel(t *testing.T) {
+	eng := New(nil)
+	refLevel := make(map[int]float64)
+	for _, rate := range []int{8000, 44100} {
+		sig := testaudio.ReferenceSignal(rate, time.Second)
+		refLevel[rate] = monoLevelDB(t, eng, writeBytes(t, "ref.wav", testaudio.EncodeAs(t, "wav", "", rate, sig)))
+	}
+	for _, tc := range []struct {
+		name string
+		rate int
+	}{
+		{"ref-1s-alaw.wav", 8000},
+		{"ref-1s-mulaw.wav", 8000},
+		{"ref-1s-ima-adpcm.wav", 44100},
+		{"ref-1s-ms-adpcm.wav", 44100},
+	} {
+		got := monoLevelDB(t, eng, writeBytes(t, tc.name, testaudio.Fixture(t, tc.name)))
+		if ref := refLevel[tc.rate]; math.Abs(got-ref) > 1 {
+			t.Errorf("%s decodes at %.2f dB, want within 1 dB of the wav's %.2f", tc.name, got, ref)
 		}
 	}
 }

@@ -229,35 +229,13 @@ type AuxObservation struct {
 
 // ScopedFile is one present file in a library scope, preloaded so the scanner can
 // fast-path an unchanged file (size+mtime match) entirely in memory and reconcile a
-// vanished one at end-of-walk, without a per-file SELECT. It carries the item the
-// file backs so a sidecar-only change can be applied without re-resolving identity,
-// and its known sidecar observations so a sidecar re-parse is stat-gated.
+// vanished one at end-of-walk, without a per-file SELECT. Its known sidecar
+// observations let a sidecar change be caught by a stat rather than a read.
 type ScopedFile struct {
 	FilePID PID
-	ItemPID PID
-	// ItemKind is the kind of the item the file backs (track/book/episode), or empty
-	// for an edge-less file. The fast-path routes a changed .cue by kind: a book
-	// applies chapters cheaply in place, while a track (or a virtual-track container)
-	// falls through to the full path, which owns the virtual-track set reconcile.
-	ItemKind Kind
-	Size     int64
-	MTimeNS  int64
-	Aux      []AuxObservation
-}
-
-// SidecarUpdate carries an item's freshly re-parsed sidecar data plus the on-disk
-// observations to record, applied outside the audio-change gate in one transaction.
-// Nil Lyrics/CoverArt leave those untouched (a scan never clears art on a failed
-// read); ReplaceChapters replaces the file's cue/chapter-file-sourced chapters.
-type SidecarUpdate struct {
-	ItemPID         PID
-	FilePID         PID
-	Lyrics          *Lyrics
-	CoverArt        *ArtImage
-	Chapters        []Chapter
-	ReplaceChapters bool             // when true, Chapters replace FilePID's cue-sourced chapters
-	ChapterSource   string           // the chapter source tag to write (e.g. "cue"); defaults to "cue"
-	Observations    []AuxObservation // sidecar observations to persist for FilePID
+	Size    int64
+	MTimeNS int64
+	Aux     []AuxObservation
 }
 
 // EnrichedTagRow is one file an enrichment write-back should stamp, carrying the
@@ -410,6 +388,9 @@ type Catalog interface {
 	// (add/update/remove), each with its own offset window. The result summarizes the
 	// file-level outcome; ItemCreated reports whether any virtual track was created.
 	PutScannedVirtualTracks(ctx context.Context, in PutScannedVirtualTracksInput) (*ScanItemResult, error)
+	// VirtualTracksForPath returns the virtual tracks the file at path backs, in start
+	// order, or none when it is not a rip.
+	VirtualTracksForPath(ctx context.Context, path []byte) ([]VirtualTrack, error)
 	FileByPath(ctx context.Context, path []byte) (*File, error)
 	FileByEssence(ctx context.Context, essence string) (*File, error)
 
@@ -429,11 +410,6 @@ type Catalog interface {
 	// emits a delta, missing is a no-op, and archived or remote are refused with
 	// their own outcome rather than downgraded.
 	MarkItemMissing(ctx context.Context, itemPID PID) (MarkMissingOutcome, error)
-	// UpdateItemSidecars refreshes an item's sidecar-sourced lyrics/art/chapters
-	// outside the audio-change gate and records the new sidecar observations, in one
-	// transaction. It returns whether anything changed and emits an item change_log
-	// delta when it does. It never touches the audio file row or entity resolution.
-	UpdateItemSidecars(ctx context.Context, in SidecarUpdate) (bool, error)
 	// UpdateFileStateIfUnchanged updates a file's size/mtime/content_hash only when
 	// its stored size and mtime still match the expected values (optimistic
 	// concurrency), so an on-disk tag write can record its own result without

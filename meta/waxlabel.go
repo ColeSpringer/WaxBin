@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/colespringer/waxbin/art"
@@ -84,7 +85,7 @@ func (a *Adapter) read(ctx context.Context, path, op string, hashEssence bool) (
 				Diagnostics: []model.FileDiagnostic{{
 					Code:     model.DiagUnsupportedFormat,
 					Severity: model.SeverityInfo,
-					Detail:   capDetail("no parser for this container; cataloged with a filename-derived title"),
+					Detail:   CapDetail("no parser for this container; cataloged with a filename-derived title"),
 				}},
 			}, nil
 		}
@@ -104,7 +105,7 @@ func (a *Adapter) read(ctx context.Context, path, op string, hashEssence bool) (
 		fm.Diagnostics = append(fm.Diagnostics, model.FileDiagnostic{
 			Code:     model.DiagLegacyOnlyTags,
 			Severity: model.SeverityInfo,
-			Detail:   capDetail("filled from a legacy tag container: " + joinKeys(filled)),
+			Detail:   CapDetail("filled from a legacy tag container: " + joinKeys(filled)),
 		})
 	}
 	if fm.Tags.Title == "" {
@@ -121,9 +122,10 @@ func (a *Adapter) read(ctx context.Context, path, op string, hashEssence bool) (
 	// it stable across retags. Files with no audio frames fall back to the content
 	// hash through an empty EssenceHash. The string carries the library's algorithm
 	// and extent version, so a WaxLabel bump can rename it for a whole format (1.6
-	// moved FLAC to flac-frames-v2) and an unchanged file then re-keys on its next
-	// full parse; currentDiagVersion is bumped alongside so audit points at
-	// scan --force.
+	// moved FLAC to flac-frames-v2, 1.7 Ogg Opus to ogg-opus-packets-v2 so the
+	// header gain is masked out, 1.8 ASF to asf-packets-v2) and an unchanged file
+	// then re-keys on its next full parse; currentDiagVersion is bumped alongside so
+	// audit points at scan --force.
 	if dig, herr := doc.HashAudioEssence(ctx, waxlabel.WithHashSource(src)); herr == nil {
 		fm.EssenceHash = dig.String()
 	} else if !errors.Is(herr, wlerr.ErrInvalidData) {
@@ -277,9 +279,9 @@ func customTagsFromDoc(doc *waxlabel.Document) map[string][]string {
 // vocabulary becomes WaxBin's model.
 const maxDetailBytes = 512
 
-// capDetail truncates s to maxDetailBytes on a rune boundary, so a capped detail is
+// CapDetail truncates s to maxDetailBytes on a rune boundary, so a capped detail is
 // still valid UTF-8 rather than ending in half a multi-byte rune.
-func capDetail(s string) string {
+func CapDetail(s string) string {
 	if len(s) <= maxDetailBytes {
 		return s
 	}
@@ -357,7 +359,7 @@ func audioDiagnostics(doc *waxlabel.Document) []model.FileDiagnostic {
 		best = &model.FileDiagnostic{
 			Code:     model.DiagCorruptAudio,
 			Severity: sev,
-			Detail:   capDetail(w.String()),
+			Detail:   CapDetail(w.String()),
 		}
 	}
 	if best == nil {
@@ -612,20 +614,22 @@ func lyricsFromDoc(doc *waxlabel.Document, fields tag.Tags) *model.Lyrics {
 // the raw bytes plus a format derived from the picture MIME; the scanner finalizes
 // the content hash and dimensions. The image is stamped "tag": it came out of the
 // file's own picture frames. It returns nil when the file embeds no usable picture.
+// A linked picture ("-->" MIME, whose bytes are a URL) is skipped in both passes, or
+// the last-resort pass would store the URL as the cover.
 func coverFromDoc(doc *waxlabel.Document) *model.ArtImage {
 	pics := doc.Pictures()
 	// Prefer a non-empty front cover; otherwise the first picture with bytes. A
 	// zero-length entry (e.g. an empty front-cover frame) must not shadow a real one.
 	var best *waxlabel.Picture
 	for i := range pics {
-		if pics[i].Type == waxlabel.PicFrontCover && len(pics[i].Data) > 0 {
+		if pics[i].Type == waxlabel.PicFrontCover && len(pics[i].Data) > 0 && pics[i].MIME != waxlabel.LinkMIME {
 			best = &pics[i]
 			break
 		}
 	}
 	if best == nil {
 		for i := range pics {
-			if len(pics[i].Data) > 0 {
+			if len(pics[i].Data) > 0 && pics[i].MIME != waxlabel.LinkMIME {
 				best = &pics[i]
 				break
 			}
@@ -657,8 +661,13 @@ func coverFromDoc(doc *waxlabel.Document) *model.ArtImage {
 // uncapped variant because WaxBin reads the whole file into memory before parsing,
 // so the parser's own line cap never protected anything. The read is bounded instead
 // (see maxSidecarBytes).
+//
+// Upstream counts a bare header as dropped since 1.7 (its --strict refuses what it
+// cannot store); here a header is structure, as the contract above says, so those
+// are filtered back out.
 func ParseLRC(text string) (lines []model.SyncedLine, dropped []int) {
 	parsed, dropped := waxlabel.ParseLRCReportFull(text)
+	dropped = dropLRCSectionHeaders(text, dropped)
 	if len(parsed) == 0 {
 		return nil, dropped
 	}
@@ -667,6 +676,41 @@ func ParseLRC(text string) (lines []model.SyncedLine, dropped []int) {
 		out = append(out, model.SyncedLine{TimeMS: ln.Time.Milliseconds(), Text: ln.Text})
 	}
 	return out, dropped
+}
+
+// dropLRCSectionHeaders removes the 1-based line numbers naming a bare section
+// header from dropped. It numbers the lines exactly as the parser does, with the BOM
+// stripped and CR and CRLF read as LF, or the two counts would disagree.
+func dropLRCSectionHeaders(text string, dropped []int) []int {
+	if len(dropped) == 0 {
+		return dropped
+	}
+	text = strings.TrimPrefix(text, "\ufeff")
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	lines := strings.Split(strings.ReplaceAll(text, "\r", "\n"), "\n")
+	out := dropped[:0]
+	for _, n := range dropped {
+		if n >= 1 && n <= len(lines) && isLRCSectionHeader(lines[n-1]) {
+			continue
+		}
+		out = append(out, n)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// isLRCSectionHeader reports whether a line is a bare section header such as
+// [Chorus]: one bracket group spanning the line and holding a word, which a mistyped
+// timestamp ([01.23.45], [01:xx.00]) does not.
+func isLRCSectionHeader(line string) bool {
+	s := strings.TrimSpace(line)
+	if len(s) < 2 || s[0] != '[' || strings.IndexByte(s, ']') != len(s)-1 {
+		return false
+	}
+	inner := s[1 : len(s)-1]
+	return !strings.Contains(inner, ":") && strings.ContainsFunc(inner, unicode.IsLetter)
 }
 
 // LRCPartial reports whether a .lrc parse is worth acting on, meaning some lines

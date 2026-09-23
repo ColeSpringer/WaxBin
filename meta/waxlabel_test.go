@@ -489,16 +489,16 @@ func TestReadDoesNotFoldWarningsWholesale(t *testing.T) {
 // message can embed a file-derived snippet, and sanitizing defends against
 // injection rather than against size.
 func TestCapDetail(t *testing.T) {
-	if got := capDetail("short"); got != "short" {
-		t.Errorf("capDetail(short) = %q", got)
+	if got := CapDetail("short"); got != "short" {
+		t.Errorf("CapDetail(short) = %q", got)
 	}
 	long := strings.Repeat("a", 1<<20)
-	if got := capDetail(long); len(got) != maxDetailBytes {
+	if got := CapDetail(long); len(got) != maxDetailBytes {
 		t.Errorf("len = %d, want %d", len(got), maxDetailBytes)
 	}
 	// Multi-byte runes: the cap must not slice one in half.
 	multi := strings.Repeat("é", 1<<20) // 2 bytes each
-	got := capDetail(multi)
+	got := CapDetail(multi)
 	if len(got) > maxDetailBytes {
 		t.Errorf("len = %d, want <= %d", len(got), maxDetailBytes)
 	}
@@ -506,7 +506,7 @@ func TestCapDetail(t *testing.T) {
 		t.Error("capped detail is not valid UTF-8")
 	}
 	emoji := strings.Repeat("🎵", 1<<20) // 4 bytes each; 512 is not a multiple of 4
-	got = capDetail(emoji)
+	got = CapDetail(emoji)
 	if !utf8.ValidString(got) {
 		t.Error("capped emoji detail is not valid UTF-8")
 	}
@@ -575,10 +575,72 @@ func TestParseLRCReportsDropped(t *testing.T) {
 	}
 }
 
+// TestParseLRCIgnoresSectionHeaders: a bare [Chorus] is structure, not content, and
+// upstream has counted it as a dropped line since 1.7 because its --strict refuses
+// content it cannot store. Counting it here would report an ordinary sidecar as
+// partly broken. A mistyped timestamp still counts, and so does a header with text
+// after it, which the parser really did drop.
+func TestParseLRCIgnoresSectionHeaders(t *testing.T) {
+	const bom = "\xef\xbb\xbf"
+	// The same sheet under every line ending the parser accepts, and behind a BOM:
+	// the header filter has to number lines the way the parser does.
+	for _, text := range []string{
+		"[00:01.00]a\n[Chorus]\n[00:02.00]b\n",
+		"[00:01.00]a\r\n[Chorus]\r\n[00:02.00]b\r\n",
+		"[00:01.00]a\r[Chorus]\r[00:02.00]b\r",
+		bom + "[Chorus]\n[00:01.00]a\n[00:02.00]b\n",
+	} {
+		lines, dropped := ParseLRC(text)
+		if len(lines) != 2 || len(dropped) != 0 || LRCPartial(lines, dropped) {
+			t.Errorf("%q: lines = %d, dropped = %v; want 2 lines and no drops", text, len(lines), dropped)
+		}
+	}
+	// Mixed endings: line 2 is the bad one, line 3 the header.
+	if _, dropped := ParseLRC("[00:01.00]a\r\nbad line\r[Chorus]\n[00:02.00]b\n"); len(dropped) != 1 || dropped[0] != 2 {
+		t.Errorf("dropped = %v, want only line 2", dropped)
+	}
+	for _, line := range []string{"[01:xx.00]b", "[01.23.45]", "[Chorus] [x2]"} {
+		if _, dropped := ParseLRC("[00:01.00]a\n" + line + "\n"); len(dropped) != 1 || dropped[0] != 2 {
+			t.Errorf("%q: dropped = %v, want line 2 counted", line, dropped)
+		}
+	}
+}
+
+// TestCoverFromDocSkipsALinkedPicture: ID3 spells a URL as a picture with the "-->"
+// MIME, whose bytes are the URL text. The last-resort rule takes the first picture
+// with bytes whatever its format, so without the skip that URL would be stored as
+// the file's cover art.
+func TestCoverFromDocSkipsALinkedPicture(t *testing.T) {
+	ctx := context.Background()
+	path := writeTemp(t, "linked.mp3", testaudio.BuildMP3("T", "A", "Al", 1))
+	doc, err := waxlabel.ParseFile(ctx, path)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	// Prepare refuses a link without the unrecognized-pictures option.
+	plan, err := doc.Edit().
+		AddPicture(waxlabel.Picture{Type: waxlabel.PicFrontCover, MIME: waxlabel.LinkMIME, Data: []byte("https://example.com/c.jpg")}).
+		Prepare(waxlabel.WithVerifyEssence(), waxlabel.WithUnrecognizedPictures())
+	if err != nil {
+		t.Fatalf("prepare linked picture: %v", err)
+	}
+	if _, _, err := plan.Execute(ctx, waxlabel.SaveBack()); err != nil {
+		t.Fatalf("embed linked picture: %v", err)
+	}
+
+	fm, err := NewReader().Read(ctx, path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if fm.CoverArt != nil {
+		t.Errorf("CoverArt = %+v, want nil; a URL is not a cover", fm.CoverArt)
+	}
+}
+
 // TestWriteWarningsCapsMessage pins the bound at the seam that actually needs it.
 // A tag_write_lost diagnostic's detail is this Message verbatim, and the writers
 // that persist it (organize, the ReplayGain pass) do not cap it themselves, so this
-// is the one place that can. It is also the case capDetail's own doc names as its
+// is the one place that can. It is also the case CapDetail's own doc names as its
 // reason to exist. Upstream sanitizes the message but does not bound its length.
 func TestWriteWarningsCapsMessage(t *testing.T) {
 	huge := strings.Repeat("A", 1<<20)
@@ -1142,8 +1204,11 @@ func TestReservedWireSpellingsAreFolded(t *testing.T) {
 // "ape" key the extension fallback always gave it and the upgrade policy ranks as
 // lossless. WavPack already matched. Musepack names its stream version and folds to
 // "musepack" on both labels, for the SV7 frame stream and the SV8 packet stream
-// alike. All parse natively, with properties and an essence hash from the tag library
-// rather than the decoder's header probe.
+// alike. The three WMA generations 1.8 decodes all label as ASF, and Lossless is the
+// one of them the catalog names apart, since its depth comes from the codec extra
+// bytes where the others take the WAVEFORMATEX field. All parse natively, with
+// properties and an essence hash from the tag library rather than the decoder's
+// header probe.
 func TestReadFoldsFormatLabels(t *testing.T) {
 	const rate = 8000
 	sig := testaudio.ReferenceSignal(rate, time.Second)
@@ -1157,6 +1222,12 @@ func TestReadFoldsFormatLabels(t *testing.T) {
 		{"a.wv", "wavpack", "wavpack", testaudio.EncodeAs(t, "wavpack", "", rate, sig), rate, 1, 16, 1000},
 		{"a.mpc", "musepack", "musepack", testaudio.Fixture(t, "ref-2s-sv7.mpc"), 44100, 2, 0, 2000},
 		{"a.mp+", "musepack", "musepack", testaudio.Fixture(t, "ref-2s-sv8-chapters.mpc"), 44100, 1, 0, 2000},
+		{"lossless.wma", "asf", "wma lossless", testaudio.Fixture(t, "lossless-s16.wma"), 44100, 2, 16, 184},
+		{"pro.wma", "asf", "wma", testaudio.Fixture(t, "pro-s16.wma"), 44100, 2, 16, 417},
+		{"voice.wma", "asf", "wma", testaudio.Fixture(t, "voice-mono.wma"), 16000, 1, 16, 1000},
+		// Named .mp3, as Layer II usually is; 1.8 reads the Layer II header, so the
+		// codec is no longer folded onto mp3.
+		{"layer2.mp3", "mp3", "mp2", testaudio.Fixture(t, "ref-1s-layer2.mp2"), 44100, 1, 0, 1018},
 	} {
 		p := writeTemp(t, c.name, c.data)
 		fm, err := NewReader().Read(context.Background(), p)
@@ -1186,7 +1257,7 @@ func TestNormalizeFormatLabels(t *testing.T) {
 		"Monkey's Audio": "ape", "WavPack": "wavpack", "WMA v1": "wma", "WMA v2": "wma",
 		"WMA Pro": "wma", "WMA Voice": "wma", "WMA Lossless": "wma lossless",
 		"Musepack SV7": "musepack", "Musepack SV8": "musepack", "PCM": "pcm", "PCM (extensible)": "pcm",
-		"FLAC": "flac", "MPEG Audio": "mp3", "Vorbis": "vorbis",
+		"FLAC": "flac", "MPEG Audio": "mp3", "MP2": "mp2", "Vorbis": "vorbis",
 	}
 	for in, want := range codecs {
 		if got := normalizeCodec(in); got != want {

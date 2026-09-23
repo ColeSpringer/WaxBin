@@ -3,8 +3,8 @@ module github.com/colespringer/waxbin
 go 1.26
 
 require (
-	github.com/colespringer/waxflow v0.0.0-20260902192358-f6352566869c
-	github.com/colespringer/waxlabel v1.6.2
+	github.com/colespringer/waxflow v0.0.0-20260921034528-05f3032900a3
+	github.com/colespringer/waxlabel v1.8.0
 	github.com/fsnotify/fsnotify v1.9.0
 	github.com/gofrs/flock v0.13.0
 	github.com/oklog/ulid/v2 v2.1.1
@@ -22,7 +22,7 @@ require (
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
-	github.com/spf13/pflag v1.0.9 // indirect
+	github.com/spf13/pflag v1.0.10 // indirect
 	modernc.org/libc v1.73.4 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect

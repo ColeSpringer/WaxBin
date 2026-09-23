@@ -27,6 +27,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/colespringer/waxflow/cue"
+
 	"github.com/colespringer/waxbin"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/waxerr"
@@ -85,12 +87,11 @@ type Location struct {
 // branch on Virtual. Omitting is also the only way to spell "to the end": a
 // transcoder reads to=0 as the empty span, not as the whole file.
 //
-// The conversion is frames*SampleRate/75, exact whenever 75 divides the rate, which
-// every CD-family and hi-res rate does. It truncates for the rates that do not
-// (32000, 16000, 8000), but gaplessness does not depend on that: one track's end and
-// the next's start are the same frame, so they convert to the same sample and no
-// join can open a gap or overlap. waxflow/internal/cue.Samples is the same formula
-// on the other side of the boundary; the two must agree and cannot share a test.
+// The conversion is cue.Samples: frames times the rate over 75, exact for every
+// CD-family and hi-res rate. It truncates for rates 75 does not divide (32000, 16000,
+// 8000), but one track's end and the next's start are the same frame, so no join can
+// open a gap. The int conversion is safe: every stored frame count came through
+// cue.ParseTime, whose bound fits in 32 bits.
 //
 // It fails only for a virtual track whose file has no known rate, which WaxLabel
 // leaves 0 for a header it could not read. There is deliberately no fallback:
@@ -106,8 +107,7 @@ func (l Location) Span() (from, to int64, err error) {
 		return 0, 0, waxerr.New(waxerr.CodeInvalid, "pidpath.Span",
 			fmt.Sprintf("file %s declares no sample rate; a virtual track's window cannot be converted to samples", l.FilePID))
 	}
-	rate := int64(l.SampleRate)
-	return l.StartFrames * rate / model.FramesPerSecond, l.EndFrames * rate / model.FramesPerSecond, nil
+	return cue.Samples(int(l.StartFrames), l.SampleRate), cue.Samples(int(l.EndFrames), l.SampleRate), nil
 }
 
 // Options configures New and Open.

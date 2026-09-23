@@ -11,10 +11,13 @@ import (
 
 // losslessCodecs are the codec keys the quality policy treats as lossless. A
 // lossless encoding always outranks a lossy one regardless of bitrate.
+//
+// The float PCM spellings are WaxLabel's own: a float WAV or MOV is uncompressed
+// audio and belongs here beside plain "pcm".
 var losslessCodecs = map[string]bool{
 	"flac": true, "alac": true, "pcm": true, "wav": true, "aiff": true,
 	"ape": true, "wavpack": true, "tak": true, "tta": true, "dsd": true,
-	"wma lossless": true,
+	"wma lossless": true, "ieee float": true, "ieee float64": true,
 }
 
 // UpgradeCandidate is one encoding of a recording, with the quality fields the

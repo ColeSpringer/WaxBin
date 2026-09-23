@@ -181,6 +181,26 @@ func TestRunUnsupportedSkipped(t *testing.T) {
 	}
 }
 
+// TestRunOpenPhaseDamageErrored: a file whose magic matched and whose headers are then
+// damaged fails at open, and it must still land in Errored so audit can name it,
+// rather than in Skipped where it would be retried forever. The pass counts it and
+// carries on.
+func TestRunOpenPhaseDamageErrored(t *testing.T) {
+	dir := t.TempDir()
+	f := writeFixture(t, dir, "truncated.flac", 0, []byte("fLaC\x00\x00\x00"))
+	store := newFakeStore(f)
+	res, err := pureGoAnalyzer(t, store).Run(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Errored != 1 || res.Analyzed != 0 || res.Skipped != 0 {
+		t.Fatalf("Run = {Analyzed:%d Skipped:%d Errored:%d}, want {0 0 1}", res.Analyzed, res.Skipped, res.Errored)
+	}
+	if _, ok := store.puts[f.PID]; ok {
+		t.Error("a damaged file was stamped; nothing was measured")
+	}
+}
+
 // TestRunCorruptErrored: a recognized container whose bytes are truncated mid-
 // stream (an MP4 whose sample data runs past EOF) is a stream-phase failure. It
 // must land in Errored so audit sees it, NOT in Skipped where it would be retried

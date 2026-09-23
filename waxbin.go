@@ -221,29 +221,34 @@ func Open(ctx context.Context, opts Options) (*Library, error) {
 // promises exactly that read of every file. It is not free: the integrity pass
 // already streamed the file to re-hash it, and on anything larger than the page cache
 // this decode streams it again. The parse in between skips the essence hash, so the
-// file is read twice rather than three times. One limitation is accepted: the
-// decoder reports damage and a failed read with the same error code, so a transient
-// read error during the decode counts as damage, as it always has on the parse path.
-// A file neither reader can open at all is not evidence of damage, so ErrUnsupported
-// passes.
+// file is read twice rather than three times. Every error is treated as a finding,
+// whatever its code: damaged bytes come back CodeInvalid and an unreadable source
+// CodeIO, and a file the auditor cannot read is worth naming either way. A file
+// neither reader can open at all is not evidence of damage, so ErrUnsupported passes.
 //
 // A parse that succeeds but reports the audio truncated fails the probe too, since
-// the decoder tolerates a tail the container's own header says is short.
-func auditProbe(r meta.Inspector, eng *decode.Engine) func(context.Context, string) error {
-	return func(ctx context.Context, p string) error {
+// the decoder tolerates a tail the container's own header says is short. Damage the
+// decode did tolerate is returned rather than raised: the file plays, and the
+// auditor reports it at warn.
+func auditProbe(r meta.Inspector, eng *decode.Engine) audit.AudioProbe {
+	return func(ctx context.Context, p string) ([]string, error) {
 		fm, err := r.Inspect(ctx, p)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		for _, d := range fm.Diagnostics {
 			if d.Code == model.DiagCorruptAudio && d.Severity == model.SeverityError {
-				return waxerr.New(waxerr.CodeInvalid, "audit probe", d.Detail)
+				return nil, waxerr.New(waxerr.CodeInvalid, "audit probe", d.Detail)
 			}
 		}
-		if _, err := eng.Measure(ctx, p, nil); err != nil && !errors.Is(err, decode.ErrUnsupported) {
-			return err
+		m, err := eng.Measure(ctx, p, nil)
+		if err != nil {
+			if errors.Is(err, decode.ErrUnsupported) {
+				return nil, nil
+			}
+			return nil, err
 		}
-		return nil
+		return m.InputDamage, nil
 	}
 }
 

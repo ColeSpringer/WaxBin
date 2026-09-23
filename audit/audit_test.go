@@ -192,11 +192,11 @@ func TestAuditIntegrity(t *testing.T) {
 		{PID: "f2", Path: []byte(bitrot), DisplayPath: bitrot, Kind: model.FileAudio, ContentHash: "sha256:stale"},
 		{PID: "f3", Path: []byte(filepath.Join(dir, "gone.flac")), DisplayPath: "gone.flac", Kind: model.FileAudio, ContentHash: "x"},
 	}}
-	probeFail := func(_ context.Context, p string) error {
+	probeFail := func(_ context.Context, p string) ([]string, error) {
 		if filepath.Base(p) == "good.flac" {
-			return nil
+			return nil, nil
 		}
-		return os.ErrInvalid
+		return nil, os.ErrInvalid
 	}
 	rep, err := New(st, identity.ContentHash, probeFail, nil).Run(context.Background(), Config{
 		Only:      []model.AuditCheck{model.CheckIntegrity, model.CheckCorruptAudio},
@@ -215,6 +215,53 @@ func TestAuditIntegrity(t *testing.T) {
 	// good.flac probes clean; the other two (a missing file and bitrot) fail the probe.
 	if got := findingsFor(rep, model.CheckCorruptAudio); len(got) != 2 {
 		t.Errorf("corrupt findings = %+v, want 2", got)
+	}
+}
+
+// TestAuditReportsToleratedDamage: a file that decodes but needed the decoder to
+// work around damage is a warn, not an error. It plays, so calling it "corrupt or
+// undecodable" would send the user re-ripping a file that is fine to listen to,
+// while saying nothing would hide bytes that are rotting.
+func TestAuditReportsToleratedDamage(t *testing.T) {
+	dir := t.TempDir()
+	damaged := filepath.Join(dir, "damaged.wv")
+	clean := filepath.Join(dir, "clean.wv")
+	for _, p := range []string{damaged, clean} {
+		if err := os.WriteFile(p, []byte("real bytes"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	st := &fakeStore{files: []model.AuditFileInfo{
+		{PID: "f1", Path: []byte(damaged), DisplayPath: damaged, Kind: model.FileAudio, ItemPID: "i1"},
+		{PID: "f2", Path: []byte(clean), DisplayPath: clean, Kind: model.FileAudio},
+	}}
+	probe := func(_ context.Context, p string) ([]string, error) {
+		if filepath.Base(p) == "damaged.wv" {
+			return []string{"frame sync lost", "3471 trailing bytes dropped"}, nil
+		}
+		return nil, nil
+	}
+	rep, err := New(st, nil, probe, nil).Run(context.Background(), Config{
+		Only: []model.AuditCheck{model.CheckCorruptAudio}, Integrity: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := findingsFor(rep, model.CheckCorruptAudio)
+	if len(got) != 1 {
+		t.Fatalf("corrupt findings = %+v, want exactly 1 (the clean file reports nothing)", got)
+	}
+	if got[0].Severity != model.SeverityWarn {
+		t.Errorf("severity = %q, want warn for a file that decodes", got[0].Severity)
+	}
+	if !strings.Contains(got[0].Message, "frame sync lost") {
+		t.Errorf("message %q does not name the first damage", got[0].Message)
+	}
+	if !strings.Contains(got[0].Message, "and 1 more") {
+		t.Errorf("message %q does not count the damage it did not show", got[0].Message)
+	}
+	if len(got[0].Entities) != 1 {
+		t.Errorf("entities = %+v, want the item the file belongs to", got[0].Entities)
 	}
 }
 
@@ -333,9 +380,9 @@ func TestAuditCanceledProbeIsNotCorruption(t *testing.T) {
 		{PID: "f1", Path: []byte(f), DisplayPath: f, Kind: model.FileAudio},
 	}}
 	ctx, cancel := context.WithCancel(context.Background())
-	probe := func(pctx context.Context, _ string) error {
+	probe := func(pctx context.Context, _ string) ([]string, error) {
 		cancel()
-		return pctx.Err()
+		return nil, pctx.Err()
 	}
 	rep, err := New(st, nil, probe, nil).Run(ctx, Config{
 		Only: []model.AuditCheck{model.CheckCorruptAudio}, Integrity: true,

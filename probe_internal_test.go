@@ -70,7 +70,7 @@ func TestAuditProbeDecodesEveryContainer(t *testing.T) {
 
 	probe := auditProbe(reader, decode.New(slog.New(slog.DiscardHandler)))
 	for _, f := range files {
-		err := probe(ctx, filepath.Join(dir, f.name))
+		_, err := probe(ctx, filepath.Join(dir, f.name))
 		if f.corrupt && err == nil {
 			t.Errorf("%s passed the corrupt-audio probe", f.name)
 		}
@@ -95,10 +95,10 @@ func TestAuditProbeFailsOnParseTimeTruncation(t *testing.T) {
 	writeRaw(t, cut, flac[:len(flac)*60/100])
 
 	probe := auditProbe(meta.NewReader(), decode.New(slog.New(slog.DiscardHandler)))
-	if err := probe(ctx, good); err != nil {
+	if _, err := probe(ctx, good); err != nil {
 		t.Errorf("intact flac failed the corrupt-audio probe: %v", err)
 	}
-	if err := probe(ctx, cut); err == nil {
+	if _, err := probe(ctx, cut); err == nil {
 		t.Error("a flac cut short passed the corrupt-audio probe")
 	}
 }
@@ -112,8 +112,47 @@ func TestAuditProbeIgnoresUndecodableInput(t *testing.T) {
 	writeRaw(t, p, []byte("no container here, just bytes nothing can open"))
 
 	probe := auditProbe(meta.NewReader(), decode.New(slog.New(slog.DiscardHandler)))
-	if err := probe(ctx, p); err != nil {
+	if _, err := probe(ctx, p); err != nil {
 		t.Errorf("an unreadable container is not evidence of corruption: %v", err)
+	}
+}
+
+// TestAuditProbeReportsToleratedDamage closes the hole the test above names: a
+// WavPack simply cut short passed everything. The parse takes the header's total on
+// trust, and the demuxer drops the partial block and decodes the rest clean, so the
+// probe had nothing to report. WaxFlow now says what it worked around, and the probe
+// returns that rather than raising it, because the file still plays: the auditor
+// reports it at warn where an error would have read as "corrupt or undecodable".
+func TestAuditProbeReportsToleratedDamage(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	const rate = 8000
+	wv := testaudio.EncodeAs(t, "wavpack", "", rate, testaudio.ReferenceSignal(rate, 4*time.Second))
+	good := filepath.Join(dir, "good.wv")
+	cut := filepath.Join(dir, "cut.wv")
+	writeRaw(t, good, wv)
+	writeRaw(t, cut, wv[:len(wv)*60/100])
+
+	// The parse still passes it, which is what makes the decoder's report the only
+	// evidence there is.
+	fm, err := meta.NewReader().Read(ctx, cut)
+	if err != nil {
+		t.Fatalf("parse of the cut file: %v", err)
+	}
+	if hasDiag(fm.Diagnostics, model.DiagCorruptAudio) {
+		t.Fatal("the parse flagged the cut file; this test needs damage only the decode sees")
+	}
+
+	probe := auditProbe(meta.NewReader(), decode.New(slog.New(slog.DiscardHandler)))
+	damage, err := probe(ctx, cut)
+	if err != nil {
+		t.Fatalf("a cut wavpack must not fail the probe; it decodes: %v", err)
+	}
+	if len(damage) == 0 {
+		t.Error("damage is empty for a wavpack cut at 60%; the decoder worked around the shortfall")
+	}
+	if damage, err = probe(ctx, good); err != nil || len(damage) != 0 {
+		t.Errorf("intact wavpack = damage %q, err %v; want neither", damage, err)
 	}
 }
 

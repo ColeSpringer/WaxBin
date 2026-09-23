@@ -618,8 +618,8 @@ func syncChaptersForFile(ctx context.Context, tx *sql.Tx, bookItemID, fileID int
 
 // syncChaptersForFileSource replaces only ONE source's chapters for a file, leaving a
 // multi-file book's other parts (and this part's chapters from a richer source)
-// intact. It is the fast-path seam that updates .lrc/.cue/podcast chapters without
-// re-reading the audio.
+// intact. It serves the sources that arrive without a scan of the audio: a podcast's
+// chapter URL and a user's own chapters.
 func syncChaptersForFileSource(ctx context.Context, tx *sql.Tx, bookItemID, fileID int64, source string, chapters []model.Chapter) (bool, error) {
 	return syncChapters(ctx, tx, bookItemID, fileID, source, chapters, true)
 }
@@ -953,8 +953,8 @@ func (s *Store) bookChapters(ctx context.Context, bookItemID int64, parts []book
 	}
 	defer rows.Close()
 	// Group per file AND per source; a file may briefly carry chapters from more than
-	// one source (e.g. the fast-path added .cue chapters beside embedded ones), so
-	// pick the single highest-precedence source per file: embedded beats cue.
+	// one source (podcast_url chapters beside embedded ones, say), so pick the single
+	// highest-precedence source per file: embedded beats cue.
 	bySource := map[int64]map[string][]model.Chapter{}
 	for rows.Next() {
 		var fid int64

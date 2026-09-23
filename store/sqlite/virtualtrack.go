@@ -237,6 +237,39 @@ func virtualTracksForFile(ctx context.Context, tx *sql.Tx, fileID int64) (map[st
 	return out, rows.Err()
 }
 
+// VirtualTracksForPath returns the virtual tracks the file at path backs, in start
+// order, or none when it backs no rip. A scan that cannot read the file's sheet
+// re-puts these windows instead of collapsing the rip to one whole-file track.
+func (s *Store) VirtualTracksForPath(ctx context.Context, path []byte) ([]model.VirtualTrack, error) {
+	const op = "store.VirtualTracksForPath"
+	rows, err := s.read.QueryContext(ctx, `SELECT pi.title, COALESCE(t.artist,''), COALESCE(t.album,''),
+			COALESCE(t.album_artist,''), COALESCE(t.genre,''), COALESCE(t.track_no,0), COALESCE(t.year,0),
+			itf.start_frames, COALESCE(itf.end_frames,0)
+		FROM file f
+		JOIN item_file itf ON itf.file_id = f.id AND itf.role = 'primary' AND itf.start_frames IS NOT NULL
+		JOIN playable_item pi ON pi.id = itf.item_id
+		LEFT JOIN track t ON t.item_id = pi.id
+		WHERE f.path = ?
+		ORDER BY itf.start_frames`, path)
+	if err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	defer rows.Close()
+	var out []model.VirtualTrack
+	for rows.Next() {
+		var vt model.VirtualTrack
+		if err := rows.Scan(&vt.Item.Title, &vt.Track.Artist, &vt.Track.Album, &vt.Track.AlbumArtist,
+			&vt.Track.Genre, &vt.Track.TrackNo, &vt.Track.Year, &vt.StartFrames, &vt.EndFrames); err != nil {
+			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		out = append(out, vt)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	return out, nil
+}
+
 // virtualTrackMetaDiffers reports whether a desired virtual track's display metadata
 // differs from what is already stored, so an unchanged track (common on a forced
 // rescan) does no entity work and emits no delta. Offsets are compared separately by

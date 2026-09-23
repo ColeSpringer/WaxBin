@@ -13,9 +13,8 @@ import (
 // path->ScopedFile, so the scanner can fast-path an unchanged file (size+mtime
 // match) in memory and reconcile a vanished one at end-of-walk without a per-file
 // SELECT. scopePrefix is a raw path prefix (typically the walk root plus a
-// separator); nil/empty spans the whole library. Each entry carries the item the
-// file backs (for sidecar-only updates) and its known sidecar observations (for the
-// stat-gated sidecar re-parse).
+// separator); nil/empty spans the whole library. Each entry carries its known sidecar
+// observations, which the fast path stat-compares.
 func (s *Store) LoadScopedFileIndex(ctx context.Context, libraryID int64, scopePrefix []byte) (map[string]model.ScopedFile, error) {
 	const op = "store.LoadScopedFileIndex"
 	lo, hi := scopePrefix, prefixUpperBound(scopePrefix)
@@ -26,7 +25,7 @@ func (s *Store) LoadScopedFileIndex(ctx context.Context, libraryID int64, scopeP
 	// fast-pathed: a restored file with the same size+mtime must go through the full
 	// path to flip its item back to present (a fast-path skip would leave it missing).
 	// Such a file, if still gone, simply is not re-reconciled (it is already missing).
-	fq := `SELECT f.id, f.pid, f.path, f.size, f.mtime_ns, COALESCE(pi.pid,''), COALESCE(pi.kind,'')
+	fq := `SELECT f.id, f.pid, f.path, f.size, f.mtime_ns
 		FROM file f
 		LEFT JOIN item_file itf ON itf.file_id = f.id
 		LEFT JOIN playable_item pi ON pi.id = itf.item_id
@@ -41,10 +40,8 @@ func (s *Store) LoadScopedFileIndex(ctx context.Context, libraryID int64, scopeP
 		}
 	}
 	// One row per file. A single-file rip backs N virtual tracks through N item_file
-	// edges, so without the GROUP BY that file would return N identical rows; the
-	// pid/kind of an arbitrary backing item is picked, which is all the fast-path needs
-	// (every virtual track is a present 'track'). A normal track or book part has one
-	// edge, so the grouping is a no-op for them.
+	// edges, so without the GROUP BY that file would return N identical rows. A normal
+	// track or book part has one edge, so the grouping is a no-op for them.
 	fq += " GROUP BY f.id"
 
 	rows, err := s.read.QueryContext(ctx, fq, args...)
@@ -55,17 +52,14 @@ func (s *Store) LoadScopedFileIndex(ctx context.Context, libraryID int64, scopeP
 	pathByID := make(map[int64]string)
 	for rows.Next() {
 		var id int64
-		var fpid, ipid, ikind string
+		var fpid string
 		var path []byte
 		var size, mtime int64
-		if err := rows.Scan(&id, &fpid, &path, &size, &mtime, &ipid, &ikind); err != nil {
+		if err := rows.Scan(&id, &fpid, &path, &size, &mtime); err != nil {
 			rows.Close()
 			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
-		byID[id] = &model.ScopedFile{
-			FilePID: model.PID(fpid), ItemPID: model.PID(ipid), ItemKind: model.Kind(ikind),
-			Size: size, MTimeNS: mtime,
-		}
+		byID[id] = &model.ScopedFile{FilePID: model.PID(fpid), Size: size, MTimeNS: mtime}
 		pathByID[id] = string(path)
 	}
 	if err := rows.Err(); err != nil {

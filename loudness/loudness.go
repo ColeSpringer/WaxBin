@@ -28,11 +28,17 @@ const ReferenceLUFS = -18.0
 // AAC-LC and Vorbis moved too, but only within WaxFlow's MDCT tolerance, which
 // its own test gates hold at around 1e-9.
 //
+// Version 3 names two more. Ogg Opus measurements under version 2 include the
+// OpusHead output gain, which the ReplayGain write-back now sets, so they are taken
+// again without it. And the same WaxFlow bump added WMA Lossless, Pro and Voice,
+// G.711 and both ADPCM families, which fpcalc hosts had stamped with a fingerprint
+// and no measurement, as version 2 found for WavPack, Monkey's Audio and WMA.
+//
 // It is not a cheap way to re-measure. The analyze pass has no measure-only path
 // and PutAnalysis rewrites the fingerprint and its index terms on every store, so
 // any bump here re-runs the whole pipeline. It is bumped because it names what
 // went stale.
-const AnalysisVersion = 2
+const AnalysisVersion = 3
 
 // Result is a track's measured loudness.
 type Result struct {

@@ -156,7 +156,10 @@ func newChaptersSetCmd(g *globals) *cobra.Command {
 				if err != nil {
 					return waxerr.Wrapf(waxerr.CodeIO, "chapters set", err, "reading %s", filePath)
 				}
-				chapters = meta.ParseCue(string(b))
+				chapters, err = meta.ParseCue(string(b))
+				if err != nil {
+					return waxerr.Wrapf(waxerr.CodeInvalid, "chapters set", err, "parsing %s", filePath)
+				}
 				if len(chapters) == 0 {
 					return waxerr.New(waxerr.CodeInvalid, "chapters set", "no chapters parsed from "+filePath)
 				}

@@ -29,8 +29,8 @@ func TestLoadScopedFileIndex(t *testing.T) {
 	if !ok {
 		t.Fatal("index missing /lib/a/one.mp3")
 	}
-	if got.FilePID != a.FilePID || got.ItemPID != a.ItemPID {
-		t.Errorf("index pids = file %s / item %s, want file %s / item %s", got.FilePID, got.ItemPID, a.FilePID, a.ItemPID)
+	if got.FilePID != a.FilePID {
+		t.Errorf("index file pid = %s, want %s", got.FilePID, a.FilePID)
 	}
 	if got.Size != int64(len("ca")) || got.MTimeNS != 1 {
 		t.Errorf("index size/mtime = %d/%d, want %d/1", got.Size, got.MTimeNS, len("ca"))
@@ -229,65 +229,6 @@ func TestMarkItemMissingRefusesFilelessStates(t *testing.T) {
 	}
 }
 
-// TestUpdateItemSidecars applies a .lrc over unchanged audio, emitting an item delta
-// on change and staying silent on a no-op.
-func TestUpdateItemSidecars(t *testing.T) {
-	st, lib := entityFixture(t)
-	ctx := context.Background()
-	a := putTrack(t, st, lib.ID, trackSpec{path: "/lib/a.mp3", essence: "ea", content: "ca", title: "A"})
-
-	before := latestSeq(t, st)
-	ly := &model.Lyrics{Source: model.SourceSidecar, Synced: []model.SyncedLine{{TimeMS: 0, Text: "hi"}}}
-	changed, err := st.UpdateItemSidecars(ctx, model.SidecarUpdate{ItemPID: a.ItemPID, FilePID: a.FilePID, Lyrics: ly})
-	if err != nil {
-		t.Fatalf("update sidecars: %v", err)
-	}
-	if !changed {
-		t.Fatal("first lyrics write reported unchanged")
-	}
-	if latestSeq(t, st) <= before {
-		t.Error("changed sidecar update emitted no change_log delta")
-	}
-	got, err := st.LyricsByItem(ctx, a.ItemPID)
-	if err != nil || len(got.Synced) != 1 || got.Synced[0].Text != "hi" {
-		t.Fatalf("lyrics not persisted: %v %+v", err, got)
-	}
-
-	// No-op: same lyrics again reports unchanged and emits no delta.
-	seq := latestSeq(t, st)
-	changed, err = st.UpdateItemSidecars(ctx, model.SidecarUpdate{ItemPID: a.ItemPID, FilePID: a.FilePID, Lyrics: ly})
-	if err != nil {
-		t.Fatalf("re-update: %v", err)
-	}
-	if changed {
-		t.Error("identical lyrics reported changed")
-	}
-	if latestSeq(t, st) != seq {
-		t.Error("no-op sidecar update emitted a delta")
-	}
-}
-
-// TestUpdateItemSidecarsPersistsObservations confirms file_aux_state rows are
-// written so a subsequent index load carries them.
-func TestUpdateItemSidecarsPersistsObservations(t *testing.T) {
-	st, lib := entityFixture(t)
-	ctx := context.Background()
-	a := putTrack(t, st, lib.ID, trackSpec{path: "/lib/a.mp3", essence: "ea", content: "ca", title: "A"})
-
-	obs := []model.AuxObservation{{Kind: model.AuxLyrics, Path: []byte("/lib/a.lrc"), Size: 10, MTimeNS: 42, Hash: "h"}}
-	if _, err := st.UpdateItemSidecars(ctx, model.SidecarUpdate{ItemPID: a.ItemPID, FilePID: a.FilePID, Observations: obs}); err != nil {
-		t.Fatalf("update sidecars: %v", err)
-	}
-	idx, err := st.LoadScopedFileIndex(ctx, lib.ID, nil)
-	if err != nil {
-		t.Fatalf("load index: %v", err)
-	}
-	entry := idx["/lib/a.mp3"]
-	if len(entry.Aux) != 1 || entry.Aux[0].Kind != model.AuxLyrics || entry.Aux[0].MTimeNS != 42 {
-		t.Fatalf("aux observation not carried in index: %+v", entry.Aux)
-	}
-}
-
 // TestUpdateFileStateIfUnchanged updates on a size/mtime match and skips on a
 // mismatch (optimistic concurrency).
 func TestUpdateFileStateIfUnchanged(t *testing.T) {
@@ -328,42 +269,6 @@ func TestUpdateFileStateIfUnchanged(t *testing.T) {
 	}
 	if updated {
 		t.Fatal("expected skip on stale size/mtime")
-	}
-}
-
-// TestUpdateItemSidecarsPreservesUnsynced: a fast-path .lrc update (synced only)
-// preserves the stored embedded unsynchronized block instead of clobbering it.
-func TestUpdateItemSidecarsPreservesUnsynced(t *testing.T) {
-	st, lib := entityFixture(t)
-	ctx := context.Background()
-	a := putTrack(t, st, lib.ID, trackSpec{path: "/lib/a.mp3", essence: "ea", content: "ca", title: "A"})
-
-	// Seed lyrics as the full path would: .lrc synced lines merged with an embedded
-	// unsynchronized block.
-	if _, err := st.UpdateItemSidecars(ctx, model.SidecarUpdate{
-		ItemPID: a.ItemPID, FilePID: a.FilePID,
-		Lyrics: &model.Lyrics{Source: model.SourceSidecar, Synced: []model.SyncedLine{{TimeMS: 0, Text: "one"}}, Unsynced: "embedded block"},
-	}); err != nil {
-		t.Fatalf("seed lyrics: %v", err)
-	}
-
-	// A fast-path .lrc update carries only synced lines (no unsynced).
-	if _, err := st.UpdateItemSidecars(ctx, model.SidecarUpdate{
-		ItemPID: a.ItemPID, FilePID: a.FilePID,
-		Lyrics: &model.Lyrics{Source: model.SourceSidecar, Synced: []model.SyncedLine{{TimeMS: 0, Text: "one"}, {TimeMS: 1000, Text: "two"}}},
-	}); err != nil {
-		t.Fatalf("update lyrics: %v", err)
-	}
-
-	ly, err := st.LyricsByItem(ctx, a.ItemPID)
-	if err != nil {
-		t.Fatalf("read lyrics: %v", err)
-	}
-	if len(ly.Synced) != 2 {
-		t.Errorf("synced lines = %d, want 2 (the updated .lrc)", len(ly.Synced))
-	}
-	if ly.Unsynced != "embedded block" {
-		t.Errorf("unsynced = %q, want the preserved embedded block", ly.Unsynced)
 	}
 }
 

@@ -228,18 +228,18 @@ func TestScanCueSidecarReadableButEmpty(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "book.cue"), []byte("REM just a comment\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	sheet, obs, _, ok := scanCueSidecar(audio)
+	sheet, obs, _, unread, ok := scanCueSidecar(audio)
 	if !ok {
 		t.Fatal("scanCueSidecar reported not-readable for a readable .cue; its observation must be recorded so the fast-path does not re-parse it forever")
 	}
-	if sheet != nil {
-		t.Errorf("sheet = %v, want nil from a trackless cue", sheet)
+	if sheet != nil || unread {
+		t.Errorf("sheet = %v, unread = %v; want nil from a trackless cue that was read", sheet, unread)
 	}
 	if obs.Kind != model.AuxCue || string(obs.Path) != filepath.Join(dir, "book.cue") || obs.Size == 0 {
 		t.Errorf("obs = %+v, want a populated AuxCue observation", obs)
 	}
 	// A truly-missing .cue still reports not-readable.
-	if _, _, _, ok := scanCueSidecar(filepath.Join(dir, "missing.m4b")); ok {
+	if _, _, _, _, ok := scanCueSidecar(filepath.Join(dir, "missing.m4b")); ok {
 		t.Error("scanCueSidecar should report ok=false when there is no .cue")
 	}
 }

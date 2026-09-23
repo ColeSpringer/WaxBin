@@ -6,12 +6,15 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"os"
 	"path/filepath"
 	"time"
 
 	"github.com/colespringer/waxflow"
 	"github.com/colespringer/waxflow/audio"
+	"github.com/colespringer/waxflow/codec"
+	"github.com/colespringer/waxflow/codec/opus"
 	"github.com/colespringer/waxflow/container"
 	"github.com/colespringer/waxflow/dsp"
 	"github.com/colespringer/waxflow/format"
@@ -28,19 +31,30 @@ const decoderName = "waxflow"
 // in MP4). The analyze pass skips such a file and retries it on a future run,
 // since a later WaxFlow may decode it.
 //
-// It is set ONLY when opening the input fails. A failure once decoding has begun
-// is never this error, however it is coded upstream: a recognized container with
-// damaged frames is a corrupt file, not an unsupported one, and it must surface
-// as an error rather than be buried as a silent skip and retried forever. Test
-// for it with errors.Is.
+// It is set only when opening the input fails, and only when nothing recognized
+// the bytes: openErr says which failures those are. A file whose magic matched
+// and whose headers are then damaged is corrupt (CodeInvalid), and so is any
+// failure once decoding has begun, however it is coded upstream. Burying those as
+// a silent skip would retry them forever. Test for it with errors.Is.
 var ErrUnsupported = errors.New("decode: unsupported input")
 
 // Measurement is a whole-file loudness measurement in WaxFlow's dB domain.
 // TruePeakDB and LoudnessRange are available upstream but deliberately
 // unstored: the catalog has no columns for them.
+//
+// For an Ogg Opus file the values, and the chunks handed to the tap, leave out the
+// header output gain the decoder applies, since the ReplayGain write-back sets it:
+// kept in, a re-measure would fold the same gain in again, and the waveform, stored
+// against an essence hash that masks the header, would go stale on every write.
 type Measurement struct {
 	IntegratedLUFS float64 // math.Inf(-1) for silence
 	SamplePeakDB   float64 // math.Inf(-1) for silence
+	// HeaderGainDB is the Ogg Opus header output gain that was removed from the two
+	// values above, and 0 everywhere else.
+	HeaderGainDB float64
+	// InputDamage lists what the tolerant read worked around (a truncated stream, a
+	// lost frame sync), complete because Measure reads to the end; nil when clean.
+	InputDamage []string
 }
 
 // Engine decodes audio. It is safe for concurrent use.
@@ -80,11 +94,22 @@ func (e *Engine) Measure(ctx context.Context, path string, tap func(chans [][]fl
 	defer f.Close()
 	defer med.Close()
 
+	hg := headerGainDB(med)
 	var wfTap func([][]float32) error
 	if tap != nil {
 		// WaxBin's taps cannot fail, so the adapter absorbs WaxFlow's error
 		// return rather than leaking it to every caller.
 		wfTap = func(chans [][]float32) error { tap(chans); return nil }
+		if hg != 0 {
+			// Scale a copy: the chunk is the meter's too.
+			scale := float32(math.Pow(10, -hg/20))
+			var scaled [][]float32
+			wfTap = func(chans [][]float32) error {
+				scaled = scaleChans(scaled, chans, scale)
+				tap(scaled)
+				return nil
+			}
+		}
 	}
 	res, err := e.wf.AnalyzeMedia(ctx, med, waxflow.AnalyzeOptions{Tap: wfTap})
 	if err != nil {
@@ -92,7 +117,47 @@ func (e *Engine) Measure(ctx context.Context, path string, tap func(chans [][]fl
 		// a mid-decode failure means the bytes are bad, not the format.
 		return nil, mapErr("decode.Measure", err)
 	}
-	return &Measurement{IntegratedLUFS: res.IntegratedLUFS, SamplePeakDB: res.SamplePeakDB}, nil
+	// -Inf silence stays -Inf through the subtraction.
+	return &Measurement{
+		IntegratedLUFS: res.IntegratedLUFS - hg,
+		SamplePeakDB:   res.SamplePeakDB - hg,
+		HeaderGainDB:   hg,
+		InputDamage:    res.InputWarnings,
+	}, nil
+}
+
+// scaleChans writes chans times scale into dst, reusing its buffers, and returns it.
+func scaleChans(dst, chans [][]float32, scale float32) [][]float32 {
+	if len(dst) != len(chans) {
+		dst = make([][]float32, len(chans))
+	}
+	for c, src := range chans {
+		d := dst[c][:0]
+		for _, v := range src {
+			d = append(d, v*scale)
+		}
+		dst[c] = d
+	}
+	return dst
+}
+
+// headerGainDB is the OpusHead output gain of an Ogg Opus file in dB, else 0. The Ogg
+// gate matches tagwrite.replayGainEdits: WaxBin writes no other Opus header, so any
+// other measurement keeps whatever gain its header applies.
+func headerGainDB(med format.Media) float64 {
+	info := med.Info()
+	if info.Container != "ogg" {
+		return 0
+	}
+	t := info.Default()
+	if t.Codec != codec.Opus {
+		return 0
+	}
+	cfg, err := opus.ParseOpusHead(t.CodecConfig)
+	if err != nil {
+		return 0
+	}
+	return float64(cfg.Gain) / 256
 }
 
 // Mono decodes at most max of path as mono PCM at rate (0 = the source rate).
@@ -210,6 +275,8 @@ func (e *Engine) open(ctx context.Context, path string) (*os.File, format.Media,
 	if err != nil {
 		return nil, nil, waxerr.Wrap(waxerr.CodeIO, "decode: open file", err)
 	}
+	// A path that is not a regular file is refused here, and that says something
+	// about the catalog, not the format, so it is an error rather than a skip.
 	src, err := container.FileSource(f)
 	if err != nil {
 		f.Close()
@@ -217,20 +284,31 @@ func (e *Engine) open(ctx context.Context, path string) (*os.File, format.Media,
 	}
 	// The hint only breaks ties; content sniffing is primary. format.resolve
 	// lowercases it and strips the dot.
-	med, err := e.wf.OpenStream(container.BindContext(ctx, src), filepath.Ext(path))
+	ext := filepath.Ext(path)
+	med, err := e.wf.OpenStream(container.BindContext(ctx, src), ext)
 	if err != nil {
+		err = openErr(ctx, src, ext, err)
 		f.Close()
-		// Both codes mean "this build cannot decode this input", so align with
-		// mapErr, which folds them into CodeUnsupported. Keying only
-		// CodeUnsupportedFormat would Error-forever a file OpenStream rejects with
-		// CodeUnsupportedSource instead of skipping it. (Unreachable from OpenStream
-		// today, but cheap to keep honest.)
-		if code := flowerr.CodeOf(err); code == flowerr.CodeUnsupportedFormat || code == flowerr.CodeUnsupportedSource {
-			return nil, nil, fmt.Errorf("%w: %v", ErrUnsupported, err)
-		}
-		return nil, nil, mapErr("decode: open stream", err)
+		return nil, nil, err
 	}
 	return f, med, nil
+}
+
+// openErr classifies a failed OpenStream. The unsupported codes are ErrUnsupported,
+// and so is a refusal from a demuxer the extension alone chose: WaxFlow falls back to
+// the extension when no magic matches, so a healthy Layer II file named .mp3 is
+// refused as malformed. Sniffing again without the extension tells the two apart.
+func openErr(ctx context.Context, src container.Source, ext string, err error) error {
+	code := flowerr.CodeOf(err)
+	unsupported := code == flowerr.CodeUnsupportedFormat || code == flowerr.CodeUnsupportedSource
+	if !unsupported && ext != "" {
+		_, perr := format.Probe(container.BindContext(ctx, src), "", nil)
+		unsupported = flowerr.CodeOf(perr) == flowerr.CodeUnsupportedFormat
+	}
+	if unsupported {
+		return fmt.Errorf("%w: %v", ErrUnsupported, err)
+	}
+	return mapErr("decode: open stream", err)
 }
 
 // MixMono returns an amplitude-average mono mix of the planar chans, using dst's
@@ -292,10 +370,14 @@ func Coverage() []FormatSupport {
 // mapErr translates WaxFlow's error vocabulary into WaxBin's, so it stops at
 // this package. It never yields ErrUnsupported: only the open call classifies
 // that, by phase rather than by code.
+// The default arm covers every code it does not name (internal among them), so
+// CodeIO from here is not only an unreadable source.
 func mapErr(op string, err error) error {
 	switch flowerr.CodeOf(err) {
 	case flowerr.CodeUnsupportedFormat, flowerr.CodeUnsupportedSource:
 		return waxerr.Wrap(waxerr.CodeUnsupported, op, err)
+	case flowerr.CodeMalformedInput:
+		return waxerr.Wrap(waxerr.CodeInvalid, op, err)
 	case flowerr.CodeSourceUnreadable:
 		return waxerr.Wrap(waxerr.CodeIO, op, err)
 	case flowerr.CodeInvalidRequest:

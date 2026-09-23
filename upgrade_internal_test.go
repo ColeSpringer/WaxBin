@@ -30,3 +30,14 @@ func TestSortByQualityStableTie(t *testing.T) {
 		t.Errorf("tie should break by PID ascending, got %s first", cs[0].ItemPID)
 	}
 }
+
+// TestLosslessCodecsCoverFloatPCM: WaxLabel labels float PCM by its sample format
+// rather than as "PCM", so a float WAV or MOV would rank as lossy without these
+// keys, and the upgrade policy would offer an mp3 as an improvement on it.
+func TestLosslessCodecsCoverFloatPCM(t *testing.T) {
+	for _, k := range []string{"pcm", "ieee float", "ieee float64"} {
+		if !losslessCodecs[k] {
+			t.Errorf("losslessCodecs[%q] is false; uncompressed audio must outrank a lossy encoding", k)
+		}
+	}
+}

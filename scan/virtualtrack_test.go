@@ -134,10 +134,11 @@ func TestScanVirtualTracksDropsUnindexedTrack(t *testing.T) {
 
 	writeMP3Raw(t, filepath.Join(root, "album.mp3"),
 		testaudio.BuildMP3WithAudio("Whole", "A", "Al", 1, testaudio.AudioWithSeed(17)))
-	// TRACK 02's INDEX names 90 seconds, which MM:SS:FF cannot spell.
+	// TRACK 02 declares only an INDEX 00, the pregap start, so it has no start of
+	// its own.
 	writeCue(t, filepath.Join(root, "album.cue"), "TITLE \"The Album\"\nFILE \"album.mp3\" WAVE\n"+
 		"  TRACK 01 AUDIO\n    TITLE \"Fine\"\n    INDEX 01 00:00:00\n"+
-		"  TRACK 02 AUDIO\n    TITLE \"Broken\"\n    INDEX 01 00:90:00\n"+
+		"  TRACK 02 AUDIO\n    TITLE \"Broken\"\n    INDEX 00 00:00:05\n"+
 		"  TRACK 03 AUDIO\n    TITLE \"Also Fine\"\n    INDEX 01 00:00:10\n")
 	scanAll(t, sc, lib, false)
 
@@ -192,10 +193,10 @@ func TestScanCueWithNoUsableTracksKeepsTheFile(t *testing.T) {
 		t.Fatalf("first scan should yield one whole-file track, got %d", len(before))
 	}
 
-	// Every INDEX names 99 seconds, which MM:SS:FF cannot spell.
+	// Neither TRACK declares an INDEX 01, so neither has a start.
 	writeCue(t, cuePath, "TITLE \"X\"\nFILE \"album.mp3\" WAVE\n"+
-		"  TRACK 01 AUDIO\n    TITLE \"A\"\n    INDEX 01 00:99:00\n"+
-		"  TRACK 02 AUDIO\n    TITLE \"B\"\n    INDEX 01 00:99:01\n")
+		"  TRACK 01 AUDIO\n    TITLE \"A\"\n    INDEX 00 00:00:00\n"+
+		"  TRACK 02 AUDIO\n    TITLE \"B\"\n    INDEX 00 00:00:05\n")
 	future := time.Now().Add(time.Hour)
 	_ = os.Chtimes(cuePath, future, future)
 	scanAll(t, sc, lib, false)
@@ -230,6 +231,149 @@ func TestScanCueWithNoUsableTracksKeepsTheFile(t *testing.T) {
 	assertScanConsistent(t, st)
 }
 
+// TestScanCueRefusedSheetKeepsTheFile: one malformed timestamp costs the whole sheet,
+// because the parse is syntactic. The file must then stay an ordinary whole-file
+// track, and the refusal must be as visible as a per-track drop, naming the line to
+// go look at.
+func TestScanCueRefusedSheetKeepsTheFile(t *testing.T) {
+	st, lib, sc, _, root := fastPathFixture(t)
+	ctx := context.Background()
+	writeMP3Raw(t, filepath.Join(root, "album.mp3"),
+		testaudio.BuildMP3WithAudio("Whole File", "A", "Al", 1, testaudio.AudioWithSeed(24)))
+	// 99 seconds is not a thing MM:SS:FF can spell.
+	writeCue(t, filepath.Join(root, "album.cue"), "TITLE \"X\"\nFILE \"album.mp3\" WAVE\n"+
+		"  TRACK 01 AUDIO\n    TITLE \"A\"\n    INDEX 01 00:99:00\n"+
+		"  TRACK 02 AUDIO\n    TITLE \"B\"\n    INDEX 01 00:00:10\n")
+	scanAll(t, sc, lib, false)
+
+	items := itemsByTrack(t, st)
+	if len(items) != 1 {
+		t.Fatalf("items = %d, want the whole-file track to survive a refused cue", len(items))
+	}
+	if items[0].Virtual {
+		t.Error("a refused sheet must not produce a virtual track")
+	}
+	ds, err := st.FileDiagnostics(ctx, model.DiagnosticFilter{})
+	if err != nil {
+		t.Fatalf("file diagnostics: %v", err)
+	}
+	var got []model.FileDiagnostic
+	for _, d := range ds {
+		if d.Code == model.DiagCueTrackDropped {
+			got = append(got, d)
+		}
+	}
+	if len(got) != 1 {
+		t.Fatalf("cue_track_dropped diagnostics = %d, want exactly 1: %+v", len(got), got)
+	}
+	if !strings.Contains(got[0].Detail, "line") {
+		t.Errorf("detail %q does not name the line that was refused", got[0].Detail)
+	}
+	assertScanConsistent(t, st)
+}
+
+// TestScanRefusedSheetKeepsAnExistingRip: one typo refuses the whole sheet, and a rip
+// that fell back to a whole-file track would lose every virtual track with its plays,
+// stars and playlist entries; fixing the typo would bring the tracks back under new
+// ids. An unread sheet says nothing new about the tracks, so the rip keeps them, and
+// the refusal is still reported. scan --force after the upgrade re-reads every sheet,
+// which is what makes this more than an edge case.
+func TestScanRefusedSheetKeepsAnExistingRip(t *testing.T) {
+	st, lib, sc, _, root := fastPathFixture(t)
+	ctx := context.Background()
+	cuePath := filepath.Join(root, "album.cue")
+	writeMP3Raw(t, filepath.Join(root, "album.mp3"),
+		testaudio.BuildMP3WithAudio("Whole", "A", "Al", 1, testaudio.AudioWithSeed(26)))
+	sheet := func(third string) string {
+		return "TITLE \"The Album\"\nFILE \"album.mp3\" WAVE\n" +
+			"  TRACK 01 AUDIO\n    TITLE \"One\"\n    INDEX 01 00:00:00\n" +
+			"  TRACK 02 AUDIO\n    TITLE \"Two\"\n    INDEX 01 00:00:05\n" +
+			"  TRACK 03 AUDIO\n    TITLE \"Three\"\n    INDEX 01 " + third + "\n"
+	}
+	writeCue(t, cuePath, sheet("00:00:10"))
+	scanAll(t, sc, lib, false)
+	before := itemsByTrack(t, st)
+	if len(before) != 3 {
+		t.Fatalf("virtual tracks = %d, want 3", len(before))
+	}
+
+	for i, cue := range []string{sheet("00:60:10"), sheet("00:00:10")} {
+		writeCue(t, cuePath, cue)
+		future := time.Now().Add(time.Duration(i+1) * time.Hour)
+		_ = os.Chtimes(cuePath, future, future)
+		scanAll(t, sc, lib, false)
+		after := itemsByTrack(t, st)
+		if len(after) != 3 {
+			t.Fatalf("pass %d: items = %d, want the 3 virtual tracks kept", i, len(after))
+		}
+		for j := range after {
+			if after[j].PID != before[j].PID || !after[j].Virtual {
+				t.Errorf("pass %d: track %d is %s (virtual %v), want %s kept", i, j, after[j].PID, after[j].Virtual, before[j].PID)
+			}
+		}
+		// The refusal is reported while it stands, naming the sheet's own line, and
+		// the fixed sheet clears it.
+		ds, err := st.FileDiagnostics(ctx, model.DiagnosticFilter{})
+		if err != nil {
+			t.Fatalf("file diagnostics: %v", err)
+		}
+		var refusal string
+		for _, d := range ds {
+			if d.Code == model.DiagCueTrackDropped {
+				refusal = d.Detail
+			}
+		}
+		switch {
+		case i == 0 && !strings.Contains(refusal, "line 11: time"):
+			t.Errorf("refusal detail = %q, want it to name line 11 and why", refusal)
+		case i == 1 && refusal != "":
+			t.Errorf("a stale cue_track_dropped survived the fix: %q", refusal)
+		}
+	}
+	assertScanConsistent(t, st)
+}
+
+// TestScanVirtualTracksDropDataTrack: a mixed-mode disc's first track is data. It
+// carries an INDEX 01 like any other, so only its datatype tells it apart, and
+// carving it as audio would yield a piece of filesystem named after a song.
+func TestScanVirtualTracksDropDataTrack(t *testing.T) {
+	st, lib, sc, _, root := fastPathFixture(t)
+	ctx := context.Background()
+	writeMP3Raw(t, filepath.Join(root, "album.mp3"),
+		testaudio.BuildMP3WithAudio("Whole", "A", "Al", 1, testaudio.AudioWithSeed(25)))
+	writeCue(t, filepath.Join(root, "album.cue"), "TITLE \"The Album\"\nFILE \"album.mp3\" WAVE\n"+
+		"  TRACK 01 MODE1/2352\n    TITLE \"Data\"\n    INDEX 01 00:00:00\n"+
+		"  TRACK 02 AUDIO\n    TITLE \"One\"\n    INDEX 01 00:00:05\n"+
+		"  TRACK 03 AUDIO\n    TITLE \"Two\"\n    INDEX 01 00:00:10\n")
+	scanAll(t, sc, lib, false)
+
+	items := itemsByTrack(t, st)
+	if len(items) != 2 {
+		t.Fatalf("virtual tracks = %d, want 2 (the data track is dropped): %+v", len(items), items)
+	}
+	for _, it := range items {
+		if it.Title == "Data" {
+			t.Fatalf("the data track was carved as audio, at frame %d", it.StartFrames)
+		}
+	}
+	ds, err := st.FileDiagnostics(ctx, model.DiagnosticFilter{})
+	if err != nil {
+		t.Fatalf("file diagnostics: %v", err)
+	}
+	found := 0
+	for _, d := range ds {
+		if d.Code == model.DiagCueTrackDropped {
+			found++
+			if !strings.Contains(d.Detail, "TRACK 01") || !strings.Contains(d.Detail, "data track") {
+				t.Errorf("detail %q does not name TRACK 01 as a data track", d.Detail)
+			}
+		}
+	}
+	if found != 1 {
+		t.Fatalf("cue_track_dropped diagnostics = %d, want 1: %+v", found, ds)
+	}
+}
+
 // TestScanCueWithOneUsableTrackStaysWholeFile: one window over a whole file is just
 // the file. Counting the malformed track toward the >= 2 rip gate carved a single
 // virtual track spanning everything, which is strictly worse than a plain track: its
@@ -241,7 +385,7 @@ func TestScanCueWithOneUsableTrackStaysWholeFile(t *testing.T) {
 		testaudio.BuildMP3WithAudio("Whole File", "A", "Al", 1, testaudio.AudioWithSeed(22)))
 	writeCue(t, filepath.Join(root, "album.cue"), "TITLE \"X\"\nFILE \"album.mp3\" WAVE\n"+
 		"  TRACK 01 AUDIO\n    TITLE \"Good\"\n    INDEX 01 00:00:00\n"+
-		"  TRACK 02 AUDIO\n    TITLE \"Bad\"\n    INDEX 01 00:99:00\n")
+		"  TRACK 02 AUDIO\n    TITLE \"Bad\"\n    INDEX 00 00:00:05\n")
 	scanAll(t, sc, lib, false)
 
 	items := itemsByTrack(t, st)

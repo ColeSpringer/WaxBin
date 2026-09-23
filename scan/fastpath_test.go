@@ -538,9 +538,9 @@ func itemStateByPID(t *testing.T, st *sqlite.Store, pid model.PID) string {
 //
 // Routing only a break to the full path handles only half the story. Trace the
 // repair: a .lrc fixed from partial back to clean would take the fast path,
-// UpdateItemSidecars would run, PutScannedTrack would never run, the scan-origin
-// diagnostic replace would never run, and the stale lyrics_partial row would live
-// on, which is the staleness the diagnostics design exists to prevent.
+// PutScannedTrack would never run, the scan-origin diagnostic replace would never
+// run, and the stale lyrics_partial row would live on, which is the staleness the
+// diagnostics design exists to prevent.
 func TestLyricsPartialDiagnosticClearsOnRepair(t *testing.T) {
 	st, lib, sc, _, root := fastPathFixture(t)
 	a := filepath.Join(root, "a.mp3")
@@ -697,12 +697,12 @@ func TestOversizedCueSidecarSkipped(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "book.cue"), []byte(big.String()), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	sheet, obs, diags, ok := scanCueSidecar(audio)
+	sheet, obs, diags, unread, ok := scanCueSidecar(audio)
 	if !ok {
 		t.Fatal("oversized .cue reported not-readable; it must report its skip, not vanish")
 	}
-	if sheet != nil {
-		t.Errorf("sheet = %+v, want nil: the file was never read", sheet)
+	if sheet != nil || !unread {
+		t.Errorf("sheet = %+v, unread = %v; want nil and unread: the file was never read", sheet, unread)
 	}
 	if obs.Size == 0 || len(obs.Hash) != 0 {
 		t.Errorf("obs = %+v, want a stat-only observation (size set, no content hash)", obs)
@@ -717,12 +717,12 @@ func TestOversizedCueSidecarSkipped(t *testing.T) {
 		[]byte("FILE \"ok.m4b\" WAVE\n  TRACK 01 AUDIO\n    INDEX 01 00:00:00\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, obs, diags, ok := scanCueSidecar(small); !ok || obs.Size == 0 || len(diags) != 0 {
-		t.Errorf("normal .cue not read cleanly: ok=%v obs=%+v diags=%+v", ok, obs, diags)
+	if _, obs, diags, unread, ok := scanCueSidecar(small); !ok || unread || obs.Size == 0 || len(diags) != 0 {
+		t.Errorf("normal .cue not read cleanly: ok=%v unread=%v obs=%+v diags=%+v", ok, unread, obs, diags)
 	}
 
 	// A truly-absent .cue still reports not-readable, and records nothing.
-	if _, _, _, ok := scanCueSidecar(filepath.Join(dir, "missing.m4b")); ok {
+	if _, _, _, _, ok := scanCueSidecar(filepath.Join(dir, "missing.m4b")); ok {
 		t.Error("absent .cue reported readable")
 	}
 }

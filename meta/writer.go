@@ -380,7 +380,7 @@ func commitPlan(ctx context.Context, plan *waxlabel.Plan, op, path, what string,
 		// Sanitized at the seam like every other warning; the error text embeds the
 		// file path, which the terminal must not have to trust.
 		warnings = append(warnings, model.TagWriteWarning{
-			Code: PostWriteWarningCode, Message: capDetail(tag.SanitizeLine(err.Error())),
+			Code: PostWriteWarningCode, Message: CapDetail(tag.SanitizeLine(err.Error())),
 		})
 	}
 	size, mtime := sres.Dest.Size, sres.Dest.ModTimeUnixNano
@@ -424,7 +424,7 @@ func writeWarnings(ws []waxlabel.Warning) []model.TagWriteWarning {
 		// every consumer, including any added later.
 		mw := model.TagWriteWarning{
 			Code:          w.Code.String(),
-			Message:       capDetail(w.String()),
+			Message:       CapDetail(w.String()),
 			Unrepresented: unrepresentedCodes[w.Code],
 		}
 		if len(w.Keys) == 0 {
@@ -440,6 +440,21 @@ func writeWarnings(ws []waxlabel.Warning) []model.TagWriteWarning {
 	return out
 }
 
+// ApplyOption tunes one Apply call.
+type ApplyOption func(*applyOptions)
+
+type applyOptions struct {
+	outputGain *int
+}
+
+// WithOutputGain sets the file's header output gain, the gain a player applies
+// before it reads any tag, as an absolute Q7.8 integer. Only Ogg Opus stores one:
+// anywhere else WaxLabel refuses the whole write, tags included, which writeCode
+// reports as CodeUnsupported. A value the file already carries is a no-op.
+func WithOutputGain(q78 int) ApplyOption {
+	return func(o *applyOptions) { o.outputGain = &q78 }
+}
+
 // Apply writes edits to the file at path atomically and in place, preserving the
 // audio essence (WithVerifyEssence). It returns the new size, mtime, and content
 // hash so the caller can update the catalog's file row through the optimistic
@@ -449,9 +464,13 @@ func writeWarnings(ws []waxlabel.Warning) []model.TagWriteWarning {
 // commitPlan documents (a landed write whose hash cannot be read; the next scan
 // heals it). A write whose bytes landed but whose post-commit step failed reports
 // success with a post-write warning instead.
-func (w *Writer) Apply(ctx context.Context, path string, edits []TagEdit) (*WriteResult, error) {
+func (w *Writer) Apply(ctx context.Context, path string, edits []TagEdit, opts ...ApplyOption) (*WriteResult, error) {
 	const op = "meta.Writer.Apply"
-	if len(edits) == 0 {
+	var o applyOptions
+	for _, opt := range opts {
+		opt(&o)
+	}
+	if len(edits) == 0 && o.outputGain == nil {
 		return &WriteResult{Changed: false}, nil
 	}
 
@@ -467,6 +486,9 @@ func (w *Writer) Apply(ctx context.Context, path string, edits []TagEdit) (*Writ
 		} else {
 			ed.Set(tag.Key(e.Key), e.Values...)
 		}
+	}
+	if o.outputGain != nil {
+		ed.SetOutputGain(*o.outputGain)
 	}
 
 	// Verify essence: the rewrite re-hashes the audio it copies and fails the write
@@ -536,9 +558,9 @@ func (w *Writer) ApplyPicture(ctx context.Context, path string, edit PictureEdit
 	if !edit.Clear {
 		ed.AddPicture(waxlabel.Picture{Type: waxlabel.PicFrontCover, Data: edit.Data})
 		if !waxlabel.IsRecognizedImage(edit.Data) {
-			// An exotic but valid cover (AVIF/HEIC, already probed and accepted by the
-			// store) is not decodable by the picture validator; allow it explicitly so the
-			// embed is not rejected at Prepare.
+			// The sniffer has known HEIF, AVIF and JPEG XL since 1.7, so this now covers
+			// a cover the store probed and accepted in a format it still does not read.
+			// Allow it explicitly so the embed is not rejected at Prepare.
 			opts = append(opts, waxlabel.WithUnrecognizedPictures())
 		}
 	}
@@ -578,7 +600,7 @@ func MergeKeylessDiagnostics(ds []model.FileDiagnostic) []model.FileDiagnostic {
 		case out[i].Detail == "":
 			out[i].Detail = d.Detail
 		default:
-			out[i].Detail = capDetail(out[i].Detail + "; " + d.Detail)
+			out[i].Detail = CapDetail(out[i].Detail + "; " + d.Detail)
 		}
 		if severityRank(d.Severity) > severityRank(out[i].Severity) {
 			out[i].Severity = d.Severity

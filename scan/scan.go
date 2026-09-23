@@ -354,7 +354,7 @@ func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, p
 				// place; a change that needs the audio (a sidecar vanished or became
 				// unusable, so revert to embedded; a directory cover changed, so resolveCover
 				// precedence) returns needsFull and falls through to the full path.
-				if !s.reconcileFastPathSidecars(ctx, path, known, sc.cache, res) {
+				if !s.reconcileFastPathSidecars(path, known, sc.cache) {
 					res.AudioFiles++
 					res.Unchanged++
 					return nil
@@ -434,11 +434,12 @@ func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, p
 	// has none to carve, and a sheet whose every track was unusable would commit the
 	// file with no items at all.
 	var carve []meta.CueTrack
+	cueUnread := false
 	if len(tags.Chapters) == 0 {
-		if sheet, cueObs, cueDiags, ok := scanCueSidecar(path); ok {
+		if sheet, cueObs, cueDiags, unread, ok := scanCueSidecar(path); ok {
 			aux = append(aux, cueObs)
 			diags = append(diags, cueDiags...)
-			cueSheet = sheet
+			cueSheet, cueUnread = sheet, unread
 		}
 		if cueSheet != nil {
 			var dropped []string
@@ -460,6 +461,18 @@ func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, p
 		isBook = true
 	case model.KindTrack:
 		isBook = false
+	}
+	// An unread sheet says nothing new about the tracks, so a rip keeps the windows it
+	// was last carved into; a whole-file fallback would delete every virtual track
+	// with its plays and stars.
+	if cueUnread && !isBook {
+		sheet, kept, err := s.keptRip(ctx, path)
+		if err != nil {
+			return err
+		}
+		if len(kept) >= 2 {
+			cueSheet, carve = sheet, kept
+		}
 	}
 	var out *model.ScanItemResult
 	switch {
@@ -702,6 +715,24 @@ func virtualTracksInput(libraryID int64, file model.File, tags model.Tags, essen
 		Acquisition:     tags.Acquisition,
 		Diagnostics:     diags,
 	}
+}
+
+// keptRip rebuilds the sheet a file's virtual tracks were last carved from, shaped so
+// virtualTracksInput reproduces each track exactly, identity key included.
+func (s *Scanner) keptRip(ctx context.Context, path string) (*meta.CueSheet, []meta.CueTrack, error) {
+	vts, err := s.cat.VirtualTracksForPath(ctx, []byte(path))
+	if err != nil || len(vts) < 2 {
+		return nil, nil, err
+	}
+	first := vts[0].Track
+	sheet := &meta.CueSheet{Title: first.Album, Performer: first.AlbumArtist, Genre: first.Genre, Year: first.Year}
+	for _, vt := range vts {
+		sheet.Tracks = append(sheet.Tracks, meta.CueTrack{
+			Number: vt.Track.TrackNo, Title: vt.Item.Title, Performer: vt.Track.Artist,
+			StartFrames: vt.StartFrames, StartValid: true,
+		})
+	}
+	return sheet, sheet.Tracks, nil
 }
 
 // abridgedMarkerRe matches a trailing BRACKETED "(Unabridged)"/"[Abridged]" marker
@@ -952,7 +983,10 @@ func lrcPartialDetail(lines []model.SyncedLine, dropped []int) string {
 // whether the file is a rip at all: a sheet naming no usable window is not one.
 func cueTracksToCarve(sheet *meta.CueSheet) (tracks []meta.CueTrack, dropped []string) {
 	for _, ct := range sheet.Tracks {
-		if !ct.StartValid {
+		switch {
+		case !ct.IsAudio():
+			dropped = append(dropped, cueTrackDesc(ct, "is a data track"))
+		case !ct.StartValid:
 			dropped = append(dropped, cueTrackDesc(ct, "has no usable INDEX 01"))
 		}
 	}
@@ -1021,41 +1055,56 @@ func cueTracksDroppedDiag(dropped []string) []model.FileDiagnostic {
 // An oversized .cue yields no sheet but still reports readable, with a stat-only
 // observation and a skip diagnostic: the caller records the observation (so the
 // fast path stops re-routing here) and applies nothing, while the diagnostic keeps
-// the skip from being invisible.
-func scanCueSidecar(audioPath string) (*meta.CueSheet, model.AuxObservation, []model.FileDiagnostic, bool) {
+// the skip from being invisible. It and a sheet the parser refused both report
+// unread, which is different from a sheet that parsed to no tracks: an unread sheet
+// says nothing about the tracks, so a rip keeps the ones it has.
+func scanCueSidecar(audioPath string) (sheet *meta.CueSheet, obs model.AuxObservation, diags []model.FileDiagnostic, unread, ok bool) {
 	cuePath := strings.TrimSuffix(audioPath, filepath.Ext(audioPath)) + ".cue"
 	// Stat before reading, so the same memory guard the .lrc read and the fast path
 	// apply also covers the .cue.
 	info, serr := os.Stat(cuePath)
 	if serr != nil {
-		return nil, model.AuxObservation{}, nil, false
+		return nil, model.AuxObservation{}, nil, false, false
 	}
 	if info.Size() > maxSidecarBytes {
 		diags := []model.FileDiagnostic{{
 			Code: model.DiagSidecarSkipped, Severity: model.SeverityWarn,
 			Detail: sidecarSkippedDetail(model.AuxCue, info.Size()),
 		}}
-		return nil, statOnlyObs(model.AuxCue, cuePath, info), diags, true
+		return nil, statOnlyObs(model.AuxCue, cuePath, info), diags, true, true
 	}
 	data, err := os.ReadFile(cuePath)
 	if err != nil {
-		return nil, model.AuxObservation{}, nil, false
+		return nil, model.AuxObservation{}, nil, false, false
 	}
-	obs := model.AuxObservation{
+	obs = model.AuxObservation{
 		Kind: model.AuxCue, Path: []byte(cuePath), Hash: art.Hash(data),
 		Size: info.Size(), MTimeNS: info.ModTime().UnixNano(),
 	}
-	return meta.ParseCueSheet(string(data)), obs, nil, true
+	sheet, perr := meta.ParseCueSheet(string(data))
+	if perr != nil {
+		// The parse is syntactic, so one bad line refuses the whole sheet. It is
+		// reported under the per-track drop code so it is just as visible.
+		reason := perr.Error()
+		var we *waxerr.Error
+		if errors.As(perr, &we) && we.Msg != "" {
+			reason = we.Msg
+		}
+		diags := []model.FileDiagnostic{{
+			Code: model.DiagCueTrackDropped, Severity: model.SeverityWarn,
+			Detail: meta.CapDetail("the cue sheet could not be parsed, so it was not applied: " + reason),
+		}}
+		return nil, obs, diags, true, true
+	}
+	return sheet, obs, nil, false, true
 }
 
-// reconcileFastPathSidecars re-checks an unchanged audio file's sidecars in one pass.
-// It applies changes that do NOT need the audio (a .lrc yielding synced lyrics, a
-// .cue yielding chapters) cheaply through the standalone UpdateItemSidecars seam, and
-// returns needsFull=true when a change requires re-reading the audio: a sidecar
-// vanished or became unusable (revert lyrics/chapters to embedded), or the directory
-// cover changed/appeared/vanished (resolveCover must re-decide embedded-vs-directory
-// precedence). Each sidecar is stat'd once; only a changed one is read.
-func (s *Scanner) reconcileFastPathSidecars(ctx context.Context, path string, known model.ScopedFile, cache *artCache, res *Result) (needsFull bool) {
+// reconcileFastPathSidecars re-checks an unchanged audio file's sidecars in one pass
+// and returns needsFull=true when any of them changed, appeared, or vanished: the full
+// path owns re-deriving what a sidecar feeds (lyrics, chapters, the virtual-track set,
+// cover precedence) together with the diagnostics each one can raise. Each sidecar is
+// stat'd once and none is read here.
+func (s *Scanner) reconcileFastPathSidecars(path string, known model.ScopedFile, cache *artCache) (needsFull bool) {
 	stored := make(map[string]model.AuxObservation, len(known.Aux))
 	for _, o := range known.Aux {
 		stored[o.Kind] = o
@@ -1067,67 +1116,32 @@ func (s *Scanner) reconcileFastPathSidecars(ctx context.Context, path string, kn
 		return true
 	}
 
-	upd := model.SidecarUpdate{ItemPID: known.ItemPID, FilePID: known.FilePID}
-	dirty := false
-
 	// Any .lrc change routes to the full path, whatever the change is.
 	//
 	// That matters most in the repair direction. Re-deriving the lyrics_partial
 	// diagnostic is full-path work, since the store replaces the scan's whole
 	// diagnostic set there. Routing only a break would cover half the story: a .lrc
-	// edited from partial back to clean would take the fast path, UpdateItemSidecars
-	// would run, and the now-false lyrics_partial row would survive indefinitely,
-	// which is the staleness the diagnostics design exists to prevent.
+	// edited from partial back to clean would keep its now-false lyrics_partial row
+	// indefinitely, which is the staleness the diagnostics design exists to prevent.
 	//
 	// The cost is bounded. The .lrc just changed, so one re-parse is cheap, and the
 	// stat comparison short-circuits every later scan before touching the file again.
 	// An oversized .lrc routes here too, once: the full path records its skip and a
 	// stat-only observation, and that observation makes the next scan's size and mtime
 	// comparison match.
-	//
-	// The check stats without reading. This branch needs no content, and reading here
-	// would mean reading and hashing the file twice, since the full path reads it too.
 	lrcPath := strings.TrimSuffix(path, filepath.Ext(path)) + ".lrc"
 	switch statSidecar(lrcPath, model.AuxLyrics, stored) {
 	case sidecarVanished, sidecarChanged, sidecarOversized:
 		return true
 	}
 
-	// .cue. A book applies its chapters cheaply in place. A track (or a virtual-track
-	// container) routes ANY .cue change to the full path instead: the full-path
-	// discriminator owns creating, reconciling, and tearing down the virtual-track set,
-	// and the fast path has no seam for it. A book with a changed/vanished cue keeps its
-	// cheap chapter update; a non-book only needs to detect the change (statSidecar), not
-	// read the file, since it re-reads on the full path anyway.
+	// A .cue change routes there too, on a book as on a track: only the full path can
+	// clear a cue_track_dropped once the sheet is fixed, and for a track it owns the
+	// virtual-track set.
 	cuePath := strings.TrimSuffix(path, filepath.Ext(path)) + ".cue"
-	if known.ItemKind == model.KindBook {
-		switch state, data, obs := checkSidecarFile(cuePath, model.AuxCue, stored); state {
-		case sidecarVanished, sidecarOversized:
-			return true
-		case sidecarChanged:
-			chapters := meta.ParseCue(string(data))
-			if len(chapters) == 0 {
-				return true
-			}
-			upd.ReplaceChapters, upd.Chapters, upd.ChapterSource = true, chapters, "cue"
-			upd.Observations = append(upd.Observations, obs)
-			dirty = true
-		}
-	} else {
-		switch statSidecar(cuePath, model.AuxCue, stored) {
-		case sidecarChanged, sidecarVanished, sidecarOversized:
-			return true
-		}
-	}
-
-	if !dirty {
-		return false
-	}
-	changed, err := s.cat.UpdateItemSidecars(ctx, upd)
-	if err != nil {
-		s.log.Warn("updating sidecars on fast-path", "path", path, "err", err)
-	} else if changed {
-		res.SidecarsUpdated++
+	switch statSidecar(cuePath, model.AuxCue, stored) {
+	case sidecarChanged, sidecarVanished, sidecarOversized:
+		return true
 	}
 	return false
 }
@@ -1148,33 +1162,6 @@ const (
 	// the file from routing to the full path on every later scan.
 	sidecarOversized
 )
-
-// checkSidecarFile stat-compares a sidecar against its stored observation, reading it
-// only when it changed. It is the shared core of the per-extension fast-path checks
-// (one stat per sidecar; no read when unchanged).
-func checkSidecarFile(sidecarPath, kind string, stored map[string]model.AuxObservation) (sidecarState, []byte, model.AuxObservation) {
-	state := statSidecar(sidecarPath, kind, stored)
-	if state != sidecarChanged {
-		// Only sidecarChanged has data to return. The oversized case builds no
-		// observation here; the full path it routes to records that one, so building a
-		// second for the caller to discard would be waste.
-		return state, nil, model.AuxObservation{}
-	}
-	info, err := os.Stat(sidecarPath)
-	if err != nil {
-		return sidecarVanished, nil, model.AuxObservation{}
-	}
-	data, rerr := os.ReadFile(sidecarPath)
-	if rerr != nil {
-		// Unreadable right now: leave it as-is rather than churn on a transient error.
-		return sidecarUnchanged, nil, model.AuxObservation{}
-	}
-	obs := model.AuxObservation{
-		Kind: kind, Path: []byte(sidecarPath),
-		Size: info.Size(), MTimeNS: info.ModTime().UnixNano(), Hash: art.Hash(data),
-	}
-	return sidecarChanged, data, obs
-}
 
 // statSidecar stat-compares a sidecar against its stored observation without reading
 // it. It is the shared core of the fast-path checks, and the whole answer for a
@@ -1447,8 +1434,7 @@ var audioExts = map[string]bool{
 // .mkv, .webm, .mk3d, .mks, .mov, and .asf share a container with an audio-only
 // spelling but routinely carry video. A format WaxFlow could not decode at all would
 // belong here too, since its files would sit in the analyze pass's retry set for good;
-// .wma is not one, because the common v1 and v2 generations decode and a Pro, Lossless,
-// or Voice stream is skipped the way any undecodable file is.
+// .wma is not one, because every WMA generation the tag library names now decodes.
 var excludedExts = map[string]bool{
 	".mkv": true, ".webm": true, ".mk3d": true, ".mks": true, ".mov": true, ".asf": true,
 }

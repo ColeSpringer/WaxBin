@@ -115,9 +115,10 @@ type Warning struct {
 
 // TagWriter applies tag edits to a file on disk and returns its new state. It is
 // satisfied by *meta.Writer; injected so organize does not hard-depend on a
-// concrete writer and stays testable.
+// concrete writer and stays testable. The options are part of the signature only so
+// *meta.Writer satisfies it; organize passes none.
 type TagWriter interface {
-	Apply(ctx context.Context, path string, edits []meta.TagEdit) (*meta.WriteResult, error)
+	Apply(ctx context.Context, path string, edits []meta.TagEdit, opts ...meta.ApplyOption) (*meta.WriteResult, error)
 }
 
 // Organizer plans and applies moves against a catalog.

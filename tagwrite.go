@@ -37,8 +37,12 @@ func (l *Library) writeReplayGainTags(ctx context.Context) (rgWriteCounts, error
 		if ctx.Err() != nil {
 			return c, ctx.Err()
 		}
-		edits := replayGainEdits(r)
-		res, err := w.Apply(ctx, string(r.Path), edits)
+		edits, gain := replayGainEdits(r)
+		var opts []meta.ApplyOption
+		if gain != nil {
+			opts = append(opts, meta.WithOutputGain(*gain))
+		}
+		res, err := w.Apply(ctx, string(r.Path), edits, opts...)
 		if err != nil {
 			if waxerr.Is(err, waxerr.CodeCanceled) || ctx.Err() != nil {
 				return c, err
@@ -135,24 +139,46 @@ type rgWriteCounts struct {
 	unrepresented int
 }
 
-// replayGainEdits builds the format-aware ReplayGain tag edits for one file. Opus
-// carries R128 gains (integer Q7.8, referenced to -23 LUFS) as its native
-// convention; every other format uses the REPLAYGAIN_* string tags (dB gain, linear
-// peak) understood by Vorbis comments and ID3 TXXX alike. Album tags are written
-// only when the file belongs to an album aggregate.
-func replayGainEdits(r model.ReplayGainRow) []meta.TagEdit {
+// replayGainEdits builds the format-aware ReplayGain tag edits for one file, plus the
+// header output gain where the file has one. Opus carries R128 gains (integer Q7.8,
+// referenced to -23 LUFS); every other format uses the REPLAYGAIN_* string tags (dB
+// gain, linear peak). Album tags are written only when the file belongs to an album
+// aggregate.
+//
+// In an Ogg file the Opus header brings the album (the track, standalone) to the -18
+// LUFS ReplayGain reference, capped where the stored peak would pass full scale since
+// every decoder applies it, and each R128 tag is its whole -23 gain less the header.
+// Opus elsewhere has a header nothing here reaches, so its tags carry the whole gain.
+func replayGainEdits(r model.ReplayGainRow) (edits []meta.TagEdit, headerGain *int) {
 	if r.Codec == "opus" {
-		edits := []meta.TagEdit{{Key: "R128_TRACK_GAIN", Values: []string{r128Gain(r.TrackGainDB)}}}
+		header := 0
+		if r.Container == "ogg" {
+			gain, peak := r.TrackGainDB, r.TrackPeak
+			if r.HasAlbum {
+				gain, peak = r.AlbumGainDB, r.AlbumPeak
+			}
+			header = q78(gain)
+			if peak > 0 {
+				header = min(header, int(math.Floor(-20*math.Log10(peak)*256)))
+			}
+			headerGain = &header
+			// RFC 7845 asks an Opus file not to carry these, and beside the header
+			// another tagger's leftovers would have a player apply the gain twice.
+			for _, k := range []string{"REPLAYGAIN_TRACK_GAIN", "REPLAYGAIN_TRACK_PEAK", "REPLAYGAIN_ALBUM_GAIN", "REPLAYGAIN_ALBUM_PEAK"} {
+				edits = append(edits, meta.TagEdit{Key: k})
+			}
+		}
+		edits = append(edits, meta.TagEdit{Key: "R128_TRACK_GAIN", Values: []string{strconv.Itoa(r128Gain(r.TrackGainDB) - header)}})
 		if r.HasAlbum {
-			edits = append(edits, meta.TagEdit{Key: "R128_ALBUM_GAIN", Values: []string{r128Gain(r.AlbumGainDB)}})
+			edits = append(edits, meta.TagEdit{Key: "R128_ALBUM_GAIN", Values: []string{strconv.Itoa(r128Gain(r.AlbumGainDB) - header)}})
 		} else {
 			// Not in an album (any more): clear any stale album gain so the tags mirror
 			// the catalog. Clearing an absent tag is a no-op (no rewrite).
 			edits = append(edits, meta.TagEdit{Key: "R128_ALBUM_GAIN"})
 		}
-		return edits
+		return edits, headerGain
 	}
-	edits := []meta.TagEdit{
+	edits = []meta.TagEdit{
 		{Key: "REPLAYGAIN_TRACK_GAIN", Values: []string{fmtGainDB(r.TrackGainDB)}},
 		{Key: "REPLAYGAIN_TRACK_PEAK", Values: []string{fmtPeak(r.TrackPeak)}},
 	}
@@ -169,7 +195,7 @@ func replayGainEdits(r model.ReplayGainRow) []meta.TagEdit {
 			meta.TagEdit{Key: "REPLAYGAIN_ALBUM_PEAK"},
 		)
 	}
-	return edits
+	return edits, nil
 }
 
 // fmtGainDB formats a ReplayGain gain as the conventional "-6.35 dB" string.
@@ -181,15 +207,16 @@ func fmtPeak(peak float64) string { return strconv.FormatFloat(peak, 'f', 6, 64)
 // r128ReferenceLUFS is the EBU R128 reference the Opus R128_*_GAIN tags target.
 const r128ReferenceLUFS = -23.0
 
+// q78 converts a gain in dB to the Q7.8 fixed-point integer both the R128 tags and
+// the Opus header carry.
+func q78(db float64) int { return int(math.Round(db * 256.0)) }
+
 // r128Gain converts a ReplayGain 2.0 gain (dB, referenced to loudness.ReferenceLUFS,
 // -18 LUFS) into the Opus R128_*_GAIN integer: Q7.8 fixed point referenced to -23
-// LUFS. The reference difference is derived (not hardcoded) so the two stay in step,
-// then the value is scaled by 256 and rounded. (The Opus header output_gain remains
-// an upstream WaxLabel gap and is intentionally not written.)
-func r128Gain(rgDB float64) string {
+// LUFS. The reference difference is derived (not hardcoded) so the two stay in step.
+func r128Gain(rgDB float64) int {
 	offset := loudness.ReferenceLUFS - r128ReferenceLUFS // -18 - (-23) = 5 dB
-	q78 := int(math.Round((rgDB - offset) * 256.0))
-	return strconv.Itoa(q78)
+	return q78(rgDB - offset)
 }
 
 // writeEnrichmentTags mirrors what enrichment filled into the backing files: every item

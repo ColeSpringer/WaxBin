@@ -3,9 +3,11 @@ package waxbin
 import (
 	"context"
 	"database/sql"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"testing"
 	"time"
 
@@ -43,7 +45,7 @@ func TestBookTagEditsClearDescriptionClearsTheLongForm(t *testing.T) {
 func TestReplayGainEdits(t *testing.T) {
 	// A standalone track (no album) writes track keys and CLEARS the album keys, so
 	// stale album gain from a former album membership is removed on disk.
-	e := replayGainEdits(model.ReplayGainRow{Codec: "mp3", TrackGainDB: -6.35, TrackPeak: 0.988})
+	e, gain := replayGainEdits(model.ReplayGainRow{Codec: "mp3", TrackGainDB: -6.35, TrackPeak: 0.988})
 	if !hasEdit(e, "REPLAYGAIN_TRACK_GAIN", "-6.35 dB") || !hasEdit(e, "REPLAYGAIN_TRACK_PEAK", "0.988000") {
 		t.Errorf("track-only edits wrong: %+v", e)
 	}
@@ -53,32 +55,136 @@ func TestReplayGainEdits(t *testing.T) {
 	if hasKey(e, "R128_TRACK_GAIN") {
 		t.Errorf("non-opus track must not contain R128 keys: %+v", e)
 	}
+	if gain != nil {
+		t.Errorf("mp3 asked for a header gain of %d; only Ogg Opus has one", *gain)
+	}
 
 	// An album member gets track + album keys.
-	e = replayGainEdits(model.ReplayGainRow{Codec: "flac", TrackGainDB: -6.0, HasAlbum: true, AlbumGainDB: -5.5, AlbumPeak: 0.99})
+	e, _ = replayGainEdits(model.ReplayGainRow{Codec: "flac", TrackGainDB: -6.0, HasAlbum: true, AlbumGainDB: -5.5, AlbumPeak: 0.99})
 	if !hasKey(e, "REPLAYGAIN_ALBUM_GAIN") || !hasKey(e, "REPLAYGAIN_ALBUM_PEAK") {
 		t.Errorf("album member missing album keys: %+v", e)
 	}
 
-	// Opus uses R128 integer gains, not the REPLAYGAIN_* strings.
-	e = replayGainEdits(model.ReplayGainRow{Codec: "opus", TrackGainDB: -5.0, HasAlbum: true, AlbumGainDB: -4.0})
-	if !hasKey(e, "R128_TRACK_GAIN") || !hasKey(e, "R128_ALBUM_GAIN") {
-		t.Errorf("opus missing R128 keys: %+v", e)
+	// Opus outside Ogg keeps the old arm: the tags carry the whole gain, because
+	// nothing here can reach an MP4 or Matroska file's header.
+	e, gain = replayGainEdits(model.ReplayGainRow{Codec: "opus", Container: "matroska", TrackGainDB: -5.0, HasAlbum: true, AlbumGainDB: -4.0})
+	if !hasEdit(e, "R128_TRACK_GAIN", "-2560") || !hasEdit(e, "R128_ALBUM_GAIN", "-2304") {
+		t.Errorf("opus in matroska: edits %+v, want the whole gain in the tags", e)
 	}
 	if hasKey(e, "REPLAYGAIN_TRACK_GAIN") {
 		t.Errorf("opus should not use REPLAYGAIN_* keys: %+v", e)
+	}
+	if gain != nil {
+		t.Errorf("opus in matroska asked for a header gain of %d; only Ogg has one", *gain)
+	}
+}
+
+// TestReplayGainEditsOggOpusHeader: in an Ogg file the header carries the album to
+// -18 LUFS and each tag carries the rest of the way to -23. So the album tag is a
+// flat -1280 (the 5 dB between the two references) and the track tag is that plus
+// the track's distance from the album, whatever the header ends up as.
+func TestReplayGainEditsOggOpusHeader(t *testing.T) {
+	// An album member. Header = the album gain; album tag = -1280; track tag =
+	// -1280 plus (track - album), here -5 - -4 = -1 dB = -256 steps.
+	e, gain := replayGainEdits(model.ReplayGainRow{
+		Codec: "opus", Container: "ogg",
+		TrackGainDB: -5.0, TrackPeak: 0.5,
+		HasAlbum: true, AlbumGainDB: -4.0, AlbumPeak: 0.5,
+	})
+	if gain == nil || *gain != q78(-4.0) {
+		t.Fatalf("header gain = %v, want %d (the album gain)", gain, q78(-4.0))
+	}
+	if !hasEdit(e, "R128_ALBUM_GAIN", "-1280") {
+		t.Errorf("album tag wrong: %+v", e)
+	}
+	if !hasEdit(e, "R128_TRACK_GAIN", strconv.Itoa(-1280-256)) {
+		t.Errorf("track tag wrong: %+v", e)
+	}
+	// Header plus tag is the whole gain to -23, which is what a tag-aware player
+	// applies. That identity is the point of the scheme.
+	if *gain+(-1280-256) != r128Gain(-5.0) {
+		t.Errorf("header %d plus track tag %d != the whole -23 gain %d", *gain, -1280-256, r128Gain(-5.0))
+	}
+	// Another tagger's REPLAYGAIN_* keys go: beside the header, a player honouring
+	// them would apply the gain twice.
+	for _, k := range []string{"REPLAYGAIN_TRACK_GAIN", "REPLAYGAIN_TRACK_PEAK", "REPLAYGAIN_ALBUM_GAIN", "REPLAYGAIN_ALBUM_PEAK"} {
+		if !isClear(e, k) {
+			t.Errorf("Ogg Opus edits do not clear %s: %+v", k, e)
+		}
+	}
+
+	// A standalone track: the header carries the track's own gain, the track tag is
+	// the flat -1280, and the album key is cleared.
+	e, gain = replayGainEdits(model.ReplayGainRow{
+		Codec: "opus", Container: "ogg", TrackGainDB: -5.0, TrackPeak: 0.5,
+	})
+	if gain == nil || *gain != q78(-5.0) {
+		t.Fatalf("header gain = %v, want %d (the track gain)", gain, q78(-5.0))
+	}
+	if !hasEdit(e, "R128_TRACK_GAIN", "-1280") || !isClear(e, "R128_ALBUM_GAIN") {
+		t.Errorf("standalone edits wrong: %+v", e)
+	}
+}
+
+// TestReplayGainEditsOggOpusPeakCap: every decoder applies the header before it
+// reads a tag, and R128 has no peak tag a player could protect itself with, so a
+// quiet album's positive header is capped at the point its own sample peak reaches
+// full scale. The tags grow by exactly what the cap took, so a tag-aware player
+// still lands at -23.
+func TestReplayGainEditsOggOpusPeakCap(t *testing.T) {
+	// +6 dB of album gain against a peak of 0.9: 0.9 * 2.0 is well past full scale.
+	// The cap is -20*log10(0.9) = 0.9151 dB, 234.3 steps, rounded down to 234.
+	const albumGain, peak = 6.0, 0.9
+	const capped = 234
+	e, gain := replayGainEdits(model.ReplayGainRow{
+		Codec: "opus", Container: "ogg",
+		TrackGainDB: albumGain, TrackPeak: peak,
+		HasAlbum: true, AlbumGainDB: albumGain, AlbumPeak: peak,
+	})
+	if gain == nil || *gain != capped {
+		t.Fatalf("header gain = %v, want the capped %d rather than %d", gain, capped, q78(albumGain))
+	}
+	// The tags absorb the difference: each is its whole -23 gain less the header.
+	if !hasEdit(e, "R128_ALBUM_GAIN", strconv.Itoa(r128Gain(albumGain)-capped)) ||
+		!hasEdit(e, "R128_TRACK_GAIN", strconv.Itoa(r128Gain(albumGain)-capped)) {
+		t.Errorf("tags did not absorb the cap: %+v", e)
+	}
+
+	// The cap rounds down, never to nearest. A peak of 0.6 caps at 1135.87 steps, and
+	// rounding that up to 1136 would carry the peak just past full scale.
+	_, gain = replayGainEdits(model.ReplayGainRow{Codec: "opus", Container: "ogg", TrackGainDB: albumGain, TrackPeak: 0.6})
+	if gain == nil || *gain != 1135 {
+		t.Fatalf("header gain = %v, want 1135", gain)
+	}
+	if got := 0.6 * math.Pow(10, float64(*gain)/256/20); got > 1 {
+		t.Errorf("the capped header carries a 0.6 peak to %.6f, past full scale", got)
+	}
+
+	// A silent row states a peak of 0, which has no logarithm; it is left uncapped.
+	_, gain = replayGainEdits(model.ReplayGainRow{
+		Codec: "opus", Container: "ogg", TrackGainDB: albumGain, TrackPeak: 0,
+	})
+	if gain == nil || *gain != q78(albumGain) {
+		t.Fatalf("header gain = %v, want the uncapped %d for a peak of 0", gain, q78(albumGain))
 	}
 }
 
 func TestR128Gain(t *testing.T) {
 	// WaxBin gain references -18 LUFS; R128 references -23, so 5 dB is subtracted,
 	// then Q7.8: (-5 - 5) * 256 = -2560.
-	if got := r128Gain(-5.0); got != "-2560" {
-		t.Errorf("r128Gain(-5.0) = %q, want -2560", got)
+	if got := r128Gain(-5.0); got != -2560 {
+		t.Errorf("r128Gain(-5.0) = %d, want -2560", got)
 	}
 	// 5 dB gain -> (5-5)*256 = 0.
-	if got := r128Gain(5.0); got != "0" {
-		t.Errorf("r128Gain(5.0) = %q, want 0", got)
+	if got := r128Gain(5.0); got != 0 {
+		t.Errorf("r128Gain(5.0) = %d, want 0", got)
+	}
+	// q78 is the plain scale-and-round the two share.
+	if got := q78(-6.0); got != -1536 {
+		t.Errorf("q78(-6.0) = %d, want -1536", got)
+	}
+	if got := q78(0); got != 0 {
+		t.Errorf("q78(0) = %d, want 0", got)
 	}
 }
 
@@ -592,6 +698,85 @@ func TestReplayGainWriteBackLandsOnWavPack(t *testing.T) {
 	}
 	if len(diags) != 0 {
 		t.Errorf("diagnostics = %+v, want none for a write that landed whole", diags)
+	}
+}
+
+// TestReplayGainWriteSetsTheOpusHeader is the write-back end to end: an Ogg Opus
+// file gets its header output gain as well as its R128 tags, and the tag is the flat
+// -1280 that a standalone track's header leaves for it. The second pass proves the
+// scheme settles: WaxLabel treats an unchanged gain as a no-op and the tags are
+// already right, so nothing is written.
+func TestReplayGainWriteSetsTheOpusHeader(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	lib, err := Open(ctx, Options{
+		DBPath: db, WriteReplayGainTags: true,
+		Roots: []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}},
+	})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer lib.Close()
+
+	const rate = 48000
+	path := filepath.Join(root, "a.opus")
+	writeRaw(t, path, testaudio.EncodeAs(t, "opus", "", rate, testaudio.ReferenceSignal(rate, 2*time.Second)))
+	// Another tagger's ReplayGain, which the header would make a player apply twice.
+	if _, err := meta.NewWriter().Apply(ctx, path, []meta.TagEdit{{Key: "REPLAYGAIN_TRACK_GAIN", Values: []string{"-3.00 dB"}}}); err != nil {
+		t.Fatalf("seeding a leftover gain tag: %v", err)
+	}
+	if _, err := lib.Scan(ctx, ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	items, err := lib.Query(ctx, query.New(query.EntityItems).Build(), "")
+	if err != nil || len(items) != 1 {
+		t.Fatalf("query items: %v (n=%d)", err, len(items))
+	}
+	f, err := lib.store.FileByPID(ctx, items[0].FilePID)
+	if err != nil {
+		t.Fatalf("file by pid: %v", err)
+	}
+	// A negative gain against a modest peak, so the cap does not engage and the
+	// header is exactly the track gain.
+	const trackGain = -6.0
+	if err := lib.store.PutAnalysis(ctx, model.AnalysisInput{
+		AnalysisVersion: 1, MeasureCompleted: true,
+		Fingerprint: model.FingerprintInput{FilePID: f.PID, EssenceHash: f.EssenceHash, AlgoVersion: 1, FP: []byte{}},
+		Loudness:    &model.LoudnessData{IntegratedLUFS: -12, TrackGainDB: trackGain, TrackPeak: 0.5},
+	}); err != nil {
+		t.Fatalf("put analysis: %v", err)
+	}
+
+	c, err := lib.writeReplayGainTags(ctx)
+	if err != nil {
+		t.Fatalf("write rg tags: %v", err)
+	}
+	if c.written != 1 || c.failed != 0 || c.unrepresented != 0 {
+		t.Fatalf("counts = {written:%d failed:%d unrepresented:%d}, want {1 0 0}", c.written, c.failed, c.unrepresented)
+	}
+
+	doc, err := waxlabel.ParseFile(ctx, path)
+	if err != nil {
+		t.Fatalf("parse after write: %v", err)
+	}
+	if got := doc.Properties().First().OutputGain; got != q78(trackGain) {
+		t.Errorf("header output gain = %d, want %d", got, q78(trackGain))
+	}
+	if got, ok := doc.Get("R128_TRACK_GAIN"); !ok || len(got) != 1 || got[0] != "-1280" {
+		t.Errorf("R128_TRACK_GAIN on disk = %v, want [-1280]", got)
+	}
+	if got, ok := doc.Get(tag.ReplayGainTrackGain); ok {
+		t.Errorf("REPLAYGAIN_TRACK_GAIN survived the write as %v", got)
+	}
+
+	// A second pass has nothing to do: the tags match and the header is unchanged.
+	c, err = lib.writeReplayGainTags(ctx)
+	if err != nil {
+		t.Fatalf("second write rg tags: %v", err)
+	}
+	if c.written != 0 || c.failed != 0 || c.unrepresented != 0 {
+		t.Errorf("second pass = {written:%d failed:%d unrepresented:%d}, want all zero", c.written, c.failed, c.unrepresented)
 	}
 }
 

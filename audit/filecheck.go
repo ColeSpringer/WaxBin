@@ -269,8 +269,11 @@ func (a *Auditor) checkIntegrity(ctx context.Context, files []model.AuditFileInf
 }
 
 // checkCorrupt probes each audio file's essence and flags one that fails to parse.
+// A file that reads to the end but needed the decoder to work around damage is a
+// separate, warn-level finding: the audio is usable, and the bytes are still rotting.
 func (a *Auditor) checkCorrupt(ctx context.Context, files []model.AuditFileInfo, sample int, add func(model.AuditFinding), seen map[string]bool) error {
 	c := &capped{limit: sample, check: model.CheckCorruptAudio, sev: model.SeverityError, add: add}
+	dc := &capped{limit: sample, check: model.CheckCorruptAudio, sev: model.SeverityWarn, add: add}
 	for _, f := range files {
 		if f.Kind != model.FileAudio {
 			continue
@@ -283,7 +286,9 @@ func (a *Auditor) checkCorrupt(ctx context.Context, files []model.AuditFileInfo,
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if err := a.probe(ctx, pathx.Long(string(f.Path))); err != nil {
+		damage, err := a.probe(ctx, pathx.Long(string(f.Path)))
+		switch {
+		case err != nil:
 			// A probe cut short by cancellation says nothing about the file. Without
 			// this check a Ctrl-C mid-decode names a healthy file as corrupt.
 			if ctx.Err() != nil {
@@ -296,9 +301,22 @@ func (a *Auditor) checkCorrupt(ctx context.Context, files []model.AuditFileInfo,
 				Path:     f.DisplayPath,
 				Entities: nonEmpty(f.ItemPID),
 			})
+		case len(damage) > 0:
+			more := ""
+			if n := len(damage) - 1; n > 0 {
+				more = "; and " + strconv.Itoa(n) + " more"
+			}
+			dc.emit(model.AuditFinding{
+				Check:    model.CheckCorruptAudio,
+				Severity: model.SeverityWarn,
+				Message:  "decoder worked around damage in: " + f.DisplayPath + " (" + damage[0] + more + ")",
+				Path:     f.DisplayPath,
+				Entities: nonEmpty(f.ItemPID),
+			})
 		}
 	}
 	c.summary("corrupt files")
+	dc.summary("files with tolerated damage")
 	return nil
 }
 

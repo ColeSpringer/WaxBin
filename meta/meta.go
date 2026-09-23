@@ -78,7 +78,9 @@ type Inspector interface {
 func normalizeCodec(c string) string {
 	s := strings.ToLower(strings.TrimSpace(c))
 	switch {
-	case s == "mpeg audio" || s == "mpeg" || s == "mp2": // pre-frame-sync fallback labeling
+	// The pre-frame-sync fallback labels fold. "MP2" does not: since 1.8 it names a
+	// Layer II stream read from a real header, which is not an MP3.
+	case s == "mpeg audio" || s == "mpeg":
 		return "mp3"
 	case s == "pcm" || s == "pcm (extensible)":
 		return "pcm"

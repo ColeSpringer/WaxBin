@@ -10,9 +10,9 @@ podcasts**.
 - **No CGO, no external binaries.** Cataloging is pure Go for every format via
   [WaxLabel], and so is the analysis pass (decode, loudness, fingerprint, and
   waveforms) via [WaxFlow]. The two libraries cover the same containers, so
-  WaxBin can decode every format it catalogs, on every host, apart from the rarer
-  WMA profiles (Pro, Lossless, Voice) that WaxFlow does not decode. `fpcalc` is the
-  sole remaining optional subprocess, used only for AcoustID lookups in enrichment.
+  WaxBin can decode every format it catalogs, on every host, apart from a few rare
+  codecs such as MPEG Layer II and AC-3. `fpcalc` is the sole remaining optional
+  subprocess, used only for AcoustID lookups in enrichment.
 - **Hard scan/analyze boundary.** Scanning is I/O-bound and never decodes PCM;
   loudness, fingerprinting, and peaks live only in a resumable analyze pass.
 - **Source of truth.** Consumers read the catalog through WaxBin's canonical
@@ -147,7 +147,7 @@ item, and a multi-file book is written across every part.
 
 The catalog is always authoritative; these opt-in features mirror an edit back into
 files for external players, always preserving audio essence (an essence-verified write
-never alters the audio):
+never alters the encoded audio):
 - The curation edits above (`edit`, `entity`, `credit`, `tag`, `lyrics set`,
   `chapters`, `art set`) take `--write-back` to embed the committed change into the
   item's file(s).
@@ -155,7 +155,8 @@ never alters the audio):
   `SOURCE_URL`/`SOURCE_ID`/`ACQUISITION_DATE`.
 - `waxbin analyze --write-replaygain` (or `write_replaygain_tags` in config) writes
   computed track and album ReplayGain into files after album aggregation
-  (`REPLAYGAIN_*`, or Opus `R128_*`).
+  (`REPLAYGAIN_*`, or for Opus the `R128_*` tags and, in an Ogg file, the header
+  output gain set to the album gain at the same -18 LUFS reference).
 - `waxbin enrich --write-tags` (or `write_enrichment_tags` in config) writes what the
   pass filled into files: every field with a tag key the scanner reads back (a track's
   `GENRE`/`BPM`/`ISRC`/`COMPOSER`/`DATE`, a book's `ASIN`/`ISBN`/`PUBLISHER`/`GENRE`/

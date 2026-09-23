@@ -20,6 +20,7 @@
 *.flac binary
 *.m4a  binary
 *.m4b  binary
+*.mp2  binary
 *.mp3  binary
 *.mpc  binary
 *.mp+  binary

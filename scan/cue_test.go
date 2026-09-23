@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -21,7 +22,8 @@ const twoTrackCue = `FILE "book.m4b" MP3
 `
 
 // TestCueChaptersForBook: a book with no embedded chapters picks up chapters from a
-// sibling .cue (source='cue'), and a cue-only edit is applied on the fast-path.
+// sibling .cue (source='cue'), and a cue-only edit reaches the full path, which is
+// the one place a cue diagnostic is re-derived and so can be cleared.
 func TestCueChaptersForBook(t *testing.T) {
 	st, lib, sc, _, root := fastPathFixture(t)
 	ctx := context.Background()
@@ -51,17 +53,34 @@ func TestCueChaptersForBook(t *testing.T) {
 		t.Errorf("chapter two start = %d ms, want 300000", chs[1].StartMS)
 	}
 
-	// Cue-only edit over unchanged audio: add a third chapter, bump the .cue mtime.
+	// A typo refuses the sheet and is reported; fixing it (and adding a third chapter)
+	// clears the report. Both edits leave the audio alone.
+	cuePath := filepath.Join(root, "book.cue")
 	threeTrack := twoTrackCue + "  TRACK 03 AUDIO\n    TITLE \"Chapter Three\"\n    INDEX 01 10:00:00\n"
-	if err := os.WriteFile(filepath.Join(root, "book.cue"), []byte(threeTrack), 0o644); err != nil {
-		t.Fatal(err)
+	for i, cue := range []string{strings.Replace(threeTrack, "10:00:00", "10:60:00", 1), threeTrack} {
+		if err := os.WriteFile(cuePath, []byte(cue), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		future := time.Now().Add(time.Duration(i+1) * time.Hour)
+		_ = os.Chtimes(cuePath, future, future)
+		r := scanAll(t, sc, lib, false)
+		if r.SidecarsUpdated != 1 || r.Unchanged != 0 {
+			t.Fatalf("pass %d: a cue-only edit should reach the full path as a sidecar change, got %+v", i, r)
+		}
+		ds, err := st.FileDiagnostics(ctx, model.DiagnosticFilter{})
+		if err != nil {
+			t.Fatalf("diagnostics: %v", err)
+		}
+		reported := false
+		for _, d := range ds {
+			reported = reported || d.Code == model.DiagCueTrackDropped
+		}
+		if reported != (i == 0) {
+			t.Errorf("pass %d: cue_track_dropped reported = %v, want %v", i, reported, i == 0)
+		}
 	}
-	future := time.Now().Add(time.Hour)
-	_ = os.Chtimes(filepath.Join(root, "book.cue"), future, future)
-
-	r := scanAll(t, sc, lib, false)
-	if r.Unchanged != 1 {
-		t.Fatalf("expected the book to fast-path (Unchanged=1), got %+v", r)
+	if got := currentItemPID(t, st, "My Book"); got != pid {
+		t.Errorf("the book's pid moved from %s to %s across cue edits", pid, got)
 	}
 	chs, err = st.Chapters(ctx, pid)
 	if err != nil {
