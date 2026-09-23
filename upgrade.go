@@ -3,22 +3,10 @@ package waxbin
 import (
 	"context"
 	"sort"
-	"strings"
 
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/query"
 )
-
-// losslessCodecs are the codec keys the quality policy treats as lossless. A
-// lossless encoding always outranks a lossy one regardless of bitrate.
-//
-// The float PCM spellings are WaxLabel's own: a float WAV or MOV is uncompressed
-// audio and belongs here beside plain "pcm".
-var losslessCodecs = map[string]bool{
-	"flac": true, "alac": true, "pcm": true, "wav": true, "aiff": true,
-	"ape": true, "wavpack": true, "tak": true, "tta": true, "dsd": true,
-	"wma lossless": true, "ieee float": true, "ieee float64": true,
-}
 
 // UpgradeCandidate is one encoding of a recording, with the quality fields the
 // policy ranks on.
@@ -130,14 +118,14 @@ func (l *Library) FindUpgrades(ctx context.Context) ([]UpgradeGroup, error) {
 func candidate(it *model.ItemView, quality map[model.PID]model.File) UpgradeCandidate {
 	c := UpgradeCandidate{
 		ItemPID: it.PID, FilePID: it.FilePID, Title: it.Title, Artist: it.Artist,
-		Codec: it.Codec, Lossless: losslessCodecs[strings.ToLower(it.Codec)],
+		Codec: it.Codec, Lossless: model.LosslessCodec(it.Codec),
 	}
 	if q, ok := quality[it.PID]; ok {
 		c.Codec = q.Codec
 		c.Bitrate = q.Bitrate
 		c.SampleRate = q.SampleRate
 		c.BitDepth = q.BitDepth
-		c.Lossless = losslessCodecs[strings.ToLower(q.Codec)]
+		c.Lossless = model.LosslessCodec(q.Codec)
 	}
 	return c
 }

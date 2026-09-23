@@ -717,8 +717,8 @@ func linkPrimaryFile(ctx context.Context, tx *sql.Tx, itemID, fileID int64) ([]i
 // An endFrames of 0 is therefore a sentinel meaning "runs to the end of the file",
 // not a length: an empty [n, n) window is unrepresentable here by construction, and
 // passing one would read back as the whole file. The caller owes it a non-empty
-// window or an open end; scan's virtualTracksInput drops a cue track the next one
-// starts on top of for exactly this reason.
+// window or an open end; meta's Carve drops a cue track the next one starts on top
+// of for exactly this reason.
 func linkVirtualTrackFile(ctx context.Context, tx *sql.Tx, itemID, fileID, startFrames, endFrames int64) (bool, error) {
 	var curFile int64
 	var curStart, curEnd sql.NullInt64

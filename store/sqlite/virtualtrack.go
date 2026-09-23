@@ -238,11 +238,12 @@ func virtualTracksForFile(ctx context.Context, tx *sql.Tx, fileID int64) (map[st
 }
 
 // VirtualTracksForPath returns the virtual tracks the file at path backs, in start
-// order, or none when it backs no rip. A scan that cannot read the file's sheet
-// re-puts these windows instead of collapsing the rip to one whole-file track.
+// order and with their stored identity keys, or none when it backs no rip. A scan that
+// cannot read the file's sheet re-puts these tracks instead of collapsing the rip to
+// one whole-file track.
 func (s *Store) VirtualTracksForPath(ctx context.Context, path []byte) ([]model.VirtualTrack, error) {
 	const op = "store.VirtualTracksForPath"
-	rows, err := s.read.QueryContext(ctx, `SELECT pi.title, COALESCE(t.artist,''), COALESCE(t.album,''),
+	rows, err := s.read.QueryContext(ctx, `SELECT COALESCE(pi.identity_key,''), pi.title, COALESCE(t.artist,''), COALESCE(t.album,''),
 			COALESCE(t.album_artist,''), COALESCE(t.genre,''), COALESCE(t.track_no,0), COALESCE(t.year,0),
 			itf.start_frames, COALESCE(itf.end_frames,0)
 		FROM file f
@@ -258,7 +259,7 @@ func (s *Store) VirtualTracksForPath(ctx context.Context, path []byte) ([]model.
 	var out []model.VirtualTrack
 	for rows.Next() {
 		var vt model.VirtualTrack
-		if err := rows.Scan(&vt.Item.Title, &vt.Track.Artist, &vt.Track.Album, &vt.Track.AlbumArtist,
+		if err := rows.Scan(&vt.Item.IdentityKey, &vt.Item.Title, &vt.Track.Artist, &vt.Track.Album, &vt.Track.AlbumArtist,
 			&vt.Track.Genre, &vt.Track.TrackNo, &vt.Track.Year, &vt.StartFrames, &vt.EndFrames); err != nil {
 			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}

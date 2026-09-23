@@ -38,8 +38,15 @@ const (
 	// next chapter's start; a fabricated 0 would claim the head of the file and
 	// truncate the track before it. The sheet's other tracks are used as usual.
 	//
-	// A sheet the parser refused outright reports here too, naming the line it could
-	// not read.
+	// The same row lists the lines of a sheet that could not be read, which the parser
+	// skips, and says why a sheet could not be applied at all: it indexes several audio
+	// FILEs or none, or its tracks cannot divide the file (they do not ascend, a cooked
+	// MODE1/2048 data track sits ahead of audio, or no INDEX places a data track between
+	// audio tracks). A rip is not carved from such a sheet: an existing rip keeps its
+	// tracks and a new file stays one whole-file track. A book applies the lines that did
+	// read, so a misspelled TRACK line costs it a chapter and gives the chapter before
+	// the lost track's title. Whenever a sheet was refused or had unread lines, the
+	// detail ends by saying what became of it.
 	//
 	// Without the diagnostic the drop is invisible: the user sees fewer tracks or
 	// chapters than the sheet declares, and no explanation.

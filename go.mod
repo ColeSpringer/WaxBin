@@ -3,7 +3,7 @@ module github.com/colespringer/waxbin
 go 1.26.0
 
 require (
-	github.com/colespringer/waxflow v0.0.0-20260921034528-05f3032900a3
+	github.com/colespringer/waxflow v0.0.0-20260923050513-446ca3124d89
 	github.com/colespringer/waxlabel v1.8.0
 	github.com/fsnotify/fsnotify v1.10.1
 	github.com/gofrs/flock v0.13.1

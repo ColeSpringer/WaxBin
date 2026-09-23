@@ -697,7 +697,7 @@ func TestOversizedCueSidecarSkipped(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "book.cue"), []byte(big.String()), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	sheet, obs, diags, unread, ok := scanCueSidecar(audio)
+	sheet, obs, diags, _, unread, ok := scanCueSidecar(audio)
 	if !ok {
 		t.Fatal("oversized .cue reported not-readable; it must report its skip, not vanish")
 	}
@@ -717,12 +717,12 @@ func TestOversizedCueSidecarSkipped(t *testing.T) {
 		[]byte("FILE \"ok.m4b\" WAVE\n  TRACK 01 AUDIO\n    INDEX 01 00:00:00\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, obs, diags, unread, ok := scanCueSidecar(small); !ok || unread || obs.Size == 0 || len(diags) != 0 {
+	if _, obs, diags, _, unread, ok := scanCueSidecar(small); !ok || unread || obs.Size == 0 || len(diags) != 0 {
 		t.Errorf("normal .cue not read cleanly: ok=%v unread=%v obs=%+v diags=%+v", ok, unread, obs, diags)
 	}
 
 	// A truly-absent .cue still reports not-readable, and records nothing.
-	if _, _, _, _, ok := scanCueSidecar(filepath.Join(dir, "missing.m4b")); ok {
+	if _, _, _, _, _, ok := scanCueSidecar(filepath.Join(dir, "missing.m4b")); ok {
 		t.Error("absent .cue reported readable")
 	}
 }

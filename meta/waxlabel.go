@@ -281,11 +281,20 @@ const maxDetailBytes = 512
 
 // CapDetail truncates s to maxDetailBytes on a rune boundary, so a capped detail is
 // still valid UTF-8 rather than ending in half a multi-byte rune.
-func CapDetail(s string) string {
-	if len(s) <= maxDetailBytes {
+func CapDetail(s string) string { return capBytes(s, maxDetailBytes) }
+
+// CapDetailWithTail is CapDetail for a detail that has to end with tail: s gives way,
+// so a summary that closes by saying what happened still says it.
+func CapDetailWithTail(s, tail string) string {
+	return capBytes(s, max(maxDetailBytes-len(tail), 0)) + tail
+}
+
+// capBytes truncates s to n bytes on a rune boundary.
+func capBytes(s string, n int) string {
+	if len(s) <= n {
 		return s
 	}
-	b := s[:maxDetailBytes]
+	b := s[:n]
 	for len(b) > 0 {
 		// size > 1 distinguishes a genuine U+FFFD in the text from the RuneError the
 		// decoder returns for a byte sequence cut in half.

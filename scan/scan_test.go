@@ -9,8 +9,10 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/colespringer/waxbin/meta"
 	"github.com/colespringer/waxbin/model"
 )
 
@@ -228,7 +230,7 @@ func TestScanCueSidecarReadableButEmpty(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "book.cue"), []byte("REM just a comment\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	sheet, obs, _, unread, ok := scanCueSidecar(audio)
+	sheet, obs, _, _, unread, ok := scanCueSidecar(audio)
 	if !ok {
 		t.Fatal("scanCueSidecar reported not-readable for a readable .cue; its observation must be recorded so the fast-path does not re-parse it forever")
 	}
@@ -238,9 +240,46 @@ func TestScanCueSidecarReadableButEmpty(t *testing.T) {
 	if obs.Kind != model.AuxCue || string(obs.Path) != filepath.Join(dir, "book.cue") || obs.Size == 0 {
 		t.Errorf("obs = %+v, want a populated AuxCue observation", obs)
 	}
+	// A sheet whose every TRACK line is misspelled has no tracks either, but it was
+	// read, and its warnings are what the caller reports.
+	if err := os.WriteFile(filepath.Join(dir, "book.cue"), []byte("TRCK 01 AUDIO\n  INDEX 01 00:00:00\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sheet, _, diags, refusal, unread, ok := scanCueSidecar(audio)
+	if !ok || unread || refusal != "" || len(diags) != 0 {
+		t.Errorf("ok = %v, unread = %v, refusal = %q, diags = %+v; want a read sheet the caller reports on", ok, unread, refusal, diags)
+	}
+	if sheet == nil || len(sheet.Tracks) != 0 || len(sheet.Warnings) != 1 {
+		t.Errorf("sheet = %+v, want no tracks and one warning", sheet)
+	}
 	// A truly-missing .cue still reports not-readable.
-	if _, _, _, _, ok := scanCueSidecar(filepath.Join(dir, "missing.m4b")); ok {
+	if _, _, _, _, _, ok := scanCueSidecar(filepath.Join(dir, "missing.m4b")); ok {
 		t.Error("scanCueSidecar should report ok=false when there is no .cue")
+	}
+}
+
+// TestCueSheetDiagKeepsItsEnding: a detail is capped, and what became of the sheet is
+// the part a reader needs most, so long chapter titles give way rather than the ending.
+func TestCueSheetDiagKeepsItsEnding(t *testing.T) {
+	long := strings.Repeat("A Very Long Chapter Title ", 12)
+	dropped := []string{`TRACK 02 ("` + long + `") has no usable INDEX 01`, `TRACK 05 ("` + long + `") has no usable INDEX 01`}
+	ds := cueSheetDiag(nil, dropped, "", "the readable lines were applied")
+	if len(ds) != 1 || len(ds[0].Detail) > 512 || !strings.HasSuffix(ds[0].Detail, "; the readable lines were applied") {
+		t.Errorf("detail = %q, want at most 512 bytes ending with what became of the sheet", ds[0].Detail)
+	}
+}
+
+// TestCueSheetDiagCountsTruncatedWarnings: past upstream's cap the count of unread
+// lines is a floor, and the detail says so.
+func TestCueSheetDiagCountsTruncatedWarnings(t *testing.T) {
+	sheet, err := meta.ParseCueSheet(strings.Repeat("INDEX 01 00:00:00\n", 70))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ds := cueSheetDiag(sheet, nil, "", "the sheet was not applied")
+	if len(ds) != 1 || !strings.HasPrefix(ds[0].Detail, "at least 64 line(s) of the cue sheet could not be read: ") ||
+		!strings.Contains(ds[0].Detail, " (and at least 61 more); the sheet was not applied") {
+		t.Errorf("detail = %q, want a floor on the count", ds[0].Detail)
 	}
 }
 

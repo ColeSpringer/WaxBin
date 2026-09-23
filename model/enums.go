@@ -202,3 +202,16 @@ const (
 	OpUpdate ChangeOp = "update"
 	OpDelete ChangeOp = "delete"
 )
+
+// LosslessCodec reports whether a catalog codec key names a lossless encoding. Such a
+// file's container declares its length, where a lossy one's can be an estimate: an
+// MP3 with no Xing header is measured off its first frame's bitrate.
+func LosslessCodec(codec string) bool { return losslessCodecs[strings.ToLower(codec)] }
+
+// losslessCodecs are the codec keys taken as lossless. The float PCM spellings are
+// WaxLabel's own: a float WAV or MOV is uncompressed audio and belongs beside "pcm".
+var losslessCodecs = map[string]bool{
+	"flac": true, "alac": true, "pcm": true, "wav": true, "aiff": true,
+	"ape": true, "wavpack": true, "tak": true, "tta": true, "dsd": true,
+	"wma lossless": true, "ieee float": true, "ieee float64": true,
+}

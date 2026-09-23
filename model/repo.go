@@ -389,7 +389,7 @@ type Catalog interface {
 	// file-level outcome; ItemCreated reports whether any virtual track was created.
 	PutScannedVirtualTracks(ctx context.Context, in PutScannedVirtualTracksInput) (*ScanItemResult, error)
 	// VirtualTracksForPath returns the virtual tracks the file at path backs, in start
-	// order, or none when it is not a rip.
+	// order and with their stored identity keys, or none when it is not a rip.
 	VirtualTracksForPath(ctx context.Context, path []byte) ([]VirtualTrack, error)
 	FileByPath(ctx context.Context, path []byte) (*File, error)
 	FileByEssence(ctx context.Context, essence string) (*File, error)

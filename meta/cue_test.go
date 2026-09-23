@@ -1,6 +1,7 @@
 package meta
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
@@ -95,10 +96,10 @@ func TestParseCueTimeKeepsTheFrame(t *testing.T) {
 	}
 }
 
-// TestParseCueSheetRefusesMalformedTime covers the three bounds and the shapes that
-// are not a timestamp at all. Upstream's parse is syntactic, so each costs the whole
-// sheet rather than the one track, and the refusal names the line to go look at.
-func TestParseCueSheetRefusesMalformedTime(t *testing.T) {
+// TestParseCueSheetReportsMalformedTime covers the three bounds and the shapes that
+// are not a timestamp at all. Each is a warning naming the line to go look at, and
+// the INDEX it spelled is dropped, so the track has no start.
+func TestParseCueSheetReportsMalformedTime(t *testing.T) {
 	for _, ts := range []string{
 		"00:60:00",   // SS past 59
 		"00:00:75",   // FF past 74 (a second holds 75 frames, 0-74)
@@ -106,14 +107,17 @@ func TestParseCueSheetRefusesMalformedTime(t *testing.T) {
 		"1:2",        // not MM:SS:FF at all
 		"-1:00:00",   // signed: Atoi takes it, a position cannot
 	} {
-		// The INDEX sits on line 3, so the refusal names it.
-		sheet, err := ParseCueSheet("FILE \"a.flac\" WAVE\n  TRACK 01 AUDIO\n    INDEX 01 " + ts + "\n")
-		if err == nil {
-			t.Errorf("INDEX %q parsed to %+v; want the sheet refused", ts, sheet)
+		s, err := ParseCueSheet("FILE \"a.flac\" WAVE\n  TRACK 01 AUDIO\n    INDEX 01 " + ts + "\n")
+		if err != nil {
+			t.Errorf("INDEX %q: %v; want a warning, not a refusal", ts, err)
 			continue
 		}
-		if !strings.Contains(err.Error(), "line 3") {
-			t.Errorf("INDEX %q: error %q does not name line 3", ts, err)
+		if s == nil || len(s.Warnings) != 1 || s.Warnings[0].Line != 3 {
+			t.Errorf("INDEX %q parsed to %+v; want one warning on line 3", ts, s)
+			continue
+		}
+		if len(s.Tracks) != 1 || s.Tracks[0].StartValid {
+			t.Errorf("INDEX %q: tracks = %+v, want one track with no start", ts, s.Tracks)
 		}
 	}
 	// The bounds are inclusive at the top: 59 seconds and frame 74 are both legal.
@@ -145,9 +149,77 @@ func TestParseCueSheetTrackWithoutIndex01IsNotZero(t *testing.T) {
 	if s.Tracks[0].StartValid {
 		t.Errorf("track = %+v, want StartValid false for a track with no INDEX 01", s.Tracks[0])
 	}
-	// A malformed INDEX 01 is a different condition: the sheet is refused outright.
-	if sheet, err := ParseCueSheet("FILE \"a.flac\" WAVE\n  TRACK 01 AUDIO\n    INDEX 01 00:99:00\n"); err == nil {
-		t.Errorf("ParseCueSheet = %+v, want a malformed INDEX 01 to refuse the sheet", sheet)
+	// A malformed INDEX 01 leaves the track startless too, and says so in a warning.
+	s = parseSheet(t, "FILE \"a.flac\" WAVE\n  TRACK 01 AUDIO\n    INDEX 01 00:99:00\n")
+	if s == nil || len(s.Tracks) != 1 || s.Tracks[0].StartValid || len(s.Warnings) != 1 {
+		t.Errorf("ParseCueSheet = %+v, want one startless track and one warning", s)
+	}
+}
+
+// TestParseCueSheetReadsPastAnUnreadableLine: one mistyped INDEX costs its own track's
+// start and nothing else. The rest of the sheet reads as written.
+func TestParseCueSheetReadsPastAnUnreadableLine(t *testing.T) {
+	s := parseSheet(t, "TITLE \"Kept\"\nFILE \"a.wav\" WAVE\n"+
+		"  TRACK 01 AUDIO\n    INDEX 01 00:0x:00\n"+
+		"  TRACK 02 AUDIO\n    INDEX 01 00:00:10\n")
+	if s == nil {
+		t.Fatal("ParseCueSheet returned nil")
+	}
+	if s.Title != "Kept" {
+		t.Errorf("title = %q, want Kept", s.Title)
+	}
+	if len(s.Tracks) != 2 || s.Tracks[0].StartValid || !s.Tracks[1].StartValid || s.Tracks[1].StartFrames != 10 {
+		t.Errorf("tracks = %+v, want track 1 startless and track 2 at frame 10", s.Tracks)
+	}
+	if len(s.Warnings) != 1 || s.Warnings[0].String() != `line 4: track 1: time "00:0x:00" is not MM:SS:FF` {
+		t.Errorf("warnings = %+v, want the one on line 4", s.Warnings)
+	}
+}
+
+// TestParseCueSheetKeepsWarningsWithoutTracks: a sheet whose every TRACK line is
+// misspelled opens no track, and the warnings are all there is to say about it. They
+// have to reach the caller, so the sheet is not reported as empty.
+func TestParseCueSheetKeepsWarningsWithoutTracks(t *testing.T) {
+	s := parseSheet(t, "TRCK 01 AUDIO\n  INDEX 01 00:00:00\nTRCK 02 AUDIO\n  INDEX 01 00:05:00\n")
+	if s == nil {
+		t.Fatal("ParseCueSheet returned nil; want the warnings kept")
+	}
+	if len(s.Tracks) != 0 {
+		t.Errorf("tracks = %+v, want none", s.Tracks)
+	}
+	if len(s.Warnings) != 2 || s.Warnings[0].Line != 2 || s.Warnings[1].Line != 4 {
+		t.Errorf("warnings = %+v, want lines 2 and 4", s.Warnings)
+	}
+}
+
+// TestParseCueSheetMarksTruncatedWarnings: upstream stops recording warnings at 64,
+// so a sheet that reaches that many may have more, and the report must not claim an
+// exact count.
+func TestParseCueSheetMarksTruncatedWarnings(t *testing.T) {
+	bad := func(n int) string { return strings.Repeat("INDEX 01 00:00:00\n", n) }
+	s := parseSheet(t, bad(70))
+	if s == nil || len(s.Warnings) != 64 || !s.WarningsTruncated {
+		t.Errorf("70 unread lines = %d warnings, truncated %v; want 64, true", len(s.Warnings), s.WarningsTruncated)
+	}
+	if s = parseSheet(t, bad(10)); s == nil || len(s.Warnings) != 10 || s.WarningsTruncated {
+		t.Errorf("10 unread lines = %+v, want 10 warnings, not truncated", s)
+	}
+}
+
+// TestParseCueRefusesAWarnedSheet: chapters set --file is an explicit command, so it
+// refuses a sheet with an unread line and names it rather than setting a partial list
+// the user would have to redo.
+func TestParseCueRefusesAWarnedSheet(t *testing.T) {
+	chs, err := ParseCue("FILE \"book.m4b\" WAVE\n  TRACK 01 AUDIO\n    INDEX 01 00:99:00\n" +
+		"  TRACK 02 AUDIO\n    INDEX 01 00:05:00\n")
+	if err == nil {
+		t.Fatalf("ParseCue = %+v, want the sheet refused", chs)
+	}
+	if !strings.Contains(err.Error(), `line 3: track 1: time "00:99:00"`) {
+		t.Errorf("error %q does not name line 3", err)
+	}
+	if strings.Contains(err.Error(), "cue:") {
+		t.Errorf("error %q still carries upstream's prefix", err)
 	}
 }
 
@@ -175,14 +247,11 @@ func TestParseCueChaptersUnchanged(t *testing.T) {
 // 0: anchoring it would misplace that chapter and also report the chapter before it
 // as ending at the start of the book.
 func TestParseCueChaptersDropUnindexedTracks(t *testing.T) {
-	chs, err := ParseCue("FILE \"book.m4b\" WAVE\n" +
-		"  TRACK 01 AUDIO\n    TITLE \"One\"\n    INDEX 01 00:00:00\n" +
-		"  TRACK 02 AUDIO\n    TITLE \"Two\"\n    INDEX 01 00:05:00\n" +
-		"  TRACK 03 AUDIO\n    TITLE \"Broken\"\n    INDEX 00 00:07:00\n" +
-		"  TRACK 04 AUDIO\n    TITLE \"Four\"\n    INDEX 01 00:10:00\n")
-	if err != nil {
-		t.Fatalf("ParseCue: %v", err)
-	}
+	chs := parseSheet(t, "FILE \"book.m4b\" WAVE\n"+
+		"  TRACK 01 AUDIO\n    TITLE \"One\"\n    INDEX 01 00:00:00\n"+
+		"  TRACK 02 AUDIO\n    TITLE \"Two\"\n    INDEX 01 00:05:00\n"+
+		"  TRACK 03 AUDIO\n    TITLE \"Broken\"\n    INDEX 00 00:07:00\n"+
+		"  TRACK 04 AUDIO\n    TITLE \"Four\"\n    INDEX 01 00:10:00\n").Chapters()
 	if len(chs) != 3 {
 		t.Fatalf("chapters = %d, want 3 (the unindexed TRACK 03 is dropped): %+v", len(chs), chs)
 	}
@@ -201,6 +270,50 @@ func TestParseCueChaptersDropUnindexedTracks(t *testing.T) {
 			t.Errorf("chapter %d (%q) starts at 0; the preceding chapter's end is read off "+
 				"this value and would collapse", i, c.Title)
 		}
+	}
+}
+
+// TestChapterDropsMatchTheStoredChapters: a book's diagnostic names the tracks that do
+// not end up as chapters. Two on one start collapse into the later once sorted, as the
+// catalog stores them, even when the sheet lists them out of order.
+func TestChapterDropsMatchTheStoredChapters(t *testing.T) {
+	s := parseSheet(t, "FILE \"book.m4b\" WAVE\n"+
+		"  TRACK 01 AUDIO\n    TITLE \"Late\"\n    INDEX 01 00:00:10\n"+
+		"  TRACK 02 AUDIO\n    TITLE \"Opening\"\n    INDEX 01 00:00:00\n"+
+		"  TRACK 03 AUDIO\n    TITLE \"Same Start\"\n    INDEX 01 00:00:10\n"+
+		"  TRACK 04 MODE1/2352\n    INDEX 01 00:00:20\n")
+	want := []string{
+		`TRACK 04 is a data track`,
+		`TRACK 01 ("Late") is empty (the next TRACK's INDEX 01 names the same frame)`,
+	}
+	if got := s.ChapterDrops(); !slices.Equal(got, want) {
+		t.Errorf("ChapterDrops = %q, want %q", got, want)
+	}
+}
+
+// TestCueTrackDescNamesAnUnnumberedTrack: a TRACK line whose number cannot be read is
+// numbered -1 upstream, which is no number a sheet can hold, so the report says so in
+// words.
+func TestCueTrackDescNamesAnUnnumberedTrack(t *testing.T) {
+	s := parseSheet(t, "FILE \"book.m4b\" WAVE\n  TRACK AUDIO\n    TITLE \"Lost\"\n    INDEX 00 00:00:05\n")
+	want := []string{`an unnumbered TRACK ("Lost") has no usable INDEX 01`}
+	if got := s.ChapterDrops(); !slices.Equal(got, want) {
+		t.Errorf("ChapterDrops = %q, want %q", got, want)
+	}
+}
+
+// TestParseCueRefusesATrackWithoutIndex01: a misspelled INDEX line is an unknown
+// command upstream, skipped with no warning, and it leaves its track with no start.
+// chapters set --file names that track rather than setting the chapters around it.
+func TestParseCueRefusesATrackWithoutIndex01(t *testing.T) {
+	chs, err := ParseCue("TRACK 01 AUDIO\n  TITLE \"Opening\"\n  INDEX 01 00:00:00\n" +
+		"TRACK 02 AUDIO\n  TITLE \"Middle\"\n  INDX 01 00:05:00\n" +
+		"TRACK 03 AUDIO\n  TITLE \"End\"\n  INDEX 01 00:10:00\n")
+	if err == nil {
+		t.Fatalf("ParseCue = %+v, want the sheet refused", chs)
+	}
+	if !strings.Contains(err.Error(), `TRACK 02 ("Middle") has no usable INDEX 01`) {
+		t.Errorf("error %q does not name TRACK 02", err)
 	}
 }
 
@@ -276,49 +389,75 @@ func TestParseCueSheetRefusesMultipleFiles(t *testing.T) {
 	}
 }
 
-// TestParseCueSheetUnquotedTitleTakesOneToken pins a limit of the upstream parser,
-// which splits an unquoted operand on whitespace and keeps the first token. The
-// retired parser took the rest of the line. It is filed in docs/upstream-requests.md;
-// the day upstream takes the whole operand this test fails and the entry retires.
-func TestParseCueSheetUnquotedTitleTakesOneToken(t *testing.T) {
+// TestParseCueSheetUnquotedTitleReadsTheLine: an unquoted one-string operand is the
+// rest of its line, as a hand-written sheet means it.
+func TestParseCueSheetUnquotedTitleReadsTheLine(t *testing.T) {
 	s := parseSheet(t, "FILE \"a.flac\" WAVE\nTITLE Jazz Album\n  TRACK 01 AUDIO\n    INDEX 01 00:00:00\n")
 	if s == nil {
 		t.Fatal("ParseCueSheet returned nil")
 	}
-	if s.Title != "Jazz" {
-		t.Errorf("title = %q, want Jazz (upstream keeps the first token of an unquoted operand)", s.Title)
+	if s.Title != "Jazz Album" {
+		t.Errorf("title = %q, want Jazz Album", s.Title)
 	}
 }
 
-// TestParseCueSheetToleratesAMissingFILE: upstream refuses a TRACK before any FILE,
-// but a sidecar beside one file rarely writes one and a hand-written chapter sheet
-// never does. The adapter supplies the implied FILE and takes it back out of a
-// refusal's line number, so the line named is the sheet's own. Also filed upstream.
-func TestParseCueSheetToleratesAMissingFILE(t *testing.T) {
+// TestParseCueSheetImpliedFILE: a sidecar beside one file rarely writes a FILE line
+// and a hand-written chapter sheet never does, so a TRACK before any FILE is indexed
+// against the implied file. A warning names the line as the sheet numbers it.
+func TestParseCueSheetImpliedFILE(t *testing.T) {
 	s := parseSheet(t, "TITLE \"No File Line\"\n  TRACK 01 AUDIO\n    INDEX 01 00:00:00\n")
 	if s == nil || len(s.Tracks) != 1 || !s.Tracks[0].StartValid {
-		t.Fatalf("ParseCueSheet = %+v, want one usable track through the synthetic FILE", s)
+		t.Fatalf("ParseCueSheet = %+v, want one usable track in the implied file", s)
 	}
 	if s.Title != "No File Line" {
 		t.Errorf("title = %q, want No File Line", s.Title)
 	}
-	_, err := ParseCueSheet("TITLE \"x\"\n  TRACK 01 AUDIO\n    INDEX 01 00:99:00\n")
-	if err == nil {
-		t.Fatal("a malformed INDEX parsed; want the sheet refused")
+	s = parseSheet(t, "TITLE \"x\"\n  TRACK 01 AUDIO\n    INDEX 01 00:99:00\n")
+	if s == nil || len(s.Warnings) != 1 {
+		t.Fatalf("ParseCueSheet = %+v, want one warning", s)
 	}
-	if !strings.Contains(err.Error(), `line 3: time "00:99:00"`) {
-		t.Errorf("error %q does not name the sheet's own line 3 and the time", err)
+	if w := s.Warnings[0].String(); !strings.HasPrefix(w, `line 3: track 1: time "00:99:00"`) {
+		t.Errorf("warning %q does not name the sheet's own line 3, the track and the time", w)
 	}
-	if strings.Contains(err.Error(), "cue:") {
-		t.Errorf("error %q still carries upstream's prefix", err)
+}
+
+// TestParseCueSheetReadsCROnlyLines: a sheet saved on classic Mac OS ends each line
+// with a bare CR. The album header ahead of FILE is the usual layout, and it must
+// read as separate lines rather than one run-on TITLE.
+func TestParseCueSheetReadsCROnlyLines(t *testing.T) {
+	s := parseSheet(t, "PERFORMER \"Band\"\rTITLE \"Album\"\rFILE \"a.wav\" WAVE\r"+
+		"  TRACK 01 AUDIO\r    TITLE \"One\"\r    INDEX 01 00:00:00\r"+
+		"  TRACK 02 AUDIO\r    TITLE \"Two\"\r    INDEX 01 00:05:00\r")
+	if s == nil {
+		t.Fatal("ParseCueSheet returned nil for a CR-only sheet")
+	}
+	if s.Performer != "Band" || s.Title != "Album" {
+		t.Errorf("album = %q by %q, want Album by Band", s.Title, s.Performer)
+	}
+	if len(s.Tracks) != 2 || s.Tracks[1].Title != "Two" || s.Tracks[1].StartFrames != 375 {
+		t.Errorf("tracks = %+v, want two, the second Two at 375 frames", s.Tracks)
+	}
+}
+
+// TestParseCueSheetKeepsInnerQuotes: the format has no escape, so only the pair of
+// quotes around an operand is stripped. The padding inside them is still trimmed.
+func TestParseCueSheetKeepsInnerQuotes(t *testing.T) {
+	s := parseSheet(t, "TITLE \" The \"Best\" Of \"\nFILE \"a.wav\" WAVE\n"+
+		"  TRACK 01 AUDIO\n    TITLE \"12\" Remix\"\n    INDEX 01 00:00:00\n")
+	if s == nil || len(s.Tracks) != 1 {
+		t.Fatalf("ParseCueSheet = %+v, want one track", s)
+	}
+	if s.Title != `The "Best" Of` {
+		t.Errorf("album title = %q, want %q", s.Title, `The "Best" Of`)
+	}
+	if s.Tracks[0].Title != `12" Remix` {
+		t.Errorf("track title = %q, want %q", s.Tracks[0].Title, `12" Remix`)
 	}
 }
 
 // TestParseCueSheetStripsABOM: a Windows editor saves UTF-8 with a byte-order mark,
-// and upstream strips one only at the very start of the text. Supplying the FILE
-// line ahead of it would leave the mark glued to the first command, which then reads
-// as an unknown word: a sheet opening with TRACK was refused, and one opening with
-// TITLE lost the album title.
+// which must not glue itself to the first command: a sheet opening with TRACK or
+// TITLE behind one still reads.
 func TestParseCueSheetStripsABOM(t *testing.T) {
 	const bom = "\xef\xbb\xbf"
 	s := parseSheet(t, bom+"TRACK 01 AUDIO\n  INDEX 01 00:00:00\nTRACK 02 AUDIO\n  INDEX 01 00:05:00\n")
@@ -331,13 +470,13 @@ func TestParseCueSheetStripsABOM(t *testing.T) {
 	}
 }
 
-// TestParseCueSheetFILETokenMatchesUpstream: the FILE check reads a line the way
-// upstream does, with space and tab as the only separators. A no-break space is part
-// of the word there, so such a line is not a FILE and the adapter must supply one.
+// TestParseCueSheetFILETokenMatchesUpstream: space and tab are the only separators, so
+// a FILE line with a no-break space is an unknown command, skipped, and the track
+// opens the implied file instead of being lost.
 func TestParseCueSheetFILETokenMatchesUpstream(t *testing.T) {
 	s := parseSheet(t, "FILE\u00a0\"a.wav\" WAVE\nTRACK 01 AUDIO\n  INDEX 01 00:00:00\n")
-	if s == nil || len(s.Tracks) != 1 {
-		t.Errorf("ParseCueSheet = %+v, want the track read against a supplied FILE", s)
+	if s == nil || len(s.Tracks) != 1 || s.File != "" {
+		t.Errorf("ParseCueSheet = %+v, want the track read against the implied file", s)
 	}
 }
 
@@ -359,11 +498,279 @@ func TestParseCueSheetEnhancedCDDataFILE(t *testing.T) {
 }
 
 // TestParseCueSheetTabSeparatedFILECountsAsOne: upstream tokenizes on tabs as well as
-// spaces, so a tab-separated FILE line is a FILE line. Missing it would prepend a
-// second one and refuse the sheet as multi-file.
+// spaces, so a tab-separated sheet reads like a space-separated one.
 func TestParseCueSheetTabSeparatedFILECountsAsOne(t *testing.T) {
 	s := parseSheet(t, "FILE\t\"album.flac\"\tWAVE\n\tTRACK 01 AUDIO\n\t\tINDEX 01 00:00:00\n")
-	if s == nil || len(s.Tracks) != 1 || !s.Tracks[0].StartValid {
-		t.Fatalf("ParseCueSheet = %+v, want one usable track", s)
+	if s == nil || len(s.Tracks) != 1 || !s.Tracks[0].StartValid || s.File != "album.flac" {
+		t.Fatalf("ParseCueSheet = %+v, want one usable track in album.flac", s)
+	}
+}
+
+// rip joins sheet lines under one FILE line, for sheets written a line per entry.
+func rip(lines ...string) string {
+	return "FILE \"album.wav\" WAVE\n" + strings.Join(lines, "\n") + "\n"
+}
+
+// TestCarve pins the windows a rip is carved into, in CD frames, for the shapes real
+// sheets have: mixed-mode images with a data track first, EAC images whose data track
+// occupies nothing, Enhanced CDs with the data track last, PC Engine discs with it
+// between audio tracks, and discs with audio ahead of track 1. An end of 0 is open.
+func TestCarve(t *testing.T) {
+	type win struct {
+		num        int
+		title      string // compared when set
+		start, end int64
+	}
+	for _, tc := range []struct {
+		name   string
+		sheet  string
+		fileMS int64 // the file's probed length, 0 when unknown
+		want   []win
+		drops  int
+		err    string // a substring of the refusal
+	}{
+		{
+			name: "a data track first starts the audio at the first audio INDEX 01",
+			sheet: rip(`TRACK 01 MODE1/2352`, `INDEX 01 00:00:00`,
+				`TRACK 02 AUDIO`, `INDEX 00 00:10:00`, `INDEX 01 00:12:00`,
+				`TRACK 03 AUDIO`, `INDEX 01 00:20:00`),
+			want:  []win{{num: 2, start: 900, end: 1500}, {num: 3, start: 1500}},
+			drops: 1,
+		},
+		{
+			name: "a data track beside audio at frame 0 occupies nothing",
+			sheet: rip(`TRACK 01 MODE1/2352`, `INDEX 01 00:00:00`,
+				`TRACK 02 AUDIO`, `INDEX 01 00:00:00`,
+				`TRACK 03 AUDIO`, `INDEX 01 00:05:00`),
+			want:  []win{{num: 2, start: 0, end: 375}, {num: 3, start: 375}},
+			drops: 1,
+		},
+		{
+			name: "a data track between audio tracks ends the track before it",
+			sheet: rip(`TRACK 01 AUDIO`, `INDEX 01 00:00:00`,
+				`TRACK 02 MODE1/2352`, `INDEX 01 00:05:00`,
+				`TRACK 03 AUDIO`, `INDEX 00 00:09:00`, `INDEX 01 00:11:00`),
+			want:  []win{{num: 1, start: 0, end: 375}, {num: 3, start: 825}},
+			drops: 1,
+		},
+		{
+			name: "the audio before a data track ends at its INDEX 00",
+			sheet: rip(`TRACK 01 AUDIO`, `INDEX 01 00:00:00`,
+				`TRACK 02 MODE1/2352`, `INDEX 00 00:04:00`, `INDEX 01 00:05:00`,
+				`TRACK 03 AUDIO`, `INDEX 01 00:11:00`),
+			want:  []win{{num: 1, start: 0, end: 300}, {num: 3, start: 825}},
+			drops: 1,
+		},
+		{
+			name: "a trailing data track inside the file ends the last track at its INDEX 00",
+			sheet: rip(`TRACK 01 AUDIO`, `INDEX 01 00:00:00`,
+				`TRACK 02 AUDIO`, `INDEX 01 00:05:00`,
+				`TRACK 03 MODE1/2352`, `INDEX 00 00:09:00`, `INDEX 01 00:11:00`),
+			fileMS: 20000,
+			want:   []win{{num: 1, start: 0, end: 375}, {num: 2, start: 375, end: 675}},
+			drops:  1,
+		},
+		{
+			name: "a trailing data track with only an INDEX 01 ends the last track there",
+			sheet: rip(`TRACK 01 AUDIO`, `INDEX 01 00:00:00`,
+				`TRACK 02 AUDIO`, `INDEX 01 00:05:00`,
+				`TRACK 03 MODE1/2352`, `INDEX 01 00:09:00`),
+			fileMS: 20000,
+			want:   []win{{num: 1, start: 0, end: 375}, {num: 2, start: 375, end: 675}},
+			drops:  1,
+		},
+		{
+			name: "a trailing data track at the file's end leaves the last track open",
+			sheet: rip(`TRACK 01 AUDIO`, `INDEX 01 00:00:00`,
+				`TRACK 02 AUDIO`, `INDEX 01 00:05:00`,
+				`TRACK 03 MODE1/2352`, `INDEX 00 00:19:25`, `INDEX 01 00:21:25`),
+			fileMS: 20000,
+			want:   []win{{num: 1, start: 0, end: 375}, {num: 2, start: 375}},
+			drops:  1,
+		},
+		{
+			name: "a trailing data track past the file leaves the last track open",
+			sheet: rip(`TRACK 01 AUDIO`, `INDEX 01 00:00:00`,
+				`TRACK 02 AUDIO`, `INDEX 01 00:05:00`,
+				`TRACK 03 MODE1/2352`, `INDEX 01 01:00:00`),
+			fileMS: 20000,
+			want:   []win{{num: 1, start: 0, end: 375}, {num: 2, start: 375}},
+			drops:  1,
+		},
+		{
+			name: "a trailing data track in a file of unknown length leaves the last track open",
+			sheet: rip(`TRACK 01 AUDIO`, `INDEX 01 00:00:00`,
+				`TRACK 02 AUDIO`, `INDEX 01 00:05:00`,
+				`TRACK 03 MODE1/2352`, `INDEX 00 00:09:00`, `INDEX 01 00:11:00`),
+			want:  []win{{num: 1, start: 0, end: 375}, {num: 2, start: 375}},
+			drops: 1,
+		},
+		{
+			name: "a trailing data track placed before the last audio track leaves it open",
+			sheet: rip(`TRACK 01 AUDIO`, `INDEX 01 00:00:00`,
+				`TRACK 02 AUDIO`, `INDEX 01 00:05:00`,
+				`TRACK 03 MODE1/2352`, `INDEX 01 00:01:00`),
+			fileMS: 20000,
+			want:   []win{{num: 1, start: 0, end: 375}, {num: 2, start: 375}},
+			drops:  1,
+		},
+		{
+			name:  "one audio track is not a rip",
+			sheet: rip(`TRACK 01 AUDIO`, `INDEX 01 00:00:00`),
+		},
+		{
+			name: "one audio track behind a data track is not a rip",
+			sheet: rip(`TRACK 01 MODE1/2352`, `INDEX 01 00:00:00`,
+				`TRACK 02 AUDIO`, `INDEX 01 00:04:00`),
+			drops: 1,
+		},
+		{
+			name: "tracks out of order are refused",
+			sheet: rip(`TRACK 01 AUDIO`, `INDEX 01 00:00:10`,
+				`TRACK 02 AUDIO`, `INDEX 01 00:00:05`,
+				`TRACK 03 AUDIO`, `INDEX 01 00:00:20`),
+			err: `file "album.wav" track 2 starts at frame 5`,
+		},
+		{
+			name: "a cooked data track ahead of audio is refused",
+			sheet: rip(`TRACK 01 MODE1/2048`, `INDEX 01 00:00:00`,
+				`TRACK 02 AUDIO`, `INDEX 01 00:04:00`,
+				`TRACK 03 AUDIO`, `INDEX 01 00:08:00`),
+			drops: 1,
+			err:   "a data track occupying the file ahead of audio",
+		},
+		{
+			name: "a data track after the last audio track needs no INDEX",
+			sheet: rip(`TRACK 01 AUDIO`, `INDEX 01 00:00:00`,
+				`TRACK 02 AUDIO`, `INDEX 01 00:05:00`,
+				`TRACK 03 MODE1/2352`),
+			want:  []win{{num: 1, start: 0, end: 375}, {num: 2, start: 375}},
+			drops: 1,
+		},
+		{
+			name: "an Enhanced CD data track given only its session gap is dropped",
+			sheet: rip(`TRACK 01 AUDIO`, `INDEX 01 00:00:00`,
+				`TRACK 02 AUDIO`, `INDEX 01 00:05:00`,
+				`TRACK 03 MODE1/2352`, `PREGAP 02:32:00`),
+			fileMS: 20000,
+			want:   []win{{num: 1, start: 0, end: 375}, {num: 2, start: 375}},
+			drops:  1,
+		},
+		{
+			name: "a data track between audio tracks with no INDEX is refused",
+			sheet: rip(`TRACK 01 AUDIO`, `INDEX 01 00:00:00`,
+				`TRACK 02 MODE1/2352`,
+				`TRACK 03 AUDIO`, `INDEX 01 00:10:00`),
+			drops: 1,
+			err:   "nothing says where the audio before it ends",
+		},
+		{
+			name: "the earlier of two audio tracks on one frame is dropped",
+			sheet: rip(`TRACK 01 AUDIO`, `INDEX 01 00:00:00`,
+				`TRACK 02 AUDIO`, `INDEX 01 00:00:00`,
+				`TRACK 03 AUDIO`, `INDEX 01 00:00:10`),
+			want:  []win{{num: 2, start: 0, end: 10}, {num: 3, start: 10}},
+			drops: 1,
+		},
+		{
+			name: "a lead-in of ten seconds is a gap",
+			sheet: rip(`TRACK 01 AUDIO`, `INDEX 00 00:00:00`, `INDEX 01 00:10:00`,
+				`TRACK 02 AUDIO`, `INDEX 01 00:20:00`),
+			want: []win{{num: 1, start: 750, end: 1500}, {num: 2, start: 1500}},
+		},
+		{
+			name: "a longer lead-in is hidden track one audio",
+			sheet: rip(`TRACK 01 AUDIO`, `INDEX 00 00:00:00`, `INDEX 01 00:10:01`,
+				`TRACK 02 AUDIO`, `INDEX 01 00:20:00`),
+			want: []win{{num: 0, title: "Hidden Track", start: 0, end: 751}, {num: 1, start: 751, end: 1500}, {num: 2, start: 1500}},
+		},
+		{
+			name: "a sheet's own TRACK 00 is kept as written",
+			sheet: rip(`TRACK 00 AUDIO`, `TITLE "Secret"`, `INDEX 01 00:00:00`,
+				`TRACK 01 AUDIO`, `INDEX 01 00:20:00`,
+				`TRACK 02 AUDIO`, `INDEX 01 00:40:00`),
+			want: []win{{num: 0, title: "Secret", start: 0, end: 1500}, {num: 1, start: 1500, end: 3000}, {num: 2, start: 3000}},
+		},
+		{
+			name: "a TRACK 00 with a long pregap of its own adds nothing",
+			sheet: rip(`TRACK 00 AUDIO`, `INDEX 01 00:20:00`,
+				`TRACK 01 AUDIO`, `INDEX 01 00:40:00`),
+			want: []win{{num: 0, start: 1500, end: 3000}, {num: 1, start: 3000}},
+		},
+		{
+			name: "a partial rip's lead-in is not hidden track one audio",
+			sheet: rip(`TRACK 05 AUDIO`, `INDEX 01 00:30:00`,
+				`TRACK 06 AUDIO`, `INDEX 01 00:50:00`),
+			want: []win{{num: 5, start: 2250, end: 3750}, {num: 6, start: 3750}},
+		},
+		{
+			name: "a track dropped ahead of track 1 leaves its lead-in unnamed",
+			sheet: rip(`TRACK 00 AUDIO`, `INDEX 00 00:00:00`,
+				`TRACK 01 AUDIO`, `INDEX 01 00:20:00`,
+				`TRACK 02 AUDIO`, `INDEX 01 00:40:00`),
+			want:  []win{{num: 1, start: 1500, end: 3000}, {num: 2, start: 3000}},
+			drops: 1,
+		},
+		{
+			name: "a dropped first track leaves the audio ahead of the next one unnamed",
+			sheet: rip(`TRACK 01 AUDIO`, `TITLE "Broken"`, `INDEX 00 00:00:00`,
+				`TRACK 02 AUDIO`, `INDEX 01 00:20:00`,
+				`TRACK 03 AUDIO`, `INDEX 01 00:40:00`),
+			want:  []win{{num: 2, start: 1500, end: 3000}, {num: 3, start: 3000}},
+			drops: 1,
+		},
+		{
+			name:  "one audio track with a long lead-in is still not a rip",
+			sheet: rip(`TRACK 01 AUDIO`, `INDEX 01 00:20:00`),
+		},
+		{
+			name: "the audio ahead of track 1 after a data FILE is the data track's pregap",
+			sheet: "FILE \"data.bin\" BINARY\n  TRACK 01 MODE1/2352\n    INDEX 01 00:00:00\n" +
+				rip(`TRACK 02 AUDIO`, `INDEX 01 00:20:00`, `TRACK 03 AUDIO`, `INDEX 01 00:40:00`),
+			want: []win{{num: 2, start: 1500, end: 3000}, {num: 3, start: 3000}},
+		},
+		{
+			name: "a data FILE ahead of track 1 makes its lead-in the data track's pregap",
+			sheet: "FILE \"data.bin\" BINARY\n  TRACK 00 MODE1/2352\n    INDEX 01 00:00:00\n" +
+				rip(`TRACK 01 AUDIO`, `INDEX 01 00:20:00`, `TRACK 02 AUDIO`, `INDEX 01 00:40:00`),
+			want: []win{{num: 1, start: 1500, end: 3000}, {num: 2, start: 3000}},
+		},
+		{
+			name: "a sheet with an unread line is not divided",
+			sheet: rip(`TRACK 01 AUDIO`, `INDEX 01 00:00:00`,
+				`TRACK 02 AUDIO`, `INDEX 01 00:0x:00`,
+				`TRACK 03 AUDIO`, `INDEX 01 00:10:00`),
+			drops: 1,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, dropped, err := parseSheet(t, tc.sheet).Carve(tc.fileMS)
+			if len(dropped) != tc.drops {
+				t.Errorf("dropped = %q, want %d", dropped, tc.drops)
+			}
+			if tc.err != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.err) || strings.Contains(err.Error(), "cue:") {
+					t.Fatalf("err = %v, want %q without upstream's prefix", err, tc.err)
+				}
+				if got != nil {
+					t.Errorf("windows = %+v beside a refusal, want none", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Carve: %v", err)
+			}
+			if len(got) != len(tc.want) {
+				t.Fatalf("windows = %+v, want %+v", got, tc.want)
+			}
+			for i, w := range tc.want {
+				g := got[i]
+				if g.Track.Number != w.num || g.StartFrames != w.start || g.EndFrames != w.end ||
+					(w.title != "" && g.Track.Title != w.title) {
+					t.Errorf("window %d = track %d %q [%d,%d), want track %d %q [%d,%d)",
+						i, g.Track.Number, g.Track.Title, g.StartFrames, g.EndFrames, w.num, w.title, w.start, w.end)
+				}
+			}
+		})
 	}
 }

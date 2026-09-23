@@ -17,7 +17,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"strconv"
 	"strings"
 
@@ -426,31 +425,6 @@ func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, p
 	// chapters would read as new on every scan, route to the full path, and re-hash
 	// the audio each time. It is the same trap the directory-cover stat fallback
 	// already avoids.
-	var cueSheet *meta.CueSheet
-	// carve is the sheet reduced to the tracks that can actually become virtual tracks.
-	// Its length decides below whether this file is a rip, since a virtual track is
-	// nothing but its start offset and the window that offset opens. Counting the
-	// tracks that named no usable window instead would carve a rip out of a sheet that
-	// has none to carve, and a sheet whose every track was unusable would commit the
-	// file with no items at all.
-	var carve []meta.CueTrack
-	cueUnread := false
-	if len(tags.Chapters) == 0 {
-		if sheet, cueObs, cueDiags, unread, ok := scanCueSidecar(path); ok {
-			aux = append(aux, cueObs)
-			diags = append(diags, cueDiags...)
-			cueSheet, cueUnread = sheet, unread
-		}
-		if cueSheet != nil {
-			var dropped []string
-			carve, dropped = cueTracksToCarve(cueSheet)
-			// Report the drops here rather than on the rip path, so they stay visible
-			// whichever path the file then takes: a sheet left with fewer than two carvable
-			// tracks never reaches virtualTracksInput at all.
-			diags = append(diags, cueTracksDroppedDiag(dropped)...)
-		}
-	}
-
 	// An audiobook takes the book path: it groups by book identity (so a multi-file
 	// book collapses its parts into one item) and carries contributors and chapters.
 	// Everything else is a music track. A forced kind from the caller wins over the
@@ -462,37 +436,102 @@ func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, p
 	case model.KindTrack:
 		isBook = false
 	}
-	// An unread sheet says nothing new about the tracks, so a rip keeps the windows it
-	// was last carved into; a whole-file fallback would delete every virtual track
-	// with its plays and stars.
-	if cueUnread && !isBook {
-		sheet, kept, err := s.keptRip(ctx, path)
+
+	var cueSheet *meta.CueSheet
+	// carve is the sheet's windows, one per track that can actually become a virtual
+	// track. Its length decides below whether this file is a rip, since a virtual track
+	// is nothing but its window. Counting the tracks that named no usable window instead
+	// would carve a rip out of a sheet that has none to carve, and a sheet whose every
+	// track was unusable would commit the file with no items at all.
+	var carve []meta.CueWindow
+	var cueDropped []string
+	cueUnread, cueRefusal := false, ""
+	if len(tags.Chapters) == 0 {
+		if sheet, cueObs, cueDiags, refusal, unread, ok := scanCueSidecar(path); ok {
+			aux = append(aux, cueObs)
+			diags = append(diags, cueDiags...)
+			cueSheet, cueUnread, cueRefusal = sheet, unread, refusal
+		}
+		switch {
+		case cueSheet == nil:
+		case isBook:
+			cueDropped = cueSheet.ChapterDrops()
+		default:
+			// Only a lossless file's length is declared rather than estimated, and one
+			// that runs long would end the last track past its audio.
+			var fileMS int64
+			if model.LosslessCodec(tags.Codec) {
+				fileMS = tags.DurationMS
+			}
+			var err error
+			if carve, cueDropped, err = cueSheet.Carve(fileMS); err != nil {
+				cueRefusal = errMsg(err)
+			}
+		}
+	}
+
+	// A rip is carved only from a sheet that reads clean: the parser skips a line it
+	// cannot read, and a skipped TRACK line merges two songs under one title. Such a
+	// sheet, like an unread one, says nothing reliable about the tracks, so a rip keeps
+	// the windows it was last carved into; a whole-file fallback would delete every
+	// virtual track with its plays and stars. A book takes the lines that did read.
+	var cueWarnings []meta.CueWarning
+	if cueSheet != nil {
+		cueWarnings = cueSheet.Warnings
+	}
+	ripUnread := cueUnread || cueRefusal != "" || len(cueWarnings) > 0
+	var cueChapters []model.Chapter
+	// rip is the virtual tracks a rip is written as. Fewer than two carvable tracks is
+	// not a rip: one window over the whole file is just the file, and it would be
+	// strictly worse as a virtual track (its tags become unwritable and it exports no
+	// fingerprint), so the file takes the plain whole-file path below.
+	var rip []model.VirtualTrack
+	disposition := ""
+	switch {
+	case isBook:
+		if cueSheet != nil {
+			cueChapters = cueSheet.Chapters()
+		}
+		switch {
+		case len(cueWarnings) > 0 && len(cueChapters) > 0:
+			disposition = "the readable lines were applied"
+		case len(cueWarnings) > 0 || cueRefusal != "":
+			disposition = "the sheet was not applied"
+		}
+	case ripUnread:
+		cueDropped = nil
+		kept, err := s.keptRip(ctx, path, tags)
 		if err != nil {
 			return err
 		}
+		disposition = "the sheet was not applied"
 		if len(kept) >= 2 {
-			cueSheet, carve = sheet, kept
+			rip, disposition = kept, "the existing tracks were kept"
 		}
+	case len(carve) >= 2:
+		rip = carvedTracks(essenceHash, tags, cueSheet, carve)
 	}
+	// Reported here rather than on the rip path, so it stays visible whichever path
+	// the file then takes: a sheet left with fewer than two carvable tracks never
+	// reaches virtualTracksInput at all.
+	diags = append(diags, cueSheetDiag(cueSheet, cueDropped, cueRefusal, disposition)...)
 	var out *model.ScanItemResult
 	switch {
-	case !isBook && len(carve) >= 2:
-		// A single file with a multi-track .cue is a single-file album rip: carve each
-		// cue TRACK into its own virtual track with an offset window, rather than
-		// cataloguing the whole file as one track. Fewer than two usable tracks is not a
-		// rip: one window over the whole file is just the file, and it would be strictly
-		// worse as a virtual track (its tags become unwritable and it exports no
-		// fingerprint), so it falls through to the plain whole-file path below.
-		vin := virtualTracksInput(lib.ID, file, tags, essenceHash, cueSheet, carve, cover, aux, diags)
-		vin.PreserveLocks = sc.preserveLocks
-		out, err = s.cat.PutScannedVirtualTracks(ctx, vin)
+	case len(rip) > 0:
+		// A single file with a multi-track .cue is a single-file album rip: each cue
+		// TRACK is its own virtual track with an offset window, rather than the whole
+		// file cataloged as one track.
+		out, err = s.cat.PutScannedVirtualTracks(ctx, model.PutScannedVirtualTracksInput{
+			LibraryID: lib.ID, File: file, Tracks: rip, CoverArt: cover, AuxObservations: aux,
+			Acquisition: tags.Acquisition, Diagnostics: diags, PreserveLocks: sc.preserveLocks,
+		})
 	case isBook:
 		bin := bookInput(lib.ID, file, tags, essenceHash, cover)
 		// With no embedded chapters, a sibling .cue fills them (marked source='cue' so
 		// embedded chapters still win). Its observation was recorded above whether or not
 		// it yielded any; apply the chapters only when it did.
-		if cueSheet != nil {
-			bin.Chapters, bin.ChapterSource = cueSheet.Chapters(), "cue"
+		if len(cueChapters) > 0 {
+			bin.Chapters, bin.ChapterSource = cueChapters, "cue"
 		}
 		bin.AuxObservations = aux
 		bin.PreferredItemPID = adoptedPID(sc, fm)
@@ -634,19 +673,12 @@ func bookInput(libraryID int64, file model.File, tags model.Tags, essenceHash st
 	}
 }
 
-// virtualTracksInput composes a single-file album rip and its .cue sheet into a
-// virtual-track persistence input. Album-level fields prefer the cue header and fall
-// back to the file's own tags. Each cue TRACK becomes a virtual track whose start is
-// its INDEX 01 offset and whose end is the next track's start (the final track's end
-// is left open), and whose per-track performer falls back to the album artist.
-// Windows are CD frames throughout, the unit the sheet is written in. Identity is
-// offset-anchored via VirtualTrackKey, so a rescan re-keys the same tracks and a
-// per-track title retag does not fork identity.
-//
-// cts are the carvable tracks in start order, already reduced and reported by
-// cueTracksToCarve; the caller gated on there being at least two of them, so every
-// one here names a real, non-empty window.
-func virtualTracksInput(libraryID int64, file model.File, tags model.Tags, essenceHash string, sheet *meta.CueSheet, cts []meta.CueTrack, cover *model.ArtImage, aux []model.AuxObservation, diags []model.FileDiagnostic) model.PutScannedVirtualTracksInput {
+// carvedTracks composes a rip's windows and its .cue sheet into virtual tracks.
+// Album-level fields prefer the cue header and fall back to the file's own tags, and
+// each track's performer falls back to the album artist. Identity is offset-anchored
+// via VirtualTrackKey, so a rescan re-keys the same tracks and a per-track title
+// retag does not fork identity.
+func carvedTracks(essenceHash string, tags model.Tags, sheet *meta.CueSheet, windows []meta.CueWindow) []model.VirtualTrack {
 	album := firstNonEmpty(sheet.Title, tags.Album, tags.Title)
 	albumArtist := firstNonEmpty(sheet.Performer, tags.AlbumArtist, tags.Artist)
 	genre := firstNonEmpty(sheet.Genre, tags.Genre)
@@ -655,84 +687,57 @@ func virtualTracksInput(libraryID int64, file model.File, tags model.Tags, essen
 		year = tags.Year
 	}
 
-	tracks := make([]model.VirtualTrack, 0, len(cts))
-	for i, ct := range cts {
-		start := ct.StartFrames
-		// The final track's end stays open rather than copying the file's probed
-		// duration: that duration is a millisecond, and milliseconds are the lossy
-		// direction. An open end already reads back as the same duration through
-		// COALESCE, and it keeps a re-analysis that refines the file's duration from
-		// emitting a spurious change row.
-		var end int64
-		if i+1 < len(cts) {
-			end = cts[i+1].StartFrames
-		}
-		artist := firstNonEmpty(ct.Performer, albumArtist)
+	tracks := make([]model.VirtualTrack, 0, len(windows))
+	for _, w := range windows {
+		ct := w.Track
 		title := ct.Title
 		if title == "" {
 			title = fmt.Sprintf("Track %02d", ct.Number)
 		}
-		tracks = append(tracks, model.VirtualTrack{
-			Item: model.PlayableItem{
-				Kind:        model.KindTrack,
-				State:       model.StatePresent,
-				Title:       title,
-				SortKey:     model.SortKey(title),
-				IdentityKey: identity.VirtualTrackKey(essenceHash, ct.Number, start),
-			},
+		vt := model.VirtualTrack{
+			Item: model.PlayableItem{Title: title, IdentityKey: identity.VirtualTrackKey(essenceHash, ct.Number, w.StartFrames)},
 			Track: model.Track{
-				Artist:      artist,
-				ArtistSort:  model.SortKey(artist),
-				Album:       album,
-				AlbumArtist: albumArtist,
-				TrackNo:     ct.Number,
-				Year:        year,
-				Genre:       genre,
-				Genres:      identity.SplitGenres(genre),
-				// From the file's own tags: a .cue has no vocabulary for these, and without
-				// them a carved rip's album row is empty where a plain rip's is filled.
-				//
-				// BPM is left out on purpose. A cue sheet states no tempo, and the file's
-				// own value describes the whole rip rather than the track being carved, so
-				// copying it down would stamp one number onto every track. A per-track bpm
-				// is an edit away for anyone who wants one.
-				Barcode:       tags.Barcode,
-				Label:         tags.Label,
-				CatalogNumber: tags.CatalogNumber,
-				Media:         tags.Media,
-				Country:       tags.Country,
+				Artist: firstNonEmpty(ct.Performer, albumArtist), Album: album, AlbumArtist: albumArtist,
+				TrackNo: ct.Number, Year: year, Genre: genre,
 			},
-			StartFrames: start,
-			EndFrames:   end,
-		})
+			StartFrames: w.StartFrames,
+			EndFrames:   w.EndFrames,
+		}
+		fillRipTrack(&vt, tags)
+		tracks = append(tracks, vt)
 	}
-	return model.PutScannedVirtualTracksInput{
-		LibraryID:       libraryID,
-		File:            file,
-		Tracks:          tracks,
-		CoverArt:        cover,
-		AuxObservations: aux,
-		Acquisition:     tags.Acquisition,
-		Diagnostics:     diags,
-	}
+	return tracks
 }
 
-// keptRip rebuilds the sheet a file's virtual tracks were last carved from, shaped so
-// virtualTracksInput reproduces each track exactly, identity key included.
-func (s *Scanner) keptRip(ctx context.Context, path string) (*meta.CueSheet, []meta.CueTrack, error) {
+// fillRipTrack completes a virtual track from its own fields and the file's tags.
+func fillRipTrack(vt *model.VirtualTrack, tags model.Tags) {
+	vt.Item.Kind, vt.Item.State, vt.Item.SortKey = model.KindTrack, model.StatePresent, model.SortKey(vt.Item.Title)
+	vt.Track.ArtistSort = model.SortKey(vt.Track.Artist)
+	vt.Track.Genres = identity.SplitGenres(vt.Track.Genre)
+	// From the file's own tags: a .cue has no vocabulary for these, and without them a
+	// carved rip's album row is empty where a plain rip's is filled.
+	//
+	// BPM is left out on purpose. A cue sheet states no tempo, and the file's own value
+	// describes the whole rip rather than the track being carved, so copying it down
+	// would stamp one number onto every track. A per-track bpm is an edit away for
+	// anyone who wants one.
+	vt.Track.Barcode, vt.Track.Label, vt.Track.CatalogNumber = tags.Barcode, tags.Label, tags.CatalogNumber
+	vt.Track.Media, vt.Track.Country = tags.Media, tags.Country
+}
+
+// keptRip returns the virtual tracks a file was last carved into, each with its own
+// stored identity key, fields and window, so re-putting them reconciles as a no-op.
+// Rebuilding identity from the stored track number would fork a track the user
+// renumbered, and one track's album fields would spread its edits to the rest.
+func (s *Scanner) keptRip(ctx context.Context, path string, tags model.Tags) ([]model.VirtualTrack, error) {
 	vts, err := s.cat.VirtualTracksForPath(ctx, []byte(path))
 	if err != nil || len(vts) < 2 {
-		return nil, nil, err
+		return nil, err
 	}
-	first := vts[0].Track
-	sheet := &meta.CueSheet{Title: first.Album, Performer: first.AlbumArtist, Genre: first.Genre, Year: first.Year}
-	for _, vt := range vts {
-		sheet.Tracks = append(sheet.Tracks, meta.CueTrack{
-			Number: vt.Track.TrackNo, Title: vt.Item.Title, Performer: vt.Track.Artist,
-			StartFrames: vt.StartFrames, StartValid: true,
-		})
+	for i := range vts {
+		fillRipTrack(&vts[i], tags)
 	}
-	return sheet, sheet.Tracks, nil
+	return vts, nil
 }
 
 // abridgedMarkerRe matches a trailing BRACKETED "(Unabridged)"/"[Abridged]" marker
@@ -969,78 +974,60 @@ func lrcPartialDetail(lines []model.SyncedLine, dropped []int) string {
 		len(dropped), first, len(lines))
 }
 
-// cueTracksToCarve reduces a .cue sheet to the tracks that can actually become
-// virtual tracks, in start order, and describes the ones it dropped.
-//
-// Two kinds cannot be carved, and neither may be stored. One the sheet gave no usable
-// INDEX 01: its start would fall back to 0 and claim the head of the file while
-// truncating the track before it. And an interior one the next track starts on top
-// of: its window is empty, and an end of 0 is the sentinel for "runs to the end of
-// the file", so it would read back as the whole album under that track's name.
-// Dropping the empty one costs its neighbours nothing, since it spans no frames.
-//
-// It runs BEFORE the rip dispatch, because the surviving count is what decides
-// whether the file is a rip at all: a sheet naming no usable window is not one.
-func cueTracksToCarve(sheet *meta.CueSheet) (tracks []meta.CueTrack, dropped []string) {
-	for _, ct := range sheet.Tracks {
-		switch {
-		case !ct.IsAudio():
-			dropped = append(dropped, cueTrackDesc(ct, "is a data track"))
-		case !ct.StartValid:
-			dropped = append(dropped, cueTrackDesc(ct, "has no usable INDEX 01"))
-		}
-	}
-	// Sort by start so each track's end can be read off the next track's start; a
-	// well-formed cue is already ordered, but a malformed one must not yield a negative
-	// window.
-	cts := sheet.UsableTracks()
-	sort.SliceStable(cts, func(i, j int) bool { return cts[i].StartFrames < cts[j].StartFrames })
-	tracks = make([]meta.CueTrack, 0, len(cts))
-	for i, ct := range cts {
-		if i+1 < len(cts) && cts[i+1].StartFrames <= ct.StartFrames {
-			dropped = append(dropped, cueTrackDesc(ct, "is empty (the next TRACK's INDEX 01 names the same frame)"))
-			continue
-		}
-		tracks = append(tracks, ct)
-	}
-	return tracks, dropped
-}
-
-// cueTrackDesc names one dropped TRACK by the sheet's own track number and title,
-// which is what the user has to go look at in the .cue. The parser does not keep the
-// offending INDEX text, and the number locates the track without it.
-func cueTrackDesc(ct meta.CueTrack, reason string) string {
-	if ct.Title != "" {
-		return fmt.Sprintf("TRACK %02d (%q) %s", ct.Number, ct.Title, reason)
-	}
-	return fmt.Sprintf("TRACK %02d %s", ct.Number, reason)
-}
-
-// maxCueDropsShown bounds the dropped-track list in a diagnostic, so a wholly
-// malformed sheet yields a readable line rather than a hundred clauses.
+// maxCueDropsShown bounds each list in a cue diagnostic, so a wholly malformed sheet
+// yields a readable line rather than a hundred clauses.
 const maxCueDropsShown = 3
 
-// cueTracksDroppedDiag summarizes a sheet's unusable tracks as ONE diagnostic.
+// cueSheetDiag summarizes everything wrong with a sheet as one diagnostic: why it could
+// not be applied at all, the lines that could not be read, the tracks dropped, and
+// what became of the sheet, which survives the detail cap whole.
 //
-// One row per dropped track would be wrong twice over: file_diagnostic is keyed by
+// One row per finding would be wrong twice over: file_diagnostic is keyed by
 // (file_id, origin, code, tag_key), so rows sharing this code collide and all but one
 // silently vanish; and an unbounded list is what lrcPartialDetail already declines to
-// build for the same reason. It reports the count plus the first few, like that one.
-func cueTracksDroppedDiag(dropped []string) []model.FileDiagnostic {
-	if len(dropped) == 0 {
+// build for the same reason. Each list reports its count plus the first few.
+func cueSheetDiag(sheet *meta.CueSheet, dropped []string, refusal, disposition string) []model.FileDiagnostic {
+	var parts []string
+	if refusal != "" {
+		parts = append(parts, refusal)
+	}
+	if sheet != nil && len(sheet.Warnings) > 0 {
+		lines := make([]string, len(sheet.Warnings))
+		for i, w := range sheet.Warnings {
+			lines[i] = w.String()
+		}
+		count := strconv.Itoa(len(lines))
+		if sheet.WarningsTruncated {
+			count = "at least " + count
+		}
+		parts = append(parts, fmt.Sprintf("%s line(s) of the cue sheet could not be read: %s",
+			count, cueShown(lines, sheet.WarningsTruncated)))
+	}
+	if len(dropped) > 0 {
+		parts = append(parts, fmt.Sprintf("%d cue TRACK(s) dropped from the sheet: %s", len(dropped), cueShown(dropped, false)))
+	}
+	if len(parts) == 0 {
 		return nil
 	}
-	shown := dropped
-	suffix := ""
-	if len(shown) > maxCueDropsShown {
-		shown = shown[:maxCueDropsShown]
-		suffix = fmt.Sprintf(" (and %d more)", len(dropped)-maxCueDropsShown)
+	tail := ""
+	if disposition != "" {
+		tail = "; " + disposition
 	}
-	return []model.FileDiagnostic{{
-		Code: model.DiagCueTrackDropped, Severity: model.SeverityWarn,
-		Detail: fmt.Sprintf("%d cue TRACK(s) dropped from the sheet: %s%s",
-			len(dropped), strings.Join(shown, "; "), suffix),
-	}}
+	detail := meta.CapDetailWithTail(strings.Join(parts, "; "), tail)
+	return []model.FileDiagnostic{{Code: model.DiagCueTrackDropped, Severity: model.SeverityWarn, Detail: detail}}
+}
+
+// cueShown joins the first maxCueDropsShown entries and counts the rest, as a floor
+// when the list itself was cut short.
+func cueShown(list []string, cut bool) string {
+	if len(list) <= maxCueDropsShown {
+		return strings.Join(list, "; ")
+	}
+	more := strconv.Itoa(len(list) - maxCueDropsShown)
+	if cut {
+		more = "at least " + more
+	}
+	return fmt.Sprintf("%s (and %s more)", strings.Join(list[:maxCueDropsShown], "; "), more)
 }
 
 // scanCueSidecar reads a sibling .cue for an audio file, parsing it into a cue sheet
@@ -1055,27 +1042,28 @@ func cueTracksDroppedDiag(dropped []string) []model.FileDiagnostic {
 // An oversized .cue yields no sheet but still reports readable, with a stat-only
 // observation and a skip diagnostic: the caller records the observation (so the
 // fast path stops re-routing here) and applies nothing, while the diagnostic keeps
-// the skip from being invisible. It and a sheet the parser refused both report
-// unread, which is different from a sheet that parsed to no tracks: an unread sheet
-// says nothing about the tracks, so a rip keeps the ones it has.
-func scanCueSidecar(audioPath string) (sheet *meta.CueSheet, obs model.AuxObservation, diags []model.FileDiagnostic, unread, ok bool) {
+// the skip from being invisible. It and a sheet that cannot be applied at all (the
+// refusal says why) both report unread, which is different from a sheet that parsed
+// to no tracks: an unread sheet says nothing about the tracks, so a rip keeps the
+// ones it has. A sheet with unread lines is returned as read, carrying its warnings.
+func scanCueSidecar(audioPath string) (sheet *meta.CueSheet, obs model.AuxObservation, diags []model.FileDiagnostic, refusal string, unread, ok bool) {
 	cuePath := strings.TrimSuffix(audioPath, filepath.Ext(audioPath)) + ".cue"
 	// Stat before reading, so the same memory guard the .lrc read and the fast path
 	// apply also covers the .cue.
 	info, serr := os.Stat(cuePath)
 	if serr != nil {
-		return nil, model.AuxObservation{}, nil, false, false
+		return nil, model.AuxObservation{}, nil, "", false, false
 	}
 	if info.Size() > maxSidecarBytes {
 		diags := []model.FileDiagnostic{{
 			Code: model.DiagSidecarSkipped, Severity: model.SeverityWarn,
 			Detail: sidecarSkippedDetail(model.AuxCue, info.Size()),
 		}}
-		return nil, statOnlyObs(model.AuxCue, cuePath, info), diags, true, true
+		return nil, statOnlyObs(model.AuxCue, cuePath, info), diags, "", true, true
 	}
 	data, err := os.ReadFile(cuePath)
 	if err != nil {
-		return nil, model.AuxObservation{}, nil, false, false
+		return nil, model.AuxObservation{}, nil, "", false, false
 	}
 	obs = model.AuxObservation{
 		Kind: model.AuxCue, Path: []byte(cuePath), Hash: art.Hash(data),
@@ -1083,20 +1071,18 @@ func scanCueSidecar(audioPath string) (sheet *meta.CueSheet, obs model.AuxObserv
 	}
 	sheet, perr := meta.ParseCueSheet(string(data))
 	if perr != nil {
-		// The parse is syntactic, so one bad line refuses the whole sheet. It is
-		// reported under the per-track drop code so it is just as visible.
-		reason := perr.Error()
-		var we *waxerr.Error
-		if errors.As(perr, &we) && we.Msg != "" {
-			reason = we.Msg
-		}
-		diags := []model.FileDiagnostic{{
-			Code: model.DiagCueTrackDropped, Severity: model.SeverityWarn,
-			Detail: meta.CapDetail("the cue sheet could not be parsed, so it was not applied: " + reason),
-		}}
-		return nil, obs, diags, true, true
+		return nil, obs, nil, errMsg(perr), true, true
 	}
-	return sheet, obs, nil, false, true
+	return sheet, obs, nil, "", false, true
+}
+
+// errMsg is an error's message without the op it was raised under.
+func errMsg(err error) string {
+	var we *waxerr.Error
+	if errors.As(err, &we) && we.Msg != "" {
+		return we.Msg
+	}
+	return err.Error()
 }
 
 // reconcileFastPathSidecars re-checks an unchanged audio file's sidecars in one pass

@@ -515,6 +515,19 @@ func TestCapDetail(t *testing.T) {
 	}
 }
 
+// TestCapDetailWithTail: the body gives way so the tail survives whole, still on a
+// rune boundary.
+func TestCapDetailWithTail(t *testing.T) {
+	if got := CapDetailWithTail("short", "; tail"); got != "short; tail" {
+		t.Errorf("CapDetailWithTail(short) = %q", got)
+	}
+	got := CapDetailWithTail(strings.Repeat("é", 1<<10), "; tail")
+	if len(got) > maxDetailBytes || !strings.HasSuffix(got, "é; tail") || !utf8.ValidString(got) {
+		t.Errorf("capped = %d bytes ending %q, want <= %d ending in a whole rune and the tail",
+			len(got), got[len(got)-10:], maxDetailBytes)
+	}
+}
+
 // TestParseLRCReportsDropped covers the signal the reporting parser exists for:
 // telling a partly-broken sidecar from a plain-text one.
 func TestParseLRCReportsDropped(t *testing.T) {

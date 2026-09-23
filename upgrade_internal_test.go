@@ -1,6 +1,10 @@
 package waxbin
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/colespringer/waxbin/model"
+)
 
 func TestSortByQuality(t *testing.T) {
 	cs := []UpgradeCandidate{
@@ -36,8 +40,8 @@ func TestSortByQualityStableTie(t *testing.T) {
 // keys, and the upgrade policy would offer an mp3 as an improvement on it.
 func TestLosslessCodecsCoverFloatPCM(t *testing.T) {
 	for _, k := range []string{"pcm", "ieee float", "ieee float64"} {
-		if !losslessCodecs[k] {
-			t.Errorf("losslessCodecs[%q] is false; uncompressed audio must outrank a lossy encoding", k)
+		if !model.LosslessCodec(k) {
+			t.Errorf("LosslessCodec(%q) is false; uncompressed audio must outrank a lossy encoding", k)
 		}
 	}
 }
