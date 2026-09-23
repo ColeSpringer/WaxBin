@@ -842,7 +842,7 @@ func artistRenameCoveredTx(ctx context.Context, tx *sql.Tx, id int64, n, curKey 
 		case model.RoleAuthor:
 			covered = slices.Contains(sc.bookAuthorNames[c.itemID], n)
 		default:
-			t, ok := sc.creditTarget[itemRoleKey{c.itemID, c.role}]
+			t, ok := sc.creditTarget[itemRoleKey(c)]
 			covered = ok && t == n
 		}
 		if !covered {

@@ -59,7 +59,7 @@ func TestProbe(t *testing.T) {
 
 func TestHashStable(t *testing.T) {
 	a := makePNG(t, 10, 10)
-	if Hash(a) != Hash(a) {
+	if Hash(a) != Hash(bytes.Clone(a)) {
 		t.Error("hash is not stable")
 	}
 	if Hash(a) == Hash(makePNG(t, 11, 10)) {

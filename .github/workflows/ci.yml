@@ -3,36 +3,50 @@ name: CI
 on:
   push:
     branches: [main]
+    paths-ignore: ["*.md", "docs/**"]
   pull_request:
+    paths-ignore: ["*.md", "docs/**"]
+  schedule:
+    # Weekly, so a new Go patch release, runner image, or published
+    # vulnerability shows up even in a week with no pushes.
+    - cron: "23 7 * * 1"
+  workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read
 
+concurrency:
+  # A new push to a pull request cancels its older run. Every other run gets a
+  # group of its own, so each commit on main keeps its result.
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    # Set explicitly so every step, Windows included, runs under bash -eo pipefail.
+    shell: bash
+
+env:
+  CGO_ENABLED: "0" # WaxBin is strictly no-CGO
+
 jobs:
-  build-test:
-    strategy:
-      # Let each OS report on its own; a Windows-only failure is a real signal
-      # (chmod, flock, and clock semantics all differ there), not a reason to
-      # cancel the Linux run.
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
-    defaults:
-      run:
-        # One shell for both runners, so the gofmt and grep steps stay a single
-        # spelling. .gitattributes pins eol=lf, so the Windows checkout is
-        # byte-identical and gofmt agrees across the matrix.
-        shell: bash
-    env:
-      CGO_ENABLED: "0" # WaxBin is strictly no-CGO
+  checks:
+    name: Checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-go@v7
         with:
           go-version: "1.26"
           check-latest: true
+          # The Linux test job uses the same cache key, and its race builds are
+          # the ones worth keeping.
+          cache: false
 
       - name: Verify formatting
         run: |
@@ -41,24 +55,106 @@ jobs:
             echo "These files need gofmt:"; echo "$unformatted"; exit 1
           fi
 
-      - name: Vet
-        run: go vet ./...
+      - name: Verify go.mod is tidy
+        run: go mod tidy -diff
 
-      - name: Build
-        run: go build ./...
+      - name: Verify the libc pin
+        # modernc.org/sqlite is transpiled against one exact modernc.org/libc
+        # (see "Fragile modernc.org/libc dependency" in its package doc), and
+        # go get -u moves libc past it.
+        run: |
+          sqlite="$(go list -m -f '{{.Version}}' modernc.org/sqlite)"
+          want="$(go mod graph | awk -v s="modernc.org/sqlite@$sqlite" \
+            '$1 == s && $2 ~ /^modernc\.org\/libc@/ { sub(/.*@/, "", $2); print $2 }')"
+          have="$(go list -m -f '{{.Version}}' modernc.org/libc)"
+          if [ "$have" != "$want" ]; then
+            echo "modernc.org/libc is $have, but modernc.org/sqlite $sqlite requires exactly ${want:-(none found)}"
+            exit 1
+          fi
+
+      - name: Vet and build every release target
+        # The targets in .goreleaser.yaml. Vet type-checks the tests as well.
+        run: |
+          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64; do
+            echo "$target"
+            GOOS="${target%/*}" GOARCH="${target#*/}" go vet ./...
+            GOOS="${target%/*}" GOARCH="${target#*/}" go build -o /dev/null ./cmd/waxbin
+          done
 
       - name: No-CGO invariant
-        # The shipped binaries must never link cgo. CGO_ENABLED=0 is the job
-        # default, so this asserts no package pulled runtime/cgo into the graph.
+        # No package outside the standard library may carry cgo files. The race
+        # tests need cgo on, so such a package would be tested on a path the
+        # shipped binaries never take.
         run: |
-          go build ./...
-          if go list -deps ./... | grep -qx runtime/cgo; then
-            echo "runtime/cgo is linked into a CGO_ENABLED=0 build"; exit 1
-          fi
+          for goos in linux darwin windows; do
+            pkgs="$(CGO_ENABLED=1 GOOS="$goos" go list -deps -test \
+              -f '{{if and .CgoFiles (not .Standard)}}{{.ImportPath}}{{end}}' ./...)"
+            if [ -n "$pkgs" ]; then
+              echo "Packages with cgo files on $goos:"; echo "$pkgs"; exit 1
+            fi
+          done
+
+      - name: staticcheck
+        # Per OS, so the Windows-only files are checked too. Installed first, since
+        # go run under another GOOS would build staticcheck itself for that OS.
+        run: |
+          go install honnef.co/go/tools/cmd/staticcheck@v0.8.1
+          for goos in linux darwin windows; do
+            echo "$goos"
+            GOOS="$goos" staticcheck ./...
+          done
+
+      - name: actionlint
+        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+
+  test:
+    name: Test (${{ matrix.os }})
+    strategy:
+      # Let each leg report on its own; a Windows-only failure is a real signal
+      # (chmod, flock, and clock semantics all differ there), not a reason to
+      # cancel the Linux run.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.26"
+          check-latest: true
 
       - name: Test (race)
         # The race detector needs cgo; scope it to the test toolchain only so the
-        # shipped binaries stay pure no-CGO.
+        # shipped binaries stay pure no-CGO. -count=1 because the restored build
+        # cache would otherwise hand back earlier test results.
         env:
           CGO_ENABLED: "1"
-        run: go test -race ./...
+        run: go test -race -count=1 ./...
+
+  govulncheck:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.26"
+          check-latest: true
+          cache: false
+
+      - name: govulncheck
+        # What is reachable differs by OS, so scan each one that ships.
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.8.0
+          for goos in linux darwin windows; do
+            echo "$goos"
+            GOOS="$goos" govulncheck ./...
+          done

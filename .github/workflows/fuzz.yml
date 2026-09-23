@@ -1,0 +1,72 @@
+name: Fuzz
+
+on:
+  schedule:
+    - cron: "47 7 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  CGO_ENABLED: "0"
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.26"
+          check-latest: true
+          # CI's Linux test job uses the same cache key, and its race builds are
+          # the ones worth keeping.
+          cache: false
+
+      # Go keeps the inputs it found interesting under GOCACHE/fuzz, so carrying
+      # that directory over lets each run pick up where the last one stopped.
+      - uses: actions/cache/restore@v6
+        with:
+          path: ~/.cache/go-build/fuzz
+          key: fuzz-corpus-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: fuzz-corpus-
+
+      - name: Fuzz every target
+        run: |
+          targets="$(git grep -oE '^func Fuzz[A-Za-z0-9_]+' -- '*_test.go' | sed 's/:func /:/')" || true
+          if [ -z "$targets" ]; then
+            echo "::error::No fuzz targets found"; exit 1
+          fi
+          status=0
+          while IFS=: read -r file target; do
+            pkg="./$(dirname "$file")"
+            echo "$target ($pkg)"
+            if ! go test -run '^$' -fuzz "^$target\$" -fuzztime 2m "$pkg"; then
+              echo "::error::$target in $pkg failed"
+              status=1
+            fi
+          done <<< "$targets"
+          exit "$status"
+
+      # Saved after a failure too, since the other targets' progress still counts.
+      - uses: actions/cache/save@v6
+        if: always()
+        with:
+          path: ~/.cache/go-build/fuzz
+          key: fuzz-corpus-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Upload failing inputs
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fuzz-failures
+          path: "**/testdata/fuzz/**"
