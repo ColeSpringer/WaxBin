@@ -276,6 +276,16 @@ func TestOptionalProviderErrorDoesNotAbort(t *testing.T) {
 	if g := scalarStr(t, db, `SELECT t.genre FROM track t JOIN playable_item pi ON pi.id=t.item_id WHERE pi.pid=?`, string(item)); g != "Progressive Rock" {
 		t.Errorf("track.genre = %q, want Progressive Rock (MB genre survives the provider error)", g)
 	}
+	// The genre fill reaches only members with no genre, and the MusicBrainz genre just
+	// gave them one, so a re-walk could add nothing the failed provider would answer: the
+	// group settles rather than being owed.
+	if settledMarkers(t, dbPath, "release_group") != 1 || owedMarkers(t, dbPath, "release_group") != 0 {
+		t.Errorf("group markers = %d settled / %d owed, want the group settled beside the landed genre",
+			settledMarkers(t, dbPath, "release_group"), owedMarkers(t, dbPath, "release_group"))
+	}
+	if res.Deferred != 0 {
+		t.Errorf("deferred = %d, want 0", res.Deferred)
+	}
 }
 
 // TestLyricsFillWhenEmpty: a track that already has lyrics is never looked up, so an
@@ -876,5 +886,143 @@ func TestGatherArtEmptyFrontFallsBackToCover(t *testing.T) {
 	}
 	if h := rgFrontHash(t, dbPath); h != "cover-hash" {
 		t.Errorf("rg front hash = %q, want cover-hash", h)
+	}
+}
+
+// TestCapabilitiesAtNarrowsDispatch: a provider is asked only at the rungs it declares,
+// a provider that declares nothing is asked wherever its union reaches, and a declaration
+// cannot widen the union.
+func TestCapabilitiesAtNarrowsDispatch(t *testing.T) {
+	ctx := context.Background()
+	releaseAsks := func(t *testing.T, p *enrich.Mock, seen *[]enrich.Request) *enrich.Result {
+		t.Helper()
+		p.EnrichFunc = func(_ context.Context, req enrich.Request) (*enrich.Candidate, error) {
+			if req.Type == enrich.TargetRelease {
+				*seen = append(*seen, req)
+			}
+			return nil, nil
+		}
+		st, _, lib := openStore(t)
+		seedAlbumTrack(t, st, lib.ID, "ess-a", model.Track{
+			Artist: "Pink Floyd", AlbumArtist: "Pink Floyd", Album: "Wish You Were Here", TrackNo: 1,
+			MBReleaseID: edGBMBID, Barcode: relBarcode,
+		})
+		caa, _ := newReleaseCAAMock(t, pngBytes(t))
+		res, err := albumArtService(st, newRelMock(t, "[]").server.URL, caa, p).Run(ctx, enrich.RunOptions{}, nil)
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		return res
+	}
+
+	t.Run("a group-only declaration is not asked about a release", func(t *testing.T) {
+		var seen []enrich.Request
+		res := releaseAsks(t, &enrich.Mock{ProviderName: "groupcovers", Caps: enrich.CapCover,
+			CapsAt: map[enrich.TargetType]enrich.Capability{enrich.TargetReleaseGroup: enrich.CapCover}}, &seen)
+		if len(seen) != 0 {
+			t.Errorf("release asks = %d, want none", len(seen))
+		}
+		if res.AlbumArtEnriched != 1 || res.ArtFetched < 1 {
+			t.Errorf("album art walked %d with %d fetched, want the archive to fill it", res.AlbumArtEnriched, res.ArtFetched)
+		}
+	})
+	t.Run("no declaration is asked at every rung its union reaches", func(t *testing.T) {
+		var seen []enrich.Request
+		releaseAsks(t, &enrich.Mock{ProviderName: "covers", Caps: enrich.CapCover}, &seen)
+		if len(seen) != 1 {
+			t.Errorf("release asks = %d, want 1", len(seen))
+		}
+	})
+	t.Run("a declaration cannot widen the union", func(t *testing.T) {
+		var seen []enrich.Request
+		releaseAsks(t, &enrich.Mock{ProviderName: "covers", Caps: enrich.CapCover,
+			CapsAt: map[enrich.TargetType]enrich.Capability{enrich.TargetRelease: enrich.CapAuxArt}}, &seen)
+		if len(seen) != 0 {
+			t.Errorf("release asks = %+v, want none: CapAuxArt is not in the provider's union", seen)
+		}
+	})
+}
+
+// TestLyricsProviderFailureLeavesTheTrackQueued: a provider's failure is not a miss. The
+// track takes no marker, so the next pass asks again as though for the first time rather
+// than waiting out the retry window.
+func TestLyricsProviderFailureLeavesTheTrackQueued(t *testing.T) {
+	ctx := context.Background()
+	st, dbPath, lib := openStore(t)
+	item := seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
+
+	down := true
+	lyrics := &enrich.Mock{ProviderName: "lyrics", Caps: enrich.CapLyrics,
+		EnrichFunc: func(context.Context, enrich.Request) (*enrich.Candidate, error) {
+			if down {
+				return nil, errors.New("quota window")
+			}
+			return &enrich.Candidate{Lyrics: &model.Lyrics{Unsynced: "shine on"}}, nil
+		}}
+	svc := enrich.New(st, enrich.Config{
+		MinRequestInterval: time.Millisecond, RetryMissesAfter: 30 * 24 * time.Hour,
+		Providers: []enrich.Provider{lyrics},
+	}, nil)
+	first, err := svc.Run(ctx, enrich.RunOptions{}, nil)
+	if err != nil {
+		t.Fatalf("run 1: %v", err)
+	}
+	if first.LyricsEnriched != 1 || first.LyricsMatched != 0 || first.Deferred != 1 {
+		t.Fatalf("run 1 = %d walked / %d matched / %d deferred, want 1/0/1", first.LyricsEnriched, first.LyricsMatched, first.Deferred)
+	}
+	if owedMarkers(t, dbPath, "lyrics") != 1 || settledMarkers(t, dbPath, "lyrics") != 0 {
+		t.Fatalf("lyrics markers = %d owed / %d settled, want the lookup owed and nothing settled",
+			owedMarkers(t, dbPath, "lyrics"), settledMarkers(t, dbPath, "lyrics"))
+	}
+
+	down = false
+	second, err := svc.Run(ctx, enrich.RunOptions{}, nil)
+	if err != nil {
+		t.Fatalf("run 2: %v", err)
+	}
+	if second.LyricsEnriched != 1 || second.LyricsMatched != 1 || second.Retried != 0 || second.Deferred != 0 {
+		t.Fatalf("run 2 = %+v, want the track asked fresh and matched", second)
+	}
+	if ly, err := st.LyricsByItem(ctx, item); err != nil || ly.Unsynced != "shine on" {
+		t.Errorf("lyrics = %+v (err %v), want the second run's answer", ly, err)
+	}
+}
+
+// TestCommunityGenreFailureLeavesTheGroupQueued: a community-genre outage defers the
+// group like an art failure does, and the next pass lands the tag the outage cost it.
+func TestCommunityGenreFailureLeavesTheGroupQueued(t *testing.T) {
+	ctx := context.Background()
+	st, dbPath, lib := openStore(t)
+	item := seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
+	mb := mbMockGenres(t, `[]`)
+	service := func(lbURL string) *enrich.Service {
+		return enrich.New(st, enrich.Config{
+			Contact: "t@e.com", MinRequestInterval: time.Millisecond, FetchCommunityGenres: true,
+			MusicBrainzBaseURL: mb.URL, ListenBrainzBaseURL: lbURL,
+		}, nil)
+	}
+
+	first, err := service(deadURL(t)).Run(ctx, enrich.RunOptions{}, nil)
+	if err != nil {
+		t.Fatalf("run 1: %v", err)
+	}
+	if first.ReleaseGroupsMatched != 1 || first.Deferred != 1 {
+		t.Fatalf("run 1 = %d matched / %d deferred, want 1 and 1", first.ReleaseGroupsMatched, first.Deferred)
+	}
+	db := roDB(t, dbPath)
+	if owedMarkers(t, dbPath, "release_group") != 1 {
+		t.Fatal("the group's lookup is not owed after the community genres failed")
+	}
+
+	lb := lbMock(t, "wywh-mbid", `[{"tag":"art rock","count":9,"genre_mbid":"g1"}]`)
+	second, err := service(lb.URL).Run(ctx, enrich.RunOptions{}, nil)
+	if err != nil {
+		t.Fatalf("run 2: %v", err)
+	}
+	if second.ReleaseGroupsEnriched != 1 || second.Deferred != 0 {
+		t.Fatalf("run 2 = %d walked / %d deferred, want the group re-walked and settled", second.ReleaseGroupsEnriched, second.Deferred)
+	}
+	if g := scalarStr(t, db, `SELECT t.genre FROM track t JOIN playable_item pi ON pi.id=t.item_id WHERE pi.pid=?`, string(item)); g != "art rock" {
+		t.Errorf("track.genre = %q, want the community tag", g)
 	}
 }

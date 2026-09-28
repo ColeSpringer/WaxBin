@@ -76,7 +76,7 @@ func (s *Store) UpsertFeed(ctx context.Context, in model.UpsertFeedInput) (*mode
 
 		// Ingest the feed image onto the podcast entity (idempotent on hash), unless the
 		// user chose this show's cover: the feed re-points on every image-URL change.
-		if err := attachEntityArtUnlessLockedTx(ctx, tx, model.ArtPodcast, up.id, in.Image); err != nil {
+		if _, err := attachEntityArtUnlessLockedTx(ctx, tx, model.ArtPodcast, up.id, in.Image); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 
@@ -158,7 +158,7 @@ func (s *Store) UpsertShow(ctx context.Context, in model.UpsertShowInput) (model
 			return err
 		}
 		pid, created = up.pid, up.created
-		if err := attachEntityArtUnlessLockedTx(ctx, tx, model.ArtPodcast, up.id, in.Image); err != nil {
+		if _, err := attachEntityArtUnlessLockedTx(ctx, tx, model.ArtPodcast, up.id, in.Image); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		// Same gate as UpsertFeed: an identical re-upsert stays silent.
@@ -857,7 +857,7 @@ func (s *Store) AttachEpisodeFile(ctx context.Context, in model.AttachEpisodeFil
 		// Guarded like the show cover: a download re-attaches the episode image every
 		// time, so an unguarded attach would let the machine through a lock that already
 		// refuses the user.
-		if err := attachEntityArtUnlessLockedTx(ctx, tx, model.ArtEpisode, itemID, in.Image); err != nil {
+		if _, err := attachEntityArtUnlessLockedTx(ctx, tx, model.ArtEpisode, itemID, in.Image); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		if err := appendChange(ctx, tx, "file", filePID, model.OpCreate); err != nil {

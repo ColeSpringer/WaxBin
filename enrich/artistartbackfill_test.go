@@ -2,6 +2,7 @@ package enrich_test
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -321,5 +322,48 @@ func TestArtistArtBackfillQueuesAnUnmatchedArtistByName(t *testing.T) {
 	}
 	if again.ArtistArtEnriched != 0 {
 		t.Errorf("second run walked %d artists; the marker should have held", again.ArtistArtEnriched)
+	}
+}
+
+// TestArtistArtBackfillFailureLeavesTheArtistQueued: the artist rung follows the same
+// rule, so an outage at an artist-art service costs the artist one pass, not a window.
+func TestArtistArtBackfillFailureLeavesTheArtistQueued(t *testing.T) {
+	ctx := context.Background()
+	st, dbPath, lib := openStore(t)
+	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "One", "The Local Band", "Demo")
+
+	down := true
+	art := &enrich.Mock{ProviderName: "deezer", Caps: enrich.CapArtistArt,
+		EnrichFunc: func(_ context.Context, req enrich.Request) (*enrich.Candidate, error) {
+			if down {
+				return nil, errors.New("deezer is down")
+			}
+			return &enrich.Candidate{Art: map[model.ArtRole]*model.ArtImage{model.ArtRoleFront: artImg(t, "artist-front")}}, nil
+		}}
+	svc := enrich.New(st, enrich.Config{
+		MinRequestInterval: time.Millisecond, RetryMissesAfter: 30 * 24 * time.Hour,
+		Providers: []enrich.Provider{art},
+	}, nil)
+	first, err := svc.Run(ctx, enrich.RunOptions{}, nil)
+	if err != nil {
+		t.Fatalf("run 1: %v", err)
+	}
+	if first.ArtistArtEnriched != 1 || first.Deferred != 1 {
+		t.Fatalf("run 1 = %d walked / %d deferred, want 1 and 1", first.ArtistArtEnriched, first.Deferred)
+	}
+	if owedMarkers(t, dbPath, "artist_art") != 1 || settledMarkers(t, dbPath, "artist_art") != 0 {
+		t.Fatal("the artist's art lookup is not owed after the provider failed")
+	}
+
+	down = false
+	second, err := svc.Run(ctx, enrich.RunOptions{}, nil)
+	if err != nil {
+		t.Fatalf("run 2: %v", err)
+	}
+	if second.ArtistArtEnriched != 1 || second.Retried != 0 {
+		t.Fatalf("run 2 = %+v, want the artist asked fresh", second)
+	}
+	if h := artistArtHash(t, dbPath, "front"); h != "artist-front" {
+		t.Errorf("artist front = %q, want the recovered provider's", h)
 	}
 }

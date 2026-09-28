@@ -2,6 +2,7 @@ package netsafe
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -152,5 +153,44 @@ func TestSafeFilename(t *testing.T) {
 		if strings.ContainsAny(SafeFilename(c.in, c.fallback), `/\:*?"<>|`) {
 			t.Errorf("SafeFilename(%q) leaked an unsafe character", c.in)
 		}
+	}
+}
+
+// TestTooLargeTellsAnOversizedBody: a body over the cap is an answer about the resource
+// itself, so it reads apart from a media type the caller refused and from a status, both
+// of which can come from a service that is not answering, while every one keeps its
+// class and its message.
+func TestTooLargeTellsAnOversizedBody(t *testing.T) {
+	ctx := context.Background()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/big":
+			w.Header().Set("Content-Type", "image/png")
+			_, _ = w.Write(make([]byte, 64))
+		case "/page":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte("<html>maintenance</html>"))
+		default:
+			w.WriteHeader(http.StatusForbidden)
+		}
+	}))
+	defer srv.Close()
+	c := New(Policy{})
+
+	_, err := c.Do(ctx, Request{URL: srv.URL + "/big", MaxBytes: 16})
+	if !TooLarge(err) || !waxerr.Is(err, waxerr.CodeInvalid) || err.Error() != "netsafe.read: response exceeds 16-byte limit" {
+		t.Errorf("oversized Do = %v (too large %v), want a CodeInvalid TooLarge with its message", err, TooLarge(err))
+	}
+	_, _, err = c.Stream(ctx, Request{URL: srv.URL + "/big"}, io.Discard, 16)
+	if want := "netsafe.Stream: response from " + srv.URL + "/big exceeds 16-byte limit"; !TooLarge(err) || err.Error() != want {
+		t.Errorf("oversized Stream = %v (too large %v), want a TooLarge reading %q", err, TooLarge(err), want)
+	}
+	_, err = c.Do(ctx, Request{URL: srv.URL + "/page", AcceptMIME: []string{"image/*"}})
+	if TooLarge(err) || !waxerr.Is(err, waxerr.CodeInvalid) {
+		t.Errorf("wrong media type = %v (too large %v), want a CodeInvalid that is not TooLarge", err, TooLarge(err))
+	}
+	_, err = c.Do(ctx, Request{URL: srv.URL + "/gone"})
+	if TooLarge(err) || !waxerr.Is(err, waxerr.CodeIO) || err.Error() != "netsafe.Do: "+srv.URL+"/gone returned HTTP 403" {
+		t.Errorf("refused status = %v (too large %v), want a CodeIO status error", err, TooLarge(err))
 	}
 }

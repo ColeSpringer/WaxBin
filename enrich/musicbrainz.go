@@ -22,6 +22,26 @@ type musicBrainz struct {
 	cache   cache
 }
 
+// mbGenres is the MusicBrainz genre entry in the provider list. It is a position rather
+// than a service: the identity spine resolves a release group's own genres, and
+// gatherGenres merges them in when the list reaches this entry, so they rank wherever
+// the list puts it and stay out of the merge when the list drops it. Its Enrich is never
+// called for a candidate.
+type mbGenres struct{}
+
+func (mbGenres) Name() string                                        { return ProviderMusicBrainz }
+func (mbGenres) Capabilities() Capability                            { return CapGenres }
+func (mbGenres) Enrich(context.Context, Request) (*Candidate, error) { return nil, nil }
+
+// CapabilitiesAt places the entry at the release-group rung, the only one whose genres
+// the spine resolves.
+func (mbGenres) CapabilitiesAt(t TargetType) Capability {
+	if t == TargetReleaseGroup {
+		return CapGenres
+	}
+	return 0
+}
+
 // jsonMIME is the response allow-list for the JSON web service.
 var jsonMIME = []string{"application/json", "text/json", "application/octet-stream"}
 

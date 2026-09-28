@@ -271,13 +271,6 @@ func insertArtSourceTx(ctx context.Context, tx *sql.Tx, img *model.ArtImage) err
 	return err
 }
 
-// attachEntityArtTx is the error-only wrapper over attachEntityArtTxChanged for the
-// callers that do not need the changed signal.
-func attachEntityArtTx(ctx context.Context, tx *sql.Tx, entityType string, entityID int64, img *model.ArtImage) error {
-	_, err := attachEntityArtTxChanged(ctx, tx, entityType, entityID, img)
-	return err
-}
-
 // attachEntityArtTxChanged dedups a front-cover image into the content-addressed art
 // store and maps it to one entity (entity_type, entity_id). It backs every cover
 // ingest: a track/book item ('track'), a podcast feed ('podcast'), an episode
@@ -330,11 +323,12 @@ func attachEntityArtTxChanged(ctx context.Context, tx *sql.Tx, entityType string
 	return true, nil
 }
 
-// attachEntityArtUnlessLockedTx is attachEntityArtTx guarded by the entity's "art"
-// curation lock: the automatic entity-cover writers (a release-group enrichment, a
-// podcast feed sync) call it so a cover the user chose survives a forced re-run or an
+// attachEntityArtUnlessLockedTx is attachEntityArtTxChanged guarded by the entity's
+// "art" curation lock: the automatic entity-cover writers (a release-group enrichment,
+// a podcast feed sync) call it so a cover the user chose survives a forced re-run or an
 // image-URL change in the feed. A nil image is a no-op, and costs no lock lookup. It
-// touches the front role, so artFillBlockedTx reads the plain "art" field alone.
+// touches the front role, so artFillBlockedTx reads the plain "art" field alone, and it
+// reports whether the front actually changed, which is what an entity delta rides on.
 //
 // It is the last guard, not the first. A caller that would pay to produce the image
 // should check the lock before doing so: the podcast sync reads it off the show
@@ -344,18 +338,15 @@ func attachEntityArtTxChanged(ctx context.Context, tx *sql.Tx, entityType string
 // The lock, not the provenance, is what governs the write. Provenance stays purely
 // descriptive, so a future producer that legitimately stamps "user" cannot quietly
 // change who is allowed to overwrite what.
-func attachEntityArtUnlessLockedTx(ctx context.Context, tx *sql.Tx, entityType model.ArtEntity, entityID int64, img *model.ArtImage) error {
+func attachEntityArtUnlessLockedTx(ctx context.Context, tx *sql.Tx, entityType model.ArtEntity, entityID int64, img *model.ArtImage) (bool, error) {
 	if img == nil || len(img.Data) == 0 {
-		return nil
+		return false, nil
 	}
 	locked, err := artFillBlockedTx(ctx, tx, entityType, entityID, model.ArtRoleFront)
-	if err != nil {
-		return err
+	if err != nil || locked {
+		return false, err
 	}
-	if locked {
-		return nil
-	}
-	return attachEntityArtTx(ctx, tx, string(entityType), entityID, img)
+	return attachEntityArtTxChanged(ctx, tx, string(entityType), entityID, img)
 }
 
 // fillEntityAuxArtTx applies enrichment's non-front role images to one entity,

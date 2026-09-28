@@ -56,11 +56,25 @@ type Options struct {
 	// does not ship extra providers.
 	SourceProviders []source.Provider
 	// EnrichmentProviders are injected metadata-enrichment providers (Discogs, Last.fm,
-	// Audnexus, Hardcover, fanart.tv, ...) supplied by an embedding module. They take
-	// priority over the key-free built-ins (Cover Art Archive, ListenBrainz, LRCLIB)
-	// for a value conflict; the MusicBrainz identity spine still resolves the anchoring
-	// MBID first. The default CLI build ships none.
+	// Audnexus, Hardcover, fanart.tv, ...) supplied by an embedding module. A pass asks
+	// them in the order given, ahead of the key-free built-ins (Cover Art Archive,
+	// ListenBrainz, LRCLIB), unless EnrichmentProviderList reorders them, and the first
+	// to answer wins a value conflict; the MusicBrainz identity spine still resolves the
+	// anchoring MBID first. Each needs a name of its own: one repeating another's or a
+	// built-in's is dropped with a warning. The default CLI build ships none.
 	EnrichmentProviders []enrich.Provider
+	// EnrichmentProviderList, when set, decides which providers each enrichment pass
+	// consults and in what order, so a settings screen can rank, add, or switch off
+	// providers without reopening the Library. It is handed the fixed list, the
+	// EnrichmentProviders ahead of the built-ins (find those by the enrich.Provider*
+	// names, or list them with EnrichmentBuiltins), and returns the list a pass uses. It
+	// is read once at the start of every pass, and again whenever a status surface asks
+	// which phases would run, so it has to be cheap and safe for concurrent use. Leaving
+	// out the enrich.ProviderMusicBrainz entry drops MusicBrainz's own genres from the
+	// genre merge; the identity spine itself runs regardless. A provider switched off is
+	// simply not asked: a release group resolved meanwhile keeps no front from it until
+	// its phase is forced again (see enrich.Config.ProviderList). Nil keeps the fixed list.
+	EnrichmentProviderList func(fixed []enrich.Provider) []enrich.Provider
 	// SecretCipher, when set, seals secret-table values (private-feed passwords) at
 	// rest; an embedder supplies one to own the key. Nil keeps secrets in plaintext.
 	SecretCipher model.SecretCipher

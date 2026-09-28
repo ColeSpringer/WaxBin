@@ -633,8 +633,8 @@ func unionReleaseGroupType(ctx context.Context, tx *sql.Tx, sid, lid int64) erro
 // loser's. Called only for artist/release_group (the marker's entity types).
 func unionEnrichmentMarker(ctx context.Context, tx *sql.Tx, table string, sid, lid int64) error {
 	if _, err := tx.ExecContext(ctx,
-		`INSERT OR IGNORE INTO entity_enrichment(entity_type, entity_id, provider, matched, mbid, enriched_at)
-		 SELECT entity_type, ?, provider, matched, mbid, enriched_at
+		`INSERT OR IGNORE INTO entity_enrichment(entity_type, entity_id, provider, matched, mbid, enriched_at, owed)
+		 SELECT entity_type, ?, provider, matched, mbid, enriched_at, owed
 		 FROM entity_enrichment WHERE entity_type = ? AND entity_id = ?`,
 		sid, table, lid); err != nil {
 		return err

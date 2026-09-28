@@ -339,7 +339,8 @@ func fillerMBID(i int) string {
 
 // TestEnrichLeavesAnAlbumQueuedAfterAShortRead: not caching the partial group is only
 // half the retry. Writing a no-match marker would keep the album out of the queue on
-// every later run, so a transient read must write nothing at all.
+// every later run, so a transient read records the lookup as owed, which the next run
+// asks again.
 func TestEnrichLeavesAnAlbumQueuedAfterAShortRead(t *testing.T) {
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
@@ -355,9 +356,9 @@ func TestEnrichLeavesAnAlbumQueuedAfterAShortRead(t *testing.T) {
 	if _, err := svc.Run(ctx, enrich.RunOptions{}, nil); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if n := scalarInt(t, roDB(t, dbPath),
-		"SELECT COUNT(*) FROM entity_enrichment WHERE entity_type='album'"); n != 0 {
-		t.Fatalf("album markers = %d, want 0 so the album stays queued", n)
+	if settledMarkers(t, dbPath, "album") != 0 || owedMarkers(t, dbPath, "album") != 1 {
+		t.Fatalf("album markers = %d settled / %d owed, want the lookup owed so the album stays queued",
+			settledMarkers(t, dbPath, "album"), owedMarkers(t, dbPath, "album"))
 	}
 
 	// The next unforced run picks it up and resolves it.
@@ -374,6 +375,34 @@ func TestEnrichLeavesAnAlbumQueuedAfterAShortRead(t *testing.T) {
 	}
 	if got := albumMBID(t, dbPath); got != edJPMBID {
 		t.Errorf("album mbid = %q, want %s", got, edJPMBID)
+	}
+}
+
+// TestAShortReadTwiceSettlesTheAlbum: the pass after a short browse asks again, and a
+// second short read settles the album as a miss, so a group whose browse never
+// reconciles costs one more browse rather than one per pass.
+func TestAShortReadTwiceSettlesTheAlbum(t *testing.T) {
+	ctx := context.Background()
+	st, dbPath, lib := openStore(t)
+	seedAlbumEdition(t, st, lib.ID, "ess-a", "CD", "JP")
+	mb := newRelMock(t, "[]")
+	svc := newRelService(st, mb.server.URL)
+	for run, deferred := range []int{1, 0} {
+		mb.browsePages = []string{
+			browsePage(3, browseDoc(edJPMBID, []string{"CD"}, "JP", "")),
+			browsePage(3),
+		}
+		res, err := svc.Run(ctx, enrich.RunOptions{}, nil)
+		if err != nil {
+			t.Fatalf("run %d: %v", run+1, err)
+		}
+		if res.AlbumsSearched != 1 || res.Deferred != deferred {
+			t.Fatalf("run %d = %d searched / %d deferred, want 1 and %d", run+1, res.AlbumsSearched, res.Deferred, deferred)
+		}
+	}
+	if settledMarkers(t, dbPath, "album") != 1 || owedMarkers(t, dbPath, "album") != 0 {
+		t.Errorf("album markers = %d settled / %d owed, want the second short read settled",
+			settledMarkers(t, dbPath, "album"), owedMarkers(t, dbPath, "album"))
 	}
 }
 
@@ -850,5 +879,53 @@ func TestLockedAlbumArtIsNeverAskedAbout(t *testing.T) {
 	}
 	if n := scalarInt(t, db, "SELECT COUNT(*) FROM art_map WHERE entity_type='album'"); n != 0 {
 		t.Errorf("album art_map rows = %d, want 0", n)
+	}
+}
+
+// TestReleaseMatchSkipReplacesAStaleMiss: an inconclusive re-ask is the release match's
+// failed lookup, so on a forced run it replaces the standing no-match marker with an
+// owed one rather than leaving the album to wait out the window, and the next ordinary
+// run asks again.
+func TestReleaseMatchSkipReplacesAStaleMiss(t *testing.T) {
+	ctx := context.Background()
+	st, dbPath, lib := openStore(t)
+	seedAlbumEdition(t, st, lib.ID, "ess-a", "CD", "JP")
+	albumID := scalarInt(t, roDB(t, dbPath), "SELECT id FROM album WHERE title='Wish You Were Here'")
+	if _, err := rwDB(t, dbPath).Exec(`INSERT INTO entity_enrichment(entity_type, entity_id, provider, matched, enriched_at)
+		VALUES ('album', ?, 'musicbrainz', 0, ?)`, albumID, time.Now().UnixNano()); err != nil {
+		t.Fatalf("seed the stale miss: %v", err)
+	}
+
+	// Claims three releases, serves one, then an empty page two: a short read.
+	mb := newRelMock(t, "[]")
+	mb.browsePages = []string{
+		browsePage(3, browseDoc(edJPMBID, []string{"CD"}, "JP", "")),
+		browsePage(3),
+	}
+	svc := newRelService(st, mb.server.URL)
+	forced, err := svc.Run(ctx, enrich.RunOptions{Force: true}, nil)
+	if err != nil {
+		t.Fatalf("forced Run: %v", err)
+	}
+	if forced.AlbumsSearched != 1 || forced.Deferred != 1 {
+		t.Fatalf("forced run = %d searched / %d deferred, want 1 and 1", forced.AlbumsSearched, forced.Deferred)
+	}
+	if owedMarkers(t, dbPath, "album") != 1 || settledMarkers(t, dbPath, "album") != 0 {
+		t.Fatal("the stale miss was not replaced by an owed lookup")
+	}
+
+	mb.browsePages = []string{browsePage(2,
+		browseDoc(edJPMBID, []string{"CD"}, "JP", ""),
+		browseDoc(edUSMBID, []string{"CD"}, "US", ""),
+	)}
+	res, err := svc.Run(ctx, enrich.RunOptions{}, nil)
+	if err != nil {
+		t.Fatalf("ordinary Run: %v", err)
+	}
+	if res.AlbumsSearched != 1 || res.AlbumsMatched != 1 {
+		t.Fatalf("ordinary run = %+v, want the album asked again and matched", res)
+	}
+	if got := albumMBID(t, dbPath); got != edJPMBID {
+		t.Errorf("album mbid = %q, want %s", got, edJPMBID)
 	}
 }

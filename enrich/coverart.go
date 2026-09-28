@@ -122,9 +122,9 @@ func releaseMBIDFromURL(reqURL, finalURL string) string {
 
 // caaProvider is the Cover Art Archive as a CapCover Provider. It keys on a release
 // group's MBID (resolved by the identity spine), fetches the front cover, and decodes
-// it to an ArtImage. A missing cover (404) or an undecodable image is a clean
-// no-match; a transient fetch error is returned so the Service logs it and continues
-// (cover art never aborts a run).
+// it to an ArtImage. A missing cover (404), one too large to store, and an undecodable
+// image are clean no-matches; anything else is returned as an error so the Service
+// leaves the target owed and asks again later (cover art never aborts a run).
 //
 // The group fetch records which release's bytes it took; a release ask whose album is
 // that release, under a group still holding those bytes, is answered from the record
@@ -136,8 +136,17 @@ type caaProvider struct {
 	log *slog.Logger
 }
 
-func (p *caaProvider) Name() string             { return providerCoverArt }
+func (p *caaProvider) Name() string             { return ProviderCoverArt }
 func (p *caaProvider) Capabilities() Capability { return CapCover }
+
+// CapabilitiesAt declares the two rungs the archive keys covers on, a release group and
+// a release, and nothing for an artist.
+func (p *caaProvider) CapabilitiesAt(t TargetType) Capability {
+	if t == TargetReleaseGroup || t == TargetRelease {
+		return CapCover
+	}
+	return 0
+}
 
 func (p *caaProvider) Enrich(ctx context.Context, req Request) (*Candidate, error) {
 	var rung string
@@ -173,10 +182,15 @@ func (p *caaProvider) Enrich(ctx context.Context, req Request) (*Candidate, erro
 	}
 	f, err := p.caa.frontCover(ctx, rung, req.MBID, cond)
 	if err != nil {
-		if waxerr.Is(err, waxerr.CodeNotFound) {
-			return nil, nil // no cover at this rung
+		// No cover at this rung, or an original over the size cap, answers this target for
+		// good: asking again fetches the same answer. Anything else can come from a
+		// service that is not answering, a refusal (a blanket block as much as a darkened
+		// item) or a page that is not an image as much as a 5xx, so the Service leaves the
+		// target owed, which costs a darkened item one more request.
+		if waxerr.Is(err, waxerr.CodeNotFound) || netsafe.TooLarge(err) {
+			return nil, nil
 		}
-		return nil, err // transient: the Service logs and skips
+		return nil, err
 	}
 	if f.notModified {
 		// The archive still serves the bytes the catalog holds: nothing to fetch, nothing

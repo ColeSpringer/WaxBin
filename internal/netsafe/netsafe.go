@@ -226,8 +226,7 @@ func (c *Client) Stream(ctx context.Context, r Request, dst io.Writer, maxBytes 
 		return nil, n, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
 	if n > maxBytes {
-		return nil, n, waxerr.New(waxerr.CodeInvalid, op,
-			fmt.Sprintf("response from %s exceeds %d-byte limit", r.URL, maxBytes))
+		return nil, n, waxerr.Wrap(waxerr.CodeInvalid, op, &tooLargeError{url: r.URL, limit: maxBytes})
 	}
 	return out, n, nil
 }
@@ -323,6 +322,29 @@ func checkStatus(status int, op, url string) error {
 	return waxerr.New(code, op, fmt.Sprintf("%s returned HTTP %d", url, status))
 }
 
+// tooLargeError is a response body over the byte cap. The URL is set where the message
+// has always named it.
+type tooLargeError struct {
+	url   string
+	limit int64
+}
+
+func (e *tooLargeError) Error() string {
+	if e.url == "" {
+		return fmt.Sprintf("response exceeds %d-byte limit", e.limit)
+	}
+	return fmt.Sprintf("response from %s exceeds %d-byte limit", e.url, e.limit)
+}
+
+// TooLarge reports whether err is a response body over the byte cap. That is the same
+// answer every time the resource is fetched, so a caller asking about many resources
+// can take it as an answer about that one, where a status or a refused media type can
+// come from a service that is not answering at all.
+func TooLarge(err error) bool {
+	var e *tooLargeError
+	return errors.As(err, &e)
+}
+
 // readCapped reads up to max bytes (max<0 = unbounded), erroring if the body would
 // exceed the cap rather than truncating it.
 func readCapped(r io.Reader, max int64) ([]byte, error) {
@@ -338,8 +360,7 @@ func readCapped(r io.Reader, max int64) ([]byte, error) {
 		return nil, waxerr.Wrap(waxerr.CodeIO, "netsafe.read", err)
 	}
 	if int64(len(data)) > max {
-		return nil, waxerr.New(waxerr.CodeInvalid, "netsafe.read",
-			fmt.Sprintf("response exceeds %d-byte limit", max))
+		return nil, waxerr.Wrap(waxerr.CodeInvalid, "netsafe.read", &tooLargeError{limit: max})
 	}
 	return data, nil
 }

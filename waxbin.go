@@ -50,14 +50,15 @@ var _ audit.Store = (*sqlite.Store)(nil)
 
 // enrichConfig converts the config-only EnrichConfig into the enrich package's
 // Config, resolving the cover-art and lyrics defaults (each on unless explicitly
-// disabled) and attaching any injected providers. The injected providers outrank the
-// key-free built-ins for a value conflict.
+// disabled) and attaching any injected providers and the hook that orders them. The
+// injected providers outrank the key-free built-ins for a value conflict unless the
+// hook reorders them.
 //
 // The retry window is resolved the same way: unset means 30 days, and anything not
 // positive means never. The default lives here rather than in enrich.Config so an
 // embedder building that struct itself keeps the old behaviour, which is where
 // FetchCoverArt puts its default too.
-func enrichConfig(c config.EnrichConfig, providers []enrich.Provider) enrich.Config {
+func enrichConfig(c config.EnrichConfig, providers []enrich.Provider, list func([]enrich.Provider) []enrich.Provider) enrich.Config {
 	retryMisses := 30 * 24 * time.Hour
 	if d := c.RetryMissesAfterDays; d != nil {
 		retryMisses = 0
@@ -75,6 +76,7 @@ func enrichConfig(c config.EnrichConfig, providers []enrich.Provider) enrich.Con
 		MatchReleases:        c.MatchReleases == nil || *c.MatchReleases,
 		RetryMissesAfter:     retryMisses,
 		Providers:            providers,
+		ProviderList:         list,
 		BlockPrivateIPs:      c.BlockPrivateIPs,
 		Timeout:              time.Duration(c.TimeoutSeconds) * time.Second,
 		MusicBrainzBaseURL:   c.MusicBrainzBaseURL,
@@ -174,7 +176,7 @@ func Open(ctx context.Context, opts Options) (*Library, error) {
 		analyzer:  analyze.New(st, decoder, log),
 		playback:  playback.New(st),
 		playlists: playlist.New(st),
-		enricher:  enrich.New(st, enrichConfig(opts.Enrichment, opts.EnrichmentProviders), log),
+		enricher:  enrich.New(st, enrichConfig(opts.Enrichment, opts.EnrichmentProviders, opts.EnrichmentProviderList), log),
 		decoder:   decoder,
 		log:       log,
 		opts:      opts,
@@ -1045,6 +1047,12 @@ func (l *Library) enrichScope(ctx context.Context, op string, opts EnrichOptions
 	}
 }
 
+// enrichDisabledMessage is the refusal when no enrichment phase can run: the engine's
+// two routes to a runnable pass, with the environment variable the CLI reads beside the
+// config key.
+const enrichDisabledMessage = "enrichment needs a MusicBrainz contact " +
+	"(set enrichment.contact / WAXBIN_ENRICH_CONTACT) or an injected provider serving one of its phases"
+
 // Enrich runs the metadata enrichment pass under an "enrich"-scoped job: MusicBrainz
 // release-group/artist/genre resolution (MBID-first), Cover Art Archive covers, and
 // the optional AcoustID fallback. It is resumable and lock-respecting, caches provider
@@ -1055,9 +1063,7 @@ func (l *Library) enrichScope(ctx context.Context, op string, opts EnrichOptions
 func (l *Library) Enrich(ctx context.Context, opts EnrichOptions) (*EnrichResult, error) {
 	out := &EnrichResult{}
 	if !l.enricher.Enabled() {
-		return out, waxerr.New(waxerr.CodeUnsupported, "waxbin.Enrich",
-			"enrichment needs a MusicBrainz contact "+
-				"(set enrichment.contact / WAXBIN_ENRICH_CONTACT) or an injected provider")
+		return out, waxerr.New(waxerr.CodeUnsupported, "waxbin.Enrich", enrichDisabledMessage)
 	}
 	scope, err := l.enrichScope(ctx, "waxbin.Enrich", opts)
 	if err != nil {
@@ -1069,6 +1075,20 @@ func (l *Library) Enrich(ctx context.Context, opts EnrichOptions) (*EnrichResult
 	}
 	return out, runErr
 }
+
+// EnrichmentBuiltins lists the key-free built-in providers this install registered,
+// in the order the fixed provider list carries them: the Cover Art Archive, the
+// MusicBrainz genre entry, ListenBrainz and LRCLIB. The genre entry comes with a contact
+// and the other three with a contact and their own toggle, so an install without a
+// contact has none. A settings screen lists them beside its own providers as ones to
+// rank or switch off through Options.EnrichmentProviderList.
+func (l *Library) EnrichmentBuiltins() []enrich.Provider { return l.enricher.Builtins() }
+
+// EnrichmentPhases reports the phases an unscoped enrichment run would walk on this
+// install now, in run order, for the providers the Library was opened with as the
+// provider list hook orders them. A forced phase outside it is refused by Enrich and
+// StartEnrich.
+func (l *Library) EnrichmentPhases() []model.EnrichPhase { return l.enricher.Phases() }
 
 // EnrichmentCoverage reports how many entities have been enriched, for doctor.
 func (l *Library) EnrichmentCoverage(ctx context.Context) (model.EnrichmentCoverage, error) {

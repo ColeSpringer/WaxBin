@@ -621,7 +621,9 @@ func clearUnmatchedAlbumMarkerTx(ctx context.Context, tx *sql.Tx, albumID int64)
 }
 
 // entityMarkerMatchedTx reports whether an entity's enrichment marker records a match,
-// so the undo path knows whether enrichment ever wrote anything to take back.
+// so the undo path knows whether enrichment ever wrote anything to take back. An identity
+// still owed a rider counts: MusicBrainz matched it, and art may have landed beside the
+// rider that failed.
 func entityMarkerMatchedTx(ctx context.Context, tx *sql.Tx, entityType string, entityID int64) (bool, error) {
 	var matched int
 	err := tx.QueryRowContext(ctx,

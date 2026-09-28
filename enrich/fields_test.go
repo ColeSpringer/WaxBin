@@ -3,6 +3,7 @@ package enrich_test
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -818,5 +819,100 @@ func TestAlbumFieldsStampsEachProviderSeparately(t *testing.T) {
 		WHERE entity_type='album' AND field='label'`)
 	if got != "discogs" {
 		t.Errorf("label curation provider = %q, want the provider that supplied the label", got)
+	}
+}
+
+// TestFieldsWalksFollowTheRung: CapFields spans the recording and release rungs, so a
+// provider that knows only one declares it and the other walk is not built for it.
+// Without the declaration an ISRC service would mark every label-less album a miss every
+// window, and a label service every track missing a bpm.
+func TestFieldsWalksFollowTheRung(t *testing.T) {
+	ctx := context.Background()
+	run := func(t *testing.T, rung enrich.TargetType) (*enrich.Result, string) {
+		t.Helper()
+		st, dbPath, lib := openStore(t)
+		seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "One", "Band", "Album")
+		p := &enrich.Mock{ProviderName: "fields", Caps: enrich.CapFields,
+			CapsAt: map[enrich.TargetType]enrich.Capability{rung: enrich.CapFields}}
+		res, err := fieldsService(t, st, p).Run(ctx, enrich.RunOptions{}, nil)
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		return res, dbPath
+	}
+	markers := func(t *testing.T, dbPath, typ string) int {
+		t.Helper()
+		return scalarInt(t, roDB(t, dbPath), "SELECT COUNT(*) FROM entity_enrichment WHERE entity_type=?", typ)
+	}
+
+	t.Run("a recording-only provider walks tracks", func(t *testing.T) {
+		res, dbPath := run(t, enrich.TargetRecording)
+		if res.TrackFieldsEnriched != 1 || res.AlbumFieldsEnriched != 0 {
+			t.Errorf("walked %d tracks and %d albums, want 1 and 0", res.TrackFieldsEnriched, res.AlbumFieldsEnriched)
+		}
+		if n := markers(t, dbPath, "fields_album"); n != 0 {
+			t.Errorf("album fields markers = %d, want none", n)
+		}
+	})
+	t.Run("a release-only provider walks albums", func(t *testing.T) {
+		res, dbPath := run(t, enrich.TargetRelease)
+		if res.AlbumFieldsEnriched != 1 || res.TrackFieldsEnriched != 0 {
+			t.Errorf("walked %d albums and %d tracks, want 1 and 0", res.AlbumFieldsEnriched, res.TrackFieldsEnriched)
+		}
+		if n := markers(t, dbPath, "fields"); n != 0 {
+			t.Errorf("track fields markers = %d, want none", n)
+		}
+	})
+}
+
+// TestTrackFieldsFailureLeavesTheItemQueued: the healthy provider's fields land with its
+// own provenance while the failed one's slot stays open, and the item is walked again so
+// the failed provider's value arrives once it answers.
+func TestTrackFieldsFailureLeavesTheItemQueued(t *testing.T) {
+	ctx := context.Background()
+	st, dbPath, lib := openStore(t)
+	pid := seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "One", "Band", "Album")
+
+	recordings := map[enrich.TargetType]enrich.Capability{enrich.TargetRecording: enrich.CapFields}
+	down := true
+	bpm := &enrich.Mock{ProviderName: "getsongbpm", Caps: enrich.CapFields, CapsAt: recordings,
+		EnrichFunc: func(context.Context, enrich.Request) (*enrich.Candidate, error) {
+			if down {
+				return nil, errors.New("rate limited")
+			}
+			return &enrich.Candidate{Fields: map[string]string{"bpm": "128"}}, nil
+		}}
+	isrc := &enrich.Mock{ProviderName: "isrcdb", Caps: enrich.CapFields, CapsAt: recordings,
+		Ret: &enrich.Candidate{Fields: map[string]string{"isrc": "GBAYA7500098"}}}
+	svc := fieldsService(t, st, bpm, isrc)
+
+	first, err := svc.Run(ctx, enrich.RunOptions{}, nil)
+	if err != nil {
+		t.Fatalf("run 1: %v", err)
+	}
+	if first.TrackFieldsEnriched != 1 || first.Deferred != 1 {
+		t.Fatalf("run 1 = %d walked / %d deferred, want 1 and 1", first.TrackFieldsEnriched, first.Deferred)
+	}
+	db := roDB(t, dbPath)
+	if _, provider, _, value := provenanceRow(t, db, pid, "isrc"); provider != "isrcdb" || value != "GBAYA7500098" {
+		t.Errorf("isrc provenance = %q/%q, want isrcdb's value", provider, value)
+	}
+	if owedMarkers(t, dbPath, "fields") != 1 || settledMarkers(t, dbPath, "fields") != 0 {
+		t.Fatal("the item's fields lookup is not owed while a provider owes an answer")
+	}
+
+	down = false
+	second, err := svc.Run(ctx, enrich.RunOptions{}, nil)
+	if err != nil {
+		t.Fatalf("run 2: %v", err)
+	}
+	if second.TrackFieldsEnriched != 1 || second.Deferred != 0 {
+		t.Fatalf("run 2 = %d walked / %d deferred, want 1 and 0", second.TrackFieldsEnriched, second.Deferred)
+	}
+	if _, provider, _, value := provenanceRow(t, db, pid, "bpm"); provider != "getsongbpm" || value != "128" {
+		t.Errorf("bpm provenance = %q/%q, want getsongbpm's 128", provider, value)
+	}
+	if m := scalarInt(t, db, `SELECT matched FROM entity_enrichment WHERE entity_type = 'fields'`); m != 1 {
+		t.Errorf("fields marker matched = %d, want 1", m)
 	}
 }

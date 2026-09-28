@@ -657,15 +657,19 @@ type enrichView struct {
 	AlbumFieldsMatched  int `json:"albumFieldsMatched,omitempty"`
 	// Retried is the retry sweep's share of the phase counts above, omitted on a run
 	// that re-asked nothing (a forced run, or a catalog with no expired misses).
-	Retried           int    `json:"retried,omitempty"`
-	ArtFetched        int    `json:"artFetched"`
-	ArtReused         int    `json:"artReused,omitempty"`
-	AuxArtFetched     int    `json:"auxArtFetched,omitempty"`
-	TagsWritten       int    `json:"tagsWritten,omitempty"`
-	TagsFailed        int    `json:"tagsFailed,omitempty"`
-	TagsUnrepresented int    `json:"tagsUnrepresented,omitempty"`
-	TagsSkipped       int    `json:"tagsSkipped,omitempty"`
-	JobPID            string `json:"jobPid,omitempty"`
+	Retried int `json:"retried,omitempty"`
+	// Deferred is the share left queued for the next pass, omitted on a run where every
+	// lookup got an answer. Stalled names the phases that ran out of live providers.
+	Deferred          int      `json:"deferred,omitempty"`
+	Stalled           []string `json:"stalled,omitempty"`
+	ArtFetched        int      `json:"artFetched"`
+	ArtReused         int      `json:"artReused,omitempty"`
+	AuxArtFetched     int      `json:"auxArtFetched,omitempty"`
+	TagsWritten       int      `json:"tagsWritten,omitempty"`
+	TagsFailed        int      `json:"tagsFailed,omitempty"`
+	TagsUnrepresented int      `json:"tagsUnrepresented,omitempty"`
+	TagsSkipped       int      `json:"tagsSkipped,omitempty"`
+	JobPID            string   `json:"jobPid,omitempty"`
 }
 
 func toEnrichView(r *waxbin.EnrichResult) enrichView {
@@ -682,6 +686,8 @@ func toEnrichView(r *waxbin.EnrichResult) enrichView {
 		BookFieldsEnriched: r.Result.BookFieldsEnriched, BookFieldsMatched: r.Result.BookFieldsMatched,
 		AlbumFieldsEnriched: r.Result.AlbumFieldsEnriched, AlbumFieldsMatched: r.Result.AlbumFieldsMatched,
 		Retried:    r.Result.Retried,
+		Deferred:   r.Result.Deferred,
+		Stalled:    phaseStrings(r.Result.Stalled),
 		ArtFetched: r.Result.ArtFetched, ArtReused: r.Result.ArtReused,
 		AuxArtFetched: r.Result.AuxArtFetched,
 		TagsWritten:   r.Result.TagsWritten, TagsFailed: r.Result.TagsFailed,

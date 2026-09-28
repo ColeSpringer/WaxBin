@@ -27,8 +27,8 @@ const itemYearExpr = "COALESCE(t.year, bk.year, ep.year)"
 // itemArtSlotExpr selects the art_map entity_type slot an item's own art lives
 // under. Tracks and books both store item art under the 'track' slot (the shared
 // attachArtTx path treats the entity id as the playable_item id), but an
-// episode's cover attaches under 'episode' (attachEntityArtTx(..., "episode",
-// itemID, ...) on download). Any read predicate probing item-own art must switch
+// episode's cover attaches under 'episode' (attachEntityArtUnlessLockedTx(...,
+// model.ArtEpisode, itemID, ...) on download). Any read predicate probing item-own art must switch
 // the slot by kind through this expression; a track-only predicate would read 0
 // for every covered episode.
 const itemArtSlotExpr = "CASE WHEN pi.kind='episode' THEN 'episode' ELSE 'track' END"

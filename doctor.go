@@ -5,6 +5,7 @@ import (
 
 	"github.com/colespringer/waxbin/decode"
 	"github.com/colespringer/waxbin/internal/caps"
+	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/query"
 	"github.com/colespringer/waxbin/store/sqlite"
 )
@@ -36,7 +37,10 @@ type DoctorReport struct {
 	DiagnosticsStale int
 	// EnrichmentEnabled reports whether any enrichment phase can run: a MusicBrainz
 	// contact is configured, or an injected provider gates a phase of its own.
+	// EnrichmentPhases are those phases in run order, the list Library.EnrichmentPhases
+	// reports.
 	EnrichmentEnabled bool
+	EnrichmentPhases  []model.EnrichPhase
 
 	// Fpcalc is the sole remaining optional helper (Chromaprint for AcoustID); it is
 	// never required for core use. Decoding is pure-Go via WaxFlow, so there is no
@@ -108,7 +112,10 @@ func (l *Library) Doctor(ctx context.Context) (*DoctorReport, error) {
 	}
 	rep.PodcastCount = len(pods)
 
-	rep.EnrichmentEnabled = l.enricher.Enabled()
+	// One read of the phase list, so the flag and the list cannot disagree when the
+	// provider list hook answers differently between two reads.
+	rep.EnrichmentPhases = l.EnrichmentPhases()
+	rep.EnrichmentEnabled = len(rep.EnrichmentPhases) > 0
 	cov, err := l.EnrichmentCoverage(ctx)
 	if err != nil {
 		return nil, err

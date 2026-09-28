@@ -66,7 +66,8 @@ type EnrichConfig struct {
 	// about that target again, which is what lets a provider that has since gained
 	// coverage be reached without a --force run re-asking about everything. Unset is 30
 	// days; 0 never retries. A matched marker is durable either way; `enrich
-	// --force-phase` re-asks one phase.
+	// --force-phase` re-asks one phase. A failed lookup is not a miss: the next pass asks
+	// it again, and that ask settles it.
 	RetryMissesAfterDays *int `json:"retry_misses_after_days,omitempty"`
 	BlockPrivateIPs      bool `json:"block_private_ips,omitempty"` // SSRF guard for provider requests
 	TimeoutSeconds       int  `json:"timeout_seconds,omitempty"`   // per-request timeout (0 = default)

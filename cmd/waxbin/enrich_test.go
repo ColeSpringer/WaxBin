@@ -8,6 +8,7 @@ import (
 
 	"github.com/colespringer/waxbin"
 	"github.com/colespringer/waxbin/enrich"
+	"github.com/colespringer/waxbin/model"
 	"github.com/spf13/cobra"
 )
 
@@ -90,5 +91,71 @@ func TestEnrichViewOmitsArtReusedAtZero(t *testing.T) {
 	}
 	if !strings.Contains(string(one), `"artReused":1`) {
 		t.Errorf("payload = %s, want artReused 1", one)
+	}
+}
+
+// TestEnrichSummaryReportsDeferred: a run that left lookups owed says how many targets it
+// left queued, in the text summary and the JSON view, and a run with none keeps the
+// shape it had.
+func TestEnrichSummaryReportsDeferred(t *testing.T) {
+	render := func(r enrich.Result) string {
+		cmd := &cobra.Command{}
+		var buf bytes.Buffer
+		cmd.SetOut(&buf)
+		if err := renderEnrichResult(cmd, &globals{}, &waxbin.EnrichResult{Result: r}); err != nil {
+			t.Fatalf("render: %v", err)
+		}
+		return buf.String()
+	}
+	if out := render(enrich.Result{LyricsEnriched: 3, Deferred: 2}); !strings.Contains(out, "deferred:       2 left queued for the next pass\n") {
+		t.Errorf("summary lacks the deferred line:\n%s", out)
+	}
+	if out := render(enrich.Result{LyricsEnriched: 3}); strings.Contains(out, "deferred:") {
+		t.Errorf("summary with nothing deferred prints a deferred line:\n%s", out)
+	}
+	payload, err := json.Marshal(toEnrichView(&waxbin.EnrichResult{Result: enrich.Result{Deferred: 2}}))
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(payload), `"deferred":2`) {
+		t.Errorf("payload = %s, want deferred 2", payload)
+	}
+	zero, err := json.Marshal(toEnrichView(&waxbin.EnrichResult{}))
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(zero), "deferred") {
+		t.Errorf("zero payload = %s, want no deferred key", zero)
+	}
+}
+
+// TestEnrichSummaryReportsStalled: a phase that ran out of live providers is named, so a
+// run that stopped short of its targets does not read as having finished them.
+func TestEnrichSummaryReportsStalled(t *testing.T) {
+	cmd := &cobra.Command{}
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	res := &waxbin.EnrichResult{Result: enrich.Result{LyricsEnriched: 3,
+		Stalled: []model.EnrichPhase{model.EnrichPhaseLyrics, model.EnrichPhaseAlbumArt}}}
+	if err := renderEnrichResult(cmd, &globals{}, res); err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	want := "stalled:        lyrics, album-art (every provider serving them was out of this pass)\n"
+	if !strings.Contains(buf.String(), want) {
+		t.Errorf("summary lacks the stalled line:\n%s", buf.String())
+	}
+	payload, err := json.Marshal(toEnrichView(res))
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(payload), `"stalled":["lyrics","album-art"]`) {
+		t.Errorf("payload = %s, want the stalled phases", payload)
+	}
+	zero, err := json.Marshal(toEnrichView(&waxbin.EnrichResult{}))
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(zero), "stalled") {
+		t.Errorf("zero payload = %s, want no stalled key", zero)
 	}
 }

@@ -24,7 +24,7 @@ type lrclib struct {
 	baseURL string // e.g. https://lrclib.net
 }
 
-func (l *lrclib) Name() string             { return providerLRCLIB }
+func (l *lrclib) Name() string             { return ProviderLRCLIB }
 func (l *lrclib) Capabilities() Capability { return CapLyrics }
 
 // lrclibResponse is the subset of LRCLIB's /api/get response we consume. An
@@ -81,7 +81,7 @@ func (l *lrclib) Enrich(ctx context.Context, req Request) (*Candidate, error) {
 	if out.Instrumental {
 		return nil, nil
 	}
-	ly := &model.Lyrics{Source: model.SourceEnrichment, Provider: providerLRCLIB}
+	ly := &model.Lyrics{Source: model.SourceEnrichment, Provider: ProviderLRCLIB}
 	if synced := parseLRC(out.SyncedLyrics); len(synced) > 0 {
 		ly.Synced = synced
 	}

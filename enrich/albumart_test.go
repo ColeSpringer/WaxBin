@@ -2,6 +2,9 @@ package enrich_test
 
 import (
 	"context"
+	"errors"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -338,5 +341,250 @@ func TestAlbumArtScopedToOneAlbum(t *testing.T) {
 	}
 	if len(asks) != 1 || asks[0].MBID != edGBMBID {
 		t.Fatalf("release asks = %+v, want only the scoped album's", asks)
+	}
+}
+
+// TestAlbumArtAuxHalfNeedsAReleaseRungProvider: a fan-art service keyed on release groups
+// declares the release rung empty, so an identified album whose front is settled is not
+// walked for its auxiliary slots on that provider's account, where it would be asked,
+// answered nil, and marked a miss every retry window. An album with no front is still
+// walked, since the archive declares the release rung.
+func TestAlbumArtAuxHalfNeedsAReleaseRungProvider(t *testing.T) {
+	ctx := context.Background()
+	var releaseAsks int
+	fanart := &enrich.Mock{ProviderName: "fanart", Caps: enrich.CapAuxArt | enrich.CapArtistArt,
+		CapsAt: map[enrich.TargetType]enrich.Capability{
+			enrich.TargetReleaseGroup: enrich.CapAuxArt,
+			enrich.TargetArtist:       enrich.CapArtistArt | enrich.CapAuxArt,
+		},
+		EnrichFunc: func(_ context.Context, req enrich.Request) (*enrich.Candidate, error) {
+			if req.Type == enrich.TargetRelease {
+				releaseAsks++
+			}
+			return nil, nil
+		}}
+	track := model.Track{
+		Artist: "Pink Floyd", AlbumArtist: "Pink Floyd", Album: "Wish You Were Here", TrackNo: 1,
+		MBReleaseID: edGBMBID, Barcode: relBarcode,
+	}
+
+	st, dbPath, lib := openStore(t)
+	seedAlbumTrackWithCover(t, st, lib.ID, "ess-a", track, pngBytes(t))
+	caa, hits := newReleaseCAAMock(t, pngBytes(t))
+	res, err := albumArtService(st, newRelMock(t, "[]").server.URL, caa, fanart).Run(ctx, enrich.RunOptions{}, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.AlbumArtEnriched != 0 || releaseAsks != 0 || *hits != 0 {
+		t.Fatalf("walked %d albums, %d release asks, %d fetches; want none for an album whose front is settled",
+			res.AlbumArtEnriched, releaseAsks, *hits)
+	}
+	if n := scalarInt(t, roDB(t, dbPath), "SELECT COUNT(*) FROM entity_enrichment WHERE entity_type='album_art'"); n != 0 {
+		t.Errorf("album art markers = %d, want none", n)
+	}
+
+	st2, _, lib2 := openStore(t)
+	seedAlbumTrack(t, st2, lib2.ID, "ess-a", track)
+	caa2, hits2 := newReleaseCAAMock(t, pngBytes(t))
+	res2, err := albumArtService(st2, newRelMock(t, "[]").server.URL, caa2, fanart).Run(ctx, enrich.RunOptions{}, nil)
+	if err != nil {
+		t.Fatalf("Run without the embedded cover: %v", err)
+	}
+	if res2.AlbumArtEnriched != 1 || *hits2 != 1 {
+		t.Errorf("walked %d albums with %d fetches, want the front half to walk it once", res2.AlbumArtEnriched, *hits2)
+	}
+	if releaseAsks != 0 {
+		t.Errorf("fanart asked %d times at the release rung, want never", releaseAsks)
+	}
+}
+
+// TestAlbumArtFrontHalfNeedsAReleaseRungProvider: a contact-less install whose only cover
+// provider serves release groups has nobody to ask about an album's own front, so an
+// identified album without one is neither walked nor marked. The lyrics provider beside
+// it keeps the install runnable.
+func TestAlbumArtFrontHalfNeedsAReleaseRungProvider(t *testing.T) {
+	ctx := context.Background()
+	st, dbPath, lib := openStore(t)
+	seedAlbumTrack(t, st, lib.ID, "ess-a", model.Track{
+		Artist: "Pink Floyd", AlbumArtist: "Pink Floyd", Album: "Wish You Were Here", TrackNo: 1,
+		MBReleaseID: edGBMBID, Barcode: relBarcode,
+	})
+	var releaseAsks int
+	groupCovers := &enrich.Mock{ProviderName: "groupcovers", Caps: enrich.CapCover,
+		CapsAt: map[enrich.TargetType]enrich.Capability{enrich.TargetReleaseGroup: enrich.CapCover},
+		EnrichFunc: func(_ context.Context, req enrich.Request) (*enrich.Candidate, error) {
+			if req.Type == enrich.TargetRelease {
+				releaseAsks++
+			}
+			return nil, nil
+		}}
+	lyrics := &enrich.Mock{ProviderName: "lyrics", Caps: enrich.CapLyrics}
+	svc := enrich.New(st, enrich.Config{
+		MinRequestInterval: time.Millisecond, Providers: []enrich.Provider{groupCovers, lyrics},
+	}, nil)
+	if got := svc.Phases(); len(got) != 1 || got[0] != model.EnrichPhaseLyrics {
+		t.Errorf("phases = %v, want [lyrics]", got)
+	}
+	res, err := svc.Run(ctx, enrich.RunOptions{}, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.AlbumArtEnriched != 0 || releaseAsks != 0 {
+		t.Errorf("walked %d albums with %d release asks, want none", res.AlbumArtEnriched, releaseAsks)
+	}
+	if res.LyricsEnriched != 1 {
+		t.Errorf("lyrics walked %d tracks, want 1", res.LyricsEnriched)
+	}
+	if n := scalarInt(t, roDB(t, dbPath), "SELECT COUNT(*) FROM entity_enrichment WHERE entity_type='album_art'"); n != 0 {
+		t.Errorf("album art markers = %d, want none", n)
+	}
+}
+
+// TestAlbumArtOwesNothingForAuxiliaryRolesNobodyServes: with no provider serving the
+// auxiliary roles at the release rung, the album's full set is its front. An injected
+// cover provider failing ahead of the archive, which then supplies the front, leaves
+// nothing a later pass could fill, so the album settles instead of being owed a lookup no
+// queue would ever select again.
+func TestAlbumArtOwesNothingForAuxiliaryRolesNobodyServes(t *testing.T) {
+	ctx := context.Background()
+	st, dbPath, lib := openStore(t)
+	seedAlbumTrack(t, st, lib.ID, "ess-a", model.Track{
+		Artist: "Pink Floyd", AlbumArtist: "Pink Floyd", Album: "Wish You Were Here", TrackNo: 1,
+		MBReleaseID: edGBMBID, Barcode: relBarcode,
+	})
+	art := pngBytes(t)
+	caa := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/release/"+edGBMBID+"/front" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write(art)
+	}))
+	t.Cleanup(caa.Close)
+	failing := &enrich.Mock{ProviderName: "covers", Caps: enrich.CapCover,
+		CapsAt: map[enrich.TargetType]enrich.Capability{enrich.TargetRelease: enrich.CapCover},
+		EnrichFunc: func(context.Context, enrich.Request) (*enrich.Candidate, error) {
+			return nil, errors.New("covers is down")
+		}}
+	res, err := albumArtService(st, newRelMock(t, "[]").server.URL, caa.URL, failing).Run(ctx, enrich.RunOptions{}, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.AlbumArtEnriched != 1 || res.ArtFetched != 1 || res.Deferred != 0 {
+		t.Fatalf("run = %d walked / %d fetched / %d deferred, want the archive's front and nothing owed",
+			res.AlbumArtEnriched, res.ArtFetched, res.Deferred)
+	}
+	if owed, settled := owedMarkers(t, dbPath, "album_art"), settledMarkers(t, dbPath, "album_art"); owed != 0 || settled != 1 {
+		t.Errorf("album art markers = %d owed / %d settled, want one settled match", owed, settled)
+	}
+}
+
+// TestAlbumArtFailureLeavesTheAlbumQueued: an archive error on the release cover is not a
+// miss, so the album is asked again on the next pass rather than waiting a retry window
+// for a cover the archive has.
+func TestAlbumArtFailureLeavesTheAlbumQueued(t *testing.T) {
+	ctx := context.Background()
+	st, dbPath, lib := openStore(t)
+	seedAlbumTrack(t, st, lib.ID, "ess-a", model.Track{
+		Artist: "Pink Floyd", AlbumArtist: "Pink Floyd", Album: "Wish You Were Here", TrackNo: 1,
+		MBReleaseID: edGBMBID, Barcode: relBarcode,
+	})
+	art := pngBytes(t)
+	fetches := 0
+	caa := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/release/"+edGBMBID+"/front" {
+			http.NotFound(w, r)
+			return
+		}
+		fetches++
+		if fetches == 1 {
+			http.Error(w, "busy", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write(art)
+	}))
+	t.Cleanup(caa.Close)
+	svc := albumArtService(st, newRelMock(t, "[]").server.URL, caa.URL)
+
+	first, err := svc.Run(ctx, enrich.RunOptions{}, nil)
+	if err != nil {
+		t.Fatalf("run 1: %v", err)
+	}
+	if first.AlbumArtEnriched != 1 || first.Deferred != 1 {
+		t.Fatalf("run 1 = %d walked / %d deferred, want 1 and 1", first.AlbumArtEnriched, first.Deferred)
+	}
+	if owedMarkers(t, dbPath, "album_art") != 1 || settledMarkers(t, dbPath, "album_art") != 0 {
+		t.Fatal("the album's art lookup is not owed after the archive failed")
+	}
+
+	second, err := svc.Run(ctx, enrich.RunOptions{}, nil)
+	if err != nil {
+		t.Fatalf("run 2: %v", err)
+	}
+	if second.AlbumArtEnriched != 1 || second.Retried != 0 || second.ArtFetched != 1 || fetches != 2 {
+		t.Fatalf("run 2 = %+v after %d fetches, want the album asked fresh and filled", second, fetches)
+	}
+	if got := albumArtHash(t, dbPath, "front"); got == "" {
+		t.Error("album front is empty after the archive recovered")
+	}
+}
+
+// TestArchiveAnswersOnlyForAMissingOrOversizedCover: a cover the archive does not have and
+// one too large to store are answers about that release, so the album settles as a miss.
+// Anything else can come from a service that is not answering, a blanket block or a
+// maintenance page as much as a darkened item, so it leaves the lookup owed, which costs
+// a darkened item one more request and keeps an outage from settling a night's albums.
+func TestArchiveAnswersOnlyForAMissingOrOversizedCover(t *testing.T) {
+	ctx := context.Background()
+	cases := []struct {
+		name  string
+		owed  bool
+		serve http.HandlerFunc
+	}{
+		{"no cover", false, http.NotFound},
+		{"an oversized original", false, func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "image/png")
+			_, _ = w.Write(make([]byte, 24<<20+1))
+		}},
+		{"a refused image", true, func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, "forbidden", http.StatusForbidden)
+		}},
+		{"a page that is not an image", true, func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte("<html>maintenance</html>"))
+		}},
+		{"a failing service", true, func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, "busy", http.StatusServiceUnavailable)
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			st, dbPath, lib := openStore(t)
+			seedAlbumTrack(t, st, lib.ID, "ess-a", model.Track{
+				Artist: "Pink Floyd", AlbumArtist: "Pink Floyd", Album: "Wish You Were Here", TrackNo: 1,
+				MBReleaseID: edGBMBID, Barcode: relBarcode,
+			})
+			caa := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/release/"+edGBMBID+"/front" {
+					tc.serve(w, r)
+					return
+				}
+				http.NotFound(w, r)
+			}))
+			t.Cleanup(caa.Close)
+			res, err := albumArtService(st, newRelMock(t, "[]").server.URL, caa.URL).Run(ctx, enrich.RunOptions{}, nil)
+			if err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			owed, settled := owedMarkers(t, dbPath, "album_art"), settledMarkers(t, dbPath, "album_art")
+			if tc.owed && (res.Deferred != 1 || owed != 1) {
+				t.Errorf("deferred %d with %d owed / %d settled, want the lookup owed", res.Deferred, owed, settled)
+			}
+			if !tc.owed && (res.Deferred != 0 || settled != 1) {
+				t.Errorf("deferred %d with %d owed / %d settled, want the album settled as a miss", res.Deferred, owed, settled)
+			}
+		})
 	}
 }

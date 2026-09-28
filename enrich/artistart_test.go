@@ -2,6 +2,7 @@ package enrich_test
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -140,5 +141,80 @@ func TestArtistArtStockRunSpendsNothing(t *testing.T) {
 	}
 	if h := artistArtHash(t, dbPath, "front"); h != "" {
 		t.Errorf("artist front hash = %q, want nothing from a stock run", h)
+	}
+}
+
+// TestArtistArtRiderFailureLeavesTheArtistQueued: the artist identity rung follows the
+// release-group one. A failed art rider leaves the artist's identity in place and its
+// marker off, so the next pass asks the provider again.
+func TestArtistArtRiderFailureLeavesTheArtistQueued(t *testing.T) {
+	ctx := context.Background()
+	st, dbPath, lib := openStore(t)
+	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
+
+	down := true
+	covers := &enrich.Mock{ProviderName: "fanart", Caps: enrich.CapCover,
+		EnrichFunc: func(_ context.Context, req enrich.Request) (*enrich.Candidate, error) {
+			if req.Type != enrich.TargetArtist {
+				return nil, nil
+			}
+			if down {
+				return nil, errors.New("fanart is down")
+			}
+			return &enrich.Candidate{Cover: artImg(t, "artist-front")}, nil
+		}}
+	svc := artistArtService(t, st, covers)
+	db := roDB(t, dbPath)
+	first, err := svc.Run(ctx, enrich.RunOptions{}, nil)
+	if err != nil {
+		t.Fatalf("run 1: %v", err)
+	}
+	if first.ArtistsMatched != 1 || first.Deferred != 1 {
+		t.Fatalf("run 1 = %d matched / %d deferred, want 1 and 1", first.ArtistsMatched, first.Deferred)
+	}
+	if m := scalarStr(t, db, "SELECT COALESCE(mbid,'') FROM artist WHERE name='Pink Floyd'"); m != "pf-mbid" {
+		t.Errorf("artist mbid = %q, want the identity landed", m)
+	}
+	if owedMarkers(t, dbPath, "artist") != 1 || settledMarkers(t, dbPath, "artist") != 0 {
+		t.Fatal("the artist's lookup is not owed while the rider owes an answer")
+	}
+
+	down = false
+	second, err := svc.Run(ctx, enrich.RunOptions{}, nil)
+	if err != nil {
+		t.Fatalf("run 2: %v", err)
+	}
+	if second.ArtistsEnriched != 1 || second.Deferred != 0 {
+		t.Fatalf("run 2 = %d walked / %d deferred, want the artist re-walked and settled", second.ArtistsEnriched, second.Deferred)
+	}
+	if h := artistArtHash(t, dbPath, "front"); h != "artist-front" {
+		t.Errorf("artist front = %q, want the rider's answer", h)
+	}
+	if n := scalarInt(t, db, "SELECT COUNT(*) FROM entity_enrichment WHERE entity_type='artist' AND matched=1"); n != 1 {
+		t.Errorf("matched artist markers = %d, want 1", n)
+	}
+}
+
+// TestAnArtistWithAFrontIsNotDeferredForItsAuxRider: the identity rungs defer only for
+// the front. An artist already holding one is asked about its auxiliary roles on the way
+// past, and a failure there leaves the identity settled; artist auxiliary art belongs to
+// the artist-art backfill, which asks again under its own marker.
+func TestAnArtistWithAFrontIsNotDeferredForItsAuxRider(t *testing.T) {
+	ctx := context.Background()
+	st, dbPath, lib := openStore(t)
+	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
+	pid := model.PID(scalarStr(t, roDB(t, dbPath), "SELECT pid FROM artist WHERE name='Pink Floyd'"))
+	if err := st.SetEntityArt(ctx, model.ArtArtist, pid, model.ArtRoleFront, pngBytes(t), "",
+		model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
+		t.Fatalf("set the artist's front: %v", err)
+	}
+	backgrounds := &enrich.Mock{ProviderName: "fanart", Caps: enrich.CapAuxArt,
+		CapsAt: map[enrich.TargetType]enrich.Capability{enrich.TargetArtist: enrich.CapAuxArt},
+		Err:    errors.New("fanart key expired")}
+	if _, err := artistArtService(t, st, backgrounds).Run(ctx, enrich.RunOptions{}, nil); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if settledMarkers(t, dbPath, "artist") != 1 || owedMarkers(t, dbPath, "artist") != 0 {
+		t.Errorf("artist identity = %d settled / %d owed, want settled", settledMarkers(t, dbPath, "artist"), owedMarkers(t, dbPath, "artist"))
 	}
 }

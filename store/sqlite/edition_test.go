@@ -194,7 +194,7 @@ func TestAlbumsNeedingReleaseMatchIncludesEditionEvidence(t *testing.T) {
 	}
 
 	// The heartbeat denominator is built from the same list and must agree.
-	n, err := st.CountEntitiesNeedingEnrichment(ctx, model.EnrichQueueOptions{}, model.EnrichCountOptions{Albums: true}, nil)
+	n, err := st.CountEntitiesNeedingEnrichment(ctx, model.EnrichQueueOptions{}, model.EnrichCountOptions{Phases: []model.EnrichPhase{model.EnrichPhaseAlbumRelease}}, nil)
 	if err != nil {
 		t.Fatalf("CountEntitiesNeedingEnrichment: %v", err)
 	}

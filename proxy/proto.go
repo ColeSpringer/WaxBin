@@ -269,8 +269,8 @@ type wireError struct {
 	Msg  string `json:"msg"`
 }
 
-// toWireError serializes err for transport, preserving its waxerr class. A nil
-// error yields nil.
+// toWireError serializes err for transport, preserving its waxerr class and its text. A
+// nil error yields nil.
 func toWireError(err error) *wireError {
 	if err == nil {
 		return nil
@@ -278,9 +278,18 @@ func toWireError(err error) *wireError {
 	we := &wireError{Code: string(waxerr.CodeOf(err)), Msg: err.Error()}
 	var e *waxerr.Error
 	if errors.As(err, &e) {
+		// The client puts the op back in front of the message, so the message is the
+		// error's own text after its op, cause included.
 		we.Op = e.Op
-		if e.Msg != "" {
+		switch {
+		case e.Msg != "" && e.Err != nil:
+			we.Msg = e.Msg + ": " + e.Err.Error()
+		case e.Msg != "":
 			we.Msg = e.Msg
+		case e.Err != nil:
+			we.Msg = e.Err.Error()
+		default:
+			we.Msg = ""
 		}
 	}
 	return we

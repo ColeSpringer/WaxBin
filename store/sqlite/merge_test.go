@@ -123,6 +123,38 @@ func TestMergeArtistsUnionsMBIDAndEnrichmentMarker(t *testing.T) {
 	}
 }
 
+// TestMergeCarriesAnOwedLookup: a loser whose lookup is owed hands the survivor an owed
+// marker, not a settled one, so the survivor is still asked on the next pass.
+func TestMergeCarriesAnOwedLookup(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	putTrack(t, st, lib.ID, trackSpec{
+		path: "/lib/a/1.flac", essence: "e1", content: "c1", title: "One",
+		artist: "Nirvana", album: "A", durationMS: 100,
+	})
+	putTrack(t, st, lib.ID, trackSpec{
+		path: "/lib/b/2.flac", essence: "e2", content: "c2", title: "Two",
+		artist: "Nirvana (US)", album: "B", durationMS: 100,
+	})
+	survivor := entityPID(t, st, "artist", "Nirvana")
+	loser := entityPID(t, st, "artist", "Nirvana (US)")
+	if _, err := st.write.ExecContext(ctx,
+		"INSERT INTO entity_enrichment(entity_type, entity_id, provider, matched, mbid, enriched_at, owed) SELECT 'artist', id, 'musicbrainz', 1, 'mbid-x', 1, 1 FROM artist WHERE name='Nirvana (US)'"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.MergeEntity(ctx, model.MergeArtist, survivor, loser); err != nil {
+		t.Fatalf("merge: %v", err)
+	}
+	var owed int
+	if err := st.read.QueryRowContext(ctx,
+		"SELECT owed FROM entity_enrichment ee JOIN artist a ON a.id=ee.entity_id AND ee.entity_type='artist' WHERE a.name='Nirvana'").Scan(&owed); err != nil {
+		t.Fatalf("survivor should inherit the marker: %v", err)
+	}
+	if owed != 1 {
+		t.Errorf("survivor marker owed = %d, want the loser's owed lookup carried over", owed)
+	}
+}
+
 // TestMergeAlbumUnionsEnrichmentMarker guards the marker union for albums, which
 // only became reachable once the release match started writing album markers.
 // Without it, merging two albums strands the loser's entity_enrichment row and the

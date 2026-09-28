@@ -3,6 +3,7 @@ package enrich_test
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -33,11 +34,11 @@ func rwDB(t *testing.T, dbPath string) *sql.DB {
 	return db
 }
 
-// backdateMisses ages every no-match marker so the retry sweep has something to select,
+// backdateMisses ages every settled no-match marker so the retry sweep has something to select,
 // never a sleep: the coarse Windows clock makes two stamps taken in one run equal.
 func backdateMisses(t *testing.T, dbPath string, age time.Duration) {
 	t.Helper()
-	if _, err := rwDB(t, dbPath).Exec("UPDATE entity_enrichment SET enriched_at = ? WHERE matched = 0",
+	if _, err := rwDB(t, dbPath).Exec("UPDATE entity_enrichment SET enriched_at = ? WHERE matched = 0 AND owed = 0",
 		time.Now().Add(-age).UnixNano()); err != nil {
 		t.Fatalf("backdate misses: %v", err)
 	}
@@ -438,5 +439,84 @@ func TestRetryOnlyRunReportsAFullHeartbeat(t *testing.T) {
 	}
 	if len(seen) < 2 || seen[0] != 0.5 || seen[1] != 1 {
 		t.Errorf("heartbeat progress = %v, want 0.5 then 1 (the count covers both sweeps)", seen)
+	}
+}
+
+// TestDeferredTargetsCountAgainstTheLimit: a deferred target spent a real request, so it
+// takes its share of --limit like any walked target.
+func TestDeferredTargetsCountAgainstTheLimit(t *testing.T) {
+	ctx := context.Background()
+	st, _, lib := openStore(t)
+	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "One", "Artist A", "Album A")
+	seedTrack(t, st, lib.ID, "/lib/b.mp3", "ess-b", "Two", "Artist B", "Album B")
+
+	var asked []string
+	art := &enrich.Mock{ProviderName: "fanart", Caps: enrich.CapArtistArt,
+		EnrichFunc: func(_ context.Context, req enrich.Request) (*enrich.Candidate, error) {
+			asked = append(asked, req.Artist)
+			if req.Artist == "Artist A" {
+				return nil, errors.New("fanart timed out")
+			}
+			return &enrich.Candidate{Art: map[model.ArtRole]*model.ArtImage{model.ArtRoleFront: artImg(t, "front")}}, nil
+		}}
+	res, err := retryArtService(st, art, retryWindow).Run(ctx, enrich.RunOptions{Limit: 1}, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.ArtistArtEnriched != 1 || res.Deferred != 1 || len(asked) != 1 || asked[0] != "Artist A" {
+		t.Fatalf("walked %d / deferred %d / asked %v, want the one deferred artist and the cap reached",
+			res.ArtistArtEnriched, res.Deferred, asked)
+	}
+}
+
+// TestForcedRunFailureReopensTheTarget: a forced re-ask that hits an outage drops the
+// standing marker, matched or not, so the next ordinary run asks again instead of the
+// target waiting for the next force.
+func TestForcedRunFailureReopensTheTarget(t *testing.T) {
+	ctx := context.Background()
+	st, dbPath, lib := openStore(t)
+	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "One", "Artist A", "Album A")
+
+	down := false
+	var forced []bool
+	art := &enrich.Mock{ProviderName: "fanart", Caps: enrich.CapArtistArt,
+		EnrichFunc: func(_ context.Context, req enrich.Request) (*enrich.Candidate, error) {
+			forced = append(forced, req.Force)
+			if down {
+				return nil, errors.New("fanart is down")
+			}
+			return &enrich.Candidate{Art: map[model.ArtRole]*model.ArtImage{model.ArtRoleFront: artImg(t, "front")}}, nil
+		}}
+	svc := retryArtService(st, art, retryWindow)
+	marker := func() int {
+		return scalarInt(t, roDB(t, dbPath), `SELECT COUNT(*) FROM entity_enrichment WHERE entity_type = 'artist_art'`)
+	}
+	if _, err := svc.Run(ctx, enrich.RunOptions{}, nil); err != nil {
+		t.Fatalf("run 1: %v", err)
+	}
+	if marker() != 1 {
+		t.Fatal("run 1 left no marker")
+	}
+
+	down = true
+	res, err := svc.Run(ctx, enrich.RunOptions{Force: true}, nil)
+	if err != nil {
+		t.Fatalf("forced run: %v", err)
+	}
+	if res.Deferred != 1 || owedMarkers(t, dbPath, "artist_art") != 1 {
+		t.Fatalf("forced run deferred %d with %d owed markers, want the match replaced by an owed lookup",
+			res.Deferred, owedMarkers(t, dbPath, "artist_art"))
+	}
+
+	down = false
+	res, err = svc.Run(ctx, enrich.RunOptions{}, nil)
+	if err != nil {
+		t.Fatalf("run 3: %v", err)
+	}
+	if res.ArtistArtEnriched != 1 || len(forced) != 3 || forced[2] {
+		t.Fatalf("run 3 walked %d with asks %v, want one unforced ask", res.ArtistArtEnriched, forced)
+	}
+	if marker() != 1 {
+		t.Error("run 3 left no marker")
 	}
 }

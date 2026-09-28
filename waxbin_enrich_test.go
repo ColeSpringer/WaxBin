@@ -1060,3 +1060,190 @@ func TestEnrichmentLimitedWriteTagsWritesWhatItLookedUp(t *testing.T) {
 		t.Fatalf("unlimited run wrote %d files, want the one still owed", res.Result.TagsWritten)
 	}
 }
+
+// TestEnrichmentProviderListFacade: the option a settings screen drives. Each Enrich call
+// consults the list the hook hands back at that moment, the provenance names the provider
+// that answered, and a hook that leaves nothing to run refuses the pass.
+func TestEnrichmentProviderListFacade(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	writeFile(t, filepath.Join(root, "a.mp3"), testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
+		Title: "One", Artist: "Artist One", Album: "Demo", Audio: testaudio.AudioWithSeed(1)}))
+
+	artFrom := func(name string) *enrich.Mock {
+		return &enrich.Mock{ProviderName: name, Caps: enrich.CapArtistArt,
+			EnrichFunc: func(_ context.Context, req enrich.Request) (*enrich.Candidate, error) {
+				if req.Type != enrich.TargetArtist {
+					return nil, nil
+				}
+				return &enrich.Candidate{Art: map[model.ArtRole]*model.ArtImage{
+					model.ArtRoleFront: {Data: coverPNG(t), Format: "png", Width: 4, Height: 4},
+				}}, nil
+			}}
+	}
+	chosen := "deezer"
+	lib, err := waxbin.Open(ctx, waxbin.Options{
+		DBPath:              db,
+		Roots:               []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}},
+		EnrichmentProviders: []enrich.Provider{artFrom("deezer"), artFrom("fanart")},
+		EnrichmentProviderList: func(fixed []enrich.Provider) []enrich.Provider {
+			for _, p := range fixed {
+				if p.Name() == chosen {
+					return []enrich.Provider{p}
+				}
+			}
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("open library: %v", err)
+	}
+	t.Cleanup(func() { _ = lib.Close() })
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	frontProvider := func(artist string) string {
+		t.Helper()
+		prov, err := lib.ArtProvenance(ctx, model.EntityRef{Type: model.ArtArtist, PID: artistPIDByName(t, ctx, db, artist)}, model.ArtRoleFront)
+		if err != nil {
+			t.Fatalf("art provenance for %s: %v", artist, err)
+		}
+		return prov.Provider
+	}
+
+	if _, err := lib.Enrich(ctx, waxbin.EnrichOptions{}); err != nil {
+		t.Fatalf("enrich 1: %v", err)
+	}
+	if got := frontProvider("Artist One"); got != "deezer" {
+		t.Fatalf("Artist One front provider = %q, want deezer", got)
+	}
+
+	writeFile(t, filepath.Join(root, "b.mp3"), testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
+		Title: "Two", Artist: "Artist Two", Album: "Demo Two", Audio: testaudio.AudioWithSeed(2)}))
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("scan 2: %v", err)
+	}
+	chosen = "fanart"
+	if _, err := lib.Enrich(ctx, waxbin.EnrichOptions{}); err != nil {
+		t.Fatalf("enrich 2: %v", err)
+	}
+	if got := frontProvider("Artist Two"); got != "fanart" {
+		t.Fatalf("Artist Two front provider = %q, want fanart", got)
+	}
+
+	chosen = "none"
+	if _, err := lib.Enrich(ctx, waxbin.EnrichOptions{}); !waxerr.Is(err, waxerr.CodeUnsupported) {
+		t.Fatalf("enrich with an empty list = %v, want CodeUnsupported", err)
+	}
+	if got := lib.EnrichmentPhases(); len(got) != 0 {
+		t.Errorf("phases with an empty list = %v, want none", got)
+	}
+}
+
+// TestEnrichmentBuiltinsFacade: the built-ins an install registers are listed before any
+// pass runs, gated on the contact and the toggles the config resolves.
+// TestOpenDropsANilEnrichmentProvider: a nil slot in Options.EnrichmentProviders is an
+// embedder's slip the engine drops, not a panic out of Open.
+func TestOpenDropsANilEnrichmentProvider(t *testing.T) {
+	lib, err := waxbin.Open(context.Background(), waxbin.Options{
+		DBPath:              filepath.Join(t.TempDir(), "catalog.db"),
+		EnrichmentProviders: []enrich.Provider{nil},
+	})
+	if err != nil {
+		t.Fatalf("open library: %v", err)
+	}
+	t.Cleanup(func() { _ = lib.Close() })
+	if phases := lib.EnrichmentPhases(); len(phases) != 0 {
+		t.Errorf("phases with only a nil provider injected = %v, want none", phases)
+	}
+}
+
+func TestEnrichmentBuiltinsFacade(t *testing.T) {
+	ctx := context.Background()
+	names := func(ps []enrich.Provider) string {
+		out := make([]string, len(ps))
+		for i, p := range ps {
+			out[i] = p.Name()
+		}
+		return strings.Join(out, ",")
+	}
+	open := func(t *testing.T, ec config.EnrichConfig) *waxbin.Library {
+		t.Helper()
+		lib, err := waxbin.Open(ctx, waxbin.Options{
+			DBPath:     filepath.Join(t.TempDir(), "catalog.db"),
+			Enrichment: ec,
+		})
+		if err != nil {
+			t.Fatalf("open library: %v", err)
+		}
+		t.Cleanup(func() { _ = lib.Close() })
+		return lib
+	}
+
+	if got := names(open(t, config.EnrichConfig{Contact: "t@e.com"}).EnrichmentBuiltins()); got != "coverartarchive,musicbrainz,listenbrainz,lrclib" {
+		t.Errorf("default builtins = %q, want every built-in in registration order", got)
+	}
+	if got := names(open(t, enrichTestConfig("http://127.0.0.1:1")).EnrichmentBuiltins()); got != "musicbrainz" {
+		t.Errorf("builtins with the optional ones off = %q, want musicbrainz alone", got)
+	}
+	if got := names(open(t, config.EnrichConfig{}).EnrichmentBuiltins()); got != "" {
+		t.Errorf("builtins without a contact = %q, want none", got)
+	}
+}
+
+// TestEnrichmentPhasesFacade: the facade hands out the phase list the engine builds, so
+// an embedder's status screen shows what its own install runs rather than a copy of the
+// gating.
+func TestEnrichmentPhasesFacade(t *testing.T) {
+	ctx := context.Background()
+	open := func(t *testing.T, opts waxbin.Options) *waxbin.Library {
+		t.Helper()
+		opts.DBPath = filepath.Join(t.TempDir(), "catalog.db")
+		lib, err := waxbin.Open(ctx, opts)
+		if err != nil {
+			t.Fatalf("open library: %v", err)
+		}
+		t.Cleanup(func() { _ = lib.Close() })
+		return lib
+	}
+	keys := func(ps []model.EnrichPhase) string {
+		out := make([]string, len(ps))
+		for i, p := range ps {
+			out[i] = string(p)
+		}
+		return strings.Join(out, ",")
+	}
+
+	art := &enrich.Mock{ProviderName: "deezer", Caps: enrich.CapArtistArt}
+	contactless := open(t, waxbin.Options{EnrichmentProviders: []enrich.Provider{art}})
+	if got := keys(contactless.EnrichmentPhases()); got != "artist-art" {
+		t.Errorf("contact-less phases = %q, want artist-art", got)
+	}
+	spine := open(t, waxbin.Options{Enrichment: enrichTestConfig("http://127.0.0.1:1")})
+	if got := keys(spine.EnrichmentPhases()); got != "artist,release-group,album-release,book" {
+		t.Errorf("identity-only phases = %q, want the identity phases in run order", got)
+	}
+}
+
+// TestDoctorReportsEnrichmentPhases: doctor carries the phase list beside the enabled
+// flag, so the report says what this build runs.
+func TestDoctorReportsEnrichmentPhases(t *testing.T) {
+	ctx := context.Background()
+	lyrics := &enrich.Mock{ProviderName: "lyrics", Caps: enrich.CapLyrics}
+	lib, err := waxbin.Open(ctx, waxbin.Options{
+		DBPath:              filepath.Join(t.TempDir(), "catalog.db"),
+		EnrichmentProviders: []enrich.Provider{lyrics},
+	})
+	if err != nil {
+		t.Fatalf("open library: %v", err)
+	}
+	t.Cleanup(func() { _ = lib.Close() })
+	rep, err := lib.Doctor(ctx)
+	if err != nil {
+		t.Fatalf("doctor: %v", err)
+	}
+	if !rep.EnrichmentEnabled || len(rep.EnrichmentPhases) != 1 || rep.EnrichmentPhases[0] != model.EnrichPhaseLyrics {
+		t.Errorf("doctor enrichment = %v %v, want enabled with [lyrics]", rep.EnrichmentEnabled, rep.EnrichmentPhases)
+	}
+}

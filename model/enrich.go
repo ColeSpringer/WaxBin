@@ -38,13 +38,19 @@ const (
 	// never a background). Registering a provider that fills those is what a phase-scoped
 	// force is for.
 	SweepRetry
-	// SweepDue is the union of the two, which is what one run's count has to report:
-	// everything a full pass will walk, whether it arrives on the fresh sweep or the
-	// retry one.
+	// SweepDue is the union of the fresh, owed and retry sweeps, which is what one run's
+	// count has to report: everything a full pass will walk, whichever sweep it arrives on.
 	SweepDue
 	// SweepAll selects every target, marker or none. It is the forced run, a scoped
 	// run, which implies force, and the phases a phase-scoped force names.
 	SweepAll
+	// SweepDeferred selects targets whose marker records a lookup as owed: a provider
+	// failed on it, or one it needed was out of the pass, so nothing was settled. A run
+	// walks them after every phase's fresh sweep and asks them the way a fresh target is
+	// asked, so a target a provider keeps failing on can never hold up the ones nothing
+	// has asked about yet. Only markers owed since before DeferredBefore are selected, so
+	// a lookup the run itself deferred waits for the next pass.
+	SweepDeferred
 )
 
 // EnrichPhase names one phase of the enrichment pass, in the run's own order. The keys
@@ -116,10 +122,12 @@ func (p EnrichPhase) Label() string { return strings.ReplaceAll(string(p), "-", 
 // EnrichQueueOptions selects what one queue walk (or the count that mirrors it) should
 // return. MissCutoff is a unix-ns instant: a no-match marker stamped at or before it has
 // expired and is walked again. Zero means no miss ever expires, so SweepRetry selects
-// nothing and SweepDue equals SweepFresh.
+// nothing and SweepDue is the fresh and owed targets alone. DeferredBefore is the
+// instant SweepDeferred measures against, which the store hands the run at its start.
 type EnrichQueueOptions struct {
-	Sweep      EnrichSweep
-	MissCutoff int64
+	Sweep          EnrichSweep
+	MissCutoff     int64
+	DeferredBefore int64
 }
 
 // EnrichScope narrows one enrichment pass to explicit targets, per phase. The id
@@ -187,13 +195,17 @@ type EnrichTarget struct {
 	Country          string
 	ReleaseGroupMBID string
 	// HasArt reports whether the target already holds a front image, and the walks that
-	// set it are the artist identity queue, the artist-art backfill, and the album-art
-	// backfill. What counts as held differs by rung: an album consumes the art fallback
+	// set it are the artist and release-group identity queues, the artist-art backfill,
+	// and the album-art backfill. What counts as held differs by rung: an album consumes the art fallback
 	// chain, so a member track's embedded cover answers its front, while an artist is a
 	// source in that chain and only its own row counts. A pass asks for a front only
 	// when this is false, so a library whose rips carry embedded art spends no
 	// rate-limited requests on covers the store would refuse to fill anyway.
 	HasArt bool
+	// NeedsGenres reports whether a release group has a member track the genre fill
+	// would reach: one with no genre and no genre lock. The release-group queue sets it,
+	// and only such a group is owed its genre rider when a genre provider fails.
+	NeedsGenres bool
 	// ArtLocked reports whether the entity's whole "art" lock stands, the one that gates
 	// the front cover and every auxiliary role alike. The artist identity queue and the
 	// release-group queue set it for the same reason: the store refuses the write, so
@@ -231,6 +243,14 @@ type ArtistEnrichment struct {
 	// Archive is release-group keyed, so these fill only for an injected provider.
 	Art    *ArtImage
 	AuxArt map[ArtRole]*ArtImage
+	// Incomplete says a provider asked for the artist's front failed with the front still
+	// open, and Unasked that a provider serving it was out of the pass. Either way
+	// everything MusicBrainz resolved is applied and the lookup is recorded as owed, so a
+	// later pass re-walks the entity off the MusicBrainz cache and asks the provider
+	// again. That ask settles it even when it fails; a pass that still cannot ask the
+	// provider leaves it owed.
+	Incomplete bool
+	Unasked    bool
 }
 
 // ArtistRelationInput is one directed artist relation to persist. Inbound reverses
@@ -264,6 +284,11 @@ type ReleaseGroupEnrichment struct {
 	// skipped entirely under the entity's art lock.
 	Art    *ArtImage
 	AuxArt map[ArtRole]*ArtImage
+	// Incomplete says a provider asked for the group's front or genres failed with the
+	// front still open or no genre found, and Unasked that a provider serving one of them
+	// was out of the pass. They record the lookup as ArtistEnrichment's do.
+	Incomplete bool
+	Unasked    bool
 }
 
 // ReleaseGroupAuxArt is the auxiliary-role backfill for one release group: the
@@ -284,27 +309,33 @@ type ReleaseGroupAuxArt struct {
 	Matched        bool
 	Provider       string
 	AuxArt         map[ArtRole]*ArtImage
+	// Incomplete says a provider the walk called for this target failed with a slot it
+	// could have filled still open. The store applies what was gathered and records the
+	// lookup as owed rather than answered, so a later pass asks again after its new
+	// targets. That ask settles it as it stands even if it fails again, so a target a
+	// provider keeps failing on costs one more request, not one per pass. A definitive
+	// answer, a match or a no-match every consulted provider agreed on, writes the marker
+	// as before.
+	Incomplete bool
+	// Unasked says a provider serving an open slot was out of the pass: it had failed too
+	// many times in a row to be consulted again. What was gathered is applied and the
+	// marker records a miss whatever else answered, so the target falls due at the retry
+	// window rather than resting behind a durable match. Only the engine's breaker sets
+	// it.
+	Unasked bool
 }
 
-// EnrichCountOptions selects the optional phases a heartbeat denominator should count.
-// Each flag mirrors whether the run actually runs that phase (a toggle for the album
-// release match, a registered capability for the rest), because a denominator counting
-// work the run will not do reports a ratio that never reaches one.
+// EnrichCountOptions selects what a heartbeat denominator counts: exactly the phases the
+// run built, so the denominator cannot drift from the walk. A phase the list leaves out
+// contributes nothing, which is what a phase its providers gate off, or one a scoped run
+// skips, needs.
 type EnrichCountOptions struct {
-	// Identity covers the MusicBrainz-backed phases (artist, release group, book).
-	// They run only with a contact configured, so a contact-less run counts none of
-	// them; Albums is the release match, which needs the toggle as well.
-	Identity  bool
-	Albums    bool // albums needing a release match
-	AuxArt    bool // release groups needing an auxiliary-art backfill
-	ArtistArt bool // artists needing an art backfill
-	// AlbumArt counts albums needing an art backfill, per askable slot. The zero value
-	// counts none, mirroring a run whose providers gate the phase off entirely.
-	AlbumArt    AlbumArtSlots
-	Lyrics      bool // tracks needing a lyrics lookup
-	TrackFields bool // tracks needing a scalar-fields lookup
-	BookFields  bool // books needing a scalar-fields lookup
-	AlbumFields bool // albums needing a scalar-fields lookup
+	// Phases are the keys of the run's built phase list, scoped as the run scoped it.
+	Phases []EnrichPhase
+	// AlbumArt counts albums needing an art backfill, per askable slot, when the album-art
+	// phase is in Phases. The zero value counts none, mirroring a run whose providers gate
+	// the phase off entirely.
+	AlbumArt AlbumArtSlots
 	// Forced names the phases a phase-scoped force walks under SweepAll, so their count
 	// takes every target while the rest are counted under the run's own sweep.
 	Forced []EnrichPhase
@@ -332,6 +363,9 @@ type ArtistArtBackfill struct {
 	Provider string
 	Art      *ArtImage
 	AuxArt   map[ArtRole]*ArtImage
+	// Incomplete and Unasked settle the marker as they do on ReleaseGroupAuxArt.
+	Incomplete bool
+	Unasked    bool
 }
 
 // LyricsEnrichment is the resolved lyrics for one recording (track). Lyrics are
@@ -343,6 +377,9 @@ type LyricsEnrichment struct {
 	Matched  bool
 	Lyrics   *Lyrics
 	Provider string // the provider that supplied the lyrics ("lrclib", ...)
+	// Incomplete and Unasked settle the marker as they do on ReleaseGroupAuxArt.
+	Incomplete bool
+	Unasked    bool
 }
 
 // AlbumReleaseMatch is the release one album was matched to, applied fill-when-empty
@@ -363,6 +400,11 @@ type AlbumReleaseMatch struct {
 	MBID     string
 	Reason   string
 	Provider string
+	// Incomplete says no tier reached a verdict for a transient reason, such as an
+	// edition browse that came back short. Nothing is filled and the lookup is recorded
+	// as owed, replacing a standing marker, so the album is asked again on a later pass
+	// rather than waiting out the window.
+	Incomplete bool
 }
 
 // AlbumArtBackfill is the art one album-art backfill pass gathered, the album twin of
@@ -394,6 +436,9 @@ type AlbumArtBackfill struct {
 	// and a durable match would never ask again.
 	FrontFromGroup bool
 	GroupFrontHash string
+	// Incomplete and Unasked settle the marker as they do on ReleaseGroupAuxArt.
+	Incomplete bool
+	Unasked    bool
 }
 
 // AlbumArtSlots names which album art vacancies a walk may ask about. Front needs a
@@ -440,6 +485,9 @@ type ItemFieldsEnrichment struct {
 	Provider  string
 	Providers map[string]string
 	Fields    map[string]string
+	// Incomplete and Unasked settle the marker as they do on ReleaseGroupAuxArt.
+	Incomplete bool
+	Unasked    bool
 }
 
 // AlbumFieldsEnrichment is the scalar fields a provider supplied for one album, the
@@ -456,6 +504,9 @@ type AlbumFieldsEnrichment struct {
 	Provider  string
 	Providers map[string]string
 	Fields    map[string]string
+	// Incomplete and Unasked settle the marker as they do on ReleaseGroupAuxArt.
+	Incomplete bool
+	Unasked    bool
 }
 
 // EnrichFillFields is the set of scalar fields an item-rung enrichment walk may fill for

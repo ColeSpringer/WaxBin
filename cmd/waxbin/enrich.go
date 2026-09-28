@@ -55,7 +55,12 @@ func newEnrichCmd(g *globals) *cobra.Command {
 			"retries every historical miss, and they all fall due together every window; " +
 			"lyrics misses are usually the largest population, at roughly half a second each " +
 			"at LRCLIB pacing, so a library with thousands of tracks LRCLIB lacks spends that " +
-			"long per window unless --limit spreads it.\n\n" +
+			"long per window unless --limit spreads it. A lookup a provider failed is not a " +
+			"miss: it is reported as deferred and asked again on the next pass, after that " +
+			"pass's new targets, and that ask settles it even if it fails again. A provider " +
+			"failing three times in a row is left out for the rest of the run with the slots it " +
+			"serves recorded as misses, a target only it could answer is left for the next run, " +
+			"and a phase with no provider left stalls and is reported.\n\n" +
 			"--item or --entity (mutually exclusive) scope the pass to one item's or entity's " +
 			"targets: a track's artist, album artist, release group, album (its release " +
 			"match, fields and art) and lyrics, a book's contributors and identifiers, or " +
@@ -153,12 +158,20 @@ func newEnrichCmd(g *globals) *cobra.Command {
 
 // enrichPhaseList renders the phase vocabulary for the flag help and its refusals.
 func enrichPhaseList() string {
-	keys := model.EnrichPhases()
-	names := make([]string, len(keys))
-	for i, k := range keys {
-		names[i] = string(k)
+	return strings.Join(phaseStrings(model.EnrichPhases()), "|")
+}
+
+// phaseKeys renders phases as their keys, comma-separated.
+func phaseKeys(phases []model.EnrichPhase) string {
+	return strings.Join(phaseStrings(phases), ", ")
+}
+
+func phaseStrings(phases []model.EnrichPhase) []string {
+	out := make([]string, len(phases))
+	for i, p := range phases {
+		out[i] = string(p)
 	}
-	return strings.Join(names, "|")
+	return out
 }
 
 // renderEnrichResult prints an enrichment pass's totals, shared by the direct run
@@ -200,6 +213,16 @@ func renderEnrichResult(cmd *cobra.Command, g *globals, res *waxbin.EnrichResult
 	// walked entities it already knew about says which ones and why.
 	if r.Retried > 0 {
 		fmt.Fprintf(w, "retried:        %d earlier misses\n", r.Retried)
+	}
+	// Also a share of the phase lines: the targets whose lookup failed, a provider's or
+	// the release match's own browse, which are owed and asked again on later passes.
+	if r.Deferred > 0 {
+		fmt.Fprintf(w, "deferred:       %d left queued for the next pass\n", r.Deferred)
+	}
+	// A stalled phase stopped short of its targets, so the lines above undercount what
+	// is still owed there.
+	if len(r.Stalled) > 0 {
+		fmt.Fprintf(w, "stalled:        %s (every provider serving them was out of this pass)\n", phaseKeys(r.Stalled))
 	}
 	if r.ArtReused > 0 {
 		fmt.Fprintf(w, "cover art:      %d fetched (%d reused from the group cover)\n", r.ArtFetched, r.ArtReused)

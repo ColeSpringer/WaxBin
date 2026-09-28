@@ -24,7 +24,7 @@ type listenBrainz struct {
 	baseURL string // e.g. https://api.listenbrainz.org
 }
 
-func (l *listenBrainz) Name() string             { return providerListenBrainz }
+func (l *listenBrainz) Name() string             { return ProviderListenBrainz }
 func (l *listenBrainz) Capabilities() Capability { return CapGenres }
 
 // lbMetadata is the subset of the ListenBrainz metadata response we consume: a map

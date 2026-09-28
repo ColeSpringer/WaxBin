@@ -43,6 +43,9 @@ func newDoctorCmd(g *globals) *cobra.Command {
 			fmt.Fprintf(w, "podcasts:       %d\n", rep.PodcastCount)
 			fmt.Fprintf(w, "enrichment:     %s (%d entities, %d matched)\n",
 				enabledLabel(rep.EnrichmentEnabled), rep.EnrichedEntities, rep.EnrichedMatched)
+			if len(rep.EnrichmentPhases) > 0 {
+				fmt.Fprintf(w, "                phases: %s\n", phaseKeys(rep.EnrichmentPhases))
+			}
 			fmt.Fprintf(w, "fpcalc:         %s\n", presentLabel(rep.Fpcalc))
 			fmt.Fprintln(w, "analyze decode coverage:")
 			tw := tabwriter.NewWriter(w, 0, 2, 2, ' ', 0)

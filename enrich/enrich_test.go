@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"image"
 	"image/color"
@@ -11,6 +12,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -164,6 +167,19 @@ func scalarStr(t *testing.T, db *sql.DB, q string, args ...any) string {
 		t.Fatalf("query %q: %v", q, err)
 	}
 	return s
+}
+
+// owedMarkers counts one marker type's rows recording a lookup as owed, the state a
+// failed lookup leaves (owed = 1) until a later pass settles it.
+func owedMarkers(t *testing.T, dbPath, typ string) int {
+	t.Helper()
+	return scalarInt(t, roDB(t, dbPath), "SELECT COUNT(*) FROM entity_enrichment WHERE entity_type = ? AND owed = 1", typ)
+}
+
+// settledMarkers counts one marker type's rows recording an answer, a match or a miss.
+func settledMarkers(t *testing.T, dbPath, typ string) int {
+	t.Helper()
+	return scalarInt(t, roDB(t, dbPath), "SELECT COUNT(*) FROM entity_enrichment WHERE entity_type = ? AND owed = 0", typ)
 }
 
 func scalarInt(t *testing.T, db *sql.DB, q string, args ...any) int {
@@ -719,5 +735,546 @@ func TestLockedCoverIsNotFetched(t *testing.T) {
 	}
 	if *caaHits != 0 {
 		t.Errorf("CAA fetched %d times for a locked cover, want 0", *caaHits)
+	}
+}
+
+// flakyGroupFront serves the one group's front after failing the first fails fetches,
+// counting every fetch, and 404s every other path.
+func flakyGroupFront(t *testing.T, art []byte, fails int) (*httptest.Server, *int) {
+	t.Helper()
+	fetches := new(int)
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/release-group/wywh-mbid/front" {
+			http.NotFound(w, r)
+			return
+		}
+		*fetches++
+		if *fetches <= fails {
+			http.Error(w, "busy", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write(art)
+	}))
+	t.Cleanup(s.Close)
+	return s, fetches
+}
+
+// TestGroupFrontFailureLeavesTheGroupQueued: MusicBrainz answered, so the identity lands,
+// but the archive failed on the group's front, and no later phase ever asks about a group
+// front. The group is owed the lookup, so the next pass re-walks it off the MusicBrainz
+// cache, and the entity delta rides on what actually landed: one for the identity, one
+// when the front arrives.
+func TestGroupFrontFailureLeavesTheGroupQueued(t *testing.T) {
+	ctx := context.Background()
+	st, dbPath, lib := openStore(t)
+	item := seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
+
+	mb := newMBMock(t)
+	caa, fetches := flakyGroupFront(t, pngBytes(t), 1)
+	svc := newService(st, mb.server.URL, caa.URL)
+	db := roDB(t, dbPath)
+	scanned := scalarInt(t, db, "SELECT COUNT(*) FROM change_log WHERE entity_type='release_group'")
+	groupDeltas := func() int {
+		return scalarInt(t, db, "SELECT COUNT(*) FROM change_log WHERE entity_type='release_group'") - scanned
+	}
+
+	first, err := svc.Run(ctx, enrich.RunOptions{}, nil)
+	if err != nil {
+		t.Fatalf("run 1: %v", err)
+	}
+	if first.ReleaseGroupsMatched != 1 || first.Deferred != 1 {
+		t.Fatalf("run 1 = %d matched / %d deferred, want 1 and 1", first.ReleaseGroupsMatched, first.Deferred)
+	}
+	if m := scalarStr(t, db, "SELECT COALESCE(mbid,'') FROM release_group"); m != "wywh-mbid" {
+		t.Errorf("group mbid = %q, want the identity landed despite the art failure", m)
+	}
+	if g := scalarStr(t, db, `SELECT t.genre FROM track t JOIN playable_item pi ON pi.id = t.item_id WHERE pi.pid = ?`, string(item)); g == "" {
+		t.Error("genres did not land beside the failed front")
+	}
+	if n := settledMarkers(t, dbPath, "release_group"); n != 0 || owedMarkers(t, dbPath, "release_group") != 1 {
+		t.Fatalf("group markers = %d settled, want the lookup owed while the front is", n)
+	}
+	if n := groupDeltas(); n != 1 {
+		t.Fatalf("group deltas after run 1 = %d, want 1 for the mbid and type", n)
+	}
+	requests := mb.requests
+
+	second, err := svc.Run(ctx, enrich.RunOptions{}, nil)
+	if err != nil {
+		t.Fatalf("run 2: %v", err)
+	}
+	if second.ReleaseGroupsEnriched != 1 || second.Deferred != 0 || second.ArtFetched != 1 || mb.requests != requests {
+		t.Fatalf("run 2 = %+v with %d new MusicBrainz requests, want the front fetched off a cached re-walk", second, mb.requests-requests)
+	}
+	if *fetches != 2 {
+		t.Errorf("front fetches = %d, want 2", *fetches)
+	}
+	if n := settledMarkers(t, dbPath, "release_group"); n != 1 {
+		t.Errorf("group markers = %d, want the durable match once the front landed", n)
+	}
+	if n := groupDeltas(); n != 2 {
+		t.Errorf("group deltas after the front landed = %d, want 2", n)
+	}
+}
+
+// TestAGroupFrontFailingTwiceSettlesTheGroup: the pass after a front failure asks the
+// archive once more, and that ask settles the group whatever it gets, so a front the
+// archive keeps failing on costs one more request rather than one per pass. The re-walk
+// changed nothing, so it sends no delta.
+func TestAGroupFrontFailingTwiceSettlesTheGroup(t *testing.T) {
+	ctx := context.Background()
+	st, dbPath, lib := openStore(t)
+	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
+
+	mb := newMBMock(t)
+	caa, fetches := flakyGroupFront(t, pngBytes(t), 2)
+	svc := newService(st, mb.server.URL, caa.URL)
+	db := roDB(t, dbPath)
+	scanned := scalarInt(t, db, "SELECT COUNT(*) FROM change_log WHERE entity_type='release_group'")
+	if _, err := svc.Run(ctx, enrich.RunOptions{}, nil); err != nil {
+		t.Fatalf("run 1: %v", err)
+	}
+	second, err := svc.Run(ctx, enrich.RunOptions{}, nil)
+	if err != nil {
+		t.Fatalf("run 2: %v", err)
+	}
+	if second.ReleaseGroupsEnriched != 1 || second.Deferred != 0 || *fetches != 2 {
+		t.Fatalf("run 2 = %d walked / %d deferred after %d fetches, want the second failure to settle the group",
+			second.ReleaseGroupsEnriched, second.Deferred, *fetches)
+	}
+	if owed, settled := owedMarkers(t, dbPath, "release_group"), settledMarkers(t, dbPath, "release_group"); owed != 0 || settled != 1 {
+		t.Errorf("group markers = %d owed / %d settled, want the match settled", owed, settled)
+	}
+	if n := scalarInt(t, db, "SELECT COUNT(*) FROM change_log WHERE entity_type='release_group'") - scanned; n != 1 {
+		t.Errorf("group deltas = %d, want only the identity's, since the re-walk changed nothing", n)
+	}
+	third, err := svc.Run(ctx, enrich.RunOptions{}, nil)
+	if err != nil {
+		t.Fatalf("run 3: %v", err)
+	}
+	if third.ReleaseGroupsEnriched != 0 || *fetches != 2 {
+		t.Errorf("run 3 walked %d groups after %d fetches, want the settled group left alone", third.ReleaseGroupsEnriched, *fetches)
+	}
+}
+
+// manyGroupsMB answers a release-group search for any title with one group of that title
+// by "Band", and the lookup of that group, so a test can walk several groups. Artist
+// searches match nothing.
+func manyGroupsMB(t *testing.T) *mbMock {
+	t.Helper()
+	m := &mbMock{}
+	titleOf := map[string]string{}
+	title := regexp.MustCompile(`releasegroup:"([^"]*)"`)
+	m.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		m.requests++
+		w.Header().Set("Content-Type", "application/json")
+		q := r.URL.Query().Get("query")
+		credit := `"artist-credit":[{"artist":{"id":"band-mbid","name":"Band"}}]`
+		switch {
+		case r.URL.Path == "/artist" && q != "":
+			io(w, `{"artists":[]}`)
+		case r.URL.Path == "/release-group" && q != "":
+			mt := title.FindStringSubmatch(q)
+			if mt == nil {
+				io(w, `{"release-groups":[]}`)
+				return
+			}
+			id := "rg-" + strings.ReplaceAll(strings.ToLower(mt[1]), " ", "-")
+			titleOf[id] = mt[1]
+			io(w, `{"release-groups":[{"id":"`+id+`","title":"`+mt[1]+`","primary-type":"Album","score":100,`+credit+`}]}`)
+		case strings.HasPrefix(r.URL.Path, "/release-group/") && titleOf[strings.TrimPrefix(r.URL.Path, "/release-group/")] != "":
+			id := strings.TrimPrefix(r.URL.Path, "/release-group/")
+			io(w, `{"id":"`+id+`","title":"`+titleOf[id]+`","primary-type":"Album","secondary-types":[],`+credit+`,"genres":[]}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(m.server.Close)
+	return m
+}
+
+// TestATrippedArchiveDefersTheGroupsAfterIt: the identity rungs never stall, since the
+// spine has to land, but a matched identity marker is durable and nothing later asks
+// about a group front. So a group walked while the archive is out of the pass is
+// deferred like the ones it failed on, and the next pass re-walks all of them off the
+// MusicBrainz cache and fetches their fronts.
+func TestATrippedArchiveDefersTheGroupsAfterIt(t *testing.T) {
+	ctx := context.Background()
+	st, dbPath, lib := openStore(t)
+	for i := 1; i <= 5; i++ {
+		k := strconv.Itoa(i)
+		seedTrack(t, st, lib.ID, "/lib/"+k+".mp3", "ess-"+k, "Song "+k, "Band", "Album "+k)
+	}
+	mb := manyGroupsMB(t)
+	down := 0
+	dead := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/release-group/") {
+			down++
+			http.Error(w, "busy", http.StatusInternalServerError)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(dead.Close)
+
+	res, err := newService(st, mb.server.URL, dead.URL).Run(ctx, enrich.RunOptions{}, nil)
+	if err != nil {
+		t.Fatalf("run 1: %v", err)
+	}
+	if down != 3 {
+		t.Errorf("archive fetches = %d, want 3 before it dropped out", down)
+	}
+	if res.ReleaseGroupsMatched != 5 || res.Deferred != 5 || len(res.Stalled) != 0 {
+		t.Fatalf("run 1 = %d matched / %d deferred / stalled %v, want 5, 5 and none",
+			res.ReleaseGroupsMatched, res.Deferred, res.Stalled)
+	}
+	db := roDB(t, dbPath)
+	if n := scalarInt(t, db, "SELECT COUNT(*) FROM release_group WHERE mbid LIKE 'rg-%'"); n != 5 {
+		t.Errorf("groups with an mbid = %d, want 5", n)
+	}
+	if owedMarkers(t, dbPath, "release_group") != 5 || settledMarkers(t, dbPath, "release_group") != 0 {
+		t.Errorf("group markers = %d owed / %d settled, want all five owed",
+			owedMarkers(t, dbPath, "release_group"), settledMarkers(t, dbPath, "release_group"))
+	}
+
+	requests := mb.requests
+	healthy, fetched := 0, pngBytes(t)
+	archive := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/release-group/") {
+			healthy++
+			w.Header().Set("Content-Type", "image/png")
+			_, _ = w.Write(fetched)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(archive.Close)
+	res, err = newService(st, mb.server.URL, archive.URL).Run(ctx, enrich.RunOptions{}, nil)
+	if err != nil {
+		t.Fatalf("run 2: %v", err)
+	}
+	if healthy != 5 || res.ArtFetched != 5 || mb.requests != requests {
+		t.Fatalf("run 2 fetched %d fronts (%d counted) with %d new MusicBrainz requests, want 5, 5 and none",
+			healthy, res.ArtFetched, mb.requests-requests)
+	}
+	if n := scalarInt(t, db, "SELECT COUNT(*) FROM entity_enrichment WHERE entity_type='release_group' AND matched=1"); n != 5 {
+		t.Errorf("matched group markers = %d, want 5", n)
+	}
+}
+
+// TestAGroupLeftUnaskedStaysOwed: the pass after an archive outage asks the owed groups
+// again while the archive is still failing. The first three fail again, which settles
+// them and trips the archive; the two walked after that were never asked, so they stay
+// owed, and the pass after fetches their fronts.
+func TestAGroupLeftUnaskedStaysOwed(t *testing.T) {
+	ctx := context.Background()
+	st, dbPath, lib := openStore(t)
+	for i := 1; i <= 5; i++ {
+		k := strconv.Itoa(i)
+		seedTrack(t, st, lib.ID, "/lib/"+k+".mp3", "ess-"+k, "Song "+k, "Band", "Album "+k)
+	}
+	mb := manyGroupsMB(t)
+	healthy, fronts, art := false, 0, pngBytes(t)
+	archive := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasPrefix(r.URL.Path, "/release-group/") {
+			http.NotFound(w, r)
+			return
+		}
+		if !healthy {
+			http.Error(w, "busy", http.StatusInternalServerError)
+			return
+		}
+		fronts++
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write(art)
+	}))
+	t.Cleanup(archive.Close)
+	svc := newService(st, mb.server.URL, archive.URL)
+	if _, err := svc.Run(ctx, enrich.RunOptions{}, nil); err != nil {
+		t.Fatalf("run 1: %v", err)
+	}
+	if owed := owedMarkers(t, dbPath, "release_group"); owed != 5 {
+		t.Fatalf("owed groups after the outage = %d, want 5", owed)
+	}
+
+	res, err := svc.Run(ctx, enrich.RunOptions{}, nil)
+	if err != nil {
+		t.Fatalf("run 2: %v", err)
+	}
+	if owed, settled := owedMarkers(t, dbPath, "release_group"), settledMarkers(t, dbPath, "release_group"); owed != 2 || settled != 3 || res.Deferred != 2 {
+		t.Fatalf("run 2 = %d owed / %d settled / %d deferred, want the three asked settled and the two unasked still owed",
+			owed, settled, res.Deferred)
+	}
+
+	healthy = true
+	if _, err := svc.Run(ctx, enrich.RunOptions{}, nil); err != nil {
+		t.Fatalf("run 3: %v", err)
+	}
+	if fronts != 2 || owedMarkers(t, dbPath, "release_group") != 0 {
+		t.Errorf("run 3 fetched %d fronts with %d still owed, want the two unasked groups' fronts", fronts, owedMarkers(t, dbPath, "release_group"))
+	}
+}
+
+// TestAGenreRiderLeftUnaskedStaysOwed is the genre twin of TestAGroupLeftUnaskedStaysOwed:
+// MusicBrainz has no genres for these groups, so the injected genre provider is the only
+// source, and the groups it was never asked about stay owed until it answers.
+func TestAGenreRiderLeftUnaskedStaysOwed(t *testing.T) {
+	ctx := context.Background()
+	st, dbPath, lib := openStore(t)
+	for i := 1; i <= 5; i++ {
+		k := strconv.Itoa(i)
+		seedTrack(t, st, lib.ID, "/lib/"+k+".mp3", "ess-"+k, "Song "+k, "Band", "Album "+k)
+	}
+	mb := manyGroupsMB(t)
+	healthy := false
+	genres := &enrich.Mock{ProviderName: "tags", Caps: enrich.CapGenres,
+		EnrichFunc: func(context.Context, enrich.Request) (*enrich.Candidate, error) {
+			if !healthy {
+				return nil, errors.New("tags is down")
+			}
+			return &enrich.Candidate{Genres: []string{"Rock"}}, nil
+		}}
+	svc := enrich.New(st, enrich.Config{
+		Contact: "test@example.com", MinRequestInterval: time.Millisecond, MusicBrainzBaseURL: mb.server.URL,
+		Providers: []enrich.Provider{genres},
+	}, nil)
+	for run := 1; run <= 2; run++ {
+		if _, err := svc.Run(ctx, enrich.RunOptions{}, nil); err != nil {
+			t.Fatalf("run %d: %v", run, err)
+		}
+	}
+	if owed, settled := owedMarkers(t, dbPath, "release_group"), settledMarkers(t, dbPath, "release_group"); owed != 2 || settled != 3 {
+		t.Fatalf("after run 2: %d owed / %d settled, want the three asked twice settled and the two unasked still owed", owed, settled)
+	}
+	healthy = true
+	if _, err := svc.Run(ctx, enrich.RunOptions{}, nil); err != nil {
+		t.Fatalf("run 3: %v", err)
+	}
+	if n := scalarInt(t, roDB(t, dbPath), "SELECT COUNT(*) FROM track WHERE genre = 'Rock'"); n != 2 || owedMarkers(t, dbPath, "release_group") != 0 {
+		t.Errorf("run 3 filled %d tracks with %d groups still owed, want the two unasked groups' genres", n, owedMarkers(t, dbPath, "release_group"))
+	}
+}
+
+// TestAGroupWhoseTracksHaveGenresIsNotOwedThem: the genre fill reaches only tracks with no
+// genre, so when every track of a group already carries one, a failed genre provider
+// leaves nothing a later pass could add, and the group settles.
+func TestAGroupWhoseTracksHaveGenresIsNotOwedThem(t *testing.T) {
+	ctx := context.Background()
+	st, dbPath, lib := openStore(t)
+	seedTrackWith(t, st, lib.ID, "/lib/1.mp3", "ess-1", "Song 1",
+		model.Track{Artist: "Band", AlbumArtist: "Band", Album: "Album 1", TrackNo: 1, Genre: "Jazz", Genres: []string{"Jazz"}})
+	mb := manyGroupsMB(t)
+	genres := &enrich.Mock{ProviderName: "tags", Caps: enrich.CapGenres,
+		EnrichFunc: func(context.Context, enrich.Request) (*enrich.Candidate, error) {
+			return nil, errors.New("tags is down")
+		}}
+	res, err := enrich.New(st, enrich.Config{
+		Contact: "test@example.com", MinRequestInterval: time.Millisecond, MusicBrainzBaseURL: mb.server.URL,
+		Providers: []enrich.Provider{genres},
+	}, nil).Run(ctx, enrich.RunOptions{}, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.ReleaseGroupsMatched != 1 || res.Deferred != 0 {
+		t.Fatalf("run = %d matched / %d deferred, want the group settled", res.ReleaseGroupsMatched, res.Deferred)
+	}
+	if owed, settled := owedMarkers(t, dbPath, "release_group"), settledMarkers(t, dbPath, "release_group"); owed != 0 || settled != 1 {
+		t.Errorf("group markers = %d owed / %d settled, want one settled match", owed, settled)
+	}
+}
+
+// TestAnArtistFrontLeftUnaskedStaysOwed is the artist twin of
+// TestAGroupLeftUnaskedStaysOwed, with an injected cover provider serving the artist rung.
+func TestAnArtistFrontLeftUnaskedStaysOwed(t *testing.T) {
+	ctx := context.Background()
+	st, dbPath, lib := openStore(t)
+	for i := 1; i <= 5; i++ {
+		k := strconv.Itoa(i)
+		seedTrack(t, st, lib.ID, "/lib/"+k+".mp3", "ess-"+k, "Song "+k, "Artist "+k, "Album "+k)
+	}
+	mb := manyNamesMB(t)
+	healthy := false
+	portraits := &enrich.Mock{ProviderName: "portraits", Caps: enrich.CapCover,
+		CapsAt: map[enrich.TargetType]enrich.Capability{enrich.TargetArtist: enrich.CapCover},
+		EnrichFunc: func(_ context.Context, req enrich.Request) (*enrich.Candidate, error) {
+			if !healthy {
+				return nil, errors.New("portraits is down")
+			}
+			return &enrich.Candidate{Cover: artImg(t, "portrait-"+req.Artist)}, nil
+		}}
+	svc := enrich.New(st, enrich.Config{
+		Contact: "test@example.com", MinRequestInterval: time.Millisecond, MusicBrainzBaseURL: mb.server.URL,
+		Providers: []enrich.Provider{portraits},
+	}, nil)
+	for run := 1; run <= 2; run++ {
+		if _, err := svc.Run(ctx, enrich.RunOptions{}, nil); err != nil {
+			t.Fatalf("run %d: %v", run, err)
+		}
+	}
+	if owed, settled := owedMarkers(t, dbPath, "artist"), settledMarkers(t, dbPath, "artist"); owed != 2 || settled != 3 {
+		t.Fatalf("after run 2: %d owed / %d settled, want the three asked twice settled and the two unasked still owed", owed, settled)
+	}
+	healthy = true
+	if _, err := svc.Run(ctx, enrich.RunOptions{}, nil); err != nil {
+		t.Fatalf("run 3: %v", err)
+	}
+	if n := scalarInt(t, roDB(t, dbPath), "SELECT COUNT(*) FROM art_map WHERE entity_type = 'artist' AND role = 'front'"); n != 2 ||
+		owedMarkers(t, dbPath, "artist") != 0 {
+		t.Errorf("run 3 attached %d artist fronts with %d artists still owed, want the two unasked artists' fronts", n, owedMarkers(t, dbPath, "artist"))
+	}
+}
+
+// manyNamesMB answers an artist search for any name with one artist of that name, and a
+// release-group search for any title with one group of that title credited to the
+// searched artist, with the lookups behind both, so a test can walk several of each.
+func manyNamesMB(t *testing.T) *mbMock {
+	t.Helper()
+	m := &mbMock{}
+	nameOf, creditOf := map[string]string{}, map[string]string{}
+	quoted := func(q, field string) string {
+		mt := regexp.MustCompile(field + `:"([^"]*)"`).FindStringSubmatch(q)
+		if mt == nil {
+			return ""
+		}
+		return mt[1]
+	}
+	slug := func(s string) string { return strings.ReplaceAll(strings.ToLower(s), " ", "-") }
+	m.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		m.requests++
+		w.Header().Set("Content-Type", "application/json")
+		q := r.URL.Query().Get("query")
+		id := r.URL.Path[strings.LastIndex(r.URL.Path, "/")+1:]
+		switch {
+		case r.URL.Path == "/artist" && q != "":
+			name := quoted(q, "artist")
+			nameOf["ar-"+slug(name)] = name
+			io(w, `{"artists":[{"id":"ar-`+slug(name)+`","name":"`+name+`","sort-name":"`+name+`","score":100}]}`)
+		case strings.HasPrefix(r.URL.Path, "/artist/") && nameOf[id] != "":
+			io(w, `{"id":"`+id+`","name":"`+nameOf[id]+`","sort-name":"`+nameOf[id]+`"}`)
+		case r.URL.Path == "/release-group" && q != "":
+			title, artist := quoted(q, "releasegroup"), quoted(q, "artist")
+			gid := "rg-" + slug(title)
+			nameOf[gid], creditOf[gid] = title, artist
+			io(w, `{"release-groups":[{"id":"`+gid+`","title":"`+title+`","primary-type":"Album","score":100,
+				"artist-credit":[{"artist":{"id":"ar-`+slug(artist)+`","name":"`+artist+`"}}]}]}`)
+		case strings.HasPrefix(r.URL.Path, "/release-group/") && nameOf[id] != "":
+			io(w, `{"id":"`+id+`","title":"`+nameOf[id]+`","primary-type":"Album","secondary-types":[],
+				"artist-credit":[{"artist":{"id":"ar-`+slug(creditOf[id])+`","name":"`+creditOf[id]+`"}}],"genres":[]}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(m.server.Close)
+	return m
+}
+
+// TestACappedRunReachesLaterPhasesPastOwedIdentities: an identity rung never stalls, so a
+// rider that never recovers (a revoked key) leaves every artist it touches owed. Those
+// are re-walked after every phase's new targets, so a nightly cap still reaches the
+// release groups instead of spending itself on the same artists every night.
+func TestACappedRunReachesLaterPhasesPastOwedIdentities(t *testing.T) {
+	ctx := context.Background()
+	st, _, lib := openStore(t)
+	for i := 1; i <= 6; i++ {
+		k := strconv.Itoa(i)
+		seedTrack(t, st, lib.ID, "/lib/"+k+".mp3", "ess-"+k, "Song "+k, "Artist "+k, "Album "+k)
+	}
+	revoked := &enrich.Mock{ProviderName: "fanart", Caps: enrich.CapCover,
+		CapsAt: map[enrich.TargetType]enrich.Capability{enrich.TargetArtist: enrich.CapCover},
+		Err:    errors.New("401: api key revoked")}
+	svc := enrich.New(st, enrich.Config{
+		Contact: "t@e.com", MinRequestInterval: time.Millisecond,
+		MusicBrainzBaseURL: manyNamesMB(t).server.URL,
+		Providers:          []enrich.Provider{revoked},
+	}, nil)
+
+	first, err := svc.Run(ctx, enrich.RunOptions{Limit: 4}, nil)
+	if err != nil {
+		t.Fatalf("night 1: %v", err)
+	}
+	if first.ArtistsEnriched != 4 || first.Deferred != 4 {
+		t.Fatalf("night 1 = %d artists / %d deferred, want the cap spent on four owed artists", first.ArtistsEnriched, first.Deferred)
+	}
+	second, err := svc.Run(ctx, enrich.RunOptions{Limit: 4}, nil)
+	if err != nil {
+		t.Fatalf("night 2: %v", err)
+	}
+	if second.ReleaseGroupsEnriched == 0 {
+		t.Fatalf("night 2 = %d artists / %d groups, want the cap to reach the release groups", second.ArtistsEnriched, second.ReleaseGroupsEnriched)
+	}
+}
+
+// TestAnAuxFailureDoesNotDeferTheGroup: the group rung's art rider is owed only its
+// front, the slot nothing later asks about. An auxiliary provider failing there, or
+// dropping out of the pass after three failures, leaves every group settled, and the
+// auxiliary backfill, which asks that provider about the same groups under its own
+// marker, is what carries the failure.
+func TestAnAuxFailureDoesNotDeferTheGroup(t *testing.T) {
+	ctx := context.Background()
+	st, dbPath, lib := openStore(t)
+	for i := 1; i <= 5; i++ {
+		k := strconv.Itoa(i)
+		seedTrack(t, st, lib.ID, "/lib/"+k+".mp3", "ess-"+k, "Song "+k, "Band", "Album "+k)
+	}
+	fanart := &enrich.Mock{ProviderName: "fanart", Caps: enrich.CapAuxArt,
+		CapsAt: map[enrich.TargetType]enrich.Capability{enrich.TargetReleaseGroup: enrich.CapAuxArt},
+		Err:    errors.New("fanart key expired")}
+	svc := enrich.New(st, enrich.Config{
+		Contact: "test@example.com", FetchCoverArt: true, MinRequestInterval: time.Millisecond,
+		MusicBrainzBaseURL: manyGroupsMB(t).server.URL, CoverArtBaseURL: caaStatus(t, http.StatusNotFound).URL,
+		Providers: []enrich.Provider{fanart},
+	}, nil)
+	if _, err := svc.Run(ctx, enrich.RunOptions{}, nil); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if settledMarkers(t, dbPath, "release_group") != 5 || owedMarkers(t, dbPath, "release_group") != 0 {
+		t.Errorf("group identities = %d settled / %d owed, want all five settled: their fronts were answered",
+			settledMarkers(t, dbPath, "release_group"), owedMarkers(t, dbPath, "release_group"))
+	}
+}
+
+// TestAGroupHoldingAFrontIsNotOwedForItsRider: a group that already holds a front asks the
+// archive only to refresh it, so a failed or skipped refresh leaves the group settled. A
+// forced run during an archive outage therefore owes nothing for the groups it walks,
+// rather than leaving the whole catalog to be walked again.
+func TestAGroupHoldingAFrontIsNotOwedForItsRider(t *testing.T) {
+	ctx := context.Background()
+	st, dbPath, lib := openStore(t)
+	for i := 1; i <= 5; i++ {
+		k := strconv.Itoa(i)
+		seedTrack(t, st, lib.ID, "/lib/"+k+".mp3", "ess-"+k, "Song "+k, "Band", "Album "+k)
+	}
+	down := false
+	art := pngBytes(t)
+	caa := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasPrefix(r.URL.Path, "/release-group/") {
+			http.NotFound(w, r)
+			return
+		}
+		if down {
+			http.Error(w, "busy", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write(art)
+	}))
+	t.Cleanup(caa.Close)
+	svc := newService(st, manyGroupsMB(t).server.URL, caa.URL)
+	if _, err := svc.Run(ctx, enrich.RunOptions{}, nil); err != nil {
+		t.Fatalf("run 1: %v", err)
+	}
+	if n := scalarInt(t, roDB(t, dbPath), "SELECT COUNT(*) FROM art_map WHERE entity_type='release_group' AND role='front'"); n != 5 {
+		t.Fatalf("group fronts after run 1 = %d, want 5", n)
+	}
+
+	down = true
+	res, err := svc.Run(ctx, enrich.RunOptions{Force: true}, nil)
+	if err != nil {
+		t.Fatalf("forced run: %v", err)
+	}
+	if res.Deferred != 0 || settledMarkers(t, dbPath, "release_group") != 5 || owedMarkers(t, dbPath, "release_group") != 0 {
+		t.Errorf("forced run = %d deferred, %d settled / %d owed groups; want every group settled, since each holds a front",
+			res.Deferred, settledMarkers(t, dbPath, "release_group"), owedMarkers(t, dbPath, "release_group"))
 	}
 }

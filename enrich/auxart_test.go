@@ -2,8 +2,10 @@ package enrich_test
 
 import (
 	"context"
+	"errors"
 	"math"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -330,5 +332,82 @@ func TestAuxBackfillQueuesAnUnmatchedGroupByTitle(t *testing.T) {
 	}
 	if again.AuxArtEnriched != 0 {
 		t.Errorf("second run walked %d groups; the marker should have held", again.AuxArtEnriched)
+	}
+}
+
+// rgAuxHash reads one auxiliary role's stored hash at the release-group rung.
+func rgAuxHash(t *testing.T, dbPath string, role model.ArtRole) string {
+	t.Helper()
+	return scalarStr(t, roDB(t, dbPath),
+		`SELECT COALESCE((SELECT source_hash FROM art_map WHERE entity_type='release_group' AND role=?), '')`, string(role))
+}
+
+// TestAuxArtFailureLeavesTheGroupQueued: with one provider failing and another answering,
+// the answer lands and the group stays queued for the one that failed. The next pass asks
+// both again; the failed provider fills its slot and the healthy one's repeat is dropped
+// at apply, since the slot it answered is no longer empty.
+func TestAuxArtFailureLeavesTheGroupQueued(t *testing.T) {
+	ctx := context.Background()
+	st, dbPath, lib := openStore(t)
+	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
+
+	down := true
+	fanart := &enrich.Mock{ProviderName: "fanart", Caps: enrich.CapAuxArt,
+		EnrichFunc: func(_ context.Context, req enrich.Request) (*enrich.Candidate, error) {
+			if req.Type != enrich.TargetReleaseGroup {
+				return nil, nil
+			}
+			if down {
+				return nil, errors.New("fanart is down")
+			}
+			return &enrich.Candidate{Art: map[model.ArtRole]*model.ArtImage{model.ArtRoleDisc: artImg(t, "disc-hash")}}, nil
+		}}
+	backs := 0
+	audiodb := &enrich.Mock{ProviderName: "theaudiodb", Caps: enrich.CapAuxArt,
+		EnrichFunc: func(_ context.Context, req enrich.Request) (*enrich.Candidate, error) {
+			if req.Type != enrich.TargetReleaseGroup {
+				return nil, nil
+			}
+			backs++
+			return &enrich.Candidate{Art: map[model.ArtRole]*model.ArtImage{
+				model.ArtRoleBack: artImg(t, "back-"+strconv.Itoa(backs)),
+			}}, nil
+		}}
+	svc := enrich.New(st, enrich.Config{MinRequestInterval: time.Millisecond, Providers: []enrich.Provider{fanart, audiodb}}, nil)
+
+	first, err := svc.Run(ctx, enrich.RunOptions{}, nil)
+	if err != nil {
+		t.Fatalf("run 1: %v", err)
+	}
+	if first.AuxArtEnriched != 1 || first.Deferred != 1 {
+		t.Fatalf("run 1 = %d walked / %d deferred, want 1 and 1", first.AuxArtEnriched, first.Deferred)
+	}
+	if got := rgAuxHash(t, dbPath, model.ArtRoleBack); got != "back-1" {
+		t.Errorf("run 1 back = %q, want the healthy provider's answer applied", got)
+	}
+	if owedMarkers(t, dbPath, "aux_art") != 1 || settledMarkers(t, dbPath, "aux_art") != 0 {
+		t.Fatal("the group's aux art lookup is not owed while a provider owes an answer")
+	}
+
+	down = false
+	second, err := svc.Run(ctx, enrich.RunOptions{}, nil)
+	if err != nil {
+		t.Fatalf("run 2: %v", err)
+	}
+	if second.AuxArtEnriched != 1 || second.Deferred != 0 {
+		t.Fatalf("run 2 = %d walked / %d deferred, want 1 and 0", second.AuxArtEnriched, second.Deferred)
+	}
+	if got := rgAuxHash(t, dbPath, model.ArtRoleDisc); got != "disc-hash" {
+		t.Errorf("run 2 disc = %q, want the recovered provider's answer", got)
+	}
+	if got := rgAuxHash(t, dbPath, model.ArtRoleBack); got != "back-1" {
+		t.Errorf("run 2 back = %q, want back-1 kept: the repeat meets a filled slot", got)
+	}
+	db := roDB(t, dbPath)
+	if m := scalarInt(t, db, `SELECT matched FROM entity_enrichment WHERE entity_type = 'aux_art'`); m != 1 {
+		t.Errorf("aux art marker matched = %d, want 1", m)
+	}
+	if p := scalarStr(t, db, `SELECT provider FROM entity_enrichment WHERE entity_type = 'aux_art'`); p != "fanart" {
+		t.Errorf("aux art marker provider = %q, want fanart", p)
 	}
 }

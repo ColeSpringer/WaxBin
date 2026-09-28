@@ -611,7 +611,10 @@ func TestScopedEnrichmentQueries(t *testing.T) {
 	// The scoped count covers exactly the phases a scoped run executes: one
 	// artist + one release group here, and the empty album/book/lyrics lists add zero.
 	scope := &model.EnrichScope{ArtistIDs: []int64{oneID}, ReleaseGroupIDs: []int64{rgOneID}}
-	n, err := st.CountEntitiesNeedingEnrichment(ctx, model.EnrichQueueOptions{Sweep: model.SweepAll}, model.EnrichCountOptions{Identity: true, Albums: true, Lyrics: true}, scope)
+	n, err := st.CountEntitiesNeedingEnrichment(ctx, model.EnrichQueueOptions{Sweep: model.SweepAll}, model.EnrichCountOptions{Phases: []model.EnrichPhase{
+		model.EnrichPhaseArtist, model.EnrichPhaseReleaseGroup, model.EnrichPhaseBook,
+		model.EnrichPhaseAlbumRelease, model.EnrichPhaseLyrics,
+	}}, scope)
 	if err != nil {
 		t.Fatalf("scoped count: %v", err)
 	}
@@ -620,7 +623,9 @@ func TestScopedEnrichmentQueries(t *testing.T) {
 	}
 	// The unscoped count still covers the catalog (2 artists + 2 rgs; the tracks
 	// need lyrics lookups too under includeLyrics).
-	un, err := st.CountEntitiesNeedingEnrichment(ctx, model.EnrichQueueOptions{Sweep: model.SweepAll}, model.EnrichCountOptions{Identity: true}, nil)
+	un, err := st.CountEntitiesNeedingEnrichment(ctx, model.EnrichQueueOptions{Sweep: model.SweepAll}, model.EnrichCountOptions{Phases: []model.EnrichPhase{
+		model.EnrichPhaseArtist, model.EnrichPhaseReleaseGroup, model.EnrichPhaseBook,
+	}}, nil)
 	if err != nil || un != 4 {
 		t.Fatalf("unscoped count = %d (err %v), want 4", un, err)
 	}
@@ -698,7 +703,9 @@ func TestScopedEnrichmentReachesGhostEntities(t *testing.T) {
 	}
 
 	// The scoped count stays in lockstep with the relaxed walk.
-	n, err := st.CountEntitiesNeedingEnrichment(ctx, model.EnrichQueueOptions{Sweep: model.SweepAll}, model.EnrichCountOptions{Identity: true}, &model.EnrichScope{ArtistIDs: []int64{ghostID}})
+	n, err := st.CountEntitiesNeedingEnrichment(ctx, model.EnrichQueueOptions{Sweep: model.SweepAll}, model.EnrichCountOptions{Phases: []model.EnrichPhase{
+		model.EnrichPhaseArtist, model.EnrichPhaseReleaseGroup, model.EnrichPhaseBook,
+	}}, &model.EnrichScope{ArtistIDs: []int64{ghostID}})
 	if err != nil || n != 1 {
 		t.Fatalf("scoped ghost count = %d (err %v), want 1", n, err)
 	}
@@ -995,7 +1002,7 @@ func TestReleaseGroupsNeedingAuxArtGuards(t *testing.T) {
 
 	// The heartbeat denominator is built from the same gate, so turning the phase on
 	// adds exactly the queued groups and nothing else.
-	withAux, err := st.CountEntitiesNeedingEnrichment(ctx, model.EnrichQueueOptions{}, model.EnrichCountOptions{AuxArt: true}, nil)
+	withAux, err := st.CountEntitiesNeedingEnrichment(ctx, model.EnrichQueueOptions{}, model.EnrichCountOptions{Phases: []model.EnrichPhase{model.EnrichPhaseAuxArt}}, nil)
 	if err != nil {
 		t.Fatalf("count with aux: %v", err)
 	}
@@ -1989,10 +1996,11 @@ func TestEnrichQueuesRetryAnExpiredMiss(t *testing.T) {
 			return st.AlbumsNeedingFields(ctx, q, 0, 100, nil)
 		}},
 	}
-	countAll := model.EnrichCountOptions{
-		Identity: true, Albums: true, AuxArt: true, ArtistArt: true,
-		Lyrics: true, TrackFields: true, AlbumFields: true,
-	}
+	countAll := model.EnrichCountOptions{Phases: []model.EnrichPhase{
+		model.EnrichPhaseArtist, model.EnrichPhaseReleaseGroup, model.EnrichPhaseBook,
+		model.EnrichPhaseAlbumRelease, model.EnrichPhaseAuxArt, model.EnrichPhaseArtistArt,
+		model.EnrichPhaseLyrics, model.EnrichPhaseTrackFields, model.EnrichPhaseAlbumFields,
+	}}
 	walked := func(t *testing.T, q model.EnrichQueueOptions) map[string]int {
 		t.Helper()
 		got := map[string]int{}
@@ -2208,7 +2216,9 @@ func TestAlbumsNeedingArtGuards(t *testing.T) {
 			got[target.Name] = true
 		}
 		// The count is built from the same gate, so it has to agree exactly.
-		n, err := st.CountEntitiesNeedingEnrichment(ctx, q, model.EnrichCountOptions{AlbumArt: slots}, nil)
+		n, err := st.CountEntitiesNeedingEnrichment(ctx, q, model.EnrichCountOptions{
+			Phases: []model.EnrichPhase{model.EnrichPhaseAlbumArt}, AlbumArt: slots,
+		}, nil)
 		if err != nil {
 			t.Fatalf("count: %v", err)
 		}
@@ -2537,14 +2547,15 @@ func TestCountEntitiesNeedingEnrichmentCountsAForcedPhaseUnderSweepAll(t *testin
 		}
 		return n
 	}
-	if n := count(t, model.EnrichCountOptions{ArtistArt: true}); n != 0 {
+	artistArt := []model.EnrichPhase{model.EnrichPhaseArtistArt}
+	if n := count(t, model.EnrichCountOptions{Phases: artistArt}); n != 0 {
 		t.Errorf("fresh count = %d, want 0: both artists carry a marker", n)
 	}
-	if n := count(t, model.EnrichCountOptions{ArtistArt: true,
+	if n := count(t, model.EnrichCountOptions{Phases: artistArt,
 		Forced: []model.EnrichPhase{model.EnrichPhaseArtistArt}}); n != 2 {
 		t.Errorf("forced count = %d, want 2 (matched and missed alike)", n)
 	}
-	if n := count(t, model.EnrichCountOptions{ArtistArt: true,
+	if n := count(t, model.EnrichCountOptions{Phases: artistArt,
 		Forced: []model.EnrichPhase{model.EnrichPhaseLyrics}}); n != 0 {
 		t.Errorf("count with an unrelated phase forced = %d, want 0", n)
 	}
@@ -2754,5 +2765,363 @@ func TestReleaseGroupsNeedingEnrichmentCarriesTheGroupFrontHash(t *testing.T) {
 	}
 	if tgt := only(t); tgt.GroupFrontHash != "" {
 		t.Errorf("with a user-set front: hash %q, want empty", tgt.GroupFrontHash)
+	}
+}
+
+// settleFixture is one album with one track, and the ids and pids every enrichment apply
+// keys on, for the tests of how an apply settles its marker.
+type settleFixture struct {
+	db                  *sql.DB
+	albumID, rgID, item int64
+	albumPID, rgPID     model.PID
+	itemPID             model.PID
+}
+
+func newSettleFixture(t *testing.T) (*sqlite.Store, settleFixture) {
+	t.Helper()
+	st, dbPath, lib := openStoreAt(t)
+	db := roConn(t, dbPath)
+	editionTrack(t, st, lib.ID, "ess-a", "Settle", 1, model.Track{Barcode: "0075992739429"})
+	f := settleFixture{db: db, albumID: albumIDByTitle(t, db, "Settle")}
+	f.rgID = int64(scalarQueryInt(t, db, "SELECT release_group_id FROM album WHERE id = ?", f.albumID))
+	f.item = int64(scalarQueryInt(t, db, "SELECT item_id FROM track WHERE album_id = ?", f.albumID))
+	f.albumPID = model.PID(scalarQueryStr(t, db, "SELECT pid FROM album WHERE id = ?", f.albumID))
+	f.rgPID = model.PID(scalarQueryStr(t, db, "SELECT pid FROM release_group WHERE id = ?", f.rgID))
+	f.itemPID = model.PID(scalarQueryStr(t, db, "SELECT pid FROM playable_item WHERE id = ?", f.item))
+	return st, f
+}
+
+func (f settleFixture) markers(t *testing.T, typ string, id int64) int {
+	t.Helper()
+	return scalarQueryInt(t, f.db, "SELECT COUNT(*) FROM entity_enrichment WHERE entity_type = ? AND entity_id = ?", typ, id)
+}
+
+func enrichedImage(hash, provider string) *model.ArtImage {
+	return &model.ArtImage{Data: []byte("provider-bytes"), Hash: hash, Format: "png", Width: 4, Height: 4,
+		Attribution: model.Attribution{Source: model.SourceEnrichment, Provider: provider}}
+}
+
+// TestApplyIncompleteDefersTheMarker: a lookup a provider failed applies what landed and
+// records the lookup as owed instead of answered, replacing a standing marker, so a later
+// pass asks again. Another failure keeps it owed, dated from that failure; which ask
+// settles it is the engine's call, made by applying the answer instead.
+func TestApplyIncompleteDefersTheMarker(t *testing.T) {
+	ctx := context.Background()
+	st, f := newSettleFixture(t)
+	cases := []struct {
+		name    string
+		typ     string
+		id      int64
+		matched int
+		stand   func() error
+		settle  func() error
+		check   func(t *testing.T)
+	}{
+		{"release group aux art", "aux_art", f.rgID, 1,
+			func() error {
+				return st.ApplyReleaseGroupAuxArt(ctx, model.ReleaseGroupAuxArt{ReleaseGroupID: f.rgID, PID: f.rgPID})
+			},
+			func() error {
+				return st.ApplyReleaseGroupAuxArt(ctx, model.ReleaseGroupAuxArt{ReleaseGroupID: f.rgID, PID: f.rgPID,
+					Matched: true, Provider: "fanart", Incomplete: true,
+					AuxArt: map[model.ArtRole]*model.ArtImage{model.ArtRoleBack: enrichedImage("h-back", "fanart")}})
+			},
+			func(t *testing.T) {
+				if h := scalarQueryStr(t, f.db, `SELECT COALESCE((SELECT source_hash FROM art_map
+					WHERE entity_type = 'release_group' AND entity_id = ? AND role = 'back'), '')`, f.rgID); h != "h-back" {
+					t.Errorf("group back = %q, want the gathered image applied", h)
+				}
+			}},
+		{"item fields", "fields", f.item, 1,
+			func() error {
+				return st.ApplyItemFields(ctx, model.ItemFieldsEnrichment{ItemID: f.item, PID: f.itemPID})
+			},
+			func() error {
+				return st.ApplyItemFields(ctx, model.ItemFieldsEnrichment{ItemID: f.item, PID: f.itemPID,
+					Matched: true, Provider: "deezer", Fields: map[string]string{"bpm": "128"}, Incomplete: true})
+			},
+			func(t *testing.T) {
+				if bpm := scalarQueryInt(t, f.db, "SELECT COALESCE(bpm, 0) FROM track WHERE item_id = ?", f.item); bpm != 128 {
+					t.Errorf("bpm = %d, want the gathered 128 applied", bpm)
+				}
+			}},
+		{"album release match", "album", f.albumID, 0,
+			func() error {
+				return st.ApplyAlbumReleaseMatch(ctx, model.AlbumReleaseMatch{AlbumID: f.albumID, PID: f.albumPID})
+			},
+			func() error {
+				return st.ApplyAlbumReleaseMatch(ctx, model.AlbumReleaseMatch{AlbumID: f.albumID, PID: f.albumPID, Incomplete: true})
+			},
+			func(t *testing.T) {
+				if m := scalarQueryStr(t, f.db, "SELECT COALESCE(mbid, '') FROM album WHERE id = ?", f.albumID); m != "" {
+					t.Errorf("album mbid = %q, want nothing written", m)
+				}
+			}},
+		{"lyrics", "lyrics", f.item, 0,
+			func() error {
+				return st.ApplyLyricsEnrichment(ctx, model.LyricsEnrichment{ItemID: f.item, PID: f.itemPID})
+			},
+			func() error {
+				return st.ApplyLyricsEnrichment(ctx, model.LyricsEnrichment{ItemID: f.item, PID: f.itemPID, Incomplete: true})
+			},
+			func(t *testing.T) {
+				if n := scalarQueryInt(t, f.db, "SELECT COUNT(*) FROM lyrics WHERE item_id = ?", f.item); n != 0 {
+					t.Errorf("lyrics rows = %d, want none", n)
+				}
+			}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := tc.stand(); err != nil {
+				t.Fatalf("standing marker: %v", err)
+			}
+			if n := f.markers(t, tc.typ, tc.id); n != 1 {
+				t.Fatalf("standing markers = %d, want 1", n)
+			}
+			if err := tc.settle(); err != nil {
+				t.Fatalf("incomplete apply: %v", err)
+			}
+			marker := func() (owed, matched int, at int64) {
+				if err := f.db.QueryRow("SELECT owed, matched, enriched_at FROM entity_enrichment WHERE entity_type = ? AND entity_id = ?",
+					tc.typ, tc.id).Scan(&owed, &matched, &at); err != nil {
+					t.Fatalf("read marker: %v", err)
+				}
+				return owed, matched, at
+			}
+			owed, matched, first := marker()
+			if owed != 1 || matched != tc.matched {
+				t.Fatalf("marker after an incomplete apply = owed %d matched %d, want owed with matched %d", owed, matched, tc.matched)
+			}
+			if err := tc.settle(); err != nil {
+				t.Fatalf("second incomplete apply: %v", err)
+			}
+			if owed, matched, at := marker(); owed != 1 || matched != tc.matched || at <= first {
+				t.Errorf("marker after a second failure = owed %d matched %d at %d, want still owed with matched %d, dated after %d",
+					owed, matched, at, tc.matched, first)
+			}
+			tc.check(t)
+		})
+	}
+}
+
+// TestApplyUnaskedRecordsAMiss: a target whose open slot belongs to a provider that was
+// out of the pass keeps what the live providers answered, but its marker records a miss
+// under the answering provider, so it falls due at the retry window instead of resting
+// behind a durable match that would never ask the missing provider.
+func TestApplyUnaskedRecordsAMiss(t *testing.T) {
+	ctx := context.Background()
+	st, f := newSettleFixture(t)
+	marker := func(t *testing.T, typ string, id int64) (int, string) {
+		t.Helper()
+		return scalarQueryInt(t, f.db, "SELECT matched FROM entity_enrichment WHERE entity_type = ? AND entity_id = ?", typ, id),
+			scalarQueryStr(t, f.db, "SELECT provider FROM entity_enrichment WHERE entity_type = ? AND entity_id = ?", typ, id)
+	}
+
+	if err := st.ApplyAlbumArtBackfill(ctx, model.AlbumArtBackfill{AlbumID: f.albumID, PID: f.albumPID,
+		Matched: true, Provider: "fanart", Unasked: true,
+		AuxArt: map[model.ArtRole]*model.ArtImage{model.ArtRoleBack: enrichedImage("h-back", "fanart")}}); err != nil {
+		t.Fatalf("ApplyAlbumArtBackfill: %v", err)
+	}
+	if h := scalarQueryStr(t, f.db, `SELECT COALESCE((SELECT source_hash FROM art_map
+		WHERE entity_type = 'album' AND entity_id = ? AND role = 'back'), '')`, f.albumID); h != "h-back" {
+		t.Errorf("album back = %q, want the live provider's image", h)
+	}
+	if matched, provider := marker(t, "album_art", f.albumID); matched != 0 || provider != "fanart" {
+		t.Errorf("album art marker = matched %d by %q, want a miss by fanart", matched, provider)
+	}
+
+	if err := st.ApplyItemFields(ctx, model.ItemFieldsEnrichment{ItemID: f.item, PID: f.itemPID,
+		Matched: true, Provider: "deezer", Fields: map[string]string{"bpm": "128"}, Unasked: true}); err != nil {
+		t.Fatalf("ApplyItemFields: %v", err)
+	}
+	if bpm := scalarQueryInt(t, f.db, "SELECT COALESCE(bpm, 0) FROM track WHERE item_id = ?", f.item); bpm != 128 {
+		t.Errorf("bpm = %d, want the live provider's 128", bpm)
+	}
+	if matched, provider := marker(t, "fields", f.item); matched != 0 || provider != "deezer" {
+		t.Errorf("fields marker = matched %d by %q, want a miss by deezer", matched, provider)
+	}
+}
+
+// TestIdentityDeltaRidesOnAChange: a deferred target is re-applied next pass and a forced
+// run re-applies everything, so the identity applies emit their entity delta only when
+// something landed, or every re-walk would send each ChangesSince tailer to re-fetch an
+// unchanged entity.
+func TestIdentityDeltaRidesOnAChange(t *testing.T) {
+	ctx := context.Background()
+	st, f := newSettleFixture(t)
+	deltas := func(t *testing.T, typ string) int {
+		t.Helper()
+		return scalarQueryInt(t, f.db, "SELECT COUNT(*) FROM change_log WHERE entity_type = ?", typ)
+	}
+
+	// The fixture's group carries its tagged MBID already, so the type is what lands.
+	group := model.ReleaseGroupEnrichment{ReleaseGroupID: f.rgID, PID: f.rgPID, Matched: true, MBID: "rg-mbid", Type: "compilation"}
+	before := deltas(t, "release_group")
+	for i, want := range []int{1, 1} {
+		if err := st.ApplyReleaseGroupEnrichment(ctx, group); err != nil {
+			t.Fatalf("group apply %d: %v", i+1, err)
+		}
+		if got := deltas(t, "release_group") - before; got != want {
+			t.Fatalf("group deltas after apply %d = %d, want %d", i+1, got, want)
+		}
+	}
+	group.Type = "ep"
+	if err := st.ApplyReleaseGroupEnrichment(ctx, group); err != nil {
+		t.Fatalf("group apply with a new type: %v", err)
+	}
+	if got := deltas(t, "release_group") - before; got != 2 {
+		t.Errorf("group deltas after the type changed = %d, want 2", got)
+	}
+
+	artistID := int64(scalarQueryInt(t, f.db, "SELECT artist_id FROM track WHERE item_id = ?", f.item))
+	artistPID := model.PID(scalarQueryStr(t, f.db, "SELECT pid FROM artist WHERE id = ?", artistID))
+	artist := model.ArtistEnrichment{ArtistID: artistID, PID: artistPID, Matched: true, MBID: "artist-mbid",
+		Aliases: []string{"The Band"}}
+	before = deltas(t, "artist")
+	for i, want := range []int{1, 1} {
+		if err := st.ApplyArtistEnrichment(ctx, artist); err != nil {
+			t.Fatalf("artist apply %d: %v", i+1, err)
+		}
+		if got := deltas(t, "artist") - before; got != want {
+			t.Fatalf("artist deltas after apply %d = %d, want %d", i+1, got, want)
+		}
+	}
+	artist.Aliases = append(artist.Aliases, "Band, The")
+	if err := st.ApplyArtistEnrichment(ctx, artist); err != nil {
+		t.Fatalf("artist apply with a new alias: %v", err)
+	}
+	if got := deltas(t, "artist") - before; got != 2 {
+		t.Errorf("artist deltas after an alias landed = %d, want 2", got)
+	}
+}
+
+// TestCoverageCountsAnOwedIdentityAsAMatch: an identity owed a rider still matched, so
+// the doctor's coverage counts it as enriched and matched while the rider is asked again.
+func TestCoverageCountsAnOwedIdentityAsAMatch(t *testing.T) {
+	ctx := context.Background()
+	st, f := newSettleFixture(t)
+	artistID := int64(scalarQueryInt(t, f.db, "SELECT artist_id FROM track WHERE item_id = ?", f.item))
+	artistPID := model.PID(scalarQueryStr(t, f.db, "SELECT pid FROM artist WHERE id = ?", artistID))
+	if err := st.ApplyArtistEnrichment(ctx, model.ArtistEnrichment{ArtistID: artistID, PID: artistPID,
+		Matched: true, MBID: "artist-mbid", Incomplete: true}); err != nil {
+		t.Fatalf("owed apply: %v", err)
+	}
+	cov, err := st.EnrichmentCoverage(ctx)
+	if err != nil {
+		t.Fatalf("coverage: %v", err)
+	}
+	if cov.Artists != 1 || cov.Matched != 1 {
+		t.Errorf("coverage with the rider owed = %d artists / %d matched, want 1 and 1", cov.Artists, cov.Matched)
+	}
+}
+
+// TestAnUnaskedIdentityKeepsItsOwedLookup: an identity whose rider provider was out of
+// the pass is owed the lookup, since nothing asks about its riders once it settles. A
+// pass that still cannot ask the rider leaves the owed lookup as it was, date and all,
+// because nothing asked for it; a failure dates it anew, and an answer settles it.
+func TestAnUnaskedIdentityKeepsItsOwedLookup(t *testing.T) {
+	ctx := context.Background()
+	st, f := newSettleFixture(t)
+	marker := func(t *testing.T) (owed, matched int, at int64) {
+		t.Helper()
+		if err := f.db.QueryRow("SELECT owed, matched, enriched_at FROM entity_enrichment WHERE entity_type = 'release_group' AND entity_id = ?",
+			f.rgID).Scan(&owed, &matched, &at); err != nil {
+			t.Fatalf("read marker: %v", err)
+		}
+		return owed, matched, at
+	}
+	group := model.ReleaseGroupEnrichment{ReleaseGroupID: f.rgID, PID: f.rgPID, Matched: true, MBID: "rg-mbid", Unasked: true}
+	if err := st.ApplyReleaseGroupEnrichment(ctx, group); err != nil {
+		t.Fatalf("unasked apply: %v", err)
+	}
+	owed, matched, first := marker(t)
+	if owed != 1 || matched != 1 {
+		t.Fatalf("marker after an unasked rider = owed %d matched %d, want owed and matched", owed, matched)
+	}
+	if err := st.ApplyReleaseGroupEnrichment(ctx, group); err != nil {
+		t.Fatalf("second unasked apply: %v", err)
+	}
+	if owed, _, at := marker(t); owed != 1 || at != first {
+		t.Errorf("marker after a second unasked rider = owed %d at %d, want still owed from %d", owed, at, first)
+	}
+	group.Unasked, group.Incomplete = false, true
+	if err := st.ApplyReleaseGroupEnrichment(ctx, group); err != nil {
+		t.Fatalf("failed apply: %v", err)
+	}
+	if owed, _, at := marker(t); owed != 1 || at <= first {
+		t.Errorf("marker after the rider failed = owed %d at %d, want still owed, dated after %d", owed, at, first)
+	}
+	group.Incomplete = false
+	if err := st.ApplyReleaseGroupEnrichment(ctx, group); err != nil {
+		t.Fatalf("answered apply: %v", err)
+	}
+	if owed, matched, _ := marker(t); owed != 0 || matched != 1 {
+		t.Errorf("marker after the rider answered = owed %d matched %d, want a settled match", owed, matched)
+	}
+}
+
+// TestAnOwedLookupSettlesAsItStoodAfterAWeek: an owed lookup nothing asks again, such as
+// one whose slot was filled some other way, is settled once it is old enough, as what
+// its walk found: an identity stays the match MusicBrainz made, and a port lookup that
+// found nothing becomes a miss the retry window re-asks.
+func TestAnOwedLookupSettlesAsItStoodAfterAWeek(t *testing.T) {
+	ctx := context.Background()
+	st, f := newSettleFixture(t)
+	if err := st.ApplyReleaseGroupEnrichment(ctx, model.ReleaseGroupEnrichment{ReleaseGroupID: f.rgID, PID: f.rgPID,
+		Matched: true, MBID: "rg-mbid", Incomplete: true}); err != nil {
+		t.Fatalf("owed group apply: %v", err)
+	}
+	if err := st.ApplyLyricsEnrichment(ctx, model.LyricsEnrichment{ItemID: f.item, PID: f.itemPID, Incomplete: true}); err != nil {
+		t.Fatalf("owed lyrics apply: %v", err)
+	}
+	asOf, err := st.ExpireDeferredLookups(ctx, time.Now().Add(time.Hour).UnixNano())
+	if err != nil {
+		t.Fatalf("ExpireDeferredLookups: %v", err)
+	}
+	if asOf != 0 {
+		t.Errorf("ExpireDeferredLookups = %d, want 0 with every owed lookup settled", asOf)
+	}
+	marker := func(typ string, id int64) (owed, matched int) {
+		if err := f.db.QueryRow("SELECT owed, matched FROM entity_enrichment WHERE entity_type = ? AND entity_id = ?",
+			typ, id).Scan(&owed, &matched); err != nil {
+			t.Fatalf("read %s marker: %v", typ, err)
+		}
+		return owed, matched
+	}
+	if owed, matched := marker("release_group", f.rgID); owed != 0 || matched != 1 {
+		t.Errorf("group marker = owed %d matched %d, want a settled match", owed, matched)
+	}
+	if owed, matched := marker("lyrics", f.item); owed != 0 || matched != 0 {
+		t.Errorf("lyrics marker = owed %d matched %d, want a settled miss", owed, matched)
+	}
+	if cov, err := st.EnrichmentCoverage(ctx); err != nil || cov.ReleaseGroups != 1 || cov.Matched != 1 {
+		t.Errorf("coverage = %d groups / %d matched (err %v), want the group counted as a match", cov.ReleaseGroups, cov.Matched, err)
+	}
+}
+
+// TestClearingAnOwedGroupsMBIDTakesItsArtBack: a group whose lookup is owed still had
+// its identity resolved, and art may have landed beside the failed rider, so clearing
+// its MBID takes back enrichment's art exactly as it does for a settled match.
+func TestClearingAnOwedGroupsMBIDTakesItsArtBack(t *testing.T) {
+	ctx := context.Background()
+	st, f := newSettleFixture(t)
+	if err := st.ApplyReleaseGroupEnrichment(ctx, model.ReleaseGroupEnrichment{
+		ReleaseGroupID: f.rgID, PID: f.rgPID, Matched: true, MBID: "rg-mbid", Incomplete: true,
+		AuxArt: map[model.ArtRole]*model.ArtImage{model.ArtRoleBack: enrichedImage("h-back", "fanart")},
+	}); err != nil {
+		t.Fatalf("owed apply: %v", err)
+	}
+	backs := func() int {
+		return scalarQueryInt(t, f.db, "SELECT COUNT(*) FROM art_map WHERE entity_type = 'release_group' AND entity_id = ? AND role = 'back'", f.rgID)
+	}
+	if backs() != 1 {
+		t.Fatal("the enrichment back did not land beside the owed lookup")
+	}
+	if _, err := st.EditEntityFields(ctx, model.MergeReleaseGroup, f.rgPID, map[string]string{"mbid": ""},
+		model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
+		t.Fatalf("clear mbid: %v", err)
+	}
+	if n := backs(); n != 0 {
+		t.Errorf("group backs after the MBID clear = %d, want enrichment's taken back", n)
 	}
 }

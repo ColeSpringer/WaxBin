@@ -204,9 +204,7 @@ func (l *Library) enrichWork(opts EnrichOptions, scope *model.EnrichScope, out *
 // scoping options do not resolve, matching the synchronous Enrich.
 func (l *Library) StartEnrich(ctx context.Context, opts EnrichOptions) (model.PID, error) {
 	if !l.enricher.Enabled() {
-		return "", waxerr.New(waxerr.CodeUnsupported, "waxbin.StartEnrich",
-			"enrichment needs a MusicBrainz contact "+
-				"(set enrichment.contact / WAXBIN_ENRICH_CONTACT) or an injected provider")
+		return "", waxerr.New(waxerr.CodeUnsupported, "waxbin.StartEnrich", enrichDisabledMessage)
 	}
 	scope, err := l.enrichScope(ctx, "waxbin.StartEnrich", opts)
 	if err != nil {

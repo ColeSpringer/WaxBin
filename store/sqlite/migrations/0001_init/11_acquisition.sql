@@ -25,6 +25,11 @@ CREATE INDEX acquisition_source ON acquisition(source_type);
 -- (enrichment.retry_misses_after_days), so a provider that gains coverage is
 -- asked again; matched=1 is durable. enriched_at is the last lookup rather than
 -- the first, since the marker's upsert refreshes it on every re-ask.
+-- owed=1 marks a lookup that is not settled yet: a provider failed on it, or one it
+-- needed was out of the pass. matched still says what the walk found, and enriched_at
+-- is when the lookup became owed. A later pass asks again after its new targets, and
+-- that ask settles it whatever it finds; one nothing asks again within a week is
+-- settled as it stands.
 -- entity_type carries two vocabularies at once: four values name an entity the coverage
 -- report counts or an album's release match, and the rest are per-pass markers keyed by
 -- whatever id that pass walks. See the enrichEntity* constants for why a new pass takes
@@ -38,8 +43,12 @@ CREATE TABLE entity_enrichment (
   matched     INTEGER NOT NULL DEFAULT 0, -- 1 when a provider returned a usable match
   mbid        TEXT,                       -- the resolved MBID, for the passes that resolve one
   enriched_at INTEGER NOT NULL,
+  owed        INTEGER NOT NULL DEFAULT 0, -- 1 while the lookup waits for another ask
   PRIMARY KEY (entity_type, entity_id)
 );
+-- Every ordinary pass looks for owed lookups and settles the old ones, and there are
+-- usually none, so the index holds the owed rows alone.
+CREATE INDEX entity_enrichment_owed ON entity_enrichment(enriched_at) WHERE owed = 1;
 
 -- Provider response cache, keyed by a provider-scoped request key (e.g.
 -- "mb:artist:<mbid>" or "mb:rg-search:<key>"), holding the raw JSON payload

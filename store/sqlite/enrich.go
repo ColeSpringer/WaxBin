@@ -84,6 +84,13 @@ const albumResolvesFrontArt = `(EXISTS (SELECT 1 FROM art_map am
 	OR EXISTS (SELECT 1 FROM art_map tm JOIN track t ON t.item_id = tm.entity_id
 		WHERE tm.entity_type = 'track' AND tm.role = 'front' AND t.album_id = al.id))`
 
+// trackTakesGroupGenres is true for a member track the release-group genre fill reaches:
+// no genre yet and no genre lock. The fill and the queue's NeedsGenres read the same
+// predicate, so a group is owed its genre rider exactly when the fill has a track to
+// reach. It reads the track as t.
+const trackTakesGroupGenres = `NOT EXISTS (SELECT 1 FROM item_genre ig WHERE ig.item_id = t.item_id)
+	AND NOT EXISTS (SELECT 1 FROM field_provenance fp WHERE fp.item_id = t.item_id AND fp.field = 'genre' AND fp.locked = 1)`
+
 // albumMatchEvidence are the album columns the release matcher can decide on. One list
 // because three places must agree: the enrichment queue predicate, and the two writers
 // that clear a stale no-match marker when new evidence lands (the scan top-up and the
@@ -129,11 +136,12 @@ func enrichBacksFilter(predicate string, ids []int64) string {
 // notEnriched returns the SQL predicate selecting the targets one sweep should walk.
 // idExpr is the entity's id column (book keys on item_id, not id).
 //
-// The four sweeps read off one marker probe. SweepAll takes everything, which is the
-// forced run. SweepFresh takes what has no marker. SweepRetry takes the no-match
-// markers stamped at or before the cutoff, and nothing at all when no window is
-// configured. SweepDue is the union the count needs, phrased as "no marker that is
-// either a match or still inside its window" so it stays a single NOT EXISTS.
+// The sweeps read off one marker probe. SweepAll takes everything, which is the forced
+// run. SweepFresh takes what has no marker. SweepDeferred takes the owed lookups that
+// predate the run. SweepRetry takes the settled no-match markers stamped at or before the
+// cutoff, and nothing at all when no window is configured. SweepDue is the union the
+// count needs, phrased as "no settled marker that is either a match or a miss still
+// inside its window" so it stays a single NOT EXISTS.
 //
 // The cutoff is spliced in as an integer literal rather than bound: the predicate is
 // assembled by string like the ghost heuristic, and a bound parameter here would have
@@ -145,16 +153,18 @@ func notEnriched(entityType, idExpr string, opts model.EnrichQueueOptions) strin
 	switch opts.Sweep {
 	case model.SweepAll:
 		return "1=1"
+	case model.SweepDeferred:
+		return "EXISTS (" + probe + " AND ee.owed = 1 AND ee.enriched_at < " + strconv.FormatInt(opts.DeferredBefore, 10) + ")"
 	case model.SweepRetry:
 		if opts.MissCutoff == 0 {
 			return "1=0"
 		}
-		return "EXISTS (" + probe + " AND ee.matched = 0 AND ee.enriched_at <= " + cutoff + ")"
+		return "EXISTS (" + probe + " AND ee.owed = 0 AND ee.matched = 0 AND ee.enriched_at <= " + cutoff + ")"
 	case model.SweepDue:
 		if opts.MissCutoff == 0 {
-			break
+			return "NOT EXISTS (" + probe + " AND ee.owed = 0)"
 		}
-		return "NOT EXISTS (" + probe + " AND (ee.matched = 1 OR ee.enriched_at > " + cutoff + "))"
+		return "NOT EXISTS (" + probe + " AND ee.owed = 0 AND (ee.matched = 1 OR ee.enriched_at > " + cutoff + "))"
 	}
 	return "NOT EXISTS (" + probe + ")"
 }
@@ -247,7 +257,11 @@ func (s *Store) ReleaseGroupsNeedingEnrichment(ctx context.Context, opts model.E
 	stmt := `SELECT rg.id, rg.pid, rg.title, COALESCE(rg.mbid,''), COALESCE(ar.name,''), ` + repCols + `,
 		EXISTS(SELECT 1 FROM entity_curation ec WHERE ec.entity_type = 'release_group'
 		       AND ec.entity_id = rg.id AND ec.field = 'art' AND ec.locked = 1),
-		` + groupEnrichmentFrontHash("rg.id") + `
+		` + groupEnrichmentFrontHash("rg.id") + `,
+		EXISTS(SELECT 1 FROM art_map am WHERE am.entity_type = 'release_group'
+		       AND am.entity_id = rg.id AND am.role = 'front'),
+		EXISTS(SELECT 1 FROM album al JOIN track t ON t.album_id = al.id
+		       WHERE al.release_group_id = rg.id AND ` + trackTakesGroupGenres + `)
 		FROM release_group rg
 		LEFT JOIN artist ar ON ar.id = rg.primary_artist_id` + repJoin + `
 		WHERE rg.id > ? AND ` + enrichBacksFilter(enrichRGBacksItems, ids) + ` AND ` + notEnriched(model.EnrichReleaseGroupType, "rg.id", opts) + scopeClause + `
@@ -266,7 +280,7 @@ func (s *Store) ReleaseGroupsNeedingEnrichment(ctx context.Context, opts model.E
 		var durMS int64
 		var artLocked int
 		if err := rows.Scan(&t.ID, &pid, &t.Name, &t.MBID, &t.ArtistName, &path, &durMS, &artLocked,
-			&t.GroupFrontHash); err != nil {
+			&t.GroupFrontHash, &t.HasArt, &t.NeedsGenres); err != nil {
 			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		t.PID = model.PID(pid)
@@ -359,14 +373,14 @@ func (s *Store) AlbumsNeedingReleaseMatch(ctx context.Context, opts model.Enrich
 	return out, rows.Err()
 }
 
-// CountEntitiesNeedingEnrichment totals the entities every phase opts selects would
+// CountEntitiesNeedingEnrichment totals the entities the phases in opts.Phases would
 // process, so the heartbeat can report a real ratio. It shares notEnriched with the
-// queues, so a SweepDue count is the fresh and retry sweeps' union by construction
-// rather than by two queries a later edit could let drift. Every phase is optional, the
-// MusicBrainz-backed ones included: they run only with a contact configured, which
-// opts.Identity mirrors. A non-nil scope filters each per-type count to its id list, and
-// a type with an empty list contributes zero, because the scoped run skips that phase
-// entirely; the denominator stays in lockstep with the work that actually runs.
+// queues, so a SweepDue count is the union of the fresh, owed and retry sweeps by
+// construction rather than by three queries a later edit could let drift. Every phase is counted only
+// when the run built it, the MusicBrainz-backed ones included. A non-nil scope filters
+// each per-type count to its id list, and a type with an empty list contributes zero,
+// because the scoped run skips that phase entirely; the denominator stays in lockstep
+// with the work that actually runs.
 func (s *Store) CountEntitiesNeedingEnrichment(ctx context.Context, q model.EnrichQueueOptions, opts model.EnrichCountOptions, scope *model.EnrichScope) (int, error) {
 	const op = "store.CountEntitiesNeedingEnrichment"
 	type countQuery struct {
@@ -386,6 +400,7 @@ func (s *Store) CountEntitiesNeedingEnrichment(ctx context.Context, q model.Enri
 		artistIDs, rgIDs, albumIDs = scope.ArtistIDs, scope.ReleaseGroupIDs, scope.AlbumIDs
 		bookIDs, lyricsIDs, fieldsIDs = scope.BookItemIDs, scope.LyricsItemIDs, scope.FieldsItemIDs
 	}
+	runs := func(p model.EnrichPhase) bool { return slices.Contains(opts.Phases, p) }
 	// A phase a phase-scoped force names walks every target, so its count has to as
 	// well; the rest are counted under the run's own sweep.
 	qFor := func(p model.EnrichPhase) model.EnrichQueueOptions {
@@ -396,11 +411,13 @@ func (s *Store) CountEntitiesNeedingEnrichment(ctx context.Context, q model.Enri
 	}
 	// The MusicBrainz-backed phases, counted only when the run will execute them: a
 	// contact-less run walks the port phases alone.
-	if opts.Identity {
+	if runs(model.EnrichPhaseArtist) {
 		add(`SELECT COUNT(*) FROM artist a WHERE `+enrichBacksFilter(enrichArtistBacksItems, artistIDs)+` AND `+notEnriched(model.EnrichArtistType, "a.id", qFor(model.EnrichPhaseArtist)), "a.id", artistIDs)
+	}
+	if runs(model.EnrichPhaseReleaseGroup) {
 		add(`SELECT COUNT(*) FROM release_group rg WHERE `+enrichBacksFilter(enrichRGBacksItems, rgIDs)+` AND `+notEnriched(model.EnrichReleaseGroupType, "rg.id", qFor(model.EnrichPhaseReleaseGroup)), "rg.id", rgIDs)
 	}
-	if opts.Albums {
+	if runs(model.EnrichPhaseAlbumRelease) {
 		add(`SELECT COUNT(*) FROM album al JOIN release_group rg ON rg.id = al.release_group_id
 			WHERE (al.mbid IS NULL OR al.mbid = '') AND rg.mbid IS NOT NULL AND rg.mbid <> ''
 			  AND `+albumMatchEvidencePredicate("al")+`
@@ -408,40 +425,40 @@ func (s *Store) CountEntitiesNeedingEnrichment(ctx context.Context, q model.Enri
 	}
 	// The aux backfill walks release groups, so it counts under the release-group scope
 	// list, the ghost heuristic included, the way its queue does.
-	if opts.AuxArt {
+	if runs(model.EnrichPhaseAuxArt) {
 		add(`SELECT COUNT(*) FROM release_group rg WHERE `+enrichBacksFilter(enrichRGBacksItems, rgIDs)+`
 			  AND `+auxArtNeededPredicate+`
 			  AND `+notEnriched(enrichEntityAuxArt, "rg.id", qFor(model.EnrichPhaseAuxArt)), "rg.id", rgIDs)
 	}
 	// The artist backfill walks artists, so it counts under the artist scope list, the
 	// ghost heuristic included, the way its queue does.
-	if opts.ArtistArt {
+	if runs(model.EnrichPhaseArtistArt) {
 		add(`SELECT COUNT(*) FROM artist a WHERE `+enrichBacksFilter(enrichArtistBacksItems, artistIDs)+`
 			  AND `+artistArtNeededPredicate+`
 			  AND `+notEnriched(enrichEntityArtistArt, "a.id", qFor(model.EnrichPhaseArtistArt)), "a.id", artistIDs)
 	}
 	// The album-art backfill walks albums, so it counts under the album scope list, the
 	// ghost heuristic and the askable slots included, the way its queue does.
-	if opts.AlbumArt.Any() {
+	if runs(model.EnrichPhaseAlbumArt) && opts.AlbumArt.Any() {
 		add(`SELECT COUNT(*) FROM album al WHERE `+enrichBacksFilter(enrichAlbumBacksItems, albumIDs)+`
 			  AND `+albumArtNeededPredicate(opts.AlbumArt)+`
 			  AND `+notEnriched(enrichEntityAlbumArt, "al.id", qFor(model.EnrichPhaseAlbumArt)), "al.id", albumIDs)
 	}
-	if opts.Identity {
+	if runs(model.EnrichPhaseBook) {
 		add(`SELECT COUNT(*) FROM book b WHERE b.mbid IS NOT NULL AND b.mbid <> '' AND `+notEnriched(model.EnrichBookType, "b.item_id", qFor(model.EnrichPhaseBook)), "b.item_id", bookIDs)
 	}
-	if opts.Lyrics {
+	if runs(model.EnrichPhaseLyrics) {
 		add(`SELECT COUNT(*) FROM playable_item pi JOIN track t ON t.item_id = pi.id
 			WHERE `+lyricsNeededPredicate+` AND `+notEnriched(enrichEntityLyrics, "pi.id", qFor(model.EnrichPhaseLyrics)), "pi.id", lyricsIDs)
 	}
 	// The two fields walks share a marker and a scope list but count separately, since
 	// each is gated by its own capability and either can run without the other.
-	if opts.TrackFields {
+	if runs(model.EnrichPhaseTrackFields) {
 		add(`SELECT COUNT(*) FROM playable_item pi JOIN track t ON t.item_id = pi.id
 			WHERE pi.kind = 'track' AND pi.state = 'present' AND pi.title <> '' AND t.artist <> ''
 			  AND `+trackFieldsVacancy+` AND `+notEnriched(enrichEntityFields, "pi.id", qFor(model.EnrichPhaseTrackFields)), "pi.id", fieldsIDs)
 	}
-	if opts.BookFields {
+	if runs(model.EnrichPhaseBookFields) {
 		add(`SELECT COUNT(*) FROM playable_item pi JOIN book bk ON bk.item_id = pi.id
 			WHERE pi.kind = 'book' AND pi.state = 'present' AND pi.title <> ''
 			  AND (bk.author <> '' OR bk.asin <> '' OR bk.isbn <> '')
@@ -449,7 +466,7 @@ func (s *Store) CountEntitiesNeedingEnrichment(ctx context.Context, q model.Enri
 	}
 	// The album fields walk counts under the album scope list, which it shares with the
 	// release match.
-	if opts.AlbumFields {
+	if runs(model.EnrichPhaseAlbumFields) {
 		add(`SELECT COUNT(*) FROM album al WHERE al.title <> ''
 			  AND (COALESCE(al.label,'') = '' OR al.year IS NULL)
 			  AND `+notEnriched(enrichEntityAlbumFields, "al.id", qFor(model.EnrichPhaseAlbumFields)), "al.id", albumIDs)
@@ -468,12 +485,18 @@ func (s *Store) CountEntitiesNeedingEnrichment(ctx context.Context, q model.Enri
 // ApplyArtistEnrichment persists one artist's resolved data: MBID (only when the
 // artist has none, so a tagged id is never overwritten), aliases, and directed
 // relations to other catalog artists. A no-match still writes the marker so the
-// artist is not retried every run.
+// artist is not retried every run, and a match whose art rider failed or was out of the
+// pass (in.Incomplete, in.Unasked) applies everything and leaves the lookup owed, so a
+// later pass asks the rider again (settleMarkerTx).
+//
+// A deferred artist is re-applied on a later pass and a forced run re-applies everything, so
+// the entity delta rides on a change (an MBID, alias, relation, or image that actually
+// landed) rather than on the match.
 func (s *Store) ApplyArtistEnrichment(ctx context.Context, in model.ArtistEnrichment) error {
 	const op = "store.ApplyArtistEnrichment"
 	return s.writeTx(ctx, func(tx *sql.Tx) error {
 		if !in.Matched {
-			return markEnrichedTx(ctx, tx, model.EnrichArtistType, in.ArtistID, enrichProviderMusicBrainz, false, "")
+			return s.settleMarkerTx(ctx, tx, model.EnrichArtistType, in.ArtistID, enrichProviderMusicBrainz, false, in.Incomplete, in.Unasked, "")
 		}
 		// Shares the fill-when-empty rule with the scan path, lock probe included, so a
 		// curated (or deliberately locked-empty) artist MBID survives either writer.
@@ -487,53 +510,72 @@ func (s *Store) ApplyArtistEnrichment(ctx context.Context, in model.ArtistEnrich
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 		}
-		if err := insertAliasesTx(ctx, tx, in.ArtistID, in.SortName, in.Aliases); err != nil {
+		aliases, err := insertAliasesTx(ctx, tx, in.ArtistID, in.SortName, in.Aliases)
+		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
-		if err := insertRelationsTx(ctx, tx, in.ArtistID, in.Relations); err != nil {
+		relations, err := insertRelationsTx(ctx, tx, in.ArtistID, in.Relations)
+		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		// The same two helpers the release-group rung applies its art with, so the
 		// fill-when-empty rule, the per-role locks and the provenance stamp are the same
 		// ones by construction rather than by restatement.
-		if err := attachEntityArtUnlessLockedTx(ctx, tx, model.ArtArtist, in.ArtistID, in.Art); err != nil {
+		front, err := attachEntityArtUnlessLockedTx(ctx, tx, model.ArtArtist, in.ArtistID, in.Art)
+		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
-		if _, err := fillEntityAuxArtTx(ctx, tx, model.ArtArtist, in.ArtistID, in.AuxArt); err != nil {
+		aux, err := fillEntityAuxArtTx(ctx, tx, model.ArtArtist, in.ArtistID, in.AuxArt)
+		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
-		if err := markEnrichedTx(ctx, tx, model.EnrichArtistType, in.ArtistID, enrichProviderMusicBrainz, true, in.MBID); err != nil {
+		if err := s.settleMarkerTx(ctx, tx, model.EnrichArtistType, in.ArtistID, enrichProviderMusicBrainz, true, in.Incomplete, in.Unasked, in.MBID); err != nil {
 			return err
+		}
+		if !wroteMBID && aliases == 0 && relations == 0 && !front && aux == 0 {
+			return nil
 		}
 		return appendChange(ctx, tx, "artist", in.PID, model.OpUpdate)
 	})
 }
 
 // insertAliasesTx adds an artist's alternate names, including the MusicBrainz
-// sort-name, ignoring duplicates (UNIQUE(artist_id, name)).
-func insertAliasesTx(ctx context.Context, tx *sql.Tx, artistID int64, sortName string, aliases []string) error {
+// sort-name, ignoring duplicates (UNIQUE(artist_id, name)), and reports how many were
+// new.
+func insertAliasesTx(ctx context.Context, tx *sql.Tx, artistID int64, sortName string, aliases []string) (int, error) {
 	names := aliases
 	if strings.TrimSpace(sortName) != "" {
 		names = append([]string{sortName}, names...)
 	}
+	added := 0
 	for _, name := range names {
 		name = strings.TrimSpace(name)
 		if name == "" {
 			continue
 		}
-		if _, err := tx.ExecContext(ctx,
+		r, err := tx.ExecContext(ctx,
 			"INSERT OR IGNORE INTO artist_alias(artist_id, name, sort_key, is_primary) VALUES (?,?,?,0)",
-			artistID, name, model.SortKey(name)); err != nil {
-			return err
+			artistID, name, model.SortKey(name))
+		if err != nil {
+			return added, err
 		}
+		n, err := r.RowsAffected()
+		if err != nil {
+			return added, err
+		}
+		added += int(n)
 	}
-	return nil
+	return added, nil
 }
 
-// insertRelationsTx links an artist to other catalog artists identified by MBID.
-// Targets not present in the catalog are skipped (no stub artists are created), so
-// relations only ever connect entities the user actually has.
-func insertRelationsTx(ctx context.Context, tx *sql.Tx, srcID int64, rels []model.ArtistRelationInput) error {
+// insertRelationsTx links an artist to other catalog artists identified by MBID, and
+// reports how many links were new. Targets not present in the catalog are skipped (no
+// stub artists are created), so relations only ever connect entities the user actually
+// has. Only the enriched artist takes a change-log delta for a new link: no read path
+// serves relations yet, so the artist at the other end has nothing a tailer could
+// re-fetch, and the read path that adds relations has to emit its delta too.
+func insertRelationsTx(ctx context.Context, tx *sql.Tx, srcID int64, rels []model.ArtistRelationInput) (int, error) {
+	added := 0
 	for _, r := range rels {
 		if r.TargetMBID == "" {
 			continue
@@ -544,7 +586,7 @@ func insertRelationsTx(ctx context.Context, tx *sql.Tx, srcID int64, rels []mode
 			continue
 		}
 		if err != nil {
-			return err
+			return added, err
 		}
 		if dstID == srcID {
 			continue
@@ -556,25 +598,37 @@ func insertRelationsTx(ctx context.Context, tx *sql.Tx, srcID int64, rels []mode
 		if r.Inbound {
 			src, dst = dstID, srcID
 		}
-		if _, err := tx.ExecContext(ctx,
+		res, err := tx.ExecContext(ctx,
 			"INSERT OR IGNORE INTO artist_relation(src_id, dst_id, kind) VALUES (?,?,?)",
-			src, dst, r.Kind); err != nil {
-			return err
+			src, dst, r.Kind)
+		if err != nil {
+			return added, err
 		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return added, err
+		}
+		added += int(n)
 	}
-	return nil
+	return added, nil
 }
 
 // ApplyReleaseGroupEnrichment persists one release group's resolved data: MBID
 // (unless it collides with another group's, deferred to the merge gate), type,
 // genres added to member items that have none (respecting genre locks, recording
 // enrichment provenance), and the Cover Art Archive front cover. Touched genre
-// rollups are maintained so db verify stays clean.
+// rollups are maintained so db verify stays clean. A match whose art or genre rider
+// failed or was out of the pass (in.Incomplete, in.Unasked) applies everything and leaves
+// the lookup owed, so a later pass asks the rider again (settleMarkerTx).
+//
+// A deferred group is re-applied on a later pass and a forced run re-applies everything, so
+// the group's delta rides on a change (an MBID, a type, or an image that actually
+// landed) rather than on the match. The genre fill emits its own per-item deltas.
 func (s *Store) ApplyReleaseGroupEnrichment(ctx context.Context, in model.ReleaseGroupEnrichment) error {
 	const op = "store.ApplyReleaseGroupEnrichment"
 	return s.writeTx(ctx, func(tx *sql.Tx) error {
 		if !in.Matched {
-			return markEnrichedTx(ctx, tx, model.EnrichReleaseGroupType, in.ReleaseGroupID, enrichProviderMusicBrainz, false, "")
+			return s.settleMarkerTx(ctx, tx, model.EnrichReleaseGroupType, in.ReleaseGroupID, enrichProviderMusicBrainz, false, in.Incomplete, in.Unasked, "")
 		}
 		wroteMBID, err := setReleaseGroupMBIDTx(ctx, tx, s.log, in.ReleaseGroupID, in.MBID)
 		if err != nil {
@@ -587,6 +641,7 @@ func (s *Store) ApplyReleaseGroupEnrichment(ctx context.Context, in model.Releas
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 		}
+		typeChanged := false
 		if in.Type != "" {
 			// release_group.type is the one entity field enrichment overwrites
 			// unconditionally, so consult the entity-curation lock first: a user who
@@ -596,23 +651,30 @@ func (s *Store) ApplyReleaseGroupEnrichment(ctx context.Context, in model.Releas
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 			if !locked {
-				if _, err := tx.ExecContext(ctx, "UPDATE release_group SET type = ? WHERE id = ?", in.Type, in.ReleaseGroupID); err != nil {
+				r, err := tx.ExecContext(ctx, "UPDATE release_group SET type = ? WHERE id = ? AND COALESCE(type,'') <> ?",
+					in.Type, in.ReleaseGroupID, in.Type)
+				if err != nil {
 					return waxerr.Wrap(waxerr.CodeIO, op, err)
 				}
+				n, err := r.RowsAffected()
+				if err != nil {
+					return waxerr.Wrap(waxerr.CodeIO, op, err)
+				}
+				typeChanged = n > 0
 			}
 		}
 		aff := newAffectedRollups()
 		if err := populateReleaseGroupGenresTx(ctx, tx, in.ReleaseGroupID, in.Genres, in.GenreProvider, aff); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
-		if in.Art != nil {
-			// Reads identically to the release_group.type guard six lines above: a user
-			// who chose this group's cover keeps it, forced run or not.
-			if err := attachEntityArtUnlessLockedTx(ctx, tx, model.ArtReleaseGroup, in.ReleaseGroupID, in.Art); err != nil {
-				return waxerr.Wrap(waxerr.CodeIO, op, err)
-			}
+		// Reads identically to the release_group.type guard above: a user who chose this
+		// group's cover keeps it, forced run or not.
+		front, err := attachEntityArtUnlessLockedTx(ctx, tx, model.ArtReleaseGroup, in.ReleaseGroupID, in.Art)
+		if err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
-		if _, err := fillEntityAuxArtTx(ctx, tx, model.ArtReleaseGroup, in.ReleaseGroupID, in.AuxArt); err != nil {
+		aux, err := fillEntityAuxArtTx(ctx, tx, model.ArtReleaseGroup, in.ReleaseGroupID, in.AuxArt)
+		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		if !aff.empty() {
@@ -620,8 +682,11 @@ func (s *Store) ApplyReleaseGroupEnrichment(ctx context.Context, in model.Releas
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 		}
-		if err := markEnrichedTx(ctx, tx, model.EnrichReleaseGroupType, in.ReleaseGroupID, enrichProviderMusicBrainz, true, in.MBID); err != nil {
+		if err := s.settleMarkerTx(ctx, tx, model.EnrichReleaseGroupType, in.ReleaseGroupID, enrichProviderMusicBrainz, true, in.Incomplete, in.Unasked, in.MBID); err != nil {
 			return err
+		}
+		if !wroteMBID && !typeChanged && !front && aux == 0 {
+			return nil
 		}
 		return appendChange(ctx, tx, "release_group", in.PID, model.OpUpdate)
 	})
@@ -858,7 +923,7 @@ func (s *Store) AlbumsNeedingArt(ctx context.Context, opts model.EnrichQueueOpti
 }
 
 // ApplyAlbumArtBackfill fills an album's empty art roles and records the backfill
-// marker, the album twin of ApplyArtistArtBackfill. It runs the fill on the images the
+// marker (settled by settleMarkerTx), the album twin of ApplyArtistArtBackfill. It runs the fill on the images the
 // caller brought rather than on the match flag, for the same reason: an exported port
 // with pictures and no match would otherwise take a permanent marker and store nothing.
 //
@@ -929,7 +994,7 @@ func (s *Store) ApplyAlbumArtBackfill(ctx context.Context, in model.AlbumArtBack
 			}
 			wrote += n
 		}
-		if err := markEnrichedTx(ctx, tx, enrichEntityAlbumArt, in.AlbumID, provider, matched, ""); err != nil {
+		if err := s.settleMarkerTx(ctx, tx, enrichEntityAlbumArt, in.AlbumID, provider, matched && !in.Unasked, in.Incomplete, in.Unasked, ""); err != nil {
 			return err
 		}
 		if wrote == 0 {
@@ -945,9 +1010,7 @@ func (s *Store) ApplyAlbumArtBackfill(ctx context.Context, in model.AlbumArtBack
 // it, and an album rowid is reused: without this a new album inheriting the id would be
 // silently skipped by a dead album's marker.
 func deleteAlbumArtMarkerTx(ctx context.Context, tx *sql.Tx, albumID int64) error {
-	_, err := tx.ExecContext(ctx,
-		"DELETE FROM entity_enrichment WHERE entity_type = ? AND entity_id = ?", enrichEntityAlbumArt, albumID)
-	return err
+	return clearEntityMarkerTx(ctx, tx, enrichEntityAlbumArt, albumID)
 }
 
 // ArtistsNeedingArtBackfill returns the next keyset page of artists with an empty art
@@ -989,7 +1052,7 @@ func (s *Store) ArtistsNeedingArtBackfill(ctx context.Context, opts model.Enrich
 }
 
 // ApplyArtistArtBackfill fills an artist's empty art roles and records the backfill
-// marker, the artist twin of ApplyReleaseGroupAuxArt. It runs the fill on the images the
+// marker (settled by settleMarkerTx), the artist twin of ApplyReleaseGroupAuxArt. It runs the fill on the images the
 // caller brought rather than on the match flag, for the same reason: an exported port
 // with pictures and no match would otherwise take a permanent marker and store nothing.
 //
@@ -1038,7 +1101,7 @@ func (s *Store) ApplyArtistArtBackfill(ctx context.Context, in model.ArtistArtBa
 			}
 			wrote += n
 		}
-		if err := markEnrichedTx(ctx, tx, enrichEntityArtistArt, in.ArtistID, provider, in.Matched, ""); err != nil {
+		if err := s.settleMarkerTx(ctx, tx, enrichEntityArtistArt, in.ArtistID, provider, in.Matched && !in.Unasked, in.Incomplete, in.Unasked, ""); err != nil {
 			return err
 		}
 		if wrote == 0 {
@@ -1066,9 +1129,7 @@ func entityHoldsArtRoleTx(ctx context.Context, tx *sql.Tx, entityType model.ArtE
 // reason too, since a clear or an unlock is what opens a vacancy the marker says was
 // already asked about.
 func deleteArtistArtMarkerTx(ctx context.Context, tx *sql.Tx, artistID int64) error {
-	_, err := tx.ExecContext(ctx,
-		"DELETE FROM entity_enrichment WHERE entity_type = ? AND entity_id = ?", enrichEntityArtistArt, artistID)
-	return err
+	return clearEntityMarkerTx(ctx, tx, enrichEntityArtistArt, artistID)
 }
 
 // artistMBIDLandedTx re-opens the artist-art backfill for an artist whose MBID has just
@@ -1093,9 +1154,7 @@ func artistMBIDLandedTx(ctx context.Context, tx *sql.Tx, artistID int64) error {
 // marker union reaches it, and album rowids are reused: without this a new album
 // inheriting the id would be silently skipped by a dead album's answer.
 func deleteAlbumFieldsMarkerTx(ctx context.Context, tx *sql.Tx, albumID int64) error {
-	_, err := tx.ExecContext(ctx,
-		"DELETE FROM entity_enrichment WHERE entity_type = ? AND entity_id = ?", enrichEntityAlbumFields, albumID)
-	return err
+	return clearEntityMarkerTx(ctx, tx, enrichEntityAlbumFields, albumID)
 }
 
 // deleteArtBackfillMarkerTx drops whichever art backfill marker an entity type carries,
@@ -1158,7 +1217,9 @@ func (s *Store) ReleaseGroupsNeedingAuxArt(ctx context.Context, opts model.Enric
 // would otherwise take a permanent marker and store nothing. It is fill-when-empty per
 // role and answers to both art locks, so the queue's approximate vacancy is settled
 // here; the marker is written either way, so a group nothing serves costs one pass
-// rather than a lookup every run.
+// rather than a lookup every run. The one exception is a lookup a provider failed
+// (in.Incomplete), which settleMarkerTx records as owed so a later pass asks again, and
+// a provider that was out of the pass (in.Unasked) records a miss whatever else answered.
 //
 // The entity delta rides on an image actually landing rather than on the match. The
 // applies beside it emit one for every match because a match there always writes
@@ -1180,7 +1241,7 @@ func (s *Store) ApplyReleaseGroupAuxArt(ctx context.Context, in model.ReleaseGro
 			}
 			wrote = n
 		}
-		if err := markEnrichedTx(ctx, tx, enrichEntityAuxArt, in.ReleaseGroupID, provider, in.Matched, ""); err != nil {
+		if err := s.settleMarkerTx(ctx, tx, enrichEntityAuxArt, in.ReleaseGroupID, provider, in.Matched && !in.Unasked, in.Incomplete, in.Unasked, ""); err != nil {
 			return err
 		}
 		if wrote == 0 {
@@ -1201,16 +1262,15 @@ func (s *Store) ApplyReleaseGroupAuxArt(ctx context.Context, in model.ReleaseGro
 // marker means the group's vacancies were asked about as of then, and those are the
 // writes that open a vacancy which came after.
 func deleteAuxArtMarkerTx(ctx context.Context, tx *sql.Tx, rgID int64) error {
-	_, err := tx.ExecContext(ctx,
-		"DELETE FROM entity_enrichment WHERE entity_type = ? AND entity_id = ?", enrichEntityAuxArt, rgID)
-	return err
+	return clearEntityMarkerTx(ctx, tx, enrichEntityAuxArt, rgID)
 }
 
 // ApplyAlbumReleaseMatch persists one album's matched release id, filled only when
 // the album has none and the id is not already held by another album, mirroring
 // setReleaseGroupMBIDTx. A no-match records the marker too, so a second run does not
 // re-search an album nothing could identify, following the per-recording lyrics marker
-// precedent.
+// precedent. An inconclusive lookup (in.Incomplete) fills nothing and records the lookup
+// as owed, since it decided nothing.
 //
 // in.Provider records which tier decided it, so an edition match (weaker evidence, see
 // enrich/release.go) stays distinguishable and undoable. Empty falls back to the spine.
@@ -1246,8 +1306,15 @@ func (s *Store) ApplyAlbumReleaseMatch(ctx context.Context, in model.AlbumReleas
 		provider = enrichProviderMusicBrainz
 	}
 	return s.writeTx(ctx, func(tx *sql.Tx) error {
+		// An inconclusive lookup decided nothing, so nothing is filled and the lookup is
+		// recorded as owed in place of a standing marker, which is what lets a forced
+		// re-ask that hit a short read be asked again next pass rather than wait out the
+		// window.
+		if in.Incomplete {
+			return s.settleMarkerTx(ctx, tx, model.EnrichAlbumType, in.AlbumID, provider, false, true, false, "")
+		}
 		if !in.Matched {
-			return markEnrichedTx(ctx, tx, model.EnrichAlbumType, in.AlbumID, provider, false, "")
+			return s.markEnrichedTx(ctx, tx, model.EnrichAlbumType, in.AlbumID, provider, false, "")
 		}
 		wrote, err := setAlbumMBIDTx(ctx, tx, s.log, in.AlbumID, in.MBID)
 		if err != nil {
@@ -1262,7 +1329,7 @@ func (s *Store) ApplyAlbumReleaseMatch(ctx context.Context, in model.AlbumReleas
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 		}
-		if err := markEnrichedTx(ctx, tx, model.EnrichAlbumType, in.AlbumID, provider, true, in.MBID); err != nil {
+		if err := s.markEnrichedTx(ctx, tx, model.EnrichAlbumType, in.AlbumID, provider, true, in.MBID); err != nil {
 			return err
 		}
 		return appendChange(ctx, tx, "album", in.PID, model.OpUpdate)
@@ -1334,12 +1401,9 @@ func populateReleaseGroupGenresTx(ctx context.Context, tx *sql.Tx, rgID int64, g
 	// is visible everywhere the facet/browse item_genre links already surface it,
 	// not only in genre browse.
 	genreDisplay := strings.Join(names, "; ")
-	// Member items with no genre and no genre lock.
 	rows, err := tx.QueryContext(ctx, `SELECT pi.id, pi.pid
 		FROM track t JOIN album al ON al.id = t.album_id JOIN playable_item pi ON pi.id = t.item_id
-		WHERE al.release_group_id = ?
-		  AND NOT EXISTS (SELECT 1 FROM item_genre ig WHERE ig.item_id = t.item_id)
-		  AND NOT EXISTS (SELECT 1 FROM field_provenance fp WHERE fp.item_id = t.item_id AND fp.field = 'genre' AND fp.locked = 1)`, rgID)
+		WHERE al.release_group_id = ? AND `+trackTakesGroupGenres, rgID)
 	if err != nil {
 		return err
 	}
@@ -1412,7 +1476,7 @@ func (s *Store) ApplyBookEnrichment(ctx context.Context, in model.BookEnrichment
 	const op = "store.ApplyBookEnrichment"
 	return s.writeTx(ctx, func(tx *sql.Tx) error {
 		if !in.Matched {
-			return markEnrichedTx(ctx, tx, model.EnrichBookType, in.BookItemID, enrichProviderMusicBrainz, false, "")
+			return s.markEnrichedTx(ctx, tx, model.EnrichBookType, in.BookItemID, enrichProviderMusicBrainz, false, "")
 		}
 		// Fill-when-empty for each field.
 		for _, f := range []struct {
@@ -1466,7 +1530,7 @@ func (s *Store) ApplyBookEnrichment(ctx context.Context, in model.BookEnrichment
 				}
 			}
 		}
-		if err := markEnrichedTx(ctx, tx, model.EnrichBookType, in.BookItemID, enrichProviderMusicBrainz, true, in.MBID); err != nil {
+		if err := s.markEnrichedTx(ctx, tx, model.EnrichBookType, in.BookItemID, enrichProviderMusicBrainz, true, in.MBID); err != nil {
 			return err
 		}
 		return appendChange(ctx, tx, "item", in.PID, model.OpUpdate)
@@ -1532,7 +1596,8 @@ func (s *Store) ItemsNeedingLyrics(ctx context.Context, opts model.EnrichQueueOp
 // per-recording marker. Lyrics are written only when the item still has none
 // (fill-when-empty, re-checked inside the transaction so a sidecar added since the
 // iteration query is never clobbered); a no-match writes only the marker so the track
-// is not re-queried each run. A match emits an item change delta.
+// is not re-queried each run, and a lookup a provider failed is recorded as owed instead
+// (settleMarkerTx). A match emits an item change delta.
 func (s *Store) ApplyLyricsEnrichment(ctx context.Context, in model.LyricsEnrichment) error {
 	const op = "store.ApplyLyricsEnrichment"
 	return s.writeTx(ctx, func(tx *sql.Tx) error {
@@ -1551,7 +1616,7 @@ func (s *Store) ApplyLyricsEnrichment(ctx context.Context, in model.LyricsEnrich
 				}
 			}
 		}
-		return markEnrichedTx(ctx, tx, enrichEntityLyrics, in.ItemID, in.Provider, in.Matched, "")
+		return s.settleMarkerTx(ctx, tx, enrichEntityLyrics, in.ItemID, in.Provider, in.Matched && !in.Unasked, in.Incomplete, in.Unasked, "")
 	})
 }
 
@@ -1562,14 +1627,99 @@ func (s *Store) ApplyLyricsEnrichment(ctx context.Context, in model.LyricsEnrich
 //
 // The upsert refreshes enriched_at, which is what re-arms the retry window after a
 // re-asked miss: the column is the last lookup, not the first, so a target nothing
-// answers for falls due again one window from each attempt rather than every run.
-func markEnrichedTx(ctx context.Context, tx *sql.Tx, entityType string, entityID int64, provider string, matched bool, mbid string) error {
-	_, err := tx.ExecContext(ctx, `INSERT INTO entity_enrichment(entity_type, entity_id, provider, matched, mbid, enriched_at)
-		VALUES (?,?,?,?,?,?)
+// answers for falls due again one window from each attempt rather than every run. It is
+// stamped through stampNS, so a pass's owed-sweep instant falls cleanly between the
+// markers written before it and after it.
+func (s *Store) markEnrichedTx(ctx context.Context, tx *sql.Tx, entityType string, entityID int64, provider string, matched bool, mbid string) error {
+	_, err := tx.ExecContext(ctx, `INSERT INTO entity_enrichment(entity_type, entity_id, provider, matched, mbid, enriched_at, owed)
+		VALUES (?,?,?,?,?,?,0)
 		ON CONFLICT(entity_type, entity_id) DO UPDATE SET
-		  provider = excluded.provider, matched = excluded.matched, mbid = excluded.mbid, enriched_at = excluded.enriched_at`,
-		entityType, entityID, provider, boolInt(matched), nullStr(strings.TrimSpace(mbid)), nowNS())
+		  provider = excluded.provider, matched = excluded.matched, mbid = excluded.mbid,
+		  enriched_at = excluded.enriched_at, owed = 0`,
+		entityType, entityID, provider, boolInt(matched), nullStr(strings.TrimSpace(mbid)), s.stampNS())
 	return err
+}
+
+// identityMarker reports whether entityType is an identity rung's marker. Nothing asks
+// about an identity's riders once its marker settles, so a rider whose provider was out
+// of the pass leaves the identity owed, where a port pass records a miss the retry
+// window re-asks.
+func identityMarker(entityType string) bool {
+	return entityType == model.EnrichArtistType || entityType == model.EnrichReleaseGroupType
+}
+
+// settleMarkerTx records what one lookup decided. failed says a provider it called failed
+// with a slot it could have filled still open, and unasked that a provider serving such a
+// slot was out of the pass.
+//
+// A failure leaves the lookup owed: the marker keeps what the walk found, replacing a
+// standing marker, so a later pass asks again, where a miss would wait out the retry
+// window and a standing match would keep a forced re-ask that hit an outage from ever
+// re-asking. An identity is owed for an unasked rider too, since nothing asks about its
+// riders once it settles; a port pass records that as a miss the retry window re-asks.
+// The owed marker is dated from the failure, and an unasked walk of a lookup already
+// owed leaves the date alone, since nothing asked for it. Anything else is an answer and
+// upserts the marker as markEnrichedTx does.
+func (s *Store) settleMarkerTx(ctx context.Context, tx *sql.Tx, entityType string, entityID int64, provider string, matched, failed, unasked bool, mbid string) error {
+	if !failed && !(unasked && identityMarker(entityType)) {
+		return s.markEnrichedTx(ctx, tx, entityType, entityID, provider, matched, mbid)
+	}
+	_, err := tx.ExecContext(ctx, `INSERT INTO entity_enrichment(entity_type, entity_id, provider, matched, mbid, enriched_at, owed)
+		VALUES (?,?,?,?,?,?,1)
+		ON CONFLICT(entity_type, entity_id) DO UPDATE SET
+		  provider = excluded.provider, matched = excluded.matched, mbid = excluded.mbid,
+		  enriched_at = CASE WHEN ? AND entity_enrichment.owed = 1
+		    THEN entity_enrichment.enriched_at ELSE excluded.enriched_at END,
+		  owed = 1`,
+		entityType, entityID, provider, boolInt(matched), nullStr(strings.TrimSpace(mbid)), s.stampNS(), boolInt(!failed))
+	return err
+}
+
+// The owed-lookup statements every ordinary pass runs, named so a test can check both
+// seek the owed rows' index.
+const (
+	owedLookupsExist  = "SELECT EXISTS(SELECT 1 FROM entity_enrichment WHERE owed = 1)"
+	expireOwedLookups = "UPDATE entity_enrichment SET owed = 0 WHERE owed = 1 AND enriched_at <= ?"
+)
+
+// ExpireDeferredLookups settles every lookup owed since at or before cutoff as it stands:
+// an identity stays the match MusicBrainz made, and a port lookup that found nothing
+// becomes a miss, dated from when it became owed, which the retry window re-asks. That
+// bounds an owed lookup nothing asks again, such as one whose slot was filled some other
+// way, which no queue would ever select.
+//
+// It returns 0 when nothing is left owed, having written nothing, so a pass with nothing
+// owed only reads. Otherwise it returns the instant the pass's owed sweep measures
+// against, stamped through stampNS: later than every marker already written and earlier
+// than every one written after it, so the sweep asks exactly the lookups earlier passes
+// left owed, even on a clock that has not ticked since the last of them.
+func (s *Store) ExpireDeferredLookups(ctx context.Context, cutoff int64) (int64, error) {
+	const op = "store.ExpireDeferredLookups"
+	var owed int
+	if err := s.read.QueryRowContext(ctx, owedLookupsExist).Scan(&owed); err != nil {
+		return 0, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	if owed == 0 {
+		return 0, nil
+	}
+	var asOf int64
+	err := s.writeTx(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, expireOwedLookups, cutoff); err != nil {
+			return err
+		}
+		var left int
+		if err := tx.QueryRowContext(ctx, owedLookupsExist).Scan(&left); err != nil {
+			return err
+		}
+		if left == 1 {
+			asOf = s.stampNS()
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	return asOf, nil
 }
 
 // ExpiredMissesExist reports whether any no-match marker is old enough to be re-asked.
@@ -1587,7 +1737,7 @@ func (s *Store) ExpiredMissesExist(ctx context.Context, cutoff int64) (bool, err
 	}
 	var found int
 	err := s.read.QueryRowContext(ctx,
-		"SELECT EXISTS(SELECT 1 FROM entity_enrichment WHERE matched = 0 AND enriched_at <= ?)",
+		"SELECT EXISTS(SELECT 1 FROM entity_enrichment WHERE owed = 0 AND matched = 0 AND enriched_at <= ?)",
 		cutoff).Scan(&found)
 	if err != nil {
 		return false, waxerr.Wrap(waxerr.CodeIO, op, err)
@@ -1626,7 +1776,8 @@ func (s *Store) EnrichmentCoverage(ctx context.Context) (model.EnrichmentCoverag
 	// Only the three entity types are coverage-reported. The per-pass markers sharing the
 	// table (the per-recording lyrics lookup, the per-album release match, the three art
 	// backfills, the two fields walks) are fill-when-empty side channels rather than
-	// entity coverage, and the WHERE already excludes them.
+	// entity coverage, and the WHERE already excludes them. An identity owed a rider
+	// still matched, so it counts.
 	rows, err := s.read.QueryContext(ctx,
 		`SELECT entity_type, COUNT(*), COALESCE(SUM(matched),0) FROM entity_enrichment
 		 WHERE entity_type IN ('artist','release_group','book') GROUP BY entity_type`)
@@ -2099,7 +2250,7 @@ func (s *Store) ItemsNeedingFields(ctx context.Context, opts model.EnrichQueueOp
 }
 
 // ApplyItemFields writes the scalar fields a provider supplied for one track or book and
-// records the fields marker. It keeps only the keys in the kind's fill set that are
+// records the fields marker (settled by settleMarkerTx). It keeps only the keys in the kind's fill set that are
 // currently empty and unlocked, both re-read inside the transaction so a value tagged or
 // locked since the queue page is never overwritten.
 //
@@ -2150,7 +2301,7 @@ func (s *Store) ApplyItemFields(ctx context.Context, in model.ItemFieldsEnrichme
 				}
 			}
 		}
-		return markEnrichedTx(ctx, tx, enrichEntityFields, in.ItemID, provider, in.Matched, "")
+		return s.settleMarkerTx(ctx, tx, enrichEntityFields, in.ItemID, provider, in.Matched && !in.Unasked, in.Incomplete, in.Unasked, "")
 	})
 }
 
@@ -2330,7 +2481,7 @@ func (s *Store) AlbumsNeedingFields(ctx context.Context, opts model.EnrichQueueO
 }
 
 // ApplyAlbumFields writes the scalar fields a provider supplied for one album and records
-// the album fields marker. Only label and year are accepted (model.AlbumFillFields), and
+// the album fields marker (settled by settleMarkerTx). Only label and year are accepted (model.AlbumFillFields), and
 // the two land by different routes because they sit at different rungs.
 //
 // label is an album column: a fill-when-empty write plus a curation row naming the
@@ -2411,7 +2562,7 @@ func (s *Store) ApplyAlbumFields(ctx context.Context, in model.AlbumFieldsEnrich
 				wrote = true
 			}
 		}
-		if err := markEnrichedTx(ctx, tx, enrichEntityAlbumFields, in.AlbumID, provider, in.Matched, ""); err != nil {
+		if err := s.settleMarkerTx(ctx, tx, enrichEntityAlbumFields, in.AlbumID, provider, in.Matched && !in.Unasked, in.Incomplete, in.Unasked, ""); err != nil {
 			return err
 		}
 		if wrote {

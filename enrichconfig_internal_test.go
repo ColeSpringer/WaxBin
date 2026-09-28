@@ -25,7 +25,7 @@ func TestEnrichConfigRetryWindow(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := enrichConfig(config.EnrichConfig{RetryMissesAfterDays: tc.in}, nil).RetryMissesAfter
+			got := enrichConfig(config.EnrichConfig{RetryMissesAfterDays: tc.in}, nil, nil).RetryMissesAfter
 			if got != tc.want {
 				t.Errorf("RetryMissesAfter = %v, want %v", got, tc.want)
 			}

@@ -19,7 +19,9 @@ import (
 // gaps on top of that anchor (genres, cover art, lyrics, book identifiers, and the
 // scalar fields the track, book, and album fields walks apply), so an embedder can add
 // a provider without touching identity resolution. A provider's own phases run with or
-// without a contact, since it brings its own credentials.
+// without a contact, since it brings its own credentials. A pass consults Config.Providers
+// ahead of the built-ins, in that order, unless Config.ProviderList answers with another
+// list for that pass.
 //
 // Rate limiting is the provider's own responsibility. The Service calls Enrich
 // sequentially within a single-goroutine pass, so a provider is never invoked
@@ -45,21 +47,35 @@ import (
 type Provider interface {
 	// Name is the stable id recorded as provenance ("musicbrainz", "lrclib", ...). It
 	// is written to entity_enrichment.provider and field_provenance.provider so a
-	// consumer can attribute a value and reason about a metadata conflict.
+	// consumer can attribute a value and reason about a metadata conflict. It is also
+	// the provider's identity within a pass, so an injected provider's name has to be
+	// its own: one repeating another's, or taking a built-in's or a marker label (see
+	// ProviderMusicBrainz and the constants beside it), is dropped when the Service is
+	// built.
 	Name() string
 	// Capabilities reports which enrichment kinds the provider supplies, so the
-	// Service only calls it for a request it can answer.
+	// Service only calls it for a request it can answer. A provider whose capabilities
+	// differ by target type also implements TargetCapabilities to say which rung serves
+	// which.
 	Capabilities() Capability
 	// Enrich answers one candidate lookup. A nil candidate with a nil error is a clean
-	// no-match (the entity was looked up and nothing was found); an error is a
-	// best-effort failure the Service logs and continues past (only the identity spine
-	// aborts a run).
+	// no-match (the entity was looked up and nothing was found). An error is a failed
+	// lookup, not a miss: the Service logs it, applies what the other providers answered,
+	// and records the lookup as owed, asked once more on a later pass after its new
+	// targets (only the identity spine aborts a run). A provider that fails three times
+	// in a row is left out for the rest of the pass, with the slots it serves recorded as
+	// misses on the targets after it. So a plain miss is a nil candidate, and so is an
+	// answer that is certain to come back the same for this target, like one too large
+	// to store; a response that could equally come from a service that is not answering,
+	// a refusal or an error page, is better returned as an error, which costs one more
+	// request where a wrong nil would settle a night's targets as misses.
 	Enrich(ctx context.Context, req Request) (*Candidate, error)
 }
 
 // Capability is a bitset of the enrichment kinds a provider can supply. A provider
 // advertises the union of what it serves, and the Service dispatches a request only
-// to a provider whose capability set covers it.
+// to a provider whose capability set covers it at the request's target type (see
+// TargetCapabilities).
 type Capability uint
 
 const (
@@ -73,8 +89,10 @@ const (
 	// gates the album-art backfill's front half. The rung is the request type: a
 	// TargetReleaseGroup answer is one edition's art standing in for the whole group,
 	// while a TargetRelease answer is the pressing an album actually is, which is what
-	// that backfill asks for. The built-in Cover Art Archive serves both, so the album
-	// front half is the one art backfill a stock install runs.
+	// that backfill asks for. The built-in Cover Art Archive serves both and says so
+	// through TargetCapabilities, so the album front half is the one art backfill a stock
+	// install runs. A provider serving covers for groups alone declares that the same
+	// way, so the front half does not walk every identified album on its account.
 	CapCover
 	// CapLyrics supplies a recording's lyrics.
 	CapLyrics
@@ -97,19 +115,25 @@ const (
 	// CapAuxArt with the non-front roles it has (the front is ignored there; the
 	// release-group pass owns that slot).
 	//
+	// A provider serving these roles for release groups and not for a release declares
+	// the release rung empty through TargetCapabilities, so the album-art backfill's
+	// auxiliary half does not walk every identified album for an answer it cannot give.
+	//
 	// The request carries the group's Title and Artist, with MBID only when the catalog
 	// has one, since the walk is keyed on the title rather than the id. A provider keyed
 	// on ids alone answers a nil candidate for an id-less request rather than an error:
-	// callProvider logs an error once per entity per run, so a miss reported as one is
-	// noise on a population that is mostly id-less. The built-in archive already does
-	// this (see enrich/coverart.go).
+	// an error defers the target and three in a row retire the provider for the run, so
+	// a miss reported as one would re-ask a population that is mostly id-less forever
+	// and take the provider out of every pass. The built-in archive already does this
+	// (see enrich/coverart.go).
 	CapAuxArt
 	// CapArtistArt supplies art for an artist, front and auxiliary roles alike, and gates
 	// the artist backfill. It is its own bit because the Cover Art Archive advertises
 	// CapCover and answers nothing for an artist: gating there would walk every artist on
 	// a stock install and mark each a permanent no-match, which is the bug the backfill
 	// exists to remove. Like CapAuxArt, a provider written before it advertises CapCover
-	// alone and has to add this to be queued.
+	// alone and has to add this to be queued. TargetCapabilities states the same rule for
+	// any capability at any rung, which is how the archive declares nothing here.
 	//
 	// The request carries the artist's name in Artist, with MBID only when the catalog
 	// has one. The walk is keyed on the name, so a local band or a mis-tagged name is
@@ -121,7 +145,8 @@ const (
 	// TargetRecording asks about one track and its answer lands on that item alone,
 	// while TargetRelease asks about an album and its answer lands on the album row and,
 	// for year, on every member at once. A provider that only knows one of the two
-	// answers nothing for the other.
+	// declares the rung it serves through TargetCapabilities; one that declares nothing
+	// is asked at both, and its nil answer marks a miss.
 	//
 	// The engine applies only the keys in the target's fill set (model.EnrichFillFields
 	// for an item, model.AlbumFillFields for an album), fill-when-empty, lock-respecting,
@@ -129,6 +154,19 @@ const (
 	// provider returns what it found rather than pre-filtering.
 	CapFields
 )
+
+// TargetCapabilities is the optional half of a provider's declaration, for one whose
+// capabilities differ by target type: the Cover Art Archive serves a cover for a release
+// group and for a release and nothing for an artist; a fan-art service serves auxiliary
+// art for a release group and an artist and nothing for a release. Capabilities stays
+// the union; CapabilitiesAt narrows it to what the provider answers for one target type,
+// and the Service consults it wherever it dispatches, so a provider is asked only at the
+// rungs it serves and a phase runs only when some provider serves its capability at its
+// own rung. A provider that does not implement it is taken to serve every capability it
+// advertises at every rung, which is what every provider written before it did.
+type TargetCapabilities interface {
+	CapabilitiesAt(t TargetType) Capability
+}
 
 // Has reports whether c advertises want.
 func (c Capability) Has(want Capability) bool { return c&want != 0 }
@@ -243,18 +281,39 @@ type Candidate struct {
 	Fields map[string]string
 }
 
-// Provider-name constants used as provenance ids. The built-ins are fixed; an
-// injected provider supplies its own Name().
+// The built-in providers' names, which are also the provenance ids they stamp. A
+// ProviderList hook finds a built-in in the fixed list it is handed by one of these, and
+// a consumer reads them back off provenance rows. An injected provider supplies its own.
 const (
-	providerMusicBrainz = "musicbrainz"
-	// providerMBEdition marks an album whose release the edition tier decided rather than
-	// a printed identifier. Distinct on purpose: that tier is not immune to MusicBrainz
-	// coverage gaps (see release.go), so its writes must stay findable and reviewable.
-	providerMBEdition    = "musicbrainz:edition"
-	providerCoverArt     = "coverartarchive"
-	providerListenBrainz = "listenbrainz"
-	providerLRCLIB       = "lrclib"
+	// ProviderMusicBrainz names the identity spine, and in the provider list the entry
+	// that ranks the spine's own release-group genres in the genre merge.
+	ProviderMusicBrainz  = "musicbrainz"
+	ProviderCoverArt     = "coverartarchive"
+	ProviderListenBrainz = "listenbrainz"
+	ProviderLRCLIB       = "lrclib"
 )
+
+// providerMBEdition marks an album whose release the edition tier decided rather than a
+// printed identifier. Distinct on purpose: that tier is not immune to MusicBrainz
+// coverage gaps (see release.go), so its writes must stay findable and reviewable. It is
+// a marker value the store records, not a provider. providerNone is the store's label
+// for a marker no provider answered (store/sqlite's enrichProviderNone).
+const (
+	providerMBEdition = "musicbrainz:edition"
+	providerNone      = "none"
+)
+
+// reservedProviderName reports whether name belongs to a built-in or labels a marker,
+// so an injected provider taking it would write values nobody could tell from the
+// built-in's, or markers that read as some other outcome.
+func reservedProviderName(name string) bool {
+	switch name {
+	case ProviderMusicBrainz, ProviderCoverArt, ProviderListenBrainz, ProviderLRCLIB,
+		providerMBEdition, providerNone:
+		return true
+	}
+	return false
+}
 
 // Mock is a scriptable Provider for tests and for standing in for an injected
 // provider (Discogs, Last.fm, ...) without any network. Set ProviderName + Caps and
@@ -263,6 +322,10 @@ const (
 type Mock struct {
 	ProviderName string
 	Caps         Capability
+	// CapsAt, when set, is the mock's per-target declaration (TargetCapabilities): a
+	// target type it names serves that entry, and one it leaves out serves nothing. Nil
+	// serves Caps at every target type.
+	CapsAt map[TargetType]Capability
 
 	// Simple mode: Enrich returns Ret, Err.
 	Ret *Candidate
@@ -277,6 +340,14 @@ func (m *Mock) Name() string { return m.ProviderName }
 
 // Capabilities reports the mock's configured capability set.
 func (m *Mock) Capabilities() Capability { return m.Caps }
+
+// CapabilitiesAt reports CapsAt's entry for t, or Caps when CapsAt is nil.
+func (m *Mock) CapabilitiesAt(t TargetType) Capability {
+	if m.CapsAt == nil {
+		return m.Caps
+	}
+	return m.CapsAt[t]
+}
 
 // Enrich returns the scripted hook result, or the simple-mode Ret/Err.
 func (m *Mock) Enrich(ctx context.Context, req Request) (*Candidate, error) {
