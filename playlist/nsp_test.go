@@ -1,6 +1,7 @@
 package playlist
 
 import (
+	"encoding/json"
 	"fmt"
 	"slices"
 	"strings"
@@ -770,8 +771,8 @@ func TestCheckNSPExportOwnsTheAnswer(t *testing.T) {
 			t.Errorf("%s: direction = %q, want export", name, rep.Direction)
 		}
 		for i, g := range rep.All() {
-			if g.Kind == "" || g.Reason == "" {
-				t.Errorf("%s: gap %d = %+v, want a kind and a reason", name, i, g)
+			if g.Kind == "" || g.Reason == "" || !slices.Contains(NSPReasons(), g.Code) {
+				t.Errorf("%s: gap %d = %+v, want a kind, a known code and a reason", name, i, g)
 			}
 		}
 		_, err := ExportNSP(q)
@@ -801,8 +802,8 @@ func TestExportNSPNotContainsOnDateField(t *testing.T) {
 	if len(rep.Gaps) != 1 || rep.Gaps[0].Kind != NSPGapOperator {
 		t.Fatalf("gaps = %+v, want one operator gap", rep.Gaps)
 	}
-	if !strings.Contains(rep.Gaps[0].Reason, "inTheLast") {
-		t.Errorf("reason = %q, want the date-field operator restriction", rep.Gaps[0].Reason)
+	if rep.Gaps[0].Code != NSPReasonDateOperator {
+		t.Errorf("code = %q, want the date-field operator restriction", rep.Gaps[0].Code)
 	}
 }
 
@@ -988,14 +989,22 @@ func TestExportNSPExtraSorts(t *testing.T) {
 	if len(e.Report.Gaps) != 1 {
 		t.Fatalf("gaps = %+v, want one", e.Report.Gaps)
 	}
-	if g := e.Report.Gaps[0]; g.Kind != NSPGapSort || g.Path != "/sorts/1" || g.Field != "year" {
-		t.Errorf("gap = %+v, want a sort gap on year at /sorts/1", g)
+	if g := e.Report.Gaps[0]; g.Kind != NSPGapSort || g.Code != NSPReasonExtraSortTerm || g.Path != "/sorts/1" ||
+		g.Field != "year" || g.Value != (query.Sort{Field: "year", Desc: true}) {
+		t.Errorf("gap = %+v, want an extra sort term gap on year desc at /sorts/1", g)
 	}
 	if len(e.Rule.Sorts) != 1 || e.Rule.Sorts[0].Field != "artist" {
 		t.Errorf("surviving sorts = %+v, want artist alone", e.Rule.Sorts)
 	}
 	if !strings.Contains(string(e.Data), `"sort": "artist"`) {
 		t.Errorf("document lost the first sort term:\n%s", e.Data)
+	}
+	// Each dropped term is a gap of its own at its own pointer.
+	three := query.New(query.EntityItems).OrderBy("artist", false).OrderBy("year", true).OrderBy("title", false).Build()
+	rep := CheckNSPExport(three)
+	if len(rep.Gaps) != 2 || rep.Gaps[0].Path != "/sorts/1" || rep.Gaps[1].Path != "/sorts/2" ||
+		rep.Gaps[1].Field != "title" || rep.Gaps[1].Value != (query.Sort{Field: "title"}) {
+		t.Errorf("gaps = %+v, want year desc at /sorts/1 and title at /sorts/2", rep.Gaps)
 	}
 	// The extra terms are reported even when the first one is itself unmappable,
 	// since the two are separate causes.
@@ -1109,6 +1118,11 @@ func TestCheckNSPImportOwnsTheAnswer(t *testing.T) {
 		if rep.Direction != NSPDirImport {
 			t.Errorf("%s: direction = %q, want import", name, rep.Direction)
 		}
+		for i, g := range rep.All() {
+			if g.Kind == "" || g.Reason == "" || !slices.Contains(NSPReasons(), g.Code) {
+				t.Errorf("%s: gap %d = %+v, want a kind, a known code and a reason", name, i, g)
+			}
+		}
 		_, err := ImportNSP([]byte(doc))
 		switch {
 		case err == nil && !rep.OK():
@@ -1206,8 +1220,11 @@ func TestImportNSPPartialRefusesMalformed(t *testing.T) {
 		"bad limit":              `{"all":[{"is":{"title":"x"}}],"limit":"notanumber"}`,
 	}
 	for name, doc := range broken {
-		if _, err := ImportNSPPartial([]byte(doc)); !waxerr.Is(err, waxerr.CodeUnsupported) {
+		_, err := ImportNSPPartial([]byte(doc))
+		if !waxerr.Is(err, waxerr.CodeUnsupported) {
 			t.Errorf("%s: want CodeUnsupported, got %v", name, err)
+		} else if strings.Contains(err.Error(), "imported: nsp:") {
+			t.Errorf("%s: refusal %q repeats the nsp prefix inside its sentence", name, err)
 		}
 		rep, err := CheckNSPImport([]byte(doc))
 		if err != nil {
@@ -1292,8 +1309,8 @@ func TestExportNSPModeAndSeedAreSeparateGaps(t *testing.T) {
 	if len(rep.Gaps) != 1 || rep.Gaps[0].Path != "/limitSeed" {
 		t.Fatalf("gaps = %+v, want the seed alone", rep.Gaps)
 	}
-	if strings.Contains(rep.Gaps[0].Reason, "mode") {
-		t.Errorf("reason = %q, but the mode survives into the document", rep.Gaps[0].Reason)
+	if rep.Gaps[0].Code != NSPReasonLimitSeed || strings.Contains(rep.Gaps[0].Reason, "mode") {
+		t.Errorf("gap = %+v, but the mode survives into the document", rep.Gaps[0])
 	}
 }
 
@@ -1313,5 +1330,79 @@ func TestNSPGapPathEscapesDocumentKeys(t *testing.T) {
 		if !got[want] {
 			t.Errorf("paths = %v, want one at %q", got, want)
 		}
+	}
+}
+
+// TestNSPReasonsRenderDistinctSentences: every code renders a sentence of its own in
+// each direction, so a caller can switch on the code where it used to parse the
+// sentence, and two codes can never read as the same sentence.
+func TestNSPReasonsRenderDistinctSentences(t *testing.T) {
+	for _, dir := range []NSPDirection{NSPDirExport, NSPDirImport} {
+		seen := map[string]NSPReason{}
+		for _, code := range NSPReasons() {
+			g := NSPGap{Code: code, Field: "f", Op: "o", Value: 7, Key: "k", Mode: "minutes"}
+			s := g.sentence(dir)
+			if s == "" {
+				t.Errorf("%s %s renders no sentence", dir, code)
+				continue
+			}
+			if prev, dup := seen[s]; dup {
+				t.Errorf("%s: %s and %s both render %q", dir, prev, code, s)
+			}
+			seen[s] = code
+		}
+	}
+}
+
+// TestNSPReportJSONCarriesTheCodes pins the structured half of a report as a consumer
+// reads it: the code on every gap, the budget gap's limit mode, a dropped sort term as
+// the term itself, and the top-level key an import could not represent.
+func TestNSPReportJSONCarriesTheCodes(t *testing.T) {
+	q := query.New(query.EntityItems).Where("artist", query.OpIs, "X").
+		OrderBy("artist", false).OrderBy("year", true).Limit(60).LimitBy(query.LimitMinutes).Build()
+	b, err := json.Marshal(CheckNSPExport(q))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		`"code":"limit_mode"`, `"code":"extra_sort_term"`, `"value":{"field":"year","desc":true}`,
+		`"code":"limit_budget"`, `"value":60`, `"mode":"minutes"`,
+	} {
+		if !strings.Contains(string(b), want) {
+			t.Errorf("export report %s\nlacks %s", b, want)
+		}
+	}
+	rep, err := CheckNSPImport([]byte(`{"limitPercent":50,"all":[{"is":{"artist":"X"}}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err = json.Marshal(rep)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := `"code":"unsupported_key","key":"limitPercent"`; !strings.Contains(string(b), want) {
+		t.Errorf("import report %s\nlacks %s", b, want)
+	}
+}
+
+// TestNSPNonNumericRatingIsOneCodeBothWays: the same conversion failure is a value gap
+// on export, where the stored rule holds a value with no .nsp form, and a malformed gap
+// on import, where Navidrome itself would never write it; the code is the same, and the
+// import gap names its field, operator and value like every other.
+func TestNSPNonNumericRatingIsOneCodeBothWays(t *testing.T) {
+	out := CheckNSPExport(query.New(query.EntityItems).Where("rating", query.OpGt, "good").Build())
+	if len(out.Gaps) != 1 || out.Gaps[0].Kind != NSPGapValue || out.Gaps[0].Code != NSPReasonValueNotNumeric {
+		t.Errorf("export gaps = %+v, want one value gap coded value_not_numeric", out.Gaps)
+	}
+	in, err := CheckNSPImport([]byte(`{"all":[{"is":{"rating":"good"}}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(in.Gaps) == 0 {
+		t.Fatal("import reported nothing")
+	}
+	if g := in.Gaps[0]; g.Kind != NSPGapMalformed || g.Code != NSPReasonValueNotNumeric ||
+		g.Field != "rating" || g.Op != "is" || g.Value != "good" {
+		t.Errorf("import gap = %+v, want a malformed value_not_numeric gap on rating is good", g)
 	}
 }

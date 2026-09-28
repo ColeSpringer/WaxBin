@@ -33,9 +33,10 @@ const decoderName = "waxflow"
 //
 // It is set only when opening the input fails, and only when nothing recognized
 // the bytes: openErr says which failures those are. A file whose magic matched
-// and whose headers are then damaged is corrupt (CodeInvalid), and so is any
-// failure once decoding has begun, however it is coded upstream. Burying those as
-// a silent skip would retry them forever. Test for it with errors.Is.
+// and whose headers are then damaged is corrupt (CodeInvalid), and any failure
+// once decoding has begun is an error rather than this, however it is coded
+// upstream. Burying those as a silent skip would retry them forever. Test for it
+// with errors.Is.
 var ErrUnsupported = errors.New("decode: unsupported input")
 
 // Measurement is a whole-file loudness measurement in WaxFlow's dB domain.
@@ -55,6 +56,10 @@ type Measurement struct {
 	// InputDamage lists what the tolerant read worked around (a truncated stream, a
 	// lost frame sync), complete because Measure reads to the end; nil when clean.
 	InputDamage []string
+	// SampleRate and Frames are the rate the tap's chunks arrive at (48000 for any
+	// Opus file, whatever its header says) and how many frames the meter measured.
+	SampleRate int
+	Frames     int64
 }
 
 // Engine decodes audio. It is safe for concurrent use.
@@ -123,6 +128,8 @@ func (e *Engine) Measure(ctx context.Context, path string, tap func(chans [][]fl
 		SamplePeakDB:   res.SamplePeakDB - hg,
 		HeaderGainDB:   hg,
 		InputDamage:    res.InputWarnings,
+		SampleRate:     res.Format.Rate,
+		Frames:         res.Samples,
 	}, nil
 }
 
@@ -371,7 +378,9 @@ func Coverage() []FormatSupport {
 // this package. It never yields ErrUnsupported: only the open call classifies
 // that, by phase rather than by code.
 // The default arm covers every code it does not name (internal among them), so
-// CodeIO from here is not only an unreadable source.
+// CodeIO from here is not only an unreadable source. CodeInvalid from here means
+// malformed input and nothing else, which is how the analyze pass reads it, so a
+// request WaxFlow refuses is CodeUnsupported.
 func mapErr(op string, err error) error {
 	switch flowerr.CodeOf(err) {
 	case flowerr.CodeUnsupportedFormat, flowerr.CodeUnsupportedSource:
@@ -381,7 +390,7 @@ func mapErr(op string, err error) error {
 	case flowerr.CodeSourceUnreadable:
 		return waxerr.Wrap(waxerr.CodeIO, op, err)
 	case flowerr.CodeInvalidRequest:
-		return waxerr.Wrap(waxerr.CodeInvalid, op, err)
+		return waxerr.Wrap(waxerr.CodeUnsupported, op, err)
 	case flowerr.CodeCanceled:
 		return waxerr.Wrap(waxerr.CodeCanceled, op, err)
 	default:

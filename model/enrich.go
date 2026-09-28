@@ -62,7 +62,7 @@ const (
 	EnrichPhaseArtist       EnrichPhase = "artist"
 	EnrichPhaseReleaseGroup EnrichPhase = "release-group"
 	EnrichPhaseAlbumRelease EnrichPhase = "album-release"
-	EnrichPhaseAuxArt       EnrichPhase = "aux-art"
+	EnrichPhaseGroupArt     EnrichPhase = "group-art"
 	EnrichPhaseArtistArt    EnrichPhase = "artist-art"
 	EnrichPhaseAlbumArt     EnrichPhase = "album-art"
 	EnrichPhaseBook         EnrichPhase = "book"
@@ -78,7 +78,7 @@ func EnrichPhases() []EnrichPhase {
 		EnrichPhaseArtist,
 		EnrichPhaseReleaseGroup,
 		EnrichPhaseAlbumRelease,
-		EnrichPhaseAuxArt,
+		EnrichPhaseGroupArt,
 		EnrichPhaseArtistArt,
 		EnrichPhaseAlbumArt,
 		EnrichPhaseBook,
@@ -95,7 +95,7 @@ func EnrichPhases() []EnrichPhase {
 func (p EnrichPhase) Valid() bool {
 	switch p {
 	case EnrichPhaseArtist, EnrichPhaseReleaseGroup, EnrichPhaseAlbumRelease,
-		EnrichPhaseAuxArt, EnrichPhaseArtistArt, EnrichPhaseAlbumArt,
+		EnrichPhaseGroupArt, EnrichPhaseArtistArt, EnrichPhaseAlbumArt,
 		EnrichPhaseBook, EnrichPhaseLyrics, EnrichPhaseTrackFields,
 		EnrichPhaseBookFields, EnrichPhaseAlbumFields:
 		return true
@@ -155,7 +155,7 @@ type EnrichScope struct {
 // rowids like the analyze port does).
 type EnrichTarget struct {
 	// Type is the entity type or the pass marker this target belongs to: artist,
-	// release_group, album, or book for the identity phases, and lyrics, aux_art,
+	// release_group, album, or book for the identity phases, and lyrics, group_art,
 	// artist_art, album_art, fields, or fields_album for the passes that borrow the
 	// marker table for their own granularity.
 	Type       string
@@ -196,12 +196,17 @@ type EnrichTarget struct {
 	ReleaseGroupMBID string
 	// HasArt reports whether the target already holds a front image, and the walks that
 	// set it are the artist and release-group identity queues, the artist-art backfill,
-	// and the album-art backfill. What counts as held differs by rung: an album consumes the art fallback
-	// chain, so a member track's embedded cover answers its front, while an artist is a
-	// source in that chain and only its own row counts. A pass asks for a front only
-	// when this is false, so a library whose rips carry embedded art spends no
+	// and the album-art backfill. What counts as held differs by rung: an album consumes
+	// the art fallback chain, so a member track's embedded cover answers its front, while
+	// an artist is a source in that chain and only its own row counts. A pass asks for a
+	// front only when this is false, so a library whose rips carry embedded art spends no
 	// rate-limited requests on covers the store would refuse to fill anyway.
 	HasArt bool
+	// FrontDue and AuxDue say which halves of its lookup the group-art walk asks about,
+	// and that queue sets them in place of HasArt: the front when the group holds none
+	// and the front's own marker leaves it due, the auxiliary roles when one of them is
+	// empty and their marker leaves them due. See ReleaseGroupArtBackfill.
+	FrontDue, AuxDue bool
 	// NeedsGenres reports whether a release group has a member track the genre fill
 	// would reach: one with no genre and no genre lock. The release-group queue sets it,
 	// and only such a group is owed its genre rider when a genre provider fails.
@@ -291,38 +296,47 @@ type ReleaseGroupEnrichment struct {
 	Unasked    bool
 }
 
-// ReleaseGroupAuxArt is the auxiliary-role backfill for one release group: the
-// images an aux-capable provider offered for the roles beside the front. It is
-// separate from ReleaseGroupEnrichment because the two passes ask different
-// questions. That one resolves identity and fetches art on the way past, keyed on
-// the front; this one asks only about the empty aux slots of a group whose front is
-// already settled, which is the case the front-keyed pre-guards can never reach.
+// ReleaseGroupArtBackfill is the art one group-art backfill pass gathered, the
+// release-group twin of ArtistArtBackfill. It is separate from ReleaseGroupEnrichment
+// because the two passes ask different questions: that one resolves identity and only
+// refreshes a front the group already holds, while this one asks about the group's empty
+// slots. Art is nil when the walk did not ask about the front or nothing offered one.
 //
-// Matched=false records a completed lookup nothing answered, so the group is not
-// re-asked every run. Provider names who supplied the first image, and the marker
-// carries it; the store substitutes its own label when there is none, since the
-// column is NOT NULL. AuxArt never carries the front role: the release-group pass
-// owns that slot.
-type ReleaseGroupAuxArt struct {
+// The walk has two halves, the front and the auxiliary roles, and each settles under its
+// own marker only when the walk asked it. So a front no provider had stays a miss the
+// retry window returns to even when an auxiliary role landed, and a group whose front an
+// earlier pass filled is still asked about its auxiliary roles once a provider serving
+// them joins. A half matched when an image for it came back. The fill runs on the images
+// the caller brought rather than on which halves it asked, so an auxiliary role a front
+// provider offered on the way past lands with the front. Provider names who supplied the
+// first image, and the markers carry it; the store substitutes its own label when there
+// is none, since the column is NOT NULL.
+type ReleaseGroupArtBackfill struct {
 	ReleaseGroupID int64
 	PID            PID
-	Matched        bool
 	Provider       string
+	Art            *ArtImage
 	AuxArt         map[ArtRole]*ArtImage
-	// Incomplete says a provider the walk called for this target failed with a slot it
-	// could have filled still open. The store applies what was gathered and records the
-	// lookup as owed rather than answered, so a later pass asks again after its new
-	// targets. That ask settles it as it stands even if it fails again, so a target a
-	// provider keeps failing on costs one more request, not one per pass. A definitive
-	// answer, a match or a no-match every consulted provider agreed on, writes the marker
-	// as before.
+	Front, Aux     ArtHalf
+}
+
+// ArtHalf is one half of an art backfill's lookup: whether the walk asked about it, and
+// how that ask fell short.
+//
+// Incomplete says a provider the walk called for this half failed with a slot of it still
+// open. The store applies what was gathered and records the half as owed rather than
+// answered, so a later pass asks again after its new targets. That ask settles it as it
+// stands even if it fails again, so a target a provider keeps failing on costs one more
+// request, not one per pass.
+//
+// Unasked says a provider serving an open slot of this half was out of the pass: it had
+// failed too many times in a row to be consulted again. What was gathered is applied and
+// the half records a miss whatever else answered, so it falls due at the retry window
+// rather than resting behind a durable match. Only the engine's breaker sets it.
+type ArtHalf struct {
+	Asked      bool
 	Incomplete bool
-	// Unasked says a provider serving an open slot was out of the pass: it had failed too
-	// many times in a row to be consulted again. What was gathered is applied and the
-	// marker records a miss whatever else answered, so the target falls due at the retry
-	// window rather than resting behind a durable match. Only the engine's breaker sets
-	// it.
-	Unasked bool
+	Unasked    bool
 }
 
 // EnrichCountOptions selects what a heartbeat denominator counts: exactly the phases the
@@ -332,25 +346,22 @@ type ReleaseGroupAuxArt struct {
 type EnrichCountOptions struct {
 	// Phases are the keys of the run's built phase list, scoped as the run scoped it.
 	Phases []EnrichPhase
-	// AlbumArt counts albums needing an art backfill, per askable slot, when the album-art
-	// phase is in Phases. The zero value counts none, mirroring a run whose providers gate
-	// the phase off entirely.
-	AlbumArt AlbumArtSlots
+	// AlbumArt and GroupArt count albums and release groups needing an art backfill, per
+	// askable slot, when their phase is in Phases. The zero value counts none, mirroring
+	// a run whose providers gate the phase off entirely.
+	AlbumArt ArtSlots
+	GroupArt ArtSlots
 	// Forced names the phases a phase-scoped force walks under SweepAll, so their count
 	// takes every target while the rest are counted under the run's own sweep.
 	Forced []EnrichPhase
 }
 
 // ArtistArtBackfill is the art one artist-art backfill pass gathered. It is the artist
-// twin of ReleaseGroupAuxArt, and separate from ArtistEnrichment for the same reason:
+// twin of ReleaseGroupArtBackfill, and separate from ArtistEnrichment for the same reason:
 // that one resolves identity and fetches art on the way past, so an artist it has
 // already marked never gets asked again, while this one asks only about the empty slots
-// of an artist whose identity is settled.
-//
-// Unlike the release-group backfill it does carry a front. Artist-rung art is fetched
-// inside the identity pass, so an already-marked artist has no picture at all, and the
-// front is the usual gap rather than the settled slot. Art is nil when the front is
-// already held or nothing offered one.
+// of an artist whose identity is settled. Art is nil when the front is already held or
+// nothing offered one.
 //
 // Matched=false records a completed lookup nothing answered, so the artist is not
 // re-asked every run. Provider names who supplied the first image, and the marker
@@ -363,7 +374,7 @@ type ArtistArtBackfill struct {
 	Provider string
 	Art      *ArtImage
 	AuxArt   map[ArtRole]*ArtImage
-	// Incomplete and Unasked settle the marker as they do on ReleaseGroupAuxArt.
+	// Incomplete and Unasked settle the marker as they do on ReleaseGroupArtBackfill.
 	Incomplete bool
 	Unasked    bool
 }
@@ -377,7 +388,7 @@ type LyricsEnrichment struct {
 	Matched  bool
 	Lyrics   *Lyrics
 	Provider string // the provider that supplied the lyrics ("lrclib", ...)
-	// Incomplete and Unasked settle the marker as they do on ReleaseGroupAuxArt.
+	// Incomplete and Unasked settle the marker as they do on ReleaseGroupArtBackfill.
 	Incomplete bool
 	Unasked    bool
 }
@@ -436,24 +447,24 @@ type AlbumArtBackfill struct {
 	// and a durable match would never ask again.
 	FrontFromGroup bool
 	GroupFrontHash string
-	// Incomplete and Unasked settle the marker as they do on ReleaseGroupAuxArt.
+	// Incomplete and Unasked settle the marker as they do on ReleaseGroupArtBackfill.
 	Incomplete bool
 	Unasked    bool
 }
 
-// AlbumArtSlots names which album art vacancies a walk may ask about. Front needs a
-// provider advertising CapCover, which the built-in Cover Art Archive does at the
-// release rung, so a stock install asks it; Aux needs one advertising CapAuxArt, which
-// no built-in does. A slot no registered provider can fill is left out of the vacancy
-// test, so a stock install never marks an album for a vacancy nothing could have
-// answered. Both false means the phase does not run at all.
-type AlbumArtSlots struct {
+// ArtSlots names which art vacancies a backfill walk may ask about at its rung. Front
+// needs a provider serving CapCover there, which the built-in Cover Art Archive does at
+// the release-group and release rungs, so a stock install asks it; Aux needs one serving
+// CapAuxArt, which no built-in does. A slot no provider in the pass can fill is left out
+// of the vacancy test, so a stock install never marks a target for a vacancy nothing
+// could have answered. Both false means the phase does not run at all.
+type ArtSlots struct {
 	Front bool
 	Aux   bool
 }
 
 // Any reports whether either slot is askable, which is the phase's own gate.
-func (s AlbumArtSlots) Any() bool { return s.Front || s.Aux }
+func (s ArtSlots) Any() bool { return s.Front || s.Aux }
 
 // BookEnrichment is the resolved data for one audiobook: external identifiers and
 // the publisher, filled only when the corresponding field is currently empty so a
@@ -485,7 +496,7 @@ type ItemFieldsEnrichment struct {
 	Provider  string
 	Providers map[string]string
 	Fields    map[string]string
-	// Incomplete and Unasked settle the marker as they do on ReleaseGroupAuxArt.
+	// Incomplete and Unasked settle the marker as they do on ReleaseGroupArtBackfill.
 	Incomplete bool
 	Unasked    bool
 }
@@ -504,7 +515,7 @@ type AlbumFieldsEnrichment struct {
 	Provider  string
 	Providers map[string]string
 	Fields    map[string]string
-	// Incomplete and Unasked settle the marker as they do on ReleaseGroupAuxArt.
+	// Incomplete and Unasked settle the marker as they do on ReleaseGroupArtBackfill.
 	Incomplete bool
 	Unasked    bool
 }
@@ -543,10 +554,20 @@ func AlbumFillFields() map[string]bool {
 }
 
 // EnrichmentCoverage reports how many entities of each type have been enriched,
-// for doctor and audit.
+// for doctor and audit. Matched sums the three identity types only.
+//
+// The lyrics counts are held-lyrics coverage over every present track, whatever
+// supplied the lyrics (a tag, a sidecar, an edit, a provider), not marker coverage.
+// TracksLyricsAsked counts the tracks with no lyrics whose lookup answered that there are
+// none (an instrumental answers that way too). The rest of Tracks were never asked, are
+// still owed an answer, or found lyrics since removed.
 type EnrichmentCoverage struct {
 	Artists       int
 	ReleaseGroups int
 	Books         int
 	Matched       int // rows where a provider returned a usable match
+
+	Tracks            int
+	TracksWithLyrics  int
+	TracksLyricsAsked int
 }

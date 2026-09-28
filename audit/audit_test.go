@@ -34,6 +34,8 @@ type fakeStore struct {
 	diags        []model.FileDiagnostic
 	diagStale    int
 	diagTotal    int
+	mismatches   []model.FileDurationMismatch
+	mismatchTot  int
 }
 
 func (f *fakeStore) DuplicateArtists(context.Context) ([]model.DuplicateSet, error) {
@@ -76,6 +78,12 @@ func (f *fakeStore) FileDiagnostics(context.Context, model.DiagnosticFilter) ([]
 }
 func (f *fakeStore) DiagnosticCoverage(context.Context) (int, int, error) {
 	return f.diagStale, f.diagTotal, nil
+}
+func (f *fakeStore) FilesDurationMismatch(_ context.Context, limit int) ([]model.FileDurationMismatch, int, error) {
+	if len(f.mismatches) > limit {
+		return f.mismatches[:limit], f.mismatchTot, nil
+	}
+	return f.mismatches, f.mismatchTot, nil
 }
 
 func findingsFor(rep *Report, check model.AuditCheck) []model.AuditFinding {
@@ -393,6 +401,113 @@ func TestAuditCanceledProbeIsNotCorruption(t *testing.T) {
 	if rep != nil {
 		if got := findingsFor(rep, model.CheckCorruptAudio); len(got) != 0 {
 			t.Errorf("corrupt findings = %+v, want none from a canceled probe", got)
+		}
+	}
+}
+
+// TestAuditCorruptDiagnosticsFromEveryWriter: corrupt_audio's cheap half reads the
+// verdict whichever writer recorded it, the scan's parse or the analyze pass's decode,
+// reports a file both flagged once at the worse severity, and hands the probe half
+// every path it reported so no file is decoded again for a verdict already on record.
+func TestAuditCorruptDiagnosticsFromEveryWriter(t *testing.T) {
+	st := &fakeStore{
+		diags: []model.FileDiagnostic{
+			{DisplayPath: "/lib/a.flac", Origin: model.OriginAnalyze, Code: model.DiagCorruptAudio,
+				Severity: model.SeverityWarn, Detail: "STREAMINFO declares 160000 samples but the frames end at 45056"},
+			{DisplayPath: "/lib/b.m4a", Origin: model.OriginAnalyze, Code: model.DiagCorruptAudio,
+				Severity: model.SeverityError, Detail: "mp4: fragment sample runs past end of source"},
+			{DisplayPath: "/lib/b.m4a", Origin: model.OriginScan, Code: model.DiagCorruptAudio,
+				Severity: model.SeverityWarn, Detail: "truncated audio"},
+		},
+		files: []model.AuditFileInfo{
+			{PID: "f1", Path: []byte("/lib/a.flac"), DisplayPath: "/lib/a.flac", Kind: model.FileAudio},
+			{PID: "f2", Path: []byte("/lib/b.m4a"), DisplayPath: "/lib/b.m4a", Kind: model.FileAudio},
+			{PID: "f3", Path: []byte("/lib/c.wv"), DisplayPath: "/lib/c.wv", Kind: model.FileAudio},
+		},
+	}
+	var probed []string
+	probe := func(_ context.Context, p string) ([]string, error) {
+		probed = append(probed, filepath.Base(p))
+		return nil, os.ErrInvalid
+	}
+	rep, err := New(st, nil, probe, nil).Run(context.Background(), Config{
+		Only: []model.AuditCheck{model.CheckCorruptAudio}, Integrity: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(probed) != 1 || probed[0] != "c.wv" {
+		t.Errorf("probed %q, want only c.wv (the others are on record)", probed)
+	}
+	sev := map[string]model.AuditSeverity{}
+	for _, f := range findingsFor(rep, model.CheckCorruptAudio) {
+		if _, dup := sev[f.Path]; dup {
+			t.Errorf("%s reported twice", f.Path)
+		}
+		sev[f.Path] = f.Severity
+	}
+	want := map[string]model.AuditSeverity{
+		"/lib/a.flac": model.SeverityWarn, "/lib/b.m4a": model.SeverityError, "/lib/c.wv": model.SeverityError,
+	}
+	for p, w := range want {
+		if sev[p] != w {
+			t.Errorf("%s severity = %q, want %q", p, sev[p], w)
+		}
+	}
+	if len(sev) != len(want) {
+		t.Errorf("findings by path = %v, want %v", sev, want)
+	}
+}
+
+// TestAuditDurationMismatch: each sampled file whose header disagrees with its decoded
+// audio is a warn finding naming both lengths, and a roll-up names the total when the
+// sample was capped.
+func TestAuditDurationMismatch(t *testing.T) {
+	st := &fakeStore{
+		mismatches: []model.FileDurationMismatch{
+			{FilePID: "f1", DisplayPath: "/lib/a.mp3", HeaderMS: 168_000, DecodedMS: 240_000},
+			{FilePID: "f2", DisplayPath: "/lib/b.mp3", HeaderMS: 60_000, DecodedMS: 100_500},
+		},
+		mismatchTot: 7,
+	}
+	rep, err := New(st, nil, nil, nil).Run(context.Background(), Config{
+		Only: []model.AuditCheck{model.CheckDurationMismatch}, Sample: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fs := findingsFor(rep, model.CheckDurationMismatch)
+	if len(fs) != 3 {
+		t.Fatalf("want 2 per-file findings plus a roll-up, got %d: %+v", len(fs), fs)
+	}
+	if fs[0].Severity != model.SeverityWarn || fs[0].Path != "/lib/a.mp3" ||
+		!strings.Contains(fs[0].Message, "2:48") || !strings.Contains(fs[0].Message, "4:00") {
+		t.Errorf("per-file finding = %+v, want a warn naming both lengths", fs[0])
+	}
+	if !strings.Contains(fs[1].Message, "1:00") || !strings.Contains(fs[1].Message, "1:40") {
+		t.Errorf("per-file finding = %+v, want both lengths", fs[1])
+	}
+	if !strings.Contains(fs[2].Message, "7 files") || !strings.Contains(fs[2].Message, "2 shown") {
+		t.Errorf("roll-up = %q, want the total and the sample size", fs[2].Message)
+	}
+
+	st.mismatchTot = 2
+	rep, err = New(st, nil, nil, nil).Run(context.Background(), Config{
+		Only: []model.AuditCheck{model.CheckDurationMismatch}, Sample: 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fs := findingsFor(rep, model.CheckDurationMismatch); len(fs) != 2 {
+		t.Errorf("uncapped sample = %d findings, want 2 and no roll-up", len(fs))
+	}
+}
+
+func TestClockMS(t *testing.T) {
+	for ms, want := range map[int64]string{
+		0: "0:00", 59_999: "0:59", 168_000: "2:48", 600_000: "10:00",
+		3_600_000: "1:00:00", 3_725_000: "1:02:05", 36_000_000: "10:00:00",
+	} {
+		if got := clockMS(ms); got != want {
+			t.Errorf("clockMS(%d) = %q, want %q", ms, got, want)
 		}
 	}
 }

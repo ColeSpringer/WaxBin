@@ -123,12 +123,15 @@ CREATE TABLE orphan_candidate (
 -- isolation is a property of the schema rather than of a delete predicate.
 CREATE TABLE file_diagnostic (
   file_id  INTEGER NOT NULL REFERENCES file(id) ON DELETE CASCADE,
-  origin   TEXT    NOT NULL,            -- scan | organize | replaygain
+  origin   TEXT    NOT NULL,            -- the writer: model.DiagnosticOrigin
   code     TEXT    NOT NULL,
   severity TEXT    NOT NULL,            -- info | warn | error
   tag_key  TEXT    NOT NULL DEFAULT '',
   detail   TEXT    NOT NULL DEFAULT '',
   seen_at  INTEGER NOT NULL,
+  -- The essence an analyze verdict describes, NULL for every other writer. A read hides
+  -- the row once the file's essence has moved on, as it hides stale loudness and peaks.
+  essence  TEXT,
   PRIMARY KEY (file_id, origin, code, tag_key)
 );
 CREATE INDEX file_diagnostic_code ON file_diagnostic(code);

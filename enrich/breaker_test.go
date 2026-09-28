@@ -497,7 +497,7 @@ func TestEveryWalkSettlesAnOwedLookupOnItsNextAsk(t *testing.T) {
 		seed         func(t *testing.T, st *sqlite.Store, libID int64)
 		provider     *enrich.Mock
 	}{
-		{"aux art", "aux_art", track, down("fanart", enrich.CapAuxArt, enrich.TargetReleaseGroup)},
+		{"group art", "group_art", track, down("fanart", enrich.CapAuxArt, enrich.TargetReleaseGroup)},
 		{"artist art", "artist_art", track, down("deezer", enrich.CapArtistArt, enrich.TargetArtist)},
 		{"album art", "album_art", album, down("covers", enrich.CapCover, enrich.TargetRelease)},
 		{"track fields", "fields", track, down("getsongbpm", enrich.CapFields, enrich.TargetRecording)},

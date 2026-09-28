@@ -31,11 +31,13 @@ func oweLyrics(t *testing.T, st *Store, id int64) {
 func TestTheOwedSweepInstantSeparatesPasses(t *testing.T) {
 	ctx := context.Background()
 	st, _ := entityFixture(t)
-	// A stamp floor ahead of the wall clock stands in for a clock that has not ticked
-	// since the last stamp.
-	st.wmu.Lock()
-	st.lastStampNS = time.Now().Add(time.Hour).UnixNano()
-	st.wmu.Unlock()
+	// A wall clock stopped at the last stamp stands in for one that has not ticked since.
+	// The floor moves only a nanosecond a stamp past it, so the real clock is ahead again
+	// once the test restores it.
+	stopped := nowNS()
+	wall := wallNS
+	wallNS = func() int64 { return stopped }
+	t.Cleanup(func() { wallNS = wall })
 
 	oweLyrics(t, st, 1)
 	asOf, err := st.ExpireDeferredLookups(ctx, 0)

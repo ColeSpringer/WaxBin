@@ -46,21 +46,33 @@ func (a *Auditor) reportFileDiagnostics(ds []model.FileDiagnostic, sample int, a
 }
 
 // reportCorruptDiagnostics emits corrupt_audio findings from the diagnostics the
-// scan already derived. It is the cheap half of CheckCorruptAudio, needing no file
-// I/O, so it runs by default. It returns the display paths it reported so the probe
-// half can skip them, leaving a file both halves flag with one finding rather than
-// two.
+// scan's parse and the analyze pass's decode already recorded. It is the cheap half of
+// CheckCorruptAudio, needing no file I/O, so it runs by default. A file both writers
+// flagged is one finding at the worse verdict. It returns the display paths it
+// reported so the probe half can skip them, leaving a file both halves flag with one
+// finding rather than two.
 func (a *Auditor) reportCorruptDiagnostics(ds []model.FileDiagnostic, sample int, add func(model.AuditFinding)) map[string]bool {
 	seen := map[string]bool{}
 	caps := make(map[model.AuditSeverity]*capped, len(diagSeverities))
 	for _, sev := range diagSeverities {
 		caps[sev] = &capped{limit: sample, check: model.CheckCorruptAudio, sev: sev, add: add}
 	}
+	worst := map[string]model.FileDiagnostic{}
+	var paths []string
 	for _, d := range ds {
 		if d.Code != model.DiagCorruptAudio {
 			continue
 		}
-		seen[d.DisplayPath] = true
+		if prev, ok := worst[d.DisplayPath]; !ok {
+			paths = append(paths, d.DisplayPath)
+		} else if severityRank(d.Severity) >= severityRank(prev.Severity) {
+			continue
+		}
+		worst[d.DisplayPath] = d
+	}
+	for _, p := range paths {
+		d := worst[p]
+		seen[p] = true
 		c, ok := caps[d.Severity]
 		if !ok {
 			c = caps[model.SeverityWarn]

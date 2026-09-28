@@ -15,6 +15,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/colespringer/waxbin/model"
@@ -55,17 +56,14 @@ type OpenOptions struct {
 // Store is the SQLite-backed catalog. It is safe for concurrent use: writes go
 // through the single coordinated write connection; reads use a connection pool.
 type Store struct {
-	path   string
-	opt    OpenOptions // normalized open options, retained so Reopen rebuilds the same DSNs
-	read   *sql.DB     // read pool (reopened in place by Reopen)
-	write  *sql.DB     // single write connection (nil when read-only)
-	wmu    sync.Mutex  // serializes write transactions; also guards closed
-	closed bool        // guarded by wmu
-	// lastStampNS is the last play-state stamp handed out, guarded by wmu. See
-	// stampNS for why the wall clock alone is not enough.
-	lastStampNS int64
-	lock        *writeLock // held advisory lock (nil when read-only)
-	readOnly    bool
+	path     string
+	opt      OpenOptions // normalized open options, retained so Reopen rebuilds the same DSNs
+	read     *sql.DB     // read pool (reopened in place by Reopen)
+	write    *sql.DB     // single write connection (nil when read-only)
+	wmu      sync.Mutex  // serializes write transactions; also guards closed
+	closed   bool        // guarded by wmu
+	lock     *writeLock  // held advisory lock (nil when read-only)
+	readOnly bool
 	// allowStale warns instead of refusing on a baseline mismatch; read-only opens
 	// only (migrate never consults it).
 	allowStale bool
@@ -432,21 +430,28 @@ func roDSN(opt OpenOptions) string {
 
 func pragma(name, value string) string { return "_pragma=" + name + "(" + value + ")" }
 
-func nowNS() int64 { return time.Now().UnixNano() }
+// lastNS is the last value nowNS returned.
+var lastNS atomic.Int64
 
-// stampNS returns the server stamp for a play-state write, never handing out the
-// same value twice. Windows' wall clock ticks coarsely enough that two back-to-back
-// write transactions can read the same nanosecond, and an equal stamp is worse than
-// a skewed one here: the browse lists order by these stamps (a tie falls through to
-// pid order, which is reverse recency), and the sync staleness test treats an equal
-// stamp as stale. The floor is per Store instance and guards nothing across
-// processes, which is already true of the wall clock. Callers must hold wmu, which
-// both play-state seams do (they stamp inside writeTx).
-func (s *Store) stampNS() int64 {
-	ns := time.Now().UnixNano()
-	if ns <= s.lastStampNS {
-		ns = s.lastStampNS + 1
+// nowNS is the store's clock: the wall clock in Unix nanoseconds, never at or below a
+// value it already returned in this process. Windows' clock ticks every 15.6ms, so
+// back-to-back writes can read the same nanosecond, and an equal stamp is worse than a
+// skewed one: browse recency and the sync staleness test order by these stamps, a
+// write-back settled at one fill's stamp must see a later fill as newer, and the owed
+// sweep's instant must fall strictly between the markers written before and after it.
+// The skew is nanoseconds while the wall clock moves forward; after it steps back,
+// stamps hold at the old time until it catches up. Stamps from separate processes are
+// not ordered, as the wall clock's never were.
+func nowNS() int64 {
+	wall := wallNS()
+	for {
+		last := lastNS.Load()
+		ns := max(wall, last+1)
+		if lastNS.CompareAndSwap(last, ns) {
+			return ns
+		}
 	}
-	s.lastStampNS = ns
-	return ns
 }
+
+// wallNS is the wall clock nowNS floors, a variable so a test can stop it.
+var wallNS = func() int64 { return time.Now().UnixNano() }

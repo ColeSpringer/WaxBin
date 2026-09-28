@@ -86,13 +86,13 @@ const (
 	// CapGenres supplies genres/tags for a release group.
 	CapGenres
 	// CapCover supplies cover-art bytes for a release group or for one release, and
-	// gates the album-art backfill's front half. The rung is the request type: a
-	// TargetReleaseGroup answer is one edition's art standing in for the whole group,
-	// while a TargetRelease answer is the pressing an album actually is, which is what
-	// that backfill asks for. The built-in Cover Art Archive serves both and says so
-	// through TargetCapabilities, so the album front half is the one art backfill a stock
-	// install runs. A provider serving covers for groups alone declares that the same
-	// way, so the front half does not walk every identified album on its account.
+	// gates the front halves of the group-art and album-art backfills. The rung is the
+	// request type: a TargetReleaseGroup answer is one edition's art standing in for the
+	// whole group, while a TargetRelease answer is the pressing an album actually is,
+	// which is what the album backfill asks for. The built-in Cover Art Archive serves
+	// both and says so through TargetCapabilities, so both front halves run on a stock
+	// install. A provider serving covers for groups alone declares that the same way, so
+	// the album front half does not walk every identified album on its account.
 	CapCover
 	// CapLyrics supplies a recording's lyrics.
 	CapLyrics
@@ -103,17 +103,16 @@ const (
 	CapBookMeta
 	// CapAuxArt supplies the auxiliary art roles (back, disc, booklet, background) for
 	// a release group, in Candidate.Art. It is separate from CapCover because it gates
-	// its own pass: the auxiliary backfill re-asks about groups whose front cover is
-	// already settled, which the cover-fetching passes never do, and it consults only
-	// the providers advertising this. The built-in Cover Art Archive serves the front
-	// alone and does not advertise it, so an install with no injected provider runs the
-	// backfill not at all and pays nothing for it.
+	// the auxiliary halves of the backfills, which consult only the providers
+	// advertising this, and keep their answers apart from the front's. The built-in Cover
+	// Art Archive serves the front alone and does not advertise it, so an install with no
+	// injected provider walks no auxiliary half and pays nothing for it.
 	//
 	// A provider that already returns auxiliary roles under CapCover keeps working
 	// exactly as before and contributes to the first-pass gather. To join the backfill
 	// it advertises this alongside CapCover, and answers a request whose Want is
-	// CapAuxArt with the non-front roles it has (the front is ignored there; the
-	// release-group pass owns that slot).
+	// CapAuxArt with the non-front roles it has (the front is ignored there; a front is
+	// asked for under CapCover).
 	//
 	// A provider serving these roles for release groups and not for a release declares
 	// the release rung empty through TargetCapabilities, so the album-art backfill's

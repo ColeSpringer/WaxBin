@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/colespringer/waxbin/internal/testaudio"
+	"github.com/colespringer/waxbin/waxerr"
+	flowerr "github.com/colespringer/waxflow/waxerr"
 )
 
 // tone returns a mono sine at the given amplitude.
@@ -375,5 +377,22 @@ func TestCoverageCodecsDecode(t *testing.T) {
 	}
 	if pcm.Frames() == 0 {
 		t.Error("decoded no frames")
+	}
+}
+
+// TestMapErrKeepsRefusedRequestsOutOfInvalid: the analyze pass reads CodeInvalid from here
+// as damaged audio, so a request WaxFlow refuses, which says nothing about the bytes, maps
+// to CodeUnsupported. Malformed input stays CodeInvalid.
+func TestMapErrKeepsRefusedRequestsOutOfInvalid(t *testing.T) {
+	for _, c := range []struct {
+		code flowerr.Code
+		want waxerr.Code
+	}{
+		{flowerr.CodeInvalidRequest, waxerr.CodeUnsupported},
+		{flowerr.CodeMalformedInput, waxerr.CodeInvalid},
+	} {
+		if got := waxerr.CodeOf(mapErr("decode.Measure", flowerr.New(c.code, "x"))); got != c.want {
+			t.Errorf("mapErr(%s) = %s, want %s", c.code, got, c.want)
+		}
 	}
 }

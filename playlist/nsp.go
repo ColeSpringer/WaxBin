@@ -2,7 +2,6 @@ package playlist
 
 import (
 	"encoding/json"
-	"fmt"
 	"math"
 	"slices"
 	"strconv"
@@ -139,13 +138,13 @@ func asFloat(v any) (float64, bool) {
 }
 
 // scaleRatingIn converts a Navidrome rating value (0 to 5 stars) to WaxBin's 0 to 100
-// scale. The second result is the failure reason, empty when the value converts; both
-// walks want the sentence rather than an error, since they record it in a report and
-// only the strict entry points turn one back into an error.
-func scaleRatingIn(v any) (any, string) {
+// scale. The second result is the failure's code, empty when the value converts; both
+// walks record it in a report rather than return an error, and only the strict entry
+// points turn one back into an error.
+func scaleRatingIn(v any) (any, NSPReason) {
 	f, ok := asFloat(v)
 	if !ok {
-		return nil, "nsp: rating value must be numeric"
+		return nil, NSPReasonValueNotNumeric
 	}
 	return f * nspRatingScale, ""
 }
@@ -153,15 +152,14 @@ func scaleRatingIn(v any) (any, string) {
 // scaleRatingOut converts a WaxBin rating value (0 to 100) back to Navidrome's 0 to 5
 // scale. It rejects a value that is not a whole number of stars rather than writing a
 // fractional or mismatched star count.
-func scaleRatingOut(v any) (any, string) {
+func scaleRatingOut(v any) (any, NSPReason) {
 	f, ok := asFloat(v)
 	if !ok {
-		return nil, "nsp: rating value must be numeric"
+		return nil, NSPReasonValueNotNumeric
 	}
 	n := int64(f)
 	if float64(n) != f || n%nspRatingScale != 0 {
-		return nil, fmt.Sprintf(
-			"nsp: WaxBin rating %v is not a whole star (a multiple of %d) and has no Navidrome 0-5 equivalent", v, nspRatingScale)
+		return nil, NSPReasonRatingNotWholeStar
 	}
 	return n / nspRatingScale, ""
 }
@@ -171,7 +169,7 @@ func scaleRatingOut(v any) (any, string) {
 // crossing unconverted leaves a stored rule holding a value the engine never produces
 // itself. A 0 or 1 is accepted too, since it means the same thing and refusing it would
 // only reject a document that round-tripped through here.
-func starredIn(v any) (any, string) {
+func starredIn(v any) (any, NSPReason) {
 	if b, ok := v.(bool); ok {
 		if b {
 			return int64(1), ""
@@ -181,30 +179,29 @@ func starredIn(v any) (any, string) {
 	if f, ok := asFloat(v); ok && (f == 0 || f == 1) {
 		return int64(f), ""
 	}
-	return nil, fmt.Sprintf("nsp: starred value %v is not a boolean", v)
+	return nil, NSPReasonValueNotBoolean
 }
 
 // starredOut converts a WaxBin starred value back to the .nsp boolean. A bool passes
 // through: a rule imported before this conversion existed holds one, and it is already
 // the value .nsp wants. Anything that is neither 0 nor 1 is not a state the column can
 // be in and has no .nsp form.
-func starredOut(v any) (any, string) {
+func starredOut(v any) (any, NSPReason) {
 	if b, ok := v.(bool); ok {
 		return b, ""
 	}
 	f, ok := asFloat(v)
 	if !ok || (f != 0 && f != 1) {
-		return nil, fmt.Sprintf(
-			"nsp: WaxBin starred value %v is neither 0 nor 1 and has no Navidrome boolean equivalent", v)
+		return nil, NSPReasonValueNotBoolean
 	}
 	return f == 1, ""
 }
 
 // nspValueConvs holds the per-field value conversions, keyed by canonical WaxBin field.
-// A field absent from it crosses verbatim. Both directions report a failure as a
-// sentence rather than an error, since the walks record it in a report and only the
-// strict entry points turn one back into an error.
-var nspValueConvs = map[string]struct{ in, out func(any) (any, string) }{
+// A field absent from it crosses verbatim. Both directions report a failure as a code
+// rather than an error, since the walks record it in a report and only the strict
+// entry points turn one back into an error.
+var nspValueConvs = map[string]struct{ in, out func(any) (any, NSPReason) }{
 	"rating":  {scaleRatingIn, scaleRatingOut},
 	"starred": {starredIn, starredOut},
 }
@@ -331,8 +328,10 @@ func (im *nspImporter) push(seg string) { im.path = append(im.path, seg) }
 func (im *nspImporter) pop()            { im.path = im.path[:len(im.path)-1] }
 func (im *nspImporter) at() string      { return nspPointer(im.path) }
 
-func (im *nspImporter) broken(reason string) {
-	im.rep.gap(NSPGap{Kind: NSPGapMalformed, Path: im.at(), Reason: reason})
+// broken records g as a malformed gap at the walk's position.
+func (im *nspImporter) broken(g NSPGap) {
+	g.Kind, g.Path = NSPGapMalformed, im.at()
+	im.rep.gap(g)
 }
 
 // nspTop decodes the document's top level. Its error is the one failure that is
@@ -363,14 +362,14 @@ func (im *nspImporter) walk(top map[string]json.RawMessage) (query.Query, bool) 
 		// Broken rather than unmappable: which of the two the person meant is not
 		// recoverable, so the walk reads "all" only to fill out the rest of the
 		// report and the document is refused either way.
-		im.broken("nsp: multiple root groups")
+		im.broken(NSPGap{Code: NSPReasonMultipleRoots})
 		rootKey = "all"
 	case hasAll:
 		rootKey = "all"
 	case hasAny:
 		rootKey = "any"
 	default:
-		im.broken("nsp: missing all/any root group")
+		im.broken(NSPGap{Code: NSPReasonMissingRoot})
 	}
 	kept := false
 	if rootKey != "" {
@@ -397,8 +396,7 @@ func (im *nspImporter) walk(top map[string]json.RawMessage) (query.Query, bool) 
 		// A semantics-affecting key WaxBin cannot represent (e.g. limitPercent). It
 		// is a real expressiveness gap rather than a broken document, so a partial
 		// import may drop it, and says so.
-		im.rep.gap(NSPGap{Kind: NSPGapShape, Path: nspPointer([]string{key}),
-			Reason: "nsp: unsupported top-level key: " + key})
+		im.rep.gap(NSPGap{Kind: NSPGapShape, Code: NSPReasonUnsupportedKey, Key: key, Path: nspPointer([]string{key})})
 	}
 
 	// limit/offset parse before the sort block: the random-sort mapping below
@@ -406,7 +404,7 @@ func (im *nspImporter) walk(top map[string]json.RawMessage) (query.Query, bool) 
 	if raw, ok := top["limit"]; ok {
 		var n int
 		if err := json.Unmarshal(raw, &n); err != nil {
-			im.rep.gap(NSPGap{Kind: NSPGapMalformed, Path: "/limit", Reason: "nsp: bad limit"})
+			im.rep.gap(NSPGap{Kind: NSPGapMalformed, Code: NSPReasonBadLimit, Path: "/limit"})
 		} else {
 			q.Limit = n
 		}
@@ -414,7 +412,7 @@ func (im *nspImporter) walk(top map[string]json.RawMessage) (query.Query, bool) 
 	if raw, ok := top["offset"]; ok {
 		var n int
 		if err := json.Unmarshal(raw, &n); err != nil {
-			im.rep.gap(NSPGap{Kind: NSPGapMalformed, Path: "/offset", Reason: "nsp: bad offset"})
+			im.rep.gap(NSPGap{Kind: NSPGapMalformed, Code: NSPReasonBadOffset, Path: "/offset"})
 		} else {
 			q.Offset = n
 		}
@@ -429,7 +427,7 @@ func (im *nspImporter) walk(top map[string]json.RawMessage) (query.Query, bool) 
 func (im *nspImporter) sort(top map[string]json.RawMessage, raw json.RawMessage, q *query.Query) {
 	var field string
 	if err := json.Unmarshal(raw, &field); err != nil {
-		im.rep.gap(NSPGap{Kind: NSPGapMalformed, Path: "/sort", Reason: "nsp: bad sort"})
+		im.rep.gap(NSPGap{Kind: NSPGapMalformed, Code: NSPReasonBadSort, Path: "/sort"})
 		return
 	}
 	lower := strings.ToLower(field)
@@ -442,8 +440,7 @@ func (im *nspImporter) sort(top map[string]json.RawMessage, raw json.RawMessage,
 		// building a query every downstream compile would reject. "order" is
 		// ignored: asc/desc of a shuffle is meaningless.
 		if q.Limit <= 0 {
-			im.rep.gap(NSPGap{Kind: NSPGapLimit, Path: "/sort", Value: field,
-				Reason: "nsp: sort random requires a positive limit"})
+			im.rep.gap(NSPGap{Kind: NSPGapLimit, Code: NSPReasonRandomNeedsLimit, Path: "/sort", Value: field})
 			return
 		}
 		q.LimitMode = query.LimitRandom
@@ -454,8 +451,7 @@ func (im *nspImporter) sort(top map[string]json.RawMessage, raw json.RawMessage,
 		// The date fields sort too (WaxBin's added/last_played are plain time
 		// columns): "recently added" is sort dateAdded desc.
 		if wb, ok = nspDateFieldToWB[lower]; !ok {
-			im.rep.gap(NSPGap{Kind: NSPGapSort, Path: "/sort", Field: field,
-				Reason: "nsp: unsupported sort field: " + field})
+			im.rep.gap(NSPGap{Kind: NSPGapSort, Code: NSPReasonUnsupportedSortField, Path: "/sort", Field: field})
 			return
 		}
 	}
@@ -465,7 +461,7 @@ func (im *nspImporter) sort(top map[string]json.RawMessage, raw json.RawMessage,
 		if err := json.Unmarshal(o, &ord); err != nil {
 			// The direction is half of what a sort says, so an unreadable one takes
 			// the sort with it rather than defaulting to ascending.
-			im.rep.gap(NSPGap{Kind: NSPGapMalformed, Path: "/order", Reason: "nsp: bad order"})
+			im.rep.gap(NSPGap{Kind: NSPGapMalformed, Code: NSPReasonBadOrder, Path: "/order"})
 			return
 		}
 		desc = strings.EqualFold(ord, "desc")
@@ -480,7 +476,7 @@ func (im *nspImporter) group(key string, raw json.RawMessage) (query.Node, bool)
 	defer im.pop()
 	var rules []json.RawMessage
 	if err := json.Unmarshal(raw, &rules); err != nil {
-		im.broken("nsp: " + key + " must be an array")
+		im.broken(NSPGap{Code: NSPReasonGroupNotArray, Key: key})
 		return nil, false
 	}
 	nodes := make([]query.Node, 0, len(rules))
@@ -496,8 +492,7 @@ func (im *nspImporter) group(key string, raw json.RawMessage) (query.Node, bool)
 	// members and kept none matches everything (all) or nothing (any), so it is
 	// dropped in turn rather than left to flip the document's meaning.
 	if len(rules) > 0 && len(nodes) == 0 {
-		im.rep.gap(NSPGap{Kind: NSPGapShape, Path: im.at(),
-			Reason: "nsp: every rule in this group has no WaxBin form"})
+		im.rep.gap(NSPGap{Kind: NSPGapShape, Code: NSPReasonGroupEmptied, Path: im.at()})
 		return nil, false
 	}
 	if key == "any" {
@@ -513,40 +508,41 @@ func (im *nspImporter) rule(raw json.RawMessage) (query.Node, bool) {
 		// Broken, not unmappable: {"is":{"artist":"x","album":"y"}} packs two rules
 		// into one rule's shape, and pruning it would silently drop a constraint the
 		// person wrote.
-		im.broken("nsp: each rule needs exactly one operator or group")
+		im.broken(NSPGap{Code: NSPReasonRuleShape})
 		return nil, false
 	}
-	for key, val := range m {
-		if key == "all" || key == "any" {
-			return im.group(key, val)
-		}
-		return im.leaf(key, val)
+	key, val := nspOnlyEntry(m)
+	if key == "all" || key == "any" {
+		return im.group(key, val)
 	}
-	im.broken("nsp: empty rule")
-	return nil, false
+	return im.leaf(key, val)
+}
+
+// nspOnlyEntry returns the entry of a map the caller has checked holds exactly one.
+func nspOnlyEntry(m map[string]json.RawMessage) (string, json.RawMessage) {
+	for k, v := range m {
+		return k, v
+	}
+	return "", nil
 }
 
 // leaf parses an operator leaf `{"<op>": {"<field>": <value>}}`.
 func (im *nspImporter) leaf(op string, val json.RawMessage) (query.Node, bool) {
 	var fv map[string]json.RawMessage
 	if err := json.Unmarshal(val, &fv); err != nil || len(fv) != 1 {
-		im.broken("nsp: operator " + op + " needs exactly one field")
+		im.broken(NSPGap{Code: NSPReasonOperatorShape, Op: op})
 		return nil, false
 	}
-	for field, rawVal := range fv {
-		if wb, ok := nspDateFieldToWB[strings.ToLower(field)]; ok {
-			return im.dateCond(op, wb, field, rawVal)
-		}
-		wb, ok := nspFieldToWB[strings.ToLower(field)]
-		if !ok {
-			im.rep.gap(NSPGap{Kind: NSPGapField, Field: field, Path: im.at(),
-				Reason: "nsp: unsupported field: " + field})
-			return nil, false
-		}
-		return im.cond(op, field, wb, rawVal)
+	field, rawVal := nspOnlyEntry(fv)
+	if wb, ok := nspDateFieldToWB[strings.ToLower(field)]; ok {
+		return im.dateCond(op, wb, field, rawVal)
 	}
-	im.broken("nsp: empty operator")
-	return nil, false
+	wb, ok := nspFieldToWB[strings.ToLower(field)]
+	if !ok {
+		im.rep.gap(NSPGap{Kind: NSPGapField, Code: NSPReasonUnsupportedField, Field: field, Path: im.at()})
+		return nil, false
+	}
+	return im.cond(op, field, wb, rawVal)
 }
 
 // dateCond builds a relative-time condition for a Navidrome date field. The .nsp
@@ -563,13 +559,12 @@ func (im *nspImporter) dateCond(op, wbField, nspField string, rawVal json.RawMes
 	case "notInTheLast":
 		wbOp = query.OpNotInTheLast
 	default:
-		im.rep.gap(NSPGap{Kind: NSPGapOperator, Field: nspField, Op: op, Path: im.at(),
-			Reason: "nsp: only inTheLast/notInTheLast are supported on " + nspField})
+		im.rep.gap(NSPGap{Kind: NSPGapOperator, Code: NSPReasonDateOperator, Field: nspField, Op: op, Path: im.at()})
 		return nil, false
 	}
 	var days float64
 	if err := json.Unmarshal(rawVal, &days); err != nil {
-		im.broken("nsp: " + op + " needs a number of days")
+		im.broken(NSPGap{Code: NSPReasonDaysNotNumber, Field: nspField, Op: op})
 		return nil, false
 	}
 	// Bound the magnitude before converting: past MaxInt64/nspDayNS (about 106,751
@@ -580,13 +575,12 @@ func (im *nspImporter) dateCond(op, wbField, nspField string, rawVal json.RawMes
 	// negative day count is rejected either way, but only after a conversion whose
 	// result the spec does not define.
 	if math.Abs(days) > float64(math.MaxInt64/nspDayNS) {
-		im.valueGap(nspField, op, days, fmt.Sprintf("nsp: %s window of %v days is too large", op, days))
+		im.valueGap(NSPReasonWindowTooLarge, nspField, op, days)
 		return nil, false
 	}
 	n := int64(days)
 	if float64(n) != days || n <= 0 {
-		im.valueGap(nspField, op, days,
-			fmt.Sprintf("nsp: %s needs a positive whole number of days, got %v", op, days))
+		im.valueGap(NSPReasonWindowNotWholeDays, nspField, op, days)
 		return nil, false
 	}
 	return query.Cond{Field: wbField, Op: wbOp, Value: n * nspDayNS}, true
@@ -599,7 +593,7 @@ func (im *nspImporter) cond(op, nspField, wbField string, rawVal json.RawMessage
 	if op == "inTheRange" {
 		var vals []any
 		if err := json.Unmarshal(rawVal, &vals); err != nil || len(vals) != 2 {
-			im.broken("nsp: inTheRange needs a [low, high] array")
+			im.broken(NSPGap{Code: NSPReasonRangeShape, Field: nspField, Op: op})
 			return nil, false
 		}
 		if !im.opAllowed(op, nspField, wbField) {
@@ -607,9 +601,9 @@ func (im *nspImporter) cond(op, nspField, wbField string, rawVal json.RawMessage
 		}
 		if conv, ok := nspValueConvs[wbField]; ok {
 			for i := range vals {
-				sv, reason := conv.in(vals[i])
-				if reason != "" {
-					im.broken(reason)
+				sv, code := conv.in(vals[i])
+				if code != "" {
+					im.broken(NSPGap{Code: code, Field: nspField, Op: op, Value: vals[i]})
 					return nil, false
 				}
 				vals[i] = sv
@@ -619,12 +613,11 @@ func (im *nspImporter) cond(op, nspField, wbField string, rawVal json.RawMessage
 	}
 	var v any
 	if err := json.Unmarshal(rawVal, &v); err != nil {
-		im.broken("nsp: bad value for " + op)
+		im.broken(NSPGap{Code: NSPReasonBadValue, Field: nspField, Op: op})
 		return nil, false
 	}
 	if wbField == "rating" && nspRatingTextOps[op] {
-		im.rep.gap(NSPGap{Kind: NSPGapOperator, Field: nspField, Op: op, Path: im.at(),
-			Reason: "nsp: " + op + " on rating has no WaxBin equivalent, since the 0-to-100 scale conversion does not carry a substring match"})
+		im.rep.gap(NSPGap{Kind: NSPGapOperator, Code: NSPReasonRatingTextOperator, Field: nspField, Op: op, Path: im.at()})
 		return nil, false
 	}
 	if !im.opAllowed(op, nspField, wbField) {
@@ -635,16 +628,15 @@ func (im *nspImporter) cond(op, nspField, wbField string, rawVal json.RawMessage
 	}
 	wbOp, ok := nspOpToWB[op]
 	if !ok {
-		im.rep.gap(NSPGap{Kind: NSPGapOperator, Field: nspField, Op: op, Path: im.at(),
-			Reason: "nsp: unsupported operator: " + op})
+		im.rep.gap(NSPGap{Kind: NSPGapOperator, Code: NSPReasonUnsupportedOperator, Field: nspField, Op: op, Path: im.at()})
 		return nil, false
 	}
 	if conv, ok := nspValueConvs[wbField]; ok {
-		sv, reason := conv.in(v)
-		if reason != "" {
+		sv, code := conv.in(v)
+		if code != "" {
 			// A value Navidrome itself would not write is a broken document rather than
 			// a value WaxBin has no room for.
-			im.broken(reason)
+			im.broken(NSPGap{Code: code, Field: nspField, Op: op, Value: v})
 			return nil, false
 		}
 		v = sv
@@ -659,14 +651,12 @@ func (im *nspImporter) opAllowed(op, nspField, wbField string) bool {
 	if wbField != "starred" || nspBoolOps[op] {
 		return true
 	}
-	im.rep.gap(NSPGap{Kind: NSPGapOperator, Field: nspField, Op: op, Path: im.at(),
-		Reason: "nsp: only is/isNot are supported on starred, which is a boolean"})
+	im.rep.gap(NSPGap{Kind: NSPGapOperator, Code: NSPReasonBooleanOperator, Field: nspField, Op: op, Path: im.at()})
 	return false
 }
 
-func (im *nspImporter) valueGap(field, op string, val any, reason string) {
-	im.rep.gap(NSPGap{Kind: NSPGapValue, Field: field, Op: op, Value: val,
-		Path: im.at(), Reason: reason})
+func (im *nspImporter) valueGap(code NSPReason, field, op string, val any) {
+	im.rep.gap(NSPGap{Kind: NSPGapValue, Code: code, Field: field, Op: op, Value: val, Path: im.at()})
 }
 
 // CheckNSPImport reports what an import of data could not carry. Its only error
@@ -721,7 +711,7 @@ func ImportNSPPartial(data []byte) (*NSPImport, error) {
 	q, kept := im.walk(top)
 	for _, g := range im.rep.Gaps {
 		if g.Kind == NSPGapMalformed {
-			return nil, nspErr("nsp: a malformed document cannot be partially imported: " + g.Reason)
+			return nil, nspErr("nsp: a malformed document cannot be partially imported: " + strings.TrimPrefix(g.Reason, "nsp: "))
 		}
 	}
 	if !kept {
@@ -788,11 +778,9 @@ func (e *nspExporter) walk(q query.Query) (map[string]any, query.Query, bool) {
 		// The render is faithful; the loss is on the way back, since Navidrome has
 		// no kind distinction and ImportNSP always builds items. In a mixed library
 		// the re-imported rule picks up audiobooks and episodes too.
-		e.rep.note(NSPGap{Kind: NSPGapEntity, Path: "/entity", Value: string(q.Entity),
-			Reason: "nsp: .nsp has no track/book distinction, so this rule re-imports as one over every kind of item"})
+		e.rep.note(NSPGap{Kind: NSPGapEntity, Code: NSPReasonEntityWidens, Path: "/entity", Value: string(q.Entity)})
 	case query.EntityFiles:
-		e.rep.gap(NSPGap{Kind: NSPGapEntity, Path: "/entity", Value: string(q.Entity),
-			Reason: "nsp: a selection over file rows is not a playlist of items"})
+		e.rep.gap(NSPGap{Kind: NSPGapEntity, Code: NSPReasonEntityFiles, Path: "/entity", Value: string(q.Entity)})
 		rule.Entity = query.EntityItems
 	}
 
@@ -804,12 +792,10 @@ func (e *nspExporter) walk(q query.Query) (map[string]any, query.Query, bool) {
 	// the mode was unrepresentable on a document that keeps it.
 	dropBudget := q.LimitMode != query.LimitCount && q.LimitMode != query.LimitRandom
 	if dropBudget {
-		e.rep.gap(NSPGap{Kind: NSPGapLimit, Path: "/limitMode", Value: string(q.LimitMode),
-			Reason: "nsp: limit mode " + string(q.LimitMode) + " has no .nsp representation"})
+		e.rep.gap(NSPGap{Kind: NSPGapLimit, Code: NSPReasonLimitMode, Path: "/limitMode", Value: string(q.LimitMode)})
 	}
 	if q.LimitSeed != 0 {
-		e.rep.gap(NSPGap{Kind: NSPGapLimit, Path: "/limitSeed", Value: q.LimitSeed,
-			Reason: "nsp: a pinned limit seed has no .nsp representation"})
+		e.rep.gap(NSPGap{Kind: NSPGapLimit, Code: NSPReasonLimitSeed, Path: "/limitSeed", Value: q.LimitSeed})
 	}
 	sorts := q.Sorts
 	if q.LimitMode == query.LimitRandom {
@@ -819,16 +805,14 @@ func (e *nspExporter) walk(q query.Query) (map[string]any, query.Query, bool) {
 			// leave the strict exporter emitting what the strict importer refuses.
 			// Compile forbids the query too, but ExportNSP takes any query.Query a
 			// caller hands it.
-			e.rep.gap(NSPGap{Kind: NSPGapLimit, Path: "/limitMode", Value: string(q.LimitMode),
-				Reason: "nsp: random limit mode requires a positive limit"})
+			e.rep.gap(NSPGap{Kind: NSPGapLimit, Code: NSPReasonRandomNeedsLimit, Path: "/limitMode", Value: string(q.LimitMode)})
 		} else {
 			// Random plus Sorts is not even a valid WaxBin query (compile rejects
 			// the combination), and rendering both would let the sort block below
 			// silently overwrite the shuffle. The shuffle is the more faithful half,
 			// so the sorts are what go.
 			if len(sorts) > 0 {
-				e.rep.gap(NSPGap{Kind: NSPGapSort, Path: "/sorts", Field: sorts[0].Field,
-					Reason: "nsp: random limit mode combined with sorts is not exportable"})
+				e.rep.gap(NSPGap{Kind: NSPGapSort, Code: NSPReasonRandomWithSorts, Path: "/sorts", Field: sorts[0].Field})
 				sorts = nil
 			}
 			group["sort"] = "random"
@@ -843,21 +827,18 @@ func (e *nspExporter) walk(q query.Query) (map[string]any, query.Query, bool) {
 			nspField, ok = wbDateFieldToNSP[s.Field]
 		}
 		if !ok {
-			e.rep.gap(NSPGap{Kind: NSPGapSort, Path: "/sorts/0", Field: s.Field,
-				Reason: "nsp: unsupported sort field: " + s.Field})
+			e.rep.gap(NSPGap{Kind: NSPGapSort, Code: NSPReasonUnsupportedSortField, Path: "/sorts/0", Field: s.Field})
 		}
-		if len(sorts) > 1 {
-			// .nsp carries one sort key, so the later terms have nowhere to go. A gap
-			// and not a note because CompileAt joins every term, which makes a
-			// two-term sort a real stored rule that an export quietly keeping the
-			// first hands back reordered. The counter-argument is that with no limit
-			// the order is presentation and not membership; the carve-out it implies,
-			// gap when Limit > 0 and note otherwise, waits until someone asks. The
-			// later terms are not field-checked in turn, since they are going either
-			// way.
-			e.rep.gap(NSPGap{Kind: NSPGapSort, Path: "/sorts/1", Field: sorts[1].Field,
-				Reason: fmt.Sprintf("nsp: .nsp holds a single sort term, so the rest of the sort (%s) has no .nsp representation",
-					nspSortTerms(sorts[1:]))})
+		// .nsp carries one sort key, so the later terms have nowhere to go, each a gap of
+		// its own at its own pointer. A gap and not a note because CompileAt joins every
+		// term, which makes a two-term sort a real stored rule that an export quietly
+		// keeping the first hands back reordered. The counter-argument is that with no
+		// limit the order is presentation and not membership; the carve-out it implies,
+		// gap when Limit > 0 and note otherwise, waits until someone asks. The later terms
+		// are not field-checked in turn, since they are going either way.
+		for i, extra := range sorts[1:] {
+			e.rep.gap(NSPGap{Kind: NSPGapSort, Code: NSPReasonExtraSortTerm,
+				Path: "/sorts/" + strconv.Itoa(i+1), Field: extra.Field, Value: extra})
 		}
 		if ok {
 			group["sort"] = nspField
@@ -875,8 +856,8 @@ func (e *nspExporter) walk(q query.Query) (map[string]any, query.Query, bool) {
 		// The value means minutes or megabytes, so writing it as "limit" would say
 		// that many tracks instead. It drops with the mode that gave it its unit.
 		if q.Limit != 0 {
-			e.rep.gap(NSPGap{Kind: NSPGapLimit, Path: "/limit", Value: q.Limit,
-				Reason: fmt.Sprintf("nsp: limit %d is a %s budget with no .nsp representation", q.Limit, q.LimitMode)})
+			e.rep.gap(NSPGap{Kind: NSPGapLimit, Code: NSPReasonLimitBudget, Path: "/limit", Value: q.Limit,
+				Mode: string(q.LimitMode)})
 		}
 	} else {
 		rule.Limit = q.Limit
@@ -929,7 +910,7 @@ func (e *nspExporter) node(n query.Node) (map[string]any, query.Node, bool) {
 	case query.Cond:
 		return e.cond(node)
 	default:
-		e.rep.gap(NSPGap{Kind: NSPGapShape, Path: e.at(), Reason: "nsp: unsupported rule node"})
+		e.rep.gap(NSPGap{Kind: NSPGapShape, Code: NSPReasonUnsupportedNode, Path: e.at()})
 		return nil, nil, false
 	}
 }
@@ -955,8 +936,7 @@ func (e *nspExporter) children(nodes []query.Node) ([]any, []query.Node, bool) {
 	// to flip the rule's meaning. A group that was empty to begin with says what
 	// it always said and stays.
 	if len(nodes) > 0 && len(kept) == 0 {
-		e.rep.gap(NSPGap{Kind: NSPGapShape, Path: e.at(),
-			Reason: "nsp: every rule in this group has no .nsp form"})
+		e.rep.gap(NSPGap{Kind: NSPGapShape, Code: NSPReasonGroupEmptied, Path: e.at()})
 		return nil, nil, false
 	}
 	return arr, kept, true
@@ -968,8 +948,7 @@ func (e *nspExporter) not(n query.Not) (map[string]any, query.Node, bool) {
 	if !isCond || c.Op != query.OpContains {
 		// The negation is the thing with no form here, not the operator under it,
 		// so Op stays empty and only the field it constrains is named.
-		g := NSPGap{Kind: NSPGapShape, Path: e.at(),
-			Reason: "nsp: unsupported negation (only notContains maps)"}
+		g := NSPGap{Kind: NSPGapShape, Code: NSPReasonNegation, Path: e.at()}
 		if isCond {
 			g.Field = c.Field
 		}
@@ -978,20 +957,19 @@ func (e *nspExporter) not(n query.Not) (map[string]any, query.Node, bool) {
 	}
 	// A date field has an .nsp name but takes only the relative operators, so a
 	// notContains on one is an operator gap rather than a missing field.
-	if nspField, isDate := wbDateFieldToNSP[c.Field]; isDate {
-		e.rep.gap(NSPGap{Kind: NSPGapOperator, Field: c.Field, Op: string(c.Op), Path: e.at(),
-			Reason: "nsp: only inTheLast/notInTheLast are supported on " + nspField})
+	if _, isDate := wbDateFieldToNSP[c.Field]; isDate {
+		e.rep.gap(NSPGap{Kind: NSPGapOperator, Code: NSPReasonDateOperator, Field: c.Field, Op: string(c.Op), Path: e.at()})
 		return nil, nil, false
 	}
 	field, ok := wbFieldToNSP[c.Field]
 	if !ok {
-		e.rep.gap(NSPGap{Kind: NSPGapField, Field: c.Field, Path: e.at(),
-			Reason: "nsp: unsupported field: " + c.Field})
+		e.rep.gap(NSPGap{Kind: NSPGapField, Code: NSPReasonUnsupportedField, Field: c.Field, Path: e.at()})
 		return nil, nil, false
 	}
 	if c.Field == "rating" {
-		e.rep.gap(NSPGap{Kind: NSPGapOperator, Field: c.Field, Op: string(c.Op), Path: e.at(),
-			Reason: "nsp: notContains on rating has no .nsp equivalent, since the 0-to-5 scale conversion does not carry a substring match"})
+		// WaxBin spells this operator as a negation and has no name for it, so the gap
+		// names it the way .nsp does.
+		e.rep.gap(NSPGap{Kind: NSPGapOperator, Code: NSPReasonRatingTextOperator, Field: c.Field, Op: "notContains", Path: e.at()})
 		return nil, nil, false
 	}
 	if !e.opAllowed(c, "notContains") {
@@ -1010,19 +988,16 @@ func (e *nspExporter) cond(c query.Cond) (map[string]any, query.Node, bool) {
 	}
 	field, ok := wbFieldToNSP[c.Field]
 	if !ok {
-		e.rep.gap(NSPGap{Kind: NSPGapField, Field: c.Field, Path: e.at(),
-			Reason: "nsp: unsupported field: " + c.Field})
+		e.rep.gap(NSPGap{Kind: NSPGapField, Code: NSPReasonUnsupportedField, Field: c.Field, Path: e.at()})
 		return nil, nil, false
 	}
 	op, ok := wbOpToNSP[c.Op]
 	if !ok {
-		e.rep.gap(NSPGap{Kind: NSPGapOperator, Field: c.Field, Op: string(c.Op), Path: e.at(),
-			Reason: "nsp: unsupported operator: " + string(c.Op)})
+		e.rep.gap(NSPGap{Kind: NSPGapOperator, Code: NSPReasonUnsupportedOperator, Field: c.Field, Op: string(c.Op), Path: e.at()})
 		return nil, nil, false
 	}
 	if c.Field == "rating" && nspRatingTextOps[op] {
-		e.rep.gap(NSPGap{Kind: NSPGapOperator, Field: c.Field, Op: string(c.Op), Path: e.at(),
-			Reason: "nsp: " + op + " on rating has no .nsp equivalent, since the 0-to-5 scale conversion does not carry a substring match"})
+		e.rep.gap(NSPGap{Kind: NSPGapOperator, Code: NSPReasonRatingTextOperator, Field: c.Field, Op: string(c.Op), Path: e.at()})
 		return nil, nil, false
 	}
 	if !e.opAllowed(c, op) {
@@ -1034,9 +1009,9 @@ func (e *nspExporter) cond(c query.Cond) (map[string]any, query.Node, bool) {
 		if converts {
 			vals = make([]any, len(c.Values))
 			for i, x := range c.Values {
-				sv, reason := conv.out(x)
-				if reason != "" {
-					e.valueGap(c, x, reason)
+				sv, code := conv.out(x)
+				if code != "" {
+					e.valueGap(code, c, x)
 					return nil, nil, false
 				}
 				vals[i] = sv
@@ -1046,9 +1021,9 @@ func (e *nspExporter) cond(c query.Cond) (map[string]any, query.Node, bool) {
 	}
 	val := c.Value
 	if converts {
-		sv, reason := conv.out(c.Value)
-		if reason != "" {
-			e.valueGap(c, c.Value, reason)
+		sv, code := conv.out(c.Value)
+		if code != "" {
+			e.valueGap(code, c, c.Value)
 			return nil, nil, false
 		}
 		val = sv
@@ -1063,8 +1038,7 @@ func (e *nspExporter) opAllowed(c query.Cond, nspOp string) bool {
 	if model.CanonicalQueryField(c.Field) != "starred" || nspBoolOps[nspOp] {
 		return true
 	}
-	e.rep.gap(NSPGap{Kind: NSPGapOperator, Field: c.Field, Op: string(c.Op), Path: e.at(),
-		Reason: "nsp: only is/isNot are supported on starred, which is a boolean"})
+	e.rep.gap(NSPGap{Kind: NSPGapOperator, Code: NSPReasonBooleanOperator, Field: c.Field, Op: string(c.Op), Path: e.at()})
 	return false
 }
 
@@ -1079,8 +1053,7 @@ func (e *nspExporter) dateCond(c query.Cond, nspField string) (map[string]any, q
 	case query.OpNotInTheLast:
 		op = "notInTheLast"
 	default:
-		e.rep.gap(NSPGap{Kind: NSPGapOperator, Field: c.Field, Op: string(c.Op), Path: e.at(),
-			Reason: "nsp: only inTheLast/notInTheLast are supported on " + nspField})
+		e.rep.gap(NSPGap{Kind: NSPGapOperator, Code: NSPReasonDateOperator, Field: c.Field, Op: string(c.Op), Path: e.at()})
 		return nil, nil, false
 	}
 	// The window is read as int64 directly rather than through asFloat: a window
@@ -1094,36 +1067,22 @@ func (e *nspExporter) dateCond(c query.Cond, nspField string) (map[string]any, q
 	case float64:
 		ns = int64(v)
 		if float64(ns) != v {
-			e.valueGap(c, c.Value, "nsp: "+op+" window must be a whole nanosecond count")
+			e.valueGap(NSPReasonWindowNotWholeDays, c, c.Value)
 			return nil, nil, false
 		}
 	default:
-		e.valueGap(c, c.Value, "nsp: "+op+" window must be numeric")
+		e.valueGap(NSPReasonValueNotNumeric, c, c.Value)
 		return nil, nil, false
 	}
 	if ns <= 0 || ns%nspDayNS != 0 {
-		e.valueGap(c, c.Value, fmt.Sprintf(
-			"nsp: %s window %v ns is not a whole number of days and has no .nsp equivalent", op, c.Value))
+		e.valueGap(NSPReasonWindowNotWholeDays, c, c.Value)
 		return nil, nil, false
 	}
 	return map[string]any{op: map[string]any{nspField: ns / nspDayNS}}, c, true
 }
 
-// nspSortTerms names sort terms the way a person wrote them, for a gap sentence.
-func nspSortTerms(sorts []query.Sort) string {
-	terms := make([]string, len(sorts))
-	for i, s := range sorts {
-		terms[i] = s.Field
-		if s.Desc {
-			terms[i] += " desc"
-		}
-	}
-	return strings.Join(terms, ", ")
-}
-
-func (e *nspExporter) valueGap(c query.Cond, val any, reason string) {
-	e.rep.gap(NSPGap{Kind: NSPGapValue, Field: c.Field, Op: string(c.Op), Value: val,
-		Path: e.at(), Reason: reason})
+func (e *nspExporter) valueGap(code NSPReason, c query.Cond, val any) {
+	e.rep.gap(NSPGap{Kind: NSPGapValue, Code: code, Field: c.Field, Op: string(c.Op), Value: val, Path: e.at()})
 }
 
 // CheckNSPExport reports what an export of q could not carry, without rendering

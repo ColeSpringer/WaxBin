@@ -20,6 +20,7 @@ import (
 	"github.com/colespringer/waxbin/loudness"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/peaks"
+	"github.com/colespringer/waxbin/waxerr"
 )
 
 // cheapSignal is a plain sine, fast to synthesize for the long fixtures where a
@@ -39,13 +40,15 @@ func discardLog() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard,
 // serving a fixed file set through the keyset cursor and recording every
 // PutAnalysis so a test can assert what was (and was not) stamped.
 type fakeStore struct {
-	files  []*model.File
-	puts   map[model.PID]model.AnalysisInput
-	putErr error
+	files    []*model.File
+	puts     map[model.PID]model.AnalysisInput
+	verdicts map[model.PID][]model.FileDiagnostic
+	putErr   error
 }
 
 func newFakeStore(files ...*model.File) *fakeStore {
-	return &fakeStore{files: files, puts: map[model.PID]model.AnalysisInput{}}
+	return &fakeStore{files: files, puts: map[model.PID]model.AnalysisInput{},
+		verdicts: map[model.PID][]model.FileDiagnostic{}}
 }
 
 func (s *fakeStore) CountFilesNeedingAnalysis(context.Context, int) (int, error) {
@@ -71,6 +74,11 @@ func (s *fakeStore) FilesNeedingAnalysis(_ context.Context, _ int, afterRelPath 
 		}
 	}
 	return out, nil
+}
+
+func (s *fakeStore) PutDecodeVerdict(_ context.Context, filePID model.PID, _ string, ds []model.FileDiagnostic) error {
+	s.verdicts[filePID] = ds
+	return nil
 }
 
 func (s *fakeStore) PutAnalysis(_ context.Context, in model.AnalysisInput) error {
@@ -157,7 +165,46 @@ func TestRunAllFormats(t *testing.T) {
 			t.Errorf("%s: algo = %d, want pure-Go %d", f.DisplayPath, in.Fingerprint.AlgoVersion, fingerprint.AlgoVersion)
 		}
 	}
+
+	// The waveform's span is the accumulator's own count, and the tap sees every chunk
+	// the meter does, so it equals the measured frame count exactly on every format.
+	// Lossless formats decode to the signal's length; lossy ones add their priming.
+	// Opus decodes at 48 kHz whatever the source rate was.
+	eng := decode.New(discardLog())
+	for i, f := range files {
+		pk := store.puts[f.PID].Peaks
+		if pk == nil {
+			continue
+		}
+		m, err := eng.Measure(context.Background(), string(f.Path), nil)
+		if err != nil {
+			t.Fatalf("%s: measure: %v", f.DisplayPath, err)
+		}
+		if pk.Frames != m.Frames || pk.SampleRate != m.SampleRate {
+			t.Errorf("%s: waveform spans %d frames at %d Hz, the meter measured %d at %d",
+				f.DisplayPath, pk.Frames, pk.SampleRate, m.Frames, m.SampleRate)
+		}
+		wantRate, want := rate, int64(len(sig))
+		if formats[i].format == "opus" {
+			wantRate, want = 48000, int64(len(sig))*48000/rate
+		}
+		if pk.SampleRate != wantRate {
+			t.Errorf("%s: waveform rate = %d, want %d", f.DisplayPath, pk.SampleRate, wantRate)
+		}
+		slack := int64(0)
+		switch formats[i].format {
+		case "mp3", "aac", "opus", "vorbis":
+			slack = lossyPriming
+		}
+		if d := pk.Frames - want; d < -slack || d > slack {
+			t.Errorf("%s: waveform spans %d frames, want %d (within %d)", f.DisplayPath, pk.Frames, want, slack)
+		}
+	}
 }
+
+// lossyPriming bounds how far a lossy decode's length may drift from the signal it
+// encoded, from the encoder's priming and padding.
+const lossyPriming = 600
 
 // TestRunUnsupportedSkipped: an input this build cannot decode (random bytes) is
 // skipped and never stamped, so a future WaxFlow can pick it up.
@@ -179,6 +226,9 @@ func TestRunUnsupportedSkipped(t *testing.T) {
 	if _, ok := store.puts[f.PID]; ok {
 		t.Error("an unsupported file was stamped; it must be skipped and retried later")
 	}
+	if ds, ok := store.verdicts[f.PID]; ok {
+		t.Errorf("an unsupported file got a verdict %+v; nothing read its bytes", ds)
+	}
 }
 
 // TestRunOpenPhaseDamageErrored: a file whose magic matched and whose headers are then
@@ -198,6 +248,17 @@ func TestRunOpenPhaseDamageErrored(t *testing.T) {
 	}
 	if _, ok := store.puts[f.PID]; ok {
 		t.Error("a damaged file was stamped; nothing was measured")
+	}
+	assertDecodeVerdict(t, store, f)
+}
+
+// assertDecodeVerdict checks the pass recorded a corrupt_audio error for a file whose
+// decode failed on its bytes, so the audit sees it though nothing was analyzed.
+func assertDecodeVerdict(t *testing.T, store *fakeStore, f *model.File) {
+	t.Helper()
+	ds := store.verdicts[f.PID]
+	if len(ds) != 1 || ds[0].Code != model.DiagCorruptAudio || ds[0].Severity != model.SeverityError || ds[0].Detail == "" {
+		t.Errorf("verdict for %s = %+v, want one corrupt_audio error with a detail", f.DisplayPath, ds)
 	}
 }
 
@@ -223,6 +284,7 @@ func TestRunCorruptErrored(t *testing.T) {
 	if _, ok := store.puts[f.PID]; ok {
 		t.Error("a corrupt file was stamped; it must land in Errored, not be committed")
 	}
+	assertDecodeVerdict(t, store, f)
 }
 
 // TestRunCanceledDoesNotCommit: a canceled run stops cleanly and stamps nothing,
@@ -257,7 +319,7 @@ func TestMeasureCanceled(t *testing.T) {
 	a := pureGoAnalyzer(t, newFakeStore(f))
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	ld, pk, err := a.measure(ctx, f)
+	ld, pk, _, err := a.measure(ctx, f)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("measure err = %v, want context.Canceled", err)
 	}
@@ -315,11 +377,11 @@ func TestMeasureMultichannel(t *testing.T) {
 	fMulti := writeFixture(t, dir, "surround.wav", 1, testaudio.EncodeWAV16Multi(rate, 6, inter))
 	a := pureGoAnalyzer(t, newFakeStore())
 
-	lMono, pMono, err := a.measure(context.Background(), fMono)
+	lMono, pMono, _, err := a.measure(context.Background(), fMono)
 	if err != nil {
 		t.Fatalf("mono measure: %v", err)
 	}
-	lMulti, pMulti, err := a.measure(context.Background(), fMulti)
+	lMulti, pMulti, _, err := a.measure(context.Background(), fMulti)
 	if err != nil {
 		t.Fatalf("surround measure: %v", err)
 	}
@@ -328,6 +390,10 @@ func TestMeasureMultichannel(t *testing.T) {
 	}
 	if pMono == nil || pMulti == nil {
 		t.Fatal("expected a waveform for both files")
+	}
+	if pMono.Frames != int64(len(mono)) || pMulti.Frames != int64(len(mono)) {
+		t.Errorf("spans = %d mono, %d surround frames, want %d for both (a frame is every channel's sample)",
+			pMono.Frames, pMulti.Frames, len(mono))
 	}
 	mb := peaks.Unpack(pMono.Data).Buckets
 	sb := peaks.Unpack(pMulti.Data).Buckets
@@ -344,6 +410,26 @@ func TestMeasureMultichannel(t *testing.T) {
 	}
 	if maxDiff > 0.005 {
 		t.Errorf("6ch-identical waveform differs from the mono mixdown by %.4f; the mixdown is corrupted", maxDiff)
+	}
+}
+
+// TestMeasureRecordsTheSpan: the waveform carries how many frames it divides and at
+// what rate, so a reader can place a window on it without the header's duration.
+func TestMeasureRecordsTheSpan(t *testing.T) {
+	dir := t.TempDir()
+	const rate = 44100
+	sig := testaudio.ReferenceSignal(rate, 3*time.Second)
+	f := writeFixture(t, dir, "a.wav", 0, testaudio.EncodeWAV16(rate, sig))
+	_, pk, _, err := pureGoAnalyzer(t, newFakeStore()).measure(context.Background(), f)
+	if err != nil {
+		t.Fatalf("measure: %v", err)
+	}
+	if pk == nil {
+		t.Fatal("no waveform")
+	}
+	if pk.Frames != int64(len(sig)) || pk.SampleRate != rate || pk.DurationMS() != 3000 {
+		t.Errorf("span = %d frames at %d Hz (%d ms), want %d at %d (3000 ms)",
+			pk.Frames, pk.SampleRate, pk.DurationMS(), len(sig), rate)
 	}
 }
 
@@ -446,5 +532,159 @@ func TestMeasureSettled(t *testing.T) {
 	}
 	if measureSettled(errors.New("read: transient glitch")) {
 		t.Error("a retryable failure must leave the stamp clear")
+	}
+}
+
+// TestPeaksDataNeedsARate: a waveform whose decode reported no rate cannot be placed,
+// so it is dropped rather than refused by the store with the fingerprint beside it.
+func TestPeaksDataNeedsARate(t *testing.T) {
+	p := peaks.Compute(cheapSignal(4000), 10)
+	if pk := peaksData(p, 4000, 0, "e"); pk != nil {
+		t.Errorf("peaksData with no rate = %+v, want nil", pk)
+	}
+	if pk := peaksData(p, 4000, 8000, "e"); pk == nil || pk.Frames != 4000 || pk.SampleRate != 8000 {
+		t.Errorf("peaksData = %+v, want 4000 frames at 8000 Hz", pk)
+	}
+}
+
+// TestRunRecordsTheDecodeVerdict: the decode that measures loudness reads every file
+// end to end, so what it found wrong with the bytes is kept. A FLAC cut short is
+// reported whether the read worked around the cut (a warning) or failed on it (an
+// error), and a clean file reports an empty list that clears an older verdict.
+func TestRunRecordsTheDecodeVerdict(t *testing.T) {
+	dir := t.TempDir()
+	const rate = 8000
+	flac := testaudio.EncodeAs(t, "flac", "", rate, testaudio.ReferenceSignal(rate, 4*time.Second))
+	cut := writeFixture(t, dir, "cut.flac", 0, flac[:len(flac)*60/100])
+	clean := writeFixture(t, dir, "clean.flac", 1, flac)
+	store := newFakeStore(cut, clean)
+	if _, err := pureGoAnalyzer(t, store).Run(context.Background(), nil); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	in, ok := store.puts[cut.PID]
+	if !ok {
+		t.Fatal("the cut file was not stored")
+	}
+	if !in.Observed || len(in.Diagnostics) != 1 {
+		t.Fatalf("cut file: observed=%v diagnostics=%+v, want one observed verdict", in.Observed, in.Diagnostics)
+	}
+	d := in.Diagnostics[0]
+	if d.Code != model.DiagCorruptAudio || (d.Severity != model.SeverityWarn && d.Severity != model.SeverityError) || d.Detail == "" {
+		t.Errorf("cut file verdict = %+v, want corrupt_audio at warn or error with a detail", d)
+	}
+
+	in = store.puts[clean.PID]
+	if !in.Observed || len(in.Diagnostics) != 0 {
+		t.Errorf("clean file: observed=%v diagnostics=%+v, want an observed empty list", in.Observed, in.Diagnostics)
+	}
+}
+
+// TestMeasureObserved pins which measure outcomes looked at the audio bytes, so that
+// their verdict replaces the one before. Bad bytes did; an input no decoder here
+// reads, an unreadable source and a cancel did not.
+func TestMeasureObserved(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"clean", nil, true},
+		{"bad bytes", waxerr.New(waxerr.CodeInvalid, "decode.Measure", "bad frame"), true},
+		{"unsupported", fmt.Errorf("open: %w", decode.ErrUnsupported), false},
+		{"unreadable", waxerr.New(waxerr.CodeIO, "decode.Measure", "read failed"), false},
+		{"canceled", context.Canceled, false},
+	} {
+		if got := measureObserved(c.err); got != c.want {
+			t.Errorf("%s: measureObserved = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// TestRunBucketsByTheDecodedLength: the fingerprint's duration bucket comes from the
+// decoded length, so a file whose header understates it still lands beside its
+// twins. The header's value is the fallback when the decode yields no waveform.
+func TestRunBucketsByTheDecodedLength(t *testing.T) {
+	dir := t.TempDir()
+	const rate = 8000
+	f := writeFixture(t, dir, "short-header.wav", 0, testaudio.EncodeWAV16(rate, cheapSignal(rate*8)))
+	f.DurationMS = 4000
+	store := newFakeStore(f)
+	if _, err := pureGoAnalyzer(t, store).Run(context.Background(), nil); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	in := store.puts[f.PID]
+	if got, want := in.Fingerprint.DurationBucket, fingerprint.DurationBucket(8000); got != want {
+		t.Errorf("duration bucket = %d, want %d (8 s decoded, not the header's 4 s)", got, want)
+	}
+}
+
+// TestRunLeavesAWideLayoutWithoutAVerdict: a healthy file with more channels than this
+// build mixes is refused, which says what the build cannot do rather than what the
+// bytes are, so it gets no corrupt_audio verdict.
+func TestRunLeavesAWideLayoutWithoutAVerdict(t *testing.T) {
+	dir := t.TempDir()
+	const rate, chans = 8000, 10
+	mono := cheapSignal(rate * 2)
+	inter := make([]float32, len(mono)*chans)
+	for i, v := range mono {
+		for c := range chans {
+			inter[i*chans+c] = v
+		}
+	}
+	f := writeFixture(t, dir, "wide.wav", 0, testaudio.EncodeWAV16Multi(rate, chans, inter))
+	store := newFakeStore(f)
+	if _, err := pureGoAnalyzer(t, store).Run(context.Background(), nil); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if in, ok := store.puts[f.PID]; ok && (in.Observed || len(in.Diagnostics) > 0) {
+		t.Errorf("observed=%v diagnostics=%+v, want no verdict on a file the meter refused", in.Observed, in.Diagnostics)
+	}
+	if v := store.verdicts[f.PID]; len(v) > 0 {
+		t.Errorf("decode verdict = %+v, want none", v)
+	}
+}
+
+// TestRunBucketsADamagedFileByItsHeader: a read that worked around damage decodes less
+// than the recording holds, so a cut file keeps its header's length and stays beside the
+// intact copy.
+func TestRunBucketsADamagedFileByItsHeader(t *testing.T) {
+	dir := t.TempDir()
+	const rate = 8000
+	flac := testaudio.EncodeAs(t, "flac", "", rate, testaudio.ReferenceSignal(rate, 8*time.Second))
+	f := writeFixture(t, dir, "cut.flac", 0, flac[:len(flac)/2])
+	f.DurationMS = 8000
+	store := newFakeStore(f)
+	if _, err := pureGoAnalyzer(t, store).Run(context.Background(), nil); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	in := store.puts[f.PID]
+	if in.Peaks == nil || len(in.Diagnostics) != 1 || in.Diagnostics[0].Severity != model.SeverityWarn {
+		t.Fatalf("peaks=%v diagnostics=%+v, want a waveform read around the damage", in.Peaks != nil, in.Diagnostics)
+	}
+	if got, want := in.Fingerprint.DurationBucket, fingerprint.DurationBucket(8000); got != want {
+		t.Errorf("duration bucket = %d, want %d (the header's 8 s, not the %d ms that decoded)", got, want, in.Peaks.DurationMS())
+	}
+}
+
+// TestBucketDuration pins the order the fingerprint bucket's length is taken in: the
+// decoded length unless the read was damaged, then the header's, then the analyzed
+// head's.
+func TestBucketDuration(t *testing.T) {
+	for _, c := range []struct {
+		name               string
+		pk                 *model.PeaksData
+		damaged            bool
+		header, head, want int64
+	}{
+		{"decoded length first", &model.PeaksData{Frames: 80000, SampleRate: 8000}, false, 4000, 3000, 10000},
+		{"header over a damaged read", &model.PeaksData{Frames: 80000, SampleRate: 8000}, true, 4000, 3000, 4000},
+		{"header without a waveform", nil, false, 4000, 3000, 4000},
+		{"header when the waveform has no rate", &model.PeaksData{Frames: 80000}, false, 4000, 3000, 4000},
+		{"analyzed head last", nil, false, 0, 3000, 3000},
+	} {
+		if got := bucketDuration(c.pk, c.damaged, c.header, c.head); got != c.want {
+			t.Errorf("%s: bucketDuration = %d, want %d", c.name, got, c.want)
+		}
 	}
 }

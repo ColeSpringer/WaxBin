@@ -29,6 +29,12 @@ type DoctorReport struct {
 	// Enrichment coverage: entities looked up, and how many a provider matched.
 	EnrichedEntities int
 	EnrichedMatched  int
+	// Lyrics coverage over the present tracks: how many hold lyrics from any source,
+	// and how many have none because a lookup answered that there are none
+	// (EnrichmentCoverage).
+	TrackCount        int
+	TracksWithLyrics  int
+	TracksLyricsAsked int
 
 	// Diagnostic coverage: how many persisted file diagnostics exist, and how many
 	// audio files have not had diagnostics derived under the current rule set. A
@@ -122,6 +128,9 @@ func (l *Library) Doctor(ctx context.Context) (*DoctorReport, error) {
 	}
 	rep.EnrichedEntities = cov.Artists + cov.ReleaseGroups + cov.Books
 	rep.EnrichedMatched = cov.Matched
+	rep.TrackCount = cov.Tracks
+	rep.TracksWithLyrics = cov.TracksWithLyrics
+	rep.TracksLyricsAsked = cov.TracksLyricsAsked
 
 	diags, err := l.store.CountFileDiagnostics(ctx)
 	if err != nil {

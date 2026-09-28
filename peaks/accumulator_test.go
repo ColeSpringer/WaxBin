@@ -156,6 +156,26 @@ func TestAccumulatorLongSignal(t *testing.T) {
 	if got := len(a.coarse); got < DefaultBuckets {
 		t.Errorf("coarse buckets = %d, want at least %d to pool from", got, DefaultBuckets)
 	}
+	if got := a.Frames(); got != 1600*65536 {
+		t.Errorf("Frames = %d, want %d", got, 1600*65536)
+	}
+}
+
+// TestAccumulatorCountsFrames: Frames is every sample Add folded, however the stream
+// was chunked and however many halvings it forced.
+func TestAccumulatorCountsFrames(t *testing.T) {
+	for _, n := range []int{0, 1, 999, 8001, 123_457} {
+		mono := signal(n, int64(n)+1)
+		for _, chunk := range []int{1, 7, 4096, max(n, 1)} {
+			a := NewAccumulator(DefaultBuckets)
+			for i := 0; i < len(mono); i += chunk {
+				a.Add(mono[i:min(i+chunk, len(mono))])
+			}
+			if got := a.Frames(); got != int64(n) {
+				t.Errorf("%d samples in chunks of %d: Frames = %d", n, chunk, got)
+			}
+		}
+	}
 }
 
 // TestHalveOddCount covers the unpaired trailing bucket. The cap is even so Add

@@ -104,9 +104,10 @@ listener. The server runs until interrupted (Ctrl-C / SIGTERM).
 
 - `waxbin audit` reports quality and integrity problems: duplicate/split entities,
   inconsistent metadata, missing art/ReplayGain, unportable filenames, orphaned
-  sidecars, case-insensitive path conflicts, invalid feeds, and derived-data
-  drift. `--integrity` adds an on-disk bitrot (content-hash) and corrupt-audio
-  pass. It reports only; it never deletes.
+  sidecars, case-insensitive path conflicts, invalid feeds, header durations that
+  disagree with the decoded audio, and derived-data drift. `--integrity` adds an
+  on-disk bitrot (content-hash) and corrupt-audio pass. It reports only; it never
+  deletes.
 - `waxbin merge <type> <survivor-pid> <loser-pid>...` collapses duplicate
   artists / release-groups / albums / genres / series onto one survivor,
   re-pointing children (so play state and provenance ride along) and

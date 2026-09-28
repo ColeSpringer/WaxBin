@@ -20,12 +20,19 @@ const currentDiagVersion = 5 // 2: WaxLabel 1.6 (FLAC truncation; WavPack, APE, 
 // only the given origin's rows, so writers cannot clear each other's findings and a
 // retry that comes back clean clears its own stale rows.
 func replaceFileDiagnosticsTx(ctx context.Context, tx *sql.Tx, fileID int64, origin model.DiagnosticOrigin, ds []model.FileDiagnostic) error {
+	return replaceStampedDiagnosticsTx(ctx, tx, fileID, origin, "", ds)
+}
+
+// replaceStampedDiagnosticsTx is replaceFileDiagnosticsTx for a writer that stamps each
+// row with the essence it describes, which only the analyze origin does ("" stamps
+// none). diagnosticCurrent hides a stamped row once the file's essence moves on.
+func replaceStampedDiagnosticsTx(ctx context.Context, tx *sql.Tx, fileID int64, origin model.DiagnosticOrigin, essence string, ds []model.FileDiagnostic) error {
 	if _, err := tx.ExecContext(ctx, "DELETE FROM file_diagnostic WHERE file_id = ? AND origin = ?", fileID, string(origin)); err != nil {
 		return err
 	}
 	now := nowNS()
 	for _, d := range ds {
-		if err := upsertFileDiagnosticTx(ctx, tx, fileID, origin, d, now); err != nil {
+		if err := upsertFileDiagnosticTx(ctx, tx, fileID, origin, essence, d, now); err != nil {
 			return err
 		}
 	}
@@ -33,10 +40,11 @@ func replaceFileDiagnosticsTx(ctx context.Context, tx *sql.Tx, fileID int64, ori
 }
 
 // upsertFileDiagnosticTx writes one diagnostic row, defaulting the severity to warn and
-// the seen time to now. The primary key is (file_id, origin, code, tag_key), so one
-// writer reporting the same code for the same key twice collapses to the last one
-// rather than failing the whole scan transaction.
-func upsertFileDiagnosticTx(ctx context.Context, tx *sql.Tx, fileID int64, origin model.DiagnosticOrigin, d model.FileDiagnostic, now int64) error {
+// the seen time to now, with the detail escaped and capped whoever wrote it. The primary
+// key is (file_id, origin, code, tag_key), so one writer reporting the same code for the
+// same key twice collapses to the last one rather than failing the whole scan
+// transaction.
+func upsertFileDiagnosticTx(ctx context.Context, tx *sql.Tx, fileID int64, origin model.DiagnosticOrigin, essence string, d model.FileDiagnostic, now int64) error {
 	sev := d.Severity
 	if sev == "" {
 		sev = model.SeverityWarn
@@ -46,11 +54,12 @@ func upsertFileDiagnosticTx(ctx context.Context, tx *sql.Tx, fileID int64, origi
 		seen = now
 	}
 	_, err := tx.ExecContext(ctx, `INSERT INTO file_diagnostic
-		(file_id, origin, code, severity, tag_key, detail, seen_at)
-		VALUES (?,?,?,?,?,?,?)
+		(file_id, origin, code, severity, tag_key, detail, seen_at, essence)
+		VALUES (?,?,?,?,?,?,?,?)
 		ON CONFLICT(file_id, origin, code, tag_key) DO UPDATE SET
-			severity=excluded.severity, detail=excluded.detail, seen_at=excluded.seen_at`,
-		fileID, string(origin), string(d.Code), string(sev), d.TagKey, d.Detail, seen)
+			severity=excluded.severity, detail=excluded.detail, seen_at=excluded.seen_at,
+			essence=excluded.essence`,
+		fileID, string(origin), string(d.Code), string(sev), d.TagKey, model.CapDetail(d.Detail), seen, nullStr(essence))
 	return err
 }
 
@@ -113,7 +122,7 @@ func (s *Store) AddFileDiagnostic(ctx context.Context, filePID model.PID, origin
 		if err != nil {
 			return err
 		}
-		if err := upsertFileDiagnosticTx(ctx, tx, fileID, origin, d, nowNS()); err != nil {
+		if err := upsertFileDiagnosticTx(ctx, tx, fileID, origin, "", d, nowNS()); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		return nil
@@ -133,7 +142,7 @@ func (s *Store) AddFileDiagnostic(ctx context.Context, filePID model.PID, origin
 // subquery rides item_file's item_id-leading primary key and materializes once; no
 // new index is needed at this table's grain.
 func (s *Store) diagnosticFilterSQL(ctx context.Context, filter model.DiagnosticFilter, op string) (string, []any, error) {
-	var conds []string
+	conds := []string{diagnosticCurrent}
 	var args []any
 	if filter.Origin != "" {
 		if !filter.Origin.Valid() {
@@ -180,11 +189,12 @@ func (s *Store) diagnosticFilterSQL(ctx context.Context, filter model.Diagnostic
 		conds = append(conds, "d.file_id IN (SELECT itf.file_id FROM item_file itf WHERE itf.item_id = ?)")
 		args = append(args, id)
 	}
-	if len(conds) == 0 {
-		return "", nil, nil
-	}
 	return " WHERE " + strings.Join(conds, " AND "), args, nil
 }
+
+// diagnosticCurrent keeps, reading the row as d and its file as f, every diagnostic but
+// an analyze verdict on audio the file no longer holds.
+const diagnosticCurrent = "(d.essence IS NULL OR d.essence = f.essence_hash)"
 
 // FileDiagnostics returns the persisted diagnostics matching the filter, each
 // joined to its file's display path. Ordering is deterministic (path, origin,
@@ -305,7 +315,8 @@ func (s *Store) hasFileDiagnostics(ctx context.Context, filePID model.PID, origi
 func (s *Store) CountFileDiagnostics(ctx context.Context) (int, error) {
 	const op = "store.CountFileDiagnostics"
 	var n int
-	if err := s.read.QueryRowContext(ctx, "SELECT COUNT(*) FROM file_diagnostic").Scan(&n); err != nil {
+	if err := s.read.QueryRowContext(ctx, "SELECT COUNT(*) FROM file_diagnostic d JOIN file f ON f.id = d.file_id WHERE "+
+		diagnosticCurrent).Scan(&n); err != nil {
 		return 0, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
 	return n, nil
@@ -329,4 +340,22 @@ func (s *Store) DiagnosticCoverage(ctx context.Context) (stale, total int, err e
 		return 0, 0, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
 	return stale, total, nil
+}
+
+// PutDecodeVerdict records what the analyze pass's decode found wrong with a file it
+// could not analyze at all, under the analyze origin and for the essence it read, so
+// the audit reports the file although no analysis landed. A later analysis of the same
+// audio replaces it.
+func (s *Store) PutDecodeVerdict(ctx context.Context, filePID model.PID, essence string, ds []model.FileDiagnostic) error {
+	const op = "store.PutDecodeVerdict"
+	return s.writeTx(ctx, func(tx *sql.Tx) error {
+		fileID, err := idByPIDTx(ctx, tx, "file", filePID, op)
+		if err != nil {
+			return err
+		}
+		if err := replaceStampedDiagnosticsTx(ctx, tx, fileID, model.OriginAnalyze, essence, ds); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		return nil
+	})
 }

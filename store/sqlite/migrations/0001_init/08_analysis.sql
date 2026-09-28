@@ -46,5 +46,9 @@ CREATE TABLE peaks (
   version      INTEGER NOT NULL,         -- peaks.Version
   bucket_count INTEGER NOT NULL,
   data         BLOB    NOT NULL,         -- packed little-endian uint16 buckets
+  -- The span the buckets divide: every decoded frame, at the decoded rate (which
+  -- can differ from the header's), so a reader can place a window exactly.
+  frames       INTEGER NOT NULL,
+  sample_rate  INTEGER NOT NULL,
   updated_at   INTEGER NOT NULL
 );

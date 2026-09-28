@@ -79,6 +79,11 @@ func entityColumnForField(field string) string {
 // stays column-only, since re-keying onto mbid: would fork any member whose own file does
 // not carry the id on its next scan; enrichment fills the column the same way.
 //
+// Any mbid edit, a set as much as a clear, drops the art enrichment fetched for the
+// entity in every role no lock holds, and its art backfill marker, so the next pass asks
+// again under the new id rather than keeping pictures of what the entity no longer claims
+// to be.
+//
 // The undo is only as durable as the tags on disk. The members still carry the release id,
 // so the next scan that re-resolves them, meaning a retag, move, or content change rather
 // than every scan, computes the mbid key again and forks a fresh identified chain while the
@@ -230,49 +235,43 @@ func (s *Store) EditEntityFields(ctx context.Context, entityType model.MergeEnti
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 		}
-		// Clearing the release id is how a wrong match is undone, which the weak edition
-		// tier's own marker exists to make possible. Three things go with an album's id, and
-		// the same three with a release group's, which holds art of its own at its own rung.
-		// The marker must, matched or not, because the queue skips a marked entity and
-		// leaving it would mean the undo silently prevented the entity from ever being
-		// re-decided; a group carries the aux-art backfill's separate marker as well. The
-		// art goes because it came from the identity now being disowned, and only
-		// enrichment's own rows go, so the member tracks' embedded covers and a hand-set
-		// cover are untouched and the entity falls back to what it showed before. And the
-		// match key goes back to its heuristic form, so the members follow the row rather
-		// than staying pinned to the id.
-		// An art backfill's marker goes on ANY mbid edit, not just a clear. Those queues
-		// walk by name, but the id rides the request when there is one, so a corrected or
-		// newly-supplied id is an answer no provider has been asked with and a marker
-		// naming the old state would suppress it for good.
-		// The identity markers below are a different question, settled only by a clear.
+		// Two things go on every mbid edit, not just a clear: an art backfill's marker and the
+		// art enrichment fetched. Those queues walk by name, but the id rides the request when
+		// there is one, so a corrected or newly-supplied id is an answer no provider has been
+		// asked with and a marker naming the old state would suppress it for good. The art was
+		// fetched for the entity this one no longer claims to be, and leaving it would close
+		// the vacancies the marker delete just opened, so the re-ask would find nothing to do
+		// and the wrong pictures would stand. Only enrichment's own rows go
+		// (clearEnrichmentArtTx), so a hand-set picture and the member tracks' embedded
+		// covers are untouched.
 		// Before the re-key, so the in-place and guard-skip paths are covered too; a merge
 		// deletes it again for nothing.
 		if _, edited := norm["mbid"]; edited {
+			var (
+				artType model.ArtEntity
+				err     error
+			)
 			switch entityType {
 			case model.MergeReleaseGroup:
-				if err := deleteAuxArtMarkerTx(ctx, tx, entityID); err != nil {
-					return waxerr.Wrap(waxerr.CodeIO, op, err)
-				}
+				artType, err = model.ArtReleaseGroup, deleteGroupArtMarkerTx(ctx, tx, entityID)
 			case model.MergeArtist:
-				if err := artistMBIDLandedTx(ctx, tx, entityID); err != nil {
-					return waxerr.Wrap(waxerr.CodeIO, op, err)
-				}
+				artType, err = model.ArtArtist, artistMBIDLandedTx(ctx, tx, entityID)
 			case model.MergeAlbum:
-				if err := deleteAlbumArtMarkerTx(ctx, tx, entityID); err != nil {
-					return waxerr.Wrap(waxerr.CodeIO, op, err)
-				}
-				// The cover goes with the marker, on any mbid edit and not only a clear.
-				// It was fetched for the release the album is no longer claiming to be,
-				// and leaving it would close the front vacancy the marker delete just
-				// opened, so the re-ask would find nothing to do and the wrong pressing's
-				// picture would stand forever. The delete names enrichment's own row, so
-				// a hand-set cover and a member track's embedded one are untouched.
-				if err := clearAlbumArtTx(ctx, tx, entityID); err != nil {
-					return waxerr.Wrap(waxerr.CodeIO, op, err)
-				}
+				artType, err = model.ArtAlbum, deleteAlbumArtMarkerTx(ctx, tx, entityID)
+			}
+			if err == nil && artType != "" {
+				err = clearEnrichmentArtTx(ctx, tx, artType, entityID)
+			}
+			if err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 		}
+		// Clearing the id is how a wrong match is undone, which the weak edition tier's own
+		// marker exists to make possible. Two more things go with an album's or a release
+		// group's id then. The identity marker must, matched or not, because the queue skips
+		// a marked entity and leaving it would mean the undo silently prevented the entity
+		// from ever being re-decided. And the match key goes back to its heuristic form, so
+		// the members follow the row rather than staying pinned to the id.
 		var survivor model.PID
 		if v, edited := norm["mbid"]; edited && v == "" {
 			switch entityType {
@@ -285,19 +284,13 @@ func (s *Store) EditEntityFields(ctx context.Context, entityType model.MergeEnti
 					return waxerr.Wrap(waxerr.CodeIO, op, err)
 				}
 			case model.MergeReleaseGroup:
-				matched, err := entityMarkerMatchedTx(ctx, tx, model.EnrichReleaseGroupType, entityID)
-				if err != nil {
-					return waxerr.Wrap(waxerr.CodeIO, op, err)
-				}
-				if matched {
-					if err := clearReleaseGroupEnrichmentArtTx(ctx, tx, entityID); err != nil {
-						return waxerr.Wrap(waxerr.CodeIO, op, err)
-					}
-				}
 				if err := clearEntityMarkerTx(ctx, tx, model.EnrichReleaseGroupType, entityID); err != nil {
 					return waxerr.Wrap(waxerr.CodeIO, op, err)
 				}
-				var moved []model.PID
+				var (
+					moved []model.PID
+					err   error
+				)
 				if survivor, moved, err = rekeyReleaseGroupHeuristicTx(ctx, tx, s.log, entityID); err != nil {
 					return waxerr.Wrap(waxerr.CodeIO, op, err)
 				}

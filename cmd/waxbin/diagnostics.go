@@ -21,7 +21,7 @@ type diagnosticFlags struct {
 
 func (df *diagnosticFlags) register(cmd *cobra.Command) {
 	f := cmd.Flags()
-	f.StringVar(&df.origin, "origin", "", "filter by writer: scan|organize|replaygain|edit|enrichment")
+	f.StringVar(&df.origin, "origin", "", "filter by writer: scan|organize|replaygain|edit|enrichment|analyze")
 	f.StringVar(&df.code, "code", "", "filter by diagnostic code (e.g. tag_write_unsynced)")
 	f.StringVar(&df.severity, "severity", "", "filter by severity: info|warn|error")
 	f.StringVar(&df.library, "library", "", "filter to files under this library, by pid or registered root path")
@@ -54,10 +54,11 @@ func newDiagnosticsCmd(g *globals) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "diagnostics",
 		Short: "Query the persisted per-file diagnostics",
-		Long: "Reads the diagnostics the scan, organize, analyze, edit, and enrich write-back " +
-			"passes recorded per file (unsupported formats, dropped cue tracks, unsynced tags, and the " +
-			"rest), filtered by writer, code, severity, library, file, or item. `list` prints " +
-			"the rows; `summary` prints grouped counts, most severe first.",
+		Long: "Reads the diagnostics recorded per file by the scan, organize, the ReplayGain tag " +
+			"write-back (replaygain), edits, the enrichment write-back, and the analyze pass's " +
+			"decode (analyze): unsupported formats, dropped cue tracks, unsynced tags, damaged " +
+			"audio, and the rest, filtered by writer, code, severity, library, file, or item. " +
+			"`list` prints the rows; `summary` prints grouped counts, most severe first.",
 	}
 	cmd.AddCommand(newDiagnosticsListCmd(g), newDiagnosticsSummaryCmd(g))
 	return cmd

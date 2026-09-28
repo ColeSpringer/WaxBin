@@ -13,6 +13,7 @@ import (
 	"errors"
 	"log/slog"
 	"strconv"
+	"strings"
 
 	"github.com/colespringer/waxbin/decode"
 	"github.com/colespringer/waxbin/fingerprint"
@@ -20,6 +21,7 @@ import (
 	"github.com/colespringer/waxbin/loudness"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/peaks"
+	"github.com/colespringer/waxbin/waxerr"
 )
 
 // effectiveVersion combines a fingerprint algorithm with the loudness and peaks
@@ -55,6 +57,9 @@ type Store interface {
 	FilesNeedingAnalysis(ctx context.Context, algoVersion int, afterRelPath []byte, afterID int64, limit int) ([]*model.File, error)
 	CountFilesNeedingAnalysis(ctx context.Context, algoVersion int) (int, error)
 	PutAnalysis(ctx context.Context, in model.AnalysisInput) error
+	// PutDecodeVerdict records the analyze origin's verdict on a file whose decode failed
+	// before an analysis could be stored, for the essence the pass read.
+	PutDecodeVerdict(ctx context.Context, filePID model.PID, essence string, ds []model.FileDiagnostic) error
 }
 
 // Analyzer runs the analyze pass over a catalog.
@@ -196,6 +201,15 @@ func (a *Analyzer) Run(ctx context.Context, hb Heartbeat) (*Result, error) {
 func (a *Analyzer) analyzeFile(ctx context.Context, f *model.File, res *Result) error {
 	sub, algo, fpDurationMS, err := a.fingerprintFile(ctx, f)
 	if err != nil {
+		// Failing on bad bytes is a verdict on the file, recorded so the audit reports it
+		// although nothing was analyzed. The file is still retried.
+		if ctx.Err() == nil && waxerr.Is(err, waxerr.CodeInvalid) {
+			if verr := a.store.PutDecodeVerdict(ctx, f.PID, f.EssenceHash, []model.FileDiagnostic{{
+				Code: model.DiagCorruptAudio, Severity: model.SeverityError, Detail: model.CapDetail(err.Error()),
+			}}); verr != nil {
+				return errors.Join(err, verr)
+			}
+		}
 		return err
 	}
 	if algo == 0 {
@@ -207,12 +221,6 @@ func (a *Analyzer) analyzeFile(ctx context.Context, f *model.File, res *Result) 
 		return nil
 	}
 
-	// Bucket by the full track length from tags; fall back to the (possibly
-	// capped) analyzed length only when the tag duration is unknown.
-	durForBucket := f.DurationMS
-	if durForBucket <= 0 {
-		durForBucket = fpDurationMS
-	}
 	in := model.AnalysisInput{
 		// Stamp the version for the algorithm actually used, not the run's preferred
 		// backend. A file that fell back to pure-Go (fpcalc failed on it) then reads as
@@ -221,12 +229,11 @@ func (a *Analyzer) analyzeFile(ctx context.Context, f *model.File, res *Result) 
 		// vector (which the candidate join would never group and never re-analyze).
 		AnalysisVersion: effectiveVersion(algo),
 		Fingerprint: model.FingerprintInput{
-			FilePID:        f.PID,
-			EssenceHash:    f.EssenceHash,
-			AlgoVersion:    algo,
-			DurationBucket: fingerprint.DurationBucket(durForBucket),
-			FP:             fingerprint.Pack(sub),
-			Terms:          indexTerms(algo, sub),
+			FilePID:     f.PID,
+			EssenceHash: f.EssenceHash,
+			AlgoVersion: algo,
+			FP:          fingerprint.Pack(sub),
+			Terms:       indexTerms(algo, sub),
 		},
 	}
 	// Loudness and peaks are best-effort. The fingerprint already stands (from the
@@ -240,8 +247,9 @@ func (a *Analyzer) analyzeFile(ctx context.Context, f *model.File, res *Result) 
 	// churn its fingerprint rows on every run for an answer that cannot change until
 	// a decoder change moves AnalysisVersion. Only a canceled context aborts before
 	// stamping.
-	ld, pk, err := a.measure(ctx, f)
+	ld, pk, diags, err := a.measure(ctx, f)
 	in.MeasureCompleted = measureSettled(err)
+	in.Observed = measureObserved(err)
 	if err != nil {
 		if ctx.Err() != nil {
 			return err
@@ -250,8 +258,13 @@ func (a *Analyzer) analyzeFile(ctx context.Context, f *model.File, res *Result) 
 			"path", f.DisplayPath, "err", err)
 		res.MeasureFailed++
 		ld, pk = nil, nil
+		if in.Observed {
+			diags = []model.FileDiagnostic{{Code: model.DiagCorruptAudio, Severity: model.SeverityError,
+				Detail: model.CapDetail(err.Error())}}
+		}
 	}
-	in.Loudness, in.Peaks = ld, pk
+	in.Loudness, in.Peaks, in.Diagnostics = ld, pk, diags
+	in.Fingerprint.DurationBucket = fingerprint.DurationBucket(bucketDuration(pk, len(diags) > 0, f.DurationMS, fpDurationMS))
 
 	if err := a.store.PutAnalysis(ctx, in); err != nil {
 		return err
@@ -311,14 +324,15 @@ func indexTerms(algo int, sub []uint32) []int64 {
 // measure computes whole-file loudness and a waveform in one streamed decode: the
 // engine's meter measures loudness while a tap folds each chunk's mono mix into
 // the peaks accumulator, so the waveform costs no second decode and memory stays
-// O(1) in the track length.
+// O(1) in the track length. It also returns a corrupt_audio verdict when the read
+// had to work around damage.
 //
 // A non-nil error covers two situations the caller separates by ctx: a canceled
 // context (fatal: abort the run, stamp nothing) versus any decode failure (an
 // undecodable input, a damaged file, or a transient read glitch). Loudness and
 // peaks are best-effort, so the caller absorbs the latter and keeps the
 // already-computed fingerprint; only cancellation is fatal to the file.
-func (a *Analyzer) measure(ctx context.Context, f *model.File) (*model.LoudnessData, *model.PeaksData, error) {
+func (a *Analyzer) measure(ctx context.Context, f *model.File) (*model.LoudnessData, *model.PeaksData, []model.FileDiagnostic, error) {
 	acc := peaks.NewAccumulator(peaks.DefaultBuckets)
 	// scratch is our own reused mixdown buffer. MixMono returns it (grown as needed)
 	// for a real mix but returns ch[0] aliased for mono input, so retain it only for
@@ -336,15 +350,45 @@ func (a *Analyzer) measure(ctx context.Context, f *model.File) (*model.LoudnessD
 	})
 	if err != nil {
 		if cerr := ctx.Err(); cerr != nil {
-			return nil, nil, cerr // cancellation is fatal: abort the run cleanly
+			return nil, nil, nil, cerr // cancellation is fatal: abort the run cleanly
 		}
 		// Any other failure (ErrUnsupported on an fpcalc host, a damaged file, or a
 		// transient read) is a best-effort miss the caller absorbs while keeping the
 		// fingerprint; measureSettled decides which of them stamp the file.
-		return nil, nil, err
+		return nil, nil, nil, err
+	}
+	var diags []model.FileDiagnostic
+	if len(m.InputDamage) > 0 {
+		diags = []model.FileDiagnostic{{Code: model.DiagCorruptAudio, Severity: model.SeverityWarn,
+			Detail: model.CapDetail(strings.Join(m.InputDamage, "; "))}}
 	}
 	return loudnessData(loudness.FromMeasurement(m.IntegratedLUFS, m.SamplePeakDB)),
-		peaksData(acc.Peaks(), f.EssenceHash), nil
+		peaksData(acc.Peaks(), acc.Frames(), m.SampleRate, f.EssenceHash), diags, nil
+}
+
+// measureObserved reports whether a measure outcome looked at the audio bytes, so its
+// verdict on them replaces the prior one: a clean read, damage it worked around, or a
+// failure on bad bytes (CodeInvalid). An input no decoder here reads, an unreadable
+// source and a cancel looked at nothing, and the prior verdict stands.
+func measureObserved(err error) bool {
+	return err == nil || waxerr.Is(err, waxerr.CodeInvalid)
+}
+
+// bucketDuration is the length the fingerprint is bucketed by: the decoded length when
+// the measure read the file without damage, else the header's, else the analyzed
+// head's. A header can understate a file (a VBR MP3 with no info frame), and trusting it
+// would bucket the file away from its twins. A read that worked around damage decodes
+// less than the recording holds, so there the header is the better guess.
+func bucketDuration(pk *model.PeaksData, damaged bool, headerMS, analyzedMS int64) int64 {
+	if pk != nil && !damaged {
+		if ms := pk.DurationMS(); ms > 0 {
+			return ms
+		}
+	}
+	if headerMS > 0 {
+		return headerMS
+	}
+	return analyzedMS
 }
 
 // measureSettled reports whether a measure outcome stamps the file as measured for
@@ -370,10 +414,12 @@ func loudnessData(r loudness.Result) *model.LoudnessData {
 }
 
 // peaksData converts a waveform to the packed stored form, stamped with the
-// essence it covers. It returns nil for an empty waveform.
-func peaksData(p peaks.Peaks, essence string) *model.PeaksData {
-	if len(p.Buckets) == 0 {
+// essence it covers and the span its buckets divide. It returns nil for an empty
+// waveform, and for one whose decode reported no rate to place it by.
+func peaksData(p peaks.Peaks, frames int64, rate int, essence string) *model.PeaksData {
+	if len(p.Buckets) == 0 || rate <= 0 {
 		return nil
 	}
-	return &model.PeaksData{Version: peaks.Version, Buckets: len(p.Buckets), Data: peaks.Pack(p), EssenceHash: essence}
+	return &model.PeaksData{Version: peaks.Version, Buckets: len(p.Buckets), Data: peaks.Pack(p),
+		EssenceHash: essence, Frames: frames, SampleRate: rate}
 }

@@ -398,3 +398,51 @@ func (s *Store) DerivedDrift(ctx context.Context) (model.DerivedDrift, error) {
 		BookISBNKeyDrift:        rep.BookISBNKeyDrift,
 	}, nil
 }
+
+// filesDurationMismatchWhere selects the audio files whose header duration and the
+// decoded length of their current waveform differ by more than two seconds and two
+// percent of the header's length, so a lossy file's priming never fires it and a 20
+// second gap on a long track does. A stale waveform describes other audio and a file
+// with no header duration has nothing to compare, so both are left out.
+const filesDurationMismatchWhere = `
+	FROM file f
+	JOIN peaks p ON p.file_id = f.id AND p.essence_hash = f.essence_hash
+	WHERE f.kind = 'audio' AND f.duration_ms > 0 AND p.sample_rate > 0
+	  AND ABS(p.frames * 1000 / p.sample_rate - f.duration_ms) > MAX(2000, f.duration_ms / 50)`
+
+// FilesDurationMismatch returns a sample (up to limit) of audio files whose header
+// states a length the decoded audio does not have, plus the total count. It is an
+// audit computation rather than a stored finding: the header half changes without the
+// essence changing (a retag, an MP3 gaining an info frame), and only the scan rewrites
+// it, so a persisted row would outlive the fix.
+func (s *Store) FilesDurationMismatch(ctx context.Context, limit int) ([]model.FileDurationMismatch, int, error) {
+	const op = "store.FilesDurationMismatch"
+	var total int
+	if err := s.read.QueryRowContext(ctx, "SELECT COUNT(*) "+filesDurationMismatchWhere).Scan(&total); err != nil {
+		return nil, 0, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	if total == 0 || limit <= 0 {
+		return nil, total, nil
+	}
+	rows, err := s.read.QueryContext(ctx,
+		"SELECT f.pid, f.display_path, f.duration_ms, p.frames * 1000 / p.sample_rate "+
+			filesDurationMismatchWhere+" ORDER BY f.display_path, f.pid LIMIT ?", limit)
+	if err != nil {
+		return nil, 0, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	defer rows.Close()
+	var out []model.FileDurationMismatch
+	for rows.Next() {
+		var m model.FileDurationMismatch
+		var pid string
+		if err := rows.Scan(&pid, &m.DisplayPath, &m.HeaderMS, &m.DecodedMS); err != nil {
+			return nil, 0, waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		m.FilePID = model.PID(pid)
+		out = append(out, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	return out, total, nil
+}

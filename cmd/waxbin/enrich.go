@@ -187,12 +187,12 @@ func renderEnrichResult(cmd *cobra.Command, g *globals, res *waxbin.EnrichResult
 	fmt.Fprintf(w, "album releases: %d searched (%d matched)\n", r.AlbumsSearched, r.AlbumsMatched)
 	fmt.Fprintf(w, "books:          %d enriched (%d matched)\n", r.BooksEnriched, r.BooksMatched)
 	fmt.Fprintf(w, "lyrics:         %d looked up (%d matched)\n", r.LyricsEnriched, r.LyricsMatched)
-	// The art backfills and the fields walks run only when an injected provider
-	// advertises them, so each line appears only when its phase ran. It has to appear
-	// then: the phase spends the same --limit budget as the ones above, and a summary
-	// that never mentions it leaves a capped run looking like it did less than it did.
-	if r.AuxArtEnriched > 0 {
-		fmt.Fprintf(w, "aux art:        %d backfilled (%d matched)\n", r.AuxArtEnriched, r.AuxArtMatched)
+	// The art backfills and the fields walks run only when some provider in the pass
+	// serves them, so each line appears only when its phase ran. It has to appear then:
+	// the phase spends the same --limit budget as the ones above, and a summary that
+	// never mentions it leaves a capped run looking like it did less than it did.
+	if r.GroupArtEnriched > 0 {
+		fmt.Fprintf(w, "group art:      %d backfilled (%d matched)\n", r.GroupArtEnriched, r.GroupArtMatched)
 	}
 	if r.ArtistArtEnriched > 0 {
 		fmt.Fprintf(w, "artist art:     %d backfilled (%d matched)\n", r.ArtistArtEnriched, r.ArtistArtMatched)
@@ -230,8 +230,8 @@ func renderEnrichResult(cmd *cobra.Command, g *globals, res *waxbin.EnrichResult
 		fmt.Fprintf(w, "cover art:      %d fetched\n", r.ArtFetched)
 	}
 	// Only when a provider offered auxiliary roles, keeping the summary shape stable
-	// for the common built-ins-only run. It counts images, so it names them: the line
-	// above counts the release groups the backfill phase walked.
+	// for the common built-ins-only run. It counts images, so it names them: the group
+	// art line above counts the release groups the backfill phase walked.
 	if r.AuxArtFetched > 0 {
 		fmt.Fprintf(w, "aux art images: %d fetched\n", r.AuxArtFetched)
 	}

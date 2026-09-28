@@ -46,6 +46,8 @@ func newDoctorCmd(g *globals) *cobra.Command {
 			if len(rep.EnrichmentPhases) > 0 {
 				fmt.Fprintf(w, "                phases: %s\n", phaseKeys(rep.EnrichmentPhases))
 			}
+			fmt.Fprintf(w, "lyrics:         %d of %d tracks (%d looked up, none found)\n",
+				rep.TracksWithLyrics, rep.TrackCount, rep.TracksLyricsAsked)
 			fmt.Fprintf(w, "fpcalc:         %s\n", presentLabel(rep.Fpcalc))
 			fmt.Fprintln(w, "analyze decode coverage:")
 			tw := tabwriter.NewWriter(w, 0, 2, 2, ' ', 0)

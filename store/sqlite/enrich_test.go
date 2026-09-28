@@ -872,7 +872,7 @@ func TestApplyAlbumArtBackfillRespectsLocks(t *testing.T) {
 }
 
 // auxRGTrack persists one track under its own artist, album, and release group, so
-// each call gives the aux-art queue a distinct group to judge. An empty mbid leaves
+// each call gives the group-art queue a distinct group to judge. An empty mbid leaves
 // the group unidentified. Re-calling it with the same name and a new album retags the
 // one file, which is how a test strands the group it was under.
 func auxRGTrack(t *testing.T, st *sqlite.Store, libID int64, name, album, mbid string) {
@@ -922,13 +922,13 @@ func assertStoreVerifyClean(t *testing.T, st *sqlite.Store) {
 	}
 }
 
-// TestReleaseGroupsNeedingAuxArtGuards pins the backfill queue's guards: a titled group
+// TestReleaseGroupsNeedingArtAuxGuards pins the backfill queue's auxiliary guards: a titled group
 // with a vacancy is queued no matter how settled its front is or whether it carries an
 // mbid, while a whole-entity art lock, an existing marker, a full set of aux slots, and
 // the shared ghost heuristic each keep a group out. A per-role lock deliberately does
 // not: the queue cannot cheaply tell a role held empty from an empty one, so the group
 // is queued and the apply skips the role.
-func TestReleaseGroupsNeedingAuxArtGuards(t *testing.T) {
+func TestReleaseGroupsNeedingArtAuxGuards(t *testing.T) {
 	ctx := context.Background()
 	st, dbPath, lib := openStoreAt(t)
 	db := roConn(t, dbPath)
@@ -966,8 +966,8 @@ func TestReleaseGroupsNeedingAuxArtGuards(t *testing.T) {
 	if _, err := st.SetArtLock(ctx, model.ArtReleaseGroup, rgPID("Whole"), model.ArtRoleFront, true); err != nil {
 		t.Fatalf("lock art: %v", err)
 	}
-	if err := st.ApplyReleaseGroupAuxArt(ctx, model.ReleaseGroupAuxArt{
-		ReleaseGroupID: rgID("Marked"), PID: rgPID("Marked"),
+	if err := st.ApplyReleaseGroupArtBackfill(ctx, model.ReleaseGroupArtBackfill{
+		ReleaseGroupID: rgID("Marked"), PID: rgPID("Marked"), Aux: model.ArtHalf{Asked: true},
 	}); err != nil {
 		t.Fatalf("mark: %v", err)
 	}
@@ -980,9 +980,9 @@ func TestReleaseGroupsNeedingAuxArtGuards(t *testing.T) {
 		t.Fatalf("lock back: %v", err)
 	}
 
-	queued, err := st.ReleaseGroupsNeedingAuxArt(ctx, model.EnrichQueueOptions{}, 0, 100, nil)
+	queued, err := st.ReleaseGroupsNeedingArt(ctx, model.EnrichQueueOptions{}, 0, 100, model.ArtSlots{Aux: true}, nil)
 	if err != nil {
-		t.Fatalf("ReleaseGroupsNeedingAuxArt: %v", err)
+		t.Fatalf("ReleaseGroupsNeedingArt: %v", err)
 	}
 	got := map[string]bool{}
 	for _, q := range queued {
@@ -1002,7 +1002,8 @@ func TestReleaseGroupsNeedingAuxArtGuards(t *testing.T) {
 
 	// The heartbeat denominator is built from the same gate, so turning the phase on
 	// adds exactly the queued groups and nothing else.
-	withAux, err := st.CountEntitiesNeedingEnrichment(ctx, model.EnrichQueueOptions{}, model.EnrichCountOptions{Phases: []model.EnrichPhase{model.EnrichPhaseAuxArt}}, nil)
+	withAux, err := st.CountEntitiesNeedingEnrichment(ctx, model.EnrichQueueOptions{}, model.EnrichCountOptions{
+		Phases: []model.EnrichPhase{model.EnrichPhaseGroupArt}, GroupArt: model.ArtSlots{Aux: true}}, nil)
 	if err != nil {
 		t.Fatalf("count with aux: %v", err)
 	}
@@ -1015,7 +1016,7 @@ func TestReleaseGroupsNeedingAuxArtGuards(t *testing.T) {
 	}
 
 	// Force is what re-asks a marked group, mirroring every other queue.
-	forced, err := st.ReleaseGroupsNeedingAuxArt(ctx, model.EnrichQueueOptions{Sweep: model.SweepAll}, 0, 100, nil)
+	forced, err := st.ReleaseGroupsNeedingArt(ctx, model.EnrichQueueOptions{Sweep: model.SweepAll}, 0, 100, model.ArtSlots{Aux: true}, nil)
 	if err != nil {
 		t.Fatalf("forced walk: %v", err)
 	}
@@ -1029,8 +1030,8 @@ func TestReleaseGroupsNeedingAuxArtGuards(t *testing.T) {
 
 	// The per-role lock is re-checked at apply: the locked slot stays empty while the
 	// role beside it fills.
-	err = st.ApplyReleaseGroupAuxArt(ctx, model.ReleaseGroupAuxArt{
-		ReleaseGroupID: rgID("RoleLock"), PID: rgPID("RoleLock"), Matched: true, Provider: "mock",
+	err = st.ApplyReleaseGroupArtBackfill(ctx, model.ReleaseGroupArtBackfill{
+		ReleaseGroupID: rgID("RoleLock"), PID: rgPID("RoleLock"), Aux: model.ArtHalf{Asked: true}, Provider: "mock",
 		AuxArt: map[model.ArtRole]*model.ArtImage{
 			model.ArtRoleBack: enrichArtImg("rl-back", "mock"),
 			model.ArtRoleDisc: enrichArtImg("rl-disc", "mock"),
@@ -1051,9 +1052,9 @@ func TestReleaseGroupsNeedingAuxArtGuards(t *testing.T) {
 	assertStoreVerifyClean(t, st)
 }
 
-// auxMarkerFixture seeds one identified release group with a settled front cover and
+// groupArtMarkerFixture seeds one identified release group with a settled front cover and
 // returns its row id, its pid, and readers for the marker count and the queue.
-func auxMarkerFixture(t *testing.T, title string, mbidN int) (*sqlite.Store, int64, model.PID, func() int, func() bool) {
+func groupArtMarkerFixture(t *testing.T, title string, mbidN int) (*sqlite.Store, int64, model.PID, func() int, func() bool) {
 	t.Helper()
 	ctx := context.Background()
 	st, dbPath, lib := openStoreAt(t)
@@ -1065,11 +1066,11 @@ func auxMarkerFixture(t *testing.T, title string, mbidN int) (*sqlite.Store, int
 
 	markers := func() int {
 		return scalarQueryInt(t, db,
-			"SELECT COUNT(*) FROM entity_enrichment WHERE entity_type='aux_art' AND entity_id=?", id)
+			"SELECT COUNT(*) FROM entity_enrichment WHERE entity_type='group_art' AND entity_id=?", id)
 	}
 	queued := func() bool {
 		t.Helper()
-		targets, err := st.ReleaseGroupsNeedingAuxArt(ctx, model.EnrichQueueOptions{}, 0, 100, nil)
+		targets, err := st.ReleaseGroupsNeedingArt(ctx, model.EnrichQueueOptions{}, 0, 100, model.ArtSlots{Aux: true}, nil)
 		if err != nil {
 			t.Fatalf("queue walk: %v", err)
 		}
@@ -1083,27 +1084,27 @@ func auxMarkerFixture(t *testing.T, title string, mbidN int) (*sqlite.Store, int
 	return st, id, pid, markers, queued
 }
 
-// markAuxArt records the backfill marker the way a run that found nothing does.
-func markAuxArt(t *testing.T, st *sqlite.Store, id int64, pid model.PID) {
+// markGroupArt records the backfill marker the way a run that found nothing does.
+func markGroupArt(t *testing.T, st *sqlite.Store, id int64, pid model.PID) {
 	t.Helper()
-	if err := st.ApplyReleaseGroupAuxArt(context.Background(),
-		model.ReleaseGroupAuxArt{ReleaseGroupID: id, PID: pid}); err != nil {
+	if err := st.ApplyReleaseGroupArtBackfill(context.Background(),
+		model.ReleaseGroupArtBackfill{ReleaseGroupID: id, PID: pid, Aux: model.ArtHalf{Asked: true}}); err != nil {
 		t.Fatalf("mark: %v", err)
 	}
 }
 
-// TestAuxArtMarkerClearsOnUnlock: the marker says the group's vacancies were asked
+// TestGroupArtMarkerClearsOnUnlock: the marker says the group's vacancies were asked
 // about once, so releasing a lock that was holding a slot shut has to drop it. Without
 // that the group is out of the queue for good short of --force, and the documented
 // unlock-then-enrich walk fills nothing.
-func TestAuxArtMarkerClearsOnUnlock(t *testing.T) {
+func TestGroupArtMarkerClearsOnUnlock(t *testing.T) {
 	ctx := context.Background()
-	st, id, pid, markers, queued := auxMarkerFixture(t, "Opened", 0)
+	st, id, pid, markers, queued := groupArtMarkerFixture(t, "Opened", 0)
 
 	if _, err := st.SetArtLock(ctx, model.ArtReleaseGroup, pid, model.ArtRoleBack, true); err != nil {
 		t.Fatalf("lock back: %v", err)
 	}
-	markAuxArt(t, st, id, pid)
+	markGroupArt(t, st, id, pid)
 	if n := markers(); n != 1 {
 		t.Fatalf("markers after the pass = %d, want 1", n)
 	}
@@ -1123,7 +1124,7 @@ func TestAuxArtMarkerClearsOnUnlock(t *testing.T) {
 
 	// Nothing opens while the whole-entity lock stands, so releasing one role under it
 	// leaves the marker alone.
-	markAuxArt(t, st, id, pid)
+	markGroupArt(t, st, id, pid)
 	for _, role := range []model.ArtRole{model.ArtRoleFront, model.ArtRoleBack} {
 		if _, err := st.SetArtLock(ctx, model.ArtReleaseGroup, pid, role, true); err != nil {
 			t.Fatalf("lock %s: %v", role, err)
@@ -1145,17 +1146,17 @@ func TestAuxArtMarkerClearsOnUnlock(t *testing.T) {
 	assertStoreVerifyClean(t, st)
 }
 
-// TestAuxArtMarkerClearsOnAuxClear: clearing an auxiliary image without locking the
+// TestGroupArtMarkerClearsOnAuxClear: clearing an auxiliary image without locking the
 // slot behind it opens a vacancy, which is the other write that outdates the marker.
 // The default clear locks the slot, and then nothing opened. A set that releases the
 // front's lock frees every role at once, since that lock is the whole-entity one, so it
 // clears the marker the way `art unlock` does.
-func TestAuxArtMarkerClearsOnAuxClear(t *testing.T) {
+func TestGroupArtMarkerClearsOnAuxClear(t *testing.T) {
 	ctx := context.Background()
-	st, id, pid, markers, _ := auxMarkerFixture(t, "Cleared", 1)
+	st, id, pid, markers, _ := groupArtMarkerFixture(t, "Cleared", 1)
 
 	setRGArt(t, st, pid, model.ArtRoleBack, "back-image")
-	markAuxArt(t, st, id, pid)
+	markGroupArt(t, st, id, pid)
 	if err := st.SetEntityArt(ctx, model.ArtReleaseGroup, pid, model.ArtRoleBack, nil, "",
 		model.Attribution{Source: model.SourceUser}, model.LockOff, false); err != nil {
 		t.Fatalf("clear back: %v", err)
@@ -1165,7 +1166,7 @@ func TestAuxArtMarkerClearsOnAuxClear(t *testing.T) {
 	}
 
 	setRGArt(t, st, pid, model.ArtRoleDisc, "disc-image")
-	markAuxArt(t, st, id, pid)
+	markGroupArt(t, st, id, pid)
 	if err := st.SetEntityArt(ctx, model.ArtReleaseGroup, pid, model.ArtRoleDisc, nil, "",
 		model.Attribution{Source: model.SourceUser}, model.LockOn, false); err != nil {
 		t.Fatalf("clear and lock disc: %v", err)
@@ -1177,7 +1178,7 @@ func TestAuxArtMarkerClearsOnAuxClear(t *testing.T) {
 	// The --keep-lock spelling on a slot carrying no lock is a fillable clear too, so it
 	// drops the marker the way --no-lock does.
 	setRGArt(t, st, pid, model.ArtRoleBooklet, "booklet-image")
-	markAuxArt(t, st, id, pid)
+	markGroupArt(t, st, id, pid)
 	if err := st.SetEntityArt(ctx, model.ArtReleaseGroup, pid, model.ArtRoleBooklet, nil, "",
 		model.Attribution{Source: model.SourceUser}, model.LockUnchanged, false); err != nil {
 		t.Fatalf("clear booklet leaving its lock alone: %v", err)
@@ -1193,7 +1194,7 @@ func TestAuxArtMarkerClearsOnAuxClear(t *testing.T) {
 	if _, err := st.SetArtLock(ctx, model.ArtReleaseGroup, pid, model.ArtRoleFront, true); err != nil {
 		t.Fatalf("lock whole art: %v", err)
 	}
-	markAuxArt(t, st, id, pid)
+	markGroupArt(t, st, id, pid)
 	if err := st.SetEntityArt(ctx, model.ArtReleaseGroup, pid, model.ArtRoleBackground, nil, "",
 		model.Attribution{Source: model.SourceUser}, model.LockUnchanged, false); err != nil {
 		t.Fatalf("clear background under the whole lock: %v", err)
@@ -1205,7 +1206,7 @@ func TestAuxArtMarkerClearsOnAuxClear(t *testing.T) {
 	// The front role's lock is the plain "art" field, so a set that releases it opens
 	// every role not held by its own lock. Both sets need force, since the whole lock
 	// taken just above is also what refuses them.
-	markAuxArt(t, st, id, pid)
+	markGroupArt(t, st, id, pid)
 	if err := st.SetEntityArt(ctx, model.ArtReleaseGroup, pid, model.ArtRoleFront, []byte("kept-front"), "png",
 		model.Attribution{Source: model.SourceUser}, model.LockUnchanged, true); err != nil {
 		t.Fatalf("set front leaving the lock alone: %v", err)
@@ -1223,9 +1224,9 @@ func TestAuxArtMarkerClearsOnAuxClear(t *testing.T) {
 	assertStoreVerifyClean(t, st)
 }
 
-// TestApplyReleaseGroupAuxArtFillsAndMarks: the marker is written either way and
+// TestApplyReleaseGroupArtBackfillFillsAndMarks: the marker is written either way and
 // always names a provider, while the entity delta rides on an image actually landing.
-func TestApplyReleaseGroupAuxArtFillsAndMarks(t *testing.T) {
+func TestApplyReleaseGroupArtBackfillFillsAndMarks(t *testing.T) {
 	ctx := context.Background()
 	st, dbPath, lib := openStoreAt(t)
 	db := roConn(t, dbPath)
@@ -1241,17 +1242,17 @@ func TestApplyReleaseGroupAuxArtFillsAndMarks(t *testing.T) {
 
 	// A run nothing answered still marks, so the group costs one pass rather than one
 	// lookup per run.
-	if err := st.ApplyReleaseGroupAuxArt(ctx, model.ReleaseGroupAuxArt{
-		ReleaseGroupID: id, PID: pid,
+	if err := st.ApplyReleaseGroupArtBackfill(ctx, model.ReleaseGroupArtBackfill{
+		ReleaseGroupID: id, PID: pid, Aux: model.ArtHalf{Asked: true},
 	}); err != nil {
 		t.Fatalf("apply no-match: %v", err)
 	}
 	if p := scalarQueryStr(t, db,
-		"SELECT provider FROM entity_enrichment WHERE entity_type='aux_art' AND entity_id=?", id); p == "" {
+		"SELECT provider FROM entity_enrichment WHERE entity_type='group_art' AND entity_id=?", id); p == "" {
 		t.Error("no-match marker provider is empty; the column is NOT NULL and a reader cannot tell that from a missing value")
 	}
 	if n := scalarQueryInt(t, db,
-		"SELECT matched FROM entity_enrichment WHERE entity_type='aux_art' AND entity_id=?", id); n != 0 {
+		"SELECT matched FROM entity_enrichment WHERE entity_type='group_art' AND entity_id=?", id); n != 0 {
 		t.Errorf("no-match marker matched = %d, want 0", n)
 	}
 	if n := rgUpdates(); n != before {
@@ -1259,8 +1260,8 @@ func TestApplyReleaseGroupAuxArtFillsAndMarks(t *testing.T) {
 	}
 
 	// A real fill emits exactly one entity delta and records the supplying provider.
-	if err := st.ApplyReleaseGroupAuxArt(ctx, model.ReleaseGroupAuxArt{
-		ReleaseGroupID: id, PID: pid, Matched: true, Provider: "mock",
+	if err := st.ApplyReleaseGroupArtBackfill(ctx, model.ReleaseGroupArtBackfill{
+		ReleaseGroupID: id, PID: pid, Aux: model.ArtHalf{Asked: true}, Provider: "mock",
 		AuxArt: map[model.ArtRole]*model.ArtImage{model.ArtRoleBack: enrichArtImg("fill-back", "mock")},
 	}); err != nil {
 		t.Fatalf("apply fill: %v", err)
@@ -1269,15 +1270,15 @@ func TestApplyReleaseGroupAuxArtFillsAndMarks(t *testing.T) {
 		t.Errorf("release_group updates = %d, want %d (one fill, one delta)", n, before+1)
 	}
 	if p := scalarQueryStr(t, db,
-		"SELECT provider FROM entity_enrichment WHERE entity_type='aux_art' AND entity_id=?", id); p != "mock" {
+		"SELECT provider FROM entity_enrichment WHERE entity_type='group_art' AND entity_id=?", id); p != "mock" {
 		t.Errorf("marker provider = %q, want mock", p)
 	}
 	backHash := scalarQueryStr(t, db,
 		"SELECT source_hash FROM art_map WHERE entity_type='release_group' AND entity_id=? AND role='back'", id)
 
 	// A second offer for the filled slot writes nothing, so it emits no delta either.
-	if err := st.ApplyReleaseGroupAuxArt(ctx, model.ReleaseGroupAuxArt{
-		ReleaseGroupID: id, PID: pid, Matched: true, Provider: "mock",
+	if err := st.ApplyReleaseGroupArtBackfill(ctx, model.ReleaseGroupArtBackfill{
+		ReleaseGroupID: id, PID: pid, Aux: model.ArtHalf{Asked: true}, Provider: "mock",
 		AuxArt: map[model.ArtRole]*model.ArtImage{model.ArtRoleBack: enrichArtImg("second-back", "mock")},
 	}); err != nil {
 		t.Fatalf("apply second: %v", err)
@@ -1290,10 +1291,10 @@ func TestApplyReleaseGroupAuxArtFillsAndMarks(t *testing.T) {
 		t.Errorf("back hash = %q, want the first image %q", h, backHash)
 	}
 
-	// The images decide the fill, not the match flag. The in-repo service sets both
-	// together, but the method is on the exported port, and a caller handing over aux
-	// art without a match must not silently get a marker and no pictures.
-	if err := st.ApplyReleaseGroupAuxArt(ctx, model.ReleaseGroupAuxArt{
+	// The images decide the fill, not which halves the caller asked. The in-repo service
+	// asks the auxiliary half for aux art, but the method is on the exported port, and a
+	// caller handing over aux art without saying so must not silently lose the pictures.
+	if err := st.ApplyReleaseGroupArtBackfill(ctx, model.ReleaseGroupArtBackfill{
 		ReleaseGroupID: id, PID: pid, Provider: "mock",
 		AuxArt: map[model.ArtRole]*model.ArtImage{model.ArtRoleDisc: enrichArtImg("unmatched-disc", "mock")},
 	}); err != nil {
@@ -1345,8 +1346,8 @@ func TestArtBackfillMarkersReopenOnNewEvidence(t *testing.T) {
 				t.Fatalf("mark %s artist art: %v", name, err)
 			}
 		}
-		if err := st.ApplyReleaseGroupAuxArt(ctx, model.ReleaseGroupAuxArt{
-			ReleaseGroupID: rgID, PID: rgPID,
+		if err := st.ApplyReleaseGroupArtBackfill(ctx, model.ReleaseGroupArtBackfill{
+			ReleaseGroupID: rgID, PID: rgPID, Aux: model.ArtHalf{Asked: true},
 		}); err != nil {
 			t.Fatalf("mark aux art: %v", err)
 		}
@@ -1368,14 +1369,14 @@ func TestArtBackfillMarkersReopenOnNewEvidence(t *testing.T) {
 		t.Errorf("artist_art markers after an identity fill = %d, want the marked artist re-opened", n)
 	}
 
-	// The same phase one rung over, for the aux-art marker.
+	// The same phase one rung over, for the group-art marker.
 	if err := st.ApplyReleaseGroupEnrichment(ctx, model.ReleaseGroupEnrichment{
 		ReleaseGroupID: rgID, PID: rgPID, Matched: true, MBID: auxRGMBID(2),
 	}); err != nil {
 		t.Fatalf("ApplyReleaseGroupEnrichment: %v", err)
 	}
-	if n := artMarkerCount(t, db, "aux_art"); n != 0 {
-		t.Errorf("aux_art markers after an identity fill = %d, want 0", n)
+	if n := artMarkerCount(t, db, "group_art"); n != 0 {
+		t.Errorf("group_art markers after an identity fill = %d, want 0", n)
 	}
 
 	// A retag that supplies an artist mbid the row lacked. The scan is the most common
@@ -1404,7 +1405,7 @@ func TestArtBackfillMarkersReopenOnRename(t *testing.T) {
 	if err := st.ApplyArtistArtBackfill(ctx, model.ArtistArtBackfill{ArtistID: artistID, PID: artistPID}); err != nil {
 		t.Fatalf("mark artist art: %v", err)
 	}
-	if err := st.ApplyReleaseGroupAuxArt(ctx, model.ReleaseGroupAuxArt{ReleaseGroupID: rgID, PID: rgPID}); err != nil {
+	if err := st.ApplyReleaseGroupArtBackfill(ctx, model.ReleaseGroupArtBackfill{ReleaseGroupID: rgID, PID: rgPID, Aux: model.ArtHalf{Asked: true}}); err != nil {
 		t.Fatalf("mark aux art: %v", err)
 	}
 
@@ -1416,8 +1417,8 @@ func TestArtBackfillMarkersReopenOnRename(t *testing.T) {
 	if n := artMarkerCount(t, db, "artist_art"); n != 0 {
 		t.Errorf("artist_art markers after a rename = %d, want 0", n)
 	}
-	if n := artMarkerCount(t, db, "aux_art"); n != 0 {
-		t.Errorf("aux_art markers after a rename = %d, want 0", n)
+	if n := artMarkerCount(t, db, "group_art"); n != 0 {
+		t.Errorf("group_art markers after a rename = %d, want 0", n)
 	}
 	assertStoreVerifyClean(t, st)
 }
@@ -1980,8 +1981,8 @@ func TestEnrichQueuesRetryAnExpiredMiss(t *testing.T) {
 		{"album release", func(q model.EnrichQueueOptions) ([]model.EnrichTarget, error) {
 			return st.AlbumsNeedingReleaseMatch(ctx, q, 0, 100, nil)
 		}},
-		{"aux art", func(q model.EnrichQueueOptions) ([]model.EnrichTarget, error) {
-			return st.ReleaseGroupsNeedingAuxArt(ctx, q, 0, 100, nil)
+		{"group art", func(q model.EnrichQueueOptions) ([]model.EnrichTarget, error) {
+			return st.ReleaseGroupsNeedingArt(ctx, q, 0, 100, model.ArtSlots{Aux: true}, nil)
 		}},
 		{"artist art", func(q model.EnrichQueueOptions) ([]model.EnrichTarget, error) {
 			return st.ArtistsNeedingArtBackfill(ctx, q, 0, 100, nil)
@@ -1998,9 +1999,9 @@ func TestEnrichQueuesRetryAnExpiredMiss(t *testing.T) {
 	}
 	countAll := model.EnrichCountOptions{Phases: []model.EnrichPhase{
 		model.EnrichPhaseArtist, model.EnrichPhaseReleaseGroup, model.EnrichPhaseBook,
-		model.EnrichPhaseAlbumRelease, model.EnrichPhaseAuxArt, model.EnrichPhaseArtistArt,
+		model.EnrichPhaseAlbumRelease, model.EnrichPhaseGroupArt, model.EnrichPhaseArtistArt,
 		model.EnrichPhaseLyrics, model.EnrichPhaseTrackFields, model.EnrichPhaseAlbumFields,
-	}}
+	}, GroupArt: model.ArtSlots{Aux: true}}
 	walked := func(t *testing.T, q model.EnrichQueueOptions) map[string]int {
 		t.Helper()
 		got := map[string]int{}
@@ -2037,8 +2038,8 @@ func TestEnrichQueuesRetryAnExpiredMiss(t *testing.T) {
 		{"album release", func() error {
 			return st.ApplyAlbumReleaseMatch(ctx, model.AlbumReleaseMatch{AlbumID: albumID, PID: albumPID})
 		}},
-		{"aux art", func() error {
-			return st.ApplyReleaseGroupAuxArt(ctx, model.ReleaseGroupAuxArt{ReleaseGroupID: rgID, PID: rgPID})
+		{"group art", func() error {
+			return st.ApplyReleaseGroupArtBackfill(ctx, model.ReleaseGroupArtBackfill{ReleaseGroupID: rgID, PID: rgPID, Aux: model.ArtHalf{Asked: true}})
 		}},
 		{"artist art", func() error {
 			return st.ApplyArtistArtBackfill(ctx, model.ArtistArtBackfill{ArtistID: artistID, PID: artistPID})
@@ -2205,7 +2206,7 @@ func TestAlbumsNeedingArtGuards(t *testing.T) {
 		t.Fatalf("mark: %v", err)
 	}
 
-	queued := func(slots model.AlbumArtSlots, q model.EnrichQueueOptions) map[string]bool {
+	queued := func(slots model.ArtSlots, q model.EnrichQueueOptions) map[string]bool {
 		t.Helper()
 		targets, err := st.AlbumsNeedingArt(ctx, q, 0, 100, slots, nil)
 		if err != nil {
@@ -2228,7 +2229,7 @@ func TestAlbumsNeedingArtGuards(t *testing.T) {
 		return got
 	}
 
-	front := queued(model.AlbumArtSlots{Front: true}, model.EnrichQueueOptions{})
+	front := queued(model.ArtSlots{Front: true}, model.EnrichQueueOptions{})
 	wantFront := map[string]bool{"ByMBID": true, "ByBarcode": true, "ByCatNo": true}
 	for _, title := range []string{"ByMBID", "ByBarcode", "ByCatNo", "TitleOnly", "Embedded", "Locked", "Marked", "Ghost"} {
 		if front[title] != wantFront[title] {
@@ -2238,7 +2239,7 @@ func TestAlbumsNeedingArtGuards(t *testing.T) {
 
 	// The embedded cover settles the front and nothing else, so the aux slots are still
 	// a question worth asking.
-	aux := queued(model.AlbumArtSlots{Aux: true}, model.EnrichQueueOptions{})
+	aux := queued(model.ArtSlots{Aux: true}, model.EnrichQueueOptions{})
 	if !aux["Embedded"] {
 		t.Error("the aux sweep skipped an album whose front is settled but whose aux slots are empty")
 	}
@@ -2249,17 +2250,17 @@ func TestAlbumsNeedingArtGuards(t *testing.T) {
 	}
 
 	// Neither slot askable is the phase not running at all.
-	if got := queued(model.AlbumArtSlots{}, model.EnrichQueueOptions{}); len(got) != 0 {
+	if got := queued(model.ArtSlots{}, model.EnrichQueueOptions{}); len(got) != 0 {
 		t.Errorf("queued %v with no askable slot, want none", got)
 	}
 
 	// A forced run reaches the marked album; only its marker was keeping it out.
-	if !queued(model.AlbumArtSlots{Front: true}, model.EnrichQueueOptions{Sweep: model.SweepAll})["Marked"] {
+	if !queued(model.ArtSlots{Front: true}, model.EnrichQueueOptions{Sweep: model.SweepAll})["Marked"] {
 		t.Error("a forced sweep did not re-queue the marked album")
 	}
 
 	// The request carries the identifiers, which is what the walk exists to send.
-	targets, err := st.AlbumsNeedingArt(ctx, model.EnrichQueueOptions{}, 0, 100, model.AlbumArtSlots{Front: true}, nil)
+	targets, err := st.AlbumsNeedingArt(ctx, model.EnrichQueueOptions{}, 0, 100, model.ArtSlots{Front: true}, nil)
 	if err != nil {
 		t.Fatalf("AlbumsNeedingArt: %v", err)
 	}
@@ -2689,7 +2690,7 @@ func TestAlbumsNeedingArtCarriesTheGroupFrontHash(t *testing.T) {
 	db := roConn(t, dbPath)
 	editionTrack(t, st, lib.ID, "ess-a", "Queued", 1, model.Track{Barcode: "0075992739429"})
 
-	slots := model.AlbumArtSlots{Front: true}
+	slots := model.ArtSlots{Front: true}
 	only := func(t *testing.T) model.EnrichTarget {
 		t.Helper()
 		got, err := st.AlbumsNeedingArt(ctx, model.EnrichQueueOptions{Sweep: model.SweepAll}, 0, 10, slots, nil)
@@ -2817,13 +2818,13 @@ func TestApplyIncompleteDefersTheMarker(t *testing.T) {
 		settle  func() error
 		check   func(t *testing.T)
 	}{
-		{"release group aux art", "aux_art", f.rgID, 1,
+		{"release group aux art", "group_art", f.rgID, 1,
 			func() error {
-				return st.ApplyReleaseGroupAuxArt(ctx, model.ReleaseGroupAuxArt{ReleaseGroupID: f.rgID, PID: f.rgPID})
+				return st.ApplyReleaseGroupArtBackfill(ctx, model.ReleaseGroupArtBackfill{ReleaseGroupID: f.rgID, PID: f.rgPID, Aux: model.ArtHalf{Asked: true}})
 			},
 			func() error {
-				return st.ApplyReleaseGroupAuxArt(ctx, model.ReleaseGroupAuxArt{ReleaseGroupID: f.rgID, PID: f.rgPID,
-					Matched: true, Provider: "fanart", Incomplete: true,
+				return st.ApplyReleaseGroupArtBackfill(ctx, model.ReleaseGroupArtBackfill{ReleaseGroupID: f.rgID, PID: f.rgPID,
+					Provider: "fanart", Aux: model.ArtHalf{Asked: true, Incomplete: true},
 					AuxArt: map[model.ArtRole]*model.ArtImage{model.ArtRoleBack: enrichedImage("h-back", "fanart")}})
 			},
 			func(t *testing.T) {
@@ -3016,7 +3017,7 @@ func TestCoverageCountsAnOwedIdentityAsAMatch(t *testing.T) {
 }
 
 // TestAnUnaskedIdentityKeepsItsOwedLookup: an identity whose rider provider was out of
-// the pass is owed the lookup, since nothing asks about its riders once it settles. A
+// the pass is owed the lookup, since the identity walk is that rider's asker. A
 // pass that still cannot ask the rider leaves the owed lookup as it was, date and all,
 // because nothing asked for it; a failure dates it anew, and an answer settles it.
 func TestAnUnaskedIdentityKeepsItsOwedLookup(t *testing.T) {

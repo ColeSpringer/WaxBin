@@ -1090,7 +1090,8 @@ func (l *Library) EnrichmentBuiltins() []enrich.Provider { return l.enricher.Bui
 // StartEnrich.
 func (l *Library) EnrichmentPhases() []model.EnrichPhase { return l.enricher.Phases() }
 
-// EnrichmentCoverage reports how many entities have been enriched, for doctor.
+// EnrichmentCoverage reports how many entities have been enriched, and how many present
+// tracks hold lyrics or had a lookup find none, for doctor.
 func (l *Library) EnrichmentCoverage(ctx context.Context) (model.EnrichmentCoverage, error) {
 	return l.enricher.Coverage(ctx)
 }
@@ -1159,7 +1160,8 @@ func (l *Library) Loudness(ctx context.Context, itemPID model.PID) (*model.Loudn
 }
 
 // Peaks returns the stored waveform overview of an item's representative primary
-// backing file, or CodeNotFound.
+// backing file, or CodeNotFound. The overview carries the frames its buckets divide
+// and their decoded rate, which is what places a virtual track's window on it.
 //
 // For a multi-file audiobook that is one part of many, and not necessarily part one:
 // the primary is whichever part was attached first, or the lowest-positioned survivor

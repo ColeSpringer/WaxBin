@@ -10,28 +10,26 @@ Everything here is work still to do. Reasoning about work deliberately not done
 belongs in the doc comment beside the code it constrains, not in this file, since
 that is where someone about to get it wrong will actually read it.
 
-## Group fronts have no backfill
+## The album and artist art backfills record the front with the auxiliary roles
 
-A release group's front is asked for only while its identity is walked, so once the
-group's marker settles nothing asks again short of `enrich --force-phase release-group`,
-which re-reads MusicBrainz for every group at one request a second. Three things leave a
-settled group without a front that a later ask could fill: a cover provider registered
-after the group settled, one an `EnrichmentProviderList` hook left out of the pass that
-resolved it, and a front that failed again on the pass that asked it a second time. The
-album rung has `album-art` for exactly this and the auxiliary roles have `aux-art`; a
-front walk over settled groups with no front and no art lock, asking the cover providers
-at the release-group rung, would close it without any MusicBrainz traffic and would give
-those fronts the retry window misses get. It is a new phase with its own marker type,
-queue, count, CLI label and docs, so it is its own change.
+The `album-art` and `artist-art` backfills keep one marker per target, matched when any
+image landed. A target whose front no provider had, but whose auxiliary role another
+provider filled, is marked matched, and a matched marker is durable: the retry window that
+re-asks a miss never re-asks it, so a cover a provider gains later is reached only through
+new evidence (a landed mbid, a curation clear) or `enrich --force-phase`. The same marker
+keeps a provider serving the auxiliary roles that joins after a front was filled from
+reaching the target. Either takes an injected provider serving the auxiliary roles. The
+`group-art` backfill already keeps its two halves apart (the `group_front` and `group_art`
+markers, `model.ArtHalf`); closing this means doing the same at the other two rungs.
 
-## Two write-back tests assume back-to-back fills get different stamps
+## The artist rung asks a picture-less artist twice in one pass
 
-`TestEnrichmentWritebackOwedUntilSettled` and `TestEnrichedAlbumLabelFiles` (store/sqlite)
-fill a field, settle the file at that fill's stamp, and fill again moments later, then
-expect the second fill to read as newer. Field provenance is stamped with `nowNS`, so on a
-clock that ticks every 15.6ms, as Windows' does, both fills can share a stamp and the
-second never reads as owed. Coarsening `nowNS` in store/sqlite/store.go (the recipe in
-the Windows notes) fails both every time, on the committed code as much as on later
-changes; Windows CI has not failed on them so far. A real pass never fills, settles and
-fills again inside one tick, so it is the tests' premise, but either stamping provenance
-through `Store.stampNS` or giving the tests distinct stamps would close it.
+The artist identity walk asks the cover providers at the artist rung for an artist's
+front on the way past, and the `artist-art` backfill later in the same pass asks the
+`CapArtistArt` providers about any slot still empty. A provider advertising both
+`CapCover` and `CapArtistArt` there is asked twice for an artist it has no picture for,
+once per walk. The group rung avoids this by leaving a vacant front to its backfill alone.
+The artist rung cannot yet, since a provider written before `CapArtistArt` advertises
+`CapCover` alone and is reached only through the identity walk. Closing it means deciding
+which walk owns a vacant artist front and which capability reaches it there, which
+changes what an injected provider has to advertise.

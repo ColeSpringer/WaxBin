@@ -27,6 +27,7 @@ func TestEnrichScopeFlagValidation(t *testing.T) {
 		{"malformed entity", []string{"--entity", "artistonly"}, "wants type:pid"},
 		{"non-enrichable entity type", []string{"--entity", "genre:01J0Y"}, "non-enrichable entity type"},
 		{"unknown phase", []string{"--force-phase", "nope"}, "unknown enrichment phase"},
+		{"retired aux-art key", []string{"--force-phase", "aux-art"}, "unknown enrichment phase \"aux-art\" (want one of artist|release-group|album-release|group-art|"},
 		{"phase with force", []string{"--force", "--force-phase", "artist"}, "exclusive"},
 		{"phase with a scope", []string{"--item", "01J0X", "--force-phase", "lyrics"}, "cannot combine"},
 	}
@@ -54,7 +55,7 @@ func TestEnrichScopeFlagValidation(t *testing.T) {
 func TestEnrichSummaryCoversEveryPhase(t *testing.T) {
 	res := &waxbin.EnrichResult{Result: enrich.Result{
 		ArtistsEnriched: 1, ReleaseGroupsEnriched: 1, AlbumsSearched: 1, BooksEnriched: 1,
-		LyricsEnriched: 1, AuxArtEnriched: 1, ArtistArtEnriched: 1, AlbumArtEnriched: 1,
+		LyricsEnriched: 1, GroupArtEnriched: 1, ArtistArtEnriched: 1, AlbumArtEnriched: 1,
 		TrackFieldsEnriched: 1, BookFieldsEnriched: 1, AlbumFieldsEnriched: 1,
 		ArtFetched: 1, ArtReused: 1,
 	}}
@@ -66,7 +67,7 @@ func TestEnrichSummaryCoversEveryPhase(t *testing.T) {
 	}
 	for _, want := range []string{
 		"artists:", "release groups:", "album releases:", "books:", "lyrics:",
-		"aux art:", "artist art:", "album art:", "track fields:", "book fields:", "album fields:",
+		"group art:", "artist art:", "album art:", "track fields:", "book fields:", "album fields:",
 		"reused from the group cover",
 	} {
 		if !strings.Contains(buf.String(), want) {

@@ -81,6 +81,9 @@ func (s *Store) CountFilesNeedingAnalysis(ctx context.Context, algoVersion int) 
 func (s *Store) PutAnalysis(ctx context.Context, in model.AnalysisInput) error {
 	const op = "store.PutAnalysis"
 	fp := in.Fingerprint
+	if pk := in.Peaks; pk != nil && (pk.Frames <= 0 || pk.SampleRate <= 0) {
+		return waxerr.New(waxerr.CodeInvalid, op, "a waveform must carry the frames it spans and their rate")
+	}
 	return s.writeTx(ctx, func(tx *sql.Tx) error {
 		fileID, err := fileIDByPID(ctx, tx, fp.FilePID, op)
 		if err != nil {
@@ -122,6 +125,18 @@ func (s *Store) PutAnalysis(ctx context.Context, in model.AnalysisInput) error {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		if err := putPeaksTx(ctx, tx, fileID, fp.EssenceHash, in.Peaks, dropPrior); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		// The decode's verdict on the bytes, when it looked at them. Otherwise only a verdict
+		// on audio the file no longer holds goes. The diagnostic stamp stays the scan's
+		// (stampDiagVersionTx).
+		if in.Observed {
+			err = replaceStampedDiagnosticsTx(ctx, tx, fileID, model.OriginAnalyze, fp.EssenceHash, in.Diagnostics)
+		} else {
+			_, err = tx.ExecContext(ctx, "DELETE FROM file_diagnostic WHERE file_id = ? AND origin = ? AND essence IS NOT ?",
+				fileID, string(model.OriginAnalyze), fp.EssenceHash)
+		}
+		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		// measured_essence is stamped only when the measuring decode reached the end of
@@ -178,11 +193,13 @@ func putPeaksTx(ctx context.Context, tx *sql.Tx, fileID int64, essence string, p
 		return nil
 	}
 	_, err := tx.ExecContext(ctx,
-		`INSERT INTO peaks(file_id, version, bucket_count, data, essence_hash, updated_at) VALUES (?,?,?,?,?,?)
+		`INSERT INTO peaks(file_id, version, bucket_count, data, frames, sample_rate, essence_hash, updated_at)
+		 VALUES (?,?,?,?,?,?,?,?)
 		 ON CONFLICT(file_id) DO UPDATE SET
 		   version=excluded.version, bucket_count=excluded.bucket_count, data=excluded.data,
+		   frames=excluded.frames, sample_rate=excluded.sample_rate,
 		   essence_hash=excluded.essence_hash, updated_at=excluded.updated_at`,
-		fileID, pk.Version, pk.Buckets, pk.Data, essence, nowNS())
+		fileID, pk.Version, pk.Buckets, pk.Data, pk.Frames, pk.SampleRate, essence, nowNS())
 	return err
 }
 

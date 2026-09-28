@@ -29,15 +29,17 @@ func newAuditCmd(g *globals) *cobra.Command {
 		Long: "Runs quality checks over the catalog: duplicate/split entities, inconsistent " +
 			"metadata, missing art/ReplayGain, unportable filenames, orphaned sidecars, " +
 			"case-insensitive path conflicts, library roots that differ only by case, " +
-			"invalid feeds, derived-data drift, and the diagnostics recorded during " +
-			"scanning and tag write-back. " +
-			"Corrupt-audio reporting comes in two halves. The free half reads signals the " +
-			"scan already derived: truncation for MP3, FLAC, AIFF, MP4, and WAV, and missing " +
-			"audio for MP3, AAC, WavPack, Monkey's Audio, and Musepack. It is a true positive " +
-			"when it fires and proves nothing when it does not, so a quiet run is not a clean " +
-			"bill of health; damage inside the audio, and any damage to Ogg, Matroska, or WMA, " +
-			"needs the decode probe. --integrity adds that probe plus an on-disk bitrot " +
-			"(content-hash) pass, both of which re-read every audio file. " +
+			"invalid feeds, derived-data drift, header durations that disagree with the " +
+			"decoded audio, and the diagnostics recorded during scanning, analysis, and tag " +
+			"write-back. " +
+			"Corrupt-audio reporting comes in two halves. The free half reads what was already " +
+			"recorded: the scan's parse flags truncation for MP3, FLAC, AIFF, MP4, and WAV and " +
+			"missing audio for MP3, AAC, WavPack, Monkey's Audio, and Musepack, and the analyze " +
+			"pass's decode flags damage inside the audio of every format it reads. A file " +
+			"analyze has not read since it changed has only the parse's word, so a quiet run " +
+			"is not a clean bill of health until analyze is current. --integrity adds a fresh " +
+			"decode of every file not already reported plus an on-disk bitrot (content-hash) " +
+			"pass, both of which re-read the files. " +
 			"--check <name> (repeatable) restricts the run; valid " +
 			"names: " + strings.Join(names, ", ") + ". Exits non-zero when any error-severity " +
 			"finding is reported.",

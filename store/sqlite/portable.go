@@ -169,7 +169,8 @@ const identitySelect = `SELECT pi.pid, pi.kind, f.essence_hash,
 	COALESCE(NULLIF(t.artist,''), bk.author, pod.title, ''),
 	pi.title,
 	COALESCE(NULLIF(t.album,''), srs.name, pod.title, ''),
-	COALESCE(bk.total_duration_ms, ` + itemEffectiveDurationExpr + `, ep.duration_ms), fp.fp, fp.algo_version` +
+	COALESCE(bk.total_duration_ms, ` + itemEffectiveDurationExpr + `, ep.duration_ms), fp.fp, fp.algo_version,
+	fp.duration_bucket` +
 	itemJoins + ` LEFT JOIN fingerprint fp ON fp.file_id = f.id AND pf.start_frames IS NULL`
 
 // ItemIdentitiesByPIDs returns a portable identity descriptor per pid, in input order,
@@ -198,10 +199,10 @@ func (s *Store) ItemIdentitiesByPIDs(ctx context.Context, pids []model.PID) ([]m
 			var pid, kind string
 			var essence sql.NullString
 			var mbid, asin, isbn, artist, title, album string
-			var dur, algo sql.NullInt64
+			var dur, algo, bucket sql.NullInt64
 			var fp []byte
 			if err := rows.Scan(&pid, &kind, &essence, &mbid, &asin, &isbn,
-				&artist, &title, &album, &dur, &fp, &algo); err != nil {
+				&artist, &title, &album, &dur, &fp, &algo, &bucket); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 			ref := model.PortableRef{
@@ -218,6 +219,7 @@ func (s *Store) ItemIdentitiesByPIDs(ctx context.Context, pids []model.PID) ([]m
 			if len(fp) > 0 {
 				ref.Fingerprint = fp
 				ref.FingerprintAlgo = int(algo.Int64)
+				ref.FingerprintBucket = bucket.Int64
 			}
 			byPID[model.PID(pid)] = ref
 		}

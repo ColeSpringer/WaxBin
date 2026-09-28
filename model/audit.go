@@ -35,6 +35,11 @@ const (
 	// root, so new ones cannot collide; this is for a catalog that already holds both
 	// spellings from before it did.
 	CheckLibraryConflict AuditCheck = "library_conflict"
+	// CheckDurationMismatch reports audio files whose header states a length the
+	// decoded audio does not have, off by more than two seconds and two percent. It
+	// reads the span the analyze pass stored with each waveform, so it covers analyzed
+	// files only.
+	CheckDurationMismatch AuditCheck = "duration_mismatch"
 )
 
 // AuditChecks returns every known audit check, for validation and help text.
@@ -45,7 +50,7 @@ func AuditChecks() []AuditCheck {
 		CheckInconsistentMeta, CheckMissingArt, CheckMissingReplayGain, CheckBadFilename,
 		CheckOrphanSidecar, CheckPathConflict, CheckInvalidFeed, CheckDerivedData,
 		CheckIntegrity, CheckCorruptAudio, CheckFileDiagnostic, CheckMissingMBID,
-		CheckLibraryConflict,
+		CheckLibraryConflict, CheckDurationMismatch,
 	}
 }
 
@@ -132,6 +137,15 @@ type AuditFileInfo struct {
 	Kind        FileKind
 	ContentHash string
 	ItemPID     PID // owning item, if any
+}
+
+// FileDurationMismatch is one audio file whose header duration disagrees with the
+// length its current waveform was decoded from.
+type FileDurationMismatch struct {
+	FilePID     PID
+	DisplayPath string
+	HeaderMS    int64
+	DecodedMS   int64
 }
 
 // ItemRef is a minimal item reference for list-style findings.

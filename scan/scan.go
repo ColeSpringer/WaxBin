@@ -1013,7 +1013,7 @@ func cueSheetDiag(sheet *meta.CueSheet, dropped []string, refusal, disposition s
 	if disposition != "" {
 		tail = "; " + disposition
 	}
-	detail := meta.CapDetailWithTail(strings.Join(parts, "; "), tail)
+	detail := model.CapDetailWithTail(strings.Join(parts, "; "), tail)
 	return []model.FileDiagnostic{{Code: model.DiagCueTrackDropped, Severity: model.SeverityWarn, Detail: detail}}
 }
 

@@ -94,8 +94,8 @@ func TestArtistArtBackfillFillsAMarkedArtist(t *testing.T) {
 }
 
 // TestArtistArtBackfillQueuesAnEmptyAuxSlot: an artist whose front is settled but whose
-// auxiliary slots are empty is queued too, which is the half auxArtNeededPredicate's
-// shape already covers at the release-group rung.
+// auxiliary slots are empty is queued too, the half groupArtNeededPredicate covers at the
+// release-group rung.
 func TestArtistArtBackfillQueuesAnEmptyAuxSlot(t *testing.T) {
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)

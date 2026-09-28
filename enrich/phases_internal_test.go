@@ -31,14 +31,16 @@ func TestPhaseKeysMatchTheModelList(t *testing.T) {
 
 // TestCheckPhasesNamesTheRung: a forced phase this install cannot run is refused naming
 // the rung it needs a provider for, since a provider serving auxiliary art for artists
-// alone would not unlock it.
+// alone would not unlock it. Cover art is off, since the archive serves the group rung.
 func TestCheckPhasesNamesTheRung(t *testing.T) {
-	s := New(nil, Config{Contact: "test@example.com", FetchCoverArt: true}, nil)
-	err := s.CheckPhases([]model.EnrichPhase{model.EnrichPhaseAuxArt})
+	artistAux := &Mock{ProviderName: "fanart", Caps: CapAuxArt,
+		CapsAt: map[TargetType]Capability{TargetArtist: CapAuxArt}}
+	s := New(nil, Config{Contact: "test@example.com", Providers: []Provider{artistAux}}, nil)
+	err := s.CheckPhases([]model.EnrichPhase{model.EnrichPhaseGroupArt})
 	if err == nil {
-		t.Fatal("aux-art on a stock install was accepted")
+		t.Fatal("group-art with no release-group art provider was accepted")
 	}
-	if !strings.Contains(err.Error(), "auxiliary art for a release group") {
+	if !strings.Contains(err.Error(), "a cover or auxiliary art for a release group") {
 		t.Errorf("refusal = %q, want it to name the release-group rung", err)
 	}
 }

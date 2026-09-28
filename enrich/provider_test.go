@@ -66,9 +66,13 @@ func lrclibMock(t *testing.T, synced, plain string) *httptest.Server {
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/api/get") {
 			w.Header().Set("Content-Type", "application/json")
-			b, _ := json.Marshal(map[string]any{
-				"instrumental": false, "syncedLyrics": synced, "plainLyrics": plain,
-			})
+			// A title starting "Instrumental" is answered the way LRCLIB answers one.
+			instrumental := strings.HasPrefix(r.URL.Query().Get("track_name"), "Instrumental")
+			body := map[string]any{"instrumental": false, "syncedLyrics": synced, "plainLyrics": plain}
+			if instrumental {
+				body = map[string]any{"instrumental": true, "syncedLyrics": nil, "plainLyrics": nil}
+			}
+			b, _ := json.Marshal(body)
 			_, _ = w.Write(b)
 			return
 		}
@@ -196,11 +200,13 @@ func TestListenBrainzGenres(t *testing.T) {
 
 // TestLRCLIBLyrics: the built-in LRCLIB provider fills lyrics for a track that has
 // none, from an httptest server, records the per-recording marker, and stamps the
-// provider as the lyrics source. A second run is a no-op (the marker is respected).
+// provider as the lyrics source. An instrumental is looked up and left without lyrics.
+// A second run is a no-op (the marker is respected).
 func TestLRCLIBLyrics(t *testing.T) {
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	item := seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
+	seedTrack(t, st, lib.ID, "/lib/b.mp3", "ess-b", "Instrumental Interlude", "Pink Floyd", "Wish You Were Here")
 
 	mb := mbMockGenres(t, `[]`)
 	lrc := lrclibMock(t, "[00:10.00]shine on\n[00:12.50]you crazy diamond", "shine on\nyou crazy diamond")
@@ -213,8 +219,8 @@ func TestLRCLIBLyrics(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if res.LyricsMatched != 1 || res.LyricsEnriched != 1 {
-		t.Fatalf("lyrics enriched=%d matched=%d, want 1/1", res.LyricsEnriched, res.LyricsMatched)
+	if res.LyricsMatched != 1 || res.LyricsEnriched != 2 {
+		t.Fatalf("lyrics enriched=%d matched=%d, want 2/1", res.LyricsEnriched, res.LyricsMatched)
 	}
 	ly, err := st.LyricsByItem(ctx, item)
 	if err != nil {
@@ -231,13 +237,18 @@ func TestLRCLIBLyrics(t *testing.T) {
 		WHERE ee.entity_type='lyrics' AND ee.matched=1 AND pi.pid=?`, string(item)); n != 1 {
 		t.Errorf("lyrics marker rows = %d, want 1 matched", n)
 	}
-	// Coverage ignores the lyrics marker (it counts only the three entity types).
+	// The entity counts leave the lyrics markers out; the lyrics counts hold the fill as
+	// held and the instrumental as looked up.
 	cov, err := st.EnrichmentCoverage(ctx)
 	if err != nil {
 		t.Fatalf("EnrichmentCoverage: %v", err)
 	}
 	if cov.Artists != 1 || cov.ReleaseGroups != 1 || cov.Books != 0 {
-		t.Errorf("coverage = %+v, want 1 artist, 1 rg, 0 books (lyrics not counted)", cov)
+		t.Errorf("coverage = %+v, want 1 artist, 1 rg, 0 books", cov)
+	}
+	if cov.Tracks != 2 || cov.TracksWithLyrics != 1 || cov.TracksLyricsAsked != 1 {
+		t.Errorf("lyrics coverage = %d tracks, %d held, %d asked; want 2, 1, 1",
+			cov.Tracks, cov.TracksWithLyrics, cov.TracksLyricsAsked)
 	}
 
 	// Second run does not re-query the track (the marker is respected).

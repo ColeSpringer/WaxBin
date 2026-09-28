@@ -97,3 +97,80 @@ func TestLyricsNotFound(t *testing.T) {
 		t.Errorf("a track with no lyrics should report CodeNotFound, got %v", err)
 	}
 }
+
+// TestCoverageCountsHeldLyrics: every present track counts toward the lyrics tile
+// whatever supplied its lyrics, and one with no lyrics whose lookup answered that there
+// are none counts as asked. A lookup still owed its answer, or one that found lyrics
+// since removed, counts as neither. Missing tracks and books are not tracks the tile
+// counts.
+func TestCoverageCountsHeldLyrics(t *testing.T) {
+	ctx := context.Background()
+	st, lib := entityFixture(t)
+	track := func(title string, ly *model.Lyrics) (int64, model.PID) {
+		t.Helper()
+		path := "/lib/" + title + ".flac"
+		res, err := st.PutScannedTrack(ctx, model.PutScannedTrackInput{
+			LibraryID: lib.ID,
+			File: model.File{
+				Path: []byte(path), DisplayPath: path, RelPath: []byte(title + ".flac"),
+				Kind: model.FileAudio, ContentHash: "c-" + title, EssenceHash: "e-" + title, ScanState: model.ScanIndexed,
+			},
+			Item: model.PlayableItem{
+				Kind: model.KindTrack, State: model.StatePresent, Title: title,
+				SortKey: model.SortKey(title), IdentityKey: "essence:e-" + title,
+			},
+			Track:  model.Track{Artist: "A", Album: "Al"},
+			Lyrics: ly,
+		})
+		if err != nil {
+			t.Fatalf("put %s: %v", title, err)
+		}
+		return itemID(t, st, title), res.ItemPID
+	}
+	apply := func(in model.LyricsEnrichment) {
+		t.Helper()
+		if err := st.ApplyLyricsEnrichment(ctx, in); err != nil {
+			t.Fatalf("apply lyrics for %d: %v", in.ItemID, err)
+		}
+	}
+
+	track("Tagged", &model.Lyrics{Source: model.SourceTag, Unsynced: "from the tag"})
+	fetched, fetchedPID := track("Fetched", nil)
+	apply(model.LyricsEnrichment{ItemID: fetched, PID: fetchedPID, Matched: true, Provider: "lrclib",
+		Lyrics: &model.Lyrics{Source: model.SourceEnrichment, Provider: "lrclib", Unsynced: "fetched"}})
+	missed, missedPID := track("Missed", nil)
+	apply(model.LyricsEnrichment{ItemID: missed, PID: missedPID, Provider: "lrclib"})
+	owed, owedPID := track("Owed", nil)
+	apply(model.LyricsEnrichment{ItemID: owed, PID: owedPID, Provider: "lrclib", Incomplete: true})
+	cleared, clearedPID := track("Cleared", nil)
+	apply(model.LyricsEnrichment{ItemID: cleared, PID: clearedPID, Matched: true, Provider: "lrclib",
+		Lyrics: &model.Lyrics{Source: model.SourceEnrichment, Provider: "lrclib", Unsynced: "since removed"}})
+	if _, err := st.write.ExecContext(ctx, "DELETE FROM lyrics WHERE item_id = ?", cleared); err != nil {
+		t.Fatalf("remove lyrics: %v", err)
+	}
+	track("Unasked", nil)
+	gone, _ := track("Gone", &model.Lyrics{Source: model.SourceSidecar, Unsynced: "still held"})
+	if _, err := st.write.ExecContext(ctx, "UPDATE playable_item SET state = 'missing' WHERE id = ?", gone); err != nil {
+		t.Fatalf("mark missing: %v", err)
+	}
+	putBook(t, st, lib.ID, bookSpec{path: "/lib/b.m4b", essence: "eb", content: "cb", title: "Spoken", author: "Au"})
+	if _, err := st.write.ExecContext(ctx,
+		"INSERT INTO lyrics(item_id, source, unsynced, updated_at) VALUES (?, 'user', 'a transcript', 1)",
+		itemID(t, st, "Spoken")); err != nil {
+		t.Fatalf("book lyrics: %v", err)
+	}
+
+	cov, err := st.EnrichmentCoverage(ctx)
+	if err != nil {
+		t.Fatalf("coverage: %v", err)
+	}
+	// Only the settled miss counts as asked: an owed lookup has no answer yet, and a found
+	// one whose lyrics were removed did not find none.
+	if cov.Tracks != 6 || cov.TracksWithLyrics != 2 || cov.TracksLyricsAsked != 1 {
+		t.Errorf("lyrics coverage = %d tracks, %d held, %d asked; want 6, 2, 1",
+			cov.Tracks, cov.TracksWithLyrics, cov.TracksLyricsAsked)
+	}
+	if cov.Matched != 0 {
+		t.Errorf("Matched = %d, want 0 (the lyrics markers are not identity matches)", cov.Matched)
+	}
+}

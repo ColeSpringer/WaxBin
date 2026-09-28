@@ -212,7 +212,7 @@ func TestStalePeaksHidden(t *testing.T) {
 	if err := st.PutAnalysis(ctx, model.AnalysisInput{
 		AnalysisVersion: 1,
 		Fingerprint:     model.FingerprintInput{FilePID: r.FilePID, EssenceHash: "e1", AlgoVersion: 1, FP: []byte{}},
-		Peaks:           &model.PeaksData{Version: 1, Buckets: 2, Data: []byte{1, 0, 2, 0}},
+		Peaks:           &model.PeaksData{Version: 1, Buckets: 2, Data: []byte{1, 0, 2, 0}, Frames: 88200, SampleRate: 44100},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -229,12 +229,12 @@ func TestStalePeaksHidden(t *testing.T) {
 
 // putPeaks stamps a file's waveform via PutAnalysis (the atomic write path), using
 // the data bytes as the distinguishing mark so a read can be traced to a part.
-func putPeaks(t *testing.T, st *Store, filePID model.PID, essence string, data []byte) {
+func putPeaks(t *testing.T, st *Store, filePID model.PID, essence string, data []byte, frames int64, rate int) {
 	t.Helper()
 	if err := st.PutAnalysis(context.Background(), model.AnalysisInput{
 		AnalysisVersion: 1,
 		Fingerprint:     model.FingerprintInput{FilePID: filePID, EssenceHash: essence, AlgoVersion: 1, FP: []byte{}},
-		Peaks:           &model.PeaksData{Version: 1, Buckets: len(data) / 2, Data: data},
+		Peaks:           &model.PeaksData{Version: 1, Buckets: len(data) / 2, Data: data, Frames: frames, SampleRate: rate},
 	}); err != nil {
 		t.Fatalf("put peaks: %v", err)
 	}
@@ -254,7 +254,7 @@ func outOfOrderBook(t *testing.T, st *Store, libID int64) map[int]*model.ScanIte
 			essence: e, content: "dc" + string(rune('0'+pos)),
 			title: "Tome", author: "Auth", asin: "BD", position: pos, durationMS: 1000,
 		})
-		putPeaks(t, st, parts[pos].FilePID, e, []byte{byte(pos), 0, byte(pos), 0})
+		putPeaks(t, st, parts[pos].FilePID, e, []byte{byte(pos), 0, byte(pos), 0}, int64(pos)*1000, 8000)
 	}
 	return parts
 }
@@ -277,6 +277,9 @@ func TestPeaksPrimaryIsNotReadingOrderPartOne(t *testing.T) {
 	}
 	if pk.Data[0] != 3 {
 		t.Errorf("Peaks answered for part %d, want part 3 (attached first, so primary)", pk.Data[0])
+	}
+	if pk.Frames != 3000 || pk.SampleRate != 8000 {
+		t.Errorf("Peaks span = %d frames at %d Hz, want part 3's 3000 at 8000", pk.Frames, pk.SampleRate)
 	}
 
 	// Re-key part three's file as a music track: the book loses its primary and
@@ -308,6 +311,9 @@ func TestPeaksPerFileAndPerItem(t *testing.T) {
 		if pk.Data[0] != byte(pos) {
 			t.Errorf("part %d file read back part %d's waveform", pos, pk.Data[0])
 		}
+		if pk.Frames != int64(pos)*1000 || pk.SampleRate != 8000 {
+			t.Errorf("part %d file span = %d frames at %d Hz, want %d at 8000", pos, pk.Frames, pk.SampleRate, pos*1000)
+		}
 	}
 
 	got, err := st.LoadPeaksForItem(ctx, parts[1].ItemPID)
@@ -325,6 +331,10 @@ func TestPeaksPerFileAndPerItem(t *testing.T) {
 		}
 		if ip.FilePID != parts[wantPos].FilePID {
 			t.Errorf("per-item peaks[%d] file = %s, want part %d's file", i, ip.FilePID, wantPos)
+		}
+		if ip.Peaks.Frames != int64(wantPos)*1000 || ip.Peaks.SampleRate != 8000 {
+			t.Errorf("per-item peaks[%d] span = %d frames at %d Hz, want %d at 8000",
+				i, ip.Peaks.Frames, ip.Peaks.SampleRate, wantPos*1000)
 		}
 	}
 }
@@ -403,5 +413,32 @@ func TestLoudnessNotFound(t *testing.T) {
 	r := putTrack(t, st, lib.ID, trackSpec{path: "/lib/a/1.flac", essence: "e1", content: "c1", title: "T", artist: "A", album: "Al"})
 	if _, err := st.LoudnessByItem(context.Background(), r.ItemPID); !waxerr.Is(err, waxerr.CodeNotFound) {
 		t.Fatalf("want CodeNotFound for an unanalyzed item, got %v", err)
+	}
+}
+
+// TestPutPeaksRefusesAnUnplacedWaveform: a waveform that does not say how many frames
+// it spans, or at what rate, cannot be placed on a timeline, so the write refuses it
+// and stores nothing.
+func TestPutPeaksRefusesAnUnplacedWaveform(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	r := putTrack(t, st, lib.ID, trackSpec{path: "/lib/a/1.flac", essence: "e1", content: "c1", title: "S", artist: "X", album: "Al"})
+	for _, pk := range []model.PeaksData{
+		{Version: 1, Buckets: 2, Data: []byte{1, 0, 2, 0}, SampleRate: 44100},
+		{Version: 1, Buckets: 2, Data: []byte{1, 0, 2, 0}, Frames: 88200},
+		{Version: 1, Buckets: 2, Data: []byte{1, 0, 2, 0}, Frames: -1, SampleRate: 44100},
+		{Version: 1, Buckets: 2, Data: []byte{1, 0, 2, 0}, Frames: 88200, SampleRate: -44100},
+	} {
+		err := st.PutAnalysis(ctx, model.AnalysisInput{
+			AnalysisVersion: 1,
+			Fingerprint:     model.FingerprintInput{FilePID: r.FilePID, EssenceHash: "e1", AlgoVersion: 1, FP: []byte{}},
+			Peaks:           &pk,
+		})
+		if !waxerr.Is(err, waxerr.CodeInvalid) {
+			t.Errorf("put %d frames at %d Hz: err = %v, want CodeInvalid", pk.Frames, pk.SampleRate, err)
+		}
+	}
+	if _, err := st.LoadPeaks(ctx, r.ItemPID); !waxerr.Is(err, waxerr.CodeNotFound) {
+		t.Errorf("a refused waveform was stored: %v", err)
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"testing"
 	"time"
 
@@ -297,8 +298,9 @@ func TestAlbumArtRetriesAnExpiredMiss(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second Run: %v", err)
 	}
-	if res.Retried != 1 || res.AlbumArtEnriched != 1 || res.ArtFetched != 1 {
-		t.Fatalf("result = %+v, want one retried album whose cover landed", res)
+	// The group's front, which the same provider missed at the group rung, expires too.
+	if res.Retried != 2 || res.AlbumArtEnriched != 1 || res.GroupArtEnriched != 1 || res.ArtFetched != 1 {
+		t.Fatalf("result = %+v, want the album's cover landing on its retry beside the group's", res)
 	}
 	if len(asks) != 2 || !asks[1].Force {
 		t.Fatalf("second asks = %+v, want a forced re-ask", asks)
@@ -400,8 +402,8 @@ func TestAlbumArtAuxHalfNeedsAReleaseRungProvider(t *testing.T) {
 
 // TestAlbumArtFrontHalfNeedsAReleaseRungProvider: a contact-less install whose only cover
 // provider serves release groups has nobody to ask about an album's own front, so an
-// identified album without one is neither walked nor marked. The lyrics provider beside
-// it keeps the install runnable.
+// identified album without one is neither walked nor marked. That provider does serve
+// the group-art backfill.
 func TestAlbumArtFrontHalfNeedsAReleaseRungProvider(t *testing.T) {
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
@@ -422,8 +424,8 @@ func TestAlbumArtFrontHalfNeedsAReleaseRungProvider(t *testing.T) {
 	svc := enrich.New(st, enrich.Config{
 		MinRequestInterval: time.Millisecond, Providers: []enrich.Provider{groupCovers, lyrics},
 	}, nil)
-	if got := svc.Phases(); len(got) != 1 || got[0] != model.EnrichPhaseLyrics {
-		t.Errorf("phases = %v, want [lyrics]", got)
+	if got, want := svc.Phases(), []model.EnrichPhase{model.EnrichPhaseGroupArt, model.EnrichPhaseLyrics}; !slices.Equal(got, want) {
+		t.Errorf("phases = %v, want %v", got, want)
 	}
 	res, err := svc.Run(ctx, enrich.RunOptions{}, nil)
 	if err != nil {

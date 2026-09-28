@@ -186,7 +186,7 @@ func TestForcePhaseHeartbeatReportsAFullRun(t *testing.T) {
 	if res.ArtistArtEnriched != 2 {
 		t.Fatalf("result = %+v, want both artists re-asked", res)
 	}
-	if len(seen) < 2 || seen[0] != 0.5 || seen[1] != 1 {
-		t.Errorf("heartbeat progress = %v, want 0.5 then 1", seen)
+	if len(seen) < 3 || seen[0] != 0.5 || seen[1] >= 1 || seen[len(seen)-1] != 1 {
+		t.Errorf("heartbeat progress = %v, want 0.5, then short of 1 until the last beat's 1", seen)
 	}
 }

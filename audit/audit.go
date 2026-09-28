@@ -34,7 +34,8 @@ type Store interface {
 	Podcasts(ctx context.Context) ([]*model.Podcast, error)
 	Libraries(ctx context.Context) ([]*model.Library, error)
 	DerivedDrift(ctx context.Context) (model.DerivedDrift, error)
-	// FileDiagnostics returns the diagnostics the scan and the tag writers persisted.
+	// FileDiagnostics returns the diagnostics the scan, the analyze pass's decode, and
+	// the tag writers persisted.
 	// It is on the port (rather than audit reaching for waxlabel itself) for the same
 	// reason AudioProbe is: the audit stays free of the tag library. The audit always
 	// passes the zero filter (the full dump); the filter exists for the query surface
@@ -43,6 +44,9 @@ type Store interface {
 	// DiagnosticCoverage reports how many audio files have not had diagnostics
 	// derived under the current rule set, and the total.
 	DiagnosticCoverage(ctx context.Context) (stale, total int, err error)
+	// FilesDurationMismatch returns a sample (up to limit) of files whose header
+	// duration disagrees with their decoded length, plus the total count.
+	FilesDurationMismatch(ctx context.Context, limit int) ([]model.FileDurationMismatch, int, error)
 }
 
 // Hasher recomputes a file's content hash for the integrity (bitrot) check.
@@ -181,6 +185,11 @@ func (a *Auditor) Run(ctx context.Context, cfg Config) (*Report, error) {
 			return nil, err
 		}
 	}
+	if a.runs(cfg, model.CheckDurationMismatch) {
+		if err := a.checkDurationMismatch(ctx, sample, add); err != nil {
+			return nil, err
+		}
+	}
 
 	// Both diagnostic-backed checks read the same persisted set, so fetch it once.
 	// corruptSeen carries corrupt_audio's cheap half into its probe half, so a file
@@ -228,9 +237,10 @@ func (a *Auditor) runs(cfg Config, c model.AuditCheck) bool {
 	// which only run when Integrity is requested.
 	//
 	// CheckCorruptAudio is not gated here, unlike CheckIntegrity, because it has two
-	// halves. The cheap half reads the corrupt-audio diagnostics the scan already
-	// derived, which is one indexed query, so it defaults on and that free visibility is
-	// the point. The heavy decode-probe half is gated on cfg.Integrity inside the check.
+	// halves. The cheap half reads the corrupt-audio diagnostics the scan and the
+	// analyze pass already recorded, which is one indexed query, so it defaults on and
+	// that free visibility is the point. The heavy decode-probe half is gated on
+	// cfg.Integrity inside the check.
 	if c == model.CheckIntegrity {
 		return cfg.Integrity
 	}
@@ -370,6 +380,52 @@ func (a *Auditor) checkMissingMBID(ctx context.Context, sample int, add func(mod
 		func(total, shown int) string {
 			return strconv.Itoa(total) + " items have no MusicBrainz identity (" + strconv.Itoa(shown) + " shown)"
 		}, add)
+}
+
+// checkDurationMismatch reports files whose header states a length the decoded audio
+// does not have: a finding per sampled file naming both lengths, then a roll-up of the
+// total when the sample was capped. The header value is what the catalog shows as the
+// track's duration, so a lying header misplaces seeks and scrubbers until a retag or a
+// re-mux fixes it and a rescan reads it again.
+func (a *Auditor) checkDurationMismatch(ctx context.Context, sample int, add func(model.AuditFinding)) error {
+	ms, total, err := a.store.FilesDurationMismatch(ctx, sample)
+	if err != nil || total == 0 {
+		return err
+	}
+	for _, m := range ms {
+		add(model.AuditFinding{
+			Check:    model.CheckDurationMismatch,
+			Severity: model.SeverityWarn,
+			Message: "header says " + clockMS(m.HeaderMS) + " but the audio decodes to " +
+				clockMS(m.DecodedMS) + ": " + m.DisplayPath,
+			Path: m.DisplayPath,
+		})
+	}
+	if total > len(ms) {
+		add(model.AuditFinding{
+			Check:    model.CheckDurationMismatch,
+			Severity: model.SeverityWarn,
+			Message: strconv.Itoa(total) + " files whose header duration disagrees with the decoded audio (" +
+				strconv.Itoa(len(ms)) + " shown)",
+		})
+	}
+	return nil
+}
+
+// clockMS renders a length as m:ss, or h:mm:ss from an hour up.
+func clockMS(ms int64) string {
+	sec := ms / 1000
+	h, m, s := sec/3600, sec/60%60, sec%60
+	two := func(n int64) string {
+		if n < 10 {
+			return "0" + strconv.FormatInt(n, 10)
+		}
+		return strconv.FormatInt(n, 10)
+	}
+	if h > 0 {
+		return strconv.FormatInt(h, 10) + ":" + two(m) + ":" + two(s)
+	}
+	return strconv.FormatInt(m, 10) + ":" + two(s)
 }
 
 func (a *Auditor) checkMissingReplayGain(ctx context.Context, add func(model.AuditFinding)) error {

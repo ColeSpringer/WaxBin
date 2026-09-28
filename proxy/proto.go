@@ -177,7 +177,11 @@ import (
 // Version 20 added EnrichParams.ForcePhases, for the reason version 3 gave: a
 // version-19 server drops the field and runs an ordinary pass where the client asked
 // for one phase to be re-asked, and the result reads as a pass that found nothing new
-// rather than as a refusal.
+// rather than as a refusal. The aux-art phase's rename to group-art rides at 20: a peer
+// that sends the old key is refused as an unknown phase, which is a loud answer rather
+// than a misread one. An older peer reading a newer enrich result finds no
+// AuxArtEnriched and shows the phase as having walked nothing, an absence of
+// information like MergedInto's at 14 rather than a false statement.
 const ProtocolVersion = 20
 
 // Method names for the proxied operations: the fast request/response catalog

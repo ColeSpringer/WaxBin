@@ -110,38 +110,38 @@ func TestPrintItemTableEpisodeColumn(t *testing.T) {
 	}
 }
 
-// TestEnrichViewAuxCounts pins the aux-backfill counters in the `enrich --json`
-// payload: present when the phase ran, absent when it did not, so an install with no
-// aux-capable provider emits exactly the shape it always did. They matter because
-// Result.total() counts them, which means `enrich --limit N` can spend its budget on
-// that phase, and a payload that never mentions it cannot explain where N went.
-func TestEnrichViewAuxCounts(t *testing.T) {
+// TestEnrichViewGroupArtCounts pins the group-art backfill counters in the `enrich
+// --json` payload: present when the phase ran, absent when it did not. They matter
+// because Result.total() counts them, which means `enrich --limit N` can spend its
+// budget on that phase, and a payload that never mentions it cannot explain where N
+// went.
+func TestEnrichViewGroupArtCounts(t *testing.T) {
 	b, err := json.Marshal(toEnrichView(&waxbin.EnrichResult{
 		Result: enrich.Result{ArtistsEnriched: 1, ArtistsMatched: 1},
 	}))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(b), "auxArt") {
-		t.Errorf("a run without the phase emitted aux counts: %s", b)
+	if strings.Contains(string(b), "groupArt") || strings.Contains(string(b), "auxArt") {
+		t.Errorf("a run without the phase emitted its counts: %s", b)
 	}
 
 	b, err = json.Marshal(toEnrichView(&waxbin.EnrichResult{
-		Result: enrich.Result{AuxArtEnriched: 3, AuxArtMatched: 2, AuxArtFetched: 4},
+		Result: enrich.Result{GroupArtEnriched: 3, GroupArtMatched: 2, AuxArtFetched: 4},
 	}))
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{`"auxArtEnriched":3`, `"auxArtMatched":2`, `"auxArtFetched":4`} {
+	for _, want := range []string{`"groupArtEnriched":3`, `"groupArtMatched":2`, `"auxArtFetched":4`} {
 		if !strings.Contains(string(b), want) {
 			t.Errorf("json = %s\nwant it to carry %s", b, want)
 		}
 	}
 }
 
-// TestRenderEnrichResultAuxLine: the backfill phase gets a summary line of its own
-// when it ran, and the image tally beside it stays distinguishable from it.
-func TestRenderEnrichResultAuxLine(t *testing.T) {
+// TestRenderEnrichResultGroupArtLine: the backfill phase gets a summary line of its
+// own when it ran, and the aux image tally beside it stays distinguishable from it.
+func TestRenderEnrichResultGroupArtLine(t *testing.T) {
 	render := func(r enrich.Result) string {
 		t.Helper()
 		cmd := &cobra.Command{}
@@ -153,17 +153,17 @@ func TestRenderEnrichResultAuxLine(t *testing.T) {
 		return buf.String()
 	}
 
-	ran := render(enrich.Result{AuxArtEnriched: 3, AuxArtMatched: 2, AuxArtFetched: 4})
-	if got := lineWith(t, ran, "aux art:"); !strings.Contains(got, "3 backfilled (2 matched)") {
-		t.Errorf("aux art line = %q, want the release groups walked and matched", got)
+	ran := render(enrich.Result{GroupArtEnriched: 3, GroupArtMatched: 2, AuxArtFetched: 4})
+	if got := lineWith(t, ran, "group art:"); !strings.Contains(got, "3 backfilled (2 matched)") {
+		t.Errorf("group art line = %q, want the release groups walked and matched", got)
 	}
 	if got := lineWith(t, ran, "aux art images:"); !strings.Contains(got, "4 fetched") {
 		t.Errorf("aux art images line = %q, want the image tally", got)
 	}
 
-	// A stock run (no aux-capable provider) keeps the summary it always had.
-	if got := render(enrich.Result{ArtistsEnriched: 1}); strings.Contains(got, "aux art") {
-		t.Errorf("a run without the phase printed an aux line:\n%s", got)
+	// A run that did not walk the phase keeps the summary it always had.
+	if got := render(enrich.Result{ArtistsEnriched: 1}); strings.Contains(got, "group art") {
+		t.Errorf("a run without the phase printed a group art line:\n%s", got)
 	}
 }
 

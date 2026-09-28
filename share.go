@@ -155,8 +155,9 @@ func (l *Library) resolveStrongID(ctx context.Context, ref model.PortableRef) (*
 
 // resolveFingerprint runs the fingerprint rung. It derives the ref's min-hash terms
 // through fingerprint.TermsForAlgo, the same dispatch the analyze write side uses, probes
-// the inverted index within a one-bucket duration window under the ref's algorithm and
-// kind, then verifies each candidate against the full vector. It returns the single item
+// the inverted index within a one-bucket window around the fingerprint's own duration
+// bucket (DurationMS's for a ref without one) under the ref's algorithm and kind, then
+// verifies each candidate against the full vector. It returns the single item
 // scoring at or above the similarity floor. A short or corrupt fingerprint with no terms,
 // an algorithm or kind with no candidates, and a tie all return nil. The floor is
 // inclusive (>=) to match FindAltEncodings, so a candidate that lands exactly on the
@@ -167,7 +168,10 @@ func (l *Library) resolveFingerprint(ctx context.Context, ref model.PortableRef)
 	if len(terms) == 0 {
 		return nil, nil
 	}
-	bucket := int(fingerprint.DurationBucket(ref.DurationMS))
+	bucket := int(ref.FingerprintBucket)
+	if bucket == 0 {
+		bucket = int(fingerprint.DurationBucket(ref.DurationMS))
+	}
 	cands, err := l.store.FingerprintCandidatesByProbe(ctx, ref.Kind, ref.FingerprintAlgo, bucket-1, bucket+1, terms, altMinSharedTerms)
 	if err != nil {
 		return nil, err

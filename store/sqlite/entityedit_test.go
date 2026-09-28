@@ -645,10 +645,10 @@ func TestEntityEditClearRGMBIDRekeysChainAndAlbumKeys(t *testing.T) {
 		"SELECT COUNT(*) FROM entity_enrichment WHERE entity_type='release_group' AND entity_id=?", rgID); n != 1 {
 		t.Fatalf("marker rows before the clear = %d, want 1", n)
 	}
-	// The aux-art backfill keeps its own marker under its own entity type, and it gates
-	// the same queue, so the undo has to take that one back too.
-	if err := st.ApplyReleaseGroupAuxArt(ctx, model.ReleaseGroupAuxArt{
-		ReleaseGroupID: rgID, PID: rgPID, Matched: true,
+	// The group-art backfill keeps its own markers under their own entity types, and they
+	// gate the same queue, so the undo has to take them back too.
+	if err := st.ApplyReleaseGroupArtBackfill(ctx, model.ReleaseGroupArtBackfill{
+		ReleaseGroupID: rgID, PID: rgPID, Front: model.ArtHalf{Asked: true}, Aux: model.ArtHalf{Asked: true},
 	}); err != nil {
 		t.Fatalf("mark aux art: %v", err)
 	}
@@ -656,8 +656,8 @@ func TestEntityEditClearRGMBIDRekeysChainAndAlbumKeys(t *testing.T) {
 	clearEntityMBID(t, st, model.MergeReleaseGroup, rgPID)
 
 	if n := scalarInt(t, st,
-		"SELECT COUNT(*) FROM entity_enrichment WHERE entity_type='aux_art' AND entity_id=?", rgID); n != 0 {
-		t.Errorf("aux-art marker rows after the clear = %d, want 0", n)
+		"SELECT COUNT(*) FROM entity_enrichment WHERE entity_type IN ('group_art','group_front') AND entity_id=?", rgID); n != 0 {
+		t.Errorf("group-art marker rows after the clear = %d, want 0", n)
 	}
 
 	wantRGKey := identity.ReleaseGroupKey("", identity.MatchKey("Alpha"), "One")
@@ -728,11 +728,11 @@ func rgArtRoles(t *testing.T, st *Store, rgID int64, role string) int {
 		"SELECT COUNT(*) FROM art_map WHERE entity_type='release_group' AND entity_id=? AND role=?", rgID, role)
 }
 
-// TestEntityEditClearRGMBIDTakesBackMatchedArt: a release group holds art of its own, so
-// the clear gives back what the match wrote there, its front cover and the aux slots
-// enrichment filled, and leaves a hand-set cover standing. An unmatched marker means
-// nothing was written to take back, so everything stays.
-func TestEntityEditClearRGMBIDTakesBackMatchedArt(t *testing.T) {
+// TestEntityEditClearRGMBIDTakesBackEnrichmentArt: a release group holds art of its own,
+// so the clear gives back what enrichment fetched there, its front cover and the aux
+// slots it filled, and leaves a hand-set cover standing. It does so whether or not the
+// identity pass matched, since the group-art backfill's requests carry the id too.
+func TestEntityEditClearRGMBIDTakesBackEnrichmentArt(t *testing.T) {
 	ctx := context.Background()
 	const rgMBID = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
 
@@ -772,8 +772,8 @@ func TestEntityEditClearRGMBIDTakesBackMatchedArt(t *testing.T) {
 	}
 	assertVerifyClean(t, matched)
 
-	// The same shape with the marker recording no match: nothing there came from the id
-	// being disowned, so nothing is taken back.
+	// The same shape with the marker recording no match: the art still came while the
+	// group claimed the id, so it goes the same way.
 	unmatched, rgPID2, rgID2 := rgArtFixture(t, rgMBID)
 	seedArt(t, unmatched, rgPID2, rgID2)
 	if err := unmatched.ApplyReleaseGroupEnrichment(ctx, model.ReleaseGroupEnrichment{
@@ -784,12 +784,109 @@ func TestEntityEditClearRGMBIDTakesBackMatchedArt(t *testing.T) {
 
 	clearEntityMBID(t, unmatched, model.MergeReleaseGroup, rgPID2)
 
-	for _, role := range []string{"front", "disc", "back"} {
-		if n := rgArtRoles(t, unmatched, rgID2, role); n != 1 {
-			t.Errorf("%s rows after an unmatched clear = %d, want 1", role, n)
+	for role, want := range map[string]int{"front": 0, "disc": 0, "back": 1} {
+		if n := rgArtRoles(t, unmatched, rgID2, role); n != want {
+			t.Errorf("%s rows after an unmatched clear = %d, want %d", role, n, want)
 		}
 	}
 	assertVerifyClean(t, unmatched)
+}
+
+// TestEntityEditMBIDCorrectionTakesBackEnrichmentArt: a corrected id disowns everything
+// enrichment fetched under the old one, so on every art rung its front and auxiliary rows
+// go on any id edit, not only a clear, and the backfill asks again under the new id. A
+// hand-set picture stays, and so does one the user locked.
+func TestEntityEditMBIDCorrectionTakesBackEnrichmentArt(t *testing.T) {
+	ctx := context.Background()
+	const rgMBID = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+	const fixed = "cccccccc-cccc-cccc-cccc-cccccccccccc"
+	user := model.Attribution{Source: model.SourceUser}
+
+	t.Run("release group", func(t *testing.T) {
+		st, rgPID, rgID := rgArtFixture(t, rgMBID)
+		if err := st.SetEntityArt(ctx, model.ArtReleaseGroup, rgPID, model.ArtRoleBack,
+			[]byte("user-back"), "png", user, model.LockOf(false), false); err != nil {
+			t.Fatalf("seed user back: %v", err)
+		}
+		if err := st.ApplyReleaseGroupEnrichment(ctx, model.ReleaseGroupEnrichment{
+			ReleaseGroupID: rgID, PID: rgPID, Matched: true, MBID: rgMBID, Type: "album",
+			Art: rgEnrichArt("rg-front"),
+			AuxArt: map[model.ArtRole]*model.ArtImage{
+				model.ArtRoleDisc: rgEnrichArt("rg-disc"), model.ArtRoleBooklet: rgEnrichArt("rg-booklet")},
+		}); err != nil {
+			t.Fatalf("enrich release group: %v", err)
+		}
+		if _, err := st.SetArtLock(ctx, model.ArtReleaseGroup, rgPID, model.ArtRoleBooklet, true); err != nil {
+			t.Fatalf("lock booklet: %v", err)
+		}
+		if _, err := st.EditEntityFields(ctx, model.MergeReleaseGroup, rgPID,
+			map[string]string{"mbid": fixed}, user, model.LockOf(false), false); err != nil {
+			t.Fatalf("correct mbid: %v", err)
+		}
+		for role, want := range map[string]int{"front": 0, "disc": 0, "back": 1, "booklet": 1} {
+			if n := rgArtRoles(t, st, rgID, role); n != want {
+				t.Errorf("%s rows after the correction = %d, want %d", role, n, want)
+			}
+		}
+		assertVerifyClean(t, st)
+	})
+
+	t.Run("album", func(t *testing.T) {
+		st, lib := entityFixture(t)
+		putTrack(t, st, lib.ID, trackSpec{path: "/lib/Alpha/One/01.flac", essence: "e1", content: "c1",
+			title: "T1", artist: "Alpha", albumArt: "Alpha", album: "One", year: 2001, durationMS: 100})
+		albumPID := entityPIDByCol(t, st, "album", "title", "One")
+		albumID := entityIDByCol(t, st, "album", "title", "One")
+		if _, err := st.EditEntityFields(ctx, model.MergeAlbum, albumPID,
+			map[string]string{"mbid": "55555555-5555-5555-5555-555555555555"}, user, model.LockOf(false), false); err != nil {
+			t.Fatalf("set album mbid: %v", err)
+		}
+		if err := st.ApplyAlbumArtBackfill(ctx, model.AlbumArtBackfill{
+			AlbumID: albumID, PID: albumPID, Matched: true, Provider: "mock",
+			Art:    rgEnrichArt("al-front"),
+			AuxArt: map[model.ArtRole]*model.ArtImage{model.ArtRoleBack: rgEnrichArt("al-back")},
+		}); err != nil {
+			t.Fatalf("album art backfill: %v", err)
+		}
+		if _, err := st.EditEntityFields(ctx, model.MergeAlbum, albumPID,
+			map[string]string{"mbid": "66666666-6666-6666-6666-666666666666"}, user, model.LockOf(false), false); err != nil {
+			t.Fatalf("correct album mbid: %v", err)
+		}
+		for _, role := range []string{"front", "back"} {
+			if n := scalarInt(t, st, "SELECT COUNT(*) FROM art_map WHERE entity_type='album' AND entity_id=? AND role=?",
+				albumID, role); n != 0 {
+				t.Errorf("album %s rows after the correction = %d, want 0", role, n)
+			}
+		}
+		assertVerifyClean(t, st)
+	})
+
+	t.Run("artist", func(t *testing.T) {
+		st, lib := entityFixture(t)
+		putTrack(t, st, lib.ID, trackSpec{path: "/lib/Alpha/One/01.flac", essence: "e1", content: "c1",
+			title: "T1", artist: "Alpha", albumArt: "Alpha", album: "One", year: 2001, durationMS: 100})
+		artistPID := entityPIDByCol(t, st, "artist", "name", "Alpha")
+		artistID := entityIDByCol(t, st, "artist", "name", "Alpha")
+		const old = "77777777-7777-7777-7777-777777777777"
+		if err := st.ApplyArtistEnrichment(ctx, model.ArtistEnrichment{
+			ArtistID: artistID, PID: artistPID, Matched: true, MBID: old,
+			Art:    rgEnrichArt("ar-front"),
+			AuxArt: map[model.ArtRole]*model.ArtImage{model.ArtRoleBackground: rgEnrichArt("ar-background")},
+		}); err != nil {
+			t.Fatalf("enrich artist: %v", err)
+		}
+		if _, err := st.EditEntityFields(ctx, model.MergeArtist, artistPID,
+			map[string]string{"mbid": "88888888-8888-8888-8888-888888888888"}, user, model.LockOf(false), false); err != nil {
+			t.Fatalf("correct artist mbid: %v", err)
+		}
+		for _, role := range []string{"front", "background"} {
+			if n := scalarInt(t, st, "SELECT COUNT(*) FROM art_map WHERE entity_type='artist' AND entity_id=? AND role=?",
+				artistID, role); n != 0 {
+				t.Errorf("artist %s rows after the correction = %d, want 0", role, n)
+			}
+		}
+		assertVerifyClean(t, st)
+	})
 }
 
 // TestEntityEditClearRGMBIDReparentsDifferentlyTitledAlbum: two differently-titled

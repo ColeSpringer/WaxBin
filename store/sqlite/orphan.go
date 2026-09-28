@@ -246,7 +246,7 @@ func deleteOrphanEntity(ctx context.Context, tx *sql.Tx, k orphanKind, o orphanR
 	// whatever new entity inherits the id.
 	switch k.entityType {
 	case model.EnrichReleaseGroupType:
-		if err := deleteAuxArtMarkerTx(ctx, tx, o.id); err != nil {
+		if err := deleteGroupArtMarkerTx(ctx, tx, o.id); err != nil {
 			return err
 		}
 	case model.EnrichArtistType:

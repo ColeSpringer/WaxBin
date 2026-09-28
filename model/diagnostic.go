@@ -1,5 +1,12 @@
 package model
 
+import (
+	"fmt"
+	"strings"
+	"unicode"
+	"unicode/utf8"
+)
+
 // DiagnosticCode names a persisted per-file observation. Each word names the
 // consequence rather than the tag library's underlying condition.
 //
@@ -63,12 +70,15 @@ const (
 	// row, and for a shared file it refuses, which it settles since the refusal would
 	// only repeat.
 	DiagTagWriteUnsynced DiagnosticCode = "tag_write_unsynced"
-	// DiagCorruptAudio marks a parse that found truncated audio or no audio frames.
-	//
-	// Its coverage is format-partial, and callers must present it that way. The
-	// underlying signals exist for MP3, AAC, AIFF, MP4, and WAV, and not for FLAC,
-	// Opus, Vorbis, or Matroska. The code is a true positive when it fires and proves
-	// nothing when it does not, so its absence is not evidence of health.
+	// DiagCorruptAudio marks audio that is truncated, has no frames, or would not
+	// decode cleanly. Two writers record it. The scan's half comes from the tag parse
+	// and is format-partial: its signals exist for MP3, AAC, AIFF, MP4, and WAV, and not
+	// for FLAC, Opus, Vorbis, or Matroska. The analyze half comes from the analyze
+	// pass's decodes, so it covers every format WaxFlow decodes (a truncated FLAC or
+	// Opus surfaces once analyze has run): a warning when the read worked around
+	// damage, an error when the decode failed on it. It describes the audio analyze
+	// read, and reads as absent once the file changes. Until analyze has read a file the
+	// code proves nothing when it does not fire, so its absence is not evidence of health.
 	DiagCorruptAudio DiagnosticCode = "corrupt_audio"
 )
 
@@ -106,12 +116,14 @@ const (
 	OriginReplayGain DiagnosticOrigin = "replaygain"
 	OriginEdit       DiagnosticOrigin = "edit"
 	OriginEnrichment DiagnosticOrigin = "enrichment"
+	// OriginAnalyze is the analyze pass's decode, which reads every file end to end.
+	OriginAnalyze DiagnosticOrigin = "analyze"
 )
 
 // Valid reports whether o is a known diagnostic writer.
 func (o DiagnosticOrigin) Valid() bool {
 	switch o {
-	case OriginScan, OriginOrganize, OriginReplayGain, OriginEdit, OriginEnrichment:
+	case OriginScan, OriginOrganize, OriginReplayGain, OriginEdit, OriginEnrichment, OriginAnalyze:
 		return true
 	default:
 		return false
@@ -173,4 +185,73 @@ type DiagnosticCount struct {
 	Code     DiagnosticCode
 	Severity AuditSeverity
 	Count    int
+}
+
+// MaxDetailBytes bounds a persisted diagnostic detail. A tag_write_lost detail comes
+// from a WaxLabel warning whose message can embed a file-derived snippet, which
+// upstream sanitizes but does not bound, and an analyze detail carries a decoder's
+// error text, so the store bounds every writer's detail.
+const MaxDetailBytes = 512
+
+// CapDetail makes s a stored detail: one line a terminal prints as text, at most
+// MaxDetailBytes long. What a terminal would act on comes out escaped (see
+// escapedRune), a byte that is not UTF-8 as \xNN, and the result is truncated on a
+// rune boundary. The store applies it to every writer's detail.
+func CapDetail(s string) string { return capBytes(escapeDetail(s), MaxDetailBytes) }
+
+// CapDetailWithTail is CapDetail for a detail that has to end with tail: s gives way,
+// so a summary that closes by saying what happened still says it.
+func CapDetailWithTail(s, tail string) string {
+	return capBytes(escapeDetail(s), max(MaxDetailBytes-len(tail), 0)) + tail
+}
+
+// escapeDetail writes an ASCII control or a byte that is not UTF-8 as \xNN and any
+// other rune escapedRune names as \uXXXX. Escaped text has nothing left to escape.
+func escapeDetail(s string) string {
+	if utf8.ValidString(s) && strings.IndexFunc(s, escapedRune) < 0 {
+		return s
+	}
+	var b strings.Builder
+	for i := 0; i < len(s); {
+		r, size := utf8.DecodeRuneInString(s[i:])
+		switch {
+		case r == utf8.RuneError && size == 1, r < utf8.RuneSelf && escapedRune(r):
+			fmt.Fprintf(&b, `\x%02x`, s[i])
+		case escapedRune(r):
+			fmt.Fprintf(&b, `\u%04x`, r)
+		default:
+			b.WriteString(s[i : i+size])
+		}
+		i += size
+	}
+	return b.String()
+}
+
+// escapedRune reports a rune a terminal acts on rather than prints: a control
+// character (the tab and newline included, since a detail is one line), a
+// bidirectional control, a zero width space, word joiner or byte order mark, or a line
+// or paragraph separator. The joiners emoji and Indic text need stay.
+func escapedRune(r rune) bool {
+	switch r {
+	case '\u200b', '\u2060', '\ufeff', '\u2028', '\u2029':
+		return true
+	}
+	return unicode.IsControl(r) || unicode.Is(unicode.Bidi_Control, r)
+}
+
+// capBytes truncates s to n bytes on a rune boundary.
+func capBytes(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	b := s[:n]
+	for len(b) > 0 {
+		// size > 1 distinguishes a genuine U+FFFD in the text from the RuneError the
+		// decoder returns for a byte sequence cut in half.
+		if r, size := utf8.DecodeLastRuneInString(b); r != utf8.RuneError || size > 1 {
+			break
+		}
+		b = b[:len(b)-1]
+	}
+	return b
 }

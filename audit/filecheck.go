@@ -278,8 +278,9 @@ func (a *Auditor) checkCorrupt(ctx context.Context, files []model.AuditFileInfo,
 		if f.Kind != model.FileAudio {
 			continue
 		}
-		// Already reported by this check's cheap half, which read the diagnostic the
-		// scan derived. Both halves flagging one file must still be one finding.
+		// Already reported by this check's cheap half, which read the diagnostic a scan
+		// or analyze pass recorded. Both halves flagging one file must still be one
+		// finding.
 		if seen[f.DisplayPath] {
 			continue
 		}

@@ -380,7 +380,7 @@ func commitPlan(ctx context.Context, plan *waxlabel.Plan, op, path, what string,
 		// Sanitized at the seam like every other warning; the error text embeds the
 		// file path, which the terminal must not have to trust.
 		warnings = append(warnings, model.TagWriteWarning{
-			Code: PostWriteWarningCode, Message: CapDetail(tag.SanitizeLine(err.Error())),
+			Code: PostWriteWarningCode, Message: model.CapDetail(tag.SanitizeLine(err.Error())),
 		})
 	}
 	size, mtime := sres.Dest.Size, sres.Dest.ModTimeUnixNano
@@ -424,7 +424,7 @@ func writeWarnings(ws []waxlabel.Warning) []model.TagWriteWarning {
 		// every consumer, including any added later.
 		mw := model.TagWriteWarning{
 			Code:          w.Code.String(),
-			Message:       CapDetail(w.String()),
+			Message:       model.CapDetail(w.String()),
 			Unrepresented: unrepresentedCodes[w.Code],
 		}
 		if len(w.Keys) == 0 {
@@ -600,7 +600,7 @@ func MergeKeylessDiagnostics(ds []model.FileDiagnostic) []model.FileDiagnostic {
 		case out[i].Detail == "":
 			out[i].Detail = d.Detail
 		default:
-			out[i].Detail = CapDetail(out[i].Detail + "; " + d.Detail)
+			out[i].Detail = model.CapDetail(out[i].Detail + "; " + d.Detail)
 		}
 		if severityRank(d.Severity) > severityRank(out[i].Severity) {
 			out[i].Severity = d.Severity

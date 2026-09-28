@@ -395,11 +395,11 @@ type ItemView struct {
 	//
 	// The window carries two coordinate systems with different jobs. StartFrames/
 	// EndFrames are CD frames (75/sec), the cue sheet's own unit and what is stored:
-	// they are the track's content identity, exact to the sample at every rate a
-	// player serves. StartMS/EndMS are the same window in milliseconds, derived
-	// through FramesToMS for display and for a player's seek. Read FramesToMS before
-	// combining the millisecond pair with anything: each field rounds independently,
-	// so the arithmetic across them does not close.
+	// they are the track's content identity, exact to the sample at the CD and hi-res
+	// rates (see FramesPerSecond). StartMS/EndMS are the same window in milliseconds,
+	// derived through FramesToMS for display and for a player's seek. Read FramesToMS
+	// before combining the millisecond pair with anything: each field rounds
+	// independently, so the arithmetic across them does not close.
 	//
 	// All four are 0 for a whole-file item (Virtual is false). EndFrames (and so
 	// EndMS) is 0 when the window runs to the end of the file.
@@ -411,9 +411,10 @@ type ItemView struct {
 
 	FilePID PID
 	Path    []byte // raw bytes of the primary file path
-	// SampleRate is the backing file's sample rate in Hz, 0 when the header did not
-	// declare one. A virtual track's consumer needs it to convert the frame window to
-	// sample offsets.
+	// SampleRate is the backing file's sample rate in Hz as its header declares it, 0
+	// when the header did not. A player converts the frame window to sample offsets
+	// with it. Placing the window on a waveform takes the peaks row's own rate instead
+	// (PeaksData.SampleRate), the decoded one the buckets were built at.
 	SampleRate  int
 	DisplayPath string
 	Container   string
@@ -432,10 +433,11 @@ func (v *ItemView) AdvisoryFlagged() bool { return v.Explicit || v.PodcastExplic
 // quantum and the unit every MM:SS:FF in a .cue sheet is written in. It is a fixed
 // property of the CD format, not a tunable.
 //
-// It is the reason a window is stored in frames at all: every sample rate a player
-// serves divides 75 exactly (44100/75 = 588, 48000/75 = 640, and likewise the rest of
-// the CD and hi-res families), so a frame converts to a sample with no rounding,
-// while a millisecond quantizes 50 of every 75 frames away.
+// It is the reason a window is stored in frames at all: the CD and hi-res families
+// divide by 75 exactly (44100/75 = 588, 48000/75 = 640, and likewise their
+// multiples), so a frame converts to a sample with no rounding, while a millisecond
+// quantizes 50 of every 75 frames away. A rate that does not (32000 is one) converts
+// as frames*rate/75, multiplied first, which keeps the error under one sample.
 const FramesPerSecond = 75
 
 // FramesToMS converts CD frames to milliseconds for display and for a player's seek.

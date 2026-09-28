@@ -176,6 +176,15 @@ func TestResolveRefFingerprint(t *testing.T) {
 		t.Fatalf("fingerprint resolve = rung %s pid %v, want fingerprint -> %s (beta)", rung, item, betaPID)
 	}
 
+	// The ref carries its fingerprint's own duration bucket, so a header that misstates
+	// the length (a VBR MP3 with no info frame) does not move the probe off the bucket the
+	// fingerprint was stored under.
+	lying := alphaRef
+	lying.DurationMS = 222_000
+	if item, rung, err := libB.ResolveRef(ctx, lying); err != nil || rung != model.MatchFingerprint || item.PID != betaPID {
+		t.Fatalf("resolve with a misstated duration = rung %s err %v, want fingerprint -> beta", rung, err)
+	}
+
 	// An algorithm mismatch scores against no candidates and, with no descriptive tags on
 	// a WAV, misses cleanly. The mismatching algo is derived rather than hardcoded: both
 	// catalogs store whichever algorithm the host's analyzer picked (Chromaprint when

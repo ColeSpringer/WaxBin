@@ -135,6 +135,30 @@ func TestEnrichScopedFacade(t *testing.T) {
 	}
 }
 
+// TestEnrichRefusesTheRetiredAuxArtPhase: the aux-art key became group-art when the
+// release-group backfill took on the front. A force naming the old key is refused as an
+// unknown phase before any job starts, rather than read as some other phase.
+func TestEnrichRefusesTheRetiredAuxArtPhase(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	lib, err := waxbin.Open(ctx, waxbin.Options{
+		DBPath:     filepath.Join(t.TempDir(), "catalog.db"),
+		Roots:      []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}},
+		Enrichment: enrichTestConfig(enrichMBMock(t).URL),
+	})
+	if err != nil {
+		t.Fatalf("open library: %v", err)
+	}
+	t.Cleanup(func() { _ = lib.Close() })
+	_, err = lib.Enrich(ctx, waxbin.EnrichOptions{ForcePhases: []model.EnrichPhase{"aux-art"}})
+	if !waxerr.Is(err, waxerr.CodeInvalid) || !strings.Contains(err.Error(), `unknown enrichment phase "aux-art"`) {
+		t.Errorf("force-phase aux-art = %v, want CodeInvalid naming the unknown phase", err)
+	}
+	if jobs, err := lib.Jobs(ctx, 10); err == nil && len(jobs) != 0 {
+		t.Errorf("a refused force started %d jobs", len(jobs))
+	}
+}
+
 // TestServeProxiedScopedEnrich round-trips the EnrichParams scope fields over
 // the socket: a bad scope keeps its error class (resolved synchronously, before
 // a job starts), and a good item scope runs as a server-side job whose result

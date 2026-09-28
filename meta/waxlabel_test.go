@@ -8,7 +8,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-	"unicode/utf8"
 
 	"github.com/colespringer/waxbin/identity"
 	"github.com/colespringer/waxbin/internal/testaudio"
@@ -484,50 +483,6 @@ func TestReadDoesNotFoldWarningsWholesale(t *testing.T) {
 	}
 }
 
-// TestCapDetail verifies the length bound and that truncation lands on a rune
-// boundary. Upstream sanitizes a warning message but does not bound it, and a
-// message can embed a file-derived snippet, and sanitizing defends against
-// injection rather than against size.
-func TestCapDetail(t *testing.T) {
-	if got := CapDetail("short"); got != "short" {
-		t.Errorf("CapDetail(short) = %q", got)
-	}
-	long := strings.Repeat("a", 1<<20)
-	if got := CapDetail(long); len(got) != maxDetailBytes {
-		t.Errorf("len = %d, want %d", len(got), maxDetailBytes)
-	}
-	// Multi-byte runes: the cap must not slice one in half.
-	multi := strings.Repeat("é", 1<<20) // 2 bytes each
-	got := CapDetail(multi)
-	if len(got) > maxDetailBytes {
-		t.Errorf("len = %d, want <= %d", len(got), maxDetailBytes)
-	}
-	if !utf8.ValidString(got) {
-		t.Error("capped detail is not valid UTF-8")
-	}
-	emoji := strings.Repeat("🎵", 1<<20) // 4 bytes each; 512 is not a multiple of 4
-	got = CapDetail(emoji)
-	if !utf8.ValidString(got) {
-		t.Error("capped emoji detail is not valid UTF-8")
-	}
-	if len(got) > maxDetailBytes {
-		t.Errorf("len = %d, want <= %d", len(got), maxDetailBytes)
-	}
-}
-
-// TestCapDetailWithTail: the body gives way so the tail survives whole, still on a
-// rune boundary.
-func TestCapDetailWithTail(t *testing.T) {
-	if got := CapDetailWithTail("short", "; tail"); got != "short; tail" {
-		t.Errorf("CapDetailWithTail(short) = %q", got)
-	}
-	got := CapDetailWithTail(strings.Repeat("é", 1<<10), "; tail")
-	if len(got) > maxDetailBytes || !strings.HasSuffix(got, "é; tail") || !utf8.ValidString(got) {
-		t.Errorf("capped = %d bytes ending %q, want <= %d ending in a whole rune and the tail",
-			len(got), got[len(got)-10:], maxDetailBytes)
-	}
-}
-
 // TestParseLRCReportsDropped covers the signal the reporting parser exists for:
 // telling a partly-broken sidecar from a plain-text one.
 func TestParseLRCReportsDropped(t *testing.T) {
@@ -666,9 +621,9 @@ func TestWriteWarningsCapsMessage(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("warnings = %d, want 1", len(got))
 	}
-	if len(got[0].Message) > maxDetailBytes {
+	if len(got[0].Message) > model.MaxDetailBytes {
 		t.Errorf("Message is %d bytes, want <= %d: an unbounded file-derived snippet reaches the catalog",
-			len(got[0].Message), maxDetailBytes)
+			len(got[0].Message), model.MaxDetailBytes)
 	}
 	if !got[0].Unrepresented {
 		t.Error("value-dropped must be classified unrepresented")

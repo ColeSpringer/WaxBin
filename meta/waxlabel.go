@@ -11,7 +11,6 @@ import (
 	"strings"
 	"time"
 	"unicode"
-	"unicode/utf8"
 
 	"github.com/colespringer/waxbin/art"
 	"github.com/colespringer/waxbin/identity"
@@ -85,7 +84,7 @@ func (a *Adapter) read(ctx context.Context, path, op string, hashEssence bool) (
 				Diagnostics: []model.FileDiagnostic{{
 					Code:     model.DiagUnsupportedFormat,
 					Severity: model.SeverityInfo,
-					Detail:   CapDetail("no parser for this container; cataloged with a filename-derived title"),
+					Detail:   model.CapDetail("no parser for this container; cataloged with a filename-derived title"),
 				}},
 			}, nil
 		}
@@ -105,7 +104,7 @@ func (a *Adapter) read(ctx context.Context, path, op string, hashEssence bool) (
 		fm.Diagnostics = append(fm.Diagnostics, model.FileDiagnostic{
 			Code:     model.DiagLegacyOnlyTags,
 			Severity: model.SeverityInfo,
-			Detail:   CapDetail("filled from a legacy tag container: " + joinKeys(filled)),
+			Detail:   model.CapDetail("filled from a legacy tag container: " + joinKeys(filled)),
 		})
 	}
 	if fm.Tags.Title == "" {
@@ -269,43 +268,6 @@ func customTagsFromDoc(doc *waxlabel.Document) map[string][]string {
 	return out
 }
 
-// maxDetailBytes bounds a persisted diagnostic detail.
-//
-// The bound is not hypothetical. A tag_write_lost detail comes from a WaxLabel
-// warning whose own doc says the message can embed a file-derived snippet. Upstream
-// runs that through tag.SanitizeLine, which escapes the terminal-hijack and newline
-// classes but leaves the length alone; sanitizing is a defense against injection,
-// not against size. So the bound belongs here, at the seam where waxlabel's
-// vocabulary becomes WaxBin's model.
-const maxDetailBytes = 512
-
-// CapDetail truncates s to maxDetailBytes on a rune boundary, so a capped detail is
-// still valid UTF-8 rather than ending in half a multi-byte rune.
-func CapDetail(s string) string { return capBytes(s, maxDetailBytes) }
-
-// CapDetailWithTail is CapDetail for a detail that has to end with tail: s gives way,
-// so a summary that closes by saying what happened still says it.
-func CapDetailWithTail(s, tail string) string {
-	return capBytes(s, max(maxDetailBytes-len(tail), 0)) + tail
-}
-
-// capBytes truncates s to n bytes on a rune boundary.
-func capBytes(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	b := s[:n]
-	for len(b) > 0 {
-		// size > 1 distinguishes a genuine U+FFFD in the text from the RuneError the
-		// decoder returns for a byte sequence cut in half.
-		if r, size := utf8.DecodeLastRuneInString(b); r != utf8.RuneError || size > 1 {
-			break
-		}
-		b = b[:len(b)-1]
-	}
-	return b
-}
-
 // joinKeys renders canonical tag keys as a comma-separated list for a diagnostic
 // detail.
 func joinKeys(keys []tag.Key) string {
@@ -368,7 +330,7 @@ func audioDiagnostics(doc *waxlabel.Document) []model.FileDiagnostic {
 		best = &model.FileDiagnostic{
 			Code:     model.DiagCorruptAudio,
 			Severity: sev,
-			Detail:   CapDetail(w.String()),
+			Detail:   model.CapDetail(w.String()),
 		}
 	}
 	if best == nil {

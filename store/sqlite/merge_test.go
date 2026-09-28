@@ -595,7 +595,7 @@ func TestMergeReleaseGroupUnionsType(t *testing.T) {
 	}
 }
 
-// TestMergeDropsLoserAuxMarker: a release-group merge drops the loser's aux-art
+// TestMergeDropsLoserAuxMarker: a release-group merge drops the loser's group-art
 // backfill marker instead of unioning it (the loser's images have just moved into the
 // survivor's empty roles, so its recorded answer no longer describes anything), and
 // leaves the survivor's own marker alone.
@@ -622,7 +622,7 @@ func TestMergeDropsLoserAuxMarker(t *testing.T) {
 		id  int64
 		pid model.PID
 	}{{survID, survPID}, {loseID, losePID}} {
-		if err := st.ApplyReleaseGroupAuxArt(ctx, model.ReleaseGroupAuxArt{ReleaseGroupID: e.id, PID: e.pid}); err != nil {
+		if err := st.ApplyReleaseGroupArtBackfill(ctx, model.ReleaseGroupArtBackfill{ReleaseGroupID: e.id, PID: e.pid, Front: model.ArtHalf{Asked: true}, Aux: model.ArtHalf{Asked: true}}); err != nil {
 			t.Fatalf("mark %s: %v", e.pid, err)
 		}
 	}
@@ -631,12 +631,12 @@ func TestMergeDropsLoserAuxMarker(t *testing.T) {
 		t.Fatalf("merge: %v", err)
 	}
 	if n := scalarInt(t, st,
-		"SELECT COUNT(*) FROM entity_enrichment WHERE entity_type='aux_art' AND entity_id=?", loseID); n != 0 {
-		t.Errorf("loser aux_art rows = %d, want 0 (a reused rowid would inherit it)", n)
+		"SELECT COUNT(*) FROM entity_enrichment WHERE entity_type IN ('group_art','group_front') AND entity_id=?", loseID); n != 0 {
+		t.Errorf("loser group-art rows = %d, want 0 (a reused rowid would inherit them)", n)
 	}
 	if n := scalarInt(t, st,
-		"SELECT COUNT(*) FROM entity_enrichment WHERE entity_type='aux_art' AND entity_id=?", survID); n != 1 {
-		t.Errorf("survivor aux_art rows = %d, want its own kept", n)
+		"SELECT COUNT(*) FROM entity_enrichment WHERE entity_type IN ('group_art','group_front') AND entity_id=?", survID); n != 2 {
+		t.Errorf("survivor group-art rows = %d, want its own two kept", n)
 	}
 	assertVerifyClean(t, st)
 }

@@ -621,10 +621,10 @@ func TestReleaseCoverIsSkippedWhenTheAlbumAlreadyHasArt(t *testing.T) {
 	}
 }
 
-// TestAlbumAuxArtFillsBesideASettledFront is the album rung of the aux backfill. That
-// phase walks release groups, so an album that matched its release while its front was
-// already answered had no way to be asked about the slots beside it. The settled front
-// stays the track's, and the front the provider offers here is dropped.
+// TestAlbumAuxArtFillsBesideASettledFront is the album rung of the group-art backfill.
+// That phase walks release groups, so an album that matched its release while its front
+// was already answered had no way to be asked about the slots beside it. The settled
+// front stays the track's, and the front the provider offers here is dropped.
 func TestAlbumAuxArtFillsBesideASettledFront(t *testing.T) {
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)

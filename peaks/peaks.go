@@ -46,6 +46,7 @@ type Accumulator struct {
 	framesPerBucket int       // samples each coarse bucket covers
 	cur             float32   // running peak of the in-progress bucket
 	count           int       // samples accumulated into cur
+	frames          int64     // every sample Add has folded
 }
 
 // NewAccumulator returns an Accumulator targeting n output buckets; n <= 0 means
@@ -61,6 +62,7 @@ func NewAccumulator(n int) *Accumulator {
 // before returning and never retains it, so the caller is free to reuse the
 // slice for the next chunk.
 func (a *Accumulator) Add(mono []float32) {
+	a.frames += int64(len(mono))
 	limit := a.n * oversample
 	for _, s := range mono {
 		if v := abs32(s); v > a.cur {
@@ -77,6 +79,10 @@ func (a *Accumulator) Add(mono []float32) {
 		}
 	}
 }
+
+// Frames reports how many samples Add has folded, which is the span the waveform's
+// buckets divide between them.
+func (a *Accumulator) Frames() int64 { return a.frames }
 
 // halve max-merges adjacent coarse buckets in place, doubling the samples each
 // covers. An odd bucket count carries its last bucket through unpaired: it holds

@@ -27,11 +27,11 @@ const (
 	enrichProviderMusicBrainz = "musicbrainz"
 	// enrichEntityLyrics is the entity_enrichment.entity_type for a per-recording
 	// lyrics lookup marker, keyed by the track's item id. It is distinct from the three
-	// entity types so a no-match lyrics lookup is not re-queried every run, while the
-	// coverage report (which counts only the entity types) ignores it.
+	// entity types so a no-match lyrics lookup is not re-queried every run; the coverage
+	// report reads it per track (a looked-up track with no lyrics), not as an entity.
 	enrichEntityLyrics = "lyrics"
-	// enrichEntityAuxArt is the entity_enrichment.entity_type for the auxiliary-art
-	// backfill, keyed by the release group's own id.
+	// enrichEntityGroupArt is the entity_enrichment.entity_type for the group-art
+	// backfill's auxiliary half, keyed by the release group's own id.
 	//
 	// The type column carries two vocabularies at once. Four values name an entity the
 	// coverage report counts or an album's release match (artist, release_group, book,
@@ -41,8 +41,12 @@ const (
 	// notEnriched keys on (entity_type, entity_id) alone, so a shared type makes one
 	// pass's no-match silence another pass's queue. The cost of a foreign type is that
 	// the row outlives the entity unless someone deletes it, which is what
-	// deleteAuxArtMarkerTx is for.
-	enrichEntityAuxArt = "aux_art"
+	// deleteGroupArtMarkerTx is for.
+	enrichEntityGroupArt = "group_art"
+	// enrichEntityGroupFront is the entity_enrichment.entity_type for the group-art
+	// backfill's front half, keyed by the release group's own id. The halves keep apart
+	// for what model.ReleaseGroupArtBackfill says, and deleteGroupArtMarkerTx drops both.
+	enrichEntityGroupFront = "group_front"
 	// enrichEntityArtistArt is the entity_enrichment.entity_type for the artist-art
 	// backfill, keyed by the artist's own id. Its own value for the reason above: sharing
 	// the artist entity's type would let the identity pass's marker silence this queue,
@@ -69,7 +73,7 @@ const (
 	// "album" type so neither pass's no-match silences the other's queue.
 	enrichEntityAlbumFields = "fields_album"
 	// enrichProviderNone labels a marker no provider answered. entity_enrichment.provider
-	// is NOT NULL and an aux backfill regularly completes with nothing offered, so the row
+	// is NOT NULL and an art backfill regularly completes with nothing offered, so the row
 	// names the outcome rather than storing an empty string a reader would take for a
 	// missing value.
 	enrichProviderNone = "none"
@@ -423,12 +427,12 @@ func (s *Store) CountEntitiesNeedingEnrichment(ctx context.Context, q model.Enri
 			  AND `+albumMatchEvidencePredicate("al")+`
 			  AND `+notEnriched(model.EnrichAlbumType, "al.id", qFor(model.EnrichPhaseAlbumRelease)), "al.id", albumIDs)
 	}
-	// The aux backfill walks release groups, so it counts under the release-group scope
-	// list, the ghost heuristic included, the way its queue does.
-	if runs(model.EnrichPhaseAuxArt) {
+	// The group-art backfill walks release groups, so it counts under the release-group
+	// scope list, the ghost heuristic and the askable slots included, the way its queue
+	// does.
+	if runs(model.EnrichPhaseGroupArt) && opts.GroupArt.Any() {
 		add(`SELECT COUNT(*) FROM release_group rg WHERE `+enrichBacksFilter(enrichRGBacksItems, rgIDs)+`
-			  AND `+auxArtNeededPredicate+`
-			  AND `+notEnriched(enrichEntityAuxArt, "rg.id", qFor(model.EnrichPhaseAuxArt)), "rg.id", rgIDs)
+			  AND `+groupArtNeededPredicate(opts.GroupArt, qFor(model.EnrichPhaseGroupArt)), "rg.id", rgIDs)
 	}
 	// The artist backfill walks artists, so it counts under the artist scope list, the
 	// ghost heuristic included, the way its queue does.
@@ -634,10 +638,10 @@ func (s *Store) ApplyReleaseGroupEnrichment(ctx context.Context, in model.Releas
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
-		// A landed id is new evidence for the aux-art backfill, which walks by title and
+		// A landed id is new evidence for the group-art backfill, which walks by title and
 		// may already hold a no-match from an id-less request.
 		if wroteMBID {
-			if err := deleteAuxArtMarkerTx(ctx, tx, in.ReleaseGroupID); err != nil {
+			if err := deleteGroupArtMarkerTx(ctx, tx, in.ReleaseGroupID); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 		}
@@ -698,7 +702,7 @@ func (s *Store) ApplyReleaseGroupEnrichment(ctx context.Context, in model.Releas
 // merge primitive's job, so here it is logged and left, never forced into a duplicate
 // key.
 //
-// The bool is what the aux-art marker hangs off, the way setAlbumMBIDTx's is: the
+// The bool is what the group-art marker hangs off, the way setAlbumMBIDTx's is: the
 // backfill walks by title and a standing no-match marker may predate the id, so a landed
 // id re-opens the ask.
 func setReleaseGroupMBIDTx(ctx context.Context, tx *sql.Tx, log logger, rgID int64, mbid string) (bool, error) {
@@ -730,47 +734,70 @@ func setReleaseGroupMBIDTx(ctx context.Context, tx *sql.Tx, log logger, rgID int
 	return n > 0, err
 }
 
-// auxArtNeededPredicate selects the release groups the auxiliary-art backfill should
-// ask about, reading the group as rg. Three parts: it carries a title, which is what a
-// provider is asked with; its whole-entity "art" lock does not stand, which is the one
-// lock cheap enough to test in SQL and the one that skips every role at apply anyway;
-// and at least one auxiliary slot is still empty.
+// groupArtNeededPredicate selects the release groups the group-art backfill should ask
+// about under opts, reading the group as rg: it carries a title, which is what a provider
+// is asked with; its whole-entity "art" lock does not stand, which is the one lock cheap
+// enough to test in SQL and the one that skips every role at apply anyway; and one half
+// of its lookup is due (groupArtHalvesDue).
 //
 // The MBID is a hint the request carries when the catalog has one, not a gate. Gating on
 // it skipped every group MusicBrainz never matched, which is the population most likely
 // to have no auxiliary art in the first place. A provider keyed on ids alone answers a
 // clean miss for an id-less request and the marker records that once, so the cost of
-// asking is one request per group rather than one every run. The title requirement is the
-// lyrics queue's rule: an entity with nothing to ask with never takes a permanent marker.
-//
-// The vacancy test is deliberately approximate. It counts stored rows against the
-// closed non-front vocabulary, both the list and the count derived from
-// model.AuxArtRoles, so a slot held empty by its own "art.<role>" lock reads here as a
-// vacancy and is skipped by fillEntityAuxArtTx at apply. That costs one marked pass
-// per such group instead of a per-role lock join in the queue, and the marker is what
-// stops it repeating.
-//
-// The front is not consulted at all. A settled front is exactly the population this
-// pass exists for.
+// asking is one request per group rather than one every run.
 //
 // Its two callers, the queue and the count, add the shared backs-items ghost heuristic
-// beside it, so the two stay in lockstep and an orphaned group carrying an mbid does
-// not spend a rate-limited request or take a marker.
-var auxArtNeededPredicate = buildAuxArtNeededPredicate()
+// beside it, so the two stay in lockstep and an orphaned group carrying an mbid does not
+// spend a rate-limited request or take a marker.
+func groupArtNeededPredicate(slots model.ArtSlots, opts model.EnrichQueueOptions) string {
+	if !slots.Any() {
+		return "1=0"
+	}
+	front, aux := groupArtHalvesDue(slots, opts)
+	return `rg.title <> ''
+	AND NOT EXISTS (SELECT 1 FROM entity_curation ec WHERE ec.entity_type = 'release_group'
+		AND ec.entity_id = rg.id AND ec.field = 'art' AND ec.locked = 1)
+	AND (` + front + ` OR ` + aux + `)`
+}
 
-func buildAuxArtNeededPredicate() string {
+// groupArtHalvesDue returns, reading the group as rg, the SQL saying each half of the
+// group-art lookup is due under opts: the front when slots names it askable, the group
+// holds none and the front's marker leaves it due, the auxiliary roles likewise with
+// their own vacancy and marker. A half slots leaves out is never due.
+//
+// A front is vacant whatever the release-group identity recorded, since that phase asks
+// about no vacant front (enrich's enrichReleaseGroup). The auxiliary vacancy is
+// deliberately approximate: it counts stored rows against the closed non-front
+// vocabulary, so a slot held empty by its own "art.<role>" lock reads here as a vacancy
+// and is skipped by fillEntityAuxArtTx at apply, which costs one marked pass per such
+// group instead of a per-role lock join.
+func groupArtHalvesDue(slots model.ArtSlots, opts model.EnrichQueueOptions) (front, aux string) {
+	front, aux = "0", "0"
+	if slots.Front {
+		front = "(NOT " + groupFrontHeld + " AND " + notEnriched(enrichEntityGroupFront, "rg.id", opts) + ")"
+	}
+	if slots.Aux {
+		aux = "(" + groupAuxVacancy + " AND " + notEnriched(enrichEntityGroupArt, "rg.id", opts) + ")"
+	}
+	return front, aux
+}
+
+// groupFrontHeld reads, for rg, whether the group holds a front: one probe of
+// art_map's primary key.
+const groupFrontHeld = `EXISTS (SELECT 1 FROM art_map am WHERE am.entity_type = 'release_group'
+	AND am.entity_id = rg.id AND am.role = 'front')`
+
+// groupAuxVacancy reads, for rg, whether some auxiliary role is empty.
+var groupAuxVacancy = func() string {
 	roles := model.AuxArtRoles()
 	quoted := make([]string, len(roles))
 	for i, r := range roles {
 		quoted[i] = "'" + string(r) + "'"
 	}
-	return `rg.title <> ''
-	AND NOT EXISTS (SELECT 1 FROM entity_curation ec WHERE ec.entity_type = 'release_group'
-		AND ec.entity_id = rg.id AND ec.field = 'art' AND ec.locked = 1)
-	AND (SELECT COUNT(*) FROM art_map am WHERE am.entity_type = 'release_group'
+	return `(SELECT COUNT(*) FROM art_map am WHERE am.entity_type = 'release_group'
 		AND am.entity_id = rg.id AND am.role IN (` + strings.Join(quoted, ",") + `)) < ` +
 		strconv.Itoa(len(roles))
-}
+}()
 
 // artistArtNeededPredicate selects the artists the artist-art backfill should ask about,
 // reading the artist as a. It carries a name, which is what a provider is asked with; its
@@ -782,11 +809,9 @@ func buildAuxArtNeededPredicate() string {
 // artists least likely to have a portrait. A provider keyed on ids alone answers a nil
 // candidate for an id-less request and the marker records the miss once.
 //
-// The front clause is what separates this from auxArtNeededPredicate, which never
-// consults the front because a settled front is exactly the population that pass exists
-// for. Here the front is the usual gap: artist-rung art is fetched inside the identity
-// pass, so an artist already marked enriched never gets a picture at all. The apply side
-// handles both halves, so asking about both is one queue rather than two.
+// The front clause asks whenever the artist has none. Artist-rung art is fetched inside
+// the identity pass, so an artist already marked enriched never gets a picture at all.
+// The apply side handles both halves, so asking about both is one queue rather than two.
 //
 // The auxiliary vacancy test is as approximate as the release-group one: a slot held
 // empty by its own "art.<role>" lock reads here as a vacancy and is dropped at apply,
@@ -811,8 +836,8 @@ func buildArtistArtNeededPredicate() string {
 
 // albumArtNeededPredicates holds, per askable slot combination, the predicate selecting
 // the albums the album-art backfill should ask about, reading the album as al. There are
-// four combinations, so they are built once at init like auxArtNeededPredicate and
-// artistArtNeededPredicate rather than reassembled per queue page.
+// four combinations, so they are built once at init like artistArtNeededPredicate rather
+// than reassembled per queue page.
 //
 // A predicate requires a title, an identifier, no whole-entity "art" lock, and a vacancy
 // in some enabled slot.
@@ -830,19 +855,19 @@ func buildArtistArtNeededPredicate() string {
 // clause is as approximate as the other backfills': a slot held empty by its own
 // "art.<role>" lock reads here as a vacancy and is dropped at apply, costing one marked
 // pass rather than a per-role lock join in the queue.
-var albumArtNeededPredicates = map[model.AlbumArtSlots]string{
-	{Front: true}:            buildAlbumArtNeededPredicate(model.AlbumArtSlots{Front: true}),
-	{Aux: true}:              buildAlbumArtNeededPredicate(model.AlbumArtSlots{Aux: true}),
-	{Front: true, Aux: true}: buildAlbumArtNeededPredicate(model.AlbumArtSlots{Front: true, Aux: true}),
-	{}:                       buildAlbumArtNeededPredicate(model.AlbumArtSlots{}),
+var albumArtNeededPredicates = map[model.ArtSlots]string{
+	{Front: true}:            buildAlbumArtNeededPredicate(model.ArtSlots{Front: true}),
+	{Aux: true}:              buildAlbumArtNeededPredicate(model.ArtSlots{Aux: true}),
+	{Front: true, Aux: true}: buildAlbumArtNeededPredicate(model.ArtSlots{Front: true, Aux: true}),
+	{}:                       buildAlbumArtNeededPredicate(model.ArtSlots{}),
 }
 
 // albumArtNeededPredicate returns the predicate for one slot combination.
-func albumArtNeededPredicate(slots model.AlbumArtSlots) string {
+func albumArtNeededPredicate(slots model.ArtSlots) string {
 	return albumArtNeededPredicates[slots]
 }
 
-func buildAlbumArtNeededPredicate(slots model.AlbumArtSlots) string {
+func buildAlbumArtNeededPredicate(slots model.ArtSlots) string {
 	roles := model.AuxArtRoles()
 	quoted := make([]string, len(roles))
 	for i, r := range roles {
@@ -868,15 +893,16 @@ func buildAlbumArtNeededPredicate(slots model.AlbumArtSlots) string {
 	AND (` + strings.Join(vacancies, " OR ") + `)`
 }
 
-// AlbumsNeedingArt returns the next keyset page of albums with an empty art slot the
 // groupEnrichmentFrontHash is the correlated read of a release group's enrichment front
-// hash, empty when it has none or its front was chosen by hand. Both art queues select
-// it so a provider can be offered the reuse of bytes it recognizes.
+// hash, empty when it has none or its front was chosen by hand. The release-group and
+// album-art queues select it so a provider can be offered the reuse of bytes it
+// recognizes.
 func groupEnrichmentFrontHash(groupIDCol string) string {
 	return `COALESCE((SELECT am.source_hash FROM art_map am WHERE am.entity_type = 'release_group'
 		AND am.entity_id = ` + groupIDCol + ` AND am.role = 'front' AND am.source = 'enrichment'), '')`
 }
 
+// AlbumsNeedingArt returns the next keyset page of albums with an empty art slot the
 // registered providers could fill, for the album-art backfill. It is the album twin of
 // ArtistsNeedingArtBackfill: same keyset shape, same ghost heuristic, and the same live
 // read of the mbid column, so a run after the release match sends the ids that phase
@@ -885,7 +911,7 @@ func groupEnrichmentFrontHash(groupIDCol string) string {
 // slots names which vacancies count, so an install with no aux-capable provider does not
 // mark an album for a slot nothing could have answered. HasArt rides along so the apply's
 // caller can tell a front fill from an auxiliary-only one without a second query.
-func (s *Store) AlbumsNeedingArt(ctx context.Context, opts model.EnrichQueueOptions, afterID int64, limit int, slots model.AlbumArtSlots, ids []int64) ([]model.EnrichTarget, error) {
+func (s *Store) AlbumsNeedingArt(ctx context.Context, opts model.EnrichQueueOptions, afterID int64, limit int, slots model.ArtSlots, ids []int64) ([]model.EnrichTarget, error) {
 	const op = "store.AlbumsNeedingArt"
 	scopeClause, scopeArgs := enrichIDsFilter("al.id", ids)
 	stmt := `SELECT al.id, al.pid, al.title, COALESCE(ar.name,''), COALESCE(al.mbid,''),
@@ -1015,7 +1041,7 @@ func deleteAlbumArtMarkerTx(ctx context.Context, tx *sql.Tx, albumID int64) erro
 
 // ArtistsNeedingArtBackfill returns the next keyset page of artists with an empty art
 // slot, front or auxiliary, for the artist-art backfill. It is the artist twin of
-// ReleaseGroupsNeedingAuxArt: same keyset shape, same ghost heuristic, same live read of
+// ReleaseGroupsNeedingArt: same keyset shape, same ghost heuristic, same live read of
 // the mbid column so a run after the identity phase sends the ids that phase filled
 // along with the request, and the same name-keyed gate, so an artist MusicBrainz never
 // matched is asked about by name.
@@ -1052,7 +1078,7 @@ func (s *Store) ArtistsNeedingArtBackfill(ctx context.Context, opts model.Enrich
 }
 
 // ApplyArtistArtBackfill fills an artist's empty art roles and records the backfill
-// marker (settled by settleMarkerTx), the artist twin of ApplyReleaseGroupAuxArt. It runs the fill on the images the
+// marker (settled by settleMarkerTx), the artist twin of ApplyReleaseGroupArtBackfill. It runs the fill on the images the
 // caller brought rather than on the match flag, for the same reason: an exported port
 // with pictures and no match would otherwise take a permanent marker and store nothing.
 //
@@ -1122,7 +1148,7 @@ func entityHoldsArtRoleTx(ctx context.Context, tx *sql.Tx, entityType model.ArtE
 }
 
 // deleteArtistArtMarkerTx drops one artist's art-backfill marker, the twin of
-// deleteAuxArtMarkerTx and wired into the same sites. The marker lives under its own
+// deleteGroupArtMarkerTx and wired into the same sites. The marker lives under its own
 // entity_type, so neither the orphan sweep's delete nor a merge's marker union reaches
 // it, and an artist rowid is reused: without this a new artist inheriting the id would be
 // silently skipped by a dead artist's marker. The curation side calls it for the same
@@ -1163,7 +1189,7 @@ func deleteAlbumFieldsMarkerTx(ctx context.Context, tx *sql.Tx, albumID int64) e
 func deleteArtBackfillMarkerTx(ctx context.Context, tx *sql.Tx, entityType model.ArtEntity, entityID int64) error {
 	switch entityType {
 	case model.ArtReleaseGroup:
-		return deleteAuxArtMarkerTx(ctx, tx, entityID)
+		return deleteGroupArtMarkerTx(ctx, tx, entityID)
 	case model.ArtArtist:
 		return deleteArtistArtMarkerTx(ctx, tx, entityID)
 	case model.ArtAlbum:
@@ -1172,25 +1198,28 @@ func deleteArtBackfillMarkerTx(ctx context.Context, tx *sql.Tx, entityType model
 	return nil
 }
 
-// ReleaseGroupsNeedingAuxArt returns the next keyset page of release groups whose
-// auxiliary art slots are not all filled, each with its title and primary-artist name,
-// which is what a name-keyed provider is asked with, and its MBID when the catalog has
-// one. A non-nil ids list scopes the walk to those release-group rowids and, as with the
+// ReleaseGroupsNeedingArt returns the next keyset page of release groups with a half of
+// their art lookup due, for the group-art backfill, each with its title and
+// primary-artist name, which is what a name-keyed provider is asked with, and its MBID
+// when the catalog has one. It is the release-group twin of ArtistsNeedingArtBackfill.
+// A non-nil ids list scopes the walk to those release-group rowids and, as with the
 // release-group pass, drops the backs-items ghost heuristic for the explicit targets;
-// the rest of the gate still applies, since without a title or a vacancy there is
-// nothing for the pass to do even where a caller pointed at it.
+// the rest of the gate still applies.
 //
-// It reads rg.mbid live rather than from a snapshot, the way AlbumsNeedingReleaseMatch
-// does, so running this after the release-group phase in the same pass sends the ids
-// that phase just filled along with the request.
-func (s *Store) ReleaseGroupsNeedingAuxArt(ctx context.Context, opts model.EnrichQueueOptions, afterID int64, limit int, ids []int64) ([]model.EnrichTarget, error) {
-	const op = "store.ReleaseGroupsNeedingAuxArt"
+// It reads rg.mbid live rather than from a snapshot, so running this after the
+// release-group phase in the same pass sends the ids that phase just filled along with
+// the request. FrontDue and AuxDue ride along, so the caller asks about the halves that
+// are due without a second query.
+func (s *Store) ReleaseGroupsNeedingArt(ctx context.Context, opts model.EnrichQueueOptions, afterID int64, limit int, slots model.ArtSlots, ids []int64) ([]model.EnrichTarget, error) {
+	const op = "store.ReleaseGroupsNeedingArt"
 	scopeClause, scopeArgs := enrichIDsFilter("rg.id", ids)
-	stmt := `SELECT rg.id, rg.pid, rg.title, COALESCE(rg.mbid,''), COALESCE(ar.name,'')
+	front, aux := groupArtHalvesDue(slots, opts)
+	stmt := `SELECT rg.id, rg.pid, rg.title, COALESCE(rg.mbid,''), COALESCE(ar.name,''),
+			CASE WHEN ` + front + ` THEN 1 ELSE 0 END, CASE WHEN ` + aux + ` THEN 1 ELSE 0 END
 		FROM release_group rg
 		LEFT JOIN artist ar ON ar.id = rg.primary_artist_id
-		WHERE rg.id > ? AND ` + enrichBacksFilter(enrichRGBacksItems, ids) + ` AND ` + auxArtNeededPredicate + `
-		  AND ` + notEnriched(enrichEntityAuxArt, "rg.id", opts) + scopeClause + `
+		WHERE rg.id > ? AND ` + enrichBacksFilter(enrichRGBacksItems, ids) + `
+		  AND ` + groupArtNeededPredicate(slots, opts) + scopeClause + `
 		ORDER BY rg.id LIMIT ?`
 	args := append(append([]any{afterID}, scopeArgs...), limitOr(limit))
 	rows, err := s.read.QueryContext(ctx, stmt, args...)
@@ -1200,49 +1229,82 @@ func (s *Store) ReleaseGroupsNeedingAuxArt(ctx context.Context, opts model.Enric
 	defer rows.Close()
 	var out []model.EnrichTarget
 	for rows.Next() {
-		t := model.EnrichTarget{Type: enrichEntityAuxArt}
+		t := model.EnrichTarget{Type: enrichEntityGroupArt}
 		var pid string
-		if err := rows.Scan(&t.ID, &pid, &t.Name, &t.MBID, &t.ArtistName); err != nil {
+		var frontDue, auxDue int
+		if err := rows.Scan(&t.ID, &pid, &t.Name, &t.MBID, &t.ArtistName, &frontDue, &auxDue); err != nil {
 			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		t.PID = model.PID(pid)
+		t.FrontDue, t.AuxDue = frontDue == 1, auxDue == 1
 		out = append(out, t)
 	}
 	return out, rows.Err()
 }
 
-// ApplyReleaseGroupAuxArt fills a release group's empty auxiliary art roles and records
-// the backfill marker. The fill runs on the images the caller brought rather than on the
-// match flag, since this is an exported port and a caller with pictures and no match
-// would otherwise take a permanent marker and store nothing. It is fill-when-empty per
-// role and answers to both art locks, so the queue's approximate vacancy is settled
-// here; the marker is written either way, so a group nothing serves costs one pass
-// rather than a lookup every run. The one exception is a lookup a provider failed
-// (in.Incomplete), which settleMarkerTx records as owed so a later pass asks again, and
-// a provider that was out of the pass (in.Unasked) records a miss whatever else answered.
+// ApplyReleaseGroupArtBackfill fills a release group's empty art roles and records a
+// marker for each half of the lookup the walk asked (settled by settleMarkerTx), the
+// release-group twin of ApplyArtistArtBackfill. A half matched when an image for it came
+// back, and the fill runs on the images whichever halves were asked.
 //
-// The entity delta rides on an image actually landing rather than on the match. The
-// applies beside it emit one for every match because a match there always writes
-// something a consumer reads (an MBID, a type, a genre); a matched gather here can
-// still write nothing at all, its roles locked or already filled, and a delta then
-// would send every ChangesSince tailer to re-fetch an unchanged group.
-func (s *Store) ApplyReleaseGroupAuxArt(ctx context.Context, in model.ReleaseGroupAuxArt) error {
-	const op = "store.ApplyReleaseGroupAuxArt"
+// The front is fill-when-empty: the gap is re-read here, inside the write, rather than
+// trusted from the queue page, so a cover set by hand in between is not overwritten, and
+// it answers to the front's lock. It does not go through attachEntityArtUnlessLockedTx,
+// which re-points a held front and is right only for the identity pass that owns the
+// slot. The auxiliary half goes through the shared helper, so its fill-when-empty rule,
+// per-role locks and provenance stamp are the same by construction.
+//
+// The entity delta rides on an image actually landing rather than on the match: a
+// matched gather can still write nothing, its roles locked or already filled, and a
+// delta then would send every ChangesSince tailer to re-fetch an unchanged group.
+func (s *Store) ApplyReleaseGroupArtBackfill(ctx context.Context, in model.ReleaseGroupArtBackfill) error {
+	const op = "store.ApplyReleaseGroupArtBackfill"
 	provider := strings.TrimSpace(in.Provider)
 	if provider == "" {
 		provider = enrichProviderNone
 	}
 	return s.writeTx(ctx, func(tx *sql.Tx) error {
 		var wrote int
+		if in.Art != nil {
+			held, err := entityHoldsArtRoleTx(ctx, tx, model.ArtReleaseGroup, in.ReleaseGroupID, model.ArtRoleFront)
+			if err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+			blocked, err := artFillBlockedTx(ctx, tx, model.ArtReleaseGroup, in.ReleaseGroupID, model.ArtRoleFront)
+			if err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+			if !held && !blocked {
+				changed, err := attachEntityArtTxChanged(ctx, tx, string(model.ArtReleaseGroup), in.ReleaseGroupID, in.Art)
+				if err != nil {
+					return waxerr.Wrap(waxerr.CodeIO, op, err)
+				}
+				if changed {
+					wrote++
+				}
+			}
+		}
 		if len(in.AuxArt) > 0 {
 			n, err := fillEntityAuxArtTx(ctx, tx, model.ArtReleaseGroup, in.ReleaseGroupID, in.AuxArt)
 			if err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
-			wrote = n
+			wrote += n
 		}
-		if err := s.settleMarkerTx(ctx, tx, enrichEntityAuxArt, in.ReleaseGroupID, provider, in.Matched && !in.Unasked, in.Incomplete, in.Unasked, ""); err != nil {
-			return err
+		for _, h := range []struct {
+			typ     string
+			half    model.ArtHalf
+			matched bool
+		}{
+			{enrichEntityGroupFront, in.Front, in.Art != nil},
+			{enrichEntityGroupArt, in.Aux, len(in.AuxArt) > 0},
+		} {
+			if !h.half.Asked {
+				continue
+			}
+			if err := s.settleMarkerTx(ctx, tx, h.typ, in.ReleaseGroupID, provider, h.matched && !h.half.Unasked, h.half.Incomplete, h.half.Unasked, ""); err != nil {
+				return err
+			}
 		}
 		if wrote == 0 {
 			return nil
@@ -1251,18 +1313,21 @@ func (s *Store) ApplyReleaseGroupAuxArt(ctx context.Context, in model.ReleaseGro
 	})
 }
 
-// deleteAuxArtMarkerTx drops one release group's aux-art backfill marker. The marker
-// lives under its own entity_type, so neither the orphan sweep's delete (which keys on
-// the entity's own type) nor a merge's marker union reaches it, and a release-group
-// rowid is reused: without this a new group inheriting the id would be silently skipped
-// by a dead group's marker.
+// deleteGroupArtMarkerTx drops one release group's group-art backfill markers, both
+// halves. They live under their own entity_types, so neither the orphan sweep's delete
+// (which keys on the entity's own type) nor a merge's marker union reaches them, and a
+// release-group rowid is reused: without this a new group inheriting the id would be
+// silently skipped by a dead group's markers.
 //
 // The curation side calls it too, from SetArtLock's unlock path and from SetEntityArt,
-// on an auxiliary clear or on a set that releases the front's whole-entity lock: the
-// marker means the group's vacancies were asked about as of then, and those are the
+// on a fillable clear or on a set that releases the front's whole-entity lock: the
+// markers mean the group's vacancies were asked about as of then, and those are the
 // writes that open a vacancy which came after.
-func deleteAuxArtMarkerTx(ctx context.Context, tx *sql.Tx, rgID int64) error {
-	return clearEntityMarkerTx(ctx, tx, enrichEntityAuxArt, rgID)
+func deleteGroupArtMarkerTx(ctx context.Context, tx *sql.Tx, rgID int64) error {
+	if err := clearEntityMarkerTx(ctx, tx, enrichEntityGroupFront, rgID); err != nil {
+		return err
+	}
+	return clearEntityMarkerTx(ctx, tx, enrichEntityGroupArt, rgID)
 }
 
 // ApplyAlbumReleaseMatch persists one album's matched release id, filled only when
@@ -1627,23 +1692,21 @@ func (s *Store) ApplyLyricsEnrichment(ctx context.Context, in model.LyricsEnrich
 //
 // The upsert refreshes enriched_at, which is what re-arms the retry window after a
 // re-asked miss: the column is the last lookup, not the first, so a target nothing
-// answers for falls due again one window from each attempt rather than every run. It is
-// stamped through stampNS, so a pass's owed-sweep instant falls cleanly between the
-// markers written before it and after it.
+// answers for falls due again one window from each attempt rather than every run.
 func (s *Store) markEnrichedTx(ctx context.Context, tx *sql.Tx, entityType string, entityID int64, provider string, matched bool, mbid string) error {
 	_, err := tx.ExecContext(ctx, `INSERT INTO entity_enrichment(entity_type, entity_id, provider, matched, mbid, enriched_at, owed)
 		VALUES (?,?,?,?,?,?,0)
 		ON CONFLICT(entity_type, entity_id) DO UPDATE SET
 		  provider = excluded.provider, matched = excluded.matched, mbid = excluded.mbid,
 		  enriched_at = excluded.enriched_at, owed = 0`,
-		entityType, entityID, provider, boolInt(matched), nullStr(strings.TrimSpace(mbid)), s.stampNS())
+		entityType, entityID, provider, boolInt(matched), nullStr(strings.TrimSpace(mbid)), nowNS())
 	return err
 }
 
-// identityMarker reports whether entityType is an identity rung's marker. Nothing asks
-// about an identity's riders once its marker settles, so a rider whose provider was out
-// of the pass leaves the identity owed, where a port pass records a miss the retry
-// window re-asks.
+// identityMarker reports whether entityType is an identity rung's marker. The identity
+// walk is its riders' asker (a group's genres have no other, and an artist's front rides
+// it), so a rider whose provider was out of the pass leaves the identity owed, where a
+// port pass records a miss the retry window re-asks.
 func identityMarker(entityType string) bool {
 	return entityType == model.EnrichArtistType || entityType == model.EnrichReleaseGroupType
 }
@@ -1655,8 +1718,9 @@ func identityMarker(entityType string) bool {
 // A failure leaves the lookup owed: the marker keeps what the walk found, replacing a
 // standing marker, so a later pass asks again, where a miss would wait out the retry
 // window and a standing match would keep a forced re-ask that hit an outage from ever
-// re-asking. An identity is owed for an unasked rider too, since nothing asks about its
-// riders once it settles; a port pass records that as a miss the retry window re-asks.
+// re-asking. An identity is owed for an unasked rider too, since the identity walk is
+// that rider's asker (see identityMarker); a port pass records that as a miss the retry
+// window re-asks.
 // The owed marker is dated from the failure, and an unasked walk of a lookup already
 // owed leaves the date alone, since nothing asked for it. Anything else is an answer and
 // upserts the marker as markEnrichedTx does.
@@ -1671,7 +1735,7 @@ func (s *Store) settleMarkerTx(ctx context.Context, tx *sql.Tx, entityType strin
 		  enriched_at = CASE WHEN ? AND entity_enrichment.owed = 1
 		    THEN entity_enrichment.enriched_at ELSE excluded.enriched_at END,
 		  owed = 1`,
-		entityType, entityID, provider, boolInt(matched), nullStr(strings.TrimSpace(mbid)), s.stampNS(), boolInt(!failed))
+		entityType, entityID, provider, boolInt(matched), nullStr(strings.TrimSpace(mbid)), nowNS(), boolInt(!failed))
 	return err
 }
 
@@ -1690,9 +1754,9 @@ const (
 //
 // It returns 0 when nothing is left owed, having written nothing, so a pass with nothing
 // owed only reads. Otherwise it returns the instant the pass's owed sweep measures
-// against, stamped through stampNS: later than every marker already written and earlier
-// than every one written after it, so the sweep asks exactly the lookups earlier passes
-// left owed, even on a clock that has not ticked since the last of them.
+// against, a stamp from the store's clock: later than every marker already written and
+// earlier than every one written after it, so the sweep asks exactly the lookups earlier
+// passes left owed, even on a wall clock that has not ticked since the last of them.
 func (s *Store) ExpireDeferredLookups(ctx context.Context, cutoff int64) (int64, error) {
 	const op = "store.ExpireDeferredLookups"
 	var owed int
@@ -1712,7 +1776,7 @@ func (s *Store) ExpireDeferredLookups(ctx context.Context, cutoff int64) (int64,
 			return err
 		}
 		if left == 1 {
-			asOf = s.stampNS()
+			asOf = nowNS()
 		}
 		return nil
 	})
@@ -1769,15 +1833,16 @@ func (s *Store) EnrichmentCachePut(ctx context.Context, key string, payload []by
 	})
 }
 
-// EnrichmentCoverage reports how many entities of each type have been enriched.
+// EnrichmentCoverage reports how many entities of each type have been enriched, and
+// how many present tracks hold lyrics or had them looked up.
 func (s *Store) EnrichmentCoverage(ctx context.Context) (model.EnrichmentCoverage, error) {
 	const op = "store.EnrichmentCoverage"
 	var cov model.EnrichmentCoverage
-	// Only the three entity types are coverage-reported. The per-pass markers sharing the
+	// Only the three entity types are entity coverage. The per-pass markers sharing the
 	// table (the per-recording lyrics lookup, the per-album release match, the three art
-	// backfills, the two fields walks) are fill-when-empty side channels rather than
-	// entity coverage, and the WHERE already excludes them. An identity owed a rider
-	// still matched, so it counts.
+	// backfills, the two fields walks) are fill-when-empty side channels, and the WHERE
+	// excludes them; the lyrics marker is read again below, per track. An identity owed a
+	// rider still matched, so it counts.
 	rows, err := s.read.QueryContext(ctx,
 		`SELECT entity_type, COUNT(*), COALESCE(SUM(matched),0) FROM entity_enrichment
 		 WHERE entity_type IN ('artist','release_group','book') GROUP BY entity_type`)
@@ -1801,7 +1866,22 @@ func (s *Store) EnrichmentCoverage(ctx context.Context) (model.EnrichmentCoverag
 			cov.Books = count
 		}
 	}
-	return cov, rows.Err()
+	if err := rows.Err(); err != nil {
+		return cov, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	// The denominator is every present track, not the lyrics phase's own queue, which
+	// also wants a title and an artist.
+	if err := s.read.QueryRowContext(ctx,
+		`SELECT COUNT(*), COUNT(ly.item_id),
+		        COALESCE(SUM(CASE WHEN ly.item_id IS NULL AND ee.owed = 0 AND ee.matched = 0 THEN 1 ELSE 0 END), 0)
+		 FROM playable_item pi
+		 LEFT JOIN lyrics ly ON ly.item_id = pi.id
+		 LEFT JOIN entity_enrichment ee ON ee.entity_type = ? AND ee.entity_id = pi.id
+		 WHERE pi.kind = 'track' AND pi.state = 'present'`, enrichEntityLyrics).
+		Scan(&cov.Tracks, &cov.TracksWithLyrics, &cov.TracksLyricsAsked); err != nil {
+		return cov, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	return cov, nil
 }
 
 // EnrichScopeForItem resolves one item into the enrichment targets a scoped pass

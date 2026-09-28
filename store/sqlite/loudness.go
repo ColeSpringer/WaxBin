@@ -88,10 +88,10 @@ func (s *Store) ReplayGainWriteback(ctx context.Context) ([]model.ReplayGainRow,
 func (s *Store) LoadPeaksForFile(ctx context.Context, filePID model.PID) (*model.PeaksData, error) {
 	const op = "store.LoadPeaksForFile"
 	var pk model.PeaksData
-	err := s.read.QueryRowContext(ctx, `SELECT p.version, p.bucket_count, p.data
+	err := s.read.QueryRowContext(ctx, `SELECT p.version, p.bucket_count, p.data, p.frames, p.sample_rate
 		FROM peaks p
 		JOIN file f ON f.id = p.file_id AND f.essence_hash = p.essence_hash
-		WHERE f.pid = ?`, string(filePID)).Scan(&pk.Version, &pk.Buckets, &pk.Data)
+		WHERE f.pid = ?`, string(filePID)).Scan(&pk.Version, &pk.Buckets, &pk.Data, &pk.Frames, &pk.SampleRate)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, waxerr.New(waxerr.CodeNotFound, op, "no peaks for file: "+string(filePID))
 	}
@@ -125,7 +125,7 @@ func (s *Store) LoadPeaksForItem(ctx context.Context, itemPID model.PID) ([]mode
 	if err != nil {
 		return nil, err
 	}
-	rows, err := s.read.QueryContext(ctx, `SELECT p.file_id, p.version, p.bucket_count, p.data
+	rows, err := s.read.QueryContext(ctx, `SELECT p.file_id, p.version, p.bucket_count, p.data, p.frames, p.sample_rate
 		FROM peaks p
 		JOIN file f ON f.id = p.file_id AND f.essence_hash = p.essence_hash
 		JOIN item_file itf ON itf.file_id = p.file_id
@@ -138,7 +138,7 @@ func (s *Store) LoadPeaksForItem(ctx context.Context, itemPID model.PID) ([]mode
 	for rows.Next() {
 		var fileID int64
 		var pk model.PeaksData
-		if err := rows.Scan(&fileID, &pk.Version, &pk.Buckets, &pk.Data); err != nil {
+		if err := rows.Scan(&fileID, &pk.Version, &pk.Buckets, &pk.Data, &pk.Frames, &pk.SampleRate); err != nil {
 			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		byFile[fileID] = pk
@@ -165,12 +165,12 @@ func (s *Store) LoadPeaksForItem(ctx context.Context, itemPID model.PID) ([]mode
 func (s *Store) LoadPeaks(ctx context.Context, itemPID model.PID) (*model.PeaksData, error) {
 	const op = "store.LoadPeaks"
 	var pk model.PeaksData
-	err := s.read.QueryRowContext(ctx, `SELECT p.version, p.bucket_count, p.data
+	err := s.read.QueryRowContext(ctx, `SELECT p.version, p.bucket_count, p.data, p.frames, p.sample_rate
 		FROM peaks p
 		JOIN file f ON f.id = p.file_id AND f.essence_hash = p.essence_hash
 		JOIN item_file pf ON pf.file_id = p.file_id AND pf.role = 'primary'
 		JOIN playable_item pi ON pi.id = pf.item_id
-		WHERE pi.pid = ?`, string(itemPID)).Scan(&pk.Version, &pk.Buckets, &pk.Data)
+		WHERE pi.pid = ?`, string(itemPID)).Scan(&pk.Version, &pk.Buckets, &pk.Data, &pk.Frames, &pk.SampleRate)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, waxerr.New(waxerr.CodeNotFound, op, "no peaks for item: "+string(itemPID))
 	}

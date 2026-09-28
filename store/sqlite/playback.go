@@ -376,7 +376,7 @@ func (s *Store) playStateWrite(ctx context.Context, op string, userPID, itemPID 
 		if err != nil {
 			return err
 		}
-		changed, err = mut(ctx, tx, userID, itemID, s.stampNS())
+		changed, err = mut(ctx, tx, userID, itemID, nowNS())
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}

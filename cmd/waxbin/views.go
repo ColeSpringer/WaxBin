@@ -642,8 +642,8 @@ type enrichView struct {
 	LyricsMatched         int `json:"lyricsMatched"`
 	// The art backfill phases print only when they walked something, so a payload from an
 	// install whose providers gate one off keeps the shape it had.
-	AuxArtEnriched    int `json:"auxArtEnriched,omitempty"`
-	AuxArtMatched     int `json:"auxArtMatched,omitempty"`
+	GroupArtEnriched  int `json:"groupArtEnriched,omitempty"`
+	GroupArtMatched   int `json:"groupArtMatched,omitempty"`
 	ArtistArtEnriched int `json:"artistArtEnriched,omitempty"`
 	ArtistArtMatched  int `json:"artistArtMatched,omitempty"`
 	AlbumArtEnriched  int `json:"albumArtEnriched,omitempty"`
@@ -679,7 +679,7 @@ func toEnrichView(r *waxbin.EnrichResult) enrichView {
 		AlbumsSearched: r.Result.AlbumsSearched, AlbumsMatched: r.Result.AlbumsMatched,
 		BooksEnriched: r.Result.BooksEnriched, BooksMatched: r.Result.BooksMatched,
 		LyricsEnriched: r.Result.LyricsEnriched, LyricsMatched: r.Result.LyricsMatched,
-		AuxArtEnriched: r.Result.AuxArtEnriched, AuxArtMatched: r.Result.AuxArtMatched,
+		GroupArtEnriched: r.Result.GroupArtEnriched, GroupArtMatched: r.Result.GroupArtMatched,
 		ArtistArtEnriched: r.Result.ArtistArtEnriched, ArtistArtMatched: r.Result.ArtistArtMatched,
 		AlbumArtEnriched: r.Result.AlbumArtEnriched, AlbumArtMatched: r.Result.AlbumArtMatched,
 		TrackFieldsEnriched: r.Result.TrackFieldsEnriched, TrackFieldsMatched: r.Result.TrackFieldsMatched,

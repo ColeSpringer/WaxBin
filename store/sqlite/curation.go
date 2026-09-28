@@ -482,25 +482,24 @@ func (s *Store) SetEntityArt(ctx context.Context, entityType model.ArtEntity, en
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 		}
-		// The aux backfill's marker predates any vacancy this write opens on a release
-		// group. Clearing an auxiliary slot opens that one role when the write leaves it
-		// fillable; the default clear locks the slot behind it, and then nothing opened.
+		// An art backfill's marker predates any vacancy this write opens. Clearing a slot
+		// opens that one role when the write leaves it fillable; the default clear locks
+		// the slot behind it, and then nothing opened.
 		//
 		// A front-role write carrying LockOff clears the marker on the instruction rather
 		// than on a transition: that lock is the whole-entity "art" field, so asking for
 		// it off frees every role, and this side does not check whether one was standing
-		// first. A --no-lock set on an already-unlocked group therefore clears it too,
+		// first. A --no-lock set on an already-unlocked entity therefore clears it too,
 		// which costs one re-ask. SetArtLock reaches the same rule from the other side,
 		// but only past its idempotency return, so it clears on the transition alone.
 		if entityType == model.ArtReleaseGroup || entityType == model.ArtArtist || entityType == model.ArtAlbum {
 			whole := artRoleLockField(role) == "art"
 			drop := whole && lock == model.LockOff
-			// A cleared role opens a vacancy the marker says was already asked about. At
-			// the release-group rung only an auxiliary role can, since that predicate
-			// never consults the front; the artist and album ones do, so their fronts
-			// count too, and without this a cleared front with the lock left alone is
-			// never backfilled again short of a forced run.
-			if img == nil && (!whole || entityType != model.ArtReleaseGroup) {
+			// A cleared role opens a vacancy the marker says was already asked about, the
+			// front included, since every rung's backfill asks about it. Without this a
+			// cleared front with the lock left alone is never backfilled again short of a
+			// forced run.
+			if img == nil {
 				blocked, err := artFillBlockedTx(ctx, tx, entityType, entityID, role)
 				if err != nil {
 					return waxerr.Wrap(waxerr.CodeIO, op, err)
@@ -635,7 +634,7 @@ func (s *Store) SetArtLock(ctx context.Context, entityType model.ArtEntity, pid 
 			model.Attribution{Source: model.SourceUser}, model.LockOf(lock)); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
-		// The aux backfill's marker records that this group's vacancies were asked about
+		// An art backfill's marker records that this entity's vacancies were asked about
 		// as of then, and an unlock changes that picture. Releasing the whole "art" lock
 		// clears it outright, since any role may now be fillable and over-clearing costs
 		// one re-ask; releasing a single role clears it only when that role really ended

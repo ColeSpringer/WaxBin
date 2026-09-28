@@ -176,7 +176,7 @@ func mergeEntityTx(ctx context.Context, tx *sql.Tx, et model.MergeEntity, table 
 	// sits under that pass's own entity_type and the union above never reached it.
 	switch et {
 	case model.MergeReleaseGroup:
-		if err := deleteAuxArtMarkerTx(ctx, tx, lid); err != nil {
+		if err := deleteGroupArtMarkerTx(ctx, tx, lid); err != nil {
 			return nil, err
 		}
 	case model.MergeArtist:

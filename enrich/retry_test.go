@@ -200,7 +200,7 @@ func TestRetrySweepForcesTheProviderRequest(t *testing.T) {
 	}
 }
 
-// TestRetrySweepLeavesAMatchedMarkerAlone: an aux backfill that answered with a back
+// TestRetrySweepLeavesAMatchedMarkerAlone: a group-art backfill that answered with a back
 // cover and nothing else still has three empty slots, so only the marker keeps it out
 // of the queue. That marker is durable: a provider gained later needs a forced run.
 func TestRetrySweepLeavesAMatchedMarkerAlone(t *testing.T) {
@@ -232,7 +232,7 @@ func TestRetrySweepLeavesAMatchedMarkerAlone(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second Run: %v", err)
 	}
-	if res.Retried != 0 || res.AuxArtEnriched != 0 || asks != 1 {
+	if res.Retried != 0 || res.GroupArtEnriched != 0 || asks != 1 {
 		t.Errorf("result = %+v, asks %d: a matched marker must stay durable", res, asks)
 	}
 
@@ -437,8 +437,8 @@ func TestRetryOnlyRunReportsAFullHeartbeat(t *testing.T) {
 	if res.Retried != 2 {
 		t.Fatalf("result = %+v, want two retried artists", res)
 	}
-	if len(seen) < 2 || seen[0] != 0.5 || seen[1] != 1 {
-		t.Errorf("heartbeat progress = %v, want 0.5 then 1 (the count covers both sweeps)", seen)
+	if len(seen) < 3 || seen[0] != 0.5 || seen[1] >= 1 || seen[len(seen)-1] != 1 {
+		t.Errorf("heartbeat progress = %v, want 0.5, then short of 1 until the last beat's 1 (the count covers both sweeps)", seen)
 	}
 }
 

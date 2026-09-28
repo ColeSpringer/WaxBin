@@ -73,7 +73,7 @@ func TestGCOrphans(t *testing.T) {
 	}
 }
 
-// TestOrphanRGSweepDropsAuxMarker: the aux-art backfill marker is keyed by the release
+// TestOrphanRGSweepDropsAuxMarker: the group-art backfill marker is keyed by the release
 // group's id under its own entity_type, so the sweep's delete (which keys on the
 // entity's own type) misses it. Release-group rowids are reused, and a marker left
 // behind would silently suppress the backfill for whatever new group inherits the id.
@@ -89,8 +89,8 @@ func TestOrphanRGSweepDropsAuxMarker(t *testing.T) {
 	if err := st.read.QueryRowContext(ctx, "SELECT id, pid FROM release_group").Scan(&rgID, &rgPID); err != nil {
 		t.Fatalf("resolve release group: %v", err)
 	}
-	if err := st.ApplyReleaseGroupAuxArt(ctx,
-		model.ReleaseGroupAuxArt{ReleaseGroupID: rgID, PID: model.PID(rgPID)}); err != nil {
+	if err := st.ApplyReleaseGroupArtBackfill(ctx,
+		model.ReleaseGroupArtBackfill{ReleaseGroupID: rgID, PID: model.PID(rgPID), Front: model.ArtHalf{Asked: true}, Aux: model.ArtHalf{Asked: true}}); err != nil {
 		t.Fatalf("mark: %v", err)
 	}
 	// The album fields marker sits the same way, under its own entity_type on an album
@@ -120,8 +120,8 @@ func TestOrphanRGSweepDropsAuxMarker(t *testing.T) {
 	if n := scalarInt(t, st, "SELECT COUNT(*) FROM release_group"); n != 0 {
 		t.Fatalf("release groups after sweep = %d, want 0", n)
 	}
-	if n := scalarInt(t, st, "SELECT COUNT(*) FROM entity_enrichment WHERE entity_type='aux_art'"); n != 0 {
-		t.Errorf("aux_art marker rows after sweep = %d, want 0", n)
+	if n := scalarInt(t, st, "SELECT COUNT(*) FROM entity_enrichment WHERE entity_type IN ('group_art','group_front')"); n != 0 {
+		t.Errorf("group-art marker rows after sweep = %d, want 0", n)
 	}
 	if n := scalarInt(t, st, "SELECT COUNT(*) FROM entity_enrichment WHERE entity_type='fields_album'"); n != 0 {
 		t.Errorf("fields_album marker rows after sweep = %d, want 0", n)

@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -760,11 +761,11 @@ func flakyGroupFront(t *testing.T, art []byte, fails int) (*httptest.Server, *in
 	return s, fetches
 }
 
-// TestGroupFrontFailureLeavesTheGroupQueued: MusicBrainz answered, so the identity lands,
-// but the archive failed on the group's front, and no later phase ever asks about a group
-// front. The group is owed the lookup, so the next pass re-walks it off the MusicBrainz
-// cache, and the entity delta rides on what actually landed: one for the identity, one
-// when the front arrives.
+// TestGroupFrontFailureLeavesTheGroupQueued: MusicBrainz answered, so the identity lands
+// and settles, but the archive failed on the group's front. The front is the group-art
+// backfill's, whose lookup is owed, so the next pass asks the archive again without a
+// MusicBrainz request, and the entity delta rides on what actually landed: one for the
+// identity, one when the front arrives.
 func TestGroupFrontFailureLeavesTheGroupQueued(t *testing.T) {
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
@@ -783,8 +784,8 @@ func TestGroupFrontFailureLeavesTheGroupQueued(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run 1: %v", err)
 	}
-	if first.ReleaseGroupsMatched != 1 || first.Deferred != 1 {
-		t.Fatalf("run 1 = %d matched / %d deferred, want 1 and 1", first.ReleaseGroupsMatched, first.Deferred)
+	if first.ReleaseGroupsMatched != 1 || first.GroupArtEnriched != 1 || first.Deferred != 1 {
+		t.Fatalf("run 1 = %+v, want the identity matched and the backfill's ask deferred", first)
 	}
 	if m := scalarStr(t, db, "SELECT COALESCE(mbid,'') FROM release_group"); m != "wywh-mbid" {
 		t.Errorf("group mbid = %q, want the identity landed despite the art failure", m)
@@ -792,8 +793,9 @@ func TestGroupFrontFailureLeavesTheGroupQueued(t *testing.T) {
 	if g := scalarStr(t, db, `SELECT t.genre FROM track t JOIN playable_item pi ON pi.id = t.item_id WHERE pi.pid = ?`, string(item)); g == "" {
 		t.Error("genres did not land beside the failed front")
 	}
-	if n := settledMarkers(t, dbPath, "release_group"); n != 0 || owedMarkers(t, dbPath, "release_group") != 1 {
-		t.Fatalf("group markers = %d settled, want the lookup owed while the front is", n)
+	if owedMarkers(t, dbPath, "release_group") != 0 || owedMarkers(t, dbPath, "group_front") != 1 {
+		t.Fatalf("owed markers: identity %d, group art %d; want the identity settled and the front owed",
+			owedMarkers(t, dbPath, "release_group"), owedMarkers(t, dbPath, "group_front"))
 	}
 	if n := groupDeltas(); n != 1 {
 		t.Fatalf("group deltas after run 1 = %d, want 1 for the mbid and type", n)
@@ -804,57 +806,58 @@ func TestGroupFrontFailureLeavesTheGroupQueued(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run 2: %v", err)
 	}
-	if second.ReleaseGroupsEnriched != 1 || second.Deferred != 0 || second.ArtFetched != 1 || mb.requests != requests {
-		t.Fatalf("run 2 = %+v with %d new MusicBrainz requests, want the front fetched off a cached re-walk", second, mb.requests-requests)
+	if second.ReleaseGroupsEnriched != 0 || second.GroupArtMatched != 1 || second.Deferred != 0 ||
+		second.ArtFetched != 1 || mb.requests != requests {
+		t.Fatalf("run 2 = %+v with %d new MusicBrainz requests, want the front fetched by the backfill alone", second, mb.requests-requests)
 	}
 	if *fetches != 2 {
 		t.Errorf("front fetches = %d, want 2", *fetches)
 	}
-	if n := settledMarkers(t, dbPath, "release_group"); n != 1 {
-		t.Errorf("group markers = %d, want the durable match once the front landed", n)
+	if owedMarkers(t, dbPath, "group_front") != 0 || settledMarkers(t, dbPath, "group_front") != 1 {
+		t.Error("the backfill's lookup did not settle once the front landed")
 	}
 	if n := groupDeltas(); n != 2 {
 		t.Errorf("group deltas after the front landed = %d, want 2", n)
 	}
 }
 
-// TestAGroupFrontFailingTwiceSettlesTheGroup: the pass after a front failure asks the
-// archive once more, and that ask settles the group whatever it gets, so a front the
-// archive keeps failing on costs one more request rather than one per pass. The re-walk
-// changed nothing, so it sends no delta.
-func TestAGroupFrontFailingTwiceSettlesTheGroup(t *testing.T) {
+// TestAGroupFrontFailingTwiceWaitsForTheRetryWindow: the pass after a front failure asks
+// the archive once more, and that ask settles the backfill's lookup whatever it gets, so
+// a front the archive keeps failing on costs one more request rather than one per pass.
+// The settled miss is asked again once the retry window has passed.
+func TestAGroupFrontFailingTwiceWaitsForTheRetryWindow(t *testing.T) {
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
 
 	mb := newMBMock(t)
 	caa, fetches := flakyGroupFront(t, pngBytes(t), 2)
-	svc := newService(st, mb.server.URL, caa.URL)
-	db := roDB(t, dbPath)
-	scanned := scalarInt(t, db, "SELECT COUNT(*) FROM change_log WHERE entity_type='release_group'")
-	if _, err := svc.Run(ctx, enrich.RunOptions{}, nil); err != nil {
-		t.Fatalf("run 1: %v", err)
+	svc := enrich.New(st, enrich.Config{
+		Contact: "test@example.com", FetchCoverArt: true, MinRequestInterval: time.Millisecond,
+		MusicBrainzBaseURL: mb.server.URL, CoverArtBaseURL: caa.URL, ListenBrainzBaseURL: caa.URL,
+		LRCLibBaseURL: caa.URL, RetryMissesAfter: retryWindow,
+	}, nil)
+	run := func(n int) *enrich.Result {
+		t.Helper()
+		res, err := svc.Run(ctx, enrich.RunOptions{}, nil)
+		if err != nil {
+			t.Fatalf("run %d: %v", n, err)
+		}
+		return res
 	}
-	second, err := svc.Run(ctx, enrich.RunOptions{}, nil)
-	if err != nil {
-		t.Fatalf("run 2: %v", err)
+	run(1)
+	if second := run(2); second.GroupArtEnriched != 1 || second.Deferred != 0 || *fetches != 2 {
+		t.Fatalf("run 2 = %+v after %d fetches, want the second failure to settle the lookup", second, *fetches)
 	}
-	if second.ReleaseGroupsEnriched != 1 || second.Deferred != 0 || *fetches != 2 {
-		t.Fatalf("run 2 = %d walked / %d deferred after %d fetches, want the second failure to settle the group",
-			second.ReleaseGroupsEnriched, second.Deferred, *fetches)
+	if owedMarkers(t, dbPath, "group_front") != 0 || settledMarkers(t, dbPath, "group_front") != 1 {
+		t.Error("the backfill's lookup is not settled after its second failure")
 	}
-	if owed, settled := owedMarkers(t, dbPath, "release_group"), settledMarkers(t, dbPath, "release_group"); owed != 0 || settled != 1 {
-		t.Errorf("group markers = %d owed / %d settled, want the match settled", owed, settled)
+	if third := run(3); third.GroupArtEnriched != 0 || *fetches != 2 {
+		t.Errorf("run 3 = %+v after %d fetches, want the miss held until the retry window", third, *fetches)
 	}
-	if n := scalarInt(t, db, "SELECT COUNT(*) FROM change_log WHERE entity_type='release_group'") - scanned; n != 1 {
-		t.Errorf("group deltas = %d, want only the identity's, since the re-walk changed nothing", n)
-	}
-	third, err := svc.Run(ctx, enrich.RunOptions{}, nil)
-	if err != nil {
-		t.Fatalf("run 3: %v", err)
-	}
-	if third.ReleaseGroupsEnriched != 0 || *fetches != 2 {
-		t.Errorf("run 3 walked %d groups after %d fetches, want the settled group left alone", third.ReleaseGroupsEnriched, *fetches)
+	backdateMisses(t, dbPath, retryAge)
+	if fourth := run(4); fourth.GroupArtMatched != 1 || *fetches != 3 || rgFrontHash(t, dbPath) == "" {
+		t.Errorf("run 4 = %+v after %d fetches, want the retry to fill the front", fourth, *fetches)
 	}
 }
 
@@ -894,12 +897,12 @@ func manyGroupsMB(t *testing.T) *mbMock {
 	return m
 }
 
-// TestATrippedArchiveDefersTheGroupsAfterIt: the identity rungs never stall, since the
-// spine has to land, but a matched identity marker is durable and nothing later asks
-// about a group front. So a group walked while the archive is out of the pass is
-// deferred like the ones it failed on, and the next pass re-walks all of them off the
-// MusicBrainz cache and fetches their fronts.
-func TestATrippedArchiveDefersTheGroupsAfterIt(t *testing.T) {
+// TestATrippedArchiveLeavesTheGroupsAfterItQueued: the identities all land and settle,
+// since that pass asks about no vacant front. The group-art backfill asks each front, so
+// an archive that fails three times in a row leaves those three lookups owed, trips, and
+// stalls the phase with the other two groups still queued. The next pass fetches all
+// five fronts with no MusicBrainz request.
+func TestATrippedArchiveLeavesTheGroupsAfterItQueued(t *testing.T) {
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	for i := 1; i <= 5; i++ {
@@ -925,17 +928,17 @@ func TestATrippedArchiveDefersTheGroupsAfterIt(t *testing.T) {
 	if down != 3 {
 		t.Errorf("archive fetches = %d, want 3 before it dropped out", down)
 	}
-	if res.ReleaseGroupsMatched != 5 || res.Deferred != 5 || len(res.Stalled) != 0 {
-		t.Fatalf("run 1 = %d matched / %d deferred / stalled %v, want 5, 5 and none",
+	if res.ReleaseGroupsMatched != 5 || res.Deferred != 3 || !slices.Equal(res.Stalled, []model.EnrichPhase{model.EnrichPhaseGroupArt}) {
+		t.Fatalf("run 1 = %d matched / %d deferred / stalled %v, want 5, 3 and group-art",
 			res.ReleaseGroupsMatched, res.Deferred, res.Stalled)
 	}
 	db := roDB(t, dbPath)
 	if n := scalarInt(t, db, "SELECT COUNT(*) FROM release_group WHERE mbid LIKE 'rg-%'"); n != 5 {
 		t.Errorf("groups with an mbid = %d, want 5", n)
 	}
-	if owedMarkers(t, dbPath, "release_group") != 5 || settledMarkers(t, dbPath, "release_group") != 0 {
-		t.Errorf("group markers = %d owed / %d settled, want all five owed",
-			owedMarkers(t, dbPath, "release_group"), settledMarkers(t, dbPath, "release_group"))
+	if settledMarkers(t, dbPath, "release_group") != 5 || owedMarkers(t, dbPath, "group_front") != 3 {
+		t.Errorf("markers: %d identities settled, %d group art owed; want 5 and 3",
+			settledMarkers(t, dbPath, "release_group"), owedMarkers(t, dbPath, "group_front"))
 	}
 
 	requests := mb.requests
@@ -958,15 +961,16 @@ func TestATrippedArchiveDefersTheGroupsAfterIt(t *testing.T) {
 		t.Fatalf("run 2 fetched %d fronts (%d counted) with %d new MusicBrainz requests, want 5, 5 and none",
 			healthy, res.ArtFetched, mb.requests-requests)
 	}
-	if n := scalarInt(t, db, "SELECT COUNT(*) FROM entity_enrichment WHERE entity_type='release_group' AND matched=1"); n != 5 {
-		t.Errorf("matched group markers = %d, want 5", n)
+	if n := scalarInt(t, db, "SELECT COUNT(*) FROM entity_enrichment WHERE entity_type='group_front' AND matched=1"); n != 5 {
+		t.Errorf("matched front markers = %d, want 5", n)
 	}
 }
 
-// TestAGroupLeftUnaskedStaysOwed: the pass after an archive outage asks the owed groups
-// again while the archive is still failing. The first three fail again, which settles
-// them and trips the archive; the two walked after that were never asked, so they stay
-// owed, and the pass after fetches their fronts.
+// TestAGroupLeftUnaskedStaysOwed: the pass after an archive outage asks again while the
+// archive is still failing. Its fresh walk fails on the two groups the outage stalled
+// before, its owed walk fails on the first group it re-asks, which settles that one and
+// trips the archive, and the two owed groups it never reached stay owed. The pass after
+// fetches those four fronts, while the settled miss waits for the retry window.
 func TestAGroupLeftUnaskedStaysOwed(t *testing.T) {
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
@@ -994,31 +998,31 @@ func TestAGroupLeftUnaskedStaysOwed(t *testing.T) {
 	if _, err := svc.Run(ctx, enrich.RunOptions{}, nil); err != nil {
 		t.Fatalf("run 1: %v", err)
 	}
-	if owed := owedMarkers(t, dbPath, "release_group"); owed != 5 {
-		t.Fatalf("owed groups after the outage = %d, want 5", owed)
+	if owed := owedMarkers(t, dbPath, "group_front"); owed != 3 {
+		t.Fatalf("owed group art after the outage = %d, want 3", owed)
 	}
 
-	res, err := svc.Run(ctx, enrich.RunOptions{}, nil)
-	if err != nil {
+	if _, err := svc.Run(ctx, enrich.RunOptions{}, nil); err != nil {
 		t.Fatalf("run 2: %v", err)
 	}
-	if owed, settled := owedMarkers(t, dbPath, "release_group"), settledMarkers(t, dbPath, "release_group"); owed != 2 || settled != 3 || res.Deferred != 2 {
-		t.Fatalf("run 2 = %d owed / %d settled / %d deferred, want the three asked settled and the two unasked still owed",
-			owed, settled, res.Deferred)
+	if owed, settled := owedMarkers(t, dbPath, "group_front"), settledMarkers(t, dbPath, "group_front"); owed != 4 || settled != 1 {
+		t.Fatalf("run 2 = %d owed / %d settled, want the one re-asked settled and four owed", owed, settled)
 	}
 
 	healthy = true
-	if _, err := svc.Run(ctx, enrich.RunOptions{}, nil); err != nil {
+	third, err := svc.Run(ctx, enrich.RunOptions{}, nil)
+	if err != nil {
 		t.Fatalf("run 3: %v", err)
 	}
-	if fronts != 2 || owedMarkers(t, dbPath, "release_group") != 0 {
-		t.Errorf("run 3 fetched %d fronts with %d still owed, want the two unasked groups' fronts", fronts, owedMarkers(t, dbPath, "release_group"))
+	if fronts != 4 || third.GroupArtMatched != 4 || owedMarkers(t, dbPath, "group_front") != 0 {
+		t.Errorf("run 3 fetched %d fronts (%d backfilled) with %d still owed, want the four owed fronts",
+			fronts, third.GroupArtMatched, owedMarkers(t, dbPath, "group_front"))
 	}
 }
 
-// TestAGenreRiderLeftUnaskedStaysOwed is the genre twin of TestAGroupLeftUnaskedStaysOwed:
-// MusicBrainz has no genres for these groups, so the injected genre provider is the only
-// source, and the groups it was never asked about stay owed until it answers.
+// TestAGenreRiderLeftUnaskedStaysOwed: MusicBrainz has no genres for these groups, so the
+// injected genre provider is the only source, and the groups it was never asked about
+// stay owed until it answers, since the identity walk is that rider's one asker.
 func TestAGenreRiderLeftUnaskedStaysOwed(t *testing.T) {
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
@@ -1206,10 +1210,9 @@ func TestACappedRunReachesLaterPhasesPastOwedIdentities(t *testing.T) {
 }
 
 // TestAnAuxFailureDoesNotDeferTheGroup: the group rung's art rider is owed only its
-// front, the slot nothing later asks about. An auxiliary provider failing there, or
-// dropping out of the pass after three failures, leaves every group settled, and the
-// auxiliary backfill, which asks that provider about the same groups under its own
-// marker, is what carries the failure.
+// front. An auxiliary provider failing there, or dropping out of the pass after three
+// failures, leaves every group settled, and the group-art backfill, which asks that
+// provider about the same groups under its own marker, is what carries the failure.
 func TestAnAuxFailureDoesNotDeferTheGroup(t *testing.T) {
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)

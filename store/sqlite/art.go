@@ -372,7 +372,7 @@ func attachEntityArtUnlessLockedTx(ctx context.Context, tx *sql.Tx, entityType m
 // to fill.
 //
 // It reports how many slots actually took an image. A caller whose whole reason to run
-// was the fill (the aux backfill pass) needs that to decide whether anything about the
+// was the fill (an art backfill pass) needs that to decide whether anything about the
 // entity changed; the callers that fill art on the way past something else ignore it.
 func fillEntityAuxArtTx(ctx context.Context, tx *sql.Tx, entityType model.ArtEntity, entityID int64, aux map[model.ArtRole]*model.ArtImage) (int, error) {
 	if len(aux) == 0 {
@@ -505,36 +505,48 @@ func fillAlbumArtFromGroupTx(ctx context.Context, tx *sql.Tx, albumID int64, has
 	return n > 0, true, err
 }
 
-// clearAlbumArtTx drops the front cover enrichment gave an album, returning it to
-// whatever the derived rung answers. It undoes the cover a release identity earned,
-// whether the release match landed the id or the album carried one already; a member
+// clearEnrichmentArtTx drops the art enrichment fetched for an entity, every role of it,
+// because the identity it came under is being disowned: each role falls back to what the
+// rung below answers and a backfill asks again. The source filter keeps a picture the user
+// chose, since a matched marker does not mean enrichment wrote a role (the fill is
+// fill-when-empty, and a backfill can match on an auxiliary role alone). A role a lock
+// holds keeps its picture too, the lock being the user's word that it stays. A member
 // track's embedded cover is untouched, since nothing here wrote it.
-//
-// The source filter is what keeps the undo from reaching a picture the user chose. A
-// matched marker does not mean enrichment wrote the front: the fill is fill-when-empty,
-// so an album that already had a hand-set cover keeps it and still takes the marker, and
-// the album-art backfill can match on an auxiliary role alone.
-func clearAlbumArtTx(ctx context.Context, tx *sql.Tx, albumID int64) error {
-	_, err := tx.ExecContext(ctx,
-		"DELETE FROM art_map WHERE entity_type = ? AND entity_id = ? AND role = 'front' AND source = ?",
-		string(model.ArtAlbum), albumID, string(model.SourceEnrichment))
-	return err
-}
-
-// clearReleaseGroupEnrichmentArtTx drops the art a release-group match wrote: the front
-// cover, the mirror of clearAlbumArtTx, and the auxiliary rows enrichment filled. Every
-// slot here can hold a picture the user chose, the front included, so only
-// enrichment-sourced rows go.
-func clearReleaseGroupEnrichmentArtTx(ctx context.Context, tx *sql.Tx, rgID int64) error {
-	if _, err := tx.ExecContext(ctx,
-		"DELETE FROM art_map WHERE entity_type = ? AND entity_id = ? AND role = 'front' AND source = ?",
-		string(model.ArtReleaseGroup), rgID, string(model.SourceEnrichment)); err != nil {
+func clearEnrichmentArtTx(ctx context.Context, tx *sql.Tx, entityType model.ArtEntity, entityID int64) error {
+	rows, err := tx.QueryContext(ctx,
+		"SELECT role FROM art_map WHERE entity_type = ? AND entity_id = ? AND source = ?",
+		string(entityType), entityID, string(model.SourceEnrichment))
+	if err != nil {
 		return err
 	}
-	_, err := tx.ExecContext(ctx,
-		"DELETE FROM art_map WHERE entity_type = ? AND entity_id = ? AND role <> 'front' AND source = ?",
-		string(model.ArtReleaseGroup), rgID, string(model.SourceEnrichment))
-	return err
+	var roles []model.ArtRole
+	for rows.Next() {
+		var role string
+		if err := rows.Scan(&role); err != nil {
+			rows.Close()
+			return err
+		}
+		roles = append(roles, model.ArtRole(role))
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, role := range roles {
+		locked, err := artFillBlockedTx(ctx, tx, entityType, entityID, role)
+		if err != nil {
+			return err
+		}
+		if locked {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx,
+			"DELETE FROM art_map WHERE entity_type = ? AND entity_id = ? AND role = ?",
+			string(entityType), entityID, string(role)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // artLevel is one rung of the resolution fallback chain: an entity type and its

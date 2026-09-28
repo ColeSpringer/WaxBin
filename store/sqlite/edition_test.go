@@ -738,7 +738,7 @@ func TestAnMBIDChangeTakesTheOldPressingsCover(t *testing.T) {
 		t.Errorf("the old release's cover survived the correction (%d rows)", n)
 	}
 	// And the album is genuinely back in the queue rather than merely unmarked.
-	queued, err := st.AlbumsNeedingArt(ctx, model.EnrichQueueOptions{}, 0, 100, model.AlbumArtSlots{Front: true}, nil)
+	queued, err := st.AlbumsNeedingArt(ctx, model.EnrichQueueOptions{}, 0, 100, model.ArtSlots{Front: true}, nil)
 	if err != nil {
 		t.Fatalf("AlbumsNeedingArt: %v", err)
 	}

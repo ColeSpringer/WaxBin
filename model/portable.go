@@ -18,13 +18,17 @@ type PortableRef struct {
 	Essence         string // exact-rip audio-essence hash
 	Fingerprint     []byte // packed acoustic fingerprint (omitted for virtual/CUE tracks)
 	FingerprintAlgo int    // fingerprint algorithm: 1 = pure-Go, 100 = Chromaprint
-	MBID            string // recording MBID (track) or release MBID (book)
-	ASIN            string // audiobook
-	ISBN            string // audiobook
-	Artist          string // track artist, or book author (the view COALESCE value)
-	Title           string
-	Album           string // track album, or book series (the view COALESCE value)
-	DurationMS      int64
+	// FingerprintBucket is the duration bucket the fingerprint was stored under, which
+	// comes from the decoded length when the header misstates it, so the resolver probes
+	// there rather than at DurationMS's bucket. Zero falls back to DurationMS.
+	FingerprintBucket int64
+	MBID              string // recording MBID (track) or release MBID (book)
+	ASIN              string // audiobook
+	ISBN              string // audiobook
+	Artist            string // track artist, or book author (the view COALESCE value)
+	Title             string
+	Album             string // track album, or book series (the view COALESCE value)
+	DurationMS        int64
 }
 
 // MatchRung names which rung of the resolve ladder produced a match, so the host can
