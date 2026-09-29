@@ -374,7 +374,7 @@ func writeCode(err error, fallback waxerr.Code) waxerr.Code {
 func commitPlan(ctx context.Context, plan *waxlabel.Plan, op, path, what string, warnings []model.TagWriteWarning) (*WriteResult, error) {
 	_, sres, err := plan.Execute(ctx, waxlabel.SaveBack())
 	if err != nil && !sres.Committed {
-		return nil, waxerr.Wrapf(writeCode(err, waxerr.CodeIO), op, err, "writing %s to %s", what, path)
+		return nil, waxerr.Classifyf(writeCode(err, waxerr.CodeIO), op, err, "writing %s to %s", what, path)
 	}
 	if err != nil {
 		// Sanitized at the seam like every other warning; the error text embeds the
@@ -476,7 +476,7 @@ func (w *Writer) Apply(ctx context.Context, path string, edits []TagEdit, opts .
 
 	doc, err := waxlabel.ParseFile(ctx, path)
 	if err != nil {
-		return nil, waxerr.Wrapf(writeCode(err, waxerr.CodeInvalid), op, err, "parsing %s for tag write", path)
+		return nil, waxerr.Classifyf(writeCode(err, waxerr.CodeInvalid), op, err, "parsing %s for tag write", path)
 	}
 
 	ed := doc.Edit()
@@ -495,7 +495,7 @@ func (w *Writer) Apply(ctx context.Context, path string, edits []TagEdit, opts .
 	// if it differs, so a tag edit can never mutate audio.
 	plan, err := ed.Prepare(waxlabel.WithVerifyEssence())
 	if err != nil {
-		return nil, waxerr.Wrapf(writeCode(err, waxerr.CodeInvalid), op, err, "preparing tag write for %s", path)
+		return nil, waxerr.Classifyf(writeCode(err, waxerr.CodeInvalid), op, err, "preparing tag write for %s", path)
 	}
 	// Read the report before the no-op gate. WaxLabel documents that a no-op can still
 	// carry a warning the consumer needs to see: an edit whose only effect was a value
@@ -536,7 +536,7 @@ func (w *Writer) ApplyPicture(ctx context.Context, path string, edit PictureEdit
 
 	doc, err := waxlabel.ParseFile(ctx, path)
 	if err != nil {
-		return nil, waxerr.Wrapf(writeCode(err, waxerr.CodeInvalid), op, err, "parsing %s for picture write", path)
+		return nil, waxerr.Classifyf(writeCode(err, waxerr.CodeInvalid), op, err, "parsing %s for picture write", path)
 	}
 	// The gate is a capability check, not a byte check: a read-only file (WaxLabel
 	// v1.4 reports ReadOnly per file, so this covers a fragmented MP4) or a format
@@ -567,7 +567,7 @@ func (w *Writer) ApplyPicture(ctx context.Context, path string, edit PictureEdit
 
 	plan, err := ed.Prepare(opts...)
 	if err != nil {
-		return nil, waxerr.Wrapf(writeCode(err, waxerr.CodeInvalid), op, err, "preparing picture write for %s", path)
+		return nil, waxerr.Classifyf(writeCode(err, waxerr.CodeInvalid), op, err, "preparing picture write for %s", path)
 	}
 	warnings := writeWarnings(plan.Report().Warnings)
 	if plan.IsNoOp() {

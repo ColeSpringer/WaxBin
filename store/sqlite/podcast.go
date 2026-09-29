@@ -60,6 +60,13 @@ func (s *Store) EnsurePodcastLibrary(ctx context.Context, dir string) (int64, er
 // updated by identity key, the feed image is ingested onto it, and every feed
 // episode is upserted by its per-podcast key. It does not delete episodes missing
 // from a later feed, and it does not move a downloaded episode back to remote.
+//
+// The validators (ETag, LastModified) and FetchedAtNS land in that same transaction,
+// so a provider that gets the validators back on the next sync can take them as proof
+// that the episodes committed; a failure leaves the previous ones in place. Nothing
+// but a feed write moves the validators (source.Provider.Enumerate states the
+// promise); the fetch time also moves when a sync is answered NotModified
+// (MarkPodcastsFetched).
 func (s *Store) UpsertFeed(ctx context.Context, in model.UpsertFeedInput) (*model.UpsertFeedResult, error) {
 	const op = "store.UpsertFeed"
 	if in.IdentityKey == "" {
@@ -68,7 +75,7 @@ func (s *Store) UpsertFeed(ctx context.Context, in model.UpsertFeedInput) (*mode
 	res := &model.UpsertFeedResult{}
 	err := s.writeTx(ctx, func(tx *sql.Tx) error {
 		now := nowNS()
-		up, err := upsertPodcast(ctx, tx, in, now)
+		up, err := upsertPodcast(ctx, tx, in, now, true)
 		if err != nil {
 			return err
 		}
@@ -131,9 +138,32 @@ func (s *Store) UpsertFeed(ctx context.Context, in model.UpsertFeedInput) (*mode
 	return res, nil
 }
 
+// MarkPodcastsFetched records syncs the source answered NotModified, all in one
+// transaction. Only last_fetched_at moves, and never backwards: the validators stay,
+// and no delta is emitted, since nothing a consumer sees changed. A pid with no row
+// (a show removed while its sync ran) is skipped.
+func (s *Store) MarkPodcastsFetched(ctx context.Context, pids []model.PID, atNS int64) error {
+	if len(pids) == 0 {
+		return nil
+	}
+	return s.writeTx(ctx, func(tx *sql.Tx) error {
+		for _, pid := range pids {
+			if _, err := tx.ExecContext(ctx,
+				"UPDATE podcast SET last_fetched_at = MAX(COALESCE(last_fetched_at, 0), ?) WHERE pid = ?",
+				atNS, string(pid)); err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, "store.MarkPodcastsFetched", err)
+			}
+		}
+		return nil
+	})
+}
+
 // UpsertShow creates or updates a show without enumerating a feed: a manual show, or
 // a provider-backed channel added before its first enumeration. Episodes are added
 // separately via UpsertEpisode. It returns the show pid and whether it was created.
+// An existing show keeps what the input does not carry: the feed-only fields, the
+// validators and fetch time (this is not a sync), and its source type when the input
+// leaves it empty.
 func (s *Store) UpsertShow(ctx context.Context, in model.UpsertShowInput) (model.PID, bool, error) {
 	const op = "store.UpsertShow"
 	if in.IdentityKey == "" {
@@ -153,7 +183,7 @@ func (s *Store) UpsertShow(ctx context.Context, in model.UpsertShowInput) (model
 				Link: in.Link, ImageURL: in.ImageURL,
 			},
 		}
-		up, err := upsertPodcast(ctx, tx, fi, now)
+		up, err := upsertPodcast(ctx, tx, fi, now, false)
 		if err != nil {
 			return err
 		}
@@ -226,7 +256,7 @@ type podcastUpsert struct {
 	// titleChanged forces an episode-FTS refresh (the title is each episode's FTS
 	// subtitle). metaChanged is broader: any consumer-visible field moved (title,
 	// author, description, funding, medium, ...), as opposed to the fetch
-	// bookkeeping (etag/last_modified/last_fetched_at) the row rewrite always
+	// bookkeeping (etag/last_modified/last_fetched_at) a sync's row rewrite always
 	// refreshes. The podcast delta is gated on it, so a sync that only re-stamped
 	// the validators stays change_log-silent.
 	titleChanged bool
@@ -234,10 +264,11 @@ type podcastUpsert struct {
 }
 
 // upsertPodcast inserts or updates a podcast row by identity_key, preserving its
-// pid/created_at. The UPDATE runs unconditionally (the fetch bookkeeping columns
-// legitimately change every sync); metaChanged reports whether anything a
-// consumer sees actually moved.
-func upsertPodcast(ctx context.Context, tx *sql.Tx, in model.UpsertFeedInput, now int64) (podcastUpsert, error) {
+// pid/created_at. A sync's UPDATE rewrites the whole row unconditionally (the fetch
+// bookkeeping columns legitimately change every sync); metaChanged reports whether
+// anything a consumer sees actually moved. synced is false for UpsertShow, whose
+// UPDATE touches only the columns its input carries.
+func upsertPodcast(ctx context.Context, tx *sql.Tx, in model.UpsertFeedInput, now int64, synced bool) (podcastUpsert, error) {
 	const op = "store.UpsertFeed"
 	f := in.Feed
 	st := in.SourceType
@@ -282,21 +313,42 @@ func upsertPodcast(ctx context.Context, tx *sql.Tx, in model.UpsertFeedInput, no
 				return podcastUpsert{}, waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 		}
-		if _, err := tx.ExecContext(ctx, `UPDATE podcast SET
-			identity_key=?, feed_url=?, title=?, sort_key=?, author=?, description=?, link=?, language=?,
-			category=?, explicit=?, funding_url=?, funding_message=?, medium=?, image_url=?, guid=?,
-			etag=?, last_modified=?, source_type=?, last_fetched_at=?, updated_at=? WHERE id=?`,
-			in.IdentityKey, in.FeedURL, f.Title, model.SortKey(f.Title), f.Author, f.Description, f.Link, f.Language,
-			f.Category, boolInt(f.Explicit), f.FundingURL, f.FundingMessage, f.Medium, f.ImageURL, f.GUID,
-			in.ETag, in.LastModified, string(st), in.FetchedAtNS, now, id); err != nil {
-			return podcastUpsert{}, waxerr.Wrap(waxerr.CodeIO, op, err)
-		}
 		metaChanged := old.title != f.Title || old.author != f.Author || old.description != f.Description ||
-			old.link != f.Link || old.language != f.Language || old.category != f.Category ||
-			(old.explicit != 0) != f.Explicit || old.fundingURL != f.FundingURL ||
-			old.fundingMessage != f.FundingMessage || old.medium != f.Medium ||
-			old.imageURL != f.ImageURL || old.guid != f.GUID ||
-			oldKey != in.IdentityKey || old.feedURL != in.FeedURL || old.sourceType != string(st)
+			old.link != f.Link || old.imageURL != f.ImageURL || oldKey != in.IdentityKey || old.feedURL != in.FeedURL
+		if synced {
+			// The fetch time never steps back, so two syncs landing out of order keep the
+			// later one.
+			if _, err := tx.ExecContext(ctx, `UPDATE podcast SET
+				identity_key=?, feed_url=?, title=?, sort_key=?, author=?, description=?, link=?, language=?,
+				category=?, explicit=?, funding_url=?, funding_message=?, medium=?, image_url=?, guid=?,
+				etag=?, last_modified=?, source_type=?,
+				last_fetched_at=MAX(COALESCE(last_fetched_at, 0), ?), updated_at=? WHERE id=?`,
+				in.IdentityKey, in.FeedURL, f.Title, model.SortKey(f.Title), f.Author, f.Description, f.Link, f.Language,
+				f.Category, boolInt(f.Explicit), f.FundingURL, f.FundingMessage, f.Medium, f.ImageURL, f.GUID,
+				in.ETag, in.LastModified, string(st), in.FetchedAtNS, now, id); err != nil {
+				return podcastUpsert{}, waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+			metaChanged = metaChanged || old.language != f.Language || old.category != f.Category ||
+				(old.explicit != 0) != f.Explicit || old.fundingURL != f.FundingURL ||
+				old.fundingMessage != f.FundingMessage || old.medium != f.Medium || old.guid != f.GUID ||
+				old.sourceType != string(st)
+		} else {
+			// UpsertShow carries only the fields a caller can set, so the rest of the row
+			// stays: the feed-only columns, the validators, the fetch time, and the source
+			// type when the input leaves it empty.
+			var sourceType any
+			if in.SourceType != "" {
+				sourceType = string(in.SourceType)
+				metaChanged = metaChanged || old.sourceType != string(in.SourceType)
+			}
+			if _, err := tx.ExecContext(ctx, `UPDATE podcast SET
+				identity_key=?, feed_url=?, title=?, sort_key=?, author=?, description=?, link=?, image_url=?,
+				source_type=COALESCE(?, source_type), updated_at=? WHERE id=?`,
+				in.IdentityKey, in.FeedURL, f.Title, model.SortKey(f.Title), f.Author, f.Description, f.Link,
+				f.ImageURL, sourceType, now, id); err != nil {
+				return podcastUpsert{}, waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+		}
 		return podcastUpsert{
 			id: id, pid: model.PID(pid),
 			titleChanged: old.title != f.Title, metaChanged: metaChanged,

@@ -375,7 +375,8 @@ func Coverage() []FormatSupport {
 }
 
 // mapErr translates WaxFlow's error vocabulary into WaxBin's, so it stops at
-// this package. It never yields ErrUnsupported: only the open call classifies
+// this package; the mapping sets the class outright, since the cause is not
+// WaxBin's to keep. It never yields ErrUnsupported: only the open call classifies
 // that, by phase rather than by code.
 // The default arm covers every code it does not name (internal among them), so
 // CodeIO from here is not only an unreadable source. CodeInvalid from here means
@@ -384,16 +385,16 @@ func Coverage() []FormatSupport {
 func mapErr(op string, err error) error {
 	switch flowerr.CodeOf(err) {
 	case flowerr.CodeUnsupportedFormat, flowerr.CodeUnsupportedSource:
-		return waxerr.Wrap(waxerr.CodeUnsupported, op, err)
+		return waxerr.Classify(waxerr.CodeUnsupported, op, err)
 	case flowerr.CodeMalformedInput:
-		return waxerr.Wrap(waxerr.CodeInvalid, op, err)
+		return waxerr.Classify(waxerr.CodeInvalid, op, err)
 	case flowerr.CodeSourceUnreadable:
-		return waxerr.Wrap(waxerr.CodeIO, op, err)
+		return waxerr.Classify(waxerr.CodeIO, op, err)
 	case flowerr.CodeInvalidRequest:
-		return waxerr.Wrap(waxerr.CodeUnsupported, op, err)
+		return waxerr.Classify(waxerr.CodeUnsupported, op, err)
 	case flowerr.CodeCanceled:
-		return waxerr.Wrap(waxerr.CodeCanceled, op, err)
+		return waxerr.Classify(waxerr.CodeCanceled, op, err)
 	default:
-		return waxerr.Wrap(waxerr.CodeIO, op, err)
+		return waxerr.Classify(waxerr.CodeIO, op, err)
 	}
 }

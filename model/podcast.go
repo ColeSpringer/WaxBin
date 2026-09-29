@@ -26,7 +26,7 @@ type Podcast struct {
 	GUID           string // <podcast:guid> when published
 	ETag           string
 	LastModified   string
-	LastFetchedAt  int64 // unix nanoseconds; 0 when never fetched
+	LastFetchedAt  int64 // unix nanoseconds of the last successful sync, a NotModified included; 0 when never fetched
 	RetentionKeep  int
 	AuthUser       string // basic-auth user; the password lives in the secret table
 	// ImageURL is the image URL the feed currently advertises, recorded as published.
@@ -190,6 +190,8 @@ type OPMLEntry struct {
 // created or updated by IdentityKey, then every episode is upserted by its
 // per-podcast key. If a feed stops listing older episodes, the store leaves those
 // rows in place. Image, when set, is fetched feed artwork ready for the art store.
+// ETag, LastModified, and FetchedAtNS commit with the episodes or not at all, which
+// is what lets a provider read the pair back as its receipt.
 type UpsertFeedInput struct {
 	FeedURL      string
 	IdentityKey  string
@@ -206,8 +208,11 @@ type UpsertFeedInput struct {
 
 // UpsertShowInput creates or updates a show that has no feed sync in this call:
 // a manual show, or a youtube channel added before its first enumeration. Episodes
-// are added separately via UpsertEpisode. FeedURL is empty for a manual show and the
-// channel/playlist URL for a youtube show.
+// are added separately via UpsertEpisode. FeedURL is the channel/playlist URL for a
+// youtube show; a manual show reuses its identity key there, since the column is
+// unique. An existing show keeps everything this does not carry: the feed-only
+// fields, the validators, the fetch time, and its source type when SourceType is
+// empty.
 type UpsertShowInput struct {
 	IdentityKey string
 	FeedURL     string

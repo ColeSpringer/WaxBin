@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
-	"errors"
 	"image"
 	"image/color"
 	"image/gif"
@@ -205,9 +204,8 @@ func TestArtProvenancePerOrigin(t *testing.T) {
 
 // TestUnstampedArtIsRefused pins the single-chokepoint guard: an image reaching the
 // store with no provenance fails at the write rather than storing a row no consumer
-// can attribute. setEntityArtRoleTx raises CodeInvalid; the scan ingest re-wraps it
-// as CodeIO the way it wraps every write failure, so the assertion walks the chain
-// for the code the guard itself raised.
+// can attribute. setEntityArtRoleTx raises CodeInvalid, and the scan ingest's wrap
+// keeps that class, so the caller sees the guard's own code.
 func TestUnstampedArtIsRefused(t *testing.T) {
 	ctx := context.Background()
 	st, dbPath, lib := openStoreAt(t)
@@ -229,24 +227,12 @@ func TestUnstampedArtIsRefused(t *testing.T) {
 	if err == nil {
 		t.Fatal("an unstamped cover was accepted, want a refusal")
 	}
-	if !hasCode(err, waxerr.CodeInvalid) {
-		t.Errorf("unstamped cover error = %v, want CodeInvalid somewhere in the chain", err)
+	if !waxerr.Is(err, waxerr.CodeInvalid) {
+		t.Errorf("unstamped cover error = %v, want CodeInvalid", err)
 	}
 	if n := scalarInt64(t, roConn(t, dbPath), "SELECT COUNT(*) FROM art_map"); n != 0 {
 		t.Errorf("art_map rows = %d after a refused write, want 0", n)
 	}
-}
-
-// hasCode reports whether any error in the chain carries code, so a test can pin the
-// code a store-internal guard raised under a caller's own wrap.
-func hasCode(err error, code waxerr.Code) bool {
-	for e := err; e != nil; e = errors.Unwrap(e) {
-		var we *waxerr.Error
-		if errors.As(e, &we) && we.Code == code {
-			return true
-		}
-	}
-	return false
 }
 
 // sizedCoverPNG encodes a PNG at the requested size, for the cases that need a source

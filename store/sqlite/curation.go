@@ -31,8 +31,8 @@ func (s *Store) SetItemLyrics(ctx context.Context, itemPID model.PID, ly *model.
 	if err := checkLockChange(lock, op); err != nil {
 		return err
 	}
-	// Up front so a caller error is CodeInvalid rather than the CodeIO the transaction
-	// wraps putLyricsTx's refusal in.
+	// Up front, before the write transaction, so a caller error never takes the write
+	// lock.
 	if ly.HasContent() {
 		attr := model.Attribution{Source: ly.Source, Provider: ly.Provider}.OrUser()
 		if err := checkAttribution(attr, attr.ValidForLyrics, op); err != nil {
@@ -327,8 +327,7 @@ func (s *Store) SetItemArt(ctx context.Context, itemPID model.PID, role model.Ar
 		return err
 	}
 	// Up front, not left to the inner write: a clear carries no image for the art_map
-	// writer to check, and the attribution still reaches the lock row. Checking here also
-	// keeps a caller error CodeInvalid rather than the CodeIO the transaction wraps it in.
+	// writer to check, and the attribution still reaches the lock row.
 	attr = attr.OrUser()
 	if err := checkAttribution(attr, attr.ValidForArt, op); err != nil {
 		return err
@@ -445,8 +444,7 @@ func (s *Store) SetEntityArt(ctx context.Context, entityType model.ArtEntity, en
 	if err := checkLockChange(lock, op); err != nil {
 		return err
 	}
-	// See SetItemArt: the clear path has no image to carry the check, and a caller error
-	// belongs outside the transaction that would reclassify it as I/O.
+	// See SetItemArt: the clear path has no image to carry the check.
 	attr = attr.OrUser()
 	if err := checkAttribution(attr, attr.ValidForArt, op); err != nil {
 		return err

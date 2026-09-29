@@ -1,6 +1,10 @@
 // Package waxerr defines WaxBin's typed errors. Every error surfaced across a
 // package boundary carries a stable Code so callers (and the CLI's exit-code
-// mapping) can branch on the failure class without string matching.
+// mapping) can branch on the failure class without string matching. An error keeps
+// the first class it is given: an outer Wrap adds its op and leaves the class
+// alone. Two constructors override it: Classify, at a boundary that translates
+// another module's failure into a WaxBin class, and FromContext, which turns a
+// cancellation into CodeCanceled at any depth.
 package waxerr
 
 import (
@@ -70,49 +74,80 @@ func New(code Code, op, msg string) *Error {
 // nil error, so it is safe to wrap unconditionally and return waxerr.Wrap(...)
 // from a func() error. It returns the error interface instead of *Error to avoid
 // the typed-nil pitfall where a nil *Error reads as a non-nil error.
+//
+// code classifies a cause that has no class yet. A cause that already carries one
+// keeps it, so an outer layer adding its op to a not-found, a lock, or a read-only
+// refusal does not turn it into the generic failure the outer layer would name.
 func Wrap(code Code, op string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return &Error{Code: classOr(err, code), Op: op, Err: err}
+}
+
+// Wrapf is Wrap with a formatted message. Like Wrap it returns a true nil for a
+// nil cause and keeps a class the cause already carries.
+func Wrapf(code Code, op string, err error, format string, args ...any) error {
+	if err == nil {
+		return nil
+	}
+	return &Error{Code: classOr(err, code), Op: op, Msg: fmt.Sprintf(format, args...), Err: err}
+}
+
+// Classify builds an Error around a cause and sets its class to code even when the
+// cause already carries one. It is for a boundary that turns another module's
+// failure into WaxBin's own class, such as an injected cipher's or WaxFlow's;
+// everywhere else Wrap keeps the class the cause has. Like Wrap it returns a true
+// nil for a nil cause.
+func Classify(code Code, op string, err error) error {
 	if err == nil {
 		return nil
 	}
 	return &Error{Code: code, Op: op, Err: err}
 }
 
-// Wrapf is Wrap with a formatted message. Like Wrap it returns a true nil for a
-// nil cause.
-func Wrapf(code Code, op string, err error, format string, args ...any) error {
+// Classifyf is Classify with a formatted message.
+func Classifyf(code Code, op string, err error, format string, args ...any) error {
 	if err == nil {
 		return nil
 	}
 	return &Error{Code: code, Op: op, Msg: fmt.Sprintf(format, args...), Err: err}
 }
 
-// CodeOf extracts the Code carried by err, walking the wrap chain. It returns
-// CodeInternal for non-WaxBin errors and "" for a nil error.
-func CodeOf(err error) Code {
-	if err == nil {
-		return ""
-	}
+// classOr returns the class err already carries, or fallback when it carries none.
+func classOr(err error, fallback Code) Code {
 	var e *Error
 	if errors.As(err, &e) {
 		return e.Code
 	}
-	return CodeInternal
+	return fallback
 }
 
-// Is reports whether err carries the given Code anywhere in its wrap chain.
+// CodeOf returns err's class: the code of the outermost Error in its chain, which
+// Wrap keeps equal to the first one given. It returns CodeInternal for a non-WaxBin
+// error and "" for nil.
+func CodeOf(err error) Code {
+	if err == nil {
+		return ""
+	}
+	return classOr(err, CodeInternal)
+}
+
+// Is reports whether err's class is code.
 func Is(err error, code Code) bool {
 	return CodeOf(err) == code
 }
 
 // FromContext classifies err: a context cancellation/deadline becomes
-// CodeCanceled, anything else is wrapped under fallback. Returns nil for nil so
-// it is safe to wrap unconditionally.
+// CodeCanceled whatever class a lower layer gave it, and anything else is wrapped
+// under fallback, keeping a class it already carries. Returns nil for nil so it is
+// safe to wrap unconditionally.
 func FromContext(op string, err error, fallback Code) error {
 	if err == nil {
 		return nil
 	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return Wrap(CodeCanceled, op, err)
+		return Classify(CodeCanceled, op, err)
 	}
 	return Wrap(fallback, op, err)
 }

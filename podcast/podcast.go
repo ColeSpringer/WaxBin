@@ -30,7 +30,12 @@ var (
 // Store is the persistence the podcast service needs (satisfied by store/sqlite).
 type Store interface {
 	EnsurePodcastLibrary(ctx context.Context, dir string) (int64, error)
+	// UpsertFeed writes the show, its episodes, and its validators in one transaction;
+	// source.Provider.Enumerate promises providers exactly that.
 	UpsertFeed(ctx context.Context, in model.UpsertFeedInput) (*model.UpsertFeedResult, error)
+	// MarkPodcastsFetched records syncs the source answered NotModified, leaving the
+	// stored validators alone.
+	MarkPodcastsFetched(ctx context.Context, pids []model.PID, atNS int64) error
 	UpsertShow(ctx context.Context, in model.UpsertShowInput) (model.PID, bool, error)
 	UpsertEpisode(ctx context.Context, in model.UpsertEpisodeInput) (*model.UpsertEpisodeResult, error)
 	Podcasts(ctx context.Context) ([]*model.Podcast, error)
@@ -113,6 +118,7 @@ type Service struct {
 	cfg       Config
 	log       *slog.Logger
 	providers map[model.SourceType]source.Provider
+	now       func() time.Time
 
 	libMu sync.Mutex
 	libID int64 // cached internal podcast-library id (0 = unresolved)
@@ -166,7 +172,7 @@ func New(store Store, reader meta.Reader, cfg Config, log *slog.Logger) *Service
 		}
 	}
 	return &Service{store: store, client: client, reader: reader, cfg: cfg, log: log,
-		providers: providers}
+		providers: providers, now: time.Now}
 }
 
 // lease runs fn holding the podcast filesystem lease, or inline when no Leaser is
@@ -257,10 +263,8 @@ func (s *Service) AddSource(ctx context.Context, url string, sourceType model.So
 	if err != nil {
 		return nil, err
 	}
-	// Add sends no conditional headers, so a NotModified here is a misbehaving
-	// server/CDN and leaves the feed nil; refuse rather than dereference it.
-	if enum.NotModified || enum.Feed == nil {
-		return nil, waxerr.New(waxerr.CodeIO, op, "feed returned not-modified to an unconditional request")
+	if err := checkEnumeration(op, enum, false); err != nil {
+		return nil, err
 	}
 	key := enum.IdentityKey
 	if key == "" {
@@ -337,18 +341,35 @@ func (s *Service) AddEpisode(ctx context.Context, showPID model.PID, ep model.Fe
 }
 
 // Sync enumerates one show conditionally (ETag/Last-Modified) through its
-// provider: a NotModified only reports no change, otherwise new/updated episodes are
-// upserted. It never deletes episodes the source stopped listing. A manual show has
-// nothing to sync; a youtube show needs an injected provider. rss and youtube shows
-// use the same sync path.
+// provider: a NotModified only records the fetch time, otherwise new/updated episodes
+// are upserted and the fresh validators land with them. It never deletes episodes the
+// source stopped listing. A manual show has nothing to sync; a youtube show needs an
+// injected provider. rss and youtube shows use the same sync path.
 //
 // The show's cover is refreshed from the feed only when the feed's image URL differs
 // from where the cover it holds came from, and never while that cover is locked. Both
 // facts ride along on the PodcastByPID this already does, so neither costs a query.
 func (s *Service) Sync(ctx context.Context, podcastPID model.PID) (*model.UpsertFeedResult, error) {
-	pod, err := s.store.PodcastByPID(ctx, podcastPID)
+	res, unchanged, err := s.sync(ctx, podcastPID)
 	if err != nil {
 		return nil, err
+	}
+	if unchanged {
+		if err := s.store.MarkPodcastsFetched(ctx, []model.PID{podcastPID}, s.now().UnixNano()); err != nil {
+			return nil, err
+		}
+	}
+	return res, nil
+}
+
+// sync is Sync without the fetch-time mark, which the caller records: Sync right
+// away, SyncAll once for every show that answered NotModified. unchanged reports that
+// answer.
+func (s *Service) sync(ctx context.Context, podcastPID model.PID) (res *model.UpsertFeedResult, unchanged bool, err error) {
+	const op = "podcast.Sync"
+	pod, err := s.store.PodcastByPID(ctx, podcastPID)
+	if err != nil {
+		return nil, false, err
 	}
 	st := pod.SourceType
 	if st == "" {
@@ -356,47 +377,74 @@ func (s *Service) Sync(ctx context.Context, podcastPID model.PID) (*model.Upsert
 	}
 	if st == model.SourceManual {
 		// A manual show is curated episode by episode; there is no feed to enumerate.
-		return &model.UpsertFeedResult{PodcastPID: podcastPID}, nil
+		return &model.UpsertFeedResult{PodcastPID: podcastPID}, false, nil
 	}
 	prov, err := s.providerFor(st)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	user, pass := s.authFor(ctx, pod)
 	enum, err := prov.Enumerate(ctx, source.Request{
 		URL: pod.FeedURL, User: user, Pass: pass, ETag: pod.ETag, LastModified: pod.LastModified,
 	})
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	if enum.NotModified || enum.Feed == nil {
-		// Nothing changed; refreshing the validators/fetch time would cost a re-parse,
-		// so just report no change.
-		return &model.UpsertFeedResult{PodcastPID: podcastPID}, nil
+	if err := checkEnumeration(op, enum, pod.ETag != "" || pod.LastModified != ""); err != nil {
+		return nil, false, err
+	}
+	if enum.NotModified {
+		// The stored validators stay (a 304 echoes them at best); only the fetch time
+		// moves, so the show still reads as checked.
+		return &model.UpsertFeedResult{PodcastPID: podcastPID}, true, nil
 	}
 	// Pass what we know about the cover the show already holds, so an unchanged one is
 	// not re-fetched/re-decoded and a locked one is not fetched at all.
-	return s.upsert(ctx, pod.FeedURL, pod.IdentityKey, st, enum, pod.CoverSourceURL, pod.CoverLocked)
+	res, err = s.upsert(ctx, pod.FeedURL, pod.IdentityKey, st, enum, pod.CoverSourceURL, pod.CoverLocked)
+	return res, false, err
+}
+
+// checkEnumeration refuses the answers the provider contract rules out: no
+// enumeration at all, one with neither a feed nor NotModified, and a NotModified to a
+// request that carried no validators, which is a misbehaving server or CDN rather
+// than an unchanged source.
+func checkEnumeration(op string, enum *source.Enumeration, conditional bool) error {
+	switch {
+	case enum == nil, !enum.NotModified && enum.Feed == nil:
+		return waxerr.New(waxerr.CodeIO, op, "provider returned neither a feed nor not-modified")
+	case enum.NotModified && !conditional:
+		return waxerr.New(waxerr.CodeIO, op, "feed returned not-modified to an unconditional request")
+	}
+	return nil
 }
 
 // SyncAll syncs every subscribed podcast, returning the per-podcast results. A
-// failed feed is logged and skipped so one dead feed does not abort the batch.
+// failed feed is logged and skipped so one dead feed does not abort the batch. The
+// shows that answered NotModified are marked fetched in one write at the end rather
+// than one write transaction per unchanged feed.
 func (s *Service) SyncAll(ctx context.Context) (map[model.PID]*model.UpsertFeedResult, error) {
 	pods, err := s.store.Podcasts(ctx)
 	if err != nil {
 		return nil, err
 	}
 	out := make(map[model.PID]*model.UpsertFeedResult, len(pods))
+	var unchanged []model.PID
 	for _, p := range pods {
 		if ctx.Err() != nil {
 			return out, waxerr.FromContext("podcast.SyncAll", ctx.Err(), waxerr.CodeCanceled)
 		}
-		res, err := s.Sync(ctx, p.PID)
+		res, notModified, err := s.sync(ctx, p.PID)
 		if err != nil {
 			s.log.Warn("podcast sync failed", "podcast", p.Title, "err", err)
 			continue
 		}
 		out[p.PID] = res
+		if notModified {
+			unchanged = append(unchanged, p.PID)
+		}
+	}
+	if err := s.store.MarkPodcastsFetched(ctx, unchanged, s.now().UnixNano()); err != nil {
+		return out, err
 	}
 	return out, nil
 }
@@ -436,7 +484,7 @@ func (s *Service) upsert(ctx context.Context, feedURL, key string, st model.Sour
 		Feed:         *enum.Feed,
 		ETag:         enum.ETag,
 		LastModified: enum.LastModified,
-		FetchedAtNS:  time.Now().UnixNano(),
+		FetchedAtNS:  s.now().UnixNano(),
 		Image:        img,
 	})
 }

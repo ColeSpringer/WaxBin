@@ -77,8 +77,10 @@ func openValue(cipher model.SecretCipher, key, stored string) (string, error) {
 	pt, err := cipher.Open([]byte(key), ct)
 	if err != nil {
 		// Name the key id the value was sealed under, so a cipher/epoch mismatch after a
-		// rotation is diagnosable rather than an opaque authentication failure.
-		return "", waxerr.Wrapf(waxerr.CodeInvalid, op, err, "opening secret sealed under key %q", keyID)
+		// rotation is diagnosable rather than an opaque authentication failure. The
+		// cipher is the embedder's, so whatever class it gave the failure, an unopenable
+		// value is invalid here rather than, say, not found.
+		return "", waxerr.Classifyf(waxerr.CodeInvalid, op, err, "opening secret sealed under key %q", keyID)
 	}
 	return string(pt), nil
 }

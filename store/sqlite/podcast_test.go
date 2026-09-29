@@ -228,3 +228,127 @@ func TestEnsurePodcastLibraryRefusesAMusicRoot(t *testing.T) {
 		t.Errorf("second EnsurePodcastLibrary = %d (err %v), want the first id %d", again, err, id)
 	}
 }
+
+// TestUpsertFeedFailureKeepsPriorValidators: a sync whose transaction fails after the
+// show row was rewritten commits neither the new validators nor the new episode,
+// which is the receipt source.Provider.Enumerate promises. The failure is a feed image
+// with no attribution, which the art writer refuses between the show row and the
+// episode loop.
+func TestUpsertFeedFailureKeepsPriorValidators(t *testing.T) {
+	st, _ := openTestStore(t)
+	ctx := context.Background()
+	first := feedInput("http://feed.example/f", "Alpha")
+	first.ETag, first.LastModified, first.FetchedAtNS = `"v1"`, "Mon, 01 Jan 2024 00:00:00 GMT", 100
+	res, err := st.UpsertFeed(ctx, first)
+	if err != nil {
+		t.Fatalf("UpsertFeed: %v", err)
+	}
+
+	second := feedInput("http://feed.example/f", "Alpha", "Beta")
+	second.ETag, second.LastModified, second.FetchedAtNS = `"v2"`, "Tue, 02 Jan 2024 00:00:00 GMT", 200
+	second.Image = &model.ArtImage{Data: []byte{1}, Hash: "sha256:x", Format: "png", Width: 1, Height: 1}
+	if _, err := st.UpsertFeed(ctx, second); !waxerr.Is(err, waxerr.CodeInvalid) {
+		t.Fatalf("UpsertFeed with an unattributed image = %v, want CodeInvalid", err)
+	}
+	pod, err := st.PodcastByPID(ctx, res.PodcastPID)
+	if err != nil {
+		t.Fatalf("PodcastByPID: %v", err)
+	}
+	if pod.ETag != `"v1"` || pod.LastModified != first.LastModified || pod.LastFetchedAt != 100 || pod.EpisodeCount != 1 {
+		t.Fatalf("after failed sync: etag %q last-modified %q fetched %d episodes %d, want the first sync's",
+			pod.ETag, pod.LastModified, pod.LastFetchedAt, pod.EpisodeCount)
+	}
+
+	second.Image = nil
+	if _, err := st.UpsertFeed(ctx, second); err != nil {
+		t.Fatalf("UpsertFeed retry: %v", err)
+	}
+	if pod, err = st.PodcastByPID(ctx, res.PodcastPID); err != nil {
+		t.Fatalf("PodcastByPID: %v", err)
+	}
+	if pod.ETag != `"v2"` || pod.LastFetchedAt != 200 || pod.EpisodeCount != 2 {
+		t.Fatalf("after retry: etag %q fetched %d episodes %d, want v2 / 200 / 2",
+			pod.ETag, pod.LastFetchedAt, pod.EpisodeCount)
+	}
+}
+
+// TestUpsertShowKeepsWhatItDoesNotCarry: UpsertShow on a synced show updates the
+// fields it carries and leaves the rest alone, since it is not a sync: the feed-only
+// columns, the validators and fetch time, and the source type when the input leaves it
+// empty. Losing them used to be masked by the validators going with them, which made
+// the next sync a full re-enumeration that filled them back in.
+func TestUpsertShowKeepsWhatItDoesNotCarry(t *testing.T) {
+	st, _ := openTestStore(t)
+	ctx := context.Background()
+	res, err := st.UpsertFeed(ctx, model.UpsertFeedInput{
+		FeedURL: "yt://c1", IdentityKey: "youtube:channel:c1", SourceType: model.SourceYouTube,
+		Feed: model.Feed{Title: "Chan", Language: "en", Category: "Tech", Explicit: true, GUID: "g1",
+			Episodes: []model.FeedEpisode{{Title: "One", GUID: "youtube:video:1"}}},
+		ETag: "cursor-1", LastModified: "lm-1", FetchedAtNS: 100,
+	})
+	if err != nil {
+		t.Fatalf("UpsertFeed: %v", err)
+	}
+	pid, created, err := st.UpsertShow(ctx, model.UpsertShowInput{
+		IdentityKey: "youtube:channel:c1", FeedURL: "yt://c1", Title: "Chan, renamed",
+	})
+	if err != nil || created || pid != res.PodcastPID {
+		t.Fatalf("UpsertShow = %s created=%v err=%v, want the existing show updated", pid, created, err)
+	}
+	pod, err := st.PodcastByPID(ctx, pid)
+	if err != nil {
+		t.Fatalf("PodcastByPID: %v", err)
+	}
+	if pod.Title != "Chan, renamed" || pod.SourceType != model.SourceYouTube {
+		t.Fatalf("after UpsertShow: title %q source %q, want the title changed and youtube kept", pod.Title, pod.SourceType)
+	}
+	if pod.ETag != "cursor-1" || pod.LastModified != "lm-1" || pod.LastFetchedAt != 100 {
+		t.Fatalf("after UpsertShow: etag %q last-modified %q fetched %d, want the sync's kept", pod.ETag, pod.LastModified, pod.LastFetchedAt)
+	}
+	if pod.Language != "en" || pod.Category != "Tech" || !pod.Explicit || pod.GUID != "g1" {
+		t.Fatalf("after UpsertShow: language %q category %q explicit %v guid %q, want the feed's kept",
+			pod.Language, pod.Category, pod.Explicit, pod.GUID)
+	}
+}
+
+// TestMarkPodcastsFetched: the mark moves only the fetch time, never backwards, emits
+// no delta, and skips a show that is gone.
+func TestMarkPodcastsFetched(t *testing.T) {
+	st, _ := openTestStore(t)
+	ctx := context.Background()
+	in := feedInput("http://feed.example/f", "Alpha")
+	in.ETag, in.FetchedAtNS = `"v1"`, 100
+	res, err := st.UpsertFeed(ctx, in)
+	if err != nil {
+		t.Fatalf("UpsertFeed: %v", err)
+	}
+	seq, err := st.LatestChangeSeq(ctx)
+	if err != nil {
+		t.Fatalf("LatestChangeSeq: %v", err)
+	}
+	fetched := func(step string, want int64) {
+		t.Helper()
+		pod, err := st.PodcastByPID(ctx, res.PodcastPID)
+		if err != nil {
+			t.Fatalf("PodcastByPID: %v", err)
+		}
+		if pod.LastFetchedAt != want || pod.ETag != `"v1"` {
+			t.Fatalf("%s: fetched %d etag %q, want %d / v1", step, pod.LastFetchedAt, pod.ETag, want)
+		}
+	}
+	if err := st.MarkPodcastsFetched(ctx, []model.PID{res.PodcastPID, "gone"}, 500); err != nil {
+		t.Fatalf("MarkPodcastsFetched: %v", err)
+	}
+	fetched("after mark", 500)
+	if err := st.MarkPodcastsFetched(ctx, []model.PID{res.PodcastPID}, 50); err != nil {
+		t.Fatalf("MarkPodcastsFetched older: %v", err)
+	}
+	fetched("after an older mark", 500)
+	after, err := st.LatestChangeSeq(ctx)
+	if err != nil {
+		t.Fatalf("LatestChangeSeq: %v", err)
+	}
+	if after != seq {
+		t.Fatalf("MarkPodcastsFetched advanced the change feed %d -> %d", seq, after)
+	}
+}

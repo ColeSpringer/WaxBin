@@ -31,23 +31,18 @@ func (failAttachStore) AttachEpisodeFile(context.Context, model.AttachEpisodeFil
 // is restored to its source rather than deleted; it is the user's only copy.
 func TestImportEpisodeFileRestoresMovedFileOnCatalogFailure(t *testing.T) {
 	ctx := context.Background()
-	db := filepath.Join(t.TempDir(), "catalog.db")
-	real, err := sqlite.Open(ctx, sqlite.OpenOptions{Path: db, Owner: "test"})
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	t.Cleanup(func() { _ = real.Close() })
+	st := newTestStore(t)
 	dir := t.TempDir()
-	svc := podcast.New(failAttachStore{real}, meta.NewReader(), podcast.Config{Dir: dir},
+	svc := podcast.New(failAttachStore{st}, meta.NewReader(), podcast.Config{Dir: dir},
 		slog.New(slog.NewTextHandler(io.Discard, nil)))
 
-	show, _, err := real.UpsertShow(ctx, model.UpsertShowInput{
+	show, _, err := st.UpsertShow(ctx, model.UpsertShowInput{
 		IdentityKey: "manual:s", FeedURL: "manual:s", SourceType: model.SourceManual, Title: "Show",
 	})
 	if err != nil {
 		t.Fatalf("UpsertShow: %v", err)
 	}
-	ep, err := real.UpsertEpisode(ctx, model.UpsertEpisodeInput{
+	ep, err := st.UpsertEpisode(ctx, model.UpsertEpisodeInput{
 		PodcastPID: show, Pinned: true,
 		Episode: model.FeedEpisode{Title: "Clip", GUID: "c1"},
 	})
@@ -74,15 +69,20 @@ func TestImportEpisodeFileRestoresMovedFileOnCatalogFailure(t *testing.T) {
 	}
 }
 
-func newTestService(t *testing.T, providers ...source.Provider) (*podcast.Service, *sqlite.Store, string) {
+func newTestStore(t *testing.T) *sqlite.Store {
 	t.Helper()
-	ctx := context.Background()
-	db := filepath.Join(t.TempDir(), "catalog.db")
-	st, err := sqlite.Open(ctx, sqlite.OpenOptions{Path: db, Owner: "test"})
+	st, err := sqlite.Open(context.Background(),
+		sqlite.OpenOptions{Path: filepath.Join(t.TempDir(), "catalog.db"), Owner: "test"})
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
+	return st
+}
+
+func newTestService(t *testing.T, providers ...source.Provider) (*podcast.Service, *sqlite.Store, string) {
+	t.Helper()
+	st := newTestStore(t)
 	dir := t.TempDir()
 	svc := podcast.New(st, meta.NewReader(), podcast.Config{Dir: dir, Providers: providers},
 		slog.New(slog.NewTextHandler(io.Discard, nil)))
