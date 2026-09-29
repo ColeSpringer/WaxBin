@@ -36,9 +36,9 @@ import (
 // per-host minimum interval or a token bucket, rather than leaning on the Service to
 // space its calls.
 //
-// Request.Want names the capability whose answer the calling pass will use, so a
-// provider advertising several capabilities can skip the work the caller will not
-// read: a genres pass on a genres-plus-cover provider need not download the cover.
+// Request.Want names the capabilities whose answers the calling pass will use, usually
+// one, so a provider advertising several can skip the work the caller will not read: a
+// genres pass on a genres-plus-cover provider need not download the cover.
 // Honoring it is an optimization, never an obligation. A provider may keep answering
 // with everything it has, since the Service ignores whatever a pass did not ask for,
 // and a zero Want means everything (the pre-Want contract, which is what an embedder
@@ -92,7 +92,8 @@ const (
 	// which is what the album backfill asks for. The built-in Cover Art Archive serves
 	// both and says so through TargetCapabilities, so both front halves run on a stock
 	// install. A provider serving covers for groups alone declares that the same way, so
-	// the album front half does not walk every identified album on its account.
+	// the album front half does not walk every identified album on its account. It is not
+	// consulted at the artist rung, which answers to CapArtistFront.
 	CapCover
 	// CapLyrics supplies a recording's lyrics.
 	CapLyrics
@@ -102,17 +103,20 @@ const (
 	// fields every book provider answers.
 	CapBookMeta
 	// CapAuxArt supplies the auxiliary art roles (back, disc, booklet, background) for
-	// a release group, in Candidate.Art. It is separate from CapCover because it gates
-	// the auxiliary halves of the backfills, which consult only the providers
-	// advertising this, and keep their answers apart from the front's. The built-in Cover
-	// Art Archive serves the front alone and does not advertise it, so an install with no
-	// injected provider walks no auxiliary half and pays nothing for it.
+	// a release group or a release, in Candidate.Art. It is separate from CapCover because
+	// it gates the auxiliary halves of those two backfills, which consult only the
+	// providers advertising this, and keep their answers apart from the front's. The
+	// built-in Cover Art Archive serves the front alone and does not advertise it, so an
+	// install with no injected provider walks no auxiliary half and pays nothing for it.
+	// Like CapCover it is not consulted at the artist rung, which answers to
+	// CapArtistAuxArt.
 	//
 	// A provider that already returns auxiliary roles under CapCover keeps working
 	// exactly as before and contributes to the first-pass gather. To join the backfill
-	// it advertises this alongside CapCover, and answers a request whose Want is
-	// CapAuxArt with the non-front roles it has (the front is ignored there; a front is
-	// asked for under CapCover).
+	// it advertises this alongside CapCover, and answers a request whose Want includes
+	// CapAuxArt with the non-front roles it has. A walk with both halves open asks such a
+	// provider once, with both capabilities in Want; one whose front is settled asks under
+	// CapAuxArt alone, and a front in that answer is ignored.
 	//
 	// A provider serving these roles for release groups and not for a release declares
 	// the release rung empty through TargetCapabilities, so the album-art backfill's
@@ -126,19 +130,16 @@ const (
 	// and take the provider out of every pass. The built-in archive already does this
 	// (see enrich/coverart.go).
 	CapAuxArt
-	// CapArtistArt supplies art for an artist, front and auxiliary roles alike, and gates
-	// the artist backfill. It is its own bit because the Cover Art Archive advertises
-	// CapCover and answers nothing for an artist: gating there would walk every artist on
-	// a stock install and mark each a permanent no-match, which is the bug the backfill
-	// exists to remove. Like CapAuxArt, a provider written before it advertises CapCover
-	// alone and has to add this to be queued. TargetCapabilities states the same rule for
-	// any capability at any rung, which is how the archive declares nothing here.
+	// CapArtistFront supplies an artist's front, the portrait, and gates the front half of
+	// the artist-art backfill. It is its own bit, apart from CapCover, because a cover
+	// provider that declares no rungs is taken to serve every rung, and gating the artist
+	// front on CapCover would ask such a provider about every artist.
 	//
 	// The request carries the artist's name in Artist, with MBID only when the catalog
 	// has one. The walk is keyed on the name, so a local band or a mis-tagged name is
 	// asked about too, and a provider keyed on ids alone answers a nil candidate for an
 	// id-less request rather than an error.
-	CapArtistArt
+	CapArtistFront
 	// CapFields supplies scalar metadata fields in Candidate.Fields, and gates the track
 	// and album fields walks. The rung is the request type rather than a second bit:
 	// TargetRecording asks about one track and its answer lands on that item alone,
@@ -152,17 +153,31 @@ const (
 	// and stamped with the provider's name; everything else in the map is ignored, so a
 	// provider returns what it found rather than pre-filtering.
 	CapFields
+	// CapArtistAuxArt supplies an artist's auxiliary art, the background, and gates the
+	// auxiliary half of the artist-art backfill, the artist rung's CapAuxArt. A provider
+	// that does not advertise it is never asked about an artist's background, so one
+	// serving fronts alone leaves no background miss for the retry window to re-ask. The
+	// request carries what CapArtistFront's does.
+	CapArtistAuxArt
 )
+
+// CapArtistArt is both artist bits, for a provider serving an artist's front and
+// background alike; it is asked once per artist whichever halves are open, and one serving
+// a single half advertises that half's bit. CapCover and CapAuxArt are not consulted at
+// the artist rung, and the Service warns once about a provider offering them there, one
+// declaring no rungs included.
+const CapArtistArt = CapArtistFront | CapArtistAuxArt
 
 // TargetCapabilities is the optional half of a provider's declaration, for one whose
 // capabilities differ by target type: the Cover Art Archive serves a cover for a release
 // group and for a release and nothing for an artist; a fan-art service serves auxiliary
-// art for a release group and an artist and nothing for a release. Capabilities stays
-// the union; CapabilitiesAt narrows it to what the provider answers for one target type,
-// and the Service consults it wherever it dispatches, so a provider is asked only at the
-// rungs it serves and a phase runs only when some provider serves its capability at its
-// own rung. A provider that does not implement it is taken to serve every capability it
-// advertises at every rung, which is what every provider written before it did.
+// art for a release group, and artist art, under CapArtistArt, for an artist, and
+// nothing for a release. Capabilities stays the union; CapabilitiesAt narrows it to what
+// the provider answers for one target type, and the Service consults it wherever it
+// dispatches, so a provider is asked only at the rungs it serves and a phase runs only
+// when some provider serves its capability at its own rung. A provider that does not
+// implement it is taken to serve every capability it advertises at every rung, which is
+// what every provider written before it did.
 type TargetCapabilities interface {
 	CapabilitiesAt(t TargetType) Capability
 }
@@ -196,10 +211,11 @@ const (
 type Request struct {
 	Type  TargetType
 	Force bool
-	// Want is the capability whose answer this pass will use; zero means everything
+	// Want names the capabilities whose answers this pass will use: one, or an art rung's
+	// front and auxiliary pair when one call asks about both halves. Zero means everything
 	// (the pre-Want contract, so existing providers and embedders are untouched). A
-	// provider may skip work whose results serve only capabilities absent from Want;
-	// anything extra it returns is ignored by the Service.
+	// provider may skip work whose results serve only capabilities absent from Want; the
+	// Service ignores what else it returns, save the auxiliary art a cover answer carries.
 	Want   Capability
 	Title  string // artist name | release-group title | track title | book title
 	Artist string // disambiguating primary artist (release group / recording / book)
@@ -232,7 +248,7 @@ type Request struct {
 }
 
 // Wants reports whether this request's pass will use an answer for c. Capability.Has
-// is any-overlap, which is exact for the single-bit wants the Service stamps.
+// is any-overlap, so a want naming an art rung's front and auxiliary pair reports each.
 func (r Request) Wants(c Capability) bool { return r.Want == 0 || r.Want.Has(c) }
 
 // Candidate is a provider's proposed enrichment for one request. The Service applies

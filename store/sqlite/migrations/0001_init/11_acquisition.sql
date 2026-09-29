@@ -35,8 +35,8 @@ CREATE INDEX acquisition_source ON acquisition(source_type);
 -- whatever id that pass walks. See the enrichEntity* constants for why a new pass takes
 -- its own value.
 CREATE TABLE entity_enrichment (
-  entity_type TEXT    NOT NULL,           -- artist|release_group|book|album|lyrics|group_art|
-                                          -- artist_art|album_art|fields|fields_album
+  entity_type TEXT    NOT NULL,           -- an entity (model.Enrich*Type) or a per-pass
+                                          -- marker (enrichEntity* in store/sqlite/enrich.go)
   entity_id   INTEGER NOT NULL,
   provider    TEXT    NOT NULL,           -- what decided it: musicbrainz, musicbrainz:edition,
                                           -- an injected provider's name, or none

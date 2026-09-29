@@ -378,12 +378,11 @@ func (s *Store) SetItemArt(ctx context.Context, itemPID model.PID, role model.Ar
 	})
 }
 
-// memberFrontClearedTx re-opens an album's art backfill after one of its tracks loses
-// its front. A member track's own cover is usually what answers the album's front
-// through the derived rung, so clearing one opens a vacancy the album's marker says was
-// already asked about; the album predicate reads the resolver's answer, so it sees the
-// gap the moment the track's row goes. A book item matches no track row and gets a
-// no-op.
+// memberFrontClearedTx re-opens an album's front half after one of its tracks loses its
+// front. A member track's own cover is usually what answers the album's front through the
+// derived rung, so clearing one opens a vacancy the album's front marker says was already
+// asked about; the album predicate reads the resolver's answer, so it sees the gap the
+// moment the track's row goes. A book item matches no track row and gets a no-op.
 //
 // Both writers of a track's front call it. SetItemArt is the item surface the CLI uses
 // and SetEntityArt accepts a track type from the proxy, so a rule living in only one of
@@ -397,7 +396,7 @@ func memberFrontClearedTx(ctx context.Context, tx *sql.Tx, itemID int64) error {
 	if err != nil || !albumID.Valid {
 		return err
 	}
-	return deleteAlbumArtMarkerTx(ctx, tx, albumID.Int64)
+	return clearEntityMarkerTx(ctx, tx, enrichEntityAlbumFront, albumID.Int64)
 }
 
 // SetEntityArt sets a durable image on a non-item entity (an album, artist, release
@@ -493,23 +492,22 @@ func (s *Store) SetEntityArt(ctx context.Context, entityType model.ArtEntity, en
 		// which costs one re-ask. SetArtLock reaches the same rule from the other side,
 		// but only past its idempotency return, so it clears on the transition alone.
 		if entityType == model.ArtReleaseGroup || entityType == model.ArtArtist || entityType == model.ArtAlbum {
-			whole := artRoleLockField(role) == "art"
-			drop := whole && lock == model.LockOff
-			// A cleared role opens a vacancy the marker says was already asked about, the
-			// front included, since every rung's backfill asks about it. Without this a
+			// A cleared role opens a vacancy its half's marker says was already asked about,
+			// the front included, since every rung's backfill asks about it. Without this a
 			// cleared front with the lock left alone is never backfilled again short of a
-			// forced run.
-			if img == nil {
-				blocked, err := artFillBlockedTx(ctx, tx, entityType, entityID, role)
-				if err != nil {
-					return waxerr.Wrap(waxerr.CodeIO, op, err)
+			// forced run. The other half's answer still stands.
+			var err error
+			switch {
+			case artRoleLockField(role) == "art" && lock == model.LockOff:
+				err = deleteArtBackfillMarkerTx(ctx, tx, entityType, entityID)
+			case img == nil:
+				var blocked bool
+				if blocked, err = artFillBlockedTx(ctx, tx, entityType, entityID, role); err == nil && !blocked {
+					err = deleteArtBackfillHalfTx(ctx, tx, entityType, entityID, role)
 				}
-				drop = drop || !blocked
 			}
-			if drop {
-				if err := deleteArtBackfillMarkerTx(ctx, tx, entityType, entityID); err != nil {
-					return waxerr.Wrap(waxerr.CodeIO, op, err)
-				}
+			if err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 		}
 		if entityType == model.ArtTrack && img == nil && artRoleLockField(role) == "art" {
@@ -634,25 +632,24 @@ func (s *Store) SetArtLock(ctx context.Context, entityType model.ArtEntity, pid 
 			model.Attribution{Source: model.SourceUser}, model.LockOf(lock)); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
-		// An art backfill's marker records that this entity's vacancies were asked about
+		// An art backfill's markers record that this entity's vacancies were asked about
 		// as of then, and an unlock changes that picture. Releasing the whole "art" lock
-		// clears it outright, since any role may now be fillable and over-clearing costs
-		// one re-ask; releasing a single role clears it only when that role really ended
-		// up open, which a standing whole lock prevents.
+		// clears both halves outright, since any role may now be fillable and over-clearing
+		// costs one re-ask; releasing a single role clears that role's half, and only when
+		// the role really ended up open, which a standing whole lock prevents.
 		if !lock && (entityType == model.ArtReleaseGroup || entityType == model.ArtArtist ||
 			entityType == model.ArtAlbum) {
-			drop := artRoleLockField(role) == "art"
-			if !drop {
-				blocked, err := artFillBlockedTx(ctx, tx, entityType, entityID, role)
-				if err != nil {
-					return waxerr.Wrap(waxerr.CodeIO, op, err)
+			var err error
+			if artRoleLockField(role) == "art" {
+				err = deleteArtBackfillMarkerTx(ctx, tx, entityType, entityID)
+			} else {
+				var blocked bool
+				if blocked, err = artFillBlockedTx(ctx, tx, entityType, entityID, role); err == nil && !blocked {
+					err = deleteArtBackfillHalfTx(ctx, tx, entityType, entityID, role)
 				}
-				drop = !blocked
 			}
-			if drop {
-				if err := deleteArtBackfillMarkerTx(ctx, tx, entityType, entityID); err != nil {
-					return waxerr.Wrap(waxerr.CodeIO, op, err)
-				}
+			if err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 		}
 		if err := stillBlocked(); err != nil {

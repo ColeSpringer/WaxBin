@@ -185,11 +185,15 @@ func TestATrippedProviderLeavesAMissBehindALiveOne(t *testing.T) {
 		t.Errorf("album backs = %d, want the live provider's on all five", n)
 	}
 	if n := scalarInt(t, db, `SELECT COUNT(*) FROM entity_enrichment
-		WHERE entity_type = 'album_art' AND owed = 0 AND matched = 0 AND provider = 'fanart'`); n != 2 {
-		t.Errorf("miss markers naming fanart = %d, want the two albums after the trip", n)
+		WHERE entity_type = 'album_front' AND owed = 0 AND matched = 0 AND provider = 'none'`); n != 2 {
+		t.Errorf("front miss markers naming none = %d, want the two albums after the trip, no front having come back", n)
 	}
-	if owed, settled := owedMarkers(t, dbPath, "album_art"), settledMarkers(t, dbPath, "album_art"); owed != 3 || settled != 2 {
-		t.Errorf("album art markers = %d owed / %d settled, want the three failures owed beside the two misses", owed, settled)
+	if owed, settled := owedMarkers(t, dbPath, "album_front"), settledMarkers(t, dbPath, "album_front"); owed != 3 || settled != 2 {
+		t.Errorf("album front markers = %d owed / %d settled, want the three failures owed beside the two misses", owed, settled)
+	}
+	if n := scalarInt(t, db, `SELECT COUNT(*) FROM entity_enrichment
+		WHERE entity_type = 'album_art' AND owed = 0 AND matched = 1 AND provider = 'fanart'`); n != 5 {
+		t.Errorf("matched auxiliary markers naming fanart = %d, want every back settled on its own half", n)
 	}
 
 	coversDown = false
@@ -317,13 +321,23 @@ func TestTripIsPerProvider(t *testing.T) {
 	}
 }
 
-// warnings records the messages of every record at Warn or above.
-type warnings struct{ msgs []string }
+// warnings records the messages of every record at Warn or above, and the provider each
+// names, empty when it names none.
+type warnings struct{ msgs, providers []string }
 
 func (w *warnings) Enabled(context.Context, slog.Level) bool { return true }
 func (w *warnings) Handle(_ context.Context, r slog.Record) error {
 	if r.Level >= slog.LevelWarn {
 		w.msgs = append(w.msgs, r.Message)
+		provider := ""
+		r.Attrs(func(a slog.Attr) bool {
+			if a.Key == "provider" {
+				provider = a.Value.String()
+				return false
+			}
+			return true
+		})
+		w.providers = append(w.providers, provider)
 	}
 	return nil
 }
@@ -499,7 +513,7 @@ func TestEveryWalkSettlesAnOwedLookupOnItsNextAsk(t *testing.T) {
 	}{
 		{"group art", "group_art", track, down("fanart", enrich.CapAuxArt, enrich.TargetReleaseGroup)},
 		{"artist art", "artist_art", track, down("deezer", enrich.CapArtistArt, enrich.TargetArtist)},
-		{"album art", "album_art", album, down("covers", enrich.CapCover, enrich.TargetRelease)},
+		{"album art", "album_front", album, down("covers", enrich.CapCover, enrich.TargetRelease)},
 		{"track fields", "fields", track, down("getsongbpm", enrich.CapFields, enrich.TargetRecording)},
 		{"book fields", "fields", book, down("audible", enrich.CapBookMeta, enrich.TargetBook)},
 		{"album fields", "fields_album", album, down("discogs", enrich.CapFields, enrich.TargetRelease)},

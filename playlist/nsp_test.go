@@ -138,10 +138,10 @@ func TestNSPRoundTrip(t *testing.T) {
 }
 
 func TestNSPUserStateFields(t *testing.T) {
-	// Navidrome's per-user fields (rating/starred/playcount) map to WaxBin's
-	// user-state query fields, so a rating/starred/playcount rule imports and
+	// Navidrome's per-user fields (rating/loved/playcount) map to WaxBin's
+	// user-state query fields, so a rating/loved/playcount rule imports and
 	// round-trips. The user is bound at read time, never in the rule doc.
-	data := []byte(`{"all":[{"gt":{"rating":3}},{"is":{"starred":true}},{"gt":{"playcount":0}}]}`)
+	data := []byte(`{"all":[{"gt":{"rating":3}},{"is":{"loved":true}},{"gt":{"playcount":0}}]}`)
 	q, err := ImportNSP(data)
 	if err != nil {
 		t.Fatalf("import user-state nsp: %v", err)
@@ -408,15 +408,15 @@ func TestNSPDateSortFields(t *testing.T) {
 }
 
 func TestExportNSPRejectsUnsupported(t *testing.T) {
-	// isPresent has no .nsp representation.
+	// Navidrome allows isPresent only on a field that can be empty, and title cannot.
 	q := query.New(query.EntityItems).WherePresence("title", query.OpIsPresent).Build()
 	if _, err := ExportNSP(q); !waxerr.Is(err, waxerr.CodeUnsupported) {
 		t.Errorf("export isPresent: want CodeUnsupported, got %v", err)
 	}
-	// A field WaxBin has but .nsp does not map (path).
-	q = query.New(query.EntityItems).Where("path", query.OpContains, "x").Build()
+	// A field WaxBin has but .nsp does not map (container).
+	q = query.New(query.EntityItems).Where("container", query.OpContains, "x").Build()
 	if _, err := ExportNSP(q); !waxerr.Is(err, waxerr.CodeUnsupported) {
-		t.Errorf("export path: want CodeUnsupported, got %v", err)
+		t.Errorf("export container: want CodeUnsupported, got %v", err)
 	}
 }
 
@@ -438,7 +438,7 @@ func nspExportCases(t *testing.T) map[string]query.Query {
 	return map[string]query.Query{
 		"clean and":            imported(`{"all":[{"is":{"artist":"Radiohead"}},{"contains":{"title":"karma"}}],"sort":"title","order":"desc","limit":50}`),
 		"clean nested any":     imported(`{"any":[{"is":{"genre":"Jazz"}},{"all":[{"gt":{"year":2000}},{"notContains":{"album":"live"}}]}]}`),
-		"clean user state":     imported(`{"all":[{"gt":{"rating":3}},{"is":{"starred":true}},{"gt":{"playcount":0}}]}`),
+		"clean user state":     imported(`{"all":[{"gt":{"rating":3}},{"is":{"loved":true}},{"gt":{"playcount":0}}]}`),
 		"clean relative dates": imported(`{"all":[{"inTheLast":{"lastPlayed":30}},{"notInTheLast":{"dateAdded":7}}]}`),
 		"clean random":         imported(`{"all":[{"is":{"artist":"X"}}],"sort":"random","limit":25}`),
 		"clean date sort":      imported(`{"all":[{"is":{"artist":"X"}}],"sort":"dateAdded","order":"desc","limit":50}`),
@@ -449,7 +449,7 @@ func nspExportCases(t *testing.T) map[string]query.Query {
 		"tag field":            query.New(query.EntityItems).Where("tag.MOOD", query.OpIs, "happy").Build(),
 		"in operator":          query.New(query.EntityItems).WhereValues("artist", query.OpIn, "A", "B").Build(),
 		"is present":           query.New(query.EntityItems).WherePresence("title", query.OpIsPresent).Build(),
-		"path field":           query.New(query.EntityItems).Where("path", query.OpContains, "x").Build(),
+		"container field":      query.New(query.EntityItems).Where("container", query.OpContains, "x").Build(),
 		"fractional star":      query.New(query.EntityItems).Where("rating", query.OpGt, 73).Build(),
 		"fractional star range": query.New(query.EntityItems).
 			WhereRange("rating", query.OpInRange, 73, 80).Build(),
@@ -459,8 +459,8 @@ func nspExportCases(t *testing.T) map[string]query.Query {
 		"absolute date op":       query.New(query.EntityItems).Where("last_played", query.OpAfter, int64(1)).Build(),
 		"unsupported negation":   negated(query.Cond{Field: "artist", Op: query.OpIs, Value: "x"}),
 		"notContains on date":    negated(query.Cond{Field: "added", Op: query.OpContains, Value: "x"}),
-		"notContains bad field":  negated(query.Cond{Field: "path", Op: query.OpContains, Value: "x"}),
-		"unsupported sort field": query.New(query.EntityItems).Where("artist", query.OpIs, "X").OrderBy("path", false).Build(),
+		"notContains bad field":  negated(query.Cond{Field: "container", Op: query.OpContains, Value: "x"}),
+		"unsupported sort field": query.New(query.EntityItems).Where("artist", query.OpIs, "X").OrderBy("container", false).Build(),
 		"minutes budget":         query.New(query.EntityItems).Limit(60).LimitBy(query.LimitMinutes).Build(),
 		"seeded random":          query.New(query.EntityItems).Limit(25).LimitBy(query.LimitRandom).Seed(42).Build(),
 		"random with sorts": {Entity: query.EntityItems, Limit: 25, LimitMode: query.LimitRandom,
@@ -511,21 +511,45 @@ func nspExportCases(t *testing.T) map[string]query.Query {
 		// playlist matching more than it did.
 		"starred ordered with sibling": query.New(query.EntityItems).
 			Where("artist", query.OpIs, "X").Where("starred", query.OpGt, 0).Build(),
+		// duration is seconds in .nsp and milliseconds in WaxBin, and the presence operators
+		// carry only on the fields Navidrome lets be empty.
+		"clean duration": query.New(query.EntityItems).Where("duration_ms", query.OpGt, 300500).Build(),
+		"clean duration range": query.New(query.EntityItems).
+			WhereRange("duration_ms", query.OpInRange, 500, 300250).Build(),
+		"clean rel path": query.New(query.EntityItems).Where("rel_path", query.OpStartsWith, "Rock/").Build(),
+		"path field":     query.New(query.EntityItems).Where("path", query.OpContains, "Beatles/").Build(),
+		"clean new pairs": imported(`{"all":[{"contains":{"composer":"Bach"}},{"is":{"catalognumber":"X1"}},` +
+			`{"is":{"mbz_album_id":"a"}},{"inTheLast":{"dateloved":30}}],"sort":"dateloved","order":"desc"}`),
+		"clean presence": query.New(query.EntityItems).WherePresence("recording_mbid", query.OpIsMissing).
+			WherePresence("bpm", query.OpIsPresent).Build(),
+		"alias presence albumartist": query.New(query.EntityItems).WherePresence("albumartist", query.OpIsMissing).Build(),
+		"duration contains":          query.New(query.EntityItems).Where("duration_ms", query.OpContains, 300).Build(),
+		"duration notContains":       negated(query.Cond{Field: "duration_ms", Op: query.OpContains, Value: 300}),
+		"duration fractional ms":     query.New(query.EntityItems).Where("duration_ms", query.OpGt, 300000.5).Build(),
+		"duration too large":         query.New(query.EntityItems).Where("duration_ms", query.OpGt, int64(1)<<60).Build(),
+		"rating is missing":          query.New(query.EntityItems).WherePresence("rating", query.OpIsMissing).Build(),
+		"negated presence":           negated(query.Cond{Field: "recording_mbid", Op: query.OpIsMissing}),
+		"presence on date":           query.New(query.EntityItems).WherePresence("starred_at", query.OpIsMissing).Build(),
+		"clean rel path isNot":       query.New(query.EntityItems).Where("rel_path", query.OpIsNot, "Rock/Bad Song.mp3").Build(),
+		"clean rel path notContains": negated(query.Cond{Field: "rel_path", Op: query.OpContains, Value: "Live/"}),
+		"clean rel path sort": query.New(query.EntityItems).Where("artist", query.OpIs, "X").
+			OrderBy("rel_path", false).Limit(50).Build(),
 	}
 }
 
-// TestNSPStarredConverts pins the conversion .nsp's boolean and WaxBin's 0/1 column
-// need. Without it an imported rule stored a Go bool the engine never produces itself,
-// and a natively written `starred is 1` exported as the integer 1 into a document that
-// defines the field as a boolean.
-func TestNSPStarredConverts(t *testing.T) {
+// TestNSPLovedConverts pins the conversion .nsp's boolean and WaxBin's 0/1 column need.
+// Navidrome names the field loved and WaxBin names it starred. Without the conversion an
+// imported rule stored a Go bool the engine never produces itself, and a natively written
+// `starred is 1` exported as the integer 1 into a document that defines the field as a
+// boolean.
+func TestNSPLovedConverts(t *testing.T) {
 	for _, tc := range []struct {
 		doc  string
 		want int64
 	}{
-		{`{"all":[{"is":{"starred":true}}]}`, 1},
-		{`{"all":[{"is":{"starred":false}}]}`, 0},
-		{`{"all":[{"is":{"starred":1}}]}`, 1}, // a document that round-tripped through here
+		{`{"all":[{"is":{"loved":true}}]}`, 1},
+		{`{"all":[{"is":{"loved":false}}]}`, 0},
+		{`{"all":[{"is":{"loved":1}}]}`, 1}, // a document that round-tripped through here
 	} {
 		q, err := ImportNSP([]byte(tc.doc))
 		if err != nil {
@@ -535,8 +559,8 @@ func TestNSPStarredConverts(t *testing.T) {
 		if !ok {
 			t.Fatalf("import %s: where = %#v", tc.doc, q.Where)
 		}
-		if got, ok := c.Value.(int64); !ok || got != tc.want {
-			t.Errorf("import %s stored %#v, want int64(%d)", tc.doc, c.Value, tc.want)
+		if got, ok := c.Value.(int64); !ok || got != tc.want || c.Field != "starred" {
+			t.Errorf("import %s stored %s %#v, want starred int64(%d)", tc.doc, c.Field, c.Value, tc.want)
 		}
 	}
 
@@ -544,12 +568,12 @@ func TestNSPStarredConverts(t *testing.T) {
 		val  any
 		want string
 	}{
-		{1, `{"is":{"starred":true}}`},
-		{0, `{"is":{"starred":false}}`},
-		{int64(1), `{"is":{"starred":true}}`},
+		{1, `{"is":{"loved":true}}`},
+		{0, `{"is":{"loved":false}}`},
+		{int64(1), `{"is":{"loved":true}}`},
 		// A rule imported before the conversion existed holds a bool, which is already
 		// the value .nsp wants.
-		{true, `{"is":{"starred":true}}`},
+		{true, `{"is":{"loved":true}}`},
 	} {
 		doc, err := ExportNSP(query.New(query.EntityItems).Where("starred", query.OpIs, tc.val).Build())
 		if err != nil {
@@ -561,7 +585,7 @@ func TestNSPStarredConverts(t *testing.T) {
 	}
 
 	// A round trip is byte-identical, which is the property the conversion has to keep.
-	const doc = `{"all":[{"is":{"starred":true}},{"isNot":{"starred":false}}]}`
+	const doc = `{"all":[{"is":{"loved":true}},{"isNot":{"loved":false}}]}`
 	q, err := ImportNSP([]byte(doc))
 	if err != nil {
 		t.Fatalf("import: %v", err)
@@ -573,12 +597,22 @@ func TestNSPStarredConverts(t *testing.T) {
 	if compact(back) != doc {
 		t.Errorf("round trip = %s, want %s", compact(back), doc)
 	}
+
+	// starred is a name only WaxBin ever wrote into a document, and Navidrome refuses one,
+	// so it is not in the vocabulary.
+	rep, err := CheckNSPImport([]byte(`{"all":[{"is":{"starred":true}}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rep.Gaps) == 0 || rep.Gaps[0].Code != NSPReasonUnsupportedField || rep.Gaps[0].Field != "starred" {
+		t.Errorf("import of starred: gaps = %+v, want unsupported_field on starred first", rep.Gaps)
+	}
 }
 
-// TestNSPStarredRefusesNonBoolean covers the two ways a starred rule has no .nsp form:
-// an operator that means nothing on a boolean, and a value the column can never hold.
-// Both used to render a document Navidrome would read as something else.
-func TestNSPStarredRefusesNonBoolean(t *testing.T) {
+// TestNSPLovedRefusesNonBoolean covers the two ways a starred rule has no .nsp form: an
+// operator that means nothing on a boolean, and a value the column can never hold. Both
+// used to render a document Navidrome would read as something else.
+func TestNSPLovedRefusesNonBoolean(t *testing.T) {
 	for _, tc := range []struct {
 		what string
 		q    query.Query
@@ -609,15 +643,15 @@ func TestNSPStarredRefusesNonBoolean(t *testing.T) {
 
 	// The import direction narrows the same way, so a document Navidrome would not have
 	// written does not become a stored rule nothing can export back.
-	irep, err := CheckNSPImport([]byte(`{"all":[{"gt":{"starred":true}}]}`))
+	irep, err := CheckNSPImport([]byte(`{"all":[{"gt":{"loved":true}}]}`))
 	if err != nil {
 		t.Fatalf("check import: %v", err)
 	}
-	if irep.OK() {
-		t.Error("importing an ordered starred rule reported no gap")
+	if len(irep.Gaps) == 0 || irep.Gaps[0].Code != NSPReasonBooleanOperator {
+		t.Errorf("importing an ordered loved rule: gaps = %+v, want boolean_operator first", irep.Gaps)
 	}
-	if _, err := ImportNSP([]byte(`{"all":[{"is":{"starred":"yes"}}]}`)); err == nil {
-		t.Error("importing a non-boolean starred value was accepted")
+	if _, err := ImportNSP([]byte(`{"all":[{"is":{"loved":"yes"}}]}`)); err == nil {
+		t.Error("importing a non-boolean loved value was accepted")
 	}
 }
 
@@ -729,13 +763,17 @@ func TestNSPExportableFields(t *testing.T) {
 		t.Errorf("NSPExportableFields is not sorted: %v", fields)
 	}
 	for _, want := range []string{"album_artist", "albumartist", "track", "track_no",
-		"disc", "disc_no", "added", "created_at", "last_played", "rating", "title"} {
+		"disc", "disc_no", "added", "created_at", "last_played", "rating", "title",
+		"rel_path", "duration_ms", "starred_at", "composer", "album_catalog_number", "recording_mbid",
+		"album_mbid", "release_group_mbid"} {
 		if !slices.Contains(fields, want) {
 			t.Errorf("NSPExportableFields is missing %q: %v", want, fields)
 		}
 	}
-	if slices.Contains(fields, "path") {
-		t.Errorf("NSPExportableFields names path, which no export can carry: %v", fields)
+	for _, absent := range []string{"codec", "path", "mbid"} {
+		if slices.Contains(fields, absent) {
+			t.Errorf("NSPExportableFields names %s, which no export can carry: %v", absent, fields)
+		}
 	}
 	for _, f := range fields {
 		_, cond := wbFieldToNSP[f]
@@ -755,6 +793,33 @@ func TestNSPExportableFields(t *testing.T) {
 	for nspName, field := range nspDateFieldToWB {
 		if wbDateFieldToNSP[field] != nspName {
 			t.Errorf("date %s maps to %q, which reverses to %q", nspName, field, wbDateFieldToNSP[field])
+		}
+	}
+}
+
+// TestNSPImportableFields is the import side's list: the Navidrome names an import
+// description shows, which is every key of both forward maps and nothing else.
+func TestNSPImportableFields(t *testing.T) {
+	fields := NSPImportableFields()
+	if !slices.IsSorted(fields) {
+		t.Errorf("NSPImportableFields is not sorted: %v", fields)
+	}
+	for _, want := range []string{"loved", "dateloved", "duration", "filepath", "mbz_album_id", "albumartist"} {
+		if !slices.Contains(fields, want) {
+			t.Errorf("NSPImportableFields is missing %q: %v", want, fields)
+		}
+	}
+	if slices.Contains(fields, "starred") {
+		t.Errorf("NSPImportableFields names starred, which Navidrome never writes: %v", fields)
+	}
+	if len(fields) != len(nspFieldToWB)+len(nspDateFieldToWB) {
+		t.Errorf("NSPImportableFields has %d names, the forward maps %d", len(fields), len(nspFieldToWB)+len(nspDateFieldToWB))
+	}
+	for _, f := range fields {
+		_, cond := nspFieldToWB[f]
+		_, date := nspDateFieldToWB[f]
+		if !cond && !date {
+			t.Errorf("NSPImportableFields names %q, which neither import map holds", f)
 		}
 	}
 }
@@ -900,22 +965,30 @@ func TestExportNSPPartialPrunes(t *testing.T) {
 // like "minutes budget" refuse would otherwise skip the case it exists to pin.
 func nspPartialRefusals() map[string]bool {
 	return map[string]bool{
-		"tag field":             true,
-		"in operator":           true,
-		"is present":            true,
-		"path field":            true,
-		"fractional star":       true,
-		"fractional star range": true,
-		"rating contains":       true,
-		"rating notContains":    true,
-		"partial day":           true,
-		"absolute date op":      true,
-		"unsupported negation":  true,
-		"notContains on date":   true,
-		"notContains bad field": true,
-		"nothing survives":      true,
-		"starred ordered":       true,
-		"starred nonsense":      true,
+		"tag field":              true,
+		"in operator":            true,
+		"is present":             true,
+		"container field":        true,
+		"fractional star":        true,
+		"fractional star range":  true,
+		"rating contains":        true,
+		"rating notContains":     true,
+		"partial day":            true,
+		"absolute date op":       true,
+		"unsupported negation":   true,
+		"notContains on date":    true,
+		"notContains bad field":  true,
+		"nothing survives":       true,
+		"starred ordered":        true,
+		"starred nonsense":       true,
+		"duration contains":      true,
+		"duration notContains":   true,
+		"duration fractional ms": true,
+		"duration too large":     true,
+		"rating is missing":      true,
+		"negated presence":       true,
+		"presence on date":       true,
+		"path field":             true,
 	}
 }
 
@@ -1008,7 +1081,7 @@ func TestExportNSPExtraSorts(t *testing.T) {
 	}
 	// The extra terms are reported even when the first one is itself unmappable,
 	// since the two are separate causes.
-	both := query.New(query.EntityItems).OrderBy("path", false).OrderBy("year", true).Build()
+	both := query.New(query.EntityItems).OrderBy("container", false).OrderBy("year", true).Build()
 	if rep := CheckNSPExport(both); len(rep.Gaps) != 2 {
 		t.Errorf("gaps = %+v, want the unmappable field and the extra term", rep.Gaps)
 	}
@@ -1074,7 +1147,7 @@ func nspImportCases() map[string]string {
 	return map[string]string{
 		"clean and":            `{"all":[{"is":{"artist":"Radiohead"}},{"contains":{"title":"karma"}}],"sort":"title","order":"desc","limit":50}`,
 		"clean nested any":     `{"any":[{"is":{"genre":"Jazz"}},{"all":[{"gt":{"year":2000}},{"notContains":{"album":"live"}}]}]}`,
-		"clean user state":     `{"all":[{"gt":{"rating":3}},{"is":{"starred":true}},{"gt":{"playcount":0}}]}`,
+		"clean user state":     `{"all":[{"gt":{"rating":3}},{"is":{"loved":true}},{"gt":{"playcount":0}}]}`,
 		"clean relative dates": `{"all":[{"inTheLast":{"lastPlayed":30}},{"notInTheLast":{"dateAdded":7}}]}`,
 		"clean random":         `{"all":[{"is":{"artist":"X"}}],"sort":"random","limit":25}`,
 		"clean date sort":      `{"all":[{"is":{"artist":"X"}}],"sort":"dateAdded","order":"desc","limit":50}`,
@@ -1102,6 +1175,22 @@ func nspImportCases() map[string]string {
 		"group not an array":   `{"all":{"is":{"artist":"x"}}}`,
 		"multiple roots":       `{"all":[{"is":{"artist":"x"}}],"any":[{"is":{"genre":"Jazz"}}]}`,
 		"all unmappable":       `{"all":[{"is":{"comment":"x"}},{"is":{"bitrate":320}}]}`,
+		"clean loved":          `{"all":[{"is":{"loved":true}},{"isNot":{"loved":false}}]}`,
+		"clean duration":       `{"all":[{"gt":{"duration":300.5}},{"inTheRange":{"duration":[0.5,300.25]}}],"sort":"duration"}`,
+		"clean new pairs": `{"all":[{"endsWith":{"filepath":".flac"}},{"contains":{"composer":"Bach"}},` +
+			`{"is":{"catalognumber":"X1"}},{"is":{"mbz_recording_id":"r"}},{"is":{"mbz_album_id":"a"}},` +
+			`{"is":{"mbz_release_group_id":"g"}},{"inTheLast":{"dateloved":30}}],"sort":"dateloved","order":"desc"}`,
+		"clean presence":        `{"all":[{"isMissing":{"mbz_recording_id":true}},{"isPresent":{"bpm":false}}]}`,
+		"starred retired":       `{"all":[{"is":{"starred":true}}]}`,
+		"duration not whole ms": `{"all":[{"gt":{"duration":300.0004}}]}`,
+		"duration too large":    `{"all":[{"gt":{"duration":1e30}}]}`,
+		"duration contains":     `{"all":[{"contains":{"duration":300}}]}`,
+		"rating too large":      `{"all":[{"gt":{"rating":1e308}}]}`,
+		"presence on title":     `{"all":[{"isMissing":{"title":true}}]}`,
+		"presence not boolean":  `{"all":[{"isMissing":{"album":"yes"}}]}`,
+		"presence on date":      `{"all":[{"isMissing":{"dateloved":true}}]}`,
+		"clean folder rule":     `{"all":[{"startsWith":{"filepath":"Soundtracks/"}}]}`,
+		"clean path exclusion":  `{"all":[{"isNot":{"filepath":"Rock/Bad Song.mp3"}}]}`,
 	}
 }
 
@@ -1242,49 +1331,64 @@ func TestImportNSPPartialRefusesMalformed(t *testing.T) {
 	}
 }
 
-// TestNSPRatingSubstringOpsRejected pins the one place the rating scale bridge
-// cannot be applied. Every other operator on rating converts between 0-to-5 and
-// 0-to-100, but a substring match does not survive a numeric conversion, so
-// scaling it would silently change which ratings match and not scaling it would
-// compare a 0-to-5 value against a 0-to-100 column. Both directions refuse.
-func TestNSPRatingSubstringOpsRejected(t *testing.T) {
-	for _, op := range []query.Op{query.OpContains, query.OpStartsWith, query.OpEndsWith} {
-		q := query.New(query.EntityItems).Where("rating", op, 60).Build()
-		rep := CheckNSPExport(q)
-		if len(rep.Gaps) != 1 || rep.Gaps[0].Kind != NSPGapOperator || rep.Gaps[0].Field != "rating" {
-			t.Errorf("export %s on rating: gaps = %+v, want one operator gap", op, rep.Gaps)
+// TestNSPScaledSubstringOpsRejected pins the one place a value conversion cannot be
+// applied. Every other operator on rating converts between 0-to-5 and 0-to-100, and on
+// duration between seconds and milliseconds, but a substring match does not survive a
+// numeric conversion, so scaling it would silently change which values match and not
+// scaling it would compare one side's unit against the other's column. Both directions
+// refuse, under one code.
+func TestNSPScaledSubstringOpsRejected(t *testing.T) {
+	for _, f := range []struct{ wb, nsp string }{{"rating", "rating"}, {"duration_ms", "duration"}} {
+		for _, op := range []query.Op{query.OpContains, query.OpStartsWith, query.OpEndsWith} {
+			q := query.New(query.EntityItems).Where(f.wb, op, 60).Build()
+			rep := CheckNSPExport(q)
+			if len(rep.Gaps) != 1 || rep.Gaps[0].Kind != NSPGapOperator || rep.Gaps[0].Field != f.wb ||
+				rep.Gaps[0].Code != NSPReasonScaledTextOperator {
+				t.Errorf("export %s on %s: gaps = %+v, want one scaled_text_operator gap", op, f.wb, rep.Gaps)
+			}
 		}
-	}
-	neg := query.New(query.EntityItems).
-		WhereNode(query.Not{Node: query.Cond{Field: "rating", Op: query.OpContains, Value: 60}}).Build()
-	if rep := CheckNSPExport(neg); len(rep.Gaps) != 1 || rep.Gaps[0].Kind != NSPGapOperator {
-		t.Errorf("export notContains on rating: gaps = %+v, want one operator gap", rep.Gaps)
+		neg := query.New(query.EntityItems).
+			WhereNode(query.Not{Node: query.Cond{Field: f.wb, Op: query.OpContains, Value: 60}}).Build()
+		if rep := CheckNSPExport(neg); len(rep.Gaps) != 1 || rep.Gaps[0].Code != NSPReasonScaledTextOperator ||
+			rep.Gaps[0].Op != "notContains" {
+			t.Errorf("export notContains on %s: gaps = %+v, want one scaled_text_operator gap", f.wb, rep.Gaps)
+		}
+
+		for _, op := range []string{"contains", "startsWith", "endsWith", "notContains"} {
+			doc := `{"all":[{"` + op + `":{"` + f.nsp + `":3}}]}`
+			if _, err := ImportNSP([]byte(doc)); !waxerr.Is(err, waxerr.CodeUnsupported) {
+				t.Errorf("import %s: want CodeUnsupported, got %v", doc, err)
+			}
+			rep, err := CheckNSPImport([]byte(doc))
+			if err != nil {
+				t.Fatalf("check %s: %v", doc, err)
+			}
+			// The leaf is the only member of its group, so the group it empties is
+			// reported after it; the leaf's own gap is what this checks.
+			if len(rep.Gaps) == 0 || rep.Gaps[0].Kind != NSPGapOperator || rep.Gaps[0].Field != f.nsp ||
+				rep.Gaps[0].Code != NSPReasonScaledTextOperator {
+				t.Errorf("import %s: gaps = %+v, want a scaled_text_operator gap on %s first", doc, rep.Gaps, f.nsp)
+			}
+		}
+
+		// The numeric operators still convert, so this is a rule about substring
+		// matching and not about the field.
+		if rep := CheckNSPExport(query.New(query.EntityItems).Where(f.wb, query.OpGt, 60).Build()); !rep.OK() {
+			t.Errorf("gt on %s stopped mapping: %+v", f.wb, rep.Gaps)
+		}
 	}
 
-	for _, doc := range []string{
-		`{"all":[{"contains":{"rating":3}}]}`,
-		`{"all":[{"startsWith":{"rating":3}}]}`,
-		`{"all":[{"endsWith":{"rating":3}}]}`,
-		`{"all":[{"notContains":{"rating":3}}]}`,
-	} {
-		if _, err := ImportNSP([]byte(doc)); !waxerr.Is(err, waxerr.CodeUnsupported) {
-			t.Errorf("import %s: want CodeUnsupported, got %v", doc, err)
-		}
-		rep, err := CheckNSPImport([]byte(doc))
-		if err != nil {
-			t.Fatalf("check %s: %v", doc, err)
-		}
-		// The leaf is the only member of its group, so the group it empties is
-		// reported after it; the leaf's own gap is what this checks.
-		if len(rep.Gaps) == 0 || rep.Gaps[0].Kind != NSPGapOperator || rep.Gaps[0].Field != "rating" {
-			t.Errorf("import %s: gaps = %+v, want an operator gap on rating first", doc, rep.Gaps)
-		}
+	// The sentence names each field's own conversion, in the direction the report ran.
+	exp := CheckNSPExport(query.New(query.EntityItems).Where("duration_ms", query.OpContains, 3).Build())
+	if len(exp.Gaps) != 1 || !strings.Contains(exp.Gaps[0].Reason, "milliseconds to seconds") {
+		t.Errorf("export duration sentence = %+v, want the milliseconds to seconds conversion named", exp.Gaps)
 	}
-
-	// The numeric operators still scale, so this is a rule about substring
-	// matching and not about the rating field.
-	if rep := CheckNSPExport(query.New(query.EntityItems).Where("rating", query.OpGt, 60).Build()); !rep.OK() {
-		t.Errorf("gt on rating stopped mapping: %+v", rep.Gaps)
+	imp, err := CheckNSPImport([]byte(`{"all":[{"contains":{"rating":3}}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(imp.Gaps) == 0 || !strings.Contains(imp.Gaps[0].Reason, "0-to-100 scale") {
+		t.Errorf("import rating sentence = %+v, want the 0-to-100 scale named", imp.Gaps)
 	}
 }
 
@@ -1383,6 +1487,13 @@ func TestNSPReportJSONCarriesTheCodes(t *testing.T) {
 	if want := `"code":"unsupported_key","key":"limitPercent"`; !strings.Contains(string(b), want) {
 		t.Errorf("import report %s\nlacks %s", b, want)
 	}
+	b, err = json.Marshal(CheckNSPExport(query.New(query.EntityItems).Where("rating", query.OpContains, 60).Build()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := `"code":"scaled_text_operator"`; !strings.Contains(string(b), want) {
+		t.Errorf("export report %s\nlacks %s", b, want)
+	}
 }
 
 // TestNSPNonNumericRatingIsOneCodeBothWays: the same conversion failure is a value gap
@@ -1404,5 +1515,377 @@ func TestNSPNonNumericRatingIsOneCodeBothWays(t *testing.T) {
 	if g := in.Gaps[0]; g.Kind != NSPGapMalformed || g.Code != NSPReasonValueNotNumeric ||
 		g.Field != "rating" || g.Op != "is" || g.Value != "good" {
 		t.Errorf("import gap = %+v, want a malformed value_not_numeric gap on rating is good", g)
+	}
+}
+
+// TestNSPHugeRatingIsAValueGap: a rating whose 0-to-100 value is not finite has no room
+// in a stored rule, which the rule codec cannot encode. It is a value gap, so a partial
+// import drops the leaf, where the import used to fail with CodeInternal.
+func TestNSPHugeRatingIsAValueGap(t *testing.T) {
+	const doc = `{"all":[{"is":{"artist":"X"}},{"gt":{"rating":1e308}}]}`
+	if _, err := ImportNSP([]byte(doc)); !waxerr.Is(err, waxerr.CodeUnsupported) {
+		t.Errorf("import: want CodeUnsupported, got %v", err)
+	}
+	rep, err := CheckNSPImport([]byte(doc))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rep.Gaps) != 1 || rep.Gaps[0].Kind != NSPGapValue || rep.Gaps[0].Code != NSPReasonValueTooLarge ||
+		rep.Gaps[0].Field != "rating" || rep.Gaps[0].Path != "/all/1" {
+		t.Errorf("gaps = %+v, want one value_too_large value gap on rating at /all/1", rep.Gaps)
+	}
+	imp, err := ImportNSPPartial([]byte(doc))
+	if err != nil {
+		t.Fatalf("partial import: %v", err)
+	}
+	if and, ok := imp.Rule.Where.(query.And); !ok || len(and.Nodes) != 1 {
+		t.Errorf("rule = %+v, want the rating leaf dropped", imp.Rule.Where)
+	}
+
+	// A finite rating past what a float holds exactly is refused the same way both ways,
+	// rather than importing a rule the export then calls a fractional star.
+	rep, err = CheckNSPImport([]byte(`{"all":[{"gt":{"rating":1e300}}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rep.Gaps) == 0 || rep.Gaps[0].Code != NSPReasonValueTooLarge {
+		t.Errorf("import rating 1e300: gaps = %+v, want value_too_large", rep.Gaps)
+	}
+	for _, v := range []any{2e301, int64(20) << 58} {
+		out := CheckNSPExport(query.New(query.EntityItems).Where("rating", query.OpGt, v).Build())
+		if len(out.Gaps) != 1 || out.Gaps[0].Code != NSPReasonValueTooLarge {
+			t.Errorf("export rating gt %v: gaps = %+v, want value_too_large", v, out.Gaps)
+		}
+	}
+}
+
+// onlyCond returns the single condition an imported document's root group holds.
+func onlyCond(t *testing.T, q query.Query) query.Cond {
+	t.Helper()
+	and, ok := q.Where.(query.And)
+	if !ok || len(and.Nodes) != 1 {
+		t.Fatalf("where = %#v, want one condition", q.Where)
+	}
+	c, ok := and.Nodes[0].(query.Cond)
+	if !ok {
+		t.Fatalf("node = %#v, want a condition", and.Nodes[0])
+	}
+	return c
+}
+
+// sameRule reports whether two rules marshal to the same bytes.
+func sameRule(t *testing.T, a, b query.Query) bool {
+	t.Helper()
+	ba, err := query.MarshalRule(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bb, err := query.MarshalRule(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(ba) == string(bb)
+}
+
+// TestNSPDurationScales pins the unit bridge: Navidrome's duration is seconds, a REAL,
+// and WaxBin's duration_ms an integer count of milliseconds.
+func TestNSPDurationScales(t *testing.T) {
+	q, err := ImportNSP([]byte(`{"all":[{"gt":{"duration":300}}]}`))
+	if err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	if c := onlyCond(t, q); c.Field != "duration_ms" || c.Op != query.OpGt || c.Value != int64(300000) {
+		t.Errorf("imported %+v, want duration_ms gt int64(300000)", c)
+	}
+	q, err = ImportNSP([]byte(`{"all":[{"inTheRange":{"duration":[0.5,300.25]}}]}`))
+	if err != nil {
+		t.Fatalf("import range: %v", err)
+	}
+	if c := onlyCond(t, q); !slices.Equal(c.Values, []any{int64(500), int64(300250)}) {
+		t.Errorf("imported range %#v, want [500 300250]", c.Values)
+	}
+
+	for ms, want := range map[int64]string{300500: `{"gt":{"duration":300.5}}`, 300000: `{"gt":{"duration":300}}`} {
+		doc, err := ExportNSP(query.New(query.EntityItems).Where("duration_ms", query.OpGt, ms).Build())
+		if err != nil {
+			t.Fatalf("export %d ms: %v", ms, err)
+		}
+		if !strings.Contains(compact(doc), want) {
+			t.Errorf("export %d ms = %s, want %s", ms, compact(doc), want)
+		}
+	}
+
+	sorted, err := ImportNSP([]byte(`{"all":[{"is":{"artist":"X"}}],"sort":"duration","order":"desc"}`))
+	if err != nil {
+		t.Fatalf("import sort: %v", err)
+	}
+	if len(sorted.Sorts) != 1 || sorted.Sorts[0] != (query.Sort{Field: "duration_ms", Desc: true}) {
+		t.Errorf("sorts = %+v, want duration_ms desc", sorted.Sorts)
+	}
+	if doc, err := ExportNSP(sorted); err != nil || !strings.Contains(compact(doc), `"sort":"duration"`) {
+		t.Errorf("export sort = %s, %v, want sort duration", doc, err)
+	}
+
+	// A rule built with 3 ms exports as 0.003 s and comes back as 3.
+	doc, err := ExportNSP(query.New(query.EntityItems).Where("duration_ms", query.OpLt, 3).Build())
+	if err != nil {
+		t.Fatalf("export 3 ms: %v", err)
+	}
+	if !strings.Contains(compact(doc), `{"lt":{"duration":0.003}}`) {
+		t.Errorf("export 3 ms = %s, want 0.003 seconds", compact(doc))
+	}
+	back, err := ImportNSP(doc)
+	if err != nil {
+		t.Fatalf("re-import: %v", err)
+	}
+	if c := onlyCond(t, back); c.Value != int64(3) {
+		t.Errorf("re-imported %#v, want int64(3)", c.Value)
+	}
+
+	// A sub-millisecond value has no WaxBin room: strict refuses, partial drops the leaf.
+	const sub = `{"all":[{"is":{"artist":"X"}},{"gt":{"duration":300.0004}}]}`
+	if _, err := ImportNSP([]byte(sub)); !waxerr.Is(err, waxerr.CodeUnsupported) {
+		t.Errorf("import sub-millisecond: want CodeUnsupported, got %v", err)
+	}
+	imp, err := ImportNSPPartial([]byte(sub))
+	if err != nil {
+		t.Fatalf("partial import sub-millisecond: %v", err)
+	}
+	if len(imp.Report.Gaps) != 1 || imp.Report.Gaps[0].Code != NSPReasonDurationNotWholeMS ||
+		imp.Report.Gaps[0].Kind != NSPGapValue || imp.Report.Gaps[0].Path != "/all/1" {
+		t.Errorf("gaps = %+v, want one duration_not_whole_ms value gap at /all/1", imp.Report.Gaps)
+	}
+	if and, ok := imp.Rule.Where.(query.And); !ok || len(and.Nodes) != 1 {
+		t.Errorf("rule = %+v, want the duration leaf dropped", imp.Rule.Where)
+	}
+
+	// A value past what an int64 of milliseconds holds is refused rather than converted,
+	// which on amd64 would have stored MinInt64 and matched everything.
+	const huge = `{"all":[{"is":{"artist":"X"}},{"gt":{"duration":1e30}}]}`
+	imp, err = ImportNSPPartial([]byte(huge))
+	if err != nil {
+		t.Fatalf("partial import 1e30: %v", err)
+	}
+	if len(imp.Report.Gaps) != 1 || imp.Report.Gaps[0].Code != NSPReasonValueTooLarge {
+		t.Errorf("gaps = %+v, want one value_too_large gap", imp.Report.Gaps)
+	}
+	if and, ok := imp.Rule.Where.(query.And); !ok || len(and.Nodes) != 1 {
+		t.Errorf("rule = %+v, want the duration leaf dropped", imp.Rule.Where)
+	}
+
+	// Substring operators refuse both ways.
+	rep, err := CheckNSPImport([]byte(`{"all":[{"contains":{"duration":300}}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rep.Gaps) == 0 || rep.Gaps[0].Code != NSPReasonScaledTextOperator {
+		t.Errorf("import contains: gaps = %+v, want scaled_text_operator", rep.Gaps)
+	}
+	for _, q := range []query.Query{
+		query.New(query.EntityItems).Where("duration_ms", query.OpContains, 300).Build(),
+		query.New(query.EntityItems).WhereNode(query.Not{Node: query.Cond{Field: "duration_ms", Op: query.OpContains, Value: 300}}).Build(),
+	} {
+		if rep := CheckNSPExport(q); len(rep.Gaps) != 1 || rep.Gaps[0].Code != NSPReasonScaledTextOperator {
+			t.Errorf("export %+v: gaps = %+v, want scaled_text_operator", q.Where, rep.Gaps)
+		}
+	}
+
+	// A stored value that is not a whole number of milliseconds, or one past the range a
+	// float carries exactly, would export into a document the importer refuses.
+	for _, tc := range []struct {
+		v    any
+		code NSPReason
+	}{{300000.5, NSPReasonDurationNotWholeMS}, {int64(1) << 60, NSPReasonValueTooLarge}} {
+		rep := CheckNSPExport(query.New(query.EntityItems).Where("duration_ms", query.OpGt, tc.v).Build())
+		if len(rep.Gaps) != 1 || rep.Gaps[0].Code != tc.code || rep.Gaps[0].Kind != NSPGapValue {
+			t.Errorf("export duration_ms gt %v: gaps = %+v, want one %s value gap", tc.v, rep.Gaps, tc.code)
+		}
+	}
+}
+
+// TestNSPNewFieldPairs covers the pairs that map because both sides hold the same value
+// in the same vocabulary. Each imports to its WaxBin field and round-trips.
+func TestNSPNewFieldPairs(t *testing.T) {
+	for _, tc := range []struct {
+		doc   string
+		field string
+		op    query.Op
+		value any
+	}{
+		{`{"all":[{"contains":{"filepath":"Beatles/"}}]}`, "rel_path", query.OpContains, "Beatles/"},
+		{`{"all":[{"startsWith":{"filepath":"Soundtracks/"}}]}`, "rel_path", query.OpStartsWith, "Soundtracks/"},
+		{`{"all":[{"endsWith":{"filepath":".flac"}}]}`, "rel_path", query.OpEndsWith, ".flac"},
+		{`{"all":[{"is":{"filepath":"Rock/a.flac"}}]}`, "rel_path", query.OpIs, "Rock/a.flac"},
+		{`{"all":[{"contains":{"composer":"Bach"}}]}`, "composer", query.OpContains, "Bach"},
+		{`{"all":[{"is":{"catalognumber":"CDP 7 46435 2"}}]}`, "album_catalog_number", query.OpIs, "CDP 7 46435 2"},
+		{`{"all":[{"is":{"mbz_recording_id":"r1"}}]}`, "recording_mbid", query.OpIs, "r1"},
+		{`{"all":[{"is":{"mbz_album_id":"a1"}}]}`, "album_mbid", query.OpIs, "a1"},
+		{`{"all":[{"is":{"mbz_release_group_id":"g1"}}]}`, "release_group_mbid", query.OpIs, "g1"},
+		{`{"all":[{"inTheLast":{"dateloved":30}}]}`, "starred_at", query.OpInTheLast, 30 * nspDayNS},
+	} {
+		q, err := ImportNSP([]byte(tc.doc))
+		if err != nil {
+			t.Fatalf("import %s: %v", tc.doc, err)
+		}
+		if c := onlyCond(t, q); c.Field != tc.field || c.Op != tc.op || c.Value != tc.value {
+			t.Errorf("import %s = %+v, want %s %s %v", tc.doc, c, tc.field, tc.op, tc.value)
+		}
+		out, err := ExportNSP(q)
+		if err != nil {
+			t.Fatalf("export %s: %v", tc.doc, err)
+		}
+		back, err := ImportNSP(out)
+		if err != nil {
+			t.Fatalf("re-import %s: %v", out, err)
+		}
+		if !sameRule(t, q, back) {
+			t.Errorf("%s did not round-trip: exported %s", tc.doc, out)
+		}
+	}
+
+	q, err := ImportNSP([]byte(`{"all":[{"is":{"artist":"X"}}],"sort":"dateloved","order":"desc"}`))
+	if err != nil {
+		t.Fatalf("import sort dateloved: %v", err)
+	}
+	if len(q.Sorts) != 1 || q.Sorts[0] != (query.Sort{Field: "starred_at", Desc: true}) {
+		t.Errorf("sorts = %+v, want starred_at desc", q.Sorts)
+	}
+	out, err := ExportNSP(q)
+	if err != nil {
+		t.Fatalf("export sort dateloved: %v", err)
+	}
+	if !strings.Contains(compact(out), `"order":"desc","sort":"dateloved"`) {
+		t.Errorf("export = %s, want sort dateloved desc", compact(out))
+	}
+}
+
+// TestNSPPresenceOperators covers isMissing and isPresent, which Navidrome allows only on
+// a field that can be empty and which take a boolean that can flip them.
+func TestNSPPresenceOperators(t *testing.T) {
+	for _, tc := range []struct {
+		doc  string
+		want query.Op
+	}{
+		{`{"all":[{"isMissing":{"mbz_recording_id":true}}]}`, query.OpIsMissing},
+		{`{"all":[{"isMissing":{"mbz_recording_id":false}}]}`, query.OpIsPresent},
+		{`{"all":[{"isPresent":{"mbz_recording_id":true}}]}`, query.OpIsPresent},
+		{`{"all":[{"isPresent":{"mbz_recording_id":false}}]}`, query.OpIsMissing},
+	} {
+		q, err := ImportNSP([]byte(tc.doc))
+		if err != nil {
+			t.Fatalf("import %s: %v", tc.doc, err)
+		}
+		if c := onlyCond(t, q); c.Field != "recording_mbid" || c.Op != tc.want || c.Value != nil || c.Values != nil {
+			t.Errorf("import %s = %+v, want recording_mbid %s with no value", tc.doc, c, tc.want)
+		}
+		out, err := ExportNSP(q)
+		if err != nil {
+			t.Fatalf("export %s: %v", tc.doc, err)
+		}
+		if want := `{"all":[{"` + string(tc.want) + `":{"mbz_recording_id":true}}]}`; compact(out) != want {
+			t.Errorf("export of %s = %s, want %s", tc.doc, compact(out), want)
+		}
+		back, err := ImportNSP(out)
+		if err != nil {
+			t.Fatalf("re-import %s: %v", out, err)
+		}
+		if !sameRule(t, q, back) {
+			t.Errorf("%s did not round-trip: exported %s", tc.doc, out)
+		}
+	}
+
+	// Every field Navidrome allows them on crosses, and an alias spelling exports too.
+	for name := range nspPresenceFields {
+		doc := `{"all":[{"isMissing":{"` + name + `":true}}]}`
+		q, err := ImportNSP([]byte(doc))
+		if err != nil {
+			t.Errorf("import %s: %v", doc, err)
+			continue
+		}
+		if out, err := ExportNSP(q); err != nil || compact(out) != doc {
+			t.Errorf("export of %s = %s, %v", doc, out, err)
+		}
+	}
+	if out, err := ExportNSP(query.New(query.EntityItems).WherePresence("albumartist", query.OpIsPresent).Build()); err != nil ||
+		compact(out) != `{"all":[{"isPresent":{"albumartist":true}}]}` {
+		t.Errorf("export of albumartist isPresent = %s, %v", out, err)
+	}
+
+	// A field that cannot be empty refuses both ways.
+	rep, err := CheckNSPImport([]byte(`{"all":[{"isMissing":{"title":true}}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rep.Gaps) == 0 || rep.Gaps[0].Code != NSPReasonPresenceOperator || rep.Gaps[0].Kind != NSPGapOperator ||
+		rep.Gaps[0].Field != "title" || rep.Gaps[0].Op != "isMissing" {
+		t.Errorf("import title isMissing: gaps = %+v, want presence_operator on title first", rep.Gaps)
+	}
+	for _, field := range []string{"title", "rating"} {
+		q := query.New(query.EntityItems).WherePresence(field, query.OpIsMissing).Build()
+		if rep := CheckNSPExport(q); len(rep.Gaps) != 1 || rep.Gaps[0].Code != NSPReasonPresenceOperator {
+			t.Errorf("export %s isMissing: gaps = %+v, want presence_operator", field, rep.Gaps)
+		}
+	}
+
+	// The value is Navidrome's boolean, so anything else is a broken document.
+	rep, err = CheckNSPImport([]byte(`{"all":[{"isMissing":{"album":"yes"}}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rep.Gaps) == 0 || rep.Gaps[0].Kind != NSPGapMalformed || rep.Gaps[0].Code != NSPReasonValueNotBoolean {
+		t.Errorf("import album isMissing yes: gaps = %+v, want a malformed value_not_boolean", rep.Gaps)
+	}
+
+	// A partial import drops a refused presence leaf and keeps the rest.
+	imp, err := ImportNSPPartial([]byte(`{"all":[{"is":{"artist":"X"}},{"isPresent":{"title":true}}]}`))
+	if err != nil {
+		t.Fatalf("partial import: %v", err)
+	}
+	if len(imp.Report.Gaps) != 1 || imp.Report.Gaps[0].Path != "/all/1" {
+		t.Errorf("gaps = %+v, want one at /all/1", imp.Report.Gaps)
+	}
+	if and, ok := imp.Rule.Where.(query.And); !ok || len(and.Nodes) != 1 {
+		t.Errorf("rule = %+v, want the presence leaf dropped", imp.Rule.Where)
+	}
+
+	// A date field keeps its own operator rule.
+	rep, err = CheckNSPImport([]byte(`{"all":[{"isMissing":{"dateloved":true}}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rep.Gaps) == 0 || rep.Gaps[0].Code != NSPReasonDateOperator {
+		t.Errorf("import dateloved isMissing: gaps = %+v, want date_operator", rep.Gaps)
+	}
+}
+
+// TestNSPPathOperators: Navidrome's filepath is relative to its library, so it maps to
+// rel_path rather than the absolute path, and every operator and a sort cross both ways.
+// WaxBin's absolute path has no .nsp counterpart.
+func TestNSPPathOperators(t *testing.T) {
+	for _, leaf := range []string{`{"is":{"filepath":"Rock/a.mp3"}}`, `{"isNot":{"filepath":"Rock/a.mp3"}}`,
+		`{"startsWith":{"filepath":"Rock/"}}`, `{"contains":{"filepath":"Live"}}`, `{"notContains":{"filepath":"Live"}}`,
+		`{"endsWith":{"filepath":".mp3"}}`, `{"gt":{"filepath":"M"}}`, `{"inTheRange":{"filepath":["A","M"]}}`} {
+		doc := `{"all":[` + leaf + `]}`
+		q, err := ImportNSP([]byte(doc))
+		if err != nil {
+			t.Errorf("import %s: %v", doc, err)
+			continue
+		}
+		if and, ok := q.Where.(query.And); !ok || len(and.Nodes) != 1 {
+			t.Errorf("import %s = %#v, want one node", doc, q.Where)
+			continue
+		}
+		out, err := ExportNSP(q)
+		if err != nil || compact(out) != doc {
+			t.Errorf("round trip of %s = %s, %v", doc, compact(out), err)
+		}
+	}
+	sorted, err := ImportNSP([]byte(`{"all":[{"is":{"artist":"X"}}],"sort":"filepath","limit":50}`))
+	if err != nil || len(sorted.Sorts) != 1 || sorted.Sorts[0].Field != "rel_path" {
+		t.Errorf("sort filepath = %+v, %v, want a sort on rel_path", sorted.Sorts, err)
+	}
+	rep := CheckNSPExport(query.New(query.EntityItems).Where("path", query.OpStartsWith, "/music/").Build())
+	if len(rep.Gaps) != 1 || rep.Gaps[0].Code != NSPReasonUnsupportedField || rep.Gaps[0].Field != "path" {
+		t.Errorf("export of the absolute path: gaps = %+v, want an unsupported_field gap", rep.Gaps)
 	}
 }

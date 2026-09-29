@@ -114,7 +114,7 @@ func TestNothingOwedTakesNoWriteLock(t *testing.T) {
 // TestOwedLookupsStayOutOfTheMissSweeps: an owed lookup belongs to the owed sweep alone.
 // The retry sweep and its probe take settled misses only, even when an owed lookup is
 // older than the retry window, as it can be under a window shorter than a week, while
-// the count reports every owed lookup as due, old or new, whatever the window.
+// the owed sweep takes every owed lookup from before its line, whatever the window.
 func TestOwedLookupsStayOutOfTheMissSweeps(t *testing.T) {
 	ctx := context.Background()
 	st, _ := entityFixture(t)
@@ -136,10 +136,10 @@ func TestOwedLookupsStayOutOfTheMissSweeps(t *testing.T) {
 	if err := st.read.QueryRowContext(ctx, "SELECT enriched_at - 1 FROM entity_enrichment WHERE entity_id = ?", recent).Scan(&cutoff); err != nil {
 		t.Fatalf("read the recent stamp: %v", err)
 	}
-	selected := func(sweep model.EnrichSweep, missCutoff int64) []int64 {
+	selected := func(opts model.EnrichQueueOptions) []int64 {
 		t.Helper()
 		q := "SELECT id FROM (SELECT 1 AS id UNION ALL SELECT 2 UNION ALL SELECT 3 UNION ALL SELECT 4) x WHERE " +
-			notEnriched(enrichEntityLyrics, "x.id", model.EnrichQueueOptions{Sweep: sweep, MissCutoff: missCutoff}) + " ORDER BY id"
+			notEnriched(enrichEntityLyrics, "x.id", opts) + " ORDER BY id"
 		rows, err := st.read.QueryContext(ctx, q)
 		if err != nil {
 			t.Fatalf("sweep: %v", err)
@@ -156,16 +156,20 @@ func TestOwedLookupsStayOutOfTheMissSweeps(t *testing.T) {
 		return ids
 	}
 	for _, tc := range []struct {
-		name  string
-		sweep model.EnrichSweep
-		cut   int64
-		want  string
+		name string
+		opts model.EnrichQueueOptions
+		want string
 	}{
-		{"retry", model.SweepRetry, cutoff, "[2]"},
-		{"due with a window", model.SweepDue, cutoff, "[1 2 4]"},
-		{"due without one", model.SweepDue, 0, "[1 4]"},
+		{"retry", model.EnrichQueueOptions{Sweep: model.SweepRetry, MissCutoff: cutoff}, "[2]"},
+		{"owed", model.EnrichQueueOptions{Sweep: model.SweepDeferred, DeferredBefore: cutoff + 2}, "[1 4]"},
+		{"owed before the recent one", model.EnrichQueueOptions{Sweep: model.SweepDeferred, DeferredBefore: cutoff + 1}, "[1]"},
+		{"due", model.EnrichQueueOptions{Sweep: model.SweepDue, MissCutoff: cutoff, DeferredBefore: cutoff + 2}, "[1 2 4]"},
+		{"due without a window", model.EnrichQueueOptions{Sweep: model.SweepDue, DeferredBefore: cutoff + 2}, "[1 4]"},
+		{"due before the recent owed one", model.EnrichQueueOptions{Sweep: model.SweepDue, MissCutoff: cutoff, DeferredBefore: cutoff + 1}, "[1 2]"},
+		{"owed with no line", model.EnrichQueueOptions{Sweep: model.SweepDeferred}, "[1 4]"},
+		{"due with no line", model.EnrichQueueOptions{Sweep: model.SweepDue, MissCutoff: cutoff}, "[1 2 4]"},
 	} {
-		if got := fmt.Sprint(selected(tc.sweep, tc.cut)); got != tc.want {
+		if got := fmt.Sprint(selected(tc.opts)); got != tc.want {
 			t.Errorf("%s sweep = %s, want %s", tc.name, got, tc.want)
 		}
 	}

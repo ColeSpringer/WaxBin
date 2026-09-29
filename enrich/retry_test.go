@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 	"time"
 
@@ -409,9 +410,9 @@ func TestRetriedAlbumReBrowsesAGroupASiblingCached(t *testing.T) {
 	}
 }
 
-// TestRetryOnlyRunReportsAFullHeartbeat: the denominator is asked for under SweepDue, so
-// a run made entirely of retries reports a real ratio rather than jumping to one on its
-// first target.
+// TestRetryOnlyRunReportsAFullHeartbeat: the denominator counts every sweep the run
+// walks, so a run made entirely of retries reports a real ratio rather than jumping to one
+// on its first target.
 func TestRetryOnlyRunReportsAFullHeartbeat(t *testing.T) {
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
@@ -518,5 +519,127 @@ func TestForcedRunFailureReopensTheTarget(t *testing.T) {
 	}
 	if marker() != 1 {
 		t.Error("run 3 left no marker")
+	}
+}
+
+// TestAnEntityDueOnTwoSweepsIsWalkedOnce: an art backfill's halves can fall due on
+// different sweeps of one run, an owed front on the owed sweep and an expired auxiliary
+// miss on the retry sweep. The first sweep to reach the entity asks about both, with the
+// cache bypassed for the expired one, so its provider is asked once and the denominator
+// counts it once.
+func TestAnEntityDueOnTwoSweepsIsWalkedOnce(t *testing.T) {
+	ctx := context.Background()
+	st, dbPath, lib := openStore(t)
+	for i, name := range []string{"Artist X", "Artist Y", "Artist Z"} {
+		k := strconv.Itoa(i)
+		seedTrack(t, st, lib.ID, "/lib/"+k+".mp3", "ess-"+k, "Song "+k, name, "Album "+k)
+	}
+	db := roDB(t, dbPath)
+	x := int64(scalarInt(t, db, "SELECT id FROM artist WHERE name = 'Artist X'"))
+	xPID := model.PID(scalarStr(t, db, "SELECT pid FROM artist WHERE name = 'Artist X'"))
+	if err := st.ApplyArtistArtBackfill(ctx, model.ArtistArtBackfill{ArtistID: x, PID: xPID,
+		Front: model.ArtHalf{Asked: true, Incomplete: true}, Aux: model.ArtHalf{Asked: true}}); err != nil {
+		t.Fatalf("mark X: %v", err)
+	}
+	backdateMisses(t, dbPath, retryAge)
+
+	var xAsks []bool
+	art := &enrich.Mock{ProviderName: "fanart", Caps: enrich.CapArtistArt,
+		EnrichFunc: func(_ context.Context, req enrich.Request) (*enrich.Candidate, error) {
+			if req.Artist == "Artist X" {
+				xAsks = append(xAsks, req.Force)
+			}
+			return nil, nil
+		}}
+	var seen []float64
+	res, err := retryArtService(st, art, retryWindow).Run(ctx, enrich.RunOptions{}, func(p float64, _ string) error {
+		seen = append(seen, p)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.ArtistArtEnriched != 3 || len(xAsks) != 1 || !xAsks[0] {
+		t.Fatalf("walked %d artist-art targets with X asked %v, want Y, Z and X once, X with the cache bypassed",
+			res.ArtistArtEnriched, xAsks)
+	}
+	if res.Retried != 1 {
+		t.Errorf("retried %d, want X, whose expired background the owed sweep re-asked", res.Retried)
+	}
+	if len(seen) == 0 || seen[0] != 1.0/3 {
+		t.Errorf("heartbeats = %v, want the first at 1 of 3", seen)
+	}
+	if owed := owedMarkers(t, dbPath, "artist_front"); owed != 0 {
+		t.Errorf("%d owed front markers after the front's one more ask, want 0", owed)
+	}
+}
+
+// TestHeartbeatCountsTheOwedLookups: a run whose work is all lookups earlier passes left
+// owed still counts them, since the count measures them against the same instant the
+// owed sweep does.
+func TestHeartbeatCountsTheOwedLookups(t *testing.T) {
+	ctx := context.Background()
+	st, dbPath, lib := openStore(t)
+	db := roDB(t, dbPath)
+	for i, name := range []string{"Artist X", "Artist Y", "Artist Z"} {
+		k := strconv.Itoa(i)
+		seedTrack(t, st, lib.ID, "/lib/"+k+".mp3", "ess-"+k, "Song "+k, name, "Album "+k)
+		id := int64(scalarInt(t, db, "SELECT id FROM artist WHERE name = ?", name))
+		pid := model.PID(scalarStr(t, db, "SELECT pid FROM artist WHERE name = ?", name))
+		if err := st.ApplyArtistArtBackfill(ctx, model.ArtistArtBackfill{ArtistID: id, PID: pid,
+			Front: model.ArtHalf{Asked: true, Incomplete: true}, Aux: model.ArtHalf{Asked: true, Incomplete: true}}); err != nil {
+			t.Fatalf("owe %s: %v", name, err)
+		}
+	}
+
+	art := &enrich.Mock{ProviderName: "fanart", Caps: enrich.CapArtistArt,
+		EnrichFunc: func(context.Context, enrich.Request) (*enrich.Candidate, error) { return nil, nil }}
+	var seen []float64
+	res, err := retryArtService(st, art, retryWindow).Run(ctx, enrich.RunOptions{}, func(p float64, _ string) error {
+		seen = append(seen, p)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.ArtistArtEnriched != 3 {
+		t.Fatalf("walked %d artist-art targets, want the three owed", res.ArtistArtEnriched)
+	}
+	if len(seen) == 0 || seen[0] != 1.0/3 {
+		t.Errorf("heartbeats = %v, want the first at 1 of 3", seen)
+	}
+}
+
+// TestOneWalkOwesOnlyAHalfNotAlreadyOwed: a walk asking an owed half beside a fresh one
+// settles each by its own rule when the provider fails again. The owed half has had its
+// one more ask and settles as a miss, while the fresh half is owed.
+func TestOneWalkOwesOnlyAHalfNotAlreadyOwed(t *testing.T) {
+	ctx := context.Background()
+	st, dbPath, lib := openStore(t)
+	seedTrack(t, st, lib.ID, "/lib/x.mp3", "ess-x", "Song", "Artist X", "Album X")
+	db := roDB(t, dbPath)
+	x := int64(scalarInt(t, db, "SELECT id FROM artist WHERE name = 'Artist X'"))
+	xPID := model.PID(scalarStr(t, db, "SELECT pid FROM artist WHERE name = 'Artist X'"))
+	if err := st.ApplyArtistArtBackfill(ctx, model.ArtistArtBackfill{ArtistID: x, PID: xPID,
+		Front: model.ArtHalf{Asked: true, Incomplete: true}}); err != nil {
+		t.Fatalf("owe X's front: %v", err)
+	}
+
+	asks := 0
+	art := &enrich.Mock{ProviderName: "fanart", Caps: enrich.CapArtistArt,
+		EnrichFunc: func(context.Context, enrich.Request) (*enrich.Candidate, error) {
+			asks++
+			return nil, errors.New("fanart timed out")
+		}}
+	if _, err := retryArtService(st, art, retryWindow).Run(ctx, enrich.RunOptions{}, nil); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if asks != 1 {
+		t.Errorf("X asked %d times, want once for both halves", asks)
+	}
+	settled := scalarInt(t, db, "SELECT COUNT(*) FROM entity_enrichment WHERE entity_type = 'artist_front' AND owed = 0")
+	if settled != 1 || owedMarkers(t, dbPath, "artist_art") != 1 {
+		t.Errorf("front settled %d, background owed %d; want the front a miss and the background owed",
+			settled, owedMarkers(t, dbPath, "artist_art"))
 	}
 }

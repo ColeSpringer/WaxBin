@@ -73,7 +73,7 @@ func TestArtistArtBackfillFillsAMarkedArtist(t *testing.T) {
 	}
 	for _, w := range wants {
 		if w != enrich.CapArtistArt {
-			t.Errorf("request Want = %v, want CapArtistArt so a provider can key its answer", w)
+			t.Errorf("request Want = %v, want CapArtistArt, both halves in one ask", w)
 		}
 	}
 	if h := artistArtHash(t, dbPath, "front"); h != "artist-front" {
@@ -94,31 +94,21 @@ func TestArtistArtBackfillFillsAMarkedArtist(t *testing.T) {
 }
 
 // TestArtistArtBackfillQueuesAnEmptyAuxSlot: an artist whose front is settled but whose
-// auxiliary slots are empty is queued too, the half groupArtNeededPredicate covers at the
-// release-group rung.
+// auxiliary slots are empty is queued for those alone, the half groupArtNeededPredicate
+// covers at the release-group rung, and the front a provider offers on the way is dropped.
 func TestArtistArtBackfillQueuesAnEmptyAuxSlot(t *testing.T) {
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
-
-	front := &enrich.Mock{ProviderName: "fanart", Caps: enrich.CapCover | enrich.CapAuxArt,
-		EnrichFunc: func(_ context.Context, req enrich.Request) (*enrich.Candidate, error) {
-			if req.Type != enrich.TargetArtist {
-				return nil, nil
-			}
-			return &enrich.Candidate{Art: map[model.ArtRole]*model.ArtImage{
-				model.ArtRoleFront: artImg(t, "artist-front"),
-			}}, nil
-		}}
-	if _, err := artistArtService(t, st, front).Run(ctx, enrich.RunOptions{}, nil); err != nil {
-		t.Fatalf("run 1: %v", err)
+	pid := model.PID(scalarStr(t, roDB(t, dbPath), "SELECT pid FROM artist WHERE name='Pink Floyd'"))
+	if err := st.SetEntityArt(ctx, model.ArtArtist, pid, model.ArtRoleFront, pngBytes(t), "",
+		model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
+		t.Fatalf("set the artist's front: %v", err)
 	}
-	if h := artistArtHash(t, dbPath, "front"); h != "artist-front" {
-		t.Fatalf("run 1 artist front hash = %q, want the identity pass's front", h)
-	}
+	held := artistArtHash(t, dbPath, "front")
 
 	var offeredFront bool
-	aux := &enrich.Mock{ProviderName: "fanart", Caps: enrich.CapCover | enrich.CapArtistArt,
+	aux := &enrich.Mock{ProviderName: "fanart", Caps: enrich.CapArtistArt,
 		EnrichFunc: func(_ context.Context, req enrich.Request) (*enrich.Candidate, error) {
 			if req.Type != enrich.TargetArtist {
 				return nil, nil
@@ -131,7 +121,7 @@ func TestArtistArtBackfillQueuesAnEmptyAuxSlot(t *testing.T) {
 		}}
 	res, err := artistArtService(t, st, aux).Run(ctx, enrich.RunOptions{}, nil)
 	if err != nil {
-		t.Fatalf("run 2: %v", err)
+		t.Fatalf("run: %v", err)
 	}
 	if res.ArtistArtEnriched != 1 {
 		t.Fatalf("backfill walked %d artists, want the one with an empty aux slot", res.ArtistArtEnriched)
@@ -142,9 +132,13 @@ func TestArtistArtBackfillQueuesAnEmptyAuxSlot(t *testing.T) {
 	if h := artistArtHash(t, dbPath, "background"); h != "artist-bg" {
 		t.Errorf("artist background hash = %q, want the backfilled background", h)
 	}
-	// The settled front is a decided slot, so a second offer must not take it.
-	if h := artistArtHash(t, dbPath, "front"); h != "artist-front" {
-		t.Errorf("artist front hash = %q, want the first run's front left alone", h)
+	// The settled front is a decided slot, so a second offer must not take it, and its half
+	// was never asked.
+	if h := artistArtHash(t, dbPath, "front"); h != held {
+		t.Errorf("artist front hash = %q, want the hand-set front %q left alone", h, held)
+	}
+	if n := owedMarkers(t, dbPath, "artist_front") + settledMarkers(t, dbPath, "artist_front"); n != 0 {
+		t.Errorf("front half markers = %d, want none for a half the walk did not ask", n)
 	}
 }
 
@@ -308,7 +302,7 @@ func TestArtistArtBackfillQueuesAnUnmatchedArtistByName(t *testing.T) {
 		t.Errorf("request = artist %q / mbid %q, want the name alone", reqs[0].Artist, reqs[0].MBID)
 	}
 	if reqs[0].Want != enrich.CapArtistArt {
-		t.Errorf("request Want = %v, want CapArtistArt", reqs[0].Want)
+		t.Errorf("request Want = %v, want CapArtistArt for an artist with neither half", reqs[0].Want)
 	}
 	if h := artistArtHash(t, dbPath, "front"); h != "local-front" {
 		t.Errorf("artist front hash = %q, want the name-keyed fill", h)
@@ -351,8 +345,10 @@ func TestArtistArtBackfillFailureLeavesTheArtistQueued(t *testing.T) {
 	if first.ArtistArtEnriched != 1 || first.Deferred != 1 {
 		t.Fatalf("run 1 = %d walked / %d deferred, want 1 and 1", first.ArtistArtEnriched, first.Deferred)
 	}
-	if owedMarkers(t, dbPath, "artist_art") != 1 || settledMarkers(t, dbPath, "artist_art") != 0 {
-		t.Fatal("the artist's art lookup is not owed after the provider failed")
+	for _, half := range []string{"artist_front", "artist_art"} {
+		if owedMarkers(t, dbPath, half) != 1 || settledMarkers(t, dbPath, half) != 0 {
+			t.Fatalf("the artist's %s half is not owed after the provider failed", half)
+		}
 	}
 
 	down = false

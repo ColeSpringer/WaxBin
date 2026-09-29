@@ -78,6 +78,17 @@ func AuxArtRoles() []ArtRole {
 	return []ArtRole{ArtRoleBack, ArtRoleDisc, ArtRoleBooklet, ArtRoleBackground}
 }
 
+// AuxArtRolesOf returns the auxiliary roles one entity type carries: background alone
+// for an artist, whose imagery has no other auxiliary role, and AuxArtRoles for the
+// rest. The art backfills' vacancy tests and gathers key on it, so an artist holding a
+// background has nothing left to ask about.
+func AuxArtRolesOf(e ArtEntity) []ArtRole {
+	if e == ArtArtist {
+		return []ArtRole{ArtRoleBackground}
+	}
+	return AuxArtRoles()
+}
+
 // Valid reports whether r is a known art role.
 func (r ArtRole) Valid() bool {
 	switch r {

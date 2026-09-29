@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/query"
 )
 
@@ -27,7 +28,9 @@ const (
 // independent: Kind is the class a direction files the gap under and the code is the
 // reason, so the same conversion failure is a malformed gap on import (a value
 // Navidrome itself would not write) and a value gap on export (a stored value with no
-// .nsp form), under one code. Each code's comment names the gap fields it fills.
+// .nsp form), under one code. The exceptions are the values Navidrome would write that
+// WaxBin has no room for (nspValueGapCodes), a value gap on import too. Each code's
+// comment names the gap fields it fills.
 type NSPReason string
 
 const (
@@ -56,15 +59,19 @@ const (
 	// Field.
 	NSPReasonUnsupportedField NSPReason = "unsupported_field" // Field
 	// Operator, all Field and Op.
-	NSPReasonDateOperator        NSPReason = "date_operator" // anything but inTheLast/notInTheLast on a date
-	NSPReasonRatingTextOperator  NSPReason = "rating_text_operator"
+	NSPReasonDateOperator        NSPReason = "date_operator"        // anything but inTheLast/notInTheLast on a date
+	NSPReasonScaledTextOperator  NSPReason = "scaled_text_operator" // a substring operator on a scaled field
 	NSPReasonUnsupportedOperator NSPReason = "unsupported_operator"
-	NSPReasonBooleanOperator     NSPReason = "boolean_operator" // anything but is/isNot on a boolean
-	// Value, all Field, Op and Value. A whole star is a multiple of nspRatingScale on
-	// WaxBin's 0-to-100 scale, which the format fixes.
+	NSPReasonBooleanOperator     NSPReason = "boolean_operator"  // anything but is/isNot on a boolean
+	NSPReasonPresenceOperator    NSPReason = "presence_operator" // isMissing/isPresent on a field that cannot be empty
+	// Value, all Field, Op and Value, and a value gap in whichever direction reports it. A
+	// whole star is a multiple of nspRatingScale on WaxBin's 0-to-100 scale, which the
+	// format fixes.
 	NSPReasonWindowTooLarge     NSPReason = "window_too_large"
 	NSPReasonWindowNotWholeDays NSPReason = "window_not_whole_days"
 	NSPReasonRatingNotWholeStar NSPReason = "rating_not_whole_star"
+	NSPReasonDurationNotWholeMS NSPReason = "duration_not_whole_ms"
+	NSPReasonValueTooLarge      NSPReason = "value_too_large"
 	// Sort.
 	NSPReasonUnsupportedSortField NSPReason = "unsupported_sort_field" // Field
 	NSPReasonRandomWithSorts      NSPReason = "random_with_sorts"      // Field, the first sort term
@@ -88,8 +95,10 @@ func NSPReasons() []NSPReason {
 		NSPReasonValueNotNumeric, NSPReasonValueNotBoolean,
 		NSPReasonUnsupportedKey, NSPReasonGroupEmptied, NSPReasonUnsupportedNode, NSPReasonNegation,
 		NSPReasonUnsupportedField,
-		NSPReasonDateOperator, NSPReasonRatingTextOperator, NSPReasonUnsupportedOperator, NSPReasonBooleanOperator,
+		NSPReasonDateOperator, NSPReasonScaledTextOperator, NSPReasonUnsupportedOperator, NSPReasonBooleanOperator,
+		NSPReasonPresenceOperator,
 		NSPReasonWindowTooLarge, NSPReasonWindowNotWholeDays, NSPReasonRatingNotWholeStar,
+		NSPReasonDurationNotWholeMS, NSPReasonValueTooLarge,
 		NSPReasonUnsupportedSortField, NSPReasonRandomWithSorts, NSPReasonExtraSortTerm,
 		NSPReasonRandomNeedsLimit, NSPReasonLimitMode, NSPReasonLimitSeed, NSPReasonLimitBudget,
 		NSPReasonEntityWidens, NSPReasonEntityFiles,
@@ -109,8 +118,8 @@ const (
 // on the other side. Field and Op name it in the vocabulary of the side being
 // read, which is why the report carries a Direction: WaxBin's names on export,
 // Navidrome's on import. Both are plain strings because only one direction has a
-// query.Op to name; the one exception is a negated contains on rating, which has no
-// WaxBin operator of its own and is named notContains. Value carries the offending
+// query.Op to name; the one exception is a negated contains on a scaled field, which
+// has no WaxBin operator of its own and is named notContains. Value carries the offending
 // value, Key a document key, and Mode the limit mode a budget limit rides on, as each
 // Code says. Reason is rendered from the code and those fields, never written by hand.
 //
@@ -243,17 +252,18 @@ func (g NSPGap) sentence(dir NSPDirection) string {
 			field = name
 		}
 		return "nsp: only inTheLast/notInTheLast are supported on " + field
-	case NSPReasonRatingTextOperator:
-		scale := "0-to-5"
-		if imp {
-			scale = "0-to-100"
-		}
-		return "nsp: " + g.Op + " on rating has no " + other + " equivalent, since the " + scale +
-			" scale conversion does not carry a substring match"
+	case NSPReasonScaledTextOperator:
+		return "nsp: " + g.Op + " on " + g.Field + " has no " + other + " equivalent, since the " +
+			nspScaleWords(g.Field, imp) + " conversion does not carry a substring match"
 	case NSPReasonUnsupportedOperator:
 		return "nsp: unsupported operator: " + g.Op
 	case NSPReasonBooleanOperator:
 		return "nsp: only is/isNot are supported on " + g.Field + ", which is a boolean"
+	case NSPReasonPresenceOperator:
+		if imp {
+			return "nsp: Navidrome allows " + g.Op + " only on a field that can be empty, not on " + g.Field
+		}
+		return "nsp: " + g.Op + " on " + g.Field + " has no .nsp form, since Navidrome allows it only on a field that can be empty"
 	case NSPReasonWindowTooLarge:
 		return fmt.Sprintf("nsp: %s window of %v days is too large", g.Op, g.Value)
 	case NSPReasonWindowNotWholeDays:
@@ -264,6 +274,13 @@ func (g NSPGap) sentence(dir NSPDirection) string {
 	case NSPReasonRatingNotWholeStar:
 		return fmt.Sprintf("nsp: WaxBin rating %v is not a whole star (a multiple of %d) and has no Navidrome 0-5 equivalent",
 			g.Value, nspRatingScale)
+	case NSPReasonDurationNotWholeMS:
+		if imp {
+			return fmt.Sprintf("nsp: %s on %s needs a whole number of milliseconds, got %v seconds", g.Op, g.Field, g.Value)
+		}
+		return fmt.Sprintf("nsp: %s on %s needs a whole number of milliseconds to export, got %v", g.Op, g.Field, g.Value)
+	case NSPReasonValueTooLarge:
+		return fmt.Sprintf("nsp: %s on %s value %v is too large to carry", g.Op, g.Field, g.Value)
 	case NSPReasonUnsupportedSortField:
 		return "nsp: unsupported sort field: " + g.Field
 	case NSPReasonRandomWithSorts:
@@ -291,6 +308,27 @@ func (g NSPGap) sentence(dir NSPDirection) string {
 		return "nsp: a selection over file rows is not a playlist of items"
 	}
 	return ""
+}
+
+// nspScaleWords names a scaled field's conversion toward the side a report is written
+// for. Field is Navidrome's name on import and WaxBin's on export.
+func nspScaleWords(field string, imp bool) string {
+	if imp {
+		field = nspFieldToWB[strings.ToLower(field)]
+	}
+	switch model.CanonicalQueryField(field) {
+	case "rating":
+		if imp {
+			return "0-to-100 scale"
+		}
+		return "0-to-5 scale"
+	case "duration_ms":
+		if imp {
+			return "seconds to milliseconds"
+		}
+		return "milliseconds to seconds"
+	}
+	return "scale"
 }
 
 // nspPointer renders a walk position as an RFC 6901 JSON Pointer. Most segments

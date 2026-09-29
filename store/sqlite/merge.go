@@ -176,11 +176,11 @@ func mergeEntityTx(ctx context.Context, tx *sql.Tx, et model.MergeEntity, table 
 	// sits under that pass's own entity_type and the union above never reached it.
 	switch et {
 	case model.MergeReleaseGroup:
-		if err := deleteGroupArtMarkerTx(ctx, tx, lid); err != nil {
+		if err := deleteArtBackfillMarkerTx(ctx, tx, model.ArtReleaseGroup, lid); err != nil {
 			return nil, err
 		}
 	case model.MergeArtist:
-		if err := deleteArtistArtMarkerTx(ctx, tx, lid); err != nil {
+		if err := deleteArtBackfillMarkerTx(ctx, tx, model.ArtArtist, lid); err != nil {
 			return nil, err
 		}
 	case model.MergeAlbum:
@@ -189,7 +189,7 @@ func mergeEntityTx(ctx context.Context, tx *sql.Tx, et model.MergeEntity, table 
 		if err := deleteAlbumFieldsMarkerTx(ctx, tx, lid); err != nil {
 			return nil, err
 		}
-		if err := deleteAlbumArtMarkerTx(ctx, tx, lid); err != nil {
+		if err := deleteArtBackfillMarkerTx(ctx, tx, model.ArtAlbum, lid); err != nil {
 			return nil, err
 		}
 	}
@@ -202,7 +202,7 @@ func mergeEntityTx(ctx context.Context, tx *sql.Tx, et model.MergeEntity, table 
 	if gainedMBID {
 		switch et {
 		case model.MergeAlbum:
-			if err := deleteAlbumArtMarkerTx(ctx, tx, sid); err != nil {
+			if err := deleteArtBackfillMarkerTx(ctx, tx, model.ArtAlbum, sid); err != nil {
 				return nil, err
 			}
 		case model.MergeArtist:

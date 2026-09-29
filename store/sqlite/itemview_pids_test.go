@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"path/filepath"
 	"sort"
 	"testing"
 
@@ -557,6 +558,46 @@ func TestIdentifierQueryFields(t *testing.T) {
 		{"album_mbid", query.OpIs, "rel-1", 1, "the track whose album carries the release id"},
 		{"album_mbid", query.OpIs, "rel-book", 1, "the book, which reports its own id here"},
 		{"album_mbid", query.OpIsMissing, nil, 2, "the bare track and the bare book"},
+	} {
+		if n := countWhere(t, st, tc.field, tc.op, tc.value); n != tc.want {
+			t.Errorf("%s %s %v = %d, want %d (%s)", tc.field, tc.op, tc.value, n, tc.want, tc.why)
+		}
+	}
+}
+
+// TestRelativePathAndRecordingQueryFields covers the two fields the .nsp map needs to
+// read Navidrome's vocabulary: rel_path is the path under the item's library root with
+// forward slashes, so a substring cannot reach into the root, and recording_mbid is a
+// track's recording id alone, where mbid also carries a book's release id.
+func TestRelativePathAndRecordingQueryFields(t *testing.T) {
+	st, lib := entityFixture(t)
+	putTrack(t, st, lib.ID, trackSpec{
+		path: "/lib/Rock/One/01.flac", relPath: filepath.Join("Rock", "One", "01.flac"),
+		essence: "e1", content: "c1", title: "One", artist: "A", albumArt: "A", album: "One",
+		mbRecording: "rec-1",
+	})
+	putTrack(t, st, lib.ID, trackSpec{
+		path: "/lib/Jazz/02.flac", relPath: filepath.Join("Jazz", "02.flac"),
+		essence: "e2", content: "c2", title: "Two", artist: "B", albumArt: "B", album: "Two",
+	})
+	putBook(t, st, lib.ID, bookSpec{
+		path: "/lib/b1.m4b", essence: "be1", content: "bc1", title: "Book", author: "Auth", mbid: "rel-book",
+	})
+	for _, tc := range []struct {
+		field string
+		op    query.Op
+		value any
+		want  int
+		why   string
+	}{
+		{"rel_path", query.OpIs, "Rock/One/01.flac", 1, "the file under its root, slash-separated"},
+		{"rel_path", query.OpStartsWith, "Rock/", 1, "a folder rule"},
+		{"rel_path", query.OpContains, "lib", 0, "the library root is not part of it"},
+		{"path", query.OpContains, "lib", 3, "the display path is absolute"},
+		{"recording_mbid", query.OpIs, "rec-1", 1, "the tagged track"},
+		{"recording_mbid", query.OpIs, "rel-book", 0, "a book's release id is not a recording"},
+		{"recording_mbid", query.OpIsPresent, nil, 1, "the one tagged track"},
+		{"recording_mbid", query.OpIsMissing, nil, 2, "the bare track and the book"},
 	} {
 		if n := countWhere(t, st, tc.field, tc.op, tc.value); n != tc.want {
 			t.Errorf("%s %s %v = %d, want %d (%s)", tc.field, tc.op, tc.value, n, tc.want, tc.why)

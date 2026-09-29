@@ -231,7 +231,7 @@ func (s *Store) EditEntityFields(ctx context.Context, entityType model.MergeEnti
 			if err := clearUnmatchedAlbumMarkerTx(ctx, tx, entityID); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
-			if err := deleteAlbumArtMarkerTx(ctx, tx, entityID); err != nil {
+			if err := deleteArtBackfillMarkerTx(ctx, tx, model.ArtAlbum, entityID); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 		}
@@ -253,11 +253,11 @@ func (s *Store) EditEntityFields(ctx context.Context, entityType model.MergeEnti
 			)
 			switch entityType {
 			case model.MergeReleaseGroup:
-				artType, err = model.ArtReleaseGroup, deleteGroupArtMarkerTx(ctx, tx, entityID)
+				artType, err = model.ArtReleaseGroup, deleteArtBackfillMarkerTx(ctx, tx, model.ArtReleaseGroup, entityID)
 			case model.MergeArtist:
 				artType, err = model.ArtArtist, artistMBIDLandedTx(ctx, tx, entityID)
 			case model.MergeAlbum:
-				artType, err = model.ArtAlbum, deleteAlbumArtMarkerTx(ctx, tx, entityID)
+				artType, err = model.ArtAlbum, deleteArtBackfillMarkerTx(ctx, tx, model.ArtAlbum, entityID)
 			}
 			if err == nil && artType != "" {
 				err = clearEnrichmentArtTx(ctx, tx, artType, entityID)

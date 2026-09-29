@@ -32,6 +32,7 @@ func entityFixture(t *testing.T) (*Store, *model.Library) {
 
 type trackSpec struct {
 	path, essence, content  string
+	relPath                 string // the path under the library root; empty takes the base name
 	title, artist, albumArt string
 	// artists is the split credit the scanner supplies alongside the raw artist
 	// string. Leaving it nil is a pre-split caller, which the store re-splits.
@@ -60,11 +61,15 @@ func putTrack(t *testing.T, st *Store, libID int64, s trackSpec) *model.ScanItem
 	if s.mbRecording != "" {
 		idKey = "mbid:" + s.mbRecording
 	}
+	rel := s.relPath
+	if rel == "" {
+		rel = filepath.Base(s.path)
+	}
 	in := model.PutScannedTrackInput{
 		LibraryID:     libID,
 		PreserveLocks: s.preserveLocks,
 		File: model.File{
-			Path: []byte(s.path), DisplayPath: s.path, RelPath: []byte(filepath.Base(s.path)),
+			Path: []byte(s.path), DisplayPath: s.path, RelPath: []byte(rel),
 			Kind: model.FileAudio, Size: int64(len(s.content)), MTimeNS: 1,
 			ContentHash: s.content, EssenceHash: s.essence, DurationMS: s.durationMS,
 			ScanState: model.ScanIndexed,

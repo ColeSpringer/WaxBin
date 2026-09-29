@@ -692,6 +692,61 @@ func rgFrontHash(t *testing.T, dbPath string) string {
 		`SELECT COALESCE((SELECT source_hash FROM art_map WHERE entity_type='release_group' AND role='front'), '')`)
 }
 
+// TestOneAskServesBothHalvesAtEveryRung: a provider serving both halves of a rung is
+// asked once for both, with both capabilities in Want, so one that honors Want and skips
+// what was not asked still fills the auxiliary roles beside the front.
+func TestOneAskServesBothHalvesAtEveryRung(t *testing.T) {
+	for _, c := range []struct {
+		rung       enrich.TargetType
+		front, aux enrich.Capability
+		auxRole    model.ArtRole
+		entity     string
+	}{
+		{enrich.TargetArtist, enrich.CapArtistFront, enrich.CapArtistAuxArt, model.ArtRoleBackground, "artist"},
+		{enrich.TargetReleaseGroup, enrich.CapCover, enrich.CapAuxArt, model.ArtRoleBack, "release_group"},
+		{enrich.TargetRelease, enrich.CapCover, enrich.CapAuxArt, model.ArtRoleBack, "album"},
+	} {
+		t.Run(string(c.rung), func(t *testing.T) {
+			ctx := context.Background()
+			st, dbPath, lib := openStore(t)
+			seedAlbumTrack(t, st, lib.ID, "ess-a", model.Track{
+				Artist: "Pink Floyd", AlbumArtist: "Pink Floyd", Album: "Wish You Were Here", TrackNo: 1,
+				Barcode: relBarcode,
+			})
+			both := c.front | c.aux
+			var wants []enrich.Capability
+			p := &enrich.Mock{ProviderName: "fanart", Caps: both,
+				CapsAt: map[enrich.TargetType]enrich.Capability{c.rung: both},
+				EnrichFunc: func(_ context.Context, req enrich.Request) (*enrich.Candidate, error) {
+					wants = append(wants, req.Want)
+					art := map[model.ArtRole]*model.ArtImage{}
+					if req.Wants(c.front) {
+						art[model.ArtRoleFront] = artImg(t, "front-hash")
+					}
+					if req.Wants(c.aux) {
+						art[c.auxRole] = artImg(t, "aux-hash")
+					}
+					return &enrich.Candidate{Art: art}, nil
+				}}
+			if _, err := enrich.New(st, enrich.Config{MinRequestInterval: time.Millisecond,
+				Providers: []enrich.Provider{p}}, nil).Run(ctx, enrich.RunOptions{}, nil); err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			if len(wants) != 1 || wants[0] != both {
+				t.Fatalf("asked with Want %v, want one ask naming both halves", wants)
+			}
+			db := roDB(t, dbPath)
+			for role, want := range map[model.ArtRole]string{model.ArtRoleFront: "front-hash", c.auxRole: "aux-hash"} {
+				got := scalarStr(t, db, "SELECT COALESCE((SELECT source_hash FROM art_map WHERE entity_type = ? AND role = ?), '')",
+					c.entity, string(role))
+				if got != want {
+					t.Errorf("%s %s = %q, want %q", c.entity, role, got, want)
+				}
+			}
+		})
+	}
+}
+
 // TestGatherArtFrontAliasEquivalence: a Cover-only provider behaves exactly as it
 // always did; the front lands and nothing counts as aux.
 func TestGatherArtFrontAliasEquivalence(t *testing.T) {

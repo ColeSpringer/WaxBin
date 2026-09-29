@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"path/filepath"
 
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/query"
@@ -227,6 +228,9 @@ var itemFields = query.FieldMap{
 	"codec":       {Expr: "f.codec", Kind: query.KindText},
 	"container":   {Expr: "f.container", Kind: query.KindText},
 	"path":        {Expr: "f.display_path", Kind: query.KindText},
+	// The path under the item's library root with forward slashes whatever the platform,
+	// which is what Navidrome's filepath holds, so a substring cannot reach into the root.
+	"rel_path": {Expr: relPathExpr, Kind: query.KindText},
 
 	// Entity handles (see the header block): the item's internal id column compared
 	// against a subquery that resolves the caller's pid once, except genre_pid, which
@@ -273,7 +277,10 @@ var itemFields = query.FieldMap{
 	// enrichment resolved release groups and no release id exists to match. The three
 	// together still need `kind in (track, book)` to match the audit: an episode is
 	// missing all of them and always will be, so the audit excludes it by kind.
-	"mbid":               {Expr: "COALESCE(NULLIF(t.mbid,''), bk.mbid, '')", Kind: query.KindText},
+	"mbid": {Expr: "COALESCE(NULLIF(t.mbid,''), bk.mbid, '')", Kind: query.KindText},
+	// A track's recording id alone: mbid also carries a book's release id, which is no
+	// recording, so this is the field for the recording vocabulary. It has no view column.
+	"recording_mbid":     {Expr: "COALESCE(t.mbid,'')", Kind: query.KindText},
 	"isrc":               {Expr: "COALESCE(t.isrc,'')", Kind: query.KindText},
 	"album_mbid":         {Expr: "COALESCE(NULLIF(alb.mbid,''), bk.mbid, '')", Kind: query.KindText},
 	"release_group_mbid": {Expr: "COALESCE(rg.mbid,'')", Kind: query.KindText},
@@ -327,6 +334,16 @@ var itemFields = query.FieldMap{
 	// use play_state_progress; that index serves the in-progress browse list alone.
 	"last_progress": {Expr: "ps.last_progress_at", Kind: query.KindTime, NeedsUser: true},
 }
+
+// relPathExpr reads file.rel_path as text. The column holds the platform's separators,
+// so on Windows they turn into forward slashes; elsewhere a backslash is a legal filename
+// character and stays.
+var relPathExpr = func() string {
+	if filepath.Separator == '\\' {
+		return `REPLACE(CAST(f.rel_path AS TEXT), '\', '/')`
+	}
+	return "CAST(f.rel_path AS TEXT)"
+}()
 
 // The engine accepts an alias and its canonical spelling as the same column. The
 // entries are copied rather than written twice so the two cannot drift apart in Expr or

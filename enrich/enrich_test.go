@@ -1088,47 +1088,6 @@ func TestAGroupWhoseTracksHaveGenresIsNotOwedThem(t *testing.T) {
 	}
 }
 
-// TestAnArtistFrontLeftUnaskedStaysOwed is the artist twin of
-// TestAGroupLeftUnaskedStaysOwed, with an injected cover provider serving the artist rung.
-func TestAnArtistFrontLeftUnaskedStaysOwed(t *testing.T) {
-	ctx := context.Background()
-	st, dbPath, lib := openStore(t)
-	for i := 1; i <= 5; i++ {
-		k := strconv.Itoa(i)
-		seedTrack(t, st, lib.ID, "/lib/"+k+".mp3", "ess-"+k, "Song "+k, "Artist "+k, "Album "+k)
-	}
-	mb := manyNamesMB(t)
-	healthy := false
-	portraits := &enrich.Mock{ProviderName: "portraits", Caps: enrich.CapCover,
-		CapsAt: map[enrich.TargetType]enrich.Capability{enrich.TargetArtist: enrich.CapCover},
-		EnrichFunc: func(_ context.Context, req enrich.Request) (*enrich.Candidate, error) {
-			if !healthy {
-				return nil, errors.New("portraits is down")
-			}
-			return &enrich.Candidate{Cover: artImg(t, "portrait-"+req.Artist)}, nil
-		}}
-	svc := enrich.New(st, enrich.Config{
-		Contact: "test@example.com", MinRequestInterval: time.Millisecond, MusicBrainzBaseURL: mb.server.URL,
-		Providers: []enrich.Provider{portraits},
-	}, nil)
-	for run := 1; run <= 2; run++ {
-		if _, err := svc.Run(ctx, enrich.RunOptions{}, nil); err != nil {
-			t.Fatalf("run %d: %v", run, err)
-		}
-	}
-	if owed, settled := owedMarkers(t, dbPath, "artist"), settledMarkers(t, dbPath, "artist"); owed != 2 || settled != 3 {
-		t.Fatalf("after run 2: %d owed / %d settled, want the three asked twice settled and the two unasked still owed", owed, settled)
-	}
-	healthy = true
-	if _, err := svc.Run(ctx, enrich.RunOptions{}, nil); err != nil {
-		t.Fatalf("run 3: %v", err)
-	}
-	if n := scalarInt(t, roDB(t, dbPath), "SELECT COUNT(*) FROM art_map WHERE entity_type = 'artist' AND role = 'front'"); n != 2 ||
-		owedMarkers(t, dbPath, "artist") != 0 {
-		t.Errorf("run 3 attached %d artist fronts with %d artists still owed, want the two unasked artists' fronts", n, owedMarkers(t, dbPath, "artist"))
-	}
-}
-
 // manyNamesMB answers an artist search for any name with one artist of that name, and a
 // release-group search for any title with one group of that title credited to the
 // searched artist, with the lookups behind both, so a test can walk several of each.
@@ -1174,9 +1133,9 @@ func manyNamesMB(t *testing.T) *mbMock {
 }
 
 // TestACappedRunReachesLaterPhasesPastOwedIdentities: an identity rung never stalls, so a
-// rider that never recovers (a revoked key) leaves every artist it touches owed. Those
-// are re-walked after every phase's new targets, so a nightly cap still reaches the
-// release groups instead of spending itself on the same artists every night.
+// rider that never recovers (a revoked key) leaves every group it touches owed. Those are
+// re-walked after every phase's new targets, so a nightly cap still reaches the group-art
+// backfill instead of spending itself on the same groups every night.
 func TestACappedRunReachesLaterPhasesPastOwedIdentities(t *testing.T) {
 	ctx := context.Background()
 	st, _, lib := openStore(t)
@@ -1184,28 +1143,30 @@ func TestACappedRunReachesLaterPhasesPastOwedIdentities(t *testing.T) {
 		k := strconv.Itoa(i)
 		seedTrack(t, st, lib.ID, "/lib/"+k+".mp3", "ess-"+k, "Song "+k, "Artist "+k, "Album "+k)
 	}
-	revoked := &enrich.Mock{ProviderName: "fanart", Caps: enrich.CapCover,
-		CapsAt: map[enrich.TargetType]enrich.Capability{enrich.TargetArtist: enrich.CapCover},
-		Err:    errors.New("401: api key revoked")}
+	revoked := &enrich.Mock{ProviderName: "tags", Caps: enrich.CapGenres, Err: errors.New("401: api key revoked")}
+	covers := &enrich.Mock{ProviderName: "covers", Caps: enrich.CapCover,
+		CapsAt: map[enrich.TargetType]enrich.Capability{enrich.TargetReleaseGroup: enrich.CapCover}}
 	svc := enrich.New(st, enrich.Config{
 		Contact: "t@e.com", MinRequestInterval: time.Millisecond,
 		MusicBrainzBaseURL: manyNamesMB(t).server.URL,
-		Providers:          []enrich.Provider{revoked},
+		Providers:          []enrich.Provider{revoked, covers},
 	}, nil)
 
-	first, err := svc.Run(ctx, enrich.RunOptions{Limit: 4}, nil)
+	first, err := svc.Run(ctx, enrich.RunOptions{Limit: 10}, nil)
 	if err != nil {
 		t.Fatalf("night 1: %v", err)
 	}
-	if first.ArtistsEnriched != 4 || first.Deferred != 4 {
-		t.Fatalf("night 1 = %d artists / %d deferred, want the cap spent on four owed artists", first.ArtistsEnriched, first.Deferred)
+	if first.ArtistsEnriched != 6 || first.ReleaseGroupsEnriched != 4 || first.Deferred != 4 {
+		t.Fatalf("night 1 = %d artists / %d groups / %d deferred, want the cap spent on six artists and four owed groups",
+			first.ArtistsEnriched, first.ReleaseGroupsEnriched, first.Deferred)
 	}
 	second, err := svc.Run(ctx, enrich.RunOptions{Limit: 4}, nil)
 	if err != nil {
 		t.Fatalf("night 2: %v", err)
 	}
-	if second.ReleaseGroupsEnriched == 0 {
-		t.Fatalf("night 2 = %d artists / %d groups, want the cap to reach the release groups", second.ArtistsEnriched, second.ReleaseGroupsEnriched)
+	if second.ReleaseGroupsEnriched != 2 || second.GroupArtEnriched != 2 {
+		t.Fatalf("night 2 = %d groups / %d group art, want the two new groups and then the group-art backfill",
+			second.ReleaseGroupsEnriched, second.GroupArtEnriched)
 	}
 }
 

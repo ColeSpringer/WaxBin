@@ -120,7 +120,7 @@ func TestAlbumArtSkipsATitleOnlyAlbum(t *testing.T) {
 			res, len(asks), *hits)
 	}
 	if n := scalarInt(t, roDB(t, dbPath),
-		"SELECT COUNT(*) FROM entity_enrichment WHERE entity_type='album_art'"); n != 0 {
+		"SELECT COUNT(*) FROM entity_enrichment WHERE entity_type IN ('album_front','album_art')"); n != 0 {
 		t.Errorf("album art markers = %d, want none", n)
 	}
 }
@@ -381,7 +381,7 @@ func TestAlbumArtAuxHalfNeedsAReleaseRungProvider(t *testing.T) {
 		t.Fatalf("walked %d albums, %d release asks, %d fetches; want none for an album whose front is settled",
 			res.AlbumArtEnriched, releaseAsks, *hits)
 	}
-	if n := scalarInt(t, roDB(t, dbPath), "SELECT COUNT(*) FROM entity_enrichment WHERE entity_type='album_art'"); n != 0 {
+	if n := scalarInt(t, roDB(t, dbPath), "SELECT COUNT(*) FROM entity_enrichment WHERE entity_type IN ('album_front','album_art')"); n != 0 {
 		t.Errorf("album art markers = %d, want none", n)
 	}
 
@@ -437,7 +437,7 @@ func TestAlbumArtFrontHalfNeedsAReleaseRungProvider(t *testing.T) {
 	if res.LyricsEnriched != 1 {
 		t.Errorf("lyrics walked %d tracks, want 1", res.LyricsEnriched)
 	}
-	if n := scalarInt(t, roDB(t, dbPath), "SELECT COUNT(*) FROM entity_enrichment WHERE entity_type='album_art'"); n != 0 {
+	if n := scalarInt(t, roDB(t, dbPath), "SELECT COUNT(*) FROM entity_enrichment WHERE entity_type IN ('album_front','album_art')"); n != 0 {
 		t.Errorf("album art markers = %d, want none", n)
 	}
 }
@@ -477,8 +477,8 @@ func TestAlbumArtOwesNothingForAuxiliaryRolesNobodyServes(t *testing.T) {
 		t.Fatalf("run = %d walked / %d fetched / %d deferred, want the archive's front and nothing owed",
 			res.AlbumArtEnriched, res.ArtFetched, res.Deferred)
 	}
-	if owed, settled := owedMarkers(t, dbPath, "album_art"), settledMarkers(t, dbPath, "album_art"); owed != 0 || settled != 1 {
-		t.Errorf("album art markers = %d owed / %d settled, want one settled match", owed, settled)
+	if owed, settled := owedMarkers(t, dbPath, "album_front"), settledMarkers(t, dbPath, "album_front"); owed != 0 || settled != 1 {
+		t.Errorf("album front markers = %d owed / %d settled, want one settled match", owed, settled)
 	}
 }
 
@@ -517,8 +517,8 @@ func TestAlbumArtFailureLeavesTheAlbumQueued(t *testing.T) {
 	if first.AlbumArtEnriched != 1 || first.Deferred != 1 {
 		t.Fatalf("run 1 = %d walked / %d deferred, want 1 and 1", first.AlbumArtEnriched, first.Deferred)
 	}
-	if owedMarkers(t, dbPath, "album_art") != 1 || settledMarkers(t, dbPath, "album_art") != 0 {
-		t.Fatal("the album's art lookup is not owed after the archive failed")
+	if owedMarkers(t, dbPath, "album_front") != 1 || settledMarkers(t, dbPath, "album_front") != 0 {
+		t.Fatal("the album's front lookup is not owed after the archive failed")
 	}
 
 	second, err := svc.Run(ctx, enrich.RunOptions{}, nil)
@@ -580,7 +580,7 @@ func TestArchiveAnswersOnlyForAMissingOrOversizedCover(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Run: %v", err)
 			}
-			owed, settled := owedMarkers(t, dbPath, "album_art"), settledMarkers(t, dbPath, "album_art")
+			owed, settled := owedMarkers(t, dbPath, "album_front"), settledMarkers(t, dbPath, "album_front")
 			if tc.owed && (res.Deferred != 1 || owed != 1) {
 				t.Errorf("deferred %d with %d owed / %d settled, want the lookup owed", res.Deferred, owed, settled)
 			}
@@ -588,5 +588,130 @@ func TestArchiveAnswersOnlyForAMissingOrOversizedCover(t *testing.T) {
 				t.Errorf("deferred %d with %d owed / %d settled, want the album settled as a miss", res.Deferred, owed, settled)
 			}
 		})
+	}
+}
+
+// countedReleaseArt is a provider serving one art capability at the release rung alone,
+// counting its asks and answering with whatever answer returns.
+func countedReleaseArt(name string, c enrich.Capability, asks *int, answer func() *enrich.Candidate) *enrich.Mock {
+	return &enrich.Mock{ProviderName: name, Caps: c,
+		CapsAt: map[enrich.TargetType]enrich.Capability{enrich.TargetRelease: c},
+		EnrichFunc: func(context.Context, enrich.Request) (*enrich.Candidate, error) {
+			*asks++
+			return answer(), nil
+		}}
+}
+
+// TestAlbumArtRetriesAFrontMissedBesideAnAuxMatch: a front no provider had stays a miss
+// even though an auxiliary role landed in the same walk, so the retry window asks about
+// the front again, and only the front.
+func TestAlbumArtRetriesAFrontMissedBesideAnAuxMatch(t *testing.T) {
+	ctx := context.Background()
+	st, dbPath, lib := openStore(t)
+	seedAlbumTrack(t, st, lib.ID, "ess-a", model.Track{
+		Artist: "Pink Floyd", AlbumArtist: "Pink Floyd", Album: "Wish You Were Here", TrackNo: 1, Barcode: relBarcode,
+	})
+	hasFront, coverAsks, auxAsks := false, 0, 0
+	covers := countedReleaseArt("covers", enrich.CapCover, &coverAsks, func() *enrich.Candidate {
+		if !hasFront {
+			return nil
+		}
+		return &enrich.Candidate{Cover: artImg(t, "album-front")}
+	})
+	aux := countedReleaseArt("fanart", enrich.CapAuxArt, &auxAsks, func() *enrich.Candidate {
+		return &enrich.Candidate{Art: map[model.ArtRole]*model.ArtImage{model.ArtRoleBack: artImg(t, "album-back")}}
+	})
+	svc := enrich.New(st, enrich.Config{MinRequestInterval: time.Millisecond, RetryMissesAfter: retryWindow,
+		Providers: []enrich.Provider{covers, aux}}, nil)
+	run := func(n int) *enrich.Result {
+		t.Helper()
+		res, err := svc.Run(ctx, enrich.RunOptions{}, nil)
+		if err != nil {
+			t.Fatalf("run %d: %v", n, err)
+		}
+		return res
+	}
+	if first := run(1); first.AlbumArtMatched != 1 || coverAsks != 1 || auxAsks != 1 || albumArtHash(t, dbPath, "back") != "album-back" {
+		t.Fatalf("run 1 = %+v with %d cover and %d aux asks, want one of each and the back filled", first, coverAsks, auxAsks)
+	}
+	if m := scalarInt(t, roDB(t, dbPath), "SELECT matched FROM entity_enrichment WHERE entity_type='album_front'"); m != 0 {
+		t.Fatalf("front marker matched = %d, want the miss recorded beside the auxiliary match", m)
+	}
+	run(2)
+	if coverAsks != 1 || auxAsks != 1 {
+		t.Fatalf("run 2 asked covers %d and fanart %d times in all, want nothing new", coverAsks, auxAsks)
+	}
+	backdateMisses(t, dbPath, retryAge)
+	hasFront = true
+	if third := run(3); third.ArtFetched != 1 || coverAsks != 2 || auxAsks != 1 || albumArtHash(t, dbPath, "front") != "album-front" {
+		t.Errorf("run 3 = %+v with %d cover and %d aux asks, want the front re-asked alone and filled", third, coverAsks, auxAsks)
+	}
+}
+
+// TestAlbumArtAuxFillsSettledFront: a pass with nothing serving the auxiliary roles fills
+// the front and asks nothing about the rest, so a provider serving them that joins later
+// reaches the album on the next pass with no forced run, and the front stays as it was.
+func TestAlbumArtAuxFillsSettledFront(t *testing.T) {
+	ctx := context.Background()
+	st, dbPath, lib := openStore(t)
+	seedAlbumTrack(t, st, lib.ID, "ess-a", model.Track{
+		Artist: "Pink Floyd", AlbumArtist: "Pink Floyd", Album: "Wish You Were Here", TrackNo: 1, Barcode: relBarcode,
+	})
+	coverAsks, auxAsks := 0, 0
+	covers := countedReleaseArt("covers", enrich.CapCover, &coverAsks, func() *enrich.Candidate {
+		return &enrich.Candidate{Cover: artImg(t, "album-front")}
+	})
+	cfg := enrich.Config{MinRequestInterval: time.Millisecond, Providers: []enrich.Provider{covers}}
+	if _, err := enrich.New(st, cfg, nil).Run(ctx, enrich.RunOptions{}, nil); err != nil {
+		t.Fatalf("run 1: %v", err)
+	}
+	if h := albumArtHash(t, dbPath, "front"); h != "album-front" || coverAsks != 1 {
+		t.Fatalf("run 1 front = %q after %d asks, want album-front from one", h, coverAsks)
+	}
+
+	aux := countedReleaseArt("fanart", enrich.CapAuxArt, &auxAsks, func() *enrich.Candidate {
+		return &enrich.Candidate{Art: map[model.ArtRole]*model.ArtImage{
+			model.ArtRoleFront: artImg(t, "late-front"),
+			model.ArtRoleBack:  artImg(t, "album-back"),
+		}}
+	})
+	cfg.Providers = []enrich.Provider{covers, aux}
+	res, err := enrich.New(st, cfg, nil).Run(ctx, enrich.RunOptions{}, nil)
+	if err != nil {
+		t.Fatalf("run 2: %v", err)
+	}
+	if auxAsks != 1 || coverAsks != 1 || res.AlbumArtMatched != 1 || albumArtHash(t, dbPath, "back") != "album-back" {
+		t.Errorf("run 2 = %+v with %d aux and %d cover asks, want the back filled and the front not re-asked", res, auxAsks, coverAsks)
+	}
+	if h := albumArtHash(t, dbPath, "front"); h != "album-front" {
+		t.Errorf("front = %q, want the settled album-front untouched", h)
+	}
+}
+
+// TestAlbumArtHalvesCreditTheirOwnProviders: the front half's marker names the provider
+// that supplied the front and the auxiliary half's the one that supplied the back, where
+// both used to name whoever answered first.
+func TestAlbumArtHalvesCreditTheirOwnProviders(t *testing.T) {
+	ctx := context.Background()
+	st, dbPath, lib := openStore(t)
+	seedAlbumTrack(t, st, lib.ID, "ess-a", model.Track{
+		Artist: "Pink Floyd", AlbumArtist: "Pink Floyd", Album: "Wish You Were Here", TrackNo: 1, Barcode: relBarcode,
+	})
+	coverAsks, auxAsks := 0, 0
+	covers := countedReleaseArt("covers", enrich.CapCover, &coverAsks, func() *enrich.Candidate {
+		return &enrich.Candidate{Cover: artImg(t, "album-front")}
+	})
+	fanart := countedReleaseArt("fanart", enrich.CapAuxArt, &auxAsks, func() *enrich.Candidate {
+		return &enrich.Candidate{Art: map[model.ArtRole]*model.ArtImage{model.ArtRoleBack: artImg(t, "album-back")}}
+	})
+	if _, err := enrich.New(st, enrich.Config{MinRequestInterval: time.Millisecond,
+		Providers: []enrich.Provider{covers, fanart}}, nil).Run(ctx, enrich.RunOptions{}, nil); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	db := roDB(t, dbPath)
+	for typ, want := range map[string]string{"album_front": "covers", "album_art": "fanart"} {
+		if got := scalarStr(t, db, "SELECT provider FROM entity_enrichment WHERE entity_type = ?", typ); got != want {
+			t.Errorf("%s marker provider = %q, want %q", typ, got, want)
+		}
 	}
 }

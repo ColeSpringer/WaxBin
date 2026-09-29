@@ -158,14 +158,11 @@ func TestApplyReleaseGroupArtBackfillSettlesEachHalf(t *testing.T) {
 		return "miss"
 	}
 	for _, in := range []model.ReleaseGroupArtBackfill{
-		{ReleaseGroupID: id("FrontMissed"), PID: pid("FrontMissed"), Provider: "mock",
-			AuxArt: map[model.ArtRole]*model.ArtImage{model.ArtRoleBack: enrichArtImg("fm-back", "mock")},
-			Front:  model.ArtHalf{Asked: true}, Aux: model.ArtHalf{Asked: true}},
-		{ReleaseGroupID: id("FrontOnly"), PID: pid("FrontOnly"), Provider: "mock",
-			Art: enrichArtImg("fo-front", "mock"), Front: model.ArtHalf{Asked: true}},
-		{ReleaseGroupID: id("AuxFailed"), PID: pid("AuxFailed"), Provider: "mock",
-			Art:   enrichArtImg("af-front", "mock"),
-			Front: model.ArtHalf{Asked: true}, Aux: model.ArtHalf{Asked: true, Incomplete: true}},
+		{ReleaseGroupID: id("FrontMissed"), PID: pid("FrontMissed"), AuxArt: map[model.ArtRole]*model.ArtImage{model.ArtRoleBack: enrichArtImg("fm-back", "mock")},
+			Front: model.ArtHalf{Asked: true, Provider: "mock"}, Aux: model.ArtHalf{Asked: true, Provider: "mock"}},
+		{ReleaseGroupID: id("FrontOnly"), PID: pid("FrontOnly"), Art: enrichArtImg("fo-front", "mock"), Front: model.ArtHalf{Asked: true, Provider: "mock"}},
+		{ReleaseGroupID: id("AuxFailed"), PID: pid("AuxFailed"), Art: enrichArtImg("af-front", "mock"),
+			Front: model.ArtHalf{Asked: true, Provider: "mock"}, Aux: model.ArtHalf{Asked: true, Incomplete: true, Provider: "mock"}},
 	} {
 		if err := st.ApplyReleaseGroupArtBackfill(ctx, in); err != nil {
 			t.Fatalf("apply %d: %v", in.ReleaseGroupID, err)
@@ -206,8 +203,7 @@ func TestApplyReleaseGroupArtBackfillFillsAVacantFront(t *testing.T) {
 			t.Fatal(err)
 		}
 		if err := st.ApplyReleaseGroupArtBackfill(ctx, model.ReleaseGroupArtBackfill{
-			ReleaseGroupID: id(c.title), PID: pid(c.title), Provider: "coverartarchive",
-			Art: enrichArtImg("backfill-"+c.title, "coverartarchive"), Front: model.ArtHalf{Asked: true},
+			ReleaseGroupID: id(c.title), PID: pid(c.title), Art: enrichArtImg("backfill-"+c.title, "coverartarchive"), Front: model.ArtHalf{Asked: true, Provider: "coverartarchive"},
 		}); err != nil {
 			t.Fatalf("apply %s: %v", c.title, err)
 		}
@@ -258,8 +254,9 @@ func TestGroupArtMarkerClearsOnAFrontClear(t *testing.T) {
 		model.Attribution{Source: model.SourceUser}, model.LockUnchanged, false); err != nil {
 		t.Fatalf("clear front: %v", err)
 	}
-	if n := markers(); n != 0 {
-		t.Errorf("markers after a fillable front clear = %d, want both dropped", n)
+	if n := count(`SELECT COUNT(*) FROM entity_enrichment WHERE entity_type='group_art' AND entity_id=?`, id("FrontCleared")); n != 1 ||
+		markers() != 1 {
+		t.Errorf("markers after a fillable front clear = %d, want the front half dropped and the auxiliary one kept", markers())
 	}
 
 	setRGArt(t, st, pid("FrontCleared"), model.ArtRoleFront, "front-again")

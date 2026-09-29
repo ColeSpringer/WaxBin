@@ -404,16 +404,12 @@ func TestLandedMBIDWriteReOpensTheArtQueue(t *testing.T) {
 	setEntityMBID(t, st, model.MergeAlbum, lockedPID, "", true)
 	setEntityMBID(t, st, model.MergeAlbum, holderPID, relTestOneMBID, false)
 
-	artMarkers := func(albumID int64) int {
-		t.Helper()
-		return scalarQueryInt(t, db,
-			"SELECT COUNT(*) FROM entity_enrichment WHERE entity_type='album_art' AND entity_id=?", albumID)
-	}
 	markArt := func(title string) int64 {
 		t.Helper()
 		id := albumIDByTitle(t, db, title)
 		pid := scalarQueryStr(t, db, "SELECT pid FROM album WHERE title = ?", title)
-		if err := st.ApplyAlbumArtBackfill(ctx, model.AlbumArtBackfill{AlbumID: id, PID: model.PID(pid)}); err != nil {
+		if err := st.ApplyAlbumArtBackfill(ctx, model.AlbumArtBackfill{AlbumID: id, PID: model.PID(pid),
+			Front: model.ArtHalf{Asked: true}, Aux: model.ArtHalf{Asked: true}}); err != nil {
 			t.Fatalf("mark %s art: %v", title, err)
 		}
 		return id
@@ -429,8 +425,8 @@ func TestLandedMBIDWriteReOpensTheArtQueue(t *testing.T) {
 		}); err != nil {
 			t.Fatalf("ApplyAlbumReleaseMatch(%s): %v", tc.title, err)
 		}
-		if artMarkers(id) != 1 {
-			t.Errorf("%s lost its art marker on a declined mbid write", tc.title)
+		if albumArtMarkers(t, db, id) != 2 {
+			t.Errorf("%s lost its art markers on a declined mbid write", tc.title)
 		}
 	}
 
@@ -443,8 +439,8 @@ func TestLandedMBIDWriteReOpensTheArtQueue(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("ApplyAlbumReleaseMatch(Fresh): %v", err)
 	}
-	if artMarkers(freshID) != 0 {
-		t.Error("a landed mbid left the art marker standing; the album is never asked with its id")
+	if albumArtMarkers(t, db, freshID) != 0 {
+		t.Error("a landed mbid left the art markers standing; the album is never asked with its id")
 	}
 }
 
@@ -462,7 +458,7 @@ func TestAlbumArtDoesNotOverwriteADerivedTrackCover(t *testing.T) {
 	pid := scalarQueryStr(t, db, "SELECT pid FROM album WHERE title='Embedded'")
 
 	if err := st.ApplyAlbumArtBackfill(ctx, model.AlbumArtBackfill{
-		AlbumID: id, PID: model.PID(pid), Matched: true, Provider: "musicbrainz",
+		AlbumID: id, PID: model.PID(pid), Front: model.ArtHalf{Asked: true, Provider: "musicbrainz"},
 		Art: &model.ArtImage{Data: []byte("provider-bytes"), Hash: "h-provider", Format: "png", Width: 4, Height: 4,
 			Attribution: model.Attribution{Source: model.SourceEnrichment, Provider: "musicbrainz"}},
 	}); err != nil {
@@ -486,7 +482,7 @@ func TestAlbumArtDoesNotOverwriteADerivedTrackCover(t *testing.T) {
 	bareID := albumIDByTitle(t, db, "Bare")
 	barePID := scalarQueryStr(t, db, "SELECT pid FROM album WHERE title='Bare'")
 	if err := st.ApplyAlbumArtBackfill(ctx, model.AlbumArtBackfill{
-		AlbumID: bareID, PID: model.PID(barePID), Matched: true, Provider: "musicbrainz",
+		AlbumID: bareID, PID: model.PID(barePID), Front: model.ArtHalf{Asked: true, Provider: "musicbrainz"},
 		Art: &model.ArtImage{Data: []byte("provider-bytes"), Hash: "h-provider", Format: "png", Width: 4, Height: 4,
 			Attribution: model.Attribution{Source: model.SourceEnrichment, Provider: "musicbrainz"}},
 	}); err != nil {
@@ -517,7 +513,7 @@ func TestAlbumArtDoesNotOverwriteACuratedCover(t *testing.T) {
 
 	id := albumIDByTitle(t, db, "Curated")
 	if err := st.ApplyAlbumArtBackfill(ctx, model.AlbumArtBackfill{
-		AlbumID: id, PID: pid, Matched: true, Provider: "musicbrainz",
+		AlbumID: id, PID: pid, Front: model.ArtHalf{Asked: true, Provider: "musicbrainz"},
 		Art: &model.ArtImage{Data: []byte("provider-bytes"), Hash: "h-provider", Format: "png", Width: 4, Height: 4,
 			Attribution: model.Attribution{Source: model.SourceEnrichment, Provider: "musicbrainz"}},
 	}); err != nil {
@@ -586,7 +582,7 @@ func TestUndoTakesTheMatchedCoverWithIt(t *testing.T) {
 		t.Fatalf("ApplyAlbumReleaseMatch: %v", err)
 	}
 	if err := st.ApplyAlbumArtBackfill(ctx, model.AlbumArtBackfill{
-		AlbumID: id, PID: model.PID(pid), Matched: true, Provider: "musicbrainz",
+		AlbumID: id, PID: model.PID(pid), Front: model.ArtHalf{Asked: true, Provider: "musicbrainz"},
 		Art: &model.ArtImage{Data: []byte("provider-bytes"), Hash: "h-provider", Format: "png", Width: 4, Height: 4,
 			Attribution: model.Attribution{Source: model.SourceEnrichment, Provider: "musicbrainz"}},
 	}); err != nil {
@@ -660,7 +656,7 @@ func TestUndoTakesATaggedAlbumsCoverToo(t *testing.T) {
 	pid := model.PID(scalarQueryStr(t, db, "SELECT pid FROM album WHERE title='Tagged'"))
 	setEntityMBID(t, st, model.MergeAlbum, string(pid), relTestOneMBID, false)
 	if err := st.ApplyAlbumArtBackfill(ctx, model.AlbumArtBackfill{
-		AlbumID: id, PID: pid, Matched: true, Provider: "coverartarchive",
+		AlbumID: id, PID: pid, Front: model.ArtHalf{Asked: true, Provider: "coverartarchive"},
 		Art: enrichArtImg("tagged-front", "coverartarchive"),
 	}); err != nil {
 		t.Fatalf("ApplyAlbumArtBackfill: %v", err)
@@ -679,11 +675,11 @@ func TestUndoTakesATaggedAlbumsCoverToo(t *testing.T) {
 	}
 }
 
-// TestUndoReadsTheArtMarkerBeforeTheEvidenceClear: --set is repeatable, so one edit can
-// clear the release id and fill a barcode at once. The new-evidence branch drops the
-// art marker before the undo below would read it, so the undo has to have read it first
-// or it decides the cover was nobody's.
-func TestUndoReadsTheArtMarkerBeforeTheEvidenceClear(t *testing.T) {
+// TestUndoTakesTheCoverWhenOneEditAlsoFillsABarcode: --set is repeatable, so one edit can
+// clear the release id and fill a barcode at once. The new-evidence branch drops the art
+// markers in that same edit, and the undo still takes enrichment's front, since no
+// marker gates it.
+func TestUndoTakesTheCoverWhenOneEditAlsoFillsABarcode(t *testing.T) {
 	ctx := context.Background()
 	st, dbPath, lib := openStoreAt(t)
 	db := roConn(t, dbPath)
@@ -693,7 +689,7 @@ func TestUndoReadsTheArtMarkerBeforeTheEvidenceClear(t *testing.T) {
 	pid := model.PID(scalarQueryStr(t, db, "SELECT pid FROM album WHERE title='Tagged'"))
 	setEntityMBID(t, st, model.MergeAlbum, string(pid), relTestOneMBID, false)
 	if err := st.ApplyAlbumArtBackfill(ctx, model.AlbumArtBackfill{
-		AlbumID: id, PID: pid, Matched: true, Provider: "coverartarchive",
+		AlbumID: id, PID: pid, Front: model.ArtHalf{Asked: true, Provider: "coverartarchive"},
 		Art: enrichArtImg("tagged-front", "coverartarchive"),
 	}); err != nil {
 		t.Fatalf("ApplyAlbumArtBackfill: %v", err)
@@ -725,7 +721,7 @@ func TestAnMBIDChangeTakesTheOldPressingsCover(t *testing.T) {
 	pid := model.PID(scalarQueryStr(t, db, "SELECT pid FROM album WHERE title='Corrected'"))
 	setEntityMBID(t, st, model.MergeAlbum, string(pid), relTestOneMBID, false)
 	if err := st.ApplyAlbumArtBackfill(ctx, model.AlbumArtBackfill{
-		AlbumID: id, PID: pid, Matched: true, Provider: "coverartarchive",
+		AlbumID: id, PID: pid, Front: model.ArtHalf{Asked: true, Provider: "coverartarchive"},
 		Art: enrichArtImg("old-pressing", "coverartarchive"),
 	}); err != nil {
 		t.Fatalf("ApplyAlbumArtBackfill: %v", err)
@@ -765,7 +761,7 @@ func TestUndoSurvivesAMarkerAnotherWriterDropped(t *testing.T) {
 	pid := model.PID(scalarQueryStr(t, db, "SELECT pid FROM album WHERE title='Tagged'"))
 	setEntityMBID(t, st, model.MergeAlbum, string(pid), relTestOneMBID, false)
 	if err := st.ApplyAlbumArtBackfill(ctx, model.AlbumArtBackfill{
-		AlbumID: id, PID: pid, Matched: true, Provider: "coverartarchive",
+		AlbumID: id, PID: pid, Front: model.ArtHalf{Asked: true, Provider: "coverartarchive"},
 		Art: enrichArtImg("tagged-front", "coverartarchive"),
 	}); err != nil {
 		t.Fatalf("ApplyAlbumArtBackfill: %v", err)
@@ -808,7 +804,7 @@ func TestUndoKeepsACuratedCover(t *testing.T) {
 
 	// The backfill answers with an auxiliary role only, which still marks a match.
 	if err := st.ApplyAlbumArtBackfill(ctx, model.AlbumArtBackfill{
-		AlbumID: id, PID: pid, Matched: true, Provider: "fanart",
+		AlbumID: id, PID: pid, Aux: model.ArtHalf{Asked: true, Provider: "fanart"},
 		AuxArt: map[model.ArtRole]*model.ArtImage{model.ArtRoleBack: enrichArtImg("aux-back", "fanart")},
 	}); err != nil {
 		t.Fatalf("ApplyAlbumArtBackfill: %v", err)

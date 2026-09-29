@@ -587,7 +587,7 @@ func fillAlbumIdentifiersTx(ctx context.Context, tx *sql.Tx, id int64, pid model
 		// A landed identifier is new evidence for the art rung too, which walks by
 		// identifier and may have asked while the album carried none. Media and country
 		// over-clear it, costing one re-ask, the same tolerance the curation sites take.
-		if err := deleteAlbumArtMarkerTx(ctx, tx, id); err != nil {
+		if err := deleteArtBackfillMarkerTx(ctx, tx, model.ArtAlbum, id); err != nil {
 			return err
 		}
 	}

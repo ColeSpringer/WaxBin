@@ -139,8 +139,8 @@ func TestAlbumArtReusesTheGroupCoverForItsOwnRelease(t *testing.T) {
 		t.Errorf("album front provenance = %q, want enrichment/coverartarchive", got)
 	}
 	if n := scalarInt(t, db,
-		"SELECT COUNT(*) FROM entity_enrichment WHERE entity_type='album_art' AND matched=1"); n != 1 {
-		t.Errorf("matched album_art markers = %d, want 1", n)
+		"SELECT COUNT(*) FROM entity_enrichment WHERE entity_type='album_front' AND matched=1"); n != 1 {
+		t.Errorf("matched album_front markers = %d, want 1", n)
 	}
 
 	res, err = svc.Run(ctx, enrich.RunOptions{}, nil)

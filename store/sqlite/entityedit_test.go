@@ -842,7 +842,7 @@ func TestEntityEditMBIDCorrectionTakesBackEnrichmentArt(t *testing.T) {
 			t.Fatalf("set album mbid: %v", err)
 		}
 		if err := st.ApplyAlbumArtBackfill(ctx, model.AlbumArtBackfill{
-			AlbumID: albumID, PID: albumPID, Matched: true, Provider: "mock",
+			AlbumID: albumID, PID: albumPID, Front: model.ArtHalf{Asked: true, Provider: "mock"}, Aux: model.ArtHalf{Asked: true, Provider: "mock"},
 			Art:    rgEnrichArt("al-front"),
 			AuxArt: map[model.ArtRole]*model.ArtImage{model.ArtRoleBack: rgEnrichArt("al-back")},
 		}); err != nil {
@@ -870,10 +870,15 @@ func TestEntityEditMBIDCorrectionTakesBackEnrichmentArt(t *testing.T) {
 		const old = "77777777-7777-7777-7777-777777777777"
 		if err := st.ApplyArtistEnrichment(ctx, model.ArtistEnrichment{
 			ArtistID: artistID, PID: artistPID, Matched: true, MBID: old,
-			Art:    rgEnrichArt("ar-front"),
-			AuxArt: map[model.ArtRole]*model.ArtImage{model.ArtRoleBackground: rgEnrichArt("ar-background")},
 		}); err != nil {
 			t.Fatalf("enrich artist: %v", err)
+		}
+		if err := st.ApplyArtistArtBackfill(ctx, model.ArtistArtBackfill{
+			ArtistID: artistID, PID: artistPID, Art: rgEnrichArt("ar-front"),
+			AuxArt: map[model.ArtRole]*model.ArtImage{model.ArtRoleBackground: rgEnrichArt("ar-background")},
+			Front:  model.ArtHalf{Asked: true, Provider: "fanart"}, Aux: model.ArtHalf{Asked: true, Provider: "fanart"},
+		}); err != nil {
+			t.Fatalf("backfill artist art: %v", err)
 		}
 		if _, err := st.EditEntityFields(ctx, model.MergeArtist, artistPID,
 			map[string]string{"mbid": "88888888-8888-8888-8888-888888888888"}, user, model.LockOf(false), false); err != nil {

@@ -768,7 +768,7 @@ func TestAuxOnlyProviderFillsTheNoArtAlbum(t *testing.T) {
 }
 
 // TestDualCapProviderIsAskedOnceForTheNoArtAlbum: a provider advertising cover and aux
-// together answers the whole gather under one CapCover request, so the aux-only leg
+// together answers the whole gather under one request naming both, so the aux-only leg
 // must not ask it again.
 func TestDualCapProviderIsAskedOnceForTheNoArtAlbum(t *testing.T) {
 	ctx := context.Background()
@@ -804,8 +804,8 @@ func TestDualCapProviderIsAskedOnceForTheNoArtAlbum(t *testing.T) {
 	if got := albumMBID(t, dbPath); got != edGBMBID {
 		t.Fatalf("album mbid = %q, want %s", got, edGBMBID)
 	}
-	if len(relAsks) != 1 || relAsks[0].Want != enrich.CapCover {
-		t.Fatalf("album asks = %+v, want exactly one under CapCover", relAsks)
+	if len(relAsks) != 1 || relAsks[0].Want != enrich.CapCover|enrich.CapAuxArt {
+		t.Fatalf("album asks = %+v, want exactly one under CapCover and CapAuxArt", relAsks)
 	}
 	if res.ArtFetched != 1 || res.AuxArtFetched != 1 {
 		t.Errorf("art fetched = %d/%d aux, want 1/1", res.ArtFetched, res.AuxArtFetched)

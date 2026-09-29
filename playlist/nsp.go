@@ -62,35 +62,50 @@ import (
 // marked malformed, and ImportNSPPartial refuses on one rather than pruning a
 // construct nobody wrote on purpose.
 
-// nspFieldToWB maps a Navidrome field name to a WaxBin query field. Only fields that
-// map cleanly (text and integer) are listed here; the date fields live in
-// nspDateFieldToWB with their own operator restriction, and any other field is
-// rejected.
+// nspFieldToWB maps a Navidrome field name to a WaxBin query field. The vocabulary is
+// Navidrome's own field table (model/criteria/fields.go), and a field maps when both
+// sides hold the same value in the same vocabulary; any other field is refused. The
+// date fields live in nspDateFieldToWB with their own operator restriction.
 //
-// The per-user fields that do map: playcount (an integer count, 1:1) and starred, whose
-// value is converted, since .nsp defines it as a boolean while WaxBin lowers the column
-// to 0/1 (see starredIn/starredOut). Only is/isNot carry on it, because ordering or
-// substring-matching a boolean means nothing on either side. rating maps too, but its
-// value is scale-converted, since Navidrome rates 0 to 5 stars while WaxBin uses 0 to
-// 100. A rating is multiplied by nspRatingScale on import and divided on export (see
-// the cond methods on nspImporter and nspExporter). A WaxBin rating that is not a
-// whole number of stars is rejected on export rather than written at the wrong
-// scale, and the substring operators are rejected in both directions (see
-// nspRatingTextOps). A mapped rule evaluates against the reading user, bound at
-// read time and never persisted.
+// Three pairs convert their value on the way across (see nspValueConvs): loved is a
+// boolean in .nsp and WaxBin's starred is 0/1, rating is 0 to 5 stars against 0 to 100,
+// and duration is seconds against milliseconds. The per-user fields evaluate against
+// the reading user, bound at read time and never persisted.
+//
+// filepath is the path under a library's root in Navidrome, so it maps to rel_path
+// rather than WaxBin's absolute path, and mbz_recording_id maps to recording_mbid, since
+// WaxBin's mbid carries a book's release id beside a track's recording.
+//
+// artist, albumartist, composer and genre are not rows of Navidrome's static table,
+// since it registers its role and tag names at start (AddRoles, AddTagNames).
+//
+// The near-misses are refused on purpose. hascoverart is an embedded-art flag where
+// WaxBin's has_art counts a folder cover too; datemodified moves on catalog writes
+// where Navidrome's does not; filetype and codec are a suffix against a container and
+// two codec vocabularies; missing is a file flag against WaxBin's state text; the
+// artist and release-track mbz_* ids have no bound alias (see the artist MBID note in
+// store/sqlite/fields.go); explicitstatus is a text status against WaxBin's
+// episode-only 0/1 probe.
 var nspFieldToWB = map[string]string{
-	"title":       "title",
-	"album":       "album",
-	"artist":      "artist",
-	"albumartist": "album_artist",
-	"genre":       "genre",
-	"year":        "year",
-	"tracknumber": "track_no",
-	"discnumber":  "disc_no",
-	"bpm":         "bpm",
-	"rating":      "rating",
-	"starred":     "starred",
-	"playcount":   "play_count",
+	"title":                "title",
+	"album":                "album",
+	"artist":               "artist",
+	"albumartist":          "album_artist",
+	"composer":             "composer",
+	"genre":                "genre",
+	"year":                 "year",
+	"tracknumber":          "track_no",
+	"discnumber":           "disc_no",
+	"bpm":                  "bpm",
+	"duration":             "duration_ms",
+	"filepath":             "rel_path",
+	"catalognumber":        "album_catalog_number",
+	"mbz_recording_id":     "recording_mbid",
+	"mbz_album_id":         "album_mbid",
+	"mbz_release_group_id": "release_group_mbid",
+	"rating":               "rating",
+	"loved":                "starred",
+	"playcount":            "play_count",
 }
 
 // nspDateFieldToWB maps Navidrome's date fields to WaxBin's nanosecond time fields.
@@ -105,6 +120,7 @@ var nspFieldToWB = map[string]string{
 var nspDateFieldToWB = map[string]string{
 	"lastplayed": "last_played",
 	"dateadded":  "added",
+	"dateloved":  "starred_at",
 }
 
 // wbDateFieldToNSP is the reverse date-field map for export, widened the same way
@@ -121,6 +137,17 @@ const nspDayNS = int64(24) * 60 * 60 * 1_000_000_000
 // would read as WaxBin "more than 3 out of 100" (nearly everything), and a WaxBin
 // "rating at least 80" would export as "80 stars" (nothing).
 const nspRatingScale = 20
+
+// nspMaxRating bounds a rating on WaxBin's scale in both directions: past 2^53 a float
+// no longer holds every whole number, so the scaling and the int64 conversion stop being
+// exact, and nothing near it is a rating anyway.
+const nspMaxRating = 1 << 53
+
+// nspMaxDurationMS bounds a duration on both sides of the seconds bridge: below 2^51
+// milliseconds (about 71,000 years) a whole millisecond count converts to seconds and
+// back exactly in float64, and nothing past it reaches an int64 conversion Go leaves
+// implementation-defined out of range.
+const nspMaxDurationMS = 1 << 51
 
 // asFloat coerces a JSON-decoded (float64) or programmatically-built (int/int64)
 // numeric value to a float64.
@@ -146,7 +173,11 @@ func scaleRatingIn(v any) (any, NSPReason) {
 	if !ok {
 		return nil, NSPReasonValueNotNumeric
 	}
-	return f * nspRatingScale, ""
+	r := f * nspRatingScale
+	if !(math.Abs(r) < nspMaxRating) {
+		return nil, NSPReasonValueTooLarge
+	}
+	return r, ""
 }
 
 // scaleRatingOut converts a WaxBin rating value (0 to 100) back to Navidrome's 0 to 5
@@ -157,6 +188,9 @@ func scaleRatingOut(v any) (any, NSPReason) {
 	if !ok {
 		return nil, NSPReasonValueNotNumeric
 	}
+	if !(math.Abs(f) < nspMaxRating) {
+		return nil, NSPReasonValueTooLarge
+	}
 	n := int64(f)
 	if float64(n) != f || n%nspRatingScale != 0 {
 		return nil, NSPReasonRatingNotWholeStar
@@ -164,12 +198,12 @@ func scaleRatingOut(v any) (any, NSPReason) {
 	return n / nspRatingScale, ""
 }
 
-// starredIn converts a .nsp starred value to the 0/1 WaxBin's column holds. .nsp defines
-// the field as a boolean while WaxBin lowers it to CASE ... THEN 1 ELSE 0, so a bool
+// boolIn converts a .nsp boolean value to the 0/1 WaxBin's column holds. .nsp defines
+// loved as a boolean while WaxBin lowers starred to CASE ... THEN 1 ELSE 0, so a bool
 // crossing unconverted leaves a stored rule holding a value the engine never produces
 // itself. A 0 or 1 is accepted too, since it means the same thing and refusing it would
 // only reject a document that round-tripped through here.
-func starredIn(v any) (any, NSPReason) {
+func boolIn(v any) (any, NSPReason) {
 	if b, ok := v.(bool); ok {
 		if b {
 			return int64(1), ""
@@ -182,11 +216,11 @@ func starredIn(v any) (any, NSPReason) {
 	return nil, NSPReasonValueNotBoolean
 }
 
-// starredOut converts a WaxBin starred value back to the .nsp boolean. A bool passes
-// through: a rule imported before this conversion existed holds one, and it is already
-// the value .nsp wants. Anything that is neither 0 nor 1 is not a state the column can
-// be in and has no .nsp form.
-func starredOut(v any) (any, NSPReason) {
+// boolOut converts a WaxBin 0/1 value back to the .nsp boolean. A bool passes through:
+// a rule imported before this conversion existed holds one, and it is already the value
+// .nsp wants. Anything that is neither 0 nor 1 is not a state the column can be in and
+// has no .nsp form.
+func boolOut(v any) (any, NSPReason) {
 	if b, ok := v.(bool); ok {
 		return b, ""
 	}
@@ -197,19 +231,95 @@ func starredOut(v any) (any, NSPReason) {
 	return f == 1, ""
 }
 
+// durationIn converts a .nsp duration in seconds to WaxBin's milliseconds. A value that
+// is not a whole number of milliseconds is refused rather than rounded, since rounding
+// moves the boundary a gt or lt draws. The check needs no tolerance: a whole count r
+// parses to the same float r/1000 computes, anywhere below nspMaxDurationMS.
+func durationIn(v any) (any, NSPReason) {
+	f, ok := asFloat(v)
+	if !ok {
+		return nil, NSPReasonValueNotNumeric
+	}
+	ms := f * 1000
+	if !(math.Abs(ms) < nspMaxDurationMS) {
+		return nil, NSPReasonValueTooLarge
+	}
+	r := math.Round(ms)
+	if r/1000 != f {
+		return nil, NSPReasonDurationNotWholeMS
+	}
+	return int64(r), ""
+}
+
+// durationOut converts WaxBin milliseconds back to .nsp seconds, refusing a value
+// durationIn would refuse on the way back in. encoding/json prints the shortest form,
+// so 300000 exports as 300 and 300500 as 300.5.
+func durationOut(v any) (any, NSPReason) {
+	f, ok := asFloat(v)
+	if !ok {
+		return nil, NSPReasonValueNotNumeric
+	}
+	if !(math.Abs(f) < nspMaxDurationMS) {
+		return nil, NSPReasonValueTooLarge
+	}
+	if f != math.Trunc(f) {
+		return nil, NSPReasonDurationNotWholeMS
+	}
+	return f / 1000, ""
+}
+
 // nspValueConvs holds the per-field value conversions, keyed by canonical WaxBin field.
 // A field absent from it crosses verbatim. Both directions report a failure as a code
 // rather than an error, since the walks record it in a report and only the strict
 // entry points turn one back into an error.
 var nspValueConvs = map[string]struct{ in, out func(any) (any, NSPReason) }{
-	"rating":  {scaleRatingIn, scaleRatingOut},
-	"starred": {starredIn, starredOut},
+	"rating":      {scaleRatingIn, scaleRatingOut},
+	"starred":     {boolIn, boolOut},
+	"duration_ms": {durationIn, durationOut},
 }
 
-// nspBoolOps are the only operators a boolean field carries. .nsp defines starred as a
-// boolean, so ordering it, ranging it, or matching a substring of it means nothing on
-// either side; without the gate a converted value would render {"gt":{"starred":true}}.
-var nspBoolOps = map[string]bool{"is": true, "isNot": true}
+// nspValueGapCodes are the import conversion failures filed as value gaps, which a
+// partial import may drop. A sub-millisecond or enormous value is one Navidrome would
+// write and WaxBin has no room for, while every other failure (a rating that is not a
+// number) is a value Navidrome would not write, so the document is broken.
+var nspValueGapCodes = map[NSPReason]bool{
+	NSPReasonDurationNotWholeMS: true,
+	NSPReasonValueTooLarge:      true,
+}
+
+// nspNarrowFields are the fields that carry fewer operators than the shared table, by
+// canonical WaxBin name: the operators each takes, as .nsp spells them, and the code
+// for any other. .nsp defines loved as a boolean, so ordering it, ranging it, or
+// matching a substring of it means nothing on either side; without the gate a converted
+// value would render {"gt":{"loved":true}}.
+var nspNarrowFields = map[string]struct {
+	ops  map[string]bool
+	code NSPReason
+}{
+	"starred": {map[string]bool{"is": true, "isNot": true}, NSPReasonBooleanOperator},
+}
+
+// nspPresenceFields are the fields isMissing and isPresent cross on, by Navidrome name.
+// It mirrors where Navidrome allows them (missingExpr in persistence/criteria_sql.go):
+// its nullable columns plus the role and tag fields. The WaxBin expressions behind them
+// agree with its lowering, NULL for a number and NULL or empty for a string, since the
+// text fields COALESCE to an empty string and bpm is read raw.
+var nspPresenceFields = map[string]bool{
+	"album": true, "artist": true, "albumartist": true, "composer": true, "genre": true,
+	"bpm": true, "catalognumber": true,
+	"mbz_recording_id": true, "mbz_album_id": true, "mbz_release_group_id": true,
+}
+
+// wbPresenceFields is nspPresenceFields by WaxBin field, every alias spelling included.
+var wbPresenceFields = func() map[string]bool {
+	m := map[string]bool{}
+	for name := range nspPresenceFields {
+		for _, spelling := range model.QueryFieldSpellings(nspFieldToWB[name]) {
+			m[spelling] = true
+		}
+	}
+	return m
+}()
 
 // wbFieldToNSP is the reverse map for export, built from nspFieldToWB and widened over
 // the engine's own alias spellings. The engine treats album_artist and albumartist as
@@ -256,15 +366,30 @@ func widenAliases(m map[string]string) map[string]string {
 // NSPExportableFields lists the WaxBin query fields that have an .nsp name at all,
 // alias spellings included, in sorted order. A field absent from it can never survive a
 // conversion; a field present may still be dropped for the operator or the value it
-// carries, since the date fields take only the relative operators and rating takes only
-// whole stars. CheckNSPExport answers that for a particular rule, and this list is for
-// the coarser question of which fields are in the vocabulary at all.
+// carries, since the date fields take only the relative operators and a converted field
+// only a value that converts. CheckNSPExport answers that for a particular rule, and
+// this list is for the coarser question of which fields are in the vocabulary at all.
 func NSPExportableFields() []string {
 	out := make([]string, 0, len(wbFieldToNSP)+len(wbDateFieldToNSP))
 	for f := range wbFieldToNSP {
 		out = append(out, f)
 	}
 	for f := range wbDateFieldToNSP {
+		out = append(out, f)
+	}
+	slices.Sort(out)
+	return out
+}
+
+// NSPImportableFields lists the Navidrome field names an import reads, in sorted order,
+// which is the list a consumer describing an import shows. It is the coarse answer too:
+// CheckNSPImport says what a particular document loses.
+func NSPImportableFields() []string {
+	out := make([]string, 0, len(nspFieldToWB)+len(nspDateFieldToWB))
+	for f := range nspFieldToWB {
+		out = append(out, f)
+	}
+	for f := range nspDateFieldToWB {
 		out = append(out, f)
 	}
 	slices.Sort(out)
@@ -286,20 +411,23 @@ var nspOpToWB = map[string]query.Op{
 	"inTheRange": query.OpInRange,
 }
 
-// nspRatingTextOps are the substring operators, named as .nsp spells them. They
-// have no faithful mapping on the rating field in either direction: the scale
-// bridge is a numeric conversion and a substring match does not survive one, since
-// "contains 3" and "contains 60" match different sets. Every other operator on
-// rating scales, so these are rejected rather than crossing at one scale or the
-// other. (Both sides accept them: WaxBin's rating column is an integer LIKE
+// nspTextOps are the substring operators, named as .nsp spells them, and
+// nspScaledFields are the fields whose value converts by a numeric factor, by canonical
+// WaxBin name. A substring operator has no faithful mapping on a scaled field in either
+// direction, since "contains 3" and "contains 60" match different sets. Every other
+// operator on those fields converts, so these are rejected rather than crossing in one
+// unit or the other. (Both sides accept them: WaxBin's columns are integers LIKE
 // compiles against, and Navidrome writes them because its field list does not say
 // otherwise.)
-var nspRatingTextOps = map[string]bool{
-	"contains":    true,
-	"startsWith":  true,
-	"endsWith":    true,
-	"notContains": true,
-}
+var (
+	nspTextOps = map[string]bool{
+		"contains":    true,
+		"startsWith":  true,
+		"endsWith":    true,
+		"notContains": true,
+	}
+	nspScaledFields = map[string]bool{"rating": true, "duration_ms": true}
+)
 
 // wbOpToNSP is the reverse map for export.
 var wbOpToNSP = func() map[query.Op]string {
@@ -586,9 +714,9 @@ func (im *nspImporter) dateCond(op, wbField, nspField string, rawVal json.RawMes
 	return query.Cond{Field: wbField, Op: wbOp, Value: n * nspDayNS}, true
 }
 
-// cond builds a condition (or a negated one) for a leaf operator. A rating value
-// is scaled up from Navidrome's 0-to-5 scale to WaxBin's 0-to-100 one. nspField
-// is the name as written, for the report; wbField is the resolved WaxBin one.
+// cond builds a condition (or a negated one) for a leaf operator, converting the value
+// of a field in nspValueConvs. nspField is the name as written, for the report; wbField
+// is the resolved WaxBin one.
 func (im *nspImporter) cond(op, nspField, wbField string, rawVal json.RawMessage) (query.Node, bool) {
 	if op == "inTheRange" {
 		var vals []any
@@ -603,7 +731,7 @@ func (im *nspImporter) cond(op, nspField, wbField string, rawVal json.RawMessage
 			for i := range vals {
 				sv, code := conv.in(vals[i])
 				if code != "" {
-					im.broken(NSPGap{Code: code, Field: nspField, Op: op, Value: vals[i]})
+					im.convGap(code, nspField, op, vals[i])
 					return nil, false
 				}
 				vals[i] = sv
@@ -616,8 +744,11 @@ func (im *nspImporter) cond(op, nspField, wbField string, rawVal json.RawMessage
 		im.broken(NSPGap{Code: NSPReasonBadValue, Field: nspField, Op: op})
 		return nil, false
 	}
-	if wbField == "rating" && nspRatingTextOps[op] {
-		im.rep.gap(NSPGap{Kind: NSPGapOperator, Code: NSPReasonRatingTextOperator, Field: nspField, Op: op, Path: im.at()})
+	if op == "isMissing" || op == "isPresent" {
+		return im.presence(op, nspField, wbField, v)
+	}
+	if nspScaledFields[wbField] && nspTextOps[op] {
+		im.rep.gap(NSPGap{Kind: NSPGapOperator, Code: NSPReasonScaledTextOperator, Field: nspField, Op: op, Path: im.at()})
 		return nil, false
 	}
 	if !im.opAllowed(op, nspField, wbField) {
@@ -634,9 +765,7 @@ func (im *nspImporter) cond(op, nspField, wbField string, rawVal json.RawMessage
 	if conv, ok := nspValueConvs[wbField]; ok {
 		sv, code := conv.in(v)
 		if code != "" {
-			// A value Navidrome itself would not write is a broken document rather than
-			// a value WaxBin has no room for.
-			im.broken(NSPGap{Code: code, Field: nspField, Op: op, Value: v})
+			im.convGap(code, nspField, op, v)
 			return nil, false
 		}
 		v = sv
@@ -644,14 +773,43 @@ func (im *nspImporter) cond(op, nspField, wbField string, rawVal json.RawMessage
 	return query.Cond{Field: wbField, Op: wbOp, Value: v}, true
 }
 
+// presence builds an isMissing or isPresent condition. Navidrome allows them only on
+// nspPresenceFields and takes a boolean that flips them, so isMissing false is
+// isPresent.
+func (im *nspImporter) presence(op, nspField, wbField string, v any) (query.Node, bool) {
+	if !nspPresenceFields[strings.ToLower(nspField)] {
+		im.rep.gap(NSPGap{Kind: NSPGapOperator, Code: NSPReasonPresenceOperator, Field: nspField, Op: op, Path: im.at()})
+		return nil, false
+	}
+	b, ok := v.(bool)
+	if !ok {
+		im.broken(NSPGap{Code: NSPReasonValueNotBoolean, Field: nspField, Op: op, Value: v})
+		return nil, false
+	}
+	if (op == "isMissing") == b {
+		return query.Cond{Field: wbField, Op: query.OpIsMissing}, true
+	}
+	return query.Cond{Field: wbField, Op: query.OpIsPresent}, true
+}
+
+// convGap records a value that did not convert: a value gap for the codes in
+// nspValueGapCodes, and otherwise a broken document.
+func (im *nspImporter) convGap(code NSPReason, field, op string, val any) {
+	if nspValueGapCodes[code] {
+		im.valueGap(code, field, op, val)
+		return
+	}
+	im.broken(NSPGap{Code: code, Field: field, Op: op, Value: val})
+}
+
 // opAllowed reports whether op crosses on wbField, recording the gap when it does not.
-// It is where a field narrower than the shared operator table says so: starred is a
-// boolean on both sides and takes only is/isNot.
+// It is where a field narrower than the shared operator table says so (nspNarrowFields).
 func (im *nspImporter) opAllowed(op, nspField, wbField string) bool {
-	if wbField != "starred" || nspBoolOps[op] {
+	n, narrow := nspNarrowFields[wbField]
+	if !narrow || n.ops[op] {
 		return true
 	}
-	im.rep.gap(NSPGap{Kind: NSPGapOperator, Code: NSPReasonBooleanOperator, Field: nspField, Op: op, Path: im.at()})
+	im.rep.gap(NSPGap{Kind: NSPGapOperator, Code: n.code, Field: nspField, Op: op, Path: im.at()})
 	return false
 }
 
@@ -966,10 +1124,10 @@ func (e *nspExporter) not(n query.Not) (map[string]any, query.Node, bool) {
 		e.rep.gap(NSPGap{Kind: NSPGapField, Code: NSPReasonUnsupportedField, Field: c.Field, Path: e.at()})
 		return nil, nil, false
 	}
-	if c.Field == "rating" {
+	if nspScaledFields[model.CanonicalQueryField(c.Field)] {
 		// WaxBin spells this operator as a negation and has no name for it, so the gap
 		// names it the way .nsp does.
-		e.rep.gap(NSPGap{Kind: NSPGapOperator, Code: NSPReasonRatingTextOperator, Field: c.Field, Op: "notContains", Path: e.at()})
+		e.rep.gap(NSPGap{Kind: NSPGapOperator, Code: NSPReasonScaledTextOperator, Field: c.Field, Op: "notContains", Path: e.at()})
 		return nil, nil, false
 	}
 	if !e.opAllowed(c, "notContains") {
@@ -978,10 +1136,9 @@ func (e *nspExporter) not(n query.Not) (map[string]any, query.Node, bool) {
 	return map[string]any{"notContains": map[string]any{field: c.Value}}, n, true
 }
 
-// cond renders a single condition as an operator object. A rating value is
-// scaled back down from WaxBin's 0-to-100 scale to Navidrome's 0-to-5 one,
-// recording a gap for a value that is not a whole star rather than writing a
-// mismatched one.
+// cond renders a single condition as an operator object, converting the value of a
+// field in nspValueConvs and recording a gap for one that does not convert rather than
+// writing a mismatched one.
 func (e *nspExporter) cond(c query.Cond) (map[string]any, query.Node, bool) {
 	if nspField, ok := wbDateFieldToNSP[c.Field]; ok {
 		return e.dateCond(c, nspField)
@@ -991,19 +1148,23 @@ func (e *nspExporter) cond(c query.Cond) (map[string]any, query.Node, bool) {
 		e.rep.gap(NSPGap{Kind: NSPGapField, Code: NSPReasonUnsupportedField, Field: c.Field, Path: e.at()})
 		return nil, nil, false
 	}
+	if c.Op == query.OpIsMissing || c.Op == query.OpIsPresent {
+		return e.presence(c, field)
+	}
 	op, ok := wbOpToNSP[c.Op]
 	if !ok {
 		e.rep.gap(NSPGap{Kind: NSPGapOperator, Code: NSPReasonUnsupportedOperator, Field: c.Field, Op: string(c.Op), Path: e.at()})
 		return nil, nil, false
 	}
-	if c.Field == "rating" && nspRatingTextOps[op] {
-		e.rep.gap(NSPGap{Kind: NSPGapOperator, Code: NSPReasonRatingTextOperator, Field: c.Field, Op: string(c.Op), Path: e.at()})
+	canon := model.CanonicalQueryField(c.Field)
+	if nspScaledFields[canon] && nspTextOps[op] {
+		e.rep.gap(NSPGap{Kind: NSPGapOperator, Code: NSPReasonScaledTextOperator, Field: c.Field, Op: string(c.Op), Path: e.at()})
 		return nil, nil, false
 	}
 	if !e.opAllowed(c, op) {
 		return nil, nil, false
 	}
-	conv, converts := nspValueConvs[model.CanonicalQueryField(c.Field)]
+	conv, converts := nspValueConvs[canon]
 	if c.Op == query.OpInRange {
 		vals := c.Values
 		if converts {
@@ -1031,14 +1192,24 @@ func (e *nspExporter) cond(c query.Cond) (map[string]any, query.Node, bool) {
 	return map[string]any{op: map[string]any{field: val}}, c, true
 }
 
+// presence renders isMissing or isPresent in the true form, on the fields Navidrome
+// allows them on.
+func (e *nspExporter) presence(c query.Cond, field string) (map[string]any, query.Node, bool) {
+	if !wbPresenceFields[c.Field] {
+		e.rep.gap(NSPGap{Kind: NSPGapOperator, Code: NSPReasonPresenceOperator, Field: c.Field, Op: string(c.Op), Path: e.at()})
+		return nil, nil, false
+	}
+	return map[string]any{string(c.Op): map[string]any{field: true}}, c, true
+}
+
 // opAllowed reports whether nspOp crosses on c's field, recording the gap when it does
-// not. It mirrors the importer's: starred is a boolean on both sides, so only is/isNot
-// carry, and without this a converted value would render {"gt":{"starred":true}}.
+// not. It mirrors the importer's.
 func (e *nspExporter) opAllowed(c query.Cond, nspOp string) bool {
-	if model.CanonicalQueryField(c.Field) != "starred" || nspBoolOps[nspOp] {
+	n, narrow := nspNarrowFields[model.CanonicalQueryField(c.Field)]
+	if !narrow || n.ops[nspOp] {
 		return true
 	}
-	e.rep.gap(NSPGap{Kind: NSPGapOperator, Code: NSPReasonBooleanOperator, Field: c.Field, Op: string(c.Op), Path: e.at()})
+	e.rep.gap(NSPGap{Kind: NSPGapOperator, Code: n.code, Field: c.Field, Op: string(c.Op), Path: e.at()})
 	return false
 }
 

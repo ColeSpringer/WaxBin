@@ -568,7 +568,7 @@ func renameReleaseGroupsForEditsTx(ctx context.Context, tx *sql.Tx, groups map[i
 			}
 			// The group-art backfill keys on the title, so a key move is new evidence for
 			// it whether or not the group carries an mbid, and its marker is permanent.
-			if err := deleteGroupArtMarkerTx(ctx, tx, rgID); err != nil {
+			if err := deleteArtBackfillMarkerTx(ctx, tx, model.ArtReleaseGroup, rgID); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 		default:
@@ -954,7 +954,7 @@ func finishArtistRenameTx(ctx context.Context, tx *sql.Tx, id int64, pid string,
 		if err := clearUnmatchedEntityMarkerTx(ctx, tx, model.EnrichArtistType, id); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
-		if err := deleteArtistArtMarkerTx(ctx, tx, id); err != nil {
+		if err := deleteArtBackfillMarkerTx(ctx, tx, model.ArtArtist, id); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 	}
