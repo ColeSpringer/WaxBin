@@ -38,6 +38,7 @@ func (a *Auditor) reportFileDiagnostics(ds []model.FileDiagnostic, sample int, a
 			Severity: d.Severity,
 			Message:  diagMessage(d),
 			Path:     d.DisplayPath,
+			FilePID:  d.FilePID,
 		})
 	}
 	for _, sev := range diagSeverities {
@@ -82,6 +83,7 @@ func (a *Auditor) reportCorruptDiagnostics(ds []model.FileDiagnostic, sample int
 			Severity: d.Severity,
 			Message:  diagMessage(d),
 			Path:     d.DisplayPath,
+			FilePID:  d.FilePID,
 		})
 	}
 	for _, sev := range diagSeverities {

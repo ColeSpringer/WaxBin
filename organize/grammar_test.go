@@ -2,9 +2,11 @@ package organize
 
 import (
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/colespringer/waxbin/model"
+	"github.com/colespringer/waxbin/waxerr"
 )
 
 func render(t *testing.T, tmpl string, fields map[string]fieldVal) string {
@@ -146,5 +148,45 @@ func TestProfileSetRejectsBadTemplate(t *testing.T) {
 	}
 	if _, err := NewProfileSet([]Profile{{Name: "bad", Music: "<{title}"}}); err == nil {
 		t.Fatal("an unbalanced group should be rejected at load")
+	}
+}
+
+// TestProfileValidate: a profile handed in whole (the facade's ad-hoc organize) needs
+// a name and three clean templates, since nothing is inherited for it.
+func TestProfileValidate(t *testing.T) {
+	good := nativeProfile
+	good.Name = "adhoc"
+	if err := good.Validate(); err != nil {
+		t.Fatalf("a complete profile: %v", err)
+	}
+	for name, p := range map[string]Profile{
+		"no name":          {Music: good.Music, Audiobook: good.Audiobook, Podcast: good.Podcast},
+		"no podcast":       {Name: "x", Music: good.Music, Audiobook: good.Audiobook},
+		"unknown field":    {Name: "x", Music: "{nope}", Audiobook: good.Audiobook, Podcast: good.Podcast},
+		"unbalanced group": {Name: "x", Music: good.Music, Audiobook: "<{title}", Podcast: good.Podcast},
+	} {
+		if err := p.Validate(); !waxerr.Is(err, waxerr.CodeInvalid) {
+			t.Errorf("%s: Validate = %v, want CodeInvalid", name, err)
+		}
+	}
+}
+
+// TestProfileSetAll: every profile the set resolves, merged as ByName returns it, in
+// name order.
+func TestProfileSetAll(t *testing.T) {
+	set, err := NewProfileSet([]Profile{{Name: "zeta", Music: "{title}.{ext}"}, {Name: "alpha", Podcast: "{episode}.{ext}"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	all := set.All()
+	var names []string
+	for _, p := range all {
+		names = append(names, p.Name)
+	}
+	if want := []string{"alpha", "waxbin-native", "zeta"}; !slices.Equal(names, want) {
+		t.Fatalf("names = %v, want %v", names, want)
+	}
+	if all[2].Music != "{title}.{ext}" || all[2].Audiobook != nativeProfile.Audiobook {
+		t.Errorf("zeta = %+v, want its music template and the inherited rest", all[2])
 	}
 }

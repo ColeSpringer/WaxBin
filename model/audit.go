@@ -94,7 +94,11 @@ type AuditFinding struct {
 	Message   string
 	Entities  []PID       // involved entity/item PIDs (survivor first for merges)
 	Path      string      // involved on-disk path, for file-level findings
+	FilePID   PID         // the file a file-level finding names, when the check had one
 	MergeType MergeEntity // set on duplicate findings, "" otherwise
+	// HeaderMS and DecodedMS are a duration_mismatch finding's two lengths.
+	HeaderMS  int64
+	DecodedMS int64
 }
 
 // DuplicateMember is one entity in a duplicate set.

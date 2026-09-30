@@ -34,7 +34,8 @@ type DownloadResult struct {
 // Download fetches an episode's enclosure into the podcast directory, catalogs it
 // as the episode's file (flipping the episode to present), and opportunistically fetches
 // its transcript and artwork. It enforces a free-space preflight and the configured
-// size cap. Re-downloading an episode replaces the prior file.
+// size cap. Re-downloading an episode replaces the prior file. A provider's failure is a
+// *source.ProviderError, as for Sync; a file that refuses the bytes is the catalog's.
 func (s *Service) Download(ctx context.Context, episodePID model.PID) (*DownloadResult, error) {
 	const op = "podcast.Download"
 	if strings.TrimSpace(s.cfg.Dir) == "" {
@@ -54,8 +55,9 @@ func (s *Service) Download(ctx context.Context, episodePID model.PID) (*Download
 	}
 	user, pass := s.authFor(ctx, pod)
 
-	libID, err := s.podcastLibrary(ctx)
-	if err != nil {
+	// Checked before the fetch so a misconfigured podcast dir costs no download; the
+	// id itself is read again at the commit.
+	if _, err := s.podcastLibrary(ctx); err != nil {
 		return nil, err
 	}
 
@@ -112,6 +114,12 @@ func (s *Service) Download(ctx context.Context, episodePID model.PID) (*Download
 	// unbounded.
 	var filePID model.PID
 	if err := s.leaseWait(ctx, func(ctx context.Context) error {
+		// Read at the commit: a maintenance hand-off during the fetch can land this
+		// download in a restored catalog whose podcast library has another id.
+		libID, err := s.podcastLibrary(ctx)
+		if err != nil {
+			return err
+		}
 		if err := os.Rename(pathx.Long(tmp), pathx.Long(dst)); err != nil {
 			_ = os.Remove(pathx.Long(tmp))
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
@@ -230,18 +238,39 @@ func (s *Service) fetchTo(ctx context.Context, prov source.Provider, path string
 	if err != nil {
 		return 0, "", waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
-	res, ferr := prov.Fetch(ctx, req, f)
-	if cerr := f.Close(); cerr != nil && ferr == nil {
-		ferr = waxerr.Wrap(waxerr.CodeIO, op, cerr)
-	}
-	if ferr != nil {
-		return 0, "", ferr
-	}
-	// An injected provider could return (nil, nil); guard rather than nil-deref.
-	if res == nil {
-		return 0, "", waxerr.New(waxerr.CodeInternal, op, "provider returned no fetch result")
+	dst := &destWriter{w: f}
+	res, ferr := prov.Fetch(ctx, req, dst)
+	cerr := f.Close()
+	switch {
+	case dst.err != nil:
+		// The file's own refusal comes first: a provider that failed after it, or carried
+		// on over it, did not fail on its own account, and a success over it is truncated.
+		return 0, "", waxerr.Wrap(waxerr.CodeIO, op, dst.err)
+	case ferr != nil:
+		return 0, "", providerErr(ctx, op, prov, "fetch", ferr)
+	case cerr != nil:
+		return 0, "", waxerr.Wrap(waxerr.CodeIO, op, cerr)
+	case res == nil:
+		// An injected provider could return (nil, nil); guard rather than nil-deref.
+		return 0, "", providerErr(ctx, op, prov, "fetch",
+			waxerr.New(waxerr.CodeInternal, op, "provider returned no fetch result"))
 	}
 	return res.Bytes, res.ContentHash, nil
+}
+
+// destWriter records the first error writing a download's own file, which is the
+// catalog's failure rather than the provider's.
+type destWriter struct {
+	w   io.Writer
+	err error
+}
+
+func (d *destWriter) Write(p []byte) (int, error) {
+	n, err := d.w.Write(p)
+	if err != nil && d.err == nil {
+		d.err = err
+	}
+	return n, err
 }
 
 // ImportEpisodeFile places an already-acquired local media file as an episode's
@@ -262,8 +291,9 @@ func (s *Service) ImportEpisodeFile(ctx context.Context, episodePID model.PID, s
 	if err != nil {
 		return nil, err
 	}
-	libID, err := s.podcastLibrary(ctx)
-	if err != nil {
+	// Checked before the file is touched; the id itself is read again at the commit,
+	// as Download does.
+	if _, err := s.podcastLibrary(ctx); err != nil {
 		return nil, err
 	}
 	info, err := os.Stat(pathx.Long(srcPath))
@@ -287,9 +317,13 @@ func (s *Service) ImportEpisodeFile(ctx context.Context, episodePID model.PID, s
 
 	// Both leases, in the fixed fs-mutate then podcast-fs order: this is the one verb
 	// that moves a file out of an arbitrary source path (which may sit in a user
-	// library tree) and into the podcast tree.
+	// library tree) and into the podcast tree, so the embedder may refuse the move.
 	var filePID model.PID
-	if err := s.leaseImport(ctx, func(ctx context.Context) error {
+	if err := s.leaseImport(ctx, srcPath, !keepOriginal, func(ctx context.Context) error {
+		libID, err := s.podcastLibrary(ctx)
+		if err != nil {
+			return err
+		}
 		if err := fsx.MoveOrCopy(srcPath, dst, keepOriginal); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}

@@ -18,6 +18,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -25,6 +26,7 @@ import (
 	binconfig "github.com/colespringer/waxbin/config"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/pidpath"
+	"github.com/colespringer/waxbin/port"
 	"github.com/colespringer/waxbin/query"
 	"github.com/colespringer/waxbin/waxerr"
 
@@ -349,6 +351,96 @@ func TestRenameInvalidatesWithinOnePoll(t *testing.T) {
 	}
 	if loc.Path != newPath {
 		t.Fatalf("located %q after the rename, want %q", loc.Path, newPath)
+	}
+}
+
+// TestOpenedCacheFollowsAReplacedCatalog: a cache that opened its own read-only
+// handle reopens it when a restore renames another catalog over the path, and answers
+// from the restored catalog rather than from the file it had open.
+func TestOpenedCacheFollowsAReplacedCatalog(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows refuses to rename over a file another handle holds open, so the cache cannot be left behind")
+	}
+	ctx := context.Background()
+	libA, _, db := buildCatalog(t, map[string][]byte{"alpha.wav": rampWAV(t, 8000)})
+	pidA := itemPIDs(t, libA)["alpha.wav"]
+	libB, rootB, dbB := buildCatalog(t, map[string][]byte{"beta.wav": rampWAV(t, 12000)})
+	pidB := itemPIDs(t, libB)["beta.wav"]
+	cache := newCache(t, db)
+	if _, err := cache.Locate(ctx, pidA); err != nil {
+		t.Fatalf("warm Locate: %v", err)
+	}
+
+	for _, l := range []*waxbin.Library{libA, libB} {
+		if err := l.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := port.Restore(ctx, dbB, db, true); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	if err := cache.Poll(ctx); err != nil {
+		t.Fatalf("Poll over a replaced catalog: %v", err)
+	}
+	if _, ok := cache.Cached(pidA); ok {
+		t.Fatal("the dead catalog's location survived the reopen")
+	}
+	loc, err := cache.Locate(ctx, pidB)
+	if err != nil {
+		t.Fatalf("Locate from the restored catalog: %v", err)
+	}
+	if want := filepath.Join(rootB, "beta.wav"); loc.Path != want {
+		t.Fatalf("located %q, want %q", loc.Path, want)
+	}
+	if _, err := cache.Locate(ctx, pidA); !waxerr.Is(err, waxerr.CodeNotFound) {
+		t.Fatalf("Locate of an item only the dead catalog held = %v, want CodeNotFound", err)
+	}
+}
+
+// TestOpenedCacheRetriesAFailedReopen: a file that replaced the catalog but cannot be
+// opened leaves lookups refused, not answered from the old file, and the next poll
+// that finds a catalog there reopens it.
+func TestOpenedCacheRetriesAFailedReopen(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows refuses to rename over a file another handle holds open, so the cache cannot be left behind")
+	}
+	ctx := context.Background()
+	libA, _, db := buildCatalog(t, map[string][]byte{"alpha.wav": rampWAV(t, 8000)})
+	pidA := itemPIDs(t, libA)["alpha.wav"]
+	libB, _, dbB := buildCatalog(t, map[string][]byte{"beta.wav": rampWAV(t, 12000)})
+	pidB := itemPIDs(t, libB)["beta.wav"]
+	cache := newCache(t, db)
+	if _, err := cache.Locate(ctx, pidA); err != nil {
+		t.Fatalf("warm Locate: %v", err)
+	}
+	for _, l := range []*waxbin.Library{libA, libB} {
+		if err := l.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	garbage := db + ".garbage"
+	if err := os.WriteFile(garbage, []byte("not a catalog"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(garbage, db); err != nil {
+		t.Fatal(err)
+	}
+	if err := cache.Poll(ctx); err == nil {
+		t.Fatal("Poll over an unopenable replacement succeeded")
+	}
+	if _, err := cache.Locate(ctx, pidA); !waxerr.Is(err, waxerr.CodeUnsupported) {
+		t.Fatalf("Locate while the reopen fails = %v, want CodeUnsupported", err)
+	}
+
+	if err := port.Restore(ctx, dbB, db, true); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	if err := cache.Poll(ctx); err != nil {
+		t.Fatalf("Poll once a catalog is back: %v", err)
+	}
+	if _, err := cache.Locate(ctx, pidB); err != nil {
+		t.Fatalf("Locate after the reopen: %v", err)
 	}
 }
 

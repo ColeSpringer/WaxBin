@@ -68,7 +68,7 @@ func TestEndToEndSingleFile(t *testing.T) {
 	pid := got.PID
 
 	// ORGANIZE (dry run, then apply)
-	plan, err := lib.PlanOrganize(ctx, query.New(query.EntityItems).Build(), "waxbin-native")
+	plan, err := lib.PlanOrganize(ctx, query.New(query.EntityItems).Build(), waxbin.OrganizeOptions{ProfileName: "waxbin-native"})
 	if err != nil {
 		t.Fatalf("plan organize: %v", err)
 	}
@@ -640,7 +640,7 @@ func TestOrganizeLeavesInPlaceLibraryFiles(t *testing.T) {
 		t.Fatalf("scan: %v", err)
 	}
 
-	plan, err := lib.PlanOrganize(ctx, query.New(query.EntityItems).Build(), "waxbin-native")
+	plan, err := lib.PlanOrganize(ctx, query.New(query.EntityItems).Build(), waxbin.OrganizeOptions{ProfileName: "waxbin-native"})
 	if err != nil {
 		t.Fatalf("plan: %v", err)
 	}
@@ -950,7 +950,7 @@ func TestOrganizeMoveFailureRollsBack(t *testing.T) {
 	dst := filepath.Join(root, "The Foobars", "Night Moves", "03 - Midnight Drive.mp3")
 	writeFile(t, dst, []byte("occupied"))
 
-	plan, err := lib.PlanOrganize(ctx, query.New(query.EntityItems).Build(), "waxbin-native")
+	plan, err := lib.PlanOrganize(ctx, query.New(query.EntityItems).Build(), waxbin.OrganizeOptions{ProfileName: "waxbin-native"})
 	if err != nil {
 		t.Fatalf("plan: %v", err)
 	}
@@ -982,7 +982,7 @@ func TestOrganizeRelocatesSidecars(t *testing.T) {
 	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
 		t.Fatalf("scan: %v", err)
 	}
-	plan, err := lib.PlanOrganize(ctx, query.New(query.EntityItems).Build(), "waxbin-native")
+	plan, err := lib.PlanOrganize(ctx, query.New(query.EntityItems).Build(), waxbin.OrganizeOptions{ProfileName: "waxbin-native"})
 	if err != nil {
 		t.Fatalf("plan: %v", err)
 	}
@@ -1218,6 +1218,9 @@ func TestEmptyTrashAgeScopeAndPurge(t *testing.T) {
 	if err != nil {
 		t.Fatalf("purge: %v", err)
 	}
+	if j := latestJob(t, ctx, lib); j.Kind != "purge-trash" || j.TargetType != "trash" || j.TargetPID != entries[0].PID {
+		t.Fatalf("purge job = %+v, want it to name trash:%s", j, entries[0].PID)
+	}
 	// The purge announces itself on the feed a consumer actually tails. The item is
 	// already archived and its columns do not move, so this delta is the only signal
 	// that a client's copy of it became unrecoverable.
@@ -1254,6 +1257,9 @@ func TestEmptyTrashAgeScopeAndPurge(t *testing.T) {
 	// A restored entry cannot be purged either: restore the survivor, then try.
 	if err := lib.RestoreTrash(ctx, entries[1].PID); err != nil {
 		t.Fatalf("restore: %v", err)
+	}
+	if j := latestJob(t, ctx, lib); j.Kind != "restore" || j.TargetType != "trash" || j.TargetPID != entries[1].PID {
+		t.Fatalf("restore job = %+v, want it to name trash:%s", j, entries[1].PID)
 	}
 	if _, err := lib.PurgeTrash(ctx, entries[1].PID); !waxerr.Is(err, waxerr.CodeNotFound) {
 		t.Fatalf("purge of a restored entry = %v, want CodeNotFound", err)
@@ -1906,7 +1912,7 @@ func TestEndToEndAudiobook(t *testing.T) {
 	}
 
 	// Organize lays the book out under the audiobook template (author/book/file).
-	plan, err := lib.PlanOrganize(ctx, query.New(query.EntityItems).Build(), "waxbin-native")
+	plan, err := lib.PlanOrganize(ctx, query.New(query.EntityItems).Build(), waxbin.OrganizeOptions{ProfileName: "waxbin-native"})
 	if err != nil {
 		t.Fatalf("plan organize: %v", err)
 	}
@@ -1968,7 +1974,7 @@ func TestEndToEndMultiFileAudiobookOrganize(t *testing.T) {
 		t.Fatalf("books = %d, want 1 (two parts grouped)", len(books))
 	}
 
-	plan, err := lib.PlanOrganize(ctx, query.New(query.EntityItems).Build(), "waxbin-native")
+	plan, err := lib.PlanOrganize(ctx, query.New(query.EntityItems).Build(), waxbin.OrganizeOptions{ProfileName: "waxbin-native"})
 	if err != nil {
 		t.Fatalf("plan: %v", err)
 	}
@@ -2019,7 +2025,7 @@ func TestMultiFileBookSameBasenameOrganize(t *testing.T) {
 		t.Fatalf("books = %d, want 1 grouped book", len(books))
 	}
 
-	plan, err := lib.PlanOrganize(ctx, query.New(query.EntityItems).Build(), "waxbin-native")
+	plan, err := lib.PlanOrganize(ctx, query.New(query.EntityItems).Build(), waxbin.OrganizeOptions{ProfileName: "waxbin-native"})
 	if err != nil {
 		t.Fatalf("plan: %v", err)
 	}
@@ -2120,5 +2126,96 @@ func TestAlbumReleaseIdentifiersFromTags(t *testing.T) {
 	}
 	if album.CatalogNumber != "CDNODATA 02" {
 		t.Errorf("album CatalogNumber = %q, want the tagged CDNODATA 02", album.CatalogNumber)
+	}
+}
+
+// TestDurationMismatchesListsTheLyingHeaders: the facade hands back the rows the
+// duration_mismatch audit reads, so a consumer can act on the file pid and both lengths
+// without parsing a finding's message. A limit of 0 lists them all, and an offset pages
+// past the ones already seen.
+func TestDurationMismatchesListsTheLyingHeaders(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	for _, name := range []string{"honest.wav", "lying1.wav", "lying2.wav"} {
+		writeFile(t, filepath.Join(root, name),
+			testaudio.EncodeWAV16(8000, testaudio.RichSignal(8000, 3, testaudio.MusicalPartials, int64(len(name)))))
+	}
+	lib := openManaged(t, ctx, db, root)
+	scanLib(t, ctx, lib)
+	if _, err := lib.Analyze(ctx, waxbin.AnalyzeOptions{}); err != nil {
+		t.Fatalf("analyze: %v", err)
+	}
+	rawExec(t, db, `UPDATE file SET duration_ms = 60000 WHERE display_path LIKE '%lying_.wav'`)
+	var lying string
+	raw, err := sql.Open("sqlite", "file:"+db+"?mode=ro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	if err := raw.QueryRowContext(ctx, `SELECT pid FROM file WHERE display_path LIKE '%lying1.wav'`).Scan(&lying); err != nil {
+		t.Fatal(err)
+	}
+
+	got, total, err := lib.DurationMismatches(ctx, 1, 0)
+	if err != nil {
+		t.Fatalf("DurationMismatches: %v", err)
+	}
+	if total != 2 || len(got) != 1 || got[0].FilePID != model.PID(lying) ||
+		got[0].HeaderMS != 60_000 || got[0].DecodedMS != 3_000 {
+		t.Fatalf("first page = %+v (total %d), want lying1 at 60000 ms header, 3000 ms decoded", got, total)
+	}
+	if next, total, err := lib.DurationMismatches(ctx, 1, 1); err != nil || total != 2 || len(next) != 1 ||
+		!strings.HasSuffix(next[0].DisplayPath, "lying2.wav") {
+		t.Errorf("second page = %+v (total %d, err %v), want lying2", next, total, err)
+	}
+	if all, total, err := lib.DurationMismatches(ctx, 0, 0); err != nil || total != 2 || len(all) != 2 {
+		t.Errorf("limit 0 = %+v (total %d, err %v), want both", all, total, err)
+	}
+}
+
+// latestJob returns the newest job row.
+func latestJob(t *testing.T, ctx context.Context, lib *waxbin.Library) *model.Job {
+	t.Helper()
+	list, err := lib.Jobs(ctx, 1)
+	if err != nil || len(list) != 1 {
+		t.Fatalf("jobs = %v (err %v), want the newest", list, err)
+	}
+	return list[0]
+}
+
+// TestScanJobNamesItsLibrary: a scan of one library records it on the job row, run
+// directly or as a background job, and a scan of every library records no target.
+func TestScanJobNamesItsLibrary(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "a.mp3"), testaudio.BuildMP3("One", "Artist", "Album", 1))
+	lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), root)
+	libs, err := lib.Libraries(ctx)
+	if err != nil || len(libs) == 0 {
+		t.Fatalf("libraries = %v (err %v)", libs, err)
+	}
+	pid := libs[0].PID
+
+	res, err := lib.Scan(ctx, waxbin.ScanRequest{})
+	if err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if j, err := lib.Job(ctx, res.JobPID); err != nil || j.TargetType != "" || j.TargetPID != "" {
+		t.Fatalf("whole scan job = %+v (err %v), want no target", j, err)
+	}
+	res, err = lib.Scan(ctx, waxbin.ScanRequest{LibraryPID: pid})
+	if err != nil {
+		t.Fatalf("scoped scan: %v", err)
+	}
+	if j, err := lib.Job(ctx, res.JobPID); err != nil || j.TargetType != "library" || j.TargetPID != pid {
+		t.Fatalf("scoped scan job = %+v (err %v), want library:%s", j, err, pid)
+	}
+	jobPID, err := lib.StartScan(ctx, waxbin.ScanRequest{LibraryPID: pid})
+	if err != nil {
+		t.Fatalf("start scan: %v", err)
+	}
+	if j := waitForJobDone(t, ctx, lib, jobPID); j.TargetType != "library" || j.TargetPID != pid {
+		t.Fatalf("background scan job = %+v, want library:%s", j, pid)
 	}
 }

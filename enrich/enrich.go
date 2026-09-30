@@ -376,7 +376,7 @@ func New(store Store, cfg Config, log *slog.Logger) *Service {
 		case name == "":
 			log.Warn("enrichment: dropping an injected provider with no name; its values could carry no provenance")
 			continue
-		case reservedProviderName(name):
+		case ReservedProviderName(name):
 			log.Warn("enrichment: dropping an injected provider named after a built-in or a marker label; its values could not be told apart",
 				"provider", name)
 			continue
@@ -454,7 +454,7 @@ func (s *Service) providerList() []Provider {
 			continue
 		}
 		name := p.Name()
-		if name == "" || seen[name] || (reservedProviderName(name) && !slices.Contains(s.builtins, p)) {
+		if name == "" || seen[name] || (ReservedProviderName(name) && !slices.Contains(s.builtins, p)) {
 			continue
 		}
 		seen[name] = true
@@ -507,6 +507,10 @@ type RunOptions struct {
 	// catalog against MusicBrainz. Exclusive with Force and with Scope, which already
 	// force every phase they walk; a phase this install does not run is refused.
 	ForcePhases []model.EnrichPhase
+	// Phases is the run's phase list: the run walks these and no other (nil walks every
+	// phase the install builds). It combines with Force, Scope and ForcePhases, whose
+	// phases must be among it, and a listed phase the install does not build is refused.
+	Phases []model.EnrichPhase
 	// Scope narrows the pass to explicit targets (nil = the full catalog walk).
 	// A scoped run implies Force: pointing at a target is an explicit gesture, so
 	// a previously-missed lookup is retried (markers and cached responses are
@@ -599,6 +603,10 @@ type Result struct {
 	TagsFailed        int
 	TagsUnrepresented int
 	TagsSkipped       int
+	// TagsReadOnly counts files within the write-back's reach left unwritten because
+	// their library is read-only, flagged before the pass or during it. Their values
+	// stay owed and are written by the first pass after the flag clears.
+	TagsReadOnly int
 
 	// Reach is every target the run looked up, by phase, in the scope shape. A
 	// limited run's tag write-back bounds itself to it, so --limit caps that work
@@ -643,15 +651,14 @@ func (s *Service) Run(ctx context.Context, opts RunOptions, hb Heartbeat) (*Resu
 	// A scoped run implies force: the caller pointed at these targets, so markers
 	// and cached provider responses are bypassed and the lookup actually re-runs.
 	scope := opts.Scope
-	if len(opts.ForcePhases) > 0 {
-		if opts.Force || scope != nil {
-			return res, waxerr.New(waxerr.CodeInvalid, op, "a phase-scoped force cannot combine with --force or a scope, which already force every phase they walk")
-		}
-		for _, p := range opts.ForcePhases {
-			if !p.Valid() {
-				return res, waxerr.New(waxerr.CodeInvalid, op, "unknown enrichment phase "+strconv.Quote(string(p)))
-			}
-		}
+	if err := CheckPhaseOptions(opts.Force, scope != nil, opts.Phases, opts.ForcePhases); err != nil {
+		return res, err
+	}
+	// The listed phases are checked against the install's unscoped list, since a scope
+	// that gives one of them no targets makes it an empty walk, not a phase the install
+	// cannot run.
+	if err := checkPhasesBuilt(s.phaseKeys(providers), opts.Phases, op); err != nil {
+		return res, err
 	}
 	st := &runState{
 		providers:       providers,
@@ -665,6 +672,12 @@ func (s *Service) Run(ctx context.Context, opts RunOptions, hb Heartbeat) (*Resu
 	}
 	for _, p := range opts.ForcePhases {
 		st.forcedPhases[p] = true
+	}
+	if len(opts.Phases) > 0 {
+		st.only = map[model.EnrichPhase]bool{}
+		for _, p := range opts.Phases {
+			st.only[p] = true
+		}
 	}
 	// The run's instant, resolved once so every phase measures against it: the retry
 	// window's cutoff, and the week an owed lookup nothing asked again is kept for. A
@@ -993,6 +1006,9 @@ func (s *Service) phases(st *runState, res *Result, scope *model.EnrichScope) []
 			},
 		})
 	}
+	if len(st.only) > 0 {
+		phases = slices.DeleteFunc(phases, func(p phase) bool { return !st.only[p.key] })
+	}
 	return phases
 }
 
@@ -1028,7 +1044,46 @@ func keysOf(phases []phase) []model.EnrichPhase {
 	return keys
 }
 
-// checkPhasesBuilt refuses a forced key the built list lacks, naming the gate.
+// CheckPhaseOptions refuses phase options a run cannot take: an unknown key in either
+// list, a forced phase beside force or a scope (each already forces every phase it
+// walks), or a forced phase the phase list leaves out. Run checks them, and so do its
+// callers that refuse before a job starts or a server is dialed, with the same words.
+func CheckPhaseOptions(force, scoped bool, phases, forced []model.EnrichPhase) error {
+	const op = "enrich.CheckPhaseOptions"
+	for _, p := range slices.Concat(phases, forced) {
+		if !p.Valid() {
+			return waxerr.New(waxerr.CodeInvalid, op, "unknown enrichment phase "+strconv.Quote(string(p))+
+				" (want one of "+strings.Join(phaseNames(model.EnrichPhases()), "|")+")")
+		}
+	}
+	if len(forced) > 0 {
+		if force {
+			return waxerr.New(waxerr.CodeInvalid, op, "a phase-scoped force and --force are exclusive, since --force already re-asks every phase")
+		}
+		if scoped {
+			return waxerr.New(waxerr.CodeInvalid, op, "a phase-scoped force cannot combine with a scope, which already forces every phase it walks")
+		}
+	}
+	if len(phases) > 0 {
+		for _, f := range forced {
+			if !slices.Contains(phases, f) {
+				return waxerr.New(waxerr.CodeInvalid, op, "forced phase "+string(f)+" is not among the phases the run walks")
+			}
+		}
+	}
+	return nil
+}
+
+// phaseNames renders phases as their keys.
+func phaseNames(phases []model.EnrichPhase) []string {
+	out := make([]string, len(phases))
+	for i, p := range phases {
+		out[i] = string(p)
+	}
+	return out
+}
+
+// checkPhasesBuilt refuses a named key the built list lacks, naming the gate.
 func checkPhasesBuilt(built, want []model.EnrichPhase, op string) error {
 	for _, w := range want {
 		if !slices.Contains(built, w) {
@@ -1084,6 +1139,8 @@ type runState struct {
 	// one of them is being walked, so forced() folds it in the way it folds retrying.
 	forcedPhases map[model.EnrichPhase]bool
 	forcing      bool
+	// only is the run's phase list when the caller named one; phases() keeps these alone.
+	only map[model.EnrichPhase]bool
 	// sweeps are the queue walks the run makes over its whole phase list, in order;
 	// missCutoff is the instant a no-match marker has to predate to be re-asked, and
 	// deferredBefore the instant an owed lookup has to predate, which the store places

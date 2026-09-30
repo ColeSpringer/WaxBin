@@ -53,14 +53,23 @@ func (h *Handle) Heartbeat(ctx context.Context, progress float64, msg string) er
 // state.
 func (h *Handle) SetResult(result string) { h.job.Result = result }
 
-// Run acquires the lease for scope, creates a running job, invokes fn, then
+// Spec names a job: its kind, the lease scope it runs under, and what it targeted
+// (see model.Job.TargetType; both target fields are empty for a whole-catalog pass).
+type Spec struct {
+	Kind, Scope string
+	TargetType  string
+	TargetPID   model.PID
+}
+
+// Run acquires the lease for spec.Scope, creates a running job, invokes fn, then
 // finalizes the job (done/failed) and releases the lease. It returns
 // CodeConflict if the scope is already leased. A panic from fn is recovered,
 // recorded as a failed job, and returned as a CodeInternal error rather than
 // propagating to the caller. Finalization uses a cancel-free context so a
 // canceled or panicked run still records its terminal state and frees the lease.
-func (m *Manager) Run(ctx context.Context, kind, scope string, fn func(context.Context, *Handle) error) (job *model.Job, err error) {
-	release, aerr := m.acquire(ctx, scope, "jobs.Run")
+func (m *Manager) Run(ctx context.Context, spec Spec, fn func(context.Context, *Handle) error) (job *model.Job, err error) {
+	kind := spec.Kind
+	release, aerr := m.acquire(ctx, spec.Scope, "jobs.Run")
 	if aerr != nil {
 		return nil, aerr
 	}
@@ -69,7 +78,8 @@ func (m *Manager) Run(ctx context.Context, kind, scope string, fn func(context.C
 	cleanup := context.WithoutCancel(ctx)
 	now := time.Now().UnixNano()
 	job = &model.Job{
-		Kind: kind, Scope: scope, State: model.JobRunning, Owner: m.owner,
+		Kind: kind, Scope: spec.Scope, State: model.JobRunning, Owner: m.owner,
+		TargetType: spec.TargetType, TargetPID: spec.TargetPID,
 		StartedAt: now, HeartbeatAt: now,
 	}
 	if cerr := m.store.CreateJob(ctx, job); cerr != nil {

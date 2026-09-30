@@ -62,7 +62,11 @@ func newRestoreCmd(g *globals) *cobra.Command {
 		Long: "Replaces the configured catalog with a validated backup. Refuses to " +
 			"overwrite an existing catalog unless --force. With --root, re-points the single " +
 			"library at a new path afterward (a portable restore onto a new machine/mount). " +
-			"Ensure no other process has the catalog open.",
+			"Under a running server it takes the maintenance hand-off, so the server closes " +
+			"its handles (which is what lets the file be replaced on Windows at all) and " +
+			"reopens on the restored catalog, the command failing if it cannot; a server " +
+			"running a job refuses until the job completes. Any other process holding the " +
+			"catalog makes it refuse.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if g.readOnly {
@@ -72,29 +76,51 @@ func newRestoreCmd(g *globals) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			// Before the hand-off, so a restore refused for its own arguments leaves a
+			// running server and its consumers undisturbed.
+			if err := port.CheckRestore(ctx(cmd), args[0], cfg.DBPath, force); err != nil {
+				return err
+			}
+			if sock := advertisedSocket(cfg.DBPath); sock != "" {
+				px, err := beginMaintenance(ctx(cmd), sock)
+				if err != nil {
+					if msg, ok := versionRefusal(err); ok {
+						return protocolMismatch("restore", msg)
+					}
+					return err
+				}
+				if px != nil {
+					g.maintConn = px
+					fmt.Fprintln(errOut(cmd), "waxbin: server is running; took the lock via maintenance mode")
+				}
+			}
+			// The server releases the lock before it answers, but a loaded filesystem can
+			// show it held a moment longer, so a hand-off probes with the open's retry.
+			probe := func() error { return ensureNoCatalogOwner(cfg.DBPath) }
+			if g.maintConn != nil {
+				err = retryConflict(ctx(cmd), probe)
+			} else {
+				err = probe()
+			}
+			if err != nil {
+				return err
+			}
 			if err := port.Restore(ctx(cmd), args[0], cfg.DBPath, force); err != nil {
 				return err
 			}
 
 			relocated := ""
 			if root != "" {
-				lib, _, err := g.open(cmd)
-				if err != nil {
-					return err
-				}
-				defer lib.Close()
-				libs, err := lib.Libraries(ctx(cmd))
-				if err != nil {
-					return err
-				}
-				if len(libs) != 1 {
-					return waxerr.New(waxerr.CodeInvalid, "restore",
-						"--root relocates a single library; the restored catalog has none or several")
-				}
-				if err := lib.RelocateRoot(ctx(cmd), libs[0].PID, root); err != nil {
+				if err := relocateRestored(cmd, g, root); err != nil {
 					return err
 				}
 				relocated = root
+			}
+			// Ended here rather than by cleanup, so a server that cannot reopen the
+			// restored catalog is reported instead of a success over a closed server.
+			if err := g.endMaintenance(); err != nil {
+				return waxerr.Wrapf(waxerr.CodeIO, "restore", err,
+					"the catalog was restored, but the server could not reopen it")
 			}
 
 			if g.jsonOut {
@@ -113,6 +139,25 @@ func newRestoreCmd(g *globals) *cobra.Command {
 	cmd.Flags().BoolVar(&force, "force", false, "overwrite an existing catalog")
 	cmd.Flags().StringVar(&root, "root", "", "re-point the single library at this new root path")
 	return cmd
+}
+
+// relocateRestored re-points the restored catalog's single library at root. The
+// library is closed before it returns, so a server taking the lock back finds it free.
+func relocateRestored(cmd *cobra.Command, g *globals, root string) error {
+	lib, _, err := g.open(cmd)
+	if err != nil {
+		return err
+	}
+	defer lib.Close()
+	libs, err := lib.Libraries(ctx(cmd))
+	if err != nil {
+		return err
+	}
+	if len(libs) != 1 {
+		return waxerr.New(waxerr.CodeInvalid, "restore",
+			"--root relocates a single library; the restored catalog has none or several")
+	}
+	return lib.RelocateRoot(ctx(cmd), libs[0].PID, root)
 }
 
 func newExportCmd(g *globals) *cobra.Command {

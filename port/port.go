@@ -478,11 +478,11 @@ func ReadCensus(ctx context.Context, path string) (*Census, error) {
 	return c, nil
 }
 
-// Restore byte-copies a validated backup over the target catalog path. It removes
-// the target's stale WAL/shm sidecars so the restored file is authoritative, and
-// refuses to overwrite an existing catalog unless force is set. The caller must
-// ensure no process has the target open.
-func Restore(ctx context.Context, backupPath, targetPath string, force bool) error {
+// CheckRestore returns the refusal Restore would give before touching anything: a
+// backup that does not validate, or an existing target without force. A caller that
+// has to prepare the target first asks here, so a restore bound to fail prepares
+// nothing.
+func CheckRestore(ctx context.Context, backupPath, targetPath string, force bool) error {
 	const op = "port.Restore"
 	if _, err := ValidateBackup(ctx, backupPath); err != nil {
 		return err
@@ -491,6 +491,18 @@ func Restore(ctx context.Context, backupPath, targetPath string, force bool) err
 		return waxerr.New(waxerr.CodeConflict, op, "target catalog exists (pass force to overwrite): "+targetPath)
 	} else if err != nil && !os.IsNotExist(err) {
 		return waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	return nil
+}
+
+// Restore byte-copies a validated backup over the target catalog path. It removes
+// the target's stale WAL/shm sidecars so the restored file is authoritative, and
+// refuses to overwrite an existing catalog unless force is set. The caller must
+// ensure no process has the target open.
+func Restore(ctx context.Context, backupPath, targetPath string, force bool) error {
+	const op = "port.Restore"
+	if err := CheckRestore(ctx, backupPath, targetPath, force); err != nil {
+		return err
 	}
 	// Copy to a sibling temp file and atomically rename it into place, so an
 	// interrupted copy (out of space, cancellation, I/O error) leaves the existing

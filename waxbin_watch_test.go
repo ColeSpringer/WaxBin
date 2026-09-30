@@ -50,7 +50,7 @@ func TestFsMutateSharedLease(t *testing.T) {
 	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
 		t.Fatalf("scan: %v", err)
 	}
-	plan, err := lib.PlanOrganize(ctx, query.New(query.EntityItems).Build(), "waxbin-native")
+	plan, err := lib.PlanOrganize(ctx, query.New(query.EntityItems).Build(), waxbin.OrganizeOptions{ProfileName: "waxbin-native"})
 	if err != nil {
 		t.Fatalf("plan organize: %v", err)
 	}

@@ -165,6 +165,7 @@ func (a *Auditor) checkFiles(ctx context.Context, cfg Config, sample int, rep *R
 					Severity: model.SeverityWarn,
 					Message:  "unportable filename (" + reason + "): " + f.DisplayPath,
 					Path:     f.DisplayPath,
+					FilePID:  f.PID,
 				})
 			}
 		}
@@ -175,6 +176,7 @@ func (a *Auditor) checkFiles(ctx context.Context, cfg Config, sample int, rep *R
 					Severity: model.SeverityWarn,
 					Message:  "orphaned " + string(f.Kind) + " sidecar (no audio in its folder): " + f.DisplayPath,
 					Path:     f.DisplayPath,
+					FilePID:  f.PID,
 				})
 			}
 		}
@@ -250,6 +252,7 @@ func (a *Auditor) checkIntegrity(ctx context.Context, files []model.AuditFileInf
 				Severity: model.SeverityError,
 				Message:  "unreadable or missing on disk: " + f.DisplayPath,
 				Path:     f.DisplayPath,
+				FilePID:  f.PID,
 				Entities: nonEmpty(f.ItemPID),
 			})
 			continue
@@ -260,6 +263,7 @@ func (a *Auditor) checkIntegrity(ctx context.Context, files []model.AuditFileInf
 				Severity: model.SeverityError,
 				Message:  "content hash changed (possible bitrot or external edit): " + f.DisplayPath,
 				Path:     f.DisplayPath,
+				FilePID:  f.PID,
 				Entities: nonEmpty(f.ItemPID),
 			})
 		}
@@ -300,6 +304,7 @@ func (a *Auditor) checkCorrupt(ctx context.Context, files []model.AuditFileInfo,
 				Severity: model.SeverityError,
 				Message:  "corrupt or undecodable audio: " + f.DisplayPath,
 				Path:     f.DisplayPath,
+				FilePID:  f.PID,
 				Entities: nonEmpty(f.ItemPID),
 			})
 		case len(damage) > 0:
@@ -312,6 +317,7 @@ func (a *Auditor) checkCorrupt(ctx context.Context, files []model.AuditFileInfo,
 				Severity: model.SeverityWarn,
 				Message:  "decoder worked around damage in: " + f.DisplayPath + " (" + damage[0] + more + ")",
 				Path:     f.DisplayPath,
+				FilePID:  f.PID,
 				Entities: nonEmpty(f.ItemPID),
 			})
 		}

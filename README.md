@@ -55,14 +55,14 @@ exit codes (`waxbin exit-codes`).
 
 | Area | Commands |
 | --- | --- |
-| **Lifecycle** | `init`, `library add`/`library list`, `scan`, `analyze`, `watch`, `serve`, `doctor`, `jobs`, `version`, `exit-codes` |
+| **Lifecycle** | `init`, `library add`/`library list`/`library set`, `scan`, `analyze`, `watch`, `serve`, `doctor`, `jobs`, `version`, `exit-codes` |
 | **Read / browse** | `query`/`ls` (incl. `--library`, `--tag KEY=VALUE`, `--tag-contains`, `--tag-present`/`--tag-missing`, `--limit-mode`/`--seed`), `browse <list>`, `facet --group-by` (incl. `tag.<KEY>`, `library`, `podcast`, `creditArtist`, `playlist`), `search` (incl. `--max-candidates`, `--library`, `--state`), `show`, `art` (incl. `--role`), `art roles`, `lyrics`, `stats [--year N]`, `provenance`, `acquisition`/`acquisition set`/`acquisition clear`, `lock`/`unlock`, `entity info`/`entity list` |
 | **Curation & editing** | `edit` (incl. `--batch`), `entity` (incl. `entity rename [--write-back]`), `credit` (incl. `--batch`), `tag`/`tag keys`, `lyrics set`, `chapters`, `art set` (incl. `--role`), `art lock`/`art unlock` (incl. `--role`), `detach [--write-back]` |
 | **Ingest / organize** | `inbox`, `import`, `organize`, `profiles` |
 | **Deletion / repair** | `trash`, `rm [--permanent]`, `mark-missing [--force]`, `merge`, `audit`, `diagnostics`, `upgrade` |
 | **Portability** | `backup`, `restore`, `export`, `manifest`, `rebuild` |
 | **Playlists / podcasts** | `playlist`, `smartplaylist`, `podcast`, `opml` |
-| **Enrichment** | `enrich` (MusicBrainz + Cover Art Archive, which need a contact; optional AcoustID; incl. `--item`/`--entity`/`--force-phase`; per-release album art; misses re-asked after `enrichment.retry_misses_after_days`; a failed lookup stays queued for the next pass; an injected provider can also fill role-tagged and artist art, and its passes run without a contact) |
+| **Enrichment** | `enrich` (MusicBrainz + Cover Art Archive, which need a contact; optional AcoustID; incl. `--item`/`--entity`/`--phase`/`--force-phase`; per-release album art; misses re-asked after `enrichment.retry_misses_after_days`; a failed lookup stays queued for the next pass; an injected provider can also fill role-tagged and artist art, and its passes run without a contact) |
 | **Maintenance** | `db verify [--fix]`, `db vacuum [--integrity]`, `db thumbs [--older-than/--max-bytes]`, `db enrich-cache [--older-than/--max-bytes]`, `db migrate`, `db reset --yes`, `user`, `state` |
 
 ### Watching for changes
@@ -96,9 +96,10 @@ and listens on a local unix control socket (default `<db>.waxsock`, created owne
 with an ownership conflict. They **auto-detect** the running server (advertised in the
 lockfile) and dispatch through it: fast mutations (`edit`, `lock`, play state,
 ratings/stars, playlists, `user`, `merge`) are proxied to the server, and the
-heavier mutating commands borrow the lock through a maintenance-mode hand-off. Read
-commands always run directly. This is a local socket only, with no network or HTTP
-listener. The server runs until interrupted (Ctrl-C / SIGTERM).
+heavier mutating commands, `restore` and `rebuild` among them, borrow the lock through
+a maintenance-mode hand-off. Read commands always run directly. This is a local socket
+only, with no network or HTTP listener. The server runs until interrupted (Ctrl-C /
+SIGTERM).
 
 ### Quality, repair, and maintenance
 

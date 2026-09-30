@@ -193,7 +193,8 @@ func itemIDsForFile(ctx context.Context, tx *sql.Tx, fileID int64) ([]int64, err
 }
 
 const trashCols = `pid, item_pid, orig_path, orig_display, trash_path, trash_display,
-	reason, size, trashed_at, COALESCE(restored_at, 0)`
+	reason, size, trashed_at, COALESCE(restored_at, 0),
+	COALESCE((SELECT l.pid FROM library l WHERE l.id = trash.library_id), '')`
 
 // TrashEntries lists trash journal rows, newest first. includeRestored controls
 // whether already-restored rows are returned; trashedBefore, when nonzero, keeps
@@ -365,13 +366,14 @@ func (s *Store) DeleteTrashRow(ctx context.Context, trashPID model.PID) error {
 
 func scanTrashEntry(sc rowScanner) (*model.TrashEntry, error) {
 	var e model.TrashEntry
-	var pid, itemPID string
+	var pid, itemPID, libPID string
 	if err := sc.Scan(&pid, &itemPID, &e.OrigPath, &e.OrigDisplay, &e.TrashPath, &e.TrashDisplay,
-		&e.Reason, &e.Size, &e.TrashedAt, &e.RestoredAt); err != nil {
+		&e.Reason, &e.Size, &e.TrashedAt, &e.RestoredAt, &libPID); err != nil {
 		return nil, err
 	}
 	e.PID = model.PID(pid)
 	e.ItemPID = model.PID(itemPID)
+	e.LibraryPID = model.PID(libPID)
 	return &e, nil
 }
 

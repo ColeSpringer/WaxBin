@@ -489,6 +489,13 @@ func (m *mutator) PodcastRemove(ctx context.Context, podcastPID model.PID) error
 	return m.lib.Podcasts().Remove(ctx, podcastPID)
 }
 
+func (m *mutator) SetLibraryReadOnly(ctx context.Context, pid model.PID, readOnly bool) (*model.Library, error) {
+	if m.px != nil {
+		return m.px.SetLibraryReadOnly(ctx, proxy.SetLibraryReadOnlyParams{LibraryPID: string(pid), ReadOnly: readOnly})
+	}
+	return m.lib.SetLibraryReadOnly(ctx, pid, readOnly)
+}
+
 func (m *mutator) AddRoot(ctx context.Context, spec config.Root) (*model.Library, error) {
 	if m.px != nil {
 		return m.px.AddRoot(ctx, proxy.AddRootParams{

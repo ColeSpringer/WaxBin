@@ -57,6 +57,27 @@ type ProfileSet struct {
 	byName map[string]Profile
 }
 
+// Validate checks that p can lay out every media kind: it has a name, and each
+// template is present and parses against the known fields. A bad template
+// (unbalanced groups or braces, an unknown field) is CodeInvalid.
+func (p Profile) Validate() error {
+	const op = "organize.Validate"
+	if p.Name == "" {
+		return waxerr.New(waxerr.CodeInvalid, op, "profile has no name")
+	}
+	for _, t := range []struct{ kind, tmpl string }{
+		{"music", p.Music}, {"audiobook", p.Audiobook}, {"podcast", p.Podcast},
+	} {
+		if t.tmpl == "" {
+			return waxerr.New(waxerr.CodeInvalid, op, "profile "+p.Name+" has no "+t.kind+" template")
+		}
+		if err := validateTemplate(t.tmpl); err != nil {
+			return waxerr.Wrapf(waxerr.CodeInvalid, op, err, "profile %s %s template", p.Name, t.kind)
+		}
+	}
+	return nil
+}
+
 // NewProfileSet validates each custom profile's templates and returns a set that
 // resolves them ahead of the built-ins. A custom profile with the same name as a
 // built-in overrides it; an empty template field inherits the built-in's. A bad
@@ -68,9 +89,6 @@ func NewProfileSet(custom []Profile) (*ProfileSet, error) {
 		set.byName[name] = p
 	}
 	for _, p := range custom {
-		if p.Name == "" {
-			return nil, waxerr.New(waxerr.CodeInvalid, "organize.NewProfileSet", "profile has no name")
-		}
 		// Inherit unspecified templates from the built-in of the same name, or from
 		// the native profile for a brand-new profile, so a user can override just one
 		// media type and still get sensible defaults for the rest.
@@ -85,17 +103,8 @@ func NewProfileSet(custom []Profile) (*ProfileSet, error) {
 			Podcast:   firstNonEmpty(p.Podcast, base.Podcast),
 			TagWrite:  p.TagWrite,
 		}
-		for kind, tmpl := range map[string]string{
-			"music": merged.Music, "audiobook": merged.Audiobook, "podcast": merged.Podcast,
-		} {
-			if tmpl == "" {
-				return nil, waxerr.New(waxerr.CodeInvalid, "organize.NewProfileSet",
-					"profile "+p.Name+" has no "+kind+" template")
-			}
-			if err := validateTemplate(tmpl); err != nil {
-				return nil, waxerr.Wrapf(waxerr.CodeInvalid, "organize.NewProfileSet", err,
-					"profile %s %s template", p.Name, kind)
-			}
+		if err := merged.Validate(); err != nil {
+			return nil, err
 		}
 		set.byName[p.Name] = merged
 	}
@@ -126,6 +135,19 @@ func (s *ProfileSet) Names() []string {
 	}
 	sort.Strings(names)
 	return names
+}
+
+// All returns every profile the set resolves, as ByName returns it, sorted by name.
+func (s *ProfileSet) All() []Profile {
+	names := s.Names()
+	if s == nil {
+		s = mustDefaultSet()
+	}
+	out := make([]Profile, len(names))
+	for i, n := range names {
+		out[i] = s.byName[n]
+	}
+	return out
 }
 
 func mustDefaultSet() *ProfileSet {

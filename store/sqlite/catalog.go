@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"math"
 	"os"
 	"strings"
@@ -118,6 +119,54 @@ func (s *Store) Libraries(ctx context.Context) ([]*model.Library, error) {
 		return nil, waxerr.Wrap(waxerr.CodeIO, "store.Libraries", err)
 	}
 	return out, nil
+}
+
+// SetLibraryReadOnly sets a library's read-only flag and returns the library. A change
+// appends a library update delta and a repeat appends nothing. The internal podcast
+// library is refused, since its files are the podcast engine's to manage.
+func (s *Store) SetLibraryReadOnly(ctx context.Context, pid model.PID, readOnly bool) (*model.Library, error) {
+	const op = "store.SetLibraryReadOnly"
+	var out *model.Library
+	err := s.writeTx(ctx, func(tx *sql.Tx) error {
+		lib, err := scanLibrary(tx.QueryRowContext(ctx, librarySelect+" WHERE pid = ?", string(pid)))
+		if errors.Is(err, sql.ErrNoRows) {
+			return waxerr.New(waxerr.CodeNotFound, op, "no such library: "+string(pid))
+		}
+		if err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		if lib.Mode == model.ModePodcast {
+			return waxerr.New(waxerr.CodeInvalid, op, "the internal podcast library cannot be made read-only")
+		}
+		out = lib
+		if lib.ReadOnly == readOnly {
+			return nil
+		}
+		if _, err := tx.ExecContext(ctx, "UPDATE library SET read_only = ? WHERE id = ?", readOnly, lib.ID); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		lib.ReadOnly = readOnly
+		return appendChange(ctx, tx, "library", pid, model.OpUpdate)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// LibraryReadOnly reads one library's read-only flag by rowid, for the write loops'
+// check just before each write.
+func (s *Store) LibraryReadOnly(ctx context.Context, id int64) (bool, error) {
+	const op = "store.LibraryReadOnly"
+	var ro bool
+	err := s.read.QueryRowContext(ctx, "SELECT read_only FROM library WHERE id = ?", id).Scan(&ro)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, waxerr.New(waxerr.CodeNotFound, op, fmt.Sprintf("no such library: %d", id))
+	}
+	if err != nil {
+		return false, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	return ro, nil
 }
 
 // libraryIDsByPIDs resolves library pids to rowids, in input order. An unknown
@@ -872,7 +921,11 @@ func fileIDByPIDRead(ctx context.Context, q queryer, pid model.PID, op string) (
 	return fileID, nil
 }
 
-// ChangesSince returns change_log rows after seq (capped per call).
+// ChangesSince returns change_log rows after seq (capped per call). A seq the feed can
+// no longer serve is CodeNotFound, so the consumer reloads in full and resumes from
+// LatestChangeSeq: one past the head (the catalog was replaced by a restore or a
+// rebuild) and one behind the oldest retained row (PruneChangeLog removed rows the
+// consumer never read).
 func (s *Store) ChangesSince(ctx context.Context, seq int64) ([]model.Change, error) {
 	const op = "store.ChangesSince"
 	rows, err := s.read.QueryContext(ctx,
@@ -891,7 +944,34 @@ func (s *Store) ChangesSince(ctx context.Context, seq int64) ([]model.Change, er
 		c.EntityPID = model.PID(pid)
 		out = append(out, c)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	if len(out) > 0 && seq > 0 && out[0].Seq > seq+1 {
+		// Pruning removes a prefix, so the rows after seq are gone only when seq sits
+		// below the oldest one left.
+		var oldest int64
+		if err := s.read.QueryRowContext(ctx, "SELECT MIN(seq) FROM change_log").Scan(&oldest); err != nil {
+			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		if seq+1 < oldest {
+			return nil, waxerr.New(waxerr.CodeNotFound, op, fmt.Sprintf(
+				"change cursor %d is behind the oldest retained change %d; the feed was pruned past it, so reload and resume from its latest seq",
+				seq, oldest))
+		}
+	}
+	if len(out) == 0 && seq > 0 {
+		head, err := s.LatestChangeSeq(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if seq > head {
+			return nil, waxerr.New(waxerr.CodeNotFound, op, fmt.Sprintf(
+				"change cursor %d is past the feed's head %d; the catalog was replaced, so reload it and resume from its latest seq",
+				seq, head))
+		}
+	}
+	return out, nil
 }
 
 // LatestChangeSeq returns the highest change_log seq (0 if empty).
@@ -902,6 +982,22 @@ func (s *Store) LatestChangeSeq(ctx context.Context) (int64, error) {
 		return 0, waxerr.Wrap(waxerr.CodeIO, "store.LatestChangeSeq", err)
 	}
 	return seq, nil
+}
+
+// NoteReopened appends the model.ChangeCatalog row and returns its seq. A maintenance
+// reopen that found the catalog replaced calls it as its last write.
+func (s *Store) NoteReopened(ctx context.Context) (int64, error) {
+	const op = "store.NoteReopened"
+	var seq int64
+	err := s.writeTx(ctx, func(tx *sql.Tx) error {
+		res, err := tx.ExecContext(ctx, appendChangeSQL, nowNS(), model.ChangeCatalog, "", string(model.OpUpdate))
+		if err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		seq, err = res.LastInsertId()
+		return waxerr.Wrap(waxerr.CodeIO, op, err)
+	})
+	return seq, err
 }
 
 // appendChangeSQL is the one change_log insert. A bulk writer prepares it once

@@ -3,6 +3,7 @@ package waxbin
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"log/slog"
@@ -94,7 +95,6 @@ type Library struct {
 	jobs      *jobs.Manager
 	scanner   *scan.Scanner
 	organizer *organize.Organizer
-	profiles  *organize.ProfileSet
 	trasher   *trash.Service
 	importer  *inbox.Service
 	analyzer  *analyze.Analyzer
@@ -115,7 +115,19 @@ type Library struct {
 	// validates against the registered set and writes its row atomically. Without it,
 	// two concurrent proxy connections could each validate before the other's row lands
 	// and both commit overlapping roots, the state Open's validation forbids.
+	// SetProfiles holds it too, so a root cannot be added under a profile being removed.
 	rootMu sync.Mutex
+
+	// profileMu guards profiles, which SetProfiles replaces; read it through profileSet.
+	profileMu sync.RWMutex
+	profiles  *organize.ProfileSet
+
+	// reopenMu serializes Reopen. reopenOwed marks a reopen whose last steps failed
+	// after the store came back, which the next Reopen or hand-off finishes, and
+	// reopenReplaced carries what that reopen found. reopenMu guards both.
+	reopenMu       sync.Mutex
+	reopenOwed     bool
+	reopenReplaced bool
 }
 
 // Open opens (creating if needed) the catalog and wires the subsystems. A
@@ -139,6 +151,15 @@ func Open(ctx context.Context, opts Options) (*Library, error) {
 		return nil, err
 	}
 	opts.DBPath, opts.Roots = cfg.DBPath, cfg.Roots
+	profiles, err := organize.NewProfileSet(toOrganizeProfiles(opts.Profiles))
+	if err != nil {
+		return nil, err
+	}
+	for _, r := range opts.Roots {
+		if err := knownProfile(profiles, "waxbin.Open", r.Path, r.Mode, r.Profile); err != nil {
+			return nil, err
+		}
+	}
 
 	st, err := sqlite.Open(ctx, sqlite.OpenOptions{
 		Path:               opts.DBPath,
@@ -156,12 +177,6 @@ func Open(ctx context.Context, opts Options) (*Library, error) {
 		ReadPoolSize:  opts.ReadPoolSize,
 	})
 	if err != nil {
-		return nil, err
-	}
-
-	profiles, err := organize.NewProfileSet(toOrganizeProfiles(opts.Profiles))
-	if err != nil {
-		_ = st.Close()
 		return nil, err
 	}
 
@@ -209,8 +224,72 @@ func Open(ctx context.Context, opts Options) (*Library, error) {
 			_ = st.Close()
 			return nil, err
 		}
+		l.warnUnknownProfiles(ctx)
 	}
 	return l, nil
+}
+
+// knownProfile refuses a managed root whose profile the set does not define. Only
+// organize and import lay files out by profile, and both act on managed roots alone,
+// so an in-place or podcast root's profile is never checked.
+func knownProfile(set *organize.ProfileSet, op, root string, mode model.Mode, profile string) error {
+	if mode != model.ModeManaged {
+		return nil
+	}
+	if _, err := set.ByName(profile); err != nil {
+		return waxerr.New(waxerr.CodeInvalid, op, "root "+root+": no such organization profile: "+profile)
+	}
+	return nil
+}
+
+// ProfilesFor lists the organization profiles a Library opened with defs would use,
+// the built-ins plus defs, sorted by name, without opening a catalog.
+func ProfilesFor(defs []config.ProfileDef) ([]organize.Profile, error) {
+	set, err := organize.NewProfileSet(toOrganizeProfiles(defs))
+	if err != nil {
+		return nil, err
+	}
+	return set.All(), nil
+}
+
+// warnUnknownProfiles logs each stored root whose profile the set does not define. The
+// configured roots were refused at Open already; a stored one cannot be, since fixing
+// it takes an open catalog, and organize and import through it refuse until it is.
+func (l *Library) warnUnknownProfiles(ctx context.Context) {
+	libs, err := l.store.Libraries(ctx)
+	if err != nil {
+		l.log.Warn("checking library profiles", "err", err)
+		return
+	}
+	set := l.profileSet()
+	for _, lib := range libs {
+		if knownProfile(set, "", lib.DisplayRoot, lib.Mode, lib.Profile) != nil {
+			l.log.Warn("library names an organization profile that is not defined; organize and import through it refuse until it is",
+				"library", lib.PID, "root", lib.DisplayRoot, "profile", lib.Profile)
+		}
+	}
+}
+
+// profileSet returns the organization profiles in effect.
+func (l *Library) profileSet() *organize.ProfileSet {
+	l.profileMu.RLock()
+	defer l.profileMu.RUnlock()
+	return l.profiles
+}
+
+// libraryProfile resolves the profile lib lays out under: override when one is named,
+// else the library's own. A library naming a profile the set lacks is CodeInvalid,
+// naming both, rather than laid out under some other profile.
+func libraryProfile(set *organize.ProfileSet, op string, lib *model.Library, override string) (organize.Profile, error) {
+	if override != "" {
+		return set.ByName(override)
+	}
+	p, err := set.ByName(lib.Profile)
+	if err != nil {
+		return organize.Profile{}, waxerr.New(waxerr.CodeInvalid, op, fmt.Sprintf(
+			"library %s (%s) names organization profile %q, which is not defined", lib.PID, lib.DisplayRoot, lib.Profile))
+	}
+	return p, nil
 }
 
 // auditProbe builds the auditor's corrupt-audio probe: a WaxLabel parse, then a
@@ -292,6 +371,36 @@ func (l *Library) Libraries(ctx context.Context) ([]*model.Library, error) {
 	return l.store.Libraries(ctx)
 }
 
+// SetLibraryReadOnly flags a library read-only or clears the flag (see
+// model.Library.ReadOnly) and returns the library. A change appends a library delta;
+// the internal podcast library is CodeInvalid.
+func (l *Library) SetLibraryReadOnly(ctx context.Context, pid model.PID, readOnly bool) (*model.Library, error) {
+	if l.ReadOnly() {
+		return nil, waxerr.New(waxerr.CodeUnsupported, "Library.SetLibraryReadOnly", "flagging a library requires a read-write library")
+	}
+	return l.store.SetLibraryReadOnly(ctx, pid, readOnly)
+}
+
+// readOnlyLibraries returns the rowids of the libraries flagged read-only.
+func (l *Library) readOnlyLibraries(ctx context.Context) (map[int64]bool, error) {
+	libs, err := l.store.Libraries(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return readOnlyIDs(libs), nil
+}
+
+// readOnlyIDs returns the rowids of the libraries in libs flagged read-only.
+func readOnlyIDs(libs []*model.Library) map[int64]bool {
+	out := map[int64]bool{}
+	for _, lib := range libs {
+		if lib.ReadOnly {
+			out[lib.ID] = true
+		}
+	}
+	return out
+}
+
 // AddRoot registers a library root at runtime, without reopening the Library. The
 // spec is validated against every root already registered exactly as Open validates
 // the configured set, then upserted: a new path emits a `library` create delta, and
@@ -312,6 +421,9 @@ func (l *Library) AddRoot(ctx context.Context, spec config.Root) (*model.Library
 	defer l.rootMu.Unlock()
 	normalized, err := l.validateRootSet(ctx, "", spec)
 	if err != nil {
+		return nil, err
+	}
+	if err := knownProfile(l.profileSet(), "Library.AddRoot", normalized.Path, normalized.Mode, normalized.Profile); err != nil {
 		return nil, err
 	}
 	return l.store.EnsureLibrary(ctx, &model.Library{
@@ -653,7 +765,12 @@ func (l *Library) Stats(ctx context.Context, userPID model.PID, topN int) (*read
 	return l.store.Stats(ctx, userPID, topN)
 }
 
-// Changes returns change_log rows after seq.
+// Changes returns change_log rows after seq. A seq the feed can no longer serve is
+// CodeNotFound, so the consumer reloads in full and resumes from LatestChangeSeq: one
+// past the head (the catalog was replaced under it by a restore or a rebuild through
+// the maintenance hand-off) or behind the oldest row a prune left. A
+// model.ChangeCatalog row signals a replaced catalog while the new log is at least as
+// long as the cursor.
 func (l *Library) Changes(ctx context.Context, sinceSeq int64) ([]model.Change, error) {
 	return l.store.ChangesSince(ctx, sinceSeq)
 }
@@ -672,12 +789,17 @@ func (l *Library) LatestChangeSeq(ctx context.Context) (int64, error) {
 
 // Subscribe registers an in-process listener for change_log rows after each
 // mutating commit. The cancel func unsubscribes. Cross-process consumers should
-// poll DataVersion and then call Changes.
+// poll DataVersion and then call Changes. A subscription survives a maintenance
+// hand-off: its reopen publishes the rows another process wrote while the Library
+// was suspended, or, when the catalog was replaced, a model.ChangeCatalog row.
 func (l *Library) Subscribe() (<-chan model.Change, func()) { return l.store.Subscribe() }
 
-// DataVersion returns SQLite's data_version, which moves whenever any connection
-// commits. A consumer in another process polls it and pulls Changes when it
-// changes.
+// DataVersion returns a counter that moves whenever another connection commits and
+// whenever the Library reopens, so a consumer in another process polls it and pulls
+// Changes when it moves. It is the store's own counter, not SQLite's data_version
+// pragma, so compare values only for equality. A read-only Library whose catalog file
+// was replaced by a restore returns CodeNotFound, since it can only read the old file;
+// reopen it.
 func (l *Library) DataVersion(ctx context.Context) (int64, error) {
 	return l.store.DataVersion(ctx)
 }
@@ -778,9 +900,20 @@ func (f fsLeaser) LeaseWait(ctx context.Context, fn func(context.Context) error)
 }
 
 // LeaseImport takes fsMutateScope then podcastFSScope. That order is fixed and
-// nothing acquires them the other way round, so the pair cannot deadlock.
-func (f fsLeaser) LeaseImport(ctx context.Context, fn func(context.Context) error) error {
+// nothing acquires them the other way round, so the pair cannot deadlock. A move out
+// of a read-only library is refused under the first lease, where the flag is read.
+func (f fsLeaser) LeaseImport(ctx context.Context, src string, move bool, fn func(context.Context) error) error {
 	return f.lib.jobs.RunLeased(ctx, fsMutateScope, func(ctx context.Context) error {
+		if move {
+			libs, err := f.lib.store.Libraries(ctx)
+			if err != nil {
+				return err
+			}
+			if lib := newReadOnlyHolder(libs).holding(src); lib != nil {
+				return waxerr.New(waxerr.CodeLocked, "podcast.ImportEpisodeFile",
+					"cannot move "+src+" out of read-only library "+string(lib.PID)+"; import a copy instead")
+			}
+		}
 		return f.lib.jobs.RunLeased(ctx, podcastFSScope, fn)
 	})
 }
@@ -801,7 +934,7 @@ func (l *Library) Scan(ctx context.Context, req ScanRequest) (*ScanResult, error
 		return nil, err
 	}
 	out := &ScanResult{}
-	job, runErr := l.jobs.Run(ctx, "scan", fsMutateScope, l.scanWork(libs, req, out))
+	job, runErr := l.jobs.Run(ctx, scanSpec(req), l.scanWork(libs, req, out))
 	if job != nil {
 		out.JobPID = job.PID
 	}
@@ -829,7 +962,7 @@ type AnalyzeOptions struct {
 func (l *Library) Analyze(ctx context.Context, opts AnalyzeOptions) (*AnalyzeResult, error) {
 	out := &AnalyzeResult{}
 	writeRG := l.opts.WriteReplayGainTags || opts.WriteReplayGainTags
-	job, runErr := l.jobs.Run(ctx, "analyze", "analyze", l.analyzeWork(writeRG, out))
+	job, runErr := l.jobs.Run(ctx, jobs.Spec{Kind: "analyze", Scope: "analyze"}, l.analyzeWork(writeRG, out))
 	if job != nil {
 		out.JobPID = job.PID
 	}
@@ -956,8 +1089,14 @@ func (e *watchEngine) logTick(msg string, err error, args ...any) {
 // folders. All are thin callers of existing primitives; each is best-effort so one
 // failing source (an unreachable feed) does not stop the others or the watcher.
 func (e *watchEngine) SyncSources(ctx context.Context) error {
-	if _, err := e.lib.Podcasts().SyncAll(ctx); err != nil {
+	res, err := e.lib.Podcasts().SyncAll(ctx)
+	if err != nil {
 		e.lib.log.Warn("watch: podcast sync", "err", err)
+	}
+	if res != nil {
+		for pid, ferr := range res.Failures {
+			e.lib.log.Warn("watch: podcast sync failed", "podcast", pid, "err", ferr)
+		}
 	}
 	if _, err := e.lib.Podcasts().ApplyRetentionAll(ctx); err != nil {
 		e.logTick("watch: podcast retention", err)
@@ -966,6 +1105,11 @@ func (e *watchEngine) SyncSources(ctx context.Context) error {
 	// dropped into the inbox is imported into a managed root and cataloged.
 	for _, folder := range e.lib.InboxFolders() {
 		plan, err := e.lib.PlanImport(ctx, ImportRequest{Source: folder})
+		if waxerr.Is(err, waxerr.CodeLocked) {
+			// Every target is read-only, which the user chose; the files wait in the inbox.
+			e.lib.log.Debug("watch: inbox waits on a read-only library", "folder", folder, "err", err)
+			continue
+		}
 		if err != nil {
 			e.lib.log.Warn("watch: inbox plan", "folder", folder, "err", err)
 			continue
@@ -992,6 +1136,10 @@ type EnrichOptions struct {
 	// ForcePhases re-asks the named phases alone, marker or none; see
 	// enrich.RunOptions.ForcePhases. Exclusive with Force and with a scope.
 	ForcePhases []model.EnrichPhase
+	// Phases limits the run to the named phases (nil walks all of them); see
+	// enrich.RunOptions.Phases. A run given a list writes back tags only for the targets
+	// it walked, as a limited run does.
+	Phases []model.EnrichPhase
 
 	ItemPID    model.PID       // scope to one item's targets ("" = no item scope)
 	EntityType read.EntityKind // with EntityPID: scope to one entity
@@ -1018,20 +1166,13 @@ type EnrichResult struct {
 func (l *Library) enrichScope(ctx context.Context, op string, opts EnrichOptions) (*model.EnrichScope, error) {
 	hasItem := opts.ItemPID != ""
 	hasEntity := opts.EntityType != "" || opts.EntityPID != ""
-	if len(opts.ForcePhases) > 0 {
-		if opts.Force || hasItem || hasEntity {
-			return nil, waxerr.New(waxerr.CodeInvalid, op, "a phase-scoped force cannot combine with --force or a scope, which already force every phase they walk")
-		}
-		for _, p := range opts.ForcePhases {
-			if !p.Valid() {
-				return nil, waxerr.New(waxerr.CodeInvalid, op, "unknown enrichment phase "+strconv.Quote(string(p)))
-			}
-		}
-		// The engine owns the install gate, since only it knows the registered
-		// providers, and it is asked here so the refusal precedes the job.
-		if err := l.enricher.CheckPhases(opts.ForcePhases); err != nil {
-			return nil, err
-		}
+	if err := enrich.CheckPhaseOptions(opts.Force, hasItem || hasEntity, opts.Phases, opts.ForcePhases); err != nil {
+		return nil, err
+	}
+	// The engine owns the install gate, since only it knows the registered providers,
+	// and it is asked here so the refusal precedes the job.
+	if err := l.enricher.CheckPhases(slices.Concat(opts.ForcePhases, opts.Phases)); err != nil {
+		return nil, err
 	}
 	switch {
 	case hasItem && hasEntity:
@@ -1069,7 +1210,7 @@ func (l *Library) Enrich(ctx context.Context, opts EnrichOptions) (*EnrichResult
 	if err != nil {
 		return out, err
 	}
-	job, runErr := l.jobs.Run(ctx, "enrich", "enrich", l.enrichWork(opts, scope, out))
+	job, runErr := l.jobs.Run(ctx, enrichSpec(opts), l.enrichWork(opts, scope, out))
 	if job != nil {
 		out.JobPID = job.PID
 	}
@@ -1254,6 +1395,15 @@ func (l *Library) Audit(ctx context.Context, opts AuditOptions) (*audit.Report, 
 // running a full audit.
 func (l *Library) FileDiagnostics(ctx context.Context, filter model.DiagnosticFilter) ([]model.FileDiagnostic, error) {
 	return l.store.FileDiagnostics(ctx, filter)
+}
+
+// DurationMismatches returns the audio files whose header states a length the decoded
+// audio does not have, by the margin the duration_mismatch audit applies (two seconds
+// and two percent), in path order, plus the total: up to limit of them (0 is all) after
+// skipping offset. The rows are computed on each call rather than stored, and cover
+// analyzed files only.
+func (l *Library) DurationMismatches(ctx context.Context, limit, offset int) ([]model.FileDurationMismatch, int, error) {
+	return l.store.FilesDurationMismatch(ctx, limit, offset)
 }
 
 // DiagnosticSummary returns the matching diagnostics grouped by writer, code,
@@ -1702,6 +1852,7 @@ func (l *Library) writeBackItemTags(ctx context.Context, op string, itemPID mode
 func (l *Library) writeBackFiles(ctx context.Context, op string, origin model.DiagnosticOrigin, files []model.ItemFileRef, wbErr *WriteBackError, refusals []string, apply func(w *meta.Writer, path string) (*meta.WriteResult, error)) error {
 	w := meta.NewWriter()
 	seen := make(map[model.PID]bool, len(files))
+	readOnly, roErr := l.readOnlyLibraries(ctx)
 	for _, ref := range files {
 		if ref.FilePID != "" {
 			if seen[ref.FilePID] {
@@ -1725,6 +1876,11 @@ func (l *Library) writeBackFiles(ctx context.Context, op string, origin model.Di
 			continue
 		}
 		path := string(file.Path)
+		if reason := readOnlyRefusal(readOnly, roErr, file.LibraryID); reason != "" {
+			l.recordWriteBackDrift(ctx, origin, ref.FilePID, reason)
+			wbErr.Failures = append(wbErr.Failures, WriteBackFailure{FilePID: ref.FilePID, Path: path, Reason: reason})
+			continue
+		}
 
 		// A file shared by several items, or one carrying offset windows, must not be
 		// rewritten for one item, since its tags belong to the whole file. Refuse it,
@@ -2199,12 +2355,27 @@ func writeBackSetupFailure(itemPID model.PID, edits map[string]string, err error
 	}
 }
 
+// OrganizeOptions picks the layout an organize uses. With neither field set, each
+// library lays out under its own configured profile.
+type OrganizeOptions struct {
+	// ProfileName lays every library out under the named profile.
+	ProfileName string
+	// Profile lays every library out under this profile, validated first and never
+	// added to the Library's set. It is for an embedder alone: the proxy's run_organize
+	// carries a name.
+	Profile *organize.Profile
+}
+
 // PlanOrganize computes a dry-run move plan for the selected items across every
 // managed library, routing each item to the library whose root already contains it.
 // Roots are non-overlapping, so kind routing is implicit in the current file path.
-// A single managed library behaves exactly as before. profileName overrides each
-// library's configured profile when non-empty.
-func (l *Library) PlanOrganize(ctx context.Context, q query.Query, profileName string) (*organize.Plan, error) {
+// A single managed library behaves exactly as before. opts overrides each library's
+// configured profile; setting both of its fields is CodeInvalid.
+func (l *Library) PlanOrganize(ctx context.Context, q query.Query, opts OrganizeOptions) (*organize.Plan, error) {
+	const op = "Library.PlanOrganize"
+	if err := checkOrganizeOptions(op, opts); err != nil {
+		return nil, err
+	}
 	managed, err := l.managedLibraries(ctx)
 	if err != nil {
 		return nil, err
@@ -2215,17 +2386,23 @@ func (l *Library) PlanOrganize(ctx context.Context, q query.Query, profileName s
 	if err != nil {
 		return nil, err
 	}
-	merged := &organize.Plan{Profile: profileName}
+	merged := &organize.Plan{Profile: opts.ProfileName}
+	if opts.Profile != nil {
+		merged.Profile = opts.Profile.Name
+	}
+	set := l.profileSet()
 	for _, lib := range managed {
+		if lib.ReadOnly {
+			merged.ReadOnlyLibraries++
+			continue
+		}
 		// Default to the library's configured profile so a root registered
 		// `:managed:...:waxbin-native` lays out as waxbin-native without repeating
-		// --profile; an explicit profileName overrides it for every library.
-		pname := profileName
-		if pname == "" {
-			pname = lib.Profile
-		}
-		prof, err := l.profiles.ByName(pname)
-		if err != nil {
+		// --profile; an explicit profile overrides it for every library.
+		var prof organize.Profile
+		if opts.Profile != nil {
+			prof = *opts.Profile
+		} else if prof, err = libraryProfile(set, op, lib, opts.ProfileName); err != nil {
 			return nil, err
 		}
 		// organize.Plan filters items to those under this library's root, so passing the
@@ -2249,9 +2426,52 @@ func (l *Library) PlanOrganize(ctx context.Context, q query.Query, profileName s
 	return merged, nil
 }
 
-// Profiles lists the organization profile names available to this library
-// (built-ins plus any configured custom profiles), sorted.
-func (l *Library) Profiles() []string { return l.profiles.Names() }
+// checkOrganizeOptions refuses a profile named and passed at once, and a passed one
+// that does not validate.
+func checkOrganizeOptions(op string, opts OrganizeOptions) error {
+	if opts.Profile == nil {
+		return nil
+	}
+	if opts.ProfileName != "" {
+		return waxerr.New(waxerr.CodeInvalid, op, "name a profile or pass one, not both")
+	}
+	return opts.Profile.Validate()
+}
+
+// Profiles lists the organization profiles in effect (the built-ins plus the custom
+// profiles from Options.Profiles or the last SetProfiles), each as a plan resolves it,
+// sorted by name.
+func (l *Library) Profiles() []organize.Profile { return l.profileSet().All() }
+
+// SetProfiles replaces the custom organization profiles, validated exactly as Open
+// validates Options.Profiles, and takes effect for the next plan. It refuses,
+// keeping the current set, when a registered managed library names a profile the new
+// set would not define. Nothing is persisted: pass the same profiles to Open to keep them
+// across a restart.
+func (l *Library) SetProfiles(ctx context.Context, defs []config.ProfileDef) error {
+	const op = "Library.SetProfiles"
+	set, err := organize.NewProfileSet(toOrganizeProfiles(defs))
+	if err != nil {
+		return err
+	}
+	l.rootMu.Lock()
+	defer l.rootMu.Unlock()
+	libs, err := l.store.Libraries(ctx)
+	if err != nil {
+		return err
+	}
+	for _, lib := range libs {
+		if knownProfile(set, op, lib.DisplayRoot, lib.Mode, lib.Profile) != nil {
+			return waxerr.New(waxerr.CodeInvalid, op, fmt.Sprintf(
+				"library %s (%s) names organization profile %q, which the new set does not define",
+				lib.PID, lib.DisplayRoot, lib.Profile))
+		}
+	}
+	l.profileMu.Lock()
+	l.profiles = set
+	l.profileMu.Unlock()
+	return nil
+}
 
 // toOrganizeProfiles converts config profile defs to organize profiles. The
 // organize package validates the templates when building the set.
@@ -2269,11 +2489,23 @@ func toOrganizeProfiles(defs []config.ProfileDef) []organize.Profile {
 	return out
 }
 
-// ApplyOrganize executes a plan under an "organize"-scoped job.
+// ApplyOrganize executes a plan under an "organize"-scoped job. A move in a library
+// flagged read-only since the plan was built is skipped.
 func (l *Library) ApplyOrganize(ctx context.Context, plan *organize.Plan) (*organize.Report, error) {
 	var rep *organize.Report
-	_, err := l.jobs.Run(ctx, "organize", fsMutateScope, func(ctx context.Context, h *jobs.Handle) error {
-		r, err := l.organizer.Execute(ctx, plan, h.JobPID(),
+	_, err := l.jobs.Run(ctx, jobs.Spec{Kind: "organize", Scope: fsMutateScope}, func(ctx context.Context, h *jobs.Handle) error {
+		libs, err := l.store.Libraries(ctx)
+		if err != nil {
+			return err
+		}
+		live := *plan
+		live.Actions = slices.Clone(plan.Actions)
+		for i := range live.Actions {
+			if a := &live.Actions[i]; !a.Skip && readOnlyLibraryAt(libs, a.SrcBytes) != nil {
+				a.Skip, a.Reason = true, readOnlySinceThePlan
+			}
+		}
+		r, err := l.organizer.Execute(ctx, &live, h.JobPID(),
 			func(p float64, msg string) error { return h.Heartbeat(ctx, p, msg) })
 		rep = r
 		return err
@@ -2302,10 +2534,14 @@ func (l *Library) PlanDelete(ctx context.Context, q query.Query, mode model.Dele
 		return nil, err
 	}
 	items := make([]*model.ItemView, 0, len(matched))
-	skipped := 0
+	skipped, readOnly := 0, 0
 	for _, it := range matched {
 		if podcastOwned(libs, it) {
 			skipped++
+			continue
+		}
+		if readOnlyLibraryAt(libs, it.Path) != nil {
+			readOnly++
 			continue
 		}
 		items = append(items, it)
@@ -2314,7 +2550,7 @@ func (l *Library) PlanDelete(ctx context.Context, q query.Query, mode model.Dele
 	if err != nil {
 		return nil, err
 	}
-	plan.SkippedPodcast = skipped
+	plan.SkippedPodcast, plan.SkippedReadOnly = skipped, readOnly
 	return plan, nil
 }
 
@@ -2339,20 +2575,139 @@ func (l *Library) PlanDeletePIDs(ctx context.Context, pids []model.PID, mode mod
 				"cannot delete a podcast episode: "+string(pid)+
 					"; use `podcast unfetch` to reclaim its bytes and keep it re-fetchable")
 		}
+		if lib := readOnlyLibraryAt(libs, it.Path); lib != nil {
+			return nil, waxerr.New(waxerr.CodeLocked, "Library.PlanDeletePIDs",
+				"cannot delete "+string(pid)+": library "+string(lib.PID)+" is read-only")
+		}
 		items = append(items, it)
 	}
 	return l.trasher.Plan(ctx, libs, items, mode)
 }
 
-// ApplyDelete executes a deletion plan under a "delete"-scoped job.
+// ApplyDelete executes a deletion plan under a "delete"-scoped job. An action in a
+// library flagged read-only since the plan was built is skipped.
 func (l *Library) ApplyDelete(ctx context.Context, plan *trash.Plan) (*trash.Report, error) {
 	var rep *trash.Report
-	_, err := l.jobs.Run(ctx, "delete", fsMutateScope, func(ctx context.Context, h *jobs.Handle) error {
-		r, err := l.trasher.Execute(ctx, plan)
+	_, err := l.jobs.Run(ctx, jobs.Spec{Kind: "delete", Scope: fsMutateScope}, func(ctx context.Context, h *jobs.Handle) error {
+		libs, err := l.store.Libraries(ctx)
+		if err != nil {
+			return err
+		}
+		live := *plan
+		live.Actions = slices.Clone(plan.Actions)
+		for i := range live.Actions {
+			if a := &live.Actions[i]; !a.Skip && readOnlyLibraryAt(libs, a.SrcBytes) != nil {
+				a.Skip, a.Reason = true, readOnlySinceThePlan
+			}
+		}
+		r, err := l.trasher.Execute(ctx, &live)
 		rep = r
 		return err
 	})
 	return rep, err
+}
+
+// readOnlySinceThePlan is why an applied plan skips an action whose library was
+// flagged read-only after the plan was built.
+const readOnlySinceThePlan = "library is read-only"
+
+// libraryAt returns the library whose root holds the raw path, or nil.
+func libraryAt(libs []*model.Library, raw []byte) *model.Library {
+	for _, lib := range libs {
+		if pathx.UnderRoot(string(lib.Root), string(raw)) {
+			return lib
+		}
+	}
+	return nil
+}
+
+// readOnlyLibraryAt returns the library holding the raw path when it is read-only, or
+// nil. Every read-only decision over a cataloged path goes through it, at plan time
+// and at apply time alike.
+func readOnlyLibraryAt(libs []*model.Library, raw []byte) *model.Library {
+	if lib := libraryAt(libs, raw); lib != nil && lib.ReadOnly {
+		return lib
+	}
+	return nil
+}
+
+// readOnlyHolder is readOnlyLibraryAt for paths a caller typed, which may be relative
+// or reach a root through a symlink or another letter case. A path is made absolute,
+// and a directory above it that is a read-only root on disk counts as well. Each root
+// and each directory is statted once, however many paths it is asked about.
+type readOnlyHolder struct {
+	libs  []*model.Library
+	roots []readOnlyRoot
+	dirs  map[string]*model.Library
+}
+
+type readOnlyRoot struct {
+	lib *model.Library
+	fi  os.FileInfo
+}
+
+func newReadOnlyHolder(libs []*model.Library) *readOnlyHolder {
+	h := &readOnlyHolder{libs: libs, dirs: map[string]*model.Library{}}
+	for _, lib := range libs {
+		if !lib.ReadOnly {
+			continue
+		}
+		if fi, err := os.Stat(pathx.Long(string(lib.Root))); err == nil {
+			h.roots = append(h.roots, readOnlyRoot{lib, fi})
+		}
+	}
+	return h
+}
+
+// holding returns the read-only library holding path, or nil.
+func (h *readOnlyHolder) holding(path string) *model.Library {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		abs = path
+	}
+	if lib := readOnlyLibraryAt(h.libs, []byte(abs)); lib != nil {
+		return lib
+	}
+	if len(h.roots) == 0 {
+		return nil
+	}
+	return h.dirHolding(filepath.Dir(abs))
+}
+
+// dirHolding returns the read-only library whose root is dir or a directory above it.
+func (h *readOnlyHolder) dirHolding(dir string) *model.Library {
+	if lib, ok := h.dirs[dir]; ok {
+		return lib
+	}
+	var lib *model.Library
+	if fi, err := os.Stat(pathx.Long(dir)); err == nil {
+		for _, r := range h.roots {
+			if os.SameFile(fi, r.fi) {
+				lib = r.lib
+				break
+			}
+		}
+	}
+	if parent := filepath.Dir(dir); lib == nil && parent != dir {
+		lib = h.dirHolding(parent)
+	}
+	h.dirs[dir] = lib
+	return lib
+}
+
+// trashEntryLibrary returns the library an entry was trashed from: the one it names,
+// or for an entry naming none the one holding its original path. It is nil when
+// neither is known.
+func trashEntryLibrary(libs []*model.Library, e model.TrashEntry) *model.Library {
+	if e.LibraryPID == "" {
+		return libraryAt(libs, e.OrigPath)
+	}
+	for _, lib := range libs {
+		if lib.PID == e.LibraryPID {
+			return lib
+		}
+	}
+	return nil
 }
 
 // MarkMissingOptions tunes a mark-missing.
@@ -2506,7 +2861,20 @@ func (l *Library) RestoreTrash(ctx context.Context, trashPID model.PID) error {
 		return waxerr.New(waxerr.CodeInvalid, "Library.RestoreTrash",
 			"cannot restore a file into the internal podcast library; re-download the episode instead")
 	}
-	_, err = l.jobs.Run(ctx, "restore", fsMutateScope, func(ctx context.Context, h *jobs.Handle) error {
+	spec := jobs.Spec{Kind: "restore", Scope: fsMutateScope, TargetType: "trash", TargetPID: trashPID}
+	_, err = l.jobs.Run(ctx, spec, func(ctx context.Context, h *jobs.Handle) error {
+		// Checked under the lease, as PurgeTrash does, against the library the file goes
+		// back into and the one the journal says it came from.
+		fresh, err := l.store.Libraries(ctx)
+		if err != nil {
+			return err
+		}
+		for _, cand := range []*model.Library{libraryAt(fresh, entry.OrigPath), trashEntryLibrary(fresh, *entry)} {
+			if cand != nil && cand.ReadOnly {
+				return waxerr.New(waxerr.CodeLocked, "Library.RestoreTrash",
+					"cannot restore trash entry "+string(trashPID)+": library "+string(cand.PID)+" is read-only")
+			}
+		}
 		// Move the file back (idempotent: a retry after a failed re-scan is a no-op).
 		if err := l.trasher.Restore(*entry); err != nil {
 			return err
@@ -2527,6 +2895,9 @@ type EmptyReport struct {
 	Purged         int
 	Errored        int
 	ReclaimedBytes int64
+	// SkippedReadOnly counts entries left in the trash because their library is
+	// read-only.
+	SkippedReadOnly int
 }
 
 // EmptyTrashOptions scopes an empty-trash pass.
@@ -2551,14 +2922,22 @@ func (l *Library) EmptyTrash(ctx context.Context, opts EmptyTrashOptions) (*Empt
 		cutoff = time.Now().Add(-opts.OlderThan).UnixNano()
 	}
 	rep := &EmptyReport{}
-	_, err := l.jobs.Run(ctx, "empty-trash", fsMutateScope, func(ctx context.Context, h *jobs.Handle) error {
+	_, err := l.jobs.Run(ctx, jobs.Spec{Kind: "empty-trash", Scope: fsMutateScope}, func(ctx context.Context, h *jobs.Handle) error {
 		entries, err := l.store.TrashEntries(ctx, false, cutoff, 0)
+		if err != nil {
+			return err
+		}
+		libs, err := l.store.Libraries(ctx)
 		if err != nil {
 			return err
 		}
 		for i := range entries {
 			if ctx.Err() != nil {
 				return waxerr.FromContext("Library.EmptyTrash", ctx.Err(), waxerr.CodeIO)
+			}
+			if lib := trashEntryLibrary(libs, entries[i]); lib != nil && lib.ReadOnly {
+				rep.SkippedReadOnly++
+				continue
 			}
 			// One entry's failure must not abort the pass: a purge error leaves the entry
 			// retryable, and a row-delete failure after a successful purge would strand an
@@ -2586,10 +2965,19 @@ func (l *Library) EmptyTrash(ctx context.Context, opts EmptyTrashOptions) (*Empt
 // slip between the check and the purge.
 func (l *Library) PurgeTrash(ctx context.Context, trashPID model.PID) (int64, error) {
 	var size int64
-	_, err := l.jobs.Run(ctx, "purge-trash", fsMutateScope, func(ctx context.Context, h *jobs.Handle) error {
+	spec := jobs.Spec{Kind: "purge-trash", Scope: fsMutateScope, TargetType: "trash", TargetPID: trashPID}
+	_, err := l.jobs.Run(ctx, spec, func(ctx context.Context, h *jobs.Handle) error {
 		entry, err := l.store.ActiveTrashByPID(ctx, trashPID)
 		if err != nil {
 			return err
+		}
+		libs, err := l.store.Libraries(ctx)
+		if err != nil {
+			return err
+		}
+		if lib := trashEntryLibrary(libs, *entry); lib != nil && lib.ReadOnly {
+			return waxerr.New(waxerr.CodeLocked, "Library.PurgeTrash",
+				"trash entry "+string(trashPID)+" came from library "+string(lib.PID)+", which is read-only")
 		}
 		n, err := l.purgeTrashEntry(ctx, *entry)
 		size = n
@@ -2628,63 +3016,97 @@ type ImportRequest struct {
 // would be imported (with destinations), which are catalog duplicates, and which
 // are quarantined. It is read-only.
 func (l *Library) PlanImport(ctx context.Context, req ImportRequest) (*inbox.Plan, error) {
+	const op = "Library.PlanImport"
 	if strings.TrimSpace(req.Source) == "" {
-		return nil, waxerr.New(waxerr.CodeInvalid, "Library.PlanImport", "no import source folder")
+		return nil, waxerr.New(waxerr.CodeInvalid, op, "no import source folder")
+	}
+	// One read serves the target, the routes, and the source check.
+	libs, err := l.store.Libraries(ctx)
+	if err != nil {
+		return nil, err
 	}
 	// Resolve the target and, for multiple media-typed managed roots, a per-file
 	// router so a staging folder splits its books into the audiobook root and its
 	// tracks into the music root. A named target (LibraryPID) or a single managed
 	// library imports everything into that one library (today's behavior).
 	var defaultLib *model.Library
-	var route func(model.Kind) *model.Library
+	var writable []*model.Library
+	var route func(model.Kind) (*model.Library, string)
 	if req.LibraryPID != "" {
-		lib, err := l.resolveManagedLibrary(ctx, req.LibraryPID)
+		lib, err := resolveManagedLibrary(libs, req.LibraryPID)
 		if err != nil {
 			return nil, err
 		}
 		defaultLib = lib
 	} else {
-		managed, err := l.managedLibraries(ctx)
+		managed, err := managedOf(libs)
 		if err != nil {
 			return nil, err
 		}
+		if writable, err = writableManaged(managed); err != nil {
+			return nil, err
+		}
 		if len(managed) == 1 {
-			defaultLib = managed[0]
+			defaultLib = writable[0]
 		} else {
-			defaultLib = firstMixedOrFirst(managed)
-			route = func(kind model.Kind) *model.Library { return routeManaged(managed, kind) }
+			// Routes are decided over every managed library, read-only ones included, so
+			// the flag never sends a file somewhere else. A file bound for a read-only
+			// library is quarantined in place until the flag clears.
+			defaultLib = firstMixedOrFirst(writable)
+			route = func(kind model.Kind) (*model.Library, string) { return routeWritable(managed, kind) }
 		}
 	}
-	profileName := req.Profile
-	if profileName == "" {
-		profileName = defaultLib.Profile
-	}
-	prof, err := l.profiles.ByName(profileName)
+	set := l.profileSet()
+	prof, err := libraryProfile(set, op, defaultLib, req.Profile)
 	if err != nil {
 		return nil, err
 	}
 	// When routing across managed roots, lay each file out under its target library's own
 	// configured profile (or the explicit --profile override when given), so a book sent
-	// to the audiobook root uses that root's profile, not the default library's.
+	// to the audiobook root uses that root's profile, not the default library's. Every
+	// library a file can be routed to is resolved up front, so one naming an undefined
+	// profile fails the plan rather than laying files out under another.
 	var profileFor func(*model.Library) organize.Profile
 	if route != nil {
-		override := req.Profile
-		profileFor = func(lib *model.Library) organize.Profile {
-			name := override
-			if name == "" {
-				name = lib.Profile
+		byLib := make(map[int64]organize.Profile, len(writable))
+		for _, lib := range writable {
+			p, err := libraryProfile(set, op, lib, req.Profile)
+			if err != nil {
+				return nil, err
 			}
-			p, perr := l.profiles.ByName(name)
-			if perr != nil {
-				return prof // config-validated names don't error; fall back to the default
-			}
-			return p
+			byLib[lib.ID] = p
 		}
+		profileFor = func(lib *model.Library) organize.Profile { return byLib[lib.ID] }
 	}
-	return l.importer.Plan(ctx, inbox.Request{
+	plan, err := l.importer.Plan(ctx, inbox.Request{
 		Source: req.Source, Library: defaultLib, Route: route, Profile: prof, ProfileFor: profileFor,
 		DupPolicy: req.DupPolicy, Copy: req.Copy, ReserveBytes: l.opts.FreeSpaceReserveBytes,
 	})
+	if err != nil {
+		return nil, err
+	}
+	quarantineReadOnlySources(libs, plan)
+	return plan, nil
+}
+
+// quarantineReadOnlySources quarantines the move-mode import actions whose source file
+// sits in a read-only library, since the move would take the file out of it.
+func quarantineReadOnlySources(libs []*model.Library, plan *inbox.Plan) {
+	if plan.Copy {
+		return
+	}
+	held := newReadOnlyHolder(libs)
+	for i := range plan.Actions {
+		a := &plan.Actions[i]
+		if a.Outcome != inbox.OutcomeImport {
+			continue
+		}
+		if lib := held.holding(a.Src); lib != nil {
+			a.Outcome = inbox.OutcomeQuarantine
+			a.Reason = "source is in read-only library " + string(lib.PID) + "; import a copy instead"
+			plan.TotalBytes -= a.Size
+		}
+	}
 }
 
 // firstMixedOrFirst returns a mixed managed library if any, else the first managed
@@ -2698,11 +3120,30 @@ func firstMixedOrFirst(managed []*model.Library) *model.Library {
 	return managed[0]
 }
 
-// ApplyImport executes an import plan under an "import"-scoped job.
+// ApplyImport executes an import plan under an "import"-scoped job. A file bound for
+// a library flagged read-only since the plan was built is quarantined in place.
 func (l *Library) ApplyImport(ctx context.Context, plan *inbox.Plan) (*inbox.Report, error) {
 	var rep *inbox.Report
-	_, err := l.jobs.Run(ctx, "import", fsMutateScope, func(ctx context.Context, h *jobs.Handle) error {
-		r, err := l.importer.Execute(ctx, plan)
+	_, err := l.jobs.Run(ctx, jobs.Spec{Kind: "import", Scope: fsMutateScope}, func(ctx context.Context, h *jobs.Handle) error {
+		libs, err := l.store.Libraries(ctx)
+		if err != nil {
+			return err
+		}
+		readOnly := readOnlyIDs(libs)
+		live := *plan
+		live.Actions = slices.Clone(plan.Actions)
+		for i := range live.Actions {
+			a := &live.Actions[i]
+			target := a.Library
+			if target == nil {
+				target = plan.Library
+			}
+			if a.Outcome == inbox.OutcomeImport && target != nil && readOnly[target.ID] {
+				a.Outcome, a.Reason = inbox.OutcomeQuarantine, readOnlySinceThePlan
+			}
+		}
+		quarantineReadOnlySources(libs, &live)
+		r, err := l.importer.Execute(ctx, &live)
 		rep = r
 		return err
 	})
@@ -2796,11 +3237,7 @@ func (l *Library) importAcquiredMedia(ctx context.Context, file AcquiredFile, ki
 	if err != nil {
 		return nil, err
 	}
-	profileName := meta.Profile
-	if profileName == "" {
-		profileName = lib.Profile
-	}
-	prof, err := l.profiles.ByName(profileName)
+	prof, err := libraryProfile(l.profileSet(), op, lib, meta.Profile)
 	if err != nil {
 		return nil, err
 	}
@@ -2811,6 +3248,11 @@ func (l *Library) importAcquiredMedia(ctx context.Context, file AcquiredFile, ki
 	if err != nil {
 		return nil, err
 	}
+	libs, err := l.store.Libraries(ctx)
+	if err != nil {
+		return nil, err
+	}
+	quarantineReadOnlySources(libs, plan)
 	res := &AcquiredResult{Kind: kind, Plan: plan}
 	// Report already-present independent of DupPolicy. The plan sets Action.Essence before
 	// the dup gate, so resolving by essence here surfaces the existing item even for a
@@ -2830,6 +3272,16 @@ func (l *Library) importAcquiredMedia(ctx context.Context, file AcquiredFile, ki
 // later download). It records the origin provenance on the episode item.
 func (l *Library) importAcquiredEpisode(ctx context.Context, file AcquiredFile, meta AcquiredMeta) (*AcquiredResult, error) {
 	const op = "Library.ImportAcquired"
+	if strings.TrimSpace(file.Path) != "" && !meta.Copy {
+		libs, err := l.store.Libraries(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if lib := newReadOnlyHolder(libs).holding(file.Path); lib != nil {
+			return nil, waxerr.New(waxerr.CodeLocked, op,
+				"cannot move "+file.Path+" out of read-only library "+string(lib.PID)+"; import a copy instead")
+		}
+	}
 	showPID := meta.ShowPID
 	if showPID == "" {
 		title := strings.TrimSpace(meta.ShowTitle)
@@ -3212,20 +3664,15 @@ func (l *Library) RotateSecrets(ctx context.Context, oldCipher, newCipher model.
 // InboxFolders returns the configured staging folders.
 func (l *Library) InboxFolders() []string { return l.opts.Inbox }
 
-// resolveManagedLibrary returns the managed library identified by pid, or the
-// single managed library when pid is empty.
-func (l *Library) resolveManagedLibrary(ctx context.Context, pid model.PID) (*model.Library, error) {
-	if pid == "" {
-		return l.singleManagedLibrary(ctx)
-	}
-	libs, err := l.store.Libraries(ctx)
-	if err != nil {
-		return nil, err
-	}
+// resolveManagedLibrary returns the managed library in libs identified by pid.
+func resolveManagedLibrary(libs []*model.Library, pid model.PID) (*model.Library, error) {
 	for _, lib := range libs {
 		if lib.PID == pid {
 			if lib.Mode != model.ModeManaged {
 				return nil, waxerr.New(waxerr.CodeInvalid, "Library.import", "target library is not managed")
+			}
+			if lib.ReadOnly {
+				return nil, waxerr.New(waxerr.CodeLocked, "Library.import", "target library "+string(pid)+" is read-only")
 			}
 			return lib, nil
 		}
@@ -3312,6 +3759,11 @@ func (l *Library) managedLibraries(ctx context.Context) ([]*model.Library, error
 	if err != nil {
 		return nil, err
 	}
+	return managedOf(libs)
+}
+
+// managedOf returns the managed libraries in libs, or an error when there are none.
+func managedOf(libs []*model.Library) ([]*model.Library, error) {
 	var managed []*model.Library
 	for _, lib := range libs {
 		if lib.Mode == model.ModeManaged {
@@ -3324,28 +3776,47 @@ func (l *Library) managedLibraries(ctx context.Context) ([]*model.Library, error
 	return managed, nil
 }
 
-func (l *Library) singleManagedLibrary(ctx context.Context) (*model.Library, error) {
-	managed, err := l.managedLibraries(ctx)
-	if err != nil {
-		return nil, err
+// routeWritable routes kind over every managed library, read-only ones included, so a
+// read-only library never sends its kind elsewhere. When it is the one a kind routes
+// to, the answer is nil with a reason naming it.
+func routeWritable(managed []*model.Library, kind model.Kind) (*model.Library, string) {
+	lib := routeManaged(managed, kind)
+	if lib != nil && lib.ReadOnly {
+		return nil, "the managed library for " + string(kind) + " media, " + string(lib.PID) + ", is read-only"
 	}
-	if len(managed) != 1 {
-		return nil, waxerr.New(waxerr.CodeInvalid, "Library.managed",
-			"multiple managed libraries configured; select one by kind or pid")
+	return lib, ""
+}
+
+// writableManaged returns the managed libraries not flagged read-only, or CodeLocked
+// when every one is.
+func writableManaged(managed []*model.Library) ([]*model.Library, error) {
+	var out []*model.Library
+	for _, lib := range managed {
+		if !lib.ReadOnly {
+			out = append(out, lib)
+		}
 	}
-	return managed[0], nil
+	if len(out) == 0 {
+		return nil, waxerr.New(waxerr.CodeLocked, "Library.import", "every managed library is read-only")
+	}
+	return out, nil
 }
 
 // managedLibraryForKind picks the managed library for an item kind. A single
 // type-specific library (music/audiobook) that accepts the kind wins over a mixed
-// root. The choice errors when no library accepts the kind or more than one does.
+// root. The choice errors when no library accepts the kind or more than one does, and
+// is CodeLocked when the library it picks is read-only.
 func (l *Library) managedLibraryForKind(ctx context.Context, kind model.Kind) (*model.Library, error) {
 	managed, err := l.managedLibraries(ctx)
 	if err != nil {
 		return nil, err
 	}
-	if lib := routeManaged(managed, kind); lib != nil {
+	lib, reason := routeWritable(managed, kind)
+	if lib != nil {
 		return lib, nil
+	}
+	if reason != "" {
+		return nil, waxerr.New(waxerr.CodeLocked, "Library.import", reason)
 	}
 	return nil, waxerr.New(waxerr.CodeInvalid, "Library.import",
 		"no managed library holds "+string(kind)+" media (or the choice is ambiguous); configure a media-typed root")

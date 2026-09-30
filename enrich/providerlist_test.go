@@ -3,6 +3,7 @@ package enrich_test
 import (
 	"context"
 	"log/slog"
+	"slices"
 	"testing"
 	"time"
 
@@ -395,6 +396,55 @@ func TestInjectedProvidersCannotTakeABuiltinsName(t *testing.T) {
 				t.Error("dropping the provider logged no warning")
 			}
 		})
+	}
+}
+
+// TestReservedProviderNamesAreWhatNewDrops: the exported list is every built-in's name
+// plus the two marker labels, so a host can refuse those names in its own settings
+// before New drops them, and it matches what New drops exactly.
+func TestReservedProviderNamesAreWhatNewDrops(t *testing.T) {
+	full := enrich.New(nil, enrich.Config{
+		Contact: "t@e.com", FetchCoverArt: true, FetchCommunityGenres: true, FetchLyrics: true,
+	}, nil)
+	reserved := enrich.ReservedProviderNames()
+	want := []string{model.EnrichProviderMBEdition, model.EnrichProviderNone}
+	for _, p := range full.Builtins() {
+		want = append(want, p.Name())
+	}
+	if len(reserved) != len(want) {
+		t.Fatalf("reserved names = %v, want the built-ins and both markers %v", reserved, want)
+	}
+	for _, name := range want {
+		if !slices.Contains(reserved, name) || !enrich.ReservedProviderName(name) {
+			t.Errorf("%q is not reserved", name)
+		}
+	}
+	if enrich.ReservedProviderName("fanart") {
+		t.Error("fanart is reserved, want only the built-ins and the markers")
+	}
+
+	injected := []enrich.Provider{&enrich.Mock{ProviderName: "fanart", Caps: enrich.CapGenres}}
+	for _, name := range reserved {
+		injected = append(injected, &enrich.Mock{ProviderName: name, Caps: enrich.CapGenres})
+	}
+	var kept []string
+	svc := enrich.New(nil, enrich.Config{
+		Providers: injected,
+		ProviderList: func(fixed []enrich.Provider) []enrich.Provider {
+			for _, p := range fixed {
+				kept = append(kept, p.Name())
+			}
+			return fixed
+		},
+	}, nil)
+	svc.Phases()
+	if !slices.Equal(kept, []string{"fanart"}) {
+		t.Errorf("New kept %v, want only fanart", kept)
+	}
+
+	reserved[0] = "changed"
+	if enrich.ReservedProviderNames()[0] == "changed" {
+		t.Error("ReservedProviderNames handed out its own slice")
 	}
 }
 

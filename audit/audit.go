@@ -46,7 +46,7 @@ type Store interface {
 	DiagnosticCoverage(ctx context.Context) (stale, total int, err error)
 	// FilesDurationMismatch returns a sample (up to limit) of files whose header
 	// duration disagrees with their decoded length, plus the total count.
-	FilesDurationMismatch(ctx context.Context, limit int) ([]model.FileDurationMismatch, int, error)
+	FilesDurationMismatch(ctx context.Context, limit, offset int) ([]model.FileDurationMismatch, int, error)
 }
 
 // Hasher recomputes a file's content hash for the integrity (bitrot) check.
@@ -388,7 +388,7 @@ func (a *Auditor) checkMissingMBID(ctx context.Context, sample int, add func(mod
 // track's duration, so a lying header misplaces seeks and scrubbers until a retag or a
 // re-mux fixes it and a rescan reads it again.
 func (a *Auditor) checkDurationMismatch(ctx context.Context, sample int, add func(model.AuditFinding)) error {
-	ms, total, err := a.store.FilesDurationMismatch(ctx, sample)
+	ms, total, err := a.store.FilesDurationMismatch(ctx, sample, 0)
 	if err != nil || total == 0 {
 		return err
 	}
@@ -398,7 +398,10 @@ func (a *Auditor) checkDurationMismatch(ctx context.Context, sample int, add fun
 			Severity: model.SeverityWarn,
 			Message: "header says " + clockMS(m.HeaderMS) + " but the audio decodes to " +
 				clockMS(m.DecodedMS) + ": " + m.DisplayPath,
-			Path: m.DisplayPath,
+			Path:      m.DisplayPath,
+			FilePID:   m.FilePID,
+			HeaderMS:  m.HeaderMS,
+			DecodedMS: m.DecodedMS,
 		})
 	}
 	if total > len(ms) {

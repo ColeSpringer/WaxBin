@@ -182,7 +182,12 @@ import (
 // than a misread one. An older peer reading a newer enrich result finds no
 // AuxArtEnriched and shows the phase as having walked nothing, an absence of
 // information like MergedInto's at 14 rather than a false statement.
-const ProtocolVersion = 20
+//
+// Version 21 added EnrichParams.Phases, for the reason version 3 gave: a version-20
+// server drops the field and runs the whole pass where the client asked for one phase.
+// set_library_read_only rides at 21 on the add_root precedent, since it widens no
+// existing struct.
+const ProtocolVersion = 21
 
 // Method names for the proxied operations: the fast request/response catalog
 // mutations, the reads a mutating command needs for its confirmation output, the
@@ -241,6 +246,8 @@ const (
 	MethodAddRoot          = "add_root"
 	MethodMaintenanceBegin = "maintenance_begin"
 	MethodMaintenanceEnd   = "maintenance_end"
+
+	MethodSetLibraryReadOnly = "set_library_read_only"
 
 	// Server-run long jobs. The server starts the job in its own process (staying
 	// available) and returns the job PID; the client tails the read-only job row.
@@ -999,6 +1006,13 @@ type AddRootParams struct {
 	Profile string `json:"profile,omitempty"`
 }
 
+// SetLibraryReadOnlyParams is the set_library_read_only request payload; the answer
+// is the library row.
+type SetLibraryReadOnlyParams struct {
+	LibraryPID string `json:"libraryPid"`
+	ReadOnly   bool   `json:"readOnly"`
+}
+
 // ScanParams is the run_scan request payload.
 type ScanParams struct {
 	LibraryPID       string `json:"libraryPid,omitempty"`
@@ -1027,6 +1041,9 @@ type EnrichParams struct {
 	// ForcePhases are the phases to re-ask alone, by model.EnrichPhase key; the server
 	// validates.
 	ForcePhases []string `json:"forcePhases,omitempty"`
+	// Phases is the run's phase list, by key (empty walks every phase); the server
+	// validates.
+	Phases []string `json:"phases,omitempty"`
 	// WriteTags asks the server to write what the pass filled back into the files.
 	// Additive: an older server drops it and runs without the write-back, which is
 	// the same as the default.

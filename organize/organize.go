@@ -63,6 +63,9 @@ type Plan struct {
 	// StampPID records whether to also stamp the backing item's WaxBin PID into a tag
 	// before the move (managed-only; organize plans only managed-root files).
 	StampPID bool
+	// ReadOnlyLibraries counts the managed libraries the plan passed over because they
+	// are read-only.
+	ReadOnlyLibraries int
 }
 
 // Pending returns the actions that would actually move.

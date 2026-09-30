@@ -2,6 +2,7 @@ package enrich
 
 import (
 	"context"
+	"slices"
 
 	"github.com/colespringer/waxbin/model"
 )
@@ -49,9 +50,8 @@ type Provider interface {
 	// is written to entity_enrichment.provider and field_provenance.provider so a
 	// consumer can attribute a value and reason about a metadata conflict. It is also
 	// the provider's identity within a pass, so an injected provider's name has to be
-	// its own: one repeating another's, or taking a built-in's or a marker label (see
-	// ProviderMusicBrainz and the constants beside it), is dropped when the Service is
-	// built.
+	// its own: one repeating another's, or taking a name ReservedProviderNames lists (a
+	// built-in's or a marker label), is dropped when the Service is built.
 	Name() string
 	// Capabilities reports which enrichment kinds the provider supplies, so the
 	// Service only calls it for a request it can answer. A provider whose capabilities
@@ -312,23 +312,23 @@ const (
 // printed identifier. Distinct on purpose: that tier is not immune to MusicBrainz
 // coverage gaps (see release.go), so its writes must stay findable and reviewable. It is
 // a marker value the store records, not a provider. providerNone is the store's label
-// for a marker no provider answered (store/sqlite's enrichProviderNone).
+// for a marker no provider answered.
 const (
-	providerMBEdition = "musicbrainz:edition"
-	providerNone      = "none"
+	providerMBEdition = model.EnrichProviderMBEdition
+	providerNone      = model.EnrichProviderNone
 )
 
-// reservedProviderName reports whether name belongs to a built-in or labels a marker,
-// so an injected provider taking it would write values nobody could tell from the
-// built-in's, or markers that read as some other outcome.
-func reservedProviderName(name string) bool {
-	switch name {
-	case ProviderMusicBrainz, ProviderCoverArt, ProviderListenBrainz, ProviderLRCLIB,
-		providerMBEdition, providerNone:
-		return true
-	}
-	return false
-}
+var reservedNames = []string{ProviderMusicBrainz, ProviderCoverArt, ProviderListenBrainz, ProviderLRCLIB,
+	providerMBEdition, providerNone}
+
+// ReservedProviderName reports whether name belongs to a built-in or labels a marker.
+// An injected provider taking one is dropped when the Service is built, since its values
+// could not be told from the built-in's, or its markers would read as another outcome.
+func ReservedProviderName(name string) bool { return slices.Contains(reservedNames, name) }
+
+// ReservedProviderNames lists the names ReservedProviderName reserves, the built-ins
+// first and then the marker labels, in a slice the caller may keep.
+func ReservedProviderNames() []string { return slices.Clone(reservedNames) }
 
 // Mock is a scriptable Provider for tests and for standing in for an injected
 // provider (Discogs, Last.fm, ...) without any network. Set ProviderName + Caps and

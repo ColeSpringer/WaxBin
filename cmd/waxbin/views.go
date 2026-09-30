@@ -82,11 +82,12 @@ func pubDate(ns int64) string {
 }
 
 type libView struct {
-	PID     string `json:"pid"`
-	Root    string `json:"root"`
-	Mode    string `json:"mode"`
-	Media   string `json:"media,omitempty"`
-	Profile string `json:"profile"`
+	PID      string `json:"pid"`
+	Root     string `json:"root"`
+	Mode     string `json:"mode"`
+	Media    string `json:"media,omitempty"`
+	Profile  string `json:"profile"`
+	ReadOnly bool   `json:"readOnly,omitempty"`
 }
 
 func libViews(libs []*model.Library) []libView {
@@ -94,7 +95,7 @@ func libViews(libs []*model.Library) []libView {
 	for _, l := range libs {
 		out = append(out, libView{
 			PID: string(l.PID), Root: l.DisplayRoot, Mode: string(l.Mode),
-			Media: string(l.MediaType()), Profile: l.Profile,
+			Media: string(l.MediaType()), Profile: l.Profile, ReadOnly: l.ReadOnly,
 		})
 	}
 	return out
@@ -562,14 +563,16 @@ func bucketViews(buckets []read.Bucket) []bucketView {
 }
 
 type jobView struct {
-	PID      string  `json:"pid"`
-	Kind     string  `json:"kind"`
-	Scope    string  `json:"scope"`
-	State    string  `json:"state"`
-	Owner    string  `json:"owner"`
-	Progress float64 `json:"progress"`
-	Message  string  `json:"message,omitempty"`
-	Error    string  `json:"error,omitempty"`
+	PID        string  `json:"pid"`
+	Kind       string  `json:"kind"`
+	Scope      string  `json:"scope"`
+	TargetType string  `json:"targetType,omitempty"`
+	TargetPID  string  `json:"targetPid,omitempty"`
+	State      string  `json:"state"`
+	Owner      string  `json:"owner"`
+	Progress   float64 `json:"progress"`
+	Message    string  `json:"message,omitempty"`
+	Error      string  `json:"error,omitempty"`
 }
 
 type derivedView struct {
@@ -669,6 +672,7 @@ type enrichView struct {
 	TagsFailed        int      `json:"tagsFailed,omitempty"`
 	TagsUnrepresented int      `json:"tagsUnrepresented,omitempty"`
 	TagsSkipped       int      `json:"tagsSkipped,omitempty"`
+	TagsReadOnly      int      `json:"tagsReadOnly,omitempty"`
 	JobPID            string   `json:"jobPid,omitempty"`
 }
 
@@ -692,7 +696,8 @@ func toEnrichView(r *waxbin.EnrichResult) enrichView {
 		AuxArtFetched: r.Result.AuxArtFetched,
 		TagsWritten:   r.Result.TagsWritten, TagsFailed: r.Result.TagsFailed,
 		TagsUnrepresented: r.Result.TagsUnrepresented, TagsSkipped: r.Result.TagsSkipped,
-		JobPID: string(r.JobPID),
+		TagsReadOnly: r.Result.TagsReadOnly,
+		JobPID:       string(r.JobPID),
 	}
 }
 
@@ -701,6 +706,7 @@ func jobViews(jobs []*model.Job) []jobView {
 	for _, j := range jobs {
 		out = append(out, jobView{
 			PID: string(j.PID), Kind: j.Kind, Scope: j.Scope, State: string(j.State),
+			TargetType: j.TargetType, TargetPID: string(j.TargetPID),
 			Owner: j.Owner, Progress: j.Progress, Message: j.Message, Error: j.Error,
 		})
 	}

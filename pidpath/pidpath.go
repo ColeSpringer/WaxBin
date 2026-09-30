@@ -56,6 +56,7 @@ type catalog interface {
 	GetMany(ctx context.Context, pids []model.PID) ([]*model.ItemView, error)
 	DataVersion(ctx context.Context) (int64, error)
 	Changes(ctx context.Context, sinceSeq int64) ([]model.Change, error)
+	LatestChangeSeq(ctx context.Context) (int64, error)
 }
 
 // Location is where an item's audio lives: the containing file, plus the window
@@ -127,9 +128,21 @@ type Options struct {
 
 // Cache resolves item PIDs to locations against a WaxBin catalog, keeping the
 // results until the change feed says otherwise. It is safe for concurrent use.
+//
+// A restore can rename another catalog over the file a read-only handle has open,
+// which leaves the handle reading the old file for good. A Cache from Open reopens its
+// own handle when that happens. A Cache from New cannot, since the library is the
+// caller's: Poll returns the CodeNotFound the library reported, and every lookup
+// refuses with CodeUnsupported until the caller reopens its library and builds a new
+// Cache.
 type Cache struct {
-	lib catalog
-	log *slog.Logger
+	// libMu guards lib and ownedLib, which an Open cache swaps for a fresh handle when
+	// its catalog file is replaced, and libClosed, which stops a swap after Close.
+	libMu     sync.Mutex
+	lib       catalog
+	libClosed bool
+	dbPath    string
+	log       *slog.Logger
 
 	// queryCtx parents every catalog query (Locate lookups and poll pulls), so Close
 	// aborts in-flight work immediately instead of waiting out queryTimeout on a hung
@@ -167,6 +180,9 @@ type Cache struct {
 	clock    int64
 	sinceSeq int64
 	dataVer  int64
+	// replaced is the CodeUnsupported error lookups return while the catalog file is
+	// known to have been replaced under the handle; nil otherwise.
+	replaced error
 
 	stop     chan struct{}
 	pollDone chan struct{}
@@ -190,7 +206,7 @@ func New(ctx context.Context, lib *waxbin.Library, opts Options) (*Cache, error)
 	if lib == nil {
 		return nil, waxerr.New(waxerr.CodeInvalid, op, "library is required")
 	}
-	c, err := newCache(ctx, lib, opts)
+	c, err := newCache(ctx, lib, nil, opts)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
@@ -216,20 +232,20 @@ func Open(ctx context.Context, opts Options) (*Cache, error) {
 	if err != nil {
 		return nil, waxerr.Wrapf(waxerr.CodeIO, op, err, "opening catalog %s", opts.DBPath)
 	}
-	c, err := newCache(ctx, lib, opts)
+	c, err := newCache(ctx, lib, lib, opts)
 	if err != nil {
 		lib.Close()
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
-	// Nothing reads ownedLib until Close, which cannot run before Open returns it.
-	c.ownedLib = lib
 	return c, nil
 }
 
 // newCache is the shared constructor both entry points funnel through, over the
 // narrowed catalog interface, which is also how the unit tests inject a fake without
-// SQLite. It returns its error unwrapped so each constructor can name itself.
-func newCache(ctx context.Context, lib catalog, opts Options) (*Cache, error) {
+// SQLite. owned is the handle Open made, which the Cache closes and may reopen from
+// opts.DBPath; New passes nil. It returns its error unwrapped so each constructor can
+// name itself.
+func newCache(ctx context.Context, lib catalog, owned io.Closer, opts Options) (*Cache, error) {
 	log := opts.Logger
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
@@ -249,6 +265,11 @@ func newCache(ctx context.Context, lib catalog, opts Options) (*Cache, error) {
 		c.Close()
 		return nil, fmt.Errorf("reading the catalog change feed: %w", err)
 	}
+	// Set before the poll loop starts, since a poll that finds the file replaced reads
+	// both; on a failed start the caller still owns the handle.
+	if owned != nil {
+		c.ownedLib, c.dbPath = owned, opts.DBPath
+	}
 	interval := opts.PollInterval
 	if interval == 0 {
 		interval = DefaultPollInterval
@@ -261,27 +282,36 @@ func newCache(ctx context.Context, lib catalog, opts Options) (*Cache, error) {
 	return c, nil
 }
 
-// initCursor walks the change feed to its tail so the first poll only sees changes
-// made after this cache opened; the cache is empty now, so nothing older can name a
-// stale entry. Loops until an empty page rather than assuming the store's page size.
+// initCursor starts the change cursor at the feed's tail so the first poll only sees
+// changes made after this cache opened; the cache is empty now, so nothing older can
+// name a stale entry.
 func (c *Cache) initCursor(ctx context.Context) error {
-	dv, err := c.lib.DataVersion(ctx)
+	dv, seq, err := prime(ctx, c.lib)
 	if err != nil {
 		return err
 	}
-	var seq int64
-	for {
-		rows, err := c.lib.Changes(ctx, seq)
-		if err != nil {
-			return err
-		}
-		if len(rows) == 0 {
-			break
-		}
-		seq = rows[len(rows)-1].Seq
-	}
 	c.sinceSeq, c.dataVer = seq, dv
 	return nil
+}
+
+// prime reads the data version and then the feed's tail, in that order, so a commit
+// between the two reads moves the version the next poll compares against.
+func prime(ctx context.Context, lib catalog) (dv, seq int64, err error) {
+	if dv, err = lib.DataVersion(ctx); err != nil {
+		return 0, 0, err
+	}
+	if seq, err = lib.LatestChangeSeq(ctx); err != nil {
+		return 0, 0, err
+	}
+	return dv, seq, nil
+}
+
+// catalog returns the handle queries go to, which an Open cache replaces when its
+// catalog file is.
+func (c *Cache) catalog() catalog {
+	c.libMu.Lock()
+	defer c.libMu.Unlock()
+	return c.lib
 }
 
 // Locate resolves an item PID to its file's location, from the cache when it is
@@ -289,7 +319,9 @@ func (c *Cache) initCursor(ctx context.Context) error {
 // queryTimeout, and Close still aborts it via the query context.
 //
 // It propagates the catalog's error unchanged, including CodeNotFound for an unknown
-// pid; translating it into a consumer's own vocabulary is the consumer's job.
+// pid; translating it into a consumer's own vocabulary is the consumer's job. A catalog
+// file replaced under the cache's handle is CodeUnsupported instead (see Cache), so it
+// never reads as a missing item.
 func (c *Cache) Locate(ctx context.Context, pid model.PID) (Location, error) {
 	if loc, hit := c.cached(pid); hit {
 		return loc, nil
@@ -309,6 +341,9 @@ func (c *Cache) Relocate(ctx context.Context, pid model.PID) (Location, error) {
 
 // lookup queries the catalog and caches the result.
 func (c *Cache) lookup(ctx context.Context, pid model.PID) (Location, error) {
+	if err := c.replacedErr(); err != nil {
+		return Location{}, err
+	}
 	gen := c.generation()
 	qctx, cancel := context.WithTimeout(ctx, queryTimeout)
 	defer cancel()
@@ -316,7 +351,7 @@ func (c *Cache) lookup(ctx context.Context, pid model.PID) (Location, error) {
 	// on; bridge the lifetime context into this query.
 	stop := context.AfterFunc(c.queryCtx, cancel)
 	defer stop()
-	iv, err := c.lib.Get(qctx, pid)
+	iv, err := c.catalog().Get(qctx, pid)
 	if err != nil {
 		return Location{}, err
 	}
@@ -329,7 +364,8 @@ func (c *Cache) lookup(ctx context.Context, pid model.PID) (Location, error) {
 // hits are served warm, and the misses go to the catalog in one GetMany rather
 // than a query per pid. A pid with no matching item is omitted from the map (the
 // GetMany contract); the error is reserved for the batch query itself failing,
-// in which case no partial map is returned.
+// in which case no partial map is returned, and for a replaced catalog file, as for
+// Locate.
 //
 // Caching follows the Locate discipline with one snapshot for the whole batch: a
 // batch raced by an invalidation returns its results but does not cache them.
@@ -353,12 +389,15 @@ func (c *Cache) LocateMany(ctx context.Context, pids []model.PID) (map[model.PID
 		return out, nil
 	}
 
+	if err := c.replacedErr(); err != nil {
+		return nil, err
+	}
 	gen := c.generation()
 	qctx, cancel := context.WithTimeout(ctx, queryTimeout)
 	defer cancel()
 	stop := context.AfterFunc(c.queryCtx, cancel)
 	defer stop()
-	views, err := c.lib.GetMany(qctx, misses)
+	views, err := c.catalog().GetMany(qctx, misses)
 	if err != nil {
 		return nil, err
 	}
@@ -389,11 +428,19 @@ func locationOf(iv *model.ItemView) Location {
 // pull that drops the cached locations the changed rows name. The background loop
 // calls it every PollInterval; tests call it directly to observe invalidation
 // deterministically.
+//
+// A cursor past the feed's head means the catalog was replaced beneath a writer's
+// reopen: Poll drops everything and resumes from the new head. A catalog file replaced
+// beneath this cache's own read-only handle is handled as the Cache doc describes.
 func (c *Cache) Poll(ctx context.Context) error {
 	c.pollMu.Lock()
 	defer c.pollMu.Unlock()
 
-	dv, err := c.lib.DataVersion(ctx)
+	lib := c.catalog()
+	dv, err := lib.DataVersion(ctx)
+	if waxerr.Is(err, waxerr.CodeNotFound) {
+		return c.fileReplaced(ctx, err)
+	}
 	if err != nil {
 		return err
 	}
@@ -405,7 +452,17 @@ func (c *Cache) Poll(ctx context.Context) error {
 	}
 	dropped := 0
 	for {
-		rows, err := c.lib.Changes(ctx, seq)
+		rows, err := lib.Changes(ctx, seq)
+		if waxerr.Is(err, waxerr.CodeNotFound) {
+			if seq, err = lib.LatestChangeSeq(ctx); err != nil {
+				return err
+			}
+			c.mu.Lock()
+			c.invalGen++
+			dropped += c.dropAllLocked()
+			c.mu.Unlock()
+			break
+		}
 		if err != nil {
 			return err
 		}
@@ -421,6 +478,61 @@ func (c *Cache) Poll(ctx context.Context) error {
 	if dropped > 0 {
 		c.log.Debug("catalog changes invalidated cached locations", "dropped", dropped, "seq", seq)
 	}
+	return nil
+}
+
+// fileReplaced handles a DataVersion that says the catalog file was replaced under the
+// cache's read-only handle. It drops everything, then reopens the handle when this
+// cache owns it, and otherwise refuses lookups with cause from here on, warning once.
+func (c *Cache) fileReplaced(ctx context.Context, cause error) error {
+	refusal := "catalog file was replaced under the library this cache reads; reopen the library and build a new cache"
+	if c.dbPath != "" {
+		refusal = "catalog file was replaced; lookups resume once the cache has reopened it"
+	}
+	c.mu.Lock()
+	c.invalGen++
+	c.dropAllLocked()
+	first := c.replaced == nil
+	c.replaced = waxerr.Classifyf(waxerr.CodeUnsupported, "pidpath.Locate", cause, "%s", refusal)
+	c.mu.Unlock()
+	if c.dbPath == "" {
+		if first {
+			c.log.Warn(refusal, "err", cause)
+		}
+		return cause
+	}
+
+	lib, err := waxbin.Open(ctx, waxbin.Options{DBPath: c.dbPath, ReadOnly: true, Logger: c.log})
+	if err != nil {
+		if first {
+			c.log.Warn("catalog file was replaced and reopening it failed; lookups are refused until a poll reopens it",
+				"path", c.dbPath, "err", err)
+		}
+		return waxerr.Wrapf(waxerr.CodeIO, "pidpath.Poll", err, "reopening replaced catalog %s", c.dbPath)
+	}
+	dv, seq, err := prime(ctx, lib)
+	if err != nil {
+		lib.Close()
+		return err
+	}
+	c.libMu.Lock()
+	if c.libClosed {
+		c.libMu.Unlock()
+		lib.Close()
+		return nil
+	}
+	old := c.ownedLib
+	c.lib, c.ownedLib = lib, lib
+	c.libMu.Unlock()
+	if old != nil {
+		old.Close()
+	}
+	c.mu.Lock()
+	c.invalGen++
+	c.dropAllLocked()
+	c.sinceSeq, c.dataVer, c.replaced = seq, dv, nil
+	c.mu.Unlock()
+	c.log.Info("catalog file was replaced; reopened it", "path", c.dbPath)
 	return nil
 }
 
@@ -449,7 +561,7 @@ func (c *Cache) invalidate(rows []model.Change) int {
 			for itemPID := range c.byFile[ch.EntityPID] {
 				dropped += c.dropLocked(itemPID)
 			}
-		case "library":
+		case "library", model.ChangeCatalog:
 			c.invalGen++
 			dropped += c.dropAllLocked()
 		}
@@ -475,6 +587,13 @@ func (c *Cache) generation() uint64 {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.invalGen
+}
+
+// replacedErr is the error a replaced catalog file left the cache with, or nil.
+func (c *Cache) replacedErr() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.replaced
 }
 
 func (c *Cache) cached(pid model.PID) (Location, bool) {
@@ -615,7 +734,8 @@ func (c *Cache) pollLoop(interval time.Duration) {
 			err := c.Poll(ctx)
 			cancel()
 			switch {
-			case err != nil && !down:
+			case err != nil && !down && c.replacedErr() == nil:
+				// A replaced catalog file refuses lookups and was logged where it was found.
 				c.log.Warn("catalog poll failing; serving cached locations", "err", err)
 			case err == nil && down:
 				c.log.Info("catalog poll recovered")
@@ -634,8 +754,12 @@ func (c *Cache) Close() error {
 			close(c.stop)
 			<-c.pollDone
 		}
-		if c.ownedLib != nil {
-			c.closeErr = c.ownedLib.Close()
+		c.libMu.Lock()
+		owned := c.ownedLib
+		c.libClosed = true
+		c.libMu.Unlock()
+		if owned != nil {
+			c.closeErr = owned.Close()
 		}
 	})
 	return c.closeErr

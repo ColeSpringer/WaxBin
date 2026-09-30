@@ -776,6 +776,16 @@ func (c *Client) AddRoot(ctx context.Context, params AddRootParams) (*model.Libr
 	return &lib, nil
 }
 
+// SetLibraryReadOnly proxies flagging a library read-only or clearing the flag,
+// returning the library row.
+func (c *Client) SetLibraryReadOnly(ctx context.Context, params SetLibraryReadOnlyParams) (*model.Library, error) {
+	var lib model.Library
+	if err := c.call(ctx, MethodSetLibraryReadOnly, params, &lib); err != nil {
+		return nil, err
+	}
+	return &lib, nil
+}
+
 // RunScan submits a scan to the server and returns the started job's PID. The
 // server runs the job in its own process (staying available); the caller tails the
 // job through a read-only catalog handle.

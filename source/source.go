@@ -10,6 +10,7 @@ package source
 
 import (
 	"context"
+	"errors"
 	"io"
 
 	"github.com/colespringer/waxbin/model"
@@ -100,4 +101,28 @@ type FetchResult struct {
 	Bytes       int64
 	ContentHash string // identity-tagged hash of the streamed bytes
 	ContentType string
+}
+
+// ProviderError marks a failure as the provider's: the source could not be enumerated
+// or fetched, or the provider's answer broke the Provider contract. The podcast service
+// returns one from every provider call it makes, so a caller can tell a failing feed
+// from a failing catalog. Err keeps its waxerr class, which waxerr.CodeOf reads through
+// Unwrap. The type lives in-process only; a proxied error carries its class and text.
+type ProviderError struct {
+	SourceType model.SourceType
+	Op         string // "enumerate" or "fetch"
+	Err        error
+}
+
+func (e *ProviderError) Error() string {
+	return string(e.SourceType) + " provider " + e.Op + ": " + e.Err.Error()
+}
+
+// Unwrap exposes the provider's own error.
+func (e *ProviderError) Unwrap() error { return e.Err }
+
+// IsProviderError reports whether err is, or wraps, a *ProviderError.
+func IsProviderError(err error) bool {
+	var pe *ProviderError
+	return errors.As(err, &pe)
 }

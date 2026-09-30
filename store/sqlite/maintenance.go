@@ -49,9 +49,9 @@ func (s *Store) IntegrityCheck(ctx context.Context) ([]string, error) {
 }
 
 // PruneChangeLog trims the change_log to its newest keep rows, returning how many
-// were deleted. Consumers that fall behind the retained horizon must full-resync
-// (the documented delta-sync contract); keeping a bounded tail stops the log from
-// growing without limit. keep must be positive.
+// were deleted. A consumer whose cursor falls behind the retained horizon gets
+// CodeNotFound from ChangesSince and full-resyncs; keeping a bounded tail stops the log
+// from growing without limit. keep must be positive.
 func (s *Store) PruneChangeLog(ctx context.Context, keep int) (int, error) {
 	const op = "store.PruneChangeLog"
 	if keep <= 0 {

@@ -98,8 +98,10 @@ type Leaser interface {
 	// commit tail, which would otherwise throw the bytes away.
 	LeaseWait(ctx context.Context, fn func(context.Context) error) error
 	// LeaseImport runs fn holding both the user-tree and podcast leases, for the one
-	// verb that moves a file from an arbitrary source path into the podcast tree.
-	LeaseImport(ctx context.Context, fn func(context.Context) error) error
+	// verb that takes a file from an arbitrary source path into the podcast tree. move
+	// reports that the file leaves src, which the embedder may refuse, as WaxBin does
+	// for a src inside a library flagged read-only.
+	LeaseImport(ctx context.Context, src string, move bool, fn func(context.Context) error) error
 }
 
 const (
@@ -139,6 +141,15 @@ func (s *Service) podcastLibrary(ctx context.Context) (int64, error) {
 	}
 	s.libID = id
 	return id, nil
+}
+
+// ForgetLibrary drops the cached podcast-library id, so the next use resolves it
+// again. A maintenance hand-off calls it, since a restore or rebuild beneath the
+// hand-off can give the library another rowid.
+func (s *Service) ForgetLibrary() {
+	s.libMu.Lock()
+	defer s.libMu.Unlock()
+	s.libID = 0
 }
 
 // New builds a podcast service. The netsafe client is constructed from cfg's
@@ -194,11 +205,11 @@ func (s *Service) leaseWait(ctx context.Context, fn func(context.Context) error)
 
 // leaseImport runs fn holding both the user-tree and podcast leases, or inline when no
 // Leaser is injected.
-func (s *Service) leaseImport(ctx context.Context, fn func(context.Context) error) error {
+func (s *Service) leaseImport(ctx context.Context, src string, move bool, fn func(context.Context) error) error {
 	if s.cfg.Leaser == nil {
 		return fn(ctx)
 	}
-	return s.cfg.Leaser.LeaseImport(ctx, fn)
+	return s.cfg.Leaser.LeaseImport(ctx, src, move, fn)
 }
 
 // providerFor returns the provider that syncs a show of source type st, defaulting
@@ -248,7 +259,7 @@ func (s *Service) Add(ctx context.Context, feedURL string, opts AddOptions) (*mo
 // ingests the image, and upserts the show plus its episodes. A new subscription gets
 // the configured default retention. Re-adding an existing source is a sync. A
 // youtube source needs an injected provider; without it the call returns
-// CodeUnsupported.
+// CodeUnsupported. A provider's failure is a *source.ProviderError, as for Sync.
 func (s *Service) AddSource(ctx context.Context, url string, sourceType model.SourceType, opts AddOptions) (*model.Podcast, error) {
 	const op = "podcast.AddSource"
 	url = strings.TrimSpace(url)
@@ -260,11 +271,11 @@ func (s *Service) AddSource(ctx context.Context, url string, sourceType model.So
 		return nil, err
 	}
 	enum, err := prov.Enumerate(ctx, source.Request{URL: url, User: opts.User, Pass: opts.Pass})
-	if err != nil {
-		return nil, err
+	if err == nil {
+		err = checkEnumeration(op, enum, false)
 	}
-	if err := checkEnumeration(op, enum, false); err != nil {
-		return nil, err
+	if err != nil {
+		return nil, providerErr(ctx, op, prov, "enumerate", err)
 	}
 	key := enum.IdentityKey
 	if key == "" {
@@ -349,6 +360,10 @@ func (s *Service) AddEpisode(ctx context.Context, showPID model.PID, ep model.Fe
 // The show's cover is refreshed from the feed only when the feed's image URL differs
 // from where the cover it holds came from, and never while that cover is locked. Both
 // facts ride along on the PodcastByPID this already does, so neither costs a query.
+//
+// A failure of the provider itself comes back as a *source.ProviderError, and any
+// other error is the catalog's own. The type does not cross the proxy, which rebuilds a
+// plain waxerr from the class and text; no sync, add, or download verb is proxied.
 func (s *Service) Sync(ctx context.Context, podcastPID model.PID) (*model.UpsertFeedResult, error) {
 	res, unchanged, err := s.sync(ctx, podcastPID)
 	if err != nil {
@@ -387,11 +402,11 @@ func (s *Service) sync(ctx context.Context, podcastPID model.PID) (res *model.Up
 	enum, err := prov.Enumerate(ctx, source.Request{
 		URL: pod.FeedURL, User: user, Pass: pass, ETag: pod.ETag, LastModified: pod.LastModified,
 	})
-	if err != nil {
-		return nil, false, err
+	if err == nil {
+		err = checkEnumeration(op, enum, pod.ETag != "" || pod.LastModified != "")
 	}
-	if err := checkEnumeration(op, enum, pod.ETag != "" || pod.LastModified != ""); err != nil {
-		return nil, false, err
+	if err != nil {
+		return nil, false, providerErr(ctx, op, prov, "enumerate", err)
 	}
 	if enum.NotModified {
 		// The stored validators stay (a 304 echoes them at best); only the fetch time
@@ -402,6 +417,15 @@ func (s *Service) sync(ctx context.Context, podcastPID model.PID) (res *model.Up
 	// not re-fetched/re-decoded and a locked one is not fetched at all.
 	res, err = s.upsert(ctx, pod.FeedURL, pod.IdentityKey, st, enum, pod.CoverSourceURL, pod.CoverLocked)
 	return res, false, err
+}
+
+// providerErr marks err as prov's failure at provOp. A call whose context ended is the
+// caller's cancellation whatever the provider made of it, so it is not marked.
+func providerErr(ctx context.Context, op string, prov source.Provider, provOp string, err error) error {
+	if ctx.Err() != nil {
+		return waxerr.Classify(waxerr.CodeCanceled, op, err)
+	}
+	return &source.ProviderError{SourceType: prov.SourceType(), Op: provOp, Err: err}
 }
 
 // checkEnumeration refuses the answers the provider contract rules out: no
@@ -418,27 +442,43 @@ func checkEnumeration(op string, enum *source.Enumeration, conditional bool) err
 	return nil
 }
 
-// SyncAll syncs every subscribed podcast, returning the per-podcast results. A
-// failed feed is logged and skipped so one dead feed does not abort the batch. The
-// shows that answered NotModified are marked fetched in one write at the end rather
-// than one write transaction per unchanged feed.
-func (s *Service) SyncAll(ctx context.Context) (map[model.PID]*model.UpsertFeedResult, error) {
+// SyncAllResult reports a SyncAll pass: the result of each show that synced, and the
+// error of each that did not, as Sync would have returned it.
+type SyncAllResult struct {
+	Results  map[model.PID]*model.UpsertFeedResult
+	Failures map[model.PID]error
+}
+
+// SyncAll syncs every subscribed podcast. A show that fails is reported in Failures
+// and the batch moves on, so one dead feed does not stop the rest; the error return is
+// the batch's own failure (a cancellation, or the final fetch-time write), and comes
+// with what the batch had done by then. The shows that answered NotModified are marked
+// fetched in one write at the end rather than one write transaction per unchanged
+// feed.
+func (s *Service) SyncAll(ctx context.Context) (*SyncAllResult, error) {
+	const op = "podcast.SyncAll"
 	pods, err := s.store.Podcasts(ctx)
 	if err != nil {
 		return nil, err
 	}
-	out := make(map[model.PID]*model.UpsertFeedResult, len(pods))
+	out := &SyncAllResult{
+		Results:  make(map[model.PID]*model.UpsertFeedResult, len(pods)),
+		Failures: map[model.PID]error{},
+	}
 	var unchanged []model.PID
 	for _, p := range pods {
 		if ctx.Err() != nil {
-			return out, waxerr.FromContext("podcast.SyncAll", ctx.Err(), waxerr.CodeCanceled)
+			return out, waxerr.FromContext(op, ctx.Err(), waxerr.CodeCanceled)
 		}
 		res, notModified, err := s.sync(ctx, p.PID)
 		if err != nil {
-			s.log.Warn("podcast sync failed", "podcast", p.Title, "err", err)
+			if ctx.Err() != nil {
+				return out, waxerr.FromContext(op, ctx.Err(), waxerr.CodeCanceled)
+			}
+			out.Failures[p.PID] = err
 			continue
 		}
-		out[p.PID] = res
+		out.Results[p.PID] = res
 		if notModified {
 			unchanged = append(unchanged, p.PID)
 		}

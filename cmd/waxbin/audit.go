@@ -109,6 +109,9 @@ type auditFindingView struct {
 	Message   string   `json:"message"`
 	Entities  []string `json:"entities,omitempty"`
 	Path      string   `json:"path,omitempty"`
+	FilePID   string   `json:"filePid,omitempty"`
+	HeaderMS  *int64   `json:"headerMs,omitempty"`
+	DecodedMS *int64   `json:"decodedMs,omitempty"`
 	MergeType string   `json:"mergeType,omitempty"`
 }
 
@@ -126,14 +129,20 @@ func toAuditView(rep *audit.Report) auditView {
 		for _, e := range f.Entities {
 			ents = append(ents, string(e))
 		}
-		fs = append(fs, auditFindingView{
+		v := auditFindingView{
 			Check:     string(f.Check),
 			Severity:  string(f.Severity),
 			Message:   f.Message,
 			Entities:  ents,
 			Path:      f.Path,
+			FilePID:   string(f.FilePID),
 			MergeType: string(f.MergeType),
-		})
+		}
+		// A mismatch always has a header length, and its decoded length may be zero.
+		if f.HeaderMS > 0 {
+			v.HeaderMS, v.DecodedMS = &f.HeaderMS, &f.DecodedMS
+		}
+		fs = append(fs, v)
 	}
 	return auditView{Findings: fs, Errors: rep.Errors(), Warnings: rep.Warnings(), FilesChecked: rep.FilesChecked}
 }

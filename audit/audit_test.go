@@ -79,7 +79,7 @@ func (f *fakeStore) FileDiagnostics(context.Context, model.DiagnosticFilter) ([]
 func (f *fakeStore) DiagnosticCoverage(context.Context) (int, int, error) {
 	return f.diagStale, f.diagTotal, nil
 }
-func (f *fakeStore) FilesDurationMismatch(_ context.Context, limit int) ([]model.FileDurationMismatch, int, error) {
+func (f *fakeStore) FilesDurationMismatch(_ context.Context, limit, _ int) ([]model.FileDurationMismatch, int, error) {
 	if len(f.mismatches) > limit {
 		return f.mismatches[:limit], f.mismatchTot, nil
 	}
@@ -145,11 +145,11 @@ func TestAuditFileChecks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := findingsFor(rep, model.CheckBadFilename); len(got) != 1 || got[0].Path != "/lib/al/what?.flac" {
-		t.Errorf("bad filename findings = %+v", got)
+	if got := findingsFor(rep, model.CheckBadFilename); len(got) != 1 || got[0].Path != "/lib/al/what?.flac" || got[0].FilePID != "f4" {
+		t.Errorf("bad filename findings = %+v, want f4", got)
 	}
-	if got := findingsFor(rep, model.CheckOrphanSidecar); len(got) != 1 || got[0].Path != "/lib/stray/notes.lrc" {
-		t.Errorf("orphan sidecar findings = %+v", got)
+	if got := findingsFor(rep, model.CheckOrphanSidecar); len(got) != 1 || got[0].Path != "/lib/stray/notes.lrc" || got[0].FilePID != "f3" {
+		t.Errorf("orphan sidecar findings = %+v, want f3", got)
 	}
 	pc := findingsFor(rep, model.CheckPathConflict)
 	if len(pc) != 1 || pc[0].Severity != model.SeverityError {
@@ -213,16 +213,24 @@ func TestAuditIntegrity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	byPath := map[string]model.PID{bitrot: "f2", "gone.flac": "f3"}
 	// bitrot (hash mismatch) + gone (missing) = 2 integrity errors.
-	if got := findingsFor(rep, model.CheckIntegrity); len(got) != 2 {
+	got := findingsFor(rep, model.CheckIntegrity)
+	if len(got) != 2 {
 		t.Errorf("integrity findings = %+v, want 2", got)
 	}
 	if rep.FilesChecked != 3 {
 		t.Errorf("FilesChecked = %d, want 3", rep.FilesChecked)
 	}
 	// good.flac probes clean; the other two (a missing file and bitrot) fail the probe.
-	if got := findingsFor(rep, model.CheckCorruptAudio); len(got) != 2 {
-		t.Errorf("corrupt findings = %+v, want 2", got)
+	corrupt := findingsFor(rep, model.CheckCorruptAudio)
+	if len(corrupt) != 2 {
+		t.Errorf("corrupt findings = %+v, want 2", corrupt)
+	}
+	for _, f := range append(got, corrupt...) {
+		if f.FilePID != byPath[f.Path] {
+			t.Errorf("%s finding for %s names file %q, want %q", f.Check, f.Path, f.FilePID, byPath[f.Path])
+		}
 	}
 }
 
@@ -412,11 +420,11 @@ func TestAuditCanceledProbeIsNotCorruption(t *testing.T) {
 func TestAuditCorruptDiagnosticsFromEveryWriter(t *testing.T) {
 	st := &fakeStore{
 		diags: []model.FileDiagnostic{
-			{DisplayPath: "/lib/a.flac", Origin: model.OriginAnalyze, Code: model.DiagCorruptAudio,
+			{FilePID: "f1", DisplayPath: "/lib/a.flac", Origin: model.OriginAnalyze, Code: model.DiagCorruptAudio,
 				Severity: model.SeverityWarn, Detail: "STREAMINFO declares 160000 samples but the frames end at 45056"},
-			{DisplayPath: "/lib/b.m4a", Origin: model.OriginAnalyze, Code: model.DiagCorruptAudio,
+			{FilePID: "f2", DisplayPath: "/lib/b.m4a", Origin: model.OriginAnalyze, Code: model.DiagCorruptAudio,
 				Severity: model.SeverityError, Detail: "mp4: fragment sample runs past end of source"},
-			{DisplayPath: "/lib/b.m4a", Origin: model.OriginScan, Code: model.DiagCorruptAudio,
+			{FilePID: "f2", DisplayPath: "/lib/b.m4a", Origin: model.OriginScan, Code: model.DiagCorruptAudio,
 				Severity: model.SeverityWarn, Detail: "truncated audio"},
 		},
 		files: []model.AuditFileInfo{
@@ -440,11 +448,15 @@ func TestAuditCorruptDiagnosticsFromEveryWriter(t *testing.T) {
 		t.Errorf("probed %q, want only c.wv (the others are on record)", probed)
 	}
 	sev := map[string]model.AuditSeverity{}
+	files := map[string]model.PID{"/lib/a.flac": "f1", "/lib/b.m4a": "f2", "/lib/c.wv": "f3"}
 	for _, f := range findingsFor(rep, model.CheckCorruptAudio) {
 		if _, dup := sev[f.Path]; dup {
 			t.Errorf("%s reported twice", f.Path)
 		}
 		sev[f.Path] = f.Severity
+		if f.FilePID != files[f.Path] {
+			t.Errorf("%s names file %q, want %q", f.Path, f.FilePID, files[f.Path])
+		}
 	}
 	want := map[string]model.AuditSeverity{
 		"/lib/a.flac": model.SeverityWarn, "/lib/b.m4a": model.SeverityError, "/lib/c.wv": model.SeverityError,
@@ -483,11 +495,16 @@ func TestAuditDurationMismatch(t *testing.T) {
 		!strings.Contains(fs[0].Message, "2:48") || !strings.Contains(fs[0].Message, "4:00") {
 		t.Errorf("per-file finding = %+v, want a warn naming both lengths", fs[0])
 	}
-	if !strings.Contains(fs[1].Message, "1:00") || !strings.Contains(fs[1].Message, "1:40") {
-		t.Errorf("per-file finding = %+v, want both lengths", fs[1])
+	if fs[0].FilePID != "f1" || fs[0].HeaderMS != 168_000 || fs[0].DecodedMS != 240_000 {
+		t.Errorf("per-file finding = %+v, want f1 at 168000 ms header, 240000 ms decoded", fs[0])
 	}
-	if !strings.Contains(fs[2].Message, "7 files") || !strings.Contains(fs[2].Message, "2 shown") {
-		t.Errorf("roll-up = %q, want the total and the sample size", fs[2].Message)
+	if !strings.Contains(fs[1].Message, "1:00") || !strings.Contains(fs[1].Message, "1:40") ||
+		fs[1].FilePID != "f2" || fs[1].HeaderMS != 60_000 || fs[1].DecodedMS != 100_500 {
+		t.Errorf("per-file finding = %+v, want f2 and both lengths", fs[1])
+	}
+	if !strings.Contains(fs[2].Message, "7 files") || !strings.Contains(fs[2].Message, "2 shown") ||
+		fs[2].FilePID != "" || fs[2].HeaderMS != 0 || fs[2].DecodedMS != 0 {
+		t.Errorf("roll-up = %+v, want the total and the sample size and no file", fs[2])
 	}
 
 	st.mismatchTot = 2
@@ -498,6 +515,21 @@ func TestAuditDurationMismatch(t *testing.T) {
 	}
 	if fs := findingsFor(rep, model.CheckDurationMismatch); len(fs) != 2 {
 		t.Errorf("uncapped sample = %d findings, want 2 and no roll-up", len(fs))
+	}
+}
+
+// TestAuditFileDiagnosticNamesTheFile: a stored diagnostic's finding carries the file it
+// was recorded against.
+func TestAuditFileDiagnosticNamesTheFile(t *testing.T) {
+	st := &fakeStore{diags: []model.FileDiagnostic{{FilePID: "f9", DisplayPath: "/lib/a.ogg",
+		Origin: model.OriginScan, Code: model.DiagUnsupportedFormat, Severity: model.SeverityWarn}}}
+	rep, err := New(st, nil, nil, nil).Run(context.Background(), Config{Only: []model.AuditCheck{model.CheckFileDiagnostic}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fs := findingsFor(rep, model.CheckFileDiagnostic)
+	if len(fs) != 1 || fs[0].FilePID != "f9" || fs[0].Path != "/lib/a.ogg" {
+		t.Fatalf("file diagnostic findings = %+v, want one naming f9", fs)
 	}
 }
 

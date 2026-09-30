@@ -8,17 +8,21 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/colespringer/waxbin"
 	"github.com/colespringer/waxbin/config"
+	"github.com/colespringer/waxbin/enrich"
 	"github.com/colespringer/waxbin/internal/testaudio"
 	"github.com/colespringer/waxbin/internal/testsock"
 	"github.com/colespringer/waxbin/meta"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/podcast"
+	"github.com/colespringer/waxbin/port"
 	"github.com/colespringer/waxbin/proxy"
 	"github.com/colespringer/waxbin/query"
 	"github.com/colespringer/waxbin/read"
@@ -1016,9 +1020,10 @@ func TestServeProxiedError(t *testing.T) {
 	}
 }
 
-// TestMaintenanceHandoffReopen exercises the A6b maintenance-mode cycle: the server
-// yields the lock, a foreground process opens the catalog directly and writes, then
-// the server reopens and sees the write.
+// TestMaintenanceHandoffReopen drives the hand-off a foreground command takes from a
+// running server: the server announces the suspend and the reopen to its host, the
+// reopen lands the catalog row at the head of the feed, DataVersion moves even when
+// nothing was written, and a proxied request waits for the host's reopen hook.
 func TestMaintenanceHandoffReopen(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
@@ -1026,17 +1031,69 @@ func TestMaintenanceHandoffReopen(t *testing.T) {
 	sock := testsock.Path(t)
 	writeFile(t, filepath.Join(root, "song.mp3"), testaudio.BuildMP3("Original", "Old Artist", "Album", 1))
 
-	lib := openServed(t, ctx, db, root, sock)
+	type reopened struct {
+		seq, head int64
+		err       error
+	}
+	var (
+		lib      *waxbin.Library
+		suspends atomic.Int32
+		block    atomic.Bool
+	)
+	reopens := make(chan reopened, 4)
+	entered, release := make(chan struct{}, 1), make(chan struct{})
+	lib, err := waxbin.Open(ctx, waxbin.Options{
+		DBPath:    db,
+		Roots:     []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}},
+		IPCSocket: sock,
+		OnSuspend: func(context.Context) { suspends.Add(1) },
+		OnReopen: func(ctx context.Context, ev waxbin.ReopenEvent) {
+			head, err := lib.LatestChangeSeq(ctx)
+			if _, uerr := lib.Users(ctx); uerr != nil {
+				err = uerr
+			}
+			reopens <- reopened{ev.Seq, head, err}
+			if block.Load() {
+				entered <- struct{}{}
+				<-release
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("open served library: %v", err)
+	}
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		_ = lib.Close()
+		t.Fatalf("scan: %v", err)
+	}
+	serveLib(t, ctx, lib, sock)
 	c := dialWhenReady(t, sock)
+	expectReopen := func(step string) {
+		t.Helper()
+		select {
+		case r := <-reopens:
+			if r.err != nil || r.seq == 0 || r.seq != r.head {
+				t.Fatalf("%s: reopen hook saw seq %d, head %d (err %v), want the head read inside the hook", step, r.seq, r.head, r.err)
+			}
+		default:
+			t.Fatalf("%s: the reopen hook did not fire", step)
+		}
+		if len(reopens) != 0 {
+			t.Fatalf("%s: the reopen hook fired more than once", step)
+		}
+	}
 
 	dvBefore, err := lib.DataVersion(ctx)
 	if err != nil {
 		t.Fatalf("data version: %v", err)
 	}
 
-	// Hand off: the server closes and releases the lock.
+	// Hand off: the server tells its host, then closes and releases the lock.
 	if err := c.MaintenanceBegin(ctx); err != nil {
 		t.Fatalf("maintenance begin: %v", err)
+	}
+	if n := suspends.Load(); n != 1 {
+		t.Fatalf("suspend hook fired %d times before the foreground open, want once", n)
 	}
 
 	// A direct read-write open now succeeds, proving the lock was released.
@@ -1055,10 +1112,11 @@ func TestMaintenanceHandoffReopen(t *testing.T) {
 		t.Fatalf("close foreground lib: %v", err)
 	}
 
-	// End maintenance: the server reopens and reacquires the lock.
+	// End maintenance: the server reopens, reacquires the lock, and tells its host.
 	if err := c.MaintenanceEnd(ctx); err != nil {
 		t.Fatalf("maintenance end: %v", err)
 	}
+	expectReopen("first hand-off")
 
 	// The reopened server sees the foreground write.
 	users, err := lib.Users(ctx)
@@ -1078,6 +1136,54 @@ func TestMaintenanceHandoffReopen(t *testing.T) {
 	}
 	if users, _ := lib.Users(ctx); !hasUsernamed(users, "AfterReopen") {
 		t.Fatalf("users = %+v, want AfterReopen", users)
+	}
+
+	// A hand-off with nothing written in between still moves DataVersion, since the
+	// poller cannot tell a quiet hand-off from one that wrote.
+	dvQuiet, err := lib.DataVersion(ctx)
+	if err != nil {
+		t.Fatalf("data version: %v", err)
+	}
+	if err := c.MaintenanceBegin(ctx); err != nil {
+		t.Fatalf("second maintenance begin: %v", err)
+	}
+	if err := c.MaintenanceEnd(ctx); err != nil {
+		t.Fatalf("second maintenance end: %v", err)
+	}
+	expectReopen("quiet hand-off")
+	if dv, err := lib.DataVersion(ctx); err != nil || dv == dvQuiet {
+		t.Fatalf("data version after a quiet hand-off = %d (err %v), want != %d", dv, err, dvQuiet)
+	}
+
+	// A proxied request issued while the reopen hook runs waits for it.
+	block.Store(true)
+	c2 := dialWhenReady(t, sock)
+	if err := c.MaintenanceBegin(ctx); err != nil {
+		t.Fatalf("third maintenance begin: %v", err)
+	}
+	ended := make(chan error, 1)
+	go func() { ended <- c.MaintenanceEnd(ctx) }()
+	<-entered
+	answered := make(chan error, 1)
+	go func() {
+		_, err := c2.Users(ctx)
+		answered <- err
+	}()
+	select {
+	case err := <-answered:
+		t.Fatalf("a proxied request was answered while the reopen hook ran (err %v)", err)
+	case <-time.After(150 * time.Millisecond):
+	}
+	close(release)
+	if err := <-ended; err != nil {
+		t.Fatalf("third maintenance end: %v", err)
+	}
+	if err := <-answered; err != nil {
+		t.Fatalf("proxied request after the hook: %v", err)
+	}
+	expectReopen("blocked hand-off")
+	if n := suspends.Load(); n != 3 {
+		t.Fatalf("suspend hook fired %d times over three hand-offs", n)
 	}
 }
 
@@ -1228,13 +1334,31 @@ func TestSubscriberSurvivesMaintenance(t *testing.T) {
 	if err != nil {
 		t.Fatalf("foreground open: %v", err)
 	}
-	if _, err := lib2.CreateUser(ctx, "fg"); err != nil {
+	fgUser, err := lib2.CreateUser(ctx, "fg")
+	if err != nil {
 		_ = lib2.Close()
 		t.Fatalf("foreground mutation: %v", err)
 	}
 	_ = lib2.Close()
 	if err := c.MaintenanceEnd(ctx); err != nil {
 		t.Fatalf("maintenance end: %v", err)
+	}
+	// The foreground write came from another process, so nothing here published it; the
+	// reopen does, and the catalog is the same one, so it writes no catalog row.
+	var got []model.Change
+	for quiet := false; !quiet; {
+		select {
+		case ch, ok := <-ch:
+			if !ok {
+				t.Fatal("subscription channel was closed by the maintenance hand-off")
+			}
+			got = append(got, ch)
+		case <-time.After(200 * time.Millisecond):
+			quiet = true
+		}
+	}
+	if len(got) != 1 || got[0].EntityType != "user" || got[0].EntityPID != fgUser.PID {
+		t.Fatalf("rows the reopen published = %+v, want the foreground's user row alone", got)
 	}
 
 	// A write through the reopened server library must still publish to the
@@ -1249,6 +1373,167 @@ func TestSubscriberSurvivesMaintenance(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("no change delivered after maintenance; the subscription was lost")
+	}
+}
+
+// TestRestoreUnderMaintenanceServesTheRestoredCatalog: a restore taken through the
+// hand-off replaces the catalog beneath a running server, which then serves the restored
+// file. Its users are the backup's, a feed cursor from the old catalog is refused, the
+// host hears of the reopen, and the podcast service forgets the library rowid it cached,
+// so a later import lands in the restored podcast library rather than in whatever row
+// the old id names there (here, a user library).
+func TestRestoreUnderMaintenanceServesTheRestoredCatalog(t *testing.T) {
+	ctx := context.Background()
+	podDir := t.TempDir()
+	importEpisode := func(lib *waxbin.Library, show model.PID, guid string) model.PID {
+		t.Helper()
+		ep, err := lib.Podcasts().AddEpisode(ctx, show, model.FeedEpisode{Title: guid, GUID: guid}, true)
+		if err != nil {
+			t.Fatalf("add episode %s: %v", guid, err)
+		}
+		src := filepath.Join(t.TempDir(), guid+".mp3")
+		writeFile(t, src, testaudio.BuildMP3WithAudio(guid, "Host", "Show", 1, testaudio.AudioWithSeed(byte(len(guid)))))
+		res, err := lib.Podcasts().ImportEpisodeFile(ctx, ep.EpisodePID, src, false)
+		if err != nil {
+			t.Fatalf("import episode %s: %v", guid, err)
+		}
+		return res.FilePID
+	}
+	podcastLibraryID := func(lib *waxbin.Library) int64 {
+		t.Helper()
+		libs, err := lib.Libraries(ctx)
+		if err != nil {
+			t.Fatalf("libraries: %v", err)
+		}
+		for _, l := range libs {
+			if l.Mode == model.ModePodcast {
+				return l.ID
+			}
+		}
+		t.Fatal("no podcast library")
+		return 0
+	}
+
+	// Backup B: two user libraries, then the podcast library, whose row is 3.
+	libB, err := waxbin.Open(ctx, waxbin.Options{
+		DBPath: filepath.Join(t.TempDir(), "b.db"),
+		Roots: []config.Root{
+			{Path: t.TempDir(), Mode: model.ModeManaged, Profile: "waxbin-native"},
+			{Path: t.TempDir(), Mode: model.ModeManaged, Profile: "waxbin-native"},
+		},
+		Podcasts: config.PodcastConfig{Dir: podDir},
+	})
+	if err != nil {
+		t.Fatalf("open b: %v", err)
+	}
+	if _, err := libB.CreateUser(ctx, "FromB"); err != nil {
+		t.Fatalf("create user in b: %v", err)
+	}
+	showB, err := libB.Podcasts().AddManual(ctx, "Show B", podcast.ManualOptions{})
+	if err != nil {
+		t.Fatalf("add show in b: %v", err)
+	}
+	importEpisode(libB, showB.PID, "b1")
+	if id := podcastLibraryID(libB); id != 3 {
+		t.Fatalf("b's podcast library row = %d, want 3", id)
+	}
+	backup := filepath.Join(t.TempDir(), "backup.db")
+	if err := libB.Backup(ctx, backup, false); err != nil {
+		t.Fatalf("backup b: %v", err)
+	}
+	if err := libB.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Catalog A, served: one user library, then the podcast library at row 2, which an
+	// import leaves cached in the podcast service.
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	sock := testsock.Path(t)
+	writeFile(t, filepath.Join(root, "song.mp3"), testaudio.BuildMP3("Original", "Artist", "Album", 1))
+	var reopens atomic.Int32
+	var reopenSeq atomic.Int64
+	var replaced atomic.Bool
+	lib, err := waxbin.Open(ctx, waxbin.Options{
+		DBPath:    db,
+		Roots:     []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}},
+		IPCSocket: sock,
+		Podcasts:  config.PodcastConfig{Dir: podDir},
+		OnReopen: func(_ context.Context, ev waxbin.ReopenEvent) {
+			reopens.Add(1)
+			reopenSeq.Store(ev.Seq)
+			replaced.Store(ev.Replaced)
+		},
+	})
+	if err != nil {
+		t.Fatalf("open a: %v", err)
+	}
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		_ = lib.Close()
+		t.Fatalf("scan a: %v", err)
+	}
+	for i := 0; i < 40; i++ {
+		if _, err := lib.CreateUser(ctx, fmt.Sprintf("FromA%d", i)); err != nil {
+			_ = lib.Close()
+			t.Fatalf("create user in a: %v", err)
+		}
+	}
+	showA, err := lib.Podcasts().AddManual(ctx, "Show A", podcast.ManualOptions{})
+	if err != nil {
+		_ = lib.Close()
+		t.Fatalf("add show in a: %v", err)
+	}
+	importEpisode(lib, showA.PID, "a1")
+	if id := podcastLibraryID(lib); id != 2 {
+		_ = lib.Close()
+		t.Fatalf("a's podcast library row = %d, want 2", id)
+	}
+	serveLib(t, ctx, lib, sock)
+	c := dialWhenReady(t, sock)
+	cursor, err := lib.LatestChangeSeq(ctx)
+	if err != nil {
+		t.Fatalf("latest seq: %v", err)
+	}
+
+	if err := c.MaintenanceBegin(ctx); err != nil {
+		t.Fatalf("maintenance begin: %v", err)
+	}
+	if err := port.Restore(ctx, backup, db, true); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	if err := c.MaintenanceEnd(ctx); err != nil {
+		t.Fatalf("maintenance end: %v", err)
+	}
+
+	users, err := lib.Users(ctx)
+	if err != nil {
+		t.Fatalf("users: %v", err)
+	}
+	if !hasUsernamed(users, "FromB") || hasUsernamed(users, "FromA0") {
+		t.Fatalf("users after the restore = %+v, want b's", users)
+	}
+	head, err := lib.LatestChangeSeq(ctx)
+	if err != nil {
+		t.Fatalf("latest seq: %v", err)
+	}
+	if reopens.Load() != 1 || reopenSeq.Load() != head || !replaced.Load() {
+		t.Fatalf("reopen hook fired %d times at seq %d (replaced %v), want once at the head %d with the catalog replaced",
+			reopens.Load(), reopenSeq.Load(), replaced.Load(), head)
+	}
+	if rows, err := lib.Changes(ctx, head-1); err != nil || len(rows) != 1 || rows[0].EntityType != model.ChangeCatalog {
+		t.Fatalf("head row = %+v (err %v), want the catalog row", rows, err)
+	}
+	if _, err := lib.Changes(ctx, cursor); !waxerr.Is(err, waxerr.CodeNotFound) {
+		t.Fatalf("changes from a's cursor %d over b's head %d = %v, want CodeNotFound", cursor, head, err)
+	}
+
+	filePID := importEpisode(lib, showB.PID, "b2")
+	f, err := lib.File(ctx, filePID)
+	if err != nil {
+		t.Fatalf("file: %v", err)
+	}
+	if want := podcastLibraryID(lib); f.LibraryID != want {
+		t.Fatalf("episode imported after the restore landed in library %d, want b's podcast library %d", f.LibraryID, want)
 	}
 }
 
@@ -1539,5 +1824,219 @@ func TestServeAcquisitionCuration(t *testing.T) {
 	}
 	if !locked {
 		t.Error("a proxied bare clear left the acquisition field unlocked")
+	}
+}
+
+// TestSuspendHookJobRefusesTheHandoff: a job the host starts while its suspend hook
+// runs is seen before the store closes, so the hand-off is refused rather than
+// crashing the job, and the host hears it can resume.
+func TestSuspendHookJobRefusesTheHandoff(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "a.mp3"), testaudio.BuildMP3("One", "Artist", "Album", 1))
+	asked, release := make(chan struct{}, 1), make(chan struct{})
+	blocking := &enrich.Mock{ProviderName: "slow", Caps: enrich.CapLyrics,
+		EnrichFunc: func(context.Context, enrich.Request) (*enrich.Candidate, error) {
+			asked <- struct{}{}
+			<-release
+			return nil, nil
+		}}
+	var (
+		lib     *waxbin.Library
+		jobPID  model.PID
+		reopens atomic.Int32
+	)
+	lib, err := waxbin.Open(ctx, waxbin.Options{
+		DBPath:              filepath.Join(t.TempDir(), "catalog.db"),
+		Roots:               []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}},
+		EnrichmentProviders: []enrich.Provider{blocking},
+		OnSuspend: func(ctx context.Context) {
+			if pid, err := lib.StartEnrich(ctx, waxbin.EnrichOptions{}); err == nil {
+				jobPID = pid
+				<-asked
+			}
+		},
+		OnReopen: func(context.Context, waxbin.ReopenEvent) { reopens.Add(1) },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lib.Close()
+	scanLib(t, ctx, lib)
+
+	err = lib.BeginMaintenance(ctx)
+	close(release)
+	if !waxerr.Is(err, waxerr.CodeConflict) {
+		t.Fatalf("hand-off with a job started in the hook = %v, want CodeConflict", err)
+	}
+	if n := reopens.Load(); n != 1 {
+		t.Fatalf("reopen hook fired %d times after the refusal, want once so the host resumes", n)
+	}
+	waitForJobDone(t, ctx, lib, jobPID)
+}
+
+// TestCanceledRefusalStillResumesTheHost: a hand-off refused because its context was
+// canceled during OnSuspend still answers the hook, from the head read before it.
+func TestCanceledRefusalStillResumesTheHost(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var seqs []int64
+	lib, err := waxbin.Open(context.Background(), waxbin.Options{
+		DBPath:    filepath.Join(t.TempDir(), "catalog.db"),
+		OnSuspend: func(context.Context) { cancel() },
+		OnReopen:  func(_ context.Context, ev waxbin.ReopenEvent) { seqs = append(seqs, ev.Seq) },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lib.Close()
+	head, err := lib.LatestChangeSeq(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := lib.BeginMaintenance(ctx); err == nil {
+		t.Fatal("a hand-off whose context was canceled in the hook went ahead")
+	}
+	if len(seqs) != 1 || seqs[0] != head {
+		t.Fatalf("reopen hook ran with %v, want once at the head %d", seqs, head)
+	}
+	if _, err := lib.Users(context.Background()); err != nil {
+		t.Fatalf("library after the refused hand-off: %v", err)
+	}
+}
+
+// TestUnannouncedReopenIsFinishedLater: a reopen that fails after the store came back
+// owes the host its hook. The next Reopen, or the next hand-off before it suspends,
+// finishes it, so each OnSuspend is answered before another begins.
+func TestUnannouncedReopenIsFinishedLater(t *testing.T) {
+	ctx := context.Background()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	var hooks []string
+	lib, err := waxbin.Open(ctx, waxbin.Options{
+		DBPath:    db,
+		OnSuspend: func(context.Context) { hooks = append(hooks, "suspend") },
+		OnReopen: func(_ context.Context, ev waxbin.ReopenEvent) {
+			hooks = append(hooks, fmt.Sprintf("reopen replaced=%v", ev.Replaced))
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lib.Close()
+
+	// A restore renames another file into place, one that refuses the catalog row.
+	if err := lib.BeginMaintenance(ctx); err != nil {
+		t.Fatal(err)
+	}
+	blob, err := os.ReadFile(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(db+".new", blob, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rawExec(t, db+".new", `CREATE TRIGGER refuse_catalog BEFORE INSERT ON change_log
+		WHEN NEW.entity_type = 'catalog' BEGIN SELECT RAISE(ABORT, 'refused'); END`)
+	if err := os.Rename(db+".new", db); err != nil {
+		t.Fatal(err)
+	}
+	if err := lib.Reopen(ctx); err == nil {
+		t.Fatal("reopen wrote its catalog row through the trigger")
+	}
+	if want := []string{"suspend"}; !slices.Equal(hooks, want) {
+		t.Fatalf("hooks after the failed reopen = %q, want %q", hooks, want)
+	}
+	rawExec(t, db, "DROP TRIGGER refuse_catalog")
+
+	if err := lib.BeginMaintenance(ctx); err != nil {
+		t.Fatalf("hand-off after the failed reopen: %v", err)
+	}
+	if err := lib.EndMaintenance(ctx); err != nil {
+		t.Fatalf("end maintenance: %v", err)
+	}
+	want := []string{"suspend", "reopen replaced=true", "suspend", "reopen replaced=false"}
+	if !slices.Equal(hooks, want) {
+		t.Fatalf("hooks = %q, want %q", hooks, want)
+	}
+	head, err := lib.LatestChangeSeq(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, err := lib.Changes(ctx, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalogRows := 0
+	for _, r := range rows {
+		if r.EntityType == model.ChangeCatalog {
+			catalogRows++
+		}
+	}
+	if catalogRows != 1 || head == 0 {
+		t.Fatalf("catalog rows = %d at head %d, want the one the finished reopen wrote", catalogRows, head)
+	}
+}
+
+// TestReopenOfAnOpenLibraryAnnouncesNothing: Reopen on a library that was never
+// suspended changes nothing, so it writes no catalog row and runs no hook, which would
+// otherwise send every consumer through a full reload.
+func TestReopenOfAnOpenLibraryAnnouncesNothing(t *testing.T) {
+	ctx := context.Background()
+	var reopens atomic.Int32
+	lib, err := waxbin.Open(ctx, waxbin.Options{
+		DBPath:   filepath.Join(t.TempDir(), "catalog.db"),
+		OnReopen: func(context.Context, waxbin.ReopenEvent) { reopens.Add(1) },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lib.Close()
+	head, err := lib.LatestChangeSeq(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := lib.Reopen(ctx); err != nil {
+		t.Fatalf("reopen of an open library: %v", err)
+	}
+	if now, err := lib.LatestChangeSeq(ctx); err != nil || now != head || reopens.Load() != 0 {
+		t.Fatalf("head %d -> %d (err %v), hook fired %d times; want nothing announced", head, now, err, reopens.Load())
+	}
+}
+
+// TestDroppedHandoffStillAnnouncesTheReopen: a client that dies holding the hand-off
+// reopens the server through the crash path, which runs the same reopen hook. The
+// catalog is the one it suspended, so no catalog row is written.
+func TestDroppedHandoffStillAnnouncesTheReopen(t *testing.T) {
+	ctx := context.Background()
+	sock := testsock.Path(t)
+	var reopens atomic.Int32
+	var replaced atomic.Bool
+	lib, err := waxbin.Open(ctx, waxbin.Options{
+		DBPath: filepath.Join(t.TempDir(), "catalog.db"), IPCSocket: sock,
+		OnReopen: func(_ context.Context, ev waxbin.ReopenEvent) {
+			replaced.Store(ev.Replaced)
+			reopens.Add(1)
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	serveLib(t, ctx, lib, sock)
+	head, err := lib.LatestChangeSeq(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := dialWhenReady(t, sock)
+	if err := c.MaintenanceBegin(ctx); err != nil {
+		t.Fatalf("maintenance begin: %v", err)
+	}
+	_ = c.Close()
+	for deadline := time.Now().Add(5 * time.Second); reopens.Load() == 0; time.Sleep(5 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("the server did not reopen after the client dropped the hand-off")
+		}
+	}
+	if rows, err := lib.Changes(ctx, head); err != nil || len(rows) != 0 || replaced.Load() {
+		t.Fatalf("changes after the drop = %+v (err %v), replaced %v; want none and the catalog kept", rows, err, replaced.Load())
 	}
 }

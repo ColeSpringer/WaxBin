@@ -20,6 +20,13 @@ type Library struct {
 	Media     MediaType
 	Profile   string // organization profile name
 	CreatedAt int64  // unix nanoseconds
+	// ReadOnly keeps WaxBin from writing anything under the root: no tag write-back,
+	// organize move, import into or out of it, delete, or trash restore or purge. A file
+	// an import would route here waits where it is rather than going to another library.
+	// The catalog still records edits. Enrichment and ReplayGain values stay owed and are
+	// written by the first pass after the flag clears; an edit's refused write-back is
+	// listed for review as unsynced and has to be made again.
+	ReadOnly bool
 }
 
 // MediaType returns the library's media type, defaulting to mixed when unset so an
@@ -459,3 +466,14 @@ type Change struct {
 	EntityPID  PID
 	Op         ChangeOp
 }
+
+// ChangeCatalog is the EntityType of the row a maintenance hand-off appends, with no
+// EntityPID, as the last step of reopening a catalog that is not the one it suspended:
+// another file at the path, as after a restore, or a feed that no longer runs on from
+// where it stopped. The whole catalog may have changed underneath a consumer, so on
+// reading it a consumer drops everything it derived, reloads, and resumes from the
+// row's Seq. When the new log is at least as long as the consumer's cursor, the rows
+// before it describe the new catalog, so a consumer that reloads per row stays correct
+// until it reaches this one. A hand-off that reopens the same catalog appends none; its
+// feed simply runs on.
+const ChangeCatalog = "catalog"

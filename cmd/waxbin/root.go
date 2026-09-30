@@ -74,6 +74,7 @@ func newRootCmd(g *globals) *cobra.Command {
 		newBookCmd(g),
 		newChaptersCmd(g),
 		newOrganizeCmd(g),
+		newProfilesCmd(g),
 		newRmCmd(g),
 		newTrashCmd(g),
 		newMarkMissingCmd(g),
@@ -231,13 +232,12 @@ func (g *globals) openMutator(cmd *cobra.Command) (*mutator, *config.Config, err
 // command's lifetime brackets the hand-off. cleanup (or, on a crash, the dropped
 // connection) tells the server to reopen.
 func (g *globals) openViaMaintenance(cmd *cobra.Command, opts waxbin.Options, sock string) (*waxbin.Library, error) {
-	px, err := proxy.Dial(sock)
+	px, err := beginMaintenance(cmd.Context(), sock)
 	if err != nil {
 		return nil, err
 	}
-	if err := px.MaintenanceBegin(cmd.Context()); err != nil {
-		_ = px.Close()
-		return nil, err
+	if px == nil {
+		return nil, waxerr.New(waxerr.CodeIO, "cli.openViaMaintenance", "no server answered on "+sock)
 	}
 	// The server has released the lock; open directly. A brief retry covers the
 	// filesystem race where the flock is not yet observably free.
@@ -253,6 +253,21 @@ func (g *globals) openViaMaintenance(cmd *cobra.Command, opts waxbin.Options, so
 	return lib, nil
 }
 
+// beginMaintenance asks the server on sock to suspend and release the write lock,
+// returning the connection that holds the hand-off. A nil client with a nil error
+// means no server answered, as with a stale advertisement.
+func beginMaintenance(ctx context.Context, sock string) (*proxy.Client, error) {
+	px, err := proxy.Dial(sock)
+	if err != nil {
+		return nil, nil
+	}
+	if err := px.MaintenanceBegin(ctx); err != nil {
+		_ = px.Close()
+		return nil, err
+	}
+	return px, nil
+}
+
 // openReadWriteRetry opens the catalog read-write, retrying a transient conflict
 // with bounded exponential backoff to cover the flock hand-off race after a server
 // releases the lock. The server releases the flock synchronously before answering
@@ -261,20 +276,32 @@ func (g *globals) openViaMaintenance(cmd *cobra.Command, opts waxbin.Options, so
 // than a fixed 200ms that could fail a slow hand-off. It mirrors the daemon-side
 // acquireWriteLockRetry so both ends of the hand-off tolerate the same lag.
 func openReadWriteRetry(ctx context.Context, opts waxbin.Options) (*waxbin.Library, error) {
+	var lib *waxbin.Library
+	err := retryConflict(ctx, func() error {
+		var err error
+		lib, err = waxbin.Open(ctx, opts)
+		return err
+	})
+	return lib, err
+}
+
+// retryConflict runs try until it stops returning CodeConflict, with the bounded
+// backoff openReadWriteRetry describes.
+func retryConflict(ctx context.Context, try func() error) error {
 	const maxAttempts = 40
 	const maxBackoff = 200 * time.Millisecond
 	backoff := 5 * time.Millisecond
 	for attempt := 0; ; attempt++ {
-		lib, err := waxbin.Open(ctx, opts)
+		err := try()
 		if err == nil {
-			return lib, nil
+			return nil
 		}
 		if !waxerr.Is(err, waxerr.CodeConflict) || attempt >= maxAttempts {
-			return nil, err
+			return err
 		}
 		select {
 		case <-ctx.Done():
-			return nil, waxerr.FromContext("cli.openReadWrite", ctx.Err(), waxerr.CodeConflict)
+			return waxerr.FromContext("cli.openReadWrite", ctx.Err(), waxerr.CodeConflict)
 		case <-time.After(backoff):
 		}
 		if backoff < maxBackoff {
@@ -288,14 +315,21 @@ func openReadWriteRetry(ctx context.Context, opts waxbin.Options) (*waxbin.Libra
 // so the server reacquires a lock that is already free. It is best effort: on a
 // crash the dropped connection triggers the same reopen on the server side.
 func (g *globals) cleanup() {
+	_ = g.endMaintenance()
+}
+
+// endMaintenance ends a maintenance hand-off this command took and returns the
+// server's answer, which is an error when it could not reopen the catalog. It uses a
+// fresh context: the command's may already be canceled (a Ctrl-C that interrupted the
+// command must still return the server to service).
+func (g *globals) endMaintenance() error {
 	if g.maintConn == nil {
-		return
+		return nil
 	}
-	// Use a fresh context: the command's context may already be canceled (a Ctrl-C
-	// that interrupted the command must still return the server to service).
-	_ = g.maintConn.MaintenanceEnd(context.Background())
+	err := g.maintConn.MaintenanceEnd(context.Background())
 	_ = g.maintConn.Close()
 	g.maintConn = nil
+	return err
 }
 
 // advertisedSocket returns the IPC socket a running server advertises beside the

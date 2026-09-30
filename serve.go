@@ -56,18 +56,67 @@ func (l *Library) Serve(ctx context.Context, socketPath string) error {
 // retry once the job completes. Unlike Close, it suspends (keeping in-process change
 // subscribers alive) so an embedder's subscription survives the hand-off.
 func (l *Library) BeginMaintenance(ctx context.Context) error {
-	if running, err := l.store.HasRunningJob(ctx); err != nil {
+	// A reopen still owing its hook is finished first, so the host hears each OnReopen
+	// before the next OnSuspend.
+	l.reopenMu.Lock()
+	err := l.finishReopenLocked(ctx)
+	l.reopenMu.Unlock()
+	if err != nil {
 		return err
-	} else if running {
-		return waxerr.New(waxerr.CodeConflict, "waxbin.BeginMaintenance",
-			"a background job is running; retry after it completes")
+	}
+	if err := l.refuseRunningJob(ctx); err != nil {
+		return err
+	}
+	if l.opts.OnSuspend != nil {
+		// Read before the hook, so a refusal after it still has a head to hand back.
+		head, err := l.store.LatestChangeSeq(ctx)
+		if err != nil {
+			return err
+		}
+		l.opts.OnSuspend(ctx)
+		// A job the host started while its hook ran would be aborted by the suspend, and
+		// the hook may have canceled ctx. Either way the hand-off is refused and nothing
+		// will reopen, so the host hears it can resume.
+		if err := l.refuseRunningJob(ctx); err != nil {
+			if l.opts.OnReopen != nil {
+				l.opts.OnReopen(context.WithoutCancel(ctx), ReopenEvent{Seq: head})
+			}
+			return err
+		}
 	}
 	l.log.Info("entering maintenance mode: releasing the write lock")
 	// Flush buffered playback like Close does, then suspend (preserving subscribers).
 	if l.playback != nil && !l.ReadOnly() {
 		_ = l.playback.Flush(context.Background())
 	}
-	return l.store.Suspend()
+	err = l.store.Suspend()
+	// The cached podcast library id is dropped after the store closes, so no download
+	// can cache the old id again before the reopen.
+	if l.podcasts != nil {
+		l.podcasts.ForgetLibrary()
+	}
+	if err != nil {
+		// A failed teardown still leaves the store closed, and no hand-off follows to
+		// reopen it, so it reopens here, which also answers OnSuspend.
+		if rerr := l.Reopen(context.WithoutCancel(ctx)); rerr != nil {
+			return errors.Join(err, rerr)
+		}
+	}
+	return err
+}
+
+// refuseRunningJob is CodeConflict while a background job runs, since a hand-off would
+// close the store under it.
+func (l *Library) refuseRunningJob(ctx context.Context) error {
+	running, err := l.store.HasRunningJob(ctx)
+	if err != nil {
+		return err
+	}
+	if running {
+		return waxerr.New(waxerr.CodeConflict, "waxbin.BeginMaintenance",
+			"a background job is running; retry after it completes")
+	}
+	return nil
 }
 
 // EndMaintenance reopens the Library after a maintenance hand-off. It implements
@@ -81,18 +130,55 @@ func (l *Library) EndMaintenance(ctx context.Context) error {
 	return nil
 }
 
-// Reopen restores a Library that was Closed for a maintenance-mode hand-off. It
-// reopens the store in place (every subsystem keeps its store handle) and
-// re-ensures the configured roots, mirroring a read-write Open. It refuses on a
-// read-only library.
+// Reopen restores a Library that was suspended for a maintenance-mode hand-off. It
+// reopens the store in place (every subsystem keeps its store handle), re-ensures the
+// configured roots, mirroring a read-write Open, appends the model.ChangeCatalog row
+// when the catalog was replaced, and runs Options.OnReopen. When a step after the
+// store reopened fails, the next Reopen, or the next BeginMaintenance, finishes the
+// rest. It refuses on a read-only library.
 func (l *Library) Reopen(ctx context.Context) error {
 	if l.ReadOnly() {
 		return waxerr.New(waxerr.CodeUnsupported, "waxbin.Reopen", "reopen requires a read-write library")
 	}
-	if err := l.store.Reopen(ctx); err != nil {
+	l.reopenMu.Lock()
+	defer l.reopenMu.Unlock()
+	res, err := l.store.Reopen(ctx)
+	if err != nil {
 		return err
 	}
-	return l.ensureRoots(ctx)
+	if res.Reopened {
+		l.reopenOwed = true
+		l.reopenReplaced = l.reopenReplaced || res.Replaced
+	}
+	return l.finishReopenLocked(ctx)
+}
+
+// finishReopenLocked runs the steps a reopen owes once its store is open, leaving them
+// owed when one fails. The caller holds reopenMu.
+func (l *Library) finishReopenLocked(ctx context.Context) error {
+	if !l.reopenOwed {
+		return nil
+	}
+	if err := l.ensureRoots(ctx); err != nil {
+		return err
+	}
+	l.warnUnknownProfiles(ctx)
+	var seq int64
+	var err error
+	if l.reopenReplaced {
+		seq, err = l.store.NoteReopened(ctx)
+	} else {
+		seq, err = l.store.LatestChangeSeq(ctx)
+	}
+	if err != nil {
+		return err
+	}
+	ev := ReopenEvent{Seq: seq, Replaced: l.reopenReplaced}
+	l.reopenOwed, l.reopenReplaced = false, false
+	if l.opts.OnReopen != nil {
+		l.opts.OnReopen(ctx, ev)
+	}
+	return nil
 }
 
 // ReadLockOwner reads the write-owner record beside a catalog's lockfile without
@@ -733,6 +819,13 @@ func (l *Library) proxyHandlers() map[string]proxy.Handler {
 				Path: p.Path, Mode: model.Mode(p.Mode), Media: model.MediaType(p.Media), Profile: p.Profile,
 			})
 		},
+		proxy.MethodSetLibraryReadOnly: func(ctx context.Context, raw json.RawMessage) (any, error) {
+			p, err := decodeParams[proxy.SetLibraryReadOnlyParams](raw)
+			if err != nil {
+				return nil, err
+			}
+			return l.SetLibraryReadOnly(ctx, model.PID(p.LibraryPID), p.ReadOnly)
+		},
 		proxy.MethodRunScan: func(ctx context.Context, raw json.RawMessage) (any, error) {
 			p, err := decodeParams[proxy.ScanParams](raw)
 			if err != nil {
@@ -767,7 +860,7 @@ func (l *Library) proxyHandlers() map[string]proxy.Handler {
 				return nil, err
 			}
 			pid, err := l.StartEnrich(ctx, EnrichOptions{WriteTags: p.WriteTags,
-				Force: p.Force, Limit: p.Limit, ForcePhases: model.EnrichPhasesOf(p.ForcePhases),
+				Force: p.Force, Limit: p.Limit, ForcePhases: model.EnrichPhasesOf(p.ForcePhases), Phases: model.EnrichPhasesOf(p.Phases),
 				ItemPID: model.PID(p.ItemPID), EntityType: read.EntityKind(p.EntityType), EntityPID: model.PID(p.EntityPID),
 			})
 			if err != nil {
@@ -784,7 +877,7 @@ func (l *Library) proxyHandlers() map[string]proxy.Handler {
 			if err != nil {
 				return nil, err
 			}
-			pid, err := l.RunOrganize(ctx, q, p.Profile)
+			pid, err := l.RunOrganize(ctx, q, OrganizeOptions{ProfileName: p.Profile})
 			if err != nil {
 				return nil, err
 			}

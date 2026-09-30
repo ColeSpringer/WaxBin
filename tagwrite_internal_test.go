@@ -471,7 +471,7 @@ func TestOrganizeTagWriteAndPIDStamp(t *testing.T) {
 		t.Fatalf("lock: %v", err)
 	}
 
-	plan, err := lib.PlanOrganize(ctx, query.New(query.EntityItems).Build(), "waxbin-native")
+	plan, err := lib.PlanOrganize(ctx, query.New(query.EntityItems).Build(), OrganizeOptions{ProfileName: "waxbin-native"})
 	if err != nil {
 		t.Fatalf("plan: %v", err)
 	}
@@ -523,7 +523,7 @@ func TestRebuildAdoptsStampedPID(t *testing.T) {
 	if _, err := lib1.Scan(ctx, ScanRequest{}); err != nil {
 		t.Fatalf("scan1: %v", err)
 	}
-	plan, err := lib1.PlanOrganize(ctx, query.New(query.EntityItems).Build(), "waxbin-native")
+	plan, err := lib1.PlanOrganize(ctx, query.New(query.EntityItems).Build(), OrganizeOptions{ProfileName: "waxbin-native"})
 	if err != nil {
 		t.Fatalf("plan: %v", err)
 	}

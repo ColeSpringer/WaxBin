@@ -16,7 +16,7 @@ func newLibraryCmd(g *globals) *cobra.Command {
 		Use:   "library",
 		Short: "List and manage library roots",
 	}
-	c.AddCommand(newLibraryListCmd(g), newLibraryAddCmd(g))
+	c.AddCommand(newLibraryListCmd(g), newLibraryAddCmd(g), newLibrarySetCmd(g))
 	return c
 }
 
@@ -42,13 +42,59 @@ func newLibraryListCmd(g *globals) *cobra.Command {
 				return nil
 			}
 			w := tabwriter.NewWriter(out(cmd), 0, 2, 2, ' ', 0)
-			fmt.Fprintln(w, "PID\tMODE\tMEDIA\tPROFILE\tROOT")
+			fmt.Fprintln(w, "PID\tMODE\tMEDIA\tPROFILE\tREAD-ONLY\tROOT")
 			for _, l := range libs {
-				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", l.PID, l.Mode, l.MediaType(), l.Profile, l.DisplayRoot)
+				ro := "no"
+				if l.ReadOnly {
+					ro = "yes"
+				}
+				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", l.PID, l.Mode, l.MediaType(), l.Profile, ro, l.DisplayRoot)
 			}
 			return w.Flush()
 		},
 	}
+}
+
+func newLibrarySetCmd(g *globals) *cobra.Command {
+	var readOnly, writable bool
+	cmd := &cobra.Command{
+		Use:   "set <pid> --read-only|--writable",
+		Short: "Flag a library read-only, or make it writable again",
+		Long: "A read-only library keeps WaxBin from writing under its root: edits still land in " +
+			"the catalog, but no tag write-back, organize move, import into or out of it, " +
+			"delete, or trash restore or purge touches its files, and a staged file bound for " +
+			"it waits in the inbox rather than going to another library. Enrichment and ReplayGain " +
+			"values stay owed and are written by the first write-back after the library is " +
+			"made writable again; an edit's refused write-back is listed in `diagnostics` as " +
+			"unsynced and has to be made again.",
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if readOnly == writable {
+				return waxerr.New(waxerr.CodeInvalid, "library set", "pass exactly one of --read-only and --writable")
+			}
+			m, _, err := g.openMutator(cmd)
+			if err != nil {
+				return err
+			}
+			defer m.Close()
+			lib, err := m.SetLibraryReadOnly(ctx(cmd), model.PID(args[0]), readOnly)
+			if err != nil {
+				return err
+			}
+			if g.jsonOut {
+				return printJSON(cmd, libViews([]*model.Library{lib})[0])
+			}
+			state := "writable"
+			if lib.ReadOnly {
+				state = "read-only"
+			}
+			fmt.Fprintf(out(cmd), "Library %s  %s  is %s\n", lib.PID, lib.DisplayRoot, state)
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&readOnly, "read-only", false, "keep WaxBin from writing under the library's root")
+	cmd.Flags().BoolVar(&writable, "writable", false, "let WaxBin write under the library's root again")
+	return cmd
 }
 
 func newLibraryAddCmd(g *globals) *cobra.Command {

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -99,6 +100,8 @@ func (f *fakeCatalog) hangPolls() <-chan struct{} {
 	return f.hang
 }
 
+// Changes pages rows after sinceSeq and, like the store, refuses a cursor past the
+// head, which is what a restored or rebuilt catalog's shorter log does.
 func (f *fakeCatalog) Changes(_ context.Context, sinceSeq int64) ([]model.Change, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -112,7 +115,24 @@ func (f *fakeCatalog) Changes(_ context.Context, sinceSeq int64) ([]model.Change
 			}
 		}
 	}
+	if len(out) == 0 && sinceSeq > f.headLocked() {
+		return nil, waxerr.New(waxerr.CodeNotFound, "fake.Changes", "cursor past the head")
+	}
 	return out, nil
+}
+
+func (f *fakeCatalog) LatestChangeSeq(context.Context) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.headLocked(), nil
+}
+
+func (f *fakeCatalog) headLocked() int64 {
+	var head int64
+	for _, ch := range f.rows {
+		head = max(head, ch.Seq)
+	}
+	return head
 }
 
 // setItem catalogs a whole-file item.
@@ -145,7 +165,7 @@ func (f *fakeCatalog) commit(rows ...model.Change) {
 // loop.
 func newTestCache(t *testing.T, f catalog) *Cache {
 	t.Helper()
-	c, err := newCache(context.Background(), f, Options{
+	c, err := newCache(context.Background(), f, nil, Options{
 		PollInterval: -1, Logger: slog.New(slog.DiscardHandler),
 	})
 	if err != nil {
@@ -408,6 +428,132 @@ func TestLibraryRowFlushesAll(t *testing.T) {
 	}
 	if loc.Path != "/new/t0.wav" {
 		t.Fatalf("located %q after relocate, want the fresh path", loc.Path)
+	}
+}
+
+// TestCatalogRowFlushesAll: a reopen's catalog row may stand for a whole catalog
+// replaced underneath, so it drops every cached location the way a library row does.
+func TestCatalogRowFlushesAll(t *testing.T) {
+	fake := newFakeCatalog()
+	pids := []model.PID{model.NewPID(), model.NewPID()}
+	for i, pid := range pids {
+		fake.setItem(pid, model.NewPID(), fmt.Sprintf("/lib/t%d.wav", i))
+	}
+	c := newTestCache(t, fake)
+	for _, pid := range pids {
+		if _, err := c.Locate(context.Background(), pid); err != nil {
+			t.Fatalf("warm Locate: %v", err)
+		}
+	}
+	fake.commit(model.Change{Seq: 1, EntityType: model.ChangeCatalog, Op: model.OpUpdate})
+	if err := c.Poll(context.Background()); err != nil {
+		t.Fatalf("Poll: %v", err)
+	}
+	for _, pid := range pids {
+		if _, ok := c.cached(pid); ok {
+			t.Fatal("a catalog row did not drop a cached location")
+		}
+	}
+}
+
+// TestPollRePrimesACursorPastTheHead: a restored catalog's shorter log refuses the
+// cursor, so the poll drops everything and resumes at the new head, and the next
+// change after it is still seen.
+func TestPollRePrimesACursorPastTheHead(t *testing.T) {
+	ctx := context.Background()
+	fake := newFakeCatalog()
+	pid, filePID := model.NewPID(), model.NewPID()
+	fake.setItem(pid, filePID, "/lib/a.wav")
+	for i := 1; i <= 10; i++ {
+		fake.rows = append(fake.rows, model.Change{Seq: int64(i), EntityType: "album", EntityPID: model.NewPID(), Op: model.OpUpdate})
+	}
+	c := newTestCache(t, fake)
+	if _, err := c.Locate(ctx, pid); err != nil {
+		t.Fatal(err)
+	}
+
+	fake.mu.Lock()
+	fake.rows = fake.rows[:3]
+	fake.dv++
+	fake.mu.Unlock()
+	fake.setItem(pid, filePID, "/restored/a.wav")
+	if err := c.Poll(ctx); err != nil {
+		t.Fatalf("Poll over a shorter log: %v", err)
+	}
+	if _, ok := c.cached(pid); ok {
+		t.Fatal("a cursor past the head left a cached location standing")
+	}
+	if loc, err := c.Locate(ctx, pid); err != nil || loc.Path != "/restored/a.wav" {
+		t.Fatalf("Locate after the restore = %+v (err %v), want the restored path", loc, err)
+	}
+
+	fake.commit(model.Change{Seq: 4, EntityType: "item", EntityPID: pid, Op: model.OpUpdate})
+	if err := c.Poll(ctx); err != nil {
+		t.Fatalf("Poll: %v", err)
+	}
+	if _, ok := c.cached(pid); ok {
+		t.Fatal("the change after the new head was missed")
+	}
+}
+
+// countingHandler counts warnings.
+type countingHandler struct {
+	slog.Handler
+	mu    sync.Mutex
+	warns int
+}
+
+func (h *countingHandler) Enabled(context.Context, slog.Level) bool { return true }
+
+func (h *countingHandler) Handle(ctx context.Context, r slog.Record) error {
+	if r.Level == slog.LevelWarn {
+		h.mu.Lock()
+		h.warns++
+		h.mu.Unlock()
+	}
+	return nil
+}
+
+// TestNewCacheRefusesAReplacedCatalog: a caller's read-only library whose file was
+// replaced can only read the dead file, so the cache drops what it holds, reports it
+// from Poll (warning once), and refuses lookups rather than answering from the dead
+// catalog.
+func TestNewCacheRefusesAReplacedCatalog(t *testing.T) {
+	ctx := context.Background()
+	fake := newFakeCatalog()
+	pid := model.NewPID()
+	fake.setItem(pid, model.NewPID(), "/lib/a.wav")
+	logs := &countingHandler{Handler: slog.DiscardHandler}
+	c, err := newCache(ctx, fake, nil, Options{PollInterval: -1, Logger: slog.New(logs)})
+	if err != nil {
+		t.Fatalf("newCache: %v", err)
+	}
+	t.Cleanup(func() { c.Close() })
+	if _, err := c.Locate(ctx, pid); err != nil {
+		t.Fatal(err)
+	}
+
+	fake.mu.Lock()
+	fake.pollErr = waxerr.New(waxerr.CodeNotFound, "fake.DataVersion", "catalog file was replaced")
+	fake.mu.Unlock()
+	for i := 0; i < 2; i++ {
+		wantCode(t, c.Poll(ctx), waxerr.CodeNotFound)
+	}
+	if logs.warns != 1 {
+		t.Errorf("warned %d times over two polls, want once", logs.warns)
+	}
+	if _, ok := c.cached(pid); ok {
+		t.Fatal("a replaced catalog left a cached location standing")
+	}
+	// Not CodeNotFound, which Locate keeps for an unknown pid: every track would read as
+	// gone to a host mapping that to a 404.
+	gets := fake.gets
+	_, err = c.Locate(ctx, pid)
+	wantCode(t, err, waxerr.CodeUnsupported)
+	_, err = c.LocateMany(ctx, []model.PID{pid})
+	wantCode(t, err, waxerr.CodeUnsupported)
+	if fake.gets != gets || len(fake.batches) != 0 {
+		t.Error("a lookup went to the dead catalog")
 	}
 }
 
@@ -835,5 +981,46 @@ func TestCloseAbortsHungLocate(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Locate still hung 2s after Close; the query-context bridge is broken")
+	}
+}
+
+// messageHandler records every message.
+type messageHandler struct {
+	slog.Handler
+	mu   sync.Mutex
+	msgs []string
+}
+
+func (h *messageHandler) Enabled(context.Context, slog.Level) bool { return true }
+
+func (h *messageHandler) Handle(_ context.Context, r slog.Record) error {
+	h.mu.Lock()
+	h.msgs = append(h.msgs, r.Message)
+	h.mu.Unlock()
+	return nil
+}
+
+// TestPollLoopDoesNotClaimToServeAReplacedCatalog: once the catalog file is known to be
+// replaced, lookups are refused, so the loop does not log that it keeps serving cached
+// locations.
+func TestPollLoopDoesNotClaimToServeAReplacedCatalog(t *testing.T) {
+	fake := newFakeCatalog()
+	logs := &messageHandler{Handler: slog.DiscardHandler}
+	c, err := newCache(context.Background(), fake, nil, Options{PollInterval: time.Millisecond, Logger: slog.New(logs)})
+	if err != nil {
+		t.Fatalf("newCache: %v", err)
+	}
+	t.Cleanup(func() { c.Close() })
+	fake.mu.Lock()
+	fake.pollErr = waxerr.New(waxerr.CodeNotFound, "fake.DataVersion", "catalog file was replaced")
+	fake.mu.Unlock()
+	time.Sleep(50 * time.Millisecond)
+	c.Close()
+	logs.mu.Lock()
+	defer logs.mu.Unlock()
+	for _, m := range logs.msgs {
+		if strings.Contains(m, "serving cached locations") {
+			t.Fatalf("logs = %q, want no claim of serving cached locations", logs.msgs)
+		}
 	}
 }

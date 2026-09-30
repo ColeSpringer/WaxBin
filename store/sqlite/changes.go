@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"os"
 
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/waxerr"
@@ -116,13 +117,24 @@ func (s *Store) maxChangeSeq(ctx context.Context) int64 {
 	return seq
 }
 
-// DataVersion returns SQLite's PRAGMA data_version. The value changes between two
-// reads when another connection commits, letting a separate process poll it and
-// call ChangesSince only when needed. Because data_version is connection-relative,
-// it must be read from one pinned connection; a rotating pool would compare
-// unrelated baselines.
+// DataVersion returns a counter that moves when another connection commits, letting a
+// separate process poll it and call ChangesSince only when needed. It is the store's
+// own counter over SQLite's PRAGMA data_version rather than the pragma itself: the
+// pragma is connection-relative, so it is read from one pinned connection, and a fresh
+// connection after a reopen can report exactly what the old one last did. The counter
+// moves whenever the pragma does and whenever the pinned connection is replaced.
+//
+// On a read-only store it first checks that the catalog file is still the one it
+// opened, and returns CodeNotFound when a restore renamed another file over the path
+// or the path is gone: this handle can only ever read the old file, so it has to be
+// reopened.
 func (s *Store) DataVersion(ctx context.Context) (int64, error) {
 	const op = "store.DataVersion"
+	if s.roFile != nil {
+		if fi, err := os.Stat(s.path); err != nil || !os.SameFile(s.roFile, fi) {
+			return 0, waxerr.New(waxerr.CodeNotFound, op, "catalog file was replaced; reopen this handle")
+		}
+	}
 	s.dvMu.Lock()
 	defer s.dvMu.Unlock()
 	if s.dvConn == nil {
@@ -130,7 +142,7 @@ func (s *Store) DataVersion(ctx context.Context) (int64, error) {
 		if err != nil {
 			return 0, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
-		s.dvConn = conn
+		s.dvConn, s.dvRaw = conn, -1
 	}
 	var v int64
 	if err := s.dvConn.QueryRowContext(ctx, "PRAGMA data_version").Scan(&v); err != nil {
@@ -140,7 +152,11 @@ func (s *Store) DataVersion(ctx context.Context) (int64, error) {
 		s.dvConn = nil
 		return 0, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
-	return v, nil
+	if v != s.dvRaw {
+		s.dvRaw = v
+		s.dvOut++
+	}
+	return s.dvOut, nil
 }
 
 // closeDataVersionConn releases the pinned data_version connection back to the

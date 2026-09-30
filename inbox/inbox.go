@@ -91,8 +91,9 @@ type Request struct {
 	// Route picks the target managed library for a file by its classified kind, for
 	// media-typed multi-root import (a book to the audiobook root, a track to the
 	// music root). When nil the file targets Library; when it returns nil for a kind
-	// (none or several match) the file is quarantined.
-	Route func(kind model.Kind) *model.Library
+	// (none or several match) the file is quarantined, with the reason Route gives or
+	// a default one.
+	Route func(kind model.Kind) (*model.Library, string)
 	// ProfileFor resolves the layout profile for a routed library, so a multi-root
 	// import lays each file out under its own library's profile rather than one shared
 	// profile. When nil, Profile is used for every file.
@@ -237,11 +238,11 @@ func (s *Service) PlanFile(ctx context.Context, req Request, path string, kind m
 // authoritative: a nil result means the kind has no unambiguous managed library (none
 // matches, or several do), so the file is quarantined rather than silently sent to the
 // default library. With no Route, every file targets the request's default Library.
-func resolveLibrary(req Request, kind model.Kind) *model.Library {
+func resolveLibrary(req Request, kind model.Kind) (*model.Library, string) {
 	if req.Route != nil {
 		return req.Route(kind)
 	}
-	return req.Library
+	return req.Library, ""
 }
 
 // batchClaims tracks the destinations and essences already claimed by earlier
@@ -269,9 +270,12 @@ func (s *Service) classify(ctx context.Context, req Request, path string, claims
 		kind = classifyKind(fm.Tags)
 	}
 	a.Kind = kind
-	lib := resolveLibrary(req, kind)
+	lib, reason := resolveLibrary(req, kind)
 	if lib == nil {
-		a.Outcome, a.Reason = OutcomeQuarantine, "no unambiguous managed library for kind "+string(kind)
+		if reason == "" {
+			reason = "no unambiguous managed library for kind " + string(kind)
+		}
+		a.Outcome, a.Reason = OutcomeQuarantine, reason
 		return a
 	}
 	a.Library = lib

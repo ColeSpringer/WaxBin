@@ -19,6 +19,7 @@ CREATE TABLE library (
   mode         TEXT    NOT NULL,         -- managed | in-place
   media        TEXT    NOT NULL DEFAULT 'mixed',  -- music|audiobook|podcast|mixed
   profile      TEXT    NOT NULL DEFAULT 'waxbin-native',
+  read_only    INTEGER NOT NULL DEFAULT 0,  -- 1 keeps every on-disk write out of this root
   created_at   INTEGER NOT NULL          -- unix nanoseconds
 );
 

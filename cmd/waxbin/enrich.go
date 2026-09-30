@@ -19,6 +19,7 @@ func newEnrichCmd(g *globals) *cobra.Command {
 	var item string
 	var entity string
 	var forcePhases []string
+	var phases []string
 	phaseList := enrichPhaseList()
 	cmd := &cobra.Command{
 		Use:   "enrich",
@@ -73,28 +74,24 @@ func newEnrichCmd(g *globals) *cobra.Command {
 			"re-resolves every group against MusicBrainz first, one lookup per group at a " +
 			"request per second, and only then re-asks for its cover, which costs a " +
 			"conditional request and no download once the group has a record; that walk is " +
-			"also how a group enriched before records existed gets one.",
+			"also how a group enriched before records existed gets one.\n\n" +
+			"--phase runs only the named phases (repeatable), forced or not; combine it with " +
+			"--item or --entity for a narrow fix. With --write-tags such a run writes back " +
+			"only what is owed on the targets it walked.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			// Flag-shape errors fail here, before the write lock is taken or the
 			// server dialed; the facade re-validates for embedders and the proxy.
 			if item != "" && entity != "" {
 				return fmt.Errorf("scope by --item or --entity, not both")
 			}
-			if len(forcePhases) > 0 {
-				if force {
-					return fmt.Errorf("--force-phase and --force are exclusive; --force already re-asks every phase")
-				}
-				if item != "" || entity != "" {
-					return fmt.Errorf("--force-phase cannot combine with --item or --entity, which already force every phase they walk")
-				}
-				for _, p := range forcePhases {
-					if !model.EnrichPhase(p).Valid() {
-						return fmt.Errorf("unknown enrichment phase %q (want one of %s)", p, phaseList)
-					}
-				}
+			if err := enrich.CheckPhaseOptions(force, item != "" || entity != "",
+				model.EnrichPhasesOf(phases), model.EnrichPhasesOf(forcePhases)); err != nil {
+				return err
 			}
-			opts := waxbin.EnrichOptions{Force: force, Limit: limit, ForcePhases: model.EnrichPhasesOf(forcePhases), ItemPID: model.PID(item), WriteTags: writeTags}
-			params := proxy.EnrichParams{Force: force, Limit: limit, ForcePhases: forcePhases, ItemPID: item, WriteTags: writeTags}
+			opts := waxbin.EnrichOptions{Force: force, Limit: limit, ForcePhases: model.EnrichPhasesOf(forcePhases),
+				Phases: model.EnrichPhasesOf(phases), ItemPID: model.PID(item), WriteTags: writeTags}
+			params := proxy.EnrichParams{Force: force, Limit: limit, ForcePhases: forcePhases, Phases: phases,
+				ItemPID: item, WriteTags: writeTags}
 			if entity != "" {
 				typ, pid, ok := strings.Cut(entity, ":")
 				if !ok || typ == "" || pid == "" {
@@ -153,6 +150,8 @@ func newEnrichCmd(g *globals) *cobra.Command {
 	cmd.Flags().StringVar(&entity, "entity", "", "scope the pass to one entity, as type:pid (artist, release_group, or album; implies --force)")
 	cmd.Flags().StringSliceVar(&forcePhases, "force-phase", nil,
 		"re-ask one phase alone for every target that still has a slot to fill, marker or none (repeatable or comma-separated): "+phaseList)
+	cmd.Flags().StringSliceVar(&phases, "phase", nil,
+		"run only these phases; combine with --item or --entity for a narrow fix (repeatable or comma-separated): "+phaseList)
 	return cmd
 }
 
@@ -237,9 +236,13 @@ func renderEnrichResult(cmd *cobra.Command, g *globals, res *waxbin.EnrichResult
 	}
 	// Only when the run wrote tags, and always with the failures beside the writes: a
 	// run where every write failed must not read like one with nothing to write.
-	if r.TagsWritten+r.TagsFailed+r.TagsUnrepresented+r.TagsSkipped > 0 {
-		fmt.Fprintf(w, "tags written:   %d (%d failed, %d unrepresented, %d skipped)\n",
-			r.TagsWritten, r.TagsFailed, r.TagsUnrepresented, r.TagsSkipped)
+	if r.TagsWritten+r.TagsFailed+r.TagsUnrepresented+r.TagsSkipped+r.TagsReadOnly > 0 {
+		fmt.Fprintf(w, "tags written:   %d (%d failed, %d unrepresented, %d skipped", r.TagsWritten, r.TagsFailed,
+			r.TagsUnrepresented, r.TagsSkipped)
+		if r.TagsReadOnly > 0 {
+			fmt.Fprintf(w, ", %d in read-only libraries", r.TagsReadOnly)
+		}
+		fmt.Fprintln(w, ")")
 	}
 	fmt.Fprintf(w, "job:            %s\n", res.JobPID)
 	return nil

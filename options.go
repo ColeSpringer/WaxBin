@@ -1,6 +1,7 @@
 package waxbin
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"os"
@@ -15,7 +16,9 @@ import (
 type Options struct {
 	// DBPath is the catalog database (local filesystem only).
 	DBPath string
-	// Roots are library roots to ensure on open (upserted; never deleted here).
+	// Roots are library roots to ensure on open (upserted; never deleted here). A
+	// root's read-only flag is the catalog's alone (Library.SetLibraryReadOnly), so
+	// ensuring a root keeps whatever flag it has.
 	Roots []config.Root
 	// ReadOnly opens without taking the write lock and forbids mutations.
 	ReadOnly bool
@@ -82,11 +85,44 @@ type Options struct {
 	// "1" when a cipher is set without one. Change it when rotating to a new key.
 	SecretKeyID string
 
+	// OnSuspend and OnReopen are the maintenance hooks, for a host that caches catalog
+	// state. OnSuspend runs when a maintenance hand-off begins, after the running-job
+	// refusal and before the Library suspends, so the host can quiesce its own work.
+	// OnReopen answers it once the Library is open again: as the last step of the
+	// reopen ending the hand-off (or the one a dropped maintenance connection triggers),
+	// after a hand-off refused once the hook ran (a job the host started during it, or
+	// ctx canceled), and after a suspend that failed and was reopened on the spot. A
+	// reopen whose last steps fail leaves its OnReopen owed; the next Reopen or
+	// BeginMaintenance finishes it, so a host hears each OnReopen before the next
+	// OnSuspend. It never runs for the initial Open, or while the Library stays closed
+	// after a reopen that failed outright or a server that shut down mid-hand-off.
+	//
+	// The proxy server holds its lock across both hooks, so proxied requests wait until
+	// OnReopen returns, which is what lets a host rebuild its own maps before the next
+	// proxied read; a hook must not call back through the proxy. The host's own
+	// goroutines are not held back, and between the two hooks every call that touches
+	// the catalog fails with CodeUnsupported. OnReopen may read the catalog; keep it
+	// short, since proxied clients wait on it.
+	OnSuspend func(ctx context.Context)
+	OnReopen  func(ctx context.Context, ev ReopenEvent)
+
 	// Storage tuning; zero values fall back to library defaults.
 	BusyTimeoutMS int
 	CacheSizeKB   int
 	MmapSizeBytes int64
 	ReadPoolSize  int
+}
+
+// ReopenEvent describes a finished reopen. Replaced reports a catalog that is not the
+// one the hand-off suspended (see model.ChangeCatalog): drop what was derived from it,
+// reload, and resume the change feed from Seq, the catalog row's seq. Otherwise the
+// feed ran on across the hand-off, and the rows other processes wrote meanwhile follow
+// the host's own cursor, so it resumes from that; Seq is then the head as the reopen
+// finished. Either way this process may write more rows before the hook runs, so Seq
+// is where to resume from, not necessarily the head.
+type ReopenEvent struct {
+	Seq      int64
+	Replaced bool
 }
 
 // OptionsFromConfig derives Options from a resolved Config.

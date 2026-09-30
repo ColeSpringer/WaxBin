@@ -28,10 +28,14 @@ func newJobsCmd(g *globals) *cobra.Command {
 				return printJSON(cmd, jobViews(list))
 			}
 			tw := tabwriter.NewWriter(out(cmd), 0, 2, 2, ' ', 0)
-			fmt.Fprintln(tw, "PID\tKIND\tSCOPE\tSTATE\tPROGRESS\tMESSAGE")
+			fmt.Fprintln(tw, "PID\tKIND\tSCOPE\tTARGET\tSTATE\tPROGRESS\tMESSAGE")
 			for _, j := range list {
-				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%.0f%%\t%s\n",
-					j.PID, j.Kind, j.Scope, j.State, j.Progress*100, j.Message)
+				target := ""
+				if j.TargetType != "" {
+					target = j.TargetType + ":" + string(j.TargetPID)
+				}
+				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%.0f%%\t%s\n",
+					j.PID, j.Kind, j.Scope, target, j.State, j.Progress*100, j.Message)
 			}
 			return tw.Flush()
 		},

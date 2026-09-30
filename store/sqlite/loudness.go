@@ -53,10 +53,11 @@ func (s *Store) CountLoudness(ctx context.Context) (int, error) {
 // standalone track has a NULL album gain, so HasAlbum=false).
 func (s *Store) ReplayGainWriteback(ctx context.Context) ([]model.ReplayGainRow, error) {
 	const op = "store.ReplayGainWriteback"
-	rows, err := s.read.QueryContext(ctx, `SELECT f.pid, f.path, COALESCE(f.container,''), COALESCE(f.codec,''),
+	rows, err := s.read.QueryContext(ctx, `SELECT f.pid, f.library_id, f.path, COALESCE(f.container,''), COALESCE(f.codec,''),
 			f.size, f.mtime_ns, l.track_gain_db, COALESCE(l.track_peak, 0), l.album_gain_db, COALESCE(l.album_peak, 0)
 		FROM loudness l
 		JOIN file f ON f.id = l.file_id AND f.essence_hash = l.essence_hash
+		JOIN library flib ON flib.id = f.library_id AND flib.read_only = 0
 		JOIN item_file pf ON pf.file_id = l.file_id AND pf.role = 'primary'
 		JOIN playable_item pi ON pi.id = pf.item_id
 		WHERE pi.kind = 'track' AND l.track_gain_db IS NOT NULL`)
@@ -68,7 +69,7 @@ func (s *Store) ReplayGainWriteback(ctx context.Context) ([]model.ReplayGainRow,
 	for rows.Next() {
 		var r model.ReplayGainRow
 		var albumGain sql.NullFloat64
-		if err := rows.Scan(&r.FilePID, &r.Path, &r.Container, &r.Codec, &r.Size, &r.MTimeNS,
+		if err := rows.Scan(&r.FilePID, &r.LibraryID, &r.Path, &r.Container, &r.Codec, &r.Size, &r.MTimeNS,
 			&r.TrackGainDB, &r.TrackPeak, &albumGain, &r.AlbumPeak); err != nil {
 			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}

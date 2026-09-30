@@ -54,6 +54,9 @@ type TrashEntry struct {
 	Size         int64
 	TrashedAt    int64 // unix nanoseconds
 	RestoredAt   int64 // 0 = still in the trash
+	// LibraryPID is the library the file was trashed from, empty when the journal row
+	// records none.
+	LibraryPID PID
 }
 
 // TrashFileInput records a file that was moved into the trash on disk so the

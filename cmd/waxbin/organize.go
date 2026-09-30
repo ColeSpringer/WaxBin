@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 
+	"github.com/colespringer/waxbin"
 	"github.com/colespringer/waxbin/organize"
 	"github.com/colespringer/waxbin/query"
 	"github.com/spf13/cobra"
@@ -37,7 +38,7 @@ func newOrganizeCmd(g *globals) *cobra.Command {
 					return err
 				}
 				defer lib.Close()
-				plan, err := lib.PlanOrganize(ctx(cmd), q, profile)
+				plan, err := lib.PlanOrganize(ctx(cmd), q, waxbin.OrganizeOptions{ProfileName: profile})
 				if err != nil {
 					return err
 				}
@@ -76,7 +77,7 @@ func newOrganizeCmd(g *globals) *cobra.Command {
 				return err
 			}
 			defer lib.Close()
-			plan, err := lib.PlanOrganize(ctx(cmd), q, profile)
+			plan, err := lib.PlanOrganize(ctx(cmd), q, waxbin.OrganizeOptions{ProfileName: profile})
 			if err != nil {
 				return err
 			}
@@ -97,8 +98,11 @@ func emitPlan(cmd *cobra.Command, g *globals, plan *organize.Plan) error {
 	if g.jsonOut {
 		return printJSON(cmd, planJSON(plan))
 	}
-	fmt.Fprintf(out(cmd), "Plan (profile %s): %d action(s), %d would move\n",
-		plan.Profile, len(plan.Actions), plan.Pending())
+	fmt.Fprintf(out(cmd), "Plan (profile %s): %d action(s), %d would move", plan.Profile, len(plan.Actions), plan.Pending())
+	if plan.ReadOnlyLibraries > 0 {
+		fmt.Fprintf(out(cmd), " (%d read-only libraries left alone)", plan.ReadOnlyLibraries)
+	}
+	fmt.Fprintln(out(cmd))
 	for _, a := range plan.Actions {
 		if a.Skip {
 			fmt.Fprintf(out(cmd), "  skip  %s (%s)\n", a.Src, a.Reason)
@@ -152,8 +156,9 @@ func planJSON(plan *organize.Plan) any {
 		})
 	}
 	return struct {
-		Profile string           `json:"profile"`
-		Pending int              `json:"pending"`
-		Actions []planActionJSON `json:"actions"`
-	}{plan.Profile, plan.Pending(), actions}
+		Profile           string           `json:"profile"`
+		Pending           int              `json:"pending"`
+		ReadOnlyLibraries int              `json:"readOnlyLibraries,omitempty"`
+		Actions           []planActionJSON `json:"actions"`
+	}{plan.Profile, plan.Pending(), plan.ReadOnlyLibraries, actions}
 }

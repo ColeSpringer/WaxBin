@@ -410,23 +410,26 @@ const filesDurationMismatchWhere = `
 	WHERE f.kind = 'audio' AND f.duration_ms > 0 AND p.sample_rate > 0
 	  AND ABS(p.frames * 1000 / p.sample_rate - f.duration_ms) > MAX(2000, f.duration_ms / 50)`
 
-// FilesDurationMismatch returns a sample (up to limit) of audio files whose header
-// states a length the decoded audio does not have, plus the total count. It is an
-// audit computation rather than a stored finding: the header half changes without the
-// essence changing (a retag, an MP3 gaining an info frame), and only the scan rewrites
-// it, so a persisted row would outlive the fix.
-func (s *Store) FilesDurationMismatch(ctx context.Context, limit int) ([]model.FileDurationMismatch, int, error) {
+// FilesDurationMismatch returns audio files whose header states a length the decoded
+// audio does not have, in path order, plus the total count: up to limit of them (0 is
+// all) after skipping offset. It is an audit computation rather than a stored finding:
+// the header half changes without the essence changing (a retag, an MP3 gaining an info
+// frame), and only the scan rewrites it, so a persisted row would outlive the fix.
+func (s *Store) FilesDurationMismatch(ctx context.Context, limit, offset int) ([]model.FileDurationMismatch, int, error) {
 	const op = "store.FilesDurationMismatch"
 	var total int
 	if err := s.read.QueryRowContext(ctx, "SELECT COUNT(*) "+filesDurationMismatchWhere).Scan(&total); err != nil {
 		return nil, 0, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
-	if total == 0 || limit <= 0 {
+	if total == 0 || offset >= total {
 		return nil, total, nil
+	}
+	if limit <= 0 {
+		limit = -1 // SQLite reads a negative LIMIT as none, and OFFSET needs one
 	}
 	rows, err := s.read.QueryContext(ctx,
 		"SELECT f.pid, f.display_path, f.duration_ms, p.frames * 1000 / p.sample_rate "+
-			filesDurationMismatchWhere+" ORDER BY f.display_path, f.pid LIMIT ?", limit)
+			filesDurationMismatchWhere+" ORDER BY f.display_path, f.pid LIMIT ? OFFSET ?", limit, max(offset, 0))
 	if err != nil {
 		return nil, 0, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}

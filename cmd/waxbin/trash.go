@@ -120,8 +120,12 @@ func newTrashEmptyCmd(g *globals) *cobra.Command {
 			if g.jsonOut {
 				return printJSON(cmd, rep)
 			}
-			fmt.Fprintf(out(cmd), "Emptied trash: purged %d, errored %d, reclaimed %d bytes\n",
+			fmt.Fprintf(out(cmd), "Emptied trash: purged %d, errored %d, reclaimed %d bytes",
 				rep.Purged, rep.Errored, rep.ReclaimedBytes)
+			if rep.SkippedReadOnly > 0 {
+				fmt.Fprintf(out(cmd), " (%d left in read-only libraries)", rep.SkippedReadOnly)
+			}
+			fmt.Fprintln(out(cmd))
 			return nil
 		},
 	}

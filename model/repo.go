@@ -253,6 +253,7 @@ type ScopedFile struct {
 type EnrichedTagRow struct {
 	ItemPID   PID
 	FilePID   PID
+	LibraryID int64 // the file's library, which the write loop re-checks for read-only
 	Kind      Kind
 	Path      []byte
 	Size      int64
@@ -280,6 +281,7 @@ type EnrichedTagRow struct {
 // album aggregate exists (a standalone track has none).
 type ReplayGainRow struct {
 	FilePID     PID
+	LibraryID   int64 // the file's library, which the write loop re-checks for read-only
 	Path        []byte
 	Container   string
 	Codec       string
@@ -494,6 +496,7 @@ type EntityFieldFile struct {
 	Value      string
 	UpdatedAt  int64 // unix ns the curation row was written
 	FilePID    PID
+	LibraryID  int64 // the file's library, which the write loop re-checks for read-only
 	Path       []byte
 	Size       int64
 	MTimeNS    int64

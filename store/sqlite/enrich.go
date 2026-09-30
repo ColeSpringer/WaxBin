@@ -85,7 +85,7 @@ const (
 	// is NOT NULL and an art backfill regularly completes with nothing offered, so the row
 	// names the outcome rather than storing an empty string a reader would take for a
 	// missing value.
-	enrichProviderNone = "none"
+	enrichProviderNone = model.EnrichProviderNone
 )
 
 // albumResolvesFrontArt is true when an album already answers a front-cover request: its
@@ -2159,7 +2159,7 @@ type logger interface {
 // settle the file past the other's and lose them.
 //
 // The /*SCOPE*/ marker takes a scoped run's reach clause; see enrichWriteScopeClause.
-const enrichedTagSelect = `SELECT pi.pid, f.pid, pi.kind, f.path, f.size, f.mtime_ns,
+const enrichedTagSelect = `SELECT pi.pid, f.pid, f.library_id, pi.kind, f.path, f.size, f.mtime_ns,
 		CASE WHEN itf.role = 'primary' THEN 1 ELSE 0 END,
 		CASE WHEN ` + fileSharedOrVirtualExpr + ` THEN 1 ELSE 0 END,
 		fpw.fields, fpw.newest,
@@ -2172,6 +2172,7 @@ const enrichedTagSelect = `SELECT pi.pid, f.pid, pi.kind, f.path, f.size, f.mtim
 	FROM playable_item pi
 	JOIN item_file itf ON itf.item_id = pi.id AND itf.start_frames IS NULL
 	JOIN file f ON f.id = itf.file_id
+	JOIN library flib ON flib.id = f.library_id AND flib.read_only = ?
 	JOIN (SELECT item_id, GROUP_CONCAT(field) AS fields, MAX(updated_at) AS newest
 	      FROM field_provenance WHERE source = 'enrichment' AND locked = 0
 	      GROUP BY item_id) fpw ON fpw.item_id = pi.id
@@ -2195,7 +2196,8 @@ const enrichmentLabelRowJoin = `lab.entity_type = 'album' AND lab.entity_id = al
 // groups' albums, which together are every item the run could have filled a written
 // field or an album label on. Artists are left out on purpose, since artist enrichment
 // fills nothing the write-back writes and an artist reaches every track it is credited
-// on. A nil scope is a full run and reaches everything.
+// on. A nil scope is a full run and reaches everything. Each list binds as one JSON
+// array, so a reach of any size stays one statement and never widens.
 func enrichWriteScopeClause(scope *model.EnrichScope, itemCol, albumCol string) (string, []any) {
 	if scope == nil {
 		return "", nil
@@ -2208,32 +2210,20 @@ func enrichWriteScopeClause(scope *model.EnrichScope, itemCol, albumCol string) 
 	items := uniq(scope.FieldsItemIDs, scope.BookItemIDs, scope.LyricsItemIDs)
 	albums := uniq(scope.AlbumIDs)
 	groups := uniq(scope.ReleaseGroupIDs)
-	if len(items)+len(albums)+len(groups) > maxScopeBinds {
-		// A reach this wide came from a --limit high enough to be a full pass in all but
-		// name. Reading it as one widens the write-back to everything owed, a superset of
-		// what the run reached and exactly what an unlimited pass writes; the alternative
-		// is a statement SQLite refuses outright.
-		return "", nil
-	}
 	var parts []string
 	var args []any
-	bind := func(ids []int64) {
-		for _, id := range ids {
-			args = append(args, id)
-		}
+	in := func(ids []int64) string {
+		args = append(args, idArray(ids))
+		return " IN (SELECT value FROM json_each(?))"
 	}
 	if len(items) > 0 {
-		parts = append(parts, itemCol+" IN "+placeholders(len(items)))
-		bind(items)
+		parts = append(parts, itemCol+in(items))
 	}
 	if len(albums) > 0 {
-		parts = append(parts, albumCol+" IN "+placeholders(len(albums)))
-		bind(albums)
+		parts = append(parts, albumCol+in(albums))
 	}
 	if len(groups) > 0 {
-		parts = append(parts, albumCol+" IN (SELECT id FROM album WHERE release_group_id IN "+
-			placeholders(len(groups))+")")
-		bind(groups)
+		parts = append(parts, albumCol+" IN (SELECT id FROM album WHERE release_group_id"+in(groups)+")")
 	}
 	if len(parts) == 0 {
 		return " AND 1=0", nil
@@ -2241,11 +2231,19 @@ func enrichWriteScopeClause(scope *model.EnrichScope, itemCol, albumCol string) 
 	return " AND (" + strings.Join(parts, " OR ") + ")", args
 }
 
-// maxScopeBinds caps the ids one write-back statement binds for a run's reach, under
-// SQLite's 32766-value ceiling with room to spare. The reach is not chunkable the way
-// ItemsByPIDs is: its three lists are ORed inside one statement, so a chunk of one would
-// re-return every row the other two already match.
-const maxScopeBinds = 32000
+// idArray renders ids as a JSON array, for json_each.
+func idArray(ids []int64) string {
+	var b strings.Builder
+	b.WriteByte('[')
+	for i, id := range ids {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteString(strconv.FormatInt(id, 10))
+	}
+	b.WriteByte(']')
+	return b.String()
+}
 
 // enrichedTagFieldOrder is the field each scanned value column belongs to, per kind. It
 // is the one place the select's column order and the field names are tied together.
@@ -2262,9 +2260,16 @@ var enrichedTagFieldOrder = map[model.Kind][]string{
 // writing nothing is not the same as clearing the tag and a file left owed would be
 // scanned past on every pass.
 func (s *Store) EnrichmentWriteback(ctx context.Context, scope *model.EnrichScope) ([]model.EnrichedTagRow, error) {
+	return s.enrichmentWriteback(ctx, scope, false)
+}
+
+// enrichmentWriteback is EnrichmentWriteback over the libraries whose read-only flag is
+// readOnly.
+func (s *Store) enrichmentWriteback(ctx context.Context, scope *model.EnrichScope, readOnly bool) ([]model.EnrichedTagRow, error) {
 	const op = "store.EnrichmentWriteback"
 	clause, args := enrichWriteScopeClause(scope, "pi.id", "t.album_id")
-	rows, err := s.read.QueryContext(ctx, strings.Replace(enrichedTagSelect, "/*SCOPE*/", clause, 1), args...)
+	rows, err := s.read.QueryContext(ctx, strings.Replace(enrichedTagSelect, "/*SCOPE*/", clause, 1),
+		append([]any{readOnly}, args...)...)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
@@ -2276,7 +2281,7 @@ func (s *Store) EnrichmentWriteback(ctx context.Context, scope *model.EnrichScop
 		var written string
 		var trackGenre, bpm, isrc, composer, trackYear string
 		var asin, isbn, publisher, bookGenre, bookYear, narrator, subtitle, edition, description string
-		if err := rows.Scan(&r.ItemPID, &r.FilePID, &r.Kind, &r.Path, &r.Size, &r.MTimeNS,
+		if err := rows.Scan(&r.ItemPID, &r.FilePID, &r.LibraryID, &r.Kind, &r.Path, &r.Size, &r.MTimeNS,
 			&primary, &shared, &written, &r.Newest, &r.Label, &r.LabelUpdatedAt,
 			&trackGenre, &bpm, &isrc, &composer, &trackYear,
 			&asin, &isbn, &publisher, &bookGenre, &bookYear, &narrator,
@@ -2819,9 +2824,16 @@ func (s *Store) applyAlbumYearTx(ctx context.Context, tx *sql.Tx, in model.Album
 // the caller records the refusal and settles it; it is never opened. The rows come in
 // album order, so a file two albums somehow claim is planned for the lower one.
 func (s *Store) EnrichedAlbumLabelFiles(ctx context.Context, scope *model.EnrichScope) ([]model.EntityFieldFile, error) {
+	return s.enrichedAlbumLabelFiles(ctx, scope, false)
+}
+
+// enrichedAlbumLabelFiles is EnrichedAlbumLabelFiles over the libraries whose read-only
+// flag is readOnly.
+func (s *Store) enrichedAlbumLabelFiles(ctx context.Context, scope *model.EnrichScope, readOnly bool) ([]model.EntityFieldFile, error) {
 	const op = "store.EnrichedAlbumLabelFiles"
 	clause, args := enrichWriteScopeClause(scope, "pi.id", "al.id")
-	rows, err := s.read.QueryContext(ctx, `SELECT DISTINCT al.id, f.pid, f.path, f.size, f.mtime_ns,
+	args = append([]any{readOnly}, args...)
+	rows, err := s.read.QueryContext(ctx, `SELECT DISTINCT al.id, f.pid, f.library_id, f.path, f.size, f.mtime_ns,
 			COALESCE(al.label,''), lab.updated_at,
 			CASE WHEN `+fileSharedOrVirtualExpr+` THEN 1 ELSE 0 END
 		FROM entity_curation lab
@@ -2830,6 +2842,7 @@ func (s *Store) EnrichedAlbumLabelFiles(ctx context.Context, scope *model.Enrich
 		JOIN playable_item pi ON pi.id = t.item_id AND pi.state = 'present'
 		JOIN item_file itf ON itf.item_id = t.item_id AND itf.role = 'primary'
 		JOIN file f ON f.id = itf.file_id
+		JOIN library flib ON flib.id = f.library_id AND flib.read_only = ?
 		WHERE COALESCE(al.label,'') <> '' AND lab.updated_at > f.enrich_settled_at`+clause+`
 		ORDER BY al.id, f.pid`, args...)
 	if err != nil {
@@ -2841,7 +2854,7 @@ func (s *Store) EnrichedAlbumLabelFiles(ctx context.Context, scope *model.Enrich
 		v := model.EntityFieldFile{EntityType: model.MergeAlbum, Field: "label"}
 		var albumID int64
 		var shared int
-		if err := rows.Scan(&albumID, &v.FilePID, &v.Path, &v.Size, &v.MTimeNS, &v.Value, &v.UpdatedAt, &shared); err != nil {
+		if err := rows.Scan(&albumID, &v.FilePID, &v.LibraryID, &v.Path, &v.Size, &v.MTimeNS, &v.Value, &v.UpdatedAt, &shared); err != nil {
 			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		v.Shared = shared == 1
@@ -2851,6 +2864,28 @@ func (s *Store) EnrichedAlbumLabelFiles(ctx context.Context, scope *model.Enrich
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
 	return out, nil
+}
+
+// EnrichmentHeldReadOnly counts the files owed an enrichment write, a tag or an album
+// label, that the write-backs leave alone because their library is read-only, within
+// scope's reach as EnrichmentWriteback reads it.
+func (s *Store) EnrichmentHeldReadOnly(ctx context.Context, scope *model.EnrichScope) (int, error) {
+	rows, err := s.enrichmentWriteback(ctx, scope, true)
+	if err != nil {
+		return 0, err
+	}
+	labels, err := s.enrichedAlbumLabelFiles(ctx, scope, true)
+	if err != nil {
+		return 0, err
+	}
+	held := make(map[model.PID]bool, len(rows)+len(labels))
+	for _, r := range rows {
+		held[r.FilePID] = true
+	}
+	for _, f := range labels {
+		held[f.FilePID] = true
+	}
+	return len(held), nil
 }
 
 // SettleEnrichmentWrite records that the enrichment tag write-back has settled every

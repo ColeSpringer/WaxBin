@@ -275,6 +275,34 @@ func TestServeProxiedForcePhase(t *testing.T) {
 	if r.ArtistsEnriched != 2 || r.ReleaseGroupsEnriched != 0 {
 		t.Fatalf("forced-phase result = %+v, want both artists re-asked and no release groups", r)
 	}
+
+	// A phase list rides the wire too: refused like a forced phase when it is unknown,
+	// unbuilt, or leaves a forced phase out, and otherwise the run walks it alone.
+	for name, p := range map[string]proxy.EnrichParams{
+		"unknown":            {Phases: []string{"nope"}},
+		"forced outside it":  {Phases: []string{"release-group"}, ForcePhases: []string{"artist"}},
+		"unbuilt lyrics run": {Phases: []string{"lyrics"}},
+	} {
+		want := waxerr.CodeInvalid
+		if name == "unbuilt lyrics run" {
+			want = waxerr.CodeUnsupported
+		}
+		if _, err := c.RunEnrich(ctx, p); !waxerr.Is(err, want) {
+			t.Errorf("proxied phase list %s: err = %v, want %s", name, err, want)
+		}
+	}
+	jobPID, err = c.RunEnrich(ctx, proxy.EnrichParams{Force: true, Phases: []string{"release-group"}})
+	if err != nil {
+		t.Fatalf("proxied phase list: %v", err)
+	}
+	job = waitForJobDone(t, ctx, lib, jobPID)
+	r = enrich.Result{}
+	if err := json.Unmarshal([]byte(job.Result), &r); err != nil {
+		t.Fatalf("decode job result %q: %v", job.Result, err)
+	}
+	if r.ReleaseGroupsEnriched != 2 || r.ArtistsEnriched != 0 {
+		t.Fatalf("phase-list result = %+v, want both release groups and no artists", r)
+	}
 }
 
 // TestScannedBookEnriches covers the book arm of enrichment, which
@@ -1082,6 +1110,143 @@ func TestEnrichmentLimitedWriteTagsWritesWhatItLookedUp(t *testing.T) {
 	}
 	if res.Result.TagsWritten != 1 {
 		t.Fatalf("unlimited run wrote %d files, want the one still owed", res.Result.TagsWritten)
+	}
+}
+
+// TestEnrichmentPhaseListWriteTagsStaysInItsReach: a run limited to some phases writes
+// back only what is owed on the targets those phases walked, as a limited run does, so
+// asking for artist art alone does not rewrite every file owing a catalog-only value.
+func TestEnrichmentPhaseListWriteTagsStaysInItsReach(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	for i, album := range []string{"Animals", "Meddle"} {
+		writeFile(t, filepath.Join(root, album+".mp3"), testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
+			Title: album, Artist: "Pink Floyd", AlbumArtist: "Pink Floyd", Album: album,
+			Audio: testaudio.AudioWithSeed(byte(i + 1))}))
+	}
+	fields := &enrich.Mock{ProviderName: "discogs", Caps: enrich.CapFields,
+		EnrichFunc: func(_ context.Context, req enrich.Request) (*enrich.Candidate, error) {
+			if req.Type == enrich.TargetRecording {
+				return &enrich.Candidate{Fields: map[string]string{"bpm": "120"}}, nil
+			}
+			return nil, nil
+		}}
+	art := &enrich.Mock{ProviderName: "fanart", Caps: enrich.CapArtistArt}
+	lib, err := waxbin.Open(ctx, waxbin.Options{
+		DBPath:              db,
+		Roots:               []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}},
+		EnrichmentProviders: []enrich.Provider{fields, art},
+	})
+	if err != nil {
+		t.Fatalf("open library: %v", err)
+	}
+	t.Cleanup(func() { _ = lib.Close() })
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	// Both filled, neither written.
+	if _, err := lib.Enrich(ctx, waxbin.EnrichOptions{}); err != nil {
+		t.Fatalf("enrich: %v", err)
+	}
+
+	res, err := lib.Enrich(ctx, waxbin.EnrichOptions{Force: true, WriteTags: true,
+		Phases: []model.EnrichPhase{model.EnrichPhaseArtistArt}})
+	if err != nil {
+		t.Fatalf("artist-art enrich: %v", err)
+	}
+	if res.Result.ArtistArtEnriched != 1 || res.Result.TrackFieldsEnriched != 0 || res.Result.TagsWritten != 0 {
+		t.Fatalf("artist-art run = %+v, want the artist walked and no file written", res.Result)
+	}
+	res, err = lib.Enrich(ctx, waxbin.EnrichOptions{WriteTags: true})
+	if err != nil {
+		t.Fatalf("unlimited enrich: %v", err)
+	}
+	if res.Result.TagsWritten != 2 {
+		t.Fatalf("unlimited run wrote %d files, want both still owed", res.Result.TagsWritten)
+	}
+}
+
+// TestEnrichJobNamesItsTarget: a scoped enrichment records the item or entity it was
+// scoped to on its job row, and an unscoped one records nothing.
+func TestEnrichJobNamesItsTarget(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "a.mp3"), testaudio.BuildMP3("One", "Pink Floyd", "Animals", 1))
+	art := &enrich.Mock{ProviderName: "fanart", Caps: enrich.CapArtistArt}
+	lib, err := waxbin.Open(ctx, waxbin.Options{
+		DBPath:              filepath.Join(t.TempDir(), "catalog.db"),
+		Roots:               []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}},
+		EnrichmentProviders: []enrich.Provider{art},
+	})
+	if err != nil {
+		t.Fatalf("open library: %v", err)
+	}
+	t.Cleanup(func() { _ = lib.Close() })
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	item := itemPIDByTitle(t, ctx, lib, "One")
+	view, err := lib.Get(ctx, item)
+	if err != nil {
+		t.Fatalf("item: %v", err)
+	}
+	for _, tc := range []struct {
+		opts     waxbin.EnrichOptions
+		typ      string
+		pid      model.PID
+		starting bool
+	}{
+		{waxbin.EnrichOptions{}, "", "", false},
+		{waxbin.EnrichOptions{ItemPID: item}, "item", item, false},
+		{waxbin.EnrichOptions{EntityType: read.EntityArtist, EntityPID: view.ArtistPID}, "artist", view.ArtistPID, true},
+	} {
+		var jobPID model.PID
+		if tc.starting {
+			jobPID, err = lib.StartEnrich(ctx, tc.opts)
+			if err != nil {
+				t.Fatalf("start enrich %+v: %v", tc.opts, err)
+			}
+			waitForJobDone(t, ctx, lib, jobPID)
+		} else {
+			res, err := lib.Enrich(ctx, tc.opts)
+			if err != nil {
+				t.Fatalf("enrich %+v: %v", tc.opts, err)
+			}
+			jobPID = res.JobPID
+		}
+		j, err := lib.Job(ctx, jobPID)
+		if err != nil || j.TargetType != tc.typ || j.TargetPID != tc.pid {
+			t.Errorf("enrich %+v job = %+v (err %v), want target %q:%q", tc.opts, j, err, tc.typ, tc.pid)
+		}
+	}
+}
+
+// TestStartEnrichTakesItsPhasesAtTheCall: the background run walks the phases it was
+// started with, however the caller reuses its slice afterwards.
+func TestStartEnrichTakesItsPhasesAtTheCall(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "a.mp3"), testaudio.BuildMP3("One", "Pink Floyd", "Animals", 1))
+	art := &enrich.Mock{ProviderName: "fanart", Caps: enrich.CapArtistArt}
+	lib, err := waxbin.Open(ctx, waxbin.Options{
+		DBPath:              filepath.Join(t.TempDir(), "catalog.db"),
+		Roots:               []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}},
+		EnrichmentProviders: []enrich.Provider{art},
+	})
+	if err != nil {
+		t.Fatalf("open library: %v", err)
+	}
+	t.Cleanup(func() { _ = lib.Close() })
+	scanLib(t, ctx, lib)
+	phases := []model.EnrichPhase{model.EnrichPhaseArtistArt}
+	jobPID, err := lib.StartEnrich(ctx, waxbin.EnrichOptions{Phases: phases, ForcePhases: phases})
+	if err != nil {
+		t.Fatalf("start enrich: %v", err)
+	}
+	phases[0] = "nope"
+	if job := waitForJobDone(t, ctx, lib, jobPID); job.State != model.JobDone {
+		t.Fatalf("enrich job = %+v, want done with the phases it was started with", job)
 	}
 }
 

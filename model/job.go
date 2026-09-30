@@ -28,7 +28,12 @@ type Job struct {
 	// Result is a JSON summary a completed job records for a client tailing it
 	// (a server-run scan/analyze/enrich/organize the client did not run in-process).
 	// Empty while running and for jobs that record no summary.
-	Result      string
+	Result string
+	// TargetType and TargetPID name what a targeted job ran on: item, artist,
+	// release_group or album for a scoped enrichment, library for a single-library scan,
+	// trash for one entry's restore or purge. Both are empty for a whole-catalog pass.
+	TargetType  string
+	TargetPID   PID
 	StartedAt   int64 // unix nanoseconds
 	HeartbeatAt int64 // unix nanoseconds
 	FinishedAt  int64 // unix nanoseconds, 0 while running

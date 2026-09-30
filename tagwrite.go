@@ -27,15 +27,28 @@ import (
 // is non-fatal (the measurement is in the catalog either way), but a run where every
 // write failed must not be indistinguishable from a run with nothing to write.
 func (l *Library) writeReplayGainTags(ctx context.Context) (rgWriteCounts, error) {
-	var c rgWriteCounts
 	rows, err := l.store.ReplayGainWriteback(ctx)
 	if err != nil {
-		return c, err
+		return rgWriteCounts{}, err
 	}
+	return l.writeReplayGainRows(ctx, rows)
+}
+
+// writeReplayGainRows writes the rows writeReplayGainTags read.
+func (l *Library) writeReplayGainRows(ctx context.Context, rows []model.ReplayGainRow) (rgWriteCounts, error) {
+	var c rgWriteCounts
 	w := meta.NewWriter()
 	for _, r := range rows {
 		if ctx.Err() != nil {
 			return c, ctx.Err()
+		}
+		// The library may have been flagged read-only since the select; the gain stays
+		// owed and the first pass after the flag clears writes it.
+		if ro, err := l.store.LibraryReadOnly(ctx, r.LibraryID); err != nil {
+			return c, err
+		} else if ro {
+			l.log.Debug("replaygain tag write skipped in a read-only library", "path", string(r.Path))
+			continue
 		}
 		edits, gain := replayGainEdits(r)
 		var opts []meta.ApplyOption
@@ -258,17 +271,30 @@ func r128Gain(rgDB float64) int {
 // state and locks. reanchorBookIdentity re-reads the file, so it self-corrects when a
 // write did not land.
 func (l *Library) writeEnrichmentTags(ctx context.Context, scope *model.EnrichScope) (enrichWriteCounts, error) {
-	var c enrichWriteCounts
 	rows, err := l.store.EnrichmentWriteback(ctx, scope)
 	if err != nil {
-		return c, err
+		return enrichWriteCounts{}, err
 	}
 	// The members still owed a label, fetched first so the item walk can strike the
 	// ones it opens anyway; what is left is written on its own.
 	labels, err := l.store.EnrichedAlbumLabelFiles(ctx, scope)
 	if err != nil {
-		return c, err
+		return enrichWriteCounts{}, err
 	}
+	// The selects leave out read-only libraries, whose files are counted here instead;
+	// the write loop adds any flagged since.
+	held, err := l.store.EnrichmentHeldReadOnly(ctx, scope)
+	if err != nil {
+		return enrichWriteCounts{}, err
+	}
+	c, err := l.writeEnrichmentRows(ctx, rows, labels)
+	c.readOnly += held
+	return c, err
+}
+
+// writeEnrichmentRows writes the rows and the label leftovers writeEnrichmentTags read.
+func (l *Library) writeEnrichmentRows(ctx context.Context, rows []model.EnrichedTagRow, labels []model.EntityFieldFile) (enrichWriteCounts, error) {
+	var c enrichWriteCounts
 	leftover := make(map[model.PID]model.EntityFieldFile, len(labels))
 	for _, f := range labels {
 		// First album wins for a file two of them somehow claim, which cannot happen
@@ -294,9 +320,23 @@ func (l *Library) writeEnrichmentTags(ctx context.Context, scope *model.EnrichSc
 	// One shared file arrives once per item that shares it, and the refusal below is per
 	// file: the count and the drift row would otherwise repeat for the same file.
 	refused := map[model.PID]bool{}
+	readOnly := map[model.PID]bool{}
 	for _, r := range rows {
 		if ctx.Err() != nil {
 			return c, ctx.Err()
+		}
+		// The library may have been flagged read-only since the select. Nothing is
+		// written or settled, so the file and its label stay owed for the first pass
+		// after the flag clears.
+		if ro, err := l.store.LibraryReadOnly(ctx, r.LibraryID); err != nil {
+			return c, err
+		} else if ro {
+			delete(leftover, r.FilePID)
+			if !readOnly[r.FilePID] {
+				readOnly[r.FilePID] = true
+				c.readOnly++
+			}
+			continue
 		}
 		if r.Kind == model.KindBook {
 			if mark, ok := abandoned[r.ItemPID]; ok {
@@ -365,6 +405,22 @@ func (l *Library) writeEnrichmentTags(ctx context.Context, scope *model.EnrichSc
 		l.reanchorBookIdentity(ctx, itemPID, primaryOf[itemPID])
 	}
 	return c, l.writeEnrichmentAlbumLabels(ctx, w, leftover, &c)
+}
+
+// readOnlyLibraryRefusal is why a file in a read-only library is not written.
+const readOnlyLibraryRefusal = "on-disk tag write-back is unavailable in a read-only library"
+
+// readOnlyRefusal is the reason a write to a file in library id is refused, or empty
+// when it may go ahead. A failed read of the flags refuses too, since the write cannot
+// be shown to be allowed.
+func readOnlyRefusal(readOnly map[int64]bool, err error, id int64) string {
+	switch {
+	case err != nil:
+		return "checking the library's read-only flag: " + err.Error()
+	case readOnly[id]:
+		return readOnlyLibraryRefusal
+	}
+	return ""
 }
 
 // sharedFileRefusal is why a file several items back, or one carrying an offset window,
@@ -574,6 +630,12 @@ func (l *Library) writeEnrichmentAlbumLabels(ctx context.Context, w *meta.Writer
 		}
 		f := leftover[pid]
 		path := string(f.Path)
+		if ro, err := l.store.LibraryReadOnly(ctx, f.LibraryID); err != nil {
+			return err
+		} else if ro {
+			c.readOnly++
+			continue
+		}
 		if f.Shared {
 			c.unrepresented++
 			l.noteEnrichmentDrift(ctx, pid, path, sharedFileRefusal)
@@ -606,6 +668,7 @@ type enrichWriteCounts struct {
 	failed        int
 	unrepresented int
 	skipped       int
+	readOnly      int // files a read-only library holds back, flagged before the select or since
 }
 
 // enrichmentTagFields is the fixed per-kind order enrichmentEdits walks, so one file's

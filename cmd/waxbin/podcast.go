@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -410,23 +411,37 @@ func newPodcastSyncCmd(g *globals) *cobra.Command {
 				fmt.Fprintf(out(cmd), "Synced: %d new, %d updated\n", res.EpisodesAdded, res.EpisodesUpdated)
 				return nil
 			}
-			results, err := lib.Podcasts().SyncAll(ctx(cmd))
+			res, err := lib.Podcasts().SyncAll(ctx(cmd))
 			if err != nil {
 				return err
 			}
 			added, updated := 0, 0
-			for _, r := range results {
+			for _, r := range res.Results {
 				added += r.EpisodesAdded
 				updated += r.EpisodesUpdated
 			}
+			type failure struct {
+				PodcastPID model.PID `json:"podcastPid"`
+				Err        string    `json:"error"`
+			}
+			failures := make([]failure, 0, len(res.Failures))
+			for pid, ferr := range res.Failures {
+				failures = append(failures, failure{pid, ferr.Error()})
+			}
+			sort.Slice(failures, func(i, j int) bool { return failures[i].PodcastPID < failures[j].PodcastPID })
 			if g.jsonOut {
 				return printJSON(cmd, struct {
-					Feeds   int `json:"feeds"`
-					Added   int `json:"added"`
-					Updated int `json:"updated"`
-				}{len(results), added, updated})
+					Feeds    int       `json:"feeds"`
+					Added    int       `json:"added"`
+					Updated  int       `json:"updated"`
+					Failed   int       `json:"failed"`
+					Failures []failure `json:"failures,omitempty"`
+				}{len(res.Results), added, updated, len(failures), failures})
 			}
-			fmt.Fprintf(out(cmd), "Synced %d feeds: %d new, %d updated\n", len(results), added, updated)
+			for _, f := range failures {
+				fmt.Fprintf(out(cmd), "  failed: %s: %s\n", f.PodcastPID, f.Err)
+			}
+			fmt.Fprintf(out(cmd), "Synced %d feeds: %d new, %d updated (%d failed)\n", len(res.Results), added, updated, len(failures))
 			return nil
 		},
 	}

@@ -19,6 +19,8 @@ CREATE TABLE job (
   message      TEXT    NOT NULL DEFAULT '',
   error        TEXT    NOT NULL DEFAULT '',
   result       TEXT    NOT NULL DEFAULT '',  -- JSON result summary of a completed job, for a tailer
+  target_type  TEXT    NOT NULL DEFAULT '',  -- what a targeted job ran on (model.Job.TargetType), '' for a whole-catalog pass
+  target_pid   TEXT    NOT NULL DEFAULT '',
   started_at   INTEGER NOT NULL,
   heartbeat_at INTEGER NOT NULL,
   finished_at  INTEGER

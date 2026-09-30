@@ -3,6 +3,7 @@ package waxbin
 import (
 	"context"
 	"encoding/json"
+	"slices"
 
 	"github.com/colespringer/waxbin/enrich"
 	"github.com/colespringer/waxbin/jobs"
@@ -30,7 +31,7 @@ type jobFn = func(context.Context, *jobs.Handle) error
 // context, so the job outlives the client request and is canceled only on server
 // shutdown). A failure to even start the job (a scope already leased, or a create
 // error) is returned synchronously.
-func (l *Library) startJob(ctx context.Context, kind, scope string, work jobFn) (model.PID, error) {
+func (l *Library) startJob(ctx context.Context, spec jobs.Spec, work jobFn) (model.PID, error) {
 	if l.ReadOnly() {
 		return "", waxerr.New(waxerr.CodeUnsupported, "waxbin.startJob", "a background job requires a read-write library")
 	}
@@ -46,7 +47,7 @@ func (l *Library) startJob(ctx context.Context, kind, scope string, work jobFn) 
 	go func() {
 		defer l.jobsWG.Done()
 		ran := false
-		_, err := l.jobs.Run(ctx, kind, scope, func(jctx context.Context, h *jobs.Handle) error {
+		_, err := l.jobs.Run(ctx, spec, func(jctx context.Context, h *jobs.Handle) error {
 			// The job row now exists: hand its PID back so the submit call can return
 			// while the work runs on.
 			ran = true
@@ -105,6 +106,15 @@ func (l *Library) scanWork(libs []*model.Library, req ScanRequest, out *ScanResu
 	}
 }
 
+// scanSpec names a scan's job, targeting the one library a scoped scan walks.
+func scanSpec(req ScanRequest) jobs.Spec {
+	spec := jobs.Spec{Kind: "scan", Scope: fsMutateScope}
+	if req.LibraryPID != "" {
+		spec.TargetType, spec.TargetPID = "library", req.LibraryPID
+	}
+	return spec
+}
+
 // StartScan submits a scan as a background job and returns its PID immediately.
 // The job runs to completion in this process; a client follows it through Job and
 // reads the scan.Result summary from the finished job's Result.
@@ -113,7 +123,7 @@ func (l *Library) StartScan(ctx context.Context, req ScanRequest) (model.PID, er
 	if err != nil {
 		return "", err
 	}
-	return l.startJob(ctx, "scan", fsMutateScope, func(jctx context.Context, h *jobs.Handle) error {
+	return l.startJob(ctx, scanSpec(req), func(jctx context.Context, h *jobs.Handle) error {
 		out := &ScanResult{}
 		if err := l.scanWork(libs, req, out)(jctx, h); err != nil {
 			return err
@@ -154,7 +164,7 @@ func (l *Library) analyzeWork(writeRG bool, out *AnalyzeResult) jobFn {
 // StartAnalyze submits the analyze pass as a background job and returns its PID.
 func (l *Library) StartAnalyze(ctx context.Context, opts AnalyzeOptions) (model.PID, error) {
 	writeRG := l.opts.WriteReplayGainTags || opts.WriteReplayGainTags
-	return l.startJob(ctx, "analyze", "analyze", func(jctx context.Context, h *jobs.Handle) error {
+	return l.startJob(ctx, jobs.Spec{Kind: "analyze", Scope: "analyze"}, func(jctx context.Context, h *jobs.Handle) error {
 		out := &AnalyzeResult{}
 		if err := l.analyzeWork(writeRG, out)(jctx, h); err != nil {
 			return err
@@ -171,7 +181,8 @@ func (l *Library) StartAnalyze(ctx context.Context, opts AnalyzeOptions) (model.
 // bad scope never starts a job.
 func (l *Library) enrichWork(opts EnrichOptions, scope *model.EnrichScope, out *EnrichResult) jobFn {
 	return func(ctx context.Context, h *jobs.Handle) error {
-		r, err := l.enricher.Run(ctx, enrich.RunOptions{Force: opts.Force, Limit: opts.Limit, ForcePhases: opts.ForcePhases, Scope: scope},
+		r, err := l.enricher.Run(ctx, enrich.RunOptions{Force: opts.Force, Limit: opts.Limit, ForcePhases: opts.ForcePhases,
+			Phases: opts.Phases, Scope: scope},
 			func(p float64, msg string) error { return h.Heartbeat(ctx, p, msg) })
 		if r != nil {
 			out.Result = *r
@@ -180,12 +191,13 @@ func (l *Library) enrichWork(opts EnrichOptions, scope *model.EnrichScope, out *
 			return err
 		}
 		// After the pass, so it writes what this run filled along with anything still
-		// owed within the run's reach: the scope for a scoped run, what a limited run
-		// looked up, and everything for an unlimited full run. A write-back failure is
-		// reported in the counts, not raised: the values are in the catalog either way.
+		// owed within the run's reach: the scope for a scoped run, what a limited or
+		// phase-listed run looked up, and everything for an unlimited full run. A
+		// write-back failure is reported in the counts, not raised: the values are in the
+		// catalog either way.
 		if l.opts.WriteEnrichmentTags || opts.WriteTags {
 			reach := scope
-			if reach == nil && opts.Limit > 0 {
+			if reach == nil && (opts.Limit > 0 || len(opts.Phases) > 0) {
 				reach = r.Reach
 			}
 			c, werr := l.writeEnrichmentTags(ctx, reach)
@@ -194,9 +206,23 @@ func (l *Library) enrichWork(opts EnrichOptions, scope *model.EnrichScope, out *
 			}
 			out.Result.TagsWritten, out.Result.TagsFailed = c.written, c.failed
 			out.Result.TagsUnrepresented, out.Result.TagsSkipped = c.unrepresented, c.skipped
+			out.Result.TagsReadOnly = c.readOnly
 		}
 		return nil
 	}
+}
+
+// enrichSpec names an enrichment's job, targeting the item or entity a scoped run
+// names.
+func enrichSpec(opts EnrichOptions) jobs.Spec {
+	spec := jobs.Spec{Kind: "enrich", Scope: "enrich"}
+	switch {
+	case opts.ItemPID != "":
+		spec.TargetType, spec.TargetPID = "item", opts.ItemPID
+	case opts.EntityPID != "":
+		spec.TargetType, spec.TargetPID = string(opts.EntityType), opts.EntityPID
+	}
+	return spec
 }
 
 // StartEnrich submits the enrichment pass as a background job and returns its PID.
@@ -210,7 +236,9 @@ func (l *Library) StartEnrich(ctx context.Context, opts EnrichOptions) (model.PI
 	if err != nil {
 		return "", err
 	}
-	return l.startJob(ctx, "enrich", "enrich", func(jctx context.Context, h *jobs.Handle) error {
+	// The job runs on after this returns, so it gets its own phase lists.
+	opts.Phases, opts.ForcePhases = slices.Clone(opts.Phases), slices.Clone(opts.ForcePhases)
+	return l.startJob(ctx, enrichSpec(opts), func(jctx context.Context, h *jobs.Handle) error {
 		out := &EnrichResult{}
 		if err := l.enrichWork(opts, scope, out)(jctx, h); err != nil {
 			return err
@@ -224,12 +252,20 @@ func (l *Library) StartEnrich(ctx context.Context, opts EnrichOptions) (model.PI
 
 // RunOrganize submits an organize pass as a background job and returns its PID. The
 // job plans across the managed libraries and executes the moves in this process, so
-// a server stays available while it runs. profileName overrides each library's
-// configured profile when non-empty. The client tails the job and reads the
-// organize.Report summary from Result.
-func (l *Library) RunOrganize(ctx context.Context, q query.Query, profileName string) (model.PID, error) {
-	return l.startJob(ctx, "organize", fsMutateScope, func(jctx context.Context, h *jobs.Handle) error {
-		plan, err := l.PlanOrganize(jctx, q, profileName)
+// a server stays available while it runs. opts overrides each library's configured
+// profile as it does for PlanOrganize; a passed profile is checked and copied before
+// the job starts, so the job never sees the caller's later changes. The client tails
+// the job and reads the organize.Report summary from Result.
+func (l *Library) RunOrganize(ctx context.Context, q query.Query, opts OrganizeOptions) (model.PID, error) {
+	if err := checkOrganizeOptions("waxbin.RunOrganize", opts); err != nil {
+		return "", err
+	}
+	if opts.Profile != nil {
+		p := *opts.Profile
+		opts.Profile = &p
+	}
+	return l.startJob(ctx, jobs.Spec{Kind: "organize", Scope: fsMutateScope}, func(jctx context.Context, h *jobs.Handle) error {
+		plan, err := l.PlanOrganize(jctx, q, opts)
 		if err != nil {
 			return err
 		}

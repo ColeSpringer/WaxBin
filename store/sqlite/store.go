@@ -80,8 +80,31 @@ type Store struct {
 	subMu sync.Mutex                     // guards subs
 	subs  map[chan model.Change]struct{} // in-process change_log listeners
 
-	dvMu   sync.Mutex // guards dvConn
-	dvConn *sql.Conn  // pinned connection for PRAGMA data_version polling
+	// dvConn is the pinned connection DataVersion reads PRAGMA data_version from, dvRaw
+	// the last value it read there (-1 while none is pinned), and dvOut the counter
+	// DataVersion returns, bumped whenever the pragma moves or the connection is
+	// replaced. dvMu guards all three.
+	dvMu   sync.Mutex
+	dvConn *sql.Conn
+	dvRaw  int64
+	dvOut  int64
+
+	// roFile is the catalog file a read-only store opened, so DataVersion can tell when
+	// a restore renamed another file over the path.
+	roFile os.FileInfo
+
+	// mark is what Suspend left for Reopen to compare against, kept until a reopen
+	// succeeds. wmu guards it.
+	mark *suspendMark
+}
+
+// suspendMark records the catalog a suspend closed: its file, and the change feed's
+// head then (-1 when it could not be read). replaced is set once a reopen has found
+// another catalog, so a retry after a failed reopen still says so.
+type suspendMark struct {
+	file     os.FileInfo
+	head     int64
+	replaced bool
 }
 
 // Open opens (creating if needed) the catalog at opt.Path. A read-write open
@@ -126,12 +149,18 @@ func Open(ctx context.Context, opt OpenOptions) (*Store, error) {
 		thumbMem:    newThumbCache(thumbCacheMax, thumbCacheBytes),
 		thumbFail:   newThumbCache(thumbFailMax, thumbFailBytes),
 		thumbFlight: newThumbFlight(),
+		dvRaw:       -1,
 	}
 
 	if opt.ReadOnly {
-		if _, err := os.Stat(opt.Path); err != nil {
+		fi, err := os.Stat(opt.Path)
+		if err != nil {
 			return nil, waxerr.Wrapf(waxerr.CodeNotFound, op, err, "opening read-only %s", opt.Path)
 		}
+		// Windows reads a file's identity at its first comparison, so compare now, while
+		// the file at the path is the one being opened.
+		_ = os.SameFile(fi, fi)
+		s.roFile = fi
 		rdb, err := openDB(ctx, roDSN(opt), opt.ReadPoolSize)
 		if err != nil {
 			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
@@ -211,7 +240,8 @@ func (s *Store) Close() error { return s.teardown(true) }
 // lock, and closes the connections, but KEEPS the in-process change subscribers
 // registered so an embedder's subscription survives the hand-off and resumes
 // delivering after Reopen. (A full Close would close those channels, terminating
-// the embedder's range loop with no way to re-establish it.)
+// the embedder's range loop with no way to re-establish it.) It also records the file
+// and the feed's head, for Reopen to tell the same catalog from a replaced one.
 func (s *Store) Suspend() error { return s.teardown(false) }
 
 // teardown closes the store, optionally closing change subscribers. closeSubs is
@@ -223,11 +253,22 @@ func (s *Store) teardown(closeSubs bool) error {
 	// a closed *sql.DB and gets an error rather than a nil-pointer dereference.
 	s.wmu.Lock()
 	if s.closed {
+		// A suspended store keeps its subscribers and its mark, so a Close now still has
+		// both to drop; a repeated Suspend keeps them.
+		if closeSubs {
+			s.mark = nil
+		}
 		s.wmu.Unlock()
+		if closeSubs {
+			s.closeSubscribers()
+		}
 		return nil
 	}
 	s.closed = true
 	if s.write != nil {
+		if !closeSubs && s.mark == nil {
+			s.mark = s.markLocked()
+		}
 		_, _ = s.write.ExecContext(context.Background(), "PRAGMA wal_checkpoint(TRUNCATE)")
 	}
 	s.wmu.Unlock()
@@ -262,35 +303,36 @@ func (s *Store) teardown(closeSubs bool) error {
 // The lock re-acquire retries with bounded backoff because a foreground process
 // may still be releasing the flock as the hand-off ends. migrate runs again so a
 // restore/rebuild that replaced the DB file mid-hand-off is brought current; the
-// rest mirrors Open's read-write reconciliation.
-func (s *Store) Reopen(ctx context.Context) error {
+// rest mirrors Open's read-write reconciliation. The result says whether it reopened
+// and whether the catalog is still the one Suspend closed (see ReopenResult).
+func (s *Store) Reopen(ctx context.Context) (ReopenResult, error) {
 	const op = "store.Reopen"
 	if s.readOnly {
-		return waxerr.New(waxerr.CodeUnsupported, op, "a read-only store cannot be reopened")
+		return ReopenResult{}, waxerr.New(waxerr.CodeUnsupported, op, "a read-only store cannot be reopened")
 	}
 	s.wmu.Lock()
 	closed := s.closed
 	s.wmu.Unlock()
 	if !closed {
-		return nil
+		return ReopenResult{}, nil
 	}
 
 	// Acquire the lock and open the connections without holding wmu: the retry can
 	// sleep, and the reconciliation steps below take wmu themselves via writeTx.
 	lock, err := acquireWriteLockRetry(ctx, s.opt.Path+".waxlock", s.opt.Owner, s.opt.IPCSocket)
 	if err != nil {
-		return err
+		return ReopenResult{}, err
 	}
 	wdb, err := openDB(ctx, rwDSN(s.opt), 1)
 	if err != nil {
 		_ = lock.release()
-		return waxerr.Wrap(waxerr.CodeIO, op, err)
+		return ReopenResult{}, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
 	rdb, err := openDB(ctx, readDSN(s.opt), s.opt.ReadPoolSize)
 	if err != nil {
 		_ = wdb.Close()
 		_ = lock.release()
-		return waxerr.Wrap(waxerr.CodeIO, op, err)
+		return ReopenResult{}, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
 
 	s.wmu.Lock()
@@ -301,36 +343,107 @@ func (s *Store) Reopen(ctx context.Context) error {
 		_ = rdb.Close()
 		_ = wdb.Close()
 		_ = lock.release()
-		return nil
+		return ReopenResult{}, nil
 	}
 	s.lock, s.write, s.read = lock, wdb, rdb
+	replaced := s.catchUpLocked(ctx)
 	s.closed = false
 	s.wmu.Unlock()
 
 	// The store is open again; run the same post-open reconciliation as Open. On any
-	// failure, Close tears the half-restored store back down so it stays cleanly
-	// closed (Close is safe here because s.closed is now false).
+	// failure the half-restored store is suspended again, keeping its subscribers and
+	// the mark, so a later Reopen can still finish the job.
 	if err := s.migrate(ctx); err != nil {
-		_ = s.Close()
-		return err
+		_ = s.Suspend()
+		return ReopenResult{}, err
 	}
 	if n, err := s.ReclaimOrphans(ctx, nowNS()); err != nil {
-		_ = s.Close()
-		return err
+		_ = s.Suspend()
+		return ReopenResult{}, err
 	} else if n > 0 {
 		s.log.Info("reclaimed orphaned jobs on reopen", "count", n)
 	}
 	if n, err := s.recoverOrganize(ctx); err != nil {
-		_ = s.Close()
-		return err
+		_ = s.Suspend()
+		return ReopenResult{}, err
 	} else if n > 0 {
 		s.log.Info("recovered interrupted organize moves on reopen", "count", n)
 	}
 	if err := s.ensureDefaultUser(ctx); err != nil {
-		_ = s.Close()
-		return err
+		_ = s.Suspend()
+		return ReopenResult{}, err
 	}
-	return nil
+	s.wmu.Lock()
+	s.mark = nil
+	s.wmu.Unlock()
+	return ReopenResult{Reopened: true, Replaced: replaced}, nil
+}
+
+// markLocked records the catalog a suspend is about to close. The caller holds wmu.
+func (s *Store) markLocked() *suspendMark {
+	m := &suspendMark{head: -1}
+	if err := s.write.QueryRowContext(context.Background(),
+		"SELECT COALESCE(MAX(seq), 0) FROM change_log").Scan(&m.head); err != nil {
+		m.head = -1
+	}
+	if fi, err := os.Stat(s.path); err == nil {
+		// Windows reads a file's identity at its first comparison, so compare now,
+		// while the file at the path is the one being closed.
+		_ = os.SameFile(fi, fi)
+		m.file = fi
+	}
+	return m
+}
+
+// catchUpLocked compares the reopened catalog with the suspend's mark and reports
+// whether it was replaced: another file at the path, a feed that went back, or new
+// rows already pruned away. Otherwise the feed ran on, and the rows another process
+// wrote meanwhile, never published here, go to subscribers now. The caller holds wmu,
+// so no write lands between the head read here and the rows published.
+func (s *Store) catchUpLocked(ctx context.Context) bool {
+	m := s.mark
+	if m == nil {
+		// Closed without a suspend, so there is nothing to compare against.
+		m = &suspendMark{head: -1}
+		s.mark = m
+	}
+	if !m.replaced {
+		m.replaced = s.replacedSince(ctx, m)
+	}
+	return m.replaced
+}
+
+// replacedSince reports whether the catalog now open differs from the one m recorded,
+// publishing the rows written since m when it does not.
+func (s *Store) replacedSince(ctx context.Context, m *suspendMark) bool {
+	if m.file == nil || m.head < 0 {
+		return true
+	}
+	if fi, err := os.Stat(s.path); err != nil || !os.SameFile(m.file, fi) {
+		return true
+	}
+	var head, oldest int64
+	if err := s.write.QueryRowContext(ctx,
+		"SELECT COALESCE(MAX(seq), 0), COALESCE(MIN(seq), 0) FROM change_log").Scan(&head, &oldest); err != nil {
+		return true
+	}
+	if head < m.head || (head > m.head && oldest > m.head+1) {
+		return true
+	}
+	if head > m.head && s.hasSubscribers() {
+		s.publishSince(ctx, m.head)
+	}
+	m.head = head
+	return false
+}
+
+// ReopenResult reports what a Reopen found. Reopened is false for a store that was
+// already open. Replaced reports that the catalog is not the one Suspend closed, or
+// that its feed does not run on from where it stopped; when it is false, the rows
+// another process wrote in between have been published to subscribers.
+type ReopenResult struct {
+	Reopened bool
+	Replaced bool
 }
 
 // ReadOnly reports whether the store was opened read-only.

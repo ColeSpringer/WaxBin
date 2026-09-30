@@ -3,12 +3,14 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/colespringer/waxbin"
 	"github.com/colespringer/waxbin/enrich"
 	"github.com/colespringer/waxbin/model"
+	"github.com/colespringer/waxbin/waxerr"
 	"github.com/spf13/cobra"
 )
 
@@ -30,6 +32,8 @@ func TestEnrichScopeFlagValidation(t *testing.T) {
 		{"retired aux-art key", []string{"--force-phase", "aux-art"}, "unknown enrichment phase \"aux-art\" (want one of artist|release-group|album-release|group-art|"},
 		{"phase with force", []string{"--force", "--force-phase", "artist"}, "exclusive"},
 		{"phase with a scope", []string{"--item", "01J0X", "--force-phase", "lyrics"}, "cannot combine"},
+		{"unknown listed phase", []string{"--phase", "nope"}, "unknown enrichment phase"},
+		{"forced phase not listed", []string{"--phase", "lyrics", "--force-phase", "artist"}, "not among"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -158,5 +162,38 @@ func TestEnrichSummaryReportsStalled(t *testing.T) {
 	}
 	if strings.Contains(string(zero), "stalled") {
 		t.Errorf("zero payload = %s, want no stalled key", zero)
+	}
+}
+
+// TestEnrichPhaseReachesTheRun: the phase list is handed to the run, which refuses one
+// this install does not build before anything is asked.
+func TestEnrichPhaseReachesTheRun(t *testing.T) {
+	t.Setenv("WAXBIN_ENRICH_CONTACT", "test@example.com")
+	db, root := filepath.Join(t.TempDir(), "catalog.db"), t.TempDir()
+	_, err := runCLIJSON(t, db, root, "enrich", "--phase", "track-fields")
+	if !waxerr.Is(err, waxerr.CodeUnsupported) || !strings.Contains(err.Error(), "track-fields") {
+		t.Fatalf("enrich --phase track-fields = %v, want the unbuilt phase refused", err)
+	}
+}
+
+// TestEnrichSummaryReportsReadOnlySkips: files left owed because their library turned
+// read-only during the write-back are counted in both outputs, apart from the other
+// skips.
+func TestEnrichSummaryReportsReadOnlySkips(t *testing.T) {
+	cmd := &cobra.Command{}
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	if err := renderEnrichResult(cmd, &globals{}, &waxbin.EnrichResult{Result: enrich.Result{TagsWritten: 1, TagsReadOnly: 2}}); err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	if !strings.Contains(buf.String(), "2 in read-only libraries") {
+		t.Errorf("summary lacks the read-only count:\n%s", buf.String())
+	}
+	payload, err := json.Marshal(toEnrichView(&waxbin.EnrichResult{Result: enrich.Result{TagsReadOnly: 2}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(payload), `"tagsReadOnly":2`) {
+		t.Errorf("payload = %s, want tagsReadOnly 2", payload)
 	}
 }

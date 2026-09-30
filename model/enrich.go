@@ -15,6 +15,15 @@ const (
 	EnrichBookType         = "book"
 )
 
+// Marker labels the store writes into entity_enrichment.provider where a provider's
+// name would go: EnrichProviderNone for a lookup no provider answered, and
+// EnrichProviderMBEdition for an album release the edition tier decided rather than a
+// printed identifier.
+const (
+	EnrichProviderNone      = "none"
+	EnrichProviderMBEdition = "musicbrainz:edition"
+)
+
 // Artist relation kinds stored in artist_relation.
 const (
 	RelationMemberOf = "member_of"

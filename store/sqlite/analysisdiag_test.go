@@ -132,7 +132,7 @@ func TestFilesDurationMismatch(t *testing.T) {
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/e-stale.mp3", essence: "e-new", content: "c-new",
 		title: "e-stale.mp3", artist: "X", album: "Al", durationMS: 60_000})
 
-	got, total, err := st.FilesDurationMismatch(ctx, 10)
+	got, total, err := st.FilesDurationMismatch(ctx, 10, 0)
 	if err != nil {
 		t.Fatalf("FilesDurationMismatch: %v", err)
 	}
@@ -146,9 +146,13 @@ func TestFilesDurationMismatch(t *testing.T) {
 		t.Errorf("second = %+v, want f-long at 300000 ms header, 200000 ms decoded", got[1])
 	}
 
-	got, total, err = st.FilesDurationMismatch(ctx, 1)
+	got, total, err = st.FilesDurationMismatch(ctx, 1, 0)
 	if err != nil || total != 2 || len(got) != 1 || got[0].FilePID != short {
 		t.Errorf("sample of 1 = %+v (total %d, err %v), want a-short of 2", got, total, err)
+	}
+	got, total, err = st.FilesDurationMismatch(ctx, 0, 1)
+	if err != nil || total != 2 || len(got) != 1 || got[0].FilePID != long {
+		t.Errorf("all after 1 = %+v (total %d, err %v), want f-long of 2", got, total, err)
 	}
 }
 

@@ -285,7 +285,7 @@ func scanFile(sc rowScanner) (*model.File, error) {
 func scanLibrary(sc rowScanner) (*model.Library, error) {
 	var lib model.Library
 	var mode, media string
-	if err := sc.Scan(&lib.ID, &lib.PID, &lib.Root, &lib.DisplayRoot, &mode, &media, &lib.Profile, &lib.CreatedAt); err != nil {
+	if err := sc.Scan(&lib.ID, &lib.PID, &lib.Root, &lib.DisplayRoot, &mode, &media, &lib.Profile, &lib.ReadOnly, &lib.CreatedAt); err != nil {
 		return nil, err
 	}
 	lib.Mode = model.Mode(mode)
@@ -293,7 +293,7 @@ func scanLibrary(sc rowScanner) (*model.Library, error) {
 	return &lib, nil
 }
 
-const librarySelect = "SELECT id, pid, root, display_root, mode, media, profile, created_at FROM library"
+const librarySelect = "SELECT id, pid, root, display_root, mode, media, profile, read_only, created_at FROM library"
 
 func libraryByRootTx(ctx context.Context, q queryer, root []byte) (*model.Library, error) {
 	return libraryByRootDB(ctx, q, root)
