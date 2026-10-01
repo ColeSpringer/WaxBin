@@ -25,8 +25,16 @@ type Library struct {
 	// an import would route here waits where it is rather than going to another library.
 	// The catalog still records edits. Enrichment and ReplayGain values stay owed and are
 	// written by the first pass after the flag clears; an edit's refused write-back is
-	// listed for review as unsynced and has to be made again.
+	// listed for review as unsynced, its values stay listed as tag_write_owed, and it has
+	// to be made again.
 	ReadOnly bool
+	// FolderFallback lets a scan name a track that carries no artist, album artist or
+	// album at all from its folders: the grandparent folder as the artist and the parent
+	// as the album, less a trailing " (YYYY)". It needs a file two folders down, so a
+	// loose file names nothing, and it never applies to a book. Only an in-place library
+	// takes it, since a managed one's folders are WaxBin's own rendering of the catalog.
+	// Off by default, since a folder layout is a guess a tag is not.
+	FolderFallback bool
 }
 
 // MediaType returns the library's media type, defaulting to mixed when unset so an
@@ -201,6 +209,9 @@ type Tags struct {
 	AlbumSort       string
 	AlbumArtistSort string
 	ComposerSort    string
+	// TitleSort is read only to fill an empty title; the tag itself stays a custom tag,
+	// since nothing collates by it.
+	TitleSort string
 
 	// External identifiers (MBID-first identity + enrichment fast-path).
 	MBID             string // MusicBrainz recording id
@@ -311,7 +322,9 @@ type ItemView struct {
 	AlbumArtist string
 	Album       string
 	TrackNo     int
+	TrackTotal  int
 	DiscNo      int
+	DiscTotal   int
 	Year        int
 	Genre       string
 	Compilation bool // a multi-artist compilation (drives Various Artists layout)

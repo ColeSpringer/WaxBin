@@ -70,6 +70,14 @@ const (
 	// row, and for a shared file it refuses, which it settles since the refusal would
 	// only repeat.
 	DiagTagWriteUnsynced DiagnosticCode = "tag_write_unsynced"
+	// DiagTagWriteOwed marks a value an edit changed in the catalog that the file does not
+	// carry yet. It is the edit writer's, one row per value with its key in TagKey: an
+	// item field or credit ("genre", "credit.composer"), or one of the Owed keys. The edit
+	// records it in its own transaction, and a write-back that lands the value clears it,
+	// so a failed or refused write-back leaves it standing. A scan that re-reads the file
+	// clears it once the catalog holds what the file says; a writer replacing its set never
+	// drops one.
+	DiagTagWriteOwed DiagnosticCode = "tag_write_owed"
 	// DiagCorruptAudio marks audio that is truncated, has no frames, or would not
 	// decode cleanly. Two writers record it. The scan's half comes from the tag parse
 	// and is format-partial: its signals exist for MP3, AAC, AIFF, MP4, and WAV, and not
@@ -80,6 +88,23 @@ const (
 	// read, and reads as absent once the file changes. Until analyze has read a file the
 	// code proves nothing when it does not fire, so its absence is not evidence of health.
 	DiagCorruptAudio DiagnosticCode = "corrupt_audio"
+	// DiagSortNameFallback marks a file whose empty display fields were filled from its
+	// sort tags (an iTunes file carrying only sonm, soar and soal) or whose number came
+	// from its file name. It also names a sort value left unused because it was the
+	// inverted "Last, First" form, which explains a display field that stayed empty.
+	DiagSortNameFallback DiagnosticCode = "sort_name_fallback"
+)
+
+// The DiagTagWriteOwed keys other than an item field or a credit: the item's front cover,
+// its acquisition, an album's front cover, and the two MusicBrainz release ids a detach or
+// an mbid clear takes off the files. An entity value written to member files is keyed
+// "<entity>.<field>" ("album.label", "artist.sort").
+const (
+	OwedArt              = "art"
+	OwedAcquisition      = "acquisition"
+	OwedAlbumArt         = "album.art"
+	OwedAlbumMBID        = "album.mbid"
+	OwedReleaseGroupMBID = "release_group.mbid"
 )
 
 // Valid reports whether c is a known diagnostic code. Every writer records
@@ -88,7 +113,8 @@ const (
 func (c DiagnosticCode) Valid() bool {
 	switch c {
 	case DiagUnsupportedFormat, DiagLegacyOnlyTags, DiagLyricsPartial, DiagSidecarSkipped,
-		DiagCueTrackDropped, DiagTagWriteLost, DiagTagWriteUnsynced, DiagCorruptAudio:
+		DiagCueTrackDropped, DiagTagWriteLost, DiagTagWriteUnsynced, DiagTagWriteOwed,
+		DiagCorruptAudio, DiagSortNameFallback:
 		return true
 	default:
 		return false

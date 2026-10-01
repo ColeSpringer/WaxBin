@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"path/filepath"
 	"strings"
 
 	"github.com/colespringer/waxbin/identity"
@@ -244,8 +243,14 @@ func rekeyCorroboratedTx(ctx context.Context, tx *sql.Tx, prior, dest *rekeyAlbu
 	if priorFolder == destFolder {
 		return true, nil
 	}
-	if priorPath != "" && identity.MatchKey(filepath.Dir(priorPath)) == priorFolder {
-		return true, nil
+	if priorPath != "" {
+		folder, err := albumFolderTx(ctx, tx, []byte(priorPath))
+		if err != nil {
+			return false, err
+		}
+		if identity.MatchKey(folder) == priorFolder {
+			return true, nil
+		}
 	}
 	return organizeMovedFolderTx(ctx, tx, fileID, priorFolder, destFolder)
 }
@@ -269,8 +274,15 @@ func organizeMovedFolderTx(ctx context.Context, tx *sql.Tx, fileID int64, priorF
 	if err != nil {
 		return false, err
 	}
-	return identity.MatchKey(filepath.Dir(string(src))) == priorFolder &&
-		identity.MatchKey(filepath.Dir(string(dst))) == destFolder, nil
+	from, err := albumFolderTx(ctx, tx, src)
+	if err != nil {
+		return false, err
+	}
+	to, err := albumFolderTx(ctx, tx, dst)
+	if err != nil {
+		return false, err
+	}
+	return identity.MatchKey(from) == priorFolder && identity.MatchKey(to) == destFolder, nil
 }
 
 // foldDrainedReleaseGroupTx folds the old album's release group together with the

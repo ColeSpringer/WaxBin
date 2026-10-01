@@ -32,8 +32,16 @@ func (c *countingReader) Read(ctx context.Context, path string) (*meta.FileMeta,
 
 func fastPathFixture(t *testing.T) (*sqlite.Store, *model.Library, *Scanner, *countingReader, string) {
 	t.Helper()
+	return fastPathFixtureAt(t, t.TempDir())
+}
+
+// fastPathFixtureAt is fastPathFixture with the library rooted at root, which it creates.
+func fastPathFixtureAt(t *testing.T, root string) (*sqlite.Store, *model.Library, *Scanner, *countingReader, string) {
+	t.Helper()
 	ctx := context.Background()
-	root := t.TempDir()
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	st, err := sqlite.Open(ctx, sqlite.OpenOptions{Path: filepath.Join(t.TempDir(), "c.db"), Owner: "test"})
 	if err != nil {
 		t.Fatalf("open store: %v", err)
@@ -750,5 +758,167 @@ func TestChapterlessCueOnTrackDoesNotChurn(t *testing.T) {
 	}
 	if r.Unchanged != 1 {
 		t.Errorf("Unchanged = %d, want 1", r.Unchanged)
+	}
+}
+
+// TestForcedRescanCountsRederivedEditAsUpdated: a forced rescan of an unchanged file
+// that re-derives a catalog-only edit changed the item, so the scan says so.
+func TestForcedRescanCountsRederivedEditAsUpdated(t *testing.T) {
+	st, lib, sc, _, root := fastPathFixture(t)
+	ctx := context.Background()
+	writeMP3(t, filepath.Join(root, "a.mp3"), "A", 1)
+	scanAll(t, sc, lib, false)
+	items, err := st.QueryItems(ctx, query.New(query.EntityItems).Build(), "")
+	if err != nil || len(items) != 1 {
+		t.Fatalf("items = %d (err %v), want 1", len(items), err)
+	}
+	if err := st.EditItemField(ctx, items[0].PID, "title", "Edited", model.Attribution{Source: model.SourceUser}, model.LockUnchanged, false); err != nil {
+		t.Fatalf("edit: %v", err)
+	}
+
+	r := scanAll(t, sc, lib, true)
+	if r.ItemsUpdated != 1 {
+		t.Fatalf("forced rescan = %+v, want the re-derived title counted as 1 updated", r)
+	}
+}
+
+// TestFolderFallbackNamesUntaggedFiles: in a library that opts in, a file with no artist,
+// album artist or album takes the artist from its grandparent folder and the album from
+// its parent, less a trailing year. A file too shallow to name both takes neither, a
+// file tagged with any of the three takes nothing, and a library that has not opted in
+// takes nothing from its folders.
+func TestFolderFallbackNamesUntaggedFiles(t *testing.T) {
+	st, lib, sc, _, root := fastPathFixture(t)
+	ctx := context.Background()
+	put := func(rel string, spec testaudio.MP3Spec, seed byte) {
+		t.Helper()
+		p := filepath.Join(append([]string{root}, strings.Split(rel, "/")...)...)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		spec.Audio = testaudio.AudioWithSeed(seed)
+		if err := os.WriteFile(p, testaudio.BuildMP3FromSpec(spec), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	put("Some Artist/Some Album (2016)/01 First.mp3", testaudio.MP3Spec{Title: "First"}, 1)
+	put("Loose Album/02 Second.mp3", testaudio.MP3Spec{Title: "Second"}, 2)
+	put("03 Third.mp3", testaudio.MP3Spec{Title: "Third"}, 3)
+	put("Other Artist/Other Album/04 Fourth.mp3", testaudio.MP3Spec{Title: "Fourth", Album: "Tagged Album"}, 4)
+	names := func() map[string][2]string {
+		t.Helper()
+		items, err := st.QueryItems(ctx, query.New(query.EntityItems).Build(), "")
+		if err != nil {
+			t.Fatalf("query: %v", err)
+		}
+		out := map[string][2]string{}
+		for _, it := range items {
+			out[it.Title] = [2]string{it.Artist, it.Album}
+		}
+		return out
+	}
+
+	// A managed library's folders are WaxBin's own rendering of the catalog, so the
+	// scan ignores the flag there even if one is set.
+	lib.FolderFallback = true
+	scanAll(t, sc, lib, false)
+	for title, got := range names() {
+		if got[0] != "" && title != "Fourth" {
+			t.Fatalf("%s took artist %q from a managed library's folders", title, got[0])
+		}
+	}
+
+	inPlace, err := st.EnsureLibrary(ctx, &model.Library{Root: lib.Root, DisplayRoot: lib.DisplayRoot,
+		Mode: model.ModeInPlace, Profile: lib.Profile})
+	if err != nil {
+		t.Fatalf("make the library in-place: %v", err)
+	}
+	scanAll(t, sc, inPlace, true)
+	for title, got := range names() {
+		if got[0] != "" && title != "Fourth" {
+			t.Fatalf("%s took artist %q with the fallback off", title, got[0])
+		}
+	}
+
+	on, err := st.SetLibraryFolderFallback(ctx, inPlace.PID, true)
+	if err != nil {
+		t.Fatalf("set folder fallback: %v", err)
+	}
+	scanAll(t, sc, on, true)
+	got := names()
+	want := map[string][2]string{
+		"First":  {"Some Artist", "Some Album"},
+		"Second": {"", ""},
+		"Third":  {"", ""},
+		"Fourth": {"", "Tagged Album"},
+	}
+	for title, w := range want {
+		if got[title] != w {
+			t.Errorf("%s = artist %q album %q, want %q %q", title, got[title][0], got[title][1], w[0], w[1])
+		}
+	}
+}
+
+// TestSortNameFallbackIsAFilterableDiagnostic: the scan stores the fallback's
+// diagnostic, and a query by its code finds it rather than refusing an unknown code.
+func TestSortNameFallbackIsAFilterableDiagnostic(t *testing.T) {
+	st, lib, sc, _, root := fastPathFixture(t)
+	ctx := context.Background()
+	p := filepath.Join(root, "07 - Untagged Song.mp3")
+	if err := os.WriteFile(p, testaudio.BuildMP3FromSpec(testaudio.MP3Spec{Genre: "Rock"}), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	scanAll(t, sc, lib, false)
+	diags, err := st.FileDiagnostics(ctx, model.DiagnosticFilter{Code: model.DiagSortNameFallback})
+	if err != nil {
+		t.Fatalf("diagnostics by code: %v", err)
+	}
+	if len(diags) != 1 || diags[0].Origin != model.OriginScan {
+		t.Fatalf("diagnostics = %+v, want the scan's one sort_name_fallback row", diags)
+	}
+}
+
+// TestFolderFallbackClimbsDiscFolders: a disc subfolder (CD1, Disc 2) names the disc, not
+// the album, so the album and artist come from the two folders above it, and the discs
+// land the way tagged discs in their own folders do: one album.
+func TestFolderFallbackClimbsDiscFolders(t *testing.T) {
+	st, lib, sc, _, root := fastPathFixture(t)
+	ctx := context.Background()
+	for i, rel := range []string{"Pink Floyd/The Wall (1979)/CD1/01 In the Flesh.mp3", "Pink Floyd/The Wall (1979)/Disc 2/01 Hey You.mp3"} {
+		p := filepath.Join(append([]string{root}, strings.Split(rel, "/")...)...)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		spec := testaudio.MP3Spec{Title: strings.TrimSuffix(filepath.Base(rel), ".mp3"), Audio: testaudio.AudioWithSeed(byte(i + 1))}
+		if err := os.WriteFile(p, testaudio.BuildMP3FromSpec(spec), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	inPlace, err := st.EnsureLibrary(ctx, &model.Library{Root: lib.Root, DisplayRoot: lib.DisplayRoot,
+		Mode: model.ModeInPlace, Profile: lib.Profile})
+	if err != nil {
+		t.Fatal(err)
+	}
+	on, err := st.SetLibraryFolderFallback(ctx, inPlace.PID, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scanAll(t, sc, on, false)
+	items, err := st.QueryItems(ctx, query.New(query.EntityItems).Build(), "")
+	if err != nil || len(items) != 2 {
+		t.Fatalf("items = %d (err %v), want 2", len(items), err)
+	}
+	for _, it := range items {
+		wantDisc := 1
+		if strings.Contains(it.Title, "Hey You") {
+			wantDisc = 2
+		}
+		if it.Artist != "Pink Floyd" || it.Album != "The Wall" || it.DiscNo != wantDisc {
+			t.Errorf("%s = artist %q album %q disc %d, want Pink Floyd, The Wall, disc %d",
+				it.Title, it.Artist, it.Album, it.DiscNo, wantDisc)
+		}
+	}
+	if items[0].AlbumPID == "" || items[0].AlbumPID != items[1].AlbumPID {
+		t.Errorf("albums = %q and %q, want the two discs on one", items[0].AlbumPID, items[1].AlbumPID)
 	}
 }

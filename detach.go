@@ -41,11 +41,15 @@ func (l *Library) Detach(ctx context.Context, itemPID model.PID, opts DetachOpti
 	return rep, l.writeBackDetach(ctx, itemPID)
 }
 
+// releaseIDsOwed are the owed keys of the two MusicBrainz release ids a detach takes off
+// the files (model.DiagTagWriteOwed).
+var releaseIDsOwed = []string{model.OwedAlbumMBID, model.OwedReleaseGroupMBID}
+
 // writeBackDetach clears the two MusicBrainz release tags from a detached member's
 // file. Only a track can be detached, so that is a single file, but it goes through the
 // shared write-back engine like every other fan-out, which is what applies the
 // shared-file guard and records the drift a refusal leaves behind.
 func (l *Library) writeBackDetach(ctx context.Context, itemPID model.PID) error {
 	return l.writeBackItemTags(ctx, "waxbin.Detach", itemPID,
-		[]meta.TagEdit{{Key: "MUSICBRAINZ_ALBUMID"}, {Key: "MUSICBRAINZ_RELEASEGROUPID"}})
+		[]meta.TagEdit{{Key: "MUSICBRAINZ_ALBUMID"}, {Key: "MUSICBRAINZ_RELEASEGROUPID"}}, releaseIDsOwed)
 }

@@ -75,7 +75,9 @@ func TestBookFieldTagKeys(t *testing.T) {
 	}
 }
 
-// TestEntityFieldTagKey pins the entity-curation field fan-out keys, per entity type.
+// TestEntityFieldTagKey pins the entity-curation field fan-out keys, per entity type, and
+// that model.EntityFieldWritable, which decides what an entity edit owes its member
+// files, names the same fields.
 func TestEntityFieldTagKey(t *testing.T) {
 	cases := []struct {
 		et    model.MergeEntity
@@ -105,6 +107,9 @@ func TestEntityFieldTagKey(t *testing.T) {
 		got, ok := EntityFieldTagKey(c.et, c.field)
 		if got != c.want || ok != c.ok {
 			t.Errorf("EntityFieldTagKey(%s, %q) = %q, %v; want %q, %v", c.et, c.field, got, ok, c.want, c.ok)
+		}
+		if w := model.EntityFieldWritable(c.et, c.field); w != c.ok {
+			t.Errorf("model.EntityFieldWritable(%s, %q) = %v, want %v", c.et, c.field, w, c.ok)
 		}
 	}
 }

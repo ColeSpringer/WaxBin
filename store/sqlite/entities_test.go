@@ -57,6 +57,16 @@ type trackSpec struct {
 
 func putTrack(t *testing.T, st *Store, libID int64, s trackSpec) *model.ScanItemResult {
 	t.Helper()
+	res, err := st.PutScannedTrack(context.Background(), trackSpecInput(libID, s))
+	if err != nil {
+		t.Fatalf("put %s: %v", s.path, err)
+	}
+	return res
+}
+
+// trackSpecInput is the scan input putTrack writes, for a test that has to re-put the
+// same file with one thing changed.
+func trackSpecInput(libID int64, s trackSpec) model.PutScannedTrackInput {
 	idKey := "essence:" + s.essence
 	if s.mbRecording != "" {
 		idKey = "mbid:" + s.mbRecording
@@ -65,7 +75,7 @@ func putTrack(t *testing.T, st *Store, libID int64, s trackSpec) *model.ScanItem
 	if rel == "" {
 		rel = filepath.Base(s.path)
 	}
-	in := model.PutScannedTrackInput{
+	return model.PutScannedTrackInput{
 		LibraryID:     libID,
 		PreserveLocks: s.preserveLocks,
 		File: model.File{
@@ -100,11 +110,6 @@ func putTrack(t *testing.T, st *Store, libID int64, s trackSpec) *model.ScanItem
 			Country:          s.country,
 		},
 	}
-	res, err := st.PutScannedTrack(context.Background(), in)
-	if err != nil {
-		t.Fatalf("put %s: %v", s.path, err)
-	}
-	return res
 }
 
 func scalarInt(t *testing.T, st *Store, q string, args ...any) int {
@@ -787,5 +792,34 @@ func TestAdoptedMemberSurvivesAnEdit(t *testing.T) {
 	}
 	if rep.NewAlbumPID == "" || rep.NewAlbumPID == rep.OldAlbumPID {
 		t.Errorf("detach report = %+v, want the member on an album of its own", rep)
+	}
+}
+
+// TestAlbumKeyAnchorsOnALibraryRootNamedLikeADisc: a library root is the edge of the disc
+// folders a key can climb out of, so loose files in a root called "CD1" key their album on
+// the root rather than the folder above it, and a real disc folder inside it joins them.
+func TestAlbumKeyAnchorsOnALibraryRootNamedLikeADisc(t *testing.T) {
+	st, _ := entityFixture(t)
+	ctx := context.Background()
+	lib, err := st.EnsureLibrary(ctx, &model.Library{Root: []byte("/rips/CD1"), DisplayRoot: "/rips/CD1",
+		Mode: model.ModeInPlace, Profile: "waxbin-native"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	putTrack(t, st, lib.ID, trackSpec{path: "/rips/CD1/01.flac", relPath: "01.flac", essence: "e1", content: "c1",
+		title: "One", artist: "Alpha", albumArt: "Alpha", album: "Album"})
+	putTrack(t, st, lib.ID, trackSpec{path: "/rips/CD1/CD2/01.flac", relPath: "CD2/01.flac", essence: "e2", content: "c2",
+		title: "Two", artist: "Alpha", albumArt: "Alpha", album: "Album"})
+
+	var albums int
+	var key string
+	if err := st.read.QueryRowContext(ctx, "SELECT COUNT(*), MIN(match_key) FROM album").Scan(&albums, &key); err != nil {
+		t.Fatalf("albums: %v", err)
+	}
+	if albums != 1 {
+		t.Errorf("albums = %d, want the loose file and the disc folder inside the root to be one", albums)
+	}
+	if got, want := albumKeyFolder(key), identity.MatchKey("/rips/CD1"); got != want {
+		t.Errorf("album key folder = %q, want the root %q", got, want)
 	}
 }

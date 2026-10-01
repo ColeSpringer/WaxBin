@@ -16,6 +16,7 @@ func TestTagKeyForField(t *testing.T) {
 		"title": "TITLE", "artist": "ARTIST", "album": "ALBUM", "album_artist": "ALBUMARTIST",
 		"composer": "COMPOSER", "comment": "COMMENT", "genre": "GENRE", "year": "DATE",
 		"track_no": "TRACKNUMBER", "disc_no": "DISCNUMBER",
+		"track_total": "TRACKTOTAL", "disc_total": "DISCTOTAL",
 	}
 	for field, wantKey := range want {
 		if got, ok := TagKeyForField(field); !ok || got != wantKey {

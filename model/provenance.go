@@ -21,7 +21,8 @@ const (
 	SourceUser       ProvenanceSource = "user"       // set through the curation surface
 	SourceEnrichment ProvenanceSource = "enrichment" // supplied by a metadata provider, named in Provider
 	// Scalar fields only.
-	SourceOrganize ProvenanceSource = "organize" // written by an organize tag write-back
+	SourceOrganize  ProvenanceSource = "organize"  // written by an organize tag write-back
+	SourceNormalize ProvenanceSource = "normalize" // rewritten by a normalization pass (a canonical spelling, a cleaned title)
 	// Artifacts only.
 	SourceSidecar ProvenanceSource = "sidecar" // read from a companion file beside the audio (cover.jpg, .lrc)
 	SourceFeed    ProvenanceSource = "feed"    // supplied by a podcast feed or its episode metadata
@@ -38,8 +39,8 @@ const (
 // surface narrows it further through one of the ValidFor* gates.
 func (s ProvenanceSource) Valid() bool {
 	switch s {
-	case SourceTag, SourceUser, SourceEnrichment, SourceOrganize, SourceSidecar, SourceFeed,
-		SourceGenerated:
+	case SourceTag, SourceUser, SourceEnrichment, SourceOrganize, SourceNormalize, SourceSidecar,
+		SourceFeed, SourceGenerated:
 		return true
 	default:
 		return false
@@ -52,7 +53,7 @@ func (s ProvenanceSource) Valid() bool {
 // the junk row IsMetadataField exists to prevent.
 func (s ProvenanceSource) ValidForField() bool {
 	switch s {
-	case SourceTag, SourceUser, SourceEnrichment, SourceOrganize:
+	case SourceTag, SourceUser, SourceEnrichment, SourceOrganize, SourceNormalize:
 		return true
 	default:
 		return false
@@ -192,7 +193,9 @@ var MetadataFields = map[string]bool{
 	"genre":         true,
 	"year":          true,
 	"track_no":      true,
+	"track_total":   true,
 	"disc_no":       true,
+	"disc_total":    true,
 	"bpm":           true,
 	"comment":       true,
 	"isrc":          true,

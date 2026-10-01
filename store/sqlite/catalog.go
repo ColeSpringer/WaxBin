@@ -30,7 +30,8 @@ var _ model.Catalog = (*Store)(nil)
 // and the one LoadScopedFileIndex ranges over, so re-spelling it in place would hide
 // every file under it from the next scan. Use RelocateLibraryRoot to actually move a
 // root; it rewrites the file paths too. Only the policy fields (mode/media/profile)
-// refresh on that branch.
+// refresh on that branch. A mode other than in-place drops the folder fallback, which
+// only an in-place library takes.
 func (s *Store) EnsureLibrary(ctx context.Context, lib *model.Library) (*model.Library, error) {
 	const op = "store.EnsureLibrary"
 	var out *model.Library
@@ -53,12 +54,14 @@ func (s *Store) EnsureLibrary(ctx context.Context, lib *model.Library) (*model.L
 				out = existing
 				return nil
 			}
+			fallback := existing.FolderFallback && lib.Mode == model.ModeInPlace
 			if _, err := tx.ExecContext(ctx,
-				"UPDATE library SET mode=?, media=?, profile=? WHERE id=?",
-				string(lib.Mode), media, lib.Profile, existing.ID); err != nil {
+				"UPDATE library SET mode=?, media=?, profile=?, folder_fallback=? WHERE id=?",
+				string(lib.Mode), media, lib.Profile, fallback, existing.ID); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 			existing.Mode, existing.Media, existing.Profile = lib.Mode, model.MediaType(media), lib.Profile
+			existing.FolderFallback = fallback
 			out = existing
 			return appendChange(ctx, tx, "library", existing.PID, model.OpUpdate)
 		}
@@ -70,13 +73,15 @@ func (s *Store) EnsureLibrary(ctx context.Context, lib *model.Library) (*model.L
 				out = existing
 				return nil
 			}
+			fallback := existing.FolderFallback && lib.Mode == model.ModeInPlace
 			if _, err := tx.ExecContext(ctx,
-				"UPDATE library SET display_root=?, mode=?, media=?, profile=? WHERE id=?",
-				lib.DisplayRoot, string(lib.Mode), media, lib.Profile, existing.ID); err != nil {
+				"UPDATE library SET display_root=?, mode=?, media=?, profile=?, folder_fallback=? WHERE id=?",
+				lib.DisplayRoot, string(lib.Mode), media, lib.Profile, fallback, existing.ID); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 			existing.DisplayRoot, existing.Mode, existing.Media, existing.Profile =
 				lib.DisplayRoot, lib.Mode, model.MediaType(media), lib.Profile
+			existing.FolderFallback = fallback
 			out = existing
 			return appendChange(ctx, tx, "library", existing.PID, model.OpUpdate)
 		}
@@ -125,7 +130,35 @@ func (s *Store) Libraries(ctx context.Context) ([]*model.Library, error) {
 // appends a library update delta and a repeat appends nothing. The internal podcast
 // library is refused, since its files are the podcast engine's to manage.
 func (s *Store) SetLibraryReadOnly(ctx context.Context, pid model.PID, readOnly bool) (*model.Library, error) {
-	const op = "store.SetLibraryReadOnly"
+	return s.setLibraryFlag(ctx, "store.SetLibraryReadOnly", pid, "read_only", readOnly,
+		func(l *model.Library) string {
+			if l.Mode == model.ModePodcast {
+				return "the internal podcast library cannot be made read-only"
+			}
+			return ""
+		},
+		func(l *model.Library) *bool { return &l.ReadOnly })
+}
+
+// SetLibraryFolderFallback turns a library's folder fallback on or off (see
+// model.Library.FolderFallback) and returns the library, with SetLibraryReadOnly's
+// delta rule. Only an in-place library takes it: a managed library's folders are
+// organize's rendering of the catalog (placeholders like "Unknown Artist" included), so
+// they could only echo it back, and an episode's names come from its feed.
+func (s *Store) SetLibraryFolderFallback(ctx context.Context, pid model.PID, on bool) (*model.Library, error) {
+	return s.setLibraryFlag(ctx, "store.SetLibraryFolderFallback", pid, "folder_fallback", on,
+		func(l *model.Library) string {
+			if on && l.Mode != model.ModeInPlace {
+				return "only an in-place library takes a folder fallback; a " + string(l.Mode) + " library's folders are WaxBin's own"
+			}
+			return ""
+		},
+		func(l *model.Library) *bool { return &l.FolderFallback })
+}
+
+// setLibraryFlag sets one boolean library column, named by the caller, and the field
+// flag reads it through. refuse names why the library cannot take the change, or "".
+func (s *Store) setLibraryFlag(ctx context.Context, op string, pid model.PID, column string, on bool, refuse func(*model.Library) string, flag func(*model.Library) *bool) (*model.Library, error) {
 	var out *model.Library
 	err := s.writeTx(ctx, func(tx *sql.Tx) error {
 		lib, err := scanLibrary(tx.QueryRowContext(ctx, librarySelect+" WHERE pid = ?", string(pid)))
@@ -135,17 +168,17 @@ func (s *Store) SetLibraryReadOnly(ctx context.Context, pid model.PID, readOnly 
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
-		if lib.Mode == model.ModePodcast {
-			return waxerr.New(waxerr.CodeInvalid, op, "the internal podcast library cannot be made read-only")
+		if reason := refuse(lib); reason != "" {
+			return waxerr.New(waxerr.CodeInvalid, op, reason)
 		}
 		out = lib
-		if lib.ReadOnly == readOnly {
+		if *flag(lib) == on {
 			return nil
 		}
-		if _, err := tx.ExecContext(ctx, "UPDATE library SET read_only = ? WHERE id = ?", readOnly, lib.ID); err != nil {
+		if _, err := tx.ExecContext(ctx, "UPDATE library SET "+column+" = ? WHERE id = ?", on, lib.ID); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
-		lib.ReadOnly = readOnly
+		*flag(lib) = on
 		return appendChange(ctx, tx, "library", pid, model.OpUpdate)
 	})
 	if err != nil {
@@ -236,21 +269,36 @@ func (s *Store) PutScannedTrack(ctx context.Context, in model.PutScannedTrackInp
 			}
 		}
 
-		// Overlay the item's locked fields onto the scanned values before any writer
-		// runs, so a curated edit survives a re-derive-from-disk `scan --force`. Runs
+		// What the file itself says, kept from before the lock overlay so the owed rows
+		// can be checked against it.
+		fileTitle, fileTrack := in.Item.Title, in.Track
+
+		// Overlay the item's locked fields, and the fills the file says nothing about,
+		// onto the scanned values before any writer runs (overlayStoredTrackTx). Runs
 		// after the essence-algorithm re-key above so it resolves the (possibly re-keyed)
-		// existing item. Off only for `scan --force --ignore-locks`.
-		if in.PreserveLocks {
-			if err := preserveLockedTrackFieldsTx(ctx, tx, s.log, &in.Track, &in.Item); err != nil {
-				return waxerr.Wrap(waxerr.CodeIO, op, err)
-			}
+		// existing item.
+		prior, err := overlayStoredTrackTx(ctx, tx, s.log, fileID, &in.Track, &in.Item, in.Derived, in.PreserveLocks)
+		if err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 
-		itemID, itemPID, created, stateChanged, err := upsertItem(ctx, tx, s.log, in.Item, bookAdoptKey{}, now, in.PreferredItemPID)
+		itemID, itemPID, created, stateChanged, priorTitle, err := upsertItem(ctx, tx, s.log, in.Item, bookAdoptKey{}, now, in.PreferredItemPID)
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		res.ItemPID, res.ItemCreated = itemPID, created
+
+		// The fields this put re-derives over an existing item, judged before upsertTrack
+		// replaces the columns they are compared against.
+		var rederived []string
+		var prov map[string]rederivable
+		if !created {
+			rederived, prov, err = rederivedTrackTx(ctx, tx, itemID, priorTitle, in.Item.Title, in.Track, in.PreserveLocks, prior)
+			if err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+		}
+		res.MetadataChanged = len(rederived) > 0
 
 		if err := upsertTrack(ctx, tx, itemID, in.Track); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
@@ -269,10 +317,15 @@ func (s *Store) PutScannedTrack(ctx context.Context, in model.PutScannedTrackInp
 		// recompute only those rows inside this transaction.
 		affected := newAffectedRollups()
 
+		retiredEnrichment, err := settleRederivedTx(ctx, tx, itemID, rederived, prov, in.PreserveLocks, affected)
+		if err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+
 		// Resolve normalized entities and refresh the item's FTS row when the scan
 		// actually changed catalog inputs. A byte-identical rescan skips this work
 		// and emits no entity-side deltas.
-		entitiesResolved := created || res.FileCreated || res.ContentChanged || res.Relinked
+		entitiesResolved := created || res.FileCreated || res.ContentChanged || res.Relinked || res.MetadataChanged
 		if entitiesResolved {
 			// The entities the item leaves (on a retag) lose the track, so collect
 			// them before relinking, and the entities it joins after.
@@ -302,7 +355,7 @@ func (s *Store) PutScannedTrack(ctx context.Context, in model.PutScannedTrackInp
 		// so a freshly resolved album_id is available to map art onto; an unchanged
 		// rescan reuses the album_id persisted by a prior scan. Their changed flags feed
 		// the item delta below so a lyrics/cover-only change is not silent to consumers.
-		lyricsChanged, err := putLyricsTx(ctx, tx, itemID, in.Lyrics, in.PreserveLocks)
+		lyricsChanged, err := putLyricsTx(ctx, tx, itemID, in.Lyrics, in.PreserveLocks, true)
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
@@ -368,6 +421,19 @@ func (s *Store) PutScannedTrack(ctx context.Context, in model.PutScannedTrackInp
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 		}
+		if err := settleOwedByScanTx(ctx, tx, fileID, itemID, scanSettle{
+			fileTitle: fileTitle, title: in.Item.Title, fileTrack: fileTrack, track: in.Track,
+			preserveLocks: in.PreserveLocks, derived: in.Derived,
+			cover: in.CoverArt, acquisitionRecorded: acqAdded,
+		}); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		// Read after entity resolution, which settles the album the label half asks about.
+		if retiredEnrichment {
+			if err := dropMootEnrichmentDriftTx(ctx, tx, fileID, itemID); err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+		}
 
 		// Emit change_log rows only for real changes, so a no-op rescan is silent
 		// (essence-first change detection) and delta consumers don't re-process.
@@ -376,12 +442,12 @@ func (s *Store) PutScannedTrack(ctx context.Context, in model.PutScannedTrackInp
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 		}
-		// Emit an item delta on create, a content change, a state transition (a restored
-		// file flipping missing -> present), a lyrics/cover-only change, OR a newly
-		// attributed origin, so a delta consumer never serves stale metadata/art after
-		// any real change. acqAdded is true only when a row was actually inserted, so a
-		// rescan of an already-attributed item stays silent.
-		if created || res.ContentChanged || stateChanged || lyricsChanged || artChanged || acqAdded || tagsChanged {
+		// Emit an item delta on create, a content change, a re-derived field, a state
+		// transition (a restored file flipping missing -> present), a lyrics/cover-only
+		// change, OR a newly attributed origin, so a delta consumer never serves stale
+		// metadata/art after any real change. acqAdded is true only when a row was actually
+		// inserted, so a rescan of an already-attributed item stays silent.
+		if created || res.ContentChanged || res.MetadataChanged || stateChanged || lyricsChanged || artChanged || acqAdded || tagsChanged {
 			if err := appendChange(ctx, tx, "item", itemPID, opFor(created)); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}

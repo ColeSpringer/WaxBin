@@ -44,6 +44,10 @@ type PutScannedTrackInput struct {
 	// scanned track before writing, so a `scan --force` cannot clobber a curated edit.
 	// The scanner sets it on every scan except an explicit `--ignore-locks` run.
 	PreserveLocks bool
+	// Derived names the fields whose scanned value the file's own tags do not state: a
+	// title from the file name, or a fill from a sort tag, the file name or the folders.
+	// A locked field holding such a value is still owed to the file (DiagTagWriteOwed).
+	Derived []string
 	// CustomTags are the file's non-standard tag frames WaxBin's typed model does not
 	// map (keyed by canonical uppercase key), persisted into item_tag so they are
 	// preserved and searchable. A key the user has locked ("tag.<KEY>") is kept over the
@@ -102,6 +106,9 @@ type PutScannedBookInput struct {
 	// PreserveLocks keeps a user-locked book field from being re-derived from tags on
 	// a forced rescan (see PutScannedTrackInput.PreserveLocks).
 	PreserveLocks bool
+	// Derived is PutScannedTrackInput.Derived; a book's only one is a title taken from
+	// the file name.
+	Derived []string
 	// CustomTags are this file's non-standard tag frames (see
 	// PutScannedTrackInput.CustomTags). A multi-file book takes them from the primary
 	// part, matching how its other metadata is owned.
@@ -175,6 +182,10 @@ type ScanItemResult struct {
 	// would otherwise report every counter zero, and the scan would report
 	// changed=false, silently skipping watch mode's downstream schedulers.
 	SidecarsChanged bool
+	// MetadataChanged reports that the write re-derived a stored field from the file: a
+	// catalog-only edit the file does not carry, or a value the reader now derives
+	// differently. It can be set over unchanged audio bytes, which is a forced rescan.
+	MetadataChanged bool
 }
 
 // ItemFileRef is one backing file of an item, in reading order. organize uses it
@@ -430,6 +441,9 @@ type Catalog interface {
 	// LockedFields returns an item's locked fields in one query, so a writer checking
 	// several fields avoids a per-field round trip.
 	LockedFields(ctx context.Context, itemPID PID) (map[string]bool, error)
+	// SettleTagWriteOwed clears a file's DiagTagWriteOwed rows for fields, once a write
+	// landed them.
+	SettleTagWriteOwed(ctx context.Context, filePID PID, fields []string) error
 	// SetFieldProvenance records that a field was set by a non-tag source (e.g.
 	// organize), attributed to attr. It refuses a locked field unless force is set.
 	SetFieldProvenance(ctx context.Context, itemPID PID, field string, attr Attribution, value string, force bool) error

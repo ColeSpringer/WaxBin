@@ -20,6 +20,7 @@ CREATE TABLE library (
   media        TEXT    NOT NULL DEFAULT 'mixed',  -- music|audiobook|podcast|mixed
   profile      TEXT    NOT NULL DEFAULT 'waxbin-native',
   read_only    INTEGER NOT NULL DEFAULT 0,  -- 1 keeps every on-disk write out of this root
+  folder_fallback INTEGER NOT NULL DEFAULT 0, -- 1 names an untagged track's artist and album from its folders
   created_at   INTEGER NOT NULL          -- unix nanoseconds
 );
 

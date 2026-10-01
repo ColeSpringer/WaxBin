@@ -55,8 +55,11 @@ func (l *Library) SetCredits(ctx context.Context, itemPID model.PID, role model.
 	if err != nil {
 		return 0, false, err
 	}
-	if skipped || !opts.WriteBack {
-		return len(stored), skipped, nil
+	if skipped {
+		return len(stored), true, nil
+	}
+	if !opts.WriteBack {
+		return len(stored), false, nil
 	}
 	// Write back the stored names (deduped), so the on-disk tag matches the catalog.
 	return len(stored), false, l.writeBackCredit(ctx, itemPID, []creditRoleEdit{{role: role, names: stored}})

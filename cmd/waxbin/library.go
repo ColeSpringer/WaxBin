@@ -42,13 +42,10 @@ func newLibraryListCmd(g *globals) *cobra.Command {
 				return nil
 			}
 			w := tabwriter.NewWriter(out(cmd), 0, 2, 2, ' ', 0)
-			fmt.Fprintln(w, "PID\tMODE\tMEDIA\tPROFILE\tREAD-ONLY\tROOT")
+			fmt.Fprintln(w, "PID\tMODE\tMEDIA\tPROFILE\tREAD-ONLY\tFOLDER-FALLBACK\tROOT")
 			for _, l := range libs {
-				ro := "no"
-				if l.ReadOnly {
-					ro = "yes"
-				}
-				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", l.PID, l.Mode, l.MediaType(), l.Profile, ro, l.DisplayRoot)
+				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", l.PID, l.Mode, l.MediaType(), l.Profile,
+					yesNo(l.ReadOnly), yesNo(l.FolderFallback), l.DisplayRoot)
 			}
 			return w.Flush()
 		},
@@ -56,28 +53,45 @@ func newLibraryListCmd(g *globals) *cobra.Command {
 }
 
 func newLibrarySetCmd(g *globals) *cobra.Command {
-	var readOnly, writable bool
+	var readOnly, writable, folders, noFolders bool
 	cmd := &cobra.Command{
-		Use:   "set <pid> --read-only|--writable",
-		Short: "Flag a library read-only, or make it writable again",
+		Use:   "set <pid> --read-only|--writable|--folder-fallback|--no-folder-fallback",
+		Short: "Set a library's read-only flag or folder fallback",
 		Long: "A read-only library keeps WaxBin from writing under its root: edits still land in " +
 			"the catalog, but no tag write-back, organize move, import into or out of it, " +
 			"delete, or trash restore or purge touches its files, and a staged file bound for " +
 			"it waits in the inbox rather than going to another library. Enrichment and ReplayGain " +
 			"values stay owed and are written by the first write-back after the library is " +
 			"made writable again; an edit's refused write-back is listed in `diagnostics` as " +
-			"unsynced and has to be made again.",
+			"unsynced and has to be made again.\n\n" +
+			"The folder fallback names a track that carries no artist, album artist, or album " +
+			"from its folders: the grandparent folder as the artist and the parent as the " +
+			"album, less a trailing \" (YYYY)\". Only an in-place library takes it, and files " +
+			"already scanned take it on `scan --force`. Each call sets one of the two.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if readOnly == writable {
-				return waxerr.New(waxerr.CodeInvalid, "library set", "pass exactly one of --read-only and --writable")
+			set := 0
+			for _, on := range []bool{readOnly, writable, folders, noFolders} {
+				if on {
+					set++
+				}
+			}
+			if set != 1 {
+				return waxerr.New(waxerr.CodeInvalid, "library set",
+					"pass exactly one of --read-only, --writable, --folder-fallback and --no-folder-fallback")
 			}
 			m, _, err := g.openMutator(cmd)
 			if err != nil {
 				return err
 			}
 			defer m.Close()
-			lib, err := m.SetLibraryReadOnly(ctx(cmd), model.PID(args[0]), readOnly)
+			pid := model.PID(args[0])
+			var lib *model.Library
+			if readOnly || writable {
+				lib, err = m.SetLibraryReadOnly(ctx(cmd), pid, readOnly)
+			} else {
+				lib, err = m.SetLibraryFolderFallback(ctx(cmd), pid, folders)
+			}
 			if err != nil {
 				return err
 			}
@@ -88,12 +102,18 @@ func newLibrarySetCmd(g *globals) *cobra.Command {
 			if lib.ReadOnly {
 				state = "read-only"
 			}
-			fmt.Fprintf(out(cmd), "Library %s  %s  is %s\n", lib.PID, lib.DisplayRoot, state)
+			fallback := "off"
+			if lib.FolderFallback {
+				fallback = "on"
+			}
+			fmt.Fprintf(out(cmd), "Library %s  %s  is %s, folder fallback %s\n", lib.PID, lib.DisplayRoot, state, fallback)
 			return nil
 		},
 	}
 	cmd.Flags().BoolVar(&readOnly, "read-only", false, "keep WaxBin from writing under the library's root")
 	cmd.Flags().BoolVar(&writable, "writable", false, "let WaxBin write under the library's root again")
+	cmd.Flags().BoolVar(&folders, "folder-fallback", false, "name untagged tracks from their artist and album folders")
+	cmd.Flags().BoolVar(&noFolders, "no-folder-fallback", false, "take no names from folders")
 	return cmd
 }
 

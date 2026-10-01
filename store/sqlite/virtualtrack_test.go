@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/colespringer/waxbin/identity"
@@ -350,4 +351,200 @@ func TestVirtualTracksConvertFromWholeFile(t *testing.T) {
 		}
 	}
 	assertConsistent(t, st)
+}
+
+// TestForcedRescanClearsVirtualTrackProvenance: when a forced rescan rewrites a virtual
+// track from its sheet, an unlocked edit the sheet does not carry is re-derived, and its
+// provenance row goes with it rather than naming a value the track no longer holds.
+func TestForcedRescanClearsVirtualTrackProvenance(t *testing.T) {
+	st, lib := openTestStore(t)
+	ctx := context.Background()
+	windows := [][2]int64{{0, 300}, {300, 600}}
+	in := vtrackInput(lib.ID, "/lib/album.flac", "sha256:VE", "sha256:VC1", 8000, windows)
+	if _, err := st.PutScannedVirtualTracks(ctx, in); err != nil {
+		t.Fatalf("put vtracks: %v", err)
+	}
+	pid := vtItems(t, st)[0].PID
+	if err := st.EditItemField(ctx, pid, "genre", "Jazz", model.Attribution{Source: model.SourceUser}, model.LockUnchanged, false); err != nil {
+		t.Fatalf("edit genre: %v", err)
+	}
+
+	in.PreserveLocks = true
+	if _, err := st.PutScannedVirtualTracks(ctx, in); err != nil {
+		t.Fatalf("forced rescan: %v", err)
+	}
+
+	v, err := st.ItemByPID(ctx, pid)
+	if err != nil {
+		t.Fatalf("item: %v", err)
+	}
+	if v.Genre != "" {
+		t.Fatalf("genre = %q, want the sheet's empty genre", v.Genre)
+	}
+	prov, err := st.FieldProvenance(ctx, pid)
+	if err != nil {
+		t.Fatalf("provenance: %v", err)
+	}
+	for _, p := range prov {
+		if p.Field == "genre" {
+			t.Fatalf("genre provenance survived the re-derive: %+v", p)
+		}
+	}
+	assertConsistent(t, st)
+}
+
+// TestForcedRescanRederivesEveryFieldOfARipTrack: the rip's change check covers every field
+// a plain track's does, so an unlocked catalog-only edit of any of them is re-derived from
+// the sheet by a forced rescan, its provenance row retired, and the track's siblings stay
+// silent. The check once compared only the title, artist, album, genre, numbers and year.
+func TestForcedRescanRederivesEveryFieldOfARipTrack(t *testing.T) {
+	st, lib := openTestStore(t)
+	ctx := context.Background()
+	in := vtrackInput(lib.ID, "/lib/album.flac", "sha256:VE", "sha256:VC1", 8000, [][2]int64{{0, 300}, {300, 600}})
+	if _, err := st.PutScannedVirtualTracks(ctx, in); err != nil {
+		t.Fatalf("put vtracks: %v", err)
+	}
+	items := vtItems(t, st)
+	edited, sibling := items[0].PID, items[1].PID
+	fields := map[string]string{"composer": "Someone", "comment": "Noted", "bpm": "120", "isrc": "USRC17607839"}
+	if err := st.EditItemFields(ctx, edited, fields, model.Attribution{Source: model.SourceUser}, model.LockUnchanged, false); err != nil {
+		t.Fatalf("edit: %v", err)
+	}
+	seq, err := st.LatestChangeSeq(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	in.PreserveLocks = true
+	if _, err := st.PutScannedVirtualTracks(ctx, in); err != nil {
+		t.Fatalf("forced rescan: %v", err)
+	}
+
+	v, err := st.ItemByPID(ctx, edited)
+	if err != nil {
+		t.Fatalf("item: %v", err)
+	}
+	if v.Composer != "" || v.BPM != 0 || v.ISRC != "" {
+		t.Errorf("composer %q bpm %d isrc %q, want the sheet's empty values back", v.Composer, v.BPM, v.ISRC)
+	}
+	prov, err := st.FieldProvenance(ctx, edited)
+	if err != nil {
+		t.Fatalf("provenance: %v", err)
+	}
+	for _, p := range prov {
+		if _, edit := fields[p.Field]; edit {
+			t.Errorf("%s provenance survived the re-derive: %+v", p.Field, p)
+		}
+	}
+	rows, err := st.ChangesSince(ctx, seq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deltas := map[model.PID]int{}
+	for _, r := range rows {
+		if r.EntityType == "item" {
+			deltas[r.EntityPID]++
+		}
+	}
+	if deltas[edited] != 1 || deltas[sibling] != 0 {
+		t.Errorf("item deltas = %v, want one for the re-derived track and none for its sibling", deltas)
+	}
+	assertConsistent(t, st)
+}
+
+// TestRipRescanKeepsEnrichmentFills: a value enrichment filled on a rip's track stays
+// through a rescan that rewrites the track from an edited sheet, while the sheet says
+// nothing for that field.
+func TestRipRescanKeepsEnrichmentFills(t *testing.T) {
+	ctx := context.Background()
+	st, dbPath, lib := openStoreAt(t)
+	db := roConn(t, dbPath)
+	in := vtrackInput(lib.ID, "/lib/album.flac", "sha256:VE", "sha256:VC1", 8000, [][2]int64{{0, 300}, {300, 600}})
+	if _, err := st.PutScannedVirtualTracks(ctx, in); err != nil {
+		t.Fatalf("put vtracks: %v", err)
+	}
+	pid := vtItems(t, st)[0].PID
+	if err := st.ApplyItemFields(ctx, model.ItemFieldsEnrichment{ItemID: itemRowID(t, db, pid), PID: pid,
+		Matched: true, Provider: "mb", Fields: map[string]string{"bpm": "120"}}); err != nil {
+		t.Fatalf("fill bpm: %v", err)
+	}
+	in.PreserveLocks = true
+	for i := range in.Tracks {
+		in.Tracks[i].Item.Title += " (edited)"
+	}
+	if _, err := st.PutScannedVirtualTracks(ctx, in); err != nil {
+		t.Fatalf("rescan: %v", err)
+	}
+	v, err := st.ItemByPID(ctx, pid)
+	if err != nil || !strings.HasSuffix(v.Title, "(edited)") || v.BPM != 120 {
+		t.Fatalf("after the rescan: title %q bpm %d (err %v), want the sheet's title and the fill kept", v.Title, v.BPM, err)
+	}
+}
+
+// TestRipRescanKeepsAGenreFillWithoutRewriting: the rip's change check compares the
+// genre, so a genre enrichment filled must be carried over the silent sheet, or every
+// rescan of the unchanged rip would rewrite its tracks.
+func TestRipRescanKeepsAGenreFillWithoutRewriting(t *testing.T) {
+	ctx := context.Background()
+	st, dbPath, lib := openStoreAt(t)
+	db := roConn(t, dbPath)
+	in := vtrackInput(lib.ID, "/lib/album.flac", "sha256:VE", "sha256:VC1", 8000, [][2]int64{{0, 300}, {300, 600}})
+	if _, err := st.PutScannedVirtualTracks(ctx, in); err != nil {
+		t.Fatalf("put vtracks: %v", err)
+	}
+	var rgID int64
+	var rgPID string
+	if err := db.QueryRow("SELECT id, pid FROM release_group").Scan(&rgID, &rgPID); err != nil {
+		t.Fatalf("release group: %v", err)
+	}
+	if err := st.ApplyReleaseGroupEnrichment(ctx, model.ReleaseGroupEnrichment{ReleaseGroupID: rgID, PID: model.PID(rgPID),
+		Matched: true, Genres: []string{"Ambient"}, GenreProvider: "mb"}); err != nil {
+		t.Fatalf("fill genre: %v", err)
+	}
+	seq, err := st.LatestChangeSeq(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	in.PreserveLocks = true
+	for range 2 {
+		if _, err := st.PutScannedVirtualTracks(ctx, in); err != nil {
+			t.Fatalf("rescan: %v", err)
+		}
+	}
+	for _, it := range vtItems(t, st) {
+		if it.Genre != "Ambient" {
+			t.Errorf("%s genre = %q, want the fill kept", it.Title, it.Genre)
+		}
+	}
+	rows, err := st.ChangesSince(ctx, seq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range rows {
+		if r.EntityType == "item" {
+			t.Errorf("item delta %+v from rescans of an unchanged rip, want none", r)
+		}
+	}
+}
+
+// TestRipTrackTakesANewDiscNumber: the rip's change check compares the disc, so a rip
+// first carved without one takes the disc its file or folder now states.
+func TestRipTrackTakesANewDiscNumber(t *testing.T) {
+	st, lib := openTestStore(t)
+	ctx := context.Background()
+	in := vtrackInput(lib.ID, "/lib/CD2/album.flac", "sha256:VE", "sha256:VC1", 8000, [][2]int64{{0, 300}, {300, 600}})
+	if _, err := st.PutScannedVirtualTracks(ctx, in); err != nil {
+		t.Fatalf("put vtracks: %v", err)
+	}
+	for i := range in.Tracks {
+		in.Tracks[i].Track.DiscNo = 2
+	}
+	if _, err := st.PutScannedVirtualTracks(ctx, in); err != nil {
+		t.Fatalf("rescan: %v", err)
+	}
+	for _, it := range vtItems(t, st) {
+		if it.DiscNo != 2 {
+			t.Errorf("%s disc = %d, want 2", it.Title, it.DiscNo)
+		}
+	}
 }

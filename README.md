@@ -126,6 +126,11 @@ auto-locks the field so a later scan or enrichment pass never re-derives over yo
 change, and records provenance: a hand edit is yours, and a caller that supplies its
 own source (the Go and socket APIs, `art set --source`, `lyrics set --source`) has
 that recorded instead. `--keep-lock` changes a value without touching its lock.
+A field's provenance names one of five sources (`tag`, `user`, `enrichment`,
+`organize`, `normalize`), and an unlocked field is re-derived from the file whenever a
+scan re-reads it (`scan --force`, or a changed file) unless the edit was written back.
+A value enrichment filled, or a normalize pass respelled, stays until the file states one
+of its own.
 
 - `waxbin edit <pid> --set field=value` edits scalar metadata such as title, artist,
   album, year, and track/disc numbers.
@@ -139,20 +144,21 @@ that recorded instead. `--keep-lock` changes a value without touching its lock.
 - `waxbin lyrics set`, `waxbin chapters`, and `waxbin art set` curate lyrics, book
   chapters, and cover art.
 
-Each of these edits the catalog and offers **opt-in `--write-back`** to also mirror the
-change into the backing file(s) (see below). Write-back is best-effort: a file that
-cannot be written returns a typed error naming the files, while the catalog edit still
-stands. A book re-anchors its identity on write-back so a later rescan resolves the same
-item, and a multi-file book is written across every part.
+Each of these edits the catalog, and `edit`, `entity`, `credit`, and `art set` offer
+**opt-in `--write-back`** to also mirror the change into the backing file(s) (see
+below). Write-back is best-effort: a file that cannot be written returns a typed error
+naming the files, while the catalog edit still stands. A book re-anchors its identity on
+write-back so a later rescan resolves the same item, and a multi-file book is written
+across every part. A value an edit changes is listed in `diagnostics` as
+`tag_write_owed` until a write-back lands it or a scan that re-reads the file finds it there.
 
 ### On-disk tag write-back (opt-in)
 
 The catalog is always authoritative; these opt-in features mirror an edit back into
 files for external players, always preserving audio essence (an essence-verified write
 never alters the encoded audio):
-- The curation edits above (`edit`, `entity`, `credit`, `tag`, `lyrics set`,
-  `chapters`, `art set`) take `--write-back` to embed the committed change into the
-  item's file(s).
+- The curation edits above (`edit`, `entity`, `credit`, `art set`) take `--write-back`
+  to embed the committed change into the item's file(s).
 - `acquisition set`/`acquisition clear` take `--write-back` for the file's own
   `SOURCE_URL`/`SOURCE_ID`/`ACQUISITION_DATE`.
 - `waxbin analyze --write-replaygain` (or `write_replaygain_tags` in config) writes
@@ -163,8 +169,8 @@ never alters the encoded audio):
   pass filled into files: every field with a tag key the scanner reads back (a track's
   `GENRE`/`BPM`/`ISRC`/`COMPOSER`/`DATE`, a book's `ASIN`/`ISBN`/`PUBLISHER`/`GENRE`/
   `DATE`/narrator) plus an album's `LABEL` across its members. Without it those values
-  live only in the catalog, which a rescan rebuilds from the file's tags, so the next
-  retag clears them. An unlimited pass writes every value not yet on its file, so the
+  live only in the catalog, where a rescan keeps them until the file states its own,
+  and other players never see them. An unlimited pass writes every value not yet on its file, so the
   first pass with it on catches up on earlier passes, and a write that fails is retried
   by the next; a scoped or `--limit` pass writes only within what it looked up.
 - An organize profile with `tag_write` corrects `albumArtist` (literal

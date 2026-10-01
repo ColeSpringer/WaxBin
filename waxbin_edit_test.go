@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/colespringer/waxbin"
@@ -710,5 +711,129 @@ func TestEditBookEditionWriteBackReanchors(t *testing.T) {
 	}
 	if len(items) != 1 {
 		t.Errorf("book count after rescan = %d, want 1 (a re-key would leave two)", len(items))
+	}
+}
+
+// TestCatalogOnlyEditOwesATagWrite: an edit kept in the catalog leaves the file behind,
+// and the file's diagnostics say so field by field. The rows outlive a scan while the
+// file still disagrees (a locked edit), go once a write-back lands the field, and go
+// when a scan re-derives an unlocked field from the file.
+func TestCatalogOnlyEditOwesATagWrite(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "song.mp3"), testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
+		Title: "Song", Artist: "Band", Album: "Album", Genre: "Rock", Year: 2001,
+	}))
+	lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), root)
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	pid := itemPIDByTitle(t, ctx, lib, "Song")
+	owed := func() map[string]string {
+		t.Helper()
+		diags, err := lib.FileDiagnostics(ctx, model.DiagnosticFilter{ItemPID: pid, Code: model.DiagTagWriteOwed})
+		if err != nil {
+			t.Fatalf("diagnostics: %v", err)
+		}
+		out := map[string]string{}
+		for _, d := range diags {
+			if d.Origin != model.OriginEdit || d.Severity != model.SeverityInfo {
+				t.Fatalf("owed row %+v, want an info row from the edit writer", d)
+			}
+			out[d.TagKey] = d.Detail
+		}
+		return out
+	}
+	if got := owed(); len(got) != 0 {
+		t.Fatalf("owed before any edit = %v", got)
+	}
+
+	if err := lib.EditFields(ctx, pid, map[string]string{"genre": "Jazz", "comment": "note"},
+		waxbin.EditOptions{Lock: model.LockOn}); err != nil {
+		t.Fatalf("catalog-only edit: %v", err)
+	}
+	got := owed()
+	if len(got) != 2 || !strings.Contains(got["genre"], "genre") || !strings.Contains(got["comment"], "comment") {
+		t.Fatalf("owed = %v, want genre and comment, each named", got)
+	}
+
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{Force: true}); err != nil {
+		t.Fatalf("forced scan: %v", err)
+	}
+	if got := owed(); len(got) != 2 {
+		t.Fatalf("owed after a scan = %v, want both kept while the file disagrees", got)
+	}
+
+	if err := lib.EditFields(ctx, pid, map[string]string{"genre": "Jazz"},
+		waxbin.EditOptions{Lock: model.LockOn, Force: true, WriteBack: true}); err != nil {
+		t.Fatalf("write-back: %v", err)
+	}
+	if got := owed(); len(got) != 1 || got["comment"] == "" {
+		t.Fatalf("owed after writing genre back = %v, want only comment left", got)
+	}
+
+	if err := lib.EditFields(ctx, pid, map[string]string{"year": "1999"}, waxbin.EditOptions{}); err != nil {
+		t.Fatalf("unlocked edit: %v", err)
+	}
+	if got := owed(); got["year"] == "" {
+		t.Fatalf("owed = %v, want year added", got)
+	}
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{Force: true}); err != nil {
+		t.Fatalf("forced scan: %v", err)
+	}
+	if got := owed(); len(got) != 1 || got["comment"] == "" {
+		t.Fatalf("owed after the scan re-derived year = %v, want only comment left", got)
+	}
+}
+
+// TestCatalogOnlyCreditOwesATagWrite: a credit set without a write-back owes its role's
+// tag to the file until a write-back lands it, and a book translator, which no tag can
+// carry, owes nothing.
+func TestCatalogOnlyCreditOwesATagWrite(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "song.mp3"), testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
+		Title: "Song", Artist: "Band", Album: "Album", Audio: testaudio.AudioWithSeed(1),
+	}))
+	writeFile(t, filepath.Join(root, "book.mp3"), testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
+		Title: "Tome", Artist: "Writer", Album: "Tome", Audio: testaudio.AudioWithSeed(2),
+		TXXX: []testaudio.TXXXFrame{{Desc: "NARRATOR", Value: "Reader"}},
+	}))
+	lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), root)
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	owed := func(pid model.PID) []string {
+		t.Helper()
+		diags, err := lib.FileDiagnostics(ctx, model.DiagnosticFilter{ItemPID: pid, Code: model.DiagTagWriteOwed})
+		if err != nil {
+			t.Fatalf("diagnostics: %v", err)
+		}
+		var out []string
+		for _, d := range diags {
+			out = append(out, d.TagKey)
+		}
+		return out
+	}
+	song := itemPIDByTitle(t, ctx, lib, "Song")
+	if _, _, err := lib.SetCredits(ctx, song, model.RoleComposer, []string{"Someone"}, waxbin.CreditEditOptions{}); err != nil {
+		t.Fatalf("set composer: %v", err)
+	}
+	if got := owed(song); len(got) != 1 || got[0] != "credit.composer" {
+		t.Fatalf("owed = %v, want credit.composer", got)
+	}
+	if _, _, err := lib.SetCredits(ctx, song, model.RoleComposer, []string{"Someone"}, waxbin.CreditEditOptions{WriteBack: true}); err != nil {
+		t.Fatalf("write composer back: %v", err)
+	}
+	if got := owed(song); len(got) != 0 {
+		t.Fatalf("owed after the write-back = %v, want none", got)
+	}
+
+	book := itemPIDByTitle(t, ctx, lib, "Tome")
+	if _, _, err := lib.SetCredits(ctx, book, model.RoleTranslator, []string{"Linguist"}, waxbin.CreditEditOptions{}); err != nil {
+		t.Fatalf("set translator: %v", err)
+	}
+	if got := owed(book); len(got) != 0 {
+		t.Fatalf("book owed = %v, want nothing for a role no tag carries", got)
 	}
 }

@@ -1,12 +1,15 @@
 package identity
 
 import (
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
 	"unicode"
 
 	"golang.org/x/text/unicode/norm"
+
+	"github.com/colespringer/waxbin/internal/pathx"
 )
 
 // MatchKey normalizes a display string into a dedup key: lowercased, diacritics
@@ -196,6 +199,46 @@ func AlbumKey(mbid, releaseGroupKey string, year, discTotal int, folder string) 
 	b.WriteByte(0x1f)
 	b.WriteString(MatchKey(folder))
 	return b.String()
+}
+
+// discFolderRe matches a subfolder holding one disc of an album: "CD1", "Disc 2", "disk3".
+var discFolderRe = regexp.MustCompile(`(?i)^(?:cd|disc|disk)\s*(\d{1,2})$`)
+
+// AlbumFolder is the folder that keys the album of a file at path: the directory holding
+// it, or the one above when that directory is a disc subfolder, since a disc folder names
+// a disc rather than an edition and an album's discs in their own folders are one album.
+// root is the library root holding the file, which is the edge of what the folders can
+// name: a root called "CD1" is no disc folder. It is empty when the root is not known.
+func AlbumFolder(root, path string) string {
+	dir := filepath.Dir(path)
+	if _, ok := folderDisc(root, dir); ok {
+		return filepath.Dir(dir)
+	}
+	return dir
+}
+
+// FolderDisc reports the disc a file's folder names, when that folder is a disc
+// subfolder inside root, the library root holding the file (empty when not known).
+func FolderDisc(root, path string) (int, bool) {
+	return folderDisc(root, filepath.Dir(path))
+}
+
+// folderDisc is DiscFolder for the directory dir, which names nothing when it is root.
+func folderDisc(root, dir string) (int, bool) {
+	if pathx.SamePath(root, dir) {
+		return 0, false
+	}
+	return DiscFolder(filepath.Base(dir))
+}
+
+// DiscFolder reports whether a folder name is a disc subfolder, and the disc it names.
+func DiscFolder(name string) (int, bool) {
+	m := discFolderRe.FindStringSubmatch(name)
+	if m == nil {
+		return 0, false
+	}
+	n, _ := strconv.Atoi(m[1])
+	return n, true
 }
 
 // numOrEmpty renders n for a key segment, treating 0 (an unknown year or disc

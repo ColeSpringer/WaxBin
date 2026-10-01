@@ -1620,11 +1620,8 @@ func populateReleaseGroupGenresTx(ctx context.Context, tx *sql.Tx, rgID int64, g
 // a book ISBN is expected, and before this check that barcode landed in the isbn
 // column as-is; now only a real ISBN (or ASIN) fills the field.
 //
-// What it writes does not survive a rescan: upsertBook assigns these from tags and
-// only locked fields are rescued, so retagging clears them and the enrichment marker
-// then stops `enrich` refilling without --force. That holds for every enrichment
-// write, not just books (the genre pass above records locked=0 too); changing it
-// means deciding enrichment outranks an empty tag on rescan.
+// What it writes outlives a rescan while the part says nothing for the field
+// (overlayStoredBookTx), and a value the file states replaces it.
 func (s *Store) ApplyBookEnrichment(ctx context.Context, in model.BookEnrichment) error {
 	const op = "store.ApplyBookEnrichment"
 	return s.writeAliveTx(ctx, op, "playable_item", in.BookItemID, func(tx *sql.Tx) error {
@@ -1761,7 +1758,7 @@ func (s *Store) ApplyLyricsEnrichment(ctx context.Context, in model.LyricsEnrich
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 			if exists == 0 {
-				if _, err := putLyricsTx(ctx, tx, in.ItemID, in.Lyrics, true); err != nil {
+				if _, err := putLyricsTx(ctx, tx, in.ItemID, in.Lyrics, true, false); err != nil {
 					return waxerr.Wrap(waxerr.CodeIO, op, err)
 				}
 				if err := appendChange(ctx, tx, "item", in.PID, model.OpUpdate); err != nil {
@@ -2255,10 +2252,9 @@ var enrichedTagFieldOrder = map[model.Kind][]string{
 // EnrichmentWriteback returns the files owed an enrichment write, with the values to
 // write: every file whose item carries an enrichment value newer than the file's settle
 // stamp, or only those within scope's reach when scope is not nil. A row with every value
-// empty is returned rather than dropped: the provenance rows outlived the values (a
-// rescan cleared them), and the caller settles the file with nothing to write, since
-// writing nothing is not the same as clearing the tag and a file left owed would be
-// scanned past on every pass.
+// empty is returned rather than dropped: the provenance rows outlived their values, and
+// the caller settles the file with nothing to write, since writing nothing is not the
+// same as clearing the tag and a file left owed would be scanned past on every pass.
 func (s *Store) EnrichmentWriteback(ctx context.Context, scope *model.EnrichScope) ([]model.EnrichedTagRow, error) {
 	return s.enrichmentWriteback(ctx, scope, false)
 }
@@ -2298,8 +2294,9 @@ func (s *Store) enrichmentWriteback(ctx context.Context, scope *model.EnrichScop
 		for _, f := range strings.Split(written, ",") {
 			enriched[f] = true
 		}
-		// A named field with an empty value means the provenance row outlived the value
-		// (a rescan cleared it), and writing nothing is not the same as clearing the tag.
+		// A named field with an empty value means the provenance row outlived the value (a
+		// scan put retires the rows it re-derives, so this is some other write), and writing
+		// nothing is not the same as clearing the tag.
 		for i, f := range enrichedTagFieldOrder[r.Kind] {
 			if !enriched[f] || values[i] == "" {
 				continue
@@ -2450,7 +2447,7 @@ func (s *Store) ApplyItemFields(ctx context.Context, in model.ItemFieldsEnrichme
 		if len(fields) > 0 {
 			affected := newAffectedRollups()
 			attr := model.Attribution{Source: model.SourceEnrichment, Provider: provider}
-			if err := applyItemEditTx(ctx, tx, s.log, in.PID, in.ItemID, kind,
+			if _, err := applyItemEditTx(ctx, tx, s.log, in.PID, in.ItemID, kind,
 				fields, norm, attr, model.LockUnchanged, op, affected); err != nil {
 				return err
 			}
@@ -2672,9 +2669,10 @@ func (s *Store) AlbumsNeedingFields(ctx context.Context, opts model.EnrichQueueO
 // member vetoes the in-place rewrite and the fallback would split the album) or any member
 // whose locks make it unwritable.
 //
-// Unlike label, a filled year does not survive a forced rescan without write-back. Only
-// locked fields are overlaid, so each member's year reverts to the tag, the heuristic key
-// reverts with it, and the album keeps its pid through the scan's reconcile path.
+// Like label, a filled year survives a rescan of members whose files say nothing for it,
+// since each member keeps an enrichment fill until its file states one
+// (overlayStoredTrackTx). A member whose file states its own year, or is retagged onto
+// another album, leaves the fill behind, and the heuristic key follows.
 //
 // Barcode, catalog number, media, and country are refused on purpose: they are the
 // evidence the MusicBrainz release matcher searches by, and a provider's guess must not
@@ -2796,7 +2794,7 @@ func (s *Store) applyAlbumYearTx(ctx context.Context, tx *sql.Tx, in model.Album
 		return false, true, nil
 	}
 	attr := model.Attribution{Source: model.SourceEnrichment, Provider: provider}
-	if _, err := applyEditEntriesTx(ctx, tx, s.log, entries, attr, model.LockUnchanged, op); err != nil {
+	if _, err := applyEditEntriesTx(ctx, tx, s.log, entries, attr, model.LockUnchanged, false, op); err != nil {
 		if waxerr.Is(err, waxerr.CodeInvalid) {
 			s.log.Warn("enrichment: skipping an invalid album year", "value", year, "album", in.PID, "err", err)
 			return false, true, nil

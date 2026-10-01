@@ -49,6 +49,22 @@ func IsEntityEditField(et MergeEntity, field string) bool {
 	return fs != nil && fs[field]
 }
 
+// EntityFieldWritable reports whether an entity field's value is written into its member
+// files' tags by a write-back: an album's sort, barcode, label, catalog number and
+// country, and an artist's sort. The rest stay in the catalog.
+func EntityFieldWritable(et MergeEntity, field string) bool {
+	switch et {
+	case MergeAlbum:
+		switch field {
+		case "sort", "barcode", "label", "catalog_number", "country":
+			return true
+		}
+	case MergeArtist:
+		return field == "sort"
+	}
+	return false
+}
+
 // releaseGroupTypes are the accepted release_group.type values (matching enrichment's
 // vocabulary). An empty value clears the type.
 var releaseGroupTypes = map[string]bool{

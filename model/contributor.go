@@ -65,3 +65,10 @@ func RoleValidForKind(r ContributorRole, kind Kind) bool {
 // field_provenance table alongside the scalar fields, namespaced so they never
 // collide with a scalar field name.
 func CreditField(r ContributorRole) string { return "credit." + string(r) }
+
+// CreditWritable reports whether a tag write-back can carry a role's credit into a file:
+// every music role has a tag, and of a book's roles the author and narrator do, the two a
+// scan reads back. A book's translator and editor stay in the catalog.
+func CreditWritable(r ContributorRole) bool {
+	return IsMusicRole(r) || r == RoleAuthor || r == RoleNarrator
+}

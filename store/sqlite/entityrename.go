@@ -166,25 +166,41 @@ func (s *Store) RenameEntity(ctx context.Context, entityType model.MergeEntity, 
 		if err != nil {
 			return err
 		}
+		// Read ahead of the pre-pass, which renames the entity in place before any apply.
+		valuesBefore, err := entryValuesTx(ctx, tx, entries)
+		if err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		creditsBefore, err := creditStatesTx(ctx, tx, creditTargets)
+		if err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
 		affected := newAffectedRollups()
 		if err := renameEntitiesForEditsTx(ctx, tx, s.log, entries, creditTargets, affected, op); err != nil {
 			return err
 		}
 		rep.MemberEdits = make([]model.ItemFieldEdit, 0, len(entries))
-		for _, e := range entries {
-			if err := applyItemEditTx(ctx, tx, s.log, e.pid, e.itemID, e.kind, e.fields, e.norm,
-				attr, lock, op, affected); err != nil {
+		for i, e := range entries {
+			cleared, err := applyItemEditTx(ctx, tx, s.log, e.pid, e.itemID, e.kind, e.fields, e.norm,
+				attr, lock, op, affected)
+			if err != nil {
 				return err
+			}
+			if err := noteOwedEntryTx(ctx, tx, e, valuesBefore[i], cleared); err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 			rep.MemberEdits = append(rep.MemberEdits, model.ItemFieldEdit{ItemPID: e.pid, Fields: e.norm})
 		}
 		// The credit half rides the same affected set, so the one maintainRollupsTx below
 		// still covers both. applyItemCreditsTx deliberately does not call it itself.
 		rep.CreditEdits = make([]model.ItemCreditEdit, 0, len(creditTargets))
-		for _, e := range creditTargets {
+		for i, e := range creditTargets {
 			stored, err := applyItemCreditsTx(ctx, tx, e, attr, lock, affected, op)
 			if err != nil {
 				return err
+			}
+			if err := noteOwedCreditTx(ctx, tx, e, creditsBefore[i]); err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 			rep.CreditEdits = append(rep.CreditEdits,
 				model.ItemCreditEdit{ItemPID: e.pid, Role: e.role, Names: stored})

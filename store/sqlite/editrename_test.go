@@ -926,10 +926,10 @@ func TestEditAlbumRenameUnderMultiBackedRG(t *testing.T) {
 	assertVerifyClean(t, st)
 }
 
-// TestEditAlbumRenameMovesWholeMultiAlbumRG: a two-disc set is two album rows (one
-// per folder) under one release group, and a batch renaming every track of both
-// discs moves the whole group in place. A per-album walk would have disc one fork
-// the group off to a fresh pid and disc two then merge the original into it,
+// TestEditAlbumRenameMovesWholeMultiAlbumRG: a set split across two folders that are
+// not disc folders is two album rows under one release group, and a batch renaming every
+// track of both moves the whole group in place. A per-album walk would have the first
+// fork the group off to a fresh pid and the second then merge the original into it,
 // destroying the pid the pre-pass exists to preserve.
 func TestEditAlbumRenameMovesWholeMultiAlbumRG(t *testing.T) {
 	st, lib := entityFixture(t)
@@ -943,7 +943,7 @@ func TestEditAlbumRenameMovesWholeMultiAlbumRG(t *testing.T) {
 		})
 	}
 	if n := scalarInt(t, st, "SELECT COUNT(*) FROM album"); n != 2 {
-		t.Fatalf("album rows = %d, want 2 (one per disc folder)", n)
+		t.Fatalf("album rows = %d, want 2 (one per folder)", n)
 	}
 	if n := scalarInt(t, st, "SELECT COUNT(*) FROM release_group"); n != 1 {
 		t.Fatalf("rg rows = %d, want 1", n)

@@ -1,6 +1,7 @@
 package identity
 
 import (
+	"path/filepath"
 	"reflect"
 	"testing"
 )
@@ -151,6 +152,52 @@ func TestAlbumKeyDisambiguatesByFolder(t *testing.T) {
 	}
 	if AlbumKey("", "", 1999, 0, "/x") != "" {
 		t.Error("an album with no release-group key should not be keyed")
+	}
+}
+
+// TestAlbumFolder: a disc subfolder keys its album by the folder above it, and any other
+// folder keys it by itself.
+func TestAlbumFolder(t *testing.T) {
+	for path, want := range map[string]string{
+		filepath.Join("music", "Floyd", "The Wall", "CD1", "01.flac"):       filepath.Join("music", "Floyd", "The Wall"),
+		filepath.Join("music", "Floyd", "The Wall", "Disc 2", "01.flac"):    filepath.Join("music", "Floyd", "The Wall"),
+		filepath.Join("music", "Floyd", "The Wall", "disk03", "01.flac"):    filepath.Join("music", "Floyd", "The Wall"),
+		filepath.Join("music", "Floyd", "The Wall", "Bonus", "01.flac"):     filepath.Join("music", "Floyd", "The Wall", "Bonus"),
+		filepath.Join("music", "Floyd", "The Wall", "01.flac"):              filepath.Join("music", "Floyd", "The Wall"),
+		filepath.Join("music", "Floyd", "CD Singles", "01.flac"):            filepath.Join("music", "Floyd", "CD Singles"),
+		filepath.Join("music", "Floyd", "The Wall", "Disc 2 Live", "x.mp3"): filepath.Join("music", "Floyd", "The Wall", "Disc 2 Live"),
+	} {
+		if got := AlbumFolder("music", path); got != want {
+			t.Errorf("AlbumFolder(%q) = %q, want %q", path, got, want)
+		}
+	}
+}
+
+// TestDiscFoldersStopAtTheLibraryRoot: a library root is the edge of the folders that can
+// name a disc, however it is spelled, while a disc folder inside it still does, and a root
+// that is not known leaves every folder to be judged by its name.
+func TestDiscFoldersStopAtTheLibraryRoot(t *testing.T) {
+	root := filepath.Join("rips", "CD1")
+	loose := filepath.Join(root, "01.flac")
+	inside := filepath.Join(root, "CD2", "01.flac")
+	nested := filepath.Join(root, "Album", "Disc 2", "01.flac")
+	for _, tc := range []struct {
+		root, path, album string
+		disc              int
+	}{
+		{root, loose, root, 0},
+		{root, inside, root, 2},
+		{root, nested, filepath.Join(root, "Album"), 2},
+		{"", loose, "rips", 1},
+		{filepath.Join("rips", "Other"), loose, "rips", 1},
+	} {
+		if got := AlbumFolder(tc.root, tc.path); got != tc.album {
+			t.Errorf("AlbumFolder(%q, %q) = %q, want %q", tc.root, tc.path, got, tc.album)
+		}
+		disc, ok := FolderDisc(tc.root, tc.path)
+		if disc != tc.disc || ok != (tc.disc > 0) {
+			t.Errorf("FolderDisc(%q, %q) = %d, %v, want disc %d", tc.root, tc.path, disc, ok, tc.disc)
+		}
 	}
 }
 

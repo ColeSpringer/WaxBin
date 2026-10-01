@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"testing"
 	"time"
@@ -504,6 +505,172 @@ func TestOrganizeTagWriteAndPIDStamp(t *testing.T) {
 	}
 }
 
+// TestOrganizeTagWriteCarriesTheTotals: organize writes each number with the total the
+// catalog holds beside it, so a file it renumbers never reads as the old pair.
+func TestOrganizeTagWriteCarriesTheTotals(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	lib, err := Open(ctx, Options{
+		DBPath:   filepath.Join(t.TempDir(), "catalog.db"),
+		Profiles: []config.ProfileDef{{Name: "waxbin-native", TagWrite: true}},
+		Roots:    []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}},
+	})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer lib.Close()
+	spec := testaudio.MP3Spec{Title: "Hit", Artist: "Solo", Album: "One", Track: 4, TrackTotal: 9, Disc: 1, DiscTotal: 1}
+	writeRaw(t, filepath.Join(root, "in.mp3"), testaudio.BuildMP3FromSpec(spec))
+	if _, err := lib.Scan(ctx, ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	items, err := lib.Query(ctx, query.New(query.EntityItems).Build(), "")
+	if err != nil || len(items) != 1 {
+		t.Fatalf("query: %v (n=%d)", err, len(items))
+	}
+	// Left unlocked: organize writes no locked field.
+	if err := lib.EditFields(ctx, items[0].PID, map[string]string{"track_total": "12", "disc_total": "2"},
+		EditOptions{}); err != nil {
+		t.Fatalf("edit totals: %v", err)
+	}
+
+	plan, err := lib.PlanOrganize(ctx, query.New(query.EntityItems).Build(), OrganizeOptions{})
+	if err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	if _, err := lib.ApplyOrganize(ctx, plan); err != nil {
+		t.Fatalf("apply organize: %v", err)
+	}
+	items, _ = lib.Query(ctx, query.New(query.EntityItems).Build(), "")
+	fm, err := meta.NewReader().Read(ctx, string(items[0].Path))
+	if err != nil {
+		t.Fatalf("read moved: %v", err)
+	}
+	if fm.Tags.TrackNo != 4 || fm.Tags.TrackTotal != 12 || fm.Tags.DiscNo != 1 || fm.Tags.DiscTotal != 2 {
+		t.Fatalf("moved file numbering = %d/%d disc %d/%d, want 4/12 disc 1/2",
+			fm.Tags.TrackNo, fm.Tags.TrackTotal, fm.Tags.DiscNo, fm.Tags.DiscTotal)
+	}
+}
+
+// TestOrganizeClearsATotalTheNumberPassed: a catalog-only renumber past the file's total
+// leaves the catalog with no total, and organize's tag write clears the file's total beside
+// the number rather than leaving it reading "7 of 1". The landed write pays the owed number.
+func TestOrganizeClearsATotalTheNumberPassed(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	lib, err := Open(ctx, Options{
+		DBPath:   filepath.Join(t.TempDir(), "catalog.db"),
+		Profiles: []config.ProfileDef{{Name: "waxbin-native", TagWrite: true}},
+		Roots:    []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}},
+	})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer lib.Close()
+	writeRaw(t, filepath.Join(root, "in.mp3"), testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
+		Title: "Hit", Artist: "Solo", Album: "One", Track: 1, TrackTotal: 1,
+	}))
+	if _, err := lib.Scan(ctx, ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	items, err := lib.Query(ctx, query.New(query.EntityItems).Build(), "")
+	if err != nil || len(items) != 1 {
+		t.Fatalf("query: %v (n=%d)", err, len(items))
+	}
+	pid := items[0].PID
+	if err := lib.EditFields(ctx, pid, map[string]string{"track_no": "7"}, EditOptions{}); err != nil {
+		t.Fatalf("renumber: %v", err)
+	}
+
+	plan, err := lib.PlanOrganize(ctx, query.New(query.EntityItems).Build(), OrganizeOptions{})
+	if err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	if _, err := lib.ApplyOrganize(ctx, plan); err != nil {
+		t.Fatalf("apply organize: %v", err)
+	}
+	items, _ = lib.Query(ctx, query.New(query.EntityItems).Build(), "")
+	fm, err := meta.NewReader().Read(ctx, string(items[0].Path))
+	if err != nil {
+		t.Fatalf("read moved: %v", err)
+	}
+	if fm.Tags.TrackNo != 7 || fm.Tags.TrackTotal != 0 {
+		t.Fatalf("moved file numbering = %d/%d, want 7 with no total", fm.Tags.TrackNo, fm.Tags.TrackTotal)
+	}
+	diags, err := lib.FileDiagnostics(ctx, model.DiagnosticFilter{ItemPID: pid, Code: model.DiagTagWriteOwed})
+	if err != nil {
+		t.Fatalf("owed rows: %v", err)
+	}
+	for _, d := range diags {
+		if d.TagKey == "track_no" {
+			t.Fatalf("owed rows = %+v, want the number organize wrote settled", diags)
+		}
+	}
+}
+
+// TestOrganizeSettlesAnAlbumArtistOnlyWhenItWroteTheCatalogsValue: a compilation's
+// organize write names the album artist "Various Artists" whatever the catalog holds, so a
+// catalog-only edit of it stays owed, while any other track's write carries the catalog's
+// own value and pays it.
+func TestOrganizeSettlesAnAlbumArtistOnlyWhenItWroteTheCatalogsValue(t *testing.T) {
+	for _, compilation := range []bool{true, false} {
+		ctx := context.Background()
+		root := t.TempDir()
+		lib, err := Open(ctx, Options{
+			DBPath:   filepath.Join(t.TempDir(), "catalog.db"),
+			Profiles: []config.ProfileDef{{Name: "waxbin-native", TagWrite: true}},
+			Roots:    []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}},
+		})
+		if err != nil {
+			t.Fatalf("open: %v", err)
+		}
+		writeRaw(t, filepath.Join(root, "in.mp3"), testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
+			Title: "Hit", Artist: "Solo", Album: "Comp", AlbumArtist: "Solo", Track: 4, Compilation: compilation,
+		}))
+		if _, err := lib.Scan(ctx, ScanRequest{}); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		items, err := lib.Query(ctx, query.New(query.EntityItems).Build(), "")
+		if err != nil || len(items) != 1 {
+			t.Fatalf("query: %v (n=%d)", err, len(items))
+		}
+		pid := items[0].PID
+		// Left unlocked: organize writes no locked field.
+		if err := lib.EditFields(ctx, pid, map[string]string{"album_artist": "Curated"}, EditOptions{}); err != nil {
+			t.Fatalf("edit album artist: %v", err)
+		}
+
+		plan, err := lib.PlanOrganize(ctx, query.New(query.EntityItems).Build(), OrganizeOptions{})
+		if err != nil {
+			t.Fatalf("plan: %v", err)
+		}
+		if _, err := lib.ApplyOrganize(ctx, plan); err != nil {
+			t.Fatalf("apply organize: %v", err)
+		}
+		items, _ = lib.Query(ctx, query.New(query.EntityItems).Build(), "")
+		fm, err := meta.NewReader().Read(ctx, string(items[0].Path))
+		if err != nil {
+			t.Fatalf("read moved: %v", err)
+		}
+		wantFile := "Curated"
+		if compilation {
+			wantFile = "Various Artists"
+		}
+		if fm.Tags.AlbumArtist != wantFile {
+			t.Fatalf("compilation %v: file album artist = %q, want %q", compilation, fm.Tags.AlbumArtist, wantFile)
+		}
+		diags, err := lib.FileDiagnostics(ctx, model.DiagnosticFilter{ItemPID: pid, Code: model.DiagTagWriteOwed})
+		if err != nil {
+			t.Fatalf("owed rows: %v", err)
+		}
+		owed := slices.ContainsFunc(diags, func(d model.FileDiagnostic) bool { return d.TagKey == "album_artist" })
+		if owed != compilation {
+			t.Errorf("compilation %v: album_artist owed = %v, want %v (rows %+v)", compilation, owed, compilation, diags)
+		}
+		_ = lib.Close()
+	}
+}
+
 // TestRebuildAdoptsStampedPID stamps an item PID during organize, then rebuilds a
 // fresh catalog over the same files and confirms the item's PID is restored from the
 // WAXBIN_ITEM_PID tag.
@@ -800,6 +967,86 @@ func enrichItemFields(t *testing.T, ctx context.Context, lib *Library, dbPath st
 	}
 }
 
+// TestEnrichmentWriteBackPaysTheOwedRowsItLands: an edit that names enrichment as its
+// source still owes the file its tags until a write lands them, and the enrichment
+// write-back is a writer like any other, so what it lands pays the row. The album label
+// reaches a member with a field of its own through the item walk and the other through the
+// leftover pass.
+func TestEnrichmentWriteBackPaysTheOwedRowsItLands(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	lib, err := Open(ctx, Options{
+		DBPath: filepath.Join(t.TempDir(), "catalog.db"),
+		Roots:  []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}},
+	})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer lib.Close()
+	for i, title := range []string{"One", "Two"} {
+		writeRaw(t, filepath.Join(root, title+".mp3"), testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
+			Title: title, Artist: "Alpha", AlbumArtist: "Alpha", Album: "Both", Track: i + 1,
+			Audio: testaudio.AudioWithSeed(byte(i + 1)),
+		}))
+	}
+	if _, err := lib.Scan(ctx, ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	items, err := lib.Query(ctx, query.New(query.EntityItems).Build(), "")
+	if err != nil || len(items) != 2 {
+		t.Fatalf("query: %v (n=%d)", err, len(items))
+	}
+	byTitle := map[string]*model.ItemView{}
+	for _, it := range items {
+		byTitle[it.Title] = it
+	}
+	owed := func(title string) []string {
+		t.Helper()
+		diags, err := lib.FileDiagnostics(ctx, model.DiagnosticFilter{ItemPID: byTitle[title].PID, Code: model.DiagTagWriteOwed})
+		if err != nil {
+			t.Fatalf("owed rows: %v", err)
+		}
+		var keys []string
+		for _, d := range diags {
+			keys = append(keys, d.TagKey)
+		}
+		slices.Sort(keys)
+		return keys
+	}
+
+	if err := lib.EditFields(ctx, byTitle["One"].PID, map[string]string{"composer": "Someone"},
+		EditOptions{Source: model.SourceEnrichment, Provider: "mb"}); err != nil {
+		t.Fatalf("enrichment composer: %v", err)
+	}
+	if _, err := lib.EditEntity(ctx, model.MergeAlbum, byTitle["One"].AlbumPID, map[string]string{"label": "Warp"},
+		EntityEditOptions{Source: model.SourceEnrichment, Provider: "mb"}); err != nil {
+		t.Fatalf("enrichment label: %v", err)
+	}
+	if got := owed("One"); !slices.Equal(got, []string{"album.label", "composer"}) {
+		t.Fatalf("owed on One = %v, want [album.label composer]", got)
+	}
+	if got := owed("Two"); !slices.Equal(got, []string{"album.label"}) {
+		t.Fatalf("owed on Two = %v, want [album.label]", got)
+	}
+
+	c, err := lib.writeEnrichmentTags(ctx, nil)
+	if err != nil {
+		t.Fatalf("write enrichment tags: %v", err)
+	}
+	if c.written != 2 || c.failed != 0 || c.unrepresented != 0 {
+		t.Fatalf("counts = {written:%d failed:%d unrepresented:%d}, want both files written", c.written, c.failed, c.unrepresented)
+	}
+	for _, title := range []string{"One", "Two"} {
+		if got := owed(title); len(got) != 0 {
+			t.Errorf("owed on %s after the write-back = %v, want none", title, got)
+		}
+	}
+	fm, err := meta.NewReader().Read(ctx, string(byTitle["One"].Path))
+	if err != nil || fm.Tags.Composer != "Someone" {
+		t.Errorf("composer on One = %q (err %v), want the value the write-back landed", fm.Tags.Composer, err)
+	}
+}
+
 // TestEnrichmentWriteBackUnwritableContainer: a file WaxLabel refuses to write at all
 // (it reads ASF and never writes it) cannot be retried into success, so it is counted
 // and diagnosed as unrepresented rather than failed, and the next pass leaves it alone
@@ -961,9 +1208,10 @@ func TestEnrichmentWriteBackMarksAbandonedParts(t *testing.T) {
 }
 
 // TestEnrichmentWriteBackSettlesAClearedValue: a value whose write failed stays owed,
-// and if a retag and rescan clear it from the catalog before the retry, the next pass
-// finds nothing to write. That settles the file and clears the drift row rather than
-// leaving a stale mark that every later pass would scan past.
+// and if a retag giving the file its own value and a rescan clear it from the catalog
+// before the retry, the next pass finds nothing to write. That settles the file and
+// clears the drift row rather than leaving a stale mark that every later pass would scan
+// past.
 func TestEnrichmentWriteBackSettlesAClearedValue(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root ignores the read-only bit, so the write would succeed")
@@ -1016,9 +1264,11 @@ func TestEnrichmentWriteBackSettlesAClearedValue(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Retagged by another tool and rescanned: the composer column is rebuilt from a
-	// file that never carried it, and the enrichment provenance row outlives the value.
-	writeRaw(t, path, testaudio.BuildMP3WithAudio("A (remaster)", "The Band", "One", 1, audio))
+	// Retagged by another tool with a composer of its own and rescanned: the file's value
+	// retires the enrichment value, and the drift the failed write left is moot with
+	// nothing owed.
+	writeRaw(t, path, testaudio.BuildMP3FromSpec(testaudio.MP3Spec{Title: "A (remaster)", Artist: "The Band",
+		Album: "One", Track: 1, Composer: "Another", Audio: audio}))
 	if _, err := lib.Scan(ctx, ScanRequest{}); err != nil {
 		t.Fatalf("rescan: %v", err)
 	}
@@ -1160,5 +1410,76 @@ func TestEnrichmentWriteBackRefusesASharedFile(t *testing.T) {
 	}
 	if c.written != 0 || c.unrepresented != 0 {
 		t.Errorf("counts on the next pass = %+v, want the refusal settled rather than repeated", c)
+	}
+}
+
+// TestCreditWritableMatchesTheWriteBack: model.CreditWritable, which decides whether an
+// edit owes a credit to the files, names exactly the roles the credit write-back writes, a
+// track's through meta.RoleTagKey and a book's through bookRoleField.
+func TestCreditWritableMatchesTheWriteBack(t *testing.T) {
+	for _, r := range []model.ContributorRole{
+		model.RoleArtist, model.RoleComposer, model.RoleLyricist, model.RoleConductor,
+		model.RolePerformer, model.RoleRemixer, model.RoleProducer, model.RoleEngineer,
+		model.RoleMixer, model.RoleArranger, model.RoleWriter, model.RoleDJMixer,
+		model.RoleAuthor, model.RoleNarrator, model.RoleTranslator, model.RoleEditor,
+	} {
+		var writes bool
+		if model.IsBookRole(r) {
+			_, writes = bookRoleField(r)
+		} else {
+			_, writes = meta.RoleTagKey(r)
+		}
+		if got := model.CreditWritable(r); got != writes {
+			t.Errorf("model.CreditWritable(%s) = %v, but the write-back writes it: %v", r, got, writes)
+		}
+	}
+}
+
+// TestEnrichmentFillSurvivesASilentRetag: a value enrichment filled stays in the catalog
+// through a retag that says nothing for it and a forced scan, rather than vanishing with
+// nothing left to queue it again, and the next write pass still owes the file and writes
+// it.
+func TestEnrichmentFillSurvivesASilentRetag(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	lib, err := Open(ctx, Options{
+		DBPath: db, WriteEnrichmentTags: true,
+		Roots: []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}},
+	})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer lib.Close()
+
+	path := filepath.Join(root, "a.mp3")
+	audio := testaudio.AudioWithSeed(1)
+	writeRaw(t, path, testaudio.BuildMP3WithAudio("A", "The Band", "One", 1, audio))
+	if _, err := lib.Scan(ctx, ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	items, err := lib.Query(ctx, query.New(query.EntityItems).Build(), "")
+	if err != nil || len(items) != 1 {
+		t.Fatalf("query items: %v (n=%d)", err, len(items))
+	}
+	enrichItemFields(t, ctx, lib, db, items[0].PID, map[string]string{"composer": "Someone"})
+
+	writeRaw(t, path, testaudio.BuildMP3WithAudio("A (remaster)", "The Band", "One", 1, audio))
+	if _, err := lib.Scan(ctx, ScanRequest{Force: true}); err != nil {
+		t.Fatalf("forced rescan: %v", err)
+	}
+	if v, err := lib.Get(ctx, items[0].PID); err != nil || v.Composer != "Someone" {
+		t.Fatalf("composer after the retag = %q (err %v), want the fill kept", v.Composer, err)
+	}
+	c, err := lib.writeEnrichmentTags(ctx, nil)
+	if err != nil {
+		t.Fatalf("write enrichment tags: %v", err)
+	}
+	if c.written != 1 {
+		t.Fatalf("written = %d, want the kept fill written to the file", c.written)
+	}
+	fm, err := meta.NewReader().Read(ctx, path)
+	if err != nil || fm.Tags.Composer != "Someone" {
+		t.Fatalf("on-disk composer = %q (err %v), want Someone", fm.Tags.Composer, err)
 	}
 }

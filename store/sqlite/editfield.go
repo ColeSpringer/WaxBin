@@ -17,7 +17,7 @@ import (
 var trackEditFields = map[string]bool{
 	"title": true, "artist": true, "album_artist": true, "album": true,
 	"composer": true, "composer_sort": true, "comment": true, "genre": true, "year": true,
-	"track_no": true, "disc_no": true, "bpm": true,
+	"track_no": true, "track_total": true, "disc_no": true, "disc_total": true, "bpm": true,
 	"isrc": true, "mbid": true, "compilation": true,
 }
 
@@ -159,7 +159,7 @@ func (s *Store) EditItemFields(ctx context.Context, itemPID model.PID, edits map
 		if err != nil {
 			return err
 		}
-		_, err = applyEditEntriesTx(ctx, tx, s.log, entries, attr, lock, op)
+		_, err = applyEditEntriesTx(ctx, tx, s.log, entries, attr, lock, true, op)
 		return err
 	})
 }
@@ -172,15 +172,32 @@ func (s *Store) EditItemFields(ctx context.Context, itemPID model.PID, edits map
 // The pre-pass runs first and once, over every entry, which is what lets a batch moving
 // several members of an album onto one new key rewrite the entity in place rather than
 // splitting it per item.
-func applyEditEntriesTx(ctx context.Context, tx *sql.Tx, log logger, entries []editEntry, attr model.Attribution, lock model.LockChange, op string) ([]model.PID, error) {
+//
+// owe records each value an entry changed as owed to the item's files
+// (model.DiagTagWriteOwed). The edit surfaces set it; the album fields walk does not,
+// since enrichment tracks what it owes the files on its own (enrich_settled_at).
+func applyEditEntriesTx(ctx context.Context, tx *sql.Tx, log logger, entries []editEntry, attr model.Attribution, lock model.LockChange, owe bool, op string) ([]model.PID, error) {
+	var before []map[string]string
+	if owe {
+		var err error
+		if before, err = entryValuesTx(ctx, tx, entries); err != nil {
+			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+	}
 	affected := newAffectedRollups()
 	if err := renameEntitiesForEditsTx(ctx, tx, log, entries, nil, affected, op); err != nil {
 		return nil, err
 	}
 	edited := make([]model.PID, 0, len(entries))
-	for _, e := range entries {
-		if err := applyItemEditTx(ctx, tx, log, e.pid, e.itemID, e.kind, e.fields, e.norm, attr, lock, op, affected); err != nil {
+	for i, e := range entries {
+		cleared, err := applyItemEditTx(ctx, tx, log, e.pid, e.itemID, e.kind, e.fields, e.norm, attr, lock, op, affected)
+		if err != nil {
 			return nil, err
+		}
+		if owe {
+			if err := noteOwedEntryTx(ctx, tx, e, before[i], cleared); err != nil {
+				return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
 		}
 		edited = append(edited, e.pid)
 	}
@@ -272,19 +289,24 @@ func validateEditTargetTx(ctx context.Context, tx *sql.Tx, itemID int64, kind st
 // kind-specific columns and re-resolves entities into the shared affected set (the
 // caller finalizes the rollups so a batch can union them once), records a provenance
 // row per field, and emits one item change delta. It does NOT call maintainRollupsTx.
-func applyItemEditTx(ctx context.Context, tx *sql.Tx, log logger, itemPID model.PID, itemID int64, kind string, fields []string, norm map[string]string, attr model.Attribution, lock model.LockChange, op string, affected *affectedRollups) error {
+// It returns the totals it cleared beside a renumbered track's number, which the edit
+// changed as surely as the fields it names.
+func applyItemEditTx(ctx context.Context, tx *sql.Tx, log logger, itemPID model.PID, itemID int64, kind string, fields []string, norm map[string]string, attr model.Attribution, lock model.LockChange, op string, affected *affectedRollups) ([]string, error) {
+	var cleared []string
 	switch kind {
 	case string(model.KindTrack):
-		if err := editTrackFieldsTx(ctx, tx, log, itemID, fields, norm, op, affected); err != nil {
-			return err
+		c, err := editTrackFieldsTx(ctx, tx, log, itemID, fields, norm, op, affected)
+		if err != nil {
+			return nil, err
 		}
+		cleared = c
 	case string(model.KindBook):
 		if err := editBookFieldsTx(ctx, tx, itemID, fields, norm, op, affected); err != nil {
-			return err
+			return nil, err
 		}
 	case string(model.KindEpisode):
 		if err := editEpisodeFieldsTx(ctx, tx, itemID, fields, norm, op); err != nil {
-			return err
+			return nil, err
 		}
 	}
 
@@ -295,10 +317,93 @@ func applyItemEditTx(ctx context.Context, tx *sql.Tx, log logger, itemPID model.
 	now := nowNS()
 	for _, f := range fields {
 		if err := upsertEditProvenanceTx(ctx, tx, itemID, f, attr, norm[f], lock, now); err != nil {
-			return waxerr.Wrap(waxerr.CodeIO, op, err)
+			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 	}
-	return appendChange(ctx, tx, "item", itemPID, model.OpUpdate)
+	// A total the edit cleared beside a number is recorded as the edit's, but never
+	// locked by it: the next edit sets that total without force, and a locked number
+	// keeps it clear on a rescan by the same rule (overlayStoredTrackTx).
+	for _, f := range cleared {
+		if err := upsertEditProvenanceTx(ctx, tx, itemID, f, attr, "", model.LockUnchanged, now); err != nil {
+			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+	}
+	return cleared, appendChange(ctx, tx, "item", itemPID, model.OpUpdate)
+}
+
+// entryValuesTx reads each entry's edited fields (editFieldValuesTx) before anything in
+// the edit runs: the rename pre-pass rewrites a shared entity in place, ahead of every
+// apply, so a read inside the apply would already see the new name.
+func entryValuesTx(ctx context.Context, tx *sql.Tx, entries []editEntry) ([]map[string]string, error) {
+	out := make([]map[string]string, len(entries))
+	for i, e := range entries {
+		v, err := editFieldValuesTx(ctx, tx, e.itemID, e.kind, e.fields)
+		if err != nil {
+			return nil, err
+		}
+		out[i] = v
+	}
+	return out, nil
+}
+
+// noteOwedEntryTx records what an applied entry changed as owed to its item's files: each
+// field whose stored value moved from before, and each total the apply cleared.
+func noteOwedEntryTx(ctx context.Context, tx *sql.Tx, e editEntry, before map[string]string, cleared []string) error {
+	if before == nil {
+		return nil
+	}
+	after, err := editFieldValuesTx(ctx, tx, e.itemID, e.kind, e.fields)
+	if err != nil {
+		return err
+	}
+	changed := cleared
+	for _, f := range e.fields {
+		if before[f] != after[f] {
+			changed = append(changed, f)
+		}
+	}
+	return noteOwedItemTx(ctx, tx, e.itemID, e.kind, changed)
+}
+
+// editFieldValuesTx reads the stored values of an item's edited fields, as the strings
+// the owed comparison uses. An episode, which owes its files nothing, and an item with no
+// subtype row read as nil; the edit reports the missing row itself.
+func editFieldValuesTx(ctx context.Context, tx *sql.Tx, itemID int64, kind string, fields []string) (map[string]string, error) {
+	out := make(map[string]string, len(fields))
+	switch kind {
+	case string(model.KindTrack):
+		tr, err := readTrackColumnsTx(ctx, tx, itemID)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		var title string
+		if err := tx.QueryRowContext(ctx, "SELECT title FROM playable_item WHERE id = ?", itemID).Scan(&title); err != nil {
+			return nil, err
+		}
+		for _, f := range fields {
+			out[f] = scanFieldValue(f, title, tr)
+		}
+	case string(model.KindBook):
+		b, title, err := loadBookForEditTx(ctx, tx, itemID)
+		if waxerr.Is(err, waxerr.CodeNotFound) {
+			return nil, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		for _, f := range fields {
+			out[f] = title
+			if f != "title" {
+				out[f] = bookFieldValue(f, b, true)
+			}
+		}
+	default:
+		return nil, nil
+	}
+	return out, nil
 }
 
 // EditManyFields applies the same field edits to several track and/or book items in
@@ -346,7 +451,7 @@ func (s *Store) EditManyFields(ctx context.Context, itemPIDs []model.PID, edits 
 		if err != nil {
 			return err
 		}
-		edited, err := applyEditEntriesTx(ctx, tx, s.log, entries, attr, lock, op)
+		edited, err := applyEditEntriesTx(ctx, tx, s.log, entries, attr, lock, true, op)
 		if err != nil {
 			return err
 		}
@@ -404,7 +509,7 @@ func (s *Store) EditItemsFields(ctx context.Context, edits []model.ItemFieldEdit
 		if err != nil {
 			return err
 		}
-		edited, err := applyEditEntriesTx(ctx, tx, s.log, entries, attr, lock, op)
+		edited, err := applyEditEntriesTx(ctx, tx, s.log, entries, attr, lock, true, op)
 		if err != nil {
 			return err
 		}
@@ -419,11 +524,12 @@ func (s *Store) EditItemsFields(ctx context.Context, edits []model.ItemFieldEdit
 
 // editTrackFieldsTx applies the edits to a track item. It mutates the loaded track,
 // updates the title on playable_item, and when an entity field changed re-resolves
-// the entities and their rollups and rebuilds the FTS row.
-func editTrackFieldsTx(ctx context.Context, tx *sql.Tx, log logger, itemID int64, fields []string, edits map[string]string, op string, affected *affectedRollups) error {
+// the entities and their rollups and rebuilds the FTS row. It returns the totals it
+// cleared beside a renumbering (clearStaleTotalsTx).
+func editTrackFieldsTx(ctx context.Context, tx *sql.Tx, log logger, itemID int64, fields []string, edits map[string]string, op string, affected *affectedRollups) ([]string, error) {
 	tr, title, filePath, err := loadTrackForEditTx(ctx, tx, itemID)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	origComposerSort := tr.ComposerSort
 
@@ -436,7 +542,7 @@ func editTrackFieldsTx(ctx context.Context, tx *sql.Tx, log logger, itemID int64
 			continue
 		}
 		if err := applyTrackEdit(&tr, f, edits[f], op); err != nil {
-			return err
+			return nil, err
 		}
 		touchTrack = true
 		editedComposer = editedComposer || f == "composer"
@@ -454,11 +560,15 @@ func editTrackFieldsTx(ctx context.Context, tx *sql.Tx, log logger, itemID int64
 	if editedComposer && !editedComposerSort {
 		locked, err := fieldLockedTx(ctx, tx, itemID, "composer_sort")
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if locked {
 			tr.ComposerSort = origComposerSort
 		}
+	}
+	cleared, err := clearStaleTotalsTx(ctx, tx, itemID, &tr, edits)
+	if err != nil {
+		return nil, err
 	}
 
 	// Title first, so the FTS rebuild below (which reads the item's title from
@@ -467,12 +577,12 @@ func editTrackFieldsTx(ctx context.Context, tx *sql.Tx, log logger, itemID int64
 		if _, err := tx.ExecContext(ctx,
 			"UPDATE playable_item SET title=?, sort_key=?, updated_at=? WHERE id=?",
 			newTitle, model.SortKey(newTitle), nowNS(), itemID); err != nil {
-			return waxerr.Wrap(waxerr.CodeIO, op, err)
+			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 	}
 	if touchTrack {
 		if err := upsertTrack(ctx, tx, itemID, tr); err != nil {
-			return waxerr.Wrap(waxerr.CodeIO, op, err)
+			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 	}
 
@@ -483,24 +593,24 @@ func editTrackFieldsTx(ctx context.Context, tx *sql.Tx, log logger, itemID int64
 		// belongs to after into the caller-supplied set. The caller finalizes the rollups
 		// so a batch unions every item's touched entities and recomputes once.
 		if err := affected.collect(ctx, tx, itemID); err != nil {
-			return waxerr.Wrap(waxerr.CodeIO, op, err)
+			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		// No prior path and no file id: an edit moves no file, so the folder the album
 		// key names is the one the item still sits in.
 		if err := resolveAndLinkEntities(ctx, tx, log, itemID, tr, filePath, "", 0, affected); err != nil {
-			return waxerr.Wrap(waxerr.CodeIO, op, err)
+			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		if err := affected.collect(ctx, tx, itemID); err != nil {
-			return waxerr.Wrap(waxerr.CodeIO, op, err)
+			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 	case touchTitle:
 		// A title-only edit still needs its FTS row rebuilt, since title is the heaviest
 		// search field. The entity branch above already does this when it runs.
 		if err := syncSearchFTS(ctx, tx, itemID, tr); err != nil {
-			return waxerr.Wrap(waxerr.CodeIO, op, err)
+			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 	}
-	return nil
+	return cleared, nil
 }
 
 // editBookFieldsTx applies the edits to a book item. It mutates the loaded book,
@@ -577,6 +687,45 @@ func editBookFieldsTx(ctx context.Context, tx *sql.Tx, itemID int64, fields []st
 	return nil
 }
 
+// numberTotals pairs each numbering field with the total that qualifies it.
+var numberTotals = []struct{ number, total string }{
+	{"track_no", "track_total"},
+	{"disc_no", "disc_total"},
+}
+
+// clearStaleTotalsTx clears the total a renumbering left behind: a number edited past a
+// total the edit did not name would read as "7 of 1", so that total goes unless it is
+// locked. It returns the totals it cleared, in numberTotals order.
+func clearStaleTotalsTx(ctx context.Context, tx *sql.Tx, itemID int64, tr *model.Track, edits map[string]string) ([]string, error) {
+	var cleared []string
+	for _, p := range numberTotals {
+		_, renumbered := edits[p.number]
+		_, named := edits[p.total]
+		if !renumbered || named {
+			continue
+		}
+		number, total := tr.TrackNo, &tr.TrackTotal
+		if p.number == "disc_no" {
+			number, total = tr.DiscNo, &tr.DiscTotal
+		}
+		if !staleTotal(number, *total) {
+			continue
+		}
+		locked, err := fieldLockedTx(ctx, tx, itemID, p.total)
+		if err != nil {
+			return nil, err
+		}
+		if !locked {
+			*total = 0
+			cleared = append(cleared, p.total)
+		}
+	}
+	return cleared, nil
+}
+
+// staleTotal reports a total that cannot qualify its number: one the number has passed.
+func staleTotal(number, total int) bool { return total > 0 && total < number }
+
 // applyTrackEdit mutates one field of tr in place, parsing the numeric fields. An
 // empty numeric value clears the field (nullInt stores 0 as NULL). It never handles
 // title, which lives on playable_item and is applied by the caller.
@@ -649,6 +798,18 @@ func applyTrackEdit(tr *model.Track, field, value, op string) error {
 			return err
 		}
 		tr.DiscNo = n
+	case "track_total":
+		n, err := parseIntField(value, "track_total", op)
+		if err != nil {
+			return err
+		}
+		tr.TrackTotal = n
+	case "disc_total":
+		n, err := parseIntField(value, "disc_total", op)
+		if err != nil {
+			return err
+		}
+		tr.DiscTotal = n
 	case "bpm":
 		// Integers only. The BPM tag itself accepts a fraction on disk and the reader
 		// rounds one on the way in, but an edit is someone stating a number, so "120.5"
@@ -787,27 +948,13 @@ func isCanonicalUUID(s string) bool { return model.IsMBID(s) }
 // file path anchors the folder-keyed AlbumKey, which keeps the album identity stable
 // across re-resolution. The path is nil when the item has no primary file.
 func loadTrackForEditTx(ctx context.Context, tx *sql.Tx, itemID int64) (model.Track, string, []byte, error) {
-	tr := model.Track{ItemID: itemID}
-	var trackNo, trackTotal, discNo, discTotal, year, bpm sql.NullInt64
-	var compilation int
-	var mbid sql.NullString
-	err := tx.QueryRowContext(ctx, `SELECT artist, artist_sort, album, album_artist, composer, composer_sort,
-		comment, track_no, track_total, disc_no, disc_total, year, bpm, genre, compilation, isrc, mbid
-		FROM track WHERE item_id = ?`, itemID).Scan(
-		&tr.Artist, &tr.ArtistSort, &tr.Album, &tr.AlbumArtist, &tr.Composer, &tr.ComposerSort,
-		&tr.Comment, &trackNo, &trackTotal, &discNo, &discTotal, &year, &bpm, &tr.Genre, &compilation, &tr.ISRC, &mbid)
+	tr, err := readTrackColumnsTx(ctx, tx, itemID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return tr, "", nil, waxerr.New(waxerr.CodeNotFound, "store.EditItemFields", "item has no track row")
 	}
 	if err != nil {
 		return tr, "", nil, waxerr.Wrap(waxerr.CodeIO, "store.EditItemFields", err)
 	}
-	tr.TrackNo, tr.TrackTotal = int(trackNo.Int64), int(trackTotal.Int64)
-	tr.DiscNo, tr.DiscTotal = int(discNo.Int64), int(discTotal.Int64)
-	tr.Year = int(year.Int64)
-	tr.BPM = int(bpm.Int64)
-	tr.Compilation = compilation != 0
-	tr.MBID = mbid.String
 
 	genres, err := currentItemGenresTx(ctx, tx, itemID)
 	if err != nil {
@@ -861,14 +1008,41 @@ func loadTrackForEditTx(ctx context.Context, tx *sql.Tx, itemID int64) (model.Tr
 	return tr, title, path, nil
 }
 
+// readTrackColumnsTx reads a track row's denormalized columns, the values upsertTrack
+// writes. A missing row is sql.ErrNoRows.
+func readTrackColumnsTx(ctx context.Context, tx *sql.Tx, itemID int64) (model.Track, error) {
+	tr := model.Track{ItemID: itemID}
+	var trackNo, trackTotal, discNo, discTotal, year, bpm sql.NullInt64
+	var compilation int
+	var mbid sql.NullString
+	err := tx.QueryRowContext(ctx, `SELECT artist, artist_sort, album, album_artist, composer, composer_sort,
+		comment, track_no, track_total, disc_no, disc_total, year, bpm, genre, compilation, isrc, mbid
+		FROM track WHERE item_id = ?`, itemID).Scan(
+		&tr.Artist, &tr.ArtistSort, &tr.Album, &tr.AlbumArtist, &tr.Composer, &tr.ComposerSort,
+		&tr.Comment, &trackNo, &trackTotal, &discNo, &discTotal, &year, &bpm, &tr.Genre, &compilation, &tr.ISRC, &mbid)
+	if err != nil {
+		return tr, err
+	}
+	tr.TrackNo, tr.TrackTotal = int(trackNo.Int64), int(trackTotal.Int64)
+	tr.DiscNo, tr.DiscTotal = int(discNo.Int64), int(discTotal.Int64)
+	tr.Year = int(year.Int64)
+	tr.BPM = int(bpm.Int64)
+	tr.Compilation = compilation != 0
+	tr.MBID = mbid.String
+	return tr, nil
+}
+
 // artistListDerived reports whether a contributor list is the split of the credit,
 // folded element-wise through MatchKey since the list carries entity display names.
-func artistListDerived(names, split []string) bool {
-	if len(names) != len(split) {
+func artistListDerived(names, split []string) bool { return foldedNamesEqual(names, split) }
+
+// foldedNamesEqual reports whether two name lists match element-wise through MatchKey.
+func foldedNamesEqual(a, b []string) bool {
+	if len(a) != len(b) {
 		return false
 	}
-	for i := range names {
-		if identity.MatchKey(names[i]) != identity.MatchKey(split[i]) {
+	for i := range a {
+		if identity.MatchKey(a[i]) != identity.MatchKey(b[i]) {
 			return false
 		}
 	}
@@ -913,7 +1087,11 @@ func adoptEntityKeyMBIDs(ctx context.Context, tx *sql.Tx, itemID int64, path []b
 	if albumKey.String == "" || albumMBID.String == "" {
 		return nil
 	}
-	if _, _, own := albumChainKeys(*tr, path); own != albumKey.String {
+	_, _, own, err := albumChainKeys(ctx, tx, *tr, path)
+	if err != nil {
+		return err
+	}
+	if own != albumKey.String {
 		tr.MBReleaseID = albumMBID.String
 	}
 	return nil

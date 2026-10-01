@@ -90,7 +90,9 @@ type MP3Spec struct {
 	// SUBTITLE field, which the tag library reads as a custom key of that frame id.
 	Subtitle          string
 	Track, Disc, Year int
-	Compilation       bool
+	// TrackTotal and DiscTotal ride their number's frame as "n/total" when set.
+	TrackTotal, DiscTotal int
+	Compilation           bool
 	// BPM is written verbatim into TBPM. It is a string because ID3 stores the text a
 	// tagger wrote, so a DJ tool's fractional "174.6" is a real fixture case.
 	BPM   string
@@ -119,11 +121,17 @@ func BuildMP3FromSpec(s MP3Spec) []byte {
 	add("TCOM", s.Composer)
 	add("TIT3", s.Subtitle)
 	add("TBPM", s.BPM)
+	numbered := func(n, total int) string {
+		if total > 0 {
+			return strconv.Itoa(n) + "/" + strconv.Itoa(total)
+		}
+		return strconv.Itoa(n)
+	}
 	if s.Track > 0 {
-		add("TRCK", strconv.Itoa(s.Track))
+		add("TRCK", numbered(s.Track, s.TrackTotal))
 	}
 	if s.Disc > 0 {
-		add("TPOS", strconv.Itoa(s.Disc))
+		add("TPOS", numbered(s.Disc, s.DiscTotal))
 	}
 	if s.Year > 0 {
 		add("TYER", strconv.Itoa(s.Year))

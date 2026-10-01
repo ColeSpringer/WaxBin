@@ -145,6 +145,12 @@ func (s *Store) DetachItemFromMBIDAlbum(ctx context.Context, itemPID model.PID) 
 		rep.NewAlbumPID = model.PID(newAlbumPID.String)
 		rep.NewReleaseGroupPID = model.PID(newRGPID.String)
 
+		// The file still names the album it left until a write-back strips both ids.
+		if err := noteOwedItemTx(ctx, tx, itemID, kind,
+			[]string{model.OwedAlbumMBID, model.OwedReleaseGroupMBID}); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+
 		// The member's own columns are unchanged, but which album it belongs to is not, so
 		// a delta consumer has to refetch it. A fresh album row emitted its own create.
 		return appendChange(ctx, tx, "item", itemPID, model.OpUpdate)

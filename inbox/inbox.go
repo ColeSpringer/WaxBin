@@ -270,6 +270,10 @@ func (s *Service) classify(ctx context.Context, req Request, path string, claims
 		kind = classifyKind(fm.Tags)
 	}
 	a.Kind = kind
+	// A track renders under the names the scan at its destination will catalog it with.
+	if kind == model.KindTrack {
+		meta.DisplayFallbacks(&fm.Tags, stagingRoot(req.Source, path), path, fm.TitleFromName)
+	}
 	lib, reason := resolveLibrary(req, kind)
 	if lib == nil {
 		if reason == "" {

@@ -197,7 +197,7 @@ func (l *Library) writeBackItemArt(ctx context.Context, itemPID model.PID, raw [
 		return (&WriteBackError{ItemPID: itemPID, Edits: edits}).noFiles()
 	}
 	return l.writeBackPicture(ctx, "waxbin.SetItemArt", itemPID, edits, files,
-		meta.PictureEdit{Clear: len(raw) == 0, Data: raw})
+		meta.PictureEdit{Clear: len(raw) == 0, Data: raw}, model.OwedArt)
 }
 
 // writeBackEntityArt fans a committed album cover across every member track's file. Only
@@ -214,19 +214,19 @@ func (l *Library) writeBackEntityArt(ctx context.Context, entityType model.ArtEn
 		return writeBackSetupFailure(entityPID, edits, err)
 	}
 	return l.writeBackPicture(ctx, "waxbin.SetEntityArt", entityPID, edits, files,
-		meta.PictureEdit{Clear: len(raw) == 0, Data: raw})
+		meta.PictureEdit{Clear: len(raw) == 0, Data: raw}, model.OwedAlbumArt)
 }
 
 // writeBackPicture applies a cover embed/clear across files through the shared
 // per-file write-back engine, returning a *WriteBackError on any refusal or failure. An
 // empty file set is a clean no-op (the album had no member files); a caller that needs
 // to report a missing file for a single item does so before calling this.
-func (l *Library) writeBackPicture(ctx context.Context, op string, refPID model.PID, edits map[string]string, files []model.ItemFileRef, pedit meta.PictureEdit) error {
+func (l *Library) writeBackPicture(ctx context.Context, op string, refPID model.PID, edits map[string]string, files []model.ItemFileRef, pedit meta.PictureEdit, owed string) error {
 	if len(files) == 0 {
 		return nil
 	}
 	wbErr := &WriteBackError{ItemPID: refPID, Edits: edits}
-	if err := l.writeBackFiles(ctx, op, model.OriginEdit, files, wbErr, nil,
+	if err := l.writeBackFiles(ctx, op, model.OriginEdit, files, wbErr, nil, []string{owed},
 		func(w *meta.Writer, path string) (*meta.WriteResult, error) {
 			return w.ApplyPicture(ctx, path, pedit)
 		}); err != nil {
@@ -252,7 +252,8 @@ type TagEditOptions struct {
 	Lock model.LockChange
 	// Force overrides a locked custom tag.
 	Force bool
-	// Source is where the values came from; empty records a user edit.
+	// Source is where the values came from; empty records a user edit, and a bulk
+	// cleanup records model.SourceNormalize (see EditOptions.Source).
 	Source model.ProvenanceSource
 	// Provider names the service that supplied an enrichment value, and is required
 	// with that source and refused with any other.

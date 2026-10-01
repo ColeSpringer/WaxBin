@@ -381,6 +381,16 @@ func (l *Library) SetLibraryReadOnly(ctx context.Context, pid model.PID, readOnl
 	return l.store.SetLibraryReadOnly(ctx, pid, readOnly)
 }
 
+// SetLibraryFolderFallback turns a library's folder fallback on or off (see
+// model.Library.FolderFallback) and returns the library. Files already scanned take it
+// on their next full read, which for an unchanged file is `scan --force`.
+func (l *Library) SetLibraryFolderFallback(ctx context.Context, pid model.PID, on bool) (*model.Library, error) {
+	if l.ReadOnly() {
+		return nil, waxerr.New(waxerr.CodeUnsupported, "Library.SetLibraryFolderFallback", "setting a library flag requires a read-write library")
+	}
+	return l.store.SetLibraryFolderFallback(ctx, pid, on)
+}
+
 // readOnlyLibraries returns the rowids of the libraries flagged read-only.
 func (l *Library) readOnlyLibraries(ctx context.Context) (map[int64]bool, error) {
 	libs, err := l.store.Libraries(ctx)
@@ -863,7 +873,8 @@ type ScanRequest struct {
 	// IgnoreLocks re-derives every field from disk even when the user locked it, so a
 	// `scan --force --ignore-locks` discards curated edits. Off by default: a scan
 	// (including --force) preserves locked fields, and write-back is what propagates a
-	// DB edit back onto disk.
+	// DB edit back onto disk. A value enrichment filled, or a normalize pass respelled,
+	// that the file says nothing about is kept either way.
 	IgnoreLocks bool
 }
 
@@ -1601,7 +1612,11 @@ type EditOptions struct {
 	// still follows Lock.
 	Force bool
 	// Source is where the values came from; empty records a user edit. A hand edit is
-	// a user edit, so the CLI sets neither this nor Provider.
+	// a user edit, so the CLI sets neither this nor Provider. A bulk cleanup of
+	// spellings (canonical casing, a fixed title) records model.SourceNormalize, so a
+	// consumer can tell it from a hand edit. An unlocked user value is re-derived from the
+	// file by the next scan that reads it, unless the edit was written back; an enrichment
+	// or normalize value stays while the file says nothing for that field.
 	Source model.ProvenanceSource
 	// Provider names the service that supplied an enrichment value, and is required
 	// with that source and refused with any other.
@@ -1705,12 +1720,12 @@ func (l *Library) EditItemsFields(ctx context.Context, edits []model.ItemFieldEd
 		return nil, err
 	}
 	out := &BatchEditResult{Edited: res.Edited, Skipped: res.Skipped}
-	if !opts.WriteBack {
-		return out, nil
-	}
 	fieldsByPID := make(map[model.PID]map[string]string, len(edits))
 	for _, e := range edits {
 		fieldsByPID[e.ItemPID] = e.Fields
+	}
+	if !opts.WriteBack {
+		return out, nil
 	}
 	return out, l.batchWriteBack(ctx, out, func(pid model.PID) error {
 		return l.writeBackFields(ctx, pid, fieldsByPID[pid])
@@ -1816,8 +1831,9 @@ func (e *WriteBackError) Error() string {
 // missing file rather than a silent success. It is the whole shape of a write-back whose
 // edits are already computed and need nothing between the write and the report: the
 // detach's id strip and the acquisition tags. A caller with a step of its own in there,
-// such as the book identity re-anchor, drives writeBackFiles directly.
-func (l *Library) writeBackItemTags(ctx context.Context, op string, itemPID model.PID, tagEdits []meta.TagEdit) error {
+// such as the book identity re-anchor, drives writeBackFiles directly. settles names the
+// owed fields a landed write pays.
+func (l *Library) writeBackItemTags(ctx context.Context, op string, itemPID model.PID, tagEdits []meta.TagEdit, settles []string) error {
 	// Everything here runs after the catalog change committed, so a lookup failure is a
 	// write-back failure to report rather than a hard error that would hide it.
 	files, err := l.store.ItemFiles(ctx, itemPID)
@@ -1828,7 +1844,7 @@ func (l *Library) writeBackItemTags(ctx context.Context, op string, itemPID mode
 	if len(files) == 0 {
 		return wbErr.noFiles()
 	}
-	if err := l.writeBackFiles(ctx, op, model.OriginEdit, files, wbErr, nil,
+	if err := l.writeBackFiles(ctx, op, model.OriginEdit, files, wbErr, nil, settles,
 		func(w *meta.Writer, path string) (*meta.WriteResult, error) {
 			return w.Apply(ctx, path, tagEdits)
 		}); err != nil {
@@ -1849,7 +1865,7 @@ func (l *Library) writeBackItemTags(ctx context.Context, op string, itemPID mode
 // own: a clean write CLEARS that origin's whole set for the file, so a pass borrowing
 // another writer's origin would wipe drift it knows nothing about and file its own losses
 // where nobody looks for them.
-func (l *Library) writeBackFiles(ctx context.Context, op string, origin model.DiagnosticOrigin, files []model.ItemFileRef, wbErr *WriteBackError, refusals []string, apply func(w *meta.Writer, path string) (*meta.WriteResult, error)) error {
+func (l *Library) writeBackFiles(ctx context.Context, op string, origin model.DiagnosticOrigin, files []model.ItemFileRef, wbErr *WriteBackError, refusals, settles []string, apply func(w *meta.Writer, path string) (*meta.WriteResult, error)) error {
 	w := meta.NewWriter()
 	seen := make(map[model.PID]bool, len(files))
 	readOnly, roErr := l.readOnlyLibraries(ctx)
@@ -1905,6 +1921,11 @@ func (l *Library) writeBackFiles(ctx context.Context, op string, origin model.Di
 			l.recordWriteBackDrift(ctx, origin, ref.FilePID, err.Error())
 			wbErr.Failures = append(wbErr.Failures, WriteBackFailure{FilePID: ref.FilePID, Path: path, Reason: err.Error()})
 			continue
+		}
+		// The write landed, so the fields it carried are no longer owed to this file. A
+		// value the format could not store is reported below as lost instead.
+		if err := l.store.SettleTagWriteOwed(ctx, ref.FilePID, settles); err != nil {
+			l.log.Warn("tag write owed settle", "path", path, "err", err)
 		}
 		// A value the on-disk format cannot store leaves the bytes unchanged but is still
 		// a real loss, and WaxLabel reports it as an unrepresented warning even on a
@@ -2018,14 +2039,18 @@ func (l *Library) writeBackItemEdits(ctx context.Context, op string, itemPID mod
 	}
 
 	var tagEdits []meta.TagEdit
-	var refusals []string
+	// refusals are the roles no tag can carry; settles are the owed fields a landed write
+	// pays (model.DiagTagWriteOwed).
+	var refusals, settles []string
 	switch item.Kind {
 	case model.KindTrack:
 		if len(edits) > 0 {
-			tagEdits, err = tagEditsForFields(edits)
+			written := withNumberTotals(edits, item)
+			tagEdits, err = tagEditsForFields(written)
 			if err != nil {
 				return err
 			}
+			settles = slices.Collect(maps.Keys(written))
 		}
 		for _, r := range roles {
 			key, ok := meta.RoleTagKey(r.role)
@@ -2039,6 +2064,7 @@ func (l *Library) writeBackItemEdits(ctx context.Context, op string, itemPID mod
 				te.Values = meta.CreditTagValues(key, r.names)
 			}
 			tagEdits = append(tagEdits, te)
+			settles = append(settles, model.CreditField(r.role))
 		}
 	case model.KindBook:
 		if len(edits) > 0 {
@@ -2054,6 +2080,9 @@ func (l *Library) writeBackItemEdits(ctx context.Context, op string, itemPID mod
 				seriesSeq = detail.SeriesSeq
 			}
 			tagEdits = bookTagEditsForFields(edits, seriesSeq)
+			settles = slices.Collect(maps.Keys(edits))
+			// A book's title is written as its ALBUM tag, so a part's TITLESORT is its own.
+			delete(sortFields, "title")
 		}
 		for _, r := range roles {
 			field, ok := bookRoleField(r.role)
@@ -2062,6 +2091,7 @@ func (l *Library) writeBackItemEdits(ctx context.Context, op string, itemPID mod
 					" role is not supported for books; the catalog edit was applied")
 				continue
 			}
+			settles = append(settles, model.CreditField(r.role))
 			keys, _ := meta.BookFieldTagKeys(field)
 			// Join with a separator the scanner splits back apart ("; ", not the ", " the
 			// display column uses), so a multi-name book credit round-trips through a rescan.
@@ -2104,18 +2134,27 @@ func (l *Library) writeBackItemEdits(ctx context.Context, op string, itemPID mod
 	for _, reason := range refusals {
 		noteRefusalFailures(files, wbErr, reason)
 	}
-	tagEdits, err = l.appendDerivedSortClears(ctx, itemPID, sortFields, tagEdits)
+	tagEdits, customCleared, err := l.appendDerivedSortClears(ctx, itemPID, sortFields, tagEdits)
 	if err != nil {
 		return writeBackSetupFailure(itemPID, all, err)
 	}
 	if len(files) == 0 {
 		return wbErr.noFiles()
 	}
-	if err := l.writeBackFiles(ctx, op, model.OriginEdit, files, wbErr, refusals,
+	if err := l.writeBackFiles(ctx, op, model.OriginEdit, files, wbErr, refusals, settles,
 		func(w *meta.Writer, path string) (*meta.WriteResult, error) {
 			return w.Apply(ctx, path, tagEdits)
 		}); err != nil {
 		return err
+	}
+	// A sort tag the catalog keeps as a custom tag is gone from the file, so it goes from
+	// the catalog too, rather than waiting for a forced rescan to notice.
+	if len(wbErr.Failures) == 0 {
+		for _, key := range customCleared {
+			if _, _, err := l.store.SetItemTag(ctx, itemPID, key, nil, model.Attribution{}, model.LockUnchanged, false); err != nil {
+				l.log.Warn("cleared sort tag", "item", itemPID, "key", key, "err", err)
+			}
+		}
 	}
 	// A book's title and author are its identity anchor, unlike a track's essence, so
 	// writing them to disk would make the next scan --force re-key the book to a new pid
@@ -2139,27 +2178,52 @@ func hasAuthorCredit(roles []creditRoleEdit) bool {
 // regenerates the stored sort key, but a stale COMPOSERSORT, ARTISTSORT, or
 // ALBUMARTISTSORT left in the file would feed the next scan's derivation and revert it.
 // Clearing the tag makes a scan derive the same key from the display name. A sort the
-// caller edited explicitly wins, and a locked sort keeps its tag.
-func (l *Library) appendDerivedSortClears(ctx context.Context, itemPID model.PID, edits map[string]string, tagEdits []meta.TagEdit) ([]meta.TagEdit, error) {
+// caller edited explicitly wins, and a locked sort keeps its tag. TITLESORT has no sort
+// field of its own and is kept as a custom tag, so that tag's lock keeps it; such a key the
+// catalog holds is also returned, for the catalog to drop once the clear lands.
+func (l *Library) appendDerivedSortClears(ctx context.Context, itemPID model.PID, edits map[string]string, tagEdits []meta.TagEdit) ([]meta.TagEdit, []string, error) {
+	var custom []string
+	var held map[string]bool // the item's custom tag keys, read once when a clear needs them
 	for _, p := range meta.DerivedSortPairs() {
 		if _, edited := edits[p.Field]; !edited {
 			continue
 		}
-		if p.SortField != "" {
+		lockField := p.SortField
+		if lockField != "" {
 			if _, explicit := edits[p.SortField]; explicit {
 				continue
 			}
-			locked, err := l.store.IsFieldLocked(ctx, itemPID, p.SortField)
+		} else if !model.IsReservedTagKey(p.TagKey) {
+			lockField = model.TagLockField(p.TagKey)
+		}
+		if lockField != "" {
+			locked, err := l.store.IsFieldLocked(ctx, itemPID, lockField)
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			if locked {
 				continue
 			}
 		}
 		tagEdits = append(tagEdits, meta.TagEdit{Key: p.TagKey})
+		if model.IsReservedTagKey(p.TagKey) {
+			continue
+		}
+		if held == nil {
+			tags, err := l.store.ItemTags(ctx, itemPID)
+			if err != nil {
+				return nil, nil, err
+			}
+			held = make(map[string]bool, len(tags))
+			for _, t := range tags {
+				held[t.Key] = true
+			}
+		}
+		if held[p.TagKey] {
+			custom = append(custom, p.TagKey)
+		}
 	}
-	return tagEdits, nil
+	return tagEdits, custom, nil
 }
 
 // bookIdentityEdited reports whether an edit touched a field identity.BookKey reads, so
@@ -2332,6 +2396,35 @@ func tagEditsForFields(edits map[string]string) ([]meta.TagEdit, error) {
 		out = append(out, e)
 	}
 	return out, nil
+}
+
+// withNumberTotals adds, beside a written track or disc number, the total the catalog
+// now holds for it when the edit did not name one, so the file never keeps a stale pair:
+// the store clears a total a renumbering passed, and a file left carrying the old one
+// would hand it back on the next rescan. edits is not modified.
+func withNumberTotals(edits map[string]string, item *model.ItemView) map[string]string {
+	var out map[string]string
+	for _, p := range []struct {
+		number, total string
+		value         int
+	}{{"track_no", "track_total", item.TrackTotal}, {"disc_no", "disc_total", item.DiscTotal}} {
+		_, renumbered := edits[p.number]
+		_, named := edits[p.total]
+		if !renumbered || named {
+			continue
+		}
+		if out == nil {
+			out = maps.Clone(edits)
+		}
+		out[p.total] = ""
+		if p.value > 0 {
+			out[p.total] = strconv.Itoa(p.value)
+		}
+	}
+	if out == nil {
+		return edits
+	}
+	return out
 }
 
 // compilationTagValue maps a validated boolean edit value to the "1"/"0" the
@@ -3453,7 +3546,7 @@ func (l *Library) writeBackAcquisition(ctx context.Context, op string, itemPID m
 		return l.refuseWriteBack(ctx, itemPID, nil,
 			"on-disk tag write-back is not supported for "+string(item.Kind)+" items; the acquisition change was applied")
 	}
-	return l.writeBackItemTags(ctx, op, itemPID, edits)
+	return l.writeBackItemTags(ctx, op, itemPID, edits, []string{model.OwedAcquisition})
 }
 
 // Backup writes a self-contained byte copy of the catalog to dest. The copy

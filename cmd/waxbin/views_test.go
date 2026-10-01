@@ -221,3 +221,17 @@ func TestEnrichViewRetriedCount(t *testing.T) {
 		t.Errorf("summary is missing the retry line:\n%s", buf.String())
 	}
 }
+
+// TestItemViewJSONCarriesTheTotals: the totals ride beside their numbers in the item
+// JSON, so a caller editing one can read it back.
+func TestItemViewJSONCarriesTheTotals(t *testing.T) {
+	b, err := json.Marshal(toItemView(&model.ItemView{PID: "t1", TrackNo: 7, TrackTotal: 12, DiscNo: 1, DiscTotal: 2}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"track":7,"trackTotal":12`, `"disc":1,"discTotal":2`} {
+		if !strings.Contains(string(b), want) {
+			t.Errorf("json = %s, want it to carry %s", b, want)
+		}
+	}
+}

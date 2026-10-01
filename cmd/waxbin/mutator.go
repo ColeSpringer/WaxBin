@@ -496,6 +496,13 @@ func (m *mutator) SetLibraryReadOnly(ctx context.Context, pid model.PID, readOnl
 	return m.lib.SetLibraryReadOnly(ctx, pid, readOnly)
 }
 
+func (m *mutator) SetLibraryFolderFallback(ctx context.Context, pid model.PID, on bool) (*model.Library, error) {
+	if m.px != nil {
+		return m.px.SetLibraryFolderFallback(ctx, proxy.SetLibraryFolderFallbackParams{LibraryPID: string(pid), On: on})
+	}
+	return m.lib.SetLibraryFolderFallback(ctx, pid, on)
+}
+
 func (m *mutator) AddRoot(ctx context.Context, spec config.Root) (*model.Library, error) {
 	if m.px != nil {
 		return m.px.AddRoot(ctx, proxy.AddRootParams{

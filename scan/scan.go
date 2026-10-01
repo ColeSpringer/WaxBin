@@ -94,7 +94,8 @@ type Result struct {
 	// ItemsCreated is audio files whose scan created at least one item (one rip that
 	// created twelve virtual tracks counts once).
 	ItemsCreated int
-	// ItemsUpdated is audio files whose audio content changed.
+	// ItemsUpdated is audio files whose content changed, or whose rescan re-derived a
+	// stored field over unchanged bytes (a forced rescan of a catalog-only edit).
 	ItemsUpdated int
 	// Relinked is audio files matched to an existing item by essence hash (a move or
 	// rename). Independent of the other outcomes rather than exclusive with them.
@@ -149,7 +150,7 @@ func (s *Scanner) Scan(ctx context.Context, req Request, hb Heartbeat) (*Result,
 	}
 
 	res := &Result{}
-	sc := &scanCtx{cache: newArtCache(), force: req.Force, adopt: req.AdoptStampedPIDs, preserveLocks: !req.IgnoreLocks}
+	sc := &scanCtx{cache: artCacheAt(root), force: req.Force, adopt: req.AdoptStampedPIDs, preserveLocks: !req.IgnoreLocks}
 
 	// Preload the scope's file index once, so the walk fast-paths an unchanged file
 	// (size+mtime match) in memory and reconciles vanished ones at end-of-walk, with
@@ -317,7 +318,7 @@ func (s *Scanner) scanFileForced(ctx context.Context, lib *model.Library, path s
 	res.FilesSeen++
 	// A single-file scan has no preloaded index, so it always takes the full path.
 	// Preserve user-locked fields by default, like a full scan.
-	if err := s.scanAudioFile(ctx, lib, string(lib.Root), path, res, &scanCtx{cache: newArtCache(), preserveLocks: true}, kind); err != nil {
+	if err := s.scanAudioFile(ctx, lib, string(lib.Root), path, res, &scanCtx{cache: artCacheAt(string(lib.Root)), preserveLocks: true}, kind); err != nil {
 		res.Errored++
 		return res, err
 	}
@@ -436,6 +437,29 @@ func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, p
 	case model.KindTrack:
 		isBook = false
 	}
+	// A track's empty display fields fall back to its sort tags, file name and (when the
+	// library opts in) folders. derived names what the file's tags do not state.
+	var derived []string
+	switch {
+	case !isBook:
+		var d *model.FileDiagnostic
+		derived, d = meta.DisplayFallbacks(&tags, root, path, fm.TitleFromName)
+		if d != nil {
+			diags = append(diags, *d)
+		}
+		if lib.FolderFallback && lib.Mode == model.ModeInPlace {
+			derived = append(derived, folderNames(&tags, rel)...)
+		}
+	case fm.TitleFromName && strings.TrimSpace(tags.Album) == "":
+		derived = []string{"title"}
+	}
+	// A book part takes its disc from a disc folder the way a track does, which orders
+	// parts numbered from one on each disc.
+	if isBook && tags.DiscNo == 0 {
+		if disc, ok := identity.FolderDisc(root, path); ok && disc > 0 {
+			tags.DiscNo = disc
+		}
+	}
 
 	var cueSheet *meta.CueSheet
 	// carve is the sheet's windows, one per track that can actually become a virtual
@@ -537,6 +561,7 @@ func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, p
 		bin.PreferredItemPID = adoptedPID(sc, fm)
 		bin.Diagnostics = diags
 		bin.PreserveLocks = sc.preserveLocks
+		bin.Derived = derived
 		out, err = s.cat.PutScannedBook(ctx, bin)
 	default:
 		out, err = s.cat.PutScannedTrack(ctx, model.PutScannedTrackInput{
@@ -558,6 +583,7 @@ func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, p
 			Acquisition:      tags.Acquisition,
 			Diagnostics:      diags,
 			PreserveLocks:    sc.preserveLocks,
+			Derived:          derived,
 		})
 	}
 	if err != nil {
@@ -568,7 +594,7 @@ func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, p
 	switch {
 	case out.ItemCreated:
 		res.ItemsCreated++
-	case out.ContentChanged:
+	case out.ContentChanged, out.MetadataChanged:
 		res.ItemsUpdated++
 	case out.SidecarsChanged:
 		// A sidecar-only change (an edited .lrc, a new cover) reaches the full path but
@@ -591,6 +617,32 @@ func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, p
 		}
 	}
 	return nil
+}
+
+// yearSuffix is the " (YYYY)" an album folder commonly ends with.
+var yearSuffix = regexp.MustCompile(`\s+\(\d{4}\)$`)
+
+// folderNames fills a track's artist and album from the folders above it, for a library
+// with the folder fallback on, when its tags name none of artist, album artist or album:
+// the grandparent folder is the artist and the parent the album, less a trailing year. A
+// disc subfolder names the disc rather than the album, so the album and artist come from
+// the two folders above it. rel is the path under the library root, and a file without
+// both folders above it names nothing, since one folder cannot say which of the two it
+// is. It returns the fields it filled.
+func folderNames(tags *model.Tags, rel string) []string {
+	if tags.Artist != "" || tags.AlbumArtist != "" || tags.Album != "" {
+		return nil
+	}
+	dirs := strings.Split(filepath.ToSlash(filepath.Dir(rel)), "/")
+	if _, ok := identity.DiscFolder(dirs[len(dirs)-1]); ok {
+		dirs = dirs[:len(dirs)-1]
+	}
+	if len(dirs) < 2 {
+		return nil
+	}
+	tags.Artist = dirs[len(dirs)-2]
+	tags.Album = yearSuffix.ReplaceAllString(dirs[len(dirs)-1], "")
+	return []string{"artist", "album"}
 }
 
 // adoptedPID returns the file's WAXBIN_ITEM_PID hint when the scan is in adopt mode
@@ -723,6 +775,8 @@ func fillRipTrack(vt *model.VirtualTrack, tags model.Tags) {
 	// anyone who wants one.
 	vt.Track.Barcode, vt.Track.Label, vt.Track.CatalogNumber = tags.Barcode, tags.Label, tags.CatalogNumber
 	vt.Track.Media, vt.Track.Country = tags.Media, tags.Country
+	// One rip is one disc, so every track it carves sits on the file's disc.
+	vt.Track.DiscNo, vt.Track.DiscTotal = tags.DiscNo, tags.DiscTotal
 }
 
 // keptRip returns the virtual tracks a file was last carved into, each with its own
@@ -914,13 +968,39 @@ func scanSidecars(audioPath string, embedded *model.Lyrics, cache *artCache) (*m
 	// that fallback the fast-path (which detects covers by existence, not decodability)
 	// would treat the undecodable file as newly-appeared on every scan and force a full
 	// reprocess forever.
-	dir := filepath.Dir(audioPath)
-	if obs := cache.dirCoverObs(dir); obs != nil {
-		aux = append(aux, *obs)
-	} else if obs := cache.dirCoverStat(dir); obs != nil {
+	if obs := coverObservation(audioPath, cache); obs != nil {
 		aux = append(aux, *obs)
 	}
 	return lyrics, aux, diags
+}
+
+// coverObservation is the observation of the directory cover resolveCover takes for a
+// file: the first decodable one across coverDirs, else the first cover file present.
+func coverObservation(audioPath string, cache *artCache) *model.AuxObservation {
+	dirs := cache.coverDirs(audioPath)
+	for _, d := range dirs {
+		if obs := cache.dirCoverObs(d); obs != nil {
+			return obs
+		}
+	}
+	for _, d := range dirs {
+		if obs := cache.dirCoverStat(d); obs != nil {
+			return obs
+		}
+	}
+	return nil
+}
+
+// coverDirs lists the folders a file's directory cover is looked for in: its own, then
+// the album folder above when it sits in a disc subfolder of the library, since an album
+// laid out in disc folders keeps its cover beside them. The library root is never taken
+// for one, so the search stays inside the library.
+func (c *artCache) coverDirs(path string) []string {
+	dir := filepath.Dir(path)
+	if _, ok := identity.FolderDisc(c.root, path); ok {
+		return []string{dir, filepath.Dir(dir)}
+	}
+	return []string{dir}
 }
 
 // maxSidecarBytes bounds a sidecar read. A .lrc/.cue is a few KiB of text, so a file
@@ -1190,9 +1270,14 @@ func coverChangedFast(path string, stored map[string]model.AuxObservation, cache
 		}
 		return info.Size() != prev.Size || info.ModTime().UnixNano() != prev.MTimeNS
 	}
-	// No prior cover: a cover newly appearing is a change. dirCoverStat lists the
+	// No prior cover: a cover newly appearing is a change. dirCoverStat lists each
 	// directory once (cached), without reading/hashing the image.
-	return cache.dirCoverStat(filepath.Dir(path)) != nil
+	for _, d := range cache.coverDirs(path) {
+		if cache.dirCoverStat(d) != nil {
+			return true
+		}
+	}
+	return false
 }
 
 // artCache memoizes per-directory cover-image lookups for one scan run, so an
@@ -1205,6 +1290,7 @@ type dirCoverEntry struct {
 }
 
 type artCache struct {
+	root     string                           // the library root, the edge of the folders a cover is looked for in
 	dirs     map[string]dirCoverEntry         // full resolve (image + hashed obs)
 	statObs  map[string]*model.AuxObservation // stat-only cover obs (no read/hash)
 	statDone map[string]bool                  // whether statObs[dir] has been computed
@@ -1216,6 +1302,13 @@ func newArtCache() *artCache {
 		statObs:  map[string]*model.AuxObservation{},
 		statDone: map[string]bool{},
 	}
+}
+
+// artCacheAt is a cache for a scan of the library rooted at root.
+func artCacheAt(root string) *artCache {
+	c := newArtCache()
+	c.root = root
+	return c
 }
 
 // dirCoverStat returns the directory cover file's observation from a cheap stat (no
@@ -1271,8 +1364,10 @@ func resolveCover(path string, embedded *model.ArtImage, cache *artCache) *model
 	if embedded != nil && finalizeArt(embedded) && embedded.Width > 0 {
 		return embedded // decodable embedded cover with known dimensions
 	}
-	if dir := cache.dirCover(filepath.Dir(path)); dir != nil {
-		return dir // a valid (decodable) directory cover
+	for _, d := range cache.coverDirs(path) {
+		if dir := cache.dirCover(d); dir != nil {
+			return dir // a valid (decodable) directory cover
+		}
 	}
 	// No usable directory cover: keep the embedded bytes even if they did not decode,
 	// so a format without a local decoder is not dropped (finalizeArt set its hash).

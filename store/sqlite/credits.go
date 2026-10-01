@@ -3,6 +3,8 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"errors"
+	"fmt"
 	"strings"
 
 	"github.com/colespringer/waxbin/model"
@@ -191,14 +193,22 @@ func (s *Store) setItemCreditsBatch(ctx context.Context, op string, edits []mode
 			entries = append(entries, t)
 		}
 
+		// Read ahead of the pre-pass, which renames an artist in place before any apply.
+		before, err := creditStatesTx(ctx, tx, entries)
+		if err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
 		affected := newAffectedRollups()
 		if err := renameArtistsForCreditsTx(ctx, tx, entries, affected, op); err != nil {
 			return err
 		}
-		for _, e := range entries {
+		for i, e := range entries {
 			stored, err := applyItemCreditsTx(ctx, tx, e, attr, lock, affected, op)
 			if err != nil {
 				return err
+			}
+			if err := noteOwedCreditTx(ctx, tx, e, before[i]); err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 			res.Edited = append(res.Edited, model.ItemCreditEdit{ItemPID: e.pid, Role: e.role, Names: stored})
 		}
@@ -308,6 +318,61 @@ func applyItemCreditsTx(ctx context.Context, tx *sql.Tx, e creditEntry, attr mod
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
 	return resolved, appendChange(ctx, tx, "item", e.pid, model.OpUpdate)
+}
+
+// creditStatesTx reads each entry's credit state (creditStateTx) ahead of the rename
+// pre-pass, which renames an artist in place before any apply.
+func creditStatesTx(ctx context.Context, tx *sql.Tx, entries []creditEntry) ([]string, error) {
+	out := make([]string, len(entries))
+	for i, e := range entries {
+		st, err := creditStateTx(ctx, tx, e)
+		if err != nil {
+			return nil, err
+		}
+		out[i] = st
+	}
+	return out, nil
+}
+
+// creditStateTx reads what a credit write-back would carry for an entry's role: the
+// credited artists in order, and the display the role feeds (a track's artist or
+// composer, a book's author or narrator).
+func creditStateTx(ctx context.Context, tx *sql.Tx, e creditEntry) (string, error) {
+	ids, err := contributorArtistIDsForRole(ctx, tx, e.itemID, e.role)
+	if err != nil {
+		return "", err
+	}
+	var q string
+	switch {
+	case e.kind == string(model.KindTrack) && e.role == model.RoleArtist:
+		q = "SELECT artist FROM track WHERE item_id = ?"
+	case e.kind == string(model.KindTrack) && e.role == model.RoleComposer:
+		q = "SELECT composer FROM track WHERE item_id = ?"
+	case e.kind == string(model.KindBook) && e.role == model.RoleAuthor:
+		q = "SELECT author FROM book WHERE item_id = ?"
+	case e.kind == string(model.KindBook) && e.role == model.RoleNarrator:
+		q = "SELECT narrator FROM book WHERE item_id = ?"
+	}
+	var display sql.NullString
+	if q != "" {
+		if err := tx.QueryRowContext(ctx, q, e.itemID).Scan(&display); err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return "", err
+		}
+	}
+	return fmt.Sprint(ids) + "\x00" + display.String, nil
+}
+
+// noteOwedCreditTx records an applied credit as owed to the item's files when its state
+// moved from before and a write-back can carry its role.
+func noteOwedCreditTx(ctx context.Context, tx *sql.Tx, e creditEntry, before string) error {
+	if !model.CreditWritable(e.role) {
+		return nil
+	}
+	after, err := creditStateTx(ctx, tx, e)
+	if err != nil || after == before {
+		return err
+	}
+	return noteOwedItemTx(ctx, tx, e.itemID, e.kind, []string{model.CreditField(e.role)})
 }
 
 // creditRenameField reports the rename pre-pass's key field for a credit role, if it
@@ -436,11 +501,12 @@ func contributorNamesForRoleTx(ctx context.Context, tx *sql.Tx, itemID int64, ro
 	return out, rows.Err()
 }
 
-// contributorArtistIDsForRole returns the artist ids currently credited in one role,
-// draining its cursor before returning so the caller can write to the same tx.
+// contributorArtistIDsForRole returns the artist ids currently credited in one role, in
+// credited order, draining its cursor before returning so the caller can write to the
+// same tx.
 func contributorArtistIDsForRole(ctx context.Context, tx *sql.Tx, itemID int64, role model.ContributorRole) ([]int64, error) {
 	rows, err := tx.QueryContext(ctx,
-		"SELECT artist_id FROM item_contributor WHERE item_id=? AND role=?", itemID, string(role))
+		"SELECT artist_id FROM item_contributor WHERE item_id=? AND role=? ORDER BY position", itemID, string(role))
 	if err != nil {
 		return nil, err
 	}

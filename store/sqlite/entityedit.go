@@ -210,6 +210,16 @@ func (s *Store) EditEntityFields(ctx context.Context, entityType model.MergeEnti
 			}
 		}
 
+		// Owed on the members before the edit: a clear that merges the entity away hands
+		// the survivor members whose files never carried what the clear removed.
+		owed, err := entityOwedKeysTx(ctx, tx, entityType, table, entityID, fields, norm)
+		if err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		if err := noteOwedMembersTx(ctx, tx, entityType, entityID, owed); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+
 		now := nowNS()
 		var newEvidence bool
 		for _, f := range fields {
@@ -373,7 +383,10 @@ func rekeyAlbumHeuristicTx(ctx context.Context, tx *sql.Tx, albumID int64) (mode
 	// Only the release id goes. The group's is carried, so an album under an mbid-keyed
 	// release group re-keys to al:mbid:<group>… exactly as a scan of these files would.
 	tr.MBReleaseID = ""
-	_, _, newKey := albumChainKeys(*tr, filePath)
+	_, _, newKey, err := albumChainKeys(ctx, tx, *tr, filePath)
+	if err != nil {
+		return "", err
+	}
 	if newKey == "" || newKey == curKey || albumKeyFolder(newKey) == "" {
 		return "", nil
 	}
@@ -408,7 +421,10 @@ func rekeyReleaseGroupHeuristicTx(ctx context.Context, tx *sql.Tx, log logger, r
 		return "", nil, err
 	}
 	tr.MBReleaseGroupID = ""
-	_, newKey, _ := albumChainKeys(*tr, filePath)
+	_, newKey, _, err := albumChainKeys(ctx, tx, *tr, filePath)
+	if err != nil {
+		return "", nil, err
+	}
 	if newKey == "" || newKey == curKey {
 		return "", nil, nil
 	}
@@ -600,7 +616,10 @@ func dependentAlbumsTx(ctx context.Context, tx *sql.Tx, rgID int64, oldRGKey str
 			continue
 		}
 		tr.MBReleaseGroupID, tr.MBReleaseID = "", ""
-		_, rgKey, albumKey := albumChainKeys(*tr, filePath)
+		_, rgKey, albumKey, err := albumChainKeys(ctx, tx, *tr, filePath)
+		if err != nil {
+			return nil, err
+		}
 		if rgKey == "" || albumKey == "" || albumKeyFolder(albumKey) == "" {
 			continue
 		}
@@ -660,6 +679,34 @@ func rewriteOrMergeEntityKeyTx(ctx context.Context, tx *sql.Tx, et model.MergeEn
 	default:
 		return "", err
 	}
+}
+
+// entityOwedKeysTx names what an entity edit owes its member files ("album.label"): each
+// field a write-back fans into their tags whose value the edit changes, and the id an
+// album's or a release group's mbid clear takes off them.
+func entityOwedKeysTx(ctx context.Context, tx *sql.Tx, entityType model.MergeEntity, table string, entityID int64, fields []string, norm map[string]string) ([]string, error) {
+	var out []string
+	for _, f := range fields {
+		strip := f == "mbid" && norm[f] == "" && (entityType == model.MergeAlbum || entityType == model.MergeReleaseGroup)
+		if !strip && !model.EntityFieldWritable(entityType, f) {
+			continue
+		}
+		var prior sql.NullString
+		var err error
+		if f == "sort" {
+			err = tx.QueryRowContext(ctx, `SELECT value FROM entity_curation
+				WHERE entity_type = ? AND entity_id = ? AND field = 'sort'`, string(entityType), entityID).Scan(&prior)
+		} else {
+			err = tx.QueryRowContext(ctx, "SELECT "+entityColumnForField(f)+" FROM "+table+" WHERE id = ?", entityID).Scan(&prior)
+		}
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return nil, err
+		}
+		if prior.String != norm[f] {
+			out = append(out, string(entityType)+"."+f)
+		}
+	}
+	return out, nil
 }
 
 // applyEntityFieldTx writes one entity field to its column. A sort-name override drives

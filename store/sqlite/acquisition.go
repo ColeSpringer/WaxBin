@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"time"
 
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/waxerr"
@@ -163,6 +164,10 @@ func (s *Store) SetAcquisition(ctx context.Context, itemPID model.PID, in model.
 				return waxerr.New(waxerr.CodeLocked, op, "acquisition is locked (use force to override)")
 			}
 		}
+		prior, err := acquisitionTagStateTx(ctx, tx, itemID)
+		if err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
 		acquiredAt := in.AcquiredAt
 		if acquiredAt == 0 {
 			acquiredAt = nowNS()
@@ -178,12 +183,38 @@ func (s *Store) SetAcquisition(ctx context.Context, itemPID model.PID, in model.
 			in.ProviderVersion, acquiredAt, in.OptionsJSON, boolInt(in.AcquiredAt != 0)); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
+		after, err := acquisitionTagStateTx(ctx, tx, itemID)
+		if err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		if after != prior {
+			if err := noteOwedItemTx(ctx, tx, itemID, kind, []string{model.OwedAcquisition}); err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+		}
 		if err := setCurationLockTx(ctx, tx, itemID, "acquisition",
 			model.Attribution{Source: model.SourceUser}, lock); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		return appendChange(ctx, tx, "item", itemPID, model.OpUpdate)
 	})
+}
+
+// acquisitionTagStateTx reads the part of an item's acquisition its file's tags carry
+// (meta.AcquisitionTagEdits: the source URL and id, and the date to the UTC day), "" for
+// no row.
+func acquisitionTagStateTx(ctx context.Context, tx *sql.Tx, itemID int64) (string, error) {
+	var url, id string
+	var at int64
+	err := tx.QueryRowContext(ctx, `SELECT source_url, source_id, acquired_at
+		FROM acquisition WHERE item_id = ?`, itemID).Scan(&url, &id, &at)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return url + "\x00" + id + "\x00" + time.Unix(0, at).UTC().Format(time.DateOnly), nil
 }
 
 // ClearAcquisition deletes an item's origin provenance, so the item falls back to the
@@ -247,6 +278,11 @@ func (s *Store) ClearAcquisition(ctx context.Context, itemPID model.PID, lock mo
 		}
 		if _, err := tx.ExecContext(ctx, "DELETE FROM acquisition WHERE item_id = ?", itemID); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		if hasRow {
+			if err := noteOwedItemTx(ctx, tx, itemID, kind, []string{model.OwedAcquisition}); err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
 		}
 		if err := setCurationLockTx(ctx, tx, itemID, "acquisition",
 			model.Attribution{Source: model.SourceUser}, lock); err != nil {

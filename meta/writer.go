@@ -51,7 +51,9 @@ var fieldTagKeys = map[string]string{
 	"genre":         "GENRE",
 	"year":          "DATE",
 	"track_no":      "TRACKNUMBER",
+	"track_total":   "TRACKTOTAL",
 	"disc_no":       "DISCNUMBER",
+	"disc_total":    "DISCTOTAL",
 	"bpm":           "BPM",
 	"isrc":          "ISRC",
 	"mbid":          "MUSICBRAINZ_TRACKID", // recording MBID (track write-back only)
@@ -107,6 +109,7 @@ type DerivedSortPair struct {
 
 // derivedSortPairs is ordered so the produced tag edits are deterministic.
 var derivedSortPairs = []DerivedSortPair{
+	{Field: "title", SortField: "", TagKey: string(tag.TitleSort)},
 	{Field: "artist", SortField: "", TagKey: string(tag.ArtistSort)},
 	{Field: "author", SortField: "author_sort", TagKey: string(tag.AlbumArtistSort)},
 	{Field: "composer", SortField: "composer_sort", TagKey: string(tag.ComposerSort)},

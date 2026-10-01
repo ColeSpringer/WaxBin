@@ -97,25 +97,43 @@ func (s *Store) PutScannedVirtualTracks(ctx context.Context, in model.PutScanned
 		if detached {
 			setChanged = true
 		}
+		// A rip's file takes no write-back, so what an edit owed the whole-file track it
+		// was before can never be paid.
+		if _, err := tx.ExecContext(ctx, `DELETE FROM file_diagnostic WHERE file_id = ? AND origin = ? AND code = ?`,
+			fileID, string(model.OriginEdit), string(model.DiagTagWriteOwed)); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
 
 		for _, vt := range in.Tracks {
-			// Overlay any user-locked fields onto the scanned virtual track before the
-			// change comparison, so a forced rescan neither reverts a curated edit nor
-			// counts a locked-field .cue change as a reason to rewrite the track. vt is a
-			// loop-local copy, so mutating it is safe.
-			if in.PreserveLocks {
-				if err := preserveLockedTrackFieldsTx(ctx, tx, s.log, &vt.Track, &vt.Item); err != nil {
+			// Overlay locked fields and the fills the sheet says nothing about onto the
+			// scanned virtual track before the change comparison, so a forced rescan
+			// neither reverts them nor counts them as a reason to rewrite the track. vt is
+			// a loop-local copy, so mutating it is safe.
+			prior, err := overlayStoredTrackTx(ctx, tx, s.log, 0, &vt.Track, &vt.Item, nil, in.PreserveLocks)
+			if err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+			ex, had := existing[vt.Item.IdentityKey]
+			// Rewriting the track re-derives what the sheet now says, so the provenance of
+			// each field it replaces goes the way a plain track's does. A track the file
+			// already backs is judged first, over the fields a plain track's put compares,
+			// so an unchanged one (a forced rescan of a stable rip) does no entity work and
+			// emits no delta.
+			var rederived []string
+			var prov map[string]rederivable
+			if had {
+				rederived, prov, err = rederivedTrackTx(ctx, tx, ex.itemID, ex.title, vt.Item.Title, vt.Track, in.PreserveLocks, prior)
+				if err != nil {
 					return waxerr.Wrap(waxerr.CodeIO, op, err)
 				}
 			}
-			ex, had := existing[vt.Item.IdentityKey]
-			metaChanged := !had || virtualTrackMetaDiffers(ex, vt)
+			metaChanged := !had || len(rederived) > 0
 			offsetChanged := !had || ex.startFrames != vt.StartFrames || ex.endFrames != vt.EndFrames
 			if !metaChanged && !offsetChanged {
-				continue // an unchanged virtual track (a forced rescan of a stable rip)
+				continue
 			}
 
-			itemID, itemPID, created, _, err := upsertItem(ctx, tx, s.log, vt.Item, bookAdoptKey{}, now, "")
+			itemID, itemPID, created, _, priorTitle, err := upsertItem(ctx, tx, s.log, vt.Item, bookAdoptKey{}, now, "")
 			if err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
@@ -123,7 +141,14 @@ func (s *Store) PutScannedVirtualTracks(ctx context.Context, in model.PutScanned
 				anyCreated = true
 			}
 			setChanged = true
-
+			// An item the catalog holds that this file did not back yet (a copy of the rip)
+			// has columns this put replaces too.
+			if !had && !created {
+				rederived, prov, err = rederivedTrackTx(ctx, tx, itemID, priorTitle, vt.Item.Title, vt.Track, in.PreserveLocks, prior)
+				if err != nil {
+					return waxerr.Wrap(waxerr.CodeIO, op, err)
+				}
+			}
 			if err := upsertTrack(ctx, tx, itemID, vt.Track); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
@@ -131,6 +156,11 @@ func (s *Store) PutScannedVirtualTracks(ctx context.Context, in model.PutScanned
 			// The cue carries per-track artist/album/genre, so unlike a plain track this
 			// must run whenever the metadata changed, not only when the audio did.
 			if err := affected.collect(ctx, tx, itemID); err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+			// The enrichment write-back never opens a rip's shared file, so no drift of its
+			// own can hang on what this retires.
+			if _, err := settleRederivedTx(ctx, tx, itemID, rederived, prov, in.PreserveLocks, affected); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 			if err := resolveAndLinkEntities(ctx, tx, s.log, itemID, vt.Track, in.File.Path, res.RelinkedFrom, fileID, affected); err != nil {
@@ -186,17 +216,11 @@ func (s *Store) PutScannedVirtualTracks(ctx context.Context, in model.PutScanned
 	return res, nil
 }
 
-// existingVirtualTrack is a virtual track already backing a file: its ids plus the
-// stored metadata and window used to decide whether a rescan changed it.
+// existingVirtualTrack is a virtual track already backing a file: its id and title plus
+// the stored window used to decide whether a rescan moved it.
 type existingVirtualTrack struct {
 	itemID      int64
 	title       string
-	artist      string
-	album       string
-	albumArtist string
-	genre       string
-	trackNo     int
-	year        int
 	startFrames int64
 	endFrames   int64
 }
@@ -207,13 +231,9 @@ type existingVirtualTrack struct {
 // edge ever has. It drains and closes its cursor before returning so the caller can
 // write to the same transaction.
 func virtualTracksForFile(ctx context.Context, tx *sql.Tx, fileID int64) (map[string]existingVirtualTrack, error) {
-	rows, err := tx.QueryContext(ctx, `SELECT pi.identity_key, pi.id, pi.title,
-			COALESCE(t.artist,''), COALESCE(t.album,''), COALESCE(t.album_artist,''),
-			COALESCE(t.genre,''), COALESCE(t.track_no,0), COALESCE(t.year,0),
-			itf.start_frames, itf.end_frames
+	rows, err := tx.QueryContext(ctx, `SELECT pi.identity_key, pi.id, pi.title, itf.start_frames, itf.end_frames
 		FROM item_file itf
 		JOIN playable_item pi ON pi.id = itf.item_id
-		LEFT JOIN track t ON t.item_id = pi.id
 		WHERE itf.file_id = ? AND itf.role = 'primary' AND itf.start_frames IS NOT NULL`, fileID)
 	if err != nil {
 		return nil, err
@@ -224,8 +244,7 @@ func virtualTracksForFile(ctx context.Context, tx *sql.Tx, fileID int64) (map[st
 		var key sql.NullString
 		var ex existingVirtualTrack
 		var startFrames, endFrames sql.NullInt64
-		if err := rows.Scan(&key, &ex.itemID, &ex.title, &ex.artist, &ex.album,
-			&ex.albumArtist, &ex.genre, &ex.trackNo, &ex.year, &startFrames, &endFrames); err != nil {
+		if err := rows.Scan(&key, &ex.itemID, &ex.title, &startFrames, &endFrames); err != nil {
 			return nil, err
 		}
 		ex.startFrames = startFrames.Int64
@@ -269,20 +288,6 @@ func (s *Store) VirtualTracksForPath(ctx context.Context, path []byte) ([]model.
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
 	return out, nil
-}
-
-// virtualTrackMetaDiffers reports whether a desired virtual track's display metadata
-// differs from what is already stored, so an unchanged track (common on a forced
-// rescan) does no entity work and emits no delta. Offsets are compared separately by
-// the caller.
-func virtualTrackMetaDiffers(ex existingVirtualTrack, vt model.VirtualTrack) bool {
-	return ex.title != vt.Item.Title ||
-		ex.artist != vt.Track.Artist ||
-		ex.album != vt.Track.Album ||
-		ex.albumArtist != vt.Track.AlbumArtist ||
-		ex.genre != vt.Track.Genre ||
-		ex.trackNo != vt.Track.TrackNo ||
-		ex.year != vt.Track.Year
 }
 
 // detachWholeFileItems removes any item that backs fileID through a whole-file edge

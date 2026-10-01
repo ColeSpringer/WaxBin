@@ -1508,8 +1508,9 @@ func seedEnrichTrackInput(libID int64) model.PutScannedTrackInput {
 // value on its item is newer than the file's settle stamp, whatever pass filled it, and
 // stops being owed once the write-back settles the stamp at that value's time. A later
 // fill reopens the file with every field, so a value an earlier pass could not land rides
-// along rather than being left behind. A value a rescan cleared still comes back, with
-// nothing to write, so the caller can settle it instead of scanning it forever.
+// along rather than being left behind. A rescan of a file that says nothing for the filled
+// fields keeps them owed, and one where the file states its own value retires that fill,
+// so the file owes nothing for it.
 func TestEnrichmentWritebackOwedUntilSettled(t *testing.T) {
 	ctx := context.Background()
 	st, dbPath, lib := openStoreAt(t)
@@ -1578,23 +1579,101 @@ func TestEnrichmentWritebackOwedUntilSettled(t *testing.T) {
 		t.Fatalf("rows = %d, want the file still owed the later fill", len(rows))
 	}
 
-	// A rescan that rebuilt the columns from a file without the values leaves the
-	// provenance rows behind: the file comes back with nothing to write.
+	// A rescan of a file still silent on both keeps the fills, so both stay owed.
 	in := seedEnrichTrackInput(lib.ID)
 	in.File.ContentHash = "c-a2"
 	in.File.MTimeNS = 2
 	if _, err := st.PutScannedTrack(ctx, in); err != nil {
 		t.Fatalf("rescan: %v", err)
 	}
+	if rows := owed(t, nil); len(rows) != 1 || rows[0].Fields["bpm"] != "128" || rows[0].Fields["composer"] != "Roger Waters" {
+		t.Fatalf("rows = %+v, want both fills still owed over a silent file", rows)
+	}
+	// Once the file states its own composer, that fill retires and only the bpm is owed.
+	in.File.ContentHash, in.File.MTimeNS = "c-a3", 3
+	in.Track.Composer, in.Track.ComposerSort = "Nick Mason", model.SortKey("Nick Mason")
+	if _, err := st.PutScannedTrack(ctx, in); err != nil {
+		t.Fatalf("rescan with a composer: %v", err)
+	}
 	rows = owed(t, nil)
-	if len(rows) != 1 || len(rows[0].Fields) != 0 {
-		t.Fatalf("rows = %+v, want the file owed with nothing left to write", rows)
+	if len(rows) != 1 || rows[0].Fields["bpm"] != "128" || rows[0].Fields["composer"] != "" {
+		t.Fatalf("rows = %+v, want the bpm alone still owed", rows)
 	}
-	if err := st.SettleEnrichmentWrite(ctx, filePID, rows[0].Newest); err != nil {
-		t.Fatalf("settle cleared: %v", err)
+	if n := scalarQueryInt(t, db, "SELECT COUNT(*) FROM field_provenance WHERE source = 'enrichment'"); n != 1 {
+		t.Fatalf("enrichment provenance rows = %d, want the bpm's alone", n)
 	}
-	if rows := owed(t, nil); len(rows) != 0 {
-		t.Fatalf("rows = %d, want none after settling the cleared value", len(rows))
+}
+
+// TestRescanRetiringEnrichmentClearsMootDrift: a rescan where the file states its own
+// values for what enrichment filled, after a failed write left drift about them, clears
+// that drift once the file owes nothing, and keeps it while the album's label is still
+// due to the file, since the failure may have been the label's.
+func TestRescanRetiringEnrichmentClearsMootDrift(t *testing.T) {
+	ctx := context.Background()
+	st, dbPath, lib := openStoreAt(t)
+	db := roConn(t, dbPath)
+	pid := seedEnrichTrack(t, st, lib.ID)
+	filePID := model.PID(scalarQueryStr(t, db, "SELECT pid FROM file"))
+	itemID := itemRowID(t, db, pid)
+
+	failedFill := func(t *testing.T, field, value string) {
+		t.Helper()
+		if err := st.ApplyItemFields(ctx, model.ItemFieldsEnrichment{
+			ItemID: itemID, PID: pid, Matched: true, Provider: "mb",
+			Fields: map[string]string{field: value},
+		}); err != nil {
+			t.Fatalf("fill: %v", err)
+		}
+		if err := st.AddFileDiagnostic(ctx, filePID, model.OriginEnrichment, model.FileDiagnostic{
+			Code: model.DiagTagWriteUnsynced, Severity: model.SeverityWarn, Detail: "permission denied",
+		}); err != nil {
+			t.Fatalf("drift: %v", err)
+		}
+	}
+	// The file states its own composer, and bpm when given one, which a rescan takes
+	// over the fills.
+	rescan := func(t *testing.T, content string, bpm int) {
+		t.Helper()
+		in := seedEnrichTrackInput(lib.ID)
+		in.File.ContentHash = content
+		in.Track.Composer, in.Track.ComposerSort, in.Track.BPM = "Nick Mason", model.SortKey("Nick Mason"), bpm
+		if _, err := st.PutScannedTrack(ctx, in); err != nil {
+			t.Fatalf("rescan: %v", err)
+		}
+	}
+	drift := func(t *testing.T) int {
+		t.Helper()
+		diags, err := st.FileDiagnostics(ctx, model.DiagnosticFilter{FilePID: filePID, Origin: model.OriginEnrichment})
+		if err != nil {
+			t.Fatalf("diagnostics: %v", err)
+		}
+		return len(diags)
+	}
+
+	failedFill(t, "composer", "Roger Waters")
+	albumID := int64(scalarQueryInt(t, db, "SELECT id FROM album"))
+	albumPID := model.PID(scalarQueryStr(t, db, "SELECT pid FROM album"))
+	if err := st.ApplyAlbumFields(ctx, model.AlbumFieldsEnrichment{
+		AlbumID: albumID, PID: albumPID, Matched: true, Provider: "discogs",
+		Fields: map[string]string{"label": "Harvest"},
+	}); err != nil {
+		t.Fatalf("label: %v", err)
+	}
+	rescan(t, "c-a2", 0)
+	if n := drift(t); n != 1 {
+		t.Fatalf("drift rows = %d, want the row kept while the label is due", n)
+	}
+
+	labelAt := int64(scalarQueryInt(t, db, "SELECT updated_at FROM entity_curation WHERE field = 'label'"))
+	if err := st.SettleEnrichmentWrite(ctx, filePID, labelAt); err != nil {
+		t.Fatalf("settle: %v", err)
+	}
+	// The file holds a composer now, so the next fill is the bpm it still lacks until the
+	// rescan finds the file's own.
+	failedFill(t, "bpm", "128")
+	rescan(t, "c-a3", 98)
+	if n := drift(t); n != 0 {
+		t.Fatalf("drift rows = %d, want none once the file owes nothing", n)
 	}
 }
 

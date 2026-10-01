@@ -92,7 +92,10 @@ func buildRenameMember(ctx context.Context, tx *sql.Tx, e editEntry, op string) 
 	}
 	m.curArtistID, m.curAlbumArtistID, m.curAlbumID = artistID.Int64, albumArtistID.Int64, albumID.Int64
 	m.hasPath = len(filePath) > 0
-	preAnchor, _, _ := albumChainKeys(cur, filePath)
+	preAnchor, _, _, err := albumChainKeys(ctx, tx, cur, filePath)
+	if err != nil {
+		return nil, err
+	}
 	if pres, _ := creditNames(preAnchor, nil, nil); len(pres) > 0 {
 		m.preAnchorPrimary = pres[0]
 	}
@@ -109,7 +112,9 @@ func buildRenameMember(ctx context.Context, tx *sql.Tx, e editEntry, op string) 
 			m.tr.Artists = e.credits
 		}
 	}
-	m.anchor, m.newRGKey, m.newAlbumKey = albumChainKeys(m.tr, filePath)
+	if m.anchor, m.newRGKey, m.newAlbumKey, err = albumChainKeys(ctx, tx, m.tr, filePath); err != nil {
+		return nil, err
+	}
 
 	// The credit primaries the artist stage compares, through the same creditNames
 	// the apply loop's resolution uses. The edit path never carries file-stated

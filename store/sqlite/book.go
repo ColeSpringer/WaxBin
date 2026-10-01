@@ -49,20 +49,20 @@ func (s *Store) PutScannedBook(ctx context.Context, in model.PutScannedBookInput
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 
-		// Overlay locked book fields onto the scanned values before any writer runs, so a
-		// curated edit survives a re-derive-from-disk `scan --force`. Off only for
-		// `scan --force --ignore-locks`.
-		if in.PreserveLocks {
-			if err := preserveLockedBookFieldsTx(ctx, tx, s.log, &in.Book, &in.Item); err != nil {
-				return waxerr.Wrap(waxerr.CodeIO, op, err)
-			}
+		fileTitle, fileBook := in.Item.Title, in.Book
+
+		// Overlay locked book fields, and the fills the part says nothing about, onto the
+		// scanned values before any writer runs (overlayStoredBookTx).
+		prior, err := overlayStoredBookTx(ctx, tx, s.log, fileID, &in.Book, &in.Item, in.Derived, in.PreserveLocks)
+		if err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 
 		// A rebuild adopts the file's WAXBIN_ITEM_PID stamp (organize stamps books too) to
 		// restore the book's original identity; identity stays essence-first, so a taken or
 		// invalid hint falls back to a fresh PID. Parts of one book share the stamp: the
 		// first to create the item adopts it, the rest join it by book key.
-		itemID, itemPID, created, stateChanged, err := upsertItem(ctx, tx, s.log, in.Item, bookAdoptKey{author: in.Book.Author, title: in.Item.Title}, now, in.PreferredItemPID)
+		itemID, itemPID, created, stateChanged, priorTitle, err := upsertItem(ctx, tx, s.log, in.Item, bookAdoptKey{author: in.Book.Author, title: in.Item.Title}, now, in.PreferredItemPID)
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
@@ -109,6 +109,35 @@ func (s *Store) PutScannedBook(ctx context.Context, in model.PutScannedBookInput
 			}
 		}
 
+		// upsertItem rewrote the title from this part, but the primary part owns the book's
+		// metadata, so any other part puts the title back. On the primary a title the put
+		// re-derives settles its provenance here; the other fields settle below.
+		ownsMeta := created || role == bookPrimaryRole
+		title := in.Item.Title
+		switch {
+		case !ownsMeta && priorTitle != in.Item.Title:
+			if _, err := tx.ExecContext(ctx, "UPDATE playable_item SET title=?, sort_key=? WHERE id=?",
+				priorTitle, model.SortKey(priorTitle), itemID); err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+			title = priorTitle
+		case ownsMeta && !created:
+			var rows map[string]rederivable
+			if known := prior.priorFor(itemID); known != nil {
+				rows = known.rederivable(in.PreserveLocks)
+			} else if rows, err = rederivableRowsTx(ctx, tx, itemID, in.PreserveLocks); err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+			if r, ok := rows["title"]; priorTitle != in.Item.Title || (ok && r.value != in.Item.Title) {
+				if _, err := retireProvenanceTx(ctx, tx, itemID, []string{"title"}, in.PreserveLocks); err != nil {
+					return waxerr.Wrap(waxerr.CodeIO, op, err)
+				}
+				res.MetadataChanged = true
+				// The retire rewrote the title's row, which the overlay's read still holds.
+				prior = nil
+			}
+		}
+
 		// Custom tags are owned by the primary part, like the book's other metadata.
 		// Overlay them onto item_tag every scan (idempotent, honoring per-key locks),
 		// before upsertBook so its FTS rebuild picks up the tag values.
@@ -121,30 +150,46 @@ func (s *Store) PutScannedBook(ctx context.Context, in model.PutScannedBookInput
 			tagsChanged = c
 		}
 
-		// On a real change, resolve the book's chapters (per file) and, only for the
-		// primary part, its metadata/series/contributors/genres/FTS. Gating the
-		// metadata on the primary makes one part the owner, so an asymmetrically-tagged
-		// later part can't clobber the book's narrator/series/etc. by scan order. The
-		// genres are still collected for every changed part so the genre rollup's
-		// summed-across-parts duration reflects a newly attached part.
+		// Only the primary part writes the book's metadata/series/contributors/genres/FTS,
+		// on a real change or when its tags disagree with the catalog. Gating the metadata
+		// on the primary makes one part the owner, so an asymmetrically-tagged later part
+		// can't clobber the book's narrator/series/etc. by scan order. The genres are still
+		// collected for every changed part so the genre rollup's summed-across-parts
+		// duration reflects a newly attached part.
 		changed := created || res.FileCreated || res.ContentChanged || res.Relinked
-		if changed {
+		// The fields the primary part's put re-derives, judged before upsertBook replaces
+		// them. Any read of the primary re-derives, a forced rescan of unchanged bytes
+		// included, the way a track's put does.
+		var rederived []string
+		var prov map[string]rederivable
+		if ownsMeta && !created {
+			if rederived, prov, err = rederivedBookTx(ctx, tx, itemID, in.Book, in.PreserveLocks, prior); err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+		}
+		rewrite := ownsMeta && (changed || len(rederived) > 0)
+		if changed || rewrite {
 			if err := affected.collect(ctx, tx, itemID); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
-			if created || role == bookPrimaryRole {
-				if err := upsertBook(ctx, tx, itemID, in.Book, affected); err != nil {
-					return waxerr.Wrap(waxerr.CodeIO, op, err)
-				}
-				if err := affected.collect(ctx, tx, itemID); err != nil {
-					return waxerr.Wrap(waxerr.CodeIO, op, err)
-				}
+		}
+		if rewrite {
+			if err := upsertBook(ctx, tx, itemID, in.Book, affected); err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
-		} else if tagsChanged {
-			// A custom-tag change on the primary part with unchanged audio bytes did not
-			// re-run upsertBook (which rebuilds the FTS row), so refresh the search row
-			// directly or the new tag values would not be searchable until the next audio
-			// change. tagsChanged is only ever set for the primary part.
+			if err := affected.collect(ctx, tx, itemID); err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+			if err := settleRederivedBookTx(ctx, tx, itemID, rederived, prov, in.PreserveLocks); err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+			res.MetadataChanged = res.MetadataChanged || len(rederived) > 0
+		}
+		if !rewrite && (tagsChanged || res.MetadataChanged) {
+			// upsertBook (which rebuilds the FTS row) did not run, so refresh the search row
+			// directly or a custom-tag change on the primary part, or a re-derived title,
+			// would not be searchable until the next audio change. tagsChanged is only ever
+			// set for the primary part.
 			if err := rebuildBookSearchFTSTx(ctx, tx, itemID); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
@@ -189,6 +234,13 @@ func (s *Store) PutScannedBook(ctx context.Context, in model.PutScannedBookInput
 		if err != nil {
 			return err
 		}
+		if err := settleOwedByScanTx(ctx, tx, fileID, itemID, scanSettle{
+			isBook: true, fileTitle: fileTitle, title: title, fileBook: fileBook,
+			bookRederived: rewrite, preserveLocks: in.PreserveLocks, derived: in.Derived,
+			cover: in.CoverArt, acquisitionRecorded: acqAdded,
+		}); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
 
 		if !affected.empty() {
 			if err := maintainRollupsTx(ctx, tx, affected, now); err != nil {
@@ -207,7 +259,7 @@ func (s *Store) PutScannedBook(ctx context.Context, in model.PutScannedBookInput
 		// created=false and ContentChanged=false, so without FileCreated/Relinked here a
 		// change_log tailer would never refresh the existing book. An externally-changed
 		// .cue (chaptersChanged with unchanged audio) also warrants a delta.
-		if created || res.ContentChanged || res.FileCreated || res.Relinked || chaptersChanged || stateChanged || artChanged || acqAdded || tagsChanged {
+		if created || res.ContentChanged || res.FileCreated || res.Relinked || res.MetadataChanged || chaptersChanged || stateChanged || artChanged || acqAdded || tagsChanged {
 			if err := appendChange(ctx, tx, "item", itemPID, opFor(created)); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}

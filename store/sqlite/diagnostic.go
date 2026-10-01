@@ -13,7 +13,7 @@ import (
 // change what would be derived from the same bytes: the audit's coverage finding
 // then reports the affected files as not yet derived, and the user can choose to run
 // `scan --force`. A mismatch never triggers a re-derive on its own.
-const currentDiagVersion = 5 // 2: WaxLabel 1.6 (FLAC truncation; WavPack, APE, WMA parsed natively); 3: 1.6.2 (WMA marker chapters); 4: 1.7 and 1.8 (hi-res MP4 and HE-AAC rates, QuickTime and AIFF-C codec names, Opus and ASF essence extents); 5: WaxFlow 446ca31 cue sheets (tolerant reading, data-track boundaries, hidden track one audio)
+const currentDiagVersion = 6 // 2: WaxLabel 1.6 (FLAC truncation; WavPack, APE, WMA parsed natively); 3: 1.6.2 (WMA marker chapters); 4: 1.7 and 1.8 (hi-res MP4 and HE-AAC rates, QuickTime and AIFF-C codec names, Opus and ASF essence extents); 5: WaxFlow 446ca31 cue sheets (tolerant reading, data-track boundaries, hidden track one audio); 6: display fallbacks from sort tags and file-name numbers
 
 // replaceFileDiagnosticsTx makes one writer's diagnostics for a file exactly ds,
 // deleting that origin's existing rows and inserting the current set. It touches
@@ -27,7 +27,10 @@ func replaceFileDiagnosticsTx(ctx context.Context, tx *sql.Tx, fileID int64, ori
 // row with the essence it describes, which only the analyze origin does ("" stamps
 // none). diagnosticCurrent hides a stamped row once the file's essence moves on.
 func replaceStampedDiagnosticsTx(ctx context.Context, tx *sql.Tx, fileID int64, origin model.DiagnosticOrigin, essence string, ds []model.FileDiagnostic) error {
-	if _, err := tx.ExecContext(ctx, "DELETE FROM file_diagnostic WHERE file_id = ? AND origin = ?", fileID, string(origin)); err != nil {
+	// The owed ledger is not part of any writer's set: its rows settle field by field
+	// (SettleTagWriteOwed), so a write-back replacing its drift rows leaves them be.
+	if _, err := tx.ExecContext(ctx, "DELETE FROM file_diagnostic WHERE file_id = ? AND origin = ? AND code <> ?",
+		fileID, string(origin), string(model.DiagTagWriteOwed)); err != nil {
 		return err
 	}
 	now := nowNS()
@@ -287,14 +290,15 @@ func (s *Store) DiagnosticSummary(ctx context.Context, filter model.DiagnosticFi
 }
 
 // hasFileDiagnostics reports whether a file already carries rows for one writer. It
-// is the guard that lets a no-op replace skip its write transaction. file.pid is
-// unique-indexed and file_diagnostic's primary key leads with file_id, so the check
-// costs two index lookups.
+// is the guard that lets a no-op replace skip its write transaction, so it leaves out
+// the owed ledger, which a replace never touches. file.pid is unique-indexed and
+// file_diagnostic's primary key leads with file_id, so the check costs two index lookups.
 func (s *Store) hasFileDiagnostics(ctx context.Context, filePID model.PID, origin model.DiagnosticOrigin) (bool, error) {
 	var n int
 	err := s.read.QueryRowContext(ctx, `SELECT EXISTS(
 		SELECT 1 FROM file_diagnostic d JOIN file f ON f.id = d.file_id
-		WHERE f.pid = ? AND d.origin = ?)`, string(filePID), string(origin)).Scan(&n)
+		WHERE f.pid = ? AND d.origin = ? AND d.code <> ?)`,
+		string(filePID), string(origin), string(model.DiagTagWriteOwed)).Scan(&n)
 	if err != nil {
 		return false, err
 	}

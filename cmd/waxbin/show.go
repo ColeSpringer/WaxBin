@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"strconv"
 
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/waxerr"
@@ -47,7 +48,7 @@ func newShowCmd(g *globals) *cobra.Command {
 			fmt.Fprintf(w, "artist:       %s\n", v.Artist)
 			fmt.Fprintf(w, "album artist: %s\n", v.AlbumArtist)
 			fmt.Fprintf(w, "album:        %s\n", v.Album)
-			fmt.Fprintf(w, "track/disc:   %d / %d\n", v.TrackNo, v.DiscNo)
+			fmt.Fprintf(w, "track/disc:   %s / %s\n", numberOf(v.TrackNo, v.TrackTotal), numberOf(v.DiscNo, v.DiscTotal))
 			fmt.Fprintf(w, "year:         %d\n", v.Year)
 			fmt.Fprintf(w, "genre:        %s\n", v.Genre)
 			fmt.Fprintf(w, "codec:        %s\n", v.Codec)
@@ -77,4 +78,12 @@ func newShowCmd(g *globals) *cobra.Command {
 			return nil
 		},
 	}
+}
+
+// numberOf renders a track or disc number with its total when the item states one.
+func numberOf(n, total int) string {
+	if total > 0 {
+		return fmt.Sprintf("%d of %d", n, total)
+	}
+	return strconv.Itoa(n)
 }

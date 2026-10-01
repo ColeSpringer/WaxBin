@@ -78,7 +78,8 @@ func (a *Adapter) read(ctx context.Context, path, op string, hashEssence bool) (
 			// `doctor` aren't blank for the file (it has no decoder regardless).
 			container, codec := extFormat(path)
 			return &FileMeta{
-				Tags: model.Tags{Title: titleFromPath(path), Container: container, Codec: codec},
+				Tags:          model.Tags{Title: titleFromPath(path), Container: container, Codec: codec},
+				TitleFromName: true,
 				// Previously swallowed silently: the file cataloged with a filename title
 				// and no tags, and nothing said why.
 				Diagnostics: []model.FileDiagnostic{{
@@ -107,7 +108,8 @@ func (a *Adapter) read(ctx context.Context, path, op string, hashEssence bool) (
 			Detail:   model.CapDetail("filled from a legacy tag container: " + joinKeys(filled)),
 		})
 	}
-	if fm.Tags.Title == "" {
+	fm.TitleFromName = fm.Tags.Title == ""
+	if fm.TitleFromName {
 		fm.Tags.Title = titleFromPath(path)
 	}
 	fm.Tags.Chapters = chaptersFromDoc(doc)
@@ -168,6 +170,7 @@ func tagsFromDoc(doc *waxlabel.Document, fields tag.Tags) model.Tags {
 		AlbumSort:       strings.TrimSpace(fields.AlbumSort),
 		AlbumArtistSort: strings.TrimSpace(fields.AlbumArtistSort),
 		ComposerSort:    strings.TrimSpace(fields.ComposerSort),
+		TitleSort:       strings.TrimSpace(fields.TitleSort),
 
 		MBID:             strings.TrimSpace(fields.MusicBrainz.RecordingID),
 		MBReleaseID:      strings.TrimSpace(fields.MusicBrainz.ReleaseID),
@@ -735,9 +738,9 @@ func chaptersFromDoc(doc *waxlabel.Document) []model.Chapter {
 // reserving the key globally would drop it from every track that has one, since this
 // function returns early for a non-book.
 //
-// Reading them is what lets enrichment write them back to disk and survive a rescan:
-// a field the reader ignores is one the scanner clears from an empty value on every
-// content-changed rescan, however it is tagged.
+// Reading them is what lets a value written back to disk read back on a rescan: a field
+// the reader ignores reads as empty however it is tagged, so a rescan would clear a
+// written-back edit from it.
 func applyBookFields(t *model.Tags, fields tag.Tags, path string) {
 	// tag.Project does not trim, so trim the two values whose meaning depends on it:
 	// mediaType is compared exactly, and narrator gates on being non-empty. The rest
@@ -909,6 +912,139 @@ func extFormat(path string) (container, codec string) {
 	default:
 		return "", strings.TrimPrefix(strings.ToLower(filepath.Ext(path)), ".")
 	}
+}
+
+// fileNumberRe splits a numbered file name into an optional disc, the track, and the
+// rest: "1-03 - Title", "03. Title", "03 Title". It is trusted only when the rest is the
+// title the tags gave. fileNameNumberRe is the shape demanded when the title is the file
+// name itself, so a name that opens with a number of its own ("50 Cent - In Da Club",
+// "1-800-273-8255", "3 Libras") keeps it: one or two digits followed by a dash or dot, or
+// a zero-padded pair before a space, and a rest that opens with no digit.
+var (
+	fileNumberRe     = regexp.MustCompile(`^(?:(\d{1,2})-)?(\d{1,3})(?:\s*[-.]\s*|\s+)(.+)$`)
+	fileNameNumberRe = regexp.MustCompile(`^(?:(\d{1,2})-)?(?:(\d{1,2})\s*[-.]\s*|(0\d)\s+)(\D.*)$`)
+)
+
+// DisplayFallbacks fills a track's empty display fields from its sort tags, an untagged
+// number from its file name, and an untagged disc from a disc folder holding the file
+// (identity.FolderDisc), looking no higher than root, the library or staging folder the
+// file sits in, which is empty when not known. It is for a file the caller has decided is
+// a track: a book's title and author are the key its parts group by, and a sort tag or a
+// file name lending them would re-key it. titleFromName is FileMeta.TitleFromName, so a
+// sort title outranks the file name and the name's number prefix is stripped.
+//
+// It returns the catalog fields whose value the file's own tags do not state (a title
+// from the file name counts) and one diagnostic reporting what it did, nil when there is
+// nothing to say.
+//
+// A sort value with a comma is left alone: it is the inverted form ("Paak, Anderson",
+// "Wall, The"), and as a display name it would mint the wrong entity. A number is taken
+// only when the rest of the file name is the title the file ended up with, so a name
+// about something else, or a title that merely starts with a number, numbers nothing.
+func DisplayFallbacks(t *model.Tags, root, path string, titleFromName bool) ([]string, *model.FileDiagnostic) {
+	var derived, fromSort, fromName, skipped []string
+	if titleFromName {
+		derived = append(derived, "title")
+	}
+	fill := func(field, label string, dst *string, sortValue string) bool {
+		switch {
+		case sortValue == "":
+			return false
+		case strings.Contains(sortValue, ","):
+			skipped = append(skipped, label+" "+strconv.Quote(sortValue))
+			return false
+		}
+		*dst = sortValue
+		fromSort = append(fromSort, label)
+		if field != "title" {
+			derived = append(derived, field)
+		}
+		return true
+	}
+	if titleFromName && fill("title", "title", &t.Title, t.TitleSort) {
+		titleFromName = false
+	}
+	if t.Artist == "" && fill("artist", "artist", &t.Artist, t.ArtistSort) {
+		t.Artists = []string{t.Artist}
+	}
+	if t.Album == "" {
+		fill("album", "album", &t.Album, t.AlbumSort)
+	}
+	if t.AlbumArtist == "" {
+		fill("album_artist", "album artist", &t.AlbumArtist, t.AlbumArtistSort)
+	}
+
+	base := filepath.Base(path)
+	disc, track, rest, ok := fileNameNumber(strings.TrimSuffix(base, filepath.Ext(base)), titleFromName)
+	if ok {
+		if titleFromName {
+			t.Title = rest
+		}
+		if identity.MatchKey(rest) == identity.MatchKey(t.Title) {
+			if t.TrackNo == 0 && track > 0 {
+				t.TrackNo = track
+				fromName = append(fromName, "track")
+				derived = append(derived, "track_no")
+			}
+			if t.DiscNo == 0 && disc > 0 {
+				t.DiscNo = disc
+				fromName = append(fromName, "disc")
+				derived = append(derived, "disc_no")
+			}
+		}
+	}
+	// A disc subfolder names the disc, which keeps an album's discs in order once their
+	// folders key one album (identity.AlbumFolder).
+	var fromFolder bool
+	if t.DiscNo == 0 {
+		if disc, ok := identity.FolderDisc(root, path); ok && disc > 0 {
+			t.DiscNo, fromFolder = disc, true
+			derived = append(derived, "disc_no")
+		}
+	}
+
+	var parts []string
+	if len(fromSort) > 0 {
+		parts = append(parts, "filled "+strings.Join(fromSort, ", ")+" from the sort tags")
+	}
+	if len(fromName) > 0 {
+		parts = append(parts, "took the "+strings.Join(fromName, " and ")+" number from the file name")
+	}
+	if fromFolder {
+		parts = append(parts, "took the disc number from its folder")
+	}
+	if len(skipped) > 0 {
+		parts = append(parts, "left the inverted sort value of "+strings.Join(skipped, ", "))
+	}
+	if len(parts) == 0 {
+		return derived, nil
+	}
+	return derived, &model.FileDiagnostic{
+		Code:     model.DiagSortNameFallback,
+		Severity: model.SeverityInfo,
+		Detail:   model.CapDetail(strings.Join(parts, "; ")),
+	}
+}
+
+// fileNameNumber splits a numbered file name into disc, track and the rest, under the
+// strict shape when the title is the file name itself (see fileNameNumberRe).
+func fileNameNumber(name string, strict bool) (disc, track int, rest string, ok bool) {
+	if strict {
+		m := fileNameNumberRe.FindStringSubmatch(name)
+		if m == nil {
+			return 0, 0, "", false
+		}
+		disc, _ = strconv.Atoi(m[1])
+		track, _ = strconv.Atoi(m[2] + m[3])
+		return disc, track, strings.TrimSpace(m[4]), true
+	}
+	m := fileNumberRe.FindStringSubmatch(name)
+	if m == nil {
+		return 0, 0, "", false
+	}
+	disc, _ = strconv.Atoi(m[1])
+	track, _ = strconv.Atoi(m[2])
+	return disc, track, strings.TrimSpace(m[3]), true
 }
 
 // titleFromPath derives a display title from the filename (extension stripped),

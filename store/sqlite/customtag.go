@@ -174,17 +174,19 @@ func syncItemTagsTx(ctx context.Context, tx *sql.Tx, itemID int64, scanned map[s
 	if len(scanned) == 0 && len(current) == 0 {
 		return false, nil
 	}
-	// Every tag.<KEY> provenance row this item has, with its lock bit. Loading them all
-	// rather than only the locked ones costs the same query and is what lets the reserved
+	// Every tag.<KEY> provenance row this item has. Loading them all rather than only the
+	// locked ones costs the same query and is what lets the reserved sweep and the stale
 	// sweep below reach an unlocked row too; the lock decisions read the same map, since a
 	// key with no row and a key with an unlocked row both answer false.
-	tagFields, err := tagProvenanceKeysTx(ctx, tx, itemID)
+	tagFields, err := tagProvenanceTx(ctx, tx, itemID)
 	if err != nil {
 		return false, err
 	}
 	locked := map[string]bool{}
 	if preserveLock {
-		locked = tagFields
+		for k, row := range tagFields {
+			locked[k] = row.locked
+		}
 	}
 
 	// Build the desired set: the scanned values for every non-locked key (normalized to
@@ -208,7 +210,8 @@ func syncItemTagsTx(ctx context.Context, tx *sql.Tx, itemID int64, scanned map[s
 	// A locked key keeps its values unless it has since become reserved: SetItemTag
 	// rejects a reserved key, so re-adding it here would store a tag nothing could edit.
 	// Dropping it is what makes newly reserving a key take effect.
-	for k, isLocked := range tagFields {
+	var stale []string
+	for k, row := range tagFields {
 		// A reserved key's provenance row goes whether or not it was locked.
 		// IsCuratableField refuses a reserved tag.<KEY> field, so once the values are gone
 		// neither SetItemTag nor UnlockField can reach the row and it would sit there
@@ -220,16 +223,34 @@ func syncItemTagsTx(ctx context.Context, tx *sql.Tx, itemID int64, scanned map[s
 			}
 			continue
 		}
-		if !isLocked || !preserveLock {
+		if row.locked && preserveLock {
+			if vs, ok := current[k]; ok {
+				desired[k] = vs
+			}
 			continue
 		}
-		if vs, ok := current[k]; ok {
-			desired[k] = vs
+		// A tag enrichment set, or a normalize pass respelled, stays while the file lacks
+		// the key, the rule a scalar fill follows (overlayStoredTrackTx).
+		if _, stated := desired[k]; !stated && fillSource(row.source) {
+			if vs, ok := current[k]; ok && row.value == strings.Join(vs, "; ") {
+				desired[k] = vs
+				continue
+			}
+		}
+		// A row stating a value the scan replaced or dropped is re-derived, the way a
+		// scalar's is (retireProvenanceTx). A lock-only row states none.
+		if row.source != string(model.SourceTag) && row.value != strings.Join(desired[k], "; ") {
+			stale = append(stale, model.TagLockField(k))
+		}
+	}
+	if len(stale) > 0 {
+		if _, err := retireProvenanceTx(ctx, tx, itemID, stale, preserveLock); err != nil {
+			return false, err
 		}
 	}
 
 	if tagSetsEqual(current, desired) {
-		return false, nil
+		return len(stale) > 0, nil
 	}
 	if _, err := tx.ExecContext(ctx, "DELETE FROM item_tag WHERE item_id=?", itemID); err != nil {
 		return false, err
@@ -261,24 +282,30 @@ func loadItemTagsTx(ctx context.Context, tx *sql.Tx, itemID int64) (map[string][
 	return out, rows.Err()
 }
 
-// tagProvenanceKeysTx returns the canonical keys that have a "tag.<KEY>" provenance row,
-// mapped to whether that row is locked.
-func tagProvenanceKeysTx(ctx context.Context, tx *sql.Tx, itemID int64) (map[string]bool, error) {
-	rows, err := tx.QueryContext(ctx,
-		"SELECT field, locked FROM field_provenance WHERE item_id=? AND field LIKE 'tag.%'", itemID)
+// tagProvenanceRow is one "tag.<KEY>" provenance row: its lock, its source, and the
+// joined values it records.
+type tagProvenanceRow struct {
+	locked        bool
+	source, value string
+}
+
+// tagProvenanceTx returns an item's "tag.<KEY>" provenance rows by canonical key.
+func tagProvenanceTx(ctx context.Context, tx *sql.Tx, itemID int64) (map[string]tagProvenanceRow, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT field, locked, source, COALESCE(value, '')
+		FROM field_provenance WHERE item_id=? AND field LIKE 'tag.%'`, itemID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	out := map[string]bool{}
+	out := map[string]tagProvenanceRow{}
 	for rows.Next() {
 		var field string
-		var locked int
-		if err := rows.Scan(&field, &locked); err != nil {
+		var row tagProvenanceRow
+		if err := rows.Scan(&field, &row.locked, &row.source, &row.value); err != nil {
 			return nil, err
 		}
 		if key, ok := model.CutTagPrefix(field); ok {
-			out[key] = locked == 1
+			out[key] = row
 		}
 	}
 	return out, rows.Err()

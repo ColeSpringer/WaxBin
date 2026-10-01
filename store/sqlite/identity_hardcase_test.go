@@ -3,6 +3,8 @@ package sqlite
 import (
 	"context"
 	"testing"
+
+	"github.com/colespringer/waxbin/model"
 )
 
 // countRows is a tiny helper for the identity hard-case assertions.
@@ -79,13 +81,13 @@ func TestClassicalMultiPerformerAlbumGroups(t *testing.T) {
 	}
 }
 
-// TestBoxSetDiscsShareReleaseGroup verifies a multi-disc box set, with tracks laid
-// out in per-disc folders, yields one release group above its per-disc album rows.
-// Browse groups the set as one work while the disc folders stay distinct editions
-// (the album key includes the folder; the release-group key does not).
-func TestBoxSetDiscsShareReleaseGroup(t *testing.T) {
+// TestBoxSetDiscFoldersAreOneAlbum verifies a multi-disc box set, with tracks laid out
+// in per-disc folders ("Disc 1", "CD2"), is one album under one release group: a disc
+// folder names a disc, not an edition, so the album key takes the folder above it. A
+// folder that is not a disc folder still keys an album of its own.
+func TestBoxSetDiscFoldersAreOneAlbum(t *testing.T) {
 	st, lib := entityFixture(t)
-	discs := []string{"Disc 1", "Disc 2", "Disc 3"}
+	discs := []string{"Disc 1", "Disc 2", "CD3"}
 	for i, disc := range discs {
 		putTrack(t, st, lib.ID, trackSpec{
 			path:      "/lib/Zeppelin/Complete/" + disc + "/1.flac",
@@ -100,18 +102,42 @@ func TestBoxSetDiscsShareReleaseGroup(t *testing.T) {
 		})
 	}
 	if got := countRows(t, st, "release_group"); got != 1 {
-		t.Errorf("box set produced %d release groups, want 1 (discs share the work)", got)
+		t.Errorf("box set produced %d release groups, want 1", got)
 	}
-	if got := countRows(t, st, "album"); got != 3 {
-		t.Errorf("box set produced %d albums, want 3 (one per disc folder)", got)
+	if got := countRows(t, st, "album"); got != 1 {
+		t.Errorf("box set produced %d albums, want 1 across its disc folders", got)
 	}
-	// All three disc albums hang under the single release group.
-	var linked int
-	if err := st.read.QueryRowContext(context.Background(),
-		"SELECT COUNT(*) FROM album WHERE release_group_id IS NOT NULL").Scan(&linked); err != nil {
-		t.Fatal(err)
+
+	putTrack(t, st, lib.ID, trackSpec{
+		path: "/lib/Zeppelin/Complete/Bonus/1.flac", essence: "be9", content: "bc9",
+		title: "Bonus Song", artist: "Led Zeppelin", albumArt: "Led Zeppelin",
+		album: "The Complete Studio Recordings", year: 1993, discTotal: 3,
+	})
+	if got := countRows(t, st, "album"); got != 2 {
+		t.Errorf("albums = %d, want the Bonus folder keyed as an album of its own", got)
 	}
-	if linked != 3 {
-		t.Errorf("%d albums linked to a release group, want 3", linked)
+}
+
+// TestDiscFolderMembersStayOneAlbumThroughAnEdit: an edit re-resolves its members through
+// the same album folder a scan keys them by, so editing every disc of a disc-folder album
+// keeps it one album.
+func TestDiscFolderMembersStayOneAlbumThroughAnEdit(t *testing.T) {
+	st, lib := entityFixture(t)
+	var pids []model.PID
+	for i, disc := range []string{"CD1", "CD2"} {
+		pids = append(pids, putTrack(t, st, lib.ID, trackSpec{
+			path: "/lib/Floyd/Wall/" + disc + "/1.flac", essence: "w" + string(rune('1'+i)), content: "wc" + string(rune('1'+i)),
+			title: "Song " + disc, artist: "Pink Floyd", albumArt: "Pink Floyd", album: "The Wall",
+		}).ItemPID)
+	}
+	if got := countRows(t, st, "album"); got != 1 {
+		t.Fatalf("albums = %d before the edit, want 1", got)
+	}
+	if _, err := st.EditManyFields(context.Background(), pids, map[string]string{"year": "1979"},
+		model.Attribution{Source: model.SourceUser}, model.LockOn, false, false); err != nil {
+		t.Fatalf("edit year: %v", err)
+	}
+	if got := countRows(t, st, "album"); got != 1 {
+		t.Errorf("albums = %d after editing every disc, want 1", got)
 	}
 }

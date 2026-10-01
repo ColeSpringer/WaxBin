@@ -134,7 +134,7 @@ const itemViewCols = `pi.pid, pi.kind, pi.state, pi.title,
 	COALESCE(NULLIF(t.artist,''), bk.author, pod.title, ''),
 	COALESCE(NULLIF(t.album_artist,''), bk.author, pod.title, ''),
 	COALESCE(NULLIF(t.album,''), srs.name, pod.title, ''),
-	t.track_no, t.disc_no, ` + itemYearExpr + `,
+	t.track_no, t.track_total, t.disc_no, t.disc_total, ` + itemYearExpr + `,
 	COALESCE(NULLIF(t.genre,''), bk.genre, ''), t.compilation,
 	COALESCE(t.composer,''), COALESCE(t.composer_sort,''),
 	COALESCE(bk.author_sort,''), COALESCE(bk.narrator,''), COALESCE(srs.name,''),
@@ -172,6 +172,7 @@ const fileSelect = `SELECT id, pid, library_id, path, display_path, rel_path, ki
 // itemViewNulls holds the nullable columns of an item view during a scan.
 type itemViewNulls struct {
 	trackNo, discNo, year, bpm, dur     sql.NullInt64
+	trackTotal, discTotal               sql.NullInt64
 	compilation                         sql.NullInt64
 	season, pubDate, explicit           sql.NullInt64
 	podcastExplicit                     sql.NullInt64
@@ -189,7 +190,7 @@ type itemViewNulls struct {
 func itemViewDests(v *model.ItemView, n *itemViewNulls) []any {
 	return []any{
 		&v.PID, &v.Kind, &v.State, &v.Title,
-		&v.Artist, &v.AlbumArtist, &v.Album, &n.trackNo, &n.discNo, &n.year, &v.Genre, &n.compilation,
+		&v.Artist, &v.AlbumArtist, &v.Album, &n.trackNo, &n.trackTotal, &n.discNo, &n.discTotal, &n.year, &v.Genre, &n.compilation,
 		&v.Composer, &v.ComposerSort,
 		&v.AuthorSort, &v.Narrator, &v.Series, &v.SeriesSeq, &v.Subtitle, &v.ASIN,
 		&n.season, &n.pubDate, &n.explicit, &n.podcastExplicit, &v.Source,
@@ -204,7 +205,9 @@ func itemViewDests(v *model.ItemView, n *itemViewNulls) []any {
 
 func (n *itemViewNulls) apply(v *model.ItemView) {
 	v.TrackNo = int(n.trackNo.Int64)
+	v.TrackTotal = int(n.trackTotal.Int64)
 	v.DiscNo = int(n.discNo.Int64)
+	v.DiscTotal = int(n.discTotal.Int64)
 	v.Year = int(n.year.Int64)
 	v.BPM = int(n.bpm.Int64)
 	v.Compilation = n.compilation.Int64 != 0
@@ -285,7 +288,7 @@ func scanFile(sc rowScanner) (*model.File, error) {
 func scanLibrary(sc rowScanner) (*model.Library, error) {
 	var lib model.Library
 	var mode, media string
-	if err := sc.Scan(&lib.ID, &lib.PID, &lib.Root, &lib.DisplayRoot, &mode, &media, &lib.Profile, &lib.ReadOnly, &lib.CreatedAt); err != nil {
+	if err := sc.Scan(&lib.ID, &lib.PID, &lib.Root, &lib.DisplayRoot, &mode, &media, &lib.Profile, &lib.ReadOnly, &lib.FolderFallback, &lib.CreatedAt); err != nil {
 		return nil, err
 	}
 	lib.Mode = model.Mode(mode)
@@ -293,7 +296,7 @@ func scanLibrary(sc rowScanner) (*model.Library, error) {
 	return &lib, nil
 }
 
-const librarySelect = "SELECT id, pid, root, display_root, mode, media, profile, read_only, created_at FROM library"
+const librarySelect = "SELECT id, pid, root, display_root, mode, media, profile, read_only, folder_fallback, created_at FROM library"
 
 func libraryByRootTx(ctx context.Context, q queryer, root []byte) (*model.Library, error) {
 	return libraryByRootDB(ctx, q, root)
@@ -576,26 +579,28 @@ func adoptBookItemByEditionTx(ctx context.Context, tx *sql.Tx, identityKey strin
 // upsertItem finds-or-creates the logical item, returning its id, pid, whether it
 // was created, and whether an existing item's state transitioned (e.g. missing ->
 // present when a file is restored) so the caller can emit a change_log delta for the
-// transition even when the audio content is unchanged.
+// transition even when the audio content is unchanged. priorTitle is the title an
+// existing item held before this write replaced it, which is how a scan put tells a
+// re-derived title from an unchanged one.
 //
 // A book whose key matches nothing gets a second look by its strong identifier, so an
 // enrichment-derived ASIN or ISBN joins the standing book rather than forking a new one,
 // and by its edition column for the same reason. See adoptBookItemByIdentTx.
-func upsertItem(ctx context.Context, tx *sql.Tx, log logger, item model.PlayableItem, adopt bookAdoptKey, now int64, preferredPID model.PID) (id int64, pid model.PID, created, stateChanged bool, err error) {
+func upsertItem(ctx context.Context, tx *sql.Tx, log logger, item model.PlayableItem, adopt bookAdoptKey, now int64, preferredPID model.PID) (id int64, pid model.PID, created, stateChanged bool, priorTitle string, err error) {
 	if item.IdentityKey != "" {
 		var rid int64
-		var rpid, curState string
+		var rpid, curState, curTitle string
 		qerr := tx.QueryRowContext(ctx,
-			"SELECT id, pid, state FROM playable_item WHERE kind = ? AND identity_key = ?",
-			string(item.Kind), item.IdentityKey).Scan(&rid, &rpid, &curState)
+			"SELECT id, pid, state, title FROM playable_item WHERE kind = ? AND identity_key = ?",
+			string(item.Kind), item.IdentityKey).Scan(&rid, &rpid, &curState, &curTitle)
 		if errors.Is(qerr, sql.ErrNoRows) && item.Kind == model.KindBook {
 			adopted, aerr := adoptBookItemByIdentTx(ctx, tx, log, item.IdentityKey, adopt)
 			if aerr != nil {
-				return 0, "", false, false, aerr
+				return 0, "", false, false, "", aerr
 			}
 			if adopted != 0 {
 				qerr = tx.QueryRowContext(ctx,
-					"SELECT id, pid, state FROM playable_item WHERE id = ?", adopted).Scan(&rid, &rpid, &curState)
+					"SELECT id, pid, state, title FROM playable_item WHERE id = ?", adopted).Scan(&rid, &rpid, &curState, &curTitle)
 			}
 		}
 		switch {
@@ -603,11 +608,11 @@ func upsertItem(ctx context.Context, tx *sql.Tx, log logger, item model.Playable
 			if _, uerr := tx.ExecContext(ctx,
 				"UPDATE playable_item SET title=?, sort_key=?, state=?, updated_at=? WHERE id=?",
 				item.Title, item.SortKey, string(item.State), now, rid); uerr != nil {
-				return 0, "", false, false, uerr
+				return 0, "", false, false, "", uerr
 			}
-			return rid, model.PID(rpid), false, curState != string(item.State), nil
+			return rid, model.PID(rpid), false, curState != string(item.State), curTitle, nil
 		case !errors.Is(qerr, sql.ErrNoRows):
-			return 0, "", false, false, qerr
+			return 0, "", false, false, "", qerr
 		}
 	}
 	// A new item mints a fresh PID, unless a rebuild supplied a valid, unclaimed
@@ -620,7 +625,7 @@ func upsertItem(ctx context.Context, tx *sql.Tx, log logger, item model.Playable
 		var taken int
 		if terr := tx.QueryRowContext(ctx,
 			"SELECT EXISTS(SELECT 1 FROM playable_item WHERE pid = ?)", string(preferredPID)).Scan(&taken); terr != nil {
-			return 0, "", false, false, terr
+			return 0, "", false, false, "", terr
 		}
 		if taken == 0 {
 			newPID = preferredPID
@@ -632,13 +637,13 @@ func upsertItem(ctx context.Context, tx *sql.Tx, log logger, item model.Playable
 		string(newPID), string(item.Kind), string(item.State), item.Title, item.SortKey,
 		nullStr(item.IdentityKey), now, now)
 	if ierr != nil {
-		return 0, "", false, false, ierr
+		return 0, "", false, false, "", ierr
 	}
 	rid, ierr := r.LastInsertId()
 	if ierr != nil {
-		return 0, "", false, false, ierr
+		return 0, "", false, false, "", ierr
 	}
-	return rid, newPID, true, false, nil
+	return rid, newPID, true, false, "", nil
 }
 
 func upsertTrack(ctx context.Context, tx *sql.Tx, itemID int64, tr model.Track) error {

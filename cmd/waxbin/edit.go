@@ -34,7 +34,8 @@ func newEditCmd(g *globals) *cobra.Command {
 		Long: "Edit metadata fields on one or more track/book items. Each edit records user " +
 			"provenance and, by default, locks the field so enrichment and organize leave it alone. " +
 			"The edit is catalog-only unless --write-back also mirrors it into each file's on-disk " +
-			"tags (track items only).\n\n" +
+			"tags (every part of a book); a value an edit changes is listed in `diagnostics` as " +
+			"tag_write_owed until a write-back lands it or a scan that re-reads the file finds it there.\n\n" +
 			"Targets are either explicit item pids, or items selected with the shared query flags " +
 			"(--artist, --genre, --year, ...) or a --rule document. A multi-item or selection edit " +
 			"previews the count and needs --yes to apply (or --dry-run to just preview).\n\n" +
@@ -43,7 +44,8 @@ func newEditCmd(g *globals) *cobra.Command {
 			"applied in one atomic catalog transaction. It excludes pids, --set, and the selection " +
 			"flags, and honors the same preview gate.\n\n" +
 			"Track fields: title, artist, album_artist, album, composer, composer_sort, comment, " +
-			"genre, year, track_no, disc_no, bpm, isrc, mbid, compilation.\n" +
+			"genre, year, track_no, track_total, disc_no, disc_total, bpm, isrc, mbid, compilation. " +
+			"A track_no or disc_no edited past a total it does not name clears that total, unless the total is locked.\n" +
 			"Book fields: title, author, author_sort, narrator, series, subtitle, genre, year, " +
 			"asin, isbn, publisher, edition, description, mbid.",
 		RunE: func(cmd *cobra.Command, args []string) error {

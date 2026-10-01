@@ -826,6 +826,13 @@ func (l *Library) proxyHandlers() map[string]proxy.Handler {
 			}
 			return l.SetLibraryReadOnly(ctx, model.PID(p.LibraryPID), p.ReadOnly)
 		},
+		proxy.MethodSetLibraryFolderFallback: func(ctx context.Context, raw json.RawMessage) (any, error) {
+			p, err := decodeParams[proxy.SetLibraryFolderFallbackParams](raw)
+			if err != nil {
+				return nil, err
+			}
+			return l.SetLibraryFolderFallback(ctx, model.PID(p.LibraryPID), p.On)
+		},
 		proxy.MethodRunScan: func(ctx context.Context, raw json.RawMessage) (any, error) {
 			p, err := decodeParams[proxy.ScanParams](raw)
 			if err != nil {

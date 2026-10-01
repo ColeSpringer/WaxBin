@@ -56,8 +56,10 @@ func newDiagnosticsCmd(g *globals) *cobra.Command {
 		Short: "Query the persisted per-file diagnostics",
 		Long: "Reads the diagnostics recorded per file by the scan, organize, the ReplayGain tag " +
 			"write-back (replaygain), edits, the enrichment write-back, and the analyze pass's " +
-			"decode (analyze): unsupported formats, dropped cue tracks, unsynced tags, damaged " +
-			"audio, and the rest, filtered by writer, code, severity, library, file, or item. " +
+			"decode (analyze): unsupported formats, dropped cue tracks, unsynced tags, edited " +
+			"values not yet written to the file (tag_write_owed, one row per value), names filled from " +
+			"sort tags or file names, damaged audio, and the rest, filtered by writer, code, " +
+			"severity, library, file, or item. " +
 			"`list` prints the rows; `summary` prints grouped counts, most severe first.",
 	}
 	cmd.AddCommand(newDiagnosticsListCmd(g), newDiagnosticsSummaryCmd(g))

@@ -2,8 +2,10 @@ package meta
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -189,6 +191,183 @@ func TestLegacyFallbackNeverChangesIdentity(t *testing.T) {
 	}
 	if key := identity.TrackKey(fm.Tags.MBID, fm.EssenceHash); !strings.HasPrefix(key, "essence:") {
 		t.Errorf("identity key = %q, want an essence: key", key)
+	}
+
+	// The read applies no display fallback, since a caller may force the file to a book:
+	// a book's title and author are its key, so a sort tag or a file name lending them
+	// would re-key the book its parts group under.
+	ctx := context.Background()
+	book := writeTemp(t, "08 Part.mp3", testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
+		TXXX: []testaudio.TXXXFrame{{Desc: "NARRATOR", Value: "Reader"}},
+	}))
+	bookKey := func() string {
+		t.Helper()
+		fm, err := NewReader().Read(ctx, book)
+		if err != nil {
+			t.Fatalf("Read book: %v", err)
+		}
+		if !fm.Tags.IsAudiobook {
+			t.Fatal("fixture did not classify as a book")
+		}
+		if d := findDiag(fm, model.DiagSortNameFallback); d != nil {
+			t.Errorf("a book took a display fallback: %+v", d)
+		}
+		author := fm.Tags.AlbumArtist
+		if author == "" {
+			author = fm.Tags.Artist
+		}
+		title := fm.Tags.Album
+		if title == "" {
+			title = fm.Tags.Title
+		}
+		return identity.BookKey(fm.Tags.ASIN, fm.Tags.ISBN, author, title, fm.Tags.Edition) + fmt.Sprintf("#%d", fm.Tags.TrackNo)
+	}
+	before := bookKey()
+	if _, err := NewWriter().Apply(ctx, book, []TagEdit{
+		{Key: "TITLESORT", Values: []string{"Part"}},
+		{Key: "ARTISTSORT", Values: []string{"Writer"}},
+		{Key: "ALBUMSORT", Values: []string{"Tome"}},
+	}); err != nil {
+		t.Fatalf("stage book sort tags: %v", err)
+	}
+	if after := bookKey(); after != before {
+		t.Errorf("book key moved from %q to %q under the display fallbacks", before, after)
+	}
+}
+
+// readTrack reads a file the way the scanner reads a track: the parse, then the display
+// fallbacks, whose diagnostic joins the read's.
+func readTrack(t *testing.T, ctx context.Context, path string) (*FileMeta, []string) {
+	t.Helper()
+	return readTrackIn(t, ctx, "", path)
+}
+
+// readTrackIn is readTrack for a file in the library rooted at root.
+func readTrackIn(t *testing.T, ctx context.Context, root, path string) (*FileMeta, []string) {
+	t.Helper()
+	fm, err := NewReader().Read(ctx, path)
+	if err != nil {
+		t.Fatalf("%s: Read: %v", filepath.Base(path), err)
+	}
+	derived, d := DisplayFallbacks(&fm.Tags, root, path, fm.TitleFromName)
+	if d != nil {
+		fm.Diagnostics = append(fm.Diagnostics, *d)
+	}
+	return fm, derived
+}
+
+// findDiag returns the first diagnostic with code c, or nil.
+func findDiag(fm *FileMeta, c model.DiagnosticCode) *model.FileDiagnostic {
+	for i := range fm.Diagnostics {
+		if fm.Diagnostics[i].Code == c {
+			return &fm.Diagnostics[i]
+		}
+	}
+	return nil
+}
+
+// TestSortTagsFillMissingDisplayFields: a file whose display tags are empty while its
+// sort tags are set (iTunes writes sonm, soar and soal) catalogs under the sort
+// spellings rather than a file-name title and no artist, and takes its number from the
+// file name once the name's remainder is the title it ended up with.
+func TestSortTagsFillMissingDisplayFields(t *testing.T) {
+	ctx := context.Background()
+	for _, c := range []struct {
+		name string
+		data []byte
+	}{
+		{"08 Parking Lot.m4a", testaudio.Fixture(t, "sample.m4a")},
+		{"08 Parking Lot.mp3", testaudio.BuildMP3FromSpec(testaudio.MP3Spec{Genre: "Hip-Hop"})},
+	} {
+		p := writeTemp(t, c.name, c.data)
+		if _, err := NewWriter().Apply(ctx, p, []TagEdit{
+			{Key: "TITLE"}, {Key: "ARTIST"}, {Key: "ALBUM"}, {Key: "TRACKNUMBER"}, {Key: "TRACKTOTAL"},
+			{Key: "TITLESORT", Values: []string{"Parking Lot"}},
+			{Key: "ARTISTSORT", Values: []string{"Anderson .Paak"}},
+			{Key: "ALBUMSORT", Values: []string{"Malibu"}},
+		}); err != nil {
+			t.Fatalf("%s: stage tags: %v", c.name, err)
+		}
+		fm, derived := readTrack(t, ctx, p)
+		if want := []string{"title", "artist", "album", "track_no"}; !slices.Equal(derived, want) {
+			t.Errorf("%s: derived = %v, want %v", c.name, derived, want)
+		}
+		tg := fm.Tags
+		if tg.Title != "Parking Lot" || tg.Artist != "Anderson .Paak" || tg.Album != "Malibu" || tg.TrackNo != 8 {
+			t.Errorf("%s: title/artist/album/track = %q/%q/%q/%d, want Parking Lot/Anderson .Paak/Malibu/8",
+				c.name, tg.Title, tg.Artist, tg.Album, tg.TrackNo)
+		}
+		if len(tg.Artists) != 1 || tg.Artists[0] != "Anderson .Paak" {
+			t.Errorf("%s: Artists = %v, want it filled alongside Artist", c.name, tg.Artists)
+		}
+		d := findDiag(fm, model.DiagSortNameFallback)
+		if d == nil || d.Severity != model.SeverityInfo {
+			t.Fatalf("%s: diagnostics = %+v, want an info sort_name_fallback", c.name, fm.Diagnostics)
+		}
+		for _, f := range []string{"title", "artist", "album", "track"} {
+			if !strings.Contains(d.Detail, f) {
+				t.Errorf("%s: detail %q does not name %s", c.name, d.Detail, f)
+			}
+		}
+	}
+}
+
+// TestSortTagFallbackSkipsInvertedForms: a sort value with a comma is the inverted form
+// ("Paak, Anderson", "Wall, The") and would mint the wrong entity as a display name, so
+// it is left, and the diagnostic names what was left and why the field stayed empty.
+func TestSortTagFallbackSkipsInvertedForms(t *testing.T) {
+	ctx := context.Background()
+	p := writeTemp(t, "song.mp3", testaudio.BuildMP3FromSpec(testaudio.MP3Spec{Title: "Song"}))
+	if _, err := NewWriter().Apply(ctx, p, []TagEdit{
+		{Key: "ARTISTSORT", Values: []string{"Paak, Anderson"}},
+		{Key: "ALBUMSORT", Values: []string{"Wall, The"}},
+	}); err != nil {
+		t.Fatalf("stage tags: %v", err)
+	}
+	fm, _ := readTrack(t, ctx, p)
+	if fm.Tags.Artist != "" || fm.Tags.Album != "" {
+		t.Errorf("artist/album = %q/%q, want both left empty", fm.Tags.Artist, fm.Tags.Album)
+	}
+	d := findDiag(fm, model.DiagSortNameFallback)
+	if d == nil {
+		t.Fatalf("diagnostics = %+v, want a sort_name_fallback naming the skipped values", fm.Diagnostics)
+	}
+	for _, v := range []string{"Paak, Anderson", "Wall, The"} {
+		if !strings.Contains(d.Detail, v) {
+			t.Errorf("detail %q does not name %q", d.Detail, v)
+		}
+	}
+}
+
+// TestFileNameNumberNeedsTheTitle: a leading number is taken from the file name only
+// when the rest of the name is the title, so "08 Parking Lot" numbers "Parking Lot" and
+// a name about something else numbers nothing; a tagged number always wins.
+func TestFileNameNumberNeedsTheTitle(t *testing.T) {
+	ctx := context.Background()
+	for _, c := range []struct {
+		name       string
+		spec       testaudio.MP3Spec
+		disc, want int
+	}{
+		{"1-03 - Song Name.mp3", testaudio.MP3Spec{Title: "Song Name"}, 1, 3},
+		{"03. song name.mp3", testaudio.MP3Spec{Title: "Song Name"}, 0, 3},
+		{"03 Other Thing.mp3", testaudio.MP3Spec{Title: "Song Name"}, 0, 0},
+		{"03 Song Name.mp3", testaudio.MP3Spec{Title: "Song Name", Track: 5}, 0, 5},
+	} {
+		p := writeTemp(t, c.name, testaudio.BuildMP3FromSpec(c.spec))
+		fm, _ := readTrack(t, ctx, p)
+		if fm.Tags.TrackNo != c.want || fm.Tags.DiscNo != c.disc {
+			t.Errorf("%s: disc/track = %d/%d, want %d/%d", c.name, fm.Tags.DiscNo, fm.Tags.TrackNo, c.disc, c.want)
+		}
+		if fm.Tags.Title != "Song Name" {
+			t.Errorf("%s: title = %q, want the tagged title kept", c.name, fm.Tags.Title)
+		}
+	}
+	// A file-name title loses its number prefix with the number taken.
+	p := writeTemp(t, "07 - Untagged Song.mp3", testaudio.BuildMP3FromSpec(testaudio.MP3Spec{Genre: "Rock"}))
+	fm, _ := readTrack(t, ctx, p)
+	if fm.Tags.Title != "Untagged Song" || fm.Tags.TrackNo != 7 {
+		t.Errorf("title/track = %q/%d, want Untagged Song/7", fm.Tags.Title, fm.Tags.TrackNo)
 	}
 }
 
@@ -1412,5 +1591,96 @@ func TestCreditWriteShapesFollowKeyCardinality(t *testing.T) {
 		if got, _ := doc.Get(tag.Conductor); len(got) != 1 || got[0] != "Ana; Ben" {
 			t.Errorf("%s: CONDUCTOR on disk = %v, want [Ana; Ben]", c.name, got)
 		}
+	}
+}
+
+// TestFileNameTitleNeedsATrackShapedNumber: an untagged file's name is taken for its
+// number only when the number is shaped like a track number (two digits with a leading
+// zero, or followed by a dash or dot) and the rest starts with no digit, so a title that
+// opens with a number keeps it.
+func TestFileNameTitleNeedsATrackShapedNumber(t *testing.T) {
+	ctx := context.Background()
+	for _, c := range []struct {
+		name, title string
+		disc, track int
+	}{
+		{"50 Cent - In Da Club.mp3", "50 Cent - In Da Club", 0, 0},
+		{"1-800-273-8255.mp3", "1-800-273-8255", 0, 0},
+		{"101 Intro.mp3", "101 Intro", 0, 0},
+		{"3 Libras.mp3", "3 Libras", 0, 0},
+		{"07 Song.mp3", "Song", 0, 7},
+		{"7 - Song.mp3", "Song", 0, 7},
+		{"12. Song.mp3", "Song", 0, 12},
+		{"1-03 Song.mp3", "Song", 1, 3},
+	} {
+		p := writeTemp(t, c.name, testaudio.BuildMP3FromSpec(testaudio.MP3Spec{Genre: "Rock"}))
+		fm, _ := readTrack(t, ctx, p)
+		if fm.Tags.Title != c.title || fm.Tags.DiscNo != c.disc || fm.Tags.TrackNo != c.track {
+			t.Errorf("%s: title/disc/track = %q/%d/%d, want %q/%d/%d",
+				c.name, fm.Tags.Title, fm.Tags.DiscNo, fm.Tags.TrackNo, c.title, c.disc, c.track)
+		}
+	}
+}
+
+// TestDiscFolderNamesTheDisc: a track in a disc folder whose tags state no disc takes the
+// folder's, reported as a fallback and marked derived, while a tagged disc wins.
+func TestDiscFolderNamesTheDisc(t *testing.T) {
+	ctx := context.Background()
+	dir := filepath.Join(t.TempDir(), "Album", "Disc 2")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(dir, "song.mp3")
+	if err := os.WriteFile(p, testaudio.BuildMP3FromSpec(testaudio.MP3Spec{Title: "Song", Track: 1}), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fm, derived := readTrack(t, ctx, p)
+	if fm.Tags.DiscNo != 2 || !slices.Contains(derived, "disc_no") {
+		t.Errorf("disc = %d, derived = %v, want 2 from the folder and disc_no derived", fm.Tags.DiscNo, derived)
+	}
+	if d := findDiag(fm, model.DiagSortNameFallback); d == nil || !strings.Contains(d.Detail, "folder") {
+		t.Errorf("diagnostics = %+v, want the folder's disc reported", fm.Diagnostics)
+	}
+	if _, err := NewWriter().Apply(ctx, p, []TagEdit{{Key: "DISCNUMBER", Values: []string{"5"}}}); err != nil {
+		t.Fatalf("tag the disc: %v", err)
+	}
+	if fm, _ := readTrack(t, ctx, p); fm.Tags.DiscNo != 5 {
+		t.Errorf("disc = %d, want the tagged 5", fm.Tags.DiscNo)
+	}
+
+	// A folder naming disc zero names no disc, so it fills nothing and reports nothing.
+	zero := filepath.Join(t.TempDir(), "Album", "CD0")
+	if err := os.MkdirAll(zero, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	p = filepath.Join(zero, "song.mp3")
+	if err := os.WriteFile(p, testaudio.BuildMP3FromSpec(testaudio.MP3Spec{Title: "Song", Track: 1}), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fm, derived = readTrack(t, ctx, p)
+	if slices.Contains(derived, "disc_no") || findDiag(fm, model.DiagSortNameFallback) != nil {
+		t.Errorf("CD0: derived = %v, diagnostics = %+v, want neither", derived, fm.Diagnostics)
+	}
+}
+
+// TestLibraryRootNamesNoDisc: the root of the library holding a file is the edge of the
+// folders that can name its disc, so a track loose in a root called "CD2" takes none.
+func TestLibraryRootNamesNoDisc(t *testing.T) {
+	ctx := context.Background()
+	root := filepath.Join(t.TempDir(), "CD2")
+	if err := os.MkdirAll(filepath.Join(root, "Disc 3"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, rel := range []string{"song.mp3", filepath.Join("Disc 3", "song.mp3")} {
+		p := filepath.Join(root, rel)
+		if err := os.WriteFile(p, testaudio.BuildMP3FromSpec(testaudio.MP3Spec{Title: "Song", Track: 1}), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if fm, derived := readTrackIn(t, ctx, root, filepath.Join(root, "song.mp3")); fm.Tags.DiscNo != 0 || slices.Contains(derived, "disc_no") {
+		t.Errorf("loose in the root: disc = %d, derived = %v, want none", fm.Tags.DiscNo, derived)
+	}
+	if fm, _ := readTrackIn(t, ctx, root, filepath.Join(root, "Disc 3", "song.mp3")); fm.Tags.DiscNo != 3 {
+		t.Errorf("in a disc folder inside the root: disc = %d, want 3", fm.Tags.DiscNo)
 	}
 }

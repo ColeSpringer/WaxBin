@@ -170,3 +170,25 @@ func TestAcquisitionIsLockOnly(t *testing.T) {
 		t.Error("acquisition is scalar-editable; it has its own edit API")
 	}
 }
+
+// TestNormalizeAcrossTheGates pins where the normalize source belongs: a scalar value a
+// normalization pass rewrote, so both scalar gates take it and neither artifact gate
+// does, and like user it names no provider, since nothing outside supplied it.
+func TestNormalizeAcrossTheGates(t *testing.T) {
+	if !SourceNormalize.Valid() || !SourceNormalize.ValidForField() {
+		t.Fatal("SourceNormalize is not a scalar-field source")
+	}
+	a := Attribution{Source: SourceNormalize}
+	if !a.ValidForField() {
+		t.Error("a normalized value was refused by ValidForField")
+	}
+	if a.ValidForArt() {
+		t.Error("a normalized cover passed ValidForArt")
+	}
+	if a.ValidForLyrics() {
+		t.Error("normalized lyrics passed ValidForLyrics")
+	}
+	if (Attribution{Source: SourceNormalize, Provider: "x"}).ValidForField() {
+		t.Error("a normalized value naming a provider was accepted")
+	}
+}

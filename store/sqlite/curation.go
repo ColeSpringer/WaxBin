@@ -66,7 +66,7 @@ func (s *Store) SetItemLyrics(ctx context.Context, itemPID model.PID, ly *model.
 			cp.Source, cp.Provider = attr.Source, attr.Provider
 			want = &cp
 		}
-		if _, err := putLyricsTx(ctx, tx, itemID, want, false); err != nil {
+		if _, err := putLyricsTx(ctx, tx, itemID, want, false, false); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		if err := setCurationLockTx(ctx, tx, itemID, "lyrics", lyricsAttribution(want), lock); err != nil {
@@ -360,7 +360,9 @@ func (s *Store) SetItemArt(ctx context.Context, itemPID model.PID, role model.Ar
 		}
 		// One path for set and clear: replace this role's mapping (a nil image just
 		// deletes it). A cleared role's orphaned source becomes GC-able.
-		if err := setEntityArtRoleTx(ctx, tx, "track", itemID, string(role), img); err != nil {
+		if err := setFrontOwingTx(ctx, tx, "track", itemID, string(role), img, func() error {
+			return noteOwedItemTx(ctx, tx, itemID, kind, []string{model.OwedArt})
+		}); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		if img == nil && lockField == "art" {
@@ -471,7 +473,23 @@ func (s *Store) SetEntityArt(ctx context.Context, entityType model.ArtEntity, en
 				return waxerr.New(waxerr.CodeLocked, op, artLockedMessage(entityType, entityPID, role))
 			}
 		}
-		if err := setEntityArtRoleTx(ctx, tx, string(entityType), entityID, string(role), img); err != nil {
+		// The two covers a write-back embeds: a track's own, and an album's in its members.
+		var owe func() error
+		switch entityType {
+		case model.ArtTrack:
+			owe = func() error {
+				var kind string
+				if err := tx.QueryRowContext(ctx, "SELECT kind FROM playable_item WHERE id = ?", entityID).Scan(&kind); err != nil {
+					return err
+				}
+				return noteOwedItemTx(ctx, tx, entityID, kind, []string{model.OwedArt})
+			}
+		case model.ArtAlbum:
+			owe = func() error {
+				return noteOwedMembersTx(ctx, tx, model.MergeAlbum, entityID, []string{model.OwedAlbumArt})
+			}
+		}
+		if err := setFrontOwingTx(ctx, tx, string(entityType), entityID, string(role), img, owe); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		if lock != model.LockUnchanged {
@@ -662,6 +680,32 @@ func (s *Store) SetArtLock(ctx context.Context, entityType model.ArtEntity, pid 
 		return model.ArtLockChange{}, err
 	}
 	return out, nil
+}
+
+// setFrontOwingTx is setEntityArtRoleTx for an edit surface: when the role is the front
+// and the picture it maps to changes, owe runs, recording the cover as owed to the files a
+// write-back embeds it in. A nil owe owes nothing.
+func setFrontOwingTx(ctx context.Context, tx *sql.Tx, entityType string, entityID int64, role string, img *model.ArtImage, owe func() error) error {
+	if role != string(model.ArtRoleFront) || owe == nil {
+		return setEntityArtRoleTx(ctx, tx, entityType, entityID, role, img)
+	}
+	var prior string
+	err := tx.QueryRowContext(ctx, "SELECT source_hash FROM art_map WHERE entity_type = ? AND entity_id = ? AND role = ?",
+		entityType, entityID, role).Scan(&prior)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if err := setEntityArtRoleTx(ctx, tx, entityType, entityID, role, img); err != nil {
+		return err
+	}
+	var hash string
+	if s := storableArt(img); s != nil {
+		hash = s.Hash
+	}
+	if hash == prior {
+		return nil
+	}
+	return owe()
 }
 
 // setEntityArtRoleTx replaces one (entity, role) art mapping, storing the source, its

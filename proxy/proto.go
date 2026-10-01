@@ -39,7 +39,7 @@ import (
 // changed=false, so every proxied write would report itself as a no-op.
 // Version 6 added EnrichParams.WriteTags: a version-5 server drops it and runs
 // without the on-disk write-back, so a client that asked for durable enrichment
-// silently gets values the next rescan clears.
+// silently gets values that live only in the catalog.
 // Version 7 added mark_missing: a version-6 server does not implement it, so a
 // client that recorded a vanished file would leave the catalog claiming the bytes
 // are still there and keep handing the same doomed work back out.
@@ -185,8 +185,8 @@ import (
 //
 // Version 21 added EnrichParams.Phases, for the reason version 3 gave: a version-20
 // server drops the field and runs the whole pass where the client asked for one phase.
-// set_library_read_only rides at 21 on the add_root precedent, since it widens no
-// existing struct.
+// set_library_read_only and set_library_folder_fallback ride at 21 on the add_root
+// precedent, since neither widens an existing struct.
 const ProtocolVersion = 21
 
 // Method names for the proxied operations: the fast request/response catalog
@@ -247,7 +247,8 @@ const (
 	MethodMaintenanceBegin = "maintenance_begin"
 	MethodMaintenanceEnd   = "maintenance_end"
 
-	MethodSetLibraryReadOnly = "set_library_read_only"
+	MethodSetLibraryReadOnly       = "set_library_read_only"
+	MethodSetLibraryFolderFallback = "set_library_folder_fallback"
 
 	// Server-run long jobs. The server starts the job in its own process (staying
 	// available) and returns the job PID; the client tails the read-only job row.
@@ -1011,6 +1012,13 @@ type AddRootParams struct {
 type SetLibraryReadOnlyParams struct {
 	LibraryPID string `json:"libraryPid"`
 	ReadOnly   bool   `json:"readOnly"`
+}
+
+// SetLibraryFolderFallbackParams is the set_library_folder_fallback request payload;
+// the answer is the library row.
+type SetLibraryFolderFallbackParams struct {
+	LibraryPID string `json:"libraryPid"`
+	On         bool   `json:"on"`
 }
 
 // ScanParams is the run_scan request payload.

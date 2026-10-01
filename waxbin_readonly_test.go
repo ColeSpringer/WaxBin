@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -46,8 +47,8 @@ func setReadOnly(t *testing.T, ctx context.Context, lib *waxbin.Library, pid mod
 }
 
 // TestReadOnlyLibraryRefusesTheTagWriteBack: an edit in a read-only library lands in
-// the catalog and leaves the file alone, reported and queued for review; once the flag
-// clears, the next edit writes the file.
+// the catalog and leaves the file alone, reported and queued for review with its value
+// still owed; once the flag clears, the next edit writes the file and pays it.
 func TestReadOnlyLibraryRefusesTheTagWriteBack(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
@@ -70,9 +71,12 @@ func TestReadOnlyLibraryRefusesTheTagWriteBack(t *testing.T) {
 	if fm, err := meta.NewReader().Read(ctx, src); err != nil || fm.Tags.BPM != 90 {
 		t.Fatalf("on-disk BPM = %d (err %v), want the file untouched", fm.Tags.BPM, err)
 	}
-	ds, err := lib.FileDiagnostics(ctx, model.DiagnosticFilter{Origin: model.OriginEdit})
+	ds, err := lib.FileDiagnostics(ctx, model.DiagnosticFilter{Origin: model.OriginEdit, Code: model.DiagTagWriteUnsynced})
 	if err != nil || len(ds) != 1 || !strings.Contains(ds[0].Detail, "read-only library") {
 		t.Fatalf("edit diagnostics = %+v (err %v), want the refusal queued for review", ds, err)
+	}
+	if got := owedOn(t, ctx, lib, pid); !slices.Equal(got, []string{"bpm"}) {
+		t.Fatalf("owed after the refusal = %v, want [bpm]", got)
 	}
 
 	setReadOnly(t, ctx, lib, libraryPIDFor(t, ctx, lib, root), false)
@@ -81,6 +85,9 @@ func TestReadOnlyLibraryRefusesTheTagWriteBack(t *testing.T) {
 	}
 	if fm, err := meta.NewReader().Read(ctx, src); err != nil || fm.Tags.BPM != 130 {
 		t.Fatalf("on-disk BPM = %d (err %v), want the edit written", fm.Tags.BPM, err)
+	}
+	if got := owedOn(t, ctx, lib, pid); len(got) != 0 {
+		t.Fatalf("owed after the write landed = %v, want none", got)
 	}
 }
 

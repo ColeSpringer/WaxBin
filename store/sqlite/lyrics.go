@@ -26,8 +26,10 @@ type lyricLineJSON struct {
 // delta only on a real change.
 // preserveLock, when true, makes a would-be change to a user-locked lyrics row a
 // no-op, so a scan/enrich pass never overwrites a curated edit. SetItemLyrics passes
-// false (it is the authoritative user write).
-func putLyricsTx(ctx context.Context, tx *sql.Tx, itemID int64, ly *model.Lyrics, preserveLock bool) (bool, error) {
+// false (it is the authoritative user write). keepFill is a scan's: lyrics enrichment
+// fetched stay while neither the file nor a sidecar carries any, the rule a scalar fill
+// follows (overlayStoredTrackTx).
+func putLyricsTx(ctx context.Context, tx *sql.Tx, itemID int64, ly *model.Lyrics, preserveLock, keepFill bool) (bool, error) {
 	// Desired row (empty source means "no lyrics row").
 	var wantSource, wantProvider, wantUnsynced, wantLines string
 	wantSynced := 0
@@ -64,6 +66,9 @@ func putLyricsTx(ctx context.Context, tx *sql.Tx, itemID int64, ly *model.Lyrics
 	exists := !errors.Is(err, sql.ErrNoRows)
 	if err != nil && exists {
 		return false, err
+	}
+	if wantSource == "" && keepFill && curSource.String == string(model.SourceEnrichment) {
+		return false, nil
 	}
 
 	// Decide whether a write is even needed before consulting the lock, so an

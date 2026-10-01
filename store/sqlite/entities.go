@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/colespringer/waxbin/identity"
+	"github.com/colespringer/waxbin/internal/pathx"
 	"github.com/colespringer/waxbin/model"
 )
 
@@ -33,7 +34,10 @@ func resolveAndLinkEntities(ctx context.Context, tx *sql.Tx, log logger, itemID 
 	if err != nil {
 		return err
 	}
-	anchor, rgKey, albumKey := albumChainKeys(tr, filePath)
+	anchor, rgKey, albumKey, err := albumChainKeys(ctx, tx, tr, filePath)
+	if err != nil {
+		return err
+	}
 	// The ids follow the same fallback the anchor made in albumChainKeys.
 	albumArtistIDs := tr.MBAlbumArtistIDs
 	if strings.TrimSpace(tr.AlbumArtist) == "" {
@@ -65,12 +69,12 @@ func resolveAndLinkEntities(ctx context.Context, tx *sql.Tx, log logger, itemID 
 		return err
 	}
 
-	// The album the track sat on before this resolve, read while the FK still points at
-	// it. upsertTrack never writes album_id, so this is exactly what the last resolve
-	// left, and a track row created moments ago reads NULL.
-	var priorAlbumID sql.NullInt64
+	// The album and artist the track sat on before this resolve, read while the FKs still
+	// point at them. upsertTrack never writes either, so this is exactly what the last
+	// resolve left, and a track row created moments ago reads NULL.
+	var priorAlbumID, priorArtistID sql.NullInt64
 	if err := tx.QueryRowContext(ctx,
-		"SELECT album_id FROM track WHERE item_id=?", itemID).Scan(&priorAlbumID); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		"SELECT album_id, artist_id FROM track WHERE item_id=?", itemID).Scan(&priorAlbumID, &priorArtistID); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
 
@@ -82,8 +86,14 @@ func resolveAndLinkEntities(ctx context.Context, tx *sql.Tx, log logger, itemID 
 	// A folder move re-keys the album, so carry the drained row's identity and
 	// attachments onto the new one rather than leaving it to ghost (scanreconcile.go).
 	// The merge it may perform repoints this track's FK, so nothing below may hold on
-	// to albumID.
+	// to albumID beyond telling that the resolve kept the prior album.
 	if err := reconcileAlbumRekeyTx(ctx, tx, priorAlbumID.Int64, albumID, priorPath, fileID, affected); err != nil {
+		return err
+	}
+	if err := dropLeftEntityOwedTx(ctx, tx, itemID, "album", priorAlbumID, albumID); err != nil {
+		return err
+	}
+	if err := dropLeftEntityOwedTx(ctx, tx, itemID, "artist", priorArtistID, artistID); err != nil {
 		return err
 	}
 
@@ -91,6 +101,31 @@ func resolveAndLinkEntities(ctx context.Context, tx *sql.Tx, log logger, itemID 
 		return err
 	}
 	return syncSearchFTS(ctx, tx, itemID, tr)
+}
+
+// dropLeftEntityOwedTx drops the owed rows about an album's or a primary artist's own
+// values ("album.label", "artist.sort") from an item's files once the item sits on another
+// one and the one it left still stands: those files owe it nothing more. An entity merged
+// into the new one is the same identity carried over, so its rows stay, and so do the
+// release ids, which are what still ties a file to the album it left. resolved is the id
+// the resolve linked, so an item it left where it was costs nothing to check; a re-key
+// reconcile can still repoint the album after it, which the probe reads.
+func dropLeftEntityOwedTx(ctx context.Context, tx *sql.Tx, itemID int64, entity string, prior sql.NullInt64, resolved int64) error {
+	if !prior.Valid || prior.Int64 == resolved {
+		return nil
+	}
+	var left bool
+	err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM `+entity+` WHERE id = ?1)
+		AND COALESCE((SELECT `+entity+`_id FROM track WHERE item_id = ?2), 0) <> ?1`, prior.Int64, itemID).Scan(&left)
+	if err != nil || !left {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `DELETE FROM file_diagnostic
+		WHERE file_id IN (SELECT file_id FROM item_file WHERE item_id = ?) AND origin = ? AND code = ?
+		AND substr(tag_key, 1, ?) = ? AND tag_key NOT IN (?, ?)`,
+		itemID, string(model.OriginEdit), string(model.DiagTagWriteOwed), len(entity)+1, entity+".",
+		model.OwedAlbumMBID, model.OwedReleaseGroupMBID)
+	return err
 }
 
 // creditNames turns one credit into its artists paired positionally with the ids the
@@ -175,7 +210,7 @@ func resolveTrackArtists(ctx context.Context, tx *sql.Tx, itemID int64, tr model
 // functions would key entities onto phantoms. Empty keys mean the track does not
 // group; the anchor comes back regardless, since the album-artist entity resolves
 // from it either way.
-func albumChainKeys(tr model.Track, filePath []byte) (anchor, rgKey, albumKey string) {
+func albumChainKeys(ctx context.Context, tx *sql.Tx, tr model.Track, filePath []byte) (anchor, rgKey, albumKey string, err error) {
 	// The album-artist anchors the release group; fall back to the track artist
 	// when a track carries no explicit album-artist (the common single-artist case).
 	anchor = tr.AlbumArtist
@@ -195,19 +230,60 @@ func albumChainKeys(tr model.Track, filePath []byte) (anchor, rgKey, albumKey st
 		// release group would collide unrelated untagged albums (e.g. two
 		// different "Greatest Hits"), so the track stays ungrouped until an
 		// artist or MBID is known.
-		return anchor, "", ""
+		return anchor, "", "", nil
 	}
 	rgKey = identity.ReleaseGroupKey(tr.MBReleaseGroupID, artistMatchKey, tr.Album)
 	if rgKey == "" {
-		return anchor, "", "" // non-album single: not grouped
+		return anchor, "", "", nil // non-album single: not grouped
 	}
 	// Key the album by release group, year, and folder, not disc total. Multi-disc
 	// albums are often tagged inconsistently, and including disc_total would split
 	// one edition into separate album rows. The folder already disambiguates
-	// editions; disc_total is still recorded for display. A MusicBrainz release id
-	// keys the album directly when present.
-	albumKey = identity.AlbumKey(tr.MBReleaseID, rgKey, tr.Year, 0, filepath.Dir(string(filePath)))
-	return anchor, rgKey, albumKey
+	// editions, a disc subfolder counting as its album's; disc_total is still recorded
+	// for display. A MusicBrainz release id keys the album directly when present.
+	folder, err := albumFolderTx(ctx, tx, filePath)
+	if err != nil {
+		return "", "", "", err
+	}
+	albumKey = identity.AlbumKey(tr.MBReleaseID, rgKey, tr.Year, 0, folder)
+	return anchor, rgKey, albumKey, nil
+}
+
+// albumFolderTx is identity.AlbumFolder for the file at path, which needs the root of the
+// library holding it. That is looked up only when the file's folder is named like a disc,
+// the one case where the answer depends on it.
+func albumFolderTx(ctx context.Context, tx *sql.Tx, path []byte) (string, error) {
+	p := string(path)
+	if _, ok := identity.DiscFolder(filepath.Base(filepath.Dir(p))); !ok {
+		return filepath.Dir(p), nil
+	}
+	root, err := libraryRootOfTx(ctx, tx, p)
+	if err != nil {
+		return "", err
+	}
+	return identity.AlbumFolder(root, p), nil
+}
+
+// libraryRootOfTx returns the root of the registered library that holds path, or "" when
+// none does. A library is a handful of rows, so the roots are read and compared in Go,
+// which also serves a path no file row carries (a journal's, or the one a file moved from).
+func libraryRootOfTx(ctx context.Context, tx *sql.Tx, path string) (string, error) {
+	rows, err := tx.QueryContext(ctx, "SELECT root FROM library")
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+	var best string
+	for rows.Next() {
+		var root []byte
+		if err := rows.Scan(&root); err != nil {
+			return "", err
+		}
+		if r := string(root); len(r) > len(best) && pathx.UnderRoot(r, path) {
+			best = r
+		}
+	}
+	return best, rows.Err()
 }
 
 // resolveAlbumChain resolves the release_group and album for a track from the keys

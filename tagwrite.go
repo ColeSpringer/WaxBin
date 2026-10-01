@@ -361,9 +361,11 @@ func (l *Library) writeEnrichmentRows(ctx context.Context, rows []model.Enriched
 		// struck from the leftovers. Only a track is ever an album member, so a book row
 		// carries none.
 		var extra []meta.TagEdit
+		var extraOwed []string
 		settleAt := r.Newest
 		if r.Label != "" {
 			extra = []meta.TagEdit{{Key: albumLabelTagKey, Values: []string{r.Label}}}
+			extraOwed = []string{albumLabelOwedKey}
 			settleAt = max(settleAt, r.LabelUpdatedAt)
 		}
 		delete(leftover, r.FilePID)
@@ -387,7 +389,7 @@ func (l *Library) writeEnrichmentRows(ctx context.Context, rows []model.Enriched
 			}
 			continue
 		}
-		failure, err := l.writeEnrichmentFile(ctx, w, r, extra, settleAt, &c)
+		failure, err := l.writeEnrichmentFile(ctx, w, r, extra, extraOwed, settleAt, &c)
 		if err != nil {
 			return c, err
 		}
@@ -472,6 +474,9 @@ var albumLabelTagKey = func() string {
 	return key
 }()
 
+// albumLabelOwedKey is the key an album label's owed row is recorded under.
+const albumLabelOwedKey = string(model.MergeAlbum) + ".label"
+
 // writeEnrichmentFile applies one row's tag edits, plus any extra edits the caller folded
 // in for this same file, and records the outcome in c: the diagnostics, the write count,
 // the settle stamp, and the optimistic file-state update. A write that did not land comes
@@ -483,13 +488,14 @@ var albumLabelTagKey = func() string {
 //
 // settleAt is the newest enrichment value the edits carry, which is what the file is
 // settled at once they land or are found unable to. extra is how an album's label
-// reaches a member file without a second full rewrite of that file.
-func (l *Library) writeEnrichmentFile(ctx context.Context, w *meta.Writer, r model.EnrichedTagRow, extra []meta.TagEdit, settleAt int64, c *enrichWriteCounts) (*model.FileDiagnostic, error) {
+// reaches a member file without a second full rewrite of that file, and extraOwed the
+// owed keys those edits pay.
+func (l *Library) writeEnrichmentFile(ctx context.Context, w *meta.Writer, r model.EnrichedTagRow, extra []meta.TagEdit, extraOwed []string, settleAt int64, c *enrichWriteCounts) (*model.FileDiagnostic, error) {
 	path := string(r.Path)
 	edits := append(enrichmentEdits(r), extra...)
 	if len(edits) == 0 {
-		// Nothing left to write, so nothing is owed: the values a rescan cleared are
-		// gone from the catalog too, and a drift row about them would be stale.
+		// Nothing left to write, so nothing is owed: the values the rows named are
+		// gone from the catalog, and a drift row about them would be stale.
 		if err := l.store.PutFileDiagnostics(ctx, r.FilePID, model.OriginEnrichment, nil); err != nil {
 			l.log.Warn("enrichment diagnostics", "path", path, "err", err)
 		}
@@ -523,6 +529,11 @@ func (l *Library) writeEnrichmentFile(ctx context.Context, w *meta.Writer, r mod
 			l.noteEnrichmentDrift(ctx, r.FilePID, path, d.Detail)
 		}
 		return &d, nil
+	}
+	// The write landed, so what it carried is no longer owed to this file. A value the
+	// format could not store is reported below as lost instead, as the edit write-back does.
+	if err := l.store.SettleTagWriteOwed(ctx, r.FilePID, append(enrichmentOwedKeys(r), extraOwed...)); err != nil {
+		l.log.Warn("enrichment owed settle", "path", path, "err", err)
 	}
 	var diags []model.FileDiagnostic
 	lost := false
@@ -651,7 +662,8 @@ func (l *Library) writeEnrichmentAlbumLabels(ctx context.Context, w *meta.Writer
 			Size: f.Size, MTimeNS: f.MTimeNS, Newest: f.UpdatedAt,
 		}
 		edits := []meta.TagEdit{{Key: key, Values: []string{f.Value}}}
-		if _, err := l.writeEnrichmentFile(ctx, w, row, edits, f.UpdatedAt, c); err != nil {
+		owed := []string{string(f.EntityType) + "." + f.Field}
+		if _, err := l.writeEnrichmentFile(ctx, w, row, edits, owed, f.UpdatedAt, c); err != nil {
 			return err
 		}
 	}
@@ -677,6 +689,18 @@ type enrichWriteCounts struct {
 var enrichmentTagFields = map[model.Kind][]string{
 	model.KindTrack: {"bpm", "composer", "genre", "isrc", "year"},
 	model.KindBook:  {"asin", "description", "edition", "genre", "isbn", "narrator", "publisher", "subtitle", "year"},
+}
+
+// enrichmentOwedKeys names the catalog fields an enrichment row's edits write, which is
+// what an edit surface recorded the file as owed them under.
+func enrichmentOwedKeys(r model.EnrichedTagRow) []string {
+	var out []string
+	for _, field := range enrichmentTagFields[r.Kind] {
+		if strings.TrimSpace(r.Fields[field]) != "" {
+			out = append(out, field)
+		}
+	}
+	return out
 }
 
 // enrichmentEdits builds the tag edits for one file. Every key comes from

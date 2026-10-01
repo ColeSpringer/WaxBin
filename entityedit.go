@@ -75,6 +75,22 @@ func (l *Library) EditEntity(ctx context.Context, entityType model.MergeEntity, 
 	return rep, l.writeBackEntity(ctx, entityType, entityPID, edits, rep)
 }
 
+// entityOwedKeys names the owed keys an entity write-back pays on the member files it
+// writes (model.DiagTagWriteOwed): "<entity>.<field>" for each edited field it fans out,
+// and the id an album's or a release group's mbid clear strips.
+func entityOwedKeys(entityType model.MergeEntity, edits map[string]string) []string {
+	var out []string
+	for field := range edits {
+		if model.EntityFieldWritable(entityType, field) {
+			out = append(out, string(entityType)+"."+field)
+		}
+	}
+	if len(entityMBIDStripEdits(entityType, edits)) > 0 {
+		out = append(out, string(entityType)+".mbid")
+	}
+	return out
+}
+
 // EntityCuration returns an entity's curation rows (only non-default fields have rows,
 // so an un-curated entity returns an empty slice).
 func (l *Library) EntityCuration(ctx context.Context, entityType model.MergeEntity, entityPID model.PID) ([]model.EntityCuration, error) {
@@ -131,7 +147,7 @@ func (l *Library) writeBackEntity(ctx context.Context, entityType model.MergeEnt
 		return nil
 	}
 	wbErr := &WriteBackError{ItemPID: entityPID, Edits: edits}
-	if err := l.writeBackFiles(ctx, "waxbin.EditEntity", model.OriginEdit, files, wbErr, nil,
+	if err := l.writeBackFiles(ctx, "waxbin.EditEntity", model.OriginEdit, files, wbErr, nil, entityOwedKeys(entityType, edits),
 		func(w *meta.Writer, path string) (*meta.WriteResult, error) {
 			return w.Apply(ctx, path, tagEdits)
 		}); err != nil {

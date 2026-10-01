@@ -16,7 +16,7 @@
 CREATE TABLE field_provenance (
   item_id    INTEGER NOT NULL REFERENCES playable_item(id) ON DELETE CASCADE,
   field      TEXT    NOT NULL,        -- canonical field name (title|artist|album|...)
-  source     TEXT    NOT NULL,        -- tag|user|enrichment|organize, plus the artifact values on an artifact lock row
+  source     TEXT    NOT NULL,        -- tag|user|enrichment|organize|normalize, plus the artifact values on an artifact lock row
   provider   TEXT,                    -- enrichment provider id, when source = enrichment
   locked     INTEGER NOT NULL DEFAULT 0,
   value      TEXT,                    -- the curated value, when set by a user edit

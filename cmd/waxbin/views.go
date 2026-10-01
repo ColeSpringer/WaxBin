@@ -82,12 +82,13 @@ func pubDate(ns int64) string {
 }
 
 type libView struct {
-	PID      string `json:"pid"`
-	Root     string `json:"root"`
-	Mode     string `json:"mode"`
-	Media    string `json:"media,omitempty"`
-	Profile  string `json:"profile"`
-	ReadOnly bool   `json:"readOnly,omitempty"`
+	PID            string `json:"pid"`
+	Root           string `json:"root"`
+	Mode           string `json:"mode"`
+	Media          string `json:"media,omitempty"`
+	Profile        string `json:"profile"`
+	ReadOnly       bool   `json:"readOnly,omitempty"`
+	FolderFallback bool   `json:"folderFallback,omitempty"`
 }
 
 func libViews(libs []*model.Library) []libView {
@@ -96,6 +97,7 @@ func libViews(libs []*model.Library) []libView {
 		out = append(out, libView{
 			PID: string(l.PID), Root: l.DisplayRoot, Mode: string(l.Mode),
 			Media: string(l.MediaType()), Profile: l.Profile, ReadOnly: l.ReadOnly,
+			FolderFallback: l.FolderFallback,
 		})
 	}
 	return out
@@ -110,7 +112,9 @@ type itemView struct {
 	AlbumArtist string `json:"albumArtist,omitempty"`
 	Album       string `json:"album,omitempty"`
 	Track       int    `json:"track,omitempty"`
+	TrackTotal  int    `json:"trackTotal,omitempty"`
 	Disc        int    `json:"disc,omitempty"`
+	DiscTotal   int    `json:"discTotal,omitempty"`
 	Year        int    `json:"year,omitempty"`
 	Genre       string `json:"genre,omitempty"`
 	// Entity handles: the effective artist/album-artist/album/release-group/podcast
@@ -181,7 +185,7 @@ func toItemView(v *model.ItemView) itemView {
 	return itemView{
 		PID: string(v.PID), Kind: string(v.Kind), State: string(v.State), Title: v.Title,
 		Artist: v.Artist, AlbumArtist: v.AlbumArtist, Album: v.Album, Track: v.TrackNo,
-		Disc: v.DiscNo, Year: v.Year, Genre: v.Genre,
+		TrackTotal: v.TrackTotal, Disc: v.DiscNo, DiscTotal: v.DiscTotal, Year: v.Year, Genre: v.Genre,
 		ArtistPID: string(v.ArtistPID), AlbumArtistPID: string(v.AlbumArtistPID),
 		AlbumPID: string(v.AlbumPID), ReleaseGroupPID: string(v.ReleaseGroupPID),
 		PodcastPID: string(v.PodcastPID), LibraryPID: string(v.LibraryPID),

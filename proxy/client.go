@@ -786,6 +786,16 @@ func (c *Client) SetLibraryReadOnly(ctx context.Context, params SetLibraryReadOn
 	return &lib, nil
 }
 
+// SetLibraryFolderFallback proxies turning a library's folder fallback on or off,
+// returning the library row.
+func (c *Client) SetLibraryFolderFallback(ctx context.Context, params SetLibraryFolderFallbackParams) (*model.Library, error) {
+	var lib model.Library
+	if err := c.call(ctx, MethodSetLibraryFolderFallback, params, &lib); err != nil {
+		return nil, err
+	}
+	return &lib, nil
+}
+
 // RunScan submits a scan to the server and returns the started job's PID. The
 // server runs the job in its own process (staying available); the caller tails the
 // job through a read-only catalog handle.

@@ -64,6 +64,32 @@ func (s *Store) RekeyBook(ctx context.Context, itemPID model.PID, newKey string)
 	return changed, err
 }
 
+// entityMemberFilesFrom selects the primary files of an entity's members (see
+// EntityMemberFiles), aliased f, with the entity's id as its one argument. The selection
+// mirrors affectedItemPIDs (merge.go): an album or release group gathers its tracks, and
+// an artist the tracks it is the primary artist of, since ARTISTSORT is that artist's
+// tag and an album-artist or contributor track must not receive it.
+func entityMemberFilesFrom(et model.MergeEntity) string {
+	switch et {
+	case model.MergeAlbum:
+		return `FROM track t
+			JOIN item_file itf ON itf.item_id = t.item_id AND itf.role = 'primary'
+			JOIN file f ON f.id = itf.file_id
+			WHERE t.album_id = ?`
+	case model.MergeReleaseGroup:
+		return `FROM track t
+			JOIN album al ON al.id = t.album_id
+			JOIN item_file itf ON itf.item_id = t.item_id AND itf.role = 'primary'
+			JOIN file f ON f.id = itf.file_id
+			WHERE al.release_group_id = ?`
+	default:
+		return `FROM track t
+			JOIN item_file itf ON itf.item_id = t.item_id AND itf.role = 'primary'
+			JOIN file f ON f.id = itf.file_id
+			WHERE t.artist_id = ?`
+	}
+}
+
 // EntityMemberFiles returns the primary backing file of every item an entity-level edit
 // fans onto. For an album or release group that is its member tracks. For an artist it is
 // only the tracks the artist is the primary artist of, and that restriction matters: the
@@ -88,39 +114,9 @@ func (s *Store) EntityMemberFiles(ctx context.Context, et model.MergeEntity, ent
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
 
-	// The member selection mirrors affectedItemPIDs (merge.go): an album/release-group
-	// gathers its tracks, an artist gathers everything it is credited on. DISTINCT
-	// collapses a file that backs several members to one row.
-	var q string
-	var args []any
-	switch et {
-	case model.MergeAlbum:
-		q = `SELECT DISTINCT f.pid, f.path, f.display_path, itf.position
-			FROM track t
-			JOIN item_file itf ON itf.item_id = t.item_id AND itf.role = 'primary'
-			JOIN file f ON f.id = itf.file_id
-			WHERE t.album_id = ?`
-		args = []any{id}
-	case model.MergeReleaseGroup:
-		q = `SELECT DISTINCT f.pid, f.path, f.display_path, itf.position
-			FROM track t
-			JOIN album al ON al.id = t.album_id
-			JOIN item_file itf ON itf.item_id = t.item_id AND itf.role = 'primary'
-			JOIN file f ON f.id = itf.file_id
-			WHERE al.release_group_id = ?`
-		args = []any{id}
-	case model.MergeArtist:
-		// Primary-artist tracks only (see the doc comment): ARTISTSORT is the primary
-		// artist's tag, so an album-artist or contributor track must not receive it.
-		q = `SELECT DISTINCT f.pid, f.path, f.display_path, itf.position
-			FROM track t
-			JOIN item_file itf ON itf.item_id = t.item_id AND itf.role = 'primary'
-			JOIN file f ON f.id = itf.file_id
-			WHERE t.artist_id = ?`
-		args = []any{id}
-	}
-
-	rows, err := s.read.QueryContext(ctx, q, args...)
+	// DISTINCT collapses a file that backs several members to one row.
+	rows, err := s.read.QueryContext(ctx,
+		"SELECT DISTINCT f.pid, f.path, f.display_path, itf.position "+entityMemberFilesFrom(et), id)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}

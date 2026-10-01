@@ -43,11 +43,14 @@ type Action struct {
 
 // TagField is one metadata field the organize tag-write will set on disk and stamp
 // with organize provenance. Field is the model metadata-field key (for lock and
-// provenance); Key is the on-disk tag key; Value is the value to write.
+// provenance); Key is the on-disk tag key; Value is the value to write. Substitute marks
+// a value that is organize's own spelling and not the catalog's (a compilation's
+// "Various Artists"), so writing it pays no edit the catalog holds for the field.
 type TagField struct {
-	Field string
-	Key   string
-	Value string
+	Field      string
+	Key        string
+	Value      string
+	Substitute bool
 }
 
 // Plan is a serializable set of moves for one library + profile. It is produced
@@ -199,7 +202,8 @@ func (o *Organizer) Plan(ctx context.Context, lib *model.Library, p Profile, ite
 
 // tagFields computes the lock-respecting metadata edits organize will write into a
 // track's file: the album artist (literal "Various Artists" for a compilation) and
-// the disc/track numbers. A locked field is skipped so curated data survives.
+// the disc/track numbers with their totals. A locked field is skipped so curated data
+// survives.
 func (o *Organizer) tagFields(ctx context.Context, it *model.ItemView) ([]TagField, error) {
 	// Load the item's locked fields once rather than one SELECT per candidate field.
 	locked, err := o.cat.LockedFields(ctx, it.PID)
@@ -225,11 +229,25 @@ func (o *Organizer) tagFields(ctx context.Context, it *model.ItemView) ([]TagFie
 		albumArtist = "Various Artists"
 	}
 	add("album_artist", albumArtist)
+	if n := len(out); n > 0 && out[n-1].Field == "album_artist" && albumArtist != it.AlbumArtist {
+		out[n-1].Substitute = true
+	}
+	// Each total rides beside its number, cleared when the catalog holds none, so a
+	// renumbered file never keeps the old pair.
+	total := func(field string, n int) {
+		if n > 0 {
+			add(field, strconv.Itoa(n))
+		} else if key, ok := meta.TagKeyForField(field); ok && !locked[field] {
+			out = append(out, TagField{Field: field, Key: key})
+		}
+	}
 	if it.TrackNo > 0 {
 		add("track_no", strconv.Itoa(it.TrackNo))
+		total("track_total", it.TrackTotal)
 	}
 	if it.DiscNo > 0 {
 		add("disc_no", strconv.Itoa(it.DiscNo))
+		total("disc_total", it.DiscTotal)
 	}
 	return out, nil
 }
@@ -402,20 +420,34 @@ func (o *Organizer) apply(ctx context.Context, plan *Plan, a *Action, jobPID mod
 	// format could not store leaves the bytes unchanged, so it reports Changed=false
 	// while being the case most worth surfacing.
 	lost := o.noteUnrepresented(ctx, a, retag, rep)
-	if retag != nil && retag.Changed {
-		for _, tf := range a.TagFields {
-			if lost[tf.Key] {
-				// The value did not land, so stamping organize provenance would name
-				// organize as the source of a value the file does not hold. That source is
-				// read by `waxbin provenance <pid>`, and skipping the stamp keeps the
-				// display truthful. It gates nothing else, since enrichment never reads
-				// source and never writes these fields.
-				continue
-			}
-			if err := o.cat.SetFieldProvenance(ctx, a.ItemPID, tf.Field, model.Attribution{Source: model.SourceOrganize}, tf.Value, false); err != nil {
-				o.log.Warn("organize provenance stamp", "item", a.ItemPID, "field", tf.Field, "err", err)
-			}
+	if retag == nil {
+		return nil
+	}
+	var landed []string
+	for _, tf := range a.TagFields {
+		if lost[tf.Key] {
+			// The value did not land, so stamping organize provenance would name
+			// organize as the source of a value the file does not hold. That source is
+			// read by `waxbin provenance <pid>`, and skipping the stamp keeps the
+			// display truthful. It gates nothing else, since enrichment never reads
+			// source and never writes these fields.
+			continue
 		}
+		if !tf.Substitute {
+			landed = append(landed, tf.Field)
+		}
+		// A cleared total names no value organize set, so it leaves no stamp.
+		if !retag.Changed || tf.Value == "" {
+			continue
+		}
+		if err := o.cat.SetFieldProvenance(ctx, a.ItemPID, tf.Field, model.Attribution{Source: model.SourceOrganize}, tf.Value, false); err != nil {
+			o.log.Warn("organize provenance stamp", "item", a.ItemPID, "field", tf.Field, "err", err)
+		}
+	}
+	// The file now carries what the catalog holds for these fields, so an edit of one of
+	// them is no longer owed to it.
+	if err := o.cat.SettleTagWriteOwed(ctx, a.FilePID, landed); err != nil {
+		o.log.Warn("organize owed settle", "item", a.ItemPID, "err", err)
 	}
 	return nil
 }
@@ -482,7 +514,11 @@ func (o *Organizer) buildEdits(plan *Plan, a *Action) []meta.TagEdit {
 	var edits []meta.TagEdit
 	if plan.TagWrite {
 		for _, tf := range a.TagFields {
-			edits = append(edits, meta.TagEdit{Key: tf.Key, Values: []string{tf.Value}})
+			e := meta.TagEdit{Key: tf.Key}
+			if tf.Value != "" {
+				e.Values = []string{tf.Value}
+			}
+			edits = append(edits, e)
 		}
 	}
 	if plan.StampPID && a.ItemPID != "" {

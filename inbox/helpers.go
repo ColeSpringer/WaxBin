@@ -73,6 +73,16 @@ func firstNonEmpty(vals ...string) string {
 
 func isAudio(path string) bool { return scan.IsAudio(path) }
 
+// stagingRoot is the folder an import reads from, the edge of what the folders above a
+// file can name: the request's source folder, or the file's own folder when the file was
+// handed over alone.
+func stagingRoot(source, path string) string {
+	if source != "" && pathx.UnderRoot(source, path) && !pathx.SamePath(source, path) {
+		return source
+	}
+	return filepath.Dir(path)
+}
+
 // placeFile moves (or copies) a staged file to its destination through the shared
 // long-path-safe mover, without clobbering an existing file there.
 func placeFile(src, dst string, asCopy bool) error {

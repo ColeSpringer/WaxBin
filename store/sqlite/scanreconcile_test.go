@@ -14,14 +14,20 @@ import (
 // cover, a star, and a matched release-group marker.
 func moveFixture(t *testing.T) (*Store, *model.Library, int, model.PID, int) {
 	t.Helper()
+	return moveFixtureAt(t, "/lib/Alpha/One/01.flac", "/lib/Alpha/One/02.flac")
+}
+
+// moveFixtureAt is moveFixture with the two tracks at the given paths.
+func moveFixtureAt(t *testing.T, first, second string) (*Store, *model.Library, int, model.PID, int) {
+	t.Helper()
 	ctx := context.Background()
 	st, lib := entityFixture(t)
 	putTrack(t, st, lib.ID, trackSpec{
-		path: "/lib/Alpha/One/01.flac", essence: "m1", content: "k1",
+		path: first, essence: "m1", content: "k1",
 		title: "M1", artist: "Alpha", albumArt: "Alpha", album: "One", genre: "Rock", year: 2001,
 	})
 	putTrack(t, st, lib.ID, trackSpec{
-		path: "/lib/Alpha/One/02.flac", essence: "m2", content: "k2",
+		path: second, essence: "m2", content: "k2",
 		title: "M2", artist: "Alpha", albumArt: "Alpha", album: "One", genre: "Rock", year: 2001,
 	})
 	albumID := scalarInt(t, st, "SELECT id FROM album")
@@ -485,6 +491,25 @@ func TestScanRetagWithMoveCarriesAlbum(t *testing.T) {
 	assertAlbumCarried(t, st, albumID, albPID, identity.AlbumKey("", rgKey, 2001, 0, "/lib/Moved/Two"))
 }
 
+// TestScanRetagWithMoveCarriesDiscFolderAlbum: an album laid out in disc folders is keyed
+// by the folder above them, so the relink corroborates its carry by that folder too.
+func TestScanRetagWithMoveCarriesDiscFolderAlbum(t *testing.T) {
+	st, lib, albumID, albPID, _ := moveFixtureAt(t, "/lib/Alpha/One/CD1/01.flac", "/lib/Alpha/One/CD2/02.flac")
+
+	for _, s := range []trackSpec{
+		{path: "/lib/Moved/Two/CD1/01.flac", essence: "m1", content: "k1", title: "M1"},
+		{path: "/lib/Moved/Two/CD2/02.flac", essence: "m2", content: "k2", title: "M2"},
+	} {
+		s.artist, s.albumArt, s.album, s.genre, s.year = "Alpha", "Alpha", "Two", "Rock", 2001
+		if res := putTrack(t, st, lib.ID, s); !res.Relinked {
+			t.Fatalf("put %s did not relink; the test needs the prior path", s.path)
+		}
+	}
+
+	rgKey := identity.ReleaseGroupKey("", identity.MatchKey("Alpha"), "Two")
+	assertAlbumCarried(t, st, albumID, albPID, identity.AlbumKey("", rgKey, 2001, 0, "/lib/Moved/Two"))
+}
+
 // TestScanOrganizedMoveThenRetagCarriesAlbum: an organize move rewrites the file paths
 // without re-keying anything, so the re-key waits for this retag scan, which finds the
 // files by their new path and never relinks. The organize journal is the only evidence
@@ -502,6 +527,28 @@ func TestScanOrganizedMoveThenRetagCarriesAlbum(t *testing.T) {
 		s.artist, s.albumArt, s.album, s.genre, s.year = "Alpha", "Alpha", "Two", "Rock", 2001
 		res := putTrack(t, st, lib.ID, s)
 		if res.Relinked {
+			t.Fatalf("put %s relinked; the organize move should have left a path match", s.path)
+		}
+	}
+
+	rgKey := identity.ReleaseGroupKey("", identity.MatchKey("Alpha"), "Two")
+	assertAlbumCarried(t, st, albumID, albPID, identity.AlbumKey("", rgKey, 2001, 0, "/lib/Organized/One"))
+}
+
+// TestScanOrganizedDiscFolderMoveCarriesAlbum: the organize journal's two ends are held
+// against the album folders above the disc folders, the folders the two keys name.
+func TestScanOrganizedDiscFolderMoveCarriesAlbum(t *testing.T) {
+	st, lib, albumID, albPID, _ := moveFixtureAt(t, "/lib/Alpha/One/CD1/01.flac", "/lib/Alpha/One/CD2/02.flac")
+
+	for _, rel := range []string{"CD1/01.flac", "CD2/02.flac"} {
+		organizeMove(t, st, "/lib/Alpha/One/"+rel, "/lib/Organized/One/"+rel)
+	}
+	for _, s := range []trackSpec{
+		{path: "/lib/Organized/One/CD1/01.flac", essence: "m1", content: "k1b", title: "M1"},
+		{path: "/lib/Organized/One/CD2/02.flac", essence: "m2", content: "k2b", title: "M2"},
+	} {
+		s.artist, s.albumArt, s.album, s.genre, s.year = "Alpha", "Alpha", "Two", "Rock", 2001
+		if res := putTrack(t, st, lib.ID, s); res.Relinked {
 			t.Fatalf("put %s relinked; the organize move should have left a path match", s.path)
 		}
 	}

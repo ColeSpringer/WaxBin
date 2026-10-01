@@ -17,8 +17,9 @@ type Options struct {
 	// DBPath is the catalog database (local filesystem only).
 	DBPath string
 	// Roots are library roots to ensure on open (upserted; never deleted here). A
-	// root's read-only flag is the catalog's alone (Library.SetLibraryReadOnly), so
-	// ensuring a root keeps whatever flag it has.
+	// root's read-only and folder fallback flags are the catalog's alone
+	// (Library.SetLibraryReadOnly, Library.SetLibraryFolderFallback), so ensuring a root
+	// keeps whatever flags it has.
 	Roots []config.Root
 	// ReadOnly opens without taking the write lock and forbids mutations.
 	ReadOnly bool
@@ -44,7 +45,8 @@ type Options struct {
 	// by default; the catalog stays authoritative).
 	WriteReplayGainTags bool
 	// WriteEnrichmentTags writes what enrichment filled back into files after an
-	// enrich pass (off by default), which is also what makes it survive a rescan.
+	// enrich pass (off by default), so other players see it too. The catalog keeps a
+	// fill through rescans either way, until the file states a value of its own.
 	WriteEnrichmentTags bool
 	// StampItemPID stamps the backing item's WaxBin PID into a tag during organize's
 	// tag write-back on managed roots (off by default).

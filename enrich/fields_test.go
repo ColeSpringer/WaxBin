@@ -680,12 +680,11 @@ func TestAlbumFieldsMergesOntoATakenKey(t *testing.T) {
 	assertFieldsVerifyClean(t, st)
 }
 
-// TestAlbumFieldsYearRevertsOnRescan pins what the year fill does NOT survive. Only
-// locked fields are overlaid by a scan, so a forced rescan without write-back reverts
-// each member's year and the heuristic key with it, while the album keeps its pid through
-// the reconcile path. label is the other half: the scan's top-up is fill-when-empty and
-// never clears it, so that one does survive.
-func TestAlbumFieldsYearRevertsOnRescan(t *testing.T) {
+// TestAlbumFieldsYearSurvivesRescan: a rescan of members whose files still say nothing
+// for the year keeps the year the album fields fill gave them, since an enrichment fill
+// stays until the file states its own, so the album keeps its key and pid. label survives
+// too: the scan's top-up is fill-when-empty and never clears it.
+func TestAlbumFieldsYearSurvivesRescan(t *testing.T) {
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "One", "Pink Floyd", "Wish You Were Here")
@@ -701,12 +700,15 @@ func TestAlbumFieldsYearRevertsOnRescan(t *testing.T) {
 		t.Fatalf("members carrying the year = %d, want both before the rescan", n)
 	}
 
-	// The same files scanned again, still tagged with no year: the scan overlays only
-	// locked fields, so each member's year goes back to the tag's.
+	// The same files scanned again, still tagged with no year: each member keeps the fill.
+	albumKey := scalarStr(t, db, "SELECT match_key FROM album")
 	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "One", "Pink Floyd", "Wish You Were Here")
 	seedTrack(t, st, lib.ID, "/lib/b.mp3", "ess-b", "Two", "Pink Floyd", "Wish You Were Here")
-	if n := scalarInt(t, db, "SELECT COUNT(*) FROM track WHERE year IS NOT NULL"); n != 0 {
-		t.Errorf("members still carrying a year after a rescan = %d, want 0 without write-back", n)
+	if n := scalarInt(t, db, "SELECT COUNT(*) FROM track WHERE year = 1975"); n != 2 {
+		t.Errorf("members carrying the year after a rescan = %d, want both", n)
+	}
+	if got := scalarStr(t, db, "SELECT match_key FROM album"); got != albumKey {
+		t.Errorf("album key = %q, want %q kept", got, albumKey)
 	}
 	if got := scalarStr(t, db, "SELECT COALESCE(label,'') FROM album"); got != "Harvest" {
 		t.Errorf("album label = %q, want it to survive the rescan", got)

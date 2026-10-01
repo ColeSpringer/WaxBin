@@ -541,3 +541,127 @@ func TestAcquisitionWriteBackRefusesAnEpisode(t *testing.T) {
 		t.Errorf("acquisition = %+v (err %v), want the committed correction", a, aerr)
 	}
 }
+
+// TestForcedBookTakesNoDisplayFallback: a file imported as a book takes none of a track's
+// display fallbacks, though its tags do not say it is one. A book's title and author are
+// the key its parts group by, so neither its destination nor its catalog row takes a sort
+// tag in their place.
+func TestForcedBookTakesNoDisplayFallback(t *testing.T) {
+	ctx := context.Background()
+	musicRoot, bookRoot, acq := t.TempDir(), t.TempDir(), t.TempDir()
+	lib := openMediaTyped(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), musicRoot, bookRoot, t.TempDir())
+	src := filepath.Join(acq, "08 Part.mp3")
+	writeFile(t, src, testaudio.BuildMP3FromSpec(testaudio.MP3Spec{Genre: "Fiction", Audio: testaudio.AudioWithSeed(3)}))
+	if _, err := meta.NewWriter().Apply(ctx, src, []meta.TagEdit{
+		{Key: "ARTISTSORT", Values: []string{"Writer"}},
+		{Key: "ALBUMSORT", Values: []string{"Tome"}},
+	}); err != nil {
+		t.Fatalf("stage sort tags: %v", err)
+	}
+	res, err := lib.ImportAcquired(ctx, waxbin.AcquiredFile{Path: src}, model.KindBook, waxbin.AcquiredMeta{SourceType: model.SourceManual})
+	if err != nil {
+		t.Fatalf("ImportAcquired: %v", err)
+	}
+	for _, a := range res.Plan.Actions {
+		if strings.Contains(a.RelDst, "Writer") || strings.Contains(a.RelDst, "Tome") {
+			t.Errorf("destination %q took a sort tag", a.RelDst)
+		}
+	}
+	if rep, err := lib.ApplyImport(ctx, res.Plan); err != nil || rep.Imported != 1 {
+		t.Fatalf("apply: rep=%+v err=%v", rep, err)
+	}
+	books, err := lib.Query(ctx, query.New(query.EntityItems).Where("kind", query.OpIs, "book").Build(), "")
+	if err != nil || len(books) != 1 {
+		t.Fatalf("books = %d (err %v), want 1", len(books), err)
+	}
+	if b := books[0]; b.Title == "Tome" || b.Artist == "Writer" {
+		t.Errorf("book = title %q author %q, want neither taken from a sort tag", b.Title, b.Artist)
+	}
+	diags, err := lib.FileDiagnostics(ctx, model.DiagnosticFilter{ItemPID: books[0].PID, Code: model.DiagSortNameFallback})
+	if err != nil || len(diags) != 0 {
+		t.Errorf("fallback diagnostics = %+v (err %v), want none on a book", diags, err)
+	}
+}
+
+// TestImportedTrackLandsUnderItsFallbackNames: an imported track's destination uses the
+// display fallbacks the scan at that destination catalogs it with, so the file lands
+// where organize would put it.
+func TestImportedTrackLandsUnderItsFallbackNames(t *testing.T) {
+	ctx := context.Background()
+	musicRoot, acq := t.TempDir(), t.TempDir()
+	lib := openMediaTyped(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), musicRoot, t.TempDir(), t.TempDir())
+	src := filepath.Join(acq, "08 Parking Lot.mp3")
+	writeFile(t, src, testaudio.BuildMP3FromSpec(testaudio.MP3Spec{Genre: "Hip-Hop", Audio: testaudio.AudioWithSeed(5)}))
+	if _, err := meta.NewWriter().Apply(ctx, src, []meta.TagEdit{
+		{Key: "ARTISTSORT", Values: []string{"Anderson .Paak"}},
+		{Key: "ALBUMSORT", Values: []string{"Malibu"}},
+	}); err != nil {
+		t.Fatalf("stage sort tags: %v", err)
+	}
+	res, err := lib.ImportAcquired(ctx, waxbin.AcquiredFile{Path: src}, model.KindTrack, waxbin.AcquiredMeta{SourceType: model.SourceManual})
+	if err != nil {
+		t.Fatalf("ImportAcquired: %v", err)
+	}
+	if rep, err := lib.ApplyImport(ctx, res.Plan); err != nil || rep.Imported != 1 {
+		t.Fatalf("apply: rep=%+v err=%v", rep, err)
+	}
+	items, err := lib.Query(ctx, query.New(query.EntityItems).Build(), "")
+	if err != nil || len(items) != 1 {
+		t.Fatalf("items = %d (err %v), want 1", len(items), err)
+	}
+	it := items[0]
+	if it.Artist != "Anderson .Paak" || it.Album != "Malibu" || it.Title != "Parking Lot" || it.TrackNo != 8 {
+		t.Fatalf("item = %q by %q on %q, track %d", it.Title, it.Artist, it.Album, it.TrackNo)
+	}
+	rel, err := filepath.Rel(musicRoot, it.DisplayPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := res.Plan.Actions[0].RelDst; rel != want || !strings.Contains(rel, "Malibu") {
+		t.Errorf("landed at %q, planned %q, want a destination under the fallback album", rel, want)
+	}
+	plan, err := lib.PlanOrganize(ctx, query.New(query.EntityItems).Build(), waxbin.OrganizeOptions{})
+	if err != nil {
+		t.Fatalf("plan organize: %v", err)
+	}
+	for _, a := range plan.Actions {
+		if !a.Skip {
+			t.Errorf("organize would move %s to %s", a.Src, a.Dst)
+		}
+	}
+}
+
+// TestImportedTrackIsNotNumberedByItsStagingFolder: the folder an import reads from is the
+// edge of what the folders above a file can name, so tracks handed over in a folder called
+// "CD1" get no disc from it, while a disc folder inside the staged tree still numbers its own.
+func TestImportedTrackIsNotNumberedByItsStagingFolder(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name    string
+		staged  func(acq string) (source, file string)
+		wantRel string
+	}{
+		{"a staging folder named like a disc", func(acq string) (string, string) {
+			dir := filepath.Join(acq, "CD1")
+			return dir, filepath.Join(dir, "08 Parking Lot.mp3")
+		}, "08 - Parking Lot.mp3"},
+		{"a disc folder inside the staging folder", func(acq string) (string, string) {
+			return acq, filepath.Join(acq, "CD1", "08 Parking Lot.mp3")
+		}, "1-08 - Parking Lot.mp3"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			musicRoot, acq := t.TempDir(), t.TempDir()
+			lib := openMediaTyped(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), musicRoot, t.TempDir(), t.TempDir())
+			source, file := tc.staged(acq)
+			writeFile(t, file, testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
+				Title: "Parking Lot", Artist: "Band", Album: "Malibu", Audio: testaudio.AudioWithSeed(5)}))
+			plan, err := lib.PlanImport(ctx, waxbin.ImportRequest{Source: source})
+			if err != nil || len(plan.Actions) != 1 {
+				t.Fatalf("plan = %+v (err %v), want one action", plan, err)
+			}
+			if got := filepath.Base(plan.Actions[0].RelDst); got != tc.wantRel {
+				t.Errorf("destination file = %q, want %q", got, tc.wantRel)
+			}
+		})
+	}
+}

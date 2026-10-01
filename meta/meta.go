@@ -26,6 +26,9 @@ type FileMeta struct {
 	// when it embeds none. The scanner finalizes its hash and dimensions and falls
 	// back to a directory cover image when this is absent.
 	CoverArt *model.ArtImage
+	// TitleFromName says Tags.Title is the file name, since the file states no title of
+	// its own. A caller applying DisplayFallbacks passes it on.
+	TitleFromName bool
 	// ItemPIDHint is the value of the file's WAXBIN_ITEM_PID tag, if present. It is a
 	// rebuild-only hint for restoring the backing item's original PID; identity stays
 	// essence-first (the tag is copyable), so the store adopts it only when unambiguous.

@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -1767,5 +1768,180 @@ func TestEditBookDescriptionClearReachesTheLongForm(t *testing.T) {
 	}
 	if d2.Description != "" {
 		t.Errorf("description after a clear and a fresh scan = %q, want empty", d2.Description)
+	}
+}
+
+// TestEditTrackNumberWriteBackClearsStaleTotal: renumbering a track past the total its
+// file states clears that total on disk beside the number, so the file does not read
+// "7 of 1", and a total edited afterwards lands as the pair.
+func TestEditTrackNumberWriteBackClearsStaleTotal(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	mp3 := filepath.Join(root, "song.mp3")
+	writeFile(t, mp3, testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
+		Title: "Song", Artist: "Band", Album: "Album", Track: 1, TrackTotal: 1,
+	}))
+	m4a := filepath.Join(root, "sample.m4a")
+	writeFile(t, m4a, testaudio.Fixture(t, "sample.m4a"))
+	if _, err := meta.NewWriter().Apply(ctx, m4a, []meta.TagEdit{
+		{Key: "TITLE", Values: []string{"Sample"}},
+		{Key: "TRACKNUMBER", Values: []string{"1"}}, {Key: "TRACKTOTAL", Values: []string{"1"}},
+	}); err != nil {
+		t.Fatalf("stage m4a numbering: %v", err)
+	}
+
+	lib := openManaged(t, ctx, db, root)
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	for _, c := range []struct{ title, path string }{{"Song", mp3}, {"Sample", m4a}} {
+		pid := itemPIDByTitle(t, ctx, lib, c.title)
+		numbering := func(wantNo, wantTotal int) {
+			t.Helper()
+			fm, err := meta.NewReader().Read(ctx, c.path)
+			if err != nil {
+				t.Fatalf("read %s: %v", c.path, err)
+			}
+			if fm.Tags.TrackNo != wantNo || fm.Tags.TrackTotal != wantTotal {
+				t.Fatalf("%s on disk = %d/%d, want %d/%d", c.title, fm.Tags.TrackNo, fm.Tags.TrackTotal, wantNo, wantTotal)
+			}
+		}
+		numbering(1, 1)
+
+		if err := lib.EditFields(ctx, pid, map[string]string{"track_no": "7"},
+			waxbin.EditOptions{Lock: model.LockOn, WriteBack: true}); err != nil {
+			t.Fatalf("%s renumber: %v", c.title, err)
+		}
+		numbering(7, 0)
+		if v, err := lib.Get(ctx, pid); err != nil || v.TrackNo != 7 || v.TrackTotal != 0 {
+			t.Fatalf("%s catalog = %+v (err %v), want 7 of nothing", c.title, v, err)
+		}
+		if c.path == mp3 {
+			doc, err := waxlabel.ParseFile(ctx, mp3)
+			if err != nil {
+				t.Fatalf("parse mp3: %v", err)
+			}
+			if v, ok := doc.Tags().First(tag.TrackTotal); ok {
+				t.Fatalf("mp3 still carries a track total %q, want TRCK to read 7 alone", v)
+			}
+		}
+
+		if err := lib.EditFields(ctx, pid, map[string]string{"track_total": "12"},
+			waxbin.EditOptions{Lock: model.LockOn, WriteBack: true}); err != nil {
+			t.Fatalf("%s total: %v", c.title, err)
+		}
+		numbering(7, 12)
+	}
+}
+
+// TestEditTitleWriteBackClearsStaleTitleSort: a written-back title edit clears the
+// TITLESORT the file carried, since an empty title is filled from it on a later read
+// and other players sort by it, and the catalog stops listing it as a custom tag. A
+// TITLESORT the user locked as a custom tag is curated and stays.
+func TestEditTitleWriteBackClearsStaleTitleSort(t *testing.T) {
+	ctx := context.Background()
+	for _, locked := range []bool{false, true} {
+		root := t.TempDir()
+		src := filepath.Join(root, "song.mp3")
+		writeFile(t, src, testaudio.BuildMP3FromSpec(testaudio.MP3Spec{Title: "Old", Artist: "Band", Album: "Album"}))
+		if _, err := meta.NewWriter().Apply(ctx, src, []meta.TagEdit{{Key: "TITLESORT", Values: []string{"Old Sort"}}}); err != nil {
+			t.Fatalf("stage TITLESORT: %v", err)
+		}
+		lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), root)
+		if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		pid := itemPIDByTitle(t, ctx, lib, "Old")
+		if locked {
+			if err := lib.Lock(ctx, pid, "tag.TITLESORT"); err != nil {
+				t.Fatalf("lock the title sort: %v", err)
+			}
+		}
+		if err := lib.EditFields(ctx, pid, map[string]string{"title": "New"},
+			waxbin.EditOptions{Lock: model.LockOn, WriteBack: true}); err != nil {
+			t.Fatalf("edit with write-back: %v", err)
+		}
+		doc, err := waxlabel.ParseFile(ctx, src)
+		if err != nil {
+			t.Fatalf("parse: %v", err)
+		}
+		if v, ok := doc.Tags().First(tag.TitleSort); ok != locked {
+			t.Errorf("locked %v: TITLESORT = %q (present %v) after the title write-back", locked, v, ok)
+		}
+		tags, err := lib.ItemTags(ctx, pid)
+		if err != nil {
+			t.Fatalf("item tags: %v", err)
+		}
+		listed := slices.ContainsFunc(tags, func(it model.ItemTag) bool { return it.Key == "TITLESORT" })
+		if listed != locked {
+			t.Errorf("locked %v: catalog lists TITLESORT %v, want %v", locked, listed, locked)
+		}
+	}
+}
+
+// TestEditTitleWriteBackAnnouncesTheItemOnce: the title write-back drops the catalog's copy
+// of a TITLESORT it cleared only when the catalog holds one, so an item with none is
+// announced once, as a write-back of any other field announces it.
+func TestEditTitleWriteBackAnnouncesTheItemOnce(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "song.mp3"), testaudio.BuildMP3FromSpec(testaudio.MP3Spec{Title: "Old", Artist: "Band", Album: "Album"}))
+	lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), root)
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	pid := itemPIDByTitle(t, ctx, lib, "Old")
+	seq, err := lib.LatestChangeSeq(ctx)
+	if err != nil {
+		t.Fatalf("change seq: %v", err)
+	}
+	if err := lib.EditFields(ctx, pid, map[string]string{"title": "New"},
+		waxbin.EditOptions{Lock: model.LockOn, WriteBack: true}); err != nil {
+		t.Fatalf("edit with write-back: %v", err)
+	}
+	changes, err := lib.Changes(ctx, seq)
+	if err != nil {
+		t.Fatalf("changes: %v", err)
+	}
+	var announced int
+	for _, c := range changes {
+		if c.EntityType == "item" && c.EntityPID == pid {
+			announced++
+		}
+	}
+	if announced != 1 {
+		t.Errorf("item deltas for one title write-back = %d, want 1 (%+v)", announced, changes)
+	}
+}
+
+// TestEditBookTitleWriteBackKeepsTitleSort: a book's title is written as its ALBUM tag,
+// so its write-back has no title sort to clear, and a part's own TITLESORT stays.
+func TestEditBookTitleWriteBackKeepsTitleSort(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	src := filepath.Join(root, "book.mp3")
+	writeFile(t, src, testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
+		Title: "Chapter One", Artist: "Writer", Album: "Tome",
+		TXXX: []testaudio.TXXXFrame{{Desc: "NARRATOR", Value: "Reader"}},
+	}))
+	if _, err := meta.NewWriter().Apply(ctx, src, []meta.TagEdit{{Key: "TITLESORT", Values: []string{"Chapter One Sort"}}}); err != nil {
+		t.Fatalf("stage TITLESORT: %v", err)
+	}
+	lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), root)
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	pid := itemPIDByTitle(t, ctx, lib, "Tome")
+	if err := lib.EditFields(ctx, pid, map[string]string{"title": "Tome Renamed"},
+		waxbin.EditOptions{Lock: model.LockOn, WriteBack: true}); err != nil {
+		t.Fatalf("edit with write-back: %v", err)
+	}
+	doc, err := waxlabel.ParseFile(ctx, src)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if v, ok := doc.Tags().First(tag.TitleSort); !ok || v != "Chapter One Sort" {
+		t.Errorf("TITLESORT = %q (present %v), want the part's own sort kept", v, ok)
 	}
 }

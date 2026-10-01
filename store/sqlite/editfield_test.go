@@ -765,7 +765,7 @@ func TestEditArtistSameValueKeepsRawAnchor(t *testing.T) {
 func TestEnrichFillFieldsFollowTheEditVocabulary(t *testing.T) {
 	excluded := map[string]bool{
 		"title": true, "genre": true, "mbid": true,
-		"track_no": true, "disc_no": true, "compilation": true,
+		"track_no": true, "disc_no": true, "track_total": true, "disc_total": true, "compilation": true,
 		"composer_sort": true, "author_sort": true, "comment": true,
 	}
 	cases := []struct {
@@ -807,5 +807,108 @@ func TestEnrichFillFieldsFollowTheEditVocabulary(t *testing.T) {
 	}
 	if !album["label"] || !album["year"] || len(album) != 2 {
 		t.Errorf("album fill set = %v, want label + year", sortedKeys(album))
+	}
+}
+
+// TestEditRecordsNormalizeSource: a batch edit attributed to a normalization pass is
+// stored as one, so a consumer can tell a cleaned spelling from a hand edit.
+func TestEditRecordsNormalizeSource(t *testing.T) {
+	st, pid := editFixture(t)
+	ctx := context.Background()
+	if _, err := st.EditItemsFields(ctx, []model.ItemFieldEdit{{ItemPID: pid, Fields: map[string]string{"genre": "Hip Hop"}}},
+		model.Attribution{Source: model.SourceNormalize}, model.LockUnchanged, false, false); err != nil {
+		t.Fatalf("normalize edit: %v", err)
+	}
+	prov, err := st.FieldProvenance(ctx, pid)
+	if err != nil {
+		t.Fatalf("provenance: %v", err)
+	}
+	for _, p := range prov {
+		if p.Field == "genre" {
+			if p.Source != model.SourceNormalize || p.Value != "Hip Hop" || p.Provider != "" {
+				t.Fatalf("genre row = %+v, want normalize with the value", p)
+			}
+			return
+		}
+	}
+	t.Fatalf("no genre provenance row: %+v", prov)
+}
+
+// TestEditTrackAndDiscTotals: the totals are ordinary editable, lockable fields, and a
+// number edited past a total it did not name clears that total rather than leaving
+// "track 7 of 1", unless the total is locked or still covers the new number.
+func TestEditTrackAndDiscTotals(t *testing.T) {
+	ctx := context.Background()
+	user := model.Attribution{Source: model.SourceUser}
+	st, lib := entityFixture(t)
+	put := func(path, essence string, trackNo, trackTotal, discNo, discTotal int) model.PID {
+		t.Helper()
+		in := trackSpecInput(lib.ID, trackSpec{path: path, essence: essence, content: essence,
+			title: essence, artist: "A", albumArt: "A", album: "One"})
+		in.Track.TrackNo, in.Track.TrackTotal, in.Track.DiscNo, in.Track.DiscTotal = trackNo, trackTotal, discNo, discTotal
+		res, err := st.PutScannedTrack(ctx, in)
+		if err != nil {
+			t.Fatalf("put %s: %v", path, err)
+		}
+		return res.ItemPID
+	}
+	totals := func(pid model.PID) (int, int) {
+		t.Helper()
+		v, err := st.ItemByPID(ctx, pid)
+		if err != nil {
+			t.Fatalf("get: %v", err)
+		}
+		return v.TrackTotal, v.DiscTotal
+	}
+
+	a := put("/lib/a.flac", "ea", 1, 1, 1, 1)
+	if err := st.EditItemField(ctx, a, "track_total", "12", user, model.LockOn, false); err != nil {
+		t.Fatalf("edit track_total: %v", err)
+	}
+	if tt, _ := totals(a); tt != 12 {
+		t.Fatalf("track total = %d, want 12", tt)
+	}
+	if locked, err := st.IsFieldLocked(ctx, a, "track_total"); err != nil || !locked {
+		t.Fatalf("track_total locked = %v (err %v), want locked", locked, err)
+	}
+	// A locked total survives a number edited past it.
+	if err := st.EditItemField(ctx, a, "track_no", "15", user, model.LockOn, false); err != nil {
+		t.Fatalf("edit track_no: %v", err)
+	}
+	if tt, _ := totals(a); tt != 12 {
+		t.Fatalf("locked track total = %d after a renumber, want 12 kept", tt)
+	}
+
+	b := put("/lib/b.flac", "eb", 1, 1, 1, 1)
+	if err := st.EditItemFields(ctx, b, map[string]string{"track_no": "7", "disc_no": "2"}, user, model.LockOn, false); err != nil {
+		t.Fatalf("renumber: %v", err)
+	}
+	if tt, dt := totals(b); tt != 0 || dt != 0 {
+		t.Fatalf("totals = %d/%d after renumbering past them, want both cleared", tt, dt)
+	}
+	prov, err := st.FieldProvenance(ctx, b)
+	if err != nil {
+		t.Fatalf("provenance: %v", err)
+	}
+	cleared := map[string]bool{}
+	for _, p := range prov {
+		if (p.Field == "track_total" || p.Field == "disc_total") && !p.Locked && p.Value == "" && p.Source == model.SourceUser {
+			cleared[p.Field] = true
+		}
+	}
+	if !cleared["track_total"] || !cleared["disc_total"] {
+		t.Fatalf("provenance = %+v, want the cleared totals recorded with the edit, unlocked", prov)
+	}
+	// Unlocked, so the total the renumbering cleared can be set next without force.
+	if err := st.EditItemField(ctx, b, "track_total", "12", user, model.LockOn, false); err != nil {
+		t.Fatalf("set the cleared total: %v", err)
+	}
+
+	c := put("/lib/c.flac", "ec", 1, 12, 1, 0)
+	if err := st.EditItemField(ctx, c, "track_no", "7", user, model.LockOn, false); err != nil {
+		t.Fatalf("renumber within total: %v", err)
+	}
+	if tt, _ := totals(c); tt != 12 {
+		t.Fatalf("track total = %d, want 12 kept while it covers the number", tt)
 	}
 }
