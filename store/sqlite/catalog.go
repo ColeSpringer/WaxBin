@@ -316,7 +316,7 @@ func (s *Store) PutScannedTrack(ctx context.Context, in model.PutScannedTrackInp
 			// The primary itself, read again, yields to a better encoding the item holds on
 			// disk, so the end state does not depend on which file the walk reached first.
 			if primary != nil && primary.fileID == fileID {
-				better, err := outrankingAlternateTx(ctx, tx, prior.itemID, in.LibraryID, in.File)
+				better, err := outrankingAlternateTx(ctx, tx, prior.itemID, in.LibraryID, in.File, nil)
 				if err != nil {
 					return waxerr.Wrap(waxerr.CodeIO, op, err)
 				}
@@ -453,7 +453,7 @@ func (s *Store) PutScannedTrack(ctx context.Context, in model.PutScannedTrackInp
 		// Re-home the file onto this item as its primary, detaching it from any prior
 		// item (an in-place essence change re-keys the file to a new identity, or a copy
 		// takes over an item whose primary is gone).
-		dep, err := departingTx(ctx, tx, fileID, in.File.EssenceHash, itemID)
+		dep, err := departingTx(ctx, tx, fileID, in.File.EssenceHash, itemID, in.PreserveLocks)
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
@@ -461,7 +461,7 @@ func (s *Store) PutScannedTrack(ctx context.Context, in model.PutScannedTrackInp
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
-		if res.Promoted, err = reconcileOrphansTx(ctx, tx, orphans, dep, affected); err != nil {
+		if res.Promoted, res.Folded, err = reconcileOrphansTx(ctx, tx, orphans, dep, affected); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		if demoted {

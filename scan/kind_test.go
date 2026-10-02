@@ -610,3 +610,17 @@ func TestFolderSettleSkipsPartsAlreadyIn(t *testing.T) {
 	}
 	oneBook(t, st, 3)
 }
+
+// TestSplitPartsNumberedAlikeStayParts: an audiobook a splitter cut into equal parts and
+// tagged track 1 on every file is still one book of every part, not one part and its
+// "encodings".
+func TestSplitPartsNumberedAlikeStayParts(t *testing.T) {
+	st, lib, sc, root := kindFixture(t, model.MediaAudiobook)
+	for i := 1; i <= 4; i++ {
+		writeUnder(t, root, "Austen/Emma/Emma - Part "+string(rune('0'+i))+".mp3", testaudio.MP3Spec{
+			Title: "Emma", Artist: "Jane Austen", AlbumArtist: "Jane Austen", Album: "Emma", Track: 1,
+			Audio: testaudio.AudioWithSeed(byte(20 + i))})
+	}
+	scanAll(t, sc, lib, false)
+	oneBook(t, st, 4)
+}

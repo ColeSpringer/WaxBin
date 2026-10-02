@@ -889,6 +889,21 @@ func (l *Library) proxyHandlers() map[string]proxy.Handler {
 			}
 			return proxy.JobStartResult{JobPID: string(pid)}, nil
 		},
+		proxy.MethodRunSetKind: func(ctx context.Context, raw json.RawMessage) (any, error) {
+			p, err := decodeParams[proxy.SetKindParams](raw)
+			if err != nil {
+				return nil, err
+			}
+			items := make([]model.PID, len(p.ItemPIDs))
+			for i, s := range p.ItemPIDs {
+				items[i] = model.PID(s)
+			}
+			pid, err := l.StartSetItemKind(ctx, items, model.Kind(p.Kind), KindOptions{WriteBack: p.WriteBack, Force: p.Force})
+			if err != nil {
+				return nil, err
+			}
+			return proxy.JobStartResult{JobPID: string(pid)}, nil
+		},
 	}
 }
 

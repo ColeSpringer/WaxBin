@@ -20,7 +20,7 @@ func newLockCmd(g *globals) *cobra.Command {
 			"overlap is deliberate: an item's art locks have one home. \"kind\" pins whether " +
 			"the item is a track or a book, so a scan keeps that kind whatever the library or " +
 			"the file's tags say; `scan --force --ignore-locks` re-derives it, and drops the " +
-			"lock when the kind changes.",
+			"lock when the kind changes. `waxbin kind` changes an item's kind and locks it.",
 		Args: cobra.MinimumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			m, _, err := g.openMutator(cmd)

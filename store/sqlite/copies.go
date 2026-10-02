@@ -82,16 +82,17 @@ func outranksPrimaryTx(ctx context.Context, tx *sql.Tx, libraryID int64, f model
 }
 
 // outrankingAlternateTx returns the item's best alternate on disk holding another encoding
-// that outranks f, a file now read as the item's primary, or nil. Such an alternate was
+// that outranks f, a file now read as the item's primary or a part, or nil; also, when set,
+// narrows the alternates (a book's to the encodings of f's part). Such an alternate was
 // read while the primary was away (moved to a folder the walk had not reached), so it
 // waited as an alternate where the other walk order would have made it the primary.
-func outrankingAlternateTx(ctx context.Context, tx *sql.Tx, itemID, libraryID int64, f model.File) (*altCandidate, error) {
+func outrankingAlternateTx(ctx context.Context, tx *sql.Tx, itemID, libraryID int64, f model.File, also func(altCandidate) bool) (*altCandidate, error) {
 	var readOnly bool
 	if err := tx.QueryRowContext(ctx, "SELECT read_only FROM library WHERE id = ?", libraryID).Scan(&readOnly); err != nil {
 		return nil, err
 	}
 	return bestAlternateTx(ctx, tx, itemID, func(c altCandidate) bool {
-		if c.start.Valid || c.essence == f.EssenceHash {
+		if c.start.Valid || c.essence == f.EssenceHash || (also != nil && !also(c)) {
 			return false
 		}
 		if c.readOnly != readOnly {
@@ -318,35 +319,38 @@ func copyDiagnostic(essence string, primary *standingPrimary) model.FileDiagnost
 // refreshCopyDiagnosticsTx rewrites the copy diagnostic of every whole-file alternate of
 // an item after its primary or parts changed, and drops any from the parts themselves. A
 // copy of a part names that part (for a book, not necessarily the primary); another
-// encoding names the primary.
+// encoding names the book's part at its position, or the primary.
 func refreshCopyDiagnosticsTx(ctx context.Context, tx *sql.Tx, itemID int64) error {
 	primary, err := primaryFileTx(ctx, tx, itemID)
 	if err != nil {
 		return err
 	}
-	rows, err := tx.QueryContext(ctx, `SELECT f.id, COALESCE(f.essence_hash, ''), itf.role, f.display_path
-		FROM item_file itf JOIN file f ON f.id = itf.file_id
+	rows, err := tx.QueryContext(ctx, `SELECT f.id, itf.role, itf.position, f.display_path, COALESCE(f.essence_hash, ''),
+			`+lostFileCols+`, pi.kind = 'book'
+		FROM item_file itf JOIN file f ON f.id = itf.file_id JOIN playable_item pi ON pi.id = itf.item_id
 		WHERE itf.item_id = ? AND itf.start_frames IS NULL
 		ORDER BY itf.role = 'alternate', itf.position, f.id`, itemID)
 	if err != nil {
 		return err
 	}
 	type edge struct {
-		fileID  int64
-		essence string
-		role    string
+		fileID   int64
+		role     string
+		position int
+		display  string
+		lost     lostEdge
 	}
-	var edges []edge
-	parts := map[string]string{}
+	var edges, parts []edge
+	book := false
 	for rows.Next() {
 		var e edge
-		var display string
-		if err := rows.Scan(&e.fileID, &e.essence, &e.role, &display); err != nil {
+		if err := rows.Scan(append([]any{&e.fileID, &e.role, &e.position, &e.display, &e.lost.file.EssenceHash},
+			append(e.lost.fileFields(), &book)...)...); err != nil {
 			rows.Close()
 			return err
 		}
-		if _, seen := parts[e.essence]; !seen && e.role != alternateRole && e.essence != "" {
-			parts[e.essence] = display
+		if e.role != alternateRole {
+			parts = append(parts, e)
 		}
 		edges = append(edges, e)
 	}
@@ -362,9 +366,15 @@ func refreshCopyDiagnosticsTx(ctx context.Context, tx *sql.Tx, itemID int64) err
 		if e.role != alternateRole || primary == nil {
 			continue
 		}
-		d := copyDiagnostic(e.essence, primary)
-		if part, ok := parts[e.essence]; ok {
-			d.Code, d.Detail = model.DiagDuplicateCopy, part
+		d := copyDiagnostic(e.lost.file.EssenceHash, primary)
+		for _, p := range parts {
+			if e.lost.file.EssenceHash != "" && p.lost.file.EssenceHash == e.lost.file.EssenceHash {
+				d.Code, d.Detail = model.DiagDuplicateCopy, p.display
+				break
+			}
+			if book && p.position == e.position && otherEncoding(p.lost.file, e.lost.file) {
+				d.Detail = p.display
+			}
 		}
 		if err := upsertFileDiagnosticTx(ctx, tx, e.fileID, model.OriginScan, "", d, now); err != nil {
 			return err
@@ -410,7 +420,7 @@ func (s *Store) attachCopyTx(ctx context.Context, tx *sql.Tx, in model.PutScanne
 	}
 	res.ItemPID, res.AttachedAsCopy = itemPID, true
 
-	dep, err := departingTx(ctx, tx, fileID, in.File.EssenceHash, itemID)
+	dep, err := departingTx(ctx, tx, fileID, in.File.EssenceHash, itemID, in.PreserveLocks)
 	if err != nil {
 		return waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
@@ -424,11 +434,12 @@ func (s *Store) attachCopyTx(ctx context.Context, tx *sql.Tx, in model.PutScanne
 		return waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
 	affected := newAffectedRollups()
-	promoted, err := reconcileOrphansTx(ctx, tx, orphans, dep, affected)
+	promoted, folded, err := reconcileOrphansTx(ctx, tx, orphans, dep, affected)
 	if err != nil {
 		return waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
 	res.Promoted = append(res.Promoted, promoted...)
+	res.Folded = append(res.Folded, folded...)
 	if changed {
 		if err := affected.collect(ctx, tx, itemID); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
@@ -472,56 +483,69 @@ func (s *Store) attachCopyTx(ctx context.Context, tx *sql.Tx, in model.PutScanne
 // part fills its gap) or otherwise keeps a primary, its rollups and book total are
 // recomputed, and it emits an update, marked missing when none of its files is on disk;
 // one left with none folds into the item the file joined (foldItemIntoTx) and is deleted.
-// It returns the files promoted.
-func reconcileOrphansTx(ctx context.Context, tx *sql.Tx, orphans []int64, dep departure, affected *affectedRollups) ([]model.PromotedFile, error) {
+// It returns the files promoted and the pids of the items folded.
+func reconcileOrphansTx(ctx context.Context, tx *sql.Tx, orphans []int64, dep departure, affected *affectedRollups) ([]model.PromotedFile, []model.PID, error) {
 	var promoted []model.PromotedFile
+	var folded []model.PID
 	for _, oid := range orphans {
 		has, err := itemHasAnyFile(ctx, tx, oid)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if err := affected.collect(ctx, tx, oid); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if has {
 			p, err := promoteLostTx(ctx, tx, oid, dep.books[oid], dep.lost[oid])
+			filled := p != nil
 			if err == nil && p == nil {
 				p, err = ensurePrimary(ctx, tx, oid)
 			}
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			if p != nil {
 				promoted = append(promoted, *p)
 			}
+			// A part that left a book takes its places on the timeline along, unless a copy
+			// or another encoding of it took its place.
+			if span, ok := dep.spans[oid]; ok && !filled {
+				if err := moveDepartedPositionsTx(ctx, tx, oid, dep.into, dep.file, span); err != nil {
+					return nil, nil, err
+				}
+			}
 			if err := refreshBookDuration(ctx, tx, oid); err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			marked, err := markUnreachableMissingTx(ctx, tx, oid, nil)
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			if !marked {
 				if err := appendItemUpdateTx(ctx, tx, oid); err != nil {
-					return nil, err
+					return nil, nil, err
 				}
 			}
 			continue
 		}
-		if dep.into != 0 && !dep.lost[oid].start.Valid {
-			if err := foldItemIntoTx(ctx, tx, oid, dep.into, dep.file); err != nil {
-				return nil, err
+		fold := dep.into != 0 && !dep.lost[oid].start.Valid
+		if fold {
+			if err := foldItemIntoTx(ctx, tx, oid, dep.into, dep.file, dep.preserveLocks); err != nil {
+				return nil, nil, err
 			}
 		}
 		opid, err := deleteItemCascade(ctx, tx, oid)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
+		}
+		if fold {
+			folded = append(folded, opid)
 		}
 		if err := appendChange(ctx, tx, "item", opid, model.OpDelete); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
-	return promoted, nil
+	return promoted, folded, nil
 }
 
 // appendItemUpdateTx appends an item update delta by item id.
@@ -534,12 +558,19 @@ func appendItemUpdateTx(ctx context.Context, tx *sql.Tx, itemID int64) error {
 }
 
 // lostEdge is the edge a file held on an item when it left the item: its role,
-// position and window, and the file's essence.
+// position and window, and the file as otherEncoding reads it.
 type lostEdge struct {
 	role       string
 	position   int
 	start, end sql.NullInt64
-	essence    string
+	file       model.File
+}
+
+// lostFileCols reads what lostEdge.file holds from the file alias f.
+const lostFileCols = `COALESCE(f.codec, ''), COALESCE(f.sample_rate, 0), COALESCE(f.bit_depth, 0), COALESCE(f.duration_ms, 0)`
+
+func (e *lostEdge) fileFields() []any {
+	return []any{&e.file.Codec, &e.file.SampleRate, &e.file.BitDepth, &e.file.DurationMS}
 }
 
 // altCandidate is an alternate edge an item can promote.
@@ -547,6 +578,7 @@ type altCandidate struct {
 	fileID, libraryID int64
 	pid               model.PID
 	path              []byte
+	display           string
 	reach             reach
 	readOnly          bool
 	essence           string
@@ -555,14 +587,21 @@ type altCandidate struct {
 	start, end        sql.NullInt64
 }
 
+// file is the candidate's file as otherEncoding reads it.
+func (c altCandidate) file() model.File {
+	f := c.quality
+	f.EssenceHash = c.essence
+	return f
+}
+
 // bestAlternateTx returns the alternate an item promotes, among those that keep and reach
 // no further than worst: a file on disk first, then one under an absent root, then a gone
 // one, and within each a file in a writable library first, then the better encoding,
 // then position and file id. It returns nil when none qualifies.
 func bestAlternateTx(ctx context.Context, tx *sql.Tx, itemID int64, keep func(altCandidate) bool, worst reach) (*altCandidate, error) {
-	rows, err := tx.QueryContext(ctx, `SELECT f.id, f.pid, f.path, f.library_id, l.root, l.read_only,
+	rows, err := tx.QueryContext(ctx, `SELECT f.id, f.pid, f.path, f.display_path, f.library_id, l.root, l.read_only,
 			COALESCE(f.essence_hash, ''), COALESCE(f.codec, ''), COALESCE(f.bitrate, 0), COALESCE(f.sample_rate, 0),
-			COALESCE(f.bit_depth, 0), itf.position, itf.start_frames, itf.end_frames
+			COALESCE(f.bit_depth, 0), COALESCE(f.duration_ms, 0), itf.position, itf.start_frames, itf.end_frames
 		FROM item_file itf JOIN file f ON f.id = itf.file_id JOIN library l ON l.id = f.library_id
 		WHERE itf.item_id = ? AND itf.role = 'alternate'`, itemID)
 	if err != nil {
@@ -573,8 +612,8 @@ func bestAlternateTx(ctx context.Context, tx *sql.Tx, itemID int64, keep func(al
 	for rows.Next() {
 		var c altCandidate
 		var root []byte
-		if err := rows.Scan(&c.fileID, &c.pid, &c.path, &c.libraryID, &root, &c.readOnly, &c.essence,
-			&c.quality.Codec, &c.quality.Bitrate, &c.quality.SampleRate, &c.quality.BitDepth,
+		if err := rows.Scan(&c.fileID, &c.pid, &c.path, &c.display, &c.libraryID, &root, &c.readOnly, &c.essence,
+			&c.quality.Codec, &c.quality.Bitrate, &c.quality.SampleRate, &c.quality.BitDepth, &c.quality.DurationMS,
 			&c.position, &c.start, &c.end); err != nil {
 			rows.Close()
 			return nil, err
@@ -678,7 +717,11 @@ func promoteLostTx(ctx context.Context, tx *sql.Tx, itemID int64, book bool, los
 	case lost.start.Valid:
 		keep = func(c altCandidate) bool { return c.start == lost.start && c.end == lost.end }
 	case book:
-		keep = func(c altCandidate) bool { return lost.essence != "" && c.essence == lost.essence }
+		// A copy of the part, or another encoding of it at its position (otherEncoding).
+		keep = func(c altCandidate) bool {
+			return (lost.file.EssenceHash != "" && c.essence == lost.file.EssenceHash) ||
+				(c.position == lost.position && otherEncoding(lost.file, c.file()))
+		}
 	case lost.role != primaryRole:
 		return nil, nil
 	}
@@ -742,8 +785,10 @@ func unstampTx(ctx context.Context, tx *sql.Tx, fileID int64) error {
 // itemLostEdgesTx returns the edges a file holds, by item, with the item's kind, read
 // before the file leaves.
 func itemLostEdgesTx(ctx context.Context, tx *sql.Tx, fileID int64, essence string) (map[int64]lostEdge, map[int64]bool, error) {
-	rows, err := tx.QueryContext(ctx, `SELECT itf.item_id, itf.role, itf.position, itf.start_frames, itf.end_frames, pi.kind
-		FROM item_file itf JOIN playable_item pi ON pi.id = itf.item_id WHERE itf.file_id = ?`, fileID)
+	rows, err := tx.QueryContext(ctx, `SELECT itf.item_id, itf.role, itf.position, itf.start_frames, itf.end_frames, pi.kind,
+			`+lostFileCols+`
+		FROM item_file itf JOIN playable_item pi ON pi.id = itf.item_id JOIN file f ON f.id = itf.file_id
+		WHERE itf.file_id = ?`, fileID)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -752,8 +797,8 @@ func itemLostEdgesTx(ctx context.Context, tx *sql.Tx, fileID int64, essence stri
 	for rows.Next() {
 		var id int64
 		var kind string
-		e := lostEdge{essence: essence}
-		if err := rows.Scan(&id, &e.role, &e.position, &e.start, &e.end, &kind); err != nil {
+		e := lostEdge{file: model.File{EssenceHash: essence}}
+		if err := rows.Scan(append([]any{&id, &e.role, &e.position, &e.start, &e.end, &kind}, e.fileFields()...)...); err != nil {
 			return nil, nil, err
 		}
 		// A primary or part edge wins over a stray alternate edge of the same pair.

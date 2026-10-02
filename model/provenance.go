@@ -243,8 +243,8 @@ var lockOnlyFields = map[string]bool{
 // KindLockField is the lock that pins an item's kind (track or book): a scan classifies
 // the item's files as that kind whatever the library or their tags say. Its row records
 // no value, since the item's own kind is what it pins. An import that forced a kind
-// against the rule writes it (source user); a re-kind drops it, the kind it pinned being
-// gone.
+// against the rule writes it (source user), as does a kind change (SetItemKind) on every
+// item it leaves; a re-kind drops it, the kind it pinned being gone.
 const KindLockField = "kind"
 
 // IsMetadataField reports whether field is a scalar, one-value curatable/editable

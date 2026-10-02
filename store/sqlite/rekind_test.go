@@ -270,3 +270,56 @@ func TestRekindHoldsBackForAKindLock(t *testing.T) {
 		t.Errorf("item = %+v (err %v), want a book", v, err)
 	}
 }
+
+// TestRekindPutsAlternatesAtThePart: a track turned into a book keeps its other encoding
+// as the alternate of its one part, at the part's position, and that encoding read again
+// as the book stays the alternate rather than becoming a second part.
+func TestRekindPutsAlternatesAtThePart(t *testing.T) {
+	st, _ := entityFixture(t)
+	ctx := context.Background()
+	lib, file := diskLibrary(t, st)
+	const mbid = "4e2b1b2a-0000-4000-8000-0000000000aa"
+	flacPath, mp3Path := file("Dune/03.flac", "f"), file("Dune/03.mp3", "m")
+	enc := func(path, essence, codec string, depth, bitrate int) model.PutScannedTrackInput {
+		in := trackSpecInput(lib.ID, trackSpec{path: path, essence: essence, content: essence + "-bytes", title: "Dune",
+			artist: "Frank Herbert", album: "Dune", mbRecording: mbid, durationMS: 1000})
+		in.File.Codec, in.File.SampleRate, in.File.BitDepth, in.File.Bitrate = codec, 44100, depth, bitrate
+		return in
+	}
+	tr := putTrackInput(t, st, enc(flacPath, "rp-flac", "flac", 16, 900))
+	if out := putTrackInput(t, st, enc(mp3Path, "rp-mp3", "mp3", 0, 320)); !out.AttachedAsCopy {
+		t.Fatalf("mp3 = %+v, want the FLAC's alternate", out)
+	}
+	put := encodedPart(lib.ID, flacPath, "rp-flac", "flac", 3, 1000)
+	if res, err := st.PutScannedBook(ctx, put); err != nil || res.ItemPID != tr.ItemPID {
+		t.Fatalf("flac as a book = %+v (err %v), want the track's item", res, err)
+	}
+	if res, err := st.PutScannedBook(ctx, encodedPart(lib.ID, mp3Path, "rp-mp3", "mp3", 3, 1000)); err != nil || !res.AttachedAsCopy {
+		t.Fatalf("mp3 as a book = %+v (err %v), want it kept the alternate", res, err)
+	}
+	refs, err := st.ItemFiles(ctx, tr.ItemPID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range refs {
+		want := "primary"
+		if r.DisplayPath == mp3Path {
+			want = "alternate"
+		}
+		if r.Role != want || r.Position != 3 {
+			t.Errorf("%s = %s at %d, want %s at 3", r.DisplayPath, r.Role, r.Position, want)
+		}
+	}
+	if d, err := st.BookByPID(ctx, tr.ItemPID); err != nil || len(d.Files) != 1 || d.TotalDurationMS != 1000 {
+		t.Errorf("book = %+v (err %v), want one part over 1000 ms", d, err)
+	}
+}
+
+func putTrackInput(t *testing.T, st *Store, in model.PutScannedTrackInput) *model.ScanItemResult {
+	t.Helper()
+	res, err := st.PutScannedTrack(context.Background(), in)
+	if err != nil {
+		t.Fatalf("put %s: %v", in.File.DisplayPath, err)
+	}
+	return res
+}

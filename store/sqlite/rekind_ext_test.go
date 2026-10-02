@@ -28,6 +28,32 @@ func TestKindLockRefusedOnAVirtualTrack(t *testing.T) {
 	}
 }
 
+// TestLockKindsSkipsAVirtualTrack: the locks a kind change writes pass over a cue track,
+// whose kind follows its rip, and still pin the other items named.
+func TestLockKindsSkipsAVirtualTrack(t *testing.T) {
+	st, lib := openTestStore(t)
+	ctx := context.Background()
+	if _, err := st.PutScannedVirtualTracks(ctx, vtrackInput(lib.ID, "/lib/rip.flac", "lk1", "lkc1", 10000, [][2]int64{{0, 300}, {300, 0}})); err != nil {
+		t.Fatalf("put rip: %v", err)
+	}
+	items := vtItems(t, st)
+	track := mustPut(t, st, input(lib.ID, "/lib/song.mp3", "lk2", "lkc2", "Song")).ItemPID
+	if err := st.LockKinds(ctx, []model.PID{items[0].PID, track}); err != nil {
+		t.Fatalf("lock kinds: %v", err)
+	}
+	locked := func(pid model.PID) bool {
+		t.Helper()
+		fields, err := st.LockedFields(ctx, pid)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return fields[model.KindLockField]
+	}
+	if locked(items[0].PID) || !locked(track) {
+		t.Errorf("cue track locked %v, track locked %v; want only the track pinned", locked(items[0].PID), locked(track))
+	}
+}
+
 // TestRekindKeepsAnEncodingAlternate: another encoding of a track's recording stays an
 // alternate when the track turns into a book and the encoding is read as one, rather than
 // becoming a second part of the same audio.

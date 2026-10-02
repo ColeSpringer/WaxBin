@@ -533,7 +533,7 @@ func detachWholeFileItems(ctx context.Context, tx *sql.Tx, fileID int64, essence
 	if err != nil || len(prev) == 0 {
 		return false, nil, err
 	}
-	dep, err := departingTx(ctx, tx, fileID, essence, 0)
+	dep, err := departingTx(ctx, tx, fileID, essence, 0, false)
 	if err != nil {
 		return false, nil, err
 	}
@@ -541,6 +541,6 @@ func detachWholeFileItems(ctx context.Context, tx *sql.Tx, fileID int64, essence
 		"DELETE FROM item_file WHERE file_id = ? AND start_frames IS NULL", fileID); err != nil {
 		return false, nil, err
 	}
-	promoted, err := reconcileOrphansTx(ctx, tx, prev, dep, affected)
+	promoted, _, err := reconcileOrphansTx(ctx, tx, prev, dep, affected)
 	return true, promoted, err
 }

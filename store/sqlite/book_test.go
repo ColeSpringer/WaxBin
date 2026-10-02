@@ -1400,3 +1400,459 @@ func TestItemsWithCopiesReasons(t *testing.T) {
 		t.Errorf("files = %+v, want the parts then the copy as the same audio", got[0].Files)
 	}
 }
+
+// encodedPart is the put of a part of the book "Dune" at position pos in one encoding.
+func encodedPart(libID int64, path, essence, codec string, pos int, durationMS int64) model.PutScannedBookInput {
+	in := bookSpecInput(libID, bookSpec{path: path, essence: essence, content: essence + "-bytes",
+		title: "Dune", author: "Frank Herbert", position: pos, durationMS: durationMS})
+	in.File.Codec, in.File.SampleRate = codec, 44100
+	if codec == "flac" {
+		in.File.BitDepth, in.File.Bitrate = 16, 900
+	} else {
+		in.File.Bitrate = 320
+	}
+	return in
+}
+
+// TestBookPartEncodingsMakeOnePart: a FLAC and an MP3 of a one-part book, tagged alike, are
+// one part and its other encoding whichever is read first: the better encoding is the part,
+// the book runs as long as one of them, and the lesser one is diagnosed against it.
+func TestBookPartEncodingsMakeOnePart(t *testing.T) {
+	for _, flacFirst := range []bool{true, false} {
+		st, _ := entityFixture(t)
+		ctx := context.Background()
+		lib, file := diskLibrary(t, st)
+		flac := encodedPart(lib.ID, file("Dune/01.flac", "f"), "de-flac", "flac", 1, 1000)
+		mp3 := encodedPart(lib.ID, file("Dune/01.mp3", "m"), "de-mp3", "mp3", 1, 1012)
+		order := []model.PutScannedBookInput{flac, mp3}
+		if !flacFirst {
+			order = []model.PutScannedBookInput{mp3, flac}
+		}
+		var book model.PID
+		for _, in := range order {
+			res, err := st.PutScannedBook(ctx, in)
+			if err != nil {
+				t.Fatal(err)
+			}
+			book = res.ItemPID
+		}
+		refs, err := st.ItemFiles(ctx, book)
+		if err != nil {
+			t.Fatal(err)
+		}
+		roles := map[string]string{}
+		for _, r := range refs {
+			roles[filepath.Ext(r.DisplayPath)] = r.Role
+			if r.Position != 1 {
+				t.Errorf("flac first %v: %s at position %d, want 1", flacFirst, r.DisplayPath, r.Position)
+			}
+		}
+		if len(refs) != 2 || roles[".flac"] != "primary" || roles[".mp3"] != "alternate" {
+			t.Errorf("flac first %v: edges = %v, want the FLAC the part and the MP3 its alternate", flacFirst, roles)
+		}
+		if d, err := st.BookByPID(ctx, book); err != nil || len(d.Files) != 1 || d.TotalDurationMS != 1000 {
+			t.Errorf("flac first %v: book = %+v (err %v), want one part over 1000 ms", flacFirst, d, err)
+		}
+		var mp3PID model.PID
+		for _, r := range refs {
+			if filepath.Ext(r.DisplayPath) == ".mp3" {
+				mp3PID = r.FilePID
+			}
+		}
+		ds, err := st.FileDiagnostics(ctx, model.DiagnosticFilter{FilePID: mp3PID, Code: model.DiagAlternateEncoding})
+		if err != nil || len(ds) != 1 || ds[0].Detail != string(flac.File.Path) {
+			t.Errorf("flac first %v: mp3 diagnostics = %+v (err %v), want one naming the FLAC", flacFirst, ds, err)
+		}
+		assertVerifyClean(t, st)
+	}
+}
+
+// TestBookPartEncodingOfAnotherLengthIsAPart: two files at one position whose running
+// times differ are two parts, not one part in two encodings.
+func TestBookPartEncodingOfAnotherLengthIsAPart(t *testing.T) {
+	st, _ := entityFixture(t)
+	ctx := context.Background()
+	lib, file := diskLibrary(t, st)
+	for _, in := range []model.PutScannedBookInput{
+		encodedPart(lib.ID, file("Dune/01.flac", "f"), "dl-flac", "flac", 1, 1000),
+		encodedPart(lib.ID, file("Dune/01b.mp3", "m"), "dl-mp3", "mp3", 1, 60000),
+	} {
+		if _, err := st.PutScannedBook(ctx, in); err != nil {
+			t.Fatal(err)
+		}
+	}
+	books := listBooks(t, st)
+	if len(books) != 1 {
+		t.Fatalf("books = %d, want one", len(books))
+	}
+	if d, err := st.BookByPID(ctx, books[0]); err != nil || len(d.Files) != 2 {
+		t.Errorf("book = %+v (err %v), want both files parts", d, err)
+	}
+}
+
+// TestBookPartEncodingTakesTheLostPartsPlace: when a part leaves its book, another
+// encoding of it the book holds takes its place rather than leaving a gap.
+func TestBookPartEncodingTakesTheLostPartsPlace(t *testing.T) {
+	st, _ := entityFixture(t)
+	ctx := context.Background()
+	lib, file := diskLibrary(t, st)
+	flac := encodedPart(lib.ID, file("Dune/01.flac", "f"), "dp-flac", "flac", 1, 1000)
+	var flacPID, mp3PID model.PID
+	var book model.PID
+	for _, in := range []model.PutScannedBookInput{
+		flac,
+		encodedPart(lib.ID, file("Dune/02.flac", "f2"), "dp-flac2", "flac", 2, 2000),
+		encodedPart(lib.ID, file("Dune/01.mp3", "m"), "dp-mp3", "mp3", 1, 1000),
+	} {
+		res, err := st.PutScannedBook(ctx, in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		book = res.ItemPID
+		switch string(in.File.Path) {
+		case string(flac.File.Path):
+			flacPID = res.FilePID
+		case filepath.Join(filepath.Dir(string(flac.File.Path)), "01.mp3"):
+			mp3PID = res.FilePID
+		}
+	}
+	before, err := st.ItemFiles(ctx, book)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range before {
+		if r.FilePID == mp3PID && r.Role != "alternate" {
+			t.Fatalf("mp3 = %s before the detach, want part 1's other encoding", r.Role)
+		}
+	}
+	if _, err := st.DetachFile(ctx, flacPID); err != nil {
+		t.Fatal(err)
+	}
+	refs, err := st.ItemFiles(ctx, book)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[model.PID]model.ItemFileRef{}
+	for _, r := range refs {
+		got[r.FilePID] = r
+	}
+	if r := got[mp3PID]; r.Role == "alternate" || r.Position != 1 {
+		t.Errorf("edges = %+v, want the MP3 in part 1's place", refs)
+	}
+	if d, err := st.BookByPID(ctx, book); err != nil || len(d.Files) != 2 || d.TotalDurationMS != 3000 {
+		t.Errorf("book = %+v (err %v), want two parts over 3000 ms", d, err)
+	}
+}
+
+// TestBookPartYieldsToABetterEncodingOnDisk: a FLAC read while its part's MP3 was away
+// waits as an alternate, and the MP3 read again at its new path yields the part to it,
+// so the walk order does not decide which encoding is the part.
+func TestBookPartYieldsToABetterEncodingOnDisk(t *testing.T) {
+	st, _ := entityFixture(t)
+	ctx := context.Background()
+	lib, file := diskLibrary(t, st)
+	mp3 := encodedPart(lib.ID, file("Dune/01.mp3", "m"), "dy-mp3", "mp3", 1, 1000)
+	res, err := st.PutScannedBook(ctx, mp3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	book := res.ItemPID
+	moved := file("Moved/01.mp3", "m")
+	if err := os.Remove(string(mp3.File.Path)); err != nil {
+		t.Fatal(err)
+	}
+	flac := encodedPart(lib.ID, file("Dune/01.flac", "f"), "dy-flac", "flac", 1, 1000)
+	if out, err := st.PutScannedBook(ctx, flac); err != nil || !out.AttachedAsCopy {
+		t.Fatalf("flac = %+v (err %v), want it waiting as an alternate while the MP3 is away", out, err)
+	}
+	mp3.File.Path, mp3.File.DisplayPath = []byte(moved), moved
+	if _, err := st.PutScannedBook(ctx, mp3); err != nil {
+		t.Fatal(err)
+	}
+	refs, err := st.ItemFiles(ctx, book)
+	if err != nil {
+		t.Fatal(err)
+	}
+	roles := map[string]string{}
+	for _, r := range refs {
+		roles[filepath.Ext(r.DisplayPath)] = r.Role
+	}
+	if len(refs) != 2 || roles[".flac"] != "primary" || roles[".mp3"] != "alternate" {
+		t.Errorf("edges = %v, want the FLAC the part once the MP3 was read again", roles)
+	}
+}
+
+// listBooks returns the pids of the catalog's books.
+func listBooks(t *testing.T, st *Store) []model.PID {
+	t.Helper()
+	rows, err := st.read.QueryContext(context.Background(), "SELECT pid FROM playable_item WHERE kind = 'book' ORDER BY id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var out []model.PID
+	for rows.Next() {
+		var p model.PID
+		if err := rows.Scan(&p); err != nil {
+			t.Fatal(err)
+		}
+		out = append(out, p)
+	}
+	return out
+}
+
+// TestBookPartsNumberedAlikeStayParts: parts of one rip that share a number and run as
+// long are still parts, whether a splitter copied track 1 onto every file or they are
+// back matter that all sorts last; only another encoding of a part is its alternate.
+func TestBookPartsNumberedAlikeStayParts(t *testing.T) {
+	st, _ := entityFixture(t)
+	ctx := context.Background()
+	lib, file := diskLibrary(t, st)
+	for _, set := range []struct {
+		title string
+		pos   int
+		files map[string]int64
+	}{
+		{"Emma", 1, map[string]int64{"Emma/Part 1.mp3": 180000, "Emma/Part 2.mp3": 180400}},
+		{"Mansfield Park", 1000, map[string]int64{"Mansfield Park/Afterword.mp3": 60000, "Mansfield Park/Credits.mp3": 60000}},
+	} {
+		var book model.PID
+		for rel, dur := range set.files {
+			in := bookSpecInput(lib.ID, bookSpec{path: file(rel, rel), essence: "na-" + rel, content: rel,
+				title: set.title, author: "Jane Austen", position: set.pos, durationMS: dur})
+			in.File.Codec, in.File.SampleRate, in.File.Bitrate = "mp3", 44100, 128
+			res, err := st.PutScannedBook(ctx, in)
+			if err != nil {
+				t.Fatal(err)
+			}
+			book = res.ItemPID
+		}
+		if d, err := st.BookByPID(ctx, book); err != nil || len(d.Files) != 2 {
+			t.Errorf("%s = %+v (err %v), want two parts", set.title, d, err)
+		}
+	}
+}
+
+// TestBookPartsInUnrecognizedDiscFoldersStayParts: two files of one name and codec at one
+// position, in disc folders the scan does not read as discs, are two parts: the same codec
+// never makes one an encoding of the other.
+func TestBookPartsInUnrecognizedDiscFoldersStayParts(t *testing.T) {
+	st, _ := entityFixture(t)
+	ctx := context.Background()
+	lib, file := diskLibrary(t, st)
+	var book model.PID
+	for rel, dur := range map[string]int64{"Dune/Part 1/01.mp3": 1000, "Dune/Part 2/01.mp3": 1004} {
+		in := bookSpecInput(lib.ID, bookSpec{path: file(rel, rel), essence: "ud-" + rel, content: rel,
+			title: "Dune", author: "Frank Herbert", position: 1, durationMS: dur})
+		in.File.Codec, in.File.SampleRate, in.File.Bitrate = "mp3", 44100, 128
+		res, err := st.PutScannedBook(ctx, in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		book = res.ItemPID
+	}
+	if d, err := st.BookByPID(ctx, book); err != nil || len(d.Files) != 2 {
+		t.Errorf("book = %+v (err %v), want two parts", d, err)
+	}
+}
+
+// TestBookPartWithAnUnknownCodecIsAPart: a file whose codec was never recorded is no
+// encoding apart from another, so two parts sharing a number stay two parts.
+func TestBookPartWithAnUnknownCodecIsAPart(t *testing.T) {
+	st, _ := entityFixture(t)
+	ctx := context.Background()
+	lib, file := diskLibrary(t, st)
+	var book model.PID
+	for rel, codec := range map[string]string{"Emma/Part 1.mp3": "mp3", "Emma/Part 2.mp3": ""} {
+		in := bookSpecInput(lib.ID, bookSpec{path: file(rel, rel), essence: "uc-" + rel, content: rel,
+			title: "Emma", author: "Jane Austen", position: 1, durationMS: 1000})
+		in.File.Codec = codec
+		res, err := st.PutScannedBook(ctx, in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		book = res.ItemPID
+	}
+	if d, err := st.BookByPID(ctx, book); err != nil || len(d.Files) != 2 {
+		t.Errorf("book = %+v (err %v), want two parts", d, err)
+	}
+}
+
+// TestUnnumberedBookEncodingsMakeOnePart: a single-file book with no part number, in two
+// encodings, is one part and its alternate, not two parts of twice the length.
+func TestUnnumberedBookEncodingsMakeOnePart(t *testing.T) {
+	st, _ := entityFixture(t)
+	ctx := context.Background()
+	lib, file := diskLibrary(t, st)
+	var book model.PID
+	for _, in := range []model.PutScannedBookInput{
+		encodedPart(lib.ID, file("Dune/Dune.mp3", "m"), "un-mp3", "mp3", 0, 1012),
+		encodedPart(lib.ID, file("Dune/Dune.flac", "f"), "un-flac", "flac", 0, 1000),
+	} {
+		res, err := st.PutScannedBook(ctx, in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		book = res.ItemPID
+	}
+	d, err := st.BookByPID(ctx, book)
+	if err != nil || len(d.Files) != 1 || filepath.Ext(d.Files[0].DisplayPath) != ".flac" || d.TotalDurationMS != 1000 {
+		t.Errorf("book = %+v (err %v), want the FLAC its one part over 1000 ms", d, err)
+	}
+}
+
+// TestMissingPartHandsItsPlaceToAnEncoding: an encoding read while its part's file had
+// gone waits as an alternate, and the scan's reconciliation of the gone part puts it in
+// the part's place.
+func TestMissingPartHandsItsPlaceToAnEncoding(t *testing.T) {
+	st, _ := entityFixture(t)
+	ctx := context.Background()
+	lib, file := diskLibrary(t, st)
+	mp3 := encodedPart(lib.ID, file("Dune/01.mp3", "m"), "mp-mp3", "mp3", 1, 1000)
+	res, err := st.PutScannedBook(ctx, mp3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(string(mp3.File.Path)); err != nil {
+		t.Fatal(err)
+	}
+	flac, err := st.PutScannedBook(ctx, encodedPart(lib.ID, file("Dune/01.flac", "f"), "mp-flac", "flac", 1, 1000))
+	if err != nil || !flac.AttachedAsCopy {
+		t.Fatalf("flac = %+v (err %v), want it waiting as an alternate", flac, err)
+	}
+	if _, err := st.MarkFilesMissing(ctx, []model.PID{res.FilePID}); err != nil {
+		t.Fatal(err)
+	}
+	refs, err := st.ItemFiles(ctx, res.ItemPID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(refs) != 1 || refs[0].FilePID != flac.FilePID || refs[0].Role != "primary" {
+		t.Errorf("edges = %+v, want the FLAC in the gone part's place", refs)
+	}
+	if it, err := st.ItemByPID(ctx, res.ItemPID); err != nil || it.State != model.StatePresent {
+		t.Errorf("book = %+v (err %v), want it present", it, err)
+	}
+}
+
+// TestBookPartLossSkipsAnAlternateOfAnotherLength: losing a part promotes an alternate at
+// its position only when it runs as long, so a file of another length waits there as an
+// alternate rather than standing in for audio it does not hold.
+func TestBookPartLossSkipsAnAlternateOfAnotherLength(t *testing.T) {
+	st, _ := entityFixture(t)
+	ctx := context.Background()
+	lib, file := diskLibrary(t, st)
+	put := func(rel, codec string, pos int, dur int64) *model.ScanItemResult {
+		t.Helper()
+		in := bookSpecInput(lib.ID, bookSpec{path: file(rel, rel), essence: "ls-" + rel, content: rel,
+			title: "Dune", author: "Frank Herbert", position: pos, durationMS: dur})
+		in.File.Codec, in.File.SampleRate = codec, 44100
+		res, err := st.PutScannedBook(ctx, in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return res
+	}
+	one := put("Dune/01.flac", "flac", 1, 1000)
+	put("Dune/02.flac", "flac", 2, 2000)
+	short := put("Dune/01.mp3", "mp3", 1, 1000)
+	// The alternate's file later reads 30 s long: it holds other audio than part 1.
+	if err := st.writeTx(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, "UPDATE file SET duration_ms = 30000 WHERE pid = ?", string(short.FilePID))
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.DetachFile(ctx, one.FilePID); err != nil {
+		t.Fatal(err)
+	}
+	refs, err := st.ItemFiles(ctx, one.ItemPID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range refs {
+		if r.FilePID == short.FilePID && r.Role != "alternate" {
+			t.Errorf("the other-length file = %s, want it left an alternate", r.Role)
+		}
+	}
+}
+
+// TestCopyTakingAGonePartsPlaceMovesNoPlace: a copy that takes a gone part's place in a
+// missing book, arriving from an item of its own, leaves the book's places alone, since
+// the timeline holds the same audio as before.
+func TestCopyTakingAGonePartsPlaceMovesNoPlace(t *testing.T) {
+	st, _ := entityFixture(t)
+	ctx := context.Background()
+	lib, file := diskLibrary(t, st)
+	backup, backupFile := diskLibrary(t, st)
+	p1, p2 := file("T/01.mp3", "gc1"), file("T/02.mp3", "gc2")
+	first := putBook(t, st, lib.ID, bookSpec{path: p1, essence: "ge1", content: "gc1", title: "T", author: "A", position: 1, durationMS: 1000})
+	second := putBook(t, st, lib.ID, bookSpec{path: p2, essence: "ge2", content: "gc2", title: "T", author: "A", position: 2, durationMS: 1000})
+	if err := st.SetProgress(ctx, "", first.ItemPID, 1500, nil); err != nil {
+		t.Fatal(err)
+	}
+	cp := backupFile("T/01.mp3", "gc1b")
+	putTrack(t, st, backup.ID, trackSpec{path: cp, essence: "ge1", content: "gc1b", title: "One", durationMS: 1000})
+	for _, p := range []string{p1, p2} {
+		if err := os.Remove(p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := st.MarkFilesMissing(ctx, []model.PID{first.FilePID, second.FilePID}); err != nil {
+		t.Fatal(err)
+	}
+	putBook(t, st, backup.ID, bookSpec{path: cp, essence: "ge1", content: "gc1b", title: "T", author: "A", position: 1, durationMS: 1000})
+	if ps, err := st.PlayStateFor(ctx, "", first.ItemPID); err != nil || ps.PositionMS != 1500 {
+		t.Errorf("book state = %+v (err %v), want the place left at 1500", ps, err)
+	}
+}
+
+// TestPartLeavingForNoItemLeavesItsPlacesAtItsStart: a part that leaves its book for no
+// item (its file now a cue rip) takes no place along, and a place inside it moves to where
+// it started rather than into the next part's audio.
+func TestPartLeavingForNoItemLeavesItsPlacesAtItsStart(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	var book model.PID
+	for i, n := range []string{"01", "02", "03"} {
+		book = putBook(t, st, lib.ID, bookSpec{path: "/lib/A/T/" + n + ".flac", essence: "rp" + n, content: "rc" + n,
+			title: "T", author: "A", position: i + 1, durationMS: 1000}).ItemPID
+	}
+	if err := st.SetProgress(ctx, "", book, 1500, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.AddBookmark(ctx, "", book, 2500, "mark"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.PutScannedVirtualTracks(ctx, vtrackSpecInput(lib.ID, "/lib/A/T/02.flac", "rp02", "rc02", 1000,
+		[][2]int64{{0, 22050}, {22050, 0}})); err != nil {
+		t.Fatal(err)
+	}
+	if ps, err := st.PlayStateFor(ctx, "", book); err != nil || ps.PositionMS != 1000 {
+		t.Errorf("book state = %+v (err %v), want the place at part 2's old start, 1000", ps, err)
+	}
+	if marks, err := st.Bookmarks(ctx, "", book); err != nil || len(marks) != 1 || marks[0].PositionMS != 1500 {
+		t.Errorf("bookmarks = %+v (err %v), want the later mark moved back to 1500", marks, err)
+	}
+}
+
+// vtrackSpecInput is the put of a rip of one file cut at windows, one cue track a window.
+func vtrackSpecInput(libID int64, path, essence, content string, dur int64, windows [][2]int64) model.PutScannedVirtualTracksInput {
+	tracks := make([]model.VirtualTrack, len(windows))
+	for i, w := range windows {
+		title := "Track " + string(rune('1'+i))
+		tracks[i] = model.VirtualTrack{
+			Item: model.PlayableItem{Kind: model.KindTrack, State: model.StatePresent, Title: title,
+				SortKey: model.SortKey(title), IdentityKey: identity.VirtualTrackKey(essence, i+1, w[0])},
+			Track:       model.Track{Artist: "A", AlbumArtist: "A", Album: "Rip", TrackNo: i + 1},
+			StartFrames: w[0], EndFrames: w[1],
+		}
+	}
+	return model.PutScannedVirtualTracksInput{
+		LibraryID: libID,
+		File: model.File{Path: []byte(path), DisplayPath: path, RelPath: []byte(filepath.Base(path)),
+			Kind: model.FileAudio, Size: int64(len(content)), MTimeNS: 1, ContentHash: content, EssenceHash: essence,
+			DurationMS: dur, ScanState: model.ScanIndexed},
+		Tracks: tracks,
+	}
+}

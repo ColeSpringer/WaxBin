@@ -26,174 +26,7 @@ import (
 
 // ProtocolVersion is the wire protocol version. A request carrying a different
 // version is rejected, so a newer client cannot silently misdrive an older
-// server. Version 2 added SetItemArtParams.Role: a version-1 server would drop
-// the unknown field and store a back-cover set as a front-cover overwrite,
-// which is exactly the misdrive the check exists to stop. Version 3 added the
-// EnrichParams scope fields: a version-2 server would drop them and run a
-// full-catalog pass where the client asked for one item or entity. Version 4
-// added the StarParams/RatingParams as-of stamp: a version-3 server would drop it
-// and stamp the change at server-now, a real misdrive for a replayed offline
-// toggle whose recorded time is what orders it against an out-of-band change.
-// Version 5 added the PlayStateChangeResult payload on the four star/rating
-// methods: a version-4 server returns no data at all, which decodes as
-// changed=false, so every proxied write would report itself as a no-op.
-// Version 6 added EnrichParams.WriteTags: a version-5 server drops it and runs
-// without the on-disk write-back, so a client that asked for durable enrichment
-// silently gets values that live only in the catalog.
-// Version 7 added mark_missing: a version-6 server does not implement it, so a
-// client that recorded a vanished file would leave the catalog claiming the bytes
-// are still there and keep handing the same doomed work back out.
-// Version 8 added set_played.
-// Version 9 added unfetch and podcast_remove, the two podcast verbs that had been
-// taking the maintenance hand-off (pausing the whole server for a short mutation).
-//
-// Neither could misdrive a version-8 server the way the field additions above could:
-// the version gate rejects every frame, ping included, so a v9 client reads a v8
-// server as absent and falls back to the maintenance hand-off, which is the pause this
-// removes rather than a wrong answer. The bump is what makes that fallback total
-// instead of leaving the client to discover an unknown-method error partway through a
-// command, matching how mark_missing (v7) and set_played (v8) were added. Adding a
-// method without a bump is also precedent (put_transcript, fetch_transcript,
-// add_root), and is the choice when keeping the other proxied methods working across a
-// version boundary matters more.
-//
-// Version 10 added artwork provenance: model.FieldProvenance gained SourceURL, the
-// provenance result gained the item's own cover as an "art" row, and
-// SetEntityArtParams gained Lock/Force. The params addition alone forces the bump by
-// the rule above, and the read addition follows version 6's precedent: the version
-// gate rejects every frame, so a WaxDeck built against 9 falls back cleanly instead of
-// rendering the art row as an editable scalar field, and it has to rebuild anyway to
-// draw the mark.
-//
-// set_art_lock landed after 10 with no bump, following the add_root precedent: it adds
-// no field to any existing struct, ArtRoles (the read that made the lock visible) has
-// no wire surface at all, and WaxDeck already has Lock/Force on set_entity_art. A bump
-// would cost it a rebuild for a method it has no reason to call, and the version gate
-// would meanwhile reject every frame from a client built against 10, including ping.
-//
-// Version 11 added curation attribution and the three-state lock. The forcing addition
-// is Source and Provider on every curation params struct (plus SourceURL on the two art
-// ones), by the rule above: a version-10 server would drop them and store a cover or a
-// genre the client fetched itself as hand-set, which is the bug this change exists to
-// fix. The retyped Lock (a bool became the LockChange string) is not the argument for
-// the bump, since the version gate rejects on version before any field decodes. A *bool
-// for Lock would have encoded the same three states without a bump, and was rejected for
-// splitting the lock vocabulary between the wire and Go.
-//
-// Version 12 added the playlist lifecycle: playlist_create, playlist_delete,
-// playlist_rename and playlist_import_m3u8. By the add_root precedent these could
-// have landed without a bump, since they add no field to any existing struct. The
-// bump is deliberate: without it a client built against 11 keeps taking the
-// maintenance hand-off for exactly these calls, which is the pause they exist to
-// remove. Nothing has shipped yet, so the total fallback a bump causes costs a
-// rebuild and nothing else.
-//
-// Version 13 added Format on the two art params structs, for a picture whose bytes no
-// decoder here recognizes, and the generated provenance source. Neither is bump-forcing
-// under the rule the entries above use, which is misdrive and not refusal: a version-12
-// server drops Format and refuses the cover with CodeInvalid, and refuses an unknown
-// source value the same way, so both fail loudly rather than storing the wrong thing.
-// The bump is taken for the add_root reason instead. It makes the fallback total, so a
-// client built against 12 reads a 13 server as absent from the first frame rather than
-// discovering a refusal partway through a command, and neither version has shipped, so
-// it costs a rebuild and nothing else.
-//
-// Version 14 added SetArtLockParams.Role, which forces the bump under the rule above: a
-// version-13 server drops the field and locks the whole entity, where the client asked
-// to lock one auxiliary slot. That is the widest possible misdrive of the call, since
-// the entity lock also stops enrichment filling every other role. An omitted Role still
-// encodes exactly as it did at 13 and still means the front cover, so the call a
-// version-13 client makes is unchanged in meaning; the bump is for the new field alone.
-// The same version added detach and EditEntityResult.MergedInto, both riding along
-// rather than earning a bump. Neither can misdrive a call. The only peer that could
-// take a detach for something else is another version-14 build predating the handler,
-// which fails loudly with "unknown method: detach" (server.go) rather than doing the
-// wrong thing, and a server built without MergedInto simply omits the field, leaving the
-// client with the generic edited-fields line it printed before. That is the house
-// precedent as well: set_art_lock landed at an already-committed version 10 and was left
-// there, with the bump taken later.
-//
-// Version 15 changed what an existing method does rather than what it carries: edit_entity
-// with WriteBack now strips the cleared id from the member files on an album or
-// release-group mbid clear, where before the clear was catalog-only. Nothing on the wire
-// says which behavior a peer has, so the mismatch misdrives silently in both directions. A
-// version-14 server takes a client's durable clear and leaves every member file naming the
-// id, so the identity forks back on the next scan while the client reports a clear that
-// held; a version-14 client asking a version-15 server for what it believes is a
-// catalog-only clear has those files rewritten instead. Both are the quiet wrong answer
-// the version gate exists to turn into a clean absence, and no added field would have
-// carried the difference.
-//
-// set_credits_batch and the newly mergeable series type ride the bump rather than earning
-// one. The batch is a new method, but the only peers without its handler are pre-15
-// builds, and the version gate refuses their every frame before the method switch is
-// reached, so the mismatch never even surfaces as an "unknown method" refusal. Merging a
-// series widens the value MergeParams.EntityType accepts, and the same gate stands in
-// front of the version-14 servers that would otherwise refuse it with CodeInvalid. Either
-// way the failure is a clean refusal rather than a quiet wrong answer, which is the
-// add_root precedent. set_credits rides along too: a multi-name credit now renames
-// onto the first name where it previously split, the batch-of-one delegation gives the
-// single-item surface that same in-place rename on a contributor role, and the request
-// gained skipLocked with the response gaining the skipped flag that answers it. Those two
-// fields are additive, and a version-14 server that ignores skipLocked answers a locked
-// credit with the CodeLocked it always did, which is a loud refusal rather than a quiet
-// wrong answer.
-// rename_entity does not bump it either, on the add_root/detach/put_transcript
-// precedent: it widens no existing struct, so a peer that knows nothing about it is not
-// at risk of misreading a frame it does understand. The affirmative case is worth stating
-// rather than leaving as an absence of reasons, because the verb is destructive. A
-// version bump would make an older server refuse every frame including ping, so a WaxDeck
-// talking to one would read it as absent; without the bump it gets "unknown method:
-// rename_entity" from the method switch, which names the one thing actually missing.
-// set_acquisition and clear_acquisition ride along on that same precedent. Both are new
-// methods that widen no existing struct, so a peer that knows nothing about them cannot
-// misread a frame it does understand, and the failure it gets is the method switch naming
-// the missing verb rather than the version gate reporting the whole server as absent.
-// Version 16 added RenameEntityResult.Credits, once an artist rename began moving the
-// contributor roles it used to refuse. This one does widen an existing struct, and the
-// field is not cosmetic: a version-15 client drops it and reports a rename that moved a
-// producer credit as having moved nothing but its members, which understates a
-// destructive verb.
-//
-// Version 17 added SetArtLockResult, and it forces the bump rather than riding along the
-// way EditEntityResult.MergedInto did at 14. The difference is what the zero value says.
-// A dropped MergedInto leaves a client with the generic line it printed before, which is
-// an absence of information; a dropped SetArtLockResult leaves Changed and StillLocked
-// both false, and the client renders that as "was already locked" or "had no lock of its
-// own" for a call that did change the pin. That is an affirmatively false statement about
-// a mutation, which is the quiet wrong answer the gate exists to turn into a clean
-// absence.
-//
-// Version 18 added the PlayedParams/ProgressParams as-of stamp, for the reason
-// version 4 gave: a version-17 server drops the field and lands an imported play or
-// resume position at server-now, so what sorts by recency after an import is the
-// import itself, and nothing in the response says so.
-//
-// Version 19 added record_session, the listening-log write an import makes beside
-// mark_played, bumped the way set_played was: `state set --played --session` would
-// land its play on a version-18 server and then fail on the unknown method partway
-// through the command.
-//
-// Version 20 added EnrichParams.ForcePhases, for the reason version 3 gave: a
-// version-19 server drops the field and runs an ordinary pass where the client asked
-// for one phase to be re-asked, and the result reads as a pass that found nothing new
-// rather than as a refusal. The aux-art phase's rename to group-art rides at 20: a peer
-// that sends the old key is refused as an unknown phase, which is a loud answer rather
-// than a misread one. An older peer reading a newer enrich result finds no
-// AuxArtEnriched and shows the phase as having walked nothing, an absence of
-// information like MergedInto's at 14 rather than a false statement.
-//
-// Version 21 added EnrichParams.Phases, for the reason version 3 gave: a version-20
-// server drops the field and runs the whole pass where the client asked for one phase.
-// set_library_read_only and set_library_folder_fallback ride at 21 on the add_root
-// precedent, since neither widens an existing struct.
-//
-// Version 22 added SetTagParams.WriteBack and SetTagResult.WriteBackFailures, for the
-// reason version 6 gave: a version-21 server drops the field and stores the tag in the
-// catalog alone, and its empty result reads as a write that landed on every file.
-// mark_missing gained the promoted and dropped outcomes, for an item that keeps a file
-// on disk while a copy or its primary is gone, which a version-21 server answers
-// files-present.
+// server.
 const ProtocolVersion = 22
 
 // Method names for the proxied operations: the fast request/response catalog
@@ -263,6 +96,7 @@ const (
 	MethodRunAnalyze  = "run_analyze"
 	MethodRunEnrich   = "run_enrich"
 	MethodRunOrganize = "run_organize"
+	MethodRunSetKind  = "run_set_kind"
 )
 
 // request is one wire frame from client to server.
@@ -1073,6 +907,16 @@ type EnrichParams struct {
 type OrganizeParams struct {
 	Rule    json.RawMessage `json:"rule,omitempty"`
 	Profile string          `json:"profile,omitempty"`
+}
+
+// SetKindParams is the run_set_kind request payload: the items to change and the kind
+// to change them to, track or book. The server checks the request before starting the
+// job, and the finished job's result is the KindReport.
+type SetKindParams struct {
+	ItemPIDs  []string `json:"itemPids"`
+	Kind      string   `json:"kind"`
+	WriteBack bool     `json:"writeBack,omitempty"`
+	Force     bool     `json:"force,omitempty"`
 }
 
 // JobStartResult is the response for a run_* method: the PID of the started job,

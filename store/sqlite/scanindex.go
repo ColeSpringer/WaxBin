@@ -241,7 +241,7 @@ func settleMissingTx(ctx context.Context, tx *sql.Tx, missing map[int64]bool, it
 			return err
 		}
 		rows, err := tx.QueryContext(ctx, `SELECT itf.file_id, itf.role, itf.position, itf.start_frames, itf.end_frames,
-				COALESCE(f.essence_hash, '')
+				COALESCE(f.essence_hash, ''), `+lostFileCols+`
 			FROM item_file itf JOIN file f ON f.id = itf.file_id WHERE itf.item_id = ?`, itemID)
 		if err != nil {
 			return err
@@ -253,7 +253,8 @@ func settleMissingTx(ctx context.Context, tx *sql.Tx, missing map[int64]bool, it
 		var gone []goneEdge
 		for rows.Next() {
 			var g goneEdge
-			if err := rows.Scan(&g.fileID, &g.lost.role, &g.lost.position, &g.lost.start, &g.lost.end, &g.lost.essence); err != nil {
+			if err := rows.Scan(append([]any{&g.fileID, &g.lost.role, &g.lost.position, &g.lost.start, &g.lost.end,
+				&g.lost.file.EssenceHash}, g.lost.fileFields()...)...); err != nil {
 				rows.Close()
 				return err
 			}

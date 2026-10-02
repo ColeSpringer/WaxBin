@@ -1789,9 +1789,9 @@ func recordWriteBack(dst *map[model.PID]*WriteBackError, pid model.PID, wberr er
 // WriteBackFailure records one backing file whose on-disk tag write-back did not
 // apply, with a human-readable reason.
 type WriteBackFailure struct {
-	FilePID model.PID
-	Path    string
-	Reason  string
+	FilePID model.PID `json:"filePid,omitempty"`
+	Path    string    `json:"path,omitempty"`
+	Reason  string    `json:"reason"`
 }
 
 // WriteBackError reports that a catalog edit committed but its on-disk tag write-back

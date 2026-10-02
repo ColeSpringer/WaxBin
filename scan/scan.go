@@ -1816,3 +1816,23 @@ func isAudio(path string) bool { return audioExts[strings.ToLower(filepath.Ext(p
 // IsAudio reports whether a path has a recognized audio extension. It is the one
 // source of truth for the audio-file set, shared with the importer.
 func IsAudio(path string) bool { return isAudio(path) }
+
+// CueRipTracks reports how many cue tracks a scan would carve from the sheet beside an
+// audio file read as a track with no embedded chapters: none when there is no sheet, when
+// it does not read clean, or when it carves fewer than two (the file then stays one track).
+// codec and durationMS are the file's; a lossless file's length bounds the last track.
+func CueRipTracks(audioPath, codec string, durationMS int64) int {
+	sheet, _, _, refusal, unread, ok := scanCueSidecar(audioPath)
+	if !ok || sheet == nil || unread || refusal != "" || len(sheet.Warnings) > 0 {
+		return 0
+	}
+	var fileMS int64
+	if model.LosslessCodec(codec) {
+		fileMS = durationMS
+	}
+	carve, _, err := sheet.Carve(fileMS)
+	if err != nil || len(carve) < 2 {
+		return 0
+	}
+	return len(carve)
+}

@@ -2083,3 +2083,40 @@ func TestDroppedHandoffStillAnnouncesTheReopen(t *testing.T) {
 		t.Fatalf("changes after the drop = %+v (err %v), replaced %v; want none and the catalog kept", rows, err, replaced.Load())
 	}
 }
+
+// TestServeProxiedRunSetKind: run_set_kind starts the kind change as a job in the server
+// and hands back its pid; the finished job's result decodes to the KindReport, and a
+// request the server refuses keeps its class on the wire without starting a job.
+func TestServeProxiedRunSetKind(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	for n := 1; n <= 2; n++ {
+		librivoxPart(t, filepath.Join(root, "Jane Austen", "Persuasion", fmt.Sprintf("%02d.mp3", n)), n)
+	}
+	sock := testsock.Path(t)
+	lib := openServed(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), root, sock)
+	c := dialWhenReady(t, sock)
+	one, two := itemPIDByTitle(t, ctx, lib, "Chapter 01"), itemPIDByTitle(t, ctx, lib, "Chapter 02")
+
+	if _, err := c.RunSetKind(ctx, proxy.SetKindParams{ItemPIDs: []string{"01ZZZZZZZZZZZZZZZZZZZZZZZZ"}, Kind: "book"}); !waxerr.Is(err, waxerr.CodeNotFound) {
+		t.Fatalf("run_set_kind of an unknown item = %v, want CodeNotFound", err)
+	}
+	jobPID, err := c.RunSetKind(ctx, proxy.SetKindParams{ItemPIDs: []string{string(one), string(two)}, Kind: "book", WriteBack: true})
+	if err != nil {
+		t.Fatalf("run_set_kind: %v", err)
+	}
+	job := waitForJobDone(t, ctx, lib, jobPID)
+	if job.Kind != "set-kind" || job.TargetType != "item" || job.TargetPID != one {
+		t.Errorf("job = %s on %s %s, want set-kind on item %s", job.Kind, job.TargetType, job.TargetPID, one)
+	}
+	var rep waxbin.KindReport
+	if err := json.Unmarshal([]byte(job.Result), &rep); err != nil {
+		t.Fatalf("job result %q: %v", job.Result, err)
+	}
+	if !slices.Equal(rep.Converted, []model.PID{one}) || rep.Absorbed[two] != one {
+		t.Errorf("report = %+v, want chapter 1 converted and chapter 2 absorbed into it", rep)
+	}
+	if v, err := lib.Get(ctx, one); err != nil || v.Kind != model.KindBook {
+		t.Errorf("item = %+v (err %v), want the book", v, err)
+	}
+}

@@ -216,6 +216,36 @@ type ScanItemResult struct {
 	// Promoted lists alternates the write promoted on another item that lost this file
 	// (a re-encoded primary re-keyed away), for the caller to re-read.
 	Promoted []PromotedFile
+	// Folded lists the items this write left with no file and folded into ItemPID, their
+	// play state and list entries moved there, before deleting them.
+	Folded []PID
+}
+
+// KindTarget is what a kind change reads of an item: its kind, whether a kind lock pins
+// it, and its files with their edges.
+type KindTarget struct {
+	ItemPID    PID
+	Kind       Kind
+	KindLocked bool
+	Files      []KindTargetFile
+}
+
+// KindTargetFile is one file of a KindTarget. Windowed marks an edge that is a window of
+// the file (a cue track), Shared a file another item also holds an edge on, and Embedded a
+// book part whose chapters its own tags give, which a scan prefers to a cue sheet.
+type KindTargetFile struct {
+	FilePID     PID
+	Path        []byte
+	DisplayPath string
+	Essence     string
+	Codec       string
+	DurationMS  int64
+	Role        string
+	Position    int
+	LibraryID   int64
+	Windowed    bool
+	Shared      bool
+	Embedded    bool
 }
 
 // ItemFileRef is one backing file of an item, in reading order. organize uses it

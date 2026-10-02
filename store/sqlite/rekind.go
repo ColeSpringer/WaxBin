@@ -27,6 +27,185 @@ func lockKindTx(ctx context.Context, tx *sql.Tx, itemID, now int64) (bool, error
 	return n > 0, err
 }
 
+// LockKinds pins the kind of each item pids names (source user), emitting an update for
+// an item whose lock changed. A cue track is passed over, its kind following its rip.
+func (s *Store) LockKinds(ctx context.Context, pids []model.PID) error {
+	const op = "store.LockKinds"
+	return s.writeTx(ctx, func(tx *sql.Tx) error {
+		now := nowNS()
+		for _, pid := range pids {
+			itemID, kind, err := itemIDKindByPIDTx(ctx, tx, pid, op)
+			if err != nil {
+				return err
+			}
+			if !curatableFieldForKind(kind, model.KindLockField) {
+				return waxerr.New(waxerr.CodeInvalid, op, "a "+kind+" item's kind cannot be locked")
+			}
+			var windowed bool
+			if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM item_file
+				WHERE item_id = ? AND role = 'primary' AND start_frames IS NOT NULL)`, itemID).Scan(&windowed); err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+			if windowed {
+				continue
+			}
+			changed, err := lockKindTx(ctx, tx, itemID, now)
+			if err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+			if changed {
+				if err := appendChange(ctx, tx, "item", pid, model.OpUpdate); err != nil {
+					return waxerr.Wrap(waxerr.CodeIO, op, err)
+				}
+			}
+		}
+		return nil
+	})
+}
+
+// KindTargets reads, for each item pids names in order, what a kind change needs: its
+// kind, its kind lock and its files, primary and parts in reading order before
+// alternates. An unknown pid is CodeNotFound.
+func (s *Store) KindTargets(ctx context.Context, pids []model.PID) ([]model.KindTarget, error) {
+	const op = "store.KindTargets"
+	out := make([]model.KindTarget, 0, len(pids))
+	for _, pid := range pids {
+		t := model.KindTarget{ItemPID: pid}
+		var id int64
+		err := s.read.QueryRowContext(ctx, `SELECT pi.id, pi.kind,
+			EXISTS(SELECT 1 FROM field_provenance fp WHERE fp.item_id = pi.id AND fp.field = 'kind' AND fp.locked = 1)
+			FROM playable_item pi WHERE pi.pid = ?`, string(pid)).Scan(&id, &t.Kind, &t.KindLocked)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, waxerr.New(waxerr.CodeNotFound, op, "no such item: "+string(pid))
+		}
+		if err != nil {
+			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		rows, err := s.read.QueryContext(ctx, `SELECT f.pid, f.path, f.display_path, COALESCE(f.essence_hash, ''),
+				COALESCE(f.codec, ''), COALESCE(f.duration_ms, 0), itf.role,
+				itf.position, f.library_id, itf.start_frames IS NOT NULL OR itf.end_frames IS NOT NULL,
+				EXISTS(SELECT 1 FROM item_file o WHERE o.file_id = f.id AND o.item_id <> itf.item_id),
+				EXISTS(SELECT 1 FROM chapter c WHERE c.book_item_id = itf.item_id AND c.file_id = f.id AND c.source = 'embedded')
+			FROM item_file itf JOIN file f ON f.id = itf.file_id
+			WHERE itf.item_id = ?
+			ORDER BY itf.role = 'alternate', itf.position, f.rel_path, f.id`, id)
+		if err != nil {
+			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		for rows.Next() {
+			var f model.KindTargetFile
+			if err := rows.Scan(&f.FilePID, &f.Path, &f.DisplayPath, &f.Essence, &f.Codec, &f.DurationMS, &f.Role,
+				&f.Position, &f.LibraryID, &f.Windowed, &f.Shared, &f.Embedded); err != nil {
+				rows.Close()
+				return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+			t.Files = append(t.Files, f)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		out = append(out, t)
+	}
+	return out, nil
+}
+
+// FollowFile makes a file an alternate of the item that anchor, another file, backs as a
+// primary or part, at anchor's position, and settles the items the file leaves as a put's
+// link does, an item left with no file folding into anchor's. A kind change uses it for a
+// copy it cannot read, its file not on disk, so the copy goes where the file it copies
+// went. It returns that item and the items folded, and does nothing when anchor backs no
+// whole-file edge or the file is that item's alternate already.
+func (s *Store) FollowFile(ctx context.Context, filePID, anchorPID model.PID) (model.PID, []model.PID, error) {
+	const op = "store.FollowFile"
+	var into model.PID
+	var folded []model.PID
+	err := s.writeTx(ctx, func(tx *sql.Tx) error {
+		var fileID int64
+		var essence string
+		err := tx.QueryRowContext(ctx, "SELECT id, COALESCE(essence_hash, '') FROM file WHERE pid = ?", string(filePID)).Scan(&fileID, &essence)
+		if errors.Is(err, sql.ErrNoRows) {
+			return waxerr.New(waxerr.CodeNotFound, op, "no such file: "+string(filePID))
+		}
+		if err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		var itemID int64
+		var position int
+		var kind string
+		err = tx.QueryRowContext(ctx, `SELECT pi.id, pi.pid, pi.kind, itf.position FROM item_file itf
+			JOIN file f ON f.id = itf.file_id JOIN playable_item pi ON pi.id = itf.item_id
+			WHERE f.pid = ? AND itf.role IN ('primary', 'part') AND itf.start_frames IS NULL
+			ORDER BY itf.role = 'primary' DESC LIMIT 1`, string(anchorPID)).Scan(&itemID, &into, &kind, &position)
+		if errors.Is(err, sql.ErrNoRows) {
+			into = ""
+			return nil
+		}
+		if err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		var held bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM item_file
+			WHERE item_id = ? AND file_id = ? AND role = 'alternate')`, itemID, fileID).Scan(&held); err != nil || held {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		dep, err := departingTx(ctx, tx, fileID, essence, itemID, true)
+		if err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		orphans, err := queryInt64sTx(ctx, tx, "SELECT DISTINCT item_id FROM item_file WHERE file_id = ? AND item_id <> ?", fileID, itemID)
+		if err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		link := `INSERT INTO item_file(item_id, file_id, role, position)
+			SELECT ?, ?, 'alternate', COALESCE(MAX(position), 0) + 1 FROM item_file WHERE item_id = ?`
+		args := []any{itemID, fileID, itemID}
+		if kind == string(model.KindBook) {
+			link, args = "INSERT INTO item_file(item_id, file_id, role, position) VALUES (?, ?, 'alternate', ?)", []any{itemID, fileID, position}
+		}
+		for _, st := range []struct {
+			q    string
+			args []any
+		}{{"DELETE FROM item_file WHERE file_id = ?", []any{fileID}}, {link, args}} {
+			if _, err := tx.ExecContext(ctx, st.q, st.args...); err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+		}
+		affected := newAffectedRollups()
+		if _, folded, err = reconcileOrphansTx(ctx, tx, orphans, dep, affected); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		if err := refreshCopyDiagnosticsTx(ctx, tx, itemID); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		if !affected.empty() {
+			if err := maintainRollupsTx(ctx, tx, affected, nowNS()); err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+		}
+		return waxerr.Wrap(waxerr.CodeIO, op, appendItemUpdateTx(ctx, tx, itemID))
+	})
+	if err != nil {
+		return "", nil, err
+	}
+	return into, folded, nil
+}
+
+// WholeFileOwner returns the item a whole-file edge on the file backs, a primary or part
+// before an alternate, or "" when only a cue track's window holds it or nothing does.
+func (s *Store) WholeFileOwner(ctx context.Context, filePID model.PID) (model.PID, error) {
+	const op = "store.WholeFileOwner"
+	var pid model.PID
+	err := s.read.QueryRowContext(ctx, `SELECT pi.pid FROM file f
+		JOIN item_file itf ON itf.file_id = f.id AND itf.start_frames IS NULL
+		JOIN playable_item pi ON pi.id = itf.item_id
+		WHERE f.pid = ? ORDER BY itf.role = 'alternate', itf.item_id LIMIT 1`, string(filePID)).Scan(&pid)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return pid, waxerr.Wrap(waxerr.CodeIO, op, err)
+}
+
 // standingItemCols reads what a file's standing takes from its item (alias pi).
 const standingItemCols = `pi.pid, pi.kind,
 	EXISTS(SELECT 1 FROM field_provenance fp WHERE fp.item_id = pi.id AND fp.field = 'kind' AND fp.locked = 1),

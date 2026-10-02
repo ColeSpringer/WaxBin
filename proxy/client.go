@@ -816,6 +816,11 @@ func (c *Client) RunEnrich(ctx context.Context, params EnrichParams) (model.PID,
 	return c.runJob(ctx, MethodRunEnrich, params)
 }
 
+// RunSetKind submits a kind change to the server and returns the job PID.
+func (c *Client) RunSetKind(ctx context.Context, params SetKindParams) (model.PID, error) {
+	return c.runJob(ctx, MethodRunSetKind, params)
+}
+
 // RunOrganize submits an organize pass to the server and returns the job PID. rule
 // is a marshaled query rule document selecting the items to organize.
 func (c *Client) RunOrganize(ctx context.Context, rule []byte, profile string) (model.PID, error) {

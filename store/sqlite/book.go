@@ -101,26 +101,57 @@ func (s *Store) PutScannedBook(ctx context.Context, in model.PutScannedBookInput
 		// representative 'primary', the rest are 'part', and a copy of a part on disk is
 		// an 'alternate') is known before deciding whether it owns the book's metadata,
 		// and detach it from any other item.
-		dep, err := departingTx(ctx, tx, fileID, in.File.EssenceHash, itemID)
+		dep, err := departingTx(ctx, tx, fileID, in.File.EssenceHash, itemID, in.PreserveLocks)
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
-		link, err := linkBookFile(ctx, tx, itemID, fileID, in.Position, in.File.EssenceHash, wasMissing)
+		// A track turned into a book has one part, so every alternate it kept copies or
+		// encodes that part and sits at its position.
+		if rekinded {
+			if _, err := tx.ExecContext(ctx, "UPDATE item_file SET position = ? WHERE item_id = ? AND role = 'alternate'",
+				in.Position, itemID); err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+		}
+		link, err := linkBookFile(ctx, tx, itemID, fileID, in.Position, in.File, in.LibraryID, wasMissing)
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		role := link.role
 		res.Joined = link.changed
+		res.Promoted = append(res.Promoted, link.promoted...)
 		if link.demoted {
 			if err := refreshCopyDiagnosticsTx(ctx, tx, itemID); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 		}
+		// A part another item brought in moves the places from where it lands on, so they
+		// keep their audio, a place where a part starts being that part's. One landing at
+		// the end moves nothing: a place at the old end has heard the book, and the new
+		// part comes next. The places the other item held come across with the fold below,
+		// each inside its own part, and the book stays finished only for a listener who
+		// finished that item too.
+		if link.changed && role != alternateRole && !link.replaced && dep.arrived(itemID) {
+			span, ok, err := partSpanTx(ctx, tx, itemID, fileID)
+			if err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+			if ok && !span.last {
+				if err := shiftPositionsTx(ctx, tx, itemID, span.offset, span.length); err != nil {
+					return waxerr.Wrap(waxerr.CodeIO, op, err)
+				}
+			}
+			if err := unfinishForArrivalTx(ctx, tx, itemID, dep.sources(itemID), now); err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+		}
 		// A surviving item lost a file (e.g. a multi-file book whose part was retagged
 		// into another book): it keeps a primary and its rollups and total are refreshed.
-		if res.Promoted, err = reconcileOrphansTx(ctx, tx, link.orphans, dep, affected); err != nil {
+		promoted, folded, err := reconcileOrphansTx(ctx, tx, link.orphans, dep, affected)
+		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
+		res.Promoted, res.Folded = append(res.Promoted, promoted...), folded
 		// A book a file the folder rule kept alone makes up takes the key the file's tags
 		// give it now (a retitled book with no ALBUM, one named for a renamed folder), so a
 		// book found later under the old key is a book of its own.
@@ -540,14 +571,19 @@ const (
 )
 
 // bookLink is what linkBookFile did: the role the file holds in the book, whether the
-// edge changed, the items the detach left behind, the part an alternate copies, and
-// whether the file took the place of a gone part, now an alternate.
+// edge changed, the items the detach left behind, the part an alternate copies or encodes,
+// whether a part became an alternate (the file took the place of a gone part, or of a
+// lesser encoding, or yielded its own to a better one), whether the file took another
+// file's place in the book's timeline, and an alternate it promoted in its own place.
 type bookLink struct {
-	role    string
-	changed bool
-	orphans []int64
-	twin    *bookTwin
-	demoted bool
+	role     string
+	changed  bool
+	orphans  []int64
+	twin     *bookTwin
+	encoding *bookTwin
+	demoted  bool
+	replaced bool
+	promoted []model.PromotedFile
 }
 
 // bookTwin is a part of a book on another file with the same audio as an arriving file.
@@ -568,7 +604,16 @@ type bookTwin struct {
 // part staying as an alternate. A part whose audio the book's primary or a lower file id
 // also holds is a copy cataloged as a part of its own before copies became alternates,
 // and folds into one now.
-func linkBookFile(ctx context.Context, tx *sql.Tx, bookItemID, fileID int64, position int, essence string, bookMissing bool) (*bookLink, error) {
+//
+// Another encoding of the part at its position (otherEncoding) is that part's alternate
+// unless it ranks ahead of it the way a track's encodings rank (outranksPrimaryTx); then
+// it takes the part's place and the part becomes its alternate, the replacement leaving
+// the book's timeline as it was. A part read again yields its place the same way to a
+// better encoding the book holds on disk (outrankingAlternateTx), so the walk order does
+// not decide which one is the part. A part off disk is replaced only once the book is
+// missing, since it may have moved.
+func linkBookFile(ctx context.Context, tx *sql.Tx, bookItemID, fileID int64, position int, f model.File, libraryID int64, bookMissing bool) (*bookLink, error) {
+	essence := f.EssenceHash
 	prev, err := queryInt64sTx(ctx, tx,
 		"SELECT DISTINCT item_id FROM item_file WHERE file_id = ? AND item_id <> ?", fileID, bookItemID)
 	if err != nil {
@@ -597,14 +642,10 @@ func linkBookFile(ctx context.Context, tx *sql.Tx, bookItemID, fileID int64, pos
 		}
 		switch {
 		case twin != nil && role != bookPartRole && bookMissing && !pathExists(twin.path):
-			if _, err := tx.ExecContext(ctx, "UPDATE item_file SET role = 'alternate' WHERE item_id = ? AND file_id = ?",
-				bookItemID, twin.fileID); err != nil {
+			if err := demoteBookPartTx(ctx, tx, bookItemID, twin.fileID); err != nil {
 				return nil, err
 			}
-			if _, err := tx.ExecContext(ctx, "DELETE FROM chapter WHERE book_item_id = ? AND file_id = ?", bookItemID, twin.fileID); err != nil {
-				return nil, err
-			}
-			role, position, link.demoted = twin.role, twin.position, true
+			role, position, link.demoted, link.replaced = twin.role, twin.position, true, true
 		case twin != nil && (role != bookPartRole || twin.role == bookPrimaryRole || twin.fileID < fileID):
 			role, position, link.twin = alternateRole, twin.position, twin
 		case role == alternateRole:
@@ -614,6 +655,53 @@ func linkBookFile(ctx context.Context, tx *sql.Tx, bookItemID, fileID int64, pos
 		case role != bookPartRole:
 			role = ""
 		}
+	}
+	switch {
+	case role == "":
+		enc, encRole, err := partEncodingTx(ctx, tx, bookItemID, fileID, position, f)
+		if err != nil {
+			return nil, err
+		}
+		if enc == nil {
+			break
+		}
+		take := bookMissing
+		if pathExists(enc.path) {
+			if take, err = outranksPrimaryTx(ctx, tx, libraryID, f, enc); err != nil {
+				return nil, err
+			}
+		}
+		if !take {
+			role, link.encoding = alternateRole, &bookTwin{fileID: enc.fileID, role: encRole, position: position, path: enc.path, display: enc.display}
+			break
+		}
+		if err := demoteBookPartTx(ctx, tx, bookItemID, enc.fileID); err != nil {
+			return nil, err
+		}
+		role, link.demoted, link.replaced = encRole, true, true
+	case role == bookPrimaryRole || role == bookPartRole:
+		better, err := outrankingAlternateTx(ctx, tx, bookItemID, libraryID, f, func(c altCandidate) bool {
+			return c.position == position && otherEncoding(f, c.file())
+		})
+		if err != nil || better == nil {
+			if err != nil {
+				return nil, err
+			}
+			break
+		}
+		if _, err := tx.ExecContext(ctx, "UPDATE item_file SET role = ? WHERE item_id = ? AND file_id = ?",
+			role, bookItemID, better.fileID); err != nil {
+			return nil, err
+		}
+		if err := unstampTx(ctx, tx, better.fileID); err != nil {
+			return nil, err
+		}
+		if _, err := tx.ExecContext(ctx, "DELETE FROM chapter WHERE book_item_id = ? AND file_id = ?", bookItemID, fileID); err != nil {
+			return nil, err
+		}
+		link.promoted = append(link.promoted, model.PromotedFile{FilePID: better.pid, LibraryID: better.libraryID, Path: better.path})
+		role, link.demoted = alternateRole, true
+		link.encoding = &bookTwin{fileID: better.fileID, role: role, position: position, path: better.path, display: better.display}
 	}
 	if role == "" {
 		var hasPrimary int
@@ -697,6 +785,72 @@ func bookTwinTx(ctx context.Context, tx *sql.Tx, bookItemID, fileID int64, essen
 	return &tw, nil
 }
 
+// demoteBookPartTx makes a book's part on fileID an alternate, dropping the chapters it
+// held as a part.
+func demoteBookPartTx(ctx context.Context, tx *sql.Tx, bookItemID, fileID int64) error {
+	if _, err := tx.ExecContext(ctx, "UPDATE item_file SET role = 'alternate' WHERE item_id = ? AND file_id = ?",
+		bookItemID, fileID); err != nil {
+		return err
+	}
+	_, err := tx.ExecContext(ctx, "DELETE FROM chapter WHERE book_item_id = ? AND file_id = ?", bookItemID, fileID)
+	return err
+}
+
+// partEncodingTx returns the book's part at position that f is another encoding of
+// (otherEncoding), primary first, with its role, or nil.
+func partEncodingTx(ctx context.Context, tx *sql.Tx, bookItemID, fileID int64, position int, f model.File) (*standingPrimary, string, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT f.id, f.path, f.display_path, COALESCE(f.essence_hash, ''), itf.role,
+			COALESCE(f.codec, ''), COALESCE(f.bitrate, 0), COALESCE(f.sample_rate, 0), COALESCE(f.bit_depth, 0),
+			COALESCE(f.duration_ms, 0), l.read_only
+		FROM item_file itf JOIN file f ON f.id = itf.file_id JOIN library l ON l.id = f.library_id
+		WHERE itf.item_id = ? AND itf.file_id <> ? AND itf.position = ? AND itf.role IN ('primary', 'part')
+		ORDER BY itf.role = 'primary' DESC, f.id`, bookItemID, fileID, position)
+	if err != nil {
+		return nil, "", err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var sp standingPrimary
+		var role string
+		q := &sp.quality
+		if err := rows.Scan(&sp.fileID, &sp.path, &sp.display, &sp.essence, &role,
+			&q.Codec, &q.Bitrate, &q.SampleRate, &q.BitDepth, &q.DurationMS, &sp.readOnly); err != nil {
+			return nil, "", err
+		}
+		q.EssenceHash = sp.essence
+		if otherEncoding(f, *q) {
+			return &sp, role, nil
+		}
+	}
+	return nil, "", rows.Err()
+}
+
+// otherEncoding reports whether two files at one part position are that part in two
+// encodings: other audio running as long (encodingLengthsMatch) in another codec, sample
+// rate or bit depth, each known on both sides. The parts of one rip share all of those,
+// which keeps a splitter's parts numbered alike, back matter that sorts last, or parts in
+// disc folders the scan does not read as discs from reading as one part; two encodings in
+// one codec at another bit rate read as two parts for the same reason.
+func otherEncoding(a, b model.File) bool {
+	if a.EssenceHash == "" || b.EssenceHash == "" || a.EssenceHash == b.EssenceHash ||
+		!encodingLengthsMatch(a.DurationMS, b.DurationMS) {
+		return false
+	}
+	differ := func(x, y int) bool { return x > 0 && y > 0 && x != y }
+	return (a.Codec != "" && b.Codec != "" && !strings.EqualFold(a.Codec, b.Codec)) ||
+		differ(a.SampleRate, b.SampleRate) || differ(a.BitDepth, b.BitDepth)
+}
+
+// encodingLengthsMatch reports whether two running times are one recording's in two
+// encodings: both known, and apart by no more than a second or half a percent of the
+// longer, which covers encoder padding and an estimated MP3 length.
+func encodingLengthsMatch(a, b int64) bool {
+	if a <= 0 || b <= 0 {
+		return false
+	}
+	return max(a-b, b-a) <= max(1000, max(a, b)/200)
+}
+
 // attachBookCopyTx is PutScannedBook's copy branch: the file is an alternate of the part
 // it copies, so the book's metadata, chapters, cover and acquisition are left alone. Any
 // chapters a former part edge stored for the file go, and the owed rows its tags pay are
@@ -709,6 +863,8 @@ func (s *Store) attachBookCopyTx(ctx context.Context, tx *sql.Tx, in model.PutSc
 	d := model.FileDiagnostic{Code: model.DiagDuplicateCopy, Severity: model.SeverityInfo}
 	if link.twin != nil {
 		d.Detail = link.twin.display
+	} else if link.encoding != nil {
+		d.Code, d.Detail = model.DiagAlternateEncoding, link.encoding.display
 	} else if primary, err := primaryFileTx(ctx, tx, itemID); err != nil {
 		return waxerr.Wrap(waxerr.CodeIO, op, err)
 	} else if primary != nil {

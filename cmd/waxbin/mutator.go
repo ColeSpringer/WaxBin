@@ -114,6 +114,33 @@ func (m *mutator) SetCreditsBatch(ctx context.Context, edits []model.ItemCreditE
 	return m.lib.SetCreditsBatch(ctx, edits, opts)
 }
 
+// SetItemKind changes the items' kind: through a server as a run_set_kind job it follows
+// to the end with tail, reading the report the job recorded (a failed job's too, which
+// says what changed before the failure), or directly.
+func (m *mutator) SetItemKind(ctx context.Context, pids []model.PID, kind model.Kind, opts waxbin.KindOptions,
+	tail func(model.PID) (*model.Job, error)) (*waxbin.KindReport, error) {
+	if m.px == nil {
+		return m.lib.SetItemKind(ctx, pids, kind, opts)
+	}
+	ids := make([]string, len(pids))
+	for i, p := range pids {
+		ids[i] = string(p)
+	}
+	jobPID, err := m.px.RunSetKind(ctx, proxy.SetKindParams{ItemPIDs: ids, Kind: string(kind), WriteBack: opts.WriteBack, Force: opts.Force})
+	if err != nil {
+		return nil, err
+	}
+	job, err := tail(jobPID)
+	if job == nil {
+		return nil, err
+	}
+	var rep waxbin.KindReport
+	if uerr := unmarshalJobResult(job, &rep); uerr != nil && err == nil {
+		return nil, uerr
+	}
+	return &rep, err
+}
+
 // toCreditEdits converts wire credit entries back to the facade's own shape.
 func toCreditEdits(items []proxy.ItemCreditsEdit) []model.ItemCreditEdit {
 	if len(items) == 0 {
