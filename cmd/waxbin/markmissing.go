@@ -15,8 +15,11 @@ func newMarkMissingCmd(g *globals) *cobra.Command {
 		Long: "Marks each item missing so listings and workers stop treating it as playable. " +
 			"The files' rows are kept, so a rescan that finds the bytes again restores the " +
 			"item. Each pid is verified before it is written: an item whose files are still " +
-			"on disk is reported files-present and left alone, and an unreadable library " +
-			"root is refused as a dropped mount rather than recorded as a deletion. " +
+			"on disk is reported files-present and left alone, one that keeps a file while " +
+			"others are gone is settled instead (a copy takes a gone primary's place, " +
+			"promoted, or a gone copy's row goes, dropped), and a file under an unreadable " +
+			"library root is a dropped mount rather than a deletion: left alone when the " +
+			"item keeps a file on disk, and refused otherwise. " +
 			"--force skips both checks, for a caller whose own view of the filesystem is " +
 			"the authoritative one. An archived or remote item is refused either way: both " +
 			"already say there are no local bytes. Each pid's outcome is reported, since " +

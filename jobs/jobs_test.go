@@ -105,3 +105,42 @@ func TestRunRecordsTheTarget(t *testing.T) {
 		t.Fatalf("whole-catalog job = %+v (err %v), want no target", got, err)
 	}
 }
+
+// TestRunRecordsACancel: a run whose context is canceled and that returns the cancel
+// ends canceled, not failed, with a message saying it was cut short.
+func TestRunRecordsACancel(t *testing.T) {
+	m, _ := newManager(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	job, err := m.Run(ctx, jobs.Spec{Kind: "scan", Scope: "scan"}, func(ctx context.Context, _ *jobs.Handle) error {
+		cancel()
+		return waxerr.FromContext("scan.Scan", ctx.Err(), waxerr.CodeIO)
+	})
+	if !waxerr.Is(err, waxerr.CodeCanceled) {
+		t.Fatalf("err = %v, want the cancel returned", err)
+	}
+	if job.State != model.JobCanceled || job.Error != "interrupted before it finished" {
+		t.Fatalf("job = %s %q, want canceled and interrupted", job.State, job.Error)
+	}
+	list, err := m.List(context.Background(), 1)
+	if err != nil || len(list) != 1 || list[0].State != model.JobCanceled {
+		t.Fatalf("persisted = %+v (err %v), want canceled", list, err)
+	}
+
+	// A job that hands back its context's raw error was canceled all the same.
+	ctx, cancel = context.WithCancel(context.Background())
+	job, _ = m.Run(ctx, jobs.Spec{Kind: "enrich", Scope: "enrich"}, func(ctx context.Context, _ *jobs.Handle) error {
+		cancel()
+		return ctx.Err()
+	})
+	if job.State != model.JobCanceled {
+		t.Errorf("raw cancel = %s, want canceled", job.State)
+	}
+
+	// A cancel error from a context that was not canceled is a failure like any other.
+	job, _ = m.Run(context.Background(), jobs.Spec{Kind: "scan", Scope: "scan"}, func(context.Context, *jobs.Handle) error {
+		return waxerr.New(waxerr.CodeCanceled, "inner", "a sub-operation gave up")
+	})
+	if job.State != model.JobFailed {
+		t.Errorf("inner cancel = %s, want failed", job.State)
+	}
+}

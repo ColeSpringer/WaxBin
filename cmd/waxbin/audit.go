@@ -30,7 +30,8 @@ func newAuditCmd(g *globals) *cobra.Command {
 			"metadata, missing art/ReplayGain, unportable filenames, orphaned sidecars, " +
 			"case-insensitive path conflicts, library roots that differ only by case, " +
 			"invalid feeds, derived-data drift, header durations that disagree with the " +
-			"decoded audio, and the diagnostics recorded during scanning, analysis, and tag " +
+			"decoded audio, the copies and other encodings items hold beside their primary " +
+			"files, and the diagnostics recorded during scanning, analysis, and tag " +
 			"write-back. " +
 			"Corrupt-audio reporting comes in two halves. The free half reads what was already " +
 			"recorded: the scan's parse flags truncation for MP3, FLAC, AIFF, MP4, and WAV and " +

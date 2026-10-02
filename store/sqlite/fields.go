@@ -44,8 +44,24 @@ const (
 	albumIDByPIDSub        = "(SELECT albq.id FROM album albq WHERE albq.pid = ?)"
 	releaseGroupIDByPIDSub = "(SELECT rgq.id FROM release_group rgq WHERE rgq.pid = ?)"
 	podcastIDByPIDSub      = "(SELECT podq.id FROM podcast podq WHERE podq.pid = ?)"
-	libraryIDByPIDSub      = "(SELECT libq.id FROM library libq WHERE libq.pid = ?)"
 )
+
+// primaryLibraryFields reads the library field from an item's primary file (alias f in
+// itemJoins) and every other field as the wrapped map does (QueryItemsByPrimary).
+type primaryLibraryFields struct{ query.Fields }
+
+func (p primaryLibraryFields) Column(field string) (query.Column, bool) {
+	if field == "library" {
+		return query.Column{Expr: "f.library_id", ValueSub: "(SELECT libq.id FROM library libq WHERE libq.pid = ?)", Kind: query.KindInt}, true
+	}
+	return p.Fields.Column(field)
+}
+
+// libraryMemberSub selects the items with a file in the libraries the compiled condition
+// names, through every edge, so an item counts in its alternates' libraries as well as
+// its primary's.
+const libraryMemberSub = `SELECT lfe.item_id FROM library lfl
+	JOIN file lff ON lff.library_id = lfl.id JOIN item_file lfe ON lfe.file_id = lff.id WHERE lfl.pid`
 
 // itemFields whitelists the logical fields a query over items/tracks may
 // reference, mapping each to a column expression in the items SELECT (aliases:
@@ -95,18 +111,20 @@ const (
 //
 // The entity-handle fields filter by normalized-entity identity instead of display
 // text, so a facet drilldown can query by the bucket's EntityPID. There are nine, and
-// they split two ways: artist_pid, album_artist_pid, album_pid, release_group_pid,
-// podcast_pid, and library are scalar columns lowered on the value side, while
-// genre_pid, credit_artist_pid, and playlist_pid are set fields, over item_genre,
+// they split three ways: artist_pid, album_artist_pid, album_pid, release_group_pid,
+// and podcast_pid are scalar columns lowered on the value side; genre_pid,
+// credit_artist_pid, and playlist_pid are set fields, over item_genre,
 // item_contributor, and playlist_item, because those dimensions hold many rows per
-// item (the paragraphs below say why they stay set fields).
+// item (the paragraphs below say why they stay set fields); and library is a member
+// column (query.MemberColumn) over every file edge, since an item with a copy in
+// another library belongs to that library too.
 //
 // The artist exprs share itemArtistIDExpr/itemAlbumArtistIDExpr with the facet specs,
 // so a facet bucket's EntityPID and a pid filter can never disagree (a book matches by
 // its author, like the artist facet). album_pid and release_group_pid are track-only
-// (NULL for books/episodes), podcast_pid is episode-only, and library is the primary
-// file's library pid (NULL for a fileless item, so `library isMissing` matches
-// undownloaded episodes). release_group_pid reads the album joined by itemJoins, so
+// (NULL for books/episodes), podcast_pid is episode-only, and library matches the
+// library of any of the item's files (none for a fileless item, so `library
+// isMissing` matches undownloaded episodes). release_group_pid reads the album joined by itemJoins, so
 // it is additionally NULL for a track whose album carries no release group:
 // isMissing there covers all three of no album, no release group, and not a track.
 //
@@ -115,9 +133,10 @@ const (
 // of the comparison. Doing it the other way round, a per-row correlated subquery
 // projecting each item's pid, forced a full scan and one pid lookup per row.
 // Lowering resolves the pid once per query and lets the planner
-// use the id column's index where one exists: podcast_pid seeks episode_podcast,
-// album_pid seeks track_album_id, and library reaches file_library. Those three
-// narrow the outer loop, so they cost O(matches).
+// use the id column's index where one exists: podcast_pid seeks episode_podcast and
+// album_pid seeks track_album_id, so they narrow the outer loop and cost O(matches).
+// library gets the same from its member form: the subquery seeks file_library once and
+// the items are reached by rowid.
 //
 // artist_pid, album_artist_pid, and release_group_pid still scan playable_item; what
 // they gain from lowering is N pid lookups collapsing to one, not an indexed seek.
@@ -131,7 +150,7 @@ const (
 //
 // The indexed seeks above are `is` and `in` only. `in` seeks the same index `is` does
 // at every arity, including one, and an empty list matches nothing. notIn is an
-// anti-join and scans at any arity, on every one of the six, so a deny-list costs
+// anti-join and scans at any arity, on every one of these, so a deny-list costs
 // O(catalog) even on podcast_pid and library.
 //
 // in and notIn are not complements over an item with no handle at all. notIn keeps
@@ -247,7 +266,7 @@ var itemFields = query.FieldMap{
 	"album_pid":         {Expr: "t.album_id", ValueSub: albumIDByPIDSub, Kind: query.KindInt},
 	"release_group_pid": {Expr: "alb.release_group_id", ValueSub: releaseGroupIDByPIDSub, Kind: query.KindInt},
 	"podcast_pid":       {Expr: "ep.podcast_id", ValueSub: podcastIDByPIDSub, Kind: query.KindInt},
-	"library":           {Expr: "f.library_id", ValueSub: libraryIDByPIDSub, Kind: query.KindInt},
+	"library":           {Member: &query.MemberColumn{IDExpr: "pi.id", Sub: libraryMemberSub}},
 	"genre_pid": {Set: &query.SetColumn{
 		Sub:       "SELECT 1 FROM item_genre igq JOIN genre gq ON gq.id = igq.genre_id WHERE igq.item_id = pi.id",
 		ValueExpr: "gq.pid",

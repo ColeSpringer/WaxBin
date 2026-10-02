@@ -57,11 +57,12 @@ func TestActiveTrashForItemsMultiPartBook(t *testing.T) {
 		filePID model.PID
 		dest    string
 	}{{part2.FilePID, "/lib/t/p2.m4b"}, {part3.FilePID, "/lib/t/p3.m4b"}} {
-		tpid, err := st.TrashFile(ctx, model.TrashFileInput{
+		tpidres, err := st.TrashFile(ctx, model.TrashFileInput{
 			FilePID: p.filePID, TrashPath: []byte(p.dest), TrashDisplay: p.dest})
 		if err != nil {
 			t.Fatalf("TrashFile: %v", err)
 		}
+		tpid := tpidres.TrashPID
 		want = append(want, tpid)
 	}
 

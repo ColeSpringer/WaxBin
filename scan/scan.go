@@ -17,8 +17,10 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/colespringer/waxbin/art"
 	"github.com/colespringer/waxbin/decode"
@@ -34,6 +36,11 @@ type Scanner struct {
 	cat    model.Catalog
 	reader meta.Reader
 	log    *slog.Logger
+	now    func() time.Time // the heartbeat floor's clock; tests swap it
+	// The walk and the per-file stat, which tests swap to make a folder or a file
+	// unreadable without changing permissions.
+	walk func(root string, fn fs.WalkDirFunc) error
+	stat func(path string) (fs.FileInfo, error)
 }
 
 // New builds a scanner over a catalog and metadata reader.
@@ -44,7 +51,7 @@ func New(cat model.Catalog, reader meta.Reader, log *slog.Logger) *Scanner {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Scanner{cat: cat, reader: reader, log: log}
+	return &Scanner{cat: cat, reader: reader, log: log, now: time.Now, walk: filepath.WalkDir, stat: os.Stat}
 }
 
 // Request describes one scan.
@@ -74,46 +81,82 @@ type Request struct {
 	IgnoreLocks bool
 }
 
-// Result tallies what a scan did. Every field counts files, not items: the Items*
-// names say what cataloging a file did, not how many items came out of it.
+// Result tallies what a scan did. Every field but Missing counts files, not items: the
+// Items* names say what cataloging a file did, not how many items came out of it.
 //
 // The two diverge for a single-file album rip, where one .cue-carved file becomes N
 // virtual-track items and still reports ItemsCreated 1. Nothing here is an item
 // count; query the catalog for that.
 //
-// The outcome counters do not sum to AudioFiles, so do not present them as a
-// partition. Each audio file takes at most one of ItemsCreated/ItemsUpdated/
-// SidecarsUpdated on the full path, or Unchanged on the fast path. But Relinked is
-// independent and rides along with whichever of those applied, SidecarsUpdated also
-// fires alongside Unchanged when the fast path applies a sidecar edit, and a forced
-// rescan that finds nothing changed takes none of them.
+// The outcomes partition the files: each audio file takes exactly one of ItemsCreated,
+// ItemsUpdated, SidecarsUpdated, Copies, Unchanged and Errored, so
+//
+//	AudioFiles == ItemsCreated + ItemsUpdated + SidecarsUpdated + Copies + Unchanged + Errored
+//	FilesSeen  == AudioFiles + Skipped
+//
+// Relinked and Reread ride alongside whichever outcome a file took. Missing counts
+// items, Promoted and Dropped count files reconciliation and the scan's writes settled
+// outside the walk, and WalkErrors counts entries the walk could not read at all, which
+// are in none of the others.
 type Result struct {
 	FilesSeen int
-	// AudioFiles is every audio file cataloged, on either path.
+	// AudioFiles is every audio file the scan visited, an errored one included.
 	AudioFiles int
 	// ItemsCreated is audio files whose scan created at least one item (one rip that
 	// created twelve virtual tracks counts once).
 	ItemsCreated int
-	// ItemsUpdated is audio files whose content changed, or whose rescan re-derived a
-	// stored field over unchanged bytes (a forced rescan of a catalog-only edit).
+	// ItemsUpdated is audio files whose content changed, whose rescan re-derived a
+	// stored field over unchanged bytes (a forced rescan of a catalog-only edit), or
+	// that joined an existing item as a new file of it (a book's next part, a better
+	// encoding taking the item over).
 	ItemsUpdated int
-	// Relinked is audio files matched to an existing item by essence hash (a move or
-	// rename). Independent of the other outcomes rather than exclusive with them.
-	Relinked  int
-	Unchanged int // fast-pathed: size+mtime matched, no hashing/parsing/upsert
-	// SidecarsUpdated is audio files whose .lrc/.cue change was applied without the
-	// audio changing, on either path: the fast path applies a cheap sidecar edit in
-	// place, and the full path lands here when a re-read found only sidecars changed.
+	// SidecarsUpdated is audio files whose .lrc/.cue or cover change was applied
+	// without the audio changing.
 	SidecarsUpdated int
-	Missing         int // items reconciled to 'missing' (backing files gone from disk)
-	Skipped         int // non-audio files
-	Errored         int
+	// Copies is audio files that joined an existing item as alternates: the same audio
+	// as its primary, or another encoding of its recording, newly found or given up by
+	// another item or a part's place. A copy read again is Unchanged, or ItemsUpdated when
+	// its bytes changed, and one moved with its folder is Unchanged and Relinked.
+	Copies int
+	// Unchanged is audio files the scan left as they were: fast-pathed on a size and
+	// mtime match, or read in full and found the same.
+	Unchanged int
+	Errored   int
+	// Relinked is audio files matched to an existing file row by essence hash (a move
+	// or rename).
+	Relinked int
+	// Reread is cataloged audio files the scan read in full rather than fast-pathing:
+	// every one under Force, else those whose size or mtime moved or whose sidecar
+	// changed.
+	Reread  int
+	Missing int // items reconciled to 'missing' (backing files gone from disk)
+	// Promoted is alternate files given the place of a primary or part their item lost
+	// (a vanished file, or a primary re-keyed to another item), each re-read as the scan
+	// ends.
+	Promoted int
+	// Dropped is the rows of gone files reconciliation removed: a gone alternate, or a
+	// row no item held.
+	Dropped    int
+	Skipped    int // non-audio files
+	WalkErrors int // entries the walk could not read
+
+	// LibraryPID and LibraryName name the library a scan walked, its pid and display
+	// root; a total over several libraries leaves them empty.
+	LibraryPID  model.PID
+	LibraryName string
 }
 
-// Heartbeat is the progress callback invoked periodically during a scan.
+// Heartbeat is the progress callback invoked periodically during a scan. progress is the
+// fraction of the audio files to visit that the scan has visited, below 1 until the
+// closing call.
 type Heartbeat func(progress float64, msg string) error
 
-const heartbeatEvery = 50
+// A heartbeat is due every heartbeatEvery files seen, and sent only when heartbeatFloor
+// has passed since the last, since a server writes the job row on each one.
+const (
+	heartbeatEvery = 50
+	heartbeatFloor = 250 * time.Millisecond
+)
 
 // Scan walks the request's root (or sub-path) and persists every audio file.
 // Symlinks are not followed (no-follow + no loops). hb may be nil.
@@ -149,7 +192,7 @@ func (s *Scanner) Scan(ctx context.Context, req Request, hb Heartbeat) (*Result,
 		}
 	}
 
-	res := &Result{}
+	res := &Result{LibraryPID: req.Library.PID, LibraryName: req.Library.DisplayRoot}
 	sc := &scanCtx{cache: artCacheAt(root), force: req.Force, adopt: req.AdoptStampedPIDs, preserveLocks: !req.IgnoreLocks}
 
 	// Preload the scope's file index once, so the walk fast-paths an unchanged file
@@ -167,10 +210,27 @@ func (s *Scanner) Scan(ctx context.Context, req Request, hb Heartbeat) (*Result,
 	}
 	knownCount := len(sc.index)
 
-	walkErr := filepath.WalkDir(walkRoot, func(path string, d fs.DirEntry, err error) error {
+	// The progress denominator: the files the index expects, or on a first scan a count
+	// taken before cataloging starts.
+	expected := knownCount
+	if expected == 0 && hb != nil {
+		expected = countAudio(ctx, walkRoot)
+	}
+	lastBeat := s.now()
+	beat := func() error {
+		if t := s.now(); t.Sub(lastBeat) >= heartbeatFloor {
+			lastBeat = t
+			done := res.AudioFiles
+			return hb(float64(done)/float64(max(expected, done+1)), "scanned "+strconv.Itoa(res.FilesSeen)+" files")
+		}
+		return nil
+	}
+
+	walkErr := s.walk(walkRoot, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			s.log.Warn("walk entry", "path", path, "err", err)
-			res.Errored++
+			res.WalkErrors++
+			sc.unreadable = append(sc.unreadable, path)
 			return nil // keep going past unreadable entries
 		}
 		if ctx.Err() != nil {
@@ -192,18 +252,17 @@ func (s *Scanner) Scan(ctx context.Context, req Request, hb Heartbeat) (*Result,
 		}
 
 		res.FilesSeen++
-		if !isAudio(path) {
+		if isAudio(path) {
+			res.AudioFiles++
+			if err := s.scanAudioFile(ctx, req.Library, root, path, res, sc, ""); err != nil {
+				s.log.Warn("scanning file", "path", path, "err", err)
+				res.Errored++
+			}
+		} else {
 			res.Skipped++
-			return nil
-		}
-		if err := s.scanAudioFile(ctx, req.Library, root, path, res, sc, ""); err != nil {
-			s.log.Warn("scanning file", "path", path, "err", err)
-			res.Errored++
 		}
 		if hb != nil && res.FilesSeen%heartbeatEvery == 0 {
-			if err := hb(0, "scanned "+strconv.Itoa(res.FilesSeen)+" files"); err != nil {
-				return err
-			}
+			return beat()
 		}
 		return nil
 	})
@@ -215,7 +274,8 @@ func (s *Scanner) Scan(ctx context.Context, req Request, hb Heartbeat) (*Result,
 	// files are gone from disk. The survival gate refuses to act on a transiently
 	// unavailable root, so a momentary mount loss cannot mark the whole library
 	// missing.
-	s.reconcileMissing(ctx, walkRoot, sc.index, knownCount, req.ForceReconcile, res)
+	s.reconcileMissing(ctx, walkRoot, sc, knownCount, req.ForceReconcile, res)
+	s.rereadPromoted(ctx, sc, res)
 
 	if hb != nil {
 		_ = hb(1, "scanned "+strconv.Itoa(res.FilesSeen)+" files")
@@ -232,6 +292,9 @@ type scanCtx struct {
 	adopt         bool                        // pass WAXBIN_ITEM_PID hints to the store (rebuild)
 	preserveLocks bool                        // keep user-locked fields from being re-derived from tags
 	cache         *artCache
+	promoted      []model.PromotedFile  // alternates a write promoted, re-read as the scan ends
+	last          *model.ScanItemResult // the store's outcome for the file put last
+	unreadable    []string              // entries the walk could not read, whose files are not reconciled
 }
 
 // reconcileMissing marks the items behind the index's residual (unwalked) files as
@@ -241,7 +304,8 @@ type scanCtx struct {
 // known), and skips reconciliation entirely on the transient cases, logging a
 // degraded warning and keeping every row, so a momentary mount loss cannot wipe the
 // catalog.
-func (s *Scanner) reconcileMissing(ctx context.Context, walkRoot string, index map[string]model.ScopedFile, knownCount int, forceReconcile bool, res *Result) {
+func (s *Scanner) reconcileMissing(ctx context.Context, walkRoot string, sc *scanCtx, knownCount int, forceReconcile bool, res *Result) {
+	index := sc.index
 	if len(index) == 0 {
 		return // every known file was seen; nothing vanished
 	}
@@ -250,9 +314,12 @@ func (s *Scanner) reconcileMissing(ctx context.Context, walkRoot string, index m
 	}
 
 	info, statErr := os.Stat(walkRoot)
+	unread := sc.unreadable
 	switch {
 	case errors.Is(statErr, fs.ErrNotExist):
-		// The root is genuinely gone: a real full removal, reconcile everything.
+		// The root is genuinely gone: a real full removal, reconcile everything. The walk
+		// reported the root itself unreadable, which here is the removal.
+		unread = nil
 	case statErr != nil:
 		s.log.Warn("watch degraded: scan root unreadable, skipping deletion reconciliation",
 			"root", walkRoot, "err", statErr)
@@ -266,29 +333,90 @@ func (s *Scanner) reconcileMissing(ctx context.Context, walkRoot string, index m
 		// so bypass the floor. This is the recovery path for a genuine >50% deletion that the
 		// survival gate would otherwise never reconcile.
 	default:
-		// Root exists: require a floor. Seeing zero files, or fewer than half of what
-		// we previously knew, reads as a transient empty/unreadable mount rather than a
-		// real mass deletion, so keep the rows. A genuine large deletion is not
-		// reconciled here (the survival gate protects against a mount blip); the operator
-		// runs `scan --reconcile-deletions` to force it.
-		if res.AudioFiles == 0 || res.AudioFiles*2 < knownCount {
-			s.log.Warn("scan: skipping deletion reconciliation (survival gate): fewer than half of known files were seen; "+
+		// Root exists: require a floor. Reading no file, or fewer than half of what we
+		// previously knew, reads as a transient empty/unreadable mount rather than a real
+		// mass deletion, so keep the rows. A file the scan visited but could not read
+		// counts as unread. A genuine large deletion is not reconciled here (the survival
+		// gate protects against a mount blip); the operator runs `scan
+		// --reconcile-deletions` to force it.
+		if read := res.AudioFiles - res.Errored; read == 0 || read*2 < knownCount {
+			s.log.Warn("scan: skipping deletion reconciliation (survival gate): fewer than half of known files were read; "+
 				"rows kept in case the root is only transiently unavailable; run `scan --reconcile-deletions` to force",
-				"root", walkRoot, "seen", res.AudioFiles, "known", knownCount, "would_mark_missing", len(index))
+				"root", walkRoot, "read", read, "known", knownCount, "would_mark_missing", len(index))
 			return
 		}
 	}
 
 	pids := make([]model.PID, 0, len(index))
-	for _, e := range index {
+	for path, e := range index {
+		// A file under a folder the walk could not read was never looked for.
+		if slices.ContainsFunc(unread, func(dir string) bool { return pathx.UnderRoot(dir, path) }) {
+			continue
+		}
 		pids = append(pids, e.FilePID)
 	}
-	n, err := s.cat.MarkFilesMissing(ctx, pids)
+	if len(pids) == 0 {
+		return
+	}
+	mr, err := s.cat.MarkFilesMissing(ctx, pids)
 	if err != nil {
 		s.log.Warn("reconciling missing files", "root", walkRoot, "err", err)
 		return
 	}
-	res.Missing = n
+	res.Missing, res.Dropped = mr.Marked, mr.Dropped
+	sc.promoted = append(sc.promoted, mr.Promoted...)
+}
+
+// rereadPromoted re-reads the files the scan's writes promoted, counting them in the
+// result: each was counted on its own visit or belongs to another library, so they take
+// no outcome of their own.
+func (s *Scanner) rereadPromoted(ctx context.Context, sc *scanCtx, res *Result) {
+	res.Promoted += s.reread(ctx, sc.promoted, sc.preserveLocks)
+	sc.promoted = nil
+}
+
+// RereadPromoted re-reads files a write promoted in place of one their item lost, so each
+// item follows the tags of the file that now owns it, and returns how many distinct files
+// it was given. Each is read under its own library's root. A file no longer on disk is
+// skipped (a later action took it too), and a failure is logged; the promotion cleared
+// each file's stamp, so the next scan reads it in full either way.
+func (s *Scanner) RereadPromoted(ctx context.Context, promoted []model.PromotedFile) int {
+	return s.reread(ctx, promoted, true)
+}
+
+func (s *Scanner) reread(ctx context.Context, promoted []model.PromotedFile, preserveLocks bool) int {
+	seen := map[string]bool{}
+	var files []model.PromotedFile
+	for _, p := range promoted {
+		if !seen[string(p.Path)] {
+			seen[string(p.Path)] = true
+			files = append(files, p)
+		}
+	}
+	if len(files) == 0 || ctx.Err() != nil {
+		return len(files)
+	}
+	libs, err := s.cat.Libraries(ctx)
+	if err != nil {
+		s.log.Warn("re-reading promoted files", "err", err)
+		return len(files)
+	}
+	for _, p := range files {
+		path := string(p.Path)
+		i := slices.IndexFunc(libs, func(l *model.Library) bool { return l.ID == p.LibraryID })
+		if i < 0 {
+			continue
+		}
+		if _, err := s.stat(path); err != nil {
+			continue
+		}
+		lib := libs[i]
+		reread := &scanCtx{cache: artCacheAt(string(lib.Root)), preserveLocks: preserveLocks}
+		if err := s.scanAudioFile(ctx, lib, string(lib.Root), path, &Result{}, reread, ""); err != nil {
+			s.log.Warn("re-reading a promoted file", "path", path, "err", err)
+		}
+	}
+	return len(files)
 }
 
 // ScanFile catalogs a single audio file under its library, classifying its kind from
@@ -297,32 +425,37 @@ func (s *Scanner) reconcileMissing(ctx context.Context, walkRoot string, index m
 // identity, essence-relink, and change detection behave identically. A non-audio path
 // is a no-op.
 func (s *Scanner) ScanFile(ctx context.Context, lib *model.Library, path string) (*Result, error) {
-	return s.scanFileForced(ctx, lib, path, "")
+	res, _, err := s.scanFileForced(ctx, lib, path, "")
+	return res, err
 }
 
 // ScanFileAs catalogs a single audio file, forcing its media kind rather than
 // classifying it from tags. Use it when the caller already knows the kind, such as an
 // audiobook whose tags do not identify it as one. An empty kind classifies from tags.
-func (s *Scanner) ScanFileAs(ctx context.Context, lib *model.Library, path string, kind model.Kind) (*Result, error) {
+// It also returns the store's outcome for the file, nil for a path that is not audio.
+func (s *Scanner) ScanFileAs(ctx context.Context, lib *model.Library, path string, kind model.Kind) (*Result, *model.ScanItemResult, error) {
 	return s.scanFileForced(ctx, lib, path, kind)
 }
 
-func (s *Scanner) scanFileForced(ctx context.Context, lib *model.Library, path string, kind model.Kind) (*Result, error) {
+func (s *Scanner) scanFileForced(ctx context.Context, lib *model.Library, path string, kind model.Kind) (*Result, *model.ScanItemResult, error) {
 	if lib == nil {
-		return nil, waxerr.New(waxerr.CodeInvalid, "scan.ScanFile", "scan request has no library")
+		return nil, nil, waxerr.New(waxerr.CodeInvalid, "scan.ScanFile", "scan request has no library")
 	}
 	res := &Result{}
 	if !isAudio(path) {
-		return res, nil
+		return res, nil, nil
 	}
 	res.FilesSeen++
+	res.AudioFiles++
 	// A single-file scan has no preloaded index, so it always takes the full path.
 	// Preserve user-locked fields by default, like a full scan.
-	if err := s.scanAudioFile(ctx, lib, string(lib.Root), path, res, &scanCtx{cache: artCacheAt(string(lib.Root)), preserveLocks: true}, kind); err != nil {
+	sc := &scanCtx{cache: artCacheAt(string(lib.Root)), preserveLocks: true}
+	if err := s.scanAudioFile(ctx, lib, string(lib.Root), path, res, sc, kind); err != nil {
 		res.Errored++
-		return res, err
+		return res, nil, err
 	}
-	return res, nil
+	s.rereadPromoted(ctx, sc, res)
+	return res, sc.last, nil
 }
 
 // scanAudioFile hashes, reads tags, and persists one audio file. forceKind overrides
@@ -331,8 +464,13 @@ func (s *Scanner) scanFileForced(ctx context.Context, lib *model.Library, path s
 // takes the fast-path: no content/essence hashing, no tag parse, no upsert, just a
 // cheap sidecar re-check, and the file is dropped from the index (marking it seen).
 func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, path string, res *Result, sc *scanCtx, forceKind model.Kind) error {
-	info, err := os.Stat(path)
+	info, err := s.stat(path)
 	if err != nil {
+		// A file the walk listed but cannot stat for any reason but its absence is still
+		// there, so it is not reconciled as gone.
+		if sc.index != nil && !errors.Is(err, fs.ErrNotExist) {
+			delete(sc.index, path)
+		}
 		return waxerr.Wrap(waxerr.CodeIO, "scan.file", err)
 	}
 
@@ -350,16 +488,15 @@ func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, p
 		if known, ok := sc.index[path]; ok {
 			delete(sc.index, path)
 			if !sc.force && known.Size == info.Size() && known.MTimeNS == info.ModTime().UnixNano() {
-				// Size+mtime match. Reconcile sidecars: cheap changes (.lrc/.cue) apply in
-				// place; a change that needs the audio (a sidecar vanished or became
-				// unusable, so revert to embedded; a directory cover changed, so resolveCover
-				// precedence) returns needsFull and falls through to the full path.
+				// Size+mtime match. A sidecar change (a .lrc or .cue edited or gone, a
+				// directory cover changed) still needs the full path, which
+				// reconcileFastPathSidecars reports.
 				if !s.reconcileFastPathSidecars(path, known, sc.cache) {
-					res.AudioFiles++
 					res.Unchanged++
 					return nil
 				}
 			}
+			res.Reread++
 		}
 	}
 
@@ -589,21 +726,28 @@ func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, p
 	if err != nil {
 		return err
 	}
+	sc.promoted = append(sc.promoted, out.Promoted...)
+	sc.last = out
 
-	res.AudioFiles++
 	switch {
 	case out.ItemCreated:
 		res.ItemsCreated++
-	case out.ContentChanged, out.MetadataChanged:
+	case out.AttachedAsCopy && out.Joined:
+		res.Copies++
+	case out.AttachedAsCopy && out.ContentChanged:
+		res.ItemsUpdated++
+	case out.AttachedAsCopy:
+		res.Unchanged++
+	case out.ContentChanged, out.MetadataChanged, out.FileCreated:
 		res.ItemsUpdated++
 	case out.SidecarsChanged:
 		// A sidecar-only change (an edited .lrc, a new cover) reaches the full path but
 		// changes no audio bytes, so ItemCreated and ContentChanged are both false.
-		// Without this case every counter stays zero, the scan reports changed=false, and
-		// watch mode's downstream schedulers are silently skipped. It also keeps
-		// SidecarsUpdated meaning what its doc says instead of quietly becoming
-		// fast-path-only.
+		// Without this case the scan reports changed=false, and watch mode's downstream
+		// schedulers are silently skipped.
 		res.SidecarsUpdated++
+	default:
+		res.Unchanged++
 	}
 	if out.Relinked {
 		res.Relinked++
@@ -617,6 +761,31 @@ func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, p
 		}
 	}
 	return nil
+}
+
+// countAudio counts the audio files under root the walk would visit, by its own skip
+// rules, for a first scan's progress denominator.
+func countAudio(ctx context.Context, root string) int {
+	n := 0
+	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if d.IsDir() {
+			if d.Name() == model.TrashDirName {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if d.Type().IsRegular() && isAudio(path) {
+			n++
+		}
+		return nil
+	})
+	return n
 }
 
 // yearSuffix is the " (YYYY)" an album folder commonly ends with.

@@ -136,10 +136,11 @@ func TestTrashEntryNamesItsLibrary(t *testing.T) {
 	st, dbPath, lib := openStoreAt(t)
 	seedEnrichTrack(t, st, lib.ID)
 	filePID := model.PID(scalarQueryStr(t, roConn(t, dbPath), "SELECT pid FROM file"))
-	tpid, err := st.TrashFile(ctx, model.TrashFileInput{FilePID: filePID, TrashPath: []byte("/trash/a.mp3"), TrashDisplay: "/trash/a.mp3"})
+	tpidres, err := st.TrashFile(ctx, model.TrashFileInput{FilePID: filePID, TrashPath: []byte("/trash/a.mp3"), TrashDisplay: "/trash/a.mp3"})
 	if err != nil {
 		t.Fatalf("TrashFile: %v", err)
 	}
+	tpid := tpidres.TrashPID
 	e, err := st.ActiveTrashByPID(ctx, tpid)
 	if err != nil || e.LibraryPID != lib.PID {
 		t.Fatalf("entry = %+v (err %v), want library %s", e, err, lib.PID)

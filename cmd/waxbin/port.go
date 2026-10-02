@@ -254,8 +254,8 @@ func newRebuildCmd(g *globals) *cobra.Command {
 			if g.jsonOut {
 				return printJSON(cmd, scanResultJSON(res))
 			}
-			fmt.Fprintf(out(cmd), "Rebuilt catalog: %d audio files, %d items created, %d updated\n",
-				res.Total.AudioFiles, res.Total.ItemsCreated, res.Total.ItemsUpdated)
+			fmt.Fprintf(out(cmd), "Rebuilt catalog: %d audio files, %d items created, %d updated, %d copies\n",
+				res.Total.AudioFiles, res.Total.ItemsCreated, res.Total.ItemsUpdated, res.Total.Copies)
 			return nil
 		},
 	}
@@ -268,8 +268,10 @@ func scanResultJSON(res *waxbin.ScanResult) any {
 		AudioFiles   int    `json:"audioFiles"`
 		ItemsCreated int    `json:"itemsCreated"`
 		ItemsUpdated int    `json:"itemsUpdated"`
+		Copies       int    `json:"copies"`
 		Relinked     int    `json:"relinked"`
 		Errored      int    `json:"errored"`
+		WalkErrors   int    `json:"walkErrors"`
 	}{string(res.JobPID), res.Total.AudioFiles, res.Total.ItemsCreated,
-		res.Total.ItemsUpdated, res.Total.Relinked, res.Total.Errored}
+		res.Total.ItemsUpdated, res.Total.Copies, res.Total.Relinked, res.Total.Errored, res.Total.WalkErrors}
 }

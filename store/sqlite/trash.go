@@ -22,24 +22,27 @@ type detachedFile struct {
 	// linked item otherwise: a multi-file book's non-first parts are 'part' edges, so
 	// requiring 'primary' left every trashed book part with a blank item.
 	itemPID model.PID
+	// promoted lists the alternates that took the file's place.
+	promoted []model.PromotedFile
 }
 
 // TrashFile drops a file's catalog row (after the file has been moved into the
 // trash on disk) and records the undo journal row, all in one transaction. The
-// logical item is preserved, becoming archived when it loses its last file.
-// Returns the new trash entry's pid.
-func (s *Store) TrashFile(ctx context.Context, in model.TrashFileInput) (model.PID, error) {
+// logical item is preserved: an alternate takes the file's place when it has one
+// (see detachFileTx), and it becomes archived when it loses its last file.
+func (s *Store) TrashFile(ctx context.Context, in model.TrashFileInput) (*model.DetachResult, error) {
 	const op = "store.TrashFile"
-	tpid := model.NewPID()
+	res := &model.DetachResult{TrashPID: model.NewPID()}
 	err := s.writeTx(ctx, func(tx *sql.Tx) error {
 		d, err := detachFileTx(ctx, tx, in.FilePID, op)
 		if err != nil {
 			return err
 		}
+		res.Promoted = d.promoted
 		_, err = tx.ExecContext(ctx, `INSERT INTO trash
 			(pid, library_id, item_pid, orig_path, orig_display, trash_path, trash_display, reason, size, trashed_at)
 			VALUES (?,?,?,?,?,?,?,?,?,?)`,
-			string(tpid), d.libraryID, string(d.itemPID), d.path, d.display,
+			string(res.TrashPID), d.libraryID, string(d.itemPID), d.path, d.display,
 			in.TrashPath, in.TrashDisplay, reasonOr(in.Reason), d.size, nowNS())
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
@@ -47,30 +50,42 @@ func (s *Store) TrashFile(ctx context.Context, in model.TrashFileInput) (model.P
 		return nil
 	})
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	return tpid, nil
+	return res, nil
 }
 
 // DetachFile drops a file's catalog row without an undo journal (pruning or
 // explicit permanent deletion; the caller removes the file from disk). The
-// logical item is preserved and archived if it loses its last file.
-func (s *Store) DetachFile(ctx context.Context, filePID model.PID) error {
+// logical item is preserved like TrashFile's.
+func (s *Store) DetachFile(ctx context.Context, filePID model.PID) (*model.DetachResult, error) {
 	const op = "store.DetachFile"
-	return s.writeTx(ctx, func(tx *sql.Tx) error {
-		_, err := detachFileTx(ctx, tx, filePID, op)
-		return err
+	res := &model.DetachResult{}
+	err := s.writeTx(ctx, func(tx *sql.Tx) error {
+		d, err := detachFileTx(ctx, tx, filePID, op)
+		if err != nil {
+			return err
+		}
+		res.Promoted = d.promoted
+		return nil
 	})
+	if err != nil {
+		return nil, err
+	}
+	return res, nil
 }
 
-// detachFileTx deletes a file row (cascading its item_file edges and analysis
-// rows), archives every item left with no files, and writes the change_log rows.
-// It returns the detached file's metadata for the trash journal.
+// detachFileTx deletes a file row (cascading its item_file edges and analysis rows),
+// promotes an alternate into the place of a primary or part edge the file held
+// (promoteLostTx, then ensurePrimary), archives every item left with no files, and
+// writes the change_log rows. It returns the detached file's metadata for the trash
+// journal, and the promoted files for the caller to re-read.
 func detachFileTx(ctx context.Context, tx *sql.Tx, filePID model.PID, op string) (*detachedFile, error) {
 	var d detachedFile
+	var essence sql.NullString
 	err := tx.QueryRowContext(ctx,
-		"SELECT id, library_id, path, display_path, size FROM file WHERE pid = ?", string(filePID)).
-		Scan(&d.id, &d.libraryID, &d.path, &d.display, &d.size)
+		"SELECT id, library_id, path, display_path, size, essence_hash FROM file WHERE pid = ?", string(filePID)).
+		Scan(&d.id, &d.libraryID, &d.path, &d.display, &d.size, &essence)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, waxerr.New(waxerr.CodeNotFound, op, "no such file: "+string(filePID))
 	}
@@ -85,6 +100,10 @@ func detachFileTx(ctx context.Context, tx *sql.Tx, filePID model.PID, op string)
 	// one linked item; a single-file rip backing several virtual tracks has one per
 	// track, each of them primary, so that case already picks arbitrarily.
 	itemIDs, err := itemIDsForFile(ctx, tx, d.id)
+	if err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	lost, books, err := itemLostEdgesTx(ctx, tx, d.id, essence.String)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
@@ -118,38 +137,46 @@ func detachFileTx(ctx context.Context, tx *sql.Tx, filePID model.PID, op string)
 	}
 
 	now := nowNS()
-	if !affected.empty() {
-		if err := maintainRollupsTx(ctx, tx, affected, now); err != nil {
-			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
-		}
-	}
 	for _, iid := range itemIDs {
 		has, err := itemHasAnyFile(ctx, tx, iid)
 		if err != nil {
 			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
+		marked := false
+		if has {
+			// A surviving item promotes an alternate into the lost edge's place, or keeps a
+			// primary another way (ensurePrimary), is marked missing when no file of it is
+			// left on disk, and emits an item update because its files, duration or
+			// chapters changed (symmetric with the attach side).
+			p, err := promoteLostTx(ctx, tx, iid, books[iid], lost[iid])
+			if err != nil {
+				return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+			if p == nil {
+				if p, err = ensurePrimary(ctx, tx, iid); err != nil {
+					return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+				}
+			}
+			if p != nil {
+				d.promoted = append(d.promoted, *p)
+			}
+			if marked, err = markUnreachableMissingTx(ctx, tx, iid, nil); err != nil {
+				return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+		}
 		// A book's denormalized total is derived from the parts it currently has, so it
 		// is refreshed whether any survived or not. An archived book has no parts and
-		// its total is 0, the same shedding the entity rollups above do: left stale it
-		// keeps feeding the item view's duration, the duration_ms filter, and its
-		// series' running time with time the book no longer has.
+		// its total is 0, the same shedding the entity rollups do: left stale it keeps
+		// feeding the item view's duration, the duration_ms filter, and its series'
+		// running time with time the book no longer has.
 		if err := refreshBookDuration(ctx, tx, iid); err != nil {
 			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		if has {
-			// A surviving multi-file book that lost a part must promote a primary (or
-			// it reads back headless) and emit an item update because its part
-			// count/duration/chapters changed, so a change_log consumer must refresh it
-			// (symmetric with the attach side). Its rollups were already recomputed above.
-			if err := ensurePrimary(ctx, tx, iid); err != nil {
-				return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
-			}
-			var pid model.PID
-			if err := tx.QueryRowContext(ctx, "SELECT pid FROM playable_item WHERE id=?", iid).Scan(&pid); err != nil {
-				return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
-			}
-			if err := appendChange(ctx, tx, "item", pid, model.OpUpdate); err != nil {
-				return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+			if !marked {
+				if err := appendItemUpdateTx(ctx, tx, iid); err != nil {
+					return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+				}
 			}
 			continue
 		}
@@ -163,6 +190,12 @@ func detachFileTx(ctx context.Context, tx *sql.Tx, filePID model.PID, op string)
 			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		if err := appendChange(ctx, tx, "item", pid, model.OpUpdate); err != nil {
+			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+	}
+	// Recomputed after the promotions, which change which file an item's duration reads.
+	if !affected.empty() {
+		if err := maintainRollupsTx(ctx, tx, affected, now); err != nil {
 			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 	}

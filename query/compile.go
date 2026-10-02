@@ -36,6 +36,10 @@ type Column struct {
 	// a correlated EXISTS subquery (see SetColumn) rather than a scalar comparison.
 	// Expr and Kind are ignored when Set is non-nil.
 	Set *SetColumn
+	// Member, when non-nil, marks a column an item matches through any of several rows,
+	// compiled to an id membership test the planner drives off the value's index (see
+	// MemberColumn). Expr and Kind are ignored when Member is non-nil.
+	Member *MemberColumn
 	// ValueSub lowers a bound value before comparison: the compiler emits it in
 	// place of the value's ? placeholder, so an identity handle compares an
 	// internal id column against a subquery resolving the caller's pid, instead of
@@ -58,6 +62,23 @@ type Column struct {
 	// result, while isNot names a single subject and keeps its own reading. Prefer it
 	// to Not{Cond{field, in, ...}}, which collapses to zero rows on one stale pid.
 	ValueSub string
+}
+
+// MemberColumn describes a field an item matches through any of several rows keyed back
+// to it, where an index can answer from the value side: an item's libraries, through
+// every file it has. Where SetColumn's correlated EXISTS visits every item, a predicate
+// here compiles to "<IDExpr> IN (<Sub> <cond>)", Sub being a SELECT of item ids ending in
+// its WHERE's value expression, so the subquery runs once off the value's index and the
+// items are reached by id. Like Expr, both are emitted verbatim and must never contain
+// caller-supplied text, and Sub's own placeholders are not supported.
+//
+// It takes the operators a lowered column takes (see Column.ValueSub), with the set
+// fields' reading: isNot and notIn keep an item with no row of that value, a deny-list,
+// isPresent is an item with any row and isMissing one with none. Only those two
+// negations scan, as a deny-list does on any field.
+type MemberColumn struct {
+	IDExpr string // the outer item id, e.g. "pi.id"
+	Sub    string // e.g. "SELECT e.item_id FROM item_file e JOIN ... WHERE l.pid"
 }
 
 // SetColumn describes a set-membership field: one whose value lives in a related
@@ -169,7 +190,7 @@ func CompileAt(q Query, fields Fields, now time.Time) (*Compiled, error) {
 				return nil, waxerr.New(waxerr.CodeInvalid, "query.Compile",
 					fmt.Sprintf("unknown sort field %q", s.Field))
 			}
-			if col.Set != nil {
+			if col.Set != nil || col.Member != nil {
 				return nil, waxerr.New(waxerr.CodeInvalid, "query.Compile",
 					fmt.Sprintf("cannot sort by a set field %q", s.Field))
 			}
@@ -312,6 +333,9 @@ func compileCond(c Cond, fields Fields, sb *strings.Builder, args *[]any, nu *bo
 	// (see SetColumn), so it lives in its own helper.
 	if col.Set != nil {
 		return compileSetCond(c, col.Set, sb, args)
+	}
+	if col.Member != nil {
+		return compileMemberCond(c, col.Member, sb, args)
 	}
 	// A value-lowered column (an identity handle) compares an internal id against a
 	// subquery resolving the caller's pid, and accepts only the operators that
@@ -551,6 +575,31 @@ func compileSetCond(c Cond, set *SetColumn, sb *strings.Builder, args *[]any) er
 	default:
 		return waxerr.New(waxerr.CodeInvalid, "query.Compile",
 			fmt.Sprintf("operator %q not supported on a set field", c.Op))
+	}
+	return nil
+}
+
+// compileMemberCond compiles a condition on a MemberColumn.
+func compileMemberCond(c Cond, m *MemberColumn, sb *strings.Builder, args *[]any) error {
+	in := func(not bool, cond string) {
+		op := " IN ("
+		if not {
+			op = " NOT IN ("
+		}
+		sb.WriteString(m.IDExpr + op + m.Sub + cond + ")")
+	}
+	switch c.Op {
+	case OpIs, OpIsNot:
+		in(c.Op == OpIsNot, " = ?")
+		*args = append(*args, c.Value)
+	case OpIn, OpNotIn:
+		in(c.Op == OpNotIn, " IN "+placeholderList(len(c.Values)))
+		*args = append(*args, c.Values...)
+	case OpIsPresent, OpIsMissing:
+		in(c.Op == OpIsMissing, " IS NOT NULL")
+	default:
+		return waxerr.New(waxerr.CodeInvalid, "query.Compile",
+			fmt.Sprintf("operator %q not supported on field %q", c.Op, c.Field))
 	}
 	return nil
 }

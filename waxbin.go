@@ -1075,7 +1075,8 @@ func (e *watchEngine) Rescan(ctx context.Context, libPID model.PID, subPath stri
 	// A live .lrc/.cue edit mutates the catalog without touching the audio bytes, so it
 	// bumps SidecarsUpdated but not ItemsUpdated. Include it, or a sidecar-only change
 	// reports changed=false and every downstream scheduler is silently skipped.
-	changed := t.ItemsCreated > 0 || t.ItemsUpdated > 0 || t.Relinked > 0 || t.Missing > 0 || t.SidecarsUpdated > 0
+	changed := t.ItemsCreated > 0 || t.ItemsUpdated > 0 || t.Relinked > 0 || t.Missing > 0 || t.SidecarsUpdated > 0 ||
+		t.Copies > 0 || t.Promoted > 0 || t.Dropped > 0
 	return changed, nil
 }
 
@@ -1269,7 +1270,8 @@ const (
 // FindAltEncodings returns other catalog items that are alt encodings of the
 // given item: the inverted index proposes candidates (shared terms within the
 // duration bucket), then each is verified by full-fingerprint similarity. The
-// item must already be analyzed; an unanalyzed item yields no matches.
+// item must already be analyzed; an unanalyzed item yields no matches. A candidate
+// naming no item, or this item (its own alternate encoding), is left out.
 func (l *Library) FindAltEncodings(ctx context.Context, itemPID model.PID) ([]AltEncoding, error) {
 	item, err := l.store.ItemByPID(ctx, itemPID)
 	if err != nil {
@@ -1295,6 +1297,9 @@ func (l *Library) FindAltEncodings(ctx context.Context, itemPID model.PID) ([]Al
 	qSub := fingerprint.Unpack(queryFP)
 	var out []AltEncoding
 	for _, c := range candidates {
+		if c.ItemPID == "" || c.ItemPID == itemPID {
+			continue
+		}
 		// The candidate query guarantees c shares the query file's fingerprint
 		// algorithm, so dispatching on the candidate's algo is safe and picks the
 		// matching (pure-Go vs Chromaprint) similarity function.
@@ -1340,10 +1345,11 @@ func (l *Library) PeaksForItem(ctx context.Context, itemPID model.PID) ([]model.
 	return l.store.LoadPeaksForItem(ctx, itemPID)
 }
 
-// ItemFiles returns every file backing an item in reading order: one row for a track or
-// single-file book, one per part for a multi-file book. Each ref carries the file's pid,
-// path, part position, and edge role, so a consumer can address a specific part and tell
-// which one the primary-file reads answered for.
+// ItemFiles returns every file backing an item: its parts in reading order (one for a
+// track or single-file book, one per part for a multi-file book), then its alternates,
+// the copies and other encodings it holds. Each ref carries the file's pid, path, part
+// position, and edge role, so a consumer can address a specific part, tell which one the
+// primary-file reads answered for, and pass over the alternates.
 func (l *Library) ItemFiles(ctx context.Context, itemPID model.PID) ([]model.ItemFileRef, error) {
 	return l.store.ItemFiles(ctx, itemPID)
 }
@@ -1796,6 +1802,9 @@ type WriteBackError struct {
 	ItemPID  model.PID
 	Edits    map[string]string
 	Failures []WriteBackFailure
+	// landed holds the files whose write went through, a lost value or a refused field
+	// beside it included, since a failure is reported per value as well as per file.
+	landed map[model.PID]bool
 }
 
 // noFiles records that the item had no backing file to write to, and returns the error
@@ -1934,6 +1943,10 @@ func (l *Library) writeBackFiles(ctx context.Context, op string, origin model.Di
 			}
 			continue
 		}
+		if wbErr.landed == nil {
+			wbErr.landed = map[model.PID]bool{}
+		}
+		wbErr.landed[ref.FilePID] = true
 		// The write landed, so the fields it carried are no longer owed to this file. A
 		// value the format could not store is reported below as lost instead.
 		if err := l.store.SettleTagWriteOwed(ctx, ref.FilePID, settles); err != nil {
@@ -2169,12 +2182,33 @@ func (l *Library) writeBackItemEdits(ctx context.Context, op string, itemPID mod
 		return err
 	}
 	// A sort tag the catalog keeps as a custom tag is gone from the file, so it goes from
-	// the catalog too, rather than waiting for a forced rescan to notice.
-	if len(wbErr.Failures) == 0 {
-		for _, key := range customCleared {
-			if err := l.store.ForgetItemTag(ctx, itemPID, key); err != nil {
-				l.log.Warn("cleared sort tag", "item", itemPID, "key", key, "err", err)
+	// the catalog too, rather than waiting for a forced rescan to notice. The catalog
+	// follows the files whose tags own the item, its primary and parts: once the clear
+	// landed on all of them the tag goes, and an alternate that refused it owes the clear;
+	// while one of them holds it, the catalog keeps it and each file the clear reached owes
+	// it back.
+	if len(customCleared) > 0 {
+		failed := func(ref model.ItemFileRef) bool { return !wbErr.landed[ref.FilePID] }
+		ownersLanded := !slices.ContainsFunc(files, func(ref model.ItemFileRef) bool { return ref.Role != "alternate" && failed(ref) })
+		var owing []model.PID
+		for _, ref := range files {
+			if failed(ref) == ownersLanded {
+				owing = append(owing, ref.FilePID)
 			}
+		}
+		if ownersLanded {
+			for _, key := range customCleared {
+				if err := l.store.ForgetItemTag(ctx, itemPID, key); err != nil {
+					l.log.Warn("cleared sort tag", "item", itemPID, "key", key, "err", err)
+				}
+			}
+		}
+		keys := make([]string, len(customCleared))
+		for i, key := range customCleared {
+			keys[i] = model.TagLockField(key)
+		}
+		if err := l.store.NoteTagWriteOwed(ctx, owing, keys); err != nil {
+			l.log.Warn("noting cleared sort tags owed", "item", itemPID, "err", err)
 		}
 	}
 	// A book's title and author are its identity anchor, unlike a track's essence, so
@@ -2495,8 +2529,9 @@ func (l *Library) PlanOrganize(ctx context.Context, q query.Query, opts Organize
 		return nil, err
 	}
 	// Organize acts on catalog rows; a per-user filter in q resolves against the
-	// default user.
-	items, err := l.store.QueryItems(ctx, q, "")
+	// default user, and the library field against each item's primary, the file organize
+	// moves.
+	items, err := l.store.QueryItemsByPrimary(ctx, q, "")
 	if err != nil {
 		return nil, err
 	}
@@ -2642,8 +2677,9 @@ func (l *Library) PlanDelete(ctx context.Context, q query.Query, mode model.Dele
 		return nil, err
 	}
 	// Delete acts on catalog rows; a per-user filter in q resolves against the
-	// default user.
-	matched, err := l.store.QueryItems(ctx, q, "")
+	// default user, and the library field against each item's primary, so a sweep of
+	// one library never deletes an item another library owns.
+	matched, err := l.store.QueryItemsByPrimary(ctx, q, "")
 	if err != nil {
 		return nil, err
 	}
@@ -2698,6 +2734,43 @@ func (l *Library) PlanDeletePIDs(ctx context.Context, pids []model.PID, mode mod
 	return l.trasher.Plan(ctx, libs, items, mode)
 }
 
+// PlanDeleteFiles computes a deletion plan for single files by pid, the `rm --file`
+// path. An alternate goes alone, and a primary or part gives its place to an alternate
+// when its item has one, so the item is archived only when the file was its last. A
+// file in the podcast library or a read-only one is refused, as PlanDeletePIDs refuses
+// such an item.
+func (l *Library) PlanDeleteFiles(ctx context.Context, filePIDs []model.PID, mode model.DeleteMode) (*trash.Plan, error) {
+	const op = "Library.PlanDeleteFiles"
+	libs, err := l.store.Libraries(ctx)
+	if err != nil {
+		return nil, err
+	}
+	targets := make([]trash.FileTarget, 0, len(filePIDs))
+	for _, pid := range filePIDs {
+		item, ref, err := l.store.FileOwner(ctx, pid)
+		if err != nil {
+			return nil, err
+		}
+		if inPodcastLibrary(libs, ref.DisplayPath) {
+			return nil, waxerr.New(waxerr.CodeInvalid, op,
+				"cannot delete a podcast episode's file: "+string(pid)+
+					"; use `podcast unfetch` to reclaim its bytes and keep it re-fetchable")
+		}
+		if lib := readOnlyLibraryAt(libs, ref.Path); lib != nil {
+			return nil, waxerr.New(waxerr.CodeLocked, op,
+				"cannot delete "+string(pid)+": library "+string(lib.PID)+" is read-only")
+		}
+		targets = append(targets, trash.FileTarget{ItemPID: item, File: ref})
+	}
+	return l.trasher.PlanFiles(libs, targets, mode)
+}
+
+// rereadPromoted re-reads each promoted file still at its path, so its item follows the
+// tags of the file that now owns it (scan.Scanner.RereadPromoted).
+func (l *Library) rereadPromoted(ctx context.Context, promoted []model.PromotedFile) {
+	l.scanner.RereadPromoted(ctx, promoted)
+}
+
 // ApplyDelete executes a deletion plan under a "delete"-scoped job. An action in a
 // library flagged read-only since the plan was built is skipped.
 func (l *Library) ApplyDelete(ctx context.Context, plan *trash.Plan) (*trash.Report, error) {
@@ -2716,7 +2789,11 @@ func (l *Library) ApplyDelete(ctx context.Context, plan *trash.Plan) (*trash.Rep
 		}
 		r, err := l.trasher.Execute(ctx, &live)
 		rep = r
-		return err
+		if err != nil {
+			return err
+		}
+		l.rereadPromoted(ctx, r.Promoted)
+		return nil
 	})
 	return rep, err
 }
@@ -2838,20 +2915,22 @@ type MarkMissingOptions struct {
 // happened, refusals included: files-present means the bytes really are on disk and the
 // caller's failure is something else.
 //
-// It verifies before it writes. Every backing file is stat'ed and the item is marked
-// only when none is on disk; a stat failing with anything other than "does not exist"
-// refuses the call with CodeIO rather than answering from a partial view. Once a file
-// comes back absent the owning library root is stat'ed too, and an absent, unreadable,
-// or non-directory root is a dropped mount rather than a deletion, so it is refused.
-// The gate is on the root and not each file's parent directory because the ordinary
-// genuine deletion is a user removing an album folder, which a parent gate would refuse.
-// A file under no registered root has no mount to check.
+// It verifies before it writes. Every backing file is stat'ed, and a file that comes back
+// absent counts as gone only when its library root is a readable directory: an absent,
+// unreadable, or non-directory root is a dropped mount rather than a deletion. The gate
+// is on the root and not each file's parent directory because the ordinary genuine
+// deletion is a user removing an album folder, which a parent gate would refuse. A file
+// under no registered root has no mount to check. An item that keeps a file on disk is
+// settled (promoted or dropped, see settleGoneFiles) over its gone files only, leaving one
+// it cannot confirm gone alone. An item with no file on disk is marked only when every
+// file is confirmed gone; a stat failing with anything other than "does not exist", or a
+// dropped mount, refuses the call with CodeIO rather than answering from a partial view.
 //
 // An item with no file rows has nothing to stat and is answered from state alone. Only
 // the named item is marked: siblings sharing one file (a rip carved into virtual tracks)
 // keep their state, so a caller repairing such a rip passes every pid. It takes no job
-// lease, since it only stats and writes one transaction; racing a scan is benign,
-// because the last commit wins and missing is recoverable by the next scan.
+// lease. Racing a scan is benign: the last commit wins, missing is recoverable by the
+// next scan, and a promoted file the re-read here misses is read in full by that scan.
 func (l *Library) MarkMissing(ctx context.Context, itemPID model.PID, opts MarkMissingOptions) (model.MarkMissingOutcome, error) {
 	const op = "Library.MarkMissing"
 	if !opts.Force {
@@ -2859,7 +2938,9 @@ func (l *Library) MarkMissing(ctx context.Context, itemPID model.PID, opts MarkM
 		if err != nil {
 			return "", err
 		}
-		present, absent := false, false
+		present := false
+		var absent []model.ItemFileRef
+		var unsure error
 		for _, ref := range files {
 			// pathx.Long or a Windows long path reports a present file as absent, which
 			// here would flip a perfectly present item to missing.
@@ -2867,47 +2948,91 @@ func (l *Library) MarkMissing(ctx context.Context, itemPID model.PID, opts MarkM
 			case err == nil:
 				present = true
 			case errors.Is(err, fs.ErrNotExist):
-				absent = true
+				absent = append(absent, ref)
 			default:
-				return "", waxerr.Wrap(waxerr.CodeIO, op, err)
+				unsure = waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
+		}
+		gone, unmounted, err := l.goneUnderMountedRoots(ctx, absent)
+		if err != nil {
+			return "", err
 		}
 		if present {
-			return model.OutcomeFilesPresent, nil
+			return l.settleGoneFiles(ctx, itemPID, gone)
 		}
-		if absent {
-			if err := l.checkRootsMounted(ctx, files, op); err != nil {
-				return "", err
-			}
+		if unsure != nil {
+			return "", unsure
+		}
+		if unmounted != "" {
+			return "", waxerr.New(waxerr.CodeIO, op, "library root "+unmounted+
+				" is not a readable directory, so its files cannot be confirmed gone;"+
+				" remount it, or narrow a rescan with --sub-path, or pass force to record it anyway")
 		}
 	}
 	return l.store.MarkItemMissing(ctx, itemPID)
 }
 
-// checkRootsMounted refuses when a library root holding one of these files is not a
-// readable directory, which is a dropped mount rather than a deletion. The roots are
-// listed once per call and each distinct one is stat'ed once, however many parts sit
-// under it.
-func (l *Library) checkRootsMounted(ctx context.Context, files []model.ItemFileRef, op string) error {
+// settleGoneFiles answers mark-missing for an item that keeps a file on disk: its gone
+// alternates lose their rows and an alternate takes a gone primary's place, re-read so
+// the item follows its tags. Nothing gone, or a gone book part with no copy to stand in,
+// is files-present.
+func (l *Library) settleGoneFiles(ctx context.Context, itemPID model.PID, gone []model.ItemFileRef) (model.MarkMissingOutcome, error) {
+	if len(gone) == 0 {
+		return model.OutcomeFilesPresent, nil
+	}
+	pids := make([]model.PID, len(gone))
+	for i, ref := range gone {
+		pids[i] = ref.FilePID
+	}
+	res, err := l.store.MarkItemFilesMissing(ctx, itemPID, pids)
+	if err != nil {
+		return "", err
+	}
+	switch {
+	case len(res.Promoted) > 0:
+		l.rereadPromoted(ctx, res.Promoted)
+		return model.OutcomePromoted, nil
+	case res.Dropped > 0:
+		return model.OutcomeDropped, nil
+	}
+	return model.OutcomeFilesPresent, nil
+}
+
+// goneUnderMountedRoots returns the absent files whose library root is a readable
+// directory, which are gone, and the display root of the first that is not (a dropped
+// mount rather than a deletion), empty when there is none. The roots are listed once per
+// call and each distinct one is stat'ed once, however many parts sit under it.
+func (l *Library) goneUnderMountedRoots(ctx context.Context, absent []model.ItemFileRef) ([]model.ItemFileRef, string, error) {
+	if len(absent) == 0 {
+		return nil, "", nil
+	}
 	libs, err := l.store.Libraries(ctx)
 	if err != nil {
-		return err
+		return nil, "", err
 	}
-	checked := map[model.PID]bool{}
-	for _, ref := range files {
+	var gone []model.ItemFileRef
+	var unmounted string
+	mounted := map[model.PID]bool{}
+	for _, ref := range absent {
 		lib := libraryForRawPath(libs, ref.Path)
-		if lib == nil || checked[lib.PID] {
+		if lib == nil {
+			gone = append(gone, ref)
 			continue
 		}
-		checked[lib.PID] = true
-		info, err := os.Stat(pathx.Long(rawRoot(lib)))
-		if err != nil || !info.IsDir() {
-			return waxerr.New(waxerr.CodeIO, op, "library root "+lib.DisplayRoot+
-				" is not a readable directory, so its files cannot be confirmed gone;"+
-				" remount it, or narrow a rescan with --sub-path, or pass force to record it anyway")
+		ok, seen := mounted[lib.PID]
+		if !seen {
+			info, err := os.Stat(pathx.Long(rawRoot(lib)))
+			ok = err == nil && info.IsDir()
+			mounted[lib.PID] = ok
+		}
+		switch {
+		case ok:
+			gone = append(gone, ref)
+		case unmounted == "":
+			unmounted = lib.DisplayRoot
 		}
 	}
-	return nil
+	return gone, unmounted, nil
 }
 
 // libraryForRawPath returns the library whose root contains a raw path, or nil. It
@@ -3235,7 +3360,9 @@ func firstMixedOrFirst(managed []*model.Library) *model.Library {
 }
 
 // ApplyImport executes an import plan under an "import"-scoped job. A file bound for
-// a library flagged read-only since the plan was built is quarantined in place.
+// a library flagged read-only since the plan was built is quarantined in place, and
+// under DupSkip a file whose audio reached the catalog since the plan was built (another
+// import applied first) is skipped as a duplicate.
 func (l *Library) ApplyImport(ctx context.Context, plan *inbox.Plan) (*inbox.Report, error) {
 	var rep *inbox.Report
 	_, err := l.jobs.Run(ctx, jobs.Spec{Kind: "import", Scope: fsMutateScope}, func(ctx context.Context, h *jobs.Handle) error {
@@ -3254,6 +3381,14 @@ func (l *Library) ApplyImport(ctx context.Context, plan *inbox.Plan) (*inbox.Rep
 			}
 			if a.Outcome == inbox.OutcomeImport && target != nil && readOnly[target.ID] {
 				a.Outcome, a.Reason = inbox.OutcomeQuarantine, readOnlySinceThePlan
+			}
+			if a.Outcome == inbox.OutcomeImport && plan.DupPolicy == model.DupSkip && a.Essence != "" {
+				switch _, err := l.store.FileByEssence(ctx, a.Essence); {
+				case err == nil:
+					a.Outcome, a.Reason = inbox.OutcomeDuplicate, "audio reached the catalog since the plan"
+				case !waxerr.Is(err, waxerr.CodeNotFound):
+					return err
+				}
 			}
 		}
 		quarantineReadOnlySources(libs, &live)
@@ -3321,6 +3456,12 @@ type AcquiredResult struct {
 	// file was skipped or imported is the action's Outcome.
 	AlreadyPresent    bool
 	AlreadyPresentPID model.PID
+	// AttachedTo names the item a DupAllow import going ahead joins as an alternate: the
+	// one already holding this audio, which keeps its metadata and takes no acquisition
+	// from the file. Empty when nothing would be attached. A file whose tags give it
+	// another identity (a different recording id) starts an item of its own instead, so
+	// the applied report's Files say what happened.
+	AttachedTo model.PID
 }
 
 // ImportAcquired routes an acquired or manual file by kind. Tracks and books go through
@@ -3375,6 +3516,9 @@ func (l *Library) importAcquiredMedia(ctx context.Context, file AcquiredFile, ki
 	if len(plan.Actions) > 0 && plan.Actions[0].Essence != "" {
 		if item, _, err := l.ResolveRef(ctx, model.PortableRef{Essence: plan.Actions[0].Essence}); err == nil && item != nil {
 			res.AlreadyPresent, res.AlreadyPresentPID = true, item.PID
+			if plan.Actions[0].Outcome == inbox.OutcomeImport && item.Kind == kind {
+				res.AttachedTo = item.PID
+			}
 		}
 	}
 	return res, nil
@@ -3971,4 +4115,9 @@ func addResult(dst *scan.Result, src *scan.Result) {
 	dst.Missing += src.Missing
 	dst.Skipped += src.Skipped
 	dst.Errored += src.Errored
+	dst.Copies += src.Copies
+	dst.Reread += src.Reread
+	dst.Promoted += src.Promoted
+	dst.Dropped += src.Dropped
+	dst.WalkErrors += src.WalkErrors
 }

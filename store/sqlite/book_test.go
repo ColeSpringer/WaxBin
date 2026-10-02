@@ -2,7 +2,10 @@ package sqlite
 
 import (
 	"context"
+	"database/sql"
+	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/colespringer/waxbin/identity"
@@ -615,7 +618,7 @@ func TestArchivedBookShedsItsDuration(t *testing.T) {
 	})
 
 	// One part gone: the book survives, and its total is the surviving part alone.
-	if err := st.DetachFile(ctx, r1.FilePID); err != nil {
+	if _, err := st.DetachFile(ctx, r1.FilePID); err != nil {
 		t.Fatalf("detach p1: %v", err)
 	}
 	d, err := st.BookByPID(ctx, r1.ItemPID)
@@ -627,7 +630,7 @@ func TestArchivedBookShedsItsDuration(t *testing.T) {
 	}
 
 	// Last part gone: the book is archived with no parts, so its total is 0.
-	if err := st.DetachFile(ctx, r2.FilePID); err != nil {
+	if _, err := st.DetachFile(ctx, r2.FilePID); err != nil {
 		t.Fatalf("detach p2: %v", err)
 	}
 	if s := itemState(t, st, r1.ItemPID); s != string(model.StateArchived) {
@@ -837,7 +840,7 @@ func TestTrashDetachEmitsItemUpdate(t *testing.T) {
 	seq, _ := st.LatestChangeSeq(ctx)
 
 	// Detaching a part of a surviving book must emit an item update (symmetric with attach).
-	if err := st.DetachFile(ctx, p2pid); err != nil {
+	if _, err := st.DetachFile(ctx, p2pid); err != nil {
 		t.Fatalf("DetachFile: %v", err)
 	}
 	changes, _ := st.ChangesSince(ctx, seq)
@@ -914,5 +917,477 @@ func TestEqualStartChaptersCollapse(t *testing.T) {
 	}
 	if err := st.SetItemChapters(ctx, r.ItemPID, chs, model.LockUnchanged, false); err != nil {
 		t.Errorf("round trip through SetItemChapters: %v", err)
+	}
+}
+
+// TestBookPartCopyIsAnAlternate: a byte-identical copy of a book's part attaches to the
+// book as an alternate of that part, so the parts, the chapter timeline and the running
+// time read as before, and the copy is diagnosed against the part it copies.
+func TestBookPartCopyIsAnAlternate(t *testing.T) {
+	st, _ := entityFixture(t)
+	ctx := context.Background()
+	root := t.TempDir()
+	lib, err := st.EnsureLibrary(ctx, &model.Library{Root: []byte(root), DisplayRoot: root, Mode: model.ModeInPlace})
+	if err != nil {
+		t.Fatal(err)
+	}
+	part := func(path, essence, content string, pos int, dur int64, chapter string) bookSpec {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return bookSpec{path: path, essence: essence, content: content, title: "Mistborn",
+			author: "Brandon Sanderson", asin: "B0010", position: pos, durationMS: dur,
+			chapters: []model.Chapter{{Position: 0, Title: chapter}}}
+	}
+	p1, p2, pc := filepath.Join(root, "book", "part1.mp3"), filepath.Join(root, "book", "part2.mp3"), filepath.Join(root, "backup", "part2.mp3")
+	r1 := putBook(t, st, lib.ID, part(p1, "mb1", "mc1", 1, 1000, "Part 1"))
+	r2 := putBook(t, st, lib.ID, part(p2, "mb2", "mc2", 2, 2000, "Part 2"))
+	seq, err := st.LatestChangeSeq(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rc := putBook(t, st, lib.ID, part(pc, "mb2", "mc2-copy", 2, 2000, "Part 2"))
+	if !rc.AttachedAsCopy || rc.ItemPID != r1.ItemPID || rc.ItemCreated {
+		t.Fatalf("copy of part 2 = %+v, want it attached to %s", rc, r1.ItemPID)
+	}
+	d, err := st.BookByPID(ctx, r1.ItemPID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(d.Files) != 2 || d.Files[1].FilePID != r2.FilePID || d.TotalDurationMS != 3000 || len(d.Chapters) != 2 {
+		t.Errorf("book = %d parts (%+v), %d ms, %d chapters; want parts 1 and 2 only, 3000 ms, 2 chapters",
+			len(d.Files), d.Files, d.TotalDurationMS, len(d.Chapters))
+	}
+	if d.Item.DurationMS != 3000 {
+		t.Errorf("stored running time = %d ms, want 3000", d.Item.DurationMS)
+	}
+	refs, err := st.ItemFiles(ctx, r1.ItemPID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	roles := map[model.PID]model.ItemFileRef{}
+	for _, r := range refs {
+		roles[r.FilePID] = r
+	}
+	if len(roles) != 3 || roles[r1.FilePID].Role != "primary" || roles[r2.FilePID].Role != "part" ||
+		roles[rc.FilePID].Role != "alternate" || roles[rc.FilePID].Position != 2 {
+		t.Errorf("edges = %+v, want parts 1 and 2 and the copy an alternate at position 2", refs)
+	}
+	ds, err := st.FileDiagnostics(ctx, model.DiagnosticFilter{FilePID: rc.FilePID, Code: model.DiagDuplicateCopy})
+	if err != nil || len(ds) != 1 || ds[0].Detail != p2 {
+		t.Errorf("copy diagnostics = %+v (err %v), want one naming %s", ds, err, p2)
+	}
+	cs, err := st.ChangesSince(ctx, seq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var items int
+	for _, c := range cs {
+		if c.EntityType == "item" {
+			items++
+		}
+	}
+	if items != 1 {
+		t.Errorf("deltas = %+v, want one item update", cs)
+	}
+	if again := putBook(t, st, lib.ID, part(pc, "mb2", "mc2-copy", 2, 2000, "Part 2")); !again.AttachedAsCopy {
+		t.Errorf("copy re-put = %+v, want it kept an alternate", again)
+	}
+	if rep, err := st.VerifyDerived(ctx); err != nil || !rep.Consistent() {
+		t.Errorf("verify = %+v (err %v), want consistent", rep, err)
+	}
+}
+
+// TestBookPartCopyWaitsForReconciliation: a part's copy re-read while the part's path is
+// missing stays an alternate (mid-walk the part may have moved), and reconciling the gone
+// part is what puts the copy in its place.
+func TestBookPartCopyWaitsForReconciliation(t *testing.T) {
+	st, _ := entityFixture(t)
+	ctx := context.Background()
+	root := t.TempDir()
+	lib, err := st.EnsureLibrary(ctx, &model.Library{Root: []byte(root), DisplayRoot: root, Mode: model.ModeInPlace})
+	if err != nil {
+		t.Fatal(err)
+	}
+	part := func(path, essence, content string, pos int, dur int64) bookSpec {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return bookSpec{path: path, essence: essence, content: content, title: "Mistborn",
+			author: "Brandon Sanderson", asin: "B0010", position: pos, durationMS: dur}
+	}
+	p1, p2, pc := filepath.Join(root, "book", "part1.mp3"), filepath.Join(root, "book", "part2.mp3"), filepath.Join(root, "backup", "part2.mp3")
+	r1 := putBook(t, st, lib.ID, part(p1, "mb1", "mc1", 1, 1000))
+	r2 := putBook(t, st, lib.ID, part(p2, "mb2", "mc2", 2, 2000))
+	putBook(t, st, lib.ID, part(pc, "mb2", "mc2-copy", 2, 2000))
+	if err := os.Remove(p2); err != nil {
+		t.Fatal(err)
+	}
+	rc := putBook(t, st, lib.ID, bookSpec{path: pc, essence: "mb2", content: "mc2-copy", title: "Mistborn",
+		author: "Brandon Sanderson", asin: "B0010", position: 2, durationMS: 2000})
+	if !rc.AttachedAsCopy {
+		t.Errorf("re-read copy = %+v, want it kept an alternate", rc)
+	}
+	if _, err := st.MarkFilesMissing(ctx, []model.PID{r2.FilePID}); err != nil {
+		t.Fatal(err)
+	}
+	refs, err := st.ItemFiles(ctx, r1.ItemPID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[model.PID]model.ItemFileRef{}
+	for _, r := range refs {
+		got[r.FilePID] = r
+	}
+	if len(refs) != 2 || got[rc.FilePID].Role != "part" || got[rc.FilePID].Position != 2 || got[r1.FilePID].Role != "primary" {
+		t.Errorf("edges = %+v, want the copy in part 2's place and the gone row dropped", refs)
+	}
+	d, err := st.BookByPID(ctx, r1.ItemPID)
+	if err != nil || len(d.Files) != 2 || d.TotalDurationMS != 3000 {
+		t.Errorf("book = %+v (err %v), want two parts over 3000 ms", d, err)
+	}
+}
+
+// TestBookPartCopyPromotedWhenThePartIsTrashed: trashing a part hands its place to its
+// copy, at the part's position and without the copy's diagnostic, and a copy of another
+// part never stands in for it.
+func TestBookPartCopyPromotedWhenThePartIsTrashed(t *testing.T) {
+	st, _ := entityFixture(t)
+	ctx := context.Background()
+	root := t.TempDir()
+	lib, err := st.EnsureLibrary(ctx, &model.Library{Root: []byte(root), DisplayRoot: root, Mode: model.ModeInPlace})
+	if err != nil {
+		t.Fatal(err)
+	}
+	part := func(path, essence, content string, pos int, dur int64) bookSpec {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return bookSpec{path: path, essence: essence, content: content, title: "Mistborn",
+			author: "Brandon Sanderson", asin: "B0010", position: pos, durationMS: dur}
+	}
+	r1 := putBook(t, st, lib.ID, part(filepath.Join(root, "book", "part1.mp3"), "mb1", "mc1", 1, 1000))
+	r2 := putBook(t, st, lib.ID, part(filepath.Join(root, "book", "part2.mp3"), "mb2", "mc2", 2, 2000))
+	c1 := putBook(t, st, lib.ID, part(filepath.Join(root, "backup", "part1.mp3"), "mb1", "mc1-copy", 1, 1000))
+	c2 := putBook(t, st, lib.ID, part(filepath.Join(root, "backup", "part2.mp3"), "mb2", "mc2-copy", 2, 2000))
+
+	res, err := st.DetachFile(ctx, r2.FilePID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Promoted) != 1 || res.Promoted[0].FilePID != c2.FilePID {
+		t.Fatalf("promoted = %+v, want part 2's copy %s", res.Promoted, c2.FilePID)
+	}
+	refs, err := st.ItemFiles(ctx, r1.ItemPID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[model.PID]model.ItemFileRef{}
+	for _, r := range refs {
+		got[r.FilePID] = r
+	}
+	if got[c2.FilePID].Role != "part" || got[c2.FilePID].Position != 2 || got[c1.FilePID].Role != "alternate" {
+		t.Errorf("edges = %+v, want part 2's copy in its place and part 1's copy still an alternate", refs)
+	}
+	ds, err := st.FileDiagnostics(ctx, model.DiagnosticFilter{FilePID: c2.FilePID, Code: model.DiagDuplicateCopy})
+	if err != nil || len(ds) != 0 {
+		t.Errorf("promoted copy diagnostics = %+v (err %v), want none", ds, err)
+	}
+	if d, err := st.BookByPID(ctx, r1.ItemPID); err != nil || len(d.Files) != 2 || d.Item.DurationMS != 3000 {
+		t.Errorf("book = %+v (err %v), want two parts over 3000 ms", d, err)
+	}
+	if rep, err := st.VerifyDerived(ctx); err != nil || !rep.Consistent() {
+		t.Errorf("verify = %+v (err %v), want consistent", rep, err)
+	}
+}
+
+// TestBookPartCopyDiagnosticsFollowTheirPart: when part 1's copy takes the book's primary
+// place, part 2's copy is still the same audio as part 2 and names it, not the new
+// primary.
+func TestBookPartCopyDiagnosticsFollowTheirPart(t *testing.T) {
+	st, _ := entityFixture(t)
+	ctx := context.Background()
+	root := t.TempDir()
+	lib, err := st.EnsureLibrary(ctx, &model.Library{Root: []byte(root), DisplayRoot: root, Mode: model.ModeInPlace})
+	if err != nil {
+		t.Fatal(err)
+	}
+	part := func(path, essence, content string, pos int) bookSpec {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return bookSpec{path: path, essence: essence, content: content, title: "Mistborn",
+			author: "Brandon Sanderson", asin: "B0010", position: pos, durationMS: 1000}
+	}
+	p2 := filepath.Join(root, "book", "part2.mp3")
+	r1 := putBook(t, st, lib.ID, part(filepath.Join(root, "book", "part1.mp3"), "mb1", "mc1", 1))
+	putBook(t, st, lib.ID, part(p2, "mb2", "mc2", 2))
+	c1 := putBook(t, st, lib.ID, part(filepath.Join(root, "backup", "part1.mp3"), "mb1", "mc1-copy", 1))
+	c2 := putBook(t, st, lib.ID, part(filepath.Join(root, "backup", "part2.mp3"), "mb2", "mc2-copy", 2))
+
+	res, err := st.DetachFile(ctx, r1.FilePID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Promoted) != 1 || res.Promoted[0].FilePID != c1.FilePID {
+		t.Fatalf("promoted = %+v, want part 1's copy %s", res.Promoted, c1.FilePID)
+	}
+	ds, err := st.FileDiagnostics(ctx, model.DiagnosticFilter{FilePID: c2.FilePID})
+	if err != nil || len(ds) != 1 || ds[0].Code != model.DiagDuplicateCopy || ds[0].Detail != p2 {
+		t.Errorf("part 2's copy diagnostics = %+v (err %v), want duplicate_copy naming %s", ds, err, p2)
+	}
+}
+
+// TestBookPartCopyIsNotAnalyzed: a copy of any part, not only the primary's, holds audio
+// the book already measures, so the analyze pass leaves it out.
+func TestBookPartCopyIsNotAnalyzed(t *testing.T) {
+	st, _ := entityFixture(t)
+	ctx := context.Background()
+	root := t.TempDir()
+	lib, err := st.EnsureLibrary(ctx, &model.Library{Root: []byte(root), DisplayRoot: root, Mode: model.ModeInPlace})
+	if err != nil {
+		t.Fatal(err)
+	}
+	part := func(path, essence, content string, pos int) bookSpec {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return bookSpec{path: path, essence: essence, content: content, title: "Mistborn",
+			author: "Brandon Sanderson", asin: "B0010", position: pos, durationMS: 1000}
+	}
+	putBook(t, st, lib.ID, part(filepath.Join(root, "book", "part1.mp3"), "mb1", "mc1", 1))
+	putBook(t, st, lib.ID, part(filepath.Join(root, "book", "part2.mp3"), "mb2", "mc2", 2))
+	c2 := putBook(t, st, lib.ID, part(filepath.Join(root, "backup", "part2.mp3"), "mb2", "mc2-copy", 2))
+	files, err := st.FilesNeedingAnalysis(ctx, 1, nil, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 2 || slices.ContainsFunc(files, func(f *model.File) bool { return f.PID == c2.FilePID }) {
+		t.Errorf("files needing analysis = %d, want the two parts and not part 2's copy %s", len(files), c2.FilePID)
+	}
+}
+
+// TestBookDoubledPartFoldsOnRescan: a copy cataloged as a part of its own before copies
+// became alternates (the book doubled its running time) folds into an alternate of its
+// part when it is read again.
+func TestBookDoubledPartFoldsOnRescan(t *testing.T) {
+	st, _ := entityFixture(t)
+	ctx := context.Background()
+	root := t.TempDir()
+	lib, err := st.EnsureLibrary(ctx, &model.Library{Root: []byte(root), DisplayRoot: root, Mode: model.ModeInPlace})
+	if err != nil {
+		t.Fatal(err)
+	}
+	part := func(path, essence, content string, pos int) bookSpec {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return bookSpec{path: path, essence: essence, content: content, title: "Mistborn",
+			author: "Brandon Sanderson", asin: "B0010", position: pos, durationMS: 1000}
+	}
+	p2 := filepath.Join(root, "book", "part2.mp3")
+	r1 := putBook(t, st, lib.ID, part(filepath.Join(root, "book", "part1.mp3"), "mb1", "mc1", 1))
+	putBook(t, st, lib.ID, part(p2, "mb2", "mc2", 2))
+	spare := part(filepath.Join(root, "spare", "part2.mp3"), "mb2", "mc2-copy", 2)
+	c2 := putBook(t, st, lib.ID, spare)
+	if err := st.writeTx(ctx, func(tx *sql.Tx) error {
+		var itemID int64
+		if err := tx.QueryRowContext(ctx, "SELECT id FROM playable_item WHERE pid = ?", string(r1.ItemPID)).Scan(&itemID); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE item_file SET role = 'part', position = 3
+			WHERE file_id = (SELECT id FROM file WHERE pid = ?)`, string(c2.FilePID)); err != nil {
+			return err
+		}
+		return refreshBookDuration(ctx, tx, itemID)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if d, err := st.BookByPID(ctx, r1.ItemPID); err != nil || d.Item.DurationMS != 3000 {
+		t.Fatalf("doubled book = %+v (err %v), want 3000 ms", d, err)
+	}
+
+	res := putBook(t, st, lib.ID, spare)
+	if !res.AttachedAsCopy || !res.Joined {
+		t.Errorf("re-read = %+v, want the doubled part joined as a copy", res)
+	}
+	refs, err := st.ItemFiles(ctx, r1.ItemPID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range refs {
+		if r.FilePID == c2.FilePID && (r.Role != "alternate" || r.Position != 2) {
+			t.Errorf("copy edge = %+v, want an alternate at position 2", r)
+		}
+	}
+	if d, err := st.BookByPID(ctx, r1.ItemPID); err != nil || d.Item.DurationMS != 2000 {
+		t.Errorf("book = %+v (err %v), want 2000 ms", d, err)
+	}
+	ds, err := st.FileDiagnostics(ctx, model.DiagnosticFilter{FilePID: c2.FilePID, Code: model.DiagDuplicateCopy})
+	if err != nil || len(ds) != 1 || ds[0].Detail != p2 {
+		t.Errorf("copy diagnostics = %+v (err %v), want duplicate_copy naming %s", ds, err, p2)
+	}
+	if rep, err := st.VerifyDerived(ctx); err != nil || !rep.Consistent() {
+		t.Errorf("verify = %+v (err %v), want consistent", rep, err)
+	}
+}
+
+// TestBookCopyReadWithoutAnEssence: a book's alternate read again with no essence (so no
+// part can be matched to it) is taken as a part, rather than failing on the missing twin.
+func TestBookCopyReadWithoutAnEssence(t *testing.T) {
+	st, _ := entityFixture(t)
+	ctx := context.Background()
+	root := t.TempDir()
+	lib, err := st.EnsureLibrary(ctx, &model.Library{Root: []byte(root), DisplayRoot: root, Mode: model.ModeInPlace})
+	if err != nil {
+		t.Fatal(err)
+	}
+	part := func(path, essence, content string, pos int) bookSpec {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return bookSpec{path: path, essence: essence, content: content, title: "Mistborn",
+			author: "Brandon Sanderson", asin: "B0010", position: pos, durationMS: 1000}
+	}
+	r1 := putBook(t, st, lib.ID, part(filepath.Join(root, "book", "part1.mp3"), "mb1", "mc1", 1))
+	spare := part(filepath.Join(root, "spare", "part1.mp3"), "mb1", "mc1-copy", 1)
+	if c := putBook(t, st, lib.ID, spare); !c.AttachedAsCopy {
+		t.Fatalf("copy = %+v, want an alternate", c)
+	}
+	spare.essence = ""
+	res := putBook(t, st, lib.ID, spare)
+	if res.AttachedAsCopy || res.ItemPID != r1.ItemPID {
+		t.Errorf("re-read = %+v, want a part of %s", res, r1.ItemPID)
+	}
+}
+
+// TestBookCopyRevivesAMissingBook: a copy of a part arriving for a book reconciliation
+// marked missing brings it back. With the part's file gone the copy takes its place; with
+// the part back on disk the copy attaches as an alternate. Either way the book is present
+// again and emits an update.
+func TestBookCopyRevivesAMissingBook(t *testing.T) {
+	st, _ := entityFixture(t)
+	ctx := context.Background()
+	newLib := func() (*model.Library, string) {
+		root := t.TempDir()
+		lib, err := st.EnsureLibrary(ctx, &model.Library{Root: []byte(root), DisplayRoot: root, Mode: model.ModeInPlace})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return lib, root
+	}
+	part := func(path, essence, content, asin string) bookSpec {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return bookSpec{path: path, essence: essence, content: content, title: "Mistborn",
+			author: "Brandon Sanderson", asin: asin, position: 1, durationMS: 1000}
+	}
+	lib, root := newLib()
+	spareLib, spareRoot := newLib()
+	updated := func(seq int64, pid model.PID) bool {
+		changes, err := st.ChangesSince(ctx, seq)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return slices.ContainsFunc(changes, func(c model.Change) bool { return c.EntityType == "item" && c.EntityPID == pid })
+	}
+
+	p1 := filepath.Join(root, "book", "part1.mp3")
+	r1 := putBook(t, st, lib.ID, part(p1, "mb1", "mc1", "B0010"))
+	if err := os.Remove(p1); err != nil {
+		t.Fatal(err)
+	}
+	if mr, err := st.MarkFilesMissing(ctx, []model.PID{r1.FilePID}); err != nil || mr.Marked != 1 {
+		t.Fatalf("reconcile = %+v (err %v), want the book missing", mr, err)
+	}
+	seq := scalarInt(t, st, "SELECT COALESCE(MAX(seq), 0) FROM change_log")
+	c1 := putBook(t, st, spareLib.ID, part(filepath.Join(spareRoot, "part1.mp3"), "mb1", "mc1-copy", "B0010"))
+	if c1.AttachedAsCopy || itemState(t, st, r1.ItemPID) != string(model.StatePresent) {
+		t.Errorf("copy = %+v, state %s, want it in the gone part's place and the book present", c1, itemState(t, st, r1.ItemPID))
+	}
+	if !updated(int64(seq), r1.ItemPID) {
+		t.Error("the revived book emitted no update")
+	}
+
+	// The part and its attached copy were both reconciled away and are back on disk: the
+	// copy, read again first, attaches as before and the book is present again.
+	q1 := filepath.Join(root, "other", "part1.mp3")
+	s1 := putBook(t, st, lib.ID, part(q1, "mb2", "md1", "B0020"))
+	spare := part(filepath.Join(spareRoot, "other.mp3"), "mb2", "md1-copy", "B0020")
+	d1 := putBook(t, st, spareLib.ID, spare)
+	if _, err := st.MarkFilesMissing(ctx, []model.PID{s1.FilePID, d1.FilePID}); err != nil ||
+		itemState(t, st, s1.ItemPID) != string(model.StateMissing) {
+		t.Fatalf("reconcile err %v, state %s, want the book missing", err, itemState(t, st, s1.ItemPID))
+	}
+	seq = scalarInt(t, st, "SELECT COALESCE(MAX(seq), 0) FROM change_log")
+	d2 := putBook(t, st, spareLib.ID, spare)
+	if !d2.AttachedAsCopy || itemState(t, st, s1.ItemPID) != string(model.StatePresent) {
+		t.Errorf("copy beside a restored part = %+v, state %s, want an alternate and the book present", d2, itemState(t, st, s1.ItemPID))
+	}
+	if !updated(int64(seq), s1.ItemPID) {
+		t.Error("the book the copy brought back emitted no update")
+	}
+}
+
+// TestItemsWithCopiesReasons: a copy of a book part is the same audio, though it is not
+// the primary's, and the item lists its parts before its alternates.
+func TestItemsWithCopiesReasons(t *testing.T) {
+	st, _ := entityFixture(t)
+	ctx := context.Background()
+	root := t.TempDir()
+	lib, err := st.EnsureLibrary(ctx, &model.Library{Root: []byte(root), DisplayRoot: root, Mode: model.ModeInPlace})
+	if err != nil {
+		t.Fatal(err)
+	}
+	part := func(path, essence, content string, pos int) bookSpec {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return bookSpec{path: path, essence: essence, content: content, title: "Mistborn",
+			author: "Brandon Sanderson", asin: "B0010", position: pos, durationMS: 1000}
+	}
+	r1 := putBook(t, st, lib.ID, part(filepath.Join(root, "book", "p1.mp3"), "mb1", "mc1", 1))
+	putBook(t, st, lib.ID, part(filepath.Join(root, "book", "p2.mp3"), "mb2", "mc2", 2))
+	rc := putBook(t, st, lib.ID, part(filepath.Join(root, "spare", "p2.mp3"), "mb2", "mc2c", 2))
+	got, err := st.ItemsWithCopies(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].ItemPID != r1.ItemPID || len(got[0].Files) != 3 {
+		t.Fatalf("items with copies = %+v, want the book with three files", got)
+	}
+	last := got[0].Files[2]
+	if last.FilePID != rc.FilePID || last.Role != "alternate" || last.Reason != model.CopySameAudio ||
+		got[0].Files[0].Reason != "" || got[0].Files[1].Reason != "" {
+		t.Errorf("files = %+v, want the parts then the copy as the same audio", got[0].Files)
 	}
 }

@@ -29,14 +29,14 @@ type Store interface {
 	DisplayPathExistsFold(ctx context.Context, displayPath string) (bool, error)
 	CreateImportBatch(ctx context.Context, b *model.ImportBatch) error
 	UpdateImportBatch(ctx context.Context, b *model.ImportBatch) error
-	PutAcquisitionForFile(ctx context.Context, path []byte, in model.AcquisitionInput) error
+	PutAcquisitionForFile(ctx context.Context, path []byte, in model.AcquisitionInput) (model.PID, error)
 }
 
 // Cataloger catalogs one file after it has been placed in the managed tree, honoring
 // a forced media kind (empty classifies from tags), so an acquired book forced with
 // --as book is cataloged as a book even when its tags do not say so.
 type Cataloger interface {
-	ScanFileAs(ctx context.Context, lib *model.Library, path string, kind model.Kind) (*scan.Result, error)
+	ScanFileAs(ctx context.Context, lib *model.Library, path string, kind model.Kind) (*scan.Result, *model.ScanItemResult, error)
 }
 
 // Service plans and applies imports.
@@ -139,6 +139,17 @@ type Report struct {
 	Sidecars    int // companion files (lyrics/art/...) carried in with the audio
 	Bytes       int64
 	Failures    []Failure
+	// Files says, for each file imported, the item it now backs and whether it joined an
+	// existing one as an alternate (a DupAllow import of audio the catalog held).
+	Files []FileOutcome
+}
+
+// FileOutcome is what importing one file did. ItemPID is empty for a cue rip, whose
+// file backs a track per cue entry.
+type FileOutcome struct {
+	Path           string
+	ItemPID        model.PID
+	AttachedAsCopy bool
 }
 
 // Failure records one import that could not be applied.
@@ -391,13 +402,14 @@ func (s *Service) Execute(ctx context.Context, plan *Plan) (*Report, error) {
 		case OutcomeQuarantine:
 			rep.Quarantined++
 		case OutcomeImport:
-			sidecars, err := s.importOne(ctx, plan, a)
+			sidecars, outcome, err := s.importOne(ctx, plan, a)
 			if err != nil {
 				rep.Errored++
 				rep.Failures = append(rep.Failures, Failure{Src: a.Src, Err: err.Error()})
 				s.log.Warn("import failed", "src", a.Src, "dst", a.Dst, "err", err)
 				continue
 			}
+			rep.Files = append(rep.Files, outcome)
 			rep.Imported++
 			rep.Bytes += a.Size
 			rep.Sidecars += sidecars
@@ -429,30 +441,40 @@ func (s *Service) placeCovers(moves []organize.CoverMove, copyMode bool) int {
 
 // importOne places one file in the managed tree, catalogs it under its target
 // library, records any acquisition provenance, and carries its sidecars in alongside
-// it. It returns the number of sidecars placed.
-func (s *Service) importOne(ctx context.Context, plan *Plan, a *Action) (int, error) {
+// it. It returns the number of sidecars placed and what cataloging the file did.
+func (s *Service) importOne(ctx context.Context, plan *Plan, a *Action) (int, FileOutcome, error) {
+	outcome := FileOutcome{Path: a.Dst}
 	if err := os.MkdirAll(pathx.Long(filepath.Dir(a.Dst)), 0o755); err != nil {
-		return 0, waxerr.Wrap(waxerr.CodeIO, "inbox.import", err)
+		return 0, outcome, waxerr.Wrap(waxerr.CodeIO, "inbox.import", err)
 	}
 	if err := placeFile(a.Src, a.Dst, plan.Copy); err != nil {
-		return 0, err
+		return 0, outcome, err
 	}
 	lib := a.Library
 	if lib == nil {
 		lib = plan.Library
 	}
-	if _, err := s.cataloger.ScanFileAs(ctx, lib, a.Dst, a.Kind); err != nil {
-		return 0, err
+	_, out, err := s.cataloger.ScanFileAs(ctx, lib, a.Dst, a.Kind)
+	if err != nil {
+		return 0, outcome, err
+	}
+	if out != nil {
+		outcome.ItemPID, outcome.AttachedAsCopy = out.ItemPID, out.AttachedAsCopy
 	}
 	// Record origin provenance on the item that now backs the placed file. This is
 	// attribution only: a failure to record it must not fail an import whose audio
-	// already landed and cataloged.
-	if plan.Acquisition != nil {
-		if err := s.store.PutAcquisitionForFile(ctx, []byte(a.Dst), *plan.Acquisition); err != nil {
+	// already landed and cataloged. A file that joined an existing item as a copy
+	// records none, since that item was acquired before it.
+	if plan.Acquisition != nil && !outcome.AttachedAsCopy {
+		copyOf, err := s.store.PutAcquisitionForFile(ctx, []byte(a.Dst), *plan.Acquisition)
+		if err != nil {
 			s.log.Warn("recording acquisition provenance", "dst", a.Dst, "err", err)
 		}
+		if copyOf != "" {
+			outcome.ItemPID, outcome.AttachedAsCopy = copyOf, true
+		}
 	}
-	return s.relocateSidecars(plan, a), nil
+	return s.relocateSidecars(plan, a), outcome, nil
 }
 
 // preflightPlan refuses an import that would leave any destination volume below its

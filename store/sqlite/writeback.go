@@ -73,25 +73,26 @@ func entityMemberFilesFrom(et model.MergeEntity) string {
 	switch et {
 	case model.MergeAlbum:
 		return `FROM track t
-			JOIN item_file itf ON itf.item_id = t.item_id AND itf.role = 'primary'
+			JOIN item_file itf ON itf.item_id = t.item_id AND itf.role IN ('primary', 'alternate')
 			JOIN file f ON f.id = itf.file_id
 			WHERE t.album_id = ?`
 	case model.MergeReleaseGroup:
 		return `FROM track t
 			JOIN album al ON al.id = t.album_id
-			JOIN item_file itf ON itf.item_id = t.item_id AND itf.role = 'primary'
+			JOIN item_file itf ON itf.item_id = t.item_id AND itf.role IN ('primary', 'alternate')
 			JOIN file f ON f.id = itf.file_id
 			WHERE al.release_group_id = ?`
 	default:
 		return `FROM track t
-			JOIN item_file itf ON itf.item_id = t.item_id AND itf.role = 'primary'
+			JOIN item_file itf ON itf.item_id = t.item_id AND itf.role IN ('primary', 'alternate')
 			JOIN file f ON f.id = itf.file_id
 			WHERE t.artist_id = ?`
 	}
 }
 
-// EntityMemberFiles returns the primary backing file of every item an entity-level edit
-// fans onto. For an album or release group that is its member tracks. For an artist it is
+// EntityMemberFiles returns the primary and alternate files of every item an entity-level
+// edit fans onto, so a copy carries the value too. For an album or release group that is
+// its member tracks. For an artist it is
 // only the tracks the artist is the primary artist of, and that restriction matters: the
 // one artist field that fans out is its sort, and ARTISTSORT is the primary artist's tag.
 // Writing it to a track where the artist is merely the album-artist or a featured

@@ -191,6 +191,9 @@ import (
 // Version 22 added SetTagParams.WriteBack and SetTagResult.WriteBackFailures, for the
 // reason version 6 gave: a version-21 server drops the field and stores the tag in the
 // catalog alone, and its empty result reads as a write that landed on every file.
+// mark_missing gained the promoted and dropped outcomes, for an item that keeps a file
+// on disk while a copy or its primary is gone, which a version-21 server answers
+// files-present.
 const ProtocolVersion = 22
 
 // Method names for the proxied operations: the fast request/response catalog

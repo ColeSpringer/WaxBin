@@ -665,3 +665,33 @@ func TestImportedTrackIsNotNumberedByItsStagingFolder(t *testing.T) {
 		})
 	}
 }
+
+// TestDupSkipImportsRaceToOne: two uploads of the same audio planned before either is
+// applied both look new, and the second apply finds the first's file and skips its own
+// as a duplicate.
+func TestDupSkipImportsRaceToOne(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), root)
+	var plans []*waxbin.AcquiredResult
+	for i, title := range []string{"Upload One", "Upload Two"} {
+		src := filepath.Join(t.TempDir(), "up.mp3")
+		writeFile(t, src, testaudio.BuildMP3WithAudio(title, "Band", "Album", i+1, testaudio.AudioWithSeed(77)))
+		r, err := lib.ImportAcquired(ctx, waxbin.AcquiredFile{Path: src}, model.KindTrack, waxbin.AcquiredMeta{DupPolicy: model.DupSkip})
+		if err != nil || r.Plan.Importable() != 1 {
+			t.Fatalf("plan %d = %+v (err %v), want it importable", i, r, err)
+		}
+		plans = append(plans, r)
+	}
+	if rep, err := lib.ApplyImport(ctx, plans[0].Plan); err != nil || rep.Imported != 1 {
+		t.Fatalf("first apply = %+v (err %v), want it imported", rep, err)
+	}
+	rep, err := lib.ApplyImport(ctx, plans[1].Plan)
+	if err != nil || rep.Imported != 0 || rep.Duplicates != 1 {
+		t.Fatalf("second apply = %+v (err %v), want it skipped as a duplicate", rep, err)
+	}
+	items, err := lib.Query(ctx, query.New(query.EntityItems).Build(), "")
+	if err != nil || len(items) != 1 {
+		t.Errorf("items = %d (err %v), want one", len(items), err)
+	}
+}

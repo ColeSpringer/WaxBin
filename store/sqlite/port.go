@@ -278,17 +278,18 @@ func (s *Store) RelocateLibraryRoot(ctx context.Context, libPID model.PID, newRo
 		// Collect (id, rel) first; the single write connection cannot update while a
 		// query is open.
 		type fileRel struct {
-			id  int64
-			rel []byte
+			id      int64
+			rel     []byte
+			display string
 		}
-		rows, err := tx.QueryContext(ctx, "SELECT id, rel_path FROM file WHERE library_id = ?", libID)
+		rows, err := tx.QueryContext(ctx, "SELECT id, rel_path, display_path FROM file WHERE library_id = ?", libID)
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		var files []fileRel
 		for rows.Next() {
 			var f fileRel
-			if err := rows.Scan(&f.id, &f.rel); err != nil {
+			if err := rows.Scan(&f.id, &f.rel, &f.display); err != nil {
 				rows.Close()
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
@@ -299,11 +300,27 @@ func (s *Store) RelocateLibraryRoot(ctx context.Context, libPID model.PID, newRo
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 
+		named, err := queryInt64sTx(ctx, tx, `SELECT DISTINCT p.file_id FROM item_file p
+			JOIN item_file a ON a.item_id = p.item_id AND a.role = 'alternate'
+			JOIN file f ON f.id = p.file_id
+			WHERE f.library_id = ? AND p.role IN ('primary', 'part')`, libID)
+		if err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		renamed := make(map[int64]bool, len(named))
+		for _, id := range named {
+			renamed[id] = true
+		}
 		for _, f := range files {
 			newPath := filepath.Join(newRoot, string(f.rel))
 			if _, err := tx.ExecContext(ctx, "UPDATE file SET path=?, display_path=? WHERE id=?",
 				[]byte(newPath), newPath, f.id); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+			if renamed[f.id] {
+				if err := renameCopyDetailsTx(ctx, tx, f.id, f.display, newPath); err != nil {
+					return waxerr.Wrap(waxerr.CodeIO, op, err)
+				}
 			}
 		}
 		return appendChange(ctx, tx, "library", libPID, model.OpUpdate)

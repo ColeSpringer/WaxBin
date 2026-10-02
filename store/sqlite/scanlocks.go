@@ -183,11 +183,18 @@ func trackColumnOf(field string) string {
 // (PutScannedTrackInput.Derived). A nonzero fileID reopens the enrichment write-back for a
 // fill a settled write put on that file and the file no longer carries. It must run
 // before upsertItem, which writes the title. It returns what it read of the existing item,
-// nil for a new one.
-func overlayStoredTrackTx(ctx context.Context, tx *sql.Tx, log logger, fileID int64, tr *model.Track, item *model.PlayableItem, derived []string, preserveLocks bool) (*scanPrior, error) {
-	id, ok, err := existingItemIDByIdentityTx(ctx, tx, log, item.Kind, item.IdentityKey, bookAdoptKey{})
-	if err != nil || !ok {
-		return nil, err
+// nil for a new one. A non-nil known is the caller's resolution of the item's key, used in
+// place of resolving it again.
+func overlayStoredTrackTx(ctx context.Context, tx *sql.Tx, log logger, fileID int64, tr *model.Track, item *model.PlayableItem, derived []string, preserveLocks bool, known *resolvedItem) (*scanPrior, error) {
+	if known == nil {
+		var err error
+		if known, err = resolveItemTx(ctx, tx, log, item.Kind, item.IdentityKey, bookAdoptKey{}); err != nil {
+			return nil, err
+		}
+	}
+	id := known.id
+	if id == 0 {
+		return nil, nil
 	}
 	rows, err := storedRowsTx(ctx, tx, id)
 	if err != nil {
@@ -404,11 +411,17 @@ func bookColumnOf(field string) string {
 // the primary part rebuilds every contributor role from the scanned lists, which a
 // locked role must overlay, whether it was locked as a scalar or a credit, and translator
 // and editor have only their credit locks. It must run before upsertItem and upsertBook.
-func overlayStoredBookTx(ctx context.Context, tx *sql.Tx, log logger, fileID int64, b *model.Book, item *model.PlayableItem, derived []string, preserveLocks bool) (*scanPrior, error) {
-	id, ok, err := existingItemIDByIdentityTx(ctx, tx, log, item.Kind, item.IdentityKey,
-		bookAdoptKey{author: b.Author, title: item.Title})
-	if err != nil || !ok {
-		return nil, err
+// known is the caller's resolution of the book's key, as for overlayStoredTrackTx.
+func overlayStoredBookTx(ctx context.Context, tx *sql.Tx, log logger, fileID int64, b *model.Book, item *model.PlayableItem, derived []string, preserveLocks bool, known *resolvedItem) (*scanPrior, error) {
+	if known == nil {
+		var err error
+		if known, err = resolveItemTx(ctx, tx, log, item.Kind, item.IdentityKey, bookAdoptKey{author: b.Author, title: item.Title}); err != nil {
+			return nil, err
+		}
+	}
+	id := known.id
+	if id == 0 {
+		return nil, nil
 	}
 	rows, err := storedRowsTx(ctx, tx, id)
 	if err != nil {

@@ -1,9 +1,12 @@
 package waxbin
 
 import (
+	"context"
+	"slices"
 	"testing"
 
 	"github.com/colespringer/waxbin/model"
+	"github.com/colespringer/waxbin/waxerr"
 )
 
 func TestSortByQuality(t *testing.T) {
@@ -43,5 +46,24 @@ func TestLosslessCodecsCoverFloatPCM(t *testing.T) {
 		if !model.LosslessCodec(k) {
 			t.Errorf("LosslessCodec(%q) is false; uncompressed audio must outrank a lossy encoding", k)
 		}
+	}
+}
+
+// TestEncodingComponentsSkipAVanishedSeed: an item deleted between the listing and its
+// own probe is skipped like a vanished neighbour, not an error for the whole listing.
+func TestEncodingComponentsSkipAVanishedSeed(t *testing.T) {
+	items := []*model.ItemView{{PID: "gone", FilePID: "f0"}, {PID: "a", FilePID: "f1"}, {PID: "b", FilePID: "f2"}}
+	alts := func(_ context.Context, pid model.PID) ([]AltEncoding, error) {
+		switch pid {
+		case "gone":
+			return nil, waxerr.New(waxerr.CodeNotFound, "test", "no such item")
+		case "a":
+			return []AltEncoding{{ItemPID: "b"}}, nil
+		}
+		return []AltEncoding{{ItemPID: "a"}}, nil
+	}
+	got, err := encodingComponents(context.Background(), items, alts)
+	if err != nil || len(got) != 1 || !slices.Equal(got[0], []model.PID{"a", "b"}) {
+		t.Errorf("components = %v (err %v), want [[a b]]", got, err)
 	}
 }

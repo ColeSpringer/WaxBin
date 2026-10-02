@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"slices"
 
 	"github.com/colespringer/waxbin"
 	"github.com/spf13/cobra"
@@ -11,12 +12,13 @@ func newUpgradeCmd(g *globals) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "upgrade",
 		Short: "List alt-encoding groups ranked by quality",
-		Long: "Finds catalog items that are the same recording in different encodings " +
-			"(grouped by audio fingerprint) and ranks each group by quality: lossless over " +
-			"lossy, then sample rate, bit depth, and bitrate. The best encoding is marked " +
-			"as the keeper; the rest are lower-quality copies to prune or upgrade. Items must " +
-			"be analyzed first (`waxbin analyze`). This is a maintenance scan over the whole " +
-			"catalog; it reports only, and never deletes.",
+		Long: "Finds the same recording in different encodings and ranks each group by " +
+			"quality: lossless over lossy, then sample rate, bit depth, and bitrate. An item " +
+			"holding another encoding of its recording as an alternate file is a group of its " +
+			"own, listed by file pid for `rm --file`; separate items are grouped by audio " +
+			"fingerprint and must be analyzed first (`waxbin analyze`). The best encoding is " +
+			"marked as the keeper; the rest are lower-quality copies to prune or upgrade. This " +
+			"is a maintenance scan over the whole catalog; it reports only, and never deletes.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			lib, _, err := g.openRead(cmd)
 			if err != nil {
@@ -37,11 +39,22 @@ func newUpgradeCmd(g *globals) *cobra.Command {
 				return nil
 			}
 			for i, grp := range groups {
-				fmt.Fprintf(w, "group %d:\n", i+1)
+				oneItem := !slices.ContainsFunc(grp.Members, func(m waxbin.UpgradeCandidate) bool {
+					return m.ItemPID != grp.Members[0].ItemPID
+				})
+				if oneItem {
+					fmt.Fprintf(w, "group %d, one item: %s [%s]\n", i+1, grp.Members[0].Title, grp.Members[0].ItemPID)
+				} else {
+					fmt.Fprintf(w, "group %d:\n", i+1)
+				}
 				for _, m := range grp.Members {
 					marker := "  "
 					if m.Best {
 						marker = "* " // keeper
+					}
+					if oneItem {
+						fmt.Fprintf(w, "%s%s  file %s\n", marker, qualityLabel(m), m.FilePID)
+						continue
 					}
 					fmt.Fprintf(w, "%s%s  %s  [%s]\n", marker, m.Title, qualityLabel(m), m.ItemPID)
 				}

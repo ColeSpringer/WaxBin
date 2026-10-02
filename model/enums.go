@@ -4,7 +4,10 @@
 // organize, jobs, and the facade depend on the domain, not on SQLite.
 package model
 
-import "strings"
+import (
+	"cmp"
+	"strings"
+)
 
 // Mode is how a library root is handled.
 type Mode string
@@ -183,6 +186,11 @@ const (
 	OutcomeFilesPresent   MarkMissingOutcome = "files-present"
 	OutcomeArchived       MarkMissingOutcome = "archived"
 	OutcomeRemote         MarkMissingOutcome = "remote"
+	// OutcomePromoted and OutcomeDropped answer for an item that keeps a file on disk
+	// while some are gone: an alternate took a gone primary's or part's place, or only
+	// gone alternates lost their rows. The item stays present either way.
+	OutcomePromoted MarkMissingOutcome = "promoted"
+	OutcomeDropped  MarkMissingOutcome = "dropped"
 )
 
 // ScanState tracks where a file is in the scan/analyze lifecycle.
@@ -207,6 +215,26 @@ const (
 // file's container declares its length, where a lossy one's can be an estimate: an
 // MP3 with no Xing header is measured off its first frame's bitrate.
 func LosslessCodec(codec string) bool { return losslessCodecs[strings.ToLower(codec)] }
+
+// CompareQuality orders two encodings by audio quality: lossless before lossy, then the
+// higher sample rate, bit depth and bitrate. It is negative when a is the better file,
+// positive when b is, and 0 for a tie. The upgrade finder ranks with it, and the store
+// picks an item's primary file by it.
+func CompareQuality(a, b File) int {
+	if la, lb := LosslessCodec(a.Codec), LosslessCodec(b.Codec); la != lb {
+		if la {
+			return -1
+		}
+		return 1
+	}
+	if c := cmp.Compare(b.SampleRate, a.SampleRate); c != 0 {
+		return c
+	}
+	if c := cmp.Compare(b.BitDepth, a.BitDepth); c != 0 {
+		return c
+	}
+	return cmp.Compare(b.Bitrate, a.Bitrate)
+}
 
 // losslessCodecs are the codec keys taken as lossless. The float PCM spellings are
 // WaxLabel's own: a float WAV or MOV is uncompressed audio and belongs beside "pcm".

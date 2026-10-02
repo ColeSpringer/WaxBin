@@ -21,10 +21,10 @@ type SearchOptions struct {
 	MaxCandidates int
 
 	// Libraries, when non-empty, scopes the search to items playable from these
-	// libraries: an item counts when its primary backing file lives in one of
-	// them. A fileless item, such as an undownloaded episode, has no library and
-	// drops out of a scoped search (its transcript hits included). An unknown
-	// library pid is an error, not an empty scope.
+	// libraries: an item counts when any of its files, an alternate copy included,
+	// lives in one of them. A fileless item, such as an undownloaded episode, has no
+	// library and drops out of a scoped search (its transcript hits included). An
+	// unknown library pid is an error, not an empty scope.
 	Libraries []model.PID
 
 	// States, when non-empty, narrows the search to items in these lifecycle

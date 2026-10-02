@@ -13,19 +13,21 @@ import (
 var diagSeverities = []model.AuditSeverity{model.SeverityError, model.SeverityWarn, model.SeverityInfo}
 
 // reportFileDiagnostics emits a finding per persisted diagnostic, leaving out
-// corrupt_audio.
+// corrupt_audio and the copy codes.
 //
 // That exclusion keeps one concept to one --check name. model.CheckCorruptAudio
 // already exists, so routing corrupt_audio through here as well would leave
 // `--check corrupt_audio` and `--check file_diagnostic` as two flags for the same
-// thing. CheckCorruptAudio owns the code and dedups its own two halves.
+// thing. CheckCorruptAudio owns the code and dedups its own two halves, and
+// CheckDuplicateCopy lists the files duplicate_copy and alternate_encoding mark.
 func (a *Auditor) reportFileDiagnostics(ds []model.FileDiagnostic, sample int, add func(model.AuditFinding)) {
 	caps := make(map[model.AuditSeverity]*capped, len(diagSeverities))
 	for _, sev := range diagSeverities {
 		caps[sev] = &capped{limit: sample, check: model.CheckFileDiagnostic, sev: sev, add: add}
 	}
 	for _, d := range ds {
-		if d.Code == model.DiagCorruptAudio {
+		switch d.Code {
+		case model.DiagCorruptAudio, model.DiagDuplicateCopy, model.DiagAlternateEncoding:
 			continue
 		}
 		c, ok := caps[d.Severity]

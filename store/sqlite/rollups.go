@@ -220,8 +220,9 @@ LEFT JOIN file f       ON f.id = pf.file_id
 WHERE rg.id /*FILTER*/
 GROUP BY rg.id`
 
-// The genre duration sums ALL of an item's files, not just the primary, so a
-// multi-file audiobook contributes its whole running time (the artist and
+// The genre duration sums ALL of an item's parts, not just the primary, so a
+// multi-file audiobook contributes its whole running time, and none of its alternates,
+// which are copies of audio the item already counts (the artist and
 // release-group rollups join through track, which books never have, so they stay
 // single-file by construction and need no such change). A virtual track has a single
 // primary edge carrying its window, which the effective-duration expression scopes to
@@ -234,7 +235,7 @@ SELECT g.id,
        ?
 FROM genre g
 LEFT JOIN item_genre ig ON ig.genre_id = g.id
-LEFT JOIN item_file pf  ON pf.item_id = ig.item_id
+LEFT JOIN item_file pf  ON pf.item_id = ig.item_id AND pf.role IN ('primary', 'part')
 LEFT JOIN file f        ON f.id = pf.file_id
 WHERE g.id /*FILTER*/
 GROUP BY g.id`

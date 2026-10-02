@@ -220,7 +220,7 @@ WHERE COALESCE(gr.track_count, -1) <>
         (SELECT COUNT(DISTINCT ig.item_id) FROM item_genre ig WHERE ig.genre_id = g.id)
    OR COALESCE(gr.total_duration_ms, -1) <>
         (SELECT COALESCE(SUM(` + itemEffectiveDurationExpr + `), 0) FROM item_genre ig
-           LEFT JOIN item_file pf ON pf.item_id = ig.item_id
+           LEFT JOIN item_file pf ON pf.item_id = ig.item_id AND pf.role IN ('primary', 'part')
            LEFT JOIN file f ON f.id = pf.file_id
          WHERE ig.genre_id = g.id)`
 

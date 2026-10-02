@@ -2251,3 +2251,36 @@ func TestSetItemTagWriteBackRefusesAFormatsOwnSpelling(t *testing.T) {
 		t.Errorf("lost rows = %+v (err %v), want TPE1 recorded as lost", ds, err)
 	}
 }
+
+// TestTitleSortClearLandsBesideALossyValue: a title write-back that lands but cannot keep
+// another value (a track number past what an MP4 holds) still cleared TITLESORT from the
+// file, so the catalog drops it too and nothing owes it.
+func TestTitleSortClearLandsBesideALossyValue(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	m4a := filepath.Join(root, "sample.m4a")
+	writeFile(t, m4a, testaudio.Fixture(t, "sample.m4a"))
+	if _, err := meta.NewWriter().Apply(ctx, m4a, []meta.TagEdit{
+		{Key: "TITLE", Values: []string{"Sample"}}, {Key: "TITLESORT", Values: []string{"Old Sort"}},
+	}); err != nil {
+		t.Fatalf("stage m4a: %v", err)
+	}
+	lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), root)
+	scanLib(t, ctx, lib)
+	pid := itemPIDByTitle(t, ctx, lib, "Sample")
+
+	err := lib.EditFields(ctx, pid, map[string]string{"title": "New", "track_no": "70000"},
+		waxbin.EditOptions{Lock: model.LockOn, WriteBack: true})
+	var wb *waxbin.WriteBackError
+	if !errors.As(err, &wb) || len(wb.Failures) != 1 {
+		t.Fatalf("edit = %v, want the lossy track number reported", err)
+	}
+	fm, err := meta.NewReader().Read(ctx, m4a)
+	if err != nil || fm.Tags.Title != "New" || len(fm.Tags.Custom["TITLESORT"]) != 0 {
+		t.Fatalf("file tags = %+v (err %v), want the new title and no TITLESORT", fm.Tags, err)
+	}
+	tags, err := lib.ItemTags(ctx, pid)
+	if err != nil || slices.ContainsFunc(tags, func(it model.ItemTag) bool { return it.Key == "TITLESORT" }) {
+		t.Errorf("catalog tags = %+v (err %v), want TITLESORT dropped with the file's", tags, err)
+	}
+}

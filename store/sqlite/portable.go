@@ -249,12 +249,13 @@ func (s *Store) ItemIdentitiesByPIDs(ctx context.Context, pids []model.PID) ([]m
 // It returns nil for an empty term set, because IN () is a SQLite syntax error and a
 // zero-term (short/corrupt) fingerprint has nothing to match anyway.
 //
-// The primary-file join is gated on pf.start_frames IS NULL, mirroring the export side: a
+// The item join is gated on pf.start_frames IS NULL, mirroring the export side: a
 // single-file CUE album's shared file is backed by N virtual-track primary edges, so an
 // ungated join would fan every term row out N-fold (inflating the shared count) and
 // collapse to an arbitrary sibling under GROUP BY. Gating to whole-file edges yields one
-// (or zero) primary row per file, so the count is exact and a virtual-track-backed file
-// resolves to an empty item pid (skipped by the caller), never an arbitrary sibling.
+// (or zero) row per file, primary or alternate (a whole-file edge belongs to one item),
+// so the count is exact and a virtual-track-backed file resolves to an empty item pid
+// (skipped by the caller), never an arbitrary sibling.
 func (s *Store) FingerprintCandidatesByProbe(ctx context.Context, kind model.Kind, algo, bucketLo, bucketHi int, terms []int64, minShared int) ([]model.FingerprintCandidate, error) {
 	const op = "store.FingerprintCandidatesByProbe"
 	if len(terms) == 0 {
@@ -279,7 +280,7 @@ SELECT f.pid, COALESCE(pi.pid, ''), cf.fp, cf.algo_version, COUNT(*) AS shared
 FROM fingerprint_term ct
 JOIN fingerprint cf        ON cf.file_id = ct.file_id
 JOIN file f                ON f.id = ct.file_id
-LEFT JOIN item_file pf     ON pf.file_id = f.id AND pf.role = 'primary' AND pf.start_frames IS NULL
+LEFT JOIN item_file pf     ON pf.file_id = f.id AND pf.role IN ('primary', 'alternate') AND pf.start_frames IS NULL
 LEFT JOIN playable_item pi ON pi.id = pf.item_id
 WHERE ct.term IN ` + placeholders(len(terms)) + `
   AND cf.algo_version = ?

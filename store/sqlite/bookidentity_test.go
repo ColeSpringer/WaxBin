@@ -151,15 +151,16 @@ func (h *warnRecorder) Handle(_ context.Context, r slog.Record) error {
 	return nil
 }
 
-func (h *warnRecorder) has(sub string) bool {
+func (h *warnRecorder) count(sub string) int {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	n := 0
 	for _, m := range h.msgs {
 		if strings.Contains(m, sub) {
-			return true
+			n++
 		}
 	}
-	return false
+	return n
 }
 
 // TestBookASINHeldByTwoBooksAdoptsTheLowest: nothing enforces uniqueness on book.asin,
@@ -202,8 +203,8 @@ func TestBookASINHeldByTwoBooksAdoptsTheLowest(t *testing.T) {
 	if part.ItemPID != older.ItemPID {
 		t.Errorf("item pid = %s, want the lowest-id holder %s", part.ItemPID, older.ItemPID)
 	}
-	if !rec.has("book identifier held by more than one matching book") {
-		t.Errorf("the ambiguous ASIN was adopted silently; logged %v", rec.msgs)
+	if n := rec.count("book identifier held by more than one matching book"); n != 1 {
+		t.Errorf("the ambiguous ASIN was logged %d times for one put, want once; logged %v", n, rec.msgs)
 	}
 	assertVerifyClean(t, st)
 }

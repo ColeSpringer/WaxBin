@@ -186,6 +186,17 @@ type ScanItemResult struct {
 	// catalog-only edit the file does not carry, or a value the reader now derives
 	// differently. It can be set over unchanged audio bytes, which is a forced rescan.
 	MetadataChanged bool
+	// AttachedAsCopy reports that the file is an alternate of an existing item: the same
+	// audio as the item's primary, or another encoding of its recording. ItemPID names
+	// that item, whose metadata the file's tags did not touch.
+	AttachedAsCopy bool
+	// Joined reports that this write made the file an alternate it was not already: a
+	// new copy, a row no item held, or a part folded into the copy it always was. A copy
+	// read again, or followed to a new path, is not joined.
+	Joined bool
+	// Promoted lists alternates the write promoted on another item that lost this file
+	// (a re-encoded primary re-keyed away), for the caller to re-read.
+	Promoted []PromotedFile
 }
 
 // ItemFileRef is one backing file of an item, in reading order. organize uses it
@@ -196,12 +207,18 @@ type ItemFileRef struct {
 	Path        []byte // raw bytes of the current path
 	DisplayPath string
 	Position    int
-	// Role is the file's edge role, "primary" or "part". It is not derivable from
-	// Position: the primary is whichever part was attached first on the create path,
-	// or the lowest-positioned survivor after a primary is detached, so neither rule
-	// makes it part one. A consumer needs it to tell which part the primary-file
-	// reads (Peaks, Loudness) answered for.
+	// Role is the file's edge role: "primary", "part", or "alternate" for a file that
+	// backs the item without owning its metadata (a copy of its audio, or a lesser
+	// encoding of its recording; a book's copy of a part shares that part's Position).
+	// It is not derivable from Position: the primary is whichever part was attached
+	// first on the create path, or the lowest-positioned survivor after a primary is
+	// detached, so neither rule makes it part one. A consumer needs it to tell which
+	// part the primary-file reads (Peaks, Loudness) answered for.
 	Role string
+	// LibraryPID is the library the file sits in, which for an alternate can differ from
+	// its item's (ItemView.LibraryPID follows the primary), so a host can serve a file
+	// inside a user's library grant.
+	LibraryPID PID
 }
 
 // RelocateInput records a completed filesystem move so the store can update the
@@ -414,9 +431,11 @@ type Catalog interface {
 	LoadScopedFileIndex(ctx context.Context, libraryID int64, scopePrefix []byte) (map[string]ScopedFile, error)
 	// MarkFilesMissing marks the items backing the given files as missing, but only
 	// when every file of an item is in the set (so a multi-file book that lost one
-	// part stays present). Rows are preserved, so a rescan restores present state.
-	// Returns the number of items newly marked missing.
-	MarkFilesMissing(ctx context.Context, filePIDs []PID) (int, error)
+	// part stays present). Rows are preserved, so a rescan restores present state. An
+	// item that keeps a file on disk instead promotes an alternate in place of a gone
+	// primary or part and drops a gone alternate's row; the promoted files are for the
+	// caller to re-read.
+	MarkFilesMissing(ctx context.Context, filePIDs []PID) (*MissingResult, error)
 	// MarkItemMissing marks one item missing by pid, whatever its files say, for a
 	// caller that already knows the bytes are gone. It shares MarkFilesMissing's
 	// idempotence and preserved rows, and owns the state rule: present flips and
@@ -455,8 +474,8 @@ type Catalog interface {
 	QueryItems(ctx context.Context, q query.Query, userPID PID) ([]*ItemView, error)
 	CountItems(ctx context.Context, q query.Query, userPID PID) (int, error)
 	ItemByPID(ctx context.Context, pid PID) (*ItemView, error)
-	// ItemFiles returns every file backing an item in reading order (one for a
-	// track or single-file book, all parts for a multi-file book).
+	// ItemFiles returns every file backing an item: its parts in reading order (one for
+	// a track or single-file book, all parts for a multi-file book), then its alternates.
 	ItemFiles(ctx context.Context, pid PID) ([]ItemFileRef, error)
 
 	// Two-phase organize journaling: PlanMove records a 'planned' organize_journal

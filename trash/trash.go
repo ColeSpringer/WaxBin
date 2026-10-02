@@ -20,8 +20,8 @@ import (
 
 // Store is the persistence the deletion service needs (satisfied by store/sqlite).
 type Store interface {
-	TrashFile(ctx context.Context, in model.TrashFileInput) (model.PID, error)
-	DetachFile(ctx context.Context, filePID model.PID) error
+	TrashFile(ctx context.Context, in model.TrashFileInput) (*model.DetachResult, error)
+	DetachFile(ctx context.Context, filePID model.PID) (*model.DetachResult, error)
 	// ItemFiles returns every file backing an item, so a multi-file book's parts are
 	// all planned for deletion, not just the representative primary.
 	ItemFiles(ctx context.Context, itemPID model.PID) ([]model.ItemFileRef, error)
@@ -99,6 +99,9 @@ type Report struct {
 	// execution skipped; these never became actions at all.
 	SkippedPodcast  int
 	SkippedReadOnly int
+	// Promoted lists the alternates that took a removed file's place, for the caller
+	// to re-read once the run is over.
+	Promoted []model.PromotedFile
 }
 
 // Failure records one deletion that could not be applied.
@@ -110,9 +113,10 @@ type Failure struct {
 
 // Plan computes the deletion for each item under the mode. Every backing file is
 // planned, so a multi-file book is removed in full rather than losing only its
-// primary part. An item with no backing file is skipped; a trashed file's
-// destination is placed in its library's trash directory under a unique
-// sub-directory so same-named files never collide.
+// primary part, and an item's alternates go with it. A file in a read-only library is
+// planned as a skip, which leaves the item on that file. An item with no backing file
+// is skipped; a trashed file's destination is placed in its library's trash directory
+// under a unique sub-directory so same-named files never collide.
 func (s *Service) Plan(ctx context.Context, libs []*model.Library, items []*model.ItemView, mode model.DeleteMode) (*Plan, error) {
 	if !mode.Valid() {
 		return nil, waxerr.New(waxerr.CodeInvalid, "trash.Plan", "invalid delete mode: "+string(mode))
@@ -127,20 +131,48 @@ func (s *Service) Plan(ctx context.Context, libs []*model.Library, items []*mode
 			if fl.FilePID == "" || fl.DisplayPath == "" {
 				continue
 			}
-			a := Action{ItemPID: it.PID, FilePID: fl.FilePID, Src: fl.DisplayPath, SrcBytes: fl.Path}
-			root, ok := rootFor(libs, fl.DisplayPath)
-			if !ok {
-				a.Skip, a.Reason = true, "file is not under a known library root"
-				plan.Actions = append(plan.Actions, a)
-				continue
-			}
-			if !mode.BypassesTrash() {
-				a.TrashDst = filepath.Join(root, model.TrashDirName, model.NewPID().String(), filepath.Base(fl.DisplayPath))
-			}
-			plan.Actions = append(plan.Actions, a)
+			plan.Actions = append(plan.Actions, planFile(libs, it.PID, fl, mode))
 		}
 	}
 	return plan, nil
+}
+
+// FileTarget is one file to delete on its own and the item it backs.
+type FileTarget struct {
+	ItemPID model.PID
+	File    model.ItemFileRef
+}
+
+// PlanFiles computes the deletion of single files under the mode: an alternate goes
+// alone, and a primary or part gives its place to an alternate when the item has one.
+func (s *Service) PlanFiles(libs []*model.Library, targets []FileTarget, mode model.DeleteMode) (*Plan, error) {
+	if !mode.Valid() {
+		return nil, waxerr.New(waxerr.CodeInvalid, "trash.PlanFiles", "invalid delete mode: "+string(mode))
+	}
+	plan := &Plan{Mode: mode}
+	for _, t := range targets {
+		plan.Actions = append(plan.Actions, planFile(libs, t.ItemPID, t.File, mode))
+	}
+	return plan, nil
+}
+
+// planFile plans one file's deletion.
+func planFile(libs []*model.Library, item model.PID, fl model.ItemFileRef, mode model.DeleteMode) Action {
+	a := Action{ItemPID: item, FilePID: fl.FilePID, Src: fl.DisplayPath, SrcBytes: fl.Path}
+	lib, ok := libFor(libs, fl.DisplayPath)
+	switch {
+	case !ok:
+		a.Skip, a.Reason = true, "file is not under a known library root"
+	case lib.ReadOnly:
+		a.Skip, a.Reason = true, "library is read-only"
+	case !mode.BypassesTrash():
+		root := lib.DisplayRoot
+		if root == "" {
+			root = string(lib.Root)
+		}
+		a.TrashDst = filepath.Join(root, model.TrashDirName, model.NewPID().String(), filepath.Base(fl.DisplayPath))
+	}
+	return a
 }
 
 // Execute applies the plan. A per-action failure is recorded and does not abort
@@ -157,7 +189,8 @@ func (s *Service) Execute(ctx context.Context, plan *Plan) (*Report, error) {
 			rep.Skipped++
 			continue
 		}
-		size, err := s.apply(ctx, a, plan.Mode)
+		size, promoted, err := s.apply(ctx, a, plan.Mode)
+		rep.Promoted = append(rep.Promoted, promoted...)
 		if err != nil {
 			rep.Errored++
 			rep.Failures = append(rep.Failures, Failure{FilePID: a.FilePID, Src: a.Src, Err: err.Error()})
@@ -177,32 +210,38 @@ func (s *Service) Execute(ctx context.Context, plan *Plan) (*Report, error) {
 // apply performs one deletion. For the trash mode it moves the file into the
 // trash and then records the journal row; if the catalog write fails after the
 // move, the file is moved back so disk and catalog stay consistent. For a bypass
-// mode it removes the file and then detaches it.
-func (s *Service) apply(ctx context.Context, a *Action, mode model.DeleteMode) (int64, error) {
+// mode it removes the file and then detaches it. It returns the alternates promoted in
+// the file's place.
+func (s *Service) apply(ctx context.Context, a *Action, mode model.DeleteMode) (int64, []model.PromotedFile, error) {
 	size := onDiskSize(a.Src)
 	if mode.BypassesTrash() {
 		if err := os.Remove(pathx.Long(a.Src)); err != nil && !os.IsNotExist(err) {
-			return 0, waxerr.Wrap(waxerr.CodeIO, "trash.delete", err)
+			return 0, nil, waxerr.Wrap(waxerr.CodeIO, "trash.delete", err)
 		}
-		return size, s.store.DetachFile(ctx, a.FilePID)
+		res, err := s.store.DetachFile(ctx, a.FilePID)
+		if err != nil {
+			return size, nil, err
+		}
+		return size, res.Promoted, nil
 	}
 
 	// fsx.Move creates the unique trash sub-directory and is long-path-safe.
 	if err := fsx.Move(a.Src, a.TrashDst); err != nil {
-		return 0, waxerr.Wrap(waxerr.CodeIO, "trash.move", err)
+		return 0, nil, waxerr.Wrap(waxerr.CodeIO, "trash.move", err)
 	}
-	if _, err := s.store.TrashFile(ctx, model.TrashFileInput{
+	res, err := s.store.TrashFile(ctx, model.TrashFileInput{
 		FilePID: a.FilePID, Reason: mode.Reason(),
 		TrashPath: []byte(a.TrashDst), TrashDisplay: a.TrashDst,
-	}); err != nil {
+	})
+	if err != nil {
 		// Put the file back so a failed catalog write does not strand it in the trash.
 		if back := fsx.Move(a.TrashDst, a.Src); back != nil {
 			s.log.Error("trashed file stranded: catalog write and rollback both failed",
 				"file", a.Src, "trash", a.TrashDst, "err", back)
 		}
-		return 0, err
+		return 0, nil, err
 	}
-	return size, nil
+	return size, res.Promoted, nil
 }
 
 // Restore ensures a trashed file is back at its original path. It is idempotent:
@@ -246,18 +285,18 @@ func (s *Service) Purge(entry model.TrashEntry) (int64, error) {
 	return size, nil
 }
 
-// rootFor returns the library root that contains path.
-func rootFor(libs []*model.Library, path string) (string, bool) {
+// libFor returns the library whose root contains path.
+func libFor(libs []*model.Library, path string) (*model.Library, bool) {
 	for _, lib := range libs {
 		root := lib.DisplayRoot
 		if root == "" {
 			root = string(lib.Root)
 		}
 		if pathx.UnderRoot(root, path) {
-			return root, true
+			return lib, true
 		}
 	}
-	return "", false
+	return nil, false
 }
 
 func onDiskSize(path string) int64 {

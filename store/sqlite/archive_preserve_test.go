@@ -70,7 +70,7 @@ func TestDetachFilePreservesPlayState(t *testing.T) {
 	seedPlayState(t, ctx, st, r.ItemPID)
 
 	seq0, _ := st.LatestChangeSeq(ctx)
-	if err := st.DetachFile(ctx, r.FilePID); err != nil {
+	if _, err := st.DetachFile(ctx, r.FilePID); err != nil {
 		t.Fatalf("DetachFile: %v", err)
 	}
 

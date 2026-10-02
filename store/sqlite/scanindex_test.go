@@ -2,6 +2,8 @@ package sqlite
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/colespringer/waxbin/model"
@@ -60,11 +62,11 @@ func TestMarkFilesMissing(t *testing.T) {
 	b := putTrack(t, st, lib.ID, trackSpec{path: "/lib/b.mp3", essence: "eb", content: "cb", title: "B"})
 
 	// Mark A's file missing; A must go to state 'missing', B stays present.
-	n, err := st.MarkFilesMissing(ctx, []model.PID{a.FilePID})
+	r, err := st.MarkFilesMissing(ctx, []model.PID{a.FilePID})
 	if err != nil {
 		t.Fatalf("mark missing: %v", err)
 	}
-	if n != 1 {
+	if n := r.Marked; n != 1 {
 		t.Fatalf("marked %d items, want 1", n)
 	}
 	if s := itemState(t, st, a.ItemPID); s != string(model.StateMissing) {
@@ -75,11 +77,11 @@ func TestMarkFilesMissing(t *testing.T) {
 	}
 
 	// Idempotent: re-marking A yields no newly-marked items.
-	n, err = st.MarkFilesMissing(ctx, []model.PID{a.FilePID})
+	r, err = st.MarkFilesMissing(ctx, []model.PID{a.FilePID})
 	if err != nil {
 		t.Fatalf("re-mark: %v", err)
 	}
-	if n != 0 {
+	if n := r.Marked; n != 0 {
 		t.Errorf("re-mark marked %d, want 0 (idempotent)", n)
 	}
 }
@@ -90,14 +92,15 @@ func TestMarkFilesMissingMultiFileBook(t *testing.T) {
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 
-	p1 := putBookPart(t, st, lib.ID, "/lib/book/p1.m4b", "bk1", "e1", 0)
-	putBookPart(t, st, lib.ID, "/lib/book/p2.m4b", "bk1", "e2", 1)
+	dir := t.TempDir()
+	p1 := putBookPart(t, st, lib.ID, realFile(t, filepath.Join(dir, "p1.m4b")), "bk1", "e1", 0)
+	putBookPart(t, st, lib.ID, realFile(t, filepath.Join(dir, "p2.m4b")), "bk1", "e2", 1)
 
-	n, err := st.MarkFilesMissing(ctx, []model.PID{p1.FilePID})
+	r, err := st.MarkFilesMissing(ctx, []model.PID{p1.FilePID})
 	if err != nil {
 		t.Fatalf("mark missing: %v", err)
 	}
-	if n != 0 {
+	if n := r.Marked; n != 0 {
 		t.Fatalf("marked %d, want 0 (book keeps a present part)", n)
 	}
 	if s := itemState(t, st, p1.ItemPID); s != string(model.StatePresent) {
@@ -110,11 +113,11 @@ func TestMarkFilesMissingMultiFileBook(t *testing.T) {
 	for _, f := range p2Files {
 		pids = append(pids, f.FilePID)
 	}
-	n, err = st.MarkFilesMissing(ctx, pids)
+	r, err = st.MarkFilesMissing(ctx, pids)
 	if err != nil {
 		t.Fatalf("mark all: %v", err)
 	}
-	if n != 1 {
+	if n := r.Marked; n != 1 {
 		t.Fatalf("marked %d, want 1 (all parts gone)", n)
 	}
 	if s := itemState(t, st, p1.ItemPID); s != string(model.StateMissing) {
@@ -181,7 +184,7 @@ func TestMarkItemMissingRefusesFilelessStates(t *testing.T) {
 	ctx := context.Background()
 
 	gone := putTrack(t, st, lib.ID, trackSpec{path: "/lib/a.mp3", essence: "ea", content: "ca", title: "A"})
-	if err := st.DetachFile(ctx, gone.FilePID); err != nil {
+	if _, err := st.DetachFile(ctx, gone.FilePID); err != nil {
 		t.Fatalf("detach: %v", err)
 	}
 	res, err := st.UpsertFeed(ctx, model.UpsertFeedInput{
@@ -314,6 +317,19 @@ func latestSeq(t *testing.T, st *Store) int64 {
 }
 
 // putBookPart persists one part of a multi-file book keyed by bookKey.
+// realFile creates an empty file at path and returns the path, for a fixture whose files
+// must read as present.
+func realFile(t *testing.T, path string) string {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
 func putBookPart(t *testing.T, st *Store, libID int64, path, bookKey, essence string, position int) *model.ScanItemResult {
 	t.Helper()
 	in := model.PutScannedBookInput{

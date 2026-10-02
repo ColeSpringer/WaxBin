@@ -101,6 +101,16 @@ const (
 	// tries fpcalc on it again; the row goes once one succeeds, or once a run finds no
 	// fpcalc at all. It is the analyze origin's, at Info.
 	DiagFingerprintFallback DiagnosticCode = "fingerprint_fallback"
+	// DiagDuplicateCopy marks a file with the same audio as its item's primary file,
+	// attached to the item as an alternate rather than given an item of its own. Its
+	// tags do not describe the item. Detail names the primary's path. It is the scan
+	// origin's, at Info.
+	DiagDuplicateCopy DiagnosticCode = "duplicate_copy"
+	// DiagAlternateEncoding marks a file holding another encoding of its item's
+	// recording (the same MusicBrainz recording id, different audio) that ranked below
+	// the primary, a writable library first and then quality, so it is attached as an
+	// alternate. Detail names the primary's path. It is the scan origin's, at Info.
+	DiagAlternateEncoding DiagnosticCode = "alternate_encoding"
 )
 
 // The DiagTagWriteOwed keys other than an item field or a credit: the item's front cover,
@@ -122,7 +132,8 @@ func (c DiagnosticCode) Valid() bool {
 	switch c {
 	case DiagUnsupportedFormat, DiagLegacyOnlyTags, DiagLyricsPartial, DiagSidecarSkipped,
 		DiagCueTrackDropped, DiagTagWriteLost, DiagTagWriteUnsynced, DiagTagWriteOwed,
-		DiagCorruptAudio, DiagSortNameFallback, DiagFingerprintFallback:
+		DiagCorruptAudio, DiagSortNameFallback, DiagFingerprintFallback, DiagDuplicateCopy,
+		DiagAlternateEncoding:
 		return true
 	default:
 		return false

@@ -247,11 +247,19 @@ func TestPutScannedTrackKeepsDuplicateCopies(t *testing.T) {
 	if rA.FilePID == rB.FilePID {
 		t.Fatalf("duplicate copies should have distinct file pids: %s", rA.FilePID)
 	}
-	if _, err := st.FileByPath(ctx, []byte(pathA)); err != nil {
-		t.Fatalf("original copy missing from catalog: %v", err)
+	if !rB.AttachedAsCopy || rB.ItemPID != rA.ItemPID {
+		t.Fatalf("copy = %+v, want it attached to %s", rB, rA.ItemPID)
 	}
-	if _, err := st.FileByPath(ctx, []byte(pathB)); err != nil {
-		t.Fatalf("new copy missing from catalog: %v", err)
+	refs, err := st.ItemFiles(ctx, rA.ItemPID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	roles := map[model.PID]string{}
+	for _, r := range refs {
+		roles[r.FilePID] = r.Role
+	}
+	if len(roles) != 2 || roles[rA.FilePID] != "primary" || roles[rB.FilePID] != "alternate" {
+		t.Fatalf("edges = %v, want the original primary and the copy alternate", roles)
 	}
 }
 

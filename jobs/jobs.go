@@ -6,6 +6,7 @@ package jobs
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -62,8 +63,9 @@ type Spec struct {
 }
 
 // Run acquires the lease for spec.Scope, creates a running job, invokes fn, then
-// finalizes the job (done/failed) and releases the lease. It returns
-// CodeConflict if the scope is already leased. A panic from fn is recovered,
+// finalizes the job and releases the lease. It returns CodeConflict if the scope is
+// already leased. A run ends done, or canceled when its context was canceled and fn
+// returned that cancel (CodeCanceled, or the context's own error), else failed. A panic from fn is recovered,
 // recorded as a failed job, and returned as a CodeInternal error rather than
 // propagating to the caller. Finalization uses a cancel-free context so a
 // canceled or panicked run still records its terminal state and frees the lease.
@@ -96,10 +98,14 @@ func (m *Manager) Run(ctx context.Context, spec Spec, fn func(context.Context, *
 	}()
 
 	runErr := fn(ctx, &Handle{mgr: m, job: job})
-	if runErr != nil {
-		m.finalize(cleanup, job, kind, model.JobFailed, runErr.Error())
-	} else {
+	switch {
+	case runErr == nil:
 		m.finalize(cleanup, job, kind, model.JobDone, "")
+	case ctx.Err() != nil && (waxerr.Is(runErr, waxerr.CodeCanceled) ||
+		errors.Is(runErr, context.Canceled) || errors.Is(runErr, context.DeadlineExceeded)):
+		m.finalize(cleanup, job, kind, model.JobCanceled, "interrupted before it finished")
+	default:
+		m.finalize(cleanup, job, kind, model.JobFailed, runErr.Error())
 	}
 	return job, runErr
 }

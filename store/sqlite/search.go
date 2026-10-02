@@ -60,18 +60,17 @@ const searchDisplayJoins = `
 // on different columns and disagree about whether the join is wanted when nothing
 // narrows at all. For libIDs=[7] and states=[present remote] it returns:
 //
-//	` AND pi.state IN (?,?)
-//		JOIN item_file spf ON spf.item_id = pi.id AND spf.role = 'primary'
-//		JOIN file sf ON sf.id = spf.file_id AND sf.library_id IN (?)`
+//	` AND pi.state IN (?,?) AND pi.id IN (SELECT spf.item_id FROM file sf
+//		JOIN item_file spf ON spf.file_id = sf.id WHERE sf.library_id IN (?))`
 //
-// The states ride the pi join's ON clause, so they must come before the scope
-// joins: the ON clause ends at the next JOIN keyword. pi is INNER-joined in both
-// rungs, so ON and WHERE are equivalent here, and keeping both narrowings in one
-// contiguous fragment is what makes the bind order fall out of fragment order.
+// Both narrowings ride the pi join's ON clause. pi is INNER-joined in both rungs, so ON
+// and WHERE are equivalent here, and keeping them in one contiguous fragment is what
+// makes the bind order fall out of fragment order.
 //
-// The library joins are INNER for the usual reason: an item whose primary backing
-// file lives elsewhere, or that has no file at all (an undownloaded episode),
-// drops out of a scoped search. Either half being empty contributes nothing.
+// An item counts in a library when any of its files lives there, its alternates'
+// included, so a host scoping by library finds it wherever it can serve a file. One with
+// no file at all (an undownloaded episode) drops out of a scoped search. The membership
+// subquery seeks file_library once. Either half being empty contributes nothing.
 func searchNarrow(libIDs []int64, states []model.ItemState) (string, []any) {
 	if len(libIDs) == 0 && len(states) == 0 {
 		return "", nil
@@ -87,9 +86,8 @@ func searchNarrow(libIDs []int64, states []model.ItemState) (string, []any) {
 		}
 	}
 	if len(libIDs) > 0 {
-		frag += `
-		JOIN item_file spf ON spf.item_id = pi.id AND spf.role = 'primary'
-		JOIN file sf ON sf.id = spf.file_id AND sf.library_id IN ` + placeholders(len(libIDs))
+		frag += ` AND pi.id IN (SELECT spf.item_id FROM file sf
+		JOIN item_file spf ON spf.file_id = sf.id WHERE sf.library_id IN ` + placeholders(len(libIDs)) + `)`
 		for _, id := range libIDs {
 			args = append(args, id)
 		}

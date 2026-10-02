@@ -83,7 +83,8 @@ func newImportCmd(g *globals) *cobra.Command {
 	f.StringVar(&sourceID, "source-id", "", "provider-native source id recorded as provenance")
 	f.StringVar(&provider, "provider", "", "provider name recorded as provenance")
 	f.StringVar(&profile, "profile", "", "organization profile (track/book)")
-	f.StringVar(&dup, "dup", "skip", "duplicate policy: skip|allow (track/book)")
+	f.StringVar(&dup, "dup", "skip",
+		"duplicate policy (track/book): skip leaves audio the catalog holds; allow imports it as a copy that joins the item already holding it")
 	f.BoolVar(&asCopy, "copy", false, "copy the file instead of moving it")
 	f.BoolVar(&apply, "apply", false, "execute a track/book import (default is a review)")
 	f.StringVar(&showPID, "show", "", "target show pid for an episode (default: a new manual show)")

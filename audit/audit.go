@@ -47,6 +47,8 @@ type Store interface {
 	// FilesDurationMismatch returns a sample (up to limit) of files whose header
 	// duration disagrees with their decoded length, plus the total count.
 	FilesDurationMismatch(ctx context.Context, limit, offset int) ([]model.FileDurationMismatch, int, error)
+	// ItemsWithCopies returns every item holding an alternate file, with all its files.
+	ItemsWithCopies(ctx context.Context) ([]model.ItemCopies, error)
 }
 
 // Hasher recomputes a file's content hash for the integrity (bitrot) check.
@@ -187,6 +189,11 @@ func (a *Auditor) Run(ctx context.Context, cfg Config) (*Report, error) {
 	}
 	if a.runs(cfg, model.CheckDurationMismatch) {
 		if err := a.checkDurationMismatch(ctx, sample, add); err != nil {
+			return nil, err
+		}
+	}
+	if a.runs(cfg, model.CheckDuplicateCopy) {
+		if err := a.checkDuplicateCopies(ctx, sample, add); err != nil {
 			return nil, err
 		}
 	}
@@ -413,6 +420,63 @@ func (a *Auditor) checkDurationMismatch(ctx context.Context, sample int, add fun
 		})
 	}
 	return nil
+}
+
+// checkDuplicateCopies lists the alternate files items hold, at info: one finding per
+// alternate up to the sample, naming its path, size and reason and the item's primary,
+// then a roll-up of the rest. A copy of a rip backs every one of its tracks and is
+// listed once, under the first.
+func (a *Auditor) checkDuplicateCopies(ctx context.Context, sample int, add func(model.AuditFinding)) error {
+	items, err := a.store.ItemsWithCopies(ctx)
+	if err != nil {
+		return err
+	}
+	c := &capped{limit: sample, check: model.CheckDuplicateCopy, sev: model.SeverityInfo, add: add}
+	seen := map[model.PID]bool{}
+	holders := 0
+	for _, it := range items {
+		primary := ""
+		for _, f := range it.Files {
+			if f.Role == "primary" {
+				primary = f.DisplayPath
+			}
+		}
+		held := false
+		for _, f := range it.Files {
+			if f.Reason == "" || seen[f.FilePID] {
+				continue
+			}
+			seen[f.FilePID], held = true, true
+			c.emit(model.AuditFinding{
+				Check:    model.CheckDuplicateCopy,
+				Severity: model.SeverityInfo,
+				Message: string(f.Reason) + " of " + it.Title + ": " + f.DisplayPath + " (" + sizeText(f.Size) +
+					"), beside the primary " + primary,
+				Entities: []model.PID{it.ItemPID},
+				Path:     f.DisplayPath,
+				FilePID:  f.FilePID,
+			})
+		}
+		if held {
+			holders++
+		}
+	}
+	c.summary("copies on " + strconv.Itoa(holders) + " items")
+	return nil
+}
+
+// sizeText renders a byte count in the largest unit that keeps it at least 1, to one
+// decimal place.
+func sizeText(n int64) string {
+	units := []string{"B", "KB", "MB", "GB", "TB"}
+	v, u := float64(n), 0
+	for v >= 1000 && u < len(units)-1 {
+		v, u = v/1000, u+1
+	}
+	if u == 0 {
+		return strconv.FormatInt(n, 10) + " B"
+	}
+	return strconv.FormatFloat(v, 'f', 1, 64) + " " + units[u]
 }
 
 // clockMS renders a length as m:ss, or h:mm:ss from an hour up.

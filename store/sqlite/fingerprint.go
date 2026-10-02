@@ -56,11 +56,24 @@ func (s *Store) FilesNeedingAnalysis(ctx context.Context, algoVersion int, after
 // while its measuring decode failed. Silence measures fine and stores no loudness
 // row, so testing for a missing loudness row instead would re-decode every silent
 // file on every run.
+//
+// An alternate holding the audio of its primary or a part is left out
+// (sameAudioAlternateExpr): its measurements would be that file's, and it is analyzed
+// once a loss promotes it.
+// Another encoding is analyzed, since its fingerprint and loudness are its own.
 const needsAnalysisPredicate = `kind = 'audio' AND essence_hash IS NOT NULL AND
-	library_id NOT IN (SELECT id FROM library WHERE mode = 'podcast') AND (
+	library_id NOT IN (SELECT id FROM library WHERE mode = 'podcast') AND
+	NOT ` + sameAudioAlternateExpr + ` AND (
 	analyzed_essence IS NULL OR analyzed_essence <> essence_hash OR
 	analysis_version IS NULL OR analysis_version <> ? OR
 	measured_essence IS NULL OR measured_essence <> essence_hash)`
+
+// sameAudioAlternateExpr is true for a file (the file table, unaliased) that is an
+// alternate of an item whose primary or one of whose parts holds the same audio.
+const sameAudioAlternateExpr = `EXISTS (SELECT 1 FROM item_file sa
+	JOIN item_file sp ON sp.item_id = sa.item_id AND sp.role IN ('primary', 'part')
+	JOIN file spf ON spf.id = sp.file_id
+	WHERE sa.file_id = file.id AND sa.role = 'alternate' AND spf.essence_hash = file.essence_hash)`
 
 // CountFilesNeedingAnalysis returns how many audio files need (re)analysis at the
 // given algorithm version. The analyze pass takes this once up front to report a
@@ -262,8 +275,8 @@ JOIN fingerprint cf       ON cf.file_id = ct.file_id
                          AND cf.algo_version = qf.algo_version
                          AND cf.duration_bucket BETWEEN qf.duration_bucket - 1 AND qf.duration_bucket + 1
 JOIN file f               ON f.id = ct.file_id
-LEFT JOIN item_file pf    ON pf.file_id = f.id AND pf.role = 'primary'
-LEFT JOIN playable_item pi ON pi.id = pf.item_id
+JOIN item_file pf         ON pf.file_id = f.id AND pf.role IN ('primary', 'alternate') AND pf.start_frames IS NULL
+JOIN playable_item pi     ON pi.id = pf.item_id
 WHERE qt.file_id = (SELECT id FROM file WHERE pid = ?)
 GROUP BY ct.file_id
 HAVING shared >= ?

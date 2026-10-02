@@ -373,7 +373,7 @@ func fileByPathTx(ctx context.Context, q queryer, path []byte) (*model.File, err
 // Two residuals on Windows, both of which read as a new file and leave a duplicate row
 // the audit's path_conflict check reports. A case-only rename of a deep component is
 // not recognized, because the essence re-link that would catch it is gated on the old
-// path no longer existing (!pathExists in resolveFile) and the old path still resolves.
+// path no longer existing (fileByEssenceGoneTx) and the old path still resolves.
 // And a scan sub-path re-spells whatever lies below the root: scan.Scan canonicalizes
 // the root prefix only, so `--sub-path C:\Music\someartist` against a stored
 // SomeArtist walks and stores the typed casing. Canonicalizing that would mean
@@ -385,32 +385,6 @@ func fileByPathDB(ctx context.Context, q queryer, path []byte) (*model.File, err
 		return nil, nil
 	}
 	return f, err
-}
-
-// fileByEssenceSingleTx returns the unique file in a library with the given
-// essence hash. It returns nil (no error) when there is no match or more than
-// one (ambiguous: do not auto re-link).
-func fileByEssenceSingleTx(ctx context.Context, q queryer, essence string, libraryID int64) (*model.File, error) {
-	rows, err := q.QueryContext(ctx, fileSelect+" WHERE essence_hash = ? AND library_id = ? LIMIT 2", essence, libraryID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var matches []*model.File
-	for rows.Next() {
-		f, err := scanFile(rows)
-		if err != nil {
-			return nil, err
-		}
-		matches = append(matches, f)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	if len(matches) != 1 {
-		return nil, nil
-	}
-	return matches[0], nil
 }
 
 func insertFileRow(ctx context.Context, tx *sql.Tx, libraryID int64, pid model.PID, f model.File, now int64) (int64, error) {
@@ -585,15 +559,25 @@ func adoptBookItemByEditionTx(ctx context.Context, tx *sql.Tx, identityKey strin
 //
 // A book whose key matches nothing gets a second look by its strong identifier, so an
 // enrichment-derived ASIN or ISBN joins the standing book rather than forking a new one,
-// and by its edition column for the same reason. See adoptBookItemByIdentTx.
-func upsertItem(ctx context.Context, tx *sql.Tx, log logger, item model.PlayableItem, adopt bookAdoptKey, now int64, preferredPID model.PID) (id int64, pid model.PID, created, stateChanged bool, priorTitle string, err error) {
+// and by its edition column for the same reason. See adoptBookItemByIdentTx. A non-nil
+// known is the put's earlier resolution of the key (resolvedItem), used in its place.
+func upsertItem(ctx context.Context, tx *sql.Tx, log logger, item model.PlayableItem, adopt bookAdoptKey, now int64, preferredPID model.PID, known *resolvedItem) (id int64, pid model.PID, created, stateChanged bool, priorTitle string, err error) {
 	if item.IdentityKey != "" {
 		var rid int64
 		var rpid, curState, curTitle string
-		qerr := tx.QueryRowContext(ctx,
-			"SELECT id, pid, state, title FROM playable_item WHERE kind = ? AND identity_key = ?",
-			string(item.Kind), item.IdentityKey).Scan(&rid, &rpid, &curState, &curTitle)
-		if errors.Is(qerr, sql.ErrNoRows) && item.Kind == model.KindBook {
+		var qerr error
+		switch {
+		case known != nil && known.id != 0:
+			qerr = tx.QueryRowContext(ctx, "SELECT id, pid, state, title FROM playable_item WHERE id = ?", known.id).
+				Scan(&rid, &rpid, &curState, &curTitle)
+		case known != nil:
+			qerr = sql.ErrNoRows
+		default:
+			qerr = tx.QueryRowContext(ctx,
+				"SELECT id, pid, state, title FROM playable_item WHERE kind = ? AND identity_key = ?",
+				string(item.Kind), item.IdentityKey).Scan(&rid, &rpid, &curState, &curTitle)
+		}
+		if known == nil && errors.Is(qerr, sql.ErrNoRows) && item.Kind == model.KindBook {
 			adopted, aerr := adoptBookItemByIdentTx(ctx, tx, log, item.IdentityKey, adopt)
 			if aerr != nil {
 				return 0, "", false, false, "", aerr
@@ -670,6 +654,10 @@ func upsertTrack(ctx context.Context, tx *sql.Tx, itemID int64, tr model.Track) 
 // or promote a new primary. Detaching every role matters because a file can be a
 // multi-file book's 'part' edge; re-keying it to a track must not leave that edge
 // dangling (the file attached to both the book and the track).
+//
+// It also drops the item's own primary edge if one is left. PutScannedTrack demotes a
+// standing primary to an alternate before it gets here, so that arm only matters for a
+// row that is no longer a whole-file primary of a live file.
 func linkPrimaryFile(ctx context.Context, tx *sql.Tx, itemID, fileID int64) ([]int64, error) {
 	rows, err := tx.QueryContext(ctx,
 		"SELECT DISTINCT item_id FROM item_file WHERE file_id = ? AND item_id <> ?",
@@ -740,7 +728,7 @@ func linkVirtualTrackFile(ctx context.Context, tx *sql.Tx, itemID, fileID, start
 		return false, err
 	}
 	if _, err := tx.ExecContext(ctx,
-		"DELETE FROM item_file WHERE item_id = ? AND role = 'primary'", itemID); err != nil {
+		"DELETE FROM item_file WHERE item_id = ? AND (role = 'primary' OR file_id = ?)", itemID, fileID); err != nil {
 		return false, err
 	}
 	if _, err := tx.ExecContext(ctx,

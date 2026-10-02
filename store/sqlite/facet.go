@@ -126,13 +126,15 @@ func facetSpecFor(g read.GroupBy, userID int64) (facetSpec, bool) {
 			groupBy: "pi.kind", keyExpr: "pi.kind", display: "pi.kind", sortExpr: "pi.kind",
 		}, true
 	case read.GroupLibrary:
-		// The primary backing file's library, keyed by pid (drilldown pairs with
-		// the `library` query field) and displayed by root. A fileless item, such
-		// as an undownloaded episode, has a NULL f.library_id and lands in the
-		// "[No File]" bucket, so episodes stay included. The library table has no
-		// sort_key; display_root is the stable human order.
+		// The libraries of the item's files, keyed by pid (drilldown pairs with the
+		// `library` query field) and displayed by root. An item with a copy in another
+		// library counts under both, as the field matches it in both. A fileless item,
+		// such as an undownloaded episode, has no library and lands in the "[No File]"
+		// bucket, so episodes stay included. The library table has no sort_key;
+		// display_root is the stable human order.
 		return facetSpec{
-			join:    " LEFT JOIN library flib ON flib.id = f.library_id",
+			join: " LEFT JOIN item_file flf ON flf.item_id = pi.id LEFT JOIN file flff ON flff.id = flf.file_id" +
+				" LEFT JOIN library flib ON flib.id = flff.library_id",
 			groupBy: "flib.id", keyExpr: "flib.pid", display: "flib.display_root", sortExpr: "flib.display_root",
 			entity: true, unknown: read.NoFile,
 		}, true

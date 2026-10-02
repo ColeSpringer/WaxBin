@@ -36,6 +36,7 @@ func TestScanReAnchorsRecasedSubPathOnWindows(t *testing.T) {
 	if err != nil {
 		t.Fatalf("re-cased sub-path scan: %v", err)
 	}
+	assertScanPartition(t, res)
 	if res.AudioFiles != 1 {
 		t.Fatalf("re-cased sub-path scan saw %d audio files, want 1", res.AudioFiles)
 	}

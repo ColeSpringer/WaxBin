@@ -248,7 +248,7 @@ func TestRenameEntityRefusesArchivedMember(t *testing.T) {
 		path: "/lib/Band/Album/02.flac", essence: "e2", content: "c2", title: "Two",
 		artist: "Band", album: "Album",
 	})
-	if err := st.DetachFile(ctx, res.FilePID); err != nil {
+	if _, err := st.DetachFile(ctx, res.FilePID); err != nil {
 		t.Fatalf("DetachFile: %v", err)
 	}
 	albumPID := model.PID(scalarStr(t, st, "SELECT pid FROM album"))

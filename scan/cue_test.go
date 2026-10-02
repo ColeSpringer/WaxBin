@@ -66,7 +66,7 @@ func TestCueChaptersForBook(t *testing.T) {
 		_ = os.Chtimes(cuePath, future, future)
 		// The typo pass keeps the same two chapters, so only the fix is a sidecar change.
 		r := scanAll(t, sc, lib, false)
-		if r.Unchanged != 0 || r.SidecarsUpdated != i {
+		if r.Reread != 1 || r.SidecarsUpdated != i || r.Unchanged != 1-i {
 			t.Fatalf("pass %d: a cue-only edit should reach the full path, got %+v", i, r)
 		}
 		detail := cueDropDetail(t, st)

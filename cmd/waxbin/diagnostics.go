@@ -58,7 +58,8 @@ func newDiagnosticsCmd(g *globals) *cobra.Command {
 			"write-back (replaygain), edits, the enrichment write-back, and the analyze pass's " +
 			"decode (analyze): unsupported formats, dropped cue tracks, unsynced tags, edited " +
 			"values not yet written to the file (tag_write_owed, one row per value), names filled from " +
-			"sort tags or file names, damaged audio, files fpcalc could not fingerprint, and the rest, " +
+			"sort tags or file names, damaged audio, files fpcalc could not fingerprint, copies and " +
+			"other encodings attached to an item (duplicate_copy, alternate_encoding), and the rest, " +
 			"filtered by writer, code, severity, library, file, or item. " +
 			"`list` prints the rows; `summary` prints grouped counts, most severe first.",
 	}

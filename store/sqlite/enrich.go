@@ -2838,7 +2838,7 @@ func (s *Store) enrichedAlbumLabelFiles(ctx context.Context, scope *model.Enrich
 		JOIN album al ON `+enrichmentLabelRowJoin+`
 		JOIN track t ON t.album_id = al.id
 		JOIN playable_item pi ON pi.id = t.item_id AND pi.state = 'present'
-		JOIN item_file itf ON itf.item_id = t.item_id AND itf.role = 'primary'
+		JOIN item_file itf ON itf.item_id = t.item_id AND itf.role IN ('primary', 'alternate')
 		JOIN file f ON f.id = itf.file_id
 		JOIN library flib ON flib.id = f.library_id AND flib.read_only = ?
 		WHERE COALESCE(al.label,'') <> '' AND lab.updated_at > f.enrich_settled_at`+clause+`

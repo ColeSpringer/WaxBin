@@ -103,12 +103,13 @@ func TestCensusCountsOnlyRestorableTrash(t *testing.T) {
 	var trashPIDs []model.PID
 	for i, name := range []string{"a", "b"} {
 		res := tracks[i]
-		tpid, err := st.TrashFile(ctx, model.TrashFileInput{
+		tpidres, err := st.TrashFile(ctx, model.TrashFileInput{
 			FilePID: res.FilePID, TrashPath: []byte("/t/" + name), TrashDisplay: "/t/" + name,
 		})
 		if err != nil {
 			t.Fatal(err)
 		}
+		tpid := tpidres.TrashPID
 		trashPIDs = append(trashPIDs, tpid)
 	}
 	if err := st.MarkTrashRestored(ctx, trashPIDs[0]); err != nil {

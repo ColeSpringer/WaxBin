@@ -97,9 +97,15 @@ func renderScanResult(cmd *cobra.Command, g *globals, jobPID model.PID, t scan.R
 			Missing         int    `json:"missing"`
 			Skipped         int    `json:"skipped"`
 			Errored         int    `json:"errored"`
+			Copies          int    `json:"copies"`
+			Reread          int    `json:"reread"`
+			Promoted        int    `json:"promoted"`
+			Dropped         int    `json:"dropped"`
+			WalkErrors      int    `json:"walkErrors"`
 		}{
 			string(jobPID), t.FilesSeen, t.AudioFiles, t.ItemsCreated, t.ItemsUpdated,
 			t.Relinked, t.Unchanged, t.SidecarsUpdated, t.Missing, t.Skipped, t.Errored,
+			t.Copies, t.Reread, t.Promoted, t.Dropped, t.WalkErrors,
 		})
 	}
 	fmt.Fprintf(out(cmd), "Scan complete (job %s)\n", jobPID)
@@ -111,9 +117,24 @@ func renderScanResult(cmd *cobra.Command, g *globals, jobPID model.PID, t scan.R
 	if t.SidecarsUpdated > 0 {
 		fmt.Fprintf(out(cmd), "  sidecars:     %d updated\n", t.SidecarsUpdated)
 	}
+	if t.Copies > 0 {
+		fmt.Fprintf(out(cmd), "  copies:       %d (joined an item as alternate files)\n", t.Copies)
+	}
+	if t.Reread > 0 {
+		fmt.Fprintf(out(cmd), "  re-read:      %d\n", t.Reread)
+	}
 	fmt.Fprintf(out(cmd), "  re-linked:    %d\n", t.Relinked)
 	fmt.Fprintf(out(cmd), "  missing:      %d\n", t.Missing)
+	if t.Promoted > 0 {
+		fmt.Fprintf(out(cmd), "  promoted:     %d (alternates given a gone file's place)\n", t.Promoted)
+	}
+	if t.Dropped > 0 {
+		fmt.Fprintf(out(cmd), "  dropped:      %d (gone files no item needs)\n", t.Dropped)
+	}
 	fmt.Fprintf(out(cmd), "  skipped:      %d\n", t.Skipped)
 	fmt.Fprintf(out(cmd), "  errored:      %d\n", t.Errored)
+	if t.WalkErrors > 0 {
+		fmt.Fprintf(out(cmd), "  unreadable:   %d (entries the walk could not read)\n", t.WalkErrors)
+	}
 	return nil
 }

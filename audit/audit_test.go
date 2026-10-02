@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -36,6 +37,11 @@ type fakeStore struct {
 	diagTotal    int
 	mismatches   []model.FileDurationMismatch
 	mismatchTot  int
+	copies       []model.ItemCopies
+}
+
+func (f *fakeStore) ItemsWithCopies(context.Context) ([]model.ItemCopies, error) {
+	return f.copies, nil
 }
 
 func (f *fakeStore) DuplicateArtists(context.Context) ([]model.DuplicateSet, error) {
@@ -518,6 +524,26 @@ func TestAuditDurationMismatch(t *testing.T) {
 	}
 }
 
+// TestAuditDuplicateCopyListsARipCopyOnce: a copy of a rip backs each of its tracks, so it
+// comes back under every track, and is one finding all the same.
+func TestAuditDuplicateCopyListsARipCopyOnce(t *testing.T) {
+	var copies []model.ItemCopies
+	for i, title := range []string{"One", "Two", "Three"} {
+		copies = append(copies, model.ItemCopies{ItemPID: model.PID("t" + strconv.Itoa(i)), Kind: model.KindTrack, Title: title,
+			Files: []model.CopyFile{
+				{FilePID: "rip", DisplayPath: "/lib/a/album.flac", Size: 300_000_000, Role: "primary"},
+				{FilePID: "ripcopy", DisplayPath: "/lib/b/album.flac", Size: 300_000_000, Role: "alternate", Reason: model.CopySameAudio},
+			}})
+	}
+	rep, err := New(&fakeStore{copies: copies}, nil, nil, nil).Run(context.Background(), Config{Only: []model.AuditCheck{model.CheckDuplicateCopy}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fs := findingsFor(rep, model.CheckDuplicateCopy); len(fs) != 1 || fs[0].FilePID != "ripcopy" {
+		t.Errorf("findings = %+v, want the rip copy once", fs)
+	}
+}
+
 // TestAuditFileDiagnosticNamesTheFile: a stored diagnostic's finding carries the file it
 // was recorded against.
 func TestAuditFileDiagnosticNamesTheFile(t *testing.T) {
@@ -533,6 +559,27 @@ func TestAuditFileDiagnosticNamesTheFile(t *testing.T) {
 	}
 }
 
+// TestAuditFileDiagnosticLeavesCopiesToTheirCheck: the copy codes are the duplicate_copy
+// check's to report, so the file_diagnostic check skips them rather than listing each
+// copy twice.
+func TestAuditFileDiagnosticLeavesCopiesToTheirCheck(t *testing.T) {
+	st := &fakeStore{diags: []model.FileDiagnostic{
+		{FilePID: "c1", DisplayPath: "/lib/b/song.flac", Origin: model.OriginScan, Code: model.DiagDuplicateCopy,
+			Severity: model.SeverityInfo, Detail: "/lib/a/song.flac"},
+		{FilePID: "c2", DisplayPath: "/lib/c/song.mp3", Origin: model.OriginScan, Code: model.DiagAlternateEncoding,
+			Severity: model.SeverityInfo, Detail: "/lib/a/song.flac"},
+		{FilePID: "f9", DisplayPath: "/lib/a.ogg", Origin: model.OriginScan, Code: model.DiagUnsupportedFormat,
+			Severity: model.SeverityWarn},
+	}}
+	rep, err := New(st, nil, nil, nil).Run(context.Background(), Config{Only: []model.AuditCheck{model.CheckFileDiagnostic}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fs := findingsFor(rep, model.CheckFileDiagnostic); len(fs) != 1 || fs[0].FilePID != "f9" {
+		t.Errorf("file diagnostic findings = %+v, want only the unsupported format", fs)
+	}
+}
+
 func TestClockMS(t *testing.T) {
 	for ms, want := range map[int64]string{
 		0: "0:00", 59_999: "0:59", 168_000: "2:48", 600_000: "10:00",
@@ -541,5 +588,50 @@ func TestClockMS(t *testing.T) {
 		if got := clockMS(ms); got != want {
 			t.Errorf("clockMS(%d) = %q, want %q", ms, got, want)
 		}
+	}
+}
+
+// TestAuditDuplicateCopy: each alternate file is listed at info under its item, naming
+// its path, its size and why it is one, with the primary named beside it; a capped
+// sample rolls the rest up.
+func TestAuditDuplicateCopy(t *testing.T) {
+	st := &fakeStore{copies: []model.ItemCopies{
+		{ItemPID: "i1", Kind: model.KindTrack, Title: "Song", Files: []model.CopyFile{
+			{FilePID: "p1", DisplayPath: "/lib/a/song.flac", Size: 30_000_000, Role: "primary"},
+			{FilePID: "c1", DisplayPath: "/lib/b/song.flac", Size: 30_000_000, Role: "alternate", Reason: model.CopySameAudio},
+			{FilePID: "c2", DisplayPath: "/lib/c/song.mp3", Size: 5_200_000, Role: "alternate", Reason: model.CopyOtherEncoding},
+		}},
+		{ItemPID: "i2", Kind: model.KindTrack, Title: "Other", Files: []model.CopyFile{
+			{FilePID: "p2", DisplayPath: "/lib/a/other.mp3", Size: 4_000_000, Role: "primary"},
+			{FilePID: "c3", DisplayPath: "/lib/b/other.mp3", Size: 4_000_000, Role: "alternate", Reason: model.CopySameAudio},
+		}},
+	}}
+	rep, err := New(st, nil, nil, nil).Run(context.Background(), Config{Only: []model.AuditCheck{model.CheckDuplicateCopy}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fs := findingsFor(rep, model.CheckDuplicateCopy)
+	if len(fs) != 3 {
+		t.Fatalf("findings = %+v, want one per alternate", fs)
+	}
+	for _, f := range fs {
+		if f.Severity != model.SeverityInfo || len(f.Entities) != 1 || f.FilePID == "" || f.Path == "" {
+			t.Errorf("finding = %+v, want info naming its item and file", f)
+		}
+	}
+	if f := fs[1]; f.FilePID != "c2" || f.Entities[0] != "i1" ||
+		!strings.Contains(f.Message, "other encoding") || !strings.Contains(f.Message, "5.2 MB") ||
+		!strings.Contains(f.Message, "/lib/c/song.mp3") || !strings.Contains(f.Message, "/lib/a/song.flac") {
+		t.Errorf("encoding finding = %+v, want the reason, size, path and the primary", f)
+	}
+	if !strings.Contains(fs[0].Message, "same audio") {
+		t.Errorf("copy finding = %+v, want the same-audio reason", fs[0])
+	}
+	rep, err = New(st, nil, nil, nil).Run(context.Background(), Config{Only: []model.AuditCheck{model.CheckDuplicateCopy}, Sample: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fs := findingsFor(rep, model.CheckDuplicateCopy); len(fs) != 3 || !strings.Contains(fs[2].Message, "3 copies on 2 items (2 shown)") {
+		t.Errorf("capped = %+v, want two and a roll-up", fs)
 	}
 }

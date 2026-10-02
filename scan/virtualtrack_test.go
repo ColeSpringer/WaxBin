@@ -5,6 +5,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -391,6 +392,49 @@ func TestScanKeptRipKeepsAnEditedTrackNumber(t *testing.T) {
 		}
 		if len(items) != 3 || !found {
 			t.Errorf("pass %d: items = %+v, want the renumbered track kept as %s", i, items, two.PID)
+		}
+	}
+}
+
+// TestScanWarnedSheetKeepsARipCopy: a copy of a rip whose own sheet stops reading keeps
+// backing the tracks it copies over its stored windows, rather than becoming a whole-file
+// track of its own and dropping them.
+func TestScanWarnedSheetKeepsARipCopy(t *testing.T) {
+	st, lib, sc, _, root := fastPathFixture(t)
+	ctx := context.Background()
+	audio := testaudio.BuildMP3WithAudio("Whole", "A", "Al", 1, testaudio.AudioWithSeed(36))
+	for _, dir := range []string{"a", "b"} {
+		if err := os.MkdirAll(filepath.Join(root, dir), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		writeMP3Raw(t, filepath.Join(root, dir, "album.mp3"), audio)
+		writeCue(t, filepath.Join(root, dir, "album.cue"), threeTrackRip("00:00:10"))
+	}
+	scanAll(t, sc, lib, false)
+	before := itemsByTrack(t, st)
+	if len(before) != 3 {
+		t.Fatalf("tracks = %d, want 3", len(before))
+	}
+	cuePath := filepath.Join(root, "b", "album.cue")
+	writeCue(t, cuePath, threeTrackRip("00:60:10"))
+	future := time.Now().Add(time.Hour)
+	_ = os.Chtimes(cuePath, future, future)
+	scanAll(t, sc, lib, false)
+	after := itemsByTrack(t, st)
+	if len(after) != 3 {
+		t.Fatalf("items = %d, want the 3 tracks and no whole-file item for the copy", len(after))
+	}
+	copyPath := filepath.Join(root, "b", "album.mp3")
+	for i, it := range after {
+		if it.PID != before[i].PID {
+			t.Errorf("track %d is %s, want %s kept", i, it.PID, before[i].PID)
+		}
+		refs, err := st.ItemFiles(ctx, it.PID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !slices.ContainsFunc(refs, func(r model.ItemFileRef) bool { return r.Role == "alternate" && string(r.Path) == copyPath }) {
+			t.Errorf("track %d files = %+v, want the copy still backing it", i, refs)
 		}
 	}
 }

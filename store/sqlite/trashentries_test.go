@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"path/filepath"
 	"testing"
 
 	"github.com/colespringer/waxbin/model"
@@ -17,12 +18,13 @@ func trashOneFile(t *testing.T, st *Store, libID int64, path, essence string) mo
 	if err := st.read.QueryRowContext(ctx, "SELECT pid FROM file WHERE path=?", []byte(path)).Scan(&filePID); err != nil {
 		t.Fatalf("file pid: %v", err)
 	}
-	tpid, err := st.TrashFile(ctx, model.TrashFileInput{
+	tpidres, err := st.TrashFile(ctx, model.TrashFileInput{
 		FilePID: filePID, TrashPath: []byte(path + ".trash"), TrashDisplay: path + ".trash",
 	})
 	if err != nil {
 		t.Fatalf("TrashFile: %v", err)
 	}
+	tpid := tpidres.TrashPID
 	entry, err := st.ActiveTrashByPID(ctx, tpid)
 	if err != nil {
 		t.Fatalf("ActiveTrashByPID: %v", err)
@@ -62,12 +64,13 @@ func TestTrashRecordsBookPartItem(t *testing.T) {
 	book := putBookPart(t, st, lib.ID, "/lib/book/p1.m4b", "bk1", "e1", 0)
 	part2 := putBookPart(t, st, lib.ID, "/lib/book/p2.m4b", "bk1", "e2", 1)
 
-	tpid, err := st.TrashFile(ctx, model.TrashFileInput{
+	tpidres, err := st.TrashFile(ctx, model.TrashFileInput{
 		FilePID: part2.FilePID, TrashPath: []byte("/lib/t/p2.m4b"), TrashDisplay: "/lib/t/p2.m4b",
 	})
 	if err != nil {
 		t.Fatalf("TrashFile: %v", err)
 	}
+	tpid := tpidres.TrashPID
 	entry, err := st.ActiveTrashByPID(ctx, tpid)
 	if err != nil {
 		t.Fatalf("ActiveTrashByPID: %v", err)
@@ -108,14 +111,15 @@ func TestPurgeEmitsItemDelta(t *testing.T) {
 	t.Run("still-present multi-file book", func(t *testing.T) {
 		st, lib := entityFixture(t)
 		ctx := context.Background()
-		book := putBookPart(t, st, lib.ID, "/lib/book/p1.m4b", "bk1", "e1", 0)
+		book := putBookPart(t, st, lib.ID, realFile(t, filepath.Join(t.TempDir(), "p1.m4b")), "bk1", "e1", 0)
 		part2 := putBookPart(t, st, lib.ID, "/lib/book/p2.m4b", "bk1", "e2", 1)
-		tpid, err := st.TrashFile(ctx, model.TrashFileInput{
+		tpidres, err := st.TrashFile(ctx, model.TrashFileInput{
 			FilePID: part2.FilePID, TrashPath: []byte("/lib/t/p2.m4b"), TrashDisplay: "/lib/t/p2.m4b",
 		})
 		if err != nil {
 			t.Fatalf("TrashFile: %v", err)
 		}
+		tpid := tpidres.TrashPID
 		if s := itemState(t, st, book.ItemPID); s != string(model.StatePresent) {
 			t.Fatalf("book state = %q, want present (a surviving part keeps it present)", s)
 		}

@@ -117,7 +117,8 @@ func newInboxImportCmd(g *globals) *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&apply, "apply", false, "execute the import (default is a review)")
 	cmd.Flags().BoolVar(&asCopy, "copy", false, "copy files (keep inbox originals) instead of moving")
-	cmd.Flags().StringVar(&dup, "dup", "skip", "duplicate policy: skip|allow")
+	cmd.Flags().StringVar(&dup, "dup", "skip",
+		"duplicate policy: skip leaves audio the catalog holds in the inbox; allow imports it as a copy that joins the item already holding it")
 	cmd.Flags().StringVar(&profile, "profile", "", "organization profile (default: the library's configured profile)")
 	return cmd
 }
@@ -185,14 +186,36 @@ func emitImportReport(cmd *cobra.Command, g *globals, src string, rep *inbox.Rep
 			Sidecars    int             `json:"sidecars"`
 			Bytes       int64           `json:"bytes"`
 			Failures    []inbox.Failure `json:"failures,omitempty"`
-		}{string(rep.BatchPID), src, rep.Imported, rep.Duplicates, rep.Quarantined, rep.Errored, rep.Sidecars, rep.Bytes, rep.Failures})
+			Files       []importedFile  `json:"files"`
+		}{string(rep.BatchPID), src, rep.Imported, rep.Duplicates, rep.Quarantined, rep.Errored, rep.Sidecars, rep.Bytes,
+			rep.Failures, importedFiles(rep.Files)})
 	}
 	fmt.Fprintf(out(cmd), "Imported %s: %d imported, %d duplicate, %d quarantined, %d errored, %d sidecars (%d bytes)\n",
 		src, rep.Imported, rep.Duplicates, rep.Quarantined, rep.Errored, rep.Sidecars, rep.Bytes)
+	for _, f := range rep.Files {
+		if f.AttachedAsCopy {
+			fmt.Fprintf(out(cmd), "  copy %s: joined item %s\n", f.Path, f.ItemPID)
+		}
+	}
 	for _, f := range rep.Failures {
 		fmt.Fprintf(out(cmd), "  FAIL %s: %s\n", f.Src, f.Err)
 	}
 	return nil
+}
+
+// importedFile is one imported file's outcome in the JSON report.
+type importedFile struct {
+	Path           string `json:"path"`
+	ItemPID        string `json:"itemPid,omitempty"`
+	AttachedAsCopy bool   `json:"attachedAsCopy"`
+}
+
+func importedFiles(fs []inbox.FileOutcome) []importedFile {
+	out := make([]importedFile, len(fs))
+	for i, f := range fs {
+		out[i] = importedFile{Path: f.Path, ItemPID: string(f.ItemPID), AttachedAsCopy: f.AttachedAsCopy}
+	}
+	return out
 }
 
 func importPlanJSON(plan *inbox.Plan) any {

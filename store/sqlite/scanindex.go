@@ -128,18 +128,20 @@ func prefixUpperBound(prefix []byte) []byte {
 	return nil
 }
 
-// MarkFilesMissing marks the items backing the given files as missing, but only when
-// EVERY file of an item is in the set, so a multi-file book that lost a single part
-// stays present (and its still-present parts, unvisited by the fast-path, would never
-// flip it back). Rows (file, item_file edges, entities) are preserved, so a later
-// rescan that re-walks the file restores its item to present. Returns the number of
-// items newly marked missing; an already-missing item emits no delta.
-func (s *Store) MarkFilesMissing(ctx context.Context, filePIDs []model.PID) (int, error) {
+// MarkFilesMissing reconciles files gone from disk. An item whose every file is in the
+// set is marked missing, so a multi-file book that lost a single part stays present (and
+// its still-present parts, unvisited by the fast-path, would never flip it back), and its
+// rows are preserved, so a later rescan that re-walks the files restores it to present.
+// An item that keeps a file on disk instead settles what it lost (settleMissingTx): an
+// alternate takes the place of a gone primary or part, and a gone alternate's edge goes.
+// A gone file left with no edge loses its row, its analysis rows going with it. An
+// already-missing item emits no delta.
+func (s *Store) MarkFilesMissing(ctx context.Context, filePIDs []model.PID) (*model.MissingResult, error) {
 	const op = "store.MarkFilesMissing"
+	res := &model.MissingResult{}
 	if len(filePIDs) == 0 {
-		return 0, nil
+		return res, nil
 	}
-	var marked int
 	err := s.writeTx(ctx, func(tx *sql.Tx) error {
 		missing, err := fileIDSet(ctx, tx, filePIDs)
 		if err != nil {
@@ -153,13 +155,15 @@ func (s *Store) MarkFilesMissing(ctx context.Context, filePIDs []model.PID) (int
 			return err
 		}
 		now := nowNS()
+		var keeping []int64
 		for _, itemID := range items {
 			all, err := allFilesInSet(ctx, tx, itemID, missing)
 			if err != nil {
 				return err
 			}
 			if !all {
-				continue // still has a present file; do not mark missing
+				keeping = append(keeping, itemID)
+				continue
 			}
 			var pid string
 			var state string
@@ -178,14 +182,154 @@ func (s *Store) MarkFilesMissing(ctx context.Context, filePIDs []model.PID) (int
 			if err := appendChange(ctx, tx, "item", model.PID(pid), model.OpUpdate); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
-			marked++
+			res.Marked++
+		}
+		if err := settleMissingTx(ctx, tx, missing, keeping, res); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		return nil
 	})
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
-	return marked, nil
+	return res, nil
+}
+
+// MarkItemFilesMissing settles one item's gone files the way MarkFilesMissing settles an
+// item that keeps a file on disk, touching no other item: a file this item shares with
+// another (a rip's file backing its siblings) keeps its row while another edge holds it.
+// The caller has checked that the item keeps a file on disk.
+func (s *Store) MarkItemFilesMissing(ctx context.Context, itemPID model.PID, filePIDs []model.PID) (*model.MissingResult, error) {
+	const op = "store.MarkItemFilesMissing"
+	res := &model.MissingResult{}
+	err := s.writeTx(ctx, func(tx *sql.Tx) error {
+		itemID, err := idByPIDTx(ctx, tx, "playable_item", itemPID, op)
+		if err != nil {
+			return err
+		}
+		missing, err := fileIDSet(ctx, tx, filePIDs)
+		if err != nil {
+			return err
+		}
+		if err := settleMissingTx(ctx, tx, missing, []int64{itemID}, res); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return res, nil
+}
+
+// settleMissingTx settles what items that keep a file outside the missing set lost to it.
+// A gone alternate's edge goes. A gone primary or part edge goes once an alternate on
+// disk took its place (promoteLostTx); without one it stays, as a book keeps a gone part
+// for a rescan to restore, and an item left with no file on disk (its other files under
+// an absent root, say) is marked missing. Then every missing file left with no edge is
+// dropped; Dropped counts those no promotion replaced, a gone alternate or a row no item
+// claimed.
+func settleMissingTx(ctx context.Context, tx *sql.Tx, missing map[int64]bool, items []int64, res *model.MissingResult) error {
+	affected := newAffectedRollups()
+	replaced := map[int64]bool{}
+	for _, itemID := range items {
+		var kind string
+		if err := tx.QueryRowContext(ctx, "SELECT kind FROM playable_item WHERE id = ?", itemID).Scan(&kind); err != nil {
+			return err
+		}
+		rows, err := tx.QueryContext(ctx, `SELECT itf.file_id, itf.role, itf.position, itf.start_frames, itf.end_frames,
+				COALESCE(f.essence_hash, '')
+			FROM item_file itf JOIN file f ON f.id = itf.file_id WHERE itf.item_id = ?`, itemID)
+		if err != nil {
+			return err
+		}
+		type goneEdge struct {
+			fileID int64
+			lost   lostEdge
+		}
+		var gone []goneEdge
+		for rows.Next() {
+			var g goneEdge
+			if err := rows.Scan(&g.fileID, &g.lost.role, &g.lost.position, &g.lost.start, &g.lost.end, &g.lost.essence); err != nil {
+				rows.Close()
+				return err
+			}
+			if missing[g.fileID] {
+				gone = append(gone, g)
+			}
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		changed := false
+		for _, g := range gone {
+			if g.lost.role != alternateRole {
+				p, err := promoteLostTx(ctx, tx, itemID, kind == string(model.KindBook), g.lost)
+				if err != nil {
+					return err
+				}
+				if p == nil {
+					continue
+				}
+				res.Promoted = append(res.Promoted, *p)
+				replaced[g.fileID] = true
+			}
+			if _, err := tx.ExecContext(ctx, "DELETE FROM item_file WHERE item_id = ? AND file_id = ? AND role = ?",
+				itemID, g.fileID, g.lost.role); err != nil {
+				return err
+			}
+			changed = true
+		}
+		marked, err := markUnreachableMissingTx(ctx, tx, itemID, missing)
+		if err != nil {
+			return err
+		}
+		if marked {
+			res.Marked++
+		}
+		if !changed {
+			continue
+		}
+		if err := affected.collect(ctx, tx, itemID); err != nil {
+			return err
+		}
+		if err := refreshBookDuration(ctx, tx, itemID); err != nil {
+			return err
+		}
+		if !marked {
+			if err := appendItemUpdateTx(ctx, tx, itemID); err != nil {
+				return err
+			}
+		}
+	}
+	for id := range missing {
+		var held int
+		var pid model.PID
+		if err := tx.QueryRowContext(ctx, `SELECT pid, EXISTS(SELECT 1 FROM item_file WHERE file_id = file.id)
+			FROM file WHERE id = ?`, id).Scan(&pid, &held); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				continue
+			}
+			return err
+		}
+		if held == 1 {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, "DELETE FROM file WHERE id = ?", id); err != nil {
+			return err
+		}
+		if err := appendChange(ctx, tx, "file", pid, model.OpDelete); err != nil {
+			return err
+		}
+		if !replaced[id] {
+			res.Dropped++
+		}
+	}
+	if affected.empty() {
+		return nil
+	}
+	return maintainRollupsTx(ctx, tx, affected, nowNS())
 }
 
 // MarkItemMissing marks one item missing by pid, whatever its files say, and is the

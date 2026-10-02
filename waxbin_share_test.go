@@ -433,15 +433,46 @@ func TestImportAcquiredAlreadyPresent(t *testing.T) {
 	// action's Duplicate outcome, which only fires under DupSkip).
 	third := filepath.Join(t.TempDir(), "three.mp3")
 	writeFile(t, third, testaudio.BuildMP3WithAudio("Dup Track Alt", "Dup Artist", "Alt Album", 2, testaudio.AudioWithSeed(51)))
-	r3, err := lib.ImportAcquired(ctx, waxbin.AcquiredFile{Path: third}, model.KindTrack, waxbin.AcquiredMeta{DupPolicy: model.DupAllow})
+	r3, err := lib.ImportAcquired(ctx, waxbin.AcquiredFile{Path: third}, model.KindTrack,
+		waxbin.AcquiredMeta{DupPolicy: model.DupAllow, SourceURL: "https://example.com/the-copy"})
 	if err != nil {
 		t.Fatalf("third import: %v", err)
 	}
-	if !r3.AlreadyPresent || r3.AlreadyPresentPID != presentPID {
-		t.Fatalf("DupAllow re-import = present %v pid %s, want present -> %s (the §D fix)", r3.AlreadyPresent, r3.AlreadyPresentPID, presentPID)
+	if !r3.AlreadyPresent || r3.AlreadyPresentPID != presentPID || r3.AttachedTo != presentPID {
+		t.Fatalf("DupAllow re-import = present %v pid %s attached to %s, want present -> %s (the §D fix)",
+			r3.AlreadyPresent, r3.AlreadyPresentPID, r3.AttachedTo, presentPID)
 	}
 	if r3.Plan.Importable() != 1 {
 		t.Fatalf("DupAllow should import the duplicate anyway, got %d importable", r3.Plan.Importable())
+	}
+
+	// Applied, the copy joins the existing item as an alternate: the item keeps its pid,
+	// title and album, and takes no acquisition from the copy.
+	rep, err := lib.ApplyImport(ctx, r3.Plan)
+	if err != nil {
+		t.Fatalf("apply third: %v", err)
+	}
+	if rep.Imported != 1 || len(rep.Files) != 1 || rep.Files[0].ItemPID != presentPID || !rep.Files[0].AttachedAsCopy ||
+		rep.Files[0].Path != r3.Plan.Actions[0].Dst {
+		t.Fatalf("report = %+v, want one file attached to %s as a copy", rep, presentPID)
+	}
+	got, err := lib.Get(ctx, presentPID)
+	if err != nil || got.Title != "Dup Track" || got.Album != "Dup Album" {
+		t.Fatalf("item = %+v (err %v), want Dup Track on Dup Album untouched", got, err)
+	}
+	var roles []string
+	refs, err := lib.ItemFiles(ctx, presentPID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range refs {
+		roles = append(roles, r.Role)
+	}
+	if len(roles) != 2 || roles[1] != "alternate" {
+		t.Errorf("roles = %v, want the original primary and the imported copy alternate", roles)
+	}
+	if acq, err := lib.Acquisition(ctx, presentPID); err == nil && acq.SourceURL == "https://example.com/the-copy" {
+		t.Errorf("acquisition = %+v, want none taken from the copy's import", acq)
 	}
 }
 

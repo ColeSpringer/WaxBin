@@ -106,7 +106,7 @@ func TestScanWMABookChapters(t *testing.T) {
 	st, lib, sc, _, root := fastPathFixture(t)
 	p := filepath.Join(root, "book.wma")
 	copyFixture(t, "chapters.wma", p)
-	if _, err := sc.ScanFileAs(context.Background(), lib, p, model.KindBook); err != nil {
+	if _, _, err := sc.ScanFileAs(context.Background(), lib, p, model.KindBook); err != nil {
 		t.Fatalf("scan: %v", err)
 	}
 	assertChapters(t, st, currentItemPID(t, st, "Chaptered"), []model.Chapter{

@@ -215,37 +215,37 @@ func (s *Store) EntityPage(ctx context.Context, kind read.EntityKind, cursor rea
 	return page, nil
 }
 
-// entityMemberSource returns the FROM/JOIN clause reaching an entity's member
-// items' primary backing files, and the expression selecting each member's entity
-// id. It is shared by the single and batched library-pid lookups so the two can
+// entityMemberSource returns the FROM/JOIN clause reaching every file of an entity's
+// member items, alternates included the way the library query field reaches them, and
+// the expression selecting each member's entity id. It is shared by the single and batched library-pid lookups so the two can
 // never diverge about which items back an entity. Artist membership uses
 // itemArtistIDExpr, the same expression the artist facet and the artist_pid query
 // field consume, so a book counts under its author consistently across all of them.
-// A fileless member contributes nothing (the INNER primary-file join).
+// A fileless member contributes nothing (the INNER file join).
 func entityMemberSource(kind read.EntityKind) (from, idExpr string) {
 	switch kind {
 	case read.EntityArtist:
 		return ` FROM playable_item pi
 			LEFT JOIN track t ON t.item_id = pi.id
 			LEFT JOIN book bk ON bk.item_id = pi.id
-			JOIN item_file pf ON pf.item_id = pi.id AND pf.role = 'primary'
+			JOIN item_file pf ON pf.item_id = pi.id
 			JOIN file f ON f.id = pf.file_id`, itemArtistIDExpr
 	case read.EntityReleaseGroup:
 		return ` FROM track t
 			JOIN album al ON al.id = t.album_id
-			JOIN item_file pf ON pf.item_id = t.item_id AND pf.role = 'primary'
+			JOIN item_file pf ON pf.item_id = t.item_id
 			JOIN file f ON f.id = pf.file_id`, "al.release_group_id"
 	case read.EntityAlbum:
 		return ` FROM track t
-			JOIN item_file pf ON pf.item_id = t.item_id AND pf.role = 'primary'
+			JOIN item_file pf ON pf.item_id = t.item_id
 			JOIN file f ON f.id = pf.file_id`, "t.album_id"
 	case read.EntityGenre:
 		return ` FROM item_genre ig
-			JOIN item_file pf ON pf.item_id = ig.item_id AND pf.role = 'primary'
+			JOIN item_file pf ON pf.item_id = ig.item_id
 			JOIN file f ON f.id = pf.file_id`, "ig.genre_id"
 	case read.EntitySeries:
 		return ` FROM book bk
-			JOIN item_file pf ON pf.item_id = bk.item_id AND pf.role = 'primary'
+			JOIN item_file pf ON pf.item_id = bk.item_id
 			JOIN file f ON f.id = pf.file_id`, "bk.series_id"
 	}
 	return "", ""

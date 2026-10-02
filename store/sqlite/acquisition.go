@@ -33,24 +33,32 @@ func (s *Store) PutAcquisition(ctx context.Context, itemPID model.PID, in model.
 // PutAcquisitionForFile records origin provenance against the item backing the file
 // at path, resolving the item from the file's primary edge. It is the import path's
 // stamp: after a placed file is cataloged, its item gets the acquisition row. It is a
-// no-op (CodeNotFound) when no cataloged item owns that path.
-func (s *Store) PutAcquisitionForFile(ctx context.Context, path []byte, in model.AcquisitionInput) error {
+// no-op (CodeNotFound) when no cataloged item owns that path. A file that joined an
+// existing item as an alternate stamps nothing, since that item was acquired before it,
+// and returns the item's pid as copyOf.
+func (s *Store) PutAcquisitionForFile(ctx context.Context, path []byte, in model.AcquisitionInput) (copyOf model.PID, err error) {
 	const op = "store.PutAcquisitionForFile"
-	return s.writeTx(ctx, func(tx *sql.Tx) error {
+	err = s.writeTx(ctx, func(tx *sql.Tx) error {
 		var itemID int64
 		var itemPID model.PID
-		err := tx.QueryRowContext(ctx, `SELECT pi.id, pi.pid
-			FROM file f JOIN item_file itf ON itf.file_id = f.id AND itf.role='primary'
+		var role string
+		err := tx.QueryRowContext(ctx, `SELECT pi.id, pi.pid, itf.role
+			FROM file f JOIN item_file itf ON itf.file_id = f.id AND itf.role IN ('primary', 'alternate')
 			JOIN playable_item pi ON pi.id = itf.item_id
-			WHERE f.path = ? LIMIT 1`, path).Scan(&itemID, &itemPID)
+			WHERE f.path = ? ORDER BY itf.role = 'primary' DESC LIMIT 1`, path).Scan(&itemID, &itemPID, &role)
 		if errors.Is(err, sql.ErrNoRows) {
 			return waxerr.New(waxerr.CodeNotFound, op, "no cataloged item backs the placed file")
 		}
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
+		if role == alternateRole {
+			copyOf = itemPID
+			return nil
+		}
 		return putAcquisitionTx(ctx, tx, itemID, itemPID, in)
 	})
+	return copyOf, err
 }
 
 // putAcquisitionTx writes the acquisition row and emits an item update delta so a

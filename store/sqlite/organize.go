@@ -45,9 +45,16 @@ func (s *Store) recoverOrganize(ctx context.Context) (int, error) {
 			committed := p.fileID.Valid && pathExists(p.dst) && !pathExists(p.src)
 			if committed {
 				rel := relUnder(p.root, p.dst)
+				var from string
+				if err := tx.QueryRowContext(ctx, "SELECT display_path FROM file WHERE id = ?", p.fileID.Int64).Scan(&from); err != nil {
+					return waxerr.Wrap(waxerr.CodeIO, op, err)
+				}
 				if _, err := tx.ExecContext(ctx,
 					"UPDATE file SET path=?, display_path=?, rel_path=?, last_seen=? WHERE id=?",
 					p.dst, string(p.dst), rel, nowNS(), p.fileID.Int64); err != nil {
+					return waxerr.Wrap(waxerr.CodeIO, op, err)
+				}
+				if err := renameCopyDetailsTx(ctx, tx, p.fileID.Int64, from, string(p.dst)); err != nil {
 					return waxerr.Wrap(waxerr.CodeIO, op, err)
 				}
 				if _, err := tx.ExecContext(ctx,

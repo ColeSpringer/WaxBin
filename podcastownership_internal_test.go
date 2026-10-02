@@ -199,13 +199,14 @@ func TestRestoreTrashRefusesThePodcastLibrary(t *testing.T) {
 	// Seed the entry the public API can no longer create.
 	dst := filepath.Join(podDir, model.TrashDirName, "seeded", filepath.Base(ep.Episode.DisplayPath))
 	writeTestFile(t, dst, []byte("moved"))
-	trashPID, err := lib.store.TrashFile(ctx, model.TrashFileInput{
+	trashPIDres, err := lib.store.TrashFile(ctx, model.TrashFileInput{
 		FilePID: ep.Episode.FilePID, Reason: "seeded",
 		TrashPath: []byte(dst), TrashDisplay: dst,
 	})
 	if err != nil {
 		t.Fatalf("seed trash entry: %v", err)
 	}
+	trashPID := trashPIDres.TrashPID
 
 	err = lib.RestoreTrash(ctx, trashPID)
 	if !waxerr.Is(err, waxerr.CodeInvalid) {

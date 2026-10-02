@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -166,12 +167,14 @@ func (o *Organizer) Plan(ctx context.Context, lib *model.Library, p Profile, ite
 		}
 		// A book may be backed by several part files. The item view carries only the
 		// representative primary, so moving just that would strand the other parts;
-		// fetch them all and move every part into the rendered book folder.
+		// fetch them all and move every part into the rendered book folder. An
+		// alternate copy of a part is not one, and stays where it is.
 		if it.Kind == model.KindBook {
 			files, err := o.cat.ItemFiles(ctx, it.PID)
 			if err != nil {
 				return nil, err
 			}
+			files = slices.DeleteFunc(files, func(f model.ItemFileRef) bool { return f.Role == "alternate" })
 			if len(files) > 1 {
 				o.planBookParts(plan, root, rel, it.PID, files)
 				continue

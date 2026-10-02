@@ -13,8 +13,9 @@
 //
 // The store uses essence-first change detection: if essence_hash is unchanged
 // but content_hash changed, the file can be treated as a tag-only update. When
-// the same essence appears at a new path, the existing file row is relinked
-// while preserving its pid.
+// the same essence appears at a new path whose old row is gone from disk, that row
+// is relinked while preserving its pid; when the old path is still there, the new
+// file is a copy and joins the same item as an alternate file.
 package identity
 
 import (
@@ -57,7 +58,8 @@ func ContentHash(path string) (string, error) {
 // TrackKey derives the entity-identity key for a track: MusicBrainz recording id
 // when known, else the essence hash. The store enforces uniqueness on
 // (kind, key) so two encodings sharing an MBID, or identical essence, dedup to
-// one logical item.
+// one logical item. That item keeps one primary file, the better encoding, and the
+// other files attach to it as alternates.
 func TrackKey(mbid, essenceHash string) string {
 	if m := strings.TrimSpace(mbid); m != "" {
 		return "mbid:" + strings.ToLower(m)

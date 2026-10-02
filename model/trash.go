@@ -68,3 +68,29 @@ type TrashFileInput struct {
 	TrashPath    []byte
 	TrashDisplay string
 }
+
+// PromotedFile is an alternate that took the place of a file its item lost. The caller
+// re-reads it, so the item's metadata follows the tags of the file that now owns it.
+type PromotedFile struct {
+	FilePID   PID
+	LibraryID int64
+	Path      []byte
+}
+
+// DetachResult is what dropping a file's row did beyond the drop: the trash entry it
+// recorded (empty for a detach that keeps no journal) and the alternates promoted in
+// the file's place.
+type DetachResult struct {
+	TrashPID PID
+	Promoted []PromotedFile
+}
+
+// MissingResult is what reconciling vanished files did: Marked items went missing with
+// every file gone, Promoted alternates took the place of a gone primary or part, and
+// Dropped gone files lost their rows with nothing taking their place (an alternate, or a
+// row no item claimed).
+type MissingResult struct {
+	Marked   int
+	Promoted []PromotedFile
+	Dropped  int
+}

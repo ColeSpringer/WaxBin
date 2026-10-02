@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 
+	"github.com/colespringer/waxbin"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/trash"
 	"github.com/colespringer/waxbin/waxerr"
@@ -14,14 +15,17 @@ func newRmCmd(g *globals) *cobra.Command {
 		permanent bool
 		prune     bool
 		apply     bool
+		files     bool
 	)
 	cmd := &cobra.Command{
-		Use:   "rm <item-pid>...",
+		Use:   "rm <pid>...",
 		Short: "Delete items (to the trash by default) while keeping their catalog history",
 		Long: "Removes the files backing the given items. By default files go to the " +
 			"library's same-volume trash and can be restored with `trash restore`. " +
 			"--prune or --permanent bypass the trash to reclaim space. The logical item " +
-			"is always preserved (archived when it loses its last file). Dry run unless --apply.",
+			"is always preserved (archived when it loses its last file). --file takes file " +
+			"pids instead and removes just those files: a copy goes alone, and an item's " +
+			"primary file gives its place to a copy when the item has one. Dry run unless --apply.",
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if permanent && prune {
@@ -45,7 +49,7 @@ func newRmCmd(g *globals) *cobra.Command {
 			for i, a := range args {
 				pids[i] = model.PID(a)
 			}
-			plan, err := lib.PlanDeletePIDs(ctx(cmd), pids, mode)
+			plan, err := planDelete(cmd, lib, pids, mode, files)
 			if err != nil {
 				return err
 			}
@@ -62,7 +66,16 @@ func newRmCmd(g *globals) *cobra.Command {
 	cmd.Flags().BoolVar(&permanent, "permanent", false, "delete from disk immediately (no trash)")
 	cmd.Flags().BoolVar(&prune, "prune", false, "bypass the trash to reclaim space (policy pruning)")
 	cmd.Flags().BoolVar(&apply, "apply", false, "execute the deletion (default is a dry run)")
+	cmd.Flags().BoolVar(&files, "file", false, "take file pids and remove only those files")
 	return cmd
+}
+
+// planDelete plans the deletion of items, or of single files with --file.
+func planDelete(cmd *cobra.Command, lib *waxbin.Library, pids []model.PID, mode model.DeleteMode, files bool) (*trash.Plan, error) {
+	if files {
+		return lib.PlanDeleteFiles(ctx(cmd), pids, mode)
+	}
+	return lib.PlanDeletePIDs(ctx(cmd), pids, mode)
 }
 
 func emitDeletePlan(cmd *cobra.Command, g *globals, plan *trash.Plan) error {

@@ -30,9 +30,10 @@ const (
 	GroupReleaseGroup GroupBy = "releaseGroup"
 	GroupYear         GroupBy = "year"
 	GroupKind         GroupBy = "kind"
-	// GroupLibrary buckets items by their primary backing file's library (key =
-	// library pid, display = the display root). A fileless item, such as an
-	// undownloaded episode, lands in the NoFile unknown bucket.
+	// GroupLibrary buckets items by the libraries their files sit in (key = library
+	// pid, display = the display root), so an item with a copy in another library
+	// counts under both. A fileless item, such as an undownloaded episode, lands in the
+	// NoFile unknown bucket.
 	GroupLibrary GroupBy = "library"
 	// GroupPodcast buckets episodes by their feed (key = podcast pid, display = the
 	// feed title). It is the mirror of the podcast_pid query field, so a bucket

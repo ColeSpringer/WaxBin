@@ -40,6 +40,10 @@ const (
 	// reads the span the analyze pass stored with each waveform, so it covers analyzed
 	// files only.
 	CheckDurationMismatch AuditCheck = "duration_mismatch"
+	// CheckDuplicateCopy lists the alternate files items hold beside their primaries: a
+	// copy of the same audio, or another encoding of the recording. It is informational;
+	// a copy can be deleted on its own with rm --file.
+	CheckDuplicateCopy AuditCheck = "duplicate_copy"
 )
 
 // AuditChecks returns every known audit check, for validation and help text.
@@ -50,7 +54,7 @@ func AuditChecks() []AuditCheck {
 		CheckInconsistentMeta, CheckMissingArt, CheckMissingReplayGain, CheckBadFilename,
 		CheckOrphanSidecar, CheckPathConflict, CheckInvalidFeed, CheckDerivedData,
 		CheckIntegrity, CheckCorruptAudio, CheckFileDiagnostic, CheckMissingMBID,
-		CheckLibraryConflict, CheckDurationMismatch,
+		CheckLibraryConflict, CheckDurationMismatch, CheckDuplicateCopy,
 	}
 }
 
@@ -179,4 +183,40 @@ func (d DerivedDrift) Consistent() bool {
 		d.ArtistRollupDrift == 0 && d.GenreRollupDrift == 0 &&
 		d.ReleaseGroupRollupDrift == 0 && d.SortKeyDrift == 0 &&
 		d.BookDurationDrift == 0 && d.BookISBNKeyDrift == 0
+}
+
+// CopyReason says why a file is an alternate of its item.
+type CopyReason string
+
+const (
+	// CopySameAudio is a file holding the same audio as one of its item's parts.
+	CopySameAudio CopyReason = "same audio"
+	// CopyOtherEncoding is another encoding of the item's recording. It ranked below the
+	// primary when it was attached, a writable library first and then quality, so a
+	// better encoding in a read-only library is one too.
+	CopyOtherEncoding CopyReason = "other encoding"
+)
+
+// ItemCopies is an item holding alternate files, with every file it has: its parts in
+// reading order, then its alternates, each with the reason it is one.
+type ItemCopies struct {
+	ItemPID PID
+	Kind    Kind
+	Title   string
+	Artist  string
+	Files   []CopyFile
+}
+
+// CopyFile is one file of an item with copies. Reason is empty for a part.
+type CopyFile struct {
+	FilePID     PID
+	LibraryPID  PID
+	DisplayPath string
+	Size        int64
+	Role        string
+	Reason      CopyReason
+	Codec       string
+	Bitrate     int
+	SampleRate  int
+	BitDepth    int
 }

@@ -30,7 +30,7 @@ func TestAcquisitionRoundTripAndSourceSurfacing(t *testing.T) {
 	}
 
 	// Stamp acquisition by the file's path (the import path) and read it back.
-	if err := st.PutAcquisitionForFile(ctx, []byte("/lib/a.mp3"), model.AcquisitionInput{
+	if _, err := st.PutAcquisitionForFile(ctx, []byte("/lib/a.mp3"), model.AcquisitionInput{
 		SourceType: model.SourceYouTube, SourceURL: "https://y/watch?v=1", SourceID: "1", Provider: "waxtap",
 	}); err != nil {
 		t.Fatalf("PutAcquisitionForFile: %v", err)

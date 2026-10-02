@@ -36,8 +36,10 @@ func (s *Store) SetItemTag(ctx context.Context, itemPID model.PID, key string, v
 	return s.setItemTag(ctx, itemPID, key, values, attr, lock, force, true)
 }
 
-// ForgetItemTag drops a custom tag a write-back has just cleared from every file of the
-// item, so the catalog follows the files and no file owes it. A locked tag is refused.
+// ForgetItemTag drops a custom tag a write-back has just cleared from the files that own
+// the item's tags, its primary and parts, so the catalog follows them, and clears every
+// file's owed row for it; the caller notes a file still holding the tag. A locked tag is
+// refused.
 func (s *Store) ForgetItemTag(ctx context.Context, itemPID model.PID, key string) error {
 	_, _, err := s.setItemTag(ctx, itemPID, key, nil, model.Attribution{}, model.LockUnchanged, false, false)
 	return err

@@ -75,6 +75,7 @@ func scanAll(t *testing.T, sc *Scanner, lib *model.Library, force bool) *Result 
 	if err != nil {
 		t.Fatalf("scan: %v", err)
 	}
+	assertScanPartition(t, res)
 	return res
 }
 
@@ -122,8 +123,8 @@ func TestFastPathReprocessesOnTouch(t *testing.T) {
 	if cr.reads-readsBefore != 1 {
 		t.Errorf("touched-mtime rescan parsed %d files, want 1", cr.reads-readsBefore)
 	}
-	if r.Unchanged != 1 {
-		t.Errorf("touched-mtime rescan Unchanged = %d, want 1", r.Unchanged)
+	if r.Unchanged != 2 || r.Reread != 1 {
+		t.Errorf("touched-mtime rescan = %+v, want both unchanged and the touched one re-read", r)
 	}
 }
 
@@ -139,8 +140,8 @@ func TestFastPathForce(t *testing.T) {
 	if cr.reads-readsBefore != 2 {
 		t.Errorf("forced rescan parsed %d files, want 2", cr.reads-readsBefore)
 	}
-	if r.Unchanged != 0 {
-		t.Errorf("forced rescan Unchanged = %d, want 0", r.Unchanged)
+	if r.Unchanged != 2 || r.Reread != 2 {
+		t.Errorf("forced rescan = %+v, want both unchanged and both re-read", r)
 	}
 }
 
@@ -435,6 +436,7 @@ func TestForceReconcileRecoversLargeDeletion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reconcile scan: %v", err)
 	}
+	assertScanPartition(t, res)
 	if res.Missing != 2 {
 		t.Fatalf("ForceReconcile Missing = %d, want 2", res.Missing)
 	}

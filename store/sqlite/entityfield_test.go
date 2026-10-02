@@ -305,7 +305,6 @@ func TestLoweredIdentityFieldPlans(t *testing.T) {
 	}{
 		{"podcast_pid", "SEARCH ep USING COVERING INDEX episode_podcast"},
 		{"album_pid", "SEARCH t USING COVERING INDEX track_album_id"},
-		{"library", "SEARCH f USING COVERING INDEX file_library"},
 		// artist_pid and album_artist_pid COALESCE across track and book, so no single
 		// index covers the expression and the scan stays. What lowering buys them is
 		// one pid lookup per query instead of one per row.
@@ -589,6 +588,37 @@ func TestLoweredNotInStalePIDExcludesNothing(t *testing.T) {
 	}
 }
 
+// TestLibraryMemberPlans: the library field matches an item through any of its files, and
+// still drives off file_library: `is` and `in` run the membership subquery once and reach
+// the items by rowid, never a correlated probe per item.
+func TestLibraryMemberPlans(t *testing.T) {
+	st, lib := entityFixture(t)
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/a.flac", essence: "ea", content: "ca",
+		title: "A", artist: "X", albumArt: "X", album: "Al"})
+	fm, ok := fieldMapFor(query.EntityItems)
+	if !ok {
+		t.Fatal("no field map for items")
+	}
+	for _, q := range []query.Query{
+		query.New(query.EntityItems).Where("library", query.OpIs, "some-pid").Build(),
+		query.New(query.EntityItems).WhereValues("library", query.OpIn, "a", "b").Build(),
+	} {
+		c, err := query.Compile(q, fm)
+		if err != nil {
+			t.Fatalf("compile: %v", err)
+		}
+		plan := explainPlan(t, st, "SELECT COUNT(*)"+itemJoins+" WHERE "+c.Where, c.Args...)
+		for _, want := range []string{"SEARCH pi USING INTEGER PRIMARY KEY", "LIST SUBQUERY", "file_library"} {
+			if !strings.Contains(plan, want) {
+				t.Errorf("%s: plan lacks %q:\n%s", c.Where, want, plan)
+			}
+		}
+		if strings.Contains(plan, "CORRELATED") {
+			t.Errorf("%s: plan probes per item:\n%s", c.Where, plan)
+		}
+	}
+}
+
 // TestLoweredNotInScansTheCatalog records the honest cost, in
 // TestReleaseGroupPIDScansOuterLoop's voice: a deny-list is an anti-join, so even
 // library, which `is` drives off file_library, scans here.
@@ -611,23 +641,20 @@ func TestLoweredNotInScansTheCatalog(t *testing.T) {
 	if !strings.Contains(plan, "SCAN pi") {
 		t.Errorf("library notIn no longer scans playable_item:\n%s", plan)
 	}
-	if strings.Contains(plan, "file_library") {
-		t.Errorf("library notIn seeks file_library; a deny-list cannot drive off that index, "+
-			"so this plan is not the one the field map header describes:\n%s", plan)
-	}
 	// The projection's own columns are correlated by design, so search for the filter's
-	// own subquery (the one resolving the pid against libq) and check its parent node.
+	// own subquery (the one resolving the pid against lfl) and check its parent node: the
+	// deny-set is built once, not resolved per row.
 	var parent string
 	for i, l := range lines {
-		if strings.Contains(l, "libq") && i > 0 {
+		if strings.Contains(l, "lfl") && i > 0 {
 			parent = lines[i-1]
 		}
 	}
 	if parent == "" {
-		t.Fatalf("no libq line; the filter did not lower its pid:\n%s", plan)
+		t.Fatalf("no lfl line; the filter did not build its member set:\n%s", plan)
 	}
-	if strings.Contains(parent, "CORRELATED") {
-		t.Errorf("library notIn resolves its pid per row (%q); lowering regressed:\n%s", parent, plan)
+	if !strings.Contains(parent, "LIST SUBQUERY") || strings.Contains(parent, "CORRELATED") {
+		t.Errorf("library notIn resolves its members per row (%q):\n%s", parent, plan)
 	}
 }
 

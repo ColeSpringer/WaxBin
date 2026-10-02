@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"slices"
+	"strconv"
 
 	"github.com/colespringer/waxbin/enrich"
 	"github.com/colespringer/waxbin/jobs"
@@ -90,19 +91,47 @@ func (l *Library) Job(ctx context.Context, pid model.PID) (*model.Job, error) {
 // synchronous Scan and the asynchronous StartScan.
 func (l *Library) scanWork(libs []*model.Library, req ScanRequest, out *ScanResult) jobFn {
 	return func(ctx context.Context, h *jobs.Handle) error {
-		for _, lib := range libs {
-			r, err := l.scanner.Scan(ctx, scan.Request{
-				Library: lib, SubPath: req.SubPath, Force: req.Force,
-				AdoptStampedPIDs: req.AdoptStampedPIDs, ForceReconcile: req.ForceReconcile,
-				IgnoreLocks: req.IgnoreLocks,
-			}, func(p float64, msg string) error { return h.Heartbeat(ctx, p, msg) })
-			if err != nil {
-				return err
-			}
-			out.Runs = append(out.Runs, *r)
-			addResult(&out.Total, r)
+		return l.scanLibraries(ctx, libs, req, out, func(p float64, msg string) error { return h.Heartbeat(ctx, p, msg) })
+	}
+}
+
+// scanLibraries scans each library in turn, reporting progress through beat. A scan of
+// one library names it at the top of out. The closing beat after the last library is
+// only a message, so a failure to write it leaves the finished scan standing, as
+// scan.Scan treats its own.
+func (l *Library) scanLibraries(ctx context.Context, libs []*model.Library, req ScanRequest, out *ScanResult, beat func(float64, string) error) error {
+	for i, lib := range libs {
+		r, err := l.scanner.Scan(ctx, scan.Request{
+			Library: lib, SubPath: req.SubPath, Force: req.Force,
+			AdoptStampedPIDs: req.AdoptStampedPIDs, ForceReconcile: req.ForceReconcile,
+			IgnoreLocks: req.IgnoreLocks,
+		}, libraryBeat(i, len(libs), beat))
+		if err != nil {
+			return err
 		}
-		return nil
+		out.Runs = append(out.Runs, *r)
+		addResult(&out.Total, r)
+	}
+	if len(libs) == 1 {
+		out.Total.LibraryPID, out.Total.LibraryName = out.Runs[0].LibraryPID, out.Runs[0].LibraryName
+	}
+	if len(libs) > 1 {
+		if err := beat(1, "scanned "+strconv.Itoa(out.Total.FilesSeen)+" files in "+strconv.Itoa(len(libs))+" libraries"); err != nil {
+			l.log.Warn("scan: closing heartbeat", "err", err)
+		}
+	}
+	return nil
+}
+
+// libraryBeat maps library i of n's own progress onto its share of the whole run, so a
+// multi-root scan's progress keeps rising from one root to the next, and names the root
+// in its message.
+func libraryBeat(i, n int, hb func(float64, string) error) scan.Heartbeat {
+	return func(p float64, msg string) error {
+		if n > 1 {
+			msg += " (library " + strconv.Itoa(i+1) + " of " + strconv.Itoa(n) + ")"
+		}
+		return hb((float64(i)+p)/float64(n), msg)
 	}
 }
 
@@ -117,7 +146,8 @@ func scanSpec(req ScanRequest) jobs.Spec {
 
 // StartScan submits a scan as a background job and returns its PID immediately.
 // The job runs to completion in this process; a client follows it through Job and
-// reads the scan.Result summary from the finished job's Result.
+// reads the summary from the finished job's Result: the total over every library as a
+// scan.Result at the top level, and each library's own result under Runs.
 func (l *Library) StartScan(ctx context.Context, req ScanRequest) (model.PID, error) {
 	libs, err := l.resolveLibraries(ctx, req.LibraryPID)
 	if err != nil {
@@ -128,7 +158,10 @@ func (l *Library) StartScan(ctx context.Context, req ScanRequest) (model.PID, er
 		if err := l.scanWork(libs, req, out)(jctx, h); err != nil {
 			return err
 		}
-		h.SetResult(l.jsonResult(out.Total))
+		h.SetResult(l.jsonResult(struct {
+			scan.Result
+			Runs []scan.Result
+		}{out.Total, out.Runs}))
 		return nil
 	})
 }

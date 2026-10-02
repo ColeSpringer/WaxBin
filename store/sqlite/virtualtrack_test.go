@@ -3,6 +3,7 @@ package sqlite_test
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -546,5 +547,328 @@ func TestRipTrackTakesANewDiscNumber(t *testing.T) {
 		if it.DiscNo != 2 {
 			t.Errorf("%s disc = %d, want 2", it.Title, it.DiscNo)
 		}
+	}
+}
+
+// TestVirtualTrackRipCopyAddsAlternates: a copy of a cue rip (the same audio and sheet)
+// gives each virtual track an alternate edge on the copy carrying the same window, the
+// primaries stay on the original, and dropping the copy drops only the alternates.
+func TestVirtualTrackRipCopyAddsAlternates(t *testing.T) {
+	ctx := context.Background()
+	st, dbPath, _ := openStoreAt(t)
+	lib, root := addCopyLibrary(t, st)
+	orig, cp := filepath.Join(root, "a", "album.flac"), filepath.Join(root, "b", "album.flac")
+	touch(t, orig)
+	touch(t, cp)
+	windows := [][2]int64{{0, 9}, {9, 27}, {27, 0}}
+	r1, err := st.PutScannedVirtualTracks(ctx, vtrackInput(lib.ID, orig, "sha256:VE", "sha256:VC", 600, windows))
+	if err != nil {
+		t.Fatal(err)
+	}
+	seq := headSeq(t, st)
+	rc, err := st.PutScannedVirtualTracks(ctx, vtrackInput(lib.ID, cp, "sha256:VE", "sha256:VC2", 600, windows))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !rc.AttachedAsCopy || rc.ItemCreated {
+		t.Fatalf("rip copy = %+v, want it attached as a copy", rc)
+	}
+	items := vtItems(t, st)
+	if len(items) != 3 {
+		t.Fatalf("virtual tracks = %d, want 3", len(items))
+	}
+	for _, it := range items {
+		if it.FilePID != r1.FilePID || it.Title == "" {
+			t.Errorf("track %s plays %s, want the original %s", it.PID, it.FilePID, r1.FilePID)
+		}
+	}
+	type edge struct {
+		role       string
+		start, end int64
+	}
+	edgesOf := func(file model.PID) map[string]edge {
+		rows, err := roConn(t, dbPath).QueryContext(ctx, `SELECT pi.pid, itf.role, itf.start_frames, COALESCE(itf.end_frames, 0)
+			FROM item_file itf JOIN file f ON f.id = itf.file_id JOIN playable_item pi ON pi.id = itf.item_id
+			WHERE f.pid = ?`, string(file))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		out := map[string]edge{}
+		for rows.Next() {
+			var pid string
+			var e edge
+			if err := rows.Scan(&pid, &e.role, &e.start, &e.end); err != nil {
+				t.Fatal(err)
+			}
+			out[pid] = e
+		}
+		return out
+	}
+	want := edgesOf(r1.FilePID)
+	got := edgesOf(rc.FilePID)
+	if len(got) != 3 {
+		t.Fatalf("copy edges = %+v, want one per track", got)
+	}
+	for pid, e := range want {
+		if e.role != "primary" || got[pid] != (edge{"alternate", e.start, e.end}) {
+			t.Errorf("track %s: original %+v, copy %+v; want the copy an alternate over the same window", pid, e, got[pid])
+		}
+	}
+	var updates int
+	for _, c := range changesAfter(t, st, seq) {
+		if c.EntityType == "item" && c.Op == model.OpUpdate {
+			updates++
+		}
+	}
+	if updates != 3 {
+		t.Errorf("item updates = %d, want one per track", updates)
+	}
+	if ds := diagsOf(t, st, rc.FilePID, model.DiagDuplicateCopy); len(ds) != 1 || ds[0].Detail != orig {
+		t.Errorf("copy diagnostics = %+v, want one naming %s", ds, orig)
+	}
+
+	seq = headSeq(t, st)
+	if again, err := st.PutScannedVirtualTracks(ctx, vtrackInput(lib.ID, cp, "sha256:VE", "sha256:VC2", 600, windows)); err != nil || !again.AttachedAsCopy {
+		t.Fatalf("copy re-put = %+v (err %v), want it kept a copy", again, err)
+	}
+	if cs := changesAfter(t, st, seq); len(cs) != 0 {
+		t.Errorf("copy re-put deltas = %+v, want none", cs)
+	}
+
+	if _, err := st.DetachFile(ctx, rc.FilePID); err != nil {
+		t.Fatal(err)
+	}
+	for _, it := range vtItems(t, st) {
+		if it.State != model.StatePresent || it.FilePID != r1.FilePID {
+			t.Errorf("after dropping the copy, track %s = %s on %s, want present on the original", it.PID, it.State, it.FilePID)
+		}
+	}
+	if left := edgesOf(r1.FilePID); len(left) != 3 {
+		t.Errorf("original edges after dropping the copy = %+v, want all three", left)
+	}
+	assertConsistent(t, st)
+}
+
+// TestVirtualTrackRipCopyWaitsForReconciliation: a rip copy re-read while the original's
+// path is missing keeps its alternates (mid-walk the original may have moved), and
+// reconciling the gone rip makes the copy every track's primary.
+func TestVirtualTrackRipCopyWaitsForReconciliation(t *testing.T) {
+	ctx := context.Background()
+	st, _, _ := openStoreAt(t)
+	lib, root := addCopyLibrary(t, st)
+	orig, cp := filepath.Join(root, "a", "album.flac"), filepath.Join(root, "b", "album.flac")
+	touch(t, orig)
+	touch(t, cp)
+	windows := [][2]int64{{0, 9}, {9, 0}}
+	r1, err := st.PutScannedVirtualTracks(ctx, vtrackInput(lib.ID, orig, "sha256:VE", "sha256:VC", 600, windows))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.PutScannedVirtualTracks(ctx, vtrackInput(lib.ID, cp, "sha256:VE", "sha256:VC2", 600, windows)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(orig); err != nil {
+		t.Fatal(err)
+	}
+	rc, err := st.PutScannedVirtualTracks(ctx, vtrackInput(lib.ID, cp, "sha256:VE", "sha256:VC2", 600, windows))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !rc.AttachedAsCopy {
+		t.Errorf("re-read copy = %+v, want it kept the copy", rc)
+	}
+	if _, err := st.MarkFilesMissing(ctx, []model.PID{r1.FilePID}); err != nil {
+		t.Fatal(err)
+	}
+	items := vtItems(t, st)
+	if len(items) != 2 {
+		t.Fatalf("virtual tracks = %d, want 2", len(items))
+	}
+	for _, it := range items {
+		if it.FilePID != rc.FilePID {
+			t.Errorf("track %s plays %s, want the copy %s", it.PID, it.FilePID, rc.FilePID)
+		}
+		if got := rolesOf(t, st, it.PID); len(got) != 1 || got[rc.FilePID] != "primary" {
+			t.Errorf("track %s edges = %v, want the copy alone as primary", it.PID, got)
+		}
+	}
+	assertConsistent(t, st)
+}
+
+// TestEssenceRekeyLeavesARipCopysTracks: a rip copy re-read as a plain track under a new
+// essence digest (unchanged bytes) does not re-key one of the virtual tracks its windows
+// back; the whole file gets an item of its own.
+func TestEssenceRekeyLeavesARipCopysTracks(t *testing.T) {
+	ctx := context.Background()
+	st, lib, root := openCopyStore(t)
+	orig, cp := filepath.Join(root, "a", "album.flac"), filepath.Join(root, "b", "album.flac")
+	touch(t, orig)
+	touch(t, cp)
+	windows := [][2]int64{{0, 9}, {9, 27}, {27, 0}}
+	if _, err := st.PutScannedVirtualTracks(ctx, vtrackInput(lib.ID, orig, "sha256:VE", "sha256:VC", 600, windows)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.PutScannedVirtualTracks(ctx, vtrackInput(lib.ID, cp, "sha256:VE", "sha256:VC2", 600, windows)); err != nil {
+		t.Fatal(err)
+	}
+	tracks := map[model.PID]bool{}
+	for _, it := range vtItems(t, st) {
+		tracks[it.PID] = true
+	}
+	res := mustPut(t, st, input(lib.ID, cp, "sha256:VE2", "sha256:VC2", "Whole"))
+	if tracks[res.ItemPID] || !res.ItemCreated {
+		t.Errorf("re-read = %+v, want a new item rather than virtual track %s", res, res.ItemPID)
+	}
+}
+
+// TestRipComesBackFromMissing: the tracks of a rip reconciliation marked missing come
+// back when the rip is read again at its path, and when a copy of it arrives in another
+// library, which then plays them.
+func TestRipComesBackFromMissing(t *testing.T) {
+	ctx := context.Background()
+	st, lib, root := openCopyStore(t)
+	other, otherRoot := addCopyLibrary(t, st)
+	orig := filepath.Join(root, "a", "album.flac")
+	touch(t, orig)
+	windows := [][2]int64{{0, 9}, {9, 27}, {27, 0}}
+	r1, err := st.PutScannedVirtualTracks(ctx, vtrackInput(lib.ID, orig, "sha256:VE", "sha256:VC", 600, windows))
+	if err != nil {
+		t.Fatal(err)
+	}
+	allState := func(want model.ItemState) bool {
+		for _, it := range vtItems(t, st) {
+			if it.State != want {
+				return false
+			}
+		}
+		return true
+	}
+	if _, err := st.MarkFilesMissing(ctx, []model.PID{r1.FilePID}); err != nil || !allState(model.StateMissing) {
+		t.Fatalf("reconcile err %v, want every track missing", err)
+	}
+	if _, err := st.PutScannedVirtualTracks(ctx, vtrackInput(lib.ID, orig, "sha256:VE", "sha256:VC", 600, windows)); err != nil {
+		t.Fatal(err)
+	}
+	if !allState(model.StatePresent) {
+		t.Error("the rip read again at its path left its tracks missing")
+	}
+
+	if err := os.Remove(orig); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.MarkFilesMissing(ctx, []model.PID{r1.FilePID}); err != nil || !allState(model.StateMissing) {
+		t.Fatalf("reconcile err %v, want every track missing again", err)
+	}
+	cp := filepath.Join(otherRoot, "album.flac")
+	touch(t, cp)
+	rc, err := st.PutScannedVirtualTracks(ctx, vtrackInput(other.ID, cp, "sha256:VE", "sha256:VC2", 600, windows))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !allState(model.StatePresent) {
+		t.Error("the copy left the tracks missing")
+	}
+	for _, it := range vtItems(t, st) {
+		if it.FilePID != rc.FilePID {
+			t.Errorf("track %s plays %s, want the copy %s", it.PID, it.FilePID, rc.FilePID)
+		}
+	}
+}
+
+// ripCopies catalogs n copies of one three-track rip, the first the original, and returns
+// each put's result and path.
+func ripCopies(t *testing.T, st *sqlite.Store, lib *model.Library, root string, n int) ([]*model.ScanItemResult, []string) {
+	t.Helper()
+	windows := [][2]int64{{0, 9}, {9, 27}, {27, 0}}
+	var res []*model.ScanItemResult
+	var paths []string
+	for i := range n {
+		p := filepath.Join(root, fmt.Sprintf("r%d", i+1), "album.flac")
+		touch(t, p)
+		r, err := st.PutScannedVirtualTracks(context.Background(),
+			vtrackInput(lib.ID, p, "sha256:VE", fmt.Sprintf("sha256:VC%d", i+1), 600, windows))
+		if err != nil {
+			t.Fatal(err)
+		}
+		res, paths = append(res, r), append(paths, p)
+	}
+	return res, paths
+}
+
+// TestRipTrackDroppedFromTheOriginalStaysOnItsCopy: a track the original rip's sheet no
+// longer declares is still backed by a copy whose sheet does, so the copy takes it over
+// rather than the track being deleted with its plays and stars. The copy is still a copy
+// of the original for the other tracks.
+func TestRipTrackDroppedFromTheOriginalStaysOnItsCopy(t *testing.T) {
+	ctx := context.Background()
+	st, lib, root := openCopyStore(t)
+	rips, paths := ripCopies(t, st, lib, root, 2)
+	third := vtItems(t, st)[2]
+	res, err := st.PutScannedVirtualTracks(ctx, vtrackInput(lib.ID, paths[0], "sha256:VE", "sha256:VC1", 600, [][2]int64{{0, 9}, {9, 27}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	items := vtItems(t, st)
+	if len(items) != 3 || items[2].PID != third.PID || items[2].FilePID != rips[1].FilePID {
+		t.Fatalf("tracks = %+v, want track 3 kept and played from the copy %s", items, rips[1].FilePID)
+	}
+	if got := promotedPIDs(res.Promoted); len(got) != 1 || got[0] != rips[1].FilePID {
+		t.Errorf("promoted = %v, want the copy", got)
+	}
+	if ds := diagsOf(t, st, rips[1].FilePID, model.DiagDuplicateCopy); len(ds) != 1 || ds[0].Detail != paths[0] {
+		t.Errorf("copy diagnostics = %+v, want it still naming the original %s", ds, paths[0])
+	}
+}
+
+// TestRipCopyDiagnosticsFollowAPromotion: when the original rip goes and a copy plays its
+// tracks, another copy's diagnostic names the copy now playing them.
+func TestRipCopyDiagnosticsFollowAPromotion(t *testing.T) {
+	ctx := context.Background()
+	st, lib, root := openCopyStore(t)
+	rips, paths := ripCopies(t, st, lib, root, 3)
+	if _, err := st.DetachFile(ctx, rips[0].FilePID); err != nil {
+		t.Fatal(err)
+	}
+	for _, it := range vtItems(t, st) {
+		if it.FilePID != rips[1].FilePID {
+			t.Fatalf("track %s plays %s, want the first copy %s", it.PID, it.FilePID, rips[1].FilePID)
+		}
+	}
+	if ds := diagsOf(t, st, rips[2].FilePID, model.DiagDuplicateCopy); len(ds) != 1 || ds[0].Detail != paths[1] {
+		t.Errorf("second copy diagnostics = %+v, want one naming %s", ds, paths[1])
+	}
+	if ds := diagsOf(t, st, rips[1].FilePID, model.DiagDuplicateCopy); len(ds) != 0 {
+		t.Errorf("promoted copy diagnostics = %+v, want none", ds)
+	}
+}
+
+// TestRipRelinkFollowsAChangedWindow: a rip moved in the same pass as an edit to one
+// track's window relinks its own row, so the other tracks keep their identity and only the
+// edited track is replaced, as the edit made in place would do.
+func TestRipRelinkFollowsAChangedWindow(t *testing.T) {
+	ctx := context.Background()
+	st, lib, root := openCopyStore(t)
+	orig, moved := filepath.Join(root, "a", "album.flac"), filepath.Join(root, "b", "album.flac")
+	touch(t, orig)
+	r1, err := st.PutScannedVirtualTracks(ctx, vtrackInput(lib.ID, orig, "sha256:VE", "sha256:VC", 600, [][2]int64{{0, 9}, {9, 27}, {27, 0}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := vtItems(t, st)
+	if err := os.Remove(orig); err != nil {
+		t.Fatal(err)
+	}
+	touch(t, moved)
+	r2, err := st.PutScannedVirtualTracks(ctx, vtrackInput(lib.ID, moved, "sha256:VE", "sha256:VC", 600, [][2]int64{{0, 9}, {9, 30}, {30, 0}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !r2.Relinked || r2.FilePID != r1.FilePID {
+		t.Errorf("moved rip = %+v, want its row %s relinked", r2, r1.FilePID)
+	}
+	after := vtItems(t, st)
+	if len(after) != 3 || after[0].PID != before[0].PID || after[1].PID != before[1].PID || after[2].PID == before[2].PID {
+		t.Errorf("tracks = %v, want the first two kept and the third replaced", after)
 	}
 }

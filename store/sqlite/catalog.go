@@ -235,7 +235,13 @@ func (s *Store) PutScannedTrack(ctx context.Context, in model.PutScannedTrackInp
 	err := s.writeTx(ctx, func(tx *sql.Tx) error {
 		now := nowNS()
 
-		fileID, filePID, priorEssence, err := s.resolveFile(ctx, tx, in, now, res)
+		// One resolution of the item key serves the relink, the overlay and the item
+		// write, unless the essence re-key below moves a key.
+		key, err := resolveItemTx(ctx, tx, s.log, in.Item.Kind, in.Item.IdentityKey, bookAdoptKey{})
+		if err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		fileID, filePID, priorEssence, err := s.resolveFile(ctx, tx, in, key.accept(), now, res)
 		if err != nil {
 			return err
 		}
@@ -267,6 +273,7 @@ func (s *Store) PutScannedTrack(ctx context.Context, in model.PutScannedTrackInp
 			if err := preserveItemIdentityForFile(ctx, tx, fileID, in.Item.Kind, in.Item.IdentityKey); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
+			key = nil
 		}
 
 		// What the file itself says, kept from before the lock overlay so the owed rows
@@ -277,12 +284,68 @@ func (s *Store) PutScannedTrack(ctx context.Context, in model.PutScannedTrackInp
 		// onto the scanned values before any writer runs (overlayStoredTrackTx). Runs
 		// after the essence-algorithm re-key above so it resolves the (possibly re-keyed)
 		// existing item.
-		prior, err := overlayStoredTrackTx(ctx, tx, s.log, fileID, &in.Track, &in.Item, in.Derived, in.PreserveLocks)
+		prior, err := overlayStoredTrackTx(ctx, tx, s.log, fileID, &in.Track, &in.Item, in.Derived, in.PreserveLocks, key)
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 
-		itemID, itemPID, created, stateChanged, priorTitle, err := upsertItem(ctx, tx, s.log, in.Item, bookAdoptKey{}, now, in.PreferredItemPID)
+		// An item's primary on another file is re-pointed by a put only as
+		// arrivalTakesOverTx allows: the same audio arriving again is a copy, another
+		// encoding of the recording takes the item over by outranking a primary still on
+		// disk, and whichever file loses becomes an alternate. A primary the walk finds
+		// missing may have moved to a folder it has not reached yet, so it is replaced
+		// only once reconciliation has marked the item missing.
+		demoted := false
+		if prior != nil {
+			primary, err := primaryFileTx(ctx, tx, prior.itemID)
+			if err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+			// The primary itself, read again, yields to a better encoding the item holds on
+			// disk, so the end state does not depend on which file the walk reached first.
+			if primary != nil && primary.fileID == fileID {
+				better, err := outrankingAlternateTx(ctx, tx, prior.itemID, in.LibraryID, in.File)
+				if err != nil {
+					return waxerr.Wrap(waxerr.CodeIO, op, err)
+				}
+				if better != nil {
+					if err := demoteToAlternateTx(ctx, tx, prior.itemID, fileID); err != nil {
+						return waxerr.Wrap(waxerr.CodeIO, op, err)
+					}
+					p, err := promoteTx(ctx, tx, prior.itemID, better, primaryRole, 0)
+					if err != nil {
+						return waxerr.Wrap(waxerr.CodeIO, op, err)
+					}
+					res.Promoted = append(res.Promoted, *p)
+					if err := appendItemUpdateTx(ctx, tx, prior.itemID); err != nil {
+						return waxerr.Wrap(waxerr.CodeIO, op, err)
+					}
+					if primary, err = primaryFileTx(ctx, tx, prior.itemID); err != nil {
+						return waxerr.Wrap(waxerr.CodeIO, op, err)
+					}
+					return s.attachCopyTx(ctx, tx, in, fileID, filePID, prior.itemID, primary, fileTitle, fileTrack, res, now)
+				}
+			}
+			if primary != nil && primary.fileID != fileID {
+				better, err := arrivalTakesOverTx(ctx, tx, prior.itemID, in.LibraryID, in.File, primary)
+				if err != nil {
+					return waxerr.Wrap(waxerr.CodeIO, op, err)
+				}
+				if !better {
+					return s.attachCopyTx(ctx, tx, in, fileID, filePID, prior.itemID, primary, fileTitle, fileTrack, res, now)
+				}
+				if err := demoteToAlternateTx(ctx, tx, prior.itemID, primary.fileID); err != nil {
+					return waxerr.Wrap(waxerr.CodeIO, op, err)
+				}
+				demoted = true
+			}
+		}
+
+		known := &resolvedItem{}
+		if prior != nil {
+			known.id = prior.itemID
+		}
+		itemID, itemPID, created, stateChanged, priorTitle, err := upsertItem(ctx, tx, s.log, in.Item, bookAdoptKey{}, now, in.PreferredItemPID, known)
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
@@ -375,41 +438,18 @@ func (s *Store) PutScannedTrack(ctx context.Context, in model.PutScannedTrackInp
 			return err
 		}
 
-		// Re-home the file onto this item, detaching it from any prior item (the
-		// case when an in-place essence change re-keys the file to a new identity).
+		// Re-home the file onto this item as its primary, detaching it from any prior
+		// item (an in-place essence change re-keys the file to a new identity, or a copy
+		// takes over an item whose primary is gone).
 		orphans, err := linkPrimaryFile(ctx, tx, itemID, fileID)
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
-		for _, oid := range orphans {
-			has, err := itemHasAnyFile(ctx, tx, oid)
-			if err != nil {
-				return waxerr.Wrap(waxerr.CodeIO, op, err)
-			}
-			if has {
-				// A surviving item (a multi-file book) that just lost a file must keep a
-				// primary (or it reads back headless) AND have its rollups recomputed,
-				// since its summed duration/genre rollup shrank with the detached part.
-				if err := affected.collect(ctx, tx, oid); err != nil {
-					return waxerr.Wrap(waxerr.CodeIO, op, err)
-				}
-				if err := ensurePrimary(ctx, tx, oid); err != nil {
-					return waxerr.Wrap(waxerr.CodeIO, op, err)
-				}
-				if err := refreshBookDuration(ctx, tx, oid); err != nil {
-					return waxerr.Wrap(waxerr.CodeIO, op, err)
-				}
-				continue
-			}
-			// The orphaned item's entities lose it; collect them before the delete.
-			if err := affected.collect(ctx, tx, oid); err != nil {
-				return waxerr.Wrap(waxerr.CodeIO, op, err)
-			}
-			opid, err := deleteItemCascade(ctx, tx, oid)
-			if err != nil {
-				return waxerr.Wrap(waxerr.CodeIO, op, err)
-			}
-			if err := appendChange(ctx, tx, "item", opid, model.OpDelete); err != nil {
+		if res.Promoted, err = reconcileOrphansTx(ctx, tx, orphans, affected); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		if demoted {
+			if err := refreshCopyDiagnosticsTx(ctx, tx, itemID); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 		}
@@ -448,7 +488,7 @@ func (s *Store) PutScannedTrack(ctx context.Context, in model.PutScannedTrackInp
 		// change, OR a newly attributed origin, so a delta consumer never serves stale
 		// metadata/art after any real change. acqAdded is true only when a row was actually
 		// inserted, so a rescan of an already-attributed item stays silent.
-		if created || res.ContentChanged || res.MetadataChanged || stateChanged || lyricsChanged || artChanged || acqAdded || tagsChanged {
+		if created || res.ContentChanged || res.MetadataChanged || stateChanged || lyricsChanged || artChanged || acqAdded || tagsChanged || demoted {
 			if err := appendChange(ctx, tx, "item", itemPID, opFor(created)); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
@@ -462,10 +502,10 @@ func (s *Store) PutScannedTrack(ctx context.Context, in model.PutScannedTrackInp
 }
 
 // resolveFile finds-or-creates the file row, preserving the pid on a path match
-// (rescan/retag) or an essence match (re-link after a move). For a path match it
-// also returns the file's prior essence hash, so the caller can detect an
-// essence-algorithm change over unchanged bytes and preserve item identity.
-func (s *Store) resolveFile(ctx context.Context, tx *sql.Tx, in model.PutScannedTrackInput, now int64, res *model.ScanItemResult) (int64, model.PID, string, error) {
+// (rescan/retag) or a match on a gone row of the same essence (re-link after a move).
+// For a path match it also returns the file's prior essence hash, so the caller can
+// detect an essence-algorithm change over unchanged bytes and preserve item identity.
+func (s *Store) resolveFile(ctx context.Context, tx *sql.Tx, in model.PutScannedTrackInput, accept map[int64]bool, now int64, res *model.ScanItemResult) (int64, model.PID, string, error) {
 	if existing, err := fileByPathTx(ctx, tx, in.File.Path); err != nil {
 		return 0, "", "", err
 	} else if existing != nil {
@@ -476,20 +516,22 @@ func (s *Store) resolveFile(ctx context.Context, tx *sql.Tx, in model.PutScanned
 		return existing.ID, existing.PID, existing.EssenceHash, nil
 	}
 
-	// No path match: re-link an existing row with identical essence only when
-	// that row's file is gone from disk (a genuine move). If the old path still
-	// exists, this is a duplicate copy, not a relocation. Give it its own file
-	// row so both copies stay cataloged.
+	// No path match: re-link a row with identical essence only when that row's file
+	// is gone from disk (a genuine move). A copy whose original is still on disk gets
+	// its own row, which the caller attaches to the item as an alternate.
 	if in.File.EssenceHash != "" {
-		relink, err := fileByEssenceSingleTx(ctx, tx, in.File.EssenceHash, in.LibraryID)
+		relink, err := fileByEssenceGoneTx(ctx, tx, in.File.EssenceHash, in.File.ContentHash, in.LibraryID, accept)
 		if err != nil {
 			return 0, "", "", err
 		}
-		if relink != nil && !pathExists(relink.Path) {
+		if relink != nil {
 			res.Relinked = true
 			res.RelinkedFrom = string(relink.Path)
 			res.ContentChanged = relink.ContentHash != in.File.ContentHash
 			if err := updateFileRow(ctx, tx, relink.ID, in.File, now); err != nil {
+				return 0, "", "", err
+			}
+			if err := renameCopyDetailsTx(ctx, tx, relink.ID, relink.DisplayPath, in.File.DisplayPath); err != nil {
 				return 0, "", "", err
 			}
 			return relink.ID, relink.PID, relink.EssenceHash, nil
@@ -509,7 +551,10 @@ func (s *Store) resolveFile(ctx context.Context, tx *sql.Tx, in model.PutScanned
 // used only when a file's bytes are unchanged but a new essence algorithm
 // produced a different digest, letting the same audio keep its item identity. It
 // is a no-op when there is no backing item, the key is already current, or another
-// item already owns newKey.
+// item already owns newKey. An alternate re-keys its item too: a copy re-read before
+// its primary would otherwise fork a new item that the primary then joins, leaving
+// the original item with no file. A windowed edge never does, since a rip's track is a
+// window of the file and not the whole file the new key names.
 func preserveItemIdentityForFile(ctx context.Context, tx *sql.Tx, fileID int64, kind model.Kind, newKey string) error {
 	if newKey == "" {
 		return nil
@@ -519,7 +564,7 @@ func preserveItemIdentityForFile(ctx context.Context, tx *sql.Tx, fileID int64, 
 	err := tx.QueryRowContext(ctx,
 		`SELECT pi.id, pi.identity_key FROM item_file itf
 		 JOIN playable_item pi ON pi.id = itf.item_id
-		 WHERE itf.file_id = ? AND itf.role = 'primary'`, fileID).Scan(&itemID, &curKey)
+		 WHERE itf.file_id = ? AND itf.role IN ('primary', 'alternate') AND itf.start_frames IS NULL`, fileID).Scan(&itemID, &curKey)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil
 	}
@@ -573,10 +618,24 @@ const budgetScanCeiling = 50_000
 // under-fills the budget rather than overflowing it, which is the safe way to
 // be wrong.
 func (s *Store) QueryItems(ctx context.Context, q query.Query, userPID model.PID) ([]*model.ItemView, error) {
+	return s.queryItems(ctx, q, userPID, false)
+}
+
+// QueryItemsByPrimary is QueryItems with the library field reading each item's primary
+// file alone, for an operation on an item's own files (organize, a delete by query): an
+// item another library holds only a copy of is not that library's to move or delete.
+func (s *Store) QueryItemsByPrimary(ctx context.Context, q query.Query, userPID model.PID) ([]*model.ItemView, error) {
+	return s.queryItems(ctx, q, userPID, true)
+}
+
+func (s *Store) queryItems(ctx context.Context, q query.Query, userPID model.PID, byPrimary bool) ([]*model.ItemView, error) {
 	const op = "store.QueryItems"
 	fm, ok := fieldMapFor(q.Entity)
 	if !ok {
 		return nil, waxerr.New(waxerr.CodeInvalid, op, "unsupported query entity: "+string(q.Entity))
+	}
+	if byPrimary {
+		fm = primaryLibraryFields{fm}
 	}
 	c, err := query.Compile(q, fm)
 	if err != nil {
@@ -596,10 +655,12 @@ func (s *Store) QueryItems(ctx context.Context, q query.Query, userPID model.PID
 		// ItemView column. Widen only this statement's SELECT (the budget scan
 		// appends the matching dest explicitly) rather than touching the shared
 		// itemViewCols/itemViewDests pair every other reader scans. The cost sums
-		// all backing files, not just the primary: a multi-file book transfers
-		// every part, so pricing only part one would overflow a device budget.
+		// all parts, not just the primary: a multi-file book transfers every part,
+		// so pricing only part one would overflow a device budget. An alternate is
+		// another copy of the same audio, which a device holds once.
 		sb.WriteString("SELECT " + itemViewCols +
-			", (SELECT COALESCE(SUM(szf.size),0) FROM item_file szif JOIN file szf ON szf.id = szif.file_id WHERE szif.item_id = pi.id)" +
+			", (SELECT COALESCE(SUM(szf.size),0) FROM item_file szif JOIN file szf ON szf.id = szif.file_id" +
+			" WHERE szif.item_id = pi.id AND szif.role IN ('primary', 'part'))" +
 			itemJoins)
 	} else {
 		sb.WriteString(itemSelect)
@@ -939,9 +1000,16 @@ func (s *Store) CommitMove(ctx context.Context, journalPID model.PID, in model.R
 		if err != nil {
 			return err
 		}
+		var from string
+		if err := tx.QueryRowContext(ctx, "SELECT display_path FROM file WHERE id = ?", fileID).Scan(&from); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
 		if _, err := tx.ExecContext(ctx,
 			"UPDATE file SET path=?, display_path=?, rel_path=?, last_seen=? WHERE id=?",
 			in.NewPath, in.NewDisplayPath, in.NewRelPath, nowNS(), fileID); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		if err := renameCopyDetailsTx(ctx, tx, fileID, from, in.NewDisplayPath); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		if _, err := tx.ExecContext(ctx,
@@ -1084,8 +1152,8 @@ func opFor(created bool) model.ChangeOp {
 }
 
 // pathExists reports whether the file at the given raw path is still present on
-// disk. It distinguishes a move (old path gone) from a duplicate copy (old path
-// still present) when deciding whether to re-link by essence, and backs
+// disk. It distinguishes a move (old path gone) from a copy (old path still present)
+// when deciding whether to re-link by essence or attach an alternate, and backs
 // organize-journal recovery, so a Windows long path must be probed with the
 // extended-length prefix or a present file would read as absent (mis-classifying a
 // move, or rolling back a completed move during recovery).

@@ -60,7 +60,7 @@ exit codes (`waxbin exit-codes`).
 | **Read / browse** | `query`/`ls` (incl. `--library`, `--tag KEY=VALUE`, `--tag-contains`, `--tag-present`/`--tag-missing`, `--limit-mode`/`--seed`), `browse <list>`, `facet --group-by` (incl. `tag.<KEY>`, `library`, `podcast`, `creditArtist`, `playlist`), `search` (incl. `--max-candidates`, `--library`, `--state`), `show`, `art` (incl. `--role`), `art roles`, `lyrics`, `stats [--year N]`, `provenance`, `acquisition`/`acquisition set`/`acquisition clear`, `lock`/`unlock`, `entity info`/`entity list` |
 | **Curation & editing** | `edit` (incl. `--batch`), `entity` (incl. `entity rename [--write-back]`), `credit` (incl. `--batch`), `tag`/`tag keys`, `lyrics set`, `chapters`, `art set` (incl. `--role`), `art lock`/`art unlock` (incl. `--role`), `detach [--write-back]` |
 | **Ingest / organize** | `inbox`, `import`, `organize`, `profiles` |
-| **Deletion / repair** | `trash`, `rm [--permanent]`, `mark-missing [--force]`, `merge`, `audit`, `diagnostics`, `upgrade` |
+| **Deletion / repair** | `trash`, `rm [--permanent] [--file]`, `mark-missing [--force]`, `merge`, `audit`, `diagnostics`, `upgrade` |
 | **Portability** | `backup`, `restore`, `export`, `manifest`, `rebuild` |
 | **Playlists / podcasts** | `playlist`, `smartplaylist`, `podcast`, `opml` |
 | **Enrichment** | `enrich` (MusicBrainz + Cover Art Archive, which need a contact; optional AcoustID; incl. `--item`/`--entity`/`--phase`/`--force-phase`; per-release album art; misses re-asked after `enrichment.retry_misses_after_days`; a failed lookup stays queued for the next pass; an injected provider can also fill role-tagged and artist art, and its passes run without a contact) |
@@ -107,15 +107,15 @@ SIGTERM).
 - `waxbin audit` reports quality and integrity problems: duplicate/split entities,
   inconsistent metadata, missing art/ReplayGain, unportable filenames, orphaned
   sidecars, case-insensitive path conflicts, invalid feeds, header durations that
-  disagree with the decoded audio, and derived-data drift. `--integrity` adds an
+  disagree with the decoded audio, copies of an item's audio, and derived-data drift. `--integrity` adds an
   on-disk bitrot (content-hash) and corrupt-audio pass. It reports only; it never
   deletes.
 - `waxbin merge <type> <survivor-pid> <loser-pid>...` collapses duplicate
   artists / release-groups / albums / genres / series onto one survivor,
   re-pointing children (so play state and provenance ride along) and
   recomputing rollups.
-- `waxbin upgrade` groups alt encodings of the same recording (by fingerprint),
-  ranks each group by quality, and marks the keeper.
+- `waxbin upgrade` groups alt encodings of the same recording (by fingerprint, or held
+  by one item), ranks each group by quality, and marks the keeper.
 - `waxbin db verify --fix` repairs derived-data drift (FTS, rollups, sort keys)
   and reclaims orphaned art. `waxbin db vacuum` GCs and compacts the database.
 - `waxbin stats --year 2025` prints a per-user listening year-in-review.

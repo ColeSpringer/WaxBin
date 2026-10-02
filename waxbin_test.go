@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
@@ -2137,9 +2138,11 @@ func TestDurationMismatchesListsTheLyingHeaders(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
-	for _, name := range []string{"honest.wav", "lying1.wav", "lying2.wav"} {
+	// Each file its own audio: identical audio would make the later two copies of the
+	// first, which are not analyzed.
+	for i, name := range []string{"honest.wav", "lying1.wav", "lying2.wav"} {
 		writeFile(t, filepath.Join(root, name),
-			testaudio.EncodeWAV16(8000, testaudio.RichSignal(8000, 3, testaudio.MusicalPartials, int64(len(name)))))
+			testaudio.EncodeWAV16(8000, testaudio.RichSignal(8000, 3, testaudio.MusicalPartials, int64(i+1))))
 	}
 	lib := openManaged(t, ctx, db, root)
 	scanLib(t, ctx, lib)
@@ -2217,5 +2220,158 @@ func TestScanJobNamesItsLibrary(t *testing.T) {
 	}
 	if j := waitForJobDone(t, ctx, lib, jobPID); j.TargetType != "library" || j.TargetPID != pid {
 		t.Fatalf("background scan job = %+v, want library:%s", j, pid)
+	}
+}
+
+// TestSameAudioCopiesEndToEnd is the LIB-01 scenario: an album folder, a byte-identical
+// copy of it, and a retagged copy of its first track. The copies join the album's items
+// as alternates and stay there through rescans, deletes, promotion and restore.
+func TestSameAudioCopiesEndToEnd(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	for i := 1; i <= 7; i++ {
+		data := testaudio.BuildMP3WithAudio(fmt.Sprintf("Track %d", i), "Artist", "Album", i, testaudio.AudioWithSeed(byte(60+i)))
+		writeFile(t, filepath.Join(root, "Album", fmt.Sprintf("%02d.mp3", i)), data)
+		writeFile(t, filepath.Join(root, "Album (copy)", fmt.Sprintf("%02d.mp3", i)), data)
+	}
+	retagged := filepath.Join(root, "Retagged", "01.mp3")
+	writeFile(t, retagged, testaudio.BuildMP3WithAudio("Track 1 (Retagged)", "Someone", "Elsewhere", 9, testaudio.AudioWithSeed(61)))
+	lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), root)
+
+	res, err := lib.Scan(ctx, waxbin.ScanRequest{})
+	if err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if res.Total.AudioFiles != 15 || res.Total.ItemsCreated != 7 || res.Total.Copies != 8 {
+		t.Fatalf("first scan = %+v, want 7 items and 8 copies of 15 files", res.Total)
+	}
+	items, err := lib.Query(ctx, query.New(query.EntityItems).Build(), "")
+	if err != nil || len(items) != 7 {
+		t.Fatalf("items = %d (err %v), want 7", len(items), err)
+	}
+	diags, err := lib.FileDiagnostics(ctx, model.DiagnosticFilter{Code: model.DiagDuplicateCopy})
+	if err != nil || len(diags) != 8 {
+		t.Fatalf("copy diagnostics = %d (err %v), want every copy diagnosed", len(diags), err)
+	}
+	rep, err := lib.Audit(ctx, waxbin.AuditOptions{Only: []model.AuditCheck{model.CheckDuplicateCopy}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	listed := map[model.PID]bool{}
+	for _, f := range rep.Findings {
+		for _, e := range f.Entities {
+			listed[e] = true
+		}
+	}
+	if len(listed) != 7 {
+		t.Errorf("duplicate_copy lists %d items, want the album's 7", len(listed))
+	}
+	if _, err := lib.Analyze(ctx, waxbin.AnalyzeOptions{}); err != nil {
+		t.Fatalf("analyze: %v", err)
+	}
+	if _, err := lib.FindUpgrades(ctx); err != nil {
+		t.Errorf("find upgrades: %v", err)
+	}
+
+	seq, err := lib.LatestChangeSeq(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res, err = lib.Scan(ctx, waxbin.ScanRequest{}); err != nil || res.Total.Unchanged != 15 || res.Total.Copies != 0 {
+		t.Fatalf("plain rescan = %+v (err %v), want every file unchanged", res.Total, err)
+	}
+	if res, err = lib.Scan(ctx, waxbin.ScanRequest{Force: true}); err != nil || res.Total.Unchanged != 15 || res.Total.Reread != 15 {
+		t.Fatalf("forced rescan = %+v (err %v), want every file re-read and unchanged", res.Total, err)
+	}
+	cs, err := lib.Changes(ctx, seq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range cs {
+		if c.EntityType != "job" {
+			t.Errorf("rescans appended %+v, want only their job rows", c)
+		}
+	}
+
+	track1 := itemPIDByTitle(t, ctx, lib, "Track 1")
+	files := func() map[string]string {
+		refs, err := lib.ItemFiles(ctx, track1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := map[string]string{}
+		for _, r := range refs {
+			rel, _ := filepath.Rel(root, string(r.Path))
+			out[filepath.ToSlash(rel)] = r.Role + ":" + string(r.FilePID)
+		}
+		return out
+	}
+	pidOf := func(rel string) model.PID {
+		v := files()[rel]
+		return model.PID(v[strings.Index(v, ":")+1:])
+	}
+	trashFile := func(rel string) {
+		t.Helper()
+		plan, err := lib.PlanDeleteFiles(ctx, []model.PID{pidOf(rel)}, model.DeleteTrash)
+		if err != nil {
+			t.Fatalf("plan %s: %v", rel, err)
+		}
+		if r, err := lib.ApplyDelete(ctx, plan); err != nil || r.Trashed != 1 {
+			t.Fatalf("trash %s = %+v (err %v)", rel, r, err)
+		}
+	}
+	restore := func(rel string) {
+		t.Helper()
+		entries, err := lib.Trash(ctx, false, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, e := range entries {
+			if strings.HasSuffix(filepath.ToSlash(e.OrigDisplay), rel) {
+				if err := lib.RestoreTrash(ctx, e.PID); err != nil {
+					t.Fatalf("restore %s: %v", rel, err)
+				}
+				return
+			}
+		}
+		t.Fatalf("no trash entry for %s", rel)
+	}
+	if got := files(); len(got) != 3 || !strings.HasPrefix(got["Album/01.mp3"], "primary") {
+		t.Fatalf("track 1 files = %v, want the album file primary and two copies", got)
+	}
+
+	// The retagged copy goes and comes back without touching the item.
+	trashFile("Retagged/01.mp3")
+	if got := titleOf(t, lib, track1); got != "Track 1" {
+		t.Errorf("title after trashing the retagged copy = %q, want Track 1", got)
+	}
+	restore("Retagged/01.mp3")
+	if got := files(); !strings.HasPrefix(got["Retagged/01.mp3"], "alternate") || titleOf(t, lib, track1) != "Track 1" {
+		t.Errorf("after restoring the retagged copy: files %v, title %q; want it an alternate again", got, titleOf(t, lib, track1))
+	}
+
+	// With the plain copy gone too, trashing the original promotes the retagged copy,
+	// whose tags then name the item.
+	trashFile("Album (copy)/01.mp3")
+	trashFile("Album/01.mp3")
+	if got := titleOf(t, lib, track1); got != "Track 1 (Retagged)" {
+		t.Errorf("title after trashing the original = %q, want the promoted copy's", got)
+	}
+	restore("Album/01.mp3")
+	got := files()
+	if !strings.HasPrefix(got["Album/01.mp3"], "alternate") || !strings.HasPrefix(got["Retagged/01.mp3"], "primary") {
+		t.Errorf("after restoring the original: %v, want it an alternate of the promoted copy", got)
+	}
+
+	// Deleting the item trashes every file it has.
+	plan, err := lib.PlanDeletePIDs(ctx, []model.PID{track1}, model.DeleteTrash)
+	if err != nil || plan.Pending() != 2 {
+		t.Fatalf("delete plan = %+v (err %v), want both files", plan, err)
+	}
+	if r, err := lib.ApplyDelete(ctx, plan); err != nil || r.Trashed != 2 {
+		t.Fatalf("delete = %+v (err %v), want both trashed", r, err)
+	}
+	if st := stateOf(t, ctx, lib, track1); st != model.StateArchived {
+		t.Errorf("track 1 = %s, want archived", st)
 	}
 }

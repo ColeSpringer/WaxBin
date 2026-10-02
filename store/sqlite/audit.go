@@ -323,10 +323,11 @@ func (s *Store) ItemsMissingMBID(ctx context.Context, limit int) ([]model.ItemRe
 // every track/book file, so the audit reports it at info severity.
 func (s *Store) CountItemsMissingReplayGain(ctx context.Context) (int, error) {
 	var n int
-	err := s.read.QueryRowContext(ctx, `SELECT COUNT(*) FROM file f
-		WHERE f.kind = 'audio' AND f.essence_hash IS NOT NULL
-		  AND f.library_id NOT IN (SELECT id FROM library WHERE mode = 'podcast')
-		  AND NOT EXISTS (SELECT 1 FROM loudness l WHERE l.essence_hash = f.essence_hash)`).Scan(&n)
+	err := s.read.QueryRowContext(ctx, `SELECT COUNT(*) FROM file
+		WHERE file.kind = 'audio' AND file.essence_hash IS NOT NULL
+		  AND file.library_id NOT IN (SELECT id FROM library WHERE mode = 'podcast')
+		  AND NOT `+sameAudioAlternateExpr+`
+		  AND NOT EXISTS (SELECT 1 FROM loudness l WHERE l.essence_hash = file.essence_hash)`).Scan(&n)
 	if err != nil {
 		return 0, waxerr.Wrap(waxerr.CodeIO, "store.CountItemsMissingReplayGain", err)
 	}
@@ -338,7 +339,7 @@ func (s *Store) CountItemsMissingReplayGain(ctx context.Context) (int, error) {
 // conflicts, integrity/corrupt audio). These are file-level checks, so it yields
 // exactly one row per file.
 //
-// The primary-file join is gated on if2.start_frames IS NULL, mirroring the portable
+// The item lookup is gated on if2.start_frames IS NULL, mirroring the portable
 // export: a single-file CUE album's shared file is backed by N virtual-track primary
 // edges, so an ungated join returns that file N times. Every consumer then treats one
 // file as N: the path-conflict check groups those rows by folded path, finds more than
@@ -347,18 +348,19 @@ func (s *Store) CountItemsMissingReplayGain(ctx context.Context) (int, error) {
 // and inflates FilesChecked; corrupt-audio re-decodes them N times; and any real
 // finding is emitted N times over.
 //
-// Gating to whole-file edges yields one (or zero) primary row per file, so a
-// virtual-track-backed file reports an empty owning item rather than an arbitrary
-// sibling. That is the truthful answer: N items share the file and none of them owns
-// it, and a finding about the file must not be pinned on whichever track sorted
-// first. The file itself is still audited, since the join is LEFT and the file row
-// survives with no item, and every finding still carries its path.
+// Gating to whole-file edges names one (or no) item per file, so a virtual-track-backed
+// file reports an empty owning item rather than an arbitrary sibling. That is the
+// truthful answer: N items share the file and none of them owns it, and a finding about
+// the file must not be pinned on whichever track sorted first. A whole-file edge of any
+// role names its item, so a book part or an alternate copy is pinned on the item it
+// backs, the primary edge first should a stray second edge exist. The file itself is
+// still audited with no item, and every finding still carries its path.
 func (s *Store) AuditFiles(ctx context.Context) ([]model.AuditFileInfo, error) {
 	rows, err := s.read.QueryContext(ctx, `SELECT f.pid, f.path, f.display_path, f.kind, f.content_hash,
-			COALESCE(pi.pid,'')
+			COALESCE((SELECT pi.pid FROM item_file if2 JOIN playable_item pi ON pi.id = if2.item_id
+				WHERE if2.file_id = f.id AND if2.start_frames IS NULL
+				ORDER BY if2.role = 'primary' DESC, if2.item_id LIMIT 1), '')
 		FROM file f
-		LEFT JOIN item_file if2 ON if2.file_id = f.id AND if2.role = 'primary' AND if2.start_frames IS NULL
-		LEFT JOIN playable_item pi ON pi.id = if2.item_id
 		ORDER BY f.id`)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, "store.AuditFiles", err)

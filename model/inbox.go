@@ -7,8 +7,9 @@ type DupPolicy string
 const (
 	// DupSkip leaves a duplicate in the inbox and does not import it (the default).
 	DupSkip DupPolicy = "skip"
-	// DupAllow imports a duplicate as a separate copy (the store keeps both file
-	// rows; exact-hash dedup is the scanner's job, not the importer's).
+	// DupAllow imports a duplicate anyway: the file gets its own row and joins the item
+	// already holding its audio as an alternate, which keeps that item's metadata and
+	// acquisition.
 	DupAllow DupPolicy = "allow"
 )
 

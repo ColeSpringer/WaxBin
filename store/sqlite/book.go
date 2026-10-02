@@ -28,7 +28,14 @@ func (s *Store) PutScannedBook(ctx context.Context, in model.PutScannedBookInput
 	err := s.writeTx(ctx, func(tx *sql.Tx) error {
 		now := nowNS()
 
-		fileID, filePID, err := s.resolveScannedFile(ctx, tx, in.LibraryID, in.File, now, res)
+		// One resolution of the book key serves the relink, the overlay and the item write,
+		// so an ambiguous identifier is looked up and logged once.
+		key, err := resolveItemTx(ctx, tx, s.log, model.KindBook, in.Item.IdentityKey,
+			bookAdoptKey{author: in.Book.Author, title: in.Item.Title})
+		if err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		fileID, filePID, err := s.resolveScannedFile(ctx, tx, in.LibraryID, in.File, key.accept(), now, res)
 		if err != nil {
 			return err
 		}
@@ -53,16 +60,23 @@ func (s *Store) PutScannedBook(ctx context.Context, in model.PutScannedBookInput
 
 		// Overlay locked book fields, and the fills the part says nothing about, onto the
 		// scanned values before any writer runs (overlayStoredBookTx).
-		prior, err := overlayStoredBookTx(ctx, tx, s.log, fileID, &in.Book, &in.Item, in.Derived, in.PreserveLocks)
+		prior, err := overlayStoredBookTx(ctx, tx, s.log, fileID, &in.Book, &in.Item, in.Derived, in.PreserveLocks, key)
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		// Read before upsertItem returns the book to present.
+		wasMissing := false
+		if prior != nil {
+			if wasMissing, err = itemMissingTx(ctx, tx, prior.itemID); err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
 		}
 
 		// A rebuild adopts the file's WAXBIN_ITEM_PID stamp (organize stamps books too) to
 		// restore the book's original identity; identity stays essence-first, so a taken or
 		// invalid hint falls back to a fresh PID. Parts of one book share the stamp: the
 		// first to create the item adopts it, the rest join it by book key.
-		itemID, itemPID, created, stateChanged, priorTitle, err := upsertItem(ctx, tx, s.log, in.Item, bookAdoptKey{author: in.Book.Author, title: in.Item.Title}, now, in.PreferredItemPID)
+		itemID, itemPID, created, stateChanged, priorTitle, err := upsertItem(ctx, tx, s.log, in.Item, bookAdoptKey{author: in.Book.Author, title: in.Item.Title}, now, in.PreferredItemPID, key)
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
@@ -71,42 +85,23 @@ func (s *Store) PutScannedBook(ctx context.Context, in model.PutScannedBookInput
 		affected := newAffectedRollups()
 
 		// Attach this file as a part FIRST, so its role (the first part is the
-		// representative 'primary', the rest are 'part') is known before deciding
-		// whether it owns the book's metadata, and detach it from any other item.
-		role, orphans, err := linkBookFile(ctx, tx, itemID, fileID, in.Position)
+		// representative 'primary', the rest are 'part', and a copy of a part on disk is
+		// an 'alternate') is known before deciding whether it owns the book's metadata,
+		// and detach it from any other item.
+		link, err := linkBookFile(ctx, tx, itemID, fileID, in.Position, in.File.EssenceHash, wasMissing)
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
-		for _, oid := range orphans {
-			has, err := itemHasAnyFile(ctx, tx, oid)
-			if err != nil {
+		role := link.role
+		if link.demoted {
+			if err := refreshCopyDiagnosticsTx(ctx, tx, itemID); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
-			if has {
-				// A surviving item lost a file (e.g. a multi-file book whose part was
-				// retagged into another book): keep a primary, recompute its shrunken
-				// duration/genre rollup, and refresh its denormalized total duration.
-				if err := affected.collect(ctx, tx, oid); err != nil {
-					return waxerr.Wrap(waxerr.CodeIO, op, err)
-				}
-				if err := ensurePrimary(ctx, tx, oid); err != nil {
-					return waxerr.Wrap(waxerr.CodeIO, op, err)
-				}
-				if err := refreshBookDuration(ctx, tx, oid); err != nil {
-					return waxerr.Wrap(waxerr.CodeIO, op, err)
-				}
-				continue
-			}
-			if err := affected.collect(ctx, tx, oid); err != nil {
-				return waxerr.Wrap(waxerr.CodeIO, op, err)
-			}
-			opid, err := deleteItemCascade(ctx, tx, oid)
-			if err != nil {
-				return waxerr.Wrap(waxerr.CodeIO, op, err)
-			}
-			if err := appendChange(ctx, tx, "item", opid, model.OpDelete); err != nil {
-				return waxerr.Wrap(waxerr.CodeIO, op, err)
-			}
+		}
+		// A surviving item lost a file (e.g. a multi-file book whose part was retagged
+		// into another book): it keeps a primary and its rollups and total are refreshed.
+		if res.Promoted, err = reconcileOrphansTx(ctx, tx, link.orphans, affected); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 
 		// upsertItem rewrote the title from this part, but the primary part owns the book's
@@ -136,6 +131,12 @@ func (s *Store) PutScannedBook(ctx context.Context, in model.PutScannedBookInput
 				// The retire rewrote the title's row, which the overlay's read still holds.
 				prior = nil
 			}
+		}
+
+		// A copy of a part still on disk adds nothing to the book: no metadata, chapters,
+		// cover or acquisition, only its own file row and the alternate edge.
+		if role == alternateRole {
+			return s.attachBookCopyTx(ctx, tx, in, fileID, filePID, itemID, itemPID, link, stateChanged, fileTitle, title, fileBook, affected, res, now)
 		}
 
 		// Custom tags are owned by the primary part, like the book's other metadata.
@@ -285,7 +286,7 @@ func (s *Store) PutScannedBook(ctx context.Context, in model.PutScannedBookInput
 // whole-file track without an MBID would if PutScannedTrack did not preserve it in
 // place. That is a known limitation, unreachable before 1.0 (the essence version is
 // frozen); a real re-encode changes the bytes and reconciles normally.
-func (s *Store) resolveScannedFile(ctx context.Context, tx *sql.Tx, libraryID int64, file model.File, now int64, res *model.ScanItemResult) (int64, model.PID, error) {
+func (s *Store) resolveScannedFile(ctx context.Context, tx *sql.Tx, libraryID int64, file model.File, accept map[int64]bool, now int64, res *model.ScanItemResult) (int64, model.PID, error) {
 	if existing, err := fileByPathTx(ctx, tx, file.Path); err != nil {
 		return 0, "", err
 	} else if existing != nil {
@@ -296,15 +297,18 @@ func (s *Store) resolveScannedFile(ctx context.Context, tx *sql.Tx, libraryID in
 		return existing.ID, existing.PID, nil
 	}
 	if file.EssenceHash != "" {
-		relink, err := fileByEssenceSingleTx(ctx, tx, file.EssenceHash, libraryID)
+		relink, err := fileByEssenceGoneTx(ctx, tx, file.EssenceHash, file.ContentHash, libraryID, accept)
 		if err != nil {
 			return 0, "", err
 		}
-		if relink != nil && !pathExists(relink.Path) {
+		if relink != nil {
 			res.Relinked = true
 			res.RelinkedFrom = string(relink.Path)
 			res.ContentChanged = relink.ContentHash != file.ContentHash
 			if err := updateFileRow(ctx, tx, relink.ID, file, now); err != nil {
+				return 0, "", err
+			}
+			if err := renameCopyDetailsTx(ctx, tx, relink.ID, relink.DisplayPath, file.DisplayPath); err != nil {
 				return 0, "", err
 			}
 			return relink.ID, relink.PID, nil
@@ -491,95 +495,170 @@ const (
 	bookPartRole    = "part"
 )
 
+// bookLink is what linkBookFile did: the role the file holds in the book, whether the
+// edge changed, the items the detach left behind, the part an alternate copies, and
+// whether the file took the place of a gone part, now an alternate.
+type bookLink struct {
+	role    string
+	changed bool
+	orphans []int64
+	twin    *bookTwin
+	demoted bool
+}
+
+// bookTwin is a part of a book on another file with the same audio as an arriving file.
+type bookTwin struct {
+	fileID   int64
+	role     string
+	position int
+	path     []byte
+	display  string
+}
+
 // linkBookFile attaches fileID to the book at the given part position and detaches
-// it from any other item (a file belongs to exactly one item). It returns the role
-// the file holds in the book (primary or part) and the items left holding no file
-// after the detach, for the caller to delete. An existing edge keeps its role.
-func linkBookFile(ctx context.Context, tx *sql.Tx, bookItemID, fileID int64, position int) (string, []int64, error) {
-	rows, err := tx.QueryContext(ctx,
+// it from any other item (a file belongs to exactly one item). An existing part keeps
+// its role. A file that holds no part of the book and has the audio of one of its parts
+// is a copy, an alternate at that part's position, even while the part's path is missing:
+// mid-walk the part may have moved to a folder not reached yet, so a copy takes a gone
+// part's place only once reconciliation has marked the book missing (bookMissing), the
+// part staying as an alternate. A part whose audio the book's primary or a lower file id
+// also holds is a copy cataloged as a part of its own before copies became alternates,
+// and folds into one now.
+func linkBookFile(ctx context.Context, tx *sql.Tx, bookItemID, fileID int64, position int, essence string, bookMissing bool) (*bookLink, error) {
+	prev, err := queryInt64sTx(ctx, tx,
 		"SELECT DISTINCT item_id FROM item_file WHERE file_id = ? AND item_id <> ?", fileID, bookItemID)
 	if err != nil {
-		return "", nil, err
+		return nil, err
 	}
-	var prev []int64
-	for rows.Next() {
-		var id int64
-		if err := rows.Scan(&id); err != nil {
-			rows.Close()
-			return "", nil, err
-		}
-		prev = append(prev, id)
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return "", nil, err
-	}
-	rows.Close()
-
 	if _, err := tx.ExecContext(ctx,
 		"DELETE FROM item_file WHERE file_id = ? AND item_id <> ?", fileID, bookItemID); err != nil {
-		return "", nil, err
+		return nil, err
 	}
+	link := &bookLink{orphans: prev, changed: len(prev) > 0}
 
-	// Keep an existing role for this (book, file) edge; otherwise the first part is
-	// the representative primary and the rest are parts.
-	var role string
+	var curRole string
+	curPos := -1
 	err = tx.QueryRowContext(ctx,
-		"SELECT role FROM item_file WHERE item_id = ? AND file_id = ? LIMIT 1", bookItemID, fileID).Scan(&role)
-	switch {
-	case errors.Is(err, sql.ErrNoRows):
+		"SELECT role, position FROM item_file WHERE item_id = ? AND file_id = ? LIMIT 1", bookItemID, fileID).Scan(&curRole, &curPos)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return nil, err
+	}
+	role := curRole
+	if role != bookPrimaryRole {
+		var twin *bookTwin
+		if essence != "" {
+			if twin, err = bookTwinTx(ctx, tx, bookItemID, fileID, essence); err != nil {
+				return nil, err
+			}
+		}
+		switch {
+		case twin != nil && role != bookPartRole && bookMissing && !pathExists(twin.path):
+			if _, err := tx.ExecContext(ctx, "UPDATE item_file SET role = 'alternate' WHERE item_id = ? AND file_id = ?",
+				bookItemID, twin.fileID); err != nil {
+				return nil, err
+			}
+			if _, err := tx.ExecContext(ctx, "DELETE FROM chapter WHERE book_item_id = ? AND file_id = ?", bookItemID, twin.fileID); err != nil {
+				return nil, err
+			}
+			role, position, link.demoted = twin.role, twin.position, true
+		case twin != nil && (role != bookPartRole || twin.role == bookPrimaryRole || twin.fileID < fileID):
+			role, position, link.twin = alternateRole, twin.position, twin
+		case role != bookPartRole:
+			role = ""
+		}
+	}
+	if role == "" {
 		var hasPrimary int
 		if err := tx.QueryRowContext(ctx,
 			"SELECT EXISTS(SELECT 1 FROM item_file WHERE item_id = ? AND role = 'primary')", bookItemID).Scan(&hasPrimary); err != nil {
-			return "", nil, err
+			return nil, err
 		}
+		role = bookPrimaryRole
 		if hasPrimary == 1 {
 			role = bookPartRole
-		} else {
-			role = bookPrimaryRole
 		}
-	case err != nil:
-		return "", nil, err
 	}
-
+	link.role = role
+	if role == curRole && position == curPos {
+		return link, nil
+	}
+	link.changed = true
 	if _, err := tx.ExecContext(ctx,
 		"DELETE FROM item_file WHERE item_id = ? AND file_id = ?", bookItemID, fileID); err != nil {
-		return "", nil, err
+		return nil, err
 	}
 	if _, err := tx.ExecContext(ctx,
 		"INSERT INTO item_file(item_id, file_id, role, position) VALUES (?,?,?,?)",
 		bookItemID, fileID, role, position); err != nil {
-		return "", nil, err
+		return nil, err
 	}
-	return role, prev, nil
+	return link, nil
 }
 
-// ensurePrimary makes sure an item that still has files keeps exactly one 'primary'
-// edge: if its primary was detached (leaving only 'part' edges), it promotes the
-// lowest-positioned remaining part. A track (single primary file) never reaches the
-// promote path; this matters for a multi-file book whose primary part was re-keyed
-// into another item.
-func ensurePrimary(ctx context.Context, tx *sql.Tx, itemID int64) error {
-	var hasPrimary int
-	if err := tx.QueryRowContext(ctx,
-		"SELECT EXISTS(SELECT 1 FROM item_file WHERE item_id = ? AND role = 'primary')", itemID).Scan(&hasPrimary); err != nil {
-		return err
-	}
-	if hasPrimary == 1 {
-		return nil
-	}
-	var fileID int64
-	err := tx.QueryRowContext(ctx,
-		"SELECT file_id FROM item_file WHERE item_id = ? ORDER BY position, file_id LIMIT 1", itemID).Scan(&fileID)
+// bookTwinTx returns the book's part on another file with the given essence, the primary
+// first and then the lowest file id, or nil.
+func bookTwinTx(ctx context.Context, tx *sql.Tx, bookItemID, fileID int64, essence string) (*bookTwin, error) {
+	var tw bookTwin
+	err := tx.QueryRowContext(ctx, `SELECT f.id, itf.role, itf.position, f.path, f.display_path
+		FROM item_file itf JOIN file f ON f.id = itf.file_id
+		WHERE itf.item_id = ? AND itf.file_id <> ? AND itf.role IN ('primary', 'part') AND f.essence_hash = ?
+		ORDER BY itf.role = 'primary' DESC, f.id LIMIT 1`, bookItemID, fileID, essence).Scan(&tw.fileID, &tw.role, &tw.position, &tw.path, &tw.display)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil // no files at all; the caller's fileless path handles deletion
+		return nil, nil
 	}
 	if err != nil {
-		return err
+		return nil, err
 	}
-	_, err = tx.ExecContext(ctx,
-		"UPDATE item_file SET role = 'primary' WHERE item_id = ? AND file_id = ?", itemID, fileID)
-	return err
+	return &tw, nil
+}
+
+// attachBookCopyTx is PutScannedBook's copy branch: the file is an alternate of the part
+// it copies, so the book's metadata, chapters, cover and acquisition are left alone. Any
+// chapters a former part edge stored for the file go, and the owed rows its tags pay are
+// settled against the stored book. The book emits an update when the edge changed or
+// the put brought it back from missing (stateChanged).
+func (s *Store) attachBookCopyTx(ctx context.Context, tx *sql.Tx, in model.PutScannedBookInput, fileID int64, filePID model.PID,
+	itemID int64, itemPID model.PID, link *bookLink, stateChanged bool, fileTitle, title string, fileBook model.Book, affected *affectedRollups, res *model.ScanItemResult, now int64) error {
+	const op = "store.PutScannedBook"
+	res.AttachedAsCopy, res.Joined = true, link.changed
+	if err := upsertFileDiagnosticTx(ctx, tx, fileID, model.OriginScan, "", model.FileDiagnostic{
+		Code: model.DiagDuplicateCopy, Severity: model.SeverityInfo, Detail: link.twin.display,
+	}, now); err != nil {
+		return waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	if _, err := tx.ExecContext(ctx, "DELETE FROM chapter WHERE book_item_id = ? AND file_id = ?", itemID, fileID); err != nil {
+		return waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	if link.changed {
+		if err := affected.collect(ctx, tx, itemID); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		if err := refreshBookDuration(ctx, tx, itemID); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+	}
+	if !affected.empty() {
+		if err := maintainRollupsTx(ctx, tx, affected, now); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+	}
+	if err := settleOwedByScanTx(ctx, tx, fileID, itemID, scanSettle{
+		isBook: true, fileTitle: fileTitle, title: title, fileBook: fileBook,
+		preserveLocks: in.PreserveLocks, derived: in.Derived, cover: in.CoverArt, fileTags: in.CustomTags,
+	}); err != nil {
+		return waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	if res.FileCreated || res.ContentChanged || res.Relinked {
+		if err := appendChange(ctx, tx, "file", filePID, opFor(res.FileCreated)); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+	}
+	if link.changed || stateChanged {
+		if err := appendChange(ctx, tx, "item", itemPID, model.OpUpdate); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+	}
+	return nil
 }
 
 // bookEffectiveDurationSum is the SQL subquery for a book's total running time: the
@@ -594,7 +673,8 @@ const bookEffectiveDurationSum = `(
 		COALESCE((SELECT MAX(MAX(c.start_ms, c.end_ms)) FROM chapter c
 		          WHERE c.book_item_id = itf.item_id AND c.file_id = itf.file_id), 0)
 	)), 0)
-	FROM item_file itf JOIN file f ON f.id = itf.file_id WHERE itf.item_id = %s)`
+	FROM item_file itf JOIN file f ON f.id = itf.file_id
+	WHERE itf.item_id = %s AND itf.role IN ('primary', 'part'))`
 
 // refreshBookDuration recomputes a book's denormalized total_duration_ms from its
 // current parts (effective durations). It is a no-op for a non-book item (the UPDATE
@@ -929,14 +1009,15 @@ func (s *Store) bookContributors(ctx context.Context, bookItemID int64) ([]model
 // file pid.
 type bookPart struct {
 	model.BookPart
-	fileID  int64
-	path    []byte
-	sortKey string
-	role    string // the item_file edge role: primary or part
+	fileID     int64
+	path       []byte
+	sortKey    string
+	role       string // the item_file edge role: primary or part
+	libraryPID model.PID
 }
 
-// bookParts returns a book's backing files in reading order. It is the single
-// source for both the chapter timeline (bookChapters) and organize (ItemFiles).
+// bookParts returns a book's parts in reading order, leaving out alternates. It is the
+// single source for both the chapter timeline (bookChapters) and organize (ItemFiles).
 // Parts order by the stored part position, then a numeric-aware key over the rel
 // path, so an unnumbered set ("p2", "p10") sorts naturally rather than
 // lexicographically (which would place "p10" before "p2" and corrupt the timeline).
@@ -950,9 +1031,10 @@ func (s *Store) bookParts(ctx context.Context, bookItemID int64) ([]bookPart, er
 func bookPartsQ(ctx context.Context, q queryer, bookItemID int64) ([]bookPart, error) {
 	const op = "store.bookParts"
 	rows, err := q.QueryContext(ctx,
-		`SELECT f.id, f.pid, f.path, f.display_path, itf.position, COALESCE(f.duration_ms, 0), f.rel_path, itf.role
+		`SELECT f.id, f.pid, f.path, f.display_path, itf.position, COALESCE(f.duration_ms, 0), f.rel_path, itf.role,
+			(SELECT l.pid FROM library l WHERE l.id = f.library_id)
 		 FROM item_file itf JOIN file f ON f.id = itf.file_id
-		 WHERE itf.item_id = ?`, bookItemID)
+		 WHERE itf.item_id = ? AND itf.role IN ('primary', 'part')`, bookItemID)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
@@ -961,7 +1043,7 @@ func bookPartsQ(ctx context.Context, q queryer, bookItemID int64) ([]bookPart, e
 	for rows.Next() {
 		var p bookPart
 		var rel []byte
-		if err := rows.Scan(&p.fileID, &p.FilePID, &p.path, &p.DisplayPath, &p.Position, &p.DurationMS, &rel, &p.role); err != nil {
+		if err := rows.Scan(&p.fileID, &p.FilePID, &p.path, &p.DisplayPath, &p.Position, &p.DurationMS, &rel, &p.role, &p.libraryPID); err != nil {
 			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		// model.SortKey zero-pads digit runs, so a plain string compare of the keys is
@@ -1191,9 +1273,10 @@ func (s *Store) BooksInSeries(ctx context.Context, seriesPID model.PID) ([]*mode
 	return out, rows.Err()
 }
 
-// ItemFiles returns every file backing an item in the same natural reading order
-// the chapter timeline uses (one row for a track or single-file book, every part
-// for a multi-file book), so organize moves a book's parts in order.
+// ItemFiles returns every file backing an item: its parts in the same natural reading
+// order the chapter timeline uses (one row for a track or single-file book, every part
+// for a multi-file book), so organize moves a book's parts in order, then its
+// alternates by position.
 //
 // Each ref carries its item_file edge role alongside the position. The two are
 // independent: the primary is whichever part was attached first, or the
@@ -1215,7 +1298,25 @@ func (s *Store) ItemFiles(ctx context.Context, pid model.PID) ([]model.ItemFileR
 	for i, p := range parts {
 		out[i] = model.ItemFileRef{
 			FilePID: p.FilePID, Path: p.path, DisplayPath: p.DisplayPath, Position: p.Position, Role: p.role,
+			LibraryPID: p.libraryPID,
 		}
+	}
+	rows, err := s.read.QueryContext(ctx, `SELECT f.pid, f.path, f.display_path, itf.position, l.pid
+		FROM item_file itf JOIN file f ON f.id = itf.file_id JOIN library l ON l.id = f.library_id
+		WHERE itf.item_id = ? AND itf.role = 'alternate' ORDER BY itf.position, f.id`, itemID)
+	if err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		ref := model.ItemFileRef{Role: alternateRole}
+		if err := rows.Scan(&ref.FilePID, &ref.Path, &ref.DisplayPath, &ref.Position, &ref.LibraryPID); err != nil {
+			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		out = append(out, ref)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
 	return out, nil
 }

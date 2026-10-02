@@ -81,8 +81,8 @@ type EntityInfo struct {
 	ReleaseGroupCount int
 	TotalDurationMS   int64
 
-	// LibraryPIDs are the distinct libraries holding the member items' primary
-	// backing files, in library order. Artist membership follows the artist
+	// LibraryPIDs are the distinct libraries holding the member items' files, an
+	// alternate copy's included, in library order. Artist membership follows the artist
 	// facet: an item counts under its effective artist (a book under its
 	// author). A fileless member, such as an undownloaded episode carrying the
 	// genre, contributes nothing.
