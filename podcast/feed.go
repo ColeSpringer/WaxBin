@@ -24,6 +24,68 @@ import (
 //	itunes  http://www.itunes.com/dtds/podcast-1.0.dtd
 //	podcast https://podcastindex.org/namespace/1.0
 //	content http://purl.org/rss/1.0/modules/content/
+//
+// Feeds also declare these under other spellings, and some use the prefixes without
+// declaring them, so nsReader rewrites each token's namespace onto the URI above first.
+const (
+	nsITunes  = "http://www.itunes.com/dtds/podcast-1.0.dtd"
+	nsPodcast = "https://podcastindex.org/namespace/1.0"
+	nsContent = "http://purl.org/rss/1.0/modules/content/"
+)
+
+// nsAliases maps a namespace's spellings, lowercased with the scheme, a leading "www." and a
+// trailing slash dropped, to the URI the struct tags name. A bare prefix is what encoding/xml leaves as
+// the namespace of a prefix the feed never declared. The GitHub address is where the
+// Podcasting 2.0 namespace lived before podcastindex.org, and some feeds still declare it.
+var nsAliases = map[string]string{
+	"itunes.com/dtds/podcast-1.0.dtd":                                     nsITunes,
+	"podcastindex.org/namespace/1.0":                                      nsPodcast,
+	"github.com/podcastindex-org/podcast-namespace/blob/main/docs/1.0.md": nsPodcast,
+	"purl.org/rss/1.0/modules/content":                                    nsContent,
+	"itunes":                                                              nsITunes,
+	"podcast":                                                             nsPodcast,
+	"content":                                                             nsContent,
+}
+
+// canonicalNS returns the URI the struct tags use for a namespace, or space unchanged.
+func canonicalNS(space string) string {
+	key := strings.ToLower(space)
+	key = strings.TrimPrefix(strings.TrimPrefix(key, "https://"), "http://")
+	key = strings.TrimPrefix(key, "www.")
+	if ns, ok := nsAliases[strings.TrimSuffix(key, "/")]; ok {
+		return ns
+	}
+	return space
+}
+
+// nsReader passes a feed's tokens through with every element and attribute namespace
+// rewritten by canonicalNS. An end element takes the name its start was given, since the
+// permissive decoder repairs a tag left open by repeating its start's untranslated name,
+// which would not pair with the rewritten start.
+type nsReader struct {
+	dec  *xml.Decoder
+	open []xml.Name
+}
+
+func (r *nsReader) Token() (xml.Token, error) {
+	tok, err := r.dec.Token()
+	switch t := tok.(type) {
+	case xml.StartElement:
+		t.Name.Space = canonicalNS(t.Name.Space)
+		for i := range t.Attr {
+			t.Attr[i].Name.Space = canonicalNS(t.Attr[i].Name.Space)
+		}
+		r.open = append(r.open, t.Name)
+		tok = t
+	case xml.EndElement:
+		if n := len(r.open); n > 0 {
+			t.Name = r.open[n-1]
+			r.open = r.open[:n-1]
+		}
+		tok = t
+	}
+	return tok, err
+}
 
 // rssDoc is the subset of an RSS 2.0 podcast feed WaxBin reads.
 type rssDoc struct {
@@ -129,11 +191,13 @@ type pcSoundbite struct {
 func ParseFeed(data []byte) (*model.Feed, error) {
 	const op = "podcast.ParseFeed"
 	var doc rssDoc
-	dec := xml.NewDecoder(bytes.NewReader(data))
+	raw := xml.NewDecoder(bytes.NewReader(data))
 	// Some feeds declare non-UTF-8 charsets or include stray entities; be permissive
 	// rather than rejecting an otherwise-parseable feed.
+	raw.Strict = false
+	raw.CharsetReader = charsetPassthrough
+	dec := xml.NewTokenDecoder(&nsReader{dec: raw})
 	dec.Strict = false
-	dec.CharsetReader = charsetPassthrough
 	if err := dec.Decode(&doc); err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeInvalid, op, err)
 	}

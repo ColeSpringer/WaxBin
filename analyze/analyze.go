@@ -14,6 +14,7 @@ import (
 	"log/slog"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/colespringer/waxbin/decode"
 	"github.com/colespringer/waxbin/fingerprint"
@@ -60,6 +61,8 @@ type Store interface {
 	// PutDecodeVerdict records the analyze origin's verdict on a file whose decode failed
 	// before an analysis could be stored, for the essence the pass read.
 	PutDecodeVerdict(ctx context.Context, filePID model.PID, essence string, ds []model.FileDiagnostic) error
+	// ClearFingerprintFallbacks drops every file's fingerprint_fallback row.
+	ClearFingerprintFallbacks(ctx context.Context) error
 }
 
 // Analyzer runs the analyze pass over a catalog.
@@ -117,6 +120,13 @@ type Result struct {
 	// first can even report as a landed no-op, so they are counted apart from
 	// failures.
 	ReplayGainTagsUnrepresented int
+	// FingerprintFallbacks counts files fpcalc failed on, fingerprinted by the pure-Go
+	// path instead and marked with a fingerprint_fallback diagnostic. Their fingerprints
+	// do not group with Chromaprint ones, so the next run tries fpcalc again.
+	FingerprintFallbacks int
+	// FingerprintPartialReads counts files whose fpcalc read ended in an error after its
+	// fingerprint covered the span analyzed, so the Chromaprint fingerprint was kept.
+	FingerprintPartialReads int
 }
 
 // Heartbeat reports progress; it may be nil.
@@ -131,6 +141,13 @@ const batchSize = 200
 // covers the format), without blocking the pass.
 func (a *Analyzer) Run(ctx context.Context, hb Heartbeat) (*Result, error) {
 	res := &Result{}
+	// Without fpcalc a file that fell back is never selected again, its stamp already
+	// naming the pure-Go fingerprint, so its fallback row would outlive the reason for it.
+	if a.fpAlgo != fingerprint.ChromaprintAlgoVersion {
+		if err := a.store.ClearFingerprintFallbacks(ctx); err != nil {
+			return res, err
+		}
+	}
 	// A one-shot total taken up front lets the heartbeat report a real ratio.
 	// The single-writer model means the needing-analysis set only shrinks during
 	// the run (analyzed files drop out), so processed/total stays monotonic.
@@ -199,7 +216,7 @@ func (a *Analyzer) Run(ctx context.Context, hb Heartbeat) (*Result, error) {
 // fpcalc host settles instead, until a decoder change moves AnalysisVersion. Only
 // a canceled context stamps nothing.
 func (a *Analyzer) analyzeFile(ctx context.Context, f *model.File, res *Result) error {
-	sub, algo, fpDurationMS, err := a.fingerprintFile(ctx, f)
+	fp, err := a.fingerprintFile(ctx, f)
 	if err != nil {
 		// Failing on bad bytes is a verdict on the file, recorded so the audit reports it
 		// although nothing was analyzed. The file is still retried.
@@ -212,7 +229,7 @@ func (a *Analyzer) analyzeFile(ctx context.Context, f *model.File, res *Result) 
 		}
 		return err
 	}
-	if algo == 0 {
+	if fp.algo == 0 {
 		// Neither fpcalc nor the pure-Go decoder could read this file: nothing to
 		// store; skipped and retried later, when a later WaxFlow may decode a format
 		// this build cannot. (A short file that produces an empty-but-valid
@@ -225,16 +242,17 @@ func (a *Analyzer) analyzeFile(ctx context.Context, f *model.File, res *Result) 
 		// Stamp the version for the algorithm actually used, not the run's preferred
 		// backend. A file that fell back to pure-Go (fpcalc failed on it) then reads as
 		// stale on the next run and is retried once fpcalc can handle it, instead of
-		// being frozen with a version claiming Chromaprint while it carries an algo-2
+		// being frozen with a version claiming Chromaprint while it carries a pure-Go
 		// vector (which the candidate join would never group and never re-analyze).
-		AnalysisVersion: effectiveVersion(algo),
+		AnalysisVersion: effectiveVersion(fp.algo),
 		Fingerprint: model.FingerprintInput{
 			FilePID:     f.PID,
 			EssenceHash: f.EssenceHash,
-			AlgoVersion: algo,
-			FP:          fingerprint.Pack(sub),
-			Terms:       indexTerms(algo, sub),
+			AlgoVersion: fp.algo,
+			FP:          fingerprint.Pack(fp.sub),
+			Terms:       indexTerms(fp.algo, fp.sub),
 		},
+		Fallback: fp.fallback,
 	}
 	// Loudness and peaks are best-effort. The fingerprint already stands (from the
 	// bounded decode above, or from fpcalc, independent of this whole-file read), so
@@ -264,7 +282,7 @@ func (a *Analyzer) analyzeFile(ctx context.Context, f *model.File, res *Result) 
 		}
 	}
 	in.Loudness, in.Peaks, in.Diagnostics = ld, pk, diags
-	in.Fingerprint.DurationBucket = fingerprint.DurationBucket(bucketDuration(pk, len(diags) > 0, f.DurationMS, fpDurationMS))
+	in.Fingerprint.DurationBucket = fingerprint.DurationBucket(bucketDuration(pk, len(diags) > 0, f.DurationMS, fp.durationMS))
 
 	if err := a.store.PutAnalysis(ctx, in); err != nil {
 		return err
@@ -273,44 +291,68 @@ func (a *Analyzer) analyzeFile(ctx context.Context, f *model.File, res *Result) 
 	if in.Loudness != nil {
 		res.LoudnessMeasured++
 	}
+	if fp.fallback != "" {
+		res.FingerprintFallbacks++
+	}
+	if fp.partial {
+		res.FingerprintPartialReads++
+	}
 	return nil
 }
 
+// fingerprinted is what fingerprintFile produced: the vector, the algorithm that made it
+// (0 for an input nothing here could decode), the duration analyzed, and how fpcalc fared,
+// as a read it kept despite an error or the reason the pure-Go path stood in for it.
+type fingerprinted struct {
+	sub        []uint32
+	algo       int
+	durationMS int64
+	partial    bool
+	fallback   string
+}
+
 // fingerprintFile computes a file's grouping fingerprint, preferring fpcalc
-// (Chromaprint) when present and falling back to the pure-Go fingerprint. It
-// returns the sub-fingerprint vector, the algorithm that produced it (stored so
-// grouping never compares incomparable layouts), and the analyzed duration. An
-// fpcalc failure on one file is not fatal: it logs and falls back to the pure-Go
-// path for that file. An input this build cannot decode returns a nil vector with
-// algo 0 (the caller skips and retries it); a corrupt one returns a real error.
-func (a *Analyzer) fingerprintFile(ctx context.Context, f *model.File) ([]uint32, int, int64, error) {
+// (Chromaprint) when present and falling back to the pure-Go fingerprint. The
+// algorithm is stored so grouping never compares incomparable layouts. An fpcalc
+// failure on one file is not fatal: it logs and falls back to the pure-Go path for
+// that file, and a read error fpcalc reports after covering the file's analyzed span
+// keeps its fingerprint. An input this build cannot decode returns algo 0 (the caller
+// skips and retries it); a corrupt one returns a real error.
+func (a *Analyzer) fingerprintFile(ctx context.Context, f *model.File) (fingerprinted, error) {
+	var fallback string
 	if a.fpAlgo == fingerprint.ChromaprintAlgoVersion {
-		sub, durSec, err := fingerprint.ChromaprintRaw(ctx, a.caps.FpcalcPath, string(f.Path), fingerprint.MaxAnalyze)
+		r, err := fingerprint.ChromaprintRawDetail(ctx, a.caps.FpcalcPath, string(f.Path), fingerprint.MaxAnalyze,
+			time.Duration(f.DurationMS)*time.Millisecond)
 		if err == nil {
-			return sub, fingerprint.ChromaprintAlgoVersion, int64(durSec) * 1000, nil
+			if r.Partial {
+				a.log.Debug("fpcalc read ended in an error past the analyzed span", "path", f.DisplayPath, "note", r.Note)
+			}
+			return fingerprinted{sub: r.Sub, algo: fingerprint.ChromaprintAlgoVersion,
+				durationMS: int64(r.DurationSec) * 1000, partial: r.Partial}, nil
 		}
 		if ctx.Err() != nil {
-			return nil, 0, 0, ctx.Err()
+			return fingerprinted{}, ctx.Err()
 		}
 		a.log.Warn("fpcalc fingerprint failed", "path", f.DisplayPath, "err", err)
 		// Fall through to the pure-Go decode for this one file.
+		fallback = err.Error()
 	}
 	pcm, err := a.eng.Mono(ctx, string(f.Path), fingerprint.InternalRate, fingerprint.MaxAnalyze)
 	if err != nil {
 		// ErrUnsupported is set only on the open call, so a corrupt-but-recognized
 		// file does not land here: skip and retry it on a future run.
 		if errors.Is(err, decode.ErrUnsupported) {
-			return nil, 0, 0, nil
+			return fingerprinted{}, nil
 		}
 		if ctx.Err() != nil {
-			return nil, 0, 0, ctx.Err()
+			return fingerprinted{}, ctx.Err()
 		}
 		// Any other error, mid-stream corruption included, is a real failure that
 		// surfaces the file to audit rather than burying it as a silent skip.
-		return nil, 0, 0, err
+		return fingerprinted{}, err
 	}
 	fp := fingerprint.Compute(pcm)
-	return fp.Sub, fingerprint.AlgoVersion, fp.DurationMS, nil
+	return fingerprinted{sub: fp.Sub, algo: fingerprint.AlgoVersion, durationMS: fp.DurationMS, fallback: fallback}, nil
 }
 
 // indexTerms builds the inverted-index min-hash terms for the chosen fingerprint

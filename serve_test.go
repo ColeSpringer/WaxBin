@@ -88,6 +88,49 @@ func openServed(t *testing.T, ctx context.Context, db, root, sock string) *waxbi
 	return lib
 }
 
+// TestServeProxiedSetTagWriteBack: set_tag carries the write-back across the socket, and a
+// committed tag whose file refused the write comes back as failures in the result rather
+// than as a transport error, the way edit_fields reports one.
+func TestServeProxiedSetTagWriteBack(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	sock := testsock.Path(t)
+	src := filepath.Join(root, "song.mp3")
+	writeFile(t, src, testaudio.BuildMP3("Song", "Band", "Album", 1))
+	lib := openServed(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), root, sock)
+	pid := itemPIDByTitle(t, ctx, lib, "Song")
+	c := dialWhenReady(t, sock)
+	mood := func() []string {
+		t.Helper()
+		fm, err := meta.NewReader().Read(ctx, src)
+		if err != nil {
+			t.Fatalf("read: %v", err)
+		}
+		return fm.Tags.Custom["MOOD"]
+	}
+
+	res, err := c.SetTag(ctx, pid, "mood", []string{"calm"}, model.Attribution{}, model.LockOn, false, true)
+	if err != nil || res.Key != "MOOD" || res.Stored != 1 || len(res.WriteBackFailures) != 0 {
+		t.Fatalf("proxied set = %+v (err %v), want MOOD stored and written", res, err)
+	}
+	if got := mood(); !slices.Equal(got, []string{"calm"}) {
+		t.Fatalf("MOOD on disk = %v, want [calm]", got)
+	}
+
+	setReadOnly(t, ctx, lib, libraryPIDFor(t, ctx, lib, root), true)
+	res, err = c.SetTag(ctx, pid, "MOOD", []string{"tense"}, model.Attribution{}, model.LockOn, true, true)
+	if err != nil || res.Stored != 1 || len(res.WriteBackFailures) != 1 || res.WriteBackFailures[0].Path != src {
+		t.Fatalf("proxied set in a read-only library = %+v (err %v), want the file's refusal in the result", res, err)
+	}
+	if got := mood(); !slices.Equal(got, []string{"calm"}) {
+		t.Errorf("MOOD on disk = %v, want the read-only file left at [calm]", got)
+	}
+	tags, err := lib.ItemTags(ctx, pid)
+	if err != nil || len(tags) != 1 || !slices.Equal(tags[0].Values, []string{"tense"}) {
+		t.Errorf("catalog tags = %+v (err %v), want the refused edit to stand as [tense]", tags, err)
+	}
+}
+
 // dialWhenReady dials the server socket, retrying until it answers a ping.
 func dialWhenReady(t *testing.T, sock string) *proxy.Client {
 	t.Helper()

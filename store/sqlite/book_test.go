@@ -24,6 +24,7 @@ type bookSpec struct {
 	position               int
 	durationMS             int64
 	chapters               []model.Chapter
+	custom                 map[string][]string
 }
 
 func putBook(t *testing.T, st *Store, libID int64, s bookSpec) *model.ScanItemResult {
@@ -57,6 +58,7 @@ func putBook(t *testing.T, st *Store, libID int64, s bookSpec) *model.ScanItemRe
 		Position:      s.position,
 		Chapters:      s.chapters,
 		PreserveLocks: s.preserveLocks,
+		CustomTags:    s.custom,
 	}
 	res, err := st.PutScannedBook(context.Background(), in)
 	if err != nil {

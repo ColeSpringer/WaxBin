@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/colespringer/waxbin/model"
@@ -546,5 +547,224 @@ func TestVerifyReclaimsStrandedTagKeys(t *testing.T) {
 	}
 	if got := tagValues(t, st, pid, "MOOD"); len(got) != 1 || got[0] != "chill" {
 		t.Errorf("MOOD = %v, want the live tag untouched", got)
+	}
+}
+
+// TestTagEditOwesItsFiles: a custom tag set in the catalog alone owes the item's file the
+// value, a set that changes nothing owes nothing, and an alias spelling owes nothing,
+// since a tag write under it lands on another field and so no write-back can pay it.
+func TestTagEditOwesItsFiles(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	res := putTrackCustom(t, st, lib.ID, "/lib/1.flac", "e1", "c1", "One", map[string][]string{"MOOD": {"calm"}}, true)
+	user := model.Attribution{Source: model.SourceUser}
+	owed := func() []string {
+		t.Helper()
+		keys, err := owedKeysOf(ctx, st, res.FilePID)
+		if err != nil {
+			t.Fatalf("owed rows: %v", err)
+		}
+		slices.Sort(keys)
+		return keys
+	}
+
+	if _, _, err := st.SetItemTag(ctx, res.ItemPID, "MOOD", []string{" calm "}, user, model.LockUnchanged, false); err != nil {
+		t.Fatalf("set unchanged: %v", err)
+	}
+	if got := owed(); got != nil {
+		t.Fatalf("owed after a set that changed nothing = %v, want none", got)
+	}
+	if _, _, err := st.SetItemTag(ctx, res.ItemPID, "mood", []string{"happy"}, user, model.LockUnchanged, false); err != nil {
+		t.Fatalf("set: %v", err)
+	}
+	if got := owed(); !slices.Equal(got, []string{"tag.MOOD"}) {
+		t.Fatalf("owed after a catalog-only set = %v, want [tag.MOOD]", got)
+	}
+	if _, _, err := st.SetItemTag(ctx, res.ItemPID, "YEAR", []string{"1999"}, user, model.LockUnchanged, false); err != nil {
+		t.Fatalf("set an alias spelling: %v", err)
+	}
+	if got := owed(); !slices.Equal(got, []string{"tag.MOOD"}) {
+		t.Fatalf("owed after an alias spelling = %v, want [tag.MOOD] alone", got)
+	}
+}
+
+// TestScanSettlesOwedTagRows: a scan pays a custom tag's owed row once the file states
+// what the catalog holds. A locked edit stays owed while the file differs and goes once
+// the file carries it, and an unlocked edit the scan re-derives away owes nothing.
+func TestScanSettlesOwedTagRows(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	calm := map[string][]string{"MOOD": {"calm"}}
+	happy := map[string][]string{"MOOD": {"happy"}}
+	res := putTrackCustom(t, st, lib.ID, "/lib/1.flac", "e1", "c1", "One", calm, true)
+	user := model.Attribution{Source: model.SourceUser}
+	owed := func() []string {
+		t.Helper()
+		keys, err := owedKeysOf(ctx, st, res.FilePID)
+		if err != nil {
+			t.Fatalf("owed rows: %v", err)
+		}
+		return keys
+	}
+
+	if _, _, err := st.SetItemTag(ctx, res.ItemPID, "MOOD", []string{"happy"}, user, model.LockOn, false); err != nil {
+		t.Fatalf("set locked: %v", err)
+	}
+	putTrackCustom(t, st, lib.ID, "/lib/1.flac", "e1", "c1", "One", calm, true)
+	if got := owed(); !slices.Equal(got, []string{"tag.MOOD"}) {
+		t.Fatalf("owed after a rescan of a file still saying calm = %v, want [tag.MOOD]", got)
+	}
+	putTrackCustom(t, st, lib.ID, "/lib/1.flac", "e1", "c2", "One", happy, true)
+	if got := owed(); got != nil {
+		t.Fatalf("owed once the file carries the value = %v, want none", got)
+	}
+
+	if _, _, err := st.SetItemTag(ctx, res.ItemPID, "MOOD", []string{"sad"}, user, model.LockOff, true); err != nil {
+		t.Fatalf("set unlocked: %v", err)
+	}
+	putTrackCustom(t, st, lib.ID, "/lib/1.flac", "e1", "c2", "One", happy, true)
+	if got := tagValues(t, st, res.ItemPID, "MOOD"); !slices.Equal(got, []string{"happy"}) {
+		t.Fatalf("MOOD = %v, want the unlocked edit re-derived to the file's [happy]", got)
+	}
+	if got := owed(); got != nil {
+		t.Fatalf("owed after the edit was re-derived away = %v, want none", got)
+	}
+}
+
+// TestScanSettlesAReDerivedBookTagOnEveryPart: a book's custom tags are its primary
+// part's, so once that part's scan re-derives a catalog-only edit away, no part owes it,
+// the parts the scan did not read included.
+func TestScanSettlesAReDerivedBookTagOnEveryPart(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	partOne := bookSpec{path: "/lib/B/1.m4b", essence: "b1", content: "b1", title: "Book", author: "Auth", position: 1}
+	one := putBook(t, st, lib.ID, partOne)
+	two := putBook(t, st, lib.ID, bookSpec{path: "/lib/B/2.m4b", essence: "b2", content: "b2", title: "Book", author: "Auth", position: 2})
+	if one.ItemPID != two.ItemPID {
+		t.Fatalf("parts landed on %s and %s, want one book", one.ItemPID, two.ItemPID)
+	}
+	if _, _, err := st.SetItemTag(ctx, one.ItemPID, "MOOD", []string{"tense"}, model.Attribution{Source: model.SourceUser}, model.LockOff, false); err != nil {
+		t.Fatalf("set: %v", err)
+	}
+	for _, f := range []model.PID{one.FilePID, two.FilePID} {
+		if keys, err := owedKeysOf(ctx, st, f); err != nil || !slices.Equal(keys, []string{"tag.MOOD"}) {
+			t.Fatalf("owed on %s after the set = %v (err %v), want [tag.MOOD]", f, keys, err)
+		}
+	}
+
+	partOne.preserveLocks = true
+	putBook(t, st, lib.ID, partOne)
+	if got := tagValues(t, st, one.ItemPID, "MOOD"); got != nil {
+		t.Fatalf("MOOD = %v, want the unlocked edit re-derived away", got)
+	}
+	for _, f := range []model.PID{one.FilePID, two.FilePID} {
+		if keys, err := owedKeysOf(ctx, st, f); err != nil || keys != nil {
+			t.Errorf("owed on %s after the re-derive = %v (err %v), want none", f, keys, err)
+		}
+	}
+}
+
+// TestScanSettlesABookPartThatCarriesTheTag: a part that is not the book's primary still
+// pays its own owed row once its file carries the catalog's values, and only its own.
+func TestScanSettlesABookPartThatCarriesTheTag(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	one := putBook(t, st, lib.ID, bookSpec{path: "/lib/B/1.m4b", essence: "b1", content: "b1", title: "Book", author: "Auth", position: 1})
+	partTwo := bookSpec{path: "/lib/B/2.m4b", essence: "b2", content: "b2", title: "Book", author: "Auth", position: 2}
+	two := putBook(t, st, lib.ID, partTwo)
+	if _, _, err := st.SetItemTag(ctx, one.ItemPID, "MOOD", []string{"tense"}, model.Attribution{Source: model.SourceUser}, model.LockOn, false); err != nil {
+		t.Fatalf("set: %v", err)
+	}
+
+	partTwo.content, partTwo.preserveLocks = "b2-tagged", true
+	partTwo.custom = map[string][]string{"MOOD": {"tense"}}
+	putBook(t, st, lib.ID, partTwo)
+	if keys, err := owedKeysOf(ctx, st, two.FilePID); err != nil || keys != nil {
+		t.Errorf("owed on the part carrying the tag = %v (err %v), want none", keys, err)
+	}
+	if keys, err := owedKeysOf(ctx, st, one.FilePID); err != nil || !slices.Equal(keys, []string{"tag.MOOD"}) {
+		t.Errorf("owed on the primary = %v (err %v), want [tag.MOOD] still", keys, err)
+	}
+}
+
+// TestIgnoreLocksRescanSettlesALockedTagEverywhere: a rescan that ignores locks replaces even
+// a locked tag with the primary's file, so the edit the owed rows were about is gone from
+// every part.
+func TestIgnoreLocksRescanSettlesALockedTagEverywhere(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	partOne := bookSpec{path: "/lib/B/1.m4b", essence: "b1", content: "b1", title: "Book", author: "Auth", position: 1}
+	one := putBook(t, st, lib.ID, partOne)
+	two := putBook(t, st, lib.ID, bookSpec{path: "/lib/B/2.m4b", essence: "b2", content: "b2", title: "Book", author: "Auth", position: 2})
+	if _, _, err := st.SetItemTag(ctx, one.ItemPID, "MOOD", []string{"tense"}, model.Attribution{Source: model.SourceUser}, model.LockOn, false); err != nil {
+		t.Fatalf("set: %v", err)
+	}
+
+	putBook(t, st, lib.ID, partOne) // preserveLocks false: the --ignore-locks rescan
+	if got := tagValues(t, st, one.ItemPID, "MOOD"); got != nil {
+		t.Fatalf("MOOD = %v, want the locked tag replaced by the file's nothing", got)
+	}
+	for _, f := range []model.PID{one.FilePID, two.FilePID} {
+		if keys, err := owedKeysOf(ctx, st, f); err != nil || keys != nil {
+			t.Errorf("owed on %s = %v (err %v), want none", f, keys, err)
+		}
+	}
+}
+
+// TestVerifyReclaimsUnpayableTagOwedRows: an owed row under a key no write-back can carry,
+// one the key rule has since stopped accepting, one WaxBin has since reserved, or one a
+// tag write puts onto another field, is stranded with the tag it was about, so db verify
+// counts it and --fix reclaims it, while a live key's row stays.
+func TestVerifyReclaimsUnpayableTagOwedRows(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	res := putTrackCustom(t, st, lib.ID, "/lib/1.mp3", "e1", "c1", "One", nil, true)
+	if _, _, err := st.SetItemTag(ctx, res.ItemPID, "MOOD", []string{"calm"}, model.Attribution{Source: model.SourceUser}, model.LockOn, false); err != nil {
+		t.Fatalf("set: %v", err)
+	}
+	// Seeded raw: each was owed before the rule that strands it.
+	for _, key := range []string{"tag.ODD~KEY", "tag.BPM", "tag.YEAR"} {
+		if err := st.AddFileDiagnostic(ctx, res.FilePID, model.OriginEdit, model.FileDiagnostic{
+			Code: model.DiagTagWriteOwed, Severity: model.SeverityInfo, TagKey: key, Detail: key + " owed",
+		}); err != nil {
+			t.Fatalf("seed %s: %v", key, err)
+		}
+	}
+
+	rep, err := st.VerifyDerived(ctx)
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if rep.StrandedTagKeyRows != 3 || !rep.Reclaimable() {
+		t.Fatalf("stranded rows = %d (reclaimable %v), want the three unpayable owed rows", rep.StrandedTagKeyRows, rep.Reclaimable())
+	}
+	if n, err := st.GCStrandedTagKeys(ctx); err != nil || n != 3 {
+		t.Fatalf("gc = %d (err %v), want 3", n, err)
+	}
+	if keys, err := owedKeysOf(ctx, st, res.FilePID); err != nil || !slices.Equal(keys, []string{"tag.MOOD"}) {
+		t.Errorf("owed after gc = %v (err %v), want the live key alone", keys, err)
+	}
+}
+
+// TestForgetItemTagPaysEveryFile: ForgetItemTag follows a write-back that cleared the tag
+// from every file, so once the catalog drops it too no file owes it.
+func TestForgetItemTagPaysEveryFile(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	one := putBook(t, st, lib.ID, bookSpec{path: "/lib/B/1.m4b", essence: "b1", content: "b1", title: "Book", author: "Auth", position: 1})
+	two := putBook(t, st, lib.ID, bookSpec{path: "/lib/B/2.m4b", essence: "b2", content: "b2", title: "Book", author: "Auth", position: 2})
+	if _, _, err := st.SetItemTag(ctx, one.ItemPID, "TITLESORT", []string{"Curated"}, model.Attribution{Source: model.SourceUser}, model.LockOff, false); err != nil {
+		t.Fatalf("set: %v", err)
+	}
+	if err := st.ForgetItemTag(ctx, one.ItemPID, "TITLESORT"); err != nil {
+		t.Fatalf("forget: %v", err)
+	}
+	if got := tagValues(t, st, one.ItemPID, "TITLESORT"); got != nil {
+		t.Errorf("TITLESORT = %v, want it dropped", got)
+	}
+	for _, f := range []model.PID{one.FilePID, two.FilePID} {
+		if keys, err := owedKeysOf(ctx, st, f); err != nil || keys != nil {
+			t.Errorf("owed on %s = %v (err %v), want none", f, keys, err)
+		}
 	}
 }

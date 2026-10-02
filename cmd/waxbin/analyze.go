@@ -84,6 +84,12 @@ func renderAnalyzeResult(cmd *cobra.Command, g *globals, res *waxbin.AnalyzeResu
 		fmt.Fprintf(w, "rg tags:    %d files whose tags could not be written without loss\n", res.Result.ReplayGainTagsUnrepresented)
 	}
 	fmt.Fprintf(w, "skipped:    %d (cannot decode; retried later)\n", res.Result.Skipped)
+	if res.Result.FingerprintFallbacks > 0 {
+		fmt.Fprintf(w, "fallback:   %d (fpcalc failed; pure-Go fingerprint stored, retried later)\n", res.Result.FingerprintFallbacks)
+	}
+	if res.Result.FingerprintPartialReads > 0 {
+		fmt.Fprintf(w, "partial:    %d (fpcalc read error past the analyzed span; fingerprint kept)\n", res.Result.FingerprintPartialReads)
+	}
 	if res.Result.MeasureFailed > 0 {
 		fmt.Fprintf(w, "no loudness: %d (fingerprint stored; measurement failed)\n", res.Result.MeasureFailed)
 	}

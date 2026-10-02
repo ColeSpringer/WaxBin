@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/colespringer/waxbin"
 	"github.com/colespringer/waxbin/internal/testaudio"
@@ -1877,6 +1878,44 @@ func TestEditTitleWriteBackClearsStaleTitleSort(t *testing.T) {
 		if listed != locked {
 			t.Errorf("locked %v: catalog lists TITLESORT %v, want %v", locked, listed, locked)
 		}
+		if got := owedOn(t, ctx, lib, pid); got != nil {
+			t.Errorf("locked %v: owed after the write-back = %v, want none", locked, got)
+		}
+	}
+}
+
+// TestTitleWriteBackPaysAnOwedTitleSortClear: a TITLESORT cleared in the catalog alone is
+// owed to the file, and a title write-back, which clears the file's TITLESORT too, pays it.
+func TestTitleWriteBackPaysAnOwedTitleSortClear(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	src := filepath.Join(root, "song.mp3")
+	writeFile(t, src, testaudio.BuildMP3FromSpec(testaudio.MP3Spec{Title: "Old", Artist: "Band", Album: "Album"}))
+	if _, err := meta.NewWriter().Apply(ctx, src, []meta.TagEdit{{Key: "TITLESORT", Values: []string{"Old Sort"}}}); err != nil {
+		t.Fatalf("stage TITLESORT: %v", err)
+	}
+	lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), root)
+	scanLib(t, ctx, lib)
+	pid := itemPIDByTitle(t, ctx, lib, "Old")
+	if _, _, err := lib.SetItemTag(ctx, pid, "TITLESORT", nil, waxbin.TagEditOptions{}); err != nil {
+		t.Fatalf("catalog-only clear: %v", err)
+	}
+	if got := owedOn(t, ctx, lib, pid); !slices.Equal(got, []string{"tag.TITLESORT"}) {
+		t.Fatalf("owed after the catalog-only clear = %v, want [tag.TITLESORT]", got)
+	}
+	if err := lib.EditFields(ctx, pid, map[string]string{"title": "New"},
+		waxbin.EditOptions{Lock: model.LockOn, WriteBack: true}); err != nil {
+		t.Fatalf("edit with write-back: %v", err)
+	}
+	doc, err := waxlabel.ParseFile(ctx, src)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if v, ok := doc.Tags().First(tag.TitleSort); ok {
+		t.Fatalf("TITLESORT = %q, want the title write-back to clear it", v)
+	}
+	if got := owedOn(t, ctx, lib, pid); got != nil {
+		t.Errorf("owed after the write-back cleared TITLESORT = %v, want none", got)
 	}
 }
 
@@ -1943,5 +1982,272 @@ func TestEditBookTitleWriteBackKeepsTitleSort(t *testing.T) {
 	}
 	if v, ok := doc.Tags().First(tag.TitleSort); !ok || v != "Chapter One Sort" {
 		t.Errorf("TITLESORT = %q (present %v), want the part's own sort kept", v, ok)
+	}
+}
+
+// itemTagValues returns an item's values for one custom tag key, nil when it has none.
+func itemTagValues(t *testing.T, ctx context.Context, lib *waxbin.Library, pid model.PID, key string) []string {
+	t.Helper()
+	tags, err := lib.ItemTags(ctx, pid)
+	if err != nil {
+		t.Fatalf("item tags: %v", err)
+	}
+	for _, tg := range tags {
+		if tg.Key == key {
+			return tg.Values
+		}
+	}
+	return nil
+}
+
+// TestSetItemTagWriteBackRoundTrips: a custom tag set with write-back reaches the file in
+// each container's own spelling, so WaxLabel reads it back and a forced rescan keeps it
+// with no lock holding it, and a clear with write-back takes it off the file again.
+func TestSetItemTagWriteBackRoundTrips(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	paths := map[string]string{
+		"Mp3 Song":  filepath.Join(root, "song.mp3"),
+		"Flac Song": filepath.Join(root, "song.flac"),
+		"M4a Song":  filepath.Join(root, "song.m4a"),
+	}
+	writeFile(t, paths["Mp3 Song"], testaudio.BuildMP3FromSpec(testaudio.MP3Spec{Title: "Mp3 Song", Artist: "Band", Album: "Album"}))
+	writeFile(t, paths["Flac Song"], testaudio.EncodeAs(t, "flac", "", 44100, testaudio.ReferenceSignal(44100, time.Second)))
+	writeFile(t, paths["M4a Song"], testaudio.Fixture(t, "sample.m4a"))
+	for _, title := range []string{"Flac Song", "M4a Song"} {
+		if _, err := meta.NewWriter().Apply(ctx, paths[title], []meta.TagEdit{{Key: "TITLE", Values: []string{title}}}); err != nil {
+			t.Fatalf("stage %s: %v", title, err)
+		}
+	}
+	lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), root)
+	scanLib(t, ctx, lib)
+	onDisk := func(path string) (string, bool) {
+		t.Helper()
+		doc, err := waxlabel.ParseFile(ctx, path)
+		if err != nil {
+			t.Fatalf("parse %s: %v", path, err)
+		}
+		return doc.Tags().First(tag.ReleaseStatus)
+	}
+	pids := map[string]model.PID{}
+	for title, path := range paths {
+		pids[title] = itemPIDByTitle(t, ctx, lib, title)
+		if _, n, err := lib.SetItemTag(ctx, pids[title], "releasestatus", []string{"unofficial"},
+			waxbin.TagEditOptions{Lock: model.LockOff, WriteBack: true}); err != nil || n != 1 {
+			t.Fatalf("%s: set with write-back = (%d, %v), want one value stored and written", title, n, err)
+		}
+		if v, ok := onDisk(path); !ok || v != "unofficial" {
+			t.Fatalf("%s: RELEASESTATUS on disk = %q (present %v), want unofficial", title, v, ok)
+		}
+	}
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{Force: true}); err != nil {
+		t.Fatalf("forced rescan: %v", err)
+	}
+	for title, pid := range pids {
+		if got := itemTagValues(t, ctx, lib, pid, "RELEASESTATUS"); !slices.Equal(got, []string{"unofficial"}) {
+			t.Errorf("%s: RELEASESTATUS after a forced rescan = %v, want [unofficial] read back from the file", title, got)
+		}
+	}
+
+	for title, path := range paths {
+		if _, n, err := lib.SetItemTag(ctx, pids[title], "RELEASESTATUS", nil,
+			waxbin.TagEditOptions{WriteBack: true}); err != nil || n != 0 {
+			t.Fatalf("%s: clear with write-back = (%d, %v), want a clear written", title, n, err)
+		}
+		if v, ok := onDisk(path); ok {
+			t.Errorf("%s: RELEASESTATUS still on disk as %q after a written clear", title, v)
+		}
+	}
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{Force: true}); err != nil {
+		t.Fatalf("forced rescan: %v", err)
+	}
+	for title, pid := range pids {
+		if got := itemTagValues(t, ctx, lib, pid, "RELEASESTATUS"); got != nil {
+			t.Errorf("%s: RELEASESTATUS = %v after the cleared file was rescanned, want none", title, got)
+		}
+	}
+}
+
+// TestSetItemTagWriteBackRefusesAliasSpellings: WaxLabel writes an alias spelling onto the
+// field it names (YEAR is the recording date, MUSICBRAINZ_ALBUMSTATUS is RELEASESTATUS),
+// so a custom tag under one cannot be written back as itself. The edit is refused whole,
+// a clear included, leaving the catalog and the file as they were; the same spelling set
+// in the catalog alone still stands and owes the file nothing.
+func TestSetItemTagWriteBackRefusesAliasSpellings(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	src := filepath.Join(root, "song.mp3")
+	writeFile(t, src, testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
+		Title: "Song", Artist: "Band", AlbumArtist: "Band", Album: "Album", Track: 3, Year: 1999,
+	}))
+	lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), root)
+	scanLib(t, ctx, lib)
+	pid := itemPIDByTitle(t, ctx, lib, "Song")
+
+	for _, c := range []struct {
+		key    string
+		values []string
+	}{
+		{"YEAR", []string{"2020"}}, {"year", nil}, {"TRACK", []string{"9"}}, {"ALBUM_ARTIST", []string{"Other"}},
+		{"TOTALTRACKS", []string{"12"}}, {"MUSICBRAINZ_ALBUMSTATUS", []string{"bootleg"}},
+	} {
+		_, _, err := lib.SetItemTag(ctx, pid, c.key, c.values, waxbin.TagEditOptions{Lock: model.LockOn, WriteBack: true})
+		if !waxerr.Is(err, waxerr.CodeInvalid) {
+			t.Errorf("SetItemTag(%s, %v) with write-back = %v, want CodeInvalid", c.key, c.values, err)
+		}
+	}
+	if tags, err := lib.ItemTags(ctx, pid); err != nil || len(tags) != 0 {
+		t.Errorf("custom tags after the refusals = %v (err %v), want none", tags, err)
+	}
+	fm, err := meta.NewReader().Read(ctx, src)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if fm.Tags.Year != 1999 || fm.Tags.TrackNo != 3 || fm.Tags.TrackTotal != 0 || fm.Tags.AlbumArtist != "Band" {
+		t.Errorf("file tags = year %d, track %d/%d, album artist %q; want the refused edits to leave 1999, 3, and Band",
+			fm.Tags.Year, fm.Tags.TrackNo, fm.Tags.TrackTotal, fm.Tags.AlbumArtist)
+	}
+	if doc, err := waxlabel.ParseFile(ctx, src); err != nil {
+		t.Fatalf("parse: %v", err)
+	} else if v, ok := doc.Tags().First(tag.ReleaseStatus); ok {
+		t.Errorf("RELEASESTATUS on disk = %q, want the refused alias left unwritten", v)
+	}
+
+	if _, n, err := lib.SetItemTag(ctx, pid, "YEAR", []string{"2020"}, waxbin.TagEditOptions{Lock: model.LockOn}); err != nil || n != 1 {
+		t.Fatalf("catalog-only set of YEAR = (%d, %v), want it stored", n, err)
+	}
+	if got := owedOn(t, ctx, lib, pid); got != nil {
+		t.Errorf("owed after a catalog-only alias spelling = %v, want none", got)
+	}
+}
+
+// TestSetItemTagWriteBackRefusesAVirtualTrack: a cue rip's file holds every track cut from
+// it, so a custom tag set on one of them is refused at the file and recorded as drift,
+// while the catalog edit stands.
+func TestSetItemTagWriteBackRefusesAVirtualTrack(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	src := filepath.Join(root, "rip.mp3")
+	writeFile(t, src, testaudio.BuildMP3FromSpec(testaudio.MP3Spec{Title: "Rip", Artist: "Band", Album: "Album"}))
+	lib := openManaged(t, ctx, db, root)
+	scanLib(t, ctx, lib)
+	pid := itemPIDByTitle(t, ctx, lib, "Rip")
+	makeBackingFileVirtual(t, ctx, db, pid)
+
+	_, n, err := lib.SetItemTag(ctx, pid, "MOOD", []string{"calm"}, waxbin.TagEditOptions{Lock: model.LockOn, WriteBack: true})
+	var wb *waxbin.WriteBackError
+	if !errors.As(err, &wb) || len(wb.Failures) != 1 || !strings.Contains(wb.Failures[0].Reason, "shared by multiple items") {
+		t.Fatalf("set on a virtual track = (%d, %v), want the file refused as shared", n, err)
+	}
+	if n != 1 || !slices.Equal(itemTagValues(t, ctx, lib, pid, "MOOD"), []string{"calm"}) {
+		t.Errorf("stored %d values, catalog MOOD = %v; want the catalog edit to stand", n, itemTagValues(t, ctx, lib, pid, "MOOD"))
+	}
+	if doc, err := waxlabel.ParseFile(ctx, src); err != nil {
+		t.Fatalf("parse: %v", err)
+	} else if v, ok := doc.Tags().First(tag.Key("MOOD")); ok {
+		t.Errorf("MOOD on disk = %q, want the shared file left alone", v)
+	}
+	ds, err := lib.FileDiagnostics(ctx, model.DiagnosticFilter{ItemPID: pid, Code: model.DiagTagWriteUnsynced})
+	if err != nil || len(ds) != 1 {
+		t.Errorf("drift rows = %+v (err %v), want the refusal queued for review", ds, err)
+	}
+}
+
+// TestSetItemTagWriteBackWritesEveryBookPart: a book keeps one set of tags across its
+// parts by convention, so a custom tag written back reaches every part, not only the
+// primary whose tags the catalog reads. A key the audiobook reader folds into a book
+// field (TIT3 is the subtitle) stays refused on a book, write-back or not.
+func TestSetItemTagWriteBackWritesEveryBookPart(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	parts := make([]string, 3)
+	for i, seed := range []byte{31, 32, 33} {
+		parts[i] = filepath.Join(root, fmt.Sprintf("part%d.m4b", i+1))
+		writeFile(t, parts[i], testaudio.BuildMP3WithAudio(fmt.Sprintf("Chapter %d", i+1), "Tolkien", "The Hobbit", i+1, testaudio.AudioWithSeed(seed)))
+	}
+	lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), root)
+	scanLib(t, ctx, lib)
+	books, err := lib.Query(ctx, query.New(query.EntityItems).Where("kind", query.OpIs, "book").Build(), "")
+	if err != nil || len(books) != 1 {
+		t.Fatalf("book query: %d books (err %v), want 1", len(books), err)
+	}
+	pid := books[0].PID
+
+	if _, _, err := lib.SetItemTag(ctx, pid, "MOOD", []string{"tense", "dark"}, waxbin.TagEditOptions{Lock: model.LockOn, WriteBack: true}); err != nil {
+		t.Fatalf("set with write-back: %v", err)
+	}
+	for _, p := range parts {
+		doc, err := waxlabel.ParseFile(ctx, p)
+		if err != nil {
+			t.Fatalf("parse %s: %v", p, err)
+		}
+		if got, _ := doc.Tags().Get(tag.Key("MOOD")); !slices.Equal(got, []string{"tense", "dark"}) {
+			t.Errorf("%s: MOOD = %v, want [tense dark]", filepath.Base(p), got)
+		}
+	}
+	if got := owedOn(t, ctx, lib, pid); got != nil {
+		t.Errorf("owed after the write landed on every part = %v, want none", got)
+	}
+	if _, _, err := lib.SetItemTag(ctx, pid, "TIT3", []string{"A Subtitle"}, waxbin.TagEditOptions{Lock: model.LockOn, WriteBack: true}); !waxerr.Is(err, waxerr.CodeInvalid) {
+		t.Errorf("SetItemTag(book, TIT3) with write-back = %v, want CodeInvalid", err)
+	}
+}
+
+// TestSetItemTagWriteBackRefusesAFormatsOwnSpelling: some custom keys are another field to
+// one format only, an ID3 frame id such as TPE2 on an MP3 or a spaced MusicBrainz name on an
+// MP4, so the write-back refuses that file and leaves the field alone. No write-back can ever
+// carry the tag there, so the file no longer owes it, and the refusal stays queued as drift
+// with its reason. A key the format drops without a word is reported as a lost write, never
+// as one that landed.
+func TestSetItemTagWriteBackRefusesAFormatsOwnSpelling(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	mp3 := filepath.Join(root, "song.mp3")
+	m4a := filepath.Join(root, "sample.m4a")
+	writeFile(t, mp3, testaudio.BuildMP3FromSpec(testaudio.MP3Spec{Title: "Song", Artist: "Band", Album: "Album"}))
+	writeFile(t, m4a, testaudio.Fixture(t, "sample.m4a"))
+	if _, err := meta.NewWriter().Apply(ctx, m4a, []meta.TagEdit{{Key: "TITLE", Values: []string{"Sample"}}}); err != nil {
+		t.Fatalf("stage m4a: %v", err)
+	}
+	lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), root)
+	scanLib(t, ctx, lib)
+	song, sample := itemPIDByTitle(t, ctx, lib, "Song"), itemPIDByTitle(t, ctx, lib, "Sample")
+
+	for _, c := range []struct {
+		pid       model.PID
+		key, path string
+	}{{song, "TPE2", mp3}, {sample, "MUSICBRAINZ TRACK ID", m4a}} {
+		_, _, err := lib.SetItemTag(ctx, c.pid, c.key, []string{"11111111-1111-1111-1111-111111111111"},
+			waxbin.TagEditOptions{Lock: model.LockOn, WriteBack: true})
+		var wb *waxbin.WriteBackError
+		if !errors.As(err, &wb) || len(wb.Failures) != 1 || wb.Failures[0].Path != c.path {
+			t.Fatalf("%s write-back = %v, want the file refused", c.key, err)
+		}
+		if got := owedOn(t, ctx, lib, c.pid); got != nil {
+			t.Errorf("%s owed = %v, want nothing owed to a file that cannot carry it", c.key, got)
+		}
+		ds, err := lib.FileDiagnostics(ctx, model.DiagnosticFilter{ItemPID: c.pid, Code: model.DiagTagWriteUnsynced})
+		if err != nil || len(ds) != 1 || !strings.Contains(ds[0].Detail, c.key) {
+			t.Errorf("%s drift = %+v (err %v), want the refusal and its reason", c.key, ds, err)
+		}
+	}
+	fm, err := meta.NewReader().Read(ctx, mp3)
+	if err != nil || fm.Tags.AlbumArtist != "" {
+		t.Errorf("mp3 album artist = %q (err %v), want none written", fm.Tags.AlbumArtist, err)
+	}
+	fm, err = meta.NewReader().Read(ctx, m4a)
+	if err != nil || fm.Tags.MBID != "" {
+		t.Errorf("m4a recording id = %q (err %v), want none written", fm.Tags.MBID, err)
+	}
+
+	_, _, err = lib.SetItemTag(ctx, song, "TPE1", []string{"x"}, waxbin.TagEditOptions{Lock: model.LockOn, WriteBack: true})
+	var wb *waxbin.WriteBackError
+	if !errors.As(err, &wb) || len(wb.Failures) != 1 {
+		t.Fatalf("TPE1 write-back = %v, want the dropped value reported", err)
+	}
+	ds, err := lib.FileDiagnostics(ctx, model.DiagnosticFilter{ItemPID: song, Code: model.DiagTagWriteLost})
+	if err != nil || len(ds) != 1 || ds[0].TagKey != "TPE1" {
+		t.Errorf("lost rows = %+v (err %v), want TPE1 recorded as lost", ds, err)
 	}
 }

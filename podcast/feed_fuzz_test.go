@@ -24,6 +24,10 @@ func FuzzParseFeed(f *testing.F) {
 		`<podcast:soundbite startTime="nan" duration="inf">x</podcast:soundbite>` +
 		`<podcast:person>   </podcast:person></item></channel></rss>`))
 
+	f.Add([]byte(`<rss xmlns:podcast="https://github.com/Podcastindex-org/podcast-namespace/blob/main/docs/1.0.md">` +
+		`<channel><title>S</title><podcast:guid>g</podcast:guid><itunes:author>A</itunes:author>` +
+		`<item><title>E</title><podcast:chapters url="https://h/c.json"/></item></channel></rss>`))
+
 	f.Fuzz(func(t *testing.T, data []byte) {
 		// A malformed feed must error cleanly, never panic.
 		_, _ = ParseFeed(data)

@@ -7,11 +7,13 @@ import (
 	"image/png"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/colespringer/waxbin/internal/testaudio"
 	"github.com/colespringer/waxbin/model"
 	waxlabel "github.com/colespringer/waxlabel"
+	"github.com/colespringer/waxlabel/tag"
 )
 
 // tinyPNG returns a small valid PNG for cover-embed tests.
@@ -110,6 +112,38 @@ func TestEntityFieldTagKey(t *testing.T) {
 		}
 		if w := model.EntityFieldWritable(c.et, c.field); w != c.ok {
 			t.Errorf("model.EntityFieldWritable(%s, %q) = %v, want %v", c.et, c.field, w, c.ok)
+		}
+	}
+}
+
+// TestRetargetedTagKeysMatchWaxLabel: model.RetargetedTagKeys, which decides that a custom
+// tag under a key owes its file nothing, lists exactly the custom keys WaxLabel's edit
+// aliases write onto another field on every format, and RetargetedTagKey names that field.
+// A spelling only one format treats as a field is ApplyCustomTag's to refuse.
+func TestRetargetedTagKeysMatchWaxLabel(t *testing.T) {
+	var want []string
+	for _, k := range tag.KnownKeys() {
+		for _, alias := range tag.KeyAliases(k) {
+			canon, ok := model.CanonicalTagKey(alias)
+			if !ok || model.IsReservedTagKey(canon) {
+				continue
+			}
+			want = append(want, canon)
+			if to, ok := RetargetedTagKey(canon); !ok || to != string(k) {
+				t.Errorf("RetargetedTagKey(%q) = %q, %v; want %q, true", canon, to, ok, k)
+			}
+		}
+	}
+	slices.Sort(want)
+	if got := model.RetargetedTagKeys(); !slices.Equal(got, want) {
+		t.Errorf("model.RetargetedTagKeys() = %v, want WaxLabel's custom-key aliases %v", got, want)
+	}
+	for _, k := range []string{"MOOD", "RELEASESTATUS", "TITLESORT", "TIT3"} {
+		if to, ok := RetargetedTagKey(k); ok {
+			t.Errorf("RetargetedTagKey(%q) = %q, want it written as itself", k, to)
+		}
+		if model.IsRetargetedTagKey(k) {
+			t.Errorf("model.IsRetargetedTagKey(%q) = true, want false", k)
 		}
 	}
 }

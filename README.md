@@ -12,7 +12,8 @@ podcasts**.
   waveforms) via [WaxFlow]. The two libraries cover the same containers, so
   WaxBin can decode every format it catalogs, on every host, apart from a few rare
   codecs such as MPEG Layer II and AC-3. `fpcalc` is the sole remaining optional
-  subprocess, used only for AcoustID lookups in enrichment.
+  subprocess: when present, analyze fingerprints with Chromaprint (the pure-Go
+  fingerprint covers a file it cannot read) and enrichment uses it for AcoustID.
 - **Hard scan/analyze boundary.** Scanning is I/O-bound and never decodes PCM;
   loudness, fingerprinting, and peaks live only in a resumable analyze pass.
 - **Source of truth.** Consumers read the catalog through WaxBin's canonical
@@ -144,7 +145,7 @@ of its own.
 - `waxbin lyrics set`, `waxbin chapters`, and `waxbin art set` curate lyrics, book
   chapters, and cover art.
 
-Each of these edits the catalog, and `edit`, `entity`, `credit`, and `art set` offer
+Each of these edits the catalog, and `edit`, `entity`, `credit`, `tag`, and `art set` offer
 **opt-in `--write-back`** to also mirror the change into the backing file(s) (see
 below). Write-back is best-effort: a file that cannot be written returns a typed error
 naming the files, while the catalog edit still stands. A book re-anchors its identity on
@@ -157,7 +158,7 @@ across every part. A value an edit changes is listed in `diagnostics` as
 The catalog is always authoritative; these opt-in features mirror an edit back into
 files for external players, always preserving audio essence (an essence-verified write
 never alters the encoded audio):
-- The curation edits above (`edit`, `entity`, `credit`, `art set`) take `--write-back`
+- The curation edits above (`edit`, `entity`, `credit`, `tag`, `art set`) take `--write-back`
   to embed the committed change into the item's file(s).
 - `acquisition set`/`acquisition clear` take `--write-back` for the file's own
   `SOURCE_URL`/`SOURCE_ID`/`ACQUISITION_DATE`.

@@ -284,8 +284,8 @@ const (
 	enrichBatch          = 100
 	defaultEnrichTimeout = 30 * time.Second
 	// acoustFingerprintMaxDur bounds how much audio fpcalc analyzes for an AcoustID
-	// lookup. Zero (a time.Duration) fingerprints the whole file, which AcoustID
-	// matches most accurately.
+	// lookup. Zero passes no length, which leaves fpcalc's own default, the first 120
+	// seconds.
 	acoustFingerprintMaxDur time.Duration = 0
 )
 
@@ -1510,20 +1510,23 @@ func (s *Service) resolveReleaseGroup(ctx context.Context, st *runState, t model
 
 // acoustResolveReleaseGroup fingerprints a release group's representative file with
 // fpcalc and asks AcoustID for a release-group MBID. It is best-effort. An fpcalc
-// failure is skipped. An AcoustID error (a bad or expired key, a quota, or an endpoint
+// failure is skipped, and a read error it reports after fingerprinting the span asked
+// for is not one. An AcoustID error (a bad or expired key, a quota, or an endpoint
 // problem usually recurs for every file) disables the fallback for the rest of the run
 // instead of retrying. It never aborts the pass, since AcoustID is an optional resolver
 // layered on top of MusicBrainz.
 func (s *Service) acoustResolveReleaseGroup(ctx context.Context, st *runState, t model.EnrichTarget) string {
-	fp, durSec, err := fingerprint.ChromaprintCompressed(ctx, s.caps.FpcalcPath, t.FilePath, acoustFingerprintMaxDur)
+	r, err := fingerprint.ChromaprintCompressedDetail(ctx, s.caps.FpcalcPath, t.FilePath, acoustFingerprintMaxDur,
+		time.Duration(t.DurationSec)*time.Second)
 	if err != nil {
 		s.log.Debug("acoustid fingerprint failed", "path", t.FilePath, "err", err)
 		return ""
 	}
+	durSec := r.DurationSec
 	if t.DurationSec > 0 {
 		durSec = t.DurationSec
 	}
-	m, err := s.aid.lookup(ctx, fp, durSec)
+	m, err := s.aid.lookup(ctx, r.Compressed, durSec)
 	if err != nil {
 		s.log.Warn("acoustid lookup failed; disabling the fallback for this run", "err", err)
 		st.acoustOff = true

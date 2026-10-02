@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/colespringer/waxbin"
+	"github.com/colespringer/waxbin/analyze"
 	"github.com/colespringer/waxbin/enrich"
 	"github.com/colespringer/waxbin/model"
 	"github.com/spf13/cobra"
@@ -233,5 +234,37 @@ func TestItemViewJSONCarriesTheTotals(t *testing.T) {
 		if !strings.Contains(string(b), want) {
 			t.Errorf("json = %s, want it to carry %s", b, want)
 		}
+	}
+}
+
+// TestAnalyzeResultReportsTheFingerprintPath: a pass reports the files fpcalc failed on,
+// the partial reads it kept, and the files whose measurement failed, in its JSON and its
+// summary, so a pass that quietly fell back to the pure-Go fingerprint does not read as
+// a clean Chromaprint one.
+func TestAnalyzeResultReportsTheFingerprintPath(t *testing.T) {
+	res := &waxbin.AnalyzeResult{Result: analyze.Result{
+		Analyzed: 9, FingerprintFallbacks: 2, FingerprintPartialReads: 3, MeasureFailed: 1,
+	}}
+	b, err := json.Marshal(toAnalyzeView(res))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"fingerprintFallbacks":2`, `"fingerprintPartialReads":3`, `"measureFailed":1`} {
+		if !strings.Contains(string(b), want) {
+			t.Errorf("json = %s\nwant it to carry %s", b, want)
+		}
+	}
+
+	cmd := &cobra.Command{}
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	if err := renderAnalyzeResult(cmd, &globals{}, res); err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	if got := lineWith(t, buf.String(), "fallback:"); !strings.Contains(got, "2") {
+		t.Errorf("fallback line = %q, want the 2 files fpcalc failed on", got)
+	}
+	if got := lineWith(t, buf.String(), "partial:"); !strings.Contains(got, "3") {
+		t.Errorf("partial line = %q, want the 3 partial reads kept", got)
 	}
 }

@@ -187,7 +187,11 @@ import (
 // server drops the field and runs the whole pass where the client asked for one phase.
 // set_library_read_only and set_library_folder_fallback ride at 21 on the add_root
 // precedent, since neither widens an existing struct.
-const ProtocolVersion = 21
+//
+// Version 22 added SetTagParams.WriteBack and SetTagResult.WriteBackFailures, for the
+// reason version 6 gave: a version-21 server drops the field and stores the tag in the
+// catalog alone, and its empty result reads as a write that landed on every file.
+const ProtocolVersion = 22
 
 // Method names for the proxied operations: the fast request/response catalog
 // mutations, the reads a mutating command needs for its confirmation output, the
@@ -560,23 +564,26 @@ type SetArtLockResult struct {
 
 // SetTagParams is the set_tag request payload: a custom tag's ordered values on an
 // item. Empty Values clears the tag. Source, Provider and Lock carry the same meaning as
-// on EditFieldsParams.
+// on EditFieldsParams. With WriteBack the tag is also written into the item's files.
 type SetTagParams struct {
-	ItemPID  string   `json:"itemPid"`
-	Key      string   `json:"key"`
-	Values   []string `json:"values,omitempty"`
-	Source   string   `json:"source,omitempty"`
-	Provider string   `json:"provider,omitempty"`
-	Lock     string   `json:"lock"`
-	Force    bool     `json:"force"`
+	ItemPID   string   `json:"itemPid"`
+	Key       string   `json:"key"`
+	Values    []string `json:"values,omitempty"`
+	Source    string   `json:"source,omitempty"`
+	Provider  string   `json:"provider,omitempty"`
+	Lock      string   `json:"lock"`
+	Force     bool     `json:"force"`
+	WriteBack bool     `json:"writeBack"`
 }
 
 // SetTagResult is the set_tag response payload: the canonical key actually stored (the
 // normalized uppercase form) and the number of values stored after trimming (0 = the
-// tag was cleared).
+// tag was cleared). A committed tag whose file write-back partially failed returns the
+// failed files here rather than as a transport error, matching edit_fields.
 type SetTagResult struct {
-	Key    string `json:"key"`
-	Stored int    `json:"stored"`
+	Key               string             `json:"key"`
+	Stored            int                `json:"stored"`
+	WriteBackFailures []WriteBackFailure `json:"writeBackFailures,omitempty"`
 }
 
 // EditEntityParams is the edit_entity request payload: curation edits to one shared

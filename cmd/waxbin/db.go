@@ -403,7 +403,8 @@ func newDBVerifyCmd(g *globals) *cobra.Command {
 					return err
 				}
 				// Custom-tag rows and locks under a key the key rule has since stopped
-				// accepting, which nothing can reach and a scan leaves alone when locked.
+				// accepting, which nothing can reach and a scan leaves alone when locked,
+				// and owed rows under a key no write-back can carry.
 				if _, err := lib.GCStrandedTagKeys(ctx(cmd)); err != nil {
 					return err
 				}

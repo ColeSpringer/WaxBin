@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
 
@@ -262,5 +263,69 @@ func TestAStoredDetailIsOneEscapedLine(t *testing.T) {
 	if len(got) != 1 || !strings.HasPrefix(got[0], prefix+`open /lib/a\x0ab.flac: \x1b[2Jdenied`) ||
 		len(got[0]) > len(prefix)+model.MaxDetailBytes {
 		t.Errorf("stored detail = %.80q (%d bytes), want it escaped and capped", got, len(strings.Join(got, "")))
+	}
+}
+
+// TestPutAnalysisRecordsTheFingerprintFallback: a fallback is the analyze origin's row
+// whatever the measuring decode observed, and an analysis without one clears it while a
+// standing verdict on the audio stays.
+func TestPutAnalysisRecordsTheFingerprintFallback(t *testing.T) {
+	ctx := context.Background()
+	st, lib := entityFixture(t)
+	r := putTrack(t, st, lib.ID, trackSpec{path: "/lib/a.flac", essence: "e1", content: "c1", title: "S", artist: "X", album: "Al"})
+	put := func(observed bool, fallback string, ds ...model.FileDiagnostic) []string {
+		t.Helper()
+		if err := st.PutAnalysis(ctx, model.AnalysisInput{
+			AnalysisVersion: 1,
+			Fingerprint:     model.FingerprintInput{FilePID: r.FilePID, EssenceHash: "e1", AlgoVersion: 1, FP: []byte{}},
+			Observed:        observed, Diagnostics: ds, Fallback: fallback,
+		}); err != nil {
+			t.Fatalf("put analysis: %v", err)
+		}
+		rows := originRows(t, st, r.FilePID, model.OriginAnalyze)
+		slices.Sort(rows)
+		return rows
+	}
+	const fallback = "fingerprint_fallback/info/fpcalc: ERROR: Could not find any audio stream"
+	const verdict = "corrupt_audio/warn/lost sync"
+
+	if got := put(false, "fpcalc: ERROR: Could not find any audio stream"); !slices.Equal(got, []string{fallback}) {
+		t.Fatalf("rows after a fallback = %q, want the fallback row", got)
+	}
+	if got := put(true, "fpcalc: ERROR: Could not find any audio stream",
+		model.FileDiagnostic{Code: model.DiagCorruptAudio, Severity: model.SeverityWarn, Detail: "lost sync"}); !slices.Equal(got, []string{verdict, fallback}) {
+		t.Fatalf("rows after a fallback beside a damaged decode = %q, want both", got)
+	}
+	if got := put(false, ""); !slices.Equal(got, []string{verdict}) {
+		t.Fatalf("rows after an analysis with no fallback = %q, want the verdict alone", got)
+	}
+	if ds, err := st.FileDiagnostics(ctx, model.DiagnosticFilter{Code: model.DiagFingerprintFallback}); err != nil || len(ds) != 0 {
+		t.Errorf("fingerprint_fallback filter = %+v (err %v), want a valid code with no rows", ds, err)
+	}
+}
+
+// TestClearFingerprintFallbacksKeepsTheVerdicts: dropping the fallback rows, which an
+// analyze pass without fpcalc does, leaves the analyze origin's verdicts on the audio and
+// every other writer's rows alone.
+func TestClearFingerprintFallbacksKeepsTheVerdicts(t *testing.T) {
+	ctx := context.Background()
+	st, lib := entityFixture(t)
+	r := putTrack(t, st, lib.ID, trackSpec{path: "/lib/a.flac", essence: "e1", content: "c1", title: "S", artist: "X", album: "Al"})
+	if err := st.PutAnalysis(ctx, model.AnalysisInput{
+		AnalysisVersion: 1,
+		Fingerprint:     model.FingerprintInput{FilePID: r.FilePID, EssenceHash: "e1", AlgoVersion: 1, FP: []byte{}},
+		Observed:        true, Fallback: "fpcalc: exited non-zero",
+		Diagnostics: []model.FileDiagnostic{{Code: model.DiagCorruptAudio, Severity: model.SeverityWarn, Detail: "lost sync"}},
+	}); err != nil {
+		t.Fatalf("put analysis: %v", err)
+	}
+	if err := st.ClearFingerprintFallbacks(ctx); err != nil {
+		t.Fatalf("clear: %v", err)
+	}
+	if got := originRows(t, st, r.FilePID, model.OriginAnalyze); !slices.Equal(got, []string{"corrupt_audio/warn/lost sync"}) {
+		t.Errorf("analyze rows after the clear = %q, want the verdict alone", got)
+	}
+	if err := st.ClearFingerprintFallbacks(ctx); err != nil {
+		t.Errorf("clear with nothing to clear: %v", err)
 	}
 }

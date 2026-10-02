@@ -622,6 +622,9 @@ type analyzeView struct {
 	ReplayGainTagsFailed        int    `json:"replayGainTagsFailed,omitempty"`
 	ReplayGainTagsUnrepresented int    `json:"replayGainTagsUnrepresented,omitempty"`
 	Skipped                     int    `json:"skipped"`
+	MeasureFailed               int    `json:"measureFailed"`
+	FingerprintFallbacks        int    `json:"fingerprintFallbacks"`
+	FingerprintPartialReads     int    `json:"fingerprintPartialReads"`
 	Errored                     int    `json:"errored"`
 	JobPID                      string `json:"jobPid,omitempty"`
 }
@@ -632,7 +635,12 @@ func toAnalyzeView(r *waxbin.AnalyzeResult) analyzeView {
 		ReplayGainTagsWritten:       r.Result.ReplayGainTagsWritten,
 		ReplayGainTagsFailed:        r.Result.ReplayGainTagsFailed,
 		ReplayGainTagsUnrepresented: r.Result.ReplayGainTagsUnrepresented,
-		Skipped:                     r.Result.Skipped, Errored: r.Result.Errored, JobPID: string(r.JobPID),
+		Skipped:                     r.Result.Skipped,
+		MeasureFailed:               r.Result.MeasureFailed,
+		FingerprintFallbacks:        r.Result.FingerprintFallbacks,
+		FingerprintPartialReads:     r.Result.FingerprintPartialReads,
+		Errored:                     r.Result.Errored,
+		JobPID:                      string(r.JobPID),
 	}
 }
 

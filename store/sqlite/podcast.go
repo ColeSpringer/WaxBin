@@ -105,7 +105,7 @@ func (s *Store) UpsertFeed(ctx context.Context, in model.UpsertFeedInput) (*mode
 		// A retitled show changes every episode's FTS subtitle (artist/album), so force
 		// a per-episode rewrite that round; otherwise an unchanged episode is skipped
 		// entirely to avoid write churn on a large feed re-sync.
-		podKey := in.IdentityKey
+		podKey := up.key
 		for i := range in.Feed.Episodes {
 			fe := in.Feed.Episodes[i]
 			key := identity.EpisodeKey(podKey, fe.GUID, fe.EnclosureURL, fe.Title)
@@ -252,6 +252,7 @@ func (s *Store) UpsertEpisode(ctx context.Context, in model.UpsertEpisodeInput) 
 type podcastUpsert struct {
 	id      int64
 	pid     model.PID
+	key     string // the identity key the row holds, which its episodes are keyed under
 	created bool
 	// titleChanged forces an episode-FTS refresh (the title is each episode's FTS
 	// subtitle). metaChanged is broader: any consumer-visible field moved (title,
@@ -292,29 +293,36 @@ func upsertPodcast(ctx context.Context, tx *sql.Tx, in model.UpsertFeedInput, no
 			&old.language, &old.category, &old.explicit, &old.fundingURL, &old.fundingMessage,
 			&old.medium, &old.imageURL, &old.guid, &oldKey, &old.feedURL, &old.sourceType)
 	}
-	err := scanOld(tx.QueryRowContext(ctx,
-		"SELECT id, pid, "+metaCols+" FROM podcast WHERE identity_key = ?", in.IdentityKey))
-	if errors.Is(err, sql.ErrNoRows) {
-		// The identity key can flip when a feed that was subscribed without a
-		// <podcast:guid> later publishes one (feed:URL -> pguid:...). Fall back to the
-		// feed URL so a re-add/OPML-reimport updates the existing row (and adopts the new
-		// key) instead of hitting UNIQUE(feed_url) on a blind INSERT.
-		err = scanOld(tx.QueryRowContext(ctx,
-			"SELECT id, pid, "+metaCols+" FROM podcast WHERE feed_url = ?", in.FeedURL))
-	}
+	err := scanOld(tx.QueryRowContext(ctx, "SELECT id, pid, "+metaCols+" FROM podcast p"+feedRowWhere,
+		in.FeedURL, in.IdentityKey, in.FeedURL))
 	switch {
 	case err == nil:
-		// When the show's identity key changes (the feed_url-matched flip above), re-key
-		// its existing episodes to the new show prefix in the same tx. Otherwise the feed
-		// loop that follows keys every episode under the NEW ep: prefix, finds no match,
-		// and re-inserts the whole catalog as duplicates (orphaning the downloaded rows).
-		if oldKey != in.IdentityKey {
-			if err := rekeyEpisodes(ctx, tx, id, oldKey, in.IdentityKey); err != nil {
+		// The key flips when a feed that was subscribed without a <podcast:guid> later
+		// publishes one (feed:URL -> pguid:...), and the row adopts the new key unless
+		// another row holds it already: the same show subscribed under a second URL before
+		// it carried the guid, which keeps a row and a key of its own.
+		key := in.IdentityKey
+		if oldKey != key {
+			var taken bool
+			if err := tx.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM podcast WHERE identity_key = ? AND id <> ?)",
+				key, id).Scan(&taken); err != nil {
+				return podcastUpsert{}, waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+			if taken {
+				key = oldKey
+			}
+		}
+		// When the show's identity key changes, re-key its existing episodes to the new
+		// show prefix in the same tx. Otherwise the feed loop that follows keys every
+		// episode under the NEW ep: prefix, finds no match, and re-inserts the whole
+		// catalog as duplicates (orphaning the downloaded rows).
+		if oldKey != key {
+			if err := rekeyEpisodes(ctx, tx, id, oldKey, key); err != nil {
 				return podcastUpsert{}, waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 		}
 		metaChanged := old.title != f.Title || old.author != f.Author || old.description != f.Description ||
-			old.link != f.Link || old.imageURL != f.ImageURL || oldKey != in.IdentityKey || old.feedURL != in.FeedURL
+			old.link != f.Link || old.imageURL != f.ImageURL || oldKey != key || old.feedURL != in.FeedURL
 		if synced {
 			// The fetch time never steps back, so two syncs landing out of order keep the
 			// later one.
@@ -323,7 +331,7 @@ func upsertPodcast(ctx context.Context, tx *sql.Tx, in model.UpsertFeedInput, no
 				category=?, explicit=?, funding_url=?, funding_message=?, medium=?, image_url=?, guid=?,
 				etag=?, last_modified=?, source_type=?,
 				last_fetched_at=MAX(COALESCE(last_fetched_at, 0), ?), updated_at=? WHERE id=?`,
-				in.IdentityKey, in.FeedURL, f.Title, model.SortKey(f.Title), f.Author, f.Description, f.Link, f.Language,
+				key, in.FeedURL, f.Title, model.SortKey(f.Title), f.Author, f.Description, f.Link, f.Language,
 				f.Category, boolInt(f.Explicit), f.FundingURL, f.FundingMessage, f.Medium, f.ImageURL, f.GUID,
 				in.ETag, in.LastModified, string(st), in.FetchedAtNS, now, id); err != nil {
 				return podcastUpsert{}, waxerr.Wrap(waxerr.CodeIO, op, err)
@@ -344,13 +352,13 @@ func upsertPodcast(ctx context.Context, tx *sql.Tx, in model.UpsertFeedInput, no
 			if _, err := tx.ExecContext(ctx, `UPDATE podcast SET
 				identity_key=?, feed_url=?, title=?, sort_key=?, author=?, description=?, link=?, image_url=?,
 				source_type=COALESCE(?, source_type), updated_at=? WHERE id=?`,
-				in.IdentityKey, in.FeedURL, f.Title, model.SortKey(f.Title), f.Author, f.Description, f.Link,
+				key, in.FeedURL, f.Title, model.SortKey(f.Title), f.Author, f.Description, f.Link,
 				f.ImageURL, sourceType, now, id); err != nil {
 				return podcastUpsert{}, waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 		}
 		return podcastUpsert{
-			id: id, pid: model.PID(pid),
+			id: id, pid: model.PID(pid), key: key,
 			titleChanged: old.title != f.Title, metaChanged: metaChanged,
 		}, nil
 	case !errors.Is(err, sql.ErrNoRows):
@@ -370,8 +378,14 @@ func upsertPodcast(ctx context.Context, tx *sql.Tx, in model.UpsertFeedInput, no
 		return podcastUpsert{}, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
 	id, _ = r.LastInsertId()
-	return podcastUpsert{id: id, pid: newPID, created: true}, nil
+	return podcastUpsert{id: id, pid: newPID, key: in.IdentityKey, created: true}, nil
 }
+
+// feedRowWhere picks the podcast a feed upsert updates: the one already holding the feed
+// URL, which is the subscription being re-added, else the one holding the identity key,
+// which a feed that moved to a new URL still has. Bind the feed URL, the key, and the feed
+// URL again.
+const feedRowWhere = " WHERE p.feed_url = ? OR p.identity_key = ? ORDER BY p.feed_url = ? DESC LIMIT 1"
 
 // upsertEpisode inserts or updates one episode item and subtype. It reads the
 // stored row first so identical feed items do not rewrite the database or FTS, and

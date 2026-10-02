@@ -246,6 +246,9 @@ func artEditDesc(raw []byte) map[string]string {
 
 // TagEditOptions configures a custom-tag edit, mirroring EditOptions.
 type TagEditOptions struct {
+	// WriteBack also writes the tag into the item's backing files, every part of a book
+	// included. It is off by default, so an edit is catalog-only unless the caller opts in.
+	WriteBack bool
 	// Lock is the instruction for the "tag.<KEY>" field's lock, which guards the tag
 	// against a scan re-deriving it from the file. The zero value leaves the stored
 	// lock alone; the CLI states LockOn or LockOff explicitly.
@@ -272,8 +275,35 @@ func (o TagEditOptions) Attribution() model.Attribution {
 // to canonical uppercase; a reserved key (one WaxBin owns through the scalar, credit, or
 // identifier APIs) is rejected. It returns the canonical key stored and the number of
 // values actually stored after trimming (0 means the tag was cleared).
+//
+// With opts.WriteBack set, the stored values are also written into the backing files once
+// the catalog edit commits, and a file that cannot take them is reported the way
+// EditFields reports one: a *WriteBackError beside the returned key and count, with the
+// edit standing. A key WaxLabel writes onto another field on every format (YEAR is the
+// recording date) is refused with CodeInvalid before anything changes, a clear included,
+// and a file whose own format would do so (TPE2 on an MP3) is refused at that file.
 func (l *Library) SetItemTag(ctx context.Context, itemPID model.PID, key string, values []string, opts TagEditOptions) (string, int, error) {
-	return l.store.SetItemTag(ctx, itemPID, key, values, opts.Attribution(), opts.Lock, opts.Force)
+	// The list the store reads to owe such a key nothing decides it here too; WaxLabel only
+	// names the field.
+	if canon, ok := model.CanonicalTagKey(key); ok && opts.WriteBack && model.IsRetargetedTagKey(canon) {
+		to, _ := meta.RetargetedTagKey(canon)
+		msg := "tag key " + canon + " is written to a file as " + to
+		if model.IsReservedTagKey(to) {
+			msg += ", which WaxBin keeps as a field of its own rather than a custom tag"
+		} else {
+			msg += "; set the tag as " + to
+		}
+		return "", 0, waxerr.New(waxerr.CodeInvalid, "waxbin.SetItemTag", msg)
+	}
+	canon, n, err := l.store.SetItemTag(ctx, itemPID, key, values, opts.Attribution(), opts.Lock, opts.Force)
+	if err != nil || !opts.WriteBack {
+		return canon, n, err
+	}
+	clean := model.CleanTagValues(values)
+	return canon, n, l.writeBackItem(ctx, "waxbin.SetItemTag", itemPID, []string{model.TagLockField(canon)},
+		func(w *meta.Writer, path string) (*meta.WriteResult, error) {
+			return w.ApplyCustomTag(ctx, path, canon, clean)
+		})
 }
 
 // ItemTags returns an item's custom tags (the non-standard frames WaxBin's model does

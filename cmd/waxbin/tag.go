@@ -16,11 +16,12 @@ import (
 // re-derive it from the file.
 func newTagCmd(g *globals) *cobra.Command {
 	var (
-		key      string
-		values   []string
-		noLock   bool
-		keepLock bool
-		force    bool
+		key       string
+		values    []string
+		noLock    bool
+		keepLock  bool
+		force     bool
+		writeBack bool
 	)
 	cmd := &cobra.Command{
 		Use:   "tag <pid> [--key KEY --value V ...]",
@@ -30,21 +31,24 @@ func newTagCmd(g *globals) *cobra.Command {
 			"to canonical uppercase (KEY and key are one tag). A tag records user provenance and, by " +
 			"default, locks the tag against a scan re-deriving it.\n\n" +
 			"A key WaxBin maps through the scalar, credit, or entity edit surface (title, artist, isrc, " +
-			"barcode, a contributor role, ...) is reserved and rejected; use that surface instead.",
+			"barcode, a contributor role, ...) is reserved and rejected; use that surface instead.\n\n" +
+			"--write-back also writes the tag into the item's file(s), every part of a book included. " +
+			"With it, a spelling the tag library writes onto another field (YEAR, TRACK, ALBUM_ARTIST, ...) " +
+			"is refused, and so is a file whose own format would do that (TPE2 in an MP3).",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			pid := model.PID(args[0])
 			if key == "" {
 				// A set-side flag with no --key is a mistake (the values would be silently
 				// dropped into a list), so reject it rather than falling through to a listing.
-				if len(values) > 0 || cmd.Flags().Changed("no-lock") ||
-					cmd.Flags().Changed("keep-lock") || cmd.Flags().Changed("force") {
-					return fmt.Errorf("--key is required to set a tag (with --value/--no-lock/--keep-lock/--force)")
+				if len(values) > 0 || cmd.Flags().Changed("no-lock") || cmd.Flags().Changed("keep-lock") ||
+					cmd.Flags().Changed("force") || cmd.Flags().Changed("write-back") {
+					return fmt.Errorf("--key is required to set a tag (with --value/--no-lock/--keep-lock/--force/--write-back)")
 				}
 				return listTags(cmd, g, pid)
 			}
 			return setTag(cmd, g, pid, key, values,
-				waxbin.TagEditOptions{Lock: lockChange(noLock, keepLock), Force: force})
+				waxbin.TagEditOptions{Lock: lockChange(noLock, keepLock), Force: force, WriteBack: writeBack})
 		},
 	}
 	f := cmd.Flags()
@@ -55,6 +59,7 @@ func newTagCmd(g *globals) *cobra.Command {
 		"; clearing a tag forgets it entirely, lock included, whichever lock flag is given")
 	cmd.MarkFlagsMutuallyExclusive("no-lock", "keep-lock")
 	f.BoolVar(&force, "force", false, "override a locked tag")
+	f.BoolVar(&writeBack, "write-back", false, "also write the tag into the item's file(s) on disk")
 	// `tag keys` is a catalog-wide read subcommand. Routing is unambiguous because an item
 	// pid is a ULID and can never be the literal "keys", so `tag <ulid>` still hits the
 	// parent's set/list RunE while `tag keys` hits the subcommand.
@@ -137,7 +142,7 @@ func setTag(cmd *cobra.Command, g *globals, pid model.PID, key string, values []
 	// Report the count the store actually stored (after trimming), so a whitespace-only
 	// --value reads as a clear rather than a set.
 	canonKey, stored, err := m.SetItemTag(ctx(cmd), pid, key, values, opts)
-	if err != nil {
+	if err := surfaceWriteBack(cmd, err); err != nil {
 		return err
 	}
 	if stored == 0 {

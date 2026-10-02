@@ -40,7 +40,7 @@ type Store interface {
 	UpsertEpisode(ctx context.Context, in model.UpsertEpisodeInput) (*model.UpsertEpisodeResult, error)
 	Podcasts(ctx context.Context) ([]*model.Podcast, error)
 	PodcastByPID(ctx context.Context, pid model.PID) (*model.Podcast, error)
-	PodcastByIdentity(ctx context.Context, key string) (*model.Podcast, error)
+	PodcastForFeed(ctx context.Context, feedURL, key string) (*model.Podcast, error)
 	EpisodesByPodcast(ctx context.Context, pid model.PID, limit int) ([]*model.Episode, error)
 	EpisodeByPID(ctx context.Context, pid model.PID) (*model.EpisodeDetail, error)
 	DownloadedEpisodes(ctx context.Context, pid model.PID) ([]*model.Episode, error)
@@ -285,13 +285,13 @@ func (s *Service) AddSource(ctx context.Context, url string, sourceType model.So
 		return nil, waxerr.New(waxerr.CodeInvalid, op, "feed has no usable identity (url or guid)")
 	}
 	// A re-add is a sync (OPML import routes every entry through here), so the show may
-	// already hold a cover, and it may be locked. Reading that first is what stops a
-	// 200-show re-import fetching a full channel image per show only for
-	// attachEntityArtUnlessLockedTx to discard it. A genuinely new show has no row, and
-	// the not-found leaves the zero values, which fetch.
+	// already hold a cover, and it may be locked. Reading that first, from the row the
+	// upsert will update, is what stops a 200-show re-import fetching a full channel image
+	// per show only for attachEntityArtUnlessLockedTx to discard it. A genuinely new show
+	// has no row, and the not-found leaves the zero values, which fetch.
 	var coverSourceURL string
 	var coverLocked bool
-	if prior, err := s.store.PodcastByIdentity(ctx, key); err == nil && prior != nil {
+	if prior, err := s.store.PodcastForFeed(ctx, url, key); err == nil && prior != nil {
 		coverSourceURL, coverLocked = prior.CoverSourceURL, prior.CoverLocked
 	}
 	res, err := s.upsert(ctx, url, key, prov.SourceType(), enum, coverSourceURL, coverLocked)

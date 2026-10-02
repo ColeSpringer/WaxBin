@@ -110,4 +110,8 @@ type AnalysisInput struct {
 	// observed nothing.
 	Diagnostics []FileDiagnostic
 	Observed    bool
+	// Fallback is why fpcalc was passed over for the pure-Go fingerprint stored here,
+	// empty when it was not. The store keeps it as the file's DiagFingerprintFallback row
+	// on every analysis, whatever the measuring decode observed.
+	Fallback string
 }

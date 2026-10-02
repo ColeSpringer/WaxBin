@@ -598,6 +598,30 @@ func TestLyricsPartialDiagnosticClearsOnRepair(t *testing.T) {
 	}
 }
 
+// TestScanRecordsATruncatedFLAC: a FLAC cut mid-frame carries the scan's own
+// corrupt_audio verdict in the catalog, from WaxLabel's frame-tail walk against
+// STREAMINFO, before analyze has decoded it, and an intact copy carries none.
+func TestScanRecordsATruncatedFLAC(t *testing.T) {
+	st, lib, sc, _, root := fastPathFixture(t)
+	const rate = 8000
+	flac := testaudio.EncodeAs(t, "flac", "", rate, testaudio.ReferenceSignal(rate, 4*time.Second))
+	for name, data := range map[string][]byte{"intact.flac": flac, "cut.flac": flac[:len(flac)*60/100]} {
+		if err := os.WriteFile(filepath.Join(root, name), data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	scanAll(t, sc, lib, false)
+
+	ds, err := st.FileDiagnostics(context.Background(), model.DiagnosticFilter{Code: model.DiagCorruptAudio})
+	if err != nil {
+		t.Fatalf("diagnostics: %v", err)
+	}
+	if len(ds) != 1 || filepath.Base(ds[0].DisplayPath) != "cut.flac" || ds[0].Origin != model.OriginScan ||
+		ds[0].Severity != model.SeverityError {
+		t.Fatalf("corrupt_audio rows = %+v, want one error from the scan on cut.flac", ds)
+	}
+}
+
 // TestOversizedSidecarSkipped verifies the read is bounded. WaxBin pulls a sidecar
 // whole into memory before any parser sees it, so the bound must be on the read, not
 // the parse, since a parser-side line cap never protected anything.

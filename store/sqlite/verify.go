@@ -29,8 +29,10 @@ type DerivedReport struct {
 	// row on an item that holds no custom tags at all.
 	OrphanReservedTagProvenance int
 	// item_tag rows and "tag.<KEY>" provenance rows under a key the key rule no longer
-	// accepts as stored. Nothing can query, edit, or unlock one, and the scan keeps a
-	// locked one on purpose, since its value has no other home.
+	// accepts as stored, and "tag.<KEY>" owed rows no write-back can pay: under such a key,
+	// a reserved one, or one a tag write puts onto another field. Nothing can query, edit,
+	// or unlock one, and the scan keeps a locked one on purpose, since its value has no
+	// other home.
 	StrandedTagKeyRows int
 }
 

@@ -11,12 +11,14 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/colespringer/waxbin/decode"
 	"github.com/colespringer/waxbin/fingerprint"
 	"github.com/colespringer/waxbin/internal/testaudio"
+	"github.com/colespringer/waxbin/internal/testfpcalc"
 	"github.com/colespringer/waxbin/loudness"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/peaks"
@@ -40,10 +42,11 @@ func discardLog() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard,
 // serving a fixed file set through the keyset cursor and recording every
 // PutAnalysis so a test can assert what was (and was not) stamped.
 type fakeStore struct {
-	files    []*model.File
-	puts     map[model.PID]model.AnalysisInput
-	verdicts map[model.PID][]model.FileDiagnostic
-	putErr   error
+	files            []*model.File
+	puts             map[model.PID]model.AnalysisInput
+	verdicts         map[model.PID][]model.FileDiagnostic
+	putErr           error
+	fallbacksCleared int
 }
 
 func newFakeStore(files ...*model.File) *fakeStore {
@@ -78,6 +81,11 @@ func (s *fakeStore) FilesNeedingAnalysis(_ context.Context, _ int, afterRelPath 
 
 func (s *fakeStore) PutDecodeVerdict(_ context.Context, filePID model.PID, _ string, ds []model.FileDiagnostic) error {
 	s.verdicts[filePID] = ds
+	return nil
+}
+
+func (s *fakeStore) ClearFingerprintFallbacks(context.Context) error {
+	s.fallbacksCleared++
 	return nil
 }
 
@@ -454,9 +462,9 @@ func TestLateCorruptionKeepsFingerprint(t *testing.T) {
 
 	// The bounded fingerprint decode reads only the clean first 120s and succeeds.
 	a := pureGoAnalyzer(t, newFakeStore(f))
-	sub, algo, _, err := a.fingerprintFile(context.Background(), f)
-	if err != nil || algo == 0 || len(sub) == 0 {
-		t.Fatalf("fingerprint of the clean head should succeed: algo=%d sub=%d err=%v", algo, len(sub), err)
+	fp, err := a.fingerprintFile(context.Background(), f)
+	if err != nil || fp.algo == 0 || len(fp.sub) == 0 {
+		t.Fatalf("fingerprint of the clean head should succeed: algo=%d sub=%d err=%v", fp.algo, len(fp.sub), err)
 	}
 	// The whole-file measure hits the rot, but the run keeps the fingerprint.
 	store := newFakeStore(f)
@@ -686,5 +694,89 @@ func TestBucketDuration(t *testing.T) {
 		if got := bucketDuration(c.pk, c.damaged, c.header, c.head); got != c.want {
 			t.Errorf("%s: bucketDuration = %d, want %d", c.name, got, c.want)
 		}
+	}
+}
+
+// chromaprintAnalyzer builds an Analyzer on the Chromaprint backend with bin as fpcalc.
+func chromaprintAnalyzer(store Store, bin string) *Analyzer {
+	a := New(store, nil, discardLog())
+	a.fpAlgo = fingerprint.ChromaprintAlgoVersion
+	a.caps.Fpcalc, a.caps.FpcalcPath = true, bin
+	a.version = effectiveVersion(a.fpAlgo)
+	return a
+}
+
+// TestRunCountsAFpcalcFallback: a file fpcalc fails on is fingerprinted by the pure-Go
+// path, counted, and stored with fpcalc's reason for the analyze origin's
+// fingerprint_fallback row; the next run, with fpcalc working, stores the Chromaprint
+// fingerprint and no reason, which clears the row.
+func TestRunCountsAFpcalcFallback(t *testing.T) {
+	ctx := context.Background()
+	f := writeFixture(t, t.TempDir(), "a.wav", 1, testaudio.EncodeWAV16(44100, cheapSignal(44100*3)))
+	f.DurationMS = 3000
+	store := newFakeStore(f)
+
+	res, err := chromaprintAnalyzer(store, testfpcalc.Write(t, "", "ERROR: Could not find any audio stream in the file", 2)).Run(ctx, nil)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	in := store.puts[f.PID]
+	if res.Analyzed != 1 || res.FingerprintFallbacks != 1 || res.FingerprintPartialReads != 0 {
+		t.Fatalf("result = %+v, want one file analyzed through the fallback", res)
+	}
+	if in.Fingerprint.AlgoVersion != fingerprint.AlgoVersion || !strings.Contains(in.Fallback, "Could not find any audio stream") {
+		t.Fatalf("stored algo %d, fallback %q; want the pure-Go fingerprint with fpcalc's reason", in.Fingerprint.AlgoVersion, in.Fallback)
+	}
+
+	res, err = chromaprintAnalyzer(store, testfpcalc.Write(t, `{"duration": 3.00, "fingerprint": [1,2,3,4]}`, "", 0)).Run(ctx, nil)
+	if err != nil {
+		t.Fatalf("second run: %v", err)
+	}
+	in = store.puts[f.PID]
+	if res.FingerprintFallbacks != 0 || in.Fingerprint.AlgoVersion != fingerprint.ChromaprintAlgoVersion ||
+		in.AnalysisVersion != effectiveVersion(fingerprint.ChromaprintAlgoVersion) || in.Fallback != "" {
+		t.Fatalf("second run = %+v, stored algo %d, version %d, fallback %q; want Chromaprint with no fallback",
+			res, in.Fingerprint.AlgoVersion, in.AnalysisVersion, in.Fallback)
+	}
+}
+
+// TestRunKeepsAPartialFpcalcRead: a read error fpcalc reports after fingerprinting the
+// whole file keeps its Chromaprint fingerprint, counted apart and with no fallback row.
+func TestRunKeepsAPartialFpcalcRead(t *testing.T) {
+	ctx := context.Background()
+	f := writeFixture(t, t.TempDir(), "a.wav", 1, testaudio.EncodeWAV16(44100, cheapSignal(44100*3)))
+	f.DurationMS = 3000
+	store := newFakeStore(f)
+	bin := testfpcalc.Write(t, `{"duration": 3.00, "fingerprint": [1,2,3,4]}`, "ERROR: Error decoding audio frame (End of file)", 3)
+
+	res, err := chromaprintAnalyzer(store, bin).Run(ctx, nil)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	in := store.puts[f.PID]
+	if res.FingerprintPartialReads != 1 || res.FingerprintFallbacks != 0 ||
+		in.Fingerprint.AlgoVersion != fingerprint.ChromaprintAlgoVersion || in.Fallback != "" {
+		t.Fatalf("result = %+v, stored algo %d, fallback %q; want the partial Chromaprint read kept",
+			res, in.Fingerprint.AlgoVersion, in.Fallback)
+	}
+}
+
+// TestOnlyAPureGoRunClearsFallbacks: a pass with no fpcalc never re-selects a file that
+// fell back, since its stamp already names the pure-Go fingerprint, so that pass is what
+// drops the fallback rows, while a Chromaprint pass leaves them to each file's analysis.
+func TestOnlyAPureGoRunClearsFallbacks(t *testing.T) {
+	ctx := context.Background()
+	store := newFakeStore()
+	if _, err := pureGoAnalyzer(t, store).Run(ctx, nil); err != nil {
+		t.Fatalf("pure-Go run: %v", err)
+	}
+	if store.fallbacksCleared != 1 {
+		t.Fatalf("pure-Go run cleared fallbacks %d times, want once", store.fallbacksCleared)
+	}
+	if _, err := chromaprintAnalyzer(store, "fpcalc-unused").Run(ctx, nil); err != nil {
+		t.Fatalf("chromaprint run: %v", err)
+	}
+	if store.fallbacksCleared != 1 {
+		t.Errorf("chromaprint run cleared fallbacks, want them left to each analysis")
 	}
 }

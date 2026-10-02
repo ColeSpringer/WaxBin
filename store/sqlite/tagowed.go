@@ -144,13 +144,15 @@ func owedFieldsTx(ctx context.Context, tx *sql.Tx, fileID int64) ([]string, erro
 type scanSettle struct {
 	isBook              bool
 	fileTitle, title    string
-	fileTrack, track    model.Track     // a track's values before and after the overlay
-	fileBook            model.Book      // a book part's values before the overlay
-	bookRederived       bool            // upsertBook rewrote the book's unlocked fields
-	preserveLocks       bool            // a locked field kept its catalog value
-	derived             []string        // fields the file's tags do not state (PutScannedTrackInput.Derived)
-	cover               *model.ArtImage // the scanned cover; the file's own when Source is tag
-	acquisitionRecorded bool            // the put recorded an acquisition from the tags
+	fileTrack, track    model.Track         // a track's values before and after the overlay
+	fileBook            model.Book          // a book part's values before the overlay
+	bookRederived       bool                // upsertBook rewrote the book's unlocked fields
+	preserveLocks       bool                // a locked field kept its catalog value
+	derived             []string            // fields the file's tags do not state (PutScannedTrackInput.Derived)
+	cover               *model.ArtImage     // the scanned cover; the file's own when Source is tag
+	acquisitionRecorded bool                // the put recorded an acquisition from the tags
+	fileTags            map[string][]string // the file's custom tags
+	tagsReplaced        []string            // the custom tag keys the put took from this file
 }
 
 // settleOwedByScanTx clears the owed rows a scan put pays. A row goes from this file once
@@ -165,10 +167,12 @@ type scanSettle struct {
 // everywhere once the item's front came from disk, and from this file when its embedded
 // picture is the catalog's; an acquisition goes when the put recorded one from the tags,
 // which undoes a clear; an album or release-group id goes when the file names the one the
-// item now sits under, which a re-resolving scan restores after a clear or a detach. An
-// entity's identifiers and sort and an album's cover are never re-derived by a scan, so
-// only the write-back that lands them pays those; an item that moves off the entity
-// drops them (dropLeftEntityOwedTx).
+// item now sits under, which a re-resolving scan restores after a clear or a detach. A
+// custom tag goes from this file when the file's values are the catalog's, and from
+// every file once the put replaced the catalog's values with the file's. An entity's
+// identifiers and sort and an album's cover are never re-derived by a scan, so only the
+// write-back that lands them pays those; an item that moves off the entity drops them
+// (dropLeftEntityOwedTx).
 func settleOwedByScanTx(ctx context.Context, tx *sql.Tx, fileID, itemID int64, s scanSettle) error {
 	owed, err := owedFieldsTx(ctx, tx, fileID)
 	if err != nil || len(owed) == 0 {
@@ -199,6 +203,8 @@ func settleOwedByScanTx(ctx context.Context, tx *sql.Tx, fileID, itemID int64, s
 		return l[col] || (col == "artist" && l[model.CreditField(model.RoleArtist)]), err
 	}
 	var stored *model.Book
+	// The item's custom tags and the file's, by canonical key, read on the first owed tag.
+	var catalogTags, fileTags map[string][]string
 	for _, f := range owed {
 		switch {
 		case f == "art":
@@ -226,6 +232,21 @@ func settleOwedByScanTx(ctx context.Context, tx *sql.Tx, fileID, itemID int64, s
 			}
 		case strings.HasPrefix(f, "album.") || strings.HasPrefix(f, "artist.") || strings.HasPrefix(f, "release_group."):
 			// An entity's value ("album.label", "album.art"): a scan never re-derives it.
+		case strings.HasPrefix(f, "tag."):
+			key, _ := model.CutTagPrefix(f)
+			if slices.Contains(s.tagsReplaced, key) {
+				everywhere = append(everywhere, f)
+				continue
+			}
+			if catalogTags == nil {
+				if catalogTags, err = loadItemTagsTx(ctx, tx, itemID); err != nil {
+					return err
+				}
+				fileTags = canonicalTags(s.fileTags)
+			}
+			if slices.Equal(fileTags[key], catalogTags[key]) {
+				here = append(here, f)
+			}
 		case f == "title":
 			held, err := lockedFallback(f)
 			if err != nil {
@@ -287,6 +308,20 @@ func settleOwedByScanTx(ctx context.Context, tx *sql.Tx, fileID, itemID int64, s
 		return err
 	}
 	return deleteOwedTx(ctx, tx, "file_id IN (SELECT file_id FROM item_file WHERE item_id = ?)", itemID, everywhere)
+}
+
+// canonicalTags returns a file's custom tags under their canonical keys, cleaned as the
+// catalog stores them.
+func canonicalTags(tags map[string][]string) map[string][]string {
+	out := make(map[string][]string, len(tags))
+	for k, vs := range tags {
+		if canon, ok := model.CanonicalTagKey(k); ok {
+			if clean := model.CleanTagValues(vs); len(clean) > 0 {
+				out[canon] = clean
+			}
+		}
+	}
+	return out
 }
 
 // bookOwedColumn maps an owed key on a book to the bookScanFields value it describes, the

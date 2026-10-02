@@ -405,17 +405,20 @@ func (c *Client) SetArtLock(ctx context.Context, entityType model.ArtEntity, ent
 }
 
 // SetTag proxies a custom-tag edit, returning the canonical key stored and the number
-// of values stored after trimming (0 = the tag was cleared).
-func (c *Client) SetTag(ctx context.Context, itemPID model.PID, key string, values []string, attr model.Attribution, lock model.LockChange, force bool) (string, int, error) {
+// of values stored after trimming (0 = the tag was cleared). A committed tag whose file
+// write-back partially failed returns the failed files in the result; the transport error
+// stays nil, matching edit_fields.
+func (c *Client) SetTag(ctx context.Context, itemPID model.PID, key string, values []string, attr model.Attribution, lock model.LockChange, force, writeBack bool) (*SetTagResult, error) {
 	var res SetTagResult
 	err := c.call(ctx, MethodSetTag, SetTagParams{
 		ItemPID: string(itemPID), Key: key, Values: values,
 		Source: string(attr.Source), Provider: attr.Provider, Lock: string(lock), Force: force,
+		WriteBack: writeBack,
 	}, &res)
 	if err != nil {
-		return "", 0, err
+		return nil, err
 	}
-	return res.Key, res.Stored, nil
+	return &res, nil
 }
 
 // EditEntity proxies a curation edit to one shared entity (artist/release_group/

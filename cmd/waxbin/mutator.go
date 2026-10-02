@@ -241,7 +241,11 @@ func (m *mutator) ClearAcquisition(ctx context.Context, itemPID model.PID, opts 
 
 func (m *mutator) SetItemTag(ctx context.Context, itemPID model.PID, key string, values []string, opts waxbin.TagEditOptions) (string, int, error) {
 	if m.px != nil {
-		return m.px.SetTag(ctx, itemPID, key, values, opts.Attribution(), opts.Lock, opts.Force)
+		res, err := m.px.SetTag(ctx, itemPID, key, values, opts.Attribution(), opts.Lock, opts.Force, opts.WriteBack)
+		if err != nil {
+			return "", 0, err
+		}
+		return res.Key, res.Stored, writeBackErr(itemPID, nil, res.WriteBackFailures)
 	}
 	return m.lib.SetItemTag(ctx, itemPID, key, values, opts)
 }

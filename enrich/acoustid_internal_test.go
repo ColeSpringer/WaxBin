@@ -2,11 +2,17 @@ package enrich
 
 import (
 	"context"
+	"encoding/base64"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
+	"github.com/colespringer/waxbin/internal/caps"
 	"github.com/colespringer/waxbin/internal/netsafe"
+	"github.com/colespringer/waxbin/internal/testfpcalc"
+	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/waxerr"
 )
 
@@ -106,5 +112,41 @@ func TestAcoustIDErrorResponse(t *testing.T) {
 	a := &acoustID{client: netsafe.New(netsafe.Policy{}), baseURL: srv.URL, key: "k"}
 	if _, err := a.lookup(context.Background(), "fp", 100); err == nil {
 		t.Fatal("an AcoustID error response should surface as an error")
+	}
+}
+
+// TestAcoustIDKeepsAPartialFpcalcRead: a read error fpcalc reports after fingerprinting
+// the span it was asked for still makes the lookup, with that fingerprint, while one that
+// stopped well short of the file's duration makes none.
+func TestAcoustIDKeepsAPartialFpcalcRead(t *testing.T) {
+	var asked []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		asked = append(asked, r.PostFormValue("fingerprint"))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"ok","results":[{"id":"aid","score":0.95,
+			"recordings":[{"id":"rec-mbid","releasegroups":[{"id":"rg-mbid"}]}]}]}`))
+	}))
+	defer srv.Close()
+	compressed := func(n int) string {
+		return base64.RawURLEncoding.EncodeToString([]byte{1, byte(n >> 16), byte(n >> 8), byte(n), 0x5a, 0xc3})
+	}
+	resolve := func(n int) string {
+		t.Helper()
+		bin := testfpcalc.Write(t, `{"duration": 300.4, "fingerprint": "`+compressed(n)+`"}`,
+			"ERROR: Error decoding audio frame (End of file)", 3)
+		s := &Service{
+			log:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+			caps: caps.Caps{Fpcalc: true, FpcalcPath: bin},
+			aid:  &acoustID{client: netsafe.New(netsafe.Policy{}), baseURL: srv.URL, key: "k"},
+		}
+		return s.acoustResolveReleaseGroup(context.Background(), &runState{}, model.EnrichTarget{FilePath: "song.flac", DurationSec: 300})
+	}
+
+	if got := resolve(948); got != "rg-mbid" || len(asked) != 1 || asked[0] != compressed(948) {
+		t.Fatalf("covering partial read resolved %q after asking %q, want rg-mbid from its fingerprint", got, asked)
+	}
+	if got := resolve(300); got != "" || len(asked) != 1 {
+		t.Fatalf("short partial read resolved %q after asking %q, want no lookup", got, asked)
 	}
 }

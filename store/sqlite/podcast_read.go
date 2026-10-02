@@ -138,6 +138,20 @@ func (s *Store) PodcastByIdentity(ctx context.Context, key string) (*model.Podca
 	return p, nil
 }
 
+// PodcastForFeed returns the podcast an UpsertFeed of feedURL under key would update (see
+// feedRowWhere), or CodeNotFound when it would create one.
+func (s *Store) PodcastForFeed(ctx context.Context, feedURL, key string) (*model.Podcast, error) {
+	const op = "store.PodcastForFeed"
+	p, err := scanPodcast(s.read.QueryRowContext(ctx, podcastSelect+feedRowWhere, feedURL, key, feedURL))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, waxerr.New(waxerr.CodeNotFound, op, "no podcast for that feed")
+	}
+	if err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	return p, nil
+}
+
 // episodeSelect reads an episode joined to its podcast and (when downloaded) its
 // primary file, plus whether a transcript is stored.
 const episodeSelect = `SELECT pi.pid, pi.title, pi.state, p.pid, p.title,

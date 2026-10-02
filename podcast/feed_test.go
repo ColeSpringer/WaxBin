@@ -1,6 +1,7 @@
 package podcast
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -39,6 +40,7 @@ const sampleFeed = `<?xml version="1.0" encoding="UTF-8"?>
       <itunes:episode>7</itunes:episode>
       <itunes:episodeType>full</itunes:episodeType>
       <enclosure url="https://example.com/1.mp3" length="123456" type="audio/mpeg"/>
+      <podcast:chapters url="https://example.com/1.json" type="application/json+chapters"/>
       <podcast:transcript url="https://example.com/1.srt" type="application/srt"/>
       <podcast:transcript url="https://example.com/1.html" type="text/html"/>
       <podcast:person role="Guest">Alex Guest</podcast:person>
@@ -154,6 +156,78 @@ func TestParseFeedPodcasting20Extras(t *testing.T) {
 	// The second episode carries no extras.
 	if len(feed.Episodes[1].Persons) != 0 || len(feed.Episodes[1].Soundbites) != 0 {
 		t.Fatalf("e2 extras should be empty: %+v", feed.Episodes[1])
+	}
+}
+
+// TestParseFeedBindsNamespaceSpellings: the extension elements bind under the namespace
+// spellings feeds use besides the canonical URIs: the Podcasting 2.0 namespace at its old
+// GitHub address, the iTunes DTD over https or in Apple's mixed-case path, and the bare
+// prefixes of a feed that never declares them.
+func TestParseFeedBindsNamespaceSpellings(t *testing.T) {
+	const (
+		itunes  = `xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd"`
+		podcast = `xmlns:podcast="https://podcastindex.org/namespace/1.0"`
+		content = `xmlns:content="http://purl.org/rss/1.0/modules/content/"`
+	)
+	for name, r := range map[string]*strings.Replacer{
+		"legacy podcast namespace": strings.NewReplacer(podcast,
+			`xmlns:podcast="https://github.com/Podcastindex-org/podcast-namespace/blob/main/docs/1.0.md"`),
+		"itunes over https":     strings.NewReplacer(itunes, `xmlns:itunes="https://www.itunes.com/dtds/podcast-1.0.dtd"`),
+		"itunes mixed-case dtd": strings.NewReplacer(itunes, `xmlns:itunes="http://www.itunes.com/DTDs/Podcast-1.0.dtd"`),
+		"itunes without www":    strings.NewReplacer(itunes, `xmlns:itunes="http://itunes.com/dtds/podcast-1.0.dtd"`),
+		"undeclared prefixes":   strings.NewReplacer(itunes, "", podcast, "", content, ""),
+	} {
+		t.Run(name, func(t *testing.T) {
+			feed, err := ParseFeed([]byte(r.Replace(sampleFeed)))
+			if err != nil {
+				t.Fatalf("ParseFeed: %v", err)
+			}
+			if feed.Author != "Jane Host" || feed.ImageURL != "https://example.com/art.jpg" || feed.Category != "Technology" {
+				t.Errorf("itunes channel fields = %q, %q, %q", feed.Author, feed.ImageURL, feed.Category)
+			}
+			if feed.GUID != "show-guid-001" || feed.FundingURL != "https://example.com/support" ||
+				feed.Medium != "podcast" || len(feed.Persons) != 2 {
+				t.Errorf("podcast channel fields = guid %q, funding %q, medium %q, %d persons",
+					feed.GUID, feed.FundingURL, feed.Medium, len(feed.Persons))
+			}
+			e1 := feed.Episodes[0]
+			if e1.DurationMS != 3723*1000 || e1.Description != "<p>First episode, expanded.</p>" {
+				t.Errorf("itunes and content item fields = %d ms, %q", e1.DurationMS, e1.Description)
+			}
+			if e1.ChaptersURL != "https://example.com/1.json" || e1.TranscriptURL != "https://example.com/1.srt" ||
+				len(e1.Persons) != 1 || len(e1.Soundbites) != 1 {
+				t.Errorf("podcast item fields = chapters %q, transcript %q, %d persons, %d soundbites",
+					e1.ChaptersURL, e1.TranscriptURL, len(e1.Persons), len(e1.Soundbites))
+			}
+		})
+	}
+}
+
+// TestParseFeedToleratesMisNestedTags: the permissive parse repairs an element left open
+// (an atom:link, a media:thumbnail, a <br> in a description under a default namespace)
+// the way it always has, so a feed that parsed before the namespace rewrite still does.
+func TestParseFeedToleratesMisNestedTags(t *testing.T) {
+	for name, feed := range map[string]string{
+		"unclosed atom:link": `<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom"><channel><title>S</title>
+			<item><title>E</title><guid>g</guid></item>
+			<atom:link href="https://h/feed" rel="self" type="application/rss+xml">
+			</channel></rss>`,
+		"unclosed media:thumbnail": `<rss version="2.0" xmlns:media="http://search.yahoo.com/mrss/"><channel><title>S</title>
+			<item><title>E</title><guid>g</guid><media:thumbnail url="https://h/t.jpg"></item>
+			</channel></rss>`,
+		"br under a default namespace": `<rss version="2.0" xmlns="http://backend.userland.com/rss2"><channel><title>S</title>
+			<item><title>E</title><guid>g</guid><description>a<br>b</description></item>
+			</channel></rss>`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			f, err := ParseFeed([]byte(feed))
+			if err != nil {
+				t.Fatalf("ParseFeed: %v", err)
+			}
+			if f.Title != "S" || len(f.Episodes) != 1 || f.Episodes[0].Title != "E" {
+				t.Fatalf("feed = %q with %+v, want S with episode E", f.Title, f.Episodes)
+			}
+		})
 	}
 }
 

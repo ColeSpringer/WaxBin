@@ -10,8 +10,10 @@
 // Cataloging is pure Go. Scanning reads tags and decoder-independent identity
 // data without decoding PCM; PCM work belongs to the separate analysis pass,
 // which is itself pure Go: decode, loudness, fingerprint, and waveforms all run
-// through WaxFlow with no CGO and no external binaries. The read side is owned by
-// WaxBin so consumers share one catalog view.
+// through WaxFlow with no CGO. The one optional subprocess is fpcalc, which the pass
+// prefers for the fingerprint when it is installed, falling back to the pure-Go one
+// for a file fpcalc cannot read. The read side is owned by WaxBin so consumers share
+// one catalog view.
 //
 // # Layout
 //

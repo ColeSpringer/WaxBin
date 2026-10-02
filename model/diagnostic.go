@@ -72,27 +72,35 @@ const (
 	DiagTagWriteUnsynced DiagnosticCode = "tag_write_unsynced"
 	// DiagTagWriteOwed marks a value an edit changed in the catalog that the file does not
 	// carry yet. It is the edit writer's, one row per value with its key in TagKey: an
-	// item field or credit ("genre", "credit.composer"), or one of the Owed keys. The edit
-	// records it in its own transaction, and a write-back that lands the value clears it,
-	// so a failed or refused write-back leaves it standing. A scan that re-reads the file
-	// clears it once the catalog holds what the file says; a writer replacing its set never
-	// drops one.
+	// item field or credit ("genre", "credit.composer"), a custom tag ("tag.MOOD"), or one
+	// of the Owed keys. The edit records it in its own transaction, and a write-back that
+	// lands the value clears it, so a failed or refused write-back leaves it standing, apart
+	// from a custom tag the file's format writes as a field of its own, which no write-back
+	// can ever carry there. A scan that re-reads the file clears it once the catalog holds
+	// what the file says; a writer replacing its set never drops one.
 	DiagTagWriteOwed DiagnosticCode = "tag_write_owed"
 	// DiagCorruptAudio marks audio that is truncated, has no frames, or would not
 	// decode cleanly. Two writers record it. The scan's half comes from the tag parse
-	// and is format-partial: its signals exist for MP3, AAC, AIFF, MP4, and WAV, and not
-	// for FLAC, Opus, Vorbis, or Matroska. The analyze half comes from the analyze
-	// pass's decodes, so it covers every format WaxFlow decodes (a truncated FLAC or
-	// Opus surfaces once analyze has run): a warning when the read worked around
-	// damage, an error when the decode failed on it. It describes the audio analyze
-	// read, and reads as absent once the file changes. Until analyze has read a file the
-	// code proves nothing when it does not fire, so its absence is not evidence of health.
+	// and is format-partial: its signals exist for MP3, AAC, AIFF, MP4, WAV, and a FLAC
+	// whose STREAMINFO states its length, and not for Opus, Vorbis, or Matroska. The
+	// analyze half comes from the analyze pass's decodes, so it covers every format
+	// WaxFlow decodes (a truncated Opus surfaces once analyze has run): a warning when
+	// the read worked around damage, an error when the decode failed on it. It
+	// describes the audio analyze read, and reads as absent once the file changes. Until
+	// analyze has read a file the code proves nothing when it does not fire, so its
+	// absence is not evidence of health.
 	DiagCorruptAudio DiagnosticCode = "corrupt_audio"
 	// DiagSortNameFallback marks a file whose empty display fields were filled from its
 	// sort tags (an iTunes file carrying only sonm, soar and soal) or whose number came
 	// from its file name. It also names a sort value left unused because it was the
 	// inverted "Last, First" form, which explains a display field that stayed empty.
 	DiagSortNameFallback DiagnosticCode = "sort_name_fallback"
+	// DiagFingerprintFallback marks a file fpcalc could not fingerprint, so the analyze
+	// pass stored the pure-Go fingerprint instead, with fpcalc's reason in Detail. Such a
+	// file does not group with copies fingerprinted by Chromaprint, and every analyze run
+	// tries fpcalc on it again; the row goes once one succeeds, or once a run finds no
+	// fpcalc at all. It is the analyze origin's, at Info.
+	DiagFingerprintFallback DiagnosticCode = "fingerprint_fallback"
 )
 
 // The DiagTagWriteOwed keys other than an item field or a credit: the item's front cover,
@@ -114,7 +122,7 @@ func (c DiagnosticCode) Valid() bool {
 	switch c {
 	case DiagUnsupportedFormat, DiagLegacyOnlyTags, DiagLyricsPartial, DiagSidecarSkipped,
 		DiagCueTrackDropped, DiagTagWriteLost, DiagTagWriteUnsynced, DiagTagWriteOwed,
-		DiagCorruptAudio, DiagSortNameFallback:
+		DiagCorruptAudio, DiagSortNameFallback, DiagFingerprintFallback:
 		return true
 	default:
 		return false

@@ -91,6 +91,58 @@ func TestReadOnlyLibraryRefusesTheTagWriteBack(t *testing.T) {
 	}
 }
 
+// TestReadOnlyLibraryRefusesTheCustomTagWriteBack: a custom tag set with write-back in a
+// read-only library lands in the catalog alone, with the refusal queued for review and the
+// value owed, and once the flag clears the same set writes the file and pays it.
+func TestReadOnlyLibraryRefusesTheCustomTagWriteBack(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	src := filepath.Join(root, "song.mp3")
+	writeFile(t, src, testaudio.BuildMP3FromSpec(testaudio.MP3Spec{Title: "Song", Artist: "Band", Album: "Album"}))
+	lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), root)
+	scanLib(t, ctx, lib)
+	pid := itemPIDByTitle(t, ctx, lib, "Song")
+	setReadOnly(t, ctx, lib, libraryPIDFor(t, ctx, lib, root), true)
+	mood := func() []string {
+		t.Helper()
+		fm, err := meta.NewReader().Read(ctx, src)
+		if err != nil {
+			t.Fatalf("read: %v", err)
+		}
+		return fm.Tags.Custom["MOOD"]
+	}
+
+	_, _, err := lib.SetItemTag(ctx, pid, "MOOD", []string{"calm"}, waxbin.TagEditOptions{Lock: model.LockOn, WriteBack: true})
+	var wb *waxbin.WriteBackError
+	if !errors.As(err, &wb) || len(wb.Failures) != 1 || !strings.Contains(wb.Failures[0].Reason, "read-only library") {
+		t.Fatalf("set in a read-only library = %v, want the file refused as read-only", err)
+	}
+	if got := mood(); got != nil {
+		t.Fatalf("MOOD on disk = %v, want the file untouched", got)
+	}
+	ds, err := lib.FileDiagnostics(ctx, model.DiagnosticFilter{Origin: model.OriginEdit, Code: model.DiagTagWriteUnsynced})
+	if err != nil || len(ds) != 1 || !strings.Contains(ds[0].Detail, "read-only library") {
+		t.Fatalf("edit diagnostics = %+v (err %v), want the refusal queued for review", ds, err)
+	}
+	if got := owedOn(t, ctx, lib, pid); !slices.Equal(got, []string{"tag.MOOD"}) {
+		t.Fatalf("owed after the refusal = %v, want [tag.MOOD]", got)
+	}
+
+	setReadOnly(t, ctx, lib, libraryPIDFor(t, ctx, lib, root), false)
+	if _, _, err := lib.SetItemTag(ctx, pid, "MOOD", []string{"calm"}, waxbin.TagEditOptions{Lock: model.LockOn, WriteBack: true, Force: true}); err != nil {
+		t.Fatalf("set once writable: %v", err)
+	}
+	if got := mood(); !slices.Equal(got, []string{"calm"}) {
+		t.Fatalf("MOOD on disk = %v, want [calm] written", got)
+	}
+	if got := owedOn(t, ctx, lib, pid); got != nil {
+		t.Fatalf("owed after the write landed = %v, want none", got)
+	}
+	if ds, err := lib.FileDiagnostics(ctx, model.DiagnosticFilter{Origin: model.OriginEdit, Code: model.DiagTagWriteUnsynced}); err != nil || len(ds) != 0 {
+		t.Errorf("drift after the write landed = %+v (err %v), want it cleared", ds, err)
+	}
+}
+
 // TestEnrichWriteTagsLeavesAReadOnlyLibraryOwed: an enrichment pass that writes tags
 // writes the writable library's files and leaves the read-only one's owed, and the
 // first pass after the flag clears writes those.

@@ -528,14 +528,13 @@ func (l *Library) proxyHandlers() map[string]proxy.Handler {
 			if lockErr != nil {
 				return nil, lockErr
 			}
-			key, stored, err := l.SetItemTag(ctx, model.PID(p.ItemPID), p.Key, p.Values, TagEditOptions{
-				Lock: lock, Force: p.Force,
+			key, stored, setErr := l.SetItemTag(ctx, model.PID(p.ItemPID), p.Key, p.Values, TagEditOptions{
+				WriteBack: p.WriteBack, Lock: lock, Force: p.Force,
 				Source: model.ProvenanceSource(p.Source), Provider: p.Provider,
 			})
-			if err != nil {
-				return nil, err
-			}
-			return proxy.SetTagResult{Key: key, Stored: stored}, nil
+			return writeBackResponse(setErr, func(f []proxy.WriteBackFailure) proxy.SetTagResult {
+				return proxy.SetTagResult{Key: key, Stored: stored, WriteBackFailures: f}
+			})
 		},
 		proxy.MethodLock: func(ctx context.Context, raw json.RawMessage) (any, error) {
 			p, err := decodeParams[proxy.FieldsParams](raw)

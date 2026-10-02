@@ -142,12 +142,13 @@ func (s *Store) PutScannedBook(ctx context.Context, in model.PutScannedBookInput
 		// Overlay them onto item_tag every scan (idempotent, honoring per-key locks),
 		// before upsertBook so its FTS rebuild picks up the tag values.
 		tagsChanged := false
+		var tagsReplaced []string
 		if created || role == bookPrimaryRole {
-			c, err := syncItemTagsTx(ctx, tx, itemID, in.CustomTags, in.PreserveLocks)
+			c, r, err := syncItemTagsTx(ctx, tx, itemID, in.CustomTags, in.PreserveLocks)
 			if err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
-			tagsChanged = c
+			tagsChanged, tagsReplaced = c, r
 		}
 
 		// Only the primary part writes the book's metadata/series/contributors/genres/FTS,
@@ -238,6 +239,7 @@ func (s *Store) PutScannedBook(ctx context.Context, in model.PutScannedBookInput
 			isBook: true, fileTitle: fileTitle, title: title, fileBook: fileBook,
 			bookRederived: rewrite, preserveLocks: in.PreserveLocks, derived: in.Derived,
 			cover: in.CoverArt, acquisitionRecorded: acqAdded,
+			fileTags: in.CustomTags, tagsReplaced: tagsReplaced,
 		}); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}

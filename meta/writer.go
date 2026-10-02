@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io/fs"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -65,6 +66,20 @@ var fieldTagKeys = map[string]string{
 func TagKeyForField(field string) (string, bool) {
 	k, ok := fieldTagKeys[field]
 	return k, ok
+}
+
+// RetargetedTagKey returns the field a tag write under key lands on, on every format, when
+// WaxLabel reads key as another spelling of one (YEAR is RECORDINGDATE), and whether it
+// does. A custom tag under such a key cannot be written back as itself.
+func RetargetedTagKey(key string) (string, bool) {
+	k, err := tag.ParseKey(key)
+	if err != nil {
+		return "", false
+	}
+	if to := waxlabel.ResolveAlias(k); to != k {
+		return string(to), true
+	}
+	return "", false
 }
 
 // AcquisitionTagEdits builds the tag edits for an item's origin provenance: the two
@@ -468,7 +483,6 @@ func WithOutputGain(q78 int) ApplyOption {
 // heals it). A write whose bytes landed but whose post-commit step failed reports
 // success with a post-write warning instead.
 func (w *Writer) Apply(ctx context.Context, path string, edits []TagEdit, opts ...ApplyOption) (*WriteResult, error) {
-	const op = "meta.Writer.Apply"
 	var o applyOptions
 	for _, opt := range opts {
 		opt(&o)
@@ -476,23 +490,93 @@ func (w *Writer) Apply(ctx context.Context, path string, edits []TagEdit, opts .
 	if len(edits) == 0 && o.outputGain == nil {
 		return &WriteResult{Changed: false}, nil
 	}
+	return writeTags(ctx, "meta.Writer.Apply", path, func(_ *waxlabel.Document, ed *waxlabel.Editor) {
+		for _, e := range edits {
+			if len(e.Values) == 0 {
+				ed.Clear(tag.Key(e.Key))
+			} else {
+				ed.Set(tag.Key(e.Key), e.Values...)
+			}
+		}
+		if o.outputGain != nil {
+			ed.SetOutputGain(*o.outputGain)
+		}
+	}, nil)
+}
 
+// ErrNotCustomTag is the cause of an ApplyCustomTag refusal that no later write-back
+// changes: the file's format writes the key as one of its own fields.
+var ErrNotCustomTag = errors.New("not a custom tag in this file's format")
+
+// ApplyCustomTag writes one custom tag's values (none clears it) the way Apply writes its
+// edits, but only where the key lands as itself. A file whose format writes the key onto
+// another field, as an ID3 frame id like TPE2 or an MP4 name folded onto a MusicBrainz id
+// would be, is refused with CodeUnsupported (wrapping ErrNotCustomTag) and left untouched,
+// and so is one whose rewrite would change another field besides. Values the file would
+// not hold as given are reported as an unrepresented warning.
+func (w *Writer) ApplyCustomTag(ctx context.Context, path, key string, values []string) (*WriteResult, error) {
+	const op = "meta.Writer.ApplyCustomTag"
+	var held []string
+	return writeTags(ctx, op, path, func(doc *waxlabel.Document, ed *waxlabel.Editor) {
+		k := tag.Key(key)
+		held, _ = doc.Tags().Get(k)
+		if len(values) == 0 {
+			ed.Clear(k)
+		} else {
+			ed.Set(k, values...)
+		}
+	}, func(plan *waxlabel.Plan, warnings []model.TagWriteWarning) ([]model.TagWriteWarning, error) {
+		return judgeCustomTag(op, key, values, held, plan.Changes(), warnings)
+	})
+}
+
+// judgeCustomTag decides a custom tag write from the plan's changes, given the values the
+// file held under key before. Another tag key changing means the format put the values
+// elsewhere when key itself did not end up holding them, and a side effect of the rewrite
+// otherwise; either refuses the write. The lowercase pseudo-keys for pictures, chapters and
+// the like are not tag keys, and the warnings already report what they lose.
+func judgeCustomTag(op, key string, values, held []string, changes []tag.Change, warnings []model.TagWriteWarning) ([]model.TagWriteWarning, error) {
+	landed := held
+	var others []string
+	for _, c := range changes {
+		switch {
+		case string(c.Key) == key:
+			landed = c.New
+		case c.Key.Valid():
+			others = append(others, tag.SanitizeLine(string(c.Key)))
+		}
+	}
+	asked := slices.Equal(landed, values)
+	if len(others) > 0 {
+		if !asked {
+			return nil, waxerr.Wrapf(waxerr.CodeUnsupported, op, ErrNotCustomTag,
+				"%s is written as %s", key, strings.Join(others, ", "))
+		}
+		return nil, waxerr.New(waxerr.CodeUnsupported, op,
+			"writing "+key+" to this file would also change "+strings.Join(others, ", "))
+	}
+	if !asked && !slices.ContainsFunc(warnings, func(wn model.TagWriteWarning) bool {
+		return wn.Unrepresented && wn.Key == key
+	}) {
+		warnings = append(warnings, model.TagWriteWarning{
+			Code: waxlabel.WarnValueDropped.String(), Key: key, Unrepresented: true,
+			Message: model.CapDetail("this file does not hold " + key + " as written"),
+		})
+	}
+	return warnings, nil
+}
+
+// writeTags is the write both Apply and ApplyCustomTag make: parse the file at path,
+// record edit on it, prepare the essence-verified rewrite, let check (when set) judge the
+// plan and its warnings, and commit unless it is a no-op.
+func writeTags(ctx context.Context, op, path string, edit func(*waxlabel.Document, *waxlabel.Editor),
+	check func(*waxlabel.Plan, []model.TagWriteWarning) ([]model.TagWriteWarning, error)) (*WriteResult, error) {
 	doc, err := waxlabel.ParseFile(ctx, path)
 	if err != nil {
 		return nil, waxerr.Classifyf(writeCode(err, waxerr.CodeInvalid), op, err, "parsing %s for tag write", path)
 	}
-
 	ed := doc.Edit()
-	for _, e := range edits {
-		if len(e.Values) == 0 {
-			ed.Clear(tag.Key(e.Key))
-		} else {
-			ed.Set(tag.Key(e.Key), e.Values...)
-		}
-	}
-	if o.outputGain != nil {
-		ed.SetOutputGain(*o.outputGain)
-	}
+	edit(doc, ed)
 
 	// Verify essence: the rewrite re-hashes the audio it copies and fails the write
 	// if it differs, so a tag edit can never mutate audio.
@@ -505,6 +589,11 @@ func (w *Writer) Apply(ctx context.Context, path string, edits []TagEdit, opts .
 	// the format could not store leaves the bytes unchanged, yet is not what was asked
 	// for. Gating on IsNoOp first would report that worst case as the cleanest one.
 	warnings := writeWarnings(plan.Report().Warnings)
+	if check != nil {
+		if warnings, err = check(plan, warnings); err != nil {
+			return nil, err
+		}
+	}
 	if plan.IsNoOp() {
 		return &WriteResult{Changed: false, Warnings: warnings}, nil
 	}

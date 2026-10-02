@@ -51,6 +51,7 @@ type coverFixture struct {
 	status  int
 	body    []byte
 	mimeStr string
+	guid    string // the feed's <podcast:guid>, none when empty
 }
 
 func newCoverFixture(t *testing.T) *coverFixture {
@@ -70,11 +71,18 @@ func newCoverFixture(t *testing.T) *coverFixture {
 	t.Cleanup(srv.Close)
 
 	mux.HandleFunc("/feed.xml", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		guid := ""
+		if f.guid != "" {
+			guid = "<podcast:guid>" + f.guid + "</podcast:guid>"
+		}
+		f.mu.Unlock()
 		w.Header().Set("Content-Type", "application/rss+xml")
 		_, _ = io.WriteString(w, fmt.Sprintf(`<?xml version="1.0"?>
-<rss version="2.0" xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd">
+<rss version="2.0" xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd"
+     xmlns:podcast="https://podcastindex.org/namespace/1.0">
   <channel>
-    <title>Cover Cast</title>
+    <title>Cover Cast</title>%s
     <itunes:image href="%s/art.png"/>
     <item>
       <title>Only Episode</title>
@@ -82,7 +90,7 @@ func newCoverFixture(t *testing.T) *coverFixture {
       <enclosure url="%s/1.mp3" length="9" type="audio/mpeg"/>
     </item>
   </channel>
-</rss>`, srv.URL, srv.URL))
+</rss>`, guid, srv.URL, srv.URL))
 	})
 	mux.HandleFunc("/art.png", func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
@@ -279,6 +287,34 @@ func TestReAddSkipsFetchWhileCoverLocked(t *testing.T) {
 	}
 	if f.coverHash(t, pid) != locked {
 		t.Error("re-add replaced the locked cover")
+	}
+}
+
+// A feed that has since published a <podcast:guid> moves its show to a new identity key
+// on the re-add, so the read has to find the show by its feed URL, or a locked cover
+// costs a download the store then discards. A feed declaring the Podcasting 2.0
+// namespace at its old address reads a guid for the first time the same way.
+func TestReAddUnderANewGUIDSkipsFetchWhileCoverLocked(t *testing.T) {
+	ctx := context.Background()
+	f := newCoverFixture(t)
+	pid := f.subscribe(t)
+	user := testPNGBytes(t, 8, 8)
+	if err := f.store.SetEntityArt(ctx, model.ArtPodcast, pid, model.ArtRoleFront, user, "", model.Attribution{Source: model.SourceUser}, model.LockOf(true), true); err != nil {
+		t.Fatalf("set user cover: %v", err)
+	}
+
+	f.mu.Lock()
+	f.guid = "cover-cast-guid"
+	f.mu.Unlock()
+	pod, err := f.svc.Add(ctx, f.feed, podcast.AddOptions{})
+	if err != nil {
+		t.Fatalf("re-add: %v", err)
+	}
+	if pod.PID != pid {
+		t.Fatalf("re-add landed on %s, want the subscribed show %s", pod.PID, pid)
+	}
+	if got := f.imageHits(); got != 1 {
+		t.Errorf("re-add under a new guid made %d image requests total, want the 1 from subscribe", got)
 	}
 }
 

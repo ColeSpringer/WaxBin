@@ -190,6 +190,45 @@ func TestReAddFeedThatGainsGUID(t *testing.T) {
 	}
 }
 
+// TestReAddTwoSubscriptionsThatGainOneGUID: one show subscribed under two feed URLs before
+// it carried a guid has two rows. When both are re-added under the guid, the first adopts
+// the guid's key, and the second updates its own row under its own key rather than taking
+// over the first row and colliding on its feed URL.
+func TestReAddTwoSubscriptionsThatGainOneGUID(t *testing.T) {
+	st, _ := openTestStore(t)
+	ctx := context.Background()
+	urls := []string{"http://feed.example/f", "http://mirror.example/f"}
+	var pids []model.PID
+	for _, u := range urls {
+		res, err := st.UpsertFeed(ctx, feedInput(u, "Alpha"))
+		if err != nil {
+			t.Fatalf("subscribe %s: %v", u, err)
+		}
+		pids = append(pids, res.PodcastPID)
+	}
+	for i, u := range urls {
+		in := feedInput(u, "Alpha")
+		in.Feed.GUID = "show-guid-xyz"
+		in.IdentityKey = identity.PodcastKey("show-guid-xyz", u)
+		res, err := st.UpsertFeed(ctx, in)
+		if err != nil {
+			t.Fatalf("re-add %s: %v", u, err)
+		}
+		if res.PodcastPID != pids[i] || res.Created {
+			t.Errorf("re-add %s updated %s (created %v), want its own row %s", u, res.PodcastPID, res.Created, pids[i])
+		}
+	}
+	for i, pid := range pids {
+		p, err := st.PodcastByPID(ctx, pid)
+		if err != nil || p.FeedURL != urls[i] {
+			t.Errorf("podcast %d feed url = %q (err %v), want %q", i, p.FeedURL, err, urls[i])
+		}
+		if eps, _ := st.EpisodesByPodcast(ctx, pid, 0); len(eps) != 1 {
+			t.Errorf("podcast %d holds %d episodes, want its one", i, len(eps))
+		}
+	}
+}
+
 func TestTruncatedFeedDoesNotDeleteEpisodes(t *testing.T) {
 	st, _ := openTestStore(t)
 	ctx := context.Background()

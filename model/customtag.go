@@ -83,6 +83,33 @@ var reservedTagKeys = map[string]bool{
 	TagWaxbinItemPID: true,
 }
 
+// retargetedTagKeys are the custom keys a tag write lands on another field on every format:
+// the tag library reads each as another spelling of one of its own (YEAR is the recording
+// date, MUSICBRAINZ_ALBUMSTATUS is RELEASESTATUS) and writes it there. They stay unreserved
+// for the reason given above, so a scan still surfaces one, but no write-back can carry it.
+// meta pins the list to the tag library's alias table. A spelling only one format reads as
+// a field (TPE2 in an ID3 tag) is refused at that file instead.
+var retargetedTagKeys = map[string]bool{
+	"YEAR": true, "ORIGINALYEAR": true, "TRACK": true, "DISC": true,
+	"TOTALTRACKS": true, "TOTALDISCS": true, "ALBUM ARTIST": true, "ALBUM_ARTIST": true,
+	"ORGANIZATION": true, "UNSYNCEDLYRICS": true, "DJ MIXER": true, "DJ_MIXER": true, "DJ-MIXER": true,
+	"MUSICBRAINZ_ALBUMSTATUS": true, "MUSICBRAINZ_ALBUMTYPE": true,
+}
+
+// IsRetargetedTagKey reports whether a tag write under key (canonical uppercase) lands on
+// another field, so a custom tag under it cannot be written back and owes its file nothing.
+func IsRetargetedTagKey(key string) bool { return retargetedTagKeys[key] }
+
+// RetargetedTagKeys returns the keys IsRetargetedTagKey knows, sorted.
+func RetargetedTagKeys() []string {
+	out := make([]string, 0, len(retargetedTagKeys))
+	for k := range retargetedTagKeys {
+		out = append(out, k)
+	}
+	slices.Sort(out)
+	return out
+}
+
 // bookOwnedTagKeys are the custom-key spellings the audiobook reader promotes into a
 // book's typed fields, each with the field it feeds. They are not reserved globally,
 // since a music release carries an ASIN or a subtitle as a plain custom tag and reserving
@@ -155,6 +182,18 @@ func CanonicalTagKey(s string) (string, bool) {
 		}
 	}
 	return string(b), true
+}
+
+// CleanTagValues returns a custom tag's values as they are stored: each trimmed of
+// surrounding whitespace, the empty ones dropped, in order.
+func CleanTagValues(values []string) []string {
+	out := make([]string, 0, len(values))
+	for _, v := range values {
+		if t := strings.TrimSpace(v); t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 // CutTagPrefix returns the key portion of a "tag.<KEY>" field and whether the prefix

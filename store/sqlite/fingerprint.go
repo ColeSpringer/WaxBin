@@ -139,6 +139,19 @@ func (s *Store) PutAnalysis(ctx context.Context, in model.AnalysisInput) error {
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
+		// The fallback describes this analysis rather than the bytes, so it is replaced
+		// every time.
+		if _, err := tx.ExecContext(ctx, "DELETE FROM file_diagnostic WHERE file_id = ? AND origin = ? AND code = ?",
+			fileID, string(model.OriginAnalyze), string(model.DiagFingerprintFallback)); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		if in.Fallback != "" {
+			if err := upsertFileDiagnosticTx(ctx, tx, fileID, model.OriginAnalyze, fp.EssenceHash, model.FileDiagnostic{
+				Code: model.DiagFingerprintFallback, Severity: model.SeverityInfo, Detail: in.Fallback,
+			}, nowNS()); err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+		}
 		// measured_essence is stamped only when the measuring decode reached the end of
 		// the file, and cleared otherwise. The clear is what makes a version bump stick:
 		// a bump is the only thing that re-selects an unchanged essence, so the old value
@@ -156,6 +169,27 @@ func (s *Store) PutAnalysis(ctx context.Context, in model.AnalysisInput) error {
 		}
 		// The file's analysis state changed; emit a delta so consumers can react.
 		return appendChange(ctx, tx, "file", fp.FilePID, model.OpUpdate)
+	})
+}
+
+// ClearFingerprintFallbacks drops every file's fingerprint_fallback row, for an analyze
+// pass that runs without fpcalc. Finding none, the common case, it takes no write lock.
+func (s *Store) ClearFingerprintFallbacks(ctx context.Context) error {
+	const op = "store.ClearFingerprintFallbacks"
+	var held bool
+	if err := s.read.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM file_diagnostic WHERE code = ?)",
+		string(model.DiagFingerprintFallback)).Scan(&held); err != nil {
+		return waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	if !held {
+		return nil
+	}
+	return s.writeTx(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, "DELETE FROM file_diagnostic WHERE origin = ? AND code = ?",
+			string(model.OriginAnalyze), string(model.DiagFingerprintFallback)); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		return nil
 	})
 }
 

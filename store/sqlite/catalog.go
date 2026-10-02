@@ -308,7 +308,7 @@ func (s *Store) PutScannedTrack(ctx context.Context, in model.PutScannedTrackInp
 		// before the entity block so the FTS rebuild there picks up the tag values, and
 		// every scan (like lyrics/art) so an added custom tag is caught without an audio
 		// change.
-		tagsChanged, err := syncItemTagsTx(ctx, tx, itemID, in.CustomTags, in.PreserveLocks)
+		tagsChanged, tagsReplaced, err := syncItemTagsTx(ctx, tx, itemID, in.CustomTags, in.PreserveLocks)
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
@@ -425,6 +425,7 @@ func (s *Store) PutScannedTrack(ctx context.Context, in model.PutScannedTrackInp
 			fileTitle: fileTitle, title: in.Item.Title, fileTrack: fileTrack, track: in.Track,
 			preserveLocks: in.PreserveLocks, derived: in.Derived,
 			cover: in.CoverArt, acquisitionRecorded: acqAdded,
+			fileTags: in.CustomTags, tagsReplaced: tagsReplaced,
 		}); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}

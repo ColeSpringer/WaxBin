@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"slices"
 	"strings"
 
 	"github.com/colespringer/waxbin/model"
@@ -28,7 +29,21 @@ import (
 // refused with CodeLocked unless force is set. It returns the canonical key stored and
 // the number of values stored after trimming (0 means the tag was cleared), so a caller
 // does not report a whitespace-only clear as a set.
+//
+// A change to the values is owed to the item's files (model.DiagTagWriteOwed) until a
+// write-back lands it, except under a key a tag write would land on another field.
 func (s *Store) SetItemTag(ctx context.Context, itemPID model.PID, key string, values []string, attr model.Attribution, lock model.LockChange, force bool) (string, int, error) {
+	return s.setItemTag(ctx, itemPID, key, values, attr, lock, force, true)
+}
+
+// ForgetItemTag drops a custom tag a write-back has just cleared from every file of the
+// item, so the catalog follows the files and no file owes it. A locked tag is refused.
+func (s *Store) ForgetItemTag(ctx context.Context, itemPID model.PID, key string) error {
+	_, _, err := s.setItemTag(ctx, itemPID, key, nil, model.Attribution{}, model.LockUnchanged, false, false)
+	return err
+}
+
+func (s *Store) setItemTag(ctx context.Context, itemPID model.PID, key string, values []string, attr model.Attribution, lock model.LockChange, force, owe bool) (string, int, error) {
 	const op = "store.SetItemTag"
 	canon, ok := model.CanonicalTagKey(key)
 	if !ok {
@@ -45,14 +60,8 @@ func (s *Store) SetItemTag(ctx context.Context, itemPID model.PID, key string, v
 	if err := checkLockChange(lock, op); err != nil {
 		return "", 0, err
 	}
-	// Drop values that are empty after trimming surrounding whitespace, preserving order.
 	// An all-empty (or nil) list clears the tag.
-	clean := make([]string, 0, len(values))
-	for _, v := range values {
-		if t := strings.TrimSpace(v); t != "" {
-			clean = append(clean, t)
-		}
-	}
+	clean := model.CleanTagValues(values)
 	field := model.TagLockField(canon)
 
 	err = s.writeTx(ctx, func(tx *sql.Tx) error {
@@ -78,8 +87,22 @@ func (s *Store) SetItemTag(ctx context.Context, itemPID model.PID, key string, v
 				return waxerr.New(waxerr.CodeLocked, op, "tag "+canon+" is locked (use force to override)")
 			}
 		}
+		before, err := itemTagValuesTx(ctx, tx, itemID, canon)
+		if err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
 		if err := writeItemTagTx(ctx, tx, itemID, canon, clean); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		switch {
+		case !owe:
+			if err := deleteOwedTx(ctx, tx, "file_id IN (SELECT file_id FROM item_file WHERE item_id = ?)", itemID, []string{field}); err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+		case !model.IsRetargetedTagKey(canon) && !slices.Equal(before, clean):
+			if err := noteOwedItemTx(ctx, tx, itemID, kind, []string{field}); err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
 		}
 		if len(clean) == 0 {
 			// A clear forgets the tag entirely, including any lock, whatever lock instruction
@@ -108,6 +131,25 @@ func (s *Store) SetItemTag(ctx context.Context, itemPID model.PID, key string, v
 		return "", 0, err
 	}
 	return canon, len(clean), nil
+}
+
+// itemTagValuesTx reads one custom tag's stored values in order, nil when the item has none.
+func itemTagValuesTx(ctx context.Context, tx *sql.Tx, itemID int64, key string) ([]string, error) {
+	rows, err := tx.QueryContext(ctx,
+		"SELECT value FROM item_tag WHERE item_id=? AND key=? ORDER BY position", itemID, key)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var v string
+		if err := rows.Scan(&v); err != nil {
+			return nil, err
+		}
+		out = append(out, v)
+	}
+	return out, rows.Err()
 }
 
 // writeItemTagTx replaces one key's rows with the given ordered values (an empty list
@@ -161,18 +203,18 @@ func (s *Store) ItemTags(ctx context.Context, itemPID model.PID) ([]model.ItemTa
 // locked "tag.<KEY>" keeps its stored values (a scan cannot re-derive a curated tag);
 // every other key is replaced by the scanned set, and a key no longer present on disk
 // is dropped. It reports whether anything changed, so the caller can emit an item delta
-// only for a real change. When preserveLock is false (an --ignore-locks run) the scan
-// overwrites even locked tags.
-func syncItemTagsTx(ctx context.Context, tx *sql.Tx, itemID int64, scanned map[string][]string, preserveLock bool) (bool, error) {
+// only for a real change, and the keys whose values it replaced with the file's. When
+// preserveLock is false (an --ignore-locks run) the scan overwrites even locked tags.
+func syncItemTagsTx(ctx context.Context, tx *sql.Tx, itemID int64, scanned map[string][]string, preserveLock bool) (bool, []string, error) {
 	current, err := loadItemTagsTx(ctx, tx, itemID)
 	if err != nil {
-		return false, err
+		return false, nil, err
 	}
 	// Fast path for the overwhelmingly common case: the file carries no custom tags and
 	// the item stores none. Nothing to do, and no lock lookup needed, so a catalog of
 	// plain files costs one indexed probe per scan and no more.
 	if len(scanned) == 0 && len(current) == 0 {
-		return false, nil
+		return false, nil, nil
 	}
 	// Every tag.<KEY> provenance row this item has. Loading them all rather than only the
 	// locked ones costs the same query and is what lets the reserved sweep and the stale
@@ -180,7 +222,7 @@ func syncItemTagsTx(ctx context.Context, tx *sql.Tx, itemID int64, scanned map[s
 	// key with no row and a key with an unlocked row both answer false.
 	tagFields, err := tagProvenanceTx(ctx, tx, itemID)
 	if err != nil {
-		return false, err
+		return false, nil, err
 	}
 	locked := map[string]bool{}
 	if preserveLock {
@@ -197,13 +239,7 @@ func syncItemTagsTx(ctx context.Context, tx *sql.Tx, itemID int64, scanned map[s
 		if !ok || model.IsReservedTagKey(canon) || locked[canon] {
 			continue
 		}
-		clean := make([]string, 0, len(vs))
-		for _, v := range vs {
-			if t := strings.TrimSpace(v); t != "" {
-				clean = append(clean, t)
-			}
-		}
-		if len(clean) > 0 {
+		if clean := model.CleanTagValues(vs); len(clean) > 0 {
 			desired[canon] = clean
 		}
 	}
@@ -219,7 +255,7 @@ func syncItemTagsTx(ctx context.Context, tx *sql.Tx, itemID int64, scanned map[s
 		if model.IsReservedTagKey(k) {
 			if _, err := tx.ExecContext(ctx, "DELETE FROM field_provenance WHERE item_id=? AND field=?",
 				itemID, model.TagLockField(k)); err != nil {
-				return false, err
+				return false, nil, err
 			}
 			continue
 		}
@@ -245,22 +281,33 @@ func syncItemTagsTx(ctx context.Context, tx *sql.Tx, itemID int64, scanned map[s
 	}
 	if len(stale) > 0 {
 		if _, err := retireProvenanceTx(ctx, tx, itemID, stale, preserveLock); err != nil {
-			return false, err
+			return false, nil, err
 		}
 	}
 
 	if tagSetsEqual(current, desired) {
-		return len(stale) > 0, nil
+		return len(stale) > 0, nil, nil
+	}
+	var replaced []string
+	for k, vs := range current {
+		if !slices.Equal(vs, desired[k]) {
+			replaced = append(replaced, k)
+		}
+	}
+	for k := range desired {
+		if _, held := current[k]; !held {
+			replaced = append(replaced, k)
+		}
 	}
 	if _, err := tx.ExecContext(ctx, "DELETE FROM item_tag WHERE item_id=?", itemID); err != nil {
-		return false, err
+		return false, nil, err
 	}
 	for key, vs := range desired {
 		if err := writeItemTagTx(ctx, tx, itemID, key, vs); err != nil {
-			return false, err
+			return false, nil, err
 		}
 	}
-	return true, nil
+	return true, replaced, nil
 }
 
 // loadItemTagsTx reads an item's custom tags into a key -> ordered-values map.
@@ -409,71 +456,88 @@ func rebuildItemSearchFTSTx(ctx context.Context, tx *sql.Tx, itemID int64, kind 
 }
 
 // strandedTagKeys returns the item_tag keys and "tag.<KEY>" provenance fields that
-// model.CanonicalTagKey no longer accepts as stored. The key rule follows the tag
-// library's, so a tightening (1.6 dropped '~') leaves rows nothing can query, edit, or
-// unlock. syncItemTagsTx keeps a locked one on purpose, since its value has no other
-// home, so db verify reports them and --fix reclaims them here.
-func (s *Store) strandedTagKeys(ctx context.Context) (keys, fields []string, err error) {
-	rows, err := s.read.QueryContext(ctx, "SELECT DISTINCT key FROM item_tag")
-	if err != nil {
-		return nil, nil, err
-	}
-	for rows.Next() {
-		var k string
-		if err := rows.Scan(&k); err != nil {
-			rows.Close()
-			return nil, nil, err
+// model.CanonicalTagKey no longer accepts as stored, and the "tag.<KEY>" owed keys no
+// write-back can pay: under such a key, or one WaxBin has since reserved, or one a tag
+// write puts onto another field. The key rule follows the tag library's, so a tightening
+// (1.6 dropped '~') leaves rows nothing can query, edit, or unlock. syncItemTagsTx keeps a
+// locked one on purpose, since its value has no other home, so db verify reports them and
+// --fix reclaims them here.
+func (s *Store) strandedTagKeys(ctx context.Context) (keys, fields, owed []string, err error) {
+	read := func(q string, args []any, stranded func(string) bool) ([]string, error) {
+		rows, err := s.read.QueryContext(ctx, q, args...)
+		if err != nil {
+			return nil, err
 		}
-		if canon, ok := model.CanonicalTagKey(k); !ok || canon != k {
-			keys = append(keys, k)
+		defer rows.Close()
+		var out []string
+		for rows.Next() {
+			var v string
+			if err := rows.Scan(&v); err != nil {
+				return nil, err
+			}
+			if stranded(v) {
+				out = append(out, v)
+			}
 		}
+		return out, rows.Err()
 	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return nil, nil, err
+	rejected := func(k string) bool {
+		canon, ok := model.CanonicalTagKey(k)
+		return !ok || canon != k
 	}
-	rows.Close()
-
-	rows, err = s.read.QueryContext(ctx, "SELECT DISTINCT field FROM field_provenance WHERE field LIKE 'tag.%'")
-	if err != nil {
-		return nil, nil, err
+	if keys, err = read("SELECT DISTINCT key FROM item_tag", nil, rejected); err != nil {
+		return nil, nil, nil, err
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var f string
-		if err := rows.Scan(&f); err != nil {
-			return nil, nil, err
-		}
+	if fields, err = read("SELECT DISTINCT field FROM field_provenance WHERE field LIKE 'tag.%'", nil, func(f string) bool {
 		k, ok := model.CutTagPrefix(f)
-		if canon, valid := model.CanonicalTagKey(k); !ok || !valid || canon != k {
-			fields = append(fields, f)
-		}
+		return !ok || rejected(k)
+	}); err != nil {
+		return nil, nil, nil, err
 	}
-	return keys, fields, rows.Err()
+	owed, err = read("SELECT DISTINCT tag_key FROM file_diagnostic WHERE origin = ? AND code = ? AND tag_key LIKE 'tag.%'",
+		[]any{string(model.OriginEdit), string(model.DiagTagWriteOwed)}, func(f string) bool {
+			k, ok := model.CutTagPrefix(f)
+			return !ok || rejected(k) || model.IsReservedTagKey(k) || model.IsRetargetedTagKey(k)
+		})
+	return keys, fields, owed, err
+}
+
+// strandedOwedWhere names the owed rows under the keys strandedTagKeys returned.
+func strandedOwedWhere(owed []string) (string, []any) {
+	args := append([]any{string(model.OriginEdit), string(model.DiagTagWriteOwed)}, anySlice(owed)...)
+	return " FROM file_diagnostic WHERE origin = ? AND code = ? AND tag_key IN " + placeholders(len(owed)), args
 }
 
 // countStrandedTagKeyRows counts the rows strandedTagKeys names, for db verify.
 func (s *Store) countStrandedTagKeyRows(ctx context.Context) (int, error) {
-	keys, fields, err := s.strandedTagKeys(ctx)
+	keys, fields, owed, err := s.strandedTagKeys(ctx)
 	if err != nil {
 		return 0, err
 	}
 	n := 0
-	if len(keys) > 0 {
+	count := func(q string, args ...any) error {
 		var c int
-		if err := s.read.QueryRowContext(ctx, "SELECT COUNT(*) FROM item_tag WHERE key IN "+placeholders(len(keys)),
-			anySlice(keys)...).Scan(&c); err != nil {
-			return 0, err
+		if err := s.read.QueryRowContext(ctx, q, args...).Scan(&c); err != nil {
+			return err
 		}
 		n += c
+		return nil
+	}
+	if len(keys) > 0 {
+		if err := count("SELECT COUNT(*) FROM item_tag WHERE key IN "+placeholders(len(keys)), anySlice(keys)...); err != nil {
+			return 0, err
+		}
 	}
 	if len(fields) > 0 {
-		var c int
-		if err := s.read.QueryRowContext(ctx, "SELECT COUNT(*) FROM field_provenance WHERE field IN "+placeholders(len(fields)),
-			anySlice(fields)...).Scan(&c); err != nil {
+		if err := count("SELECT COUNT(*) FROM field_provenance WHERE field IN "+placeholders(len(fields)), anySlice(fields)...); err != nil {
 			return 0, err
 		}
-		n += c
+	}
+	if len(owed) > 0 {
+		where, args := strandedOwedWhere(owed)
+		if err := count("SELECT COUNT(*)"+where, args...); err != nil {
+			return 0, err
+		}
 	}
 	return n, nil
 }
@@ -482,11 +546,11 @@ func (s *Store) countStrandedTagKeyRows(ctx context.Context) (int, error) {
 // The search text of an affected item catches up on its next scan.
 func (s *Store) GCStrandedTagKeys(ctx context.Context) (int, error) {
 	const op = "store.GCStrandedTagKeys"
-	keys, fields, err := s.strandedTagKeys(ctx)
+	keys, fields, owed, err := s.strandedTagKeys(ctx)
 	if err != nil {
 		return 0, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
-	if len(keys) == 0 && len(fields) == 0 {
+	if len(keys) == 0 && len(fields) == 0 && len(owed) == 0 {
 		return 0, nil
 	}
 	var n int64
@@ -501,6 +565,15 @@ func (s *Store) GCStrandedTagKeys(ctx context.Context) (int, error) {
 		}
 		if len(fields) > 0 {
 			r, err := tx.ExecContext(ctx, "DELETE FROM field_provenance WHERE field IN "+placeholders(len(fields)), anySlice(fields)...)
+			if err != nil {
+				return err
+			}
+			c, _ := r.RowsAffected()
+			n += c
+		}
+		if len(owed) > 0 {
+			where, args := strandedOwedWhere(owed)
+			r, err := tx.ExecContext(ctx, "DELETE"+where, args...)
 			if err != nil {
 				return err
 			}

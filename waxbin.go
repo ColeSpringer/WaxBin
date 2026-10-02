@@ -646,8 +646,9 @@ func (l *Library) GCReservedTagProvenance(ctx context.Context) (int, error) {
 }
 
 // GCStrandedTagKeys deletes the custom-tag rows and locks whose key the key rule no
-// longer accepts, returning how many went. A scan keeps a locked one, since its value
-// has no other home, so this is the repair for the count VerifyDerived reports.
+// longer accepts, and the owed rows no write-back can pay, returning how many went. A scan
+// keeps a locked one, since its value has no other home, so this is the repair for the
+// count VerifyDerived reports.
 func (l *Library) GCStrandedTagKeys(ctx context.Context) (int, error) {
 	return l.store.GCStrandedTagKeys(ctx)
 }
@@ -1834,6 +1835,13 @@ func (e *WriteBackError) Error() string {
 // such as the book identity re-anchor, drives writeBackFiles directly. settles names the
 // owed fields a landed write pays.
 func (l *Library) writeBackItemTags(ctx context.Context, op string, itemPID model.PID, tagEdits []meta.TagEdit, settles []string) error {
+	return l.writeBackItem(ctx, op, itemPID, settles, func(w *meta.Writer, path string) (*meta.WriteResult, error) {
+		return w.Apply(ctx, path, tagEdits)
+	})
+}
+
+// writeBackItem is writeBackItemTags with the per-file write supplied by the caller.
+func (l *Library) writeBackItem(ctx context.Context, op string, itemPID model.PID, settles []string, apply func(w *meta.Writer, path string) (*meta.WriteResult, error)) error {
 	// Everything here runs after the catalog change committed, so a lookup failure is a
 	// write-back failure to report rather than a hard error that would hide it.
 	files, err := l.store.ItemFiles(ctx, itemPID)
@@ -1844,10 +1852,7 @@ func (l *Library) writeBackItemTags(ctx context.Context, op string, itemPID mode
 	if len(files) == 0 {
 		return wbErr.noFiles()
 	}
-	if err := l.writeBackFiles(ctx, op, model.OriginEdit, files, wbErr, nil, settles,
-		func(w *meta.Writer, path string) (*meta.WriteResult, error) {
-			return w.Apply(ctx, path, tagEdits)
-		}); err != nil {
+	if err := l.writeBackFiles(ctx, op, model.OriginEdit, files, wbErr, nil, settles, apply); err != nil {
 		return err
 	}
 	return wbErr.result()
@@ -1920,6 +1925,13 @@ func (l *Library) writeBackFiles(ctx context.Context, op string, origin model.Di
 			l.log.Warn("tag write-back", "path", path, "err", err)
 			l.recordWriteBackDrift(ctx, origin, ref.FilePID, err.Error())
 			wbErr.Failures = append(wbErr.Failures, WriteBackFailure{FilePID: ref.FilePID, Path: path, Reason: err.Error()})
+			// A custom tag the file's format writes as a field of its own is refused for good,
+			// so the file stops owing it and the drift row says why.
+			if errors.Is(err, meta.ErrNotCustomTag) {
+				if err := l.store.SettleTagWriteOwed(ctx, ref.FilePID, settles); err != nil {
+					l.log.Warn("tag write owed settle", "path", path, "err", err)
+				}
+			}
 			continue
 		}
 		// The write landed, so the fields it carried are no longer owed to this file. A
@@ -2134,9 +2146,18 @@ func (l *Library) writeBackItemEdits(ctx context.Context, op string, itemPID mod
 	for _, reason := range refusals {
 		noteRefusalFailures(files, wbErr, reason)
 	}
+	planned := len(tagEdits)
 	tagEdits, customCleared, err := l.appendDerivedSortClears(ctx, itemPID, sortFields, tagEdits)
 	if err != nil {
 		return writeBackSetupFailure(itemPID, all, err)
+	}
+	// A file the write clears a custom sort tag from no longer lags a catalog that holds
+	// none. One the catalog holds is settled when the catalog drops it below, which waits
+	// for every file to land.
+	for _, te := range tagEdits[planned:] {
+		if !model.IsReservedTagKey(te.Key) && !slices.Contains(customCleared, te.Key) {
+			settles = append(settles, model.TagLockField(te.Key))
+		}
 	}
 	if len(files) == 0 {
 		return wbErr.noFiles()
@@ -2151,7 +2172,7 @@ func (l *Library) writeBackItemEdits(ctx context.Context, op string, itemPID mod
 	// the catalog too, rather than waiting for a forced rescan to notice.
 	if len(wbErr.Failures) == 0 {
 		for _, key := range customCleared {
-			if _, _, err := l.store.SetItemTag(ctx, itemPID, key, nil, model.Attribution{}, model.LockUnchanged, false); err != nil {
+			if err := l.store.ForgetItemTag(ctx, itemPID, key); err != nil {
 				l.log.Warn("cleared sort tag", "item", itemPID, "key", key, "err", err)
 			}
 		}
