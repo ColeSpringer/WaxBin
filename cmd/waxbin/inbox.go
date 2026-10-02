@@ -65,17 +65,26 @@ func newInboxImportCmd(g *globals) *cobra.Command {
 		asCopy  bool
 		dup     string
 		profile string
+		as      string
 	)
 	cmd := &cobra.Command{
 		Use:   "import [folder]",
 		Short: "Import a staging folder into the managed library (review unless --apply)",
 		Long: "Plans an import of [folder] (or every configured inbox folder) into the " +
 			"managed library: which files import where, which are catalog duplicates, and " +
-			"which are quarantined. Pass --apply to execute. Files are moved unless --copy.",
+			"which are quarantined. Pass --apply to execute. Files are moved unless --copy. " +
+			"Each file is a track or a book by the rule a scan applies, its library's media " +
+			"and its tags, and a file whose tags name no book joins the book its folder " +
+			"holds. --as track|book forces every file to that kind, pinned with a kind " +
+			"lock where the rule would give it another, as `import --as` does.",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			policy := model.DupPolicy(dup)
 			if !policy.Valid() {
 				return waxerr.New(waxerr.CodeInvalid, "inbox.import", "invalid --dup policy (use skip|allow)")
+			}
+			kind := model.Kind(as)
+			if kind != "" && kind != model.KindTrack && kind != model.KindBook {
+				return waxerr.New(waxerr.CodeInvalid, "inbox.import", "invalid --as (use track|book)")
 			}
 			lib, _, err := g.open(cmd)
 			if err != nil {
@@ -93,7 +102,7 @@ func newInboxImportCmd(g *globals) *cobra.Command {
 			}
 			for _, src := range sources {
 				plan, err := lib.PlanImport(ctx(cmd), waxbin.ImportRequest{
-					Source: src, Profile: profile, DupPolicy: policy, Copy: asCopy,
+					Source: src, Profile: profile, DupPolicy: policy, Copy: asCopy, Kind: kind,
 				})
 				if err != nil {
 					return err
@@ -120,6 +129,7 @@ func newInboxImportCmd(g *globals) *cobra.Command {
 	cmd.Flags().StringVar(&dup, "dup", "skip",
 		"duplicate policy: skip leaves audio the catalog holds in the inbox; allow imports it as a copy that joins the item already holding it")
 	cmd.Flags().StringVar(&profile, "profile", "", "organization profile (default: the library's configured profile)")
+	cmd.Flags().StringVar(&as, "as", "", "force every file to a kind: track|book (default: classify each file)")
 	return cmd
 }
 

@@ -140,9 +140,8 @@ func itemFields(item *model.ItemView) map[string]fieldVal {
 	// Audiobook tokens. For a book the view's Artist is the author (COALESCE'd in
 	// the read view), so author/authorsort derive from it.
 	f["author"] = fieldVal{s: foldField(firstNonEmpty(item.Artist, item.AlbumArtist))}
-	// This renders a folded value, so an accented author is spelled without accents
-	// on disk: a book by Édith Piaf files under "piaf, edith". That is model.SortKey
-	// showing through, and it is permanent, not a one-time move.
+	// {authorsort} renders the collation key (model.SortKey), lower-cased and without
+	// accents, for a custom layout that files books by it; the native one uses {author}.
 	f["authorsort"] = fieldVal{s: foldField(firstNonEmpty(item.AuthorSort, model.SortKey(item.Artist)))}
 	f["series"] = fieldVal{s: foldField(item.Series)}
 	f["seq"] = fieldVal{s: foldField(item.SeriesSeq)}

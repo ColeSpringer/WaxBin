@@ -118,12 +118,14 @@ func newLibrarySetCmd(g *globals) *cobra.Command {
 }
 
 func newLibraryAddCmd(g *globals) *cobra.Command {
-	return &cobra.Command{
+	var allowAbsent bool
+	cmd := &cobra.Command{
 		Use:   "add <path[:mode[:media[:profile]]]>",
 		Short: "Register a new library root at runtime",
 		Long: "Registers a library root in the running catalog without an init or restart. The " +
 			"spec is validated against the registered roots, inbox folders, and podcast dir " +
-			"(non-overlapping, like init). Re-adding an existing path updates its policy under " +
+			"(non-overlapping, like init). The path must be a folder; pass --allow-absent for " +
+			"one mounted later. Re-adding an existing path updates its policy under " +
 			"the same pid. Scan, organize, and import pick the root up immediately; a running " +
 			"watch does not until it restarts. An audiobook root catalogs every file in it as a " +
 			"book; music and mixed roots classify each file by its tags. Re-adding a root as " +
@@ -147,7 +149,7 @@ func newLibraryAddCmd(g *globals) *cobra.Command {
 				return err
 			}
 			defer m.Close()
-			lib, err := m.AddRoot(ctx(cmd), spec)
+			lib, err := m.AddRoot(ctx(cmd), spec, allowAbsent)
 			if err != nil {
 				return err
 			}
@@ -159,4 +161,6 @@ func newLibraryAddCmd(g *globals) *cobra.Command {
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&allowAbsent, "allow-absent", false, "register a root whose folder does not exist yet (a drive mounted later)")
+	return cmd
 }

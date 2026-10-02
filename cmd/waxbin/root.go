@@ -172,6 +172,15 @@ func (g *globals) openLib(cmd *cobra.Command, forceReadOnly bool) (*waxbin.Libra
 	if err != nil {
 		return nil, nil, err
 	}
+	lib, err := g.openLoaded(cmd, cfg, forceReadOnly)
+	if err != nil {
+		return nil, nil, err
+	}
+	return lib, cfg, nil
+}
+
+// openLoaded opens the library a loaded config describes.
+func (g *globals) openLoaded(cmd *cobra.Command, cfg *config.Config, forceReadOnly bool) (*waxbin.Library, error) {
 	opts := waxbin.OptionsFromConfig(cfg, g.logger(cfg))
 	opts.ReadOnly = forceReadOnly || g.readOnly
 	opts.AllowStaleBaseline = g.allowStale
@@ -184,20 +193,20 @@ func (g *globals) openLib(cmd *cobra.Command, forceReadOnly bool) (*waxbin.Libra
 			if sock := advertisedSocket(cfg.DBPath); sock != "" {
 				lib2, err2 := g.openViaMaintenance(cmd, opts, sock)
 				if err2 == nil {
-					return lib2, cfg, nil
+					return lib2, nil
 				}
 				// A failed hand-off normally defers to the original conflict, but a
 				// version refusal on the maintenance-begin frame means the server is
 				// alive and will refuse everything, so the held-lock message would only
 				// misdirect the operator at the flock.
 				if msg, ok := versionRefusal(err2); ok {
-					return nil, nil, protocolMismatch("cli.open", msg)
+					return nil, protocolMismatch("cli.open", msg)
 				}
 			}
 		}
-		return nil, nil, err
+		return nil, err
 	}
-	return lib, cfg, nil
+	return lib, nil
 }
 
 // openMutator resolves how a mutating command reaches the catalog. When a server

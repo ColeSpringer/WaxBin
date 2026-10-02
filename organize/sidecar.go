@@ -27,10 +27,10 @@ var sidecarExts = []string{
 // collisions are logged and skipped, never fatal: the audio (the cataloged entity) has
 // already moved, and a sidecar is best-effort. The directory's own cover is not here;
 // applyCoverMoves carries that once the batch is done.
-func (o *Organizer) moveSidecars(srcAudio, dstAudio string) int {
+func (o *Organizer) moveSidecars(sp *fsx.Speller, srcAudio, dstAudio string) int {
 	moved := 0
 	for _, m := range SidecarMoves(srcAudio, dstAudio) {
-		switch err := moveSidecar(m.Src, m.Dst); {
+		switch err := moveSidecar(sp, m.Src, m.Dst); {
 		case err == nil:
 			moved++
 		case errors.Is(err, errSidecarExists):
@@ -157,10 +157,10 @@ func dirHasAudio(byLower map[string]string, dir string, isAudio func(string) boo
 
 // applyCoverMoves carries the planned directory covers, reporting how many landed. A
 // failure or a destination collision is logged and skipped, the way a sidecar's is.
-func (o *Organizer) applyCoverMoves(moves []CoverMove) int {
+func (o *Organizer) applyCoverMoves(sp *fsx.Speller, moves []CoverMove) int {
 	moved := 0
 	for _, m := range moves {
-		switch err := fsx.MoveOrCopy(m.Src, m.Dst, m.Copy); {
+		switch err := sp.MoveOrCopy(m.Src, m.Dst, m.Copy); {
 		case err == nil:
 			moved++
 		case errors.Is(err, fsx.ErrExist):
@@ -194,13 +194,13 @@ var errSidecarExists = errors.New("sidecar destination exists")
 // creating the parent directory and falling back to copy+remove across
 // filesystems. A pre-existing destination yields errSidecarExists so the caller
 // can leave the source in place rather than lose either copy.
-func moveSidecar(src, dst string) error {
+func moveSidecar(sp *fsx.Speller, src, dst string) error {
 	if src == dst {
 		return nil
 	}
 	// fsx.Move is long-path-safe and creates the parent + cross-device fallback; an
 	// existing destination becomes errSidecarExists so the caller leaves the source.
-	if err := fsx.Move(src, dst); err != nil {
+	if err := sp.Move(src, dst); err != nil {
 		if errors.Is(err, fsx.ErrExist) {
 			return errSidecarExists
 		}

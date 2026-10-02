@@ -238,6 +238,32 @@ func CompareQuality(a, b File) int {
 	return cmp.Compare(b.Bitrate, a.Bitrate)
 }
 
+// OtherEncoding reports whether two files at one part position are that part in two
+// encodings: other audio running as long (EncodingLengthsMatch) in another codec, sample
+// rate or bit depth, each known on both sides. The parts of one rip share all of those,
+// which keeps a splitter's parts numbered alike, back matter that sorts last, or parts in
+// disc folders the scan does not read as discs from reading as one part; two encodings in
+// one codec at another bit rate read as two parts for the same reason.
+func OtherEncoding(a, b File) bool {
+	if a.EssenceHash == "" || b.EssenceHash == "" || a.EssenceHash == b.EssenceHash ||
+		!EncodingLengthsMatch(a.DurationMS, b.DurationMS) {
+		return false
+	}
+	differ := func(x, y int) bool { return x > 0 && y > 0 && x != y }
+	return (a.Codec != "" && b.Codec != "" && !strings.EqualFold(a.Codec, b.Codec)) ||
+		differ(a.SampleRate, b.SampleRate) || differ(a.BitDepth, b.BitDepth)
+}
+
+// EncodingLengthsMatch reports whether two running times are one recording's in two
+// encodings: both known, and apart by no more than a second or half a percent of the
+// longer, which covers encoder padding and an estimated MP3 length.
+func EncodingLengthsMatch(a, b int64) bool {
+	if a <= 0 || b <= 0 {
+		return false
+	}
+	return max(a-b, b-a) <= max(1000, max(a, b)/200)
+}
+
 // losslessCodecs are the codec keys taken as lossless. The float PCM spellings are
 // WaxLabel's own: a float WAV or MOV is uncompressed audio and belongs beside "pcm".
 var losslessCodecs = map[string]bool{

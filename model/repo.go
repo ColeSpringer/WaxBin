@@ -131,6 +131,11 @@ type PutScannedBookInput struct {
 	// LockKind and KindForced are PutScannedTrackInput's.
 	LockKind   bool
 	KindForced bool
+	// DiscUnstated and PlaceUnstated say the file states no disc, or no place on its disc
+	// (no track number and no number in its title or name), so a part the catalog already
+	// holds keeps the one stored for it: the name organize or an import gave the file has
+	// replaced the one that stated it.
+	DiscUnstated, PlaceUnstated bool
 }
 
 // PutScannedVirtualTracksInput carries a single-file album rip and the virtual
@@ -246,6 +251,18 @@ type KindTargetFile struct {
 	Windowed    bool
 	Shared      bool
 	Embedded    bool
+}
+
+// DiscStride spaces a book's discs in its part positions (item_file.position): a part's
+// position is its disc times DiscStride plus its place on the disc.
+const DiscStride = 100000
+
+// PartPosition is the position of a book part on a disc at a place.
+func PartPosition(disc, place int) int { return disc*DiscStride + place }
+
+// SplitPartPosition is the disc and place a book part's position holds.
+func SplitPartPosition(position int) (disc, place int) {
+	return position / DiscStride, position % DiscStride
 }
 
 // ItemFileRef is one backing file of an item, in reading order. organize uses it
@@ -571,6 +588,9 @@ type Catalog interface {
 	PlanMove(ctx context.Context, in RelocateInput) (PID, error)
 	CommitMove(ctx context.Context, journalPID PID, in RelocateInput) error
 	AbortMove(ctx context.Context, journalPID PID) error
+	// RespellFolder gives the files below a folder renamed between two spellings of its
+	// name the new spelling in their paths, returning how many it moved.
+	RespellFolder(ctx context.Context, from, to string) (int, error)
 
 	ChangesSince(ctx context.Context, seq int64) ([]Change, error)
 	LatestChangeSeq(ctx context.Context) (int64, error)

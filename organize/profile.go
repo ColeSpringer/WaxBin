@@ -33,13 +33,13 @@ func (p Profile) templateFor(kind model.Kind) string {
 }
 
 // nativeProfile is the default layout. Music uses an album-artist/album/track
-// shape compatible with common servers and taggers. Audiobooks include series,
-// sequence, narrator, and ASIN when present. Podcast paths stay readable while
-// stable episode identity remains in the catalog.
+// shape compatible with common servers and taggers. Audiobooks file under the author as
+// spelled and include series, sequence, narrator, and ASIN when present. Podcast paths
+// stay readable while stable episode identity remains in the catalog.
 var nativeProfile = Profile{
 	Name:      "waxbin-native",
 	Music:     `{albumartist}/{album}< ({year})>/<{disc}->{track:02} - {title}.{ext}`,
-	Audiobook: `{authorsort}/<{series}/><{seq} - ><{year} - >{title}< - {subtitle}>< \{{narrator}\}>< [{asin}]>/{title}.{ext}`,
+	Audiobook: `{author}/<{series}/><{seq} - ><{year} - >{title}< - {subtitle}>< \{{narrator}\}>< [{asin}]>/{title}.{ext}`,
 	Podcast:   `{podcast}/<{season}/><{pubdate} - >{episode}.{ext}`,
 }
 

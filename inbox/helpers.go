@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/colespringer/waxbin/identity"
 	"github.com/colespringer/waxbin/internal/fsx"
 	"github.com/colespringer/waxbin/internal/pathx"
 	"github.com/colespringer/waxbin/model"
@@ -19,7 +20,7 @@ import (
 // render a destination for a not-yet-cataloged staged file, for the given media kind.
 // Only the layout fields are populated; DisplayPath carries the source so the
 // extension resolves. A book kind additionally maps the spoken-word tag fields the
-// audiobook template names (authorsort/series/seq/narrator/subtitle/asin), mirroring
+// audiobook template names (author/authorsort/series/seq/narrator/subtitle/asin), mirroring
 // the scanner's book projection, so a book renders under the audiobook layout rather
 // than the music one.
 func acquiredItemView(tags model.Tags, src string, kind model.Kind) *model.ItemView {
@@ -39,7 +40,7 @@ func acquiredItemView(tags model.Tags, src string, kind model.Kind) *model.ItemV
 	}
 	if kind == model.KindBook {
 		author := firstNonEmpty(tags.AlbumArtist, tags.Artist)
-		v.Title = firstNonEmpty(tags.Album, tags.Title)
+		v.Title = scan.BookTitle(tags)
 		v.Artist, v.AlbumArtist = author, author
 		v.AuthorSort = model.SortKey(firstNonEmpty(tags.AlbumArtistSort, tags.ArtistSort, author))
 		v.Narrator = strings.Join(tags.Narrators, ", ")
@@ -65,19 +66,25 @@ func isAudio(path string) bool { return scan.IsAudio(path) }
 
 // stagingRoot is the folder an import reads from, the edge of what the folders above a
 // file can name: the request's source folder, or the file's own folder when the file was
-// handed over alone.
+// handed over alone, and the folder above either when it is a disc folder, so the disc
+// folder still names its disc.
 func stagingRoot(source, path string) string {
+	root := filepath.Dir(path)
 	if source != "" && pathx.UnderRoot(source, path) && !pathx.SamePath(source, path) {
-		return source
+		root = source
 	}
-	return filepath.Dir(path)
+	if d, ok := identity.DiscFolder(filepath.Base(root)); ok && d > 0 {
+		return filepath.Dir(root)
+	}
+	return root
 }
 
 // placeFile moves (or copies) a staged file to its destination through the shared
-// long-path-safe mover, without clobbering an existing file there.
-func placeFile(src, dst string, asCopy bool) error {
+// long-path-safe mover, without clobbering an existing file there. The folders the
+// destination names take its spelling (fsx.Speller).
+func placeFile(sp *fsx.Speller, src, dst string, asCopy bool) error {
 	const op = "inbox.place"
-	if err := fsx.MoveOrCopy(src, dst, asCopy); err != nil {
+	if err := sp.MoveOrCopy(src, dst, asCopy); err != nil {
 		if errors.Is(err, fsx.ErrExist) {
 			return waxerr.New(waxerr.CodeConflict, op, "destination already exists: "+dst)
 		}
@@ -97,8 +104,6 @@ func pathExists(path string) bool {
 	_, err := os.Stat(pathx.Long(path))
 	return err == nil
 }
-
-func caseFold(s string) string { return strings.ToLower(filepath.Clean(s)) }
 
 func nowNS() int64 { return time.Now().UnixNano() }
 

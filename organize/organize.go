@@ -1,6 +1,7 @@
 package organize
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -176,8 +177,18 @@ func (o *Organizer) Plan(ctx context.Context, lib *model.Library, p Profile, ite
 			}
 			files = slices.DeleteFunc(files, func(f model.ItemFileRef) bool { return f.Role == "alternate" })
 			if len(files) > 1 {
-				o.planBookParts(plan, root, rel, it.PID, files)
+				o.planBookParts(plan, root, rel, it.PID, it.PartTotal, files)
 				continue
+			}
+			// A lone part past the first is a part of a book whose other parts are not
+			// here yet, named as it will be beside them; a lone first part is a
+			// single-file book as often as not, and keeps the book's own name.
+			if len(files) == 1 {
+				if p := PartAt(files[0].Position); p.Track > 0 {
+					if last, ok := LonePart(p, it.PartTotal); ok {
+						rel = BookPartRelPath(rel, p, last, filepath.Ext(it.DisplayPath))
+					}
+				}
 			}
 		}
 		dst := filepath.Join(root, rel)
@@ -255,15 +266,86 @@ func (o *Organizer) tagFields(ctx context.Context, it *model.ItemView) ([]TagFie
 	return out, nil
 }
 
+// PartNumber is the number a book part's file name carries: its place on its disc, led
+// by the disc when it has one.
+type PartNumber struct{ Disc, Track int }
+
+// PartAt is the place a book part's stored position gives it (scan.PartPosition).
+func PartAt(position int) PartNumber {
+	disc, place := model.SplitPartPosition(position)
+	return PartNumber{Disc: disc, Track: place}
+}
+
+// NumberParts numbers a book's parts, given in reading order with the place each one's
+// tags or name give it. When every part has a place of its own (a track from 1 to 999, no
+// two alike) the parts keep their places, so a book imported a file at a time is named the
+// way organize names it whole; otherwise they are numbered in reading order. It also
+// returns the last number to pad them to: the highest disc, and the highest place or the
+// part total the book's files are tagged with.
+func NumberParts(places []PartNumber, trackTotal int) ([]PartNumber, PartNumber) {
+	out := slices.Clone(places)
+	last := PartNumber{Track: trackTotal}
+	seen := make(map[PartNumber]bool, len(places))
+	for _, p := range places {
+		if p.Track < 1 || p.Track >= 1000 || seen[p] {
+			for i := range out {
+				out[i] = PartNumber{Track: i + 1}
+			}
+			return out, PartNumber{Track: len(places)}
+		}
+		seen[p] = true
+		last = PartNumber{Disc: max(last.Disc, p.Disc), Track: max(last.Track, p.Track)}
+	}
+	return out, last
+}
+
+// LonePart says whether a book's only part is named by its number, as it will be beside
+// the parts still to come, and the last number to pad it to: a place past the first, a
+// disc past the first or a tagged part total past one says more parts are coming, where a
+// lone first part is a single-file book as often as not.
+func LonePart(place PartNumber, trackTotal int) (PartNumber, bool) {
+	last := PartNumber{Disc: place.Disc, Track: max(place.Track, trackTotal)}
+	return last, place.Track > 0 && place.Track < 1000 && (place.Track > 1 || place.Disc > 1 || trackTotal > 1)
+}
+
+// BookPartRelPath names one part of a multi-file book in the book's folder: rel is the
+// book's rendered path, and the part is "<title> - NN<ext>", or "<title> - D-NN<ext>" on
+// disc D, each number padded to the digits of last's (two at least for the part). A title
+// near the length limit is cut to keep the number.
+func BookPartRelPath(rel string, part, last PartNumber, ext string) string {
+	return CopyRelPath(rel, part, last, 1, ext)
+}
+
+// CopyRelPath names the nth file of a book part, its first being the part itself
+// (BookPartRelPath) and the others its copies and other encodings, told apart by " (n)";
+// a zero part is a book's only part under the book's own name.
+func CopyRelPath(rel string, part, last PartNumber, n int, ext string) string {
+	stem := strings.TrimSuffix(filepath.Base(rel), filepath.Ext(rel))
+	suffix := ""
+	if part.Track > 0 {
+		num := fmt.Sprintf("%0*d", max(2, len(strconv.Itoa(last.Track))), part.Track)
+		if part.Disc > 0 {
+			num = fmt.Sprintf("%0*d-%s", len(strconv.Itoa(max(last.Disc, part.Disc))), part.Disc, num)
+		}
+		suffix = " - " + num
+	}
+	if n > 1 {
+		suffix += " (" + strconv.Itoa(n) + ")"
+	}
+	suffix += strings.ToLower(ext)
+	if budget := maxSegmentBytes - len(suffix); len(stem) > budget {
+		stem = strings.TrimRight(truncateUTF8(stem, budget), " .")
+	}
+	return filepath.Join(filepath.Dir(rel), sanitizeSegment(stem+suffix))
+}
+
 // planBookParts plans a move for every part of a multi-file book into the rendered
-// book folder (the directory of the template output). The audiobook template names
-// a single file, so a multi-file book names each part "{book title} - NN.ext" using
-// the part's 1-based reading-order index (files arrive in reading order). The index
-// is a deterministic, unique disambiguator, so two source parts that happen to share
-// a basename across folders no longer render to the same destination and get
-// silently dropped by collision detection, the split this function exists to
-// prevent.
-func (o *Organizer) planBookParts(plan *Plan, root, rel string, itemPID model.PID, files []model.ItemFileRef) {
+// book folder (the directory of the template output), each part named by NumberParts
+// over the places its position gives it (files arrive in reading order). The numbers
+// are unique, so two source parts that happen to share a basename across folders no
+// longer render to the same destination and get silently dropped by collision
+// detection, the split this function exists to prevent.
+func (o *Organizer) planBookParts(plan *Plan, root, rel string, itemPID model.PID, trackTotal int, files []model.ItemFileRef) {
 	// All-or-nothing: if any part cannot be placed (no path, or outside this managed
 	// root), leave the WHOLE book where it is rather than moving some parts and
 	// stranding others, the split this function exists to prevent. Roots are
@@ -276,15 +358,14 @@ func (o *Organizer) planBookParts(plan *Plan, root, rel string, itemPID model.PI
 			return
 		}
 	}
-	folder := filepath.Dir(rel)
-	stem := strings.TrimSuffix(filepath.Base(rel), filepath.Ext(rel))
-	width := len(strconv.Itoa(len(files)))
-	if width < 2 {
-		width = 2 // at least two digits ("01") so a small set still sorts on disk
-	}
+	places := make([]PartNumber, len(files))
 	for i, fl := range files {
-		name := fmt.Sprintf("%s - %0*d%s", stem, width, i+1, strings.ToLower(filepath.Ext(fl.DisplayPath)))
-		partRel := filepath.Join(folder, sanitizeSegment(name))
+		places[i] = PartAt(fl.Position)
+	}
+	numbers, last := NumberParts(places, trackTotal)
+	acts := make([]Action, 0, len(files))
+	for i, fl := range files {
+		partRel := BookPartRelPath(rel, numbers[i], last, filepath.Ext(fl.DisplayPath))
 		dst := filepath.Join(root, partRel)
 		a := Action{
 			ItemPID: itemPID, FilePID: fl.FilePID,
@@ -293,8 +374,50 @@ func (o *Organizer) planBookParts(plan *Plan, root, rel string, itemPID model.PI
 		if filepath.Clean(a.Src) == filepath.Clean(dst) {
 			a.Skip, a.Reason = true, "already in place"
 		}
-		plan.Actions = append(plan.Actions, a)
+		acts = append(acts, a)
 	}
+	plan.Actions = append(plan.Actions, orderBookMoves(acts)...)
+}
+
+// orderBookMoves orders a book's moves so a part moves after the part whose name it takes
+// has moved off it, where it can: a cycle of them (two parts trading numbers) keeps its
+// order, one move per part, and Execute parks one part of it. A move to its own name in
+// another case or Unicode form waits on nothing.
+func orderBookMoves(acts []Action) []Action {
+	from := make(map[string]int, len(acts))
+	for i, a := range acts {
+		if !a.Skip {
+			from[pathx.CollisionKey(a.Src)] = i
+		}
+	}
+	out := make([]Action, 0, len(acts))
+	waiter := map[int]int{}
+	var ready []int
+	for i, a := range acts {
+		switch j, taken := from[pathx.CollisionKey(a.Dst)]; {
+		case a.Skip:
+			out = append(out, a)
+		case taken && j != i:
+			waiter[j] = i
+		default:
+			ready = append(ready, i)
+		}
+	}
+	done := make([]bool, len(acts))
+	for len(ready) > 0 {
+		i := ready[0]
+		ready = ready[1:]
+		out, done[i] = append(out, acts[i]), true
+		if w, ok := waiter[i]; ok {
+			ready = append(ready, w)
+		}
+	}
+	for i, a := range acts {
+		if !a.Skip && !done[i] {
+			out = append(out, a)
+		}
+	}
+	return out
 }
 
 // markCollisions skips any action whose destination collides with an
@@ -310,7 +433,7 @@ func markCollisions(plan *Plan) {
 		if a.Skip {
 			continue
 		}
-		key := strings.ToLower(filepath.Clean(a.Dst))
+		key := pathx.CollisionKey(a.Dst)
 		if j, ok := seen[key]; ok {
 			a.Skip = true
 			a.Reason = "destination collides with " + plan.Actions[j].Src
@@ -323,27 +446,35 @@ func markCollisions(plan *Plan) {
 // Execute applies the plan: each move happens on disk, then the catalog records
 // the relocation (path update + organize_journal + change_log) in one
 // transaction. A per-action failure is recorded and does not abort the run.
+//
+// A move whose destination is the source of a move still to come waits for it, and a
+// cycle of them (two parts trading numbers) is broken by parking one part under a free
+// name first. Each folder a destination names in another spelling is respelled before the
+// move lands in it, the catalog and the plan's later sources following.
 func (o *Organizer) Execute(ctx context.Context, plan *Plan, jobPID model.PID, hb func(progress float64, msg string) error) (*Report, error) {
 	rep := &Report{}
 	total := len(plan.Actions)
+	sp := fsx.NewSpeller(plan.Root, func(from, to string) { o.respelled(ctx, plan, from, to) })
 	// The directory covers are planned once the audio has actually moved, from what left
 	// each directory and where it landed, so a split album gets a cover in each
 	// destination and an emptied directory is not left holding one.
 	// It runs on the cancellation path too: the audio already moved, so a directory
 	// emptied before the cancel would otherwise keep a cover with nothing to hold it.
 	var moved []SidecarMove
-	placeCovers := func() { rep.SidecarsMoved += o.applyCoverMoves(CoverMoves(moved, scan.IsAudio)) }
-	for i := range plan.Actions {
-		if ctx.Err() != nil {
-			placeCovers()
-			return rep, waxerr.FromContext("organize.Execute", ctx.Err(), waxerr.CodeIO)
+	placeCovers := func() { rep.SidecarsMoved += o.applyCoverMoves(sp, CoverMoves(moved, scan.IsAudio)) }
+	pending := map[string]int{}
+	for _, a := range plan.Actions {
+		if !a.Skip {
+			pending[pathx.CollisionKey(a.Src)]++
 		}
-		a := &plan.Actions[i]
-		if a.Skip {
-			rep.Skipped++
-			continue
-		}
-		if err := o.apply(ctx, plan, a, jobPID, rep); err != nil {
+	}
+	blocked := func(a *Action) bool {
+		k := pathx.CollisionKey(a.Dst)
+		return k != pathx.CollisionKey(a.Src) && pending[k] > 0
+	}
+	ran := 0
+	run := func(a *Action) {
+		if err := o.apply(ctx, plan, a, jobPID, rep, sp); err != nil {
 			rep.Errored++
 			rep.Failures = append(rep.Failures, Failure{FilePID: a.FilePID, Src: a.Src, Dst: a.Dst, Err: err.Error()})
 			o.log.Warn("organize action failed", "src", a.Src, "dst", a.Dst, "err", err)
@@ -352,15 +483,106 @@ func (o *Organizer) Execute(ctx context.Context, plan *Plan, jobPID model.PID, h
 			// The audio is moved and recorded; now carry its own companions (same-basename
 			// lyrics/cue/art) so a move does not leave them behind. Sidecars are not
 			// cataloged, so a failure here is logged, not fatal.
-			rep.SidecarsMoved += o.moveSidecars(a.Src, a.Dst)
+			rep.SidecarsMoved += o.moveSidecars(sp, a.Src, a.Dst)
 			moved = append(moved, SidecarMove{Src: a.Src, Dst: a.Dst})
 		}
-		if hb != nil {
-			_ = hb(float64(i+1)/float64(max(total, 1)), "organized "+strconv.Itoa(i+1)+"/"+strconv.Itoa(total))
+		pending[pathx.CollisionKey(a.Src)]--
+		if ran++; hb != nil {
+			_ = hb(float64(ran)/float64(max(total, 1)), "organized "+strconv.Itoa(ran)+"/"+strconv.Itoa(total))
 		}
+	}
+	var waiting []*Action
+	for i := range plan.Actions {
+		if ctx.Err() != nil {
+			placeCovers()
+			return rep, waxerr.FromContext("organize.Execute", ctx.Err(), waxerr.CodeIO)
+		}
+		a := &plan.Actions[i]
+		switch {
+		case a.Skip:
+			rep.Skipped++
+			ran++
+		case blocked(a):
+			waiting = append(waiting, a)
+		default:
+			run(a)
+		}
+	}
+	for len(waiting) > 0 {
+		if ctx.Err() != nil {
+			placeCovers()
+			return rep, waxerr.FromContext("organize.Execute", ctx.Err(), waxerr.CodeIO)
+		}
+		if i := slices.IndexFunc(waiting, func(a *Action) bool { return !blocked(a) }); i >= 0 {
+			a := waiting[i]
+			waiting = slices.Delete(waiting, i, i+1)
+			run(a)
+			continue
+		}
+		// Every move left waits on another, so they wait in a cycle: park the first under a
+		// free name, which frees the name the move before it in the cycle takes.
+		a := waiting[0]
+		old := pathx.CollisionKey(a.Src)
+		if err := o.park(ctx, plan, a, jobPID, sp); err != nil {
+			waiting = waiting[1:]
+			rep.Errored++
+			rep.Failures = append(rep.Failures, Failure{FilePID: a.FilePID, Src: a.Src, Dst: a.Dst, Err: err.Error()})
+			o.log.Warn("organize action failed", "src", a.Src, "dst", a.Dst, "err", err)
+			pending[old]--
+			continue
+		}
+		pending[old]--
+		pending[pathx.CollisionKey(a.Src)]++
 	}
 	placeCovers()
 	return rep, nil
+}
+
+// park moves an action's file to a free name in its own folder, journaled like any move,
+// and points the action at it, so the move waiting on its name can land first.
+func (o *Organizer) park(ctx context.Context, plan *Plan, a *Action, jobPID model.PID, sp *fsx.Speller) error {
+	tmp, err := fsx.FreeName(filepath.Dir(a.Src), strings.ToLower(filepath.Ext(a.Src)))
+	if err != nil {
+		return waxerr.Wrap(waxerr.CodeIO, "organize.park", err)
+	}
+	rel, err := filepath.Rel(plan.Root, tmp)
+	if err != nil {
+		rel = filepath.Base(tmp)
+	}
+	in := model.RelocateInput{FilePID: a.FilePID, JobPID: jobPID, SrcPath: a.SrcBytes,
+		NewPath: []byte(tmp), NewDisplayPath: tmp, NewRelPath: []byte(rel)}
+	jpid, err := o.cat.PlanMove(ctx, in)
+	if err != nil {
+		return err
+	}
+	if err := moveFile(sp, a.Src, tmp); err != nil {
+		_ = o.cat.AbortMove(ctx, jpid)
+		return err
+	}
+	if err := o.cat.CommitMove(ctx, jpid, in); err != nil {
+		return err
+	}
+	o.moveSidecars(sp, a.Src, tmp)
+	a.Src, a.SrcBytes = tmp, []byte(tmp)
+	return nil
+}
+
+// respelled follows a folder the Speller renamed to another spelling: the catalog's paths
+// below it, and the sources of the moves still to come.
+func (o *Organizer) respelled(ctx context.Context, plan *Plan, from, to string) {
+	if _, err := o.cat.RespellFolder(context.WithoutCancel(ctx), from, to); err != nil {
+		o.log.Warn("organize: respelling the catalog's paths", "from", from, "to", to, "err", err)
+	}
+	prefix := from + string(filepath.Separator)
+	for i := range plan.Actions {
+		a := &plan.Actions[i]
+		if strings.HasPrefix(a.Src, prefix) {
+			a.Src = to + a.Src[len(from):]
+		}
+		if bytes.HasPrefix(a.SrcBytes, []byte(prefix)) {
+			a.SrcBytes = append([]byte(to), a.SrcBytes[len(from):]...)
+		}
+	}
 }
 
 // apply optionally re-tags the source (before the move, so a tag-write failure
@@ -369,7 +591,7 @@ func (o *Organizer) Execute(ctx context.Context, plan *Plan, jobPID model.PID, h
 // plus a paired file-state update recording the re-tag's new hash/mtime. If the
 // move fails, it marks the journal row 'rolled_back' (and records the re-tag at the
 // un-moved source so the catalog reflects the bytes on disk).
-func (o *Organizer) apply(ctx context.Context, plan *Plan, a *Action, jobPID model.PID, rep *Report) error {
+func (o *Organizer) apply(ctx context.Context, plan *Plan, a *Action, jobPID model.PID, rep *Report, sp *fsx.Speller) error {
 	in := model.RelocateInput{
 		FilePID:        a.FilePID,
 		JobPID:         jobPID,
@@ -406,7 +628,7 @@ func (o *Organizer) apply(ctx context.Context, plan *Plan, a *Action, jobPID mod
 	if err != nil {
 		return err
 	}
-	if err := moveFile(a.Src, a.Dst); err != nil {
+	if err := moveFile(sp, a.Src, a.Dst); err != nil {
 		_ = o.cat.AbortMove(ctx, jpid)
 		// The retag succeeded but the move did not: record the new bytes at the
 		// un-moved source so the next scan does not re-hash it, then surface the move error.
@@ -552,12 +774,12 @@ func (o *Organizer) recordRetag(ctx context.Context, filePID model.PID, prevSize
 // moveFile moves src to dst via the shared long-path-safe mover (create parent,
 // no-clobber, cross-device fallback), translating fsx's sentinel into WaxBin's
 // typed conflict so a colliding destination is reported, not silently overwritten.
-func moveFile(src, dst string) error {
+func moveFile(sp *fsx.Speller, src, dst string) error {
 	const op = "organize.move"
 	if src == dst {
 		return nil
 	}
-	if err := fsx.Move(src, dst); err != nil {
+	if err := sp.Move(src, dst); err != nil {
 		if errors.Is(err, fsx.ErrExist) {
 			return waxerr.New(waxerr.CodeConflict, op, "destination already exists: "+dst)
 		}

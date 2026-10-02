@@ -3,22 +3,34 @@ package main
 import (
 	"fmt"
 
+	"github.com/colespringer/waxbin/config"
 	"github.com/colespringer/waxbin/store/sqlite"
 	"github.com/colespringer/waxbin/waxerr"
 	"github.com/spf13/cobra"
 )
 
 func newInitCmd(g *globals) *cobra.Command {
-	return &cobra.Command{
+	var allowAbsent bool
+	cmd := &cobra.Command{
 		Use:   "init",
 		Short: "Create the catalog (run migrations) and register library roots",
 		Long: "Creates the catalog database if absent, applies migrations, and " +
-			"registers the configured library roots. Pass roots with --root path[:mode[:profile]].",
+			"registers the configured library roots. Pass roots with --root path[:mode[:profile]]. " +
+			"Each root must be a folder; pass --allow-absent for one mounted later.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if g.readOnly {
 				return waxerr.New(waxerr.CodeInvalid, "init", "cannot init in --read-only mode")
 			}
-			lib, cfg, err := g.open(cmd)
+			cfg, err := g.loadConfig(cmd)
+			if err != nil {
+				return err
+			}
+			for _, r := range cfg.Roots {
+				if err := config.CheckFolder(r.Path, allowAbsent); err != nil {
+					return err
+				}
+			}
+			lib, err := g.openLoaded(cmd, cfg, false)
 			if err != nil {
 				return err
 			}
@@ -47,4 +59,6 @@ func newInitCmd(g *globals) *cobra.Command {
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&allowAbsent, "allow-absent", false, "register roots whose folders do not exist yet (drives mounted later)")
+	return cmd
 }

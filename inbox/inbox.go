@@ -30,13 +30,20 @@ type Store interface {
 	CreateImportBatch(ctx context.Context, b *model.ImportBatch) error
 	UpdateImportBatch(ctx context.Context, b *model.ImportBatch) error
 	PutAcquisitionForFile(ctx context.Context, path []byte, in model.AcquisitionInput) (model.PID, error)
+	// BookByKey returns the book a library holds under an identity key, with its parts in
+	// reading order, or nil.
+	BookByKey(ctx context.Context, libraryID int64, key string) (*model.ItemView, []model.ItemFileRef, error)
+	FileByPID(ctx context.Context, pid model.PID) (*model.File, error)
+	// RespellFolder follows a folder a placement renamed to another spelling.
+	RespellFolder(ctx context.Context, from, to string) (int, error)
 }
 
 // Cataloger catalogs one file after it has been placed in the managed tree, honoring
 // a forced media kind (empty classifies from tags), so an acquired book forced with
-// --as book is cataloged as a book even when its tags do not say so.
+// --as book is cataloged as a book even when its tags do not say so, and the book the
+// import's folder rule found a file with no album a part of.
 type Cataloger interface {
-	ScanFileAs(ctx context.Context, lib *model.Library, path string, kind model.Kind) (*scan.Result, *model.ScanItemResult, error)
+	ScanFileWith(ctx context.Context, lib *model.Library, path string, opts scan.FileOptions) (*scan.Result, *model.ScanItemResult, error)
 }
 
 // Service plans and applies imports.
@@ -82,6 +89,18 @@ type Action struct {
 	Library    *model.Library // target managed library for this file (kind-routed)
 	Outcome    Outcome
 	Reason     string
+	// Album is the book the import's folder rule found a file whose tags name no album a
+	// part of, which the cataloging scan joins it to (scan.FileOptions.Album).
+	Album string
+	// Book groups a book's staged files, which land together or not at all (HoldBooks);
+	// Joined marks one the folder rule made a part of the book, and Alternate a copy or
+	// another encoding of one of its parts.
+	Book              string
+	Joined, Alternate bool
+	// Position is a book part's position in its book as the staged file gives it
+	// (scan.PartPosition), which the cataloging scan keeps where the name the file is
+	// placed under no longer states it.
+	Position int
 }
 
 // Request configures an import.
@@ -108,6 +127,12 @@ type Request struct {
 	ForceKind model.Kind
 	// Acquisition, when set, records origin provenance on each imported item.
 	Acquisition *model.AcquisitionInput
+	// Inbox says Source is a configured inbox folder, which holds staged imports rather
+	// than one book, so a file straight in it is in no book's folder.
+	Inbox bool
+	// Hold, when set, gives the reason a staged file stays where it is (a read-only
+	// library holds it), or "".
+	Hold func(src string) string
 }
 
 // Plan is a reviewable set of import actions.
@@ -177,18 +202,16 @@ func (s *Service) Plan(ctx context.Context, req Request) (*Plan, error) {
 	if !req.DupPolicy.Valid() {
 		return nil, waxerr.New(waxerr.CodeInvalid, op, "invalid duplicate policy: "+string(req.DupPolicy))
 	}
+	if abs, err := filepath.Abs(req.Source); err == nil {
+		req.Source = abs
+	}
 	plan := &Plan{
 		Source: req.Source, Library: req.Library, Profile: req.Profile.Name,
 		Copy: req.Copy, DupPolicy: req.DupPolicy, Reserve: req.ReserveBytes,
 		Acquisition: req.Acquisition,
 	}
 
-	// Claims made within this import: destinations (so two staged files never
-	// target the same path) and audio essences (so under DupSkip two staged copies
-	// of the same recording don't both import even when their tags, and thus their
-	// destinations, differ).
-	claims := &batchClaims{dst: map[string]bool{}, essence: map[string]bool{}}
-
+	var files []*staged
 	walkErr := filepath.WalkDir(req.Source, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil // skip unreadable entries; the walk continues
@@ -202,12 +225,14 @@ func (s *Service) Plan(ctx context.Context, req Request) (*Plan, error) {
 		if !isAudio(path) {
 			return nil
 		}
-		plan.Actions = append(plan.Actions, s.classify(ctx, req, path, claims))
+		files = append(files, s.classify(ctx, req, path))
 		return nil
 	})
 	if walkErr != nil {
 		return nil, waxerr.FromContext(op, walkErr, waxerr.CodeIO)
 	}
+	s.joinFolders(req, files)
+	plan.Actions = s.settle(ctx, req, s.numberBooks(ctx, files))
 	for i := range plan.Actions {
 		if plan.Actions[i].Outcome == OutcomeImport {
 			plan.TotalBytes += plan.Actions[i].Size
@@ -241,10 +266,10 @@ func (s *Service) PlanFile(ctx context.Context, req Request, path string, kind m
 		Copy: req.Copy, DupPolicy: req.DupPolicy, Reserve: req.ReserveBytes,
 		Acquisition: req.Acquisition,
 	}
-	claims := &batchClaims{dst: map[string]bool{}, essence: map[string]bool{}}
-	a := s.classify(ctx, req, path, claims)
-	plan.Actions = append(plan.Actions, a)
-	if a.Outcome == OutcomeImport {
+	files := []*staged{s.classify(ctx, req, path)}
+	s.joinFolders(req, files)
+	plan.Actions = s.settle(ctx, req, s.numberBooks(ctx, files))
+	if a := plan.Actions[0]; a.Outcome == OutcomeImport {
 		plan.TotalBytes += a.Size
 	}
 	return plan, nil
@@ -268,15 +293,35 @@ type batchClaims struct {
 	essence map[string]bool
 }
 
-// classify decides one file's outcome and, for an import, its media kind, target
-// library, and destination.
-func (s *Service) classify(ctx context.Context, req Request, path string, claims *batchClaims) Action {
-	a := Action{Src: path, Size: onDiskSize(path)}
+// file is the staged file as model.OtherEncoding and model.CompareQuality read it.
+func (s *staged) file() model.File {
+	return model.File{EssenceHash: s.Essence, Codec: s.tags.Codec, SampleRate: s.tags.SampleRate,
+		BitDepth: s.tags.BitDepth, Bitrate: s.tags.Bitrate, DurationMS: s.tags.DurationMS}
+}
+
+// staged is a file classified for import before its destination is settled: its tags as
+// read and as its destination renders from them and, for a book, the book's key and the
+// file's position in it.
+type staged struct {
+	Action
+	raw, tags   model.Tags
+	prof        organize.Profile
+	book        string
+	place       int
+	placeStated bool
+	rel         string // the rendered destination before any part number
+}
+
+// classify decides one file's media kind, target library and rendered destination, or
+// that it is a catalog duplicate or cannot be imported.
+func (s *Service) classify(ctx context.Context, req Request, path string) *staged {
+	st := &staged{Action: Action{Src: path, Size: onDiskSize(path)}}
+	a := &st.Action
 
 	fm, err := s.reader.Read(ctx, path)
 	if err != nil {
 		a.Outcome, a.Reason = OutcomeQuarantine, "unreadable: "+err.Error()
-		return a
+		return st
 	}
 	// Determine the media kind (forced for an acquired file, else by the scan's rule, with
 	// the target library when no route picks one by kind) and route to the matching managed
@@ -290,22 +335,27 @@ func (s *Service) classify(ctx context.Context, req Request, path string, claims
 		kind = scan.EffectiveKind(&fm.Tags, target, "", "")
 	}
 	a.Kind, a.KindForced = kind, req.ForceKind != ""
+	st.raw = fm.Tags
 	// A file renders under the names the scan at its destination will catalog it with.
+	root := stagingRoot(req.Source, path)
 	if kind == model.KindTrack {
-		meta.DisplayFallbacks(&fm.Tags, stagingRoot(req.Source, path), path, fm.TitleFromName)
+		meta.DisplayFallbacks(&fm.Tags, root, path, fm.TitleFromName)
 	} else {
 		meta.PromoteBookFields(&fm.Tags)
+		st.book = scan.BookIdentityKey(fm.Tags)
+		st.place, st.placeStated = scan.PartPosition(&fm.Tags, root, path)
+		a.Position = st.place
 	}
+	st.tags = fm.Tags
 	lib, reason := resolveLibrary(req, kind)
 	if lib == nil {
 		if reason == "" {
 			reason = "no unambiguous managed library for kind " + string(kind)
 		}
 		a.Outcome, a.Reason = OutcomeQuarantine, reason
-		return a
+		return st
 	}
 	a.Library = lib
-	root := string(lib.Root)
 
 	// Match the scanner's essence rule so the duplicate check sees the same key the
 	// catalog stores: the audio essence, or the content hash when there is none.
@@ -320,16 +370,16 @@ func (s *Service) classify(ctx context.Context, req Request, path string, claims
 	if essence != "" && req.DupPolicy == model.DupSkip {
 		if _, err := s.store.FileByEssence(ctx, essence); err == nil {
 			a.Outcome, a.Reason = OutcomeDuplicate, "audio already in the catalog"
-			return a
+			return st
 		} else if !waxerr.Is(err, waxerr.CodeNotFound) {
 			a.Outcome, a.Reason = OutcomeQuarantine, "dedup check failed: "+err.Error()
-			return a
+			return st
 		}
-		// A second staged copy of the same recording (possibly tagged differently, so
-		// a different destination) is still a duplicate under skip.
-		if claims.essence[essence] {
-			a.Outcome, a.Reason = OutcomeDuplicate, "duplicate of another file in this import"
-			return a
+	}
+	if req.Hold != nil {
+		if reason := req.Hold(path); reason != "" {
+			a.Outcome, a.Reason = OutcomeQuarantine, reason
+			return st
 		}
 	}
 
@@ -340,36 +390,74 @@ func (s *Service) classify(ctx context.Context, req Request, path string, claims
 	if req.ProfileFor != nil {
 		prof = req.ProfileFor(lib)
 	}
+	st.prof = prof
 	rel, err := organize.RenderRelPath(prof, acquiredItemView(fm.Tags, path, kind))
 	if err != nil {
 		a.Outcome, a.Reason = OutcomeQuarantine, "no destination: "+err.Error()
-		return a
+		return st
 	}
-	dst := filepath.Join(root, rel)
-	key := caseFold(dst)
+	st.rel, a.RelDst, a.Outcome = rel, rel, OutcomeImport
+	return st
+}
+
+// settle decides each staged file's destination in the order the files will land: a
+// second staged copy of audio another file claimed is a duplicate under DupSkip, and a
+// destination another staged file claimed, one already on disk, or one a cataloged file
+// holds under another case is quarantined.
+func (s *Service) settle(ctx context.Context, req Request, files []*staged) []Action {
+	// Claims made within this import: destinations (so two staged files never
+	// target the same path) and audio essences (so under DupSkip two staged copies
+	// of the same recording don't both import even when their tags, and thus their
+	// destinations, differ).
+	claims := &batchClaims{dst: map[string]bool{}, essence: map[string]bool{}}
+	out := make([]Action, len(files))
+	for i, f := range files {
+		a := f.Action
+		if a.Outcome == OutcomeImport {
+			s.claim(ctx, req, &a, claims)
+		}
+		if a.Outcome != OutcomeImport {
+			a.Dst, a.RelDst = "", ""
+		}
+		out[i] = a
+	}
+	HoldBooks(out)
+	return out
+}
+
+// claim takes an importable action's destination and audio for this import, or turns it
+// into a duplicate or a quarantine.
+func (s *Service) claim(ctx context.Context, req Request, a *Action, claims *batchClaims) {
+	// A second staged copy of the same recording (possibly tagged differently, so a
+	// different destination) is still a duplicate under skip.
+	if a.Essence != "" && req.DupPolicy == model.DupSkip && claims.essence[a.Essence] {
+		a.Outcome, a.Reason = OutcomeDuplicate, "duplicate of another file in this import"
+		return
+	}
+	dst := filepath.Join(string(a.Library.Root), a.RelDst)
+	key := pathx.CollisionKey(dst)
 	if claims.dst[key] {
 		a.Outcome, a.Reason = OutcomeQuarantine, "destination already claimed by another staged file"
-		return a
+		return
 	}
 	if pathExists(dst) {
 		a.Outcome, a.Reason = OutcomeQuarantine, "destination already exists in the library"
-		return a
+		return
 	}
 	// A cataloged file whose path differs only by case would coexist here on Linux
 	// but collide on a case-insensitive filesystem, so refuse it for portability.
 	if exists, err := s.store.DisplayPathExistsFold(ctx, dst); err != nil {
 		a.Outcome, a.Reason = OutcomeQuarantine, "collision check failed: "+err.Error()
-		return a
+		return
 	} else if exists {
 		a.Outcome, a.Reason = OutcomeQuarantine, "destination case-collides with a cataloged file"
-		return a
+		return
 	}
 	claims.dst[key] = true
-	if essence != "" {
-		claims.essence[essence] = true
+	if a.Essence != "" {
+		claims.essence[a.Essence] = true
 	}
-	a.Dst, a.RelDst, a.Outcome = dst, rel, OutcomeImport
-	return a
+	a.Dst = dst
 }
 
 // Execute applies a plan: a free-space preflight first, then each importable file is
@@ -400,6 +488,17 @@ func (s *Service) Execute(ctx context.Context, plan *Plan) (*Report, error) {
 	// keep a cover with nothing to hold it.
 	var placed []organize.SidecarMove
 	placeCovers := func() { rep.Sidecars += s.placeCovers(organize.CoverMoves(placed, scan.IsAudio), plan.Copy) }
+	spellers := map[int64]*fsx.Speller{}
+	speller := func(lib *model.Library) *fsx.Speller {
+		if spellers[lib.ID] == nil {
+			spellers[lib.ID] = fsx.NewSpeller(string(lib.Root), func(from, to string) {
+				if _, err := s.store.RespellFolder(context.WithoutCancel(ctx), from, to); err != nil {
+					s.log.Warn("import: respelling the catalog's paths", "from", from, "to", to, "err", err)
+				}
+			})
+		}
+		return spellers[lib.ID]
+	}
 	for i := range plan.Actions {
 		if ctx.Err() != nil {
 			placeCovers()
@@ -413,7 +512,11 @@ func (s *Service) Execute(ctx context.Context, plan *Plan) (*Report, error) {
 		case OutcomeQuarantine:
 			rep.Quarantined++
 		case OutcomeImport:
-			sidecars, outcome, err := s.importOne(ctx, plan, a)
+			lib := a.Library
+			if lib == nil {
+				lib = plan.Library
+			}
+			sidecars, outcome, err := s.importOne(ctx, plan, a, lib, speller(lib))
 			if err != nil {
 				rep.Errored++
 				rep.Failures = append(rep.Failures, Failure{Src: a.Src, Err: err.Error()})
@@ -453,23 +556,23 @@ func (s *Service) placeCovers(moves []organize.CoverMove, copyMode bool) int {
 // importOne places one file in the managed tree, catalogs it under its target
 // library, records any acquisition provenance, and carries its sidecars in alongside
 // it. It returns the number of sidecars placed and what cataloging the file did.
-func (s *Service) importOne(ctx context.Context, plan *Plan, a *Action) (int, FileOutcome, error) {
+func (s *Service) importOne(ctx context.Context, plan *Plan, a *Action, lib *model.Library, sp *fsx.Speller) (int, FileOutcome, error) {
 	outcome := FileOutcome{Path: a.Dst}
 	if err := os.MkdirAll(pathx.Long(filepath.Dir(a.Dst)), 0o755); err != nil {
 		return 0, outcome, waxerr.Wrap(waxerr.CodeIO, "inbox.import", err)
 	}
-	if err := placeFile(a.Src, a.Dst, plan.Copy); err != nil {
+	if err := placeFile(sp, a.Src, a.Dst, plan.Copy); err != nil {
 		return 0, outcome, err
-	}
-	lib := a.Library
-	if lib == nil {
-		lib = plan.Library
 	}
 	var forced model.Kind
 	if a.KindForced {
 		forced = a.Kind
 	}
-	_, out, err := s.cataloger.ScanFileAs(ctx, lib, a.Dst, forced)
+	opts := scan.FileOptions{Kind: forced, Album: a.Album}
+	if a.Kind == model.KindBook {
+		opts.Position = &a.Position
+	}
+	_, out, err := s.cataloger.ScanFileWith(ctx, lib, a.Dst, opts)
 	if err != nil {
 		return 0, outcome, err
 	}

@@ -47,6 +47,7 @@ CREATE TABLE book (
   description     TEXT    NOT NULL DEFAULT '',
   genre           TEXT    NOT NULL DEFAULT '',    -- denormalized display, like track.genre
   mbid            TEXT,                           -- MusicBrainz release id, when known
+  track_total     INTEGER,                        -- the parts the primary file's TRACKTOTAL counts
   total_duration_ms INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX book_series ON book(series_id);

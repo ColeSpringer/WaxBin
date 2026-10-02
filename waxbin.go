@@ -411,20 +411,43 @@ func readOnlyIDs(libs []*model.Library) map[int64]bool {
 	return out
 }
 
+// AddRootOption tunes AddRoot.
+type AddRootOption func(*addRootOptions)
+
+type addRootOptions struct{ allowAbsent bool }
+
+// AllowAbsent lets AddRoot register a root whose folder does not exist yet, such as a
+// drive or volume mounted later. A scan of it finds nothing until the folder is there.
+func AllowAbsent() AddRootOption { return func(o *addRootOptions) { o.allowAbsent = true } }
+
 // AddRoot registers a library root at runtime, without reopening the Library. The
 // spec is validated against every root already registered exactly as Open validates
 // the configured set, then upserted: a new path emits a `library` create delta, and
 // re-adding an existing path refreshes its mode/media/profile under the same pid.
 // Spec defaults match config loading (in-place, mixed, waxbin-native).
 //
+// Unlike a configured root, which Open resolves against the working directory, the path
+// must be absolute, and it must be a folder a scan can walk: a file is refused, and so
+// is a path that does not exist unless AllowAbsent is passed.
+//
 // The store is the single source of truth for roots, so scan, organize, and import
 // pick the new root up immediately and the row survives a restart even if the embedder
 // never adds it to its own configuration. A running Watch follows it on its next
 // scheduled tick.
-func (l *Library) AddRoot(ctx context.Context, spec config.Root) (*model.Library, error) {
+func (l *Library) AddRoot(ctx context.Context, spec config.Root, opts ...AddRootOption) (*model.Library, error) {
 	if l.ReadOnly() {
 		return nil, waxerr.New(waxerr.CodeUnsupported, "Library.AddRoot", "adding a root requires a read-write library")
 	}
+	if strings.TrimSpace(spec.Path) != "" && !filepath.IsAbs(spec.Path) {
+		return nil, waxerr.New(waxerr.CodeInvalid, "Library.AddRoot", "library root must be an absolute path: "+spec.Path)
+	}
+	var o addRootOptions
+	for _, opt := range opts {
+		opt(&o)
+	}
+	// Stat the folder before taking rootMu, so a hung mount blocks no other root
+	// mutation; its refusal is reported after the overlap checks, which say more.
+	walkable := config.CheckFolder(filepath.Clean(spec.Path), o.allowAbsent)
 	// Hold rootMu across validate + upsert so a concurrent root mutation cannot
 	// slip an overlapping row in between the two.
 	l.rootMu.Lock()
@@ -435,6 +458,9 @@ func (l *Library) AddRoot(ctx context.Context, spec config.Root) (*model.Library
 	}
 	if err := knownProfile(l.profileSet(), "Library.AddRoot", normalized.Path, normalized.Mode, normalized.Profile); err != nil {
 		return nil, err
+	}
+	if walkable != nil {
+		return nil, walkable
 	}
 	return l.store.EnsureLibrary(ctx, &model.Library{
 		Root:        []byte(normalized.Path),
@@ -3253,6 +3279,10 @@ type ImportRequest struct {
 	Profile    string          // layout; empty uses the library's configured profile
 	DupPolicy  model.DupPolicy // how to treat catalog duplicates (default skip)
 	Copy       bool            // copy (keep originals) instead of move
+	// Kind forces every file to a kind, track or book, which the cataloging scan pins with
+	// a kind lock where the file's tags, library and folder would give it another. Empty
+	// classifies each file by that rule.
+	Kind model.Kind
 }
 
 // PlanImport computes a reviewable import plan for a staging folder: which files
@@ -3262,6 +3292,9 @@ func (l *Library) PlanImport(ctx context.Context, req ImportRequest) (*inbox.Pla
 	const op = "Library.PlanImport"
 	if strings.TrimSpace(req.Source) == "" {
 		return nil, waxerr.New(waxerr.CodeInvalid, op, "no import source folder")
+	}
+	if req.Kind != "" && req.Kind != model.KindTrack && req.Kind != model.KindBook {
+		return nil, waxerr.New(waxerr.CodeInvalid, op, "an import can force track or book, not "+string(req.Kind))
 	}
 	// One read serves the target, the routes, and the source check.
 	libs, err := l.store.Libraries(ctx)
@@ -3321,32 +3354,53 @@ func (l *Library) PlanImport(ctx context.Context, req ImportRequest) (*inbox.Pla
 		}
 		profileFor = func(lib *model.Library) organize.Profile { return byLib[lib.ID] }
 	}
-	plan, err := l.importer.Plan(ctx, inbox.Request{
+	return l.importer.Plan(ctx, inbox.Request{
 		Source: req.Source, Library: defaultLib, Route: route, Profile: prof, ProfileFor: profileFor,
-		DupPolicy: req.DupPolicy, Copy: req.Copy, ReserveBytes: l.opts.FreeSpaceReserveBytes,
+		DupPolicy: req.DupPolicy, Copy: req.Copy, ReserveBytes: l.opts.FreeSpaceReserveBytes, ForceKind: req.Kind,
+		Inbox: l.isInboxFolder(req.Source), Hold: readOnlySources(libs, req.Copy),
 	})
-	if err != nil {
-		return nil, err
+}
+
+// isInboxFolder reports whether path is one of the configured inbox folders.
+func (l *Library) isInboxFolder(path string) bool {
+	abs := func(p string) string {
+		if a, err := filepath.Abs(p); err == nil {
+			return a
+		}
+		return p
 	}
-	quarantineReadOnlySources(libs, plan)
-	return plan, nil
+	return slices.ContainsFunc(l.opts.Inbox, func(dir string) bool { return pathx.SamePath(abs(dir), abs(path)) })
+}
+
+// readOnlySources returns the planner's hold for a move-mode import: a staged file in a
+// read-only library stays there, since the move would take the file out of it.
+func readOnlySources(libs []*model.Library, asCopy bool) func(string) string {
+	if asCopy {
+		return nil
+	}
+	held := newReadOnlyHolder(libs)
+	return func(src string) string {
+		if lib := held.holding(src); lib != nil {
+			return "source is in read-only library " + string(lib.PID) + "; import a copy instead"
+		}
+		return ""
+	}
 }
 
 // quarantineReadOnlySources quarantines the move-mode import actions whose source file
-// sits in a read-only library, since the move would take the file out of it.
+// sits in a read-only library, for a plan applied after a library was flagged.
 func quarantineReadOnlySources(libs []*model.Library, plan *inbox.Plan) {
-	if plan.Copy {
+	hold := readOnlySources(libs, plan.Copy)
+	if hold == nil {
 		return
 	}
-	held := newReadOnlyHolder(libs)
 	for i := range plan.Actions {
 		a := &plan.Actions[i]
 		if a.Outcome != inbox.OutcomeImport {
 			continue
 		}
-		if lib := held.holding(a.Src); lib != nil {
-			a.Outcome = inbox.OutcomeQuarantine
-			a.Reason = "source is in read-only library " + string(lib.PID) + "; import a copy instead"
+		if reason := hold(a.Src); reason != "" {
+			a.Outcome, a.Reason = inbox.OutcomeQuarantine, reason
 			plan.TotalBytes -= a.Size
 		}
 	}
@@ -3366,7 +3420,8 @@ func firstMixedOrFirst(managed []*model.Library) *model.Library {
 // ApplyImport executes an import plan under an "import"-scoped job. A file bound for
 // a library flagged read-only since the plan was built is quarantined in place, and
 // under DupSkip a file whose audio reached the catalog since the plan was built (another
-// import applied first) is skipped as a duplicate.
+// import applied first) is skipped as a duplicate; a book one of whose parts no longer
+// lands stays where it is with it.
 func (l *Library) ApplyImport(ctx context.Context, plan *inbox.Plan) (*inbox.Report, error) {
 	var rep *inbox.Report
 	_, err := l.jobs.Run(ctx, jobs.Spec{Kind: "import", Scope: fsMutateScope}, func(ctx context.Context, h *jobs.Handle) error {
@@ -3396,6 +3451,7 @@ func (l *Library) ApplyImport(ctx context.Context, plan *inbox.Plan) (*inbox.Rep
 			}
 		}
 		quarantineReadOnlySources(libs, &live)
+		inbox.HoldBooks(live.Actions)
 		r, err := l.importer.Execute(ctx, &live)
 		rep = r
 		return err
@@ -3501,18 +3557,18 @@ func (l *Library) importAcquiredMedia(ctx context.Context, file AcquiredFile, ki
 	if err != nil {
 		return nil, err
 	}
-	plan, err := l.importer.PlanFile(ctx, inbox.Request{
-		Library: lib, Profile: prof, DupPolicy: meta.DupPolicy, Copy: meta.Copy,
-		ReserveBytes: l.opts.FreeSpaceReserveBytes, Acquisition: acquisitionInput(meta),
-	}, file.Path, kind)
-	if err != nil {
-		return nil, err
-	}
 	libs, err := l.store.Libraries(ctx)
 	if err != nil {
 		return nil, err
 	}
-	quarantineReadOnlySources(libs, plan)
+	plan, err := l.importer.PlanFile(ctx, inbox.Request{
+		Library: lib, Profile: prof, DupPolicy: meta.DupPolicy, Copy: meta.Copy,
+		ReserveBytes: l.opts.FreeSpaceReserveBytes, Acquisition: acquisitionInput(meta),
+		Hold: readOnlySources(libs, meta.Copy),
+	}, file.Path, kind)
+	if err != nil {
+		return nil, err
+	}
 	res := &AcquiredResult{Kind: kind, Plan: plan}
 	// Report already-present independent of DupPolicy. The plan sets Action.Essence before
 	// the dup gate, so resolving by essence here surfaces the existing item even for a

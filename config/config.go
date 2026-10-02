@@ -5,10 +5,13 @@ package config
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/colespringer/waxbin/internal/pathx"
 	"github.com/colespringer/waxbin/model"
@@ -202,7 +205,10 @@ func mergeJSON(cfg *Config, path string) error {
 
 // Validate normalizes roots (absolute + cleaned, default mode/profile) and
 // rejects an empty DB path or overlapping/nested roots. It mutates the receiver
-// in place so callers see normalized paths.
+// in place so callers see normalized paths. A relative root resolves against the
+// working directory, and a root need not exist, since a configured root may be a
+// volume mounted after the process starts; the runtime AddRoot and `waxbin init` are
+// stricter (CheckFolder).
 func (c *Config) Validate() error {
 	if strings.TrimSpace(c.DBPath) == "" {
 		return waxerr.New(waxerr.CodeInvalid, "config.Validate", "db path is required")
@@ -291,6 +297,23 @@ func (c *Config) Validate() error {
 		}
 	}
 	return nil
+}
+
+// CheckFolder refuses a root a scan could never walk: a path that is not a folder, or one
+// that cannot be reached unless absent is allowed (a drive or volume mounted later, which
+// may answer a stat with an error of its own until it is).
+func CheckFolder(path string, absent bool) error {
+	const op = "config.CheckFolder"
+	info, err := os.Stat(pathx.Long(path))
+	switch {
+	case err == nil && !info.IsDir():
+		return waxerr.New(waxerr.CodeInvalid, op, "library root is not a directory: "+path)
+	case err == nil || absent:
+		return nil
+	case errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR):
+		return waxerr.New(waxerr.CodeInvalid, op, "library root does not exist: "+path+" (allow an absent root to register one mounted later)")
+	}
+	return waxerr.Wrap(waxerr.CodeIO, op, err)
 }
 
 // ParseRootSpec parses a CLI root spec "path[:mode[:media[:profile]]]" into a Root.

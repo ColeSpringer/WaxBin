@@ -91,7 +91,7 @@ func TestMoveSidecarOnDiskAndCollision(t *testing.T) {
 	mustMkdir(t, dstDir)
 	mustWrite(t, filepath.Join(dstDir, "cover.jpg"))
 
-	moved := o.moveSidecars(filepath.Join(srcDir, "song.mp3"), filepath.Join(dstDir, "01 - Song.mp3"))
+	moved := o.moveSidecars(fsx.NewSpeller(dir, nil), filepath.Join(srcDir, "song.mp3"), filepath.Join(dstDir, "01 - Song.mp3"))
 	if moved != 1 {
 		t.Fatalf("moved %d sidecars, want 1 (lrc moved, conflicting cover left)", moved)
 	}
@@ -136,7 +136,7 @@ func TestExecuteSplitsADirectoryCoverAcrossDestinations(t *testing.T) {
 		{Src: plan.Actions[0].Src, Dst: plan.Actions[0].Dst},
 		{Src: plan.Actions[1].Src, Dst: plan.Actions[1].Dst},
 	}
-	if n := o.applyCoverMoves(CoverMoves(moved, scan.IsAudio)); n != 2 {
+	if n := o.applyCoverMoves(fsx.NewSpeller(dir, nil), CoverMoves(moved, scan.IsAudio)); n != 2 {
 		t.Fatalf("covers placed = %d, want one per destination", n)
 	}
 	for _, d := range []string{dstA, dstB} {

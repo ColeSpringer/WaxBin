@@ -1104,13 +1104,13 @@ func adoptEntityKeyMBIDs(ctx context.Context, tx *sql.Tx, itemID int64, path []b
 // re-applies the same sets it read.
 func loadBookForEditTx(ctx context.Context, tx *sql.Tx, itemID int64) (model.Book, string, error) {
 	b := model.Book{ItemID: itemID}
-	var seriesID, year, abridged sql.NullInt64
+	var seriesID, year, abridged, trackTotal sql.NullInt64
 	var mbid sql.NullString
 	err := tx.QueryRowContext(ctx, `SELECT subtitle, author, author_sort, narrator, series_id,
-		series_seq, year, publisher, asin, isbn, edition, abridged, description, genre, mbid
+		series_seq, year, publisher, asin, isbn, edition, abridged, description, genre, mbid, track_total
 		FROM book WHERE item_id = ?`, itemID).Scan(
 		&b.Subtitle, &b.Author, &b.AuthorSort, &b.Narrator, &seriesID,
-		&b.SeriesSeq, &year, &b.Publisher, &b.ASIN, &b.ISBN, &b.Edition, &abridged, &b.Description, &b.Genre, &mbid)
+		&b.SeriesSeq, &year, &b.Publisher, &b.ASIN, &b.ISBN, &b.Edition, &abridged, &b.Description, &b.Genre, &mbid, &trackTotal)
 	if errors.Is(err, sql.ErrNoRows) {
 		return b, "", waxerr.New(waxerr.CodeNotFound, "store.EditItemFields", "item has no book row")
 	}
@@ -1119,6 +1119,7 @@ func loadBookForEditTx(ctx context.Context, tx *sql.Tx, itemID int64) (model.Boo
 	}
 	b.Year = int(year.Int64)
 	b.MBID = mbid.String
+	b.TrackTotal = int(trackTotal.Int64)
 	if abridged.Valid {
 		v := abridged.Int64 != 0
 		b.Abridged = &v

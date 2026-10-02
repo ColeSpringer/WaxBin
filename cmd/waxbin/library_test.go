@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -143,5 +144,46 @@ func TestLibrarySetFolderFallbackThroughAServer(t *testing.T) {
 	}
 	if libs, err := lib.Libraries(ctx); err != nil || libs[0].FolderFallback || !libs[0].ReadOnly {
 		t.Fatalf("server libraries = %+v (err %v), want the fallback off and read-only untouched", libs, err)
+	}
+}
+
+// TestLibraryAddChecksTheFolder: `library add` resolves a relative path against the
+// working directory and registers an existing folder, refuses a missing one, and
+// registers it with --allow-absent; `init` refuses a missing configured root the same way.
+func TestLibraryAddChecksTheFolder(t *testing.T) {
+	t.Setenv("WAXBIN_CONFIG", "")
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	if _, err := runLibraryCmd(t, db, false, "init"); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	work := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(work, "music"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(work)
+	out, err := runLibraryCmd(t, db, true, "library", "add", filepath.Join(".", "music")+":in-place")
+	var added struct {
+		Data struct {
+			Root string `json:"root"`
+		} `json:"data"`
+	}
+	if err != nil || json.Unmarshal([]byte(out), &added) != nil || added.Data.Root != filepath.Join(work, "music") {
+		t.Fatalf("library add ./music = %q (err %v), want the absolute folder registered", out, err)
+	}
+	later := filepath.Join(t.TempDir(), "later")
+	if _, err := runLibraryCmd(t, db, false, "library", "add", later+":in-place"); !waxerr.Is(err, waxerr.CodeInvalid) {
+		t.Fatalf("library add of a missing folder = %v, want CodeInvalid", err)
+	}
+	if _, err := runLibraryCmd(t, db, false, "library", "add", later+":in-place", "--allow-absent"); err != nil {
+		t.Fatalf("library add --allow-absent: %v", err)
+	}
+
+	fresh := filepath.Join(t.TempDir(), "fresh.db")
+	missing := filepath.Join(t.TempDir(), "unmounted")
+	if _, err := runLibraryCmd(t, fresh, false, "--root", missing, "init"); !waxerr.Is(err, waxerr.CodeInvalid) {
+		t.Fatalf("init with a missing root = %v, want CodeInvalid", err)
+	}
+	if _, err := runLibraryCmd(t, fresh, false, "--root", missing, "init", "--allow-absent"); err != nil {
+		t.Fatalf("init --allow-absent: %v", err)
 	}
 }

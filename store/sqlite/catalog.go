@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -1185,4 +1186,67 @@ func opFor(created bool) model.ChangeOp {
 func pathExists(path []byte) bool {
 	_, err := os.Stat(pathx.Long(string(path)))
 	return err == nil
+}
+
+// RespellFolder gives the cataloged files below folder from the spelling to, a rename of
+// the folder between two spellings of its name having moved them (fsx.Speller), so a scan
+// finds each file where the catalog says rather than reading it again. It returns how many
+// files it moved.
+func (s *Store) RespellFolder(ctx context.Context, from, to string) (int, error) {
+	const op = "store.RespellFolder"
+	from, to = filepath.Clean(from), filepath.Clean(to)
+	lo := []byte(from + string(filepath.Separator))
+	type below struct {
+		id            int64
+		pid           model.PID
+		path, display string
+		root          string
+	}
+	n := 0
+	err := s.writeTx(ctx, func(tx *sql.Tx) error {
+		rows, err := tx.QueryContext(ctx, `SELECT f.id, f.pid, f.path, f.display_path, l.root FROM file f
+			JOIN library l ON l.id = f.library_id WHERE f.path >= ? AND f.path < ?`, lo, prefixUpperBound(lo))
+		if err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		var files []below
+		for rows.Next() {
+			var b below
+			var path, root []byte
+			if err := rows.Scan(&b.id, &b.pid, &path, &b.display, &root); err != nil {
+				rows.Close()
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+			b.path, b.root = string(path), string(root)
+			files = append(files, b)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		for _, f := range files {
+			path := to + f.path[len(from):]
+			display := path
+			if strings.HasPrefix(f.display, from) {
+				display = to + f.display[len(from):]
+			}
+			rel, err := filepath.Rel(f.root, path)
+			if err != nil {
+				rel = filepath.Base(path)
+			}
+			if _, err := tx.ExecContext(ctx, "UPDATE file SET path=?, display_path=?, rel_path=? WHERE id=?",
+				[]byte(path), display, []byte(rel), f.id); err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+			if err := renameCopyDetailsTx(ctx, tx, f.id, f.display, display); err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+			if err := appendChange(ctx, tx, "file", f.pid, model.OpUpdate); err != nil {
+				return err
+			}
+		}
+		n = len(files)
+		return nil
+	})
+	return n, err
 }

@@ -1,6 +1,7 @@
 package config_test
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -152,6 +153,31 @@ func TestParseRootSpecWindowsDrive(t *testing.T) {
 		}
 		if r.Path != tc.path || r.Mode != tc.mode || r.Profile != tc.profile {
 			t.Fatalf("%s -> %+v, want path=%q mode=%q profile=%q", tc.spec, r, tc.path, tc.mode, tc.profile)
+		}
+	}
+}
+
+// TestCheckFolder: a root must be a folder, and one that cannot be reached (missing, or a
+// path through a file) is refused as absent unless absence is allowed, when only a path
+// that exists and is not a folder is refused.
+func TestCheckFolder(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "song.mp3")
+	if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		path   string
+		absent bool
+		want   waxerr.Code
+	}{
+		{dir, false, ""}, {file, false, waxerr.CodeInvalid}, {file, true, waxerr.CodeInvalid},
+		{filepath.Join(dir, "later"), false, waxerr.CodeInvalid}, {filepath.Join(dir, "later"), true, ""},
+		{filepath.Join(file, "sub"), false, waxerr.CodeInvalid}, {filepath.Join(file, "sub"), true, ""},
+	} {
+		err := config.CheckFolder(c.path, c.absent)
+		if (c.want == "" && err != nil) || (c.want != "" && !waxerr.Is(err, c.want)) {
+			t.Errorf("CheckFolder(%s, absent %v) = %v, want %q", c.path, c.absent, err, c.want)
 		}
 	}
 }

@@ -154,7 +154,7 @@ const itemViewCols = `pi.pid, pi.kind, pi.state, pi.title,
 	COALESCE(rg.mbid,''),
 	COALESCE((SELECT vapm.mbid FROM artist vapm WHERE vapm.id = ` + itemArtistIDExpr + `),''),
 	COALESCE((SELECT vaapm.mbid FROM artist vaapm WHERE vaapm.id = ` + itemAlbumArtistIDExpr + `),''),
-	t.bpm`
+	t.bpm, bk.track_total`
 
 const itemSelect = `SELECT ` + itemViewCols + itemJoins
 
@@ -172,7 +172,7 @@ const fileSelect = `SELECT id, pid, library_id, path, display_path, rel_path, ki
 // itemViewNulls holds the nullable columns of an item view during a scan.
 type itemViewNulls struct {
 	trackNo, discNo, year, bpm, dur     sql.NullInt64
-	trackTotal, discTotal               sql.NullInt64
+	trackTotal, discTotal, partTotal    sql.NullInt64
 	compilation                         sql.NullInt64
 	season, pubDate, explicit           sql.NullInt64
 	podcastExplicit                     sql.NullInt64
@@ -199,7 +199,7 @@ func itemViewDests(v *model.ItemView, n *itemViewNulls) []any {
 		&n.artistPID, &n.albumArtistPID, &n.albumPID, &n.releaseGroupPID, &n.podcastPID,
 		&n.libraryPID,
 		&v.MBID, &v.ISRC, &v.AlbumMBID, &v.ReleaseGroupMBID, &v.ArtistMBID, &v.AlbumArtistMBID,
-		&n.bpm,
+		&n.bpm, &n.partTotal,
 	}
 }
 
@@ -210,6 +210,7 @@ func (n *itemViewNulls) apply(v *model.ItemView) {
 	v.DiscTotal = int(n.discTotal.Int64)
 	v.Year = int(n.year.Int64)
 	v.BPM = int(n.bpm.Int64)
+	v.PartTotal = int(n.partTotal.Int64)
 	v.Compilation = n.compilation.Int64 != 0
 	v.Season = int(n.season.Int64)
 	v.PubDateNS = n.pubDate.Int64

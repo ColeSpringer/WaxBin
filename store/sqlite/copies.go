@@ -372,7 +372,7 @@ func refreshCopyDiagnosticsTx(ctx context.Context, tx *sql.Tx, itemID int64) err
 				d.Code, d.Detail = model.DiagDuplicateCopy, p.display
 				break
 			}
-			if book && p.position == e.position && otherEncoding(p.lost.file, e.lost.file) {
+			if book && p.position == e.position && model.OtherEncoding(p.lost.file, e.lost.file) {
 				d.Detail = p.display
 			}
 		}
@@ -558,7 +558,7 @@ func appendItemUpdateTx(ctx context.Context, tx *sql.Tx, itemID int64) error {
 }
 
 // lostEdge is the edge a file held on an item when it left the item: its role,
-// position and window, and the file as otherEncoding reads it.
+// position and window, and the file as model.OtherEncoding reads it.
 type lostEdge struct {
 	role       string
 	position   int
@@ -587,7 +587,7 @@ type altCandidate struct {
 	start, end        sql.NullInt64
 }
 
-// file is the candidate's file as otherEncoding reads it.
+// file is the candidate's file as model.OtherEncoding reads it.
 func (c altCandidate) file() model.File {
 	f := c.quality
 	f.EssenceHash = c.essence
@@ -717,10 +717,10 @@ func promoteLostTx(ctx context.Context, tx *sql.Tx, itemID int64, book bool, los
 	case lost.start.Valid:
 		keep = func(c altCandidate) bool { return c.start == lost.start && c.end == lost.end }
 	case book:
-		// A copy of the part, or another encoding of it at its position (otherEncoding).
+		// A copy of the part, or another encoding of it at its position (model.OtherEncoding).
 		keep = func(c altCandidate) bool {
 			return (lost.file.EssenceHash != "" && c.essence == lost.file.EssenceHash) ||
-				(c.position == lost.position && otherEncoding(lost.file, c.file()))
+				(c.position == lost.position && model.OtherEncoding(lost.file, c.file()))
 		}
 	case lost.role != primaryRole:
 		return nil, nil

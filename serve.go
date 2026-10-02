@@ -814,9 +814,13 @@ func (l *Library) proxyHandlers() map[string]proxy.Handler {
 			// AddRoot validates the spec (mode/media vocabulary, overlaps) against
 			// this server's registered set, which is the catalog that matters: this
 			// process is the one that scans.
+			var opts []AddRootOption
+			if p.AllowAbsent {
+				opts = append(opts, AllowAbsent())
+			}
 			return l.AddRoot(ctx, config.Root{
 				Path: p.Path, Mode: model.Mode(p.Mode), Media: model.MediaType(p.Media), Profile: p.Profile,
-			})
+			}, opts...)
 		},
 		proxy.MethodSetLibraryReadOnly: func(ctx context.Context, raw json.RawMessage) (any, error) {
 			p, err := decodeParams[proxy.SetLibraryReadOnlyParams](raw)

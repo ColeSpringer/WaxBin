@@ -841,14 +841,15 @@ type PodcastRemoveParams struct {
 // AddRootParams is the add_root request payload: a library root spec to
 // register at runtime. The response is the resulting model.Library row. The
 // server validates the spec against its own registered set (Library.AddRoot),
-// so mode/media/profile vocabulary and defaults live server-side. Path should
-// be sent absolute: the server resolves a relative path against its own working
-// directory, not the client's.
+// so mode/media/profile vocabulary and defaults live server-side. Path must be
+// absolute and name a folder; AllowAbsent registers one that does not exist yet.
+// A server that predates AllowAbsent registers any path, so the field rides on 22.
 type AddRootParams struct {
-	Path    string `json:"path"`
-	Mode    string `json:"mode,omitempty"`
-	Media   string `json:"media,omitempty"`
-	Profile string `json:"profile,omitempty"`
+	Path        string `json:"path"`
+	Mode        string `json:"mode,omitempty"`
+	Media       string `json:"media,omitempty"`
+	Profile     string `json:"profile,omitempty"`
+	AllowAbsent bool   `json:"allowAbsent,omitempty"`
 }
 
 // SetLibraryReadOnlyParams is the set_library_read_only request payload; the answer

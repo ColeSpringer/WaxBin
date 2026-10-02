@@ -2120,3 +2120,23 @@ func TestServeProxiedRunSetKind(t *testing.T) {
 		t.Errorf("item = %+v (err %v), want the book", v, err)
 	}
 }
+
+// TestServeProxiedAddRootAllowsAnAbsentRoot: add_root refuses a root that does not exist
+// unless the request allows it to be absent, the option reaching the server's AddRoot.
+func TestServeProxiedAddRootAllowsAnAbsentRoot(t *testing.T) {
+	ctx := context.Background()
+	sock := testsock.Path(t)
+	lib := openServed(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), t.TempDir(), sock)
+	c := dialWhenReady(t, sock)
+	missing := filepath.Join(t.TempDir(), "later")
+	if _, err := c.AddRoot(ctx, proxy.AddRootParams{Path: missing, Mode: "in-place"}); !waxerr.Is(err, waxerr.CodeInvalid) {
+		t.Fatalf("add_root of a missing folder = %v, want CodeInvalid", err)
+	}
+	added, err := c.AddRoot(ctx, proxy.AddRootParams{Path: missing, Mode: "in-place", AllowAbsent: true})
+	if err != nil || added.DisplayRoot != missing {
+		t.Fatalf("add_root allowing it absent = %+v, %v; want it registered", added, err)
+	}
+	if libs, err := lib.Libraries(ctx); err != nil || len(libs) != 2 {
+		t.Fatalf("server libraries = %d (err %v), want the added root", len(libs), err)
+	}
+}

@@ -173,3 +173,134 @@ func TestLibraryRootNamedLikeADiscIsNoDiscFolder(t *testing.T) {
 		}
 	}
 }
+
+// TestPartPosition: a book part's place is its disc and place as its file states them: the
+// tags, else a disc folder and the number its title or file name gives, and in a managed
+// library the "Title - D-NN" name organize gives a part on a disc. A plain "Title - NN" is
+// never read, being a reading-order index as often as a place, and nor is a staged file's
+// name.
+func TestPartPosition(t *testing.T) {
+	root := filepath.Join("/", "lib")
+	for _, c := range []struct {
+		rel           string
+		title         string
+		track, disc   int
+		managed       bool
+		want          int
+		stated, given bool
+	}{
+		{"Author/Tome/x.mp3", "Chapter", 2, 0, true, 2, true, false},
+		{"Author/Tome/x.mp3", "Chapter 3", 0, 0, true, 3, true, false},
+		{"Author/Tome/Tome - 03.mp3", "Tome - 03", 0, 0, true, 0, false, false},
+		{"Author/Tome/Tome - 2-03.mp3", "Tome - 2-03", 0, 0, true, 2*model.DiscStride + 3, true, false},
+		{"Author/Tome/Tome - 2-03.mp3", "Tome - 2-03", 0, 0, false, 0, false, false},
+		{"Author/Tome/Tome - 2-03.mp3", "Chapter", 3, 1, true, model.DiscStride + 3, true, false},
+		{"Author/Tome/Tome - 07.mp3", "Chapter 1", 0, 0, true, 1, true, false},
+		{"Author/Tome/CD2/01.mp3", "01", 0, 0, false, 2*model.DiscStride + 1, true, false},
+		{"Author/Tome/Apollo - 13.mp3", "Apollo - 13", 0, 0, true, 0, false, false},
+		{"Author/Tome/Lecture - 03-2021.mp3", "Lecture - 03-2021", 0, 0, true, 0, false, false},
+		{"Author/Tome/Tome - 05.mp3", "Tome - 05", 0, 0, true, 2*model.DiscStride + 7, true, true},
+	} {
+		tags := &model.Tags{Title: c.title, TrackNo: c.track, DiscNo: c.disc}
+		path := filepath.Join(append([]string{root}, strings.Split(c.rel, "/")...)...)
+		var given *int
+		if c.given {
+			g := 2*model.DiscStride + 7
+			given = &g
+		}
+		got := partPlace(tags, root, path, c.managed, given)
+		if got.position != c.want || got.placeUnstated == c.stated {
+			t.Errorf("partPlace(%s, title %q, track %d, disc %d, managed %v) = %+v, want %d stated %v",
+				c.rel, c.title, c.track, c.disc, c.managed, got, c.want, c.stated)
+		}
+	}
+	if pos, stated := PartPosition(&model.Tags{Title: "Tome - 2-03"}, root, filepath.Join(root, "Tome - 2-03.mp3")); pos != 0 || stated {
+		t.Errorf("a staged part name read as %d (stated %v), want nothing", pos, stated)
+	}
+}
+
+// TestRenamedBookPartsKeepTheirPlaces: a part whose new name no longer states the place
+// its old one gave it keeps the place the catalog holds, and the disc in a part name
+// orders the discs of parts whose tags state none.
+func TestRenamedBookPartsKeepTheirPlaces(t *testing.T) {
+	st, lib, sc, _, root := fastPathFixture(t)
+	ctx := context.Background()
+	narrator := []testaudio.TXXXFrame{{Desc: "NARRATOR", Value: "Reader"}}
+	for i, p := range []struct {
+		rel   string
+		track int
+	}{
+		{"Author/Tome/01.mp3", 1}, {"Author/Tome/02.mp3", 2}, {"Author/Tome/Epilogue.mp3", 0},
+		{"Author/Set/Set - 1-02.mp3", 2}, {"Author/Set/Set - 2-01.mp3", 1},
+	} {
+		album := "Tome"
+		if strings.Contains(p.rel, "/Set/") {
+			album = "Set"
+		}
+		writeUnder(t, root, p.rel, testaudio.MP3Spec{AlbumArtist: "Author", Album: album, Track: p.track,
+			TXXX: narrator, Audio: testaudio.AudioWithSeed(byte(i + 1))})
+	}
+	scanAll(t, sc, lib, false)
+	// The epilogue's name gave it its place; the name organize would give it states none.
+	if err := os.Rename(filepath.Join(root, "Author", "Tome", "Epilogue.mp3"), filepath.Join(root, "Author", "Tome", "Tome - 03.mp3")); err != nil {
+		t.Fatal(err)
+	}
+	scanAll(t, sc, lib, true)
+	books, err := st.QueryItems(ctx, query.New(query.EntityItems).Where("kind", query.OpIs, "book").Build(), "")
+	if err != nil || len(books) != 2 {
+		t.Fatalf("books = %d (err %v), want 2", len(books), err)
+	}
+	for _, b := range books {
+		files, err := st.ItemFiles(ctx, b.PID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var names []string
+		for _, f := range files {
+			names = append(names, filepath.Base(f.DisplayPath))
+		}
+		want := map[string]string{"Tome": "01.mp3,02.mp3,Tome - 03.mp3", "Set": "Set - 1-02.mp3,Set - 2-01.mp3"}[b.Title]
+		if got := strings.Join(names, ","); got != want {
+			t.Errorf("%s reads %s, want %s", b.Title, got, want)
+		}
+	}
+}
+
+// TestManagedPartNamesGiveTheirDiscAndPlace: in a managed library a part named "Title -
+// D-NN", the name organize gives a part when every part kept its place, reads back as that
+// disc and place, so a rebuild orders the book as organize named it; an in-place library's
+// names are its owner's, and a name like "Lecture - 03-2021" is no part name anywhere.
+func TestManagedPartNamesGiveTheirDiscAndPlace(t *testing.T) {
+	for _, mode := range []model.Mode{model.ModeManaged, model.ModeInPlace} {
+		st, lib, sc, root := kindFixture(t, model.MediaAudiobook)
+		lib.Mode = mode
+		ctx := context.Background()
+		for i, name := range []string{"Set - 2-01.mp3", "Set - 1-02.mp3", "Set - 1-01.mp3", "Set - 03-2021.mp3"} {
+			writeUnder(t, root, "Author/Set/"+name, testaudio.MP3Spec{AlbumArtist: "Author", Album: "Set",
+				Audio: testaudio.AudioWithSeed(byte(i + 1))})
+		}
+		scanAll(t, sc, lib, false)
+		books := itemsOfKind(t, st, model.KindBook)
+		if len(books) != 1 {
+			t.Fatalf("%s: books = %d, want 1", mode, len(books))
+		}
+		files, err := st.ItemFiles(ctx, books[0].PID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := map[string]int{}
+		for _, f := range files {
+			got[filepath.Base(f.DisplayPath)] = f.Position
+		}
+		want := map[string]int{"Set - 1-01.mp3": model.DiscStride + 1, "Set - 1-02.mp3": model.DiscStride + 2,
+			"Set - 2-01.mp3": 2*model.DiscStride + 1, "Set - 03-2021.mp3": 0}
+		if mode == model.ModeInPlace {
+			want = map[string]int{"Set - 1-01.mp3": 0, "Set - 1-02.mp3": 0, "Set - 2-01.mp3": 0, "Set - 03-2021.mp3": 0}
+		}
+		for name, pos := range want {
+			if got[name] != pos {
+				t.Errorf("%s: %s at %d, want %d", mode, name, got[name], pos)
+			}
+		}
+	}
+}

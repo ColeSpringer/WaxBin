@@ -16,7 +16,7 @@ import (
 // book its folder holds. That is a book with no ALBUM, whatever made it a book, or a track
 // the rule made one (no force or lock) outside a library declared music and with no cue
 // sheet beside it to make it a rip. It joins the book its ALBUM names, or with no ALBUM
-// the folder's only book when it is a numbered part (partShaped); a track joins only a
+// the folder's only book when it is a numbered part (PartShaped); a track joins only a
 // strong book, one the library's media, an .m4b, an audiobook media type or a narrator
 // credit made, or one already of several parts. A genre alone names what one file holds,
 // so it never pulls its folder in.
@@ -91,8 +91,8 @@ func bookFolder(root, path string) string {
 	return f
 }
 
-// hasCueSheet reports a .cue beside the file, the sheet scanCueSidecar reads.
-func hasCueSheet(path string) bool {
+// HasCueSheet reports a .cue beside the file, the sheet scanCueSidecar reads.
+func HasCueSheet(path string) bool {
 	_, err := os.Stat(sidecarPath(path, ".cue"))
 	return err == nil
 }
@@ -109,19 +109,21 @@ func joins(kind model.Kind, ruled bool, album string, lib *model.Library, rip bo
 // named reports whether an ALBUM names a book: its title, or the title its key was made
 // from (a catalog-only title edit leaves the key as it was). An empty ALBUM names any.
 func named(album string, b model.FolderBook) bool {
-	if album == "" {
+	if album == "" || NamesBook(album, b.Title) {
 		return true
 	}
 	t := identity.MatchKey(cleanBookTitle(album))
-	if t == identity.MatchKey(b.Title) {
-		return true
-	}
 	if rest, ok := strings.CutPrefix(b.Key, "book:"); ok {
 		if seg := strings.Split(rest, "\x1f"); len(seg) == 3 && seg[1] == t {
 			return true
 		}
 	}
 	return false
+}
+
+// NamesBook reports whether an ALBUM names a book of the title.
+func NamesBook(album, title string) bool {
+	return identity.MatchKey(cleanBookTitle(album)) == identity.MatchKey(title)
 }
 
 // names reports whether an ALBUM names a book (named), or, for a book keyed by an
@@ -413,11 +415,11 @@ func (s *Scanner) settleFolder(ctx context.Context, lib *model.Library, root, wa
 			continue
 		}
 		album := strings.TrimSpace(fm.Tags.Album)
-		ok, track := joins(EffectiveKind(&fm.Tags, lib, "", ""), true, album, lib, len(fm.Tags.Chapters) == 0 && hasCueSheet(u.path))
+		ok, track := joins(EffectiveKind(&fm.Tags, lib, "", ""), true, album, lib, len(fm.Tags.Chapters) == 0 && HasCueSheet(u.path))
 		if !ok {
 			continue
 		}
-		if b := settled(album, partShaped(&fm.Tags, u.path), u.known.ItemPID); b != nil && b.ItemPID != u.known.ItemPID && (!track || s.strong(ctx, b)) {
+		if b := settled(album, PartShaped(&fm.Tags, u.path), u.known.ItemPID); b != nil && b.ItemPID != u.known.ItemPID && (!track || s.strong(ctx, b)) {
 			counted := &res.Unchanged
 			if u.outside {
 				counted = nil

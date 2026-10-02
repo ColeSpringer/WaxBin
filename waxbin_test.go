@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -1921,7 +1922,7 @@ func TestEndToEndAudiobook(t *testing.T) {
 	for _, a := range plan.Actions {
 		if a.ItemPID == bookPID {
 			bookAction = true
-			want := filepath.Join("j.r.r. tolkien", "The Hobbit", "The Hobbit.m4b")
+			want := filepath.Join("J.R.R. Tolkien", "The Hobbit", "The Hobbit.m4b")
 			if a.RelDst != want {
 				t.Errorf("audiobook dst = %q, want %q", a.RelDst, want)
 			}
@@ -1991,7 +1992,7 @@ func TestEndToEndMultiFileAudiobookOrganize(t *testing.T) {
 	}
 
 	// Both parts now live together in the author/book folder; none left behind.
-	inFolder, _ := filepath.Glob(filepath.Join(root, "sanderson", "Mistborn", "*.m4b"))
+	inFolder, _ := filepath.Glob(filepath.Join(root, "Sanderson", "Mistborn", "*.m4b"))
 	if len(inFolder) != 2 {
 		t.Errorf("parts in book folder = %v, want 2 co-located", inFolder)
 	}
@@ -2036,9 +2037,155 @@ func TestMultiFileBookSameBasenameOrganize(t *testing.T) {
 	if _, err := lib.ApplyOrganize(ctx, plan); err != nil {
 		t.Fatalf("apply: %v", err)
 	}
-	parts, _ := filepath.Glob(filepath.Join(root, "auth", "OneBook", "*.m4b"))
+	parts, _ := filepath.Glob(filepath.Join(root, "Auth", "OneBook", "*.m4b"))
 	if len(parts) != 2 {
 		t.Errorf("parts in book folder = %v, want 2 uniquely-named", parts)
+	}
+}
+
+// TestImportedBookPartsNeedNoOrganize: a folder import names a book's parts the way
+// organize does, so organizing right after the import moves nothing. The books cover
+// parts numbered by their tags, parts on disc folders with no disc tag, and parts whose
+// places come from their file names, one of them back matter.
+func TestImportedBookPartsNeedNoOrganize(t *testing.T) {
+	ctx := context.Background()
+	root, staging := t.TempDir(), t.TempDir()
+	lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), root)
+	narrated := []testaudio.TXXXFrame{{Desc: "NARRATOR", Value: "Reader"}}
+	seed := byte(1)
+	part := func(rel, album string, track, total int) {
+		writeFile(t, filepath.Join(staging, rel), testaudio.BuildMP3FromSpec(testaudio.MP3Spec{Artist: "Author",
+			Album: album, Track: track, TrackTotal: total, TXXX: narrated, Audio: testaudio.AudioWithSeed(seed)}))
+		seed++
+	}
+	part("Second/01.mp3", "Second Book", 1, 2)
+	part("Second/02.mp3", "Second Book", 2, 2)
+	part("Discs/CD1/01.mp3", "Disc Book", 1, 0)
+	part("Discs/CD1/02.mp3", "Disc Book", 2, 0)
+	part("Discs/CD2/01.mp3", "Disc Book", 1, 0)
+	part("Third/01.mp3", "Third Book", 0, 0)
+	part("Third/02.mp3", "Third Book", 0, 0)
+	part("Third/Epilogue.mp3", "Third Book", 0, 0)
+	// A book whose narrator only one part names: the parts are books by their genre, and
+	// the narrated one lands first to own the book's metadata.
+	narrated = nil
+	for i := 1; i <= 3; i++ {
+		spec := testaudio.MP3Spec{Artist: "Author", Album: "Fourth Book", Genre: "Audiobook", Track: i, TrackTotal: 3,
+			Audio: testaudio.AudioWithSeed(seed)}
+		if i == 2 {
+			spec.TXXX = []testaudio.TXXXFrame{{Desc: "NARRATOR", Value: "Reader"}}
+		}
+		writeFile(t, filepath.Join(staging, "Fourth", fmt.Sprintf("%02d.mp3", i)), testaudio.BuildMP3FromSpec(spec))
+		seed++
+	}
+
+	plan, err := lib.PlanImport(ctx, waxbin.ImportRequest{Source: staging})
+	if err != nil {
+		t.Fatalf("PlanImport: %v", err)
+	}
+	if plan.Importable() != 11 {
+		t.Fatalf("importable = %d, want all 11 parts: %+v", plan.Importable(), plan.Actions)
+	}
+	if rep, err := lib.ApplyImport(ctx, plan); err != nil || rep.Imported != 11 {
+		t.Fatalf("ApplyImport: rep=%+v err=%v", rep, err)
+	}
+	books, err := lib.Query(ctx, query.New(query.EntityItems).Where("kind", query.OpIs, "book").Build(), "")
+	if err != nil || len(books) != 4 {
+		t.Fatalf("books = %d (err %v), want 4", len(books), err)
+	}
+	for _, b := range books {
+		files, err := lib.ItemFiles(ctx, b.PID)
+		if err != nil {
+			t.Fatalf("ItemFiles: %v", err)
+		}
+		var names []string
+		for _, f := range files {
+			names = append(names, filepath.Base(f.DisplayPath))
+		}
+		want := map[string][]string{
+			"Second Book": {"Second Book - 01.mp3", "Second Book - 02.mp3"},
+			"Disc Book":   {"Disc Book - 1-01.mp3", "Disc Book - 1-02.mp3", "Disc Book - 2-01.mp3"},
+			"Third Book":  {"Third Book - 01.mp3", "Third Book - 02.mp3", "Third Book - 03.mp3"},
+			"Fourth Book": {"Fourth Book - 01.mp3", "Fourth Book - 02.mp3", "Fourth Book - 03.mp3"},
+		}[b.Title]
+		if !slices.Equal(names, want) {
+			t.Errorf("%s parts in reading order = %v, want %v", b.Title, names, want)
+		}
+		if b.Title == "Fourth Book" && (b.Narrator != "Reader" || !strings.Contains(b.DisplayPath, "Fourth Book {Reader}")) {
+			t.Errorf("Fourth Book narrator %q at %s, want the narrated part's layout and metadata", b.Narrator, b.DisplayPath)
+		}
+	}
+
+	again, err := lib.PlanOrganize(ctx, query.New(query.EntityItems).Build(), waxbin.OrganizeOptions{ProfileName: "waxbin-native"})
+	if err != nil {
+		t.Fatalf("PlanOrganize: %v", err)
+	}
+	for _, a := range again.Actions {
+		if !a.Skip {
+			t.Errorf("organize would move %s to %s", a.Src, a.RelDst)
+		}
+	}
+}
+
+// TestAcquiredBookPartsImportOneAtATime: a host importing a book's parts one file at a
+// time lands every part, each named by its number, as one book organize leaves alone; a
+// lone part past the first already carries its number.
+func TestAcquiredBookPartsImportOneAtATime(t *testing.T) {
+	ctx := context.Background()
+	root, acq := t.TempDir(), t.TempDir()
+	lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), root)
+	for i := 1; i <= 2; i++ {
+		src := filepath.Join(acq, fmt.Sprintf("part%d.mp3", i))
+		writeFile(t, src, testaudio.BuildMP3FromSpec(testaudio.MP3Spec{Title: "Chapter", Artist: "Author",
+			Album: "Second Book", Track: i, TrackTotal: 2, Audio: testaudio.AudioWithSeed(byte(i))}))
+		res, err := lib.ImportAcquired(ctx, waxbin.AcquiredFile{Path: src}, model.KindBook, waxbin.AcquiredMeta{})
+		if err != nil {
+			t.Fatalf("ImportAcquired part %d: %v", i, err)
+		}
+		if rep, err := lib.ApplyImport(ctx, res.Plan); err != nil || rep.Imported != 1 {
+			t.Fatalf("ApplyImport part %d: rep=%+v err=%v (actions %+v)", i, rep, err, res.Plan.Actions)
+		}
+	}
+	books, err := lib.Query(ctx, query.New(query.EntityItems).Where("kind", query.OpIs, "book").Build(), "")
+	if err != nil || len(books) != 1 {
+		t.Fatalf("books = %d (err %v), want one", len(books), err)
+	}
+	files, err := lib.ItemFiles(ctx, books[0].PID)
+	if err != nil || len(files) != 2 || filepath.Base(files[0].DisplayPath) != "Second Book - 01.mp3" ||
+		filepath.Base(files[1].DisplayPath) != "Second Book - 02.mp3" {
+		t.Fatalf("parts = %+v (err %v), want Second Book - 01 and - 02", files, err)
+	}
+	plan, err := lib.PlanOrganize(ctx, query.New(query.EntityItems).Build(), waxbin.OrganizeOptions{ProfileName: "waxbin-native"})
+	if err != nil || plan.Pending() != 0 {
+		t.Fatalf("organize pending = %+v (err %v), want nothing to move", plan, err)
+	}
+}
+
+// TestOrganizeNamesALonePartByItsNumber: a book with one part cataloged is named by the
+// part's number when it is past the first, the name the part keeps once its siblings
+// arrive, and by the book alone when it is the first.
+func TestOrganizeNamesALonePartByItsNumber(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	narrated := []testaudio.TXXXFrame{{Desc: "NARRATOR", Value: "Reader"}}
+	writeFile(t, filepath.Join(root, "in", "third.mp3"), testaudio.BuildMP3FromSpec(testaudio.MP3Spec{Title: "Chapter",
+		Artist: "Author", Album: "Part Book", Track: 3, TXXX: narrated, Audio: testaudio.AudioWithSeed(1)}))
+	writeFile(t, filepath.Join(root, "in", "whole.mp3"), testaudio.BuildMP3FromSpec(testaudio.MP3Spec{Title: "Whole",
+		Artist: "Author", Album: "Lone Book", Track: 1, TXXX: narrated, Audio: testaudio.AudioWithSeed(2)}))
+	lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), root)
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	plan, err := lib.PlanOrganize(ctx, query.New(query.EntityItems).Build(), waxbin.OrganizeOptions{ProfileName: "waxbin-native"})
+	if err != nil {
+		t.Fatalf("PlanOrganize: %v", err)
+	}
+	got := map[string]string{}
+	for _, a := range plan.Actions {
+		got[filepath.Base(a.Src)] = filepath.Base(a.RelDst)
+	}
+	if got["third.mp3"] != "Part Book - 03.mp3" || got["whole.mp3"] != "Lone Book.mp3" {
+		t.Errorf("organize names = %v, want Part Book - 03.mp3 and Lone Book.mp3", got)
 	}
 }
 

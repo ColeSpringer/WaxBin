@@ -39,8 +39,8 @@ func TestPartShaped(t *testing.T) {
 		{"", 1, 0, false},
 	} {
 		tags := &model.Tags{Title: c.title, TrackNo: c.track, TrackTotal: c.total}
-		if got := partShaped(tags, "/lib/Author/x.mp3"); got != c.want {
-			t.Errorf("partShaped(%q, track %d/%d) = %v, want %v", c.title, c.track, c.total, got, c.want)
+		if got := PartShaped(tags, "/lib/Author/x.mp3"); got != c.want {
+			t.Errorf("PartShaped(%q, track %d/%d) = %v, want %v", c.title, c.track, c.total, got, c.want)
 		}
 	}
 }

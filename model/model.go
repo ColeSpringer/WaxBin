@@ -409,6 +409,9 @@ type ItemView struct {
 	SeriesSeq  string
 	Subtitle   string
 	ASIN       string
+	// PartTotal is the number of parts the book's primary file says it has (its
+	// TRACKTOTAL), 0 when it states none; organize pads part numbers to it.
+	PartTotal int
 
 	// Podcast/episode fields, populated only for episode items. Album and Artist
 	// carry the podcast title through the shared view; these fields hold the

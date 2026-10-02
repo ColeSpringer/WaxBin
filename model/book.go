@@ -28,6 +28,9 @@ type Book struct {
 	Description string
 	Genres      []string // resolved into item_genre links, like a track's
 	Genre       string   // joined display of Genres (the denormalized column)
+	// TrackTotal is the number of parts the primary file's TRACKTOTAL says the book has,
+	// 0 when it states none. Organize pads part numbers to it.
+	TrackTotal int
 }
 
 // Series groups the books of one set, the album abstraction for audiobooks. Books

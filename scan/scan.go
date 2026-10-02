@@ -9,6 +9,7 @@
 package scan
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -307,6 +308,9 @@ type scanCtx struct {
 	open               []string
 	adoptOnly, unadopt bool
 	albums             map[string]string
+	// album and position are FileOptions', for a single-file scan.
+	album    string
+	position *int
 }
 
 // reconcileMissing marks the items behind the index's residual (unwalked) files as
@@ -437,7 +441,7 @@ func (s *Scanner) reread(ctx context.Context, promoted []model.PromotedFile, pre
 // identity, essence-relink, and change detection behave identically. A non-audio path
 // is a no-op.
 func (s *Scanner) ScanFile(ctx context.Context, lib *model.Library, path string) (*Result, error) {
-	res, _, err := s.scanFileForced(ctx, lib, path, "")
+	res, _, err := s.ScanFileWith(ctx, lib, path, FileOptions{})
 	return res, err
 }
 
@@ -448,10 +452,23 @@ func (s *Scanner) ScanFile(ctx context.Context, lib *model.Library, path string)
 // classifies by the rule.
 // It also returns the store's outcome for the file, nil for a path that is not audio.
 func (s *Scanner) ScanFileAs(ctx context.Context, lib *model.Library, path string, kind model.Kind) (*Result, *model.ScanItemResult, error) {
-	return s.scanFileForced(ctx, lib, path, kind)
+	return s.ScanFileWith(ctx, lib, path, FileOptions{Kind: kind})
 }
 
-func (s *Scanner) scanFileForced(ctx context.Context, lib *model.Library, path string, kind model.Kind) (*Result, *model.ScanItemResult, error) {
+// FileOptions steers a single-file scan. Kind is ScanFileAs's. Album names the book a
+// file whose tags name none belongs to, as an import's folder rule found it in the
+// folder the file was staged in: the file joins a book of that title in its folder the
+// way a file whose ALBUM names it does, and a book file takes it as its title. Position
+// is a book part's position as the staged file gave it (PartPosition), for the disc or
+// place the name it was placed under no longer states.
+type FileOptions struct {
+	Kind     model.Kind
+	Album    string
+	Position *int
+}
+
+// ScanFileWith is ScanFileAs with the options an import passes.
+func (s *Scanner) ScanFileWith(ctx context.Context, lib *model.Library, path string, opts FileOptions) (*Result, *model.ScanItemResult, error) {
 	if lib == nil {
 		return nil, nil, waxerr.New(waxerr.CodeInvalid, "scan.ScanFile", "scan request has no library")
 	}
@@ -463,8 +480,8 @@ func (s *Scanner) scanFileForced(ctx context.Context, lib *model.Library, path s
 	res.AudioFiles++
 	// A single-file scan has no preloaded index, so it always takes the full path.
 	// Preserve user-locked fields by default, like a full scan.
-	sc := &scanCtx{cache: artCacheAt(string(lib.Root)), preserveLocks: true}
-	if err := s.scanAudioFile(ctx, lib, string(lib.Root), path, res, sc, kind); err != nil {
+	sc := &scanCtx{cache: artCacheAt(string(lib.Root)), preserveLocks: true, album: strings.TrimSpace(opts.Album), position: opts.Position}
+	if err := s.scanAudioFile(ctx, lib, string(lib.Root), path, res, sc, opts.Kind); err != nil {
 		res.Errored++
 		return res, nil, err
 	}
@@ -570,11 +587,17 @@ func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, p
 	album := strings.TrimSpace(tags.Album)
 	folder := bookFolder(root, path)
 	loose, looseTrack := joins(kind, forceKind == "" && lock == "", album, lib, cueRead.ok)
-	part := album == "" && partShaped(&tags, path)
+	part := album == "" && PartShaped(&tags, path)
+	// An import names the book a file it staged with no ALBUM belongs to, which the file's
+	// new name no longer shows; the rule then reads it as the file's album.
+	albumName, hinted := album, album == "" && sc.album != ""
+	if hinted {
+		albumName = sc.album
+	}
 	var adopt *model.FolderBook
 	walked, by := false, joinedBy(0)
 	if loose && !sc.unadopt {
-		if adopt, walked, by, err = s.adoption(ctx, lib, root, folder, sc, looseTrack, part, album, standing); err != nil {
+		if adopt, walked, by, err = s.adoption(ctx, lib, root, folder, sc, looseTrack, part, albumName, standing); err != nil {
 			return err
 		}
 	}
@@ -587,7 +610,7 @@ func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, p
 	if forceKind != "" {
 		rule := EffectiveKind(&tags, lib, "", "")
 		if ok, track := joins(rule, true, album, lib, cueRead.ok); ok && rule == model.KindTrack {
-			b, _, _, err := s.adoption(ctx, lib, root, folder, sc, track, part, album, standing)
+			b, _, _, err := s.adoption(ctx, lib, root, folder, sc, track, part, albumName, standing)
 			if err != nil {
 				return err
 			}
@@ -605,7 +628,16 @@ func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, p
 	if isBook {
 		// A numbered part with no album is a part of the book its folder names, so the
 		// parts of an untagged book key one book.
-		if part && folder != "" {
+		// WaxBin gave a managed file its name and folder, so where they would give a book's
+		// primary file its title they state none: the book keeps the one the catalog holds.
+		kept := lib.Mode == model.ModeManaged && album == "" && (part && folder != "" || fm.TitleFromName) &&
+			standing != nil && standing.Book != nil && standing.Book.Title != "" && bytes.Equal(standing.Book.Primary, []byte(path))
+		switch {
+		case hinted:
+			tags.Album, folderTitled = sc.album, true
+		case kept:
+			tags.Album, folderTitled = standing.Book.Title, true
+		case part && folder != "":
 			tags.Album, folderTitled = filepath.Base(folder), true
 		}
 		meta.PromoteBookFields(&tags)
@@ -660,14 +692,6 @@ func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, p
 	case album == "" && (fm.TitleFromName || adopt != nil || folderTitled):
 		derived = []string{"title"}
 	}
-	// A book part takes its disc from a disc folder the way a track does, which orders
-	// parts numbered from one on each disc.
-	if isBook && tags.DiscNo == 0 {
-		if disc, ok := identity.FolderDisc(root, path); ok && disc > 0 {
-			tags.DiscNo = disc
-		}
-	}
-
 	// A sibling .cue is examined when the file carries no embedded chapters. A book
 	// applies its tracks as chapters; a non-book single file with a multi-track .cue is
 	// an album rip whose tracks become virtual tracks.
@@ -767,7 +791,7 @@ func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, p
 			Acquisition: tags.Acquisition, Diagnostics: diags, PreserveLocks: sc.preserveLocks,
 		})
 	case isBook:
-		bin := bookInput(lib.ID, file, tags, essenceHash, cover)
+		bin := bookInput(lib.ID, file, tags, essenceHash, cover, partPlace(&tags, root, path, lib.Mode == model.ModeManaged, sc.position))
 		if adopt != nil {
 			bin.OwnKey = bin.Item.IdentityKey
 			bin.Item.IdentityKey, bin.Adopted = adopt.Key, true
@@ -945,8 +969,8 @@ func adoptedPID(sc *scanCtx, fm *meta.FileMeta) model.PID {
 // work, falling back to the essence hash for an untitled book so a rescan still
 // dedups to one item. A file with no embedded chapters contributes a single
 // whole-file chapter so a multi-file book still navigates by part.
-func bookInput(libraryID int64, file model.File, tags model.Tags, essenceHash string, cover *model.ArtImage) model.PutScannedBookInput {
-	title := cleanBookTitle(firstNonEmpty(tags.Album, tags.Title))
+func bookInput(libraryID int64, file model.File, tags model.Tags, essenceHash string, cover *model.ArtImage, at place) model.PutScannedBookInput {
+	title := BookTitle(tags)
 	author := firstNonEmpty(tags.AlbumArtist, tags.Artist)
 	key := BookIdentityKey(tags)
 	if key == "" {
@@ -961,11 +985,6 @@ func bookInput(libraryID int64, file model.File, tags model.Tags, essenceHash st
 		// still has one entry. Marked 'synthetic' so an external .cue outranks it.
 		chapters = []model.Chapter{{Position: 0, Title: tags.Title}}
 		chapterSource = "synthetic"
-	}
-
-	position := partPosition(&tags, string(file.Path))
-	if tags.DiscNo > 0 {
-		position += tags.DiscNo * 100000
 	}
 
 	authorSort := model.SortKey(firstNonEmpty(tags.AlbumArtistSort, tags.ArtistSort, author))
@@ -1000,14 +1019,40 @@ func bookInput(libraryID int64, file model.File, tags model.Tags, essenceHash st
 			Description: tags.Description,
 			Genres:      tags.Genres,
 			Genre:       tags.Genre,
+			TrackTotal:  tags.TrackTotal,
 		},
-		Position:      position,
+		Position:      at.position,
+		DiscUnstated:  at.discUnstated,
+		PlaceUnstated: at.placeUnstated,
 		Chapters:      chapters,
 		ChapterSource: chapterSource,
 		CoverArt:      cover,
 		CustomTags:    tags.Custom,
 		Acquisition:   tags.Acquisition,
 	}
+}
+
+// place is where a book part sits in its book, and which of it the file leaves unstated.
+type place struct {
+	position                    int
+	discUnstated, placeUnstated bool
+}
+
+// partPlace is a book part's place as the file states it, an import's (given) filling
+// what it does not; the catalog keeps what is still unstated for a part it already holds.
+func partPlace(tags *model.Tags, root, path string, managed bool, given *int) place {
+	disc, discStated := partDisc(tags, root, path, managed)
+	at, placeStated := partPosition(tags, path, managed)
+	if given != nil {
+		givenDisc, givenPlace := model.SplitPartPosition(*given)
+		if !discStated {
+			disc, discStated = givenDisc, true
+		}
+		if !placeStated {
+			at, placeStated = givenPlace, true
+		}
+	}
+	return place{position: model.PartPosition(disc, at), discUnstated: !discStated, placeUnstated: !placeStated}
 }
 
 // carvedTracks composes a rip's windows and its .cue sheet into virtual tracks.
@@ -1095,9 +1140,14 @@ var abridgedMarkerRe = regexp.MustCompile(`(?i)\s*[\(\[]\s*(?:un)?abridged\s*[\)
 // It returns "" for a book with no title, author, or identifier, in which case the scanner
 // falls back to the essence hash, an identity a metadata edit does not disturb.
 func BookIdentityKey(tags model.Tags) string {
-	title := cleanBookTitle(firstNonEmpty(tags.Album, tags.Title))
 	author := firstNonEmpty(tags.AlbumArtist, tags.Artist)
-	return identity.BookKey(tags.ASIN, tags.ISBN, author, title, tags.Edition)
+	return identity.BookKey(tags.ASIN, tags.ISBN, author, BookTitle(tags), tags.Edition)
+}
+
+// BookTitle is the title a book takes from a file's tags: the album, else the title, less
+// a trailing abridged or unabridged marker.
+func BookTitle(tags model.Tags) string {
+	return cleanBookTitle(firstNonEmpty(tags.Album, tags.Title))
 }
 
 // cleanBookTitle removes a trailing bracketed abridged/unabridged marker from a

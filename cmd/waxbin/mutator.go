@@ -534,13 +534,17 @@ func (m *mutator) SetLibraryFolderFallback(ctx context.Context, pid model.PID, o
 	return m.lib.SetLibraryFolderFallback(ctx, pid, on)
 }
 
-func (m *mutator) AddRoot(ctx context.Context, spec config.Root) (*model.Library, error) {
+func (m *mutator) AddRoot(ctx context.Context, spec config.Root, allowAbsent bool) (*model.Library, error) {
 	if m.px != nil {
 		return m.px.AddRoot(ctx, proxy.AddRootParams{
-			Path: spec.Path, Mode: string(spec.Mode), Media: string(spec.Media), Profile: spec.Profile,
+			Path: spec.Path, Mode: string(spec.Mode), Media: string(spec.Media), Profile: spec.Profile, AllowAbsent: allowAbsent,
 		})
 	}
-	return m.lib.AddRoot(ctx, spec)
+	var opts []waxbin.AddRootOption
+	if allowAbsent {
+		opts = append(opts, waxbin.AllowAbsent())
+	}
+	return m.lib.AddRoot(ctx, spec, opts...)
 }
 
 // toPIDs converts a wire string slice into a PID slice.

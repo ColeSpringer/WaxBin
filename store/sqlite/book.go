@@ -97,6 +97,10 @@ func (s *Store) PutScannedBook(ctx context.Context, in model.PutScannedBookInput
 
 		affected := newAffectedRollups()
 
+		position, err := keptPositionTx(ctx, tx, itemID, fileID, in)
+		if err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
 		// Attach this file as a part FIRST, so its role (the first part is the
 		// representative 'primary', the rest are 'part', and a copy of a part on disk is
 		// an 'alternate') is known before deciding whether it owns the book's metadata,
@@ -109,11 +113,11 @@ func (s *Store) PutScannedBook(ctx context.Context, in model.PutScannedBookInput
 		// encodes that part and sits at its position.
 		if rekinded {
 			if _, err := tx.ExecContext(ctx, "UPDATE item_file SET position = ? WHERE item_id = ? AND role = 'alternate'",
-				in.Position, itemID); err != nil {
+				position, itemID); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 		}
-		link, err := linkBookFile(ctx, tx, itemID, fileID, in.Position, in.File, in.LibraryID, wasMissing)
+		link, err := linkBookFile(ctx, tx, itemID, fileID, position, in.File, in.LibraryID, wasMissing)
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
@@ -426,19 +430,21 @@ func upsertBook(ctx context.Context, tx *sql.Tx, itemID int64, b model.Book, aff
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO book
 		(item_id, subtitle, author, author_sort, author_id, narrator, series_id, series_seq,
-		 series_seq_sort, year, publisher, asin, isbn, isbn_key, edition, abridged, description, genre, mbid)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		 series_seq_sort, year, publisher, asin, isbn, isbn_key, edition, abridged, description, genre, mbid,
+		 track_total)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(item_id) DO UPDATE SET
 			subtitle=excluded.subtitle, author=excluded.author, author_sort=excluded.author_sort,
 			author_id=excluded.author_id, narrator=excluded.narrator, series_id=excluded.series_id,
 			series_seq=excluded.series_seq, series_seq_sort=excluded.series_seq_sort, year=excluded.year,
 			publisher=excluded.publisher, asin=excluded.asin, isbn=excluded.isbn,
 			isbn_key=excluded.isbn_key, edition=excluded.edition,
-			abridged=excluded.abridged, description=excluded.description, genre=excluded.genre, mbid=excluded.mbid`,
+			abridged=excluded.abridged, description=excluded.description, genre=excluded.genre, mbid=excluded.mbid,
+			track_total=excluded.track_total`,
 		itemID, b.Subtitle, author, authorSort, nullInt64(authorID), b.Narrator, nullInt64(seriesID),
 		b.SeriesSeq, model.SortKey(b.SeriesSeq), nullInt(b.Year), b.Publisher, b.ASIN, b.ISBN,
 		identity.ISBNKey(b.ISBN), b.Edition, nullBool(b.Abridged), b.Description, b.Genre,
-		nullStr(b.MBID)); err != nil {
+		nullStr(b.MBID), nullInt(b.TrackTotal)); err != nil {
 		return err
 	}
 	if err := syncItemGenres(ctx, tx, itemID, b.Genres, b.Genre); err != nil {
@@ -605,7 +611,7 @@ type bookTwin struct {
 // also holds is a copy cataloged as a part of its own before copies became alternates,
 // and folds into one now.
 //
-// Another encoding of the part at its position (otherEncoding) is that part's alternate
+// Another encoding of the part at its position (model.OtherEncoding) is that part's alternate
 // unless it ranks ahead of it the way a track's encodings rank (outranksPrimaryTx); then
 // it takes the part's place and the part becomes its alternate, the replacement leaving
 // the book's timeline as it was. A part read again yields its place the same way to a
@@ -681,7 +687,7 @@ func linkBookFile(ctx context.Context, tx *sql.Tx, bookItemID, fileID int64, pos
 		role, link.demoted, link.replaced = encRole, true, true
 	case role == bookPrimaryRole || role == bookPartRole:
 		better, err := outrankingAlternateTx(ctx, tx, bookItemID, libraryID, f, func(c altCandidate) bool {
-			return c.position == position && otherEncoding(f, c.file())
+			return c.position == position && model.OtherEncoding(f, c.file())
 		})
 		if err != nil || better == nil {
 			if err != nil {
@@ -729,6 +735,33 @@ func linkBookFile(ctx context.Context, tx *sql.Tx, bookItemID, fileID int64, pos
 		return nil, err
 	}
 	return link, nil
+}
+
+// keptPositionTx is the position a book part takes: the one the scan read, with the disc
+// or the place the file does not state (PutScannedBookInput.DiscUnstated, PlaceUnstated)
+// kept from the position the catalog holds for the file, in this book first.
+func keptPositionTx(ctx context.Context, tx *sql.Tx, bookItemID, fileID int64, in model.PutScannedBookInput) (int, error) {
+	if !in.DiscUnstated && !in.PlaceUnstated {
+		return in.Position, nil
+	}
+	var stored int
+	err := tx.QueryRowContext(ctx, `SELECT position FROM item_file WHERE file_id = ?
+		ORDER BY item_id = ? DESC, role = 'alternate' LIMIT 1`, fileID, bookItemID).Scan(&stored)
+	if errors.Is(err, sql.ErrNoRows) {
+		return in.Position, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	disc, place := model.SplitPartPosition(in.Position)
+	storedDisc, storedPlace := model.SplitPartPosition(stored)
+	if in.DiscUnstated {
+		disc = storedDisc
+	}
+	if in.PlaceUnstated {
+		place = storedPlace
+	}
+	return model.PartPosition(disc, place), nil
 }
 
 // rekeyOwnBookTx gives a book of one part the key its file's own tags give it, unless
@@ -797,7 +830,7 @@ func demoteBookPartTx(ctx context.Context, tx *sql.Tx, bookItemID, fileID int64)
 }
 
 // partEncodingTx returns the book's part at position that f is another encoding of
-// (otherEncoding), primary first, with its role, or nil.
+// (model.OtherEncoding), primary first, with its role, or nil.
 func partEncodingTx(ctx context.Context, tx *sql.Tx, bookItemID, fileID int64, position int, f model.File) (*standingPrimary, string, error) {
 	rows, err := tx.QueryContext(ctx, `SELECT f.id, f.path, f.display_path, COALESCE(f.essence_hash, ''), itf.role,
 			COALESCE(f.codec, ''), COALESCE(f.bitrate, 0), COALESCE(f.sample_rate, 0), COALESCE(f.bit_depth, 0),
@@ -818,37 +851,11 @@ func partEncodingTx(ctx context.Context, tx *sql.Tx, bookItemID, fileID int64, p
 			return nil, "", err
 		}
 		q.EssenceHash = sp.essence
-		if otherEncoding(f, *q) {
+		if model.OtherEncoding(f, *q) {
 			return &sp, role, nil
 		}
 	}
 	return nil, "", rows.Err()
-}
-
-// otherEncoding reports whether two files at one part position are that part in two
-// encodings: other audio running as long (encodingLengthsMatch) in another codec, sample
-// rate or bit depth, each known on both sides. The parts of one rip share all of those,
-// which keeps a splitter's parts numbered alike, back matter that sorts last, or parts in
-// disc folders the scan does not read as discs from reading as one part; two encodings in
-// one codec at another bit rate read as two parts for the same reason.
-func otherEncoding(a, b model.File) bool {
-	if a.EssenceHash == "" || b.EssenceHash == "" || a.EssenceHash == b.EssenceHash ||
-		!encodingLengthsMatch(a.DurationMS, b.DurationMS) {
-		return false
-	}
-	differ := func(x, y int) bool { return x > 0 && y > 0 && x != y }
-	return (a.Codec != "" && b.Codec != "" && !strings.EqualFold(a.Codec, b.Codec)) ||
-		differ(a.SampleRate, b.SampleRate) || differ(a.BitDepth, b.BitDepth)
-}
-
-// encodingLengthsMatch reports whether two running times are one recording's in two
-// encodings: both known, and apart by no more than a second or half a percent of the
-// longer, which covers encoder padding and an estimated MP3 length.
-func encodingLengthsMatch(a, b int64) bool {
-	if a <= 0 || b <= 0 {
-		return false
-	}
-	return max(a-b, b-a) <= max(1000, max(a, b)/200)
 }
 
 // attachBookCopyTx is PutScannedBook's copy branch: the file is an alternate of the part
@@ -1580,4 +1587,30 @@ func (s *Store) itemIDKindByPID(ctx context.Context, pid model.PID, op string) (
 		return 0, "", waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
 	return id, kind, nil
+}
+
+// BookByKey returns the book a library holds under an identity key, its primary file in
+// the library, with its parts in reading order (no alternates), or nil when it holds none.
+func (s *Store) BookByKey(ctx context.Context, libraryID int64, key string) (*model.ItemView, []model.ItemFileRef, error) {
+	const op = "store.BookByKey"
+	var pid string
+	err := s.read.QueryRowContext(ctx, `SELECT pi.pid FROM playable_item pi
+		JOIN item_file itf ON itf.item_id = pi.id AND itf.role = 'primary'
+		JOIN file f ON f.id = itf.file_id
+		WHERE pi.kind = 'book' AND pi.identity_key = ? AND f.library_id = ? LIMIT 1`, key, libraryID).Scan(&pid)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil, nil
+	}
+	if err != nil {
+		return nil, nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	view, err := s.ItemByPID(ctx, model.PID(pid))
+	if err != nil {
+		return nil, nil, err
+	}
+	files, err := s.ItemFiles(ctx, model.PID(pid))
+	if err != nil {
+		return nil, nil, err
+	}
+	return view, slices.DeleteFunc(files, func(f model.ItemFileRef) bool { return f.Role == alternateRole }), nil
 }

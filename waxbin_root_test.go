@@ -287,6 +287,7 @@ func TestAddRootConcurrentOverlapSerialized(t *testing.T) {
 		{Path: filepath.Join(base, "lib"), Mode: model.ModeManaged},
 		{Path: filepath.Join(base, "lib", "sub"), Mode: model.ModeManaged},
 	}
+	writeFile(t, filepath.Join(base, "lib", "sub", ".keep"), nil)
 	errs := make([]error, len(specs))
 	var wg sync.WaitGroup
 	wg.Add(len(specs))
@@ -392,4 +393,40 @@ func hasPodcastLib(libs []*model.Library) bool {
 		}
 	}
 	return false
+}
+
+// TestAddRootRefusesWhatAScanCannotWalk: a relative path, a file and a path that does not
+// exist are refused with the reason and register nothing, and a root to be mounted later
+// registers when the caller says it may be absent, its scan finding nothing to mark gone.
+func TestAddRootRefusesWhatAScanCannotWalk(t *testing.T) {
+	ctx := context.Background()
+	lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), t.TempDir())
+	file := filepath.Join(t.TempDir(), "song.mp3")
+	writeFile(t, file, testaudio.BuildMP3("Song", "Artist", "Album", 1))
+	missing := filepath.Join(t.TempDir(), "not", "mounted")
+	for _, tc := range []struct{ name, path, reason string }{
+		{"relative", filepath.Join("relative", "music"), "absolute"},
+		{"a file", file, "not a directory"},
+		{"missing", missing, "does not exist"},
+	} {
+		_, err := lib.AddRoot(ctx, config.Root{Path: tc.path, Mode: model.ModeInPlace})
+		if !waxerr.Is(err, waxerr.CodeInvalid) || !strings.Contains(err.Error(), tc.reason) {
+			t.Errorf("AddRoot(%s) = %v, want CodeInvalid saying %q", tc.name, err, tc.reason)
+		}
+	}
+	if libs, err := lib.Libraries(ctx); err != nil || len(libs) != 1 {
+		t.Fatalf("libraries = %d (err %v), want only the configured root", len(libs), err)
+	}
+
+	added, err := lib.AddRoot(ctx, config.Root{Path: missing, Mode: model.ModeInPlace}, waxbin.AllowAbsent())
+	if err != nil || added.DisplayRoot != missing {
+		t.Fatalf("AddRoot(missing, AllowAbsent) = %+v, %v; want it registered", added, err)
+	}
+	if _, err := lib.AddRoot(ctx, config.Root{Path: file, Mode: model.ModeInPlace}, waxbin.AllowAbsent()); !waxerr.Is(err, waxerr.CodeInvalid) {
+		t.Errorf("AddRoot(a file, AllowAbsent) = %v, want CodeInvalid", err)
+	}
+	res, err := lib.Scan(ctx, waxbin.ScanRequest{LibraryPID: added.PID})
+	if err != nil || res.Total.Missing != 0 || res.Total.AudioFiles != 0 {
+		t.Fatalf("scan of the absent root = %+v (err %v), want nothing found and nothing missing", res, err)
+	}
 }

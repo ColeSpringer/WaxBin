@@ -632,20 +632,20 @@ func TestImportedTrackLandsUnderItsFallbackNames(t *testing.T) {
 	}
 }
 
-// TestImportedTrackIsNotNumberedByItsStagingFolder: the folder an import reads from is the
-// edge of what the folders above a file can name, so tracks handed over in a folder called
-// "CD1" get no disc from it, while a disc folder inside the staged tree still numbers its own.
-func TestImportedTrackIsNotNumberedByItsStagingFolder(t *testing.T) {
+// TestImportedTrackTakesItsDiscFolder: a disc folder names its disc whether it sits
+// inside the staged tree or is the folder an import was handed, one disc of an album
+// imported on its own.
+func TestImportedTrackTakesItsDiscFolder(t *testing.T) {
 	ctx := context.Background()
 	for _, tc := range []struct {
 		name    string
 		staged  func(acq string) (source, file string)
 		wantRel string
 	}{
-		{"a staging folder named like a disc", func(acq string) (string, string) {
+		{"a staging folder that is a disc folder", func(acq string) (string, string) {
 			dir := filepath.Join(acq, "CD1")
 			return dir, filepath.Join(dir, "08 Parking Lot.mp3")
-		}, "08 - Parking Lot.mp3"},
+		}, "1-08 - Parking Lot.mp3"},
 		{"a disc folder inside the staging folder", func(acq string) (string, string) {
 			return acq, filepath.Join(acq, "CD1", "08 Parking Lot.mp3")
 		}, "1-08 - Parking Lot.mp3"},
@@ -961,5 +961,66 @@ func TestTrashedBookMovedBackByHandKeepsItsKind(t *testing.T) {
 		if tracks, _ := lib.Query(ctx, query.New(query.EntityItems).Where("kind", query.OpIs, "track").Build(), ""); len(tracks) != 0 {
 			t.Errorf("elsewhere %v: tracks = %d, want none", elsewhere, len(tracks))
 		}
+	}
+}
+
+// TestFolderImportClassifiesAgainstItsLibrary: a folder import whose only route is a
+// library declared audiobook makes a plain file a book there, by the library's rule and so
+// with no kind lock; the same file into a mixed root is a track; and a folder import forced
+// to a kind its tags and library would not give the file pins it with a lock.
+func TestFolderImportClassifiesAgainstItsLibrary(t *testing.T) {
+	ctx := context.Background()
+	plain := func(staging string, seed byte) {
+		writeFile(t, filepath.Join(staging, "chapter.mp3"), testaudio.BuildMP3FromSpec(testaudio.MP3Spec{Title: "Chapter One",
+			Artist: "Author", Album: "Tome", Track: 1, Genre: "Fiction", Audio: testaudio.AudioWithSeed(seed)}))
+	}
+	imported := func(lib *waxbin.Library, req waxbin.ImportRequest) *model.ItemView {
+		t.Helper()
+		plan, err := lib.PlanImport(ctx, req)
+		if err != nil {
+			t.Fatalf("PlanImport: %v", err)
+		}
+		if rep, err := lib.ApplyImport(ctx, plan); err != nil || rep.Imported != 1 {
+			t.Fatalf("ApplyImport: rep=%+v err=%v (actions %+v)", rep, err, plan.Actions)
+		}
+		items, err := lib.Query(ctx, query.New(query.EntityItems).Build(), "")
+		if err != nil || len(items) != 1 {
+			t.Fatalf("items = %d (err %v), want the import", len(items), err)
+		}
+		return items[0]
+	}
+
+	books, staging := t.TempDir(), t.TempDir()
+	lib, err := waxbin.Open(ctx, waxbin.Options{
+		DBPath: filepath.Join(t.TempDir(), "books.db"),
+		Roots:  []config.Root{{Path: books, Mode: model.ModeManaged, Media: model.MediaAudiobook, Profile: "waxbin-native"}},
+	})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = lib.Close() })
+	plain(staging, 1)
+	if v := imported(lib, waxbin.ImportRequest{Source: staging}); v.Kind != model.KindBook {
+		t.Errorf("import into an audiobook library = %s, want a book", v.Kind)
+	} else if row := kindRow(t, ctx, lib, v.PID); row != nil {
+		t.Errorf("kind row = %+v, want none for a kind the library gives", row)
+	}
+
+	mixed := openManaged(t, ctx, filepath.Join(t.TempDir(), "mixed.db"), t.TempDir())
+	staging = t.TempDir()
+	plain(staging, 2)
+	if v := imported(mixed, waxbin.ImportRequest{Source: staging}); v.Kind != model.KindTrack {
+		t.Errorf("import into a mixed library = %s, want a track", v.Kind)
+	}
+
+	forced := openManaged(t, ctx, filepath.Join(t.TempDir(), "forced.db"), t.TempDir())
+	staging = t.TempDir()
+	plain(staging, 3)
+	v := imported(forced, waxbin.ImportRequest{Source: staging, Kind: model.KindBook})
+	if v.Kind != model.KindBook {
+		t.Errorf("forced import = %s, want a book", v.Kind)
+	}
+	if row := kindRow(t, ctx, forced, v.PID); row == nil || !row.Locked || row.Source != model.SourceUser {
+		t.Errorf("kind row = %+v, want a user lock for the forced kind", row)
 	}
 }

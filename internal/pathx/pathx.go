@@ -13,6 +13,8 @@ package pathx
 import (
 	"path/filepath"
 	"strings"
+
+	"golang.org/x/text/unicode/norm"
 )
 
 // UnderRoot reports whether p is root itself or nested beneath it. Both should
@@ -32,3 +34,9 @@ func SamePath(a, b string) bool {
 	rel, err := filepath.Rel(a, b)
 	return err == nil && rel == "."
 }
+
+// CollisionKey is the key under which two paths name one file on a filesystem that
+// matches names without regard to case or Unicode form, as NTFS, APFS and exFAT do. It
+// folds on every platform, unlike SamePath: a library is laid out so it stays whole on
+// any of them.
+func CollisionKey(p string) string { return strings.ToLower(norm.NFC.String(filepath.Clean(p))) }

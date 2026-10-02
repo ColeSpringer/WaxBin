@@ -110,7 +110,7 @@ func TestBookInput(t *testing.T) {
 		Genres: []string{"Fantasy"}, Genre: "Fantasy",
 	}
 	file := model.File{Path: []byte("/lib/x.m4b"), DurationMS: 5000}
-	in := bookInput(7, file, tags, "ess1", nil)
+	in := bookInput(7, file, tags, "ess1", nil, partPlace(&tags, "/lib", "/lib/x.m4b", false, nil))
 
 	if in.Item.Kind != model.KindBook {
 		t.Errorf("kind = %s, want book", in.Item.Kind)
@@ -141,7 +141,7 @@ func TestBookInput(t *testing.T) {
 
 func TestBookInputUntitledFallsBackToEssence(t *testing.T) {
 	tags := model.Tags{BookSignal: model.BookTagSignal} // no album, title, or ids
-	in := bookInput(1, model.File{}, tags, "essX", nil)
+	in := bookInput(1, model.File{}, tags, "essX", nil, place{})
 	if in.Item.IdentityKey != "essence:essX" {
 		t.Errorf("untitled book key = %q, want essence fallback", in.Item.IdentityKey)
 	}
