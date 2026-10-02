@@ -43,6 +43,17 @@ func (s *Store) setLock(ctx context.Context, itemPID model.PID, field string, lo
 		if !curatableFieldForKind(kind, field) {
 			return waxerr.New(waxerr.CodeInvalid, op, "field "+field+" is not valid for a "+kind+" item")
 		}
+		// A cue track is a window of its rip file, whose kind the whole file decides.
+		if field == model.KindLockField && locked {
+			var windowed bool
+			if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM item_file
+				WHERE item_id = ? AND role = 'primary' AND start_frames IS NOT NULL)`, itemID).Scan(&windowed); err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+			if windowed {
+				return waxerr.New(waxerr.CodeInvalid, op, "a cue track's kind follows its rip file and cannot be locked")
+			}
+		}
 		// Idempotent: if the field is already in the desired lock state, do nothing
 		// and emit no delta. Without this, unlocking a field with no row would
 		// upsert and delete a tag row while still publishing a spurious item change.
@@ -67,15 +78,18 @@ func (s *Store) setLock(ctx context.Context, itemPID model.PID, field string, lo
 		// it guesses "tag" where a curation set records what it was told. Without the
 		// exception an `art lock` followed by `unlock <pid> art` would strand an inert
 		// row claiming a cover that does not exist, and the same for a role slot after
-		// `unlock <pid> art.back`. The exception stops at art: chapters, lyrics and
-		// acquisition record a real user attribution with no overlay to re-report it, so
-		// dropping their row would destroy the only record that the artifact was curated.
+		// `unlock <pid> art.back`. A kind row goes the same way: it records no value, and
+		// once unlocked the next scan derives the kind again, so a row naming who chose it
+		// would report a choice that no longer holds. The exception stops there: chapters,
+		// lyrics and acquisition record a real user attribution with no overlay to
+		// re-report it, so dropping their row would destroy the only record that the
+		// artifact was curated.
 		if !locked {
 			const sparse = `DELETE FROM field_provenance
 				WHERE item_id=? AND field=? AND locked=0 AND (value IS NULL OR value='')`
 			q, args := sparse+" AND source=?", []any{itemID, field, string(model.SourceTag)}
 			_, isRole := model.CutArtRolePrefix(field)
-			if field == "art" || isRole {
+			if field == "art" || isRole || field == model.KindLockField {
 				q, args = sparse, []any{itemID, field}
 			}
 			if _, err := tx.ExecContext(ctx, q, args...); err != nil {

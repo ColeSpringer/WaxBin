@@ -105,7 +105,7 @@ func TestBookInput(t *testing.T) {
 		Title: "Chapter 1", Album: "The Way of Kings (Unabridged)",
 		AlbumArtist: "Brandon Sanderson", Artist: "Brandon Sanderson, Narrator",
 		Series: "Stormlight Archive", SeriesSeq: "1", ASIN: "B00ABC", Year: 2010,
-		IsAudiobook: true, Narrators: []string{"Kate Reading", "Michael Kramer"},
+		BookSignal: model.BookTagSignal, Narrators: []string{"Kate Reading", "Michael Kramer"},
 		TrackNo: 2, DiscNo: 1,
 		Genres: []string{"Fantasy"}, Genre: "Fantasy",
 	}
@@ -140,7 +140,7 @@ func TestBookInput(t *testing.T) {
 }
 
 func TestBookInputUntitledFallsBackToEssence(t *testing.T) {
-	tags := model.Tags{IsAudiobook: true} // no album, title, or ids
+	tags := model.Tags{BookSignal: model.BookTagSignal} // no album, title, or ids
 	in := bookInput(1, model.File{}, tags, "essX", nil)
 	if in.Item.IdentityKey != "essence:essX" {
 		t.Errorf("untitled book key = %q, want essence fallback", in.Item.IdentityKey)

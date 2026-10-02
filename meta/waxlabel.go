@@ -3,6 +3,7 @@ package meta
 import (
 	"context"
 	"errors"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -99,8 +100,7 @@ func (a *Adapter) read(ctx context.Context, path, op string, hashEssence bool) (
 
 	fm := &FileMeta{Tags: tagsFromDoc(doc, fields), Lyrics: lyricsFromDoc(doc, fields), CoverArt: coverFromDoc(doc)}
 	fm.ItemPIDHint = firstTag(doc, tag.Key(model.TagWaxbinItemPID))
-	// Before the filename fallback, so a legacy title beats a filename-derived one,
-	// and before applyBookFields, which reads Album/Title/Comment/Composer.
+	// Before the filename fallback, so a legacy title beats a filename-derived one.
 	if filled := applyLegacyFallback(&fm.Tags, doc); len(filled) > 0 {
 		fm.Diagnostics = append(fm.Diagnostics, model.FileDiagnostic{
 			Code:     model.DiagLegacyOnlyTags,
@@ -113,7 +113,7 @@ func (a *Adapter) read(ctx context.Context, path, op string, hashEssence bool) (
 		fm.Tags.Title = titleFromPath(path)
 	}
 	fm.Tags.Chapters = chaptersFromDoc(doc)
-	applyBookFields(&fm.Tags, fields, path)
+	fm.Tags.BookSignal = bookSignal(fields, path)
 	fm.Diagnostics = append(fm.Diagnostics, audioDiagnostics(doc)...)
 
 	if !hashEssence {
@@ -171,6 +171,10 @@ func tagsFromDoc(doc *waxlabel.Document, fields tag.Tags) model.Tags {
 		AlbumArtistSort: strings.TrimSpace(fields.AlbumArtistSort),
 		ComposerSort:    strings.TrimSpace(fields.ComposerSort),
 		TitleSort:       strings.TrimSpace(fields.TitleSort),
+
+		NarratorRaw: strings.TrimSpace(fields.Narrator),
+		Grouping:    strings.TrimSpace(fields.Grouping),
+		Description: firstNonEmpty(fields.Description, fields.LongDescription),
 
 		MBID:             strings.TrimSpace(fields.MusicBrainz.RecordingID),
 		MBReleaseID:      strings.TrimSpace(fields.MusicBrainz.ReleaseID),
@@ -384,8 +388,8 @@ func parseAcquiredAt(s string) int64 {
 //
 // The exclusions are forced rather than stylistic. Every MusicBrainz ID, ISRC,
 // ASIN/ISBN, NARRATOR, and MEDIATYPE is withheld because identity.TrackKey returns
-// "mbid:"+MBID in preference to "essence:"+hash, and applyBookFields keys a book off
-// NARRATOR/MEDIATYPE. Promoting a value out of a legacy container into either would
+// "mbid:"+MBID in preference to "essence:"+hash, and bookSignal makes a book of a file
+// off NARRATOR/MEDIATYPE. Promoting a value out of a legacy container into either would
 // re-key an existing item on the next full scan, and upsertItem creates a new item on
 // an identity miss, orphaning the old item's PID, play state, ratings, and
 // provenance. The invariant this preserves is that the fallback fills display and
@@ -498,7 +502,7 @@ func applyLegacyFallback(t *model.Tags, doc *waxlabel.Document) []tag.Key {
 	}
 
 	// A legacy container is not projected through tag.Project, so trim here for the
-	// same reason applyBookFields does.
+	// same reason bookSignal does.
 	firstVal := func(k tag.Key) string {
 		fv, ok := best[k]
 		if !ok {
@@ -720,76 +724,100 @@ func chaptersFromDoc(doc *waxlabel.Document) []model.Chapter {
 	return out
 }
 
-// applyBookFields classifies a file as an audiobook and, when it is, fills the
-// spoken-word fields on t from the caller's already-projected tag view.
-// A file is a book when its container is .m4b, its iTunes media kind is audiobook
-// (stik=2), or it carries a narrator credit. Series/sequence and abridged/edition come
-// from conventional tag patterns.
+// audiobookGenres are the genres that say a file is an audiobook, by match key, so a
+// spelling such as "Audio Book" counts and ID3's numeric 183 reaches here as its name.
+// Speech (ID3's 101) and Spoken Word are not among them: they tag a skit on an album or a
+// comedy record as often as a book.
+var audiobookGenres = map[string]bool{"audiobook": true, "audiobooks": true, "audio book": true}
+
+// bookSignal reads what a file's canonical tags say about it being an audiobook: an .m4b
+// name, an iTunes audiobook media kind (MEDIATYPE 2, the stik atom) or a narrator credit,
+// else an audiobook genre. fields is the canonical set, so a genre a legacy container
+// filled in never counts.
+func bookSignal(fields tag.Tags, path string) model.BookSignal {
+	// tag.Project does not trim, and MEDIATYPE is compared exactly while a narrator
+	// counts only when non-empty, so both are trimmed here.
+	if strings.EqualFold(filepath.Ext(path), ".m4b") || strings.TrimSpace(fields.MediaType) == "2" ||
+		strings.TrimSpace(fields.Narrator) != "" {
+		return model.BookTagSignal
+	}
+	for _, raw := range fields.Genres {
+		for _, g := range identity.SplitGenres(raw) {
+			if audiobookGenres[identity.MatchKey(g)] {
+				return model.BookGenreSignal
+			}
+		}
+	}
+	return model.NoBookSignal
+}
+
+// PromoteBookFields fills the spoken-word fields of a file a caller catalogs as a book,
+// from the values the reader kept raw. The narrator falls back to the composer (the
+// m4b and Audiobookshelf convention), the series comes from the grouping, and
+// abridged/edition from the conventional marker in the album, title or comment.
 //
-// The identifier and descriptive fields are read here rather than globally because they
-// are kind-dependent. Publisher rides the same frame as an album's label (TPUB, Vorbis
-// and Matroska PUBLISHER), which the projection hands over as fields.Label; for a book
-// that value is the publisher, and a book consumes no album label, so the two never
-// collide. ASIN, ISBN, SUBTITLE, and EDITION have no typed key in the tag library, so
-// they arrive as custom tags and are promoted out of that map here, as does TIT3, the
-// ID3 subtitle frame other taggers write, which surfaces under its frame id. They stay
-// reserved for a book alone (model.BookOwnedTagKeys is the list the store refuses as
-// custom tags on a book): a music release can carry an ASIN or a subtitle too, and
-// reserving the key globally would drop it from every track that has one, since this
-// function returns early for a non-book.
+// Publisher rides the frame an album's label does (TPUB, Vorbis and Matroska PUBLISHER),
+// which the projection hands over as Label; a book consumes no album label, so the two
+// never collide. ASIN, ISBN, SUBTITLE and EDITION have no typed key in the tag library and
+// arrive as custom tags, as does TIT3, the ID3 subtitle frame other taggers write; they
+// move out of the custom map here. They stay reserved for a book alone
+// (model.BookOwnedTagKeys is the list the store refuses as custom tags on a book), since
+// a music release can carry an ASIN or a subtitle too.
 //
 // Reading them is what lets a value written back to disk read back on a rescan: a field
 // the reader ignores reads as empty however it is tagged, so a rescan would clear a
-// written-back edit from it.
-func applyBookFields(t *model.Tags, fields tag.Tags, path string) {
-	// tag.Project does not trim, so trim the two values whose meaning depends on it:
-	// mediaType is compared exactly, and narrator gates on being non-empty. The rest
-	// reach a helper that trims by contract (firstNonEmpty, parseSeries).
-	narrator := strings.TrimSpace(fields.Narrator)
-	mediaType := strings.TrimSpace(fields.MediaType)
-	isBook := strings.EqualFold(filepath.Ext(path), ".m4b") || mediaType == "2" || narrator != ""
-	if !isBook {
-		return
-	}
-	t.IsAudiobook = true
-	// A common m4b/Audiobookshelf convention stores the narrator in COMPOSER when
-	// there is no dedicated NARRATOR tag.
+// written-back edit from it. The custom map is copied before a key moves out of it, so
+// the map the caller read stays whole, and a field whose key is gone keeps its value, so
+// a second promotion changes nothing.
+func PromoteBookFields(t *model.Tags) {
+	narrator := t.NarratorRaw
 	if narrator == "" {
 		narrator = t.Composer
 	}
 	t.Narrators = SplitCredits(narrator)
-	t.Description = firstNonEmpty(fields.Description, fields.LongDescription)
-	t.Series, t.SeriesSeq = parseSeries(fields.Grouping)
-	t.Abridged, t.Edition = parseAbridged(t.Album, t.Title, t.Comment)
-	if e := takeCustom(t, "EDITION"); e != "" {
+	t.Series, t.SeriesSeq = parseSeries(t.Grouping)
+	t.Custom = maps.Clone(t.Custom)
+	abridged, edition := parseAbridged(t.Album, t.Title, t.Comment)
+	if e, ok := takeCustom(t, "EDITION"); ok && e != "" {
 		// An explicit edition outranks the one the abridged marker implies, and carries
 		// the flag with it when it is the abridged word itself.
-		t.Edition = e
+		edition = e
 		if flag, ok := abridgedWord(e); ok {
-			t.Abridged = &flag
+			abridged = &flag
 		}
+	} else if !ok && t.Edition != "" {
+		edition, abridged = t.Edition, t.Abridged
 	}
-	t.Subtitle = firstNonEmpty(takeCustom(t, "SUBTITLE"), takeCustom(t, "TIT3"))
-	t.Publisher = strings.TrimSpace(fields.Label)
-	t.ASIN = takeCustom(t, "ASIN")
-	t.ISBN = takeCustom(t, "ISBN")
+	t.Abridged, t.Edition = abridged, edition
+	sub, subOK := takeCustom(t, "SUBTITLE")
+	tit3, tit3OK := takeCustom(t, "TIT3")
+	if subOK || tit3OK {
+		t.Subtitle = firstNonEmpty(sub, tit3)
+	}
+	t.Publisher = t.Label
+	if v, ok := takeCustom(t, "ASIN"); ok {
+		t.ASIN = v
+	}
+	if v, ok := takeCustom(t, "ISBN"); ok {
+		t.ISBN = v
+	}
 }
 
 // takeCustom promotes a custom tag to a typed field: it returns the key's first
-// non-empty value and removes it from the custom map, so one value never reports
-// through two surfaces.
-func takeCustom(t *model.Tags, key string) string {
+// non-empty value, and whether the key was there, and removes it from the custom map,
+// so one value never reports through two surfaces.
+func takeCustom(t *model.Tags, key string) (string, bool) {
 	vals, ok := t.Custom[key]
 	if !ok {
-		return ""
+		return "", false
 	}
 	delete(t.Custom, key)
 	for _, v := range vals {
 		if s := strings.TrimSpace(v); s != "" {
-			return s
+			return s, true
 		}
 	}
-	return ""
+	return "", true
 }
 
 // firstTag returns the first value of a canonical key, trimmed, or "". It reads

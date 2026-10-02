@@ -193,7 +193,7 @@ func CreditTagValues(key string, names []string) []string {
 // this map. It packs a name and a sequence into one GROUPING value, so the caller builds
 // that through BookSeriesTagKey and PackSeriesGrouping.
 //
-// Every key here is one applyBookFields reads back, and that is the rule for adding one:
+// Every key here is one PromoteBookFields reads back, and that is the rule for adding one:
 // a key only the writer knows is cleared by the next content-changed rescan, which is the
 // loss the write-back exists to prevent. publisher writes the LABEL key because that is
 // the frame it is read from (TPUB, or PUBLISHER on Vorbis and Matroska), which a book
@@ -218,7 +218,7 @@ var bookFieldTagKeys = map[string][]string{
 	"narrator":    {string(tag.Narrator), string(tag.Composer)},
 	"genre":       {string(tag.Genre)},
 	"year":        {"DATE"}, // same key a track's year uses; no tag constant, matching fieldTagKeys
-	"asin":        {"ASIN"}, // no tag constant: read back by name in applyBookFields
+	"asin":        {"ASIN"}, // no tag constant: read back by name in PromoteBookFields
 	"isbn":        {"ISBN"},
 	"publisher":   {string(tag.Label)},
 	"mbid":        {"MUSICBRAINZ_ALBUMID"}, // a book's release id, read back by bookInput

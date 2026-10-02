@@ -53,6 +53,14 @@ type PutScannedTrackInput struct {
 	// preserved and searchable. A key the user has locked ("tag.<KEY>") is kept over the
 	// scanned value when PreserveLocks is set.
 	CustomTags map[string][]string
+	// LockKind pins the item's kind (KindLockField, source user): the caller forced a
+	// kind the library and the file's tags would not give it. A file that joins an item
+	// as a copy locks nothing.
+	LockKind bool
+	// KindForced says the caller forced the put's kind, so an item whose kind a lock pins
+	// may still change kind in place. An unforced put over such a lock (one set after the
+	// scan read the item) is refused with CodeConflict, for the next scan to read again.
+	KindForced bool
 }
 
 // TagWaxbinItemPID is the custom tag key that carries a backing item's stable WaxBin
@@ -113,6 +121,16 @@ type PutScannedBookInput struct {
 	// PutScannedTrackInput.CustomTags). A multi-file book takes them from the primary
 	// part, matching how its other metadata is owned.
 	CustomTags map[string][]string
+	// Adopted says the scan's folder rule gave the file its book, the file's own tags
+	// naming none: Item carries that book's key, and the file sets the book's title only
+	// as its only file, though as the primary it owns the rest of the book's metadata.
+	// OwnKey is the key the file's own tags give it, which a book the file alone makes up
+	// takes in place of its own unless it says less (an identifier, or an author, lost).
+	Adopted bool
+	OwnKey  string
+	// LockKind and KindForced are PutScannedTrackInput's.
+	LockKind   bool
+	KindForced bool
 }
 
 // PutScannedVirtualTracksInput carries a single-file album rip and the virtual
@@ -190,8 +208,9 @@ type ScanItemResult struct {
 	// audio as the item's primary, or another encoding of its recording. ItemPID names
 	// that item, whose metadata the file's tags did not touch.
 	AttachedAsCopy bool
-	// Joined reports that this write made the file an alternate it was not already: a
-	// new copy, a row no item held, or a part folded into the copy it always was. A copy
+	// Joined reports that this write gave the file an edge it did not hold: a new
+	// alternate (a new copy, a row no item held, a part folded into the copy it always
+	// was), or a book part arriving from another item or moving within the book. A copy
 	// read again, or followed to a new path, is not joined.
 	Joined bool
 	// Promoted lists alternates the write promoted on another item that lost this file
@@ -264,6 +283,35 @@ type ScopedFile struct {
 	Size    int64
 	MTimeNS int64
 	Aux     []AuxObservation
+	// ItemPID and Kind are the item the file backs and its kind, empty for a file backing
+	// none, and KindLocked whether a kind lock pins it: an audiobook library's rule and the
+	// folder rule are checked against them without reading the file.
+	ItemPID    PID
+	Kind       Kind
+	KindLocked bool
+}
+
+// FileStanding is what the catalog holds behind a file a scan reads: the item it backs
+// through a whole-file edge (a primary or part first, else an alternate), that item's
+// kind, the edge's role, whether a kind lock pins the item, and for a book what the
+// folder rule needs of it.
+type FileStanding struct {
+	Path       []byte
+	ItemPID    PID
+	Kind       Kind
+	Role       string
+	KindLocked bool
+	Book       *FolderBook // nil unless the item is a book
+}
+
+// FolderBook is a book as the scan's folder rule sees it: its identity key and title, how
+// many primary or part files it has, and the path of its primary.
+type FolderBook struct {
+	ItemPID PID
+	Key     string
+	Title   string
+	Files   int
+	Primary []byte
 }
 
 // EnrichedTagRow is one file an enrichment write-back should stamp, carrying the
@@ -429,6 +477,13 @@ type Catalog interface {
 	// scanner fast-paths unchanged files and reconciles vanished ones without a
 	// per-file query.
 	LoadScopedFileIndex(ctx context.Context, libraryID int64, scopePrefix []byte) (map[string]ScopedFile, error)
+	// FileStanding returns what the catalog holds behind the file at path: its own row,
+	// else a row holding the same audio, this library's first. It is nil when no item
+	// holds either.
+	FileStanding(ctx context.Context, libraryID int64, path []byte, essence string) (*FileStanding, error)
+	// FolderStanding returns the standing of each cataloged file directly in folder, or in
+	// a disc folder under it (identity.AlbumFolder against root), in path order.
+	FolderStanding(ctx context.Context, libraryID int64, root, folder string) ([]FileStanding, error)
 	// MarkFilesMissing marks the items backing the given files as missing, but only
 	// when every file of an item is in the set (so a multi-file book that lost one
 	// part stays present). Rows are preserved, so a rescan restores present state. An

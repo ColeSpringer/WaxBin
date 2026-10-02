@@ -437,6 +437,7 @@ func TestEnrichmentTagWriteBackSurvivesRescan(t *testing.T) {
 	if err != nil {
 		t.Fatalf("re-read file: %v", err)
 	}
+	meta.PromoteBookFields(&fm.Tags)
 	if fm.Tags.ASIN != "B002V0QUOC" || fm.Tags.ISBN != "9780261102217" || fm.Tags.Publisher != "HarperCollins" {
 		t.Fatalf("file tags after write-back: asin=%q isbn=%q publisher=%q",
 			fm.Tags.ASIN, fm.Tags.ISBN, fm.Tags.Publisher)
@@ -546,6 +547,7 @@ func mergeTags(t *testing.T, path string, spec testaudio.MP3Spec) []byte {
 	if err != nil {
 		t.Fatalf("read for merge: %v", err)
 	}
+	meta.PromoteBookFields(&fm.Tags)
 	spec.Label = fm.Tags.Publisher
 	spec.TXXX = append(spec.TXXX,
 		testaudio.TXXXFrame{Desc: "ASIN", Value: fm.Tags.ASIN},
@@ -731,6 +733,7 @@ func TestEnrichmentWritesBookFieldsToDisk(t *testing.T) {
 	if err != nil {
 		t.Fatalf("re-read file: %v", err)
 	}
+	meta.PromoteBookFields(&fm.Tags)
 	if fm.Tags.Year != 1937 {
 		t.Errorf("file year = %d, want the folded 1937", fm.Tags.Year)
 	}

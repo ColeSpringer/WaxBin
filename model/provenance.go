@@ -230,13 +230,22 @@ var MetadataFields = map[string]bool{
 //
 // Acquisition is the one whose artifact is a whole row in another table rather than a
 // value: the lock says the item's recorded origin is curated, so a scan re-deriving
-// SOURCE_URL tags and an import event both leave it alone.
+// SOURCE_URL tags and an import event both leave it alone. Kind (KindLockField) is the
+// item's kind itself.
 var lockOnlyFields = map[string]bool{
 	"lyrics":      true,
 	"chapters":    true,
 	"art":         true,
 	"acquisition": true,
+	KindLockField: true,
 }
+
+// KindLockField is the lock that pins an item's kind (track or book): a scan classifies
+// the item's files as that kind whatever the library or their tags say. Its row records
+// no value, since the item's own kind is what it pins. An import that forced a kind
+// against the rule writes it (source user); a re-kind drops it, the kind it pinned being
+// gone.
+const KindLockField = "kind"
 
 // IsMetadataField reports whether field is a scalar, one-value curatable/editable
 // metadata field. The structured artifacts (lyrics/chapters/art/acquisition) and

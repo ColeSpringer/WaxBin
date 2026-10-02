@@ -125,7 +125,10 @@ func newLibraryAddCmd(g *globals) *cobra.Command {
 			"spec is validated against the registered roots, inbox folders, and podcast dir " +
 			"(non-overlapping, like init). Re-adding an existing path updates its policy under " +
 			"the same pid. Scan, organize, and import pick the root up immediately; a running " +
-			"watch does not until it restarts.",
+			"watch does not until it restarts. An audiobook root catalogs every file in it as a " +
+			"book; music and mixed roots classify each file by its tags. Re-adding a root as " +
+			"audiobook turns its tracks into books on the next scan; moving one off audiobook " +
+			"takes `scan --force` to re-read its books' tags.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			spec, err := config.ParseRootSpec(args[0])

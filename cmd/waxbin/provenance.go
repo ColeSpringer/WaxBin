@@ -17,7 +17,10 @@ func newLockCmd(g *globals) *cobra.Command {
 			"the same row `waxbin art lock <pid>` does (its --type defaults to track). An " +
 			"auxiliary slot is \"art.<role>\" (art.back, art.disc, art.booklet, " +
 			"art.background), the row `waxbin art lock <pid> --role <role>` writes. That " +
-			"overlap is deliberate: an item's art locks have one home.",
+			"overlap is deliberate: an item's art locks have one home. \"kind\" pins whether " +
+			"the item is a track or a book, so a scan keeps that kind whatever the library or " +
+			"the file's tags say; `scan --force --ignore-locks` re-derives it, and drops the " +
+			"lock when the kind changes.",
 		Args: cobra.MinimumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			m, _, err := g.openMutator(cmd)

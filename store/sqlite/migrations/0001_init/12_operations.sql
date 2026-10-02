@@ -68,6 +68,7 @@ CREATE TABLE trash (
   orig_display  TEXT    NOT NULL,
   trash_path    BLOB    NOT NULL,             -- where it now lives, raw bytes
   trash_display TEXT    NOT NULL,
+  essence_hash  TEXT,                         -- the file's audio, to know it again elsewhere
   reason        TEXT    NOT NULL DEFAULT 'user', -- user|prune|dedup|organize
   size          INTEGER NOT NULL DEFAULT 0,
   trashed_at    INTEGER NOT NULL,             -- unix nanoseconds
@@ -75,6 +76,11 @@ CREATE TABLE trash (
 );
 CREATE INDEX trash_active ON trash(restored_at);
 CREATE INDEX trash_item   ON trash(item_pid);
+-- A scan reading a file no row holds looks here for the item it backed before the trash
+-- took it (FileStanding), by the path it left or its audio, so a file put back by hand
+-- keeps its item's kind lock.
+CREATE INDEX trash_orig    ON trash(orig_path) WHERE restored_at IS NULL;
+CREATE INDEX trash_essence ON trash(essence_hash) WHERE restored_at IS NULL;
 
 -- Staging/inbox import batches. Each import of a staging folder into a managed
 -- library is recorded with its source attribution and a tally of imported/

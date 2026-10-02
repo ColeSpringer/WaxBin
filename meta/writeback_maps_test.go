@@ -62,12 +62,12 @@ func TestBookFieldTagKeys(t *testing.T) {
 	}
 	// series alone has no key here: it packs a name and a sequence into one GROUPING
 	// value through BookSeriesTagKey. Every other book field round-trips; subtitle,
-	// edition, and description were the last to gain a key applyBookFields reads back.
+	// edition, and description were the last to gain a key PromoteBookFields reads back.
 	if _, ok := BookFieldTagKeys("series"); ok {
 		t.Error("BookFieldTagKeys(series): want no mapping (BookSeriesTagKey carries it)")
 	}
 	// The identifier trio must round-trip: every key written here is one
-	// applyBookFields reads back, or a rescan silently clears the value.
+	// PromoteBookFields reads back, or a rescan silently clears the value.
 	for field, want := range map[string]string{
 		"asin": "ASIN", "isbn": "ISBN", "publisher": "LABEL", "mbid": "MUSICBRAINZ_ALBUMID"} {
 		got, ok := BookFieldTagKeys(field)

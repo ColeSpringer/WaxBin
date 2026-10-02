@@ -32,6 +32,15 @@ type bookSpec struct {
 
 func putBook(t *testing.T, st *Store, libID int64, s bookSpec) *model.ScanItemResult {
 	t.Helper()
+	res, err := st.PutScannedBook(context.Background(), bookSpecInput(libID, s))
+	if err != nil {
+		t.Fatalf("put book %s: %v", s.path, err)
+	}
+	return res
+}
+
+// bookSpecInput is the scan input putBook writes, for a test that puts it itself.
+func bookSpecInput(libID int64, s bookSpec) model.PutScannedBookInput {
 	key := identity.BookKey(s.asin, s.isbn, s.author, s.title, s.edition)
 	if key == "" {
 		key = "essence:" + s.essence
@@ -40,7 +49,7 @@ func putBook(t *testing.T, st *Store, libID int64, s bookSpec) *model.ScanItemRe
 	if len(s.genres) > 0 {
 		genre = s.genres[0]
 	}
-	in := model.PutScannedBookInput{
+	return model.PutScannedBookInput{
 		LibraryID: libID,
 		File: model.File{
 			Path: []byte(s.path), DisplayPath: s.path, RelPath: []byte(filepath.Base(s.path)),
@@ -63,11 +72,6 @@ func putBook(t *testing.T, st *Store, libID int64, s bookSpec) *model.ScanItemRe
 		PreserveLocks: s.preserveLocks,
 		CustomTags:    s.custom,
 	}
-	res, err := st.PutScannedBook(context.Background(), in)
-	if err != nil {
-		t.Fatalf("put book %s: %v", s.path, err)
-	}
-	return res
 }
 
 // TestPutScannedBookRelinksOnMove: a moved book file re-links onto its existing row and
@@ -1252,7 +1256,8 @@ func TestBookDoubledPartFoldsOnRescan(t *testing.T) {
 }
 
 // TestBookCopyReadWithoutAnEssence: a book's alternate read again with no essence (so no
-// part can be matched to it) is taken as a part, rather than failing on the missing twin.
+// part can be matched to it) stays an alternate of its book, rather than failing on the
+// missing twin or becoming a second part of the same audio.
 func TestBookCopyReadWithoutAnEssence(t *testing.T) {
 	st, _ := entityFixture(t)
 	ctx := context.Background()
@@ -1278,8 +1283,12 @@ func TestBookCopyReadWithoutAnEssence(t *testing.T) {
 	}
 	spare.essence = ""
 	res := putBook(t, st, lib.ID, spare)
-	if res.AttachedAsCopy || res.ItemPID != r1.ItemPID {
-		t.Errorf("re-read = %+v, want a part of %s", res, r1.ItemPID)
+	if !res.AttachedAsCopy || res.ItemPID != r1.ItemPID {
+		t.Errorf("re-read = %+v, want still an alternate of %s", res, r1.ItemPID)
+	}
+	if n := scalarInt(t, st, `SELECT COUNT(*) FROM item_file itf JOIN playable_item pi ON pi.id = itf.item_id
+		WHERE pi.pid = ? AND itf.role IN ('primary', 'part')`, string(r1.ItemPID)); n != 1 {
+		t.Errorf("parts = %d, want the one", n)
 	}
 }
 

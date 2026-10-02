@@ -17,6 +17,7 @@ type detachedFile struct {
 	path      []byte
 	display   string
 	size      int64
+	essence   sql.NullString
 	// itemPID is the item the file backed, for reporting and for the delta a later
 	// purge emits. It is the primary item when the file has a primary edge, and any
 	// linked item otherwise: a multi-file book's non-first parts are 'part' edges, so
@@ -40,10 +41,10 @@ func (s *Store) TrashFile(ctx context.Context, in model.TrashFileInput) (*model.
 		}
 		res.Promoted = d.promoted
 		_, err = tx.ExecContext(ctx, `INSERT INTO trash
-			(pid, library_id, item_pid, orig_path, orig_display, trash_path, trash_display, reason, size, trashed_at)
-			VALUES (?,?,?,?,?,?,?,?,?,?)`,
+			(pid, library_id, item_pid, orig_path, orig_display, trash_path, trash_display, essence_hash, reason, size, trashed_at)
+			VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
 			string(res.TrashPID), d.libraryID, string(d.itemPID), d.path, d.display,
-			in.TrashPath, in.TrashDisplay, reasonOr(in.Reason), d.size, nowNS())
+			in.TrashPath, in.TrashDisplay, d.essence, reasonOr(in.Reason), d.size, nowNS())
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
@@ -82,10 +83,9 @@ func (s *Store) DetachFile(ctx context.Context, filePID model.PID) (*model.Detac
 // journal, and the promoted files for the caller to re-read.
 func detachFileTx(ctx context.Context, tx *sql.Tx, filePID model.PID, op string) (*detachedFile, error) {
 	var d detachedFile
-	var essence sql.NullString
 	err := tx.QueryRowContext(ctx,
 		"SELECT id, library_id, path, display_path, size, essence_hash FROM file WHERE pid = ?", string(filePID)).
-		Scan(&d.id, &d.libraryID, &d.path, &d.display, &d.size, &essence)
+		Scan(&d.id, &d.libraryID, &d.path, &d.display, &d.size, &d.essence)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, waxerr.New(waxerr.CodeNotFound, op, "no such file: "+string(filePID))
 	}
@@ -103,7 +103,7 @@ func detachFileTx(ctx context.Context, tx *sql.Tx, filePID model.PID, op string)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
-	lost, books, err := itemLostEdgesTx(ctx, tx, d.id, essence.String)
+	lost, books, err := itemLostEdgesTx(ctx, tx, d.id, d.essence.String)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}

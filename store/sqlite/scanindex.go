@@ -25,7 +25,8 @@ func (s *Store) LoadScopedFileIndex(ctx context.Context, libraryID int64, scopeP
 	// fast-pathed: a restored file with the same size+mtime must go through the full
 	// path to flip its item back to present (a fast-path skip would leave it missing).
 	// Such a file, if still gone, simply is not re-reconciled (it is already missing).
-	fq := `SELECT f.id, f.pid, f.path, f.size, f.mtime_ns
+	fq := `SELECT f.id, f.pid, f.path, f.size, f.mtime_ns, COALESCE(pi.pid, ''), COALESCE(pi.kind, ''),
+			EXISTS(SELECT 1 FROM field_provenance fp WHERE fp.item_id = pi.id AND fp.field = 'kind' AND fp.locked = 1)
 		FROM file f
 		LEFT JOIN item_file itf ON itf.file_id = f.id
 		LEFT JOIN playable_item pi ON pi.id = itf.item_id
@@ -52,14 +53,16 @@ func (s *Store) LoadScopedFileIndex(ctx context.Context, libraryID int64, scopeP
 	pathByID := make(map[int64]string)
 	for rows.Next() {
 		var id int64
-		var fpid string
+		var fpid, ipid, kind string
 		var path []byte
 		var size, mtime int64
-		if err := rows.Scan(&id, &fpid, &path, &size, &mtime); err != nil {
+		var locked bool
+		if err := rows.Scan(&id, &fpid, &path, &size, &mtime, &ipid, &kind, &locked); err != nil {
 			rows.Close()
 			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
-		byID[id] = &model.ScopedFile{FilePID: model.PID(fpid), Size: size, MTimeNS: mtime}
+		byID[id] = &model.ScopedFile{FilePID: model.PID(fpid), Size: size, MTimeNS: mtime,
+			ItemPID: model.PID(ipid), Kind: model.Kind(kind), KindLocked: locked}
 		pathByID[id] = string(path)
 	}
 	if err := rows.Err(); err != nil {

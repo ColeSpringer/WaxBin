@@ -120,7 +120,7 @@ func (s *Store) PutScannedVirtualTracks(ctx context.Context, in model.PutScanned
 		// part catalogued before the .cue existed): the file is now a virtual-track
 		// container, so those whole-file edges must go. This is the forward conversion
 		// plain-track -> virtual-tracks; it is a no-op on every later scan.
-		detached, promoted, err := detachWholeFileItems(ctx, tx, fileID, affected)
+		detached, promoted, err := detachWholeFileItems(ctx, tx, fileID, in.File.EssenceHash, affected)
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
@@ -527,16 +527,20 @@ func dropUndeclaredVirtualAlternatesTx(ctx context.Context, tx *sql.Tx, fileID i
 // The affected entities are collected so their rollups stay current. It reports
 // whether it removed anything, so the caller can count the conversion as a change, and
 // the files promoted in place of a lost primary.
-func detachWholeFileItems(ctx context.Context, tx *sql.Tx, fileID int64, affected *affectedRollups) (bool, []model.PromotedFile, error) {
+func detachWholeFileItems(ctx context.Context, tx *sql.Tx, fileID int64, essence string, affected *affectedRollups) (bool, []model.PromotedFile, error) {
 	prev, err := queryInt64sTx(ctx, tx,
 		"SELECT DISTINCT item_id FROM item_file WHERE file_id = ? AND start_frames IS NULL", fileID)
 	if err != nil || len(prev) == 0 {
+		return false, nil, err
+	}
+	dep, err := departingTx(ctx, tx, fileID, essence, 0)
+	if err != nil {
 		return false, nil, err
 	}
 	if _, err := tx.ExecContext(ctx,
 		"DELETE FROM item_file WHERE file_id = ? AND start_frames IS NULL", fileID); err != nil {
 		return false, nil, err
 	}
-	promoted, err := reconcileOrphansTx(ctx, tx, prev, affected)
+	promoted, err := reconcileOrphansTx(ctx, tx, prev, dep, affected)
 	return true, promoted, err
 }

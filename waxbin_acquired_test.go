@@ -3,6 +3,7 @@ package waxbin_test
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -693,5 +694,272 @@ func TestDupSkipImportsRaceToOne(t *testing.T) {
 	items, err := lib.Query(ctx, query.New(query.EntityItems).Build(), "")
 	if err != nil || len(items) != 1 {
 		t.Errorf("items = %d (err %v), want one", len(items), err)
+	}
+}
+
+// TestImportClassifiesASpokenWordGenreAsABook: a folder import classifies by the same rule
+// the scan does, so a file tagged with an audiobook genre routes to the audiobook root as
+// a book, and a plain file imported into a lone audiobook library is a book there.
+func TestImportClassifiesASpokenWordGenreAsABook(t *testing.T) {
+	ctx := context.Background()
+	musicRoot, bookRoot, staging := t.TempDir(), t.TempDir(), t.TempDir()
+	lib := openMediaTyped(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), musicRoot, bookRoot, t.TempDir())
+	writeFile(t, filepath.Join(staging, "01.mp3"), testaudio.BuildMP3FromSpec(testaudio.MP3Spec{Title: "Chapter One",
+		Artist: "Author", Album: "Tome", Track: 1, Genre: "Audiobook", Composer: "Reader", Audio: testaudio.AudioWithSeed(1)}))
+	plan, err := lib.PlanImport(ctx, waxbin.ImportRequest{Source: staging})
+	if err != nil {
+		t.Fatalf("PlanImport: %v", err)
+	}
+	if len(plan.Actions) != 1 || plan.Actions[0].Kind != model.KindBook || plan.Actions[0].Library == nil ||
+		string(plan.Actions[0].Library.Root) != bookRoot {
+		t.Fatalf("actions = %+v, want one book routed to the audiobook root", plan.Actions)
+	}
+	// The book layout names the narrator, here the composer the scan will promote.
+	if !strings.Contains(plan.Actions[0].RelDst, "Tome {Reader}") {
+		t.Errorf("destination %q, want the book layout with its narrator", plan.Actions[0].RelDst)
+	}
+
+	only := t.TempDir()
+	books, err := waxbin.Open(ctx, waxbin.Options{
+		DBPath: filepath.Join(t.TempDir(), "books.db"),
+		Roots:  []config.Root{{Path: only, Mode: model.ModeManaged, Media: model.MediaAudiobook, Profile: "waxbin-native"}},
+	})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = books.Close() })
+	staging2 := t.TempDir()
+	writeFile(t, filepath.Join(staging2, "01.mp3"), testaudio.BuildMP3FromSpec(testaudio.MP3Spec{Title: "Chapter One",
+		Artist: "Author", Album: "Tome", Track: 1, Genre: "Fiction", Audio: testaudio.AudioWithSeed(2)}))
+	plan, err = books.PlanImport(ctx, waxbin.ImportRequest{Source: staging2})
+	if err != nil {
+		t.Fatalf("PlanImport: %v", err)
+	}
+	if len(plan.Actions) != 1 || plan.Actions[0].Kind != model.KindBook {
+		t.Fatalf("actions = %+v, want the plain file planned as a book", plan.Actions)
+	}
+}
+
+// importPlainAsBook imports a file whose tags say nothing about being a book as one, into
+// a mixed managed root, and returns the library, the item and the placed file's path.
+func importPlainAsBook(t *testing.T, ctx context.Context) (*waxbin.Library, model.PID, string) {
+	t.Helper()
+	root, acq := t.TempDir(), t.TempDir()
+	lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), root)
+	src := filepath.Join(acq, "chapter.mp3")
+	writeFile(t, src, testaudio.BuildMP3FromSpec(testaudio.MP3Spec{Title: "Chapter One", Artist: "Tolkien",
+		Album: "The Hobbit", Track: 1, Genre: "Fiction", Audio: testaudio.AudioWithSeed(7)}))
+	res, err := lib.ImportAcquired(ctx, waxbin.AcquiredFile{Path: src}, model.KindBook, waxbin.AcquiredMeta{SourceType: model.SourceManual})
+	if err != nil {
+		t.Fatalf("ImportAcquired: %v", err)
+	}
+	if rep, err := lib.ApplyImport(ctx, res.Plan); err != nil || rep.Imported != 1 {
+		t.Fatalf("apply: rep=%+v err=%v", rep, err)
+	}
+	books, err := lib.Query(ctx, query.New(query.EntityItems).Where("kind", query.OpIs, "book").Build(), "")
+	if err != nil || len(books) != 1 {
+		t.Fatalf("books = %d (err %v), want the import", len(books), err)
+	}
+	return lib, books[0].PID, books[0].DisplayPath
+}
+
+// kindRow returns an item's kind provenance row, nil when it has none.
+func kindRow(t *testing.T, ctx context.Context, lib *waxbin.Library, pid model.PID) *model.FieldProvenance {
+	t.Helper()
+	rows, err := lib.Provenance(ctx, pid)
+	if err != nil {
+		t.Fatalf("provenance: %v", err)
+	}
+	for i := range rows {
+		if rows[i].Field == model.KindLockField {
+			return &rows[i]
+		}
+	}
+	return nil
+}
+
+// TestImportedBookKeepsItsKindAcrossScans: a file imported as a book whose tags do not say
+// it is one carries a kind lock, so a forced rescan keeps it a book with its pid, play
+// state and acquisition row.
+func TestImportedBookKeepsItsKindAcrossScans(t *testing.T) {
+	ctx := context.Background()
+	lib, pid, _ := importPlainAsBook(t, ctx)
+	if row := kindRow(t, ctx, lib, pid); row == nil || !row.Locked || row.Source != model.SourceUser {
+		t.Fatalf("kind row = %+v, want a user lock", row)
+	}
+	if err := lib.Playback().Checkpoint(ctx, "", pid, 4000, nil); err != nil {
+		t.Fatalf("checkpoint: %v", err)
+	}
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{Force: true}); err != nil {
+		t.Fatalf("forced scan: %v", err)
+	}
+	v, err := lib.Get(ctx, pid)
+	if err != nil {
+		t.Fatalf("item after a forced scan: %v", err)
+	}
+	if v.Kind != model.KindBook || v.State != model.StatePresent {
+		t.Errorf("item = %s %s, want a present book", v.Kind, v.State)
+	}
+	if st, err := lib.Playback().State(ctx, "", pid); err != nil || st.PositionMS != 4000 {
+		t.Errorf("play state = %+v (err %v), want the position kept", st, err)
+	}
+	if a, err := lib.Acquisition(ctx, pid); err != nil || a.SourceType != model.SourceManual {
+		t.Errorf("acquisition = %+v (err %v), want the import's manual row", a, err)
+	}
+	if books, _ := lib.Query(ctx, query.New(query.EntityItems).Build(), ""); len(books) != 1 {
+		t.Errorf("items = %d after the scan, want 1", len(books))
+	}
+}
+
+// TestIgnoreLocksRederivesAnImportedKind: an --ignore-locks scan classifies by the tags
+// again, so the imported file is a track, the same item turned into one in place, and its
+// stale kind lock goes.
+func TestIgnoreLocksRederivesAnImportedKind(t *testing.T) {
+	ctx := context.Background()
+	lib, pid, path := importPlainAsBook(t, ctx)
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{Force: true, IgnoreLocks: true}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	tracks, err := lib.Query(ctx, query.New(query.EntityItems).Where("kind", query.OpIs, "track").Build(), "")
+	if err != nil || len(tracks) != 1 || tracks[0].DisplayPath != path {
+		t.Fatalf("tracks = %d (err %v), want the file re-derived as a track", len(tracks), err)
+	}
+	if tracks[0].PID != pid {
+		t.Errorf("track pid = %s, want the book's %s kept", tracks[0].PID, pid)
+	}
+	if row := kindRow(t, ctx, lib, tracks[0].PID); row != nil {
+		t.Errorf("kind row = %+v, want the stale lock gone", row)
+	}
+}
+
+// TestRestoreKeepsALockedKind: a trashed kind-locked book comes back from the trash as
+// the same book, rather than as a new track its tags would make.
+func TestRestoreKeepsALockedKind(t *testing.T) {
+	ctx := context.Background()
+	lib, pid, _ := importPlainAsBook(t, ctx)
+	plan, err := lib.PlanDeletePIDs(ctx, []model.PID{pid}, model.DeleteTrash)
+	if err != nil {
+		t.Fatalf("plan delete: %v", err)
+	}
+	if _, err := lib.ApplyDelete(ctx, plan); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	entries, err := lib.Trash(ctx, false, 0)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("trash = %d (err %v), want 1", len(entries), err)
+	}
+	if err := lib.RestoreTrash(ctx, entries[0].PID); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	v, err := lib.Get(ctx, pid)
+	if err != nil || v.Kind != model.KindBook || v.State != model.StatePresent {
+		t.Fatalf("restored item = %+v (err %v), want the present book", v, err)
+	}
+	if tracks, _ := lib.Query(ctx, query.New(query.EntityItems).Where("kind", query.OpIs, "track").Build(), ""); len(tracks) != 0 {
+		t.Errorf("tracks = %d after the restore, want none", len(tracks))
+	}
+}
+
+// TestLockKindField: kind locks and unlocks like any lock-only field, on a track or a book.
+func TestLockKindField(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), root)
+	writeFile(t, filepath.Join(root, "song.mp3"), testaudio.BuildMP3("Song", "Band", "Record", 1))
+	writeFile(t, filepath.Join(root, "Author", "Tome", "01.mp3"), testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
+		Title: "Chapter", Artist: "Author", Album: "Tome", TXXX: []testaudio.TXXXFrame{{Desc: "NARRATOR", Value: "Reader"}},
+		Audio: testaudio.AudioWithSeed(4)}))
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	for _, title := range []string{"Song", "Tome"} {
+		pid := itemPIDByTitle(t, ctx, lib, title)
+		if err := lib.Lock(ctx, pid, model.KindLockField); err != nil {
+			t.Fatalf("lock %s kind: %v", title, err)
+		}
+		if row := kindRow(t, ctx, lib, pid); row == nil || !row.Locked {
+			t.Fatalf("%s kind row = %+v, want locked", title, row)
+		}
+		if err := lib.Unlock(ctx, pid, model.KindLockField); err != nil {
+			t.Fatalf("unlock %s kind: %v", title, err)
+		}
+		if row := kindRow(t, ctx, lib, pid); row != nil {
+			t.Errorf("%s kind row = %+v after unlock, want none", title, row)
+		}
+	}
+}
+
+// TestMovedFileKeepsItsLockedKind: a kind-locked file moved within its library is found
+// by its audio before its new path has a row, so it keeps its kind and its item.
+func TestMovedFileKeepsItsLockedKind(t *testing.T) {
+	ctx := context.Background()
+	lib, pid, path := importPlainAsBook(t, ctx)
+	moved := filepath.Join(filepath.Dir(filepath.Dir(path)), "Moved", filepath.Base(path))
+	if err := os.MkdirAll(filepath.Dir(moved), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(path, moved); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	v, err := lib.Get(ctx, pid)
+	if err != nil || v.Kind != model.KindBook || v.DisplayPath != moved {
+		t.Fatalf("item = %+v (err %v), want the book at its new path", v, err)
+	}
+}
+
+// TestUnlockedKindLeavesNoRow: unlocking an imported book's kind drops its row, since the
+// next scan derives the kind again and a row would name a choice that no longer holds.
+func TestUnlockedKindLeavesNoRow(t *testing.T) {
+	ctx := context.Background()
+	lib, pid, _ := importPlainAsBook(t, ctx)
+	if err := lib.Unlock(ctx, pid, model.KindLockField); err != nil {
+		t.Fatalf("unlock: %v", err)
+	}
+	if row := kindRow(t, ctx, lib, pid); row != nil {
+		t.Errorf("kind row = %+v after unlock, want none", row)
+	}
+}
+
+// TestTrashedBookMovedBackByHandKeepsItsKind: a kind-locked book's file put back from the
+// trash by hand, at its old path or elsewhere in the library, is found through the trash
+// journal and comes back as the same book rather than a new track.
+func TestTrashedBookMovedBackByHandKeepsItsKind(t *testing.T) {
+	for _, elsewhere := range []bool{false, true} {
+		ctx := context.Background()
+		lib, pid, path := importPlainAsBook(t, ctx)
+		plan, err := lib.PlanDeletePIDs(ctx, []model.PID{pid}, model.DeleteTrash)
+		if err != nil {
+			t.Fatalf("plan delete: %v", err)
+		}
+		if _, err := lib.ApplyDelete(ctx, plan); err != nil {
+			t.Fatalf("delete: %v", err)
+		}
+		entries, err := lib.Trash(ctx, false, 0)
+		if err != nil || len(entries) != 1 {
+			t.Fatalf("trash = %d (err %v), want 1", len(entries), err)
+		}
+		dst := path
+		if elsewhere {
+			dst = filepath.Join(filepath.Dir(filepath.Dir(path)), "Back", filepath.Base(path))
+		}
+		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(entries[0].TrashDisplay, dst); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		v, err := lib.Get(ctx, pid)
+		if err != nil || v.Kind != model.KindBook || v.State != model.StatePresent {
+			t.Errorf("elsewhere %v: item = %+v (err %v), want the present book", elsewhere, v, err)
+		}
+		if tracks, _ := lib.Query(ctx, query.New(query.EntityItems).Where("kind", query.OpIs, "track").Build(), ""); len(tracks) != 0 {
+			t.Errorf("elsewhere %v: tracks = %d, want none", elsewhere, len(tracks))
+		}
 	}
 }

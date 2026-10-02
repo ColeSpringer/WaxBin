@@ -13,7 +13,7 @@ import (
 // change what would be derived from the same bytes: the audit's coverage finding
 // then reports the affected files as not yet derived, and the user can choose to run
 // `scan --force`. A mismatch never triggers a re-derive on its own.
-const currentDiagVersion = 7 // 2: WaxLabel 1.6 (FLAC truncation; WavPack, APE, WMA parsed natively); 3: 1.6.2 (WMA marker chapters); 4: 1.7 and 1.8 (hi-res MP4 and HE-AAC rates, QuickTime and AIFF-C codec names, Opus and ASF essence extents); 5: WaxFlow 446ca31 cue sheets (tolerant reading, data-track boundaries, hidden track one audio); 6: display fallbacks from sort tags and file-name numbers; 7: copies and other encodings attached as alternates (duplicate_copy, alternate_encoding)
+const currentDiagVersion = 8 // 2: WaxLabel 1.6 (FLAC truncation; WavPack, APE, WMA parsed natively); 3: 1.6.2 (WMA marker chapters); 4: 1.7 and 1.8 (hi-res MP4 and HE-AAC rates, QuickTime and AIFF-C codec names, Opus and ASF essence extents); 5: WaxFlow 446ca31 cue sheets (tolerant reading, data-track boundaries, hidden track one audio); 6: display fallbacks from sort tags and file-name numbers; 7: copies and other encodings attached as alternates (duplicate_copy, alternate_encoding); 8: audiobook classification (audiobook genres, an audiobook root's files, the folder rule)
 
 // replaceFileDiagnosticsTx makes one writer's diagnostics for a file exactly ds,
 // deleting that origin's existing rows and inserting the current set. It touches

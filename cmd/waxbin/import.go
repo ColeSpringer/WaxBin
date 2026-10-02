@@ -21,8 +21,9 @@ func newImportCmd(g *globals) *cobra.Command {
 		Long: "Routes a file by --as kind. Tracks and books go through the managed-library " +
 			"import planner; episodes go into the podcast library as pinned episodes. The " +
 			"selected kind is also the scanner override, so --as book can catalog an audiobook " +
-			"whose tags do not identify it as one. WaxBin records an acquisition row with the " +
-			"supplied source metadata.",
+			"whose tags do not identify it as one; that kind is then locked (`waxbin provenance` " +
+			"shows it, `unlock <pid> kind` clears it) so later scans keep it. WaxBin records an " +
+			"acquisition row with the supplied source metadata.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			kind := model.Kind(as)

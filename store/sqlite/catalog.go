@@ -247,6 +247,18 @@ func (s *Store) PutScannedTrack(ctx context.Context, in model.PutScannedTrackInp
 		}
 		res.FilePID = filePID
 
+		// A book whose sole file this is, now read as a track, becomes one in place.
+		rekinded := false
+		if key.id == 0 {
+			id, err := rekindItemForFileTx(ctx, tx, fileID, model.KindTrack, in.Item.IdentityKey, in.PreserveLocks && !in.KindForced, now)
+			if err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+			if id != 0 {
+				key, rekinded = &resolvedItem{id: id}, true
+			}
+		}
+
 		// Record this file's sidecar observations (replacing the prior set) so the next
 		// scan can stat-compare them and re-parse only a changed sidecar, and so a
 		// since-deleted sidecar's observation is pruned rather than forcing a full
@@ -361,7 +373,7 @@ func (s *Store) PutScannedTrack(ctx context.Context, in model.PutScannedTrackInp
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 		}
-		res.MetadataChanged = len(rederived) > 0
+		res.MetadataChanged = len(rederived) > 0 || rekinded
 
 		if err := upsertTrack(ctx, tx, itemID, in.Track); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
@@ -388,7 +400,7 @@ func (s *Store) PutScannedTrack(ctx context.Context, in model.PutScannedTrackInp
 		// Resolve normalized entities and refresh the item's FTS row when the scan
 		// actually changed catalog inputs. A byte-identical rescan skips this work
 		// and emits no entity-side deltas.
-		entitiesResolved := created || res.FileCreated || res.ContentChanged || res.Relinked || res.MetadataChanged
+		entitiesResolved := created || res.FileCreated || res.ContentChanged || res.Relinked || res.MetadataChanged || rekinded
 		if entitiesResolved {
 			// The entities the item leaves (on a retag) lose the track, so collect
 			// them before relinking, and the entities it joins after.
@@ -441,11 +453,15 @@ func (s *Store) PutScannedTrack(ctx context.Context, in model.PutScannedTrackInp
 		// Re-home the file onto this item as its primary, detaching it from any prior
 		// item (an in-place essence change re-keys the file to a new identity, or a copy
 		// takes over an item whose primary is gone).
+		dep, err := departingTx(ctx, tx, fileID, in.File.EssenceHash, itemID)
+		if err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
 		orphans, err := linkPrimaryFile(ctx, tx, itemID, fileID)
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
-		if res.Promoted, err = reconcileOrphansTx(ctx, tx, orphans, affected); err != nil {
+		if res.Promoted, err = reconcileOrphansTx(ctx, tx, orphans, dep, affected); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		if demoted {
@@ -476,6 +492,13 @@ func (s *Store) PutScannedTrack(ctx context.Context, in model.PutScannedTrackInp
 			}
 		}
 
+		kindLocked := false
+		if in.LockKind {
+			if kindLocked, err = lockKindTx(ctx, tx, itemID, now); err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+		}
+
 		// Emit change_log rows only for real changes, so a no-op rescan is silent
 		// (essence-first change detection) and delta consumers don't re-process.
 		if res.FileCreated || res.ContentChanged || res.Relinked {
@@ -488,7 +511,7 @@ func (s *Store) PutScannedTrack(ctx context.Context, in model.PutScannedTrackInp
 		// change, OR a newly attributed origin, so a delta consumer never serves stale
 		// metadata/art after any real change. acqAdded is true only when a row was actually
 		// inserted, so a rescan of an already-attributed item stays silent.
-		if created || res.ContentChanged || res.MetadataChanged || stateChanged || lyricsChanged || artChanged || acqAdded || tagsChanged || demoted {
+		if created || res.ContentChanged || res.MetadataChanged || stateChanged || lyricsChanged || artChanged || acqAdded || tagsChanged || demoted || kindLocked {
 			if err := appendChange(ctx, tx, "item", itemPID, opFor(created)); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
@@ -547,11 +570,12 @@ func (s *Store) resolveFile(ctx context.Context, tx *sql.Tx, in model.PutScanned
 	return id, pid, "", nil
 }
 
-// preserveItemIdentityForFile re-keys the item backing fileID to newKey. It is
+// preserveItemIdentityForFile re-keys the item of kind backing fileID to newKey. It is
 // used only when a file's bytes are unchanged but a new essence algorithm
 // produced a different digest, letting the same audio keep its item identity. It
-// is a no-op when there is no backing item, the key is already current, or another
-// item already owns newKey. An alternate re-keys its item too: a copy re-read before
+// is a no-op when there is no backing item of that kind (a book part read as a track
+// leaves the book's key alone), the key is already current, or another item already
+// owns newKey. An alternate re-keys its item too: a copy re-read before
 // its primary would otherwise fork a new item that the primary then joins, leaving
 // the original item with no file. A windowed edge never does, since a rip's track is a
 // window of the file and not the whole file the new key names.
@@ -564,7 +588,8 @@ func preserveItemIdentityForFile(ctx context.Context, tx *sql.Tx, fileID int64, 
 	err := tx.QueryRowContext(ctx,
 		`SELECT pi.id, pi.identity_key FROM item_file itf
 		 JOIN playable_item pi ON pi.id = itf.item_id
-		 WHERE itf.file_id = ? AND itf.role IN ('primary', 'alternate') AND itf.start_frames IS NULL`, fileID).Scan(&itemID, &curKey)
+		 WHERE itf.file_id = ? AND itf.role IN ('primary', 'alternate') AND itf.start_frames IS NULL AND pi.kind = ?`,
+		fileID, string(kind)).Scan(&itemID, &curKey)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil
 	}

@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/colespringer/waxbin"
+	"github.com/colespringer/waxbin/identity"
 	"github.com/colespringer/waxbin/internal/testaudio"
 	"github.com/colespringer/waxbin/meta"
 	"github.com/colespringer/waxbin/model"
@@ -302,6 +303,7 @@ func TestEditBookFacade(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read tags: %v", err)
 	}
+	meta.PromoteBookFields(&fm.Tags)
 	if fm.Tags.Subtitle != "There and Back Again" {
 		t.Errorf("on-disk SUBTITLE = %q, want the edited subtitle", fm.Tags.Subtitle)
 	}
@@ -346,6 +348,7 @@ func TestEditBookWriteBackRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read tags: %v", err)
 	}
+	meta.PromoteBookFields(&fm.Tags)
 	if fm.Tags.Album != "The Hobbit: Illustrated" {
 		t.Errorf("on-disk ALBUM = %q, want the edited title", fm.Tags.Album)
 	}
@@ -568,6 +571,21 @@ func makeBackingFileVirtual(t *testing.T, ctx context.Context, db string, pid mo
 	}
 }
 
+// storedIdentityKey reads an item's identity key via a direct read.
+func storedIdentityKey(t *testing.T, ctx context.Context, db string, pid model.PID) string {
+	t.Helper()
+	raw, err := sql.Open("sqlite", "file:"+db+"?_pragma=busy_timeout(10000)")
+	if err != nil {
+		t.Fatalf("open raw db: %v", err)
+	}
+	defer raw.Close()
+	var key string
+	if err := raw.QueryRowContext(ctx, "SELECT identity_key FROM playable_item WHERE pid = ?", string(pid)).Scan(&key); err != nil {
+		t.Fatalf("identity key: %v", err)
+	}
+	return key
+}
+
 // countEditDiagnostics counts edit-origin file diagnostics via a direct read.
 func countEditDiagnostics(t *testing.T, ctx context.Context, db string) int {
 	t.Helper()
@@ -634,8 +652,14 @@ func TestEditBookIdentifierReanchors(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read back: %v", err)
 	}
+	meta.PromoteBookFields(&fm.Tags)
 	if fm.Tags.ISBN != "9780261102217" {
 		t.Errorf("on-disk ISBN = %q, want the normalized form the catalog stored", fm.Tags.ISBN)
+	}
+	// The stored key follows the identifier now on disk, rather than leaving the scan's
+	// ISBN adoption to paper over a key that names the author and title.
+	if got, want := storedIdentityKey(t, ctx, db, pid), identity.BookKey("", "9780261102217", "J.R.R. Tolkien", "The Hobbit", ""); got != want {
+		t.Errorf("identity key = %q, want %q", got, want)
 	}
 
 	// Forced, which is the scan that recomputes identity from tags. A plain rescan
@@ -689,6 +713,7 @@ func TestEditBookEditionWriteBackReanchors(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read back: %v", err)
 	}
+	meta.PromoteBookFields(&fm.Tags)
 	if fm.Tags.Edition != "75th Anniversary Edition" || fm.Tags.Subtitle != "There and Back Again" || fm.Tags.Description != blurb {
 		t.Errorf("on-disk edition/subtitle/description = %q/%q/%q, want the edited values",
 			fm.Tags.Edition, fm.Tags.Subtitle, fm.Tags.Description)

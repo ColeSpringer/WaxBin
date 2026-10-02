@@ -2313,9 +2313,12 @@ func (l *Library) reanchorBookIdentity(ctx context.Context, itemPID, filePID mod
 	}
 	// An empty key means the file now has no title/author, so the scanner would fall back
 	// to an essence-anchored key. Leave the stored key alone rather than guess the essence
-	// fallback here; clearing both identity fields is a degenerate edit.
+	// fallback here; clearing both identity fields is a degenerate edit. A file whose tags
+	// name no book title (no ALBUM) keeps the key it has too: the scan keeps such a file in
+	// the book it backs rather than keying it on its own title or file name.
+	meta.PromoteBookFields(&fm.Tags)
 	newKey := scan.BookIdentityKey(fm.Tags)
-	if newKey == "" {
+	if newKey == "" || (strings.TrimSpace(fm.Tags.Album) == "" && strings.HasPrefix(newKey, "book:")) {
 		return
 	}
 	if _, err := l.store.RekeyBook(ctx, itemPID, newKey); err != nil {
@@ -3120,7 +3123,8 @@ func (l *Library) RestoreTrash(ctx context.Context, trashPID model.PID) error {
 		}
 		// Re-catalog before marking the entry restored, so a re-scan failure leaves
 		// the entry active and the restore retryable rather than flagging it done
-		// while the item is still archived.
+		// while the item is still archived. The scan finds the archived item through
+		// the active entry, so a kind lock it holds reads the file back as that kind.
 		if _, err := l.scanner.Scan(ctx, scan.Request{Library: lib, SubPath: entry.OrigDisplay}, nil); err != nil {
 			return err
 		}
@@ -3466,9 +3470,10 @@ type AcquiredResult struct {
 
 // ImportAcquired routes an acquired or manual file by kind. Tracks and books go through
 // the import planner for the matching managed library, with duplicate checks,
-// destination rendering, free-space checks, and acquisition provenance. Episodes go into
-// the internal podcast library under an existing or manual show, pinned by default.
-// WaxBin never performs platform extraction itself.
+// destination rendering, free-space checks, and acquisition provenance; a kind the file's
+// tags and its library would not give it is pinned on the item with a kind lock. Episodes
+// go into the internal podcast library under an existing or manual show, pinned by
+// default. WaxBin never performs platform extraction itself.
 func (l *Library) ImportAcquired(ctx context.Context, file AcquiredFile, kind model.Kind, meta AcquiredMeta) (*AcquiredResult, error) {
 	switch kind {
 	case model.KindTrack, model.KindBook:

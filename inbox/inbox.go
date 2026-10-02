@@ -74,10 +74,14 @@ type Action struct {
 	RelDst  string
 	Size    int64
 	Essence string
-	Kind    model.Kind     // classified/forced media kind (routes template + library)
-	Library *model.Library // target managed library for this file (kind-routed)
-	Outcome Outcome
-	Reason  string
+	Kind    model.Kind // classified/forced media kind (routes template + library)
+	// KindForced says the request forced Kind. The cataloging scan then takes it too,
+	// pinning it when the file's tags would say otherwise; a classified kind is left to
+	// the scan's own rule at the destination.
+	KindForced bool
+	Library    *model.Library // target managed library for this file (kind-routed)
+	Outcome    Outcome
+	Reason     string
 }
 
 // Request configures an import.
@@ -98,8 +102,9 @@ type Request struct {
 	// import lays each file out under its own library's profile rather than one shared
 	// profile. When nil, Profile is used for every file.
 	ProfileFor func(lib *model.Library) organize.Profile
-	// ForceKind overrides tag-based kind classification. Empty classifies from tags
-	// (audiobook -> book, else track); the acquired single-file path forces a kind.
+	// ForceKind overrides the kind rule (scan.EffectiveKind). Empty classifies by the
+	// rule; the acquired single-file path forces a kind, which the cataloging scan pins
+	// with a kind lock when the rule would say otherwise.
 	ForceKind model.Kind
 	// Acquisition, when set, records origin provenance on each imported item.
 	Acquisition *model.AcquisitionInput
@@ -273,17 +278,23 @@ func (s *Service) classify(ctx context.Context, req Request, path string, claims
 		a.Outcome, a.Reason = OutcomeQuarantine, "unreadable: "+err.Error()
 		return a
 	}
-	// Determine the media kind (forced for an acquired file, else tag-classified) and
-	// route to the matching managed library, so a book lands in the audiobook root and
-	// a track in the music root.
+	// Determine the media kind (forced for an acquired file, else by the scan's rule, with
+	// the target library when no route picks one by kind) and route to the matching managed
+	// library, so a book lands in the audiobook root and a track in the music root.
 	kind := req.ForceKind
 	if kind == "" {
-		kind = classifyKind(fm.Tags)
+		var target *model.Library
+		if req.Route == nil {
+			target = req.Library
+		}
+		kind = scan.EffectiveKind(&fm.Tags, target, "", "")
 	}
-	a.Kind = kind
-	// A track renders under the names the scan at its destination will catalog it with.
+	a.Kind, a.KindForced = kind, req.ForceKind != ""
+	// A file renders under the names the scan at its destination will catalog it with.
 	if kind == model.KindTrack {
 		meta.DisplayFallbacks(&fm.Tags, stagingRoot(req.Source, path), path, fm.TitleFromName)
+	} else {
+		meta.PromoteBookFields(&fm.Tags)
 	}
 	lib, reason := resolveLibrary(req, kind)
 	if lib == nil {
@@ -454,7 +465,11 @@ func (s *Service) importOne(ctx context.Context, plan *Plan, a *Action) (int, Fi
 	if lib == nil {
 		lib = plan.Library
 	}
-	_, out, err := s.cataloger.ScanFileAs(ctx, lib, a.Dst, a.Kind)
+	var forced model.Kind
+	if a.KindForced {
+		forced = a.Kind
+	}
+	_, out, err := s.cataloger.ScanFileAs(ctx, lib, a.Dst, forced)
 	if err != nil {
 		return 0, outcome, err
 	}

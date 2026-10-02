@@ -410,6 +410,10 @@ func (s *Store) attachCopyTx(ctx context.Context, tx *sql.Tx, in model.PutScanne
 	}
 	res.ItemPID, res.AttachedAsCopy = itemPID, true
 
+	dep, err := departingTx(ctx, tx, fileID, in.File.EssenceHash, itemID)
+	if err != nil {
+		return waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
 	changed, orphans, err := linkAlternateFile(ctx, tx, itemID, fileID)
 	if err != nil {
 		return waxerr.Wrap(waxerr.CodeIO, op, err)
@@ -420,7 +424,7 @@ func (s *Store) attachCopyTx(ctx context.Context, tx *sql.Tx, in model.PutScanne
 		return waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
 	affected := newAffectedRollups()
-	promoted, err := reconcileOrphansTx(ctx, tx, orphans, affected)
+	promoted, err := reconcileOrphansTx(ctx, tx, orphans, dep, affected)
 	if err != nil {
 		return waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
@@ -464,10 +468,12 @@ func (s *Store) attachCopyTx(ctx context.Context, tx *sql.Tx, in model.PutScanne
 }
 
 // reconcileOrphansTx settles the items a link detached a file from. One that still has a
-// file keeps a primary, its rollups and book total are recomputed, and it emits an
-// update, marked missing when none of its files is on disk; one left with none is
-// deleted. It returns the files promoted to a primary.
-func reconcileOrphansTx(ctx context.Context, tx *sql.Tx, orphans []int64, affected *affectedRollups) ([]model.PromotedFile, error) {
+// file puts an alternate in the place the file left (promoteLostTx: a copy of a book's
+// part fills its gap) or otherwise keeps a primary, its rollups and book total are
+// recomputed, and it emits an update, marked missing when none of its files is on disk;
+// one left with none folds into the item the file joined (foldItemIntoTx) and is deleted.
+// It returns the files promoted.
+func reconcileOrphansTx(ctx context.Context, tx *sql.Tx, orphans []int64, dep departure, affected *affectedRollups) ([]model.PromotedFile, error) {
 	var promoted []model.PromotedFile
 	for _, oid := range orphans {
 		has, err := itemHasAnyFile(ctx, tx, oid)
@@ -478,7 +484,10 @@ func reconcileOrphansTx(ctx context.Context, tx *sql.Tx, orphans []int64, affect
 			return nil, err
 		}
 		if has {
-			p, err := ensurePrimary(ctx, tx, oid)
+			p, err := promoteLostTx(ctx, tx, oid, dep.books[oid], dep.lost[oid])
+			if err == nil && p == nil {
+				p, err = ensurePrimary(ctx, tx, oid)
+			}
 			if err != nil {
 				return nil, err
 			}
@@ -498,6 +507,11 @@ func reconcileOrphansTx(ctx context.Context, tx *sql.Tx, orphans []int64, affect
 				}
 			}
 			continue
+		}
+		if dep.into != 0 && !dep.lost[oid].start.Valid {
+			if err := foldItemIntoTx(ctx, tx, oid, dep.into, dep.file); err != nil {
+				return nil, err
+			}
 		}
 		opid, err := deleteItemCascade(ctx, tx, oid)
 		if err != nil {

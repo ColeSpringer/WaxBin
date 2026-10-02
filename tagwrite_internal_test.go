@@ -1193,6 +1193,7 @@ func TestEnrichmentWriteBackMarksAbandonedParts(t *testing.T) {
 		if err != nil {
 			t.Fatalf("re-read %s: %v", p, err)
 		}
+		meta.PromoteBookFields(&fm.Tags)
 		if fm.Tags.ASIN != "B002V0QUOC" {
 			t.Errorf("%s ASIN = %q, want the enriched identifier on every part", filepath.Base(p), fm.Tags.ASIN)
 		}

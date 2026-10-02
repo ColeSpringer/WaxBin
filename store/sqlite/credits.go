@@ -23,6 +23,8 @@ var staticCurationFieldKinds = map[string]map[model.Kind]bool{
 	"chapters":    {model.KindBook: true},
 	"art":         {model.KindTrack: true, model.KindBook: true},
 	"acquisition": {model.KindTrack: true, model.KindBook: true, model.KindEpisode: true},
+	// An episode's kind comes from its feed, never a scan, so it has nothing to pin.
+	model.KindLockField: {model.KindTrack: true, model.KindBook: true},
 }
 
 // curatableFieldForKind reports whether a provenance/lock field applies to the given

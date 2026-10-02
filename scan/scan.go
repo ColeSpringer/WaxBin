@@ -193,7 +193,8 @@ func (s *Scanner) Scan(ctx context.Context, req Request, hb Heartbeat) (*Result,
 	}
 
 	res := &Result{LibraryPID: req.Library.PID, LibraryName: req.Library.DisplayRoot}
-	sc := &scanCtx{cache: artCacheAt(root), force: req.Force, adopt: req.AdoptStampedPIDs, preserveLocks: !req.IgnoreLocks}
+	sc := &scanCtx{cache: artCacheAt(root), force: req.Force, adopt: req.AdoptStampedPIDs, preserveLocks: !req.IgnoreLocks,
+		folders: map[string]*folderState{}}
 
 	// Preload the scope's file index once, so the walk fast-paths an unchanged file
 	// (size+mtime match) in memory and reconciles vanished ones at end-of-walk, with
@@ -252,6 +253,7 @@ func (s *Scanner) Scan(ctx context.Context, req Request, hb Heartbeat) (*Result,
 		}
 
 		res.FilesSeen++
+		s.leaveFolders(ctx, req.Library, root, walkRoot, path, sc, res)
 		if isAudio(path) {
 			res.AudioFiles++
 			if err := s.scanAudioFile(ctx, req.Library, root, path, res, sc, ""); err != nil {
@@ -269,6 +271,7 @@ func (s *Scanner) Scan(ctx context.Context, req Request, hb Heartbeat) (*Result,
 	if walkErr != nil {
 		return res, waxerr.FromContext(op, walkErr, waxerr.CodeIO)
 	}
+	s.leaveFolders(ctx, req.Library, root, walkRoot, "", sc, res)
 
 	// Reconcile deletions: entries still in the index were never walked, so their
 	// files are gone from disk. The survival gate refuses to act on a transiently
@@ -295,6 +298,15 @@ type scanCtx struct {
 	promoted      []model.PromotedFile  // alternates a write promoted, re-read as the scan ends
 	last          *model.ScanItemResult // the store's outcome for the file put last
 	unreadable    []string              // entries the walk could not read, whose files are not reconciled
+	// The folder rule's state (folder.go): a walk's album folders, the ones it is inside
+	// (innermost last), and whether a read is the rule's second look at a file, written
+	// only when the file joins a book (adoptOnly) or read with the rule left out
+	// (unadopt). folders is nil outside a walk. albums caches the ALBUM of a book's
+	// primary file the rule read.
+	folders            map[string]*folderState
+	open               []string
+	adoptOnly, unadopt bool
+	albums             map[string]string
 }
 
 // reconcileMissing marks the items behind the index's residual (unwalked) files as
@@ -419,8 +431,8 @@ func (s *Scanner) reread(ctx context.Context, promoted []model.PromotedFile, pre
 	return len(files)
 }
 
-// ScanFile catalogs a single audio file under its library, classifying its kind from
-// tags. It is the entry point for re-cataloging one restored or freshly-imported file
+// ScanFile catalogs a single audio file under its library, classifying its kind by
+// EffectiveKind. It is the entry point for re-cataloging one restored or freshly-imported file
 // without walking the whole root; it shares the per-file path with the full scan, so
 // identity, essence-relink, and change detection behave identically. A non-audio path
 // is a no-op.
@@ -429,9 +441,11 @@ func (s *Scanner) ScanFile(ctx context.Context, lib *model.Library, path string)
 	return res, err
 }
 
-// ScanFileAs catalogs a single audio file, forcing its media kind rather than
-// classifying it from tags. Use it when the caller already knows the kind, such as an
-// audiobook whose tags do not identify it as one. An empty kind classifies from tags.
+// ScanFileAs catalogs a single audio file, forcing its media kind rather than classifying
+// it. Use it when the caller already knows the kind, such as an audiobook whose tags do not
+// identify it as one; a forced kind the rule would not give the file (its library, its
+// tags or its folder) is pinned with a kind lock, so later scans keep it. An empty kind
+// classifies by the rule.
 // It also returns the store's outcome for the file, nil for a path that is not audio.
 func (s *Scanner) ScanFileAs(ctx context.Context, lib *model.Library, path string, kind model.Kind) (*Result, *model.ScanItemResult, error) {
 	return s.scanFileForced(ctx, lib, path, kind)
@@ -487,12 +501,15 @@ func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, p
 	if sc.index != nil {
 		if known, ok := sc.index[path]; ok {
 			delete(sc.index, path)
-			if !sc.force && known.Size == info.Size() && known.MTimeNS == info.ModTime().UnixNano() {
+			if !sc.force && known.Size == info.Size() && known.MTimeNS == info.ModTime().UnixNano() && !kindOwed(lib, known) {
 				// Size+mtime match. A sidecar change (a .lrc or .cue edited or gone, a
 				// directory cover changed) still needs the full path, which
 				// reconcileFastPathSidecars reports.
 				if !s.reconcileFastPathSidecars(path, known, sc.cache) {
 					res.Unchanged++
+					if f := sc.folderState(bookFolder(root, path), true); f != nil {
+						f.unread = append(f.unread, unreadFile{path: path, known: known})
+					}
 					return nil
 				}
 			}
@@ -520,6 +537,78 @@ func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, p
 	essenceHash := fm.EssenceHash
 	if essenceHash == "" {
 		essenceHash = contentHash
+	}
+
+	// An audiobook takes the book path: it groups by book identity (so a multi-file book
+	// collapses its parts into one item) and carries contributors and chapters. Everything
+	// else is a music track. The kind is a forced one, a lock's, the library's or the tags'
+	// (EffectiveKind), and the folder rule (folder.go) then gives a file whose tags name no
+	// book the one it belongs to. A file a folder settle reads again is written only when it
+	// joins a book.
+	standing, err := s.cat.FileStanding(ctx, lib.ID, []byte(path), essenceHash)
+	if err != nil {
+		return err
+	}
+	var lock model.Kind
+	if forceKind == "" && standing != nil && standing.KindLocked && sc.preserveLocks {
+		lock = standing.Kind
+	}
+	kind := EffectiveKind(&tags, lib, forceKind, lock)
+	// A sibling .cue is read once, here: a file with no embedded chapters and a sheet
+	// beside it is a rip the folder rule leaves alone, and the sheet is applied below.
+	var cueRead struct {
+		sheet      *meta.CueSheet
+		obs        model.AuxObservation
+		diags      []model.FileDiagnostic
+		refusal    string
+		unread, ok bool
+	}
+	if len(tags.Chapters) == 0 {
+		c := &cueRead
+		c.sheet, c.obs, c.diags, c.refusal, c.unread, c.ok = scanCueSidecar(path)
+	}
+	album := strings.TrimSpace(tags.Album)
+	folder := bookFolder(root, path)
+	loose, looseTrack := joins(kind, forceKind == "" && lock == "", album, lib, cueRead.ok)
+	part := album == "" && partShaped(&tags, path)
+	var adopt *model.FolderBook
+	walked, by := false, joinedBy(0)
+	if loose && !sc.unadopt {
+		if adopt, walked, by, err = s.adoption(ctx, lib, root, folder, sc, looseTrack, part, album, standing); err != nil {
+			return err
+		}
+	}
+	if sc.adoptOnly && adopt == nil {
+		return nil
+	}
+	// A kind forced against the rule, the folder rule included, is pinned, so a later scan
+	// keeps it.
+	lockKind := false
+	if forceKind != "" {
+		rule := EffectiveKind(&tags, lib, "", "")
+		if ok, track := joins(rule, true, album, lib, cueRead.ok); ok && rule == model.KindTrack {
+			b, _, _, err := s.adoption(ctx, lib, root, folder, sc, track, part, album, standing)
+			if err != nil {
+				return err
+			}
+			if b != nil {
+				rule = model.KindBook
+			}
+		}
+		lockKind = forceKind != rule
+	}
+	if adopt != nil {
+		kind = model.KindBook
+	}
+	isBook := kind == model.KindBook
+	folderTitled := false
+	if isBook {
+		// A numbered part with no album is a part of the book its folder names, so the
+		// parts of an untagged book key one book.
+		if part && folder != "" {
+			tags.Album, folderTitled = filepath.Base(folder), true
+		}
+		meta.PromoteBookFields(&tags)
 	}
 
 	rel, err := filepath.Rel(root, path)
@@ -554,28 +643,9 @@ func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, p
 	// for the file, so one that comes back clean clears its own stale rows.
 	diags := append(fm.Diagnostics, sidecarDiags...)
 
-	// A sibling .cue is examined when the file carries no embedded chapters. A book
-	// applies its tracks as chapters; a non-book single file with a multi-track .cue is
-	// an album rip whose tracks become virtual tracks.
-	//
-	// The observation has to be recorded either way. The fast path stat-compares only
-	// the sidecars it holds an observation for, so a track with a .cue that yields no
-	// chapters would read as new on every scan, route to the full path, and re-hash
-	// the audio each time. It is the same trap the directory-cover stat fallback
-	// already avoids.
-	// An audiobook takes the book path: it groups by book identity (so a multi-file
-	// book collapses its parts into one item) and carries contributors and chapters.
-	// Everything else is a music track. A forced kind from the caller wins over the
-	// tag heuristic.
-	isBook := tags.IsAudiobook
-	switch forceKind {
-	case model.KindBook:
-		isBook = true
-	case model.KindTrack:
-		isBook = false
-	}
 	// A track's empty display fields fall back to its sort tags, file name and (when the
-	// library opts in) folders. derived names what the file's tags do not state.
+	// library opts in) folders. derived names what the file's tags do not state, which for
+	// a book is its title when no album tag names it.
 	var derived []string
 	switch {
 	case !isBook:
@@ -587,7 +657,7 @@ func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, p
 		if lib.FolderFallback && lib.Mode == model.ModeInPlace {
 			derived = append(derived, folderNames(&tags, rel)...)
 		}
-	case fm.TitleFromName && strings.TrimSpace(tags.Album) == "":
+	case album == "" && (fm.TitleFromName || adopt != nil || folderTitled):
 		derived = []string{"title"}
 	}
 	// A book part takes its disc from a disc folder the way a track does, which orders
@@ -598,6 +668,15 @@ func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, p
 		}
 	}
 
+	// A sibling .cue is examined when the file carries no embedded chapters. A book
+	// applies its tracks as chapters; a non-book single file with a multi-track .cue is
+	// an album rip whose tracks become virtual tracks.
+	//
+	// The observation has to be recorded either way. The fast path stat-compares only
+	// the sidecars it holds an observation for, so a track with a .cue that yields no
+	// chapters would read as new on every scan, route to the full path, and re-hash
+	// the audio each time. It is the same trap the directory-cover stat fallback
+	// already avoids.
 	var cueSheet *meta.CueSheet
 	// carve is the sheet's windows, one per track that can actually become a virtual
 	// track. Its length decides below whether this file is a rip, since a virtual track
@@ -608,10 +687,10 @@ func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, p
 	var cueDropped []string
 	cueUnread, cueRefusal := false, ""
 	if len(tags.Chapters) == 0 {
-		if sheet, cueObs, cueDiags, refusal, unread, ok := scanCueSidecar(path); ok {
-			aux = append(aux, cueObs)
-			diags = append(diags, cueDiags...)
-			cueSheet, cueUnread, cueRefusal = sheet, unread, refusal
+		if cueRead.ok {
+			aux = append(aux, cueRead.obs)
+			diags = append(diags, cueRead.diags...)
+			cueSheet, cueUnread, cueRefusal = cueRead.sheet, cueRead.unread, cueRead.refusal
 		}
 		switch {
 		case cueSheet == nil:
@@ -677,6 +756,7 @@ func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, p
 	// reaches virtualTracksInput at all.
 	diags = append(diags, cueSheetDiag(cueSheet, cueDropped, cueRefusal, disposition)...)
 	var out *model.ScanItemResult
+	var bookKey string
 	switch {
 	case len(rip) > 0:
 		// A single file with a multi-track .cue is a single-file album rip: each cue
@@ -688,6 +768,11 @@ func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, p
 		})
 	case isBook:
 		bin := bookInput(lib.ID, file, tags, essenceHash, cover)
+		if adopt != nil {
+			bin.OwnKey = bin.Item.IdentityKey
+			bin.Item.IdentityKey, bin.Adopted = adopt.Key, true
+		}
+		bookKey = bin.Item.IdentityKey
 		// With no embedded chapters, a sibling .cue fills them (marked source='cue' so
 		// embedded chapters still win). Its observation was recorded above whether or not
 		// it yielded any; apply the chapters only when it did.
@@ -699,6 +784,7 @@ func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, p
 		bin.Diagnostics = diags
 		bin.PreserveLocks = sc.preserveLocks
 		bin.Derived = derived
+		bin.LockKind, bin.KindForced = lockKind, forceKind != ""
 		out, err = s.cat.PutScannedBook(ctx, bin)
 	default:
 		out, err = s.cat.PutScannedTrack(ctx, model.PutScannedTrackInput{
@@ -721,6 +807,8 @@ func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, p
 			Diagnostics:      diags,
 			PreserveLocks:    sc.preserveLocks,
 			Derived:          derived,
+			LockKind:         lockKind,
+			KindForced:       forceKind != "",
 		})
 	}
 	if err != nil {
@@ -728,26 +816,23 @@ func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, p
 	}
 	sc.promoted = append(sc.promoted, out.Promoted...)
 	sc.last = out
+	counted := countOutcome(res, out)
 
-	switch {
-	case out.ItemCreated:
-		res.ItemsCreated++
-	case out.AttachedAsCopy && out.Joined:
-		res.Copies++
-	case out.AttachedAsCopy && out.ContentChanged:
-		res.ItemsUpdated++
-	case out.AttachedAsCopy:
-		res.Unchanged++
-	case out.ContentChanged, out.MetadataChanged, out.FileCreated:
-		res.ItemsUpdated++
-	case out.SidecarsChanged:
-		// A sidecar-only change (an edited .lrc, a new cover) reaches the full path but
-		// changes no audio bytes, so ItemCreated and ContentChanged are both false.
-		// Without this case the scan reports changed=false, and watch mode's downstream
-		// schedulers are silently skipped.
-		res.SidecarsUpdated++
-	default:
-		res.Unchanged++
+	// What the folder rule needs of the folder later: a book a stated album named, and a
+	// file whose tags named no book of its own, unless a book read here took it in by name.
+	// A part the folder's only book took as the walk passed is checked again at the settle.
+	only := walked && by == byOnly
+	if f := sc.folderState(folder, (!walked || only) && (loose || (isBook && album != ""))); f != nil {
+		switch {
+		case isBook && album != "" && !walked:
+			f.addBook(folderBook{
+				FolderBook: model.FolderBook{ItemPID: out.ItemPID, Key: bookKey, Title: cleanBookTitle(album)},
+				strong:     lib.MediaType() == model.MediaAudiobook || tags.BookSignal == model.BookTagSignal,
+			})
+		case loose && (!walked || only):
+			f.loose = append(f.loose, looseFile{path: path, album: album, track: looseTrack, part: part, only: only,
+				item: out.ItemPID, counted: counted})
+		}
 	}
 	if out.Relinked {
 		res.Relinked++
@@ -761,6 +846,37 @@ func (s *Scanner) scanAudioFile(ctx context.Context, lib *model.Library, root, p
 		}
 	}
 	return nil
+}
+
+// countOutcome adds a put's outcome to the result and returns the counter it took. The
+// outcomes partition the files (see Result).
+func countOutcome(res *Result, out *model.ScanItemResult) *int {
+	switch {
+	case out.ItemCreated:
+		res.ItemsCreated++
+		return &res.ItemsCreated
+	case out.AttachedAsCopy && out.Joined:
+		res.Copies++
+		return &res.Copies
+	case out.AttachedAsCopy && out.ContentChanged:
+		res.ItemsUpdated++
+		return &res.ItemsUpdated
+	case out.AttachedAsCopy:
+		res.Unchanged++
+		return &res.Unchanged
+	case out.ContentChanged, out.MetadataChanged, out.FileCreated, out.Joined:
+		res.ItemsUpdated++
+		return &res.ItemsUpdated
+	case out.SidecarsChanged:
+		// A sidecar-only change (an edited .lrc, a new cover) reaches the full path but
+		// changes no audio bytes, so ItemCreated and ContentChanged are both false.
+		// Without this case the scan reports changed=false, and watch mode's downstream
+		// schedulers are silently skipped.
+		res.SidecarsUpdated++
+		return &res.SidecarsUpdated
+	}
+	res.Unchanged++
+	return &res.Unchanged
 }
 
 // countAudio counts the audio files under root the walk would visit, by its own skip
@@ -847,9 +963,9 @@ func bookInput(libraryID int64, file model.File, tags model.Tags, essenceHash st
 		chapterSource = "synthetic"
 	}
 
-	position := tags.TrackNo
+	position := partPosition(&tags, string(file.Path))
 	if tags.DiscNo > 0 {
-		position = tags.DiscNo*100000 + tags.TrackNo
+		position += tags.DiscNo * 100000
 	}
 
 	authorSort := model.SortKey(firstNonEmpty(tags.AlbumArtistSort, tags.ArtistSort, author))
@@ -974,9 +1090,10 @@ var abridgedMarkerRe = regexp.MustCompile(`(?i)\s*[\(\[]\s*(?:un)?abridged\s*[\)
 // same key PutScannedBook resolves the item by, from the title (ALBUM), author
 // (ALBUMARTIST), and any identifiers. It is exported so the on-disk write-back re-anchor
 // can recompute a book's identity from its file after a title or author edit lands there,
-// keeping the catalog's stored key in step with what a rescan will derive. It returns ""
-// for a book with no title, author, or identifier, in which case the scanner falls back
-// to the essence hash, an identity a metadata edit does not disturb.
+// keeping the catalog's stored key in step with what a rescan will derive. tags must have
+// had meta.PromoteBookFields applied, which is what fills the identifiers and the edition.
+// It returns "" for a book with no title, author, or identifier, in which case the scanner
+// falls back to the essence hash, an identity a metadata edit does not disturb.
 func BookIdentityKey(tags model.Tags) string {
 	title := cleanBookTitle(firstNonEmpty(tags.Album, tags.Title))
 	author := firstNonEmpty(tags.AlbumArtist, tags.Artist)
@@ -1095,7 +1212,7 @@ func scanSidecars(audioPath string, embedded *model.Lyrics, cache *artCache) (*m
 
 	// Stat before reading. The stat bounds the read (maxSidecarBytes) and supplies the
 	// observation, so an oversized or vanished .lrc is never pulled into memory.
-	lrcPath := strings.TrimSuffix(audioPath, filepath.Ext(audioPath)) + ".lrc"
+	lrcPath := sidecarPath(audioPath, ".lrc")
 	if info, serr := os.Stat(lrcPath); serr == nil {
 		switch {
 		case info.Size() > maxSidecarBytes:
@@ -1279,6 +1396,11 @@ func cueShown(list []string, cut bool) string {
 	return fmt.Sprintf("%s (and %s more)", strings.Join(list[:maxCueDropsShown], "; "), more)
 }
 
+// sidecarPath is the same-basename sidecar of an audio file with the given extension.
+func sidecarPath(audioPath, ext string) string {
+	return strings.TrimSuffix(audioPath, filepath.Ext(audioPath)) + ext
+}
+
 // scanCueSidecar reads a sibling .cue for an audio file, parsing it into a cue sheet
 // and returning its on-disk observation. The bool reports whether the .cue was
 // READABLE, meaning the observation is valid; it does not report whether the .cue
@@ -1296,7 +1418,7 @@ func cueShown(list []string, cut bool) string {
 // to no tracks: an unread sheet says nothing about the tracks, so a rip keeps the
 // ones it has. A sheet with unread lines is returned as read, carrying its warnings.
 func scanCueSidecar(audioPath string) (sheet *meta.CueSheet, obs model.AuxObservation, diags []model.FileDiagnostic, refusal string, unread, ok bool) {
-	cuePath := strings.TrimSuffix(audioPath, filepath.Ext(audioPath)) + ".cue"
+	cuePath := sidecarPath(audioPath, ".cue")
 	// Stat before reading, so the same memory guard the .lrc read and the fast path
 	// apply also covers the .cue.
 	info, serr := os.Stat(cuePath)
@@ -1364,7 +1486,7 @@ func (s *Scanner) reconcileFastPathSidecars(path string, known model.ScopedFile,
 	// An oversized .lrc routes here too, once: the full path records its skip and a
 	// stat-only observation, and that observation makes the next scan's size and mtime
 	// comparison match.
-	lrcPath := strings.TrimSuffix(path, filepath.Ext(path)) + ".lrc"
+	lrcPath := sidecarPath(path, ".lrc")
 	switch statSidecar(lrcPath, model.AuxLyrics, stored) {
 	case sidecarVanished, sidecarChanged, sidecarOversized:
 		return true
@@ -1373,7 +1495,7 @@ func (s *Scanner) reconcileFastPathSidecars(path string, known model.ScopedFile,
 	// A .cue change routes there too, on a book as on a track: only the full path can
 	// clear a cue_track_dropped once the sheet is fixed, and for a track it owns the
 	// virtual-track set.
-	cuePath := strings.TrimSuffix(path, filepath.Ext(path)) + ".cue"
+	cuePath := sidecarPath(path, ".cue")
 	switch statSidecar(cuePath, model.AuxCue, stored) {
 	case sidecarChanged, sidecarVanished, sidecarOversized:
 		return true

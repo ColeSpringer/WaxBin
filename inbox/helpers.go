@@ -51,16 +51,6 @@ func acquiredItemView(tags model.Tags, src string, kind model.Kind) *model.ItemV
 	return v
 }
 
-// classifyKind decides a staged file's media kind from its tags: an audiobook (per
-// the WaxLabel adapter's stik/NARRATOR/extension heuristic) is a book, everything
-// else a track. Episodes are never classified here; they are ingested explicitly.
-func classifyKind(tags model.Tags) model.Kind {
-	if tags.IsAudiobook {
-		return model.KindBook
-	}
-	return model.KindTrack
-}
-
 // firstNonEmpty returns the first argument that is non-empty after trimming.
 func firstNonEmpty(vals ...string) string {
 	for _, v := range vals {

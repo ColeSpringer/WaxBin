@@ -29,7 +29,9 @@ func (m Mode) Valid() bool { return m == ModeManaged || m == ModeInPlace }
 
 // MediaType is the content class a managed root holds. It lets organize and import
 // route tracks and books to type-specific roots. A mixed root keeps the single-tree
-// behavior where both kinds share one library.
+// behavior where both kinds share one library. An audiobook root also decides kind: a
+// scan catalogs every file in it as a book, where music and mixed roots classify by tags
+// (scan.EffectiveKind).
 type MediaType string
 
 const (

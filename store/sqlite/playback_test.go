@@ -898,18 +898,26 @@ func TestPlayStatesForItems(t *testing.T) {
 	}
 }
 
-func TestPlayStateCascadesWithItem(t *testing.T) {
+// TestPlayStateFollowsARekeyedFile: a file re-keyed to a new item leaves its old item
+// with no file, which folds into the new one, so the star moves with the file and no row
+// is left behind on the deleted item.
+func TestPlayStateFollowsARekeyedFile(t *testing.T) {
 	st, lib := entityFixture(t)
 	ctx := context.Background()
-	// Re-key the file essence so the prior item is orphaned and deleted.
 	spec := trackSpec{path: "/lib/a/1.mp3", essence: "e1", content: "c1", title: "First", artist: "A", album: "Al"}
 	r := putTrack(t, st, lib.ID, spec)
 	if _, err := st.SetStar(ctx, "", r.ItemPID, true, nil); err != nil {
 		t.Fatal(err)
 	}
 	spec.essence, spec.content, spec.title = "e2", "c2", "Second"
-	putTrack(t, st, lib.ID, spec)
-	if n := scalarInt(t, st, "SELECT COUNT(*) FROM play_state"); n != 0 {
-		t.Errorf("orphaned play_state rows = %d, want 0 (cascaded with the item)", n)
+	next := putTrack(t, st, lib.ID, spec)
+	if next.ItemPID == r.ItemPID {
+		t.Fatalf("re-keyed file kept item %s, want a new one (fixture check)", r.ItemPID)
+	}
+	if ps, err := st.PlayStateFor(ctx, "", next.ItemPID); err != nil || !ps.Starred {
+		t.Errorf("new item state = %+v (err %v), want the star moved across", ps, err)
+	}
+	if n := scalarInt(t, st, "SELECT COUNT(*) FROM play_state"); n != 1 {
+		t.Errorf("play_state rows = %d, want only the new item's", n)
 	}
 }

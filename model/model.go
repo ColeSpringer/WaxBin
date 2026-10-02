@@ -234,11 +234,16 @@ type Tags struct {
 	Channels   int
 	BitDepth   int
 
-	// Audiobook / spoken-word fields, populated by the WaxLabel adapter from
-	// spoken-word tags. IsAudiobook drives the scanner's book-vs-track branch;
-	// Edition disambiguates an abridged release from the same title's unabridged
-	// one. Abridged is nil when the tags do not say.
-	IsAudiobook bool
+	// BookSignal is what the file's own tags say about it being an audiobook. The
+	// scanner decides the kind (scan.EffectiveKind), and the fields below hold for a
+	// file it catalogs as a book once meta.PromoteBookFields has run: the reader fills
+	// only Description, NarratorRaw and Grouping, so a file decided to be a track keeps
+	// its book-owned keys (ASIN, SUBTITLE...) as custom tags. Edition disambiguates an
+	// abridged release from the same title's unabridged one. Abridged is nil when the
+	// tags do not say.
+	BookSignal  BookSignal
+	NarratorRaw string // the NARRATOR tag, before a book falls back to the composer
+	Grouping    string // the GROUPING tag, which carries a book's series
 	Subtitle    string
 	Narrators   []string
 	Series      string
@@ -263,6 +268,20 @@ type Tags struct {
 	// any. It does not feed Year; see TagAcquisition for why.
 	Acquisition TagAcquisition
 }
+
+// BookSignal is what a file's tags say about it being an audiobook, weakest first.
+type BookSignal int
+
+const (
+	// NoBookSignal: nothing in the tags names an audiobook.
+	NoBookSignal BookSignal = iota
+	// BookGenreSignal: an audiobook genre. It names what one file holds, so it makes
+	// that file a book without pulling the rest of its folder in.
+	BookGenreSignal
+	// BookTagSignal: an .m4b name, an audiobook media type (MEDIATYPE 2, iTunes stik)
+	// or a narrator credit.
+	BookTagSignal
+)
 
 // MaxBPM is the largest tempo the catalog stores. It is the MP4 tmpo atom's two-byte
 // ceiling, which is the tightest of the formats WaxBin writes, so a value the edit
@@ -372,8 +391,8 @@ type ItemView struct {
 	AlbumArtistMBID  string
 
 	// Composer and its collation key, populated for track items (empty for
-	// books/episodes; a book's narrator-in-COMPOSER convention is handled at scan
-	// classification, not surfaced here).
+	// books/episodes; a book with no NARRATOR takes its composer as the narrator
+	// when the scan promotes its book fields, and that is not surfaced here).
 	Composer     string
 	ComposerSort string
 	// BPM is the track's stated tempo, whole (see Tags.BPM), and 0 for an item that

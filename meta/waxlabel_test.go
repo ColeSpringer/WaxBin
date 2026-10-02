@@ -186,8 +186,8 @@ func TestLegacyFallbackNeverChangesIdentity(t *testing.T) {
 	if fm.Tags.MBID != "" {
 		t.Errorf("MBID = %q, want empty: a legacy container must never supply an identity key", fm.Tags.MBID)
 	}
-	if fm.Tags.IsAudiobook {
-		t.Error("IsAudiobook = true: a legacy container must never change an item's kind")
+	if fm.Tags.BookSignal != model.NoBookSignal {
+		t.Error("BookSignal set: a legacy container must never change an item's kind")
 	}
 	if key := identity.TrackKey(fm.Tags.MBID, fm.EssenceHash); !strings.HasPrefix(key, "essence:") {
 		t.Errorf("identity key = %q, want an essence: key", key)
@@ -206,12 +206,13 @@ func TestLegacyFallbackNeverChangesIdentity(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Read book: %v", err)
 		}
-		if !fm.Tags.IsAudiobook {
+		if fm.Tags.BookSignal == model.NoBookSignal {
 			t.Fatal("fixture did not classify as a book")
 		}
 		if d := findDiag(fm, model.DiagSortNameFallback); d != nil {
 			t.Errorf("a book took a display fallback: %+v", d)
 		}
+		PromoteBookFields(&fm.Tags)
 		author := fm.Tags.AlbumArtist
 		if author == "" {
 			author = fm.Tags.Artist
@@ -417,8 +418,8 @@ func TestBookFieldsTrimUntrimmedMediaType(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Read: %v", err)
 	}
-	if !fm.Tags.IsAudiobook {
-		t.Error("IsAudiobook = false for MEDIATYPE=\" 2\"; the projection is untrimmed and must be trimmed at the use site")
+	if fm.Tags.BookSignal != model.BookTagSignal {
+		t.Error("no book signal for MEDIATYPE=\" 2\"; the projection is untrimmed and must be trimmed at the use site")
 	}
 }
 
@@ -435,8 +436,8 @@ func TestBookFieldsTrimUntrimmedNarrator(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Read: %v", err)
 	}
-	if fm.Tags.IsAudiobook {
-		t.Error("IsAudiobook = true for a whitespace-only NARRATOR; the value must be trimmed before the non-empty test")
+	if fm.Tags.BookSignal != model.NoBookSignal {
+		t.Error("a whitespace-only NARRATOR signaled a book; the value must be trimmed before the non-empty test")
 	}
 }
 
@@ -846,9 +847,10 @@ func TestReadsBookIdentifierTags(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Read: %v", err)
 	}
-	if !fm.Tags.IsAudiobook {
+	if fm.Tags.BookSignal == model.NoBookSignal {
 		t.Fatal("fixture did not classify as a book")
 	}
+	PromoteBookFields(&fm.Tags)
 	if fm.Tags.ASIN != "B002V0QUOC" || fm.Tags.ISBN != "9780261102217" {
 		t.Errorf("asin/isbn = %q/%q, want the tagged values", fm.Tags.ASIN, fm.Tags.ISBN)
 	}
@@ -883,9 +885,10 @@ func TestReadsBookDescriptiveTags(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Read: %v", err)
 	}
-	if !fm.Tags.IsAudiobook {
+	if fm.Tags.BookSignal == model.NoBookSignal {
 		t.Fatal("fixture did not classify as a book")
 	}
+	PromoteBookFields(&fm.Tags)
 	if fm.Tags.Subtitle != "There and Back Again" {
 		t.Errorf("subtitle = %q, want the SUBTITLE value", fm.Tags.Subtitle)
 	}
@@ -942,6 +945,7 @@ func TestBookEditionTagSetsAbridgedFlag(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Read: %v", err)
 		}
+		PromoteBookFields(&fm.Tags)
 		return fm.Tags
 	}
 	if got := read("Abridged"); got.Edition != "Abridged" || got.Abridged == nil || !*got.Abridged {
@@ -968,6 +972,7 @@ func TestBookSubtitleFallsBackToTIT3(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Read: %v", err)
 	}
+	PromoteBookFields(&fm.Tags)
 	if fm.Tags.Subtitle != "There and Back Again" {
 		t.Errorf("subtitle = %q, want the TIT3 value", fm.Tags.Subtitle)
 	}
@@ -983,6 +988,7 @@ func TestBookSubtitleFallsBackToTIT3(t *testing.T) {
 	if fm, err = NewReader().Read(context.Background(), p); err != nil {
 		t.Fatalf("Read: %v", err)
 	}
+	PromoteBookFields(&fm.Tags)
 	if fm.Tags.Subtitle != "From SUBTITLE" {
 		t.Errorf("subtitle = %q, want SUBTITLE to outrank TIT3", fm.Tags.Subtitle)
 	}
@@ -999,7 +1005,7 @@ func TestBookSubtitleFallsBackToTIT3(t *testing.T) {
 }
 
 // TestBookOwnedTagKeysPromote ties the reader to model.BookOwnedTagKeys, the list the
-// store refuses as custom tags on a book: every key in it must be one applyBookFields
+// store refuses as custom tags on a book: every key in it must be one PromoteBookFields
 // promotes out of the custom map, or the store would refuse a tag the reader then stores.
 func TestBookOwnedTagKeysPromote(t *testing.T) {
 	keys := model.BookOwnedTagKeys()
@@ -1018,6 +1024,7 @@ func TestBookOwnedTagKeysPromote(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Read: %v", err)
 	}
+	PromoteBookFields(&fm.Tags)
 	for _, k := range keys {
 		if v, ok := fm.Tags.Custom[k]; ok {
 			t.Errorf("book custom[%s] = %v, want the key promoted to its typed field", k, v)
@@ -1064,9 +1071,10 @@ func TestMP4BookDescriptiveRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Read: %v", err)
 	}
-	if !fm.Tags.IsAudiobook {
+	if fm.Tags.BookSignal == model.NoBookSignal {
 		t.Fatal("fixture did not classify as a book")
 	}
+	PromoteBookFields(&fm.Tags)
 	if fm.Tags.Subtitle != "There and Back Again" || fm.Tags.Edition != "75th Anniversary Edition" || fm.Tags.Description != blurb {
 		t.Errorf("subtitle/edition/description = %q/%q/%q, want the written values back from the MP4 atoms",
 			fm.Tags.Subtitle, fm.Tags.Edition, fm.Tags.Description)
@@ -1087,7 +1095,7 @@ func TestTrackKeepsLabelAsLabel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Read: %v", err)
 	}
-	if fm.Tags.IsAudiobook {
+	if fm.Tags.BookSignal != model.NoBookSignal {
 		t.Fatal("music fixture classified as a book")
 	}
 	if fm.Tags.Label != "Parlophone" {
@@ -1100,7 +1108,7 @@ func TestTrackKeepsLabelAsLabel(t *testing.T) {
 
 // TestTrackKeepsASINAsCustomTag: a music release can carry an ASIN, and only a book
 // promotes it to a typed field. Reserving the key globally would drop it from every
-// track that has one, since applyBookFields returns early for a non-book.
+// track that has one, since only a caller that has decided the file is a book promotes.
 func TestTrackKeepsASINAsCustomTag(t *testing.T) {
 	p := writeTemp(t, "song.mp3", testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
 		Title: "Airbag", Artist: "Radiohead", Album: "OK Computer",

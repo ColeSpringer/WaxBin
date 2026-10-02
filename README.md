@@ -48,6 +48,9 @@ go build ./cmd/waxbin
 
 Roots are declared as `path[:mode[:media[:profile]]]`, for example
 `/music:managed:music`, `/audiobooks:managed:audiobook`, `/rips:in-place`.
+An `audiobook` root catalogs every file as a book; elsewhere a file is a book when its
+tags say so (an `.m4b`, an audiobook media type, a narrator or an audiobook genre), and a
+part with no such tag joins the book its folder holds.
 Config resolves with **flag > env (`WAXBIN_*`) > JSON > default** precedence.
 Every data command supports `--json` (with a `schemaVersion`) and returns stable
 exit codes (`waxbin exit-codes`).
@@ -144,6 +147,8 @@ of its own.
   key in the catalog with per-key item counts.
 - `waxbin lyrics set`, `waxbin chapters`, and `waxbin art set` curate lyrics, book
   chapters, and cover art.
+- `waxbin lock <pid> kind` pins whether an item is a track or a book, and `import --as`
+  records that lock when it overrides the tags.
 
 Each of these edits the catalog, and `edit`, `entity`, `credit`, `tag`, and `art set` offer
 **opt-in `--write-back`** to also mirror the change into the backing file(s) (see
