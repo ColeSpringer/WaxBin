@@ -19,6 +19,7 @@ import (
 // TestTagKeyForField pins the canonical field-to-tag-key map that both the organize
 // tag-write and the catalog field-edit write-back share, so the two never drift.
 func TestTagKeyForField(t *testing.T) {
+	t.Parallel()
 	want := map[string]string{
 		"title": "TITLE", "artist": "ARTIST", "album": "ALBUM", "album_artist": "ALBUMARTIST",
 		"composer": "COMPOSER", "comment": "COMMENT", "genre": "GENRE", "year": "DATE",
@@ -41,6 +42,7 @@ func TestTagKeyForField(t *testing.T) {
 // TestWriterRoundTripPreservesEssence writes a tag and confirms it reads back while
 // the audio essence hash is unchanged (a tag edit must never alter audio).
 func TestWriterRoundTripPreservesEssence(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "song.mp3")
@@ -96,6 +98,7 @@ func TestWriterRoundTripPreservesEssence(t *testing.T) {
 // drops without a word is reported as a lost write, and the same key on a FLAC, whose
 // comments are free-form, is an ordinary custom tag.
 func TestApplyCustomTagGuardsTheKey(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	mp3 := writeTemp(t, "song.mp3", testaudio.BuildMP3FromSpec(testaudio.MP3Spec{Title: "T", Artist: "A", Album: "Al"}))
 	m4a := writeTemp(t, "song.m4a", testaudio.Fixture(t, "sample.m4a"))
@@ -148,6 +151,7 @@ func TestApplyCustomTagGuardsTheKey(t *testing.T) {
 // another key changing beside a key that landed is a side effect, refused for itself; a
 // picture or chapter delta is no tag key and the write goes ahead.
 func TestJudgeCustomTagReadsTheChanges(t *testing.T) {
+	t.Parallel()
 	x := []string{"x"}
 	for _, c := range []struct {
 		name       string

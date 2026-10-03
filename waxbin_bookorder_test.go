@@ -59,6 +59,7 @@ func mixedPart(t *testing.T, path, title string, track int, seed byte) {
 // order and keeps it through organize and a forced rescan, the numbers in its new file
 // names never read back as places.
 func TestImportedMixedBookKeepsItsReadingOrder(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root, staging := t.TempDir(), t.TempDir()
 	lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), root)
@@ -90,6 +91,7 @@ func TestImportedMixedBookKeepsItsReadingOrder(t *testing.T) {
 // that order when its files are read again, though their new names carry numbers its
 // untagged parts never had.
 func TestOrganizedBookKeepsItsOrderOnRescan(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	mixedPart(t, filepath.Join(root, "in", "u1.mp3"), "Alpha", 0, 1)
@@ -123,6 +125,7 @@ func TestOrganizedBookKeepsItsOrderOnRescan(t *testing.T) {
 // a number ("Mistborn - 03", "Catch - 22") is not a numbered part, so organize and an
 // import name it for its book alone.
 func TestSeriesNamedSingleFileBookKeepsItsName(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root, acq := t.TempDir(), t.TempDir()
 	narrated := []testaudio.TXXXFrame{{Desc: "NARRATOR", Value: "Reader"}}
@@ -152,6 +155,7 @@ func TestSeriesNamedSingleFileBookKeepsItsName(t *testing.T) {
 // long book imported a part at a time, and a book's first part imported before the rest,
 // are named the same by both.
 func TestOrganizeNamesPartsByTheirTaggedTotal(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root, staging, acq := t.TempDir(), t.TempDir(), t.TempDir()
 	lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), root)
@@ -187,6 +191,7 @@ func TestOrganizeNamesPartsByTheirTaggedTotal(t *testing.T) {
 // TestBookEditKeepsItsPartTotal: a book reads its part total apart from a track's total,
 // and an edit rewrites the book row from what it holds, the part total included.
 func TestBookEditKeepsItsPartTotal(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, "in", "part1.mp3"), testaudio.BuildMP3FromSpec(testaudio.MP3Spec{Artist: "Author",
@@ -211,6 +216,7 @@ func TestBookEditKeepsItsPartTotal(t *testing.T) {
 // a chain (parts at places 2 to 4 named 01 to 03 by an older rule) or a swap (two parts
 // trading numbers), lands in one run with nothing left over.
 func TestOrganizeRenumbersABookInOneRun(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	narrated := []testaudio.TXXXFrame{{Desc: "NARRATOR", Value: "Reader"}}
@@ -251,6 +257,7 @@ func TestOrganizeRenumbersABookInOneRun(t *testing.T) {
 // TestCaseOnlyRenameMovesOnce: a part whose new path differs from its own only by case
 // waits on no other move, so it moves once rather than through a parked name.
 func TestCaseOnlyRenameMovesOnce(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	narrated := []testaudio.TXXXFrame{{Desc: "NARRATOR", Value: "Reader"}}

@@ -109,6 +109,7 @@ func catalogShape(t *testing.T, st *Store) string {
 // or an open-time seeding step that only runs on the fresh path would quietly put
 // most of this package on a different catalog than it appears to use.
 func TestSeededCatalogMatchesAFreshOne(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	open := func(path string) *Store {
 		t.Helper()

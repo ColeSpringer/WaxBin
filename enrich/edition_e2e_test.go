@@ -36,6 +36,7 @@ func albumMarker(t *testing.T, dbPath string) (provider string, matched int) {
 // TestEnrichMatchesReleaseFromMediaAndCountry is the deferred entry closed end to end:
 // no barcode, no catalog number, resolved from the medium and country its tags carry.
 func TestEnrichMatchesReleaseFromMediaAndCountry(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedAlbumEdition(t, st, lib.ID, "ess-a", "CD", "GB")
@@ -72,6 +73,7 @@ func TestEnrichMatchesReleaseFromMediaAndCountry(t *testing.T) {
 // TestEnrichRefusesAnAmbiguousGroup: two GB CDs describe the album equally well, so the
 // uniqueness gate writes nothing.
 func TestEnrichRefusesAnAmbiguousGroup(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedAlbumEdition(t, st, lib.ID, "ess-a", "CD", "GB")
@@ -97,6 +99,7 @@ func TestEnrichRefusesAnAmbiguousGroup(t *testing.T) {
 // TestEnrichSkipsTheBrowseWhenAnIdentifierDecides pins tier ordering: a resolving
 // barcode short-circuits, so the whole-group browse is never requested.
 func TestEnrichSkipsTheBrowseWhenAnIdentifierDecides(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedAlbumTrack(t, st, lib.ID, "ess-a", model.Track{
@@ -124,6 +127,7 @@ func TestEnrichSkipsTheBrowseWhenAnIdentifierDecides(t *testing.T) {
 // TestEnrichSkipsTheBrowseWithNothingInterpretable: the queue gate fires on a non-empty
 // column, so a codec-only album reaches the phase and must cost no browse.
 func TestEnrichSkipsTheBrowseWithNothingInterpretable(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedAlbumEdition(t, st, lib.ID, "ess-a", "FLAC", "")
@@ -148,6 +152,7 @@ func TestEnrichSkipsTheBrowseWithNothingInterpretable(t *testing.T) {
 // TestEnrichPagesAWholeGroup: the tier reads release-count from page one and keeps going
 // until every release is accounted for.
 func TestEnrichPagesAWholeGroup(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedAlbumEdition(t, st, lib.ID, "ess-a", "CD", "JP")
@@ -180,6 +185,7 @@ func TestEnrichPagesAWholeGroup(t *testing.T) {
 // among refuses whatever the pages say, so the tier stops after page one and caches that
 // (a stable fact), leaving two albums in one group costing a single request.
 func TestEnrichRefusesAnOverCapGroup(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedAlbumEdition(t, st, lib.ID, "ess-a", "CD", "JP")
@@ -208,6 +214,7 @@ func TestEnrichRefusesAnOverCapGroup(t *testing.T) {
 // TestEnrichDoesNotCacheAShortRead: fewer releases than release-count is transient, not a
 // fact about the group, so the second album re-fetches rather than inherit a partial set.
 func TestEnrichDoesNotCacheAShortRead(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedAlbumEdition(t, st, lib.ID, "ess-a", "CD", "JP")
@@ -238,6 +245,7 @@ func TestEnrichDoesNotCacheAShortRead(t *testing.T) {
 // TestEnrichServesASecondAlbumFromTheGroupCache: the projection is cached per group, so a
 // group's second album costs no request.
 func TestEnrichServesASecondAlbumFromTheGroupCache(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedAlbumEdition(t, st, lib.ID, "ess-a", "CD", "GB")
@@ -277,6 +285,7 @@ func cachedEditionGroups(t *testing.T, dbPath string) int {
 // TestEnrichTakesTheMatchedReleasesOwnCover: the album rung of the art chain had no
 // producer until now, so this is the first art of the edition actually held.
 func TestEnrichTakesTheMatchedReleasesOwnCover(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedAlbumEdition(t, st, lib.ID, "ess-a", "CD", "GB")
@@ -342,6 +351,7 @@ func fillerMBID(i int) string {
 // every later run, so a transient read records the lookup as owed, which the next run
 // asks again.
 func TestEnrichLeavesAnAlbumQueuedAfterAShortRead(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedAlbumEdition(t, st, lib.ID, "ess-a", "CD", "JP")
@@ -382,6 +392,7 @@ func TestEnrichLeavesAnAlbumQueuedAfterAShortRead(t *testing.T) {
 // second short read settles the album as a miss, so a group whose browse never
 // reconciles costs one more browse rather than one per pass.
 func TestAShortReadTwiceSettlesTheAlbum(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedAlbumEdition(t, st, lib.ID, "ess-a", "CD", "JP")
@@ -410,6 +421,7 @@ func TestAShortReadTwiceSettlesTheAlbum(t *testing.T) {
 // release-count cannot be judged complete, and taking the count as zero would satisfy
 // every completeness test and hand the matcher whatever fraction the page held.
 func TestEnrichRefusesABrowseWithNoUsableCount(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedAlbumEdition(t, st, lib.ID, "ess-a", "CD", "JP")
@@ -432,6 +444,7 @@ func TestEnrichRefusesABrowseWithNoUsableCount(t *testing.T) {
 // TestEnrichCountsReleaseCovers: a background job serializes Result alone, so a run that
 // fetched two hundred album covers must not report no art work at all.
 func TestEnrichCountsReleaseCovers(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedAlbumEdition(t, st, lib.ID, "ess-a", "CD", "GB")
@@ -462,6 +475,7 @@ func TestEnrichCountsReleaseCovers(t *testing.T) {
 // provider list like every other cover, so an embedder's provider can answer it and
 // still outrank the built-in Cover Art Archive.
 func TestInjectedCoverProviderServesTheReleaseRung(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedAlbumEdition(t, st, lib.ID, "ess-a", "CD", "GB")
@@ -512,6 +526,7 @@ func TestInjectedCoverProviderServesTheReleaseRung(t *testing.T) {
 // That is one album's bad tag, not a broken run, so it must not abort the pass the way an
 // unreachable service does.
 func TestEnrichSurvivesAStaleReleaseGroupID(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedAlbumEdition(t, st, lib.ID, "ess-a", "CD", "GB")
@@ -538,6 +553,7 @@ func TestEnrichSurvivesAStaleReleaseGroupID(t *testing.T) {
 // TestForcedRunBrowsesEachGroupOnce: force bypasses the per-group cache read, so without
 // a per-run memo every album under one group would re-page the whole thing.
 func TestForcedRunBrowsesEachGroupOnce(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, _, lib := openStore(t)
 	seedAlbumEdition(t, st, lib.ID, "ess-a", "CD", "GB")
@@ -567,6 +583,7 @@ func TestForcedRunBrowsesEachGroupOnce(t *testing.T) {
 // auxiliary roles are asked about all the same, since a settled front says nothing about
 // the empty slots beside it.
 func TestReleaseCoverIsSkippedWhenTheAlbumAlreadyHasArt(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedAlbumTrackWithCover(t, st, lib.ID, "ess-a", model.Track{
@@ -626,6 +643,7 @@ func TestReleaseCoverIsSkippedWhenTheAlbumAlreadyHasArt(t *testing.T) {
 // was already answered had no way to be asked about the slots beside it. The settled
 // front stays the track's, and the front the provider offers here is dropped.
 func TestAlbumAuxArtFillsBesideASettledFront(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedAlbumTrackWithCover(t, st, lib.ID, "ess-a", model.Track{
@@ -695,6 +713,7 @@ func TestAlbumAuxArtFillsBesideASettledFront(t *testing.T) {
 // from the cover providers, and the aux-only provider is asked exactly once, under the
 // one capability it advertises.
 func TestAuxOnlyProviderFillsTheNoArtAlbum(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedAlbumEdition(t, st, lib.ID, "ess-a", "CD", "GB")
@@ -771,6 +790,7 @@ func TestAuxOnlyProviderFillsTheNoArtAlbum(t *testing.T) {
 // together answers the whole gather under one request naming both, so the aux-only leg
 // must not ask it again.
 func TestDualCapProviderIsAskedOnceForTheNoArtAlbum(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedAlbumEdition(t, st, lib.ID, "ess-a", "CD", "GB")
@@ -824,6 +844,7 @@ func TestDualCapProviderIsAskedOnceForTheNoArtAlbum(t *testing.T) {
 // a request per locked album on every forced run. The bare album pins the front half of
 // the gate and the one carrying an embedded cover pins the aux half.
 func TestLockedAlbumArtIsNeverAskedAbout(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedAlbumTrack(t, st, lib.ID, "ess-a", model.Track{
@@ -887,6 +908,7 @@ func TestLockedAlbumArtIsNeverAskedAbout(t *testing.T) {
 // owed one rather than leaving the album to wait out the window, and the next ordinary
 // run asks again.
 func TestReleaseMatchSkipReplacesAStaleMiss(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedAlbumEdition(t, st, lib.ID, "ess-a", "CD", "JP")

@@ -13,6 +13,7 @@ import (
 // TestLoadScopedFileIndex verifies the preloaded index carries each present file's
 // pids, size, and mtime, scoped by path prefix.
 func TestLoadScopedFileIndex(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 
@@ -55,6 +56,7 @@ func TestLoadScopedFileIndex(t *testing.T) {
 // TestMarkFilesMissing marks a single-file item missing but keeps a multi-file book
 // present when only one of its parts vanished.
 func TestMarkFilesMissing(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 
@@ -89,6 +91,7 @@ func TestMarkFilesMissing(t *testing.T) {
 // TestMarkFilesMissingMultiFileBook confirms a book with one vanished part but a
 // still-present part is NOT marked missing.
 func TestMarkFilesMissingMultiFileBook(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 
@@ -129,6 +132,7 @@ func TestMarkFilesMissingMultiFileBook(t *testing.T) {
 // and emits a delta, a second call is a silent no-op, and an unknown pid is
 // CodeNotFound.
 func TestMarkItemMissing(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	a := putTrack(t, st, lib.ID, trackSpec{path: "/lib/a.mp3", essence: "ea", content: "ca", title: "A"})
@@ -180,6 +184,7 @@ func TestMarkItemMissing(t *testing.T) {
 // rather than downgraded. Downgrading archived would lose the fact that the listener
 // deleted the item and would put it back into every listing that excludes archived.
 func TestMarkItemMissingRefusesFilelessStates(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 
@@ -235,6 +240,7 @@ func TestMarkItemMissingRefusesFilelessStates(t *testing.T) {
 // TestUpdateFileStateIfUnchanged updates on a size/mtime match and skips on a
 // mismatch (optimistic concurrency).
 func TestUpdateFileStateIfUnchanged(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	a := putTrack(t, st, lib.ID, trackSpec{path: "/lib/a.mp3", essence: "ea", content: "ca", title: "A"})
@@ -276,6 +282,7 @@ func TestUpdateFileStateIfUnchanged(t *testing.T) {
 }
 
 func TestChapterSourceRank(t *testing.T) {
+	t.Parallel()
 	// podcast_url outranks embedded (the episode contract); embedded outranks cue;
 	// synthetic is lowest of the named sources.
 	if !(chapterSourceRank("podcast_url") < chapterSourceRank("embedded")) {

@@ -10,6 +10,7 @@ import (
 )
 
 func TestSetItemCreditsMusicRoles(t *testing.T) {
+	t.Parallel()
 	st, pid := editFixture(t) // one track: artist Alpha, composer "Writer"
 	ctx := context.Background()
 
@@ -80,6 +81,7 @@ func TestSetItemCreditsMusicRoles(t *testing.T) {
 }
 
 func TestSetItemCreditsRoleKindValidation(t *testing.T) {
+	t.Parallel()
 	st, pid := editFixture(t)
 	ctx := context.Background()
 
@@ -94,6 +96,7 @@ func TestSetItemCreditsRoleKindValidation(t *testing.T) {
 }
 
 func TestSetItemCreditsBookAuthorSyncsDenorm(t *testing.T) {
+	t.Parallel()
 	st, bpid := bookEditFixture(t)
 	ctx := context.Background()
 
@@ -115,6 +118,7 @@ func TestSetItemCreditsBookAuthorSyncsDenorm(t *testing.T) {
 }
 
 func TestSetItemCreditsDedupAndCount(t *testing.T) {
+	t.Parallel()
 	st, pid := editFixture(t)
 	ctx := context.Background()
 
@@ -158,6 +162,7 @@ func TestSetItemCreditsDedupAndCount(t *testing.T) {
 }
 
 func TestSetFieldProvenanceRejectsNonScalar(t *testing.T) {
+	t.Parallel()
 	st, pid := editFixture(t)
 	ctx := context.Background()
 	// art/lyrics/chapters are lockable but NOT scalar-settable, so SetFieldProvenance
@@ -178,6 +183,7 @@ func TestSetFieldProvenanceRejectsNonScalar(t *testing.T) {
 // artist entity is renamed in place (pid, curation, star, alias) rather than split off
 // into a fresh row, mirroring what a whole-set EditItemFields artist edit does.
 func TestSetCreditsArtistRenamesSingleRefArtistInPlace(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{
@@ -249,6 +255,7 @@ func TestSetCreditsArtistRenamesSingleRefArtistInPlace(t *testing.T) {
 // TestSetCreditsAuthorRenamesInPlace: setting a book's author to a new name runs the
 // pre-pass as a single-entry batch too, renaming the author artist in place.
 func TestSetCreditsAuthorRenamesInPlace(t *testing.T) {
+	t.Parallel()
 	st, pid := bookEditFixture(t)
 	ctx := context.Background()
 	artistID := entityIDByCol(t, st, "artist", "name", "Jane Author")
@@ -311,6 +318,7 @@ func TestSetCreditsAuthorRenamesInPlace(t *testing.T) {
 // item outside this single-entry batch still references the old artist, so coverage
 // fails and the credit split behaves as it always did.
 func TestSetCreditsMultiRefArtistStillSplits(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{
@@ -354,6 +362,7 @@ func TestSetCreditsMultiRefArtistStillSplits(t *testing.T) {
 // joined display is never an entity name: the pre-pass reads the caller's list, which no
 // splitter could recover from it.
 func TestSetCreditsTwoAuthorsRenamesOntoFirst(t *testing.T) {
+	t.Parallel()
 	st, pid := bookEditFixture(t)
 	ctx := context.Background()
 	janeID := entityIDByCol(t, st, "artist", "name", "Jane Author")
@@ -398,6 +407,7 @@ func TestSetCreditsTwoAuthorsRenamesOntoFirst(t *testing.T) {
 // one artist, so the pre-pass renames the old row onto the whole string instead of the
 // half a book-credit split would leave.
 func TestSetCreditsAmpersandNameStaysWhole(t *testing.T) {
+	t.Parallel()
 	st, pid := bookEditFixture(t)
 	ctx := context.Background()
 	janeID := entityIDByCol(t, st, "artist", "name", "Jane Author")
@@ -431,6 +441,7 @@ func TestSetCreditsAmpersandNameStaysWhole(t *testing.T) {
 // naming two artists renames the covered entity onto the first of them and splits the
 // rest off, rather than leaving it behind or naming it after the comma-joined display.
 func TestSetCreditsTwoArtistsRenamesOntoFirst(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{
@@ -474,6 +485,7 @@ func TestSetCreditsTwoArtistsRenamesOntoFirst(t *testing.T) {
 // Nothing re-resolves the chain behind this call, so a refused artist rename must not
 // leave the release group and album keyed on a name their columns no longer spell.
 func TestSetCreditsRefusedRenameLeavesChainKeys(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	// No album artist tag, so the release-group anchor falls back to the track credit
@@ -516,6 +528,7 @@ func TestSetCreditsRefusedRenameLeavesChainKeys(t *testing.T) {
 // could not: two items credit one artist, the batch moves both at once, so the coverage
 // checks see every reference move and the entity renames in place instead of splitting.
 func TestSetItemCreditsBatchCoveredRenameLandsInPlace(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{
@@ -576,6 +589,7 @@ func TestSetItemCreditsBatchCoveredRenameLandsInPlace(t *testing.T) {
 // not cover, because the file behind it still spells the old name and the next rescan
 // would fork it back. Alpha, whose every reference moves to Beta, still renames.
 func TestSetItemCreditsBatchCoverageComparesTarget(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{
@@ -625,6 +639,7 @@ func TestSetItemCreditsBatchCoverageComparesTarget(t *testing.T) {
 // not a rename, and the query behind the holders has no order, so nothing could pick
 // which of them the pair meant.
 func TestSetItemCreditsBatchContributorRoleCardinality(t *testing.T) {
+	t.Parallel()
 	st, pid := editFixture(t)
 	ctx := context.Background()
 
@@ -675,6 +690,7 @@ func TestSetItemCreditsBatchContributorRoleCardinality(t *testing.T) {
 // so the fold-back guard reads the credit the batch leaves behind rather than the one it
 // is replacing.
 func TestSetItemCreditsBatchTwoRolesOneItem(t *testing.T) {
+	t.Parallel()
 	st, pid := bookEditFixture(t)
 	ctx := context.Background()
 	janeID := entityIDByCol(t, st, "artist", "name", "Jane Author")
@@ -723,6 +739,7 @@ func TestSetItemCreditsBatchTwoRolesOneItem(t *testing.T) {
 // rename her row, since the narrator credit would then describe nobody. The fold-back
 // guard reads the sibling entry's names to catch it.
 func TestSetItemCreditsBatchFoldBackIntoSiblingRoleBlocksRename(t *testing.T) {
+	t.Parallel()
 	st, pid := bookEditFixture(t)
 	ctx := context.Background()
 	janeID := entityIDByCol(t, st, "artist", "name", "Jane Author")
@@ -753,6 +770,7 @@ func TestSetItemCreditsBatchFoldBackIntoSiblingRoleBlocksRename(t *testing.T) {
 // (item, role) pair are all refused before any write, while the same item under two
 // roles is not a duplicate.
 func TestSetItemCreditsBatchValidation(t *testing.T) {
+	t.Parallel()
 	st, pid := bookEditFixture(t)
 	ctx := context.Background()
 	attr := model.Attribution{Source: model.SourceUser}
@@ -782,6 +800,7 @@ func TestSetItemCreditsBatchValidation(t *testing.T) {
 // TestSetItemCreditsBatchSkipsLocked: a locked credit role aborts the batch by default
 // and is skipped and reported with skipLocked, per entry rather than per item.
 func TestSetItemCreditsBatchSkipsLocked(t *testing.T) {
+	t.Parallel()
 	st, pid := bookEditFixture(t)
 	ctx := context.Background()
 	attr := model.Attribution{Source: model.SourceUser}
@@ -816,6 +835,7 @@ func TestSetItemCreditsBatchSkipsLocked(t *testing.T) {
 }
 
 func TestLockCreditRole(t *testing.T) {
+	t.Parallel()
 	st, pid := editFixture(t)
 	ctx := context.Background()
 
@@ -841,6 +861,7 @@ func TestLockCreditRole(t *testing.T) {
 // query, so they have to arrive grouped by item and ordered within it, and an item the
 // filter drops must not appear at all.
 func TestExportCreditsStreamsInItemOrder(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib := entityFixture(t)
 	kept := putTrack(t, st, lib.ID, trackSpec{

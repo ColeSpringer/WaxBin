@@ -28,6 +28,7 @@ func openEmptyStore(t *testing.T) *sqlite.Store {
 // find the library already registered over that tree rather than adding a second one.
 // The stored spelling is what every file.path was built from, so it must not move.
 func TestEnsureLibraryFoldsRootCaseOnWindows(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS != "windows" {
 		t.Skip("path case folding is a Windows filesystem property")
 	}
@@ -87,6 +88,7 @@ func TestEnsureLibraryFoldsRootCaseOnWindows(t *testing.T) {
 // darwin without folding for every POSIX caller. The audit's library_conflict check is
 // what reports the collision there.
 func TestEnsureLibraryKeepsRootBytesExactOffWindows(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("pins the non-folding branch of pathx.FoldsCase")
 	}
@@ -119,6 +121,7 @@ func TestEnsureLibraryKeepsRootBytesExactOffWindows(t *testing.T) {
 
 // A fold match still refreshes the policy fields, and says so in the change log.
 func TestEnsureLibraryFoldRefreshesPolicyOnWindows(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS != "windows" {
 		t.Skip("path case folding is a Windows filesystem property")
 	}
@@ -161,6 +164,7 @@ func TestEnsureLibraryFoldRefreshesPolicyOnWindows(t *testing.T) {
 
 // LibraryByRoot folds too, since it shares the lookup.
 func TestLibraryByRootFoldsCaseOnWindows(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS != "windows" {
 		t.Skip("path case folding is a Windows filesystem property")
 	}

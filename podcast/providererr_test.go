@@ -31,6 +31,7 @@ func providerFailure(t *testing.T, step string, err error, op string, class waxe
 // comes back as a ProviderError keeping its class, while a failed catalog write and a
 // canceled call do not.
 func TestProviderFailuresAreToldFromTheCatalogs(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st := newTestStore(t)
 	failing := &failFeedStore{Store: st}
@@ -100,6 +101,7 @@ func TestProviderFailuresAreToldFromTheCatalogs(t *testing.T) {
 // TestDownloadBlamesAFailedCatalogWriteOnTheCatalog: bytes that land but whose
 // catalog write fails are not the provider's failure.
 func TestDownloadBlamesAFailedCatalogWriteOnTheCatalog(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st := newTestStore(t)
 	yt := &source.Mock{Type: model.SourceYouTube, IdentityKey: "youtube:channel:c1",
@@ -124,6 +126,7 @@ func TestDownloadBlamesAFailedCatalogWriteOnTheCatalog(t *testing.T) {
 // TestSyncAllReportsEachFailure: a batch keeps going past a dead feed and hands back
 // its error, the provider's mark included, beside the shows that synced.
 func TestSyncAllReportsEachFailure(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	answers := map[string]*source.Enumeration{}
 	var dead string

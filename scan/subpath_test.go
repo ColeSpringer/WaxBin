@@ -16,6 +16,7 @@ import (
 // reachable once EnsureLibrary started folding, because a re-cased root no longer
 // errors out before a scan is ever run.
 func TestScanReAnchorsRecasedSubPathOnWindows(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS != "windows" {
 		t.Skip("path case folding is a Windows filesystem property")
 	}

@@ -11,6 +11,7 @@ import (
 // TestAuditViewCarriesTheFileAndLengths: a finding's file pid and a duration mismatch's
 // two lengths reach the JSON, and a finding without them leaves the keys out.
 func TestAuditViewCarriesTheFileAndLengths(t *testing.T) {
+	t.Parallel()
 	rep := &audit.Report{Findings: []model.AuditFinding{
 		{Check: model.CheckDurationMismatch, Severity: model.SeverityWarn, Message: "m", Path: "/lib/a.mp3",
 			FilePID: "f1", HeaderMS: 60_000, DecodedMS: 3_000},

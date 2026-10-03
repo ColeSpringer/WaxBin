@@ -30,6 +30,7 @@ func target(barcode, catNo string) model.EnrichTarget {
 }
 
 func TestMatchReleaseByBarcode(t *testing.T) {
+	t.Parallel()
 	// 0075992739429 is a valid EAN-13; 075992739429 is the same barcode as a UPC-A.
 	cases := []struct {
 		name           string
@@ -57,6 +58,7 @@ func TestMatchReleaseByBarcode(t *testing.T) {
 }
 
 func TestMatchReleaseByCatalogNumber(t *testing.T) {
+	t.Parallel()
 	hits := []mbRelease{rel("rel-a", "", "SHVL 804")}
 	for _, tagged := range []string{"SHVL 804", "shvl-804", "shvl804"} {
 		got, reason := matchRelease(target("", tagged), nil, hits)
@@ -76,6 +78,7 @@ func TestMatchReleaseByCatalogNumber(t *testing.T) {
 // entity-MBID writer fills only when empty, so a best-of-a-bad-lot winner would be
 // permanent and unappealable; a tie writes nothing instead.
 func TestMatchReleaseRefusesAmbiguity(t *testing.T) {
+	t.Parallel()
 	two := []mbRelease{rel("rel-a", "0075992739429"), rel("rel-b", "0075992739429")}
 	if got, _ := matchRelease(target("0075992739429", ""), two, nil); got != "" {
 		t.Errorf("two releases on one barcode matched %q, want no match", got)
@@ -95,6 +98,7 @@ func TestMatchReleaseRefusesAmbiguity(t *testing.T) {
 // in: a release matching on title, year, or track count but on no identifier is not a
 // match, because those are the signals a group's reissue variants share.
 func TestMatchReleaseIgnoresYearAndCounts(t *testing.T) {
+	t.Parallel()
 	near := rel("rel-a", "0000000000000")
 	near.Title = "Wish You Were Here"
 	if got, _ := matchRelease(target("0075992739429", ""), []mbRelease{near}, nil); got != "" {
@@ -110,6 +114,7 @@ func TestMatchReleaseIgnoresYearAndCounts(t *testing.T) {
 // hit whose release group is not the album's is discarded even though the identifier
 // matched, and so is one carrying no release group to verify against.
 func TestMatchReleaseRejectsAForeignReleaseGroup(t *testing.T) {
+	t.Parallel()
 	foreign := rel("rel-a", "0075992739429")
 	foreign.ReleaseGroup = &mbReleaseGroup{ID: "99999999-8888-7777-6666-555555555555"}
 	if got, _ := matchRelease(target("0075992739429", ""), []mbRelease{foreign}, nil); got != "" {
@@ -134,6 +139,7 @@ func TestMatchReleaseRejectsAForeignReleaseGroup(t *testing.T) {
 // barcode, and MusicBrainz holds whichever was entered, so asking for only one form
 // would leave matchRelease recognizing hits it never retrieved.
 func TestBarcodeSpellingsAsksForBothStoredForms(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		in   string
 		want []string

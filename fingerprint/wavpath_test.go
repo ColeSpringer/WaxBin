@@ -17,6 +17,7 @@ import (
 // so it must track the route the pass actually takes, decoding straight to
 // InternalRate, which makes Compute's own resample a no-op.
 func TestFingerprintThroughWAVPath(t *testing.T) {
+	t.Parallel()
 	const rate = 22050
 	dir := t.TempDir()
 	orig := testaudio.RichSignal(rate, 20, testaudio.MusicalPartials, 1)

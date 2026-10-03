@@ -25,6 +25,7 @@ func owedFields(t *testing.T, st *sqlite.Store, pid model.PID) map[string]bool {
 // to a rip's shared file, whose tags belong to every track cut from it, nor to an
 // episode's, whose tags are its feed's.
 func TestEditOwesNoFileAWriteCannotReach(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib := openTestStore(t)
 	if _, err := st.PutScannedTrack(ctx, input(lib.ID, "/lib/song.mp3", "sha256:E", "sha256:C", "Song")); err != nil {
@@ -86,6 +87,7 @@ func TestEditOwesNoFileAWriteCannotReach(t *testing.T) {
 // credit set to the names already credited, or a field set to the value it holds, owes
 // nothing.
 func TestEditOwesWhatItChanged(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib := openTestStore(t)
 	res, err := st.PutScannedTrack(ctx, input(lib.ID, "/lib/song.mp3", "sha256:E", "sha256:C", "Song"))
@@ -119,6 +121,7 @@ func TestEditOwesWhatItChanged(t *testing.T) {
 // owed once a rescan moves the member onto another album, which owes the file nothing of
 // the album it left; a member still on the album keeps its row.
 func TestOwedEntityRowsLeaveWithTheItem(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib := openTestStore(t)
 	one := input(lib.ID, "/lib/one.mp3", "sha256:E1", "sha256:C1", "One")
@@ -163,6 +166,7 @@ func TestOwedEntityRowsLeaveWithTheItem(t *testing.T) {
 // TestRipConversionDropsOwedRows: a whole-file track whose file becomes a cue rip drops
 // the rows its edits owed the file, since a rip's shared file takes no write-back.
 func TestRipConversionDropsOwedRows(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib := openTestStore(t)
 	r, err := st.PutScannedTrack(ctx, input(lib.ID, "/lib/album.mp3", "sha256:VE", "sha256:VC", "Whole File"))
@@ -197,6 +201,7 @@ func owedRowCount(t *testing.T, st *sqlite.Store) int {
 // and the drained album's identity is carried, either onto the new key or into a curated
 // album already there, so the album value its file still lacks stays owed.
 func TestOwedEntityRowsFollowACarriedAlbum(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	user := model.Attribution{Source: model.SourceUser}
 	for _, intoCurated := range []bool{false, true} {

@@ -12,6 +12,7 @@ import (
 // feed episode and that a later feed re-sync, which passes pinned=false, never un-pins
 // it. Otherwise retention could delete a file the user explicitly kept.
 func TestFeedSyncPreservesPinnedEpisode(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, _ := openTestStore(t)
 
@@ -46,6 +47,7 @@ func TestFeedSyncPreservesPinnedEpisode(t *testing.T) {
 // publishes a <podcast:guid> and is re-added (matched by feed URL), its episodes are
 // re-keyed rather than re-inserted, so the catalog is not doubled.
 func TestFeedGainingGUIDDoesNotDuplicate(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, _ := openTestStore(t)
 	url := "http://feed.example/g"
@@ -74,6 +76,7 @@ func TestFeedGainingGUIDDoesNotDuplicate(t *testing.T) {
 // TestEpisodeSourceReflectsShowType verifies an episode with no acquisition row reads
 // its source from the show's source_type (rss), not the local default.
 func TestEpisodeSourceReflectsShowType(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, _ := openTestStore(t)
 	res, err := st.UpsertFeed(ctx, feedInput("http://feed.example/s", "Alpha"))
@@ -91,6 +94,7 @@ func TestEpisodeSourceReflectsShowType(t *testing.T) {
 }
 
 func TestUpsertShowAndEpisodePinnedRetention(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, _ := openTestStore(t)
 

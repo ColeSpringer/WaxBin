@@ -51,6 +51,7 @@ func tagValues(t *testing.T, st *Store, pid model.PID, key string) []string {
 }
 
 func TestSetItemTag(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	res := putTrackCustom(t, st, lib.ID, "/lib/1.flac", "e1", "c1", "One", nil, true)
@@ -104,6 +105,7 @@ func TestSetItemTag(t *testing.T) {
 // is refused as a custom tag on a book, where the scalar edit owns it, and stays a
 // plain custom tag on a track.
 func TestSetItemTagRefusesBookOwnedKeysOnBooks(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib := entityFixture(t)
 	book := putBook(t, st, lib.ID, bookSpec{
@@ -124,6 +126,7 @@ func TestSetItemTagRefusesBookOwnedKeysOnBooks(t *testing.T) {
 }
 
 func TestScanPreservesLockedCustomTag(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 
@@ -164,6 +167,7 @@ func TestScanPreservesLockedCustomTag(t *testing.T) {
 }
 
 func TestScanRefreshesFTSOnTagChangeWithoutAudioChange(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	// First scan: the file carries MOOD=filevalue.
@@ -199,6 +203,7 @@ func TestScanRefreshesFTSOnTagChangeWithoutAudioChange(t *testing.T) {
 }
 
 func TestItemTagsNotFound(t *testing.T) {
+	t.Parallel()
 	st, _ := entityFixture(t)
 	if _, err := st.ItemTags(context.Background(), "does-not-exist"); !waxerr.Is(err, waxerr.CodeNotFound) {
 		t.Fatalf("ItemTags for a missing item should be CodeNotFound, got %v", err)
@@ -206,6 +211,7 @@ func TestItemTagsNotFound(t *testing.T) {
 }
 
 func TestCustomTagIsSearchable(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	res := putTrackCustom(t, st, lib.ID, "/lib/1.flac", "e1", "c1", "One", nil, true)
@@ -229,6 +235,7 @@ func TestCustomTagIsSearchable(t *testing.T) {
 // SetItemTag rejects a reserved key and a surviving row would be uneditable. The fixture
 // is written directly: only a catalog predating the reservation can hold such a row.
 func TestScanDropsALockedRowUnderANewlyReservedKey(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	res := putTrackCustom(t, st, lib.ID, "/lib/1.flac", "e1", "c1", "One",
@@ -288,6 +295,7 @@ func TestScanDropsALockedRowUnderANewlyReservedKey(t *testing.T) {
 // never locked. It is just as unreachable once reserved (IsCuratableField refuses the
 // field whatever its lock bit), so iterating only the locked keys would leave it behind.
 func TestScanDropsAnUnlockedRowUnderANewlyReservedKey(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	res := putTrackCustom(t, st, lib.ID, "/lib/1.flac", "e1", "c1", "One",
@@ -334,6 +342,7 @@ func TestScanDropsAnUnlockedRowUnderANewlyReservedKey(t *testing.T) {
 // folded a release earlier, so they left no rows behind. The rows are written
 // directly here for the same reason the MEDIA fixture is.
 func TestScanRetiresTheFoldedWireSpellings(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	res := putTrackCustom(t, st, lib.ID, "/lib/1.mp3", "e1", "c1", "One",
@@ -402,6 +411,7 @@ func TestScanRetiresTheFoldedWireSpellings(t *testing.T) {
 // path would cost each plain file a second query per scan, so db verify counts the row
 // as reclaimable and --fix deletes it.
 func TestVerifyReclaimsUnreachableReservedTagProvenance(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	res := putTrackCustom(t, st, lib.ID, "/lib/plain.mp3", "e1", "c1", "One", nil, true)
@@ -457,6 +467,7 @@ func TestVerifyReclaimsUnreachableReservedTagProvenance(t *testing.T) {
 // TestGCReservedTagProvenanceKeepsLiveLocks: the sweep is keyed on the reserved set, so
 // a curated lock under a key that is still a custom tag must be left alone.
 func TestGCReservedTagProvenanceKeepsLiveLocks(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	res := putTrackCustom(t, st, lib.ID, "/lib/1.mp3", "e1", "c1", "One",
@@ -490,6 +501,7 @@ func TestGCReservedTagProvenanceKeepsLiveLocks(t *testing.T) {
 // locked one on purpose. db verify reports them as reclaimable garbage, not corruption,
 // and --fix removes them without touching a live curated tag.
 func TestVerifyReclaimsStrandedTagKeys(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	res := putTrackCustom(t, st, lib.ID, "/lib/1.mp3", "e1", "c1", "One",
@@ -554,6 +566,7 @@ func TestVerifyReclaimsStrandedTagKeys(t *testing.T) {
 // value, a set that changes nothing owes nothing, and an alias spelling owes nothing,
 // since a tag write under it lands on another field and so no write-back can pay it.
 func TestTagEditOwesItsFiles(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	res := putTrackCustom(t, st, lib.ID, "/lib/1.flac", "e1", "c1", "One", map[string][]string{"MOOD": {"calm"}}, true)
@@ -592,6 +605,7 @@ func TestTagEditOwesItsFiles(t *testing.T) {
 // what the catalog holds. A locked edit stays owed while the file differs and goes once
 // the file carries it, and an unlocked edit the scan re-derives away owes nothing.
 func TestScanSettlesOwedTagRows(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	calm := map[string][]string{"MOOD": {"calm"}}
@@ -635,6 +649,7 @@ func TestScanSettlesOwedTagRows(t *testing.T) {
 // part's, so once that part's scan re-derives a catalog-only edit away, no part owes it,
 // the parts the scan did not read included.
 func TestScanSettlesAReDerivedBookTagOnEveryPart(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	partOne := bookSpec{path: "/lib/B/1.m4b", essence: "b1", content: "b1", title: "Book", author: "Auth", position: 1}
@@ -667,6 +682,7 @@ func TestScanSettlesAReDerivedBookTagOnEveryPart(t *testing.T) {
 // TestScanSettlesABookPartThatCarriesTheTag: a part that is not the book's primary still
 // pays its own owed row once its file carries the catalog's values, and only its own.
 func TestScanSettlesABookPartThatCarriesTheTag(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	one := putBook(t, st, lib.ID, bookSpec{path: "/lib/B/1.m4b", essence: "b1", content: "b1", title: "Book", author: "Auth", position: 1})
@@ -691,6 +707,7 @@ func TestScanSettlesABookPartThatCarriesTheTag(t *testing.T) {
 // a locked tag with the primary's file, so the edit the owed rows were about is gone from
 // every part.
 func TestIgnoreLocksRescanSettlesALockedTagEverywhere(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	partOne := bookSpec{path: "/lib/B/1.m4b", essence: "b1", content: "b1", title: "Book", author: "Auth", position: 1}
@@ -716,6 +733,7 @@ func TestIgnoreLocksRescanSettlesALockedTagEverywhere(t *testing.T) {
 // tag write puts onto another field, is stranded with the tag it was about, so db verify
 // counts it and --fix reclaims it, while a live key's row stays.
 func TestVerifyReclaimsUnpayableTagOwedRows(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	res := putTrackCustom(t, st, lib.ID, "/lib/1.mp3", "e1", "c1", "One", nil, true)
@@ -749,6 +767,7 @@ func TestVerifyReclaimsUnpayableTagOwedRows(t *testing.T) {
 // TestForgetItemTagPaysEveryFile: ForgetItemTag follows a write-back that cleared the tag
 // from every file, so once the catalog drops it too no file owes it.
 func TestForgetItemTagPaysEveryFile(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	one := putBook(t, st, lib.ID, bookSpec{path: "/lib/B/1.m4b", essence: "b1", content: "b1", title: "Book", author: "Auth", position: 1})

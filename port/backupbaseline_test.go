@@ -37,12 +37,14 @@ func backupOfFreshCatalog(t *testing.T) string {
 // TestValidateBackupAcceptsAFreshBackup pins the property the stamp placement
 // rests on: VACUUM INTO carries user_version.
 func TestValidateBackupAcceptsAFreshBackup(t *testing.T) {
+	t.Parallel()
 	if _, err := port.ValidateBackup(context.Background(), backupOfFreshCatalog(t)); err != nil {
 		t.Fatalf("validating a backup of a healthy catalog: %v", err)
 	}
 }
 
 func TestValidateBackupRejectsForeignBaseline(t *testing.T) {
+	t.Parallel()
 	backup := backupOfFreshCatalog(t)
 	stampUserVersion(t, backup, 0x5a5a5a5a)
 
@@ -56,6 +58,7 @@ func TestValidateBackupRejectsForeignBaseline(t *testing.T) {
 // TestRestoreLeavesTargetIntactOnForeignBaseline pins what the check buys over
 // temp-and-rename: a restore never succeeds into an unopenable catalog.
 func TestRestoreLeavesTargetIntactOnForeignBaseline(t *testing.T) {
+	t.Parallel()
 	backup := backupOfFreshCatalog(t)
 	stampUserVersion(t, backup, 0x5a5a5a5a)
 

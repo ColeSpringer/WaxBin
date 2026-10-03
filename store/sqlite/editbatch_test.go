@@ -12,6 +12,7 @@ import (
 // members get distinct titles and track numbers in one batch, and the touched
 // rollups come out consistent.
 func TestEditItemsFieldsPerItemMaps(t *testing.T) {
+	t.Parallel()
 	st, _, p1, p2 := twoTrackFixture(t)
 	ctx := context.Background()
 
@@ -49,6 +50,7 @@ func TestEditItemsFieldsPerItemMaps(t *testing.T) {
 // a bad field on the second entry undoes the first entry's edit, and a missing
 // pid does the same.
 func TestEditItemsFieldsAtomic(t *testing.T) {
+	t.Parallel()
 	st, _, p1, p2 := twoTrackFixture(t)
 	ctx := context.Background()
 
@@ -88,6 +90,7 @@ func TestEditItemsFieldsAtomic(t *testing.T) {
 // locked target aborts, with skipLocked it is skipped and reported while the
 // rest applies.
 func TestEditItemsFieldsSkipLocked(t *testing.T) {
+	t.Parallel()
 	st, _, p1, p2 := twoTrackFixture(t)
 	ctx := context.Background()
 
@@ -120,6 +123,7 @@ func TestEditItemsFieldsSkipLocked(t *testing.T) {
 // TestEditItemsFieldsDuplicatePID verifies two maps for one item reject the
 // batch: conflicting entries are a caller bug, not something to merge.
 func TestEditItemsFieldsDuplicatePID(t *testing.T) {
+	t.Parallel()
 	st, _, p1, _ := twoTrackFixture(t)
 	_, err := st.EditItemsFields(context.Background(), []model.ItemFieldEdit{
 		{ItemPID: p1, Fields: map[string]string{"title": "A"}},
@@ -136,6 +140,7 @@ func TestEditItemsFieldsDuplicatePID(t *testing.T) {
 // the track artist "Alpha" also wrote a book, and moving both references at once
 // renames the one artist entity in place.
 func TestEditItemsFieldsMixedKinds(t *testing.T) {
+	t.Parallel()
 	st, lib, p1, _ := twoTrackFixture(t)
 	ctx := context.Background()
 	bres := putBook(t, st, lib.ID, bookSpec{

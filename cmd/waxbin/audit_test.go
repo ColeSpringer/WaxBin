@@ -19,6 +19,7 @@ import (
 // the audit runs, rather than silently matching nothing and reporting no issues.
 // Validation happens before the catalog is opened, so no database is needed.
 func TestAuditRejectsUnknownCheck(t *testing.T) {
+	t.Parallel()
 	cmd := newAuditCmd(&globals{})
 	cmd.SilenceUsage, cmd.SilenceErrors = true, true
 	cmd.SetArgs([]string{"--check", "missing_replay_gain"}) // typo: real name is missing_replaygain

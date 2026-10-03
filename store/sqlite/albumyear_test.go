@@ -43,6 +43,7 @@ func putMalibu(t *testing.T, st *Store, libID int64) map[int]*model.ScanItemResu
 // carry, whichever member was read first, and a retag that leaves the most common year
 // standing writes nothing.
 func TestAlbumYearIsTheMostCommonMemberYear(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putMalibu(t, st, lib.ID)
@@ -67,6 +68,7 @@ func TestAlbumYearIsTheMostCommonMemberYear(t *testing.T) {
 // is no part of the album's year, so trashing the eleven 2015 tracks leaves the album the
 // year of the one that remains, and says so in the change log.
 func TestAlbumYearFollowsTrashedMembers(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	tracks := putMalibu(t, st, lib.ID)
@@ -95,6 +97,7 @@ func TestAlbumYearFollowsTrashedMembers(t *testing.T) {
 // TestAlbumYearTiesGoToTheEarliest: six members at 2009 and six at 1999 give the album
 // 1999, the earliest of the most common years, however the members were read.
 func TestAlbumYearTiesGoToTheEarliest(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	for n := 1; n <= 12; n++ {
 		year := 2009
@@ -115,6 +118,7 @@ func TestAlbumYearTiesGoToTheEarliest(t *testing.T) {
 // locked empty takes nothing, and an album whose members all lock it stays without a year:
 // the locks are the user's say over the album's year too.
 func TestAlbumYearFromEnrichmentStays(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	fill := func(title, year string) {
@@ -178,6 +182,7 @@ func TestAlbumYearFromEnrichmentStays(t *testing.T) {
 // TestVerifyReportsAlbumYearDrift: an album year that is not its members' most common
 // year is drift, which db verify reports and the rollup repair puts right.
 func TestVerifyReportsAlbumYearDrift(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putMalibu(t, st, lib.ID)
@@ -203,6 +208,7 @@ func TestVerifyReportsAlbumYearDrift(t *testing.T) {
 // TestAlbumYearFollowsAMerge: a merged album's year is recounted over the members it took
 // in.
 func TestAlbumYearFollowsAMerge(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	for n := 1; n <= 2; n++ {
@@ -225,6 +231,7 @@ func TestAlbumYearFollowsAMerge(t *testing.T) {
 // TestAlbumYearFollowsADetach: a member detached from a MusicBrainz-keyed album leaves its
 // year behind with it.
 func TestAlbumYearFollowsADetach(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	const rel = "b1000000-0000-4000-8000-0000000000ab"
@@ -249,6 +256,7 @@ func TestAlbumYearFollowsADetach(t *testing.T) {
 // TestAlbumYearFollowsAReKind: a member that becomes a book leaves its album, and the
 // album's year is recounted without it.
 func TestAlbumYearFollowsAReKind(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	var first *model.ScanItemResult
 	for i, year := range []int{2015, 2015, 2016} {
@@ -276,6 +284,7 @@ func TestAlbumYearFollowsAReKind(t *testing.T) {
 // so its own year neither refuses a provider's nor takes it, and a trashed member with
 // none is not filled.
 func TestAlbumFieldsYearSkipsTrashedMembers(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	var res []*model.ScanItemResult
@@ -319,6 +328,7 @@ func TestAlbumFieldsYearSkipsTrashedMembers(t *testing.T) {
 // member carries one any more, whether the dated members were trashed or their years
 // cleared, and a hand-set year on such an album is drift.
 func TestAlbumYearClearsWithItsMembers(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	trashed := putTrack(t, st, lib.ID, yearTrack(1, 2001, "/lib/AP/Yes Lawd", "Yes Lawd"))
@@ -358,6 +368,7 @@ func TestAlbumYearClearsWithItsMembers(t *testing.T) {
 // the import planner renders with, read one rule, so an album lands in the folder the
 // catalog then names it by. Each case is an album in a folder of its own.
 func TestAlbumYearRuleMatchesTheModel(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	cases := map[string][]int{
 		"Stray":       {2015, 2015, 2015, 2016},
@@ -389,6 +400,7 @@ func TestAlbumYearRuleMatchesTheModel(t *testing.T) {
 // deliberate; the album shows the newest of them and the year check stays quiet. A year
 // most members share with a stray beside it still reports.
 func TestCompilationOfOriginalYearsIsNoInconsistency(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	for i, y := range []int{1971, 1975, 1975, 1983, 1990, 1999} {
 		putTrack(t, st, lib.ID, yearTrack(i+1, y, "/lib/AP/Greatest", "Greatest"))
@@ -412,6 +424,7 @@ func TestCompilationOfOriginalYearsIsNoInconsistency(t *testing.T) {
 // ask a provider about, for its fields or its art, until a member comes back, and its
 // counts agree; a run scoped to it still reaches it.
 func TestAlbumWalksSkipTrashedAlbums(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	for _, album := range []string{"Gone", "Here"} {

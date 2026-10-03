@@ -8,6 +8,7 @@ import (
 )
 
 func TestDownloadFilenameNoCollision(t *testing.T) {
+	t.Parallel()
 	// Two episodes of one podcast whose enclosures share a basename (differ only by
 	// path prefix) must map to distinct on-disk filenames.
 	a := &model.Episode{PID: "01AAAA", EnclosureURL: "https://h/1/audio.mp3", EnclosureType: "audio/mpeg"}
@@ -27,6 +28,7 @@ func TestDownloadFilenameNoCollision(t *testing.T) {
 }
 
 func TestDownloadFilenameGuaranteesExtension(t *testing.T) {
+	t.Parallel()
 	e := &model.Episode{PID: "01CCCC", EnclosureURL: "https://h/stream?id=9", EnclosureType: "audio/mp4"}
 	name := downloadFilename(e)
 	if !strings.HasSuffix(name, ".m4a") {
@@ -35,6 +37,7 @@ func TestDownloadFilenameGuaranteesExtension(t *testing.T) {
 }
 
 func TestCapFilenamePreservesExtension(t *testing.T) {
+	t.Parallel()
 	long := strings.Repeat("a", 300) + ".mp3"
 	got := capFilename(long, 50)
 	if len(got) > 50 {
@@ -46,6 +49,7 @@ func TestCapFilenamePreservesExtension(t *testing.T) {
 }
 
 func TestParseChapterDoc(t *testing.T) {
+	t.Parallel()
 	// Out-of-order chapters are sorted by start; a negative-start entry is skipped
 	// (never stored as a negative offset); Positions are contiguous after filtering.
 	body := []byte(`{"chapters":[

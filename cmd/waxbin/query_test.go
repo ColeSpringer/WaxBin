@@ -34,6 +34,7 @@ func condOf(t *testing.T, q query.Query) query.Cond {
 }
 
 func TestBuildQueryTagEqualityPreservesEqualsInValue(t *testing.T) {
+	t.Parallel()
 	// KEY=VALUE splits on the FIRST '=', so a value that itself contains '=' survives.
 	q, err := buildQuery(yearCmd(), "", queryFlags{tagEq: []string{"DISCOGS_RELEASE=id=12345"}})
 	if err != nil {
@@ -46,6 +47,7 @@ func TestBuildQueryTagEqualityPreservesEqualsInValue(t *testing.T) {
 }
 
 func TestBuildQueryTagWithoutEqualsIsUsageError(t *testing.T) {
+	t.Parallel()
 	_, err := buildQuery(yearCmd(), "", queryFlags{tagEq: []string{"NOEQUALS"}})
 	if !waxerr.Is(err, waxerr.CodeInvalid) {
 		t.Fatalf("--tag with no '=' should be CodeInvalid, got %v", err)
@@ -53,6 +55,7 @@ func TestBuildQueryTagWithoutEqualsIsUsageError(t *testing.T) {
 }
 
 func TestBuildQueryTagEmptyKeyIsUsageError(t *testing.T) {
+	t.Parallel()
 	// An empty key on any tag flag gets a clear message at the point of use, not the
 	// resolver's generic "unknown field" error.
 	for _, qf := range []queryFlags{
@@ -69,6 +72,7 @@ func TestBuildQueryTagEmptyKeyIsUsageError(t *testing.T) {
 }
 
 func TestBuildQueryTagReservedKeyIsClearError(t *testing.T) {
+	t.Parallel()
 	// A reserved key (owned by a modeled/edit surface) is rejected at the point of use
 	// with a message naming it as reserved, not the resolver's generic "unknown field".
 	for _, qf := range []queryFlags{
@@ -86,6 +90,7 @@ func TestBuildQueryTagReservedKeyIsClearError(t *testing.T) {
 }
 
 func TestBuildQueryTagPresenceAndContains(t *testing.T) {
+	t.Parallel()
 	q, err := buildQuery(yearCmd(), "", queryFlags{tagPresent: []string{"MYKEY"}})
 	if err != nil {
 		t.Fatalf("buildQuery: %v", err)
@@ -107,6 +112,7 @@ func TestBuildQueryTagPresenceAndContains(t *testing.T) {
 // empty result that reads as an empty library. query, browse, facet, and edit all
 // route through buildQuery.
 func TestBuildQueryKindValidation(t *testing.T) {
+	t.Parallel()
 	for _, k := range []string{"track", "book", "episode"} {
 		if _, err := buildQuery(yearCmd(), "", queryFlags{kind: k}); err != nil {
 			t.Errorf("--kind %s: %v", k, err)
@@ -153,6 +159,7 @@ func testLibs() fakeLibraryLister {
 }
 
 func TestBuildQueryLibraryFlagsCompileToIn(t *testing.T) {
+	t.Parallel()
 	q, err := buildQuery(yearCmd(), "", queryFlags{library: []model.PID{"lib-music", "lib-books"}})
 	if err != nil {
 		t.Fatalf("buildQuery: %v", err)
@@ -167,6 +174,7 @@ func TestBuildQueryLibraryFlagsCompileToIn(t *testing.T) {
 }
 
 func TestResolveLibraryRefsAcceptsAPIDOrARootPath(t *testing.T) {
+	t.Parallel()
 	for _, ref := range []string{"lib-music", vol + "/music", vol + "/music/"} {
 		got, err := resolveLibraryRefs(context.Background(), testLibs(), "query", []string{ref})
 		if err != nil {
@@ -181,6 +189,7 @@ func TestResolveLibraryRefsAcceptsAPIDOrARootPath(t *testing.T) {
 // A pid and its root path name one library, and collapsing them keeps the condition at
 // arity 1, which is the only arity compileValueSubCond drives off file_library.
 func TestResolveLibraryRefsDeduplicatesSpellingsOfOneLibrary(t *testing.T) {
+	t.Parallel()
 	got, err := resolveLibraryRefs(context.Background(), testLibs(), "query",
 		[]string{vol + "/music", "lib-music", vol + "/books", vol + "/music/"})
 	if err != nil {
@@ -196,6 +205,7 @@ func TestResolveLibraryRefsDeduplicatesSpellingsOfOneLibrary(t *testing.T) {
 // branch real data never reaches: both spellings must still resolve, and a path under
 // either must still get the containing-root hint.
 func TestResolveLibraryRefsMatchesEitherRootSpelling(t *testing.T) {
+	t.Parallel()
 	libs := fakeLibraryLister{libs: []*model.Library{
 		{PID: "lib-odd", Root: []byte(vol + "/raw\xffmusic"), DisplayRoot: vol + "/shown/music"},
 	}}
@@ -215,6 +225,7 @@ func TestResolveLibraryRefsMatchesEitherRootSpelling(t *testing.T) {
 }
 
 func TestResolveLibraryRefsRejectsAnUnknownLibrary(t *testing.T) {
+	t.Parallel()
 	_, err := resolveLibraryRefs(context.Background(), testLibs(), "query", []string{vol + "/nope"})
 	if !waxerr.Is(err, waxerr.CodeNotFound) {
 		t.Fatalf("err = %v, want CodeNotFound", err)
@@ -238,6 +249,7 @@ func TestResolveLibraryRefsRejectsAnUnknownLibrary(t *testing.T) {
 // Roots are stored absolute, so a ref typed relative to the working directory has to
 // resolve the same way `library add` resolves the path it registers.
 func TestResolveLibraryRefsAcceptsARelativePath(t *testing.T) {
+	t.Parallel()
 	wd, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
@@ -260,6 +272,7 @@ func TestResolveLibraryRefsAcceptsARelativePath(t *testing.T) {
 // !HasPrefix(rel, "..") calls a sibling like /musicarchive a child of /music, which
 // would hand back the wrong root in the hint.
 func TestResolveLibraryRefsDoesNotTreatASiblingAsContained(t *testing.T) {
+	t.Parallel()
 	for _, ref := range []string{vol + "/musicarchive", vol + "/music.old"} {
 		_, err := resolveLibraryRefs(context.Background(), testLibs(), "query", []string{ref})
 		if !waxerr.Is(err, waxerr.CodeNotFound) {
@@ -275,6 +288,7 @@ func TestResolveLibraryRefsDoesNotTreatASiblingAsContained(t *testing.T) {
 // names the same directory. Byte equality used to miss it and hand back the
 // inside-root hint for the root itself.
 func TestResolveLibraryRefsFoldsCaseOnWindows(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS != "windows" {
 		t.Skip("path case folding is a Windows filesystem property")
 	}
@@ -291,6 +305,7 @@ func TestResolveLibraryRefsFoldsCaseOnWindows(t *testing.T) {
 // The op names the command the error came from, so `search --library bogus` does not
 // report itself as a query error.
 func TestResolveLibraryRefsCarriesTheCallersOp(t *testing.T) {
+	t.Parallel()
 	for _, op := range []string{"query", "facet", "search", "diagnostics"} {
 		_, err := resolveLibraryRefs(context.Background(), testLibs(), op, []string{"/nope"})
 		if err == nil || !strings.HasPrefix(err.Error(), op+": ") {
@@ -302,6 +317,7 @@ func TestResolveLibraryRefsCarriesTheCallersOp(t *testing.T) {
 // scopedQuery is the seam that keeps resolve and apply together. Dropping the apply
 // would leave a --library that validates its input and then filters nothing.
 func TestScopedQueryAppliesTheResolvedLibraries(t *testing.T) {
+	t.Parallel()
 	q, err := scopedQuery(context.Background(), testLibs(), yearCmd(), "query", "",
 		queryFlags{}, []string{vol + "/music"})
 	if err != nil {
@@ -317,6 +333,7 @@ func TestScopedQueryAppliesTheResolvedLibraries(t *testing.T) {
 // A rule document owns the whole where-clause, so layering --library on top is refused
 // rather than dropped. Silently ignoring it would answer a wider question than asked.
 func TestScopedQueryRefusesLibraryWithARule(t *testing.T) {
+	t.Parallel()
 	_, err := scopedQuery(context.Background(), testLibs(), yearCmd(), "query", "rule.json",
 		queryFlags{}, []string{"/music"})
 	if !waxerr.Is(err, waxerr.CodeInvalid) {
@@ -333,6 +350,7 @@ func TestScopedQueryRefusesLibraryWithARule(t *testing.T) {
 // filter, wrong for browse where it is the by-year list's parameter. browse builds
 // its kind filter directly instead.
 func TestBrowseKindDoesNotInheritYearFlag(t *testing.T) {
+	t.Parallel()
 	cmd := newBrowseCmd(&globals{})
 	if err := cmd.Flags().Set("year", "2000"); err != nil {
 		t.Fatalf("set --year: %v", err)

@@ -16,6 +16,7 @@ import (
 )
 
 func TestMarkCollisions(t *testing.T) {
+	t.Parallel()
 	plan := &Plan{Actions: []Action{
 		{Src: "/in/1.mp3", Dst: "/lib/A/Al/01 - X.mp3"},
 		{Src: "/in/2.mp3", Dst: "/lib/A/Al/01 - X.mp3"}, // identical destination
@@ -42,6 +43,7 @@ func TestMarkCollisions(t *testing.T) {
 }
 
 func TestSidecarMovesEnumeration(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	srcDir := filepath.Join(dir, "src")
 	dstDir := filepath.Join(dir, "Artist", "Album")
@@ -80,6 +82,7 @@ func TestSidecarMovesEnumeration(t *testing.T) {
 }
 
 func TestMoveSidecarOnDiskAndCollision(t *testing.T) {
+	t.Parallel()
 	o := New(nil, nil, nil)
 	dir := t.TempDir()
 	srcDir := filepath.Join(dir, "src")
@@ -110,6 +113,7 @@ func TestMoveSidecarOnDiskAndCollision(t *testing.T) {
 // it runs: a plan routing one directory's tracks to two destinations leaves a cover in
 // each, and both are counted.
 func TestExecuteSplitsADirectoryCoverAcrossDestinations(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	srcDir := filepath.Join(dir, "src")
 	dstA, dstB := filepath.Join(dir, "A"), filepath.Join(dir, "B")
@@ -155,6 +159,7 @@ func TestExecuteSplitsADirectoryCoverAcrossDestinations(t *testing.T) {
 // with nothing to hold it. The cancel fires from the heartbeat, between the two
 // actions, so nothing here races.
 func TestExecuteCarriesCoversWhenCancelled(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, err := sqlite.Open(ctx, sqlite.OpenOptions{
 		Path: filepath.Join(t.TempDir(), "c.db"), Owner: "test",

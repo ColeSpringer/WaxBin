@@ -20,6 +20,7 @@ import (
 // Validation happens with no database configured, so reaching it proves the
 // early path.
 func TestEnrichScopeFlagValidation(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name string
 		args []string
@@ -57,6 +58,7 @@ func TestEnrichScopeFlagValidation(t *testing.T) {
 // them non-zero and checks each line is there. The album fields phase was added without
 // its line, which is what this catches.
 func TestEnrichSummaryCoversEveryPhase(t *testing.T) {
+	t.Parallel()
 	res := &waxbin.EnrichResult{Result: enrich.Result{
 		ArtistsEnriched: 1, ReleaseGroupsEnriched: 1, AlbumsSearched: 1, BooksEnriched: 1,
 		LyricsEnriched: 1, GroupArtEnriched: 1, ArtistArtEnriched: 1, AlbumArtEnriched: 1,
@@ -83,6 +85,7 @@ func TestEnrichSummaryCoversEveryPhase(t *testing.T) {
 // TestEnrichViewOmitsArtReusedAtZero: the reuse count is new, so a payload from a run
 // that reused nothing has to keep the shape it had.
 func TestEnrichViewOmitsArtReusedAtZero(t *testing.T) {
+	t.Parallel()
 	zero, err := json.Marshal(toEnrichView(&waxbin.EnrichResult{}))
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
@@ -103,6 +106,7 @@ func TestEnrichViewOmitsArtReusedAtZero(t *testing.T) {
 // left queued, in the text summary and the JSON view, and a run with none keeps the
 // shape it had.
 func TestEnrichSummaryReportsDeferred(t *testing.T) {
+	t.Parallel()
 	render := func(r enrich.Result) string {
 		cmd := &cobra.Command{}
 		var buf bytes.Buffer
@@ -137,6 +141,7 @@ func TestEnrichSummaryReportsDeferred(t *testing.T) {
 // TestEnrichSummaryReportsStalled: a phase that ran out of live providers is named, so a
 // run that stopped short of its targets does not read as having finished them.
 func TestEnrichSummaryReportsStalled(t *testing.T) {
+	t.Parallel()
 	cmd := &cobra.Command{}
 	var buf bytes.Buffer
 	cmd.SetOut(&buf)
@@ -180,6 +185,7 @@ func TestEnrichPhaseReachesTheRun(t *testing.T) {
 // read-only during the write-back are counted in both outputs, apart from the other
 // skips.
 func TestEnrichSummaryReportsReadOnlySkips(t *testing.T) {
+	t.Parallel()
 	cmd := &cobra.Command{}
 	var buf bytes.Buffer
 	cmd.SetOut(&buf)

@@ -155,6 +155,7 @@ func (f *coverFixture) coverHash(t *testing.T, pid model.PID) string {
 // is what the old compare got wrong, since podcast.image_url had already advanced to
 // the feed's URL while the lock skipped the attach.
 func TestSyncSkipsFetchWhileCoverLocked(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newCoverFixture(t)
 	pid := f.subscribe(t)
@@ -201,6 +202,7 @@ func TestSyncSkipsFetchWhileCoverLocked(t *testing.T) {
 // as "where the cover came from"): nothing resets that column on a clear, so it would
 // compare A against A forever and the show would stay coverless.
 func TestSyncRefillsClearedCover(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newCoverFixture(t)
 	pid := f.subscribe(t)
@@ -231,6 +233,7 @@ func TestSyncRefillsClearedCover(t *testing.T) {
 // A failed fetch attaches nothing, so source_url stays as it was and the next sync
 // tries again rather than deciding the cover is current.
 func TestSyncRetriesAfterFailedCoverFetch(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newCoverFixture(t)
 	f.setStatus(http.StatusInternalServerError)
@@ -266,6 +269,7 @@ func TestSyncRetriesAfterFailedCoverFetch(t *testing.T) {
 // Add. A show whose cover the user locked must not pay for a full image download that
 // the store then discards.
 func TestReAddSkipsFetchWhileCoverLocked(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newCoverFixture(t)
 	pid := f.subscribe(t)
@@ -295,6 +299,7 @@ func TestReAddSkipsFetchWhileCoverLocked(t *testing.T) {
 // costs a download the store then discards. A feed declaring the Podcasting 2.0
 // namespace at its old address reads a guid for the first time the same way.
 func TestReAddUnderANewGUIDSkipsFetchWhileCoverLocked(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newCoverFixture(t)
 	pid := f.subscribe(t)
@@ -320,6 +325,7 @@ func TestReAddUnderANewGUIDSkipsFetchWhileCoverLocked(t *testing.T) {
 
 // The same read also means a re-add whose cover is already current costs no download.
 func TestReAddSkipsFetchWhenCoverCurrent(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newCoverFixture(t)
 	f.subscribe(t)
@@ -349,6 +355,7 @@ func bmpBytes(t *testing.T, w, h int) []byte {
 // the same picture forever. It decodes now, with the dimensions that only a decoder can
 // give, and the compare goes quiet.
 func TestSyncAttachesBMPChannelImage(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newCoverFixture(t)
 	f.setImage(bmpBytes(t, 24, 18), "image/bmp")
@@ -384,6 +391,7 @@ func TestSyncAttachesBMPChannelImage(t *testing.T) {
 // host fixes it. Trusting the header would attach the broken cover and then skip the
 // fetch forever, since upsert compares the advertised URL against the one on file.
 func TestSyncDiscardsMisdeclaredImage(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newCoverFixture(t)
 	f.setImage(append([]byte("BM"), make([]byte, 60)...), "image/bmp")

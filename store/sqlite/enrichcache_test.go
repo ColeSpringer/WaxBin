@@ -56,6 +56,7 @@ func cacheKeys(t *testing.T, db *sql.DB) []string {
 // the kind has to be the provider and endpoint rather than the whole key, and the
 // archive's group records have to stand out as the share a prune leaves alone.
 func TestEnrichmentCacheStatsGroupsByKind(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, _ := openStoreAt(t)
 	rw := writeConn(t, dbPath)
@@ -116,6 +117,7 @@ func TestEnrichmentCacheStatsGroupsByKind(t *testing.T) {
 // TestPruneEnrichmentCacheDropsOnlyEntriesPastTheAge: the archive's group record is not
 // a cached answer, so no age reaches it.
 func TestPruneEnrichmentCacheDropsOnlyEntriesPastTheAge(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, _ := openStoreAt(t)
 	rw := writeConn(t, dbPath)
@@ -152,6 +154,7 @@ func TestPruneEnrichmentCacheDropsOnlyEntriesPastTheAge(t *testing.T) {
 // TestPruneEnrichmentCacheEvictsOldestFirstToTheBudget: the budget bounds the prunable
 // rows, so the exempt record neither counts toward it nor goes.
 func TestPruneEnrichmentCacheEvictsOldestFirstToTheBudget(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, _ := openStoreAt(t)
 	rw := writeConn(t, dbPath)
@@ -188,6 +191,7 @@ func TestPruneEnrichmentCacheEvictsOldestFirstToTheBudget(t *testing.T) {
 // TestPruneEnrichmentCacheNeedsABound: a prune with neither bound is a caller bug, and
 // reporting nothing removed would read as an empty cache.
 func TestPruneEnrichmentCacheNeedsABound(t *testing.T) {
+	t.Parallel()
 	st, _, _ := openStoreAt(t)
 	if _, _, err := st.PruneEnrichmentCache(context.Background(), -1, -1); !waxerr.Is(err, waxerr.CodeInvalid) {
 		t.Errorf("unbounded prune err = %v, want CodeInvalid", err)

@@ -19,6 +19,7 @@ import (
 // any consumer that parses JSON numbers into doubles (JS, jq 1.6, loose Go
 // decoding). Zero stamps (never changed) are omitted.
 func TestPlayStateViewJSON(t *testing.T) {
+	t.Parallel()
 	r := 80
 	full := &model.PlayState{
 		ItemPID: "i1", PositionMS: 42000, Played: true, PlayCount: 3,
@@ -56,6 +57,7 @@ func TestPlayStateViewJSON(t *testing.T) {
 // chosen from the rows rather than always emitted, so a music-only catalog does not
 // grow a permanently blank column.
 func TestPrintItemTableEpisodeColumn(t *testing.T) {
+	t.Parallel()
 	track := &model.ItemView{
 		PID: "t1", Kind: model.KindTrack, Title: "Airbag",
 		Artist: "Radiohead", Album: "OK Computer", TrackNo: 1, Year: 1997,
@@ -117,6 +119,7 @@ func TestPrintItemTableEpisodeColumn(t *testing.T) {
 // budget on that phase, and a payload that never mentions it cannot explain where N
 // went.
 func TestEnrichViewGroupArtCounts(t *testing.T) {
+	t.Parallel()
 	b, err := json.Marshal(toEnrichView(&waxbin.EnrichResult{
 		Result: enrich.Result{ArtistsEnriched: 1, ArtistsMatched: 1},
 	}))
@@ -143,6 +146,7 @@ func TestEnrichViewGroupArtCounts(t *testing.T) {
 // TestRenderEnrichResultGroupArtLine: the backfill phase gets a summary line of its
 // own when it ran, and the aux image tally beside it stays distinguishable from it.
 func TestRenderEnrichResultGroupArtLine(t *testing.T) {
+	t.Parallel()
 	render := func(r enrich.Result) string {
 		t.Helper()
 		cmd := &cobra.Command{}
@@ -190,6 +194,7 @@ func lineWith(t *testing.T, out, want string) string {
 // It is absent from a run that re-asked nothing, so the ordinary payload keeps its
 // shape, and present when it did, because those targets spent the --limit budget too.
 func TestEnrichViewRetriedCount(t *testing.T) {
+	t.Parallel()
 	b, err := json.Marshal(toEnrichView(&waxbin.EnrichResult{
 		Result: enrich.Result{ArtistsEnriched: 1, ArtistsMatched: 1},
 	}))
@@ -226,6 +231,7 @@ func TestEnrichViewRetriedCount(t *testing.T) {
 // TestItemViewJSONCarriesTheTotals: the totals ride beside their numbers in the item
 // JSON, so a caller editing one can read it back.
 func TestItemViewJSONCarriesTheTotals(t *testing.T) {
+	t.Parallel()
 	b, err := json.Marshal(toItemView(&model.ItemView{PID: "t1", TrackNo: 7, TrackTotal: 12, DiscNo: 1, DiscTotal: 2}))
 	if err != nil {
 		t.Fatal(err)
@@ -242,6 +248,7 @@ func TestItemViewJSONCarriesTheTotals(t *testing.T) {
 // summary, so a pass that quietly fell back to the pure-Go fingerprint does not read as
 // a clean Chromaprint one.
 func TestAnalyzeResultReportsTheFingerprintPath(t *testing.T) {
+	t.Parallel()
 	res := &waxbin.AnalyzeResult{Result: analyze.Result{
 		Analyzed: 9, FingerprintFallbacks: 2, FingerprintPartialReads: 3, MeasureFailed: 1,
 	}}

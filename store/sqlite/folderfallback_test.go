@@ -13,6 +13,7 @@ import (
 // repeat none, and a library whose folders WaxBin lays out itself refuses it: a managed
 // one, whose folders render the catalog, and the podcast library.
 func TestSetLibraryFolderFallback(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, _, managed := openStoreAt(t)
 	if _, err := st.SetLibraryFolderFallback(ctx, managed.PID, true); !waxerr.Is(err, waxerr.CodeInvalid) {
@@ -76,6 +77,7 @@ func TestSetLibraryFolderFallback(t *testing.T) {
 // would read back as on for a library the setter refuses it on, and come back by itself if
 // the root were ever flipped to in-place again.
 func TestEnsureLibraryClearsFolderFallbackWhenTheModeLeavesInPlace(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, _, _ := openStoreAt(t)
 	root := []byte("/flip")

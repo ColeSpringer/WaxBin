@@ -13,6 +13,7 @@ import (
 // failures is surfaced as a warning and returns a nil error, which is exactly the case
 // where the linkage comes back and the user has to hear about it.
 func TestDetachDurabilityWarning(t *testing.T) {
+	t.Parallel()
 	stripFailed := &waxbin.WriteBackError{
 		ItemPID: "i1",
 		Failures: []waxbin.WriteBackFailure{{

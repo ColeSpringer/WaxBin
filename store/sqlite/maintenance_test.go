@@ -30,6 +30,7 @@ func defaultUserID(t *testing.T, st *Store) int64 {
 }
 
 func TestYearInReview(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{
@@ -95,6 +96,7 @@ func TestYearInReview(t *testing.T) {
 }
 
 func TestYearInReviewRejectsOutOfRange(t *testing.T) {
+	t.Parallel()
 	st, _ := entityFixture(t)
 	ctx := context.Background()
 	// A year outside the unix-nanosecond range would produce wrapped bounds; reject it.
@@ -107,6 +109,7 @@ func TestYearInReviewRejectsOutOfRange(t *testing.T) {
 }
 
 func TestVacuumAndIntegrity(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{
@@ -129,6 +132,7 @@ func TestVacuumAndIntegrity(t *testing.T) {
 }
 
 func TestPruneChangeLog(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	for i, spec := range []trackSpec{

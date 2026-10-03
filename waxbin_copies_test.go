@@ -98,6 +98,7 @@ func deleteFiles(t *testing.T, lib *waxbin.Library, files ...model.PID) {
 // the copy and re-reads it, so the item's title is the copy's; restoring the original
 // brings it back as an alternate rather than taking the item over.
 func TestCopyTrashedPrimaryPromotesAndRestoreRejoins(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newCopyFixture(t)
 	deleteFiles(t, f.lib, f.orig)
@@ -129,6 +130,7 @@ func TestCopyTrashedPrimaryPromotesAndRestoreRejoins(t *testing.T) {
 }
 
 func TestCopyTrashedAlternateLeavesTheItem(t *testing.T) {
+	t.Parallel()
 	f := newCopyFixture(t)
 	deleteFiles(t, f.lib, f.copy)
 	if got := titleOf(t, f.lib, f.item); got != "Original" {
@@ -142,6 +144,7 @@ func TestCopyTrashedAlternateLeavesTheItem(t *testing.T) {
 // TestCopyDeletingTheItemTrashesEveryFile: deleting the item plans and trashes its copy
 // too, leaving it archived.
 func TestCopyDeletingTheItemTrashesEveryFile(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newCopyFixture(t)
 	plan, err := f.lib.PlanDeletePIDs(ctx, []model.PID{f.item}, model.DeleteTrash)
@@ -163,6 +166,7 @@ func TestCopyDeletingTheItemTrashesEveryFile(t *testing.T) {
 // and copy present promotes the copy (re-read, so its title shows); on one whose copy
 // is gone it drops the copy's row.
 func TestMarkMissingPromotesOrDropsCopies(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newCopyFixture(t)
 	if err := os.Remove(f.copyPath); err != nil {
@@ -198,6 +202,7 @@ func TestMarkMissingPromotesOrDropsCopies(t *testing.T) {
 // TestCopyRescanPromotesWhenThePrimaryVanishes: a plain rescan that finds the primary
 // gone promotes the copy and re-reads it, instead of marking the item missing.
 func TestCopyRescanPromotesWhenThePrimaryVanishes(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newCopyFixture(t)
 	if err := os.Remove(f.origPath); err != nil {
@@ -224,6 +229,7 @@ func TestCopyRescanPromotesWhenThePrimaryVanishes(t *testing.T) {
 // TestCopyOfABookPartIsNotOrganizedAsAPart: organize lays out a book's parts only, so a
 // copy of one of them is neither renumbered into the book folder nor moved at all.
 func TestCopyOfABookPartIsNotOrganizedAsAPart(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, "in", "p1.m4b"),
@@ -323,6 +329,7 @@ func owedKeys(t *testing.T, lib *waxbin.Library, file model.PID) []string {
 // clear; when the primary refuses, the catalog keeps it and the copy that dropped it owes
 // it back.
 func TestTitleSortClearFollowsThePrimary(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	hasTitleSort := func(lib *waxbin.Library, pid model.PID) bool {
 		t.Helper()
@@ -355,6 +362,7 @@ func TestTitleSortClearFollowsThePrimary(t *testing.T) {
 // TestCopyWriteBackReachesTheCopy: a written-back edit lands in the copy too, so the
 // copy's tags do not drift from the item they back.
 func TestCopyWriteBackReachesTheCopy(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newCopyFixture(t)
 	if err := f.lib.EditFields(ctx, f.item, map[string]string{"genre": "Jazz"}, waxbin.EditOptions{WriteBack: true}); err != nil {
@@ -375,6 +383,7 @@ func TestCopyWriteBackReachesTheCopy(t *testing.T) {
 // with one message for the whole run, and its stored result is the total with each
 // root's run beside it, named by library.
 func TestMultiRootScanJobReportsTheWhole(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	rootA, rootB := t.TempDir(), t.TempDir()
 	for i := range 3 {
@@ -421,6 +430,7 @@ func TestMultiRootScanJobReportsTheWhole(t *testing.T) {
 // files-present even when a copy's library root is absent, and only the copies whose
 // root is mounted are settled; the unreachable one stays.
 func TestMarkMissingIgnoresACopyOnAnUnpluggedDrive(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newCopyFixture(t)
 	drive := filepath.Join(t.TempDir(), "drive")
@@ -459,6 +469,7 @@ func TestMarkMissingIgnoresACopyOnAnUnpluggedDrive(t *testing.T) {
 // through a copy in that library, but an organize or a delete scoped to it acts only on
 // items whose own primary lives there, never moving or deleting another library's files.
 func TestLibraryScopedFileOperationsKeepToTheirLibrary(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	rootA, rootB := t.TempDir(), t.TempDir()
 	writeFile(t, filepath.Join(rootA, "loose", "song.mp3"), testaudio.BuildMP3("Song", "Artist", "Album", 1))

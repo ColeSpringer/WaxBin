@@ -16,6 +16,7 @@ import (
 // two encodings of one recording and leaves an unrelated track ungrouped, marking
 // exactly one keeper per group.
 func TestFindUpgradesGroupsAltEncodings(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -79,6 +80,7 @@ func TestFindUpgradesGroupsAltEncodings(t *testing.T) {
 // still lists its groups: a candidate that names no item is passed over rather than
 // aborting the listing.
 func TestFindUpgradesSkipsWhatItCannotResolve(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -140,6 +142,7 @@ func TestFindUpgradesSkipsWhatItCannotResolve(t *testing.T) {
 // FLAC primary (one recording id) is a group of its own, primary first and best, the
 // alternate named by its file so a host can delete it with PlanDeleteFiles.
 func TestFindUpgradesListsAnItemsLesserEncoding(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")

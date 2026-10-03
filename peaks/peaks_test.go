@@ -6,6 +6,7 @@ import (
 )
 
 func TestComputeBucketsPeak(t *testing.T) {
+	t.Parallel()
 	// A ramp from 0 to 1: each later bucket should hold a larger max than the prior.
 	n := 4096
 	mono := make([]float32, n)
@@ -27,6 +28,7 @@ func TestComputeBucketsPeak(t *testing.T) {
 }
 
 func TestComputeTakesMaxAbs(t *testing.T) {
+	t.Parallel()
 	// A negative spike must register as a positive peak.
 	mono := []float32{0, 0, -0.8, 0, 0, 0.2, 0, 0}
 	p := Compute(mono, 2)
@@ -36,6 +38,7 @@ func TestComputeTakesMaxAbs(t *testing.T) {
 }
 
 func TestPackRoundTrip(t *testing.T) {
+	t.Parallel()
 	in := Peaks{Buckets: []float32{0, 0.25, 0.5, 1.0, 0.123}}
 	out := Unpack(Pack(in))
 	if len(out.Buckets) != len(in.Buckets) {
@@ -49,6 +52,7 @@ func TestPackRoundTrip(t *testing.T) {
 }
 
 func TestPackHandlesNaN(t *testing.T) {
+	t.Parallel()
 	// A NaN bucket (which the max logic never selects, but a future caller might
 	// pass) must serialize deterministically to silence, not an arch-dependent
 	// uint16 from casting NaN.
@@ -63,6 +67,7 @@ func TestPackHandlesNaN(t *testing.T) {
 }
 
 func TestMaxPoolDownsamples(t *testing.T) {
+	t.Parallel()
 	coarse := []float32{0.1, 0.9, 0.2, 0.3, 0.8, 0.4}
 	out := maxPool(coarse, 3)
 	if len(out) != 3 {

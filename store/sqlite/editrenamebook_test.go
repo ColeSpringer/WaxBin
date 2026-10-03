@@ -14,6 +14,7 @@ import (
 // deliberately untouched: a DB-only author edit does not re-anchor the book (that is
 // write-back's job), so a rescan still finds it by the old key.
 func TestEditBookAuthorRenamesArtistInPlace(t *testing.T) {
+	t.Parallel()
 	st, pid := bookEditFixture(t)
 	ctx := context.Background()
 	artistID := entityIDByCol(t, st, "artist", "name", "Jane Author")
@@ -85,6 +86,7 @@ func TestEditBookAuthorRenamesArtistInPlace(t *testing.T) {
 // reference the batch does not move, so the rename falls back to the split and the old
 // author keeps its pid and that book.
 func TestBookAuthorRenameBlockedByOutsideBook(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putBook(t, st, lib.ID, bookSpec{
@@ -122,6 +124,7 @@ func TestBookAuthorRenameBlockedByOutsideBook(t *testing.T) {
 // wrote keeps a narrator credit that the author edit does not move, so the rename is
 // refused even though the book is in the batch.
 func TestBookAuthorRenameBlockedByNarratorRef(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putBook(t, st, lib.ID, bookSpec{
@@ -157,6 +160,7 @@ func TestBookAuthorRenameBlockedByNarratorRef(t *testing.T) {
 // that would rename it. Renaming would carry its pid and curation to the new author and
 // mint a bare row for the narrator, so the rename is refused and the author splits.
 func TestBookAuthorRenameBlockedByIncomingNarrator(t *testing.T) {
+	t.Parallel()
 	st, pid := bookEditFixture(t)
 	ctx := context.Background()
 	janeID := entityIDByCol(t, st, "artist", "name", "Jane Author")
@@ -191,6 +195,7 @@ func TestBookAuthorRenameBlockedByIncomingNarrator(t *testing.T) {
 // TestBookAuthorClearSplits: a cleared author names no target to rename onto, so the
 // author entity is left where it is and the book simply un-links from it.
 func TestBookAuthorClearSplits(t *testing.T) {
+	t.Parallel()
 	st, pid := bookEditFixture(t)
 	ctx := context.Background()
 	janePID := entityPID(t, st, "artist", "Jane Author")
@@ -219,6 +224,7 @@ func TestBookAuthorClearSplits(t *testing.T) {
 // incumbent survives with its pid and inherits the loser's references and attachments,
 // so the fix lands in place instead of leaving a drained author behind.
 func TestBookAuthorRenameOntoExistingArtistMerges(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putBook(t, st, lib.ID, bookSpec{
@@ -307,6 +313,7 @@ func TestBookAuthorRenameOntoExistingArtistMerges(t *testing.T) {
 // series row is rewritten in place, so its pid survives and the batch emits an update
 // rather than a create.
 func TestEditBookSeriesRenamesInPlace(t *testing.T) {
+	t.Parallel()
 	st, pid := bookEditFixture(t)
 	ctx := context.Background()
 	seriesID := scalarInt(t, st, "SELECT id FROM series")
@@ -349,6 +356,7 @@ func TestEditBookSeriesRenamesInPlace(t *testing.T) {
 // TestSeriesRenameSplitsOnPartialCoverage: a book the batch leaves behind keeps the
 // series referenced, so the edited book forks onto a fresh row as today.
 func TestSeriesRenameSplitsOnPartialCoverage(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	for i, title := range []string{"Book One", "Book Two"} {
@@ -395,6 +403,7 @@ func TestSeriesRenameSplitsOnPartialCoverage(t *testing.T) {
 // the row would take its pid to the new name and mint a fresh "Dune" for the arriving
 // book, so the series is left to split instead.
 func TestSeriesRenameSkipsWhenBatchReintroducesName(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	for i, title := range []string{"Book One", "Book Two"} {
@@ -450,6 +459,7 @@ func TestSeriesRenameSkipsWhenBatchReintroducesName(t *testing.T) {
 // primitive, the way the artist and release-group chains do, so the loser is deleted
 // rather than left to drain and its books arrive on the incumbent.
 func TestSeriesRenameTakenKeyMerges(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putBook(t, st, lib.ID, bookSpec{

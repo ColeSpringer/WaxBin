@@ -42,6 +42,7 @@ func rescanTrack(t *testing.T, st *Store, libID int64, s trackSpec, preserveLock
 // curated bpm has to outlive a forced rescan whose file states a different number,
 // and go back to the file's value once the lock is off.
 func TestScanForcePreservesLockedBPM(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 
@@ -83,6 +84,7 @@ func TestScanForcePreservesLockedBPM(t *testing.T) {
 }
 
 func TestScanForcePreservesLockedTrackFields(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 
@@ -149,6 +151,7 @@ func TestScanForcePreservesLockedTrackFields(t *testing.T) {
 }
 
 func TestScanForcePreservesLockedCredits(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 
@@ -207,6 +210,7 @@ func TestScanForcePreservesLockedCredits(t *testing.T) {
 }
 
 func TestScanForcePreservesLockedBookFields(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 
@@ -342,6 +346,7 @@ func assertDerivedClean(t *testing.T, st *Store) {
 // hangs off the field follows the column: the genre links, the provenance row, and one
 // item delta.
 func TestForcedRescanRederivesUnlockedEditedField(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	spec := trackSpec{
@@ -377,6 +382,7 @@ func TestForcedRescanRederivesUnlockedEditedField(t *testing.T) {
 // TestForcedRescanKeepsWrittenBackEdit: an edit the write-back put into the file is what
 // the file now says, so a forced rescan has nothing to re-derive and stays silent.
 func TestForcedRescanKeepsWrittenBackEdit(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	spec := trackSpec{
@@ -426,6 +432,7 @@ func TestForcedRescanKeepsWrittenBackEdit(t *testing.T) {
 // under a provenance row naming an older edit (what a forced rescan left before the
 // re-derive rule) is healed: the row goes and the links are resolved from the column.
 func TestForcedRescanHealsStaleProvenance(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	spec := trackSpec{
@@ -463,6 +470,7 @@ func TestForcedRescanHealsStaleProvenance(t *testing.T) {
 // replaces or drops loses its provenance row with it, since the row would otherwise
 // describe a value the item no longer holds.
 func TestForcedRescanClearsStaleCustomTagProvenance(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	onDisk := map[string][]string{"RELEASESTATUS": {"official"}}
@@ -494,6 +502,7 @@ func TestForcedRescanClearsStaleCustomTagProvenance(t *testing.T) {
 // is re-derived like the scalar it denormalizes into, so the credit list, its provenance
 // row, and the column agree with the file afterwards.
 func TestForcedRescanClearsCatalogOnlyComposerCredit(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	spec := trackSpec{
@@ -537,6 +546,7 @@ func TestForcedRescanClearsCatalogOnlyComposerCredit(t *testing.T) {
 // unlocked catalog-only title edit reverts on a forced rescan, and the search row, the
 // provenance row and the delta have to revert with it.
 func TestForcedRescanRederivesBookTitle(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	spec := bookSpec{
@@ -575,6 +585,7 @@ func TestForcedRescanRederivesBookTitle(t *testing.T) {
 // from the file, discarding the curated value. The lock itself stays, now over the
 // file's value, so the row must stop naming the value it no longer holds.
 func TestIgnoreLocksRescanKeepsLockDropsValue(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	user := model.Attribution{Source: model.SourceUser}
@@ -626,6 +637,7 @@ func TestIgnoreLocksRescanKeepsLockDropsValue(t *testing.T) {
 // TestScanForcePreservesLockedTotals: a curated track or disc total outlives a forced
 // rescan of a file that states another, like every other locked column.
 func TestScanForcePreservesLockedTotals(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	spec := trackSpec{path: "/lib/A/One/01.flac", essence: "e1", content: "c1",
@@ -656,6 +668,7 @@ func TestScanForcePreservesLockedTotals(t *testing.T) {
 // the file still states (a catalog-only edit) keeps the cleared total through a forced
 // rescan, rather than reading the file's stale pair back as "7 of 1".
 func TestScanForceKeepsLockedNumberPastTheFileTotal(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	spec := trackSpec{path: "/lib/A/One/01.flac", essence: "e1", content: "c1",
@@ -686,6 +699,7 @@ func TestScanForceKeepsLockedNumberPastTheFileTotal(t *testing.T) {
 // from its primary part settles their owed rows, the title's row settles once the file
 // states the catalog's title, and a locked field's row stands while the file disagrees.
 func TestBookScanSettlesOwedRows(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	user := model.Attribution{Source: model.SourceUser}
@@ -723,6 +737,7 @@ func TestBookScanSettlesOwedRows(t *testing.T) {
 // a value of its own. The enrichment write-back's drift on every part goes once nothing
 // stays owed, and a locked field keeps its row.
 func TestContentChangedBookRescanRetiresReDerivedProvenance(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	user := model.Attribution{Source: model.SourceUser}
@@ -790,6 +805,7 @@ func TestContentChangedBookRescanRetiresReDerivedProvenance(t *testing.T) {
 // TestForcedRescanRederivesBookFields: a forced rescan of a book's unchanged primary part
 // re-derives an unlocked catalog-only edit the way a track's does, and keeps a locked one.
 func TestForcedRescanRederivesBookFields(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	user := model.Attribution{Source: model.SourceUser}
@@ -830,6 +846,7 @@ func TestForcedRescanRederivesBookFields(t *testing.T) {
 // stands while the file disagrees and goes once the file carries the catalog's value,
 // the rule a track's locked field already follows.
 func TestBookScanSettlesOwedLockedFieldTheFileAgreesWith(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	user := model.Attribution{Source: model.SourceUser}
@@ -856,6 +873,7 @@ func TestBookScanSettlesOwedLockedFieldTheFileAgreesWith(t *testing.T) {
 // survivor's name. A forced rescan of an unchanged file must not read that difference as a
 // re-derive: it would rewrite the book on every pass and fork a merged series back out.
 func TestForcedBookRescanLeavesEntitySpellingsAlone(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	first := bookSpec{path: "/lib/A/One/one.m4b", essence: "be1", content: "bc1",
@@ -897,6 +915,7 @@ func TestForcedBookRescanLeavesEntitySpellingsAlone(t *testing.T) {
 // title included, so a later part tagged with another title (one ASIN groups them) neither
 // renames the book nor reports a change, whatever order the parts are read in.
 func TestBookPartLeavesTheTitleToThePrimary(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	one := bookSpec{path: "/lib/A/Book/01.m4b", essence: "be1", content: "bc1",
 		title: "Book One", author: "Jane Author", asin: "B000000001", position: 1}
@@ -917,6 +936,7 @@ func TestBookPartLeavesTheTitleToThePrimary(t *testing.T) {
 // book's metadata compares its file against the book the catalog holds, so a changed
 // part whose tags still lack a catalog-only edit keeps that edit owed.
 func TestNonPrimaryBookPartKeepsOwedRowsItsFileStillLacks(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	one := bookSpec{path: "/lib/A/Book/01.m4b", essence: "be1", content: "bc1",
@@ -945,6 +965,7 @@ func TestNonPrimaryBookPartKeepsOwedRowsItsFileStillLacks(t *testing.T) {
 // value, since genres are many, so the row states nothing a file could contradict. Once
 // the write-back put the genre in the file, a forced rescan has nothing to re-derive.
 func TestValuelessProvenanceIsNoClaim(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	spec := trackSpec{path: "/lib/A/One/01.flac", essence: "e1", content: "c1",
@@ -971,6 +992,7 @@ func TestValuelessProvenanceIsNoClaim(t *testing.T) {
 // value for a field a valueless enrichment row filled retires the row and, with nothing
 // left owed, the drift a failed write-back left on the file.
 func TestValuelessEnrichmentRowRetiresWithItsDrift(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	spec := trackSpec{path: "/lib/A/One/01.flac", essence: "e1", content: "c1",
@@ -1005,6 +1027,7 @@ func TestValuelessEnrichmentRowRetiresWithItsDrift(t *testing.T) {
 // holds nothing against the file, and the rescan changes nothing. A value the file states
 // replaces the fill for that field alone.
 func TestRescanKeepsEnrichmentFillsTheFileLacks(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	spec := trackSpec{path: "/lib/A/One/01.flac", essence: "e1", content: "c1",
@@ -1061,6 +1084,7 @@ func TestRescanKeepsEnrichmentFillsTheFileLacks(t *testing.T) {
 // rewrites the book from its primary part keeps what enrichment filled while the part says
 // nothing for it, and takes the part's own value where it states one.
 func TestBookRescanKeepsEnrichmentFillsTheFileLacks(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	spec := bookSpec{path: "/lib/Author/Book/book.m4b", essence: "be1", content: "bc1",
@@ -1101,6 +1125,7 @@ func TestBookRescanKeepsEnrichmentFillsTheFileLacks(t *testing.T) {
 // without a write-back is owed to the file, and a rescan that keeps it over a file still
 // silent on it pays nothing, for a book's primary part as for a track.
 func TestKeptEnrichmentFillStaysOwed(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	fill := model.Attribution{Source: model.SourceEnrichment, Provider: "mb"}
@@ -1137,6 +1162,7 @@ func TestKeptEnrichmentFillStaysOwed(t *testing.T) {
 // belong to that album, so a member whose file is retagged onto another album leaves them
 // behind, while a silent rescan of a member that stayed keeps them.
 func TestAlbumFillsStayWithTheirAlbum(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	one := trackSpec{path: "/lib/A/Mixed/01.flac", essence: "e1", content: "c1", title: "One", artist: "Alpha", albumArt: "Alpha", album: "Hits"}
@@ -1175,6 +1201,7 @@ func TestAlbumFillsStayWithTheirAlbum(t *testing.T) {
 // rescan of a file that names nobody in that role, a track's composer and a book's
 // narrator alike.
 func TestEnrichmentCreditsSurviveASilentRescan(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	fill := model.Attribution{Source: model.SourceEnrichment, Provider: "mb"}
@@ -1211,6 +1238,7 @@ func TestEnrichmentCreditsSurviveASilentRescan(t *testing.T) {
 // longer describes it, so a rescan of a silent file re-derives the column under the
 // edit's own rule in one pass, leaving the column and the credits agreeing.
 func TestFillGivesWayToALaterEdit(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	spec := trackSpec{path: "/lib/A/One/01.flac", essence: "e1", content: "c1", title: "Song", artist: "Alpha", albumArt: "Alpha", album: "One"}
@@ -1243,6 +1271,7 @@ func TestFillGivesWayToALaterEdit(t *testing.T) {
 // one the file does not state, so a value set as enrichment stays over the guess, the
 // title included.
 func TestFillBeatsAFallbackGuess(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	in := trackSpecInput(lib.ID, trackSpec{path: "/lib/A/One/07 Guess.flac", essence: "e1", content: "c1",
@@ -1272,6 +1301,7 @@ func TestFillBeatsAFallbackGuess(t *testing.T) {
 // TestFillGivesWayToAZeroTheFileStates: a string the file states is a value even when it
 // reads "0", and a total kept beside a number the file now states past it is cleared.
 func TestFillGivesWayToAZeroTheFileStates(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	spec := trackSpec{path: "/lib/A/One/01.flac", essence: "e1", content: "c1", title: "Song", artist: "Alpha", albumArt: "Alpha", album: "One"}
@@ -1298,6 +1328,7 @@ func TestFillGivesWayToAZeroTheFileStates(t *testing.T) {
 // file no longer carries, is owed again, while a file whose write reported the value
 // lost is not reopened, since it would only lose it again.
 func TestLostFillReopensTheWriteBack(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	spec := trackSpec{path: "/lib/A/One/01.flac", essence: "e1", content: "c1", title: "Song", artist: "Alpha", albumArt: "Alpha", album: "One"}
@@ -1342,6 +1373,7 @@ func TestLostFillReopensTheWriteBack(t *testing.T) {
 // TestNormalizedFillSurvivesASilentRescan: a normalize pass respelling an enrichment value
 // leaves a value the file never carried, so a rescan of a silent file keeps it.
 func TestNormalizedFillSurvivesASilentRescan(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	spec := trackSpec{path: "/lib/A/One/01.flac", essence: "e1", content: "c1", title: "Song", artist: "Alpha", albumArt: "Alpha", album: "One"}
@@ -1365,6 +1397,7 @@ func TestNormalizedFillSurvivesASilentRescan(t *testing.T) {
 // under --ignore-locks, which re-derives what the file states, and the file's own value
 // replaces it.
 func TestLockedFillUnderIgnoreLocks(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	spec := trackSpec{path: "/lib/A/One/01.flac", essence: "e1", content: "c1", title: "Song", artist: "Alpha", albumArt: "Alpha", album: "One"}
@@ -1392,6 +1425,7 @@ func TestLockedFillUnderIgnoreLocks(t *testing.T) {
 // TestEnrichmentCustomTagSurvivesASilentRescan: a custom tag set as enrichment stays
 // through a rescan of a file without the key, and the file's own value replaces it.
 func TestEnrichmentCustomTagSurvivesASilentRescan(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	pid := putTrackCustom(t, st, lib.ID, "/lib/a.mp3", "ess-a", "c1", "Song", nil, true).ItemPID
@@ -1412,6 +1446,7 @@ func TestEnrichmentCustomTagSurvivesASilentRescan(t *testing.T) {
 // TestEnrichmentLyricsSurviveASilentRescan: lyrics enrichment fetched stay through a
 // rescan of a file with none, and the file's own lyrics replace them.
 func TestEnrichmentLyricsSurviveASilentRescan(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	spec := trackSpec{path: "/lib/A/One/01.flac", essence: "e1", content: "c1", title: "Song", artist: "Alpha", albumArt: "Alpha", album: "One"}

@@ -33,6 +33,7 @@ func addChunked(mono []float32, n, chunk int) Peaks {
 // TestAccumulatorChunkIndependence is the contract that lets the analyze pass
 // feed the accumulator whatever chunk size the decoder happens to emit.
 func TestAccumulatorChunkIndependence(t *testing.T) {
+	t.Parallel()
 	mono := signal(200_000, 1)
 	want := Pack(Compute(mono, DefaultBuckets))
 	for _, chunk := range []int{1, 7, 4096, 65536, len(mono)} {
@@ -47,6 +48,7 @@ func TestAccumulatorChunkIndependence(t *testing.T) {
 // exercise different merge states: shorter than the bucket count, non-power-of-two
 // with a partial trailing bucket, and long enough for many merge generations.
 func TestAccumulatorBucketCount(t *testing.T) {
+	t.Parallel()
 	for _, n := range []int{1, 7, 999, 1000, 1001, 4096, 8000, 8001, 123_457, 1_000_000} {
 		p := Compute(signal(n, int64(n)), DefaultBuckets)
 		if len(p.Buckets) != DefaultBuckets {
@@ -59,6 +61,7 @@ func TestAccumulatorBucketCount(t *testing.T) {
 // the tail: a stream shorter than the bucket count stretches across every bucket,
 // so with an all-nonzero signal no bucket may read as silence.
 func TestAccumulatorShortStreamHasNoTrailingZeros(t *testing.T) {
+	t.Parallel()
 	mono := make([]float32, 17)
 	for i := range mono {
 		mono[i] = 0.5
@@ -78,6 +81,7 @@ func TestAccumulatorShortStreamHasNoTrailingZeros(t *testing.T) {
 // kill: maxPool answers empty input with n zeros, which stores as a fake
 // all-silent waveform instead of no waveform at all.
 func TestAccumulatorEmptyIsNilNotZeros(t *testing.T) {
+	t.Parallel()
 	if p := NewAccumulator(DefaultBuckets).Peaks(); p.Buckets != nil {
 		t.Errorf("empty accumulator: Buckets = %v, want nil", p.Buckets)
 	}
@@ -95,6 +99,7 @@ func TestAccumulatorEmptyIsNilNotZeros(t *testing.T) {
 // TestAccumulatorPeaksIsRepeatable checks Peaks does not consume the accumulator:
 // the partial trailing bucket must not be folded into its state.
 func TestAccumulatorPeaksIsRepeatable(t *testing.T) {
+	t.Parallel()
 	a := NewAccumulator(64)
 	a.Add(signal(1234, 9))
 	first := Pack(a.Peaks())
@@ -116,6 +121,7 @@ func TestAccumulatorPeaksIsRepeatable(t *testing.T) {
 // TestAccumulatorPreservesPeak checks a merge never loses a spike: max-merging is
 // what makes the reduction lossless in the one dimension a waveform reports.
 func TestAccumulatorPreservesPeak(t *testing.T) {
+	t.Parallel()
 	// Long enough to force many merge generations, with one full-scale spike
 	// buried mid-stream.
 	mono := make([]float32, 500_000)
@@ -140,6 +146,7 @@ func TestAccumulatorPreservesPeak(t *testing.T) {
 // bucket count holds and memory stays bounded (a 24h-scale stream at a coarse
 // rate; the point is the merge generations, not the wall clock).
 func TestAccumulatorLongSignal(t *testing.T) {
+	t.Parallel()
 	a := NewAccumulator(DefaultBuckets)
 	chunk := signal(65536, 3)
 	// ~100M samples: ~17 halvings past the first fill.
@@ -164,6 +171,7 @@ func TestAccumulatorLongSignal(t *testing.T) {
 // TestAccumulatorCountsFrames: Frames is every sample Add folded, however the stream
 // was chunked and however many halvings it forced.
 func TestAccumulatorCountsFrames(t *testing.T) {
+	t.Parallel()
 	for _, n := range []int{0, 1, 999, 8001, 123_457} {
 		mono := signal(n, int64(n)+1)
 		for _, chunk := range []int{1, 7, 4096, max(n, 1)} {
@@ -181,6 +189,7 @@ func TestAccumulatorCountsFrames(t *testing.T) {
 // TestHalveOddCount covers the unpaired trailing bucket. The cap is even so Add
 // cannot reach this state today; halve handles it anyway, and this pins that.
 func TestHalveOddCount(t *testing.T) {
+	t.Parallel()
 	a := &Accumulator{n: 2, framesPerBucket: 1, coarse: []float32{0.1, 0.9, 0.2, 0.3, 0.7}}
 	a.halve()
 	want := []float32{0.9, 0.3, 0.7} // pairs max-merged; the odd last carries through

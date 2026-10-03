@@ -37,6 +37,7 @@ func putLyricTrack(t *testing.T, st *sqlite.Store, libID int64, essence, content
 // TestLyricsProvenanceRoundTrip: each of the four sources survives the write and comes
 // back naming itself, with the provider only where one supplied the words.
 func TestLyricsProvenanceRoundTrip(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStoreAt(t)
 	db := roConn(t, dbPath)
@@ -98,6 +99,7 @@ func TestLyricsProvenanceRoundTrip(t *testing.T) {
 // provider, so a rescan that re-reads the same words stays silent and a re-attribution
 // does not.
 func TestUnchangedLyricsRescanWritesNothing(t *testing.T) {
+	t.Parallel()
 	st, dbPath, lib := openStoreAt(t)
 	ly := func() *model.Lyrics {
 		return &model.Lyrics{Source: model.SourceSidecar, Synced: []model.SyncedLine{{TimeMS: 0, Text: "hi"}}}
@@ -124,6 +126,7 @@ func TestUnchangedLyricsRescanWritesNothing(t *testing.T) {
 // lyrics table holds, not the one the lock writer invented. LockField records "tag" on
 // any field it locks, and enrichment records no provenance row at all.
 func TestFieldProvenanceOverlaysLyrics(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStoreAt(t)
 	db := roConn(t, dbPath)

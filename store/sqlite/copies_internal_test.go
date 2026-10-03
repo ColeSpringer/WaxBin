@@ -14,6 +14,7 @@ import (
 // alternate it was not already, a new copy or a row no item held, and not when it read
 // an attached copy again or followed it to a new path.
 func TestCopyJoinedReportsANewEdge(t *testing.T) {
+	t.Parallel()
 	st, _ := entityFixture(t)
 	ctx := context.Background()
 	root := t.TempDir()

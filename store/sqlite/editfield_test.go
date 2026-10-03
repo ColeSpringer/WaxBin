@@ -21,6 +21,7 @@ func editFixture(t *testing.T) (*Store, model.PID) {
 }
 
 func TestEditPlainFieldAndProvenance(t *testing.T) {
+	t.Parallel()
 	st, pid := editFixture(t)
 	ctx := context.Background()
 
@@ -52,6 +53,7 @@ func TestEditPlainFieldAndProvenance(t *testing.T) {
 }
 
 func TestEditTitleRebuildsFTSAndSortKey(t *testing.T) {
+	t.Parallel()
 	st, pid := editFixture(t)
 	ctx := context.Background()
 
@@ -92,6 +94,7 @@ func TestEditTitleRebuildsFTSAndSortKey(t *testing.T) {
 }
 
 func TestEditArtistReResolvesEntitiesAndRollups(t *testing.T) {
+	t.Parallel()
 	st, pid := editFixture(t)
 	ctx := context.Background()
 
@@ -135,6 +138,7 @@ func TestEditArtistReResolvesEntitiesAndRollups(t *testing.T) {
 // survives as a zero-rollup ghost with db verify still clean (the edit adds no
 // in-transaction entity GC).
 func TestEditOrphansEntityKeepsVerifyClean(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{
@@ -167,6 +171,7 @@ func TestEditOrphansEntityKeepsVerifyClean(t *testing.T) {
 }
 
 func TestEditGenreUpdatesLinksAndVerifyClean(t *testing.T) {
+	t.Parallel()
 	st, pid := editFixture(t)
 	ctx := context.Background()
 
@@ -212,6 +217,7 @@ func TestEditGenreUpdatesLinksAndVerifyClean(t *testing.T) {
 // TestEditYearKeepsTheAlbum: the year keys no album, so editing it leaves the item on
 // the album it was on, under the key that album already had.
 func TestEditYearKeepsTheAlbum(t *testing.T) {
+	t.Parallel()
 	st, pid := editFixture(t)
 	ctx := context.Background()
 	albumID := scalarInt(t, st, "SELECT id FROM album")
@@ -243,6 +249,7 @@ func TestEditYearKeepsTheAlbum(t *testing.T) {
 }
 
 func TestEditMultipleFieldsOneDelta(t *testing.T) {
+	t.Parallel()
 	st, pid := editFixture(t)
 	ctx := context.Background()
 
@@ -268,6 +275,7 @@ func TestEditMultipleFieldsOneDelta(t *testing.T) {
 // the denormalized column, the resolved entity, and the recorded provenance all store
 // the same value (not just the CLI-facing input).
 func TestEditTrimsValueEverywhere(t *testing.T) {
+	t.Parallel()
 	st, pid := editFixture(t)
 	ctx := context.Background()
 
@@ -297,6 +305,7 @@ func TestEditTrimsValueEverywhere(t *testing.T) {
 }
 
 func TestEditRespectsLock(t *testing.T) {
+	t.Parallel()
 	st, pid := editFixture(t)
 	ctx := context.Background()
 
@@ -325,6 +334,7 @@ func TestEditRespectsLock(t *testing.T) {
 // TestEditLocksAgainstEnrichment checks that once a user edit auto-locks a field, a
 // later enrichment write to it is refused.
 func TestEditLocksAgainstEnrichment(t *testing.T) {
+	t.Parallel()
 	st, pid := editFixture(t)
 	ctx := context.Background()
 
@@ -340,6 +350,7 @@ func TestEditLocksAgainstEnrichment(t *testing.T) {
 }
 
 func TestEditRejectsBadInput(t *testing.T) {
+	t.Parallel()
 	st, pid := editFixture(t)
 	ctx := context.Background()
 
@@ -363,6 +374,7 @@ func TestEditRejectsBadInput(t *testing.T) {
 // item's kind (the whitelist is the track∪book union, but a track cannot carry an
 // author lock, nor a book an album_artist lock), while a valid same-kind field works.
 func TestLockIsKindAware(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	track, trackPID := editFixture(t)
 	book, bookPID := bookEditFixture(t)
@@ -388,6 +400,7 @@ func TestLockIsKindAware(t *testing.T) {
 }
 
 func TestFileSharedOrVirtual(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/a/1.flac", essence: "e1", content: "c1", title: "S", artist: "X", album: "A"})
@@ -432,6 +445,7 @@ func TestFileSharedOrVirtual(t *testing.T) {
 // caller supplied rather than a source the store invented, which is what lets a program
 // that fetched a value say so.
 func TestEditCarriesTheCallersAttribution(t *testing.T) {
+	t.Parallel()
 	st, pid := editFixture(t)
 	ctx := context.Background()
 
@@ -468,6 +482,7 @@ func TestEditCarriesTheCallersAttribution(t *testing.T) {
 // meaning on a scalar field, and a scalar row has no column for a fetch URL, so both
 // are refused rather than dropped.
 func TestScalarEditRefusesWhatAScalarRowCannotHold(t *testing.T) {
+	t.Parallel()
 	st, pid := editFixture(t)
 	ctx := context.Background()
 
@@ -490,6 +505,7 @@ func TestScalarEditRefusesWhatAScalarRowCannotHold(t *testing.T) {
 // to change a value: it no longer has to state a lock intent it never formed, and a
 // forced edit no longer releases a lock it never read.
 func TestEditWithLockUnchangedLeavesTheLockStanding(t *testing.T) {
+	t.Parallel()
 	st, pid := editFixture(t)
 	ctx := context.Background()
 
@@ -529,6 +545,7 @@ func TestEditWithLockUnchangedLeavesTheLockStanding(t *testing.T) {
 // TestEditRefusesAnUnknownLockInstruction keeps the lock vocabulary closed the way the
 // art-role one is.
 func TestEditRefusesAnUnknownLockInstruction(t *testing.T) {
+	t.Parallel()
 	st, pid := editFixture(t)
 	if err := st.EditItemField(context.Background(), pid, "comment", "x",
 		model.Attribution{}, model.LockChange("yes"), false); !waxerr.Is(err, waxerr.CodeInvalid) {
@@ -541,6 +558,7 @@ func TestEditRefusesAnUnknownLockInstruction(t *testing.T) {
 // no edit re-keys a member with a heuristic key no row owns. Without the carryover in
 // loadTrackForEditTx, every one of these edits forked the member off the album.
 func TestEditKeepsMBIDKeyedAlbum(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	const rgMBID = "11111111-1111-1111-1111-111111111111"
@@ -608,6 +626,7 @@ func TestEditKeepsMBIDKeyedAlbum(t *testing.T) {
 // release-group mbid set, a partial-member year edit leaves that member on its album
 // (the year keys nothing), under the same mbid-keyed RG row.
 func TestEditYearUnderMBIDReleaseGroup(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	const rgMBID = "33333333-3333-3333-3333-333333333333"
@@ -659,6 +678,7 @@ func TestEditYearUnderMBIDReleaseGroup(t *testing.T) {
 // A stated multi-value list, by contrast, anchors on its first artist and keeps doing
 // so across an edit (the curated/stated branch keeps the loaded list).
 func TestEditKeepsSplitCreditAnchor(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{
@@ -705,6 +725,7 @@ func TestEditKeepsSplitCreditAnchor(t *testing.T) {
 // case from the entities it resolved onto must still read as derived; a genre edit
 // then keeps the raw-credit anchor and the chain does not fork.
 func TestEditKeepsCaseDriftedDerivedCredit(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	// Track 1 spells the entity "Alpha"; track 2's credit folds onto it lowercase.
@@ -741,6 +762,7 @@ func TestEditKeepsCaseDriftedDerivedCredit(t *testing.T) {
 // one member of a raw-anchored album computes the same keys a scan would and does
 // not fork the member off its chain.
 func TestEditArtistSameValueKeepsRawAnchor(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	for i, title := range []string{"F1", "F2"} {
@@ -789,6 +811,7 @@ func TestEditArtistSameValueKeepsRawAnchor(t *testing.T) {
 // (identity), the positions and flags a file's tags settle, the derived sorts, comment,
 // and a track's year, which the album rung fills.
 func TestEnrichFillFieldsFollowTheEditVocabulary(t *testing.T) {
+	t.Parallel()
 	excluded := map[string]bool{
 		"title": true, "genre": true, "mbid": true,
 		"track_no": true, "disc_no": true, "track_total": true, "disc_total": true, "compilation": true,
@@ -840,6 +863,7 @@ func TestEnrichFillFieldsFollowTheEditVocabulary(t *testing.T) {
 // TestEditRecordsNormalizeSource: a batch edit attributed to a normalization pass is
 // stored as one, so a consumer can tell a cleaned spelling from a hand edit.
 func TestEditRecordsNormalizeSource(t *testing.T) {
+	t.Parallel()
 	st, pid := editFixture(t)
 	ctx := context.Background()
 	if _, err := st.EditItemsFields(ctx, []model.ItemFieldEdit{{ItemPID: pid, Fields: map[string]string{"genre": "Hip Hop"}}},
@@ -865,6 +889,7 @@ func TestEditRecordsNormalizeSource(t *testing.T) {
 // number edited past a total it did not name clears that total rather than leaving
 // "track 7 of 1", unless the total is locked or still covers the new number.
 func TestEditTrackAndDiscTotals(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	user := model.Attribution{Source: model.SourceUser}
 	st, lib := entityFixture(t)

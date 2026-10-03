@@ -12,6 +12,7 @@ import (
 // TestKindLockRefusedOnAVirtualTrack: a cue track's kind follows its rip, which no lock on
 // one track can pin, so the lock is refused.
 func TestKindLockRefusedOnAVirtualTrack(t *testing.T) {
+	t.Parallel()
 	st, lib := openTestStore(t)
 	ctx := context.Background()
 	res, err := st.PutScannedVirtualTracks(ctx, vtrackInput(lib.ID, "/lib/rip.flac", "vk1", "vkc1", 10000, [][2]int64{{0, 300}, {300, 0}}))
@@ -31,6 +32,7 @@ func TestKindLockRefusedOnAVirtualTrack(t *testing.T) {
 // TestLockKindsSkipsAVirtualTrack: the locks a kind change writes pass over a cue track,
 // whose kind follows its rip, and still pin the other items named.
 func TestLockKindsSkipsAVirtualTrack(t *testing.T) {
+	t.Parallel()
 	st, lib := openTestStore(t)
 	ctx := context.Background()
 	if _, err := st.PutScannedVirtualTracks(ctx, vtrackInput(lib.ID, "/lib/rip.flac", "lk1", "lkc1", 10000, [][2]int64{{0, 300}, {300, 0}})); err != nil {
@@ -58,6 +60,7 @@ func TestLockKindsSkipsAVirtualTrack(t *testing.T) {
 // alternate when the track turns into a book and the encoding is read as one, rather than
 // becoming a second part of the same audio.
 func TestRekindKeepsAnEncodingAlternate(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib, root := openCopyStore(t)
 	mp3, flac := filepath.Join(root, "mp3", "1.mp3"), filepath.Join(root, "flac", "1.flac")

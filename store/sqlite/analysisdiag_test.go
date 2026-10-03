@@ -42,6 +42,7 @@ func originRows(t *testing.T, st *Store, filePID model.PID, origin model.Diagnos
 // rows belong to another writer and stay. A decode that never looked (an unsupported
 // input, an IO error, a cancel) leaves the prior verdict standing.
 func TestPutAnalysisOwnsTheAnalyzeOrigin(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib := entityFixture(t)
 	r := putTrack(t, st, lib.ID, trackSpec{path: "/lib/a.flac", essence: "e1", content: "c1", title: "S", artist: "X", album: "Al"})
@@ -93,6 +94,7 @@ func TestPutAnalysisOwnsTheAnalyzeOrigin(t *testing.T) {
 // diagnostics were derived under the current rules, so an analyze verdict must not
 // mark a file the scan never derived as current.
 func TestPutAnalysisLeavesTheDiagnosticStampAlone(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib := entityFixture(t)
 	r := putTrack(t, st, lib.ID, trackSpec{path: "/lib/a.flac", essence: "e1", content: "c1", title: "S", artist: "X", album: "Al"})
@@ -115,6 +117,7 @@ func TestPutAnalysisLeavesTheDiagnosticStampAlone(t *testing.T) {
 // the header's length. A file with no header duration has nothing to compare, and one
 // whose waveform predates its current audio says nothing about it.
 func TestFilesDurationMismatch(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib := entityFixture(t)
 	file := func(name string, headerMS int64, decodedFrames int64) model.PID {
@@ -162,6 +165,7 @@ func TestFilesDurationMismatch(t *testing.T) {
 // as absent everywhere a diagnostic is read, and the next analysis clears it even when
 // that analysis could not look at the new bytes.
 func TestAnalyzeVerdictFollowsTheEssence(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib := entityFixture(t)
 	spec := trackSpec{path: "/lib/a.flac", essence: "e1", content: "c1", title: "S", artist: "X", album: "Al"}
@@ -211,6 +215,7 @@ func TestAnalyzeVerdictFollowsTheEssence(t *testing.T) {
 // TestPutDecodeVerdictRecordsAFailedAnalysis: a file the analyze pass could not decode at
 // all still gets its verdict, under the analyze origin and for the audio it read.
 func TestPutDecodeVerdictRecordsAFailedAnalysis(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib := entityFixture(t)
 	spec := trackSpec{path: "/lib/a.m4a", essence: "e1", content: "c1", title: "S", artist: "X", album: "Al"}
@@ -234,6 +239,7 @@ func TestPutDecodeVerdictRecordsAFailedAnalysis(t *testing.T) {
 // looked at nothing (an IO error in the measure) clears only verdicts on earlier audio,
 // however the file's analysis stamp compares.
 func TestAnUnobservedAnalysisKeepsTheCurrentVerdict(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib := entityFixture(t)
 	r := putTrack(t, st, lib.ID, trackSpec{path: "/lib/a.m4a", essence: "e1", content: "c1", title: "S", artist: "X", album: "Al"})
@@ -251,6 +257,7 @@ func TestAnUnobservedAnalysisKeepsTheCurrentVerdict(t *testing.T) {
 // so a writer handing over raw error text (a failed tag write naming its path) cannot
 // put a control sequence or an unbounded message in front of the audit.
 func TestAStoredDetailIsOneEscapedLine(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	r := putTrack(t, st, lib.ID, trackSpec{path: "/lib/a.flac", essence: "e1", content: "c1", title: "S", artist: "X", album: "Al"})
 	raw := "open /lib/a\nb.flac: \x1b[2Jdenied" + strings.Repeat("x", 2*model.MaxDetailBytes)
@@ -270,6 +277,7 @@ func TestAStoredDetailIsOneEscapedLine(t *testing.T) {
 // whatever the measuring decode observed, and an analysis without one clears it while a
 // standing verdict on the audio stays.
 func TestPutAnalysisRecordsTheFingerprintFallback(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib := entityFixture(t)
 	r := putTrack(t, st, lib.ID, trackSpec{path: "/lib/a.flac", essence: "e1", content: "c1", title: "S", artist: "X", album: "Al"})
@@ -308,6 +316,7 @@ func TestPutAnalysisRecordsTheFingerprintFallback(t *testing.T) {
 // analyze pass without fpcalc does, leaves the analyze origin's verdicts on the audio and
 // every other writer's rows alone.
 func TestClearFingerprintFallbacksKeepsTheVerdicts(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib := entityFixture(t)
 	r := putTrack(t, st, lib.ID, trackSpec{path: "/lib/a.flac", essence: "e1", content: "c1", title: "S", artist: "X", album: "Al"})

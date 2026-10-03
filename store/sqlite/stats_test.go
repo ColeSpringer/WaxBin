@@ -9,6 +9,7 @@ import (
 // (an artist no longer backing any track) is not counted, so the totals stay
 // consistent with the Facet-derived top lists.
 func TestStatsExcludesGhostEntities(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	// Scan with a typo'd artist, then fix the tag (content change, same item).

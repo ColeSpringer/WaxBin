@@ -21,6 +21,7 @@ import (
 // root is registered with a create delta, and the very next scan catalogs files
 // under it without a reopen (scan resolves roots from store rows).
 func TestAddRootScansImmediately(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	rootA := t.TempDir()
 	rootB := t.TempDir()
@@ -82,6 +83,7 @@ func TestAddRootScansImmediately(t *testing.T) {
 // reject, an invalid mode rejects, and the internal podcast-mode library row
 // does not poison the root set it is validated against.
 func TestAddRootValidation(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	base := t.TempDir()
 	rootA := filepath.Join(base, "music")
@@ -147,6 +149,7 @@ func TestAddRootValidation(t *testing.T) {
 // TestAddRootIdempotentReAdd: re-adding a registered path keeps the pid and
 // refreshes the policy, the EnsureLibrary upsert semantics.
 func TestAddRootIdempotentReAdd(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	rootA := t.TempDir()
 	rootB := t.TempDir()
@@ -190,6 +193,7 @@ func TestAddRootIdempotentReAdd(t *testing.T) {
 // TestAddRootReadOnlyRefuses: a read-only handle refuses before touching the
 // store.
 func TestAddRootReadOnlyRefuses(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	rootA := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -209,6 +213,7 @@ func TestAddRootReadOnlyRefuses(t *testing.T) {
 // another root rejects with the config vocabulary, a clean relocation still
 // works, and an unknown pid stays CodeNotFound.
 func TestRelocateRootValidatesOverlap(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	rootA := t.TempDir()
 	rootB := t.TempDir()
@@ -274,6 +279,7 @@ func TestRelocateRootValidatesOverlap(t *testing.T) {
 // mutex (the second to acquire it sees the first's committed row and rejects);
 // without it both validate against the pre-race set and both insert.
 func TestAddRootConcurrentOverlapSerialized(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	base := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -326,6 +332,7 @@ func TestAddRootConcurrentOverlapSerialized(t *testing.T) {
 // configured-dir check is disabled here, so only the row-based overlap can catch
 // it, and without it a later scan would ingest episodes as music.
 func TestAddRootPodcastOverlapWhenDirUnset(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	base := t.TempDir()
 	rootA := filepath.Join(base, "music")
@@ -399,6 +406,7 @@ func hasPodcastLib(libs []*model.Library) bool {
 // exist are refused with the reason and register nothing, and a root to be mounted later
 // registers when the caller says it may be absent, its scan finding nothing to mark gone.
 func TestAddRootRefusesWhatAScanCannotWalk(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), t.TempDir())
 	file := filepath.Join(t.TempDir(), "song.mp3")

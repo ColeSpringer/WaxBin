@@ -55,6 +55,7 @@ func episodeByTitle(t *testing.T, st *Store, podPID model.PID, title string) *mo
 }
 
 func TestPodcasting20ExtrasPersistAndRead(t *testing.T) {
+	t.Parallel()
 	st, _ := entityFixture(t)
 	ctx := context.Background()
 
@@ -107,6 +108,7 @@ func TestPodcasting20ExtrasPersistAndRead(t *testing.T) {
 }
 
 func TestPodcasting20IdenticalReSyncIsSilent(t *testing.T) {
+	t.Parallel()
 	st, _ := entityFixture(t)
 	ctx := context.Background()
 	if _, err := st.UpsertFeed(ctx, extrasFeedInput("http://feed.example/f")); err != nil {
@@ -167,6 +169,7 @@ func TestPodcasting20IdenticalReSyncIsSilent(t *testing.T) {
 }
 
 func TestPodcasting20OneEpisodePersonChange(t *testing.T) {
+	t.Parallel()
 	st, _ := entityFixture(t)
 	ctx := context.Background()
 	if _, err := st.UpsertFeed(ctx, extrasFeedInput("http://feed.example/f")); err != nil {
@@ -220,6 +223,7 @@ func TestPodcasting20OneEpisodePersonChange(t *testing.T) {
 }
 
 func TestPodcasting20RemoveLeavesNoOrphans(t *testing.T) {
+	t.Parallel()
 	st, _ := entityFixture(t)
 	ctx := context.Background()
 	res, err := st.UpsertFeed(ctx, extrasFeedInput("http://feed.example/f"))

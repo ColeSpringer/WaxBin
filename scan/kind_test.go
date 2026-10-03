@@ -82,6 +82,7 @@ func oneBook(t *testing.T, st *sqlite.Store, parts int) *model.ItemView {
 }
 
 func TestEffectiveKindPrecedence(t *testing.T) {
+	t.Parallel()
 	music := &model.Library{Media: model.MediaMusic}
 	books := &model.Library{Media: model.MediaAudiobook}
 	mixed := &model.Library{}
@@ -113,6 +114,7 @@ func TestEffectiveKindPrecedence(t *testing.T) {
 // file as a book whatever its tags say, and the book takes the spoken-word fields its tags
 // carry (the narrator from the composer).
 func TestAudiobookLibraryMakesABookOfAPlainFile(t *testing.T) {
+	t.Parallel()
 	st, lib, sc, root := kindFixture(t, model.MediaAudiobook)
 	writeUnder(t, root, "Author/Tome/01 Chapter One.mp3", testaudio.MP3Spec{Title: "Chapter One", Artist: "Author",
 		Album: "Tome", Track: 1, Genre: "Fiction", Composer: "Reader"})
@@ -133,6 +135,7 @@ func TestAudiobookLibraryMakesABookOfAPlainFile(t *testing.T) {
 // TestMixedLibraryClassifiesByTags: a mixed library keeps tag classification, broadened
 // by a spoken-word genre (spelled out or as ID3's numeric 183).
 func TestMixedLibraryClassifiesByTags(t *testing.T) {
+	t.Parallel()
 	st, lib, sc, root := kindFixture(t, model.MediaMixed)
 	writeUnder(t, root, "Band/Record/01.mp3", testaudio.MP3Spec{Title: "Song", Artist: "Band", Album: "Record",
 		Track: 1, Genre: "Fiction", Audio: testaudio.AudioWithSeed(1)})
@@ -152,6 +155,7 @@ func TestMixedLibraryClassifiesByTags(t *testing.T) {
 // TestM4BStaysABookInAMusicLibrary: a music library classifies by tags too, so an .m4b
 // in it is still a book.
 func TestM4BStaysABookInAMusicLibrary(t *testing.T) {
+	t.Parallel()
 	st, lib, sc, root := kindFixture(t, model.MediaMusic)
 	dst := filepath.Join(root, "Author", "Tome", "book.m4b")
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
@@ -183,6 +187,7 @@ func writeBookFolder(t *testing.T, root string, narrated int) {
 // order the walk reaches them in, and the counts read as one book created and two parts
 // joining it.
 func TestFolderConsensusJoinsUntaggedParts(t *testing.T) {
+	t.Parallel()
 	for _, narrated := range []int{1, 3} {
 		st, lib, sc, root := kindFixture(t, model.MediaMixed)
 		writeBookFolder(t, root, narrated)
@@ -198,6 +203,7 @@ func TestFolderConsensusJoinsUntaggedParts(t *testing.T) {
 // than keying a book of its own on its title, in an audiobook library and beside a
 // narrated part in a mixed one, wherever it sorts.
 func TestFolderBookTakesAPartWithNoAlbum(t *testing.T) {
+	t.Parallel()
 	for _, media := range []model.MediaType{model.MediaAudiobook, model.MediaMixed} {
 		st, lib, sc, root := kindFixture(t, media)
 		writeUnder(t, root, "Author/Tome/00 Intro.mp3", testaudio.MP3Spec{Title: "Intro", Artist: "Author",
@@ -213,6 +219,7 @@ func TestFolderBookTakesAPartWithNoAlbum(t *testing.T) {
 // TestSpokenWordTrackKeepsItsAlbumMusic: a Spoken Word genre names no audiobook in a mixed
 // root, so a skit stays a track on its album.
 func TestSpokenWordTrackKeepsItsAlbumMusic(t *testing.T) {
+	t.Parallel()
 	st, lib, sc, root := kindFixture(t, model.MediaMixed)
 	for i, genre := range []string{"Rock", "Spoken Word", "Rock"} {
 		writeUnder(t, root, "Band/Record/0"+string(rune('1'+i))+".mp3", testaudio.MP3Spec{Title: "Cut " + genre,
@@ -229,6 +236,7 @@ func TestSpokenWordTrackKeepsItsAlbumMusic(t *testing.T) {
 // book on the folder holding them, so an untagged book is one book named for its folder.
 // A file straight under the root has no folder to take a name from.
 func TestBookTitleFromItsFolder(t *testing.T) {
+	t.Parallel()
 	st, lib, sc, root := kindFixture(t, model.MediaAudiobook)
 	writeUnder(t, root, "Author/Tome/01.mp3", testaudio.MP3Spec{Audio: testaudio.AudioWithSeed(1)})
 	writeUnder(t, root, "Author/Tome/02.mp3", testaudio.MP3Spec{Audio: testaudio.AudioWithSeed(2)})
@@ -250,6 +258,7 @@ func TestBookTitleFromItsFolder(t *testing.T) {
 // TestFolderBookKeepsARetaggedPart: a part a folder's book took in keeps its place when it
 // is retagged and read again on its own, the narrated part unchanged and not read.
 func TestFolderBookKeepsARetaggedPart(t *testing.T) {
+	t.Parallel()
 	st, lib, sc, root := kindFixture(t, model.MediaMixed)
 	writeBookFolder(t, root, 1)
 	scanAll(t, sc, lib, false)
@@ -268,6 +277,7 @@ func TestFolderBookKeepsARetaggedPart(t *testing.T) {
 // TestFolderBookTakesANewPart: a part added later to a folder whose book has several parts
 // joins it, the book's own files unchanged and not read.
 func TestFolderBookTakesANewPart(t *testing.T) {
+	t.Parallel()
 	st, lib, sc, root := kindFixture(t, model.MediaMixed)
 	writeBookFolder(t, root, 1)
 	scanAll(t, sc, lib, false)
@@ -283,6 +293,7 @@ func TestFolderBookTakesANewPart(t *testing.T) {
 // TestNarratorAddedLaterGathersTheFolder: a folder cataloged as tracks becomes one book
 // once one part gains a narrator credit, its unchanged siblings included.
 func TestNarratorAddedLaterGathersTheFolder(t *testing.T) {
+	t.Parallel()
 	st, lib, sc, root := kindFixture(t, model.MediaMixed)
 	writeBookFolder(t, root, 0)
 	scanAll(t, sc, lib, false)
@@ -308,6 +319,7 @@ func TestNarratorAddedLaterGathersTheFolder(t *testing.T) {
 // TestFolderBookKeepsAMovedPart: a part the folder rule took in stays in its book when it
 // moves to a folder of its own, as a part whose tags name the book would.
 func TestFolderBookKeepsAMovedPart(t *testing.T) {
+	t.Parallel()
 	st, lib, sc, root := kindFixture(t, model.MediaMixed)
 	writeBookFolder(t, root, 1)
 	scanAll(t, sc, lib, false)
@@ -332,6 +344,7 @@ func TestFolderBookKeepsAMovedPart(t *testing.T) {
 // unchanged file cataloged there as a track is read again so the next plain scan makes it
 // a book; a track whose kind is locked stays one and is not read.
 func TestFastPathReadsATrackInAnAudiobookLibrary(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib, sc, root := kindFixture(t, model.MediaMixed)
 	writeUnder(t, root, "Author/Tome/01.mp3", testaudio.MP3Spec{Title: "Chapter", Artist: "Author", Album: "Tome",
@@ -382,6 +395,7 @@ func (r *inspectingReader) Inspect(ctx context.Context, path string) (*meta.File
 // numbers are books of their own, named for their files, rather than one book named for
 // the folder they share or parts of a tagged book beside them.
 func TestUntaggedBooksInAnAuthorFolderStayApart(t *testing.T) {
+	t.Parallel()
 	for _, tagged := range []bool{false, true} {
 		st, lib, sc, root := kindFixture(t, model.MediaAudiobook)
 		writeUnder(t, root, "Frank Herbert/Dune.mp3", testaudio.MP3Spec{Audio: testaudio.AudioWithSeed(1)})
@@ -400,6 +414,7 @@ func TestUntaggedBooksInAnAuthorFolderStayApart(t *testing.T) {
 // TestTitledPartsWithoutAnAlbumAreOneBook: numbered parts that carry chapter titles and
 // no album are one book named for their folder.
 func TestTitledPartsWithoutAnAlbumAreOneBook(t *testing.T) {
+	t.Parallel()
 	st, lib, sc, root := kindFixture(t, model.MediaAudiobook)
 	for i := 1; i <= 3; i++ {
 		writeUnder(t, root, "Author/Tome/0"+string(rune('0'+i))+".mp3", testaudio.MP3Spec{Title: "Chapter " + string(rune('0'+i)),
@@ -414,6 +429,7 @@ func TestTitledPartsWithoutAnAlbumAreOneBook(t *testing.T) {
 // TestNewBookDoesNotRereadItsSiblings: a new book in a folder of single-file books is the
 // only file a plain scan reads in full; its siblings name books of their own.
 func TestNewBookDoesNotRereadItsSiblings(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	st, err := sqlite.Open(ctx, sqlite.OpenOptions{Path: filepath.Join(t.TempDir(), "c.db"), Owner: "test"})
@@ -448,6 +464,7 @@ func TestNewBookDoesNotRereadItsSiblings(t *testing.T) {
 // TestOnePartBookTakesALaterPart: a narrated book of one part takes in a plain part that
 // arrives in a later scan.
 func TestOnePartBookTakesALaterPart(t *testing.T) {
+	t.Parallel()
 	st, lib, sc, root := kindFixture(t, model.MediaMixed)
 	writeUnder(t, root, "Author/Tome/01.mp3", testaudio.MP3Spec{Title: "Chapter 1", Artist: "Author", AlbumArtist: "Author",
 		Album: "Tome", Track: 1, TXXX: []testaudio.TXXXFrame{{Desc: "NARRATOR", Value: "Reader"}}, Audio: testaudio.AudioWithSeed(1)})
@@ -461,6 +478,7 @@ func TestOnePartBookTakesALaterPart(t *testing.T) {
 // TestDiscFoldersJoinAcrossSubPathScans: disc folders scanned one at a time, as the
 // watcher rescans a folder, still make one book.
 func TestDiscFoldersJoinAcrossSubPathScans(t *testing.T) {
+	t.Parallel()
 	st, lib, sc, root := kindFixture(t, model.MediaMixed)
 	ctx := context.Background()
 	writeUnder(t, root, "Author/Tome/CD1/01.mp3", testaudio.MP3Spec{Title: "Part 1", Artist: "Author", AlbumArtist: "Author",
@@ -480,6 +498,7 @@ func TestDiscFoldersJoinAcrossSubPathScans(t *testing.T) {
 // TestMusicLibraryKeepsANarratedAlbumApart: a library declared music classifies by tags,
 // so a narrated intro is a book of its own and its album's songs stay tracks.
 func TestMusicLibraryKeepsANarratedAlbumApart(t *testing.T) {
+	t.Parallel()
 	st, lib, sc, root := kindFixture(t, model.MediaMusic)
 	for i := 1; i <= 4; i++ {
 		spec := testaudio.MP3Spec{Title: "Song " + string(rune('0'+i)), Artist: "Band", AlbumArtist: "Band", Album: "Record",
@@ -498,6 +517,7 @@ func TestMusicLibraryKeepsANarratedAlbumApart(t *testing.T) {
 // TestRipBesideABookStaysARip: a single-file rip whose sheet carves it stays a rip beside
 // a narrated book in its folder, though its file names no album and a number.
 func TestRipBesideABookStaysARip(t *testing.T) {
+	t.Parallel()
 	st, lib, sc, root := kindFixture(t, model.MediaMixed)
 	writeUnder(t, root, "Shelf/a-book.mp3", testaudio.MP3Spec{Title: "Ch 1", Artist: "Author", Album: "Tome",
 		TXXX: []testaudio.TXXXFrame{{Desc: "NARRATOR", Value: "Reader"}}, Audio: testaudio.AudioWithSeed(1)})
@@ -512,6 +532,7 @@ func TestRipBesideABookStaysARip(t *testing.T) {
 // TestFolderSettleLeavesAnErroredFile: a file the walk could not read is not read again
 // by a folder settle, so its error is its only count.
 func TestFolderSettleLeavesAnErroredFile(t *testing.T) {
+	t.Parallel()
 	st, lib, sc, root := kindFixture(t, model.MediaMixed)
 	writeUnder(t, root, "Author/Tome/02.mp3", testaudio.MP3Spec{Title: "Chapter 2", Artist: "Author", AlbumArtist: "Author",
 		Album: "Tome", Track: 2, Audio: testaudio.AudioWithSeed(2)})
@@ -540,6 +561,7 @@ func TestFolderSettleLeavesAnErroredFile(t *testing.T) {
 // when the narrated part is trashed, owns the book's metadata but never its title, since
 // its tags name no book.
 func TestPromotedPartLeavesTheBookTitle(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib, sc, root := kindFixture(t, model.MediaMixed)
 	writeUnder(t, root, "Author/Tome/01.mp3", testaudio.MP3Spec{Title: "Chapter 1", Artist: "Author", AlbumArtist: "Author",
@@ -568,6 +590,7 @@ func TestPromotedPartLeavesTheBookTitle(t *testing.T) {
 // named still joins the book a tagged part read after it in the same walk makes, as it
 // would had the walk reached the tagged part first.
 func TestFolderRuleIgnoresWalkOrder(t *testing.T) {
+	t.Parallel()
 	st, lib, sc, root := kindFixture(t, model.MediaAudiobook)
 	writeUnder(t, root, "Tome/01.mp3", testaudio.MP3Spec{Audio: testaudio.AudioWithSeed(1)})
 	scanAll(t, sc, lib, false)
@@ -582,6 +605,7 @@ func TestFolderRuleIgnoresWalkOrder(t *testing.T) {
 // last reads each part once; the numbered parts with no album it kept in the book are not
 // read again when the narrated part names the same book.
 func TestFolderSettleSkipsPartsAlreadyIn(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	st, err := sqlite.Open(ctx, sqlite.OpenOptions{Path: filepath.Join(t.TempDir(), "c.db"), Owner: "test"})
@@ -615,6 +639,7 @@ func TestFolderSettleSkipsPartsAlreadyIn(t *testing.T) {
 // tagged track 1 on every file is still one book of every part, not one part and its
 // "encodings".
 func TestSplitPartsNumberedAlikeStayParts(t *testing.T) {
+	t.Parallel()
 	st, lib, sc, root := kindFixture(t, model.MediaAudiobook)
 	for i := 1; i <= 4; i++ {
 		writeUnder(t, root, "Austen/Emma/Emma - Part "+string(rune('0'+i))+".mp3", testaudio.MP3Spec{

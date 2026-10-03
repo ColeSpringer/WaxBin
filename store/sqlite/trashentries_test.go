@@ -59,6 +59,7 @@ func trashRowCount(t *testing.T, st *Store, pid model.PID) int {
 // journal used to land with a blank item for every other part, which both blanked
 // the ITEM column in `trash list` and left a later purge with nothing to announce.
 func TestTrashRecordsBookPartItem(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	book := putBookPart(t, st, lib.ID, "/lib/book/p1.m4b", "bk1", "e1", 0)
@@ -85,6 +86,7 @@ func TestTrashRecordsBookPartItem(t *testing.T) {
 // to announce. A dropped row is dropped in every case: the quiet paths are guards on
 // the delta, not on the delete.
 func TestPurgeEmitsItemDelta(t *testing.T) {
+	t.Parallel()
 	t.Run("archived item", func(t *testing.T) {
 		st, lib := entityFixture(t)
 		ctx := context.Background()
@@ -200,6 +202,7 @@ func TestPurgeEmitsItemDelta(t *testing.T) {
 }
 
 func TestTrashEntriesCutoffIsStrict(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	entry := trashOneFile(t, st, lib.ID, "/lib/a.mp3", "te1")
@@ -224,6 +227,7 @@ func TestTrashEntriesCutoffIsStrict(t *testing.T) {
 }
 
 func TestTrashEntriesCutoffExcludesRestored(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	entry := trashOneFile(t, st, lib.ID, "/lib/b.mp3", "te2")

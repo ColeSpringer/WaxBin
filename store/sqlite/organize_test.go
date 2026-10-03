@@ -37,6 +37,7 @@ func openRootedStore(t *testing.T, dir, db, owner string) (*sqlite.Store, *model
 // move but before CommitMove: the planned journal row is left behind and the file
 // row still points at the source. Reopening must finish the move.
 func TestRecoverOrganizeFinishesCompletedMove(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	dir := t.TempDir()
 	db := filepath.Join(t.TempDir(), "c.db")
@@ -83,6 +84,7 @@ func TestRecoverOrganizeFinishesCompletedMove(t *testing.T) {
 // before the on-disk move: the source is still in place, so recovery must roll the
 // journal row back and leave the catalog pointing at the source.
 func TestRecoverOrganizeRollsBackUnstartedMove(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	dir := t.TempDir()
 	db := filepath.Join(t.TempDir(), "c.db")
@@ -126,6 +128,7 @@ func fileOnDisk(p string) bool {
 // destination are one file under two listed names (hard links, which fsx.Move refuses) did
 // not take effect, so recovery rolls it back and the catalog keeps the source.
 func TestRecoverOrganizeRollsBackAMoveListedUnderBothNames(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	dir := t.TempDir()
 	db := filepath.Join(t.TempDir(), "c.db")
@@ -167,6 +170,7 @@ func TestRecoverOrganizeRollsBackAMoveListedUnderBothNames(t *testing.T) {
 // warning rather than failing the open on every start; the catalog keeps the source and
 // the next scan reconciles.
 func TestRecoverOrganizeLeavesADestinationAnotherRowHolds(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	dir := t.TempDir()
 	db := filepath.Join(t.TempDir(), "c.db")

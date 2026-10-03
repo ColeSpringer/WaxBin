@@ -22,6 +22,7 @@ func countingLyrics(asks *int) *enrich.Mock {
 // TestPhasesWalksTheNamedPhasesAlone: a run given a phase list walks those phases and no
 // other, forced or not, and its reach holds only their targets.
 func TestPhasesWalksTheNamedPhasesAlone(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, _, lib := openStore(t)
 	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
@@ -65,6 +66,7 @@ func TestPhasesWalksTheNamedPhasesAlone(t *testing.T) {
 // TestPhasesNarrowsAScope: a scope and a phase list intersect, and a listed phase the
 // scope gives nothing to walk is an empty walk rather than a refusal.
 func TestPhasesNarrowsAScope(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, _, lib := openStore(t)
 	pid := seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
@@ -98,6 +100,7 @@ func TestPhasesNarrowsAScope(t *testing.T) {
 // errors, and a listed phase the install does not build is refused naming its gate, all
 // before anything is walked.
 func TestPhasesRefusals(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, _, lib := openStore(t)
 	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
@@ -134,6 +137,7 @@ func TestPhasesRefusals(t *testing.T) {
 // TestCheckPhaseOptions: the one validator the engine, the facade and the CLI share
 // refuses each bad combination with the same words, CodeInvalid, and passes a good one.
 func TestCheckPhaseOptions(t *testing.T) {
+	t.Parallel()
 	artist, lyrics := []model.EnrichPhase{model.EnrichPhaseArtist}, []model.EnrichPhase{model.EnrichPhaseLyrics}
 	for name, c := range map[string]struct {
 		force, scoped  bool

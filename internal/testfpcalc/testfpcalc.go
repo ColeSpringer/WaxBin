@@ -4,8 +4,10 @@ package testfpcalc
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -24,8 +26,13 @@ func Write(t testing.TB, stdout, stderr string, code int) string {
 	}
 	bin := filepath.Join(dir, "fpcalc")
 	script := fmt.Sprintf("#!/bin/sh\ncat '%s/out'\ncat '%s/err' >&2\nexit %d\n", dir, dir, code)
-	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
+	// Write the executable in a child, so a concurrent fork in the test process
+	// cannot inherit its write descriptor and make exec fail with ETXTBSY. Run
+	// waits for the writer and its children to exit before returning the path.
+	cmd := exec.Command("/bin/sh", "-c", `cat > "$1" && chmod 755 "$1"`, "testfpcalc", bin)
+	cmd.Stdin = strings.NewReader(script)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("write fpcalc stand-in: %v: %s", err, out)
 	}
 	return bin
 }

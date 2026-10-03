@@ -64,6 +64,7 @@ func assertScanConsistent(t *testing.T, st *sqlite.Store) {
 // carved into browseable virtual tracks with offset-derived durations, sharing one
 // backing file whose tags are guarded against a per-track write-back.
 func TestScanVirtualTracksFromCue(t *testing.T) {
+	t.Parallel()
 	st, lib, sc, _, root := fastPathFixture(t)
 	ctx := context.Background()
 
@@ -131,6 +132,7 @@ func TestScanVirtualTracksFromCue(t *testing.T) {
 // head of the album under its name, because a virtual track's start is its content
 // identity, not a seek hint.
 func TestScanVirtualTracksDropsUnindexedTrack(t *testing.T) {
+	t.Parallel()
 	st, lib, sc, _, root := fastPathFixture(t)
 	ctx := context.Background()
 
@@ -183,6 +185,7 @@ func TestScanVirtualTracksDropsUnindexedTrack(t *testing.T) {
 // track was detached and deleted, nothing replaced it, and the audio became
 // unreachable in the catalog.
 func TestScanCueWithNoUsableTracksKeepsTheFile(t *testing.T) {
+	t.Parallel()
 	st, lib, sc, _, root := fastPathFixture(t)
 	ctx := context.Background()
 	cuePath := filepath.Join(root, "album.cue")
@@ -261,6 +264,7 @@ func cueDropDetail(t *testing.T, st *sqlite.Store) string {
 // the track whose INDEX was mistyped and serve it under track 1's name. The file stays
 // a whole-file track and the diagnostic names the line.
 func TestScanWarnedSheetKeepsTheFile(t *testing.T) {
+	t.Parallel()
 	st, lib, sc, _, root := fastPathFixture(t)
 	writeMP3Raw(t, filepath.Join(root, "album.mp3"),
 		testaudio.BuildMP3WithAudio("Whole File", "A", "Al", 1, testaudio.AudioWithSeed(24)))
@@ -286,6 +290,7 @@ func TestScanWarnedSheetKeepsTheFile(t *testing.T) {
 // so the lost track's TITLE lands on the track before it and its INDEX is what warns.
 // Carving that sheet would store track 1 under track 2's title.
 func TestScanMisspelledTrackLineIsNotCarved(t *testing.T) {
+	t.Parallel()
 	st, lib, sc, _, root := fastPathFixture(t)
 	writeMP3Raw(t, filepath.Join(root, "album.mp3"),
 		testaudio.BuildMP3WithAudio("Whole File", "A", "Al", 1, testaudio.AudioWithSeed(27)))
@@ -311,6 +316,7 @@ func TestScanMisspelledTrackLineIsNotCarved(t *testing.T) {
 // line says nothing reliable about the tracks, so the rip keeps them, and the
 // diagnostic names the line and says so.
 func TestScanWarnedSheetKeepsAnExistingRip(t *testing.T) {
+	t.Parallel()
 	st, lib, sc, _, root := fastPathFixture(t)
 	cuePath := filepath.Join(root, "album.cue")
 	writeMP3Raw(t, filepath.Join(root, "album.mp3"),
@@ -368,6 +374,7 @@ func threeTrackRip(third string) string {
 // identity. Rebuilt from the track number, a renumbered track would become a new item
 // on the typo and another when the sheet is fixed.
 func TestScanKeptRipKeepsAnEditedTrackNumber(t *testing.T) {
+	t.Parallel()
 	st, lib, sc, _, root := fastPathFixture(t)
 	ctx := context.Background()
 	cuePath := filepath.Join(root, "album.cue")
@@ -400,6 +407,7 @@ func TestScanKeptRipKeepsAnEditedTrackNumber(t *testing.T) {
 // backing the tracks it copies over its stored windows, rather than becoming a whole-file
 // track of its own and dropping them.
 func TestScanWarnedSheetKeepsARipCopy(t *testing.T) {
+	t.Parallel()
 	st, lib, sc, _, root := fastPathFixture(t)
 	ctx := context.Background()
 	audio := testaudio.BuildMP3WithAudio("Whole", "A", "Al", 1, testaudio.AudioWithSeed(36))
@@ -442,6 +450,7 @@ func TestScanWarnedSheetKeepsARipCopy(t *testing.T) {
 // TestScanKeptRipKeepsEachTracksAlbum: a kept rip takes each track's album fields from
 // that track, so an edit to one track's album does not spread to the others.
 func TestScanKeptRipKeepsEachTracksAlbum(t *testing.T) {
+	t.Parallel()
 	st, lib, sc, _, root := fastPathFixture(t)
 	ctx := context.Background()
 	cuePath := filepath.Join(root, "album.cue")
@@ -469,6 +478,7 @@ func TestScanKeptRipKeepsEachTracksAlbum(t *testing.T) {
 // cannot be applied at all, and a rip keeps its tracks through that as it does through
 // an unread line.
 func TestScanMultiFileSheetKeepsAnExistingRip(t *testing.T) {
+	t.Parallel()
 	st, lib, sc, _, root := fastPathFixture(t)
 	cuePath := filepath.Join(root, "album.cue")
 	writeMP3Raw(t, filepath.Join(root, "album.mp3"),
@@ -499,6 +509,7 @@ func TestScanMultiFileSheetKeepsAnExistingRip(t *testing.T) {
 // carries an INDEX 01 like any other, so only its datatype tells it apart, and
 // carving it as audio would yield a piece of filesystem named after a song.
 func TestScanVirtualTracksDropDataTrack(t *testing.T) {
+	t.Parallel()
 	st, lib, sc, _, root := fastPathFixture(t)
 	ctx := context.Background()
 	writeMP3Raw(t, filepath.Join(root, "album.mp3"),
@@ -541,6 +552,7 @@ func TestScanVirtualTracksDropDataTrack(t *testing.T) {
 // than running on to the next audio track, so no track carries data-mode noise, and a
 // rip kept through a later typo keeps that end.
 func TestScanDataTrackBetweenAudioEndsTheTrackBefore(t *testing.T) {
+	t.Parallel()
 	st, lib, sc, _, root := fastPathFixture(t)
 	cuePath := filepath.Join(root, "album.cue")
 	writeMP3Raw(t, filepath.Join(root, "album.mp3"),
@@ -579,6 +591,7 @@ func TestScanDataTrackBetweenAudioEndsTheTrackBefore(t *testing.T) {
 // audio in a second session, which the rip does not hold, so the last audio track
 // still runs to the end of the file. The fixture is about half a second long.
 func TestScanTrailingDataTrackLeavesTheEndOpen(t *testing.T) {
+	t.Parallel()
 	st, lib, sc, _, root := fastPathFixture(t)
 	writeMP3Raw(t, filepath.Join(root, "album.mp3"),
 		testaudio.BuildMP3WithAudio("Whole", "A", "Al", 1, testaudio.AudioWithSeed(31)))
@@ -607,6 +620,7 @@ const gameDiscCue = "TITLE \"Game Disc\"\nFILE \"album.wav\" WAVE\n" +
 // image carries its trailing data track's sectors as audio, which plays as noise, so
 // the last song ends where the data starts.
 func TestScanTrailingDataTrackInsideTheFileEndsTheLastTrack(t *testing.T) {
+	t.Parallel()
 	st, lib, sc, _, root := fastPathFixture(t)
 	writeMP3Raw(t, filepath.Join(root, "album.wav"), testaudio.EncodeWAV16(8000, make([]float32, 21*8000)))
 	writeCue(t, filepath.Join(root, "album.cue"), gameDiscCue)
@@ -626,6 +640,7 @@ func TestScanTrailingDataTrackInsideTheFileEndsTheLastTrack(t *testing.T) {
 // an estimate that runs long, so it cannot say the data sits inside the file, and the
 // last song keeps its open end rather than one past its audio.
 func TestScanTrailingDataTrackInALossyFileLeavesTheEndOpen(t *testing.T) {
+	t.Parallel()
 	st, lib, sc, _, root := fastPathFixture(t)
 	writeMP3Raw(t, filepath.Join(root, "album.mp3"),
 		testaudio.BuildMP3WithAudio("Whole", "A", "Al", 1, bytes.Repeat(testaudio.AudioWithSeed(37), 40)))
@@ -642,6 +657,7 @@ func TestScanTrailingDataTrackInALossyFileLeavesTheEndOpen(t *testing.T) {
 // the file, and sorting it would carve a guess. The file stays a whole-file track and
 // the diagnostic says why.
 func TestScanOutOfOrderSheetIsRefused(t *testing.T) {
+	t.Parallel()
 	st, lib, sc, _, root := fastPathFixture(t)
 	writeMP3Raw(t, filepath.Join(root, "album.mp3"),
 		testaudio.BuildMP3WithAudio("Whole File", "A", "Al", 1, testaudio.AudioWithSeed(32)))
@@ -666,6 +682,7 @@ func TestScanOutOfOrderSheetIsRefused(t *testing.T) {
 // longer than a pregap is a song of its own, carved as track 0 so it sorts first.
 // Its identity rests on number 0 at frame 0, so it survives a forced rescan.
 func TestScanHiddenTrackOneAudioIsCarved(t *testing.T) {
+	t.Parallel()
 	st, lib, sc, _, root := fastPathFixture(t)
 	// Forty copies of the default run make a file of about 21 s.
 	writeMP3Raw(t, filepath.Join(root, "album.mp3"),
@@ -701,6 +718,7 @@ func TestScanHiddenTrackOneAudioIsCarved(t *testing.T) {
 // item, and its plays and stars with it, on the next forced scan of a file that was
 // cataloged whole.
 func TestScanOneTrackSheetWithALongLeadInStaysWhole(t *testing.T) {
+	t.Parallel()
 	st, lib, sc, _, root := fastPathFixture(t)
 	writeMP3Raw(t, filepath.Join(root, "song.mp3"),
 		testaudio.BuildMP3WithAudio("Whole", "A", "Al", 1, bytes.Repeat(testaudio.AudioWithSeed(34), 40)))
@@ -722,6 +740,7 @@ func TestScanOneTrackSheetWithALongLeadInStaysWhole(t *testing.T) {
 // virtual track spanning everything, which is strictly worse than a plain track: its
 // tags become unwritable and it exports no fingerprint.
 func TestScanCueWithOneUsableTrackStaysWholeFile(t *testing.T) {
+	t.Parallel()
 	st, lib, sc, _, root := fastPathFixture(t)
 	ctx := context.Background()
 	writeMP3Raw(t, filepath.Join(root, "album.mp3"),
@@ -754,6 +773,7 @@ func TestScanCueWithOneUsableTrackStaysWholeFile(t *testing.T) {
 // end of the file", so an empty window would read back as the whole album under the
 // first track's name. That is the failure the frame window exists to prevent.
 func TestScanCueDropsEmptyWindow(t *testing.T) {
+	t.Parallel()
 	st, lib, sc, _, root := fastPathFixture(t)
 	writeMP3Raw(t, filepath.Join(root, "album.mp3"),
 		testaudio.BuildMP3WithAudio("Whole", "A", "Al", 1, testaudio.AudioWithSeed(23)))
@@ -783,6 +803,7 @@ func TestScanCueDropsEmptyWindow(t *testing.T) {
 // TestScanVirtualTracksRescanIdempotent: an unchanged rip fast-paths (no re-parse,
 // no reshaping of the set).
 func TestScanVirtualTracksRescanIdempotent(t *testing.T) {
+	t.Parallel()
 	st, lib, sc, cr, root := fastPathFixture(t)
 	writeMP3Raw(t, filepath.Join(root, "album.mp3"),
 		testaudio.BuildMP3WithAudio("Whole", "A", "Al", 1, testaudio.AudioWithSeed(11)))
@@ -811,6 +832,7 @@ func TestScanVirtualTracksRescanIdempotent(t *testing.T) {
 // to the full path and reconciles the set (a new track appears, the originals keep
 // their identity).
 func TestScanVirtualTracksCueEditReconciles(t *testing.T) {
+	t.Parallel()
 	st, lib, sc, _, root := fastPathFixture(t)
 	cuePath := filepath.Join(root, "album.cue")
 	writeMP3Raw(t, filepath.Join(root, "album.mp3"),
@@ -845,6 +867,7 @@ func TestScanVirtualTracksCueEditReconciles(t *testing.T) {
 // case where no survivor's window shifts, and it must still register as a change so the
 // scan summary and watch-mode schedulers see it, not just the change_log.
 func TestScanVirtualTracksLeadingRemovalCounts(t *testing.T) {
+	t.Parallel()
 	st, lib, sc, _, root := fastPathFixture(t)
 	cuePath := filepath.Join(root, "album.cue")
 	writeMP3Raw(t, filepath.Join(root, "album.mp3"),
@@ -888,6 +911,7 @@ func TestScanVirtualTracksLeadingRemovalCounts(t *testing.T) {
 // TestScanBookCueStaysChapters: a book with a multi-track .cue keeps the chapter
 // path, producing one book item rather than virtual tracks.
 func TestScanBookCueStaysChapters(t *testing.T) {
+	t.Parallel()
 	st, lib, sc, _, root := fastPathFixture(t)
 	ctx := context.Background()
 
@@ -920,6 +944,7 @@ func TestScanBookCueStaysChapters(t *testing.T) {
 // TestScanCueAddedThenRemovedConverts: a whole-file track gains a cue (converting to
 // virtual tracks), then loses it (reverting to one whole-file track).
 func TestScanCueAddedThenRemovedConverts(t *testing.T) {
+	t.Parallel()
 	st, lib, sc, _, root := fastPathFixture(t)
 	ctx := context.Background()
 	cuePath := filepath.Join(root, "album.cue")

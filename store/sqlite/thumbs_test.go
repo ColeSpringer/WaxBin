@@ -71,6 +71,7 @@ func backdate(t *testing.T, db *sql.DB, size int, age time.Duration) {
 // for: one cover browsed at three rungs is three derivatives, and the breakdown has
 // to show that rather than reporting a single cached cover.
 func TestThumbCacheStatsCountsEachRungSeparately(t *testing.T) {
+	t.Parallel()
 	st, dbPath, lib := openStoreAt(t)
 	_, raw := seedRungs(t, st, lib.ID, 48, 96, 192)
 
@@ -121,6 +122,7 @@ func TestThumbCacheStatsCountsEachRungSeparately(t *testing.T) {
 // reports the originals it would be derived from. Zeros across the board would read as
 // "no artwork at all", which is the one thing an empty cache does not mean.
 func TestThumbCacheStatsReportsOriginalsWithNoDerivatives(t *testing.T) {
+	t.Parallel()
 	st, _, lib := openStoreAt(t)
 	raw := sizedCoverPNG(t, 400, 400)
 	putCoveredTrack(t, st, lib.ID, "/lib/a.flac", "ess-a", "A", "Album",
@@ -144,6 +146,7 @@ func TestThumbCacheStatsReportsOriginalsWithNoDerivatives(t *testing.T) {
 // TestPruneThumbnailsDropsOnlyEntriesPastTheAge pins the age bound's edge: the rung
 // inside the window survives.
 func TestPruneThumbnailsDropsOnlyEntriesPastTheAge(t *testing.T) {
+	t.Parallel()
 	st, dbPath, lib := openStoreAt(t)
 	seedRungs(t, st, lib.ID, 48, 192)
 	db := roConn(t, dbPath)
@@ -167,6 +170,7 @@ func TestPruneThumbnailsDropsOnlyEntriesPastTheAge(t *testing.T) {
 // TestPruneThumbnailsKeepsTheNewestInsideTheByteBudget pins the size bound: with
 // nothing but a creation stamp to order by, the budget evicts oldest first.
 func TestPruneThumbnailsKeepsTheNewestInsideTheByteBudget(t *testing.T) {
+	t.Parallel()
 	st, dbPath, lib := openStoreAt(t)
 	seedRungs(t, st, lib.ID, 48, 96, 192)
 	w := writeConn(t, dbPath)
@@ -199,6 +203,7 @@ func TestPruneThumbnailsKeepsTheNewestInsideTheByteBudget(t *testing.T) {
 // budget rather than "no bound given": every derivative regenerates on request, so
 // emptying the cache is a legitimate ask.
 func TestPruneThumbnailsZeroBudgetEmptiesTheCache(t *testing.T) {
+	t.Parallel()
 	st, dbPath, lib := openStoreAt(t)
 	seedRungs(t, st, lib.ID, 48, 192)
 
@@ -218,6 +223,7 @@ func TestPruneThumbnailsZeroBudgetEmptiesTheCache(t *testing.T) {
 // rather than silently doing nothing: a caller that passes neither bound has a bug,
 // and "removed 0" would read as an empty cache.
 func TestPruneThumbnailsRefusesWithNoPolicy(t *testing.T) {
+	t.Parallel()
 	st, _, lib := openStoreAt(t)
 	seedRungs(t, st, lib.ID, 48)
 
@@ -232,6 +238,7 @@ func TestPruneThumbnailsRefusesWithNoPolicy(t *testing.T) {
 // real instruction rather than the absence of one. The two bounds have to agree on
 // what zero means, or `--older-than 0d` refuses an invocation that named a bound.
 func TestPruneThumbnailsZeroAgeEmptiesTheCache(t *testing.T) {
+	t.Parallel()
 	st, dbPath, lib := openStoreAt(t)
 	seedRungs(t, st, lib.ID, 48, 192)
 
@@ -251,6 +258,7 @@ func TestPruneThumbnailsZeroAgeEmptiesTheCache(t *testing.T) {
 // The census answers from one read snapshot, so a writer generating thumbnails
 // alongside it cannot leave the breakdown adding up to more than the total above it.
 func TestThumbCacheStatsRungsSumToTheTotal(t *testing.T) {
+	t.Parallel()
 	st, _, lib := openStoreAt(t)
 	seedRungs(t, st, lib.ID, 48, 96, 192)
 

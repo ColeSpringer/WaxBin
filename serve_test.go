@@ -30,6 +30,10 @@ import (
 	"github.com/colespringer/waxbin/waxerr"
 )
 
+// asyncTestTimeout allows for race instrumentation and contended CI hosts.
+// Successful operations still return as soon as their condition is satisfied.
+const asyncTestTimeout = 30 * time.Second
+
 // serveLib starts Serve on an already-open read-write library in the background and
 // tears it down at cleanup.
 func serveLib(t *testing.T, ctx context.Context, lib *waxbin.Library, sock string) {
@@ -44,7 +48,7 @@ func serveLib(t *testing.T, ctx context.Context, lib *waxbin.Library, sock strin
 			if err != nil {
 				t.Errorf("serve returned: %v", err)
 			}
-		case <-time.After(2 * time.Second):
+		case <-time.After(asyncTestTimeout):
 			t.Error("serve did not stop")
 		}
 		_ = lib.Close()
@@ -92,6 +96,7 @@ func openServed(t *testing.T, ctx context.Context, db, root, sock string) *waxbi
 // committed tag whose file refused the write comes back as failures in the result rather
 // than as a transport error, the way edit_fields reports one.
 func TestServeProxiedSetTagWriteBack(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	sock := testsock.Path(t)
@@ -134,12 +139,13 @@ func TestServeProxiedSetTagWriteBack(t *testing.T) {
 // dialWhenReady dials the server socket, retrying until it answers a ping.
 func dialWhenReady(t *testing.T, sock string) *proxy.Client {
 	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), asyncTestTimeout)
+	defer cancel()
 	var lastErr error
-	for time.Now().Before(deadline) {
+	for ctx.Err() == nil {
 		c, err := proxy.Dial(sock)
 		if err == nil {
-			if perr := c.Ping(context.Background()); perr == nil {
+			if perr := c.Ping(ctx); perr == nil {
 				t.Cleanup(func() { _ = c.Close() })
 				return c
 			} else {
@@ -159,6 +165,7 @@ func dialWhenReady(t *testing.T, sock string) *proxy.Client {
 // server holding the write lock, a client's edits, ratings, stars, and user
 // creation all succeed through the socket instead of failing with CodeConflict.
 func TestServeProxiedMutations(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -271,6 +278,7 @@ func TestServeProxiedMutations(t *testing.T) {
 // result entries, a repeated (item, role) pair refused, and a locked entry either
 // failing the batch or being reported as skipped with its role.
 func TestServeProxiedCreditsBatch(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -361,6 +369,7 @@ func albumPIDFromFacet(t *testing.T, ctx context.Context, lib *waxbin.Library) m
 // library, and the as-of stamp rides asOfNs so a stale replay is skipped by the recorded
 // time guard, the same wire fields and new methods WaxDeck's getStarred2 import uses.
 func TestServeProxiedEntityStar(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -407,6 +416,7 @@ func TestServeProxiedEntityStar(t *testing.T) {
 // wire: a recorded play time lands on last_played_at and a recorded checkpoint on
 // last_progress_at, which is what the protocol bump to 18 protects.
 func TestServeProxiedRecordedTime(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -459,6 +469,7 @@ func TestServeProxiedRecordedTime(t *testing.T) {
 // changed=false and make every proxied write look like a no-op, so the server must refuse
 // it outright rather than answer it.
 func TestServeProxiedChangedBool(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -544,6 +555,7 @@ func TestServeProxiedChangedBool(t *testing.T) {
 // vanished file has no other way to tell the catalog while `waxbin serve` is up. The
 // verification runs on the server's filesystem, so the refusal travels too.
 func TestServeProxiedMarkMissing(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -581,6 +593,7 @@ func TestServeProxiedMarkMissing(t *testing.T) {
 // rule is replaced under the same pid, membership follows on the next read, and a
 // bad rule keeps its CodeInvalid class across the wire.
 func TestServeProxiedSmartPlaylistSetRule(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -630,6 +643,7 @@ func TestServeProxiedSmartPlaylistSetRule(t *testing.T) {
 // HasArt projection follows. This is the surface WaxDeck serves a synced playlist's
 // cover from.
 func TestServeProxiedPlaylistArt(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db := filepath.Join(t.TempDir(), "catalog.db")
 	sock := testsock.Path(t)
@@ -673,6 +687,7 @@ func TestServeProxiedPlaylistArt(t *testing.T) {
 // reach the stored mapping instead of arriving as a hand-set cover, and a lock
 // instruction of "leave it alone" leaves the pin the entity already carries standing.
 func TestServeProxiedArtAttribution(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db := filepath.Join(t.TempDir(), "catalog.db")
 	sock := testsock.Path(t)
@@ -757,6 +772,7 @@ func TestServeProxiedArtAttribution(t *testing.T) {
 // Our own client normalizes, so this is what a non-Go client assembling the frame by
 // hand meets; the omitted role still means front and still works.
 func TestServeArtLockRefusesExplicitFrontRole(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db := filepath.Join(t.TempDir(), "catalog.db")
 	sock := testsock.Path(t)
@@ -838,6 +854,7 @@ func rawFrame(t *testing.T, sock, frame string) (code, message string) {
 // media type the client fetched it with, instead of being refused as unrecognized, and
 // a composed cover reports itself as generated rather than as one a hand chose.
 func TestServeProxiedArtFormatAndGeneratedSource(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db := filepath.Join(t.TempDir(), "catalog.db")
 	sock := testsock.Path(t)
@@ -903,6 +920,7 @@ func TestServeProxiedArtFormatAndGeneratedSource(t *testing.T) {
 // keeps its class across the wire, and the stored transcript reads back through
 // the server's own library.
 func TestServeProxiedTranscript(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -951,6 +969,7 @@ func TestServeProxiedTranscript(t *testing.T) {
 // server's catalog (the process that scans), a proxied run_scan catalogs a file
 // under it, and a validation failure keeps its class across the wire.
 func TestServeProxiedAddRoot(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	rootA := t.TempDir()
 	rootB := t.TempDir()
@@ -996,6 +1015,7 @@ func TestServeProxiedAddRoot(t *testing.T) {
 // write-back flag crossed the wire, its file loses the release tags that would put it
 // back on the next rescan.
 func TestServeProxiedDetach(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -1042,6 +1062,7 @@ func TestServeProxiedDetach(t *testing.T) {
 // locked field edited without force returns CodeLocked, so the CLI exit code is the
 // same as a local edit.
 func TestServeProxiedError(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -1068,6 +1089,7 @@ func TestServeProxiedError(t *testing.T) {
 // reopen lands the catalog row at the head of the feed, DataVersion moves even when
 // nothing was written, and a proxied request waits for the host's reopen hook.
 func TestMaintenanceHandoffReopen(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -1236,6 +1258,7 @@ func TestMaintenanceHandoffReopen(t *testing.T) {
 // would pause it instead. A CLI-embedding host such as WaxDeck must keep serving
 // while a submitted scan runs.
 func TestServerRunJobKeepsServerUp(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -1291,8 +1314,11 @@ func TestServerRunJobKeepsServerUp(t *testing.T) {
 // unless it finished successfully.
 func waitForJobDone(t *testing.T, ctx context.Context, lib *waxbin.Library, jobPID model.PID) *model.Job {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
+	ctx, cancel := context.WithTimeout(ctx, 2*asyncTestTimeout)
+	defer cancel()
+	tick := time.NewTicker(15 * time.Millisecond)
+	defer tick.Stop()
+	for {
 		job, err := lib.Job(ctx, jobPID)
 		if err != nil {
 			t.Fatalf("job read: %v", err)
@@ -1303,16 +1329,19 @@ func waitForJobDone(t *testing.T, ctx context.Context, lib *waxbin.Library, jobP
 		case model.JobFailed, model.JobCrashed, model.JobCanceled:
 			t.Fatalf("job ended %s: %s", job.State, job.Error)
 		}
-		time.Sleep(15 * time.Millisecond)
+		select {
+		case <-tick.C:
+		case <-ctx.Done():
+			t.Fatalf("job %s did not finish (last state %s): %v", jobPID, job.State, ctx.Err())
+		}
 	}
-	t.Fatalf("job %s did not finish", jobPID)
-	return nil
 }
 
 // TestMaintenanceRefusedWhileJobRuns verifies a maintenance hand-off is refused
 // while a server-run job is in flight, rather than closing the store out from under
 // the running scan (which would abort it partway). See BeginMaintenance's guard.
 func TestMaintenanceRefusedWhileJobRuns(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -1354,6 +1383,7 @@ func TestMaintenanceRefusedWhileJobRuns(t *testing.T) {
 // subscribers) rather than closing it, so after EndMaintenance the embedder's
 // channel still delivers deltas for subsequent writes.
 func TestSubscriberSurvivesMaintenance(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -1388,16 +1418,18 @@ func TestSubscriberSurvivesMaintenance(t *testing.T) {
 	}
 	// The foreground write came from another process, so nothing here published it; the
 	// reopen does, and the catalog is the same one, so it writes no catalog row.
+	// MaintenanceEnd publishes all foreground rows before it returns.
 	var got []model.Change
-	for quiet := false; !quiet; {
+collect:
+	for {
 		select {
 		case ch, ok := <-ch:
 			if !ok {
 				t.Fatal("subscription channel was closed by the maintenance hand-off")
 			}
 			got = append(got, ch)
-		case <-time.After(200 * time.Millisecond):
-			quiet = true
+		default:
+			break collect
 		}
 	}
 	if len(got) != 1 || got[0].EntityType != "user" || got[0].EntityPID != fgUser.PID {
@@ -1414,7 +1446,7 @@ func TestSubscriberSurvivesMaintenance(t *testing.T) {
 		if !ok {
 			t.Fatal("subscription channel was closed by the maintenance hand-off")
 		}
-	case <-time.After(2 * time.Second):
+	default:
 		t.Fatal("no change delivered after maintenance; the subscription was lost")
 	}
 }
@@ -1426,6 +1458,7 @@ func TestSubscriberSurvivesMaintenance(t *testing.T) {
 // so a later import lands in the restored podcast library rather than in whatever row
 // the old id names there (here, a user library).
 func TestRestoreUnderMaintenanceServesTheRestoredCatalog(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	podDir := t.TempDir()
 	importEpisode := func(lib *waxbin.Library, show model.PID, guid string) model.PID {
@@ -1603,6 +1636,7 @@ func hasUsernamed(users []*model.User, name string) bool {
 // short leased mutation; over the socket the server stays up and the episode still
 // comes back remote rather than archived.
 func TestServeProxiedPodcastUnfetchAndRemove(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	podDir := t.TempDir()
@@ -1683,6 +1717,7 @@ func TestServeProxiedPodcastUnfetchAndRemove(t *testing.T) {
 // what this test really pins is that creating, renaming, importing and deleting
 // a playlist no longer needs the server to stand down.
 func TestServeProxiedPlaylistLifecycle(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -1764,6 +1799,7 @@ func TestServeProxiedPlaylistLifecycle(t *testing.T) {
 // comes back over the wire, including the outcome and member count a client reads to know
 // which branch ran.
 func TestServeProxiedRenameEntity(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -1805,6 +1841,7 @@ func TestServeProxiedRenameEntity(t *testing.T) {
 // the correction, the clear's default lock, and the CodeLocked refusal surviving the
 // wire so the CLI's exit code matches a local run.
 func TestServeAcquisitionCuration(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -1874,6 +1911,7 @@ func TestServeAcquisitionCuration(t *testing.T) {
 // runs is seen before the store closes, so the hand-off is refused rather than
 // crashing the job, and the host hears it can resume.
 func TestSuspendHookJobRefusesTheHandoff(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, "a.mp3"), testaudio.BuildMP3("One", "Artist", "Album", 1))
@@ -1921,6 +1959,7 @@ func TestSuspendHookJobRefusesTheHandoff(t *testing.T) {
 // TestCanceledRefusalStillResumesTheHost: a hand-off refused because its context was
 // canceled during OnSuspend still answers the hook, from the head read before it.
 func TestCanceledRefusalStillResumesTheHost(t *testing.T) {
+	t.Parallel()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	var seqs []int64
@@ -1952,6 +1991,7 @@ func TestCanceledRefusalStillResumesTheHost(t *testing.T) {
 // owes the host its hook. The next Reopen, or the next hand-off before it suspends,
 // finishes it, so each OnSuspend is answered before another begins.
 func TestUnannouncedReopenIsFinishedLater(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db := filepath.Join(t.TempDir(), "catalog.db")
 	var hooks []string
@@ -2024,6 +2064,7 @@ func TestUnannouncedReopenIsFinishedLater(t *testing.T) {
 // suspended changes nothing, so it writes no catalog row and runs no hook, which would
 // otherwise send every consumer through a full reload.
 func TestReopenOfAnOpenLibraryAnnouncesNothing(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	var reopens atomic.Int32
 	lib, err := waxbin.Open(ctx, waxbin.Options{
@@ -2050,6 +2091,7 @@ func TestReopenOfAnOpenLibraryAnnouncesNothing(t *testing.T) {
 // reopens the server through the crash path, which runs the same reopen hook. The
 // catalog is the one it suspended, so no catalog row is written.
 func TestDroppedHandoffStillAnnouncesTheReopen(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	sock := testsock.Path(t)
 	var reopens atomic.Int32
@@ -2074,7 +2116,7 @@ func TestDroppedHandoffStillAnnouncesTheReopen(t *testing.T) {
 		t.Fatalf("maintenance begin: %v", err)
 	}
 	_ = c.Close()
-	for deadline := time.Now().Add(5 * time.Second); reopens.Load() == 0; time.Sleep(5 * time.Millisecond) {
+	for deadline := time.Now().Add(asyncTestTimeout); reopens.Load() == 0; time.Sleep(5 * time.Millisecond) {
 		if time.Now().After(deadline) {
 			t.Fatal("the server did not reopen after the client dropped the hand-off")
 		}
@@ -2088,6 +2130,7 @@ func TestDroppedHandoffStillAnnouncesTheReopen(t *testing.T) {
 // and hands back its pid; the finished job's result decodes to the KindReport, and a
 // request the server refuses keeps its class on the wire without starting a job.
 func TestServeProxiedRunSetKind(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	for n := 1; n <= 2; n++ {
@@ -2124,6 +2167,7 @@ func TestServeProxiedRunSetKind(t *testing.T) {
 // TestServeProxiedAddRootAllowsAnAbsentRoot: add_root refuses a root that does not exist
 // unless the request allows it to be absent, the option reaching the server's AddRoot.
 func TestServeProxiedAddRootAllowsAnAbsentRoot(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	sock := testsock.Path(t)
 	lib := openServed(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), t.TempDir(), sock)

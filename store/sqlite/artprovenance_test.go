@@ -105,6 +105,7 @@ func itemRowID(t *testing.T, db *sql.DB, pid model.PID) int64 {
 // content-addressed blob store holds exactly one art_source row, and each entity still
 // answers for itself.
 func TestDedupedSourceKeepsSeparateProvenance(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStoreAt(t)
 	raw := coverPNG(t, 3)
@@ -143,6 +144,7 @@ func TestDedupedSourceKeepsSeparateProvenance(t *testing.T) {
 // TestArtProvenancePerOrigin walks one cover from each producer through to the stored
 // mapping: a tag, a sidecar, a user set, an enrichment fetch, and a podcast feed.
 func TestArtProvenancePerOrigin(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStoreAt(t)
 	db := roConn(t, dbPath)
@@ -207,6 +209,7 @@ func TestArtProvenancePerOrigin(t *testing.T) {
 // can attribute. setEntityArtRoleTx raises CodeInvalid, and the scan ingest's wrap
 // keeps that class, so the caller sees the guard's own code.
 func TestUnstampedArtIsRefused(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStoreAt(t)
 	unstamped := stamped(t, coverPNG(t, 7), "", "", "")
@@ -293,6 +296,7 @@ func storedArt(t *testing.T, db *sql.DB, entityType string, entityID int64) (has
 // dimensions are all derivable from the bytes the store is already holding, so it
 // derives them.
 func TestUndescribedCoverIsStoredNotDropped(t *testing.T) {
+	t.Parallel()
 	st, dbPath, lib := openStoreAt(t)
 	raw := coverPNG(t, 11)
 
@@ -314,6 +318,7 @@ func TestUndescribedCoverIsStoredNotDropped(t *testing.T) {
 // undecodable to ResolveArt, which then serves the source unscaled forever. Filling
 // each field independently is what keeps the thumbnail path reachable.
 func TestCoverWithFormatButNoDimensionsStillThumbnails(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStoreAt(t)
 	raw := sizedCoverPNG(t, 400, 300)
@@ -341,6 +346,7 @@ func TestCoverWithFormatButNoDimensionsStillThumbnails(t *testing.T) {
 // happens against a real address, so a cover whose bytes match the stored one refreshes
 // the attribution in place instead of being dropped before the comparison ran.
 func TestUndescribedCoverMatchingTheStoredOneReattributes(t *testing.T) {
+	t.Parallel()
 	st, dbPath, lib := openStoreAt(t)
 	raw := coverPNG(t, 12)
 
@@ -370,6 +376,7 @@ func TestUndescribedCoverMatchingTheStoredOneReattributes(t *testing.T) {
 // invites: it is keyed by (source hash, size) alone, so a cached entry must not carry
 // the first requester's provenance into a second entity's answer.
 func TestThumbnailCacheDoesNotCacheProvenance(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, _, lib := openStoreAt(t)
 	// Bigger than the smallest rung, so the resolve below really generates rather than
@@ -407,6 +414,7 @@ func TestThumbnailCacheDoesNotCacheProvenance(t *testing.T) {
 // TestDerivedAlbumCoverReportsMemberProvenance: an album with no durable cover answers
 // from a member track, and reports that track's provenance rather than inventing one.
 func TestDerivedAlbumCoverReportsMemberProvenance(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStoreAt(t)
 	putCoveredTrack(t, st, lib.ID, "/lib/a.flac", "ess-a", "One", "A",
@@ -429,6 +437,7 @@ func TestDerivedAlbumCoverReportsMemberProvenance(t *testing.T) {
 // TestLockedEntityCoverSurvivesEnrichment: a chosen release-group cover is not replaced
 // by a fetched one, forced run or not, while an unlocked one still fills.
 func TestLockedEntityCoverSurvivesEnrichment(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStoreAt(t)
 	putCoveredTrack(t, st, lib.ID, "/lib/a.flac", "ess-a", "One", "A",
@@ -482,6 +491,7 @@ func TestLockedEntityCoverSurvivesEnrichment(t *testing.T) {
 // TestLockedShowCoverSurvivesFeedSync: a chosen show cover is not replaced when the
 // feed's image URL changes, while an unlocked one follows the feed.
 func TestLockedShowCoverSurvivesFeedSync(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, _ := openStoreAt(t)
 	sync := func(imageURL string, seed int) *model.UpsertFeedResult {
@@ -527,6 +537,7 @@ func TestLockedShowCoverSurvivesFeedSync(t *testing.T) {
 // lock is the plain "art" field, which is also the whole-entity enrichment gate, and
 // that gate deliberately does not refuse a user's aux set.
 func TestArtLockPerRole(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStoreAt(t)
 	putCoveredTrack(t, st, lib.ID, "/lib/a.flac", "ess-a", "One", "A",
@@ -631,6 +642,7 @@ func assertRoleLocks(t *testing.T, st *sqlite.Store, albumPID model.PID, want ma
 // surfaces. Before it had one, an embedder's set_entity_art lock landed in
 // entity_curation, where the scan and SetItemArt never looked.
 func TestItemArtLockHasOneHome(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStoreAt(t)
 	pid := putCoveredTrack(t, st, lib.ID, "/lib/a.flac", "ess-a", "One", "A",
@@ -673,6 +685,7 @@ func TestItemArtLockHasOneHome(t *testing.T) {
 // TestEpisodeArtLockSurvivesRedownload: a chosen episode cover is not re-pointed by the
 // next download, which re-attaches the feed's episode image every time.
 func TestEpisodeArtLockSurvivesRedownload(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, _ := openStoreAt(t)
 	feed, err := st.UpsertFeed(ctx, model.UpsertFeedInput{
@@ -724,6 +737,7 @@ func TestEpisodeArtLockSurvivesRedownload(t *testing.T) {
 // TestFieldProvenanceOverlaysArt covers the four overlay states: a cover with no lock
 // row, a lock row with no cover, both together, and a cover inherited from the album.
 func TestFieldProvenanceOverlaysArt(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStoreAt(t)
 	db := roConn(t, dbPath)
@@ -797,6 +811,7 @@ func TestFieldProvenanceOverlaysArt(t *testing.T) {
 // TestArtSourceQueryField selects items by where their own cover came from, and reads
 // empty for an item whose only cover is inherited.
 func TestArtSourceQueryField(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStoreAt(t)
 	putCoveredTrack(t, st, lib.ID, "/lib/a.flac", "ess-a", "Tagged", "A",
@@ -852,6 +867,7 @@ func scalarInt64(t *testing.T, db *sql.DB, q string, args ...any) int64 {
 // through OrUser and a picture nobody chose reported itself as hand-set. It now stores
 // and reads back as what it is, and its refusals are the ones user has.
 func TestGeneratedCoverReportsItself(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, _ := openStoreAt(t)
 	db := roConn(t, dbPath)

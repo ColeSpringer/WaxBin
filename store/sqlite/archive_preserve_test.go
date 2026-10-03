@@ -60,6 +60,7 @@ func hasChange(changes []model.Change, entity string, pid model.PID, op model.Ch
 }
 
 func TestDetachFilePreservesPlayState(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib := openTestStore(t)
 
@@ -98,6 +99,7 @@ func TestDetachFilePreservesPlayState(t *testing.T) {
 }
 
 func TestDropEpisodeFilePreservesPlayState(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, _ := openTestStore(t)
 

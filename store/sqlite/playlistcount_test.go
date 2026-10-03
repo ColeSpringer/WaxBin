@@ -83,6 +83,7 @@ func countFixture(t *testing.T) (*Store, *model.Library, []model.PID) {
 func rockNarrow() query.Node { return query.Cond{Field: "genre", Op: query.OpIs, Value: "Rock"} }
 
 func TestCountStaticPlaylistItems(t *testing.T) {
+	t.Parallel()
 	st, _, pids := countFixture(t)
 	ctx := context.Background()
 
@@ -117,6 +118,7 @@ func TestCountStaticPlaylistItems(t *testing.T) {
 }
 
 func TestCountSmartPlaylistUnlimited(t *testing.T) {
+	t.Parallel()
 	st, _, _ := countFixture(t)
 	ctx := context.Background()
 
@@ -134,6 +136,7 @@ func TestCountSmartPlaylistUnlimited(t *testing.T) {
 // Rock tracks in total. Pushing the narrow inside the rule would count all five and
 // clamp to three; the truth is two.
 func TestCountSmartPlaylistLimitEvaluationOrder(t *testing.T) {
+	t.Parallel()
 	st, _, _ := countFixture(t)
 	ctx := context.Background()
 
@@ -154,6 +157,7 @@ func TestCountSmartPlaylistLimitEvaluationOrder(t *testing.T) {
 // not: with no limit but an offset, treating the rule as unlimited over-counts by the
 // offset.
 func TestCountSmartPlaylistOffsetEvaluationOrder(t *testing.T) {
+	t.Parallel()
 	st, _, _ := countFixture(t)
 	ctx := context.Background()
 
@@ -171,6 +175,7 @@ func TestCountSmartPlaylistOffsetEvaluationOrder(t *testing.T) {
 }
 
 func TestCountSmartPlaylistLimitModes(t *testing.T) {
+	t.Parallel()
 	st, _, _ := countFixture(t)
 	ctx := context.Background()
 	base := func() *query.Builder {
@@ -217,6 +222,7 @@ func TestCountSmartPlaylistLimitModes(t *testing.T) {
 // membership PlaylistItems does, using the starred-rule shape from
 // TestSmartPlaylistPerUser.
 func TestCountPlaylistItemsPerUser(t *testing.T) {
+	t.Parallel()
 	st, ids := userStateFixture(t)
 	ctx := context.Background()
 	bob, _ := st.CreateUser(ctx, "bob")
@@ -243,6 +249,7 @@ func TestCountPlaylistItemsPerUser(t *testing.T) {
 // on the evaluate-then-count path, where a single condition would otherwise be
 // rejected. The items are distinct, so the chunk sums cannot double-count.
 func TestCountEvaluatedPlaylistChunkBoundary(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	const n = idBatchSize + 7
@@ -274,6 +281,7 @@ func TestCountEvaluatedPlaylistChunkBoundary(t *testing.T) {
 // hydrate-and-filter answer, which is the honest way to hold the stated contract:
 // CountItems equals len(Items filtered by narrow).
 func TestCountPlaylistItemsMatrix(t *testing.T) {
+	t.Parallel()
 	st, _, pids := countFixture(t)
 	ctx := context.Background()
 
@@ -328,6 +336,7 @@ func TestCountPlaylistItemsMatrix(t *testing.T) {
 // playlist by pid and never scans playable_item, which is what keeps a per-playlist
 // count O(members) rather than O(catalog).
 func TestCountStaticPlaylistDrivesFromPlaylist(t *testing.T) {
+	t.Parallel()
 	st, _, pids := countFixture(t)
 	ctx := context.Background()
 	pl, err := st.CreatePlaylist(ctx, "Mix", "", model.PlaylistStatic, "", nil)

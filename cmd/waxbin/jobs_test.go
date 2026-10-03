@@ -12,6 +12,7 @@ import (
 // TestJobsNamesWhatAJobTargeted: a scan of one library shows that library as its
 // target in both outputs, and a scan of every library shows none.
 func TestJobsNamesWhatAJobTargeted(t *testing.T) {
+	t.Parallel()
 	db, root := filepath.Join(t.TempDir(), "catalog.db"), t.TempDir()
 	if _, err := runCLIJSON(t, db, root, "scan"); err != nil {
 		t.Fatalf("scan: %v", err)

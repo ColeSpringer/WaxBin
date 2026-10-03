@@ -6,6 +6,7 @@ import (
 )
 
 func TestTranscriptToTextSRT(t *testing.T) {
+	t.Parallel()
 	srt := "1\n00:00:01,000 --> 00:00:04,000\nhello world\n\n2\n00:00:04,000 --> 00:00:06,000\nsecond cue\n"
 	got := transcriptToText([]byte(srt), "srt")
 	if strings.Contains(got, "-->") || strings.Contains(got, "00:00") {
@@ -23,6 +24,7 @@ func TestTranscriptToTextSRT(t *testing.T) {
 }
 
 func TestTranscriptToTextSRTLongLinesAndCRLF(t *testing.T) {
+	t.Parallel()
 	// A cue line far past bufio.Scanner's 64 KiB token cap must survive intact;
 	// the line walker has no such limit (the reason it is not a Scanner). CRLF
 	// line endings reduce the same as bare LF.
@@ -35,6 +37,7 @@ func TestTranscriptToTextSRTLongLinesAndCRLF(t *testing.T) {
 }
 
 func TestTranscriptToTextJSONSegments(t *testing.T) {
+	t.Parallel()
 	doc := `{"version":"1.0.0","segments":[
 		{"speaker":"Jane","startTime":0,"endTime":5,"body":"Hello there."},
 		{"speaker":"Sam","startTime":5,"endTime":9,"body":"Hi Jane."},
@@ -46,6 +49,7 @@ func TestTranscriptToTextJSONSegments(t *testing.T) {
 }
 
 func TestTranscriptToTextJSONBareArray(t *testing.T) {
+	t.Parallel()
 	doc := `[{"body":"First."},{"body":"Second."}]`
 	if got := transcriptToText([]byte(doc), "json"); got != "First.\nSecond.\n" {
 		t.Fatalf("bare-array reduction = %q", got)
@@ -53,6 +57,7 @@ func TestTranscriptToTextJSONBareArray(t *testing.T) {
 }
 
 func TestTranscriptToTextJSONFallsBackVerbatim(t *testing.T) {
+	t.Parallel()
 	// Malformed JSON, a non-segments object, and segments with no text all store
 	// verbatim rather than losing the body.
 	for _, doc := range []string{
@@ -67,6 +72,7 @@ func TestTranscriptToTextJSONFallsBackVerbatim(t *testing.T) {
 }
 
 func TestTranscriptToTextUnknownVerbatim(t *testing.T) {
+	t.Parallel()
 	body := "plain text transcript"
 	if got := transcriptToText([]byte(body), "text"); got != body {
 		t.Fatalf("text reduction = %q", got)

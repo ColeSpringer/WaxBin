@@ -60,6 +60,7 @@ const sampleFeed = `<?xml version="1.0" encoding="UTF-8"?>
 </rss>`
 
 func TestParseFeed(t *testing.T) {
+	t.Parallel()
 	feed, err := ParseFeed([]byte(sampleFeed))
 	if err != nil {
 		t.Fatalf("ParseFeed: %v", err)
@@ -116,6 +117,7 @@ func TestParseFeed(t *testing.T) {
 }
 
 func TestParseFeedPodcasting20Extras(t *testing.T) {
+	t.Parallel()
 	feed, err := ParseFeed([]byte(sampleFeed))
 	if err != nil {
 		t.Fatalf("ParseFeed: %v", err)
@@ -164,6 +166,7 @@ func TestParseFeedPodcasting20Extras(t *testing.T) {
 // GitHub address, the iTunes DTD over https or in Apple's mixed-case path, and the bare
 // prefixes of a feed that never declares them.
 func TestParseFeedBindsNamespaceSpellings(t *testing.T) {
+	t.Parallel()
 	const (
 		itunes  = `xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd"`
 		podcast = `xmlns:podcast="https://podcastindex.org/namespace/1.0"`
@@ -207,6 +210,7 @@ func TestParseFeedBindsNamespaceSpellings(t *testing.T) {
 // (an atom:link, a media:thumbnail, a <br> in a description under a default namespace)
 // the way it always has, so a feed that parsed before the namespace rewrite still does.
 func TestParseFeedToleratesMisNestedTags(t *testing.T) {
+	t.Parallel()
 	for name, feed := range map[string]string{
 		"unclosed atom:link": `<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom"><channel><title>S</title>
 			<item><title>E</title><guid>g</guid></item>
@@ -232,6 +236,7 @@ func TestParseFeedToleratesMisNestedTags(t *testing.T) {
 }
 
 func TestParseFeedMultipleFundingKeepsFirstWithURL(t *testing.T) {
+	t.Parallel()
 	feed, err := ParseFeed([]byte(`<rss xmlns:podcast="https://podcastindex.org/namespace/1.0"><channel>
 		<title>S</title>
 		<podcast:funding>no url here</podcast:funding>
@@ -247,12 +252,14 @@ func TestParseFeedMultipleFundingKeepsFirstWithURL(t *testing.T) {
 }
 
 func TestParseFeedRejectsNonFeed(t *testing.T) {
+	t.Parallel()
 	if _, err := ParseFeed([]byte(`<html><body>not a feed</body></html>`)); err == nil {
 		t.Fatal("expected error on non-feed XML")
 	}
 }
 
 func TestParseDurationForms(t *testing.T) {
+	t.Parallel()
 	cases := map[string]int64{
 		"":           0,
 		"90":         90000,
@@ -269,6 +276,7 @@ func TestParseDurationForms(t *testing.T) {
 }
 
 func TestParsePubDateNamedZone(t *testing.T) {
+	t.Parallel()
 	// "EST" must resolve to -0500, not Go's fabricated +0000.
 	got := parsePubDate("Tue, 10 Jun 2003 04:00:00 EST")
 	want := time.Date(2003, 6, 10, 9, 0, 0, 0, time.UTC).UnixNano() // 04:00 -0500 == 09:00 UTC

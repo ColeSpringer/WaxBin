@@ -110,6 +110,7 @@ func countValuesWhere(t *testing.T, st *Store, field string, op query.Op, values
 }
 
 func TestEntityPIDFieldsMirrorFacets(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/r1.flac", essence: "e1", content: "c1",
@@ -228,6 +229,7 @@ func TestEntityPIDFieldsMirrorFacets(t *testing.T) {
 // Go. isMissing is the complement over the whole catalog (every non-episode carries a
 // NULL podcast_id), which is what makes the field usable as a kind discriminator too.
 func TestPodcastPIDField(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/1.flac", essence: "e1", content: "c1", title: "A", artist: "X", album: "Al"})
@@ -281,6 +283,7 @@ func TestPodcastPIDField(t *testing.T) {
 // one, since it catches a regression back to per-row lowering on all five fields
 // at once.
 func TestLoweredIdentityFieldPlans(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	// Real rows in every table the lowered fields touch, so the planner is choosing
 	// over a populated schema rather than over empty tables. Nothing here runs ANALYZE,
@@ -363,6 +366,7 @@ func TestLoweredIdentityFieldPlans(t *testing.T) {
 // `is` matches, an empty list matching nothing, and an unknown pid contributing
 // nothing rather than poisoning the whole condition.
 func TestPodcastPIDInSemantics(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/1.flac", essence: "e1", content: "c1", title: "A", artist: "X", album: "Al"})
 	one := putFeed(t, st, "http://cast.example/one", "Ep1", "Ep2", "Ep3")
@@ -394,6 +398,7 @@ func TestPodcastPIDInSemantics(t *testing.T) {
 // outer loop, by putting release_group_id on track, say, fails here and gets the
 // field promoted to the seeking group in the field map header along with this test.
 func TestReleaseGroupPIDScansOuterLoop(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/a.flac", essence: "ea", content: "ca",
 		title: "A", artist: "X", albumArt: "X", album: "Al"})
@@ -473,6 +478,7 @@ func explainPlanLines(t *testing.T, st *Store, stmt string, args ...any) []strin
 // against it is not a question an identity handle answers. Sorting by one is rejected
 // for the same reason, mirroring the tag-field restriction.
 func TestLoweredIdentityFieldOperators(t *testing.T) {
+	t.Parallel()
 	st, _ := entityFixture(t)
 	ctx := context.Background()
 	for _, field := range []string{"artist_pid", "release_group_pid"} {
@@ -506,6 +512,7 @@ func TestLoweredIdentityFieldOperators(t *testing.T) {
 }
 
 func TestLibraryNotInIsADenyList(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	lib2, err := st.EnsureLibrary(ctx, &model.Library{
@@ -544,6 +551,7 @@ func TestLibraryNotInIsADenyList(t *testing.T) {
 // deliberately: with only live pids the IS NULL disjunct changes nothing, because
 // IS NOT is already null-safe, and the test would pass either way.
 func TestLoweredNotInKeepsItemsWithoutTheHandle(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/1.flac", essence: "e1", content: "c1", title: "A", artist: "X", album: "Al"})
 	one := putFeed(t, st, "http://cast.example/one", "Ep1")
@@ -569,6 +577,7 @@ func TestLoweredNotInKeepsItemsWithoutTheHandle(t *testing.T) {
 }
 
 func TestLoweredNotInStalePIDExcludesNothing(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/1.flac", essence: "e1", content: "c1", title: "A", artist: "X", album: "Al"})
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/2.flac", essence: "e2", content: "c2", title: "B", artist: "Y", album: "Al2"})
@@ -592,6 +601,7 @@ func TestLoweredNotInStalePIDExcludesNothing(t *testing.T) {
 // still drives off file_library: `is` and `in` run the membership subquery once and reach
 // the items by rowid, never a correlated probe per item.
 func TestLibraryMemberPlans(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/a.flac", essence: "ea", content: "ca",
 		title: "A", artist: "X", albumArt: "X", album: "Al"})
@@ -623,6 +633,7 @@ func TestLibraryMemberPlans(t *testing.T) {
 // TestReleaseGroupPIDScansOuterLoop's voice: a deny-list is an anti-join, so even
 // library, which `is` drives off file_library, scans here.
 func TestLoweredNotInScansTheCatalog(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/a.flac", essence: "ea", content: "ca",
 		title: "A", artist: "X", albumArt: "X", album: "Al"})
@@ -663,6 +674,7 @@ func TestLoweredNotInScansTheCatalog(t *testing.T) {
 // is still not true, so the condition collapses to "no rows" the moment one listed pid
 // stops resolving. notIn keeps those rows; see TestLoweredNotInStalePIDExcludesNothing.
 func TestNotInDiffersFromNotOfInOnAStalePID(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/1.flac", essence: "e1", content: "c1", title: "A", artist: "X", album: "Al"})
 	one := putFeed(t, st, "http://cast.example/one", "Ep1", "Ep2")
@@ -696,6 +708,7 @@ func TestNotInDiffersFromNotOfInOnAStalePID(t *testing.T) {
 // isNot against an unknown pid now matches nothing where the unlowered text compare
 // matched everything. `is` matched nothing before and still does.
 func TestLoweredIdentityIsNotUnknownPID(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/1.flac", essence: "e1", content: "c1", title: "A", artist: "X", album: "Al"})
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/2.flac", essence: "e2", content: "c2", title: "B", artist: "Y", album: "Al2"})
@@ -714,6 +727,7 @@ func TestLoweredIdentityIsNotUnknownPID(t *testing.T) {
 }
 
 func TestGenrePIDSetSemantics(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/1.flac", essence: "e1", content: "c1",
 		title: "A", artist: "X", album: "Al", genre: "Rock; Pop"})
@@ -750,6 +764,7 @@ func TestGenrePIDSetSemantics(t *testing.T) {
 // user's private playlist is in the fixture so the documented boundary is asserted and
 // not only described.
 func TestPlaylistPIDSetSemantics(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	a := putTrack(t, st, lib.ID, trackSpec{path: "/lib/a.flac", essence: "ea", content: "ca", title: "A", artist: "X", album: "Al"}).ItemPID
@@ -825,6 +840,7 @@ func TestPlaylistPIDSetSemantics(t *testing.T) {
 }
 
 func TestLibraryFieldAndFacet(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	lib2, err := st.EnsureLibrary(ctx, &model.Library{
@@ -875,6 +891,7 @@ func TestLibraryFieldAndFacet(t *testing.T) {
 }
 
 func TestHasArtAcrossKinds(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 
@@ -967,6 +984,7 @@ func TestHasArtAcrossKinds(t *testing.T) {
 // gets wrong: `explicit is 0` still returns every one of its episodes. The
 // restricted browse is the conjunction of both fields.
 func TestAdvisoryFields(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/1.flac", essence: "e1", content: "c1",
@@ -1013,6 +1031,7 @@ func TestAdvisoryFields(t *testing.T) {
 }
 
 func TestHasLyricsField(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	if _, err := st.PutScannedTrack(ctx, model.PutScannedTrackInput{
@@ -1054,6 +1073,7 @@ func TestHasLyricsField(t *testing.T) {
 // the row for the source column. Loose string matching, since plan wording varies
 // by SQLite version.
 func TestPresenceFieldPlansSeekIndexes(t *testing.T) {
+	t.Parallel()
 	st, _ := entityFixture(t)
 	ctx := context.Background()
 
@@ -1101,6 +1121,7 @@ func TestPresenceFieldPlansSeekIndexes(t *testing.T) {
 }
 
 func TestSmartRuleRoundTripsNewFields(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	covered := putWithCover(t, st, lib.ID, "/lib/al/1.flac", "e1", testPNG(t, 32, 32))
@@ -1136,6 +1157,7 @@ func TestSmartRuleRoundTripsNewFields(t *testing.T) {
 // stored as a rule: it survives the marshal/parse round trip and evaluates as a
 // deny-list against the referenced static playlist.
 func TestSmartRuleRoundTripsPlaylistPID(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	filed := putTrack(t, st, lib.ID, trackSpec{path: "/lib/1.flac", essence: "e1", content: "c1",

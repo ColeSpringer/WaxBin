@@ -10,6 +10,7 @@ import (
 )
 
 func TestAcquisitionRoundTripAndSourceSurfacing(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib := openTestStore(t)
 
@@ -70,6 +71,7 @@ func TestAcquisitionRoundTripAndSourceSurfacing(t *testing.T) {
 }
 
 func TestLibraryMediaPersistence(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, _ := openTestStore(t)
 	if _, err := st.EnsureLibrary(ctx, &model.Library{
@@ -103,6 +105,7 @@ func TestLibraryMediaPersistence(t *testing.T) {
 // carrying SOURCE_URL/SOURCE_ID/ACQUISITION_DATE is evidence of external origin, so
 // it gets an acquisition row and stops reading as source:local.
 func TestAcquisitionFromTagsAttributesScannedItem(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib := openTestStore(t)
 
@@ -151,6 +154,7 @@ func TestAcquisitionFromTagsAttributesScannedItem(t *testing.T) {
 // not a claim of external origin (a local rip can carry one), so it alone must not
 // flip an item off source:local.
 func TestAcquisitionFromTagsRequiresURLOrID(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib := openTestStore(t)
 
@@ -177,6 +181,7 @@ func TestAcquisitionFromTagsRequiresURLOrID(t *testing.T) {
 // a downloaded episode would overwrite its real source_type='rss' and provider with a
 // bare 'manual', destroying the authoritative record of how the item arrived.
 func TestAcquisitionFromTagsNeverClobbersEvent(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib := openTestStore(t)
 
@@ -223,6 +228,7 @@ func TestAcquisitionFromTagsNeverClobbersEvent(t *testing.T) {
 // name keeps what stands, so a bare event can neither erase what a tag established nor
 // downgrade a real acquisition to manual.
 func TestAcquisitionReRecordIsMergeWise(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib := openTestStore(t)
 
@@ -298,6 +304,7 @@ func TestAcquisitionReRecordIsMergeWise(t *testing.T) {
 // TestClearAcquisitionReturnsItemToLocal pins the inverse the merge-wise upsert needs:
 // nothing else can lower a field, so removing the row is the only correction downward.
 func TestClearAcquisitionReturnsItemToLocal(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib := openTestStore(t)
 
@@ -335,6 +342,7 @@ func TestClearAcquisitionReturnsItemToLocal(t *testing.T) {
 // nothing under a different provider's name. An event that switches the provider without
 // naming an id of its own drops the standing one rather than mislabelling it.
 func TestAcquisitionSourceIDFollowsProvider(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib := openTestStore(t)
 	res, err := st.PutScannedTrack(ctx, input(lib.ID, "/lib/a.mp3", "ess-a", "c-a", "Song"))
@@ -374,6 +382,7 @@ func TestAcquisitionSourceIDFollowsProvider(t *testing.T) {
 // TestTagDerivedSourceIDSurvivesAProvider: a tag-derived row names no provider, so a later
 // event that names one is not contradicting anything and the tag's id stands.
 func TestTagDerivedSourceIDSurvivesAProvider(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib := openTestStore(t)
 	in := input(lib.ID, "/lib/a.mp3", "ess-a", "c-a", "Tagged")
@@ -395,6 +404,7 @@ func TestTagDerivedSourceIDSurvivesAProvider(t *testing.T) {
 // kinds are checked, and a lock the plain command set carries no attribution, so an
 // unlock drops it through setLock's ordinary tag-sourced sparse delete.
 func TestAcquisitionLockAppliesToEveryKind(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib := openTestStore(t)
 
@@ -437,6 +447,7 @@ func TestAcquisitionLockAppliesToEveryKind(t *testing.T) {
 // The file still carries SOURCE_URL, and insertAcquisitionIfAbsentTx only ever protected
 // a row that exists, so without the lock a cleared origin comes straight back.
 func TestAcquisitionLockSurvivesRescan(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib := openTestStore(t)
 
@@ -484,6 +495,7 @@ func TestAcquisitionLockSurvivesRescan(t *testing.T) {
 // TestPutAcquisitionSkipsLockedItem: the automatic writers skip in silence, the way
 // attachArtRespectingLockTx does, rather than refusing an import outright.
 func TestPutAcquisitionSkipsLockedItem(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib := openTestStore(t)
 
@@ -517,6 +529,7 @@ func TestPutAcquisitionSkipsLockedItem(t *testing.T) {
 // path: every column is written as given, so a correction can empty a field that a bare
 // event could never lower.
 func TestSetAcquisitionIsAuthoritative(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib := openTestStore(t)
 
@@ -574,6 +587,7 @@ func TestSetAcquisitionIsAuthoritative(t *testing.T) {
 // TestSetAcquisitionRefusesLocalAndUnknown: local is the absence of a row, so asking
 // for it is asking for a clear.
 func TestSetAcquisitionRefusesLocalAndUnknown(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib := openTestStore(t)
 	res, err := st.PutScannedTrack(ctx, input(lib.ID, "/lib/a.mp3", "ess-a", "c-a", "Song"))
@@ -592,6 +606,7 @@ func TestSetAcquisitionRefusesLocalAndUnknown(t *testing.T) {
 // TestAcquisitionCurationRefusesALock: the curation pair refuses out loud where the
 // automatic writers skip in silence, and force is the way through.
 func TestAcquisitionCurationRefusesALock(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib := openTestStore(t)
 	res, err := st.PutScannedTrack(ctx, input(lib.ID, "/lib/a.mp3", "ess-a", "c-a", "Song"))
@@ -626,6 +641,7 @@ func TestAcquisitionCurationRefusesALock(t *testing.T) {
 // TestClearAcquisitionLocksByDefault is the asymmetry that makes a clear stick: the row
 // it removes is one the next scan would re-derive from the file's own tags.
 func TestClearAcquisitionLocksByDefault(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib := openTestStore(t)
 
@@ -674,6 +690,7 @@ func TestClearAcquisitionLocksByDefault(t *testing.T) {
 // TestClearAcquisitionOfNothingEmitsNoDelta: a clear that removed no row and left the
 // lock where it stood did nothing, so it must not publish a change.
 func TestClearAcquisitionOfNothingEmitsNoDelta(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib := openTestStore(t)
 	res, err := st.PutScannedTrack(ctx, input(lib.ID, "/lib/a.mp3", "ess-a", "c-a", "Song"))
@@ -708,6 +725,7 @@ func TestClearAcquisitionOfNothingEmitsNoDelta(t *testing.T) {
 // type through the source COALESCE, so its own acquisition row is the only thing that
 // overrides it, and the lock is what keeps that override across a re-sync.
 func TestSetAcquisitionOverridesAnEpisodeShowSource(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, _ := openTestStore(t)
 	if _, err := st.UpsertFeed(ctx, oneEpisodeFeed("https://feed.test/f", "g-1", "Ep", "d", "l")); err != nil {
@@ -745,6 +763,7 @@ func TestSetAcquisitionOverridesAnEpisodeShowSource(t *testing.T) {
 // acquisition row's "this origin was hand-set" has no such overlay, and the origin it
 // describes is still standing, so an unlock must leave the attribution behind.
 func TestUnlockKeepsCuratedAcquisitionProvenance(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib := openTestStore(t)
 	res, err := st.PutScannedTrack(ctx, input(lib.ID, "/lib/a.mp3", "ess-a", "c-a", "Song"))
@@ -784,6 +803,7 @@ func TestUnlockKeepsCuratedAcquisitionProvenance(t *testing.T) {
 // TestClearAcquisitionIsIdempotent: the default lock must not make the verb refuse its
 // own second run, which is what a batch correction over a mixed selection does.
 func TestClearAcquisitionIsIdempotent(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib := openTestStore(t)
 

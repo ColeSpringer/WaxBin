@@ -13,6 +13,7 @@ import (
 // TestOrganizePlanNamesReadOnlyLibraries: a plan that passed over read-only libraries
 // says so in both outputs, and one that did not stays quiet.
 func TestOrganizePlanNamesReadOnlyLibraries(t *testing.T) {
+	t.Parallel()
 	render := func(json bool, plan *organize.Plan) string {
 		cmd := &cobra.Command{}
 		var buf bytes.Buffer

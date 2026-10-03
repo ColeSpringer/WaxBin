@@ -22,6 +22,7 @@ func countRows(t *testing.T, st *Store, table string) int {
 // track artists under one album-artist) collapses to a single album and release
 // group keyed by the album-artist, not fragmented per track artist.
 func TestVariousArtistsCompilationGroups(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	for i, artist := range []string{"Artist A", "Artist B", "Artist C"} {
 		putTrack(t, st, lib.ID, trackSpec{
@@ -58,6 +59,7 @@ func TestVariousArtistsCompilationGroups(t *testing.T) {
 // groups into one album, because album identity keys on the album-artist, not the
 // varying track artist.
 func TestClassicalMultiPerformerAlbumGroups(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	performers := []string{"Soloist One", "Soloist Two", "Full Orchestra"}
 	for i, p := range performers {
@@ -87,6 +89,7 @@ func TestClassicalMultiPerformerAlbumGroups(t *testing.T) {
 // folder names a disc, not an edition, so the album key takes the folder above it. A
 // folder that is not a disc folder still keys an album of its own.
 func TestBoxSetDiscFoldersAreOneAlbum(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	discs := []string{"Disc 1", "Disc 2", "CD3"}
 	for i, disc := range discs {
@@ -124,6 +127,7 @@ func TestBoxSetDiscFoldersAreOneAlbum(t *testing.T) {
 // moves it in place through the rename pre-pass, and an edit of one member, which
 // re-resolves that member alone, keeps it one album.
 func TestDiscFolderMembersStayOneAlbumThroughAnEdit(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	var pids []model.PID
 	for i, disc := range []string{"CD1", "CD2"} {
@@ -166,6 +170,7 @@ func TestDiscFolderMembersStayOneAlbumThroughAnEdit(t *testing.T) {
 // tagged 2015 and one 2016, is one album under one release group rather than two albums
 // keyed apart by the year.
 func TestOddTrackYearKeepsOneAlbum(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	for i := 1; i <= 12; i++ {
 		year := 2015
@@ -192,6 +197,7 @@ func TestOddTrackYearKeepsOneAlbum(t *testing.T) {
 // TestYearlessTrackJoinsItsDatedSiblings: a track with no year tag lands on the album its
 // dated siblings make, whichever is read first.
 func TestYearlessTrackJoinsItsDatedSiblings(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	for i, year := range []int{0, 1977, 1977} {
 		n := strconv.Itoa(i + 1)

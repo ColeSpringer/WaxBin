@@ -11,6 +11,7 @@ import (
 )
 
 func TestEditTrackScalarIdentifiers(t *testing.T) {
+	t.Parallel()
 	st, pid := editFixture(t)
 	ctx := context.Background()
 
@@ -45,6 +46,7 @@ func TestEditTrackScalarIdentifiers(t *testing.T) {
 // CLI parses integers only, so a fractional or negative value is a usage error here
 // even though the tag key itself accepts a fraction on disk.
 func TestEditTrackBPM(t *testing.T) {
+	t.Parallel()
 	st, pid := editFixture(t)
 	ctx := context.Background()
 
@@ -92,6 +94,7 @@ func TestEditTrackBPM(t *testing.T) {
 // TestQueryBPMRange pins bpm as a numeric query field: a range compare narrows on the
 // number rather than on text, and a track with no bpm is outside every range.
 func TestQueryBPMRange(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	putTrack(t, st, lib.ID, trackSpec{
 		path: "/lib/a/slow.flac", essence: "e1", content: "c1", title: "Slow", artist: "A", album: "Alp", bpm: 90,
@@ -121,6 +124,7 @@ func TestQueryBPMRange(t *testing.T) {
 }
 
 func TestEditTrackCompilationClear(t *testing.T) {
+	t.Parallel()
 	st, pid := editFixture(t)
 	ctx := context.Background()
 
@@ -142,6 +146,7 @@ func TestEditTrackCompilationClear(t *testing.T) {
 }
 
 func TestEditTrackBadValues(t *testing.T) {
+	t.Parallel()
 	st, pid := editFixture(t)
 	ctx := context.Background()
 
@@ -158,6 +163,7 @@ func TestEditTrackBadValues(t *testing.T) {
 }
 
 func TestEditBookScalarFields(t *testing.T) {
+	t.Parallel()
 	st, pid := bookEditFixture(t)
 	ctx := context.Background()
 

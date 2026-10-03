@@ -14,6 +14,7 @@ func mapFile(content string) *fstest.MapFile {
 }
 
 func TestLoadMigrationsDirectoryConcatenatesInNameOrder(t *testing.T) {
+	t.Parallel()
 	fsys := fstest.MapFS{
 		// Deliberately declared out of order; fs.ReadDir sorts by filename.
 		"migrations/0001_init/02_second.sql": mapFile("-- two\n"),
@@ -40,6 +41,7 @@ func TestLoadMigrationsDirectoryConcatenatesInNameOrder(t *testing.T) {
 // in a trailing line comment): the join separator must terminate each file's
 // last statement rather than letting it merge into the next file.
 func TestDirectoryMigrationFileBoundariesAreStatementBoundaries(t *testing.T) {
+	t.Parallel()
 	fsys := fstest.MapFS{
 		"migrations/0001_init/01_a.sql": mapFile("CREATE TABLE a (x INTEGER)"),
 		"migrations/0001_init/02_b.sql": mapFile("CREATE TABLE b (y INTEGER);\n-- trailing comment"),
@@ -69,6 +71,7 @@ func TestDirectoryMigrationFileBoundariesAreStatementBoundaries(t *testing.T) {
 }
 
 func TestLoadMigrationsDirectorySkipsNonSQL(t *testing.T) {
+	t.Parallel()
 	fsys := fstest.MapFS{
 		"migrations/0001_init/01_first.sql": mapFile("-- one\n"),
 		"migrations/0001_init/README.md":    mapFile("not sql"),
@@ -87,6 +90,7 @@ func TestLoadMigrationsDirectorySkipsNonSQL(t *testing.T) {
 }
 
 func TestLoadMigrationsEmptyDirectoryErrors(t *testing.T) {
+	t.Parallel()
 	fsys := fstest.MapFS{
 		"migrations/0001_init": &fstest.MapFile{Mode: fs.ModeDir},
 	}
@@ -106,6 +110,7 @@ func TestLoadMigrationsEmptyDirectoryErrors(t *testing.T) {
 }
 
 func TestLoadMigrationsDuplicateVersionErrors(t *testing.T) {
+	t.Parallel()
 	// The duplicate spans both shapes: a directory and a single file.
 	fsys := fstest.MapFS{
 		"migrations/0001_init/01_first.sql": mapFile("-- one\n"),
@@ -118,6 +123,7 @@ func TestLoadMigrationsDuplicateVersionErrors(t *testing.T) {
 }
 
 func TestLoadMigrationsSortsNumerically(t *testing.T) {
+	t.Parallel()
 	// Unpadded names order lexicographically as 10 < 2; version sorting must be
 	// numeric.
 	fsys := fstest.MapFS{
@@ -134,6 +140,7 @@ func TestLoadMigrationsSortsNumerically(t *testing.T) {
 }
 
 func TestLoadMigrationsSkipsAndRejectsBadNames(t *testing.T) {
+	t.Parallel()
 	// A stray non-.sql file at the top level is ignored.
 	fsys := fstest.MapFS{
 		"migrations/0001_init.sql": mapFile("-- ok\n"),
@@ -164,6 +171,7 @@ func TestLoadMigrationsSkipsAndRejectsBadNames(t *testing.T) {
 // fails first when someone appends a 0002 without bumping SchemaVersion, or
 // bumps the constant without shipping the migration.
 func TestEmbeddedMigrationsMatchSchemaVersion(t *testing.T) {
+	t.Parallel()
 	ms, err := loadMigrations(migrationsFS)
 	if err != nil {
 		t.Fatalf("loadMigrations(embedded): %v", err)

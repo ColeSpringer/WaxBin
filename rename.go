@@ -123,7 +123,7 @@ func (l *Library) writeBackRename(ctx context.Context, entityPID model.PID,
 		}
 		credits[e.ItemPID] = append(credits[e.ItemPID], creditRoleEdit{role: e.Role, names: e.Names})
 	}
-	if err := l.batchWriteBack(ctx, &out, func(pid model.PID) error {
+	if err := l.batchWriteBack(&out, func(pid model.PID) error {
 		return l.writeBackItemEdits(ctx, "waxbin.RenameEntity", pid, byItem[pid], credits[pid])
 	}); err != nil {
 		return err

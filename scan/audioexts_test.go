@@ -22,6 +22,7 @@ import (
 // with its reason, and nothing is both. A format added upstream fails here until the
 // scanner takes a position on it.
 func TestAudioExtsTrackTagLibrary(t *testing.T) {
+	t.Parallel()
 	claimed := map[string]bool{}
 	for _, f := range waxlabel.Formats() {
 		for _, ext := range waxlabel.ExtensionsFor(f) {
@@ -68,6 +69,7 @@ func (unparsedReader) Read(context.Context, string) (*meta.FileMeta, error) {
 // the upgrade scan. The scanner asks the decoder for the header instead, which
 // decodes no PCM.
 func TestScanProbesPropertiesForUnparsedContainers(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	st, err := sqlite.Open(ctx, sqlite.OpenOptions{Path: filepath.Join(t.TempDir(), "c.db"), Owner: "test"})

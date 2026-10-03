@@ -28,6 +28,7 @@ func feedInput(feedURL string, titles ...string) model.UpsertFeedInput {
 }
 
 func TestUpsertFeedAndItemView(t *testing.T) {
+	t.Parallel()
 	st, _ := openTestStore(t)
 	ctx := context.Background()
 
@@ -68,6 +69,7 @@ func TestUpsertFeedAndItemView(t *testing.T) {
 }
 
 func TestReSyncDoesNotDowngradeDownloaded(t *testing.T) {
+	t.Parallel()
 	st, _ := openTestStore(t)
 	ctx := context.Background()
 
@@ -116,6 +118,7 @@ func TestReSyncDoesNotDowngradeDownloaded(t *testing.T) {
 }
 
 func TestReSyncUnchangedSkipsEpisodeWrites(t *testing.T) {
+	t.Parallel()
 	st, _ := openTestStore(t)
 	ctx := context.Background()
 	in := feedInput("http://feed.example/f", "Alpha", "Beta")
@@ -140,6 +143,7 @@ func TestReSyncUnchangedSkipsEpisodeWrites(t *testing.T) {
 }
 
 func TestReSyncChangedEpisodeEmitsUpdate(t *testing.T) {
+	t.Parallel()
 	st, _ := openTestStore(t)
 	ctx := context.Background()
 	if _, err := st.UpsertFeed(ctx, feedInput("http://feed.example/f", "Alpha", "Beta")); err != nil {
@@ -158,6 +162,7 @@ func TestReSyncChangedEpisodeEmitsUpdate(t *testing.T) {
 }
 
 func TestReAddFeedThatGainsGUID(t *testing.T) {
+	t.Parallel()
 	st, _ := openTestStore(t)
 	ctx := context.Background()
 	url := "http://feed.example/f"
@@ -195,6 +200,7 @@ func TestReAddFeedThatGainsGUID(t *testing.T) {
 // the guid's key, and the second updates its own row under its own key rather than taking
 // over the first row and colliding on its feed URL.
 func TestReAddTwoSubscriptionsThatGainOneGUID(t *testing.T) {
+	t.Parallel()
 	st, _ := openTestStore(t)
 	ctx := context.Background()
 	urls := []string{"http://feed.example/f", "http://mirror.example/f"}
@@ -230,6 +236,7 @@ func TestReAddTwoSubscriptionsThatGainOneGUID(t *testing.T) {
 }
 
 func TestTruncatedFeedDoesNotDeleteEpisodes(t *testing.T) {
+	t.Parallel()
 	st, _ := openTestStore(t)
 	ctx := context.Background()
 
@@ -252,6 +259,7 @@ func TestTruncatedFeedDoesNotDeleteEpisodes(t *testing.T) {
 // podcast dir and a music root can collide; filing episodes into a scanned library
 // would leave the scanner treating every download as a track.
 func TestEnsurePodcastLibraryRefusesAMusicRoot(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, _, lib := openStoreAt(t)
 
@@ -274,6 +282,7 @@ func TestEnsurePodcastLibraryRefusesAMusicRoot(t *testing.T) {
 // with no attribution, which the art writer refuses between the show row and the
 // episode loop.
 func TestUpsertFeedFailureKeepsPriorValidators(t *testing.T) {
+	t.Parallel()
 	st, _ := openTestStore(t)
 	ctx := context.Background()
 	first := feedInput("http://feed.example/f", "Alpha")
@@ -317,6 +326,7 @@ func TestUpsertFeedFailureKeepsPriorValidators(t *testing.T) {
 // empty. Losing them used to be masked by the validators going with them, which made
 // the next sync a full re-enumeration that filled them back in.
 func TestUpsertShowKeepsWhatItDoesNotCarry(t *testing.T) {
+	t.Parallel()
 	st, _ := openTestStore(t)
 	ctx := context.Background()
 	res, err := st.UpsertFeed(ctx, model.UpsertFeedInput{
@@ -353,6 +363,7 @@ func TestUpsertShowKeepsWhatItDoesNotCarry(t *testing.T) {
 // TestMarkPodcastsFetched: the mark moves only the fetch time, never backwards, emits
 // no delta, and skips a show that is gone.
 func TestMarkPodcastsFetched(t *testing.T) {
+	t.Parallel()
 	st, _ := openTestStore(t)
 	ctx := context.Background()
 	in := feedInput("http://feed.example/f", "Alpha")

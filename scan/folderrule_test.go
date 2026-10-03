@@ -22,6 +22,7 @@ func titled(t *testing.T, st *sqlite.Store, title string) *model.ItemView {
 }
 
 func TestPartShaped(t *testing.T) {
+	t.Parallel()
 	for _, c := range []struct {
 		title        string
 		track, total int
@@ -48,6 +49,7 @@ func TestPartShaped(t *testing.T) {
 // TestNumberedTitlesAreBooksOfTheirOwn: a book whose title opens with a number is not a
 // numbered part, so it stays apart from the other book in its author's folder.
 func TestNumberedTitlesAreBooksOfTheirOwn(t *testing.T) {
+	t.Parallel()
 	st, lib, sc, root := kindFixture(t, model.MediaMixed)
 	narrator := []testaudio.TXXXFrame{{Desc: "NARRATOR", Value: "Reader"}}
 	writeUnder(t, root, "Jordan Peterson/12 Rules for Life.mp3", testaudio.MP3Spec{Title: "12 Rules for Life", Artist: "Jordan Peterson",
@@ -63,6 +65,7 @@ func TestNumberedTitlesAreBooksOfTheirOwn(t *testing.T) {
 // TestSingleTrackNumbersDoNotMakeParts: books with no album each tagged track 1 are books
 // of their own, not parts of one book named for their author's folder.
 func TestSingleTrackNumbersDoNotMakeParts(t *testing.T) {
+	t.Parallel()
 	st, lib, sc, root := kindFixture(t, model.MediaAudiobook)
 	writeUnder(t, root, "Frank Herbert/Dune.mp3", testaudio.MP3Spec{Title: "Dune", Artist: "Frank Herbert", Track: 1,
 		Audio: testaudio.AudioWithSeed(1)})
@@ -77,6 +80,7 @@ func TestSingleTrackNumbersDoNotMakeParts(t *testing.T) {
 // TestWordNamedPartsAreOneBook: untagged parts named for sections of a book are one book
 // named for their folder, in reading order.
 func TestWordNamedPartsAreOneBook(t *testing.T) {
+	t.Parallel()
 	st, lib, sc, root := kindFixture(t, model.MediaAudiobook)
 	for i, name := range []string{"Epilogue", "Chapter One", "Prologue"} {
 		writeUnder(t, root, "Author/Tome/"+name+".mp3", testaudio.MP3Spec{Audio: testaudio.AudioWithSeed(byte(i + 1))})
@@ -102,6 +106,7 @@ func TestWordNamedPartsAreOneBook(t *testing.T) {
 // TestJoinedPartsKeepTheirNumberedOrder: untagged parts the folder rule takes in are read
 // in the order their names number, around the tagged part.
 func TestJoinedPartsKeepTheirNumberedOrder(t *testing.T) {
+	t.Parallel()
 	st, lib, sc, root := kindFixture(t, model.MediaMixed)
 	writeUnder(t, root, "Author/Tome/01.mp3", testaudio.MP3Spec{Title: "Chapter 1", Artist: "Author", AlbumArtist: "Author",
 		Album: "Tome", Track: 1, TXXX: []testaudio.TXXXFrame{{Desc: "NARRATOR", Value: "Reader"}}, Audio: testaudio.AudioWithSeed(1)})
@@ -126,6 +131,7 @@ func TestJoinedPartsKeepTheirNumberedOrder(t *testing.T) {
 // album's tracks, and the tracks that do not become it fold into it: their stars, plays
 // and playlist entries move to the book.
 func TestAudiobookRootFoldsItsTracks(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib, sc, root := kindFixture(t, model.MediaMixed)
 	for i := 1; i <= 3; i++ {
@@ -171,6 +177,7 @@ func TestAudiobookRootFoldsItsTracks(t *testing.T) {
 // folder rule would give it to a sibling's book carries a kind lock, so a forced scan
 // keeps it a track.
 func TestForcedTrackTheFolderRuleWouldTakeIsLocked(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib, sc, root := kindFixture(t, model.MediaMixed)
 	writeUnder(t, root, "Author/Tome/01.mp3", testaudio.MP3Spec{Title: "Chapter 1", Artist: "Author", AlbumArtist: "Author",
@@ -192,6 +199,7 @@ func TestForcedTrackTheFolderRuleWouldTakeIsLocked(t *testing.T) {
 // TestRetitledBookTakesItsNewKey: a book with no album that is retitled keys under its new
 // title, so a book later found under the old title is a book of its own.
 func TestRetitledBookTakesItsNewKey(t *testing.T) {
+	t.Parallel()
 	st, lib, sc, root := kindFixture(t, model.MediaAudiobook)
 	writeUnder(t, root, "A/Dune.mp3", testaudio.MP3Spec{Title: "Dune", Artist: "Frank Herbert", Audio: testaudio.AudioWithSeed(1)})
 	scanAll(t, sc, lib, false)
@@ -207,6 +215,7 @@ func TestRetitledBookTakesItsNewKey(t *testing.T) {
 // TestIdentifierBookKeepsAPartAfterATitleEdit: a part the folder rule gave a book keyed
 // by its ASIN stays in it when read again after a catalog-only retitle of the book.
 func TestIdentifierBookKeepsAPartAfterATitleEdit(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib, sc, root := kindFixture(t, model.MediaMixed)
 	writeUnder(t, root, "Author/Tome/01.mp3", testaudio.MP3Spec{Title: "Chapter 1", Artist: "Author", AlbumArtist: "Author",
@@ -230,6 +239,7 @@ func TestIdentifierBookKeepsAPartAfterATitleEdit(t *testing.T) {
 // TestSpeechInterludesStayOnTheirAlbum: a Speech genre (ID3's 101) names no audiobook in a
 // mixed root, so the interludes on an album stay its tracks.
 func TestSpeechInterludesStayOnTheirAlbum(t *testing.T) {
+	t.Parallel()
 	st, lib, sc, root := kindFixture(t, model.MediaMixed)
 	for i, genre := range []string{"Hip-Hop", "(101)", "Hip-Hop", "Speech", "Hip-Hop"} {
 		writeUnder(t, root, "Rapper/Record/0"+string(rune('1'+i))+".mp3", testaudio.MP3Spec{Title: "Cut " + string(rune('1'+i)),
@@ -247,6 +257,7 @@ func TestSpeechInterludesStayOnTheirAlbum(t *testing.T) {
 // TestFolderRuleIgnoresWalkOrderBetweenBooks: an untagged numbered part in a folder that
 // holds two books joins neither, whichever book the walk reaches first.
 func TestFolderRuleIgnoresWalkOrderBetweenBooks(t *testing.T) {
+	t.Parallel()
 	for _, name := range []string{"a5.mp3", "c5.mp3"} {
 		st, lib, sc, root := kindFixture(t, model.MediaAudiobook)
 		writeUnder(t, root, "Shelf/a1.mp3", testaudio.MP3Spec{Title: "One", Artist: "Author", Album: "A", Track: 1, Audio: testaudio.AudioWithSeed(1)})
@@ -262,6 +273,7 @@ func TestFolderRuleIgnoresWalkOrderBetweenBooks(t *testing.T) {
 // TestCopyFillsTheGapItsPartLeaves: when a part is retagged into another book, the copy
 // of it left behind takes its place in the book it came from.
 func TestCopyFillsTheGapItsPartLeaves(t *testing.T) {
+	t.Parallel()
 	st, lib, sc, root := kindFixture(t, model.MediaAudiobook)
 	writeUnder(t, root, "Tome/01.mp3", testaudio.MP3Spec{Title: "Chapter 1", Artist: "Author", Album: "Tome", Track: 1,
 		Audio: testaudio.AudioWithSeed(1)})
@@ -285,6 +297,7 @@ func TestCopyFillsTheGapItsPartLeaves(t *testing.T) {
 // when the tagged part is trashed keeps the book's key, so the tagged part put back joins
 // the same book rather than starting another.
 func TestLesserPartKeepsTheBookKey(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib, sc, root := kindFixture(t, model.MediaAudiobook)
 	first := testaudio.MP3Spec{Title: "Chapter 1", Artist: "Author", Album: "Tome", Track: 1, Audio: testaudio.AudioWithSeed(1)}
@@ -311,6 +324,7 @@ func TestLesserPartKeepsTheBookKey(t *testing.T) {
 // TestFolderRuleCountsTheCatalogsBooks: a numbered part with no ALBUM arriving in a folder
 // of two books joins neither when the walk reads only one of them again.
 func TestFolderRuleCountsTheCatalogsBooks(t *testing.T) {
+	t.Parallel()
 	st, lib, sc, root := kindFixture(t, model.MediaAudiobook)
 	writeUnder(t, root, "Shelf/a1.mp3", testaudio.MP3Spec{Title: "One", Artist: "Author", Album: "A", Track: 1, Audio: testaudio.AudioWithSeed(1)})
 	writeUnder(t, root, "Shelf/b1.mp3", testaudio.MP3Spec{Title: "One", Artist: "Author", Album: "B", Track: 1, Audio: testaudio.AudioWithSeed(2)})
@@ -326,6 +340,7 @@ func TestFolderRuleCountsTheCatalogsBooks(t *testing.T) {
 // TestRetitleOntoAnotherBooksKeyKeepsItsBook: a book with no ALBUM retitled to the title
 // another book of its author holds keeps its own item, since that key is taken.
 func TestRetitleOntoAnotherBooksKeyKeepsItsBook(t *testing.T) {
+	t.Parallel()
 	st, lib, sc, root := kindFixture(t, model.MediaAudiobook)
 	writeUnder(t, root, "A/Dune.mp3", testaudio.MP3Spec{Title: "Dune", Artist: "Frank Herbert", Audio: testaudio.AudioWithSeed(1)})
 	writeUnder(t, root, "B/Children.mp3", testaudio.MP3Spec{Title: "Children of Dune", Artist: "Frank Herbert", Audio: testaudio.AudioWithSeed(2)})

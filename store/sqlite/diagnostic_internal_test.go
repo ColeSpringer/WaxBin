@@ -11,6 +11,7 @@ import (
 // only owed rows has nothing for an edit write-back's clean replace to remove, and the
 // guard that skips that write transaction has to read the file that way.
 func TestOwedRowsAreNoWritersRows(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib := entityFixture(t)
 	res := putTrack(t, st, lib.ID, trackSpec{

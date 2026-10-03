@@ -37,6 +37,7 @@ func albumArtQueue(t *testing.T, st *sqlite.Store, opts model.EnrichQueueOptions
 // front a member track's cover answers is held; an album with no identifier, a
 // whole-entity lock, or both halves answered is not walked.
 func TestAlbumsNeedingArtHalves(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStoreAt(t)
 	db := roConn(t, dbPath)
@@ -94,6 +95,7 @@ func TestAlbumsNeedingArtHalves(t *testing.T) {
 // beside a landed front is owed, and a front answered with the group's picture is matched
 // only when a row was actually copied.
 func TestApplyAlbumArtBackfillSettlesEachHalf(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStoreAt(t)
 	db := roConn(t, dbPath)

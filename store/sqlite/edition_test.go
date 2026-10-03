@@ -78,6 +78,7 @@ func markerRows(t *testing.T, db *sql.DB, albumID int64) (n int, provider string
 // TestResolveAlbumStoresAndTopsUpEditionColumns covers both halves of the scan write: an
 // insert takes the first file's values, a later file fills only the empty columns.
 func TestResolveAlbumStoresAndTopsUpEditionColumns(t *testing.T) {
+	t.Parallel()
 	st, dbPath, lib := openStoreAt(t)
 	db := roConn(t, dbPath)
 
@@ -101,6 +102,7 @@ func TestResolveAlbumStoresAndTopsUpEditionColumns(t *testing.T) {
 // TestResolveAlbumTopsUpYear: a year-less first file leaves album.year NULL, and from then
 // on the column is its members' year (model.AlbumYear), whatever the first file said.
 func TestResolveAlbumTopsUpYear(t *testing.T) {
+	t.Parallel()
 	st, dbPath, lib := openStoreAt(t)
 	db := roConn(t, dbPath)
 	const rel = "b1000000-0000-4000-8000-0000000000aa"
@@ -136,6 +138,7 @@ func TestResolveAlbumTopsUpYear(t *testing.T) {
 // TestEditionColumnLockSurvivesBothWriters: a curated media value keeps against the scan
 // top-up, as a curated barcode does.
 func TestEditionColumnLockSurvivesBothWriters(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStoreAt(t)
 	db := roConn(t, dbPath)
@@ -160,6 +163,7 @@ func TestEditionColumnLockSurvivesBothWriters(t *testing.T) {
 // TestAlbumsNeedingReleaseMatchIncludesEditionEvidence: an album carrying only a medium
 // or only a country is now worth a lookup; one carrying nothing still is not.
 func TestAlbumsNeedingReleaseMatchIncludesEditionEvidence(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, _, lib := openStoreAt(t)
 
@@ -213,6 +217,7 @@ func TestAlbumsNeedingReleaseMatchIncludesEditionEvidence(t *testing.T) {
 // TestScanClearsAnUnmatchedAlbumMarker is the lifecycle the widened gate needs: without
 // it a barcode retag would never re-queue a media-only album short of --force.
 func TestScanClearsAnUnmatchedAlbumMarker(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStoreAt(t)
 	db := roConn(t, dbPath)
@@ -250,6 +255,7 @@ func TestScanClearsAnUnmatchedAlbumMarker(t *testing.T) {
 // album has an mbid and is never queued again, so clearing it would decrement
 // EnrichmentCoverage.Matched with no path back.
 func TestMatchedAlbumMarkerSurvivesNewEvidence(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStoreAt(t)
 	db := roConn(t, dbPath)
@@ -277,6 +283,7 @@ func TestMatchedAlbumMarkerSurvivesNewEvidence(t *testing.T) {
 // TestEntityEditClearsAnUnmatchedAlbumMarker: the second writer of an album's evidence
 // clears the marker on the same rule. Editing label does not, since it feeds no tier.
 func TestEntityEditClearsAnUnmatchedAlbumMarker(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStoreAt(t)
 	db := roConn(t, dbPath)
@@ -317,6 +324,7 @@ func TestEntityEditClearsAnUnmatchedAlbumMarker(t *testing.T) {
 // TestEntityEditNormalizesCountry pins the edit/scan asymmetry: an edit asserts one
 // country and folds alpha-3, a scan stores the tag. media has no normalizer.
 func TestEntityEditNormalizesCountry(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStoreAt(t)
 	db := roConn(t, dbPath)
@@ -354,6 +362,7 @@ func TestEntityEditNormalizesCountry(t *testing.T) {
 // TestEntityInfoReadsEditionColumns checks both entityinfo SQL sites, which mirror each
 // other column for column.
 func TestEntityInfoReadsEditionColumns(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStoreAt(t)
 	db := roConn(t, dbPath)
@@ -394,6 +403,7 @@ func TestEntityInfoReadsEditionColumns(t *testing.T) {
 // the opposite case: the album is not (or is not yet known to be) that pressing, so the
 // marker stands and it is not re-asked with an id it does not hold.
 func TestLandedMBIDWriteReOpensTheArtQueue(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStoreAt(t)
 	db := roConn(t, dbPath)
@@ -452,6 +462,7 @@ func TestLandedMBIDWriteReOpensTheArtQueue(t *testing.T) {
 // cover. Probing only for the album's own row would call almost every album empty and
 // quietly replace the file's own artwork on the first backfill.
 func TestAlbumArtDoesNotOverwriteADerivedTrackCover(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStoreAt(t)
 	db := roConn(t, dbPath)
@@ -501,6 +512,7 @@ func TestAlbumArtDoesNotOverwriteADerivedTrackCover(t *testing.T) {
 // fill-when-empty is the only thing protecting a cover a user deliberately set, which is
 // what SetEntityArt's own doc promises of enrichment.
 func TestAlbumArtDoesNotOverwriteACuratedCover(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStoreAt(t)
 	db := roConn(t, dbPath)
@@ -534,6 +546,7 @@ func TestAlbumArtDoesNotOverwriteACuratedCover(t *testing.T) {
 // write can be reverted, and reverting means the album is re-decidable. The marker has
 // to go with the id or the queue keeps skipping it.
 func TestClearingAnAlbumMBIDUndoesTheMatch(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStoreAt(t)
 	db := roConn(t, dbPath)
@@ -571,6 +584,7 @@ func TestClearingAnAlbumMBIDUndoesTheMatch(t *testing.T) {
 // the pressing being disowned, so leaving it would make the undo cosmetic. A member
 // track's embedded cover is untouched, since nothing here wrote it.
 func TestUndoTakesTheMatchedCoverWithIt(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStoreAt(t)
 	db := roConn(t, dbPath)
@@ -650,6 +664,7 @@ func pngFixture() []byte {
 // marker is what says a provider answered, and the undo has to read that one or it leaves
 // the disowned pressing's picture standing.
 func TestUndoTakesATaggedAlbumsCoverToo(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStoreAt(t)
 	db := roConn(t, dbPath)
@@ -683,6 +698,7 @@ func TestUndoTakesATaggedAlbumsCoverToo(t *testing.T) {
 // markers in that same edit, and the undo still takes enrichment's front, since no
 // marker gates it.
 func TestUndoTakesTheCoverWhenOneEditAlsoFillsABarcode(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStoreAt(t)
 	db := roConn(t, dbPath)
@@ -715,6 +731,7 @@ func TestUndoTakesTheCoverWhenOneEditAlsoFillsABarcode(t *testing.T) {
 // old release's cover in place closes that vacancy, so the re-ask would find nothing to
 // do and the wrong pressing's picture would stand for good.
 func TestAnMBIDChangeTakesTheOldPressingsCover(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStoreAt(t)
 	db := roConn(t, dbPath)
@@ -755,6 +772,7 @@ func TestAnMBIDChangeTakesTheOldPressingsCover(t *testing.T) {
 // identifier), so gating the undo's art clear on either of them left a disowned
 // pressing's cover standing whenever one had already gone.
 func TestUndoSurvivesAMarkerAnotherWriterDropped(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStoreAt(t)
 	db := roConn(t, dbPath)
@@ -790,6 +808,7 @@ func TestUndoSurvivesAMarkerAnotherWriterDropped(t *testing.T) {
 // the front stays the user's, and the fill is fill-when-empty either way, so an
 // unfiltered delete here would destroy a cover the user chose.
 func TestUndoKeepsACuratedCover(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStoreAt(t)
 	db := roConn(t, dbPath)

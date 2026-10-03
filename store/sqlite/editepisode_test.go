@@ -37,6 +37,7 @@ func episodePID(t *testing.T, st *sqlite.Store) model.PID {
 }
 
 func TestEditEpisodeFields(t *testing.T) {
+	t.Parallel()
 	st, _ := openTestStore(t)
 	ctx := context.Background()
 	if _, err := st.UpsertFeed(ctx, oneEpisodeFeed("http://feed/x", "g1", "Original", "Original Desc", "http://link/1")); err != nil {
@@ -73,6 +74,7 @@ func TestEditEpisodeFields(t *testing.T) {
 }
 
 func TestEditEpisodeSurvivesFeedResync(t *testing.T) {
+	t.Parallel()
 	st, _ := openTestStore(t)
 	ctx := context.Background()
 	if _, err := st.UpsertFeed(ctx, oneEpisodeFeed("http://feed/x", "g1", "Original", "Original Desc", "http://link/1")); err != nil {

@@ -27,6 +27,7 @@ import (
 // reads back as the old value. A set writes the short key alone and leaves the long
 // form, which may hold a fuller text, in place.
 func TestBookTagEditsClearDescriptionClearsTheLongForm(t *testing.T) {
+	t.Parallel()
 	cleared := map[string]bool{}
 	for _, e := range bookTagEditsForFields(map[string]string{"description": ""}, "") {
 		if len(e.Values) != 0 {
@@ -44,6 +45,7 @@ func TestBookTagEditsClearDescriptionClearsTheLongForm(t *testing.T) {
 }
 
 func TestReplayGainEdits(t *testing.T) {
+	t.Parallel()
 	// A standalone track (no album) writes track keys and CLEARS the album keys, so
 	// stale album gain from a former album membership is removed on disk.
 	e, gain := replayGainEdits(model.ReplayGainRow{Codec: "mp3", TrackGainDB: -6.35, TrackPeak: 0.988})
@@ -85,6 +87,7 @@ func TestReplayGainEdits(t *testing.T) {
 // flat -1280 (the 5 dB between the two references) and the track tag is that plus
 // the track's distance from the album, whatever the header ends up as.
 func TestReplayGainEditsOggOpusHeader(t *testing.T) {
+	t.Parallel()
 	// An album member. Header = the album gain; album tag = -1280; track tag =
 	// -1280 plus (track - album), here -5 - -4 = -1 dB = -256 steps.
 	e, gain := replayGainEdits(model.ReplayGainRow{
@@ -133,6 +136,7 @@ func TestReplayGainEditsOggOpusHeader(t *testing.T) {
 // full scale. The tags grow by exactly what the cap took, so a tag-aware player
 // still lands at -23.
 func TestReplayGainEditsOggOpusPeakCap(t *testing.T) {
+	t.Parallel()
 	// +6 dB of album gain against a peak of 0.9: 0.9 * 2.0 is well past full scale.
 	// The cap is -20*log10(0.9) = 0.9151 dB, 234.3 steps, rounded down to 234.
 	const albumGain, peak = 6.0, 0.9
@@ -171,6 +175,7 @@ func TestReplayGainEditsOggOpusPeakCap(t *testing.T) {
 }
 
 func TestR128Gain(t *testing.T) {
+	t.Parallel()
 	// WaxBin gain references -18 LUFS; R128 references -23, so 5 dB is subtracted,
 	// then Q7.8: (-5 - 5) * 256 = -2560.
 	if got := r128Gain(-5.0); got != -2560 {
@@ -194,6 +199,7 @@ func TestR128Gain(t *testing.T) {
 // track and album ReplayGain tags, and that the catalog's file row was updated so
 // the scan fast-path recognizes WaxBin's own write.
 func TestReplayGainWriteBackAlbum(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -280,6 +286,7 @@ func TestReplayGainWriteBackAlbum(t *testing.T) {
 // error, so a run against a read-only library reported success with nothing
 // written, which is indistinguishable from a run with nothing to write.
 func TestReplayGainWriteBackCountsFailures(t *testing.T) {
+	t.Parallel()
 	if os.Geteuid() == 0 {
 		t.Skip("root ignores the read-only bit, so the write would succeed")
 	}
@@ -353,6 +360,7 @@ func TestReplayGainWriteBackCountsFailures(t *testing.T) {
 // wholesale, so a file that flips from unwritable to a plain failure must not keep
 // the stale "cannot store" row.
 func TestReplayGainWriteBackUnwritableContainer(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -437,6 +445,7 @@ func TestReplayGainWriteBackUnwritableContainer(t *testing.T) {
 // albumArtist ("Various Artists"), the item PID tag, organize provenance, and a
 // locked field left untouched.
 func TestOrganizeTagWriteAndPIDStamp(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -508,6 +517,7 @@ func TestOrganizeTagWriteAndPIDStamp(t *testing.T) {
 // TestOrganizeTagWriteCarriesTheTotals: organize writes each number with the total the
 // catalog holds beside it, so a file it renumbers never reads as the old pair.
 func TestOrganizeTagWriteCarriesTheTotals(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	lib, err := Open(ctx, Options{
@@ -556,6 +566,7 @@ func TestOrganizeTagWriteCarriesTheTotals(t *testing.T) {
 // leaves the catalog with no total, and organize's tag write clears the file's total beside
 // the number rather than leaving it reading "7 of 1". The landed write pays the owed number.
 func TestOrganizeClearsATotalTheNumberPassed(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	lib, err := Open(ctx, Options{
@@ -613,6 +624,7 @@ func TestOrganizeClearsATotalTheNumberPassed(t *testing.T) {
 // catalog-only edit of it stays owed, while any other track's write carries the catalog's
 // own value and pays it.
 func TestOrganizeSettlesAnAlbumArtistOnlyWhenItWroteTheCatalogsValue(t *testing.T) {
+	t.Parallel()
 	for _, compilation := range []bool{true, false} {
 		ctx := context.Background()
 		root := t.TempDir()
@@ -675,6 +687,7 @@ func TestOrganizeSettlesAnAlbumArtistOnlyWhenItWroteTheCatalogsValue(t *testing.
 // fresh catalog over the same files and confirms the item's PID is restored from the
 // WAXBIN_ITEM_PID tag.
 func TestRebuildAdoptsStampedPID(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 
@@ -726,6 +739,7 @@ func TestRebuildAdoptsStampedPID(t *testing.T) {
 // files; a rebuild adopts it for exactly one and mints a fresh PID for the other (a
 // copyable tag must never make two files claim one identity).
 func TestPIDAdoptionConflictMintsFresh(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	shared := model.NewPID()
@@ -811,6 +825,7 @@ func writeRaw(t *testing.T, path string, data []byte) {
 // WavPack file could not hold before now lands on disk and reads back through the
 // same library the scan uses, with no lost-write diagnostic left behind.
 func TestReplayGainWriteBackLandsOnWavPack(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -874,6 +889,7 @@ func TestReplayGainWriteBackLandsOnWavPack(t *testing.T) {
 // scheme settles: WaxLabel treats an unchanged gain as a no-op and the tags are
 // already right, so nothing is written.
 func TestReplayGainWriteSetsTheOpusHeader(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -973,6 +989,7 @@ func enrichItemFields(t *testing.T, ctx context.Context, lib *Library, dbPath st
 // reaches a member with a field of its own through the item walk and the other through the
 // leftover pass.
 func TestEnrichmentWriteBackPaysTheOwedRowsItLands(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	lib, err := Open(ctx, Options{
@@ -1052,6 +1069,7 @@ func TestEnrichmentWriteBackPaysTheOwedRowsItLands(t *testing.T) {
 // and diagnosed as unrepresented rather than failed, and the next pass leaves it alone
 // instead of reporting the same file as a fresh failure every run.
 func TestEnrichmentWriteBackUnwritableContainer(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -1106,6 +1124,7 @@ func TestEnrichmentWriteBackUnwritableContainer(t *testing.T) {
 // would carry an identifier the parts lack, and identity.BookKey would split the book
 // on the next scan.
 func TestEnrichmentWriteBackMarksAbandonedParts(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -1214,6 +1233,7 @@ func TestEnrichmentWriteBackMarksAbandonedParts(t *testing.T) {
 // clears the drift row rather than leaving a stale mark that every later pass would scan
 // past.
 func TestEnrichmentWriteBackSettlesAClearedValue(t *testing.T) {
+	t.Parallel()
 	if os.Geteuid() == 0 {
 		t.Skip("root ignores the read-only bit, so the write would succeed")
 	}
@@ -1303,6 +1323,7 @@ func TestEnrichmentWriteBackSettlesAClearedValue(t *testing.T) {
 // scan. The classification is tested on its own because no container this suite can build
 // refuses those keys, so there is no file that would drive the warning end to end.
 func TestLostBookIdentityReadsOnlyTheIdentifierKeys(t *testing.T) {
+	t.Parallel()
 	lostASIN := []model.TagWriteWarning{{Key: "ASIN", Unrepresented: true, Message: "dropped"}}
 	if !lostBookIdentity(model.KindBook, lostASIN) {
 		t.Errorf("a book that lost its ASIN read as a clean write")
@@ -1337,6 +1358,7 @@ func TestLostBookIdentityReadsOnlyTheIdentifierKeys(t *testing.T) {
 // file while the newest value is per item, so a rewrite would settle the file past the
 // other item's value and lose it.
 func TestEnrichmentWriteBackRefusesASharedFile(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -1418,6 +1440,7 @@ func TestEnrichmentWriteBackRefusesASharedFile(t *testing.T) {
 // edit owes a credit to the files, names exactly the roles the credit write-back writes, a
 // track's through meta.RoleTagKey and a book's through bookRoleField.
 func TestCreditWritableMatchesTheWriteBack(t *testing.T) {
+	t.Parallel()
 	for _, r := range []model.ContributorRole{
 		model.RoleArtist, model.RoleComposer, model.RoleLyricist, model.RoleConductor,
 		model.RolePerformer, model.RoleRemixer, model.RoleProducer, model.RoleEngineer,
@@ -1441,6 +1464,7 @@ func TestCreditWritableMatchesTheWriteBack(t *testing.T) {
 // nothing left to queue it again, and the next write pass still owes the file and writes
 // it.
 func TestEnrichmentFillSurvivesASilentRetag(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")

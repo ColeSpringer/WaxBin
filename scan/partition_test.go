@@ -26,6 +26,7 @@ func assertScanPartition(t *testing.T, r *Result) {
 }
 
 func TestScanCountsACopy(t *testing.T) {
+	t.Parallel()
 	_, lib, sc, _, root := fastPathFixture(t)
 	writeMP3(t, filepath.Join(root, "a", "1.mp3"), "One", 9)
 	writeMP3(t, filepath.Join(root, "b", "1.mp3"), "One Again", 9)
@@ -60,6 +61,7 @@ func unreadableAt(sc *Scanner, dir string) {
 // TestScanCountsWalkErrorsApart: a directory the walk cannot read is a walk error, not
 // an audio file that failed.
 func TestScanCountsWalkErrorsApart(t *testing.T) {
+	t.Parallel()
 	_, lib, sc, _, root := fastPathFixture(t)
 	writeMP3(t, filepath.Join(root, "ok.mp3"), "Fine", 1)
 	locked := filepath.Join(root, "locked")
@@ -74,6 +76,7 @@ func TestScanCountsWalkErrorsApart(t *testing.T) {
 // TestScanKeepsFilesUnderAnUnreadableFolder: files under a folder the walk could not
 // read are not reconciled as gone.
 func TestScanKeepsFilesUnderAnUnreadableFolder(t *testing.T) {
+	t.Parallel()
 	_, lib, sc, _, root := fastPathFixture(t)
 	for i := byte(1); i <= 3; i++ {
 		writeMP3(t, filepath.Join(root, "a", fmt.Sprintf("%d.mp3", i)), fmt.Sprintf("A %d", i), i)
@@ -90,6 +93,7 @@ func TestScanKeepsFilesUnderAnUnreadableFolder(t *testing.T) {
 // (an I/O or permission error, not a missing file) is not reconciled as gone, and a scan
 // that could read no file at all reconciles nothing.
 func TestScanKeepsAFileItCouldNotStat(t *testing.T) {
+	t.Parallel()
 	_, lib, sc, _, root := fastPathFixture(t)
 	paths := make([]string, 4)
 	for i := range paths {
@@ -153,6 +157,7 @@ func recordBeats(t *testing.T, sc *Scanner, clock *fakeClock, req Request) ([]be
 // rising and inside (0,1) until the closing 1, on a first scan as on a rescan. The
 // cadence counts every file seen, so a 50th entry that is not audio still beats.
 func TestScanProgressRisesToOne(t *testing.T) {
+	t.Parallel()
 	_, lib, sc, _, root := fastPathFixture(t)
 	for i := range 120 {
 		writeMP3(t, filepath.Join(root, fmt.Sprintf("a%03d.mp3", i)), fmt.Sprintf("T%d", i), byte(i))
@@ -185,6 +190,7 @@ func TestScanProgressRisesToOne(t *testing.T) {
 // TestScanHeartbeatsAreSpaced: however fast files go by, beats come at least 250 ms
 // apart, so a fast scan does not write the job row hundreds of times a second.
 func TestScanHeartbeatsAreSpaced(t *testing.T) {
+	t.Parallel()
 	_, lib, sc, _, root := fastPathFixture(t)
 	for i := range 300 {
 		writeMP3(t, filepath.Join(root, fmt.Sprintf("b%03d.mp3", i)), fmt.Sprintf("B%d", i), byte(i))
@@ -203,6 +209,7 @@ func TestScanHeartbeatsAreSpaced(t *testing.T) {
 // TestScanReadsAPromotedCopyNoOneReRead: a copy promoted by a write whose follow-up read
 // never ran is read in full by the next plain scan, so its item takes the copy's tags.
 func TestScanReadsAPromotedCopyNoOneReRead(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib, sc, _, root := fastPathFixture(t)
 	original := filepath.Join(root, "a", "1.mp3")
@@ -232,6 +239,7 @@ func TestScanReadsAPromotedCopyNoOneReRead(t *testing.T) {
 // TestScanCountsPromotionsAndDrops: reconciliation's promotions and dropped rows are
 // counted beside the walk's outcomes.
 func TestScanCountsPromotionsAndDrops(t *testing.T) {
+	t.Parallel()
 	_, lib, sc, _, root := fastPathFixture(t)
 	primary, gone := filepath.Join(root, "a", "1.mp3"), filepath.Join(root, "c", "1.mp3")
 	writeMP3(t, primary, "Original", 9)
@@ -254,6 +262,7 @@ func TestScanCountsPromotionsAndDrops(t *testing.T) {
 // TestScanCountsOnlyNewCopies: a backup folder moved as a whole relinks its copies, which
 // were already attached and count as unchanged rather than as new copies.
 func TestScanCountsOnlyNewCopies(t *testing.T) {
+	t.Parallel()
 	_, lib, sc, _, root := fastPathFixture(t)
 	writeMP3(t, filepath.Join(root, "a", "1.mp3"), "One", 9)
 	writeMP3(t, filepath.Join(root, "backup", "1.mp3"), "One Again", 9)
@@ -271,6 +280,7 @@ func TestScanCountsOnlyNewCopies(t *testing.T) {
 // TestScanOfARemovedRootReconcilesIt: a library root that no longer exists is a real
 // removal, not an unreadable folder, so its items are marked missing.
 func TestScanOfARemovedRootReconcilesIt(t *testing.T) {
+	t.Parallel()
 	_, lib, sc, _, root := fastPathFixture(t)
 	writeMP3(t, filepath.Join(root, "1.mp3"), "One", 1)
 	writeMP3(t, filepath.Join(root, "2.mp3"), "Two", 2)

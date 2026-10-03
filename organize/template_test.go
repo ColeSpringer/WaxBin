@@ -13,6 +13,7 @@ import (
 // TestRenderRelPathSanitizesSeparatorsInFields ensures a path separator inside a
 // metadata field does not create extra nested directories.
 func TestRenderRelPathSanitizesSeparatorsInFields(t *testing.T) {
+	t.Parallel()
 	p, err := organize.ProfileByName("waxbin-native")
 	if err != nil {
 		t.Fatal(err)
@@ -39,6 +40,7 @@ func TestRenderRelPathSanitizesSeparatorsInFields(t *testing.T) {
 }
 
 func TestRenderRelPathUsesUnknownBuckets(t *testing.T) {
+	t.Parallel()
 	p, _ := organize.ProfileByName("waxbin-native")
 	rel, err := organize.RenderRelPath(p, &model.ItemView{Title: "Solo", TrackNo: 0, DisplayPath: "x.flac"})
 	if err != nil {
@@ -72,6 +74,7 @@ func splitAll(p string) []string {
 // exercising the author/series/sequence/narrator/asin tokens and their optional
 // groups.
 func TestRenderRelPathAudiobook(t *testing.T) {
+	t.Parallel()
 	p, err := organize.ProfileByName("waxbin-native")
 	if err != nil {
 		t.Fatal(err)
@@ -105,6 +108,7 @@ func TestRenderRelPathAudiobook(t *testing.T) {
 // TestRenderRelPathAudiobookSparse drops the optional series/narrator/asin groups
 // when those fields are empty.
 func TestRenderRelPathAudiobookSparse(t *testing.T) {
+	t.Parallel()
 	p, _ := organize.ProfileByName("waxbin-native")
 	book := &model.ItemView{
 		Kind: model.KindBook, Title: "Standalone", Artist: "Solo Author",
@@ -125,6 +129,7 @@ func TestRenderRelPathAudiobookSparse(t *testing.T) {
 // last disc's digits, when it has one; a title near the length limit gives way to the
 // number.
 func TestBookPartRelPath(t *testing.T) {
+	t.Parallel()
 	rel := filepath.Join("Author", "Book", "Book.mp3")
 	p := func(disc, track int) organize.PartNumber { return organize.PartNumber{Disc: disc, Track: track} }
 	for _, tc := range []struct {
@@ -155,6 +160,7 @@ func TestBookPartRelPath(t *testing.T) {
 // every part has one of its own, padded to the highest place or the tagged part total, and
 // are numbered in reading order otherwise.
 func TestNumberParts(t *testing.T) {
+	t.Parallel()
 	p := func(disc, track int) organize.PartNumber { return organize.PartNumber{Disc: disc, Track: track} }
 	for _, tc := range []struct {
 		name   string
@@ -182,6 +188,7 @@ func TestNumberParts(t *testing.T) {
 // TestLonePart: a book's only part is numbered when its place, its disc or the part total
 // it is tagged with says more parts are coming.
 func TestLonePart(t *testing.T) {
+	t.Parallel()
 	p := func(disc, track int) organize.PartNumber { return organize.PartNumber{Disc: disc, Track: track} }
 	for _, tc := range []struct {
 		place organize.PartNumber
@@ -199,6 +206,7 @@ func TestLonePart(t *testing.T) {
 
 // TestPartAt reads a stored part position back as the disc and place it encodes.
 func TestPartAt(t *testing.T) {
+	t.Parallel()
 	for pos, want := range map[int]organize.PartNumber{
 		0: {}, 7: {Track: 7}, 100003: {Disc: 1, Track: 3}, 201000: {Disc: 2, Track: 1000},
 	} {
@@ -211,6 +219,7 @@ func TestPartAt(t *testing.T) {
 // TestAuthorSortStillRendersForACustomLayout: {authorsort} renders the collation key, for
 // a custom layout that files books by it.
 func TestAuthorSortStillRendersForACustomLayout(t *testing.T) {
+	t.Parallel()
 	p := organize.Profile{Name: "by-sort", Music: "{artist}/{title}.{ext}", Audiobook: "{authorsort}/{title}.{ext}", Podcast: "{podcast}/{episode}.{ext}"}
 	rel, err := organize.RenderRelPath(p, &model.ItemView{Kind: model.KindBook, Title: "Standalone", Artist: "Édith Piaf", DisplayPath: "/in/x.m4b"})
 	if err != nil {
@@ -225,6 +234,7 @@ func TestAuthorSortStillRendersForACustomLayout(t *testing.T) {
 // a part whose new name is its own in another case waits on nothing, and a cycle (two
 // parts trading numbers) keeps its order, one move per part, for Execute to resolve.
 func TestOrderBookMoves(t *testing.T) {
+	t.Parallel()
 	p := func(name string) string { return filepath.Join(string(filepath.Separator), "lib", "Book", name) }
 	acts := []organize.Action{
 		{Src: p("x - 05.mp3"), Dst: p("x - 03.mp3")},

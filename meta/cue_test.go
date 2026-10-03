@@ -37,6 +37,7 @@ func parseSheet(t *testing.T, text string) *CueSheet {
 // TestParseCueSheet checks album-level fields, per-track fields, and that a track
 // with no PERFORMER of its own leaves it empty (the scanner inherits the album's).
 func TestParseCueSheet(t *testing.T) {
+	t.Parallel()
 	s := parseSheet(t, ripCue)
 	if s == nil {
 		t.Fatal("ParseCueSheet returned nil for a two-track sheet")
@@ -66,6 +67,7 @@ func TestParseCueSheet(t *testing.T) {
 // own frame rate are the same number, which is what lets a stored frame count be
 // handed to cue.Samples. model may not import waxflow, so the comparison lives here.
 func TestCueFrameRateAgreesWithUpstream(t *testing.T) {
+	t.Parallel()
 	if model.FramesPerSecond != cue.FramesPerSecond {
 		t.Errorf("model.FramesPerSecond = %d, cue.FramesPerSecond = %d; the two address the same frames",
 			model.FramesPerSecond, cue.FramesPerSecond)
@@ -79,6 +81,7 @@ func TestCueFrameRateAgreesWithUpstream(t *testing.T) {
 // sample 8612421, missing by 15 samples: a third of a millisecond of the neighboring
 // track served under this one's name.
 func TestParseCueTimeKeepsTheFrame(t *testing.T) {
+	t.Parallel()
 	s := parseSheet(t, "FILE \"a.flac\" WAVE\n  TRACK 01 AUDIO\n    INDEX 01 03:15:22\n")
 	if s == nil || len(s.Tracks) != 1 || !s.Tracks[0].StartValid {
 		t.Fatalf("ParseCueSheet = %+v, want one track with a start", s)
@@ -100,6 +103,7 @@ func TestParseCueTimeKeepsTheFrame(t *testing.T) {
 // are not a timestamp at all. Each is a warning naming the line to go look at, and
 // the INDEX it spelled is dropped, so the track has no start.
 func TestParseCueSheetReportsMalformedTime(t *testing.T) {
+	t.Parallel()
 	for _, ts := range []string{
 		"00:60:00",   // SS past 59
 		"00:00:75",   // FF past 74 (a second holds 75 frames, 0-74)
@@ -132,6 +136,7 @@ func TestParseCueSheetReportsMalformedTime(t *testing.T) {
 // offset naming the head of the rip and the scanner would carve the album's opening
 // under this track's name.
 func TestParseCueSheetTrackWithoutIndex01IsNotZero(t *testing.T) {
+	t.Parallel()
 	// INDEX 00 is the pregap start, which addresses the previous track's tail; it is
 	// not a start and must not be read as one.
 	s := parseSheet(t, "FILE \"a.flac\" WAVE\n  TRACK 01 AUDIO\n    TITLE \"Pregap only\"\n    INDEX 00 00:00:05\n")
@@ -159,6 +164,7 @@ func TestParseCueSheetTrackWithoutIndex01IsNotZero(t *testing.T) {
 // TestParseCueSheetReadsPastAnUnreadableLine: one mistyped INDEX costs its own track's
 // start and nothing else. The rest of the sheet reads as written.
 func TestParseCueSheetReadsPastAnUnreadableLine(t *testing.T) {
+	t.Parallel()
 	s := parseSheet(t, "TITLE \"Kept\"\nFILE \"a.wav\" WAVE\n"+
 		"  TRACK 01 AUDIO\n    INDEX 01 00:0x:00\n"+
 		"  TRACK 02 AUDIO\n    INDEX 01 00:00:10\n")
@@ -180,6 +186,7 @@ func TestParseCueSheetReadsPastAnUnreadableLine(t *testing.T) {
 // misspelled opens no track, and the warnings are all there is to say about it. They
 // have to reach the caller, so the sheet is not reported as empty.
 func TestParseCueSheetKeepsWarningsWithoutTracks(t *testing.T) {
+	t.Parallel()
 	s := parseSheet(t, "TRCK 01 AUDIO\n  INDEX 01 00:00:00\nTRCK 02 AUDIO\n  INDEX 01 00:05:00\n")
 	if s == nil {
 		t.Fatal("ParseCueSheet returned nil; want the warnings kept")
@@ -196,6 +203,7 @@ func TestParseCueSheetKeepsWarningsWithoutTracks(t *testing.T) {
 // so a sheet that reaches that many may have more, and the report must not claim an
 // exact count.
 func TestParseCueSheetMarksTruncatedWarnings(t *testing.T) {
+	t.Parallel()
 	bad := func(n int) string { return strings.Repeat("INDEX 01 00:00:00\n", n) }
 	s := parseSheet(t, bad(70))
 	if s == nil || len(s.Warnings) != 64 || !s.WarningsTruncated {
@@ -210,6 +218,7 @@ func TestParseCueSheetMarksTruncatedWarnings(t *testing.T) {
 // refuses a sheet with an unread line and names it rather than setting a partial list
 // the user would have to redo.
 func TestParseCueRefusesAWarnedSheet(t *testing.T) {
+	t.Parallel()
 	chs, err := ParseCue("FILE \"book.m4b\" WAVE\n  TRACK 01 AUDIO\n    INDEX 01 00:99:00\n" +
 		"  TRACK 02 AUDIO\n    INDEX 01 00:05:00\n")
 	if err == nil {
@@ -226,6 +235,7 @@ func TestParseCueRefusesAWarnedSheet(t *testing.T) {
 // TestParseCueChaptersUnchanged confirms ParseCue still projects the sheet's tracks
 // into file-relative navigation chapters (the book path's contract).
 func TestParseCueChaptersUnchanged(t *testing.T) {
+	t.Parallel()
 	chs, err := ParseCue(ripCue)
 	if err != nil {
 		t.Fatalf("ParseCue: %v", err)
@@ -247,6 +257,7 @@ func TestParseCueChaptersUnchanged(t *testing.T) {
 // 0: anchoring it would misplace that chapter and also report the chapter before it
 // as ending at the start of the book.
 func TestParseCueChaptersDropUnindexedTracks(t *testing.T) {
+	t.Parallel()
 	chs := parseSheet(t, "FILE \"book.m4b\" WAVE\n"+
 		"  TRACK 01 AUDIO\n    TITLE \"One\"\n    INDEX 01 00:00:00\n"+
 		"  TRACK 02 AUDIO\n    TITLE \"Two\"\n    INDEX 01 00:05:00\n"+
@@ -277,6 +288,7 @@ func TestParseCueChaptersDropUnindexedTracks(t *testing.T) {
 // not end up as chapters. Two on one start collapse into the later once sorted, as the
 // catalog stores them, even when the sheet lists them out of order.
 func TestChapterDropsMatchTheStoredChapters(t *testing.T) {
+	t.Parallel()
 	s := parseSheet(t, "FILE \"book.m4b\" WAVE\n"+
 		"  TRACK 01 AUDIO\n    TITLE \"Late\"\n    INDEX 01 00:00:10\n"+
 		"  TRACK 02 AUDIO\n    TITLE \"Opening\"\n    INDEX 01 00:00:00\n"+
@@ -295,6 +307,7 @@ func TestChapterDropsMatchTheStoredChapters(t *testing.T) {
 // numbered -1 upstream, which is no number a sheet can hold, so the report says so in
 // words.
 func TestCueTrackDescNamesAnUnnumberedTrack(t *testing.T) {
+	t.Parallel()
 	s := parseSheet(t, "FILE \"book.m4b\" WAVE\n  TRACK AUDIO\n    TITLE \"Lost\"\n    INDEX 00 00:00:05\n")
 	want := []string{`an unnumbered TRACK ("Lost") has no usable INDEX 01`}
 	if got := s.ChapterDrops(); !slices.Equal(got, want) {
@@ -306,6 +319,7 @@ func TestCueTrackDescNamesAnUnnumberedTrack(t *testing.T) {
 // command upstream, skipped with no warning, and it leaves its track with no start.
 // chapters set --file names that track rather than setting the chapters around it.
 func TestParseCueRefusesATrackWithoutIndex01(t *testing.T) {
+	t.Parallel()
 	chs, err := ParseCue("TRACK 01 AUDIO\n  TITLE \"Opening\"\n  INDEX 01 00:00:00\n" +
 		"TRACK 02 AUDIO\n  TITLE \"Middle\"\n  INDX 01 00:05:00\n" +
 		"TRACK 03 AUDIO\n  TITLE \"End\"\n  INDEX 01 00:10:00\n")
@@ -322,6 +336,7 @@ func TestParseCueRefusesATrackWithoutIndex01(t *testing.T) {
 // datatype tells it apart. A CD+G karaoke track is audio with graphics beside it, so
 // it stays.
 func TestParseCueChaptersSkipDataTracks(t *testing.T) {
+	t.Parallel()
 	chs, err := ParseCue("FILE \"disc.flac\" WAVE\n" +
 		"  TRACK 01 MODE1/2352\n    TITLE \"Data\"\n    INDEX 01 00:00:00\n" +
 		"  TRACK 02 AUDIO\n    TITLE \"One\"\n    INDEX 01 00:05:00\n" +
@@ -341,6 +356,7 @@ func TestParseCueChaptersSkipDataTracks(t *testing.T) {
 // stripped from album/track fields and the REM DATE year, not just the outer quotes.
 // Upstream keeps a quoted run verbatim, so the trimming is this adapter's.
 func TestParseCueSheetTrimsQuotedPadding(t *testing.T) {
+	t.Parallel()
 	padded := "PERFORMER \"  Padded Band  \"\n" +
 		"TITLE \" Spaced Album \"\n" +
 		"REM GENRE \" Jazz \"\n" +
@@ -365,6 +381,7 @@ func TestParseCueSheetTrimsQuotedPadding(t *testing.T) {
 // TestParseCueSheetEmpty returns a nil sheet and no error when nothing is there to
 // read: a sheet with no TRACK is as good as an absent one.
 func TestParseCueSheetEmpty(t *testing.T) {
+	t.Parallel()
 	s := parseSheet(t, "REM just a comment\nTITLE \"Nope\"\n")
 	if s != nil {
 		t.Errorf("ParseCueSheet(trackless) = %+v, want nil", s)
@@ -379,6 +396,7 @@ func TestParseCueSheetEmpty(t *testing.T) {
 // rip whose tracks are already separate, so there is nothing to carve. Refusing by
 // name beats picking the first file, which would be a plausible wrong answer.
 func TestParseCueSheetRefusesMultipleFiles(t *testing.T) {
+	t.Parallel()
 	_, err := ParseCueSheet("FILE \"one.flac\" WAVE\n  TRACK 01 AUDIO\n    INDEX 01 00:00:00\n" +
 		"FILE \"two.flac\" WAVE\n  TRACK 02 AUDIO\n    INDEX 01 00:00:00\n")
 	if err == nil {
@@ -392,6 +410,7 @@ func TestParseCueSheetRefusesMultipleFiles(t *testing.T) {
 // TestParseCueSheetUnquotedTitleReadsTheLine: an unquoted one-string operand is the
 // rest of its line, as a hand-written sheet means it.
 func TestParseCueSheetUnquotedTitleReadsTheLine(t *testing.T) {
+	t.Parallel()
 	s := parseSheet(t, "FILE \"a.flac\" WAVE\nTITLE Jazz Album\n  TRACK 01 AUDIO\n    INDEX 01 00:00:00\n")
 	if s == nil {
 		t.Fatal("ParseCueSheet returned nil")
@@ -405,6 +424,7 @@ func TestParseCueSheetUnquotedTitleReadsTheLine(t *testing.T) {
 // and a hand-written chapter sheet never does, so a TRACK before any FILE is indexed
 // against the implied file. A warning names the line as the sheet numbers it.
 func TestParseCueSheetImpliedFILE(t *testing.T) {
+	t.Parallel()
 	s := parseSheet(t, "TITLE \"No File Line\"\n  TRACK 01 AUDIO\n    INDEX 01 00:00:00\n")
 	if s == nil || len(s.Tracks) != 1 || !s.Tracks[0].StartValid {
 		t.Fatalf("ParseCueSheet = %+v, want one usable track in the implied file", s)
@@ -425,6 +445,7 @@ func TestParseCueSheetImpliedFILE(t *testing.T) {
 // with a bare CR. The album header ahead of FILE is the usual layout, and it must
 // read as separate lines rather than one run-on TITLE.
 func TestParseCueSheetReadsCROnlyLines(t *testing.T) {
+	t.Parallel()
 	s := parseSheet(t, "PERFORMER \"Band\"\rTITLE \"Album\"\rFILE \"a.wav\" WAVE\r"+
 		"  TRACK 01 AUDIO\r    TITLE \"One\"\r    INDEX 01 00:00:00\r"+
 		"  TRACK 02 AUDIO\r    TITLE \"Two\"\r    INDEX 01 00:05:00\r")
@@ -442,6 +463,7 @@ func TestParseCueSheetReadsCROnlyLines(t *testing.T) {
 // TestParseCueSheetKeepsInnerQuotes: the format has no escape, so only the pair of
 // quotes around an operand is stripped. The padding inside them is still trimmed.
 func TestParseCueSheetKeepsInnerQuotes(t *testing.T) {
+	t.Parallel()
 	s := parseSheet(t, "TITLE \" The \"Best\" Of \"\nFILE \"a.wav\" WAVE\n"+
 		"  TRACK 01 AUDIO\n    TITLE \"12\" Remix\"\n    INDEX 01 00:00:00\n")
 	if s == nil || len(s.Tracks) != 1 {
@@ -459,6 +481,7 @@ func TestParseCueSheetKeepsInnerQuotes(t *testing.T) {
 // which must not glue itself to the first command: a sheet opening with TRACK or
 // TITLE behind one still reads.
 func TestParseCueSheetStripsABOM(t *testing.T) {
+	t.Parallel()
 	const bom = "\xef\xbb\xbf"
 	s := parseSheet(t, bom+"TRACK 01 AUDIO\n  INDEX 01 00:00:00\nTRACK 02 AUDIO\n  INDEX 01 00:05:00\n")
 	if s == nil || len(s.Tracks) != 2 {
@@ -474,6 +497,7 @@ func TestParseCueSheetStripsABOM(t *testing.T) {
 // a FILE line with a no-break space is an unknown command, skipped, and the track
 // opens the implied file instead of being lost.
 func TestParseCueSheetFILETokenMatchesUpstream(t *testing.T) {
+	t.Parallel()
 	s := parseSheet(t, "FILE\u00a0\"a.wav\" WAVE\nTRACK 01 AUDIO\n  INDEX 01 00:00:00\n")
 	if s == nil || len(s.Tracks) != 1 || s.File != "" {
 		t.Errorf("ParseCueSheet = %+v, want the track read against the implied file", s)
@@ -485,6 +509,7 @@ func TestParseCueSheetFILETokenMatchesUpstream(t *testing.T) {
 // than refused as a rip already split per track; a sheet whose FILEs each hold audio
 // still is refused.
 func TestParseCueSheetEnhancedCDDataFILE(t *testing.T) {
+	t.Parallel()
 	s := parseSheet(t, "FILE \"album.wav\" WAVE\n"+
 		"  TRACK 01 AUDIO\n    INDEX 01 00:00:00\n  TRACK 02 AUDIO\n    INDEX 01 00:05:00\n"+
 		"FILE \"data.bin\" BINARY\n  TRACK 03 MODE2/2352\n    INDEX 01 00:00:00\n")
@@ -500,6 +525,7 @@ func TestParseCueSheetEnhancedCDDataFILE(t *testing.T) {
 // TestParseCueSheetTabSeparatedFILECountsAsOne: upstream tokenizes on tabs as well as
 // spaces, so a tab-separated sheet reads like a space-separated one.
 func TestParseCueSheetTabSeparatedFILECountsAsOne(t *testing.T) {
+	t.Parallel()
 	s := parseSheet(t, "FILE\t\"album.flac\"\tWAVE\n\tTRACK 01 AUDIO\n\t\tINDEX 01 00:00:00\n")
 	if s == nil || len(s.Tracks) != 1 || !s.Tracks[0].StartValid || s.File != "album.flac" {
 		t.Fatalf("ParseCueSheet = %+v, want one usable track in album.flac", s)
@@ -516,6 +542,7 @@ func rip(lines ...string) string {
 // occupies nothing, Enhanced CDs with the data track last, PC Engine discs with it
 // between audio tracks, and discs with audio ahead of track 1. An end of 0 is open.
 func TestCarve(t *testing.T) {
+	t.Parallel()
 	type win struct {
 		num        int
 		title      string // compared when set

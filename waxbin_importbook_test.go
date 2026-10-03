@@ -74,6 +74,7 @@ func oneBook(t *testing.T, ctx context.Context, lib *waxbin.Library, parts int) 
 // joining the book their album names, whether the parts sit in a folder of the source or
 // the source is the book's folder.
 func TestStagedBookFolderImportsAsOneBook(t *testing.T) {
+	t.Parallel()
 	for _, nested := range []bool{true, false} {
 		ctx := context.Background()
 		musicRoot, bookRoot, staging := t.TempDir(), t.TempDir(), t.TempDir()
@@ -102,6 +103,7 @@ func TestStagedBookFolderImportsAsOneBook(t *testing.T) {
 // their folder holds, in a mixed library where they would otherwise stay tracks, and land
 // in its folder.
 func TestStagedAlbumlessPartsJoinTheirBook(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root, staging := t.TempDir(), t.TempDir()
 	lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), root)
@@ -121,6 +123,7 @@ func TestStagedAlbumlessPartsJoinTheirBook(t *testing.T) {
 // TestStagedAlbumlessBookIsNamedForItsFolder: numbered parts of a book whose tags name no
 // album are one book named for their staging folder, as a scan names them.
 func TestStagedAlbumlessBookIsNamedForItsFolder(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root, staging := t.TempDir(), t.TempDir()
 	lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), root)
@@ -137,6 +140,7 @@ func TestStagedAlbumlessBookIsNamedForItsFolder(t *testing.T) {
 // when its album names the book and the book is one by a tag of its own (a narrator, not
 // only a genre).
 func TestStagedTracksJoinOnlyAStrongBookTheyName(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root, staging := t.TempDir(), t.TempDir()
 	lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), root)
@@ -165,6 +169,7 @@ func TestStagedTracksJoinOnlyAStrongBookTheyName(t *testing.T) {
 // declared music, or one a cue sheet beside it makes a rip, joins no book, as a scan of
 // its destination would leave it.
 func TestStagedTracksStayTracksWhereTheScanKeepsThem(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	music, staging := t.TempDir(), t.TempDir()
 	lib, err := waxbin.Open(ctx, waxbin.Options{
@@ -226,6 +231,7 @@ func stageJoinedParts(t *testing.T, staging string, other testaudio.MP3Spec) {
 // Bound for a library declared audiobook, untagged parts join it the same way, while parts
 // whose own album and artist key another book are cataloged as that book there.
 func TestJoinedPartsLandWithTheirBook(t *testing.T) {
+	t.Parallel()
 	untagged := testaudio.MP3Spec{}
 	misattributed := testaudio.MP3Spec{Album: "Dune", Artist: "Scott Brick", Track: 2, TrackTotal: 3}
 	for name, other := range map[string]testaudio.MP3Spec{"untagged": untagged, "another artist": misattributed} {
@@ -280,6 +286,7 @@ func TestJoinedPartsLandWithTheirBook(t *testing.T) {
 // TestStagedTrackJoinsABookOfSeveralParts: a book two staged parts make is strong enough
 // to take in a track whose album names it, as a scan of its folder joins one.
 func TestStagedTrackJoinsABookOfSeveralParts(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	staging := t.TempDir()
 	for i := 1; i <= 3; i++ {
@@ -301,6 +308,7 @@ func TestStagedTrackJoinsABookOfSeveralParts(t *testing.T) {
 // folder's disc, so the first part of each disc lands apart, and one with no album keeps
 // its disc though the folder above names no book.
 func TestAcquiredDiscPartsKeepTheirDiscs(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root, acq := t.TempDir(), t.TempDir()
 	lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), root)
@@ -345,6 +353,7 @@ func TestAcquiredDiscPartsKeepTheirDiscs(t *testing.T) {
 // part's alternate once cataloged, so it takes the part's number rather than one of its
 // own, and organize finds every part where the import put it.
 func TestStagedEncodingOfAPartTakesItsNumber(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	books, staging := t.TempDir(), t.TempDir()
 	const rate = 22050
@@ -396,6 +405,7 @@ func TestStagedEncodingOfAPartTakesItsNumber(t *testing.T) {
 // catalog already holds is that part's other file, so it is named by the part's number
 // beside it rather than numbered as one more part.
 func TestStagedEncodingOfACatalogedPartTakesItsNumber(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	books := t.TempDir()
 	const rate = 22050
@@ -439,6 +449,7 @@ func TestStagedEncodingOfACatalogedPartTakesItsNumber(t *testing.T) {
 // catalog holds names a copy of a cataloged part beside it, by the part's number, past
 // the copies already there.
 func TestStagedCopyOfACatalogedPartIsNamedBesideIt(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), t.TempDir())
 	stage := func() string {
@@ -473,6 +484,7 @@ func TestStagedCopyOfACatalogedPartIsNamedBesideIt(t *testing.T) {
 // than one book, so numbered parts with no album straight in it are not named for it,
 // while a book folder inside it still names its parts' book.
 func TestConfiguredInboxNamesNoBook(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root, inboxDir := t.TempDir(), t.TempDir()
 	lib, err := waxbin.Open(ctx, waxbin.Options{
@@ -503,6 +515,7 @@ func TestConfiguredInboxNamesNoBook(t *testing.T) {
 // folder it was staged in, keeps that title through a forced rescan in the managed library,
 // where its folder and file name are the ones WaxBin gave it.
 func TestImportedAlbumlessBookKeepsItsTitle(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root, staging := t.TempDir(), t.TempDir()
 	lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), root)
@@ -523,6 +536,7 @@ func TestImportedAlbumlessBookKeepsItsTitle(t *testing.T) {
 // staged parts make lands after both of them, numbered between them, so its destination
 // already holds a book of several parts to join.
 func TestStagedTrackJoinsBetweenWeakParts(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	staging := t.TempDir()
 	for i := 1; i <= 3; i++ {
@@ -561,6 +575,7 @@ func TestImportOfTheWorkingFolder(t *testing.T) {
 // at a time, land beside the parts their book already holds, after them, rather than on
 // the name the first one took.
 func TestAcquiredUnnumberedPartsImportOneAtATime(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	acq := t.TempDir()
 	lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), t.TempDir())
@@ -587,6 +602,7 @@ func TestAcquiredUnnumberedPartsImportOneAtATime(t *testing.T) {
 // TestAcquiredFileNamesNoBookForItsFolder: a file imported alone is named for no book by
 // the folder a host staged it in.
 func TestAcquiredFileNamesNoBookForItsFolder(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	acq := t.TempDir()
 	lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), t.TempDir())
@@ -612,6 +628,7 @@ func TestAcquiredFileNamesNoBookForItsFolder(t *testing.T) {
 // the plan holds the rest of its book in place, laid out as they were around it, for the
 // import to be planned again around what the catalog now holds.
 func TestBookHeldWhenItsPartBecomesADuplicate(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	staging, acq := t.TempDir(), t.TempDir()
 	lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), t.TempDir())

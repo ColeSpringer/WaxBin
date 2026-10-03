@@ -18,6 +18,7 @@ func seedTwoTracks(t *testing.T, st *Store, libID int64) {
 }
 
 func TestVerifyDerivedCleanAfterRefresh(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	seedTwoTracks(t, st, lib.ID)
@@ -34,6 +35,7 @@ func TestVerifyDerivedCleanAfterRefresh(t *testing.T) {
 }
 
 func TestVerifyDetectsStaleRollups(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	seedTwoTracks(t, st, lib.ID)
@@ -71,6 +73,7 @@ func TestVerifyDetectsStaleRollups(t *testing.T) {
 }
 
 func TestVerifyDetectsCorruptedRollup(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	seedTwoTracks(t, st, lib.ID)
@@ -91,6 +94,7 @@ func TestVerifyDetectsCorruptedRollup(t *testing.T) {
 }
 
 func TestVerifyDetectsSortKeyDrift(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	seedTwoTracks(t, st, lib.ID)
@@ -108,6 +112,7 @@ func TestVerifyDetectsSortKeyDrift(t *testing.T) {
 }
 
 func TestVerifyDetectsFTSGap(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	seedTwoTracks(t, st, lib.ID)

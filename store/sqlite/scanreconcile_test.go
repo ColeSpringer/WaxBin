@@ -78,6 +78,7 @@ func assertAlbumAttachments(t *testing.T, st *Store, albumID, rgID int) {
 // into another re-keys it, and the reconciliation moves the surviving row onto the new
 // key instead of letting the old one ghost with its pid and attachments.
 func TestScanMoveCarriesAlbumIdentity(t *testing.T) {
+	t.Parallel()
 	st, lib, albumID, albPID, rgID := moveFixture(t)
 	ctx := context.Background()
 
@@ -123,6 +124,7 @@ func TestScanMoveCarriesAlbumIdentity(t *testing.T) {
 // into the incumbent, which keeps its own pid and art and takes the locks the old row
 // held.
 func TestScanMoveIntoEstablishedAlbumMergesAttachments(t *testing.T) {
+	t.Parallel()
 	st, lib, oldID, oldPID, _ := moveFixture(t)
 	ctx := context.Background()
 
@@ -193,6 +195,7 @@ func TestScanMoveIntoEstablishedAlbumMergesAttachments(t *testing.T) {
 // same release group that simply carries no attachments. It reads bare, so it is the one
 // merged away, and the drained curated row keeps its pid and takes over its folder key.
 func TestScanMoveOntoBareButPopulatedAlbum(t *testing.T) {
+	t.Parallel()
 	st, lib, albumID, albPID, rgID := moveFixture(t)
 	ctx := context.Background()
 
@@ -247,6 +250,7 @@ func TestScanMoveOntoBareButPopulatedAlbum(t *testing.T) {
 // TestScanYearRetagKeepsAlbum: the year keys no album, so an external year retag of
 // every member leaves the album on its key, with nothing to carry and no row forked.
 func TestScanYearRetagKeepsAlbum(t *testing.T) {
+	t.Parallel()
 	st, lib, albumID, albPID, rgID := moveFixture(t)
 	ctx := context.Background()
 
@@ -331,6 +335,7 @@ const retagFolder = "/lib/Alpha/One"
 // unchanged folder is what ties them together, and the old row carries onto the new
 // key and follows it under the new group.
 func TestScanTitleRetagCarriesAlbum(t *testing.T) {
+	t.Parallel()
 	st, lib, albumID, albPID, _ := moveFixture(t)
 
 	for _, s := range []trackSpec{
@@ -356,6 +361,7 @@ func TestScanTitleRetagCarriesAlbum(t *testing.T) {
 // established group is the one that survives the fold, keeping its pid and taking the
 // new title, which is the album rung's bare-destination rule one level up.
 func TestScanTitleRetagKeepsReleaseGroupPID(t *testing.T) {
+	t.Parallel()
 	st, lib, albumID, albPID, rgID := moveFixture(t)
 	rgPID := scalarStr(t, st, "SELECT pid FROM release_group WHERE id=?", rgID)
 
@@ -387,6 +393,7 @@ func TestScanTitleRetagKeepsReleaseGroupPID(t *testing.T) {
 // leaves behind, so nothing on the scan path re-marks it and the closing verify is what
 // catches a rollup left stale by the primary-artist flip.
 func TestScanAlbumArtistRetagIntoEstablishedAlbumKeepsGroupPID(t *testing.T) {
+	t.Parallel()
 	st, lib, albumID, _, rgID := moveFixture(t)
 	ctx := context.Background()
 	rgPID := scalarStr(t, st, "SELECT pid FROM release_group WHERE id=?", rgID)
@@ -468,6 +475,7 @@ func TestScanAlbumArtistRetagIntoEstablishedAlbumKeepsGroupPID(t *testing.T) {
 // TestScanArtistRetagCarriesAlbum: an artist retag re-keys the release group through
 // its artist segment instead of its title, and carries on the same folder evidence.
 func TestScanArtistRetagCarriesAlbum(t *testing.T) {
+	t.Parallel()
 	st, lib, albumID, albPID, _ := moveFixture(t)
 
 	for _, s := range []trackSpec{
@@ -486,6 +494,7 @@ func TestScanArtistRetagCarriesAlbum(t *testing.T) {
 // folder shares neither release group nor folder with the old row, so the carry rests
 // on the essence relink alone: the file came from the folder the old key names.
 func TestScanRetagWithMoveCarriesAlbum(t *testing.T) {
+	t.Parallel()
 	st, lib, albumID, albPID, _ := moveFixture(t)
 
 	for _, s := range []trackSpec{
@@ -506,6 +515,7 @@ func TestScanRetagWithMoveCarriesAlbum(t *testing.T) {
 // TestScanRetagWithMoveCarriesDiscFolderAlbum: an album laid out in disc folders is keyed
 // by the folder above them, so the relink corroborates its carry by that folder too.
 func TestScanRetagWithMoveCarriesDiscFolderAlbum(t *testing.T) {
+	t.Parallel()
 	st, lib, albumID, albPID, _ := moveFixtureAt(t, "/lib/Alpha/One/CD1/01.flac", "/lib/Alpha/One/CD2/02.flac")
 
 	for _, s := range []trackSpec{
@@ -527,6 +537,7 @@ func TestScanRetagWithMoveCarriesDiscFolderAlbum(t *testing.T) {
 // files by their new path and never relinks. The organize journal is the only evidence
 // left, and its committed row carries the album.
 func TestScanOrganizedMoveThenRetagCarriesAlbum(t *testing.T) {
+	t.Parallel()
 	st, lib, albumID, albPID, _ := moveFixture(t)
 
 	for _, n := range []string{"01", "02"} {
@@ -550,6 +561,7 @@ func TestScanOrganizedMoveThenRetagCarriesAlbum(t *testing.T) {
 // TestScanOrganizedDiscFolderMoveCarriesAlbum: the organize journal's two ends are held
 // against the album folders above the disc folders, the folders the two keys name.
 func TestScanOrganizedDiscFolderMoveCarriesAlbum(t *testing.T) {
+	t.Parallel()
 	st, lib, albumID, albPID, _ := moveFixtureAt(t, "/lib/Alpha/One/CD1/01.flac", "/lib/Alpha/One/CD2/02.flac")
 
 	for _, rel := range []string{"CD1/01.flac", "CD2/02.flac"} {
@@ -574,6 +586,7 @@ func TestScanOrganizedDiscFolderMoveCarriesAlbum(t *testing.T) {
 // later hop than the one that took it out of the album's folder. Its destination still
 // lines up with the new key, and that alone corroborates nothing.
 func TestScanStaleOrganizeJournalStillSplits(t *testing.T) {
+	t.Parallel()
 	st, lib, albumID, albPID, rgID := moveFixture(t)
 
 	for _, n := range []string{"01", "02"} {
@@ -589,6 +602,7 @@ func TestScanStaleOrganizeJournalStillSplits(t *testing.T) {
 // from the staging folder rather than the one the old key names, and the journal's newest
 // row ends there rather than where the file is now, so neither corroborates.
 func TestScanRelinkFromAnotherFolderStillSplits(t *testing.T) {
+	t.Parallel()
 	st, lib, albumID, albPID, rgID := moveFixture(t)
 
 	for _, n := range []string{"01", "02"} {
@@ -660,6 +674,7 @@ func setEntityMBIDColumn(t *testing.T, st *Store, table string, id int, mbid str
 // while their keys stay heuristic, which is what enrichment leaves behind. Two ids are
 // two releases, so the shared folder is a coincidence and the carry is refused.
 func TestScanRetagRefusesConflictingAlbumMBIDs(t *testing.T) {
+	t.Parallel()
 	st, lib, albumID, albPID, rgID := moveFixture(t)
 	destID, _ := sameFolderAlbum(t, st, lib)
 	destPID := scalarStr(t, st, "SELECT pid FROM album WHERE id=?", destID)
@@ -689,6 +704,7 @@ func TestScanRetagRefusesConflictingAlbumMBIDs(t *testing.T) {
 // mbid-keyed group, so folder evidence can reach two identified groups, and folding
 // them on it would merge two different MusicBrainz releases.
 func TestScanRetagRefusesConflictingReleaseGroupMBIDs(t *testing.T) {
+	t.Parallel()
 	st, lib, albumID, albPID, rgID := moveFixture(t)
 	destID, destRGID := sameFolderAlbum(t, st, lib)
 	rgPID := scalarStr(t, st, "SELECT pid FROM release_group WHERE id=?", rgID)
@@ -742,6 +758,7 @@ func organizeMove(t *testing.T, st *Store, src, dst string) {
 // TestScanPartialMoveDoesNotReconcile: the carry waits for the file that drains the old
 // row, so moving one member of two leaves both albums standing.
 func TestScanPartialMoveDoesNotReconcile(t *testing.T) {
+	t.Parallel()
 	st, lib, albumID, albPID, rgID := moveFixture(t)
 
 	putTrack(t, st, lib.ID, trackSpec{

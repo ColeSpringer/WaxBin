@@ -17,6 +17,7 @@ import (
 // whole run, so the job's progress keeps rising from one root to the next, and the
 // message names the root.
 func TestLibraryBeatRisesAcrossRoots(t *testing.T) {
+	t.Parallel()
 	var got []float64
 	var msgs []string
 	rec := func(p float64, msg string) error {
@@ -63,6 +64,7 @@ func twoRootLibrary(t *testing.T) *Library {
 // TestScanSurvivesItsClosingBeat: once every library is scanned, a closing heartbeat that
 // cannot be written does not turn the finished scan into a failure.
 func TestScanSurvivesItsClosingBeat(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	lib := twoRootLibrary(t)
 	libs, err := lib.resolveLibraries(ctx, "")
@@ -84,6 +86,7 @@ func TestScanSurvivesItsClosingBeat(t *testing.T) {
 // TestScanTotalNamesASingleLibrary: a scan of one library names it at the top of its
 // result as well as in its run.
 func TestScanTotalNamesASingleLibrary(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	lib := twoRootLibrary(t)
 	libs, err := lib.Libraries(ctx)

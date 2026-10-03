@@ -17,6 +17,7 @@ import (
 // fatal the day a second migration lands: the fingerprint is the v1 baseline's, not
 // the highest version's.
 func TestFingerprintIgnoresLaterMigrations(t *testing.T) {
+	t.Parallel()
 	baseline := fstest.MapFS{
 		"migrations/0001_init/01_a.sql": mapFile("CREATE TABLE a (x INTEGER);\n"),
 		"migrations/0001_init/02_b.sql": mapFile("CREATE TABLE b (y INTEGER);\n"),
@@ -44,6 +45,7 @@ func TestFingerprintIgnoresLaterMigrations(t *testing.T) {
 // TestFingerprintRejectsAStreamWithoutABaseline guards the other half: taking
 // ms[0] is only correct because version 1 is required to be there.
 func TestFingerprintRejectsAStreamWithoutABaseline(t *testing.T) {
+	t.Parallel()
 	_, err := baselineFingerprint(fstest.MapFS{
 		"migrations/0002_later.sql": mapFile("CREATE TABLE a (x INTEGER);\n"),
 	})
@@ -54,6 +56,7 @@ func TestFingerprintRejectsAStreamWithoutABaseline(t *testing.T) {
 }
 
 func TestFingerprintIsStableAndNonZero(t *testing.T) {
+	t.Parallel()
 	first, err := baselineFingerprint(migrationsFS)
 	if err != nil {
 		t.Fatalf("first: %v", err)
@@ -105,6 +108,7 @@ func newCatalog(t *testing.T) string {
 }
 
 func TestFreshCatalogStampsBaseline(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	path := newCatalog(t)
 
@@ -143,6 +147,7 @@ func TestFreshCatalogStampsBaseline(t *testing.T) {
 }
 
 func TestOpenRefusesForeignBaseline(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	want, err := buildBaseline()
 	if err != nil {
@@ -175,6 +180,7 @@ func TestOpenRefusesForeignBaseline(t *testing.T) {
 }
 
 func TestAllowStaleOpensReadOnlyOnly(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	want, err := buildBaseline()
 	if err != nil {
@@ -203,6 +209,7 @@ func TestAllowStaleOpensReadOnlyOnly(t *testing.T) {
 // TestUninitializedCatalogStillSaysInit pins the probe order: an empty file is
 // missing both, and "run init" is the useful answer.
 func TestUninitializedCatalogStillSaysInit(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "empty.db")
 	raw, err := sql.Open(driverName, "file:"+path)
 	if err != nil {

@@ -66,6 +66,7 @@ func (fx codecFixture) path(tb testing.TB, dir, name string, rate int, sig []flo
 // codec rename, or a new codec ID with no fixture, fails here loudly rather than
 // mislabeling doctor's coverage table.
 func TestCoverageDecodesEveryCodec(t *testing.T) {
+	t.Parallel()
 	const rate = 44100
 	sig := testaudio.ReferenceSignal(rate, 3*time.Second)
 	eng := New(nil)
@@ -95,6 +96,7 @@ func TestCoverageDecodesEveryCodec(t *testing.T) {
 // wrote the mono source as two channels; matching within a decibel says the decode
 // is right rather than merely non-empty.
 func TestMusepackStreamVersionsDecode(t *testing.T) {
+	t.Parallel()
 	const rate = 44100
 	eng := New(nil)
 	level := func(path string) float64 { return monoLevelDB(t, eng, path) }
@@ -129,6 +131,7 @@ func monoLevelDB(tb testing.TB, eng *Engine, path string) float64 {
 // non-empty. Each was encoded from a ReferenceSignal WAV, so comparing the level
 // of its decode with the level of that same WAV says the decode is right.
 func TestTelephonyCodecsDecodeToTheReferenceLevel(t *testing.T) {
+	t.Parallel()
 	eng := New(nil)
 	refLevel := make(map[int]float64)
 	for _, rate := range []int{8000, 44100} {
@@ -157,6 +160,7 @@ func TestTelephonyCodecsDecodeToTheReferenceLevel(t *testing.T) {
 // matters: one identical-LUFS assertion over every format would be wrong for the
 // lossy half. Every format WaxFlow encodes belongs in one list or the other.
 func TestFormatLoudnessParity(t *testing.T) {
+	t.Parallel()
 	const rate = 44100
 	sig := testaudio.ReferenceSignal(rate, 4*time.Second)
 	eng := New(nil)

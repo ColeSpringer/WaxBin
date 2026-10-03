@@ -11,6 +11,7 @@ import (
 // your failure is something else") has to be tellable from marked without parsing
 // the text column.
 func TestMarkMissingViewJSON(t *testing.T) {
+	t.Parallel()
 	b, err := json.Marshal([]markMissingView{
 		{PID: "i1", Outcome: "marked"},
 		{PID: "i2", Outcome: "files-present"},

@@ -41,6 +41,7 @@ func detachFixture(t *testing.T, relMBID string) (*Store, *model.Library, int, s
 // its other members alone. The release group is heuristic here, so the member stays under
 // it rather than forking a second one.
 func TestDetachMovesMemberToHeuristicAlbum(t *testing.T) {
+	t.Parallel()
 	const relMBID = "44444444-4444-4444-4444-444444444444"
 	st, _, albumID, albumPID, rgID, rgPID, pid1, pid2 := detachFixture(t, relMBID)
 	ctx := context.Background()
@@ -108,6 +109,7 @@ func TestDetachMovesMemberToHeuristicAlbum(t *testing.T) {
 // album curated, pid intact, and empty, which is the ghost the scan reconciliation
 // exists to avoid. The refusal points at the whole-album escape hatch instead.
 func TestDetachRefusesLastMember(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	const relMBID = "55555555-5555-5555-5555-555555555555"
@@ -162,6 +164,7 @@ func groupKeyedFixture(t *testing.T, rgMBID string) (*Store, *model.Library, int
 // its members to MusicBrainz on every re-resolve, so detach applies there too. The freed
 // member lands on a chain with no identifier anywhere in it.
 func TestDetachMovesReleaseGroupKeyedMember(t *testing.T) {
+	t.Parallel()
 	const rgMBID = "77777777-7777-7777-7777-777777777777"
 	st, _, albumID, albumPID := groupKeyedFixture(t, rgMBID)
 	ctx := context.Background()
@@ -208,6 +211,7 @@ func TestDetachMovesReleaseGroupKeyedMember(t *testing.T) {
 // group-keyed shape too, and names the hatch that fits it, which is the release group's
 // own mbid rather than the album's.
 func TestDetachRefusesLastMemberOfGroupKeyedAlbum(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	const rgMBID = "88888888-8888-8888-8888-888888888888"
@@ -232,6 +236,7 @@ func TestDetachRefusesLastMemberOfGroupKeyedAlbum(t *testing.T) {
 // TestDetachRefusesHeuristicAlbum: a member of an album keyed on tags and folder already
 // resolves from its own tags, so there is nothing to detach it from.
 func TestDetachRefusesHeuristicAlbum(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	for i, title := range []string{"T1", "T2"} {
@@ -258,6 +263,7 @@ func TestDetachRefusesHeuristicAlbum(t *testing.T) {
 // TestDetachRefusesNonTrack: only a track sits on an album chain, so a book is refused
 // rather than sent through the track re-resolve.
 func TestDetachRefusesNonTrack(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putBook(t, st, lib.ID, bookSpec{
@@ -279,6 +285,7 @@ func TestDetachRefusesNonTrack(t *testing.T) {
 // re-resolve and leaves the detach standing, while a retag (same essence, new bytes)
 // puts the member straight back on the identified album.
 func TestDetachRetagRescanReadopts(t *testing.T) {
+	t.Parallel()
 	const relMBID = "66666666-6666-6666-6666-666666666666"
 	st, lib, albumID, _, _, _, pid1, _ := detachFixture(t, relMBID)
 	ctx := context.Background()

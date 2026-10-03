@@ -33,6 +33,7 @@ func entityExists(t *testing.T, st *Store, table, name string) bool {
 }
 
 func TestMergeArtists(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	// Two heuristically-distinct artists for the same act (the "The"-strip does not
@@ -80,6 +81,7 @@ func TestMergeArtists(t *testing.T) {
 }
 
 func TestMergeArtistsUnionsMBIDAndEnrichmentMarker(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{
@@ -126,6 +128,7 @@ func TestMergeArtistsUnionsMBIDAndEnrichmentMarker(t *testing.T) {
 // TestMergeCarriesAnOwedLookup: a loser whose lookup is owed hands the survivor an owed
 // marker, not a settled one, so the survivor is still asked on the next pass.
 func TestMergeCarriesAnOwedLookup(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{
@@ -160,6 +163,7 @@ func TestMergeCarriesAnOwedLookup(t *testing.T) {
 // Without it, merging two albums strands the loser's entity_enrichment row and the
 // survivor reads as never-searched.
 func TestMergeAlbumUnionsEnrichmentMarker(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{
@@ -212,6 +216,7 @@ func TestMergeAlbumUnionsEnrichmentMarker(t *testing.T) {
 }
 
 func TestMergeGenresDedupsSharedItems(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	// One track tagged with both "Hip-Hop" and "Rap": merging Rap into Hip-Hop must
@@ -246,6 +251,7 @@ func TestMergeGenresDedupsSharedItems(t *testing.T) {
 }
 
 func TestMergeAlbumsAcrossReleaseGroups(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	// Two albums under two different release groups (distinct album artists).
@@ -350,6 +356,7 @@ func artHashes(t *testing.T, st *Store, entityType string, entityID int64) []str
 }
 
 func TestMergeArtistPreservesSurvivorArt(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/a/1.flac", essence: "e1", content: "c1", title: "One", artist: "Beatles", album: "A"})
@@ -374,6 +381,7 @@ func TestMergeArtistPreservesSurvivorArt(t *testing.T) {
 }
 
 func TestMergeArtistInheritsArtWhenSurvivorHasNone(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/a/1.flac", essence: "e1", content: "c1", title: "One", artist: "Beatles", album: "A"})
@@ -411,6 +419,7 @@ func seedArtRole(t *testing.T, st *Store, hash, entityType string, entityID int6
 // TestMergeArtInheritsPerRole verifies the per-role inherit: the survivor keeps
 // the roles it fills and gains only the loser's roles it lacks, in one merge.
 func TestMergeArtInheritsPerRole(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/a/1.flac", essence: "e1", content: "c1", title: "One", artist: "Beatles", album: "A"})
@@ -442,6 +451,7 @@ func TestMergeArtInheritsPerRole(t *testing.T) {
 // does curate keeps its own answer, where the union would have promoted it to locked
 // over a picture the loser never protected.
 func TestMergeCarriesRoleArtLocks(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/a/1.flac", essence: "e1", content: "c1", title: "One", artist: "Beatles", album: "A"})
@@ -498,6 +508,7 @@ func roleLocked(t *testing.T, st *Store, entityType string, entityID int64, fiel
 }
 
 func TestMergePreservesUnrelatedSelfLoop(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/a/1.flac", essence: "e1", content: "c1", title: "One", artist: "Aartist", album: "A"})
@@ -524,6 +535,7 @@ func TestMergePreservesUnrelatedSelfLoop(t *testing.T) {
 }
 
 func TestMergeEntitiesAtomicOnBadLoser(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/a/1.flac", essence: "e1", content: "c1", title: "One", artist: "Surv", album: "A"})
@@ -542,6 +554,7 @@ func TestMergeEntitiesAtomicOnBadLoser(t *testing.T) {
 }
 
 func TestMergeEmitsPerItemChangeLog(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/a/1.flac", essence: "e1", content: "c1", title: "LoserSong", artist: "Beatles", album: "A"})
@@ -568,6 +581,7 @@ func TestMergeEmitsPerItemChangeLog(t *testing.T) {
 }
 
 func TestMergeReleaseGroupUnionsType(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/a/1.flac", essence: "e1", content: "c1", title: "One", artist: "A", albumArt: "A", album: "SurvRG"})
@@ -600,6 +614,7 @@ func TestMergeReleaseGroupUnionsType(t *testing.T) {
 // survivor's empty roles, so its recorded answer no longer describes anything), and
 // leaves the survivor's own marker alone.
 func TestMergeDropsLoserAuxMarker(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/a/1.flac", essence: "e1", content: "c1", title: "One", artist: "A", albumArt: "A", album: "SurvRG"})
@@ -660,6 +675,7 @@ func seriesFixture(t *testing.T) (*Store, model.PID, model.PID) {
 // TestMergeSeries collapses one series onto another: the loser's books re-point, the
 // loser row goes, and the moved book gets its own item delta.
 func TestMergeSeries(t *testing.T) {
+	t.Parallel()
 	st, survivor, loser := seriesFixture(t)
 	ctx := context.Background()
 	survivorID := entityIDByCol(t, st, "series", "name", "Dune Chronicles")
@@ -696,6 +712,7 @@ func TestMergeSeries(t *testing.T) {
 // under the dead series unless the merge reindexes it. `db verify` counts rows rather
 // than content, so nothing else catches the drift.
 func TestMergeSeriesRebuildsBookFTS(t *testing.T) {
+	t.Parallel()
 	st, survivor, loser := seriesFixture(t)
 	ctx := context.Background()
 
@@ -716,6 +733,7 @@ func TestMergeSeriesRebuildsBookFTS(t *testing.T) {
 // reuses rowids, so a candidate row left behind by a merged-away loser would hand the
 // next entity to take that id a pre-aged first_seen and an immediate sweep.
 func TestMergeDropsLoserOrphanCandidate(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/a/1.flac", essence: "e1", content: "c1", title: "One", artist: "A", albumArt: "A", album: "SurvRG"})
@@ -757,6 +775,7 @@ func TestMergeDropsLoserOrphanCandidate(t *testing.T) {
 // mergeEntityTx directly because the public entry point's own Valid gate catches an
 // unknown type long before either switch sees it.
 func TestMergeUnhandledTypeRefusesBeforeDeleting(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/a/1.flac", essence: "e1", content: "c1", title: "One", artist: "Surv", album: "A"})
@@ -778,6 +797,7 @@ func TestMergeUnhandledTypeRefusesBeforeDeleting(t *testing.T) {
 }
 
 func TestMergeErrors(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{
@@ -814,6 +834,7 @@ func TestMergeErrors(t *testing.T) {
 // records an answer about the loser, and album rowids are reused, so it goes with the
 // loser rather than being inherited.
 func TestMergeAlbumDropsFieldsMarker(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{

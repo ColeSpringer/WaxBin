@@ -22,6 +22,7 @@ func identityKeyOf(t *testing.T, st *Store, pid model.PID) string {
 // key is adopted, a same/empty key is a no-op, a key already held by another book is
 // skipped (not forced into a unique-index violation), and a track is never re-keyed.
 func TestRekeyBook(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 

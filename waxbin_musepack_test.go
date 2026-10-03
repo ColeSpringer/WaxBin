@@ -13,6 +13,7 @@ import (
 // WaxFlow, which is why the scanner picks them up rather than leaving them in the
 // analyze pass's retry set.
 func TestAnalyzeDecodesMusepack(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	for _, f := range [][2]string{{"ref-2s-sv7.mpc", "seven.mpc"}, {"ref-2s-sv8-chapters.mpc", "eight.mp+"}} {

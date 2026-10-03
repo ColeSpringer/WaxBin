@@ -14,6 +14,7 @@ import (
 // have, and every one of those widths used to mint its own cache row. They round to
 // one rung now, so a resized window costs one derivative rather than one per width.
 func TestSizedResolveCollapsesNearbyBoxesOntoOneRung(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStoreAt(t)
 
@@ -54,6 +55,7 @@ func TestSizedResolveCollapsesNearbyBoxesOntoOneRung(t *testing.T) {
 // up must not fold genuinely different sizes together, or a grid tile and a hero image
 // would fight over one cache entry.
 func TestSizedResolveSeparatesDistinctRungs(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStoreAt(t)
 
@@ -87,6 +89,7 @@ func TestSizedResolveSeparatesDistinctRungs(t *testing.T) {
 // resamples. It is a long thin strip rather than a square so the fixture stays cheap:
 // fitDimensions measures the longest side, which is all this turns on.
 func TestResolveAboveTheLadderIsServedAsAsked(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStoreAt(t)
 
@@ -129,6 +132,7 @@ func TestResolveAboveTheLadderIsServedAsAsked(t *testing.T) {
 // needs to know which one so it can key its own cache off it. Thumbnail is what
 // separates the two, not Box.
 func TestResolveReportsRungOnEveryAnswer(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, _, lib := openStoreAt(t)
 

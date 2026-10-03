@@ -56,6 +56,7 @@ func serveOneRefusal(t *testing.T, sock, msg string) {
 // over its flock with a misleading held-lock error, so the refusal must surface as its
 // own error naming both sides and the fix.
 func TestDialServerVersionMismatchIsAHardError(t *testing.T) {
+	t.Parallel()
 	sock := testsock.Path(t)
 	refusal := fmt.Sprintf("%s %d (this server speaks 14)", proxy.VersionMismatchPrefix, proxy.ProtocolVersion)
 	serveOneRefusal(t, sock, refusal)
@@ -78,6 +79,7 @@ func TestDialServerVersionMismatchIsAHardError(t *testing.T) {
 // TestDialServerDeadSocketStillFallsBack: an advertisement whose socket nobody serves
 // keeps yielding a silent nil, so the direct-open fallback is untouched.
 func TestDialServerDeadSocketStillFallsBack(t *testing.T) {
+	t.Parallel()
 	dbPath := advertiseSocket(t, testsock.Path(t))
 	px, err := dialServer(dbPath)
 	if px != nil || err != nil {

@@ -57,6 +57,7 @@ func flagOnlyLibrary(t *testing.T, lib *Library, ro bool) {
 // alone and owed, counted apart from the other skips, and written by the first pass
 // after the flag clears.
 func TestEnrichmentWriteBackSkipsALibraryFlaggedAfterTheQuery(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	lib, db, items := openTwoTracks(t)
 	for _, it := range items {
@@ -96,6 +97,7 @@ func TestEnrichmentWriteBackSkipsALibraryFlaggedAfterTheQuery(t *testing.T) {
 // TestReplayGainWriteBackSkipsALibraryFlaggedAfterTheQuery is the same check for the
 // ReplayGain write-back.
 func TestReplayGainWriteBackSkipsALibraryFlaggedAfterTheQuery(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	lib, _, items := openTwoTracks(t)
 	for _, it := range items {
@@ -155,6 +157,7 @@ func (w *warnCounter) Handle(_ context.Context, r slog.Record) error {
 // user chose, so the watch loop's inbox import passes over it without a warning each
 // tick.
 func TestWatchInboxQuietWhileEveryLibraryIsReadOnly(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root, inbox := t.TempDir(), t.TempDir()
 	writeRaw(t, filepath.Join(inbox, "a.mp3"), testaudio.BuildMP3("A", "Band", "One", 1))

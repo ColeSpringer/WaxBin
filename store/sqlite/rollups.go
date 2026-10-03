@@ -174,7 +174,7 @@ func placeholders(n int) string {
 }
 
 // idBatchSize bounds an IN(...) / multi-row VALUES batch to stay well under the
-// SQLite bound-parameter limit.
+// SQLite bound-parameter limit, matching query's maxInValues cap.
 const idBatchSize = 500
 
 // uniquePIDs deduplicates pids preserving first-seen order, the shared front

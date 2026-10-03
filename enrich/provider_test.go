@@ -105,6 +105,7 @@ func genreProvenanceProvider(t *testing.T, dbPath string, item model.PID) string
 // returns no genres; an injected provider fills the gap, and its name is recorded as
 // the genre field's provenance provider.
 func TestInjectedProviderFillsGenreGap(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	item := seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
@@ -136,6 +137,7 @@ func TestInjectedProviderFillsGenreGap(t *testing.T) {
 // display-primary one (injected outranks the built-ins) and its name is the recorded
 // provider, while the union still includes every provider's genres.
 func TestInjectedProviderWinsGenreConflict(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	item := seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
@@ -175,6 +177,7 @@ func TestInjectedProviderWinsGenreConflict(t *testing.T) {
 // TestListenBrainzGenres: the built-in ListenBrainz provider supplies genres from an
 // httptest server, recorded with its provider name, when nothing else has any.
 func TestListenBrainzGenres(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	item := seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
@@ -203,6 +206,7 @@ func TestListenBrainzGenres(t *testing.T) {
 // provider as the lyrics source. An instrumental is looked up and left without lyrics.
 // A second run is a no-op (the marker is respected).
 func TestLRCLIBLyrics(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	item := seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
@@ -264,6 +268,7 @@ func TestLRCLIBLyrics(t *testing.T) {
 // TestOptionalProviderErrorDoesNotAbort: an injected provider that errors is
 // best-effort, so the run completes and the MusicBrainz genres still land.
 func TestOptionalProviderErrorDoesNotAbort(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	item := seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
@@ -302,6 +307,7 @@ func TestOptionalProviderErrorDoesNotAbort(t *testing.T) {
 // TestLyricsFillWhenEmpty: a track that already has lyrics is never looked up, so an
 // existing sidecar/embedded copy is preserved and no marker is written.
 func TestLyricsFillWhenEmpty(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	item := seedTrackWithLyrics(t, st, lib.ID, &model.Lyrics{
@@ -339,6 +345,7 @@ func TestLyricsFillWhenEmpty(t *testing.T) {
 // lock the same as the built-in path: a locked item is never filled, while an unlocked
 // sibling in the same release group is.
 func TestInjectedGenreProviderRespectsLock(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	locked := seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
@@ -372,6 +379,7 @@ func TestInjectedGenreProviderRespectsLock(t *testing.T) {
 // negative lyrics marker is written; otherwise retagging it later would leave it
 // permanently skipped.
 func TestLyricsSkipsUntaggedTrack(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Mystery Track", "", "")
@@ -398,6 +406,7 @@ func TestLyricsSkipsUntaggedTrack(t *testing.T) {
 // TestLRCLIBParsesEdgeTimestamps: an over-precise fraction (4 digits) and a long
 // minute field (3 digits) both parse rather than dropping the line.
 func TestLRCLIBParsesEdgeTimestamps(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, _, lib := openStore(t)
 	item := seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
@@ -429,6 +438,7 @@ func TestLRCLIBParsesEdgeTimestamps(t *testing.T) {
 // TestListenBrainzDropsFolksonomyTags: community tags with no genre_mbid (raw
 // folksonomy like "seen live") are dropped, never written as genres.
 func TestListenBrainzDropsFolksonomyTags(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	item := seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
@@ -453,6 +463,7 @@ func TestListenBrainzDropsFolksonomyTags(t *testing.T) {
 // than the cap never evicts an authoritative MusicBrainz genre; only the non-MB
 // additions are capped.
 func TestMusicBrainzGenresSurviveProviderCap(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	item := seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
@@ -487,6 +498,7 @@ func TestMusicBrainzGenresSurviveProviderCap(t *testing.T) {
 // TestGatherCoverPassesIdentityHints: the cover request carries the release title and
 // artist, so an injected cover provider that keys on text (not only the MBID) can match.
 func TestGatherCoverPassesIdentityHints(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, _, lib := openStore(t)
 	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
@@ -521,6 +533,7 @@ func TestGatherCoverPassesIdentityHints(t *testing.T) {
 // duration drift), the provider retries by name and still finds the lyrics, so the
 // track is not permanently marked lyric-less.
 func TestLRCLIBRetriesWithoutDurationOnMiss(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, _, lib := openStore(t)
 	item := seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
@@ -595,6 +608,7 @@ func assertDerivedConsistent(t *testing.T, st *sqlite.Store) {
 // gathering onto the request, so a multi-capability provider can tell what the answer
 // will be used for; a zero-value request still wants everything.
 func TestRequestWantStampedPerPass(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, _, lib := openStore(t)
 	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
@@ -641,6 +655,7 @@ func TestRequestWantStampedPerPass(t *testing.T) {
 // can key its expensive work on req.Wants, so the genres pass no longer triggers a
 // cover download nobody reads.
 func TestMultiCapProviderSkipsUnwantedWork(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	item := seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
@@ -696,6 +711,7 @@ func rgFrontHash(t *testing.T, dbPath string) string {
 // asked once for both, with both capabilities in Want, so one that honors Want and skips
 // what was not asked still fills the auxiliary roles beside the front.
 func TestOneAskServesBothHalvesAtEveryRung(t *testing.T) {
+	t.Parallel()
 	for _, c := range []struct {
 		rung       enrich.TargetType
 		front, aux enrich.Capability
@@ -750,6 +766,7 @@ func TestOneAskServesBothHalvesAtEveryRung(t *testing.T) {
 // TestGatherArtFrontAliasEquivalence: a Cover-only provider behaves exactly as it
 // always did; the front lands and nothing counts as aux.
 func TestGatherArtFrontAliasEquivalence(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
@@ -776,6 +793,7 @@ func TestGatherArtFrontAliasEquivalence(t *testing.T) {
 // TestGatherArtRoleMapPrecedence: when a provider offers both, the role map's front
 // beats the Cover alias.
 func TestGatherArtRoleMapPrecedence(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
@@ -806,6 +824,7 @@ func TestGatherArtRoleMapPrecedence(t *testing.T) {
 // consulted, and an aux-only provider ahead of the winner still contributes its
 // roles (first-offer-wins per role).
 func TestGatherArtStopsAtFrontWinner(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	cfg := func(st enrich.Store, providers ...enrich.Provider) *enrich.Service {
 		return enrich.New(st, enrich.Config{
@@ -874,6 +893,7 @@ func TestGatherArtStopsAtFrontWinner(t *testing.T) {
 // release-group rung with its attribution, resolves at that level only, and its
 // source stays referenced (GCArt reclaims nothing while the entity lives).
 func TestAuxArtAppliedAtReleaseGroup(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	track := seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
@@ -929,6 +949,7 @@ func TestAuxArtAppliedAtReleaseGroup(t *testing.T) {
 // is not "present", so the Cover alias still supplies the effective front instead of
 // being suppressed and then dropped.
 func TestGatherArtEmptyFrontFallsBackToCover(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
@@ -959,6 +980,7 @@ func TestGatherArtEmptyFrontFallsBackToCover(t *testing.T) {
 // a provider that declares nothing is asked wherever its union reaches, and a declaration
 // cannot widen the union.
 func TestCapabilitiesAtNarrowsDispatch(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	releaseAsks := func(t *testing.T, p *enrich.Mock, seen *[]enrich.Request) *enrich.Result {
 		t.Helper()
@@ -1013,6 +1035,7 @@ func TestCapabilitiesAtNarrowsDispatch(t *testing.T) {
 // track takes no marker, so the next pass asks again as though for the first time rather
 // than waiting out the retry window.
 func TestLyricsProviderFailureLeavesTheTrackQueued(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	item := seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
@@ -1057,6 +1080,7 @@ func TestLyricsProviderFailureLeavesTheTrackQueued(t *testing.T) {
 // TestCommunityGenreFailureLeavesTheGroupQueued: a community-genre outage defers the
 // group like an art failure does, and the next pass lands the tag the outage cost it.
 func TestCommunityGenreFailureLeavesTheGroupQueued(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	item := seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")

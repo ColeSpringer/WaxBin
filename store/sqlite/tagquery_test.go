@@ -41,6 +41,7 @@ func matchTag(t *testing.T, st *Store, cond query.Cond) map[model.PID]bool {
 }
 
 func TestQueryTagEqualityAnyMatch(t *testing.T) {
+	t.Parallel()
 	st, a, b, c := tagFixture(t)
 	// Equality is ANY-match over a multi-valued tag: A carries happy among its values.
 	got := matchTag(t, st, query.Cond{Field: "tag.MOOD", Op: query.OpIs, Value: "happy"})
@@ -59,6 +60,7 @@ func TestQueryTagEqualityAnyMatch(t *testing.T) {
 }
 
 func TestQueryTagPresenceAndMissing(t *testing.T) {
+	t.Parallel()
 	st, a, b, c := tagFixture(t)
 	if got := matchTag(t, st, query.Cond{Field: "tag.MYKEY", Op: query.OpIsPresent}); !got[a] || got[b] || got[c] {
 		t.Errorf("tag.MYKEY isPresent = %v, want only A", got)
@@ -70,6 +72,7 @@ func TestQueryTagPresenceAndMissing(t *testing.T) {
 }
 
 func TestQueryTagContainsCaseInsensitive(t *testing.T) {
+	t.Parallel()
 	st, a, _, _ := tagFixture(t)
 	// Substring (LIKE) is ASCII-case-insensitive, unlike equality.
 	if got := matchTag(t, st, query.Cond{Field: "tag.MYKEY", Op: query.OpContains, Value: "FO"}); !got[a] || len(got) != 1 {
@@ -81,6 +84,7 @@ func TestQueryTagContainsCaseInsensitive(t *testing.T) {
 // denied iff the value V is present on key X. An item carrying V is excluded, an item
 // with a different value or no tag at all matches.
 func TestQueryTagIsNotDenyContract(t *testing.T) {
+	t.Parallel()
 	st, a, b, c := tagFixture(t)
 	got := matchTag(t, st, query.Cond{Field: "tag.MOOD", Op: query.OpIsNot, Value: "happy"})
 	if got[a] {
@@ -99,6 +103,7 @@ func TestQueryTagIsNotDenyContract(t *testing.T) {
 // on read (only the item carrying the value is a member). No store/CLI code is needed
 // beyond the query primitive; rules round-trip verbatim.
 func TestSmartPlaylistTagRule(t *testing.T) {
+	t.Parallel()
 	st, a, _, _ := tagFixture(t)
 	ctx := context.Background()
 	rule := query.New(query.EntityItems).Where("tag.MOOD", query.OpIs, "happy").Build()
@@ -116,6 +121,7 @@ func TestSmartPlaylistTagRule(t *testing.T) {
 }
 
 func TestQueryTagRejectsReservedAndInvalidKeys(t *testing.T) {
+	t.Parallel()
 	st, _, _, _ := tagFixture(t)
 	ctx := context.Background()
 	for _, field := range []string{"tag.TITLE", "tag.A=B", "tag."} {

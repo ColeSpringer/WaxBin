@@ -30,6 +30,7 @@ import (
 // TestEndToEndSingleFile verifies the core flow from scan to store to query to
 // organize and read back.
 func TestEndToEndSingleFile(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -126,6 +127,7 @@ func TestEndToEndSingleFile(t *testing.T) {
 // them; and the fingerprint index groups two encodings of one recording while
 // excluding an unrelated track.
 func TestAnalyzeAndGroupAltEncodings(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -200,6 +202,7 @@ func TestAnalyzeAndGroupAltEncodings(t *testing.T) {
 // ReplayGain for decodable files (WAV loudness works whether via ffmpeg's
 // ebur128 or the pure-Go R128 fallback, so the assertion is host-independent).
 func TestAnalyzeMeasuresLoudness(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -260,6 +263,7 @@ func itemPIDByTitle(t *testing.T, ctx context.Context, lib *waxbin.Library, titl
 // file's identity by pid, and GetMany returns item views in request order,
 // skipping an unknown pid.
 func TestFileAndGetMany(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -322,6 +326,7 @@ func TestFileAndGetMany(t *testing.T) {
 // that write. The 0-on-empty case lives beside the store, since Open seeds a default
 // user whose delta is already on the feed by the time a Library exists.
 func TestLatestChangeSeqTracksTheFeedTail(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -366,6 +371,7 @@ func TestLatestChangeSeqTracksTheFeedTail(t *testing.T) {
 // change bus wired through the facade: a star/rating round-trips for the default
 // user, and a subscriber sees the play_state delta.
 func TestPlaybackAndChangeBus(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -405,17 +411,20 @@ func TestPlaybackAndChangeBus(t *testing.T) {
 	}
 
 	// The subscriber observed play_state deltas for the item.
+	// Publication completes before each mutation returns.
 	var saw bool
-	timeout := time.After(time.Second)
 collect:
 	for {
 		select {
-		case c := <-ch:
+		case c, ok := <-ch:
+			if !ok {
+				t.Fatal("subscription closed before delivering the play_state delta")
+			}
 			if c.EntityType == "play_state" && c.EntityPID == item {
 				saw = true
 				break collect
 			}
-		case <-timeout:
+		default:
 			break collect
 		}
 	}
@@ -430,6 +439,7 @@ collect:
 // needs no external binary. Before the migration it ran only when ffmpeg was
 // installed.
 func TestAnalyzeAIFFNotErrored(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -462,6 +472,7 @@ func TestAnalyzeAIFFNotErrored(t *testing.T) {
 // TestStatsOnFacet verifies the stats summary: structural counts and the
 // Facet-built top genres/artists, plus per-user play stats from play_state.
 func TestStatsOnFacet(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -516,6 +527,7 @@ func TestStatsOnFacet(t *testing.T) {
 // TestDoctorReadOnly verifies doctor works over a read-only open (which never
 // migrates) and reports the catalog's actual applied version.
 func TestDoctorReadOnly(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -553,6 +565,7 @@ func TestDoctorReadOnly(t *testing.T) {
 
 // TestWriteOwnershipConflict verifies a second writer is refused via the flock.
 func TestWriteOwnershipConflict(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -575,6 +588,7 @@ func TestWriteOwnershipConflict(t *testing.T) {
 // TestReadOnlyRefusesMutations verifies a read-only library cannot mutate but
 // can read, and that read-only opens do not contend for the write lock.
 func TestReadOnlyRefusesMutations(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -611,6 +625,7 @@ func TestReadOnlyRefusesMutations(t *testing.T) {
 // TestOrganizeLeavesInPlaceLibraryFiles verifies organize only moves files in
 // the managed library and never touches an in-place library's files.
 func TestOrganizeLeavesInPlaceLibraryFiles(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	managedRoot := t.TempDir()
 	inplaceRoot := t.TempDir()
@@ -664,6 +679,7 @@ func TestOrganizeLeavesInPlaceLibraryFiles(t *testing.T) {
 // TestScanRelativeSubPath verifies a relative --sub-path is resolved under the
 // library root rather than rejected.
 func TestScanRelativeSubPath(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -695,6 +711,7 @@ func TestScanRelativeSubPath(t *testing.T) {
 // path as vanished and flipped the item to missing in the same scan that had
 // just relinked it.
 func TestScanDoesNotMarkRelinkedFileMissing(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -779,6 +796,7 @@ func TestScanDoesNotMarkRelinkedFileMissing(t *testing.T) {
 // the scanner's stale-entry drop has to be fed by every path that reports a relink, not
 // just the track one.
 func TestScanDoesNotMarkRelinkedBookFileMissing(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -833,6 +851,7 @@ func TestScanDoesNotMarkRelinkedBookFileMissing(t *testing.T) {
 // and the store's reconciliation must carry the row rather than leave it ghosting with
 // its pid and star. It also proves the derived state stays consistent afterwards.
 func TestScanFolderMoveKeepsAlbumIdentity(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -893,6 +912,7 @@ func TestScanFolderMoveKeepsAlbumIdentity(t *testing.T) {
 // TestOpenRejectsOverlappingRoots verifies embedders get the same root isolation
 // as the CLI because Open runs config validation.
 func TestOpenRejectsOverlappingRoots(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	base := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -912,6 +932,7 @@ func TestOpenRejectsOverlappingRoots(t *testing.T) {
 // query while another session holds the write lock (what the read-only CLI
 // commands rely on).
 func TestReadOnlyConcurrentWithWriter(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -937,6 +958,7 @@ func TestReadOnlyConcurrentWithWriter(t *testing.T) {
 // TestOrganizeMoveFailureRollsBack verifies a colliding destination fails the
 // action (reported, not fatal) and leaves the source in place.
 func TestOrganizeMoveFailureRollsBack(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -972,6 +994,7 @@ func TestOrganizeMoveFailureRollsBack(t *testing.T) {
 // its same-basename sidecars (renamed to the new basename) and the directory
 // cover art along with it.
 func TestOrganizeRelocatesSidecars(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -1015,6 +1038,7 @@ func TestOrganizeRelocatesSidecars(t *testing.T) {
 // trash and archives its item, a re-scan does not resurrect it, and restore
 // brings both the file and the item back.
 func TestDeleteTrashRestoreRoundTrip(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -1120,6 +1144,7 @@ func TestDeleteTrashRestoreRoundTrip(t *testing.T) {
 // TestPruneBypassesTrash verifies pruning deletes from disk immediately, records
 // no undo entry, and still preserves the logical item.
 func TestPruneBypassesTrash(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -1163,6 +1188,7 @@ func TestPruneBypassesTrash(t *testing.T) {
 // purge removes exactly one entry (file and row) and is NotFound on a repeat or
 // on a restored entry, and an unscoped empty drains the rest.
 func TestEmptyTrashAgeScopeAndPurge(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -1295,6 +1321,7 @@ func TestEmptyTrashAgeScopeAndPurge(t *testing.T) {
 // TestInboxImportAndDedup verifies importing a staging folder places and catalogs
 // the file under the profile, records an import batch, and skips a duplicate.
 func TestInboxImportAndDedup(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	inboxDir := t.TempDir()
@@ -1361,6 +1388,7 @@ func TestInboxImportAndDedup(t *testing.T) {
 // redacted backup does not, and a restored backup re-opens with its catalog and
 // secrets intact.
 func TestBackupRedactAndRestore(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -1427,6 +1455,7 @@ func TestBackupRedactAndRestore(t *testing.T) {
 // TestLogicalExport verifies the JSON export carries metadata and user state, a
 // versioned manifest, and never secrets.
 func TestLogicalExport(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -1518,6 +1547,7 @@ func TestLogicalExport(t *testing.T) {
 // an episode, and play state and a session on that episode all present to be
 // filtered out.
 func TestManifestMatchesExport(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -1578,6 +1608,7 @@ func TestManifestMatchesExport(t *testing.T) {
 // catalog swaps in the backup content, leaves no temp file, and that a no-force
 // restore is refused without disturbing the target.
 func TestRestoreReplacesAtomically(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 
 	// Backup A: a catalog whose single item is titled "FromBackup".
@@ -1631,6 +1662,7 @@ func TestRestoreReplacesAtomically(t *testing.T) {
 // destination differs only by case from an already-cataloged file is quarantined
 // (it would coexist on Linux but collide on a case-insensitive filesystem).
 func TestInboxQuarantinesCaseCollision(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	inboxDir := t.TempDir()
@@ -1688,6 +1720,7 @@ func secretCount(t *testing.T, dbPath string) int {
 // managed root leaves a cover in each destination, where the first destination used to
 // take the only copy. A copy-mode import leaves the staging cover in place besides.
 func TestInboxImportSplitsADirectoryCover(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	musicRoot, bookRoot, podDir := t.TempDir(), t.TempDir(), t.TempDir()
 	inboxDir := t.TempDir()
@@ -1751,6 +1784,7 @@ func bookPath(t *testing.T, root string) string {
 // into the managed tree alongside the audio, so importing does not leave them
 // behind.
 func TestInboxImportCarriesSidecars(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	inboxDir := t.TempDir()
@@ -1790,6 +1824,7 @@ func TestInboxImportCarriesSidecars(t *testing.T) {
 // different destinations) do not both import. The second is a duplicate of the
 // first within the same batch, not just of the prior catalog.
 func TestInboxSkipsWithinBatchDuplicate(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	inboxDir := t.TempDir()
@@ -1858,6 +1893,7 @@ func hasDoneJob(jobs []*model.Job, kind string) bool {
 // book) is scanned, read back as a book with chapters, laid out by the audiobook
 // template, found by search, and leaves the derived data consistent.
 func TestEndToEndAudiobook(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -1952,6 +1988,7 @@ func TestEndToEndAudiobook(t *testing.T) {
 // multi-file audiobook into one book folder rather than relocating only the
 // representative file and splitting the book.
 func TestEndToEndMultiFileAudiobookOrganize(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -2007,6 +2044,7 @@ func TestEndToEndMultiFileAudiobookOrganize(t *testing.T) {
 // reading-ordered names in the book folder rather than colliding (which would skip
 // all but one and split the book).
 func TestMultiFileBookSameBasenameOrganize(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -2048,6 +2086,7 @@ func TestMultiFileBookSameBasenameOrganize(t *testing.T) {
 // parts numbered by their tags, parts on disc folders with no disc tag, and parts whose
 // places come from their file names, one of them back matter.
 func TestImportedBookPartsNeedNoOrganize(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root, staging := t.TempDir(), t.TempDir()
 	lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), root)
@@ -2131,6 +2170,7 @@ func TestImportedBookPartsNeedNoOrganize(t *testing.T) {
 // time lands every part, each named by its number, as one book organize leaves alone; a
 // lone part past the first already carries its number.
 func TestAcquiredBookPartsImportOneAtATime(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root, acq := t.TempDir(), t.TempDir()
 	lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), root)
@@ -2165,6 +2205,7 @@ func TestAcquiredBookPartsImportOneAtATime(t *testing.T) {
 // part's number when it is past the first, the name the part keeps once its siblings
 // arrive, and by the book alone when it is the first.
 func TestOrganizeNamesALonePartByItsNumber(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	narrated := []testaudio.TXXXFrame{{Desc: "NARRATOR", Value: "Reader"}}
@@ -2193,6 +2234,7 @@ func TestOrganizeNamesALonePartByItsNumber(t *testing.T) {
 // removal for EVERY part, not just the representative primary (which would strand
 // the rest on disk).
 func TestTrashExpandsMultiFileBook(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -2234,6 +2276,7 @@ func TestTrashExpandsMultiFileBook(t *testing.T) {
 // three arrive by two different ID3 routes (TPUB for the label, TXXX for the other
 // two), so a mapping regression on either could not surface.
 func TestAlbumReleaseIdentifiersFromTags(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -2282,6 +2325,7 @@ func TestAlbumReleaseIdentifiersFromTags(t *testing.T) {
 // without parsing a finding's message. A limit of 0 lists them all, and an offset pages
 // past the ones already seen.
 func TestDurationMismatchesListsTheLyingHeaders(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -2337,6 +2381,7 @@ func latestJob(t *testing.T, ctx context.Context, lib *waxbin.Library) *model.Jo
 // TestScanJobNamesItsLibrary: a scan of one library records it on the job row, run
 // directly or as a background job, and a scan of every library records no target.
 func TestScanJobNamesItsLibrary(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, "a.mp3"), testaudio.BuildMP3("One", "Artist", "Album", 1))
@@ -2374,6 +2419,7 @@ func TestScanJobNamesItsLibrary(t *testing.T) {
 // copy of it, and a retagged copy of its first track. The copies join the album's items
 // as alternates and stay there through rescans, deletes, promotion and restore.
 func TestSameAudioCopiesEndToEnd(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	for i := 1; i <= 7; i++ {

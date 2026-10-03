@@ -30,6 +30,7 @@ func idColFor(table string) string {
 }
 
 func TestRollupsMaintainedOnWrite(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	// Two tracks of one artist; rollups must be correct WITHOUT a manual refresh.
@@ -55,6 +56,7 @@ func TestRollupsMaintainedOnWrite(t *testing.T) {
 }
 
 func TestRetagDecrementsOldGenreRollup(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	spec := trackSpec{
@@ -81,6 +83,7 @@ func TestRetagDecrementsOldGenreRollup(t *testing.T) {
 }
 
 func TestOrphanDeleteDecrementsRollup(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	// Re-key the single file's essence so the prior item is orphaned and deleted.

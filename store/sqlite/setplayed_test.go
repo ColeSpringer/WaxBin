@@ -13,6 +13,7 @@ func ptrNS(v int64) *int64 { return &v }
 // TestSetPlayedUndoesAPlay covers the verb's reason for existing, across all
 // three play-count modes: nil keeps the count, &0 resets it, &n sets it exactly.
 func TestSetPlayedUndoesAPlay(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	for _, tc := range []struct {
 		name      string
@@ -59,6 +60,7 @@ func TestSetPlayedUndoesAPlay(t *testing.T) {
 // created. A zero count under played=1 would sort as never played in
 // `browse most-played`, and MarkPlayed can never produce it.
 func TestSetPlayedKeepsCountConsistentWithPlayed(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 
 	t.Run("no prior row", func(t *testing.T) {
@@ -119,6 +121,7 @@ func TestSetPlayedKeepsCountConsistentWithPlayed(t *testing.T) {
 }
 
 func TestSetPlayedRejectsInvalidInput(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	item := seedItem(t, st, lib)
@@ -145,6 +148,7 @@ func TestSetPlayedRejectsInvalidInput(t *testing.T) {
 // TestSetPlayedNoOpIsSilent pins the changed bool against the delta feed, which
 // is the observable it claims to mirror.
 func TestSetPlayedNoOpIsSilent(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	item := seedItem(t, st, lib)
@@ -183,6 +187,7 @@ func TestSetPlayedNoOpIsSilent(t *testing.T) {
 }
 
 func TestSetPlayedAsOfRecordedTime(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	item := seedItem(t, st, lib)
@@ -231,6 +236,7 @@ func TestSetPlayedAsOfRecordedTime(t *testing.T) {
 // recorded earlier, and it must never move backwards, or an interactive un-mark
 // stamping at server-now would undercut a future stamp a replay already stored.
 func TestSetPlayedStampScope(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 
 	t.Run("a count-only change leaves the stamp", func(t *testing.T) {
@@ -280,6 +286,7 @@ func TestSetPlayedStampScope(t *testing.T) {
 // TestMarkPlayedOrdersAgainstSetPlayed is why MarkPlayed stamps at all, and pins
 // the trailing-clock case SetPlayed's doc warns about.
 func TestMarkPlayedOrdersAgainstSetPlayed(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	item := seedItem(t, st, lib)
@@ -308,6 +315,7 @@ func TestMarkPlayedOrdersAgainstSetPlayed(t *testing.T) {
 // TestMarkPlayedStampIsMonotonic covers the two ways the stamp fails silently:
 // the COALESCE trap on a first play, and a future asOf regressed by the next play.
 func TestMarkPlayedStampIsMonotonic(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 
 	t.Run("first play on a fresh row", func(t *testing.T) {

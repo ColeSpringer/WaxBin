@@ -10,6 +10,7 @@ import (
 // TestRoleTagKeysResolve asserts every music contributor role maps to a canonical
 // WaxLabel tag key present at the pinned waxlabel version (the prerequisite gate).
 func TestRoleTagKeysResolve(t *testing.T) {
+	t.Parallel()
 	want := map[model.ContributorRole]tag.Key{
 		model.RoleArtist:    tag.Artist,
 		model.RoleComposer:  tag.Composer,

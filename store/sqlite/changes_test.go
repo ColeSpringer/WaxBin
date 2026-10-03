@@ -9,16 +9,15 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/waxerr"
 )
 
-// drain collects changes from ch until it goes quiet for a short window.
+// drain collects buffered changes. Mutations and Reopen publish synchronously,
+// so every expected row is available when the operation returns.
 func drain(ch <-chan model.Change) []model.Change {
 	var out []model.Change
-	timeout := time.After(time.Second)
 	for {
 		select {
 		case c, ok := <-ch:
@@ -26,15 +25,14 @@ func drain(ch <-chan model.Change) []model.Change {
 				return out
 			}
 			out = append(out, c)
-		case <-timeout:
-			return out
-		case <-time.After(50 * time.Millisecond):
+		default:
 			return out
 		}
 	}
 }
 
 func TestSubscribePublishesDeltas(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 
@@ -76,6 +74,7 @@ func TestSubscribePublishesDeltas(t *testing.T) {
 }
 
 func TestUnsubscribeStopsDelivery(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ch, cancel := st.Subscribe()
 	cancel()
@@ -88,6 +87,7 @@ func TestUnsubscribeStopsDelivery(t *testing.T) {
 }
 
 func TestDataVersionMovesOnCommit(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	before, err := st.DataVersion(ctx)
@@ -109,6 +109,7 @@ func TestDataVersionMovesOnCommit(t *testing.T) {
 // already row one, and PruneChangeLog always keeps a row, so no caller above this
 // layer can ever observe it naturally.
 func TestLatestChangeSeqEmptyFeed(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, err := Open(ctx, OpenOptions{Path: filepath.Join(t.TempDir(), "c.db"), Owner: "test"})
 	if err != nil {
@@ -132,6 +133,7 @@ func TestLatestChangeSeqEmptyFeed(t *testing.T) {
 // fresh one, whose pragma starts over, so a poller holding the old value must still see
 // the value move even though nothing was written.
 func TestDataVersionMovesAcrossAReopen(t *testing.T) {
+	t.Parallel()
 	st, _ := entityFixture(t)
 	ctx := context.Background()
 	// Two hand-offs: the first can move on the fixture's own writes, and the second is
@@ -164,6 +166,7 @@ func TestDataVersionMovesAcrossAReopen(t *testing.T) {
 // TestChangesSincePastTheHeadIsNotFound: a cursor at the head reads an empty page, and
 // one past it names a feed that was replaced under the consumer.
 func TestChangesSincePastTheHeadIsNotFound(t *testing.T) {
+	t.Parallel()
 	st, _ := entityFixture(t)
 	ctx := context.Background()
 	head, err := st.LatestChangeSeq(ctx)
@@ -185,6 +188,7 @@ func TestChangesSincePastTheHeadIsNotFound(t *testing.T) {
 // TestNoteReopenedAppendsTheCatalogRow: the row is the head, carries no pid, and is
 // published to in-process subscribers like any other.
 func TestNoteReopenedAppendsTheCatalogRow(t *testing.T) {
+	t.Parallel()
 	st, _ := entityFixture(t)
 	ctx := context.Background()
 	ch, cancel := st.Subscribe()
@@ -213,6 +217,7 @@ func TestNoteReopenedAppendsTheCatalogRow(t *testing.T) {
 // restore that renames a new file into place leaves it reading the old one. Its
 // DataVersion says so rather than carrying on over the dead catalog.
 func TestReadOnlyStoreNoticesAReplacedFile(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("Windows refuses to rename over or remove a file another handle holds open, so the reader cannot be left behind")
 	}
@@ -259,6 +264,7 @@ func TestReadOnlyStoreNoticesAReplacedFile(t *testing.T) {
 // away would silently skip the rows it never saw, so it is refused like a cursor past
 // the head; one at the horizon, and a fresh consumer at zero, read what is retained.
 func TestChangesSinceBehindThePrunedFeedIsNotFound(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	for i := 0; i < 4; i++ {
@@ -320,6 +326,7 @@ func foreground(t *testing.T, path string, fn func(*Store)) {
 // the reopen hands subscribers the rows the foreground process wrote, which were
 // committed elsewhere and never published here, and says the catalog is the same one.
 func TestReopenPublishesWhatAnotherProcessWrote(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, path, ch := suspendedStore(t)
 	var lib *model.Library
@@ -344,6 +351,7 @@ func TestReopenPublishesWhatAnotherProcessWrote(t *testing.T) {
 // and a feed whose new rows were pruned away all leave nothing to catch up from, so
 // the reopen reports the catalog replaced and publishes none of it.
 func TestReopenNoticesAnotherCatalog(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	putRow := func(fg *Store, root string) {
 		if _, err := fg.EnsureLibrary(ctx, &model.Library{Root: []byte(root), DisplayRoot: root, Mode: model.ModeManaged, Profile: "waxbin-native"}); err != nil {
@@ -399,6 +407,7 @@ func TestReopenNoticesAnotherCatalog(t *testing.T) {
 // store closed but its subscriptions open, like a suspend, and the next attempt still
 // reports what the first one found.
 func TestFailedReopenKeepsSubscribersAndTheVerdict(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, path, ch := suspendedStore(t)
 	blob, err := os.ReadFile(path)
@@ -449,6 +458,7 @@ func TestFailedReopenKeepsSubscribersAndTheVerdict(t *testing.T) {
 // TestCloseWhileSuspendedEndsSubscriptions: a server shut down mid-hand-off closes a
 // store that is already suspended, and its subscribers' range loops still end.
 func TestCloseWhileSuspendedEndsSubscriptions(t *testing.T) {
+	t.Parallel()
 	st, _, ch := suspendedStore(t)
 	if err := st.Close(); err != nil {
 		t.Fatalf("close: %v", err)
@@ -458,7 +468,7 @@ func TestCloseWhileSuspendedEndsSubscriptions(t *testing.T) {
 		if ok {
 			t.Fatal("a row arrived instead of the close")
 		}
-	case <-time.After(time.Second):
+	default:
 		t.Fatal("closing a suspended store left its subscription open")
 	}
 }
@@ -466,6 +476,7 @@ func TestCloseWhileSuspendedEndsSubscriptions(t *testing.T) {
 // TestRepeatedSuspendKeepsItsMark: a second Suspend of a suspended store changes
 // nothing, so the reopen still recognizes the catalog and catches up on it.
 func TestRepeatedSuspendKeepsItsMark(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, path, ch := suspendedStore(t)
 	if err := st.Suspend(); err != nil {

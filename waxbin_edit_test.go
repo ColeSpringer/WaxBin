@@ -20,6 +20,7 @@ import (
 // TestEditFieldDBOnly verifies a catalog-only edit updates the catalog and locks the
 // field without touching the file's on-disk tags.
 func TestEditFieldDBOnly(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -62,6 +63,7 @@ func TestEditFieldDBOnly(t *testing.T) {
 // TestEditFieldWriteBack verifies --write-back mirrors the edit into the on-disk
 // tags, readable by re-parsing the file.
 func TestEditFieldWriteBack(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -96,6 +98,7 @@ func TestEditFieldWriteBack(t *testing.T) {
 // writes the canonical form: the loosely-spelled ISRC lands normalized in the
 // catalog column and in the file's tags alike, so the two can never diverge.
 func TestEditWriteBackNormalizesIdentifier(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -139,6 +142,7 @@ func TestEditWriteBackNormalizesIdentifier(t *testing.T) {
 // write (a shared/virtual file) is reported under its pid while the atomic
 // catalog batch and the sibling's on-disk sync both stand.
 func TestEditItemsFieldsWriteBackPerItem(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -210,6 +214,7 @@ func TestEditItemsFieldsWriteBackPerItem(t *testing.T) {
 // WriteBackError while the catalog edit still lands and a drift diagnostic is
 // recorded.
 func TestEditWriteBackSharedFileRefused(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -256,6 +261,7 @@ func TestEditWriteBackSharedFileRefused(t *testing.T) {
 // a DB-only book field such as subtitle is a clean no-op: the field has no on-disk tag a
 // scan reads back, so nothing is written and the catalog edit stands.
 func TestEditBookFacade(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -317,6 +323,7 @@ func TestEditBookFacade(t *testing.T) {
 // series→GROUPING, genre→GENRE) into the primary part, and that a fresh scan of the
 // rewritten file reconstructs the same catalog values from those tags.
 func TestEditBookWriteBackRoundTrip(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -399,6 +406,7 @@ func TestEditBookWriteBackRoundTrip(t *testing.T) {
 // scan --force resolves the same item and keeps its pid and its locks, rather than
 // re-keying to the new on-disk title and dropping the curation.
 func TestEditBookWriteBackReanchorsIdentity(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -451,6 +459,7 @@ func TestEditBookWriteBackReanchorsIdentity(t *testing.T) {
 // write-back writes every part (not just the primary), so the parts keep a single shared
 // identity key and a scan --force resolves one whole book rather than splitting it.
 func TestEditBookWriteBackMultiFileStaysWhole(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -507,6 +516,7 @@ func TestEditBookWriteBackMultiFileStaysWhole(t *testing.T) {
 // backing files reports a skipped write-back (not a silent success) while the catalog
 // edit still applies.
 func TestEditWriteBackNoFiles(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -604,6 +614,7 @@ func countEditDiagnostics(t *testing.T, ctx context.Context, db string) int {
 // TestEditReadOnlyRefused verifies a read-only library refuses the edit before any
 // write-back.
 func TestEditReadOnlyRefused(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -630,6 +641,7 @@ func TestEditReadOnlyRefused(t *testing.T) {
 // without re-anchoring the stored key leaves the next scan resolving a different item,
 // orphaning this one's pid and everything hanging off it.
 func TestEditBookIdentifierReanchors(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -689,6 +701,7 @@ func TestEditBookIdentifierReanchors(t *testing.T) {
 // follow or the next forced scan resolves a different item. The subtitle and description
 // written beside it read back through a fresh scan of the file.
 func TestEditBookEditionWriteBackReanchors(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -744,6 +757,7 @@ func TestEditBookEditionWriteBackReanchors(t *testing.T) {
 // file still disagrees (a locked edit), go once a write-back lands the field, and go
 // when a scan re-derives an unlocked field from the file.
 func TestCatalogOnlyEditOwesATagWrite(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, "song.mp3"), testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
@@ -815,6 +829,7 @@ func TestCatalogOnlyEditOwesATagWrite(t *testing.T) {
 // tag to the file until a write-back lands it, and a book translator, which no tag can
 // carry, owes nothing.
 func TestCatalogOnlyCreditOwesATagWrite(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, "song.mp3"), testaudio.BuildMP3FromSpec(testaudio.MP3Spec{

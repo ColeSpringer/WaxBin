@@ -14,6 +14,7 @@ import (
 // says, and leaves a file outside it alone, a sibling folder whose name it begins included.
 // The paths are native, as a scan's are, since the folder prefix ends in the OS separator.
 func TestRespellFolderMovesItsFilesPaths(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib := openTestStore(t)
 	nat := filepath.FromSlash
@@ -52,6 +53,7 @@ func TestRespellFolderMovesItsFilesPaths(t *testing.T) {
 // nothing, while still closing its journal row; the file's one move is the respell's one
 // change.
 func TestCommitMoveAfterARespellLogsNoChange(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStoreAt(t)
 	nat := filepath.FromSlash

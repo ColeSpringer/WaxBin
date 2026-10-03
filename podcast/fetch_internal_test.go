@@ -20,6 +20,7 @@ func (refusingWriter) Write([]byte) (int, error) { return 0, errors.New("no spac
 // own file refused bytes is the catalog's failure, and so is one whose provider
 // swallowed the refusal and reported success.
 func TestFetchToBlamesALocalWriteOnTheCatalog(t *testing.T) {
+	t.Parallel()
 	for _, swallow := range []bool{false, true} {
 		prov := &source.Mock{Type: model.SourceYouTube,
 			FetchFunc: func(_ context.Context, _ source.FetchRequest, w io.Writer) (*source.FetchResult, error) {

@@ -31,6 +31,7 @@ func putFile(t *testing.T, st *Store, libID int64, path, essence string, duratio
 }
 
 func TestFingerprintCandidatesSharedTerms(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 
@@ -77,6 +78,7 @@ func TestFingerprintCandidatesSharedTerms(t *testing.T) {
 }
 
 func TestFingerprintCandidatesNeighborBucket(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	q := putFile(t, st, lib.ID, "/lib/q.wav", "eq", 0)
@@ -106,6 +108,7 @@ func TestFingerprintCandidatesNeighborBucket(t *testing.T) {
 }
 
 func TestFilesNeedingAnalysisLifecycle(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	a := putFile(t, st, lib.ID, "/lib/a.wav", "ea", 200000)
@@ -139,6 +142,7 @@ func TestFilesNeedingAnalysisLifecycle(t *testing.T) {
 // nothing either, and must come back. Before measured_essence the store could not
 // tell them apart, so one of the two was always handled wrong.
 func TestNeedsAnalysisTracksMeasurementCompletion(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	silent := putFile(t, st, lib.ID, "/lib/silent.wav", "es", 200000)
@@ -196,6 +200,7 @@ func TestNeedsAnalysisTracksMeasurementCompletion(t *testing.T) {
 // settles as fully current while its loudness row still holds numbers from the
 // decoder the bump was raised to invalidate, and nothing ever looks at it again.
 func TestVersionBumpDoesNotSettleOnAFailedRemeasure(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	a := putFile(t, st, lib.ID, "/lib/a.wv", "ea", 200000)
@@ -256,6 +261,7 @@ func TestVersionBumpDoesNotSettleOnAFailedRemeasure(t *testing.T) {
 // file would serve the old decoder's numbers as current forever. Only a measure
 // that failed outright may keep the prior row, and that path stays unsettled.
 func TestVersionBumpClearsLoudnessOnCompletedEmptyRemeasure(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	a := putFile(t, st, lib.ID, "/lib/a.wv", "ea", 200000)
@@ -300,6 +306,7 @@ func TestVersionBumpClearsLoudnessOnCompletedEmptyRemeasure(t *testing.T) {
 // TestFilesNeedingAnalysisKeyset verifies the (rel_path, id) cursor advances past
 // already-seen files, so paging never re-fetches a batch or strands later files.
 func TestFilesNeedingAnalysisKeyset(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	for _, name := range []string{"a", "b", "c", "d", "e"} {

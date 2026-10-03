@@ -24,6 +24,7 @@ func entityStateDeltas(t *testing.T, st *Store, pid model.PID) int {
 // back through EntityPlayState and StarredEntities, then exercises rating set, clamp, and
 // clear. It is the core round-trip the getStarred2 migration import needs.
 func TestEntityStarRatingReadBack(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{
@@ -109,6 +110,7 @@ func TestEntityStarRatingReadBack(t *testing.T) {
 // matching PlayStateFor and EntityCuration, so a typo'd or stale pid surfaces instead of
 // masking as unstarred, and a bad entity errors just like a bad user does.
 func TestEntityPlayStateUnknownPID(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/a/1.flac", essence: "e1", content: "c1", title: "One", artist: "X", album: "Al"})
@@ -130,6 +132,7 @@ func TestEntityPlayStateUnknownPID(t *testing.T) {
 // TestStarredEntitiesRecencyOrder verifies the starred list is ordered most-recent
 // first by starred_at, the recency contract a getStarred2 serve relies on.
 func TestStarredEntitiesRecencyOrder(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/a/1.flac", essence: "e1", content: "c1", title: "One", artist: "A", albumArt: "A", album: "First"})
@@ -159,6 +162,7 @@ func TestStarredEntitiesRecencyOrder(t *testing.T) {
 // value-identical call stays a no-op regardless of as-of, none of the skips emitting a
 // delta.
 func TestEntityStarAsOfRecordedTime(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/a/1.flac", essence: "e1", content: "c1", title: "One", artist: "X", album: "Al"})
@@ -218,6 +222,7 @@ func TestEntityStarAsOfRecordedTime(t *testing.T) {
 
 // TestEntityRatingAsOfRecordedTime mirrors the star as-of guard for entity ratings.
 func TestEntityRatingAsOfRecordedTime(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/a/1.flac", essence: "e1", content: "c1", title: "One", artist: "X", album: "Al"})
@@ -251,6 +256,7 @@ func TestEntityRatingAsOfRecordedTime(t *testing.T) {
 // idempotent re-star or re-rate (what a getStarred2 re-import sends for every already
 // starred row) writes no change_log delta, so a re-import stays change-log silent.
 func TestEntityStarIdempotentReimportNoDelta(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/a/1.flac", essence: "e1", content: "c1", title: "One", artist: "X", album: "Al"})
@@ -286,6 +292,7 @@ func TestEntityStarIdempotentReimportNoDelta(t *testing.T) {
 // Each step asserts the bool against the delta count rather than a hardcoded expectation,
 // so the suppression and the report cannot drift apart.
 func TestEntityStateChangedAgreesWithDelta(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/a/1.flac", essence: "e1", content: "c1", title: "One", artist: "X", album: "Al"})
@@ -328,6 +335,7 @@ func TestEntityStateChangedAgreesWithDelta(t *testing.T) {
 // its entity_type filter in the reads is load-bearing because a rowid is not unique
 // across entity tables.
 func TestEntityStateMergeConflict(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/a/1.flac", essence: "e1", content: "c1", title: "One", artist: "A", albumArt: "A", album: "SurvRG"})
@@ -382,6 +390,7 @@ func TestEntityStateMergeConflict(t *testing.T) {
 // a role or field only the loser held. A pure survivor-wins-by-row merge would drop the
 // star.
 func TestEntityStateMergeUnionsDisjoint(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/a/1.flac", essence: "e1", content: "c1", title: "One", artist: "A", albumArt: "A", album: "SurvRG"})
@@ -424,6 +433,7 @@ func TestEntityStateMergeUnionsDisjoint(t *testing.T) {
 // NULL, rating_changed_at set) must keep that cleared state, never inherit the loser's
 // stale rating. A naive per-column COALESCE(rating, loser.rating) would resurrect it.
 func TestEntityStateMergeKeepsClearedRating(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/a/1.flac", essence: "e1", content: "c1", title: "One", artist: "A", albumArt: "A", album: "SurvRG"})
@@ -456,6 +466,7 @@ func TestEntityStateMergeKeepsClearedRating(t *testing.T) {
 // a starred album entity whose tracks are all deleted is swept by GCOrphans, and its
 // entity_play_state row goes with it, leaving derived data consistent.
 func TestEntityStateOrphanLockstep(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	r := putTrack(t, st, lib.ID, trackSpec{path: "/lib/a/1.flac", essence: "e1", content: "c1", title: "One", artist: "X", album: "Al"})
@@ -498,6 +509,7 @@ func TestEntityStateOrphanLockstep(t *testing.T) {
 // written by the entity play-state path. It guards against someone later "fixing" the
 // series arm by adding it to the write path.
 func TestEntityStateSeriesOrphanNoOp(t *testing.T) {
+	t.Parallel()
 	st, _ := entityFixture(t)
 	ctx := context.Background()
 	// A series with no book is an orphan; it carries no entity_play_state row.
@@ -524,6 +536,7 @@ func TestEntityStateSeriesOrphanNoOp(t *testing.T) {
 // it carries no per-user state and no consumer asks for one, so every star/rating/read
 // entry point still refuses it.
 func TestEntityStateRejectsSeries(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putBook(t, st, lib.ID, bookSpec{

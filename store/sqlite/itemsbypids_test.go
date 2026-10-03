@@ -47,6 +47,7 @@ func equalPIDs(a, b []model.PID) bool {
 }
 
 func TestItemsByPIDsPreservesOrderAndSkipsMissing(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib := openTestStore(t)
 	pids := putItems(t, ctx, st, lib.ID, 5)
@@ -66,6 +67,7 @@ func TestItemsByPIDsPreservesOrderAndSkipsMissing(t *testing.T) {
 }
 
 func TestItemsByPIDsDedupsAndHandlesEmpty(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib := openTestStore(t)
 	pids := putItems(t, ctx, st, lib.ID, 2)
@@ -92,6 +94,7 @@ func TestItemsByPIDsDedupsAndHandlesEmpty(t *testing.T) {
 // pids) must span multiple SELECTs yet still return every real item exactly once,
 // in request order.
 func TestItemsByPIDsChunkBoundary(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib := openTestStore(t)
 	real := putItems(t, ctx, st, lib.ID, 6)

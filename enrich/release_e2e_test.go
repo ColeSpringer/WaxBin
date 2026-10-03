@@ -205,6 +205,7 @@ func albumMBID(t *testing.T, dbPath string) string {
 // release_group.mbid, and nothing tagged one here, so the match can only happen
 // because the release-group phase ran first in the same pass.
 func TestEnrichMatchesReleaseFromBarcode(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedAlbumWithIdentifiers(t, st, lib.ID, "ess-a", relBarcode, "", "")
@@ -239,6 +240,7 @@ func TestEnrichMatchesReleaseFromBarcode(t *testing.T) {
 // number as a zero-padded EAN-13. Comparing folds them together, but only if the
 // query retrieved the document in the first place.
 func TestEnrichMatchesAReleaseStoredUnderTheOtherGTINForm(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedAlbumWithIdentifiers(t, st, lib.ID, "ess-a", relBarcodeUPC, "", "")
@@ -259,6 +261,7 @@ func TestEnrichMatchesAReleaseStoredUnderTheOtherGTINForm(t *testing.T) {
 // and a slash, which is the case escapeLucene exists for, and checks that the
 // barcode tier costs no request when the album has no barcode.
 func TestEnrichMatchesReleaseFromCatalogNumber(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedAlbumWithIdentifiers(t, st, lib.ID, "ess-a", "", "SHVL 804/A", "")
@@ -283,6 +286,7 @@ func TestEnrichMatchesReleaseFromCatalogNumber(t *testing.T) {
 // to prevent: a group with far more releases than a browse page holds still resolves,
 // because the query is pointed at the identifier rather than paged through the group.
 func TestEnrichMatchesAPopularReleaseGroup(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedAlbumWithIdentifiers(t, st, lib.ID, "ess-a", relBarcode, "", "")
@@ -306,6 +310,7 @@ func TestEnrichMatchesAPopularReleaseGroup(t *testing.T) {
 // TestEnrichRecordsAlbumNoMatch pins the marker: an album nothing could identify is
 // not re-searched on the next unforced run.
 func TestEnrichRecordsAlbumNoMatch(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedAlbumWithIdentifiers(t, st, lib.ID, "ess-a", relBarcode, "", "")
@@ -342,6 +347,7 @@ func TestEnrichRecordsAlbumNoMatch(t *testing.T) {
 // WITHOUT a marker. A marker there would mean repairing the id never re-queues the
 // album short of --force.
 func TestEnrichDoesNotMarkAnUnsearchableAlbum(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	// A scan stores identifiers verbatim, so a tag can put anything in that column.
@@ -363,6 +369,7 @@ func TestEnrichDoesNotMarkAnUnsearchableAlbum(t *testing.T) {
 // TestEnrichLeavesUnidentifiableAlbumEmpty checks the queue gate: an album with no
 // barcode and no catalog number is never queued, so it costs no request at all.
 func TestEnrichLeavesUnidentifiableAlbumEmpty(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedAlbumWithIdentifiers(t, st, lib.ID, "ess-a", "", "", "")
@@ -386,6 +393,7 @@ func TestEnrichLeavesUnidentifiableAlbumEmpty(t *testing.T) {
 // TestEnrichSkipsTheReleaseMatchWhenDisabled pins the toggle: with MatchReleases off
 // the phase does not run, so no album is searched and none carries a marker.
 func TestEnrichSkipsTheReleaseMatchWhenDisabled(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedAlbumWithIdentifiers(t, st, lib.ID, "ess-a", relBarcode, "", "")

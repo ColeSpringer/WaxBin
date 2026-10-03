@@ -16,6 +16,7 @@ import (
 // rescan that comes back clean clears the stale ones, and re-deriving the same
 // diagnostic does not accumulate duplicates.
 func TestScanDiagnosticsReplacedPerScan(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib := openTestStore(t)
 
@@ -64,6 +65,7 @@ func TestScanDiagnosticsReplacedPerScan(t *testing.T) {
 // ReplayGain pass cannot erase what organize found. It is a schema property now (the
 // primary key carries origin), but pin it so a refactor cannot quietly undo it.
 func TestDiagnosticsCrossWriterIsolation(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib := openTestStore(t)
 
@@ -95,6 +97,7 @@ func TestDiagnosticsCrossWriterIsolation(t *testing.T) {
 // TestDiagnosticsCascadeOnFileDelete verifies the ON DELETE CASCADE reaps rows with
 // their file, so a removed file leaves no orphan diagnostics behind.
 func TestDiagnosticsCascadeOnFileDelete(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib := openTestStore(t)
 
@@ -237,6 +240,7 @@ func diagnosticQueryFixture(t *testing.T) diagFixture {
 // TestFileDiagnosticsFilters verifies each filter dimension and their
 // conjunction, and that the zero filter still returns the full dump.
 func TestFileDiagnosticsFilters(t *testing.T) {
+	t.Parallel()
 	fx := diagnosticQueryFixture(t)
 	st := fx.st
 	ctx := context.Background()
@@ -346,6 +350,7 @@ func TestFileDiagnosticsFilters(t *testing.T) {
 // dimensions from the shared filter builder: "how bad is this one item" is answered
 // here, over the same rows the list returns.
 func TestDiagnosticSummaryScopes(t *testing.T) {
+	t.Parallel()
 	fx := diagnosticQueryFixture(t)
 	ctx := context.Background()
 
@@ -368,6 +373,7 @@ func TestDiagnosticSummaryScopes(t *testing.T) {
 // TestFileDiagnosticsPaging verifies limit/offset windows tile the stable order
 // exactly: concatenating pages reproduces the full dump.
 func TestFileDiagnosticsPaging(t *testing.T) {
+	t.Parallel()
 	st := diagnosticQueryFixture(t).st
 	ctx := context.Background()
 
@@ -409,6 +415,7 @@ func TestFileDiagnosticsPaging(t *testing.T) {
 // TestDiagnosticSummary verifies the grouped counts and their most-severe-first
 // order, and that the dimensional filters apply to the summary too.
 func TestDiagnosticSummary(t *testing.T) {
+	t.Parallel()
 	fx := diagnosticQueryFixture(t)
 	st := fx.st
 	ctx := context.Background()
@@ -452,6 +459,7 @@ func TestDiagnosticSummary(t *testing.T) {
 // a file the scan has derived is not stale, which is what lets "no rows" mean
 // "clean, and here is the coverage" rather than "not yet derived".
 func TestDiagnosticCoverageReflectsScan(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib := openTestStore(t)
 
@@ -476,6 +484,7 @@ func TestDiagnosticCoverageReflectsScan(t *testing.T) {
 // wholesale replace would erase them, and adding the same row again updates it rather
 // than doubling it.
 func TestAddFileDiagnosticKeepsTheStandingRows(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib := openTestStore(t)
 	res, err := st.PutScannedTrack(ctx, input(lib.ID, "/lib/x.mp3", "ess-x", "c-x", "X"))

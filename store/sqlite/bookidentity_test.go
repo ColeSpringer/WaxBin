@@ -37,6 +37,7 @@ func setBookISBN(t *testing.T, st *Store, pid model.PID, isbn string) {
 // TestBookPartAdoptsEnrichedASIN: a part arriving with the ASIN enrichment wrote joins
 // the standing book. Without adoption its asin: key matches nothing and it forks.
 func TestBookPartAdoptsEnrichedASIN(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 
 	first := putBook(t, st, lib.ID, bookSpec{
@@ -65,6 +66,7 @@ func TestBookPartAdoptsEnrichedASIN(t *testing.T) {
 // segment, which matches nothing, so it joins the standing book whose column already
 // names that edition rather than forking. A different edition is a different book.
 func TestBookAdoptsByEditionColumn(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 
@@ -102,6 +104,7 @@ func TestBookAdoptsByEditionColumn(t *testing.T) {
 // upsertItem, so without adoption there too the adopted part's scanned title overwrites
 // the curated one on the book it is joining.
 func TestAdoptedBookPartSeesTheLockOverlay(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 
@@ -166,6 +169,7 @@ func (h *warnRecorder) count(sub string) int {
 // TestBookASINHeldByTwoBooksAdoptsTheLowest: nothing enforces uniqueness on book.asin,
 // so the tie is broken deterministically and logged for audit to report the pair.
 func TestBookASINHeldByTwoBooksAdoptsTheLowest(t *testing.T) {
+	t.Parallel()
 	rec := &warnRecorder{}
 	ctx := context.Background()
 	st, err := Open(ctx, OpenOptions{
@@ -213,6 +217,7 @@ func TestBookASINHeldByTwoBooksAdoptsTheLowest(t *testing.T) {
 // can write, and adopting on it alone let a wrong one swallow an unrelated book and
 // overwrite its title. The author has to agree before the join happens.
 func TestBookASINOnAnUnrelatedBookForks(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 
 	hobbit := putBook(t, st, lib.ID, bookSpec{
@@ -239,6 +244,7 @@ func TestBookASINOnAnUnrelatedBookForks(t *testing.T) {
 // so long as the standing book's own title has not been curated away from what its files
 // say.
 func TestBookVolumeSharingASeriesASINForks(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 
 	one := putBook(t, st, lib.ID, bookSpec{
@@ -262,6 +268,7 @@ func TestBookVolumeSharingASeriesASINForks(t *testing.T) {
 // the tag said, so the two spellings below would never have compared equal against the
 // column itself.
 func TestBookPartAdoptsAnEnrichedISBN(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 
 	first := putBook(t, st, lib.ID, bookSpec{
@@ -286,6 +293,7 @@ func TestBookPartAdoptsAnEnrichedISBN(t *testing.T) {
 // TestBookISBNOnAnUnrelatedBookForks: the ISBN arm corroborates exactly as the ASIN one
 // does, so a mis-tagged identifier cannot swallow another book.
 func TestBookISBNOnAnUnrelatedBookForks(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 
 	hobbit := putBook(t, st, lib.ID, bookSpec{
@@ -307,6 +315,7 @@ func TestBookISBNOnAnUnrelatedBookForks(t *testing.T) {
 // TestDescriptiveBookKeyIsUntouched: a book: key carries no identifier to look up, so
 // the adoption probe has nothing to do and two different books stay apart.
 func TestDescriptiveBookKeyIsUntouched(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 
 	first := putBook(t, st, lib.ID, bookSpec{
@@ -326,6 +335,7 @@ func TestDescriptiveBookKeyIsUntouched(t *testing.T) {
 // TestBookIdentLookupIgnoresISBNSeparators: the cross-catalog resolver compares the same
 // canonical key the adoption does, so a caller holding either spelling finds the book.
 func TestBookIdentLookupIgnoresISBNSeparators(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	book := putBook(t, st, lib.ID, bookSpec{
@@ -347,6 +357,7 @@ func TestBookIdentLookupIgnoresISBNSeparators(t *testing.T) {
 // writer that sets one without the other is drift `db verify` has to name rather than a
 // book that silently stops resolving.
 func TestVerifyCatchesISBNKeyDrift(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	book := putBook(t, st, lib.ID, bookSpec{
 		path: "/lib/a.m4b", essence: "be1", content: "bc1",

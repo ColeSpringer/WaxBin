@@ -53,6 +53,7 @@ func (l handoffLeaser) LeaseImport(ctx context.Context, _ string, _ bool, fn fun
 // that spans a hand-off commits into the podcast library of the catalog it finishes
 // against, not the one it started against.
 func TestCommitUsesTheLibraryIDOfTheCatalogItLandsIn(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, err := sqlite.Open(ctx, sqlite.OpenOptions{Path: filepath.Join(t.TempDir(), "catalog.db"), Owner: "test"})
 	if err != nil {

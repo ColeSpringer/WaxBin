@@ -25,6 +25,7 @@ const twoTrackCue = `FILE "book.m4b" MP3
 // sibling .cue (source='cue'), and a cue-only edit reaches the full path, which is
 // the one place a cue diagnostic is re-derived and so can be cleared.
 func TestCueChaptersForBook(t *testing.T) {
+	t.Parallel()
 	st, lib, sc, _, root := fastPathFixture(t)
 	ctx := context.Background()
 
@@ -94,6 +95,7 @@ func TestCueChaptersForBook(t *testing.T) {
 // line is misspelled yields warnings and no chapter. The part keeps its whole-file
 // chapter rather than being left with none, and the diagnostic lists the lines.
 func TestCueSheetWithNoReadableTrackKeepsTheBookChapter(t *testing.T) {
+	t.Parallel()
 	st, lib, sc, _, root := fastPathFixture(t)
 	ctx := context.Background()
 	spec := testaudio.MP3Spec{Title: "Part", Artist: "Auth", AlbumArtist: "Auth", Album: "Typo Book", Audio: testaudio.AudioWithSeed(6)}
@@ -121,6 +123,7 @@ func TestCueSheetWithNoReadableTrackKeepsTheBookChapter(t *testing.T) {
 // TestCueChaptersOnForcedRescan: a .cue added to an unchanged book is imported by a
 // forced rescan (which bypasses the fast-path), not skipped by the content gate.
 func TestCueChaptersOnForcedRescan(t *testing.T) {
+	t.Parallel()
 	st, lib, sc, _, root := fastPathFixture(t)
 	ctx := context.Background()
 
@@ -148,6 +151,7 @@ func TestCueChaptersOnForcedRescan(t *testing.T) {
 // TestCueMultiFileSheetOnABookIsNotApplied: a book sheet that cannot be applied at all
 // leaves the part its whole-file chapter, and the detail ends by saying so.
 func TestCueMultiFileSheetOnABookIsNotApplied(t *testing.T) {
+	t.Parallel()
 	st, lib, sc, _, root := fastPathFixture(t)
 	ctx := context.Background()
 	spec := testaudio.MP3Spec{Title: "Part", Artist: "Auth", AlbumArtist: "Auth", Album: "Split Book", Audio: testaudio.AudioWithSeed(7)}
@@ -175,6 +179,7 @@ func TestCueMultiFileSheetOnABookIsNotApplied(t *testing.T) {
 // exactly the ones missing from its chapters, including the earlier of two on one
 // start, which the catalog collapses into the later.
 func TestCueBookDiagnosticMatchesItsChapters(t *testing.T) {
+	t.Parallel()
 	st, lib, sc, _, root := fastPathFixture(t)
 	ctx := context.Background()
 	spec := testaudio.MP3Spec{Title: "Part", Artist: "Auth", AlbumArtist: "Auth", Album: "Paired Book", Audio: testaudio.AudioWithSeed(9)}

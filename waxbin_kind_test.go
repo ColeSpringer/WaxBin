@@ -53,6 +53,7 @@ func librivoxTrack(t *testing.T, ctx context.Context) (*waxbin.Library, model.PI
 // whole-file chapter and the reader as its narrator, carries a kind lock, and a forced
 // scan leaves it a book. The change runs as a set-kind job.
 func TestSetItemKindMakesATrackABook(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	lib, pid, _, _ := librivoxTrack(t, ctx)
 	if err := lib.Playback().Checkpoint(ctx, "", pid, 300, nil); err != nil {
@@ -105,6 +106,7 @@ func assertPersuasionBook(t *testing.T, ctx context.Context, lib *waxbin.Library
 // in an MP3, the stik atom in an M4A), so a forced scan that ignores locks still reads a
 // book, and turning the book back into a track clears it, so that scan reads a track.
 func TestSetItemKindWritesTheMediaType(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	mp3 := filepath.Join(root, "Jane Austen", "Persuasion", "01.mp3")
@@ -164,6 +166,7 @@ func TestSetItemKindWritesTheMediaType(t *testing.T) {
 // TestSetItemKindHonoursAKindLock: an item whose kind is locked is refused without Force
 // and left as it was; with Force it converts and the lock pins the new kind.
 func TestSetItemKindHonoursAKindLock(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	lib, pid, _, _ := librivoxTrack(t, ctx)
 	if err := lib.Lock(ctx, pid, model.KindLockField); err != nil {
@@ -195,6 +198,7 @@ func TestSetItemKindHonoursAKindLock(t *testing.T) {
 // cue sheet gives, a file not on disk, a target kind other than track or book, and an
 // unknown item.
 func TestSetItemKindRefusals(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root, pod := t.TempDir(), t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -284,6 +288,7 @@ func shareFileWith(t *testing.T, ctx context.Context, db string, pid, other mode
 // and the write-back it cannot make is reported and recorded as drift, the file left as
 // it was.
 func TestSetItemKindInAReadOnlyLibrary(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	lib, pid, path, _ := librivoxTrack(t, ctx)
 	libs, err := lib.Libraries(ctx)
@@ -324,6 +329,7 @@ func TestSetItemKindInAReadOnlyLibrary(t *testing.T) {
 // TestSetItemKindLocksTheKindTheRuleGives: an item turned back into the kind its library
 // gives it is still pinned, so a root declared otherwise later keeps it.
 func TestSetItemKindLocksTheKindTheRuleGives(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	librivoxPart(t, filepath.Join(root, "Jane Austen", "Persuasion", "01.mp3"), 1)
@@ -393,6 +399,7 @@ func partStarts(t *testing.T, ctx context.Context, lib *waxbin.Library, pid mode
 // plays, stars, playlist entries and sessions folding into the book, and their pids are
 // gone; the copy of the third chapter follows it into the book.
 func TestSetItemKindMergesTracksIntoOneBook(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	lib, pids, db := persuasionChapters(t, ctx)
 	t1, t2, t3 := pids[0], pids[1], pids[2]
@@ -500,6 +507,7 @@ func TestSetItemKindMergesTracksIntoOneBook(t *testing.T) {
 // its chapter is not the book's first, and its place moves on by the parts that join
 // ahead of it, so it still points at the same audio.
 func TestSetItemKindMergeKeepsTheFirstNamedItem(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	lib, pids, _ := persuasionChapters(t, ctx)
 	t1, t2, t3 := pids[0], pids[1], pids[2]
@@ -524,6 +532,7 @@ func TestSetItemKindMergeKeepsTheFirstNamedItem(t *testing.T) {
 // part, a listener's resume position or a bookmark, lands on that part's track as an
 // offset into it.
 func TestSetItemKindSplitsABookIntoTracks(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	for n := 1; n <= 3; n++ {
@@ -602,6 +611,7 @@ func TestSetItemKindSplitsABookIntoTracks(t *testing.T) {
 // audiobook, leaves its resume position on the audio it pointed at, as an offset into the
 // part that holds it, not past the end of the track that keeps the pid.
 func TestScanSplitMovesTheBookPosition(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root, db := t.TempDir(), filepath.Join(t.TempDir(), "catalog.db")
 	for n := 1; n <= 2; n++ {
@@ -643,6 +653,7 @@ func TestScanSplitMovesTheBookPosition(t *testing.T) {
 // changed reported, in the call's answer and in the failed job's result, so a host can
 // still map the pids it lost.
 func TestSetItemKindReportsAPartialChange(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root, db := t.TempDir(), filepath.Join(t.TempDir(), "catalog.db")
 	for n := 1; n <= 3; n++ {
@@ -691,6 +702,7 @@ func TestSetItemKindReportsAPartialChange(t *testing.T) {
 // last scan still refuses the change to a track, since the read would carve the file into
 // cue tracks; a sheet the catalog remembers but the disk no longer has refuses nothing.
 func TestSetItemKindChecksTheSheetOnDisk(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	audio := filepath.Join(root, "Austen", "Emma", "emma.mp3")
@@ -740,6 +752,7 @@ func TestSetItemKindChecksTheSheetOnDisk(t *testing.T) {
 // track already holds folds into that track when split, and the report names that track
 // rather than the new track of the book's first part.
 func TestSetItemKindReportsWhereTheBookFolded(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	narrated := func(title string, track int, seed byte) []byte {
@@ -770,6 +783,7 @@ func TestSetItemKindReportsWhereTheBookFolded(t *testing.T) {
 // encodings are linked by recording id), and a place inside the part lands on the part's
 // own track.
 func TestSetItemKindSplitPlacesFollowThePart(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	const rate = 22050
@@ -842,6 +856,7 @@ func TestSetItemKindSplitPlacesFollowThePart(t *testing.T) {
 // TestSetItemKindWritesOnlyTheNamedItems: a track merged into a book it did not name gets
 // the kind written into its own file, and the book's other parts are left as they are.
 func TestSetItemKindWritesOnlyTheNamedItems(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	lib, pids, _ := persuasionChapters(t, ctx)
 	if _, err := lib.SetItemKind(ctx, pids[:2], model.KindBook, waxbin.KindOptions{}); err != nil {
@@ -873,6 +888,7 @@ func TestSetItemKindWritesOnlyTheNamedItems(t *testing.T) {
 // follows the file it copies: merged, its track is absorbed and the copy is the book's
 // alternate of that part; split, it goes to that part's own track.
 func TestSetItemKindCarriesAnOfflineCopy(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root, db := t.TempDir(), filepath.Join(t.TempDir(), "catalog.db")
 	for n := 1; n <= 3; n++ {
@@ -932,6 +948,7 @@ func TestSetItemKindCarriesAnOfflineCopy(t *testing.T) {
 // book's pid on that part's track, the encoding joining it, rather than folding the book
 // into a track the encoding made first.
 func TestSetItemKindKeepsThePidWhenThePrimarysEncodingSharesItsRecording(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	const rate = 22050
@@ -986,6 +1003,7 @@ func TestSetItemKindKeepsThePidWhenThePrimarysEncodingSharesItsRecording(t *test
 // TestSetItemKindPassesOverItemsAlreadyOfTheKind: an item already of the kind asked for is
 // not read, so a gone part of it refuses nothing, and the other items change.
 func TestSetItemKindPassesOverItemsAlreadyOfTheKind(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	lib, track, _, _ := librivoxTrack(t, ctx)
 	books := t.TempDir()
@@ -1012,6 +1030,7 @@ func TestSetItemKindPassesOverItemsAlreadyOfTheKind(t *testing.T) {
 // TestSetItemKindSplitsBesideAOneTrackSheet: a cue sheet that a read would not carve into
 // cue tracks (a single track) refuses nothing, and the book becomes a plain track.
 func TestSetItemKindSplitsBesideAOneTrackSheet(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, "Austen", "Emma", "emma.mp3"), testaudio.BuildMP3WithAudio("Emma", "Jane Austen", "Emma", 1, testaudio.AudioWithSeed(85)))

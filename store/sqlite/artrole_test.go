@@ -14,6 +14,7 @@ import (
 // verify/GC treatment of multi-role and episode/podcast art.
 
 func TestArtRolesIndependentSetAndClear(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	front, back := testPNG(t, 40, 40), testPNG(t, 41, 41)
@@ -58,6 +59,7 @@ func TestArtRolesIndependentSetAndClear(t *testing.T) {
 }
 
 func TestScanPreservesNonFrontRoles(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	coverA, coverB, back := testPNG(t, 40, 40), testPNG(t, 42, 42), testPNG(t, 41, 41)
@@ -83,6 +85,7 @@ func TestScanPreservesNonFrontRoles(t *testing.T) {
 // bug: an item holding nothing but a back image must not serve it as a front cover; the
 // front walk falls through to the album level instead.
 func TestChainIgnoresNonFrontRows(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	albumCover, back := testPNG(t, 40, 40), testPNG(t, 41, 41)
@@ -111,6 +114,7 @@ func TestChainIgnoresNonFrontRows(t *testing.T) {
 // reports CodeNotFound even when a member track carries one (the member-derived
 // answer is a front-cover mechanism alone).
 func TestNonFrontResolvesOwnLevelOnly(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	back := testPNG(t, 41, 41)
@@ -145,6 +149,7 @@ func TestNonFrontResolvesOwnLevelOnly(t *testing.T) {
 // cover, a sibling answered through the album's track-derived cover, and the
 // derived -> durable flip once a real album row exists.
 func TestResolveArtLevelDerivedMatrix(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	trackCover, albumCover := testPNG(t, 40, 40), testPNG(t, 42, 42)
@@ -187,6 +192,7 @@ func TestResolveArtLevelDerivedMatrix(t *testing.T) {
 }
 
 func TestSetArtUnknownRoleRejected(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	img := testPNG(t, 40, 40)
@@ -219,6 +225,7 @@ func TestSetArtUnknownRoleRejected(t *testing.T) {
 // map row no resolver reads back, since the chain probes the slot the item's kind
 // selects, so the mismatch is refused up front.
 func TestEntityArtSlotKindMismatchRejected(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	img := testPNG(t, 40, 40)
@@ -254,6 +261,7 @@ func TestEntityArtSlotKindMismatchRejected(t *testing.T) {
 // playable_item.id is a plain INTEGER PRIMARY KEY, so a row left for GCArt could
 // resurface on whatever item inherits the rowid.
 func TestItemDeleteDropsArtRows(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	cover := testPNG(t, 40, 40)
@@ -288,6 +296,7 @@ func TestItemDeleteDropsArtRows(t *testing.T) {
 // removed show takes its own feed art and each episode's cover with it, since podcast
 // and playable_item rowids are reused the same way.
 func TestRemovePodcastDropsArtRows(t *testing.T) {
+	t.Parallel()
 	st, _ := entityFixture(t)
 	ctx := context.Background()
 	feedArt, epArt := testPNG(t, 40, 40), testPNG(t, 41, 41)
@@ -325,6 +334,7 @@ func TestRemovePodcastDropsArtRows(t *testing.T) {
 // TestGCArtMultiRole verifies GC reclaims every role's source once the entity is
 // gone, and that VerifyDerived counts live multi-role sources as reachable.
 func TestGCArtMultiRole(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	front, back := testPNG(t, 40, 40), testPNG(t, 41, 41)
@@ -358,6 +368,7 @@ func TestGCArtMultiRole(t *testing.T) {
 // reachable only through a podcast or episode slot is live (GCArt keeps it), so
 // VerifyDerived must not count it orphaned.
 func TestVerifyCountsPodcastArtLive(t *testing.T) {
+	t.Parallel()
 	st, _ := entityFixture(t)
 	ctx := context.Background()
 
@@ -403,6 +414,7 @@ func TestVerifyCountsPodcastArtLive(t *testing.T) {
 // iterating the rows that exist, and a coverless entity has none. The lock is the base
 // fact now and the artifact the overlay, so the lock reports on its own.
 func TestArtRolesReportsCoverlessLock(t *testing.T) {
+	t.Parallel()
 	st, _ := entityFixture(t)
 	ctx := context.Background()
 	feed, err := st.UpsertFeed(ctx, extrasFeedInput("http://feed.example/coverless-lock"))
@@ -448,6 +460,7 @@ func TestArtRolesReportsCoverlessLock(t *testing.T) {
 // The synthesized entry must not appear for an entity that simply holds no art, which
 // is what keeps "an empty list means nothing stored" true for the unlocked case.
 func TestArtRolesEmptyOnCoverlessUnlockedEntity(t *testing.T) {
+	t.Parallel()
 	st, _ := entityFixture(t)
 	ctx := context.Background()
 	pl := newPlaylist(t, st, "Mix")
@@ -465,6 +478,7 @@ func TestArtRolesEmptyOnCoverlessUnlockedEntity(t *testing.T) {
 // enrichment answers to in every role, so the stored back row reads locked under it
 // even though it carries no art.back row of its own.
 func TestArtRolesCoverlessLockKeepsRoleOrder(t *testing.T) {
+	t.Parallel()
 	st, _ := entityFixture(t)
 	ctx := context.Background()
 	pl := newPlaylist(t, st, "Ordered")
@@ -504,6 +518,7 @@ func TestArtRolesCoverlessLockKeepsRoleOrder(t *testing.T) {
 // SetArtLock is the lock-only mutation SetEntityArt cannot express, and unlocking is
 // the way back out of a refused set with no --force in sight.
 func TestSetArtLockRoundTrip(t *testing.T) {
+	t.Parallel()
 	st, _ := entityFixture(t)
 	ctx := context.Background()
 	pl := newPlaylist(t, st, "Locked")
@@ -529,6 +544,7 @@ func TestSetArtLockRoundTrip(t *testing.T) {
 // SetArtLock on a track and `lock <pid> art` write the same row, since --type defaults
 // to track. The overlap is deliberate, so it is pinned rather than left to be found.
 func TestSetArtLockSharesTheItemArtLockRow(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	pid := putWithCover(t, st, lib.ID, "/lib/al/1.flac", "e1", testPNG(t, 40, 40))
@@ -574,6 +590,7 @@ func TestSetArtLockSharesTheItemArtLockRow(t *testing.T) {
 // guard, unlocking a never-locked entity writes nothing and still publishes an update,
 // sending every ChangesSince tailer to re-fetch for no change.
 func TestSetArtLockEmitsNoDeltaWhenAlreadyInState(t *testing.T) {
+	t.Parallel()
 	st, _ := entityFixture(t)
 	ctx := context.Background()
 	pl := newPlaylist(t, st, "Quiet")
@@ -605,6 +622,7 @@ func TestSetArtLockEmitsNoDeltaWhenAlreadyInState(t *testing.T) {
 // is recorded as having downloaded it, where every curation write used to be stamped as
 // a hand-set cover on its way into the store.
 func TestArtSetCarriesTheCallersAttribution(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	pid := putWithCover(t, st, lib.ID, "/lib/al/1.flac", "e1", testPNG(t, 40, 40))
@@ -643,6 +661,7 @@ func TestArtSetCarriesTheCallersAttribution(t *testing.T) {
 // the lock it forced past. Before this, preserving a lock meant reading it first and
 // passing it back, which is the interleave two administrators lose a decision to.
 func TestArtWriteLeavesAnUnreadLockAlone(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	pid := putWithCover(t, st, lib.ID, "/lib/al/1.flac", "e1", testPNG(t, 40, 40))
@@ -680,6 +699,7 @@ func TestArtWriteLeavesAnUnreadLockAlone(t *testing.T) {
 // art_map row, so ArtRoles synthesizes the front entry from the lock row alone. That row
 // used to record an invented "user" whatever the write said.
 func TestCoverlessLockReportsTheWritesAttribution(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	pid := putWithCover(t, st, lib.ID, "/lib/al/1.flac", "e1", testPNG(t, 40, 40))
@@ -723,6 +743,7 @@ func TestCoverlessLockReportsTheWritesAttribution(t *testing.T) {
 // the attribution. The two reads share one chain walk precisely so this cannot drift,
 // and the assertion is what keeps it that way.
 func TestArtProvenanceAgreesWithResolveArt(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	trackCover, albumCover, backCover := testPNG(t, 40, 40), testPNG(t, 42, 42), testPNG(t, 44, 44)
@@ -792,6 +813,7 @@ func TestArtProvenanceAgreesWithResolveArt(t *testing.T) {
 // TestArtProvenanceReportsTheStoredSourceNotAThumbnail: the dimensions describe the
 // image the store holds, which is what separates this read from a sized resolve.
 func TestArtProvenanceReportsTheStoredSourceNotAThumbnail(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	pid := putWithCover(t, st, lib.ID, "/lib/al/1.flac", "e1", testPNG(t, 400, 300))
@@ -816,6 +838,7 @@ func TestArtProvenanceReportsTheStoredSourceNotAThumbnail(t *testing.T) {
 // contains. The refusal is CodeInvalid, not the CodeIO a transaction would wrap it in,
 // because a caller mistake is not a disk failure.
 func TestArtWriteRefusesAnUnstorableAttribution(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	pid := putWithCover(t, st, lib.ID, "/lib/al/1.flac", "e1", testPNG(t, 40, 40))
@@ -859,6 +882,7 @@ func TestArtWriteRefusesAnUnstorableAttribution(t *testing.T) {
 // an existing mapping in place without going through the role writer, so an unpaired
 // cover could blank a correct provider there. Both branches run the same check.
 func TestAutomaticAttachRefusesAnUnstorableAttribution(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	cover := testPNG(t, 40, 40)
@@ -924,6 +948,7 @@ func enrichedPNG(t *testing.T, w, h int) *model.ArtImage {
 // so the vacancy stops reading as an invitation and the next enrichment pass leaves it
 // alone. The roles beside it stay fillable, which is the whole point of the split.
 func TestAuxClearRecordsRoleLockAndBlocksFill(t *testing.T) {
+	t.Parallel()
 	st, _ := entityFixture(t)
 	ctx := context.Background()
 	pl := newPlaylist(t, st, "Aux")
@@ -969,6 +994,7 @@ func TestAuxClearRecordsRoleLockAndBlocksFill(t *testing.T) {
 // every role, which is what a user with no interest in per-role bookkeeping reaches
 // for. Per-role locks narrow the gate, they do not replace it.
 func TestWholeArtLockStillGatesAuxFills(t *testing.T) {
+	t.Parallel()
 	st, _ := entityFixture(t)
 	ctx := context.Background()
 	pl := newPlaylist(t, st, "Whole")
@@ -991,6 +1017,7 @@ func TestWholeArtLockStillGatesAuxFills(t *testing.T) {
 // own attribution. It is otherwise invisible, and it is what a client needs to tell an
 // empty-and-fillable slot from an empty-and-pinned one.
 func TestArtRolesReportsLockedEmptyAuxRole(t *testing.T) {
+	t.Parallel()
 	st, _ := entityFixture(t)
 	ctx := context.Background()
 	pl := newPlaylist(t, st, "Vacancy")
@@ -1036,6 +1063,7 @@ func TestArtRolesReportsLockedEmptyAuxRole(t *testing.T) {
 // field_provenance, so `lock <pid> art.back` and `art lock --role back --type track`
 // write the row the scan and the item surface already read.
 func TestItemArtRoleLockIsItemScoped(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	pid := putWithCover(t, st, lib.ID, "/lib/al/1.flac", "e1", testPNG(t, 40, 40))
@@ -1079,6 +1107,7 @@ func TestItemArtRoleLockIsItemScoped(t *testing.T) {
 // `art roles` prints instead of contradicting it on the same entity. A user's own hand
 // still gets past the whole-entity lock in an auxiliary role.
 func TestArtLockedReportsTheEffectiveLock(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	held := putWithCover(t, st, lib.ID, "/lib/al/1.flac", "e1", testPNG(t, 40, 40))
@@ -1145,6 +1174,7 @@ func TestArtLockedReportsTheEffectiveLock(t *testing.T) {
 // asked for it and carries that source, so the sparse cleanup's tag-only test would
 // skip it and strand an inert row for a field field_provenance holds no value in.
 func TestGenericUnlockDropsArtRoleLockRow(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	pid := putWithCover(t, st, lib.ID, "/lib/al/1.flac", "e1", testPNG(t, 40, 40))
@@ -1178,6 +1208,7 @@ func TestGenericUnlockDropsArtRoleLockRow(t *testing.T) {
 // way credit.<role> and tag.<KEY> do, on both kinds that carry art, and the front has
 // no spelling there at all.
 func TestGenericLockAcceptsArtRoleField(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	track := putWithCover(t, st, lib.ID, "/lib/al/1.flac", "e1", testPNG(t, 40, 40))
@@ -1208,6 +1239,7 @@ func TestGenericLockAcceptsArtRoleField(t *testing.T) {
 // "art" pin gates enrichment in every role, and a caller that reads the request back as
 // the outcome tells a user the slot is open when it is not.
 func TestSetArtLockReportsWhatItDid(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	pid := putWithCover(t, st, lib.ID, "/lib/al/1.flac", "e1", testPNG(t, 40, 40))

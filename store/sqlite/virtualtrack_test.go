@@ -69,6 +69,7 @@ func assertConsistent(t *testing.T, st *sqlite.Store) {
 // TestVirtualTrackForcePreservesLockedTitle: a curated edit on a CUE-carved virtual
 // track survives a content-changed forced rescan, and --ignore-locks re-derives it.
 func TestVirtualTrackForcePreservesLockedTitle(t *testing.T) {
+	t.Parallel()
 	st, lib := openTestStore(t)
 	ctx := context.Background()
 	windows := [][2]int64{{0, 300}, {300, 600}}
@@ -107,6 +108,7 @@ func TestVirtualTrackForcePreservesLockedTitle(t *testing.T) {
 // items sharing one file, each with its offset window driving its duration, and the
 // rollups/stats sum the windows rather than the whole file once per track.
 func TestVirtualTracksCreateAndOffsets(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib := openTestStore(t)
 
@@ -164,6 +166,7 @@ func TestVirtualTracksCreateAndOffsets(t *testing.T) {
 // without forking siblings. An unchanged rescan is silent, and dropping a track
 // deletes only it while the survivors keep their pids.
 func TestVirtualTracksReconcileSet(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib := openTestStore(t)
 
@@ -215,6 +218,7 @@ func TestVirtualTracksReconcileSet(t *testing.T) {
 // duration; the effective-duration expression floors it at 0 so stats and rollups
 // stay sane and db verify stays clean.
 func TestVirtualTrackDurationNeverNegative(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib := openTestStore(t)
 
@@ -244,6 +248,7 @@ func TestVirtualTrackDurationNeverNegative(t *testing.T) {
 // track's window, not the whole shared file, or a provider that matches on duration
 // (LRCLIB) is fed the wrong length and never matches.
 func TestVirtualTrackLyricsUsesWindowDuration(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib := openTestStore(t)
 
@@ -281,6 +286,7 @@ func TestVirtualTrackLyricsUsesWindowDuration(t *testing.T) {
 // converted each endpoint before subtracting: frames 1 to 3 is a 2-frame window,
 // which is 26 ms, while 40 - 13 reports 27.
 func TestVirtualTrackWindowRoundTripsExactly(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib := openTestStore(t)
 
@@ -322,6 +328,7 @@ func TestVirtualTrackWindowRoundTripsExactly(t *testing.T) {
 // TestVirtualTracksConvertFromWholeFile: a whole-file track scanned before the .cue
 // existed is detached and deleted when the file is re-cataloged as virtual tracks.
 func TestVirtualTracksConvertFromWholeFile(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib := openTestStore(t)
 
@@ -358,6 +365,7 @@ func TestVirtualTracksConvertFromWholeFile(t *testing.T) {
 // track from its sheet, an unlocked edit the sheet does not carry is re-derived, and its
 // provenance row goes with it rather than naming a value the track no longer holds.
 func TestForcedRescanClearsVirtualTrackProvenance(t *testing.T) {
+	t.Parallel()
 	st, lib := openTestStore(t)
 	ctx := context.Background()
 	windows := [][2]int64{{0, 300}, {300, 600}}
@@ -399,6 +407,7 @@ func TestForcedRescanClearsVirtualTrackProvenance(t *testing.T) {
 // the sheet by a forced rescan, its provenance row retired, and the track's siblings stay
 // silent. The check once compared only the title, artist, album, genre, numbers and year.
 func TestForcedRescanRederivesEveryFieldOfARipTrack(t *testing.T) {
+	t.Parallel()
 	st, lib := openTestStore(t)
 	ctx := context.Background()
 	in := vtrackInput(lib.ID, "/lib/album.flac", "sha256:VE", "sha256:VC1", 8000, [][2]int64{{0, 300}, {300, 600}})
@@ -457,6 +466,7 @@ func TestForcedRescanRederivesEveryFieldOfARipTrack(t *testing.T) {
 // through a rescan that rewrites the track from an edited sheet, while the sheet says
 // nothing for that field.
 func TestRipRescanKeepsEnrichmentFills(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStoreAt(t)
 	db := roConn(t, dbPath)
@@ -486,6 +496,7 @@ func TestRipRescanKeepsEnrichmentFills(t *testing.T) {
 // genre, so a genre enrichment filled must be carried over the silent sheet, or every
 // rescan of the unchanged rip would rewrite its tracks.
 func TestRipRescanKeepsAGenreFillWithoutRewriting(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStoreAt(t)
 	db := roConn(t, dbPath)
@@ -531,6 +542,7 @@ func TestRipRescanKeepsAGenreFillWithoutRewriting(t *testing.T) {
 // TestRipTrackTakesANewDiscNumber: the rip's change check compares the disc, so a rip
 // first carved without one takes the disc its file or folder now states.
 func TestRipTrackTakesANewDiscNumber(t *testing.T) {
+	t.Parallel()
 	st, lib := openTestStore(t)
 	ctx := context.Background()
 	in := vtrackInput(lib.ID, "/lib/CD2/album.flac", "sha256:VE", "sha256:VC1", 8000, [][2]int64{{0, 300}, {300, 600}})
@@ -554,6 +566,7 @@ func TestRipTrackTakesANewDiscNumber(t *testing.T) {
 // gives each virtual track an alternate edge on the copy carrying the same window, the
 // primaries stay on the original, and dropping the copy drops only the alternates.
 func TestVirtualTrackRipCopyAddsAlternates(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, _ := openStoreAt(t)
 	lib, root := addCopyLibrary(t, st)
@@ -654,6 +667,7 @@ func TestVirtualTrackRipCopyAddsAlternates(t *testing.T) {
 // path is missing keeps its alternates (mid-walk the original may have moved), and
 // reconciling the gone rip makes the copy every track's primary.
 func TestVirtualTrackRipCopyWaitsForReconciliation(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, _, _ := openStoreAt(t)
 	lib, root := addCopyLibrary(t, st)
@@ -700,6 +714,7 @@ func TestVirtualTrackRipCopyWaitsForReconciliation(t *testing.T) {
 // essence digest (unchanged bytes) does not re-key one of the virtual tracks its windows
 // back; the whole file gets an item of its own.
 func TestEssenceRekeyLeavesARipCopysTracks(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib, root := openCopyStore(t)
 	orig, cp := filepath.Join(root, "a", "album.flac"), filepath.Join(root, "b", "album.flac")
@@ -726,6 +741,7 @@ func TestEssenceRekeyLeavesARipCopysTracks(t *testing.T) {
 // back when the rip is read again at its path, and when a copy of it arrives in another
 // library, which then plays them.
 func TestRipComesBackFromMissing(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib, root := openCopyStore(t)
 	other, otherRoot := addCopyLibrary(t, st)
@@ -801,6 +817,7 @@ func ripCopies(t *testing.T, st *sqlite.Store, lib *model.Library, root string, 
 // rather than the track being deleted with its plays and stars. The copy is still a copy
 // of the original for the other tracks.
 func TestRipTrackDroppedFromTheOriginalStaysOnItsCopy(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib, root := openCopyStore(t)
 	rips, paths := ripCopies(t, st, lib, root, 2)
@@ -824,6 +841,7 @@ func TestRipTrackDroppedFromTheOriginalStaysOnItsCopy(t *testing.T) {
 // TestRipCopyDiagnosticsFollowAPromotion: when the original rip goes and a copy plays its
 // tracks, another copy's diagnostic names the copy now playing them.
 func TestRipCopyDiagnosticsFollowAPromotion(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib, root := openCopyStore(t)
 	rips, paths := ripCopies(t, st, lib, root, 3)
@@ -847,6 +865,7 @@ func TestRipCopyDiagnosticsFollowAPromotion(t *testing.T) {
 // track's window relinks its own row, so the other tracks keep their identity and only the
 // edited track is replaced, as the edit made in place would do.
 func TestRipRelinkFollowsAChangedWindow(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib, root := openCopyStore(t)
 	orig, moved := filepath.Join(root, "a", "album.flac"), filepath.Join(root, "b", "album.flac")

@@ -20,6 +20,7 @@ func titlesOf(items []*model.ItemView) []string {
 }
 
 func TestStaticPlaylistOrderAndEdits(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	a := putTrack(t, st, lib.ID, trackSpec{path: "/lib/a.flac", essence: "ea", content: "ca", title: "A", artist: "X", album: "Al"}).ItemPID
@@ -66,6 +67,7 @@ func TestStaticPlaylistOrderAndEdits(t *testing.T) {
 }
 
 func TestSmartPlaylistEvaluatedOnRead(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/1.flac", essence: "e1", content: "c1", title: "Old", artist: "X", album: "Al", year: 1990})
@@ -99,6 +101,7 @@ func TestSmartPlaylistEvaluatedOnRead(t *testing.T) {
 }
 
 func TestPlaylistRuleRoundTrips(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	_ = lib
@@ -117,6 +120,7 @@ func TestPlaylistRuleRoundTrips(t *testing.T) {
 }
 
 func TestCreatePlaylistValidation(t *testing.T) {
+	t.Parallel()
 	st, _ := entityFixture(t)
 	ctx := context.Background()
 	// Smart requires a rule.
@@ -144,6 +148,7 @@ func TestCreatePlaylistValidation(t *testing.T) {
 }
 
 func TestSetPlaylistRule(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/1.flac", essence: "e1", content: "c1", title: "Old", artist: "X", album: "Al", year: 1990})
@@ -219,6 +224,7 @@ func TestSetPlaylistRule(t *testing.T) {
 }
 
 func TestRemovePlaylistItemAt(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	a := putTrack(t, st, lib.ID, trackSpec{path: "/lib/a.flac", essence: "ea", content: "ca", title: "A", artist: "X", album: "Al"}).ItemPID
@@ -244,6 +250,7 @@ func TestRemovePlaylistItemAt(t *testing.T) {
 }
 
 func TestRemovePlaylistItemNonMemberIsNoOp(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	a := putTrack(t, st, lib.ID, trackSpec{path: "/lib/a.flac", essence: "ea", content: "ca", title: "A", artist: "X", album: "Al"}).ItemPID
@@ -266,6 +273,7 @@ func TestRemovePlaylistItemNonMemberIsNoOp(t *testing.T) {
 }
 
 func TestItemByPlaylistPathMatching(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	// Stored paths are OS-native and absolute, as a real scan writes them. The

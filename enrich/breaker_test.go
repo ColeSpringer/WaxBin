@@ -58,6 +58,7 @@ func lyricsService(st enrich.Store, p enrich.Provider) *enrich.Service {
 // nobody to ask either, so an expired miss it would have re-asked is left as it was and
 // the phase is reported once.
 func TestProviderTripsAfterConsecutiveFailures(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedTrack(t, st, lib.ID, "/lib/old.mp3", "ess-old", "Old Song", "Old Artist", "Old Album")
@@ -90,6 +91,7 @@ func TestProviderTripsAfterConsecutiveFailures(t *testing.T) {
 // fails on some targets and answers others stays in the pass, and three failures spread
 // across the run do not add up to a trip.
 func TestOneFailureDoesNotTrip(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedTracks(t, st, lib.ID, 6)
@@ -110,6 +112,7 @@ func TestOneFailureDoesNotTrip(t *testing.T) {
 // TestATrippedProviderStartsCleanNextRun: the breaker is per run, so the next pass asks
 // the provider about every target again.
 func TestATrippedProviderStartsCleanNextRun(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, _, lib := openStore(t)
 	seedTracks(t, st, lib.ID, 5)
@@ -161,6 +164,7 @@ func releaseArt(t *testing.T, name string, caps enrich.Capability, role model.Ar
 // could not be asked about is recorded as a miss rather than a durable match, so the
 // retry window asks about it again.
 func TestATrippedProviderLeavesAMissBehindALiveOne(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	identifiedAlbums(t, st, lib.ID, 5)
@@ -217,6 +221,7 @@ func TestATrippedProviderLeavesAMissBehindALiveOne(t *testing.T) {
 // a count or a heartbeat, as a stall would, while the phase itself keeps its live cover
 // provider. The next pass finds them fresh.
 func TestAnAlbumOnlyAnOutProviderCouldFillIsLeftAlone(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	for i := 1; i <= 5; i++ {
@@ -267,6 +272,7 @@ func TestAnAlbumOnlyAnOutProviderCouldFillIsLeftAlone(t *testing.T) {
 // misses nobody asked about keep the marker they had, stamp included, exactly as a
 // --limit cutoff leaves them.
 func TestAStalledPhaseLeavesMarkersAlone(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedTracks(t, st, lib.ID, 5)
@@ -300,6 +306,7 @@ func TestAStalledPhaseLeavesMarkersAlone(t *testing.T) {
 // TestTripIsPerProvider: a tripped auxiliary provider takes only its own slots out of
 // the pass, so the cover provider keeps filling fronts and the phase does not stall.
 func TestTripIsPerProvider(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	identifiedAlbums(t, st, lib.ID, 5)
@@ -348,6 +355,7 @@ func (w *warnings) WithGroup(string) slog.Handler      { return w }
 // cancellation says nothing about the provider, so it is neither reported as a provider
 // failure nor counted toward a trip.
 func TestACanceledRunDoesNotBlameTheProvider(t *testing.T) {
+	t.Parallel()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	st, _, lib := openStore(t)
@@ -373,6 +381,7 @@ func TestACanceledRunDoesNotBlameTheProvider(t *testing.T) {
 // keep a new track from ever being asked, which is what happened while a failed lookup
 // went back to the fresh queue at the head of every pass. That ask settles them.
 func TestDeferredLookupsNeverHoldUpNewTargets(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedTracks(t, st, lib.ID, 6)
@@ -416,6 +425,7 @@ func TestDeferredLookupsNeverHoldUpNewTargets(t *testing.T) {
 // provider always fails on costs one more request and then waits out the retry window
 // like any other miss.
 func TestASecondFailureSettlesAnOwedLookup(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedTracks(t, st, lib.ID, 1)
@@ -450,6 +460,7 @@ func TestASecondFailureSettlesAnOwedLookup(t *testing.T) {
 // next pass reaches the track behind them rather than tripping on them again until they
 // age out.
 func TestAFailingClusterHoldsUpTheOwedSweepOnePassAtMost(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedTracks(t, st, lib.ID, 3)
@@ -488,6 +499,7 @@ func TestAFailingClusterHoldsUpTheOwedSweepOnePassAtMost(t *testing.T) {
 // TestEveryWalkSettlesAnOwedLookupOnItsNextAsk: every port walk leaves a lookup its
 // provider failed on owed, and the next pass's ask settles it, a second failure included.
 func TestEveryWalkSettlesAnOwedLookupOnItsNextAsk(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	down := func(name string, caps enrich.Capability, at enrich.TargetType) *enrich.Mock {
 		return &enrich.Mock{ProviderName: name, Caps: caps, CapsAt: map[enrich.TargetType]enrich.Capability{at: caps},
@@ -547,6 +559,7 @@ func TestEveryWalkSettlesAnOwedLookupOnItsNextAsk(t *testing.T) {
 // as it stood, a miss dated from when it became owed, rather than keep the owed sweep
 // running for it forever.
 func TestAnOwedLookupNothingAsksSettlesAfterAWeek(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedTracks(t, st, lib.ID, 1)
@@ -580,6 +593,7 @@ func TestAnOwedLookupNothingAsksSettlesAfterAWeek(t *testing.T) {
 // passes left owed, so a track that fails on this pass's fresh sweep is not asked again
 // minutes later in the same pass.
 func TestALookupDeferredThisPassWaitsForTheNext(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, _, lib := openStore(t)
 	seedTracks(t, st, lib.ID, 1)
@@ -607,6 +621,7 @@ func TestALookupDeferredThisPassWaitsForTheNext(t *testing.T) {
 // first sweep, owed ones included, so the owed sweep behind it has nothing left for that
 // phase.
 func TestAForcedPhaseWalksAnOwedTargetOnce(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, _, lib := openStore(t)
 	seedTracks(t, st, lib.ID, 1)
@@ -628,6 +643,7 @@ func TestAForcedPhaseWalksAnOwedTargetOnce(t *testing.T) {
 // that left this phase with nobody to ask, not every provider that dropped out of the
 // pass, so a lyrics stall never blames an artist-art service.
 func TestAStallNamesOnlyItsOwnProviders(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, _, lib := openStore(t)
 	seedTracks(t, st, lib.ID, 5)

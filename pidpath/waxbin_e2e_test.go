@@ -261,6 +261,7 @@ func decodePCM(t *testing.T, raw []byte) *audio.Buffer {
 }
 
 func TestResolveAgainstRealCatalog(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	alpha := rampWAV(t, 8000)
 	lib, _, db := buildCatalog(t, map[string][]byte{
@@ -313,6 +314,7 @@ func TestResolveAgainstRealCatalog(t *testing.T) {
 }
 
 func TestRenameInvalidatesWithinOnePoll(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	lib, root, db := buildCatalog(t, map[string][]byte{
 		"alpha.wav": rampWAV(t, 8000),
@@ -358,6 +360,7 @@ func TestRenameInvalidatesWithinOnePoll(t *testing.T) {
 // handle reopens it when a restore renames another catalog over the path, and answers
 // from the restored catalog rather than from the file it had open.
 func TestOpenedCacheFollowsAReplacedCatalog(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("Windows refuses to rename over a file another handle holds open, so the cache cannot be left behind")
 	}
@@ -401,6 +404,7 @@ func TestOpenedCacheFollowsAReplacedCatalog(t *testing.T) {
 // opened leaves lookups refused, not answered from the old file, and the next poll
 // that finds a catalog there reopens it.
 func TestOpenedCacheRetriesAFailedReopen(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("Windows refuses to rename over a file another handle holds open, so the cache cannot be left behind")
 	}
@@ -445,6 +449,7 @@ func TestOpenedCacheRetriesAFailedReopen(t *testing.T) {
 }
 
 func TestBackgroundPollInvalidates(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	lib, root, db := buildCatalog(t, map[string][]byte{
 		"alpha.wav": rampWAV(t, 8000),
@@ -485,6 +490,7 @@ func TestBackgroundPollInvalidates(t *testing.T) {
 // implements: a rename that lands between polls leaves the cached path stale, the
 // open fails, and Relocate fixes it without waiting for the next tick.
 func TestRelocateHealsAStaleLocation(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	alpha := rampWAV(t, 8000)
 	lib, root, db := buildCatalog(t, map[string][]byte{"alpha.wav": alpha})
@@ -532,6 +538,7 @@ func TestRelocateHealsAStaleLocation(t *testing.T) {
 }
 
 func TestPIDStreamsE2E(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	lib, root, db := buildCatalog(t, map[string][]byte{
 		"alpha.wav": rampWAV(t, 8000),
@@ -631,6 +638,7 @@ FILE "rip.wav" WAVE
 // the ramp names positions, so serving the album, or serving the window 15 samples
 // off the boundary the disc named, both fail.
 func TestVirtualTrackStreamsItsOwnSamples(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	const totalSamples = 3 * 44100
 	lib, _, db := buildCatalog(t, map[string][]byte{
@@ -719,6 +727,7 @@ func TestVirtualTrackStreamsItsOwnSamples(t *testing.T) {
 // read-only handle onto the same file. Close must stop the poll and leave the library
 // alone, since this Cache did not open it.
 func TestNewOverACallerOpenedLibrary(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	lib, root, _ := buildCatalog(t, map[string][]byte{
 		"alpha.wav": rampWAV(t, 8000),

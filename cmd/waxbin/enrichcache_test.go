@@ -44,6 +44,7 @@ func TestPrintEnrichCacheReportShowsEveryKind(t *testing.T) {
 // TestPrintEnrichCacheReportOnAnEmptyCacheSaysSo: an empty cache reads as empty rather
 // than as an epoch timestamp with a table of nothing under it.
 func TestPrintEnrichCacheReportOnAnEmptyCacheSaysSo(t *testing.T) {
+	t.Parallel()
 	now := time.Date(2026, 9, 6, 12, 0, 0, 0, time.UTC)
 	var buf bytes.Buffer
 	printEnrichCacheReport(&buf, &model.EnrichmentCacheReport{}, now)
@@ -61,6 +62,7 @@ func TestPrintEnrichCacheReportOnAnEmptyCacheSaysSo(t *testing.T) {
 }
 
 func TestEnrichCacheViewJSON(t *testing.T) {
+	t.Parallel()
 	rep := &model.EnrichmentCacheReport{
 		Rows: 3, Bytes: 900, OldestAt: 1784777333683766021, NewestAt: 1784777333683766022,
 		ExemptRows: 1, ExemptBytes: 20,

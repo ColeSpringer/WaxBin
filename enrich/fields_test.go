@@ -81,6 +81,7 @@ func provenanceRow(t *testing.T, db *sql.DB, pid model.PID, field string) (strin
 // everything it knows cannot give a track a year its album rung owns or write a genre
 // the genre pass owns.
 func TestTrackFieldsFillsEmptyScalars(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	pid := seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
@@ -164,6 +165,7 @@ func TestTrackFieldsFillsEmptyScalars(t *testing.T) {
 // enrichment follows. The marker still lands, so an item nothing could fill costs one
 // pass rather than a request every run.
 func TestTrackFieldsRespectsLocksAndFilledValues(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	pid := seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
@@ -207,6 +209,7 @@ func TestTrackFieldsRespectsLocksAndFilledValues(t *testing.T) {
 // pass answers for many items and one unparseable bpm must not abort the rest, and the
 // marker still lands so the item is not re-asked every run.
 func TestTrackFieldsSkipsAMalformedValue(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
@@ -245,6 +248,7 @@ func TestTrackFieldsSkipsAMalformedValue(t *testing.T) {
 // Fields map both land, the identifier is normalized, and a full release date is folded
 // to its year rather than failing the parse and burning the marker.
 func TestBookFieldsDispatchesCapBookMeta(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	pid := seedBook(t, st, lib.ID, "/lib/b.m4b", "ess-b", "Neuromancer", "William Gibson")
@@ -307,6 +311,7 @@ func TestBookFieldsDispatchesCapBookMeta(t *testing.T) {
 // is never asked under CapFields, and neither phase walks, so a stock install spends
 // nothing and writes no markers.
 func TestFieldsPhasesSkippedWithoutACapableProvider(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
@@ -338,6 +343,7 @@ func TestFieldsPhasesSkippedWithoutACapableProvider(t *testing.T) {
 // TestFieldsHeartbeatDenominator: the count mirrors the phases that will run, so the
 // ratio reaches one. A denominator counting work the run skips never does.
 func TestFieldsHeartbeatDenominator(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, _, lib := openStore(t)
 	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "One", "Band", "Album")
@@ -364,6 +370,7 @@ func TestFieldsHeartbeatDenominator(t *testing.T) {
 // TestFieldsScopedToOneItem: --item reaches the fields phase, so a user pointing at one
 // track re-asks about it rather than waiting for the next full pass.
 func TestFieldsScopedToOneItem(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	pid := seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "One", "Band", "Album")
@@ -428,6 +435,7 @@ func seedTrackIdentified(t *testing.T, st *sqlite.Store, libID int64, path, esse
 // identifiers, so a provider keyed on one can answer without a text match, and the
 // identifiers a provider offers back are refused: they are the release matcher's evidence.
 func TestAlbumFieldsFillsLabelAndYear(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedTrackIdentified(t, st, lib.ID, "/lib/a.mp3", "ess-a", "One", "Pink Floyd", "Wish You Were Here",
@@ -512,6 +520,7 @@ func TestAlbumFieldsFillsLabelAndYear(t *testing.T) {
 // TestAlbumFieldsRespectsLocks: a member's locked year keeps that member out of the year
 // fill, while the album and the other member take the year and the label lands beside it.
 func TestAlbumFieldsRespectsLocks(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	pidA := seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "One", "Pink Floyd", "Wish You Were Here")
@@ -554,6 +563,7 @@ func TestAlbumFieldsRespectsLocks(t *testing.T) {
 // until a later member brings one, and then the column is its members' year and is not
 // filled: the label lands, the provider's year does not, and the tagged year stands.
 func TestAlbumFieldsToppedUpYearIsNotRefilled(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	const relMBID = "b1000000-0000-4000-8000-000000000001"
@@ -590,6 +600,7 @@ func TestAlbumFieldsToppedUpYearIsNotRefilled(t *testing.T) {
 // so clearing the one member year leaves the album with none, and a provider's year then
 // fills the album and the members (the clear locked nothing). The label lands beside it.
 func TestAlbumFieldsFillsAnAlbumWhoseMembersLostTheirYear(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	const relMBID = "b1000000-0000-4000-8000-000000000002"
@@ -625,6 +636,7 @@ func TestAlbumFieldsFillsAnAlbumWhoseMembersLostTheirYear(t *testing.T) {
 // the members that have none, even where the album's own column has lost it. The column
 // is cleared by hand, since no writer leaves it empty over a dated member.
 func TestAlbumFieldsMemberYearVetoesTheFill(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "One", "Pink Floyd", "Animals")
@@ -657,6 +669,7 @@ func TestAlbumFieldsMemberYearVetoesTheFill(t *testing.T) {
 // onto its sibling's key and merged it away. They are one album now, its year is the dated
 // member's, and a provider's year lands nowhere.
 func TestAlbumFieldsDatedMemberKeepsTheAlbumYear(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedTrackYear(t, st, lib.ID, "/lib/a.mp3", "ess-a", "One", "Pink Floyd", "Animals", 1977)
@@ -691,6 +704,7 @@ func TestAlbumFieldsDatedMemberKeepsTheAlbumYear(t *testing.T) {
 // stays until the file states its own, and the album keeps its pid. label survives too:
 // the scan's top-up is fill-when-empty and never clears it.
 func TestAlbumFieldsYearSurvivesRescan(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "One", "Pink Floyd", "Wish You Were Here")
@@ -727,6 +741,7 @@ func TestAlbumFieldsYearSurvivesRescan(t *testing.T) {
 
 // TestAlbumFieldsScopedToOneEntity: --entity album:<pid> reaches the album fields phase.
 func TestAlbumFieldsScopedToOneEntity(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "One", "Band A", "Album A")
@@ -771,6 +786,7 @@ func seedTrackRelease(t *testing.T, st *sqlite.Store, libID int64, path, essence
 // TestAlbumFieldsStampsEachProviderSeparately: the album's label curation row names the
 // provider that supplied the label, not whichever provider answered first overall.
 func TestAlbumFieldsStampsEachProviderSeparately(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "One", "Pink Floyd", "Animals")
@@ -805,6 +821,7 @@ func TestAlbumFieldsStampsEachProviderSeparately(t *testing.T) {
 // Without the declaration an ISRC service would mark every label-less album a miss every
 // window, and a label service every track missing a bpm.
 func TestFieldsWalksFollowTheRung(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	run := func(t *testing.T, rung enrich.TargetType) (*enrich.Result, string) {
 		t.Helper()
@@ -847,6 +864,7 @@ func TestFieldsWalksFollowTheRung(t *testing.T) {
 // own provenance while the failed one's slot stays open, and the item is walked again so
 // the failed provider's value arrives once it answers.
 func TestTrackFieldsFailureLeavesTheItemQueued(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	pid := seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "One", "Band", "Album")

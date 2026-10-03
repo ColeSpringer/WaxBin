@@ -31,6 +31,7 @@ func putWithLyrics(t *testing.T, st *Store, libID int64, content string, ly *mod
 }
 
 func TestLyricsRoundTripAndClear(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	pid := putWithLyrics(t, st, lib.ID, "c1", &model.Lyrics{
@@ -66,6 +67,7 @@ func TestLyricsRoundTripAndClear(t *testing.T) {
 }
 
 func TestLyricsPickedUpWithoutAudioChange(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	// First scan: no lyrics yet.
@@ -91,6 +93,7 @@ func TestLyricsPickedUpWithoutAudioChange(t *testing.T) {
 }
 
 func TestLyricsNotFound(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	pid := putTrack(t, st, lib.ID, trackSpec{path: "/lib/x.flac", essence: "ex", content: "cx", title: "X", artist: "A", album: "Al"}).ItemPID
 	if _, err := st.LyricsByItem(context.Background(), pid); !waxerr.Is(err, waxerr.CodeNotFound) {
@@ -104,6 +107,7 @@ func TestLyricsNotFound(t *testing.T) {
 // since removed, counts as neither. Missing tracks and books are not tracks the tile
 // counts.
 func TestCoverageCountsHeldLyrics(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib := entityFixture(t)
 	track := func(title string, ly *model.Lyrics) (int64, model.PID) {

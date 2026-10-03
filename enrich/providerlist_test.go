@@ -56,6 +56,7 @@ func frontOnlyArtistArt(t *testing.T, name string, asked *[]string, onAsk func()
 // the next pass, not halfway through this one, and the provenance names the provider
 // that actually answered rather than a slot.
 func TestProviderListIsReadOncePerPass(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "One", "Artist A", "Album A")
@@ -102,6 +103,7 @@ func TestProviderListIsReadOncePerPass(t *testing.T) {
 // the two refuses instead of walking nothing and reporting success, and a pass that saw
 // a list walks it.
 func TestRunRefusesOnTheListItSnapshots(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 
 	t.Run("a list emptied after the advice read refuses", func(t *testing.T) {
@@ -164,6 +166,7 @@ func TestRunRefusesOnTheListItSnapshots(t *testing.T) {
 // TestProviderListOrdersAndDropsTheBuiltIns: the built-ins are entries in the list like
 // any other, so a hook moves them, drops them, and ranks the MusicBrainz genre baseline.
 func TestProviderListOrdersAndDropsTheBuiltIns(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 
 	t.Run("an injected cover ranked after the archive loses the front to it", func(t *testing.T) {
@@ -284,6 +287,7 @@ func TestProviderListOrdersAndDropsTheBuiltIns(t *testing.T) {
 // way Providers is, so a nil entry cannot panic the pass, a nameless provider cannot
 // write values with no provenance, and a provider listed twice is asked once.
 func TestProviderListDropsNilNamelessAndDuplicateEntries(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, _, lib := openStore(t)
 	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "One", "Artist A", "Album A")
@@ -323,6 +327,7 @@ func TestProviderListDropsNilNamelessAndDuplicateEntries(t *testing.T) {
 // TestBuiltinsListsWhatTheInstallRegistered: a settings surface can list what the
 // install has on offer before any pass runs, the MusicBrainz genre entry included.
 func TestBuiltinsListsWhatTheInstallRegistered(t *testing.T) {
+	t.Parallel()
 	injected := &enrich.Mock{ProviderName: "fanart", Caps: enrich.CapCover}
 	names := func(ps []enrich.Provider) []string {
 		out := make([]string, len(ps))
@@ -365,6 +370,7 @@ func TestBuiltinsListsWhatTheInstallRegistered(t *testing.T) {
 // write values nobody could tell from the built-in's. It is dropped at New, loudly, and
 // the built-in answers as usual.
 func TestInjectedProvidersCannotTakeABuiltinsName(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	for _, name := range []string{"lrclib", "musicbrainz", "none"} {
 		t.Run(name, func(t *testing.T) {
@@ -403,6 +409,7 @@ func TestInjectedProvidersCannotTakeABuiltinsName(t *testing.T) {
 // plus the two marker labels, so a host can refuse those names in its own settings
 // before New drops them, and it matches what New drops exactly.
 func TestReservedProviderNamesAreWhatNewDrops(t *testing.T) {
+	t.Parallel()
 	full := enrich.New(nil, enrich.Config{
 		Contact: "t@e.com", FetchCoverArt: true, FetchCommunityGenres: true, FetchLyrics: true,
 	}, nil)
@@ -451,6 +458,7 @@ func TestReservedProviderNamesAreWhatNewDrops(t *testing.T) {
 // TestSameNamedInjectedProvidersKeepTheFirst: two injected providers under one name would
 // share its provenance and its failure count, so the second is dropped at New.
 func TestSameNamedInjectedProvidersKeepTheFirst(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "One", "Artist A", "Album A")
@@ -477,6 +485,7 @@ func TestSameNamedInjectedProvidersKeepTheFirst(t *testing.T) {
 // the per-pass list drops one, rather than panicking the service's construction (and with
 // it the library's Open).
 func TestNewDropsANilInjectedProvider(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "One", "Artist A", "Album A")
@@ -498,6 +507,7 @@ func TestNewDropsANilInjectedProvider(t *testing.T) {
 // entry it adds under a built-in's name is not that built-in, so it is dropped and the
 // registered one keeps its place.
 func TestProviderListDropsAnImpostorOfABuiltin(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, _, lib := openStore(t)
 	item := seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")

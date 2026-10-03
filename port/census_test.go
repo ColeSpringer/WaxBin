@@ -16,6 +16,7 @@ import (
 // and `library add` would pull it into scan and organize, which ModePodcast exists
 // to prevent.
 func TestCensusExcludesThePodcastLibrary(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	dir := t.TempDir()
 	db := filepath.Join(dir, "catalog.db")
@@ -97,6 +98,7 @@ func openWithTracks(t *testing.T, ctx context.Context, db string, names ...strin
 // TestCensusCountsOnlyRestorableTrash matches what `trash list` shows: a restored
 // entry is journal history, and nothing is at stake in discarding it.
 func TestCensusCountsOnlyRestorableTrash(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db := filepath.Join(t.TempDir(), "catalog.db")
 	st, tracks := openWithTracks(t, ctx, db, "a", "b")
@@ -131,6 +133,7 @@ func TestCensusCountsOnlyRestorableTrash(t *testing.T) {
 // TestCensusReportsAnUnreadableCatalogAsPartial is what keeps `db reset` from
 // printing "Discarded: 0 items" for a catalog it could not read.
 func TestCensusReportsAnUnreadableCatalogAsPartial(t *testing.T) {
+	t.Parallel()
 	db := filepath.Join(t.TempDir(), "catalog.db")
 	if err := os.WriteFile(db, []byte("not a database at all"), 0o600); err != nil {
 		t.Fatal(err)
@@ -148,6 +151,7 @@ func TestCensusReportsAnUnreadableCatalogAsPartial(t *testing.T) {
 // about to discard: play state is what an item is worth to a user now, and the
 // sessions are the years of history behind stats --year.
 func TestCensusCountsPlaySessions(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db := filepath.Join(t.TempDir(), "catalog.db")
 	st, tracks := openWithTracks(t, ctx, db, "a")

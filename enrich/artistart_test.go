@@ -67,6 +67,7 @@ func artistArtHash(t *testing.T, dbPath, role string) string {
 // reaches it and fills its front and its auxiliary roles in one pass, through the
 // artist-art backfill and the same store helpers the release group uses.
 func TestArtistArtFillsFrontAndAux(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
@@ -102,6 +103,7 @@ func TestArtistArtFillsFrontAndAux(t *testing.T) {
 // TestArtistArtSkippedWhenLocked: the whole-entity art lock cancels both asks, so a
 // forced re-run does not re-download one picture per locked artist.
 func TestArtistArtSkippedWhenLocked(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
@@ -135,6 +137,7 @@ func TestArtistArtSkippedWhenLocked(t *testing.T) {
 // TestArtistArtStockRunSpendsNothing: no built-in provider answers at this rung, so a
 // stock install makes no extra request and the artist stays without a picture.
 func TestArtistArtStockRunSpendsNothing(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
@@ -155,6 +158,7 @@ func TestArtistArtStockRunSpendsNothing(t *testing.T) {
 // so an artist-art service that is down costs the identity nothing. The backfill owes its
 // halves, and the next pass asks again and fills the front.
 func TestAFailedArtistArtAskLeavesTheIdentitySettled(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
@@ -205,6 +209,7 @@ func TestAFailedArtistArtAskLeavesTheIdentitySettled(t *testing.T) {
 // cover provider that declares no rungs is never asked about an artist. The identity
 // settles and the backfill writes no marker for a phase that never ran.
 func TestArtistRungIgnoresCoverProviders(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
@@ -241,6 +246,7 @@ func TestArtistRungIgnoresCoverProviders(t *testing.T) {
 // capabilities at every rung, with no picture for this artist, hears about it once per
 // pass rather than once from the identity walk and again from the backfill.
 func TestAnArtistIsAskedOncePerPass(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, _, lib := openStore(t)
 	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
@@ -269,6 +275,7 @@ func TestAnArtistIsAskedOncePerPass(t *testing.T) {
 // even though an auxiliary role landed in the same walk, so the retry window asks about
 // the front again while the auxiliary half's match stands untouched.
 func TestArtistArtRetriesAFrontMissedBesideAnAuxMatch(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
@@ -319,6 +326,7 @@ func TestArtistArtRetriesAFrontMissedBesideAnAuxMatch(t *testing.T) {
 // reaches the artist on its first pass, with no forced run and no window to wait out,
 // and the front stays as it was.
 func TestArtistArtAuxFillsSettledFront(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
@@ -359,6 +367,7 @@ func TestArtistArtAuxFillsSettledFront(t *testing.T) {
 // carries, so the gather stops asking once a front and a background are held, and a
 // release role a provider offers for an artist is not stored at the artist rung.
 func TestArtistArtStopsOnceABackgroundLands(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
@@ -394,6 +403,7 @@ func TestArtistArtStopsOnceABackgroundLands(t *testing.T) {
 // provider serving artist fronts alone is asked about fronts alone, so an artist it has
 // no background for leaves no background miss to re-ask every retry window.
 func TestAFrontOnlyArtistProviderLeavesTheBackgroundUnasked(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
@@ -433,6 +443,7 @@ func TestAFrontOnlyArtistProviderLeavesTheBackgroundUnasked(t *testing.T) {
 // TestABackgroundOnlyArtistProviderLeavesTheFrontUnasked is the mirror: a provider serving
 // backgrounds alone is asked for them alone and never answers for a front.
 func TestABackgroundOnlyArtistProviderLeavesTheFrontUnasked(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
@@ -465,6 +476,7 @@ func TestABackgroundOnlyArtistProviderLeavesTheFrontUnasked(t *testing.T) {
 // service says so once per provider rather than going quiet, and leaves a provider that
 // scopes its release art to the release rungs alone.
 func TestRunWarnsOfReleaseArtOfferedForArtists(t *testing.T) {
+	t.Parallel()
 	st, _, lib := openStore(t)
 	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
 	old := &enrich.Mock{ProviderName: "fanart", Caps: enrich.CapCover | enrich.CapAuxArt,

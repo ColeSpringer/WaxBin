@@ -30,6 +30,7 @@ func tinyPNG(t *testing.T) []byte {
 // A book maps the same catalog fields to DIFFERENT tags than a track (title→ALBUM,
 // author→ALBUMARTIST), so the two maps must stay distinct.
 func TestBookFieldTagKeys(t *testing.T) {
+	t.Parallel()
 	want := map[string][]string{
 		"title":       {"ALBUM"},
 		"author":      {"ALBUMARTIST"},
@@ -81,6 +82,7 @@ func TestBookFieldTagKeys(t *testing.T) {
 // that model.EntityFieldWritable, which decides what an entity edit owes its member
 // files, names the same fields.
 func TestEntityFieldTagKey(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		et    model.MergeEntity
 		field string
@@ -121,6 +123,7 @@ func TestEntityFieldTagKey(t *testing.T) {
 // aliases write onto another field on every format, and RetargetedTagKey names that field.
 // A spelling only one format treats as a field is ApplyCustomTag's to refuse.
 func TestRetargetedTagKeysMatchWaxLabel(t *testing.T) {
+	t.Parallel()
 	var want []string
 	for _, k := range tag.KnownKeys() {
 		for _, alias := range tag.KeyAliases(k) {
@@ -151,6 +154,7 @@ func TestRetargetedTagKeysMatchWaxLabel(t *testing.T) {
 // TestPackSeriesGroupingRoundTrip checks PackSeriesGrouping is the inverse of the
 // scanner's parseSeries, so a series+sequence written to GROUPING reads back unchanged.
 func TestPackSeriesGroupingRoundTrip(t *testing.T) {
+	t.Parallel()
 	cases := []struct{ name, seq string }{
 		{"Foundation", "2"},
 		{"Foundation", "1.5"},
@@ -175,6 +179,7 @@ func TestPackSeriesGroupingRoundTrip(t *testing.T) {
 // TestApplyPictureRoundTrip embeds a front cover and reads it back, and confirms a
 // re-embed of identical bytes is a no-op and the audio essence is preserved.
 func TestApplyPictureRoundTrip(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "song.mp3")

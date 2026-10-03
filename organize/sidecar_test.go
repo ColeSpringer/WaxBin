@@ -19,6 +19,7 @@ func coverPlan(srcAudio, dstAudio string) []CoverMove {
 // (AVIF/HEIC), now recognized by the scanner, is carried with the album, not left
 // behind in the old directory.
 func TestCoverMovesCarriesExoticCover(t *testing.T) {
+	t.Parallel()
 	srcDir := t.TempDir()
 	dstDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(srcDir, "cover.avif"), []byte("avifdata"), 0o644); err != nil {
@@ -48,6 +49,7 @@ func TestCoverMovesCarriesExoticCover(t *testing.T) {
 // scanner matches case-insensitively) is also carried, not stranded on a case-sensitive
 // filesystem.
 func TestCoverMovesCarriesMixedCaseCover(t *testing.T) {
+	t.Parallel()
 	srcDir := t.TempDir()
 	dstDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(srcDir, "Cover.JPG"), []byte("x"), 0o644); err != nil {
@@ -71,6 +73,7 @@ func TestCoverMovesCarriesMixedCaseCover(t *testing.T) {
 // TestCoverMovesSkipsSameDir confirms directory art is not touched when the audio stays
 // in the same directory (only same-basename companions move then).
 func TestCoverMovesSkipsSameDir(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "cover.avif"), []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
@@ -83,6 +86,7 @@ func TestCoverMovesSkipsSameDir(t *testing.T) {
 // TestSidecarMovesLeavesDirectoryArtAlone: the per-file enumeration plans a file's own
 // companions and nothing else, so the directory's cover is the batch planner's job.
 func TestSidecarMovesLeavesDirectoryArtAlone(t *testing.T) {
+	t.Parallel()
 	srcDir, dstDir := t.TempDir(), t.TempDir()
 	for _, name := range []string{"track.lrc", "cover.jpg"} {
 		if err := os.WriteFile(filepath.Join(srcDir, name), []byte("x"), 0o644); err != nil {
@@ -114,6 +118,7 @@ func exists(p string) bool {
 // TestCoverMovesSplitsAcrossDestinations is the gap this planner closes: a compilation
 // split per artist used to leave every destination but the first bare.
 func TestCoverMovesSplitsAcrossDestinations(t *testing.T) {
+	t.Parallel()
 	srcDir, dstA, dstB := t.TempDir(), t.TempDir(), t.TempDir()
 	mustWrite(t, filepath.Join(srcDir, "cover.jpg"))
 	// The audio has already moved by the time the planner runs, so the source directory
@@ -146,6 +151,7 @@ func TestCoverMovesSplitsAcrossDestinations(t *testing.T) {
 // TestCoverMovesKeepsTheCoverWhenAudioStays: one track of three leaves, so the
 // destination takes a copy and the tracks left behind keep their picture.
 func TestCoverMovesKeepsTheCoverWhenAudioStays(t *testing.T) {
+	t.Parallel()
 	srcDir, dstDir := t.TempDir(), t.TempDir()
 	mustWrite(t, filepath.Join(srcDir, "cover.jpg"))
 	mustWrite(t, filepath.Join(srcDir, "two.mp3"))
@@ -170,6 +176,7 @@ func TestCoverMovesKeepsTheCoverWhenAudioStays(t *testing.T) {
 // TestCoverMovesMovesWhenEmptiedToOnePlace is the previous behaviour, unchanged: a whole
 // album relocating carries its cover rather than leaving an orphan behind.
 func TestCoverMovesMovesWhenEmptiedToOnePlace(t *testing.T) {
+	t.Parallel()
 	srcDir, dstDir := t.TempDir(), t.TempDir()
 	mustWrite(t, filepath.Join(srcDir, "cover.jpg"))
 	mustWrite(t, filepath.Join(dstDir, "01 - One.mp3"))
@@ -191,6 +198,7 @@ func TestCoverMovesMovesWhenEmptiedToOnePlace(t *testing.T) {
 // TestCoverMovesSkipsAnExistingDestinationCover: a destination that already has one
 // keeps it rather than being overwritten or reported as a failure.
 func TestCoverMovesSkipsAnExistingDestinationCover(t *testing.T) {
+	t.Parallel()
 	srcDir, dstDir := t.TempDir(), t.TempDir()
 	mustWrite(t, filepath.Join(srcDir, "cover.jpg"))
 	mustWrite(t, filepath.Join(dstDir, "cover.jpg"))
@@ -208,6 +216,7 @@ func TestCoverMovesSkipsAnExistingDestinationCover(t *testing.T) {
 // second cover where it was, since the first one's already sits at the destination.
 // Choosing between two covers is not this planner's call.
 func TestCoverMovesLeavesTheSecondCoverOnAMerge(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	srcA, srcB, dstDir := filepath.Join(dir, "a"), filepath.Join(dir, "b"), filepath.Join(dir, "dst")
 	for _, d := range []string{srcA, srcB, dstDir} {

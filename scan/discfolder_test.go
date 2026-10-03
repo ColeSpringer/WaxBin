@@ -29,6 +29,7 @@ func writeUnder(t *testing.T, root, rel string, spec testaudio.MP3Spec) {
 // one album, and each takes its disc from its folder, so the discs keep their order
 // rather than interleaving by track number.
 func TestDiscFoldersNumberTheirDiscs(t *testing.T) {
+	t.Parallel()
 	st, lib, sc, _, root := fastPathFixture(t)
 	ctx := context.Background()
 	for i, f := range []struct{ rel, title string }{
@@ -61,6 +62,7 @@ func TestDiscFoldersNumberTheirDiscs(t *testing.T) {
 // TestDiscFolderRipTakesItsDisc: a cue rip in a disc folder carves tracks that carry
 // the folder's disc, the rip file's own tags stating none.
 func TestDiscFolderRipTakesItsDisc(t *testing.T) {
+	t.Parallel()
 	st, lib, sc, _, root := fastPathFixture(t)
 	dir := filepath.Join(root, "Album", "CD2")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -84,6 +86,7 @@ func TestDiscFolderRipTakesItsDisc(t *testing.T) {
 // TestBookPartsInDiscFoldersKeepTheirOrder: a book's parts numbered from one in each
 // disc folder take the folder's disc, so the second disc's parts follow the first's.
 func TestBookPartsInDiscFoldersKeepTheirOrder(t *testing.T) {
+	t.Parallel()
 	st, lib, sc, _, root := fastPathFixture(t)
 	ctx := context.Background()
 	narrator := []testaudio.TXXXFrame{{Desc: "NARRATOR", Value: "Reader"}}
@@ -109,6 +112,7 @@ func TestBookPartsInDiscFoldersKeepTheirOrder(t *testing.T) {
 // TestResolveCoverClimbsFromADiscFolder: a file in a disc folder with no cover of its
 // own takes the cover in its album folder, and a file in any other subfolder does not.
 func TestResolveCoverClimbsFromADiscFolder(t *testing.T) {
+	t.Parallel()
 	album := t.TempDir()
 	writeJPEG(t, filepath.Join(album, "cover.jpg"), 64, 64)
 	for _, sub := range []string{"CD1", "Bonus"} {
@@ -131,6 +135,7 @@ func TestResolveCoverClimbsFromADiscFolder(t *testing.T) {
 // folder on the full scan, and the next scan takes the fast path, since the cover the
 // track uses is the one its observation records.
 func TestDiscFolderCoverScansOnce(t *testing.T) {
+	t.Parallel()
 	st, lib, sc, _, root := fastPathFixture(t)
 	ctx := context.Background()
 	writeUnder(t, root, "Album/CD1/01.mp3", testaudio.MP3Spec{Title: "Song", Artist: "Band", Album: "Album", Track: 1})
@@ -150,6 +155,7 @@ func TestDiscFolderCoverScansOnce(t *testing.T) {
 // disc. Loose tracks in a root called "CD1" carry no disc, and the scan looks for their
 // cover in the root alone, never in the folder beside it.
 func TestLibraryRootNamedLikeADiscIsNoDiscFolder(t *testing.T) {
+	t.Parallel()
 	parent := t.TempDir()
 	root := filepath.Join(parent, "CD1")
 	st, lib, sc, _, _ := fastPathFixtureAt(t, root)
@@ -180,6 +186,7 @@ func TestLibraryRootNamedLikeADiscIsNoDiscFolder(t *testing.T) {
 // never read, being a reading-order index as often as a place, and nor is a staged file's
 // name.
 func TestPartPosition(t *testing.T) {
+	t.Parallel()
 	root := filepath.Join("/", "lib")
 	for _, c := range []struct {
 		rel           string
@@ -223,6 +230,7 @@ func TestPartPosition(t *testing.T) {
 // its old one gave it keeps the place the catalog holds, and the disc in a part name
 // orders the discs of parts whose tags state none.
 func TestRenamedBookPartsKeepTheirPlaces(t *testing.T) {
+	t.Parallel()
 	st, lib, sc, _, root := fastPathFixture(t)
 	ctx := context.Background()
 	narrator := []testaudio.TXXXFrame{{Desc: "NARRATOR", Value: "Reader"}}
@@ -271,6 +279,7 @@ func TestRenamedBookPartsKeepTheirPlaces(t *testing.T) {
 // disc and place, so a rebuild orders the book as organize named it; an in-place library's
 // names are its owner's, and a name like "Lecture - 03-2021" is no part name anywhere.
 func TestManagedPartNamesGiveTheirDiscAndPlace(t *testing.T) {
+	t.Parallel()
 	for _, mode := range []model.Mode{model.ModeManaged, model.ModeInPlace} {
 		st, lib, sc, root := kindFixture(t, model.MediaAudiobook)
 		lib.Mode = mode

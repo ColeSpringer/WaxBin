@@ -117,6 +117,7 @@ func retryArtService(st enrich.Store, p enrich.Provider, window time.Duration) *
 // and asked with the cache bypassed, since the cached miss is exactly what earned the
 // marker.
 func TestRetrySweepReAsksAnExpiredIdentityMiss(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
@@ -159,6 +160,7 @@ func TestRetrySweepReAsksAnExpiredIdentityMiss(t *testing.T) {
 // TestRetrySweepForcesTheProviderRequest: a provider that caches its own misses has to
 // be told, or the re-ask returns the answer that earned the marker.
 func TestRetrySweepForcesTheProviderRequest(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
@@ -205,6 +207,7 @@ func TestRetrySweepForcesTheProviderRequest(t *testing.T) {
 // cover and nothing else still has three empty slots, so only the marker keeps it out
 // of the queue. That marker is durable: a provider gained later needs a forced run.
 func TestRetrySweepLeavesAMatchedMarkerAlone(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
@@ -248,6 +251,7 @@ func TestRetrySweepLeavesAMatchedMarkerAlone(t *testing.T) {
 
 // TestRetryWindowOfZeroNeverReAsks: the config key's off switch.
 func TestRetryWindowOfZeroNeverReAsks(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
@@ -276,6 +280,7 @@ func TestRetryWindowOfZeroNeverReAsks(t *testing.T) {
 // than a wider predicate: on a capped nightly run the budget has to reach the files
 // nobody has looked at yet, even when an older miss sorts ahead of them by id.
 func TestFreshTargetsAreWalkedBeforeRetries(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
@@ -328,6 +333,7 @@ func TestFreshTargetsAreWalkedBeforeRetries(t *testing.T) {
 // phase, the artist-art retry below would take the budget and the newly scanned track's
 // lyrics would go unlooked-at night after night.
 func TestFreshTargetsWinTheBudgetAcrossPhasesToo(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
@@ -358,6 +364,7 @@ func TestFreshTargetsWinTheBudgetAcrossPhasesToo(t *testing.T) {
 // without a request. A retried album under that group must still get a real re-browse,
 // or the re-ask reads the same stale answer that earned its marker.
 func TestRetriedAlbumReBrowsesAGroupASiblingCached(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedAlbumEdition(t, st, lib.ID, "ess-b", "CD", "JP")
@@ -414,6 +421,7 @@ func TestRetriedAlbumReBrowsesAGroupASiblingCached(t *testing.T) {
 // walks, so a run made entirely of retries reports a real ratio rather than jumping to one
 // on its first target.
 func TestRetryOnlyRunReportsAFullHeartbeat(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
@@ -446,6 +454,7 @@ func TestRetryOnlyRunReportsAFullHeartbeat(t *testing.T) {
 // TestDeferredTargetsCountAgainstTheLimit: a deferred target spent a real request, so it
 // takes its share of --limit like any walked target.
 func TestDeferredTargetsCountAgainstTheLimit(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, _, lib := openStore(t)
 	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "One", "Artist A", "Album A")
@@ -474,6 +483,7 @@ func TestDeferredTargetsCountAgainstTheLimit(t *testing.T) {
 // standing marker, matched or not, so the next ordinary run asks again instead of the
 // target waiting for the next force.
 func TestForcedRunFailureReopensTheTarget(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "One", "Artist A", "Album A")
@@ -528,6 +538,7 @@ func TestForcedRunFailureReopensTheTarget(t *testing.T) {
 // cache bypassed for the expired one, so its provider is asked once and the denominator
 // counts it once.
 func TestAnEntityDueOnTwoSweepsIsWalkedOnce(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	for i, name := range []string{"Artist X", "Artist Y", "Artist Z"} {
@@ -578,6 +589,7 @@ func TestAnEntityDueOnTwoSweepsIsWalkedOnce(t *testing.T) {
 // owed still counts them, since the count measures them against the same instant the
 // owed sweep does.
 func TestHeartbeatCountsTheOwedLookups(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	db := roDB(t, dbPath)
@@ -614,6 +626,7 @@ func TestHeartbeatCountsTheOwedLookups(t *testing.T) {
 // settles each by its own rule when the provider fails again. The owed half has had its
 // one more ask and settles as a miss, while the fresh half is owed.
 func TestOneWalkOwesOnlyAHalfNotAlreadyOwed(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedTrack(t, st, lib.ID, "/lib/x.mp3", "ess-x", "Song", "Artist X", "Album X")

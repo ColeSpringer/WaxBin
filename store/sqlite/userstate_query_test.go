@@ -50,6 +50,7 @@ func joinTitles(ss []string) string { return strings.Join(ss, ",") }
 // TestQueryUserStateFields exercises a filter over each new per-user field for the
 // default user, confirming the play_state join surfaces the right rows.
 func TestQueryUserStateFields(t *testing.T) {
+	t.Parallel()
 	st, ids := userStateFixture(t)
 	ctx := context.Background()
 
@@ -106,6 +107,7 @@ func TestQueryUserStateFields(t *testing.T) {
 // (played is 0, play_count is 0, rating isMissing) and only drop out once a row
 // exists. A silent INNER join would hide every never-played item.
 func TestQueryUserStateLeftJoinVisibility(t *testing.T) {
+	t.Parallel()
 	st, ids := userStateFixture(t)
 	ctx := context.Background()
 
@@ -138,6 +140,7 @@ func TestQueryUserStateLeftJoinVisibility(t *testing.T) {
 // user A must read as unplayed for user B. This is exactly the bug a WHERE-clause
 // user_id predicate (instead of an ON-clause one) would introduce.
 func TestQueryUserStateCrossUserIsolation(t *testing.T) {
+	t.Parallel()
 	st, ids := userStateFixture(t)
 	ctx := context.Background()
 
@@ -185,6 +188,7 @@ func TestQueryUserStateCrossUserIsolation(t *testing.T) {
 // distinguishes "started" from "opened once" (which played cannot). Progress is
 // per-user, so another user's position must not select the item for this one.
 func TestPositionField(t *testing.T) {
+	t.Parallel()
 	st, ids := userStateFixture(t)
 	ctx := context.Background()
 	bob, err := st.CreateUser(ctx, "bob")
@@ -232,6 +236,7 @@ func TestPositionField(t *testing.T) {
 // TestCountItemsUserState confirms Count honors the per-user filter and, because the
 // join is on play_state's primary key, never multiplies the count.
 func TestCountItemsUserState(t *testing.T) {
+	t.Parallel()
 	st, ids := userStateFixture(t)
 	ctx := context.Background()
 	if err := st.MarkPlayed(ctx, "", ids["Alpha"], false, nil); err != nil {
@@ -260,6 +265,7 @@ func TestCountItemsUserState(t *testing.T) {
 // TestQueryPageUserState confirms keyset pagination still filters by user state
 // while keeping its canonical sort_key ordering.
 func TestQueryPageUserState(t *testing.T) {
+	t.Parallel()
 	st, ids := userStateFixture(t)
 	ctx := context.Background()
 	for _, title := range []string{"Alpha", "Charlie"} {
@@ -284,6 +290,7 @@ func TestQueryPageUserState(t *testing.T) {
 // TestSmartPlaylistPerUser confirms one smart-playlist rule yields per-user
 // membership: the user is bound at read time, never stored in the rule.
 func TestSmartPlaylistPerUser(t *testing.T) {
+	t.Parallel()
 	st, ids := userStateFixture(t)
 	ctx := context.Background()
 	bob, _ := st.CreateUser(ctx, "bob")
@@ -330,6 +337,7 @@ func itemTitles(items []*model.ItemView) []string {
 // index seek (its primary key / item index) rather than a full table scan, so no
 // extra index is needed as the plan claims. It inspects the actual generated join.
 func TestUserStateJoinIndexSeek(t *testing.T) {
+	t.Parallel()
 	st, _ := userStateFixture(t)
 	ctx := context.Background()
 	uid, err := userIDByPID(ctx, st.read, "", "test")
@@ -388,6 +396,7 @@ func TestUserStateJoinIndexSeek(t *testing.T) {
 // rather than silently returning default-scoped results. The default user ("")
 // stays valid and skips the lookup.
 func TestQueryUnknownUserValidated(t *testing.T) {
+	t.Parallel()
 	st, _ := userStateFixture(t)
 	ctx := context.Background()
 
@@ -415,6 +424,7 @@ func TestQueryUnknownUserValidated(t *testing.T) {
 // TestFacetUserState confirms a facet honors a per-user filter (only the current
 // user's played items are grouped).
 func TestFacetUserState(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	a := putTrack(t, st, lib.ID, trackSpec{path: "/l/a.flac", essence: "ea", content: "ca", title: "A", artist: "X", album: "Al", genre: "Rock"})

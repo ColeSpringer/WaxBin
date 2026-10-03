@@ -14,6 +14,7 @@ import (
 // move as a set. A -wal left behind beside a renamed main file would drop its
 // uncheckpointed commits from the copy the reset exists to preserve.
 func TestMoveCatalogRollsBackOnPartialFailure(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	db := filepath.Join(dir, "catalog.db")
 	for _, suffix := range []string{"", "-wal", "-shm"} {
@@ -42,6 +43,7 @@ func TestMoveCatalogRollsBackOnPartialFailure(t *testing.T) {
 }
 
 func TestMoveCatalogAsideMovesTheWholeSet(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	db := filepath.Join(dir, "catalog.db")
 	for _, suffix := range []string{"", "-wal", "-shm"} {
@@ -67,6 +69,7 @@ func TestMoveCatalogAsideMovesTheWholeSet(t *testing.T) {
 // second, where the timestamped name collides and os.Rename would silently replace
 // the real backup with whatever followed it.
 func TestMoveCatalogAsideDoesNotClobberAnEarlierBackup(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	db := filepath.Join(dir, "catalog.db")
 
@@ -94,6 +97,7 @@ func TestMoveCatalogAsideDoesNotClobberAnEarlierBackup(t *testing.T) {
 }
 
 func TestMoveCatalogAsideWithNoCatalog(t *testing.T) {
+	t.Parallel()
 	dest, err := moveCatalogAside(filepath.Join(t.TempDir(), "absent.db"))
 	if err != nil || dest != "" {
 		t.Fatalf("no catalog = (%q, %v), want (\"\", nil)", dest, err)
@@ -103,6 +107,7 @@ func TestMoveCatalogAsideWithNoCatalog(t *testing.T) {
 // TestEnsureNoCatalogOwnerRefusesALiveOwner pins the check that keeps a reset from
 // renaming the catalog out from under a running server or watcher.
 func TestEnsureNoCatalogOwnerRefusesALiveOwner(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db := filepath.Join(t.TempDir(), "catalog.db")
 

@@ -11,6 +11,7 @@ import (
 // selects as one statement, each list bound once as a JSON array whatever its length,
 // with repeats collapsed (albums and release groups are each appended by two phases).
 func TestEnrichWriteScopeClauseBindsEachListOnce(t *testing.T) {
+	t.Parallel()
 	const itemCol, albumCol = "pi.id", "t.album_id"
 
 	if clause, args := enrichWriteScopeClause(nil, itemCol, albumCol); clause != "" || args != nil {

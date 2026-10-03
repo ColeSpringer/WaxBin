@@ -111,6 +111,7 @@ func putCopyPair(t *testing.T, st *sqlite.Store, lib *model.Library, p1, p2 stri
 }
 
 func TestCopyAttachesAsAlternate(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib, root := openCopyStore(t)
 	p1, p2 := filepath.Join(root, "a", "1.mp3"), filepath.Join(root, "b", "1.mp3")
@@ -164,6 +165,7 @@ func TestCopyAttachesAsAlternate(t *testing.T) {
 // TestCopyRePutIsSilent: a forced re-read of the copy changes nothing and emits nothing,
 // and a retag of the copy moves only its own file row.
 func TestCopyRePutIsSilent(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib, root := openCopyStore(t)
 	p1, p2 := filepath.Join(root, "a", "1.mp3"), filepath.Join(root, "b", "1.mp3")
@@ -195,6 +197,7 @@ func TestCopyRePutIsSilent(t *testing.T) {
 }
 
 func TestCopyLeavesThePrimaryOwningTheItem(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib, root := openCopyStore(t)
 	p1, p2 := filepath.Join(root, "a", "1.mp3"), filepath.Join(root, "b", "1.mp3")
@@ -217,6 +220,7 @@ func TestCopyLeavesThePrimaryOwningTheItem(t *testing.T) {
 // TestCopyRelinkTakesTheGoneRow: a move of the primary relinks its own row, not the
 // copy's, now that one essence has several rows.
 func TestCopyRelinkTakesTheGoneRow(t *testing.T) {
+	t.Parallel()
 	st, lib, root := openCopyStore(t)
 	p1, p2 := filepath.Join(root, "a", "1.mp3"), filepath.Join(root, "b", "1.mp3")
 	r1, r2 := putCopyPair(t, st, lib, p1, p2)
@@ -236,6 +240,7 @@ func TestCopyRelinkTakesTheGoneRow(t *testing.T) {
 }
 
 func TestCopyRelinksGoneRowsInIDOrder(t *testing.T) {
+	t.Parallel()
 	st, lib, root := openCopyStore(t)
 	p1, p2 := filepath.Join(root, "a", "1.mp3"), filepath.Join(root, "b", "1.mp3")
 	r1, r2 := putCopyPair(t, st, lib, p1, p2)
@@ -263,6 +268,7 @@ func TestCopyRelinksGoneRowsInIDOrder(t *testing.T) {
 // TestCopyAcrossLibrariesAttaches: a copy in another library, read-only or not, joins
 // the item rather than starting one; the relink lookup stays inside one library.
 func TestCopyAcrossLibrariesAttaches(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib, root := openCopyStore(t)
 	p1 := filepath.Join(root, "a", "1.mp3")
@@ -296,6 +302,7 @@ func TestCopyAcrossLibrariesAttaches(t *testing.T) {
 // TestCopyEncodingRanksByQuality: two encodings under one recording MBID share an item,
 // and the better one is its primary whichever arrives first, its tags owning the item.
 func TestCopyEncodingRanksByQuality(t *testing.T) {
+	t.Parallel()
 	encoding := func(lib *model.Library, path, essence, title, codec string, bitrate, depth int) model.PutScannedTrackInput {
 		in := input(lib.ID, path, essence, "sha256:C"+essence, title)
 		in.Item.IdentityKey = "mbid:rec-1"
@@ -378,6 +385,7 @@ func TestCopyEncodingRanksByQuality(t *testing.T) {
 // path is missing stays the alternate, since mid-walk a missing path may be a primary moved
 // to a folder not reached yet; reconciling the gone file is what promotes the copy.
 func TestCopyWaitsForReconciliationToReplaceAGonePrimary(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib, root := openCopyStore(t)
 	p1, p2 := filepath.Join(root, "a", "1.mp3"), filepath.Join(root, "b", "1.mp3")
@@ -406,6 +414,7 @@ func TestCopyWaitsForReconciliationToReplaceAGonePrimary(t *testing.T) {
 // keys (one untagged, one carrying a recording id), both files moved, the tagged one walked
 // first: each move relinks its own row, and neither item is lost.
 func TestCopyRelinkKeepsEachRowWithItsItem(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib, root := openCopyStore(t)
 	pb, pa := filepath.Join(root, "b", "1.mp3"), filepath.Join(root, "a", "1.mp3")
@@ -444,6 +453,7 @@ func TestCopyRelinkKeepsEachRowWithItsItem(t *testing.T) {
 // TestCopyRelinkLeavesAnotherItemsGoneRow: a move never takes the gone row of another item,
 // which reconciliation then marks missing rather than deleting.
 func TestCopyRelinkLeavesAnotherItemsGoneRow(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib, root := openCopyStore(t)
 	pb, pa := filepath.Join(root, "b", "1.mp3"), filepath.Join(root, "a", "1.mp3")
@@ -479,6 +489,7 @@ func TestCopyRelinkLeavesAnotherItemsGoneRow(t *testing.T) {
 // audio, so the outcome matches retagging it in place and then moving it: the file keeps
 // its pid under the new key and the old item, left with no file, goes.
 func TestRelinkFollowsAKeyChange(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib, root := openCopyStore(t)
 	p1, p2 := filepath.Join(root, "a", "1.mp3"), filepath.Join(root, "b", "1.mp3")
@@ -503,6 +514,7 @@ func TestRelinkFollowsAKeyChange(t *testing.T) {
 // together, the copy walked first: the copy relinks its own row and stays the alternate, so
 // the item keeps the original's tags.
 func TestCopyMovedWithItsOriginalKeepsTheRoles(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib, root := openCopyStore(t)
 	p1, p2 := filepath.Join(root, "a", "1.mp3"), filepath.Join(root, "b", "1.mp3")
@@ -533,6 +545,7 @@ func TestCopyMovedWithItsOriginalKeepsTheRoles(t *testing.T) {
 // TestCopyKeepsAPrimaryUnderAnAbsentRoot: a primary whose whole library root is missing
 // may only be unmounted, so a copy elsewhere stays an alternate.
 func TestCopyKeepsAPrimaryUnderAnAbsentRoot(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib, root := openCopyStore(t)
 	p1 := filepath.Join(root, "a", "1.mp3")
@@ -558,6 +571,7 @@ func TestCopyKeepsAPrimaryUnderAnAbsentRoot(t *testing.T) {
 // re-read first re-keys its item in place, as a primary does, so its item is neither
 // forked nor left to be deleted when the primary follows.
 func TestCopyKeepsTheItemAcrossAnEssenceRekey(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib, root := openCopyStore(t)
 	p1, p2 := filepath.Join(root, "a", "1.mp3"), filepath.Join(root, "b", "1.mp3")
@@ -589,6 +603,7 @@ func promotedPIDs(ps []model.PromotedFile) []model.PID {
 // TestCopyPromotedWhenThePrimaryIsTrashed: trashing the primary promotes the copy, whose
 // copy diagnostic goes, and reports it for a re-read; the item stays present.
 func TestCopyPromotedWhenThePrimaryIsTrashed(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib, root := openCopyStore(t)
 	p1, p2 := filepath.Join(root, "a", "1.mp3"), filepath.Join(root, "b", "1.mp3")
@@ -615,6 +630,7 @@ func TestCopyPromotedWhenThePrimaryIsTrashed(t *testing.T) {
 }
 
 func TestCopyTrashedLeavesTheItemAlone(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib, root := openCopyStore(t)
 	p1, p2 := filepath.Join(root, "a", "1.mp3"), filepath.Join(root, "b", "1.mp3")
@@ -637,6 +653,7 @@ func TestCopyTrashedLeavesTheItemAlone(t *testing.T) {
 // in a writable one, losing the primary promotes the writable copy, and a better
 // encoding outranks a lesser one in the same standing.
 func TestCopyPromotionPrefersAWritableLibrary(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib, root := openCopyStore(t)
 	ro, roRoot := addCopyLibrary(t, st)
@@ -689,6 +706,7 @@ func TestCopyPromotionPrefersAWritableLibrary(t *testing.T) {
 // the item over when the primary is read at its new path, the end state the other order
 // reaches. The promoted file is reported for a re-read.
 func TestEncodingTakeoverIgnoresWalkOrder(t *testing.T) {
+	t.Parallel()
 	st, lib, root := openCopyStore(t)
 	encoding := func(path, essence, title, codec string, bitrate, depth int) model.PutScannedTrackInput {
 		touch(t, path)
@@ -728,6 +746,7 @@ func TestEncodingTakeoverIgnoresWalkOrder(t *testing.T) {
 // attaches to an item whose primary is in a writable one, and a writable encoding takes
 // an item over from a read-only primary whatever its quality, the order promotion uses.
 func TestCopyEncodingInAReadOnlyLibraryAttaches(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib, root := openCopyStore(t)
 	ro, roRoot := addCopyLibrary(t, st)
@@ -775,6 +794,7 @@ func TestCopyEncodingInAReadOnlyLibraryAttaches(t *testing.T) {
 // TestMarkFilesMissingPromotesACopy: reconciling a vanished primary whose copy is on
 // disk promotes the copy rather than marking the item missing, and drops the gone row.
 func TestMarkFilesMissingPromotesACopy(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib, root := openCopyStore(t)
 	p1, p2 := filepath.Join(root, "a", "1.mp3"), filepath.Join(root, "b", "1.mp3")
@@ -801,6 +821,7 @@ func TestMarkFilesMissingPromotesACopy(t *testing.T) {
 // drive) loses to one on disk, whichever attached first, both when the primary is
 // trashed and when reconciliation finds it gone.
 func TestCopyPromotionPrefersACopyOnDisk(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib, root := openCopyStore(t)
 	unplugged, offRoot := addCopyLibrary(t, st)
@@ -845,6 +866,7 @@ func TestCopyPromotionPrefersACopyOnDisk(t *testing.T) {
 // item missing rather than leaving it present with no file. A reconciliation never
 // promotes a gone copy in place of a gone primary.
 func TestCopyGoneStillGivesTheItemAPrimary(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib, root := openCopyStore(t)
 	p1, p2 := filepath.Join(root, "a", "1.mp3"), filepath.Join(root, "b", "1.mp3")
@@ -893,6 +915,7 @@ func TestCopyGoneStillGivesTheItemAPrimary(t *testing.T) {
 // current path after the primary moves, by a rescan's relink, an organize move, or a
 // relocated library root.
 func TestCopyDiagnosticFollowsAMovedPrimary(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib, root := openCopyStore(t)
 	p1, p2 := filepath.Join(root, "a", "1.mp3"), filepath.Join(root, "b", "1.mp3")
@@ -952,6 +975,7 @@ func stateOf(t *testing.T, st *sqlite.Store, pid model.PID) model.ItemState {
 // reconciliation); with the primary back on disk the copy attaches and the item is present
 // again. Either way the item emits an update.
 func TestCopyRevivesAMissingItem(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib, root := openCopyStore(t)
 	other, otherRoot := addCopyLibrary(t, st)
@@ -1002,6 +1026,7 @@ func TestCopyRevivesAMissingItem(t *testing.T) {
 // TestRestoredBackupRevivesItsItem: when the primary and its copy are both gone, the item
 // is missing; restoring only the copy at its old path brings the item back on it.
 func TestRestoredBackupRevivesItsItem(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib, root := openCopyStore(t)
 	p1, p2 := filepath.Join(root, "a", "1.mp3"), filepath.Join(root, "b", "1.mp3")
@@ -1031,6 +1056,7 @@ func TestRestoredBackupRevivesItsItem(t *testing.T) {
 // finds the primary gone or the primary is trashed. The item, playable from no file, is
 // marked missing, and comes back when the drive's copy is read again.
 func TestUnreachableCopyLeavesTheItemMissing(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib, root := openCopyStore(t)
 	drive, driveRoot := addCopyLibrary(t, st)
@@ -1076,6 +1102,7 @@ func TestUnreachableCopyLeavesTheItemMissing(t *testing.T) {
 }
 
 func TestMarkFilesMissingDropsAGoneCopy(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, _ := openStoreAt(t)
 	lib, root := addCopyLibrary(t, st)
@@ -1109,6 +1136,7 @@ func TestMarkFilesMissingDropsAGoneCopy(t *testing.T) {
 // to a new item, and the old item keeps its pid and play state on the promoted copy
 // rather than being deleted.
 func TestCopyRekeyedPrimaryPromotesTheAlternate(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib, root := openCopyStore(t)
 	p1, p2 := filepath.Join(root, "a", "1.mp3"), filepath.Join(root, "b", "1.mp3")
@@ -1135,6 +1163,7 @@ func TestCopyRekeyedPrimaryPromotesTheAlternate(t *testing.T) {
 // TestCopyCountsOnceInRollupsAndStats: a copy adds no running time to its genre or the
 // library total, and costs nothing toward a size budget, while db verify stays clean.
 func TestCopyCountsOnceInRollupsAndStats(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, _ := openStoreAt(t)
 	lib, root := addCopyLibrary(t, st)
@@ -1168,6 +1197,7 @@ func TestCopyCountsOnceInRollupsAndStats(t *testing.T) {
 // analyzed (its measurements would be the primary's), while another encoding is, its
 // fingerprint and loudness being its own.
 func TestCopyAnalysisSkipsASameAudioAlternate(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib, root := openCopyStore(t)
 	p1, p2 := filepath.Join(root, "a", "1.mp3"), filepath.Join(root, "b", "1.mp3")
@@ -1204,6 +1234,7 @@ func TestCopyAnalysisSkipsASameAudioAlternate(t *testing.T) {
 // TestFingerprintCandidatesNameAnItem: a candidate always names the item it backs: an
 // alternate encoding names its item, and a rip's shared file is left out.
 func TestFingerprintCandidatesNameAnItem(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib, root := openCopyStore(t)
 	pm, pf, rip := filepath.Join(root, "m", "x.mp3"), filepath.Join(root, "f", "x.flac"), filepath.Join(root, "r", "album.flac")
@@ -1241,6 +1272,7 @@ func TestFingerprintCandidatesNameAnItem(t *testing.T) {
 // TestCopyMemberFilesFanOut: an album's member files take in its tracks' copies, so an
 // album-level write reaches them.
 func TestCopyMemberFilesFanOut(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib, root := openCopyStore(t)
 	p1, p2 := filepath.Join(root, "a", "1.mp3"), filepath.Join(root, "b", "1.mp3")
@@ -1265,6 +1297,7 @@ func TestCopyMemberFilesFanOut(t *testing.T) {
 // TestPutAcquisitionForFileSkipsACopy: an import stamp on a file that joined an existing
 // item as a copy records nothing, since the item was acquired before it, and says so.
 func TestPutAcquisitionForFileSkipsACopy(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib, root := openCopyStore(t)
 	p1, p2 := filepath.Join(root, "a", "1.mp3"), filepath.Join(root, "b", "1.mp3")
@@ -1286,6 +1319,7 @@ func TestPutAcquisitionForFileSkipsACopy(t *testing.T) {
 // field matches either, and the library facet counts it under each. Its own library
 // stays the primary's, and each of its files names its own.
 func TestCopyLibraryScopeCoversEveryFile(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, libA, rootA := openCopyStore(t)
 	libB, rootB := addCopyLibrary(t, st)
@@ -1349,6 +1383,7 @@ func TestCopyLibraryScopeCoversEveryFile(t *testing.T) {
 // TestAuditFilesNameACopysItem: the file-level audit pins a copy's findings on the item
 // it backs, as it does the primary's.
 func TestAuditFilesNameACopysItem(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib, root := openCopyStore(t)
 	p1, p2 := filepath.Join(root, "a", "1.mp3"), filepath.Join(root, "b", "1.mp3")
@@ -1370,6 +1405,7 @@ func TestAuditFilesNameACopysItem(t *testing.T) {
 // with a file in any listed library, notIn is a deny-list that keeps a fileless item, and
 // the presence pair splits items with files from those without.
 func TestLibraryFieldOperators(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, libA, rootA := openCopyStore(t)
 	libB, rootB := addCopyLibrary(t, st)

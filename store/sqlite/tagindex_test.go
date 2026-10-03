@@ -45,6 +45,7 @@ func queryPlan(t *testing.T, st *Store, stmt string, args ...any) string {
 // per-item tag.<KEY> EXISTS predicate as an index seek, so no tag read falls back to a
 // full table scan of item_tag.
 func TestTagIndexUsage(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	putTrackCustom(t, st, lib.ID, "/lib/a.flac", "ea", "ca", "A",
 		map[string][]string{"MOOD": {"happy"}, "MYKEY": {"foo"}}, true)

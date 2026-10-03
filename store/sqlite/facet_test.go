@@ -22,6 +22,7 @@ func bucketByDisplay(r *read.FacetResult, display string) (read.Bucket, bool) {
 }
 
 func TestFacetByGenre(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/1.flac", essence: "e1", content: "c1", title: "A", artist: "X", album: "Al", genre: "Rock; Pop"})
@@ -50,6 +51,7 @@ func TestFacetByGenre(t *testing.T) {
 }
 
 func TestFacetByArtistUnknownBucket(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/1.flac", essence: "e1", content: "c1", title: "A", artist: "Radiohead", album: "OK"})
@@ -68,6 +70,7 @@ func TestFacetByArtistUnknownBucket(t *testing.T) {
 }
 
 func TestFacetByAlbum(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/1.flac", essence: "e1", content: "c1", title: "A", artist: "X", album: "First"})
@@ -135,6 +138,7 @@ func detachReleaseGroup(t *testing.T, st *Store, albumTitle string) {
 // distinct unknown states it has to keep apart, and the drilldown through
 // release_group_pid that a bucket's EntityPID is for.
 func TestFacetByReleaseGroup(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	// Two editions of one record: same album artist and album title, different
@@ -205,6 +209,7 @@ func TestFacetByReleaseGroup(t *testing.T) {
 }
 
 func TestFacetByYearAndKind(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/1.flac", essence: "e1", content: "c1", title: "A", artist: "X", album: "Al", year: 1997})
@@ -232,6 +237,7 @@ func TestFacetByYearAndKind(t *testing.T) {
 }
 
 func TestFacetHonorsFilter(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/1.flac", essence: "e1", content: "c1", title: "A", artist: "X", album: "Al", genre: "Rock", year: 2000})
@@ -283,6 +289,7 @@ func playlistFacetFixture(t *testing.T) (st *Store, bob *model.User, mine, bobSh
 }
 
 func TestFacetByPlaylist(t *testing.T) {
+	t.Parallel()
 	st, _, mine, bobShared, _ := playlistFacetFixture(t)
 	ctx := context.Background()
 
@@ -318,6 +325,7 @@ func TestFacetByPlaylist(t *testing.T) {
 // the same query faceted by the same dimension returns a different bucket set per
 // caller.
 func TestFacetByPlaylistBucketSetVariesByUser(t *testing.T) {
+	t.Parallel()
 	st, bob, _, bobShared, bobPrivate := playlistFacetFixture(t)
 	ctx := context.Background()
 	all := query.New(query.EntityItems).Build()
@@ -342,6 +350,7 @@ func TestFacetByPlaylistBucketSetVariesByUser(t *testing.T) {
 }
 
 func TestFacetByPlaylistExcludesSmart(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/a.flac", essence: "ea", content: "ca", title: "A", artist: "X", album: "Al"})
@@ -364,6 +373,7 @@ func TestFacetByPlaylistExcludesSmart(t *testing.T) {
 // once for the visibility clause, and the WHERE args follow. Any swap makes the
 // visibility clause test a non-id and the facet comes back empty or wrong.
 func TestFacetByPlaylistWithUserFilter(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	a := putTrack(t, st, lib.ID, trackSpec{path: "/lib/a.flac", essence: "ea", content: "ca", title: "A", artist: "X", album: "Al"}).ItemPID
@@ -405,6 +415,7 @@ func TestFacetByPlaylistWithUserFilter(t *testing.T) {
 // what a flip to LEFT JOIN would break. SCAN fpl is deliberately not asserted: it
 // appears only after ANALYZE.
 func TestFacetByPlaylistDrivesFromPlaylistItem(t *testing.T) {
+	t.Parallel()
 	st, _, _, _, _ := playlistFacetFixture(t)
 	fm, ok := fieldMapFor(query.EntityItems)
 	if !ok {
@@ -436,6 +447,7 @@ func TestFacetByPlaylistDrivesFromPlaylistItem(t *testing.T) {
 // would silently bind userID = 0 and return an empty bucket set instead of an error,
 // and the read package's own test cannot see the specs.
 func TestFacetSpecUserScopedMatchesFlag(t *testing.T) {
+	t.Parallel()
 	for _, g := range read.GroupBys() {
 		zero, ok := facetSpecFor(g, 0)
 		if !ok {
@@ -451,6 +463,7 @@ func TestFacetSpecUserScopedMatchesFlag(t *testing.T) {
 }
 
 func TestFacetRejectsBadGroupBy(t *testing.T) {
+	t.Parallel()
 	st, _ := entityFixture(t)
 	if _, err := st.Facet(context.Background(), query.New(query.EntityItems).Build(), read.GroupBy("bogus"), "", 0, ""); err == nil {
 		t.Fatal("expected an error for an unsupported group-by")
@@ -482,6 +495,7 @@ func orderLimitFixture(t *testing.T) (*Store, *model.Library) {
 // it. The tied pair is the load-bearing case; without the collation tiebreak the two
 // could swap between runs.
 func TestFacetCountOrderAndLimit(t *testing.T) {
+	t.Parallel()
 	st, _ := orderLimitFixture(t)
 	ctx := context.Background()
 	all := query.New(query.EntityItems).Build()
@@ -547,6 +561,7 @@ func TestFacetCountOrderAndLimit(t *testing.T) {
 // is dropping the (sortExpr IS NULL) term that this has to catch, and that only
 // shows up against a dimension with an unknown bucket to misplace.
 func TestFacetDefaultOrderUnchanged(t *testing.T) {
+	t.Parallel()
 	st, lib := orderLimitFixture(t)
 	ctx := context.Background()
 	all := query.New(query.EntityItems).Build()
@@ -614,6 +629,7 @@ func TestFacetDefaultOrderUnchanged(t *testing.T) {
 // title "Beta" comes first. Ordering by display ahead of sort_key, or dropping the
 // sort_key term, flips the result.
 func TestFacetLabelOrderIsCollation(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	for i, album := range []string{"Beta", "The Aardvark"} {
 		n := string(rune('a' + i))
@@ -635,6 +651,7 @@ func TestFacetLabelOrderIsCollation(t *testing.T) {
 }
 
 func TestQueryPageKeysetCoversAllOnce(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	titles := []string{"Echo", "Alpha", "Delta", "Bravo", "Charlie"}
@@ -686,6 +703,7 @@ func TestQueryPageKeysetCoversAllOnce(t *testing.T) {
 }
 
 func TestQueryPageDescending(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	for _, title := range []string{"Alpha", "Bravo", "Charlie"} {
@@ -722,6 +740,7 @@ func TestQueryPageDescending(t *testing.T) {
 }
 
 func TestQueryPageStableUnderConcurrentInsert(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	for _, title := range []string{"Alpha", "Charlie", "Echo"} {
@@ -772,6 +791,7 @@ func TestQueryPageStableUnderConcurrentInsert(t *testing.T) {
 // argument is wrong. Resolving the user before validating the dimension and the order
 // masked both with "no such user", sending the caller after the wrong argument.
 func TestFacetArgumentErrorsBeatUserLookup(t *testing.T) {
+	t.Parallel()
 	st, _, _, _, _ := playlistFacetFixture(t)
 	ctx := context.Background()
 	all := query.New(query.EntityItems).Build()

@@ -30,6 +30,7 @@ func bookInputWithPID(libID int64, path, essence, title, author string, preferre
 }
 
 func TestPutScannedBookAdoptsPreferredPID(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 
@@ -59,6 +60,7 @@ func TestPutScannedBookAdoptsPreferredPID(t *testing.T) {
 }
 
 func TestThumbCacheLRU(t *testing.T) {
+	t.Parallel()
 	// A nil cache is a permanent miss and never panics (defensive).
 	var nilc *thumbCache
 	if _, ok := nilc.get("h", 1); ok {
@@ -104,6 +106,7 @@ func TestThumbCacheLRU(t *testing.T) {
 // once per request during a grid scroll. It is a separate instance from the thumbnail
 // cache so a run of undecodable covers cannot flush the real thumbnails beside them.
 func TestThumbCacheNegativeEntries(t *testing.T) {
+	t.Parallel()
 	// A nil negative cache is a permanent miss and never panics, the same guard put has.
 	var nilc *thumbCache
 	nilc.put("h", 1, model.ArtBlob{})
@@ -139,6 +142,7 @@ func TestThumbCacheNegativeEntries(t *testing.T) {
 // size re-encodes at that size, so entry count alone would let a handful of large covers
 // pin far more memory than the cache is meant to hold.
 func TestThumbCacheByteBound(t *testing.T) {
+	t.Parallel()
 	c := newThumbCache(100, 1000)
 	for i := range 10 {
 		c.put(fmt.Sprintf("h%d", i), 100, model.ArtBlob{Bytes: make([]byte, 300)})
@@ -167,6 +171,7 @@ func TestThumbCacheByteBound(t *testing.T) {
 }
 
 func TestThumbCacheBytesIsolated(t *testing.T) {
+	t.Parallel()
 	c := newThumbCache(4, 1<<20)
 
 	// The cache must not share a backing array with the caller who PUT the bytes: a

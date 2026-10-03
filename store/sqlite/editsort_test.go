@@ -36,6 +36,7 @@ func bookAuthorRow(t *testing.T, st *Store, pid model.PID) (author, authorSort s
 }
 
 func TestEditComposerSortMatrix(t *testing.T) {
+	t.Parallel()
 	st, pid := editFixture(t) // composer "Writer" -> derived sort
 	ctx := context.Background()
 
@@ -117,6 +118,7 @@ func TestEditComposerSortMatrix(t *testing.T) {
 }
 
 func TestEditAuthorSortMatrix(t *testing.T) {
+	t.Parallel()
 	st, pid := bookEditFixture(t) // author "Jane Author" -> derived sort
 	ctx := context.Background()
 
@@ -173,6 +175,7 @@ func TestEditAuthorSortMatrix(t *testing.T) {
 // sort-lock rule as the scalar path: a composer/author credit edit regenerates the
 // derived sort, unless that sort is locked.
 func TestCreditEditRespectsSortLocks(t *testing.T) {
+	t.Parallel()
 	st, pid := editFixture(t)
 	ctx := context.Background()
 
@@ -238,6 +241,7 @@ func rescanTrackWithComposer(t *testing.T, st *Store, libID int64, path, essence
 }
 
 func TestScanPreservesLockedSortNames(t *testing.T) {
+	t.Parallel()
 	st, pid := editFixture(t)
 	ctx := context.Background()
 
@@ -282,6 +286,7 @@ func lib1ID(t *testing.T, st *Store) int64 {
 }
 
 func TestQuerySortAndViewExposure(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	// Composers whose display and collation order differ: "The Zeta" collates as

@@ -66,6 +66,7 @@ func trackWithArtist(libID int64, path, essence, artist, mbArtistID string) mode
 // TestApplyArtistEnrichmentRelationDirection checks that an inbound relation is
 // stored member -> band, the opposite orientation from a naive src=enriched edge.
 func TestApplyArtistEnrichmentRelationDirection(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStoreAt(t)
 
@@ -122,6 +123,7 @@ func TestApplyArtistEnrichmentRelationDirection(t *testing.T) {
 // the book's polymorphic entity_enrichment marker, so a reused rowid cannot inherit
 // a stale "already enriched" state.
 func TestEntityEnrichmentClearedOnItemDelete(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStoreAt(t)
 
@@ -265,6 +267,7 @@ func setEntityMBID(t *testing.T, st *sqlite.Store, et model.MergeEntity, pid, mb
 // page and the apply (a merge or an orphan sweep in another writer), and a dead rowid
 // gets nothing rather than failing the run or stranding a marker.
 func TestApplyAlbumFieldsIgnoresAVanishedAlbum(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, _ := openStoreAt(t)
 	err := st.ApplyAlbumFields(ctx, model.AlbumFieldsEnrichment{
@@ -281,6 +284,7 @@ func TestApplyAlbumFieldsIgnoresAVanishedAlbum(t *testing.T) {
 }
 
 func TestAlbumsNeedingReleaseMatchGatesOnIdentifiers(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStoreAt(t)
 	db := roConn(t, dbPath)
@@ -333,6 +337,7 @@ func TestAlbumsNeedingReleaseMatchGatesOnIdentifiers(t *testing.T) {
 // album already holds is left for the merge primitive rather than duplicated. The
 // marker is still recorded in both cases, so neither is re-searched every run.
 func TestAlbumReleaseMatchRespectsLockAndDuplicate(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStoreAt(t)
 	db := roConn(t, dbPath)
@@ -383,6 +388,7 @@ func TestAlbumReleaseMatchRespectsLockAndDuplicate(t *testing.T) {
 // lookup; a book to its contributors and its own identifier fill; an episode is
 // refused; an unknown pid is CodeNotFound.
 func TestEnrichScopeForItem(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStoreAt(t)
 	db := roConn(t, dbPath)
@@ -500,6 +506,7 @@ func TestEnrichScopeForItem(t *testing.T) {
 // group scope to themselves, an album to its parent release group, and the
 // kinds enrichment has no provider for are refused.
 func TestEnrichScopeForEntity(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStoreAt(t)
 	db := roConn(t, dbPath)
@@ -550,6 +557,7 @@ func TestEnrichScopeForEntity(t *testing.T) {
 // force still bypasses markers inside the scope, and the count mirrors the
 // phases a scoped run would execute (an empty list contributes zero).
 func TestScopedEnrichmentQueries(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStoreAt(t)
 	db := roConn(t, dbPath)
@@ -657,6 +665,7 @@ func TestScopedEnrichmentQueries(t *testing.T) {
 // dropped for an explicitly scoped walk: a full pass skips an artist left
 // backing nothing by a retag, but a caller who names that artist reaches it.
 func TestScopedEnrichmentReachesGhostEntities(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStoreAt(t)
 	db := roConn(t, dbPath)
@@ -744,6 +753,7 @@ func enrichArtImg(hash, provider string) *model.ArtImage {
 // user image in a role is never replaced, and the entity art lock skips every
 // enrichment art write.
 func TestApplyReleaseGroupEnrichmentAuxRoles(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStoreAt(t)
 	db := roConn(t, dbPath)
@@ -810,6 +820,7 @@ func TestApplyReleaseGroupEnrichmentAuxRoles(t *testing.T) {
 // and every auxiliary role at once, and a per-role lock takes only its own slot, which is
 // the approximation the queue's vacancy test leaves for the apply to settle.
 func TestApplyAlbumArtBackfillRespectsLocks(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStoreAt(t)
 	db := roConn(t, dbPath)
@@ -929,6 +940,7 @@ func assertStoreVerifyClean(t *testing.T, st *sqlite.Store) {
 // not: the queue cannot cheaply tell a role held empty from an empty one, so the group
 // is queued and the apply skips the role.
 func TestReleaseGroupsNeedingArtAuxGuards(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStoreAt(t)
 	db := roConn(t, dbPath)
@@ -1097,6 +1109,7 @@ func markGroupArt(t *testing.T, st *sqlite.Store, id int64, pid model.PID) {
 // that the group is out of the queue for good short of --force, and the documented
 // unlock-then-enrich walk fills nothing.
 func TestGroupArtMarkerClearsOnUnlock(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, id, pid, markers, queued := groupArtMarkerFixture(t, "Opened", 0)
 
@@ -1151,6 +1164,7 @@ func TestGroupArtMarkerClearsOnUnlock(t *testing.T) {
 // front's lock frees every role at once, since that lock is the whole-entity one, so it
 // clears the marker the way `art unlock` does.
 func TestGroupArtMarkerClearsOnAuxClear(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, id, pid, markers, _ := groupArtMarkerFixture(t, "Cleared", 1)
 
@@ -1226,6 +1240,7 @@ func TestGroupArtMarkerClearsOnAuxClear(t *testing.T) {
 // TestApplyReleaseGroupArtBackfillFillsAndMarks: the marker is written either way and
 // always names a provider, while the entity delta rides on an image actually landing.
 func TestApplyReleaseGroupArtBackfillFillsAndMarks(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStoreAt(t)
 	db := roConn(t, dbPath)
@@ -1318,6 +1333,7 @@ func artMarkerCount(t *testing.T, db *sql.DB, markerType string) int {
 // scan's tag fill, the identity phase, and the entity edit) and all three go through the
 // one helper; a release group's lands through the identity phase alone.
 func TestArtBackfillMarkersReopenOnNewEvidence(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStoreAt(t)
 	db := roConn(t, dbPath)
@@ -1387,6 +1403,7 @@ func TestArtBackfillMarkersReopenOnNewEvidence(t *testing.T) {
 // asked with, which is new evidence whether or not the entity carries an mbid. Both
 // markers go through the whole-album edit's rename pre-pass.
 func TestArtBackfillMarkersReopenOnRename(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStoreAt(t)
 	db := roConn(t, dbPath)
@@ -1450,6 +1467,7 @@ func retagArtistMBID(t *testing.T, st *sqlite.Store, libID int64, name, mbid str
 // answer, and the provenance row is where a consumer attributes a value, so each field
 // names the provider that actually supplied it rather than whichever answered first.
 func TestApplyItemFieldsStampsEachProviderSeparately(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStoreAt(t)
 	db := roConn(t, dbPath)
@@ -1512,6 +1530,7 @@ func seedEnrichTrackInput(libID int64) model.PutScannedTrackInput {
 // fields keeps them owed, and one where the file states its own value retires that fill,
 // so the file owes nothing for it.
 func TestEnrichmentWritebackOwedUntilSettled(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStoreAt(t)
 	db := roConn(t, dbPath)
@@ -1609,6 +1628,7 @@ func TestEnrichmentWritebackOwedUntilSettled(t *testing.T) {
 // that drift once the file owes nothing, and keeps it while the album's label is still
 // due to the file, since the failure may have been the label's.
 func TestRescanRetiringEnrichmentClearsMootDrift(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStoreAt(t)
 	db := roConn(t, dbPath)
@@ -1688,6 +1708,7 @@ func TestRescanRetiringEnrichmentClearsMootDrift(t *testing.T) {
 // instead, folded into the one rewrite. A user-curated label is not the enrichment
 // write-back's to write.
 func TestEnrichedAlbumLabelFiles(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStoreAt(t)
 	db := roConn(t, dbPath)
@@ -1874,6 +1895,7 @@ func TestEnrichedAlbumLabelFiles(t *testing.T) {
 // is a label to write, so an unguarded term hands the same file back on every pass for
 // good.
 func TestEnrichmentWritebackDropsALabelTheAlbumNoLongerHolds(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStoreAt(t)
 	db := roConn(t, dbPath)
@@ -1968,6 +1990,7 @@ func TestEnrichmentWritebackDropsALabelTheAlbumNoLongerHolds(t *testing.T) {
 // newest value is per item, so rewriting the file for one item would settle it past the
 // other's value and lose it.
 func TestEnrichmentWritebackFlagsASharedFile(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStoreAt(t)
 	db := roConn(t, dbPath)
@@ -2028,6 +2051,7 @@ func backdateMisses(t *testing.T, db *sql.DB, age time.Duration) int64 {
 // had no picture of an artist last month is asked again this month, without the forced
 // run that would re-ask about every matched entity too.
 func TestEnrichQueuesRetryAnExpiredMiss(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStoreAt(t)
 	db := roConn(t, dbPath)
@@ -2217,6 +2241,7 @@ func TestEnrichQueuesRetryAnExpiredMiss(t *testing.T) {
 // rowid, no marker a reused id would inherit and no row a foreign key refuses, and
 // returns cleanly so the run goes on.
 func TestEnrichmentAppliesOnAVanishedRowidWriteNothing(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, _ := openStoreAt(t)
 	db := roConn(t, dbPath)
@@ -2296,6 +2321,7 @@ func TestEnrichmentAppliesOnAVanishedRowidWriteNothing(t *testing.T) {
 // walks it once and settles each half by its own rule. A forced sweep reports the
 // vacancies alone, and SweepDue counts the entity once.
 func TestArtQueuesReportEveryHalfDueInTheRun(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStoreAt(t)
 	db := roConn(t, dbPath)
@@ -2458,6 +2484,7 @@ func albumArtMarkers(t *testing.T, db *sql.DB, albumID int64) int {
 // track's embedded cover included), a whole art lock, an existing marker, and the ghost
 // heuristic each keep it out.
 func TestAlbumsNeedingArtGuards(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStoreAt(t)
 	db := roConn(t, dbPath)
@@ -2573,6 +2600,7 @@ func TestAlbumsNeedingArtGuards(t *testing.T) {
 // delta rides on an image actually landing; and an album merged away between the queue
 // page and the write gets neither.
 func TestApplyAlbumArtBackfillFillsAndMarks(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStoreAt(t)
 	db := roConn(t, dbPath)
@@ -2660,6 +2688,7 @@ func TestApplyAlbumArtBackfillFillsAndMarks(t *testing.T) {
 // halves, because each one either opens a vacancy the markers say were asked about or
 // hands a dead rowid to a new album.
 func TestAlbumArtMarkerLifecycle(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStoreAt(t)
 	db := roConn(t, dbPath)
@@ -2785,6 +2814,7 @@ func TestAlbumArtMarkerLifecycle(t *testing.T) {
 // dropped by the merge itself, so without this the survivor's own marker names the state
 // before the union and it is never asked with the id it just gained.
 func TestMergeReopensTheSurvivorsArtQueue(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStoreAt(t)
 	db := roConn(t, dbPath)
@@ -2816,6 +2846,7 @@ func TestMergeReopensTheSurvivorsArtQueue(t *testing.T) {
 // denominator has to cover a phase-scoped force's own walk, or the ratio never reaches
 // one; the phases it does not name stay on the run's sweep.
 func TestCountEntitiesNeedingEnrichmentCountsAForcedPhaseUnderSweepAll(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStoreAt(t)
 	db := roConn(t, dbPath)
@@ -2865,6 +2896,7 @@ func TestCountEntitiesNeedingEnrichmentCountsAForcedPhaseUnderSweepAll(t *testin
 // than a picture, under the same guards a fetched cover passes, and a copy that finds
 // nothing leaves the marker unmatched so a still-vacant album is asked again.
 func TestApplyAlbumArtBackfillCopiesTheGroupFront(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStoreAt(t)
 	db := roConn(t, dbPath)
@@ -2988,6 +3020,7 @@ func TestApplyAlbumArtBackfillCopiesTheGroupFront(t *testing.T) {
 // id and the hash of the front the catalog holds, so it can offer the reuse; a cover
 // chosen by hand carries no hash, since it is nothing the provider fetched.
 func TestAlbumsNeedingArtCarriesTheGroupFrontHash(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStoreAt(t)
 	db := roConn(t, dbPath)
@@ -3035,6 +3068,7 @@ func TestAlbumsNeedingArtCarriesTheGroupFrontHash(t *testing.T) {
 // the hash of the front the catalog holds, which is what lets a forced re-fetch ask the
 // archive conditionally; a hand-set cover carries none, so it is fetched plainly.
 func TestReleaseGroupsNeedingEnrichmentCarriesTheGroupFrontHash(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStoreAt(t)
 	db := roConn(t, dbPath)
@@ -3110,6 +3144,7 @@ func enrichedImage(hash, provider string) *model.ArtImage {
 // pass asks again. Another failure keeps it owed, dated from that failure; which ask
 // settles it is the engine's call, made by applying the answer instead.
 func TestApplyIncompleteDefersTheMarker(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, f := newSettleFixture(t)
 	cases := []struct {
@@ -3213,6 +3248,7 @@ func TestApplyIncompleteDefersTheMarker(t *testing.T) {
 // under the answering provider, so it falls due at the retry window instead of resting
 // behind a durable match that would never ask the missing provider.
 func TestApplyUnaskedRecordsAMiss(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, f := newSettleFixture(t)
 	marker := func(t *testing.T, typ string, id int64) (int, string) {
@@ -3251,6 +3287,7 @@ func TestApplyUnaskedRecordsAMiss(t *testing.T) {
 // something landed, or every re-walk would send each ChangesSince tailer to re-fetch an
 // unchanged entity.
 func TestIdentityDeltaRidesOnAChange(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, f := newSettleFixture(t)
 	deltas := func(t *testing.T, typ string) int {
@@ -3302,6 +3339,7 @@ func TestIdentityDeltaRidesOnAChange(t *testing.T) {
 // TestCoverageCountsAnOwedIdentityAsAMatch: an identity owed a rider still matched, so
 // the doctor's coverage counts it as enriched and matched while the rider is asked again.
 func TestCoverageCountsAnOwedIdentityAsAMatch(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, f := newSettleFixture(t)
 	if err := st.ApplyReleaseGroupEnrichment(ctx, model.ReleaseGroupEnrichment{ReleaseGroupID: f.rgID, PID: f.rgPID,
@@ -3322,6 +3360,7 @@ func TestCoverageCountsAnOwedIdentityAsAMatch(t *testing.T) {
 // pass that still cannot ask the rider leaves the owed lookup as it was, date and all,
 // because nothing asked for it; a failure dates it anew, and an answer settles it.
 func TestAnUnaskedIdentityKeepsItsOwedLookup(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, f := newSettleFixture(t)
 	marker := func(t *testing.T) (owed, matched int, at int64) {
@@ -3367,6 +3406,7 @@ func TestAnUnaskedIdentityKeepsItsOwedLookup(t *testing.T) {
 // its walk found: an identity stays the match MusicBrainz made, and a port lookup that
 // found nothing becomes a miss the retry window re-asks.
 func TestAnOwedLookupSettlesAsItStoodAfterAWeek(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, f := newSettleFixture(t)
 	if err := st.ApplyReleaseGroupEnrichment(ctx, model.ReleaseGroupEnrichment{ReleaseGroupID: f.rgID, PID: f.rgPID,
@@ -3405,6 +3445,7 @@ func TestAnOwedLookupSettlesAsItStoodAfterAWeek(t *testing.T) {
 // its identity resolved, and art may have landed beside the failed rider, so clearing
 // its MBID takes back enrichment's art exactly as it does for a settled match.
 func TestClearingAnOwedGroupsMBIDTakesItsArtBack(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, f := newSettleFixture(t)
 	if err := st.ApplyReleaseGroupEnrichment(ctx, model.ReleaseGroupEnrichment{

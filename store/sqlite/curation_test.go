@@ -51,6 +51,7 @@ func bmpFixture(t *testing.T, w, h int) []byte {
 // bytes cannot name, it never overrides one they can, and with nobody able to name the
 // picture the write is still refused.
 func TestSetArtFormatHint(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	pid := putWithCover(t, st, lib.ID, "/lib/al/1.flac", "e1", testPNG(t, 8, 8))
@@ -117,6 +118,7 @@ func roleFormat(t *testing.T, st *Store, et model.ArtEntity, pid model.PID, role
 }
 
 func TestSetItemLyricsAndLockSurvivesScan(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{
@@ -172,6 +174,7 @@ func rescanTrackWithLyrics(t *testing.T, st *Store, libID int64, essence, conten
 }
 
 func TestSetItemArtAndLockSurvivesScan(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{
@@ -240,6 +243,7 @@ func rescanTrackWithCover(t *testing.T, st *Store, libID int64, essence, content
 }
 
 func TestSetEntityArtDurableAlbum(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{
@@ -278,6 +282,7 @@ func TestSetEntityArtDurableAlbum(t *testing.T) {
 }
 
 func TestSetItemChaptersSurvivesScan(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putBook(t, st, lib.ID, bookSpec{
@@ -340,6 +345,7 @@ func startTitles(chs []model.Chapter) [][2]any {
 }
 
 func TestSetItemChaptersMultiFileRoundTrip(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	pid := threePartBook(t, st, lib.ID)
@@ -381,6 +387,7 @@ func TestSetItemChaptersMultiFileRoundTrip(t *testing.T) {
 }
 
 func TestSetItemChaptersSpanningContiguous(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	pid := threePartBook(t, st, lib.ID)
@@ -405,6 +412,7 @@ func TestSetItemChaptersSpanningContiguous(t *testing.T) {
 }
 
 func TestSetItemChaptersClampsGapAcrossBoundary(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	pid := threePartBook(t, st, lib.ID)
@@ -438,6 +446,7 @@ func TestSetItemChaptersClampsGapAcrossBoundary(t *testing.T) {
 }
 
 func TestSetItemChaptersRejectsBadTimelines(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	pid := threePartBook(t, st, lib.ID)
@@ -460,6 +469,7 @@ func TestSetItemChaptersRejectsBadTimelines(t *testing.T) {
 }
 
 func TestSetItemChaptersShrinkClearsUncoveredParts(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	pid := threePartBook(t, st, lib.ID)
@@ -502,6 +512,7 @@ func TestSetItemChaptersShrinkClearsUncoveredParts(t *testing.T) {
 }
 
 func TestSetItemChaptersMultiFileSurvivesScan(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	pid := threePartBook(t, st, lib.ID)
@@ -527,6 +538,7 @@ func TestSetItemChaptersMultiFileSurvivesScan(t *testing.T) {
 }
 
 func TestSetItemChaptersZeroDurationPartKeepsTimeline(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	// Part 1 has an unknown (0) file duration; only its scanned chapter extent
@@ -563,6 +575,7 @@ func TestSetItemChaptersZeroDurationPartKeepsTimeline(t *testing.T) {
 }
 
 func TestSetItemChaptersMapsAgainstDisplayedSource(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	// Part 1 (unknown duration) carries embedded chapters reaching 400 ms plus a
@@ -621,6 +634,7 @@ func TestSetItemChaptersMapsAgainstDisplayedSource(t *testing.T) {
 }
 
 func TestSetItemChaptersMultiFileIgnoresStaleFileOffsets(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	pid := threePartBook(t, st, lib.ID)
@@ -643,6 +657,7 @@ func TestSetItemChaptersMultiFileIgnoresStaleFileOffsets(t *testing.T) {
 }
 
 func TestSetItemChaptersBeyondTotalExtendsDuration(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	pid := threePartBook(t, st, lib.ID)

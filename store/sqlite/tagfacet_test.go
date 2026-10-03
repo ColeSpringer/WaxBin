@@ -10,6 +10,7 @@ import (
 )
 
 func TestFacetByTagValue(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	// A: MOOD=[happy, sad], a multi-value item counted once per distinct value.
@@ -47,6 +48,7 @@ func TestFacetByTagValue(t *testing.T) {
 // WHERE args. Any swap makes the tag key bind a non-key value and the facet returns the
 // wrong (typically empty) result, so a correct happy:1 proves the ordering.
 func TestFacetByTagWithUserFilter(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	a := putTrackCustom(t, st, lib.ID, "/lib/a.flac", "ea", "ca", "A",
@@ -76,6 +78,7 @@ func TestFacetByTagWithUserFilter(t *testing.T) {
 }
 
 func TestTagKeys(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrackCustom(t, st, lib.ID, "/lib/a.flac", "ea", "ca", "A",
@@ -96,6 +99,7 @@ func TestTagKeys(t *testing.T) {
 }
 
 func TestTagKeysEmpty(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	putTrackCustom(t, st, lib.ID, "/lib/a.flac", "ea", "ca", "A", nil, true)
 	keys, err := st.TagKeys(context.Background())

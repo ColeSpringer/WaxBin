@@ -1737,7 +1737,7 @@ func (l *Library) EditManyFields(ctx context.Context, itemPIDs []model.PID, edit
 	if !opts.WriteBack {
 		return out, nil
 	}
-	return out, l.batchWriteBack(ctx, out, func(pid model.PID) error {
+	return out, l.batchWriteBack(out, func(pid model.PID) error {
 		return l.writeBackFields(ctx, pid, edits)
 	})
 }
@@ -1760,7 +1760,7 @@ func (l *Library) EditItemsFields(ctx context.Context, edits []model.ItemFieldEd
 	if !opts.WriteBack {
 		return out, nil
 	}
-	return out, l.batchWriteBack(ctx, out, func(pid model.PID) error {
+	return out, l.batchWriteBack(out, func(pid model.PID) error {
 		return l.writeBackFields(ctx, pid, fieldsByPID[pid])
 	})
 }
@@ -1768,9 +1768,9 @@ func (l *Library) EditItemsFields(ctx context.Context, edits []model.ItemFieldEd
 // batchWriteBack mirrors a committed batch into each edited item's on-disk tags,
 // recording a per-item WriteBackError on out instead of failing the rest. write is the
 // per-item on-disk pass: the writeBackFields closure both field-edit surfaces pass in.
-// Only a canceled context aborts the pass, and the catalog batch has committed either
-// way, so the caller hands out back alongside it.
-func (l *Library) batchWriteBack(ctx context.Context, out *BatchEditResult, write func(model.PID) error) error {
+// write carries the context, and only a canceled one aborts the pass. The catalog batch
+// has committed either way, so the caller hands out back alongside it.
+func (l *Library) batchWriteBack(out *BatchEditResult, write func(model.PID) error) error {
 	for _, pid := range out.Edited {
 		if err := recordWriteBack(&out.WriteBackErrors, pid, write(pid)); err != nil {
 			return err

@@ -18,6 +18,7 @@ import (
 // Set fields are skipped: their Expr is empty by contract, so genre_pid,
 // credit_artist_pid, and playlist_pid would otherwise read as one group.
 func TestNoUndeclaredFieldAliases(t *testing.T) {
+	t.Parallel()
 	byExpr := map[string][]string{}
 	for name, col := range itemFields {
 		if col.Set != nil {
@@ -66,6 +67,7 @@ func TestNoUndeclaredFieldAliases(t *testing.T) {
 // A rename on one side of the map alone would leave a rule holding a field the engine
 // no longer knows.
 func TestDeclaredAliasesResolve(t *testing.T) {
+	t.Parallel()
 	for alias, canon := range model.QueryFieldAliases() {
 		a, ok := itemFields[alias]
 		if !ok {
@@ -92,6 +94,7 @@ func TestDeclaredAliasesResolve(t *testing.T) {
 // while reading as though it supported them. playlist imports model and query and
 // nothing here, so this test-only import is not a cycle.
 func TestNSPExportableFieldsAreQueryFields(t *testing.T) {
+	t.Parallel()
 	fields := playlist.NSPExportableFields()
 	if len(fields) == 0 {
 		t.Fatal("NSPExportableFields is empty")

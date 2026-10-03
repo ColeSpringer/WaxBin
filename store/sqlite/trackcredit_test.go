@@ -56,6 +56,7 @@ func trackArtistName(t *testing.T, st *Store, itemPID model.PID) string {
 }
 
 func TestScanSplitsAFeaturedCreditIntoOneArtistEach(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	res := putTrack(t, st, lib.ID, trackSpec{
 		path: "/lib/a/1.flac", essence: "e1", content: "c1", title: "Empire State of Mind",
@@ -78,6 +79,7 @@ func TestScanSplitsAFeaturedCreditIntoOneArtistEach(t *testing.T) {
 }
 
 func TestScanKeepsAnUnsplitCreditAsOneArtist(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	res := putTrack(t, st, lib.ID, trackSpec{
 		path: "/lib/a/1.flac", essence: "e1", content: "c1", title: "September",
@@ -106,6 +108,7 @@ func TestScanKeepsAnUnsplitCreditAsOneArtist(t *testing.T) {
 // precedence: a file that repeated the ARTIST frame stated its list, so those values
 // are taken verbatim even when one of them contains a splitter marker.
 func TestScanPrefersARepeatedArtistFrameOverSplitting(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	res := putTrack(t, st, lib.ID, trackSpec{
 		path: "/lib/a/1.flac", essence: "e1", content: "c1", title: "Collab",
@@ -122,6 +125,7 @@ func TestScanPrefersARepeatedArtistFrameOverSplitting(t *testing.T) {
 // music credits have no scan-side input, so a rescan that cleared them would destroy
 // a curated producer list on every content change.
 func TestRescanReplacesOnlyTheArtistRoleOnATrack(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	spec := trackSpec{
@@ -159,6 +163,7 @@ func TestRescanReplacesOnlyTheArtistRoleOnATrack(t *testing.T) {
 // be re-derived because the display joins with a comma and the splitter does not
 // split on one.
 func TestLockedArtistCreditSurvivesAForcedRescan(t *testing.T) {
+	t.Parallel()
 	for _, field := range []string{"artist", "credit.artist"} {
 		t.Run(field, func(t *testing.T) {
 			st, lib := entityFixture(t)
@@ -207,6 +212,7 @@ func TestLockedArtistCreditSurvivesAForcedRescan(t *testing.T) {
 // artist_id, so without a rollup row of its own the drift query reads a missing row
 // as -1 against a recompute of 0 and reports permanent drift.
 func TestAFeaturedArtistRollsUpToZeroWithoutDrifting(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{
@@ -233,6 +239,7 @@ func TestAFeaturedArtistRollsUpToZeroWithoutDrifting(t *testing.T) {
 // must not fan a track across buckets. A featured artist reads with ItemCount 0,
 // exactly as a book narrator already does.
 func TestArtistFacetStillBucketsAJointCreditOnce(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	putTrack(t, st, lib.ID, trackSpec{
 		path: "/lib/a/1.flac", essence: "e1", content: "c1", title: "Song",
@@ -257,6 +264,7 @@ func TestArtistFacetStillBucketsAJointCreditOnce(t *testing.T) {
 // the same track buckets once under its primary in GroupArtist and once per credited
 // artist here, so a featured artist is browsable.
 func TestCreditArtistFacetFansOutWhereArtistDoesNot(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{
@@ -294,6 +302,7 @@ func TestCreditArtistFacetFansOutWhereArtistDoesNot(t *testing.T) {
 // of syncCreditDenormTx, where the display IS rebuilt from the names because the user
 // typed them.
 func TestSetArtistCreditRewritesTheTrackDisplayAndItsArtistID(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	res := putTrack(t, st, lib.ID, trackSpec{
@@ -319,6 +328,7 @@ func TestSetArtistCreditRewritesTheTrackDisplayAndItsArtistID(t *testing.T) {
 // credits existed: it has no RoleArtist rows, so the artist track.artist_id points
 // away from is not a prior contributor and its rollup would drift unrecomputed.
 func TestSetArtistCreditRefreshesTheOutgoingArtistRollup(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	res := putTrack(t, st, lib.ID, trackSpec{
@@ -353,6 +363,7 @@ func TestSetArtistCreditRefreshesTheOutgoingArtistRollup(t *testing.T) {
 // resolveAndLinkEntities; this one rewrites track.artist without passing through it,
 // and answering its ftsDirty with the book rebuild would write the wrong row.
 func TestSetArtistCreditRefreshesTheTrackSearchRow(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	res := putTrack(t, st, lib.ID, trackSpec{
@@ -377,6 +388,7 @@ func TestSetArtistCreditRefreshesTheTrackSearchRow(t *testing.T) {
 // --- the MBID pairing rule -------------------------------------------------
 
 func TestEachSplitArtistTakesItsOwnMBID(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	putTrack(t, st, lib.ID, trackSpec{
 		path: "/lib/a/1.flac", essence: "e1", content: "c1", title: "Song",
@@ -393,6 +405,7 @@ func TestEachSplitArtistTakesItsOwnMBID(t *testing.T) {
 }
 
 func TestACreditWhoseIDCountDisagreesTakesNone(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	// Three ids against two names: the file and the split describe different things,
 	// so every id is dropped rather than paired by position into a wrong answer.
@@ -415,6 +428,7 @@ func TestACreditWhoseIDCountDisagreesTakesNone(t *testing.T) {
 // this as one entity, so it collapses back to the credit it names and takes that id.
 // No artists here, so the list is a split rather than one the file stated.
 func TestASingleTaggedIDKeepsASplitCreditWhole(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	res := putTrack(t, st, lib.ID, trackSpec{
 		path: "/lib/a/1.flac", essence: "e1", content: "c1", title: "Song",
@@ -437,6 +451,7 @@ func TestASingleTaggedIDKeepsASplitCreditWhole(t *testing.T) {
 // targets, an untagged library with no artist ids to recover from. A wrong split there
 // creates artist rows nothing later removes.
 func TestScanDoesNotSplitABandNameOnItsPunctuation(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	for i, name := range []string{"AC/DC", "Hall & Oates", "Sly & the Family Stone"} {
 		spec := trackSpec{
@@ -461,6 +476,7 @@ func TestScanDoesNotSplitABandNameOnItsPunctuation(t *testing.T) {
 // to a list the file stated. Collapsing here would drop every artist after the first,
 // since the raw display carries only the first value.
 func TestAStatedListSurvivesASingleTaggedID(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	res := putTrack(t, st, lib.ID, trackSpec{
 		path: "/lib/a/1.flac", essence: "e1", content: "c1", title: "Song",
@@ -480,6 +496,7 @@ func TestAStatedListSurvivesASingleTaggedID(t *testing.T) {
 // TestArtistMBIDBackfillReachesASplitArtist: an id arriving on a later scan lands on
 // an artist row the earlier scan created without one.
 func TestArtistMBIDBackfillReachesASplitArtist(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	spec := trackSpec{
 		path: "/lib/a/1.flac", essence: "e1", content: "c1", title: "Song",
@@ -505,6 +522,7 @@ func TestArtistMBIDBackfillReachesASplitArtist(t *testing.T) {
 // heuristically-grouped album in such a library, abandoning its pid and everything
 // hanging off it.
 func TestARepeatedArtistFrameDoesNotRekeyTheAlbum(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	// Scanned before the display joined the list: one ARTIST value, no ALBUMARTIST.
 	putTrack(t, st, lib.ID, trackSpec{
@@ -542,6 +560,7 @@ func TestARepeatedArtistFrameDoesNotRekeyTheAlbum(t *testing.T) {
 // TestAlbumArtistResolvesToItsPrimary: a joint album-artist credit no longer creates
 // an entity named for the whole string, so the primary takes its own id.
 func TestAlbumArtistResolvesToItsPrimary(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	putTrack(t, st, lib.ID, trackSpec{
 		path: "/lib/a/1.flac", essence: "e1", content: "c1", title: "Song",
@@ -564,6 +583,7 @@ func TestAlbumArtistResolvesToItsPrimary(t *testing.T) {
 // safe. ReleaseGroupKey reads the RAW album-artist string, not the resolved entity,
 // so an album scanned before the split keeps its match_key, its row, and its pid.
 func TestAlbumArtistSplitDoesNotRekeyTheReleaseGroup(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	spec := trackSpec{
 		path: "/lib/a/1.flac", essence: "e1", content: "c1", title: "Song",
@@ -590,6 +610,7 @@ func TestAlbumArtistSplitDoesNotRekeyTheReleaseGroup(t *testing.T) {
 // catalog: a group left pointing at a combined artist repoints on rescan, and both
 // artists' rollups are recomputed so db verify stays clean.
 func TestReleaseGroupAdoptsANewPrimaryArtist(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	spec := trackSpec{
@@ -628,6 +649,7 @@ func TestReleaseGroupAdoptsANewPrimaryArtist(t *testing.T) {
 }
 
 func TestCreditMBIDsReducesToTheSoleCase(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name  string
 		names []string

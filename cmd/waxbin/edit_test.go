@@ -10,6 +10,7 @@ import (
 )
 
 func TestParseSetFlags(t *testing.T) {
+	t.Parallel()
 	t.Run("trims whitespace around the equals sign", func(t *testing.T) {
 		edits, err := parseSetFlags([]string{"title = My Song", " artist=The Band "})
 		if err != nil {
@@ -51,6 +52,7 @@ func TestParseSetFlags(t *testing.T) {
 }
 
 func TestLoadBatchEdits(t *testing.T) {
+	t.Parallel()
 	doc := `[
 		{"itemPid": "i1", "fields": {"title": "Opener", "track_no": "1"}},
 		{"itemPid": "i2", "fields": {"title": "Closer"}}

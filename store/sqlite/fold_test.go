@@ -19,6 +19,7 @@ import (
 // sits in the book, a part finished is not the book finished, and the queue, playlists,
 // sessions and acquisition follow without listing the book twice.
 func TestFoldMovesPlayStateIntoTheBook(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	var pids []model.PID
@@ -136,6 +137,7 @@ func TestFoldMovesPlayStateIntoTheBook(t *testing.T) {
 // TestFolderStandingSeeksThePath: the folder listing seeks the path index for the folder's
 // range rather than walking every file of the library.
 func TestFolderStandingSeeksThePath(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	plan := explainPlan(t, st, folderStandingQ, lib.ID, []byte("/lib/A/"), []byte("/lib/A0"))
 	if strings.Contains(plan, "file_library") || !strings.Contains(plan, "path>? AND path<?") {
@@ -147,6 +149,7 @@ func TestFolderStandingSeeksThePath(t *testing.T) {
 // archived item it backed through the trash journal, by its old path or by its audio, so
 // a scan that finds it back honours the item's kind lock.
 func TestFileStandingFindsATrashedItem(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	const path = "/lib/Author/Tome/01.mp3"
@@ -171,6 +174,7 @@ func TestFileStandingFindsATrashedItem(t *testing.T) {
 // TestPartLeavingABookHandsItsPlaceToACopy: a part put into another book leaves its place
 // to a copy of it the book holds, so the book keeps its length.
 func TestPartLeavingABookHandsItsPlaceToACopy(t *testing.T) {
+	t.Parallel()
 	st, _ := entityFixture(t)
 	ctx := context.Background()
 	root := t.TempDir()
@@ -210,6 +214,7 @@ func TestPartLeavingABookHandsItsPlaceToACopy(t *testing.T) {
 // was, even when the track that becomes the book was starred and then unstarred; its own
 // rating stands over another's.
 func TestFoldStarsWhenEitherWasStarred(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	t1 := putTrack(t, st, lib.ID, trackSpec{path: "/lib/A/T/01.mp3", essence: "se1", content: "sc1", title: "One", artist: "A", album: "T"}).ItemPID
@@ -245,6 +250,7 @@ func TestFoldStarsWhenEitherWasStarred(t *testing.T) {
 // for the key, with their provenance; a key a book owns as a field, and a value the
 // track's own file stated, stay behind.
 func TestFoldCarriesLockedAndFilledCustomTags(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	t1 := putTrackCustom(t, st, lib.ID, "/lib/A/T/01.mp3", "ce1", "cc1", "One", nil, true).ItemPID
@@ -298,6 +304,7 @@ func TestFoldCarriesLockedAndFilledCustomTags(t *testing.T) {
 // TestFoldIntoABookAsACopyLandsAtItsPart: a track whose file is a copy of a book's second
 // part folds into the book with its position moved to where that part starts.
 func TestFoldIntoABookAsACopyLandsAtItsPart(t *testing.T) {
+	t.Parallel()
 	st, _ := entityFixture(t)
 	ctx := context.Background()
 	lib, file := diskLibrary(t, st)
@@ -343,6 +350,7 @@ func diskLibrary(t *testing.T, st *Store) (*model.Library, func(rel, content str
 // TestFoldOffsetsByTheBookTimeline: a part counts for its furthest chapter when that runs
 // past its file's known duration, as the book's timeline does.
 func TestFoldOffsetsByTheBookTimeline(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	book := putBook(t, st, lib.ID, bookSpec{path: "/lib/A/T/01.mp3", essence: "oe1", content: "oc1", title: "T", author: "A", position: 1,
@@ -361,6 +369,7 @@ func TestFoldOffsetsByTheBookTimeline(t *testing.T) {
 // where a listener is moves that listener's place, and a bookmark, on by its length, so
 // both still point at the same audio.
 func TestPartJoiningABookMovesLaterPositions(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	track := func(n string) model.PID {
@@ -404,6 +413,7 @@ func TestPartJoiningABookMovesLaterPositions(t *testing.T) {
 // takes the places inside it along, as offsets into the part, and moves later places back
 // by its length; the book's last part turns it into a track in place.
 func TestPartLeavingABookTakesItsPositions(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	var book model.PID
@@ -492,6 +502,7 @@ func TestPartLeavingABookTakesItsPositions(t *testing.T) {
 // TestCopyFillingAPartKeepsThePositions: while a copy takes a leaving part's place the
 // book's timeline is unchanged, so no place moves; the copy leaving too is what moves them.
 func TestCopyFillingAPartKeepsThePositions(t *testing.T) {
+	t.Parallel()
 	st, _ := entityFixture(t)
 	ctx := context.Background()
 	lib, file := diskLibrary(t, st)
@@ -516,6 +527,7 @@ func TestCopyFillingAPartKeepsThePositions(t *testing.T) {
 // the listener was last: a checkpoint later than the book's own wins over it, and a part
 // finished last puts the listener at that part's last moment.
 func TestFoldFollowsTheLatestListening(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	var pids []model.PID
@@ -554,6 +566,7 @@ func TestFoldFollowsTheLatestListening(t *testing.T) {
 // of the two change stamps, so a replayed change older than the book's own unstar cannot
 // undo it.
 func TestFoldStarKeepsTheLaterChangeStamp(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	t1 := putTrack(t, st, lib.ID, trackSpec{path: "/lib/A/T/01.mp3", essence: "ks1", content: "kc1", title: "One", artist: "A", album: "T"}).ItemPID
@@ -586,6 +599,7 @@ func TestFoldStarKeepsTheLaterChangeStamp(t *testing.T) {
 // TestPartJoiningAFinishedBookUnfinishesIt: a book a finished track became is finished only
 // for a listener who finished every part that joined it too.
 func TestPartJoiningAFinishedBookUnfinishesIt(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	t1 := putTrack(t, st, lib.ID, trackSpec{path: "/lib/A/T/01.mp3", essence: "fu1", content: "fc1", title: "One", artist: "A", album: "T", durationMS: 1000}).ItemPID
@@ -617,6 +631,7 @@ func TestPartJoiningAFinishedBookUnfinishesIt(t *testing.T) {
 // last moment, inside it, so a part joining right after it is what they hear next rather
 // than a part they skip.
 func TestMiddleInsertionKeepsAFinishedPartsPlace(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	track := func(n string) model.PID {
@@ -643,6 +658,7 @@ func TestMiddleInsertionKeepsAFinishedPartsPlace(t *testing.T) {
 // TestFoldLeavesLockedTagsWhenLocksAreIgnored: a scan that ignores locks carries no folded
 // track's locked tag onto the book, while a fill the track holds still comes across.
 func TestFoldLeavesLockedTagsWhenLocksAreIgnored(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrackCustom(t, st, lib.ID, "/lib/A/T/01.mp3", "il1", "ic1", "One", nil, false)
@@ -670,6 +686,7 @@ func TestFoldLeavesLockedTagsWhenLocksAreIgnored(t *testing.T) {
 // keep the later star change and the later rating of the two, rather than a star from
 // before the survivor's own unstar.
 func TestFoldIntoATrackKeepsTheLaterChanges(t *testing.T) {
+	t.Parallel()
 	st, _ := entityFixture(t)
 	ctx := context.Background()
 	lib, file := diskLibrary(t, st)
@@ -715,6 +732,7 @@ func TestFoldIntoATrackKeepsTheLaterChanges(t *testing.T) {
 // starts is the start of that part, so a part joining right before it moves it on with the
 // part, the way a player resuming there would start that part.
 func TestPlaceAtAPartsStartMovesWithIt(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	for _, n := range []string{"01", "02", "03"} {
@@ -745,6 +763,7 @@ func TestPlaceAtAPartsStartMovesWithIt(t *testing.T) {
 // TestFoldedPlacesLandInsideTheirPart: a track's place at or past its end folds to its
 // part's last moment, so it belongs to that part rather than to the next one or to no part.
 func TestFoldedPlacesLandInsideTheirPart(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	var two model.PID
@@ -777,6 +796,7 @@ func TestFoldedPlacesLandInsideTheirPart(t *testing.T) {
 // TestPartAppendedAfterTheEndComesNext: a listener at the end of a book has heard all of
 // it, so a part joining at the end is what they hear next; their place stays put.
 func TestPartAppendedAfterTheEndComesNext(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	for _, n := range []string{"01", "02"} {

@@ -45,6 +45,7 @@ func transcriptFixture(t *testing.T, transcriptURL string) (*podcast.Service, *s
 }
 
 func TestPutTranscriptValidatesAndReduces(t *testing.T) {
+	t.Parallel()
 	svc, _, ep := transcriptFixture(t, "")
 	ctx := context.Background()
 
@@ -86,6 +87,7 @@ func TestPutTranscriptValidatesAndReduces(t *testing.T) {
 }
 
 func TestPutTranscriptRejectsOversizedBody(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db := filepath.Join(t.TempDir(), "catalog.db")
 	st, err := sqlite.Open(ctx, sqlite.OpenOptions{Path: db, Owner: "test"})
@@ -112,6 +114,7 @@ func TestPutTranscriptRejectsOversizedBody(t *testing.T) {
 }
 
 func TestFetchTranscriptPropagatesAndStores(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	status := http.StatusOK
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -147,6 +150,7 @@ func TestFetchTranscriptPropagatesAndStores(t *testing.T) {
 }
 
 func TestFetchTranscriptWithoutURLIsInvalid(t *testing.T) {
+	t.Parallel()
 	svc, _, ep := transcriptFixture(t, "")
 	if err := svc.FetchTranscript(context.Background(), ep); !waxerr.Is(err, waxerr.CodeInvalid) {
 		t.Fatalf("no-url fetch = %v, want CodeInvalid", err)
@@ -154,6 +158,7 @@ func TestFetchTranscriptWithoutURLIsInvalid(t *testing.T) {
 }
 
 func TestTranscriptReadAbsences(t *testing.T) {
+	t.Parallel()
 	svc, st, ep := transcriptFixture(t, "")
 	ctx := context.Background()
 	// No transcript stored yet: CodeNotFound, distinct from an unknown episode.

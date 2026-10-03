@@ -71,6 +71,7 @@ func coverPNG(t *testing.T) []byte {
 // fans the values across every member track's on-disk tags (BARCODE, ALBUMSORT), while
 // a release-group-style DB-only value would not be written.
 func TestEditEntityWriteBackFanOut(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -112,6 +113,7 @@ func TestEditEntityWriteBackFanOut(t *testing.T) {
 // is merely the album-artist (which would overwrite that track's real primary-artist sort
 // on the next scan).
 func TestEditEntityArtistSortOnlyPrimaryArtist(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -152,6 +154,7 @@ func TestEditEntityArtistSortOnlyPrimaryArtist(t *testing.T) {
 // --write-back lands COMPOSER and COMPOSERSORT in the file's tags, and that the
 // locked catalog values survive a forced rescan of the rewritten file.
 func TestEditComposerSortWriteBack(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -201,6 +204,7 @@ func TestEditComposerSortWriteBack(t *testing.T) {
 // reads TBPM into it, an edit with write-back stamps the new number onto the file, and
 // a forced rescan reads that number back rather than reverting.
 func TestEditBPMWriteBackRoundTrip(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -251,6 +255,7 @@ func TestEditBPMWriteBackRoundTrip(t *testing.T) {
 // revert the regenerated catalog sort (in a fresh catalog always, and in this
 // one wherever the field is unlocked). A curated, locked sort keeps its tag.
 func TestEditComposerWriteBackClearsStaleSortTag(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -329,6 +334,7 @@ func TestEditComposerWriteBackClearsStaleSortTag(t *testing.T) {
 // write-back clears a stale ALBUMARTISTSORT so the file's derivation follows the
 // new author.
 func TestEditAuthorWriteBackClearsStaleSortTag(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -382,6 +388,7 @@ func TestEditAuthorWriteBackClearsStaleSortTag(t *testing.T) {
 // lands ALBUMARTISTSORT (the key the audiobook scanner's author_sort derive reads
 // first) in every part's tags.
 func TestEditAuthorSortWriteBack(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -427,6 +434,7 @@ func TestEditAuthorSortWriteBack(t *testing.T) {
 // TestSetItemArtWriteBack verifies an item cover set with --write-back embeds the cover
 // into the item's backing file.
 func TestSetItemArtWriteBack(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -465,6 +473,7 @@ func TestSetItemArtWriteBack(t *testing.T) {
 // cover into every part of a multi-file book, not just the primary, so an external
 // player sees the same cover on each part.
 func TestSetItemArtWriteBackMultiFileBook(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -497,6 +506,7 @@ func TestSetItemArtWriteBackMultiFileBook(t *testing.T) {
 // cover into every member track's file, while the same on a non-album entity (an artist)
 // is a catalog-only no-op that embeds nothing on disk.
 func TestSetEntityArtAlbumFanOut(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -523,6 +533,7 @@ func TestSetEntityArtAlbumFanOut(t *testing.T) {
 // ALBUMARTIST on the primary part, while a translator credit (which no scan reconstructs
 // from a tag) is refused with the catalog edit standing.
 func TestSetCreditsBookWriteBack(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -579,6 +590,7 @@ func TestSetCreditsBookWriteBack(t *testing.T) {
 // role's value, with the two roles no scan reconstructs from a tag refused while the
 // author's write beside them still lands, and the sibling item's tag written too.
 func TestSetCreditsBatchWriteBackGroupsRolesPerItem(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -658,6 +670,7 @@ func TestSetCreditsBatchWriteBackGroupsRolesPerItem(t *testing.T) {
 // credit written back lands as a repeated ARTIST frame, and the next scan reads that
 // frame verbatim rather than re-splitting it, so the curated list survives.
 func TestScanSplitCreditRoundTripsThroughCreditWriteBack(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -745,6 +758,7 @@ func TestScanSplitCreditRoundTripsThroughCreditWriteBack(t *testing.T) {
 // or carries an offset window, reporting it as a *WriteBackError while the catalog cover
 // stands.
 func TestSetEntityArtAlbumFanOutRefusesSharedMember(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -794,6 +808,7 @@ func assertFrontCover(t *testing.T, ctx context.Context, path string) {
 // and a picture nobody can name has to stay refused: the hint rescues a cover, it does
 // not turn every file into one.
 func TestSetItemArtFormatHint(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -890,6 +905,7 @@ func catalogScalar[T any](t *testing.T, ctx context.Context, db, q string, args 
 // release group's id stays on disk, since the clear disowned the release alone and the
 // re-keyed album carries the group segment.
 func TestEditEntityWriteBackStripsClearedAlbumMBID(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -960,6 +976,7 @@ func TestEditEntityWriteBackStripsClearedAlbumMBID(t *testing.T) {
 // naming the disowned group forks a fresh identified group on its next re-resolve, which is
 // the whole failure the strip exists to prevent.
 func TestEditEntityWriteBackStripsReparentedAlbumFiles(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -1030,6 +1047,7 @@ func TestEditEntityWriteBackStripsReparentedAlbumFiles(t *testing.T) {
 // survivor's members and the moved album's, and a file backing neither the merge nor the
 // move is written once and unchanged.
 func TestEditEntityWriteBackStripsAfterGroupMergeAndMove(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -1099,6 +1117,7 @@ func TestEditEntityWriteBackStripsAfterGroupMergeAndMove(t *testing.T) {
 // member's file still names the release. The classification is what the CLI reads to
 // decide the durability caveat still applies; the other member is stripped either way.
 func TestEditEntityWriteBackRefusedKeepsTheMBID(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -1160,6 +1179,7 @@ func TestEditEntityWriteBackRefusedKeepsTheMBID(t *testing.T) {
 // row the clear deliberately leaves standing, so a member that kept that id re-resolves
 // onto it. Stripping it too would mint a heuristic twin and drain the identified row.
 func TestEditEntityWriteBackStripsClearedReleaseGroupMBID(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -1234,6 +1254,7 @@ func TestEditEntityWriteBackStripsClearedReleaseGroupMBID(t *testing.T) {
 // sibling-field combination that would have fanned a value alongside it is refused before
 // anything commits.
 func TestEditEntityWriteBackAfterMBIDClearMerge(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -1325,6 +1346,7 @@ func TestEditEntityWriteBackAfterMBIDClearMerge(t *testing.T) {
 // scan that re-resolves entities would re-adopt it; with write-back the two ids come off
 // the file and a forced rescan leaves the member on its heuristic album.
 func TestDetachWriteBackStripsMBTags(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -1400,6 +1422,7 @@ func TestDetachWriteBackStripsMBTags(t *testing.T) {
 // catalog detach stands, and the release ids are still on disk. That classification is
 // what the CLI reads to decide whether the durability caveat still applies.
 func TestDetachWriteBackRefusedKeepsTheTags(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -1448,6 +1471,7 @@ func TestDetachWriteBackRefusedKeepsTheTags(t *testing.T) {
 // re-resolves them splits the album back apart; with write-back the files carry the new
 // name and a forced rescan lands on the same row, pid and all.
 func TestRenameEntityWriteBackSurvivesRescan(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -1499,6 +1523,7 @@ func TestRenameEntityWriteBackSurvivesRescan(t *testing.T) {
 // rename moves both, and with write-back both reach the file, so the forced rescan that
 // re-derives them does not fork the old spelling back.
 func TestRenameArtistWriteBackCarriesTheCreditHalf(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -1560,6 +1585,7 @@ func TestRenameArtistWriteBackCarriesTheCreditHalf(t *testing.T) {
 // failure; fanning the halves out separately would rewrite the file twice and report the
 // same file twice.
 func TestRenameArtistWriteBackWritesEachFileOnce(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -1607,6 +1633,7 @@ func TestRenameArtistWriteBackWritesEachFileOnce(t *testing.T) {
 // reconstructs, so the rename's write-back refuses that half while the author's write
 // beside it lands and the catalog rename stands.
 func TestRenameArtistWriteBackRefusesBookTranslator(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -1668,6 +1695,7 @@ func TestRenameArtistWriteBackRefusesBookTranslator(t *testing.T) {
 // as one joined value rather than two, so the write reports clean and the typed
 // projection reads both names, while a producer credit keeps one value per holder.
 func TestSetCreditsShapesSingleValuedRoles(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -1714,6 +1742,7 @@ func TestSetCreditsShapesSingleValuedRoles(t *testing.T) {
 // book's description when it has no DESCRIPTION, so clearing the description has to empty
 // both keys, or a rescan reads the old blurb back. A set leaves the long form alone.
 func TestEditBookDescriptionClearReachesTheLongForm(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -1776,6 +1805,7 @@ func TestEditBookDescriptionClearReachesTheLongForm(t *testing.T) {
 // file states clears that total on disk beside the number, so the file does not read
 // "7 of 1", and a total edited afterwards lands as the pair.
 func TestEditTrackNumberWriteBackClearsStaleTotal(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -1841,6 +1871,7 @@ func TestEditTrackNumberWriteBackClearsStaleTotal(t *testing.T) {
 // and other players sort by it, and the catalog stops listing it as a custom tag. A
 // TITLESORT the user locked as a custom tag is curated and stays.
 func TestEditTitleWriteBackClearsStaleTitleSort(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	for _, locked := range []bool{false, true} {
 		root := t.TempDir()
@@ -1887,6 +1918,7 @@ func TestEditTitleWriteBackClearsStaleTitleSort(t *testing.T) {
 // TestTitleWriteBackPaysAnOwedTitleSortClear: a TITLESORT cleared in the catalog alone is
 // owed to the file, and a title write-back, which clears the file's TITLESORT too, pays it.
 func TestTitleWriteBackPaysAnOwedTitleSortClear(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	src := filepath.Join(root, "song.mp3")
@@ -1923,6 +1955,7 @@ func TestTitleWriteBackPaysAnOwedTitleSortClear(t *testing.T) {
 // of a TITLESORT it cleared only when the catalog holds one, so an item with none is
 // announced once, as a write-back of any other field announces it.
 func TestEditTitleWriteBackAnnouncesTheItemOnce(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, "song.mp3"), testaudio.BuildMP3FromSpec(testaudio.MP3Spec{Title: "Old", Artist: "Band", Album: "Album"}))
@@ -1957,6 +1990,7 @@ func TestEditTitleWriteBackAnnouncesTheItemOnce(t *testing.T) {
 // TestEditBookTitleWriteBackKeepsTitleSort: a book's title is written as its ALBUM tag,
 // so its write-back has no title sort to clear, and a part's own TITLESORT stays.
 func TestEditBookTitleWriteBackKeepsTitleSort(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	src := filepath.Join(root, "book.mp3")
@@ -2004,6 +2038,7 @@ func itemTagValues(t *testing.T, ctx context.Context, lib *waxbin.Library, pid m
 // each container's own spelling, so WaxLabel reads it back and a forced rescan keeps it
 // with no lock holding it, and a clear with write-back takes it off the file again.
 func TestSetItemTagWriteBackRoundTrips(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	paths := map[string]string{
@@ -2074,6 +2109,7 @@ func TestSetItemTagWriteBackRoundTrips(t *testing.T) {
 // a clear included, leaving the catalog and the file as they were; the same spelling set
 // in the catalog alone still stands and owes the file nothing.
 func TestSetItemTagWriteBackRefusesAliasSpellings(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	src := filepath.Join(root, "song.mp3")
@@ -2125,6 +2161,7 @@ func TestSetItemTagWriteBackRefusesAliasSpellings(t *testing.T) {
 // it, so a custom tag set on one of them is refused at the file and recorded as drift,
 // while the catalog edit stands.
 func TestSetItemTagWriteBackRefusesAVirtualTrack(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -2159,6 +2196,7 @@ func TestSetItemTagWriteBackRefusesAVirtualTrack(t *testing.T) {
 // primary whose tags the catalog reads. A key the audiobook reader folds into a book
 // field (TIT3 is the subtitle) stays refused on a book, write-back or not.
 func TestSetItemTagWriteBackWritesEveryBookPart(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	parts := make([]string, 3)
@@ -2201,6 +2239,7 @@ func TestSetItemTagWriteBackWritesEveryBookPart(t *testing.T) {
 // with its reason. A key the format drops without a word is reported as a lost write, never
 // as one that landed.
 func TestSetItemTagWriteBackRefusesAFormatsOwnSpelling(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	mp3 := filepath.Join(root, "song.mp3")
@@ -2256,6 +2295,7 @@ func TestSetItemTagWriteBackRefusesAFormatsOwnSpelling(t *testing.T) {
 // another value (a track number past what an MP4 holds) still cleared TITLESORT from the
 // file, so the catalog drops it too and nothing owes it.
 func TestTitleSortClearLandsBesideALossyValue(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	m4a := filepath.Join(root, "sample.m4a")

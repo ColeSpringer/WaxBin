@@ -10,6 +10,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/colespringer/waxbin/art"
@@ -57,6 +58,7 @@ func putWithCover(t *testing.T, st *Store, libID int64, path, essence string, co
 }
 
 func TestResolveArtOriginalAndThumbnail(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	cover := testPNG(t, 120, 80)
@@ -95,6 +97,7 @@ func TestResolveArtOriginalAndThumbnail(t *testing.T) {
 }
 
 func TestResolveArtFallbackChain(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	cover := testPNG(t, 64, 64)
@@ -114,6 +117,7 @@ func TestResolveArtFallbackChain(t *testing.T) {
 }
 
 func TestArtAttachedWithoutAudioChange(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	// First scan: no cover.
@@ -144,6 +148,7 @@ func albumPID(t *testing.T, st *Store) model.PID {
 }
 
 func TestAlbumArtPrunedOnCoverChange(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	coverA, coverB, coverC := testPNG(t, 64, 64), testPNG(t, 65, 65), testPNG(t, 66, 66)
@@ -204,6 +209,7 @@ func putArt(t *testing.T, st *Store, libID int64, path, essence, content, album 
 }
 
 func TestAlbumArtNotStaleAfterTrackDeparts(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	coverA, coverB := testPNG(t, 64, 64), testPNG(t, 65, 65)
@@ -235,6 +241,7 @@ func TestAlbumArtNotStaleAfterTrackDeparts(t *testing.T) {
 }
 
 func TestVerifyConsistentIgnoresReclaimableArt(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	coverA, coverB := testPNG(t, 64, 64), testPNG(t, 65, 65)
@@ -261,6 +268,7 @@ func TestVerifyConsistentIgnoresReclaimableArt(t *testing.T) {
 }
 
 func TestResolveArtNotFound(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	pid := putWithCover(t, st, lib.ID, "/lib/al/1.flac", "e1", nil) // no art anywhere
 	_, err := st.ResolveArt(context.Background(), model.EntityRef{Type: model.ArtTrack, PID: pid}, model.ArtRoleFront, 0)
@@ -270,6 +278,7 @@ func TestResolveArtNotFound(t *testing.T) {
 }
 
 func TestGCArtRemovesOrphans(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	cover := testPNG(t, 50, 50)
@@ -329,6 +338,7 @@ func TestGCArtRemovesOrphans(t *testing.T) {
 // which evicts the memos of genuinely different bad sources and puts their decode and
 // their warning back on every request.
 func TestGenerationFailureIsRememberedPerSourceNotPerRung(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	junk := []byte("II*\x00 the first bytes of a tiff and nothing else")
@@ -357,6 +367,7 @@ func TestGenerationFailureIsRememberedPerSourceNotPerRung(t *testing.T) {
 // It drives Store.thumbnail directly, since the loader is the only place the duplicated
 // work is observable from outside without a hook in the store itself.
 func TestThumbnailCollapsesConcurrentMissesOntoOneGeneration(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	cover := testPNG(t, 400, 300)
@@ -366,52 +377,50 @@ func TestThumbnailCollapsesConcurrentMissesOntoOneGeneration(t *testing.T) {
 		t.Fatalf("provenance: %v", err)
 	}
 
-	const callers = 8
-	var loads atomic.Int64
-	release := make(chan struct{})
-	source := func(context.Context) (*model.ArtBlob, error) {
-		loads.Add(1)
-		<-release // hold the leader inside generation so the rest pile up behind it
-		return &model.ArtBlob{Bytes: cover.Data, Format: cover.Format,
-			Width: cover.Width, Height: cover.Height, SourceHash: cover.Hash}, nil
-	}
-
-	var wg sync.WaitGroup
-	blobs := make([]*model.ArtBlob, callers)
-	errs := make([]error, callers)
-	for i := range callers {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			blobs[i], errs[i] = st.thumbnail(ctx, prov, 192, source)
-		}()
-	}
-	// A second entry into the loader is the regression itself, and without the flight it
-	// happens in microseconds, so the wait is bounded rather than a fixed sleep.
-	for deadline := time.Now().Add(300 * time.Millisecond); loads.Load() < 2 && time.Now().Before(deadline); {
-		time.Sleep(time.Millisecond)
-	}
-	close(release)
-	wg.Wait()
-
-	if n := loads.Load(); n != 1 {
-		t.Errorf("the source was loaded %d times for %d concurrent resolves of one rung, want 1", n, callers)
-	}
-	for i := range callers {
-		if errs[i] != nil {
-			t.Fatalf("caller %d: %v", i, errs[i])
+	synctest.Test(t, func(t *testing.T) {
+		const callers = 8
+		var loads atomic.Int64
+		release := make(chan struct{})
+		source := func(context.Context) (*model.ArtBlob, error) {
+			loads.Add(1)
+			<-release // hold generation until every caller has joined or loaded
+			return &model.ArtBlob{Bytes: cover.Data, Format: cover.Format,
+				Width: cover.Width, Height: cover.Height, SourceHash: cover.Hash}, nil
 		}
-		if !blobs[i].Thumbnail || blobs[i].Width != 192 {
-			t.Errorf("caller %d got %dx%d thumbnail=%v, want a generated 192-wide image",
-				i, blobs[i].Width, blobs[i].Height, blobs[i].Thumbnail)
+
+		var wg sync.WaitGroup
+		blobs := make([]*model.ArtBlob, callers)
+		errs := make([]error, callers)
+		for i := range callers {
+			wg.Go(func() {
+				blobs[i], errs[i] = st.thumbnail(ctx, prov, 192, source)
+			})
 		}
-	}
-	// Every caller owns its bytes. Handing the same slice to the crowd would let one
-	// caller's write reach the others, which is the bargain the cache already keeps.
-	blobs[0].Bytes[0] ^= 0xff
-	if bytes.Equal(blobs[0].Bytes, blobs[1].Bytes) {
-		t.Error("callers share one backing array; a flight result must be copied per caller")
-	}
+		// All callers must reach a blocked state before generation is released;
+		// a delayed goroutine cannot turn a concurrent miss into a later cache hit.
+		synctest.Wait()
+		if n := loads.Load(); n != 1 {
+			t.Errorf("the source was loaded %d times for %d concurrent resolves of one rung, want 1", n, callers)
+		}
+		close(release)
+		wg.Wait()
+
+		for i := range callers {
+			if errs[i] != nil {
+				t.Fatalf("caller %d: %v", i, errs[i])
+			}
+			if !blobs[i].Thumbnail || blobs[i].Width != 192 {
+				t.Errorf("caller %d got %dx%d thumbnail=%v, want a generated 192-wide image",
+					i, blobs[i].Width, blobs[i].Height, blobs[i].Thumbnail)
+			}
+		}
+		// Every caller owns its bytes. Handing the same slice to the crowd would let one
+		// caller's write reach the others, which is the bargain the cache already keeps.
+		blobs[0].Bytes[0] ^= 0xff
+		if bytes.Equal(blobs[0].Bytes, blobs[1].Bytes) {
+			t.Error("callers share one backing array; a flight result must be copied per caller")
+		}
+	})
 }
 
 // TestThumbnailFlightSurvivesOneCallerLeaving pins whose cancellation is whose. A caller
@@ -419,6 +428,7 @@ func TestThumbnailCollapsesConcurrentMissesOntoOneGeneration(t *testing.T) {
 // waiting on carries on for the callers still there, which is why the leader runs on a
 // context detached from the one that started it.
 func TestThumbnailFlightSurvivesOneCallerLeaving(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	cover := testPNG(t, 400, 300)
 	pid := putWithCover(t, st, lib.ID, "/lib/leave.flac", "ess-leave", cover)
@@ -480,6 +490,7 @@ func TestThumbnailFlightSurvivesOneCallerLeaving(t *testing.T) {
 // to append, so an empty but present body came back absent, and "no bytes at all" is a
 // distinct answer from "a body of length zero" everywhere this blob is read.
 func TestCloneArtBlobPreservesWhetherBytesArePresent(t *testing.T) {
+	t.Parallel()
 	if got := cloneArtBlob(model.ArtBlob{Bytes: []byte{}}).Bytes; got == nil {
 		t.Error("an empty but present body cloned to nil")
 	}
@@ -499,6 +510,7 @@ func TestCloneArtBlobPreservesWhetherBytesArePresent(t *testing.T) {
 // refreshed key installs a new one and a reader already holding the old one keeps a
 // picture that stays what it was.
 func TestThumbCachePutReplacesRatherThanWrites(t *testing.T) {
+	t.Parallel()
 	c := newThumbCache(4, 1<<20)
 	c.put("h", 64, model.ArtBlob{Bytes: []byte{1, 2, 3}})
 	held, ok := c.get("h", 64)
@@ -516,6 +528,7 @@ func TestThumbCachePutReplacesRatherThanWrites(t *testing.T) {
 // the life of the process: every later request joins a call that never closes, and the
 // symptom is a hang on one cover with nothing in the logs.
 func TestThumbFlightReleasesTheKeyOnPanic(t *testing.T) {
+	t.Parallel()
 	f := newThumbFlight()
 	key := thumbKey{"h", 64}
 	func() {

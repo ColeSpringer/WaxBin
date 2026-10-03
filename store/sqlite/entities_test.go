@@ -125,6 +125,7 @@ func scalarInt(t *testing.T, st *Store, q string, args ...any) int {
 }
 
 func TestEntityResolutionDedupes(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 
 	putTrack(t, st, lib.ID, trackSpec{
@@ -160,6 +161,7 @@ func TestEntityResolutionDedupes(t *testing.T) {
 // release-group id unifies two releases the heuristic key would have split
 // (different titles/folders), while a different id keeps them separate.
 func TestMBIDFirstReleaseGroupUnifies(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	putTrack(t, st, lib.ID, trackSpec{
 		path: "/lib/a/1.flac", essence: "e1", content: "c1", title: "A", artist: "Band",
@@ -189,6 +191,7 @@ func TestMBIDFirstReleaseGroupUnifies(t *testing.T) {
 // TestInconsistentDiscTotalNotFragmented verifies an album whose tracks carry
 // inconsistent disc-total tags (some missing) is not split into multiple albums.
 func TestInconsistentDiscTotalNotFragmented(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	putTrack(t, st, lib.ID, trackSpec{
 		path: "/lib/Band/Set/d1t1.flac", essence: "e1", content: "c1", title: "One",
@@ -204,6 +207,7 @@ func TestInconsistentDiscTotalNotFragmented(t *testing.T) {
 }
 
 func TestMusicColumnsPersist(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	putTrack(t, st, lib.ID, trackSpec{
 		path: "/lib/v/1.flac", essence: "e1", content: "c1", title: "Aria",
@@ -228,6 +232,7 @@ func TestMusicColumnsPersist(t *testing.T) {
 // file whose essence hash changed by algorithm upgrade keeps the same item,
 // preserving its pid and per-user play state.
 func TestEssenceAlgoUpgradePreservesItem(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	spec := trackSpec{
@@ -269,6 +274,7 @@ func TestEssenceAlgoUpgradePreservesItem(t *testing.T) {
 // TestReencodeStillRekeys verifies the upgrade-preservation path does not apply
 // to a real re-encode, where the content hash changes.
 func TestReencodeStillRekeys(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	spec := trackSpec{path: "/lib/a/1.mp3", essence: "e1", content: "c1", title: "First", artist: "A", album: "Al"}
 	r1 := putTrack(t, st, lib.ID, spec)
@@ -284,6 +290,7 @@ func TestReencodeStillRekeys(t *testing.T) {
 }
 
 func TestGenreMatchKeyDedup(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	// Two display variants of one genre must resolve to a single entity.
 	putTrack(t, st, lib.ID, trackSpec{
@@ -308,6 +315,7 @@ func TestGenreMatchKeyDedup(t *testing.T) {
 }
 
 func TestRetagReplacesGenreLinks(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	spec := trackSpec{
 		path: "/lib/a/1.mp3", essence: "stable", content: "c1", title: "Song",
@@ -335,6 +343,7 @@ func TestRetagReplacesGenreLinks(t *testing.T) {
 }
 
 func TestSearchFTSMaintained(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	putTrack(t, st, lib.ID, trackSpec{
 		path: "/lib/a/1.flac", essence: "e1", content: "c1", title: "Paranoid Android",
@@ -352,6 +361,7 @@ func TestSearchFTSMaintained(t *testing.T) {
 }
 
 func TestFTSRowRemovedWithItem(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	// Same essence at two live paths would dedup to one item; instead re-key the
 	// single file's essence so the prior item is orphaned and deleted.
@@ -371,6 +381,7 @@ func TestFTSRowRemovedWithItem(t *testing.T) {
 }
 
 func TestRefreshRollups(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{
@@ -413,6 +424,7 @@ func TestRefreshRollups(t *testing.T) {
 // rows. New entities are the only entity-side deltas, and a no-op rescan creates
 // none.
 func TestNoopRescanStaysSilent(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	spec := trackSpec{
@@ -433,6 +445,7 @@ func TestNoopRescanStaysSilent(t *testing.T) {
 // deletes the FTS row, then checks that a no-op rescan leaves it gone but a
 // content-changed rescan restores it.
 func TestNoopRescanSkipsEntityWork(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	spec := trackSpec{
@@ -457,6 +470,7 @@ func TestNoopRescanSkipsEntityWork(t *testing.T) {
 }
 
 func TestUntaggedAlbumNotGrouped(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	// Two fully artist-less albums sharing a title must stay separate; a title-only
 	// release-group key would collide them.
@@ -477,6 +491,7 @@ func TestUntaggedAlbumNotGrouped(t *testing.T) {
 }
 
 func TestNonAlbumSingleNotGrouped(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	putTrack(t, st, lib.ID, trackSpec{
 		path: "/lib/loose/1.mp3", essence: "e1", content: "c1", title: "Loose",
@@ -499,6 +514,7 @@ func TestNonAlbumSingleNotGrouped(t *testing.T) {
 // rescanned after a Picard pass. Each rescan here varies the content hash the way a
 // retag does, since a byte-identical rescan skips entity resolution outright.
 func TestArtistMBIDBackfill(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 
 	untagged := trackSpec{
@@ -544,6 +560,7 @@ func TestArtistMBIDBackfill(t *testing.T) {
 // TestArtistMBIDBackfillRespectsLock: a locked-empty mbid is a curated value, and the
 // fill-when-empty WHERE clause alone would refill it.
 func TestArtistMBIDBackfillRespectsLock(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 
@@ -585,6 +602,7 @@ func artistChanges(t *testing.T, st *Store) int {
 // identity.AlbumKey, so a late tag pass hits the existing row and never reaches the
 // insert that carries them.
 func TestAlbumIdentifierBackfill(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 
 	untagged := trackSpec{
@@ -638,6 +656,7 @@ func albumChanges(t *testing.T, st *Store) int {
 // nothing. It must join the rows already holding its identity, keeping their pids and
 // everything attached to them, rather than forking a second pair.
 func TestMBIDAdoptionJoinsEnrichedEntity(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 
@@ -725,6 +744,7 @@ func TestMBIDAdoptionJoinsEnrichedEntity(t *testing.T) {
 // holds the canonical lowercase id, and a file tagged with the uppercase spelling still
 // adopts, because identity's keys lowercase before the probe compares.
 func TestMBIDAdoptionFoldsTagCasing(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	const relMBID = "c3d4e5f6-1111-2222-3333-444455556666"
@@ -756,6 +776,7 @@ func TestMBIDAdoptionFoldsTagCasing(t *testing.T) {
 // re-resolution computed its own folder's heuristic key, missed, and forked it onto an
 // album of its own on any entity-touching edit.
 func TestAdoptedMemberSurvivesAnEdit(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	const relMBID = "eeeeeeee-1111-2222-3333-444444444444"
@@ -802,6 +823,7 @@ func TestAdoptedMemberSurvivesAnEdit(t *testing.T) {
 // folders a key can climb out of, so loose files in a root called "CD1" key their album on
 // the root rather than the folder above it, and a real disc folder inside it joins them.
 func TestAlbumKeyAnchorsOnALibraryRootNamedLikeADisc(t *testing.T) {
+	t.Parallel()
 	st, _ := entityFixture(t)
 	ctx := context.Background()
 	lib, err := st.EnsureLibrary(ctx, &model.Library{Root: []byte("/rips/CD1"), DisplayRoot: "/rips/CD1",

@@ -16,6 +16,7 @@ import (
 // reaches the parent set/list RunE. This is only sound because an item pid is a ULID
 // and can never be the literal "keys", so no cobra Args/TraverseChildren tweak is needed.
 func TestTagCommandRouting(t *testing.T) {
+	t.Parallel()
 	tagCmd := newTagCmd(&globals{})
 
 	c, _, err := tagCmd.Find([]string{"keys"})

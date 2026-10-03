@@ -30,6 +30,7 @@ func writeBytes(t *testing.T, name string, data []byte) string {
 // analyze pass's to refuse. A clean file reports none, which is the half that keeps
 // the field from being noise.
 func TestMeasureReportsToleratedDamage(t *testing.T) {
+	t.Parallel()
 	const rate = 8000
 	flac := testaudio.EncodeAs(t, "flac", "", rate, testaudio.ReferenceSignal(rate, 4*time.Second))
 	eng := New(nil)
@@ -57,6 +58,7 @@ func TestMeasureReportsToleratedDamage(t *testing.T) {
 // nothing are a format this build does not cover (ErrUnsupported), and the pass skips
 // them, even when the extension handed them to a demuxer that refused them.
 func TestOpenClassifiesDamageApartFromUnsupported(t *testing.T) {
+	t.Parallel()
 	eng := New(nil)
 
 	// The fLaC marker matches the sniff table, so the FLAC demuxer takes the file
@@ -95,6 +97,7 @@ func TestOpenClassifiesDamageApartFromUnsupported(t *testing.T) {
 // The Mono comparison is the other half: it proves the decoder really did apply the
 // header, which is what makes the subtraction necessary rather than cosmetic.
 func TestMeasureRemovesTheOggOpusHeaderGain(t *testing.T) {
+	t.Parallel()
 	const rate, headerQ78, headerDB = 48000, -1536, -6.0
 	ctx := context.Background()
 	dir := t.TempDir()

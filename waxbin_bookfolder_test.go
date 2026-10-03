@@ -55,6 +55,7 @@ func keepsBook(t *testing.T, ctx context.Context, lib *waxbin.Library, pid model
 // TestFolderNamedBookSurvivesAFolderRename: a one-part book named for its folder keeps its
 // item when the folder is renamed, its tags still naming no book.
 func TestFolderNamedBookSurvivesAFolderRename(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	lib, pid, root, _ := untaggedBook(t, ctx)
 	if err := os.Rename(filepath.Join(root, "Someone", "Tome"), filepath.Join(root, "Someone", "Tome - Book One")); err != nil {
@@ -73,6 +74,7 @@ func TestFolderNamedBookSurvivesAFolderRename(t *testing.T) {
 // TestFolderNamedBookSurvivesOrganize: organize moves a book named for its folder into a
 // folder its own layout names, and a forced scan keeps the item.
 func TestFolderNamedBookSurvivesOrganize(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	lib, pid, _, _ := untaggedBook(t, ctx)
 	if err := lib.EditFields(ctx, pid, map[string]string{"year": "1937"}, waxbin.EditOptions{}); err != nil {
@@ -94,6 +96,7 @@ func TestFolderNamedBookSurvivesOrganize(t *testing.T) {
 // TestFolderNamedBookSurvivesAnAuthorWriteBack: an author written back to a book whose
 // tags name no title leaves its key alone, and a forced scan keeps the item.
 func TestFolderNamedBookSurvivesAnAuthorWriteBack(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	lib, pid, _, db := untaggedBook(t, ctx)
 	key := storedIdentityKey(t, ctx, db, pid)
@@ -112,6 +115,7 @@ func TestFolderNamedBookSurvivesAnAuthorWriteBack(t *testing.T) {
 // TestJoinedPartKeepsItsOwedTitle: a part the folder rule keeps in its book is held to its
 // own tags when the scan settles owed rows, so a catalog-only title edit stays owed on it.
 func TestJoinedPartKeepsItsOwedTitle(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), root)

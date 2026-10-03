@@ -19,6 +19,7 @@ import (
 // roleLocked rides beside locked so a per-role pin control can tell an auxiliary slot
 // held by its own pin from one held by the front cover's.
 func TestArtRoleViewsJSON(t *testing.T) {
+	t.Parallel()
 	b, err := json.Marshal(artRoleViews([]model.ArtRoleInfo{
 		{
 			Role: model.ArtRoleBack, Format: "png", Width: 500, Height: 500,
@@ -44,6 +45,7 @@ func TestArtRoleViewsJSON(t *testing.T) {
 // other, or reaching either without a decision, fails here rather than in a consumer's
 // parser. artView adding `box` was itself an unpinned change to this payload.
 func TestArtViewKeySet(t *testing.T) {
+	t.Parallel()
 	want := []string{"box", "bytes", "derived", "format", "height", "level", "provider",
 		"source", "sourceHash", "sourceUrl", "thumbnail", "updatedAt", "width"}
 	views := map[string]map[string]any{
@@ -67,6 +69,7 @@ func TestArtViewKeySet(t *testing.T) {
 // ladder rung, so the width alone does not say which request would land on these same
 // bytes; box does. A sizeless read asked for no rung and reports none.
 func TestArtViewReportsTheRungServed(t *testing.T) {
+	t.Parallel()
 	sized := artView(&model.ArtProvenance{Format: "png", Width: 192, Height: 144}, true, 192)
 	if got := sized["box"]; got != 192 {
 		t.Errorf("box = %v, want 192 (the rung 187 rounds up to)", got)
@@ -81,6 +84,7 @@ func TestArtViewReportsTheRungServed(t *testing.T) {
 // flag is the front cover, whose lock is the entity's own; spelling "front" out is
 // refused and points at dropping the flag, so there is one way to say it.
 func TestParseArtLockRole(t *testing.T) {
+	t.Parallel()
 	if got, err := parseArtLockRole("lock", ""); err != nil || got != model.ArtRoleFront {
 		t.Errorf("empty --role = %q (err %v), want front", got, err)
 	}
@@ -107,6 +111,7 @@ func TestParseArtLockRole(t *testing.T) {
 // nothing, and saying "unlocked" there leaves a user wondering why enrichment still skips
 // the slot. Each such line names the command that would actually open it.
 func TestArtLockLine(t *testing.T) {
+	t.Parallel()
 	const pid = model.PID("01ABC")
 	cases := []struct {
 		name   string

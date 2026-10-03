@@ -11,6 +11,7 @@ import (
 // TestEpisodeChapters verifies URL-sourced podcast chapters store and read back, and
 // that they win over embedded chapters (precedence), surviving a re-sync.
 func TestEpisodeChapters(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, err := Open(ctx, OpenOptions{Path: filepath.Join(t.TempDir(), "c.db"), Owner: "test"})
 	if err != nil {

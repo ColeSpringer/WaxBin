@@ -15,6 +15,7 @@ const oneEpisodeFeed = `<?xml version="1.0"?><rss version="2.0"><channel><title>
 // TestPodcastSyncAllCountsTheFailedFeeds: a batch sync keeps going past a dead feed,
 // and names and counts it beside the feeds that synced.
 func TestPodcastSyncAllCountsTheFailedFeeds(t *testing.T) {
+	t.Parallel()
 	serve := func() *httptest.Server {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			w.Header().Set("Content-Type", "application/rss+xml")

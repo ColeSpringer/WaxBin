@@ -183,6 +183,7 @@ func wantCode(t *testing.T, err error, code waxerr.Code) {
 }
 
 func TestLocateCaches(t *testing.T) {
+	t.Parallel()
 	fake := newFakeCatalog()
 	pid, filePID := model.NewPID(), model.NewPID()
 	fake.setItem(pid, filePID, "/lib/track.wav")
@@ -209,6 +210,7 @@ func TestLocateCaches(t *testing.T) {
 // consumer's job, so an unknown pid stays CodeNotFound and a broken catalog stays
 // whatever the catalog said.
 func TestLocatePropagatesCatalogErrors(t *testing.T) {
+	t.Parallel()
 	fake := newFakeCatalog()
 	c := newTestCache(t, fake)
 
@@ -230,6 +232,7 @@ func TestLocatePropagatesCatalogErrors(t *testing.T) {
 // (14647*588) exactly. The millisecond path this replaced reached 8612421, 15 samples
 // early: a third of a millisecond of the previous track at the head of this one.
 func TestSpanIsExactAtTheSample(t *testing.T) {
+	t.Parallel()
 	fake := newFakeCatalog()
 	pid, filePID := model.NewPID(), model.NewPID()
 	fake.setVirtual(pid, filePID, "/lib/rip.flac", 44100, 14647, 22000)
@@ -255,6 +258,7 @@ func TestSpanIsExactAtTheSample(t *testing.T) {
 // must share a sample. This is what keeps a gapless record gapless, and it holds at
 // every rate, including the ones 75 does not divide.
 func TestSpanAbutsAtTheJoin(t *testing.T) {
+	t.Parallel()
 	for _, rate := range []int{44100, 48000, 88200, 96000, 192000, 32000, 16000, 8000} {
 		boundary := int64(14647)
 		first := Location{Virtual: true, SampleRate: rate, StartFrames: 0, EndFrames: boundary}
@@ -278,6 +282,7 @@ func TestSpanAbutsAtTheJoin(t *testing.T) {
 // caller omits. Spelling it as the file's sample count would be a guess, and to=0 is
 // the empty span to a transcoder, never the whole file.
 func TestSpanOpenEndOmits(t *testing.T) {
+	t.Parallel()
 	loc := Location{Virtual: true, SampleRate: 44100, StartFrames: 375, EndFrames: 0}
 	from, to, err := loc.Span()
 	if err != nil {
@@ -293,6 +298,7 @@ func TestSpanOpenEndOmits(t *testing.T) {
 // second, rejecting a perfectly serviceable whole-file item over a header field it
 // does not need.
 func TestSpanChecksVirtualBeforeRate(t *testing.T) {
+	t.Parallel()
 	virtual := Location{Virtual: true, SampleRate: 0, StartFrames: 375, EndFrames: 750}
 	if _, _, err := virtual.Span(); err == nil {
 		t.Fatal("a virtual track with no sample rate must fail rather than omit its bounds " +
@@ -310,6 +316,7 @@ func TestSpanChecksVirtualBeforeRate(t *testing.T) {
 }
 
 func TestRelocateHealsAStaleEntry(t *testing.T) {
+	t.Parallel()
 	fake := newFakeCatalog()
 	pid, filePID := model.NewPID(), model.NewPID()
 	fake.setItem(pid, filePID, "/lib/old.wav")
@@ -342,6 +349,7 @@ func TestRelocateHealsAStaleEntry(t *testing.T) {
 }
 
 func TestPollInvalidation(t *testing.T) {
+	t.Parallel()
 	fake := newFakeCatalog()
 	type row struct{ pid, filePID model.PID }
 	items := make([]row, 3)
@@ -391,6 +399,7 @@ func TestPollInvalidation(t *testing.T) {
 // its items, so a library row drops every cached location; the next Locate re-reads
 // the fresh path. This is the relocate blind spot the file-row path does not cover.
 func TestLibraryRowFlushesAll(t *testing.T) {
+	t.Parallel()
 	fake := newFakeCatalog()
 	type row struct{ pid, filePID model.PID }
 	items := make([]row, 3)
@@ -434,6 +443,7 @@ func TestLibraryRowFlushesAll(t *testing.T) {
 // TestCatalogRowFlushesAll: a reopen's catalog row may stand for a whole catalog
 // replaced underneath, so it drops every cached location the way a library row does.
 func TestCatalogRowFlushesAll(t *testing.T) {
+	t.Parallel()
 	fake := newFakeCatalog()
 	pids := []model.PID{model.NewPID(), model.NewPID()}
 	for i, pid := range pids {
@@ -460,6 +470,7 @@ func TestCatalogRowFlushesAll(t *testing.T) {
 // cursor, so the poll drops everything and resumes at the new head, and the next
 // change after it is still seen.
 func TestPollRePrimesACursorPastTheHead(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	fake := newFakeCatalog()
 	pid, filePID := model.NewPID(), model.NewPID()
@@ -519,6 +530,7 @@ func (h *countingHandler) Handle(ctx context.Context, r slog.Record) error {
 // from Poll (warning once), and refuses lookups rather than answering from the dead
 // catalog.
 func TestNewCacheRefusesAReplacedCatalog(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	fake := newFakeCatalog()
 	pid := model.NewPID()
@@ -558,6 +570,7 @@ func TestNewCacheRefusesAReplacedCatalog(t *testing.T) {
 }
 
 func TestPollPagesToTheTail(t *testing.T) {
+	t.Parallel()
 	fake := newFakeCatalog()
 	fake.pageSize = 2
 	pid, filePID := model.NewPID(), model.NewPID()
@@ -591,6 +604,7 @@ func TestPollPagesToTheTail(t *testing.T) {
 }
 
 func TestInitCursorStartsAtTail(t *testing.T) {
+	t.Parallel()
 	fake := newFakeCatalog()
 	fake.pageSize = 2
 	for i := 1; i <= 5; i++ {
@@ -606,6 +620,7 @@ func TestInitCursorStartsAtTail(t *testing.T) {
 }
 
 func TestCloseAbortsHungPoll(t *testing.T) {
+	t.Parallel()
 	fake := newFakeCatalog()
 	c := newTestCache(t, fake)
 	polling := fake.hangPolls()
@@ -626,6 +641,7 @@ func TestCloseAbortsHungPoll(t *testing.T) {
 }
 
 func TestCacheEvictsOldest(t *testing.T) {
+	t.Parallel()
 	fake := newFakeCatalog()
 	c := newTestCache(t, fake)
 
@@ -651,6 +667,7 @@ func TestCacheEvictsOldest(t *testing.T) {
 // a stale entry behind: the row is already spent, so nothing would ever invalidate the
 // late insert. store refuses results from before a newer invalidation.
 func TestStoreLosesRaceToInvalidation(t *testing.T) {
+	t.Parallel()
 	fake := newFakeCatalog()
 	c := newTestCache(t, fake)
 	pid := model.NewPID()
@@ -685,6 +702,7 @@ func TestStoreLosesRaceToInvalidation(t *testing.T) {
 // misses reach the catalog, in one GetMany. The fake records the batch argument,
 // so a hit leaking into the query is caught directly rather than inferred.
 func TestLocateManyMixedHitMiss(t *testing.T) {
+	t.Parallel()
 	fake := newFakeCatalog()
 	warm, cold := model.NewPID(), model.NewPID()
 	fake.setItem(warm, model.NewPID(), "/lib/warm.wav")
@@ -722,6 +740,7 @@ func TestLocateManyMixedHitMiss(t *testing.T) {
 // the GetMany contract. The error return is reserved for the batch query itself
 // failing, and then no partial map comes back.
 func TestLocateManyOmitsUnknown(t *testing.T) {
+	t.Parallel()
 	fake := newFakeCatalog()
 	known := model.NewPID()
 	fake.setItem(known, model.NewPID(), "/lib/t.wav")
@@ -755,6 +774,7 @@ func TestLocateManyOmitsUnknown(t *testing.T) {
 // store's guard: the invalidating rows are already spent, and a late insert
 // would never be dropped.
 func TestLocateManyLosesRaceToInvalidation(t *testing.T) {
+	t.Parallel()
 	fake := newFakeCatalog()
 	c := newTestCache(t, fake)
 	a, b := model.NewPID(), model.NewPID()
@@ -783,6 +803,7 @@ func TestLocateManyLosesRaceToInvalidation(t *testing.T) {
 // does not cache them, so it cannot flush the warm working set. Locate's
 // single-pid path keeps its oldest-out eviction.
 func TestLocateManyNeverEvicts(t *testing.T) {
+	t.Parallel()
 	fake := newFakeCatalog()
 	c := newTestCache(t, fake)
 	for i := 0; i < maxEntries; i++ {
@@ -811,6 +832,7 @@ func TestLocateManyNeverEvicts(t *testing.T) {
 // reverse index, so a later file change row (a rename) drops them like any
 // Locate-cached entry.
 func TestLocateManyEntriesInvalidateViaByFile(t *testing.T) {
+	t.Parallel()
 	fake := newFakeCatalog()
 	pid, filePID := model.NewPID(), model.NewPID()
 	fake.setItem(pid, filePID, "/lib/t.wav")
@@ -835,6 +857,7 @@ func TestLocateManyEntriesInvalidateViaByFile(t *testing.T) {
 // so one file change row must drop every sibling resolving through it. A single-value
 // reverse index would invalidate only the one stored last.
 func TestFileRowInvalidatesAllSharingItems(t *testing.T) {
+	t.Parallel()
 	fake := newFakeCatalog()
 	c := newTestCache(t, fake)
 	filePID := model.PID("F0000000000000000000000009")
@@ -872,6 +895,7 @@ func (f *closableCatalog) Close() error { f.closed = true; return nil }
 // holds its descriptors open past sql.DB.Close, so counting them proves nothing.
 // TestNewOverACallerOpenedLibrary covers the observable half against a real catalog.
 func TestCloseReleasesOnlyAnOwnedLibrary(t *testing.T) {
+	t.Parallel()
 	owned := &closableCatalog{fakeCatalog: newFakeCatalog()}
 	c := newTestCache(t, owned)
 	c.ownedLib = owned // as Open does with the handle it created
@@ -895,6 +919,7 @@ func TestCloseReleasesOnlyAnOwnedLibrary(t *testing.T) {
 // TestOpenOwnsItsLibrary is the other half: Close releases ownedLib (above), so Open
 // has to set it. Whitebox for the same reason.
 func TestOpenOwnsItsLibrary(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db := filepath.Join(t.TempDir(), "catalog.db")
 	// WaxBin creates the catalog; a read-only open cannot, so author it first.
@@ -945,6 +970,7 @@ func (b *blockingGetCatalog) Get(ctx context.Context, _ model.PID) (*model.ItemV
 // TestLocateHonorsCallerContext: a canceled request context aborts a hung catalog
 // lookup instead of waiting out queryTimeout.
 func TestLocateHonorsCallerContext(t *testing.T) {
+	t.Parallel()
 	b := &blockingGetCatalog{fakeCatalog: newFakeCatalog(), getting: make(chan struct{}, 1)}
 	c := newTestCache(t, b)
 
@@ -962,6 +988,7 @@ func TestLocateHonorsCallerContext(t *testing.T) {
 // TestCloseAbortsHungLocate pins the other half of the bridge: Close aborts an
 // in-flight lookup even while the caller's context lives on.
 func TestCloseAbortsHungLocate(t *testing.T) {
+	t.Parallel()
 	b := &blockingGetCatalog{fakeCatalog: newFakeCatalog(), getting: make(chan struct{}, 1)}
 	c := newTestCache(t, b)
 
@@ -987,8 +1014,9 @@ func TestCloseAbortsHungLocate(t *testing.T) {
 // messageHandler records every message.
 type messageHandler struct {
 	slog.Handler
-	mu   sync.Mutex
-	msgs []string
+	mu       sync.Mutex
+	msgs     []string
+	observed chan struct{}
 }
 
 func (h *messageHandler) Enabled(context.Context, slog.Level) bool { return true }
@@ -996,6 +1024,10 @@ func (h *messageHandler) Enabled(context.Context, slog.Level) bool { return true
 func (h *messageHandler) Handle(_ context.Context, r slog.Record) error {
 	h.mu.Lock()
 	h.msgs = append(h.msgs, r.Message)
+	select {
+	case h.observed <- struct{}{}:
+	default:
+	}
 	h.mu.Unlock()
 	return nil
 }
@@ -1004,8 +1036,9 @@ func (h *messageHandler) Handle(_ context.Context, r slog.Record) error {
 // replaced, lookups are refused, so the loop does not log that it keeps serving cached
 // locations.
 func TestPollLoopDoesNotClaimToServeAReplacedCatalog(t *testing.T) {
+	t.Parallel()
 	fake := newFakeCatalog()
-	logs := &messageHandler{Handler: slog.DiscardHandler}
+	logs := &messageHandler{Handler: slog.DiscardHandler, observed: make(chan struct{}, 1)}
 	c, err := newCache(context.Background(), fake, nil, Options{PollInterval: time.Millisecond, Logger: slog.New(logs)})
 	if err != nil {
 		t.Fatalf("newCache: %v", err)
@@ -1014,7 +1047,13 @@ func TestPollLoopDoesNotClaimToServeAReplacedCatalog(t *testing.T) {
 	fake.mu.Lock()
 	fake.pollErr = waxerr.New(waxerr.CodeNotFound, "fake.DataVersion", "catalog file was replaced")
 	fake.mu.Unlock()
-	time.Sleep(50 * time.Millisecond)
+	// The warning proves a background poll reached the replaced catalog. Close
+	// then joins that poll before we check all messages it emitted.
+	select {
+	case <-logs.observed:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the poll loop did not report the replaced catalog")
+	}
 	c.Close()
 	logs.mu.Lock()
 	defer logs.mu.Unlock()

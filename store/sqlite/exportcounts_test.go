@@ -13,6 +13,7 @@ import (
 // out, the way Export filters them, so a manifest answered without the body cannot
 // disagree with one read from it.
 func TestExportCounts(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	track := seedItem(t, st, lib)

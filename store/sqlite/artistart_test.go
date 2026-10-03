@@ -71,6 +71,7 @@ func artistArtQueue(t *testing.T, st *sqlite.Store, opts model.EnrichQueueOption
 // carries, so an artist holding one has no auxiliary vacancy. An artist with every slot
 // filled, a whole-entity lock, or both halves answered is not walked.
 func TestArtistsNeedingArtBackfillHalves(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, id, pid, _, _ := artistArtFixture(t, "Fresh", "Identified", "Held", "HeldFull", "Whole",
 		"FrontAnswered", "AuxAnswered", "BothAnswered", "BgHeld", "FrontBgHeld")
@@ -143,6 +144,7 @@ func TestArtistsNeedingArtBackfillHalves(t *testing.T) {
 // whatever stood. A front no provider had stays a miss beside an auxiliary match, and a
 // failed half is owed while the other settles.
 func TestApplyArtistArtBackfillSettlesEachHalf(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, id, pid, count, _ := artistArtFixture(t, "FrontMissed", "FrontOnly", "AuxMissed", "AuxFailed")
 	marker := func(name, typ string) string {
@@ -188,6 +190,7 @@ func TestApplyArtistArtBackfillSettlesEachHalf(t *testing.T) {
 // drops both markers, while a fillable front clear opens the front alone and leaves the
 // background's answer standing.
 func TestArtistArtMarkersDropOnNewEvidence(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, id, pid, count, _ := artistArtFixture(t, "Landed", "Cleared")
 	markers := func(name string) int {
@@ -230,6 +233,7 @@ func TestArtistArtMarkersDropOnNewEvidence(t *testing.T) {
 // be merged away between the queue page and the write, and a marker or an image written
 // for the dead rowid would sit on whatever entity inherits it.
 func TestArtBackfillOnAVanishedRowidWritesNothing(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, _ := openStoreAt(t)
 	db := roConn(t, dbPath)
@@ -262,6 +266,7 @@ func TestArtBackfillOnAVanishedRowidWritesNothing(t *testing.T) {
 // settled that half, and a half nothing answered names none, rather than both halves
 // taking whoever supplied the first image.
 func TestArtHalvesNameTheirOwnProvider(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, id, pid, count, str := artistArtFixture(t, "Split", "FrontOnly")
 	provider := func(name, typ string) string {
@@ -297,6 +302,7 @@ func TestArtHalvesNameTheirOwnProvider(t *testing.T) {
 // neither stored nor counted toward the auxiliary half, so a caller handing the store a
 // back image for an artist leaves the background half a miss.
 func TestArtistArtKeepsOnlyTheRolesAnArtistCarries(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, id, pid, count, _ := artistArtFixture(t, "Stray")
 	if err := st.ApplyArtistArtBackfill(ctx, model.ArtistArtBackfill{ArtistID: id("Stray"), PID: pid("Stray"),
@@ -316,6 +322,7 @@ func TestArtistArtKeepsOnlyTheRolesAnArtistCarries(t *testing.T) {
 // to, so the other half's answer stands; a role the entity does not carry opens nothing,
 // and releasing the whole-entity lock opens both.
 func TestAClearDropsOnlyItsOwnHalf(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, id, pid, count, _ := artistArtFixture(t, "Cleared")
 	halves := func() string {

@@ -43,6 +43,7 @@ func changesSince(t *testing.T, st *Store, seq int64) [][2]string {
 // TestRefreshSortKeysClearsDrift mirrors TestVerifyDetectsSortKeyDrift: the drift
 // the check reports is exactly what the repair clears.
 func TestRefreshSortKeysClearsDrift(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	seedTwoTracks(t, st, lib.ID)
@@ -96,6 +97,7 @@ func TestRefreshSortKeysClearsDrift(t *testing.T) {
 // TestRefreshSortKeysFolds covers the change that motivates the repair: a key the
 // ASCII-only implementation wrote buckets under E rather than after Z.
 func TestRefreshSortKeysFolds(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{
@@ -121,6 +123,7 @@ func TestRefreshSortKeysFolds(t *testing.T) {
 // TestRefreshSortKeysUsesCuratedOverride proves a curated entity is recomputed from
 // the override the user typed, not from the display name.
 func TestRefreshSortKeysUsesCuratedOverride(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{
@@ -158,6 +161,7 @@ func TestRefreshSortKeysUsesCuratedOverride(t *testing.T) {
 // TestRefreshSortKeysRefoldsTagDerivedColumns covers the columns whose input was a
 // sort tag the catalog does not keep.
 func TestRefreshSortKeysRefoldsTagDerivedColumns(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	tr := putTrack(t, st, lib.ID, trackSpec{
@@ -210,6 +214,7 @@ func TestRefreshSortKeysRefoldsTagDerivedColumns(t *testing.T) {
 // author_sort is left alone: an explicit edit stores the literal string the user
 // typed, which refolding would rewrite.
 func TestRefreshSortKeysSkipsLockedSortFields(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	locked := putTrack(t, st, lib.ID, trackSpec{
@@ -262,6 +267,7 @@ func TestRefreshSortKeysSkipsLockedSortFields(t *testing.T) {
 // TestRefreshSortKeysCoversAliasAndSeriesSeq covers the two columns that were in
 // neither the drift check nor any repair before.
 func TestRefreshSortKeysCoversAliasAndSeriesSeq(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{
@@ -317,6 +323,7 @@ func TestRefreshSortKeysCoversAliasAndSeriesSeq(t *testing.T) {
 // TestRefreshSortKeysEmitsDeltas checks the change feed: a rewritten entity emits
 // its own delta and nothing else, and a run that moves nothing stays silent.
 func TestRefreshSortKeysEmitsDeltas(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	seedTwoTracks(t, st, lib.ID)
@@ -348,6 +355,7 @@ func TestRefreshSortKeysEmitsDeltas(t *testing.T) {
 // TestRefreshSortKeysSpansBatches exercises the mid-stream commit. The rows are
 // inserted directly because scanning past the batch size would take minutes.
 func TestRefreshSortKeysSpansBatches(t *testing.T) {
+	t.Parallel()
 	st, _ := entityFixture(t)
 	ctx := context.Background()
 	const n = sortKeyBatch + 25
@@ -383,6 +391,7 @@ func TestRefreshSortKeysSpansBatches(t *testing.T) {
 // the survivor's column has to follow or the merge leaves the catalog failing
 // db verify.
 func TestMergeAppliesInheritedSortOverride(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/1.flac", essence: "e1", content: "c1", title: "A", artist: "Edith Piaf", album: "X"})

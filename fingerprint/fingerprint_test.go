@@ -14,6 +14,7 @@ func pcm(rate int, samples []float32) *decode.PCM {
 }
 
 func TestFingerprintSelfConsistent(t *testing.T) {
+	t.Parallel()
 	orig := pcm(44100, testaudio.RichSignal(44100, 8, testaudio.MusicalPartials, 1))
 	transcoded := pcm(44100, testaudio.Reencode(orig.Samples, 0.85, 42)) // quieter copy with noise
 	// A different recording: shifted partials and a different modulation pattern.
@@ -43,6 +44,7 @@ func TestFingerprintSelfConsistent(t *testing.T) {
 }
 
 func TestFingerprintGainInvariant(t *testing.T) {
+	t.Parallel()
 	orig := pcm(44100, testaudio.RichSignal(44100, 5, testaudio.MusicalPartials, 3))
 	louder := &decode.PCM{SampleRate: 44100, Channels: 1, Samples: make([]float32, len(orig.Samples))}
 	for i, s := range orig.Samples {
@@ -54,6 +56,7 @@ func TestFingerprintGainInvariant(t *testing.T) {
 }
 
 func TestIndexTermsShareUnderTranscode(t *testing.T) {
+	t.Parallel()
 	orig := pcm(44100, testaudio.RichSignal(44100, 8, testaudio.MusicalPartials, 1))
 	transcoded := pcm(44100, testaudio.Reencode(orig.Samples, 0.85, 42))
 	different := pcm(44100, testaudio.RichSignal(44100, 8, testaudio.AltPartials, 7))
@@ -72,6 +75,7 @@ func TestIndexTermsShareUnderTranscode(t *testing.T) {
 }
 
 func TestPackRoundTrip(t *testing.T) {
+	t.Parallel()
 	sub := []uint32{0, 1, 0x7fff, 0x1234, 42}
 	if got := Unpack(Pack(sub)); len(got) != len(sub) {
 		t.Fatalf("round-trip length %d, want %d", len(got), len(sub))

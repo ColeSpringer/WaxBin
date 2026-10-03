@@ -81,6 +81,7 @@ func writeTestFile(t *testing.T, path string, data []byte) {
 // item, so it gets an error naming the verb that does own those bytes rather than a
 // quiet skip.
 func TestRmRefusesAnEpisodeAndNamesTheVerb(t *testing.T) {
+	t.Parallel()
 	lib, _, trackPID, episodePID := ownershipFixture(t)
 	ctx := context.Background()
 
@@ -109,6 +110,7 @@ func TestRmRefusesAnEpisodeAndNamesTheVerb(t *testing.T) {
 // episode has no file, so there is no path to resolve to a library, and rm fell
 // through to an empty plan reporting "0 action(s)" rather than the refusal.
 func TestRmRefusesANeverDownloadedEpisode(t *testing.T) {
+	t.Parallel()
 	lib, _, _, episodePID := ownershipFixture(t)
 	ctx := context.Background()
 	ep, err := lib.Podcasts().Episode(ctx, episodePID)
@@ -145,6 +147,7 @@ func TestRmRefusesANeverDownloadedEpisode(t *testing.T) {
 // mixed match set plans the tracks, leaves the episodes alone, and says how many it
 // left alone. Failing the whole sweep would break retention and dedup.
 func TestPlanDeleteSkipsEpisodesAndReportsIt(t *testing.T) {
+	t.Parallel()
 	lib, podDir, _, episodePID := ownershipFixture(t)
 	ctx := context.Background()
 
@@ -186,6 +189,7 @@ func TestPlanDeleteSkipsEpisodesAndReportsIt(t *testing.T) {
 // resolveLibraries, so without this the restore would generic-scan the one library
 // resolveLibraries refuses.
 func TestRestoreTrashRefusesThePodcastLibrary(t *testing.T) {
+	t.Parallel()
 	lib, podDir, _, episodePID := ownershipFixture(t)
 	ctx := context.Background()
 
@@ -221,6 +225,7 @@ func TestRestoreTrashRefusesThePodcastLibrary(t *testing.T) {
 // of this now routes to: it reclaims the bytes and keeps the episode re-fetchable,
 // with its play state intact, which is what `rm` cannot do.
 func TestUnfetchStillLeavesTheEpisodeRemote(t *testing.T) {
+	t.Parallel()
 	lib, _, _, episodePID := ownershipFixture(t)
 	ctx := context.Background()
 
@@ -285,6 +290,7 @@ func holdScope(t *testing.T, lib *Library, scope string) {
 // per-podcast form would fail CodeConflict against itself on the first podcast of
 // every watch tick.
 func TestApplyRetentionAllUnderARealLeaser(t *testing.T) {
+	t.Parallel()
 	lib, _, _, episodePID := ownershipFixture(t)
 	ctx := context.Background()
 
@@ -311,6 +317,7 @@ func TestApplyRetentionAllUnderARealLeaser(t *testing.T) {
 // TestPodcastVerbsConflictOnTheirOwnScope pins that the verbs do serialize against
 // each other.
 func TestPodcastVerbsConflictOnTheirOwnScope(t *testing.T) {
+	t.Parallel()
 	lib, _, _, episodePID := ownershipFixture(t)
 	ctx := context.Background()
 	ep, err := lib.Podcasts().Episode(ctx, episodePID)
@@ -335,6 +342,7 @@ func TestPodcastVerbsConflictOnTheirOwnScope(t *testing.T) {
 // podcast verbs must not be blocked by it. ImportEpisodeFile is the exception, since
 // it moves a file out of an arbitrary source path.
 func TestPodcastVerbsIgnoreTheFsMutateScope(t *testing.T) {
+	t.Parallel()
 	lib, _, _, episodePID := ownershipFixture(t)
 	ctx := context.Background()
 	ep, err := lib.Podcasts().Episode(ctx, episodePID)

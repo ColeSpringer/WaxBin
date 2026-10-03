@@ -8,6 +8,7 @@ import (
 )
 
 func TestUnsafeSegmentReasonMatchesSanitizer(t *testing.T) {
+	t.Parallel()
 	// The audit detector must agree with the sanitizer: a name organize would
 	// rewrite is flagged unsafe, and a name it leaves alone is reported safe. This
 	// locks the two together (they drifted on leading spaces, since sanitizeSegment trims
@@ -35,6 +36,7 @@ func TestUnsafeSegmentReasonMatchesSanitizer(t *testing.T) {
 }
 
 func TestSanitizeSegmentReservedDeviceNames(t *testing.T) {
+	t.Parallel()
 	cases := map[string]string{
 		"CON":       "CON_",
 		"nul":       "nul_",
@@ -52,6 +54,7 @@ func TestSanitizeSegmentReservedDeviceNames(t *testing.T) {
 }
 
 func TestSanitizeSegmentTrailingDotsAndSpaces(t *testing.T) {
+	t.Parallel()
 	// Windows silently strips trailing dots/spaces, so the catalog path would
 	// disagree with disk; WaxBin strips them itself.
 	if got := sanitizeSegment("Album.  "); got != "Album" {
@@ -63,6 +66,7 @@ func TestSanitizeSegmentTrailingDotsAndSpaces(t *testing.T) {
 }
 
 func TestSanitizeSegmentNFC(t *testing.T) {
+	t.Parallel()
 	// A decomposed "é" (e + combining acute) must compose to the single NFC code
 	// point so it cannot collide with a precomposed twin on a byte-preserving FS.
 	decomposed := "Caf" + "é"
@@ -76,6 +80,7 @@ func TestSanitizeSegmentNFC(t *testing.T) {
 }
 
 func TestCapSegmentBytesKeepsExtension(t *testing.T) {
+	t.Parallel()
 	long := strings.Repeat("a", 400) + ".flac"
 	got := sanitizeSegment(long)
 	if len(got) > maxSegmentBytes {
@@ -87,6 +92,7 @@ func TestCapSegmentBytesKeepsExtension(t *testing.T) {
 }
 
 func TestTruncateUTF8RuneBoundary(t *testing.T) {
+	t.Parallel()
 	// A 3-byte rune repeated; cutting at a non-multiple of 3 must back up to a
 	// boundary rather than emit a partial sequence.
 	s := strings.Repeat("世", 200) // 600 bytes
@@ -100,6 +106,7 @@ func TestTruncateUTF8RuneBoundary(t *testing.T) {
 }
 
 func TestFoldFieldPreservesEmpty(t *testing.T) {
+	t.Parallel()
 	// foldField must return "" for empty input (so optional groups drop), unlike
 	// sanitizeSegment which returns "_".
 	if got := foldField(""); got != "" {

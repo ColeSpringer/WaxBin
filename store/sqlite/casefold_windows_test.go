@@ -16,6 +16,7 @@ import (
 // folders' spellings: a crash before the rename rolls the move back, a crash after it
 // finishes the move.
 func TestRecoverOrganizeFinishesACaseOnlyRename(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	dir := t.TempDir()
 	db := filepath.Join(t.TempDir(), "c.db")
@@ -73,6 +74,7 @@ func TestRecoverOrganizeFinishesACaseOnlyRename(t *testing.T) {
 // case-insensitive filesystem still resolves under its old spelling, and relinks to the new
 // one as a move rather than landing as a copy, since the folders no longer list the old.
 func TestScanRelinksAnExternalCaseOnlyRename(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	dir := t.TempDir()
 	st, lib := openRootedStore(t, dir, filepath.Join(t.TempDir(), "c.db"), "owner")

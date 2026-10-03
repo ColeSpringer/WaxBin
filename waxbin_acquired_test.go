@@ -40,6 +40,7 @@ func openMediaTyped(t *testing.T, ctx context.Context, db, musicRoot, bookRoot, 
 // music-typed root and a book to the audiobook-typed root, records source
 // provenance, and surfaces it on the read side.
 func TestImportAcquiredRoutesByKind(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	musicRoot := t.TempDir()
 	bookRoot := t.TempDir()
@@ -126,6 +127,7 @@ func TestImportAcquiredRoutesByKind(t *testing.T) {
 // whose kind cannot route to a single managed root (two music roots), rather than
 // silently placing it in the first one.
 func TestImportAmbiguousRouteQuarantines(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	music1 := t.TempDir()
 	music2 := t.TempDir()
@@ -159,6 +161,7 @@ func TestImportAmbiguousRouteQuarantines(t *testing.T) {
 // TestImportAcquiredEpisode verifies an acquired episode is ingested into the
 // internal podcast library under a manual show, pinned and downloaded.
 func TestImportAcquiredEpisode(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	musicRoot := t.TempDir()
 	bookRoot := t.TempDir()
@@ -219,6 +222,7 @@ func tagAcquisition(t *testing.T, path, url, id string) {
 // a mis-tagged rip reads as acquired from wherever its SOURCE_URL pointed, and this is
 // the verb that says otherwise.
 func TestSetAcquisitionCorrectsAWrongOrigin(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -278,6 +282,7 @@ func TestSetAcquisitionCorrectsAWrongOrigin(t *testing.T) {
 // TestClearAcquisitionHoldsAcrossARescan is the durability case. Before the default
 // lock, the file's own tags put the wrong origin straight back on the next full scan.
 func TestClearAcquisitionHoldsAcrossARescan(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -310,6 +315,7 @@ func TestClearAcquisitionHoldsAcrossARescan(t *testing.T) {
 // catalog agreeing to ignore evidence still sitting in the file; this removes the
 // evidence, so the origin stays gone with no lock holding it.
 func TestClearAcquisitionWriteBackStripsTheTags(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -352,6 +358,7 @@ func TestClearAcquisitionWriteBackStripsTheTags(t *testing.T) {
 // TestSetAcquisitionWriteBackWritesTheTags: the correction goes onto disk too, so an
 // export, a copy or a rebuild carries the right origin rather than the wrong one.
 func TestSetAcquisitionWriteBackWritesTheTags(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -398,6 +405,7 @@ func TestSetAcquisitionWriteBackWritesTheTags(t *testing.T) {
 // case that matters most, since its acquisition row is the only thing overriding the
 // show's source type.
 func TestImportAcquiredRespectsACuratedOrigin(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	acq := t.TempDir()
 	podDir := t.TempDir()
@@ -454,6 +462,7 @@ func TestImportAcquiredRespectsACuratedOrigin(t *testing.T) {
 // confidence that then outlives the catalog. The same rule insertAcquisitionIfAbsentTx
 // refuses file mtime for.
 func TestSetAcquisitionWriteBackWithholdsAMintedStamp(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -514,6 +523,7 @@ func TestSetAcquisitionWriteBackWithholdsAMintedStamp(t *testing.T) {
 // file, so a tag write would be undone by the next download. The refusal is a
 // WriteBackError, so the CLI surfaces it as a warning while the catalog change stands.
 func TestAcquisitionWriteBackRefusesAnEpisode(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	acq := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -548,6 +558,7 @@ func TestAcquisitionWriteBackRefusesAnEpisode(t *testing.T) {
 // the key its parts group by, so neither its destination nor its catalog row takes a sort
 // tag in their place.
 func TestForcedBookTakesNoDisplayFallback(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	musicRoot, bookRoot, acq := t.TempDir(), t.TempDir(), t.TempDir()
 	lib := openMediaTyped(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), musicRoot, bookRoot, t.TempDir())
@@ -588,6 +599,7 @@ func TestForcedBookTakesNoDisplayFallback(t *testing.T) {
 // display fallbacks the scan at that destination catalogs it with, so the file lands
 // where organize would put it.
 func TestImportedTrackLandsUnderItsFallbackNames(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	musicRoot, acq := t.TempDir(), t.TempDir()
 	lib := openMediaTyped(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), musicRoot, t.TempDir(), t.TempDir())
@@ -636,6 +648,7 @@ func TestImportedTrackLandsUnderItsFallbackNames(t *testing.T) {
 // inside the staged tree or is the folder an import was handed, one disc of an album
 // imported on its own.
 func TestImportedTrackTakesItsDiscFolder(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	for _, tc := range []struct {
 		name    string
@@ -671,6 +684,7 @@ func TestImportedTrackTakesItsDiscFolder(t *testing.T) {
 // applied both look new, and the second apply finds the first's file and skips its own
 // as a duplicate.
 func TestDupSkipImportsRaceToOne(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), root)
@@ -701,6 +715,7 @@ func TestDupSkipImportsRaceToOne(t *testing.T) {
 // the scan does, so a file tagged with an audiobook genre routes to the audiobook root as
 // a book, and a plain file imported into a lone audiobook library is a book there.
 func TestImportClassifiesASpokenWordGenreAsABook(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	musicRoot, bookRoot, staging := t.TempDir(), t.TempDir(), t.TempDir()
 	lib := openMediaTyped(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), musicRoot, bookRoot, t.TempDir())
@@ -782,6 +797,7 @@ func kindRow(t *testing.T, ctx context.Context, lib *waxbin.Library, pid model.P
 // it is one carries a kind lock, so a forced rescan keeps it a book with its pid, play
 // state and acquisition row.
 func TestImportedBookKeepsItsKindAcrossScans(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	lib, pid, _ := importPlainAsBook(t, ctx)
 	if row := kindRow(t, ctx, lib, pid); row == nil || !row.Locked || row.Source != model.SourceUser {
@@ -815,6 +831,7 @@ func TestImportedBookKeepsItsKindAcrossScans(t *testing.T) {
 // again, so the imported file is a track, the same item turned into one in place, and its
 // stale kind lock goes.
 func TestIgnoreLocksRederivesAnImportedKind(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	lib, pid, path := importPlainAsBook(t, ctx)
 	if _, err := lib.Scan(ctx, waxbin.ScanRequest{Force: true, IgnoreLocks: true}); err != nil {
@@ -835,6 +852,7 @@ func TestIgnoreLocksRederivesAnImportedKind(t *testing.T) {
 // TestRestoreKeepsALockedKind: a trashed kind-locked book comes back from the trash as
 // the same book, rather than as a new track its tags would make.
 func TestRestoreKeepsALockedKind(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	lib, pid, _ := importPlainAsBook(t, ctx)
 	plan, err := lib.PlanDeletePIDs(ctx, []model.PID{pid}, model.DeleteTrash)
@@ -862,6 +880,7 @@ func TestRestoreKeepsALockedKind(t *testing.T) {
 
 // TestLockKindField: kind locks and unlocks like any lock-only field, on a track or a book.
 func TestLockKindField(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), root)
@@ -892,6 +911,7 @@ func TestLockKindField(t *testing.T) {
 // TestMovedFileKeepsItsLockedKind: a kind-locked file moved within its library is found
 // by its audio before its new path has a row, so it keeps its kind and its item.
 func TestMovedFileKeepsItsLockedKind(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	lib, pid, path := importPlainAsBook(t, ctx)
 	moved := filepath.Join(filepath.Dir(filepath.Dir(path)), "Moved", filepath.Base(path))
@@ -913,6 +933,7 @@ func TestMovedFileKeepsItsLockedKind(t *testing.T) {
 // TestUnlockedKindLeavesNoRow: unlocking an imported book's kind drops its row, since the
 // next scan derives the kind again and a row would name a choice that no longer holds.
 func TestUnlockedKindLeavesNoRow(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	lib, pid, _ := importPlainAsBook(t, ctx)
 	if err := lib.Unlock(ctx, pid, model.KindLockField); err != nil {
@@ -927,6 +948,7 @@ func TestUnlockedKindLeavesNoRow(t *testing.T) {
 // trash by hand, at its old path or elsewhere in the library, is found through the trash
 // journal and comes back as the same book rather than a new track.
 func TestTrashedBookMovedBackByHandKeepsItsKind(t *testing.T) {
+	t.Parallel()
 	for _, elsewhere := range []bool{false, true} {
 		ctx := context.Background()
 		lib, pid, path := importPlainAsBook(t, ctx)
@@ -969,6 +991,7 @@ func TestTrashedBookMovedBackByHandKeepsItsKind(t *testing.T) {
 // with no kind lock; the same file into a mixed root is a track; and a folder import forced
 // to a kind its tags and library would not give the file pins it with a lock.
 func TestFolderImportClassifiesAgainstItsLibrary(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	plain := func(staging string, seed byte) {
 		writeFile(t, filepath.Join(staging, "chapter.mp3"), testaudio.BuildMP3FromSpec(testaudio.MP3Spec{Title: "Chapter One",

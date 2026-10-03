@@ -38,6 +38,7 @@ func itemChanges(t *testing.T, st *Store, seq int64, pid model.PID) (all, update
 // goes, the book row, its author and chapter come, and the provenance only a track's
 // fields carry goes while the genre lock stays. It emits one item update.
 func TestRekindTrackToBookKeepsTheItem(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	const path = "/lib/Tolkien/The Hobbit/01.mp3"
@@ -170,6 +171,7 @@ func TestRekindTrackToBookKeepsTheItem(t *testing.T) {
 // TestRekindBookToTrackDropsChapters: a single-file book whose file is put again as a track
 // stays the same item, and its chapters and chapters lock go with the book.
 func TestRekindBookToTrackDropsChapters(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	const path = "/lib/Tolkien/hobbit.mp3"
@@ -210,6 +212,7 @@ func TestRekindBookToTrackDropsChapters(t *testing.T) {
 // track, leaves the book rather than turning it into a track, and the book keeps its pid
 // on its remaining part.
 func TestRekindLeavesAMultiPartBook(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	book := putBook(t, st, lib.ID, bookSpec{path: "/lib/b/p1.mp3", essence: "mp1", content: "mpc1", title: "Tome",
@@ -230,6 +233,7 @@ func TestRekindLeavesAMultiPartBook(t *testing.T) {
 // re-keys only an item of the put's kind, so a book part read as a track under a new
 // essence leaves the book's key alone.
 func TestPreserveIdentityKeepsAnotherKind(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	book := putBook(t, st, lib.ID, bookSpec{path: "/lib/b/p1.mp3", essence: "pk1", content: "pkc1", title: "Tome",
 		author: "Auth", position: 1})
@@ -246,6 +250,7 @@ func TestPreserveIdentityKeepsAnotherKind(t *testing.T) {
 // lock pins alone, as with a lock set between a scan's read and its write, and the scan
 // reads the file again; a forced put re-kinds it.
 func TestRekindHoldsBackForAKindLock(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	const path = "/lib/Tolkien/hobbit.mp3"
@@ -275,6 +280,7 @@ func TestRekindHoldsBackForAKindLock(t *testing.T) {
 // as the alternate of its one part, at the part's position, and that encoding read again
 // as the book stays the alternate rather than becoming a second part.
 func TestRekindPutsAlternatesAtThePart(t *testing.T) {
+	t.Parallel()
 	st, _ := entityFixture(t)
 	ctx := context.Background()
 	lib, file := diskLibrary(t, st)

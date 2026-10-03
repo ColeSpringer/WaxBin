@@ -14,6 +14,7 @@ import (
 // this: it writes all three, reads them back through the adapter, then clears them and
 // confirms the frames are gone rather than left holding an empty string.
 func TestAcquisitionTagsRoundTripAndClear(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	const rate = 44100
 	sig := testaudio.ReferenceSignal(rate, 1200*time.Millisecond)

@@ -13,6 +13,7 @@ import (
 )
 
 func TestSearchGroupsAndMatches(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/1.flac", essence: "e1", content: "c1", title: "Paranoid Android", artist: "Radiohead", album: "OK Computer", albumArt: "Radiohead"})
@@ -42,6 +43,7 @@ func TestSearchGroupsAndMatches(t *testing.T) {
 // title contains the term ranks above one that only matches via an artist/album
 // column.
 func TestSearchTitleOutranksArtist(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	// One fixture has "Mercury" as the title.
@@ -68,6 +70,7 @@ func TestSearchTitleOutranksArtist(t *testing.T) {
 }
 
 func TestSearchEmptyAndPunctuationQuery(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/1.flac", essence: "e1", content: "c1", title: "Hello", artist: "X", album: "Al"})
@@ -89,6 +92,7 @@ func TestSearchEmptyAndPunctuationQuery(t *testing.T) {
 }
 
 func TestFTSMatchQuery(t *testing.T) {
+	t.Parallel()
 	cases := map[string]string{
 		"Beatles":     "beatles*",
 		"AC/DC":       "ac* dc*",
@@ -108,6 +112,7 @@ func TestFTSMatchQuery(t *testing.T) {
 // the search ran before the candidate-cap/scope options existed, so the default
 // path stays byte-identical (same plan, same behavior) as the builder evolves.
 func TestSearchStmtZeroPathGolden(t *testing.T) {
+	t.Parallel()
 	want := `SELECT pi.pid, pi.kind, pi.title,
 		COALESCE(NULLIF(t.artist,''), bk.author, pod.title, ''), COALESCE(t.album_artist,''),
 		COALESCE(t.album,''), COALESCE(art.pid,''), COALESCE(al.pid,''), ` + searchBM25 + ` AS score
@@ -139,6 +144,7 @@ func TestSearchStmtZeroPathGolden(t *testing.T) {
 // under a cap smaller than the match count, because the pool keeps the newest
 // rows, and Truncated reports the pruning.
 func TestSearchCandidateCapPrunesOldest(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	// Oldest row: the only TITLE match for "nebula" (would rank first).
@@ -180,6 +186,7 @@ func TestSearchCandidateCapPrunesOldest(t *testing.T) {
 // TestSearchCapAboveMatchCountIsExact verifies a cap at or above the match count
 // changes nothing: same groups as uncapped, no truncation.
 func TestSearchCapAboveMatchCountIsExact(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/1.flac", essence: "e1", content: "c1",
@@ -216,6 +223,7 @@ func TestSearchCapAboveMatchCountIsExact(t *testing.T) {
 // from the given libraries and that an unknown library pid errors instead of
 // silently narrowing.
 func TestSearchLibraryScope(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	lib2, err := st.EnsureLibrary(ctx, &model.Library{
@@ -303,6 +311,7 @@ func transcriptFixture(t *testing.T) (*Store, *model.Library, model.PID, model.P
 // transcript rung: a transcript hit for an undownloaded episode (no file, so no
 // library) drops out of a scoped search but still surfaces unscoped.
 func TestSearchScopeCoversTranscripts(t *testing.T) {
+	t.Parallel()
 	st, lib, downloaded, _ := transcriptFixture(t)
 	ctx := context.Background()
 
@@ -336,6 +345,7 @@ func TestSearchScopeCoversTranscripts(t *testing.T) {
 // pool: newer out-of-scope matches must not consume the cap and starve an older
 // in-scope match.
 func TestSearchCapAndScopeCombined(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	lib2, err := st.EnsureLibrary(ctx, &model.Library{
@@ -372,6 +382,7 @@ func TestSearchCapAndScopeCombined(t *testing.T) {
 // makes States: [archived] work at all), each single state selects its own item, two
 // states select both, and an unknown state errors instead of narrowing to nothing.
 func TestSearchStateNarrowing(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	live := putTrack(t, st, lib.ID, trackSpec{path: "/lib/a.flac", essence: "e1", content: "c1",
@@ -428,6 +439,7 @@ func TestSearchStateNarrowing(t *testing.T) {
 // missing item keeps its file row and its item_file edges, so a library scope still
 // admits it and only States can remove it.
 func TestSearchStateAndScopeCompose(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	live := putTrack(t, st, lib.ID, trackSpec{path: "/lib/a.flac", essence: "e1", content: "c1",
@@ -467,6 +479,7 @@ func TestSearchStateAndScopeCompose(t *testing.T) {
 // candidate pool, so newer excluded matches cannot consume the cap and starve an
 // older included one. A predicate applied outside the pool returns nothing here.
 func TestSearchCapAndStatesCombined(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	// Oldest match is the only one left present; four newer matches get archived.
@@ -499,6 +512,7 @@ func TestSearchCapAndStatesCombined(t *testing.T) {
 // state narrowing, including the case no library scope can express: States [remote]
 // searches the unfetched backlog.
 func TestSearchStatesCoverTranscripts(t *testing.T) {
+	t.Parallel()
 	st, _, downloaded, remote := transcriptFixture(t)
 	ctx := context.Background()
 
@@ -541,6 +555,7 @@ func TestSearchStatesCoverTranscripts(t *testing.T) {
 // combination behaviourally. limit and maxCandidates are chosen so the inner (601)
 // and outer (501) limits differ and a swap is visible.
 func TestSearchStmtNarrowArgOrder(t *testing.T) {
+	t.Parallel()
 	const (
 		limit = 20
 		maxC  = 600
@@ -589,6 +604,7 @@ func TestSearchStmtNarrowArgOrder(t *testing.T) {
 // temp b-tree of its own, in every shape including the pre-option one, which is why
 // the assertion is scoped to the co-routine rather than the whole plan.
 func TestSearchNarrowPlan(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/a.flac", essence: "e1", content: "c1",
 		title: "Harbor Lights", artist: "A", album: "Alp"})

@@ -12,6 +12,7 @@ import (
 )
 
 func TestParseBytes(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		in   string
 		want int64
@@ -40,6 +41,7 @@ func TestParseBytes(t *testing.T) {
 }
 
 func TestParseBytesRejects(t *testing.T) {
+	t.Parallel()
 	// A negative budget has no meaning, and an unrecognized unit must not fall back
 	// to reading the digits as bytes: 200TB silently becoming 200 would prune a cache
 	// the operator meant to leave alone.
@@ -53,6 +55,7 @@ func TestParseBytesRejects(t *testing.T) {
 }
 
 func TestByteLabel(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		in   int64
 		want string
@@ -71,7 +74,8 @@ func TestByteLabel(t *testing.T) {
 
 // westOfUTC moves the process zone west of UTC for one test, so an instant just past
 // midnight UTC renders a day earlier in local time. Without it a report that formats
-// in local time passes everywhere the developer happens to sit in UTC.
+// in local time passes everywhere the developer happens to sit in UTC. The zone is
+// process-wide, so a test that calls it stays out of the parallel set.
 func westOfUTC(t *testing.T) {
 	t.Helper()
 	saved := time.Local
@@ -117,6 +121,7 @@ func TestPrintThumbReportShowsEveryRung(t *testing.T) {
 // date beside it is UTC while "today" would be a local-calendar claim, and the two
 // disagree for anything generated after the reader's local midnight.
 func TestAgoLabelUnderADay(t *testing.T) {
+	t.Parallel()
 	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
 	if got := agoLabel(now, now.Add(-3*time.Hour)); got != "under a day ago" {
 		t.Errorf("agoLabel 3h back = %q, want %q", got, "under a day ago")
@@ -129,6 +134,7 @@ func TestAgoLabelUnderADay(t *testing.T) {
 // TestPrintThumbReportOnAnEmptyCacheSaysSo pins that an empty cache reads as empty
 // rather than as a table of zeroes with an epoch timestamp under it.
 func TestPrintThumbReportOnAnEmptyCacheSaysSo(t *testing.T) {
+	t.Parallel()
 	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
 	var buf bytes.Buffer
 	printThumbReport(&buf, &model.ThumbCacheReport{ArtSources: 700, ArtSourceBytes: 1_100_000_000}, now)
@@ -143,6 +149,7 @@ func TestPrintThumbReportOnAnEmptyCacheSaysSo(t *testing.T) {
 }
 
 func TestThumbCacheViewJSON(t *testing.T) {
+	t.Parallel()
 	rep := &model.ThumbCacheReport{
 		Rows: 2, Bytes: 900, Sources: 1, ArtSources: 1, ArtSourceBytes: 4096,
 		OldestAt: 1784777333683766021, NewestAt: 1784777333683766022,

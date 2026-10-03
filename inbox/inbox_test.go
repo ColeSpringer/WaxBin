@@ -88,6 +88,7 @@ func wantPlanned(t *testing.T, got, want map[string]string) {
 // folder, the way organize names them, whether a folder is imported at once or a host
 // imports one file at a time.
 func TestBookPartsAreNumbered(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	staging := t.TempDir()
 	for i, name := range []string{"one.mp3", "two.mp3"} {
@@ -116,6 +117,7 @@ func TestBookPartsAreNumbered(t *testing.T) {
 // TestBookDiscsAreNumbered: a book on several discs leads each part's number with its
 // disc, whether the tags or a disc folder give it.
 func TestBookDiscsAreNumbered(t *testing.T) {
+	t.Parallel()
 	staging := t.TempDir()
 	seed := byte(1)
 	for disc := 1; disc <= 2; disc++ {
@@ -156,6 +158,7 @@ func TestBookDiscsAreNumbered(t *testing.T) {
 // TestUnnumberedBookPartsTakeReadingOrder: parts whose tags give no place are numbered in
 // the order the scan reads them, and a part that names its place in its title keeps it.
 func TestUnnumberedBookPartsTakeReadingOrder(t *testing.T) {
+	t.Parallel()
 	staging := t.TempDir()
 	for i, name := range []string{"c.mp3", "a.mp3", "b.mp3"} {
 		stage(t, filepath.Join(staging, "Third", name), testaudio.MP3Spec{Title: "Untitled Stretch", Artist: "Author",
@@ -193,6 +196,7 @@ func TestUnnumberedBookPartsTakeReadingOrder(t *testing.T) {
 // writes on a single-file book, so it keeps the book's own name; a lone part past the
 // first is numbered.
 func TestLoneBookPartKeepsTheBareName(t *testing.T) {
+	t.Parallel()
 	staging := t.TempDir()
 	stage(t, filepath.Join(staging, "lone.mp3"), testaudio.MP3Spec{Title: "Whole", Artist: "Author", Album: "Lone Book",
 		Track: 1, Audio: testaudio.AudioWithSeed(1)})
@@ -214,6 +218,7 @@ func TestLoneBookPartKeepsTheBareName(t *testing.T) {
 // the strongest book signal, which lands first so the catalog makes it the book's primary
 // file, the one whose tags organize renders the folder from.
 func TestBookPartsLandUnderOneLayout(t *testing.T) {
+	t.Parallel()
 	staging := t.TempDir()
 	for i := 1; i <= 3; i++ {
 		spec := testaudio.MP3Spec{Title: "Chapter", Artist: "Author", Album: "Tome", Track: i, TrackTotal: 3,
@@ -240,6 +245,7 @@ func TestBookPartsLandUnderOneLayout(t *testing.T) {
 // TestBookPartsPadToTheirTaggedTotal: parts numbered by their tags pad to the total the
 // tags give, as a host importing them one at a time names them.
 func TestBookPartsPadToTheirTaggedTotal(t *testing.T) {
+	t.Parallel()
 	staging := t.TempDir()
 	for i := 1; i <= 2; i++ {
 		stage(t, filepath.Join(staging, "Long", "0"+string(rune('0'+i))+".mp3"), testaudio.MP3Spec{Title: "Chapter",
@@ -257,6 +263,7 @@ func TestBookPartsPadToTheirTaggedTotal(t *testing.T) {
 // TestStagedCopyOfAPartIsNoPartOfItsOwn: a second staged copy of a part's audio is a
 // duplicate and takes no number, so the book's parts keep theirs.
 func TestStagedCopyOfAPartIsNoPartOfItsOwn(t *testing.T) {
+	t.Parallel()
 	staging := t.TempDir()
 	one := testaudio.MP3Spec{Title: "Chapter", Artist: "Author", Album: "Tome", Track: 1, TrackTotal: 2, Audio: testaudio.AudioWithSeed(1)}
 	stage(t, filepath.Join(staging, "Tome", "a.mp3"), one)
@@ -286,6 +293,7 @@ func TestStagedCopyOfAPartIsNoPartOfItsOwn(t *testing.T) {
 // TestImportedBookTitleDropsTheAbridgedMarker: a book renders under the title the scan
 // gives it, without a trailing "(Unabridged)".
 func TestImportedBookTitleDropsTheAbridgedMarker(t *testing.T) {
+	t.Parallel()
 	staging := t.TempDir()
 	stage(t, filepath.Join(staging, "tome.mp3"), testaudio.MP3Spec{Title: "Chapter", Artist: "Author",
 		Album: "Tome (Unabridged)", Audio: testaudio.AudioWithSeed(1)})
@@ -303,6 +311,7 @@ func TestImportedBookTitleDropsTheAbridgedMarker(t *testing.T) {
 // does another encoding in the same container; a long title gives way to keep the names
 // apart and within the limit.
 func TestStagedCopiesOfAPartAreItsAlternates(t *testing.T) {
+	t.Parallel()
 	const rate = 22050
 	samples := testaudio.RichSignal(rate, 2, testaudio.MusicalPartials, 31)
 	staging := t.TempDir()
@@ -355,6 +364,7 @@ func TestStagedCopiesOfAPartAreItsAlternates(t *testing.T) {
 // TestBookHeldWhenAPartCannotLand: a book whose own part cannot land stays where it is
 // whole, while a staged copy of a part that is a duplicate holds nothing.
 func TestBookHeldWhenAPartCannotLand(t *testing.T) {
+	t.Parallel()
 	staging := t.TempDir()
 	for i := 1; i <= 3; i++ {
 		stage(t, filepath.Join(staging, "Dune", "0"+string(rune('0'+i))+".mp3"), testaudio.MP3Spec{Artist: "Author",
@@ -393,6 +403,7 @@ func TestBookHeldWhenAPartCannotLand(t *testing.T) {
 // a joined file or a copy of a part that will not land holds nothing, nor does another
 // book's part.
 func TestHoldBooks(t *testing.T) {
+	t.Parallel()
 	act := func(src, book string, outcome inbox.Outcome, joined, alternate bool) inbox.Action {
 		return inbox.Action{Src: src, Book: book, Outcome: outcome, Joined: joined, Alternate: alternate, RelDst: src}
 	}

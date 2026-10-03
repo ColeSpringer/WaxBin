@@ -50,6 +50,7 @@ func albumArtHash(t *testing.T, dbPath, role string) string {
 // It also pins the request shape WaxDeck asked for: both printed identifiers ride the
 // release-rung art request beside the mbid.
 func TestAlbumArtBackfillFillsAPicardTaggedAlbum(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedAlbumTrack(t, st, lib.ID, "ess-a", model.Track{
@@ -103,6 +104,7 @@ func TestAlbumArtBackfillFillsAPicardTaggedAlbum(t *testing.T) {
 // with no identifier can only be answered with the wrong edition's picture. It is left
 // out of the walk entirely rather than asked and marked, which would record noise.
 func TestAlbumArtSkipsATitleOnlyAlbum(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
@@ -129,6 +131,7 @@ func TestAlbumArtSkipsATitleOnlyAlbum(t *testing.T) {
 // the column can hold something no provider will accept. The printed identifiers carry
 // the ask instead of the whole request failing on a bad id.
 func TestAlbumArtBlanksANonUUIDReleaseMBID(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedAlbumTrack(t, st, lib.ID, "ess-a", model.Track{
@@ -159,6 +162,7 @@ func TestAlbumArtBlanksANonUUIDReleaseMBID(t *testing.T) {
 // answers the album's front, so the ask is redirected to the empty auxiliary slots rather
 // than cancelled, and it goes to the providers that claim those roles.
 func TestAlbumArtAsksUnderCapAuxArtBesideASettledFront(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedAlbumTrackWithCover(t, st, lib.ID, "ess-a", model.Track{
@@ -209,6 +213,7 @@ func TestAlbumArtAsksUnderCapAuxArtBesideASettledFront(t *testing.T) {
 // behind them. This rung IS the backfill and its marker is durable, so an auxiliary
 // provider ordered after the cover winner would never be asked, once, ever.
 func TestAlbumArtAsksTheAuxProviderBehindTheCoverWinner(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedAlbumTrack(t, st, lib.ID, "ess-a", model.Track{
@@ -259,6 +264,7 @@ func TestAlbumArtAsksTheAuxProviderBehindTheCoverWinner(t *testing.T) {
 // archive had no cover for last month is asked again this month, and asked with the
 // cache bypass a forced run uses.
 func TestAlbumArtRetriesAnExpiredMiss(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedAlbumTrack(t, st, lib.ID, "ess-a", model.Track{
@@ -313,6 +319,7 @@ func TestAlbumArtRetriesAnExpiredMiss(t *testing.T) {
 // TestAlbumArtScopedToOneAlbum: --entity album:<pid> resolves to the album itself as well
 // as to its release group, so the art rung is reachable by name from the CLI.
 func TestAlbumArtScopedToOneAlbum(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedAlbumTrack(t, st, lib.ID, "ess-a", model.Track{
@@ -352,6 +359,7 @@ func TestAlbumArtScopedToOneAlbum(t *testing.T) {
 // answered nil, and marked a miss every retry window. An album with no front is still
 // walked, since the archive declares the release rung.
 func TestAlbumArtAuxHalfNeedsAReleaseRungProvider(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	var releaseAsks int
 	fanart := &enrich.Mock{ProviderName: "fanart", Caps: enrich.CapAuxArt | enrich.CapArtistArt,
@@ -405,6 +413,7 @@ func TestAlbumArtAuxHalfNeedsAReleaseRungProvider(t *testing.T) {
 // identified album without one is neither walked nor marked. That provider does serve
 // the group-art backfill.
 func TestAlbumArtFrontHalfNeedsAReleaseRungProvider(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedAlbumTrack(t, st, lib.ID, "ess-a", model.Track{
@@ -448,6 +457,7 @@ func TestAlbumArtFrontHalfNeedsAReleaseRungProvider(t *testing.T) {
 // nothing a later pass could fill, so the album settles instead of being owed a lookup no
 // queue would ever select again.
 func TestAlbumArtOwesNothingForAuxiliaryRolesNobodyServes(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedAlbumTrack(t, st, lib.ID, "ess-a", model.Track{
@@ -486,6 +496,7 @@ func TestAlbumArtOwesNothingForAuxiliaryRolesNobodyServes(t *testing.T) {
 // miss, so the album is asked again on the next pass rather than waiting a retry window
 // for a cover the archive has.
 func TestAlbumArtFailureLeavesTheAlbumQueued(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedAlbumTrack(t, st, lib.ID, "ess-a", model.Track{
@@ -539,6 +550,7 @@ func TestAlbumArtFailureLeavesTheAlbumQueued(t *testing.T) {
 // maintenance page as much as a darkened item, so it leaves the lookup owed, which costs
 // a darkened item one more request and keeps an outage from settling a night's albums.
 func TestArchiveAnswersOnlyForAMissingOrOversizedCover(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	cases := []struct {
 		name  string
@@ -606,6 +618,7 @@ func countedReleaseArt(name string, c enrich.Capability, asks *int, answer func(
 // even though an auxiliary role landed in the same walk, so the retry window asks about
 // the front again, and only the front.
 func TestAlbumArtRetriesAFrontMissedBesideAnAuxMatch(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedAlbumTrack(t, st, lib.ID, "ess-a", model.Track{
@@ -652,6 +665,7 @@ func TestAlbumArtRetriesAFrontMissedBesideAnAuxMatch(t *testing.T) {
 // the front and asks nothing about the rest, so a provider serving them that joins later
 // reaches the album on the next pass with no forced run, and the front stays as it was.
 func TestAlbumArtAuxFillsSettledFront(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedAlbumTrack(t, st, lib.ID, "ess-a", model.Track{
@@ -692,6 +706,7 @@ func TestAlbumArtAuxFillsSettledFront(t *testing.T) {
 // that supplied the front and the auxiliary half's the one that supplied the back, where
 // both used to name whoever answered first.
 func TestAlbumArtHalvesCreditTheirOwnProviders(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedAlbumTrack(t, st, lib.ID, "ess-a", model.Track{

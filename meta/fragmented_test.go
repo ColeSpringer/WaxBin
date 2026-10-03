@@ -14,6 +14,7 @@ import (
 // was rejected as an unsupported format and cataloged with a filename title),
 // and a tag write is refused as a capability the file lacks, not a bad request.
 func TestFragmentedMP4ReadableButUnwritable(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	rate := 44100
 	sig := testaudio.ReferenceSignal(rate, time.Second/2)

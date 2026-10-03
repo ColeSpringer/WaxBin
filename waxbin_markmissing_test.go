@@ -29,6 +29,7 @@ func stateOf(t *testing.T, ctx context.Context, lib *waxbin.Library, pid model.P
 // the store's state rule: a file that is really on disk is reported back instead of
 // recorded, a deleted file marks, and a repeat is idempotent.
 func TestMarkMissingVerifiesBeforeWriting(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -86,6 +87,7 @@ func TestMarkMissingVerifiesBeforeWriting(t *testing.T) {
 // deletion, and a gate on each file's parent directory would refuse exactly that,
 // teaching callers to reach for Force and skip every guard.
 func TestMarkMissingAdmitsDeletedFolder(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -117,6 +119,7 @@ func TestMarkMissingAdmitsDeletedFolder(t *testing.T) {
 // the library root gone the files' absence proves nothing, so the call is refused
 // rather than recording a whole library as deleted. Force is the override.
 func TestMarkMissingRefusesUnreachableRoot(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := filepath.Join(t.TempDir(), "mount")
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -155,6 +158,7 @@ func TestMarkMissingRefusesUnreachableRoot(t *testing.T) {
 // one is genuinely deleted and the other's storage is unreadable. The answer is a
 // refusal rather than a decision made from the half of the book it could see.
 func TestMarkMissingMultiFileBookRefusesPartialView(t *testing.T) {
+	t.Parallel()
 	if os.Geteuid() == 0 {
 		t.Skip("root ignores directory permissions, so the unreadable part cannot be staged")
 	}

@@ -8,6 +8,7 @@ import (
 )
 
 func TestActiveTrashForItemsGroupsByItem(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 
@@ -45,6 +46,7 @@ func TestActiveTrashForItemsGroupsByItem(t *testing.T) {
 // TestActiveTrashForItemsMultiPartBook is the case a boolean cannot answer: the
 // caller needs both trash pids to restore a partly-trashed book.
 func TestActiveTrashForItemsMultiPartBook(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 
@@ -89,6 +91,7 @@ func TestActiveTrashForItemsMultiPartBook(t *testing.T) {
 // TestActiveTrashForItemsExcludesRestored pins the absent-includeRestored decision:
 // a restored entry is not restorable, so its item drops out of the map entirely.
 func TestActiveTrashForItemsExcludesRestored(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	entry := trashOneFile(t, st, lib.ID, "/lib/a.mp3", "rf1")
@@ -108,6 +111,7 @@ func TestActiveTrashForItemsExcludesRestored(t *testing.T) {
 // TestActiveTrashForItemsDedupsInput pins why uniquePIDs is not optional: a
 // repeated pid would otherwise have its entries appended twice.
 func TestActiveTrashForItemsDedupsInput(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	entry := trashOneFile(t, st, lib.ID, "/lib/a.mp3", "df1")
@@ -124,6 +128,7 @@ func TestActiveTrashForItemsDedupsInput(t *testing.T) {
 // TestActiveTrashForItemsChunkBoundary crosses the idBatchSize (500) IN-clause
 // boundary, and passes the empty pid that would match every edge-less journal row.
 func TestActiveTrashForItemsChunkBoundary(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	entry := trashOneFile(t, st, lib.ID, "/lib/a.mp3", "cf1")

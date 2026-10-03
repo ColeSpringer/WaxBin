@@ -14,6 +14,7 @@ import (
 // Speech and Spoken Word name a skit or a comedy record as often as a book, so they
 // signal nothing.
 func TestBookSignal(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name, file string
 		spec       testaudio.MP3Spec
@@ -47,6 +48,7 @@ func TestBookSignal(t *testing.T) {
 // TestLegacyGenreByteIsNoBookSignal: an ID3v1 trailer's genre byte fills the genre, but a
 // legacy container never changes a file's kind, so ID3v1's Audiobook (183) signals nothing.
 func TestLegacyGenreByteIsNoBookSignal(t *testing.T) {
+	t.Parallel()
 	raw := testaudio.AppendID3v1(testaudio.DefaultAudio(), "V1 Title", "V1 Artist", "V1 Album")
 	raw[len(raw)-1] = 183
 	fm, err := NewReader().Read(context.Background(), writeTemp(t, "v1.mp3", raw))
@@ -66,6 +68,7 @@ func TestLegacyGenreByteIsNoBookSignal(t *testing.T) {
 // (a forced kind, an audiobook library), and the promotion then fills a narrator from the
 // composer, the series from the grouping and the identifiers from their custom keys.
 func TestPromoteBookFieldsOnAnUntaggedBook(t *testing.T) {
+	t.Parallel()
 	p := writeTemp(t, "part.mp3", testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
 		Title: "Chapter One", Artist: "Author", Album: "Tome", Composer: "Reader", Label: "House",
 		TXXX: []testaudio.TXXXFrame{{Desc: "ASIN", Value: "B00TOME"}, {Desc: "SUBTITLE", Value: "A Tale"}},
@@ -109,6 +112,7 @@ func TestPromoteBookFieldsOnAnUntaggedBook(t *testing.T) {
 // TestPromoteBookFieldsTwice: a second promotion finds the custom keys the first moved and
 // keeps the fields they filled, and the promotion leaves the map the caller read alone.
 func TestPromoteBookFieldsTwice(t *testing.T) {
+	t.Parallel()
 	read := map[string][]string{"EDITION": {"Collector's"}, "SUBTITLE": {"A Tale"}, "ASIN": {"B00TOME"},
 		"ISBN": {"9780306406157"}, "MOOD": {"calm"}}
 	tags := model.Tags{Album: "Tome (Abridged)", Custom: read}

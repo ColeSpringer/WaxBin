@@ -9,6 +9,7 @@ import (
 // count always increments, the three stamps land in recorded time and never move
 // backwards, and a live play after a recorded one stamps at server-now.
 func TestMarkPlayedAsOfRecordedTime(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	item := seedItem(t, st, lib)
@@ -55,6 +56,7 @@ func TestMarkPlayedAsOfRecordedTime(t *testing.T) {
 // keeps its play time, but does not re-set the flags the user cleared. The delta
 // still fires, since the count moved.
 func TestMarkPlayedAsOfDoesNotResurrectAnUndo(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	item := seedItem(t, st, lib)
@@ -94,6 +96,7 @@ func TestMarkPlayedAsOfDoesNotResurrectAnUndo(t *testing.T) {
 // TestMarkPlayedAsOfZeroIsServerNow pins the shared sentinel: a pointer to 0 is
 // "no recorded time", not the epoch (see asOfRecorded).
 func TestMarkPlayedAsOfZeroIsServerNow(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	item := seedItem(t, st, lib)
@@ -112,6 +115,7 @@ func TestMarkPlayedAsOfZeroIsServerNow(t *testing.T) {
 // applies, the stamp lands in recorded time and never moves backwards, and a
 // live checkpoint stamps at server-now.
 func TestSetProgressAsOfRecordedTime(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	item := seedItem(t, st, lib)
@@ -148,6 +152,7 @@ func TestSetProgressAsOfRecordedTime(t *testing.T) {
 // composed at one recorded time (the CLI's --reset-count --played --as-of) land
 // the play.
 func TestMarkPlayedSameTimeAsFlagChangeApplies(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	item := seedItem(t, st, lib)
@@ -172,6 +177,7 @@ func TestMarkPlayedSameTimeAsFlagChangeApplies(t *testing.T) {
 // or checkpoint moves past it, while played_changed_at keeps the raw stamp for
 // ordering.
 func TestPlaybackRecencyClampsFutureStamp(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	item := seedItem(t, st, lib)

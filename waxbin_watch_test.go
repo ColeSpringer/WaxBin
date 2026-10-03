@@ -17,6 +17,7 @@ import (
 
 // TestWatchRefusesReadOnly confirms watch is refused on a read-only library.
 func TestWatchRefusesReadOnly(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -41,6 +42,7 @@ func TestWatchRefusesReadOnly(t *testing.T) {
 // scope, so at most one filesystem mutator runs at a time (the coordination the
 // watcher relies on).
 func TestFsMutateSharedLease(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -83,6 +85,7 @@ func TestFsMutateSharedLease(t *testing.T) {
 // a dropped file is cataloged within an interval and a deleted one is reconciled to
 // missing, then Ctrl-C (context cancel) exits with CodeCanceled.
 func TestWatchScheduledCatalogsAndReconciles(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -117,6 +120,7 @@ func TestWatchScheduledCatalogsAndReconciles(t *testing.T) {
 // TestWatchFollowsAddRoot: a root registered while the watcher runs is followed on its
 // next scheduled tick, so its files are cataloged without a restart.
 func TestWatchFollowsAddRoot(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	rootA, rootB := t.TempDir(), t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -184,6 +188,7 @@ func waitFor(t *testing.T, timeout time.Duration, cond func() bool) {
 // the scan reports changed=false, and watch mode's downstream schedulers (analyze,
 // enrich, source sync) simply stop firing on sidecar edits, with no error anywhere.
 func TestSidecarEditReportsChanged(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")

@@ -8,6 +8,7 @@ import (
 )
 
 func TestParseAsOf(t *testing.T) {
+	t.Parallel()
 	// Empty means "no recorded time": stamp at server now.
 	if got, err := parseAsOf(""); err != nil || got != nil {
 		t.Errorf("parseAsOf(\"\") = (%v, %v), want (nil, nil)", got, err)

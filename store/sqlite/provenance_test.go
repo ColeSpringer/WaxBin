@@ -19,6 +19,7 @@ func itemPID(t *testing.T, st *Store) model.PID {
 }
 
 func TestLockUnlockKeepsProvenanceSparse(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{
@@ -54,6 +55,7 @@ func TestLockUnlockKeepsProvenanceSparse(t *testing.T) {
 // TestRedundantLockUnlockSilent verifies a no-op lock/unlock emits no change
 // delta (unlocking a never-locked field nets to zero and must stay silent).
 func TestRedundantLockUnlockSilent(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/a/1.flac", essence: "e1", content: "c1", title: "S", artist: "X", album: "Al"})
@@ -84,6 +86,7 @@ func TestRedundantLockUnlockSilent(t *testing.T) {
 }
 
 func TestLockRejectsUnknownField(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/a/1.flac", essence: "e1", content: "c1", title: "S", artist: "X", album: "A"})
 	err := st.LockField(context.Background(), itemPID(t, st), "definitely_not_a_field")
@@ -93,6 +96,7 @@ func TestLockRejectsUnknownField(t *testing.T) {
 }
 
 func TestSetFieldProvenanceRespectsLock(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/a/1.flac", essence: "e1", content: "c1", title: "S", artist: "X", album: "A"})
@@ -134,6 +138,7 @@ func TestSetFieldProvenanceRespectsLock(t *testing.T) {
 // TestProvenanceUnknownItem verifies a bogus item pid is reported as NotFound,
 // not silently rendered as a clean tag-sourced item.
 func TestProvenanceUnknownItem(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/a/1.flac", essence: "e1", content: "c1", title: "S", artist: "X", album: "Al"})
 	if _, err := st.FieldProvenance(context.Background(), "01J0NONEXISTENT0000000000"); !waxerr.Is(err, waxerr.CodeNotFound) {
@@ -146,6 +151,7 @@ func TestProvenanceUnknownItem(t *testing.T) {
 }
 
 func TestProvenanceCascadesWithItem(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	// Re-key the file's essence so the prior item is orphaned and deleted; its
@@ -166,6 +172,7 @@ func TestProvenanceCascadesWithItem(t *testing.T) {
 // provider left over from a previous source does not survive a write that names a
 // different one. Only the lock is preserved.
 func TestSetFieldProvenanceReattributesWholly(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/a/1.flac", essence: "e1", content: "c1", title: "S", artist: "X", album: "A"})

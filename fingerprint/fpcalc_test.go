@@ -31,6 +31,7 @@ const decodeNote = "ERROR: Error decoding audio frame (Invalid data found when p
 // 120 seconds (948 x 1365/11025 s plus Chromaprint's 2.6 s of context), 221 the first 30,
 // and 300 only about 40.
 func TestChromaprintRawDetailKeepsACoveringPartialRead(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	for _, c := range []struct {
 		name     string
@@ -82,6 +83,7 @@ func TestChromaprintRawDetailKeepsACoveringPartialRead(t *testing.T) {
 // value count in its header, so a partial read is judged the same way, against fpcalc's
 // own 120-second default when no length is passed.
 func TestChromaprintCompressedDetailKeepsACoveringPartialRead(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	compressed := func(n int) string {
 		return base64.RawURLEncoding.EncodeToString([]byte{1, byte(n >> 16), byte(n >> 8), byte(n), 0x5a, 0xc3})
@@ -98,6 +100,7 @@ func TestChromaprintCompressedDetailKeepsACoveringPartialRead(t *testing.T) {
 }
 
 func TestDecodeRawFingerprint(t *testing.T) {
+	t.Parallel()
 	// fpcalc -raw -json prints signed decimals; a value beyond int32 range must keep
 	// its low 32 bits rather than overflow.
 	raw := json.RawMessage(`[0, 1, -1, 2147483648, 4294967295]`)
@@ -117,6 +120,7 @@ func TestDecodeRawFingerprint(t *testing.T) {
 }
 
 func TestChromaprintTermsDeterministicBoundedDistinct(t *testing.T) {
+	t.Parallel()
 	sub := make([]uint32, 200)
 	for i := range sub {
 		sub[i] = uint32(i*2654435761) ^ uint32(i<<7) // spread the values
@@ -151,12 +155,14 @@ func TestChromaprintTermsDeterministicBoundedDistinct(t *testing.T) {
 }
 
 func TestChromaprintTermsTooShort(t *testing.T) {
+	t.Parallel()
 	if got := ChromaprintTerms([]uint32{42}, 64); got != nil {
 		t.Fatalf("single-value fingerprint should yield no terms, got %v", got)
 	}
 }
 
 func TestSimilarChromaprintIdenticalAndUnrelated(t *testing.T) {
+	t.Parallel()
 	a := make([]uint32, 300)
 	for i := range a {
 		a[i] = uint32(i*198491317) ^ uint32(i)
@@ -188,6 +194,7 @@ func TestSimilarChromaprintIdenticalAndUnrelated(t *testing.T) {
 const altSimilarityFloorTest = 0.7
 
 func TestSimilarByAlgoDispatch(t *testing.T) {
+	t.Parallel()
 	// A 32-bit Chromaprint-style vector compared with the pure-Go Similar would
 	// mask to 15 bits; SimilarByAlgo must route by algo so it uses the 32-bit path.
 	a := make([]uint32, 100)
@@ -208,6 +215,7 @@ func TestSimilarByAlgoDispatch(t *testing.T) {
 // frame before fpcalc names its error on the last line, so the note a kept read carries and
 // the error a refused one returns are that line, short and whole.
 func TestFpcalcNoteIsItsClosingError(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	noisy := strings.Repeat("[mp3float @ 0x5599] Header missing é\n", 20000) + decodeNote + "\n"
 	r, err := ChromaprintRawDetail(ctx, testfpcalc.Write(t, rawJSON(300.4, 948), noisy, 3), "song.mp3", MaxAnalyze, 300*time.Second)

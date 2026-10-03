@@ -13,6 +13,7 @@ import (
 // a phase-scoped force validates against, so adding a phase to one and not the other
 // fails here rather than at a user's refused --force-phase.
 func TestPhaseKeysMatchTheModelList(t *testing.T) {
+	t.Parallel()
 	p := &Mock{ProviderName: "everything",
 		Caps: CapAuxArt | CapArtistArt | CapCover | CapLyrics | CapFields | CapBookMeta}
 	s := New(nil, Config{Contact: "test@example.com", MatchReleases: true, Providers: []Provider{p}}, nil)
@@ -33,6 +34,7 @@ func TestPhaseKeysMatchTheModelList(t *testing.T) {
 // the rung it needs a provider for, since a provider serving auxiliary art for artists
 // alone would not unlock it. Cover art is off, since the archive serves the group rung.
 func TestCheckPhasesNamesTheRung(t *testing.T) {
+	t.Parallel()
 	artistAux := &Mock{ProviderName: "fanart", Caps: CapAuxArt,
 		CapsAt: map[TargetType]Capability{TargetArtist: CapAuxArt}}
 	s := New(nil, Config{Contact: "test@example.com", Providers: []Provider{artistAux}}, nil)
@@ -48,6 +50,7 @@ func TestCheckPhasesNamesTheRung(t *testing.T) {
 // TestPhasesReportsTheBuiltList: Phases is the list a run would build now, read through
 // the current provider list, and Enabled and the forced-phase check agree with it.
 func TestPhasesReportsTheBuiltList(t *testing.T) {
+	t.Parallel()
 	all := &Mock{ProviderName: "everything",
 		Caps: CapAuxArt | CapArtistArt | CapCover | CapLyrics | CapFields | CapBookMeta}
 	full := New(nil, Config{Contact: "test@example.com", MatchReleases: true, Providers: []Provider{all}}, nil)

@@ -11,6 +11,7 @@ import (
 )
 
 func TestDuplicateArtistsByCollationKey(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	// "Beatles" and "The Beatles" fold to the same sort key (the "The"-strip) but
@@ -37,6 +38,7 @@ func TestDuplicateArtistsByCollationKey(t *testing.T) {
 }
 
 func TestDuplicateArtistsByMBID(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{
@@ -69,6 +71,7 @@ func TestDuplicateArtistsByMBID(t *testing.T) {
 }
 
 func TestDuplicateAlbumsSurvivorHasMostTracks(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	// One album with two tracks (folder a1) and one with a single track (folder a2),
@@ -102,6 +105,7 @@ func TestDuplicateAlbumsSurvivorHasMostTracks(t *testing.T) {
 // TestDuplicateAlbumsByName: two albums carrying one folded title under one album artist,
 // in different folders and with no MusicBrainz ids, are a duplicate set, the larger first.
 func TestDuplicateAlbumsByName(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/A/Hits/1.flac", essence: "e1", content: "c1", title: "One", artist: "A", albumArt: "A", album: "Hits"})
@@ -127,6 +131,7 @@ func TestDuplicateAlbumsByName(t *testing.T) {
 // TestDuplicateAlbumsByNameAcrossKeyedGroups: a name pair is found whether its release
 // groups are keyed by name or by MusicBrainz id, which is a partly tagged album's split.
 func TestDuplicateAlbumsByNameAcrossKeyedGroups(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/A/Hits/1.flac", essence: "e1", content: "c1", title: "One", artist: "A", albumArt: "A", album: "Hits"})
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/A/Hits (Tagged)/1.flac", essence: "e2", content: "c2", title: "Two", artist: "A", albumArt: "A", album: "Hits",
@@ -148,6 +153,7 @@ func TestDuplicateAlbumsByNameAcrossKeyedGroups(t *testing.T) {
 // "Greatest Hits" of one artist) and no duplicate, while an untagged third joins the
 // larger of them.
 func TestDuplicateAlbumsByNameKeepsDistinctReleasesApart(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/A/GH 1975/1.flac", essence: "e1", content: "c1", title: "One", artist: "A", albumArt: "A", album: "Greatest Hits",
@@ -213,6 +219,7 @@ func replacedRipFixture(t *testing.T, st *Store, libID int64) {
 // an album whose members are all trashed is no duplicate, and a set ranks its albums by
 // the members they still hold.
 func TestDuplicateAlbumsByNameCountLiveMembers(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	replacedRipFixture(t, st, lib.ID)
 	sets, err := st.DuplicateAlbums(context.Background())
@@ -236,6 +243,7 @@ func TestDuplicateAlbumsByNameCountLiveMembers(t *testing.T) {
 // TestSplitAlbumsCountLiveMembers: the split check reads the same way, so a trashed rip
 // splits nothing and the live rip leads.
 func TestSplitAlbumsCountLiveMembers(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	replacedRipFixture(t, st, lib.ID)
 	splits, err := st.SplitAlbums(context.Background())
@@ -253,6 +261,7 @@ func TestSplitAlbumsCountLiveMembers(t *testing.T) {
 // TestDuplicateAlbumsByMBIDPutsTheLiveAlbumFirst: an id pair ranks its albums by live
 // members too, so a merge keeps the album still in use.
 func TestDuplicateAlbumsByMBIDPutsTheLiveAlbumFirst(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	replacedRipFixture(t, st, lib.ID)
@@ -275,6 +284,7 @@ func TestDuplicateAlbumsByMBIDPutsTheLiveAlbumFirst(t *testing.T) {
 // the same name are two findings that never name the same loser, so merging the id pair
 // leaves the name finding naming albums that still exist.
 func TestDuplicateAlbumsNameSetLeavesOutTheIDPairsLoser(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	for i, folder := range []string{"/lib/A/Hits", "/lib/A/Hits", "/lib/A/Hits (CD)", "/lib/A/Hits (Rip)"} {
@@ -308,6 +318,7 @@ func TestDuplicateAlbumsNameSetLeavesOutTheIDPairsLoser(t *testing.T) {
 // under a name-keyed group whose id enrichment filled in the column is under that group,
 // so it is no duplicate of a same-named album under another group's id.
 func TestDuplicateAlbumsByNameReadsAGroupIDFromItsColumn(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/A/GH/1.flac", essence: "e1", content: "c1", title: "One",
@@ -328,6 +339,7 @@ func TestDuplicateAlbumsByNameReadsAGroupIDFromItsColumn(t *testing.T) {
 }
 
 func TestSplitAlbumsDetectsFolderSplit(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	// Same album by the same artist across two folders -> two album rows (the album
@@ -353,6 +365,7 @@ func TestSplitAlbumsDetectsFolderSplit(t *testing.T) {
 }
 
 func TestInconsistentAlbumsCompilationFlag(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	// Two tracks in ONE album (same folder/artist/year) with a mismatched
@@ -380,6 +393,7 @@ func TestInconsistentAlbumsCompilationFlag(t *testing.T) {
 // TestInconsistentAlbumsYear: the year keys no album, so members disagreeing on it share
 // one album, and that album reports the disagreement.
 func TestInconsistentAlbumsYear(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	for i, year := range []int{2015, 2015, 2016} {
@@ -406,6 +420,7 @@ func TestInconsistentAlbumsYear(t *testing.T) {
 // each claimed twice on one disc, are what says so. Another disc's track 1 repeats
 // nothing, a member with no disc counts as disc 1, and a trashed member claims nothing.
 func TestInconsistentAlbumsRepeatedTrackNumbers(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	for i, tr := range []struct{ no, disc, year int }{
@@ -436,6 +451,7 @@ func TestInconsistentAlbumsRepeatedTrackNumbers(t *testing.T) {
 // TestInconsistentAlbumsIgnoreTrashedMembers: a trashed member's year is no part of its
 // album, so it reports no disagreement.
 func TestInconsistentAlbumsIgnoreTrashedMembers(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	for i, year := range []int{2015, 2015, 2016} {
 		n := strconv.Itoa(i + 1)
@@ -455,6 +471,7 @@ func TestInconsistentAlbumsIgnoreTrashedMembers(t *testing.T) {
 }
 
 func TestItemsMissingArt(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{
@@ -473,6 +490,7 @@ func TestItemsMissingArt(t *testing.T) {
 }
 
 func TestCountItemsMissingReplayGain(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{
@@ -488,6 +506,7 @@ func TestCountItemsMissingReplayGain(t *testing.T) {
 }
 
 func TestCountItemsMissingReplayGainExcludesPodcasts(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	// A normal (analyzable) track with no loudness -> counts.
@@ -522,6 +541,7 @@ func TestCountItemsMissingReplayGainExcludesPodcasts(t *testing.T) {
 }
 
 func TestAuditFilesReturnsRows(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{
@@ -545,6 +565,7 @@ func TestAuditFilesReturnsRows(t *testing.T) {
 // the file as colliding with itself at error severity (a non-zero exit for anyone with
 // a rip) and made integrity re-hash the same bytes once per track.
 func TestAuditFilesYieldsOneRowPerSharedRip(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 
@@ -612,6 +633,7 @@ func TestAuditFilesYieldsOneRowPerSharedRip(t *testing.T) {
 // own recording id to count as covered: its album's release id or its release group's
 // id also resolves it, the way the missing-art predicate walks its own fallback chain.
 func TestItemsMissingMBID(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 
@@ -660,6 +682,7 @@ func TestItemsMissingMBID(t *testing.T) {
 // mbid: match_key, and asserts both finders group them. Grouping on the column alone
 // reports nothing here, which is the whole reason the effective-id expression exists.
 func TestDuplicateEntitiesByEffectiveMBID(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	const rgMBID = "11111111-2222-3333-4444-555555555555"
@@ -721,6 +744,7 @@ func TestDuplicateEntitiesByEffectiveMBID(t *testing.T) {
 // TestDuplicateFindersIgnoreDistinctIDs guards the effective-id expression against
 // pairing rows that merely both lack an id, which a COALESCE to ” would do.
 func TestDuplicateFindersIgnoreDistinctIDs(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{

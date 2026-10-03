@@ -12,6 +12,7 @@ import (
 // onto the store's three-state instruction. Neither flag locks, which is the default
 // every one of them has always had.
 func TestLockChange(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		noLock, keepLock bool
 		want             model.LockChange
@@ -30,6 +31,7 @@ func TestLockChange(t *testing.T) {
 // edit, each surface takes its own vocabulary, and every refusal names the flag that is
 // actually wrong rather than the one that happens to be nearby.
 func TestParseAttribution(t *testing.T) {
+	t.Parallel()
 	art := func(source, provider, url string) (model.Attribution, error) {
 		return parseAttribution("art set", source, provider, url, model.Attribution.ValidForArt, artSourceList)
 	}

@@ -19,6 +19,7 @@ func seedItem(t *testing.T, st *Store, lib *model.Library) model.PID {
 }
 
 func TestDefaultUserSeeded(t *testing.T) {
+	t.Parallel()
 	st, _ := entityFixture(t)
 	u, err := st.DefaultUser(context.Background())
 	if err != nil {
@@ -30,6 +31,7 @@ func TestDefaultUserSeeded(t *testing.T) {
 }
 
 func TestPlayStateLifecycle(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	item := seedItem(t, st, lib)
@@ -95,6 +97,7 @@ func TestPlayStateLifecycle(t *testing.T) {
 }
 
 func TestRatingClamped(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	item := seedItem(t, st, lib)
@@ -109,6 +112,7 @@ func TestRatingClamped(t *testing.T) {
 }
 
 func TestBookmarksAndQueue(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	item := seedItem(t, st, lib)
@@ -142,6 +146,7 @@ func TestBookmarksAndQueue(t *testing.T) {
 }
 
 func TestSessions(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	item := seedItem(t, st, lib)
@@ -186,6 +191,7 @@ func TestSessions(t *testing.T) {
 // year in review, and a session with no start, an end before its start, or a negative
 // play time is refused. EndSession shares the play-time guard.
 func TestRecordSession(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	item := seedItem(t, st, lib)
@@ -266,6 +272,7 @@ func TestRecordSession(t *testing.T) {
 // a stable order, every user's, an open session reading back with no end and a
 // filtered item's sessions neither counted nor delivered.
 func TestExportSessions(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	item := seedItem(t, st, lib)
@@ -359,6 +366,7 @@ func playStateDeltas(t *testing.T, st *Store) int {
 // replay, a newer one applies and stamps in recorded time, and a value-identical
 // call stays a no-op regardless of as-of.
 func TestStarAsOfRecordedTime(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	item := seedItem(t, st, lib)
@@ -428,6 +436,7 @@ func TestStarAsOfRecordedTime(t *testing.T) {
 // stamp is NULL (no ordering info) even with an old recorded time: a rating-only
 // row carries a NULL starred_changed_at.
 func TestStarAsOfNullPriorApplies(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	item := seedItem(t, st, lib)
@@ -453,6 +462,7 @@ func TestStarAsOfNullPriorApplies(t *testing.T) {
 // not-provided sentinel the proxy wire uses, so the direct store path must agree:
 // a lone &0 must not stamp at the epoch and then lose every staleness comparison.
 func TestStarAsOfZeroIsServerNow(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	item := seedItem(t, st, lib)
@@ -472,6 +482,7 @@ func TestStarAsOfZeroIsServerNow(t *testing.T) {
 // recorded time is skipped, a newer applies and stamps in recorded time, and a
 // value-identical re-rate stays a no-op preserving the stamp.
 func TestRatingAsOfRecordedTime(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	item := seedItem(t, st, lib)
@@ -522,6 +533,7 @@ func TestRatingAsOfRecordedTime(t *testing.T) {
 // a silent no-op (no delta, starred_at preserved, stamp untouched), and
 // unstarring an untouched item creates no row at all.
 func TestStarStampAndNoOp(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	item := seedItem(t, st, lib)
@@ -595,6 +607,7 @@ func TestStarStampAndNoOp(t *testing.T) {
 // (a clear included) bumps rating_changed_at, an identical re-rate is a silent
 // no-op, and clearing a never-set rating creates no row.
 func TestRatingStampAndNoOp(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	item := seedItem(t, st, lib)
@@ -676,6 +689,7 @@ func TestRatingStampAndNoOp(t *testing.T) {
 // "duplicate skipped" for a replay, which lands the stamp on the value it already
 // held.
 func TestPlayStateChangedAgreesWithDelta(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	item := seedItem(t, st, lib)
@@ -733,6 +747,7 @@ func TestPlayStateChangedAgreesWithDelta(t *testing.T) {
 // TestStampsUntouchedByProgressAndPlays pins the stamp scope: checkpoints, play
 // counts, and a played/finished change never move the star/rating change stamps.
 func TestStampsUntouchedByProgressAndPlays(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	item := seedItem(t, st, lib)
@@ -769,6 +784,7 @@ func TestStampsUntouchedByProgressAndPlays(t *testing.T) {
 // updated_at and leave it alone, which is what keeps a star off the head of the
 // in-progress list.
 func TestLastProgressStampedByPlaybackWritesOnly(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	item := seedItem(t, st, lib)
@@ -827,6 +843,7 @@ func TestLastProgressStampedByPlaybackWritesOnly(t *testing.T) {
 // per-item ordering by user pid, untouched and unknown pids absent, duplicate
 // input collapsed, and the stamps carried through.
 func TestPlayStatesForItems(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	item1 := seedItem(t, st, lib)
@@ -902,6 +919,7 @@ func TestPlayStatesForItems(t *testing.T) {
 // with no file, which folds into the new one, so the star moves with the file and no row
 // is left behind on the deleted item.
 func TestPlayStateFollowsARekeyedFile(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	spec := trackSpec{path: "/lib/a/1.mp3", essence: "e1", content: "c1", title: "First", artist: "A", album: "Al"}

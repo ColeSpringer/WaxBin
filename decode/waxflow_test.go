@@ -76,6 +76,7 @@ func writeStereoWAV(t *testing.T, dir, name string, rate int, left, right []floa
 }
 
 func TestMonoRoundTrip(t *testing.T) {
+	t.Parallel()
 	const rate = 22050
 	samples := tone(rate, time.Second, 440, 0.4)
 	p := writeWAV(t, t.TempDir(), "tone.wav", rate, samples)
@@ -99,6 +100,7 @@ func TestMonoRoundTrip(t *testing.T) {
 }
 
 func TestMonoMaxDuration(t *testing.T) {
+	t.Parallel()
 	const rate = 22050
 	p := writeWAV(t, t.TempDir(), "long.wav", rate, tone(rate, 4*time.Second, 300, 0.1))
 
@@ -113,6 +115,7 @@ func TestMonoMaxDuration(t *testing.T) {
 }
 
 func TestMonoZeroMaxDecodesWholeFile(t *testing.T) {
+	t.Parallel()
 	const rate = 22050
 	samples := tone(rate, 2*time.Second, 300, 0.2)
 	p := writeWAV(t, t.TempDir(), "whole.wav", rate, samples)
@@ -129,6 +132,7 @@ func TestMonoZeroMaxDecodesWholeFile(t *testing.T) {
 // TestMonoResamplesToInternalRate covers the fingerprint's route: decode
 // straight to the analysis rate rather than box-averaging afterwards.
 func TestMonoResamplesToInternalRate(t *testing.T) {
+	t.Parallel()
 	const srcRate, dstRate = 44100, 11025
 	p := writeWAV(t, t.TempDir(), "hq.wav", srcRate, tone(srcRate, 2*time.Second, 440, 0.5))
 
@@ -158,6 +162,7 @@ func TestMonoResamplesToInternalRate(t *testing.T) {
 // TestMonoUnsupportedInput pins the open phase: an input nothing recognizes is
 // ErrUnsupported, which the analyze pass reads as "skip and retry later".
 func TestMonoUnsupportedInput(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	p := filepath.Join(dir, "bad.wav")
 	if err := os.WriteFile(p, []byte("not a wav file at all, nor anything else"), 0o644); err != nil {
@@ -173,6 +178,7 @@ func TestMonoUnsupportedInput(t *testing.T) {
 }
 
 func TestMonoMissingFile(t *testing.T) {
+	t.Parallel()
 	_, err := New(nil).Mono(context.Background(), filepath.Join(t.TempDir(), "nope.wav"), 0, 0)
 	if err == nil {
 		t.Fatal("want an error for a missing file")
@@ -189,6 +195,7 @@ func TestMonoMissingFile(t *testing.T) {
 // (~0.891) and flattening exactly what the fingerprint and waveform read. A
 // full-scale correlated stereo pair must come back at ~1.0.
 func TestMonoStereoIsUnlimitedAmplitudeAverage(t *testing.T) {
+	t.Parallel()
 	const rate = 44100
 	full := tone(rate, time.Second, 440, 1.0)
 	p := writeStereoWAV(t, t.TempDir(), "loud.wav", rate, full, full)
@@ -220,6 +227,7 @@ func TestMonoStereoIsUnlimitedAmplitudeAverage(t *testing.T) {
 // and PCM.Mono (interleaved, buffered) feed the same waveform code, so a
 // streamed waveform must equal a buffered one sample for sample.
 func TestMixMonoMatchesPCMMono(t *testing.T) {
+	t.Parallel()
 	for _, nch := range []int{1, 2, 6} {
 		const frames = 500
 		inter := make([]float32, frames*nch)
@@ -249,6 +257,7 @@ func TestMixMonoMatchesPCMMono(t *testing.T) {
 }
 
 func TestMixMonoEmpty(t *testing.T) {
+	t.Parallel()
 	if got := MixMono(nil, nil); len(got) != 0 {
 		t.Errorf("MixMono(nil, nil) = %v, want empty", got)
 	}
@@ -256,6 +265,7 @@ func TestMixMonoEmpty(t *testing.T) {
 
 // TestMixMonoReusesScratch checks the streaming path does not allocate per chunk.
 func TestMixMonoReusesScratch(t *testing.T) {
+	t.Parallel()
 	chans := [][]float32{make([]float32, 128), make([]float32, 128)}
 	scratch := make([]float32, 0, 128)
 	first := MixMono(scratch, chans)
@@ -266,6 +276,7 @@ func TestMixMonoReusesScratch(t *testing.T) {
 }
 
 func TestMeasureWAV(t *testing.T) {
+	t.Parallel()
 	const rate = 44100
 	samples := tone(rate, 2*time.Second, 1000, 1.0)
 	p := writeWAV(t, t.TempDir(), "m.wav", rate, samples)
@@ -293,6 +304,7 @@ func TestMeasureWAV(t *testing.T) {
 }
 
 func TestMeasureNilTap(t *testing.T) {
+	t.Parallel()
 	const rate = 22050
 	p := writeWAV(t, t.TempDir(), "n.wav", rate, tone(rate, time.Second, 440, 0.5))
 	if _, err := New(nil).Measure(context.Background(), p, nil); err != nil {
@@ -301,6 +313,7 @@ func TestMeasureNilTap(t *testing.T) {
 }
 
 func TestMeasureUnsupportedInput(t *testing.T) {
+	t.Parallel()
 	p := filepath.Join(t.TempDir(), "bad.flac")
 	if err := os.WriteFile(p, []byte("definitely not audio"), 0o644); err != nil {
 		t.Fatal(err)
@@ -315,6 +328,7 @@ func TestMeasureUnsupportedInput(t *testing.T) {
 }
 
 func TestMeasureCanceled(t *testing.T) {
+	t.Parallel()
 	const rate = 44100
 	p := writeWAV(t, t.TempDir(), "c.wav", rate, tone(rate, 5*time.Second, 440, 0.5))
 	ctx, cancel := context.WithCancel(context.Background())
@@ -334,6 +348,7 @@ func TestMeasureCanceled(t *testing.T) {
 // must name the real decoder, and the set must be derived rather than a stale
 // hand-maintained list.
 func TestCoverageIsHonest(t *testing.T) {
+	t.Parallel()
 	cov := Coverage()
 	if len(cov) == 0 {
 		t.Fatal("Coverage is empty")
@@ -369,6 +384,7 @@ func TestCoverageIsHonest(t *testing.T) {
 // table claims must actually decode a real file. WAV is the fixture this
 // package can build without an encoder; the full eight-format sweep is Phase 8's.
 func TestCoverageCodecsDecode(t *testing.T) {
+	t.Parallel()
 	const rate = 22050
 	p := writeWAV(t, t.TempDir(), "cov.wav", rate, tone(rate, time.Second, 440, 0.3))
 	pcm, err := New(nil).Mono(context.Background(), p, 0, 0)
@@ -384,6 +400,7 @@ func TestCoverageCodecsDecode(t *testing.T) {
 // as damaged audio, so a request WaxFlow refuses, which says nothing about the bytes, maps
 // to CodeUnsupported. Malformed input stays CodeInvalid.
 func TestMapErrKeepsRefusedRequestsOutOfInvalid(t *testing.T) {
+	t.Parallel()
 	for _, c := range []struct {
 		code flowerr.Code
 		want waxerr.Code

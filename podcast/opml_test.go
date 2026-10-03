@@ -9,6 +9,7 @@ import (
 )
 
 func TestParseOPMLNestedAndDedup(t *testing.T) {
+	t.Parallel()
 	doc := `<?xml version="1.0"?>
 <opml version="2.0">
   <head><title>subs</title></head>
@@ -34,6 +35,7 @@ func TestParseOPMLNestedAndDedup(t *testing.T) {
 }
 
 func TestOPMLRoundTrip(t *testing.T) {
+	t.Parallel()
 	in := []model.OPMLEntry{
 		{Title: "Show A", FeedURL: "https://a.example/feed"},
 		{Title: "Show B", FeedURL: "https://b.example/feed"},
@@ -52,6 +54,7 @@ func TestOPMLRoundTrip(t *testing.T) {
 }
 
 func TestParseOPMLDepthBoundRejects(t *testing.T) {
+	t.Parallel()
 	var b strings.Builder
 	b.WriteString(`<opml version="2.0"><body>`)
 	depth := maxOPMLDepth + 50

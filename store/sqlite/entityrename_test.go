@@ -13,6 +13,7 @@ import (
 // its pid and everything hanging off it, which is what the implicit pre-pass could only
 // manage when a caller's batch happened to cover every track.
 func TestRenameEntityAlbumKeepsRow(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{
@@ -69,6 +70,7 @@ func TestRenameEntityAlbumKeepsRow(t *testing.T) {
 // TestRenameEntityCaseOnlyRefreshes covers the third outcome: the key does not move, so
 // only the display columns do.
 func TestRenameEntityCaseOnlyRefreshes(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{
@@ -92,6 +94,7 @@ func TestRenameEntityCaseOnlyRefreshes(t *testing.T) {
 // TestRenameEntityOntoTakenKeyMerges pins the merge outcome and the survivor the report
 // hands back, since the caller's pid does not exist afterwards.
 func TestRenameEntityOntoTakenKeyMerges(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{
@@ -124,6 +127,7 @@ func TestRenameEntityOntoTakenKeyMerges(t *testing.T) {
 // TestRenameEntityRefusesSilentSplits checks each refusal that replaces a split nobody
 // was told about.
 func TestRenameEntityRefusesSilentSplits(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{
@@ -182,6 +186,7 @@ func TestRenameEntityRefusesSilentSplits(t *testing.T) {
 // group retitles every member, which would flatten editions that are deliberately named
 // apart into one album.
 func TestRenameReleaseGroupRefusesMixedEditions(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{
@@ -202,6 +207,7 @@ func TestRenameReleaseGroupRefusesMixedEditions(t *testing.T) {
 // TestRenameReleaseGroupMovesChain renames a group whose albums share a title and checks
 // both rungs moved together, the group keeping its pid.
 func TestRenameReleaseGroupMovesChain(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{
@@ -243,6 +249,7 @@ func TestRenameReleaseGroupMovesChain(t *testing.T) {
 // in-place move silently: a member with no primary file has no folder to key on, so no
 // scan of its restored files would ever compute the key the rename lands on.
 func TestRenameEntityRefusesArchivedMember(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{
@@ -271,6 +278,7 @@ func TestRenameEntityRefusesArchivedMember(t *testing.T) {
 // performer, another track credits as album-artist, and a book credits as author, and
 // checks all three followed one row rather than forking a second artist.
 func TestRenameArtistMovesEveryReference(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{
@@ -316,6 +324,7 @@ func TestRenameArtistMovesEveryReference(t *testing.T) {
 // artists keeps the other one, which is also what makes the pre-pass's fold-back guard
 // meaningful.
 func TestRenameArtistKeepsJointCreditNames(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{
@@ -340,6 +349,7 @@ func TestRenameArtistKeepsJointCreditNames(t *testing.T) {
 // would keep the row naming the old spelling while the artist's curation moved, which is
 // why this used to be a refusal.
 func TestRenameArtistMovesContributorRole(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{
@@ -384,6 +394,7 @@ func TestRenameArtistMovesContributorRole(t *testing.T) {
 // TestRenameArtistRefusesLockedCredit: the credit half checks its lock up front, with the
 // field half, so a rename cannot move some of an artist's references and refuse the rest.
 func TestRenameArtistRefusesLockedCredit(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{
@@ -421,6 +432,7 @@ func TestRenameArtistRefusesLockedCredit(t *testing.T) {
 // producing another moves both references in one transaction, which is what makes the
 // coverage check pass and the row rename in place rather than ghost.
 func TestRenameArtistMovesFieldAndCreditTogether(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{
@@ -470,6 +482,7 @@ func TestRenameArtistMovesFieldAndCreditTogether(t *testing.T) {
 // member's folder, so an album whose members live in different folders, which a shared
 // MusicBrainz id can produce, computes a different key per folder and splits.
 func TestRenameEntityRefusesSplitAcrossFolders(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	const relMBID = "dddddddd-1111-2222-3333-444444444444"
@@ -509,6 +522,7 @@ func TestRenameEntityRefusesSplitAcrossFolders(t *testing.T) {
 // pre-pass then renamed the artist row onto the whole credit string while the co-credit
 // was dropped. The list now comes from the contributor rows instead.
 func TestRenameArtistKeepsStatedCoCredits(t *testing.T) {
+	t.Parallel()
 	for _, display := range []string{"Alpha & Beta", "Alpha, Beta", "Alpha; Beta"} {
 		t.Run(display, func(t *testing.T) {
 			st, lib := entityFixture(t)
@@ -548,6 +562,7 @@ func TestRenameArtistKeepsStatedCoCredits(t *testing.T) {
 // other one, so it defaults an empty attribution to a user edit and refuses values the
 // other surfaces refuse, rather than storing them.
 func TestRenameEntityValidatesAttributionAndLock(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{
@@ -581,6 +596,7 @@ func TestRenameEntityValidatesAttributionAndLock(t *testing.T) {
 // groups as it has albums, so the chain-rung expectation that every member lands under one
 // group must not be applied here.
 func TestRenameArtistSpansManyAlbums(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{
@@ -615,6 +631,7 @@ func TestRenameArtistSpansManyAlbums(t *testing.T) {
 // without the artist being on its tracks is one such reference, and the shape a
 // credit-split transition leaves behind.
 func TestRenameArtistRefusedWhenPrePassDeclines(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{
@@ -649,6 +666,7 @@ func TestRenameArtistRefusedWhenPrePassDeclines(t *testing.T) {
 // that, this failed the coverage check and rolled back reporting an uncovered reference,
 // which was not the reason.
 func TestRenameArtistMovesASharedRole(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{
@@ -685,6 +703,7 @@ func TestRenameArtistMovesASharedRole(t *testing.T) {
 // credits would be deleted and not rebuilt with the rename reporting success. An artist
 // held by credits alone has no member for the member-key check to catch this on.
 func TestRenameArtistRefusesAKeylessName(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{

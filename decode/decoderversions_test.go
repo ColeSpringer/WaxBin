@@ -38,6 +38,7 @@ var decoderVersions = map[string]string{
 }
 
 func TestWaxFlowDecoderVersionsPinned(t *testing.T) {
+	t.Parallel()
 	for _, id := range format.Decoders() {
 		want, ok := decoderVersions[string(id)]
 		got := format.DecoderVersion(id)

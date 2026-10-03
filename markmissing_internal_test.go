@@ -14,6 +14,7 @@ import (
 // under the library. The end-to-end shape cannot be staged everywhere, since a
 // filesystem that enforces UTF-8 names (APFS, HFS+) rejects such a root outright.
 func TestLibraryForRawPathMatchesRawBytes(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		// The premise is unreachable there: raw and display roots are always the same
 		// bytes on Windows, and filepath.Rel folds an invalid byte onto its U+FFFD
@@ -51,6 +52,7 @@ func TestLibraryForRawPathMatchesRawBytes(t *testing.T) {
 // bytes still resolves to something statable rather than an empty path, which would
 // stat the process working directory.
 func TestRawRootFallsBackToDisplay(t *testing.T) {
+	t.Parallel()
 	if r := rawRoot(&model.Library{DisplayRoot: "/mnt/music"}); r != "/mnt/music" {
 		t.Errorf("rawRoot with no raw bytes = %q, want the display root", r)
 	}

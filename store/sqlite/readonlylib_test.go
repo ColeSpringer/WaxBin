@@ -13,6 +13,7 @@ import (
 // the root being ensured again, a real change emits one library delta and a repeat
 // none, and the podcast library cannot be flagged.
 func TestSetLibraryReadOnly(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, _, lib := openStoreAt(t)
 	seq0, err := st.LatestChangeSeq(ctx)
@@ -72,6 +73,7 @@ func TestSetLibraryReadOnly(t *testing.T) {
 // first pass after the flag clears writes them. The rows name the library for the
 // write loops' own live check.
 func TestReadOnlyLibraryIsLeftOutOfTheWritebacks(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStoreAt(t)
 	db := roConn(t, dbPath)
@@ -132,6 +134,7 @@ func TestReadOnlyLibraryIsLeftOutOfTheWritebacks(t *testing.T) {
 // TestTrashEntryNamesItsLibrary: a trash entry carries the library its file was in, so
 // the facade can honor that library's flag without matching paths.
 func TestTrashEntryNamesItsLibrary(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStoreAt(t)
 	seedEnrichTrack(t, st, lib.ID)
@@ -154,6 +157,7 @@ func TestTrashEntryNamesItsLibrary(t *testing.T) {
 // TestAWideReachStaysItsOwn: a reach naming more ids than one statement can bind still
 // selects only its own files for both write-backs, rather than everything owed.
 func TestAWideReachStaysItsOwn(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStoreAt(t)
 	db := roConn(t, dbPath)

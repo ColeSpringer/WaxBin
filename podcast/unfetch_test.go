@@ -69,6 +69,7 @@ func unfetchFixture(t *testing.T) (*podcast.Service, *sqlite.Store, []*model.Epi
 }
 
 func TestUnfetchReclaimsAndPreservesPlayState(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	svc, st, eps := unfetchFixture(t)
 	ep := eps[0]
@@ -119,6 +120,7 @@ func TestUnfetchReclaimsAndPreservesPlayState(t *testing.T) {
 // TestUnfetchTwiceIsANoOp pins the benign race: a retention pass that already
 // reclaimed the file must not turn the caller's action into an error.
 func TestUnfetchTwiceIsANoOp(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	svc, _, eps := unfetchFixture(t)
 	ep := eps[0]
@@ -150,6 +152,7 @@ func TestUnfetchTwiceIsANoOp(t *testing.T) {
 // TestUnfetchIgnoresThePin is the deliberate asymmetry: a pin exempts an episode
 // from retention, not from an explicit unfetch, and survives it.
 func TestUnfetchIgnoresThePin(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	svc, _, eps := unfetchFixture(t)
 	ep := eps[1] // the older one, which retention would otherwise drop
@@ -206,6 +209,7 @@ func TestUnfetchIgnoresThePin(t *testing.T) {
 // Leaser (which is every test in this package, and any embedder that does not inject
 // one) runs its filesystem verbs directly rather than failing for want of a lease.
 func TestNilLeaserRunsInline(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	svc, _, eps := unfetchFixture(t)
 	if _, err := svc.Download(ctx, eps[0].PID); err != nil {

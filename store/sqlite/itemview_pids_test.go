@@ -17,6 +17,7 @@ import (
 // its author for the two artist pids and has no album; an episode, which has no
 // track or book row, carries none of those three and carries its show's instead.
 func TestItemViewEntityPIDs(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 
@@ -108,6 +109,7 @@ func TestItemViewEntityPIDs(t *testing.T) {
 // above it. AlbumPID is re-asserted here because it is now produced by a joined
 // column rather than a correlated seek, and the value must not have moved.
 func TestItemViewReleaseGroupPID(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 
@@ -180,6 +182,7 @@ func TestItemViewReleaseGroupPID(t *testing.T) {
 // show reads Explicit false and PodcastExplicit true, which is the inheritance
 // question AdvisoryFlagged answers in one read.
 func TestItemViewExplicit(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	tr := putTrack(t, st, lib.ID, trackSpec{path: "/lib/1.flac", essence: "e1", content: "c1",
@@ -258,6 +261,7 @@ func TestItemViewExplicit(t *testing.T) {
 // a straight copy: with no album entity, its AlbumMBID reads its own book.mbid rather
 // than staying empty the way AlbumPID does.
 func TestItemViewIdentifiers(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 
@@ -358,6 +362,7 @@ func TestItemViewIdentifiers(t *testing.T) {
 // them shifts the identifiers rather than failing the scan. The values are asserted,
 // not just the query: an all-text shift still scans cleanly.
 func TestItemViewIdentifiersUnderMegabytesBudget(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	tr := putTrack(t, st, lib.ID, trackSpec{
@@ -393,6 +398,7 @@ func TestItemViewIdentifiersUnderMegabytesBudget(t *testing.T) {
 // that splice itemViewCols, because the megabytes budget extends the column list and
 // the dest list at two independent sites and a mis-ordered column shows up only there.
 func TestItemViewLibraryPID(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	lib2, err := st.EnsureLibrary(ctx, &model.Library{
@@ -483,6 +489,7 @@ func TestItemViewLibraryPID(t *testing.T) {
 // with TestLibraryFieldAndFacet's mirror loop this gives projection equals filter equals
 // facet, which is the guarantee a consumer holding an item view relies on.
 func TestItemViewLibraryPIDMatchesTheLibraryFilter(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	lib2, err := st.EnsureLibrary(ctx, &model.Library{
@@ -522,6 +529,7 @@ func TestItemViewLibraryPIDMatchesTheLibraryFilter(t *testing.T) {
 // the fields COALESCE to ”, so it has to match both an absent row and an empty
 // string. mbid spans track and book, which is why an untagged book counts.
 func TestIdentifierQueryFields(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 
 	putTrack(t, st, lib.ID, trackSpec{
@@ -570,6 +578,7 @@ func TestIdentifierQueryFields(t *testing.T) {
 // forward slashes, so a substring cannot reach into the root, and recording_mbid is a
 // track's recording id alone, where mbid also carries a book's release id.
 func TestRelativePathAndRecordingQueryFields(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	putTrack(t, st, lib.ID, trackSpec{
 		path: "/lib/Rock/One/01.flac", relPath: filepath.Join("Rock", "One", "01.flac"),
@@ -609,6 +618,7 @@ func TestRelativePathAndRecordingQueryFields(t *testing.T) {
 // text, which is the trap worth pinning: a scan stores the tag and an edit normalizes, so
 // "USA" and "US" differ here even though the enrichment matcher folds them together.
 func TestAlbumEntityQueryFields(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 
 	putTrack(t, st, lib.ID, trackSpec{
@@ -654,6 +664,7 @@ func TestAlbumEntityQueryFields(t *testing.T) {
 // id, so mbid/album_mbid alone would report every track as missing while the audit
 // reports none.
 func TestReleaseGroupMBIDField(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 
 	putTrack(t, st, lib.ID, trackSpec{

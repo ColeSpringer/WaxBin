@@ -27,7 +27,7 @@ func oweLyrics(t *testing.T, st *Store, id int64) {
 // against falls after every lookup deferred before it and before every one deferred
 // after it, even when the wall clock has not moved in between, as it often has not on a
 // clock that ticks every 15.6ms. A lookup an earlier pass deferred is asked, and one this
-// pass deferred waits for the next.
+// pass deferred waits for the next. Swapping the clock keeps it out of the parallel set.
 func TestTheOwedSweepInstantSeparatesPasses(t *testing.T) {
 	ctx := context.Background()
 	st, _ := entityFixture(t)
@@ -68,6 +68,7 @@ func TestTheOwedSweepInstantSeparatesPasses(t *testing.T) {
 // the old ones, so both statements seek the owed rows' own index rather than scan every
 // marker the catalog holds.
 func TestOwedLookupsUseTheirIndex(t *testing.T) {
+	t.Parallel()
 	st, _ := entityFixture(t)
 	for name, plan := range map[string]string{
 		"probe":  queryPlan(t, st, owedLookupsExist),
@@ -83,6 +84,7 @@ func TestOwedLookupsUseTheirIndex(t *testing.T) {
 // reads, and the nightly run with nothing to do neither waits on another writer nor
 // holds one up.
 func TestNothingOwedTakesNoWriteLock(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	path := seedCatalog(t, filepath.Join(t.TempDir(), "c.db"))
 	st, err := Open(ctx, OpenOptions{Path: path, Owner: "test", BusyTimeoutMS: 50})
@@ -116,6 +118,7 @@ func TestNothingOwedTakesNoWriteLock(t *testing.T) {
 // older than the retry window, as it can be under a window shorter than a week, while
 // the owed sweep takes every owed lookup from before its line, whatever the window.
 func TestOwedLookupsStayOutOfTheMissSweeps(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, _ := entityFixture(t)
 	const owed, miss, match, recent = 1, 2, 3, 4

@@ -29,6 +29,7 @@ func newManager(t *testing.T) (*jobs.Manager, *sqlite.Store) {
 }
 
 func TestRunHappyPath(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	m, _ := newManager(t)
 
@@ -46,6 +47,7 @@ func TestRunHappyPath(t *testing.T) {
 // TestRunReturnsErrorOnPanic verifies a panicking job is recovered into a
 // CodeInternal error (not propagated), recorded as failed, and the lease frees.
 func TestRunReturnsErrorOnPanic(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	m, st := newManager(t)
 
@@ -85,6 +87,7 @@ func TestRunReturnsErrorOnPanic(t *testing.T) {
 // TestRunRecordsTheTarget: the job row names what a job targeted, and a whole-catalog
 // job names nothing.
 func TestRunRecordsTheTarget(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	m, st := newManager(t)
 	noop := func(context.Context, *jobs.Handle) error { return nil }
@@ -109,6 +112,7 @@ func TestRunRecordsTheTarget(t *testing.T) {
 // TestRunRecordsACancel: a run whose context is canceled and that returns the cancel
 // ends canceled, not failed, with a message saying it was cut short.
 func TestRunRecordsACancel(t *testing.T) {
+	t.Parallel()
 	m, _ := newManager(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	job, err := m.Run(ctx, jobs.Spec{Kind: "scan", Scope: "scan"}, func(ctx context.Context, _ *jobs.Handle) error {

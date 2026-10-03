@@ -44,6 +44,7 @@ func twoTrackFixture(t *testing.T) (*Store, *model.Library, model.PID, model.PID
 }
 
 func TestEditManyFieldsApplies(t *testing.T) {
+	t.Parallel()
 	st, _, p1, p2 := twoTrackFixture(t)
 	ctx := context.Background()
 
@@ -73,6 +74,7 @@ func TestEditManyFieldsApplies(t *testing.T) {
 }
 
 func TestEditManyFieldsAtomicOnKindMismatch(t *testing.T) {
+	t.Parallel()
 	st, lib, p1, _ := twoTrackFixture(t)
 	ctx := context.Background()
 
@@ -103,6 +105,7 @@ func TestEditManyFieldsAtomicOnKindMismatch(t *testing.T) {
 }
 
 func TestEditManyFieldsSkipLocked(t *testing.T) {
+	t.Parallel()
 	st, _, p1, p2 := twoTrackFixture(t)
 	ctx := context.Background()
 

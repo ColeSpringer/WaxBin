@@ -63,6 +63,7 @@ func planDst(t *testing.T, lib *waxbin.Library, opts waxbin.OrganizeOptions) (*o
 // bad template is refused whole, and one that drops a profile a root uses is refused
 // naming the library, both leaving the old set in place.
 func TestSetProfilesReplacesTheSet(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	lib, _ := openWithProfile(t, "A/{title}.{ext}")
 	if _, dst := planDst(t, lib, waxbin.OrganizeOptions{}); dst != "A/Song.mp3" {
@@ -98,6 +99,7 @@ func TestSetProfilesReplacesTheSet(t *testing.T) {
 // TestPlanOrganizeTakesAnAdHocProfile: a profile value lays out every library without
 // joining the set, and is validated first.
 func TestPlanOrganizeTakesAnAdHocProfile(t *testing.T) {
+	t.Parallel()
 	lib, _ := openWithProfile(t, "A/{title}.{ext}")
 	adhoc := organize.Profile{Name: "adhoc", Music: "Z/{title}.{ext}", Audiobook: "{title}.{ext}", Podcast: "{episode}.{ext}"}
 	plan, dst := planDst(t, lib, waxbin.OrganizeOptions{Profile: &adhoc})
@@ -124,6 +126,7 @@ func TestPlanOrganizeTakesAnAdHocProfile(t *testing.T) {
 // when RunOrganize was called, so a caller reusing its struct afterwards changes
 // nothing, and a profile that does not validate is refused before any job starts.
 func TestRunOrganizeTakesItsProfileAtTheCall(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	lib, root := openWithProfile(t, "A/{title}.{ext}")
 	q := query.New(query.EntityItems).Build()
@@ -148,6 +151,7 @@ func TestRunOrganizeTakesItsProfileAtTheCall(t *testing.T) {
 // TestRootsMustNameAKnownProfile: a root naming a profile the set lacks is refused
 // when it is added at runtime and when it is configured at Open.
 func TestRootsMustNameAKnownProfile(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), t.TempDir())
 	added := t.TempDir()
@@ -171,6 +175,7 @@ func TestRootsMustNameAKnownProfile(t *testing.T) {
 // profile it names is not checked. A config that still names a removed profile there
 // opens, adds, and lets the profile go.
 func TestInPlaceRootsKeepAnyProfileName(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	lib, err := waxbin.Open(ctx, waxbin.Options{
 		DBPath:   filepath.Join(t.TempDir(), "catalog.db"),
@@ -193,6 +198,7 @@ func TestInPlaceRootsKeepAnyProfileName(t *testing.T) {
 // call removes that profile ends with one of the two refused, never with a root
 // naming a profile the set lacks.
 func TestAddRootAndSetProfilesSerialize(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	for i := 0; i < 8; i++ {
 		lib, err := waxbin.Open(ctx, waxbin.Options{
@@ -248,6 +254,7 @@ func (m *messages) Handle(_ context.Context, r slog.Record) error {
 // needs an open catalog, and an import routed through that root names the problem
 // instead of laying files out under some other profile.
 func TestAStoredRootWithAMissingProfile(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db := filepath.Join(t.TempDir(), "catalog.db")
 	music, books := t.TempDir(), t.TempDir()
@@ -305,6 +312,7 @@ func TestAStoredRootWithAMissingProfile(t *testing.T) {
 // TestReopenWarnsOfAStoredRootsMissingProfile: a reopen can land on a catalog written
 // elsewhere during the hand-off, so it checks the stored roots' profiles as Open does.
 func TestReopenWarnsOfAStoredRootsMissingProfile(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db := filepath.Join(t.TempDir(), "catalog.db")
 	logs := &messages{}

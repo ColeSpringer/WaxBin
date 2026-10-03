@@ -69,6 +69,7 @@ func twoMemberAlbum(t *testing.T, ctx context.Context, txxx []testaudio.TXXXFram
 // TestCatalogOnlyRenameOwesItsMembers: a rename without a write-back leaves every
 // member's file behind on the keying field it rewrote, until a rename that writes back.
 func TestCatalogOnlyRenameOwesItsMembers(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	lib, _, one, two := twoMemberAlbum(t, ctx, nil)
 	v, err := lib.Get(ctx, one)
@@ -98,6 +99,7 @@ func TestCatalogOnlyRenameOwesItsMembers(t *testing.T) {
 // file its tags until a write-back lands them, and a clear the lock does not hold is
 // undone by the next full scan reading the tags back, which pays the row too.
 func TestCatalogOnlyAcquisitionOwesAWrite(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, "a.mp3"), testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
@@ -141,6 +143,7 @@ func TestCatalogOnlyAcquisitionOwesAWrite(t *testing.T) {
 // the album it left, so the release ids are owed, and a scan that re-resolves the member
 // from those ids puts it back on the album, which pays them.
 func TestCatalogOnlyDetachOwesAWrite(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	lib, root, one, _ := twoMemberAlbum(t, ctx, []testaudio.TXXXFrame{
 		{Desc: "MusicBrainz Album Id", Value: "14141414-1414-1414-1414-141414141414"},
@@ -173,6 +176,7 @@ func TestCatalogOnlyDetachOwesAWrite(t *testing.T) {
 // TestCatalogOnlyEntityEditOwesMemberFiles: an album field edited without a write-back
 // owes every member file the fanned tag, and an edit that writes back pays them all.
 func TestCatalogOnlyEntityEditOwesMemberFiles(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	lib, _, one, two := twoMemberAlbum(t, ctx, nil)
 	v, err := lib.Get(ctx, one)
@@ -203,6 +207,7 @@ func TestCatalogOnlyEntityEditOwesMemberFiles(t *testing.T) {
 // row; a locked one keeps it owed until a write-back embeds it. An album cover owes every
 // member file the same way.
 func TestCatalogOnlyCoverOwesAWrite(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	lib, root, one, two := twoMemberAlbum(t, ctx, nil)
 	red, blue := solidPNG(t, color.RGBA{R: 255, A: 255}), solidPNG(t, color.RGBA{B: 255, A: 255})
@@ -297,6 +302,7 @@ func TestCatalogOnlyCoverOwesAWrite(t *testing.T) {
 // write-back leaves the id on every member file, so its strip is owed, and a scan that
 // re-resolves a member from that id puts it back on an identified album, which pays it.
 func TestCatalogOnlyAlbumIDClearOwesTheStrip(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	lib, root, one, two := twoMemberAlbum(t, ctx, []testaudio.TXXXFrame{
 		{Desc: "MusicBrainz Album Id", Value: "14141414-1414-1414-1414-141414141414"},
@@ -333,6 +339,7 @@ func TestCatalogOnlyAlbumIDClearOwesTheStrip(t *testing.T) {
 // since the file's ALBUM tag is empty. An unlocked edit the rescan replaces with the
 // fallback value is gone, so its row goes with it.
 func TestOwedLockedValueSettlesOnlyOnATag(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	p := filepath.Join(root, "song.mp3")
@@ -377,6 +384,7 @@ func TestOwedLockedValueSettlesOnlyOnATag(t *testing.T) {
 // origin or a cover set to what the catalog holds owe nothing. A write-back that lands
 // leaves nothing owed, and one a read-only library refuses leaves its value owed.
 func TestUnchangedEditsOweNothing(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	lib, _, one, _ := twoMemberAlbum(t, ctx, nil)
 	v, err := lib.Get(ctx, one)
@@ -444,6 +452,7 @@ func TestUnchangedEditsOweNothing(t *testing.T) {
 // are one set of tags on disk (ARTIST, COMPOSER), so a write-back that lands one of them
 // pays an owed row about the other, the way a scan that reads the file back does.
 func TestWriteBackPaysBothSpellingsOfAColumn(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	track := func(t *testing.T) (*waxbin.Library, model.PID) {
 		t.Helper()

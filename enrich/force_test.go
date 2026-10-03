@@ -27,6 +27,7 @@ func forceService(st enrich.Store, mbURL string, window time.Duration, providers
 // described: a provider registered after the markers settled is asked about them,
 // and the identity phase nobody named is left alone.
 func TestForcePhaseReAsksTheNamedPhaseAlone(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, _, lib := openStore(t)
 	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
@@ -65,6 +66,7 @@ func TestForcePhaseReAsksTheNamedPhaseAlone(t *testing.T) {
 // TestForcePhaseLeavesTheOtherPhasesOnTheirOwnSweeps: the unnamed phases still walk
 // fresh and retry, and the named one is walked once rather than once per sweep.
 func TestForcePhaseLeavesTheOtherPhasesOnTheirOwnSweeps(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
@@ -101,6 +103,7 @@ func TestForcePhaseLeavesTheOtherPhasesOnTheirOwnSweeps(t *testing.T) {
 // TestForcePhaseRefusesBadCombinations: an unknown name, and the two combinations that
 // already force everything, are refused before anything is walked.
 func TestForcePhaseRefusesBadCombinations(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, _, lib := openStore(t)
 	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
@@ -130,6 +133,7 @@ func TestForcePhaseRefusesBadCombinations(t *testing.T) {
 // would walk nothing and report a complete run, so it is refused instead, naming the
 // gate.
 func TestForcePhaseRefusesAPhaseTheInstallDoesNotRun(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, _, lib := openStore(t)
 	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
@@ -162,6 +166,7 @@ func TestForcePhaseRefusesAPhaseTheInstallDoesNotRun(t *testing.T) {
 // TestForcePhaseHeartbeatReportsAFullRun: the denominator counts a forced phase under
 // SweepAll, so a run made entirely of re-asks reports a real ratio.
 func TestForcePhaseHeartbeatReportsAFullRun(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, _, lib := openStore(t)
 	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")

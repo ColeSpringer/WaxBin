@@ -15,6 +15,7 @@ import (
 // TestProbeReadsHeaderProperties pins what the scanner leans on: real properties
 // for a container no tag parser reads, from the header alone.
 func TestProbeReadsHeaderProperties(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	const rate = 44100
 	p := filepath.Join(dir, "a.wv")
@@ -43,6 +44,7 @@ func TestProbeReadsHeaderProperties(t *testing.T) {
 // would put a number in the catalog the file does not hold, and rank a WMA above an
 // MP3 in the upgrade scan on the strength of it.
 func TestProbeOmitsBitDepthWithoutOne(t *testing.T) {
+	t.Parallel()
 	p := filepath.Join(t.TempDir(), "mono-8k.wma")
 	if err := os.WriteFile(p, testaudio.Fixture(t, "mono-8k.wma"), 0o644); err != nil {
 		t.Fatal(err)
@@ -63,6 +65,7 @@ func TestProbeOmitsBitDepthWithoutOne(t *testing.T) {
 // ErrUnsupported, which is how the scanner knows to leave the row's zeroes alone
 // rather than write something invented.
 func TestProbeUnsupportedInput(t *testing.T) {
+	t.Parallel()
 	p := filepath.Join(t.TempDir(), "mystery.wv")
 	if err := os.WriteFile(p, []byte("not a container at all"), 0o644); err != nil {
 		t.Fatal(err)
@@ -76,6 +79,7 @@ func TestProbeUnsupportedInput(t *testing.T) {
 // sample count that would overflow the millisecond multiply, or claim more than
 // the plausibility bound, reports no duration at all rather than a poisoned one.
 func TestProbeDurationBounds(t *testing.T) {
+	t.Parallel()
 	if got := probeDuration(8000*3, 8000); got != 3000 {
 		t.Errorf("plain conversion = %d, want 3000", got)
 	}

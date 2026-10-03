@@ -14,6 +14,7 @@ import (
 // canonical form: the column and the provenance row both carry the normalized
 // value, and a malformed one rejects the edit before any write.
 func TestEditNormalizesISRC(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	res := putTrack(t, st, lib.ID, trackSpec{
@@ -74,6 +75,7 @@ func TestEditNormalizesISRC(t *testing.T) {
 // stripped and asin uppercased, and a malformed isbn rejects the whole edit
 // (the valid asin beside it included).
 func TestEditNormalizesBookIdentifiers(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	res := putBook(t, st, lib.ID, bookSpec{
@@ -113,6 +115,7 @@ func TestEditNormalizesBookIdentifiers(t *testing.T) {
 // TestEntityEditNormalizesBarcode verifies the album barcode is stored (and
 // curated) in canonical digits.
 func TestEntityEditNormalizesBarcode(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{
@@ -152,6 +155,7 @@ func TestEntityEditNormalizesBarcode(t *testing.T) {
 // malformed identifier (the barcode-as-isbn case) with the rest of the apply
 // intact: valid fields fill, the marker is written, nothing aborts.
 func TestBookEnrichmentSkipsInvalidIdentifier(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	res := putBook(t, st, lib.ID, bookSpec{
@@ -196,6 +200,7 @@ func TestBookEnrichmentSkipsInvalidIdentifier(t *testing.T) {
 // book resolvable from any part, a CUE rip returning every virtual sibling, and
 // the divergence from the essence lookup after a tag write changes the bytes.
 func TestItemsByContentHash(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 

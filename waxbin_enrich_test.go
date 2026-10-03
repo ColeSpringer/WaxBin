@@ -72,6 +72,7 @@ func enrichTestConfig(mbURL string) config.EnrichConfig {
 // mutual-exclusivity and resolution errors surface before any job starts, and a
 // scoped run walks only the scoped item's targets.
 func TestEnrichScopedFacade(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -139,6 +140,7 @@ func TestEnrichScopedFacade(t *testing.T) {
 // release-group backfill took on the front. A force naming the old key is refused as an
 // unknown phase before any job starts, rather than read as some other phase.
 func TestEnrichRefusesTheRetiredAuxArtPhase(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	lib, err := waxbin.Open(ctx, waxbin.Options{
@@ -164,6 +166,7 @@ func TestEnrichRefusesTheRetiredAuxArtPhase(t *testing.T) {
 // a job starts), and a good item scope runs as a server-side job whose result
 // reflects only the scoped targets.
 func TestServeProxiedScopedEnrich(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -219,6 +222,7 @@ func TestServeProxiedScopedEnrich(t *testing.T) {
 // keep their class across the wire and start no job, and a named phase re-asks every
 // target it could serve while the phases nobody named stay put.
 func TestServeProxiedForcePhase(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -309,6 +313,7 @@ func TestServeProxiedForcePhase(t *testing.T) {
 // BooksNeedingEnrichment gates on a non-empty book.mbid. Until the scanner copied the
 // release id off a file's tags, that gate was never satisfied on a scanned library.
 func TestScannedBookEnriches(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -384,6 +389,7 @@ func TestScannedBookEnriches(t *testing.T) {
 // The pid assertion is the other half: ASIN and ISBN feed identity.BookKey, so writing
 // them re-keys the book unless the pass re-anchors its stored key.
 func TestEnrichmentTagWriteBackSurvivesRescan(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -467,6 +473,7 @@ func TestEnrichmentTagWriteBackSurvivesRescan(t *testing.T) {
 // on the next scan and abandon the row's pid, curation, and stars. The value lives in
 // the catalog only; enrichedTagSelect does not carry it.
 func TestMatchedReleaseStaysOffDisk(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -560,6 +567,7 @@ func mergeTags(t *testing.T, path string, spec testaudio.MP3Spec) []byte {
 // half of retiring a downstream by-name sweep. The identity phases stay off, so nothing
 // reaches MusicBrainz, and the artist is reached by name.
 func TestEnrichWithoutContactRunsInjectedProvider(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -612,6 +620,7 @@ func TestEnrichWithoutContactRunsInjectedProvider(t *testing.T) {
 // album's LABEL fans across every member (it lives on the album row, so it rides its own
 // path), and a book's DATE and narrator land on the book's file.
 func TestEnrichmentWritesTheNewFillsToDisk(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -687,6 +696,7 @@ func TestEnrichmentWritesTheNewFillsToDisk(t *testing.T) {
 // and a forced rescan reads them back onto the same item. edition feeds the identity key,
 // so the write has to re-anchor the book or the rescan would resolve a fresh one.
 func TestEnrichmentWritesBookFieldsToDisk(t *testing.T) {
+	t.Parallel()
 	const blurb = "Bilbo Baggins is a hobbit who enjoys a comfortable life."
 	ctx := context.Background()
 	root := t.TempDir()
@@ -778,6 +788,7 @@ func TestEnrichmentWritesBookFieldsToDisk(t *testing.T) {
 // which the write-back's own drift rows arrange: one file through the item path with
 // its bpm and the album label folded in, the other through the label fan-out alone.
 func TestEnrichmentWriteBackRetriesOnTheNextPass(t *testing.T) {
+	t.Parallel()
 	if os.Geteuid() == 0 {
 		t.Skip("root ignores the read-only bit, so the writes would succeed")
 	}
@@ -895,6 +906,7 @@ func TestEnrichmentWriteBackRetriesOnTheNextPass(t *testing.T) {
 // with it off has nothing new to fill when it is turned on, and the pass still writes
 // every value that never reached its file, once.
 func TestEnrichmentWriteTagsCatchesUpAfterAPassWithoutIt(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -973,6 +985,7 @@ func TestEnrichmentWriteTagsCatchesUpAfterAPassWithoutIt(t *testing.T) {
 // scope and nothing beyond it, so an item's "enrich now" cannot turn into a rewrite of
 // every catalog-only value in the library. The rest stays owed for a full run.
 func TestEnrichmentScopedWriteTagsStaysScoped(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -1045,6 +1058,7 @@ func TestEnrichmentScopedWriteTagsStaysScoped(t *testing.T) {
 // looked up and nothing beyond them, so a pacing run cannot turn into a rewrite of
 // every catalog-only value in the library. The rest waits for an unlimited run.
 func TestEnrichmentLimitedWriteTagsWritesWhatItLookedUp(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -1120,6 +1134,7 @@ func TestEnrichmentLimitedWriteTagsWritesWhatItLookedUp(t *testing.T) {
 // back only what is owed on the targets those phases walked, as a limited run does, so
 // asking for artist art alone does not rewrite every file owing a catalog-only value.
 func TestEnrichmentPhaseListWriteTagsStaysInItsReach(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -1173,6 +1188,7 @@ func TestEnrichmentPhaseListWriteTagsStaysInItsReach(t *testing.T) {
 // TestEnrichJobNamesItsTarget: a scoped enrichment records the item or entity it was
 // scoped to on its job row, and an unscoped one records nothing.
 func TestEnrichJobNamesItsTarget(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, "a.mp3"), testaudio.BuildMP3("One", "Pink Floyd", "Animals", 1))
@@ -1228,6 +1244,7 @@ func TestEnrichJobNamesItsTarget(t *testing.T) {
 // TestStartEnrichTakesItsPhasesAtTheCall: the background run walks the phases it was
 // started with, however the caller reuses its slice afterwards.
 func TestStartEnrichTakesItsPhasesAtTheCall(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, "a.mp3"), testaudio.BuildMP3("One", "Pink Floyd", "Animals", 1))
@@ -1257,6 +1274,7 @@ func TestStartEnrichTakesItsPhasesAtTheCall(t *testing.T) {
 // consults the list the hook hands back at that moment, the provenance names the provider
 // that answered, and a hook that leaves nothing to run refuses the pass.
 func TestEnrichmentProviderListFacade(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -1338,6 +1356,7 @@ func TestEnrichmentProviderListFacade(t *testing.T) {
 // TestOpenDropsANilEnrichmentProvider: a nil slot in Options.EnrichmentProviders is an
 // embedder's slip the engine drops, not a panic out of Open.
 func TestOpenDropsANilEnrichmentProvider(t *testing.T) {
+	t.Parallel()
 	lib, err := waxbin.Open(context.Background(), waxbin.Options{
 		DBPath:              filepath.Join(t.TempDir(), "catalog.db"),
 		EnrichmentProviders: []enrich.Provider{nil},
@@ -1352,6 +1371,7 @@ func TestOpenDropsANilEnrichmentProvider(t *testing.T) {
 }
 
 func TestEnrichmentBuiltinsFacade(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	names := func(ps []enrich.Provider) string {
 		out := make([]string, len(ps))
@@ -1388,6 +1408,7 @@ func TestEnrichmentBuiltinsFacade(t *testing.T) {
 // an embedder's status screen shows what its own install runs rather than a copy of the
 // gating.
 func TestEnrichmentPhasesFacade(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	open := func(t *testing.T, opts waxbin.Options) *waxbin.Library {
 		t.Helper()
@@ -1421,6 +1442,7 @@ func TestEnrichmentPhasesFacade(t *testing.T) {
 // TestDoctorReportsEnrichmentPhases: doctor carries the phase list beside the enabled
 // flag, so the report says what this build runs.
 func TestDoctorReportsEnrichmentPhases(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	lyrics := &enrich.Mock{ProviderName: "lyrics", Caps: enrich.CapLyrics}
 	lib, err := waxbin.Open(ctx, waxbin.Options{

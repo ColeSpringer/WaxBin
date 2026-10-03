@@ -12,6 +12,7 @@ import (
 // directly keeps the behaviour it had; the facade is what turns an unset config key into
 // the 30 day default, and an explicit 0 back into never.
 func TestEnrichConfigRetryWindow(t *testing.T) {
+	t.Parallel()
 	days := func(n int) *int { return &n }
 	cases := []struct {
 		name string

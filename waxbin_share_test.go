@@ -60,6 +60,7 @@ func scanLib(t *testing.T, ctx context.Context, lib *waxbin.Library) {
 // across two catalogs, a bogus essence misses, and when the same bytes back two
 // different-kind items the rung is disambiguated by ref.Kind.
 func TestResolveRefEssence(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 
 	// Catalog A holds the source rip; export its portable ref.
@@ -134,6 +135,7 @@ func TestResolveRefEssence(t *testing.T) {
 // same recording (a transcode with different bytes) resolves by fingerprint, while an
 // algorithm mismatch and a too-short fingerprint both fall through cleanly.
 func TestResolveRefFingerprint(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	const rate = 22050
 	orig := testaudio.RichSignal(rate, 20, testaudio.MusicalPartials, 1)
@@ -211,6 +213,7 @@ func TestResolveRefFingerprint(t *testing.T) {
 // tie-breaker (not a filter), a duration off by more than the tolerance misses, an empty
 // artist skips the rung, and more than one survivor is resolved only by a unique album.
 func TestResolveRefDescriptive(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "b.db")
@@ -279,6 +282,7 @@ func TestResolveRefDescriptive(t *testing.T) {
 // TestResolveRefBook covers the book path: essence exact, the strong-id rung (an
 // enrichment-set ASIN), and the descriptive rung (author + title).
 func TestResolveRefBook(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "b.db")
@@ -320,6 +324,7 @@ func TestResolveRefBook(t *testing.T) {
 // TestResolveRefStrongIDTrack drives the track recording-MBID rung end-to-end through the
 // facade, with the id injected as enrichment would set it.
 func TestResolveRefStrongIDTrack(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "b.db")
@@ -341,6 +346,7 @@ func TestResolveRefStrongIDTrack(t *testing.T) {
 // TestPlaylistRefRoundTrip exports a mixed-kind playlist and resolves it in another
 // catalog, checking that order and per-entry rung survive a present/absent mix.
 func TestPlaylistRefRoundTrip(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 
 	// Source catalog: a track and a book.
@@ -390,6 +396,7 @@ func TestPlaylistRefRoundTrip(t *testing.T) {
 // essence is reported under DupSkip AND under DupAllow (independent of policy), and the
 // action's Outcome still conveys skipped-vs-imported.
 func TestImportAcquiredAlreadyPresent(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	acq := t.TempDir()
@@ -479,6 +486,7 @@ func TestImportAcquiredAlreadyPresent(t *testing.T) {
 // TestResolveRefReadOnly verifies all three facade methods work on a read-only Library
 // (pure reads, no change_log writes).
 func TestResolveRefReadOnly(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "b.db")

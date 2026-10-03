@@ -82,6 +82,7 @@ func scanAll(t *testing.T, sc *Scanner, lib *model.Library, force bool) *Result 
 // TestFastPathSkipsUnchanged verifies a rescan of an untouched tree parses nothing
 // and reports every file as unchanged.
 func TestFastPathSkipsUnchanged(t *testing.T) {
+	t.Parallel()
 	_, lib, sc, cr, root := fastPathFixture(t)
 	writeMP3(t, filepath.Join(root, "a.mp3"), "A", 1)
 	writeMP3(t, filepath.Join(root, "b.mp3"), "B", 2)
@@ -107,6 +108,7 @@ func TestFastPathSkipsUnchanged(t *testing.T) {
 // TestFastPathReprocessesOnTouch verifies a changed mtime OR size re-parses just
 // that file.
 func TestFastPathReprocessesOnTouch(t *testing.T) {
+	t.Parallel()
 	_, lib, sc, cr, root := fastPathFixture(t)
 	a := filepath.Join(root, "a.mp3")
 	writeMP3(t, a, "A", 1)
@@ -130,6 +132,7 @@ func TestFastPathReprocessesOnTouch(t *testing.T) {
 
 // TestFastPathForce re-parses everything under --force.
 func TestFastPathForce(t *testing.T) {
+	t.Parallel()
 	_, lib, sc, cr, root := fastPathFixture(t)
 	writeMP3(t, filepath.Join(root, "a.mp3"), "A", 1)
 	writeMP3(t, filepath.Join(root, "b.mp3"), "B", 2)
@@ -154,6 +157,7 @@ func TestFastPathForce(t *testing.T) {
 // sidecar just changed, and it stops there: the stat gate short-circuits the next
 // scan, which this test pins below.
 func TestFastPathPicksUpLyricSidecar(t *testing.T) {
+	t.Parallel()
 	st, lib, sc, cr, root := fastPathFixture(t)
 	a := filepath.Join(root, "a.mp3")
 	writeMP3(t, a, "A", 1)
@@ -212,6 +216,7 @@ func TestFastPathPicksUpLyricSidecar(t *testing.T) {
 // TestFastPathReconcilesDelete marks an item missing when its file is deleted, with
 // the other file present (above the survival floor).
 func TestFastPathReconcilesDelete(t *testing.T) {
+	t.Parallel()
 	st, lib, sc, _, root := fastPathFixture(t)
 	a := filepath.Join(root, "a.mp3")
 	writeMP3(t, a, "A", 1)
@@ -234,6 +239,7 @@ func TestFastPathReconcilesDelete(t *testing.T) {
 // TestSurvivalGateEmptyRoot: a root that exists but has no files leaves every row
 // intact (the transient-mount-loss guard).
 func TestSurvivalGateEmptyRoot(t *testing.T) {
+	t.Parallel()
 	st, lib, sc, _, root := fastPathFixture(t)
 	writeMP3(t, filepath.Join(root, "a.mp3"), "A", 1)
 	writeMP3(t, filepath.Join(root, "b.mp3"), "B", 2)
@@ -259,6 +265,7 @@ func TestSurvivalGateEmptyRoot(t *testing.T) {
 // TestSurvivalGateBelowFloor: seeing fewer than half the known files skips
 // reconciliation, keeping the vanished ones present until a healthier scan.
 func TestSurvivalGateBelowFloor(t *testing.T) {
+	t.Parallel()
 	st, lib, sc, _, root := fastPathFixture(t)
 	writeMP3(t, filepath.Join(root, "a.mp3"), "A", 1)
 	writeMP3(t, filepath.Join(root, "b.mp3"), "B", 2)
@@ -286,6 +293,7 @@ func TestSurvivalGateBelowFloor(t *testing.T) {
 // same size+mtime, must be reprocessed back to present (not left missing by a
 // fast-path skip).
 func TestFastPathRestoresMissingItem(t *testing.T) {
+	t.Parallel()
 	st, lib, sc, _, root := fastPathFixture(t)
 	a := filepath.Join(root, "a.mp3")
 	writeMP3(t, a, "A", 1)
@@ -337,6 +345,7 @@ func TestFastPathRestoresMissingItem(t *testing.T) {
 // TestFastPathReconcilesDeletedLyricSidecar: deleting a .lrc over unchanged audio is
 // reconciled (lyrics reverting to embedded, here none, so cleared).
 func TestFastPathReconcilesDeletedLyricSidecar(t *testing.T) {
+	t.Parallel()
 	st, lib, sc, _, root := fastPathFixture(t)
 	ctx := context.Background()
 	a := filepath.Join(root, "a.mp3")
@@ -365,6 +374,7 @@ func TestFastPathReconcilesDeletedLyricSidecar(t *testing.T) {
 // cover is cheap (false), while a changed or newly-appeared cover reports true (so
 // the caller routes through the full path and resolveCover keeps embedded precedence).
 func TestCoverChangedFast(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	writeJPEG(t, filepath.Join(dir, "cover.jpg"), 40, 40)
 	audio := filepath.Join(dir, "a.mp3")
@@ -410,6 +420,7 @@ func currentItemPID(t *testing.T, st *sqlite.Store, title string) model.PID {
 // TestForceReconcileRecoversLargeDeletion: a >50% deletion is skipped by the
 // survival gate, but ForceReconcile reconciles it (the recovery path).
 func TestForceReconcileRecoversLargeDeletion(t *testing.T) {
+	t.Parallel()
 	st, lib, sc, _, root := fastPathFixture(t)
 	writeMP3(t, filepath.Join(root, "a.mp3"), "A", 1)
 	writeMP3(t, filepath.Join(root, "b.mp3"), "B", 2)
@@ -448,6 +459,7 @@ func TestForceReconcileRecoversLargeDeletion(t *testing.T) {
 // TestFastPathEmptiedLyricSidecar: a .lrc edited to no usable synced lines reverts
 // to embedded (here none, so cleared), like the full path, not left stale.
 func TestFastPathEmptiedLyricSidecar(t *testing.T) {
+	t.Parallel()
 	st, lib, sc, _, root := fastPathFixture(t)
 	ctx := context.Background()
 	writeMP3(t, filepath.Join(root, "a.mp3"), "A", 1)
@@ -477,6 +489,7 @@ func TestFastPathEmptiedLyricSidecar(t *testing.T) {
 // reconciled once (full path), later scans fast-path it again (the vanished aux row
 // was pruned, so the file is not re-hashed forever).
 func TestFastPathDeletedSidecarNotForeverFull(t *testing.T) {
+	t.Parallel()
 	_, lib, sc, cr, root := fastPathFixture(t)
 	writeMP3(t, filepath.Join(root, "a.mp3"), "A", 1)
 	lrc := filepath.Join(root, "a.lrc")
@@ -510,6 +523,7 @@ func TestFastPathDeletedSidecarNotForeverFull(t *testing.T) {
 // change with unchanged audio still emits an item change_log delta so consumers
 // don't serve stale lyrics.
 func TestFullPathLyricsOnlyEmitsDelta(t *testing.T) {
+	t.Parallel()
 	st, lib, sc, _, root := fastPathFixture(t)
 	writeMP3(t, filepath.Join(root, "a.mp3"), "A", 1)
 	scanAll(t, sc, lib, false)
@@ -552,6 +566,7 @@ func itemStateByPID(t *testing.T, st *sqlite.Store, pid model.PID) string {
 // run, and the stale lyrics_partial row would live on, which is the staleness the
 // diagnostics design exists to prevent.
 func TestLyricsPartialDiagnosticClearsOnRepair(t *testing.T) {
+	t.Parallel()
 	st, lib, sc, _, root := fastPathFixture(t)
 	a := filepath.Join(root, "a.mp3")
 	writeMP3(t, a, "A", 1)
@@ -604,6 +619,7 @@ func TestLyricsPartialDiagnosticClearsOnRepair(t *testing.T) {
 // corrupt_audio verdict in the catalog, from WaxLabel's frame-tail walk against
 // STREAMINFO, before analyze has decoded it, and an intact copy carries none.
 func TestScanRecordsATruncatedFLAC(t *testing.T) {
+	t.Parallel()
 	st, lib, sc, _, root := fastPathFixture(t)
 	const rate = 8000
 	flac := testaudio.EncodeAs(t, "flac", "", rate, testaudio.ReferenceSignal(rate, 4*time.Second))
@@ -628,6 +644,7 @@ func TestScanRecordsATruncatedFLAC(t *testing.T) {
 // whole into memory before any parser sees it, so the bound must be on the read, not
 // the parse, since a parser-side line cap never protected anything.
 func TestOversizedSidecarSkipped(t *testing.T) {
+	t.Parallel()
 	st, lib, sc, _, root := fastPathFixture(t)
 	a := filepath.Join(root, "a.mp3")
 	writeMP3(t, a, "A", 1)
@@ -681,6 +698,7 @@ func TestOversizedSidecarSkipped(t *testing.T) {
 // and every scan re-routes to the full path and re-hashes the audio. It is the same
 // trap the directory-cover stat fallback already exists to avoid.
 func TestOversizedSidecarDoesNotChurn(t *testing.T) {
+	t.Parallel()
 	_, lib, sc, cr, root := fastPathFixture(t)
 	writeMP3(t, filepath.Join(root, "a.mp3"), "A", 1)
 	scanAll(t, sc, lib, false)
@@ -720,6 +738,7 @@ func TestOversizedSidecarDoesNotChurn(t *testing.T) {
 // stat-only observation so the fast path stops re-routing to the full path and a
 // diagnostic so the skip stays visible, but it contributes no chapters.
 func TestOversizedCueSidecarSkipped(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	audio := filepath.Join(dir, "book.m4b")
 
@@ -766,6 +785,7 @@ func TestOversizedCueSidecarSkipped(t *testing.T) {
 // a chapterless one routes to the full path, so if its observation is recorded only
 // for books, the track re-parses and re-hashes its audio on every scan.
 func TestChapterlessCueOnTrackDoesNotChurn(t *testing.T) {
+	t.Parallel()
 	_, lib, sc, cr, root := fastPathFixture(t)
 	a := filepath.Join(root, "a.mp3")
 	writeMP3(t, a, "A", 1)
@@ -790,6 +810,7 @@ func TestChapterlessCueOnTrackDoesNotChurn(t *testing.T) {
 // TestForcedRescanCountsRederivedEditAsUpdated: a forced rescan of an unchanged file
 // that re-derives a catalog-only edit changed the item, so the scan says so.
 func TestForcedRescanCountsRederivedEditAsUpdated(t *testing.T) {
+	t.Parallel()
 	st, lib, sc, _, root := fastPathFixture(t)
 	ctx := context.Background()
 	writeMP3(t, filepath.Join(root, "a.mp3"), "A", 1)
@@ -814,6 +835,7 @@ func TestForcedRescanCountsRederivedEditAsUpdated(t *testing.T) {
 // file tagged with any of the three takes nothing, and a library that has not opted in
 // takes nothing from its folders.
 func TestFolderFallbackNamesUntaggedFiles(t *testing.T) {
+	t.Parallel()
 	st, lib, sc, _, root := fastPathFixture(t)
 	ctx := context.Background()
 	put := func(rel string, spec testaudio.MP3Spec, seed byte) {
@@ -888,6 +910,7 @@ func TestFolderFallbackNamesUntaggedFiles(t *testing.T) {
 // TestSortNameFallbackIsAFilterableDiagnostic: the scan stores the fallback's
 // diagnostic, and a query by its code finds it rather than refusing an unknown code.
 func TestSortNameFallbackIsAFilterableDiagnostic(t *testing.T) {
+	t.Parallel()
 	st, lib, sc, _, root := fastPathFixture(t)
 	ctx := context.Background()
 	p := filepath.Join(root, "07 - Untagged Song.mp3")
@@ -908,6 +931,7 @@ func TestSortNameFallbackIsAFilterableDiagnostic(t *testing.T) {
 // the album, so the album and artist come from the two folders above it, and the discs
 // land the way tagged discs in their own folders do: one album.
 func TestFolderFallbackClimbsDiscFolders(t *testing.T) {
+	t.Parallel()
 	st, lib, sc, _, root := fastPathFixture(t)
 	ctx := context.Background()
 	for i, rel := range []string{"Pink Floyd/The Wall (1979)/CD1/01 In the Flesh.mp3", "Pink Floyd/The Wall (1979)/Disc 2/01 Hey You.mp3"} {

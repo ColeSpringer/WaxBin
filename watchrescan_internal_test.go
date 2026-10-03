@@ -15,6 +15,7 @@ import (
 // copy into a vanished primary's place reports a change, so the watcher's analyze pass
 // runs for the promoted file.
 func TestWatchRescanCountsAPromotionAsAChange(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	lib, err := Open(ctx, Options{DBPath: filepath.Join(t.TempDir(), "catalog.db"),

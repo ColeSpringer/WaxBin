@@ -80,6 +80,7 @@ func bookSpecInput(libID int64, s bookSpec) model.PutScannedBookInput {
 // the book missing. resolveScannedFile serves the virtual-track path too, so this covers
 // both.
 func TestPutScannedBookRelinksOnMove(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 
 	first := putBook(t, st, lib.ID, bookSpec{
@@ -108,6 +109,7 @@ func TestPutScannedBookRelinksOnMove(t *testing.T) {
 }
 
 func TestPutScannedBookSingleFile(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 
@@ -180,6 +182,7 @@ func TestPutScannedBookSingleFile(t *testing.T) {
 }
 
 func TestMultiFileBookGrouping(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 
@@ -244,6 +247,7 @@ func TestMultiFileBookGrouping(t *testing.T) {
 }
 
 func TestMultiFileBookRescanIsStable(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 
 	spec := bookSpec{
@@ -267,6 +271,7 @@ func TestMultiFileBookRescanIsStable(t *testing.T) {
 }
 
 func TestBooksInSeriesOrdering(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 
@@ -303,6 +308,7 @@ func TestBooksInSeriesOrdering(t *testing.T) {
 }
 
 func TestBookSearchAndFacet(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 
@@ -350,6 +356,7 @@ func mustItemPID(t *testing.T, st *Store, title string) model.PID {
 }
 
 func TestMultiFileBookGenreRollupDuration(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 
@@ -377,6 +384,7 @@ func TestMultiFileBookGenreRollupDuration(t *testing.T) {
 }
 
 func TestMultiFileBookEmptyMiddlePart(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 
@@ -417,6 +425,7 @@ func TestMultiFileBookEmptyMiddlePart(t *testing.T) {
 }
 
 func TestTrackEntityExcludesBooks(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/m/a.flac", essence: "te1", content: "tc1", title: "Song", artist: "Band"})
@@ -446,6 +455,7 @@ func TestTrackEntityExcludesBooks(t *testing.T) {
 }
 
 func TestBookMatchesItemFilters(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putBook(t, st, lib.ID, bookSpec{
@@ -482,6 +492,7 @@ func TestBookMatchesItemFilters(t *testing.T) {
 }
 
 func TestMultiFileBookEmitsItemUpdateOnNewPart(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	r1 := putBook(t, st, lib.ID, bookSpec{
@@ -515,6 +526,7 @@ func TestMultiFileBookEmitsItemUpdateOnNewPart(t *testing.T) {
 }
 
 func TestMultiFileBookMetadataOwnedByPrimary(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	// Part 1 is scanned first, so it becomes the primary and owns the book metadata.
@@ -550,6 +562,7 @@ func TestMultiFileBookMetadataOwnedByPrimary(t *testing.T) {
 }
 
 func TestNaturalPartOrdering(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	// Parts with no track numbers (position 0) and un-zero-padded names. Natural
@@ -576,6 +589,7 @@ func TestNaturalPartOrdering(t *testing.T) {
 }
 
 func TestPromotePrimaryOnDetach(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	r1 := putBook(t, st, lib.ID, bookSpec{
@@ -610,6 +624,7 @@ func TestPromotePrimaryOnDetach(t *testing.T) {
 // stale, the book reads back with a running time it no longer has and `db verify`
 // reports drift a rescan cannot clear, since the file it would re-read is gone.
 func TestArchivedBookShedsItsDuration(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	r1 := putBook(t, st, lib.ID, bookSpec{
@@ -661,6 +676,7 @@ func TestArchivedBookShedsItsDuration(t *testing.T) {
 // `db verify --fix` runs RefreshRollups, and without this it reported drift it could
 // not clear.
 func TestRefreshRollupsRepairsBookDuration(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	r := putBook(t, st, lib.ID, bookSpec{
@@ -699,6 +715,7 @@ func TestRefreshRollupsRepairsBookDuration(t *testing.T) {
 }
 
 func TestZeroDurationPartAdvancesTimeline(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	// Part 1 has an unknown (0) duration but a chapter that ends at 500ms; part 2's
@@ -726,6 +743,7 @@ func TestZeroDurationPartAdvancesTimeline(t *testing.T) {
 }
 
 func TestStatsAndBrowseIncludeBooks(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	res := putBook(t, st, lib.ID, bookSpec{
@@ -759,6 +777,7 @@ func TestStatsAndBrowseIncludeBooks(t *testing.T) {
 }
 
 func TestRekeyNonPrimaryPartLeavesNoDanglingEdge(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	r1 := putBook(t, st, lib.ID, bookSpec{
@@ -795,6 +814,7 @@ func TestRekeyNonPrimaryPartLeavesNoDanglingEdge(t *testing.T) {
 }
 
 func TestBookTotalCoversChapterSpan(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putBook(t, st, lib.ID, bookSpec{
@@ -827,6 +847,7 @@ func TestBookTotalCoversChapterSpan(t *testing.T) {
 }
 
 func TestTrashDetachEmitsItemUpdate(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	r1 := putBook(t, st, lib.ID, bookSpec{
@@ -860,6 +881,7 @@ func TestTrashDetachEmitsItemUpdate(t *testing.T) {
 }
 
 func TestStatsArtistCountMatchesFacet(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putBook(t, st, lib.ID, bookSpec{
@@ -892,6 +914,7 @@ func TestStatsArtistCountMatchesFacet(t *testing.T) {
 // back with a real [start, end) span and the list round-trips through
 // SetItemChapters, which refuses equal starts.
 func TestEqualStartChaptersCollapse(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	r := putBook(t, st, lib.ID, bookSpec{
@@ -928,6 +951,7 @@ func TestEqualStartChaptersCollapse(t *testing.T) {
 // book as an alternate of that part, so the parts, the chapter timeline and the running
 // time read as before, and the copy is diagnosed against the part it copies.
 func TestBookPartCopyIsAnAlternate(t *testing.T) {
+	t.Parallel()
 	st, _ := entityFixture(t)
 	ctx := context.Background()
 	root := t.TempDir()
@@ -1010,6 +1034,7 @@ func TestBookPartCopyIsAnAlternate(t *testing.T) {
 // missing stays an alternate (mid-walk the part may have moved), and reconciling the gone
 // part is what puts the copy in its place.
 func TestBookPartCopyWaitsForReconciliation(t *testing.T) {
+	t.Parallel()
 	st, _ := entityFixture(t)
 	ctx := context.Background()
 	root := t.TempDir()
@@ -1063,6 +1088,7 @@ func TestBookPartCopyWaitsForReconciliation(t *testing.T) {
 // copy, at the part's position and without the copy's diagnostic, and a copy of another
 // part never stands in for it.
 func TestBookPartCopyPromotedWhenThePartIsTrashed(t *testing.T) {
+	t.Parallel()
 	st, _ := entityFixture(t)
 	ctx := context.Background()
 	root := t.TempDir()
@@ -1119,6 +1145,7 @@ func TestBookPartCopyPromotedWhenThePartIsTrashed(t *testing.T) {
 // place, part 2's copy is still the same audio as part 2 and names it, not the new
 // primary.
 func TestBookPartCopyDiagnosticsFollowTheirPart(t *testing.T) {
+	t.Parallel()
 	st, _ := entityFixture(t)
 	ctx := context.Background()
 	root := t.TempDir()
@@ -1158,6 +1185,7 @@ func TestBookPartCopyDiagnosticsFollowTheirPart(t *testing.T) {
 // TestBookPartCopyIsNotAnalyzed: a copy of any part, not only the primary's, holds audio
 // the book already measures, so the analyze pass leaves it out.
 func TestBookPartCopyIsNotAnalyzed(t *testing.T) {
+	t.Parallel()
 	st, _ := entityFixture(t)
 	ctx := context.Background()
 	root := t.TempDir()
@@ -1191,6 +1219,7 @@ func TestBookPartCopyIsNotAnalyzed(t *testing.T) {
 // became alternates (the book doubled its running time) folds into an alternate of its
 // part when it is read again.
 func TestBookDoubledPartFoldsOnRescan(t *testing.T) {
+	t.Parallel()
 	st, _ := entityFixture(t)
 	ctx := context.Background()
 	root := t.TempDir()
@@ -1259,6 +1288,7 @@ func TestBookDoubledPartFoldsOnRescan(t *testing.T) {
 // part can be matched to it) stays an alternate of its book, rather than failing on the
 // missing twin or becoming a second part of the same audio.
 func TestBookCopyReadWithoutAnEssence(t *testing.T) {
+	t.Parallel()
 	st, _ := entityFixture(t)
 	ctx := context.Background()
 	root := t.TempDir()
@@ -1297,6 +1327,7 @@ func TestBookCopyReadWithoutAnEssence(t *testing.T) {
 // the part back on disk the copy attaches as an alternate. Either way the book is present
 // again and emits an update.
 func TestBookCopyRevivesAMissingBook(t *testing.T) {
+	t.Parallel()
 	st, _ := entityFixture(t)
 	ctx := context.Background()
 	newLib := func() (*model.Library, string) {
@@ -1367,6 +1398,7 @@ func TestBookCopyRevivesAMissingBook(t *testing.T) {
 // TestItemsWithCopiesReasons: a copy of a book part is the same audio, though it is not
 // the primary's, and the item lists its parts before its alternates.
 func TestItemsWithCopiesReasons(t *testing.T) {
+	t.Parallel()
 	st, _ := entityFixture(t)
 	ctx := context.Background()
 	root := t.TempDir()
@@ -1418,6 +1450,7 @@ func encodedPart(libID int64, path, essence, codec string, pos int, durationMS i
 // one part and its other encoding whichever is read first: the better encoding is the part,
 // the book runs as long as one of them, and the lesser one is diagnosed against it.
 func TestBookPartEncodingsMakeOnePart(t *testing.T) {
+	t.Parallel()
 	for _, flacFirst := range []bool{true, false} {
 		st, _ := entityFixture(t)
 		ctx := context.Background()
@@ -1470,6 +1503,7 @@ func TestBookPartEncodingsMakeOnePart(t *testing.T) {
 // TestBookPartEncodingOfAnotherLengthIsAPart: two files at one position whose running
 // times differ are two parts, not one part in two encodings.
 func TestBookPartEncodingOfAnotherLengthIsAPart(t *testing.T) {
+	t.Parallel()
 	st, _ := entityFixture(t)
 	ctx := context.Background()
 	lib, file := diskLibrary(t, st)
@@ -1493,6 +1527,7 @@ func TestBookPartEncodingOfAnotherLengthIsAPart(t *testing.T) {
 // TestBookPartEncodingTakesTheLostPartsPlace: when a part leaves its book, another
 // encoding of it the book holds takes its place rather than leaving a gap.
 func TestBookPartEncodingTakesTheLostPartsPlace(t *testing.T) {
+	t.Parallel()
 	st, _ := entityFixture(t)
 	ctx := context.Background()
 	lib, file := diskLibrary(t, st)
@@ -1548,6 +1583,7 @@ func TestBookPartEncodingTakesTheLostPartsPlace(t *testing.T) {
 // waits as an alternate, and the MP3 read again at its new path yields the part to it,
 // so the walk order does not decide which encoding is the part.
 func TestBookPartYieldsToABetterEncodingOnDisk(t *testing.T) {
+	t.Parallel()
 	st, _ := entityFixture(t)
 	ctx := context.Background()
 	lib, file := diskLibrary(t, st)
@@ -1605,6 +1641,7 @@ func listBooks(t *testing.T, st *Store) []model.PID {
 // long are still parts, whether a splitter copied track 1 onto every file or they are
 // back matter that all sorts last; only another encoding of a part is its alternate.
 func TestBookPartsNumberedAlikeStayParts(t *testing.T) {
+	t.Parallel()
 	st, _ := entityFixture(t)
 	ctx := context.Background()
 	lib, file := diskLibrary(t, st)
@@ -1637,6 +1674,7 @@ func TestBookPartsNumberedAlikeStayParts(t *testing.T) {
 // position, in disc folders the scan does not read as discs, are two parts: the same codec
 // never makes one an encoding of the other.
 func TestBookPartsInUnrecognizedDiscFoldersStayParts(t *testing.T) {
+	t.Parallel()
 	st, _ := entityFixture(t)
 	ctx := context.Background()
 	lib, file := diskLibrary(t, st)
@@ -1659,6 +1697,7 @@ func TestBookPartsInUnrecognizedDiscFoldersStayParts(t *testing.T) {
 // TestBookPartWithAnUnknownCodecIsAPart: a file whose codec was never recorded is no
 // encoding apart from another, so two parts sharing a number stay two parts.
 func TestBookPartWithAnUnknownCodecIsAPart(t *testing.T) {
+	t.Parallel()
 	st, _ := entityFixture(t)
 	ctx := context.Background()
 	lib, file := diskLibrary(t, st)
@@ -1681,6 +1720,7 @@ func TestBookPartWithAnUnknownCodecIsAPart(t *testing.T) {
 // TestUnnumberedBookEncodingsMakeOnePart: a single-file book with no part number, in two
 // encodings, is one part and its alternate, not two parts of twice the length.
 func TestUnnumberedBookEncodingsMakeOnePart(t *testing.T) {
+	t.Parallel()
 	st, _ := entityFixture(t)
 	ctx := context.Background()
 	lib, file := diskLibrary(t, st)
@@ -1705,6 +1745,7 @@ func TestUnnumberedBookEncodingsMakeOnePart(t *testing.T) {
 // gone waits as an alternate, and the scan's reconciliation of the gone part puts it in
 // the part's place.
 func TestMissingPartHandsItsPlaceToAnEncoding(t *testing.T) {
+	t.Parallel()
 	st, _ := entityFixture(t)
 	ctx := context.Background()
 	lib, file := diskLibrary(t, st)
@@ -1739,6 +1780,7 @@ func TestMissingPartHandsItsPlaceToAnEncoding(t *testing.T) {
 // its position only when it runs as long, so a file of another length waits there as an
 // alternate rather than standing in for audio it does not hold.
 func TestBookPartLossSkipsAnAlternateOfAnotherLength(t *testing.T) {
+	t.Parallel()
 	st, _ := entityFixture(t)
 	ctx := context.Background()
 	lib, file := diskLibrary(t, st)
@@ -1781,6 +1823,7 @@ func TestBookPartLossSkipsAnAlternateOfAnotherLength(t *testing.T) {
 // missing book, arriving from an item of its own, leaves the book's places alone, since
 // the timeline holds the same audio as before.
 func TestCopyTakingAGonePartsPlaceMovesNoPlace(t *testing.T) {
+	t.Parallel()
 	st, _ := entityFixture(t)
 	ctx := context.Background()
 	lib, file := diskLibrary(t, st)
@@ -1811,6 +1854,7 @@ func TestCopyTakingAGonePartsPlaceMovesNoPlace(t *testing.T) {
 // item (its file now a cue rip) takes no place along, and a place inside it moves to where
 // it started rather than into the next part's audio.
 func TestPartLeavingForNoItemLeavesItsPlacesAtItsStart(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	var book model.PID

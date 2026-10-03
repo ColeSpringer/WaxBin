@@ -50,6 +50,7 @@ func setReadOnly(t *testing.T, ctx context.Context, lib *waxbin.Library, pid mod
 // the catalog and leaves the file alone, reported and queued for review with its value
 // still owed; once the flag clears, the next edit writes the file and pays it.
 func TestReadOnlyLibraryRefusesTheTagWriteBack(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	src := filepath.Join(root, "song.mp3")
@@ -95,6 +96,7 @@ func TestReadOnlyLibraryRefusesTheTagWriteBack(t *testing.T) {
 // read-only library lands in the catalog alone, with the refusal queued for review and the
 // value owed, and once the flag clears the same set writes the file and pays it.
 func TestReadOnlyLibraryRefusesTheCustomTagWriteBack(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	src := filepath.Join(root, "song.mp3")
@@ -147,6 +149,7 @@ func TestReadOnlyLibraryRefusesTheCustomTagWriteBack(t *testing.T) {
 // writes the writable library's files and leaves the read-only one's owed, and the
 // first pass after the flag clears writes those.
 func TestEnrichWriteTagsLeavesAReadOnlyLibraryOwed(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	rootA, rootB := t.TempDir(), t.TempDir()
 	srcA, srcB := filepath.Join(rootA, "a.mp3"), filepath.Join(rootB, "b.mp3")
@@ -233,6 +236,7 @@ func twoLibraries(t *testing.T) (lib *waxbin.Library, srcs [2]string, items, lib
 // TestReadOnlyLibraryKeepsItsTrash: files trashed from a library that is now read-only
 // are neither purged nor restored until the flag clears.
 func TestReadOnlyLibraryKeepsItsTrash(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	lib, _, items, libs := twoLibraries(t)
 	plan, err := lib.PlanDeletePIDs(ctx, items[:], model.DeleteTrash)
@@ -277,6 +281,7 @@ func TestReadOnlyLibraryKeepsItsTrash(t *testing.T) {
 // TestReadOnlyLibraryRefusesDeletes: a sweep plans nothing in a read-only library and
 // says so, and naming its item is refused.
 func TestReadOnlyLibraryRefusesDeletes(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	lib, _, items, libs := twoLibraries(t)
 	setReadOnly(t, ctx, lib, libs[1], true)
@@ -295,6 +300,7 @@ func TestReadOnlyLibraryRefusesDeletes(t *testing.T) {
 // TestDeletePlanAppliedAfterTheFlag: a plan built while the library was writable is
 // checked again when applied, and its actions there are skipped.
 func TestDeletePlanAppliedAfterTheFlag(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	lib, srcs, items, libs := twoLibraries(t)
 	plan, err := lib.PlanDeletePIDs(ctx, items[:], model.DeleteTrash)
@@ -314,6 +320,7 @@ func TestDeletePlanAppliedAfterTheFlag(t *testing.T) {
 // TestOrganizeLeavesAReadOnlyLibraryAlone: a plan covers the writable library alone and
 // counts the read-only one it passed over.
 func TestOrganizeLeavesAReadOnlyLibraryAlone(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	lib, _, items, libs := twoLibraries(t)
 	setReadOnly(t, ctx, lib, libs[1], true)
@@ -329,6 +336,7 @@ func TestOrganizeLeavesAReadOnlyLibraryAlone(t *testing.T) {
 // TestOrganizePlanAppliedAfterTheFlag: a plan built while the library was writable is
 // checked again when applied, and its moves there are skipped.
 func TestOrganizePlanAppliedAfterTheFlag(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	lib, srcs, _, libs := twoLibraries(t)
 	plan, err := lib.PlanOrganize(ctx, query.New(query.EntityItems).Build(), waxbin.OrganizeOptions{})
@@ -370,6 +378,7 @@ func openMusicAndMixed(t *testing.T) (*waxbin.Library, [2]model.PID) {
 // rather than sent to the writable mixed one, an acquired track is refused the same
 // way, and so is naming the read-only root as the target.
 func TestImportWaitsOnAReadOnlyLibrary(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	lib, libs := openMusicAndMixed(t)
 	staging := t.TempDir()
@@ -406,6 +415,7 @@ func TestImportWaitsOnAReadOnlyLibrary(t *testing.T) {
 // TestImportPlanAppliedAfterTheFlag: a plan built while its target was writable is
 // checked again when applied, and its files are quarantined in place.
 func TestImportPlanAppliedAfterTheFlag(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root, staging := t.TempDir(), t.TempDir()
 	src := filepath.Join(staging, "song.mp3")
@@ -429,6 +439,7 @@ func TestImportPlanAppliedAfterTheFlag(t *testing.T) {
 // read-only library quarantines them, at plan time and again when an older plan is
 // applied; a copy may still read them, and an acquired episode is refused.
 func TestImportLeavesAReadOnlyRootsFilesInPlace(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	lib, srcs, _, libs := twoLibraries(t)
 	incoming := filepath.Join(filepath.Dir(srcs[0]), "incoming")
@@ -472,6 +483,7 @@ func TestImportLeavesAReadOnlyRootsFilesInPlace(t *testing.T) {
 // does not matter. A relative path, or one that reaches the read-only root through a
 // symlink, is still a move out of that library.
 func TestImportSourceSpelledAnotherWayStaysInPlace(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	lib, srcs, _, libs := twoLibraries(t)
 	root := filepath.Dir(srcs[0])
@@ -515,6 +527,7 @@ func TestImportSourceSpelledAnotherWayStaysInPlace(t *testing.T) {
 // to the flag too, since a host can call it without going through ImportAcquired. A
 // move out of a read-only library is refused and a copy is not.
 func TestEpisodeFileStaysInAReadOnlyLibrary(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	src := filepath.Join(root, "ep.mp3")
@@ -552,6 +565,7 @@ func TestEpisodeFileStaysInAReadOnlyLibrary(t *testing.T) {
 // TestRoutedImportNamesTheReadOnlyLibrary: a staged track whose only library is
 // read-only is quarantined saying so, not as though no library took tracks.
 func TestRoutedImportNamesTheReadOnlyLibrary(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	music, books, staging := t.TempDir(), t.TempDir(), t.TempDir()
 	lib, err := waxbin.Open(ctx, waxbin.Options{
@@ -582,6 +596,7 @@ func TestRoutedImportNamesTheReadOnlyLibrary(t *testing.T) {
 // library is matched to one by its original path, so it is still kept out of a
 // read-only library's reach.
 func TestTrashEntryWithNoRecordedLibraryIsMatchedByPath(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")

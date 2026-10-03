@@ -14,6 +14,7 @@ import (
 // the duration-weighted album gain, not once per virtual track. Counting it per
 // virtual track over-weights the rip and skews the aggregate.
 func TestAlbumGainDedupsSharedRipFile(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 

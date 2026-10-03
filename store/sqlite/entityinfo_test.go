@@ -74,6 +74,7 @@ func entityInfoFixture(t *testing.T) (*Store, *model.Library) {
 }
 
 func TestEntityByPIDAllKinds(t *testing.T) {
+	t.Parallel()
 	st, lib := entityInfoFixture(t)
 	ctx := context.Background()
 
@@ -156,6 +157,7 @@ func TestEntityByPIDAllKinds(t *testing.T) {
 // so the column had no writer in any catalog. Both read paths are checked, since
 // the batch one is a separate statement.
 func TestSeriesEntityCarriesNoMBID(t *testing.T) {
+	t.Parallel()
 	st, _ := entityInfoFixture(t)
 	ctx := context.Background()
 	pid := entityPIDByName(t, st, "series", "name", "Middle-earth")
@@ -180,6 +182,7 @@ func TestSeriesEntityCarriesNoMBID(t *testing.T) {
 // TestEntityByPIDMatchesFacet pins the lookup's counts to the facet the pid came
 // from: an artist bucket's count and its EntityByPID ItemCount must agree.
 func TestEntityByPIDMatchesFacet(t *testing.T) {
+	t.Parallel()
 	st, _ := entityInfoFixture(t)
 	ctx := context.Background()
 
@@ -210,6 +213,7 @@ func TestEntityByPIDMatchesFacet(t *testing.T) {
 // member: an artist backing items in two libraries reports both, and a book
 // counts under its author (the facet membership rule).
 func TestEntityLibraryPIDsSpanLibraries(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	lib2, err := st.EnsureLibrary(ctx, &model.Library{
@@ -248,6 +252,7 @@ func TestEntityLibraryPIDsSpanLibraries(t *testing.T) {
 // of input order, omits unknown pids, collapses a repeat, and matches EntityByPID
 // field for field across every kind (the divergence guard the plan asks for).
 func TestEntityByPIDs(t *testing.T) {
+	t.Parallel()
 	st, _ := entityInfoFixture(t)
 	ctx := context.Background()
 
@@ -300,6 +305,7 @@ func TestEntityByPIDs(t *testing.T) {
 }
 
 func TestEntityByPIDsEmptyAndBadKind(t *testing.T) {
+	t.Parallel()
 	st, _ := entityInfoFixture(t)
 	ctx := context.Background()
 	if got, err := st.EntityByPIDs(ctx, read.EntityArtist, nil); err != nil || got != nil {
@@ -311,6 +317,7 @@ func TestEntityByPIDsEmptyAndBadKind(t *testing.T) {
 }
 
 func TestEntityByPIDUnknown(t *testing.T) {
+	t.Parallel()
 	st, _ := entityFixture(t)
 	ctx := context.Background()
 	if _, err := st.EntityByPID(ctx, "podcast", "x"); !waxerr.Is(err, waxerr.CodeInvalid) {
@@ -357,6 +364,7 @@ func drainEntityPages(t *testing.T, st *Store, kind read.EntityKind, limit int) 
 // EntityByPIDs hydrates for the same pid. The last is what makes a page row and a
 // looked-up row the same thing by construction rather than by coincidence.
 func TestEntityPageCoversAllOnce(t *testing.T) {
+	t.Parallel()
 	st, _ := entityInfoFixture(t)
 	ctx := context.Background()
 
@@ -397,6 +405,7 @@ func TestEntityPageCoversAllOnce(t *testing.T) {
 // "The Wall" and "Wall" both generate the sort key "wall". Without pid in the keyset
 // comparison a page boundary landing between them would drop one or repeat both.
 func TestEntityPageSharedSortKey(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/1.flac", essence: "e1", content: "c1",
 		title: "A", artist: "X", album: "The Wall"})
@@ -422,6 +431,7 @@ func TestEntityPageSharedSortKey(t *testing.T) {
 }
 
 func TestEntityPageBadInput(t *testing.T) {
+	t.Parallel()
 	st, _ := entityInfoFixture(t)
 	ctx := context.Background()
 	if _, err := st.EntityPage(ctx, "podcast", "", 0); !waxerr.Is(err, waxerr.CodeInvalid) {
@@ -435,6 +445,7 @@ func TestEntityPageBadInput(t *testing.T) {
 // TestEntityInfoAlbumIdentifiers reads back the album's other release identifiers,
 // which scan fills from tags and entity edit can write but nothing could read.
 func TestEntityInfoAlbumIdentifiers(t *testing.T) {
+	t.Parallel()
 	st, _ := entityInfoFixture(t)
 	ctx := context.Background()
 

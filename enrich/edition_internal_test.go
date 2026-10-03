@@ -27,6 +27,7 @@ func editionTarget(media, country string) model.EnrichTarget {
 }
 
 func TestFoldAlnumIsIdempotent(t *testing.T) {
+	t.Parallel()
 	for _, s := range []string{`12" Vinyl`, "CD-R", "Hybrid SACD (CD layer)", "  compact disc ", "8cm CD"} {
 		once := foldAlnum(s)
 		if twice := foldAlnum(once); twice != once {
@@ -38,6 +39,7 @@ func TestFoldAlnumIsIdempotent(t *testing.T) {
 // TestFormatAncestryIsSymmetric: both directions occur in real libraries, and siblings
 // must stay distinct or a 7" and a 12" pressing collapse into one answer.
 func TestFormatAncestryIsSymmetric(t *testing.T) {
+	t.Parallel()
 	compatible := [][2]string{
 		{"Vinyl", `12" Vinyl`},
 		{"Vinyl", "Flexi-disc"},
@@ -72,6 +74,7 @@ func TestFormatAncestryIsSymmetric(t *testing.T) {
 // TestFormatCompatibilityIsReflexiveAndSymmetric runs over the real vocabulary rather
 // than a hand-picked list, which catches a later table entry with a typo in it.
 func TestFormatCompatibilityIsReflexiveAndSymmetric(t *testing.T) {
+	t.Parallel()
 	var vocab []string
 	for f := range mediaVocabulary {
 		vocab = append(vocab, f)
@@ -90,6 +93,7 @@ func TestFormatCompatibilityIsReflexiveAndSymmetric(t *testing.T) {
 }
 
 func TestMediaAlternatives(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		in   string
 		want []string
@@ -120,6 +124,7 @@ func TestMediaAlternatives(t *testing.T) {
 // TestMediaInterpretabilityDropsCodecs pins the codec omission: MEDIA=FLAC describes the
 // file, and mapping it to Digital Media would hand a group's lone digital release a win.
 func TestMediaInterpretabilityDropsCodecs(t *testing.T) {
+	t.Parallel()
 	eds := []releaseEdition{
 		ed("rel-cd", []string{"CD"}),
 		ed("rel-digital", []string{"Digital Media"}),
@@ -142,6 +147,7 @@ func TestMediaInterpretabilityDropsCodecs(t *testing.T) {
 // TestMediaInterpretableFromTheGroupsOwnFormats: the tables are not a coverage ceiling,
 // since a format MusicBrainz adds later interprets once the group is in hand.
 func TestMediaInterpretableFromTheGroupsOwnFormats(t *testing.T) {
+	t.Parallel()
 	alts := mediaAlternatives("Holographic Disc")
 	if mediaInterpretable(alts, nil) {
 		t.Error("a format no table knows should not interpret without the group's formats")
@@ -157,6 +163,7 @@ func TestMediaInterpretableFromTheGroupsOwnFormats(t *testing.T) {
 // as no evidence and never browses its group, which is the one case the group-derived
 // clause above cannot rescue because it runs after the fetch it would have to justify.
 func TestFlatFormatsInterpretBeforeTheFetch(t *testing.T) {
+	t.Parallel()
 	for _, f := range []string{"Cassette", "Blu-ray", "MiniDisc", "8-Track Cartridge", "Shellac"} {
 		if !editionEvidence(editionTarget(f, "")) {
 			t.Errorf("MEDIA=%s should be evidence worth a browse", f)
@@ -171,6 +178,7 @@ func TestFlatFormatsInterpretBeforeTheFetch(t *testing.T) {
 // TestEditionRefusesAMultiFormatRelease is the In Rainbows case: a rule of "the single
 // format equals the tag" would exclude the discbox and hand the answer to the other GB CD.
 func TestEditionRefusesAMultiFormatRelease(t *testing.T) {
+	t.Parallel()
 	g := group(
 		ed("rel-discbox", []string{`12" Vinyl`, "CD", "Enhanced CD"}, "GB"),
 		ed("rel-gb-cd", []string{"CD"}, "GB"),
@@ -188,6 +196,7 @@ func TestEditionRefusesAMultiFormatRelease(t *testing.T) {
 // TestEditionRefusesSiblingPressingsInBothTagDirections is the Nevermind case: sibling
 // pressings stay candidates whichever spelling the library carries.
 func TestEditionRefusesSiblingPressingsInBothTagDirections(t *testing.T) {
+	t.Parallel()
 	g := group(
 		ed("rel-generic", []string{"Vinyl"}, "US"),
 		ed("rel-12a", []string{`12" Vinyl`}, "US"),
@@ -206,6 +215,7 @@ func TestEditionRefusesSiblingPressingsInBothTagDirections(t *testing.T) {
 }
 
 func TestCountryAlternatives(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		in   string
 		want []string
@@ -227,6 +237,7 @@ func TestCountryAlternatives(t *testing.T) {
 // TestCountryPredicateFailsTowardInclusion covers both sides: an album-side XW/XE drops
 // the predicate, a release-side one stays a candidate.
 func TestCountryPredicateFailsTowardInclusion(t *testing.T) {
+	t.Parallel()
 	for _, supra := range []string{"XW", "XE"} {
 		if countryInterpretable(countryAlternatives(supra)) {
 			t.Errorf("album-side %s should drop the country predicate", supra)
@@ -263,6 +274,7 @@ func TestCountryPredicateFailsTowardInclusion(t *testing.T) {
 // TestEditionMatchesOnCountryAlone pins that country alone may fire: it is what a
 // regional pressing turns on, which media cannot express.
 func TestEditionMatchesOnCountryAlone(t *testing.T) {
+	t.Parallel()
 	g := group(
 		ed("rel-us-a", []string{"CD"}, "US"),
 		ed("rel-us-b", []string{"CD"}, "US"),
@@ -284,6 +296,7 @@ func TestEditionMatchesOnCountryAlone(t *testing.T) {
 }
 
 func TestEditionReasonNamesTheEvidence(t *testing.T) {
+	t.Parallel()
 	g := group(
 		ed("rel-gb-cd", []string{"CD"}, "GB"),
 		ed("rel-gb-vinyl", []string{"Vinyl"}, "GB"),
@@ -301,6 +314,7 @@ func TestEditionReasonNamesTheEvidence(t *testing.T) {
 // TestEditionTakesAFreeBarcodeWin: a browse carries barcode anyway, so a barcode unique
 // over the WHOLE group decides first, at no extra request.
 func TestEditionTakesAFreeBarcodeWin(t *testing.T) {
+	t.Parallel()
 	withBarcode := ed("rel-a", []string{"CD"}, "US")
 	withBarcode.Barcode = "0075992739429"
 	g := group(withBarcode, ed("rel-b", []string{"CD"}, "US"))
@@ -314,6 +328,7 @@ func TestEditionTakesAFreeBarcodeWin(t *testing.T) {
 
 // TestEditionRefusesAnIncompleteSet: uniqueness over part of a group is not uniqueness.
 func TestEditionRefusesAnIncompleteSet(t *testing.T) {
+	t.Parallel()
 	overCap := releaseGroupEditions{Count: maxGroupReleases + 1}
 	if id, _, _ := matchEdition(editionTarget("CD", "JP"), overCap); id != "" {
 		t.Errorf("an over-cap group matched %q, want no match", id)
@@ -327,6 +342,7 @@ func TestEditionRefusesAnIncompleteSet(t *testing.T) {
 // TestEditionEvidenceGatesTheFetch: the queue gate fires on a non-empty column, so this
 // is what keeps a MEDIA=FLAC album from spending a browse to learn it says nothing.
 func TestEditionEvidenceGatesTheFetch(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		media, country string
 		want           bool
@@ -349,6 +365,7 @@ func TestEditionEvidenceGatesTheFetch(t *testing.T) {
 // TestUninterpretableInputMatchesAbsentInput states the interpretation invariant as an
 // equivalence. If these diverge, an unreadable tag has become a predicate that excludes.
 func TestUninterpretableInputMatchesAbsentInput(t *testing.T) {
+	t.Parallel()
 	g := group(
 		ed("rel-gb-cd", []string{"CD"}, "GB"),
 		ed("rel-us-cd", []string{"CD"}, "US"),
@@ -371,6 +388,7 @@ func TestUninterpretableInputMatchesAbsentInput(t *testing.T) {
 // TestAddingAnAlternativeNeverShrinksTheSurvivors is the widening invariant: an
 // alternative that removed a survivor could delete the true release.
 func TestAddingAnAlternativeNeverShrinksTheSurvivors(t *testing.T) {
+	t.Parallel()
 	eds := []releaseEdition{
 		ed("rel-cd", []string{"CD"}, "GB"),
 		ed("rel-shm", []string{"SHM-CD"}, "JP"),
@@ -423,6 +441,7 @@ func TestAddingAnAlternativeNeverShrinksTheSurvivors(t *testing.T) {
 // TestNoAlbumTokenExcludesAReleaseInItsClosure is what makes the generic/specific
 // asymmetry safe in both directions.
 func TestNoAlbumTokenExcludesAReleaseInItsClosure(t *testing.T) {
+	t.Parallel()
 	var vocab []string
 	for f := range mediaVocabulary {
 		vocab = append(vocab, f)
@@ -441,6 +460,7 @@ func TestNoAlbumTokenExcludesAReleaseInItsClosure(t *testing.T) {
 // TestEditionOfProjectsBrowseDocuments checks the projection, including the country
 // union (MusicBrainz routinely lists XE alongside the specific codes).
 func TestEditionOfProjectsBrowseDocuments(t *testing.T) {
+	t.Parallel()
 	r := &mbRelease{
 		ID:      "rel-a",
 		Barcode: " 0075992739429 ",
@@ -466,6 +486,7 @@ func TestEditionOfProjectsBrowseDocuments(t *testing.T) {
 // TestSoleMatchingIsTheOnlyGate: a browse document has no score and no release group, so
 // soleRelease would reject every edition. The split is what keeps the tier alive.
 func TestSoleMatchingIsTheOnlyGate(t *testing.T) {
+	t.Parallel()
 	eds := []releaseEdition{ed("rel-a", []string{"CD"}), ed("rel-b", []string{"Vinyl"})}
 	if id, ok := soleMatching(eds, func(e releaseEdition) bool { return e.ID == "rel-a" }); !ok || id != "rel-a" {
 		t.Errorf("soleMatching = (%q, %v), want (rel-a, true)", id, ok)
@@ -492,6 +513,7 @@ func TestSoleMatchingIsTheOnlyGate(t *testing.T) {
 // the count regex allowed the space its only alternative was the uninterpretable "2CD",
 // so the whole media predicate dropped silently.
 func TestSpacedCountStillInterprets(t *testing.T) {
+	t.Parallel()
 	g := group(
 		ed("rel-cd", []string{"CD"}, "GB"),
 		ed("rel-vinyl", []string{"Vinyl"}, "GB"),
@@ -509,6 +531,7 @@ func TestSpacedCountStillInterprets(t *testing.T) {
 // TestUKMatchesAGBRelease: MusicBrainz stores the United Kingdom as GB, so without the
 // alias a UK-tagged album excludes its own release and can land on whatever is left.
 func TestUKMatchesAGBRelease(t *testing.T) {
+	t.Parallel()
 	g := group(
 		ed("rel-gb", []string{"CD"}, "GB"),
 		ed("rel-us", []string{"CD"}, "US"),
@@ -525,6 +548,7 @@ func TestUKMatchesAGBRelease(t *testing.T) {
 // not use would otherwise open: it excludes every release that names a value and leaves
 // the ones MusicBrainz records nothing for to win by default.
 func TestAPredicateNoReleaseAffirmsDrops(t *testing.T) {
+	t.Parallel()
 	// The album says JP; the group has no JP release and one release with no country at
 	// all. Excluding on country would hand that one a uniqueness win.
 	g := group(
@@ -557,6 +581,7 @@ func TestAPredicateNoReleaseAffirmsDrops(t *testing.T) {
 // countryAffirmed, since no release ever names it. UK is the one that matters in
 // practice and is handled properly, by folding to the GB MusicBrainz stores.
 func TestANonISOCountryCannotDecide(t *testing.T) {
+	t.Parallel()
 	g := group(
 		ed("rel-gb", []string{"CD"}, "GB"),
 		ed("rel-us", []string{"CD"}, "US"),
@@ -579,6 +604,7 @@ func TestANonISOCountryCannotDecide(t *testing.T) {
 // marker an operator would use to revert weak writes in bulk. matchEdition reports which
 // it was, so rewording a reason cannot change the marker.
 func TestBarcodeInGroupIsNotAnEditionMatch(t *testing.T) {
+	t.Parallel()
 	withBarcode := ed("rel-a", []string{"CD"}, "US")
 	withBarcode.Barcode = "0075992739429"
 	g := group(withBarcode, ed("rel-b", []string{"Vinyl"}, "GB"))

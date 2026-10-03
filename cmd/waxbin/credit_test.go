@@ -17,6 +17,7 @@ import (
 )
 
 func TestLoadBatchCredits(t *testing.T) {
+	t.Parallel()
 	doc := `[
 		{"itemPid": "i1", "role": "author", "names": ["Ursula K. Le Guin"]},
 		{"itemPid": "i1", "role": "narrator", "names": []},
@@ -197,6 +198,7 @@ func TestCreditSingleSkipLocked(t *testing.T) {
 // two roles warns once about its write-back failure, since its roles were mirrored in
 // one pass.
 func TestPrintCreditBatchResult(t *testing.T) {
+	t.Parallel()
 	res := &waxbin.CreditBatchResult{
 		Edited: []model.ItemCreditEdit{
 			{ItemPID: "i1", Role: model.RoleAuthor, Names: []string{"A"}},

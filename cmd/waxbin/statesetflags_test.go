@@ -10,6 +10,7 @@ import (
 // and its write lock taken. Reaching the errors with an empty globals (no database
 // configured) proves the checks run on the early path.
 func TestStateSetFlagValidation(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name string
 		args []string

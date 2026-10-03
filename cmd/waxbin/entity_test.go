@@ -15,6 +15,7 @@ import (
 // names are part of the CLI contract, and the omitempty set keeps kind-foreign
 // fields (a genre's mbid, a track entity's year) out of the document.
 func TestEntityInfoViewJSON(t *testing.T) {
+	t.Parallel()
 	full := &read.EntityInfo{
 		Kind: read.EntityReleaseGroup, PID: "rg1", Name: "OK Computer", SortKey: "ok computer",
 		MBID: "11111111-2222-3333-4444-555555555555", Type: "album",
@@ -49,6 +50,7 @@ func TestEntityInfoViewJSON(t *testing.T) {
 // errors with an empty globals (no database configured) proves they run on the early
 // path, ahead of openMutator.
 func TestEntityStarRateArgValidation(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name string
 		args []string
@@ -86,6 +88,7 @@ func TestEntityStarRateArgValidation(t *testing.T) {
 // whether --write-back was asked for. A strip that reported failures is surfaced as a
 // warning and returns a nil error, which is the case where the identity forks back.
 func TestEntityClearDurabilityWarning(t *testing.T) {
+	t.Parallel()
 	stripFailed := &waxbin.WriteBackError{
 		ItemPID: "al1",
 		Failures: []waxbin.WriteBackFailure{{
@@ -133,6 +136,7 @@ func TestEntityClearDurabilityWarning(t *testing.T) {
 // case-insensitive "clear" keyword to a nil pointer (the clear), and out-of-range or
 // non-numeric input rejected.
 func TestParseEntityRating(t *testing.T) {
+	t.Parallel()
 	for _, clear := range []string{"clear", "CLEAR", "Clear", "cLeAr"} {
 		got, err := parseEntityRating(clear)
 		if err != nil || got != nil {
@@ -156,6 +160,7 @@ func TestParseEntityRating(t *testing.T) {
 // stamps are decimal strings (the ns-precision contract shared with playStateView), a
 // zero stamp and an unset rating are omitted, and starred is always present.
 func TestEntityPlayStateViewJSON(t *testing.T) {
+	t.Parallel()
 	full := &model.EntityPlayState{
 		Kind: model.MergeAlbum, EntityPID: "al1", Rating: 80, HasRating: true,
 		Starred: true, StarredAt: 100, RatingChangedAt: 200, StarredChangedAt: 100, UpdatedAt: 300,

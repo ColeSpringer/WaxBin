@@ -21,6 +21,7 @@ import (
 // round-trips through form encoding intact, and that meta is space-separated on the
 // wire (decoded from the "+" url.Values produces) rather than a literal "+".
 func TestAcoustIDLookupPostsFormBody(t *testing.T) {
+	t.Parallel()
 	var method, meta, fp, client, format string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		method = r.Method
@@ -59,6 +60,7 @@ func TestAcoustIDLookupPostsFormBody(t *testing.T) {
 }
 
 func TestAcoustIDNoKeyIsUnsupported(t *testing.T) {
+	t.Parallel()
 	a := &acoustID{client: netsafe.New(netsafe.Policy{}), baseURL: "http://unused", key: ""}
 	if _, err := a.lookup(context.Background(), "fp", 100); !waxerr.Is(err, waxerr.CodeUnsupported) {
 		t.Fatalf("no-key lookup err = %v, want CodeUnsupported", err)
@@ -66,6 +68,7 @@ func TestAcoustIDNoKeyIsUnsupported(t *testing.T) {
 }
 
 func TestAcoustIDLowScoreYieldsNoMatch(t *testing.T) {
+	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"status":"ok","results":[{"id":"aid","score":0.4,
@@ -86,6 +89,7 @@ func TestAcoustIDLowScoreYieldsNoMatch(t *testing.T) {
 // recording in a result carries no release group but a same-score sibling does: the
 // selection must not lock onto the first and drop a resolvable match.
 func TestAcoustIDPrefersRecordingWithReleaseGroup(t *testing.T) {
+	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"status":"ok","results":[{"id":"aid","score":0.95,"recordings":[
@@ -104,6 +108,7 @@ func TestAcoustIDPrefersRecordingWithReleaseGroup(t *testing.T) {
 }
 
 func TestAcoustIDErrorResponse(t *testing.T) {
+	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"status":"error","error":{"message":"invalid api key"}}`))
@@ -119,6 +124,7 @@ func TestAcoustIDErrorResponse(t *testing.T) {
 // the span it was asked for still makes the lookup, with that fingerprint, while one that
 // stopped well short of the file's duration makes none.
 func TestAcoustIDKeepsAPartialFpcalcRead(t *testing.T) {
+	t.Parallel()
 	var asked []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = r.ParseForm()

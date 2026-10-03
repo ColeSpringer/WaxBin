@@ -6,6 +6,7 @@ import "testing"
 // guards is the request path: it carries the group's own UUID, so a fetch that ended
 // where it started must yield nothing rather than record the group as a release.
 func TestReleaseMBIDFromURL(t *testing.T) {
+	t.Parallel()
 	const (
 		group   = "b0000000-0000-4000-8000-000000000002"
 		release = "e0000000-0000-4000-8000-00000000000a"

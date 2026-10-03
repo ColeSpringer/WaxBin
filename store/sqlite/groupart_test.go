@@ -65,6 +65,7 @@ func groupArtQueue(t *testing.T, st *sqlite.Store, opts model.EnrichQueueOptions
 // or missed identity leaves the front to this walk. A group with every slot filled, a
 // whole-entity lock, or both halves answered is not walked.
 func TestReleaseGroupsNeedingArtHalves(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, id, pid, _ := groupArtFixture(t, "Fresh", "Matched", "Owed", "Missed", "Held", "HeldFull",
 		"Whole", "FrontAnswered", "AuxAnswered", "BothAnswered")
@@ -142,6 +143,7 @@ func TestReleaseGroupsNeedingArtHalves(t *testing.T) {
 // whatever stood. A front no provider had stays a miss beside an auxiliary match, and a
 // failed half is owed while the other settles.
 func TestApplyReleaseGroupArtBackfillSettlesEachHalf(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, id, pid, count := groupArtFixture(t, "FrontMissed", "FrontOnly", "AuxFailed")
 	marker := func(title, typ string) string {
@@ -183,6 +185,7 @@ func TestApplyReleaseGroupArtBackfillSettlesEachHalf(t *testing.T) {
 // that has none, is fill-when-empty against a front set since the queue page, and
 // answers to the art lock; the entity delta rides on a write.
 func TestApplyReleaseGroupArtBackfillFillsAVacantFront(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, id, pid, count := groupArtFixture(t, "Vacant", "Held", "Locked")
 	setRGArt(t, st, pid("Held"), model.ArtRoleFront, "user-front")
@@ -233,6 +236,7 @@ func TestApplyReleaseGroupArtBackfillFillsAVacantFront(t *testing.T) {
 // opens a vacancy the markers say was already asked about and drops them; a clear that
 // locks the slot opens nothing.
 func TestGroupArtMarkerClearsOnAFrontClear(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, id, pid, count := groupArtFixture(t, "FrontCleared")
 	markers := func() int {

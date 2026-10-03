@@ -13,6 +13,7 @@ import (
 // respects the grace window, and then deletes a childless album -> release_group ->
 // artist chain.
 func TestGCOrphans(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 
@@ -78,6 +79,7 @@ func TestGCOrphans(t *testing.T) {
 // entity's own type) misses it. Release-group rowids are reused, and a marker left
 // behind would silently suppress the backfill for whatever new group inherits the id.
 func TestOrphanRGSweepDropsAuxMarker(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	r := putTrack(t, st, lib.ID, trackSpec{
@@ -131,6 +133,7 @@ func TestOrphanRGSweepDropsAuxMarker(t *testing.T) {
 
 // TestGCOrphansEmitsDeltas confirms a swept entity emits a change_log delete.
 func TestGCOrphansEmitsDeltas(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	r := putTrack(t, st, lib.ID, trackSpec{

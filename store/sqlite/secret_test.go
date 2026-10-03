@@ -63,6 +63,7 @@ func openCipheredStore(t *testing.T, dir, keyID string, c *aeadCipher) *sqlite.S
 }
 
 func TestSecretSealRoundTrip(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	dir := t.TempDir()
 	c := newAEAD(t, "key-a")
@@ -90,6 +91,7 @@ func TestSecretSealRoundTrip(t *testing.T) {
 }
 
 func TestSecretWrongAADFails(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	dir := t.TempDir()
 	c := newAEAD(t, "key-a")
@@ -108,6 +110,7 @@ func TestSecretWrongAADFails(t *testing.T) {
 }
 
 func TestSecretPlaintextWhenNoCipher(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	dir := t.TempDir()
 	st, err := sqlite.Open(ctx, sqlite.OpenOptions{Path: filepath.Join(dir, "catalog.db"), Owner: "test"})
@@ -129,6 +132,7 @@ func TestSecretPlaintextWhenNoCipher(t *testing.T) {
 }
 
 func TestSecretSealedWithoutCipherErrors(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	dir := t.TempDir()
 	// Seal a value with a cipher, then reopen with no cipher and confirm the read
@@ -151,6 +155,7 @@ func TestSecretSealedWithoutCipherErrors(t *testing.T) {
 }
 
 func TestReSealSecretsAdoption(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	dir := t.TempDir()
 
@@ -186,6 +191,7 @@ func TestReSealSecretsAdoption(t *testing.T) {
 }
 
 func TestRotateSecretsEpochTellsRowsApart(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	dir := t.TempDir()
 	oldC := newAEAD(t, "key-old")
@@ -220,6 +226,7 @@ func TestRotateSecretsEpochTellsRowsApart(t *testing.T) {
 }
 
 func TestSecretKeyIDWithColonRejected(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	c := newAEAD(t, "key-a")
 	// A ':' in the key id would corrupt the colon-delimited envelope, so Open rejects it.
@@ -246,6 +253,7 @@ func TestSecretKeyIDWithColonRejected(t *testing.T) {
 }
 
 func TestSecretFilePerms0600(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("unix permissions")
 	}

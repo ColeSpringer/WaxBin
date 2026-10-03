@@ -50,6 +50,7 @@ func setFileSize(t *testing.T, st *Store, path string, size int64) {
 }
 
 func TestQueryLimitRandomSeeded(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	limitFixture(t, st, lib.ID)
@@ -113,6 +114,7 @@ func TestQueryLimitRandomSeeded(t *testing.T) {
 }
 
 func TestQueryLimitMinutesBudget(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	// A=90s, B=60s, C=30s, D..F=60s; canonical order is A,B,C,D,E,F.
@@ -184,6 +186,7 @@ func TestQueryLimitMinutesBudget(t *testing.T) {
 }
 
 func TestQueryLimitMegabytes(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	limitFixture(t, st, lib.ID)
@@ -210,6 +213,7 @@ func TestQueryLimitMegabytes(t *testing.T) {
 }
 
 func TestQueryBudgetSkipsUnpriceableRows(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	// A has NO measurable duration (an unparsed file); B..F are 60s each.
@@ -251,6 +255,7 @@ func TestQueryBudgetSkipsUnpriceableRows(t *testing.T) {
 }
 
 func TestQueryLimitMegabytesMultiFileBook(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	// A three-part book, 400 KB per part: syncing it costs 1.2 MB, so a 1 MB
@@ -280,6 +285,7 @@ func TestQueryLimitMegabytesMultiFileBook(t *testing.T) {
 }
 
 func TestQueryLimitMegabytesSharedCUEFile(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 
@@ -330,6 +336,7 @@ func TestQueryLimitMegabytesSharedCUEFile(t *testing.T) {
 }
 
 func TestSmartPlaylistLimitModesEndToEnd(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	limitFixture(t, st, lib.ID)

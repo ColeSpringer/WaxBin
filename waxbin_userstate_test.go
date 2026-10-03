@@ -18,6 +18,7 @@ import (
 // user's state never leaks to another, and a smart playlist yields per-user
 // membership from a single stored rule.
 func TestUserStateQueryThroughFacade(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -110,6 +111,7 @@ func TestUserStateQueryThroughFacade(t *testing.T) {
 // facade map agrees with the per-pair State reads, a buffered (unflushed)
 // position is overlaid in-process, and untouched items are absent.
 func TestPlayStatesForItemsFacade(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")

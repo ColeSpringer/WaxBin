@@ -63,6 +63,7 @@ func changeCount(t *testing.T, st *Store, seq int64, entityType string, op model
 // release group in place, keeping ids, pids, curation, art, stars, and the matched
 // enrichment marker, and emits entity updates rather than a create/delete pair.
 func TestEditAlbumRenamesInPlace(t *testing.T) {
+	t.Parallel()
 	st, _, pids := renameFixture(t)
 	ctx := context.Background()
 	albumID := scalarInt(t, st, "SELECT id FROM album")
@@ -170,6 +171,7 @@ func TestEditAlbumRenamesInPlace(t *testing.T) {
 // whole-set title rename deletes the RG's unmatched enrichment marker and the entity
 // re-enters the enrichment queue.
 func TestEditAlbumRenameRequeuesUnmatchedRG(t *testing.T) {
+	t.Parallel()
 	st, _, pids := renameFixture(t)
 	ctx := context.Background()
 	rgID := scalarInt(t, st, "SELECT id FROM release_group")
@@ -194,6 +196,7 @@ func TestEditAlbumRenameRequeuesUnmatchedRG(t *testing.T) {
 // TestEditAlbumPartialMemberSplits pins today's contract: an edit that moves only
 // some of an album's members forks those members off and the old entity stays.
 func TestEditAlbumPartialMemberSplits(t *testing.T) {
+	t.Parallel()
 	st, _, pids := renameFixture(t)
 	ctx := context.Background()
 	albumID := scalarInt(t, st, "SELECT id FROM album")
@@ -217,6 +220,7 @@ func TestEditAlbumPartialMemberSplits(t *testing.T) {
 // TestEditYearKeepsTheAlbumKey: the year keys neither the album nor the release group,
 // so a whole-set year edit leaves both rows on the keys they had.
 func TestEditYearKeepsTheAlbumKey(t *testing.T) {
+	t.Parallel()
 	st, _, pids := renameFixture(t)
 	ctx := context.Background()
 	albumID := scalarInt(t, st, "SELECT id FROM album")
@@ -258,6 +262,7 @@ func TestEditYearKeepsTheAlbumKey(t *testing.T) {
 // TestEditAlbumCaseOnlyRefreshesDisplay: a case-only rename folds to the same match
 // key, so the row is untouched except for the display title and sort refresh.
 func TestEditAlbumCaseOnlyRefreshesDisplay(t *testing.T) {
+	t.Parallel()
 	st, _, pids := renameFixture(t)
 	ctx := context.Background()
 	albumID := scalarInt(t, st, "SELECT id FROM album")
@@ -295,6 +300,7 @@ func TestEditAlbumCaseOnlyRefreshesDisplay(t *testing.T) {
 // another row already owns auto-merges the old entity into the incumbent, which keeps
 // its pid and attachments; the loser emits an OpDelete.
 func TestEditAlbumCollisionMergesIntoIncumbent(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	// One folder for all three tracks, so the album keys differ only through the rg
@@ -367,6 +373,7 @@ func TestEditAlbumCollisionMergesIntoIncumbent(t *testing.T) {
 // row still drains, though, and the scan-side reconciliation carries it onto the last
 // member's new album: the edit never moved a file, so both keys name the same folder.
 func TestEditItemsFieldsNonUniformAlbumCarries(t *testing.T) {
+	t.Parallel()
 	st, _, pids := renameFixture(t)
 	ctx := context.Background()
 	albumID := scalarInt(t, st, "SELECT id FROM album")
@@ -402,6 +409,7 @@ func TestEditItemsFieldsNonUniformAlbumCarries(t *testing.T) {
 // participant, so the all-members condition fails and the edited members split off
 // while the locked one keeps the old entity.
 func TestEditSkipLockedMemberBreaksAllMembers(t *testing.T) {
+	t.Parallel()
 	st, _, pids := renameFixture(t)
 	ctx := context.Background()
 	albumID := scalarInt(t, st, "SELECT id FROM album")
@@ -433,6 +441,7 @@ func TestEditSkipLockedMemberBreaksAllMembers(t *testing.T) {
 // TestEditRenameAlongsideGenre: a rename combined with a genre edit renames in place
 // while the genre links and rollups flow through the unchanged per-item path.
 func TestEditRenameAlongsideGenre(t *testing.T) {
+	t.Parallel()
 	st, _, pids := renameFixture(t)
 	ctx := context.Background()
 	albumID := scalarInt(t, st, "SELECT id FROM album")
@@ -465,6 +474,7 @@ func TestEditRenameAlongsideGenre(t *testing.T) {
 // other members. Editing the album on all of them renames in place; editing one
 // splits as today.
 func TestEditVirtualCueRipRenames(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	windows := [][2]int64{{0, 300}, {300, 600}}
@@ -529,6 +539,7 @@ func TestEditVirtualCueRipRenames(t *testing.T) {
 // TestEditMBIDAlbumDisplayRefresh: on an mbid-keyed album a whole-set title edit
 // cannot move the key, so it refreshes the display columns on the kept row.
 func TestEditMBIDAlbumDisplayRefresh(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	const rgMBID = "44444444-4444-4444-4444-444444444444"
@@ -575,6 +586,7 @@ func TestEditMBIDAlbumDisplayRefresh(t *testing.T) {
 // spelling preserved as an alias, and its curation, star, and RG primary pointer all
 // survive.
 func TestEditArtistWholeSetRenamesInPlace(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{
@@ -653,6 +665,7 @@ func TestEditArtistWholeSetRenamesInPlace(t *testing.T) {
 // a blank album_artist the release group anchors on the credited artist, so editing
 // artist alone renames the artist, the release group, and the album in place.
 func TestEditArtistEmptyAlbumArtistMovesWholeChain(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{
@@ -704,6 +717,7 @@ func TestEditArtistEmptyAlbumArtistMovesWholeChain(t *testing.T) {
 // artist row already owns folds the old artist into the incumbent (stars fold, loser
 // OpDelete), instead of leaving a ghost.
 func TestEditArtistCollisionMergesIntoIncumbent(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{
@@ -754,6 +768,7 @@ func TestEditArtistCollisionMergesIntoIncumbent(t *testing.T) {
 // old artist ("Alpha" to "Beta feat. Alpha") must not rename Alpha, whose curation
 // belongs to the still-referenced featured credit; the primary forks off as today.
 func TestEditArtistRetainedAsFeatureSplits(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{
@@ -790,6 +805,7 @@ func TestEditArtistRetainedAsFeatureSplits(t *testing.T) {
 // curated producer credit) keeps the artist referenced, so the rename falls back to
 // split and the old artist survives.
 func TestEditArtistOutsideReferenceBlocks(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{
@@ -835,6 +851,7 @@ func TestEditArtistOutsideReferenceBlocks(t *testing.T) {
 // credit on S2, both of which this batch rewrites, so every reference moves and Guest
 // renames in place instead of forking a fresh row and leaving a ghost behind.
 func TestEditBatchSecondaryCreditMovesWithItsField(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{
@@ -885,6 +902,7 @@ func TestEditBatchSecondaryCreditMovesWithItsField(t *testing.T) {
 // album, it keeps that album (no ghost) and the renamed album moves under a
 // found-or-created new release group.
 func TestEditAlbumRenameUnderMultiBackedRG(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	// Two editions of "One" under one release group (same rg key, different album
@@ -941,6 +959,7 @@ func TestEditAlbumRenameUnderMultiBackedRG(t *testing.T) {
 // fork the group off to a fresh pid and the second then merge the original into it,
 // destroying the pid the pre-pass exists to preserve.
 func TestEditAlbumRenameMovesWholeMultiAlbumRG(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	for _, d := range []struct{ folder, essence, title string }{
@@ -1013,6 +1032,7 @@ func TestEditAlbumRenameMovesWholeMultiAlbumRG(t *testing.T) {
 // the artist had already committed, leaving a ghost group double-counted in the
 // artist's rollup.
 func TestEditRenameWithAReDatedMemberKeepsChainInPlace(t *testing.T) {
+	t.Parallel()
 	st, _, pids := renameFixture(t)
 	ctx := context.Background()
 	artistID := scalarInt(t, st, "SELECT id FROM artist")
@@ -1060,6 +1080,7 @@ func TestEditRenameWithAReDatedMemberKeepsChainInPlace(t *testing.T) {
 // artist rename deterministically, rather than letting map iteration order decide
 // whether an earlier group's uniform value stands.
 func TestEditConflictingAnchorsBlockArtistRename(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	for _, d := range []struct{ folder, essence, title string }{
@@ -1100,6 +1121,7 @@ func TestEditConflictingAnchorsBlockArtistRename(t *testing.T) {
 // through the vacuously-passing coverage checks. The anchor pair fires only when the
 // edit moved the anchor.
 func TestEditRetitleKeepsMergedAnchorSpelling(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	// The survivor's only reference is the merged compilation itself: two loose
@@ -1163,6 +1185,7 @@ func TestEditRetitleKeepsMergedAnchorSpelling(t *testing.T) {
 // pre-pass must not rewrite the original row onto it; the group falls back to the
 // per-item split and the original keeps its real key.
 func TestEditArchivedAlbumFallsBackToSplit(t *testing.T) {
+	t.Parallel()
 	st, _, pids := renameFixture(t)
 	ctx := context.Background()
 	albumID := scalarInt(t, st, "SELECT id FROM album")
@@ -1189,6 +1212,7 @@ func TestEditArchivedAlbumFallsBackToSplit(t *testing.T) {
 // marker, since MatchKey folds exactly what the MusicBrainz search is insensitive
 // to and re-queueing would burn a rate-limited lookup on the same non-match.
 func TestEditArtistCaseOnlyRespellKeepsMarker(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{

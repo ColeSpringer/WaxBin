@@ -75,6 +75,7 @@ func tinyPNG(t *testing.T) []byte {
 }
 
 func TestPodcastEndToEnd(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	dir := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -245,6 +246,7 @@ func hasEpisode(hits []read.SearchHit, pid model.PID) bool {
 }
 
 func TestUnsubscribeRemovesEpisodesAndFiles(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	dir := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")

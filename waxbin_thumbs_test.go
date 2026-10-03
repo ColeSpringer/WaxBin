@@ -14,6 +14,7 @@ import (
 // A struct whose zero value emptied the cache would make a forgotten bound look like
 // a working call, so the unbounded policy is refused instead of defaulted.
 func TestThumbPrunePolicyZeroValueIsRefused(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), t.TempDir())
 
@@ -28,6 +29,7 @@ func TestThumbPrunePolicyZeroValueIsRefused(t *testing.T) {
 // that read zero as "unbounded" would refuse `--older-than 0d` for naming no bound,
 // which is the opposite of what was typed.
 func TestThumbPruneZeroIsABound(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	var zeroAge time.Duration
 	var zeroBudget int64
@@ -50,6 +52,7 @@ func TestThumbPruneZeroIsABound(t *testing.T) {
 // TestThumbCacheStatsOnAnEmptyCatalog pins that the census answers before anything is
 // scanned, since "how much is this costing me" is asked of catalogs in every state.
 func TestThumbCacheStatsOnAnEmptyCatalog(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), t.TempDir())
 

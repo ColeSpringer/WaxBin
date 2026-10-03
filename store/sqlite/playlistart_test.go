@@ -27,6 +27,7 @@ func newPlaylist(t *testing.T, st *Store, name string) model.PID {
 // member track's cover never answers for the playlist, and the playlist's own front
 // and back both resolve at the playlist level with no fallback and no derivation.
 func TestPlaylistArtResolvesOwnLevelOnly(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	trackCover, front, back := testPNG(t, 40, 40), testPNG(t, 42, 42), testPNG(t, 43, 43)
@@ -118,6 +119,7 @@ func playlistHasArt(t *testing.T, st *Store, pid model.PID) bool {
 // cover on both the single and list reads, and counts only the front role, so an
 // auxiliary image does not advertise a cover the playlist does not have.
 func TestPlaylistHasArt(t *testing.T) {
+	t.Parallel()
 	st, _ := entityFixture(t)
 	ctx := context.Background()
 	front, back := testPNG(t, 42, 42), testPNG(t, 43, 43)
@@ -161,6 +163,7 @@ func TestPlaylistHasArt(t *testing.T) {
 // per-role lock is the worst of them to inherit: it is invisible on a fresh entity and
 // silently holds one slot empty against every enrichment pass.
 func TestPlaylistArtNotInheritedThroughReusedRowid(t *testing.T) {
+	t.Parallel()
 	st, _ := entityFixture(t)
 	ctx := context.Background()
 	front := testPNG(t, 42, 42)
@@ -211,6 +214,7 @@ func TestPlaylistArtNotInheritedThroughReusedRowid(t *testing.T) {
 // and the sources and their thumbnails are reclaimed. Two roles are set because the
 // delete is role-agnostic, like the rest of the art GC.
 func TestPlaylistArtDeleteAndGC(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	trackCover, front, back := testPNG(t, 40, 40), testPNG(t, 42, 42), testPNG(t, 43, 43)

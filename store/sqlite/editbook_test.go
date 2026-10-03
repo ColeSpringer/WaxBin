@@ -26,6 +26,7 @@ func bookEditFixture(t *testing.T) (*Store, model.PID) {
 }
 
 func TestEditBookSubtitleAndProvenance(t *testing.T) {
+	t.Parallel()
 	st, pid := bookEditFixture(t)
 	ctx := context.Background()
 
@@ -47,6 +48,7 @@ func TestEditBookSubtitleAndProvenance(t *testing.T) {
 }
 
 func TestEditBookAuthorReResolvesContributor(t *testing.T) {
+	t.Parallel()
 	st, pid := bookEditFixture(t)
 	ctx := context.Background()
 
@@ -94,6 +96,7 @@ func TestEditBookAuthorReResolvesContributor(t *testing.T) {
 }
 
 func TestEditBookSeriesAndNarrator(t *testing.T) {
+	t.Parallel()
 	st, pid := bookEditFixture(t)
 	ctx := context.Background()
 
@@ -123,6 +126,7 @@ func TestEditBookSeriesAndNarrator(t *testing.T) {
 }
 
 func TestEditBookGenreAndTitle(t *testing.T) {
+	t.Parallel()
 	st, pid := bookEditFixture(t)
 	ctx := context.Background()
 
@@ -149,6 +153,7 @@ func TestEditBookGenreAndTitle(t *testing.T) {
 }
 
 func TestEditBookRejectsTrackOnlyField(t *testing.T) {
+	t.Parallel()
 	st, pid := bookEditFixture(t)
 	// album is a track field, not valid on a book.
 	err := st.EditItemField(context.Background(), pid, "album", "X", model.Attribution{Source: model.SourceUser}, model.LockOf(true), false)
@@ -158,6 +163,7 @@ func TestEditBookRejectsTrackOnlyField(t *testing.T) {
 }
 
 func TestEditTrackRejectsBookOnlyField(t *testing.T) {
+	t.Parallel()
 	st, pid := editFixture(t)
 	// author is a book field, not valid on a track.
 	err := st.EditItemField(context.Background(), pid, "author", "X", model.Attribution{Source: model.SourceUser}, model.LockOf(true), false)

@@ -22,6 +22,7 @@ func putLoudness(t *testing.T, st *Store, filePID model.PID, essence string, gai
 }
 
 func TestRefreshAlbumGain(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	// Two tracks of one album (same artist/album/folder).
@@ -63,6 +64,7 @@ func TestRefreshAlbumGain(t *testing.T) {
 }
 
 func TestReanalyzePreservesAlbumGain(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	r := putTrack(t, st, lib.ID, trackSpec{
@@ -89,6 +91,7 @@ func TestReanalyzePreservesAlbumGain(t *testing.T) {
 // (the file was re-encoded but not yet re-analyzed) is not returned: the essence
 // no longer matches the file's current essence.
 func TestStaleLoudnessHidden(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	spec := trackSpec{path: "/lib/a/1.flac", essence: "e1", content: "c1", title: "Song", artist: "X", album: "Al"}
@@ -119,6 +122,7 @@ func TestStaleLoudnessHidden(t *testing.T) {
 // re-analyzed for new audio but loudness fails (nil), the prior measurement is
 // cleared rather than left behind, while a same-essence re-analyze keeps it.
 func TestReanalyzeEssenceChangeClearsStaleLoudness(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	r := putTrack(t, st, lib.ID, trackSpec{path: "/lib/a/1.flac", essence: "e1", content: "c1", title: "S", artist: "X", album: "Al"})
@@ -148,6 +152,7 @@ func TestReanalyzeEssenceChangeClearsStaleLoudness(t *testing.T) {
 // TestAlbumGainClearedWhenLeavingAlbum verifies a track retagged out of its album
 // loses its album ReplayGain on the next RefreshAlbumGain.
 func TestAlbumGainClearedWhenLeavingAlbum(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	r1 := putTrack(t, st, lib.ID, trackSpec{path: "/lib/B/A/1.flac", essence: "e1", content: "c1", title: "One", artist: "B", album: "A", durationMS: 100})
@@ -176,6 +181,7 @@ func TestAlbumGainClearedWhenLeavingAlbum(t *testing.T) {
 // on the change feed (so a data_version tailer can invalidate its cache), and a
 // second refresh with no change emits nothing.
 func TestRefreshAlbumGainEmitsDeltas(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	r1 := putTrack(t, st, lib.ID, trackSpec{path: "/lib/B/A/1.flac", essence: "e1", content: "c1", title: "One", artist: "B", album: "A", durationMS: 100})
@@ -205,6 +211,7 @@ func TestRefreshAlbumGainEmitsDeltas(t *testing.T) {
 // TestStalePeaksHidden verifies a waveform from superseded audio is not returned
 // (essence mismatch), mirroring the loudness freshness check.
 func TestStalePeaksHidden(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	spec := trackSpec{path: "/lib/a/1.flac", essence: "e1", content: "c1", title: "S", artist: "X", album: "Al"}
@@ -266,6 +273,7 @@ func outOfOrderBook(t *testing.T, st *Store, libID int64) map[int]*model.ScanIte
 // to the lowest-positioned survivor (the ensurePrimary rule), which is part one.
 // Neither rule is reading order, which is why the per-part reads exist.
 func TestPeaksPrimaryIsNotReadingOrderPartOne(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	parts := outOfOrderBook(t, st, lib.ID)
@@ -299,6 +307,7 @@ func TestPeaksPrimaryIsNotReadingOrderPartOne(t *testing.T) {
 // reachable by file pid, and the per-item read returns them all in reading order
 // rather than the single primary Peaks answers for.
 func TestPeaksPerFileAndPerItem(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	parts := outOfOrderBook(t, st, lib.ID)
@@ -345,6 +354,7 @@ func TestPeaksPerFileAndPerItem(t *testing.T) {
 // part also drops out of the per-item read rather than reporting an old waveform for
 // a part that has been re-encoded.
 func TestPeaksForFileNotFound(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	parts := outOfOrderBook(t, st, lib.ID)
@@ -379,6 +389,7 @@ func TestPeaksForFileNotFound(t *testing.T) {
 // rule it exists to expose: the parts come back in reading order, but the primary is
 // the one attached first, so a consumer cannot infer it from position.
 func TestItemFilesCarryRole(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	parts := outOfOrderBook(t, st, lib.ID)
 
@@ -409,6 +420,7 @@ func TestItemFilesCarryRole(t *testing.T) {
 }
 
 func TestLoudnessNotFound(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	r := putTrack(t, st, lib.ID, trackSpec{path: "/lib/a/1.flac", essence: "e1", content: "c1", title: "T", artist: "A", album: "Al"})
 	if _, err := st.LoudnessByItem(context.Background(), r.ItemPID); !waxerr.Is(err, waxerr.CodeNotFound) {
@@ -420,6 +432,7 @@ func TestLoudnessNotFound(t *testing.T) {
 // it spans, or at what rate, cannot be placed on a timeline, so the write refuses it
 // and stores nothing.
 func TestPutPeaksRefusesAnUnplacedWaveform(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	r := putTrack(t, st, lib.ID, trackSpec{path: "/lib/a/1.flac", essence: "e1", content: "c1", title: "S", artist: "X", album: "Al"})

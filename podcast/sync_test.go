@@ -65,6 +65,7 @@ func enumeration(key, tag string, n int) *source.Enumeration {
 // the validators a sync commits come back on the next request, a NotModified answer's
 // do not, and a failed write leaves the previous pair in place.
 func TestSyncHandsBackCommittedValidators(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st := newTestStore(t)
 	failing := &failFeedStore{Store: st}
@@ -150,6 +151,7 @@ func TestSyncHandsBackCommittedValidators(t *testing.T) {
 // validators sends none, so a NotModified answer is a misbehaving source, refused the
 // way AddSource refuses it, and not recorded as a sync.
 func TestSyncRefusesUnconditionalNotModified(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	prov := &scriptedProvider{}
 	svc, st, _ := newTestService(t, prov.mock())
@@ -178,6 +180,7 @@ func TestSyncRefusesUnconditionalNotModified(t *testing.T) {
 // TestSyncAllMarksUnchangedShows: every show that answered NotModified in a pass gets
 // the pass's fetch time.
 func TestSyncAllMarksUnchangedShows(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	prov := &scriptedProvider{}
 	svc, st, _ := newTestService(t, prov.mock())

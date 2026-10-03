@@ -31,6 +31,7 @@ func entityIDByCol(t *testing.T, st *Store, table, col, val string) int64 {
 }
 
 func TestEditEntityAlbumIdentifiers(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{
@@ -80,6 +81,7 @@ func TestEditEntityAlbumIdentifiers(t *testing.T) {
 }
 
 func TestScanPopulatesAlbumIdentifiers(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	// A scanned track carries album-level release identifiers; they land on the album
@@ -118,6 +120,7 @@ func TestScanPopulatesAlbumIdentifiers(t *testing.T) {
 }
 
 func TestEditEntitySortOverride(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{
@@ -161,6 +164,7 @@ func TestEditEntitySortOverride(t *testing.T) {
 }
 
 func TestEnrichRespectsReleaseGroupTypeLock(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{
@@ -198,6 +202,7 @@ func TestEnrichRespectsReleaseGroupTypeLock(t *testing.T) {
 }
 
 func TestEnrichRespectsArtistMBIDLock(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{
@@ -229,6 +234,7 @@ func TestEnrichRespectsArtistMBIDLock(t *testing.T) {
 }
 
 func TestEditEntityRejectsDuplicateMBID(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{
@@ -256,6 +262,7 @@ func TestEditEntityRejectsDuplicateMBID(t *testing.T) {
 }
 
 func TestMergeEntityCurationLockedWins(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{
@@ -304,6 +311,7 @@ func TestMergeEntityCurationLockedWins(t *testing.T) {
 // entity_curation carries its own provider column and the same preserving upsert, so
 // both are pinned here rather than left to the item side's coverage.
 func TestEntityCurationCarriesAttributionAndLockChange(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{
@@ -371,6 +379,7 @@ func clearEntityMBID(t *testing.T, st *Store, et model.MergeEntity, pid model.PI
 // so a rescan of a member whose file lost the tag lands back on the same row instead of
 // forking, and the edit path's key carryover derives the same key.
 func TestEntityEditClearAlbumMBIDRekeysHeuristic(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	const relMBID = "22222222-2222-2222-2222-222222222222"
@@ -439,6 +448,7 @@ func TestEntityEditClearAlbumMBIDRekeysHeuristic(t *testing.T) {
 // the release id is dropped, so an album under an mbid-keyed release group lands on the
 // al:mbid:<group> form a scan of the same files computes, and the group keeps its own id.
 func TestEntityEditClearAlbumMBIDKeepsRGCarryover(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	const relMBID = "99999999-9999-9999-9999-999999999999"
 	const rgMBID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
@@ -498,6 +508,7 @@ func TestEntityEditClearAlbumMBIDKeepsRGCarryover(t *testing.T) {
 // standing; a retag puts the member straight back onto an identified row. Stripping the
 // tags is what closes that, and it belongs to the facade's write-back, not here.
 func TestEntityEditClearAlbumMBIDRetagRescanReadopts(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	const relMBID = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
 	first := trackSpec{
@@ -545,6 +556,7 @@ func TestEntityEditClearAlbumMBIDRetagRescanReadopts(t *testing.T) {
 // hatch: when a heuristic sibling already owns the key the clear derives, the disowned
 // album folds into it rather than being left on the id it just gave up.
 func TestEntityEditClearAlbumMBIDMergesIntoHeuristicTwin(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	const relMBID = "33333333-3333-3333-3333-333333333333"
@@ -615,6 +627,7 @@ func TestEntityEditClearAlbumMBIDMergesIntoHeuristicTwin(t *testing.T) {
 // and every dependent album key has the group segment swapped, without which each album
 // would sit on a key no scan computes.
 func TestEntityEditClearRGMBIDRekeysChainAndAlbumKeys(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	const rgMBID = "44444444-4444-4444-4444-444444444444"
@@ -732,6 +745,7 @@ func rgArtRoles(t *testing.T, st *Store, rgID int64, role string) int {
 // slots it filled, and leaves a hand-set cover standing. It does so whether or not the
 // identity pass matched, since the group-art backfill's requests carry the id too.
 func TestEntityEditClearRGMBIDTakesBackEnrichmentArt(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	const rgMBID = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
 
@@ -796,6 +810,7 @@ func TestEntityEditClearRGMBIDTakesBackEnrichmentArt(t *testing.T) {
 // go on any id edit, not only a clear, and the backfill asks again under the new id. A
 // hand-set picture stays, and so does one the user locked.
 func TestEntityEditMBIDCorrectionTakesBackEnrichmentArt(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	const rgMBID = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
 	const fixed = "cccccccc-cccc-cccc-cccc-cccccccccccc"
@@ -900,6 +915,7 @@ func TestEntityEditMBIDCorrectionTakesBackEnrichmentArt(t *testing.T) {
 // of its own rather than a key spliced from the representative's title that nothing would
 // ever recompute.
 func TestEntityEditClearRGMBIDReparentsDifferentlyTitledAlbum(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	const rgMBID = "dddddddd-dddd-dddd-dddd-dddddddddddd"
 	putTrack(t, st, lib.ID, trackSpec{
@@ -1001,6 +1017,7 @@ func TestEntityEditClearRGMBIDReparentsDifferentlyTitledAlbum(t *testing.T) {
 // fills the column and leaves the key alone, so a member whose own file never carried the
 // id is not forked off on its next scan.
 func TestEntityEditSetMBIDStaysColumnOnly(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{
@@ -1044,6 +1061,7 @@ func TestEntityEditSetMBIDStaysColumnOnly(t *testing.T) {
 // was the chain's only grouping evidence, there is no heuristic key to fall back to, so
 // the column clears and the key stands rather than the row moving somewhere no scan looks.
 func TestEntityEditClearMBIDSkipsUngroupableChain(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	const rgMBID = "77777777-7777-7777-7777-777777777777"
 	putTrack(t, st, lib.ID, trackSpec{
@@ -1073,6 +1091,7 @@ func TestEntityEditClearMBIDSkipsUngroupableChain(t *testing.T) {
 // member is not the entity's answer while a sibling still has one, so the clear derives
 // from the sibling instead of skipping half-applied.
 func TestEntityEditClearMBIDSkipsArchivedRepresentative(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	const relMBID = "cccccccc-cccc-cccc-cccc-cccccccccccc"
@@ -1108,6 +1127,7 @@ func TestEntityEditClearMBIDSkipsArchivedRepresentative(t *testing.T) {
 // heuristic twin it re-keys onto, and its dependent album, whose swapped key the twin's
 // own album already owns, folds in behind it.
 func TestEntityEditClearRGMBIDMergesIntoHeuristicTwin(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	const rgMBID = "88888888-8888-8888-8888-888888888888"
 	putTrack(t, st, lib.ID, trackSpec{
@@ -1154,6 +1174,7 @@ func TestEntityEditClearRGMBIDMergesIntoHeuristicTwin(t *testing.T) {
 // call is refused and rolled back, while the far more common clear that simply re-keys in
 // place still carries them.
 func TestEntityEditClearMBIDWithSiblingFieldsRefusesOnlyOnMerge(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	attr := model.Attribution{Source: model.SourceUser}
 

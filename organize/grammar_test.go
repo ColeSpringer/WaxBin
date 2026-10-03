@@ -19,6 +19,7 @@ func render(t *testing.T, tmpl string, fields map[string]fieldVal) string {
 }
 
 func TestGrammarOptionalField(t *testing.T) {
+	t.Parallel()
 	f := map[string]fieldVal{"disc": {n: 0, isNum: true}, "track": {n: 3, isNum: true}}
 	if got := render(t, "{disc?}{track:02}", f); got != "03" {
 		t.Fatalf("empty optional should drop: got %q want 03", got)
@@ -30,6 +31,7 @@ func TestGrammarOptionalField(t *testing.T) {
 }
 
 func TestGrammarConditionalGroup(t *testing.T) {
+	t.Parallel()
 	withYear := map[string]fieldVal{"album": {s: "X"}, "year": {n: 2020, isNum: true}}
 	if got := render(t, "{album}< ({year})>", withYear); got != "X (2020)" {
 		t.Fatalf("group with value: got %q", got)
@@ -41,6 +43,7 @@ func TestGrammarConditionalGroup(t *testing.T) {
 }
 
 func TestGrammarGroupKeepsLiteralAroundField(t *testing.T) {
+	t.Parallel()
 	f := map[string]fieldVal{"disc": {n: 2, isNum: true}, "track": {n: 1, isNum: true}}
 	if got := render(t, "<{disc}->{track:02}", f); got != "2-01" {
 		t.Fatalf("disc prefix present: got %q want 2-01", got)
@@ -52,6 +55,7 @@ func TestGrammarGroupKeepsLiteralAroundField(t *testing.T) {
 }
 
 func TestGrammarNestedGroups(t *testing.T) {
+	t.Parallel()
 	// Outer group survives if any inner field has a value.
 	f := map[string]fieldVal{"a": {s: ""}, "b": {s: "B"}}
 	if got := render(t, "<x<{a}><{b}>y>", f); got != "xBy" {
@@ -64,6 +68,7 @@ func TestGrammarNestedGroups(t *testing.T) {
 }
 
 func TestGrammarEscapes(t *testing.T) {
+	t.Parallel()
 	f := map[string]fieldVal{"narrator": {s: "Bob"}}
 	if got := render(t, `< \{{narrator}\}>`, f); got != " {Bob}" {
 		t.Fatalf("escaped braces: got %q want \" {Bob}\"", got)
@@ -74,12 +79,14 @@ func TestGrammarEscapes(t *testing.T) {
 }
 
 func TestGrammarUnknownFieldErrors(t *testing.T) {
+	t.Parallel()
 	if _, err := renderTemplate("{nope}", map[string]fieldVal{}); err == nil {
 		t.Fatal("unknown field should error")
 	}
 }
 
 func TestGrammarUnbalancedErrors(t *testing.T) {
+	t.Parallel()
 	if _, err := renderTemplate("<{a}", map[string]fieldVal{"a": {s: "x"}}); err == nil {
 		t.Fatal("unterminated group should error")
 	}
@@ -89,6 +96,7 @@ func TestGrammarUnbalancedErrors(t *testing.T) {
 }
 
 func TestNativeMusicTemplate(t *testing.T) {
+	t.Parallel()
 	p, _ := ProfileByName("waxbin-native")
 	item := &model.ItemView{
 		AlbumArtist: "Pink Floyd", Album: "The Wall", Year: 1979,
@@ -105,6 +113,7 @@ func TestNativeMusicTemplate(t *testing.T) {
 }
 
 func TestNativeMusicTemplateCompilation(t *testing.T) {
+	t.Parallel()
 	p, _ := ProfileByName("waxbin-native")
 	item := &model.ItemView{
 		Artist: "Some One", AlbumArtist: "Some One", Album: "Hits",
@@ -121,6 +130,7 @@ func TestNativeMusicTemplateCompilation(t *testing.T) {
 }
 
 func TestProfileSetCustomOverride(t *testing.T) {
+	t.Parallel()
 	set, err := NewProfileSet([]Profile{{Name: "flat", Music: "{title}.{ext}"}})
 	if err != nil {
 		t.Fatal(err)
@@ -143,6 +153,7 @@ func TestProfileSetCustomOverride(t *testing.T) {
 }
 
 func TestProfileSetRejectsBadTemplate(t *testing.T) {
+	t.Parallel()
 	if _, err := NewProfileSet([]Profile{{Name: "bad", Music: "{unknownfield}"}}); err == nil {
 		t.Fatal("a template with an unknown field should be rejected at load")
 	}
@@ -154,6 +165,7 @@ func TestProfileSetRejectsBadTemplate(t *testing.T) {
 // TestProfileValidate: a profile handed in whole (the facade's ad-hoc organize) needs
 // a name and three clean templates, since nothing is inherited for it.
 func TestProfileValidate(t *testing.T) {
+	t.Parallel()
 	good := nativeProfile
 	good.Name = "adhoc"
 	if err := good.Validate(); err != nil {
@@ -174,6 +186,7 @@ func TestProfileValidate(t *testing.T) {
 // TestProfileSetAll: every profile the set resolves, merged as ByName returns it, in
 // name order.
 func TestProfileSetAll(t *testing.T) {
+	t.Parallel()
 	set, err := NewProfileSet([]Profile{{Name: "zeta", Music: "{title}.{ext}"}, {Name: "alpha", Podcast: "{episode}.{ext}"}})
 	if err != nil {
 		t.Fatal(err)

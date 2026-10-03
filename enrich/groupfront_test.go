@@ -111,6 +111,7 @@ func seedWYWH(t *testing.T, st *sqlite.Store, libID int64, essence, releaseID st
 // entry described: the group's front is this pressing's, so the album takes the
 // row rather than the picture.
 func TestAlbumArtReusesTheGroupCoverForItsOwnRelease(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedWYWH(t, st, lib.ID, "ess-a", edGBMBID)
@@ -155,6 +156,7 @@ func TestAlbumArtReusesTheGroupCoverForItsOwnRelease(t *testing.T) {
 // TestAlbumArtFetchesTheReleaseFrontOfAnotherPressing: the group's bytes are some other
 // edition's, so the album downloads its own.
 func TestAlbumArtFetchesTheReleaseFrontOfAnotherPressing(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedWYWH(t, st, lib.ID, "ess-a", edGBMBID)
@@ -180,6 +182,7 @@ func TestAlbumArtFetchesTheReleaseFrontOfAnotherPressing(t *testing.T) {
 // edition, but the group still holds the old bytes, so the new album must fetch its own
 // rather than take a cover of a different pressing.
 func TestAlbumArtDoesNotReuseAMovedGroupPick(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, _, lib := openStore(t)
 	seedWYWH(t, st, lib.ID, "ess-a", relTwoMBID)
@@ -208,6 +211,7 @@ func TestAlbumArtDoesNotReuseAMovedGroupPick(t *testing.T) {
 // TestAlbumArtDoesNotReuseWhenTheGroupFrontChangedUnderTheRecord: the record is about
 // bytes, so a group whose front was replaced no longer answers for them.
 func TestAlbumArtDoesNotReuseWhenTheGroupFrontChangedUnderTheRecord(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedWYWH(t, st, lib.ID, "ess-a", edGBMBID)
@@ -246,6 +250,7 @@ func TestAlbumArtDoesNotReuseWhenTheGroupFrontChangedUnderTheRecord(t *testing.T
 // TestAlbumArtDoesNotReuseAHandSetGroupCover: a cover the user chose carries no record,
 // so the album asks the archive for its own rather than copying it.
 func TestAlbumArtDoesNotReuseAHandSetGroupCover(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedWYWH(t, st, lib.ID, "ess-a", edGBMBID)
@@ -274,6 +279,7 @@ func TestAlbumArtDoesNotReuseAHandSetGroupCover(t *testing.T) {
 // TestAlbumArtReuseIgnoresForce: the record is a fact about the bytes the catalog holds,
 // not a cached answer, so a forced walk of the album-art phase reads it too.
 func TestAlbumArtReuseIgnoresForce(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedWYWH(t, st, lib.ID, "ess-a", edGBMBID)
@@ -308,6 +314,7 @@ func TestAlbumArtReuseIgnoresForce(t *testing.T) {
 // TestAlbumArtRecordsOncePerGroupFetch: one record per group serves every album under it,
 // so the pressing the archive picked reuses and the other one downloads.
 func TestAlbumArtRecordsOncePerGroupFetch(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, _, lib := openStore(t)
 	seedWYWH(t, st, lib.ID, "ess-a", edGBMBID)
@@ -332,6 +339,7 @@ func TestAlbumArtRecordsOncePerGroupFetch(t *testing.T) {
 // release-group phase re-fetches every group front, and the recorded validator turns
 // that into a request with no download for a cover the archive has not changed.
 func TestForcedGroupFetchIsConditionalWhenTheCatalogHoldsTheBytes(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedWYWH(t, st, lib.ID, "ess-a", edGBMBID)
@@ -367,6 +375,7 @@ func TestForcedGroupFetchIsConditionalWhenTheCatalogHoldsTheBytes(t *testing.T) 
 // TestForcedGroupFetchDownloadsWhenTheArchiveChanged: the validator is the archive's, so
 // a cover it has replaced still downloads, and the record follows the new bytes.
 func TestForcedGroupFetchDownloadsWhenTheArchiveChanged(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedWYWH(t, st, lib.ID, "ess-a", edGBMBID)
@@ -401,6 +410,7 @@ func TestForcedGroupFetchDownloadsWhenTheArchiveChanged(t *testing.T) {
 // record, so an unlocked slot is fetched plainly and replaced, which is what art set
 // --no-lock documents.
 func TestForcedGroupFetchIsUnconditionalForAHandSetFront(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedWYWH(t, st, lib.ID, "ess-a", edGBMBID)

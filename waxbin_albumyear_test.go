@@ -23,6 +23,7 @@ func malibuMP3(n, year int) []byte {
 // so a track tagged a year apart from the rest lands in its album's folder rather than a
 // folder of its own that the next scan would key as a second album.
 func TestOrganizeFilesAStrayYearWithItsAlbum(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
@@ -70,6 +71,7 @@ func TestOrganizeFilesAStrayYearWithItsAlbum(t *testing.T) {
 // year lands with its album. Two staged releases of one name in folders of their own keep
 // their own years.
 func TestImportFilesAStrayYearWithItsAlbum(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root, staging := t.TempDir(), t.TempDir()
 	lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), root)

@@ -49,6 +49,7 @@ func drainBrowse(t *testing.T, st *Store, list read.DiscoveryList, opt read.Brow
 // drops so the statement can drive off episode_pubdate, and every non-episode, which
 // has no ep row at all).
 func TestRecentEpisodesList(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/t.flac", essence: "et", content: "ct",
 		title: "A Track", artist: "X", album: "Al"})
@@ -81,6 +82,7 @@ func TestRecentEpisodesList(t *testing.T) {
 // contain "USE TEMP B-TREE FOR ORDER BY". Only the pid tiebreak is block-sorted; a
 // bare "FOR ORDER BY" would mean the whole result set was.
 func TestRecentEpisodesPlanUsesPubDateIndex(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/t.flac", essence: "et", content: "ct",
@@ -136,6 +138,7 @@ func TestRecentEpisodesPlanUsesPubDateIndex(t *testing.T) {
 }
 
 func TestBrowseAlphabetical(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	for _, title := range []string{"Echo", "Alpha", "Delta", "Bravo", "Charlie"} {
 		putTrack(t, st, lib.ID, trackSpec{path: "/lib/" + title + ".flac", essence: "e" + title, content: "c" + title, title: title, artist: "X", album: "Al"})
@@ -148,6 +151,7 @@ func TestBrowseAlphabetical(t *testing.T) {
 }
 
 func TestBrowseNewest(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	specs := []struct {
 		title string
@@ -179,6 +183,7 @@ func TestBrowseNewest(t *testing.T) {
 }
 
 func TestBrowseRandomStableSeed(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	for _, c := range "ABCDEFGHIJ" {
 		s := string(c)
@@ -207,6 +212,7 @@ func TestBrowseRandomStableSeed(t *testing.T) {
 }
 
 func TestBrowseMostPlayedAndStarred(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	ids := map[string]model.PID{}
@@ -244,6 +250,7 @@ func TestBrowseMostPlayedAndStarred(t *testing.T) {
 // membership is a play, ordering is last_played_at, and a checkpoint alone does not
 // put an item here. That last one is the gap in-progress exists to fill.
 func TestBrowseRecentlyPlayed(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	ids := map[string]model.PID{}
@@ -277,6 +284,7 @@ func TestBrowseRecentlyPlayed(t *testing.T) {
 // TestBrowseRecentlyPlayedOrdersByRecordedTime pins what an import gets: plays
 // carrying their own times order by those times, not by the order they arrived.
 func TestBrowseRecentlyPlayedOrdersByRecordedTime(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	ids := map[string]model.PID{}
@@ -301,6 +309,7 @@ func TestBrowseRecentlyPlayedOrdersByRecordedTime(t *testing.T) {
 // TestBrowseInProgressOrdersByRecordedTime is the checkpoint twin: an imported
 // resume position sits where its recorded time puts it, not at the head.
 func TestBrowseInProgressOrdersByRecordedTime(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	ids := map[string]model.PID{}
@@ -325,6 +334,7 @@ func TestBrowseInProgressOrdersByRecordedTime(t *testing.T) {
 // TestBrowseInProgress pins the "where was I" list: membership is a resume position
 // on an unfinished item and ordering is the last playback write.
 func TestBrowseInProgress(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	ids := map[string]model.PID{}
@@ -377,6 +387,7 @@ func TestBrowseInProgress(t *testing.T) {
 // the documented sharp one. A test asserting the behaviour is what stops someone
 // "fixing" it later without reading the contract on read.ListInProgress.
 func TestBrowseInProgressBoundaries(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	ids := map[string]model.PID{}
@@ -424,6 +435,7 @@ func TestBrowseInProgressBoundaries(t *testing.T) {
 // cursor-bound page must both drive off play_state_progress rather than sorting the
 // whole set.
 func TestBrowseInProgressPlanUsesProgressIndex(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	for _, title := range []string{"One", "Two"} {
@@ -458,6 +470,7 @@ func TestBrowseInProgressPlanUsesProgressIndex(t *testing.T) {
 }
 
 func TestBrowseByYearAndByGenre(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/a.flac", essence: "ea", content: "ca", title: "A", artist: "X", album: "Al", genre: "Rock", year: 2000})
@@ -502,6 +515,7 @@ func TestBrowseByYearAndByGenre(t *testing.T) {
 // beside artist because year is the pair people re-litigate, and seeing artist behave
 // identically shows it is the design.
 func TestEpisodeScopeAcrossReadSurfaces(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/a.flac", essence: "ea", content: "ca",
@@ -566,6 +580,7 @@ func TestEpisodeScopeAcrossReadSurfaces(t *testing.T) {
 // spans every kind and so leads with podcast episodes on a podcast-heavy catalog,
 // a default rather than the only option.
 func TestBrowseKindScoped(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/a.flac", essence: "ea", content: "ca",
 		title: "Newer Track", artist: "X", album: "Al", year: 2010})
@@ -617,6 +632,7 @@ func TestBrowseKindScoped(t *testing.T) {
 // validates that pid, so an unfiltered one cannot start erroring on a value it never
 // looked at.
 func TestBrowseZeroQueryUnchanged(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	for _, title := range []string{"Alpha", "Bravo", "Charlie"} {
 		putTrack(t, st, lib.ID, trackSpec{path: "/lib/" + title + ".flac",
@@ -637,6 +653,7 @@ func TestBrowseZeroQueryUnchanged(t *testing.T) {
 // selects the field whitelist. An unknown field is CodeInvalid too, inherited from
 // query.Compile rather than reimplemented here.
 func TestBrowseQueryWithoutEntityErrors(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/a.flac", essence: "ea", content: "ca", title: "A", artist: "X", album: "Al"})
@@ -668,6 +685,7 @@ func TestBrowseQueryWithoutEntityErrors(t *testing.T) {
 // pi.kind='track', so a browse would return books and episodes carrying NULL track
 // columns.
 func TestBrowseQueryTracksEntityExcludesBooks(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/a.flac", essence: "ea", content: "ca", title: "A Track", artist: "X", album: "Al"})
 	putBook(t, st, lib.ID, bookSpec{path: "/lib/b.m4b", essence: "eb", content: "cb", title: "B Book", author: "Auth", asin: "BX"})
@@ -688,6 +706,7 @@ func TestBrowseQueryTracksEntityExcludesBooks(t *testing.T) {
 // must be exactly the unfiltered sequence for the same seed with the out-of-scope
 // rows removed, not a different permutation of the scope.
 func TestBrowseRandomScopedIsSubsequence(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	inScope := map[string]bool{}
@@ -743,6 +762,7 @@ func TestBrowseRandomScopedIsSubsequence(t *testing.T) {
 // different stars and different play counts here precisely so a mismatch shows up as
 // the wrong titles.
 func TestBrowseQueryUserFieldBindsUserJoin(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	ids := map[string]model.PID{}
@@ -798,6 +818,7 @@ func TestBrowseQueryUserFieldBindsUserJoin(t *testing.T) {
 // The second case is the plan's most-played + tag.<KEY>: a list join plus compiled
 // tag args, with no user field in the query.
 func TestBrowseQueryBindOrder(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	ids := map[string]model.PID{}
@@ -859,6 +880,7 @@ func TestBrowseQueryBindOrder(t *testing.T) {
 // detecting the contradiction would mean teaching the browse path what each list
 // filters on, which is exactly the coupling the shared filter engine avoids.
 func TestBrowseQueryContradictsByYear(t *testing.T) {
+	t.Parallel()
 	st, lib := entityFixture(t)
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/a.flac", essence: "ea", content: "ca",
 		title: "A", artist: "X", album: "Al", year: 2000})

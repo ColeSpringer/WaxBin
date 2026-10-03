@@ -53,6 +53,7 @@ func input(libID int64, path, essence, content, title string) model.PutScannedTr
 }
 
 func TestLockfileClearedOnClose(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db := filepath.Join(t.TempDir(), "c.db")
 	ownerFile := db + ".waxlock.owner"
@@ -78,6 +79,7 @@ func TestLockfileClearedOnClose(t *testing.T) {
 }
 
 func TestPutScannedTrackPreservesPIDsOnRetag(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib := openTestStore(t)
 	path := "/lib/song.mp3"
@@ -118,6 +120,7 @@ func TestPutScannedTrackPreservesPIDsOnRetag(t *testing.T) {
 }
 
 func TestRescanEssenceChangeReplacesItem(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib := openTestStore(t)
 	path := "/lib/song.mp3"
@@ -148,6 +151,7 @@ func TestRescanEssenceChangeReplacesItem(t *testing.T) {
 }
 
 func TestNoOpRescanEmitsNoChanges(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib := openTestStore(t)
 	in := input(lib.ID, "/lib/song.mp3", "sha256:E", "sha256:C", "Title")
@@ -167,6 +171,7 @@ func TestNoOpRescanEmitsNoChanges(t *testing.T) {
 }
 
 func TestQueryItemsOffsetWithoutLimit(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib := openTestStore(t)
 	for i := 0; i < 5; i++ {
@@ -194,6 +199,7 @@ func TestQueryItemsOffsetWithoutLimit(t *testing.T) {
 }
 
 func TestConcurrentCloseAndReads(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib := openTestStore(t)
 	if _, err := st.PutScannedTrack(ctx, input(lib.ID, "/lib/a.mp3", "sha256:E", "sha256:C", "T")); err != nil {
@@ -216,6 +222,7 @@ func TestConcurrentCloseAndReads(t *testing.T) {
 }
 
 func TestPutScannedTrackKeepsDuplicateCopies(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib := openTestStore(t)
 	dir := t.TempDir()
@@ -264,6 +271,7 @@ func TestPutScannedTrackKeepsDuplicateCopies(t *testing.T) {
 }
 
 func TestOpenRejectsNewerSchema(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	db := filepath.Join(t.TempDir(), "c.db")
 
@@ -296,6 +304,7 @@ func TestOpenRejectsNewerSchema(t *testing.T) {
 }
 
 func TestPutScannedTrackRelinksOnMove(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib := openTestStore(t)
 
@@ -334,6 +343,7 @@ func TestPutScannedTrackRelinksOnMove(t *testing.T) {
 }
 
 func TestLeaseExclusion(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, _ := openTestStore(t)
 
@@ -358,6 +368,7 @@ func TestLeaseExclusion(t *testing.T) {
 }
 
 func TestReclaimOrphans(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, _ := openTestStore(t)
 

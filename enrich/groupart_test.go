@@ -62,6 +62,7 @@ func auxService(t *testing.T, st enrich.Store, providers ...enrich.Provider) *en
 // auxiliary roles still reaches the group, fills the empty roles, and leaves the front
 // exactly as it was.
 func TestGroupArtAuxFillsSettledFront(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
@@ -136,6 +137,7 @@ func TestGroupArtAuxFillsSettledFront(t *testing.T) {
 // half and no other, leaving the auxiliary roles for a provider serving them to reach
 // later. A second run asks nothing.
 func TestGroupArtFetchesAStockFrontAlone(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
@@ -166,6 +168,7 @@ func TestGroupArtFetchesAStockFrontAlone(t *testing.T) {
 // TestGroupArtAuxMarkerStopsRepeat: a group no provider could serve is asked once, by the
 // backfill, and never again on a later run. Force is the way back in.
 func TestGroupArtAuxMarkerStopsRepeat(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
@@ -218,6 +221,7 @@ func TestGroupArtAuxMarkerStopsRepeat(t *testing.T) {
 // there is nothing left to gather, so the providers behind it are not consulted at all.
 // Without that stop their images are downloaded in full and then dropped.
 func TestGroupArtAuxStopsAtAFullSet(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, _, lib := openStore(t)
 	seedTaggedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "wywh-mbid")
@@ -252,6 +256,7 @@ func TestGroupArtAuxStopsAtAFullSet(t *testing.T) {
 // release-group id up front, which is what makes the aux phase's own queue non-empty
 // before the run starts and the count exact.
 func TestGroupArtAuxHeartbeatDenominator(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, _, lib := openStore(t)
 	seedTaggedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "wywh-mbid")
@@ -290,6 +295,7 @@ func TestGroupArtAuxHeartbeatDenominator(t *testing.T) {
 // title now, and the request carries the title and primary-artist name with an empty
 // MBID.
 func TestGroupArtAuxQueuesAnUnmatchedGroupByTitle(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Basement Tape", "The Local Band", "Demo")
@@ -358,6 +364,7 @@ func rgAuxHash(t *testing.T, dbPath string, role model.ArtRole) string {
 // both again; the failed provider fills its slot and the healthy one's repeat is dropped
 // at apply, since the slot it answered is no longer empty.
 func TestGroupArtAuxFailureLeavesTheGroupQueued(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
@@ -488,6 +495,7 @@ func stockRun(t *testing.T, st enrich.Store, mbURL, caaURL string, coverArt bool
 // group whose identity settled while cover art was off has no front, and nothing asked
 // again. With the archive on, the backfill asks about it on the next run.
 func TestGroupArtFillsAFrontSettledWithoutCoverArt(t *testing.T) {
+	t.Parallel()
 	st, dbPath, lib := openStore(t)
 	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
 	mbURL := mbMockGenres(t, `[]`).URL
@@ -521,6 +529,7 @@ func TestGroupArtFillsAFrontSettledWithoutCoverArt(t *testing.T) {
 // whose provider list left the archive out settled the group with no front, and a later
 // pass with the archive in the list backfills it.
 func TestGroupArtReachesAGroupTheHookLeftTheArchiveOutOf(t *testing.T) {
+	t.Parallel()
 	st, dbPath, lib := openStore(t)
 	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
 	mbURL := mbMockGenres(t, `[]`).URL
@@ -543,6 +552,7 @@ func TestGroupArtReachesAGroupTheHookLeftTheArchiveOutOf(t *testing.T) {
 // group costs the archive one request in its first pass, and an outage leaves the
 // backfill's lookup owed while the identity settles.
 func TestGroupArtAsksAFreshGroupsFront(t *testing.T) {
+	t.Parallel()
 	for _, c := range []struct {
 		state                 string
 		owedGroupArt, settled int
@@ -571,6 +581,7 @@ func TestGroupArtAsksAFreshGroupsFront(t *testing.T) {
 // TestGroupArtAsksACoverlessGroupOnce: a group the archive has no cover for is asked once,
 // and the miss holds until the retry window rather than being asked again next pass.
 func TestGroupArtAsksACoverlessGroupOnce(t *testing.T) {
+	t.Parallel()
 	st, _, lib := openStore(t)
 	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
 	mbURL := mbMockGenres(t, `[]`).URL
@@ -590,6 +601,7 @@ func TestGroupArtAsksACoverlessGroupOnce(t *testing.T) {
 // leave the front to it. A title-keyed provider serving the group rung is asked for the
 // front of an unmatched group in the same run.
 func TestGroupArtAsksTheFrontOfAGroupMusicBrainzMissed(t *testing.T) {
+	t.Parallel()
 	st, dbPath, lib := openStore(t)
 	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Basement Tape", "The Local Band", "Demo")
 	fronts := 0
@@ -619,6 +631,7 @@ func TestGroupArtAsksTheFrontOfAGroupMusicBrainzMissed(t *testing.T) {
 // re-queues a group the backfill had marked from a request without one. The heartbeat
 // stays short of 1 until the last beat says the pass is done.
 func TestGroupArtHeartbeatStaysShortOfDoneUntilTheEnd(t *testing.T) {
+	t.Parallel()
 	st, dbPath, lib := openStore(t)
 	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
 	caaURL, _ := newGroupArchive(t, pngBytes(t), "up")
@@ -662,6 +675,7 @@ func TestGroupArtHeartbeatStaysShortOfDoneUntilTheEnd(t *testing.T) {
 // stays a miss even though a provider filled an auxiliary role in the same walk, so the
 // retry window asks about the front again, and only the front.
 func TestGroupArtRetriesAFrontMissedBesideAnAuxMatch(t *testing.T) {
+	t.Parallel()
 	st, dbPath, lib := openStore(t)
 	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
 	caaURL, arch := newGroupArchive(t, pngBytes(t), "missing")
@@ -706,6 +720,7 @@ func TestGroupArtRetriesAFrontMissedBesideAnAuxMatch(t *testing.T) {
 // a held front from the cover providers alone. The auxiliary roles are the group-art
 // backfill's to ask, so a provider serving only those is not consulted on the way.
 func TestGroupRefreshLeavesTheAuxProvidersToTheBackfill(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")

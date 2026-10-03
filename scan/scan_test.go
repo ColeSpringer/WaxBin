@@ -34,6 +34,7 @@ func writeJPEG(t *testing.T, path string, w, h int) {
 }
 
 func TestResolveCoverSkipsUndecodableEmbedded(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	writeJPEG(t, filepath.Join(dir, "cover.jpg"), 80, 80)
 	audio := filepath.Join(dir, "song.mp3")
@@ -53,6 +54,7 @@ func TestResolveCoverSkipsUndecodableEmbedded(t *testing.T) {
 }
 
 func TestResolveCoverKeepsUndecodableAsLastResort(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir() // no directory cover here
 	audio := filepath.Join(dir, "song.mp3")
 	junk := &model.ArtImage{Data: []byte("exotic-but-real-bytes")}
@@ -66,6 +68,7 @@ func TestResolveCoverKeepsUndecodableAsLastResort(t *testing.T) {
 }
 
 func TestSidecarLyricsPrecedence(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	audio := filepath.Join(dir, "song.flac")
 	if err := os.WriteFile(filepath.Join(dir, "song.lrc"), []byte("[00:00.00]Hello\n[00:01.50]World\n"), 0o644); err != nil {
@@ -88,6 +91,7 @@ func TestSidecarLyricsPrecedence(t *testing.T) {
 }
 
 func TestSidecarLyricsFallbackToEmbedded(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	audio := filepath.Join(dir, "song.flac") // no .lrc next to it
 	embedded := &model.Lyrics{Source: model.SourceTag, Unsynced: "just text"}
@@ -101,6 +105,7 @@ func TestSidecarLyricsFallbackToEmbedded(t *testing.T) {
 }
 
 func TestBookInput(t *testing.T) {
+	t.Parallel()
 	tags := model.Tags{
 		Title: "Chapter 1", Album: "The Way of Kings (Unabridged)",
 		AlbumArtist: "Brandon Sanderson", Artist: "Brandon Sanderson, Narrator",
@@ -140,6 +145,7 @@ func TestBookInput(t *testing.T) {
 }
 
 func TestBookInputUntitledFallsBackToEssence(t *testing.T) {
+	t.Parallel()
 	tags := model.Tags{BookSignal: model.BookTagSignal} // no album, title, or ids
 	in := bookInput(1, model.File{}, tags, "essX", nil, place{})
 	if in.Item.IdentityKey != "essence:essX" {
@@ -148,6 +154,7 @@ func TestBookInputUntitledFallsBackToEssence(t *testing.T) {
 }
 
 func TestCleanBookTitle(t *testing.T) {
+	t.Parallel()
 	cases := map[string]string{
 		"The Hobbit (Unabridged)": "The Hobbit",
 		"Dune [Abridged]":         "Dune",
@@ -169,6 +176,7 @@ func exoticAVIF() []byte {
 }
 
 func TestResolveCoverExoticEmbeddedYieldsToDirCover(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	writeJPEG(t, filepath.Join(dir, "cover.jpg"), 64, 64)
 	audio := filepath.Join(dir, "song.m4a")
@@ -184,6 +192,7 @@ func TestResolveCoverExoticEmbeddedYieldsToDirCover(t *testing.T) {
 }
 
 func TestResolveCoverExoticEmbeddedKeptWithoutDirCover(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir() // no directory cover
 	audio := filepath.Join(dir, "song.m4a")
 	got := resolveCover(audio, &model.ArtImage{Data: exoticAVIF()}, newArtCache())
@@ -196,6 +205,7 @@ func TestResolveCoverExoticEmbeddedKeptWithoutDirCover(t *testing.T) {
 }
 
 func TestScanSidecarsRecordsUndecodableCoverObs(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	audio := filepath.Join(dir, "song.flac")
 	// A cover file present on disk but neither decodable nor a recognized exotic.
@@ -224,6 +234,7 @@ func TestScanSidecarsRecordsUndecodableCoverObs(t *testing.T) {
 }
 
 func TestScanCueSidecarReadableButEmpty(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	audio := filepath.Join(dir, "book.m4b")
 	// A readable .cue that yields no chapters (no TRACK/INDEX entries).
@@ -261,6 +272,7 @@ func TestScanCueSidecarReadableButEmpty(t *testing.T) {
 // TestCueSheetDiagKeepsItsEnding: a detail is capped, and what became of the sheet is
 // the part a reader needs most, so long chapter titles give way rather than the ending.
 func TestCueSheetDiagKeepsItsEnding(t *testing.T) {
+	t.Parallel()
 	long := strings.Repeat("A Very Long Chapter Title ", 12)
 	dropped := []string{`TRACK 02 ("` + long + `") has no usable INDEX 01`, `TRACK 05 ("` + long + `") has no usable INDEX 01`}
 	ds := cueSheetDiag(nil, dropped, "", "the readable lines were applied")
@@ -272,6 +284,7 @@ func TestCueSheetDiagKeepsItsEnding(t *testing.T) {
 // TestCueSheetDiagCountsTruncatedWarnings: past upstream's cap the count of unread
 // lines is a floor, and the detail says so.
 func TestCueSheetDiagCountsTruncatedWarnings(t *testing.T) {
+	t.Parallel()
 	sheet, err := meta.ParseCueSheet(strings.Repeat("INDEX 01 00:00:00\n", 70))
 	if err != nil {
 		t.Fatal(err)
@@ -284,6 +297,7 @@ func TestCueSheetDiagCountsTruncatedWarnings(t *testing.T) {
 }
 
 func TestFindDirCoverAVIF(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	// A minimal AVIF-branded ISOBMFF header (undecodable by pure-Go, but recognized).
 	avif := append([]byte{0, 0, 0, 0x20}, []byte("ftypavif")...)
@@ -308,6 +322,7 @@ func TestFindDirCoverAVIF(t *testing.T) {
 // combined one. The distinction is what keeps a tagged artist id from collapsing a
 // list the tagger stated.
 func TestCreditArtistsReportsOnlyAStatedList(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name string
 		tags model.Tags
@@ -358,6 +373,7 @@ func TestCreditArtistsReportsOnlyAStatedList(t *testing.T) {
 // decoder handles the container whatever the extension says, so audioExts is the
 // only gate, and .mkv and .webm stay out because they routinely carry video.
 func TestIsAudioMatroska(t *testing.T) {
+	t.Parallel()
 	for _, p := range []string{"/lib/live.mka", "/lib/LIVE.MKA"} {
 		if !IsAudio(p) {
 			t.Errorf("IsAudio(%q) = false, want true", p)
@@ -376,6 +392,7 @@ func TestIsAudioMatroska(t *testing.T) {
 // next scan will trust. A probe that merely cannot read the file keeps the zeroes
 // and lets the file catalog, so audit can still name it.
 func TestProbePropertiesInterruptedScanFails(t *testing.T) {
+	t.Parallel()
 	s := &Scanner{log: slog.New(slog.DiscardHandler)}
 	missing := filepath.Join(t.TempDir(), "gone.wv")
 

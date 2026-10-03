@@ -30,6 +30,7 @@ func artistArtMarker(t *testing.T, dbPath string) string {
 // queue for good; the second run, with an art provider injected, fills the front the
 // first run had no source for.
 func TestArtistArtBackfillFillsAMarkedArtist(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
@@ -97,6 +98,7 @@ func TestArtistArtBackfillFillsAMarkedArtist(t *testing.T) {
 // auxiliary slots are empty is queued for those alone, the half groupArtNeededPredicate
 // covers at the release-group rung, and the front a provider offers on the way is dropped.
 func TestArtistArtBackfillQueuesAnEmptyAuxSlot(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
@@ -145,6 +147,7 @@ func TestArtistArtBackfillQueuesAnEmptyAuxSlot(t *testing.T) {
 // TestArtistArtBackfillSkipsALockedArtist: the whole-entity art lock keeps the artist out
 // of the queue, so a locked artist spends no request and takes no marker.
 func TestArtistArtBackfillSkipsALockedArtist(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
@@ -181,6 +184,7 @@ func TestArtistArtBackfillSkipsALockedArtist(t *testing.T) {
 // as a vacancy and is dropped at apply instead. The marker is still written, so it costs
 // one pass rather than a request every run.
 func TestArtistArtBackfillDropsARoleHeldEmptyByItsLock(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
@@ -217,6 +221,7 @@ func TestArtistArtBackfillDropsARoleHeldEmptyByItsLock(t *testing.T) {
 // phase at all, or a stock install (whose Cover Art Archive answers nothing for an artist)
 // would stamp a permanent no-match on every artist, which is the bug this closes.
 func TestArtistArtBackfillIsSilentWithoutTheCapability(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
@@ -263,6 +268,7 @@ func mbMockNoArtist(t *testing.T) *httptest.Server {
 // all. The walk is keyed on the name now, and the request carries the name with an empty
 // MBID so a name-keyed provider has something to work with.
 func TestArtistArtBackfillQueuesAnUnmatchedArtistByName(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Basement Tape", "The Local Band", "Demo")
@@ -322,6 +328,7 @@ func TestArtistArtBackfillQueuesAnUnmatchedArtistByName(t *testing.T) {
 // TestArtistArtBackfillFailureLeavesTheArtistQueued: the artist rung follows the same
 // rule, so an outage at an artist-art service costs the artist one pass, not a window.
 func TestArtistArtBackfillFailureLeavesTheArtistQueued(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "One", "The Local Band", "Demo")

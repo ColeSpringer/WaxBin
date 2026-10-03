@@ -213,6 +213,7 @@ func newService(st enrich.Store, mbURL, caaURL string) *enrich.Service {
 // --- tests ------------------------------------------------------------------
 
 func TestEnrichHappyPath(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
@@ -327,6 +328,7 @@ func res2Total(r *enrich.Result) int {
 }
 
 func TestEnrichRespectsGenreLock(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	locked := seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
@@ -368,6 +370,7 @@ func caaStatus(t *testing.T, code int) *httptest.Server {
 }
 
 func TestEnrichCoverArt404IsNotFatal(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
@@ -390,6 +393,7 @@ func TestEnrichCoverArt404IsNotFatal(t *testing.T) {
 }
 
 func TestEnrichCoverArtTransientErrorIsBestEffort(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
@@ -417,6 +421,7 @@ func TestEnrichCoverArtTransientErrorIsBestEffort(t *testing.T) {
 // search will not adopt a title-matching hit credited to a different artist (the
 // "Greatest Hits" MBID-theft guard).
 func TestEnrichReleaseGroupSearchRejectsWrongArtist(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Track", "Pink Floyd", "Greatest Hits")
@@ -451,6 +456,7 @@ func TestEnrichReleaseGroupSearchRejectsWrongArtist(t *testing.T) {
 }
 
 func TestEnrichTrailingSlashBaseURL(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, _, lib := openStore(t)
 	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
@@ -474,6 +480,7 @@ func TestEnrichTrailingSlashBaseURL(t *testing.T) {
 // TestEnrichDoesNotCachePoisonedResponse verifies a 2xx-but-garbage body is not
 // cached: it would otherwise wedge every non-forced resume (re-read, re-fail).
 func TestEnrichDoesNotCachePoisonedResponse(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, _, lib := openStore(t)
 	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
@@ -498,6 +505,7 @@ func TestEnrichDoesNotCachePoisonedResponse(t *testing.T) {
 // TestEnrichDisabledWithoutContact: with neither route to a runnable phase, the pass
 // still refuses outright rather than walking queues nothing can serve.
 func TestEnrichDisabledWithoutContact(t *testing.T) {
+	t.Parallel()
 	st, _, _ := openStore(t)
 	svc := enrich.New(st, enrich.Config{}, nil) // no contact, no providers
 	if svc.Enabled() {
@@ -517,6 +525,7 @@ func TestEnrichDisabledWithoutContact(t *testing.T) {
 // built-in is registered: an unpaced walk of every track against LRCLIB under the
 // default User-Agent is exactly what the guard exists to prevent.
 func TestEnrichRunsInjectedPhasesWithoutContact(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Basement Tape", "The Local Band", "Demo")
@@ -573,6 +582,7 @@ func TestEnrichRunsInjectedPhasesWithoutContact(t *testing.T) {
 }
 
 func TestEnrichOfflineDegradesGracefully(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, _, lib := openStore(t)
 	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
@@ -602,6 +612,7 @@ func TestEnrichOfflineDegradesGracefully(t *testing.T) {
 // untouched), and the scope implies force, so a second scoped run re-enriches
 // its targets instead of skipping them by their markers.
 func TestEnrichScopedRun(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	scoped := seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
@@ -662,6 +673,7 @@ func TestEnrichScopedRun(t *testing.T) {
 // phase runs just that phase: an artist-only scope must not walk release groups,
 // books, or lyrics.
 func TestEnrichScopedRunSkipsEmptyPhases(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
@@ -691,6 +703,7 @@ func TestEnrichScopedRunSkipsEmptyPhases(t *testing.T) {
 // as enrichment art naming the provider and the archive request URL, not the redirect
 // target the client actually read the bytes from.
 func TestCoverArtProvenanceRecordsProviderAndURL(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
@@ -720,6 +733,7 @@ func TestCoverArtProvenanceRecordsProviderAndURL(t *testing.T) {
 // must not spend a rate-limited Cover Art Archive request discovering that on every
 // forced run.
 func TestLockedCoverIsNotFetched(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
@@ -767,6 +781,7 @@ func flakyGroupFront(t *testing.T, art []byte, fails int) (*httptest.Server, *in
 // MusicBrainz request, and the entity delta rides on what actually landed: one for the
 // identity, one when the front arrives.
 func TestGroupFrontFailureLeavesTheGroupQueued(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	item := seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
@@ -826,6 +841,7 @@ func TestGroupFrontFailureLeavesTheGroupQueued(t *testing.T) {
 // a front the archive keeps failing on costs one more request rather than one per pass.
 // The settled miss is asked again once the retry window has passed.
 func TestAGroupFrontFailingTwiceWaitsForTheRetryWindow(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
@@ -903,6 +919,7 @@ func manyGroupsMB(t *testing.T) *mbMock {
 // stalls the phase with the other two groups still queued. The next pass fetches all
 // five fronts with no MusicBrainz request.
 func TestATrippedArchiveLeavesTheGroupsAfterItQueued(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	for i := 1; i <= 5; i++ {
@@ -972,6 +989,7 @@ func TestATrippedArchiveLeavesTheGroupsAfterItQueued(t *testing.T) {
 // trips the archive, and the two owed groups it never reached stay owed. The pass after
 // fetches those four fronts, while the settled miss waits for the retry window.
 func TestAGroupLeftUnaskedStaysOwed(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	for i := 1; i <= 5; i++ {
@@ -1024,6 +1042,7 @@ func TestAGroupLeftUnaskedStaysOwed(t *testing.T) {
 // injected genre provider is the only source, and the groups it was never asked about
 // stay owed until it answers, since the identity walk is that rider's one asker.
 func TestAGenreRiderLeftUnaskedStaysOwed(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	for i := 1; i <= 5; i++ {
@@ -1064,6 +1083,7 @@ func TestAGenreRiderLeftUnaskedStaysOwed(t *testing.T) {
 // genre, so when every track of a group already carries one, a failed genre provider
 // leaves nothing a later pass could add, and the group settles.
 func TestAGroupWhoseTracksHaveGenresIsNotOwedThem(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedTrackWith(t, st, lib.ID, "/lib/1.mp3", "ess-1", "Song 1",
@@ -1137,6 +1157,7 @@ func manyNamesMB(t *testing.T) *mbMock {
 // re-walked after every phase's new targets, so a nightly cap still reaches the group-art
 // backfill instead of spending itself on the same groups every night.
 func TestACappedRunReachesLaterPhasesPastOwedIdentities(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, _, lib := openStore(t)
 	for i := 1; i <= 6; i++ {
@@ -1175,6 +1196,7 @@ func TestACappedRunReachesLaterPhasesPastOwedIdentities(t *testing.T) {
 // failures, leaves every group settled, and the group-art backfill, which asks that
 // provider about the same groups under its own marker, is what carries the failure.
 func TestAnAuxFailureDoesNotDeferTheGroup(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	for i := 1; i <= 5; i++ {
@@ -1203,6 +1225,7 @@ func TestAnAuxFailureDoesNotDeferTheGroup(t *testing.T) {
 // forced run during an archive outage therefore owes nothing for the groups it walks,
 // rather than leaving the whole catalog to be walked again.
 func TestAGroupHoldingAFrontIsNotOwedForItsRider(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	for i := 1; i <= 5; i++ {

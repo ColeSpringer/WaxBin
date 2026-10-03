@@ -17,6 +17,7 @@ import (
 // into its author's folder spelled anew renames the folder, and the catalog's path of a
 // book left in it follows, so the next scan reads nothing again.
 func TestOrganizeRespellsAnAuthorFolder(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	narrated := []testaudio.TXXXFrame{{Desc: "NARRATOR", Value: "Reader"}}
@@ -49,6 +50,7 @@ func TestOrganizeRespellsAnAuthorFolder(t *testing.T) {
 // spells otherwise gives the folder the import's spelling, and the catalog's paths of the
 // books already in it follow.
 func TestImportRespellsAnAuthorFolder(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	narrated := []testaudio.TXXXFrame{{Desc: "NARRATOR", Value: "Reader"}}

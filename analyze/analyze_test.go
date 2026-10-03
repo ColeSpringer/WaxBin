@@ -130,6 +130,7 @@ func writeFixture(t *testing.T, dir, name string, id int64, data []byte) *model.
 // external binaries. An aac/aac-lc vocabulary slip would surface here loudly as a
 // skip, not silently in production.
 func TestRunAllFormats(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	const rate = 44100
 	sig := testaudio.ReferenceSignal(rate, 4*time.Second)
@@ -217,6 +218,7 @@ const lossyPriming = 600
 // TestRunUnsupportedSkipped: an input this build cannot decode (random bytes) is
 // skipped and never stamped, so a future WaxFlow can pick it up.
 func TestRunUnsupportedSkipped(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	rnd := make([]byte, 16384)
 	for i := range rnd {
@@ -244,6 +246,7 @@ func TestRunUnsupportedSkipped(t *testing.T) {
 // rather than in Skipped where it would be retried forever. The pass counts it and
 // carries on.
 func TestRunOpenPhaseDamageErrored(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	f := writeFixture(t, dir, "truncated.flac", 0, []byte("fLaC\x00\x00\x00"))
 	store := newFakeStore(f)
@@ -275,6 +278,7 @@ func assertDecodeVerdict(t *testing.T, store *fakeStore, f *model.File) {
 // must land in Errored so audit sees it, NOT in Skipped where it would be retried
 // forever, and it must not be stamped.
 func TestRunCorruptErrored(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	const rate = 44100
 	sig := testaudio.ReferenceSignal(rate, 4*time.Second)
@@ -298,6 +302,7 @@ func TestRunCorruptErrored(t *testing.T) {
 // TestRunCanceledDoesNotCommit: a canceled run stops cleanly and stamps nothing,
 // so no file is frozen as "analyzed, no loudness" and every file is retried.
 func TestRunCanceledDoesNotCommit(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	const rate = 44100
 	sig := testaudio.ReferenceSignal(rate, 2*time.Second)
@@ -320,6 +325,7 @@ func TestRunCanceledDoesNotCommit(t *testing.T) {
 // TestMeasureCanceled: measure yields to a canceled context by returning an error
 // rather than a partial measurement, so analyzeFile aborts before PutAnalysis.
 func TestMeasureCanceled(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	const rate = 44100
 	sig := testaudio.ReferenceSignal(rate, 2*time.Second)
@@ -340,6 +346,7 @@ func TestMeasureCanceled(t *testing.T) {
 // old pure-Go path skipped peaks past a 15-minute decode cap; the streamed
 // Accumulator has no such cap, so the waveform is stored whole.
 func TestRunLongFilePeaks(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("long-file fixture is slow")
 	}
@@ -372,6 +379,7 @@ func TestRunLongFilePeaks(t *testing.T) {
 // meter on the full multichannel signal with channel weighting, so it is not
 // expected to match the mono file and is only checked for presence here.)
 func TestMeasureMultichannel(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	const rate = 44100
 	mono := testaudio.ReferenceSignal(rate, 3*time.Second)
@@ -424,6 +432,7 @@ func TestMeasureMultichannel(t *testing.T) {
 // TestMeasureRecordsTheSpan: the waveform carries how many frames it divides and at
 // what rate, so a reader can place a window on it without the header's duration.
 func TestMeasureRecordsTheSpan(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	const rate = 44100
 	sig := testaudio.ReferenceSignal(rate, 3*time.Second)
@@ -449,6 +458,7 @@ func TestMeasureRecordsTheSpan(t *testing.T) {
 // converges) and counted in MeasureFailed, not discarded into Errored, which would
 // discard the fingerprint too and leave the file with nothing to group on.
 func TestLateCorruptionKeepsFingerprint(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("late-corruption fixture is a >120s encode")
 	}
@@ -493,6 +503,7 @@ func TestLateCorruptionKeepsFingerprint(t *testing.T) {
 // the two used to look identical in the catalog. Its measurement did run to the end
 // of the file, so it is stamped and the pass leaves it alone from here.
 func TestSilenceStampsAsMeasured(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	const rate = 8000
 	f := writeFixture(t, dir, "silence.wav", 0, testaudio.EncodeWAV16(rate, make([]float32, rate*2)))
@@ -521,6 +532,7 @@ func TestSilenceStampsAsMeasured(t *testing.T) {
 // all, so those measurements are wrong or missing, and only a stamp that differs
 // gets them redone.
 func TestVersionLeavesThePreBumpStampBehind(t *testing.T) {
+	t.Parallel()
 	const preBump = 1_001_001
 	if Version == preBump {
 		t.Fatalf("Version is still the pre-bump %d; loudness.AnalysisVersion (%d) did not move with the decoder",
@@ -532,6 +544,7 @@ func TestVersionLeavesThePreBumpStampBehind(t *testing.T) {
 // input settles (nothing this build runs can change the answer, and a decoder
 // change re-selects it through AnalysisVersion); anything retryable stays clear.
 func TestMeasureSettled(t *testing.T) {
+	t.Parallel()
 	if !measureSettled(nil) {
 		t.Error("a clean measure should settle")
 	}
@@ -546,6 +559,7 @@ func TestMeasureSettled(t *testing.T) {
 // TestPeaksDataNeedsARate: a waveform whose decode reported no rate cannot be placed,
 // so it is dropped rather than refused by the store with the fingerprint beside it.
 func TestPeaksDataNeedsARate(t *testing.T) {
+	t.Parallel()
 	p := peaks.Compute(cheapSignal(4000), 10)
 	if pk := peaksData(p, 4000, 0, "e"); pk != nil {
 		t.Errorf("peaksData with no rate = %+v, want nil", pk)
@@ -560,6 +574,7 @@ func TestPeaksDataNeedsARate(t *testing.T) {
 // reported whether the read worked around the cut (a warning) or failed on it (an
 // error), and a clean file reports an empty list that clears an older verdict.
 func TestRunRecordsTheDecodeVerdict(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	const rate = 8000
 	flac := testaudio.EncodeAs(t, "flac", "", rate, testaudio.ReferenceSignal(rate, 4*time.Second))
@@ -592,6 +607,7 @@ func TestRunRecordsTheDecodeVerdict(t *testing.T) {
 // their verdict replaces the one before. Bad bytes did; an input no decoder here
 // reads, an unreadable source and a cancel did not.
 func TestMeasureObserved(t *testing.T) {
+	t.Parallel()
 	for _, c := range []struct {
 		name string
 		err  error
@@ -613,6 +629,7 @@ func TestMeasureObserved(t *testing.T) {
 // decoded length, so a file whose header understates it still lands beside its
 // twins. The header's value is the fallback when the decode yields no waveform.
 func TestRunBucketsByTheDecodedLength(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	const rate = 8000
 	f := writeFixture(t, dir, "short-header.wav", 0, testaudio.EncodeWAV16(rate, cheapSignal(rate*8)))
@@ -631,6 +648,7 @@ func TestRunBucketsByTheDecodedLength(t *testing.T) {
 // build mixes is refused, which says what the build cannot do rather than what the
 // bytes are, so it gets no corrupt_audio verdict.
 func TestRunLeavesAWideLayoutWithoutAVerdict(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	const rate, chans = 8000, 10
 	mono := cheapSignal(rate * 2)
@@ -657,6 +675,7 @@ func TestRunLeavesAWideLayoutWithoutAVerdict(t *testing.T) {
 // than the recording holds, so a cut file keeps its header's length and stays beside the
 // intact copy.
 func TestRunBucketsADamagedFileByItsHeader(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	const rate = 8000
 	flac := testaudio.EncodeAs(t, "flac", "", rate, testaudio.ReferenceSignal(rate, 8*time.Second))
@@ -679,6 +698,7 @@ func TestRunBucketsADamagedFileByItsHeader(t *testing.T) {
 // decoded length unless the read was damaged, then the header's, then the analyzed
 // head's.
 func TestBucketDuration(t *testing.T) {
+	t.Parallel()
 	for _, c := range []struct {
 		name               string
 		pk                 *model.PeaksData
@@ -711,6 +731,7 @@ func chromaprintAnalyzer(store Store, bin string) *Analyzer {
 // fingerprint_fallback row; the next run, with fpcalc working, stores the Chromaprint
 // fingerprint and no reason, which clears the row.
 func TestRunCountsAFpcalcFallback(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := writeFixture(t, t.TempDir(), "a.wav", 1, testaudio.EncodeWAV16(44100, cheapSignal(44100*3)))
 	f.DurationMS = 3000
@@ -743,6 +764,7 @@ func TestRunCountsAFpcalcFallback(t *testing.T) {
 // TestRunKeepsAPartialFpcalcRead: a read error fpcalc reports after fingerprinting the
 // whole file keeps its Chromaprint fingerprint, counted apart and with no fallback row.
 func TestRunKeepsAPartialFpcalcRead(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := writeFixture(t, t.TempDir(), "a.wav", 1, testaudio.EncodeWAV16(44100, cheapSignal(44100*3)))
 	f.DurationMS = 3000
@@ -765,6 +787,7 @@ func TestRunKeepsAPartialFpcalcRead(t *testing.T) {
 // fell back, since its stamp already names the pure-Go fingerprint, so that pass is what
 // drops the fallback rows, while a Chromaprint pass leaves them to each file's analysis.
 func TestOnlyAPureGoRunClearsFallbacks(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store := newFakeStore()
 	if _, err := pureGoAnalyzer(t, store).Run(ctx, nil); err != nil {

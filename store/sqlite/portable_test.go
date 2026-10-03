@@ -49,6 +49,7 @@ func bookIn(libID int64, path, essence, title, author, series, asin, isbn string
 // TOTAL running time (the sum of its parts), matching the item view it is later compared
 // against, rather than only the primary part's duration.
 func TestItemIdentityBookDurationSumsParts(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib := openTestStore(t)
 
@@ -81,6 +82,7 @@ func TestItemIdentityBookDurationSumsParts(t *testing.T) {
 }
 
 func TestItemsByEssence(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib := openTestStore(t)
 
@@ -120,6 +122,7 @@ func TestItemsByEssence(t *testing.T) {
 }
 
 func TestItemByRecordingMBID(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib := openTestStore(t)
 
@@ -160,6 +163,7 @@ func TestItemByRecordingMBID(t *testing.T) {
 }
 
 func TestItemsByArtistKey(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib := openTestStore(t)
 
@@ -185,6 +189,7 @@ func TestItemsByArtistKey(t *testing.T) {
 }
 
 func TestItemByBookIdent(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib := openTestStore(t)
 
@@ -221,6 +226,7 @@ func TestItemByBookIdent(t *testing.T) {
 }
 
 func TestItemsByAuthorKey(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib := openTestStore(t)
 
@@ -238,6 +244,7 @@ func TestItemsByAuthorKey(t *testing.T) {
 }
 
 func TestItemIdentitiesByPIDs(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib := openTestStore(t)
 
@@ -321,6 +328,7 @@ func TestItemIdentitiesByPIDs(t *testing.T) {
 }
 
 func TestFingerprintCandidatesByProbe(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib := openTestStore(t)
 
@@ -377,6 +385,7 @@ func TestFingerprintCandidatesByProbe(t *testing.T) {
 // the shared count out N-fold or resolving to an arbitrary sibling. The candidate carries
 // an empty item pid instead, which the facade skips.
 func TestProbeCUEAlbumNoFanout(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, lib := openTestStore(t)
 

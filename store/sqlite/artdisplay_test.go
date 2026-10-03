@@ -22,6 +22,7 @@ const (
 // cover thumbnailed correctly into a small grid tile and came back as raw TIFF at a
 // rung above its own size, so one picture drew in one place and not the other.
 func TestSizedResolveReencodesUndisplayableSource(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStoreAt(t)
 	raw := sizedCover(t, "tiff", 60, 40)
@@ -63,6 +64,7 @@ func TestSizedResolveReencodesUndisplayableSource(t *testing.T) {
 // likely to be argued out of the floor later. WebP is absent because x/image decodes it
 // and does not encode it.
 func TestSizedResolveKeepsShortCircuitForDisplayable(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	for _, format := range []string{"jpeg", "png", "gif", "bmp"} {
 		t.Run(format, func(t *testing.T) {
@@ -100,6 +102,7 @@ func TestSizedResolveKeepsShortCircuitForDisplayable(t *testing.T) {
 // per rung rather than collapsed onto one entry: see the box passed to thumbnail for why
 // the stored dimensions are not trusted to do that collapsing.
 func TestSizedResolveRungsAboveSourceAgree(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, _, lib := openStoreAt(t)
 	raw := sizedCover(t, "tiff", 60, 40)
@@ -132,6 +135,7 @@ func TestSizedResolveRungsAboveSourceAgree(t *testing.T) {
 // its bytes really are. Clamping to that figure would answer a large request with a
 // small picture and cache it under the small rung, where nothing would ever correct it.
 func TestSizedResolveIgnoresUnderstatedStoredDimensions(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStoreAt(t)
 	raw := sizedCover(t, "tiff", 800, 800)
@@ -167,6 +171,7 @@ func TestSizedResolveIgnoresUnderstatedStoredDimensions(t *testing.T) {
 // which before this change took the short circuit above its own size and was never
 // handed to a generator.
 func TestSizedResolveFallsBackWhenGenerationFails(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStoreAt(t)
 	junk := []byte("II*\x00 this is not a tiff, only the first bytes of one")
@@ -211,6 +216,7 @@ func TestSizedResolveFallsBackWhenGenerationFails(t *testing.T) {
 // persist: a read-only library re-encodes and serves from the in-process cache, and
 // writes nothing.
 func TestSizedResolveOnReadOnlyStore(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStoreAt(t)
 	raw := sizedCover(t, "tiff", 60, 40)
@@ -271,6 +277,7 @@ func (h *countingHandler) count() int {
 // without the record a grid scroll re-attempts the same decode and re-emits the same
 // warning once per request.
 func TestSizedResolveRemembersGenerationFailure(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "catalog.db")
 	h := &countingHandler{}

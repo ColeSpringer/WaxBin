@@ -41,6 +41,7 @@ func fileOfItem(t *testing.T, st *sqlite.Store, title string) *model.File {
 // packet stream catalog under the "musepack" labels with the parse's stream
 // properties, and an APEv2 write lands on either.
 func TestScanMusepack(t *testing.T) {
+	t.Parallel()
 	st, lib, sc, _, root := fastPathFixture(t)
 	ctx := context.Background()
 	files := []struct {
@@ -81,6 +82,7 @@ func TestScanMusepack(t *testing.T) {
 // TestScanMusepackBookChapters: the SV8 chapter packets reach the catalog as a
 // book's embedded chapters, in start order, each end taken from the next start.
 func TestScanMusepackBookChapters(t *testing.T) {
+	t.Parallel()
 	st, lib, sc, _, root := fastPathFixture(t)
 	p := filepath.Join(root, "book.mpc")
 	copyFixture(t, "ref-2s-sv8-chapters.mpc", p)
@@ -103,6 +105,7 @@ func TestScanMusepackBookChapters(t *testing.T) {
 // narrator credit, so the kind is forced the way an import of a known audiobook
 // forces it.
 func TestScanWMABookChapters(t *testing.T) {
+	t.Parallel()
 	st, lib, sc, _, root := fastPathFixture(t)
 	p := filepath.Join(root, "book.wma")
 	copyFixture(t, "chapters.wma", p)

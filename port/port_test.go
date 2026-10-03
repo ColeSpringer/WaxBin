@@ -15,6 +15,7 @@ import (
 )
 
 func TestSnapshotRoundTrip(t *testing.T) {
+	t.Parallel()
 	libs := []*model.Library{{PID: "L1", DisplayRoot: "/music", Mode: model.ModeManaged, Profile: "waxbin-native"}}
 	items := []*model.ItemView{{PID: "I1", Kind: model.KindTrack, State: model.StatePresent, Title: "Song", Artist: "A",
 		MBID: "rec-1", ISRC: "USRC17607839", BPM: 128}}
@@ -72,6 +73,7 @@ func TestSnapshotRoundTrip(t *testing.T) {
 // same quoted decimal encoding as every other unix-ns field, and keeps an open
 // session's absent end out of the document rather than writing it as "0".
 func TestSnapshotSessionTimesEncodeAsStrings(t *testing.T) {
+	t.Parallel()
 	sessions := []model.PlaySession{
 		{PID: "S1", UserPID: "U1", ItemPID: "I1", StartedAt: 1 << 60, EndedAt: 1<<60 + 5, MsPlayed: 10},
 		{PID: "S2", UserPID: "U1", ItemPID: "I1", StartedAt: 1<<60 + 9},
@@ -99,6 +101,7 @@ func TestSnapshotSessionTimesEncodeAsStrings(t *testing.T) {
 // ItemView now projects a library pid, so copying it across is a change someone could
 // reasonably make; this is what says it would be wrong.
 func TestItemExportCarriesNoLibraryHandle(t *testing.T) {
+	t.Parallel()
 	libs := []*model.Library{{PID: "L1", DisplayRoot: "/music", Mode: model.ModeManaged, Profile: "waxbin-native"}}
 	items := []*model.ItemView{{PID: "I1", Kind: model.KindTrack, State: model.StatePresent,
 		Title: "Song", LibraryPID: "L1"}}
@@ -123,6 +126,7 @@ func TestItemExportCarriesNoLibraryHandle(t *testing.T) {
 // and copying that list into the flat per-item record is a change someone could
 // reasonably make. Only the combined display crosses.
 func TestItemExportCarriesNoSplitArtistCredit(t *testing.T) {
+	t.Parallel()
 	items := []*model.ItemView{{PID: "I1", Kind: model.KindTrack, State: model.StatePresent,
 		Title: "Empire State of Mind", Artist: "Jay-Z feat. Alicia Keys"}}
 
@@ -142,6 +146,7 @@ func TestItemExportCarriesNoSplitArtistCredit(t *testing.T) {
 }
 
 func TestReadSnapshotRejectsForeignJSON(t *testing.T) {
+	t.Parallel()
 	_, err := port.ReadSnapshot(strings.NewReader(`{"manifest":{"format":"something-else"}}`))
 	if !waxerr.Is(err, waxerr.CodeInvalid) {
 		t.Fatalf("want CodeInvalid for a non-WaxBin export, got %v", err)
@@ -149,6 +154,7 @@ func TestReadSnapshotRejectsForeignJSON(t *testing.T) {
 }
 
 func TestValidateBackupRejectsNonCatalog(t *testing.T) {
+	t.Parallel()
 	f := filepath.Join(t.TempDir(), "notdb.txt")
 	if err := os.WriteFile(f, []byte("not a database"), 0o644); err != nil {
 		t.Fatal(err)
@@ -164,6 +170,7 @@ func TestValidateBackupRejectsNonCatalog(t *testing.T) {
 // side is a COALESCE ending in 'local' and so never hands back an empty string for
 // omitempty to drop.
 func TestSnapshotCarriesAcquisitionSource(t *testing.T) {
+	t.Parallel()
 	items := []*model.ItemView{
 		{PID: "I1", Kind: model.KindTrack, State: model.StatePresent, Title: "Acquired", Source: model.SourceYouTube},
 		{PID: "I2", Kind: model.KindTrack, State: model.StatePresent, Title: "Scanned", Source: model.SourceLocal},
@@ -199,6 +206,7 @@ func TestSnapshotCarriesAcquisitionSource(t *testing.T) {
 // produces from the whole snapshot, an empty log is an empty array, and a row count
 // the manifest did not announce is refused at Close rather than written as a lie.
 func TestSnapshotWriterStreamsSessions(t *testing.T) {
+	t.Parallel()
 	libs := []*model.Library{{PID: "L1", DisplayRoot: "/music", Mode: model.ModeManaged, Profile: "waxbin-native"}}
 	items := []*model.ItemView{{PID: "I1", Kind: model.KindTrack, State: model.StatePresent, Title: "Song"}}
 	plays := []model.PlayState{{UserPID: "U1", ItemPID: "I1", PlayCount: 2}}
@@ -262,6 +270,7 @@ func TestSnapshotWriterStreamsSessions(t *testing.T) {
 // rides beside Artist rather than as a relational handle, and an item with none keeps
 // the shape it had.
 func TestBuildSnapshotCarriesCredits(t *testing.T) {
+	t.Parallel()
 	items := []*model.ItemView{
 		{PID: "I1", Kind: model.KindTrack, State: model.StatePresent, Title: "Song", Artist: "A & B"},
 		{PID: "I2", Kind: model.KindTrack, State: model.StatePresent, Title: "Bare"},

@@ -30,6 +30,7 @@ func (failAttachStore) AttachEpisodeFile(context.Context, model.AttachEpisodeFil
 // catalog write fails after a moved (not copied) acquired file has landed, the file
 // is restored to its source rather than deleted; it is the user's only copy.
 func TestImportEpisodeFileRestoresMovedFileOnCatalogFailure(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	st := newTestStore(t)
 	dir := t.TempDir()
@@ -92,6 +93,7 @@ func newTestService(t *testing.T, providers ...source.Provider) (*podcast.Servic
 // TestYouTubeProviderDispatch verifies an injected mock youtube provider handles
 // AddSource, Sync, and Download through the shared podcast engine.
 func TestYouTubeProviderDispatch(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	yt := &source.Mock{
 		Type:        model.SourceYouTube,
@@ -131,6 +133,7 @@ func TestYouTubeProviderDispatch(t *testing.T) {
 // TestManualShowAndEpisode verifies a manual show is created, accepts curated
 // episodes, and never syncs because there is no feed to enumerate.
 func TestManualShowAndEpisode(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	svc, _, _ := newTestService(t)
 
@@ -170,6 +173,7 @@ func TestManualShowAndEpisode(t *testing.T) {
 // TestSyncYouTubeAbsentProvider verifies a youtube show cannot sync when the build
 // has no youtube provider registered.
 func TestSyncYouTubeAbsentProvider(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	// Register the youtube provider only long enough to subscribe, then a fresh
 	// service without it stands in for a default CLI build.

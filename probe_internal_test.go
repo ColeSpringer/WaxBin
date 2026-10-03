@@ -27,6 +27,7 @@ import (
 // shortfall, drops the partial block, and decodes the rest clean, so nothing detects
 // it and the probe must not be sold as if it did.
 func TestAuditProbeDecodesEveryContainer(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	dir := t.TempDir()
 	const rate = 8000
@@ -85,6 +86,7 @@ func TestAuditProbeDecodesEveryContainer(t *testing.T) {
 // decoder objects to the partial last frame. The probe reads the parse's verdict as
 // well as the decoder's.
 func TestAuditProbeFailsOnParseTimeTruncation(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	dir := t.TempDir()
 	const rate = 8000
@@ -107,6 +109,7 @@ func TestAuditProbeFailsOnParseTimeTruncation(t *testing.T) {
 // decoder covers says nothing about the bytes, so the probe must not call it
 // corrupt. Only a file that opens and then fails is damaged.
 func TestAuditProbeIgnoresUndecodableInput(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	p := filepath.Join(t.TempDir(), "mystery.wv")
 	writeRaw(t, p, []byte("no container here, just bytes nothing can open"))
@@ -124,6 +127,7 @@ func TestAuditProbeIgnoresUndecodableInput(t *testing.T) {
 // returns that rather than raising it, because the file still plays: the auditor
 // reports it at warn where an error would have read as "corrupt or undecodable".
 func TestAuditProbeReportsToleratedDamage(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	dir := t.TempDir()
 	const rate = 8000

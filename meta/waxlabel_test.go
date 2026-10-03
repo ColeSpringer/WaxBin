@@ -30,6 +30,7 @@ func writeTemp(t *testing.T, name string, data []byte) string {
 // TestReadProjectsTags verifies the adapter projects WaxLabel's canonical tags
 // and stream properties into model.Tags.
 func TestReadProjectsTags(t *testing.T) {
+	t.Parallel()
 	p := writeTemp(t, "song.mp3", testaudio.BuildMP3("Midnight Drive", "The Foobars", "Night Moves", 3))
 	fm, err := NewReader().Read(context.Background(), p)
 	if err != nil {
@@ -54,6 +55,7 @@ func TestReadProjectsTags(t *testing.T) {
 // files with identical audio but different tags hash the same, while different
 // audio hashes differently.
 func TestEssenceStableAcrossRetag(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	audio := testaudio.DefaultAudio()
 
@@ -82,6 +84,7 @@ func TestEssenceStableAcrossRetag(t *testing.T) {
 
 // TestReadMissingFile surfaces an I/O error rather than panicking.
 func TestReadMissingFile(t *testing.T) {
+	t.Parallel()
 	if _, err := NewReader().Read(context.Background(), filepath.Join(t.TempDir(), "nope.mp3")); err == nil {
 		t.Fatal("expected an error reading a missing file")
 	}
@@ -90,6 +93,7 @@ func TestReadMissingFile(t *testing.T) {
 // TestReadToleratesUnsupportedFormat verifies a format WaxLabel cannot parse is
 // still cataloged with a filename title and content-hash essence.
 func TestReadToleratesUnsupportedFormat(t *testing.T) {
+	t.Parallel()
 	p := writeTemp(t, "track.wma", []byte("not a recognized audio container, just bytes"))
 	fm, err := NewReader().Read(context.Background(), p)
 	if err != nil {
@@ -109,6 +113,7 @@ func TestReadToleratesUnsupportedFormat(t *testing.T) {
 // TestReadWAVEssence verifies a pure-Go-decodable WAV gets a real essence hash
 // and the lowercase pcm codec the analyze registry selects on.
 func TestReadWAVEssence(t *testing.T) {
+	t.Parallel()
 	wav := testaudio.EncodeWAV16(22050, testaudio.RichSignal(22050, 2, testaudio.MusicalPartials, 1))
 	p := writeTemp(t, "tone.wav", wav)
 	fm, err := NewReader().Read(context.Background(), p)
@@ -128,6 +133,7 @@ func TestReadWAVEssence(t *testing.T) {
 // Formats that carry several comments (Vorbis, AIFF ANNO, MP4 cmt, ID3 COMM) would
 // otherwise have no defined answer for the one column the catalog stores.
 func TestReadCommentTakesFirst(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	p := writeTemp(t, "commented.mp3", testaudio.BuildMP3("T", "A", "Al", 1))
 	if _, err := NewWriter().Apply(ctx, p, []TagEdit{{Key: "COMMENT", Values: []string{"  first  ", "second"}}}); err != nil {
@@ -147,6 +153,7 @@ func TestReadCommentTakesFirst(t *testing.T) {
 // an ID3v1 trailer used to catalog with no artist, no album, and a filename-derived
 // title.
 func TestReadLegacyOnlyTagsFallback(t *testing.T) {
+	t.Parallel()
 	raw := testaudio.AppendID3v1(testaudio.DefaultAudio(), "V1 Title", "V1 Only Artist", "V1 Album")
 	p := writeTemp(t, "v1only.mp3", raw)
 
@@ -176,6 +183,7 @@ func TestReadLegacyOnlyTagsFallback(t *testing.T) {
 // Tags.MBID would re-key an existing item on the next full scan and orphan its PID,
 // play state, ratings, and provenance. The fallback must fill display fields only.
 func TestLegacyFallbackNeverChangesIdentity(t *testing.T) {
+	t.Parallel()
 	raw := testaudio.AppendID3v1(testaudio.DefaultAudio(), "V1 Title", "V1 Only Artist", "V1 Album")
 	p := writeTemp(t, "v1only.mp3", raw)
 
@@ -272,6 +280,7 @@ func findDiag(fm *FileMeta, c model.DiagnosticCode) *model.FileDiagnostic {
 // spellings rather than a file-name title and no artist, and takes its number from the
 // file name once the name's remainder is the title it ended up with.
 func TestSortTagsFillMissingDisplayFields(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	for _, c := range []struct {
 		name string
@@ -317,6 +326,7 @@ func TestSortTagsFillMissingDisplayFields(t *testing.T) {
 // ("Paak, Anderson", "Wall, The") and would mint the wrong entity as a display name, so
 // it is left, and the diagnostic names what was left and why the field stayed empty.
 func TestSortTagFallbackSkipsInvertedForms(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	p := writeTemp(t, "song.mp3", testaudio.BuildMP3FromSpec(testaudio.MP3Spec{Title: "Song"}))
 	if _, err := NewWriter().Apply(ctx, p, []TagEdit{
@@ -344,6 +354,7 @@ func TestSortTagFallbackSkipsInvertedForms(t *testing.T) {
 // when the rest of the name is the title, so "08 Parking Lot" numbers "Parking Lot" and
 // a name about something else numbers nothing; a tagged number always wins.
 func TestFileNameNumberNeedsTheTitle(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	for _, c := range []struct {
 		name       string
@@ -376,6 +387,7 @@ func TestFileNameNumberNeedsTheTitle(t *testing.T) {
 // rather than as a property of whichever fixture happens to be handy: ID3v1 cannot
 // express an MBID, so no MP3 fixture can catch a regression here.
 func TestLegacyFallbackAllowlistExcludesIdentityKeys(t *testing.T) {
+	t.Parallel()
 	forbidden := []tag.Key{
 		tag.MBRecordingID, tag.MBReleaseID, tag.MBReleaseGroupID, tag.MBArtistID,
 		tag.MBAlbumArtistID, tag.MBReleaseTrackID, tag.MBWorkID, tag.MBDiscID,
@@ -391,6 +403,7 @@ func TestLegacyFallbackAllowlistExcludesIdentityKeys(t *testing.T) {
 // TestLegacyFallbackIsFillOnly verifies a legacy container never overrides a
 // canonical value: the fallback exists to fill gaps, not to arbitrate.
 func TestLegacyFallbackIsFillOnly(t *testing.T) {
+	t.Parallel()
 	base := testaudio.BuildMP3("V2 Title", "V2 Artist", "V2 Album", 3)
 	p := writeTemp(t, "both.mp3", testaudio.AppendID3v1(base, "V1 Title", "V1 Artist", "V1 Album"))
 
@@ -408,6 +421,7 @@ func TestLegacyFallbackIsFillOnly(t *testing.T) {
 // MEDIATYPE of " 2" would silently stop classifying the file as a book. No narrator
 // is set here, so mediaType is the only thing that can classify it.
 func TestBookFieldsTrimUntrimmedMediaType(t *testing.T) {
+	t.Parallel()
 	raw := testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
 		Title: "A Book", Artist: "Author", Album: "A Book",
 		TXXX: []testaudio.TXXXFrame{{Desc: "MEDIATYPE", Value: " 2"}},
@@ -426,6 +440,7 @@ func TestBookFieldsTrimUntrimmedMediaType(t *testing.T) {
 // TestBookFieldsTrimUntrimmedNarrator covers the other untrimmed use site: a
 // whitespace-only NARRATOR must not classify a file as a book.
 func TestBookFieldsTrimUntrimmedNarrator(t *testing.T) {
+	t.Parallel()
 	raw := testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
 		Title: "A Song", Artist: "Band", Album: "An Album",
 		TXXX: []testaudio.TXXXFrame{{Desc: "NARRATOR", Value: "   "}},
@@ -446,6 +461,7 @@ func TestBookFieldsTrimUntrimmedNarrator(t *testing.T) {
 // the key is reserved now that the scalar composer_sort surface owns it, so
 // double-storing it in item_tag would shadow the modeled value.
 func TestReadComposerSort(t *testing.T) {
+	t.Parallel()
 	raw := testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
 		Title: "A Song", Artist: "Band", Album: "An Album", Composer: "The Composer",
 		TXXX: []testaudio.TXXXFrame{{Desc: "COMPOSERSORT", Value: "Composer, The"}},
@@ -465,6 +481,7 @@ func TestReadComposerSort(t *testing.T) {
 }
 
 func TestParseSeries(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		in, name, seq string
 	}{
@@ -485,6 +502,7 @@ func TestParseSeries(t *testing.T) {
 }
 
 func TestParseAbridged(t *testing.T) {
+	t.Parallel()
 	if a, ed := parseAbridged("The Hobbit (Unabridged)", "", ""); a == nil || *a || ed != "Unabridged" {
 		t.Errorf("unabridged: got (%v,%q), want (false,Unabridged)", a, ed)
 	}
@@ -497,6 +515,7 @@ func TestParseAbridged(t *testing.T) {
 }
 
 func TestSplitCredits(t *testing.T) {
+	t.Parallel()
 	// Splits on the unambiguous delimiters ; / &.
 	got := SplitCredits("Neil Gaiman & Terry Pratchett")
 	if len(got) != 2 || got[0] != "Neil Gaiman" || got[1] != "Terry Pratchett" {
@@ -518,6 +537,7 @@ func TestSplitCredits(t *testing.T) {
 }
 
 func TestParseAbridgedBracketedOnly(t *testing.T) {
+	t.Parallel()
 	// The bracketed marker is detected...
 	if a, _ := parseAbridged("The Hobbit (Unabridged)", "", ""); a == nil || *a {
 		t.Error("(Unabridged) should yield abridged=false")
@@ -542,6 +562,7 @@ func TestParseAbridgedBracketedOnly(t *testing.T) {
 // sort keys, and organize's {year} path token, so folding an acquisition date in
 // would catalog a 1975 album downloaded in 2019 as year=2019.
 func TestReadProjectsAcquisitionTags(t *testing.T) {
+	t.Parallel()
 	raw := testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
 		Title: "Old Song", Artist: "Band", Album: "Old Album", Year: 1975,
 		TXXX: []testaudio.TXXXFrame{
@@ -576,6 +597,7 @@ func TestReadProjectsAcquisitionTags(t *testing.T) {
 // degradation rule: an unusable value yields 0, the store's "stamp it for me"
 // sentinel, rather than a confidently wrong date.
 func TestParseAcquiredAt(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		in   string
 		want int64
@@ -601,6 +623,7 @@ func TestParseAcquiredAt(t *testing.T) {
 // TestReadDiagnosesUnsupportedFormat verifies the unsupported-format branch now says
 // why a file cataloged with no tags, instead of swallowing it silently.
 func TestReadDiagnosesUnsupportedFormat(t *testing.T) {
+	t.Parallel()
 	p := writeTemp(t, "track.wma", []byte("not a recognized audio container, just bytes"))
 	fm, err := NewReader().Read(context.Background(), p)
 	if err != nil {
@@ -619,6 +642,7 @@ func TestReadDiagnosesUnsupportedFormat(t *testing.T) {
 // so an unconditional error would permanently flag a legitimately tag-only MP3 as
 // broken. It must be warn.
 func TestReadDiagnosesNoAudioFrames(t *testing.T) {
+	t.Parallel()
 	// An ID3v2-tagged .mp3 whose essence region holds non-MPEG bytes.
 	raw := testaudio.BuildMP3WithAudio("T", "A", "Al", 1, []byte("this is plainly not mpeg audio at all"))
 	p := writeTemp(t, "notaudio.mp3", raw)
@@ -648,6 +672,7 @@ func TestReadDiagnosesNoAudioFrames(t *testing.T) {
 // wholesale would store millions of rows and leave the audit reporting problems on a
 // healthy library. Only the named codes may become diagnostics.
 func TestReadDoesNotFoldWarningsWholesale(t *testing.T) {
+	t.Parallel()
 	// This file provably carries a trailing-id3v1 warning upstream.
 	raw := testaudio.AppendID3v1(testaudio.BuildMP3("T", "A", "Al", 1), "V1 T", "V1 A", "V1 Al")
 	p := writeTemp(t, "healthy.mp3", raw)
@@ -666,6 +691,7 @@ func TestReadDoesNotFoldWarningsWholesale(t *testing.T) {
 // TestParseLRCReportsDropped covers the signal the reporting parser exists for:
 // telling a partly-broken sidecar from a plain-text one.
 func TestParseLRCReportsDropped(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name        string
 		text        string
@@ -729,6 +755,7 @@ func TestParseLRCReportsDropped(t *testing.T) {
 // partly broken. A mistyped timestamp still counts, and so does a header with text
 // after it, which the parser really did drop.
 func TestParseLRCIgnoresSectionHeaders(t *testing.T) {
+	t.Parallel()
 	const bom = "\xef\xbb\xbf"
 	// The same sheet under every line ending the parser accepts, and behind a BOM:
 	// the header filter has to number lines the way the parser does.
@@ -759,6 +786,7 @@ func TestParseLRCIgnoresSectionHeaders(t *testing.T) {
 // with bytes whatever its format, so without the skip that URL would be stored as
 // the file's cover art.
 func TestCoverFromDocSkipsALinkedPicture(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	path := writeTemp(t, "linked.mp3", testaudio.BuildMP3("T", "A", "Al", 1))
 	doc, err := waxlabel.ParseFile(ctx, path)
@@ -791,6 +819,7 @@ func TestCoverFromDocSkipsALinkedPicture(t *testing.T) {
 // is the one place that can. It is also the case CapDetail's own doc names as its
 // reason to exist. Upstream sanitizes the message but does not bound its length.
 func TestWriteWarningsCapsMessage(t *testing.T) {
+	t.Parallel()
 	huge := strings.Repeat("A", 1<<20)
 	ws := []waxlabel.Warning{{
 		Code:    waxlabel.WarnValueDropped,
@@ -815,6 +844,7 @@ func TestWriteWarningsCapsMessage(t *testing.T) {
 // one is carried rather than indexed into (Keys is documented as empty for warnings
 // that name no key, so w.Keys[0] would panic).
 func TestWriteWarningsFansOutKeysAndSurvivesKeyless(t *testing.T) {
+	t.Parallel()
 	ws := []waxlabel.Warning{
 		{Code: waxlabel.WarnValueDropped, Message: "two keys", Keys: []tag.Key{tag.TrackNumber, tag.DiscNumber}},
 		{Code: waxlabel.WarnValueCoerced, Message: "no key at all"},
@@ -835,6 +865,7 @@ func TestWriteWarningsFansOutKeysAndSurvivesKeyless(t *testing.T) {
 // matter beyond display: a field the reader ignores is one the scanner clears on
 // every content-changed rescan, so nothing written to disk could survive.
 func TestReadsBookIdentifierTags(t *testing.T) {
+	t.Parallel()
 	p := writeTemp(t, "book.m4b", testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
 		Title: "The Hobbit", Artist: "J.R.R. Tolkien", AlbumArtist: "J.R.R. Tolkien",
 		Album: "The Hobbit", Label: "HarperCollins",
@@ -871,6 +902,7 @@ func TestReadsBookIdentifierTags(t *testing.T) {
 // promotes; DESCRIPTION is the typed key. An explicit EDITION outranks the edition the
 // bracketed abridged marker derives, while the marker still decides the flag.
 func TestReadsBookDescriptiveTags(t *testing.T) {
+	t.Parallel()
 	const blurb = "Bilbo Baggins is a hobbit who enjoys a comfortable life."
 	p := writeTemp(t, "book.m4b", testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
 		Title: "The Hobbit", Artist: "J.R.R. Tolkien", AlbumArtist: "J.R.R. Tolkien",
@@ -934,6 +966,7 @@ func TestReadsBookDescriptiveTags(t *testing.T) {
 // word sets the flag the marker would have, so the pair parseAbridged returns together
 // stays a pair; any other edition leaves the flag to the marker.
 func TestBookEditionTagSetsAbridgedFlag(t *testing.T) {
+	t.Parallel()
 	read := func(edition string) model.Tags {
 		t.Helper()
 		p := writeTemp(t, "book.m4b", testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
@@ -964,6 +997,7 @@ func TestBookEditionTagSetsAbridgedFlag(t *testing.T) {
 // reads it when no SUBTITLE key is present. SUBTITLE wins when both are, since it is the
 // key the write-back writes. A track keeps TIT3 as the custom tag it always was.
 func TestBookSubtitleFallsBackToTIT3(t *testing.T) {
+	t.Parallel()
 	p := writeTemp(t, "book.m4b", testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
 		Title: "The Hobbit", Artist: "J.R.R. Tolkien", AlbumArtist: "J.R.R. Tolkien",
 		Album: "The Hobbit", Subtitle: "There and Back Again",
@@ -1008,6 +1042,7 @@ func TestBookSubtitleFallsBackToTIT3(t *testing.T) {
 // store refuses as custom tags on a book: every key in it must be one PromoteBookFields
 // promotes out of the custom map, or the store would refuse a tag the reader then stores.
 func TestBookOwnedTagKeysPromote(t *testing.T) {
+	t.Parallel()
 	keys := model.BookOwnedTagKeys()
 	if len(keys) == 0 {
 		t.Fatal("BookOwnedTagKeys is empty")
@@ -1048,6 +1083,7 @@ func TestBookOwnedTagKeysPromote(t *testing.T) {
 // go through freeform atoms, and neither path is reached by the MP3 bytes the other book
 // fixtures wrap in a .m4b name.
 func TestMP4BookDescriptiveRoundTrip(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	p := writeTemp(t, "book.m4b", testaudio.Fixture(t, "sample.m4a"))
 	const blurb = "Bilbo Baggins is a hobbit who enjoys a comfortable life."
@@ -1088,6 +1124,7 @@ func TestMP4BookDescriptiveRoundTrip(t *testing.T) {
 
 // TestTrackKeepsLabelAsLabel: the shared frame must still mean "label" for music.
 func TestTrackKeepsLabelAsLabel(t *testing.T) {
+	t.Parallel()
 	p := writeTemp(t, "song.mp3", testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
 		Title: "Airbag", Artist: "Radiohead", Album: "OK Computer", Label: "Parlophone",
 	}))
@@ -1110,6 +1147,7 @@ func TestTrackKeepsLabelAsLabel(t *testing.T) {
 // promotes it to a typed field. Reserving the key globally would drop it from every
 // track that has one, since only a caller that has decided the file is a book promotes.
 func TestTrackKeepsASINAsCustomTag(t *testing.T) {
+	t.Parallel()
 	p := writeTemp(t, "song.mp3", testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
 		Title: "Airbag", Artist: "Radiohead", Album: "OK Computer",
 		TXXX: []testaudio.TXXXFrame{{Desc: "ASIN", Value: "B000002UB1"}},
@@ -1129,6 +1167,7 @@ func TestTrackKeepsASINAsCustomTag(t *testing.T) {
 // TestReadsMediaAndReleaseCountry covers the scan-side source for the two columns the
 // release matcher falls back to. Both are promoted out of the custom-tag map.
 func TestReadsMediaAndReleaseCountry(t *testing.T) {
+	t.Parallel()
 	p := writeTemp(t, "song.mp3", testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
 		Title: "Airbag", Artist: "Radiohead", Album: "OK Computer",
 		TXXX: []testaudio.TXXXFrame{
@@ -1158,6 +1197,7 @@ func TestReadsMediaAndReleaseCountry(t *testing.T) {
 // TXXX frame under one of them reaches the typed field instead of the custom-tag map.
 // The spelling is reserved besides, which is what retires the rows an older scan stored.
 func TestReadsFoldedWireSpellings(t *testing.T) {
+	t.Parallel()
 	p := writeTemp(t, "song.mp3", testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
 		Title: "Airbag", Artist: "Radiohead", Album: "OK Computer",
 		TXXX: []testaudio.TXXXFrame{
@@ -1190,6 +1230,7 @@ func TestReadsFoldedWireSpellings(t *testing.T) {
 // WaxLabel folds onto the canonical RELEASECOUNTRY key, so the reader needs to know only
 // that one. Neither spelling may leak into the custom-tag map.
 func TestReadsPicardsReleaseCountrySpelling(t *testing.T) {
+	t.Parallel()
 	p := writeTemp(t, "song.mp3", testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
 		Title: "Airbag", Artist: "Radiohead", Album: "OK Computer",
 		TXXX: []testaudio.TXXXFrame{{Desc: "MusicBrainz Album Release Country", Value: "GB"}},
@@ -1213,6 +1254,7 @@ func TestReadsPicardsReleaseCountrySpelling(t *testing.T) {
 // single-valued-multi). Two that disagree read as absent, because a guess would feed a
 // matcher that writes a permanent release id.
 func TestDisagreeingCountrySpellingsReadAsAbsent(t *testing.T) {
+	t.Parallel()
 	p := writeTemp(t, "song.mp3", testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
 		Title: "Airbag", Artist: "Radiohead", Album: "OK Computer",
 		TXXX: []testaudio.TXXXFrame{
@@ -1251,6 +1293,7 @@ func TestDisagreeingCountrySpellingsReadAsAbsent(t *testing.T) {
 // key does not accept reads as absent rather than as a partial parse, and neither the
 // canonical key nor the ID3 frame spelling may survive as a custom tag.
 func TestReadsBPM(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		tagged string
 		want   int
@@ -1288,6 +1331,7 @@ func TestReadsBPM(t *testing.T) {
 // library accepts. The store enforces the ceiling and cannot import the tag library, so
 // this is what catches a WaxLabel release that moves it.
 func TestBPMCeilingMatchesTagLibrary(t *testing.T) {
+	t.Parallel()
 	if !tag.ValidBPMValue(tag.BPM, strconv.Itoa(model.MaxBPM)) {
 		t.Errorf("model.MaxBPM = %d is rejected by tag.ValidBPMValue", model.MaxBPM)
 	}
@@ -1301,6 +1345,7 @@ func TestBPMCeilingMatchesTagLibrary(t *testing.T) {
 // read back. The tmpo atom stores a whole number, so writing one must not report the
 // value as unrepresented, and the round-trip must return the number that went in.
 func TestWritesWholeBPMToMP4(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	const rate = 44100
 	sig := testaudio.ReferenceSignal(rate, 1200*time.Millisecond)
@@ -1333,6 +1378,7 @@ func TestWritesWholeBPMToMP4(t *testing.T) {
 // TBPM is absent by design: it is an ID3 frame name the ID3 mapping folds, not a
 // global alias, and its read projection is pinned by the BPM tests.
 func TestReservedWireSpellingsAreFolded(t *testing.T) {
+	t.Parallel()
 	spellings := []string{
 		"PART_NUMBER", "TOTAL_PARTS", "TOTAL_DISCS", "LEAD_PERFORMER",
 		"DATE_RECORDED", "DATE_RELEASED", "DATE_RELEASE", "DATE_ORIGINAL",
@@ -1365,6 +1411,7 @@ func TestReservedWireSpellingsAreFolded(t *testing.T) {
 // properties and an essence hash from the tag library rather than the decoder's
 // header probe.
 func TestReadFoldsFormatLabels(t *testing.T) {
+	t.Parallel()
 	const rate = 8000
 	sig := testaudio.ReferenceSignal(rate, time.Second)
 	for _, c := range []struct {
@@ -1408,6 +1455,7 @@ func TestReadFoldsFormatLabels(t *testing.T) {
 // names WMA by generation and Musepack by stream version, and labels an extensible WAV
 // header apart from plain PCM.
 func TestNormalizeFormatLabels(t *testing.T) {
+	t.Parallel()
 	codecs := map[string]string{
 		"Monkey's Audio": "ape", "WavPack": "wavpack", "WMA v1": "wma", "WMA v2": "wma",
 		"WMA Pro": "wma", "WMA Voice": "wma", "WMA Lossless": "wma lossless",
@@ -1434,6 +1482,7 @@ func TestNormalizeFormatLabels(t *testing.T) {
 // whatever the library accepts must not be refused here. The library stops at 0x7D,
 // the Vorbis comment ceiling, so '~' is out on both sides.
 func TestCanonicalTagKeyMatchesTagLibrary(t *testing.T) {
+	t.Parallel()
 	for b := 0; b < 256; b++ {
 		key := "K" + string([]byte{byte(b)}) + "Y"
 		got, ok := model.CanonicalTagKey(key)
@@ -1451,6 +1500,7 @@ func TestCanonicalTagKeyMatchesTagLibrary(t *testing.T) {
 // warning the MP3 and WAV parsers already raised, and the adapter projects it as an
 // error-severity corrupt-audio diagnostic.
 func TestReadDiagnosesTruncatedFLAC(t *testing.T) {
+	t.Parallel()
 	const rate = 8000
 	flac := testaudio.EncodeAs(t, "flac", "", rate, testaudio.ReferenceSignal(rate, 4*time.Second))
 	fm, err := NewReader().Read(context.Background(), writeTemp(t, "good.flac", flac))
@@ -1475,6 +1525,7 @@ func TestReadDiagnosesTruncatedFLAC(t *testing.T) {
 // empty Key, a keyed value loss fans out per key, and a picture-removal miss stays
 // advisory because ApplyPicture clears the front cover before every embed.
 func TestWriteWarningsClassifyRewriteLosses(t *testing.T) {
+	t.Parallel()
 	got := writeWarnings([]waxlabel.Warning{
 		{Code: waxlabel.WarnDuplicateTagBlockDropped, Message: "a second LIST/INFO chunk was dropped"},
 		{Code: waxlabel.WarnNumericGenre, Message: "GENRE reads back as a name", Keys: []tag.Key{tag.Genre}},
@@ -1502,6 +1553,7 @@ func TestWriteWarningsClassifyRewriteLosses(t *testing.T) {
 // the same verdict as Read (here a truncated FLAC's corrupt-audio diagnostic) without
 // the whole-audio read the essence hash costs.
 func TestInspectSkipsEssence(t *testing.T) {
+	t.Parallel()
 	const rate = 8000
 	flac := testaudio.EncodeAs(t, "flac", "", rate, testaudio.ReferenceSignal(rate, 4*time.Second))
 	p := writeTemp(t, "cut.flac", flac[:len(flac)*60/100])
@@ -1524,6 +1576,7 @@ func TestInspectSkipsEssence(t *testing.T) {
 // file_diagnostic primary key, so they merge into one row that names both, at the worse
 // severity, while keyed rows and a different code stay separate.
 func TestMergeKeylessDiagnostics(t *testing.T) {
+	t.Parallel()
 	got := MergeKeylessDiagnostics([]model.FileDiagnostic{
 		{Code: model.DiagTagWriteUnsynced, Severity: model.SeverityWarn, Detail: "refused a"},
 		{Code: model.DiagTagWriteLost, Severity: model.SeverityWarn, TagKey: "GENRE", Detail: "numeric"},
@@ -1551,6 +1604,7 @@ func TestMergeKeylessDiagnostics(t *testing.T) {
 // joined with the separator identity.SplitCredits reads back, and a single name is
 // left alone either way.
 func TestCreditTagValues(t *testing.T) {
+	t.Parallel()
 	two := []string{"Ana Conductor", "Ben Conductor"}
 	if got := CreditTagValues(string(tag.Performer), two); len(got) != 2 {
 		t.Errorf("PERFORMER values = %v, want one per holder", got)
@@ -1571,6 +1625,7 @@ func TestCreditTagValues(t *testing.T) {
 // writer on the two shapes: PERFORMER lands as two values and CONDUCTOR as one joined
 // value, on FLAC and MP3 alike, with no lossy-write warning on either.
 func TestCreditWriteShapesFollowKeyCardinality(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	const rate = 8000
 	sig := testaudio.ReferenceSignal(rate, time.Second)
@@ -1607,6 +1662,7 @@ func TestCreditWriteShapesFollowKeyCardinality(t *testing.T) {
 // zero, or followed by a dash or dot) and the rest starts with no digit, so a title that
 // opens with a number keeps it.
 func TestFileNameTitleNeedsATrackShapedNumber(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	for _, c := range []struct {
 		name, title string
@@ -1633,6 +1689,7 @@ func TestFileNameTitleNeedsATrackShapedNumber(t *testing.T) {
 // TestDiscFolderNamesTheDisc: a track in a disc folder whose tags state no disc takes the
 // folder's, reported as a fallback and marked derived, while a tagged disc wins.
 func TestDiscFolderNamesTheDisc(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	dir := filepath.Join(t.TempDir(), "Album", "Disc 2")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -1674,6 +1731,7 @@ func TestDiscFolderNamesTheDisc(t *testing.T) {
 // TestLibraryRootNamesNoDisc: the root of the library holding a file is the edge of the
 // folders that can name its disc, so a track loose in a root called "CD2" takes none.
 func TestLibraryRootNamesNoDisc(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := filepath.Join(t.TempDir(), "CD2")
 	if err := os.MkdirAll(filepath.Join(root, "Disc 3"), 0o755); err != nil {

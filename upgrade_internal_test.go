@@ -10,6 +10,7 @@ import (
 )
 
 func TestSortByQuality(t *testing.T) {
+	t.Parallel()
 	cs := []UpgradeCandidate{
 		{ItemPID: "lossy-hi", Codec: "mp3", Bitrate: 320, SampleRate: 44100},
 		{ItemPID: "flac-cd", Codec: "flac", Lossless: true, SampleRate: 44100, BitDepth: 16},
@@ -27,6 +28,7 @@ func TestSortByQuality(t *testing.T) {
 }
 
 func TestSortByQualityStableTie(t *testing.T) {
+	t.Parallel()
 	// Identical quality: deterministic by PID so pagination/reporting is stable.
 	cs := []UpgradeCandidate{
 		{ItemPID: "z", Codec: "flac", Lossless: true, SampleRate: 44100, BitDepth: 16},
@@ -42,6 +44,7 @@ func TestSortByQualityStableTie(t *testing.T) {
 // rather than as "PCM", so a float WAV or MOV would rank as lossy without these
 // keys, and the upgrade policy would offer an mp3 as an improvement on it.
 func TestLosslessCodecsCoverFloatPCM(t *testing.T) {
+	t.Parallel()
 	for _, k := range []string{"pcm", "ieee float", "ieee float64"} {
 		if !model.LosslessCodec(k) {
 			t.Errorf("LosslessCodec(%q) is false; uncompressed audio must outrank a lossy encoding", k)
@@ -52,6 +55,7 @@ func TestLosslessCodecsCoverFloatPCM(t *testing.T) {
 // TestEncodingComponentsSkipAVanishedSeed: an item deleted between the listing and its
 // own probe is skipped like a vanished neighbour, not an error for the whole listing.
 func TestEncodingComponentsSkipAVanishedSeed(t *testing.T) {
+	t.Parallel()
 	items := []*model.ItemView{{PID: "gone", FilePID: "f0"}, {PID: "a", FilePID: "f1"}, {PID: "b", FilePID: "f2"}}
 	alts := func(_ context.Context, pid model.PID) ([]AltEncoding, error) {
 		switch pid {
