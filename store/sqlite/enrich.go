@@ -130,9 +130,10 @@ const enrichArtistBacksItems = `(EXISTS (SELECT 1 FROM track t WHERE t.artist_id
 // least one track.
 const enrichRGBacksItems = `EXISTS (SELECT 1 FROM album al JOIN track t ON t.album_id = al.id WHERE al.release_group_id = rg.id)`
 
-// enrichAlbumBacksItems restricts the album-art backfill to albums that still hold a
-// track, the ghost heuristic the other art backfills carry.
-const enrichAlbumBacksItems = `EXISTS (SELECT 1 FROM track t WHERE t.album_id = al.id)`
+// enrichAlbumBacksItems restricts the album walks (fields and art) to albums that still
+// hold a live member (liveMembers), the ghost heuristic the other art backfills carry, so
+// an album of trashed tracks waits for one to come back.
+const enrichAlbumBacksItems = `EXISTS (SELECT 1 FROM track t ` + liveMembers + ` WHERE t.album_id = al.id)`
 
 // enrichBacksFilter returns the backs-items predicate for a walk, neutralized
 // ("1=1") when the walk is scoped to explicit ids: the heuristic protects a
@@ -478,7 +479,7 @@ func (s *Store) CountEntitiesNeedingEnrichment(ctx context.Context, q model.Enri
 	// The album fields walk counts under the album scope list, which it shares with the
 	// release match.
 	if runs(model.EnrichPhaseAlbumFields) {
-		add(`SELECT COUNT(*) FROM album al WHERE al.title <> ''
+		add(`SELECT COUNT(*) FROM album al WHERE al.title <> '' AND `+enrichBacksFilter(enrichAlbumBacksItems, albumIDs)+`
 			  AND (COALESCE(al.label,'') = '' OR al.year IS NULL)
 			  AND `+notEnriched(enrichEntityAlbumFields, "al.id", qFor(model.EnrichPhaseAlbumFields)), "al.id", albumIDs)
 	}
@@ -2627,7 +2628,7 @@ func (s *Store) AlbumsNeedingFields(ctx context.Context, opts model.EnrichQueueO
 		FROM album al
 		LEFT JOIN release_group rg ON rg.id = al.release_group_id
 		LEFT JOIN artist ar ON ar.id = rg.primary_artist_id
-		WHERE al.id > ? AND al.title <> ''
+		WHERE al.id > ? AND al.title <> '' AND ` + enrichBacksFilter(enrichAlbumBacksItems, ids) + `
 		  AND (COALESCE(al.label,'') = '' OR al.year IS NULL)
 		  AND ` + notEnriched(enrichEntityAlbumFields, "al.id", opts) + scopeClause + `
 		ORDER BY al.id LIMIT ?`
@@ -2651,28 +2652,23 @@ func (s *Store) AlbumsNeedingFields(ctx context.Context, opts model.EnrichQueueO
 }
 
 // ApplyAlbumFields writes the scalar fields a provider supplied for one album and records
-// the album fields marker (settled by settleMarkerTx). Only label and year are accepted (model.AlbumFillFields), and
-// the two land by different routes because they sit at different rungs.
+// the album fields marker (settled by settleMarkerTx). Only label and year are accepted
+// (model.AlbumFillFields).
 //
 // label is an album column: a fill-when-empty write plus a curation row naming the
 // provider, the way every other entity-rung enrichment value lands. It survives a forced
 // rescan, since the scan's own top-up is fill-when-empty and never clears it.
 //
-// year participates in the album identity key, so it cannot be written per member without
-// forking the album. It goes through the uniform whole-album edit instead, which moves the
-// album and its release group in place. The album row is the first fill-when-empty test:
-// the scan tops its year up from any member carrying one, and a member's year cleared
-// later leaves the column set over year-less members, which is an album that has its year
-// and must not take a provider's. The members are the second, because that is where the
-// value lands: any member already carrying a year vetoes (a merge keeps a survivor's NULL
-// year over the loser's tagged members), as does any member not present (an archived
-// member vetoes the in-place rewrite and the fallback would split the album) or any member
-// whose locks make it unwritable.
+// year fills every member that has no year and no lock on it, each taking a provenance
+// row naming the provider, so the write-back can put the year in its file, and the
+// album's year follows its members (refreshAlbumYearsTx). A member whose year is locked
+// takes nothing, so an album whose members all lock theirs gets no year. It fills nothing
+// on an album that already has a year, which comes from its members. The year keys
+// nothing, so the fill moves no album.
 //
 // Like label, a filled year survives a rescan of members whose files say nothing for it,
 // since each member keeps an enrichment fill until its file states one
-// (overlayStoredTrackTx). A member whose file states its own year, or is retagged onto
-// another album, leaves the fill behind, and the heuristic key follows.
+// (overlayStoredTrackTx).
 //
 // Barcode, catalog number, media, and country are refused on purpose: they are the
 // evidence the MusicBrainz release matcher searches by, and a provider's guess must not
@@ -2695,25 +2691,13 @@ func (s *Store) ApplyAlbumFields(ctx context.Context, in model.AlbumFieldsEnrich
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
-		wrote, alive := false, true
-		// The year goes FIRST, because it is the one fill that can move the album onto a
-		// key another album already holds, which merges this row away. A label written
-		// before that would go down with the row: the column is on the album, and the
-		// merge does not carry it to the survivor.
+		// The year's own delta comes from the album's refresh, which writes one when the
+		// filled members move it; only the label is the album row's write here.
+		var wrote bool
 		if v := strings.TrimSpace(in.Fields["year"]); v != "" && !curYear.Valid {
-			did, stillThere, err := s.applyAlbumYearTx(ctx, tx, in, leadingYear(v), provider, op)
-			if err != nil {
+			if err := s.applyAlbumYearTx(ctx, tx, in, leadingYear(v), provider, op); err != nil {
 				return err
 			}
-			wrote, alive = did, stillThere
-		}
-		// A merged-away album's rowid names a row that no longer exists, so nothing more
-		// belongs on the dead id: no label, no marker, no delta. The merge emitted the
-		// survivor's delta, and the survivor carries its own label state and its own
-		// marker, so it is asked about a label on its own terms rather than inheriting an
-		// answer aimed at the row that just disappeared.
-		if !alive {
-			return nil
 		}
 		if v := strings.TrimSpace(in.Fields["label"]); v != "" {
 			ok, err := fillEntityFieldTx(ctx, tx, model.MergeAlbum, "album", "label", in.AlbumID, v)
@@ -2743,69 +2727,58 @@ func (s *Store) ApplyAlbumFields(ctx context.Context, in model.AlbumFieldsEnrich
 	})
 }
 
-// applyAlbumYearTx runs the whole-album year fill for an album the caller found year-less,
-// reporting whether it wrote and whether the album row still exists afterwards (a taken
-// key merges this album into the incumbent and the row is gone). See ApplyAlbumFields for
-// why the veto is member-level.
-func (s *Store) applyAlbumYearTx(ctx context.Context, tx *sql.Tx, in model.AlbumFieldsEnrichment, year, provider, op string) (bool, bool, error) {
-	var members []model.PID
-	rows, err := tx.QueryContext(ctx, `SELECT pi.pid, pi.state, COALESCE(t.year, 0)
-		FROM track t JOIN playable_item pi ON pi.id = t.item_id
-		WHERE t.album_id = ? ORDER BY pi.id`, in.AlbumID)
-	if err != nil {
-		return false, true, waxerr.Wrap(waxerr.CodeIO, op, err)
+// applyAlbumYearTx fills the year of an album the caller found year-less on its
+// year-less members. Trashed members are no part of the album's year, so they are neither
+// asked nor filled, and a live member carrying a year refuses the fill, since the album's
+// year is its members' wherever they have one.
+func (s *Store) applyAlbumYearTx(ctx context.Context, tx *sql.Tx, in model.AlbumFieldsEnrichment, year, provider, op string) error {
+	if n, err := strconv.Atoi(year); err != nil || n <= 0 {
+		s.log.Warn("enrichment: skipping a malformed album year", "value", year, "album", in.PID)
+		return nil
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var pid, state string
-		var y int
-		if err := rows.Scan(&pid, &state, &y); err != nil {
-			return false, true, waxerr.Wrap(waxerr.CodeIO, op, err)
-		}
-		if y != 0 || state != string(model.StatePresent) {
-			return false, true, nil
-		}
-		members = append(members, model.PID(pid))
-	}
-	if err := rows.Err(); err != nil {
-		return false, true, waxerr.Wrap(waxerr.CodeIO, op, err)
-	}
-	if len(members) == 0 {
-		return false, true, nil
-	}
-
 	names, norm, err := normalizeEdits(map[string]string{"year": year}, op)
 	if err != nil {
 		s.log.Warn("enrichment: skipping a malformed album year", "value", year, "album", in.PID, "err", err)
-		return false, true, nil
+		return nil
 	}
-	targets := make([]editEntry, 0, len(members))
-	for _, pid := range members {
-		targets = append(targets, editEntry{pid: pid, fields: names, norm: norm})
+	var targets []editEntry
+	rows, err := tx.QueryContext(ctx, `SELECT pi.pid, COALESCE(t.year, 0)
+		FROM track t `+liveMembers+`
+		WHERE t.album_id = ? ORDER BY pi.id`, in.AlbumID)
+	if err != nil {
+		return waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
-	// skipLocked probes each member's locks as it validates, so a locked year anywhere
-	// under the album vetoes the fill without a separate per-member lock read.
+	defer rows.Close()
+	for rows.Next() {
+		var pid string
+		var y int
+		if err := rows.Scan(&pid, &y); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		if y != 0 {
+			return nil
+		}
+		targets = append(targets, editEntry{pid: model.PID(pid), fields: names, norm: norm})
+	}
+	if err := rows.Err(); err != nil {
+		return waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	rows.Close()
+
+	// skipLocked leaves out a member whose year is locked, the empty value it holds
+	// included, and fills the rest.
 	var skipped []model.PID
 	entries, err := collectEditEntriesTx(ctx, tx, targets, false, true, op, &skipped)
-	if err != nil {
-		return false, true, err
+	if err != nil || len(entries) == 0 {
+		return err
 	}
-	if len(skipped) > 0 || len(entries) != len(members) {
-		return false, true, nil
+	yp := in.Providers["year"]
+	if yp == "" {
+		yp = provider
 	}
-	attr := model.Attribution{Source: model.SourceEnrichment, Provider: provider}
-	if _, err := applyEditEntriesTx(ctx, tx, s.log, entries, attr, model.LockUnchanged, false, op); err != nil {
-		if waxerr.Is(err, waxerr.CodeInvalid) {
-			s.log.Warn("enrichment: skipping an invalid album year", "value", year, "album", in.PID, "err", err)
-			return false, true, nil
-		}
-		return false, true, err
-	}
-	var alive int
-	if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM album WHERE id = ?", in.AlbumID).Scan(&alive); err != nil {
-		return false, true, waxerr.Wrap(waxerr.CodeIO, op, err)
-	}
-	return true, alive > 0, nil
+	attr := model.Attribution{Source: model.SourceEnrichment, Provider: yp}
+	_, err = applyEditEntriesTx(ctx, tx, s.log, entries, attr, model.LockUnchanged, false, op)
+	return err
 }
 
 // EnrichedAlbumLabelFiles returns the member files still owed an enrichment-written

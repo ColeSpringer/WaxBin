@@ -232,6 +232,7 @@ func (s *Service) Plan(ctx context.Context, req Request) (*Plan, error) {
 		return nil, waxerr.FromContext(op, walkErr, waxerr.CodeIO)
 	}
 	s.joinFolders(req, files)
+	dateAlbums(req, files)
 	plan.Actions = s.settle(ctx, req, s.numberBooks(ctx, files))
 	for i := range plan.Actions {
 		if plan.Actions[i].Outcome == OutcomeImport {

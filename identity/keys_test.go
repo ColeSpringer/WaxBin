@@ -145,13 +145,27 @@ func TestReleaseGroupKey(t *testing.T) {
 
 func TestAlbumKeyDisambiguatesByFolder(t *testing.T) {
 	rg := ReleaseGroupKey("", MatchKey("Artist"), "Greatest Hits")
-	a := AlbumKey("", rg, 1999, 0, "/music/Artist/GH-1999")
-	b := AlbumKey("", rg, 1999, 0, "/music/Artist/GH-remaster")
+	a := AlbumKey("", rg, 0, "/music/Artist/GH-1999")
+	b := AlbumKey("", rg, 0, "/music/Artist/GH-remaster")
 	if a == b {
 		t.Error("same-titled editions in different folders should get distinct album keys")
 	}
-	if AlbumKey("", "", 1999, 0, "/x") != "" {
+	if AlbumKey("", "", 0, "/x") != "" {
 		t.Error("an album with no release-group key should not be keyed")
+	}
+}
+
+// TestAlbumKeyKeepsTheEmptyYearSlot: the key no longer names a year, and the segment the
+// year held stays empty, so an album whose members never carried a year keeps the key a
+// catalog already stores for it.
+func TestAlbumKeyKeepsTheEmptyYearSlot(t *testing.T) {
+	rg := ReleaseGroupKey("", MatchKey("Anderson .Paak"), "Malibu")
+	want := "al:rg:anderson paak\x1fmalibu\x1f\x1f\x1fmusic anderson paak malibu"
+	if got := AlbumKey("", rg, 0, "/music/Anderson .Paak/Malibu"); got != want {
+		t.Errorf("AlbumKey = %q, want %q", got, want)
+	}
+	if got := AlbumKey("", rg, 2, "/music/Anderson .Paak/Malibu"); got != "al:rg:anderson paak\x1fmalibu\x1f\x1f2\x1fmusic anderson paak malibu" {
+		t.Errorf("AlbumKey with a disc total = %q, want the total in its own segment", got)
 	}
 }
 

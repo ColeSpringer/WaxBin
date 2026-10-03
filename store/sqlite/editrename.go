@@ -76,8 +76,7 @@ type renameMember struct {
 // buildRenameMember loads one participant's scan-equivalent state (loadTrackForEditTx,
 // after the mbid carryover and derived-credit reconstruction) and derives the chain
 // keys its overlaid edit implies. Overlaying only the participating fields through
-// applyTrackEdit keeps parse and split semantics identical to the apply loop, so a bad
-// year aborts here with the same error the apply would give.
+// applyTrackEdit keeps parse and split semantics identical to the apply loop.
 func buildRenameMember(ctx context.Context, tx *sql.Tx, e editEntry, op string) (*renameMember, error) {
 	cur, _, filePath, err := loadTrackForEditTx(ctx, tx, e.itemID)
 	if err != nil {
@@ -435,9 +434,9 @@ func renameArtistsForCreditsTx(ctx context.Context, tx *sql.Tx, entries []credit
 func renameReleaseGroupsForEditsTx(ctx context.Context, tx *sql.Tx, groups map[int64][]*renameMember, affected *affectedRollups, op string) error {
 	// Qualify each album group for RG purposes: the batch covers every track of the
 	// album and every member computes one non-empty new RG key. Album-key uniformity
-	// is deliberately not required: the year is an album-key segment but not an RG
-	// one, so a batch that renames a whole set while re-dating one member still moves
-	// the group in place and only the album splits.
+	// is deliberately not required: the folder is an album-key segment but not an RG
+	// one, so a batch that renames an album whose members sit in different folders
+	// still moves the group in place and only the album splits.
 	type rgIntent struct {
 		newRGKey    string
 		titleEdited bool
@@ -631,9 +630,10 @@ func renameArtistsForEditsTx(ctx context.Context, tx *sql.Tx, members []*renameM
 		}
 		// An anchor pair fires only when the edit actually moved the anchor, never
 		// on drift between the denormalized column and the entity's own spelling: a
-		// merge leaves columns spelling the loser's name, and without this gate an
-		// unrelated whole-set edit (a year change) would rename the surviving entity
-		// back to the column value through the vacuously-passing coverage checks.
+		// merge leaves columns spelling the loser's name, and without this gate a
+		// whole-set edit of another keying field (an album retitle) would rename the
+		// surviving entity back to the column value through the vacuously-passing
+		// coverage checks.
 		if m.curAlbumArtistID != 0 && m.anchorPrimary != m.preAnchorPrimary {
 			addPair(m.curAlbumArtistID, m.anchorPrimary)
 		}
@@ -1173,10 +1173,10 @@ func renameAlbumChainTx(ctx context.Context, tx *sql.Tx, log logger, albumID int
 	}
 
 	var curKey, curPID, curTitle string
-	var curYear, curRGID sql.NullInt64
+	var curRGID sql.NullInt64
 	err := tx.QueryRowContext(ctx,
-		"SELECT match_key, pid, title, year, release_group_id FROM album WHERE id=?", albumID).
-		Scan(&curKey, &curPID, &curTitle, &curYear, &curRGID)
+		"SELECT match_key, pid, title, release_group_id FROM album WHERE id=?", albumID).
+		Scan(&curKey, &curPID, &curTitle, &curRGID)
 	if errors.Is(err, sql.ErrNoRows) || (err == nil && !curRGID.Valid) {
 		return nil // no chain resolution ever leaves; fall back
 	}
@@ -1194,11 +1194,10 @@ func renameAlbumChainTx(ctx context.Context, tx *sql.Tx, log logger, albumID int
 		return waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
 
-	// The display values a rename may carry: a column is written only when every
-	// member edited its field to one identical value, so a case-divergent batch that
-	// still folds to one key keeps the current display.
+	// The display value a rename may carry: the title is written only when every member
+	// edited it to one identical value, so a case-divergent batch that still folds to one
+	// key keeps the current display.
 	titleEdited, newTitle := uniformEditedValue(group, "album", func(m *renameMember) string { return m.tr.Album })
-	yearEdited, newYear := uniformEditedValue(group, "year", func(m *renameMember) int { return m.tr.Year })
 
 	// Release-group fallback. The batch-level RG stage already moved (or merged) a
 	// fully covered group in place, after which the fresh read above sees the new
@@ -1247,20 +1246,10 @@ func renameAlbumChainTx(ctx context.Context, tx *sql.Tx, log logger, albumID int
 		// markers are not cleared here (or on any album rename): the release match
 		// consults identifiers and the RG's mbid, never the album title or year, so a
 		// rename is not new evidence at that level.
-		var wrote bool
 		if titleEdited && newTitle != curTitle {
 			if _, err := tx.ExecContext(ctx, "UPDATE album SET title=? WHERE id=?", newTitle, albumID); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
-			wrote = true
-		}
-		if yearEdited && int64(newYear) != curYear.Int64 {
-			if _, err := tx.ExecContext(ctx, "UPDATE album SET year=? WHERE id=?", nullInt(newYear), albumID); err != nil {
-				return waxerr.Wrap(waxerr.CodeIO, op, err)
-			}
-			wrote = true
-		}
-		if wrote {
 			if err := refreshEntitySortKeyTx(ctx, tx, model.MergeAlbum, "album", albumID); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
@@ -1295,18 +1284,15 @@ func renameAlbumChainTx(ctx context.Context, tx *sql.Tx, log logger, albumID int
 				return err
 			}
 		case errors.Is(err, sql.ErrNoRows):
-			// Free: rewrite the row in place; columns not backed by an edited field
-			// keep their current values.
-			title, year := curTitle, curYear.Int64
+			// Free: rewrite the row in place; the title keeps its current value unless
+			// the batch edited it.
+			title := curTitle
 			if titleEdited {
 				title = newTitle
 			}
-			if yearEdited {
-				year = int64(newYear)
-			}
 			if _, err := tx.ExecContext(ctx,
-				"UPDATE album SET match_key=?, title=?, year=? WHERE id=?",
-				newAlbumKey, title, nullInt(int(year)), albumID); err != nil {
+				"UPDATE album SET match_key=?, title=? WHERE id=?",
+				newAlbumKey, title, albumID); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 			if err := refreshEntitySortKeyTx(ctx, tx, model.MergeAlbum, "album", albumID); err != nil {

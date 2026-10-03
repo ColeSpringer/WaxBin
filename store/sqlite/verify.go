@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 
 	"github.com/colespringer/waxbin/identity"
 	"github.com/colespringer/waxbin/model"
@@ -22,6 +23,7 @@ type DerivedReport struct {
 	SortKeyDrift            int // entities whose stored sort_key != regenerated
 	BookDurationDrift       int // books whose stored total_duration_ms != summed parts
 	BookISBNKeyDrift        int // books whose stored isbn_key != identity.ISBNKey(isbn)
+	AlbumYearDrift          int // albums whose year != their members' most common year
 	OrphanArtSources        int // art_source images with no live art_map references
 	OrphanThumbnails        int // thumb_cache rows whose source is unreferenced
 	// field_provenance rows under a "tag.<KEY>" whose key WaxBin has since reserved.
@@ -55,7 +57,7 @@ func (r DerivedReport) consistentApartFromSortKeys() bool {
 	return r.ItemsMissingFTS == 0 && r.OrphanFTSRows == 0 &&
 		r.ArtistRollupDrift == 0 && r.GenreRollupDrift == 0 &&
 		r.ReleaseGroupRollupDrift == 0 && r.BookDurationDrift == 0 &&
-		r.BookISBNKeyDrift == 0
+		r.BookISBNKeyDrift == 0 && r.AlbumYearDrift == 0
 }
 
 // Reclaimable reports whether `db verify --fix` would reclaim space: orphaned art
@@ -89,6 +91,9 @@ func (s *Store) VerifyDerived(ctx context.Context) (*DerivedReport, error) {
 		// effective durations (the same definition refreshBookDuration writes).
 		{&rep.BookDurationDrift, "SELECT COUNT(*) FROM book b WHERE b.total_duration_ms <> " +
 			fmt.Sprintf(bookEffectiveDurationSum, "b.item_id")},
+		// The same query refreshAlbumYearsTx repairs from, so the check and the repair
+		// cannot disagree.
+		{&rep.AlbumYearDrift, "SELECT COUNT(*) FROM (" + strings.Replace(albumYearDriftQ, "/*FILTER*/", "", 1) + ")"},
 		// A map row pointing at a deleted entity does not count as a reference here,
 		// matching GCArt, which removes the stale map before deleting the source.
 		{&rep.OrphanArtSources, "SELECT COUNT(*) FROM art_source WHERE hash NOT IN (" + liveArtSourceQ + ")"},

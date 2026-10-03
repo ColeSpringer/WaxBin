@@ -16,7 +16,11 @@ func newMergeCmd(g *globals) *cobra.Command {
 			"tracks, albums, books, genre links, and contributor credits (so play state and " +
 			"provenance ride along), unioning MBID/enrichment state, recomputing rollups, " +
 			"and deleting the losers. The survivor keeps its public id. Use `audit` to find " +
-			"duplicate artists/albums/genres to merge.",
+			"duplicate artists/albums/genres to merge. Two albums apart only by their " +
+			"folder or their tags split again on the next scan or edit that re-reads " +
+			"their members, since an album's identity comes from its files; tag the " +
+			"files alike and keep them in one folder (organize does in a managed " +
+			"library) to keep the merge.",
 		Args: cobra.MinimumNArgs(3),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			et := model.MergeEntity(args[0])

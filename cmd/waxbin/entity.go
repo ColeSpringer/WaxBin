@@ -204,7 +204,7 @@ func newEntityRenameCmd(g *globals) *cobra.Command {
 			"at once, so the entity's identity key moves and the row stays: its pid, artwork, " +
 			"curation, stars, and enrichment marker all survive. This is what `edit` cannot do, " +
 			"since the fields `edit` writes never key an entity.\n\n" +
-			"Renamable types and their fields: album (album, album_artist, year), release_group " +
+			"Renamable types and their fields: album (album, album_artist), release_group " +
 			"(album, album_artist), artist (name). The artist rung takes one field because the " +
 			"item-level tag it writes differs per reference: a track credits an artist through " +
 			"ARTIST or ALBUMARTIST, a book through its author, and each referring credit list " +

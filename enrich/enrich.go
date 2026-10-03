@@ -108,11 +108,11 @@ type Store interface {
 	// that fails validation is skipped rather than failing the pass, and nothing
 	// surviving writes the marker alone.
 	ApplyItemFields(ctx context.Context, in model.ItemFieldsEnrichment) error
-	// ApplyAlbumFields writes an album's label on the album row and its year across
-	// every member at once, both fill-when-empty and lock-respecting, and records the
-	// album fields marker, settled by Incomplete and Unasked as ApplyItemFields settles
-	// its own. The year fill is vetoed unless the album has no year and every member is
-	// present, year-less, and unlocked, since it moves the album identity key.
+	// ApplyAlbumFields writes an album's label on the album row and its year on the
+	// album's year-less members, both fill-when-empty and lock-respecting, and records
+	// the album fields marker, settled by Incomplete and Unasked as ApplyItemFields
+	// settles its own. The year fills nothing on an album that has a year or a member
+	// carrying one, since the album's year comes from its members.
 	ApplyAlbumFields(ctx context.Context, in model.AlbumFieldsEnrichment) error
 
 	ApplyArtistEnrichment(ctx context.Context, in model.ArtistEnrichment) error
@@ -1912,7 +1912,7 @@ func (s *Service) enrichBook(ctx context.Context, st *runState, t model.EnrichTa
 // enrichTrackFields fills one track's empty scalar fields from the providers advertising
 // CapFields and marks it so the walk does not repeat. The rung is the request type: a
 // recording target's answer lands on this one item, which is what separates it from the
-// album walk, whose year fans across every member.
+// album walk, whose year lands on the album's year-less members.
 func (s *Service) enrichTrackFields(ctx context.Context, st *runState, t model.EnrichTarget) (outcome, error) {
 	in := model.ItemFieldsEnrichment{ItemID: t.ID, PID: t.PID}
 	fields, providers, sf := s.gatherFields(ctx, st, Request{
@@ -1957,8 +1957,8 @@ func (s *Service) enrichBookFields(ctx context.Context, st *runState, t model.En
 
 // enrichAlbumFields fills one album's empty label and year from the providers advertising
 // CapFields. The rung is the request type: a release target's answer lands on the album
-// row and, for year, on every member at once, which is what separates it from the
-// recording walk above.
+// row and, for year, on its members that have none and do not lock it, which is what
+// separates it from the recording walk above.
 func (s *Service) enrichAlbumFields(ctx context.Context, st *runState, t model.EnrichTarget) (outcome, error) {
 	in := model.AlbumFieldsEnrichment{AlbumID: t.ID, PID: t.PID}
 	fields, providers, sf := s.gatherFields(ctx, st, Request{

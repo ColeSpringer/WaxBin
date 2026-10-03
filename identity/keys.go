@@ -179,10 +179,13 @@ func ReleaseGroupKey(mbid, artistMatchKey, title string) string {
 }
 
 // AlbumKey is the entity-identity key for a specific release/edition: MBID when
-// known, else (release-group key, year, disc total, folder). The folder
-// disambiguates same-titled editions that share a release group. Returns "" when
-// the release-group key is empty.
-func AlbumKey(mbid, releaseGroupKey string, year, discTotal int, folder string) string {
+// known, else (release-group key, disc total, folder). The folder keeps apart
+// same-titled editions of one release group that sit in different folders. A track's
+// year is no part of it, since the tracks of one release often disagree on it, so two
+// same-titled records in one folder share a key unless an MBID or a title tells them
+// apart. The segment the year once held stays empty, so a year-less album keeps the key
+// it always had. Returns "" when the release-group key is empty.
+func AlbumKey(mbid, releaseGroupKey string, discTotal int, folder string) string {
 	if m := strings.TrimSpace(mbid); m != "" {
 		return "mbid:" + strings.ToLower(m)
 	}
@@ -193,7 +196,6 @@ func AlbumKey(mbid, releaseGroupKey string, year, discTotal int, folder string) 
 	b.WriteString("al:")
 	b.WriteString(releaseGroupKey)
 	b.WriteByte(0x1f)
-	b.WriteString(numOrEmpty(year))
 	b.WriteByte(0x1f)
 	b.WriteString(numOrEmpty(discTotal))
 	b.WriteByte(0x1f)
@@ -241,8 +243,8 @@ func DiscFolder(name string) (int, bool) {
 	return n, true
 }
 
-// numOrEmpty renders n for a key segment, treating 0 (an unknown year or disc
-// count) as empty so it does not falsely distinguish two otherwise-equal keys.
+// numOrEmpty renders n for a key segment, treating 0 (an unknown disc count) as empty
+// so it does not falsely distinguish two otherwise-equal keys.
 func numOrEmpty(n int) string {
 	if n == 0 {
 		return ""

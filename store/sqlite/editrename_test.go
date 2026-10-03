@@ -106,7 +106,7 @@ func TestEditAlbumRenamesInPlace(t *testing.T) {
 		t.Fatalf("album pid = %s, want kept %s", pid, albPID)
 	}
 	wantRGKey := identity.ReleaseGroupKey("", identity.MatchKey("Alpha"), "Renamed")
-	wantAlbumKey := identity.AlbumKey("", wantRGKey, 2001, 0, "/lib/Alpha/One")
+	wantAlbumKey := identity.AlbumKey("", wantRGKey, 0, "/lib/Alpha/One")
 	if k := scalarStr(t, st, "SELECT match_key FROM album"); k != wantAlbumKey {
 		t.Fatalf("album match_key = %q, want %q", k, wantAlbumKey)
 	}
@@ -214,14 +214,15 @@ func TestEditAlbumPartialMemberSplits(t *testing.T) {
 	assertVerifyClean(t, st)
 }
 
-// TestEditYearRekeysAlbumOnly: the year is part of the album key but not the RG key,
-// so a whole-set year edit re-keys the album row in place and leaves the RG alone.
-func TestEditYearRekeysAlbumOnly(t *testing.T) {
+// TestEditYearKeepsTheAlbumKey: the year keys neither the album nor the release group,
+// so a whole-set year edit leaves both rows on the keys they had.
+func TestEditYearKeepsTheAlbumKey(t *testing.T) {
 	st, _, pids := renameFixture(t)
 	ctx := context.Background()
 	albumID := scalarInt(t, st, "SELECT id FROM album")
 	rgKey0 := scalarStr(t, st, "SELECT match_key FROM release_group")
 
+	seq0, _ := st.LatestChangeSeq(ctx)
 	if _, err := st.EditManyFields(ctx, pids, map[string]string{"year": "1999"},
 		model.Attribution{Source: model.SourceUser}, model.LockOf(true), false, false); err != nil {
 		t.Fatalf("edit year: %v", err)
@@ -233,15 +234,23 @@ func TestEditYearRekeysAlbumOnly(t *testing.T) {
 		t.Fatalf("album id = %d, want kept %d", id, albumID)
 	}
 	wantRGKey := identity.ReleaseGroupKey("", identity.MatchKey("Alpha"), "One")
-	wantKey := identity.AlbumKey("", wantRGKey, 1999, 0, "/lib/Alpha/One")
+	wantKey := identity.AlbumKey("", wantRGKey, 0, "/lib/Alpha/One")
 	if k := scalarStr(t, st, "SELECT match_key FROM album"); k != wantKey {
 		t.Fatalf("album match_key = %q, want %q", k, wantKey)
 	}
-	if y := scalarInt(t, st, "SELECT year FROM album"); y != 1999 {
-		t.Fatalf("album year = %d, want 1999", y)
-	}
 	if k := scalarStr(t, st, "SELECT match_key FROM release_group"); k != rgKey0 {
 		t.Fatalf("rg match_key moved on a year edit: %q", k)
+	}
+	if y := scalarInt(t, st, "SELECT year FROM album"); y != 1999 {
+		t.Errorf("album year = %d, want its members' 1999", y)
+	}
+	if n := changeCount(t, st, seq0, "album", model.OpUpdate); n < 1 {
+		t.Errorf("album updates = %d, want the year change logged", n)
+	}
+	for _, op := range []model.ChangeOp{model.OpCreate, model.OpDelete} {
+		if n := changeCount(t, st, seq0, "album", op); n != 0 {
+			t.Errorf("album %s deltas = %d, want 0", op, n)
+		}
 	}
 	assertVerifyClean(t, st)
 }
@@ -382,7 +391,7 @@ func TestEditItemsFieldsNonUniformAlbumCarries(t *testing.T) {
 		t.Errorf("members share album %d, want distinct", a)
 	}
 	wantRGKey := identity.ReleaseGroupKey("", identity.MatchKey("Alpha"), "Gamma")
-	wantKey := identity.AlbumKey("", wantRGKey, 2001, 0, "/lib/Alpha/One")
+	wantKey := identity.AlbumKey("", wantRGKey, 0, "/lib/Alpha/One")
 	if k := scalarStr(t, st, "SELECT match_key FROM album WHERE id=?", albumID); k != wantKey {
 		t.Errorf("carried album match_key = %q, want %q", k, wantKey)
 	}
@@ -879,7 +888,7 @@ func TestEditAlbumRenameUnderMultiBackedRG(t *testing.T) {
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	// Two editions of "One" under one release group (same rg key, different album
-	// keys through year and folder).
+	// keys through the folder).
 	putTrack(t, st, lib.ID, trackSpec{
 		path: "/lib/a/01.flac", essence: "e1", content: "c1",
 		title: "S1", artist: "Alpha", albumArt: "Alpha", album: "One", year: 2001,
@@ -997,17 +1006,18 @@ func TestEditAlbumRenameMovesWholeMultiAlbumRG(t *testing.T) {
 	assertVerifyClean(t, st)
 }
 
-// TestEditRenameWithYearSplitKeepsChainInPlace: a batch that renames the whole set's
-// artist while re-dating one member still renames the artist and the release group
-// in place (the year is an album-key segment, not an RG one); only the album splits.
-// Before the batch-level RG stage the album-key non-uniformity vetoed the whole
-// chain after the artist had already committed, leaving a ghost group double-counted
-// in the artist's rollup.
-func TestEditRenameWithYearSplitKeepsChainInPlace(t *testing.T) {
+// TestEditRenameWithAReDatedMemberKeepsChainInPlace: a batch that renames the whole
+// set's artist while re-dating one member renames the artist, the release group and the
+// album in place, since the year keys none of them. It used to split the album by year,
+// and before the batch-level RG stage that non-uniformity vetoed the whole chain after
+// the artist had already committed, leaving a ghost group double-counted in the
+// artist's rollup.
+func TestEditRenameWithAReDatedMemberKeepsChainInPlace(t *testing.T) {
 	st, _, pids := renameFixture(t)
 	ctx := context.Background()
 	artistID := scalarInt(t, st, "SELECT id FROM artist")
 	rgID := scalarInt(t, st, "SELECT id FROM release_group")
+	albumID := scalarInt(t, st, "SELECT id FROM album")
 
 	if _, err := st.EditItemsFields(ctx, []model.ItemFieldEdit{
 		{ItemPID: pids[0], Fields: map[string]string{"artist": "Beta", "album_artist": "Beta", "year": "1999"}},
@@ -1029,13 +1039,18 @@ func TestEditRenameWithYearSplitKeepsChainInPlace(t *testing.T) {
 	if k := scalarStr(t, st, "SELECT match_key FROM release_group WHERE id=?", rgID); k != wantRGKey {
 		t.Fatalf("rg match_key = %q, want %q", k, wantRGKey)
 	}
-	// The members split by year into two albums, both under the renamed group.
-	if a, b := memberAlbumID(t, st, pids[0]), memberAlbumID(t, st, pids[1]); a == b {
-		t.Errorf("members share album %d, want a year split", a)
+	// Both members stay on the one album, renamed in place under the renamed group.
+	for _, pid := range pids {
+		if id := memberAlbumID(t, st, pid); id != albumID {
+			t.Errorf("member %s album = %d, want the renamed %d", pid, id, albumID)
+		}
 	}
-	if n := scalarInt(t, st, `SELECT COUNT(DISTINCT al.release_group_id) FROM track t
-		JOIN album al ON al.id = t.album_id`); n != 1 {
-		t.Errorf("members span %d release groups, want 1", n)
+	if n := scalarInt(t, st, "SELECT COUNT(*) FROM album"); n != 1 {
+		t.Fatalf("album rows = %d, want 1 (renamed in place, no split)", n)
+	}
+	wantKey := identity.AlbumKey("", wantRGKey, 0, "/lib/Alpha/One")
+	if k := scalarStr(t, st, "SELECT match_key FROM album WHERE id=?", albumID); k != wantKey {
+		t.Errorf("album match_key = %q, want %q", k, wantKey)
 	}
 	assertVerifyClean(t, st)
 }
@@ -1079,12 +1094,12 @@ func TestEditConflictingAnchorsBlockArtistRename(t *testing.T) {
 	assertVerifyClean(t, st)
 }
 
-// TestEditYearKeepsMergedAnchorSpelling: after a merge the member columns still
-// spell the loser's name while the entity spells the survivor's, and an unrelated
-// whole-set edit must not rename the survivor back to the column value through the
-// vacuously-passing coverage checks. The anchor pair fires only when the edit moved
-// the anchor.
-func TestEditYearKeepsMergedAnchorSpelling(t *testing.T) {
+// TestEditRetitleKeepsMergedAnchorSpelling: after a merge the member columns still
+// spell the loser's name while the entity spells the survivor's, and a whole-set edit
+// of another keying field must not rename the survivor back to the column value
+// through the vacuously-passing coverage checks. The anchor pair fires only when the
+// edit moved the anchor.
+func TestEditRetitleKeepsMergedAnchorSpelling(t *testing.T) {
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	// The survivor's only reference is the merged compilation itself: two loose
@@ -1124,9 +1139,9 @@ func TestEditYearKeepsMergedAnchorSpelling(t *testing.T) {
 	seq0, _ := st.LatestChangeSeq(ctx)
 	p1 := model.PID(scalarStr(t, st, "SELECT pid FROM playable_item WHERE title='K1'"))
 	p2 := model.PID(scalarStr(t, st, "SELECT pid FROM playable_item WHERE title='K2'"))
-	if _, err := st.EditManyFields(ctx, []model.PID{p1, p2}, map[string]string{"year": "1999"},
+	if _, err := st.EditManyFields(ctx, []model.PID{p1, p2}, map[string]string{"album": "Comp II"},
 		model.Attribution{Source: model.SourceUser}, model.LockOf(true), false, false); err != nil {
-		t.Fatalf("year edit: %v", err)
+		t.Fatalf("retitle: %v", err)
 	}
 
 	// The survivor keeps its spelling and pid: no pair fired, so the pre-pass never
@@ -1138,7 +1153,7 @@ func TestEditYearKeepsMergedAnchorSpelling(t *testing.T) {
 		t.Fatalf("survivor pid = %s, want kept %s", pid, survivorPID)
 	}
 	if n := changeCount(t, st, seq0, "artist", model.OpUpdate); n != 0 {
-		t.Errorf("artist updates = %d, want 0 (a year edit renames no artist)", n)
+		t.Errorf("artist updates = %d, want 0 (a retitle renames no artist)", n)
 	}
 	assertVerifyClean(t, st)
 }

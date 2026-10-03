@@ -394,7 +394,7 @@ func TestEntityEditClearAlbumMBIDRekeysHeuristic(t *testing.T) {
 	}
 
 	wantKey := identity.AlbumKey("", identity.ReleaseGroupKey("", identity.MatchKey("Alpha"), "One"),
-		2001, 0, "/lib/Alpha/One")
+		0, "/lib/Alpha/One")
 	if k := scalarStr(t, st, "SELECT match_key FROM album WHERE id=?", albumID); k != wantKey {
 		t.Fatalf("album match_key = %q, want the heuristic %q", k, wantKey)
 	}
@@ -456,7 +456,7 @@ func TestEntityEditClearAlbumMBIDKeepsRGCarryover(t *testing.T) {
 
 	clearEntityMBID(t, st, model.MergeAlbum, albumPID)
 
-	wantKey := identity.AlbumKey("", "mbid:"+rgMBID, 2001, 0, "/lib/Alpha/One")
+	wantKey := identity.AlbumKey("", "mbid:"+rgMBID, 0, "/lib/Alpha/One")
 	if k := scalarStr(t, st, "SELECT match_key FROM album WHERE id=?", albumID); k != wantKey {
 		t.Fatalf("album match_key = %q, want the group-carrying %q", k, wantKey)
 	}
@@ -564,7 +564,7 @@ func TestEntityEditClearAlbumMBIDMergesIntoHeuristicTwin(t *testing.T) {
 		t.Fatalf("album rows = %d, want 2", n)
 	}
 	heuristicKey := identity.AlbumKey("", identity.ReleaseGroupKey("", identity.MatchKey("Alpha"), "One"),
-		2001, 0, "/lib/Alpha/One")
+		0, "/lib/Alpha/One")
 	twinPID := entityPIDByCol(t, st, "album", "match_key", heuristicKey)
 	twinID := entityIDByCol(t, st, "album", "match_key", heuristicKey)
 	identified := entityPIDByCol(t, st, "album", "match_key", "mbid:"+relMBID)
@@ -631,9 +631,9 @@ func TestEntityEditClearRGMBIDRekeysChainAndAlbumKeys(t *testing.T) {
 	rgPID := entityPIDByCol(t, st, "release_group", "match_key", "mbid:"+rgMBID)
 	rgID := entityIDByCol(t, st, "release_group", "match_key", "mbid:"+rgMBID)
 	albumID1 := entityIDByCol(t, st, "album", "match_key",
-		identity.AlbumKey("", "mbid:"+rgMBID, 2001, 0, "/lib/Alpha/One"))
+		identity.AlbumKey("", "mbid:"+rgMBID, 0, "/lib/Alpha/One"))
 	albumID2 := entityIDByCol(t, st, "album", "match_key",
-		identity.AlbumKey("", "mbid:"+rgMBID, 2002, 0, "/lib/Alpha/One Deluxe"))
+		identity.AlbumKey("", "mbid:"+rgMBID, 0, "/lib/Alpha/One Deluxe"))
 
 	// A matched marker to take back with the id.
 	if err := st.ApplyReleaseGroupEnrichment(ctx, model.ReleaseGroupEnrichment{
@@ -670,10 +670,9 @@ func TestEntityEditClearRGMBIDRekeysChainAndAlbumKeys(t *testing.T) {
 	}
 	for _, tc := range []struct {
 		id     int64
-		year   int
 		folder string
-	}{{albumID1, 2001, "/lib/Alpha/One"}, {albumID2, 2002, "/lib/Alpha/One Deluxe"}} {
-		want := identity.AlbumKey("", wantRGKey, tc.year, 0, tc.folder)
+	}{{albumID1, "/lib/Alpha/One"}, {albumID2, "/lib/Alpha/One Deluxe"}} {
+		want := identity.AlbumKey("", wantRGKey, 0, tc.folder)
 		if k := scalarStr(t, st, "SELECT match_key FROM album WHERE id=?", tc.id); k != want {
 			t.Fatalf("album %d match_key = %q, want %q", tc.id, k, want)
 		}
@@ -915,8 +914,8 @@ func TestEntityEditClearRGMBIDReparentsDifferentlyTitledAlbum(t *testing.T) {
 	})
 	rgPID := entityPIDByCol(t, st, "release_group", "match_key", "mbid:"+rgMBID)
 	rgID := entityIDByCol(t, st, "release_group", "match_key", "mbid:"+rgMBID)
-	plainKey0 := identity.AlbumKey("", "mbid:"+rgMBID, 2001, 0, "/lib/Alpha/One")
-	deluxeKey0 := identity.AlbumKey("", "mbid:"+rgMBID, 2002, 0, "/lib/Alpha/One Deluxe")
+	plainKey0 := identity.AlbumKey("", "mbid:"+rgMBID, 0, "/lib/Alpha/One")
+	deluxeKey0 := identity.AlbumKey("", "mbid:"+rgMBID, 0, "/lib/Alpha/One Deluxe")
 	plainID, plainPID := entityIDByCol(t, st, "album", "match_key", plainKey0),
 		entityPIDByCol(t, st, "album", "match_key", plainKey0)
 	deluxeID, deluxePID := entityIDByCol(t, st, "album", "match_key", deluxeKey0),
@@ -947,10 +946,9 @@ func TestEntityEditClearRGMBIDReparentsDifferentlyTitledAlbum(t *testing.T) {
 	for _, tc := range []struct {
 		id     int64
 		rgKey  string
-		year   int
 		folder string
-	}{{plainID, plainRGKey, 2001, "/lib/Alpha/One"}, {deluxeID, deluxeRGKey, 2002, "/lib/Alpha/One Deluxe"}} {
-		want := identity.AlbumKey("", tc.rgKey, tc.year, 0, tc.folder)
+	}{{plainID, plainRGKey, "/lib/Alpha/One"}, {deluxeID, deluxeRGKey, "/lib/Alpha/One Deluxe"}} {
+		want := identity.AlbumKey("", tc.rgKey, 0, tc.folder)
 		if k := scalarStr(t, st, "SELECT match_key FROM album WHERE id=?", tc.id); k != want {
 			t.Errorf("album %d match_key = %q, want the %q its own members compute", tc.id, k, want)
 		}
@@ -1098,7 +1096,7 @@ func TestEntityEditClearMBIDSkipsArchivedRepresentative(t *testing.T) {
 	clearEntityMBID(t, st, model.MergeAlbum, albumPID)
 
 	wantKey := identity.AlbumKey("", identity.ReleaseGroupKey("", identity.MatchKey("Alpha"), "One"),
-		2001, 0, "/lib/Alpha/One")
+		0, "/lib/Alpha/One")
 	if k := scalarStr(t, st, "SELECT match_key FROM album WHERE id=?", albumID); k != wantKey {
 		t.Fatalf("album match_key = %q, want the %q its filed member computes", k, wantKey)
 	}
@@ -1128,7 +1126,7 @@ func TestEntityEditClearRGMBIDMergesIntoHeuristicTwin(t *testing.T) {
 	twinRGKey := identity.ReleaseGroupKey("", identity.MatchKey("Alpha"), "One")
 	twinRGPID := entityPIDByCol(t, st, "release_group", "match_key", twinRGKey)
 	twinAlbumPID := entityPIDByCol(t, st, "album", "match_key",
-		identity.AlbumKey("", twinRGKey, 2001, 0, "/lib/Alpha/One"))
+		identity.AlbumKey("", twinRGKey, 0, "/lib/Alpha/One"))
 	identified := entityPIDByCol(t, st, "release_group", "match_key", "mbid:"+rgMBID)
 
 	clearEntityMBID(t, st, model.MergeReleaseGroup, identified)
@@ -1173,7 +1171,7 @@ func TestEntityEditClearMBIDWithSiblingFieldsRefusesOnlyOnMerge(t *testing.T) {
 		t.Fatalf("clear plus label on a free key: %v", err)
 	}
 	wantKey := identity.AlbumKey("", identity.ReleaseGroupKey("", identity.MatchKey("Alpha"), "One"),
-		2001, 0, "/lib/Alpha/One")
+		0, "/lib/Alpha/One")
 	if k := scalarStr(t, free, "SELECT match_key FROM album WHERE pid=?", string(albumPID)); k != wantKey {
 		t.Fatalf("album match_key = %q, want the heuristic %q", k, wantKey)
 	}

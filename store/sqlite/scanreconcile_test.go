@@ -104,7 +104,7 @@ func TestScanMoveCarriesAlbumIdentity(t *testing.T) {
 		t.Fatalf("album pid = %s, want kept %s", pid, albPID)
 	}
 	rgKey := identity.ReleaseGroupKey("", identity.MatchKey("Alpha"), "One")
-	wantKey := identity.AlbumKey("", rgKey, 2001, 0, "/lib/Moved/One")
+	wantKey := identity.AlbumKey("", rgKey, 0, "/lib/Moved/One")
 	if k := scalarStr(t, st, "SELECT match_key FROM album"); k != wantKey {
 		t.Fatalf("album match_key = %q, want %q", k, wantKey)
 	}
@@ -231,7 +231,7 @@ func TestScanMoveOntoBareButPopulatedAlbum(t *testing.T) {
 		t.Fatalf("members on the survivor = %d, want 3", n)
 	}
 	rgKey := identity.ReleaseGroupKey("", identity.MatchKey("Alpha"), "One")
-	wantKey := identity.AlbumKey("", rgKey, 2001, 0, "/lib/Alpha/Two")
+	wantKey := identity.AlbumKey("", rgKey, 0, "/lib/Alpha/Two")
 	if k := scalarStr(t, st, "SELECT match_key FROM album"); k != wantKey {
 		t.Fatalf("album match_key = %q, want the destination folder's %q", k, wantKey)
 	}
@@ -244,36 +244,48 @@ func TestScanMoveOntoBareButPopulatedAlbum(t *testing.T) {
 	assertVerifyClean(t, st)
 }
 
-// TestScanYearRetagCarriesAlbum: a year is part of the album key but not the release
-// group's, so an external year retag of every member re-keys the album in place and the
-// row adopts the new year.
-func TestScanYearRetagCarriesAlbum(t *testing.T) {
+// TestScanYearRetagKeepsAlbum: the year keys no album, so an external year retag of
+// every member leaves the album on its key, with nothing to carry and no row forked.
+func TestScanYearRetagKeepsAlbum(t *testing.T) {
 	st, lib, albumID, albPID, rgID := moveFixture(t)
+	ctx := context.Background()
 
-	for _, s := range []trackSpec{
+	seq0, err := st.LatestChangeSeq(ctx)
+	if err != nil {
+		t.Fatalf("seq: %v", err)
+	}
+	// One member retagged leaves two members that disagree, which goes to the later
+	// year; both retagged agree on it.
+	for i, s := range []trackSpec{
 		{path: "/lib/Alpha/One/01.flac", essence: "m1", content: "k1b", title: "M1"},
 		{path: "/lib/Alpha/One/02.flac", essence: "m2", content: "k2b", title: "M2"},
 	} {
 		s.artist, s.albumArt, s.album, s.genre, s.year = "Alpha", "Alpha", "One", "Rock", 2002
 		putTrack(t, st, lib.ID, s)
+		if n := scalarInt(t, st, "SELECT COUNT(*) FROM album"); n != 1 {
+			t.Fatalf("album rows after retagging %s = %d, want 1", s.title, n)
+		}
+		want := []int{2002, 2002}[i]
+		if y := scalarInt(t, st, "SELECT year FROM album"); y != want {
+			t.Errorf("album year after retagging %s = %d, want %d", s.title, y, want)
+		}
 	}
 
-	if n := scalarInt(t, st, "SELECT COUNT(*) FROM album"); n != 1 {
-		t.Fatalf("album rows = %d, want 1 (the retagged album carried)", n)
-	}
 	if id := scalarInt(t, st, "SELECT id FROM album"); id != albumID {
 		t.Fatalf("album id = %d, want kept %d", id, albumID)
 	}
 	if pid := scalarStr(t, st, "SELECT pid FROM album"); pid != string(albPID) {
 		t.Fatalf("album pid = %s, want kept %s", pid, albPID)
 	}
-	if y := scalarInt(t, st, "SELECT year FROM album"); y != 2002 {
-		t.Errorf("album year = %d, want the retagged 2002", y)
-	}
 	rgKey := identity.ReleaseGroupKey("", identity.MatchKey("Alpha"), "One")
-	wantKey := identity.AlbumKey("", rgKey, 2002, 0, "/lib/Alpha/One")
+	wantKey := identity.AlbumKey("", rgKey, 0, "/lib/Alpha/One")
 	if k := scalarStr(t, st, "SELECT match_key FROM album"); k != wantKey {
 		t.Fatalf("album match_key = %q, want %q", k, wantKey)
+	}
+	for _, op := range []model.ChangeOp{model.OpCreate, model.OpDelete} {
+		if n := changeCount(t, st, seq0, "album", op); n != 0 {
+			t.Errorf("album %s deltas = %d, want 0", op, n)
+		}
 	}
 	assertAlbumAttachments(t, st, albumID, rgID)
 	assertVerifyClean(t, st)
@@ -330,7 +342,7 @@ func TestScanTitleRetagCarriesAlbum(t *testing.T) {
 	}
 
 	rgKey := identity.ReleaseGroupKey("", identity.MatchKey("Alpha"), "Two")
-	assertAlbumCarried(t, st, albumID, albPID, identity.AlbumKey("", rgKey, 2001, 0, retagFolder))
+	assertAlbumCarried(t, st, albumID, albPID, identity.AlbumKey("", rgKey, 0, retagFolder))
 	if title := scalarStr(t, st, "SELECT title FROM album"); title != "Two" {
 		t.Errorf("album title = %q, want the retagged Two", title)
 	}
@@ -350,7 +362,7 @@ func TestScanTitleRetagKeepsReleaseGroupPID(t *testing.T) {
 	retagInto(t, st, lib, retagFolder)
 
 	rgKey := identity.ReleaseGroupKey("", identity.MatchKey("Alpha"), "Two")
-	assertAlbumCarried(t, st, albumID, albPID, identity.AlbumKey("", rgKey, 2001, 0, retagFolder))
+	assertAlbumCarried(t, st, albumID, albPID, identity.AlbumKey("", rgKey, 0, retagFolder))
 	if id := scalarInt(t, st, "SELECT id FROM release_group"); id != rgID {
 		t.Fatalf("release group id = %d, want the established %d", id, rgID)
 	}
@@ -467,7 +479,7 @@ func TestScanArtistRetagCarriesAlbum(t *testing.T) {
 	}
 
 	rgKey := identity.ReleaseGroupKey("", identity.MatchKey("Beta"), "One")
-	assertAlbumCarried(t, st, albumID, albPID, identity.AlbumKey("", rgKey, 2001, 0, retagFolder))
+	assertAlbumCarried(t, st, albumID, albPID, identity.AlbumKey("", rgKey, 0, retagFolder))
 }
 
 // TestScanRetagWithMoveCarriesAlbum: a retag that also moves the release out of its
@@ -488,7 +500,7 @@ func TestScanRetagWithMoveCarriesAlbum(t *testing.T) {
 	}
 
 	rgKey := identity.ReleaseGroupKey("", identity.MatchKey("Alpha"), "Two")
-	assertAlbumCarried(t, st, albumID, albPID, identity.AlbumKey("", rgKey, 2001, 0, "/lib/Moved/Two"))
+	assertAlbumCarried(t, st, albumID, albPID, identity.AlbumKey("", rgKey, 0, "/lib/Moved/Two"))
 }
 
 // TestScanRetagWithMoveCarriesDiscFolderAlbum: an album laid out in disc folders is keyed
@@ -507,7 +519,7 @@ func TestScanRetagWithMoveCarriesDiscFolderAlbum(t *testing.T) {
 	}
 
 	rgKey := identity.ReleaseGroupKey("", identity.MatchKey("Alpha"), "Two")
-	assertAlbumCarried(t, st, albumID, albPID, identity.AlbumKey("", rgKey, 2001, 0, "/lib/Moved/Two"))
+	assertAlbumCarried(t, st, albumID, albPID, identity.AlbumKey("", rgKey, 0, "/lib/Moved/Two"))
 }
 
 // TestScanOrganizedMoveThenRetagCarriesAlbum: an organize move rewrites the file paths
@@ -532,7 +544,7 @@ func TestScanOrganizedMoveThenRetagCarriesAlbum(t *testing.T) {
 	}
 
 	rgKey := identity.ReleaseGroupKey("", identity.MatchKey("Alpha"), "Two")
-	assertAlbumCarried(t, st, albumID, albPID, identity.AlbumKey("", rgKey, 2001, 0, "/lib/Organized/One"))
+	assertAlbumCarried(t, st, albumID, albPID, identity.AlbumKey("", rgKey, 0, "/lib/Organized/One"))
 }
 
 // TestScanOrganizedDiscFolderMoveCarriesAlbum: the organize journal's two ends are held
@@ -554,7 +566,7 @@ func TestScanOrganizedDiscFolderMoveCarriesAlbum(t *testing.T) {
 	}
 
 	rgKey := identity.ReleaseGroupKey("", identity.MatchKey("Alpha"), "Two")
-	assertAlbumCarried(t, st, albumID, albPID, identity.AlbumKey("", rgKey, 2001, 0, "/lib/Organized/One"))
+	assertAlbumCarried(t, st, albumID, albPID, identity.AlbumKey("", rgKey, 0, "/lib/Organized/One"))
 }
 
 // TestScanStaleOrganizeJournalStillSplits pins the refusal on the journal's source end.
@@ -613,7 +625,7 @@ func assertAlbumGhosted(t *testing.T, st *Store, albumID int, albPID model.PID, 
 		t.Errorf("members left on the old album = %d, want 0", n)
 	}
 	rgKey := identity.ReleaseGroupKey("", identity.MatchKey("Alpha"), "One")
-	oldKey := identity.AlbumKey("", rgKey, 2001, 0, retagFolder)
+	oldKey := identity.AlbumKey("", rgKey, 0, retagFolder)
 	if k := scalarStr(t, st, "SELECT match_key FROM album WHERE id=?", albumID); k != oldKey {
 		t.Errorf("old album match_key = %q, want the unchanged %q", k, oldKey)
 	}
@@ -747,7 +759,7 @@ func TestScanPartialMoveDoesNotReconcile(t *testing.T) {
 		t.Errorf("members left on the old album = %d, want 1", n)
 	}
 	rgKey := identity.ReleaseGroupKey("", identity.MatchKey("Alpha"), "One")
-	oldKey := identity.AlbumKey("", rgKey, 2001, 0, "/lib/Alpha/One")
+	oldKey := identity.AlbumKey("", rgKey, 0, "/lib/Alpha/One")
 	if k := scalarStr(t, st, "SELECT match_key FROM album WHERE id=?", albumID); k != oldKey {
 		t.Errorf("old album match_key = %q, want the unchanged %q", k, oldKey)
 	}

@@ -43,9 +43,13 @@ func (s *Store) MergeEntity(ctx context.Context, et model.MergeEntity, survivorP
 // enrichment case), because the survivor inherits the loser's MBID below and
 // identity is MBID-first. A purely heuristic merge with no MBID can be re-derived
 // from the still-original tags on a later scan, so fix the tags or enable organize
-// tag write-back to make it durable. Merging artists does not auto-collapse two
-// same-titled release groups now sharing the survivor; run `merge release_group`
-// for those.
+// tag write-back to make it durable. A merge of two albums that differ only by folder
+// (what audit reports as a duplicate by name or a split album) is undone however they
+// are tagged, since each member's key names its own folder: the next scan, or edit, that
+// re-resolves the members splits them again. Moving their files into one folder, which
+// organize does in a managed library, is what keeps it. Merging artists does not
+// auto-collapse two same-titled release groups now sharing the survivor; run
+// `merge release_group` for those.
 func (s *Store) MergeEntities(ctx context.Context, et model.MergeEntity, survivorPID model.PID, loserPIDs []model.PID) ([]*model.MergeReport, error) {
 	const op = "store.MergeEntities"
 	if !et.Valid() {
@@ -415,6 +419,8 @@ func repointReleaseGroup(ctx context.Context, tx *sql.Tx, sid, lid int64, aff *a
 // no rollup, but moving tracks between two albums under different release groups
 // changes those groups' rollups, so both are refreshed.
 func repointAlbum(ctx context.Context, tx *sql.Tx, sid, lid int64, aff *affectedRollups) (int, error) {
+	// The survivor's year is recounted over the members it takes in.
+	aff.albums[sid] = true
 	for _, id := range []int64{sid, lid} {
 		var rgID sql.NullInt64
 		if err := tx.QueryRowContext(ctx,

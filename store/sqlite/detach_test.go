@@ -55,7 +55,7 @@ func TestDetachMovesMemberToHeuristicAlbum(t *testing.T) {
 	}
 
 	rgKey := identity.ReleaseGroupKey("", identity.MatchKey("Alpha"), "One")
-	wantKey := identity.AlbumKey("", rgKey, 2001, 0, "/lib/Alpha/One")
+	wantKey := identity.AlbumKey("", rgKey, 0, "/lib/Alpha/One")
 	newAlbumID := scalarInt(t, st, "SELECT id FROM album WHERE match_key=?", wantKey)
 	if newAlbumID == albumID {
 		t.Fatalf("the detached member landed back on the identified album %d", albumID)
@@ -151,7 +151,7 @@ func groupKeyedFixture(t *testing.T, rgMBID string) (*Store, *model.Library, int
 			genre: "Rock", year: 2001, mbReleaseGroup: rgMBID,
 		})
 	}
-	wantKey := identity.AlbumKey("", "mbid:"+rgMBID, 2001, 0, "/lib/Alpha/One")
+	wantKey := identity.AlbumKey("", "mbid:"+rgMBID, 0, "/lib/Alpha/One")
 	if k := scalarStr(t, st, "SELECT match_key FROM album"); k != wantKey {
 		t.Fatalf("album match_key = %q, want the group-carrying %q", k, wantKey)
 	}
@@ -174,7 +174,7 @@ func TestDetachMovesReleaseGroupKeyedMember(t *testing.T) {
 	}
 
 	rgKey := identity.ReleaseGroupKey("", identity.MatchKey("Alpha"), "One")
-	wantKey := identity.AlbumKey("", rgKey, 2001, 0, "/lib/Alpha/One")
+	wantKey := identity.AlbumKey("", rgKey, 0, "/lib/Alpha/One")
 	newAlbumID := scalarInt(t, st, "SELECT id FROM album WHERE match_key=?", wantKey)
 	if id := memberAlbumID(t, st, pid1); id != newAlbumID {
 		t.Errorf("detached member's album = %d, want the heuristic row %d", id, newAlbumID)
@@ -189,7 +189,7 @@ func TestDetachMovesReleaseGroupKeyedMember(t *testing.T) {
 		t.Errorf("the freed member's release group match_key = %q, want %q", k, rgKey)
 	}
 	if k := scalarStr(t, st, "SELECT match_key FROM album WHERE id=?", albumID); k !=
-		identity.AlbumKey("", "mbid:"+rgMBID, 2001, 0, "/lib/Alpha/One") {
+		identity.AlbumKey("", "mbid:"+rgMBID, 0, "/lib/Alpha/One") {
 		t.Errorf("the album left behind re-keyed to %q, want it untouched", k)
 	}
 	newRGPID := scalarStr(t, st, "SELECT pid FROM release_group WHERE id=?", newRGID)

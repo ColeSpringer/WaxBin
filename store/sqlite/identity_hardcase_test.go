@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"strconv"
 	"testing"
 
 	"github.com/colespringer/waxbin/model"
@@ -119,8 +120,9 @@ func TestBoxSetDiscFoldersAreOneAlbum(t *testing.T) {
 }
 
 // TestDiscFolderMembersStayOneAlbumThroughAnEdit: an edit re-resolves its members through
-// the same album folder a scan keys them by, so editing every disc of a disc-folder album
-// keeps it one album.
+// the same album folder a scan keys them by, so retitling every disc of a disc-folder album
+// moves it in place through the rename pre-pass, and an edit of one member, which
+// re-resolves that member alone, keeps it one album.
 func TestDiscFolderMembersStayOneAlbumThroughAnEdit(t *testing.T) {
 	st, lib := entityFixture(t)
 	var pids []model.PID
@@ -133,11 +135,72 @@ func TestDiscFolderMembersStayOneAlbumThroughAnEdit(t *testing.T) {
 	if got := countRows(t, st, "album"); got != 1 {
 		t.Fatalf("albums = %d before the edit, want 1", got)
 	}
-	if _, err := st.EditManyFields(context.Background(), pids, map[string]string{"year": "1979"},
+	albumID := scalarInt(t, st, "SELECT id FROM album")
+	seq, _ := st.LatestChangeSeq(context.Background())
+	if _, err := st.EditManyFields(context.Background(), pids, map[string]string{"album": "The Wall (Remastered)"},
 		model.Attribution{Source: model.SourceUser}, model.LockOn, false, false); err != nil {
-		t.Fatalf("edit year: %v", err)
+		t.Fatalf("retitle: %v", err)
 	}
 	if got := countRows(t, st, "album"); got != 1 {
-		t.Errorf("albums = %d after editing every disc, want 1", got)
+		t.Errorf("albums = %d after retitling every disc, want 1", got)
+	}
+	if id := scalarInt(t, st, "SELECT id FROM album"); id != albumID {
+		t.Errorf("album id = %d, want %d renamed in place", id, albumID)
+	}
+	// In place, not forked onto a new row and carried back by the re-key reconcile.
+	for _, op := range []model.ChangeOp{model.OpCreate, model.OpDelete} {
+		if n := changeCount(t, st, seq, "album", op); n != 0 {
+			t.Errorf("album %s deltas = %d, want none", op, n)
+		}
+	}
+	if err := st.EditItemField(context.Background(), pids[1], "genre", "Rock",
+		model.Attribution{Source: model.SourceUser}, model.LockOn, false); err != nil {
+		t.Fatalf("edit genre: %v", err)
+	}
+	if got := countRows(t, st, "album"); got != 1 {
+		t.Errorf("albums = %d after editing one disc's member, want 1", got)
+	}
+}
+
+// TestOddTrackYearKeepsOneAlbum: a release whose tracks disagree on the year, eleven
+// tagged 2015 and one 2016, is one album under one release group rather than two albums
+// keyed apart by the year.
+func TestOddTrackYearKeepsOneAlbum(t *testing.T) {
+	st, lib := entityFixture(t)
+	for i := 1; i <= 12; i++ {
+		year := 2015
+		if i == 7 {
+			year = 2016
+		}
+		n := strconv.Itoa(i)
+		putTrack(t, st, lib.ID, trackSpec{
+			path: "/lib/Anderson .Paak/Malibu/" + n + ".flac", essence: "malibu" + n, content: "mc" + n,
+			title: "Track " + n, artist: "Anderson .Paak", albumArt: "Anderson .Paak", album: "Malibu", year: year,
+		})
+	}
+	if got := countRows(t, st, "album"); got != 1 {
+		t.Errorf("albums = %d, want 1 for twelve tracks of one release", got)
+	}
+	if got := countRows(t, st, "release_group"); got != 1 {
+		t.Errorf("release groups = %d, want 1", got)
+	}
+	if n := scalarInt(t, st, "SELECT COUNT(*) FROM track WHERE album_id = (SELECT id FROM album)"); n != 12 {
+		t.Errorf("tracks on the album = %d, want 12", n)
+	}
+}
+
+// TestYearlessTrackJoinsItsDatedSiblings: a track with no year tag lands on the album its
+// dated siblings make, whichever is read first.
+func TestYearlessTrackJoinsItsDatedSiblings(t *testing.T) {
+	st, lib := entityFixture(t)
+	for i, year := range []int{0, 1977, 1977} {
+		n := strconv.Itoa(i + 1)
+		putTrack(t, st, lib.ID, trackSpec{
+			path: "/lib/Pink Floyd/Animals/" + n + ".flac", essence: "an" + n, content: "ac" + n,
+			title: "Track " + n, artist: "Pink Floyd", albumArt: "Pink Floyd", album: "Animals", year: year,
+		})
+	}
+	if got := countRows(t, st, "album"); got != 1 {
+		t.Errorf("albums = %d, want the year-less track on its siblings' album", got)
 	}
 }

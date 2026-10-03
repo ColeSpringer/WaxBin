@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"testing"
 
 	"github.com/colespringer/waxbin/identity"
@@ -86,11 +87,243 @@ func TestDuplicateAlbumsSurvivorHasMostTracks(t *testing.T) {
 	if len(sets) != 1 || len(sets[0].Members) != 2 {
 		t.Fatalf("want one duplicate-album set of 2, got %+v", sets)
 	}
+	// The pair shares a name too, and is reported once, by its MBID.
+	if sets[0].Reason != "shared MBID" {
+		t.Errorf("reason = %q, want shared MBID", sets[0].Reason)
+	}
 	// The survivor (first member) must be the album backing the most tracks, so a
 	// merge re-points the fewest tracks and keeps the larger album's PID.
 	if sets[0].Members[0].TrackCount != 2 {
 		t.Errorf("survivor track count = %d, want 2 (the larger album); members=%+v",
 			sets[0].Members[0].TrackCount, sets[0].Members)
+	}
+}
+
+// TestDuplicateAlbumsByName: two albums carrying one folded title under one album artist,
+// in different folders and with no MusicBrainz ids, are a duplicate set, the larger first.
+func TestDuplicateAlbumsByName(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/A/Hits/1.flac", essence: "e1", content: "c1", title: "One", artist: "A", albumArt: "A", album: "Hits"})
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/A/Hits Again/1.flac", essence: "e2", content: "c2", title: "Two", artist: "A", albumArt: "A", album: "HITS!"})
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/A/Hits Again/2.flac", essence: "e3", content: "c3", title: "Three", artist: "A", albumArt: "A", album: "HITS!"})
+	// Another artist's album of the same title is no duplicate of either.
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/B/Hits/1.flac", essence: "e4", content: "c4", title: "Four", artist: "B", albumArt: "B", album: "Hits"})
+	sets, err := st.DuplicateAlbums(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sets) != 1 || len(sets[0].Members) != 2 {
+		t.Fatalf("sets = %+v, want one pair", sets)
+	}
+	if sets[0].Reason != "same title and album artist" || sets[0].EntityType != model.MergeAlbum {
+		t.Errorf("set = %s (%q), want an album set for the same title and album artist", sets[0].EntityType, sets[0].Reason)
+	}
+	if sets[0].Members[0].TrackCount != 2 || sets[0].Members[1].TrackCount != 1 {
+		t.Errorf("members = %+v, want the two-track album first", sets[0].Members)
+	}
+}
+
+// TestDuplicateAlbumsByNameAcrossKeyedGroups: a name pair is found whether its release
+// groups are keyed by name or by MusicBrainz id, which is a partly tagged album's split.
+func TestDuplicateAlbumsByNameAcrossKeyedGroups(t *testing.T) {
+	st, lib := entityFixture(t)
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/A/Hits/1.flac", essence: "e1", content: "c1", title: "One", artist: "A", albumArt: "A", album: "Hits"})
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/A/Hits (Tagged)/1.flac", essence: "e2", content: "c2", title: "Two", artist: "A", albumArt: "A", album: "Hits",
+		mbReleaseGroup: "aaaaaaaa-0000-4000-8000-000000000001"})
+	if n := countRows(t, st, "release_group"); n != 2 {
+		t.Fatalf("release groups = %d, want the name-keyed one and the id-keyed one", n)
+	}
+	sets, err := st.DuplicateAlbums(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sets) != 1 || len(sets[0].Members) != 2 || sets[0].Reason != "same title and album artist" {
+		t.Fatalf("sets = %+v, want one name pair", sets)
+	}
+}
+
+// TestDuplicateAlbumsByNameKeepsDistinctReleasesApart: albums that share a name but carry
+// different MusicBrainz ids, of the release or of its group, are different releases (two
+// "Greatest Hits" of one artist) and no duplicate, while an untagged third joins the
+// larger of them.
+func TestDuplicateAlbumsByNameKeepsDistinctReleasesApart(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/A/GH 1975/1.flac", essence: "e1", content: "c1", title: "One", artist: "A", albumArt: "A", album: "Greatest Hits",
+		mbRelease: "bbbbbbbb-0000-4000-8000-000000000001"})
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/A/GH 1975/2.flac", essence: "e2", content: "c2", title: "Two", artist: "A", albumArt: "A", album: "Greatest Hits",
+		mbRelease: "bbbbbbbb-0000-4000-8000-000000000001"})
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/A/GH 1990/1.flac", essence: "e3", content: "c3", title: "Three", artist: "A", albumArt: "A", album: "Greatest Hits",
+		mbRelease: "bbbbbbbb-0000-4000-8000-000000000002"})
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/B/Live 1/1.flac", essence: "e4", content: "c4", title: "Four", artist: "B", albumArt: "B", album: "Live",
+		mbReleaseGroup: "cccccccc-0000-4000-8000-000000000001"})
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/B/Live 2/1.flac", essence: "e5", content: "c5", title: "Five", artist: "B", albumArt: "B", album: "Live",
+		mbReleaseGroup: "cccccccc-0000-4000-8000-000000000002"})
+	sets, err := st.DuplicateAlbums(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sets) != 0 {
+		t.Fatalf("sets = %+v, want none: every pair names two releases", sets)
+	}
+
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/A/Greatest Hits/1.flac", essence: "e6", content: "c6", title: "Six", artist: "A", albumArt: "A", album: "Greatest Hits"})
+	sets, err = st.DuplicateAlbums(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sets) != 1 || len(sets[0].Members) != 2 || sets[0].Members[0].TrackCount != 2 {
+		t.Fatalf("sets = %+v, want the untagged album paired with the two-track release", sets)
+	}
+}
+
+// trashItemFile moves one put track's file to the trash, archiving its item.
+func trashItemFile(t *testing.T, st *Store, res *model.ScanItemResult) {
+	t.Helper()
+	path := []byte("/trash/" + string(res.FilePID) + ".flac")
+	if _, err := st.TrashFile(context.Background(), model.TrashFileInput{
+		FilePID: res.FilePID, TrashPath: path, TrashDisplay: string(path)}); err != nil {
+		t.Fatalf("trash: %v", err)
+	}
+}
+
+// replacedRipFixture is a rip of Hits whose three tracks were trashed, beside a new rip of
+// it in another folder with two live tracks and a third rip of it with one trashed track
+// and one live one.
+func replacedRipFixture(t *testing.T, st *Store, libID int64) {
+	t.Helper()
+	for i := 1; i <= 3; i++ {
+		n := strconv.Itoa(i)
+		trashItemFile(t, st, putTrack(t, st, libID, trackSpec{path: "/lib/A/Hits/" + n + ".flac", essence: "old" + n, content: "oc" + n,
+			title: "Old " + n, artist: "A", albumArt: "A", album: "Hits"}))
+	}
+	for i := 1; i <= 2; i++ {
+		n := strconv.Itoa(i)
+		putTrack(t, st, libID, trackSpec{path: "/lib/A/Hits [FLAC]/" + n + ".flac", essence: "new" + n, content: "nc" + n,
+			title: "New " + n, artist: "A", albumArt: "A", album: "Hits"})
+	}
+	trashItemFile(t, st, putTrack(t, st, libID, trackSpec{path: "/lib/A/Hits (2)/1.flac", essence: "half1", content: "hc1",
+		title: "Half 1", artist: "A", albumArt: "A", album: "Hits"}))
+	putTrack(t, st, libID, trackSpec{path: "/lib/A/Hits (2)/2.flac", essence: "half2", content: "hc2",
+		title: "Half 2", artist: "A", albumArt: "A", album: "Hits"})
+}
+
+// TestDuplicateAlbumsByNameCountLiveMembers: a trashed member is no part of its album, so
+// an album whose members are all trashed is no duplicate, and a set ranks its albums by
+// the members they still hold.
+func TestDuplicateAlbumsByNameCountLiveMembers(t *testing.T) {
+	st, lib := entityFixture(t)
+	replacedRipFixture(t, st, lib.ID)
+	sets, err := st.DuplicateAlbums(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sets) != 1 || len(sets[0].Members) != 2 {
+		t.Fatalf("sets = %+v, want one pair without the trashed rip", sets)
+	}
+	if got := sets[0].Members; got[0].TrackCount != 2 || got[1].TrackCount != 1 {
+		t.Errorf("members = %+v, want the live rip (2) first and the half-trashed one (1)", got)
+	}
+	trashed := scalarStr(t, st, "SELECT al.pid FROM album al JOIN track t ON t.album_id = al.id JOIN playable_item pi ON pi.id = t.item_id WHERE pi.title = 'Old 1'")
+	for _, m := range sets[0].Members {
+		if string(m.PID) == trashed {
+			t.Errorf("set names the trashed rip %s", trashed)
+		}
+	}
+}
+
+// TestSplitAlbumsCountLiveMembers: the split check reads the same way, so a trashed rip
+// splits nothing and the live rip leads.
+func TestSplitAlbumsCountLiveMembers(t *testing.T) {
+	st, lib := entityFixture(t)
+	replacedRipFixture(t, st, lib.ID)
+	splits, err := st.SplitAlbums(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(splits) != 1 || len(splits[0].Albums) != 2 {
+		t.Fatalf("splits = %+v, want one split of the two live rips", splits)
+	}
+	if got := splits[0].Albums; got[0].TrackCount != 2 || got[1].TrackCount != 1 {
+		t.Errorf("albums = %+v, want the live rip (2) first", got)
+	}
+}
+
+// TestDuplicateAlbumsByMBIDPutsTheLiveAlbumFirst: an id pair ranks its albums by live
+// members too, so a merge keeps the album still in use.
+func TestDuplicateAlbumsByMBIDPutsTheLiveAlbumFirst(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	replacedRipFixture(t, st, lib.ID)
+	if _, err := st.write.ExecContext(ctx, "UPDATE album SET mbid = 'eeeeeeee-0000-4000-8000-000000000001' WHERE match_key LIKE '%hits flac' OR match_key LIKE '%a hits'"); err != nil {
+		t.Fatal(err)
+	}
+	sets, err := st.DuplicateAlbums(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sets) == 0 || sets[0].Reason != "shared MBID" || len(sets[0].Members) != 2 {
+		t.Fatalf("sets = %+v, want the id pair first", sets)
+	}
+	if got := sets[0].Members; got[0].TrackCount != 2 || got[1].TrackCount != 0 {
+		t.Errorf("members = %+v, want the live rip (2) as survivor over the trashed one (0)", got)
+	}
+}
+
+// TestDuplicateAlbumsNameSetLeavesOutTheIDPairsLoser: an id pair and an untagged album of
+// the same name are two findings that never name the same loser, so merging the id pair
+// leaves the name finding naming albums that still exist.
+func TestDuplicateAlbumsNameSetLeavesOutTheIDPairsLoser(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	for i, folder := range []string{"/lib/A/Hits", "/lib/A/Hits", "/lib/A/Hits (CD)", "/lib/A/Hits (Rip)"} {
+		n := strconv.Itoa(i + 1)
+		putTrack(t, st, lib.ID, trackSpec{path: folder + "/" + n + ".flac", essence: "o" + n, content: "oc" + n,
+			title: "T" + n, artist: "A", albumArt: "A", album: "Hits"})
+	}
+	if _, err := st.write.ExecContext(ctx, "UPDATE album SET mbid = 'ffffffff-0000-4000-8000-000000000001' WHERE match_key NOT LIKE '%rip'"); err != nil {
+		t.Fatal(err)
+	}
+	sets, err := st.DuplicateAlbums(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sets) != 2 || sets[0].Reason != "shared MBID" || sets[1].Reason != model.ReasonSameAlbumName {
+		t.Fatalf("sets = %+v, want the id pair and one name set", sets)
+	}
+	survivor, loser := sets[0].Members[0].PID, sets[0].Members[1].PID
+	byName := sets[1].Members
+	if len(byName) != 2 || byName[0].PID != survivor {
+		t.Errorf("name set = %+v, want the id pair's survivor %s and the untagged album", byName, survivor)
+	}
+	for _, m := range byName {
+		if m.PID == loser {
+			t.Errorf("name set names the id pair's loser %s, which a merge of the pair deletes", loser)
+		}
+	}
+}
+
+// TestDuplicateAlbumsByNameReadsAGroupIDFromItsColumn: an album keyed by its release id
+// under a name-keyed group whose id enrichment filled in the column is under that group,
+// so it is no duplicate of a same-named album under another group's id.
+func TestDuplicateAlbumsByNameReadsAGroupIDFromItsColumn(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/A/GH/1.flac", essence: "e1", content: "c1", title: "One",
+		artist: "A", albumArt: "A", album: "Greatest Hits", mbRelease: "bbbbbbbb-0000-4000-8000-000000000009"})
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/A/GH Two/1.flac", essence: "e2", content: "c2", title: "Two",
+		artist: "A", albumArt: "A", album: "Greatest Hits", mbReleaseGroup: "cccccccc-0000-4000-8000-000000000009"})
+	if _, err := st.write.ExecContext(ctx, `UPDATE release_group SET mbid = 'cccccccc-0000-4000-8000-000000000008'
+		WHERE match_key NOT LIKE 'mbid:%'`); err != nil {
+		t.Fatal(err)
+	}
+	sets, err := st.DuplicateAlbums(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sets) != 0 {
+		t.Errorf("sets = %+v, want none: the two sit under different release groups", sets)
 	}
 }
 
@@ -141,6 +374,83 @@ func TestInconsistentAlbumsCompilationFlag(t *testing.T) {
 	}
 	if issues[0].Problem == "" {
 		t.Error("expected a non-empty problem description")
+	}
+}
+
+// TestInconsistentAlbumsYear: the year keys no album, so members disagreeing on it share
+// one album, and that album reports the disagreement.
+func TestInconsistentAlbumsYear(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	for i, year := range []int{2015, 2015, 2016} {
+		n := string(rune('1' + i))
+		putTrack(t, st, lib.ID, trackSpec{
+			path: "/lib/AP/Malibu/" + n + ".flac", essence: "m" + n, content: "c" + n, title: "T" + n,
+			artist: "Anderson .Paak", albumArt: "Anderson .Paak", album: "Malibu", year: year,
+		})
+	}
+	issues, err := st.InconsistentAlbums(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(issues) != 1 || issues[0].Title != "Malibu" {
+		t.Fatalf("issues = %+v, want one for Malibu", issues)
+	}
+	if issues[0].Problem != "2 distinct years" {
+		t.Errorf("problem = %q, want %q", issues[0].Problem, "2 distinct years")
+	}
+}
+
+// TestInconsistentAlbumsRepeatedTrackNumbers: two same-titled records by one artist kept
+// in one folder are one album now that the year keys nothing, and their track numbers,
+// each claimed twice on one disc, are what says so. Another disc's track 1 repeats
+// nothing, a member with no disc counts as disc 1, and a trashed member claims nothing.
+func TestInconsistentAlbumsRepeatedTrackNumbers(t *testing.T) {
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	for i, tr := range []struct{ no, disc, year int }{
+		{1, 0, 1994}, {2, 0, 1994}, {1, 1, 2001}, {2, 0, 2001}, {1, 2, 1994}, {3, 0, 1994}, {3, 0, 2001},
+	} {
+		n := strconv.Itoa(i + 1)
+		res := putTrack(t, st, lib.ID, trackSpec{path: "/lib/Weezer/" + n + ".flac", essence: "w" + n, content: "wc" + n,
+			title: "Song " + n, artist: "Weezer", albumArt: "Weezer", album: "Weezer", year: tr.year, trackNo: tr.no, discNo: tr.disc})
+		if i == 6 {
+			trashItemFile(t, st, res)
+		}
+	}
+	if n := countRows(t, st, "album"); n != 1 {
+		t.Fatalf("albums = %d, want the two records on one album", n)
+	}
+	issues, err := st.InconsistentAlbums(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(issues) != 1 {
+		t.Fatalf("issues = %+v, want one for Weezer", issues)
+	}
+	if issues[0].RepeatedPositions != 2 || issues[0].Problem != "2 distinct years, 2 repeated track numbers" {
+		t.Errorf("issue = %+v, want 2 repeated track numbers beside the 2 years", issues[0])
+	}
+}
+
+// TestInconsistentAlbumsIgnoreTrashedMembers: a trashed member's year is no part of its
+// album, so it reports no disagreement.
+func TestInconsistentAlbumsIgnoreTrashedMembers(t *testing.T) {
+	st, lib := entityFixture(t)
+	for i, year := range []int{2015, 2015, 2016} {
+		n := strconv.Itoa(i + 1)
+		res := putTrack(t, st, lib.ID, trackSpec{path: "/lib/AP/Malibu/" + n + ".flac", essence: "m" + n, content: "c" + n, title: "T" + n,
+			artist: "Anderson .Paak", albumArt: "Anderson .Paak", album: "Malibu", year: year, trackNo: i + 1})
+		if year == 2016 {
+			trashItemFile(t, st, res)
+		}
+	}
+	issues, err := st.InconsistentAlbums(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(issues) != 0 {
+		t.Errorf("issues = %+v, want none once the odd track is trashed", issues)
 	}
 }
 

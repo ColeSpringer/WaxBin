@@ -113,13 +113,18 @@ type DuplicateMember struct {
 }
 
 // DuplicateSet is a group of entities that should probably be one: they share an
-// MBID, or normalize to the same collation key. The audit turns each set into a
-// merge-candidate finding (survivor = the member backing the most tracks).
+// MBID, or normalize to the same collation key, or (albums) carry one title under one
+// album artist. The audit turns each set into a merge-candidate finding (survivor = the
+// member backing the most tracks).
 type DuplicateSet struct {
 	EntityType MergeEntity
 	Reason     string
 	Members    []DuplicateMember
 }
+
+// ReasonSameAlbumName is the reason of a duplicate album set found by name, the albums
+// a folder keeps apart.
+const ReasonSameAlbumName = "same title and album artist"
 
 // SplitAlbum reports one album title by one artist spread across multiple album
 // entities (its tracks split by folder/tags into separate rows).
@@ -129,11 +134,14 @@ type SplitAlbum struct {
 	Albums []DuplicateMember
 }
 
-// AlbumIssue reports metadata inconsistency within one album entity.
+// AlbumIssue reports metadata inconsistency within one album entity. RepeatedPositions
+// counts the track numbers (within a disc) two or more of its members claim, which is how
+// two same-titled releases sharing a folder, and so an album, show.
 type AlbumIssue struct {
-	AlbumPID PID
-	Title    string
-	Problem  string
+	AlbumPID          PID
+	Title             string
+	Problem           string
+	RepeatedPositions int
 }
 
 // AuditFileInfo is the file-row projection the filesystem-level checks inspect
@@ -175,6 +183,7 @@ type DerivedDrift struct {
 	SortKeyDrift            int
 	BookDurationDrift       int
 	BookISBNKeyDrift        int
+	AlbumYearDrift          int
 }
 
 // Consistent reports whether the derived data is drift-free.
@@ -182,7 +191,7 @@ func (d DerivedDrift) Consistent() bool {
 	return d.ItemsMissingFTS == 0 && d.OrphanFTSRows == 0 &&
 		d.ArtistRollupDrift == 0 && d.GenreRollupDrift == 0 &&
 		d.ReleaseGroupRollupDrift == 0 && d.SortKeyDrift == 0 &&
-		d.BookDurationDrift == 0 && d.BookISBNKeyDrift == 0
+		d.BookDurationDrift == 0 && d.BookISBNKeyDrift == 0 && d.AlbumYearDrift == 0
 }
 
 // CopyReason says why a file is an alternate of its item.

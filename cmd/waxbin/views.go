@@ -588,6 +588,7 @@ type derivedView struct {
 	SortKeyDrift            int `json:"sortKeyDrift"`
 	BookDurationDrift       int `json:"bookDurationDrift"`
 	BookISBNKeyDrift        int `json:"bookIsbnKeyDrift"`
+	AlbumYearDrift          int `json:"albumYearDrift"`
 	OrphanArtSources        int `json:"orphanArtSources"`
 	OrphanThumbnails        int `json:"orphanThumbnails"`
 	// Custom-tag provenance rows under a key WaxBin has since reserved.
@@ -605,6 +606,7 @@ func toDerivedView(r *sqlite.DerivedReport) derivedView {
 		ArtistRollupDrift: r.ArtistRollupDrift, GenreRollupDrift: r.GenreRollupDrift,
 		ReleaseGroupRollupDrift: r.ReleaseGroupRollupDrift, SortKeyDrift: r.SortKeyDrift,
 		BookDurationDrift: r.BookDurationDrift, BookISBNKeyDrift: r.BookISBNKeyDrift,
+		AlbumYearDrift:   r.AlbumYearDrift,
 		OrphanArtSources: r.OrphanArtSources, OrphanThumbnails: r.OrphanThumbnails,
 		OrphanReservedTagProvenance: r.OrphanReservedTagProvenance,
 		StrandedTagKeyRows:          r.StrandedTagKeyRows,

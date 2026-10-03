@@ -499,9 +499,8 @@ type ItemFieldsEnrichment struct {
 
 // AlbumFieldsEnrichment is the scalar fields a provider supplied for one album, the
 // entity rung of the same walk. Only AlbumFillFields keys are applied: label lands on
-// the album row itself, year on every member at once through the uniform whole-album
-// edit, since year participates in the album identity key and a per-member write would
-// fork the album.
+// the album row itself, year on each member that has none, and the album's year follows
+// its members.
 type AlbumFieldsEnrichment struct {
 	AlbumID int64
 	PID     PID
@@ -525,7 +524,9 @@ type AlbumFieldsEnrichment struct {
 // (identity), the positions and flags a file's own tags settle (track_no, disc_no,
 // compilation), the derived sort fields (an edit of the display field regenerates them,
 // so filling one would be undone and could restore a locked value), and comment, which
-// is the listener's own note rather than a fact about the recording.
+// is the listener's own note rather than a fact about the recording. A track's year is
+// out too: it is its release's, which the album rung fills (AlbumFillFields), where a
+// recording's would be its first release and would then vote in its album's year.
 //
 // A kind with no fields walk returns nil.
 func EnrichFillFields(kind Kind) map[string]bool {

@@ -43,6 +43,7 @@ type trackSpec struct {
 	year                  int
 	bpm                   int
 	discTotal             int
+	trackNo, discNo       int
 	durationMS            int64
 	compilation           bool
 	mbRecording           string
@@ -96,6 +97,8 @@ func trackSpecInput(libID int64, s trackSpec) model.PutScannedTrackInput {
 			Year:             s.year,
 			BPM:              s.bpm,
 			DiscTotal:        s.discTotal,
+			TrackNo:          s.trackNo,
+			DiscNo:           s.discNo,
 			Compilation:      s.compilation,
 			MBID:             s.mbRecording,
 			MBReleaseGroupID: s.mbReleaseGroup,

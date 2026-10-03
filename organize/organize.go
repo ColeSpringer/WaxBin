@@ -144,11 +144,19 @@ func New(cat model.Catalog, writer TagWriter, log *slog.Logger) *Organizer {
 	return &Organizer{cat: cat, writer: writer, log: log}
 }
 
+// PlanOptions carries what the catalog knows beyond an item's own tags.
+type PlanOptions struct {
+	// AlbumYears maps an album's pid to its year, which {year} renders for every track
+	// on the album, so a track tagged a year apart from the rest files with its album
+	// rather than in a folder the next scan would key as an album of its own.
+	AlbumYears map[model.PID]int
+}
+
 // Plan computes the destination for each item under the profile. Items with no
 // backing file are skipped; items already at their destination are marked Skip. A
 // multi-file audiobook expands into one move per part so the whole book is
 // relocated together rather than split.
-func (o *Organizer) Plan(ctx context.Context, lib *model.Library, p Profile, items []*model.ItemView) (*Plan, error) {
+func (o *Organizer) Plan(ctx context.Context, lib *model.Library, p Profile, items []*model.ItemView, opts PlanOptions) (*Plan, error) {
 	root := string(lib.Root)
 	plan := &Plan{Profile: p.Name, LibraryPID: lib.PID, Root: root, TagWrite: p.TagWrite}
 	for _, it := range items {
@@ -162,7 +170,13 @@ func (o *Organizer) Plan(ctx context.Context, lib *model.Library, p Profile, ite
 		if !pathx.UnderRoot(root, it.DisplayPath) {
 			continue
 		}
-		rel, err := RenderRelPath(p, it)
+		view := it
+		if y := opts.AlbumYears[it.AlbumPID]; it.AlbumPID != "" && y != 0 && y != it.Year {
+			v := *it
+			v.Year = y
+			view = &v
+		}
+		rel, err := RenderRelPath(p, view)
 		if err != nil {
 			return nil, err
 		}

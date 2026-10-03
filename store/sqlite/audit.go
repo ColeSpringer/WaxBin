@@ -2,9 +2,12 @@ package sqlite
 
 import (
 	"context"
+	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 
+	"github.com/colespringer/waxbin/identity"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/waxerr"
 )
@@ -53,15 +56,124 @@ func (s *Store) DuplicateGenres(ctx context.Context) ([]model.DuplicateSet, erro
 	return s.scanDupSets(ctx, q, model.MergeGenre, "same collation key")
 }
 
-// DuplicateAlbums finds album entities that share a MusicBrainz release id.
+// DuplicateAlbums finds album entities that share a MusicBrainz release id, and ones
+// that carry one title under one album artist (albumNameDupSets). A name set leaves out
+// the albums an id set would merge away, so no two findings name one loser and acting on
+// one never strands the other; a pair found both ways is reported once, by its id.
 func (s *Store) DuplicateAlbums(ctx context.Context) ([]model.DuplicateSet, error) {
 	// Order each group by track count DESC so scanDupSets picks the album with the
 	// most tracks as the survivor (re-pointing the fewest tracks), matching the
 	// "survivor = most tracks" contract the artist/genre queries honor.
-	return s.scanDupSets(ctx, effectiveMBIDDupQuery("album",
-		"(SELECT COUNT(*) FROM track t WHERE t.album_id = k.id)"),
+	byMBID, err := s.scanDupSets(ctx, effectiveMBIDDupQuery("album", fmt.Sprintf(liveAlbumMembers, "k.id")),
 		model.MergeAlbum, "shared MBID")
+	if err != nil {
+		return nil, err
+	}
+	byName, err := s.albumNameDupSets(ctx)
+	if err != nil {
+		return nil, err
+	}
+	merged := map[model.PID]bool{}
+	for _, set := range byMBID {
+		for _, m := range set.Members[1:] {
+			merged[m.PID] = true
+		}
+	}
+	for _, set := range byName {
+		set.Members = slices.DeleteFunc(set.Members, func(m model.DuplicateMember) bool { return merged[m.PID] })
+		if len(set.Members) > 1 {
+			byMBID = append(byMBID, set)
+		}
+	}
+	return byMBID, nil
 }
+
+// albumNameDupSets groups albums by their release group's primary artist and their
+// folded title, across name-keyed and id-keyed groups alike, which is what an album split
+// across folders, or tagged in part, looks like. Albums carrying different MusicBrainz ids,
+// of the release or of its group, are different releases of one name (an artist's two
+// "Greatest Hits"), so a group is split into sets that never hold two ids: each album, the
+// largest first, joins the first set it does not conflict with. A set's first member is
+// its largest. Size counts live members only, and an album holding none is left out.
+// Merging a pair by name lasts only until a scan re-derives the members' keys
+// (MergeEntities).
+func (s *Store) albumNameDupSets(ctx context.Context) ([]model.DuplicateSet, error) {
+	q := `SELECT pid, title, artist_key, mb, rg_mb, n FROM (
+		SELECT al.pid, al.title, ar.match_key AS artist_key,
+			COALESCE(NULLIF(al.mbid,''), CASE WHEN al.match_key LIKE 'mbid:%' THEN substr(al.match_key, 6) END, '') AS mb,
+			COALESCE(NULLIF(rg.mbid,''), CASE WHEN rg.match_key LIKE 'mbid:%' THEN substr(rg.match_key, 6) END, '') AS rg_mb,
+			` + fmt.Sprintf(liveAlbumMembers, "al.id") + ` AS n
+		FROM album al
+		JOIN release_group rg ON rg.id = al.release_group_id
+		JOIN artist ar ON ar.id = rg.primary_artist_id)
+		WHERE n > 0
+		ORDER BY n DESC, pid`
+	rows, err := s.read.QueryContext(ctx, q)
+	if err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeIO, "store.audit", err)
+	}
+	defer rows.Close()
+	type album struct {
+		member     model.DuplicateMember
+		mbid, rgMB string
+	}
+	conflicts := func(a, b album) bool {
+		return (a.mbid != "" && b.mbid != "" && a.mbid != b.mbid) ||
+			(a.rgMB != "" && b.rgMB != "" && a.rgMB != b.rgMB)
+	}
+	groups := map[string][][]album{}
+	var order []string
+	for rows.Next() {
+		var a album
+		var pid, artistKey string
+		if err := rows.Scan(&pid, &a.member.Name, &artistKey, &a.mbid, &a.rgMB, &a.member.TrackCount); err != nil {
+			return nil, waxerr.Wrap(waxerr.CodeIO, "store.audit", err)
+		}
+		a.member.PID = model.PID(pid)
+		title := identity.MatchKey(a.member.Name)
+		if artistKey == "" || title == "" {
+			continue
+		}
+		key := artistKey + "\x1f" + title
+		if _, ok := groups[key]; !ok {
+			order = append(order, key)
+		}
+		sets := groups[key]
+		placed := false
+		for i := range sets {
+			if !slices.ContainsFunc(sets[i], func(b album) bool { return conflicts(a, b) }) {
+				sets[i] = append(sets[i], a)
+				placed = true
+				break
+			}
+		}
+		if !placed {
+			sets = append(sets, []album{a})
+		}
+		groups[key] = sets
+	}
+	if err := rows.Err(); err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeIO, "store.audit", err)
+	}
+	slices.Sort(order)
+	var out []model.DuplicateSet
+	for _, key := range order {
+		for _, set := range groups[key] {
+			if len(set) < 2 {
+				continue
+			}
+			ds := model.DuplicateSet{EntityType: model.MergeAlbum, Reason: model.ReasonSameAlbumName}
+			for _, a := range set {
+				ds.Members = append(ds.Members, a.member)
+			}
+			out = append(out, ds)
+		}
+	}
+	return out, nil
+}
+
+// liveAlbumMembers counts an album's live members (liveMembers). %s is the album id.
+const liveAlbumMembers = `(SELECT COUNT(*) FROM track t ` + liveMembers + ` WHERE t.album_id = %s)`
 
 // DuplicateReleaseGroups finds release-group entities that share a MusicBrainz
 // release-group id. Ordered by member-album count DESC, which is the group rung's
@@ -126,19 +238,21 @@ func (s *Store) scanDupSets(ctx context.Context, q string, et model.MergeEntity,
 
 // SplitAlbums finds one album title by one artist spread across multiple album
 // entities: the same normalized (album-artist, album title) maps to more than one
-// album_id (its tracks split by folder or inconsistent tags).
+// album_id (its tracks split by folder or inconsistent tags), over live members only
+// (liveMembers).
 func (s *Store) SplitAlbums(ctx context.Context) ([]model.SplitAlbum, error) {
 	const q = `SELECT LOWER(t.album_artist) || char(31) || LOWER(t.album),
 			t.album_artist, t.album, al.pid, al.title, COUNT(*)
 		FROM track t
 		JOIN album al ON al.id = t.album_id
+		` + liveMembers + `
 		WHERE t.album <> '' AND t.album_artist <> '' AND t.album_id IS NOT NULL
 		  AND LOWER(t.album_artist) || char(31) || LOWER(t.album) IN (
-			SELECT LOWER(album_artist) || char(31) || LOWER(album) FROM track
-			WHERE album <> '' AND album_artist <> '' AND album_id IS NOT NULL
-			GROUP BY 1 HAVING COUNT(DISTINCT album_id) > 1)
+			SELECT LOWER(t.album_artist) || char(31) || LOWER(t.album) FROM track t ` + liveMembers + `
+			WHERE t.album <> '' AND t.album_artist <> '' AND t.album_id IS NOT NULL
+			GROUP BY 1 HAVING COUNT(DISTINCT t.album_id) > 1)
 		GROUP BY 1, al.id
-		ORDER BY 1, COUNT(*) DESC`
+		ORDER BY 1, COUNT(*) DESC, al.pid`
 	rows, err := s.read.QueryContext(ctx, q)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, "store.SplitAlbums", err)
@@ -164,22 +278,35 @@ func (s *Store) SplitAlbums(ctx context.Context) ([]model.SplitAlbum, error) {
 }
 
 // InconsistentAlbums finds album entities whose member tracks disagree on
-// metadata that is not part of the album identity key: the compilation flag and
-// disc total. Year and album-artist are part of album identity, so tracks that
-// disagree on them land in separate album rows, which SplitAlbums reports as a
-// split album. A mixed compilation flag or disc total within one album is a real
-// tagging inconsistency worth surfacing.
+// metadata that is not part of the album identity key: the compilation flag, the
+// disc total and the year, and track numbers two members claim on one disc.
+// Album-artist is part of album identity, so tracks that disagree on it land in
+// separate album rows, which SplitAlbums reports as a split album. A mixed compilation
+// flag, disc total or year within one album is a real tagging inconsistency worth
+// surfacing, a year only where most members share one (members that each carry their own
+// year are a compilation tagged with original years, which is deliberate); the album shows
+// its members' year meanwhile (model.AlbumYear). Repeated track numbers are most often
+// two same-titled releases sharing a folder, which the album key cannot tell apart once
+// the year keys nothing. Only live members are read (liveMembers).
 func (s *Store) InconsistentAlbums(ctx context.Context) ([]model.AlbumIssue, error) {
-	const q = `SELECT al.pid, al.title,
-			COUNT(DISTINCT t.compilation),
-			COUNT(DISTINCT NULLIF(t.disc_total,0))
+	const q = `SELECT pid, title, comps, discs, years, repeats FROM (
+		SELECT al.pid, al.title, al.sort_key,
+			COUNT(DISTINCT t.compilation) AS comps,
+			COUNT(DISTINCT NULLIF(t.disc_total,0)) AS discs,
+			CASE WHEN (SELECT MAX(n) > 1 AND 2 * MAX(n) >= SUM(n) FROM (
+					SELECT COUNT(*) AS n FROM track t ` + liveMembers + `
+					WHERE t.album_id = al.id AND t.year > 0 GROUP BY t.year))
+				THEN COUNT(DISTINCT NULLIF(t.year,0)) ELSE 0 END AS years,
+			(SELECT COUNT(*) FROM (SELECT 1 FROM track t ` + liveMembers + `
+				WHERE t.album_id = al.id AND t.track_no > 0
+				GROUP BY COALESCE(NULLIF(t.disc_no,0),1), t.track_no HAVING COUNT(*) > 1)) AS repeats
 		FROM album al
 		JOIN track t ON t.album_id = al.id
-		JOIN playable_item pi ON pi.id = t.item_id
+		` + liveMembers + `
 		WHERE pi.kind = 'track'
-		GROUP BY al.id
-		HAVING COUNT(DISTINCT t.compilation) > 1 OR COUNT(DISTINCT NULLIF(t.disc_total,0)) > 1
-		ORDER BY al.sort_key`
+		GROUP BY al.id)
+		WHERE comps > 1 OR discs > 1 OR years > 1 OR repeats > 0
+		ORDER BY sort_key`
 	rows, err := s.read.QueryContext(ctx, q)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, "store.InconsistentAlbums", err)
@@ -188,8 +315,8 @@ func (s *Store) InconsistentAlbums(ctx context.Context) ([]model.AlbumIssue, err
 	var out []model.AlbumIssue
 	for rows.Next() {
 		var pid, title string
-		var comps, discs int
-		if err := rows.Scan(&pid, &title, &comps, &discs); err != nil {
+		var comps, discs, years, repeats int
+		if err := rows.Scan(&pid, &title, &comps, &discs, &years, &repeats); err != nil {
 			return nil, waxerr.Wrap(waxerr.CodeIO, "store.InconsistentAlbums", err)
 		}
 		var parts []string
@@ -199,8 +326,14 @@ func (s *Store) InconsistentAlbums(ctx context.Context) ([]model.AlbumIssue, err
 		if discs > 1 {
 			parts = append(parts, plural(discs, "distinct disc total"))
 		}
+		if years > 1 {
+			parts = append(parts, plural(years, "distinct year"))
+		}
+		if repeats > 0 {
+			parts = append(parts, plural(repeats, "repeated track number"))
+		}
 		out = append(out, model.AlbumIssue{
-			AlbumPID: model.PID(pid), Title: title, Problem: strings.Join(parts, ", "),
+			AlbumPID: model.PID(pid), Title: title, Problem: strings.Join(parts, ", "), RepeatedPositions: repeats,
 		})
 	}
 	return out, rows.Err()
@@ -398,6 +531,7 @@ func (s *Store) DerivedDrift(ctx context.Context) (model.DerivedDrift, error) {
 		SortKeyDrift:            rep.SortKeyDrift,
 		BookDurationDrift:       rep.BookDurationDrift,
 		BookISBNKeyDrift:        rep.BookISBNKeyDrift,
+		AlbumYearDrift:          rep.AlbumYearDrift,
 	}, nil
 }
 

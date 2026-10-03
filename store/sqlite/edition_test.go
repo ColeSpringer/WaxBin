@@ -98,9 +98,8 @@ func TestResolveAlbumStoresAndTopsUpEditionColumns(t *testing.T) {
 	}
 }
 
-// TestResolveAlbumTopsUpYear: an album keyed by its release id ignores the year, so a
-// year-less first file used to leave album.year NULL for good. A later member's year now
-// fills it, and a full column keeps against the next member's different one.
+// TestResolveAlbumTopsUpYear: a year-less first file leaves album.year NULL, and from then
+// on the column is its members' year (model.AlbumYear), whatever the first file said.
 func TestResolveAlbumTopsUpYear(t *testing.T) {
 	st, dbPath, lib := openStoreAt(t)
 	db := roConn(t, dbPath)
@@ -122,8 +121,12 @@ func TestResolveAlbumTopsUpYear(t *testing.T) {
 		t.Errorf("typeof(album.year) = %q, want integer", got)
 	}
 	editionTrack(t, st, lib.ID, "ess-y3", "Year", 1, model.Track{MBReleaseID: rel, Year: 1980})
+	if got := albumYear(); got != "1980" {
+		t.Errorf("album.year after a member with another year = %q, want the later 1980 of two that disagree", got)
+	}
+	editionTrack(t, st, lib.ID, "ess-y4", "Year", 1, model.Track{MBReleaseID: rel, Year: 1975})
 	if got := albumYear(); got != "1975" {
-		t.Errorf("album.year after a member with another year = %q, want the first fill kept", got)
+		t.Errorf("album.year after a second 1975 member = %q, want 1975, two of the three", got)
 	}
 	if n := scalarQueryInt(t, db, "SELECT COUNT(*) FROM album WHERE title='Year'"); n != 1 {
 		t.Errorf("albums = %d, want the one the release id held together", n)

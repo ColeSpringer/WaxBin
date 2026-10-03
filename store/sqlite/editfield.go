@@ -30,11 +30,12 @@ var bookEditFields = map[string]bool{
 }
 
 // editEntityFields are the track fields whose edit re-resolves normalized entities
-// and their maintained rollups. genre drives item_genre + the genre rollup, and year
-// participates in the album identity key (AlbumKey), so both route through the entity
-// path alongside artist/album_artist/album.
+// and their maintained rollups. genre drives item_genre + the genre rollup, so it
+// routes through the entity path alongside artist/album_artist/album. A year edit
+// re-resolves nothing, since the year keys no entity; it only marks the album, whose
+// year follows its members.
 var editEntityFields = map[string]bool{
-	"artist": true, "album_artist": true, "album": true, "genre": true, "year": true,
+	"artist": true, "album_artist": true, "album": true, "genre": true,
 }
 
 // editKeyFields are the track fields that participate in the album-chain identity keys
@@ -42,7 +43,7 @@ var editEntityFields = map[string]bool{
 // and makes the item a rename pre-pass participant. artist is present because a blank
 // album_artist anchors the release group on the first credited artist.
 var editKeyFields = map[string]bool{
-	"artist": true, "album_artist": true, "album": true, "year": true,
+	"artist": true, "album_artist": true, "album": true,
 }
 
 // bookKeyFields are the book fields whose edit can move the item onto another author
@@ -533,7 +534,7 @@ func editTrackFieldsTx(ctx context.Context, tx *sql.Tx, log logger, itemID int64
 	}
 	origComposerSort := tr.ComposerSort
 
-	var touchTitle, touchTrack, touchEntities, editedComposer, editedComposerSort bool
+	var touchTitle, touchTrack, touchEntities, editedComposer, editedComposerSort, editedYear bool
 	newTitle := title
 	for _, f := range fields {
 		if f == "title" {
@@ -547,6 +548,7 @@ func editTrackFieldsTx(ctx context.Context, tx *sql.Tx, log logger, itemID int64
 		touchTrack = true
 		editedComposer = editedComposer || f == "composer"
 		editedComposerSort = editedComposerSort || f == "composer_sort"
+		editedYear = editedYear || f == "year"
 		if editEntityFields[f] {
 			touchEntities = true
 		}
@@ -582,6 +584,11 @@ func editTrackFieldsTx(ctx context.Context, tx *sql.Tx, log logger, itemID int64
 	}
 	if touchTrack {
 		if err := upsertTrack(ctx, tx, itemID, tr); err != nil {
+			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+	}
+	if editedYear {
+		if err := affected.collectAlbumOf(ctx, tx, itemID); err != nil {
 			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 	}

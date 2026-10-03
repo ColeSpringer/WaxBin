@@ -11,10 +11,10 @@ import (
 )
 
 // This file holds the album re-key reconciliation the scan path needs. A heuristic
-// album key embeds the folder, the year, and the release group above it, so moving a
-// release on disk or retagging its title, artist, or year keys every member onto a fresh
-// album row while the old row drains to zero tracks and ghosts with its pid, curation,
-// art, and stars until a manual GC destroys it. A scan resolves one file at a time and
+// album key embeds the folder and the release group above it, so moving a release on
+// disk or retagging its title or artist keys every member onto a fresh album row while
+// the old row drains to zero tracks and ghosts with its pid, curation, art, and stars
+// until a manual GC destroys it. A scan resolves one file at a time and
 // has no batch to check all-members against, the way the edit-path rename pre-pass does,
 // so the detection lives at the write that re-keys: reconcileAlbumRekeyTx runs inside the
 // same transaction, just after the track's album FK moves, and does its work on the file
@@ -102,7 +102,6 @@ type rekeyAlbum struct {
 	key   string
 	title string
 	mbid  sql.NullString
-	year  sql.NullInt64
 	rgID  sql.NullInt64
 }
 
@@ -216,8 +215,8 @@ func reconcileAlbumRekeyTx(ctx context.Context, tx *sql.Tx, priorAlbumID, newAlb
 		rgID = dest.rgID
 	}
 	if _, err := tx.ExecContext(ctx,
-		"UPDATE album SET match_key=?, title=?, year=?, release_group_id=? WHERE id=?",
-		dest.key, dest.title, dest.year, rgID, prior.id); err != nil {
+		"UPDATE album SET match_key=?, title=?, release_group_id=? WHERE id=?",
+		dest.key, dest.title, rgID, prior.id); err != nil {
 		return err
 	}
 	if err := refreshEntitySortKeyTx(ctx, tx, model.MergeAlbum, "album", prior.id); err != nil {
@@ -424,8 +423,8 @@ func albumKeyFolder(key string) string {
 func loadRekeyAlbumTx(ctx context.Context, tx *sql.Tx, albumID int64) (*rekeyAlbum, error) {
 	a := &rekeyAlbum{id: albumID}
 	err := tx.QueryRowContext(ctx,
-		"SELECT pid, match_key, title, mbid, year, release_group_id FROM album WHERE id=?", albumID).
-		Scan(&a.pid, &a.key, &a.title, &a.mbid, &a.year, &a.rgID)
+		"SELECT pid, match_key, title, mbid, release_group_id FROM album WHERE id=?", albumID).
+		Scan(&a.pid, &a.key, &a.title, &a.mbid, &a.rgID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}

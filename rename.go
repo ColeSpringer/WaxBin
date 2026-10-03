@@ -49,8 +49,9 @@ func (o RenameOptions) Attribution() model.Attribution {
 // survive. The report says which branch it took, renamed, merged or refreshed, and names
 // the survivor when a taken key folded the entity into an incumbent.
 //
-// Renamable fields are the ones that key the rung: album, album_artist and year on an
-// album, album and album_artist on a release group, and name on an artist. The artist
+// Renamable fields are the ones that key the rung: album and album_artist on an album
+// or a release group, and name on an artist. A year keys neither, so it is refused at
+// both; edit the members' years instead, and the album's year follows them. The artist
 // rung takes one field because the item-level field it writes differs per reference kind,
 // which it works out itself; each referring credit list keeps its other names.
 //

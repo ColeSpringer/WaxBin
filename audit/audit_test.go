@@ -125,6 +125,102 @@ func TestAuditDuplicateAndDedup(t *testing.T) {
 	}
 }
 
+// TestAuditAlbumNameDuplicateSaysToOrganize: a pair of albums found by name is split by
+// folder, which a merge alone does not outlast, so the finding says how to keep one; and
+// a pair of one name can be two releases, so the advice is conditional.
+func TestAuditAlbumNameDuplicateSaysToOrganize(t *testing.T) {
+	st := &fakeStore{dupAlbums: []model.DuplicateSet{{
+		EntityType: model.MergeAlbum, Reason: model.ReasonSameAlbumName,
+		Members: []model.DuplicateMember{{PID: "al1", Name: "Hits", TrackCount: 2}, {PID: "al2", Name: "Hits", TrackCount: 1}},
+	}}}
+	rep, err := New(st, nil, nil, nil).Run(context.Background(), Config{Only: []model.AuditCheck{model.CheckDuplicateAlbum}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fs := findingsFor(rep, model.CheckDuplicateAlbum)
+	want := "if they are one release, tag their files alike (album, album artist, any MusicBrainz ids) and keep them in one folder, " +
+		"which a scan then reads as one album; `waxbin merge` alone joins them only until a scan or edit re-resolves them"
+	if len(fs) != 1 || !strings.Contains(fs[0].Message, want) {
+		t.Fatalf("findings = %+v, want one saying %q", fs, want)
+	}
+}
+
+// TestAuditSplitAlbumSaysToMoveTheFiles: a split album is most often split by folder, so
+// its advice matches the name check's.
+func TestAuditSplitAlbumSaysToMoveTheFiles(t *testing.T) {
+	st := &fakeStore{splits: []model.SplitAlbum{{Artist: "A", Title: "Hits",
+		Albums: []model.DuplicateMember{{PID: "al1", Name: "Hits", TrackCount: 2}, {PID: "al2", Name: "Hits", TrackCount: 1}}}}}
+	rep, err := New(st, nil, nil, nil).Run(context.Background(), Config{Only: []model.AuditCheck{model.CheckSplitAlbum}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fs := findingsFor(rep, model.CheckSplitAlbum)
+	want := "if they are one release, tag their files alike (album, album artist, any MusicBrainz ids) and keep them in one folder, " +
+		"which a scan then reads as one album; `waxbin merge album` alone joins them only until a scan or edit re-resolves them"
+	if len(fs) != 1 || !strings.Contains(fs[0].Message, want) {
+		t.Fatalf("findings = %+v, want one saying %q", fs, want)
+	}
+}
+
+// TestAuditRepeatedTrackNumbersSayHowToSplit: repeated track numbers come from two releases
+// sharing an album, one release held twice, or untagged discs, and the fix differs for
+// each, so the finding names all three; an album with only a stray year says nothing of
+// the kind.
+func TestAuditRepeatedTrackNumbersSayHowToSplit(t *testing.T) {
+	st := &fakeStore{inconsist: []model.AlbumIssue{
+		{AlbumPID: "al1", Title: "Weezer", Problem: "2 distinct years, 10 repeated track numbers", RepeatedPositions: 10},
+		{AlbumPID: "al2", Title: "Malibu", Problem: "2 distinct years"},
+	}}
+	rep, err := New(st, nil, nil, nil).Run(context.Background(), Config{Only: []model.AuditCheck{model.CheckInconsistentMeta}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fs := findingsFor(rep, model.CheckInconsistentMeta)
+	if len(fs) != 2 {
+		t.Fatalf("findings = %+v, want two", fs)
+	}
+	want := "; repeated track numbers mean two releases share the album (give them distinct album titles or " +
+		"MusicBrainz release ids), one release is here twice (keep one copy), or its discs carry no disc numbers (tag them)"
+	for _, f := range fs {
+		advised := strings.Contains(f.Message, want)
+		if wantAdvice := f.Entities[0] == "al1"; advised != wantAdvice {
+			t.Errorf("finding %q carries the causes = %t, want %t", f.Message, advised, wantAdvice)
+		}
+	}
+}
+
+// TestAuditSplitAlbumDefersToADuplicateFinding: a split the duplicate check already
+// reports names the same merge, so with both checks run it is reported once, as the
+// duplicate; a split no duplicate covers still reports, and so does the split check run on
+// its own.
+func TestAuditSplitAlbumDefersToADuplicateFinding(t *testing.T) {
+	member := func(pid model.PID, n int) model.DuplicateMember {
+		return model.DuplicateMember{PID: pid, Name: "Hits", TrackCount: n}
+	}
+	st := &fakeStore{
+		dupAlbums: []model.DuplicateSet{{EntityType: model.MergeAlbum, Reason: model.ReasonSameAlbumName,
+			Members: []model.DuplicateMember{member("al1", 2), member("al2", 1)}}},
+		splits: []model.SplitAlbum{
+			{Artist: "A", Title: "Hits", Albums: []model.DuplicateMember{member("al1", 2), member("al2", 1)}},
+			{Artist: "B", Title: "Live", Albums: []model.DuplicateMember{member("al3", 2), member("al4", 1)}},
+		},
+	}
+	both, err := New(st, nil, nil, nil).Run(context.Background(), Config{Only: []model.AuditCheck{model.CheckDuplicateAlbum, model.CheckSplitAlbum}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dups, splits := findingsFor(both, model.CheckDuplicateAlbum), findingsFor(both, model.CheckSplitAlbum); len(dups) != 1 || len(splits) != 1 || splits[0].Entities[0] != "al3" {
+		t.Errorf("findings = %+v, want the duplicate for Hits and the split for Live only", both.Findings)
+	}
+	alone, err := New(st, nil, nil, nil).Run(context.Background(), Config{Only: []model.AuditCheck{model.CheckSplitAlbum}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if splits := findingsFor(alone, model.CheckSplitAlbum); len(splits) != 2 {
+		t.Errorf("split check alone = %+v, want both splits", alone.Findings)
+	}
+}
+
 func TestAuditDerivedDriftIsError(t *testing.T) {
 	st := &fakeStore{drift: model.DerivedDrift{ArtistRollupDrift: 3}}
 	rep, err := New(st, nil, nil, nil).Run(context.Background(), Config{Only: []model.AuditCheck{model.CheckDerivedData}})
@@ -133,6 +229,19 @@ func TestAuditDerivedDriftIsError(t *testing.T) {
 	}
 	if rep.Errors() != 1 {
 		t.Fatalf("drift should be one error finding, got errors=%d findings=%+v", rep.Errors(), rep.Findings)
+	}
+}
+
+// TestAuditAlbumYearDriftIsError: an album year that is not its members' most common
+// year is derived-data drift like a stale rollup, named in the finding.
+func TestAuditAlbumYearDriftIsError(t *testing.T) {
+	st := &fakeStore{drift: model.DerivedDrift{AlbumYearDrift: 2}}
+	rep, err := New(st, nil, nil, nil).Run(context.Background(), Config{Only: []model.AuditCheck{model.CheckDerivedData}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Errors() != 1 || !strings.Contains(rep.Findings[0].Message, "2 album-year") {
+		t.Fatalf("findings = %+v, want one error naming 2 album-year drift", rep.Findings)
 	}
 }
 

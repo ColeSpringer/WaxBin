@@ -27,11 +27,11 @@ import (
 // two cannot drift.
 
 // renameKeyFields is the field vocabulary each rung owns, which is the keying fields of
-// that rung and nothing else. year is an album-key segment but not a release-group one
-// (a group key is anchor and title), so it is refused one rung up rather than silently
-// applied to the members and ignored by the key.
+// that rung and nothing else. An album and its release group key on the same two fields
+// (the album adds only its folder), so a year is refused at both: it keys neither, and an
+// edit of the members' years is all it ever was.
 var renameKeyFields = map[model.MergeEntity]map[string]bool{
-	model.MergeAlbum:        {"album": true, "album_artist": true, "year": true},
+	model.MergeAlbum:        {"album": true, "album_artist": true},
 	model.MergeReleaseGroup: {"album": true, "album_artist": true},
 	// The artist rung takes one field, because the item-level field a rename writes
 	// differs per reference kind: a track credits the artist through artist or
@@ -85,9 +85,8 @@ func (s *Store) RenameEntity(ctx context.Context, entityType model.MergeEntity, 
 		}
 		// A name-bearing key segment cannot go empty. The resulting key would be empty
 		// too, which un-groups every member and ghosts the entity, and that is a clear
-		// rather than a rename: `waxbin entity edit` owns clearing. year may go empty,
-		// which only drops a segment from an album key.
-		if f != "year" && strings.TrimSpace(v) == "" {
+		// rather than a rename: `waxbin entity edit` owns clearing.
+		if strings.TrimSpace(v) == "" {
 			return nil, waxerr.New(waxerr.CodeInvalid, op,
 				"cannot rename "+f+" to nothing: that un-groups every member rather than moving the entity")
 		}

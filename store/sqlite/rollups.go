@@ -14,29 +14,32 @@ import (
 // base tables, instead of applying deltas, handles entities dropping to zero
 // tracks. A full-catalog rebuild remains available for repair and verification.
 
-// affectedRollups accumulates the entity ids whose rollups a write must refresh.
+// affectedRollups accumulates the entity ids whose rollups a write must refresh, and
+// the albums whose maintained year it must (refreshAlbumYearsTx).
 type affectedRollups struct {
 	artists map[int64]bool
 	rgs     map[int64]bool
 	genres  map[int64]bool
+	albums  map[int64]bool
 }
 
 func newAffectedRollups() *affectedRollups {
-	return &affectedRollups{artists: map[int64]bool{}, rgs: map[int64]bool{}, genres: map[int64]bool{}}
+	return &affectedRollups{artists: map[int64]bool{}, rgs: map[int64]bool{}, genres: map[int64]bool{},
+		albums: map[int64]bool{}}
 }
 
 func (a *affectedRollups) empty() bool {
-	return len(a.artists) == 0 && len(a.rgs) == 0 && len(a.genres) == 0
+	return len(a.artists) == 0 && len(a.rgs) == 0 && len(a.genres) == 0 && len(a.albums) == 0
 }
 
-// collect records the item's current artist, album artist, release group, and
+// collect records the item's current artist, album artist, album, release group, and
 // genres as affected. Call it before and after relinks, and before orphan
 // deletes, so every entity that gains or loses the track is refreshed.
 func (a *affectedRollups) collect(ctx context.Context, tx *sql.Tx, itemID int64) error {
-	var artistID, albumArtistID, rgID sql.NullInt64
-	err := tx.QueryRowContext(ctx, `SELECT t.artist_id, t.album_artist_id, al.release_group_id
+	var artistID, albumArtistID, albumID, rgID sql.NullInt64
+	err := tx.QueryRowContext(ctx, `SELECT t.artist_id, t.album_artist_id, t.album_id, al.release_group_id
 		FROM track t LEFT JOIN album al ON al.id = t.album_id WHERE t.item_id = ?`, itemID).
-		Scan(&artistID, &albumArtistID, &rgID)
+		Scan(&artistID, &albumArtistID, &albumID, &rgID)
 	if err != nil && err != sql.ErrNoRows {
 		return err
 	}
@@ -45,6 +48,9 @@ func (a *affectedRollups) collect(ctx context.Context, tx *sql.Tx, itemID int64)
 	}
 	if albumArtistID.Valid {
 		a.artists[albumArtistID.Int64] = true
+	}
+	if albumID.Valid {
+		a.albums[albumID.Int64] = true
 	}
 	if rgID.Valid {
 		a.rgs[rgID.Int64] = true
@@ -64,10 +70,24 @@ func (a *affectedRollups) collect(ctx context.Context, tx *sql.Tx, itemID int64)
 	return rows.Err()
 }
 
+// collectAlbumOf records the album the item's track sits on as affected, for a write
+// that moves the track's year and nothing the other rollups count.
+func (a *affectedRollups) collectAlbumOf(ctx context.Context, tx *sql.Tx, itemID int64) error {
+	var albumID sql.NullInt64
+	err := tx.QueryRowContext(ctx, "SELECT album_id FROM track WHERE item_id = ?", itemID).Scan(&albumID)
+	if err != nil && err != sql.ErrNoRows {
+		return err
+	}
+	if albumID.Valid {
+		a.albums[albumID.Int64] = true
+	}
+	return nil
+}
+
 // maintainRollupsTx recomputes rollups for the affected entities inside the
-// caller's transaction. Each row is deleted and reinserted from a base-table
-// aggregation scoped to its id, so touched entities with zero tracks still get
-// the zero row expected by the consistency check.
+// caller's transaction, and the affected albums' years. Each row is deleted and
+// reinserted from a base-table aggregation scoped to its id, so touched entities with
+// zero tracks still get the zero row expected by the consistency check.
 func maintainRollupsTx(ctx context.Context, tx *sql.Tx, aff *affectedRollups, now int64) error {
 	if err := refreshRollupSubset(ctx, tx, ids(aff.artists), "artist_rollup", "artist_id", artistRollupSelect, now); err != nil {
 		return err
@@ -75,7 +95,10 @@ func maintainRollupsTx(ctx context.Context, tx *sql.Tx, aff *affectedRollups, no
 	if err := refreshRollupSubset(ctx, tx, ids(aff.rgs), "release_group_rollup", "release_group_id", releaseGroupRollupSelect, now); err != nil {
 		return err
 	}
-	return refreshRollupSubset(ctx, tx, ids(aff.genres), "genre_rollup", "genre_id", genreRollupSelect, now)
+	if err := refreshRollupSubset(ctx, tx, ids(aff.genres), "genre_rollup", "genre_id", genreRollupSelect, now); err != nil {
+		return err
+	}
+	return refreshAlbumYearsTx(ctx, tx, ids(aff.albums))
 }
 
 // refreshRollupSubset deletes and recomputes the rollup rows for a set of entity
@@ -100,18 +123,21 @@ func refreshRollupSubset(ctx context.Context, tx *sql.Tx, idList []int64, table,
 }
 
 // RefreshRollups recomputes every rollup from the base tables in one transaction,
-// plus each book's denormalized total duration. Per-write maintenance keeps both
-// current during normal operation; this whole-catalog rebuild repairs drift reported
-// by `db verify`. The book total is not a rollup table, but it is the same kind of
-// maintained derived sum, it is on the same drift report, and this is the verb
-// `db verify --fix` runs, so repairing it anywhere else would leave the fix
-// unreachable.
+// plus each book's denormalized total duration and each album's year. Per-write
+// maintenance keeps them current during normal operation; this whole-catalog rebuild
+// repairs drift reported by `db verify`. The book total and the album year are not
+// rollup tables, but they are the same kind of maintained derived value, they are on
+// the same drift report, and this is the verb `db verify --fix` runs, so repairing
+// them anywhere else would leave the fix unreachable.
 func (s *Store) RefreshRollups(ctx context.Context) error {
 	return s.writeTx(ctx, func(tx *sql.Tx) error {
 		if err := rebuildRollups(ctx, tx, nowNS()); err != nil {
 			return err
 		}
-		return refreshAllBookDurations(ctx, tx)
+		if err := refreshAllBookDurations(ctx, tx); err != nil {
+			return err
+		}
+		return refreshAllAlbumYearsTx(ctx, tx)
 	})
 }
 

@@ -12,6 +12,7 @@ package audit
 import (
 	"context"
 	"log/slog"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -148,7 +149,7 @@ func (a *Auditor) Run(ctx context.Context, cfg Config) (*Report, error) {
 		}
 	}
 	if a.runs(cfg, model.CheckSplitAlbum) {
-		if err := a.checkSplitAlbums(ctx, add); err != nil {
+		if err := a.checkSplitAlbums(ctx, albumsOffered(rep.Findings), add); err != nil {
 			return nil, err
 		}
 	}
@@ -292,10 +293,14 @@ func (a *Auditor) checkDuplicates(ctx context.Context, fetch func(context.Contex
 		for _, m := range set.Members {
 			names = append(names, m.Name)
 		}
+		fix := "; merge with `waxbin merge`"
+		if set.Reason == model.ReasonSameAlbumName {
+			fix = oneRelease("waxbin merge")
+		}
 		add(model.AuditFinding{
 			Check:     check,
 			Severity:  model.SeverityWarn,
-			Message:   "duplicate " + string(set.EntityType) + " (" + set.Reason + "): " + strings.Join(names, " / ") + "; merge with `waxbin merge`",
+			Message:   "duplicate " + string(set.EntityType) + " (" + set.Reason + "): " + strings.Join(names, " / ") + fix,
 			Entities:  pids, // survivor first (store orders by track count)
 			MergeType: set.EntityType,
 		})
@@ -303,20 +308,51 @@ func (a *Auditor) checkDuplicates(ctx context.Context, fetch func(context.Contex
 	return nil
 }
 
-func (a *Auditor) checkSplitAlbums(ctx context.Context, add func(model.AuditFinding)) error {
+// oneRelease is the advice for albums paired by name, by a duplicate or a split finding.
+// One name can be two releases, and what keeps one release's albums apart is its files, a
+// folder or tags such as a MusicBrainz id, so a merge lasts only until a scan or an edit
+// re-resolves the members from them.
+func oneRelease(merge string) string {
+	return "; if they are one release, tag their files alike (album, album artist, any MusicBrainz ids) " +
+		"and keep them in one folder, which a scan then reads as one album; `" + merge +
+		"` alone joins them only until a scan or edit re-resolves them"
+}
+
+// albumsOffered names the albums a duplicate_album finding already offers to merge.
+func albumsOffered(fs []model.AuditFinding) map[model.PID]bool {
+	out := map[model.PID]bool{}
+	for _, f := range fs {
+		if f.Check == model.CheckDuplicateAlbum {
+			for _, pid := range f.Entities {
+				out[pid] = true
+			}
+		}
+	}
+	return out
+}
+
+// checkSplitAlbums reports albums one title by one artist is split across. A split
+// naming an album a duplicate_album finding already offers is left to that finding: the
+// two would offer one merge twice, and acting on either would leave the other naming an
+// album that is gone.
+func (a *Auditor) checkSplitAlbums(ctx context.Context, offered map[model.PID]bool, add func(model.AuditFinding)) error {
 	splits, err := a.store.SplitAlbums(ctx)
 	if err != nil {
 		return err
 	}
 	for _, s := range splits {
+		if slices.ContainsFunc(s.Albums, func(al model.DuplicateMember) bool { return offered[al.PID] }) {
+			continue
+		}
 		pids := make([]model.PID, 0, len(s.Albums))
 		for _, al := range s.Albums {
 			pids = append(pids, al.PID)
 		}
 		add(model.AuditFinding{
-			Check:     model.CheckSplitAlbum,
-			Severity:  model.SeverityWarn,
-			Message:   "album \"" + s.Title + "\" by " + s.Artist + " is split across " + strconv.Itoa(len(s.Albums)) + " album entities; merge with `waxbin merge album`",
+			Check:    model.CheckSplitAlbum,
+			Severity: model.SeverityWarn,
+			Message: "album \"" + s.Title + "\" by " + s.Artist + " is split across " + strconv.Itoa(len(s.Albums)) +
+				" album entities" + oneRelease("waxbin merge album"),
 			Entities:  pids,
 			MergeType: model.MergeAlbum,
 		})
@@ -330,10 +366,17 @@ func (a *Auditor) checkInconsistentAlbums(ctx context.Context, add func(model.Au
 		return err
 	}
 	for _, is := range issues {
+		msg := "album \"" + is.Title + "\": " + is.Problem
+		if is.RepeatedPositions > 0 {
+			// Two releases are told apart by their tags, not a folder, since organize
+			// files an album's members into one.
+			msg += "; repeated track numbers mean two releases share the album (give them distinct album titles or " +
+				"MusicBrainz release ids), one release is here twice (keep one copy), or its discs carry no disc numbers (tag them)"
+		}
 		add(model.AuditFinding{
 			Check:    model.CheckInconsistentMeta,
 			Severity: model.SeverityInfo,
-			Message:  "album \"" + is.Title + "\": " + is.Problem,
+			Message:  msg,
 			Entities: []model.PID{is.AlbumPID},
 		})
 	}
@@ -542,6 +585,7 @@ func driftParts(d model.DerivedDrift) []string {
 	addPart(d.SortKeyDrift, "sort-key")
 	addPart(d.BookDurationDrift, "book-duration")
 	addPart(d.BookISBNKeyDrift, "book-isbn-key")
+	addPart(d.AlbumYearDrift, "album-year")
 	return p
 }
 

@@ -209,9 +209,13 @@ func TestEditGenreUpdatesLinksAndVerifyClean(t *testing.T) {
 	}
 }
 
-func TestEditYearReResolvesAlbum(t *testing.T) {
+// TestEditYearKeepsTheAlbum: the year keys no album, so editing it leaves the item on
+// the album it was on, under the key that album already had.
+func TestEditYearKeepsTheAlbum(t *testing.T) {
 	st, pid := editFixture(t)
 	ctx := context.Background()
+	albumID := scalarInt(t, st, "SELECT id FROM album")
+	key0 := scalarStr(t, st, "SELECT match_key FROM album")
 
 	if err := st.EditItemField(ctx, pid, "year", "1999", model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
 		t.Fatalf("edit year: %v", err)
@@ -219,6 +223,18 @@ func TestEditYearReResolvesAlbum(t *testing.T) {
 	v, _ := st.ItemByPID(ctx, pid)
 	if v.Year != 1999 {
 		t.Fatalf("year = %d, want 1999", v.Year)
+	}
+	if n := countRows(t, st, "album"); n != 1 {
+		t.Fatalf("albums = %d, want the item kept on its album", n)
+	}
+	if id := memberAlbumID(t, st, pid); id != albumID {
+		t.Errorf("item album = %d, want kept %d", id, albumID)
+	}
+	if k := scalarStr(t, st, "SELECT match_key FROM album"); k != key0 {
+		t.Errorf("album match_key = %q, want unchanged %q", k, key0)
+	}
+	if y := scalarInt(t, st, "SELECT year FROM album"); y != 1999 {
+		t.Errorf("album year = %d, want its one member's 1999", y)
 	}
 	rep, err := st.VerifyDerived(ctx)
 	if err != nil || !rep.Consistent() {
@@ -589,8 +605,8 @@ func TestEditKeepsMBIDKeyedAlbum(t *testing.T) {
 }
 
 // TestEditYearUnderMBIDReleaseGroup is the heuristic-album sibling: with only the
-// release-group mbid set, a partial-member year edit re-keys that member's album (the
-// year is part of the heuristic album key) but stays under the same mbid-keyed RG row.
+// release-group mbid set, a partial-member year edit leaves that member on its album
+// (the year keys nothing), under the same mbid-keyed RG row.
 func TestEditYearUnderMBIDReleaseGroup(t *testing.T) {
 	st, lib := entityFixture(t)
 	ctx := context.Background()
@@ -606,15 +622,25 @@ func TestEditYearUnderMBIDReleaseGroup(t *testing.T) {
 		t.Fatalf("rg rows = %d, want 1", n)
 	}
 	rgID := scalarInt(t, st, "SELECT id FROM release_group")
+	albumID := scalarInt(t, st, "SELECT id FROM album")
 
 	pid1 := model.PID(scalarStr(t, st, "SELECT pid FROM playable_item WHERE title='T1'"))
 	if err := st.EditItemField(ctx, pid1, "year", "1999",
 		model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
 		t.Fatalf("edit year: %v", err)
 	}
-	// The member re-keyed onto a different album row, still under the same RG.
+	// The member stays on its album, under the same RG.
 	if n := scalarInt(t, st, "SELECT COUNT(*) FROM release_group"); n != 1 {
 		t.Fatalf("rg rows after year edit = %d, want 1", n)
+	}
+	if n := countRows(t, st, "album"); n != 1 {
+		t.Fatalf("album rows after year edit = %d, want 1", n)
+	}
+	if id := memberAlbumID(t, st, pid1); id != albumID {
+		t.Fatalf("member's album = %d, want kept %d", id, albumID)
+	}
+	if y := scalarInt(t, st, "SELECT year FROM album"); y != 2001 {
+		t.Errorf("album year = %d, want 2001: its two members disagree, so the later", y)
 	}
 	if id := scalarInt(t, st, `SELECT al.release_group_id FROM track t
 		JOIN album al ON al.id = t.album_id
@@ -760,8 +786,8 @@ func TestEditArtistSameValueKeepsRawAnchor(t *testing.T) {
 //
 // The rule: a kind's editable scalar fields, minus its own identity keys (a per-member
 // write forks the entity), the title, genre (CapGenres owns it), the recording mbid
-// (identity), the positions and flags a file's tags settle, the derived sorts, and
-// comment.
+// (identity), the positions and flags a file's tags settle, the derived sorts, comment,
+// and a track's year, which the album rung fills.
 func TestEnrichFillFieldsFollowTheEditVocabulary(t *testing.T) {
 	excluded := map[string]bool{
 		"title": true, "genre": true, "mbid": true,
@@ -769,16 +795,17 @@ func TestEnrichFillFieldsFollowTheEditVocabulary(t *testing.T) {
 		"composer_sort": true, "author_sort": true, "comment": true,
 	}
 	cases := []struct {
-		kind model.Kind
-		keys map[string]bool
+		kind  model.Kind
+		keys  map[string]bool
+		rungs map[string]bool // fields another rung of the walk fills
 	}{
-		{model.KindTrack, editKeyFields},
-		{model.KindBook, bookKeyFields},
+		{model.KindTrack, editKeyFields, model.AlbumFillFields()},
+		{model.KindBook, bookKeyFields, nil},
 	}
 	for _, c := range cases {
 		want := map[string]bool{}
 		for f := range editableFieldsForKind(string(c.kind)) {
-			if !excluded[f] && !c.keys[f] {
+			if !excluded[f] && !c.keys[f] && !c.rungs[f] {
 				want[f] = true
 			}
 		}

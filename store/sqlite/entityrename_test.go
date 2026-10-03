@@ -150,6 +150,11 @@ func TestRenameEntityRefusesSilentSplits(t *testing.T) {
 		map[string]string{"year": "2001"}, model.Attribution{}, model.LockUnchanged, false); !waxerr.Is(err, waxerr.CodeInvalid) {
 		t.Errorf("year at the group rung = %v, want CodeInvalid", err)
 	}
+	// The year keys no album either, so the album rung refuses it too.
+	if _, err := st.RenameEntity(ctx, model.MergeAlbum, albumPID,
+		map[string]string{"year": "2001"}, model.Attribution{}, model.LockUnchanged, false); !waxerr.Is(err, waxerr.CodeInvalid) {
+		t.Errorf("year at the album rung = %v, want CodeInvalid", err)
+	}
 
 	// A locked keying field on one member is a refusal, never the skip that would break
 	// the coverage count and split the album.

@@ -78,8 +78,8 @@ func provenanceRow(t *testing.T, db *sql.DB, pid model.PID, field string) (strin
 // TestTrackFieldsFillsEmptyScalars is the ask: a CapFields provider's answer for a
 // recording lands on that one track, fill-when-empty, stamped with its name. The keys
 // outside the track fill set are dropped rather than applied, so a provider returning
-// everything it knows cannot fork the album off its year or write a genre the genre pass
-// owns.
+// everything it knows cannot give a track a year its album rung owns or write a genre
+// the genre pass owns.
 func TestTrackFieldsFillsEmptyScalars(t *testing.T) {
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
@@ -96,7 +96,7 @@ func TestTrackFieldsFillsEmptyScalars(t *testing.T) {
 			reqs = append(reqs, req)
 			return &enrich.Candidate{Fields: map[string]string{
 				"bpm": "128", "isrc": "gbaya7500098",
-				// Ignored: year would fork the album, artist is a chain key, genre is
+				// Ignored: year is the album rung's, artist is a chain key, genre is
 				// CapGenres' to decide.
 				"year": "1975", "artist": "Somebody Else", "genre": "Prog",
 			}}, nil
@@ -134,6 +134,9 @@ func TestTrackFieldsFillsEmptyScalars(t *testing.T) {
 	}
 	// The ignored keys landed nowhere: the year is still the scan's and the album is
 	// still one row.
+	if n := scalarInt(t, db, "SELECT COUNT(*) FROM track WHERE year IS NOT NULL"); n != 0 {
+		t.Errorf("tracks carrying a year = %d, want the scan's none", n)
+	}
 	if n := scalarInt(t, db, "SELECT COUNT(*) FROM album"); n != 1 {
 		t.Errorf("albums = %d, want the one the scan made", n)
 	}
@@ -390,9 +393,8 @@ func TestFieldsScopedToOneItem(t *testing.T) {
 	}
 }
 
-// The album rung of the fields walk. label is an album column; year participates in the
-// album identity key, so it goes through the uniform whole-album edit and is vetoed
-// unless every member agrees.
+// The album rung of the fields walk. label is an album column; year lands on the album
+// and on each member that has none, and no member keeps its own year from it.
 
 // albumFieldsMock answers only release targets, so a test can run the album walk beside
 // the track one without the two mixing.
@@ -421,8 +423,8 @@ func seedTrackIdentified(t *testing.T, st *sqlite.Store, libID int64, path, esse
 }
 
 // TestAlbumFieldsFillsLabelAndYear: the label lands on the album row with a curation row
-// naming the provider, and the year lands on every member at once through the uniform
-// edit, leaving one album row with the pid it had. The request carries both printed
+// naming the provider, and the year lands on the album and on every member, leaving one
+// album row with the pid and the key it had. The request carries both printed
 // identifiers, so a provider keyed on one can answer without a text match, and the
 // identifiers a provider offers back are refused: they are the release matcher's evidence.
 func TestAlbumFieldsFillsLabelAndYear(t *testing.T) {
@@ -434,6 +436,7 @@ func TestAlbumFieldsFillsLabelAndYear(t *testing.T) {
 		"0075992739429", "SHVL 804")
 	db := roDB(t, dbPath)
 	beforePID := scalarStr(t, db, "SELECT pid FROM album")
+	beforeKey := scalarStr(t, db, "SELECT match_key FROM album")
 
 	var reqs []enrich.Request
 	mock := albumFieldsMock(t, map[string]string{
@@ -474,15 +477,18 @@ func TestAlbumFieldsFillsLabelAndYear(t *testing.T) {
 		t.Errorf("members carrying the year = %d, want both", n)
 	}
 	if got := scalarStr(t, db, "SELECT COALESCE(CAST(year AS TEXT),'') FROM album"); got != "1975" {
-		t.Errorf("album.year = %q, want the pre-pass to have rewritten it", got)
+		t.Errorf("album.year = %q, want 1975", got)
 	}
-	// One album, still the one that was asked about: the uniform edit rewrote the key in
-	// place rather than forking a member onto a second album.
+	// One album, still the one that was asked about, on the key it had: the year keys
+	// nothing, so the fill moves no album.
 	if n := scalarInt(t, db, "SELECT COUNT(*) FROM album"); n != 1 {
-		t.Errorf("albums = %d, want the one rewritten in place", n)
+		t.Errorf("albums = %d, want the one asked about", n)
 	}
 	if got := scalarStr(t, db, "SELECT pid FROM album"); got != beforePID {
 		t.Errorf("album pid = %q, want the original %q kept", got, beforePID)
+	}
+	if got := scalarStr(t, db, "SELECT match_key FROM album"); got != beforeKey {
+		t.Errorf("album match_key = %q, want the original %q kept", got, beforeKey)
 	}
 	for _, f := range []string{"media", "country"} {
 		if got := scalarStr(t, db, "SELECT COALESCE("+f+",'') FROM album"); got != "" {
@@ -503,18 +509,17 @@ func TestAlbumFieldsFillsLabelAndYear(t *testing.T) {
 	}
 }
 
-// TestAlbumFieldsRespectsLocks: a locked album label is left alone, and a member's locked
-// year vetoes the whole year fill (a per-member write would fork the album) while the
-// label beside it still lands.
+// TestAlbumFieldsRespectsLocks: a member's locked year keeps that member out of the year
+// fill, while the album and the other member take the year and the label lands beside it.
 func TestAlbumFieldsRespectsLocks(t *testing.T) {
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
-	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "One", "Pink Floyd", "Wish You Were Here")
+	pidA := seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "One", "Pink Floyd", "Wish You Were Here")
 	pidB := seedTrack(t, st, lib.ID, "/lib/b.mp3", "ess-b", "Two", "Pink Floyd", "Wish You Were Here")
 	db := roDB(t, dbPath)
 
 	// A locked-empty year on one member. It carries no value, so the vacancy test still
-	// passes and only the lock probe can stop the fill.
+	// passes and only the lock probe keeps the fill off it.
 	if err := st.LockField(ctx, pidB, "year"); err != nil {
 		t.Fatalf("lock the year: %v", err)
 	}
@@ -523,10 +528,21 @@ func TestAlbumFieldsRespectsLocks(t *testing.T) {
 		t.Fatalf("run: %v", err)
 	}
 	if got := scalarStr(t, db, "SELECT COALESCE(label,'') FROM album"); got != "Harvest" {
-		t.Errorf("album label = %q, want the label to land beside a vetoed year", got)
+		t.Errorf("album label = %q, want the label to land", got)
 	}
-	if n := scalarInt(t, db, "SELECT COUNT(*) FROM track WHERE year IS NOT NULL"); n != 0 {
-		t.Errorf("members carrying a year = %d, want the fill vetoed by one member's lock", n)
+	memberYear := func(pid model.PID) string {
+		t.Helper()
+		return scalarStr(t, db, `SELECT COALESCE(CAST(t.year AS TEXT),'') FROM track t
+			JOIN playable_item pi ON pi.id = t.item_id WHERE pi.pid = ?`, string(pid))
+	}
+	if got := memberYear(pidA); got != "1975" {
+		t.Errorf("unlocked member's year = %q, want the fill", got)
+	}
+	if got := memberYear(pidB); got != "" {
+		t.Errorf("locked member's year = %q, want it kept empty", got)
+	}
+	if got := scalarStr(t, db, "SELECT COALESCE(CAST(year AS TEXT),'') FROM album"); got != "1975" {
+		t.Errorf("album.year = %q, want 1975", got)
 	}
 	if n := scalarInt(t, db, "SELECT COUNT(*) FROM album"); n != 1 {
 		t.Errorf("albums = %d, want no fork", n)
@@ -534,10 +550,9 @@ func TestAlbumFieldsRespectsLocks(t *testing.T) {
 	assertFieldsVerifyClean(t, st)
 }
 
-// TestAlbumFieldsToppedUpYearIsNotRefilled: an mbid-keyed album's key ignores the year,
-// so its first file used to leave album.year NULL over members that carried theirs. The
-// scan now tops the column up from a later member, and a full column is not filled: the
-// label lands, the provider's year does not, and the tagged year stands.
+// TestAlbumFieldsToppedUpYearIsNotRefilled: a year-less first file leaves album.year NULL
+// until a later member brings one, and then the column is its members' year and is not
+// filled: the label lands, the provider's year does not, and the tagged year stands.
 func TestAlbumFieldsToppedUpYearIsNotRefilled(t *testing.T) {
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
@@ -571,28 +586,22 @@ func TestAlbumFieldsToppedUpYearIsNotRefilled(t *testing.T) {
 	assertFieldsVerifyClean(t, st)
 }
 
-// TestAlbumFieldsKeepsAnAlbumYearOverYearlessMembers isolates the album rung's own
-// fill-when-empty test from the member veto: a member's year cleared after the insert
-// leaves the column set over members that carry none, and a provider's year must not
-// replace it. The label beside it still lands.
-func TestAlbumFieldsKeepsAnAlbumYearOverYearlessMembers(t *testing.T) {
+// TestAlbumFieldsFillsAnAlbumWhoseMembersLostTheirYear: an album's year is its members',
+// so clearing the one member year leaves the album with none, and a provider's year then
+// fills the album and the members (the clear locked nothing). The label lands beside it.
+func TestAlbumFieldsFillsAnAlbumWhoseMembersLostTheirYear(t *testing.T) {
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	const relMBID = "b1000000-0000-4000-8000-000000000002"
 	pidA := seedTrackRelease(t, st, lib.ID, "/lib/a.mp3", "ess-a", "One", "Pink Floyd", "Wish You Were Here", relMBID, 1975)
 	seedTrackRelease(t, st, lib.ID, "/lib/b.mp3", "ess-b", "Two", "Pink Floyd", "Wish You Were Here", relMBID, 0)
 	db := roDB(t, dbPath)
-	// A single-member clear leaves the album row alone: the pre-pass needs the whole
-	// membership, and the per-item resolve only fills an empty column.
 	if err := st.EditItemFields(ctx, pidA, map[string]string{"year": ""},
 		model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("clear the year: %v", err)
 	}
-	if n := scalarInt(t, db, "SELECT COUNT(*) FROM track WHERE year IS NOT NULL"); n != 0 {
-		t.Fatalf("members carrying a year = %d, want none after the clear", n)
-	}
-	if got := scalarStr(t, db, "SELECT COALESCE(CAST(year AS TEXT),'') FROM album"); got != "1975" {
-		t.Fatalf("album.year = %q, want the insert-time year kept: the fixture did not reach the state under test", got)
+	if got := scalarStr(t, db, "SELECT COALESCE(CAST(year AS TEXT),'') FROM album"); got != "" {
+		t.Fatalf("album.year = %q, want none once no member carries one", got)
 	}
 
 	mock := albumFieldsMock(t, map[string]string{"label": "Harvest", "year": "1999"}, nil)
@@ -600,90 +609,87 @@ func TestAlbumFieldsKeepsAnAlbumYearOverYearlessMembers(t *testing.T) {
 		t.Fatalf("run: %v", err)
 	}
 	if got := scalarStr(t, db, "SELECT COALESCE(label,'') FROM album"); got != "Harvest" {
-		t.Errorf("album label = %q, want the label to land beside the kept year", got)
+		t.Errorf("album label = %q, want the label to land", got)
 	}
-	if got := scalarStr(t, db, "SELECT COALESCE(CAST(year AS TEXT),'') FROM album"); got != "1975" {
-		t.Errorf("album.year = %q, want the standing year kept over a provider's", got)
+	if got := scalarStr(t, db, "SELECT COALESCE(CAST(year AS TEXT),'') FROM album"); got != "1999" {
+		t.Errorf("album.year = %q, want the provider's 1999", got)
 	}
-	if n := scalarInt(t, db, "SELECT COUNT(*) FROM track WHERE year = 1999"); n != 0 {
-		t.Errorf("members took the provider year on %d tracks, want none", n)
+	if n := scalarInt(t, db, "SELECT COUNT(*) FROM track WHERE year = 1999"); n != 2 {
+		t.Errorf("members carrying the provider year = %d, want both", n)
 	}
 	assertFieldsVerifyClean(t, st)
 }
 
-// TestAlbumFieldsMemberYearVetoesTheFill: the year lands on every member, so a member
-// already carrying one vetoes the whole fill. The state is reached through a merge, which
-// keeps the survivor's NULL year over the loser's tagged members; the scan's top-up
-// closed the other way in.
+// TestAlbumFieldsMemberYearVetoesTheFill: an album whose members carry a year takes its
+// year from them, so a member carrying one keeps a provider's year off the album and off
+// the members that have none, even where the album's own column has lost it. The column
+// is cleared by hand, since no writer leaves it empty over a dated member.
 func TestAlbumFieldsMemberYearVetoesTheFill(t *testing.T) {
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
 	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "One", "Pink Floyd", "Animals")
 	seedTrackYear(t, st, lib.ID, "/lib/b.mp3", "ess-b", "Two", "Pink Floyd", "Animals", 1977)
 	db := roDB(t, dbPath)
-	survivor := scalarStr(t, db, "SELECT pid FROM album WHERE year IS NULL")
-	loser := scalarStr(t, db, "SELECT pid FROM album WHERE year = 1977")
-	if _, err := st.MergeEntity(ctx, model.MergeAlbum, model.PID(survivor), model.PID(loser)); err != nil {
-		t.Fatalf("merge: %v", err)
-	}
-	if got := scalarStr(t, db, "SELECT COALESCE(CAST(year AS TEXT),'') FROM album"); got != "" {
-		t.Fatalf("album.year after the merge = %q, want NULL: the fixture did not reach the state under test", got)
+	if _, err := rwDB(t, dbPath).Exec("UPDATE album SET year = NULL"); err != nil {
+		t.Fatalf("clear the album year: %v", err)
 	}
 
-	mock := albumFieldsMock(t, map[string]string{"year": "1977"}, nil)
+	mock := albumFieldsMock(t, map[string]string{"year": "1999"}, nil)
 	if _, err := fieldsService(t, st, mock).Run(ctx, enrich.RunOptions{}, nil); err != nil {
 		t.Fatalf("run: %v", err)
+	}
+	if n := scalarInt(t, db, "SELECT COUNT(*) FROM track WHERE year = 1999"); n != 0 {
+		t.Errorf("members carrying the provider's year = %d, want none", n)
 	}
 	if n := scalarInt(t, db, "SELECT COUNT(*) FROM track WHERE year = 1977"); n != 1 {
 		t.Errorf("members carrying 1977 = %d, want only the one tagged with it", n)
 	}
 	if got := scalarStr(t, db, "SELECT COALESCE(CAST(year AS TEXT),'') FROM album"); got != "" {
-		t.Errorf("album.year = %q, want the fill vetoed", got)
+		t.Errorf("album.year = %q, want the provider's year refused", got)
 	}
 	if n := scalarInt(t, db, "SELECT COUNT(*) FROM album"); n != 1 {
 		t.Errorf("albums = %d, want no fork", n)
 	}
-	assertFieldsVerifyClean(t, st)
 }
 
-// TestAlbumFieldsMergesOntoATakenKey: another album already holds the key this fill would
-// move onto, so the rename pre-pass folds this album into the incumbent and the row is
-// gone. Nothing is written on the dead rowid, and the incumbent is asked on its own.
-func TestAlbumFieldsMergesOntoATakenKey(t *testing.T) {
+// TestAlbumFieldsDatedMemberKeepsTheAlbumYear: two tracks of one release, one dated and one
+// not, used to be two albums keyed apart by the year, and the fill moved the year-less one
+// onto its sibling's key and merged it away. They are one album now, its year is the dated
+// member's, and a provider's year lands nowhere.
+func TestAlbumFieldsDatedMemberKeepsTheAlbumYear(t *testing.T) {
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
-	// Two albums with the same title and artist, separated only by their year.
 	seedTrackYear(t, st, lib.ID, "/lib/a.mp3", "ess-a", "One", "Pink Floyd", "Animals", 1977)
 	seedTrack(t, st, lib.ID, "/lib/b.mp3", "ess-b", "Two", "Pink Floyd", "Animals")
 	db := roDB(t, dbPath)
-	if n := scalarInt(t, db, "SELECT COUNT(*) FROM album"); n != 2 {
-		t.Fatalf("albums = %d, want the two the year separated", n)
+	if n := scalarInt(t, db, "SELECT COUNT(*) FROM album"); n != 1 {
+		t.Fatalf("albums = %d, want the year-less track on its sibling's album", n)
 	}
-	incumbent := scalarStr(t, db, "SELECT pid FROM album WHERE year = 1977")
+	albumPID := scalarStr(t, db, "SELECT pid FROM album")
 
-	mock := albumFieldsMock(t, map[string]string{"year": "1977"}, nil)
+	mock := albumFieldsMock(t, map[string]string{"year": "1999", "label": "Harvest"}, nil)
 	if _, err := fieldsService(t, st, mock).Run(ctx, enrich.RunOptions{}, nil); err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	if n := scalarInt(t, db, "SELECT COUNT(*) FROM album"); n != 1 {
-		t.Fatalf("albums = %d, want the year-less one folded into the incumbent", n)
+	if got := scalarStr(t, db, "SELECT COALESCE(CAST(year AS TEXT),'') FROM album"); got != "1977" {
+		t.Errorf("album.year = %q, want the dated member's 1977", got)
 	}
-	if got := scalarStr(t, db, "SELECT pid FROM album"); got != incumbent {
-		t.Errorf("surviving album pid = %q, want the incumbent %q", got, incumbent)
+	if n := scalarInt(t, db, "SELECT COUNT(*) FROM track WHERE year = 1999"); n != 0 {
+		t.Errorf("members carrying the provider's year = %d, want none", n)
 	}
-	// No marker stranded on the rowid the merge freed.
-	if n := scalarInt(t, db, `SELECT COUNT(*) FROM entity_enrichment ee
-		WHERE ee.entity_type = 'fields_album'
-		  AND NOT EXISTS (SELECT 1 FROM album al WHERE al.id = ee.entity_id)`); n != 0 {
-		t.Errorf("stranded fields_album markers = %d, want none on a dead rowid", n)
+	if got := scalarStr(t, db, "SELECT COALESCE(label,'') FROM album"); got != "Harvest" {
+		t.Errorf("album label = %q, want the label to land", got)
+	}
+	if got := scalarStr(t, db, "SELECT pid FROM album"); got != albumPID {
+		t.Errorf("album pid = %q, want %q kept", got, albumPID)
 	}
 	assertFieldsVerifyClean(t, st)
 }
 
 // TestAlbumFieldsYearSurvivesRescan: a rescan of members whose files still say nothing
 // for the year keeps the year the album fields fill gave them, since an enrichment fill
-// stays until the file states its own, so the album keeps its key and pid. label survives
-// too: the scan's top-up is fill-when-empty and never clears it.
+// stays until the file states its own, and the album keeps its pid. label survives too:
+// the scan's top-up is fill-when-empty and never clears it.
 func TestAlbumFieldsYearSurvivesRescan(t *testing.T) {
 	ctx := context.Background()
 	st, dbPath, lib := openStore(t)
@@ -745,8 +751,7 @@ func TestAlbumFieldsScopedToOneEntity(t *testing.T) {
 	}
 }
 
-// seedTrackYear is seedTrack with a tagged year, which is what separates two albums that
-// otherwise share a title and an artist.
+// seedTrackYear is seedTrack with a tagged year.
 func seedTrackYear(t *testing.T, st *sqlite.Store, libID int64, path, essence, title, artist, album string, year int) model.PID {
 	t.Helper()
 	return seedTrackWith(t, st, libID, path, essence, title,
@@ -754,47 +759,13 @@ func seedTrackYear(t *testing.T, st *sqlite.Store, libID int64, path, essence, t
 }
 
 // seedTrackRelease is seedTrack with an album release MBID, which makes the album key
-// mbid-based and therefore blind to the year.
+// mbid-based.
 func seedTrackRelease(t *testing.T, st *sqlite.Store, libID int64, path, essence, title, artist, album, relMBID string, year int) model.PID {
 	t.Helper()
 	return seedTrackWith(t, st, libID, path, essence, title, model.Track{
 		Artist: artist, AlbumArtist: artist, Album: album, TrackNo: 1,
 		Year: year, MBReleaseID: relMBID,
 	})
-}
-
-// TestAlbumFieldsLabelSurvivesTheYearMerge: the year is the one fill that can move an
-// album onto a key another album already holds, which merges this row away. A label
-// written before that would go down with the row, since the column is on the album and
-// the merge does not carry it over. So the year runs first and the label is skipped
-// outright when the row is gone, leaving the survivor to be asked on its own terms rather
-// than silently losing the value to a deleted row.
-func TestAlbumFieldsLabelSurvivesTheYearMerge(t *testing.T) {
-	ctx := context.Background()
-	st, dbPath, lib := openStore(t)
-	seedTrackYear(t, st, lib.ID, "/lib/a.mp3", "ess-a", "One", "Pink Floyd", "Animals", 1977)
-	seedTrack(t, st, lib.ID, "/lib/b.mp3", "ess-b", "Two", "Pink Floyd", "Animals")
-	db := roDB(t, dbPath)
-	incumbent := scalarStr(t, db, "SELECT pid FROM album WHERE year = 1977")
-
-	mock := albumFieldsMock(t, map[string]string{"year": "1977", "label": "Harvest"}, nil)
-	if _, err := fieldsService(t, st, mock).Run(ctx, enrich.RunOptions{}, nil); err != nil {
-		t.Fatalf("run: %v", err)
-	}
-	if n := scalarInt(t, db, "SELECT COUNT(*) FROM album"); n != 1 {
-		t.Fatalf("albums = %d, want the year-less one folded into the incumbent", n)
-	}
-	if got := scalarStr(t, db, "SELECT pid FROM album"); got != incumbent {
-		t.Fatalf("surviving album = %q, want the incumbent %q", got, incumbent)
-	}
-	// No curation row stranded on the rowid the merge freed, which is what a label
-	// written before the merge would have left behind.
-	if n := scalarInt(t, db, `SELECT COUNT(*) FROM entity_curation ec
-		WHERE ec.entity_type = 'album'
-		  AND NOT EXISTS (SELECT 1 FROM album al WHERE al.id = ec.entity_id)`); n != 0 {
-		t.Errorf("stranded album curation rows = %d, want none on a dead rowid", n)
-	}
-	assertFieldsVerifyClean(t, st)
 }
 
 // TestAlbumFieldsStampsEachProviderSeparately: the album's label curation row names the
@@ -821,6 +792,11 @@ func TestAlbumFieldsStampsEachProviderSeparately(t *testing.T) {
 		WHERE entity_type='album' AND field='label'`)
 	if got != "discogs" {
 		t.Errorf("label curation provider = %q, want the provider that supplied the label", got)
+	}
+	// The member the year landed on names the year's provider, not the label's.
+	got = scalarStr(t, db, `SELECT COALESCE(provider,'') FROM field_provenance WHERE field='year'`)
+	if got != "musicbrainz-ish" {
+		t.Errorf("member year provenance provider = %q, want the provider that supplied the year", got)
 	}
 }
 

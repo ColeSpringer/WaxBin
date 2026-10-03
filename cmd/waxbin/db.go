@@ -363,12 +363,12 @@ func newDBVerifyCmd(g *globals) *cobra.Command {
 	var resorted int
 	cmd := &cobra.Command{
 		Use:   "verify",
-		Short: "Check derived data (FTS, rollups, sort keys, book durations) against the source rows",
+		Short: "Check derived data (FTS, rollups, sort keys, book durations, album years) against the source rows",
 		Long: "Runs the derived-data consistency check: the writer-maintained FTS, " +
 			"rollups, and generated sort keys are compared against a fresh recompute from " +
-			"the source rows. Reports drift; --fix recomputes the maintained rollups and " +
-			"book durations and refolds stale sort keys first. Exits non-zero when any " +
-			"drift remains.",
+			"the source rows. Reports drift; --fix recomputes the maintained rollups, " +
+			"book durations and album years and refolds stale sort keys first. Exits " +
+			"non-zero when any drift remains.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			// --fix recomputes rollups and reclaims orphaned art, so it needs the
 			// write lock; a plain verify is read-only and runs alongside a writer.
@@ -431,6 +431,7 @@ func newDBVerifyCmd(g *globals) *cobra.Command {
 				fmt.Fprintf(w, "sort-key drift:           %d\n", rep.SortKeyDrift)
 				fmt.Fprintf(w, "book-duration drift:      %d\n", rep.BookDurationDrift)
 				fmt.Fprintf(w, "book-isbn-key drift:      %d\n", rep.BookISBNKeyDrift)
+				fmt.Fprintf(w, "album-year drift:         %d\n", rep.AlbumYearDrift)
 				fmt.Fprintf(w, "orphan art sources:       %d\n", rep.OrphanArtSources)
 				fmt.Fprintf(w, "orphan thumbnails:        %d\n", rep.OrphanThumbnails)
 				fmt.Fprintf(w, "orphan tag provenance:    %d\n", rep.OrphanReservedTagProvenance)
@@ -459,6 +460,6 @@ func newDBVerifyCmd(g *globals) *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().BoolVar(&fix, "fix", false, "recompute rollups and book durations, refold stale sort keys, and reclaim orphaned art and tag provenance before verifying (takes the write lock)")
+	cmd.Flags().BoolVar(&fix, "fix", false, "recompute rollups, book durations and album years, refold stale sort keys, and reclaim orphaned art and tag provenance before verifying (takes the write lock)")
 	return cmd
 }

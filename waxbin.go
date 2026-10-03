@@ -1396,9 +1396,9 @@ func (l *Library) VerifyDerived(ctx context.Context) (*sqlite.DerivedReport, err
 	return l.store.VerifyDerived(ctx)
 }
 
-// RefreshRollups recomputes the maintained rollups and every book's denormalized
-// total duration, the repair for the rollup and book-duration drift VerifyDerived
-// can report.
+// RefreshRollups recomputes the maintained rollups, every book's denormalized total
+// duration and every album's year, the repair for the rollup, book-duration and
+// album-year drift VerifyDerived can report.
 func (l *Library) RefreshRollups(ctx context.Context) error {
 	return l.store.RefreshRollups(ctx)
 }
@@ -2568,6 +2568,16 @@ func (l *Library) PlanOrganize(ctx context.Context, q query.Query, opts Organize
 	if opts.Profile != nil {
 		merged.Profile = opts.Profile.Name
 	}
+	var albums []model.PID
+	for _, it := range items {
+		if it.AlbumPID != "" {
+			albums = append(albums, it.AlbumPID)
+		}
+	}
+	years, err := l.store.AlbumYears(ctx, albums)
+	if err != nil {
+		return nil, err
+	}
 	set := l.profileSet()
 	for _, lib := range managed {
 		if lib.ReadOnly {
@@ -2585,7 +2595,7 @@ func (l *Library) PlanOrganize(ctx context.Context, q query.Query, opts Organize
 		}
 		// organize.Plan filters items to those under this library's root, so passing the
 		// full item set to each library partitions the work by current location.
-		p, err := l.organizer.Plan(ctx, lib, prof, items)
+		p, err := l.organizer.Plan(ctx, lib, prof, items, organize.PlanOptions{AlbumYears: years})
 		if err != nil {
 			return nil, err
 		}
