@@ -3,8 +3,10 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"path/filepath"
 
+	"github.com/colespringer/waxbin/internal/fsx"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/waxerr"
 )
@@ -14,9 +16,13 @@ import (
 // Open while this process holds the exclusive write flock, so any pending row
 // belongs to a dead prior owner. For each:
 //
-//   - the move completed but the commit did not (destination present, source
-//     gone): finish it by pointing the file at the destination and marking it
-//     committed.
+//   - the move completed but the commit did not (destination present, source gone):
+//     finish it by pointing the file at the destination and marking it committed.
+//     Present means listed under its own spelling (fsx.Lister), since a case-insensitive
+//     filesystem resolves the source of a rename between two spellings of a name as
+//     readily as its destination. A destination another file row holds is rolled back
+//     with a warning instead, so a stale row never keeps the catalog from opening; the
+//     next scan reconciles it.
 //   - otherwise (source still present, or both gone): the move did not take
 //     effect, so mark rolled_back and leave the catalog's path authoritative.
 //
@@ -41,30 +47,24 @@ func (s *Store) recoverOrganize(ctx context.Context) (int, error) {
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
+		lister := fsx.NewLister()
+		present := func(root, path []byte) bool { return pathExists(path) && lister.Spelled(string(root), string(path)) }
 		for _, p := range pending {
-			committed := p.fileID.Valid && pathExists(p.dst) && !pathExists(p.src)
+			committed := p.fileID.Valid && present(p.root, p.dst) && !present(p.root, p.src)
 			if committed {
-				rel := relUnder(p.root, p.dst)
-				var from string
-				if err := tx.QueryRowContext(ctx, "SELECT display_path FROM file WHERE id = ?", p.fileID.Int64).Scan(&from); err != nil {
+				held, err := pathHeldByAnotherTx(ctx, tx, p.dst, p.fileID.Int64)
+				if err != nil {
 					return waxerr.Wrap(waxerr.CodeIO, op, err)
 				}
-				if _, err := tx.ExecContext(ctx,
-					"UPDATE file SET path=?, display_path=?, rel_path=?, last_seen=? WHERE id=?",
-					p.dst, string(p.dst), rel, nowNS(), p.fileID.Int64); err != nil {
-					return waxerr.Wrap(waxerr.CodeIO, op, err)
+				if held {
+					s.log.Warn("organize recovery: another file holds the destination, keeping the catalog's path", "src", string(p.src), "dst", string(p.dst))
+					committed = false
 				}
-				if err := renameCopyDetailsTx(ctx, tx, p.fileID.Int64, from, string(p.dst)); err != nil {
+			}
+			if committed {
+				if err := commitMoveTx(ctx, tx, p.fileID.Int64, p.journalPID, model.RelocateInput{FilePID: model.PID(p.filePID.String),
+					NewPath: p.dst, NewDisplayPath: string(p.dst), NewRelPath: relUnder(p.root, p.dst)}); err != nil {
 					return waxerr.Wrap(waxerr.CodeIO, op, err)
-				}
-				if _, err := tx.ExecContext(ctx,
-					"UPDATE organize_journal SET state='committed' WHERE pid=?", p.journalPID); err != nil {
-					return waxerr.Wrap(waxerr.CodeIO, op, err)
-				}
-				if p.filePID.Valid {
-					if err := appendChange(ctx, tx, "file", model.PID(p.filePID.String), model.OpUpdate); err != nil {
-						return waxerr.Wrap(waxerr.CodeIO, op, err)
-					}
 				}
 			} else if _, err := tx.ExecContext(ctx,
 				"UPDATE organize_journal SET state='rolled_back' WHERE pid=?", p.journalPID); err != nil {
@@ -108,6 +108,16 @@ func pendingMoves(ctx context.Context, tx *sql.Tx) ([]pendingMove, error) {
 		out = append(out, p)
 	}
 	return out, rows.Err()
+}
+
+// pathHeldByAnotherTx reports whether a file row other than fileID holds path.
+func pathHeldByAnotherTx(ctx context.Context, tx *sql.Tx, path []byte, fileID int64) (bool, error) {
+	var id int64
+	err := tx.QueryRowContext(ctx, "SELECT id FROM file WHERE path = ? AND id != ?", path, fileID).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return err == nil, err
 }
 
 // relUnder returns dst relative to root, falling back to the base name when the

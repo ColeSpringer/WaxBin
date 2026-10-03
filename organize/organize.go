@@ -459,16 +459,18 @@ func markCollisions(plan *Plan) {
 
 // Execute applies the plan: each move happens on disk, then the catalog records
 // the relocation (path update + organize_journal + change_log) in one
-// transaction. A per-action failure is recorded and does not abort the run.
+// transaction; a move a folder respell already carried into place logs no change. A
+// per-action failure is recorded and does not abort the run.
 //
 // A move whose destination is the source of a move still to come waits for it, and a
 // cycle of them (two parts trading numbers) is broken by parking one part under a free
 // name first. Each folder a destination names in another spelling is respelled before the
-// move lands in it, the catalog and the plan's later sources following.
+// move lands in it, the catalog and the plan's later sources following, or the move fails
+// with the folder as it was.
 func (o *Organizer) Execute(ctx context.Context, plan *Plan, jobPID model.PID, hb func(progress float64, msg string) error) (*Report, error) {
 	rep := &Report{}
 	total := len(plan.Actions)
-	sp := fsx.NewSpeller(plan.Root, func(from, to string) { o.respelled(ctx, plan, from, to) })
+	sp := fsx.NewSpeller(plan.Root, func(from, to string) error { return o.respelled(ctx, plan, from, to) })
 	// The directory covers are planned once the audio has actually moved, from what left
 	// each directory and where it landed, so a split album gets a cover in each
 	// destination and an emptied directory is not left holding one.
@@ -582,10 +584,11 @@ func (o *Organizer) park(ctx context.Context, plan *Plan, a *Action, jobPID mode
 }
 
 // respelled follows a folder the Speller renamed to another spelling: the catalog's paths
-// below it, and the sources of the moves still to come.
-func (o *Organizer) respelled(ctx context.Context, plan *Plan, from, to string) {
+// below it, and the sources of the moves still to come. An error leaves the plan as it
+// was, and has the Speller rename the folder back.
+func (o *Organizer) respelled(ctx context.Context, plan *Plan, from, to string) error {
 	if _, err := o.cat.RespellFolder(context.WithoutCancel(ctx), from, to); err != nil {
-		o.log.Warn("organize: respelling the catalog's paths", "from", from, "to", to, "err", err)
+		return err
 	}
 	prefix := from + string(filepath.Separator)
 	for i := range plan.Actions {
@@ -597,6 +600,7 @@ func (o *Organizer) respelled(ctx context.Context, plan *Plan, from, to string) 
 			a.SrcBytes = append([]byte(to), a.SrcBytes[len(from):]...)
 		}
 	}
+	return nil
 }
 
 // apply optionally re-tags the source (before the move, so a tag-write failure

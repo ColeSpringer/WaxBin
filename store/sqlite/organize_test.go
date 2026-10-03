@@ -121,3 +121,89 @@ func fileOnDisk(p string) bool {
 	_, err := os.Stat(p)
 	return err == nil
 }
+
+// TestRecoverOrganizeRollsBackAMoveListedUnderBothNames: a planned move whose source and
+// destination are one file under two listed names (hard links, which fsx.Move refuses) did
+// not take effect, so recovery rolls it back and the catalog keeps the source.
+func TestRecoverOrganizeRollsBackAMoveListedUnderBothNames(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	db := filepath.Join(t.TempDir(), "c.db")
+
+	st, lib := openRootedStore(t, dir, db, "owner-a")
+	src := filepath.Join(dir, "song.mp3")
+	dst := filepath.Join(dir, "Song.mp3")
+	if err := os.WriteFile(src, []byte("audio"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(src, dst); err != nil {
+		t.Skipf("hard link: %v", err)
+	}
+	r, err := st.PutScannedTrack(ctx, input(lib.ID, src, "sha256:E", "sha256:C", "Song"))
+	if err != nil {
+		t.Fatalf("seed file: %v", err)
+	}
+	if _, err := st.PlanMove(ctx, model.RelocateInput{
+		FilePID: r.FilePID, JobPID: "job", SrcPath: []byte(src),
+		NewPath: []byte(dst), NewDisplayPath: dst, NewRelPath: []byte("Song.mp3"),
+	}); err != nil {
+		t.Fatalf("plan move: %v", err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	st2, _ := openRootedStore(t, dir, db, "owner-b")
+	if _, err := st2.FileByPath(ctx, []byte(src)); err != nil {
+		t.Fatalf("catalog should keep the source: %v", err)
+	}
+	if _, err := st2.FileByPath(ctx, []byte(dst)); err == nil {
+		t.Fatal("the destination should not resolve after the rollback")
+	}
+}
+
+// TestRecoverOrganizeLeavesADestinationAnotherRowHolds: a landed move whose destination
+// path another file row still holds cannot be committed, so recovery rolls it back with a
+// warning rather than failing the open on every start; the catalog keeps the source and
+// the next scan reconciles.
+func TestRecoverOrganizeLeavesADestinationAnotherRowHolds(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	db := filepath.Join(t.TempDir(), "c.db")
+
+	st, lib := openRootedStore(t, dir, db, "owner-a")
+	src := filepath.Join(dir, "a.mp3")
+	dst := filepath.Join(dir, "b.mp3")
+	if err := os.WriteFile(src, []byte("audio"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r, err := st.PutScannedTrack(ctx, input(lib.ID, src, "sha256:E1", "sha256:C1", "A"))
+	if err != nil {
+		t.Fatalf("seed file: %v", err)
+	}
+	stale, err := st.PutScannedTrack(ctx, input(lib.ID, dst, "sha256:E2", "sha256:C2", "B"))
+	if err != nil {
+		t.Fatalf("seed the row holding the destination: %v", err)
+	}
+	if _, err := st.PlanMove(ctx, model.RelocateInput{
+		FilePID: r.FilePID, JobPID: "job", SrcPath: []byte(src),
+		NewPath: []byte(dst), NewDisplayPath: dst, NewRelPath: []byte("b.mp3"),
+	}); err != nil {
+		t.Fatalf("plan move: %v", err)
+	}
+	if err := os.Rename(src, dst); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	st2, _ := openRootedStore(t, dir, db, "owner-b")
+	f, err := st2.FileByPath(ctx, []byte(src))
+	if err != nil || f.PID != r.FilePID {
+		t.Errorf("source row = %+v (err %v), want the moved file's row kept there", f, err)
+	}
+	if f, err := st2.FileByPath(ctx, []byte(dst)); err != nil || f.PID != stale.FilePID {
+		t.Errorf("destination row = %+v (err %v), want the row that held it untouched", f, err)
+	}
+}

@@ -82,7 +82,9 @@ func ensureAbsent(dst string) error {
 }
 
 // sameName reports whether two names are one name to a filesystem that matches names
-// without regard to case or Unicode normalization form, as NTFS and APFS do.
+// without regard to case or Unicode normalization form. NTFS folds case, APFS folds case
+// and form, and the fold here covers both so a rename between two such spellings reads
+// alike wherever it runs.
 func sameName(a, b string) bool {
 	return strings.EqualFold(norm.NFC.String(a), norm.NFC.String(b))
 }
@@ -109,6 +111,49 @@ func sameFile(stat func(string) (os.FileInfo, error), a, b string) bool {
 	}
 	bi, err := stat(pathx.Long(b))
 	return err == nil && os.SameFile(ai, bi)
+}
+
+// A Lister reports whether paths are spelled as their folders list them, reading each
+// folder once. NTFS resolves a path spelled in another case than its entries, and APFS
+// one in another case or Unicode form, so a stat alone cannot tell a cataloged file that
+// moved to another spelling of its name from one still in place.
+type Lister struct {
+	fs    folders
+	lists map[string][]string
+}
+
+// NewLister returns a Lister over the OS filesystem.
+func NewLister() *Lister { return newLister(osFolders{}) }
+
+func newLister(fs folders) *Lister { return &Lister{fs: fs, lists: map[string][]string{}} }
+
+// Spelled reports whether path is listed under exactly its own spelling at each name
+// below root; a path outside root is judged by its last name alone, and one whose folders
+// cannot be read is not spelled so.
+func (l *Lister) Spelled(root, path string) bool {
+	root, path = filepath.Clean(root), filepath.Clean(path)
+	sep := string(filepath.Separator)
+	cur, rel := root, ""
+	if r, err := filepath.Rel(root, path); err != nil || r == "." || r == ".." || strings.HasPrefix(r, ".."+sep) {
+		cur, rel = filepath.Dir(path), filepath.Base(path)
+	} else {
+		rel = r
+	}
+	for _, name := range strings.Split(rel, sep) {
+		names, ok := l.lists[cur]
+		if !ok {
+			var err error
+			if names, err = l.fs.ReadDir(cur); err != nil {
+				return false
+			}
+			l.lists[cur] = names
+		}
+		if !slices.Contains(names, name) {
+			return false
+		}
+		cur = filepath.Join(cur, name)
+	}
+	return true
 }
 
 // respellEntry gives the entry of dir named like name that spelling: by a direct rename
@@ -198,20 +243,21 @@ func (osFolders) Rename(from, to string) error { return os.Rename(pathx.Long(fro
 // spelled otherwise for the folder as it stands, so a move into "J.R.R. Tolkien" lands in
 // "j.r.r. tolkien" and keeps that spelling; the Speller renames such a folder first. It
 // never touches the root or a folder above it, remembers the folders it has checked, and
-// reports each rename to renamed, whose files have moved with it.
+// reports each rename to renamed, whose files have moved with it. An error from renamed
+// has the folder renamed back and fails the move, so disk and catalog never disagree.
 type Speller struct {
 	root    string
 	fs      folders
-	renamed func(from, to string)
+	renamed func(from, to string) error
 	checked map[string]bool
 }
 
 // NewSpeller returns a Speller for the folders below root.
-func NewSpeller(root string, renamed func(from, to string)) *Speller {
+func NewSpeller(root string, renamed func(from, to string) error) *Speller {
 	return newSpeller(root, osFolders{}, renamed)
 }
 
-func newSpeller(root string, fs folders, renamed func(from, to string)) *Speller {
+func newSpeller(root string, fs folders, renamed func(from, to string) error) *Speller {
 	return &Speller{root: filepath.Clean(root), fs: fs, renamed: renamed, checked: map[string]bool{}}
 }
 
@@ -241,7 +287,10 @@ func (sp *Speller) Respell(dir string) error {
 					return err
 				}
 				if sp.renamed != nil {
-					sp.renamed(old, next)
+					if err := sp.renamed(old, next); err != nil {
+						_ = respellEntry(sp.fs, cur, names[i], false)
+						return err
+					}
 				}
 			}
 			sp.checked[next] = true

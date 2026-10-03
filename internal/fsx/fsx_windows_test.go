@@ -17,7 +17,10 @@ func TestSpellerRenamesByCase(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "author", "A.mp3"), "audio")
 	var renamed [][2]string
-	sp := NewSpeller(dir, func(from, to string) { renamed = append(renamed, [2]string{from, to}) })
+	sp := NewSpeller(dir, func(from, to string) error {
+		renamed = append(renamed, [2]string{from, to})
+		return nil
+	})
 	if err := sp.Move(filepath.Join(dir, "author", "A.mp3"), filepath.Join(dir, "Author", "a.mp3")); err != nil {
 		t.Fatalf("Move: %v", err)
 	}
@@ -57,4 +60,25 @@ func names(t *testing.T, dir string) []string {
 		out = append(out, e.Name())
 	}
 	return out
+}
+
+// TestSpelledAfterACaseOnlyRename: on a case-insensitive filesystem a path resolves under
+// both spellings before and after a case-only rename, and the folders' listings tell the
+// two apart.
+func TestSpelledAfterACaseOnlyRename(t *testing.T) {
+	dir := t.TempDir()
+	src, dst := filepath.Join(dir, "author", "a.mp3"), filepath.Join(dir, "Author", "A.mp3")
+	writeFile(t, src, "audio")
+	if !NewLister().Spelled(dir, src) || NewLister().Spelled(dir, dst) {
+		t.Error("before the rename, want the source spelled as listed and the destination not")
+	}
+	if err := os.Rename(filepath.Join(dir, "author"), filepath.Join(dir, "Author")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(filepath.Join(dir, "Author", "a.mp3"), dst); err != nil {
+		t.Fatal(err)
+	}
+	if NewLister().Spelled(dir, src) || !NewLister().Spelled(dir, dst) {
+		t.Error("after the rename, want the destination spelled as listed and the source not")
+	}
 }

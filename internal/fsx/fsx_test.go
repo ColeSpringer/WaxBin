@@ -3,6 +3,7 @@ package fsx
 import (
 	"errors"
 	"os"
+	"path"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -126,7 +127,8 @@ func TestFreeNameIsShortAndKeepsTheExtension(t *testing.T) {
 // foldFS is a filesystem that matches names without regard to case or Unicode form, as
 // NTFS and APFS do, and keeps the spelling a name was created or last renamed with.
 // ignoreRename makes a rename between two spellings of one name a silent no-op, as some
-// filesystems do.
+// filesystems do. Its keys are slash paths on every OS; the Speller's native paths are
+// mapped onto them.
 type foldFS struct {
 	dirs         map[string][]string // a folder's entries by their stored spelling
 	ignoreRename bool
@@ -145,11 +147,14 @@ func (f *foldFS) find(dir, name string) (string, bool) {
 func (f *foldFS) resolve(p string) (string, bool) {
 	cur := "/"
 	for _, part := range strings.Split(strings.TrimPrefix(filepath.ToSlash(p), "/"), "/") {
+		if part == "" {
+			continue
+		}
 		e, ok := f.find(cur, part)
 		if !ok {
 			return "", false
 		}
-		cur = filepath.Join(cur, e)
+		cur = path.Join(cur, e)
 	}
 	return cur, true
 }
@@ -174,7 +179,7 @@ func (f *foldFS) Rename(from, to string) error {
 	if !ok {
 		return os.ErrNotExist
 	}
-	parent, oldName, newName := filepath.Dir(rf), filepath.Base(rf), filepath.Base(to)
+	parent, oldName, newName := path.Dir(rf), path.Base(rf), path.Base(filepath.ToSlash(to))
 	if e, taken := f.find(parent, newName); taken && e != oldName {
 		return os.ErrExist
 	}
@@ -186,10 +191,93 @@ func (f *foldFS) Rename(from, to string) error {
 	for d, entries := range f.dirs {
 		if d == rf || strings.HasPrefix(d, rf+"/") {
 			delete(f.dirs, d)
-			f.dirs[filepath.Join(parent, newName)+strings.TrimPrefix(d, rf)] = entries
+			f.dirs[path.Join(parent, newName)+strings.TrimPrefix(d, rf)] = entries
 		}
 	}
 	return nil
+}
+
+// TestSpelledReadsTheFolderListings: a path is spelled as listed when each folder below the
+// root lists the next name exactly, whatever spelling the filesystem would resolve; the
+// root's own spelling is not judged, and a path outside the root is judged by its last name.
+func TestSpelledReadsTheFolderListings(t *testing.T) {
+	fs := &foldFS{dirs: map[string][]string{
+		"/":                         {"music", "elsewhere"},
+		"/music":                    {"Author", "same", "both", "Both"},
+		"/music/Author":             {"E\u0301dith"},
+		"/music/Author/E\u0301dith": {"x.mp3"},
+		"/music/same":               {"x.mp3"},
+		"/music/both":               {"x.mp3"},
+		"/music/Both":               {"x.mp3"},
+		"/elsewhere":                {"x.mp3"},
+	}}
+	for _, tc := range []struct {
+		root, path string
+		want       bool
+	}{
+		{"/music", "/music/Author/E\u0301dith/x.mp3", true},
+		{"/music", "/music/author/E\u0301dith/x.mp3", false},
+		{"/music", "/music/Author/\u00c9dith/x.mp3", false},
+		{"/music", "/music/same/x.mp3", true},
+		{"/music", "/music/same/X.mp3", false},
+		{"/music", "/music/both/x.mp3", true},
+		{"/music", "/music/Both/x.mp3", true},
+		{"/music", "/music/none/x.mp3", false},
+		{"/Music", "/Music/same/x.mp3", true},
+		{"/", "/music/same/x.mp3", true},
+		{"/", "/Music/same/x.mp3", false},
+		{"/music", "/elsewhere/x.mp3", true},
+		{"/music", "/elsewhere/X.mp3", false},
+	} {
+		if got := newLister(fs).Spelled(filepath.FromSlash(tc.root), filepath.FromSlash(tc.path)); got != tc.want {
+			t.Errorf("Spelled(%q, %q) = %v, want %v", tc.root, tc.path, got, tc.want)
+		}
+	}
+}
+
+// TestSpelledOnDisk: a file is spelled as listed, an absent one is not, and nor is another
+// spelling of a listed name, whether or not the filesystem would resolve it.
+func TestSpelledOnDisk(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "a", "x.mp3"), "audio")
+	for path, want := range map[string]bool{
+		filepath.Join(dir, "a", "x.mp3"): true,
+		filepath.Join(dir, "a", "y.mp3"): false,
+		filepath.Join(dir, "a", "X.mp3"): false,
+		filepath.Join(dir, "A", "x.mp3"): false,
+	} {
+		if got := NewLister().Spelled(dir, path); got != want {
+			t.Errorf("Spelled(%q) = %v, want %v", path, got, want)
+		}
+	}
+}
+
+// TestSpellerRenamesBackWhenTheCatalogRefuses: a folder rename the catalog cannot follow is
+// undone and the move fails, with the folder left unchecked so a later move tries again.
+func TestSpellerRenamesBackWhenTheCatalogRefuses(t *testing.T) {
+	fs := &foldFS{dirs: map[string][]string{"/": {"music"}, "/music": {"author"}, "/music/author": {}}}
+	var renamed [][2]string
+	refuse := true
+	sp := newSpeller("/music", fs, func(from, to string) error {
+		if refuse {
+			refuse = false
+			return errors.New("catalog refused")
+		}
+		renamed = append(renamed, [2]string{filepath.ToSlash(from), filepath.ToSlash(to)})
+		return nil
+	})
+	if err := sp.Respell("/music/Author/Book"); err == nil || err.Error() != "catalog refused" {
+		t.Fatalf("Respell = %v, want the catalog's error", err)
+	}
+	if got := fs.dirs["/music"]; !slices.Equal(got, []string{"author"}) || len(renamed) != 0 {
+		t.Fatalf("after the refusal: folders = %q, renamed = %q; want author kept and nothing reported", got, renamed)
+	}
+	if err := sp.Respell("/music/Author/Book"); err != nil {
+		t.Fatalf("Respell again: %v", err)
+	}
+	if got := fs.dirs["/music"]; !slices.Equal(got, []string{"Author"}) || !slices.Equal(renamed, [][2]string{{"/music/author", "/music/Author"}}) {
+		t.Errorf("after the retry: folders = %q, renamed = %q; want Author, reported once", got, renamed)
+	}
 }
 
 // TestSpellerRespellsFoldersBelowItsRoot: a folder a path names in another spelling is
@@ -206,7 +294,10 @@ func TestSpellerRespellsFoldersBelowItsRoot(t *testing.T) {
 			"/music/Other":                      {},
 		}}
 		var renamed [][2]string
-		sp := newSpeller("/Music", fs, func(from, to string) { renamed = append(renamed, [2]string{from, to}) })
+		sp := newSpeller("/Music", fs, func(from, to string) error {
+			renamed = append(renamed, [2]string{filepath.ToSlash(from), filepath.ToSlash(to)})
+			return nil
+		})
 		if err := sp.Respell("/Music/J.R.R. Tolkien/\u00c9dith/Book"); err != nil {
 			t.Fatalf("Respell (ignore %v): %v", ignore, err)
 		}

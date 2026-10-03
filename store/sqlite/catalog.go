@@ -1017,8 +1017,10 @@ func (s *Store) PlanMove(ctx context.Context, in model.RelocateInput) (model.PID
 	return jpid, nil
 }
 
-// CommitMove updates the file's path columns, marks the journal row
-// 'committed', and logs the change in one transaction.
+// CommitMove updates the file's path columns, marks the journal row 'committed', and
+// logs the change in one transaction. A move onto the path the catalog already holds,
+// as when a folder above the file was respelled and carried it there (RespellFolder),
+// commits the journal row and logs no change, since the file's path has not moved.
 func (s *Store) CommitMove(ctx context.Context, journalPID model.PID, in model.RelocateInput) error {
 	const op = "store.CommitMove"
 	return s.writeTx(ctx, func(tx *sql.Tx) error {
@@ -1026,24 +1028,38 @@ func (s *Store) CommitMove(ctx context.Context, journalPID model.PID, in model.R
 		if err != nil {
 			return err
 		}
-		var from string
-		if err := tx.QueryRowContext(ctx, "SELECT display_path FROM file WHERE id = ?", fileID).Scan(&from); err != nil {
+		if err := commitMoveTx(ctx, tx, fileID, string(journalPID), in); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
-		if _, err := tx.ExecContext(ctx,
-			"UPDATE file SET path=?, display_path=?, rel_path=?, last_seen=? WHERE id=?",
-			in.NewPath, in.NewDisplayPath, in.NewRelPath, nowNS(), fileID); err != nil {
-			return waxerr.Wrap(waxerr.CodeIO, op, err)
-		}
-		if err := renameCopyDetailsTx(ctx, tx, fileID, from, in.NewDisplayPath); err != nil {
-			return waxerr.Wrap(waxerr.CodeIO, op, err)
-		}
-		if _, err := tx.ExecContext(ctx,
-			"UPDATE organize_journal SET state='committed' WHERE pid=?", string(journalPID)); err != nil {
-			return waxerr.Wrap(waxerr.CodeIO, op, err)
-		}
-		return appendChange(ctx, tx, "file", in.FilePID, model.OpUpdate)
+		return nil
 	})
+}
+
+// commitMoveTx points a file row at its journaled move's destination, marks the journal
+// row committed and logs the file's change, for CommitMove and for recovery. A move onto
+// the path the row already holds logs nothing.
+func commitMoveTx(ctx context.Context, tx *sql.Tx, fileID int64, journalPID string, in model.RelocateInput) error {
+	var path, rel []byte
+	var from string
+	if err := tx.QueryRowContext(ctx, "SELECT path, display_path, rel_path FROM file WHERE id = ?", fileID).Scan(&path, &from, &rel); err != nil {
+		return err
+	}
+	changed := !bytes.Equal(path, in.NewPath) || from != in.NewDisplayPath || !bytes.Equal(rel, in.NewRelPath)
+	if _, err := tx.ExecContext(ctx,
+		"UPDATE file SET path=?, display_path=?, rel_path=?, last_seen=? WHERE id=?",
+		in.NewPath, in.NewDisplayPath, in.NewRelPath, nowNS(), fileID); err != nil {
+		return err
+	}
+	if err := renameCopyDetailsTx(ctx, tx, fileID, from, in.NewDisplayPath); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, "UPDATE organize_journal SET state='committed' WHERE pid=?", journalPID); err != nil {
+		return err
+	}
+	if !changed {
+		return nil
+	}
+	return appendChange(ctx, tx, "file", in.FilePID, model.OpUpdate)
 }
 
 // AbortMove marks a planned move 'rolled_back' after an on-disk move failed.
@@ -1177,12 +1193,16 @@ func opFor(created bool) model.ChangeOp {
 	return model.OpUpdate
 }
 
-// pathExists reports whether the file at the given raw path is still present on
+// pathExists reports whether the file at the given raw path can still be reached on
 // disk. It distinguishes a move (old path gone) from a copy (old path still present)
 // when deciding whether to re-link by essence or attach an alternate, and backs
 // organize-journal recovery, so a Windows long path must be probed with the
 // extended-length prefix or a present file would read as absent (mis-classifying a
-// move, or rolling back a completed move during recovery).
+// move, or rolling back a completed move during recovery). A filesystem that folds case
+// or Unicode form reaches a file under spellings other than its entry's, so the two
+// decisions that must tell a file moved to another spelling from one in place, the relink
+// and recovery, also ask fsx.Lister whether the path is listed as spelled; the checks that
+// ask only whether a file can be played or is gone keep the plain stat.
 func pathExists(path []byte) bool {
 	_, err := os.Stat(pathx.Long(string(path)))
 	return err == nil

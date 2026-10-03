@@ -8,6 +8,7 @@ import (
 	"os"
 	"slices"
 
+	"github.com/colespringer/waxbin/internal/fsx"
 	"github.com/colespringer/waxbin/internal/pathx"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/waxerr"
@@ -199,7 +200,10 @@ func reachOf(path, root []byte, roots map[string]bool) reach {
 
 // fileByEssenceGoneTx returns the row a moved file relinks to: a file in the library with
 // the same essence whose path is gone from disk, one holding the same bytes first, then the
-// lowest id. A row still on disk is a copy, never a relink target. A row must back nothing
+// lowest id. A row still on disk under its own spelling is a copy, never a relink target;
+// one whose path resolves but whose spelling the folders no longer list (fsx.Lister) is the
+// file renamed between two spellings of its name outside WaxBin, which NTFS and APFS
+// resolve either way, and it relinks like any move. A row must back nothing
 // or one of the items in accept, the items the arriving file would join (a rip's row
 // backs a track per window, and a moved rip whose sheet changed one window still takes
 // its own row): relinking another item's row would hand the file over to it, or detach and
@@ -225,9 +229,17 @@ func fileByEssenceGoneTx(ctx context.Context, tx *sql.Tx, essence, content strin
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
+	if len(matches) == 0 {
+		return nil, nil
+	}
+	root, err := libraryRootTx(ctx, tx, libraryID)
+	if err != nil {
+		return nil, err
+	}
+	lister := fsx.NewLister()
 	var gone []*model.File
 	for _, f := range matches {
-		if pathExists(f.Path) {
+		if pathExists(f.Path) && lister.Spelled(root, string(f.Path)) {
 			continue
 		}
 		gone = append(gone, f)
@@ -243,6 +255,15 @@ func fileByEssenceGoneTx(ctx context.Context, tx *sql.Tx, essence, content strin
 		return gone[0], nil
 	}
 	return nil, nil
+}
+
+// libraryRootTx reads a library's root inside a transaction.
+func libraryRootTx(ctx context.Context, tx *sql.Tx, libraryID int64) (string, error) {
+	var root []byte
+	if err := tx.QueryRowContext(ctx, "SELECT root FROM library WHERE id = ?", libraryID).Scan(&root); err != nil {
+		return "", err
+	}
+	return string(root), nil
 }
 
 // resolvedItem is an item key resolution made earlier in the same transaction, so the

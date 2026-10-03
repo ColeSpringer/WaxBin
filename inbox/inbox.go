@@ -492,10 +492,9 @@ func (s *Service) Execute(ctx context.Context, plan *Plan) (*Report, error) {
 	spellers := map[int64]*fsx.Speller{}
 	speller := func(lib *model.Library) *fsx.Speller {
 		if spellers[lib.ID] == nil {
-			spellers[lib.ID] = fsx.NewSpeller(string(lib.Root), func(from, to string) {
-				if _, err := s.store.RespellFolder(context.WithoutCancel(ctx), from, to); err != nil {
-					s.log.Warn("import: respelling the catalog's paths", "from", from, "to", to, "err", err)
-				}
+			spellers[lib.ID] = fsx.NewSpeller(string(lib.Root), func(from, to string) error {
+				_, err := s.store.RespellFolder(context.WithoutCancel(ctx), from, to)
+				return err
 			})
 		}
 		return spellers[lib.ID]
