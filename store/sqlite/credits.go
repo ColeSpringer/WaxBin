@@ -294,29 +294,22 @@ func applyItemCreditsTx(ctx context.Context, tx *sql.Tx, e creditEntry, attr mod
 		resolved = append(resolved, name)
 	}
 
-	// Keep the denormalized column in step for the roles that carry one, and rebuild
-	// the search row for a book (whose FTS carries author + narrator).
-	ftsDirty, err := syncCreditDenormTx(ctx, tx, e.itemID, e.kind, e.role, resolved, firstID)
-	if err != nil {
+	// Keep the denormalized column in step for the roles that carry one, then rebuild
+	// the search row, whose credits column names every credited contributor.
+	if err := syncCreditDenormTx(ctx, tx, e.itemID, e.kind, e.role, resolved, firstID); err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
-	if ftsDirty {
-		// The rebuild is per kind: search_fts.artist for a track is artist +
-		// album artist, where a book's is author + narrator, so the book rebuild
-		// run against a track would write the wrong row.
-		rebuild := rebuildBookSearchFTSTx
-		if e.kind == string(model.KindTrack) {
-			rebuild = rebuildTrackSearchFTSTx
-		}
-		if err := rebuild(ctx, tx, e.itemID); err != nil {
-			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
-		}
+	if err := rebuildItemSearchFTSTx(ctx, tx, e.itemID, e.kind); err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
 
 	// Record the credit's provenance (value = the display list) under the caller's
 	// attribution and lock instruction.
 	if err := upsertEditProvenanceTx(ctx, tx, e.itemID, model.CreditField(e.role), attr,
 		strings.Join(resolved, "; "), lock, nowNS()); err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	if err := supersedeTwinTx(ctx, tx, e.itemID, model.CreditField(e.role), lock, affected); err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
 	return resolved, appendChange(ctx, tx, "item", e.pid, model.OpUpdate)
@@ -393,13 +386,12 @@ func creditRenameField(role model.ContributorRole) (string, bool) {
 	}
 }
 
-// syncCreditDenormTx updates the denormalized column a role feeds, returning whether
-// the item's search row must be rebuilt (true for a book author/narrator change).
-// The roles that carry a derived sort column (composer_sort, author_sort) regenerate
-// it from the new display, unless that sort is locked: a locked sort is curated
-// state the credit edit did not name, so it survives, exactly as it does on the
-// scalar edit path (the editTrackFieldsTx/editBookFieldsTx probes).
-func syncCreditDenormTx(ctx context.Context, tx *sql.Tx, itemID int64, kind string, role model.ContributorRole, names []string, firstArtistID int64) (bool, error) {
+// syncCreditDenormTx updates the denormalized column a role feeds. The roles that
+// carry a derived sort column (composer_sort, author_sort) regenerate it from the new
+// display, unless that sort is locked: a locked sort is curated state the credit edit
+// did not name, so it survives, exactly as it does on the scalar edit path (the
+// editTrackFieldsTx/editBookFieldsTx probes).
+func syncCreditDenormTx(ctx context.Context, tx *sql.Tx, itemID int64, kind string, role model.ContributorRole, names []string, firstArtistID int64) error {
 	switch {
 	case kind == string(model.KindTrack) && role == model.RoleArtist:
 		// Here the display IS rebuilt from the edited names, unlike the scan path,
@@ -407,17 +399,15 @@ func syncCreditDenormTx(ctx context.Context, tx *sql.Tx, itemID int64, kind stri
 		// no file text to stay faithful to. artist_sort follows because it has no edit
 		// surface of its own, so unlike composer_sort there is no lock to probe.
 		display := strings.Join(names, ", ")
-		if _, err := tx.ExecContext(ctx, "UPDATE track SET artist=?, artist_sort=?, artist_id=? WHERE item_id=?",
-			display, model.SortKey(display), nullInt64(firstArtistID), itemID); err != nil {
-			return false, err
-		}
-		return true, nil
+		_, err := tx.ExecContext(ctx, "UPDATE track SET artist=?, artist_sort=?, artist_id=? WHERE item_id=?",
+			display, model.SortKey(display), nullInt64(firstArtistID), itemID)
+		return err
 	case kind == string(model.KindTrack) && role == model.RoleComposer:
 		// The composer denormalization uses "; " (matching the scanner's multi-composer join).
 		display := strings.Join(names, "; ")
 		sortLocked, err := fieldLockedTx(ctx, tx, itemID, "composer_sort")
 		if err != nil {
-			return false, err
+			return err
 		}
 		if sortLocked {
 			_, err = tx.ExecContext(ctx, "UPDATE track SET composer=? WHERE item_id=?", display, itemID)
@@ -425,15 +415,12 @@ func syncCreditDenormTx(ctx context.Context, tx *sql.Tx, itemID int64, kind stri
 			_, err = tx.ExecContext(ctx, "UPDATE track SET composer=?, composer_sort=? WHERE item_id=?",
 				display, model.SortKey(display), itemID)
 		}
-		if err != nil {
-			return false, err
-		}
-		return false, nil
+		return err
 	case kind == string(model.KindBook) && role == model.RoleAuthor:
 		display := strings.Join(names, ", ")
 		sortLocked, err := fieldLockedTx(ctx, tx, itemID, "author_sort")
 		if err != nil {
-			return false, err
+			return err
 		}
 		if sortLocked {
 			_, err = tx.ExecContext(ctx, "UPDATE book SET author=?, author_id=? WHERE item_id=?",
@@ -442,43 +429,108 @@ func syncCreditDenormTx(ctx context.Context, tx *sql.Tx, itemID int64, kind stri
 			_, err = tx.ExecContext(ctx, "UPDATE book SET author=?, author_sort=?, author_id=? WHERE item_id=?",
 				display, model.SortKey(display), nullInt64(firstArtistID), itemID)
 		}
-		if err != nil {
-			return false, err
-		}
-		return true, nil
+		return err
 	case kind == string(model.KindBook) && role == model.RoleNarrator:
-		if _, err := tx.ExecContext(ctx, "UPDATE book SET narrator=? WHERE item_id=?",
-			strings.Join(names, ", "), itemID); err != nil {
-			return false, err
-		}
-		return true, nil
+		_, err := tx.ExecContext(ctx, "UPDATE book SET narrator=? WHERE item_id=?",
+			strings.Join(names, ", "), itemID)
+		return err
 	default:
-		// Other roles have no denormalized column; a track's non-composer credit does
-		// not feed its search row either.
-		return false, nil
+		// Other roles have no denormalized column.
+		return nil
 	}
 }
 
-// rebuildTrackSearchFTSTx reloads a track's current state and rewrites its search
-// row, so an artist credit change is reflected in search. The scan and scalar-edit
-// paths reach syncSearchFTS through resolveAndLinkEntities; the credit path is the
-// only one that rewrites track.artist without passing through it.
-func rebuildTrackSearchFTSTx(ctx context.Context, tx *sql.Tx, itemID int64) error {
-	tr, _, _, err := loadTrackForEditTx(ctx, tx, itemID)
+// The credits that denormalize into a column (artist and composer on a track, author
+// and narrator on a book) share it with that column's plain field, and owedTwins pairs
+// the two spellings. A scan reads them as one column (trackColumnOf, settleRederivedTx),
+// so the rest of the catalog does too: a lock on either spelling holds both
+// (lockedFieldSetTx, fieldLockedTx), and a write through one settles the other's
+// provenance row (supersedeTwinTx).
+
+// twinTable is the table holding each plain spelling's column.
+var twinTable = map[string]string{"artist": "track", "composer": "track", "author": "book", "narrator": "book"}
+
+// supersedeTwinTx settles a write through field, one spelling of a column it shares with
+// its twin. The twin's provenance row stops describing the column unless its value
+// reproduces what the write left there, so it is retired, as a scan's re-derive retires
+// it; its lock moves onto field's row unless the write set field's lock itself, so a
+// column locked through either spelling stays locked. A twin row that still describes
+// the column stays, and loses its lock when the write unlocked the column. A composer
+// credit retired this way takes its contributor rows (and their names in the search row)
+// with it, since a track's composer list only ever comes from that credit
+// (settleRederivedTx); the other credits re-split with the plain edit that superseded
+// them.
+func supersedeTwinTx(ctx context.Context, tx *sql.Tx, itemID int64, field string, lock model.LockChange, affected *affectedRollups) error {
+	twin, ok := owedTwins[field]
+	if !ok {
+		return nil
+	}
+	var value sql.NullString
+	var locked bool
+	err := tx.QueryRowContext(ctx, "SELECT value, locked FROM field_provenance WHERE item_id = ? AND field = ?",
+		itemID, twin).Scan(&value, &locked)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
 	if err != nil {
 		return err
 	}
-	return syncSearchFTS(ctx, tx, itemID, tr)
+	col := field
+	if _, credit := model.CutCreditPrefix(field); credit {
+		col = twin
+	}
+	var column string
+	if err := tx.QueryRowContext(ctx, "SELECT "+col+" FROM "+twinTable[col]+" WHERE item_id = ?", itemID).Scan(&column); err != nil {
+		return err
+	}
+	if value.Valid && twinReproduces(twin, value.String, column) {
+		if !locked || lock != model.LockOff {
+			return nil
+		}
+		_, err := tx.ExecContext(ctx, "UPDATE field_provenance SET locked = 0, updated_at = ? WHERE item_id = ? AND field = ?",
+			nowNS(), itemID, twin)
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, "DELETE FROM field_provenance WHERE item_id = ? AND field = ?", itemID, twin); err != nil {
+		return err
+	}
+	if locked && lock == model.LockUnchanged {
+		if _, err := tx.ExecContext(ctx,
+			"UPDATE field_provenance SET locked = 1 WHERE item_id = ? AND field = ?", itemID, field); err != nil {
+			return err
+		}
+	}
+	if twin != model.CreditField(model.RoleComposer) {
+		return nil
+	}
+	prior, err := contributorArtistIDsForRole(ctx, tx, itemID, model.RoleComposer)
+	if err != nil {
+		return err
+	}
+	for _, aid := range prior {
+		affected.artists[aid] = true
+	}
+	if _, err := tx.ExecContext(ctx, "DELETE FROM item_contributor WHERE item_id = ? AND role = ?",
+		itemID, string(model.RoleComposer)); err != nil {
+		return err
+	}
+	// The search row names every credited contributor.
+	return rebuildItemSearchFTSTx(ctx, tx, itemID, string(model.KindTrack))
 }
 
-// rebuildBookSearchFTSTx reloads a book's current state and rewrites its search row,
-// so an author/narrator credit change is reflected in search.
-func rebuildBookSearchFTSTx(ctx context.Context, tx *sql.Tx, itemID int64) error {
-	b, _, err := loadBookForEditTx(ctx, tx, itemID)
-	if err != nil {
-		return err
+// twinReproduces reports whether a twin's recorded value writes the column as it
+// stands: a credit's "; "-joined list displayed the way syncCreditDenormTx displays it,
+// or a plain field's value as is.
+func twinReproduces(twin, value, column string) bool {
+	role, credit := model.CutCreditPrefix(twin)
+	if !credit {
+		return value == column
 	}
-	return syncBookSearchFTS(ctx, tx, itemID, b, bookAuthorDisplay(b))
+	sep := ", "
+	if role == string(model.RoleComposer) {
+		sep = "; "
+	}
+	return strings.Join(strings.Split(value, "; "), sep) == column
 }
 
 // contributorNamesForRoleTx returns the names currently credited in one role, in

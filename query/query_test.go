@@ -515,6 +515,46 @@ func TestCompileSetValuesCaps(t *testing.T) {
 	}
 }
 
+// TestCompileLikePatternCap (PL-08): SQLite refuses a LIKE pattern over 50,000 bytes
+// when the statement runs, so a long contains, startsWith or endsWith value used to
+// compile, save as a rule, and then fail every read of it as an I/O error. The cap
+// counts the pattern as bound: the value with its metacharacters escaped, plus the
+// wildcards the operator adds.
+func TestCompileLikePatternCap(t *testing.T) {
+	t.Parallel()
+	a := func(n int) string { return strings.Repeat("a", n) }
+	for _, field := range []string{"title", "tag.MOOD"} {
+		for _, c := range []struct {
+			op query.Op
+			v  string
+			ok bool
+		}{
+			{query.OpContains, a(49998), true},
+			{query.OpContains, a(49999), false},
+			{query.OpStartsWith, a(49999), true},
+			{query.OpStartsWith, a(50000), false},
+			{query.OpEndsWith, a(49999), true},
+			{query.OpEndsWith, a(50000), false},
+			// Escaping doubles each metacharacter.
+			{query.OpContains, strings.Repeat("%", 24999), true},
+			{query.OpContains, strings.Repeat("%", 25000), false},
+			// The limit is bytes, not characters: three bytes each.
+			{query.OpContains, strings.Repeat("東", 16666), true},
+			{query.OpContains, strings.Repeat("東", 16667), false},
+		} {
+			_, err := query.Compile(query.New(query.EntityItems).Where(field, c.op, c.v).Build(), fieldsWithTag{})
+			switch {
+			case c.ok && err != nil:
+				t.Errorf("%s %s of %d bytes: %v, want it to compile", field, c.op, len(c.v), err)
+			case !c.ok && !waxerr.Is(err, waxerr.CodeInvalid):
+				t.Errorf("%s %s of %d bytes: err = %v, want CodeInvalid", field, c.op, len(c.v), err)
+			case !c.ok && (!strings.Contains(err.Error(), field) || !strings.Contains(err.Error(), string(c.op))):
+				t.Errorf("refusal %q does not name the field and the operator", err)
+			}
+		}
+	}
+}
+
 // TestWhereValuesCopiesSlice pins the defensive copy: a caller refilling one
 // scratch buffer must not have every condition it built compile against the last
 // group's values.

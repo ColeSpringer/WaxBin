@@ -112,7 +112,7 @@ func newEditCmd(g *globals) *cobra.Command {
 	f.BoolVar(&noLock, "no-lock", false, "unlock the edited fields (they default to locked)")
 	f.BoolVar(&keepLock, "keep-lock", false, keepLockUsage("the edited fields"))
 	cmd.MarkFlagsMutuallyExclusive("no-lock", "keep-lock")
-	f.BoolVar(&force, "force", false, "override a locked field")
+	f.BoolVar(&force, "force", false, "override a locked field, or the locked credit that fills it")
 	// Selection flags (mirror the query command).
 	f.StringVar(&qf.title, "title", "", "select items whose title matches (substring)")
 	f.StringVar(&qf.artist, "artist", "", "select items whose artist matches (substring)")

@@ -1551,7 +1551,7 @@ func populateReleaseGroupGenresTx(ctx context.Context, tx *sql.Tx, rgID int64, g
 		return nil
 	}
 	// The denormalized track.genre feeds the item display, the `--genre` query
-	// filter, and (on the next scan) the FTS row; set it too so an enrichment genre
+	// filter, and the search row; set it too so an enrichment genre
 	// is visible everywhere the facet/browse item_genre links already surface it,
 	// not only in genre browse.
 	genreDisplay := strings.Join(names, "; ")
@@ -1590,10 +1590,19 @@ func populateReleaseGroupGenresTx(ctx context.Context, tx *sql.Tx, rgID int64, g
 			}
 		}
 		// Fill the denormalized display column only when empty (never overwriting a
-		// tag; the member query already excluded items that carry a genre).
-		if _, err := tx.ExecContext(ctx,
-			"UPDATE track SET genre = ? WHERE item_id = ? AND (genre IS NULL OR genre = '')", genreDisplay, it.id); err != nil {
+		// tag; the member query already excluded items that carry a genre). The search
+		// row's extra column carries it.
+		r, err := tx.ExecContext(ctx,
+			"UPDATE track SET genre = ? WHERE item_id = ? AND (genre IS NULL OR genre = '')", genreDisplay, it.id)
+		if err != nil {
 			return err
+		}
+		if n, err := r.RowsAffected(); err != nil {
+			return err
+		} else if n > 0 {
+			if err := rebuildItemSearchFTSTx(ctx, tx, it.id, string(model.KindTrack)); err != nil {
+				return err
+			}
 		}
 		// Record that genres came from enrichment, and which provider supplied the
 		// display-primary genre, so future organize/enrichment respects them and a

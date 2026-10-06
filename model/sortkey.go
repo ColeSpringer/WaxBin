@@ -23,6 +23,23 @@ const (
 	kanaFoldShift = 0x60
 )
 
+// HiraganaOf maps a katakana letter onto its hiragana by the offset Fold uses, keeping
+// the voicing a precomposed letter carries, and any other rune to itself.
+func HiraganaOf(r rune) rune {
+	if r >= katakanaLo && r <= katakanaHi {
+		return r - kanaFoldShift
+	}
+	return r
+}
+
+// KatakanaOf is HiraganaOf the other way round.
+func KatakanaOf(r rune) rune {
+	if r >= katakanaLo-kanaFoldShift && r <= katakanaHi-kanaFoldShift {
+		return r + kanaFoldShift
+	}
+	return r
+}
+
 // SortKey derives a collation-friendly key from a display string so a portable
 // BINARY sort matches human expectations: folded to a plain lowercase form (see
 // Fold), leading articles stripped, embedded numbers zero-padded, and whitespace
@@ -78,10 +95,10 @@ func foldGeneral(s string) string {
 		switch {
 		case r < utf8.RuneSelf:
 			b.WriteByte(byte(r))
-		case r >= katakanaLo && r <= katakanaHi:
+		case HiraganaOf(r) != r:
 			// After the mark strip, so voiced "ガ" has already become "カ" and lands on
 			// the same "か" that voiced hiragana reaches.
-			b.WriteRune(r - kanaFoldShift)
+			b.WriteRune(HiraganaOf(r))
 		default:
 			if rep, ok := foldSpecial(r); ok {
 				b.WriteString(rep)

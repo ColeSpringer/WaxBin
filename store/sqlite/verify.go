@@ -69,9 +69,9 @@ func (r DerivedReport) Reclaimable() bool {
 }
 
 // VerifyDerived checks FTS coverage, the maintained rollups, and the generated
-// sort keys against the source rows. FTS field content is not diffed yet, only
-// coverage. It never writes: `db verify` surfaces the report and the operator
-// runs the matching repair.
+// sort keys against the source rows. FTS field content is not diffed, only
+// coverage; RebuildSearchIndex rewrites stale content. It never writes: `db verify`
+// surfaces the report and the operator runs the matching repair.
 func (s *Store) VerifyDerived(ctx context.Context) (*DerivedReport, error) {
 	const op = "store.VerifyDerived"
 	rep := &DerivedReport{}

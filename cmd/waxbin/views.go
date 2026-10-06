@@ -525,6 +525,7 @@ type searchHitView struct {
 	Title    string  `json:"title"`
 	Subtitle string  `json:"subtitle,omitempty"`
 	Score    float64 `json:"score"`
+	Exact    bool    `json:"exact,omitempty"`
 }
 
 type searchView struct {
@@ -550,7 +551,7 @@ func hitViews(hits []read.SearchHit) []searchHitView {
 	out := make([]searchHitView, 0, len(hits))
 	for _, h := range hits {
 		out = append(out, searchHitView{
-			PID: string(h.PID), Kind: h.Kind, Title: h.Title, Subtitle: h.Subtitle, Score: h.Score,
+			PID: string(h.PID), Kind: h.Kind, Title: h.Title, Subtitle: h.Subtitle, Score: h.Score, Exact: h.Exact,
 		})
 	}
 	return out
@@ -598,6 +599,8 @@ type derivedView struct {
 	Consistent         bool `json:"consistent"`
 	// Present only when --fix rewrote sort keys, which invalidates open page cursors.
 	SortKeysRewritten int `json:"sortKeysRewritten,omitempty"`
+	// Present only when --fix rewrote, wrote or dropped search rows.
+	SearchRowsRebuilt int `json:"searchRowsRebuilt,omitempty"`
 }
 
 func toDerivedView(r *sqlite.DerivedReport) derivedView {

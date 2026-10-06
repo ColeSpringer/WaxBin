@@ -23,7 +23,10 @@ func newSearchCmd(g *globals) *cobra.Command {
 		Long: "Searches catalog metadata (and podcast transcripts) and returns grouped, " +
 			"relevance-ranked results (artists, albums, tracks, books, episodes). Field " +
 			"weighting makes a title match outrank an artist/album match, which outranks a " +
-			"transcript-body match. Multiple words narrow the result (implicit AND, prefix-matched). " +
+			"transcript-body match. Multiple words narrow the result (each is prefix-matched and all must match). " +
+			"A word matches with or without its inner punctuation (\"krit\" finds Big K.R.I.T., " +
+			"\"Ke$ha\" and \"kesha\" find each other), either kana finds a Japanese title, and a word " +
+			"inside a CJK or Thai title is found; a query of symbols alone matches titles and artists spelled the same. " +
 			"--max-candidates bounds how many matches are ranked (the newest ones win under " +
 			"truncation), --library scopes the search to items playable from those libraries, " +
 			"and --state narrows it to items in those lifecycle states.",

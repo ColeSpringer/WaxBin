@@ -19,6 +19,8 @@ CREATE TABLE artist (
   mbid      TEXT                         -- not unique, not indexed; see above
 );
 CREATE INDEX artist_sort ON artist(sort_key);
+-- Search finds an artist by its match key with the spaces dropped, so "jayz" is Jay-Z.
+CREATE INDEX artist_joined_key ON artist(replace(match_key, ' ', ''));
 
 -- Alternate names for an artist (is_primary marks the canonical display name).
 CREATE TABLE artist_alias (

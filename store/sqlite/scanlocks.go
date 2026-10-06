@@ -25,8 +25,9 @@ import (
 // An unlocked item therefore costs an empty index probe, and a catalog with no locks
 // costs nothing.
 
-// lockedFieldSetTx returns the set of an item's locked fields, draining its cursor
-// before returning so the caller can write to the same transaction.
+// lockedFieldSetTx returns the set of an item's locked fields, a credit's twin included
+// (withTwinLocks), draining its cursor before returning so the caller can write to the
+// same transaction.
 func lockedFieldSetTx(ctx context.Context, tx *sql.Tx, itemID int64) (map[string]bool, error) {
 	rows, err := tx.QueryContext(ctx,
 		"SELECT field FROM field_provenance WHERE item_id=? AND locked=1", itemID)
@@ -45,7 +46,27 @@ func lockedFieldSetTx(ctx context.Context, tx *sql.Tx, itemID int64) (map[string
 		}
 		out[field] = true
 	}
+	withTwinLocks(out)
 	return out, rows.Err()
+}
+
+// withTwinLocks marks the twin of each locked spelling locked too: a credit and the field
+// it fills share one column (owedTwins), so a lock on either holds both.
+func withTwinLocks(locked map[string]bool) {
+	for f := range locked {
+		if twin, ok := owedTwins[f]; ok {
+			locked[twin] = true
+		}
+	}
+}
+
+// lockSpellings returns the spellings whose locks hold field: itself, and its twin when
+// it has one.
+func lockSpellings(field string) []string {
+	if twin, ok := owedTwins[field]; ok {
+		return []string{field, twin}
+	}
+	return []string{field}
 }
 
 // existingItemIDByIdentityTx resolves an item's rowid by (kind, identity_key),

@@ -120,8 +120,8 @@ SIGTERM).
   recomputing rollups.
 - `waxbin upgrade` groups alt encodings of the same recording (by fingerprint, or held
   by one item), ranks each group by quality, and marks the keeper.
-- `waxbin db verify --fix` repairs derived-data drift (FTS, rollups, album years, sort
-  keys) and reclaims orphaned art. `waxbin db vacuum` GCs and compacts the database.
+- `waxbin db verify --fix` repairs derived-data drift (the search index, rollups, album
+  years, sort keys) and reclaims orphaned art. `waxbin db vacuum` GCs and compacts the database.
 - `waxbin stats --year 2025` prints a per-user listening year-in-review.
 
 ### Curation & editing
@@ -141,7 +141,9 @@ of its own.
   album, year, and track/disc numbers.
 - `waxbin entity <pid> ...` edits a normalized entity's curated fields: a sort-name
   override, release identifiers such as barcode and label, and MusicBrainz IDs.
-- `waxbin credit <pid> ...` curates contributor roles such as composer and performer.
+- `waxbin credit <pid> ...` curates contributor roles such as composer and performer. A
+  credit and the field it fills (artist, composer, author, narrator) lock together, and
+  an edit through either one replaces the other.
 - `waxbin tag <pid> --key KEY --value V` sets a **custom tag**: a non-standard frame a
   file carries that WaxBin's typed model does not map, or one you add yourself.
   `waxbin tag <pid>` lists an item's tags, and `waxbin tag keys` lists every custom-tag

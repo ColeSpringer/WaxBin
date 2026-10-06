@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/colespringer/waxbin/model"
@@ -311,6 +312,39 @@ func TestItemByPlaylistPathMatching(t *testing.T) {
 	putTrack(t, st, lib.ID, trackSpec{path: nat("/lib/y/dup.flac"), essence: "ey", content: "cy", title: "Dy", artist: "X", album: "Al"})
 	if _, err := st.ItemByPlaylistPath(ctx, "dup.flac"); !waxerr.Is(err, waxerr.CodeNotFound) {
 		t.Errorf("ambiguous basename should be CodeNotFound, got %v", err)
+	}
+}
+
+// TestLikePatternAtTheCapRuns: a pattern of exactly SQLite's 50,000-byte limit runs, and
+// a rule one byte over it is refused when saved rather than failing every read.
+func TestLikePatternAtTheCapRuns(t *testing.T) {
+	t.Parallel()
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/1.flac", essence: "e1", content: "c1", title: "One", artist: "X", album: "Al"})
+	for _, q := range []query.Query{
+		query.New(query.EntityItems).Where("title", query.OpContains, strings.Repeat("a", 49998)).Build(),
+		query.New(query.EntityItems).Where("title", query.OpStartsWith, strings.Repeat("%", 24999)+"a").Build(),
+	} {
+		if items, err := st.QueryItems(ctx, q, ""); err != nil || len(items) != 0 {
+			t.Errorf("pattern at the cap = %d items (err %v), want none and no error", len(items), err)
+		}
+	}
+	rule := query.New(query.EntityItems).Where("title", query.OpContains, strings.Repeat("a", 49999)).Build()
+	if _, err := st.CreatePlaylist(ctx, "Long", "", model.PlaylistSmart, "", &rule); !waxerr.Is(err, waxerr.CodeInvalid) {
+		t.Errorf("saving a rule one byte over the cap: err = %v, want CodeInvalid", err)
+	}
+}
+
+// TestItemByPlaylistPathPastTheLikeCap: a relative entry too long for a LIKE pattern
+// names no file the catalog can hold, so it is not found rather than an I/O error.
+// SQLite checks the length per row, so the catalog holds a file.
+func TestItemByPlaylistPathPastTheLikeCap(t *testing.T) {
+	t.Parallel()
+	st, lib := entityFixture(t)
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/1.flac", essence: "e1", content: "c1", title: "One", artist: "X", album: "Al"})
+	if _, err := st.ItemByPlaylistPath(context.Background(), strings.Repeat("a/", 30000)+"x.flac"); !waxerr.Is(err, waxerr.CodeNotFound) {
+		t.Errorf("60,000-byte relative entry: err = %v, want CodeNotFound", err)
 	}
 }
 

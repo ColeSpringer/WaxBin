@@ -588,8 +588,12 @@ func (s *Store) ItemByPlaylistPath(ctx context.Context, p string) (*model.ItemVi
 		return nil, waxerr.New(waxerr.CodeNotFound, op, "no item at path: "+p)
 	}
 
-	// Relative entry: a unique path-suffix match on the display path.
-	pattern := "%" + escapeLike(string(filepath.Separator)+clean)
+	// Relative entry: a unique path-suffix match on the display path. A pattern past
+	// SQLite's LIKE limit names no path a file can have.
+	pattern := "%" + query.LikeEscape(string(filepath.Separator)+clean)
+	if len(pattern) > query.MaxLikePatternBytes {
+		return nil, waxerr.New(waxerr.CodeNotFound, op, "no unique item for relative path: "+p)
+	}
 	rows, err := s.read.QueryContext(ctx,
 		itemSelect+` WHERE f.display_path LIKE ? ESCAPE '\' LIMIT 2`, pattern)
 	if err != nil {
@@ -611,10 +615,4 @@ func (s *Store) ItemByPlaylistPath(ctx context.Context, p string) (*model.ItemVi
 		return matches[0], nil
 	}
 	return nil, waxerr.New(waxerr.CodeNotFound, op, "no unique item for relative path: "+p)
-}
-
-// escapeLike escapes LIKE metacharacters so a literal matches verbatim under
-// "LIKE ? ESCAPE '\\'".
-func escapeLike(s string) string {
-	return strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(s)
 }

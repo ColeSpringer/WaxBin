@@ -146,6 +146,11 @@ type Compiled struct {
 
 const likeEscape = '\\'
 
+// MaxLikePatternBytes is SQLite's limit on a LIKE pattern
+// (SQLITE_MAX_LIKE_PATTERN_LENGTH). A longer one fails when the statement runs, which
+// for a saved rule is every read of it, so the compiler refuses it instead.
+const MaxLikePatternBytes = 50000
+
 const (
 	// maxInValues caps one set-membership condition, matching idBatchSize in
 	// store/sqlite/rollups.go. A caller needing more should chunk as ItemsByPIDs does.
@@ -363,15 +368,13 @@ func compileCond(c Cond, fields Fields, sb *strings.Builder, args *[]any, nu *bo
 	case OpLte:
 		sb.WriteString(col.Expr + " <= ?")
 		*args = append(*args, c.Value)
-	case OpContains:
+	case OpContains, OpStartsWith, OpEndsWith:
+		p, err := likeArg(c)
+		if err != nil {
+			return err
+		}
 		sb.WriteString(likeExpr(col.Expr))
-		*args = append(*args, "%"+likePattern(c.Value)+"%")
-	case OpStartsWith:
-		sb.WriteString(likeExpr(col.Expr))
-		*args = append(*args, likePattern(c.Value)+"%")
-	case OpEndsWith:
-		sb.WriteString(likeExpr(col.Expr))
-		*args = append(*args, "%"+likePattern(c.Value))
+		*args = append(*args, p)
 	case OpInRange:
 		if len(c.Values) != 2 {
 			return waxerr.New(waxerr.CodeInvalid, "query.Compile",
@@ -560,18 +563,14 @@ func compileSetCond(c Cond, set *SetColumn, sb *strings.Builder, args *[]any) er
 		sb.WriteString("NOT EXISTS (" + set.Sub + " AND " + set.ValueExpr + " IN " + placeholderList(len(c.Values)) + ")")
 		*args = append(*args, set.Args...)
 		*args = append(*args, c.Values...)
-	case OpContains:
+	case OpContains, OpStartsWith, OpEndsWith:
+		p, err := likeArg(c)
+		if err != nil {
+			return err
+		}
 		sb.WriteString("EXISTS (" + set.Sub + " AND " + likeExpr(set.ValueExpr) + ")")
 		*args = append(*args, set.Args...)
-		*args = append(*args, "%"+likePattern(c.Value)+"%")
-	case OpStartsWith:
-		sb.WriteString("EXISTS (" + set.Sub + " AND " + likeExpr(set.ValueExpr) + ")")
-		*args = append(*args, set.Args...)
-		*args = append(*args, likePattern(c.Value)+"%")
-	case OpEndsWith:
-		sb.WriteString("EXISTS (" + set.Sub + " AND " + likeExpr(set.ValueExpr) + ")")
-		*args = append(*args, set.Args...)
-		*args = append(*args, "%"+likePattern(c.Value))
+		*args = append(*args, p)
 	default:
 		return waxerr.New(waxerr.CodeInvalid, "query.Compile",
 			fmt.Sprintf("operator %q not supported on a set field", c.Op))
@@ -640,14 +639,34 @@ func likeExpr(expr string) string {
 	return expr + " LIKE ? ESCAPE '" + string(likeEscape) + "'"
 }
 
-// likePattern stringifies a value and escapes LIKE metacharacters so a literal
-// % or _ in user input matches itself.
-func likePattern(v any) string {
-	s := fmt.Sprint(v)
-	r := strings.NewReplacer(
-		string(likeEscape), string(likeEscape)+string(likeEscape),
-		"%", string(likeEscape)+"%",
-		"_", string(likeEscape)+"_",
-	)
-	return r.Replace(s)
+// likeArg builds the pattern a contains, startsWith or endsWith condition binds: its
+// value with the LIKE metacharacters escaped, and the wildcards the operator adds. One
+// over MaxLikePatternBytes is refused.
+func likeArg(c Cond) (string, error) {
+	p := LikeEscape(fmt.Sprint(c.Value))
+	switch c.Op {
+	case OpContains:
+		p = "%" + p + "%"
+	case OpStartsWith:
+		p += "%"
+	case OpEndsWith:
+		p = "%" + p
+	}
+	if len(p) > MaxLikePatternBytes {
+		return "", waxerr.New(waxerr.CodeInvalid, "query.Compile",
+			fmt.Sprintf("%s on %q makes a %d-byte LIKE pattern, over the %d-byte limit", c.Op, c.Field, len(p), MaxLikePatternBytes))
+	}
+	return p, nil
+}
+
+var likeReplacer = strings.NewReplacer(
+	string(likeEscape), string(likeEscape)+string(likeEscape),
+	"%", string(likeEscape)+"%",
+	"_", string(likeEscape)+"_",
+)
+
+// LikeEscape escapes the LIKE metacharacters in s, so a literal % or _ matches itself
+// under the ESCAPE clause the compiler writes (backslash).
+func LikeEscape(s string) string {
+	return likeReplacer.Replace(s)
 }

@@ -55,49 +55,60 @@ func (s *Store) setLock(ctx context.Context, itemPID model.PID, field string, lo
 			}
 		}
 		// Idempotent: if the field is already in the desired lock state, do nothing
-		// and emit no delta. Without this, unlocking a field with no row would
-		// upsert and delete a tag row while still publishing a spurious item change.
+		// and emit no delta, so a repeated lock or unlock publishes no spurious item
+		// change. A credit's twin counts, so locking a column already locked through the
+		// other spelling is a no-op, and unlocking it clears both.
 		if cur, err := fieldLockedTx(ctx, tx, itemID, field); err != nil {
 			return err
 		} else if cur == locked {
 			return nil
 		}
 		now := nowNS()
-		// Upsert: a new row defaults to source='tag' (the value is still the tag's);
-		// an existing row keeps its source/value and only flips the lock bit.
-		if _, err := tx.ExecContext(ctx, `INSERT INTO field_provenance(item_id, field, source, locked, updated_at)
-			VALUES (?,?,?,?,?)
-			ON CONFLICT(item_id, field) DO UPDATE SET locked=excluded.locked, updated_at=excluded.updated_at`,
-			itemID, field, string(model.SourceTag), boolInt(locked), now); err != nil {
-			return waxerr.Wrap(waxerr.CodeIO, op, err)
-		}
-		// Keep the table sparse: drop a row that now carries neither a lock nor a
-		// non-tag provenance nor a curated value. An art row goes whatever source it
-		// carries, because art keeps no value here in any role (the bytes and their real
-		// attribution live in art_map) and this command has no artifact to attribute, so
-		// it guesses "tag" where a curation set records what it was told. Without the
-		// exception an `art lock` followed by `unlock <pid> art` would strand an inert
-		// row claiming a cover that does not exist, and the same for a role slot after
-		// `unlock <pid> art.back`. A kind row goes the same way: it records no value, and
-		// once unlocked the next scan derives the kind again, so a row naming who chose it
-		// would report a choice that no longer holds. The exception stops there: chapters,
-		// lyrics and acquisition record a real user attribution with no overlay to
-		// re-report it, so dropping their row would destroy the only record that the
-		// artifact was curated.
-		if !locked {
-			const sparse = `DELETE FROM field_provenance
-				WHERE item_id=? AND field=? AND locked=0 AND (value IS NULL OR value='')`
-			q, args := sparse+" AND source=?", []any{itemID, field, string(model.SourceTag)}
-			_, isRole := model.CutArtRolePrefix(field)
-			if field == "art" || isRole || field == model.KindLockField {
-				q, args = sparse, []any{itemID, field}
+		if locked {
+			// Upsert: a new row defaults to source='tag' (the value is still the tag's);
+			// an existing row keeps its source/value and only flips the lock bit.
+			if _, err := tx.ExecContext(ctx, `INSERT INTO field_provenance(item_id, field, source, locked, updated_at)
+				VALUES (?,?,?,1,?) ON CONFLICT(item_id, field) DO UPDATE SET locked=1, updated_at=excluded.updated_at`,
+				itemID, field, string(model.SourceTag), now); err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
-			if _, err := tx.ExecContext(ctx, q, args...); err != nil {
+			return appendChange(ctx, tx, "item", itemPID, model.OpUpdate)
+		}
+		for _, f := range lockSpellings(field) {
+			if _, err := tx.ExecContext(ctx, `UPDATE field_provenance SET locked=0, updated_at=?
+				WHERE item_id=? AND field=? AND locked=1`, now, itemID, f); err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+			if err := dropUnlockedRowTx(ctx, tx, itemID, f); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 		}
 		return appendChange(ctx, tx, "item", itemPID, model.OpUpdate)
 	})
+}
+
+// dropUnlockedRowTx keeps the table sparse after an unlock: it drops a row that now
+// carries neither a lock nor a non-tag provenance nor a curated value. An art row goes
+// whatever source it carries, because art keeps no value here in any role (the bytes and
+// their real attribution live in art_map) and this command has no artifact to attribute,
+// so it guesses "tag" where a curation set records what it was told. Without the
+// exception an `art lock` followed by `unlock <pid> art` would strand an inert row
+// claiming a cover that does not exist, and the same for a role slot after `unlock <pid>
+// art.back`. A kind row goes the same way: it records no value, and once unlocked the
+// next scan derives the kind again, so a row naming who chose it would report a choice
+// that no longer holds. The exception stops there: chapters, lyrics and acquisition
+// record a real user attribution with no overlay to re-report it, so dropping their row
+// would destroy the only record that the artifact was curated.
+func dropUnlockedRowTx(ctx context.Context, tx *sql.Tx, itemID int64, field string) error {
+	const sparse = `DELETE FROM field_provenance
+		WHERE item_id=? AND field=? AND locked=0 AND (value IS NULL OR value='')`
+	q, args := sparse+" AND source=?", []any{itemID, field, string(model.SourceTag)}
+	_, isRole := model.CutArtRolePrefix(field)
+	if field == "art" || isRole || field == model.KindLockField {
+		q, args = sparse, []any{itemID, field}
+	}
+	_, err := tx.ExecContext(ctx, q, args...)
+	return err
 }
 
 // checkFieldAttribution is the single gate every scalar curation write runs its
@@ -271,7 +282,8 @@ func (s *Store) overlayArtifact(ctx context.Context, itemPID model.PID, itemID i
 
 // LockedFields returns the set of an item's locked fields in one query, so a writer
 // checking several fields (organize tag write-back) does not issue one SELECT per
-// field. An item with no locks returns an empty (non-nil) map.
+// field. A credit and the field it fills are both in it when either is locked. An item
+// with no locks returns an empty (non-nil) map.
 func (s *Store) LockedFields(ctx context.Context, itemPID model.PID) (map[string]bool, error) {
 	rows, err := s.read.QueryContext(ctx, `SELECT fp.field
 		FROM field_provenance fp JOIN playable_item pi ON pi.id = fp.item_id
@@ -288,39 +300,39 @@ func (s *Store) LockedFields(ctx context.Context, itemPID model.PID) (map[string
 		}
 		out[field] = true
 	}
+	withTwinLocks(out)
 	return out, rows.Err()
 }
 
-// IsFieldLocked reports whether an item field is locked. It is the guard a writer
-// (organize tag write-back, enrichment) calls before overwriting a field, so
-// curated data survives. A missing row means unlocked.
+// IsFieldLocked reports whether an item field is locked, through its own row or its
+// twin's (lockSpellings). It is the guard a writer (organize tag write-back,
+// enrichment) calls before overwriting a field, so curated data survives. A missing
+// row means unlocked.
 func (s *Store) IsFieldLocked(ctx context.Context, itemPID model.PID, field string) (bool, error) {
-	var locked int
-	err := s.read.QueryRowContext(ctx, `SELECT fp.locked
+	spellings := lockSpellings(field)
+	var locked bool
+	err := s.read.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1
 		FROM field_provenance fp JOIN playable_item pi ON pi.id = fp.item_id
-		WHERE pi.pid = ? AND fp.field = ?`, string(itemPID), field).Scan(&locked)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
-	}
+		WHERE pi.pid = ? AND fp.locked = 1 AND fp.field IN `+placeholders(len(spellings))+`)`,
+		append([]any{string(itemPID)}, anySlice(spellings)...)...).Scan(&locked)
 	if err != nil {
 		return false, waxerr.Wrap(waxerr.CodeIO, "store.IsFieldLocked", err)
 	}
-	return locked == 1, nil
+	return locked, nil
 }
 
-// fieldLockedTx reports whether an item field is locked in field_provenance. It takes
-// a queryer for the same reason entityFieldLockedTx does.
+// fieldLockedTx reports whether an item field is locked in field_provenance, through
+// its own row or its twin's. It takes a queryer for the same reason
+// entityFieldLockedTx does.
 func fieldLockedTx(ctx context.Context, q queryer, itemID int64, field string) (bool, error) {
-	var locked int
-	err := q.QueryRowContext(ctx,
-		"SELECT locked FROM field_provenance WHERE item_id=? AND field=?", itemID, field).Scan(&locked)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
-	}
+	spellings := lockSpellings(field)
+	var locked bool
+	err := q.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM field_provenance WHERE item_id = ? AND locked = 1 AND field IN "+
+		placeholders(len(spellings))+")", append([]any{itemID}, anySlice(spellings)...)...).Scan(&locked)
 	if err != nil {
 		return false, waxerr.Wrap(waxerr.CodeIO, "store.fieldLocked", err)
 	}
-	return locked == 1, nil
+	return locked, nil
 }
 
 // itemIDByPID resolves a public item id to its rowid, or CodeNotFound.

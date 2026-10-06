@@ -775,25 +775,12 @@ func dedupGenres(genres []string) []string {
 	return out
 }
 
-// syncSearchFTS rebuilds the item's metadata FTS row (rowid == item id). The
-// table is writer-maintained with no triggers, so the delete-then-insert keeps
-// it consistent inside the mutating transaction.
+// syncSearchFTS rebuilds a track's search row (trackSearchRowTx) from the values the
+// caller just stored.
 func syncSearchFTS(ctx context.Context, tx *sql.Tx, itemID int64, tr model.Track) error {
-	if _, err := tx.ExecContext(ctx, "DELETE FROM search_fts WHERE rowid = ?", itemID); err != nil {
-		return err
-	}
-	var title string
-	if err := tx.QueryRowContext(ctx, "SELECT title FROM playable_item WHERE id = ?", itemID).Scan(&title); err != nil {
-		return err
-	}
-	artist := strings.TrimSpace(tr.Artist + " " + tr.AlbumArtist)
-	custom, err := itemCustomTagText(ctx, tx, itemID)
+	r, err := trackSearchRowTx(ctx, tx, itemID, tr)
 	if err != nil {
 		return err
 	}
-	extra := strings.TrimSpace(tr.Genre + " " + custom)
-	_, err = tx.ExecContext(ctx,
-		"INSERT INTO search_fts(rowid, kind, title, subtitle, artist, album, extra) VALUES (?,?,?,?,?,?,?)",
-		itemID, string(model.KindTrack), title, "", artist, tr.Album, extra)
-	return err
+	return writeSearchRowTx(ctx, tx, itemID, r)
 }

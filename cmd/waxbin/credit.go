@@ -32,7 +32,8 @@ func newCreditCmd(g *globals) *cobra.Command {
 		Long: "Without --role, lists an item's contributors across every role. With --role, " +
 			"replaces that role's contributors with the given --name values (repeatable; none " +
 			"clears the role). A credit records user provenance and, by default, locks the " +
-			"credit.<role> field. --write-back also mirrors the credit into the file's on-disk " +
+			"credit.<role> field; an artist, composer, author or narrator credit shares that lock " +
+			"with the field it fills. --write-back also mirrors the credit into the file's on-disk " +
 			"tag (a track's music role, or a book's author/narrator across its parts).\n\n" +
 			"--batch sets several credits instead: a JSON array of {\"itemPid\": ..., \"role\": " +
 			"..., \"names\": [...]} entries (\"-\" reads stdin), applied in one atomic catalog " +
@@ -79,7 +80,7 @@ func newCreditCmd(g *globals) *cobra.Command {
 	f.BoolVar(&noLock, "no-lock", false, "unlock the credit (it defaults to locked)")
 	f.BoolVar(&keepLock, "keep-lock", false, keepLockUsage("the credit"))
 	cmd.MarkFlagsMutuallyExclusive("no-lock", "keep-lock")
-	f.BoolVar(&force, "force", false, "override a locked credit role")
+	f.BoolVar(&force, "force", false, "override a locked credit role, or the locked field it fills")
 	f.StringVar(&batchPath, "batch", "", "set several credits from a JSON file (\"-\" = stdin)")
 	f.BoolVar(&dryRun, "dry-run", false, "preview the edit without applying it")
 	f.BoolVar(&assumeYes, "yes", false, "apply a batch without the preview gate")

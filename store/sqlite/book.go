@@ -265,7 +265,7 @@ func (s *Store) PutScannedBook(ctx context.Context, in model.PutScannedBookInput
 			// directly or a custom-tag change on the primary part, or a re-derived title,
 			// would not be searchable until the next audio change. tagsChanged is only ever
 			// set for the primary part.
-			if err := rebuildBookSearchFTSTx(ctx, tx, itemID); err != nil {
+			if err := rebuildItemSearchFTSTx(ctx, tx, itemID, string(model.KindBook)); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 		}
@@ -1123,26 +1123,14 @@ func chaptersInSync(ctx context.Context, tx *sql.Tx, bookItemID, fileID int64, s
 	return true, nil
 }
 
-// syncBookSearchFTS rebuilds a book's metadata FTS row (rowid == item id). Title
-// carries the heaviest weight; the author sits in the artist column, the series in
-// the album column, and the narrator plus genre in the low-weighted extra field.
+// syncBookSearchFTS rebuilds a book's search row (bookSearchRowTx) from the values
+// the caller just stored, author being the display the book row holds.
 func syncBookSearchFTS(ctx context.Context, tx *sql.Tx, itemID int64, b model.Book, author string) error {
-	if _, err := tx.ExecContext(ctx, "DELETE FROM search_fts WHERE rowid = ?", itemID); err != nil {
-		return err
-	}
-	var title string
-	if err := tx.QueryRowContext(ctx, "SELECT title FROM playable_item WHERE id = ?", itemID).Scan(&title); err != nil {
-		return err
-	}
-	custom, err := itemCustomTagText(ctx, tx, itemID)
+	r, err := bookSearchRowTx(ctx, tx, itemID, b, author)
 	if err != nil {
 		return err
 	}
-	extra := strings.TrimSpace(b.Narrator + " " + b.Genre + " " + custom)
-	_, err = tx.ExecContext(ctx,
-		"INSERT INTO search_fts(rowid, kind, title, subtitle, artist, album, extra) VALUES (?,?,?,?,?,?,?)",
-		itemID, string(model.KindBook), title, b.Subtitle, author, b.Series, extra)
-	return err
+	return writeSearchRowTx(ctx, tx, itemID, r)
 }
 
 // nullBool renders an optional bool as a nullable INTEGER (NULL when unknown).

@@ -51,19 +51,31 @@ type SearchOptions struct {
 
 // SearchHit is one ranked search result: an entity reference plus its display
 // fields and BM25 score. Score is the SQLite bm25 value, where a lower (more
-// negative) score is a better match; consumers order ascending.
+// negative) score is a better match; an artist or album hit carries the score of the
+// best item row that brought it in, or, found by its own name alone, the best score the
+// search read. A query of symbols alone has no bm25, so its hits score 0.
 type SearchHit struct {
 	PID      model.PID
 	Kind     string  // artist|album|track|book|episode
-	Title    string  // primary display (track/album/book title, or artist name)
+	Title    string  // primary display (track/album/book title, or the artist's or album's own name)
 	Subtitle string  // secondary display (artist for a track/album, author for a book; empty for an artist)
 	Score    float64 // bm25; lower is a better match
+	// Exact marks an artist or album whose own name is the query: the same match key,
+	// the same key once spaces are dropped ("jayz" is Jay-Z), or for a query of
+	// symbols alone the same sort key.
+	Exact bool
 }
 
-// SearchResult is the grouped, BM25-ranked answer for one query string. Metadata
-// hits (artists/albums/tracks) come from the metadata FTS with field weighting so
-// a title hit outranks artist and album hits. Episodes are reserved for
-// transcript-backed podcast search and stay empty until transcript indexing exists.
+// SearchResult is the grouped answer for one query string, and each group's order is
+// authoritative. Tracks, books and episodes come in BM25 order from the metadata FTS,
+// whose field weighting makes a title hit outrank an artist or album hit; episodes
+// whose transcript matches follow the episodes whose metadata does. A query of symbols
+// alone ("$", "!!!") has no words to rank, so its items, found by title or artist, come
+// newest first. Artists and albums are ranked on their own names first (exact, then
+// the query beginning a word of the name, then every query word inside it, then the
+// rest), and within that by the best item row that brought them in, so a track titled
+// after an artist cannot put its own performer ahead of that artist. Scores are
+// therefore not comparable across an entity group's tiers.
 type SearchResult struct {
 	Query    string
 	Artists  []SearchHit

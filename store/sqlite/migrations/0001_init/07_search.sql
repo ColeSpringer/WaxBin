@@ -22,12 +22,15 @@ CREATE TABLE genre_rollup (
 );
 
 -- Writer-maintained metadata FTS (no triggers): rowid == playable_item.id, kept
--- in sync inside the same write transaction that mutates the item.
+-- in sync inside the same write transaction that mutates the item. Each column
+-- holds its NFC text followed by the alternate forms of its words (searchtext.go),
+-- and the mark categories keep an Indic or Thai word whole.
 CREATE VIRTUAL TABLE search_fts USING fts5(
-  kind, title, subtitle, artist, album, extra,
-  tokenize = 'unicode61 remove_diacritics 2');
+  kind UNINDEXED, title, subtitle, artist, album, extra, credits,
+  tokenize = "unicode61 remove_diacritics 2 categories 'L* N* Co M*'");
 
--- Transcript text lives in its own FTS so a metadata hit can outrank a body hit.
+-- Transcript text lives in its own FTS so a metadata hit can outrank a body hit. The
+-- body is indexed with the script folds of the search columns (searchtext.go).
 CREATE VIRTUAL TABLE transcript_fts USING fts5(
   episode_id UNINDEXED, body,
-  tokenize = 'unicode61 remove_diacritics 2');
+  tokenize = "unicode61 remove_diacritics 2 categories 'L* N* Co M*'");

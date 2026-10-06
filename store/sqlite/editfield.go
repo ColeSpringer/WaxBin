@@ -320,6 +320,9 @@ func applyItemEditTx(ctx context.Context, tx *sql.Tx, log logger, itemPID model.
 		if err := upsertEditProvenanceTx(ctx, tx, itemID, f, attr, norm[f], lock, now); err != nil {
 			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
+		if err := supersedeTwinTx(ctx, tx, itemID, f, lock, affected); err != nil {
+			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
 	}
 	// A total the edit cleared beside a number is recorded as the edit's, but never
 	// locked by it: the next edit sets that total without force, and a locked number
@@ -610,9 +613,9 @@ func editTrackFieldsTx(ctx context.Context, tx *sql.Tx, log logger, itemID int64
 		if err := affected.collect(ctx, tx, itemID); err != nil {
 			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
-	case touchTitle:
-		// A title-only edit still needs its FTS row rebuilt, since title is the heaviest
-		// search field. The entity branch above already does this when it runs.
+	case touchTitle || editedComposer:
+		// The title and the composer feed the search row too, and the entity branch
+		// above is what rebuilds it otherwise.
 		if err := syncSearchFTS(ctx, tx, itemID, tr); err != nil {
 			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
@@ -687,7 +690,8 @@ func editBookFieldsTx(ctx context.Context, tx *sql.Tx, itemID int64, fields []st
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 	case touchTitle:
-		if err := syncBookSearchFTS(ctx, tx, itemID, b, bookAuthorDisplay(b)); err != nil {
+		// The book row is not rewritten, so the row indexes the author it stores.
+		if err := syncBookSearchFTS(ctx, tx, itemID, b, b.Author); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 	}
@@ -1017,12 +1021,12 @@ func loadTrackForEditTx(ctx context.Context, tx *sql.Tx, itemID int64) (model.Tr
 
 // readTrackColumnsTx reads a track row's denormalized columns, the values upsertTrack
 // writes. A missing row is sql.ErrNoRows.
-func readTrackColumnsTx(ctx context.Context, tx *sql.Tx, itemID int64) (model.Track, error) {
+func readTrackColumnsTx(ctx context.Context, q queryer, itemID int64) (model.Track, error) {
 	tr := model.Track{ItemID: itemID}
 	var trackNo, trackTotal, discNo, discTotal, year, bpm sql.NullInt64
 	var compilation int
 	var mbid sql.NullString
-	err := tx.QueryRowContext(ctx, `SELECT artist, artist_sort, album, album_artist, composer, composer_sort,
+	err := q.QueryRowContext(ctx, `SELECT artist, artist_sort, album, album_artist, composer, composer_sort,
 		comment, track_no, track_total, disc_no, disc_total, year, bpm, genre, compilation, isrc, mbid
 		FROM track WHERE item_id = ?`, itemID).Scan(
 		&tr.Artist, &tr.ArtistSort, &tr.Album, &tr.AlbumArtist, &tr.Composer, &tr.ComposerSort,

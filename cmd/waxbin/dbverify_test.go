@@ -41,3 +41,52 @@ func TestDBVerifyReportsAndFixesAlbumYearDrift(t *testing.T) {
 		t.Fatalf("db verify --fix = %d drift (err %v), want 0 and success", n, err)
 	}
 }
+
+// TestDBVerifyFixRebuildsTheSearchIndex: a search row gone stale is something `db
+// verify` cannot see (it counts rows), so --fix rebuilds the index and says how many
+// rows it wrote.
+func TestDBVerifyFixRebuildsTheSearchIndex(t *testing.T) {
+	db, root, _ := creditCLIFixture(t)
+	raw, err := sql.Open("sqlite", "file:"+db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = raw.Close() })
+	if _, err := raw.Exec("UPDATE search_fts SET title = 'outdated words'"); err != nil {
+		t.Fatalf("stale the row by hand: %v", err)
+	}
+	_ = raw.Close()
+
+	out, err := runCLIJSON(t, db, root, "db", "verify", "--fix")
+	if err != nil {
+		t.Fatalf("db verify --fix: %v", err)
+	}
+	var env struct {
+		Data struct {
+			SearchRowsRebuilt int `json:"searchRowsRebuilt"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(out), &env); err != nil {
+		t.Fatalf("db verify --fix printed %q: %v", out, err)
+	}
+	if env.Data.SearchRowsRebuilt != 1 {
+		t.Errorf("searchRowsRebuilt = %d, want 1", env.Data.SearchRowsRebuilt)
+	}
+	for q, want := range map[string]int{"outdated": 0, "song": 1} {
+		out, err := runCLIJSON(t, db, root, "search", q)
+		if err != nil {
+			t.Fatalf("search %q: %v", q, err)
+		}
+		var res struct {
+			Data struct {
+				Tracks []struct{} `json:"tracks"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal([]byte(out), &res); err != nil {
+			t.Fatalf("search printed %q: %v", out, err)
+		}
+		if len(res.Data.Tracks) != want {
+			t.Errorf("search %q = %d tracks, want %d", q, len(res.Data.Tracks), want)
+		}
+	}
+}

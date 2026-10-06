@@ -360,15 +360,15 @@ func newDBMigrateCmd(g *globals) *cobra.Command {
 
 func newDBVerifyCmd(g *globals) *cobra.Command {
 	var fix bool
-	var resorted int
+	var resorted, reindexed int
 	cmd := &cobra.Command{
 		Use:   "verify",
 		Short: "Check derived data (FTS, rollups, sort keys, book durations, album years) against the source rows",
 		Long: "Runs the derived-data consistency check: the writer-maintained FTS, " +
 			"rollups, and generated sort keys are compared against a fresh recompute from " +
 			"the source rows. Reports drift; --fix recomputes the maintained rollups, " +
-			"book durations and album years and refolds stale sort keys first. Exits " +
-			"non-zero when any drift remains.",
+			"book durations and album years, refolds stale sort keys and rebuilds stale " +
+			"search rows first. Exits non-zero when any drift remains.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			// --fix recomputes rollups and reclaims orphaned art, so it needs the
 			// write lock; a plain verify is read-only and runs alongside a writer.
@@ -408,6 +408,10 @@ func newDBVerifyCmd(g *globals) *cobra.Command {
 				if _, err := lib.GCStrandedTagKeys(ctx(cmd)); err != nil {
 					return err
 				}
+				// Last, so it indexes what the steps above left.
+				if reindexed, err = lib.RebuildSearchIndex(ctx(cmd)); err != nil {
+					return err
+				}
 			}
 
 			rep, err := lib.VerifyDerived(ctx(cmd))
@@ -418,6 +422,7 @@ func newDBVerifyCmd(g *globals) *cobra.Command {
 			if g.jsonOut {
 				view := toDerivedView(rep)
 				view.SortKeysRewritten = resorted
+				view.SearchRowsRebuilt = reindexed
 				if err := printJSON(cmd, view); err != nil {
 					return err
 				}
@@ -441,6 +446,9 @@ func newDBVerifyCmd(g *globals) *cobra.Command {
 				if resorted > 0 {
 					fmt.Fprintf(w, "sort keys rewritten:      %d (re-page any open cursors)\n", resorted)
 				}
+				if fix {
+					fmt.Fprintf(w, "search rows rebuilt:      %d\n", reindexed)
+				}
 				// Orphaned art and stranded tag provenance are reclaimable garbage,
 				// not corruption, so they do not fail the check; point the operator
 				// at --fix to reclaim them.
@@ -460,6 +468,6 @@ func newDBVerifyCmd(g *globals) *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().BoolVar(&fix, "fix", false, "recompute rollups, book durations and album years, refold stale sort keys, and reclaim orphaned art and tag provenance before verifying (takes the write lock)")
+	cmd.Flags().BoolVar(&fix, "fix", false, "recompute rollups, book durations and album years, refold stale sort keys, reclaim orphaned art and tag provenance, and rebuild stale search rows before verifying (takes the write lock)")
 	return cmd
 }

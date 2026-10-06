@@ -1412,6 +1412,14 @@ func (l *Library) RefreshSortKeys(ctx context.Context) (int, error) {
 	return l.store.RefreshSortKeys(ctx)
 }
 
+// RebuildSearchIndex rewrites every search row that has drifted from its item's
+// stored state, writes the ones items lack and drops the ones no item backs, and
+// returns how many it wrote or dropped. VerifyDerived counts search rows but does not
+// read them, so this is the only repair for a row gone stale.
+func (l *Library) RebuildSearchIndex(ctx context.Context) (int, error) {
+	return l.store.RebuildSearchIndex(ctx)
+}
+
 // AuditOptions selects which audit checks run.
 type AuditOptions struct {
 	// Only, when non-empty, restricts the run to these checks.

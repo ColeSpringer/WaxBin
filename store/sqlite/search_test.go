@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -10,6 +11,7 @@ import (
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/read"
 	"github.com/colespringer/waxbin/waxerr"
+	"golang.org/x/text/unicode/norm"
 )
 
 func TestSearchGroupsAndMatches(t *testing.T) {
@@ -94,12 +96,30 @@ func TestSearchEmptyAndPunctuationQuery(t *testing.T) {
 func TestFTSMatchQuery(t *testing.T) {
 	t.Parallel()
 	cases := map[string]string{
-		"Beatles":     "beatles*",
-		"AC/DC":       "ac* dc*",
-		"  hello  ":   "hello*",
-		"!!!":         "",
-		"Sgt. Pepper": "sgt* pepper*",
-		"OR":          "or*", // lowercased: a plain term, not the FTS operator
+		"Beatles":                  `"beatles"*`,
+		"AC/DC":                    `("ac dc"* OR "acdc"* OR ("ac"* AND "dc"*))`,
+		"  hello  ":                `"hello"*`,
+		"!!!":                      "",
+		"$":                        "",
+		"Sgt. Pepper":              `"sgt"* AND "pepper"*`,
+		"OR":                       `"or"*`, // inside quotes: a plain term, not the FTS operator
+		`say "hi"`:                 `"say"* AND "hi"*`,
+		"Pi'erre":                  `("pi erre"* OR "pierre"* OR ("pi"* AND "erre"*))`,
+		"ガンダム・シード":                 `("ガンダム シード"* OR "がんだむ しーど"* OR "ガンダムシード"* OR "がんだむしーど"* OR ("がんだむ"* AND "しーど"*))`,
+		"Ty Dolla $ign":            `"ty"* AND "dolla"* AND ("ign"* OR "sign"*)`,
+		"Ty & Dolla":               `"ty"* AND "dolla"*`,
+		"スパイス":                     `("スパイス"* OR "すぱいす"* OR "すぱ ぱい いす")`,
+		"東京":                       `"東京"*`,
+		"がんだむ":                     `("がんだむ"* OR "がん んだ だむ")`,
+		"Ｆｕｌｌ":                     `("ｆｕｌｌ"* OR "full"*)`,
+		"हिन्दी":                   `"हिन्दी"*`,
+		"ครับ":                     `("ครับ"* OR "ครั รับ")`,
+		norm.NFD.String("Pokémon"): `"pokémon"*`,
+		// A mark alone folds to nothing in the tokenizer, an empty prefix matching
+		// every row, so a word with no letter or digit is dropped.
+		"\u0301":       "",
+		"halo \u0301":  `"halo"*`,
+		"\u0301\u0302": "",
 	}
 	for in, want := range cases {
 		if got := ftsMatchQuery(in); got != want {
@@ -108,14 +128,210 @@ func TestFTSMatchQuery(t *testing.T) {
 	}
 }
 
-// TestSearchStmtZeroPathGolden pins the option-free statement to the exact text
-// the search ran before the candidate-cap/scope options existed, so the default
-// path stays byte-identical (same plan, same behavior) as the builder evolves.
+// TestSearchFindsWhatPeopleType: a word typed without its inner punctuation, a dollar
+// sign read as an s, a symbol-only title, CJK inside a run in either kana, a Thai word
+// inside a title, decomposed input, and a whole Indic word.
+func TestSearchFindsWhatPeopleType(t *testing.T) {
+	t.Parallel()
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	for i, tr := range []struct{ title, artist string }{
+		{"Cocaine 80's", "Joey Bada$$"},
+		{"That’s What I Like", "Bruno Mars"},
+		{"You're the One", "Kaytranada"},
+		{"Mask Off", "Pi'erre Bourne"},
+		{"Mount Olympus", "Big K.R.I.T."},
+		{"Healing", "A.CHAL"},
+		{"Bottom of the Bottle", "Curren$y"},
+		{"Or Nah", "Ty Dolla $ign"},
+		{"$", "Symbols"},
+		{"東京スパイス", "Spice"},
+		{"ガンダム", "Sunrise"},
+		{"マシーンLOVE", "Machine"},
+		{"純愛", "Junai"},
+		{"Pokémon Theme", "Jason Paige"},
+		{"हिन्दी", "Hindi"},
+		// Splitting at the marks would cut both into the same three letters.
+		{"हानोदे", "Other"},
+		{"สวัสดีครับ", "Thai"},
+		{"한국 노래", "Korean"},
+		{"Thats Life", "Sinatra"},
+		{"Tik Tok", "Kesha"},
+		{"Rock and Roll", "Led Zeppelin"},
+		{"Hello", "Adele"},
+	} {
+		n := strconv.Itoa(i)
+		putTrack(t, st, lib.ID, trackSpec{path: "/lib/" + n + ".flac", essence: "e" + n, content: "c" + n,
+			title: tr.title, artist: tr.artist, album: "Album " + n})
+	}
+	for _, c := range []struct{ q, want string }{
+		{"Cocaine 80s", "Cocaine 80's"},
+		{"Thats What I Like", "That’s What I Like"},
+		{"Youre the one", "You're the One"},
+		{"Pierre", "Mask Off"},
+		{"krit", "Mount Olympus"},
+		{"achal", "Healing"},
+		{"Curren$y", "Bottom of the Bottle"},
+		{"currensy", "Bottom of the Bottle"},
+		{"Ty Dolla Sign", "Or Nah"},
+		{"Ty Dolla $ign", "Or Nah"},
+		{"$", "$"},
+		{"スパイス", "東京スパイス"},
+		{"すぱいす", "東京スパイス"},
+		{"東京", "東京スパイス"},
+		{"がんだむ", "ガンダム"},
+		{norm.NFD.String("Pokémon"), "Pokémon Theme"},
+		{"हिन्दी", "हिन्दी"},
+		{"ครับ", "สวัสดีครับ"},
+		{norm.NFD.String("한국"), "한국 노래"},
+		{"スパ", "東京スパイス"},
+		{"愛", "純愛"},
+		{"love", "マシーンLOVE"},
+		{"That's Life", "Thats Life"},
+		{"Ke$ha", "Tik Tok"},
+		{"Joey Badass", "Cocaine 80's"},
+		// The words either side of inner punctuation can sit apart, or in other columns.
+		{"rock&roll", "Rock and Roll"},
+		{"Adele-Hello", "Hello"},
+		{"Adele_Hello", "Hello"},
+	} {
+		res, err := st.Search(ctx, c.q, read.SearchOptions{})
+		if err != nil {
+			t.Fatalf("search %q: %v", c.q, err)
+		}
+		if len(res.Tracks) != 1 || res.Tracks[0].Title != c.want {
+			t.Errorf("search %q = %+v, want only %q", c.q, res.Tracks, c.want)
+		}
+	}
+	if res, err := st.Search(ctx, "\u0301", read.SearchOptions{}); err != nil || !res.Empty() {
+		t.Errorf("search of a lone combining mark = %+v (err %v), want nothing", res, err)
+	}
+}
+
+// TestSearchSymbolOnlyQueryFindsBySortKey: a query with no word in it looks the text up
+// by sort key among item titles, album titles and track artists, under the same
+// narrowing. An album gets such a title only when an MBID keys it (a title with no
+// letter keys no album otherwise), and no artist entity ever gets such a name, so a
+// band named "!!!" is found through its tracks.
+func TestSearchSymbolOnlyQueryFindsBySortKey(t *testing.T) {
+	t.Parallel()
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/1.flac", essence: "e1", content: "c1",
+		title: "Perfect", artist: "Ed Sheeran", album: "÷", albumArt: "Ed Sheeran",
+		mbReleaseGroup: "e0000000-0000-4000-8000-000000000001", mbRelease: "e0000000-0000-4000-8000-000000000002"})
+	dollar := putTrack(t, st, lib.ID, trackSpec{path: "/lib/2.flac", essence: "e2", content: "c2",
+		title: "$", artist: "Someone", album: "Money"})
+	band := putTrack(t, st, lib.ID, trackSpec{path: "/lib/3.flac", essence: "e3", content: "c3",
+		title: "Myth Takes", artist: "!!!", album: "Myth Takes"})
+	// The band is found by the name it is credited under, whatever its sort tag says and
+	// wherever it sits in a list of artists.
+	sorted := trackSpecInput(lib.ID, trackSpec{path: "/lib/4.flac", essence: "e4", content: "c4",
+		title: "Shake the Shudder", artist: "!!!", album: "Shake the Shudder"})
+	sorted.Track.ArtistSort = model.SortKey("Chk Chk Chk")
+	if _, err := st.PutScannedTrack(ctx, sorted); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/5.flac", essence: "e5", content: "c5",
+		title: "First Credit", artist: "!!!, Someone", artists: []string{"!!!", "Someone"}, album: "Collabs"})
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/6.flac", essence: "e6", content: "c6",
+		title: "Second Credit", artist: "Someone, !!!", artists: []string{"Someone", "!!!"}, album: "Collabs"})
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/7.flac", essence: "e7", content: "c7",
+		title: "Not The Band", artist: "Wow!!!", album: "Other"})
+	found, err := st.Search(ctx, "!!!", read.SearchOptions{})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	var titles []string
+	for _, h := range found.Tracks {
+		titles = append(titles, h.Title)
+	}
+	slices.Sort(titles)
+	if want := []string{"First Credit", "Myth Takes", "Second Credit", "Shake the Shudder"}; !slices.Equal(titles, want) {
+		t.Errorf("search !!! = %v, want %v", titles, want)
+	}
+	if !slices.ContainsFunc(found.Tracks, func(h read.SearchHit) bool { return h.PID == band.ItemPID }) {
+		t.Errorf("search !!! = %+v, want the band's track", found.Tracks)
+	}
+
+	found, err = st.Search(ctx, "÷", read.SearchOptions{})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if len(found.Albums) != 1 || found.Albums[0].Title != "÷" || found.Albums[0].Subtitle != "Ed Sheeran" || !found.Albums[0].Exact {
+		t.Errorf("albums = %+v, want ÷ by Ed Sheeran, exact", found.Albums)
+	}
+	if len(found.Tracks) != 0 {
+		t.Errorf("tracks = %+v, want none (no title is ÷)", found.Tracks)
+	}
+	found, err = st.Search(ctx, "$", read.SearchOptions{})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if len(found.Tracks) != 1 || found.Tracks[0].PID != dollar.ItemPID || len(found.Albums) != 1 || found.Albums[0].Title != "Money" {
+		t.Errorf("search $ = %+v, want the track titled $ and its album", found)
+	}
+	// The narrowing applies: a state nothing is in hides all of it.
+	for _, q := range []string{"÷", "$", "!!!"} {
+		found, err = st.Search(ctx, q, read.SearchOptions{States: []model.ItemState{model.StateArchived}})
+		if err != nil {
+			t.Fatalf("search: %v", err)
+		}
+		if !found.Empty() {
+			t.Errorf("archived-only search %q = %+v, want nothing", q, found)
+		}
+	}
+}
+
+// TestSearchSymbolOnlyQueryHonorsTheCap: the sort-key lookup reads one row past its
+// cap like the ranked search, so a full result reports Truncated, and a candidate cap
+// keeps the newest matches.
+func TestSearchSymbolOnlyQueryHonorsTheCap(t *testing.T) {
+	t.Parallel()
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	var pids []model.PID
+	for i := range 3 {
+		n := strconv.Itoa(i)
+		pids = append(pids, putTrack(t, st, lib.ID, trackSpec{path: "/lib/" + n + ".flac", essence: "e" + n, content: "c" + n,
+			title: "$", artist: "Artist " + n, album: "Album " + n}).ItemPID)
+	}
+	res, err := st.Search(ctx, "$", read.SearchOptions{MaxCandidates: 2})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if !res.Truncated || len(res.Tracks) != 2 || res.Tracks[0].PID != pids[2] || res.Tracks[1].PID != pids[1] {
+		t.Errorf("capped search $ = truncated %t, tracks %+v; want the newest two and truncated", res.Truncated, res.Tracks)
+	}
+	if res, err := st.Search(ctx, "$", read.SearchOptions{}); err != nil || res.Truncated || len(res.Tracks) != 3 {
+		t.Errorf("uncapped search $ = %+v (err %v), want all three, not truncated", res, err)
+	}
+}
+
+// TestSearchValidatesOptionsBeforeTheQuery: an unknown library or state is refused
+// whatever the query holds, a symbol-only or empty one included.
+func TestSearchValidatesOptionsBeforeTheQuery(t *testing.T) {
+	t.Parallel()
+	st, _ := entityFixture(t)
+	ctx := context.Background()
+	for _, q := range []string{"abc", "!!!", ""} {
+		if _, err := st.Search(ctx, q, read.SearchOptions{Libraries: []model.PID{"nope"}}); !waxerr.Is(err, waxerr.CodeNotFound) {
+			t.Errorf("search %q in an unknown library: err = %v, want CodeNotFound", q, err)
+		}
+		if _, err := st.Search(ctx, q, read.SearchOptions{States: []model.ItemState{"bogus"}}); !waxerr.Is(err, waxerr.CodeInvalid) {
+			t.Errorf("search %q in an unknown state: err = %v, want CodeInvalid", q, err)
+		}
+	}
+}
+
+// TestSearchStmtZeroPathGolden pins the option-free statement to its exact text, the
+// flat FTS query with no candidate wrap and no narrowing, so the default path changes
+// only when this golden does.
 func TestSearchStmtZeroPathGolden(t *testing.T) {
 	t.Parallel()
 	want := `SELECT pi.pid, pi.kind, pi.title,
 		COALESCE(NULLIF(t.artist,''), bk.author, pod.title, ''), COALESCE(t.album_artist,''),
-		COALESCE(t.album,''), COALESCE(art.pid,''), COALESCE(al.pid,''), ` + searchBM25 + ` AS score
+		COALESCE(art.pid,''), COALESCE(art.name,''), COALESCE(al.pid,''), COALESCE(al.title,''), ` + searchBM25 + ` AS score
 		FROM search_fts
 		JOIN playable_item pi ON pi.id = search_fts.rowid
 		LEFT JOIN track t ON t.item_id = pi.id
@@ -374,6 +590,94 @@ func TestSearchCapAndScopeCombined(t *testing.T) {
 	}
 	if got.Truncated {
 		t.Error("one in-scope match under a cap of two is not a truncation")
+	}
+}
+
+// TestTranscriptSearchFoldsScripts: a transcript body is indexed with the script folds
+// the metadata columns get (pairs over unspaced runs, either kana, compatibility forms,
+// marks inside words), so a word inside a Japanese or Thai sentence is found. Its
+// punctuation-joined forms are left out: a body is often raw subtitle markup, where
+// they would index a junk word for every timestamp.
+func TestTranscriptSearchFoldsScripts(t *testing.T) {
+	t.Parallel()
+	st, _ := entityFixture(t)
+	ctx := context.Background()
+	res, err := st.UpsertFeed(ctx, model.UpsertFeedInput{FeedURL: "http://feed.example/t", IdentityKey: "podcast:feed.example/t",
+		Feed: model.Feed{Title: "Show", Episodes: []model.FeedEpisode{
+			{GUID: "ja", Title: "Episode One", EnclosureURL: "http://feed.example/ja.mp3"},
+			{GUID: "th", Title: "Episode Two", EnclosureURL: "http://feed.example/th.mp3"},
+		}}, FetchedAtNS: 1})
+	if err != nil {
+		t.Fatalf("upsert feed: %v", err)
+	}
+	eps, err := st.EpisodesByPodcast(ctx, res.PodcastPID, 0)
+	if err != nil || len(eps) != 2 {
+		t.Fatalf("episodes = %d (err %v)", len(eps), err)
+	}
+	// Split at their marks, the two Hindi words would cut into the same three letters.
+	bodies := map[string]string{"Episode One": "今日は東京スパイスの話をします हानोदे", "Episode Two": "สวัสดีครับ ทุกคน हिन्दी"}
+	for _, ep := range eps {
+		if err := st.PutTranscript(ctx, model.PutTranscriptInput{EpisodePID: ep.PID, Format: "text", Body: bodies[ep.Title]}); err != nil {
+			t.Fatalf("transcript: %v", err)
+		}
+	}
+	for q, want := range map[string]string{"スパイス": "Episode One", "すぱいす": "Episode One", "ครับ": "Episode Two", "हिन्दी": "Episode Two"} {
+		found, err := st.Search(ctx, q, read.SearchOptions{})
+		if err != nil {
+			t.Fatalf("search %q: %v", q, err)
+		}
+		if len(found.Episodes) != 1 || found.Episodes[0].Title != want {
+			t.Errorf("search %q episodes = %+v, want %s through its transcript", q, found.Episodes, want)
+		}
+	}
+}
+
+// TestProseJoinsWordsNotNumbers: show notes and transcripts hold a word run together
+// across its inner punctuation as a title does, so "kesha" finds Ke$ha in either, but not
+// a run of digits, which in prose is a number or a time: a chapter mark at 19:45 is no
+// 1945. A title keeps those, so "444" finds 4:44.
+func TestProseJoinsWordsNotNumbers(t *testing.T) {
+	t.Parallel()
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	res, err := st.UpsertFeed(ctx, model.UpsertFeedInput{FeedURL: "http://feed.example/p", IdentityKey: "podcast:feed.example/p",
+		Feed: model.Feed{Title: "Show", Episodes: []model.FeedEpisode{
+			{GUID: "n", Title: "Notes", EnclosureURL: "http://feed.example/n.mp3", Description: "<p>19:45 Pi'erre on the beat</p>"},
+			{GUID: "s", Title: "Spoken", EnclosureURL: "http://feed.example/s.mp3"},
+		}}, FetchedAtNS: 1})
+	if err != nil {
+		t.Fatalf("upsert feed: %v", err)
+	}
+	eps, err := st.EpisodesByPodcast(ctx, res.PodcastPID, 0)
+	if err != nil || len(eps) != 2 {
+		t.Fatalf("episodes = %d (err %v)", len(eps), err)
+	}
+	for _, ep := range eps {
+		if ep.Title == "Spoken" {
+			if err := st.PutTranscript(ctx, model.PutTranscriptInput{EpisodePID: ep.PID, Format: "text",
+				Body: "we played Ke$ha at 20:01, don't miss it"}); err != nil {
+				t.Fatalf("transcript: %v", err)
+			}
+		}
+	}
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/1.flac", essence: "e1", content: "c1", title: "4:44", artist: "JAY-Z", album: "4:44"})
+	for _, c := range []struct{ q, episode, track string }{
+		{"pierre", "Notes", ""}, {"kesha", "Spoken", ""}, {"dont", "Spoken", ""},
+		{"1945", "", ""}, {"2001", "", ""}, {"444", "", "4:44"},
+	} {
+		found, err := st.Search(ctx, c.q, read.SearchOptions{})
+		if err != nil {
+			t.Fatalf("search %q: %v", c.q, err)
+		}
+		if got := firstTitle(found.Episodes); len(found.Episodes) > 1 || got != c.episode {
+			t.Errorf("search %q episodes = %+v, want %q", c.q, found.Episodes, c.episode)
+		}
+		if got := firstTitle(found.Tracks); len(found.Tracks) > 1 || got != c.track {
+			t.Errorf("search %q tracks = %+v, want %q", c.q, found.Tracks, c.track)
+		}
+	}
+	if got := proseIndexText("1\n00:00:01,000 --> 00:00:04,000\nDon't stop"); !strings.Contains(got, "dont") || strings.Contains(got, "000001000") {
+		t.Errorf("prose index text = %q, want the word joined and not the timestamp", got)
 	}
 }
 
@@ -640,10 +944,413 @@ func TestSearchNarrowPlan(t *testing.T) {
 	}
 }
 
+// TestSearchByNamePlans pins that the direct name lookups seek their indexes rather than
+// scan their tables on every search, the space-dropped artist key included
+// (artist_joined_key), with a narrowing as with none, and that the sort-key item lookup a
+// query of symbols alone runs seeks its keys and reads only the track table whole, for
+// the artist display.
+func TestSearchByNamePlans(t *testing.T) {
+	t.Parallel()
+	st, _ := entityFixture(t)
+	for _, states := range [][]model.ItemState{nil, {model.StatePresent}} {
+		narrow, args := searchNarrow([]int64{1}, states)
+		artists := strings.Join(explainPlanLines(t, st, artistByNameQ(narrow, 2),
+			append(append(append([]any{"a", "b", "a"}, args...), args...), 5)...), "\n")
+		for _, want := range []string{"MULTI-INDEX OR", "artist_joined_key", "artist_sort"} {
+			if !strings.Contains(artists, want) {
+				t.Errorf("artist lookup plan lacks %q:\n%s", want, artists)
+			}
+		}
+		if strings.Contains(artists, "SCAN art") {
+			t.Errorf("artist lookup scans the table:\n%s", artists)
+		}
+		albums := strings.Join(explainPlanLines(t, st, albumByNameQ(narrow), append(append([]any{"a"}, args...), 5)...), "\n")
+		if !strings.Contains(albums, "SEARCH al USING INDEX album_sort") {
+			t.Errorf("album lookup does not seek album_sort:\n%s", albums)
+		}
+		items := strings.Join(explainPlanLines(t, st, itemsBySortKeyQ(narrow), append(append([]any{"a"}, args...), 5)...), "\n")
+		for _, want := range []string{"item_sort", "track_artist", "SCAN track", "SCAN m", "SEARCH pi USING INTEGER PRIMARY KEY"} {
+			if !strings.Contains(items, want) {
+				t.Errorf("sort-key item lookup plan lacks %q:\n%s", want, items)
+			}
+		}
+		if strings.Contains(items, "SCAN pi") {
+			t.Errorf("sort-key item lookup scans playable_item:\n%s", items)
+		}
+	}
+}
+
 // firstTitle renders a hit list's leading title for failure messages.
 func firstTitle(hits []read.SearchHit) string {
 	if len(hits) == 0 {
 		return ""
 	}
 	return hits[0].Title
+}
+
+// searchRowCol reads one column of an item's search row.
+func searchRowCol(t *testing.T, st *Store, pid model.PID, col string) string {
+	t.Helper()
+	return scalarStr(t, st, "SELECT "+col+" FROM search_fts WHERE rowid = (SELECT id FROM playable_item WHERE pid = ?)", string(pid))
+}
+
+// TestSearchRowCarriesCredits: the credits column holds the composer and every credited
+// contributor the artist column does not already name, so a producer or a lyricist is
+// searchable and a performer named in the artist column is not counted twice.
+func TestSearchRowCarriesCredits(t *testing.T) {
+	t.Parallel()
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	res := putTrack(t, st, lib.ID, trackSpec{path: "/lib/1.flac", essence: "e1", content: "c1",
+		title: "Apeshit", artist: "The Carters", artists: []string{"Beyoncé", "JAY-Z"},
+		album: "Everything Is Love", composer: "Pharrell Williams"})
+	for _, c := range []struct {
+		role  model.ContributorRole
+		names []string
+	}{{model.RoleProducer, []string{"Pharrell Williams"}}, {model.RoleLyricist, []string{"Quavo"}}} {
+		if _, _, err := st.SetItemCredits(ctx, res.ItemPID, c.role, c.names,
+			model.Attribution{Source: model.SourceUser}, model.LockOf(false), false, false); err != nil {
+			t.Fatalf("set %s credit: %v", c.role, err)
+		}
+	}
+	credits := searchRowCol(t, st, res.ItemPID, "credits")
+	for _, want := range []string{"Pharrell Williams", "Quavo", "Beyoncé", "JAY-Z"} {
+		if !strings.Contains(credits, want) {
+			t.Errorf("credits = %q, want it to carry %q", credits, want)
+		}
+	}
+	if n := strings.Count(credits, "Pharrell"); n != 1 {
+		t.Errorf("credits = %q names the composer-producer %d times, want once", credits, n)
+	}
+	if strings.Contains(credits, "Carters") {
+		t.Errorf("credits = %q repeats the artist column", credits)
+	}
+	found, err := st.Search(ctx, "quavo", read.SearchOptions{})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if len(found.Tracks) != 1 || found.Tracks[0].PID != res.ItemPID {
+		t.Errorf("search quavo = %+v, want the credited track", found.Tracks)
+	}
+}
+
+// TestSearchColumnsKeepTheRawTextFirst: each column holds its raw text, then the
+// alternate forms of its words, so nothing that read the raw text loses it.
+func TestSearchColumnsKeepTheRawTextFirst(t *testing.T) {
+	t.Parallel()
+	st, lib := entityFixture(t)
+	res := putTrack(t, st, lib.ID, trackSpec{path: "/lib/1.flac", essence: "e1", content: "c1",
+		title: "That’s What I Like", artist: "Bruno Mars", album: "24K Magic"})
+	title := searchRowCol(t, st, res.ItemPID, "title")
+	if !strings.HasPrefix(title, "That’s What I Like") || !strings.HasSuffix(title, "thats") {
+		t.Errorf("title column = %q, want the raw title followed by its alternate forms", title)
+	}
+	if got := searchRowCol(t, st, res.ItemPID, "artist"); got != "Bruno Mars" {
+		t.Errorf("artist column = %q, want the plain artist with nothing appended", got)
+	}
+	// The performer credit is named by the artist column already.
+	if got := searchRowCol(t, st, res.ItemPID, "credits"); got != "" {
+		t.Errorf("credits = %q, want nothing beside the artist column", got)
+	}
+}
+
+// TestSearchKindIsNotIndexed: the kind column used to be indexed, so "t" prefix-matched
+// the word "track" on every track row.
+func TestSearchKindIsNotIndexed(t *testing.T) {
+	t.Parallel()
+	st, lib := entityFixture(t)
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/1.flac", essence: "e1", content: "c1",
+		title: "Hello", artist: "Xavier", album: "Al"})
+	res, err := st.Search(context.Background(), "t", read.SearchOptions{})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if len(res.Tracks) != 0 {
+		t.Errorf("search t = %+v, want no track (nothing it holds starts with t)", res.Tracks)
+	}
+}
+
+// TestComposerEditRebuildsTheSearchRow: a composer edit routes through neither the
+// entity re-resolve nor the title branch, so it used to leave the row stale.
+func TestComposerEditRebuildsTheSearchRow(t *testing.T) {
+	t.Parallel()
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	res := putTrack(t, st, lib.ID, trackSpec{path: "/lib/1.flac", essence: "e1", content: "c1",
+		title: "The Ecstasy of Gold", artist: "Orchestra", album: "Al", composer: "Nobody"})
+	if err := st.EditItemField(ctx, res.ItemPID, "composer", "Ennio Morricone",
+		model.Attribution{Source: model.SourceUser}, model.LockUnchanged, false); err != nil {
+		t.Fatalf("edit composer: %v", err)
+	}
+	found, err := st.Search(ctx, "morricone", read.SearchOptions{})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if len(found.Tracks) != 1 {
+		t.Errorf("search morricone = %+v, want the edited track", found.Tracks)
+	}
+	if strings.Contains(searchRowCol(t, st, res.ItemPID, "credits"), "Nobody") {
+		t.Error("the old composer is still in the search row")
+	}
+}
+
+// TestComposerEditOverACreditLeavesItUnsearchable: a plain composer edit that moves the
+// composer away from an earlier composer credit retires that credit (supersedeTwinTx),
+// so its names leave the search row with it.
+func TestComposerEditOverACreditLeavesItUnsearchable(t *testing.T) {
+	t.Parallel()
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	res := putTrack(t, st, lib.ID, trackSpec{path: "/lib/1.flac", essence: "e1", content: "c1",
+		title: "Main Theme", artist: "Orchestra", album: "Al"})
+	if _, _, err := st.SetItemCredits(ctx, res.ItemPID, model.RoleComposer, []string{"Hans Zimmer"},
+		model.Attribution{Source: model.SourceUser}, model.LockOf(false), false, false); err != nil {
+		t.Fatalf("set composer credit: %v", err)
+	}
+	if err := st.EditItemField(ctx, res.ItemPID, "composer", "John Williams",
+		model.Attribution{Source: model.SourceUser}, model.LockUnchanged, false); err != nil {
+		t.Fatalf("edit composer: %v", err)
+	}
+	for q, want := range map[string]int{"zimmer": 0, "williams": 1} {
+		found, err := st.Search(ctx, q, read.SearchOptions{})
+		if err != nil {
+			t.Fatalf("search %q: %v", q, err)
+		}
+		if len(found.Tracks) != want {
+			t.Errorf("search %q = %+v, want %d tracks", q, found.Tracks, want)
+		}
+	}
+}
+
+// TestArtistMergeRebuildsCreditedRows: a merge re-points the loser's credits onto the
+// survivor, whose name the credits column then carries, so the survivor's name finds a
+// track still tagged with the loser's.
+func TestArtistMergeRebuildsCreditedRows(t *testing.T) {
+	t.Parallel()
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/1.flac", essence: "e1", content: "c1",
+		title: "Purple Rain", artist: "Prince", album: "Purple Rain"})
+	moved := putTrack(t, st, lib.ID, trackSpec{path: "/lib/2.flac", essence: "e2", content: "c2",
+		title: "Gold", artist: "TAFKAP", album: "The Gold Experience"})
+	survivor := model.PID(scalarStr(t, st, "SELECT pid FROM artist WHERE name = 'Prince'"))
+	loser := model.PID(scalarStr(t, st, "SELECT pid FROM artist WHERE name = 'TAFKAP'"))
+	if _, err := st.MergeEntity(ctx, model.MergeArtist, survivor, loser); err != nil {
+		t.Fatalf("merge: %v", err)
+	}
+	found, err := st.Search(ctx, "prince", read.SearchOptions{})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	var hit bool
+	for _, h := range found.Tracks {
+		hit = hit || h.PID == moved.ItemPID
+	}
+	if !hit {
+		t.Errorf("search prince = %+v, want the merged artist's track too", found.Tracks)
+	}
+	assertVerifyClean(t, st)
+}
+
+// TestEnrichmentGenreFillRebuildsTheSearchRow: the release-group genre fill writes
+// track.genre, which the search row's extra column carries, so it rebuilds the row.
+func TestEnrichmentGenreFillRebuildsTheSearchRow(t *testing.T) {
+	t.Parallel()
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	res := putTrack(t, st, lib.ID, trackSpec{path: "/lib/1.flac", essence: "e1", content: "c1",
+		title: "Alison", artist: "Slowdive", album: "Souvlaki", albumArt: "Slowdive"})
+	var rgID int64
+	var rgPID string
+	if err := st.read.QueryRowContext(ctx, `SELECT rg.id, rg.pid FROM release_group rg
+		JOIN album al ON al.release_group_id = rg.id JOIN track t ON t.album_id = al.id`).Scan(&rgID, &rgPID); err != nil {
+		t.Fatalf("read release group: %v", err)
+	}
+	if err := st.ApplyReleaseGroupEnrichment(ctx, model.ReleaseGroupEnrichment{ReleaseGroupID: rgID,
+		PID: model.PID(rgPID), Matched: true, MBID: "e0000000-0000-4000-8000-000000000001",
+		Genres: []string{"Shoegaze"}, GenreProvider: "musicbrainz"}); err != nil {
+		t.Fatalf("apply enrichment: %v", err)
+	}
+	found, err := st.Search(ctx, "shoegaze", read.SearchOptions{})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if len(found.Tracks) != 1 || found.Tracks[0].PID != res.ItemPID {
+		t.Errorf("search shoegaze = %+v, want the track the fill reached", found.Tracks)
+	}
+}
+
+// TestBookSearchRowCredits: a book's credits carry its narrators and every other credit,
+// a translator set by a credit edit included, and its extra column no longer repeats
+// the narrator.
+func TestBookSearchRowCredits(t *testing.T) {
+	t.Parallel()
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	res := putBook(t, st, lib.ID, bookSpec{path: "/lib/b/1.m4b", essence: "b1", content: "c1",
+		title: "Gone Girl", author: "Gillian Flynn", narrators: []string{"Julia Whelan"}})
+	if _, _, err := st.SetItemCredits(ctx, res.ItemPID, model.RoleTranslator, []string{"Edith Grossman"},
+		model.Attribution{Source: model.SourceUser}, model.LockOf(false), false, false); err != nil {
+		t.Fatalf("set translator: %v", err)
+	}
+	credits := searchRowCol(t, st, res.ItemPID, "credits")
+	for _, want := range []string{"Julia Whelan", "Edith Grossman"} {
+		if !strings.Contains(credits, want) {
+			t.Errorf("credits = %q, want it to carry %q", credits, want)
+		}
+	}
+	if strings.Contains(credits, "Flynn") {
+		t.Errorf("credits = %q repeats the author column", credits)
+	}
+	if extra := searchRowCol(t, st, res.ItemPID, "extra"); strings.Contains(extra, "Whelan") {
+		t.Errorf("extra = %q still carries the narrator", extra)
+	}
+	found, err := st.Search(ctx, "grossman", read.SearchOptions{})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if len(found.Books) != 1 || found.Books[0].PID != res.ItemPID {
+		t.Errorf("search grossman = %+v, want the translated book", found.Books)
+	}
+}
+
+// TestSearchArtistsRankOnTheirOwnNames (LIB-07): a track whose title names an artist
+// outranks that artist's own tracks, and used to put its own artist first in Artists.
+// The group now ranks each artist by how its name meets the query, and a hit carries
+// the artist's name rather than a track's credit string.
+func TestSearchArtistsRankOnTheirOwnNames(t *testing.T) {
+	t.Parallel()
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	for i, tr := range []struct {
+		title, artist, album string
+		artists              []string
+	}{
+		{"Peaches (feat. Giveon)", "Justin Bieber", "", nil},
+		// The credit string names two artists; the hit is the entity, by its own name.
+		{"Heartbreak Anniversary", "GIVĒON & Friend", "", []string{"GIVĒON", "Friend"}},
+		{"Glowed Up (feat. Anderson .Paak)", "KAYTRANADA", "", nil},
+		{"Come Down", "Anderson .Paak", "", nil},
+		// Matched through its album, after the title match above: its name holds the
+		// query inside a word, which ranks it below a name that begins with the query
+		// and above one that does not hold it at all.
+		{"Other Song", "Kopaak", "Paak Album", nil},
+		{"B.I.G. Interlude", "Diddy", "", nil},
+		{"Big Poppa", "The Notorious B.I.G.", "", nil},
+	} {
+		n := strconv.Itoa(i)
+		album := tr.album
+		if album == "" {
+			album = "Album " + n
+		}
+		putTrack(t, st, lib.ID, trackSpec{path: "/lib/" + n + ".flac", essence: "e" + n, content: "c" + n,
+			title: tr.title, artist: tr.artist, artists: tr.artists, album: album})
+	}
+	for _, c := range []struct {
+		q, first string
+		exact    bool
+	}{
+		{"Giveon", "GIVĒON", true},
+		{"paak", "Anderson .Paak", false},
+		{"B.I.G", "The Notorious B.I.G.", false},
+	} {
+		res, err := st.Search(ctx, c.q, read.SearchOptions{})
+		if err != nil {
+			t.Fatalf("search %q: %v", c.q, err)
+		}
+		if len(res.Artists) < 2 || res.Artists[0].Title != c.first || res.Artists[0].Exact != c.exact {
+			t.Errorf("search %q artists = %+v, want %q first (exact %t) ahead of the title match's artist", c.q, res.Artists, c.first, c.exact)
+		}
+		for _, h := range res.Artists[1:] {
+			if h.Exact {
+				t.Errorf("search %q: %+v is marked exact", c.q, h)
+			}
+		}
+	}
+	res, err := st.Search(ctx, "paak", read.SearchOptions{})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if len(res.Artists) != 3 || res.Artists[1].Title != "Kopaak" || res.Artists[2].Title != "KAYTRANADA" {
+		t.Errorf("search paak artists = %+v, want Anderson .Paak, Kopaak, KAYTRANADA", res.Artists)
+	}
+}
+
+// TestSearchFindsAnArtistByNamePastTheCap: an artist whose tracks fall outside the
+// ranked pool is still listed when its name is the query, and a narrowing that leaves
+// none of its tracks hides it.
+func TestSearchFindsAnArtistByNamePastTheCap(t *testing.T) {
+	t.Parallel()
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	for i, a := range []string{"Love", "JAY-Z", "The Beatles", "モーニング娘。"} {
+		n := strconv.Itoa(i)
+		putTrack(t, st, lib.ID, trackSpec{path: "/lib/a" + n + ".flac", essence: "a" + n, content: "a" + n,
+			title: "Own Song " + n, artist: a, album: "Own Album " + n})
+	}
+	for i := 1; i <= 3; i++ {
+		n := strconv.Itoa(i)
+		putTrack(t, st, lib.ID, trackSpec{path: "/lib/" + n + ".flac", essence: "e" + n, content: "c" + n,
+			title: "Love Song " + n + " for jayz and beatles もーにんぐ娘", artist: "Singer " + n, album: "Songs " + n})
+	}
+	// The pool keeps the newest two matches, so each artist's own track is outside it:
+	// the name is found by its match key, by that key without its spaces, and by sort key,
+	// read past fullwidth forms and either kana as the tiers read them.
+	for _, c := range []struct {
+		q, want string
+		exact   bool
+	}{
+		{"love", "Love", true}, {"jayz", "JAY-Z", true}, {"beatles", "The Beatles", false},
+		{"ｊａｙｚ", "JAY-Z", true}, {"もーにんぐ娘", "モーニング娘。", true},
+	} {
+		res, err := st.Search(ctx, c.q, read.SearchOptions{MaxCandidates: 2})
+		if err != nil {
+			t.Fatalf("search: %v", err)
+		}
+		if len(res.Artists) == 0 || res.Artists[0].Title != c.want || res.Artists[0].Exact != c.exact {
+			t.Errorf("search %q artists = %+v, want %s first (exact %t)", c.q, res.Artists, c.want, c.exact)
+			continue
+		}
+		// Found by its name alone, it scores as well as anything the search read, so a
+		// consumer still ordering by score does not sink it below the item-borne artists.
+		for _, h := range res.Artists[1:] {
+			if res.Artists[0].Score > h.Score {
+				t.Errorf("search %q: %s scores %v, worse than %s at %v", c.q, c.want, res.Artists[0].Score, h.Title, h.Score)
+			}
+		}
+	}
+	res, err := st.Search(ctx, "love", read.SearchOptions{States: []model.ItemState{model.StateRemote}})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if len(res.Artists) != 0 {
+		t.Errorf("remote-only artists = %+v, want none", res.Artists)
+	}
+}
+
+// TestSearchAlbumsRankOnTheirOwnTitles: albums tier the same way, and one titled as
+// the query is found by its title past the pool too.
+func TestSearchAlbumsRankOnTheirOwnTitles(t *testing.T) {
+	t.Parallel()
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/0.flac", essence: "e0", content: "c0",
+		title: "Because", artist: "The Beatles", album: "Love", albumArt: "The Beatles"})
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/1.flac", essence: "e1", content: "c1",
+		title: "Crazy in Love", artist: "Beyoncé", album: "Dangerously in Love", albumArt: "Beyoncé"})
+	res, err := st.Search(ctx, "love", read.SearchOptions{})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if len(res.Albums) != 2 || res.Albums[0].Title != "Love" || !res.Albums[0].Exact ||
+		res.Albums[1].Title != "Dangerously in Love" || res.Albums[1].Exact {
+		t.Errorf("albums = %+v, want Love (exact) then Dangerously in Love", res.Albums)
+	}
+	res, err = st.Search(ctx, "love", read.SearchOptions{MaxCandidates: 1})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if len(res.Albums) == 0 || res.Albums[0].Title != "Love" || res.Albums[0].Subtitle != "The Beatles" {
+		t.Errorf("capped albums = %+v, want Love by The Beatles first", res.Albums)
+	}
 }

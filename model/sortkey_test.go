@@ -276,3 +276,22 @@ func FuzzRefoldKeyIdempotent(f *testing.F) {
 		}
 	})
 }
+
+// TestKanaOffsets: each syllabary maps onto the other letter for letter, voiced and
+// small letters included, and the prolonged sound mark and everything else stay put.
+func TestKanaOffsets(t *testing.T) {
+	t.Parallel()
+	for r := rune(0x3041); r <= 0x3096; r++ {
+		if k := KatakanaOf(r); k == r || HiraganaOf(k) != r {
+			t.Errorf("hiragana %U maps to %U and back to %U", r, k, HiraganaOf(k))
+		}
+	}
+	for _, r := range []rune{'ー', 'A', '漢', 0x3040, 0x3097, 0x30A0, 0x30F7} {
+		if HiraganaOf(r) != r || KatakanaOf(r) != r {
+			t.Errorf("%U moved", r)
+		}
+	}
+	if HiraganaOf('ガ') != 'が' || KatakanaOf('ゖ') != 'ヶ' {
+		t.Error("a voiced or small letter does not map onto its pair")
+	}
+}

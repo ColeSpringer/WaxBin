@@ -106,6 +106,18 @@ func mergeEntityTx(ctx context.Context, tx *sql.Tx, et model.MergeEntity, table 
 		return nil, err
 	}
 
+	// The credits column of a search row names each credited artist, so the items the
+	// loser is credited on are reindexed once the loser's delete has cascaded the credit
+	// rows the re-point could not move (the item credited the survivor already).
+	var credited []searchItem
+	if et == model.MergeArtist {
+		if credited, err = searchItemsTx(ctx, tx,
+			"SELECT DISTINCT ic.item_id, pi.kind FROM item_contributor ic JOIN playable_item pi ON pi.id = ic.item_id WHERE ic.artist_id = ?",
+			lid); err != nil {
+			return nil, err
+		}
+	}
+
 	aff := newAffectedRollups()
 	var children int
 	switch et {
@@ -231,6 +243,11 @@ func mergeEntityTx(ctx context.Context, tx *sql.Tx, et model.MergeEntity, table 
 	// we care to keep was already re-pointed above.
 	if _, err := tx.ExecContext(ctx, "DELETE FROM "+table+" WHERE id = ?", lid); err != nil {
 		return nil, err
+	}
+	for _, it := range credited {
+		if err := rebuildItemSearchFTSTx(ctx, tx, it.id, it.kind); err != nil {
+			return nil, err
+		}
 	}
 
 	// Recompute the survivor's (and any cross-affected) rollups from base tables
@@ -472,7 +489,7 @@ func repointSeries(ctx context.Context, tx *sql.Tx, sid, lid int64) (int, error)
 		return 0, err
 	}
 	for _, itemID := range itemIDs {
-		if err := rebuildBookSearchFTSTx(ctx, tx, itemID); err != nil {
+		if err := rebuildItemSearchFTSTx(ctx, tx, itemID, string(model.KindBook)); err != nil {
 			return 0, err
 		}
 	}

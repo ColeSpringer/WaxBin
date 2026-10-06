@@ -375,13 +375,13 @@ func TestSetArtistCreditRefreshesTheTrackSearchRow(t *testing.T) {
 		t.Fatalf("set artist credit: %v", err)
 	}
 	got := scalarStr(t, st, "SELECT artist FROM search_fts WHERE rowid = (SELECT id FROM playable_item)")
-	if got == "" || got == "Old Name Old Name" {
+	if got == "" || strings.HasPrefix(got, "Old Name Old Name") {
 		t.Fatalf("search row artist = %q, want it refreshed to the new credit", got)
 	}
 	// A track's search artist is its artist plus its album artist, not a book's
-	// author plus narrator.
-	if want := "Jay-Z Old Name"; got != want {
-		t.Errorf("search row artist = %q, want %q", got, want)
+	// author plus narrator, followed by the alternate forms of its words.
+	if want := "Jay-Z Old Name"; !strings.HasPrefix(got, want) {
+		t.Errorf("search row artist = %q, want it to begin %q", got, want)
 	}
 }
 

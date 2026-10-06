@@ -41,7 +41,9 @@ func newUnlockCmd(g *globals) *cobra.Command {
 	return &cobra.Command{
 		Use:   "unlock <pid> <field>...",
 		Short: "Clear locks on item fields",
-		Long: "Clears locks on one or more of an item's fields. Unlocking \"art\" clears the " +
+		Long: "Clears locks on one or more of an item's fields. An artist, composer, author or " +
+			"narrator field shares its lock with its credit.<role>, so unlocking either clears both. " +
+			"Unlocking \"art\" clears the " +
 			"same row `waxbin art unlock <pid>` does, and \"art.<role>\" the row `--role " +
 			"<role>` writes; an item's art locks have one home. For a non-item entity's " +
 			"artwork, use `waxbin art unlock --type <entity>`.",

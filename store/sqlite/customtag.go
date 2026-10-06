@@ -421,8 +421,8 @@ func tagSetsEqual(a, b map[string][]string) bool {
 // itemCustomTagText returns an item's custom tag values joined for the search row's
 // extra column, so a custom tag is searchable. Keys are omitted; only the values feed
 // full-text search.
-func itemCustomTagText(ctx context.Context, tx *sql.Tx, itemID int64) (string, error) {
-	rows, err := tx.QueryContext(ctx,
+func itemCustomTagText(ctx context.Context, q queryer, itemID int64) (string, error) {
+	rows, err := q.QueryContext(ctx,
 		"SELECT value FROM item_tag WHERE item_id=? ORDER BY key, position", itemID)
 	if err != nil {
 		return "", err
@@ -437,24 +437,6 @@ func itemCustomTagText(ctx context.Context, tx *sql.Tx, itemID int64) (string, e
 		vals = append(vals, v)
 	}
 	return strings.Join(vals, " "), rows.Err()
-}
-
-// rebuildItemSearchFTSTx rebuilds a track or book item's search row from its current
-// stored state, so a change that does not go through the scan path (a custom-tag edit)
-// still refreshes full-text search. A kind with no FTS producer is a no-op.
-func rebuildItemSearchFTSTx(ctx context.Context, tx *sql.Tx, itemID int64, kind string) error {
-	switch kind {
-	case string(model.KindTrack):
-		tr, _, _, err := loadTrackForEditTx(ctx, tx, itemID)
-		if err != nil {
-			return err
-		}
-		return syncSearchFTS(ctx, tx, itemID, tr)
-	case string(model.KindBook):
-		return rebuildBookSearchFTSTx(ctx, tx, itemID)
-	default:
-		return nil
-	}
 }
 
 // strandedTagKeys returns the item_tag keys and "tag.<KEY>" provenance fields that
@@ -544,8 +526,8 @@ func (s *Store) countStrandedTagKeyRows(ctx context.Context) (int, error) {
 	return n, nil
 }
 
-// GCStrandedTagKeys deletes the rows strandedTagKeys names, returning how many went.
-// The search text of an affected item catches up on its next scan.
+// GCStrandedTagKeys deletes the rows strandedTagKeys names, returning how many went,
+// and rebuilds the search row of every item whose values it deleted.
 func (s *Store) GCStrandedTagKeys(ctx context.Context) (int, error) {
 	const op = "store.GCStrandedTagKeys"
 	keys, fields, owed, err := s.strandedTagKeys(ctx)
@@ -558,12 +540,22 @@ func (s *Store) GCStrandedTagKeys(ctx context.Context) (int, error) {
 	var n int64
 	err = s.writeTx(ctx, func(tx *sql.Tx) error {
 		if len(keys) > 0 {
+			items, err := searchItemsTx(ctx, tx, `SELECT DISTINCT it.item_id, pi.kind FROM item_tag it
+				JOIN playable_item pi ON pi.id = it.item_id WHERE it.key IN `+placeholders(len(keys)), anySlice(keys)...)
+			if err != nil {
+				return err
+			}
 			r, err := tx.ExecContext(ctx, "DELETE FROM item_tag WHERE key IN "+placeholders(len(keys)), anySlice(keys)...)
 			if err != nil {
 				return err
 			}
 			c, _ := r.RowsAffected()
 			n += c
+			for _, it := range items {
+				if err := rebuildItemSearchFTSTx(ctx, tx, it.id, it.kind); err != nil {
+					return err
+				}
+			}
 		}
 		if len(fields) > 0 {
 			r, err := tx.ExecContext(ctx, "DELETE FROM field_provenance WHERE field IN "+placeholders(len(fields)), anySlice(fields)...)

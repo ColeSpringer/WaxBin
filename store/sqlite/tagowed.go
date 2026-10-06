@@ -223,7 +223,7 @@ func settleOwedByScanTx(ctx context.Context, tx *sql.Tx, fileID, itemID int64, s
 			return false, nil
 		}
 		l, err := lockedFields()
-		return l[col] || (col == "artist" && l[model.CreditField(model.RoleArtist)]), err
+		return l[col], err
 	}
 	var stored *model.Book
 	// The item's custom tags and the file's, by canonical key, read on the first owed tag.
