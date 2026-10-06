@@ -146,6 +146,8 @@ type Plan struct {
 	TotalBytes  int64 // bytes the importable actions would bring in
 	Actions     []Action
 	Acquisition *model.AcquisitionInput // recorded on each imported item when set
+	// Inbox says Source is a configured inbox folder (Request.Inbox).
+	Inbox bool
 }
 
 // Importable returns the number of actions that would actually import.
@@ -167,8 +169,10 @@ type Report struct {
 	Quarantined int
 	Errored     int
 	Sidecars    int // companion files (lyrics/art/...) carried in with the audio
-	Bytes       int64
-	Failures    []Failure
+	// DirsPruned counts the staging folders the import emptied and removed.
+	DirsPruned int
+	Bytes      int64
+	Failures   []Failure
 	// Files says, for each file imported, the item it now backs and whether it joined an
 	// existing one as an alternate (a DupAllow import of audio the catalog held).
 	Files []FileOutcome
@@ -206,7 +210,7 @@ func (s *Service) Plan(ctx context.Context, req Request) (*Plan, error) {
 		req.Source = abs
 	}
 	plan := &Plan{
-		Source: req.Source, Library: req.Library, Profile: req.Profile.Name,
+		Source: req.Source, Inbox: req.Inbox, Library: req.Library, Profile: req.Profile.Name,
 		Copy: req.Copy, DupPolicy: req.DupPolicy, Reserve: req.ReserveBytes,
 		Acquisition: req.Acquisition,
 	}
@@ -483,12 +487,23 @@ func (s *Service) Execute(ctx context.Context, plan *Plan) (*Report, error) {
 	rep := &Report{BatchPID: batch.PID}
 
 	// The staging directories' covers are planned once the audio has landed, so a folder
-	// routed to more than one library leaves a cover in each destination.
-	// It runs on the cancellation path too, before the batch is finalized: the audio
+	// routed to more than one library leaves a cover in each destination. The album
+	// folders are the source and the folders below it, or only those below a configured
+	// inbox, which holds staged imports; a file handed over alone carries nothing from its
+	// folder. It runs on the cancellation path too, before the batch is finalized: the audio
 	// already landed, so a staging directory emptied before the cancel would otherwise
-	// keep a cover with nothing to hold it.
+	// keep a cover with nothing to hold it. The staging folders the import emptied are
+	// then removed; a copier still writing into one has a file there, which keeps it.
 	var placed []organize.SidecarMove
-	placeCovers := func() { rep.Sidecars += s.placeCovers(organize.CoverMoves(placed, scan.IsAudio), plan.Copy) }
+	placeCovers := func() {
+		root := filepath.Dir(plan.Source)
+		if plan.Inbox {
+			root = plan.Source
+		}
+		rep.Sidecars += s.placeCovers(organize.CoverMoves(placed, organize.PruneOptions(root, nil)), plan.Copy)
+		rep.DirsPruned += s.pruneStaging(plan.Source, placed)
+	}
+	sib := organize.NewSiblings()
 	spellers := map[int64]*fsx.Speller{}
 	speller := func(lib *model.Library) *fsx.Speller {
 		if spellers[lib.ID] == nil {
@@ -516,7 +531,7 @@ func (s *Service) Execute(ctx context.Context, plan *Plan) (*Report, error) {
 			if lib == nil {
 				lib = plan.Library
 			}
-			sidecars, outcome, err := s.importOne(ctx, plan, a, lib, speller(lib))
+			sidecars, outcome, err := s.importOne(ctx, plan, a, lib, speller(lib), sib)
 			if err != nil {
 				rep.Errored++
 				rep.Failures = append(rep.Failures, Failure{Src: a.Src, Err: err.Error()})
@@ -553,10 +568,26 @@ func (s *Service) placeCovers(moves []organize.CoverMove, copyMode bool) int {
 	return moved
 }
 
+// pruneStaging removes the staging folders the import emptied, and any folder above them
+// then empty, below the staging root only; a companion left in one follows its audio as
+// organize.FolderDisposal says.
+func (s *Service) pruneStaging(root string, placed []organize.SidecarMove) int {
+	dirs := make([]string, 0, len(placed))
+	for _, m := range placed {
+		dirs = append(dirs, filepath.Dir(m.Src))
+	}
+	dispose, undo := organize.FolderDisposal(placed, func(string) string { return root })
+	return fsx.PruneAll(dirs, func(string) fsx.PruneOptions {
+		opts := organize.PruneOptions(root, dispose)
+		opts.Undo = undo
+		return opts
+	}, func(dir string, err error) { s.log.Warn("pruning an emptied staging folder", "dir", dir, "err", err) })
+}
+
 // importOne places one file in the managed tree, catalogs it under its target
 // library, records any acquisition provenance, and carries its sidecars in alongside
 // it. It returns the number of sidecars placed and what cataloging the file did.
-func (s *Service) importOne(ctx context.Context, plan *Plan, a *Action, lib *model.Library, sp *fsx.Speller) (int, FileOutcome, error) {
+func (s *Service) importOne(ctx context.Context, plan *Plan, a *Action, lib *model.Library, sp *fsx.Speller, sib *organize.Siblings) (int, FileOutcome, error) {
 	outcome := FileOutcome{Path: a.Dst}
 	if err := os.MkdirAll(pathx.Long(filepath.Dir(a.Dst)), 0o755); err != nil {
 		return 0, outcome, waxerr.Wrap(waxerr.CodeIO, "inbox.import", err)
@@ -592,7 +623,10 @@ func (s *Service) importOne(ctx context.Context, plan *Plan, a *Action, lib *mod
 			outcome.ItemPID, outcome.AttachedAsCopy = copyOf, true
 		}
 	}
-	return s.relocateSidecars(plan, a), outcome, nil
+	if !plan.Copy {
+		sib.Left(a.Src)
+	}
+	return s.relocateSidecars(plan, a, sib), outcome, nil
 }
 
 // preflightPlan refuses an import that would leave any destination volume below its
@@ -629,10 +663,10 @@ func preflightPlan(plan *Plan) error {
 // is already imported). The same discovery as organize is used, so import and organize
 // keep one sidecar set; the directory's own cover is carried by placeCovers once the
 // batch is done.
-func (s *Service) relocateSidecars(plan *Plan, a *Action) int {
+func (s *Service) relocateSidecars(plan *Plan, a *Action, sib *organize.Siblings) int {
 	moved := 0
-	for _, m := range organize.SidecarMoves(a.Src, a.Dst) {
-		switch err := fsx.MoveOrCopy(m.Src, m.Dst, plan.Copy); {
+	for _, m := range organize.SidecarMoves(a.Src, a.Dst, sib) {
+		switch err := fsx.MoveOrCopy(m.Src, m.Dst, plan.Copy || m.Shared); {
 		case err == nil:
 			moved++
 		case errors.Is(err, fsx.ErrExist):

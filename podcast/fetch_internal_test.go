@@ -37,3 +37,16 @@ func TestFetchToBlamesALocalWriteOnTheCatalog(t *testing.T) {
 		}
 	}
 }
+
+// TestFetchToRemakesAFolderAPruneTook: Download makes the show folder outside the podcast
+// lease, so an unfetch's prune can take it before the download's file exists; the fetch
+// makes it again rather than failing.
+func TestFetchToRemakesAFolderAPruneTook(t *testing.T) {
+	t.Parallel()
+	prov := &source.Mock{Type: model.SourceYouTube, Payload: []byte("audio")}
+	path := filepath.Join(t.TempDir(), "Show", "ep.part")
+	n, _, err := (&Service{}).fetchTo(context.Background(), prov, path, source.FetchRequest{URL: "yt://v1"})
+	if err != nil || n != 5 {
+		t.Fatalf("fetchTo = %d, %v; want the five bytes written into a remade folder", n, err)
+	}
+}

@@ -10,6 +10,7 @@ import (
 
 	"github.com/colespringer/waxbin/art"
 	"github.com/colespringer/waxbin/identity"
+	"github.com/colespringer/waxbin/internal/diskfree"
 	"github.com/colespringer/waxbin/internal/netsafe"
 	"github.com/colespringer/waxbin/internal/pathx"
 	"github.com/colespringer/waxbin/meta"
@@ -121,6 +122,7 @@ type Service struct {
 	log       *slog.Logger
 	providers map[model.SourceType]source.Provider
 	now       func() time.Time
+	freeSpace func(dir string) (uint64, error)
 
 	libMu sync.Mutex
 	libID int64 // cached internal podcast-library id (0 = unresolved)
@@ -183,7 +185,7 @@ func New(store Store, reader meta.Reader, cfg Config, log *slog.Logger) *Service
 		}
 	}
 	return &Service{store: store, client: client, reader: reader, cfg: cfg, log: log,
-		providers: providers, now: time.Now}
+		providers: providers, now: time.Now, freeSpace: diskfree.Available}
 }
 
 // lease runs fn holding the podcast filesystem lease, or inline when no Leaser is
@@ -605,6 +607,7 @@ func (s *Service) Remove(ctx context.Context, pid model.PID) error {
 				s.log.Warn("removing episode file on unsubscribe", "path", p, "err", err)
 			}
 		}
+		s.pruneFolders(files...)
 		return nil
 	})
 }

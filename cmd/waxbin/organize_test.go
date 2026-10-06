@@ -38,3 +38,29 @@ func TestOrganizePlanNamesReadOnlyLibraries(t *testing.T) {
 		t.Errorf("plan json = %+v (err %v), want readOnlyLibraries 2", env, err)
 	}
 }
+
+// TestOrganizeReportSaysWhatItPruned: an applied organize says how many folders its moves
+// emptied and removed, in both outputs.
+func TestOrganizeReportSaysWhatItPruned(t *testing.T) {
+	t.Parallel()
+	render := func(json bool) string {
+		cmd := &cobra.Command{}
+		var buf bytes.Buffer
+		cmd.SetOut(&buf)
+		if err := emitReport(cmd, &globals{jsonOut: json}, "p", &organize.Report{Moved: 3, DirsPruned: 2}); err != nil {
+			t.Fatal(err)
+		}
+		return buf.String()
+	}
+	if out := render(false); !strings.Contains(out, "pruned 2 folders") {
+		t.Errorf("report text lacks the pruned count:\n%s", out)
+	}
+	var env struct {
+		Data struct {
+			DirsPruned int `json:"dirsPruned"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(render(true)), &env); err != nil || env.Data.DirsPruned != 2 {
+		t.Errorf("report json = %+v (err %v), want dirsPruned 2", env, err)
+	}
+}

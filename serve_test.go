@@ -1674,11 +1674,11 @@ func TestServeProxiedPodcastUnfetchAndRemove(t *testing.T) {
 	if err != nil {
 		t.Fatalf("proxied unfetch: %v", err)
 	}
-	if !got.Unfetched || got.ReclaimedBytes <= 0 {
-		t.Errorf("proxied unfetch = %+v, want the bytes reclaimed", got)
+	if !got.Unfetched || got.ReclaimedBytes <= 0 || got.DirsPruned != 1 {
+		t.Errorf("proxied unfetch = %+v, want the bytes reclaimed and the show folder pruned", got)
 	}
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Errorf("the episode file survives at %s", path)
+	if _, err := os.Stat(filepath.Dir(path)); !os.IsNotExist(err) {
+		t.Errorf("the episode's folder survives at %s", filepath.Dir(path))
 	}
 	after, err := lib.Podcasts().Episode(ctx, res.EpisodePID)
 	if err != nil {

@@ -37,6 +37,14 @@ type Library struct {
 	FolderFallback bool
 }
 
+// RootPath is the library root as a path to open: DisplayRoot, or Root when that is empty.
+func (l *Library) RootPath() string {
+	if l.DisplayRoot != "" {
+		return l.DisplayRoot
+	}
+	return string(l.Root)
+}
+
 // MediaType returns the library's media type, defaulting to mixed when unset so an
 // older catalog routes as a single content-classified tree.
 func (l *Library) MediaType() MediaType {

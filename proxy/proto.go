@@ -826,10 +826,13 @@ type UnfetchParams struct {
 
 // UnfetchResult is the unfetch response. Unfetched is false when the episode held no
 // file, which is a no-op rather than an error, so a client needs the flag to tell "I
-// reclaimed these bytes" from "there was nothing to reclaim".
+// reclaimed these bytes" from "there was nothing to reclaim". DirsPruned counts the
+// folders the unfetch emptied and removed; it rides on version 22, and an older server
+// leaves it out.
 type UnfetchResult struct {
 	Unfetched      bool  `json:"unfetched"`
 	ReclaimedBytes int64 `json:"reclaimedBytes"`
+	DirsPruned     int   `json:"dirsPruned,omitempty"`
 }
 
 // PodcastRemoveParams is the podcast_remove request payload: the show to unsubscribe

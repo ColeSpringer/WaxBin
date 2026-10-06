@@ -27,7 +27,8 @@ func newAuditCmd(g *globals) *cobra.Command {
 		Use:   "audit",
 		Short: "Report catalog quality and integrity problems",
 		Long: "Runs quality checks over the catalog: duplicate/split entities, inconsistent " +
-			"metadata, missing art/ReplayGain, unportable filenames, orphaned sidecars, " +
+			"metadata, missing art/ReplayGain, unportable filenames, folders holding only " +
+			"companion files (covers, booklets, logs) and no audio, " +
 			"case-insensitive path conflicts, library roots that differ only by case, " +
 			"invalid feeds, derived-data drift, header durations that disagree with the " +
 			"decoded audio, the copies and other encodings items hold beside their primary " +
@@ -40,7 +41,8 @@ func newAuditCmd(g *globals) *cobra.Command {
 			"analyze has not read since it changed has only the parse's word, so a quiet run " +
 			"is not a clean bill of health until analyze is current. --integrity adds a fresh " +
 			"decode of every file not already reported plus an on-disk bitrot (content-hash) " +
-			"pass, both of which re-read the files. " +
+			"pass, both of which re-read the files, and the walk of every library folder that " +
+			"finds folders left holding only companion files. " +
 			"--check <name> (repeatable) restricts the run; valid " +
 			"names: " + strings.Join(names, ", ") + ". Exits non-zero when any error-severity " +
 			"finding is reported.",
@@ -82,7 +84,7 @@ func newAuditCmd(g *globals) *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().BoolVar(&integrity, "integrity", false, "also re-read every audio file for bitrot and corruption (slow)")
+	cmd.Flags().BoolVar(&integrity, "integrity", false, "also re-read every audio file for bitrot and corruption, and walk every library folder (slow)")
 	cmd.Flags().StringArrayVar(&checks, "check", nil, "restrict to a specific check (repeatable)")
 	cmd.Flags().IntVar(&sample, "sample", 0, "cap the sample size per check (0 = default)")
 	return cmd

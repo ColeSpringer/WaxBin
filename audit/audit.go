@@ -220,6 +220,12 @@ func (a *Auditor) Run(ctx context.Context, cfg Config) (*Report, error) {
 		}
 	}
 
+	if a.runs(cfg, model.CheckOrphanSidecar) {
+		if err := a.checkOrphanFolders(ctx, sample, add); err != nil {
+			return nil, err
+		}
+	}
+
 	// The filesystem-facing checks all iterate the file list, so fetch it once.
 	if a.needsFiles(cfg) {
 		if err := a.checkFiles(ctx, cfg, sample, rep, add, corruptSeen); err != nil {
@@ -249,7 +255,7 @@ func (a *Auditor) runs(cfg Config, c model.AuditCheck) bool {
 	// analyze pass already recorded, which is one indexed query, so it defaults on and
 	// that free visibility is the point. The heavy decode-probe half is gated on
 	// cfg.Integrity inside the check.
-	if c == model.CheckIntegrity {
+	if c == model.CheckIntegrity || c == model.CheckOrphanSidecar {
 		return cfg.Integrity
 	}
 	return true
@@ -258,7 +264,6 @@ func (a *Auditor) runs(cfg Config, c model.AuditCheck) bool {
 // needsFiles reports whether any enabled check reads the file list.
 func (a *Auditor) needsFiles(cfg Config) bool {
 	return a.runs(cfg, model.CheckBadFilename) ||
-		a.runs(cfg, model.CheckOrphanSidecar) ||
 		a.runs(cfg, model.CheckPathConflict) ||
 		(a.runs(cfg, model.CheckIntegrity) && a.hash != nil) ||
 		// The corrupt-audio probe keys off cfg.Integrity directly rather than runs(),

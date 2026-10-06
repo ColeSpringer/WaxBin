@@ -998,10 +998,10 @@ func TestOrganizeRelocatesSidecars(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	db := filepath.Join(t.TempDir(), "catalog.db")
-	src := filepath.Join(root, "song.mp3")
+	src := filepath.Join(root, "Downloads", "song.mp3")
 	writeFile(t, src, testaudio.BuildMP3("Midnight Drive", "The Foobars", "Night Moves", 3))
-	writeFile(t, filepath.Join(root, "song.lrc"), []byte("[00:00.00]lyric"))
-	writeFile(t, filepath.Join(root, "cover.jpg"), []byte("jpegdata"))
+	writeFile(t, filepath.Join(root, "Downloads", "song.lrc"), []byte("[00:00.00]lyric"))
+	writeFile(t, filepath.Join(root, "Downloads", "cover.jpg"), []byte("jpegdata"))
 
 	lib := openManaged(t, ctx, db, root)
 	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
@@ -1029,7 +1029,7 @@ func TestOrganizeRelocatesSidecars(t *testing.T) {
 	if !fileExists(filepath.Join(dstDir, "cover.jpg")) {
 		t.Error("directory cover art was not moved with the audio")
 	}
-	if fileExists(filepath.Join(root, "song.lrc")) {
+	if fileExists(filepath.Join(root, "Downloads", "song.lrc")) {
 		t.Error("lyrics sidecar left behind at source")
 	}
 }

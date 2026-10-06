@@ -2689,8 +2689,14 @@ func (l *Library) ApplyOrganize(ctx context.Context, plan *organize.Plan) (*orga
 		live := *plan
 		live.Actions = slices.Clone(plan.Actions)
 		for i := range live.Actions {
-			if a := &live.Actions[i]; !a.Skip && readOnlyLibraryAt(libs, a.SrcBytes) != nil {
+			a := &live.Actions[i]
+			if !a.Skip && readOnlyLibraryAt(libs, a.SrcBytes) != nil {
 				a.Skip, a.Reason = true, readOnlySinceThePlan
+			}
+			// A plan built without roots (by hand, or before actions carried them) takes
+			// each file's library, which the cover pass and the prune need.
+			if lib := libraryAt(libs, a.SrcBytes); a.Root == "" && lib != nil {
+				a.Root = string(lib.Root)
 			}
 		}
 		r, err := l.organizer.Execute(ctx, &live, h.JobPID(),
@@ -2822,8 +2828,15 @@ func (l *Library) ApplyDelete(ctx context.Context, plan *trash.Plan) (*trash.Rep
 		live := *plan
 		live.Actions = slices.Clone(plan.Actions)
 		for i := range live.Actions {
-			if a := &live.Actions[i]; !a.Skip && readOnlyLibraryAt(libs, a.SrcBytes) != nil {
+			a := &live.Actions[i]
+			if !a.Skip && readOnlyLibraryAt(libs, a.SrcBytes) != nil {
 				a.Skip, a.Reason = true, readOnlySinceThePlan
+			}
+			// A plan built without roots (by hand, or before actions carried them) takes
+			// each file's library, which the prune needs to bound itself and to know
+			// whose companions it may take.
+			if lib := libraryAt(libs, a.SrcBytes); a.Root == "" && lib != nil {
+				a.Root, a.InPlace = lib.RootPath(), lib.Mode == model.ModeInPlace
 			}
 		}
 		r, err := l.trasher.Execute(ctx, &live)
@@ -3210,6 +3223,8 @@ func (l *Library) EmptyTrash(ctx context.Context, opts EmptyTrashOptions) (*Empt
 		if err != nil {
 			return err
 		}
+		var roots []string
+		defer func() { l.sweepTrash(context.WithoutCancel(ctx), roots) }()
 		for i := range entries {
 			if ctx.Err() != nil {
 				return waxerr.FromContext("Library.EmptyTrash", ctx.Err(), waxerr.CodeIO)
@@ -3230,6 +3245,9 @@ func (l *Library) EmptyTrash(ctx context.Context, opts EmptyTrashOptions) (*Empt
 			}
 			rep.Purged++
 			rep.ReclaimedBytes += size
+			if root, ok := trashRoot(entries[i]); ok && !slices.Contains(roots, root) {
+				roots = append(roots, root)
+			}
 		}
 		return nil
 	})
@@ -3260,12 +3278,50 @@ func (l *Library) PurgeTrash(ctx context.Context, trashPID model.PID) (int64, er
 		}
 		n, err := l.purgeTrashEntry(ctx, *entry)
 		size = n
-		return err
+		if err != nil {
+			return err
+		}
+		if root, ok := trashRoot(*entry); ok {
+			l.sweepTrash(ctx, []string{root})
+		}
+		return nil
 	})
 	if err != nil {
 		return 0, err
 	}
 	return size, nil
+}
+
+// trashRoot returns the root of the library whose trash holds an entry, read from the
+// entry's own path.
+func trashRoot(e model.TrashEntry) (string, bool) {
+	trash := filepath.Dir(filepath.Dir(e.TrashDisplay))
+	return filepath.Dir(trash), filepath.Base(trash) == model.TrashDirName
+}
+
+// sweepTrash drops what the trash under each root keeps that the journal is done with
+// (trash.Sweep). Every entry is passed, whatever its library, so an entry folder is never
+// misjudged over a difference in how a root is spelled.
+func (l *Library) sweepTrash(ctx context.Context, roots []string) {
+	if len(roots) == 0 {
+		return
+	}
+	entries, err := l.store.TrashEntries(ctx, true, 0, 0)
+	if err != nil {
+		l.log.Warn("sweeping the trash", "err", err)
+		return
+	}
+	var active, restored []model.TrashEntry
+	for _, e := range entries {
+		if e.RestoredAt != 0 {
+			restored = append(restored, e)
+		} else {
+			active = append(active, e)
+		}
+	}
+	for _, root := range roots {
+		l.trasher.Sweep(root, active, restored)
+	}
 }
 
 // purgeTrashEntry is the shared purge step: remove the trashed file (and its
@@ -3854,11 +3910,7 @@ func (l *Library) Export(ctx context.Context, w io.Writer) (*port.Manifest, erro
 			continue
 		}
 		if lib := libraryContaining(libs, it.DisplayPath); lib != nil {
-			root := lib.DisplayRoot
-			if root == "" {
-				root = string(lib.Root)
-			}
-			if rel, err := filepath.Rel(root, it.DisplayPath); err == nil {
+			if rel, err := filepath.Rel(lib.RootPath(), it.DisplayPath); err == nil {
 				relByPID[it.PID] = rel
 			}
 		}
@@ -4038,11 +4090,7 @@ func inPodcastLibrary(libs []*model.Library, path string) bool {
 // libraryContaining returns the library whose root contains path, or nil.
 func libraryContaining(libs []*model.Library, path string) *model.Library {
 	for _, lib := range libs {
-		root := lib.DisplayRoot
-		if root == "" {
-			root = string(lib.Root)
-		}
-		if pathx.UnderRoot(root, path) {
+		if pathx.UnderRoot(lib.RootPath(), path) {
 			return lib
 		}
 	}
@@ -4191,4 +4239,5 @@ func addResult(dst *scan.Result, src *scan.Result) {
 	dst.Promoted += src.Promoted
 	dst.Dropped += src.Dropped
 	dst.WalkErrors += src.WalkErrors
+	dst.SubPathGone = dst.SubPathGone || src.SubPathGone
 }

@@ -3,7 +3,9 @@ package podcast
 import (
 	"context"
 	"os"
+	"path/filepath"
 
+	"github.com/colespringer/waxbin/internal/fsx"
 	"github.com/colespringer/waxbin/internal/pathx"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/waxerr"
@@ -15,6 +17,8 @@ type UnfetchResult struct {
 	EpisodePID     model.PID
 	Unfetched      bool
 	ReclaimedBytes int64
+	// DirsPruned counts the folders the unfetch emptied and removed.
+	DirsPruned int
 }
 
 // Unfetch deletes a downloaded episode's file and returns the episode to remote,
@@ -63,5 +67,23 @@ func (s *Service) unfetch(ctx context.Context, episodePID model.PID) (*UnfetchRe
 		return nil, err
 	}
 	res.Unfetched = true
+	res.DirsPruned = s.pruneFolders(ep.DisplayPath)
 	return res, nil
+}
+
+// pruneFolders removes the folders that held the given episode files once they hold
+// nothing but junk, up to the download folder, and returns how many went. A file nothing
+// else claims, a companion someone put there included, keeps its folder.
+func (s *Service) pruneFolders(paths ...string) int {
+	if s.cfg.Dir == "" {
+		return 0
+	}
+	dirs := make([]string, 0, len(paths))
+	for _, p := range paths {
+		if p != "" {
+			dirs = append(dirs, filepath.Dir(p))
+		}
+	}
+	return fsx.PruneAll(dirs, func(string) fsx.PruneOptions { return fsx.PruneOptions{Root: s.cfg.Dir, Junk: fsx.IsJunk} },
+		func(dir string, err error) { s.log.Warn("pruning an emptied podcast folder", "dir", dir, "err", err) })
 }

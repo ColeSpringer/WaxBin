@@ -7,11 +7,11 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/colespringer/waxbin/internal/fsx"
 	"github.com/colespringer/waxbin/model"
-	"github.com/colespringer/waxbin/scan"
 	"github.com/colespringer/waxbin/store/sqlite"
 )
 
@@ -52,7 +52,7 @@ func TestSidecarMovesEnumeration(t *testing.T) {
 		mustWrite(t, filepath.Join(srcDir, name))
 	}
 
-	moves := SidecarMoves(filepath.Join(srcDir, "song.mp3"), filepath.Join(dstDir, "01 - Song.mp3"))
+	moves := SidecarMoves(filepath.Join(srcDir, "song.mp3"), filepath.Join(dstDir, "01 - Song.mp3"), nil)
 	got := make([]string, 0, len(moves))
 	for _, m := range moves {
 		got = append(got, filepath.Base(m.Src)+" -> "+filepath.Base(m.Dst))
@@ -94,7 +94,7 @@ func TestMoveSidecarOnDiskAndCollision(t *testing.T) {
 	mustMkdir(t, dstDir)
 	mustWrite(t, filepath.Join(dstDir, "cover.jpg"))
 
-	moved := o.moveSidecars(fsx.NewSpeller(dir, nil), filepath.Join(srcDir, "song.mp3"), filepath.Join(dstDir, "01 - Song.mp3"))
+	moved := o.moveSidecars(fsx.NewSpeller(dir, nil), filepath.Join(srcDir, "song.mp3"), filepath.Join(dstDir, "01 - Song.mp3"), nil)
 	if moved != 1 {
 		t.Fatalf("moved %d sidecars, want 1 (lrc moved, conflicting cover left)", moved)
 	}
@@ -140,7 +140,7 @@ func TestExecuteSplitsADirectoryCoverAcrossDestinations(t *testing.T) {
 		{Src: plan.Actions[0].Src, Dst: plan.Actions[0].Dst},
 		{Src: plan.Actions[1].Src, Dst: plan.Actions[1].Dst},
 	}
-	if n := o.applyCoverMoves(fsx.NewSpeller(dir, nil), CoverMoves(moved, scan.IsAudio)); n != 2 {
+	if n := o.applyCoverMoves(fsx.NewSpeller(dir, nil), CoverMoves(moved, PruneOptions(dir, nil))); n != 2 {
 		t.Fatalf("covers placed = %d, want one per destination", n)
 	}
 	for _, d := range []string{dstA, dstB} {
@@ -204,7 +204,7 @@ func TestExecuteCarriesCoversWhenCancelled(t *testing.T) {
 		}
 		actions = append(actions, Action{
 			FilePID: res.FilePID, ItemPID: res.ItemPID,
-			Src: src, SrcBytes: []byte(src), Dst: dst,
+			Src: src, SrcBytes: []byte(src), Dst: dst, Root: root,
 		})
 	}
 
@@ -242,5 +242,100 @@ func mustWrite(t *testing.T, p string) {
 	t.Helper()
 	if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestExecuteTakesSharedLyricsWithTheLastFile: three files of one name moving to three
+// places each leave with the lyrics they share, copies for the first two and the file
+// itself for the last, so nothing is left behind.
+func TestExecuteTakesSharedLyricsWithTheLastFile(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	st, err := sqlite.Open(ctx, sqlite.OpenOptions{Path: filepath.Join(t.TempDir(), "c.db"), Owner: "test"})
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	root := t.TempDir()
+	srcDir := filepath.Join(root, "Rip")
+	mustMkdir(t, srcDir)
+	mustWrite(t, filepath.Join(srcDir, "Song.lrc"))
+	lib, err := st.EnsureLibrary(ctx, &model.Library{Root: []byte(root), DisplayRoot: root, Mode: model.ModeManaged, Profile: "waxbin-native"})
+	if err != nil {
+		t.Fatalf("ensure library: %v", err)
+	}
+	var actions []Action
+	for i, name := range []string{"Song.mp3", "Song.mpga", "Song.wav"} {
+		src, dst := filepath.Join(srcDir, name), filepath.Join(root, "Album"+name[5:], "01 - Song"+filepath.Ext(name))
+		mustWrite(t, src)
+		res, err := st.PutScannedTrack(ctx, model.PutScannedTrackInput{
+			LibraryID: lib.ID,
+			File: model.File{Path: []byte(src), DisplayPath: src, RelPath: []byte(filepath.Join("Rip", name)),
+				Kind: model.FileAudio, Size: 1, MTimeNS: 1, DurationMS: 1000,
+				ContentHash: "c-" + name, EssenceHash: "e-" + name, ScanState: model.ScanIndexed},
+			Item: model.PlayableItem{Kind: model.KindTrack, State: model.StatePresent, Title: name,
+				SortKey: model.SortKey(name), IdentityKey: "essence:e-" + name},
+			Track: model.Track{Artist: "A", AlbumArtist: "A", Album: name, TrackNo: i + 1},
+		})
+		if err != nil {
+			t.Fatalf("seed %s: %v", name, err)
+		}
+		actions = append(actions, Action{FilePID: res.FilePID, ItemPID: res.ItemPID, Src: src, SrcBytes: []byte(src), Dst: dst, Root: root})
+	}
+	rep, err := New(st, nil, slog.New(slog.NewTextHandler(io.Discard, nil))).Execute(ctx, &Plan{Actions: actions}, "", nil)
+	if err != nil || rep.Moved != 3 {
+		t.Fatalf("execute: %+v (err %v), want three moved", rep, err)
+	}
+	if exists(srcDir) {
+		t.Fatal("the lyrics stayed behind, keeping the source folder")
+	}
+	for _, a := range actions {
+		if !exists(strings.TrimSuffix(a.Dst, filepath.Ext(a.Dst)) + ".lrc") {
+			t.Errorf("%s has no lyrics beside it", a.Dst)
+		}
+	}
+}
+
+// TestParkRecordsItsPathBelowTheActionsRoot: a part parked under a free name in a plan
+// that spans two libraries, which has no root of its own, records its path below its own
+// library's root.
+func TestParkRecordsItsPathBelowTheActionsRoot(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	st, err := sqlite.Open(ctx, sqlite.OpenOptions{Path: filepath.Join(t.TempDir(), "c.db"), Owner: "test"})
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	root := t.TempDir()
+	src := filepath.Join(root, "Book", "01.mp3")
+	mustMkdir(t, filepath.Dir(src))
+	mustWrite(t, src)
+	lib, err := st.EnsureLibrary(ctx, &model.Library{Root: []byte(root), DisplayRoot: root, Mode: model.ModeManaged, Profile: "waxbin-native"})
+	if err != nil {
+		t.Fatalf("ensure library: %v", err)
+	}
+	res, err := st.PutScannedTrack(ctx, model.PutScannedTrackInput{
+		LibraryID: lib.ID,
+		File: model.File{Path: []byte(src), DisplayPath: src, RelPath: []byte(filepath.Join("Book", "01.mp3")),
+			Kind: model.FileAudio, Size: 1, MTimeNS: 1, DurationMS: 1000,
+			ContentHash: "c-1", EssenceHash: "e-1", ScanState: model.ScanIndexed},
+		Item:  model.PlayableItem{Kind: model.KindTrack, State: model.StatePresent, Title: "One", SortKey: model.SortKey("One"), IdentityKey: "essence:e-1"},
+		Track: model.Track{Artist: "A", AlbumArtist: "A", Album: "Book", TrackNo: 1},
+	})
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	a := &Action{FilePID: res.FilePID, ItemPID: res.ItemPID, Src: src, SrcBytes: []byte(src), Root: root}
+	o := New(st, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err := o.park(ctx, &Plan{Actions: []Action{*a}}, a, "", fsx.NewSpeller(root, nil), NewSiblings()); err != nil {
+		t.Fatalf("park: %v", err)
+	}
+	f, err := st.FileByPath(ctx, []byte(a.Src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join("Book", filepath.Base(a.Src)); string(f.RelPath) != want {
+		t.Fatalf("parked rel_path = %q, want %q", f.RelPath, want)
 	}
 }

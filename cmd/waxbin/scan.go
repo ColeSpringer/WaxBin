@@ -102,10 +102,11 @@ func renderScanResult(cmd *cobra.Command, g *globals, jobPID model.PID, t scan.R
 			Promoted        int    `json:"promoted"`
 			Dropped         int    `json:"dropped"`
 			WalkErrors      int    `json:"walkErrors"`
+			SubPathGone     bool   `json:"subPathGone,omitempty"`
 		}{
 			string(jobPID), t.FilesSeen, t.AudioFiles, t.ItemsCreated, t.ItemsUpdated,
 			t.Relinked, t.Unchanged, t.SidecarsUpdated, t.Missing, t.Skipped, t.Errored,
-			t.Copies, t.Reread, t.Promoted, t.Dropped, t.WalkErrors,
+			t.Copies, t.Reread, t.Promoted, t.Dropped, t.WalkErrors, t.SubPathGone,
 		})
 	}
 	fmt.Fprintf(out(cmd), "Scan complete (job %s)\n", jobPID)
@@ -135,6 +136,9 @@ func renderScanResult(cmd *cobra.Command, g *globals, jobPID model.PID, t scan.R
 	fmt.Fprintf(out(cmd), "  errored:      %d\n", t.Errored)
 	if t.WalkErrors > 0 {
 		fmt.Fprintf(out(cmd), "  unreadable:   %d (entries the walk could not read)\n", t.WalkErrors)
+	}
+	if t.SubPathGone {
+		fmt.Fprintln(out(cmd), "  sub-path:     not found (what the catalog held there is reconciled)")
 	}
 	return nil
 }

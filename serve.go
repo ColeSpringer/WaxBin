@@ -797,7 +797,7 @@ func (l *Library) proxyHandlers() map[string]proxy.Handler {
 			if err != nil {
 				return nil, err
 			}
-			return proxy.UnfetchResult{Unfetched: res.Unfetched, ReclaimedBytes: res.ReclaimedBytes}, nil
+			return proxy.UnfetchResult{Unfetched: res.Unfetched, ReclaimedBytes: res.ReclaimedBytes, DirsPruned: res.DirsPruned}, nil
 		},
 		proxy.MethodPodcastRemove: func(ctx context.Context, raw json.RawMessage) (any, error) {
 			p, err := decodeParams[proxy.PodcastRemoveParams](raw)

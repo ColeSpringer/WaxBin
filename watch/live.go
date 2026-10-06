@@ -147,6 +147,17 @@ loop:
 // goroutine, off the fsnotify read path, so its os.Stat / addTree walk cannot stall
 // event reading.
 func (w *Watcher) handleEvent(lw *liveWatch, deb *debouncer, ev fsnotify.Event) {
+	switch {
+	case ev.Has(fsnotify.Remove):
+		// A removed folder is rescanned itself, which a scan reads as gone and reconciles;
+		// its parent, a whole library for a first-level folder, has nothing new.
+		if lw.forget(ev.Name, false) {
+			deb.schedule(ev.Name)
+			return
+		}
+	case ev.Has(fsnotify.Rename):
+		lw.forget(ev.Name, true)
+	}
 	if ev.Has(fsnotify.Create) {
 		if info, err := os.Stat(ev.Name); err == nil && info.IsDir() {
 			if filepath.Base(ev.Name) == model.TrashDirName {
@@ -170,6 +181,40 @@ type liveWatch struct {
 	max     int // 0 = unlimited (kernel limit still applies, detected via ENOSPC)
 	mu      sync.Mutex
 	count   int
+	armed   map[string]bool
+	// removed holds the folders a Remove dropped, for the second event fsnotify sends
+	// for one (on its own watch and on its parent's).
+	removed map[string]bool
+}
+
+// forget drops the watch on a folder that was removed, or with subtree one moved away
+// and every watched folder below it, so the count follows the tree and the cap leaves
+// room for the folders that arrive later; it reports whether dir was a watched folder. A
+// removed folder's own events drop the folders below it first.
+func (lw *liveWatch) forget(dir string, subtree bool) bool {
+	lw.mu.Lock()
+	defer lw.mu.Unlock()
+	if !lw.armed[dir] {
+		if lw.removed[dir] {
+			delete(lw.removed, dir)
+			return true
+		}
+		return false
+	}
+	for p := range lw.armed {
+		if p == dir || subtree && underRoot(dir, p) {
+			delete(lw.armed, p)
+			lw.count--
+			_ = lw.watcher.Remove(p) // the kernel may have dropped it already
+		}
+	}
+	if !subtree {
+		if lw.removed == nil || len(lw.removed) > 1024 {
+			lw.removed = map[string]bool{}
+		}
+		lw.removed[dir] = true
+	}
+	return true
 }
 
 func (lw *liveWatch) total() int {
@@ -214,7 +259,13 @@ func (lw *liveWatch) addTree(dir string) (added int, exhausted bool) {
 			return nil
 		}
 		lw.mu.Lock()
-		lw.count++
+		if lw.armed == nil {
+			lw.armed = map[string]bool{}
+		}
+		if !lw.armed[path] {
+			lw.armed[path] = true
+			lw.count++
+		}
 		lw.mu.Unlock()
 		added++
 		return nil

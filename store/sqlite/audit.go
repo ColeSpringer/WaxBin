@@ -468,8 +468,8 @@ func (s *Store) CountItemsMissingReplayGain(ctx context.Context) (int, error) {
 }
 
 // AuditFiles returns every catalogued file's path, kind, content hash, and owning
-// item, for the filesystem-level checks (bad filenames, orphan sidecars, path
-// conflicts, integrity/corrupt audio). These are file-level checks, so it yields
+// item, for the filesystem-level checks (bad filenames, path conflicts,
+// integrity/corrupt audio). These are file-level checks, so it yields
 // exactly one row per file.
 //
 // The item lookup is gated on if2.start_frames IS NULL, mirroring the portable

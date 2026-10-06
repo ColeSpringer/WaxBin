@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -140,6 +141,9 @@ type Result struct {
 	Dropped    int
 	Skipped    int // non-audio files
 	WalkErrors int // entries the walk could not read
+	// SubPathGone says the sub-path asked for was not there, so the scan walked nothing
+	// and reconciled what the catalog held under it.
+	SubPathGone bool
 
 	// LibraryPID and LibraryName name the library a scan walked, its pid and display
 	// root; a total over several libraries leaves them empty.
@@ -228,7 +232,16 @@ func (s *Scanner) Scan(ctx context.Context, req Request, hb Heartbeat) (*Result,
 		return nil
 	}
 
-	walkErr := s.walk(walkRoot, func(path string, d fs.DirEntry, err error) error {
+	// A sub-path removed since it was named (a folder a delete or a move emptied, or one
+	// removed by hand) is nothing to walk and no walk error: the reconcile below marks what
+	// the catalog held under it missing.
+	walk := s.walk
+	if walkRoot != root && subPathGone(root, walkRoot) {
+		s.log.Debug("scan sub-path is gone", "path", walkRoot)
+		res.SubPathGone = true
+		walk = func(string, fs.WalkDirFunc) error { return nil }
+	}
+	walkErr := walk(walkRoot, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			s.log.Warn("walk entry", "path", path, "err", err)
 			res.WalkErrors++
@@ -285,6 +298,15 @@ func (s *Scanner) Scan(ctx context.Context, req Request, hb Heartbeat) (*Result,
 		_ = hb(1, "scanned "+strconv.Itoa(res.FilesSeen)+" files")
 	}
 	return res, nil
+}
+
+// subPathGone reports whether sub is absent while the library root holding it is there.
+func subPathGone(root, sub string) bool {
+	if _, err := os.Lstat(sub); !errors.Is(err, fs.ErrNotExist) {
+		return false
+	}
+	info, err := os.Stat(root)
+	return err == nil && info.IsDir()
 }
 
 // scanCtx carries the per-scan fast-path state through the walk. The walk is
@@ -1866,6 +1888,9 @@ func isAudio(path string) bool { return audioExts[strings.ToLower(filepath.Ext(p
 // IsAudio reports whether a path has a recognized audio extension. It is the one
 // source of truth for the audio-file set, shared with the importer.
 func IsAudio(path string) bool { return isAudio(path) }
+
+// AudioExtensions lists the extensions IsAudio accepts, lowercase and sorted.
+func AudioExtensions() []string { return slices.Sorted(maps.Keys(audioExts)) }
 
 // CueRipTracks reports how many cue tracks a scan would carve from the sheet beside an
 // audio file read as a track with no embedded chapters: none when there is no sheet, when

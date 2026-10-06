@@ -489,3 +489,97 @@ func TestLiveWatchArmsARootAddedLater(t *testing.T) {
 		return false
 	})
 }
+
+// TestLiveWatchForgetsARemovedFolder: a watched folder that is removed, as a prune
+// removes one, gives its place under the cap back, and one moved away gives back its
+// subtree's, so the watcher can still arm the folders that arrive later.
+func TestLiveWatchForgetsARemovedFolder(t *testing.T) {
+	root := t.TempDir()
+	for _, name := range []string{"a", filepath.Join("b", "c")} {
+		if err := os.MkdirAll(filepath.Join(root, name), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		t.Skipf("fsnotify unavailable: %v", err)
+	}
+	defer watcher.Close()
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	lw := &liveWatch{watcher: watcher, log: log, max: 4}
+	if added, _ := lw.addTree(root); added != 4 {
+		t.Skipf("armed %d of 4 watches", added)
+	}
+	w := &Watcher{log: log}
+	deb := newDebouncer(time.Hour, func(string) {})
+	defer deb.stop()
+
+	if err := os.Remove(filepath.Join(root, "a")); err != nil {
+		t.Fatal(err)
+	}
+	w.handleEvent(lw, deb, fsnotify.Event{Name: filepath.Join(root, "a"), Op: fsnotify.Remove})
+	if lw.total() != 3 {
+		t.Fatalf("total after a removal = %d, want 3", lw.total())
+	}
+	if err := os.Rename(filepath.Join(root, "b"), filepath.Join(t.TempDir(), "b")); err != nil {
+		t.Fatal(err)
+	}
+	w.handleEvent(lw, deb, fsnotify.Event{Name: filepath.Join(root, "b"), Op: fsnotify.Rename})
+	if lw.total() != 1 {
+		t.Fatalf("total after a subtree moved away = %d, want 1", lw.total())
+	}
+	for _, name := range []string{"d", "e", "f"} {
+		if err := os.Mkdir(filepath.Join(root, name), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if _, exhausted := lw.addTree(filepath.Join(root, name)); exhausted {
+			t.Fatalf("arming %s hit the cap with %d armed", name, lw.total())
+		}
+	}
+}
+
+// TestLiveWatchRescansARemovedFolderItself: a watched folder's removal, which fsnotify
+// reports on the folder's own watch and on its parent's, schedules a rescan of that
+// folder, which a scan reads as gone and reconciles, not of the folder above it, which
+// for a first-level folder is the whole library.
+func TestLiveWatchRescansARemovedFolderItself(t *testing.T) {
+	root := t.TempDir()
+	artist := filepath.Join(root, "Artist")
+	if err := os.Mkdir(artist, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		t.Skipf("fsnotify unavailable: %v", err)
+	}
+	defer watcher.Close()
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	lw := &liveWatch{watcher: watcher, log: log}
+	if added, _ := lw.addTree(root); added != 2 {
+		t.Skipf("armed %d of 2 watches", added)
+	}
+	got := make(chan string, 8)
+	deb := newDebouncer(time.Millisecond, func(dir string) { got <- dir })
+	defer deb.stop()
+	if err := os.Remove(artist); err != nil {
+		t.Fatal(err)
+	}
+	w := &Watcher{log: log}
+	for range 2 {
+		w.handleEvent(lw, deb, fsnotify.Event{Name: artist, Op: fsnotify.Remove})
+	}
+	var dirs []string
+	timeout := time.After(200 * time.Millisecond)
+collect:
+	for {
+		select {
+		case d := <-got:
+			dirs = append(dirs, d)
+		case <-timeout:
+			break collect
+		}
+	}
+	if len(dirs) != 1 || dirs[0] != artist {
+		t.Fatalf("rescans scheduled for %v, want the removed folder alone", dirs)
+	}
+}

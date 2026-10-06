@@ -2,17 +2,86 @@ package audit
 
 import (
 	"context"
+	"io/fs"
 	"net/url"
+	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"unicode/utf8"
 
+	"github.com/colespringer/waxbin/identity"
 	"github.com/colespringer/waxbin/internal/pathx"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/organize"
 )
+
+// checkOrphanFolders reports each folder below a library root that holds companion files
+// (covers, booklets, logs and the like) and nothing else but junk: no audio, no subfolder,
+// no file the companion set does not name. An album's own artwork folder (Scans/ beside
+// its audio or its disc folders) is no orphan, and neither is a system's junk folder,
+// which is not walked; nor is the trash. It reads folder listings only, so it runs with
+// the other disk checks. Such a folder is what a delete or a move leaves where companions
+// keep a folder, as they do in an in-place library; in a managed library the trash or
+// organize that empties a folder takes its companions along and removes it.
+func (a *Auditor) checkOrphanFolders(ctx context.Context, sample int, add func(model.AuditFinding)) error {
+	libs, err := a.store.Libraries(ctx)
+	if err != nil {
+		return err
+	}
+	orphan := &capped{limit: sample, check: model.CheckOrphanSidecar, sev: model.SeverityInfo, add: add}
+	for _, lib := range libs {
+		root := lib.RootPath()
+		o := organize.PruneOptions(root, nil)
+		// walk reports whether dir holds audio itself and whether it holds companions and
+		// nothing else, and reports the companion-only folders below it.
+		var walk func(dir string) (audio, companionsOnly bool)
+		walk = func(dir string) (bool, bool) {
+			if ctx.Err() != nil {
+				return false, false
+			}
+			entries, err := os.ReadDir(pathx.Long(dir))
+			if err != nil {
+				return false, false
+			}
+			_, companions, other := o.Leftovers(dir, entries)
+			audio := slices.ContainsFunc(entries, func(e fs.DirEntry) bool {
+				return e.Type().IsRegular() && o.IsAudio(filepath.Join(dir, e.Name()))
+			})
+			album := audio
+			var orphans []string
+			for _, e := range entries {
+				p := filepath.Join(dir, e.Name())
+				if !e.IsDir() || e.Name() == model.TrashDirName || o.Junk(p) {
+					continue
+				}
+				childAudio, childOrphan := walk(p)
+				if _, disc := identity.DiscFolder(e.Name()); disc && childAudio {
+					album = true
+				}
+				if childOrphan {
+					orphans = append(orphans, p)
+				}
+			}
+			for _, p := range orphans {
+				if !album {
+					orphan.emit(model.AuditFinding{
+						Check:    model.CheckOrphanSidecar,
+						Severity: model.SeverityInfo,
+						Message:  "folder holds companion files and no audio: " + p,
+						Path:     p,
+					})
+				}
+			}
+			return audio, len(companions) > 0 && !other
+		}
+		walk(root)
+	}
+	orphan.summary("folders holding companion files and no audio")
+	return ctx.Err()
+}
 
 // checkInvalidFeeds flags podcast shows whose feed looks broken: an rss/youtube
 // show with an unparseable feed URL, or a synced show with no episodes.
@@ -128,29 +197,19 @@ func foldASCIIPath(raw []byte) string {
 	return string(b)
 }
 
-// checkFiles runs the file-list-driven checks in one pass: bad filenames, orphaned
-// sidecars, case-insensitive path conflicts, and (opt-in) on-disk integrity and
-// corrupt-audio detection.
+// checkFiles runs the file-list-driven checks in one pass: bad filenames,
+// case-insensitive path conflicts, and (opt-in) on-disk integrity and corrupt-audio
+// detection.
 func (a *Auditor) checkFiles(ctx context.Context, cfg Config, sample int, rep *Report, add func(model.AuditFinding), corruptSeen map[string]bool) error {
 	files, err := a.store.AuditFiles(ctx)
 	if err != nil {
 		return err
 	}
 
-	// Directories that hold at least one audio file, for orphan-sidecar detection.
-	audioDirs := map[string]bool{}
-	for _, f := range files {
-		if f.Kind == model.FileAudio {
-			audioDirs[filepath.Dir(string(f.Path))] = true
-		}
-	}
-
 	doBad := a.runs(cfg, model.CheckBadFilename)
-	doOrphan := a.runs(cfg, model.CheckOrphanSidecar)
 	doConflict := a.runs(cfg, model.CheckPathConflict)
 
 	bad := &capped{limit: sample, check: model.CheckBadFilename, sev: model.SeverityWarn, add: add}
-	orphan := &capped{limit: sample, check: model.CheckOrphanSidecar, sev: model.SeverityWarn, add: add}
 	foldGroups := map[string][]model.AuditFileInfo{}
 
 	for _, f := range files {
@@ -169,20 +228,8 @@ func (a *Auditor) checkFiles(ctx context.Context, cfg Config, sample int, rep *R
 				})
 			}
 		}
-		if doOrphan && f.Kind != model.FileAudio && f.Kind != model.FileForeign {
-			if !audioDirs[filepath.Dir(string(f.Path))] {
-				orphan.emit(model.AuditFinding{
-					Check:    model.CheckOrphanSidecar,
-					Severity: model.SeverityWarn,
-					Message:  "orphaned " + string(f.Kind) + " sidecar (no audio in its folder): " + f.DisplayPath,
-					Path:     f.DisplayPath,
-					FilePID:  f.PID,
-				})
-			}
-		}
 	}
 	bad.summary("unportable filenames")
-	orphan.summary("orphaned sidecars")
 
 	if doConflict {
 		a.reportPathConflicts(foldGroups, sample, add)

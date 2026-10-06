@@ -507,7 +507,7 @@ func (m *mutator) Unfetch(ctx context.Context, episodePID model.PID) (*podcast.U
 			return nil, err
 		}
 		return &podcast.UnfetchResult{
-			EpisodePID: episodePID, Unfetched: res.Unfetched, ReclaimedBytes: res.ReclaimedBytes,
+			EpisodePID: episodePID, Unfetched: res.Unfetched, ReclaimedBytes: res.ReclaimedBytes, DirsPruned: res.DirsPruned,
 		}, nil
 	}
 	return m.lib.Podcasts().Unfetch(ctx, episodePID)

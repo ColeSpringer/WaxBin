@@ -194,14 +194,15 @@ func emitImportReport(cmd *cobra.Command, g *globals, src string, rep *inbox.Rep
 			Quarantined int             `json:"quarantined"`
 			Errored     int             `json:"errored"`
 			Sidecars    int             `json:"sidecars"`
+			DirsPruned  int             `json:"dirsPruned"`
 			Bytes       int64           `json:"bytes"`
 			Failures    []inbox.Failure `json:"failures,omitempty"`
 			Files       []importedFile  `json:"files"`
-		}{string(rep.BatchPID), src, rep.Imported, rep.Duplicates, rep.Quarantined, rep.Errored, rep.Sidecars, rep.Bytes,
+		}{string(rep.BatchPID), src, rep.Imported, rep.Duplicates, rep.Quarantined, rep.Errored, rep.Sidecars, rep.DirsPruned, rep.Bytes,
 			rep.Failures, importedFiles(rep.Files)})
 	}
-	fmt.Fprintf(out(cmd), "Imported %s: %d imported, %d duplicate, %d quarantined, %d errored, %d sidecars (%d bytes)\n",
-		src, rep.Imported, rep.Duplicates, rep.Quarantined, rep.Errored, rep.Sidecars, rep.Bytes)
+	fmt.Fprintf(out(cmd), "Imported %s: %d imported, %d duplicate, %d quarantined, %d errored, %d sidecars (%d bytes), pruned %s\n",
+		src, rep.Imported, rep.Duplicates, rep.Quarantined, rep.Errored, rep.Sidecars, rep.Bytes, plural(rep.DirsPruned, "folder"))
 	for _, f := range rep.Files {
 		if f.AttachedAsCopy {
 			fmt.Fprintf(out(cmd), "  copy %s: joined item %s\n", f.Path, f.ItemPID)

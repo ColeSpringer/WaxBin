@@ -2,10 +2,12 @@ package organize
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -15,7 +17,6 @@ import (
 	"github.com/colespringer/waxbin/internal/pathx"
 	"github.com/colespringer/waxbin/meta"
 	"github.com/colespringer/waxbin/model"
-	"github.com/colespringer/waxbin/scan"
 	"github.com/colespringer/waxbin/waxerr"
 )
 
@@ -34,6 +35,7 @@ type Action struct {
 	SrcBytes []byte // raw bytes of the current path
 	Dst      string // planned absolute path
 	RelDst   string // destination relative to the library root
+	Root     string // the root of the library the move is made in
 	Skip     bool   // already in place / nothing to do
 	Reason   string
 	// TagFields are the metadata fields to write into this file before the move
@@ -90,7 +92,9 @@ type Report struct {
 	Skipped       int
 	Errored       int
 	SidecarsMoved int
-	Failures      []Failure
+	// DirsPruned counts the source folders the moves emptied and removed.
+	DirsPruned int
+	Failures   []Failure
 	// Warnings records moves that succeeded but whose tag write-back did not fully
 	// land. They are not failures and do not affect the exit code.
 	Warnings []Warning
@@ -208,7 +212,7 @@ func (o *Organizer) Plan(ctx context.Context, lib *model.Library, p Profile, ite
 		dst := filepath.Join(root, rel)
 		a := Action{
 			ItemPID: it.PID, FilePID: it.FilePID,
-			Src: it.DisplayPath, SrcBytes: it.Path, Dst: dst, RelDst: rel,
+			Src: it.DisplayPath, SrcBytes: it.Path, Dst: dst, RelDst: rel, Root: root,
 		}
 		if filepath.Clean(a.Src) == filepath.Clean(dst) {
 			a.Skip, a.Reason = true, "already in place"
@@ -383,7 +387,7 @@ func (o *Organizer) planBookParts(plan *Plan, root, rel string, itemPID model.PI
 		dst := filepath.Join(root, partRel)
 		a := Action{
 			ItemPID: itemPID, FilePID: fl.FilePID,
-			Src: fl.DisplayPath, SrcBytes: fl.Path, Dst: dst, RelDst: partRel,
+			Src: fl.DisplayPath, SrcBytes: fl.Path, Dst: dst, RelDst: partRel, Root: root,
 		}
 		if filepath.Clean(a.Src) == filepath.Clean(dst) {
 			a.Skip, a.Reason = true, "already in place"
@@ -470,14 +474,37 @@ func markCollisions(plan *Plan) {
 func (o *Organizer) Execute(ctx context.Context, plan *Plan, jobPID model.PID, hb func(progress float64, msg string) error) (*Report, error) {
 	rep := &Report{}
 	total := len(plan.Actions)
-	sp := fsx.NewSpeller(plan.Root, func(from, to string) error { return o.respelled(ctx, plan, from, to) })
+	// A plan can span the managed libraries, so each root has its own Speller.
+	spellers := map[string]*fsx.Speller{}
+	speller := func(root string) *fsx.Speller {
+		if root == "" {
+			root = plan.Root
+		}
+		if spellers[root] == nil {
+			spellers[root] = fsx.NewSpeller(root, func(from, to string) error { return o.respelled(ctx, plan, from, to) })
+		}
+		return spellers[root]
+	}
 	// The directory covers are planned once the audio has actually moved, from what left
 	// each directory and where it landed, so a split album gets a cover in each
 	// destination and an emptied directory is not left holding one.
 	// It runs on the cancellation path too: the audio already moved, so a directory
-	// emptied before the cancel would otherwise keep a cover with nothing to hold it.
+	// emptied before the cancel would otherwise keep a cover with nothing to hold it. The
+	// source folders the moves emptied are then removed.
 	var moved []SidecarMove
-	placeCovers := func() { rep.SidecarsMoved += o.applyCoverMoves(sp, CoverMoves(moved, scan.IsAudio)) }
+	roots := map[string]string{}
+	sib := NewSiblings()
+	placeCovers := func() {
+		byRoot := map[string][]SidecarMove{}
+		for _, m := range moved {
+			r := roots[filepath.Dir(m.Src)]
+			byRoot[r] = append(byRoot[r], m)
+		}
+		for _, r := range slices.Sorted(maps.Keys(byRoot)) {
+			rep.SidecarsMoved += o.applyCoverMoves(speller(r), CoverMoves(byRoot[r], PruneOptions(r, nil)))
+		}
+		rep.DirsPruned += o.prune(roots, moved)
+	}
 	pending := map[string]int{}
 	for _, a := range plan.Actions {
 		if !a.Skip {
@@ -490,6 +517,7 @@ func (o *Organizer) Execute(ctx context.Context, plan *Plan, jobPID model.PID, h
 	}
 	ran := 0
 	run := func(a *Action) {
+		sp := speller(a.Root)
 		if err := o.apply(ctx, plan, a, jobPID, rep, sp); err != nil {
 			rep.Errored++
 			rep.Failures = append(rep.Failures, Failure{FilePID: a.FilePID, Src: a.Src, Dst: a.Dst, Err: err.Error()})
@@ -499,8 +527,11 @@ func (o *Organizer) Execute(ctx context.Context, plan *Plan, jobPID model.PID, h
 			// The audio is moved and recorded; now carry its own companions (same-basename
 			// lyrics/cue/art) so a move does not leave them behind. Sidecars are not
 			// cataloged, so a failure here is logged, not fatal.
-			rep.SidecarsMoved += o.moveSidecars(sp, a.Src, a.Dst)
+			sib.Left(a.Src)
+			sib.Arrived(a.Dst)
+			rep.SidecarsMoved += o.moveSidecars(sp, a.Src, a.Dst, sib)
 			moved = append(moved, SidecarMove{Src: a.Src, Dst: a.Dst})
+			roots[filepath.Dir(a.Src)] = cmp.Or(a.Root, plan.Root)
 		}
 		pending[pathx.CollisionKey(a.Src)]--
 		if ran++; hb != nil {
@@ -539,7 +570,7 @@ func (o *Organizer) Execute(ctx context.Context, plan *Plan, jobPID model.PID, h
 		// free name, which frees the name the move before it in the cycle takes.
 		a := waiting[0]
 		old := pathx.CollisionKey(a.Src)
-		if err := o.park(ctx, plan, a, jobPID, sp); err != nil {
+		if err := o.park(ctx, plan, a, jobPID, speller(a.Root), sib); err != nil {
 			waiting = waiting[1:]
 			rep.Errored++
 			rep.Failures = append(rep.Failures, Failure{FilePID: a.FilePID, Src: a.Src, Dst: a.Dst, Err: err.Error()})
@@ -554,14 +585,26 @@ func (o *Organizer) Execute(ctx context.Context, plan *Plan, jobPID model.PID, h
 	return rep, nil
 }
 
+// prune removes the source folders the moves emptied, and any folder above them that is
+// then empty, up to each one's library root (roots maps a source folder to it); a
+// companion left in one follows its audio as FolderDisposal says.
+func (o *Organizer) prune(roots map[string]string, moved []SidecarMove) int {
+	dispose, undo := FolderDisposal(moved, func(src string) string { return roots[filepath.Dir(src)] })
+	return fsx.PruneAll(slices.Sorted(maps.Keys(roots)), func(dir string) fsx.PruneOptions {
+		opts := PruneOptions(roots[dir], dispose)
+		opts.Undo = undo
+		return opts
+	}, func(dir string, err error) { o.log.Warn("pruning an emptied folder", "dir", dir, "err", err) })
+}
+
 // park moves an action's file to a free name in its own folder, journaled like any move,
 // and points the action at it, so the move waiting on its name can land first.
-func (o *Organizer) park(ctx context.Context, plan *Plan, a *Action, jobPID model.PID, sp *fsx.Speller) error {
+func (o *Organizer) park(ctx context.Context, plan *Plan, a *Action, jobPID model.PID, sp *fsx.Speller, sib *Siblings) error {
 	tmp, err := fsx.FreeName(filepath.Dir(a.Src), strings.ToLower(filepath.Ext(a.Src)))
 	if err != nil {
 		return waxerr.Wrap(waxerr.CodeIO, "organize.park", err)
 	}
-	rel, err := filepath.Rel(plan.Root, tmp)
+	rel, err := filepath.Rel(cmp.Or(a.Root, plan.Root), tmp)
 	if err != nil {
 		rel = filepath.Base(tmp)
 	}
@@ -578,7 +621,9 @@ func (o *Organizer) park(ctx context.Context, plan *Plan, a *Action, jobPID mode
 	if err := o.cat.CommitMove(ctx, jpid, in); err != nil {
 		return err
 	}
-	o.moveSidecars(sp, a.Src, tmp)
+	sib.Left(a.Src)
+	sib.Arrived(tmp)
+	o.moveSidecars(sp, a.Src, tmp, sib)
 	a.Src, a.SrcBytes = tmp, []byte(tmp)
 	return nil
 }

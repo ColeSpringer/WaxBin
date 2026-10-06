@@ -104,6 +104,9 @@ func spelledAlike(src, dst string) bool {
 	return err == nil && !(slices.Contains(names, sb) && slices.Contains(names, db))
 }
 
+// SameFile reports whether two paths reach one file, following links.
+func SameFile(a, b string) bool { return sameFile(os.Stat, a, b) }
+
 func sameFile(stat func(string) (os.FileInfo, error), a, b string) bool {
 	ai, err := stat(pathx.Long(a))
 	if err != nil {

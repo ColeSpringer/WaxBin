@@ -1,16 +1,20 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/colespringer/waxbin/inbox"
 	"github.com/colespringer/waxbin/internal/testaudio"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/query"
 	"github.com/colespringer/waxbin/waxerr"
+	"github.com/spf13/cobra"
 )
 
 // TestInboxImportForcesAKind: `inbox import --as book` imports a staged folder's plain
@@ -60,5 +64,31 @@ func TestInboxImportForcesAKind(t *testing.T) {
 	}
 	if !locked {
 		t.Errorf("provenance = %+v, want the forced kind locked", rows)
+	}
+}
+
+// TestImportReportSaysWhatItPruned: an applied import says how many staging folders it
+// emptied and removed, in both outputs.
+func TestImportReportSaysWhatItPruned(t *testing.T) {
+	t.Parallel()
+	render := func(asJSON bool) string {
+		cmd := &cobra.Command{}
+		var buf bytes.Buffer
+		cmd.SetOut(&buf)
+		if err := emitImportReport(cmd, &globals{jsonOut: asJSON}, "/staging", &inbox.Report{Imported: 2, DirsPruned: 1}); err != nil {
+			t.Fatal(err)
+		}
+		return buf.String()
+	}
+	if out := render(false); !strings.Contains(out, "pruned 1 folder") {
+		t.Errorf("report text lacks the pruned count:\n%s", out)
+	}
+	var env struct {
+		Data struct {
+			DirsPruned int `json:"dirsPruned"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(render(true)), &env); err != nil || env.Data.DirsPruned != 1 {
+		t.Errorf("report json = %+v (err %v), want dirsPruned 1", env, err)
 	}
 }

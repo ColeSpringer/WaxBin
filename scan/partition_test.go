@@ -296,3 +296,24 @@ func TestScanOfARemovedRootReconcilesIt(t *testing.T) {
 		t.Errorf("scan = %+v, want both items missing", res)
 	}
 }
+
+// TestScanOfARemovedSubPathIsNoWalkError: a sub-path that is gone while its root stays is
+// nothing the walk failed to read, and what the catalog held under it is missing.
+func TestScanOfARemovedSubPathIsNoWalkError(t *testing.T) {
+	t.Parallel()
+	_, lib, sc, _, root := fastPathFixture(t)
+	writeMP3(t, filepath.Join(root, "keep", "1.mp3"), "Kept", 1)
+	writeMP3(t, filepath.Join(root, "gone", "2.mp3"), "Gone", 2)
+	scanAll(t, sc, lib, false)
+	if err := os.RemoveAll(filepath.Join(root, "gone")); err != nil {
+		t.Fatal(err)
+	}
+	r, err := sc.Scan(context.Background(), Request{Library: lib, SubPath: filepath.Join(root, "gone")}, nil)
+	if err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	assertScanPartition(t, r)
+	if r.WalkErrors != 0 || r.Missing != 1 || !r.SubPathGone {
+		t.Errorf("scan = %+v, want no walk error, the one item missing, and the sub-path said to be gone", r)
+	}
+}

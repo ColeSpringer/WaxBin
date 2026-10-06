@@ -248,23 +248,18 @@ func TestAuditAlbumYearDriftIsError(t *testing.T) {
 func TestAuditFileChecks(t *testing.T) {
 	st := &fakeStore{files: []model.AuditFileInfo{
 		{PID: "f1", Path: []byte("/lib/al/song.flac"), DisplayPath: "/lib/al/song.flac", Kind: model.FileAudio},
-		{PID: "f2", Path: []byte("/lib/al/song.lrc"), DisplayPath: "/lib/al/song.lrc", Kind: model.FileLyrics},         // not orphan (audio in dir)
-		{PID: "f3", Path: []byte("/lib/stray/notes.lrc"), DisplayPath: "/lib/stray/notes.lrc", Kind: model.FileLyrics}, // orphan
-		{PID: "f4", Path: []byte("/lib/al/what?.flac"), DisplayPath: "/lib/al/what?.flac", Kind: model.FileAudio},      // bad name
+		{PID: "f4", Path: []byte("/lib/al/what?.flac"), DisplayPath: "/lib/al/what?.flac", Kind: model.FileAudio}, // bad name
 		{PID: "f5", Path: []byte("/lib/x/Track.flac"), DisplayPath: "/lib/x/Track.flac", Kind: model.FileAudio},
 		{PID: "f6", Path: []byte("/lib/x/track.flac"), DisplayPath: "/lib/x/track.flac", Kind: model.FileAudio}, // case conflict with f5
 	}}
 	rep, err := New(st, nil, nil, nil).Run(context.Background(), Config{Only: []model.AuditCheck{
-		model.CheckBadFilename, model.CheckOrphanSidecar, model.CheckPathConflict,
+		model.CheckBadFilename, model.CheckPathConflict,
 	}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got := findingsFor(rep, model.CheckBadFilename); len(got) != 1 || got[0].Path != "/lib/al/what?.flac" || got[0].FilePID != "f4" {
 		t.Errorf("bad filename findings = %+v, want f4", got)
-	}
-	if got := findingsFor(rep, model.CheckOrphanSidecar); len(got) != 1 || got[0].Path != "/lib/stray/notes.lrc" || got[0].FilePID != "f3" {
-		t.Errorf("orphan sidecar findings = %+v, want f3", got)
 	}
 	pc := findingsFor(rep, model.CheckPathConflict)
 	if len(pc) != 1 || pc[0].Severity != model.SeverityError {

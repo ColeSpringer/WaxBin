@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -65,7 +66,9 @@ func (s *Service) Download(ctx context.Context, episodePID model.PID) (*Download
 	if err := os.MkdirAll(pathx.Long(folder), 0o755); err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
-	if err := s.preflightSpace(folder, ep.EnclosureSize); err != nil {
+	// Measured on the download folder, which no prune removes: an unfetch can prune the
+	// show folder before the fetch, which makes it again.
+	if err := s.preflightSpace(s.cfg.Dir, ep.EnclosureSize); err != nil {
 		return nil, err
 	}
 
@@ -151,6 +154,7 @@ func (s *Service) Download(ctx context.Context, episodePID model.PID) (*Download
 			if err := os.Remove(pathx.Long(ep.DisplayPath)); err != nil && !os.IsNotExist(err) {
 				s.log.Warn("removing superseded episode file", "path", ep.DisplayPath, "err", err)
 			}
+			s.pruneFolders(ep.DisplayPath)
 		}
 		return nil
 	}); err != nil {
@@ -235,6 +239,13 @@ func parseChapterDoc(body []byte) ([]model.Chapter, error) {
 func (s *Service) fetchTo(ctx context.Context, prov source.Provider, path string, req source.FetchRequest) (int64, string, error) {
 	const op = "podcast.Download"
 	f, err := os.Create(pathx.Long(path))
+	if errors.Is(err, fs.ErrNotExist) {
+		// The show folder is made outside the podcast lease, so an unfetch may have pruned
+		// it since.
+		if err = os.MkdirAll(pathx.Long(filepath.Dir(path)), 0o755); err == nil {
+			f, err = os.Create(pathx.Long(path))
+		}
+	}
 	if err != nil {
 		return 0, "", waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
@@ -435,6 +446,8 @@ func (s *Service) applyRetention(ctx context.Context, podcastPID model.PID) (*Re
 	if len(downloaded) <= pod.RetentionKeep {
 		return res, nil
 	}
+	var removed []string
+	defer func() { s.pruneFolders(removed...) }()
 	for _, ep := range downloaded[pod.RetentionKeep:] {
 		if ctx.Err() != nil {
 			return res, waxerr.FromContext("podcast.ApplyRetention", ctx.Err(), waxerr.CodeCanceled)
@@ -448,6 +461,7 @@ func (s *Service) applyRetention(ctx context.Context, podcastPID model.PID) (*Re
 				continue
 			}
 		}
+		removed = append(removed, ep.DisplayPath)
 		if err := s.store.DropEpisodeFile(ctx, ep.PID); err != nil {
 			return res, err
 		}
@@ -501,7 +515,7 @@ func (s *Service) preflightSpace(dir string, enclosureSize int64) error {
 	if need <= 0 {
 		return nil
 	}
-	avail, err := diskfree.Available(dir)
+	avail, err := s.freeSpace(dir)
 	if errors.Is(err, diskfree.ErrUnsupported) {
 		return nil
 	}

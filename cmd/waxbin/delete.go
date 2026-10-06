@@ -22,7 +22,10 @@ func newRmCmd(g *globals) *cobra.Command {
 		Short: "Delete items (to the trash by default) while keeping their catalog history",
 		Long: "Removes the files backing the given items. By default files go to the " +
 			"library's same-volume trash and can be restored with `trash restore`. " +
-			"--prune or --permanent bypass the trash to reclaim space. The logical item " +
+			"--prune or --permanent bypass the trash to reclaim space. A file's own sidecars " +
+			"(same-name lyrics, cue sheet, art) go with it, and a folder the delete leaves empty " +
+			"is removed; in a managed library the covers and other companions of such a folder " +
+			"go into the trash with the file, or are deleted with --prune or --permanent. The logical item " +
 			"is always preserved (archived when it loses its last file). --file takes file " +
 			"pids instead and removes just those files: a copy goes alone, and an item's " +
 			"primary file gives its place to a copy when the item has one. Dry run unless --apply.",
@@ -84,7 +87,8 @@ func emitDeletePlan(cmd *cobra.Command, g *globals, plan *trash.Plan) error {
 	}
 	w := out(cmd)
 	fmt.Fprintf(w, "Delete plan (mode %s): %d action(s), %d would delete\n", plan.Mode, len(plan.Actions), plan.Pending())
-	for _, a := range plan.Actions {
+	managed, sidecars := false, plan.Sidecars()
+	for i, a := range plan.Actions {
 		if a.Skip {
 			fmt.Fprintf(w, "  skip  %s (%s)\n", a.Src, a.Reason)
 			continue
@@ -94,6 +98,13 @@ func emitDeletePlan(cmd *cobra.Command, g *globals, plan *trash.Plan) error {
 		} else {
 			fmt.Fprintf(w, "  trash %s\n", a.Src)
 		}
+		for _, sc := range sidecars[i] {
+			fmt.Fprintf(w, "    with  %s\n", sc)
+		}
+		managed = managed || !a.InPlace
+	}
+	if managed && plan.Mode.BypassesTrash() {
+		fmt.Fprintln(w, "(a managed folder this empties is removed, its covers and other companions with it)")
 	}
 	fmt.Fprintln(w, "(dry run; pass --apply to execute)")
 	return nil
@@ -108,13 +119,14 @@ func emitDeleteReport(cmd *cobra.Command, g *globals, plan *trash.Plan, rep *tra
 			Skipped        int             `json:"skipped"`
 			Errored        int             `json:"errored"`
 			ReclaimedBytes int64           `json:"reclaimedBytes"`
+			DirsPruned     int             `json:"dirsPruned"`
 			Failures       []trash.Failure `json:"failures,omitempty"`
 		}{string(plan.Mode), rep.Trashed, rep.Deleted, rep.Skipped, rep.Errored,
-			rep.ReclaimedBytes, rep.Failures})
+			rep.ReclaimedBytes, rep.DirsPruned, rep.Failures})
 	}
 	w := out(cmd)
-	fmt.Fprintf(w, "Deleted (mode %s): trashed %d, removed %d, skipped %d, errored %d, reclaimed %d bytes\n",
-		plan.Mode, rep.Trashed, rep.Deleted, rep.Skipped, rep.Errored, rep.ReclaimedBytes)
+	fmt.Fprintf(w, "Deleted (mode %s): trashed %d, removed %d, skipped %d, errored %d, reclaimed %d bytes, pruned %s\n",
+		plan.Mode, rep.Trashed, rep.Deleted, rep.Skipped, rep.Errored, rep.ReclaimedBytes, plural(rep.DirsPruned, "folder"))
 	for _, f := range rep.Failures {
 		fmt.Fprintf(w, "  FAIL %s: %s\n", f.Src, f.Err)
 	}
@@ -123,17 +135,19 @@ func emitDeleteReport(cmd *cobra.Command, g *globals, plan *trash.Plan, rep *tra
 
 func deletePlanJSON(plan *trash.Plan) any {
 	type actionJSON struct {
-		ItemPID string `json:"itemPid"`
-		FilePID string `json:"filePid"`
-		Src     string `json:"src"`
-		Skip    bool   `json:"skip"`
-		Reason  string `json:"reason,omitempty"`
+		ItemPID  string   `json:"itemPid"`
+		FilePID  string   `json:"filePid"`
+		Src      string   `json:"src"`
+		Sidecars []string `json:"sidecars,omitempty"`
+		Skip     bool     `json:"skip"`
+		Reason   string   `json:"reason,omitempty"`
 	}
 	actions := make([]actionJSON, 0, len(plan.Actions))
-	for _, a := range plan.Actions {
+	sidecars := plan.Sidecars()
+	for i, a := range plan.Actions {
 		actions = append(actions, actionJSON{
 			ItemPID: string(a.ItemPID), FilePID: string(a.FilePID),
-			Src: a.Src, Skip: a.Skip, Reason: a.Reason,
+			Src: a.Src, Sidecars: sidecars[i], Skip: a.Skip, Reason: a.Reason,
 		})
 	}
 	return struct {

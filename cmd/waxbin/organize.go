@@ -19,7 +19,10 @@ func newOrganizeCmd(g *globals) *cobra.Command {
 		Use:   "organize",
 		Short: "Plan (and with --apply, execute) moves for the managed library",
 		Long: "Computes destination paths for items under an organization profile and " +
-			"moves the files when --apply is given. Without --apply it is a dry run.",
+			"moves the files when --apply is given. Without --apply it is a dry run. Each " +
+			"file's own sidecars move with it, and an album folder whose audio all goes to " +
+			"one place, leaving nothing else behind, sends its covers and other companions " +
+			"after it; a folder the moves leave empty is removed.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			// Organize every item; the template engine picks the per-kind layout
 			// (music vs audiobook), so books are laid out by the audiobook template
@@ -122,12 +125,13 @@ func emitReport(cmd *cobra.Command, g *globals, profile string, rep *organize.Re
 			Skipped       int                `json:"skipped"`
 			Errored       int                `json:"errored"`
 			SidecarsMoved int                `json:"sidecarsMoved"`
+			DirsPruned    int                `json:"dirsPruned"`
 			Failures      []organize.Failure `json:"failures,omitempty"`
 			Warnings      []organize.Warning `json:"warnings,omitempty"`
-		}{profile, rep.Moved, rep.Skipped, rep.Errored, rep.SidecarsMoved, rep.Failures, rep.Warnings})
+		}{profile, rep.Moved, rep.Skipped, rep.Errored, rep.SidecarsMoved, rep.DirsPruned, rep.Failures, rep.Warnings})
 	}
-	fmt.Fprintf(out(cmd), "Organized (profile %s): moved %d, skipped %d, errored %d, sidecars %d\n",
-		profile, rep.Moved, rep.Skipped, rep.Errored, rep.SidecarsMoved)
+	fmt.Fprintf(out(cmd), "Organized (profile %s): moved %d, skipped %d, errored %d, sidecars %d, pruned %s\n",
+		profile, rep.Moved, rep.Skipped, rep.Errored, rep.SidecarsMoved, plural(rep.DirsPruned, "folder"))
 	for _, f := range rep.Failures {
 		fmt.Fprintf(out(cmd), "  FAIL %s -> %s: %s\n", f.Src, f.Dst, f.Err)
 	}
