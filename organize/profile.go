@@ -4,7 +4,10 @@
 package organize
 
 import (
+	"cmp"
+	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/waxerr"
@@ -18,6 +21,37 @@ type Profile struct {
 	Audiobook string // book template
 	Podcast   string // episode template
 	TagWrite  bool   // optional lock-respecting tag write-back (off by default)
+	// CompilationFolder is the album artist a compilation files under, and the one the tag
+	// write gives it: Various Artists when nil, the album artist it is tagged with when
+	// empty.
+	CompilationFolder *string
+}
+
+// Clone returns p with a compilation folder of its own, so a copy kept or handed out
+// never shares one with the profile it came from.
+func (p Profile) Clone() Profile {
+	if p.CompilationFolder != nil {
+		folder := *p.CompilationFolder
+		p.CompilationFolder = &folder
+	}
+	return p
+}
+
+// compilationArtist is the album artist a compilation tagged with albumArtist files under:
+// the profile's compilation folder, else its own album artist, else Various Artists, so a
+// compilation tagged with none stays together rather than scattering across its
+// performers.
+func (p Profile) compilationArtist(albumArtist string) string {
+	return cmp.Or(p.Compilations(), strings.TrimSpace(albumArtist), variousArtists)
+}
+
+// Compilations is the album artist the profile files a compilation under, empty for its
+// own.
+func (p Profile) Compilations() string {
+	if p.CompilationFolder == nil {
+		return variousArtists
+	}
+	return strings.TrimSpace(*p.CompilationFolder)
 }
 
 // templateFor returns the path template for an item's media kind.
@@ -38,7 +72,7 @@ func (p Profile) templateFor(kind model.Kind) string {
 // stay readable while stable episode identity remains in the catalog.
 var nativeProfile = Profile{
 	Name:      "waxbin-native",
-	Music:     `{albumartist}/{album}< ({year})>/<{disc}->{track:02} - {title}.{ext}`,
+	Music:     `{albumartist}/{album}< ({year})>/<{disc}-><{track:02} - >{title}.{ext}`,
 	Audiobook: `{author}/<{series}/><{seq} - ><{year} - >{title}< - {subtitle}>< \{{narrator}\}>< [{asin}]>/{title}.{ext}`,
 	Podcast:   `{podcast}/<{season}/><{pubdate} - >{episode}.{ext}`,
 }
@@ -64,6 +98,12 @@ func (p Profile) Validate() error {
 	const op = "organize.Validate"
 	if p.Name == "" {
 		return waxerr.New(waxerr.CodeInvalid, op, "profile has no name")
+	}
+	// A folder that folds to nothing would file compilations under Unknown Artist while the
+	// tag write stored the value itself.
+	if folder := p.Compilations(); folder != "" && foldField(folder) == "" {
+		return waxerr.New(waxerr.CodeInvalid, op, fmt.Sprintf(
+			"profile %s compilation folder %q names no folder; leave it empty to file compilations under their album artist", p.Name, folder))
 	}
 	for _, t := range []struct{ kind, tmpl string }{
 		{"music", p.Music}, {"audiobook", p.Audiobook}, {"podcast", p.Podcast},
@@ -102,6 +142,8 @@ func NewProfileSet(custom []Profile) (*ProfileSet, error) {
 			Audiobook: firstNonEmpty(p.Audiobook, base.Audiobook),
 			Podcast:   firstNonEmpty(p.Podcast, base.Podcast),
 			TagWrite:  p.TagWrite,
+			// The set keeps a folder of its own, apart from the caller's.
+			CompilationFolder: p.Clone().CompilationFolder,
 		}
 		if err := merged.Validate(); err != nil {
 			return nil, err
@@ -121,7 +163,7 @@ func (s *ProfileSet) ByName(name string) (Profile, error) {
 		return Profile{}, waxerr.New(waxerr.CodeNotFound, "organize.ProfileByName",
 			"no such organization profile: "+name)
 	}
-	return p, nil
+	return p.Clone(), nil
 }
 
 // Names lists the set's profile names, sorted.
@@ -145,7 +187,7 @@ func (s *ProfileSet) All() []Profile {
 	}
 	out := make([]Profile, len(names))
 	for i, n := range names {
-		out[i] = s.byName[n]
+		out[i] = s.byName[n].Clone()
 	}
 	return out
 }

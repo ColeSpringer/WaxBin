@@ -36,6 +36,11 @@ type Store interface {
 	FileByPID(ctx context.Context, pid model.PID) (*model.File, error)
 	// RespellFolder follows a folder a placement renamed to another spelling.
 	RespellFolder(ctx context.Context, from, to string) (int, error)
+	// ArtistNames returns the name the catalog keeps for each artist match key it holds,
+	// and AlbumTitles the title of each album it holds under an identity key, so a staged
+	// track lands under the spellings the catalog will file it by.
+	ArtistNames(ctx context.Context, matchKeys []string) (map[string]string, error)
+	AlbumTitles(ctx context.Context, keys []string) (map[string]string, error)
 }
 
 // Cataloger catalogs one file after it has been placed in the managed tree, honoring
@@ -236,8 +241,14 @@ func (s *Service) Plan(ctx context.Context, req Request) (*Plan, error) {
 		return nil, waxerr.FromContext(op, walkErr, waxerr.CodeIO)
 	}
 	s.joinFolders(req, files)
-	dateAlbums(req, files)
-	plan.Actions = s.settle(ctx, req, s.numberBooks(ctx, files))
+	spelling, err := s.spellings(ctx, files)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.alignAlbums(ctx, req, files, spelling); err != nil {
+		return nil, err
+	}
+	plan.Actions = s.settle(ctx, req, s.numberBooks(ctx, files, spelling))
 	for i := range plan.Actions {
 		if plan.Actions[i].Outcome == OutcomeImport {
 			plan.TotalBytes += plan.Actions[i].Size
@@ -273,7 +284,14 @@ func (s *Service) PlanFile(ctx context.Context, req Request, path string, kind m
 	}
 	files := []*staged{s.classify(ctx, req, path)}
 	s.joinFolders(req, files)
-	plan.Actions = s.settle(ctx, req, s.numberBooks(ctx, files))
+	spelling, err := s.spellings(ctx, files)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.alignAlbums(ctx, req, files, spelling); err != nil {
+		return nil, err
+	}
+	plan.Actions = s.settle(ctx, req, s.numberBooks(ctx, files, spelling))
 	if a := plan.Actions[0]; a.Outcome == OutcomeImport {
 		plan.TotalBytes += a.Size
 	}

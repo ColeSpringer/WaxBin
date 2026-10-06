@@ -6,8 +6,11 @@ import (
 	"path"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/colespringer/waxbin/internal/pathx"
 )
 
 func writeFile(t *testing.T, path, content string) {
@@ -316,6 +319,85 @@ func TestSpellerRespellsFoldersBelowItsRoot(t *testing.T) {
 		}
 		if got := fs.dirs["/music/J.R.R. Tolkien"]; !slices.Equal(got, []string{"\u00c9dith"}) {
 			t.Errorf("ignore %v: entries = %q, want the new spellings", ignore, got)
+		}
+	}
+}
+
+// TestOccupant: what stands at a move's destination is its exact entry, an entry named
+// apart only by case, or a hard link of the source, and never the source's own entry under
+// another spelling, even when that entry is listed before a sibling named like it.
+func TestOccupant(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "a", "Song.mp3"), "src")
+	writeFile(t, filepath.Join(dir, "b", "Taken.mp3"), "other")
+	src := filepath.Join(dir, "a", "Song.mp3")
+	ls := NewLister()
+	for _, c := range []struct {
+		dst, want string
+		exact     bool
+	}{
+		{filepath.Join(dir, "b", "Free.mp3"), "", false},
+		{filepath.Join(dir, "c", "Free.mp3"), "", false},
+		{filepath.Join(dir, "b", "Taken.mp3"), filepath.Join(dir, "b", "Taken.mp3"), true},
+		{filepath.Join(dir, "b", "TAKEN.mp3"), filepath.Join(dir, "b", "Taken.mp3"), false},
+		{filepath.Join(dir, "a", "SONG.mp3"), "", false},
+	} {
+		got, exact, err := ls.Occupant(src, c.dst)
+		if err != nil || got != c.want || exact != c.exact {
+			t.Errorf("Occupant(%s) = %q, %v, %v; want %q, %v", c.dst, got, exact, err, c.want, c.exact)
+		}
+	}
+
+	if err := os.Link(src, filepath.Join(dir, "a", "link.mp3")); err != nil {
+		t.Skipf("hard link: %v", err)
+	}
+	if got, exact, _ := NewLister().Occupant(src, filepath.Join(dir, "a", "link.mp3")); got != filepath.Join(dir, "a", "link.mp3") || !exact {
+		t.Errorf("Occupant of a hard link = %q, %v; want the link, exact", got, exact)
+	}
+	writeFile(t, filepath.Join(dir, "a", "song.mp3"), "sibling")
+	if b, _ := os.ReadFile(src); string(b) != "src" {
+		t.Skip("this filesystem folds case")
+	}
+	if got, exact, _ := NewLister().Occupant(src, filepath.Join(dir, "a", "SONG.mp3")); got != filepath.Join(dir, "a", "song.mp3") || exact {
+		t.Errorf("Occupant beside the source's own entry = %q, %v; want the sibling song.mp3, not exact", got, exact)
+	}
+}
+
+// BenchmarkOccupantFlatFolder looks for occupants of a new name for each of 4000 files in
+// one folder, the work a re-layout of a flat folder makes Hold do.
+func BenchmarkOccupantFlatFolder(b *testing.B) {
+	dir := b.TempDir()
+	const n = 4000
+	for i := range n {
+		if err := os.WriteFile(filepath.Join(dir, "track "+strconv.Itoa(i)+".mp3"), nil, 0o644); err != nil {
+			b.Fatal(err)
+		}
+	}
+	b.ResetTimer()
+	for range b.N {
+		ls := NewLister()
+		for i := range n {
+			if _, _, err := ls.Occupant(filepath.Join(dir, "track "+strconv.Itoa(i)+".mp3"), filepath.Join(dir, "Song "+strconv.Itoa(i)+".mp3")); err != nil {
+				b.Fatal(err)
+			}
+		}
+	}
+}
+
+// TestFoldNameReadsNamesAsSameNameDoes: two names share pathx.FoldName exactly when
+// sameName takes them for one name, through the case folds that are not plain
+// lower-casing (the Greek final sigma, the Kelvin sign) and the two Unicode forms of an
+// accent, so the listing index and the plan's keys agree with the moves.
+func TestFoldNameReadsNamesAsSameNameDoes(t *testing.T) {
+	t.Parallel()
+	names := []string{"Song.mp3", "SONG.mp3", "song.MP3", "ΟΔΟΣ", "οδος", "οδοσ", "Kelvin", "kelvin",
+		"Beyoncé", "Beyoncé", "BEYONCÉ", "Beyonce", "straße", "STRASSE", "a", "b"}
+	for _, a := range names {
+		for _, b := range names {
+			if got, want := pathx.FoldName(a) == pathx.FoldName(b), sameName(a, b); got != want {
+				t.Errorf("fold keys of %q and %q equal %v, sameName says %v", a, b, got, want)
+			}
 		}
 	}
 }

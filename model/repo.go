@@ -285,6 +285,9 @@ type ItemFileRef struct {
 	// its item's (ItemView.LibraryPID follows the primary), so a host can serve a file
 	// inside a user's library grant.
 	LibraryPID PID
+	// Virtual reports that the item plays a window of the file, as a track a cue sheet
+	// carves out of a rip does, rather than the whole file.
+	Virtual bool
 }
 
 // RelocateInput records a completed filesystem move so the store can update the
@@ -518,6 +521,12 @@ type Catalog interface {
 	VirtualTracksForPath(ctx context.Context, path []byte) ([]VirtualTrack, error)
 	FileByPath(ctx context.Context, path []byte) (*File, error)
 	FileByEssence(ctx context.Context, essence string) (*File, error)
+	// FileOwner returns a file's edge and the item it backs, the item it is the primary of
+	// first, or an empty item pid for a file that backs none.
+	FileOwner(ctx context.Context, filePID PID) (PID, ItemFileRef, error)
+	// FilePIDsByPath returns the pid of the file the catalog holds at each path it holds,
+	// keyed by the path, in one read however many paths there are.
+	FilePIDsByPath(ctx context.Context, paths [][]byte) (map[string]PID, error)
 
 	// LoadScopedFileIndex bulk-loads the present files under a library scope (a raw
 	// path prefix; nil/empty spans the whole library) into path->ScopedFile, so the

@@ -3,6 +3,7 @@ package organize
 import (
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/colespringer/waxbin/model"
@@ -126,6 +127,82 @@ func TestNativeMusicTemplateCompilation(t *testing.T) {
 	want := filepath.Join("Various Artists", "Hits", "01 - Song.mp3")
 	if rel != want {
 		t.Fatalf("compilation layout = %q, want %q", rel, want)
+	}
+	for folder, want := range map[string]string{"": "Some One", "Compilations": "Compilations"} {
+		p.CompilationFolder = &folder
+		if rel, err := RenderRelPath(p, item); err != nil || rel != filepath.Join(want, "Hits", "01 - Song.mp3") {
+			t.Errorf("compilation folder %q: layout = %q (err %v), want it under %s", folder, rel, err, want)
+		}
+	}
+	// Set empty, a compilation tagged with no album artist stays together under Various
+	// Artists rather than scattering across its performers.
+	empty := ""
+	p.CompilationFolder = &empty
+	untagged := *item
+	untagged.AlbumArtist = ""
+	if rel, err := RenderRelPath(p, &untagged); err != nil || rel != filepath.Join("Various Artists", "Hits", "01 - Song.mp3") {
+		t.Errorf("a compilation with no album artist = %q (err %v), want it under Various Artists", rel, err)
+	}
+}
+
+// TestProfileRefusesACompilationFolderThatNamesNoFolder: a compilation folder that folds to
+// nothing would file compilations under Unknown Artist while the tag write stored the value
+// itself, so it is refused; a blank one reads as empty, and spaces around a name are
+// dropped from the folder and the tag alike.
+func TestProfileRefusesACompilationFolderThatNamesNoFolder(t *testing.T) {
+	t.Parallel()
+	for _, folder := range []string{"..", " . "} {
+		p := nativeProfile
+		p.Name, p.CompilationFolder = "x", &folder
+		if err := p.Validate(); !waxerr.Is(err, waxerr.CodeInvalid) {
+			t.Errorf("compilation folder %q: Validate = %v, want CodeInvalid", folder, err)
+		}
+	}
+	item := &model.ItemView{AlbumArtist: "Some One", Album: "Hits", TrackNo: 1, Title: "Song", Compilation: true, DisplayPath: "/in/x.mp3"}
+	for folder, want := range map[string]string{"   ": "Some One", " Comps ": "Comps"} {
+		p := nativeProfile
+		p.CompilationFolder = &folder
+		if err := p.Validate(); err != nil {
+			t.Errorf("compilation folder %q: Validate = %v", folder, err)
+		}
+		if rel, err := RenderRelPath(p, item); err != nil || rel != filepath.Join(want, "Hits", "01 - Song.mp3") || p.Compilations() != strings.TrimSpace(folder) {
+			t.Errorf("compilation folder %q: layout = %q (err %v), Compilations %q; want it under %s", folder, rel, err, p.Compilations(), want)
+		}
+	}
+}
+
+// TestProfileSetKeepsACompilationFolder: a custom profile's compilation folder, the empty
+// one included, survives the merge, and one that names none inherits the built-in's.
+func TestProfileSetKeepsACompilationFolder(t *testing.T) {
+	t.Parallel()
+	empty := ""
+	set, err := NewProfileSet([]Profile{{Name: "by-artist", CompilationFolder: &empty}, {Name: "waxbin-native", TagWrite: true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	item := &model.ItemView{AlbumArtist: "Some One", Album: "Hits", TrackNo: 1, Title: "Song", Compilation: true, DisplayPath: "/in/x.mp3"}
+	for name, want := range map[string]string{"by-artist": "Some One", "waxbin-native": "Various Artists"} {
+		p, err := set.ByName(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if rel, err := RenderRelPath(p, item); err != nil || !strings.HasPrefix(rel, want+string(filepath.Separator)) {
+			t.Errorf("%s: layout = %q (err %v), want it under %s", name, rel, err, want)
+		}
+	}
+	empty = "changed"
+	p, _ := set.ByName("by-artist")
+	if p.CompilationFolder == nil || *p.CompilationFolder != "" {
+		t.Errorf("the set shares the caller's folder: %v", p.CompilationFolder)
+	}
+	*p.CompilationFolder = "written through ByName"
+	for _, q := range set.All() {
+		if q.Name == "by-artist" {
+			*q.CompilationFolder = "written through All"
+		}
+	}
+	if p, _ := set.ByName("by-artist"); *p.CompilationFolder != "" {
+		t.Errorf("a profile handed out shares the set's folder: %q", *p.CompilationFolder)
 	}
 }
 

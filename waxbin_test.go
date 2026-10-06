@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"io"
 	"io/fs"
@@ -18,6 +19,7 @@ import (
 	"github.com/colespringer/waxbin/config"
 	"github.com/colespringer/waxbin/internal/testaudio"
 	"github.com/colespringer/waxbin/model"
+	"github.com/colespringer/waxbin/organize"
 	"github.com/colespringer/waxbin/podcast"
 	"github.com/colespringer/waxbin/port"
 	"github.com/colespringer/waxbin/query"
@@ -955,9 +957,10 @@ func TestReadOnlyConcurrentWithWriter(t *testing.T) {
 	}
 }
 
-// TestOrganizeMoveFailureRollsBack verifies a colliding destination fails the
-// action (reported, not fatal) and leaves the source in place.
-func TestOrganizeMoveFailureRollsBack(t *testing.T) {
+// TestOrganizeHoldsAnOccupiedDestination: a destination a file already holds is held at
+// plan time, so the preview says the move will not happen, and the apply leaves the
+// source in place.
+func TestOrganizeHoldsAnOccupiedDestination(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
@@ -969,8 +972,6 @@ func TestOrganizeMoveFailureRollsBack(t *testing.T) {
 	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
 		t.Fatalf("scan: %v", err)
 	}
-
-	// Occupy the destination so the move collides.
 	dst := filepath.Join(root, "The Foobars", "Night Moves", "03 - Midnight Drive.mp3")
 	writeFile(t, dst, []byte("occupied"))
 
@@ -978,15 +979,87 @@ func TestOrganizeMoveFailureRollsBack(t *testing.T) {
 	if err != nil {
 		t.Fatalf("plan: %v", err)
 	}
+	if plan.Pending() != 0 || plan.Held() != 1 || plan.Actions[0].Code != organize.HoldOccupied {
+		t.Fatalf("plan = %+v, want the move held as occupied", plan.Actions)
+	}
 	rep, err := lib.ApplyOrganize(ctx, plan)
 	if err != nil {
 		t.Fatalf("apply: %v", err)
 	}
-	if rep.Moved != 0 || rep.Errored != 1 {
-		t.Fatalf("expected 0 moved / 1 errored on collision, got %+v", rep)
+	if rep.Moved != 0 || rep.Held != 1 || rep.Errored != 0 {
+		t.Fatalf("report = %+v, want the move held", rep)
 	}
 	if !fileExists(src) {
-		t.Fatal("source should remain after a failed move")
+		t.Fatal("source should remain after a held move")
+	}
+}
+
+// TestApplyOrganizeLooksAgainAtWhatThePlanHeld: a destination the preview found taken and
+// that has been cleared since is free when the same plan is applied, so the move happens
+// without a new plan.
+func TestApplyOrganizeLooksAgainAtWhatThePlanHeld(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	writeFile(t, filepath.Join(root, "song.mp3"), testaudio.BuildMP3("Midnight Drive", "The Foobars", "Night Moves", 3))
+	lib := openManaged(t, ctx, db, root)
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	dst := filepath.Join(root, "The Foobars", "Night Moves", "03 - Midnight Drive.mp3")
+	writeFile(t, dst, []byte("occupied"))
+	plan, err := lib.PlanOrganize(ctx, query.New(query.EntityItems).Build(), waxbin.OrganizeOptions{ProfileName: "waxbin-native"})
+	if err != nil || plan.Held() != 1 {
+		t.Fatalf("plan = %+v (err %v), want the move held", plan, err)
+	}
+	if err := os.Remove(dst); err != nil {
+		t.Fatal(err)
+	}
+	rep, err := lib.ApplyOrganize(ctx, plan)
+	if err != nil || rep.Moved != 1 || rep.Held != 0 {
+		t.Fatalf("apply = %+v (err %v), want the move made now that its destination is free", rep, err)
+	}
+}
+
+// TestApplyOrganizeHoldsADestinationTakenSinceThePlan: a destination a file takes between
+// the preview and the apply is looked at again, so the apply reports the move held rather
+// than failed, and records what it did on its job.
+func TestApplyOrganizeHoldsADestinationTakenSinceThePlan(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	src := filepath.Join(root, "song.mp3")
+	writeFile(t, src, testaudio.BuildMP3("Midnight Drive", "The Foobars", "Night Moves", 3))
+
+	lib := openManaged(t, ctx, db, root)
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	plan, err := lib.PlanOrganize(ctx, query.New(query.EntityItems).Build(), waxbin.OrganizeOptions{ProfileName: "waxbin-native"})
+	if err != nil || plan.Pending() != 1 {
+		t.Fatalf("plan = %+v (err %v), want the move pending", plan, err)
+	}
+	writeFile(t, filepath.Join(root, "The Foobars", "Night Moves", "03 - Midnight Drive.mp3"), []byte("occupied"))
+
+	rep, err := lib.ApplyOrganize(ctx, plan)
+	if err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if rep.Moved != 0 || rep.Held != 1 || rep.Errored != 0 {
+		t.Fatalf("report = %+v, want the move held, not failed", rep)
+	}
+	if !fileExists(src) {
+		t.Fatal("source should remain after a held move")
+	}
+	jobs, err := lib.Jobs(ctx, 1)
+	if err != nil || len(jobs) != 1 || jobs[0].Kind != "organize" {
+		t.Fatalf("jobs = %+v (err %v), want the organize job", jobs, err)
+	}
+	var rr organize.RunResult
+	if err := json.Unmarshal([]byte(jobs[0].Result), &rr); err != nil || rr.Profile != "waxbin-native" || rr.Report.Held != 1 {
+		t.Fatalf("job result %q (err %v), want the report with its hold", jobs[0].Result, err)
 	}
 }
 

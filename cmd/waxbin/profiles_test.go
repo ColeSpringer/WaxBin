@@ -26,7 +26,8 @@ func TestProfilesListsTheTemplates(t *testing.T) {
 	}
 	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
 	if len(lines) != 2 || !strings.HasPrefix(lines[0], "NAME") || !strings.Contains(lines[0], "PODCAST") ||
-		!strings.HasPrefix(lines[1], "waxbin-native") || !strings.Contains(lines[1], "{albumartist}/{album}") {
+		!strings.Contains(lines[0], "COMPILATIONS") || !strings.HasPrefix(lines[1], "waxbin-native") ||
+		!strings.Contains(lines[1], "{albumartist}/{album}") || !strings.Contains(lines[1], "Various Artists") {
 		t.Fatalf("profiles =\n%s\nwant a header and the native profile's templates", stdout.String())
 	}
 
@@ -41,12 +42,13 @@ func TestProfilesListsTheTemplates(t *testing.T) {
 			Audiobook string `json:"audiobook"`
 			Podcast   string `json:"podcast"`
 			TagWrite  bool   `json:"tagWrite"`
+			Folder    string `json:"compilationFolder"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal([]byte(out), &env); err != nil || len(env.Data) != 1 {
 		t.Fatalf("profiles --json printed %q (err %v), want one profile", out, err)
 	}
-	if p := env.Data[0]; p.Name != "waxbin-native" || p.Music == "" || p.Audiobook == "" || p.Podcast == "" {
+	if p := env.Data[0]; p.Name != "waxbin-native" || p.Music == "" || p.Audiobook == "" || p.Podcast == "" || p.Folder != "Various Artists" {
 		t.Errorf("profile = %+v, want the native profile in full", p)
 	}
 }

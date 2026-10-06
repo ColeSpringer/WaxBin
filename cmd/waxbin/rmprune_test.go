@@ -11,7 +11,10 @@ import (
 
 	"github.com/colespringer/waxbin"
 	"github.com/colespringer/waxbin/internal/testaudio"
+	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/query"
+	"github.com/colespringer/waxbin/trash"
+	"github.com/spf13/cobra"
 )
 
 // TestRmReportsThePrunedFolders: rm says how many folders the delete emptied and removed,
@@ -134,5 +137,37 @@ func TestRmDryRunListsWhatGoesWithAFile(t *testing.T) {
 	}
 	if text := stdout.String(); !strings.Contains(text, "with  "+filepath.Join(album, "1.lrc")) || !strings.Contains(text, "companions") {
 		t.Fatalf("rm --permanent dry run printed %q, want the lyrics listed and the folder companions noted", text)
+	}
+}
+
+// TestRmDryRunNamesARipsTracks: deleting a cue rip's file archives every track it plays,
+// so the dry run names them in both outputs, not only the track the action was planned
+// for.
+func TestRmDryRunNamesARipsTracks(t *testing.T) {
+	t.Parallel()
+	plan := &trash.Plan{Mode: model.DeleteTrash, Actions: []trash.Action{{
+		ItemPID: "one", FilePID: "f", Src: filepath.Join(t.TempDir(), "album.wav"), Tracks: []model.PID{"one", "two"},
+	}}}
+	render := func(json bool) string {
+		cmd := &cobra.Command{}
+		var buf bytes.Buffer
+		cmd.SetOut(&buf)
+		if err := emitDeletePlan(cmd, &globals{jsonOut: json}, plan); err != nil {
+			t.Fatal(err)
+		}
+		return buf.String()
+	}
+	if text := render(false); !strings.Contains(text, "one, two") {
+		t.Errorf("dry run does not name the rip's tracks:\n%s", text)
+	}
+	var env struct {
+		Data struct {
+			Actions []struct {
+				Tracks []string `json:"tracks"`
+			} `json:"actions"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(render(true)), &env); err != nil || len(env.Data.Actions) != 1 || len(env.Data.Actions[0].Tracks) != 2 {
+		t.Errorf("dry run json = %+v (err %v), want the rip's two tracks", env, err)
 	}
 }

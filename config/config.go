@@ -38,6 +38,10 @@ type ProfileDef struct {
 	Audiobook string `json:"audiobook,omitempty"`
 	Podcast   string `json:"podcast,omitempty"`
 	TagWrite  bool   `json:"tag_write,omitempty"`
+	// CompilationFolder names the folder compilations file under, and the album artist
+	// organize's tag write gives them: Various Artists when unset, their own tagged album
+	// artist when set empty (Various Artists for one tagged with none).
+	CompilationFolder *string `json:"compilation_folder,omitempty"`
 }
 
 // PodcastConfig controls podcast downloads and remote fetch limits. Dir is an

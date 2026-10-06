@@ -13,6 +13,7 @@ package pathx
 import (
 	"path/filepath"
 	"strings"
+	"unicode"
 
 	"golang.org/x/text/unicode/norm"
 )
@@ -39,4 +40,17 @@ func SamePath(a, b string) bool {
 // matches names without regard to case or Unicode form, as NTFS, APFS and exFAT do. It
 // folds on every platform, unlike SamePath: a library is laid out so it stays whole on
 // any of them.
-func CollisionKey(p string) string { return strings.ToLower(norm.NFC.String(filepath.Clean(p))) }
+func CollisionKey(p string) string { return FoldName(filepath.Clean(p)) }
+
+// FoldName is a name as a filesystem that ignores case and Unicode form reads it: NFC,
+// each rune the least of its case folds, so two names strings.EqualFold matches share it
+// (a final sigma and a capital sigma too, which lower-casing tells apart).
+func FoldName(name string) string {
+	return strings.Map(func(r rune) rune {
+		least := r
+		for f := unicode.SimpleFold(r); f != r; f = unicode.SimpleFold(f) {
+			least = min(least, f)
+		}
+		return least
+	}, norm.NFC.String(name))
+}

@@ -180,8 +180,10 @@ never alters the encoded audio):
   and other players never see them. An unlimited pass writes every value not yet on its file, so the
   first pass with it on catches up on earlier passes, and a write that fails is retried
   by the next; a scoped or `--limit` pass writes only within what it looked up.
-- An organize profile with `tag_write` corrects `albumArtist` (literal
-  `Various Artists` for compilations) and disc/track numbering on disk as it moves
+- An organize profile files compilations under its `compilation_folder` (`Various
+  Artists` unless set; set empty, their tagged album artist, or `Various Artists` for one
+  tagged with none). With `tag_write` it also
+  corrects `albumArtist` to match and disc/track numbering on disk as it moves
   files, skipping locked fields and re-tagging before the move so a failure aborts
   cleanly.
 - `stamp_item_pid` additionally stamps a `WAXBIN_ITEM_PID` tag during organize, so

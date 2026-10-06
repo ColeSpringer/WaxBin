@@ -1268,6 +1268,7 @@ type bookPart struct {
 	sortKey    string
 	role       string // the item_file edge role: primary or part
 	libraryPID model.PID
+	virtual    bool // the edge plays a window of the file
 }
 
 // bookParts returns a book's parts in reading order, leaving out alternates. It is the
@@ -1286,7 +1287,7 @@ func bookPartsQ(ctx context.Context, q queryer, bookItemID int64) ([]bookPart, e
 	const op = "store.bookParts"
 	rows, err := q.QueryContext(ctx,
 		`SELECT f.id, f.pid, f.path, f.display_path, itf.position, COALESCE(f.duration_ms, 0), f.rel_path, itf.role,
-			(SELECT l.pid FROM library l WHERE l.id = f.library_id)
+			(SELECT l.pid FROM library l WHERE l.id = f.library_id), itf.start_frames IS NOT NULL
 		 FROM item_file itf JOIN file f ON f.id = itf.file_id
 		 WHERE itf.item_id = ? AND itf.role IN ('primary', 'part')`, bookItemID)
 	if err != nil {
@@ -1297,7 +1298,7 @@ func bookPartsQ(ctx context.Context, q queryer, bookItemID int64) ([]bookPart, e
 	for rows.Next() {
 		var p bookPart
 		var rel []byte
-		if err := rows.Scan(&p.fileID, &p.FilePID, &p.path, &p.DisplayPath, &p.Position, &p.DurationMS, &rel, &p.role, &p.libraryPID); err != nil {
+		if err := rows.Scan(&p.fileID, &p.FilePID, &p.path, &p.DisplayPath, &p.Position, &p.DurationMS, &rel, &p.role, &p.libraryPID, &p.virtual); err != nil {
 			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		// model.SortKey zero-pads digit runs, so a plain string compare of the keys is
@@ -1552,10 +1553,10 @@ func (s *Store) ItemFiles(ctx context.Context, pid model.PID) ([]model.ItemFileR
 	for i, p := range parts {
 		out[i] = model.ItemFileRef{
 			FilePID: p.FilePID, Path: p.path, DisplayPath: p.DisplayPath, Position: p.Position, Role: p.role,
-			LibraryPID: p.libraryPID,
+			LibraryPID: p.libraryPID, Virtual: p.virtual,
 		}
 	}
-	rows, err := s.read.QueryContext(ctx, `SELECT f.pid, f.path, f.display_path, itf.position, l.pid
+	rows, err := s.read.QueryContext(ctx, `SELECT f.pid, f.path, f.display_path, itf.position, l.pid, itf.start_frames IS NOT NULL
 		FROM item_file itf JOIN file f ON f.id = itf.file_id JOIN library l ON l.id = f.library_id
 		WHERE itf.item_id = ? AND itf.role = 'alternate' ORDER BY itf.position, f.id`, itemID)
 	if err != nil {
@@ -1564,7 +1565,7 @@ func (s *Store) ItemFiles(ctx context.Context, pid model.PID) ([]model.ItemFileR
 	defer rows.Close()
 	for rows.Next() {
 		ref := model.ItemFileRef{Role: alternateRole}
-		if err := rows.Scan(&ref.FilePID, &ref.Path, &ref.DisplayPath, &ref.Position, &ref.LibraryPID); err != nil {
+		if err := rows.Scan(&ref.FilePID, &ref.Path, &ref.DisplayPath, &ref.Position, &ref.LibraryPID, &ref.Virtual); err != nil {
 			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		out = append(out, ref)

@@ -6,13 +6,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"maps"
+	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
 
+	"github.com/colespringer/waxbin/identity"
 	"github.com/colespringer/waxbin/internal/fsx"
 	"github.com/colespringer/waxbin/internal/pathx"
 	"github.com/colespringer/waxbin/meta"
@@ -36,13 +39,35 @@ type Action struct {
 	Dst      string // planned absolute path
 	RelDst   string // destination relative to the library root
 	Root     string // the root of the library the move is made in
-	Skip     bool   // already in place / nothing to do
+	Skip     bool   // not moving: in place already, or held for Code
+	Code     HoldCode
 	Reason   string
 	// TagFields are the metadata fields to write into this file before the move
 	// (album artist, track/disc numbers), computed lock-respectingly at plan time.
 	// Empty unless the profile enables tag-write. Carried in the plan so a re-validated
 	// executor writes exactly what was planned without re-reading the profile or item.
 	TagFields []TagField
+}
+
+// HoldCode says why an action does not move: HoldInPlace marks a file already at its
+// destination, and every other code a move held back.
+type HoldCode string
+
+const (
+	HoldInPlace      HoldCode = "in-place"
+	HoldCollision    HoldCode = "collision"     // another item of the plan takes the destination first, or keeps it
+	HoldOccupied     HoldCode = "occupied"      // a file the plan does not move holds the destination, on disk or in the catalog
+	HoldOccupiedCase HoldCode = "occupied-case" // a file named apart from the destination only by case or Unicode form stands beside it
+	HoldUntagged     HoldCode = "untagged"      // no artist, album artist or album to file the item under
+	HoldMissing      HoldCode = "missing"       // the file is not on disk
+	HoldVirtual      HoldCode = "virtual"       // a cue rip's shared file, carrying several tracks
+	HoldBookHeld     HoldCode = "book-held"     // another part of the book is held, and a book moves whole
+	HoldReadOnly     HoldCode = "read-only"     // the file's library is read-only
+)
+
+// hold marks an action as not moving, for code.
+func (a *Action) hold(code HoldCode, reason string) {
+	a.Skip, a.Code, a.Reason = true, code, reason
 }
 
 // TagField is one metadata field the organize tag-write will set on disk and stamp
@@ -86,10 +111,36 @@ func (p *Plan) Pending() int {
 	return n
 }
 
-// Report summarizes an applied plan.
+// Held returns the actions held back from a move they need.
+func (p *Plan) Held() int {
+	n := 0
+	for i := range p.Actions {
+		if p.Actions[i].held() {
+			n++
+		}
+	}
+	return n
+}
+
+// held reports whether the action is held back, rather than moving or in place already.
+func (a *Action) held() bool { return a.Skip && a.Code != "" && a.Code != HoldInPlace }
+
+// HeldMove is a move an applied plan held back, with why.
+type HeldMove struct {
+	FilePID  model.PID
+	Src, Dst string
+	Code     HoldCode
+	Reason   string
+}
+
+// Report summarizes an applied plan: Moved, Skipped (in place already), Held and Errored
+// partition its actions.
 type Report struct {
-	Moved         int
-	Skipped       int
+	Moved   int
+	Skipped int
+	Held    int
+	// Holds lists the held moves, the ones the plan held and those a later look held.
+	Holds         []HeldMove
 	Errored       int
 	SidecarsMoved int
 	// DirsPruned counts the source folders the moves emptied and removed.
@@ -154,15 +205,22 @@ type PlanOptions struct {
 	// on the album, so a track tagged a year apart from the rest files with its album
 	// rather than in a folder the next scan would key as an album of its own.
 	AlbumYears map[model.PID]int
+	// Names maps an artist's pid to the name the catalog keeps for it and an album's to its
+	// title, so tracks tagged with two spellings of one artist or album file under one
+	// folder rather than two.
+	Names map[model.PID]string
 }
 
 // Plan computes the destination for each item under the profile. Items with no
 // backing file are skipped; items already at their destination are marked Skip. A
 // multi-file audiobook expands into one move per part so the whole book is
-// relocated together rather than split.
+// relocated together rather than split. Hold then holds back each move that cannot
+// happen, and an item with no artist, album artist or album that its layout would file
+// under the unknown buckets is held as untagged.
 func (o *Organizer) Plan(ctx context.Context, lib *model.Library, p Profile, items []*model.ItemView, opts PlanOptions) (*Plan, error) {
 	root := string(lib.Root)
 	plan := &Plan{Profile: p.Name, LibraryPID: lib.PID, Root: root, TagWrite: p.TagWrite}
+	rips := map[model.PID]bool{}
 	for _, it := range items {
 		if it.FilePID == "" || it.DisplayPath == "" {
 			continue
@@ -174,69 +232,128 @@ func (o *Organizer) Plan(ctx context.Context, lib *model.Library, p Profile, ite
 		if !pathx.UnderRoot(root, it.DisplayPath) {
 			continue
 		}
-		view := it
-		if y := opts.AlbumYears[it.AlbumPID]; it.AlbumPID != "" && y != 0 && y != it.Year {
-			v := *it
-			v.Year = y
-			view = &v
+		// The tracks a cue sheet carves out of one file all play that file, which no one
+		// track's path names, so the rip is held once.
+		if it.Virtual {
+			if !rips[it.FilePID] {
+				rips[it.FilePID] = true
+				a := Action{ItemPID: it.PID, FilePID: it.FilePID, Src: it.DisplayPath, SrcBytes: it.Path, Root: root}
+				a.hold(HoldVirtual, "the file of a cue rip, which plays several tracks, stays where it is")
+				plan.Actions = append(plan.Actions, a)
+			}
+			continue
 		}
-		rel, err := RenderRelPath(p, view)
+		acts, err := o.planItem(ctx, root, p, it, opts)
 		if err != nil {
 			return nil, err
 		}
-		// A book may be backed by several part files. The item view carries only the
-		// representative primary, so moving just that would strand the other parts;
-		// fetch them all and move every part into the rendered book folder. An
-		// alternate copy of a part is not one, and stays where it is.
-		if it.Kind == model.KindBook {
-			files, err := o.cat.ItemFiles(ctx, it.PID)
-			if err != nil {
-				return nil, err
-			}
-			files = slices.DeleteFunc(files, func(f model.ItemFileRef) bool { return f.Role == "alternate" })
-			if len(files) > 1 {
-				o.planBookParts(plan, root, rel, it.PID, it.PartTotal, files)
-				continue
-			}
-			// A lone part past the first is a part of a book whose other parts are not
-			// here yet, named as it will be beside them; a lone first part is a
-			// single-file book as often as not, and keeps the book's own name.
-			if len(files) == 1 {
-				if p := PartAt(files[0].Position); p.Track > 0 {
-					if last, ok := LonePart(p, it.PartTotal); ok {
-						rel = BookPartRelPath(rel, p, last, filepath.Ext(it.DisplayPath))
-					}
-				}
-			}
-		}
-		dst := filepath.Join(root, rel)
-		a := Action{
-			ItemPID: it.PID, FilePID: it.FilePID,
-			Src: it.DisplayPath, SrcBytes: it.Path, Dst: dst, RelDst: rel, Root: root,
-		}
-		if filepath.Clean(a.Src) == filepath.Clean(dst) {
-			a.Skip, a.Reason = true, "already in place"
-		}
-		// Tag write-back applies to music tracks (albumArtist / Various Artists /
-		// disc-track numbering); a book's tag model is different and is left alone.
-		if p.TagWrite && it.Kind == model.KindTrack {
-			fields, err := o.tagFields(ctx, it)
-			if err != nil {
-				return nil, err
-			}
-			a.TagFields = fields
-		}
-		plan.Actions = append(plan.Actions, a)
+		plan.Actions = append(plan.Actions, acts...)
 	}
-	markCollisions(plan)
+	if err := o.Hold(ctx, plan); err != nil {
+		return nil, err
+	}
 	return plan, nil
 }
 
+// planItem plans the moves of one item's files.
+func (o *Organizer) planItem(ctx context.Context, root string, p Profile, it *model.ItemView, opts PlanOptions) ([]Action, error) {
+	v := *it
+	if y := opts.AlbumYears[it.AlbumPID]; it.AlbumPID != "" && y != 0 {
+		v.Year = y
+	}
+	// The artist pair is the item's own text where it is not the entity's name in another
+	// spelling: a joint credit's entity is only its first name.
+	v.Artist = spelled(opts.Names, it.ArtistPID, it.Artist)
+	v.AlbumArtist = spelled(opts.Names, it.AlbumArtistPID, it.AlbumArtist)
+	if title := opts.Names[it.AlbumPID]; it.AlbumPID != "" && title != "" {
+		v.Album = title
+	}
+	rel, buckets, err := renderRel(p, &v)
+	if err != nil {
+		return nil, err
+	}
+	acts, err := o.itemMoves(ctx, root, rel, p, it)
+	if err != nil || !untagged(it, buckets) {
+		return acts, err
+	}
+	for i := range acts {
+		if !acts[i].Skip {
+			acts[i].hold(HoldUntagged, "no artist, album artist or album to file it under")
+		}
+	}
+	return acts, nil
+}
+
+// itemMoves plans an item's move to its rendered path, or each part's for a book.
+func (o *Organizer) itemMoves(ctx context.Context, root, rel string, p Profile, it *model.ItemView) ([]Action, error) {
+	// A book may be backed by several part files. The item view carries only the
+	// representative primary, so moving just that would strand the other parts;
+	// fetch them all and move every part into the rendered book folder. An
+	// alternate copy of a part is not one, and stays where it is.
+	if it.Kind == model.KindBook {
+		files, err := o.cat.ItemFiles(ctx, it.PID)
+		if err != nil {
+			return nil, err
+		}
+		files = slices.DeleteFunc(files, func(f model.ItemFileRef) bool { return f.Role == "alternate" })
+		if len(files) > 1 {
+			return o.planBookParts(root, rel, it.PID, it.PartTotal, files), nil
+		}
+		// A lone part past the first is a part of a book whose other parts are not
+		// here yet, named as it will be beside them; a lone first part is a
+		// single-file book as often as not, and keeps the book's own name.
+		if len(files) == 1 {
+			if p := PartAt(files[0].Position); p.Track > 0 {
+				if last, ok := LonePart(p, it.PartTotal); ok {
+					rel = BookPartRelPath(rel, p, last, filepath.Ext(it.DisplayPath))
+				}
+			}
+		}
+	}
+	dst := filepath.Join(root, rel)
+	a := Action{
+		ItemPID: it.PID, FilePID: it.FilePID,
+		Src: it.DisplayPath, SrcBytes: it.Path, Dst: dst, RelDst: rel, Root: root,
+	}
+	if filepath.Clean(a.Src) == filepath.Clean(dst) {
+		a.hold(HoldInPlace, "already in place")
+	}
+	// Tag write-back applies to music tracks (albumArtist / Various Artists /
+	// disc-track numbering); a book's tag model is different and is left alone.
+	if p.TagWrite && it.Kind == model.KindTrack {
+		fields, err := o.tagFields(ctx, p, it)
+		if err != nil {
+			return nil, err
+		}
+		a.TagFields = fields
+	}
+	return []Action{a}, nil
+}
+
+// spelled is the name the catalog keeps for the entity pid where raw is that name in
+// another spelling, else raw.
+func spelled(names map[model.PID]string, pid model.PID, raw string) string {
+	if name := names[pid]; pid != "" && name != "" && identity.MatchKey(name) == identity.MatchKey(raw) {
+		return name
+	}
+	return raw
+}
+
+// untagged reports whether an item has no artist, album artist or album and the path
+// rendered for it fell back on the unknown bucket of a field they give, which would file it
+// with every other item tagged so.
+func untagged(it *model.ItemView, buckets map[string]bool) bool {
+	if firstNonEmpty(it.Artist, it.AlbumArtist, it.Album) != "" {
+		return false
+	}
+	return slices.ContainsFunc(filingFields, func(f string) bool { return buckets[f] })
+}
+
 // tagFields computes the lock-respecting metadata edits organize will write into a
-// track's file: the album artist (literal "Various Artists" for a compilation) and
-// the disc/track numbers with their totals. A locked field is skipped so curated data
-// survives.
-func (o *Organizer) tagFields(ctx context.Context, it *model.ItemView) ([]TagField, error) {
+// track's file: the album artist (the profile's compilation folder for a compilation, as
+// its path names it) and the disc/track numbers with their totals. A locked field is
+// skipped so curated data survives.
+func (o *Organizer) tagFields(ctx context.Context, p Profile, it *model.ItemView) ([]TagField, error) {
 	// Load the item's locked fields once rather than one SELECT per candidate field.
 	locked, err := o.cat.LockedFields(ctx, it.PID)
 	if err != nil {
@@ -258,7 +375,7 @@ func (o *Organizer) tagFields(ctx context.Context, it *model.ItemView) ([]TagFie
 
 	albumArtist := it.AlbumArtist
 	if it.Compilation {
-		albumArtist = "Various Artists"
+		albumArtist = p.compilationArtist(it.AlbumArtist)
 	}
 	add("album_artist", albumArtist)
 	if n := len(out); n > 0 && out[n-1].Field == "album_artist" && albumArtist != it.AlbumArtist {
@@ -363,18 +480,25 @@ func CopyRelPath(rel string, part, last PartNumber, n int, ext string) string {
 // are unique, so two source parts that happen to share a basename across folders no
 // longer render to the same destination and get silently dropped by collision
 // detection, the split this function exists to prevent.
-func (o *Organizer) planBookParts(plan *Plan, root, rel string, itemPID model.PID, trackTotal int, files []model.ItemFileRef) {
+func (o *Organizer) planBookParts(root, rel string, itemPID model.PID, trackTotal int, files []model.ItemFileRef) []Action {
 	// All-or-nothing: if any part cannot be placed (no path, or outside this managed
-	// root), leave the WHOLE book where it is rather than moving some parts and
+	// root), the parts here are held where they are rather than moving some parts and
 	// stranding others, the split this function exists to prevent. Roots are
 	// validated non-overlapping, so a legitimately-scanned book's parts are all under
 	// one root; this guards a stray/cross-root edge.
 	for _, fl := range files {
-		if fl.DisplayPath == "" || !pathx.UnderRoot(root, fl.DisplayPath) {
-			o.log.Warn("skipping multi-file book organize: a part is not placeable",
-				"item", itemPID, "part", fl.DisplayPath)
-			return
+		if fl.DisplayPath != "" && pathx.UnderRoot(root, fl.DisplayPath) {
+			continue
 		}
+		var held []Action
+		for _, part := range files {
+			if part.DisplayPath != "" && pathx.UnderRoot(root, part.DisplayPath) {
+				a := Action{ItemPID: itemPID, FilePID: part.FilePID, Src: part.DisplayPath, SrcBytes: part.Path, Root: root}
+				a.hold(HoldBookHeld, "a part of its book is outside this library: "+cmp.Or(fl.DisplayPath, string(fl.FilePID)))
+				held = append(held, a)
+			}
+		}
+		return held
 	}
 	places := make([]PartNumber, len(files))
 	for i, fl := range files {
@@ -390,11 +514,11 @@ func (o *Organizer) planBookParts(plan *Plan, root, rel string, itemPID model.PI
 			Src: fl.DisplayPath, SrcBytes: fl.Path, Dst: dst, RelDst: partRel, Root: root,
 		}
 		if filepath.Clean(a.Src) == filepath.Clean(dst) {
-			a.Skip, a.Reason = true, "already in place"
+			a.hold(HoldInPlace, "already in place")
 		}
 		acts = append(acts, a)
 	}
-	plan.Actions = append(plan.Actions, orderBookMoves(acts)...)
+	return orderBookMoves(acts)
 }
 
 // orderBookMoves orders a book's moves so a part moves after the part whose name it takes
@@ -438,14 +562,195 @@ func orderBookMoves(acts []Action) []Action {
 	return out
 }
 
-// markCollisions skips any action whose destination collides with an
-// earlier-planned one. Two items rendering to the same path (or to paths that
-// differ only by case, which collide on a case-insensitive filesystem) cannot
-// both be moved there, so all but the first are held back with a reason rather
-// than silently overwriting. The key is cleaned and case-folded so a managed tree
-// remains portable across case-sensitive and case-insensitive filesystems.
-func markCollisions(plan *Plan) {
+// Hold holds back each action of the plan that cannot move as disk and catalog stand. A
+// file not on disk is missing, a file already in place included. A destination two moves
+// claim goes to the first, and one a file the plan leaves in place keeps is a collision;
+// collisions are decided afresh as other holds land, so a move that lost its destination to
+// one since held claims it back. A file the plan does not move standing at the destination,
+// or beside it under a name apart only by case or Unicode form, holds it, as does a catalog
+// row for a file gone from that path; a destination another move of the plan vacates is
+// free, since Execute waits that move, and a file's own entry under another spelling is no
+// occupant. A held part holds the rest of its book. Plan runs it, and an apply runs it
+// again over a plan made earlier (see Reopen).
+func (o *Organizer) Hold(ctx context.Context, plan *Plan) error {
+	var dsts [][]byte
+	for i := range plan.Actions {
+		a := &plan.Actions[i]
+		if a.Skip && a.Code != HoldInPlace {
+			continue
+		}
+		if _, err := os.Lstat(pathx.Long(a.Src)); errors.Is(err, fs.ErrNotExist) {
+			a.hold(HoldMissing, "file is not on disk")
+		} else if err != nil {
+			a.hold(HoldMissing, "file cannot be looked at: "+err.Error())
+		} else if !a.Skip {
+			dsts = append(dsts, []byte(a.Dst))
+		}
+	}
+	known, err := o.cat.FilePIDsByPath(ctx, dsts)
+	if err != nil {
+		return err
+	}
+	ls := fsx.NewLister()
+	found := make([]*occupant, len(plan.Actions))
+	collided := make([]bool, len(plan.Actions))
+	for {
+		for i := range collided {
+			if collided[i] {
+				a := &plan.Actions[i]
+				a.Skip, a.Code, a.Reason, collided[i] = false, "", "", false
+			}
+		}
+		markCollisions(plan, collided)
+		moving := map[string][]string{}
+		for _, a := range plan.Actions {
+			if !a.Skip {
+				k := pathx.CollisionKey(a.Src)
+				moving[k] = append(moving[k], a.Src)
+			}
+		}
+		changed := false
+		for i := range plan.Actions {
+			a := &plan.Actions[i]
+			if a.Skip {
+				continue
+			}
+			if found[i] == nil {
+				oc, err := o.occupant(ctx, ls, known, a)
+				if err != nil {
+					return err
+				}
+				found[i] = &oc
+			}
+			oc := found[i]
+			if oc.code == "" || vacated(moving, oc.path) {
+				continue
+			}
+			a.hold(oc.code, oc.reason)
+			changed = true
+		}
+		if holdBooks(plan) {
+			changed = true
+		}
+		if !changed {
+			return nil
+		}
+	}
+}
+
+// Reopen clears the holds that follow from how disk and catalog stood when the plan was
+// made (a collision, an occupied destination, a missing file, a held book part, a read-only
+// library), so a Hold run later decides them again as things then stand. A file in place,
+// an untagged item, a cue rip and a book part outside its library stay as planned.
+func (p *Plan) Reopen() {
+	for i := range p.Actions {
+		a := &p.Actions[i]
+		switch a.Code {
+		case HoldCollision, HoldOccupied, HoldOccupiedCase, HoldMissing, HoldBookHeld, HoldReadOnly:
+			if a.Dst == "" {
+				continue
+			}
+			a.Skip, a.Code, a.Reason = false, "", ""
+			if filepath.Clean(a.Src) == filepath.Clean(a.Dst) {
+				a.hold(HoldInPlace, "already in place")
+			}
+		}
+	}
+}
+
+// vacated reports whether the file at path is the source of a move still in the plan,
+// spelled as the plan has it or as the folder lists it after a rename by case that no scan
+// has read yet; a hard link of that file named apart by case is another entry and stays.
+func vacated(moving map[string][]string, path string) bool {
+	for _, src := range moving[pathx.CollisionKey(path)] {
+		if filepath.Clean(src) == filepath.Clean(path) || fsx.SpelledAlike(src, path) {
+			return true
+		}
+	}
+	return false
+}
+
+// occupant is what holds a destination: the path of a file there, or of the catalog row
+// claiming it, and the code and reason it holds the move for. A zero occupant holds
+// nothing.
+type occupant struct {
+	path   string
+	code   HoldCode
+	reason string
+}
+
+// occupant finds what holds an action's destination: an entry of its folder under its
+// name or one apart only by case, else the catalog's row for the path. known holds the
+// catalog's files at the plan's destinations, read at once.
+func (o *Organizer) occupant(ctx context.Context, ls *fsx.Lister, known map[string]model.PID, a *Action) (occupant, error) {
+	p, exact, err := ls.Occupant(a.Src, a.Dst)
+	if err != nil {
+		return occupant{path: a.Dst, code: HoldOccupied, reason: "destination cannot be looked at: " + err.Error()}, nil
+	}
+	if p == "" {
+		what, err := o.cataloged(ctx, a.ItemPID, known[a.Dst])
+		if what == "" || err != nil {
+			return occupant{}, err
+		}
+		return occupant{path: a.Dst, code: HoldOccupied,
+			reason: "destination is held in the catalog by " + what + ", which is not on disk: " + a.Dst}, nil
+	}
+	file, ok := known[p]
+	if !ok {
+		f, err := o.cat.FileByPath(ctx, []byte(p))
+		switch {
+		case err == nil:
+			file = f.PID
+		case !waxerr.Is(err, waxerr.CodeNotFound):
+			return occupant{}, err
+		}
+	}
+	what, err := o.cataloged(ctx, a.ItemPID, file)
+	if err != nil {
+		return occupant{}, err
+	}
+	if what == "" {
+		what = "a file the catalog does not know"
+	}
+	if !exact {
+		return occupant{path: p, code: HoldOccupiedCase, reason: "destination differs only by case from " + what + ": " + p}, nil
+	}
+	return occupant{path: p, code: HoldOccupied, reason: "destination holds " + what + ": " + p}, nil
+}
+
+// cataloged says whose the cataloged file is, as a reason names it, or nothing for no
+// file.
+func (o *Organizer) cataloged(ctx context.Context, self, file model.PID) (string, error) {
+	if file == "" {
+		return "", nil
+	}
+	item, _, err := o.cat.FileOwner(ctx, file)
+	switch {
+	case err != nil:
+		return "", err
+	case item == "":
+		return "a cataloged file that backs no item", nil
+	case item == self:
+		return "another file of this item", nil
+	default:
+		return "the file of item " + string(item), nil
+	}
+}
+
+// markCollisions holds every move whose destination collides with an earlier-planned one
+// or with the path of a file the plan leaves where it is, marking each in held. Two items
+// rendering to the same path (or to paths that differ only by case, which collide on a
+// case-insensitive filesystem) cannot both be moved there, so all but the first are held
+// back with a reason rather than silently overwriting. The key is cleaned and case-folded
+// so a managed tree remains portable across case-sensitive and case-insensitive
+// filesystems.
+func markCollisions(plan *Plan, held []bool) {
 	seen := make(map[string]int, len(plan.Actions))
+	for i, a := range plan.Actions {
+		if a.Skip {
+			seen[pathx.CollisionKey(a.Src)] = i
+		}
+	}
 	for i := range plan.Actions {
 		a := &plan.Actions[i]
 		if a.Skip {
@@ -453,12 +758,34 @@ func markCollisions(plan *Plan) {
 		}
 		key := pathx.CollisionKey(a.Dst)
 		if j, ok := seen[key]; ok {
-			a.Skip = true
-			a.Reason = "destination collides with " + plan.Actions[j].Src
+			a.hold(HoldCollision, "destination collides with "+plan.Actions[j].Src)
+			if held != nil {
+				held[i] = true
+			}
 			continue
 		}
 		seen[key] = i
 	}
+}
+
+// holdBooks holds every move of an item one of whose actions is held, since a book's parts
+// move together or not at all, reporting whether it held any.
+func holdBooks(plan *Plan) bool {
+	held := map[model.PID]string{}
+	for _, a := range plan.Actions {
+		if _, ok := held[a.ItemPID]; !ok && a.ItemPID != "" && a.held() {
+			held[a.ItemPID] = a.Src
+		}
+	}
+	changed := false
+	for i := range plan.Actions {
+		a := &plan.Actions[i]
+		if src, ok := held[a.ItemPID]; ok && !a.Skip {
+			a.hold(HoldBookHeld, "another part of its book is held: "+src)
+			changed = true
+		}
+	}
+	return changed
 }
 
 // Execute applies the plan: each move happens on disk, then the catalog records
@@ -546,6 +873,10 @@ func (o *Organizer) Execute(ctx context.Context, plan *Plan, jobPID model.PID, h
 		}
 		a := &plan.Actions[i]
 		switch {
+		case a.held():
+			rep.Held++
+			rep.Holds = append(rep.Holds, HeldMove{FilePID: a.FilePID, Src: a.Src, Dst: a.Dst, Code: a.Code, Reason: a.Reason})
+			ran++
 		case a.Skip:
 			rep.Skipped++
 			ran++

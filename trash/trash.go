@@ -8,11 +8,13 @@ package trash
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"maps"
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 
 	"github.com/colespringer/waxbin/internal/fsx"
 	"github.com/colespringer/waxbin/internal/pathx"
@@ -28,6 +30,8 @@ type Store interface {
 	// ItemFiles returns every file backing an item, so a multi-file book's parts are
 	// all planned for deletion, not just the representative primary.
 	ItemFiles(ctx context.Context, itemPID model.PID) ([]model.ItemFileRef, error)
+	// RipTracks returns the tracks a cue sheet carves out of a file.
+	RipTracks(ctx context.Context, filePID model.PID) ([]model.ItemRef, error)
 }
 
 // Service plans and applies deletions.
@@ -58,6 +62,9 @@ type Action struct {
 	InPlace bool
 	Skip    bool
 	Reason  string
+	// Tracks lists, for the file of a cue rip, every track it plays, which the deletion
+	// archives with it; it is empty for any other file.
+	Tracks []model.PID
 }
 
 // Plan is a set of deletions under one mode. Produced read-only (dry run) and
@@ -81,6 +88,10 @@ type Plan struct {
 	// SkippedReadOnly counts items a caller dropped before planning because their
 	// library is read-only, carried to Report like SkippedPodcast.
 	SkippedReadOnly int
+	// SkippedRipTracks counts tracks a caller dropped before planning because the sweep
+	// matched only some of the tracks a cue sheet carves out of their file (DropPartialRips),
+	// carried to Report like SkippedPodcast.
+	SkippedRipTracks int
 }
 
 // Pending returns the number of actions that would actually delete.
@@ -105,8 +116,9 @@ type Report struct {
 	// SkippedPodcast is the plan's count carried through, so a report reads as a
 	// complete account of the matched set. Skipped counts planned actions the
 	// execution skipped; these never became actions at all.
-	SkippedPodcast  int
-	SkippedReadOnly int
+	SkippedPodcast   int
+	SkippedReadOnly  int
+	SkippedRipTracks int
 	// Promoted lists the alternates that took a removed file's place, for the caller
 	// to re-read once the run is over.
 	Promoted []model.PromotedFile
@@ -126,25 +138,169 @@ type Failure struct {
 // primary part, and an item's alternates go with it. A file in a read-only library is
 // planned as a skip, which leaves the item on that file. An item with no backing file
 // is skipped; a trashed file's destination is placed in its library's trash directory
-// under a unique sub-directory so same-named files never collide.
+// under a unique sub-directory so same-named files never collide. The file of a cue rip
+// is planned once for all its tracks, and only when every one of them is deleted, since
+// deleting it takes every track it plays: one track alone is refused (CodeInvalid),
+// naming the others.
 func (s *Service) Plan(ctx context.Context, libs []*model.Library, items []*model.ItemView, mode model.DeleteMode) (*Plan, error) {
 	if !mode.Valid() {
 		return nil, waxerr.New(waxerr.CodeInvalid, "trash.Plan", "invalid delete mode: "+string(mode))
 	}
-	plan := &Plan{Mode: mode}
+	return s.plan(ctx, newReads(s.store), libs, items, mode)
+}
+
+// PlanSweep is Plan for a sweep over a query's matches: rather than refuse a track of a cue
+// rip whose other tracks the sweep did not match, it leaves out every track of that rip it
+// matched, counting them in SkippedRipTracks, and deletes the rest.
+func (s *Service) PlanSweep(ctx context.Context, libs []*model.Library, items []*model.ItemView, mode model.DeleteMode) (*Plan, error) {
+	if !mode.Valid() {
+		return nil, waxerr.New(waxerr.CodeInvalid, "trash.PlanSweep", "invalid delete mode: "+string(mode))
+	}
+	r := newReads(s.store)
+	items, dropped, err := dropPartialRips(ctx, r, items)
+	if err != nil {
+		return nil, err
+	}
+	plan, err := s.plan(ctx, r, libs, items, mode)
+	if err != nil {
+		return nil, err
+	}
+	plan.SkippedRipTracks = dropped
+	return plan, nil
+}
+
+func (s *Service) plan(ctx context.Context, r *reads, libs []*model.Library, items []*model.ItemView, mode model.DeleteMode) (*Plan, error) {
+	deleting := make(map[model.PID]bool, len(items))
 	for _, it := range items {
-		files, err := s.store.ItemFiles(ctx, it.PID)
+		deleting[it.PID] = true
+	}
+	plan := &Plan{Mode: mode}
+	planned := map[model.PID]bool{}
+	var refused []string
+	for _, it := range items {
+		files, err := r.itemFiles(ctx, it.PID)
 		if err != nil {
 			return nil, err
 		}
 		for _, fl := range files {
-			if fl.FilePID == "" || fl.DisplayPath == "" {
+			if fl.FilePID == "" || fl.DisplayPath == "" || planned[fl.FilePID] {
 				continue
 			}
-			plan.Actions = append(plan.Actions, planFile(libs, it.PID, fl, mode))
+			planned[fl.FilePID] = true
+			a := planFile(libs, it.PID, fl, mode)
+			if fl.Virtual {
+				tracks, kept, err := r.ripTracks(ctx, fl.FilePID, deleting)
+				if err != nil {
+					return nil, err
+				}
+				if len(kept) > 0 {
+					var names []string
+					for _, tr := range kept {
+						names = append(names, fmt.Sprintf("%q (%s)", tr.Title, tr.PID))
+					}
+					refused = append(refused, fmt.Sprintf("%q (%s) plays a window of the cue rip %s, which also plays %s",
+						it.Title, it.PID, fl.DisplayPath, strings.Join(names, ", ")))
+					continue
+				}
+				a.Tracks = tracks
+			}
+			plan.Actions = append(plan.Actions, a)
 		}
 	}
+	if len(refused) > 0 {
+		return nil, waxerr.New(waxerr.CodeInvalid, "trash.Plan", "a cue rip's tracks are deleted together or not at all: "+strings.Join(refused, "; "))
+	}
 	return plan, nil
+}
+
+// reads keeps the item files and rip tracks one planning pass reads, so a rip's tracks are
+// read once however many of them the pass meets.
+type reads struct {
+	store  Store
+	files  map[model.PID][]model.ItemFileRef
+	tracks map[model.PID][]model.ItemRef
+}
+
+func newReads(store Store) *reads {
+	return &reads{store: store, files: map[model.PID][]model.ItemFileRef{}, tracks: map[model.PID][]model.ItemRef{}}
+}
+
+func (r *reads) itemFiles(ctx context.Context, item model.PID) ([]model.ItemFileRef, error) {
+	if files, ok := r.files[item]; ok {
+		return files, nil
+	}
+	files, err := r.store.ItemFiles(ctx, item)
+	if err == nil {
+		r.files[item] = files
+	}
+	return files, err
+}
+
+// ripTracks returns the tracks a cue sheet carves out of a file, and those of them not in
+// deleting.
+func (r *reads) ripTracks(ctx context.Context, filePID model.PID, deleting map[model.PID]bool) ([]model.PID, []model.ItemRef, error) {
+	refs, ok := r.tracks[filePID]
+	if !ok {
+		var err error
+		if refs, err = r.store.RipTracks(ctx, filePID); err != nil {
+			return nil, nil, err
+		}
+		r.tracks[filePID] = refs
+	}
+	tracks := make([]model.PID, len(refs))
+	var kept []model.ItemRef
+	for i, tr := range refs {
+		tracks[i] = tr.PID
+		if !deleting[tr.PID] {
+			kept = append(kept, tr)
+		}
+	}
+	return tracks, kept, nil
+}
+
+// dropPartialRips leaves out of a sweep's items every track a cue sheet carves out of a
+// file, a copy of the rip included, whose other tracks the sweep did not match, since
+// deleting the file takes them all, and counts what it left out.
+func dropPartialRips(ctx context.Context, r *reads, items []*model.ItemView) ([]*model.ItemView, int, error) {
+	dropped := 0
+	for {
+		deleting := make(map[model.PID]bool, len(items))
+		for _, it := range items {
+			deleting[it.PID] = true
+		}
+		drop := map[model.PID]bool{}
+		for _, it := range items {
+			if drop[it.PID] {
+				continue
+			}
+			files, err := r.itemFiles(ctx, it.PID)
+			if err != nil {
+				return nil, 0, err
+			}
+			for _, fl := range files {
+				if !fl.Virtual {
+					continue
+				}
+				tracks, kept, err := r.ripTracks(ctx, fl.FilePID, deleting)
+				if err != nil {
+					return nil, 0, err
+				}
+				if len(kept) == 0 {
+					continue
+				}
+				for _, tr := range tracks {
+					if deleting[tr] {
+						drop[tr] = true
+					}
+				}
+			}
+		}
+		if len(drop) == 0 {
+			return items, dropped, nil
+		}
+		items = slices.DeleteFunc(slices.Clone(items), func(it *model.ItemView) bool { return drop[it.PID] })
+		dropped += len(drop)
+	}
 }
 
 // FileTarget is one file to delete on its own and the item it backs.
@@ -154,16 +310,49 @@ type FileTarget struct {
 }
 
 // PlanFiles computes the deletion of single files under the mode: an alternate goes
-// alone, and a primary or part gives its place to an alternate when the item has one.
-func (s *Service) PlanFiles(libs []*model.Library, targets []FileTarget, mode model.DeleteMode) (*Plan, error) {
+// alone, and a primary or part gives its place to an alternate when the item has one. The
+// file of a cue rip names every track it plays, which its deletion archives.
+func (s *Service) PlanFiles(ctx context.Context, libs []*model.Library, targets []FileTarget, mode model.DeleteMode) (*Plan, error) {
 	if !mode.Valid() {
 		return nil, waxerr.New(waxerr.CodeInvalid, "trash.PlanFiles", "invalid delete mode: "+string(mode))
 	}
 	plan := &Plan{Mode: mode}
 	for _, t := range targets {
-		plan.Actions = append(plan.Actions, planFile(libs, t.ItemPID, t.File, mode))
+		a := planFile(libs, t.ItemPID, t.File, mode)
+		tracks, err := s.store.RipTracks(ctx, t.File.FilePID)
+		if err != nil {
+			return nil, err
+		}
+		for _, tr := range tracks {
+			a.Tracks = append(a.Tracks, tr.PID)
+		}
+		plan.Actions = append(plan.Actions, a)
 	}
 	return plan, nil
+}
+
+// Recheck skips each planned deletion of a file whose cue rip plays other tracks than the
+// plan named, a whole file having become a rip or a rip having gained or lost a track since
+// the plan was made, since deleting it would archive tracks no one chose.
+func (s *Service) Recheck(ctx context.Context, plan *Plan) error {
+	for i := range plan.Actions {
+		a := &plan.Actions[i]
+		if a.Skip {
+			continue
+		}
+		refs, err := s.store.RipTracks(ctx, a.FilePID)
+		if err != nil {
+			return err
+		}
+		now := make([]model.PID, len(refs))
+		for j, tr := range refs {
+			now[j] = tr.PID
+		}
+		if !slices.Equal(now, a.Tracks) {
+			a.Skip, a.Reason = true, "the cue rip's tracks changed since the plan; plan the delete again"
+		}
+	}
+	return nil
 }
 
 // planFile plans one file's deletion.
@@ -189,7 +378,7 @@ func planFile(libs []*model.Library, item model.PID, fl model.ItemFileRef, mode 
 // pruning/permanent deletes remove the file outright and tally reclaimed bytes. The
 // folders the run empties are removed once it ends, a canceled run included.
 func (s *Service) Execute(ctx context.Context, plan *Plan) (*Report, error) {
-	rep := &Report{SkippedPodcast: plan.SkippedPodcast, SkippedReadOnly: plan.SkippedReadOnly}
+	rep := &Report{SkippedPodcast: plan.SkippedPodcast, SkippedReadOnly: plan.SkippedReadOnly, SkippedRipTracks: plan.SkippedRipTracks}
 	emptied := map[string]*Action{}
 	sib := organize.NewSiblings()
 	for i := range plan.Actions {

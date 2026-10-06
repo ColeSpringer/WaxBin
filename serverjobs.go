@@ -294,24 +294,41 @@ func (l *Library) RunOrganize(ctx context.Context, q query.Query, opts OrganizeO
 		return "", err
 	}
 	if opts.Profile != nil {
-		p := *opts.Profile
+		p := opts.Profile.Clone()
 		opts.Profile = &p
 	}
-	return l.startJob(ctx, jobs.Spec{Kind: "organize", Scope: fsMutateScope}, func(jctx context.Context, h *jobs.Handle) error {
+	return l.startJob(ctx, jobs.Spec{Kind: "organize", Scope: fsMutateScope}, l.organizeWork(q, opts, new(*organize.RunResult)))
+}
+
+// Organize plans an organize pass and applies it at once under one "organize"-scoped job,
+// the direct form of RunOrganize: the plan is made inside the job, so its moves need no
+// second look. It returns the report with the resolved profile, as the job records it.
+func (l *Library) Organize(ctx context.Context, q query.Query, opts OrganizeOptions) (*organize.RunResult, error) {
+	if err := checkOrganizeOptions("Library.Organize", opts); err != nil {
+		return nil, err
+	}
+	var out *organize.RunResult
+	_, err := l.jobs.Run(ctx, jobs.Spec{Kind: "organize", Scope: fsMutateScope}, l.organizeWork(q, opts, &out))
+	return out, err
+}
+
+// organizeWork plans across the managed libraries and executes the plan inside a job,
+// leaving the run's result in out.
+func (l *Library) organizeWork(q query.Query, opts OrganizeOptions, out **organize.RunResult) jobFn {
+	return func(jctx context.Context, h *jobs.Handle) error {
 		plan, err := l.PlanOrganize(jctx, q, opts)
 		if err != nil {
 			return err
 		}
 		rep, err := l.organizer.Execute(jctx, plan, h.JobPID(),
 			func(p float64, msg string) error { return h.Heartbeat(jctx, p, msg) })
-		if err != nil {
-			return err
-		}
 		if rep != nil {
 			// Record the resolved profile alongside the report so a tailing client prints
-			// the same profile name the direct path does, not a placeholder.
-			h.SetResult(l.jsonResult(organize.RunResult{Profile: plan.Profile, Report: *rep}))
+			// the same profile name the direct path does, not a placeholder. A canceled run
+			// records what it moved before the cancel.
+			*out = &organize.RunResult{Profile: plan.Profile, Report: *rep}
+			h.SetResult(l.jsonResult(**out))
 		}
-		return nil
-	})
+		return err
+	}
 }

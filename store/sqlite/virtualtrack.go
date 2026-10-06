@@ -395,6 +395,32 @@ func (s *Store) VirtualTracksForPath(ctx context.Context, path []byte) ([]model.
 	return out, nil
 }
 
+// RipTracks returns the tracks a cue sheet carves out of a file, in start order, as the
+// items playing a window of it; a file every item plays whole returns none.
+func (s *Store) RipTracks(ctx context.Context, filePID model.PID) ([]model.ItemRef, error) {
+	const op = "store.RipTracks"
+	rows, err := s.read.QueryContext(ctx, `SELECT pi.pid, pi.title, pi.kind
+		FROM file f JOIN item_file itf ON itf.file_id = f.id AND itf.start_frames IS NOT NULL
+		JOIN playable_item pi ON pi.id = itf.item_id
+		WHERE f.pid = ? ORDER BY itf.start_frames, pi.id`, string(filePID))
+	if err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	defer rows.Close()
+	var out []model.ItemRef
+	for rows.Next() {
+		var r model.ItemRef
+		if err := rows.Scan(&r.PID, &r.Title, &r.Kind); err != nil {
+			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	return out, nil
+}
+
 // handVirtualTrackOverTx gives a track its rip no longer declares to another file that
 // backs it, a copy of the rip whose sheet still does: this file's edge goes and an
 // alternate takes its place (promoteLostTx, then ensurePrimary). It reports false, with

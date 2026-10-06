@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -89,6 +90,10 @@ func sameName(a, b string) bool {
 	return strings.EqualFold(norm.NFC.String(a), norm.NFC.String(b))
 }
 
+// SpelledAlike reports whether dst is src's own entry under another spelling of its name,
+// which Move respells in place.
+func SpelledAlike(src, dst string) bool { return spelledAlike(src, dst) }
+
 // spelledAlike reports whether dst is src's own entry under another spelling of its name.
 // A hard link names the same file through an entry of its own, which a move must not take
 // for the file being in place: that is two entries listed in the folder.
@@ -122,13 +127,40 @@ func sameFile(stat func(string) (os.FileInfo, error), a, b string) bool {
 // moved to another spelling of its name from one still in place.
 type Lister struct {
 	fs    folders
-	lists map[string][]string
+	lists map[string]*listing
+}
+
+// listing is a folder's entries by their names, and by those names folded as sameName
+// matches them, in listing order.
+type listing struct {
+	names  map[string]bool
+	folded map[string][]string
 }
 
 // NewLister returns a Lister over the OS filesystem.
 func NewLister() *Lister { return newLister(osFolders{}) }
 
-func newLister(fs folders) *Lister { return &Lister{fs: fs, lists: map[string][]string{}} }
+func newLister(fs folders) *Lister { return &Lister{fs: fs, lists: map[string]*listing{}} }
+
+// list reads a folder once, reporting whether it could be read.
+func (l *Lister) list(dir string) (*listing, bool) {
+	if lst, ok := l.lists[dir]; ok {
+		return lst, lst != nil
+	}
+	names, err := l.fs.ReadDir(dir)
+	if err != nil {
+		l.lists[dir] = nil
+		return nil, false
+	}
+	lst := &listing{names: make(map[string]bool, len(names)), folded: make(map[string][]string, len(names))}
+	for _, n := range names {
+		lst.names[n] = true
+		k := pathx.FoldName(n)
+		lst.folded[k] = append(lst.folded[k], n)
+	}
+	l.lists[dir] = lst
+	return lst, true
+}
 
 // Spelled reports whether path is listed under exactly its own spelling at each name
 // below root; a path outside root is judged by its last name alone, and one whose folders
@@ -143,20 +175,47 @@ func (l *Lister) Spelled(root, path string) bool {
 		rel = r
 	}
 	for _, name := range strings.Split(rel, sep) {
-		names, ok := l.lists[cur]
-		if !ok {
-			var err error
-			if names, err = l.fs.ReadDir(cur); err != nil {
-				return false
-			}
-			l.lists[cur] = names
-		}
-		if !slices.Contains(names, name) {
+		lst, ok := l.list(cur)
+		if !ok || !lst.names[name] {
 			return false
 		}
 		cur = filepath.Join(cur, name)
 	}
 	return true
+}
+
+// Occupant reports what stands at dst for a move of src there: the path of the entry
+// holding dst's name, and whether it is spelled as dst is or apart from it only by case or
+// Unicode form, which a filesystem that folds those takes for the same name. It reports no
+// path when nothing stands there or the entry is src's own under another spelling, which
+// Move respells in place, and an error when dst could not be looked at.
+func (l *Lister) Occupant(src, dst string) (string, bool, error) {
+	dir, name := filepath.Dir(dst), filepath.Base(dst)
+	err := l.fs.Lstat(dst)
+	switch {
+	case err == nil:
+		if spelledAlike(src, dst) {
+			return "", false, nil
+		}
+	case !errors.Is(err, fs.ErrNotExist):
+		return "", false, err
+	}
+	lst, _ := l.list(dir)
+	if lst != nil && lst.names[name] {
+		return dst, true, nil
+	}
+	if lst != nil {
+		for _, n := range lst.folded[pathx.FoldName(name)] {
+			if n == filepath.Base(src) && sameFile(os.Stat, dir, filepath.Dir(src)) {
+				continue
+			}
+			return filepath.Join(dir, n), false, nil
+		}
+	}
+	if err == nil {
+		return dst, true, nil
+	}
+	return "", false, nil
 }
 
 // respellEntry gives the entry of dir named like name that spelling: by a direct rename

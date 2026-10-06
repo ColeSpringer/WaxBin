@@ -22,7 +22,10 @@ func newOrganizeCmd(g *globals) *cobra.Command {
 			"moves the files when --apply is given. Without --apply it is a dry run. Each " +
 			"file's own sidecars move with it, and an album folder whose audio all goes to " +
 			"one place, leaving nothing else behind, sends its covers and other companions " +
-			"after it; a folder the moves leave empty is removed.",
+			"after it; a folder the moves leave empty is removed. A move that cannot happen is " +
+			"held and the plan says why: a destination another file holds, a file not on disk, " +
+			"an item with no artist, album artist or album, or a cue rip's shared file. --apply " +
+			"plans and moves in one go, and its report lists what it held and why.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			// Organize every item; the template engine picks the per-kind layout
 			// (music vs audiobook), so books are laid out by the audiobook template
@@ -80,15 +83,11 @@ func newOrganizeCmd(g *globals) *cobra.Command {
 				return err
 			}
 			defer lib.Close()
-			plan, err := lib.PlanOrganize(ctx(cmd), q, waxbin.OrganizeOptions{ProfileName: profile})
+			rr, err := lib.Organize(ctx(cmd), q, waxbin.OrganizeOptions{ProfileName: profile})
 			if err != nil {
 				return err
 			}
-			rep, err := lib.ApplyOrganize(ctx(cmd), plan)
-			if err != nil {
-				return err
-			}
-			return emitReport(cmd, g, plan.Profile, rep)
+			return emitReport(cmd, g, rr.Profile, &rr.Report)
 		},
 	}
 	cmd.Flags().StringVar(&profile, "profile", "", "organization profile (default: the library's configured profile)")
@@ -101,17 +100,20 @@ func emitPlan(cmd *cobra.Command, g *globals, plan *organize.Plan) error {
 	if g.jsonOut {
 		return printJSON(cmd, planJSON(plan))
 	}
-	fmt.Fprintf(out(cmd), "Plan (profile %s): %d action(s), %d would move", plan.Profile, len(plan.Actions), plan.Pending())
+	fmt.Fprintf(out(cmd), "Plan (profile %s): %d action(s), %d would move, %d held", plan.Profile, len(plan.Actions), plan.Pending(), plan.Held())
 	if plan.ReadOnlyLibraries > 0 {
 		fmt.Fprintf(out(cmd), " (%d read-only libraries left alone)", plan.ReadOnlyLibraries)
 	}
 	fmt.Fprintln(out(cmd))
 	for _, a := range plan.Actions {
-		if a.Skip {
+		switch {
+		case !a.Skip:
+			fmt.Fprintf(out(cmd), "  move  %s\n        -> %s\n", a.Src, a.Dst)
+		case a.Code == "" || a.Code == organize.HoldInPlace:
 			fmt.Fprintf(out(cmd), "  skip  %s (%s)\n", a.Src, a.Reason)
-			continue
+		default:
+			fmt.Fprintf(out(cmd), "  hold  %s [%s] (%s)\n", a.Src, a.Code, a.Reason)
 		}
-		fmt.Fprintf(out(cmd), "  move  %s\n        -> %s\n", a.Src, a.Dst)
 	}
 	fmt.Fprintln(out(cmd), "(dry run; pass --apply to execute)")
 	return nil
@@ -120,18 +122,23 @@ func emitPlan(cmd *cobra.Command, g *globals, plan *organize.Plan) error {
 func emitReport(cmd *cobra.Command, g *globals, profile string, rep *organize.Report) error {
 	if g.jsonOut {
 		return printJSON(cmd, struct {
-			Profile       string             `json:"profile"`
-			Moved         int                `json:"moved"`
-			Skipped       int                `json:"skipped"`
-			Errored       int                `json:"errored"`
-			SidecarsMoved int                `json:"sidecarsMoved"`
-			DirsPruned    int                `json:"dirsPruned"`
-			Failures      []organize.Failure `json:"failures,omitempty"`
-			Warnings      []organize.Warning `json:"warnings,omitempty"`
-		}{profile, rep.Moved, rep.Skipped, rep.Errored, rep.SidecarsMoved, rep.DirsPruned, rep.Failures, rep.Warnings})
+			Profile       string              `json:"profile"`
+			Moved         int                 `json:"moved"`
+			Skipped       int                 `json:"skipped"`
+			Held          int                 `json:"held"`
+			Errored       int                 `json:"errored"`
+			SidecarsMoved int                 `json:"sidecarsMoved"`
+			DirsPruned    int                 `json:"dirsPruned"`
+			Holds         []organize.HeldMove `json:"holds,omitempty"`
+			Failures      []organize.Failure  `json:"failures,omitempty"`
+			Warnings      []organize.Warning  `json:"warnings,omitempty"`
+		}{profile, rep.Moved, rep.Skipped, rep.Held, rep.Errored, rep.SidecarsMoved, rep.DirsPruned, rep.Holds, rep.Failures, rep.Warnings})
 	}
-	fmt.Fprintf(out(cmd), "Organized (profile %s): moved %d, skipped %d, errored %d, sidecars %d, pruned %s\n",
-		profile, rep.Moved, rep.Skipped, rep.Errored, rep.SidecarsMoved, plural(rep.DirsPruned, "folder"))
+	fmt.Fprintf(out(cmd), "Organized (profile %s): moved %d, skipped %d, held %d, errored %d, sidecars %d, pruned %s\n",
+		profile, rep.Moved, rep.Skipped, rep.Held, rep.Errored, rep.SidecarsMoved, plural(rep.DirsPruned, "folder"))
+	for _, h := range rep.Holds {
+		fmt.Fprintf(out(cmd), "  HOLD %s [%s] (%s)\n", h.Src, h.Code, h.Reason)
+	}
 	for _, f := range rep.Failures {
 		fmt.Fprintf(out(cmd), "  FAIL %s -> %s: %s\n", f.Src, f.Dst, f.Err)
 	}
@@ -148,6 +155,7 @@ type planActionJSON struct {
 	Src     string `json:"src"`
 	Dst     string `json:"dst"`
 	Skip    bool   `json:"skip"`
+	Code    string `json:"code,omitempty"`
 	Reason  string `json:"reason,omitempty"`
 }
 
@@ -156,13 +164,14 @@ func planJSON(plan *organize.Plan) any {
 	for _, a := range plan.Actions {
 		actions = append(actions, planActionJSON{
 			ItemPID: string(a.ItemPID), FilePID: string(a.FilePID),
-			Src: a.Src, Dst: a.Dst, Skip: a.Skip, Reason: a.Reason,
+			Src: a.Src, Dst: a.Dst, Skip: a.Skip, Code: string(a.Code), Reason: a.Reason,
 		})
 	}
 	return struct {
 		Profile           string           `json:"profile"`
 		Pending           int              `json:"pending"`
+		Held              int              `json:"held"`
 		ReadOnlyLibraries int              `json:"readOnlyLibraries,omitempty"`
 		Actions           []planActionJSON `json:"actions"`
-	}{plan.Profile, plan.Pending(), plan.ReadOnlyLibraries, actions}
+	}{plan.Profile, plan.Pending(), plan.Held(), plan.ReadOnlyLibraries, actions}
 }

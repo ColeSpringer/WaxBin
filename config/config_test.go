@@ -181,3 +181,21 @@ func TestCheckFolder(t *testing.T) {
 		}
 	}
 }
+
+// TestLoadKeepsAnEmptyCompilationFolder: a profile that sets its compilation folder empty
+// (file compilations under their album artist) is told apart from one that sets none.
+func TestLoadKeepsAnEmptyCompilationFolder(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "waxbin.json")
+	if err := os.WriteFile(path, []byte(`{"profiles": [{"name": "a", "compilation_folder": ""}, {"name": "b"}]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(config.Overrides{ConfigPath: path}, func(string) string { return "" })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Profiles) != 2 || cfg.Profiles[0].CompilationFolder == nil || *cfg.Profiles[0].CompilationFolder != "" ||
+		cfg.Profiles[1].CompilationFolder != nil {
+		t.Fatalf("profiles = %+v, want a's folder set empty and b's unset", cfg.Profiles)
+	}
+}

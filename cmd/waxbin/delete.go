@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/colespringer/waxbin"
 	"github.com/colespringer/waxbin/model"
@@ -26,7 +27,8 @@ func newRmCmd(g *globals) *cobra.Command {
 			"(same-name lyrics, cue sheet, art) go with it, and a folder the delete leaves empty " +
 			"is removed; in a managed library the covers and other companions of such a folder " +
 			"go into the trash with the file, or are deleted with --prune or --permanent. The logical item " +
-			"is always preserved (archived when it loses its last file). --file takes file " +
+			"is always preserved (archived when it loses its last file). The tracks a cue sheet " +
+			"carves out of one file are deleted together or not at all. --file takes file " +
 			"pids instead and removes just those files: a copy goes alone, and an item's " +
 			"primary file gives its place to a copy when the item has one. Dry run unless --apply.",
 		Args: cobra.MinimumNArgs(1),
@@ -101,6 +103,13 @@ func emitDeletePlan(cmd *cobra.Command, g *globals, plan *trash.Plan) error {
 		for _, sc := range sidecars[i] {
 			fmt.Fprintf(w, "    with  %s\n", sc)
 		}
+		if len(a.Tracks) > 0 {
+			pids := make([]string, len(a.Tracks))
+			for j, p := range a.Tracks {
+				pids[j] = string(p)
+			}
+			fmt.Fprintf(w, "    the cue rip's tracks: %s\n", strings.Join(pids, ", "))
+		}
 		managed = managed || !a.InPlace
 	}
 	if managed && plan.Mode.BypassesTrash() {
@@ -135,19 +144,20 @@ func emitDeleteReport(cmd *cobra.Command, g *globals, plan *trash.Plan, rep *tra
 
 func deletePlanJSON(plan *trash.Plan) any {
 	type actionJSON struct {
-		ItemPID  string   `json:"itemPid"`
-		FilePID  string   `json:"filePid"`
-		Src      string   `json:"src"`
-		Sidecars []string `json:"sidecars,omitempty"`
-		Skip     bool     `json:"skip"`
-		Reason   string   `json:"reason,omitempty"`
+		ItemPID  string      `json:"itemPid"`
+		FilePID  string      `json:"filePid"`
+		Src      string      `json:"src"`
+		Sidecars []string    `json:"sidecars,omitempty"`
+		Tracks   []model.PID `json:"tracks,omitempty"`
+		Skip     bool        `json:"skip"`
+		Reason   string      `json:"reason,omitempty"`
 	}
 	actions := make([]actionJSON, 0, len(plan.Actions))
 	sidecars := plan.Sidecars()
 	for i, a := range plan.Actions {
 		actions = append(actions, actionJSON{
 			ItemPID: string(a.ItemPID), FilePID: string(a.FilePID),
-			Src: a.Src, Sidecars: sidecars[i], Skip: a.Skip, Reason: a.Reason,
+			Src: a.Src, Sidecars: sidecars[i], Tracks: a.Tracks, Skip: a.Skip, Reason: a.Reason,
 		})
 	}
 	return struct {

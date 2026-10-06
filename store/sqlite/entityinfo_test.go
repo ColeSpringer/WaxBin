@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/colespringer/waxbin/identity"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/query"
 	"github.com/colespringer/waxbin/read"
@@ -301,6 +302,37 @@ func TestEntityByPIDs(t *testing.T) {
 				t.Errorf("%s %s parity: batch %+v != single %+v", kind, pid, b, single)
 			}
 		}
+	}
+}
+
+// TestEntityNames: the names the catalog keeps for artists, and an album's title, by pid,
+// an unknown pid left out; other kinds are refused.
+func TestEntityNames(t *testing.T) {
+	t.Parallel()
+	st, _ := entityInfoFixture(t)
+	ctx := context.Background()
+	radiohead := entityPIDByName(t, st, "artist", "name", "Radiohead")
+	tolkien := entityPIDByName(t, st, "artist", "name", "J.R.R. Tolkien")
+	album := entityPIDByName(t, st, "album", "title", "OK Computer")
+	got, err := st.EntityNames(ctx, read.EntityArtist, []model.PID{radiohead, "missing", tolkien, radiohead})
+	if err != nil || len(got) != 2 || got[radiohead] != "Radiohead" || got[tolkien] != "J.R.R. Tolkien" {
+		t.Errorf("artist names = %v (err %v), want Radiohead and J.R.R. Tolkien", got, err)
+	}
+	if got, err := st.EntityNames(ctx, read.EntityAlbum, []model.PID{album}); err != nil || got[album] != "OK Computer" {
+		t.Errorf("album names = %v (err %v), want OK Computer", got, err)
+	}
+	if _, err := st.EntityNames(ctx, read.EntityGenre, []model.PID{"x"}); !waxerr.Is(err, waxerr.CodeInvalid) {
+		t.Errorf("genre names = %v, want CodeInvalid", err)
+	}
+	if got, err := st.ArtistNames(ctx, []string{identity.MatchKey("RADIOHEAD"), "nobody"}); err != nil || len(got) != 1 || got["radiohead"] != "Radiohead" {
+		t.Errorf("artist names by match key = %v (err %v), want Radiohead alone", got, err)
+	}
+	var key string
+	if err := st.read.QueryRowContext(ctx, "SELECT match_key FROM album WHERE pid = ?", string(album)).Scan(&key); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := st.AlbumTitles(ctx, []string{key, "al:nothing"}); err != nil || len(got) != 1 || got[key] != "OK Computer" {
+		t.Errorf("album titles by key = %v (err %v), want OK Computer alone", got, err)
 	}
 }
 

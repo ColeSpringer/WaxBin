@@ -23,7 +23,7 @@ func TestMarkCollisions(t *testing.T) {
 		{Src: "/in/3.mp3", Dst: "/lib/A/Al/01 - x.mp3"}, // differs only by case
 		{Src: "/in/4.mp3", Dst: "/lib/A/Al/02 - Y.mp3"}, // distinct
 	}}
-	markCollisions(plan)
+	markCollisions(plan, nil)
 
 	if plan.Actions[0].Skip {
 		t.Fatal("first claimant of a destination should still move")
@@ -39,6 +39,17 @@ func TestMarkCollisions(t *testing.T) {
 	}
 	if plan.Pending() != 2 {
 		t.Fatalf("pending = %d, want 2", plan.Pending())
+	}
+
+	// Names a filesystem that folds case takes for one, though lower-casing tells them
+	// apart: the Greek final sigma.
+	sigma := &Plan{Actions: []Action{
+		{Src: "/in/5.mp3", Dst: "/lib/Οδος.mp3"},
+		{Src: "/in/6.mp3", Dst: "/lib/ΟΔΟΣ.mp3"},
+	}}
+	markCollisions(sigma, nil)
+	if !sigma.Actions[1].Skip {
+		t.Error("a final sigma and a capital sigma are one name to a folding filesystem")
 	}
 }
 

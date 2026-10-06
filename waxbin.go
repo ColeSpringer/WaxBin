@@ -2568,16 +2568,30 @@ func (l *Library) PlanOrganize(ctx context.Context, q query.Query, opts Organize
 	if opts.Profile != nil {
 		merged.Profile = opts.Profile.Name
 	}
-	var albums []model.PID
+	var albums, artists []model.PID
 	for _, it := range items {
 		if it.AlbumPID != "" {
 			albums = append(albums, it.AlbumPID)
+		}
+		for _, p := range []model.PID{it.ArtistPID, it.AlbumArtistPID} {
+			if p != "" {
+				artists = append(artists, p)
+			}
 		}
 	}
 	years, err := l.store.AlbumYears(ctx, albums)
 	if err != nil {
 		return nil, err
 	}
+	names, err := l.store.EntityNames(ctx, read.EntityArtist, artists)
+	if err != nil {
+		return nil, err
+	}
+	titles, err := l.store.EntityNames(ctx, read.EntityAlbum, albums)
+	if err != nil {
+		return nil, err
+	}
+	maps.Copy(names, titles)
 	set := l.profileSet()
 	for _, lib := range managed {
 		if lib.ReadOnly {
@@ -2595,7 +2609,7 @@ func (l *Library) PlanOrganize(ctx context.Context, q query.Query, opts Organize
 		}
 		// organize.Plan filters items to those under this library's root, so passing the
 		// full item set to each library partitions the work by current location.
-		p, err := l.organizer.Plan(ctx, lib, prof, items, organize.PlanOptions{AlbumYears: years})
+		p, err := l.organizer.Plan(ctx, lib, prof, items, organize.PlanOptions{AlbumYears: years, Names: names})
 		if err != nil {
 			return nil, err
 		}
@@ -2671,14 +2685,16 @@ func toOrganizeProfiles(defs []config.ProfileDef) []organize.Profile {
 	for _, d := range defs {
 		out = append(out, organize.Profile{
 			Name: d.Name, Music: d.Music, Audiobook: d.Audiobook,
-			Podcast: d.Podcast, TagWrite: d.TagWrite,
+			Podcast: d.Podcast, TagWrite: d.TagWrite, CompilationFolder: d.CompilationFolder,
 		})
 	}
 	return out
 }
 
-// ApplyOrganize executes a plan under an "organize"-scoped job. A move in a library
-// flagged read-only since the plan was built is skipped.
+// ApplyOrganize executes a plan under an "organize"-scoped job and records its report on
+// the job. The plan is checked again first, since disk and catalog may have moved on
+// since it was made: a hold whose cause has gone is lifted, a move in a library flagged
+// read-only since then is held, and so is one whose destination something now holds.
 func (l *Library) ApplyOrganize(ctx context.Context, plan *organize.Plan) (*organize.Report, error) {
 	var rep *organize.Report
 	_, err := l.jobs.Run(ctx, jobs.Spec{Kind: "organize", Scope: fsMutateScope}, func(ctx context.Context, h *jobs.Handle) error {
@@ -2688,10 +2704,11 @@ func (l *Library) ApplyOrganize(ctx context.Context, plan *organize.Plan) (*orga
 		}
 		live := *plan
 		live.Actions = slices.Clone(plan.Actions)
+		live.Reopen()
 		for i := range live.Actions {
 			a := &live.Actions[i]
 			if !a.Skip && readOnlyLibraryAt(libs, a.SrcBytes) != nil {
-				a.Skip, a.Reason = true, readOnlySinceThePlan
+				a.Skip, a.Code, a.Reason = true, organize.HoldReadOnly, readOnlySinceThePlan
 			}
 			// A plan built without roots (by hand, or before actions carried them) takes
 			// each file's library, which the cover pass and the prune need.
@@ -2699,9 +2716,15 @@ func (l *Library) ApplyOrganize(ctx context.Context, plan *organize.Plan) (*orga
 				a.Root = string(lib.Root)
 			}
 		}
+		if err := l.organizer.Hold(ctx, &live); err != nil {
+			return err
+		}
 		r, err := l.organizer.Execute(ctx, &live, h.JobPID(),
 			func(p float64, msg string) error { return h.Heartbeat(ctx, p, msg) })
 		rep = r
+		if r != nil {
+			h.SetResult(l.jsonResult(organize.RunResult{Profile: plan.Profile, Report: *r}))
+		}
 		return err
 	})
 	return rep, err
@@ -2715,7 +2738,8 @@ func (l *Library) ApplyOrganize(ctx context.Context, plan *organize.Plan) (*orga
 // Items in the internal podcast library are dropped before planning and counted as
 // SkippedPodcast, so a sweep over a mixed query does not fail because it matched an
 // episode. The count is surfaced rather than dropped, since a silent skip would
-// misreport what the sweep covered.
+// misreport what the sweep covered. So are the tracks of a cue rip the sweep matched only
+// some of (SkippedRipTracks), since deleting the rip's file takes every track it plays.
 func (l *Library) PlanDelete(ctx context.Context, q query.Query, mode model.DeleteMode) (*trash.Plan, error) {
 	libs, err := l.store.Libraries(ctx)
 	if err != nil {
@@ -2741,7 +2765,7 @@ func (l *Library) PlanDelete(ctx context.Context, q query.Query, mode model.Dele
 		}
 		items = append(items, it)
 	}
-	plan, err := l.trasher.Plan(ctx, libs, items, mode)
+	plan, err := l.trasher.PlanSweep(ctx, libs, items, mode)
 	if err != nil {
 		return nil, err
 	}
@@ -2753,7 +2777,8 @@ func (l *Library) PlanDelete(ctx context.Context, q query.Query, mode model.Dele
 // `rm <pid>` path; PlanDelete is the query-driven path used by retention/dedup.
 //
 // An episode is refused here rather than skipped: the caller named the item, so a
-// silent skip would lie about what happened. See inPodcastLibrary.
+// silent skip would lie about what happened. See inPodcastLibrary. So is one of the
+// tracks a cue sheet carves out of one file unless the rip's other tracks are named too.
 func (l *Library) PlanDeletePIDs(ctx context.Context, pids []model.PID, mode model.DeleteMode) (*trash.Plan, error) {
 	libs, err := l.store.Libraries(ctx)
 	if err != nil {
@@ -2807,7 +2832,7 @@ func (l *Library) PlanDeleteFiles(ctx context.Context, filePIDs []model.PID, mod
 		}
 		targets = append(targets, trash.FileTarget{ItemPID: item, File: ref})
 	}
-	return l.trasher.PlanFiles(libs, targets, mode)
+	return l.trasher.PlanFiles(ctx, libs, targets, mode)
 }
 
 // rereadPromoted re-reads each promoted file still at its path, so its item follows the
@@ -2817,7 +2842,8 @@ func (l *Library) rereadPromoted(ctx context.Context, promoted []model.PromotedF
 }
 
 // ApplyDelete executes a deletion plan under a "delete"-scoped job. An action in a
-// library flagged read-only since the plan was built is skipped.
+// library flagged read-only since the plan was built is skipped, and so is one whose file's
+// cue rip plays other tracks than the plan named (trash.Recheck).
 func (l *Library) ApplyDelete(ctx context.Context, plan *trash.Plan) (*trash.Report, error) {
 	var rep *trash.Report
 	_, err := l.jobs.Run(ctx, jobs.Spec{Kind: "delete", Scope: fsMutateScope}, func(ctx context.Context, h *jobs.Handle) error {
@@ -2838,6 +2864,9 @@ func (l *Library) ApplyDelete(ctx context.Context, plan *trash.Plan) (*trash.Rep
 			if lib := libraryAt(libs, a.SrcBytes); a.Root == "" && lib != nil {
 				a.Root, a.InPlace = lib.RootPath(), lib.Mode == model.ModeInPlace
 			}
+		}
+		if err := l.trasher.Recheck(ctx, &live); err != nil {
+			return err
 		}
 		r, err := l.trasher.Execute(ctx, &live)
 		rep = r

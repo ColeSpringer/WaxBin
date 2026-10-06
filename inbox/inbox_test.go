@@ -23,8 +23,12 @@ func (emptyStore) FileByEssence(context.Context, string) (*model.File, error) {
 	return nil, waxerr.New(waxerr.CodeNotFound, "test", "no file")
 }
 func (emptyStore) DisplayPathExistsFold(context.Context, string) (bool, error) { return false, nil }
-func (emptyStore) CreateImportBatch(context.Context, *model.ImportBatch) error { return nil }
-func (emptyStore) UpdateImportBatch(context.Context, *model.ImportBatch) error { return nil }
+
+func (emptyStore) ArtistNames(context.Context, []string) (map[string]string, error) { return nil, nil }
+
+func (emptyStore) AlbumTitles(context.Context, []string) (map[string]string, error) { return nil, nil }
+func (emptyStore) CreateImportBatch(context.Context, *model.ImportBatch) error      { return nil }
+func (emptyStore) UpdateImportBatch(context.Context, *model.ImportBatch) error      { return nil }
 func (emptyStore) PutAcquisitionForFile(context.Context, []byte, model.AcquisitionInput) (model.PID, error) {
 	return "", nil
 }

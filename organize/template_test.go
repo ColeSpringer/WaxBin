@@ -46,7 +46,7 @@ func TestRenderRelPathUsesUnknownBuckets(t *testing.T) {
 	if err != nil {
 		t.Fatalf("render: %v", err)
 	}
-	want := filepath.Join("Unknown Artist", "Unknown Album", "00 - Solo.flac")
+	want := filepath.Join("Unknown Artist", "Unknown Album", "Solo.flac")
 	if rel != want {
 		t.Fatalf("rel = %q, want %q", rel, want)
 	}

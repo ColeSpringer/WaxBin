@@ -90,6 +90,8 @@ func (fakeStore) DetachFile(context.Context, model.PID) (*model.DetachResult, er
 
 func (fakeStore) ItemFiles(context.Context, model.PID) ([]model.ItemFileRef, error) { return nil, nil }
 
+func (fakeStore) RipTracks(context.Context, model.PID) ([]model.ItemRef, error) { return nil, nil }
+
 func writeAt(t *testing.T, p, content string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
@@ -115,7 +117,7 @@ func TestTrashLeavesASidecarAnotherEncodingUses(t *testing.T) {
 			lib := &model.Library{Root: []byte(root), DisplayRoot: root, Mode: model.ModeManaged}
 			src := filepath.Join(album, "Song.mp3")
 			s := New(fakeStore{}, nil)
-			plan, err := s.PlanFiles([]*model.Library{lib}, []FileTarget{{ItemPID: "i",
+			plan, err := s.PlanFiles(context.Background(), []*model.Library{lib}, []FileTarget{{ItemPID: "i",
 				File: model.ItemFileRef{FilePID: "f", Path: []byte(src), DisplayPath: src}}}, mode)
 			if err != nil {
 				t.Fatal(err)
@@ -277,7 +279,7 @@ func TestTrashPrunesWhatACanceledRunEmptied(t *testing.T) {
 	for _, p := range []string{one, two} {
 		targets = append(targets, FileTarget{ItemPID: "i", File: model.ItemFileRef{FilePID: model.PID(p), Path: []byte(p), DisplayPath: p}})
 	}
-	plan, err := s.PlanFiles([]*model.Library{lib}, targets, model.DeleteTrash)
+	plan, err := s.PlanFiles(context.Background(), []*model.Library{lib}, targets, model.DeleteTrash)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -329,7 +331,7 @@ func TestPlanSidecarsFollowTheRunOrder(t *testing.T) {
 		targets = append(targets, FileTarget{ItemPID: "i", File: model.ItemFileRef{FilePID: model.PID(name), Path: []byte(p), DisplayPath: p}})
 	}
 	s := New(fakeStore{}, nil)
-	plan, err := s.PlanFiles([]*model.Library{lib}, targets, model.DeletePermanent)
+	plan, err := s.PlanFiles(context.Background(), []*model.Library{lib}, targets, model.DeletePermanent)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -361,5 +363,68 @@ func TestRestoreLeavesExtrasForAnotherFileAtThePath(t *testing.T) {
 	album := filepath.Join(root, "Artist", "Album")
 	if fileExists(filepath.Join(album, "01 Song.lrc")) || fileExists(filepath.Join(album, "Cover.jpg")) {
 		t.Error("the old sidecars or cover were put beside another file")
+	}
+}
+
+// ripStore is a catalog of one item whose whole-file primary has a cue rip window on a copy
+// as its alternate, counting the reads a plan makes.
+type ripStore struct {
+	fakeStore
+	files                map[model.PID][]model.ItemFileRef
+	tracks               map[model.PID][]model.ItemRef
+	itemFiles, ripTracks int
+}
+
+func (r *ripStore) ItemFiles(_ context.Context, pid model.PID) ([]model.ItemFileRef, error) {
+	r.itemFiles++
+	return r.files[pid], nil
+}
+
+func (r *ripStore) RipTracks(_ context.Context, pid model.PID) ([]model.ItemRef, error) {
+	r.ripTracks++
+	return r.tracks[pid], nil
+}
+
+// TestSweepLeavesARipItMatchedThroughACopy: a sweep leaves out an item one of whose files
+// is a cue rip it matched only part of, an alternate copy of the rip included, rather than
+// failing on it.
+func TestSweepLeavesARipItMatchedThroughACopy(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	lib := &model.Library{Root: []byte(root), DisplayRoot: root, Mode: model.ModeManaged}
+	whole, rip := filepath.Join(root, "x.mp3"), filepath.Join(root, "copy", "album.wav")
+	st := &ripStore{
+		files: map[model.PID][]model.ItemFileRef{"x": {
+			{FilePID: "fx", Path: []byte(whole), DisplayPath: whole, Role: "primary"},
+			{FilePID: "frip", Path: []byte(rip), DisplayPath: rip, Role: "alternate", Virtual: true},
+		}},
+		tracks: map[model.PID][]model.ItemRef{"frip": {{PID: "x", Title: "X"}, {PID: "y", Title: "Y"}}},
+	}
+	plan, err := New(st, nil).PlanSweep(context.Background(), []*model.Library{lib}, []*model.ItemView{{PID: "x", Title: "X"}}, model.DeleteTrash)
+	if err != nil || len(plan.Actions) != 0 || plan.SkippedRipTracks != 1 {
+		t.Fatalf("sweep = %+v (err %v), want x left out and counted", plan, err)
+	}
+}
+
+// TestSweepReadsEachRipOnce: a sweep over every track of a rip reads each item's files and
+// the rip's tracks once, however many of its tracks it matched.
+func TestSweepReadsEachRipOnce(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	lib := &model.Library{Root: []byte(root), DisplayRoot: root, Mode: model.ModeManaged}
+	rip := filepath.Join(root, "album.wav")
+	st := &ripStore{files: map[model.PID][]model.ItemFileRef{}, tracks: map[model.PID][]model.ItemRef{}}
+	var items []*model.ItemView
+	for _, pid := range []model.PID{"a", "b", "c"} {
+		st.files[pid] = []model.ItemFileRef{{FilePID: "frip", Path: []byte(rip), DisplayPath: rip, Role: "primary", Virtual: true}}
+		st.tracks["frip"] = append(st.tracks["frip"], model.ItemRef{PID: pid})
+		items = append(items, &model.ItemView{PID: pid, Virtual: true})
+	}
+	plan, err := New(st, nil).PlanSweep(context.Background(), []*model.Library{lib}, items, model.DeleteTrash)
+	if err != nil || len(plan.Actions) != 1 || len(plan.Actions[0].Tracks) != 3 {
+		t.Fatalf("sweep = %+v (err %v), want the rip's file once with its three tracks", plan, err)
+	}
+	if st.itemFiles != 3 || st.ripTracks != 1 {
+		t.Errorf("reads = %d item files, %d rip tracks; want 3 and 1", st.itemFiles, st.ripTracks)
 	}
 }

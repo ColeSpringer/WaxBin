@@ -148,6 +148,32 @@ func TestRunOrganizeTakesItsProfileAtTheCall(t *testing.T) {
 	}
 }
 
+// TestRunOrganizeTakesItsCompilationFolderAtTheCall: the job files a compilation under
+// the folder the profile named when RunOrganize was called, whatever the caller then does
+// with the string it pointed at.
+func TestRunOrganizeTakesItsCompilationFolderAtTheCall(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := t.TempDir()
+	spec := testaudio.MP3Spec{Title: "Hit", Artist: "Solo", Album: "Comp", AlbumArtist: "Solo", Track: 1, Compilation: true, Audio: testaudio.AudioWithSeed(3)}
+	writeFile(t, filepath.Join(root, "in", "hit.mp3"), testaudio.BuildMP3FromSpec(spec))
+	lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), root)
+	scanLib(t, ctx, lib)
+	folder := "Comps"
+	prof := organize.Profile{Name: "adhoc", Music: "{albumartist}/{title}.{ext}", Audiobook: "{title}.{ext}", Podcast: "{episode}.{ext}", CompilationFolder: &folder}
+	pid, err := lib.RunOrganize(ctx, query.New(query.EntityItems).Build(), waxbin.OrganizeOptions{Profile: &prof})
+	if err != nil {
+		t.Fatalf("run organize: %v", err)
+	}
+	folder = "Changed"
+	if job := waitForJobDone(t, ctx, lib, pid); job.State != model.JobDone {
+		t.Fatalf("organize job = %+v, want done", job)
+	}
+	if !fileExists(filepath.Join(root, "Comps", "Hit.mp3")) {
+		t.Fatal("the job did not file the compilation under the folder it was called with")
+	}
+}
+
 // TestRootsMustNameAKnownProfile: a root naming a profile the set lacks is refused
 // when it is added at runtime and when it is configured at Open.
 func TestRootsMustNameAKnownProfile(t *testing.T) {

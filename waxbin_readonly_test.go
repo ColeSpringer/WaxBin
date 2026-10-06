@@ -334,7 +334,7 @@ func TestOrganizeLeavesAReadOnlyLibraryAlone(t *testing.T) {
 }
 
 // TestOrganizePlanAppliedAfterTheFlag: a plan built while the library was writable is
-// checked again when applied, and its moves there are skipped.
+// checked again when applied, and its moves there are held.
 func TestOrganizePlanAppliedAfterTheFlag(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -345,8 +345,8 @@ func TestOrganizePlanAppliedAfterTheFlag(t *testing.T) {
 	}
 	setReadOnly(t, ctx, lib, libs[1], true)
 	rep, err := lib.ApplyOrganize(ctx, plan)
-	if err != nil || rep.Moved != 1 || rep.Skipped != 1 {
-		t.Fatalf("apply = %+v (err %v), want one moved and one skipped", rep, err)
+	if err != nil || rep.Moved != 1 || rep.Held != 1 || rep.Skipped != 0 {
+		t.Fatalf("apply = %+v (err %v), want one moved and one held", rep, err)
 	}
 	if fileExists(srcs[0]) || !fileExists(srcs[1]) {
 		t.Fatalf("after apply: A in place %v, B in place %v, want only B left", fileExists(srcs[0]), fileExists(srcs[1]))

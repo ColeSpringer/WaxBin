@@ -36,6 +36,9 @@ var unknownBuckets = map[string]string{
 	"podcast":     unknownPodcast,
 }
 
+// filingFields are the fields an item's artist, album artist and album give.
+var filingFields = []string{"albumartist", "artist", "album", "author", "authorsort", "podcast"}
+
 // knownFields is the template vocabulary. A template referencing any other field
 // is rejected at validation and render time so a typo fails loudly instead of
 // silently dropping a segment.
@@ -85,10 +88,17 @@ func (f fieldVal) format(spec string) string {
 // segment. Empty segments (a fully dropped conditional group between separators)
 // collapse rather than leaving an empty directory.
 func RenderRelPath(p Profile, item *model.ItemView) (string, error) {
-	tmpl := p.templateFor(item.Kind)
-	rendered, err := renderTemplate(tmpl, itemFields(item))
+	rel, _, err := renderRel(p, item)
+	return rel, err
+}
+
+// renderRel is RenderRelPath, also naming the fields the path fell back on an unknown
+// bucket for.
+func renderRel(p Profile, item *model.ItemView) (string, map[string]bool, error) {
+	buckets := map[string]bool{}
+	rendered, err := renderWith(p.templateFor(item.Kind), itemFields(p, item), buckets)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 
 	parts := strings.Split(rendered, "/")
@@ -102,16 +112,16 @@ func RenderRelPath(p Profile, item *model.ItemView) (string, error) {
 		clean = append(clean, sanitizeSegment(raw))
 	}
 	if len(clean) == 0 {
-		return "", waxerr.New(waxerr.CodeInvalid, "organize.RenderRelPath", "template produced an empty path")
+		return "", nil, waxerr.New(waxerr.CodeInvalid, "organize.RenderRelPath", "template produced an empty path")
 	}
-	return filepath.Join(clean...), nil
+	return filepath.Join(clean...), buckets, nil
 }
 
 // itemFields builds the template vocabulary from an item view. String values are
 // folded (separators neutralized) but not bucketed here, so a group-internal field
-// stays genuinely empty and lets its group drop. Compilations use a literal
-// Various Artists album-artist folder.
-func itemFields(item *model.ItemView) map[string]fieldVal {
+// stays genuinely empty and lets its group drop. A compilation files under the profile's
+// compilation folder.
+func itemFields(p Profile, item *model.ItemView) map[string]fieldVal {
 	// Seed every known field empty so a template for another media kind can still
 	// render a music item, dropping the unused fields' optional groups.
 	f := make(map[string]fieldVal, len(knownFields))
@@ -121,7 +131,7 @@ func itemFields(item *model.ItemView) map[string]fieldVal {
 
 	albumArtist := firstNonEmpty(item.AlbumArtist, item.Artist)
 	if item.Compilation {
-		albumArtist = variousArtists
+		albumArtist = p.compilationArtist(item.AlbumArtist)
 	}
 	ext := strings.TrimPrefix(strings.ToLower(filepath.Ext(item.DisplayPath)), ".")
 	if ext == "" {
@@ -177,18 +187,23 @@ func pubDateField(ns int64) string {
 //	               Groups may nest. Fields inside a group are implicitly optional.
 //	\{ \} \< \> \\ a literal '{', '}', '<', '>', or '\'.
 func renderTemplate(tmpl string, fields map[string]fieldVal) (string, error) {
-	text, _, next, err := renderNodes(tmpl, 0, false, fields)
+	return renderWith(tmpl, fields, nil)
+}
+
+// renderWith is renderTemplate, noting in buckets (when not nil) each field rendered as
+// its unknown bucket.
+func renderWith(tmpl string, fields map[string]fieldVal, buckets map[string]bool) (string, error) {
+	text, _, _, err := renderNodes(tmpl, 0, false, fields, buckets)
 	if err != nil {
 		return "", err
 	}
-	_ = next
 	return text, nil
 }
 
 // renderNodes renders from tmpl[i] until end (top level) or the matching '>'
 // (inside a group). It returns the rendered text, whether any field token
 // contributed a value (which decides a group's survival), and the next index.
-func renderNodes(tmpl string, i int, inGroup bool, fields map[string]fieldVal) (string, bool, int, error) {
+func renderNodes(tmpl string, i int, inGroup bool, fields map[string]fieldVal, buckets map[string]bool) (string, bool, int, error) {
 	var b strings.Builder
 	anyVal := false
 	for i < len(tmpl) {
@@ -208,7 +223,7 @@ func renderNodes(tmpl string, i int, inGroup bool, fields map[string]fieldVal) (
 			b.WriteByte('>') // a stray '>' at top level is a literal
 			i++
 		case '<':
-			inner, innerHas, ni, err := renderNodes(tmpl, i+1, true, fields)
+			inner, innerHas, ni, err := renderNodes(tmpl, i+1, true, fields, buckets)
 			if err != nil {
 				return "", false, 0, err
 			}
@@ -218,7 +233,7 @@ func renderNodes(tmpl string, i int, inGroup bool, fields map[string]fieldVal) (
 				anyVal = true
 			}
 		case '{':
-			val, has, ni, err := renderField(tmpl, i, inGroup, fields)
+			val, has, ni, err := renderField(tmpl, i, inGroup, fields, buckets)
 			if err != nil {
 				return "", false, 0, err
 			}
@@ -237,7 +252,7 @@ func renderNodes(tmpl string, i int, inGroup bool, fields map[string]fieldVal) (
 }
 
 // renderField parses and renders a {field[:spec][?]} token at tmpl[i]=='{'.
-func renderField(tmpl string, i int, inGroup bool, fields map[string]fieldVal) (string, bool, int, error) {
+func renderField(tmpl string, i int, inGroup bool, fields map[string]fieldVal, buckets map[string]bool) (string, bool, int, error) {
 	const op = "organize.render"
 	rel := strings.IndexByte(tmpl[i:], '}')
 	if rel < 0 {
@@ -267,6 +282,9 @@ func renderField(tmpl string, i int, inGroup bool, fields map[string]fieldVal) (
 		}
 		if fv.isNum {
 			return fv.format(spec), false, next, nil
+		}
+		if buckets != nil {
+			buckets[name] = true
 		}
 		return unknownBuckets[name], false, next, nil
 	}

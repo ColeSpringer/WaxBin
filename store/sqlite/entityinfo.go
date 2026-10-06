@@ -275,6 +275,114 @@ func (s *Store) entityLibraryPIDs(ctx context.Context, kind read.EntityKind, id 
 	return out, nil
 }
 
+// EntityNames returns the name the catalog keeps for each artist, or each album's title,
+// by pid, without the counts EntityByPIDs gathers; an unknown pid is left out.
+func (s *Store) EntityNames(ctx context.Context, kind read.EntityKind, pids []model.PID) (map[model.PID]string, error) {
+	const op = "store.EntityNames"
+	var stmt string
+	switch kind {
+	case read.EntityArtist:
+		stmt = "SELECT pid, name FROM artist WHERE pid IN "
+	case read.EntityAlbum:
+		stmt = "SELECT pid, title FROM album WHERE pid IN "
+	default:
+		return nil, waxerr.New(waxerr.CodeInvalid, op, "names are read for artists and albums, not "+string(kind))
+	}
+	keys := make([]string, len(pids))
+	for i, p := range pids {
+		keys[i] = string(p)
+	}
+	byKey, err := s.namesByKey(ctx, op, stmt, keys)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[model.PID]string, len(byKey))
+	for k, name := range byKey {
+		out[model.PID(k)] = name
+	}
+	return out, nil
+}
+
+// ArtistNames returns the name the catalog keeps for each artist it holds under the given
+// match keys (identity.MatchKey).
+func (s *Store) ArtistNames(ctx context.Context, matchKeys []string) (map[string]string, error) {
+	return s.namesByKey(ctx, "store.ArtistNames", "SELECT match_key, name FROM artist WHERE match_key IN ", matchKeys)
+}
+
+// AlbumTitles returns the title of each album the catalog holds under the given identity
+// keys (identity.AlbumKey).
+func (s *Store) AlbumTitles(ctx context.Context, keys []string) (map[string]string, error) {
+	return s.namesByKey(ctx, "store.AlbumTitles", "SELECT match_key, title FROM album WHERE match_key IN ", keys)
+}
+
+// FilePIDsByPath returns the pid of the file the catalog holds at each path it holds,
+// keyed by the path, in bounded batches.
+func (s *Store) FilePIDsByPath(ctx context.Context, paths [][]byte) (map[string]model.PID, error) {
+	const op = "store.FilePIDsByPath"
+	out := map[string]model.PID{}
+	err := chunkSlice(paths, idBatchSize, func(chunk [][]byte) error {
+		args := make([]any, len(chunk))
+		for i, p := range chunk {
+			args[i] = p
+		}
+		rows, err := s.read.QueryContext(ctx, "SELECT path, pid FROM file WHERE path IN "+placeholders(len(chunk)), args...)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var path []byte
+			var pid string
+			if err := rows.Scan(&path, &pid); err != nil {
+				return err
+			}
+			out[string(path)] = model.PID(pid)
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	return out, nil
+}
+
+// namesByKey runs stmt, a select of a key and a name ending in "IN ", over keys in bounded
+// batches.
+func (s *Store) namesByKey(ctx context.Context, op, stmt string, keys []string) (map[string]string, error) {
+	seen := make(map[string]bool, len(keys))
+	unique := keys[:0:0]
+	for _, k := range keys {
+		if !seen[k] {
+			seen[k] = true
+			unique = append(unique, k)
+		}
+	}
+	out := map[string]string{}
+	err := chunkSlice(unique, idBatchSize, func(chunk []string) error {
+		args := make([]any, len(chunk))
+		for i, k := range chunk {
+			args[i] = k
+		}
+		rows, err := s.read.QueryContext(ctx, stmt+placeholders(len(chunk)), args...)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var k, name string
+			if err := rows.Scan(&k, &name); err != nil {
+				return err
+			}
+			out[k] = name
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	return out, nil
+}
+
 // EntityByPIDs is the batched form of EntityByPID: it returns summary info for many
 // entities of a single kind, keyed by pid. It retires the one-EntityByPID-per-hit
 // cost a consumer pays hydrating a page of entity pids, such as a restricted-user

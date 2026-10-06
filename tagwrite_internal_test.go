@@ -514,6 +514,57 @@ func TestOrganizeTagWriteAndPIDStamp(t *testing.T) {
 	}
 }
 
+// TestOrganizeWritesTheCompilationFolderAsTheAlbumArtist: a compilation files under its
+// profile's compilation folder, its tagged album artist when the folder is empty (Various
+// Artists when it has none), and the tag write gives the file that same album artist.
+func TestOrganizeWritesTheCompilationFolderAsTheAlbumArtist(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ folder, albumArtist, want string }{
+		{"Compilations", "Solo", "Compilations"},
+		{"", "Solo", "Solo"},
+		{"", "", "Various Artists"},
+	} {
+		folder, want := tc.folder, tc.want
+		t.Run(want, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			root := t.TempDir()
+			lib, err := Open(ctx, Options{
+				DBPath:   filepath.Join(t.TempDir(), "catalog.db"),
+				Profiles: []config.ProfileDef{{Name: "waxbin-native", TagWrite: true, CompilationFolder: &folder}},
+				Roots:    []config.Root{{Path: root, Mode: model.ModeManaged, Profile: "waxbin-native"}},
+			})
+			if err != nil {
+				t.Fatalf("open: %v", err)
+			}
+			defer lib.Close()
+			spec := testaudio.MP3Spec{Title: "Hit", Artist: "Solo", Album: "Comp", AlbumArtist: tc.albumArtist, Track: 4, Compilation: true, Audio: testaudio.AudioWithSeed(7)}
+			writeRaw(t, filepath.Join(root, "in.mp3"), testaudio.BuildMP3FromSpec(spec))
+			if _, err := lib.Scan(ctx, ScanRequest{}); err != nil {
+				t.Fatalf("scan: %v", err)
+			}
+			plan, err := lib.PlanOrganize(ctx, query.New(query.EntityItems).Build(), OrganizeOptions{})
+			if err != nil {
+				t.Fatalf("plan: %v", err)
+			}
+			if _, err := lib.ApplyOrganize(ctx, plan); err != nil {
+				t.Fatalf("apply organize: %v", err)
+			}
+			items, _ := lib.Query(ctx, query.New(query.EntityItems).Build(), "")
+			if moved := string(items[0].Path); moved != filepath.Join(root, want, "Comp", "04 - Hit.mp3") {
+				t.Fatalf("moved to %s, want it under %s", moved, want)
+			}
+			fm, err := meta.NewReader().Read(ctx, string(items[0].Path))
+			if err != nil {
+				t.Fatalf("read moved: %v", err)
+			}
+			if fm.Tags.AlbumArtist != want {
+				t.Errorf("album artist on disk = %q, want %q", fm.Tags.AlbumArtist, want)
+			}
+		})
+	}
+}
+
 // TestOrganizeTagWriteCarriesTheTotals: organize writes each number with the total the
 // catalog holds beside it, so a file it renumbers never reads as the old pair.
 func TestOrganizeTagWriteCarriesTheTotals(t *testing.T) {

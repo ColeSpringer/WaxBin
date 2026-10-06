@@ -22,7 +22,7 @@ import (
 // folder rule joined land after the parts their own tags make, which are the book they
 // join, and a copy or another encoding of a part is its alternate once cataloged, numbered
 // like it and told apart.
-func (s *Service) numberBooks(ctx context.Context, files []*staged) []*staged {
+func (s *Service) numberBooks(ctx context.Context, files []*staged, spelling map[string]string) []*staged {
 	groups := map[string][]*staged{}
 	var keys []string
 	for _, f := range files {
@@ -38,7 +38,7 @@ func (s *Service) numberBooks(ctx context.Context, files []*staged) []*staged {
 	landing := map[*staged][]*staged{}
 	for _, key := range keys {
 		first := groups[key][0]
-		landing[first] = s.numberBook(ctx, key, groups[key])
+		landing[first] = s.numberBook(ctx, key, groups[key], spelling)
 	}
 	out := make([]*staged, 0, len(files))
 	landed := map[*staged]bool{}
@@ -59,7 +59,7 @@ func (s *Service) numberBooks(ctx context.Context, files []*staged) []*staged {
 }
 
 // numberBook names one staged book's files and returns them in the order they land.
-func (s *Service) numberBook(ctx context.Context, key string, files []*staged) []*staged {
+func (s *Service) numberBook(ctx context.Context, key string, files []*staged, spelling map[string]string) []*staged {
 	sortKey := make(map[*staged]string, len(files))
 	for _, f := range files {
 		sortKey[f] = model.SortKey(f.Src)
@@ -101,7 +101,9 @@ func (s *Service) numberBook(ctx context.Context, key string, files []*staged) [
 	var owner *staged
 	layout := ""
 	if view, parts := s.catalogBook(ctx, lead[0]); view != nil {
-		layout, last = s.catalogNumbers(ctx, view, parts, lead, number, used)
+		v := *view
+		spellAuthor(&v, spelling)
+		layout, last = s.catalogNumbers(ctx, &v, parts, lead, number, used)
 	} else {
 		owner = lead[0]
 		for _, f := range lead {
@@ -110,6 +112,12 @@ func (s *Service) numberBook(ctx context.Context, key string, files []*staged) [
 			}
 		}
 		layout, last = owner.rel, stagedNumbers(lead, owner, number)
+		// The author takes the spelling the catalog keeps for it, as organize files it.
+		if v := acquiredItemView(owner.tags, owner.Src, model.KindBook); spellAuthor(v, spelling) {
+			if rel, err := organize.RenderRelPath(owner.prof, v); err == nil {
+				layout = rel
+			}
+		}
 	}
 	for _, f := range lead {
 		if f.Alternate {
@@ -117,6 +125,8 @@ func (s *Service) numberBook(ctx context.Context, key string, files []*staged) [
 		}
 		if n, ok := number[f]; ok {
 			f.RelDst = organize.BookPartRelPath(layout, n, last, filepath.Ext(f.Src))
+		} else if f == owner {
+			f.RelDst = layout
 		}
 		used[pathx.CollisionKey(f.RelDst)] = true
 	}
