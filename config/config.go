@@ -13,6 +13,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/colespringer/waxbin/internal/fsx"
 	"github.com/colespringer/waxbin/internal/pathx"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/waxerr"
@@ -308,9 +309,9 @@ func (c *Config) Validate() error {
 // may answer a stat with an error of its own until it is).
 func CheckFolder(path string, absent bool) error {
 	const op = "config.CheckFolder"
-	info, err := os.Stat(pathx.Long(path))
+	err := fsx.RootUnreachable(path)
 	switch {
-	case err == nil && !info.IsDir():
+	case errors.Is(err, fsx.ErrNotDir):
 		return waxerr.New(waxerr.CodeInvalid, op, "library root is not a directory: "+path)
 	case err == nil || absent:
 		return nil

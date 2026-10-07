@@ -45,6 +45,16 @@ func (l *Library) RootPath() string {
 	return string(l.Root)
 }
 
+// RemoveRootReport is what removing a library did: the file rows it detached, the items
+// that lost their last file and were archived, and the trash journal entries it dropped.
+// Root is the library's display root, where all of those files still are.
+type RemoveRootReport struct {
+	Root             string
+	FilesDetached    int
+	ItemsArchived    int
+	TrashRowsDropped int
+}
+
 // MediaType returns the library's media type, defaulting to mixed when unset so an
 // older catalog routes as a single content-classified tree.
 func (l *Library) MediaType() MediaType {

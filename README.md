@@ -59,7 +59,7 @@ exit codes (`waxbin exit-codes`).
 
 | Area | Commands |
 | --- | --- |
-| **Lifecycle** | `init`, `library add`/`library list`/`library set`, `scan`, `analyze`, `watch`, `serve`, `doctor`, `jobs`, `version`, `exit-codes` |
+| **Lifecycle** | `init`, `library add`/`library list`/`library set`/`library remove`, `scan`, `analyze`, `watch`, `serve`, `doctor`, `jobs`, `version`, `exit-codes` |
 | **Read / browse** | `query`/`ls` (incl. `--library`, `--tag KEY=VALUE`, `--tag-contains`, `--tag-present`/`--tag-missing`, `--limit-mode`/`--seed`), `browse <list>`, `facet --group-by` (incl. `tag.<KEY>`, `library`, `podcast`, `creditArtist`, `playlist`), `search` (incl. `--max-candidates`, `--library`, `--state`), `show`, `art` (incl. `--role`), `art roles`, `lyrics`, `stats [--year N]`, `provenance`, `acquisition`/`acquisition set`/`acquisition clear`, `lock`/`unlock`, `entity info`/`entity list` |
 | **Curation & editing** | `edit` (incl. `--batch`), `entity` (incl. `entity rename [--write-back]`), `credit` (incl. `--batch`), `tag`/`tag keys`, `lyrics set`, `chapters`, `art set` (incl. `--role`), `art lock`/`art unlock` (incl. `--role`), `detach [--write-back]`, `kind --to book\|track [--write-back]` |
 | **Ingest / organize** | `inbox`, `import`, `organize`, `profiles` |
@@ -117,7 +117,8 @@ SIGTERM).
 - `waxbin merge <type> <survivor-pid> <loser-pid>...` collapses duplicate
   artists / release-groups / albums / genres / series onto one survivor,
   re-pointing children (so play state and provenance ride along) and
-  recomputing rollups.
+  recomputing rollups, though files still tagged with a merged spelling can split it
+  off again when they are re-read.
 - `waxbin upgrade` groups alt encodings of the same recording (by fingerprint, or held
   by one item), ranks each group by quality, and marks the keeper.
 - `waxbin db verify --fix` repairs derived-data drift (the search index, rollups, album

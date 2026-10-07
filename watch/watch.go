@@ -89,8 +89,10 @@ type Engine interface {
 	// Best-effort; a nil implementation is fine when the deployment has no sources.
 	SyncSources(ctx context.Context) error
 	// Roots returns the roots to watch as of now. The watcher asks at every scheduled
-	// tick, so a root registered or relocated while it runs is picked up on the next
-	// tick without a restart. An error keeps the current set.
+	// tick, so a root registered, relocated or removed while it runs is followed on the
+	// next tick without a restart. An empty set leaves the watcher idle until a root
+	// appears. An error keeps the current set, except CodeNotFound, which says the scope
+	// the watcher was given is gone, and stops it.
 	Roots(ctx context.Context) ([]Root, error)
 }
 
@@ -105,6 +107,8 @@ type Watcher struct {
 	opts     Options
 	log      *slog.Logger
 	degraded atomic.Bool
+	// openSource opens the live layer's event source; tests swap in one they feed.
+	openSource func() (source, error)
 }
 
 // New builds a watcher over an engine and roots.
@@ -113,7 +117,7 @@ func New(engine Engine, roots []Root, opts Options, log *slog.Logger) *Watcher {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Watcher{engine: engine, roots: roots, opts: opts, log: log}
+	return &Watcher{engine: engine, roots: roots, opts: opts, log: log, openSource: newSource}
 }
 
 // Degraded reports whether the live filesystem-event layer failed to arm (so the
@@ -128,6 +132,9 @@ func (w *Watcher) Run(ctx context.Context) error {
 	if len(w.roots) == 0 {
 		return waxerr.New(waxerr.CodeInvalid, "watch.Run", "no roots to watch")
 	}
+	// The live layer runs on this context, so it ends with Run however Run ends.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 
 	// Initial catch-up so a freshly started watcher reflects changes made while it
 	// was down, before the first tick.
@@ -147,10 +154,10 @@ func (w *Watcher) Run(ctx context.Context) error {
 	// rescan requests here, so all rescans run on this single loop (never two at once,
 	// which would self-conflict on the shared filesystem-mutator lease).
 	reqs := make(chan rescanReq, 128)
-	var added chan Root
+	var sets chan []Root
 	if w.opts.Live {
-		added = make(chan Root, 16)
-		go w.runLive(ctx, reqs, added)
+		sets = make(chan []Root, 1)
+		go w.runLive(ctx, reqs, sets)
 	}
 
 	for {
@@ -158,11 +165,15 @@ func (w *Watcher) Run(ctx context.Context) error {
 		case <-ctx.Done():
 			return waxerr.New(waxerr.CodeCanceled, "watch.Run", "watch canceled")
 		case <-interval.C:
-			w.refreshRoots(ctx, added)
+			if err := w.refreshRoots(ctx, sets); err != nil {
+				return err
+			}
 			w.rescanAll(ctx, false, "scheduled")
 		case <-fullC:
 			w.log.Info("watch: full-content rescan")
-			w.refreshRoots(ctx, added)
+			if err := w.refreshRoots(ctx, sets); err != nil {
+				return err
+			}
 			w.rescanAll(ctx, true, "full")
 		case r := <-reqs:
 			w.rescanOne(ctx, r)
@@ -170,22 +181,20 @@ func (w *Watcher) Run(ctx context.Context) error {
 	}
 }
 
-// refreshRoots re-reads the root set from the engine and swaps it in, then offers every
-// root to the live layer, which arms the ones it does not hold: a new library, one
-// whose path moved, or one whose folder went from under its watch (moved away, or
-// replaced). A read failure or an empty answer keeps the current set: a library that
-// had roots when the watcher started has not lost them all.
-//
-// Folder watches below a relocated root stay armed until exit. Their events resolve to
-// no root and are dropped.
-func (w *Watcher) refreshRoots(ctx context.Context, added chan<- Root) {
+// refreshRoots re-reads the root set from the engine and swaps it in, then hands the
+// whole set to the live layer, which arms the roots it does not hold (a new library, one
+// whose path moved, or one whose folder went from under its watch) and releases those
+// that left. A read failure keeps the current set. A scope that is gone, a watcher given
+// one library that has since been removed, is returned, which stops the watcher.
+func (w *Watcher) refreshRoots(ctx context.Context, sets chan []Root) error {
 	roots, err := w.engine.Roots(ctx)
-	if err != nil {
+	switch {
+	case waxerr.Is(err, waxerr.CodeNotFound):
+		w.log.Warn("watch: the watched library is gone; stopping", "err", err)
+		return err
+	case err != nil:
 		w.log.Warn("watch: roots unreadable, keeping the current set", "err", err)
-		return
-	}
-	if len(roots) == 0 {
-		return
+		return nil
 	}
 	w.rootsMu.Lock()
 	old := w.roots
@@ -195,12 +204,31 @@ func (w *Watcher) refreshRoots(ctx context.Context, added chan<- Root) {
 		if !slices.Contains(old, r) {
 			w.log.Info("watch: following a root", "library", r.LibraryPID, "root", r.Path)
 		}
-		if added != nil {
-			select {
-			case added <- r:
-			default: // the live layer is behind; the next tick offers the root again
-			}
-		}
+	}
+	if len(roots) == 0 && len(old) > 0 {
+		w.log.Info("watch: no library roots left; waiting for one to be added")
+	}
+	if sets != nil {
+		offer(sets, roots)
+	}
+	return nil
+}
+
+// offer hands the live layer the newest root set, replacing one it has not read yet. sets
+// is buffered, and this is its only sender.
+func offer(sets chan []Root, roots []Root) {
+	select {
+	case sets <- roots:
+		return
+	default:
+	}
+	select {
+	case <-sets:
+	default:
+	}
+	select {
+	case sets <- roots:
+	default:
 	}
 }
 

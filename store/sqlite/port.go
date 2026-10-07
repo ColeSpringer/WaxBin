@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/colespringer/waxbin/internal/pathx"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/read"
 	"github.com/colespringer/waxbin/waxerr"
@@ -254,7 +255,11 @@ func (s *Store) ExportSessions(ctx context.Context, keep func(itemPID model.PID)
 
 // RelocateLibraryRoot re-points a library (and every file under it) at a new root
 // path, for a portable restore onto a different machine or mount. File rel paths
-// are preserved, so path = newRoot/rel. The new root must be absolute.
+// are preserved, so path = newRoot/rel. The other paths stored under the old root move
+// too: the trash journal's (the trash folder is inside the root), so a restore after the
+// move puts a file back under the new one, its files' sidecar observations, and the
+// organize journal's moves, those of files deleted since included. The new root must be
+// absolute.
 func (s *Store) RelocateLibraryRoot(ctx context.Context, libPID model.PID, newRoot string) error {
 	const op = "store.RelocateLibraryRoot"
 	if !filepath.IsAbs(newRoot) {
@@ -263,7 +268,10 @@ func (s *Store) RelocateLibraryRoot(ctx context.Context, libPID model.PID, newRo
 	newRoot = filepath.Clean(newRoot)
 	return s.writeTx(ctx, func(tx *sql.Tx) error {
 		var libID int64
-		err := tx.QueryRowContext(ctx, "SELECT id FROM library WHERE pid = ?", string(libPID)).Scan(&libID)
+		var oldRoot []byte
+		var oldDisplay string
+		err := tx.QueryRowContext(ctx, "SELECT id, root, display_root FROM library WHERE pid = ?", string(libPID)).
+			Scan(&libID, &oldRoot, &oldDisplay)
 		if errors.Is(err, sql.ErrNoRows) {
 			return waxerr.New(waxerr.CodeNotFound, op, "no such library: "+string(libPID))
 		}
@@ -323,6 +331,121 @@ func (s *Store) RelocateLibraryRoot(ctx context.Context, libPID model.PID, newRo
 				}
 			}
 		}
+		if err := relocateTrashTx(ctx, tx, libID, string(oldRoot), oldDisplay, newRoot); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		if err := relocateBlobsTx(ctx, tx, `SELECT a.rowid, a.path FROM file_aux_state a
+			JOIN file f ON f.id = a.file_id WHERE f.library_id = ?`,
+			"UPDATE file_aux_state SET path = ? WHERE rowid = ?", 1, libID, string(oldRoot), newRoot); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		// A move whose file is gone names no library; reroot leaves those of other roots.
+		if err := relocateBlobsTx(ctx, tx, `SELECT j.id, j.src, j.dst FROM organize_journal j
+			LEFT JOIN file f ON f.id = j.file_id WHERE f.library_id = ? OR j.file_id IS NULL`,
+			"UPDATE organize_journal SET src = ?, dst = ? WHERE id = ?", 2, libID, string(oldRoot), newRoot); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
 		return appendChange(ctx, tx, "library", libPID, model.OpUpdate)
 	})
+}
+
+// relocateTrashTx moves a library's trash journal paths from under its old root to the
+// same places under newRoot, the raw paths by the raw root and the display paths by the
+// display root. A path outside the old root stays as it is.
+func relocateTrashTx(ctx context.Context, tx *sql.Tx, libID int64, oldRoot, oldDisplay, newRoot string) error {
+	type entry struct {
+		id                    int64
+		orig, trashed         []byte
+		origShown, trashShown string
+	}
+	rows, err := tx.QueryContext(ctx,
+		"SELECT id, orig_path, orig_display, trash_path, trash_display FROM trash WHERE library_id = ?", libID)
+	if err != nil {
+		return err
+	}
+	var entries []entry
+	for rows.Next() {
+		var e entry
+		if err := rows.Scan(&e.id, &e.orig, &e.origShown, &e.trashed, &e.trashShown); err != nil {
+			rows.Close()
+			return err
+		}
+		entries = append(entries, e)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, e := range entries {
+		orig, trashed := reroot(string(e.orig), oldRoot, newRoot), reroot(string(e.trashed), oldRoot, newRoot)
+		origShown, trashShown := reroot(e.origShown, oldDisplay, newRoot), reroot(e.trashShown, oldDisplay, newRoot)
+		if orig == string(e.orig) && trashed == string(e.trashed) && origShown == e.origShown && trashShown == e.trashShown {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx,
+			"UPDATE trash SET orig_path = ?, orig_display = ?, trash_path = ?, trash_display = ? WHERE id = ?",
+			[]byte(orig), origShown, []byte(trashed), trashShown, e.id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// relocateBlobsTx moves the raw paths a query reads (a row id, then paths of them) from
+// under oldRoot to newRoot, writing a changed row back through update, which takes the
+// paths in order and then the id.
+func relocateBlobsTx(ctx context.Context, tx *sql.Tx, query, update string, paths int, libID int64, oldRoot, newRoot string) error {
+	type row struct {
+		id    int64
+		paths [][]byte
+	}
+	rows, err := tx.QueryContext(ctx, query, libID)
+	if err != nil {
+		return err
+	}
+	var found []row
+	for rows.Next() {
+		r := row{paths: make([][]byte, paths)}
+		dest := []any{&r.id}
+		for i := range r.paths {
+			dest = append(dest, &r.paths[i])
+		}
+		if err := rows.Scan(dest...); err != nil {
+			rows.Close()
+			return err
+		}
+		found = append(found, r)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, r := range found {
+		args, moved := make([]any, 0, paths+1), false
+		for _, p := range r.paths {
+			to := reroot(string(p), oldRoot, newRoot)
+			moved = moved || to != string(p)
+			args = append(args, []byte(to))
+		}
+		if !moved {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, update, append(args, r.id)...); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// reroot returns path moved from under oldRoot to the same place under newRoot, or path
+// itself when it is not under oldRoot.
+func reroot(path, oldRoot, newRoot string) string {
+	if !pathx.UnderRoot(oldRoot, path) {
+		return path
+	}
+	rel, err := filepath.Rel(oldRoot, path)
+	if err != nil {
+		return path
+	}
+	return filepath.Join(newRoot, rel)
 }

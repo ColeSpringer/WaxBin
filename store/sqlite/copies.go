@@ -5,11 +5,9 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"os"
 	"slices"
 
 	"github.com/colespringer/waxbin/internal/fsx"
-	"github.com/colespringer/waxbin/internal/pathx"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/waxerr"
 )
@@ -188,8 +186,7 @@ func reachOf(path, root []byte, roots map[string]bool) reach {
 	}
 	up, seen := roots[string(root)]
 	if !seen {
-		info, err := os.Stat(pathx.Long(string(root)))
-		up = err == nil && info.IsDir()
+		up = fsx.RootUnreachable(string(root)) == nil
 		roots[string(root)] = up
 	}
 	if !up {

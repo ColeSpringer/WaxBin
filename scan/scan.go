@@ -22,11 +22,13 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/colespringer/waxbin/art"
 	"github.com/colespringer/waxbin/decode"
 	"github.com/colespringer/waxbin/identity"
+	"github.com/colespringer/waxbin/internal/fsx"
 	"github.com/colespringer/waxbin/internal/pathx"
 	"github.com/colespringer/waxbin/meta"
 	"github.com/colespringer/waxbin/model"
@@ -43,6 +45,37 @@ type Scanner struct {
 	// unreadable without changing permissions.
 	walk func(root string, fn fs.WalkDirFunc) error
 	stat func(path string) (fs.FileInfo, error)
+
+	// unreachable holds the roots found out of reach, so an outage is warned about once
+	// rather than by every scheduled rescan that meets it.
+	reachMu     sync.Mutex
+	unreachable map[string]bool
+}
+
+// noteReach logs a library root's reachability when it changes: a warning when it goes
+// out of reach, a note when it is back; a scan meeting an outage already warned about
+// says so only at debug level.
+func (s *Scanner) noteReach(root string, err error) {
+	s.reachMu.Lock()
+	if s.unreachable == nil {
+		s.unreachable = map[string]bool{}
+	}
+	was := s.unreachable[root]
+	if err != nil {
+		s.unreachable[root] = true
+	} else {
+		delete(s.unreachable, root)
+	}
+	s.reachMu.Unlock()
+	const msg = "scan: library root is not reachable; nothing under it is marked missing"
+	switch {
+	case err != nil && !was:
+		s.log.Warn(msg, "root", root, "err", err)
+	case err != nil:
+		s.log.Debug(msg, "root", root, "err", err)
+	case was:
+		s.log.Info("scan: library root is reachable again", "root", root)
+	}
 }
 
 // New builds a scanner over a catalog and metadata reader.
@@ -72,8 +105,8 @@ type Request struct {
 	AdoptStampedPIDs bool
 	// ForceReconcile bypasses the survival gate's ">=50% of known files must be seen"
 	// floor, so a deliberate large deletion is reconciled (deleted items become missing)
-	// instead of latching present forever. It still requires the root to be readable
-	// (a genuinely unreadable/errored root is never reconciled). It is an explicit
+	// instead of latching present forever. It still requires the root to be there and
+	// readable: an absent or unreadable root is never reconciled. It is an explicit
 	// operator action; the watcher never sets it, so a transient mount loss during a
 	// scheduled/forced watch rescan can never wipe the catalog.
 	ForceReconcile bool
@@ -144,6 +177,10 @@ type Result struct {
 	// SubPathGone says the sub-path asked for was not there, so the scan walked nothing
 	// and reconciled what the catalog held under it.
 	SubPathGone bool
+	// RootUnreachable says the library root was not there, not a folder, or not
+	// readable, which may only be a drive that is not mounted, so nothing under it was
+	// marked missing. An absent root is one walk error and is not walked at all.
+	RootUnreachable bool
 
 	// LibraryPID and LibraryName name the library a scan walked, its pid and display
 	// root; a total over several libraries leaves them empty.
@@ -204,6 +241,14 @@ func (s *Scanner) Scan(ctx context.Context, req Request, hb Heartbeat) (*Result,
 	}
 
 	res := &Result{LibraryPID: req.Library.PID, LibraryName: req.Library.DisplayRoot}
+	if err := fsx.RootUnreachable(root); err != nil {
+		s.noteReach(root, err)
+		res.WalkErrors, res.RootUnreachable = 1, true
+		if hb != nil {
+			_ = hb(1, "library root is not reachable")
+		}
+		return res, nil
+	}
 	sc := &scanCtx{cache: artCacheAt(root), force: req.Force, adopt: req.AdoptStampedPIDs, preserveLocks: !req.IgnoreLocks,
 		folders: map[string]*folderState{}}
 
@@ -242,14 +287,19 @@ func (s *Scanner) Scan(ctx context.Context, req Request, hb Heartbeat) (*Result,
 	// removed by hand) is nothing to walk and no walk error: the reconcile below marks what
 	// the catalog held under it missing.
 	walk := s.walk
-	if walkRoot != root && subPathGone(root, walkRoot) {
+	if walkRoot != root && subPathGone(walkRoot) {
 		s.log.Debug("scan sub-path is gone", "path", walkRoot)
 		res.SubPathGone = true
 		walk = func(string, fs.WalkDirFunc) error { return nil }
 	}
 	walkErr := walk(walkRoot, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
-			s.log.Warn("walk entry", "path", path, "err", err)
+			if path == root {
+				s.noteReach(root, err)
+				res.RootUnreachable = true
+			} else {
+				s.log.Warn("walk entry", "path", path, "err", err)
+			}
 			res.WalkErrors++
 			sc.unreadable = append(sc.unreadable, path)
 			return nil // keep going past unreadable entries
@@ -297,7 +347,10 @@ func (s *Scanner) Scan(ctx context.Context, req Request, hb Heartbeat) (*Result,
 	// files are gone from disk. The survival gate refuses to act on a transiently
 	// unavailable root, so a momentary mount loss cannot mark the whole library
 	// missing.
-	s.reconcileMissing(ctx, walkRoot, sc, knownCount, req.ForceReconcile, res)
+	s.reconcileMissing(ctx, root, walkRoot, sc, knownCount, req.ForceReconcile, res)
+	if !res.RootUnreachable {
+		s.noteReach(root, nil)
+	}
 	s.rereadPromoted(ctx, sc, res)
 
 	if hb != nil {
@@ -306,13 +359,10 @@ func (s *Scanner) Scan(ctx context.Context, req Request, hb Heartbeat) (*Result,
 	return res, nil
 }
 
-// subPathGone reports whether sub is absent while the library root holding it is there.
-func subPathGone(root, sub string) bool {
-	if _, err := os.Lstat(sub); !errors.Is(err, fs.ErrNotExist) {
-		return false
-	}
-	info, err := os.Stat(root)
-	return err == nil && info.IsDir()
+// subPathGone reports whether sub is absent. Scan has found its root reachable by then.
+func subPathGone(sub string) bool {
+	_, err := os.Lstat(sub)
+	return errors.Is(err, fs.ErrNotExist)
 }
 
 // scanCtx carries the per-scan fast-path state through the walk. The walk is
@@ -342,13 +392,13 @@ type scanCtx struct {
 }
 
 // reconcileMissing marks the items behind the index's residual (unwalked) files as
-// missing, behind a survival gate. The gate distinguishes a genuine removal (root
-// absent, or a healthy scan that simply saw fewer files) from a transient failure
-// (root exists but is empty/unreadable, or a partial walk saw far fewer files than
-// known), and skips reconciliation entirely on the transient cases, logging a
-// degraded warning and keeping every row, so a momentary mount loss cannot wipe the
-// catalog.
-func (s *Scanner) reconcileMissing(ctx context.Context, walkRoot string, sc *scanCtx, knownCount int, forceReconcile bool, res *Result) {
+// missing, behind a survival gate. The gate distinguishes a genuine removal (a sub-path
+// gone from a root that is there, or a healthy scan that simply saw fewer files) from a
+// transient failure (the root absent, or empty/unreadable, or a partial walk that saw
+// far fewer files than known), and skips reconciliation entirely on the transient
+// cases, logging a degraded warning and keeping every row, so a momentary mount loss
+// cannot wipe the catalog.
+func (s *Scanner) reconcileMissing(ctx context.Context, root, walkRoot string, sc *scanCtx, knownCount int, forceReconcile bool, res *Result) {
 	index := sc.index
 	if len(index) == 0 {
 		return // every known file was seen; nothing vanished
@@ -360,10 +410,14 @@ func (s *Scanner) reconcileMissing(ctx context.Context, walkRoot string, sc *sca
 	info, statErr := os.Stat(walkRoot)
 	unread := sc.unreadable
 	switch {
-	case errors.Is(statErr, fs.ErrNotExist):
-		// The root is genuinely gone: a real full removal, reconcile everything. The walk
-		// reported the root itself unreadable, which here is the removal.
+	case errors.Is(statErr, fs.ErrNotExist) && walkRoot != root && (res.SubPathGone || fsx.RootUnreachable(root) == nil):
+		// The sub-path is genuinely gone from a root that is there: reconcile what it held.
 		unread = nil
+	case errors.Is(statErr, fs.ErrNotExist):
+		// The root went while the scan ran, as an unmounted drive does.
+		res.RootUnreachable = true
+		s.noteReach(root, statErr)
+		return
 	case statErr != nil:
 		s.log.Warn("watch degraded: scan root unreadable, skipping deletion reconciliation",
 			"root", walkRoot, "err", statErr)

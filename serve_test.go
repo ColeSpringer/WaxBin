@@ -2277,3 +2277,44 @@ func TestServeProxiedAddRootAllowsAnAbsentRoot(t *testing.T) {
 		t.Fatalf("server libraries = %d (err %v), want the added root", len(libs), err)
 	}
 }
+
+// TestServeProxiedRemoveRoot: run_remove_root removes a library from the server's catalog
+// as a job whose result reports what it did, and the server's own configured root is
+// refused unless forced, before any job starts.
+func TestServeProxiedRemoveRoot(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	rootA, rootB := t.TempDir(), t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	sock := testsock.Path(t)
+	writeFile(t, filepath.Join(rootB, "b.mp3"), testaudio.BuildMP3("In B", "Artist", "Album", 1))
+	lib := openServedRW(t, ctx, db, rootA, sock)
+	c := dialWhenReady(t, sock)
+	b, err := c.AddRoot(ctx, proxy.AddRootParams{Path: rootB, Mode: "in-place"})
+	if err != nil {
+		t.Fatalf("add root: %v", err)
+	}
+	jobPID, err := c.RunScan(ctx, proxy.ScanParams{LibraryPID: string(b.PID)})
+	if err != nil {
+		t.Fatalf("run scan: %v", err)
+	}
+	waitForJobDone(t, ctx, lib, jobPID)
+
+	jobPID, err = c.RunRemoveRoot(ctx, proxy.RemoveRootParams{LibraryPID: string(b.PID)})
+	if err != nil {
+		t.Fatalf("run remove root: %v", err)
+	}
+	job := waitForJobDone(t, ctx, lib, jobPID)
+	var res model.RemoveRootReport
+	if err := json.Unmarshal([]byte(job.Result), &res); err != nil || job.Kind != "remove-root" ||
+		res.Root != rootB || res.FilesDetached != 1 || res.ItemsArchived != 1 {
+		t.Errorf("job %s result = %+v (err %v), want the one file and item under %s", job.Kind, res, err, rootB)
+	}
+	libs, err := lib.Libraries(ctx)
+	if err != nil || len(libs) != 1 || libs[0].DisplayRoot != rootA {
+		t.Fatalf("server libraries = %+v (err %v), want only %s", libs, err, rootA)
+	}
+	if _, err := c.RunRemoveRoot(ctx, proxy.RemoveRootParams{LibraryPID: string(libs[0].PID)}); !waxerr.Is(err, waxerr.CodeInvalid) {
+		t.Errorf("remove the server's configured root = %v, want CodeInvalid before any job starts", err)
+	}
+}

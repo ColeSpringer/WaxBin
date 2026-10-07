@@ -845,6 +845,12 @@ func (c *Client) RunSetKind(ctx context.Context, params SetKindParams) (model.PI
 	return c.runJob(ctx, MethodRunSetKind, params)
 }
 
+// RunRemoveRoot submits taking a library out of the server's catalog and returns the job
+// PID.
+func (c *Client) RunRemoveRoot(ctx context.Context, params RemoveRootParams) (model.PID, error) {
+	return c.runJob(ctx, MethodRunRemoveRoot, params)
+}
+
 // RunOrganize submits an organize pass to the server and returns the job PID. rule
 // is a marshaled query rule document selecting the items to organize.
 func (c *Client) RunOrganize(ctx context.Context, rule []byte, profile string) (model.PID, error) {

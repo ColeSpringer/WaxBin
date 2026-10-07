@@ -24,6 +24,23 @@ import (
 // Callers translate it to their own typed error (a conflict, or a skip).
 var ErrExist = errors.New("fsx: destination already exists")
 
+// ErrNotDir is RootUnreachable's answer for a path that is there but is not a folder.
+var ErrNotDir = errors.New("not a directory")
+
+// RootUnreachable says why a library root cannot be walked, or nil when it is a folder:
+// the stat's error (not there, an unmounted drive, no permission), or ErrNotDir. It is
+// the one test of a root the scan, the watcher and mark-missing share.
+func RootUnreachable(root string) error {
+	info, err := os.Stat(pathx.Long(root))
+	switch {
+	case err != nil:
+		return err
+	case !info.IsDir():
+		return ErrNotDir
+	}
+	return nil
+}
+
 // MoveOrCopy moves src to dst, or copies it (leaving src in place) when asCopy is
 // set. It is the importer's primitive (move staged files, or copy to keep them).
 func MoveOrCopy(src, dst string, asCopy bool) error {

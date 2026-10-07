@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/colespringer/waxbin/internal/fsx"
 	"github.com/colespringer/waxbin/internal/pathx"
 	"github.com/colespringer/waxbin/model"
 	"github.com/fsnotify/fsnotify"
@@ -42,16 +43,15 @@ func underRoot(root, path string) bool { return pathx.UnderRoot(root, path) }
 // sidesteps the "a .lrc path is not an audio path" problem: a directory rescan
 // picks up whatever landed. If no watch can be armed (ENOSPC, unsupported fs), it
 // marks the watcher degraded and returns, leaving scheduled rescans as the mechanism.
-// added carries roots registered or relocated while the watcher runs, which the event
-// worker arms.
-func (w *Watcher) runLive(ctx context.Context, reqs chan<- rescanReq, added <-chan Root) {
-	src, err := newSource()
+// sets carries the root set each tick reads, which the event worker follows.
+func (w *Watcher) runLive(ctx context.Context, reqs chan<- rescanReq, sets <-chan []Root) {
+	src, err := w.openSource()
 	if err != nil {
 		w.degraded.Store(true)
 		w.log.Warn("watch: live events unavailable, scheduled rescans only", hint("err", err)...)
 		return
 	}
-	w.serveLive(ctx, src, reqs, added)
+	w.serveLive(ctx, src, reqs, sets)
 }
 
 // errCoverageLost is what a source sends when its watch on a root ended for good, with
@@ -59,17 +59,20 @@ func (w *Watcher) runLive(ctx context.Context, reqs chan<- rescanReq, added <-ch
 var errCoverageLost = errors.New("watch: live coverage lost")
 
 // serveLive arms the roots on src and services its events until ctx ends.
-func (w *Watcher) serveLive(ctx context.Context, src source, reqs chan<- rescanReq, added <-chan Root) {
+func (w *Watcher) serveLive(ctx context.Context, src source, reqs chan<- rescanReq, sets <-chan []Root) {
 	defer src.Close()
 
 	lw := &liveWatch{src: src, log: w.log, max: watchCap(w.opts.MaxWatchDirs)}
 	exhausted := false
 	for _, r := range w.rootSet() {
-		if _, ex := lw.addTree(r.Path); ex {
+		if _, ex := lw.armRoot(r.Path); ex {
 			exhausted = true
 		}
 	}
 	switch {
+	case lw.total() == 0 && lw.outOfReach():
+		// Every root is out of reach, so no watch failed: each is armed when a tick finds
+		// it back.
 	case lw.total() == 0:
 		w.degraded.Store(true)
 		w.log.Warn("watch: no filesystem watches could be armed, scheduled rescans only", hint()...)
@@ -102,10 +105,11 @@ func (w *Watcher) serveLive(ctx context.Context, src source, reqs chan<- rescanR
 	// overflow the source's queue (dropping events). A worker drains a buffered
 	// channel; if it backs up, the reader schedules the directory directly rather than
 	// blocking, so reading from the source always stays fast.
-	// The roots the tick offers are armed on this worker too, not on the read loop:
+	// The root set each tick reads is followed on this worker too, not on the read loop:
 	// arming a large tree is the same walk handleEvent makes, and the read loop exists
 	// to stay clear of it. A root still armed is left alone; one whose watch went with
-	// its folder (moved away, or replaced) is armed again.
+	// its folder (moved away, or replaced) is armed again, and one no longer in the set
+	// (removed, or relocated) gives its watches up.
 	events := make(chan fsnotify.Event, liveEventBuffer)
 	go func() {
 		for {
@@ -115,11 +119,8 @@ func (w *Watcher) serveLive(ctx context.Context, src source, reqs chan<- rescanR
 					return
 				}
 				w.handleEvent(lw, deb, ev)
-			case r := <-added:
-				if lw.watched(filepath.Clean(r.Path)) {
-					continue
-				}
-				if _, ex := lw.addTree(r.Path); ex {
+			case set := <-sets:
+				if lw.follow(set) {
 					w.degraded.Store(true)
 				}
 			}
@@ -251,6 +252,94 @@ type liveWatch struct {
 	// below holds the watched folders directly under each, so forgetting a folder
 	// takes the folders below it without a walk over the whole set.
 	below map[string]map[string]bool
+	// roots is the root paths it was asked to arm, which a set without one releases, and
+	// unreachable the ones among them that were not there when it tried.
+	roots       map[string]bool
+	unreachable map[string]bool
+}
+
+// armRoot arms a root's tree unless the root is still armed, and remembers it as a root.
+// It reports how many folders it armed and whether it hit a ceiling, as addTree does. A
+// root that is not there, or is not a folder, is a library out of reach (a drive not
+// mounted, say), said once until it is back rather than taken for a failed watch.
+func (lw *liveWatch) armRoot(root string) (int, bool) {
+	root = filepath.Clean(root)
+	lw.mu.Lock()
+	if lw.roots == nil {
+		lw.roots, lw.unreachable = map[string]bool{}, map[string]bool{}
+	}
+	lw.roots[root] = true
+	held := lw.armed[root]
+	lw.mu.Unlock()
+	if held {
+		return 0, false
+	}
+	err := fsx.RootUnreachable(root)
+	reachable := err == nil
+	lw.mu.Lock()
+	was := lw.unreachable[root]
+	if reachable {
+		delete(lw.unreachable, root)
+	} else {
+		lw.unreachable[root] = true
+	}
+	lw.mu.Unlock()
+	switch {
+	case !reachable && !was:
+		lw.log.Warn("watch: library root is not reachable; it is watched once it is back", "root", root, "err", err)
+		return 0, false
+	case !reachable:
+		return 0, false
+	case was:
+		lw.log.Info("watch: library root is reachable again", "root", root)
+	}
+	return lw.addTree(root)
+}
+
+// outOfReach reports whether every root it was asked to arm was out of reach.
+func (lw *liveWatch) outOfReach() bool {
+	lw.mu.Lock()
+	defer lw.mu.Unlock()
+	return len(lw.roots) > 0 && len(lw.unreachable) == len(lw.roots)
+}
+
+// follow arms the roots in set it does not hold and releases those it armed that set no
+// longer names, reporting whether an arm hit a ceiling.
+func (lw *liveWatch) follow(set []Root) bool {
+	keep := make(map[string]bool, len(set))
+	for _, r := range set {
+		keep[filepath.Clean(r.Path)] = true
+	}
+	lw.mu.Lock()
+	var gone []string
+	for root := range lw.roots {
+		if !keep[root] {
+			gone = append(gone, root)
+		}
+	}
+	lw.mu.Unlock()
+	for _, root := range gone {
+		lw.release(root)
+	}
+	exhausted := false
+	for _, r := range set {
+		if _, ex := lw.armRoot(r.Path); ex {
+			exhausted = true
+		}
+	}
+	return exhausted
+}
+
+// release drops a root that left the watched set and every watched folder below it, so
+// the watcher holds nothing open in a folder that is no longer a library.
+func (lw *liveWatch) release(root string) {
+	lw.mu.Lock()
+	delete(lw.roots, root)
+	delete(lw.unreachable, root)
+	gone := lw.drop(root, nil)
+	lw.unlink(root)
+	lw.mu.Unlock()
+	lw.unwatch(gone)
 }
 
 // forget drops a watched folder that is gone, and the watched folders below it: a move
@@ -260,28 +349,44 @@ type liveWatch struct {
 // watched folder.
 func (lw *liveWatch) forget(dir string) bool {
 	lw.mu.Lock()
-	defer lw.mu.Unlock()
 	if !lw.armed[dir] {
+		lw.mu.Unlock()
 		return false
 	}
-	lw.drop(dir)
+	gone := lw.drop(dir, nil)
+	lw.unlink(dir)
+	lw.mu.Unlock()
+	lw.unwatch(gone)
+	return true
+}
+
+// drop forgets dir and every watched folder below it, under the lock, adding them to
+// gone for the caller to unwatch once it lets the lock go.
+func (lw *liveWatch) drop(dir string, gone []string) []string {
+	for kid := range lw.below[dir] {
+		gone = lw.drop(kid, gone)
+	}
+	delete(lw.below, dir)
+	delete(lw.armed, dir)
+	return append(gone, dir)
+}
+
+// unlink takes dir out of its parent's list of watched folders, under the lock.
+func (lw *liveWatch) unlink(dir string) {
 	if parent := filepath.Dir(dir); parent != dir {
 		delete(lw.below[parent], dir)
 		if len(lw.below[parent]) == 0 {
 			delete(lw.below, parent)
 		}
 	}
-	return true
 }
 
-// drop forgets dir and every watched folder below it, under the lock.
-func (lw *liveWatch) drop(dir string) {
-	for kid := range lw.below[dir] {
-		lw.drop(kid)
+// unwatch removes the source's watches on dirs, off the lock: a source can wait on its
+// reader, the reader on the read loop, and the read loop on the lock.
+func (lw *liveWatch) unwatch(dirs []string) {
+	for _, dir := range dirs {
+		_ = lw.src.Remove(dir) // the kernel may have dropped it already
 	}
-	delete(lw.below, dir)
-	delete(lw.armed, dir)
-	_ = lw.src.Remove(dir) // the kernel may have dropped it already
 }
 
 func (lw *liveWatch) total() int {

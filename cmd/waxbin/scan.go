@@ -42,11 +42,14 @@ func newScanCmd(g *globals) *cobra.Command {
 				if err != nil {
 					return err
 				}
-				var t scan.Result
-				if err := unmarshalJobResult(job, &t); err != nil {
+				var res struct {
+					scan.Result
+					Runs []scan.Result
+				}
+				if err := unmarshalJobResult(job, &res); err != nil {
 					return err
 				}
-				return renderScanResult(cmd, g, jobPID, t)
+				return renderScanResult(cmd, g, jobPID, res.Result, res.Runs)
 			}
 
 			lib, _, err := g.open(cmd)
@@ -65,7 +68,7 @@ func newScanCmd(g *globals) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return renderScanResult(cmd, g, res.JobPID, res.Total)
+			return renderScanResult(cmd, g, res.JobPID, res.Total, res.Runs)
 		},
 	}
 	var full bool
@@ -82,31 +85,35 @@ func newScanCmd(g *globals) *cobra.Command {
 }
 
 // renderScanResult prints a scan's totals, shared by the direct run and the
-// server-run (job-tailed) path.
-func renderScanResult(cmd *cobra.Command, g *globals, jobPID model.PID, t scan.Result) error {
+// server-run (job-tailed) path. runs is each library's own result, which names a root
+// the scan could not reach.
+func renderScanResult(cmd *cobra.Command, g *globals, jobPID model.PID, t scan.Result, runs []scan.Result) error {
+	unreachable := unreachableRoots(runs)
 	if g.jsonOut {
 		return printJSON(cmd, struct {
-			JobPID          string `json:"jobPid"`
-			FilesSeen       int    `json:"filesSeen"`
-			AudioFiles      int    `json:"audioFiles"`
-			ItemsCreated    int    `json:"itemsCreated"`
-			ItemsUpdated    int    `json:"itemsUpdated"`
-			Relinked        int    `json:"relinked"`
-			Unchanged       int    `json:"unchanged"`
-			SidecarsUpdated int    `json:"sidecarsUpdated"`
-			Missing         int    `json:"missing"`
-			Skipped         int    `json:"skipped"`
-			Errored         int    `json:"errored"`
-			Copies          int    `json:"copies"`
-			Reread          int    `json:"reread"`
-			Promoted        int    `json:"promoted"`
-			Dropped         int    `json:"dropped"`
-			WalkErrors      int    `json:"walkErrors"`
-			SubPathGone     bool   `json:"subPathGone,omitempty"`
+			JobPID           string   `json:"jobPid"`
+			FilesSeen        int      `json:"filesSeen"`
+			AudioFiles       int      `json:"audioFiles"`
+			ItemsCreated     int      `json:"itemsCreated"`
+			ItemsUpdated     int      `json:"itemsUpdated"`
+			Relinked         int      `json:"relinked"`
+			Unchanged        int      `json:"unchanged"`
+			SidecarsUpdated  int      `json:"sidecarsUpdated"`
+			Missing          int      `json:"missing"`
+			Skipped          int      `json:"skipped"`
+			Errored          int      `json:"errored"`
+			Copies           int      `json:"copies"`
+			Reread           int      `json:"reread"`
+			Promoted         int      `json:"promoted"`
+			Dropped          int      `json:"dropped"`
+			WalkErrors       int      `json:"walkErrors"`
+			SubPathGone      bool     `json:"subPathGone,omitempty"`
+			RootUnreachable  bool     `json:"rootUnreachable,omitempty"`
+			UnreachableRoots []string `json:"unreachableRoots,omitempty"`
 		}{
 			string(jobPID), t.FilesSeen, t.AudioFiles, t.ItemsCreated, t.ItemsUpdated,
 			t.Relinked, t.Unchanged, t.SidecarsUpdated, t.Missing, t.Skipped, t.Errored,
-			t.Copies, t.Reread, t.Promoted, t.Dropped, t.WalkErrors, t.SubPathGone,
+			t.Copies, t.Reread, t.Promoted, t.Dropped, t.WalkErrors, t.SubPathGone, t.RootUnreachable, unreachable,
 		})
 	}
 	fmt.Fprintf(out(cmd), "Scan complete (job %s)\n", jobPID)
@@ -140,5 +147,22 @@ func renderScanResult(cmd *cobra.Command, g *globals, jobPID model.PID, t scan.R
 	if t.SubPathGone {
 		fmt.Fprintln(out(cmd), "  sub-path:     not found (what the catalog held there is reconciled)")
 	}
+	for _, root := range unreachable {
+		fmt.Fprintf(out(cmd), "  root:         %s is not reachable (nothing under it was marked missing)\n", root)
+	}
+	if t.RootUnreachable && len(unreachable) == 0 {
+		fmt.Fprintln(out(cmd), "  root:         not reachable (nothing under it was marked missing)")
+	}
 	return nil
+}
+
+// unreachableRoots names the roots a scan's per-library results say it could not reach.
+func unreachableRoots(runs []scan.Result) []string {
+	var out []string
+	for _, r := range runs {
+		if r.RootUnreachable {
+			out = append(out, r.LibraryName)
+		}
+	}
+	return out
 }

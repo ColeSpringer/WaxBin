@@ -835,7 +835,7 @@ func (l *Library) proxyHandlers() map[string]proxy.Handler {
 			// AddRoot validates the spec (mode/media vocabulary, overlaps) against
 			// this server's registered set, which is the catalog that matters: this
 			// process is the one that scans.
-			var opts []AddRootOption
+			var opts []RootOption
 			if p.AllowAbsent {
 				opts = append(opts, AllowAbsent())
 			}
@@ -924,6 +924,17 @@ func (l *Library) proxyHandlers() map[string]proxy.Handler {
 				items[i] = model.PID(s)
 			}
 			pid, err := l.StartSetItemKind(ctx, items, model.Kind(p.Kind), KindOptions{WriteBack: p.WriteBack, Force: p.Force})
+			if err != nil {
+				return nil, err
+			}
+			return proxy.JobStartResult{JobPID: string(pid)}, nil
+		},
+		proxy.MethodRunRemoveRoot: func(ctx context.Context, raw json.RawMessage) (any, error) {
+			p, err := decodeParams[proxy.RemoveRootParams](raw)
+			if err != nil {
+				return nil, err
+			}
+			pid, err := l.StartRemoveRoot(ctx, model.PID(p.LibraryPID), RemoveRootOptions{Force: p.Force})
 			if err != nil {
 				return nil, err
 			}

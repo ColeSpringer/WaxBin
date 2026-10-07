@@ -547,11 +547,32 @@ func (m *mutator) AddRoot(ctx context.Context, spec config.Root, allowAbsent boo
 			Path: spec.Path, Mode: string(spec.Mode), Media: string(spec.Media), Profile: spec.Profile, AllowAbsent: allowAbsent,
 		})
 	}
-	var opts []waxbin.AddRootOption
+	var opts []waxbin.RootOption
 	if allowAbsent {
 		opts = append(opts, waxbin.AllowAbsent())
 	}
 	return m.lib.AddRoot(ctx, spec, opts...)
+}
+
+// RemoveRoot removes a library, through a running server as a job tail follows.
+func (m *mutator) RemoveRoot(ctx context.Context, pid model.PID, force bool,
+	tail func(model.PID) (*model.Job, error)) (*model.RemoveRootReport, error) {
+	if m.px == nil {
+		return m.lib.RemoveRoot(ctx, pid, waxbin.RemoveRootOptions{Force: force})
+	}
+	jobPID, err := m.px.RunRemoveRoot(ctx, proxy.RemoveRootParams{LibraryPID: string(pid), Force: force})
+	if err != nil {
+		return nil, err
+	}
+	job, err := tail(jobPID)
+	if job == nil {
+		return nil, err
+	}
+	var rep model.RemoveRootReport
+	if uerr := unmarshalJobResult(job, &rep); uerr != nil && err == nil {
+		return nil, uerr
+	}
+	return &rep, err
 }
 
 // toPIDs converts a wire string slice into a PID slice.

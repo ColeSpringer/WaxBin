@@ -1,9 +1,14 @@
 package waxbin_test
 
 import (
+	"bytes"
 	"context"
+	"image"
+	"image/png"
+	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -271,6 +276,27 @@ func TestRelocateRootValidatesOverlap(t *testing.T) {
 	if err := lib.RelocateRoot(ctx, model.NewPID(), t.TempDir()); !waxerr.Is(err, waxerr.CodeNotFound) {
 		t.Fatalf("relocate unknown pid = %v, want CodeNotFound", err)
 	}
+
+	// What a scan could never walk is refused as AddRoot refuses it, before any row moves:
+	// a relative path, a file, and a folder that is not there unless the caller allows it.
+	file := filepath.Join(t.TempDir(), "file")
+	writeFile(t, file, []byte("x"))
+	missing := filepath.Join(t.TempDir(), "not", "mounted")
+	for _, tc := range []struct{ name, path, reason string }{
+		{"relative", filepath.Join("relative", "music"), "absolute"},
+		{"a file", file, "not a directory"},
+		{"missing", missing, "does not exist"},
+	} {
+		if err := lib.RelocateRoot(ctx, libB.PID, tc.path); !waxerr.Is(err, waxerr.CodeInvalid) || !strings.Contains(err.Error(), tc.reason) {
+			t.Errorf("relocate to %s = %v, want CodeInvalid saying %q", tc.name, err, tc.reason)
+		}
+	}
+	if libs, _ := lib.Libraries(ctx); !slices.ContainsFunc(libs, func(l *model.Library) bool { return l.DisplayRoot == rootC }) {
+		t.Fatalf("a refused relocation moved the root: %+v", libs)
+	}
+	if err := lib.RelocateRoot(ctx, libB.PID, missing, waxbin.AllowAbsent()); err != nil {
+		t.Fatalf("relocate to a root mounted later, allowed absent: %v", err)
+	}
 }
 
 // TestAddRootConcurrentOverlapSerialized pins the rootMu guard: two goroutines
@@ -436,5 +462,335 @@ func TestAddRootRefusesWhatAScanCannotWalk(t *testing.T) {
 	res, err := lib.Scan(ctx, waxbin.ScanRequest{LibraryPID: added.PID})
 	if err != nil || res.Total.Missing != 0 || res.Total.AudioFiles != 0 {
 		t.Fatalf("scan of the absent root = %+v (err %v), want nothing found and nothing missing", res, err)
+	}
+}
+
+// TestRemoveRootArchivesWhatItHeldAndAReaddRelinksIt: removing a library detaches its
+// files, archives the items left with none under their pids with their play state and
+// list entries, drops its trash journal, and deletes its row with one library delta,
+// leaving every file where it was; an item with a copy in another library keeps that
+// copy. Adding the root back and scanning it brings the archived items back under their
+// old pids.
+func TestRemoveRootArchivesWhatItHeldAndAReaddRelinksIt(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	rootA, rootB := t.TempDir(), t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	writeFile(t, filepath.Join(rootA, "kept.mp3"), testaudio.BuildMP3WithAudio("Kept", "Artist", "Album", 1, testaudio.AudioWithSeed(41)))
+	lib := openManaged(t, ctx, db, rootA)
+	scanLib(t, ctx, lib)
+	kept := itemPIDByTitle(t, ctx, lib, "Kept")
+
+	writeFile(t, filepath.Join(rootB, "kept copy.mp3"), testaudio.BuildMP3WithAudio("Kept", "Artist", "Album", 1, testaudio.AudioWithSeed(41)))
+	writeFile(t, filepath.Join(rootB, "one.mp3"), testaudio.BuildMP3WithAudio("Gone One", "Artist", "Other", 1, testaudio.AudioWithSeed(42)))
+	writeFile(t, filepath.Join(rootB, "two.mp3"), testaudio.BuildMP3WithAudio("Gone Two", "Artist", "Other", 2, testaudio.AudioWithSeed(43)))
+	writeFile(t, filepath.Join(rootB, "trashed.mp3"), testaudio.BuildMP3WithAudio("Trashed", "Artist", "Other", 3, testaudio.AudioWithSeed(44)))
+	b, err := lib.AddRoot(ctx, config.Root{Path: rootB, Mode: model.ModeManaged, Profile: "waxbin-native"})
+	if err != nil {
+		t.Fatalf("add root: %v", err)
+	}
+	scanLib(t, ctx, lib)
+	one, two, trashed := itemPIDByTitle(t, ctx, lib, "Gone One"), itemPIDByTitle(t, ctx, lib, "Gone Two"),
+		itemPIDByTitle(t, ctx, lib, "Trashed")
+	if files, err := lib.ItemFiles(ctx, kept); err != nil || len(files) != 2 {
+		t.Fatalf("kept item files = %+v (err %v), want its own and the copy in the added library", files, err)
+	}
+	if _, err := lib.Playback().SetStar(ctx, "", one, true, nil); err != nil {
+		t.Fatalf("star: %v", err)
+	}
+	list, err := lib.Playlists().CreateStatic(ctx, "List", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := lib.Playlists().Set(ctx, list, []model.PID{one, two}); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := lib.PlanDeletePIDs(ctx, []model.PID{trashed}, model.DeleteTrash)
+	if err != nil {
+		t.Fatalf("plan delete: %v", err)
+	}
+	if _, err := lib.ApplyDelete(ctx, plan); err != nil {
+		t.Fatalf("apply delete: %v", err)
+	}
+	before, err := lib.Changes(ctx, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seq := before[len(before)-1].Seq
+
+	rep, err := lib.RemoveRoot(ctx, b.PID, waxbin.RemoveRootOptions{})
+	if err != nil {
+		t.Fatalf("remove root: %v", err)
+	}
+	if rep.FilesDetached != 3 || rep.ItemsArchived != 2 || rep.TrashRowsDropped != 1 || rep.Root != rootB {
+		t.Errorf("report = %+v, want 3 files detached, 2 items archived, 1 trash row dropped at %s", rep, rootB)
+	}
+	libs, err := lib.Libraries(ctx)
+	if err != nil || len(libs) != 1 || libs[0].DisplayRoot != rootA {
+		t.Fatalf("libraries = %+v (err %v), want only %s", libs, err, rootA)
+	}
+	for _, pid := range []model.PID{one, two, trashed} {
+		if st := stateOf(t, ctx, lib, pid); st != model.StateArchived {
+			t.Errorf("item %s state = %q, want archived", pid, st)
+		}
+	}
+	if ps, err := lib.Playback().State(ctx, "", one); err != nil || !ps.Starred {
+		t.Errorf("play state = %+v (err %v), want the star kept", ps, err)
+	}
+	if items, err := lib.Playlists().Items(ctx, list, ""); err != nil || len(items) != 2 {
+		t.Errorf("playlist = %d items (err %v), want both entries kept", len(items), err)
+	}
+	if st := stateOf(t, ctx, lib, kept); st != model.StatePresent {
+		t.Errorf("kept item state = %q, want present", st)
+	}
+	if files, err := lib.ItemFiles(ctx, kept); err != nil || len(files) != 1 || files[0].DisplayPath != filepath.Join(rootA, "kept.mp3") {
+		t.Errorf("kept item files = %+v (err %v), want its own file alone", files, err)
+	}
+	if entries, err := lib.Trash(ctx, false, 0); err != nil || len(entries) != 0 {
+		t.Errorf("trash = %+v (err %v), want the removed library's entry gone", entries, err)
+	}
+	for _, name := range []string{"kept copy.mp3", "one.mp3", "two.mp3"} {
+		if !fileExists(filepath.Join(rootB, name)) {
+			t.Errorf("%s was touched on disk", name)
+		}
+	}
+	if held, _ := filepath.Glob(filepath.Join(rootB, model.TrashDirName, "*", "trashed.mp3")); len(held) != 1 {
+		t.Errorf("trashed file on disk = %v, want it left in the trash folder", held)
+	}
+	after, err := lib.Changes(ctx, seq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deletes := 0
+	for _, ch := range after {
+		if ch.EntityType == "library" && ch.EntityPID == b.PID {
+			if ch.Op != model.OpDelete {
+				t.Errorf("library delta %+v, want only the delete", ch)
+			}
+			deletes++
+		}
+	}
+	if deletes != 1 {
+		t.Errorf("library deletes = %d, want 1", deletes)
+	}
+
+	again, err := lib.AddRoot(ctx, config.Root{Path: rootB, Mode: model.ModeManaged, Profile: "waxbin-native"})
+	if err != nil {
+		t.Fatalf("add the root back: %v", err)
+	}
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{LibraryPID: again.PID}); err != nil {
+		t.Fatalf("scan the root back: %v", err)
+	}
+	for _, pid := range []model.PID{one, two} {
+		if st := stateOf(t, ctx, lib, pid); st != model.StatePresent {
+			t.Errorf("item %s after the re-add = %q, want present under its old pid", pid, st)
+		}
+	}
+	if ps, err := lib.Playback().State(ctx, "", one); err != nil || !ps.Starred {
+		t.Errorf("play state after the re-add = %+v (err %v), want the star", ps, err)
+	}
+	if files, err := lib.ItemFiles(ctx, kept); err != nil || len(files) != 2 {
+		t.Errorf("kept item files after the re-add = %+v (err %v), want the copy back", files, err)
+	}
+}
+
+// TestRemoveRootRefuses: an unknown pid is not found, a read-only handle cannot remove,
+// and a root the catalog was opened with is refused without force, saying it comes
+// from the configuration. Forced, it goes, and a reopen of the same handle does not
+// register it again.
+func TestRemoveRootRefuses(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	rootA, rootB := t.TempDir(), t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	lib, err := waxbin.Open(ctx, waxbin.Options{DBPath: db, Roots: []config.Root{
+		{Path: rootA, Mode: model.ModeManaged, Profile: "waxbin-native"},
+		{Path: rootB, Mode: model.ModeInPlace, Profile: "waxbin-native"},
+	}})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = lib.Close() })
+	libs, err := lib.Libraries(ctx)
+	if err != nil || len(libs) != 2 {
+		t.Fatalf("libraries = %+v (err %v)", libs, err)
+	}
+	var b model.PID
+	for _, l := range libs {
+		if l.DisplayRoot == rootB {
+			b = l.PID
+		}
+	}
+
+	if _, err := lib.RemoveRoot(ctx, model.NewPID(), waxbin.RemoveRootOptions{}); !waxerr.Is(err, waxerr.CodeNotFound) {
+		t.Errorf("remove an unknown library = %v, want CodeNotFound", err)
+	}
+	_, err = lib.RemoveRoot(ctx, b, waxbin.RemoveRootOptions{})
+	if !waxerr.Is(err, waxerr.CodeInvalid) || !strings.Contains(err.Error(), "configuration") {
+		t.Fatalf("remove a configured root = %v, want CodeInvalid naming the configuration", err)
+	}
+	if libs, _ := lib.Libraries(ctx); len(libs) != 2 {
+		t.Fatalf("a refused removal removed something: %+v", libs)
+	}
+
+	if _, err := lib.RemoveRoot(ctx, b, waxbin.RemoveRootOptions{Force: true}); err != nil {
+		t.Fatalf("forced removal of a configured root: %v", err)
+	}
+	if err := lib.BeginMaintenance(ctx); err != nil {
+		t.Fatalf("begin maintenance: %v", err)
+	}
+	if err := lib.EndMaintenance(ctx); err != nil {
+		t.Fatalf("end maintenance: %v", err)
+	}
+	if libs, err := lib.Libraries(ctx); err != nil || len(libs) != 1 || libs[0].DisplayRoot != rootA {
+		t.Fatalf("libraries after a reopen = %+v (err %v), want the removed root kept out", libs, err)
+	}
+
+	ro, err := waxbin.Open(ctx, waxbin.Options{DBPath: db, ReadOnly: true})
+	if err != nil {
+		t.Fatalf("open read-only: %v", err)
+	}
+	defer ro.Close()
+	if _, err := ro.RemoveRoot(ctx, libs[0].PID, waxbin.RemoveRootOptions{Force: true}); !waxerr.Is(err, waxerr.CodeUnsupported) {
+		t.Errorf("remove on a read-only handle = %v, want CodeUnsupported", err)
+	}
+}
+
+// TestRelocateRootKeepsAReopenFromRegisteringTheOldPath: a configured root relocated by
+// this handle is ensured at its new path when the handle reopens after a maintenance
+// hand-off, not registered again as an empty library at the old one.
+func TestRelocateRootKeepsAReopenFromRegisteringTheOldPath(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	rootA, rootB, rootC := t.TempDir(), t.TempDir(), t.TempDir()
+	lib, err := waxbin.Open(ctx, waxbin.Options{DBPath: filepath.Join(t.TempDir(), "catalog.db"), Roots: []config.Root{
+		{Path: rootA, Mode: model.ModeManaged, Profile: "waxbin-native"},
+		{Path: rootB, Mode: model.ModeInPlace, Profile: "waxbin-native"},
+	}})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = lib.Close() })
+	libs, err := lib.Libraries(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, l := range libs {
+		if l.DisplayRoot == rootB {
+			if err := lib.RelocateRoot(ctx, l.PID, rootC); err != nil {
+				t.Fatalf("relocate: %v", err)
+			}
+		}
+	}
+	if err := lib.BeginMaintenance(ctx); err != nil {
+		t.Fatalf("begin maintenance: %v", err)
+	}
+	if err := lib.EndMaintenance(ctx); err != nil {
+		t.Fatalf("end maintenance: %v", err)
+	}
+	libs, err = lib.Libraries(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var roots []string
+	for _, l := range libs {
+		roots = append(roots, l.DisplayRoot)
+	}
+	if len(roots) != 2 || slices.Contains(roots, rootB) || !slices.Contains(roots, rootC) {
+		t.Fatalf("roots after a reopen = %v, want %s and %s", roots, rootA, rootC)
+	}
+}
+
+// TestRelocateRootKeepsTheFastPath: a file and its folder's cover moved with their root
+// are unchanged to the next scan, since the cover's observation moved with them, where it
+// used to read the file in full as though the cover had gone.
+func TestRelocateRootKeepsTheFastPath(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	base := t.TempDir()
+	oldRoot, newRoot := filepath.Join(base, "old"), filepath.Join(base, "new")
+	writeFile(t, filepath.Join(oldRoot, "song.mp3"), testaudio.BuildMP3WithAudio("Song", "Artist", "Album", 1, testaudio.AudioWithSeed(73)))
+	var cover bytes.Buffer
+	if err := png.Encode(&cover, image.NewRGBA(image.Rect(0, 0, 4, 4))); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(oldRoot, "cover.png"), cover.Bytes())
+	lib, err := waxbin.Open(ctx, waxbin.Options{DBPath: filepath.Join(t.TempDir(), "catalog.db")})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = lib.Close() })
+	added, err := lib.AddRoot(ctx, config.Root{Path: oldRoot, Mode: model.ModeInPlace})
+	if err != nil {
+		t.Fatalf("add root: %v", err)
+	}
+	scanLib(t, ctx, lib)
+	if err := os.Rename(oldRoot, newRoot); err != nil {
+		t.Fatal(err)
+	}
+	if err := lib.RelocateRoot(ctx, added.PID, newRoot); err != nil {
+		t.Fatalf("relocate: %v", err)
+	}
+	res, err := lib.Scan(ctx, waxbin.ScanRequest{})
+	if err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if res.Total.Unchanged != 1 || res.Total.Reread != 0 || res.Total.SidecarsUpdated != 0 {
+		t.Errorf("scan after the relocation = %+v, want the file unchanged and not read again", res.Total)
+	}
+}
+
+// TestRelocateRootCarriesTheTrashJournal: a library moved with its trash folder still
+// restores what it trashed, into the new root, since the journal's paths moved with it.
+func TestRelocateRootCarriesTheTrashJournal(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	base := t.TempDir()
+	oldRoot, newRoot := filepath.Join(base, "old"), filepath.Join(base, "new")
+	writeFile(t, filepath.Join(oldRoot, "Artist", "keep.mp3"), testaudio.BuildMP3WithAudio("Keep", "Artist", "Album", 1, testaudio.AudioWithSeed(71)))
+	writeFile(t, filepath.Join(oldRoot, "Artist", "gone.mp3"), testaudio.BuildMP3WithAudio("Gone", "Artist", "Album", 2, testaudio.AudioWithSeed(72)))
+	lib, err := waxbin.Open(ctx, waxbin.Options{DBPath: filepath.Join(t.TempDir(), "catalog.db")})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = lib.Close() })
+	added, err := lib.AddRoot(ctx, config.Root{Path: oldRoot, Mode: model.ModeInPlace})
+	if err != nil {
+		t.Fatalf("add root: %v", err)
+	}
+	scanLib(t, ctx, lib)
+	gone := itemPIDByTitle(t, ctx, lib, "Gone")
+	plan, err := lib.PlanDeletePIDs(ctx, []model.PID{gone}, model.DeleteTrash)
+	if err != nil {
+		t.Fatalf("plan delete: %v", err)
+	}
+	if _, err := lib.ApplyDelete(ctx, plan); err != nil {
+		t.Fatalf("apply delete: %v", err)
+	}
+
+	if err := os.Rename(oldRoot, newRoot); err != nil {
+		t.Fatal(err)
+	}
+	if err := lib.RelocateRoot(ctx, added.PID, newRoot); err != nil {
+		t.Fatalf("relocate: %v", err)
+	}
+	entries, err := lib.Trash(ctx, false, 0)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("trash = %+v (err %v), want the one entry", entries, err)
+	}
+	e := entries[0]
+	want := filepath.Join(newRoot, "Artist", "gone.mp3")
+	if string(e.OrigPath) != want || e.OrigDisplay != want || !strings.HasPrefix(e.TrashDisplay, newRoot+string(filepath.Separator)) ||
+		!strings.HasPrefix(string(e.TrashPath), newRoot+string(filepath.Separator)) {
+		t.Fatalf("entry = %+v, want its paths under %s", e, newRoot)
+	}
+	if err := lib.RestoreTrash(ctx, e.PID); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	if !fileExists(want) {
+		t.Errorf("%s was not restored", want)
+	}
+	if st := stateOf(t, ctx, lib, gone); st != model.StatePresent {
+		t.Errorf("restored item state = %q, want present", st)
 	}
 }

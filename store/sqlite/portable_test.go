@@ -7,7 +7,6 @@ import (
 
 	"github.com/colespringer/waxbin/identity"
 	"github.com/colespringer/waxbin/model"
-	"github.com/colespringer/waxbin/waxerr"
 )
 
 // trackIn builds a track scan input with explicit descriptive + strong-id fields, on top
@@ -121,7 +120,7 @@ func TestItemsByEssence(t *testing.T) {
 	}
 }
 
-func TestItemByRecordingMBID(t *testing.T) {
+func TestItemsByRecordingMBID(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	st, lib := openTestStore(t)
@@ -133,32 +132,33 @@ func TestItemByRecordingMBID(t *testing.T) {
 
 	// Exact match, and case-insensitive match (MBID case is the only cross-catalog variance).
 	for _, q := range []string{"rec-abc", "REC-ABC"} {
-		got, err := st.ItemByRecordingMBID(ctx, q)
-		if err != nil {
-			t.Fatalf("ItemByRecordingMBID(%q): %v", q, err)
-		}
-		if got.PID != tr.ItemPID {
-			t.Fatalf("ItemByRecordingMBID(%q) = %s, want %s", q, got.PID, tr.ItemPID)
+		got, err := st.ItemsByRecordingMBID(ctx, q)
+		if err != nil || len(got) != 1 || got[0].PID != tr.ItemPID {
+			t.Fatalf("ItemsByRecordingMBID(%q) = %v (err %v), want %s", q, got, err, tr.ItemPID)
 		}
 	}
 
-	// A miss and an empty id both return CodeNotFound (no error to the caller's ladder).
+	// A miss and an empty id are empty, not errors.
 	for _, q := range []string{"rec-none", ""} {
-		if _, err := st.ItemByRecordingMBID(ctx, q); !waxerr.Is(err, waxerr.CodeNotFound) {
-			t.Fatalf("ItemByRecordingMBID(%q) err = %v, want CodeNotFound", q, err)
+		if got, err := st.ItemsByRecordingMBID(ctx, q); err != nil || len(got) != 0 {
+			t.Fatalf("ItemsByRecordingMBID(%q) = %v (err %v), want nothing", q, got, err)
 		}
 	}
 
-	// The same recording MBID on two distinct items (a single + a compilation) is
-	// ambiguous and declines, rather than resolving to an arbitrary one.
-	if _, err := st.PutScannedTrack(ctx, trackIn(lib.ID, "/lib/b.mp3", "E-B", "Song A", "Alpha", "Best Of", "dup-mbid")); err != nil {
+	// The same recording MBID on two distinct items (a single + a compilation) answers
+	// both, for the caller to settle the tie.
+	b, err := st.PutScannedTrack(ctx, trackIn(lib.ID, "/lib/b.mp3", "E-B", "Song A", "Alpha", "Best Of", "dup-mbid"))
+	if err != nil {
 		t.Fatalf("put track b: %v", err)
 	}
-	if _, err := st.PutScannedTrack(ctx, trackIn(lib.ID, "/lib/c.mp3", "E-C", "Song A", "Alpha", "Album A", "dup-mbid")); err != nil {
+	c, err := st.PutScannedTrack(ctx, trackIn(lib.ID, "/lib/c.mp3", "E-C", "Song A", "Alpha", "Album A", "dup-mbid"))
+	if err != nil {
 		t.Fatalf("put track c: %v", err)
 	}
-	if _, err := st.ItemByRecordingMBID(ctx, "dup-mbid"); !waxerr.Is(err, waxerr.CodeNotFound) {
-		t.Fatalf("ambiguous recording mbid err = %v, want CodeNotFound", err)
+	got, err := st.ItemsByRecordingMBID(ctx, "dup-mbid")
+	if err != nil || len(got) != 2 || got[0].PID == got[1].PID ||
+		(got[0].PID != b.ItemPID && got[0].PID != c.ItemPID) || (got[1].PID != b.ItemPID && got[1].PID != c.ItemPID) {
+		t.Fatalf("shared recording mbid = %v (err %v), want both items", got, err)
 	}
 }
 
@@ -188,7 +188,7 @@ func TestItemsByArtistKey(t *testing.T) {
 	}
 }
 
-func TestItemByBookIdent(t *testing.T) {
+func TestItemsByBookIdent(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	st, lib := openTestStore(t)
@@ -205,23 +205,17 @@ func TestItemByBookIdent(t *testing.T) {
 		{"", "b01asin", ""}, // case-insensitive
 		{"", "", "978-0-261"},
 	} {
-		got, err := st.ItemByBookIdent(ctx, tc.mbid, tc.asin, tc.isbn)
-		if err != nil {
-			t.Fatalf("ItemByBookIdent(%+v): %v", tc, err)
-		}
-		if got.PID != bk.ItemPID {
-			t.Fatalf("ItemByBookIdent(%+v) = %s, want %s", tc, got.PID, bk.ItemPID)
+		got, err := st.ItemsByBookIdent(ctx, tc.mbid, tc.asin, tc.isbn)
+		if err != nil || len(got) != 1 || got[0].PID != bk.ItemPID {
+			t.Fatalf("ItemsByBookIdent(%+v) = %v (err %v), want %s", tc, got, err, bk.ItemPID)
 		}
 	}
 
-	// All-empty and a pure miss return CodeNotFound. (The ambiguous >1 decline shares the
-	// singleItem LIMIT-2 path proven by TestItemByRecordingMBID; a strong id cannot back
-	// two distinct book items via scan, since ASIN/ISBN drive BookKey identity.)
-	if _, err := st.ItemByBookIdent(ctx, "", "", ""); !waxerr.Is(err, waxerr.CodeNotFound) {
-		t.Fatalf("all-empty book ident err = %v, want CodeNotFound", err)
-	}
-	if _, err := st.ItemByBookIdent(ctx, "", "NOPE", ""); !waxerr.Is(err, waxerr.CodeNotFound) {
-		t.Fatalf("missing book ident err = %v, want CodeNotFound", err)
+	// All-empty and a pure miss are empty.
+	for _, tc := range []struct{ mbid, asin, isbn string }{{"", "", ""}, {"", "NOPE", ""}} {
+		if got, err := st.ItemsByBookIdent(ctx, tc.mbid, tc.asin, tc.isbn); err != nil || len(got) != 0 {
+			t.Fatalf("ItemsByBookIdent(%+v) = %v (err %v), want nothing", tc, got, err)
+		}
 	}
 }
 

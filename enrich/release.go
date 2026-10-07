@@ -16,8 +16,8 @@ import (
 // design rather than an omission. Every writer of an entity MBID fills only when
 // empty, so a best-of-a-bad-lot winner would be permanent and unappealable, and a
 // float invites a later maintainer to lower the bar when coverage disappoints. What
-// decides a match is a uniqueness gate, the shape pickEssenceMatch already uses
-// ("only when that closest item stands alone").
+// decides a match is a uniqueness gate, the shape the facade's ResolveRef already uses
+// (a rung matches only when its closest candidate stands alone).
 //
 // Track and disc counts stay out: they are the signals a release group's reissue
 // variants share, so where counts are the only evidence they do not discriminate.

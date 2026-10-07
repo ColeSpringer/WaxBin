@@ -1,9 +1,16 @@
 package main
 
 import (
+	"context"
+	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/colespringer/waxbin"
+	"github.com/colespringer/waxbin/config"
+	"github.com/colespringer/waxbin/internal/testaudio"
 	"github.com/colespringer/waxbin/model"
+	"github.com/colespringer/waxbin/query"
 )
 
 func TestDedupLosers(t *testing.T) {
@@ -32,5 +39,61 @@ func TestDedupLosers(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestMergeSaysWhatCanUndoIt: a merge in text ends with a note that the files still carry
+// the spellings it merged, which a later read can split off again; with --json it prints
+// its document alone.
+func TestMergeSaysWhatCanUndoIt(t *testing.T) {
+	t.Setenv("WAXBIN_CONFIG", "")
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	for i, artist := range []string{"Kept Spelling", "Second Spelling", "Third Spelling"} {
+		writeAsset(t, filepath.Join(root, artist+".mp3"),
+			testaudio.BuildMP3WithAudio("Song "+artist, artist, "Album "+artist, 1, testaudio.AudioWithSeed(byte(81+i))))
+	}
+	lib, err := waxbin.Open(ctx, waxbin.Options{DBPath: db,
+		Roots: []config.Root{{Path: root, Mode: model.ModeInPlace, Profile: "waxbin-native"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	items, err := lib.Query(ctx, query.New(query.EntityItems).Build(), "")
+	if err != nil || len(items) != 3 {
+		t.Fatalf("items = %d (err %v), want 3", len(items), err)
+	}
+	artists, albums := map[string]model.PID{}, map[string]model.PID{}
+	for _, it := range items {
+		artists[it.Artist] = it.ArtistPID
+		albums[it.Album] = it.AlbumPID
+	}
+	if err := lib.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	text, err := runLibraryCmd(t, db, false, "merge", "artist", string(artists["Kept Spelling"]), string(artists["Second Spelling"]))
+	if err != nil {
+		t.Fatalf("merge: %v", err)
+	}
+	if !strings.Contains(text, "note:") || !strings.Contains(text, "split") || !strings.Contains(text, "rebuild") {
+		t.Errorf("merge printed %q, want a note on what can split it again", text)
+	}
+	text, err = runLibraryCmd(t, db, false, "merge", "album", string(albums["Album Kept Spelling"]), string(albums["Album Second Spelling"]))
+	if err != nil {
+		t.Fatalf("merge albums: %v", err)
+	}
+	if !strings.Contains(text, "note:") || !strings.Contains(text, "folder") {
+		t.Errorf("album merge printed %q, want a note that keeping it takes one folder", text)
+	}
+	out, err := runLibraryCmd(t, db, true, "merge", "artist", string(artists["Kept Spelling"]), string(artists["Third Spelling"]))
+	if err != nil {
+		t.Fatalf("merge --json: %v", err)
+	}
+	if _, why := oneEnvelope(out); why != "" || strings.Contains(out, "note:") {
+		t.Errorf("merge --json printed %q (%s), want one envelope and no note", out, why)
 	}
 }

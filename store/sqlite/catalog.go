@@ -188,6 +188,125 @@ func (s *Store) setLibraryFlag(ctx context.Context, op string, pid model.PID, co
 	return out, nil
 }
 
+// dropLibraryTx drops a library's active trash entries, giving each one's item an update
+// (it can no longer be restored, which a tailer learns as DeleteTrashRow tells it), then
+// the library row with its delta, and returns how many entries went. Restored entries go
+// with the row.
+func dropLibraryTx(ctx context.Context, tx *sql.Tx, libID int64, libPID model.PID) (int, error) {
+	items, err := queryInt64sTx(ctx, tx, `SELECT DISTINCT pi.id FROM trash tr JOIN playable_item pi ON pi.pid = tr.item_pid
+		WHERE tr.library_id = ? AND tr.restored_at IS NULL`, libID)
+	if err != nil {
+		return 0, err
+	}
+	r, err := tx.ExecContext(ctx, "DELETE FROM trash WHERE library_id = ? AND restored_at IS NULL", libID)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := r.RowsAffected()
+	for _, id := range items {
+		if err := appendItemUpdateTx(ctx, tx, id); err != nil {
+			return 0, err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, "DELETE FROM library WHERE id = ?", libID); err != nil {
+		return 0, err
+	}
+	return int(n), appendChange(ctx, tx, "library", libPID, model.OpDelete)
+}
+
+// removeBatch is how many files a library removal detaches per transaction.
+const removeBatch = 500
+
+// RemoveLibrary takes a library out of the catalog and touches nothing on disk. Each file
+// row under it is detached as a trash detach does it: an alternate in another library
+// takes the place of a primary or part, and an item left with no file is archived, its
+// pid, play state and list entries kept, so adding the root back and scanning re-links
+// it. The library's trash journal goes too, leaving its trashed files where they lie,
+// then the row with one library delta. The files go removeBatch at a time, each batch its
+// own transaction, beat (when set) hearing the files detached so far and the total after
+// each; a cancel stops between batches with the library still registered, and calling
+// again finishes the job. The promoted files are returned for the caller to re-read. The
+// internal podcast library is refused.
+func (s *Store) RemoveLibrary(ctx context.Context, libPID model.PID, beat func(done, total int) error) (*model.RemoveRootReport, []model.PromotedFile, error) {
+	return s.removeLibrary(ctx, libPID, removeBatch, beat)
+}
+
+func (s *Store) removeLibrary(ctx context.Context, libPID model.PID, batch int, beat func(done, total int) error) (*model.RemoveRootReport, []model.PromotedFile, error) {
+	const op = "store.RemoveLibrary"
+	lib, err := scanLibrary(s.read.QueryRowContext(ctx, librarySelect+" WHERE pid = ?", string(libPID)))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil, waxerr.New(waxerr.CodeNotFound, op, "no such library: "+string(libPID))
+	}
+	if err != nil {
+		return nil, nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	if lib.Mode == model.ModePodcast {
+		return nil, nil, waxerr.New(waxerr.CodeInvalid, op, "the internal podcast library follows the podcasts dir config and cannot be removed")
+	}
+	rep := &model.RemoveRootReport{Root: lib.DisplayRoot}
+	var promoted []model.PromotedFile
+	detached := map[model.PID]bool{}
+	// The promoted files are handed back however the run ends, less any it went on to
+	// detach, which re-reading would put back.
+	settled := func() []model.PromotedFile {
+		var out []model.PromotedFile
+		for _, p := range promoted {
+			if !detached[p.FilePID] {
+				out = append(out, p)
+			}
+		}
+		return out
+	}
+	for finished := false; !finished; {
+		if err := ctx.Err(); err != nil {
+			return rep, settled(), waxerr.FromContext(op, err, waxerr.CodeIO)
+		}
+		b := newDetachBatch()
+		dropped, left := 0, 0
+		err := s.writeTx(ctx, func(tx *sql.Tx) error {
+			ids, err := queryInt64sTx(ctx, tx, "SELECT id FROM file WHERE library_id = ? ORDER BY id LIMIT ?", lib.ID, batch)
+			if err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+			for _, id := range ids {
+				if _, err := b.detachTx(ctx, tx, id); err != nil {
+					return waxerr.Wrap(waxerr.CodeIO, op, err)
+				}
+			}
+			if err := b.settleTx(ctx, tx); err != nil {
+				return waxerr.Wrap(waxerr.CodeIO, op, err)
+			}
+			// The batch that empties the library deletes it in the same transaction, so no
+			// file can land in between and go with the row unsettled. Until then the count
+			// left keeps the progress true when a file lands meanwhile.
+			if len(ids) == batch {
+				return waxerr.Wrap(waxerr.CodeIO, op,
+					tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM file WHERE library_id = ?", lib.ID).Scan(&left))
+			}
+			finished = true
+			n, err := dropLibraryTx(ctx, tx, lib.ID, libPID)
+			dropped = n
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		})
+		if err != nil {
+			return rep, settled(), err
+		}
+		rep.FilesDetached += len(b.files)
+		rep.ItemsArchived += b.archived
+		rep.TrashRowsDropped += dropped
+		promoted = append(promoted, b.promoted...)
+		for _, pid := range b.files {
+			detached[pid] = true
+		}
+		if beat != nil && len(b.files) > 0 {
+			if err := beat(rep.FilesDetached, rep.FilesDetached+left); err != nil {
+				return rep, settled(), err
+			}
+		}
+	}
+	return rep, settled(), nil
+}
+
 // LibraryReadOnly reads one library's read-only flag by rowid, for the write loops'
 // check just before each write.
 func (s *Store) LibraryReadOnly(ctx context.Context, id int64) (bool, error) {

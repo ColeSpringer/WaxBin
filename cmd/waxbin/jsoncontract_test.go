@@ -187,6 +187,7 @@ func TestEveryCommandAnswersJSON(t *testing.T) {
 	fx := newJSONFixture(t)
 	p := func(pid model.PID) string { return string(pid) }
 	asset := func(name string) string { return filepath.Join(fx.assets, name) }
+	added := t.TempDir()
 	cases := []struct {
 		args    []string
 		wantErr bool
@@ -305,7 +306,9 @@ func TestEveryCommandAnswersJSON(t *testing.T) {
 		{args: []string{"podcast", "sync"}},
 		{args: []string{"library", "set", p(fx.library), "--read-only"}},
 		{args: []string{"library", "set", p(fx.library), "--writable"}},
-		{args: []string{"library", "add", t.TempDir() + ":in-place"}},
+		{args: []string{"library", "add", added + ":in-place"}},
+		{args: []string{"library", "remove", "ADDED"}},
+		{args: []string{"library", "remove", p(fx.library)}, wantErr: true},
 		{args: []string{"merge", "artist", p(fx.artist), p(fx.other)}},
 		{args: []string{"db", "vacuum"}},
 		{args: []string{"db", "verify", "--fix"}},
@@ -339,11 +342,16 @@ func TestEveryCommandAnswersJSON(t *testing.T) {
 		{args: []string{"db", "reset", "--yes"}},
 	}
 	for _, c := range cases {
-		// TRASH stands for the trash entry the last delete wrote, read off trash list.
+		// TRASH stands for the trash entry the last delete wrote, read off trash list, and
+		// ADDED for the library `library add` registered.
 		for i, a := range c.args {
-			if a == "TRASH" {
+			switch a {
+			case "TRASH":
 				c.args = append([]string(nil), c.args...)
 				c.args[i] = lastTrashEntry(t, fx)
+			case "ADDED":
+				c.args = append([]string(nil), c.args...)
+				c.args[i] = libraryAt(t, fx, added)
 			}
 		}
 		stdout, stderr, err := runJSONCommand(fx, c.args, c.bare)
@@ -367,6 +375,31 @@ func TestEveryCommandAnswersJSON(t *testing.T) {
 			}
 		}
 	}
+}
+
+// libraryAt reads the pid of the library at root off `library list --json`.
+func libraryAt(t *testing.T, fx *jsonFixture, root string) string {
+	t.Helper()
+	stdout, _, err := runJSONCommand(fx, []string{"library", "list"}, false)
+	if err != nil {
+		t.Fatalf("library list: %v", err)
+	}
+	var env struct {
+		Data []struct {
+			PID  string `json:"pid"`
+			Root string `json:"root"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &env); err != nil {
+		t.Fatalf("library list printed %q: %v", stdout, err)
+	}
+	for _, l := range env.Data {
+		if l.Root == root {
+			return l.PID
+		}
+	}
+	t.Fatalf("no library at %s in %q", root, stdout)
+	return ""
 }
 
 // lastTrashEntry reads the newest active trash entry's pid off `trash list --json`.

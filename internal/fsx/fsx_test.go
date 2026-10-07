@@ -401,3 +401,21 @@ func TestFoldNameReadsNamesAsSameNameDoes(t *testing.T) {
 		}
 	}
 }
+
+// TestRootUnreachable: a folder is reachable, a file is not a directory, and a path that
+// is not there says so, the answer every root check (scan, watch, mark-missing) shares.
+func TestRootUnreachable(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	file := filepath.Join(dir, "file")
+	writeFile(t, file, "x")
+	if err := RootUnreachable(dir); err != nil {
+		t.Errorf("a folder = %v, want reachable", err)
+	}
+	if err := RootUnreachable(file); !errors.Is(err, ErrNotDir) {
+		t.Errorf("a file = %v, want ErrNotDir", err)
+	}
+	if err := RootUnreachable(filepath.Join(dir, "gone")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("a missing path = %v, want not-exist", err)
+	}
+}

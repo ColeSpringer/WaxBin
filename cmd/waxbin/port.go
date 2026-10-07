@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 
 	"github.com/colespringer/waxbin"
 	"github.com/colespringer/waxbin/port"
@@ -53,15 +54,16 @@ func redactNote(redact bool) string {
 
 func newRestoreCmd(g *globals) *cobra.Command {
 	var (
-		force bool
-		root  string
+		force, allowAbsent bool
+		root               string
 	)
 	cmd := &cobra.Command{
 		Use:   "restore <backup.db>",
 		Short: "Restore the catalog from a backup (optionally onto a new root)",
 		Long: "Replaces the configured catalog with a validated backup. Refuses to " +
 			"overwrite an existing catalog unless --force. With --root, re-points the single " +
-			"library at a new path afterward (a portable restore onto a new machine/mount). " +
+			"library at a new path afterward (a portable restore onto a new machine/mount); " +
+			"the path must be a folder, or one mounted later with --allow-absent. " +
 			"Under a running server it takes the maintenance hand-off, so the server closes " +
 			"its handles (which is what lets the file be replaced on Windows at all) and " +
 			"reopens on the restored catalog, the command failing if it cannot; a server " +
@@ -111,10 +113,9 @@ func newRestoreCmd(g *globals) *cobra.Command {
 
 			relocated := ""
 			if root != "" {
-				if err := relocateRestored(cmd, g, root); err != nil {
+				if relocated, err = relocateRestored(cmd, g, root, allowAbsent); err != nil {
 					return err
 				}
-				relocated = root
 			}
 			// Ended here rather than by cleanup, so a server that cannot reopen the
 			// restored catalog is reported instead of a success over a closed server.
@@ -138,26 +139,36 @@ func newRestoreCmd(g *globals) *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&force, "force", false, "overwrite an existing catalog")
 	cmd.Flags().StringVar(&root, "root", "", "re-point the single library at this new root path")
+	cmd.Flags().BoolVar(&allowAbsent, "allow-absent", false, "let --root name a folder that does not exist yet (a drive mounted later)")
 	return cmd
 }
 
-// relocateRestored re-points the restored catalog's single library at root. The
-// library is closed before it returns, so a server taking the lock back finds it free.
-func relocateRestored(cmd *cobra.Command, g *globals, root string) error {
+// relocateRestored re-points the restored catalog's single library at root, a relative
+// one taken from the working directory, and returns the path it used. The library is
+// closed before it returns, so a server taking the lock back finds it free.
+func relocateRestored(cmd *cobra.Command, g *globals, root string, allowAbsent bool) (string, error) {
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		return "", waxerr.Wrapf(waxerr.CodeInvalid, "restore", err, "resolving %q", root)
+	}
 	lib, _, err := g.open(cmd)
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer lib.Close()
 	libs, err := lib.Libraries(ctx(cmd))
 	if err != nil {
-		return err
+		return "", err
 	}
 	if len(libs) != 1 {
-		return waxerr.New(waxerr.CodeInvalid, "restore",
+		return "", waxerr.New(waxerr.CodeInvalid, "restore",
 			"--root relocates a single library; the restored catalog has none or several")
 	}
-	return lib.RelocateRoot(ctx(cmd), libs[0].PID, root)
+	var opts []waxbin.RootOption
+	if allowAbsent {
+		opts = append(opts, waxbin.AllowAbsent())
+	}
+	return abs, lib.RelocateRoot(ctx(cmd), libs[0].PID, abs, opts...)
 }
 
 func newExportCmd(g *globals) *cobra.Command {
@@ -262,6 +273,9 @@ func newRebuildCmd(g *globals) *cobra.Command {
 			}
 			fmt.Fprintf(out(cmd), "Rebuilt catalog: %d audio files, %d items created, %d updated, %d copies\n",
 				res.Total.AudioFiles, res.Total.ItemsCreated, res.Total.ItemsUpdated, res.Total.Copies)
+			for _, root := range unreachableRoots(res.Runs) {
+				fmt.Fprintf(out(cmd), "  %s is not reachable, so nothing under it was rebuilt\n", root)
+			}
 			return nil
 		},
 	}
@@ -270,14 +284,17 @@ func newRebuildCmd(g *globals) *cobra.Command {
 // scanResultJSON renders a scan/rebuild tally; mirrors the scan command's shape.
 func scanResultJSON(res *waxbin.ScanResult) any {
 	return struct {
-		JobPID       string `json:"jobPid"`
-		AudioFiles   int    `json:"audioFiles"`
-		ItemsCreated int    `json:"itemsCreated"`
-		ItemsUpdated int    `json:"itemsUpdated"`
-		Copies       int    `json:"copies"`
-		Relinked     int    `json:"relinked"`
-		Errored      int    `json:"errored"`
-		WalkErrors   int    `json:"walkErrors"`
+		JobPID           string   `json:"jobPid"`
+		AudioFiles       int      `json:"audioFiles"`
+		ItemsCreated     int      `json:"itemsCreated"`
+		ItemsUpdated     int      `json:"itemsUpdated"`
+		Copies           int      `json:"copies"`
+		Relinked         int      `json:"relinked"`
+		Errored          int      `json:"errored"`
+		WalkErrors       int      `json:"walkErrors"`
+		RootUnreachable  bool     `json:"rootUnreachable,omitempty"`
+		UnreachableRoots []string `json:"unreachableRoots,omitempty"`
 	}{string(res.JobPID), res.Total.AudioFiles, res.Total.ItemsCreated,
-		res.Total.ItemsUpdated, res.Total.Copies, res.Total.Relinked, res.Total.Errored, res.Total.WalkErrors}
+		res.Total.ItemsUpdated, res.Total.Copies, res.Total.Relinked, res.Total.Errored, res.Total.WalkErrors,
+		res.Total.RootUnreachable, unreachableRoots(res.Runs)}
 }

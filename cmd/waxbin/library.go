@@ -3,9 +3,11 @@ package main
 import (
 	"fmt"
 	"path/filepath"
+	"slices"
 	"text/tabwriter"
 
 	"github.com/colespringer/waxbin/config"
+	"github.com/colespringer/waxbin/internal/pathx"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/waxerr"
 	"github.com/spf13/cobra"
@@ -16,7 +18,7 @@ func newLibraryCmd(g *globals) *cobra.Command {
 		Use:   "library",
 		Short: "List and manage library roots",
 	}
-	c.AddCommand(newLibraryListCmd(g), newLibraryAddCmd(g), newLibrarySetCmd(g))
+	c.AddCommand(newLibraryListCmd(g), newLibraryAddCmd(g), newLibrarySetCmd(g), newLibraryRemoveCmd(g))
 	return c
 }
 
@@ -126,8 +128,9 @@ func newLibraryAddCmd(g *globals) *cobra.Command {
 			"spec is validated against the registered roots, inbox folders, and podcast dir " +
 			"(non-overlapping, like init). The path must be a folder; pass --allow-absent for " +
 			"one mounted later. Re-adding an existing path updates its policy under " +
-			"the same pid. Scan, organize, and import pick the root up immediately; a running " +
-			"watch does not until it restarts. An audiobook root catalogs every file in it as a " +
+			"the same pid. Scan, organize, and import pick the root up immediately. `waxbin watch` " +
+			"holds the catalog while it runs, so stop it to add a root; started again, it " +
+			"watches the new root too. An audiobook root catalogs every file in it as a " +
 			"book; music and mixed roots classify each file by its tags. Re-adding a root as " +
 			"audiobook turns its tracks into books on the next scan; moving one off audiobook " +
 			"takes `scan --force` to re-read its books' tags.",
@@ -162,5 +165,63 @@ func newLibraryAddCmd(g *globals) *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&allowAbsent, "allow-absent", false, "register a root whose folder does not exist yet (a drive mounted later)")
+	return cmd
+}
+
+func newLibraryRemoveCmd(g *globals) *cobra.Command {
+	var force bool
+	cmd := &cobra.Command{
+		Use:   "remove <pid>",
+		Short: "Take a library root out of the catalog, leaving its files alone",
+		Long: "Removes a library from the catalog without touching anything on disk. Its items " +
+			"with no file in another library are archived with their play state and playlist " +
+			"entries, so adding the root back and scanning it brings them back under their old " +
+			"ids. Its trash entries go with it, their files staying in its trash folder. Every " +
+			"run that loads a configured root registers it again, so one is refused unless " +
+			"--force; take it out of the configuration as well. The podcast library cannot be " +
+			"removed.",
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			m, cfg, err := g.openMutator(cmd)
+			if err != nil {
+				return err
+			}
+			defer m.Close()
+			rep, err := m.RemoveRoot(ctx(cmd), model.PID(args[0]), force,
+				func(job model.PID) (*model.Job, error) { return g.tailJob(cmd, job) })
+			if err != nil {
+				return err
+			}
+			if slices.ContainsFunc(cfg.Roots, func(r config.Root) bool { return pathx.SamePath(r.Path, rep.Root) }) {
+				where := "the configuration"
+				if p := g.resolveConfigPath(); p != "" {
+					where = p
+				}
+				fmt.Fprintf(errOut(cmd), "warning: %s is a configured root, so the next run that loads it registers it again; take it out of %s\n",
+					rep.Root, where)
+			}
+			if g.jsonOut {
+				return printJSON(cmd, struct {
+					LibraryPID       string `json:"libraryPid"`
+					Root             string `json:"root"`
+					FilesDetached    int    `json:"filesDetached"`
+					ItemsArchived    int    `json:"itemsArchived"`
+					TrashRowsDropped int    `json:"trashRowsDropped"`
+				}{args[0], rep.Root, rep.FilesDetached, rep.ItemsArchived, rep.TrashRowsDropped})
+			}
+			fmt.Fprintf(out(cmd), "Removed library %s  %s: %s detached, %s archived\n", args[0], rep.Root,
+				plural(rep.FilesDetached, "file"), plural(rep.ItemsArchived, "item"))
+			if rep.TrashRowsDropped > 0 {
+				entries := "entries"
+				if rep.TrashRowsDropped == 1 {
+					entries = "entry"
+				}
+				fmt.Fprintf(out(cmd), "  dropped %d trash %s; their files stay in %s\n", rep.TrashRowsDropped, entries,
+					filepath.Join(rep.Root, model.TrashDirName))
+			}
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&force, "force", false, "remove a root the configuration names")
 	return cmd
 }

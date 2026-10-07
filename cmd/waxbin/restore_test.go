@@ -254,3 +254,69 @@ func TestRestoreReportsAServerThatCannotReopen(t *testing.T) {
 		t.Fatalf("restore of a catalog the server cannot reopen = %v, want that reported", err)
 	}
 }
+
+// TestRestoreRelocatesOnlyToAFolder: `restore --root` takes a relative path from where the
+// command runs, and refuses a folder that is not there unless --allow-absent says it is
+// mounted later.
+func TestRestoreRelocatesOnlyToAFolder(t *testing.T) {
+	t.Setenv("WAXBIN_CONFIG", "")
+	ctx := context.Background()
+	source := t.TempDir()
+	lib, err := waxbin.Open(ctx, waxbin.Options{DBPath: filepath.Join(t.TempDir(), "src.db"),
+		Roots: []config.Root{{Path: source, Mode: model.ModeInPlace}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	backup := filepath.Join(t.TempDir(), "backup.db")
+	if err := lib.Backup(ctx, backup, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := lib.Close(); err != nil {
+		t.Fatal(err)
+	}
+	restore := func(db string, args ...string) error {
+		cmd := newRootCmd(&globals{})
+		cmd.SetOut(&bytes.Buffer{})
+		cmd.SetErr(&bytes.Buffer{})
+		cmd.SetArgs(append([]string{"--db", db, "restore", backup}, args...))
+		return cmd.ExecuteContext(ctx)
+	}
+	rootOf := func(db string) string {
+		t.Helper()
+		lib, err := waxbin.Open(ctx, waxbin.Options{DBPath: db, ReadOnly: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer lib.Close()
+		libs, err := lib.Libraries(ctx)
+		if err != nil || len(libs) != 1 {
+			t.Fatalf("libraries = %+v (err %v)", libs, err)
+		}
+		return libs[0].DisplayRoot
+	}
+
+	base := t.TempDir()
+	missing := filepath.Join(base, "not mounted")
+	db := filepath.Join(t.TempDir(), "a.db")
+	if err := restore(db, "--root", missing); !waxerr.Is(err, waxerr.CodeInvalid) {
+		t.Fatalf("restore --root to a missing folder = %v, want CodeInvalid", err)
+	}
+	if err := restore(db, "--root", missing, "--allow-absent", "--force"); err != nil {
+		t.Fatalf("restore --root --allow-absent: %v", err)
+	}
+	if got := rootOf(db); got != missing {
+		t.Errorf("relocated to %s, want %s", got, missing)
+	}
+
+	if err := os.Mkdir(filepath.Join(base, "music"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(base)
+	db = filepath.Join(t.TempDir(), "b.db")
+	if err := restore(db, "--root", "music"); err != nil {
+		t.Fatalf("restore --root music: %v", err)
+	}
+	if got := rootOf(db); got != filepath.Join(base, "music") {
+		t.Errorf("relocated to %s, want the folder under the working directory", got)
+	}
+}

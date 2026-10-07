@@ -36,7 +36,7 @@ func TestEditTrackScalarIdentifiers(t *testing.T) {
 	}
 
 	// The recording MBID becomes a cross-catalog resolution anchor.
-	if v, err := st.ItemByRecordingMBID(ctx, "b1a9c0e9-d987-4042-ae91-78d6a3267d69"); err != nil || v.PID != pid {
+	if v, err := st.ItemsByRecordingMBID(ctx, "b1a9c0e9-d987-4042-ae91-78d6a3267d69"); err != nil || len(v) != 1 || v[0].PID != pid {
 		t.Fatalf("resolve by recording mbid = %v, %v", v, err)
 	}
 }

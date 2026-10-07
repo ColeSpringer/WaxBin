@@ -19,7 +19,8 @@ type Options struct {
 	// Roots are library roots to ensure on open (upserted; never deleted here). A
 	// root's read-only and folder fallback flags are the catalog's alone
 	// (Library.SetLibraryReadOnly, Library.SetLibraryFolderFallback), so ensuring a root
-	// keeps whatever flags it has.
+	// keeps whatever flags it has. Since every open registers these again,
+	// Library.RemoveRoot refuses one of them unless forced.
 	Roots []config.Root
 	// ReadOnly opens without taking the write lock and forbids mutations.
 	ReadOnly bool

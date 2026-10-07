@@ -2,8 +2,11 @@ package waxbin_test
 
 import (
 	"context"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -265,4 +268,124 @@ func TestSidecarEditReportsChanged(t *testing.T) {
 			}
 		})
 	}
+}
+
+// lockedLog is a log sink the watcher and the scans it runs can write while a test reads it.
+type lockedLog struct {
+	mu  sync.Mutex
+	buf strings.Builder
+}
+
+func (b *lockedLog) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedLog) count(s string) int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return strings.Count(b.buf.String(), s)
+}
+
+// removeRootPast removes a library, retrying while the watcher's own rescan holds the
+// filesystem lease.
+func removeRootPast(t *testing.T, lib *waxbin.Library, pid model.PID, force bool) {
+	t.Helper()
+	deadline := time.Now().Add(4 * time.Second)
+	for {
+		_, err := lib.RemoveRoot(context.Background(), pid, waxbin.RemoveRootOptions{Force: force})
+		if err == nil {
+			return
+		}
+		if !waxerr.Is(err, waxerr.CodeConflict) || time.Now().After(deadline) {
+			t.Fatalf("remove root: %v", err)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// TestWatchOfARemovedLibraryStops: a watch scoped to one library stops once that library
+// is removed, saying so once, where it used to warn on every tick that it could not
+// rescan it.
+func TestWatchOfARemovedLibraryStops(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	rootA, rootB := t.TempDir(), t.TempDir()
+	var logs lockedLog
+	lib, err := waxbin.Open(ctx, waxbin.Options{DBPath: filepath.Join(t.TempDir(), "catalog.db"),
+		Roots:  []config.Root{{Path: rootA, Mode: model.ModeManaged, Profile: "waxbin-native"}},
+		Logger: slog.New(slog.NewTextHandler(&logs, nil))})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = lib.Close() })
+	writeFile(t, filepath.Join(rootB, "b.mp3"), testaudio.BuildMP3WithAudio("In B", "Artist", "Album", 1, testaudio.AudioWithSeed(7)))
+	b, err := lib.AddRoot(ctx, config.Root{Path: rootB, Mode: model.ModeInPlace})
+	if err != nil {
+		t.Fatalf("add root: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- lib.Watch(ctx, waxbin.WatchOptions{LibraryPID: b.PID, Interval: 40 * time.Millisecond, FullRescanInterval: -1})
+	}()
+	waitFor(t, 4*time.Second, func() bool { return itemCount(t, lib, "In B") == 1 })
+	removeRootPast(t, lib, b.PID, false)
+	select {
+	case err := <-done:
+		if !waxerr.Is(err, waxerr.CodeNotFound) {
+			t.Fatalf("watch exit = %v, want CodeNotFound", err)
+		}
+	case <-time.After(4 * time.Second):
+		t.Fatal("the watch kept running after its library was removed")
+	}
+	if n := logs.count("watched library is gone"); n != 1 {
+		t.Errorf("logged the stop %d times, want once", n)
+	}
+}
+
+// TestWatchIdlesWhenItsLastRootIsRemoved: a watch over every library whose last one is
+// removed stops rescanning it, where it used to keep the stale set and warn each tick,
+// and follows a root registered after.
+func TestWatchIdlesWhenItsLastRootIsRemoved(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	rootA, rootB := t.TempDir(), t.TempDir()
+	var logs lockedLog
+	lib, err := waxbin.Open(ctx, waxbin.Options{DBPath: filepath.Join(t.TempDir(), "catalog.db"),
+		Roots:  []config.Root{{Path: rootA, Mode: model.ModeManaged, Profile: "waxbin-native"}},
+		Logger: slog.New(slog.NewTextHandler(&logs, nil))})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = lib.Close() })
+	writeFile(t, filepath.Join(rootA, "a.mp3"), testaudio.BuildMP3WithAudio("In A", "Artist", "Album", 1, testaudio.AudioWithSeed(8)))
+	writeFile(t, filepath.Join(rootB, "b.mp3"), testaudio.BuildMP3WithAudio("In B", "Artist", "Album", 2, testaudio.AudioWithSeed(9)))
+
+	runCtx, cancel := context.WithCancel(ctx)
+	done := make(chan error, 1)
+	go func() {
+		done <- lib.Watch(runCtx, waxbin.WatchOptions{Interval: 40 * time.Millisecond, FullRescanInterval: -1})
+	}()
+	defer func() {
+		cancel()
+		if err := <-done; !waxerr.Is(err, waxerr.CodeCanceled) {
+			t.Errorf("watch exit = %v, want CodeCanceled", err)
+		}
+	}()
+	waitFor(t, 4*time.Second, func() bool { return itemCount(t, lib, "In A") == 1 })
+	libs, err := lib.Libraries(ctx)
+	if err != nil || len(libs) != 1 {
+		t.Fatalf("libraries = %+v (err %v)", libs, err)
+	}
+	removeRootPast(t, lib, libs[0].PID, true)
+	time.Sleep(300 * time.Millisecond)
+	if n := logs.count("rescan error") + logs.count("roots unreadable"); n > 1 {
+		t.Errorf("the watch warned %d times after its last root went, want it quiet", n)
+	}
+	if _, err := lib.AddRoot(ctx, config.Root{Path: rootB, Mode: model.ModeInPlace}); err != nil {
+		t.Fatalf("add root: %v", err)
+	}
+	waitFor(t, 4*time.Second, func() bool { return itemCount(t, lib, "In B") == 1 })
 }

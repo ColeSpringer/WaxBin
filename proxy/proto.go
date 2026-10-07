@@ -100,6 +100,8 @@ const (
 	MethodRunEnrich   = "run_enrich"
 	MethodRunOrganize = "run_organize"
 	MethodRunSetKind  = "run_set_kind"
+
+	MethodRunRemoveRoot = "run_remove_root"
 )
 
 // request is one wire frame from client to server.
@@ -894,6 +896,14 @@ type SetLibraryReadOnlyParams struct {
 type SetLibraryFolderFallbackParams struct {
 	LibraryPID string `json:"libraryPid"`
 	On         bool   `json:"on"`
+}
+
+// RemoveRootParams is the run_remove_root request payload. Force removes a root the
+// server was opened with. The server checks the request before starting the job, and the
+// finished job's result is the model.RemoveRootReport.
+type RemoveRootParams struct {
+	LibraryPID string `json:"libraryPid"`
+	Force      bool   `json:"force,omitempty"`
 }
 
 // ScanParams is the run_scan request payload.

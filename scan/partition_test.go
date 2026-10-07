@@ -1,15 +1,19 @@
 package scan
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/query"
 )
 
@@ -277,23 +281,48 @@ func TestScanCountsOnlyNewCopies(t *testing.T) {
 	}
 }
 
-// TestScanOfARemovedRootReconcilesIt: a library root that no longer exists is a real
-// removal, not an unreadable folder, so its items are marked missing.
-func TestScanOfARemovedRootReconcilesIt(t *testing.T) {
+// TestScanOfAnAbsentRootIsUnreachable: a library root that is not there may be a drive
+// that is not mounted, so a scan of it, of a sub-path under it, or one told to reconcile
+// deletions is one walk error and an unreachable root and marks nothing missing. The
+// outage is warned about once, without a watch-limit hint, however many scans meet it,
+// and its end is noted. When the root is back, nothing went missing meanwhile.
+func TestScanOfAnAbsentRootIsUnreachable(t *testing.T) {
 	t.Parallel()
-	_, lib, sc, _, root := fastPathFixture(t)
-	writeMP3(t, filepath.Join(root, "1.mp3"), "One", 1)
-	writeMP3(t, filepath.Join(root, "2.mp3"), "Two", 2)
+	st, lib, sc, _, root := fastPathFixture(t)
+	var logs bytes.Buffer
+	sc.log = slog.New(slog.NewTextHandler(&logs, nil))
+	writeMP3(t, filepath.Join(root, "a", "1.mp3"), "One", 1)
+	writeMP3(t, filepath.Join(root, "a", "2.mp3"), "Two", 2)
 	scanAll(t, sc, lib, false)
-	if err := os.RemoveAll(root); err != nil {
+	one := currentItemPID(t, st, "One")
+	away := root + ".unmounted"
+	if err := os.Rename(root, away); err != nil {
 		t.Fatal(err)
 	}
-	res, err := sc.Scan(context.Background(), Request{Library: lib}, nil)
-	if err != nil {
-		t.Fatalf("scan: %v", err)
+	for _, req := range []Request{{Library: lib}, {Library: lib, ForceReconcile: true}, {Library: lib, SubPath: filepath.Join(root, "a")}} {
+		res, err := sc.Scan(context.Background(), req, nil)
+		if err != nil {
+			t.Fatalf("scan %+v: %v", req, err)
+		}
+		assertScanPartition(t, res)
+		if !res.RootUnreachable || res.WalkErrors != 1 || res.Missing != 0 || res.FilesSeen != 0 {
+			t.Errorf("scan %+v = %+v, want one walk error, the root unreachable and nothing missing", req, res)
+		}
 	}
-	if res.Missing != 2 {
-		t.Errorf("scan = %+v, want both items missing", res)
+	if got := logs.String(); strings.Count(got, "library root is not reachable") != 1 || strings.Contains(got, "inotify") {
+		t.Errorf("log = %q, want the root named not reachable once and no watch hint", got)
+	}
+	if s := itemStateByPID(t, st, one); s != string(model.StatePresent) {
+		t.Errorf("item = %s while its root was away, want present", s)
+	}
+	if err := os.Rename(away, root); err != nil {
+		t.Fatal(err)
+	}
+	if r := scanAll(t, sc, lib, false); r.RootUnreachable || r.Missing != 0 || r.Unchanged != 2 {
+		t.Errorf("scan once the root is back = %+v, want both files unchanged and nothing missing", r)
+	}
+	if got := logs.String(); strings.Count(got, "library root is reachable again") != 1 {
+		t.Errorf("log = %q, want the root's return noted once", got)
 	}
 }
 

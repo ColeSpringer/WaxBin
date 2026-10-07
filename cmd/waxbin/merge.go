@@ -63,10 +63,22 @@ func newMergeCmd(g *globals) *cobra.Command {
 			}
 			fmt.Fprintf(w, "merged %d %s(s) into %s; %d children re-pointed\n",
 				len(reports), et, survivor, total)
+			fmt.Fprintln(w, mergeNote(et))
 			return nil
 		},
 	}
 	return cmd
+}
+
+// mergeNote is the caveat a merge prints: the catalog holds the merge, and files that
+// disagree with it can bring a merged entity back when they are read again. An album's
+// identity takes its folder as well as its tags.
+func mergeNote(et model.MergeEntity) string {
+	const reread = "when they are read again after a retag, move or content change, or by a rebuild"
+	if et == model.MergeAlbum {
+		return "note: merged albums can split again " + reread + ", unless their files are tagged alike and share one folder"
+	}
+	return "note: files still tagged with a merged spelling can split it off again " + reread + "; tag them alike to keep the merge"
 }
 
 // dedupLosers returns the distinct loser PIDs in input order, excluding any equal

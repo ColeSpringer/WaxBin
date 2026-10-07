@@ -343,12 +343,12 @@ func TestBookIdentLookupIgnoresISBNSeparators(t *testing.T) {
 		title: "The Hobbit", author: "J.R.R. Tolkien", isbn: "978-0-13-468599-1", durationMS: 1000,
 	})
 	for _, spelling := range []string{"978-0-13-468599-1", "9780134685991", "ISBN 978 0 13 468599 1"} {
-		got, err := st.ItemByBookIdent(ctx, "", "", spelling)
+		got, err := st.ItemsByBookIdent(ctx, "", "", spelling)
 		if err != nil {
 			t.Fatalf("lookup %q: %v", spelling, err)
 		}
-		if got.PID != book.ItemPID {
-			t.Errorf("lookup %q = %s, want %s", spelling, got.PID, book.ItemPID)
+		if len(got) != 1 || got[0].PID != book.ItemPID {
+			t.Errorf("lookup %q = %v, want %s", spelling, got, book.ItemPID)
 		}
 	}
 }

@@ -1195,3 +1195,30 @@ func TestCanceledPartialWriteRetiresTheConnection(t *testing.T) {
 			err, waxerr.CodeOf(err))
 	}
 }
+
+// TestRunRemoveRootRoundTrip: run_remove_root carries the library and force to the
+// server and answers with the job to follow, a refusal keeping its class.
+func TestRunRemoveRootRoundTrip(t *testing.T) {
+	var got proxy.RemoveRootParams
+	handlers := map[string]proxy.Handler{
+		proxy.MethodRunRemoveRoot: func(_ context.Context, raw json.RawMessage) (any, error) {
+			_ = json.Unmarshal(raw, &got)
+			if !got.Force {
+				return nil, waxerr.New(waxerr.CodeInvalid, "Library.RemoveRoot", "configured root")
+			}
+			return proxy.JobStartResult{JobPID: "job1"}, nil
+		},
+	}
+	c := dial(t, startServer(t, handlers, nil))
+	ctx := context.Background()
+	if _, err := c.RunRemoveRoot(ctx, proxy.RemoveRootParams{LibraryPID: "lib1"}); !waxerr.Is(err, waxerr.CodeInvalid) {
+		t.Errorf("unforced removal = %v, want CodeInvalid", err)
+	}
+	job, err := c.RunRemoveRoot(ctx, proxy.RemoveRootParams{LibraryPID: "lib1", Force: true})
+	if err != nil || job != "job1" {
+		t.Fatalf("run_remove_root = %q, %v; want the job", job, err)
+	}
+	if got.LibraryPID != "lib1" || !got.Force {
+		t.Errorf("run_remove_root params = %+v", got)
+	}
+}

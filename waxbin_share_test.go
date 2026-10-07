@@ -3,14 +3,17 @@ package waxbin_test
 import (
 	"context"
 	"database/sql"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/colespringer/waxbin"
 	"github.com/colespringer/waxbin/fingerprint"
+	"github.com/colespringer/waxbin/identity"
 	"github.com/colespringer/waxbin/internal/testaudio"
 	"github.com/colespringer/waxbin/model"
+	"github.com/colespringer/waxbin/query"
 
 	_ "modernc.org/sqlite"
 )
@@ -277,6 +280,239 @@ func TestResolveRefDescriptive(t *testing.T) {
 	noAlbum := model.PortableRef{Kind: model.KindTrack, Artist: "Amb Artist", Title: "Amb Song"}
 	if item, rung, err := lib.ResolveRef(ctx, noAlbum); err != nil || rung != model.MatchNone || item != nil {
 		t.Fatalf("empty-album tie-break = rung %s item %v err %v, want none (ambiguous)", rung, item, err)
+	}
+}
+
+// TestResolveRefWithAcceptsCopiesOfOneRecording: a tie ResolveRef declines between items
+// that are provably one recording is accepted under AcceptSameRecording, which takes the
+// present item with the lowest pid and counts the tie: two copies of an album track
+// matched by artist and title alone, a recording id two items share, and the same bytes
+// cataloged as a track and as a book. Two recordings that share only an artist and a
+// title are still declined, and so are two windows of one rip, with the tie counted.
+func TestResolveRefWithAcceptsCopiesOfOneRecording(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "c.db")
+	writeFile(t, filepath.Join(root, "rip one", "song.mp3"),
+		testaudio.BuildMP3WithAudio("Copied Song", "Copy Artist", "Copy Album", 3, testaudio.AudioWithSeed(51)))
+	writeFile(t, filepath.Join(root, "rip two", "song.mp3"),
+		testaudio.BuildMP3WithAudio("Copied Song", "Copy Artist", "Copy Album", 3, testaudio.AudioWithSeed(52)))
+	writeFile(t, filepath.Join(root, "studio.mp3"),
+		testaudio.BuildMP3WithAudio("Twice Song", "Twice Artist", "Studio Album", 1, testaudio.AudioWithSeed(53)))
+	writeFile(t, filepath.Join(root, "live.mp3"),
+		testaudio.BuildMP3WithAudio("Twice Song", "Twice Artist", "Live Album", 1, testaudio.AudioWithSeed(54)))
+	writeFile(t, filepath.Join(root, "single.mp3"),
+		testaudio.BuildMP3WithAudio("Single Edit", "Id Artist", "Single", 1, testaudio.AudioWithSeed(55)))
+	writeFile(t, filepath.Join(root, "best of.mp3"),
+		testaudio.BuildMP3WithAudio("Album Cut", "Id Artist", "Best Of", 1, testaudio.AudioWithSeed(56)))
+	writeFile(t, filepath.Join(root, "track.mp3"),
+		testaudio.BuildMP3WithAudio("Same Bytes", "Byte Artist", "Byte Album", 1, testaudio.AudioWithSeed(57)))
+	writeFile(t, filepath.Join(root, "book.m4b"),
+		testaudio.BuildMP3WithAudio("Same Bytes Read", "Byte Author", "", 1, testaudio.AudioWithSeed(57)))
+	writeCueRip(t, filepath.Join(root, "rip"), 9, "Window One", "Window Two")
+	lib := openManaged(t, ctx, db, root)
+	scanLib(t, ctx, lib)
+	accept := waxbin.ResolveOptions{AcceptSameRecording: true}
+	lower := func(a, b model.PID) (model.PID, model.PID) {
+		if a < b {
+			return a, b
+		}
+		return b, a
+	}
+
+	copies := model.PortableRef{Kind: model.KindTrack, Artist: "Copy Artist", Title: "Copied Song"}
+	if item, rung, err := lib.ResolveRef(ctx, copies); err != nil || item != nil || rung != model.MatchNone {
+		t.Fatalf("ResolveRef(copies) = %v %s %v, want declined", item, rung, err)
+	}
+	if m, err := lib.ResolveRefWith(ctx, copies, waxbin.ResolveOptions{}); err != nil || m.Item != nil || m.Candidates != 2 {
+		t.Fatalf("ResolveRefWith(copies) unaccepted = %+v (err %v), want declined with the tie counted", m, err)
+	}
+	var pair []model.PID
+	items, err := lib.Query(ctx, query.New(query.EntityItems).Where("title", query.OpIs, "Copied Song").Build(), "")
+	if err != nil || len(items) != 2 {
+		t.Fatalf("copies = %d (err %v), want 2 items", len(items), err)
+	}
+	for _, it := range items {
+		pair = append(pair, it.PID)
+	}
+	first, second := lower(pair[0], pair[1])
+	m, err := lib.ResolveRefWith(ctx, copies, accept)
+	if err != nil || m.Item == nil || m.Item.PID != first || m.Rung != model.MatchDescriptive || m.Candidates != 2 {
+		t.Fatalf("ResolveRefWith(copies) = %+v (err %v), want %s by descriptive of 2", m, err, first)
+	}
+	twice := model.PortableRef{Kind: model.KindTrack, Artist: "Twice Artist", Title: "Twice Song"}
+	batch, err := lib.ResolvePlaylistRefsWith(ctx, []model.PortableRef{copies, twice}, accept)
+	if err != nil || len(batch) != 2 || batch[0].PID != first || batch[0].Rung != model.MatchDescriptive || batch[0].Candidates != 2 ||
+		batch[1].PID != "" || batch[1].Rung != model.MatchNone || batch[1].Candidates != 2 {
+		t.Fatalf("ResolvePlaylistRefsWith = %+v (err %v), want the copies taken and the two recordings declined, each counting 2", batch, err)
+	}
+	if plain, err := lib.ResolvePlaylistRefs(ctx, []model.PortableRef{copies}); err != nil || len(plain) != 1 ||
+		plain[0].PID != "" || plain[0].Candidates != 2 {
+		t.Fatalf("ResolvePlaylistRefs(copies) = %+v (err %v), want declined with 2 candidates", plain, err)
+	}
+	firstItem, err := lib.Get(ctx, first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(firstItem.DisplayPath); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lib.MarkMissing(ctx, first, waxbin.MarkMissingOptions{}); err != nil {
+		t.Fatalf("mark missing: %v", err)
+	}
+	if m, err := lib.ResolveRefWith(ctx, copies, accept); err != nil || m.Item == nil || m.Item.PID != second {
+		t.Fatalf("ResolveRefWith(copies) with the first missing = %+v (err %v), want the present %s", m, err, second)
+	}
+
+	if m, err := lib.ResolveRefWith(ctx, twice, accept); err != nil || m.Item != nil || m.Rung != model.MatchNone || m.Candidates != 2 {
+		t.Fatalf("ResolveRefWith(two recordings) = %+v (err %v), want declined with 2 candidates", m, err)
+	}
+
+	single, best := itemPIDByTitle(t, ctx, lib, "Single Edit"), itemPIDByTitle(t, ctx, lib, "Album Cut")
+	rawExec(t, db, "UPDATE track SET mbid = ? WHERE item_id IN (SELECT id FROM playable_item WHERE pid IN (?, ?))",
+		"rec-shared", string(single), string(best))
+	byID := model.PortableRef{Kind: model.KindTrack, MBID: "REC-SHARED", Essence: "sha256:nomatch"}
+	if item, _, err := lib.ResolveRef(ctx, byID); err != nil || item != nil {
+		t.Fatalf("ResolveRef(shared mbid) = %v (err %v), want declined", item, err)
+	}
+	low, _ := lower(single, best)
+	if m, err := lib.ResolveRefWith(ctx, byID, accept); err != nil || m.Item == nil || m.Item.PID != low || m.Rung != model.MatchStrongID || m.Candidates != 2 {
+		t.Fatalf("ResolveRefWith(shared mbid) = %+v (err %v), want %s by strong id of 2", m, err, low)
+	}
+
+	trackPID, bookPID := itemPIDByTitle(t, ctx, lib, "Same Bytes"), itemPIDByTitle(t, ctx, lib, "Same Bytes Read")
+	essence := exportRefs(t, ctx, lib, trackPID)[0].Essence
+	bare := model.PortableRef{Essence: essence}
+	if item, _, err := lib.ResolveRef(ctx, bare); err != nil || item != nil {
+		t.Fatalf("ResolveRef(essence of a track and a book) = %v (err %v), want declined", item, err)
+	}
+	low, _ = lower(trackPID, bookPID)
+	if m, err := lib.ResolveRefWith(ctx, bare, accept); err != nil || m.Item == nil || m.Item.PID != low || m.Rung != model.MatchEssence || m.Candidates != 2 {
+		t.Fatalf("ResolveRefWith(essence tie) = %+v (err %v), want %s by essence of 2", m, err, low)
+	}
+
+	window := exportRefs(t, ctx, lib, itemPIDByTitle(t, ctx, lib, "Window One"))[0]
+	windows := model.PortableRef{Essence: window.Essence, DurationMS: window.DurationMS}
+	if m, err := lib.ResolveRefWith(ctx, windows, accept); err != nil || m.Item != nil || m.Candidates != 2 {
+		t.Fatalf("ResolveRefWith(two equal windows of a rip) = %+v (err %v), want declined with 2 candidates", m, err)
+	}
+}
+
+// TestResolveRefWithAcceptsBooksSharingTheRefsISBN: two books that carry the ISBN a ref
+// names, and no other id, tie on the strong-id rung, which the ISBN proves.
+func TestResolveRefWithAcceptsBooksSharingTheRefsISBN(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "c.db")
+	writeFile(t, filepath.Join(root, "one.m4b"), testaudio.BuildMP3WithAudio("Edition One", "Isbn Author", "", 1, testaudio.AudioWithSeed(97)))
+	writeFile(t, filepath.Join(root, "two.m4b"), testaudio.BuildMP3WithAudio("Edition Two", "Isbn Author", "", 1, testaudio.AudioWithSeed(98)))
+	lib := openManaged(t, ctx, db, root)
+	scanLib(t, ctx, lib)
+	one, two := itemPIDByTitle(t, ctx, lib, "Edition One"), itemPIDByTitle(t, ctx, lib, "Edition Two")
+	const isbn = "978-0-306-40615-7"
+	rawExec(t, db, "UPDATE book SET isbn = ?, isbn_key = ? WHERE item_id IN (SELECT id FROM playable_item WHERE pid IN (?, ?))",
+		isbn, identity.ISBNKey(isbn), string(one), string(two))
+	ref := model.PortableRef{Kind: model.KindBook, ISBN: "9780306406157"}
+	low := one
+	if two < low {
+		low = two
+	}
+	m, err := lib.ResolveRefWith(ctx, ref, waxbin.ResolveOptions{AcceptSameRecording: true})
+	if err != nil || m.Item == nil || m.Item.PID != low || m.Rung != model.MatchStrongID || m.Candidates != 2 {
+		t.Fatalf("ResolveRefWith(two books with the ref's ISBN) = %+v (err %v), want %s by strong id of 2", m, err, low)
+	}
+}
+
+// TestResolveRefWithDeclinesUnnumberedNamesakes: two different tracks on one album that
+// share a title and a length but carry no track number, two interludes say, are not
+// provably one recording, so even AcceptSameRecording declines the tie.
+func TestResolveRefWithDeclinesUnnumberedNamesakes(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := t.TempDir()
+	for i, name := range []string{"interlude a.mp3", "interlude b.mp3"} {
+		writeFile(t, filepath.Join(root, "album", name), testaudio.BuildMP3FromSpec(testaudio.MP3Spec{
+			Title: "Interlude", Artist: "Skit Artist", Album: "Skit Album", Audio: testaudio.AudioWithSeed(byte(95 + i))}))
+	}
+	lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "c.db"), root)
+	scanLib(t, ctx, lib)
+	ref := model.PortableRef{Kind: model.KindTrack, Artist: "Skit Artist", Title: "Interlude"}
+	m, err := lib.ResolveRefWith(ctx, ref, waxbin.ResolveOptions{AcceptSameRecording: true})
+	if err != nil || m.Item != nil || m.Candidates != 2 {
+		t.Fatalf("ResolveRefWith(two unnumbered interludes) = %+v (err %v), want declined with 2 candidates", m, err)
+	}
+}
+
+// TestResolveRefWithDeclinesABookHoldingTheBytesAsAPart: a track and a two-part book one
+// of whose parts is the track's bytes share an essence, but the book is more than that
+// recording, so even AcceptSameRecording declines the tie.
+func TestResolveRefWithDeclinesABookHoldingTheBytesAsAPart(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "track.mp3"),
+		testaudio.BuildMP3WithAudio("Part Song", "Part Artist", "Part Album", 1, testaudio.AudioWithSeed(91)))
+	writeFile(t, filepath.Join(root, "book", "p1.m4b"),
+		testaudio.BuildMP3WithAudio("Long Book", "Book Author", "", 1, testaudio.AudioWithSeed(91)))
+	writeFile(t, filepath.Join(root, "book", "p2.m4b"),
+		testaudio.BuildMP3WithAudio("Long Book", "Book Author", "", 2, testaudio.AudioWithSeed(92)))
+	lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "c.db"), root)
+	scanLib(t, ctx, lib)
+	track := itemPIDByTitle(t, ctx, lib, "Part Song")
+	book := itemPIDByTitle(t, ctx, lib, "Long Book")
+	if files, err := lib.ItemFiles(ctx, book); err != nil || len(files) != 2 {
+		t.Fatalf("book files = %+v (err %v), want two parts", files, err)
+	}
+	bare := model.PortableRef{Essence: exportRefs(t, ctx, lib, track)[0].Essence}
+	m, err := lib.ResolveRefWith(ctx, bare, waxbin.ResolveOptions{AcceptSameRecording: true})
+	if err != nil || m.Item != nil || m.Candidates != 2 {
+		t.Fatalf("ResolveRefWith(a track's bytes, also a book's part) = %+v (err %v), want declined with 2 candidates", m, err)
+	}
+}
+
+// TestResolveRefWithAcceptsAFingerprintTie: two encodings that decode to the same audio
+// match a ref's fingerprint equally, which ResolveRef declines and AcceptSameRecording
+// takes.
+func TestResolveRefWithAcceptsAFingerprintTie(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	const rate = 22050
+	audio := testaudio.RichSignal(rate, 20, testaudio.MusicalPartials, 3)
+
+	rootA := t.TempDir()
+	writeFile(t, filepath.Join(rootA, "source.wav"), testaudio.EncodeWAV16(rate, audio))
+	libA := openManaged(t, ctx, filepath.Join(t.TempDir(), "a.db"), rootA)
+	scanLib(t, ctx, libA)
+	if _, err := libA.Analyze(ctx, waxbin.AnalyzeOptions{}); err != nil {
+		t.Fatalf("analyze A: %v", err)
+	}
+	ref := exportRefs(t, ctx, libA, itemPIDByTitle(t, ctx, libA, "source"))[0]
+	if len(ref.Fingerprint) == 0 {
+		t.Skip("analyze produced no fingerprint (no decoder available)")
+	}
+	ref.Essence = "sha256:nomatch"
+
+	rootB := t.TempDir()
+	writeFile(t, filepath.Join(rootB, "wave.wav"), testaudio.EncodeWAV16(rate, audio))
+	writeFile(t, filepath.Join(rootB, "flac.flac"), testaudio.EncodeAs(t, "flac", "", rate, audio))
+	libB := openManaged(t, ctx, filepath.Join(t.TempDir(), "b.db"), rootB)
+	scanLib(t, ctx, libB)
+	if _, err := libB.Analyze(ctx, waxbin.AnalyzeOptions{}); err != nil {
+		t.Fatalf("analyze B: %v", err)
+	}
+	wave, flac := itemPIDByTitle(t, ctx, libB, "wave"), itemPIDByTitle(t, ctx, libB, "flac")
+	if item, _, err := libB.ResolveRef(ctx, ref); err != nil || item != nil {
+		t.Fatalf("ResolveRef(fingerprint tie) = %v (err %v), want declined", item, err)
+	}
+	low := wave
+	if flac < low {
+		low = flac
+	}
+	m, err := libB.ResolveRefWith(ctx, ref, waxbin.ResolveOptions{AcceptSameRecording: true})
+	if err != nil || m.Item == nil || m.Item.PID != low || m.Rung != model.MatchFingerprint || m.Candidates != 2 {
+		t.Fatalf("ResolveRefWith(fingerprint tie) = %+v (err %v), want %s by fingerprint of 2", m, err, low)
 	}
 }
 

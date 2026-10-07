@@ -207,3 +207,42 @@ func TestMarkMissingMultiFileBookRefusesPartialView(t *testing.T) {
 		t.Errorf("state = %q, want present (a refused call must not write)", st)
 	}
 }
+
+// TestAnAbsentRootIsUnreachableToScanAndMarkMissing: with a library root gone, a scan
+// reports it unreachable and marks nothing missing, as MarkMissing refuses to; once the
+// root is back, a scan finds every item still present.
+func TestAnAbsentRootIsUnreachableToScanAndMarkMissing(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := filepath.Join(t.TempDir(), "mount")
+	writeFile(t, filepath.Join(root, "album", "one.mp3"), testaudio.BuildMP3("One", "Artist", "Album", 1))
+	lib := openManaged(t, ctx, filepath.Join(t.TempDir(), "catalog.db"), root)
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	items, _ := lib.Query(ctx, query.New(query.EntityItems).Build(), "")
+	if len(items) != 1 {
+		t.Fatalf("items = %d, want 1", len(items))
+	}
+	pid := items[0].PID
+	away := root + ".away"
+	if err := os.Rename(root, away); err != nil {
+		t.Fatal(err)
+	}
+	res, err := lib.Scan(ctx, waxbin.ScanRequest{})
+	if err != nil || !res.Total.RootUnreachable || res.Total.Missing != 0 {
+		t.Fatalf("scan with the root away = %+v (err %v), want it unreachable and nothing missing", res, err)
+	}
+	if _, err := lib.MarkMissing(ctx, pid, waxbin.MarkMissingOptions{}); !waxerr.Is(err, waxerr.CodeIO) {
+		t.Errorf("mark-missing with the root away = %v, want CodeIO", err)
+	}
+	if err := os.Rename(away, root); err != nil {
+		t.Fatal(err)
+	}
+	if res, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil || res.Total.RootUnreachable || res.Total.Missing != 0 {
+		t.Fatalf("scan once the root is back = %+v (err %v), want nothing missing", res, err)
+	}
+	if st := stateOf(t, ctx, lib, pid); st != model.StatePresent {
+		t.Errorf("state = %q, want present throughout", st)
+	}
+}

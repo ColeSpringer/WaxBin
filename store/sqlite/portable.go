@@ -10,7 +10,7 @@ import (
 )
 
 // This file holds the read primitives behind the cross-catalog sharing feature
-// (facade ResolveRef/ExportPlaylistRefs). Every method is a pure read on the read
+// (facade ResolveRefWith/ExportPlaylistRefs). Every method is a pure read on the read
 // pool (s.read): it writes no change_log rows and is safe on a read-only Library. None of
 // them belongs to the model.Catalog port. They are extra methods on *Store that the
 // facade calls directly, so the port stays as it is and the var _ model.Catalog assertion
@@ -74,23 +74,22 @@ func (s *Store) ItemsByContentHash(ctx context.Context, hash string) ([]*model.I
 	return collectItems(rows, op)
 }
 
-// ItemByRecordingMBID returns the single track item whose recording MBID matches
-// (case-insensitively). It returns CodeNotFound for zero matches or for more than one:
-// a recording legitimately appears on both a single and a compilation, and resolving an
-// ambiguous id to an arbitrary one of them would rebuild a shared playlist against the
-// wrong local item, so the strong-id rung declines and the caller falls through to the
-// fuzzier rungs.
-func (s *Store) ItemByRecordingMBID(ctx context.Context, mbid string) (*model.ItemView, error) {
-	const op = "store.ItemByRecordingMBID"
+// ItemsByRecordingMBID returns every track item whose recording MBID matches
+// (case-insensitively), an empty slice on a miss. Several are a tie for the caller to
+// settle: a recording legitimately appears on both a single and a compilation, and
+// resolving the id to an arbitrary one of them would rebuild a shared playlist against
+// the wrong local item.
+func (s *Store) ItemsByRecordingMBID(ctx context.Context, mbid string) ([]*model.ItemView, error) {
+	const op = "store.ItemsByRecordingMBID"
 	if mbid == "" {
-		return nil, waxerr.New(waxerr.CodeNotFound, op, "no recording mbid")
+		return nil, nil
 	}
 	rows, err := s.read.QueryContext(ctx,
-		itemSelect+" WHERE pi.kind = 'track' AND t.mbid = ? COLLATE NOCASE LIMIT 2", mbid)
+		itemSelect+" WHERE pi.kind = 'track' AND t.mbid = ? COLLATE NOCASE ORDER BY pi.pid", mbid)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
-	return singleItem(rows, op, "recording mbid")
+	return collectItems(rows, op)
 }
 
 // ItemsByArtistKey returns the track items whose artist entity has the given match key,
@@ -112,27 +111,27 @@ func (s *Store) ItemsByArtistKey(ctx context.Context, artistMatchKey string) ([]
 	return collectItems(rows, op)
 }
 
-// ItemByBookIdent returns the single book item matching any of the supplied strong ids
-// (release MBID, ASIN, ISBN), each compared case-insensitively and only when non-empty.
-// Like ItemByRecordingMBID it returns CodeNotFound for zero or more than one match. All
-// three match reliably cross-catalog: MBID and ASIN vary only by case, and the ISBN is
-// compared on book.isbn_key, the canonical form stored beside the raw value, so a
-// hyphenated and an unhyphenated spelling of one book do compare equal.
-func (s *Store) ItemByBookIdent(ctx context.Context, mbid, asin, isbn string) (*model.ItemView, error) {
-	const op = "store.ItemByBookIdent"
+// ItemsByBookIdent returns every book item matching any of the supplied strong ids
+// (release MBID, ASIN, ISBN), each compared case-insensitively and only when non-empty,
+// with ItemsByRecordingMBID's rule for several. All three match reliably cross-catalog:
+// MBID and ASIN vary only by case, and the ISBN is compared on book.isbn_key, the
+// canonical form stored beside the raw value, so a hyphenated and an unhyphenated
+// spelling of one book do compare equal.
+func (s *Store) ItemsByBookIdent(ctx context.Context, mbid, asin, isbn string) ([]*model.ItemView, error) {
+	const op = "store.ItemsByBookIdent"
 	if mbid == "" && asin == "" && isbn == "" {
-		return nil, waxerr.New(waxerr.CodeNotFound, op, "no book identifier")
+		return nil, nil
 	}
 	rows, err := s.read.QueryContext(ctx,
 		itemSelect+` WHERE pi.kind = 'book' AND (
 			 (? <> '' AND bk.mbid = ? COLLATE NOCASE)
 		  OR (? <> '' AND bk.asin = ? COLLATE NOCASE)
-		  OR (? <> '' AND bk.isbn_key = ?)) LIMIT 2`,
+		  OR (? <> '' AND bk.isbn_key = ?)) ORDER BY pi.pid`,
 		mbid, mbid, asin, asin, identity.ISBNKey(isbn), identity.ISBNKey(isbn))
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
-	return singleItem(rows, op, "book identifier")
+	return collectItems(rows, op)
 }
 
 // ItemsByAuthorKey returns the book items whose author entity has the given match key,
@@ -296,31 +295,6 @@ ORDER BY shared DESC`
 		out = append(out, c)
 	}
 	return out, rows.Err()
-}
-
-// singleItem reads at most two rows and returns the single item, or CodeNotFound for
-// zero or more than one. The ambiguity is a deliberate decline: a strong id that maps to
-// several local items must not resolve to an arbitrary one.
-func singleItem(rows *sql.Rows, op, what string) (*model.ItemView, error) {
-	defer rows.Close()
-	var got *model.ItemView
-	for rows.Next() {
-		v, err := scanItemView(rows)
-		if err != nil {
-			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
-		}
-		if got != nil {
-			return nil, waxerr.New(waxerr.CodeNotFound, op, "ambiguous "+what)
-		}
-		got = v
-	}
-	if err := rows.Err(); err != nil {
-		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
-	}
-	if got == nil {
-		return nil, waxerr.New(waxerr.CodeNotFound, op, "no item for "+what)
-	}
-	return got, nil
 }
 
 // collectItems drains rows into a slice of item views.

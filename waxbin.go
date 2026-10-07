@@ -24,6 +24,7 @@ import (
 	"github.com/colespringer/waxbin/fingerprint"
 	"github.com/colespringer/waxbin/identity"
 	"github.com/colespringer/waxbin/inbox"
+	"github.com/colespringer/waxbin/internal/fsx"
 	"github.com/colespringer/waxbin/internal/pathx"
 	"github.com/colespringer/waxbin/jobs"
 	"github.com/colespringer/waxbin/meta"
@@ -111,12 +112,15 @@ type Library struct {
 	// Close drains them against the still-open store instead of tearing it down mid-job.
 	jobsWG sync.WaitGroup
 
-	// rootMu serializes runtime root-set mutations (AddRoot, RelocateRoot) so each
-	// validates against the registered set and writes its row atomically. Without it,
-	// two concurrent proxy connections could each validate before the other's row lands
-	// and both commit overlapping roots, the state Open's validation forbids.
+	// rootMu serializes runtime root-set mutations (AddRoot, RelocateRoot, RemoveRoot) so
+	// each validates against the registered set and writes its row atomically. Without
+	// it, two concurrent proxy connections could each validate before the other's row
+	// lands and both commit overlapping roots, the state Open's validation forbids.
 	// SetProfiles holds it too, so a root cannot be added under a profile being removed.
-	rootMu sync.Mutex
+	// It also guards opts.Roots, which a forced RemoveRoot trims and RelocateRoot moves,
+	// and removing, the libraries a RemoveRoot is taking out, by pid.
+	rootMu   sync.Mutex
+	removing map[model.PID]*model.Library
 
 	// profileMu guards profiles, which SetProfiles replaces; read it through profileSet.
 	profileMu sync.RWMutex
@@ -351,7 +355,11 @@ func (l *Library) Close() error {
 // ReadOnly reports whether the library was opened read-only.
 func (l *Library) ReadOnly() bool { return l.store.ReadOnly() }
 
+// ensureRoots registers the configured roots, under rootMu since RemoveRoot and
+// RelocateRoot change them.
 func (l *Library) ensureRoots(ctx context.Context) error {
+	l.rootMu.Lock()
+	defer l.rootMu.Unlock()
 	for _, r := range l.opts.Roots {
 		if _, err := l.store.EnsureLibrary(ctx, &model.Library{
 			Root:        []byte(r.Path),
@@ -411,14 +419,15 @@ func readOnlyIDs(libs []*model.Library) map[int64]bool {
 	return out
 }
 
-// AddRootOption tunes AddRoot.
-type AddRootOption func(*addRootOptions)
+// RootOption tunes AddRoot and RelocateRoot.
+type RootOption func(*rootOptions)
 
-type addRootOptions struct{ allowAbsent bool }
+type rootOptions struct{ allowAbsent bool }
 
-// AllowAbsent lets AddRoot register a root whose folder does not exist yet, such as a
-// drive or volume mounted later. A scan of it finds nothing until the folder is there.
-func AllowAbsent() AddRootOption { return func(o *addRootOptions) { o.allowAbsent = true } }
+// AllowAbsent lets AddRoot register, or RelocateRoot move a library to, a root whose
+// folder does not exist yet, such as a drive or volume mounted later. A scan of it
+// reports the root unreachable until the folder is there.
+func AllowAbsent() RootOption { return func(o *rootOptions) { o.allowAbsent = true } }
 
 // AddRoot registers a library root at runtime, without reopening the Library. The
 // spec is validated against every root already registered exactly as Open validates
@@ -434,14 +443,14 @@ func AllowAbsent() AddRootOption { return func(o *addRootOptions) { o.allowAbsen
 // pick the new root up immediately and the row survives a restart even if the embedder
 // never adds it to its own configuration. A running Watch follows it on its next
 // scheduled tick.
-func (l *Library) AddRoot(ctx context.Context, spec config.Root, opts ...AddRootOption) (*model.Library, error) {
+func (l *Library) AddRoot(ctx context.Context, spec config.Root, opts ...RootOption) (*model.Library, error) {
 	if l.ReadOnly() {
 		return nil, waxerr.New(waxerr.CodeUnsupported, "Library.AddRoot", "adding a root requires a read-write library")
 	}
 	if strings.TrimSpace(spec.Path) != "" && !filepath.IsAbs(spec.Path) {
 		return nil, waxerr.New(waxerr.CodeInvalid, "Library.AddRoot", "library root must be an absolute path: "+spec.Path)
 	}
-	var o addRootOptions
+	var o rootOptions
 	for _, opt := range opts {
 		opt(&o)
 	}
@@ -456,6 +465,12 @@ func (l *Library) AddRoot(ctx context.Context, spec config.Root, opts ...AddRoot
 	if err != nil {
 		return nil, err
 	}
+	for _, lib := range l.removing {
+		if pathx.SamePath(string(lib.Root), normalized.Path) {
+			return nil, waxerr.New(waxerr.CodeConflict, "Library.AddRoot",
+				"library "+string(lib.PID)+" at "+lib.DisplayRoot+" is being removed; add the root again once that is done")
+		}
+	}
 	if err := knownProfile(l.profileSet(), "Library.AddRoot", normalized.Path, normalized.Mode, normalized.Profile); err != nil {
 		return nil, err
 	}
@@ -469,6 +484,148 @@ func (l *Library) AddRoot(ctx context.Context, spec config.Root, opts ...AddRoot
 		Media:       normalized.Media,
 		Profile:     normalized.Profile,
 	})
+}
+
+// RemoveRootOptions tunes RemoveRoot.
+type RemoveRootOptions struct {
+	// Force removes a root this Library was opened with (Options.Roots). Every open
+	// registers those again, so the caller takes it out of its configuration as well;
+	// this handle forgets it, so a reopen after a maintenance hand-off leaves it out.
+	Force bool
+}
+
+// RemoveRoot takes a library out of the catalog without touching its files. Each file row
+// under it is detached: an item with a copy in another library carries on from that copy,
+// and an item left with no file is archived with its pid, play state and playlist
+// entries, so AddRoot of the same path and a scan re-link it. The library's trash journal
+// goes too, its trashed files staying in the library's trash folder, and the row is
+// deleted with one library delta. A running Watch drops the root on its next tick, and a
+// Watch of this library alone stops.
+//
+// It runs as a "remove-root" job under the filesystem lease, so it is CodeConflict while a
+// scan, organize, import or delete runs, and while it runs AddRoot of the same path is a
+// conflict too. The internal podcast library is refused, and so is a root in Options.Roots
+// unless opts.Force is set. StartRemoveRoot is the asynchronous variant a server exposes.
+func (l *Library) RemoveRoot(ctx context.Context, libPID model.PID, opts RemoveRootOptions) (*model.RemoveRootReport, error) {
+	const op = "Library.RemoveRoot"
+	if err := l.checkRemoveRoot(ctx, op, libPID, opts.Force); err != nil {
+		return nil, err
+	}
+	var rep *model.RemoveRootReport
+	_, err := l.jobs.Run(ctx, removeRootSpec(libPID), func(jctx context.Context, h *jobs.Handle) error {
+		var err error
+		rep, err = l.removeRootWork(jctx, op, libPID, opts.Force, h)
+		return err
+	})
+	return rep, err
+}
+
+// StartRemoveRoot submits RemoveRoot as a background job and returns its pid; the
+// finished job's Result holds the model.RemoveRootReport as JSON. The request is checked
+// before the job starts, so a refused one starts none.
+func (l *Library) StartRemoveRoot(ctx context.Context, libPID model.PID, opts RemoveRootOptions) (model.PID, error) {
+	const op = "waxbin.StartRemoveRoot"
+	if err := l.checkRemoveRoot(ctx, op, libPID, opts.Force); err != nil {
+		return "", err
+	}
+	return l.startJob(ctx, removeRootSpec(libPID), func(jctx context.Context, h *jobs.Handle) error {
+		_, err := l.removeRootWork(jctx, op, libPID, opts.Force, h)
+		return err
+	})
+}
+
+func removeRootSpec(libPID model.PID) jobs.Spec {
+	return jobs.Spec{Kind: "remove-root", Scope: fsMutateScope, TargetType: "library", TargetPID: libPID}
+}
+
+// checkRemoveRoot refuses a removal before its job starts, so a refusal leaves no failed
+// job behind. The job checks again once it holds the lease.
+func (l *Library) checkRemoveRoot(ctx context.Context, op string, libPID model.PID, force bool) error {
+	if l.ReadOnly() {
+		return waxerr.New(waxerr.CodeUnsupported, op, "removing a root requires a read-write library")
+	}
+	l.rootMu.Lock()
+	defer l.rootMu.Unlock()
+	_, err := l.removableRoot(ctx, op, libPID, force)
+	return err
+}
+
+// removeRootWork removes the library inside its job. The library is marked as being
+// removed while the batches run, off rootMu, so a root mutation waits on nothing a slow
+// disk can hold up; a removal that finished drops a configured root from this handle.
+// What the removal promoted is re-read however it ended, since each batch committed.
+func (l *Library) removeRootWork(ctx context.Context, op string, libPID model.PID, force bool, h *jobs.Handle) (*model.RemoveRootReport, error) {
+	lib, err := l.beginRemoval(ctx, op, libPID, force)
+	if err != nil {
+		return nil, err
+	}
+	rep, promoted, err := l.store.RemoveLibrary(ctx, libPID, func(done, total int) error {
+		return h.Heartbeat(ctx, float64(done)/float64(max(total, 1)),
+			"detached "+strconv.Itoa(done)+" of "+strconv.Itoa(total)+" files")
+	})
+	var removed *model.Library
+	if err == nil {
+		removed = lib
+	}
+	l.endRemoval(libPID, removed)
+	l.rereadPromoted(context.WithoutCancel(ctx), promoted)
+	if rep != nil {
+		h.SetResult(l.jsonResult(rep))
+	}
+	return rep, err
+}
+
+// beginRemoval checks the library again under rootMu and marks it as being removed, which
+// AddRoot reads.
+func (l *Library) beginRemoval(ctx context.Context, op string, libPID model.PID, force bool) (*model.Library, error) {
+	l.rootMu.Lock()
+	defer l.rootMu.Unlock()
+	lib, err := l.removableRoot(ctx, op, libPID, force)
+	if err != nil {
+		return nil, err
+	}
+	if l.removing == nil {
+		l.removing = map[model.PID]*model.Library{}
+	}
+	l.removing[libPID] = lib
+	return lib, nil
+}
+
+// endRemoval clears the mark, and for a library that is gone drops its root from the
+// configured set.
+func (l *Library) endRemoval(libPID model.PID, removed *model.Library) {
+	l.rootMu.Lock()
+	defer l.rootMu.Unlock()
+	delete(l.removing, libPID)
+	if removed != nil {
+		l.opts.Roots = slices.DeleteFunc(slices.Clone(l.opts.Roots), func(c config.Root) bool {
+			return pathx.SamePath(string(removed.Root), c.Path)
+		})
+	}
+}
+
+// removableRoot returns the library RemoveRoot may remove, or why not. The caller holds
+// rootMu.
+func (l *Library) removableRoot(ctx context.Context, op string, libPID model.PID, force bool) (*model.Library, error) {
+	libs, err := l.store.Libraries(ctx)
+	if err != nil {
+		return nil, err
+	}
+	i := slices.IndexFunc(libs, func(lib *model.Library) bool { return lib.PID == libPID })
+	if i < 0 {
+		return nil, waxerr.New(waxerr.CodeNotFound, op, "no such library: "+string(libPID))
+	}
+	lib := libs[i]
+	if lib.Mode == model.ModePodcast {
+		return nil, waxerr.New(waxerr.CodeInvalid, op,
+			"the internal podcast library follows the podcasts dir config and cannot be removed")
+	}
+	if !force && slices.ContainsFunc(l.opts.Roots, func(c config.Root) bool { return pathx.SamePath(string(lib.Root), c.Path) }) {
+		return nil, waxerr.New(waxerr.CodeInvalid, op, "library root "+lib.DisplayRoot+
+			" is in the configuration this catalog was opened with, which registers it again at every open;"+
+			" take it out of the configuration, or pass force to remove it until then")
+	}
+	return lib, nil
 }
 
 // validateRootSet validates candidate against every registered root except the one
@@ -1038,8 +1195,9 @@ type WatchOptions struct {
 // over a local control socket. Idle lock release is deliberately post-1.0.
 //
 // The watched roots are re-read from the catalog on every scheduled tick, so a root
-// registered through AddRoot or moved by RelocateRoot is followed without a restart, and
-// with Live its tree is armed then too.
+// registered through AddRoot, moved by RelocateRoot or dropped by RemoveRoot is followed
+// without a restart, and with Live its tree is armed or released then too. A watch of
+// one library stops once that library is removed, returning CodeNotFound.
 func (l *Library) Watch(ctx context.Context, opts WatchOptions) error {
 	if l.ReadOnly() {
 		return waxerr.New(waxerr.CodeUnsupported, "Library.Watch", "watch requires a read-write library")
@@ -1074,9 +1232,20 @@ type watchEngine struct {
 }
 
 // Roots re-resolves the watched libraries from the catalog, which is where a runtime
-// AddRoot or RelocateRoot lands.
+// AddRoot, RelocateRoot or RemoveRoot lands. Watching every library, none left is an
+// empty set; watching one that is gone is CodeNotFound, which stops the watch.
 func (e *watchEngine) Roots(ctx context.Context) ([]watch.Root, error) {
+	if e.libPID == "" {
+		libs, err := e.lib.store.Libraries(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return watchRoots(userLibraries(libs)), nil
+	}
 	libs, err := e.lib.resolveLibraries(ctx, e.libPID)
+	if waxerr.Is(err, waxerr.CodeNotFound) {
+		return nil, waxerr.New(waxerr.CodeNotFound, "Library.Watch", "the watched library "+string(e.libPID)+" was removed")
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -3111,8 +3280,7 @@ func (l *Library) goneUnderMountedRoots(ctx context.Context, absent []model.Item
 		}
 		ok, seen := mounted[lib.PID]
 		if !seen {
-			info, err := os.Stat(pathx.Long(rawRoot(lib)))
-			ok = err == nil && info.IsDir()
+			ok = fsx.RootUnreachable(rawRoot(lib)) == nil
 			mounted[lib.PID] = ok
 		}
 		switch {
@@ -4009,13 +4177,30 @@ func (l *Library) Manifest(ctx context.Context) (*port.Manifest, error) {
 	return &m, nil
 }
 
-// RelocateRoot re-points a library and every file under it at a new root path, for a
-// portable restore onto a different machine or mount. The new path is validated with the
-// moved library's entry substituted, so a relocation cannot create the overlap Open
-// would refuse. The internal podcast library is not relocatable: its root follows the
-// podcasts dir config.
-func (l *Library) RelocateRoot(ctx context.Context, libPID model.PID, newRoot string) error {
+// RelocateRoot re-points a library, every file under it and its trash journal at a new
+// root path, for a portable restore onto a different machine or mount. The new path is
+// validated with the moved library's entry substituted, so a relocation cannot create the
+// overlap Open would refuse, and like AddRoot's it must be an absolute folder a scan can
+// walk, one not there yet only with AllowAbsent. It holds the filesystem lease, so it is
+// CodeConflict while a scan, organize, import or delete runs. The internal podcast
+// library is not relocatable: its root follows the podcasts dir config.
+func (l *Library) RelocateRoot(ctx context.Context, libPID model.PID, newRoot string, opts ...RootOption) error {
+	return l.jobs.RunLeased(ctx, fsMutateScope, func(ctx context.Context) error {
+		return l.relocateRoot(ctx, libPID, newRoot, opts)
+	})
+}
+
+func (l *Library) relocateRoot(ctx context.Context, libPID model.PID, newRoot string, opts []RootOption) error {
 	const op = "Library.RelocateRoot"
+	if !filepath.IsAbs(newRoot) {
+		return waxerr.New(waxerr.CodeInvalid, op, "new library root must be an absolute path: "+newRoot)
+	}
+	var o rootOptions
+	for _, opt := range opts {
+		opt(&o)
+	}
+	// Stat before rootMu, as AddRoot does, and report after the overlap checks.
+	walkable := config.CheckFolder(filepath.Clean(newRoot), o.allowAbsent)
 	// Serialize with AddRoot (and other relocations) so the read-validate-write is
 	// atomic against a concurrent root mutation; see rootMu.
 	l.rootMu.Lock()
@@ -4044,7 +4229,22 @@ func (l *Library) RelocateRoot(ctx context.Context, libPID model.PID, newRoot st
 	if err != nil {
 		return err
 	}
-	return l.store.RelocateLibraryRoot(ctx, libPID, normalized.Path)
+	if walkable != nil {
+		return walkable
+	}
+	if err := l.store.RelocateLibraryRoot(ctx, libPID, normalized.Path); err != nil {
+		return err
+	}
+	// A configured root moves with its library, or a reopen of this handle would register
+	// the old path again as an empty library.
+	roots := slices.Clone(l.opts.Roots)
+	for i := range roots {
+		if pathx.SamePath(string(moved.Root), roots[i].Path) {
+			roots[i].Path = normalized.Path
+		}
+	}
+	l.opts.Roots = roots
+	return nil
 }
 
 // SetSecret stores a named credential in the secret table. Values are never
@@ -4141,14 +4341,7 @@ func (l *Library) resolveLibraries(ctx context.Context, pid model.PID) ([]*model
 		return nil, err
 	}
 	if pid == "" {
-		// Exclude the internal podcast library. scan/rebuild walk user roots; podcast
-		// downloads are cataloged by the podcast engine.
-		var userLibs []*model.Library
-		for _, lib := range libs {
-			if lib.Mode != model.ModePodcast {
-				userLibs = append(userLibs, lib)
-			}
-		}
+		userLibs := userLibraries(libs)
 		if len(userLibs) == 0 {
 			return nil, waxerr.New(waxerr.CodeInvalid, "Library.Scan", "no library roots configured")
 		}
@@ -4166,6 +4359,18 @@ func (l *Library) resolveLibraries(ctx context.Context, pid model.PID) ([]*model
 		}
 	}
 	return nil, waxerr.New(waxerr.CodeNotFound, "Library.Scan", "no such library: "+string(pid))
+}
+
+// userLibraries is the libraries a scan or a watch of every library covers: all but the
+// internal podcast library, whose downloads the podcast engine catalogs.
+func userLibraries(libs []*model.Library) []*model.Library {
+	var out []*model.Library
+	for _, lib := range libs {
+		if lib.Mode != model.ModePodcast {
+			out = append(out, lib)
+		}
+	}
+	return out
 }
 
 // managedLibraries returns every managed library, or an error when none exist.
@@ -4278,4 +4483,5 @@ func addResult(dst *scan.Result, src *scan.Result) {
 	dst.Dropped += src.Dropped
 	dst.WalkErrors += src.WalkErrors
 	dst.SubPathGone = dst.SubPathGone || src.SubPathGone
+	dst.RootUnreachable = dst.RootUnreachable || src.RootUnreachable
 }

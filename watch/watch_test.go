@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"testing/synctest"
@@ -661,6 +662,16 @@ func (f *fakeSource) Close() error {
 	return nil
 }
 
+// closed reports whether the source was closed, which the live layer does as it ends.
+func (f *fakeSource) closed() bool {
+	select {
+	case _, ok := <-f.errs:
+		return !ok
+	default:
+		return false
+	}
+}
+
 // told counts how often dir was added, or with dropped how often it was removed.
 func (f *fakeSource) told(dir string, dropped bool) int {
 	f.mu.Lock()
@@ -765,37 +776,274 @@ func TestServeLiveRearmsARootOfferedAgain(t *testing.T) {
 	root := t.TempDir()
 	w := newWatcher(&mockEngine{}, []Root{{LibraryPID: "L1", Path: root}}, Options{})
 	src := newFakeSource()
-	added := make(chan Root)
+	sets := make(chan []Root)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
-	go func() { w.serveLive(ctx, src, make(chan rescanReq, 8), added); close(done) }()
+	go func() { w.serveLive(ctx, src, make(chan rescanReq, 8), sets); close(done) }()
 	defer func() { cancel(); <-done }()
 	waitFor(t, "the root was never armed", func() bool { return src.told(root, false) == 1 })
 
-	added <- Root{LibraryPID: "L1", Path: root}
+	sets <- []Root{{LibraryPID: "L1", Path: root}}
 	src.events <- fsnotify.Event{Name: root, Op: fsnotify.Rename}
 	waitFor(t, "the renamed root was never forgotten", func() bool { return src.told(root, true) == 1 })
 	if n := src.told(root, false); n != 1 {
 		t.Fatalf("the root was armed %d times while it held, want once", n)
 	}
-	added <- Root{LibraryPID: "L1", Path: root}
+	sets <- []Root{{LibraryPID: "L1", Path: root}}
 	waitFor(t, "the root was not armed again", func() bool { return src.told(root, false) == 2 })
 }
 
-// TestRefreshRootsOffersEveryRoot: the tick offers the live layer every root, not only
-// the new ones, so a root whose watch went can be armed again.
+// TestServeLiveReleasesARootThatLeftTheSet: a root the tick no longer offers, a removed
+// or relocated library, gives up its watches and those of the folders below it, so a
+// removed folder is not held open by the watcher; the roots still offered keep theirs.
+func TestServeLiveReleasesARootThatLeftTheSet(t *testing.T) {
+	stay, leave := t.TempDir(), t.TempDir()
+	below := filepath.Join(leave, "Artist")
+	if err := os.Mkdir(below, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	w := newWatcher(&mockEngine{}, []Root{{LibraryPID: "A", Path: stay}, {LibraryPID: "B", Path: leave}}, Options{})
+	src := newFakeSource()
+	sets := make(chan []Root)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { w.serveLive(ctx, src, make(chan rescanReq, 8), sets); close(done) }()
+	defer func() { cancel(); <-done }()
+	waitFor(t, "the roots were never armed", func() bool { return src.told(below, false) == 1 && src.told(stay, false) == 1 })
+
+	sets <- []Root{{LibraryPID: "A", Path: stay}}
+	waitFor(t, "the root that left was never released", func() bool {
+		return src.told(leave, true) == 1 && src.told(below, true) == 1
+	})
+	sets <- []Root{{LibraryPID: "A", Path: stay}}
+	time.Sleep(50 * time.Millisecond)
+	if src.told(stay, true) != 0 || src.told(stay, false) != 1 {
+		t.Fatalf("the root that stayed was dropped %d and armed %d times, want 0 and 1", src.told(stay, true), src.told(stay, false))
+	}
+}
+
+// TestRefreshRootsOffersEveryRoot: the tick offers the live layer the whole set, not
+// only the new roots, so a root whose watch went can be armed again and one that left
+// can be released.
 func TestRefreshRootsOffersEveryRoot(t *testing.T) {
 	eng := &mockEngine{}
 	w := newWatcher(eng, []Root{{LibraryPID: "L1", Path: "/lib"}}, Options{})
 	eng.setRoots(Root{LibraryPID: "L1", Path: "/lib"}, Root{LibraryPID: "L2", Path: "/lib2"})
-	added := make(chan Root, 4)
-	w.refreshRoots(context.Background(), added)
-	var got []Root
-	for len(added) > 0 {
-		got = append(got, <-added)
+	sets := make(chan []Root, 1)
+	if err := w.refreshRoots(context.Background(), sets); err != nil {
+		t.Fatal(err)
 	}
 	want := []Root{{LibraryPID: "L1", Path: "/lib"}, {LibraryPID: "L2", Path: "/lib2"}}
-	if !slices.Equal(got, want) {
+	if got := <-sets; !slices.Equal(got, want) {
 		t.Fatalf("offered %v, want %v", got, want)
+	}
+	// A tick the live layer has not caught up with replaces the set it has not read.
+	eng.setRoots(Root{LibraryPID: "L1", Path: "/lib"})
+	if err := w.refreshRoots(context.Background(), sets); err != nil {
+		t.Fatal(err)
+	}
+	eng.setRoots(Root{LibraryPID: "L3", Path: "/lib3"})
+	if err := w.refreshRoots(context.Background(), sets); err != nil {
+		t.Fatal(err)
+	}
+	if got := <-sets; !slices.Equal(got, []Root{{LibraryPID: "L3", Path: "/lib3"}}) {
+		t.Fatalf("offered %v after two ticks, want the newest set", got)
+	}
+}
+
+// lockedBuffer is a log sink the watcher's goroutines can write while a test reads it.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf strings.Builder
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) count(s string) int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return strings.Count(b.buf.String(), s)
+}
+
+// TestWatcherStopsWhenItsLibraryIsGone: a watcher scoped to a library that has been
+// removed stops on the tick that finds it gone, saying so once, rather than warning on
+// every tick that it cannot rescan it.
+func TestWatcherStopsWhenItsLibraryIsGone(t *testing.T) {
+	eng := &mockEngine{}
+	var logs lockedBuffer
+	eng.setRoots(Root{LibraryPID: "L1", Path: "/lib"})
+	w := New(eng, []Root{{LibraryPID: "L1", Path: "/lib"}}, Options{Interval: 20 * time.Millisecond, FullRescanInterval: -1},
+		slog.New(slog.NewTextHandler(&logs, nil)))
+	done := make(chan error, 1)
+	go func() { done <- w.Run(context.Background()) }()
+	waitFor(t, "the initial rescan never ran", func() bool { return eng.rescanCount() > 0 })
+
+	eng.mu.Lock()
+	eng.rootsErr = waxerr.New(waxerr.CodeNotFound, "test", "the watched library was removed")
+	eng.mu.Unlock()
+	select {
+	case err := <-done:
+		if !waxerr.Is(err, waxerr.CodeNotFound) {
+			t.Fatalf("Run = %v, want CodeNotFound", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the watcher kept running after its library was removed")
+	}
+	if n := logs.count("watched library is gone"); n != 1 {
+		t.Errorf("logged the stop %d times, want once:\n%s", n, logs.buf.String())
+	}
+}
+
+// TestWatcherIdlesWithNoRootsLeft: an engine reporting no roots, as after the last
+// library is removed, leaves the watcher with nothing to rescan rather than rescanning
+// the roots it had, and a root registered later is followed.
+func TestWatcherIdlesWithNoRootsLeft(t *testing.T) {
+	eng := &mockEngine{}
+	w := newWatcher(eng, []Root{{LibraryPID: "L1", Path: "/lib"}}, Options{
+		Interval: 20 * time.Millisecond, FullRescanInterval: -1,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- w.Run(ctx) }()
+	defer func() { cancel(); <-done }()
+	waitFor(t, "the initial rescan never ran", func() bool { return eng.rescanCount() > 0 })
+
+	eng.setRoots()
+	waitFor(t, "the empty set was never taken", func() bool { return len(w.rootSet()) == 0 })
+	quiet := eng.rescanCount()
+	time.Sleep(100 * time.Millisecond)
+	if n := eng.rescanCount(); n > quiet+1 {
+		t.Fatalf("rescanned %d times with no roots left, want none past the tick that emptied the set", n-quiet)
+	}
+
+	eng.setRoots(Root{LibraryPID: "L2", Path: "/lib2"})
+	waitFor(t, "the root added later was never rescanned", func() bool {
+		eng.mu.Lock()
+		defer eng.mu.Unlock()
+		return slices.ContainsFunc(eng.rescans, func(r rescanCall) bool { return r.libPID == "L2" })
+	})
+}
+
+// TestServeLiveSaysARootIsNotReachable: a root that is not there is reported once as not
+// reachable, not as a failed watch with a watch-limit hint, and the live layer keeps
+// serving, so the root is armed when a tick offers it after it is back.
+func TestServeLiveSaysARootIsNotReachable(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "mount")
+	var logs lockedBuffer
+	w := New(&mockEngine{}, []Root{{LibraryPID: "L1", Path: root}}, Options{}, slog.New(slog.NewTextHandler(&logs, nil)))
+	src := newFakeSource()
+	sets := make(chan []Root)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { w.serveLive(ctx, src, make(chan rescanReq, 8), sets); close(done) }()
+	defer func() { cancel(); <-done }()
+	offerSet := func() {
+		select {
+		case sets <- []Root{{LibraryPID: "L1", Path: root}}:
+		case <-time.After(3 * time.Second):
+			t.Fatal("the live layer stopped serving")
+		}
+	}
+
+	waitFor(t, "the absent root was never reported", func() bool { return logs.count("library root is not reachable") == 1 })
+	offerSet()
+	offerSet()
+	if n := logs.count("library root is not reachable"); n != 1 {
+		t.Errorf("reported the absent root %d times, want once until it is back", n)
+	}
+	if logs.count("max_user_watches") != 0 || logs.count("no filesystem watches could be armed") != 0 {
+		t.Errorf("an absent root was logged as a failed watch:\n%s", logs.buf.String())
+	}
+	if err := os.Mkdir(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	offerSet()
+	waitFor(t, "the root was never armed once back", func() bool { return src.told(root, false) == 1 })
+}
+
+// TestWatcherStopsItsLiveLayerWithIt: a live watcher that stops because its library is
+// gone takes its live layer down too, releasing every watch it held, though the caller's
+// context is still live.
+func TestWatcherStopsItsLiveLayerWithIt(t *testing.T) {
+	eng := &mockEngine{}
+	eng.setRoots(Root{LibraryPID: "L1", Path: t.TempDir()})
+	w := New(eng, eng.roots, Options{Interval: 20 * time.Millisecond, FullRescanInterval: -1, Live: true}, quietLog)
+	src := newFakeSource()
+	w.openSource = func() (source, error) { return src, nil }
+	done := make(chan error, 1)
+	go func() { done <- w.Run(context.Background()) }()
+	waitFor(t, "the initial rescan never ran", func() bool { return eng.rescanCount() > 0 })
+
+	eng.mu.Lock()
+	eng.rootsErr = waxerr.New(waxerr.CodeNotFound, "test", "the watched library was removed")
+	eng.mu.Unlock()
+	select {
+	case err := <-done:
+		if !waxerr.Is(err, waxerr.CodeNotFound) {
+			t.Fatalf("Run = %v, want CodeNotFound", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the watcher kept running after its library was removed")
+	}
+	waitFor(t, "the live layer outlived the watcher", src.closed)
+}
+
+// TestServeLiveSaysWhyARootIsOutOfReach: a root that is a file rather than a folder is
+// reported with that reason, not with an empty error.
+func TestServeLiveSaysWhyARootIsOutOfReach(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(root, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var logs lockedBuffer
+	w := New(&mockEngine{}, []Root{{LibraryPID: "L1", Path: root}}, Options{}, slog.New(slog.NewTextHandler(&logs, nil)))
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { w.serveLive(ctx, newFakeSource(), make(chan rescanReq, 8), nil); close(done) }()
+	defer func() { cancel(); <-done }()
+	waitFor(t, "the root was never reported", func() bool { return logs.count("library root is not reachable") == 1 })
+	if logs.count("not a directory") != 1 || logs.count("err=<nil>") != 0 {
+		t.Errorf("the report does not say why:\n%s", logs.buf.String())
+	}
+}
+
+// waitingSource is a source whose Remove waits until let is closed, as one that has to
+// hear back from its own reader can.
+type waitingSource struct {
+	*fakeSource
+	let      chan struct{}
+	removing chan string
+}
+
+func (w *waitingSource) Remove(dir string) error {
+	w.removing <- dir
+	<-w.let
+	return w.fakeSource.Remove(dir)
+}
+
+// TestLiveWatchUnwatchesOffItsLock: a watch is taken off the source after the folder
+// set's lock is let go, so the read loop, which needs that lock, is never held up behind
+// a source waiting on something the read loop itself has to do.
+func TestLiveWatchUnwatchesOffItsLock(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "below"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	src := &waitingSource{fakeSource: newFakeSource(), let: make(chan struct{}), removing: make(chan string, 8)}
+	defer close(src.let)
+	lw := &liveWatch{src: src, log: quietLog}
+	lw.armRoot(root)
+	go lw.release(root)
+	<-src.removing
+	done := make(chan struct{})
+	go func() { lw.watched(root); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the folder set's lock was held while the source removed a watch")
 	}
 }

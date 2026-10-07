@@ -82,15 +82,51 @@ func (s *Store) DetachFile(ctx context.Context, filePID model.PID) (*model.Detac
 // writes the change_log rows. It returns the detached file's metadata for the trash
 // journal, and the promoted files for the caller to re-read.
 func detachFileTx(ctx context.Context, tx *sql.Tx, filePID model.PID, op string) (*detachedFile, error) {
-	var d detachedFile
-	err := tx.QueryRowContext(ctx,
-		"SELECT id, library_id, path, display_path, size, essence_hash FROM file WHERE pid = ?", string(filePID)).
-		Scan(&d.id, &d.libraryID, &d.path, &d.display, &d.size, &d.essence)
+	var id int64
+	err := tx.QueryRowContext(ctx, "SELECT id FROM file WHERE pid = ?", string(filePID)).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, waxerr.New(waxerr.CodeNotFound, op, "no such file: "+string(filePID))
 	}
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	b := newDetachBatch()
+	d, err := b.detachTx(ctx, tx, id)
+	if err == nil {
+		err = b.settleTx(ctx, tx)
+	}
+	if err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	d.promoted = b.promoted
+	return d, nil
+}
+
+// detachBatch detaches a run of files in one transaction, the way detachFileTx detaches
+// one, and settles each item they touched and each rollup once for the run.
+type detachBatch struct {
+	affected *affectedRollups
+	items    []int64 // the items the files backed, in the order first met
+	touched  map[int64]bool
+	files    []model.PID
+	promoted []model.PromotedFile
+	archived int
+}
+
+func newDetachBatch() *detachBatch {
+	return &detachBatch{affected: newAffectedRollups(), touched: map[int64]bool{}}
+}
+
+// detachTx deletes one file row and gives each item that keeps files an alternate in the
+// place the file held, which has to happen before the next file goes, since it reads the
+// edge the file left.
+func (b *detachBatch) detachTx(ctx context.Context, tx *sql.Tx, fileID int64) (*detachedFile, error) {
+	d := detachedFile{id: fileID}
+	var pid model.PID
+	if err := tx.QueryRowContext(ctx,
+		"SELECT pid, library_id, path, display_path, size, essence_hash FROM file WHERE id = ?", fileID).
+		Scan(&pid, &d.libraryID, &d.path, &d.display, &d.size, &d.essence); err != nil {
+		return nil, err
 	}
 
 	// Every item linked to this file, and the one the journal records, captured
@@ -101,23 +137,23 @@ func detachFileTx(ctx context.Context, tx *sql.Tx, filePID model.PID, op string)
 	// track, each of them primary, so that case already picks arbitrarily.
 	itemIDs, err := itemIDsForFile(ctx, tx, d.id)
 	if err != nil {
-		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+		return nil, err
 	}
 	lost, books, err := itemLostEdgesTx(ctx, tx, d.id, d.essence.String)
 	if err != nil {
-		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+		return nil, err
 	}
 	if err := tx.QueryRowContext(ctx,
 		`SELECT pi.pid FROM item_file itf JOIN playable_item pi ON pi.id = itf.item_id
 		 WHERE itf.file_id = ? AND itf.role = 'primary'
 		 ORDER BY itf.item_id LIMIT 1`, d.id).Scan(&d.itemPID); err != nil &&
 		!errors.Is(err, sql.ErrNoRows) {
-		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+		return nil, err
 	}
 	if d.itemPID == "" && len(itemIDs) > 0 {
 		if err := tx.QueryRowContext(ctx,
 			"SELECT pid FROM playable_item WHERE id = ?", itemIDs[0]).Scan(&d.itemPID); err != nil {
-			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+			return nil, err
 		}
 	}
 
@@ -125,43 +161,64 @@ func detachFileTx(ctx context.Context, tx *sql.Tx, filePID model.PID, op string)
 	// must refresh the touched entities or `db verify` would see drift. The track
 	// rows survive (the item is archived, not deleted), so the recompute keeps the
 	// track counts and only sheds the now-absent duration.
-	affected := newAffectedRollups()
 	for _, iid := range itemIDs {
-		if err := affected.collect(ctx, tx, iid); err != nil {
-			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+		if b.touched[iid] {
+			continue
+		}
+		b.touched[iid] = true
+		b.items = append(b.items, iid)
+		if err := b.affected.collect(ctx, tx, iid); err != nil {
+			return nil, err
 		}
 	}
 
 	if _, err := tx.ExecContext(ctx, "DELETE FROM file WHERE id = ?", d.id); err != nil {
-		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+		return nil, err
 	}
-
-	now := nowNS()
 	for _, iid := range itemIDs {
 		has, err := itemHasAnyFile(ctx, tx, iid)
 		if err != nil {
-			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+			return nil, err
+		}
+		if !has {
+			continue
+		}
+		p, err := promoteLostTx(ctx, tx, iid, books[iid], lost[iid])
+		if err != nil {
+			return nil, err
+		}
+		if p != nil {
+			b.promoted = append(b.promoted, *p)
+		}
+	}
+	b.files = append(b.files, pid)
+	return &d, nil
+}
+
+// settleTx finishes each item the run touched: one that keeps a file keeps a primary
+// (ensurePrimary), is marked missing when no file of it is left on disk, and emits an
+// item update because its files, duration or chapters changed (symmetric with the attach
+// side); one left with none is archived. Then the touched rollups are recomputed, after
+// the promotions, which change which file an item's duration reads, and each file's
+// delete is logged.
+func (b *detachBatch) settleTx(ctx context.Context, tx *sql.Tx) error {
+	now := nowNS()
+	for _, iid := range b.items {
+		has, err := itemHasAnyFile(ctx, tx, iid)
+		if err != nil {
+			return err
 		}
 		marked := false
 		if has {
-			// A surviving item promotes an alternate into the lost edge's place, or keeps a
-			// primary another way (ensurePrimary), is marked missing when no file of it is
-			// left on disk, and emits an item update because its files, duration or
-			// chapters changed (symmetric with the attach side).
-			p, err := promoteLostTx(ctx, tx, iid, books[iid], lost[iid])
+			p, err := ensurePrimary(ctx, tx, iid)
 			if err != nil {
-				return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
-			}
-			if p == nil {
-				if p, err = ensurePrimary(ctx, tx, iid); err != nil {
-					return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
-				}
+				return err
 			}
 			if p != nil {
-				d.promoted = append(d.promoted, *p)
+				b.promoted = append(b.promoted, *p)
 			}
 			if marked, err = markUnreachableMissingTx(ctx, tx, iid, nil); err != nil {
-				return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+				return err
 			}
 		}
 		// A book's denormalized total is derived from the parts it currently has, so it
@@ -170,39 +227,42 @@ func detachFileTx(ctx context.Context, tx *sql.Tx, filePID model.PID, op string)
 		// feeding the item view's duration, the duration_ms filter, and its series'
 		// running time with time the book no longer has.
 		if err := refreshBookDuration(ctx, tx, iid); err != nil {
-			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+			return err
 		}
 		if has {
 			if !marked {
 				if err := appendItemUpdateTx(ctx, tx, iid); err != nil {
-					return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+					return err
 				}
 			}
 			continue
 		}
-		var pid model.PID
-		if err := tx.QueryRowContext(ctx, "SELECT pid FROM playable_item WHERE id=?", iid).Scan(&pid); err != nil {
-			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+		var state string
+		if err := tx.QueryRowContext(ctx, "SELECT state FROM playable_item WHERE id=?", iid).Scan(&state); err != nil {
+			return err
 		}
-		if _, err := tx.ExecContext(ctx,
-			"UPDATE playable_item SET state=?, updated_at=? WHERE id=?",
+		if state != string(model.StateArchived) {
+			b.archived++
+		}
+		if _, err := tx.ExecContext(ctx, "UPDATE playable_item SET state=?, updated_at=? WHERE id=?",
 			string(model.StateArchived), now, iid); err != nil {
-			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+			return err
 		}
-		if err := appendChange(ctx, tx, "item", pid, model.OpUpdate); err != nil {
-			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
-		}
-	}
-	// Recomputed after the promotions, which change which file an item's duration reads.
-	if !affected.empty() {
-		if err := maintainRollupsTx(ctx, tx, affected, now); err != nil {
-			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+		if err := appendItemUpdateTx(ctx, tx, iid); err != nil {
+			return err
 		}
 	}
-	if err := appendChange(ctx, tx, "file", filePID, model.OpDelete); err != nil {
-		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+	if !b.affected.empty() {
+		if err := maintainRollupsTx(ctx, tx, b.affected, now); err != nil {
+			return err
+		}
 	}
-	return &d, nil
+	for _, pid := range b.files {
+		if err := appendChange(ctx, tx, "file", pid, model.OpDelete); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // itemIDsForFile returns the distinct item ids linked to a file by any role, in id
