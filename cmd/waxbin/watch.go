@@ -89,7 +89,7 @@ fast-path's size+mtime check misses.`,
 	cmd.Flags().DurationVar(&fullInterval, "full-interval", 6*time.Hour, "full-content rescan cadence (0 disables)")
 	cmd.Flags().BoolVar(&live, "live", false, "also react to filesystem events (best-effort; falls back to scheduled)")
 	cmd.Flags().DurationVar(&writeSettle, "write-settle", 2*time.Second, "quiet window before a live rescan fires")
-	cmd.Flags().IntVar(&maxWatchDirs, "max-watch-dirs", 0, "cap live fsnotify watches (0 = unlimited; excess covered by scheduled rescans)")
+	cmd.Flags().IntVar(&maxWatchDirs, "max-watch-dirs", 0, "cap live folder watches (0 = unlimited; excess covered by scheduled rescans; unused on Windows, where one watch covers a root)")
 	cmd.Flags().BoolVar(&doAnalyze, "analyze", false, "run the analyze pass after a rescan that changed something")
 	cmd.Flags().BoolVar(&syncSources, "sync-sources", false, "sync podcast feeds and apply retention each cycle")
 	return cmd

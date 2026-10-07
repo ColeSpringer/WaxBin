@@ -602,7 +602,7 @@ func (s *Service) Restore(entry model.TrashEntry) error {
 func (s *Service) restoreExtras(orig, trashed string) {
 	entry := filepath.Dir(trashed)
 	trash := filepath.Dir(entry)
-	if filepath.Base(trash) != model.TrashDirName {
+	if !model.IsTrashName(filepath.Base(trash)) {
 		return
 	}
 	root := filepath.Dir(trash)

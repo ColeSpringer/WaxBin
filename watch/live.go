@@ -16,15 +16,19 @@ import (
 	"github.com/fsnotify/fsnotify"
 )
 
-// inotifyHint points at the usual cause of a failed watch arm on Linux, the
-// per-user inotify watch limit, so a degraded warning is actionable. Scheduled
-// rescans still cover the library regardless.
-const inotifyHint = "on Linux, raise fs.inotify.max_user_watches (sysctl) if this is watch exhaustion"
+// hint appends the platform's advice for a failed arm (watchHint) to log attributes,
+// when it has any. Scheduled rescans still cover the library regardless.
+func hint(args ...any) []any {
+	if watchHint != "" {
+		return append(args, "hint", watchHint)
+	}
+	return args
+}
 
-// liveEventBuffer bounds the internal queue between the fsnotify reader and the
-// event worker. It is generous so a burst (an album drop, a big move) is absorbed
-// without the reader ever blocking on the worker's os.Stat / tree walk; on overflow
-// the reader falls back to scheduling the directory directly rather than stalling.
+// liveEventBuffer bounds the internal queue between the read loop and the event
+// worker. It is generous so a burst (an album drop, a big move) is absorbed without
+// the reader ever blocking on the worker's os.Stat / tree walk; on overflow the reader
+// falls back to scheduling the directory directly rather than stalling.
 const liveEventBuffer = 4096
 
 // underRoot reports whether path is within root, using the single shared
@@ -41,15 +45,24 @@ func underRoot(root, path string) bool { return pathx.UnderRoot(root, path) }
 // added carries roots registered or relocated while the watcher runs, which the event
 // worker arms.
 func (w *Watcher) runLive(ctx context.Context, reqs chan<- rescanReq, added <-chan Root) {
-	watcher, err := fsnotify.NewWatcher()
+	src, err := newSource()
 	if err != nil {
 		w.degraded.Store(true)
-		w.log.Warn("watch: live events unavailable, scheduled rescans only", "err", err, "hint", inotifyHint)
+		w.log.Warn("watch: live events unavailable, scheduled rescans only", hint("err", err)...)
 		return
 	}
-	defer watcher.Close()
+	w.serveLive(ctx, src, reqs, added)
+}
 
-	lw := &liveWatch{watcher: watcher, log: w.log, max: w.opts.MaxWatchDirs}
+// errCoverageLost is what a source sends when its watch on a root ended for good, with
+// the root and the cause; the scheduled rescans cover the root from then on.
+var errCoverageLost = errors.New("watch: live coverage lost")
+
+// serveLive arms the roots on src and services its events until ctx ends.
+func (w *Watcher) serveLive(ctx context.Context, src source, reqs chan<- rescanReq, added <-chan Root) {
+	defer src.Close()
+
+	lw := &liveWatch{src: src, log: w.log, max: watchCap(w.opts.MaxWatchDirs)}
 	exhausted := false
 	for _, r := range w.rootSet() {
 		if _, ex := lw.addTree(r.Path); ex {
@@ -59,7 +72,7 @@ func (w *Watcher) runLive(ctx context.Context, reqs chan<- rescanReq, added <-ch
 	switch {
 	case lw.total() == 0:
 		w.degraded.Store(true)
-		w.log.Warn("watch: no filesystem watches could be armed, scheduled rescans only", "hint", inotifyHint)
+		w.log.Warn("watch: no filesystem watches could be armed, scheduled rescans only", hint()...)
 		return
 	case exhausted:
 		// Some subtrees are unwatched (watch cap or kernel inotify limit). Mark degraded
@@ -67,7 +80,7 @@ func (w *Watcher) runLive(ctx context.Context, reqs chan<- rescanReq, added <-ch
 		// unwatched remainder, so live is a best-effort accelerator, not the mechanism.
 		w.degraded.Store(true)
 		w.log.Warn("watch: filesystem watch capacity reached; some directories are live-unwatched, relying on scheduled rescans for them",
-			"armed", lw.total(), "hint", inotifyHint)
+			hint("armed", lw.total())...)
 	default:
 		w.log.Info("watch: live filesystem events armed", "dirs", lw.total())
 	}
@@ -84,14 +97,15 @@ func (w *Watcher) runLive(ctx context.Context, reqs chan<- rescanReq, added <-ch
 	})
 	defer deb.stop()
 
-	// Decouple the kernel event read from the potentially-blocking os.Stat + tree walk
-	// in handleEvent: on a slow/network mount those calls would stall the read and
-	// overflow fsnotify's internal queue (dropping events). A worker drains a buffered
+	// Decouple the event read from the potentially-blocking os.Stat + tree walk in
+	// handleEvent: on a slow/network mount those calls would stall the read and
+	// overflow the source's queue (dropping events). A worker drains a buffered
 	// channel; if it backs up, the reader schedules the directory directly rather than
-	// blocking, so reading from watcher.Events always stays fast.
-	// A root registered while the watcher runs is armed on this worker too, not on the
-	// read loop: arming a large tree is the same walk handleEvent makes, and the read
-	// loop exists to stay clear of it.
+	// blocking, so reading from the source always stays fast.
+	// The roots the tick offers are armed on this worker too, not on the read loop:
+	// arming a large tree is the same walk handleEvent makes, and the read loop exists
+	// to stay clear of it. A root still armed is left alone; one whose watch went with
+	// its folder (moved away, or replaced) is armed again.
 	events := make(chan fsnotify.Event, liveEventBuffer)
 	go func() {
 		for {
@@ -102,6 +116,9 @@ func (w *Watcher) runLive(ctx context.Context, reqs chan<- rescanReq, added <-ch
 				}
 				w.handleEvent(lw, deb, ev)
 			case r := <-added:
+				if lw.watched(filepath.Clean(r.Path)) {
+					continue
+				}
 				if _, ex := lw.addTree(r.Path); ex {
 					w.degraded.Store(true)
 				}
@@ -114,55 +131,71 @@ loop:
 		select {
 		case <-ctx.Done():
 			break loop
-		case ev, ok := <-watcher.Events:
+		case ev, ok := <-src.Events():
 			if !ok {
 				break loop
+			}
+			// An event under no root comes from a watch that outlived its root. One in the
+			// library trash, which the recursive watch on Windows reports and no folder
+			// watch did, would have a rescan start below the trash folder and re-catalog
+			// what it holds.
+			root, found := w.rootFor(ev.Name)
+			if !found {
+				continue
+			}
+			if rel, err := filepath.Rel(root.Path, ev.Name); err == nil && model.InTrash(rel) {
+				continue
 			}
 			select {
 			case events <- ev:
 			default:
-				// Worker backed up on slow I/O: schedule the directory directly (cheap, no
-				// stat) so the reader never blocks. A brand-new subtree arriving under this
-				// overload may not get live watches until the next scheduled full rescan.
-				deb.schedule(filepath.Dir(ev.Name))
+				// Worker backed up on slow I/O: the rules that need no look at the disk
+				// still apply, then the directory is scheduled directly, so the reader never
+				// blocks. A brand-new subtree arriving under this overload may not get live
+				// watches until the next scheduled full rescan.
+				if !lw.settle(deb, ev) {
+					deb.schedule(filepath.Dir(ev.Name))
+				}
 			}
-		case ferr, ok := <-watcher.Errors:
+		case ferr, ok := <-src.Errors():
 			if !ok {
 				break loop
 			}
-			// An overflow/queue error means we may have missed events; the scheduled
-			// rescan is the backstop, so log and continue rather than tearing down.
-			w.log.Warn("watch: fsnotify error", "err", ferr)
+			switch {
+			case errors.Is(ferr, errCoverageLost):
+				w.degraded.Store(true)
+			case errors.Is(ferr, fsnotify.ErrEventOverflow):
+				// Events were lost that nothing can name, so every root is rescanned now
+				// rather than at the scheduled tick.
+				for _, r := range w.rootSet() {
+					deb.schedule(r.Path)
+				}
+			}
+			w.log.Warn("watch: filesystem events error", "err", ferr)
 		}
 	}
 	// Stop the worker. We do not wait for it: on a hung mount its in-flight stat/walk
 	// could block, and shutdown (Ctrl-C) must stay responsive. The goroutine exits once
 	// that call returns and it observes the closed channel.
 	close(events)
+	if ctx.Err() == nil {
+		// The source ended on its own, and nothing live is left behind it.
+		w.degraded.Store(true)
+		w.log.Warn("watch: live events ended, scheduled rescans only")
+	}
 }
 
 // handleEvent coalesces an event to its containing directory and schedules a
 // debounced rescan. A newly created directory is also added to the watch set (and
 // itself rescanned) so a moved-in subtree stays covered. It runs on the event worker
-// goroutine, off the fsnotify read path, so its os.Stat / addTree walk cannot stall
-// event reading.
+// goroutine, off the read loop, so its os.Stat / addTree walk cannot stall event
+// reading.
 func (w *Watcher) handleEvent(lw *liveWatch, deb *debouncer, ev fsnotify.Event) {
-	switch {
-	case ev.Has(fsnotify.Remove):
-		// A removed folder is rescanned itself, which a scan reads as gone and reconciles;
-		// its parent, a whole library for a first-level folder, has nothing new.
-		if lw.forget(ev.Name, false) {
-			deb.schedule(ev.Name)
-			return
-		}
-	case ev.Has(fsnotify.Rename):
-		lw.forget(ev.Name, true)
+	if lw.settle(deb, ev) {
+		return
 	}
 	if ev.Has(fsnotify.Create) {
 		if info, err := os.Stat(ev.Name); err == nil && info.IsDir() {
-			if filepath.Base(ev.Name) == model.TrashDirName {
-				return
-			}
 			if _, ex := lw.addTree(ev.Name); ex {
 				w.degraded.Store(true)
 			}
@@ -173,63 +206,105 @@ func (w *Watcher) handleEvent(lw *liveWatch, deb *debouncer, ev fsnotify.Event) 
 	deb.schedule(filepath.Dir(ev.Name))
 }
 
-// liveWatch owns the fsnotify watch set and its bounded directory count. addTree runs
-// from both startup and the event worker, so the count is mutex-guarded.
-type liveWatch struct {
-	watcher *fsnotify.Watcher
-	log     *slog.Logger
-	max     int // 0 = unlimited (kernel limit still applies, detected via ENOSPC)
-	mu      sync.Mutex
-	count   int
-	armed   map[string]bool
-	// removed holds the folders a Remove dropped, for the second event fsnotify sends
-	// for one (on its own watch and on its parent's).
-	removed map[string]bool
+// settle applies the rules that need no look at the disk and reports whether they
+// dealt with the event. A removed folder is rescanned itself, which a scan reads as
+// gone and reconciles; its parent, a whole library for a first-level folder, has
+// nothing new. A renamed folder is only forgotten: its old and new paths are
+// reconciled together by the parent's rescan, as one move, where rescanning each alone
+// would read its files as missing and then as new. A write Windows reports on a folder
+// whose entries changed says nothing the entry's own event does not.
+func (lw *liveWatch) settle(deb *debouncer, ev fsnotify.Event) bool {
+	switch {
+	case ev.Has(fsnotify.Remove):
+		if lw.forget(ev.Name) {
+			deb.schedule(ev.Name)
+			return true
+		}
+	case ev.Has(fsnotify.Rename):
+		lw.forget(ev.Name)
+	case ev.Has(fsnotify.Write):
+		return lw.watched(ev.Name)
+	}
+	return false
 }
 
-// forget drops the watch on a folder that was removed, or with subtree one moved away
-// and every watched folder below it, so the count follows the tree and the cap leaves
-// room for the folders that arrive later; it reports whether dir was a watched folder. A
-// removed folder's own events drop the folders below it first.
-func (lw *liveWatch) forget(dir string, subtree bool) bool {
+// source delivers filesystem events for the folders it is told about. fsnotify watches
+// one folder per Add everywhere but Windows, where each watch holds a handle open and
+// NTFS refuses to rename a folder with an open handle below it; there one recursive
+// watch per root is the source, and an Add under a watched root has nothing to do.
+type source interface {
+	Add(dir string) error
+	Remove(dir string) error
+	Events() <-chan fsnotify.Event
+	Errors() <-chan error
+	Close() error
+}
+
+// liveWatch owns the watched folder set and its bounded count. addTree runs from both
+// startup and the event worker, so the count is mutex-guarded.
+type liveWatch struct {
+	src   source
+	log   *slog.Logger
+	max   int // 0 = unlimited (kernel limit still applies, detected via ENOSPC)
+	mu    sync.Mutex
+	armed map[string]bool
+	// below holds the watched folders directly under each, so forgetting a folder
+	// takes the folders below it without a walk over the whole set.
+	below map[string]map[string]bool
+}
+
+// forget drops a watched folder that is gone, and the watched folders below it: a move
+// takes them along, as does a Recycle Bin delete, which arrives as a removal, and a
+// removal from the bottom up has emptied them already. The count follows the tree, so
+// the cap leaves room for the folders that arrive later. It reports whether dir was a
+// watched folder.
+func (lw *liveWatch) forget(dir string) bool {
 	lw.mu.Lock()
 	defer lw.mu.Unlock()
 	if !lw.armed[dir] {
-		if lw.removed[dir] {
-			delete(lw.removed, dir)
-			return true
-		}
 		return false
 	}
-	for p := range lw.armed {
-		if p == dir || subtree && underRoot(dir, p) {
-			delete(lw.armed, p)
-			lw.count--
-			_ = lw.watcher.Remove(p) // the kernel may have dropped it already
+	lw.drop(dir)
+	if parent := filepath.Dir(dir); parent != dir {
+		delete(lw.below[parent], dir)
+		if len(lw.below[parent]) == 0 {
+			delete(lw.below, parent)
 		}
-	}
-	if !subtree {
-		if lw.removed == nil || len(lw.removed) > 1024 {
-			lw.removed = map[string]bool{}
-		}
-		lw.removed[dir] = true
 	}
 	return true
+}
+
+// drop forgets dir and every watched folder below it, under the lock.
+func (lw *liveWatch) drop(dir string) {
+	for kid := range lw.below[dir] {
+		lw.drop(kid)
+	}
+	delete(lw.below, dir)
+	delete(lw.armed, dir)
+	_ = lw.src.Remove(dir) // the kernel may have dropped it already
 }
 
 func (lw *liveWatch) total() int {
 	lw.mu.Lock()
 	defer lw.mu.Unlock()
-	return lw.count
+	return len(lw.armed)
 }
 
-// addTree arms a watch on dir and every subdirectory, skipping the library trash
-// directory and unreadable subtrees. It stops early once the configured max is
-// reached or the kernel refuses a watch (an inotify exhaustion surfaces as ENOSPC),
-// returning how many it armed and whether it hit either ceiling. Stopping on ENOSPC
-// avoids a per-directory warning storm when the rest of the walk would fail the same
-// way, and it lets the caller fall back to scheduled-only coverage for the remainder.
+// watched reports whether dir is a watched folder.
+func (lw *liveWatch) watched(dir string) bool {
+	lw.mu.Lock()
+	defer lw.mu.Unlock()
+	return lw.armed[dir]
+}
+
+// addTree watches dir and every folder below it, skipping the library trash directory
+// and unreadable subtrees. It stops early once the configured max is reached or the
+// kernel refuses a watch (an inotify exhaustion surfaces as ENOSPC), returning how
+// many it armed and whether it hit either ceiling. Stopping on ENOSPC avoids a
+// per-directory warning storm when the rest of the walk would fail the same way, and
+// it lets the caller fall back to scheduled-only coverage for the remainder.
 func (lw *liveWatch) addTree(dir string) (added int, exhausted bool) {
+	dir = filepath.Clean(dir)
 	_ = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil
@@ -237,21 +312,21 @@ func (lw *liveWatch) addTree(dir string) (added int, exhausted bool) {
 		if !d.IsDir() {
 			return nil
 		}
-		if d.Name() == model.TrashDirName {
+		if model.IsTrashName(d.Name()) {
 			return fs.SkipDir
 		}
 		lw.mu.Lock()
-		atCap := lw.max > 0 && lw.count >= lw.max
+		atCap := lw.max > 0 && len(lw.armed) >= lw.max
 		lw.mu.Unlock()
 		if atCap {
 			exhausted = true
 			return fs.SkipAll
 		}
-		if aerr := lw.watcher.Add(path); aerr != nil {
+		if aerr := lw.src.Add(path); aerr != nil {
 			// A resource-limit failure means further adds will also fail: stop and signal
 			// degradation rather than warn once per remaining directory.
 			if errors.Is(aerr, syscall.ENOSPC) {
-				lw.log.Warn("watch: inotify watch limit reached", "dir", path, "hint", inotifyHint)
+				lw.log.Warn("watch: inotify watch limit reached", hint("dir", path)...)
 				exhausted = true
 				return fs.SkipAll
 			}
@@ -259,12 +334,17 @@ func (lw *liveWatch) addTree(dir string) (added int, exhausted bool) {
 			return nil
 		}
 		lw.mu.Lock()
-		if lw.armed == nil {
-			lw.armed = map[string]bool{}
-		}
 		if !lw.armed[path] {
+			if lw.armed == nil {
+				lw.armed, lw.below = map[string]bool{}, map[string]map[string]bool{}
+			}
 			lw.armed[path] = true
-			lw.count++
+			if parent := filepath.Dir(path); parent != path {
+				if lw.below[parent] == nil {
+					lw.below[parent] = map[string]bool{}
+				}
+				lw.below[parent][path] = true
+			}
 		}
 		lw.mu.Unlock()
 		added++

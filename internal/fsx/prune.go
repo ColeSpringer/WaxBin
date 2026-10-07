@@ -199,7 +199,7 @@ func below(root, dir string) bool {
 	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return false
 	}
-	return !slices.Contains(strings.Split(rel, string(filepath.Separator)), model.TrashDirName)
+	return !model.InTrash(rel)
 }
 
 // refused is nil for the failures that end a prune quietly: a folder already gone, one

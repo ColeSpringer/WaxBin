@@ -3,8 +3,9 @@
 // first-class mechanism: filesystem events are unreliable on the target
 // filesystems (WSL2, NFS, SMB, bind mounts) and the incremental fast-path is blind
 // to a same-size, mtime-preserving change, so a periodic full-content rescan is the
-// backstop. An optional fsnotify layer coalesces live events into targeted
-// directory rescans on top, degrading cleanly to scheduled-only when it cannot arm.
+// backstop. An optional live layer (fsnotify, or one recursive watch per root on
+// Windows) coalesces filesystem events into targeted directory rescans on top,
+// degrading cleanly to scheduled-only when it cannot arm.
 package watch
 
 import (
@@ -29,13 +30,14 @@ type Options struct {
 	// supplies the friendly 6h default via its flag, so `--full-interval 0` turns the
 	// periodic full rescan off.
 	FullRescanInterval time.Duration
-	// Live enables the fsnotify optimization on top of scheduled rescans.
+	// Live enables filesystem events on top of scheduled rescans.
 	Live bool
-	// MaxWatchDirs caps how many directories the live layer arms with fsnotify
+	// MaxWatchDirs caps how many directories the live layer arms with folder
 	// watches. 0 means unlimited, though the kernel's own limit still applies (an
 	// inotify exhaustion is detected and degrades gracefully). A positive value bounds
 	// watch consumption on a very large library. The unwatched remainder stays covered
-	// by scheduled rescans, and the watcher reports Degraded.
+	// by scheduled rescans, and the watcher reports Degraded. On Windows one watch
+	// covers each root whole, so the cap has nothing to count and is ignored.
 	MaxWatchDirs int
 	// WriteSettle is how long a directory must be event-quiet before a live rescan
 	// fires, so a multi-file album drop coalesces into one directory rescan (default 2s).
@@ -168,13 +170,14 @@ func (w *Watcher) Run(ctx context.Context) error {
 	}
 }
 
-// refreshRoots re-reads the root set from the engine and swaps it in, handing each root
-// not in the old set (a new library, or one whose path moved) to the live layer to arm.
-// A read failure or an empty answer keeps the current set: a library that had roots when
-// the watcher started has not lost them all.
+// refreshRoots re-reads the root set from the engine and swaps it in, then offers every
+// root to the live layer, which arms the ones it does not hold: a new library, one
+// whose path moved, or one whose folder went from under its watch (moved away, or
+// replaced). A read failure or an empty answer keeps the current set: a library that
+// had roots when the watcher started has not lost them all.
 //
-// A watch armed on a root later relocated or removed stays armed until exit. Its events
-// resolve to no library and are dropped.
+// Folder watches below a relocated root stay armed until exit. Their events resolve to
+// no root and are dropped.
 func (w *Watcher) refreshRoots(ctx context.Context, added chan<- Root) {
 	roots, err := w.engine.Roots(ctx)
 	if err != nil {
@@ -189,14 +192,13 @@ func (w *Watcher) refreshRoots(ctx context.Context, added chan<- Root) {
 	w.roots = roots
 	w.rootsMu.Unlock()
 	for _, r := range roots {
-		if slices.Contains(old, r) {
-			continue
+		if !slices.Contains(old, r) {
+			w.log.Info("watch: following a root", "library", r.LibraryPID, "root", r.Path)
 		}
-		w.log.Info("watch: following a root", "library", r.LibraryPID, "root", r.Path)
 		if added != nil {
 			select {
 			case added <- r:
-			default: // the live layer is behind; its next scheduled rescan covers the root anyway
+			default: // the live layer is behind; the next tick offers the root again
 			}
 		}
 	}
@@ -288,17 +290,24 @@ func (w *Watcher) runSchedulers(ctx context.Context, changed bool) {
 	}
 }
 
-// libraryForPath returns the library PID whose root contains path, or "" when none
-// does (an event outside every watched root).
-func (w *Watcher) libraryForPath(path string) model.PID {
+// rootFor returns the root that contains path, the longest where roots nest, and
+// whether there is one (an event outside every watched root has none).
+func (w *Watcher) rootFor(path string) (Root, bool) {
 	w.rootsMu.RLock()
 	defer w.rootsMu.RUnlock()
-	best := ""
-	var bestPID model.PID
+	var best Root
+	found := false
 	for _, r := range w.roots {
-		if underRoot(r.Path, path) && len(r.Path) > len(best) {
-			best, bestPID = r.Path, r.LibraryPID
+		if underRoot(r.Path, path) && (!found || len(r.Path) > len(best.Path)) {
+			best, found = r, true
 		}
 	}
-	return bestPID
+	return best, found
+}
+
+// libraryForPath returns the library PID whose root contains path, or "" when none
+// does.
+func (w *Watcher) libraryForPath(path string) model.PID {
+	r, _ := w.rootFor(path)
+	return r.LibraryPID
 }

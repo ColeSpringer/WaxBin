@@ -1020,7 +1020,7 @@ type WatchOptions struct {
 	FullRescanInterval time.Duration
 	Live               bool
 	WriteSettle        time.Duration
-	MaxWatchDirs       int // 0 = unlimited; caps live fsnotify watches (see watch.Options)
+	MaxWatchDirs       int // 0 = unlimited; caps live folder watches (see watch.Options)
 	Analyze            bool
 	SyncSources        bool
 	// OnActivity, when set, is called after each cycle for a CLI heartbeat.
@@ -3334,7 +3334,7 @@ func (l *Library) PurgeTrash(ctx context.Context, trashPID model.PID) (int64, er
 // entry's own path.
 func trashRoot(e model.TrashEntry) (string, bool) {
 	trash := filepath.Dir(filepath.Dir(e.TrashDisplay))
-	return filepath.Dir(trash), filepath.Base(trash) == model.TrashDirName
+	return filepath.Dir(trash), model.IsTrashName(filepath.Base(trash))
 }
 
 // sweepTrash drops what the trash under each root keeps that the journal is done with

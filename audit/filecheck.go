@@ -54,7 +54,7 @@ func (a *Auditor) checkOrphanFolders(ctx context.Context, sample int, add func(m
 			var orphans []string
 			for _, e := range entries {
 				p := filepath.Join(dir, e.Name())
-				if !e.IsDir() || e.Name() == model.TrashDirName || o.Junk(p) {
+				if !e.IsDir() || model.IsTrashName(e.Name()) || o.Junk(p) {
 					continue
 				}
 				childAudio, childOrphan := walk(p)

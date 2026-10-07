@@ -1,9 +1,30 @@
 package model
 
+import (
+	"path/filepath"
+	"slices"
+	"strings"
+
+	"github.com/colespringer/waxbin/internal/pathx"
+)
+
 // TrashDirName is the per-library directory that holds trashed files. It lives
 // under the library root so a trash move is same-volume (atomic); the scanner
 // skips it so trashed files are never re-cataloged.
 const TrashDirName = ".waxbin-trash"
+
+var trashFold = pathx.FoldName(TrashDirName)
+
+// IsTrashName reports whether a folder name is the trash folder's, as a filesystem that
+// ignores case and Unicode form reads it. That is the rule on every platform, as it is
+// for the layout: a library stays whole wherever it is moved.
+func IsTrashName(name string) bool { return pathx.FoldName(name) == trashFold }
+
+// InTrash reports whether a path relative to its library root is the trash folder or
+// lies below it.
+func InTrash(rel string) bool {
+	return slices.ContainsFunc(strings.Split(rel, string(filepath.Separator)), IsTrashName)
+}
 
 // DeleteMode is the deletion policy for a file-backed item. User deletes default
 // to the reversible trash; pruning and explicit permanent deletes bypass it to

@@ -194,6 +194,12 @@ func (s *Scanner) Scan(ctx context.Context, req Request, hb Heartbeat) (*Result,
 		// see the note beside fileByPathDB for why that is left alone.
 		if rel, err := filepath.Rel(root, walkRoot); err == nil {
 			walkRoot = filepath.Join(root, rel)
+			// A walk starting below the trash folder would never meet the skip below. The
+			// sub-path is judged as typed and as the disk spells it, since Windows reaches
+			// the folder through a short or trailing-dot spelling of its name too.
+			if model.InTrash(rel) || model.InTrash(spelledRel(root, walkRoot)) {
+				return nil, waxerr.New(waxerr.CodeInvalid, op, "sub-path is inside the library trash")
+			}
 		}
 	}
 
@@ -254,7 +260,7 @@ func (s *Scanner) Scan(ctx context.Context, req Request, hb Heartbeat) (*Result,
 		if d.IsDir() {
 			// Never descend into the library's trash: those files were deleted, and
 			// re-cataloging them would resurrect the items they backed.
-			if d.Name() == model.TrashDirName {
+			if model.IsTrashName(d.Name()) {
 				return fs.SkipDir
 			}
 			return nil
@@ -937,7 +943,7 @@ func countAudio(ctx context.Context, root string) int {
 			return ctx.Err()
 		}
 		if d.IsDir() {
-			if d.Name() == model.TrashDirName {
+			if model.IsTrashName(d.Name()) {
 				return fs.SkipDir
 			}
 			return nil
@@ -1910,4 +1916,22 @@ func CueRipTracks(audioPath, codec string, durationMS int64) int {
 		return 0
 	}
 	return len(carve)
+}
+
+// spelledRel is path relative to root as the disk spells both, or "" when either
+// cannot be resolved.
+func spelledRel(root, path string) string {
+	r, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return ""
+	}
+	p, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return ""
+	}
+	rel, err := filepath.Rel(r, p)
+	if err != nil {
+		return ""
+	}
+	return rel
 }
