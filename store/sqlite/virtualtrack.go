@@ -88,6 +88,8 @@ func (s *Store) PutScannedVirtualTracks(ctx context.Context, in model.PutScanned
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
+		// The playlists and queues the dropped tracks leave are settled once after the loop.
+		var batch entryHolders
 		for key, ex := range existing {
 			if desired[key] {
 				continue
@@ -106,7 +108,7 @@ func (s *Store) PutScannedVirtualTracks(ctx context.Context, in model.PutScanned
 				setChanged = true
 				continue
 			}
-			opid, err := deleteItemCascade(ctx, tx, ex.itemID)
+			opid, err := deleteItemCascade(ctx, tx, ex.itemID, &batch)
 			if err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
@@ -114,6 +116,9 @@ func (s *Store) PutScannedVirtualTracks(ctx context.Context, in model.PutScanned
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 			setChanged = true
+		}
+		if err := batch.settleTx(ctx, tx); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 
 		// Detach any NON-virtual item still backing this file (a plain track or a book

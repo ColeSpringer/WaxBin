@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"strings"
 	"testing"
 	"time"
 
@@ -93,9 +92,16 @@ func TestStateSetAsOfCoversPlaybackWrites(t *testing.T) {
 	if err != nil {
 		t.Fatalf("export: %v", err)
 	}
-	snap, err := port.ReadSnapshot(strings.NewReader(doc))
-	if err != nil {
+	// Under --json the export is the envelope's data.
+	var env struct {
+		Data json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(doc), &env); err != nil {
 		t.Fatalf("export printed %q: %v", doc, err)
+	}
+	snap, err := port.ReadSnapshot(bytes.NewReader(env.Data))
+	if err != nil {
+		t.Fatalf("export data %q: %v", env.Data, err)
 	}
 	if len(snap.PlaySessions) != 1 || snap.PlaySessions[0].PID != got.SessionPID || snap.PlaySessions[0].Client != "lastfm" {
 		t.Fatalf("exported sessions = %+v, want the one logged under client lastfm", snap.PlaySessions)

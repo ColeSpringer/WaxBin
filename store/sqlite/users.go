@@ -85,6 +85,22 @@ func (s *Store) Users(ctx context.Context) ([]*model.User, error) {
 	return out, rows.Err()
 }
 
+// UserByPID returns one user, the default user for an empty pid, or CodeNotFound.
+func (s *Store) UserByPID(ctx context.Context, pid model.PID) (*model.User, error) {
+	if pid == "" {
+		return s.DefaultUser(ctx)
+	}
+	u, err := scanUser(s.read.QueryRowContext(ctx,
+		"SELECT id, pid, name, is_default, created_at FROM user WHERE pid = ?", string(pid)))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, waxerr.New(waxerr.CodeNotFound, "store.UserByPID", "no such user: "+string(pid))
+	}
+	if err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeIO, "store.UserByPID", err)
+	}
+	return u, nil
+}
+
 // DefaultUser returns the seeded default user.
 func (s *Store) DefaultUser(ctx context.Context) (*model.User, error) {
 	u, err := scanUser(s.read.QueryRowContext(ctx,

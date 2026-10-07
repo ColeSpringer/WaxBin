@@ -24,8 +24,11 @@ type DerivedReport struct {
 	BookDurationDrift       int // books whose stored total_duration_ms != summed parts
 	BookISBNKeyDrift        int // books whose stored isbn_key != identity.ISBNKey(isbn)
 	AlbumYearDrift          int // albums whose year != their members' most common year
-	OrphanArtSources        int // art_source images with no live art_map references
-	OrphanThumbnails        int // thumb_cache rows whose source is unreferenced
+	// Static playlists whose positions are not 0..n-1. Informational: an index resolves
+	// by rank, so such a gap changes nothing a reader sees; --fix renumbers it.
+	PlaylistPositionDrift int
+	OrphanArtSources      int // art_source images with no live art_map references
+	OrphanThumbnails      int // thumb_cache rows whose source is unreferenced
 	// field_provenance rows under a "tag.<KEY>" whose key WaxBin has since reserved.
 	// Nothing can read, edit, or unlock one, and the scan's own sweep cannot reach the
 	// row on an item that holds no custom tags at all.
@@ -39,9 +42,10 @@ type DerivedReport struct {
 }
 
 // Consistent reports whether the writer-maintained derived data is correct: FTS
-// coverage, rollups, and generated sort keys. Orphan-art counts are excluded
-// because a cover swap or an item deletion leaves reclaimable sources behind as a
-// matter of course; Reclaimable reports those.
+// coverage, rollups, and generated sort keys. Orphan-art counts are excluded because a
+// cover swap or an item deletion leaves reclaimable sources behind as a matter of
+// course; Reclaimable reports those. Playlist position gaps are excluded too (see
+// PlaylistPositionDrift).
 func (r DerivedReport) Consistent() bool {
 	return r.SortKeyDrift == 0 && r.consistentApartFromSortKeys()
 }
@@ -94,6 +98,7 @@ func (s *Store) VerifyDerived(ctx context.Context) (*DerivedReport, error) {
 		// The same query refreshAlbumYearsTx repairs from, so the check and the repair
 		// cannot disagree.
 		{&rep.AlbumYearDrift, "SELECT COUNT(*) FROM (" + strings.Replace(albumYearDriftQ, "/*FILTER*/", "", 1) + ")"},
+		{&rep.PlaylistPositionDrift, "SELECT COUNT(*) FROM (" + playlistPositionDriftQ + ")"},
 		// A map row pointing at a deleted entity does not count as a reference here,
 		// matching GCArt, which removes the stale map before deleting the source.
 		{&rep.OrphanArtSources, "SELECT COUNT(*) FROM art_source WHERE hash NOT IN (" + liveArtSourceQ + ")"},

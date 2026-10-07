@@ -180,9 +180,11 @@ func newAcquisitionSetCmd(g *globals) *cobra.Command {
 				})); err != nil {
 				return err
 			}
-			fmt.Fprintf(out(cmd), "recorded acquisition provenance for %s; it now reads source:%s\n",
-				pid, in.SourceType)
-			return nil
+			return reply(cmd, g, struct {
+				ItemPID    model.PID `json:"itemPid"`
+				SourceType string    `json:"sourceType"`
+			}{pid, string(in.SourceType)}, fmt.Sprintf("recorded acquisition provenance for %s; it now reads source:%s\n",
+				pid, in.SourceType))
 		},
 	}
 	f := cmd.Flags()
@@ -235,11 +237,13 @@ func newAcquisitionClearCmd(g *globals) *cobra.Command {
 				})); err != nil {
 				return err
 			}
-			fmt.Fprintf(out(cmd), "cleared acquisition provenance for %s; it now reads the source it has without a row of its own\n", pid)
 			if w := clearDurabilityWarning(noLock, writeBack); w != "" {
 				fmt.Fprintln(errOut(cmd), w)
 			}
-			return nil
+			return reply(cmd, g, struct {
+				ItemPID model.PID `json:"itemPid"`
+				Cleared bool      `json:"cleared"`
+			}{pid, true}, fmt.Sprintf("cleared acquisition provenance for %s; it now reads the source it has without a row of its own\n", pid))
 		},
 	}
 	f := cmd.Flags()

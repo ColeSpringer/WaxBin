@@ -480,6 +480,13 @@ func (s *Store) writeTx(ctx context.Context, fn func(*sql.Tx) error) error {
 	if err != nil {
 		return waxerr.Wrap(waxerr.CodeIO, "store.writeTx", err)
 	}
+	// A panic in fn would otherwise keep the one write connection checked out for good.
+	defer func() {
+		if p := recover(); p != nil {
+			_ = tx.Rollback()
+			panic(p)
+		}
+	}()
 	if err := fn(tx); err != nil {
 		_ = tx.Rollback()
 		return err

@@ -586,7 +586,13 @@ func (s *Store) SetQueue(ctx context.Context, userPID model.PID, itemPIDs []mode
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 		}
-		return appendChange(ctx, tx, "play_queue", userPID, model.OpUpdate)
+		// The delta names the user by pid, as an item delete's queue delta does, so the
+		// default user's queue is one key however it was written.
+		var pid model.PID
+		if err := tx.QueryRowContext(ctx, "SELECT pid FROM user WHERE id = ?", userID).Scan(&pid); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		return appendChange(ctx, tx, "play_queue", pid, model.OpUpdate)
 	})
 }
 

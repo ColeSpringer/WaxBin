@@ -177,12 +177,14 @@ func newChaptersSetCmd(g *globals) *cobra.Command {
 			if err := m.SetChapters(ctx(cmd), model.PID(args[0]), chapters, lockChange(noLock, keepLock), force); err != nil {
 				return err
 			}
+			text := fmt.Sprintf("set %d user chapter(s) for %s\n", len(chapters), args[0])
 			if clear {
-				fmt.Fprintf(out(cmd), "cleared user chapters for %s\n", args[0])
-			} else {
-				fmt.Fprintf(out(cmd), "set %d user chapter(s) for %s\n", len(chapters), args[0])
+				text = fmt.Sprintf("cleared user chapters for %s\n", args[0])
 			}
-			return nil
+			return reply(cmd, g, struct {
+				ItemPID  string `json:"itemPid"`
+				Chapters int    `json:"chapters"`
+			}{args[0], len(chapters)}, text)
 		},
 	}
 	f := cmd.Flags()

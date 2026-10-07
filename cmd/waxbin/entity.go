@@ -126,7 +126,7 @@ func newEntityEditCmd(g *globals) *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			et := model.MergeEntity(args[0])
 			if !model.EntityEditable(et) {
-				return fmt.Errorf("unknown or non-editable entity type %q (want artist, release_group, or album)", args[0])
+				return waxerr.New(waxerr.CodeInvalid, "entity edit", fmt.Sprintf("unknown or non-editable entity type %q (want artist, release_group, or album)", args[0]))
 			}
 			pid := model.PID(args[1])
 			edits, err := parseSetFlags(sets)
@@ -151,12 +151,17 @@ func newEntityEditCmd(g *globals) *cobra.Command {
 			}
 			// A clear that re-keyed onto a twin took this entity with it, so naming the
 			// pid the user typed would name a row that no longer exists.
+			view := struct {
+				Type       string    `json:"type"`
+				PID        model.PID `json:"pid"`
+				Fields     int       `json:"fields"`
+				MergedInto model.PID `json:"mergedInto,omitempty"`
+			}{Type: string(et), PID: pid, Fields: len(edits)}
 			if rep != nil && rep.MergedInto != "" {
-				fmt.Fprintf(out(cmd), "cleared the mbid; %s %s merged into %s\n", et, pid, rep.MergedInto)
-				return nil
+				view.MergedInto = rep.MergedInto
+				return reply(cmd, g, view, fmt.Sprintf("cleared the mbid; %s %s merged into %s\n", et, pid, rep.MergedInto))
 			}
-			fmt.Fprintf(out(cmd), "edited %d field(s) on %s %s\n", len(edits), et, pid)
-			return nil
+			return reply(cmd, g, view, fmt.Sprintf("edited %d field(s) on %s %s\n", len(edits), et, pid))
 		},
 	}
 	f := cmd.Flags()
@@ -230,7 +235,7 @@ func newEntityRenameCmd(g *globals) *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			et := model.MergeEntity(args[0])
 			if !model.EntityRenamable(et) {
-				return fmt.Errorf("cannot rename a %q entity (want album, release_group, or artist)", args[0])
+				return waxerr.New(waxerr.CodeInvalid, "entity rename", fmt.Sprintf("cannot rename a %q entity (want album, release_group, or artist)", args[0]))
 			}
 			pid := model.PID(args[1])
 			fields, err := parseSetFlags(sets)
@@ -529,15 +534,20 @@ func newEntityStarCmd(g *globals) *cobra.Command {
 				return err
 			}
 			pid := model.PID(args[1])
-			if _, err := m.SetEntityStar(ctx(cmd), uPID, kind, pid, !unstar, asOfNS); err != nil {
+			changed, err := m.SetEntityStar(ctx(cmd), uPID, kind, pid, !unstar, asOfNS)
+			if err != nil {
 				return err
 			}
 			verb := "starred"
 			if unstar {
 				verb = "unstarred"
 			}
-			fmt.Fprintf(out(cmd), "%s %s %s\n", verb, kind, pid)
-			return nil
+			return reply(cmd, g, struct {
+				Type    string    `json:"type"`
+				PID     model.PID `json:"pid"`
+				Starred bool      `json:"starred"`
+				Changed bool      `json:"changed"`
+			}{string(kind), pid, !unstar, changed}, fmt.Sprintf("%s %s %s\n", verb, kind, pid))
 		},
 	}
 	f := cmd.Flags()
@@ -582,15 +592,20 @@ func newEntityRateCmd(g *globals) *cobra.Command {
 				return err
 			}
 			pid := model.PID(args[1])
-			if _, err := m.SetEntityRating(ctx(cmd), uPID, kind, pid, rating, asOfNS); err != nil {
+			changed, err := m.SetEntityRating(ctx(cmd), uPID, kind, pid, rating, asOfNS)
+			if err != nil {
 				return err
 			}
-			if rating == nil {
-				fmt.Fprintf(out(cmd), "cleared rating on %s %s\n", kind, pid)
-			} else {
-				fmt.Fprintf(out(cmd), "rated %s %s %d/100\n", kind, pid, *rating)
+			text := fmt.Sprintf("cleared rating on %s %s\n", kind, pid)
+			if rating != nil {
+				text = fmt.Sprintf("rated %s %s %d/100\n", kind, pid, *rating)
 			}
-			return nil
+			return reply(cmd, g, struct {
+				Type    string    `json:"type"`
+				PID     model.PID `json:"pid"`
+				Rating  *int      `json:"rating"`
+				Changed bool      `json:"changed"`
+			}{string(kind), pid, rating, changed}, text)
 		},
 	}
 	f := cmd.Flags()

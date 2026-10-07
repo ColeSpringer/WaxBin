@@ -435,7 +435,7 @@ func (m *mutator) PlaylistImportM3U8(ctx context.Context, name string, owner mod
 			return nil, err
 		}
 		return &playlist.ImportResult{
-			PlaylistPID: model.PID(res.PlaylistPID), Matched: res.Matched,
+			PlaylistPID: model.PID(res.PlaylistPID), Matched: res.Matched, Merged: res.Merged,
 			Unmatched: res.Unmatched, UnmatchedPaths: res.UnmatchedPaths,
 		}, nil
 	}
@@ -456,11 +456,18 @@ func (m *mutator) PlaylistRemove(ctx context.Context, playlistPID, itemPID model
 	return m.lib.Playlists().Remove(ctx, playlistPID, itemPID)
 }
 
-func (m *mutator) PlaylistRemoveAt(ctx context.Context, playlistPID model.PID, position int) error {
+func (m *mutator) PlaylistRemoveMany(ctx context.Context, playlistPID model.PID, indexes []int, expect []model.PID) error {
 	if m.px != nil {
-		return m.px.PlaylistRemoveAt(ctx, playlistPID, position)
+		return m.px.PlaylistRemoveMany(ctx, playlistPID, indexes, expect)
 	}
-	return m.lib.Playlists().RemoveAt(ctx, playlistPID, position)
+	return m.lib.Playlists().RemoveAtMany(ctx, playlistPID, indexes, expect)
+}
+
+func (m *mutator) PlaylistSetOwner(ctx context.Context, playlistPID, owner model.PID) error {
+	if m.px != nil {
+		return m.px.PlaylistSetOwner(ctx, playlistPID, owner)
+	}
+	return m.lib.Playlists().SetOwner(ctx, playlistPID, owner)
 }
 
 func (m *mutator) PlaylistSetRule(ctx context.Context, playlistPID model.PID, rule query.Query) error {

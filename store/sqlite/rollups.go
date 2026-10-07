@@ -123,12 +123,13 @@ func refreshRollupSubset(ctx context.Context, tx *sql.Tx, idList []int64, table,
 }
 
 // RefreshRollups recomputes every rollup from the base tables in one transaction,
-// plus each book's denormalized total duration and each album's year. Per-write
+// plus each book's denormalized total duration and each album's year, and renumbers
+// each static playlist whose positions are not its listing indexes. Per-write
 // maintenance keeps them current during normal operation; this whole-catalog rebuild
-// repairs drift reported by `db verify`. The book total and the album year are not
-// rollup tables, but they are the same kind of maintained derived value, they are on
-// the same drift report, and this is the verb `db verify --fix` runs, so repairing
-// them anywhere else would leave the fix unreachable.
+// repairs drift reported by `db verify`. The book total, the album year and the
+// playlist positions are not rollup tables, but they are the same kind of maintained
+// value, they are on the same drift report, and this is the verb `db verify --fix`
+// runs, so repairing them anywhere else would leave the fix unreachable.
 func (s *Store) RefreshRollups(ctx context.Context) error {
 	return s.writeTx(ctx, func(tx *sql.Tx) error {
 		if err := rebuildRollups(ctx, tx, nowNS()); err != nil {
@@ -137,7 +138,10 @@ func (s *Store) RefreshRollups(ctx context.Context) error {
 		if err := refreshAllBookDurations(ctx, tx); err != nil {
 			return err
 		}
-		return refreshAllAlbumYearsTx(ctx, tx)
+		if err := refreshAllAlbumYearsTx(ctx, tx); err != nil {
+			return err
+		}
+		return compactAllPlaylistsTx(ctx, tx)
 	})
 }
 

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -214,7 +215,9 @@ func TestPrintCreditBatchResult(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
-	printCreditBatchResult(cmd, res)
+	if err := printCreditBatchResult(cmd, &globals{}, res, nil); err != nil {
+		t.Fatal(err)
+	}
 
 	if !strings.Contains(stdout.String(), "3 credit edit(s) across 2 item(s)") {
 		t.Errorf("summary = %q, want the edit and distinct item counts", stdout.String())
@@ -224,5 +227,28 @@ func TestPrintCreditBatchResult(t *testing.T) {
 	}
 	if n := strings.Count(stderr.String(), "/b.m4b"); n != 1 {
 		t.Errorf("write-back warning printed %d times, want once for the item's two entries", n)
+	}
+
+	// Under --json the same report is one document, the warnings still on stderr.
+	stdout.Reset()
+	stderr.Reset()
+	if err := printCreditBatchResult(cmd, &globals{jsonOut: true}, res, nil); err != nil {
+		t.Fatal(err)
+	}
+	var env struct {
+		Data struct {
+			Edited  []creditEntryView `json:"edited"`
+			Skipped []creditEntryView `json:"skipped"`
+			Applied bool              `json:"applied"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &env); err != nil {
+		t.Fatalf("json report %q: %v", stdout.String(), err)
+	}
+	if len(env.Data.Edited) != 3 || len(env.Data.Skipped) != 1 || env.Data.Skipped[0].ItemPID != "i3" || !env.Data.Applied {
+		t.Errorf("json report = %+v, want three edited, i3 skipped, applied", env.Data)
+	}
+	if n := strings.Count(stderr.String(), "/b.m4b"); n != 1 {
+		t.Errorf("json mode printed the write-back warning %d times, want once", n)
 	}
 }

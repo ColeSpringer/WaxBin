@@ -30,6 +30,27 @@ func TestDefaultUserSeeded(t *testing.T) {
 	}
 }
 
+// TestUserByPID: a pid finds its user, an empty pid the default user, and a pid no
+// user holds is CodeNotFound.
+func TestUserByPID(t *testing.T) {
+	t.Parallel()
+	st, _ := entityFixture(t)
+	ctx := context.Background()
+	bob, err := st.CreateUser(ctx, "bob")
+	if err != nil {
+		t.Fatalf("user: %v", err)
+	}
+	if u, err := st.UserByPID(ctx, bob.PID); err != nil || u.Name != "bob" || u.IsDefault {
+		t.Errorf("bob = %+v (err %v)", u, err)
+	}
+	if u, err := st.UserByPID(ctx, ""); err != nil || !u.IsDefault {
+		t.Errorf("empty pid = %+v (err %v), want the default user", u, err)
+	}
+	if _, err := st.UserByPID(ctx, "nobody"); !waxerr.Is(err, waxerr.CodeNotFound) {
+		t.Errorf("unknown pid: err = %v, want CodeNotFound", err)
+	}
+}
+
 func TestPlayStateLifecycle(t *testing.T) {
 	t.Parallel()
 	st, lib := entityFixture(t)

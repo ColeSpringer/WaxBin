@@ -381,8 +381,15 @@ func newArtLockCmd(g *globals, lock bool) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			fmt.Fprint(out(cmd), artLockLine(change, lock, past, et, r, pid))
-			return nil
+			return reply(cmd, g, struct {
+				Type        string    `json:"type"`
+				PID         model.PID `json:"pid"`
+				Role        string    `json:"role"`
+				Locked      bool      `json:"locked"`
+				Changed     bool      `json:"changed"`
+				StillLocked bool      `json:"stillLocked"`
+			}{string(et), pid, string(r), lock, change.Changed, change.StillLocked},
+				artLockLine(change, lock, past, et, r, pid))
 		},
 	}
 	cmd.Flags().StringVar(&entType, "type", "track", "entity type: "+artTypeList)
@@ -525,22 +532,34 @@ func newArtSetCmd(g *globals) *cobra.Command {
 			if err := surfaceWriteBack(cmd, err); err != nil {
 				return err
 			}
-			if clear {
-				// Naming the lock is the point: a cleared slot is locked by default,
-				// which is what refuses every later set in that role and holds it empty
-				// against enrichment, and nothing else reports it.
-				lockNote := " (locked)"
-				switch {
-				case keepLock:
-					lockNote = " (lock unchanged)"
-				case noLock:
-					lockNote = " (unlocked)"
-				}
-				fmt.Fprintf(out(cmd), "cleared %s %s art for %s%s\n", et, r, pid, lockNote)
-			} else {
-				fmt.Fprintf(out(cmd), "set %s %s art for %s (%d bytes)\n", et, r, pid, len(raw))
+			view := struct {
+				Type    string    `json:"type"`
+				PID     model.PID `json:"pid"`
+				Role    string    `json:"role"`
+				Bytes   int       `json:"bytes"`
+				Cleared bool      `json:"cleared"`
+				Lock    string    `json:"lock"`
+			}{string(et), pid, string(r), len(raw), clear, "locked"}
+			switch {
+			case keepLock:
+				view.Lock = "unchanged"
+			case noLock:
+				view.Lock = "unlocked"
 			}
-			return nil
+			if !clear {
+				return reply(cmd, g, view, fmt.Sprintf("set %s %s art for %s (%d bytes)\n", et, r, pid, len(raw)))
+			}
+			// Naming the lock is the point: a cleared slot is locked by default, which is
+			// what refuses every later set in that role and holds it empty against
+			// enrichment, and nothing else reports it.
+			lockNote := " (locked)"
+			switch {
+			case keepLock:
+				lockNote = " (lock unchanged)"
+			case noLock:
+				lockNote = " (unlocked)"
+			}
+			return reply(cmd, g, view, fmt.Sprintf("cleared %s %s art for %s%s\n", et, r, pid, lockNote))
 		},
 	}
 	f := cmd.Flags()

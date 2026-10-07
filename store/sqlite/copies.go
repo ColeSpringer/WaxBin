@@ -508,6 +508,8 @@ func (s *Store) attachCopyTx(ctx context.Context, tx *sql.Tx, in model.PutScanne
 func reconcileOrphansTx(ctx context.Context, tx *sql.Tx, orphans []int64, dep departure, affected *affectedRollups) ([]model.PromotedFile, []model.PID, error) {
 	var promoted []model.PromotedFile
 	var folded []model.PID
+	// The playlists and queues the folds and deletes change are settled once at the end.
+	var batch entryHolders
 	for _, oid := range orphans {
 		has, err := itemHasAnyFile(ctx, tx, oid)
 		if err != nil {
@@ -551,11 +553,11 @@ func reconcileOrphansTx(ctx context.Context, tx *sql.Tx, orphans []int64, dep de
 		}
 		fold := dep.into != 0 && !dep.lost[oid].start.Valid
 		if fold {
-			if err := foldItemIntoTx(ctx, tx, oid, dep.into, dep.file, dep.preserveLocks); err != nil {
+			if err := foldItemIntoTx(ctx, tx, oid, dep.into, dep.file, dep.preserveLocks, &batch); err != nil {
 				return nil, nil, err
 			}
 		}
-		opid, err := deleteItemCascade(ctx, tx, oid)
+		opid, err := deleteItemCascade(ctx, tx, oid, &batch)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -566,7 +568,7 @@ func reconcileOrphansTx(ctx context.Context, tx *sql.Tx, orphans []int64, dep de
 			return nil, nil, err
 		}
 	}
-	return promoted, folded, nil
+	return promoted, folded, batch.settleTx(ctx, tx)
 }
 
 // appendItemUpdateTx appends an item update delta by item id.

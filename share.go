@@ -296,11 +296,11 @@ func uniqueOrAlbumTiebreak(survivors []*model.ItemView, want string, key func(*m
 	return nil
 }
 
-// ExportPlaylistRefs returns portable identity descriptors for a playlist's members in
-// order (a static list's stored order, a smart list evaluated for userPID). A playlist
-// of local PIDs cannot cross catalogs, so the host ships these refs and rebuilds the
-// list on the far side via ResolvePlaylistRefs. An empty userPID selects the default
-// user.
+// ExportPlaylistRefs returns a portable identity descriptor for each of a playlist's
+// entries in order (a static list's stored order, a smart list evaluated for userPID),
+// an item listed twice exported twice. A playlist of local PIDs cannot cross catalogs,
+// so the host ships these refs and rebuilds the list on the far side via
+// ResolvePlaylistRefs. An empty userPID selects the default user.
 func (l *Library) ExportPlaylistRefs(ctx context.Context, playlistPID, userPID model.PID) ([]model.PortableRef, error) {
 	items, err := l.Playlists().Items(ctx, playlistPID, userPID)
 	if err != nil {
@@ -310,7 +310,17 @@ func (l *Library) ExportPlaylistRefs(ctx context.Context, playlistPID, userPID m
 	for _, v := range items {
 		pids = append(pids, v.PID)
 	}
-	return l.store.ItemIdentitiesByPIDs(ctx, pids)
+	byPID, err := l.store.ItemIdentities(ctx, pids)
+	if err != nil {
+		return nil, err
+	}
+	refs := make([]model.PortableRef, 0, len(pids))
+	for _, pid := range pids {
+		if ref, ok := byPID[pid]; ok {
+			refs = append(refs, ref)
+		}
+	}
+	return refs, nil
 }
 
 // ResolvePlaylistRefs resolves a batch of portable refs to local items, preserving input

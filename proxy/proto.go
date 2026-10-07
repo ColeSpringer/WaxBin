@@ -27,7 +27,7 @@ import (
 // ProtocolVersion is the wire protocol version. A request carrying a different
 // version is rejected, so a newer client cannot silently misdrive an older
 // server.
-const ProtocolVersion = 22
+const ProtocolVersion = 23
 
 // Method names for the proxied operations: the fast request/response catalog
 // mutations, the reads a mutating command needs for its confirmation output, the
@@ -89,6 +89,9 @@ const (
 
 	MethodSetLibraryReadOnly       = "set_library_read_only"
 	MethodSetLibraryFolderFallback = "set_library_folder_fallback"
+
+	MethodPlaylistRemoveMany = "playlist_remove_many"
+	MethodPlaylistSetOwner   = "playlist_set_owner"
 
 	// Server-run long jobs. The server starts the job in its own process (staying
 	// available) and returns the job PID; the client tails the read-only job row.
@@ -772,10 +775,12 @@ type PlaylistImportParams struct {
 // PlaylistImportResult is the playlist_import_m3u8 response: the new playlist and
 // what the import could not match. The unmatched paths are the reason this is not
 // a bare pid, since an import that silently dropped half a file is the failure a
-// caller needs to see.
+// caller needs to see. Merged counts lines that joined the entry before them (a book
+// listed by its part files).
 type PlaylistImportResult struct {
 	PlaylistPID    string   `json:"playlistPid"`
 	Matched        int      `json:"matched"`
+	Merged         int      `json:"merged,omitempty"`
 	Unmatched      int      `json:"unmatched"`
 	UnmatchedPaths []string `json:"unmatchedPaths,omitempty"`
 }
@@ -786,10 +791,32 @@ type PlaylistRemoveParams struct {
 	ItemPID     string `json:"itemPid"`
 }
 
-// PlaylistRemoveAtParams is the playlist_remove_at request payload.
+// PlaylistRemoveAtParams is the playlist_remove_at request payload. Position is an
+// index of the playlist's listing as it stands (0 is the first entry) since version 23,
+// which exists for that change: a server at 22 read it as a stored position that
+// removals left sparse, and would drop ExpectPID unread. A non-empty ExpectPID refuses
+// the removal (conflict) when the entry holds another item or is gone.
 type PlaylistRemoveAtParams struct {
 	PlaylistPID string `json:"playlistPid"`
 	Position    int    `json:"position"`
+	ExpectPID   string `json:"expectPid,omitempty"`
+}
+
+// PlaylistRemoveManyParams is the playlist_remove_many request payload: listing indexes
+// all resolved before any entry goes. ExpectPIDs is null for no guard, else one item
+// pid per position that the entry must still hold (an empty pid skips that one), so an
+// empty list is sent as one and refused for its length.
+type PlaylistRemoveManyParams struct {
+	PlaylistPID string   `json:"playlistPid"`
+	Positions   []int    `json:"positions"`
+	ExpectPIDs  []string `json:"expectPids"`
+}
+
+// PlaylistSetOwnerParams is the playlist_set_owner request payload; an empty OwnerPID
+// selects the default user.
+type PlaylistSetOwnerParams struct {
+	PlaylistPID string `json:"playlistPid"`
+	OwnerPID    string `json:"ownerPid"`
 }
 
 // PlaylistSetRuleParams is the playlist_set_rule request payload. Rule is a

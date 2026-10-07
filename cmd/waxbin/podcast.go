@@ -74,8 +74,10 @@ func newPodcastTranscriptCmd(g *globals) *cobra.Command {
 					if err := m.FetchTranscript(ctx(cmd), pid); err != nil {
 						return err
 					}
-					fmt.Fprintln(out(cmd), "Transcript fetched and stored.")
-					return nil
+					return reply(cmd, g, struct {
+						EpisodePID model.PID `json:"episodePid"`
+						Fetched    bool      `json:"fetched"`
+					}{pid, true}, "Transcript fetched and stored.\n")
 				}
 				body, err := os.ReadFile(filePath)
 				if err != nil {
@@ -86,8 +88,10 @@ func newPodcastTranscriptCmd(g *globals) *cobra.Command {
 				}); err != nil {
 					return err
 				}
-				fmt.Fprintln(out(cmd), "Transcript stored.")
-				return nil
+				return reply(cmd, g, struct {
+					EpisodePID model.PID `json:"episodePid"`
+					Stored     bool      `json:"stored"`
+				}{pid, true}, "Transcript stored.\n")
 			}
 			lib, _, err := g.openRead(cmd)
 			if err != nil {
@@ -532,8 +536,10 @@ func newPodcastAuthCmd(g *globals) *cobra.Command {
 			if err := lib.Podcasts().SetAuth(ctx(cmd), model.PID(args[0]), args[1], pass); err != nil {
 				return err
 			}
-			fmt.Fprintln(out(cmd), "Credentials saved.")
-			return nil
+			return reply(cmd, g, struct {
+				PodcastPID string `json:"podcastPid"`
+				User       string `json:"user"`
+			}{args[0], args[1]}, "Credentials saved.\n")
 		},
 	}
 	cmd.Flags().StringVar(&pass, "pass", "", "basic-auth password")
@@ -554,23 +560,29 @@ func newPodcastRetentionCmd(g *globals) *cobra.Command {
 			}
 			defer lib.Close()
 			pid := model.PID(args[0])
+			view := struct {
+				PodcastPID     model.PID `json:"podcastPid"`
+				Keep           *int      `json:"keep,omitempty"`
+				Removed        *int      `json:"removed,omitempty"`
+				ReclaimedBytes *int64    `json:"reclaimedBytes,omitempty"`
+			}{PodcastPID: pid}
+			var text strings.Builder
 			if cmd.Flags().Changed("keep") {
 				if err := lib.Podcasts().SetRetention(ctx(cmd), pid, keep); err != nil {
 					return err
 				}
-				fmt.Fprintf(out(cmd), "Retention set: %s\n", keepLabel(keep))
+				view.Keep = &keep
+				fmt.Fprintf(&text, "Retention set: %s\n", keepLabel(keep))
 			}
 			if apply {
 				res, err := lib.Podcasts().ApplyRetention(ctx(cmd), pid)
 				if err != nil {
 					return err
 				}
-				if g.jsonOut {
-					return printJSON(cmd, res)
-				}
-				fmt.Fprintf(out(cmd), "Removed %d episode files, reclaimed %d bytes\n", res.Removed, res.ReclaimedBytes)
+				view.Removed, view.ReclaimedBytes = &res.Removed, &res.ReclaimedBytes
+				fmt.Fprintf(&text, "Removed %d episode files, reclaimed %d bytes\n", res.Removed, res.ReclaimedBytes)
 			}
-			return nil
+			return reply(cmd, g, view, text.String())
 		},
 	}
 	cmd.Flags().IntVar(&keep, "keep", 0, "keep the newest N downloaded episodes (0 = keep all)")
@@ -592,8 +604,10 @@ func newPodcastRemoveCmd(g *globals) *cobra.Command {
 			if err := m.PodcastRemove(ctx(cmd), model.PID(args[0])); err != nil {
 				return err
 			}
-			fmt.Fprintln(out(cmd), "Unsubscribed.")
-			return nil
+			return reply(cmd, g, struct {
+				PodcastPID string `json:"podcastPid"`
+				Removed    bool   `json:"removed"`
+			}{args[0], true}, "Unsubscribed.\n")
 		},
 	}
 }

@@ -485,7 +485,7 @@ func TestEntityStateOrphanLockstep(t *testing.T) {
 	// for a reason unrelated to entity play-state.
 	itemID := int64(scalarInt(t, st, "SELECT id FROM playable_item WHERE pid = ?", string(r.ItemPID)))
 	if err := st.writeTx(ctx, func(tx *sql.Tx) error {
-		_, err := deleteItemCascade(ctx, tx, itemID)
+		_, err := deleteItemCascade(ctx, tx, itemID, nil)
 		return err
 	}); err != nil {
 		t.Fatalf("delete item: %v", err)

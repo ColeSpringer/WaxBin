@@ -7,6 +7,7 @@ import (
 	"github.com/colespringer/waxbin"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/read"
+	"github.com/colespringer/waxbin/waxerr"
 	"github.com/spf13/cobra"
 )
 
@@ -43,7 +44,7 @@ func newTagCmd(g *globals) *cobra.Command {
 				// dropped into a list), so reject it rather than falling through to a listing.
 				if len(values) > 0 || cmd.Flags().Changed("no-lock") || cmd.Flags().Changed("keep-lock") ||
 					cmd.Flags().Changed("force") || cmd.Flags().Changed("write-back") {
-					return fmt.Errorf("--key is required to set a tag (with --value/--no-lock/--keep-lock/--force/--write-back)")
+					return waxerr.New(waxerr.CodeInvalid, "tag", "--key is required to set a tag (with --value/--no-lock/--keep-lock/--force/--write-back)")
 				}
 				return listTags(cmd, g, pid)
 			}
@@ -145,12 +146,15 @@ func setTag(cmd *cobra.Command, g *globals, pid model.PID, key string, values []
 	if err := surfaceWriteBack(cmd, err); err != nil {
 		return err
 	}
+	text := fmt.Sprintf("set tag %s (%d value(s)) on %s\n", canonKey, stored, pid)
 	if stored == 0 {
-		fmt.Fprintf(out(cmd), "cleared tag %s on %s\n", canonKey, pid)
-	} else {
-		fmt.Fprintf(out(cmd), "set tag %s (%d value(s)) on %s\n", canonKey, stored, pid)
+		text = fmt.Sprintf("cleared tag %s on %s\n", canonKey, pid)
 	}
-	return nil
+	return reply(cmd, g, struct {
+		ItemPID model.PID `json:"itemPid"`
+		Key     string    `json:"key"`
+		Values  int       `json:"values"`
+	}{pid, canonKey, stored}, text)
 }
 
 // tagView is the JSON shape for a custom tag.

@@ -233,10 +233,11 @@ func moveDepartedPositionsTx(ctx context.Context, tx *sql.Tx, bookID, into, file
 // custom tags a scan would keep come across (foldItemTagsTx), and the bookmarks, sessions,
 // queue and playlist entries and acquisition move across: a queue or playlist that already
 // holds the survivor drops the loser's entries instead, so a book made of three tracks is
-// listed once. When the survivor is a book, a position or bookmark lands inside the file's
+// listed once, and each playlist and queue changed is settled (entryHolders), here or
+// with the caller's batch. When the survivor is a book, a position or bookmark lands inside the file's
 // part (partSpan.inside). Only tracks and books fold, and the caller deletes the loser
 // afterwards.
-func foldItemIntoTx(ctx context.Context, tx *sql.Tx, loser, survivor, fileID int64, preserveLocks bool) error {
+func foldItemIntoTx(ctx context.Context, tx *sql.Tx, loser, survivor, fileID int64, preserveLocks bool, batch *entryHolders) error {
 	var lkind, skind string
 	if err := tx.QueryRowContext(ctx, `SELECT (SELECT kind FROM playable_item WHERE id = ?),
 		(SELECT kind FROM playable_item WHERE id = ?)`, loser, survivor).Scan(&lkind, &skind); err != nil {
@@ -260,6 +261,13 @@ func foldItemIntoTx(ctx context.Context, tx *sql.Tx, loser, survivor, fileID int
 	if err := foldItemTagsTx(ctx, tx, loser, survivor, skind, preserveLocks); err != nil {
 		return err
 	}
+	var own entryHolders
+	if batch == nil {
+		batch = &own
+	}
+	if err := batch.addTx(ctx, tx, "item_id = ?", loser); err != nil {
+		return err
+	}
 	stmts := []struct {
 		q    string
 		args []any
@@ -280,7 +288,7 @@ func foldItemIntoTx(ctx context.Context, tx *sql.Tx, loser, survivor, fileID int
 			return err
 		}
 	}
-	return nil
+	return own.settleTx(ctx, tx)
 }
 
 // foldItemTagsTx brings across the loser's custom tags a scan of the survivor would keep,

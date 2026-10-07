@@ -121,7 +121,7 @@ SIGTERM).
 - `waxbin upgrade` groups alt encodings of the same recording (by fingerprint, or held
   by one item), ranks each group by quality, and marks the keeper.
 - `waxbin db verify --fix` repairs derived-data drift (the search index, rollups, album
-  years, sort keys) and reclaims orphaned art. `waxbin db vacuum` GCs and compacts the database.
+  years, sort keys, playlist positions) and reclaims orphaned art. `waxbin db vacuum` GCs and compacts the database.
 - `waxbin stats --year 2025` prints a per-user listening year-in-review.
 
 ### Curation & editing

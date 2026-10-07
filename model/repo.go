@@ -605,10 +605,11 @@ type Catalog interface {
 	LatestChangeSeq(ctx context.Context) (int64, error)
 
 	// RefreshRollups recomputes the maintained catalog-structural rollups
-	// (per artist/release_group/genre) and each book's denormalized total duration
-	// from the base tables. Normal scans maintain touched rows transactionally; this
-	// is the repair path for db verify drift, so it must cover every maintained sum
-	// the drift report names or `db verify --fix` reports drift it cannot clear.
+	// (per artist/release_group/genre), each book's denormalized total duration and each
+	// album's year from the base tables, and renumbers drifted playlist positions. Normal
+	// scans maintain touched rows transactionally; this is the repair path for db verify
+	// drift, so it must cover every maintained value the drift report names or `db
+	// verify --fix` reports drift it cannot clear.
 	RefreshRollups(ctx context.Context) error
 }
 

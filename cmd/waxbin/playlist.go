@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -25,6 +26,7 @@ func newPlaylistCmd(g *globals) *cobra.Command {
 		newPlaylistRemoveCmd(g),
 		newPlaylistDeleteCmd(g),
 		newPlaylistRenameCmd(g),
+		newPlaylistSetOwnerCmd(g),
 		newPlaylistExportCmd(g),
 		newPlaylistImportCmd(g),
 	)
@@ -142,9 +144,9 @@ func newPlaylistShowCmd(g *globals) *cobra.Command {
 			}
 			fmt.Fprintf(out(cmd), "%s (%s, %s) - %d items\n", pl.Name, pl.Kind, pl.Visibility, len(items))
 			tw := tabwriter.NewWriter(out(cmd), 0, 2, 2, ' ', 0)
-			fmt.Fprintln(tw, "PID\tTITLE\tARTIST\tALBUM")
-			for _, v := range items {
-				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", v.PID, v.Title, v.Artist, v.Album)
+			fmt.Fprintln(tw, "INDEX\tPID\tTITLE\tARTIST\tALBUM")
+			for i, v := range items {
+				fmt.Fprintf(tw, "%d\t%s\t%s\t%s\t%s\n", i, v.PID, v.Title, v.Artist, v.Album)
 			}
 			return tw.Flush()
 		},
@@ -167,47 +169,61 @@ func newPlaylistAddCmd(g *globals) *cobra.Command {
 			if err := m.PlaylistAdd(ctx(cmd), model.PID(args[0]), pids(args[1:])...); err != nil {
 				return err
 			}
-			fmt.Fprintf(out(cmd), "added %d items\n", len(args)-1)
-			return nil
+			return reply(cmd, g, struct {
+				PlaylistPID string      `json:"playlistPid"`
+				Added       []model.PID `json:"added"`
+			}{args[0], pids(args[1:])}, fmt.Sprintf("added %d items\n", len(args)-1))
 		},
 	}
 	return cmd
 }
 
 func newPlaylistRemoveCmd(g *globals) *cobra.Command {
-	var position int
+	var indexes []int
 	cmd := &cobra.Command{
 		Use:   "remove PID [ITEMPID]",
 		Short: "Remove items from a static playlist",
-		Long: "Removes items from a static playlist: by ITEMPID (every occurrence), or " +
-			"a single occurrence by --position N (so a duplicated item can be removed by " +
-			"position).",
+		Long: "Removes items from a static playlist: every occurrence of ITEMPID, or the " +
+			"entries at the given --index values, the indexes `playlist show` prints, all " +
+			"read from the listing as it stands before any entry goes. With both, each " +
+			"--index must hold ITEMPID or nothing is removed.",
 		Args: cobra.RangeArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			byPos := cmd.Flags().Changed("position")
-			if byPos && len(args) != 1 {
-				return waxerr.New(waxerr.CodeInvalid, "playlist remove", "--position takes only the playlist PID, not an item pid")
-			}
-			if !byPos && len(args) != 2 {
-				return waxerr.New(waxerr.CodeInvalid, "playlist remove", "give an ITEMPID or --position N")
+			if len(indexes) == 0 && len(args) != 2 {
+				return waxerr.New(waxerr.CodeInvalid, "playlist remove", "give an ITEMPID or --index N")
 			}
 			m, _, err := g.openMutator(cmd)
 			if err != nil {
 				return err
 			}
 			defer m.Close()
-			if byPos {
-				if err := m.PlaylistRemoveAt(ctx(cmd), model.PID(args[0]), position); err != nil {
-					return err
+			switch {
+			case len(indexes) == 0:
+				err = m.PlaylistRemove(ctx(cmd), model.PID(args[0]), model.PID(args[1]))
+			case len(args) == 2:
+				expect := make([]model.PID, len(indexes))
+				for i := range expect {
+					expect[i] = model.PID(args[1])
 				}
-			} else if err := m.PlaylistRemove(ctx(cmd), model.PID(args[0]), model.PID(args[1])); err != nil {
+				err = m.PlaylistRemoveMany(ctx(cmd), model.PID(args[0]), indexes, expect)
+			default:
+				err = m.PlaylistRemoveMany(ctx(cmd), model.PID(args[0]), indexes, nil)
+			}
+			if err != nil {
 				return err
 			}
-			fmt.Fprintln(out(cmd), "removed")
-			return nil
+			view := struct {
+				PlaylistPID string `json:"playlistPid"`
+				ItemPID     string `json:"itemPid,omitempty"`
+				Indexes     []int  `json:"indexes,omitempty"`
+			}{PlaylistPID: args[0], Indexes: indexes}
+			if len(args) == 2 {
+				view.ItemPID = args[1]
+			}
+			return reply(cmd, g, view, "removed\n")
 		},
 	}
-	cmd.Flags().IntVar(&position, "position", 0, "remove the single entry at this position instead of an item pid")
+	cmd.Flags().IntSliceVar(&indexes, "index", nil, "remove the entry at this listing index (repeatable)")
 	return cmd
 }
 
@@ -225,8 +241,10 @@ func newPlaylistDeleteCmd(g *globals) *cobra.Command {
 			if err := m.PlaylistDelete(ctx(cmd), model.PID(args[0])); err != nil {
 				return err
 			}
-			fmt.Fprintln(out(cmd), "deleted")
-			return nil
+			return reply(cmd, g, struct {
+				PlaylistPID string `json:"playlistPid"`
+				Deleted     bool   `json:"deleted"`
+			}{args[0], true}, "deleted\n")
 		},
 	}
 	return cmd
@@ -246,8 +264,36 @@ func newPlaylistRenameCmd(g *globals) *cobra.Command {
 			if err := m.PlaylistRename(ctx(cmd), model.PID(args[0]), args[1]); err != nil {
 				return err
 			}
-			fmt.Fprintln(out(cmd), "renamed")
-			return nil
+			return reply(cmd, g, struct {
+				PlaylistPID string `json:"playlistPid"`
+				Name        string `json:"name"`
+			}{args[0], args[1]}, "renamed\n")
+		},
+	}
+	return cmd
+}
+
+func newPlaylistSetOwnerCmd(g *globals) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "set-owner PID USERPID",
+		Short: "Move a playlist to another user",
+		Long: "Moves a playlist to another user, who sees it from then on (a private " +
+			"playlist leaves its old owner's list). A smart playlist's per-user fields " +
+			"still evaluate for whoever reads it.",
+		Args: cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			m, _, err := g.openMutator(cmd)
+			if err != nil {
+				return err
+			}
+			defer m.Close()
+			if err := m.PlaylistSetOwner(ctx(cmd), model.PID(args[0]), model.PID(args[1])); err != nil {
+				return err
+			}
+			return reply(cmd, g, struct {
+				PlaylistPID string `json:"playlistPid"`
+				OwnerPID    string `json:"ownerPid"`
+			}{args[0], args[1]}, "owner set\n")
 		},
 	}
 	return cmd
@@ -265,16 +311,36 @@ func newPlaylistExportCmd(g *globals) *cobra.Command {
 				return err
 			}
 			defer lib.Close()
-			w := out(cmd)
-			if outPath != "" {
-				f, err := os.Create(outPath)
-				if err != nil {
-					return waxerr.Wrapf(waxerr.CodeIO, "playlist export", err, "creating %s", outPath)
+			pl := model.PID(args[0])
+			if outPath == "" {
+				if !g.jsonOut {
+					return lib.Playlists().ExportM3U8(ctx(cmd), pl, out(cmd), model.PID(user))
 				}
-				defer f.Close()
-				w = f
+				var doc bytes.Buffer
+				if err := lib.Playlists().ExportM3U8(ctx(cmd), pl, &doc, model.PID(user)); err != nil {
+					return err
+				}
+				return printJSON(cmd, struct {
+					PlaylistPID model.PID `json:"playlistPid"`
+					M3U8        string    `json:"m3u8"`
+				}{pl, doc.String()})
 			}
-			return lib.Playlists().ExportM3U8(ctx(cmd), model.PID(args[0]), w, model.PID(user))
+			f, err := os.Create(outPath)
+			if err != nil {
+				return waxerr.Wrapf(waxerr.CodeIO, "playlist export", err, "creating %s", outPath)
+			}
+			if err := lib.Playlists().ExportM3U8(ctx(cmd), pl, f, model.PID(user)); err != nil {
+				_ = f.Close()
+				return err
+			}
+			// Closed here so a late write error is reported rather than a short file.
+			if err := f.Close(); err != nil {
+				return waxerr.Wrapf(waxerr.CodeIO, "playlist export", err, "closing %s", outPath)
+			}
+			return reply(cmd, g, struct {
+				PlaylistPID model.PID `json:"playlistPid"`
+				Out         string    `json:"out"`
+			}{pl, outPath}, "")
 		},
 	}
 	cmd.Flags().StringVar(&outPath, "out", "", "write the M3U8 to this file instead of stdout")
@@ -284,10 +350,19 @@ func newPlaylistExportCmd(g *globals) *cobra.Command {
 
 func newPlaylistImportCmd(g *globals) *cobra.Command {
 	var file, user, visibility string
+	var dryRun bool
 	cmd := &cobra.Command{
 		Use:   "import NAME",
 		Short: "Import an M3U8 file as a new static playlist",
-		Args:  cobra.ExactArgs(1),
+		Long: "Imports an M3U8 file as a new static playlist. Each path names the item " +
+			"behind its file, by exact path or a relative-path suffix, through any of its " +
+			"files (a copy names its item, a book's part the book). A path naming several " +
+			"items, such as a cue rip's file, is settled by its #EXTINF label (artist - " +
+			"title, or the title, the length breaking a tie) and otherwise left unmatched. " +
+			"Consecutive lines naming one item through different files, a book listed by " +
+			"its parts, become one entry. --dry-run prints what each line matches and " +
+			"creates nothing.",
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			r := cmd.InOrStdin()
 			if file != "" {
@@ -302,6 +377,9 @@ func newPlaylistImportCmd(g *globals) *cobra.Command {
 			if err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, "playlist import", err)
 			}
+			if dryRun {
+				return previewImport(cmd, g, args[0], model.PID(user), model.PlaylistVisibility(visibility), doc)
+			}
 			m, _, err := g.openMutator(cmd)
 			if err != nil {
 				return err
@@ -313,18 +391,77 @@ func newPlaylistImportCmd(g *globals) *cobra.Command {
 			}
 			if g.jsonOut {
 				return printJSON(cmd, map[string]any{
-					"playlistPid": string(res.PlaylistPID), "matched": res.Matched,
+					"playlistPid": string(res.PlaylistPID), "matched": res.Matched, "merged": res.Merged,
 					"unmatched": res.Unmatched, "unmatchedPaths": res.UnmatchedPaths,
 				})
 			}
-			fmt.Fprintf(out(cmd), "%s: matched %d, unmatched %d\n", res.PlaylistPID, res.Matched, res.Unmatched)
+			fmt.Fprintf(out(cmd), "%s: matched %d, merged %d, unmatched %d\n", res.PlaylistPID, res.Matched, res.Merged, res.Unmatched)
 			return nil
 		},
 	}
 	cmd.Flags().StringVar(&file, "file", "", "read the M3U8 from this file instead of stdin")
 	cmd.Flags().StringVar(&user, "user", "", "owner user pid (empty = default user)")
 	cmd.Flags().StringVar(&visibility, "visibility", "private", "visibility: private|shared")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print what each entry matches and create nothing")
 	return cmd
+}
+
+// previewImport prints the match for every line of an M3U8 document, read from a
+// read-only open so it runs beside a server holding the catalog, after the checks the
+// import makes, so it fails where the import would.
+func previewImport(cmd *cobra.Command, g *globals, name string, owner model.PID, vis model.PlaylistVisibility, doc []byte) error {
+	lib, _, err := g.openRead(cmd)
+	if err != nil {
+		return err
+	}
+	defer lib.Close()
+	if err := lib.Playlists().CheckImport(ctx(cmd), name, owner, vis); err != nil {
+		return err
+	}
+	matches, err := lib.Playlists().ResolveM3U8(ctx(cmd), bytes.NewReader(doc))
+	if err != nil {
+		return err
+	}
+	type entry struct {
+		Path    string `json:"path"`
+		ItemPID string `json:"itemPid,omitempty"`
+		Title   string `json:"title,omitempty"`
+		Merged  bool   `json:"merged,omitempty"`
+	}
+	entries := make([]entry, len(matches))
+	matched, merged := 0, 0
+	for i, m := range matches {
+		entries[i].Path = m.Path
+		switch {
+		case m.Item == nil:
+		case m.Merged:
+			entries[i].ItemPID, entries[i].Title, entries[i].Merged = string(m.Item.PID), m.Item.Title, true
+			merged++
+		default:
+			entries[i].ItemPID, entries[i].Title = string(m.Item.PID), m.Item.Title
+			matched++
+		}
+	}
+	unmatched := len(matches) - matched - merged
+	if g.jsonOut {
+		return printJSON(cmd, map[string]any{
+			"dryRun": true, "matched": matched, "merged": merged, "unmatched": unmatched, "entries": entries,
+		})
+	}
+	fmt.Fprintf(out(cmd), "matched %d, merged %d, unmatched %d (dry run, nothing created)\n", matched, merged, unmatched)
+	tw := tabwriter.NewWriter(out(cmd), 0, 2, 2, ' ', 0)
+	fmt.Fprintln(tw, "PATH\tPID\tTITLE")
+	for _, e := range entries {
+		switch {
+		case e.ItemPID == "":
+			fmt.Fprintf(tw, "%s\t-\t(no unique match)\n", e.Path)
+		case e.Merged:
+			fmt.Fprintf(tw, "%s\t%s\t%s (same entry as above)\n", e.Path, e.ItemPID, e.Title)
+		default:
+			fmt.Fprintf(tw, "%s\t%s\t%s\n", e.Path, e.ItemPID, e.Title)
+		}
+	}
+	return tw.Flush()
 }
 
 func newSmartPlaylistCmd(g *globals) *cobra.Command {
@@ -443,8 +580,10 @@ func newSmartPlaylistSetRuleCmd(g *globals) *cobra.Command {
 				return err
 			}
 			writeNSPReport(errOut(cmd), rep, partial)
-			fmt.Fprintln(out(cmd), "rule updated")
-			return nil
+			return reply(cmd, g, struct {
+				PlaylistPID string `json:"playlistPid"`
+				RuleUpdated bool   `json:"ruleUpdated"`
+			}{args[0], true}, "rule updated\n")
 		},
 	}
 	cmd.Flags().StringVar(&rulePath, "rule", "", "JSON query rule document")
@@ -525,7 +664,9 @@ func newSmartPlaylistExportNSPCmd(g *globals) *cobra.Command {
 // returned untouched, leaving the exit-code mapping alone.
 func refuseNSP(cmd *cobra.Command, g *globals, rep playlist.NSPReport, partial bool, cause error) error {
 	if g.jsonOut {
-		if err := printJSON(cmd, nspReportJSON(rep, nil, partial)); err != nil {
+		view := nspReportJSON(rep, nil, partial)
+		view["error"] = errText(cause)
+		if err := printJSON(cmd, view); err != nil {
 			return err
 		}
 		return cause

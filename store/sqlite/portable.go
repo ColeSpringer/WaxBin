@@ -173,13 +173,11 @@ const identitySelect = `SELECT pi.pid, pi.kind, f.essence_hash,
 	fp.duration_bucket` +
 	itemJoins + ` LEFT JOIN fingerprint fp ON fp.file_id = f.id AND pf.start_frames IS NULL`
 
-// ItemIdentitiesByPIDs returns a portable identity descriptor per pid, in input order,
-// skipping any pid with no matching item and collapsing a repeated pid to its first
-// position. It mirrors ItemsByPIDs (dedup, chunked IN(...), input-order rebuild); it is
-// the export half of the playlist round-trip, turning a local playlist's PIDs into
-// catalog-independent refs.
-func (s *Store) ItemIdentitiesByPIDs(ctx context.Context, pids []model.PID) ([]model.PortableRef, error) {
-	const op = "store.ItemIdentitiesByPIDs"
+// ItemIdentities returns a portable identity descriptor for each pid that names an
+// item, keyed by pid: the export half of the playlist round-trip, which maps a
+// playlist's entries through it so an item listed twice exports twice.
+func (s *Store) ItemIdentities(ctx context.Context, pids []model.PID) (map[model.PID]model.PortableRef, error) {
+	const op = "store.ItemIdentities"
 	if len(pids) == 0 {
 		return nil, nil
 	}
@@ -228,13 +226,7 @@ func (s *Store) ItemIdentitiesByPIDs(ctx context.Context, pids []model.PID) ([]m
 	if err != nil {
 		return nil, err
 	}
-	out := make([]model.PortableRef, 0, len(unique))
-	for _, pid := range unique {
-		if ref, ok := byPID[pid]; ok {
-			out = append(out, ref)
-		}
-	}
-	return out, nil
+	return byPID, nil
 }
 
 // FingerprintCandidatesByProbe finds catalog files that share at least minShared

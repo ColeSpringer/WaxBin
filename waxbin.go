@@ -1389,16 +1389,17 @@ func (l *Library) RefreshAlbumGain(ctx context.Context) error {
 // Coverage reports per-codec analysis decode support for doctor.
 func (l *Library) Coverage() []decode.FormatSupport { return decode.Coverage() }
 
-// VerifyDerived runs the derived-data consistency check (FTS, rollups, and
-// generated sort keys versus the source rows). It is read-only; it reports drift
-// rather than repairing it.
+// VerifyDerived runs the derived-data consistency check (FTS, rollups, generated sort
+// keys, book durations, album years and playlist positions versus the source rows). It
+// is read-only; it reports drift rather than repairing it.
 func (l *Library) VerifyDerived(ctx context.Context) (*sqlite.DerivedReport, error) {
 	return l.store.VerifyDerived(ctx)
 }
 
 // RefreshRollups recomputes the maintained rollups, every book's denormalized total
-// duration and every album's year, the repair for the rollup, book-duration and
-// album-year drift VerifyDerived can report.
+// duration and every album's year, and renumbers drifted playlist positions, the
+// repair for the rollup, book-duration, album-year and playlist-position drift
+// VerifyDerived can report.
 func (l *Library) RefreshRollups(ctx context.Context) error {
 	return l.store.RefreshRollups(ctx)
 }

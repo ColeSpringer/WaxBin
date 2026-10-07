@@ -100,12 +100,14 @@ func newLyricsSetCmd(g *globals) *cobra.Command {
 			if err := m.SetLyrics(ctx(cmd), model.PID(args[0]), ly, lockChange(noLock, keepLock), force); err != nil {
 				return err
 			}
+			text := fmt.Sprintf("set lyrics for %s\n", args[0])
 			if clear {
-				fmt.Fprintf(out(cmd), "cleared lyrics for %s\n", args[0])
-			} else {
-				fmt.Fprintf(out(cmd), "set lyrics for %s\n", args[0])
+				text = fmt.Sprintf("cleared lyrics for %s\n", args[0])
 			}
-			return nil
+			return reply(cmd, g, struct {
+				ItemPID string `json:"itemPid"`
+				Cleared bool   `json:"cleared"`
+			}{args[0], clear}, text)
 		},
 	}
 	f := cmd.Flags()

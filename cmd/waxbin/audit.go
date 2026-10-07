@@ -70,18 +70,21 @@ func newAuditCmd(g *globals) *cobra.Command {
 				return err
 			}
 
+			var verdict error
+			if rep.Errors() > 0 {
+				verdict = waxerr.New(waxerr.CodeInvalid, "audit",
+					fmt.Sprintf("%d error-severity finding(s)", rep.Errors()))
+			}
 			if g.jsonOut {
-				if err := printJSON(cmd, toAuditView(rep)); err != nil {
+				view := toAuditView(rep)
+				view.Error = errText(verdict)
+				if err := printJSON(cmd, view); err != nil {
 					return err
 				}
 			} else {
 				printAuditText(cmd, rep)
 			}
-			if rep.Errors() > 0 {
-				return waxerr.New(waxerr.CodeInvalid, "audit",
-					fmt.Sprintf("%d error-severity finding(s)", rep.Errors()))
-			}
-			return nil
+			return verdict
 		},
 	}
 	cmd.Flags().BoolVar(&integrity, "integrity", false, "also re-read every audio file for bitrot and corruption, and walk every library folder (slow)")
@@ -123,6 +126,7 @@ type auditView struct {
 	Errors       int                `json:"errors"`
 	Warnings     int                `json:"warnings"`
 	FilesChecked int                `json:"filesChecked"`
+	Error        string             `json:"error,omitempty"`
 }
 
 func toAuditView(rep *audit.Report) auditView {

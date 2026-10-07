@@ -1087,6 +1087,11 @@ func (s *Store) RemovePodcast(ctx context.Context, podcastPID model.PID) ([]stri
 		}
 		rows.Close()
 
+		var holders entryHolders
+		if err := holders.addTx(ctx, tx, "item_id IN ("+epItems+")", podcastID); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+
 		// 2. Emit one 'item' delete delta per episode (read pi.pid before the rows are
 		//    gone) so delta-sync consumers drop each episode from their caches.
 		if _, err := tx.ExecContext(ctx,
@@ -1114,6 +1119,9 @@ func (s *Store) RemovePodcast(ctx context.Context, podcastPID model.PID) ([]stri
 			if _, err := tx.ExecContext(ctx, stmt, podcastID); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
+		}
+		if err := holders.settleTx(ctx, tx); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 
 		// 7. Drop the show's own feed art, then the podcast row and its delta. The

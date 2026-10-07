@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/colespringer/waxbin"
@@ -389,6 +390,114 @@ func TestPlaylistRefRoundTrip(t *testing.T) {
 	}
 	if res[1].Rung != model.MatchNone || res[1].PID != "" {
 		t.Fatalf("entry 1 = rung %s pid %s, want a miss (book absent)", res[1].Rung, res[1].PID)
+	}
+}
+
+// TestExportPlaylistRefsKeepsDuplicates: a playlist listing an item twice exports a ref
+// for each entry, in order.
+func TestExportPlaylistRefsKeepsDuplicates(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "a.db")
+	writeFile(t, filepath.Join(root, "a.mp3"),
+		testaudio.BuildMP3WithAudio("Song A", "Artist", "Album", 1, testaudio.AudioWithSeed(91)))
+	writeFile(t, filepath.Join(root, "b.mp3"),
+		testaudio.BuildMP3WithAudio("Song B", "Artist", "Album", 2, testaudio.AudioWithSeed(92)))
+	lib := openManaged(t, ctx, db, root)
+	scanLib(t, ctx, lib)
+	a, b := itemPIDByTitle(t, ctx, lib, "Song A"), itemPIDByTitle(t, ctx, lib, "Song B")
+	refs := exportRefs(t, ctx, lib, a, b, a)
+	if len(refs) != 3 {
+		t.Fatalf("exported %d refs, want 3", len(refs))
+	}
+	if refs[0].Title != "Song A" || refs[1].Title != "Song B" || refs[2].Title != "Song A" ||
+		refs[0].Essence != refs[2].Essence || refs[0].Essence == refs[1].Essence {
+		t.Errorf("refs = %s, %s, %s; want A, B, A", refs[0].Title, refs[1].Title, refs[2].Title)
+	}
+}
+
+// TestDuplicatesSurviveRemovalByIndexIntoTheExport is review focus 4: a playlist
+// holding one item three times loses an entry by index after an earlier removal by
+// index, and the export lists what is left, duplicates and all, in order.
+func TestDuplicatesSurviveRemovalByIndexIntoTheExport(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "a.db")
+	for i, title := range []string{"Song A", "Song B", "Song C"} {
+		writeFile(t, filepath.Join(root, title+".mp3"),
+			testaudio.BuildMP3WithAudio(title, "Artist", "Album", i+1, testaudio.AudioWithSeed(byte(96+i))))
+	}
+	lib := openManaged(t, ctx, db, root)
+	scanLib(t, ctx, lib)
+	a, b, c := itemPIDByTitle(t, ctx, lib, "Song A"), itemPIDByTitle(t, ctx, lib, "Song B"), itemPIDByTitle(t, ctx, lib, "Song C")
+	pls := lib.Playlists()
+	pl, err := pls.CreateStatic(ctx, "Dups", "", "")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := pls.Set(ctx, pl, []model.PID{a, b, a, c, a}); err != nil {
+		t.Fatalf("set: %v", err)
+	}
+	if err := pls.RemoveAt(ctx, pl, 1, b); err != nil {
+		t.Fatalf("remove index 1 (B): %v", err)
+	}
+	if err := pls.RemoveAt(ctx, pl, 3, a); err != nil {
+		t.Fatalf("remove index 3 (the last A): %v", err)
+	}
+	refs, err := lib.ExportPlaylistRefs(ctx, pl, "")
+	if err != nil {
+		t.Fatalf("export: %v", err)
+	}
+	var got []string
+	for _, r := range refs {
+		got = append(got, r.Title)
+	}
+	if strings.Join(got, ",") != "Song A,Song A,Song C" {
+		t.Errorf("exported %v, want [Song A Song A Song C]", got)
+	}
+}
+
+// TestResolveM3U8OnAReadOnlyLibrary: resolving an M3U8 is a read, so a read-only library
+// answers it, one match per entry with no item for a miss or an ambiguous suffix.
+func TestResolveM3U8OnAReadOnlyLibrary(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "a.db")
+	song := filepath.Join(root, "Album", "song.mp3")
+	writeFile(t, song, testaudio.BuildMP3WithAudio("Song", "Artist", "Album", 1, testaudio.AudioWithSeed(93)))
+	writeFile(t, filepath.Join(root, "x", "dup.mp3"), testaudio.BuildMP3WithAudio("Dup X", "Artist", "X", 1, testaudio.AudioWithSeed(94)))
+	writeFile(t, filepath.Join(root, "y", "dup.mp3"), testaudio.BuildMP3WithAudio("Dup Y", "Artist", "Y", 1, testaudio.AudioWithSeed(95)))
+	rw := openManaged(t, ctx, db, root)
+	scanLib(t, ctx, rw)
+	want := itemPIDByTitle(t, ctx, rw, "Song")
+	if err := rw.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	ro, err := waxbin.Open(ctx, waxbin.Options{DBPath: db, ReadOnly: true})
+	if err != nil {
+		t.Fatalf("open read-only: %v", err)
+	}
+	t.Cleanup(func() { _ = ro.Close() })
+
+	doc := "#EXTM3U\n" + song + "\nAlbum/song.mp3\ndup.mp3\nmissing.mp3\n"
+	matches, err := ro.Playlists().ResolveM3U8(ctx, strings.NewReader(doc))
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if len(matches) != 4 {
+		t.Fatalf("matches = %d, want 4", len(matches))
+	}
+	for i, wantPID := range []model.PID{want, want, "", ""} {
+		var got model.PID
+		if matches[i].Item != nil {
+			got = matches[i].Item.PID
+		}
+		if got != wantPID {
+			t.Errorf("entry %d (%s) = %q, want %q", i, matches[i].Path, got, wantPID)
+		}
 	}
 }
 

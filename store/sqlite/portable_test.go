@@ -72,12 +72,12 @@ func TestItemIdentityBookDurationSumsParts(t *testing.T) {
 		t.Fatalf("both parts should join one book item: %s vs %s", r1.ItemPID, r2.ItemPID)
 	}
 
-	refs, err := st.ItemIdentitiesByPIDs(ctx, []model.PID{r1.ItemPID})
+	refs, err := st.ItemIdentities(ctx, []model.PID{r1.ItemPID})
 	if err != nil || len(refs) != 1 {
 		t.Fatalf("identities = %d refs (err %v), want 1", len(refs), err)
 	}
-	if refs[0].DurationMS != 300000 {
-		t.Fatalf("book ref duration = %d, want 300000 (sum of both parts, not just the primary)", refs[0].DurationMS)
+	if refs[r1.ItemPID].DurationMS != 300000 {
+		t.Fatalf("book ref duration = %d, want 300000 (sum of both parts, not just the primary)", refs[r1.ItemPID].DurationMS)
 	}
 }
 
@@ -243,7 +243,7 @@ func TestItemsByAuthorKey(t *testing.T) {
 	}
 }
 
-func TestItemIdentitiesByPIDs(t *testing.T) {
+func TestItemIdentities(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	st, lib := openTestStore(t)
@@ -275,17 +275,16 @@ func TestItemIdentitiesByPIDs(t *testing.T) {
 	fp(tr.FilePID, "E-A")
 	fp(vt.FilePID, "E-CUE")
 
-	// Input order preserved, a repeated pid collapsed to its first position, a missing
-	// pid skipped.
-	refs, err := st.ItemIdentitiesByPIDs(ctx, []model.PID{bk.ItemPID, tr.ItemPID, tr.ItemPID, "nope"})
+	// One ref per pid that names an item: a repeated pid once, a missing pid absent.
+	refs, err := st.ItemIdentities(ctx, []model.PID{bk.ItemPID, tr.ItemPID, tr.ItemPID, "nope"})
 	if err != nil {
-		t.Fatalf("ItemIdentitiesByPIDs: %v", err)
+		t.Fatalf("ItemIdentities: %v", err)
 	}
 	if len(refs) != 2 {
-		t.Fatalf("got %d refs, want 2 (book, track; dup collapsed, missing skipped)", len(refs))
+		t.Fatalf("got %d refs, want 2 (book, track; dup once, missing absent)", len(refs))
 	}
 
-	book, track := refs[0], refs[1]
+	book, track := refs[bk.ItemPID], refs[tr.ItemPID]
 	if book.Kind != model.KindBook || book.Essence != "E-BK" || book.ASIN != "B01" ||
 		book.Artist != "Tolkien" || book.Title != "The Hobbit" || book.Album != "Middle Earth" {
 		t.Fatalf("book ref wrong: %+v", book)
@@ -308,22 +307,23 @@ func TestItemIdentitiesByPIDs(t *testing.T) {
 	if err != nil || len(vtItems) == 0 {
 		t.Fatalf("resolve virtual-track items: %d (err %v)", len(vtItems), err)
 	}
-	vtRefs, err := st.ItemIdentitiesByPIDs(ctx, []model.PID{vtItems[0].PID})
+	vtRefs, err := st.ItemIdentities(ctx, []model.PID{vtItems[0].PID})
 	if err != nil {
-		t.Fatalf("ItemIdentitiesByPIDs(vt): %v", err)
+		t.Fatalf("ItemIdentities(vt): %v", err)
 	}
-	if len(vtRefs) != 1 {
-		t.Fatalf("got %d vt refs, want 1", len(vtRefs))
+	vtRef, ok := vtRefs[vtItems[0].PID]
+	if len(vtRefs) != 1 || !ok {
+		t.Fatalf("got %d vt refs, want the one", len(vtRefs))
 	}
-	if len(vtRefs[0].Fingerprint) != 0 {
-		t.Fatalf("virtual-track ref must omit the shared fingerprint, got %d bytes", len(vtRefs[0].Fingerprint))
+	if len(vtRef.Fingerprint) != 0 {
+		t.Fatalf("virtual-track ref must omit the shared fingerprint, got %d bytes", len(vtRef.Fingerprint))
 	}
-	if vtRefs[0].Essence != "E-CUE" {
-		t.Fatalf("virtual-track ref essence = %q, want E-CUE", vtRefs[0].Essence)
+	if vtRef.Essence != "E-CUE" {
+		t.Fatalf("virtual-track ref essence = %q, want E-CUE", vtRef.Essence)
 	}
 
-	if none, err := st.ItemIdentitiesByPIDs(ctx, nil); err != nil || none != nil {
-		t.Fatalf("empty pids should return nil, got %v (err %v)", none, err)
+	if none, err := st.ItemIdentities(ctx, nil); err != nil || len(none) != 0 {
+		t.Fatalf("empty pids should return none, got %v (err %v)", none, err)
 	}
 }
 

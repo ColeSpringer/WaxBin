@@ -722,9 +722,33 @@ func (c *Client) PlaylistRemove(ctx context.Context, playlistPID, itemPID model.
 	return c.call(ctx, MethodPlaylistRemove, PlaylistRemoveParams{PlaylistPID: string(playlistPID), ItemPID: string(itemPID)}, nil)
 }
 
-// PlaylistRemoveAt proxies removing the single playlist entry at a position.
-func (c *Client) PlaylistRemoveAt(ctx context.Context, playlistPID model.PID, position int) error {
-	return c.call(ctx, MethodPlaylistRemoveAt, PlaylistRemoveAtParams{PlaylistPID: string(playlistPID), Position: position}, nil)
+// PlaylistRemoveAt proxies removing the single playlist entry at a listing index,
+// refused when expect is set and the entry holds another item.
+func (c *Client) PlaylistRemoveAt(ctx context.Context, playlistPID model.PID, position int, expect model.PID) error {
+	return c.call(ctx, MethodPlaylistRemoveAt, PlaylistRemoveAtParams{
+		PlaylistPID: string(playlistPID), Position: position, ExpectPID: string(expect),
+	}, nil)
+}
+
+// PlaylistRemoveMany proxies removing the entries at several listing indexes at once.
+func (c *Client) PlaylistRemoveMany(ctx context.Context, playlistPID model.PID, positions []int, expect []model.PID) error {
+	var ids []string
+	if expect != nil {
+		ids = make([]string, len(expect))
+		for i, p := range expect {
+			ids[i] = string(p)
+		}
+	}
+	return c.call(ctx, MethodPlaylistRemoveMany, PlaylistRemoveManyParams{
+		PlaylistPID: string(playlistPID), Positions: positions, ExpectPIDs: ids,
+	}, nil)
+}
+
+// PlaylistSetOwner proxies moving a playlist to another user.
+func (c *Client) PlaylistSetOwner(ctx context.Context, playlistPID, ownerPID model.PID) error {
+	return c.call(ctx, MethodPlaylistSetOwner, PlaylistSetOwnerParams{
+		PlaylistPID: string(playlistPID), OwnerPID: string(ownerPID),
+	}, nil)
 }
 
 // PlaylistSetRule proxies replacing a smart playlist's rule in place. rule is a

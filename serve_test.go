@@ -1795,6 +1795,99 @@ func TestServeProxiedPlaylistLifecycle(t *testing.T) {
 	}
 }
 
+// TestServeProxiedPlaylistRemoveByIndex: removals by index go through the server against
+// the listing as it stands, a batch against one snapshot, and a guarded removal of an
+// entry holding another item is refused with nothing removed.
+func TestServeProxiedPlaylistRemoveByIndex(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	sock := testsock.Path(t)
+	for i, title := range []string{"One", "Two", "Three"} {
+		writeFile(t, filepath.Join(root, title+".mp3"),
+			testaudio.BuildMP3WithAudio(title, "Artist", "Album", i+1, testaudio.AudioWithSeed(byte(70+i))))
+	}
+	lib := openServed(t, ctx, db, root, sock)
+	c := dialWhenReady(t, sock)
+	pid := func(title string) model.PID { return itemPIDByTitle(t, ctx, lib, title) }
+	one, two, three := pid("One"), pid("Two"), pid("Three")
+	pl, err := c.PlaylistCreate(ctx, "Mix", "", "", nil)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := c.PlaylistAdd(ctx, pl, []model.PID{one, two, three, one, two}); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	titles := func() []string {
+		t.Helper()
+		items, err := lib.Playlists().Items(ctx, pl, "")
+		if err != nil {
+			t.Fatalf("items: %v", err)
+		}
+		out := make([]string, len(items))
+		for i, it := range items {
+			out[i] = it.Title
+		}
+		return out
+	}
+
+	if err := c.PlaylistRemoveMany(ctx, pl, []int{4, 1}, nil); err != nil {
+		t.Fatalf("remove many: %v", err)
+	}
+	if got := titles(); strings.Join(got, ",") != "One,Three,One" {
+		t.Fatalf("after removing [4 1] = %v, want [One Three One]", got)
+	}
+	if err := c.PlaylistRemoveAt(ctx, pl, 1, one); !waxerr.Is(err, waxerr.CodeConflict) {
+		t.Fatalf("guarded remove of Three as One = %v, want CodeConflict", err)
+	}
+	if err := c.PlaylistRemoveAt(ctx, pl, 1, three); err != nil {
+		t.Fatalf("guarded remove of Three: %v", err)
+	}
+	if got := titles(); strings.Join(got, ",") != "One,One" {
+		t.Fatalf("after removing index 1 = %v, want [One One]", got)
+	}
+	if err := c.PlaylistRemoveAt(ctx, pl, -1, ""); !waxerr.Is(err, waxerr.CodeInvalid) {
+		t.Fatalf("remove at -1 = %v, want CodeInvalid", err)
+	}
+	// A guard list of the wrong length is refused over the wire as it is in process.
+	if err := c.PlaylistRemoveMany(ctx, pl, []int{0}, []model.PID{}); !waxerr.Is(err, waxerr.CodeInvalid) {
+		t.Fatalf("remove [0] with an empty guard list = %v, want CodeInvalid", err)
+	}
+	if got := titles(); strings.Join(got, ",") != "One,One" {
+		t.Fatalf("after the refused removal = %v, want [One One]", got)
+	}
+}
+
+// TestServeProxiedPlaylistSetOwner: an owner change goes through the server, and the
+// playlist is the new user's afterwards.
+func TestServeProxiedPlaylistSetOwner(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	sock := testsock.Path(t)
+	lib := openServedRW(t, ctx, db, root, sock)
+	c := dialWhenReady(t, sock)
+	bob, err := c.CreateUser(ctx, "bob")
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	pl, err := c.PlaylistCreate(ctx, "Mix", "", "", nil)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := c.PlaylistSetOwner(ctx, pl, bob.PID); err != nil {
+		t.Fatalf("set owner: %v", err)
+	}
+	if p, err := lib.Playlists().Get(ctx, pl); err != nil || p.OwnerPID != bob.PID {
+		t.Fatalf("playlist = %+v (err %v), want bob's", p, err)
+	}
+	if err := c.PlaylistSetOwner(ctx, pl, "nobody"); !waxerr.Is(err, waxerr.CodeNotFound) {
+		t.Fatalf("set owner to an unknown user = %v, want CodeNotFound", err)
+	}
+}
+
 // TestServeProxiedRenameEntity checks the rename params reach the handler and the report
 // comes back over the wire, including the outcome and member count a client reads to know
 // which branch ran.

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"fmt"
 	"net"
@@ -122,5 +123,79 @@ func TestOpenLibVersionMismatchSurfacesOverTheLockConflict(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "owned by another process") {
 		t.Fatalf("err = %v, want the lock conflict replaced", err)
+	}
+}
+
+// TestUnknownSubcommandIsAUsageError: a subcommand a command group does not know is
+// refused as a usage error, while a group named alone still prints its help.
+func TestUnknownSubcommandIsAUsageError(t *testing.T) {
+	t.Parallel()
+	run := func(args ...string) (string, error) {
+		cmd := newRootCmd(&globals{})
+		var out bytes.Buffer
+		cmd.SetOut(&out)
+		cmd.SetErr(&out)
+		cmd.SetArgs(args)
+		err := cmd.ExecuteContext(context.Background())
+		return out.String(), err
+	}
+	for _, args := range [][]string{{"playlist", "bogus", "x"}, {"db", "bogus"}, {"completion", "bogus"}} {
+		if _, err := run(args...); !waxerr.Is(err, waxerr.CodeInvalid) {
+			t.Errorf("%v: err = %v, want CodeInvalid", args, err)
+		}
+	}
+	if _, err := run("playlist", "set-ownr"); err == nil || !strings.Contains(err.Error(), "did you mean set-owner?") {
+		t.Errorf("a near miss: err = %v, want it to name set-owner", err)
+	}
+	if out, err := run("playlist"); err != nil || !strings.Contains(out, "set-owner") {
+		t.Errorf("playlist alone: err %v, printed %.80q; want its help", err, out)
+	}
+}
+
+// TestUsageErrorsExitTwo: every malformed command line is a usage error (exit 2), the
+// ones cobra raises itself included, while help still answers what it knows.
+func TestUsageErrorsExitTwo(t *testing.T) {
+	t.Parallel()
+	run := func(args ...string) (string, error) {
+		cmd := newRootCmd(&globals{})
+		var out bytes.Buffer
+		cmd.SetOut(&out)
+		cmd.SetErr(&out)
+		cmd.SetArgs(args)
+		err := cmd.ExecuteContext(context.Background())
+		return out.String(), err
+	}
+	for _, args := range [][]string{
+		{"playlist", "show"},
+		{"playlist", "list", "--bogus"},
+		{"query", "--limit", "many"},
+		{"acquisition", "set", "x", "--type", "manual", "--no-lock", "--keep-lock"},
+		{"facet"},
+		{"scna"},
+		{"help", "bogus"},
+		{"help", "playlist", "bogus"},
+		{"edit", "--set", "title=x"},
+		{"kind", "--to", "song", "x"},
+		{"credit"},
+		{"enrich", "--item", "x", "--entity", "artist:y"},
+	} {
+		out, err := run(args...)
+		if !waxerr.Is(err, waxerr.CodeInvalid) || exitCodeFor(err) != exitUsage {
+			t.Errorf("%v: err = %v (exit %d), want a usage error (exit %d); printed %.120q", args, err, exitCodeFor(err), exitUsage, out)
+		}
+	}
+	if _, err := run("scna"); err == nil || !strings.Contains(err.Error(), "did you mean scan?") {
+		t.Errorf("an unknown root command: err = %v, want it to name scan", err)
+	}
+	if _, err := run("playlist", "help", "bogus"); !waxerr.Is(err, waxerr.CodeInvalid) {
+		t.Errorf("playlist help bogus: err = %v, want an unknown topic", err)
+	}
+	if out, err := run("playlist", "help", "show"); err != nil || !strings.Contains(out, "playlist show PID") {
+		t.Errorf("playlist help show: err %v, printed %.80q; want show's help", err, out)
+	}
+	for _, args := range [][]string{{}, {"playlist"}, {"help"}, {"help", "playlist"}, {"help", "playlist", "show"}, {"playlist", "help"}, {"db", "help"}} {
+		if out, err := run(args...); err != nil || !strings.Contains(out, "Usage:") {
+			t.Errorf("%v: err %v, printed %.80q; want help", args, err, out)
+		}
 	}
 }

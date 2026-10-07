@@ -364,6 +364,96 @@ func TestRenameEntityRoundTrip(t *testing.T) {
 	}
 }
 
+// TestPlaylistRemoveByIndexRoundTrip: remove_at and remove_many carry their indexes and
+// guards, and a guard's refusal keeps its class across the wire.
+func TestPlaylistRemoveByIndexRoundTrip(t *testing.T) {
+	var at proxy.PlaylistRemoveAtParams
+	var many proxy.PlaylistRemoveManyParams
+	handlers := map[string]proxy.Handler{
+		proxy.MethodPlaylistRemoveAt: func(_ context.Context, raw json.RawMessage) (any, error) {
+			_ = json.Unmarshal(raw, &at)
+			return nil, waxerr.New(waxerr.CodeConflict, "store.RemovePlaylistItemAt", "playlist entry 2 holds b, not a")
+		},
+		proxy.MethodPlaylistRemoveMany: func(_ context.Context, raw json.RawMessage) (any, error) {
+			_ = json.Unmarshal(raw, &many)
+			return nil, nil
+		},
+	}
+	c := dial(t, startServer(t, handlers, nil))
+	ctx := context.Background()
+
+	if err := c.PlaylistRemoveAt(ctx, "pl1", 2, "a"); !waxerr.Is(err, waxerr.CodeConflict) {
+		t.Errorf("remove at err = %v, want CodeConflict", err)
+	}
+	if at.PlaylistPID != "pl1" || at.Position != 2 || at.ExpectPID != "a" {
+		t.Errorf("remove_at params = %+v", at)
+	}
+	if err := c.PlaylistRemoveMany(ctx, "pl1", []int{3, 1}, nil); err != nil {
+		t.Fatalf("remove many: %v", err)
+	}
+	if many.PlaylistPID != "pl1" || len(many.Positions) != 2 || many.Positions[0] != 3 || many.Positions[1] != 1 || many.ExpectPIDs != nil {
+		t.Errorf("remove_many params = %+v", many)
+	}
+	if err := c.PlaylistRemoveMany(ctx, "pl1", []int{0}, []model.PID{"x"}); err != nil {
+		t.Fatalf("guarded remove many: %v", err)
+	}
+	if len(many.ExpectPIDs) != 1 || many.ExpectPIDs[0] != "x" {
+		t.Errorf("guarded remove_many params = %+v", many)
+	}
+	// An empty guard list is not an absent one: the server must see it to refuse it.
+	many = proxy.PlaylistRemoveManyParams{}
+	if err := c.PlaylistRemoveMany(ctx, "pl1", []int{0}, []model.PID{}); err != nil {
+		t.Fatalf("empty guard list: %v", err)
+	}
+	if many.ExpectPIDs == nil {
+		t.Errorf("an empty guard list arrived as none: %+v", many)
+	}
+}
+
+// TestPlaylistSetOwnerRoundTrip: playlist_set_owner carries the playlist and its new
+// owner, and an unknown user keeps its class across the wire.
+func TestPlaylistSetOwnerRoundTrip(t *testing.T) {
+	var got proxy.PlaylistSetOwnerParams
+	handlers := map[string]proxy.Handler{
+		proxy.MethodPlaylistSetOwner: func(_ context.Context, raw json.RawMessage) (any, error) {
+			_ = json.Unmarshal(raw, &got)
+			if got.OwnerPID == "nobody" {
+				return nil, waxerr.New(waxerr.CodeNotFound, "store.SetPlaylistOwner", "no such user")
+			}
+			return nil, nil
+		},
+	}
+	c := dial(t, startServer(t, handlers, nil))
+	ctx := context.Background()
+	if err := c.PlaylistSetOwner(ctx, "pl1", "u2"); err != nil {
+		t.Fatalf("set owner: %v", err)
+	}
+	if got.PlaylistPID != "pl1" || got.OwnerPID != "u2" {
+		t.Errorf("playlist_set_owner params = %+v", got)
+	}
+	if err := c.PlaylistSetOwner(ctx, "pl1", "nobody"); !waxerr.Is(err, waxerr.CodeNotFound) {
+		t.Errorf("unknown owner err = %v, want CodeNotFound", err)
+	}
+}
+
+// TestPlaylistImportResultCarriesMerged: the lines an import merged into the entry
+// before them come back over the wire.
+func TestPlaylistImportResultCarriesMerged(t *testing.T) {
+	handlers := map[string]proxy.Handler{
+		proxy.MethodPlaylistImport: func(context.Context, json.RawMessage) (any, error) {
+			return proxy.PlaylistImportResult{PlaylistPID: "pl1", Matched: 1, Merged: 2}, nil
+		},
+	}
+	c := dial(t, startServer(t, handlers, nil))
+	res, err := c.PlaylistImportM3U8(context.Background(), "Book", "", "", []byte("/b/p1.m4b\n"))
+	if err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	if res.Matched != 1 || res.Merged != 2 {
+		t.Errorf("result = %+v, want 1 matched and 2 merged", res)
+	}
+}
+
 // TestDetachRoundTrip checks the detach params reach the handler and the report comes
 // back whole, including the write-back failures a partial tag strip reports as a result
 // rather than a transport error.

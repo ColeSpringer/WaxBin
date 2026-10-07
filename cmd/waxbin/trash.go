@@ -149,28 +149,31 @@ func newTrashPurgeCmd(g *globals) *cobra.Command {
 			defer lib.Close()
 			purged := 0
 			var reclaimed int64
+			report := func(failure error) error {
+				suffix := ""
+				if failure != nil {
+					suffix = " before the failure"
+				}
+				return reply(cmd, g, struct {
+					Purged         int    `json:"purged"`
+					ReclaimedBytes int64  `json:"reclaimedBytes"`
+					Error          string `json:"error,omitempty"`
+				}{purged, reclaimed, errText(failure)}, fmt.Sprintf("Purged %d file(s), reclaimed %d bytes%s\n", purged, reclaimed, suffix))
+			}
 			for _, a := range args {
 				size, err := lib.PurgeTrash(ctx(cmd), model.PID(a))
 				if err != nil {
 					// Earlier pids are already irreversibly gone; say so before
 					// reporting the failure rather than discarding the progress.
 					if purged > 0 {
-						fmt.Fprintf(out(cmd), "Purged %d file(s), reclaimed %d bytes before the failure\n",
-							purged, reclaimed)
+						_ = report(err)
 					}
 					return err
 				}
 				purged++
 				reclaimed += size
 			}
-			if g.jsonOut {
-				return printJSON(cmd, struct {
-					Purged         int   `json:"purged"`
-					ReclaimedBytes int64 `json:"reclaimedBytes"`
-				}{purged, reclaimed})
-			}
-			fmt.Fprintf(out(cmd), "Purged %d file(s), reclaimed %d bytes\n", purged, reclaimed)
-			return nil
+			return report(nil)
 		},
 	}
 }

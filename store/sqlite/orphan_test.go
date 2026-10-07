@@ -111,7 +111,7 @@ func TestOrphanRGSweepDropsAuxMarker(t *testing.T) {
 	// item's FTS row and the verify below would fail for an unrelated reason.
 	itemID := int64(scalarInt(t, st, "SELECT id FROM playable_item WHERE pid = ?", string(r.ItemPID)))
 	if err := st.writeTx(ctx, func(tx *sql.Tx) error {
-		_, err := deleteItemCascade(ctx, tx, itemID)
+		_, err := deleteItemCascade(ctx, tx, itemID, nil)
 		return err
 	}); err != nil {
 		t.Fatalf("delete item: %v", err)

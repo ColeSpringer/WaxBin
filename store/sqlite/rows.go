@@ -751,10 +751,19 @@ func itemHasAnyFile(ctx context.Context, tx *sql.Tx, itemID int64) (bool, error)
 // deleteItemCascade removes an item (and, via FK cascade, its track, edges, and
 // item_genre links), returning its pid for the change_log. The FTS row is keyed
 // by rowid with no foreign key, so it is removed explicitly to avoid a stale
-// search hit pointing at a deleted item.
-func deleteItemCascade(ctx context.Context, tx *sql.Tx, itemID int64) (model.PID, error) {
+// search hit pointing at a deleted item. The playlists and queues the cascade
+// takes entries from are settled (entryHolders): here, or by the caller once for a
+// loop of deletes when it passes a batch.
+func deleteItemCascade(ctx context.Context, tx *sql.Tx, itemID int64, batch *entryHolders) (model.PID, error) {
 	var pid model.PID
 	if err := tx.QueryRowContext(ctx, "SELECT pid FROM playable_item WHERE id = ?", itemID).Scan(&pid); err != nil {
+		return "", err
+	}
+	var own entryHolders
+	if batch == nil {
+		batch = &own
+	}
+	if err := batch.addTx(ctx, tx, "item_id = ?", itemID); err != nil {
 		return "", err
 	}
 	if _, err := tx.ExecContext(ctx, "DELETE FROM search_fts WHERE rowid = ?", itemID); err != nil {
@@ -781,7 +790,7 @@ func deleteItemCascade(ctx context.Context, tx *sql.Tx, itemID int64) (model.PID
 	if _, err := tx.ExecContext(ctx, "DELETE FROM playable_item WHERE id = ?", itemID); err != nil {
 		return "", err
 	}
-	return pid, nil
+	return pid, own.settleTx(ctx, tx)
 }
 
 func nullStr(s string) any {

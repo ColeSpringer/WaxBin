@@ -9,6 +9,7 @@ import (
 
 	"github.com/colespringer/waxbin"
 	"github.com/colespringer/waxbin/model"
+	"github.com/colespringer/waxbin/waxerr"
 	"github.com/spf13/cobra"
 )
 
@@ -57,7 +58,7 @@ func newEditCmd(g *globals) *cobra.Command {
 
 			if batchPath != "" {
 				if len(args) > 0 || len(sets) > 0 || hasSelection {
-					return fmt.Errorf("--batch is exclusive with pids, --set, and the selection flags")
+					return waxerr.New(waxerr.CodeInvalid, "edit", "--batch is exclusive with pids, --set, and the selection flags")
 				}
 				return runMapBatchEdit(cmd, g, batchPath, opts, dryRun, assumeYes)
 			}
@@ -67,10 +68,10 @@ func newEditCmd(g *globals) *cobra.Command {
 				return err
 			}
 			if len(args) > 0 && hasSelection {
-				return fmt.Errorf("give explicit pids or selection filters, not both")
+				return waxerr.New(waxerr.CodeInvalid, "edit", "give explicit pids or selection filters, not both")
 			}
 			if len(args) == 0 && !hasSelection {
-				return fmt.Errorf("specify item pids or a selection filter (--artist, --genre, --rule, ...)")
+				return waxerr.New(waxerr.CodeInvalid, "edit", "specify item pids or a selection filter (--artist, --genre, --rule, ...)")
 			}
 
 			// Resolve the target pids first (explicit, or a selection query), so --dry-run
@@ -82,15 +83,10 @@ func newEditCmd(g *globals) *cobra.Command {
 				return err
 			}
 			if len(targets) == 0 {
-				fmt.Fprintln(out(cmd), "no items matched; nothing to edit")
-				return nil
+				return previewSelection(cmd, g, nil, "no items matched; nothing to edit\n")
 			}
 			if dryRun {
-				fmt.Fprintf(out(cmd), "%d item(s) would be edited:\n", len(targets))
-				for _, pid := range targets {
-					fmt.Fprintln(out(cmd), "  "+string(pid))
-				}
-				return nil
+				return previewSelection(cmd, g, targets, fmt.Sprintf("%d item(s) would be edited:\n", len(targets)))
 			}
 
 			// A single explicit pid keeps the original single-item behavior: it applies
@@ -100,8 +96,7 @@ func newEditCmd(g *globals) *cobra.Command {
 			}
 			// A multi-item or selection edit needs an explicit --yes to apply.
 			if !assumeYes {
-				fmt.Fprintf(out(cmd), "%d item(s) selected; re-run with --yes to apply (or --dry-run to preview)\n", len(targets))
-				return nil
+				return awaitYes(cmd, g, targets)
 			}
 			return runBatchEdit(cmd, g, targets, edits, opts)
 		},
@@ -190,7 +185,9 @@ func runBatchEdit(cmd *cobra.Command, g *globals, targets []model.PID, edits map
 	// The result is nil only when the whole call failed (or over a proxy that cannot
 	// convey a partial result).
 	if res != nil {
-		printBatchEditResult(cmd, res)
+		if perr := printBatchEditResult(cmd, g, res, err); err == nil {
+			err = perr
+		}
 	}
 	return err
 }
@@ -212,29 +209,29 @@ func loadBatchEdits(cmd *cobra.Command, path string) ([]model.ItemFieldEdit, err
 		data, err = os.ReadFile(path)
 	}
 	if err != nil {
-		return nil, err
+		return nil, waxerr.Wrapf(waxerr.CodeIO, "edit --batch", err, "reading %s", path)
 	}
 	var entries []struct {
 		ItemPID string            `json:"itemPid"`
 		Fields  map[string]string `json:"fields"`
 	}
 	if err := json.Unmarshal(data, &entries); err != nil {
-		return nil, fmt.Errorf("parse batch document: %w", err)
+		return nil, waxerr.Wrapf(waxerr.CodeInvalid, "edit --batch", err, "parse batch document")
 	}
 	if len(entries) == 0 {
-		return nil, fmt.Errorf("batch document has no entries")
+		return nil, waxerr.New(waxerr.CodeInvalid, "edit --batch", "batch document has no entries")
 	}
 	out := make([]model.ItemFieldEdit, len(entries))
 	seen := make(map[string]int, len(entries))
 	for i, e := range entries {
 		if e.ItemPID == "" {
-			return nil, fmt.Errorf("batch entry %d has no itemPid", i)
+			return nil, waxerr.New(waxerr.CodeInvalid, "edit --batch", fmt.Sprintf("batch entry %d has no itemPid", i))
 		}
 		if len(e.Fields) == 0 {
-			return nil, fmt.Errorf("batch entry %d (%s) has no fields", i, e.ItemPID)
+			return nil, waxerr.New(waxerr.CodeInvalid, "edit --batch", fmt.Sprintf("batch entry %d (%s) has no fields", i, e.ItemPID))
 		}
 		if first, dup := seen[e.ItemPID]; dup {
-			return nil, fmt.Errorf("batch entries %d and %d both name item %s; give each item one map", first, i, e.ItemPID)
+			return nil, waxerr.New(waxerr.CodeInvalid, "edit --batch", fmt.Sprintf("batch entries %d and %d both name item %s; give each item one map", first, i, e.ItemPID))
 		}
 		seen[e.ItemPID] = i
 		out[i] = model.ItemFieldEdit{ItemPID: model.PID(e.ItemPID), Fields: e.Fields}
@@ -251,15 +248,32 @@ func runMapBatchEdit(cmd *cobra.Command, g *globals, batchPath string, opts waxb
 	if err != nil {
 		return err
 	}
-	if dryRun {
+	if dryRun || !assumeYes {
+		if g.jsonOut {
+			if !dryRun {
+				fmt.Fprintln(errOut(cmd), "re-run with --yes to apply (or --dry-run to preview)")
+			}
+			type entry struct {
+				ItemPID model.PID         `json:"itemPid"`
+				Fields  map[string]string `json:"fields"`
+			}
+			entries := make([]entry, len(edits))
+			for i, e := range edits {
+				entries[i] = entry{e.ItemPID, e.Fields}
+			}
+			return printJSON(cmd, struct {
+				Entries []entry `json:"entries"`
+				Applied bool    `json:"applied"`
+			}{Entries: entries})
+		}
+		if !dryRun {
+			fmt.Fprintf(out(cmd), "%d item(s) in the batch; re-run with --yes to apply (or --dry-run to preview)\n", len(edits))
+			return nil
+		}
 		fmt.Fprintf(out(cmd), "%d item(s) in the batch:\n", len(edits))
 		for _, e := range edits {
 			fmt.Fprintf(out(cmd), "  %s (%d field(s))\n", e.ItemPID, len(e.Fields))
 		}
-		return nil
-	}
-	if !assumeYes {
-		fmt.Fprintf(out(cmd), "%d item(s) in the batch; re-run with --yes to apply (or --dry-run to preview)\n", len(edits))
 		return nil
 	}
 
@@ -272,22 +286,27 @@ func runMapBatchEdit(cmd *cobra.Command, g *globals, batchPath string, opts waxb
 	// Same contract as runBatchEdit: the catalog batch already committed when res is
 	// non-nil beside an error, so report what was edited before returning it.
 	if res != nil {
-		printBatchEditResult(cmd, res)
+		if perr := printBatchEditResult(cmd, g, res, err); err == nil {
+			err = perr
+		}
 	}
 	return err
 }
 
-// printBatchEditResult reports an applied batch edit: the edited count, any
-// skipped locked items, and the per-item write-back warnings. Warnings follow
+// printBatchEditResult reports an applied batch edit (as JSON under --json): the
+// edited count, any skipped locked items, and the per-item write-back warnings. A
+// failure after the catalog batch committed rides in the JSON as its error member. Warnings follow
 // the result's Edited order rather than map order, so two runs of the same
 // batch print identically.
-func printBatchEditResult(cmd *cobra.Command, res *waxbin.BatchEditResult) {
-	w := out(cmd)
-	fmt.Fprintf(w, "edited %d item(s)\n", len(res.Edited))
-	if len(res.Skipped) > 0 {
-		fmt.Fprintf(w, "skipped %d locked item(s)\n", len(res.Skipped))
-		for _, pid := range res.Skipped {
-			fmt.Fprintln(w, "  "+string(pid))
+func printBatchEditResult(cmd *cobra.Command, g *globals, res *waxbin.BatchEditResult, failure error) error {
+	if !g.jsonOut {
+		w := out(cmd)
+		fmt.Fprintf(w, "edited %d item(s)\n", len(res.Edited))
+		if len(res.Skipped) > 0 {
+			fmt.Fprintf(w, "skipped %d locked item(s)\n", len(res.Skipped))
+			for _, pid := range res.Skipped {
+				fmt.Fprintln(w, "  "+string(pid))
+			}
 		}
 	}
 	for _, pid := range res.Edited {
@@ -299,6 +318,15 @@ func printBatchEditResult(cmd *cobra.Command, res *waxbin.BatchEditResult) {
 			fmt.Fprintf(errOut(cmd), "warning: on-disk tag write-back skipped for %s (%s): %s\n", pid, f.Path, f.Reason)
 		}
 	}
+	if !g.jsonOut {
+		return nil
+	}
+	return printJSON(cmd, struct {
+		Edited  []model.PID `json:"edited"`
+		Skipped []model.PID `json:"skipped"`
+		Applied bool        `json:"applied"`
+		Error   string      `json:"error,omitempty"`
+	}{append([]model.PID{}, res.Edited...), append([]model.PID{}, res.Skipped...), true, errText(failure)})
 }
 
 // parseSetFlags parses repeated field=value flags into an edit map. It needs at least
@@ -306,7 +334,7 @@ func printBatchEditResult(cmd *cobra.Command, res *waxbin.BatchEditResult) {
 // empty, which clears the field, and may itself contain '='.
 func parseSetFlags(sets []string) (map[string]string, error) {
 	if len(sets) == 0 {
-		return nil, fmt.Errorf("at least one --set field=value is required")
+		return nil, waxerr.New(waxerr.CodeInvalid, "--set", "at least one --set field=value is required")
 	}
 	edits := make(map[string]string, len(sets))
 	for _, s := range sets {
@@ -316,10 +344,10 @@ func parseSetFlags(sets []string) (map[string]string, error) {
 		field = strings.TrimSpace(field)
 		value = strings.TrimSpace(value)
 		if !ok || field == "" {
-			return nil, fmt.Errorf("invalid --set %q: want field=value", s)
+			return nil, waxerr.New(waxerr.CodeInvalid, "--set", fmt.Sprintf("invalid --set %q: want field=value", s))
 		}
 		if _, dup := edits[field]; dup {
-			return nil, fmt.Errorf("field %q set more than once", field)
+			return nil, waxerr.New(waxerr.CodeInvalid, "--set", fmt.Sprintf("field %q set more than once", field))
 		}
 		edits[field] = value
 	}

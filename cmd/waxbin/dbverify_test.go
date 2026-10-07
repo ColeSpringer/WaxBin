@@ -42,6 +42,46 @@ func TestDBVerifyReportsAndFixesAlbumYearDrift(t *testing.T) {
 	}
 }
 
+// TestDBVerifyReportsAndFixesPlaylistPositionDrift: playlist positions that are not the
+// listing indexes are reported by `db verify` without failing it (indexes resolve by
+// rank), and `db verify --fix` renumbers them in listing order.
+func TestDBVerifyReportsAndFixesPlaylistPositionDrift(t *testing.T) {
+	db, root, pid := creditCLIFixture(t)
+	if _, err := runCLIJSON(t, db, root, "playlist", "create", "Mix"); err != nil {
+		t.Fatalf("playlist create: %v", err)
+	}
+	raw, err := sql.Open("sqlite", "file:"+db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = raw.Close() })
+	if _, err := raw.Exec(`INSERT INTO playlist_item(playlist_id, position, item_id)
+		SELECT (SELECT id FROM playlist), 5, id FROM playable_item WHERE pid = ?`, string(pid)); err != nil {
+		t.Fatalf("add a sparse entry by hand: %v", err)
+	}
+	_ = raw.Close()
+
+	verify := func(args ...string) (int, error) {
+		t.Helper()
+		out, err := runCLIJSON(t, db, root, append([]string{"db", "verify"}, args...)...)
+		var env struct {
+			Data struct {
+				PlaylistPositionDrift int `json:"playlistPositionDrift"`
+			} `json:"data"`
+		}
+		if jerr := json.Unmarshal([]byte(out), &env); jerr != nil {
+			t.Fatalf("db verify %v printed %q: %v", args, out, jerr)
+		}
+		return env.Data.PlaylistPositionDrift, err
+	}
+	if n, err := verify(); n != 1 || err != nil {
+		t.Fatalf("db verify = %d drift (err %v), want 1 and success", n, err)
+	}
+	if n, err := verify("--fix"); n != 0 || err != nil {
+		t.Fatalf("db verify --fix = %d drift (err %v), want 0 and success", n, err)
+	}
+}
+
 // TestDBVerifyFixRebuildsTheSearchIndex: a search row gone stale is something `db
 // verify` cannot see (it counts rows), so --fix rebuilds the index and says how many
 // rows it wrote.

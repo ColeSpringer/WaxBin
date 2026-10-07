@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 
@@ -77,10 +78,20 @@ func newOPMLExportCmd(g *globals) *cobra.Command {
 				if err := f.Close(); err != nil {
 					return waxerr.Wrapf(waxerr.CodeIO, "opml.export", err, "closing %s", args[0])
 				}
-				fmt.Fprintf(out(cmd), "Exported subscriptions to %s\n", args[0])
-				return nil
+				return reply(cmd, g, struct {
+					Out string `json:"out"`
+				}{args[0]}, fmt.Sprintf("Exported subscriptions to %s\n", args[0]))
 			}
-			return lib.Podcasts().ExportOPML(ctx(cmd), out(cmd))
+			if !g.jsonOut {
+				return lib.Podcasts().ExportOPML(ctx(cmd), out(cmd))
+			}
+			var doc bytes.Buffer
+			if err := lib.Podcasts().ExportOPML(ctx(cmd), &doc); err != nil {
+				return err
+			}
+			return printJSON(cmd, struct {
+				OPML string `json:"opml"`
+			}{doc.String()})
 		},
 	}
 }

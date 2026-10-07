@@ -469,6 +469,7 @@ type playlistView struct {
 	PID        string `json:"pid"`
 	Name       string `json:"name"`
 	Owner      string `json:"owner"`
+	OwnerPID   string `json:"ownerPid"`
 	Kind       string `json:"kind"`
 	Visibility string `json:"visibility"`
 	ItemCount  int    `json:"itemCount"`
@@ -481,7 +482,7 @@ type playlistView struct {
 // what keeps --json from reporting 0 where the table reports 42.
 func toPlaylistView(p *model.Playlist, count int) playlistView {
 	return playlistView{
-		PID: string(p.PID), Name: p.Name, Owner: p.OwnerName, Kind: string(p.Kind),
+		PID: string(p.PID), Name: p.Name, Owner: p.OwnerName, OwnerPID: string(p.OwnerPID), Kind: string(p.Kind),
 		Visibility: string(p.Visibility), ItemCount: count, HasArt: p.HasArt,
 	}
 }
@@ -590,6 +591,7 @@ type derivedView struct {
 	BookDurationDrift       int `json:"bookDurationDrift"`
 	BookISBNKeyDrift        int `json:"bookIsbnKeyDrift"`
 	AlbumYearDrift          int `json:"albumYearDrift"`
+	PlaylistPositionDrift   int `json:"playlistPositionDrift"`
 	OrphanArtSources        int `json:"orphanArtSources"`
 	OrphanThumbnails        int `json:"orphanThumbnails"`
 	// Custom-tag provenance rows under a key WaxBin has since reserved.
@@ -601,6 +603,8 @@ type derivedView struct {
 	SortKeysRewritten int `json:"sortKeysRewritten,omitempty"`
 	// Present only when --fix rewrote, wrote or dropped search rows.
 	SearchRowsRebuilt int `json:"searchRowsRebuilt,omitempty"`
+	// Why the check failed, when it did.
+	Error string `json:"error,omitempty"`
 }
 
 func toDerivedView(r *sqlite.DerivedReport) derivedView {
@@ -609,7 +613,7 @@ func toDerivedView(r *sqlite.DerivedReport) derivedView {
 		ArtistRollupDrift: r.ArtistRollupDrift, GenreRollupDrift: r.GenreRollupDrift,
 		ReleaseGroupRollupDrift: r.ReleaseGroupRollupDrift, SortKeyDrift: r.SortKeyDrift,
 		BookDurationDrift: r.BookDurationDrift, BookISBNKeyDrift: r.BookISBNKeyDrift,
-		AlbumYearDrift:   r.AlbumYearDrift,
+		AlbumYearDrift: r.AlbumYearDrift, PlaylistPositionDrift: r.PlaylistPositionDrift,
 		OrphanArtSources: r.OrphanArtSources, OrphanThumbnails: r.OrphanThumbnails,
 		OrphanReservedTagProvenance: r.OrphanReservedTagProvenance,
 		StrandedTagKeyRows:          r.StrandedTagKeyRows,

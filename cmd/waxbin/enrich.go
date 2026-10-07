@@ -9,6 +9,7 @@ import (
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/proxy"
 	"github.com/colespringer/waxbin/read"
+	"github.com/colespringer/waxbin/waxerr"
 	"github.com/spf13/cobra"
 )
 
@@ -82,7 +83,7 @@ func newEnrichCmd(g *globals) *cobra.Command {
 			// Flag-shape errors fail here, before the write lock is taken or the
 			// server dialed; the facade re-validates for embedders and the proxy.
 			if item != "" && entity != "" {
-				return fmt.Errorf("scope by --item or --entity, not both")
+				return waxerr.New(waxerr.CodeInvalid, "enrich", "scope by --item or --entity, not both")
 			}
 			if err := enrich.CheckPhaseOptions(force, item != "" || entity != "",
 				model.EnrichPhasesOf(phases), model.EnrichPhasesOf(forcePhases)); err != nil {
@@ -95,12 +96,12 @@ func newEnrichCmd(g *globals) *cobra.Command {
 			if entity != "" {
 				typ, pid, ok := strings.Cut(entity, ":")
 				if !ok || typ == "" || pid == "" {
-					return fmt.Errorf("--entity wants type:pid, got %q", entity)
+					return waxerr.New(waxerr.CodeInvalid, "enrich", fmt.Sprintf("--entity wants type:pid, got %q", entity))
 				}
 				switch typ {
 				case "artist", "release_group", "album":
 				default:
-					return fmt.Errorf("unknown or non-enrichable entity type %q (want artist, release_group, or album)", typ)
+					return waxerr.New(waxerr.CodeInvalid, "enrich", fmt.Sprintf("unknown or non-enrichable entity type %q (want artist, release_group, or album)", typ))
 				}
 				opts.EntityType, opts.EntityPID = read.EntityKind(typ), model.PID(pid)
 				params.EntityType, params.EntityPID = typ, pid

@@ -10,6 +10,7 @@ import (
 
 	"github.com/colespringer/waxbin"
 	"github.com/colespringer/waxbin/model"
+	"github.com/colespringer/waxbin/waxerr"
 	"github.com/spf13/cobra"
 )
 
@@ -51,12 +52,12 @@ func newCreditCmd(g *globals) *cobra.Command {
 			}
 			if batchPath != "" {
 				if len(args) > 0 || role != "" || len(names) > 0 {
-					return fmt.Errorf("--batch is exclusive with the pid, --role, and --name")
+					return waxerr.New(waxerr.CodeInvalid, "credit", "--batch is exclusive with the pid, --role, and --name")
 				}
 				return runCreditBatch(cmd, g, batchPath, opts, dryRun, assumeYes)
 			}
 			if len(args) == 0 {
-				return fmt.Errorf("specify an item pid, or --batch to set several credits at once")
+				return waxerr.New(waxerr.CodeInvalid, "credit", "specify an item pid, or --batch to set several credits at once")
 			}
 			pid := model.PID(args[0])
 			if role == "" {
@@ -67,8 +68,7 @@ func newCreditCmd(g *globals) *cobra.Command {
 			// silently mutate (and, with --write-back, rewrite the file) despite the user
 			// asking only to preview, which is the invariant the edit path documents.
 			if dryRun {
-				printCreditPreview(cmd, pid, model.ContributorRole(role), names)
-				return nil
+				return printCreditPreview(cmd, g, pid, model.ContributorRole(role), names)
 			}
 			return setCredits(cmd, g, pid, model.ContributorRole(role), names, opts)
 		},
@@ -105,7 +105,7 @@ func loadBatchCredits(cmd *cobra.Command, path string) ([]model.ItemCreditEdit, 
 		data, err = os.ReadFile(path)
 	}
 	if err != nil {
-		return nil, err
+		return nil, waxerr.Wrapf(waxerr.CodeIO, "credit --batch", err, "reading %s", path)
 	}
 	var entries []struct {
 		ItemPID string   `json:"itemPid"`
@@ -113,24 +113,24 @@ func loadBatchCredits(cmd *cobra.Command, path string) ([]model.ItemCreditEdit, 
 		Names   []string `json:"names"`
 	}
 	if err := json.Unmarshal(data, &entries); err != nil {
-		return nil, fmt.Errorf("parse batch document: %w", err)
+		return nil, waxerr.Wrapf(waxerr.CodeInvalid, "credit --batch", err, "parse batch document")
 	}
 	if len(entries) == 0 {
-		return nil, fmt.Errorf("batch document has no entries")
+		return nil, waxerr.New(waxerr.CodeInvalid, "credit --batch", "batch document has no entries")
 	}
 	type pair struct{ pid, role string }
 	out := make([]model.ItemCreditEdit, len(entries))
 	seen := make(map[pair]int, len(entries))
 	for i, e := range entries {
 		if e.ItemPID == "" {
-			return nil, fmt.Errorf("batch entry %d has no itemPid", i)
+			return nil, waxerr.New(waxerr.CodeInvalid, "credit --batch", fmt.Sprintf("batch entry %d has no itemPid", i))
 		}
 		if e.Role == "" {
-			return nil, fmt.Errorf("batch entry %d (%s) has no role", i, e.ItemPID)
+			return nil, waxerr.New(waxerr.CodeInvalid, "credit --batch", fmt.Sprintf("batch entry %d (%s) has no role", i, e.ItemPID))
 		}
 		if first, dup := seen[pair{e.ItemPID, e.Role}]; dup {
-			return nil, fmt.Errorf("batch entries %d and %d both set the %s credit of %s; give each pair one entry",
-				first, i, e.Role, e.ItemPID)
+			return nil, waxerr.New(waxerr.CodeInvalid, "credit --batch", fmt.Sprintf("batch entries %d and %d both set the %s credit of %s; give each pair one entry",
+				first, i, e.Role, e.ItemPID))
 		}
 		seen[pair{e.ItemPID, e.Role}] = i
 		out[i] = model.ItemCreditEdit{
@@ -148,15 +148,24 @@ func runCreditBatch(cmd *cobra.Command, g *globals, batchPath string, opts waxbi
 	if err != nil {
 		return err
 	}
-	if dryRun {
+	if dryRun || !assumeYes {
+		if g.jsonOut {
+			if !dryRun {
+				fmt.Fprintln(errOut(cmd), "re-run with --yes to apply (or --dry-run to preview)")
+			}
+			return printJSON(cmd, struct {
+				Entries []creditEntryView `json:"entries"`
+				Applied bool              `json:"applied"`
+			}{Entries: creditEntryViews(edits, true)})
+		}
+		if !dryRun {
+			fmt.Fprintf(out(cmd), "%d credit(s) in the batch; re-run with --yes to apply (or --dry-run to preview)\n", len(edits))
+			return nil
+		}
 		fmt.Fprintf(out(cmd), "%d credit(s) in the batch:\n", len(edits))
 		for _, e := range edits {
 			fmt.Fprintf(out(cmd), "  %s %s (%d name(s))\n", e.ItemPID, e.Role, len(e.Names))
 		}
-		return nil
-	}
-	if !assumeYes {
-		fmt.Fprintf(out(cmd), "%d credit(s) in the batch; re-run with --yes to apply (or --dry-run to preview)\n", len(edits))
 		return nil
 	}
 
@@ -169,39 +178,67 @@ func runCreditBatch(cmd *cobra.Command, g *globals, batchPath string, opts waxbi
 	// Same contract as edit --batch: the catalog batch already committed when res is
 	// non-nil beside an error, so report what was edited before returning it.
 	if res != nil {
-		printCreditBatchResult(cmd, res)
+		if perr := printCreditBatchResult(cmd, g, res, err); err == nil {
+			err = perr
+		}
 	}
 	return err
+}
+
+// creditEntryView is one batch credit entry in --json output.
+type creditEntryView struct {
+	ItemPID model.PID `json:"itemPid"`
+	Role    string    `json:"role"`
+	Names   []string  `json:"names,omitempty"`
+}
+
+func creditEntryViews(edits []model.ItemCreditEdit, withNames bool) []creditEntryView {
+	out := make([]creditEntryView, len(edits))
+	for i, e := range edits {
+		out[i] = creditEntryView{ItemPID: e.ItemPID, Role: string(e.Role)}
+		if withNames {
+			out[i].Names = append([]string{}, e.Names...)
+		}
+	}
+	return out
 }
 
 // printCreditPreview describes what a single credit edit would do without applying it.
 // It is the --dry-run answer for the single-item path, printed before any mutator
 // opens, and mirrors the wording of the applied report below.
-func printCreditPreview(cmd *cobra.Command, pid model.PID, role model.ContributorRole, names []string) {
+func printCreditPreview(cmd *cobra.Command, g *globals, pid model.PID, role model.ContributorRole, names []string) error {
+	text := fmt.Sprintf("would set the %s credits of %s to %s\n", role, pid, strings.Join(names, "; "))
 	if len(names) == 0 {
-		fmt.Fprintf(out(cmd), "would clear the %s credits of %s\n", role, pid)
-		return
+		text = fmt.Sprintf("would clear the %s credits of %s\n", role, pid)
 	}
-	fmt.Fprintf(out(cmd), "would set the %s credits of %s to %s\n", role, pid, strings.Join(names, "; "))
+	return reply(cmd, g, struct {
+		ItemPID model.PID `json:"itemPid"`
+		Role    string    `json:"role"`
+		Names   []string  `json:"names"`
+		Applied bool      `json:"applied"`
+	}{pid, string(role), append([]string{}, names...), false}, text)
 }
 
-// printCreditBatchResult reports an applied credit batch. The batch's unit is the
+// printCreditBatchResult reports an applied credit batch (as JSON under --json, with a
+// failure after the commit as its error member). The batch's unit is the
 // (item, role) entry, so the summary counts edits and the distinct items they landed
 // on, and a skipped line names its role. Warnings follow the result's Edited order
 // rather than map order, deduped by item: an item edited under two roles appears twice
 // in Edited, but its roles were mirrored into its files in one pass, so its failures
 // are reported once.
-func printCreditBatchResult(cmd *cobra.Command, res *waxbin.CreditBatchResult) {
-	w := out(cmd)
-	distinct := map[model.PID]bool{}
-	for _, e := range res.Edited {
-		distinct[e.ItemPID] = true
-	}
-	fmt.Fprintf(w, "applied %d credit edit(s) across %d item(s)\n", len(res.Edited), len(distinct))
-	if len(res.Skipped) > 0 {
-		fmt.Fprintf(w, "skipped %d locked credit(s)\n", len(res.Skipped))
-		for _, e := range res.Skipped {
-			fmt.Fprintf(w, "  %s %s\n", e.ItemPID, e.Role)
+func printCreditBatchResult(cmd *cobra.Command, g *globals, res *waxbin.CreditBatchResult, failure error) error {
+	if !g.jsonOut {
+		w := out(cmd)
+		distinct := map[model.PID]bool{}
+		for _, e := range res.Edited {
+			distinct[e.ItemPID] = true
+		}
+		fmt.Fprintf(w, "applied %d credit edit(s) across %d item(s)\n", len(res.Edited), len(distinct))
+		if len(res.Skipped) > 0 {
+			fmt.Fprintf(w, "skipped %d locked credit(s)\n", len(res.Skipped))
+			for _, e := range res.Skipped {
+				fmt.Fprintf(w, "  %s %s\n", e.ItemPID, e.Role)
+			}
 		}
 	}
 	warned := map[model.PID]bool{}
@@ -218,6 +255,15 @@ func printCreditBatchResult(cmd *cobra.Command, res *waxbin.CreditBatchResult) {
 			fmt.Fprintf(errOut(cmd), "warning: on-disk tag write-back skipped for %s (%s): %s\n", e.ItemPID, f.Path, f.Reason)
 		}
 	}
+	if !g.jsonOut {
+		return nil
+	}
+	return printJSON(cmd, struct {
+		Edited  []creditEntryView `json:"edited"`
+		Skipped []creditEntryView `json:"skipped"`
+		Applied bool              `json:"applied"`
+		Error   string            `json:"error,omitempty"`
+	}{creditEntryViews(res.Edited, false), creditEntryViews(res.Skipped, false), true, errText(failure)})
 }
 
 func listCredits(cmd *cobra.Command, g *globals, pid model.PID) error {
@@ -258,18 +304,22 @@ func setCredits(cmd *cobra.Command, g *globals, pid model.PID, role model.Contri
 	if err := surfaceWriteBack(cmd, err); err != nil {
 		return err
 	}
-	if skipped {
-		fmt.Fprintf(out(cmd), "skipped the locked %s credit of %s\n", role, pid)
-		return nil
-	}
 	// Report the count actually stored (trimmed, resolvable, deduped) rather than the
 	// raw --name count, so an unresolvable name that cleared the role reads as "0".
-	if stored == 0 {
-		fmt.Fprintf(out(cmd), "cleared %s credits for %s\n", role, pid)
-	} else {
-		fmt.Fprintf(out(cmd), "set %d %s credit(s) for %s\n", stored, role, pid)
+	text := fmt.Sprintf("set %d %s credit(s) for %s\n", stored, role, pid)
+	switch {
+	case skipped:
+		text = fmt.Sprintf("skipped the locked %s credit of %s\n", role, pid)
+	case stored == 0:
+		text = fmt.Sprintf("cleared %s credits for %s\n", role, pid)
 	}
-	return nil
+	return reply(cmd, g, struct {
+		ItemPID model.PID `json:"itemPid"`
+		Role    string    `json:"role"`
+		Stored  int       `json:"stored"`
+		Skipped bool      `json:"skipped"`
+		Applied bool      `json:"applied"`
+	}{pid, string(role), stored, skipped, !skipped}, text)
 }
 
 // creditView is the JSON shape for a contributor.

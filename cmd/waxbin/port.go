@@ -175,6 +175,12 @@ func newExportCmd(g *globals) *cobra.Command {
 			}
 			defer lib.Close()
 
+			if len(args) == 0 && g.jsonOut {
+				return printJSONStream(cmd, func(w io.Writer) error {
+					_, err := lib.Export(ctx(cmd), w)
+					return err
+				})
+			}
 			var w io.Writer = out(cmd)
 			var file *os.File
 			if len(args) == 1 {

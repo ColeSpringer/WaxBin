@@ -730,7 +730,7 @@ func (l *Library) proxyHandlers() map[string]proxy.Handler {
 				return nil, err
 			}
 			return proxy.PlaylistImportResult{
-				PlaylistPID: string(res.PlaylistPID), Matched: res.Matched,
+				PlaylistPID: string(res.PlaylistPID), Matched: res.Matched, Merged: res.Merged,
 				Unmatched: res.Unmatched, UnmatchedPaths: res.UnmatchedPaths,
 			}, nil
 		},
@@ -757,7 +757,28 @@ func (l *Library) proxyHandlers() map[string]proxy.Handler {
 			if err != nil {
 				return nil, err
 			}
-			return nil, l.playlists.RemoveAt(ctx, model.PID(p.PlaylistPID), p.Position)
+			return nil, l.playlists.RemoveAt(ctx, model.PID(p.PlaylistPID), p.Position, model.PID(p.ExpectPID))
+		},
+		proxy.MethodPlaylistRemoveMany: func(ctx context.Context, raw json.RawMessage) (any, error) {
+			p, err := decodeParams[proxy.PlaylistRemoveManyParams](raw)
+			if err != nil {
+				return nil, err
+			}
+			var expect []model.PID
+			if p.ExpectPIDs != nil {
+				expect = make([]model.PID, len(p.ExpectPIDs))
+				for i, e := range p.ExpectPIDs {
+					expect[i] = model.PID(e)
+				}
+			}
+			return nil, l.playlists.RemoveAtMany(ctx, model.PID(p.PlaylistPID), p.Positions, expect)
+		},
+		proxy.MethodPlaylistSetOwner: func(ctx context.Context, raw json.RawMessage) (any, error) {
+			p, err := decodeParams[proxy.PlaylistSetOwnerParams](raw)
+			if err != nil {
+				return nil, err
+			}
+			return nil, l.playlists.SetOwner(ctx, model.PID(p.PlaylistPID), model.PID(p.OwnerPID))
 		},
 		proxy.MethodPlaylistSetRule: func(ctx context.Context, raw json.RawMessage) (any, error) {
 			p, err := decodeParams[proxy.PlaylistSetRuleParams](raw)

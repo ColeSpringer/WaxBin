@@ -6,6 +6,7 @@ import (
 
 	"github.com/colespringer/waxbin"
 	"github.com/colespringer/waxbin/model"
+	"github.com/colespringer/waxbin/waxerr"
 	"github.com/spf13/cobra"
 )
 
@@ -40,34 +41,28 @@ func newKindCmd(g *globals) *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			kind := model.Kind(to)
 			if kind != model.KindBook && kind != model.KindTrack {
-				return fmt.Errorf("--to must be book or track")
+				return waxerr.New(waxerr.CodeInvalid, "kind", "--to must be book or track")
 			}
 			hasSelection := qf.title != "" || qf.artist != "" || qf.album != "" || qf.genre != "" ||
 				qf.kind != "" || qf.source != "" || qf.year != 0 || rulePath != ""
 			if len(args) > 0 && hasSelection {
-				return fmt.Errorf("give explicit pids or selection filters, not both")
+				return waxerr.New(waxerr.CodeInvalid, "kind", "give explicit pids or selection filters, not both")
 			}
 			if len(args) == 0 && !hasSelection {
-				return fmt.Errorf("specify item pids or a selection filter (--artist, --album, --rule, ...)")
+				return waxerr.New(waxerr.CodeInvalid, "kind", "specify item pids or a selection filter (--artist, --album, --rule, ...)")
 			}
 			targets, err := resolveEditTargets(cmd, g, args, hasSelection, rulePath, qf, user)
 			if err != nil {
 				return err
 			}
 			if len(targets) == 0 {
-				fmt.Fprintln(out(cmd), "no items matched; nothing to change")
-				return nil
+				return previewSelection(cmd, g, nil, "no items matched; nothing to change\n")
 			}
 			if dryRun {
-				fmt.Fprintf(out(cmd), "%d item(s) would change to a %s:\n", len(targets), kind)
-				for _, pid := range targets {
-					fmt.Fprintln(out(cmd), "  "+string(pid))
-				}
-				return nil
+				return previewSelection(cmd, g, targets, fmt.Sprintf("%d item(s) would change to a %s:\n", len(targets), kind))
 			}
 			if (hasSelection || len(args) > 1) && !assumeYes {
-				fmt.Fprintf(out(cmd), "%d item(s) selected; re-run with --yes to apply (or --dry-run to preview)\n", len(targets))
-				return nil
+				return awaitYes(cmd, g, targets)
 			}
 			m, _, err := g.openMutator(cmd)
 			if err != nil {
@@ -79,7 +74,7 @@ func newKindCmd(g *globals) *cobra.Command {
 			// A change cut short still reports what it did before the error, since an item it
 			// absorbed is gone either way.
 			if rep != nil && (err == nil || len(rep.Converted)+len(rep.Absorbed)+len(rep.Created) > 0) {
-				if perr := emitKindReport(cmd, g, kind, rep); err == nil {
+				if perr := emitKindReport(cmd, g, kind, rep, err); err == nil {
 					err = perr
 				}
 			}
@@ -106,10 +101,14 @@ func newKindCmd(g *globals) *cobra.Command {
 }
 
 // emitKindReport prints what a kind change did, and warns about each file whose tags it
-// could not write.
-func emitKindReport(cmd *cobra.Command, g *globals, kind model.Kind, rep *waxbin.KindReport) error {
+// could not write. Under --json a change cut short carries its failure as the error
+// member.
+func emitKindReport(cmd *cobra.Command, g *globals, kind model.Kind, rep *waxbin.KindReport, failure error) error {
 	if g.jsonOut {
-		return printJSON(cmd, rep)
+		return printJSON(cmd, struct {
+			*waxbin.KindReport
+			Error string `json:"error,omitempty"`
+		}{rep, errText(failure)})
 	}
 	fmt.Fprintf(out(cmd), "Changed to a %s: %d converted, %d absorbed, %d created\n",
 		kind, len(rep.Converted), len(rep.Absorbed), len(rep.Created))
