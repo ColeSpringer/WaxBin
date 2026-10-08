@@ -164,7 +164,7 @@ func scanPlaylist(sc rowScanner) (*model.Playlist, error) {
 // PlaylistByPID returns one playlist's metadata, or CodeNotFound.
 func (s *Store) PlaylistByPID(ctx context.Context, pid model.PID) (*model.Playlist, error) {
 	const op = "store.PlaylistByPID"
-	p, err := scanPlaylist(s.read.QueryRowContext(ctx, playlistSelect+" WHERE p.pid = ?", string(pid)))
+	p, err := scanPlaylist(s.rdb().QueryRowContext(ctx, playlistSelect+" WHERE p.pid = ?", string(pid)))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, waxerr.New(waxerr.CodeNotFound, op, "no such playlist: "+string(pid))
 	}
@@ -178,11 +178,11 @@ func (s *Store) PlaylistByPID(ctx context.Context, pid model.PID) (*model.Playli
 // the user's own plus any shared by others, ordered by name.
 func (s *Store) ListPlaylists(ctx context.Context, ownerPID model.PID) ([]*model.Playlist, error) {
 	const op = "store.ListPlaylists"
-	userID, err := userIDByPID(ctx, s.read, ownerPID, op)
+	userID, err := userIDByPID(ctx, s.rdb(), ownerPID, op)
 	if err != nil {
 		return nil, err
 	}
-	rows, err := s.read.QueryContext(ctx,
+	rows, err := s.rdb().QueryContext(ctx,
 		playlistSelect+" WHERE p.owner_user_id = ? OR p.visibility = 'shared' ORDER BY u.name, p.name",
 		userID)
 	if err != nil {
@@ -326,7 +326,7 @@ func (s *Store) SetPlaylistRule(ctx context.Context, pid model.PID, rule query.Q
 	const op = "store.SetPlaylistRule"
 	var kind string
 	var stored sql.NullString
-	err := s.read.QueryRowContext(ctx,
+	err := s.rdb().QueryRowContext(ctx,
 		"SELECT kind, rule FROM playlist WHERE pid = ?", string(pid)).Scan(&kind, &stored)
 	if errors.Is(err, sql.ErrNoRows) {
 		return waxerr.New(waxerr.CodeNotFound, op, "no such playlist: "+string(pid))
@@ -404,7 +404,7 @@ func (s *Store) PlaylistItems(ctx context.Context, pid model.PID, userPID model.
 		}
 		return s.QueryItems(ctx, *p.Rule, userPID)
 	}
-	rows, err := s.read.QueryContext(ctx,
+	rows, err := s.rdb().QueryContext(ctx,
 		itemSelect+` JOIN playlist_item pli ON pli.item_id = pi.id
 		 JOIN playlist pl ON pl.id = pli.playlist_id
 		 WHERE pl.pid = ? ORDER BY pli.position`, string(pid))
@@ -518,7 +518,7 @@ func (s *Store) countStaticPlaylistItems(ctx context.Context, op string, pid, us
 	args = append(args, string(pid))
 	args = append(args, c.Args...)
 	var n int
-	if err := s.read.QueryRowContext(ctx, stmt, args...).Scan(&n); err != nil {
+	if err := s.rdb().QueryRowContext(ctx, stmt, args...).Scan(&n); err != nil {
 		return 0, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
 	return n, nil
@@ -939,7 +939,7 @@ func (s *Store) itemsBehindFiles(ctx context.Context, op, cond string, arg any, 
 	if limit > 0 {
 		q += fmt.Sprintf(" LIMIT %d", limit)
 	}
-	rows, err := s.read.QueryContext(ctx, q, arg)
+	rows, err := s.rdb().QueryContext(ctx, q, arg)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}

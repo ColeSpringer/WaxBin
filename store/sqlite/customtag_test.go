@@ -247,7 +247,7 @@ func TestScanDropsALockedRowUnderANewlyReservedKey(t *testing.T) {
 	}
 
 	var itemID int64
-	if err := st.read.QueryRowContext(ctx,
+	if err := st.rdb().QueryRowContext(ctx,
 		"SELECT id FROM playable_item WHERE pid = ?", string(pid)).Scan(&itemID); err != nil {
 		t.Fatalf("resolve item: %v", err)
 	}
@@ -275,7 +275,7 @@ func TestScanDropsALockedRowUnderANewlyReservedKey(t *testing.T) {
 	// The lock row goes with the values. IsCuratableField refuses a reserved tag.<KEY>,
 	// so a surviving row would be unreachable by SetItemTag and UnlockField alike.
 	var orphans int
-	if err := st.read.QueryRowContext(ctx,
+	if err := st.rdb().QueryRowContext(ctx,
 		"SELECT COUNT(*) FROM field_provenance WHERE item_id=? AND field='tag.MEDIA'", itemID).
 		Scan(&orphans); err != nil {
 		t.Fatalf("count provenance: %v", err)
@@ -303,7 +303,7 @@ func TestScanDropsAnUnlockedRowUnderANewlyReservedKey(t *testing.T) {
 	pid := res.ItemPID
 
 	var itemID int64
-	if err := st.read.QueryRowContext(ctx,
+	if err := st.rdb().QueryRowContext(ctx,
 		"SELECT id FROM playable_item WHERE pid = ?", string(pid)).Scan(&itemID); err != nil {
 		t.Fatalf("resolve item: %v", err)
 	}
@@ -325,7 +325,7 @@ func TestScanDropsAnUnlockedRowUnderANewlyReservedKey(t *testing.T) {
 		t.Errorf("reserved tag survived the sync as %v", got)
 	}
 	var orphans int
-	if err := st.read.QueryRowContext(ctx,
+	if err := st.rdb().QueryRowContext(ctx,
 		"SELECT COUNT(*) FROM field_provenance WHERE item_id=? AND field='tag.RELEASECOUNTRY'", itemID).
 		Scan(&orphans); err != nil {
 		t.Fatalf("count provenance: %v", err)
@@ -350,7 +350,7 @@ func TestScanRetiresTheFoldedWireSpellings(t *testing.T) {
 	pid := res.ItemPID
 
 	var itemID int64
-	if err := st.read.QueryRowContext(ctx,
+	if err := st.rdb().QueryRowContext(ctx,
 		"SELECT id FROM playable_item WHERE pid = ?", string(pid)).Scan(&itemID); err != nil {
 		t.Fatalf("resolve item: %v", err)
 	}
@@ -386,7 +386,7 @@ func TestScanRetiresTheFoldedWireSpellings(t *testing.T) {
 			t.Errorf("%s survived the sync as %v; a reserved key has no custom-tag surface", key, got)
 		}
 		var orphans int
-		if err := st.read.QueryRowContext(ctx,
+		if err := st.rdb().QueryRowContext(ctx,
 			"SELECT COUNT(*) FROM field_provenance WHERE item_id=? AND field=?",
 			itemID, model.TagLockField(key)).Scan(&orphans); err != nil {
 			t.Fatalf("count provenance: %v", err)
@@ -418,7 +418,7 @@ func TestVerifyReclaimsUnreachableReservedTagProvenance(t *testing.T) {
 	pid := res.ItemPID
 
 	var itemID int64
-	if err := st.read.QueryRowContext(ctx,
+	if err := st.rdb().QueryRowContext(ctx,
 		"SELECT id FROM playable_item WHERE pid = ?", string(pid)).Scan(&itemID); err != nil {
 		t.Fatalf("resolve item: %v", err)
 	}
@@ -509,7 +509,7 @@ func TestVerifyReclaimsStrandedTagKeys(t *testing.T) {
 	pid := res.ItemPID
 
 	var itemID int64
-	if err := st.read.QueryRowContext(ctx,
+	if err := st.rdb().QueryRowContext(ctx,
 		"SELECT id FROM playable_item WHERE pid = ?", string(pid)).Scan(&itemID); err != nil {
 		t.Fatalf("resolve item: %v", err)
 	}

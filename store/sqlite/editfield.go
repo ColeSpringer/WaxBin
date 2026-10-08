@@ -1260,7 +1260,7 @@ func itemIDKindByPIDTx(ctx context.Context, tx *sql.Tx, pid model.PID, op string
 func (s *Store) FileSharedOrVirtual(ctx context.Context, filePID model.PID) (bool, error) {
 	const op = "store.FileSharedOrVirtual"
 	var shared int
-	err := s.read.QueryRowContext(ctx,
+	err := s.rdb().QueryRowContext(ctx,
 		"SELECT "+fileSharedOrVirtualExpr+" FROM file f WHERE f.pid = ?", string(filePID)).Scan(&shared)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil

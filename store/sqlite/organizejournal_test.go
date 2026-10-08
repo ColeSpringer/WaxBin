@@ -23,7 +23,7 @@ func TestPruneOrganizeJournalTakesWholeJobs(t *testing.T) {
 		{"j5", "unsettled", "committed", old}, {"j6", "unsettled", "planned", old},
 	}
 	for _, r := range rows {
-		if _, err := st.write.ExecContext(ctx, `INSERT INTO organize_journal(pid, job_pid, src, dst, state, created_at)
+		if _, err := st.wdb().ExecContext(ctx, `INSERT INTO organize_journal(pid, job_pid, src, dst, state, created_at)
 			VALUES (?, ?, 'a', 'b', ?, ?)`, r.pid, r.job, r.state, r.at); err != nil {
 			t.Fatal(err)
 		}

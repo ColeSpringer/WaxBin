@@ -19,7 +19,7 @@ import (
 // creditedArtists returns an item's RoleArtist credits in credited order.
 func creditedArtists(t *testing.T, st *Store, itemPID model.PID) []string {
 	t.Helper()
-	rows, err := st.read.QueryContext(context.Background(), `SELECT a.name
+	rows, err := st.rdb().QueryContext(context.Background(), `SELECT a.name
 		FROM item_contributor ic
 		JOIN artist a ON a.id = ic.artist_id
 		JOIN playable_item pi ON pi.id = ic.item_id
@@ -46,7 +46,7 @@ func creditedArtists(t *testing.T, st *Store, itemPID model.PID) []string {
 func trackArtistName(t *testing.T, st *Store, itemPID model.PID) string {
 	t.Helper()
 	var name string
-	err := st.read.QueryRowContext(context.Background(), `SELECT COALESCE(a.name,'')
+	err := st.rdb().QueryRowContext(context.Background(), `SELECT COALESCE(a.name,'')
 		FROM track tr JOIN playable_item pi ON pi.id = tr.item_id
 		LEFT JOIN artist a ON a.id = tr.artist_id WHERE pi.pid = ?`, string(itemPID)).Scan(&name)
 	if err != nil {
@@ -336,7 +336,7 @@ func TestSetArtistCreditRefreshesTheOutgoingArtistRollup(t *testing.T) {
 		artist: "Old Name", albumArt: "Old Name", album: "Album", durationMS: 100,
 	})
 	// Strip the credit rows to reproduce a pre-Phase-6 catalog.
-	if _, err := st.write.ExecContext(ctx, "DELETE FROM item_contributor WHERE role = 'artist'"); err != nil {
+	if _, err := st.wdb().ExecContext(ctx, "DELETE FROM item_contributor WHERE role = 'artist'"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -620,11 +620,11 @@ func TestReleaseGroupAdoptsANewPrimaryArtist(t *testing.T) {
 	putTrack(t, st, lib.ID, spec)
 
 	// Reproduce the pre-split shape: a combined artist holding the group.
-	if _, err := st.write.ExecContext(ctx,
+	if _, err := st.wdb().ExecContext(ctx,
 		"INSERT INTO artist(pid, name, sort_key, match_key) VALUES ('OLD','Jay-Z feat. Alicia Keys','x','jay-z feat. alicia keys')"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.write.ExecContext(ctx,
+	if _, err := st.wdb().ExecContext(ctx,
 		"UPDATE release_group SET primary_artist_id = (SELECT id FROM artist WHERE pid='OLD')"); err != nil {
 		t.Fatal(err)
 	}

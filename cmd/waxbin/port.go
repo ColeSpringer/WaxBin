@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 
 	"github.com/colespringer/waxbin"
+	"github.com/colespringer/waxbin/internal/lockwait"
 	"github.com/colespringer/waxbin/port"
 	"github.com/colespringer/waxbin/waxerr"
 	"github.com/spf13/cobra"
@@ -107,7 +108,7 @@ func newRestoreCmd(g *globals) *cobra.Command {
 			// show it held a moment longer, so a hand-off probes with the open's retry.
 			probe := func() error { return ensureNoCatalogOwner(cfg.DBPath) }
 			if g.maintConn != nil {
-				err = retryConflict(ctx(cmd), probe)
+				err = lockwait.Retry(ctx(cmd), "cli.restore", probe)
 			} else {
 				err = probe()
 			}

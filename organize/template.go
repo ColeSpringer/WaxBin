@@ -71,13 +71,17 @@ func (f fieldVal) empty() bool {
 	return f.s == ""
 }
 
+// maxPadWidth caps a {field:0N} width at what one path segment holds, since the segment
+// is cut there anyway.
+const maxPadWidth = maxSegmentBytes
+
 func (f fieldVal) format(spec string) string {
 	if !f.isNum {
 		return f.s
 	}
 	if len(spec) > 0 && spec[0] == '0' {
 		if width, err := strconv.Atoi(spec); err == nil {
-			return fmt.Sprintf("%0*d", width, f.n)
+			return fmt.Sprintf("%0*d", min(width, maxPadWidth), f.n)
 		}
 	}
 	return strconv.Itoa(f.n)
@@ -181,11 +185,13 @@ func pubDateField(ns int64) string {
 // renderTemplate renders a template string against a field set. The grammar:
 //
 //	{field}        substitute the field (required: an empty value renders its
-//	               unknown bucket); {field:0N} zero-pads a number.
+//	               unknown bucket); {field:0N} zero-pads a number to N digits,
+//	               at most 255.
 //	{field?}       optional: an empty value renders nothing (no bucket).
 //	<...>          a conditional group: rendered only when at least one field
 //	               token inside resolves to a non-empty value; otherwise dropped.
-//	               Groups may nest. Fields inside a group are implicitly optional.
+//	               Groups may nest, up to 32 deep. Fields inside a group are
+//	               implicitly optional.
 //	\{ \} \< \> \\ a literal '{', '}', '<', '>', or '\'.
 func renderTemplate(tmpl string, fields map[string]fieldVal) (string, error) {
 	return renderWith(tmpl, fields, nil)
@@ -194,17 +200,22 @@ func renderTemplate(tmpl string, fields map[string]fieldVal) (string, error) {
 // renderWith is renderTemplate, noting in buckets (when not nil) each field rendered as
 // its unknown bucket.
 func renderWith(tmpl string, fields map[string]fieldVal, buckets map[string]bool) (string, error) {
-	text, _, _, err := renderNodes(tmpl, 0, false, fields, buckets)
+	text, _, _, err := renderNodes(tmpl, 0, 0, fields, buckets)
 	if err != nil {
 		return "", err
 	}
 	return text, nil
 }
 
-// renderNodes renders from tmpl[i] until end (top level) or the matching '>'
-// (inside a group). It returns the rendered text, whether any field token
+// maxGroupDepth bounds how deep '<' groups nest. Each level is one frame of the
+// renderer, and a layout has no use for more than a handful.
+const maxGroupDepth = 32
+
+// renderNodes renders from tmpl[i] until end (top level, depth 0) or the matching '>'
+// (inside a group at depth). It returns the rendered text, whether any field token
 // contributed a value (which decides a group's survival), and the next index.
-func renderNodes(tmpl string, i int, inGroup bool, fields map[string]fieldVal, buckets map[string]bool) (string, bool, int, error) {
+func renderNodes(tmpl string, i, depth int, fields map[string]fieldVal, buckets map[string]bool) (string, bool, int, error) {
+	inGroup := depth > 0
 	var b strings.Builder
 	anyVal := false
 	for i < len(tmpl) {
@@ -224,7 +235,11 @@ func renderNodes(tmpl string, i int, inGroup bool, fields map[string]fieldVal, b
 			b.WriteByte('>') // a stray '>' at top level is a literal
 			i++
 		case '<':
-			inner, innerHas, ni, err := renderNodes(tmpl, i+1, true, fields, buckets)
+			if depth >= maxGroupDepth {
+				return "", false, 0, waxerr.New(waxerr.CodeInvalid, "organize.render",
+					fmt.Sprintf("'<' groups nest deeper than %d in template", maxGroupDepth))
+			}
+			inner, innerHas, ni, err := renderNodes(tmpl, i+1, depth+1, fields, buckets)
 			if err != nil {
 				return "", false, 0, err
 			}

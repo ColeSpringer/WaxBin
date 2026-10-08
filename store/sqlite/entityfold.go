@@ -102,7 +102,7 @@ func (s *Store) EntityFolds(ctx context.Context, et model.MergeEntity) ([]model.
 	if et == model.MergeAlbum || et == model.MergeReleaseGroup {
 		name = "title"
 	}
-	rows, err := s.read.QueryContext(ctx,
+	rows, err := s.rdb().QueryContext(ctx,
 		"SELECT f.key, f.entity_pid, e."+name+", f.created_at FROM entity_fold f JOIN "+string(et)+
 			" e ON e.pid = f.entity_pid WHERE f.entity_type = ? ORDER BY f.key", string(et))
 	if err != nil {

@@ -17,7 +17,7 @@ import (
 // the batch and merge paths interpolate a table name on.
 func allEntityPIDs(t *testing.T, st *Store, kind read.EntityKind) []model.PID {
 	t.Helper()
-	rows, err := st.read.QueryContext(context.Background(), "SELECT pid FROM "+string(kind))
+	rows, err := st.rdb().QueryContext(context.Background(), "SELECT pid FROM "+string(kind))
 	if err != nil {
 		t.Fatalf("list %s pids: %v", kind, err)
 	}
@@ -41,7 +41,7 @@ func allEntityPIDs(t *testing.T, st *Store, kind read.EntityKind) []model.PID {
 func entityPIDByName(t *testing.T, st *Store, table, nameCol, name string) model.PID {
 	t.Helper()
 	var pid string
-	if err := st.read.QueryRowContext(context.Background(),
+	if err := st.rdb().QueryRowContext(context.Background(),
 		"SELECT pid FROM "+table+" WHERE "+nameCol+" = ?", name).Scan(&pid); err != nil {
 		t.Fatalf("pid of %s %q: %v", table, name, err)
 	}
@@ -328,7 +328,7 @@ func TestEntityNames(t *testing.T) {
 		t.Errorf("artist names by match key = %v (err %v), want Radiohead alone", got, err)
 	}
 	var key string
-	if err := st.read.QueryRowContext(ctx, "SELECT match_key FROM album WHERE pid = ?", string(album)).Scan(&key); err != nil {
+	if err := st.rdb().QueryRowContext(ctx, "SELECT match_key FROM album WHERE pid = ?", string(album)).Scan(&key); err != nil {
 		t.Fatal(err)
 	}
 	if got, err := st.AlbumTitles(ctx, []string{key, "al:nothing"}); err != nil || len(got) != 1 || got[key] != "OK Computer" {

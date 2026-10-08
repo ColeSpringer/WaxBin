@@ -63,9 +63,9 @@ func (s *Store) BrowsePage(ctx context.Context, list read.DiscoveryList, opt rea
 	var rows *sql.Rows
 	if list == read.ListRandom {
 		// A shuffle inlines its seed, so its text is new for every seed.
-		rows, err = s.read.QueryContext(ctx, stmt, args...)
+		rows, err = s.rdb().QueryContext(ctx, stmt, args...)
 	} else {
-		rows, err = s.rstmts.queryContext(ctx, s.read, stmt, args...)
+		rows, err = s.rstmts.queryContext(ctx, s.rdb(), stmt, args...)
 	}
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
@@ -343,7 +343,7 @@ func (s *Store) browseSpecFor(ctx context.Context, list read.DiscoveryList, opt 
 // inner semantics and drop every never-played item. The cost is one extra
 // primary-key seek per candidate row; the user id is resolved once and shared.
 func (s *Store) playBrowseSpec(ctx context.Context, list read.DiscoveryList, userPID model.PID, op string) (browseSpec, error) {
-	userID, err := userIDByPID(ctx, s.read, userPID, op)
+	userID, err := userIDByPID(ctx, s.rdb(), userPID, op)
 	if err != nil {
 		return browseSpec{}, err
 	}
@@ -379,7 +379,7 @@ func (s *Store) genreIDByPID(ctx context.Context, pid model.PID, op string) (int
 		return 0, waxerr.New(waxerr.CodeInvalid, op, "by-genre browse requires a genre pid")
 	}
 	var id int64
-	err := s.read.QueryRowContext(ctx, "SELECT id FROM genre WHERE pid = ?", string(pid)).Scan(&id)
+	err := s.rdb().QueryRowContext(ctx, "SELECT id FROM genre WHERE pid = ?", string(pid)).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, waxerr.New(waxerr.CodeNotFound, op, "no such genre: "+string(pid))
 	}

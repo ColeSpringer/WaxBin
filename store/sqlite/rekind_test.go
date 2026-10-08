@@ -147,7 +147,7 @@ func TestRekindTrackToBookKeepsTheItem(t *testing.T) {
 		t.Errorf("genre lock = %v, want it kept", fields["genre"])
 	}
 	owed := map[string]bool{}
-	rowsOwed, err := st.read.QueryContext(ctx, `SELECT tag_key FROM file_diagnostic WHERE code = 'tag_write_owed'`)
+	rowsOwed, err := st.rdb().QueryContext(ctx, `SELECT tag_key FROM file_diagnostic WHERE code = 'tag_write_owed'`)
 	if err != nil {
 		t.Fatalf("owed rows: %v", err)
 	}

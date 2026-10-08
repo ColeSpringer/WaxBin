@@ -98,7 +98,7 @@ func TestPutAnalysisLeavesTheDiagnosticStampAlone(t *testing.T) {
 	ctx := context.Background()
 	st, lib := entityFixture(t)
 	r := putTrack(t, st, lib.ID, trackSpec{path: "/lib/a.flac", essence: "e1", content: "c1", title: "S", artist: "X", album: "Al"})
-	if _, err := st.write.ExecContext(ctx, "UPDATE file SET diag_version = 0 WHERE pid = ?", string(r.FilePID)); err != nil {
+	if _, err := st.wdb().ExecContext(ctx, "UPDATE file SET diag_version = 0 WHERE pid = ?", string(r.FilePID)); err != nil {
 		t.Fatal(err)
 	}
 	putAnalyzed(t, st, r.FilePID, "e1", true, model.FileDiagnostic{
@@ -203,7 +203,7 @@ func TestAnalyzeVerdictFollowsTheEssence(t *testing.T) {
 
 	putAnalyzed(t, st, r.FilePID, "e2", false)
 	var stored int
-	if err := st.read.QueryRowContext(ctx,
+	if err := st.rdb().QueryRowContext(ctx,
 		"SELECT COUNT(*) FROM file_diagnostic WHERE origin = 'analyze'").Scan(&stored); err != nil {
 		t.Fatal(err)
 	}

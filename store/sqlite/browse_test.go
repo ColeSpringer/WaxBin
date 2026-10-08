@@ -268,7 +268,7 @@ type planNode struct {
 
 func explainPlanTree(t *testing.T, st *Store, stmt string, args ...any) []planNode {
 	t.Helper()
-	rows, err := st.read.QueryContext(context.Background(), "EXPLAIN QUERY PLAN "+stmt, args...)
+	rows, err := st.rdb().QueryContext(context.Background(), "EXPLAIN QUERY PLAN "+stmt, args...)
 	if err != nil {
 		t.Fatalf("explain: %v", err)
 	}
@@ -352,7 +352,7 @@ func TestBrowseRandomSortsNarrowRows(t *testing.T) {
 	}
 
 	var want []string
-	rows, err := st.read.QueryContext(ctx, "SELECT title FROM playable_item ORDER BY wb_shuffle(42, pid), pid")
+	rows, err := st.rdb().QueryContext(ctx, "SELECT title FROM playable_item ORDER BY wb_shuffle(42, pid), pid")
 	if err != nil {
 		t.Fatalf("seed order: %v", err)
 	}
@@ -428,7 +428,7 @@ func TestBrowseMostPlayedSortsTiesAsNarrowRows(t *testing.T) {
 	}
 
 	var want []string
-	rows, err := st.read.QueryContext(ctx, `SELECT pi.title FROM play_state ps JOIN playable_item pi ON pi.id = ps.item_id
+	rows, err := st.rdb().QueryContext(ctx, `SELECT pi.title FROM play_state ps JOIN playable_item pi ON pi.id = ps.item_id
 		WHERE ps.play_count > 0 ORDER BY ps.play_count DESC, pi.pid DESC`)
 	if err != nil {
 		t.Fatal(err)

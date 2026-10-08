@@ -11,7 +11,7 @@ import (
 
 // This file holds the read primitives behind the cross-catalog sharing feature
 // (facade ResolveRefWith/ExportPlaylistRefs). Every method is a pure read on the read
-// pool (s.read): it writes no change_log rows and is safe on a read-only Library. None of
+// pool: it writes no change_log rows and is safe on a read-only Library. None of
 // them belongs to the model.Catalog port. They are extra methods on *Store that the
 // facade calls directly, so the port stays as it is and the var _ model.Catalog assertion
 // still holds.
@@ -29,7 +29,7 @@ func (s *Store) ItemsByEssence(ctx context.Context, essence string) ([]*model.It
 	if essence == "" {
 		return nil, nil
 	}
-	rows, err := s.read.QueryContext(ctx, itemSelect+` WHERE pi.id IN (
+	rows, err := s.rdb().QueryContext(ctx, itemSelect+` WHERE pi.id IN (
 		SELECT itf.item_id FROM item_file itf
 		JOIN file f2 ON f2.id = itf.file_id
 		WHERE f2.essence_hash = ?)`, essence)
@@ -64,7 +64,7 @@ func (s *Store) ItemsByContentHash(ctx context.Context, hash string) ([]*model.I
 	if hash == "" {
 		return nil, nil
 	}
-	rows, err := s.read.QueryContext(ctx, itemSelect+` WHERE pi.id IN (
+	rows, err := s.rdb().QueryContext(ctx, itemSelect+` WHERE pi.id IN (
 		SELECT itf.item_id FROM item_file itf
 		JOIN file f2 ON f2.id = itf.file_id
 		WHERE f2.content_hash = ?)`, hash)
@@ -84,7 +84,7 @@ func (s *Store) ItemsByRecordingMBID(ctx context.Context, mbid string) ([]*model
 	if mbid == "" {
 		return nil, nil
 	}
-	rows, err := s.read.QueryContext(ctx,
+	rows, err := s.rdb().QueryContext(ctx,
 		itemSelect+" WHERE pi.kind = 'track' AND t.mbid = ? COLLATE NOCASE ORDER BY pi.pid", mbid)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
@@ -107,7 +107,7 @@ func (s *Store) ItemsByArtistKey(ctx context.Context, artistMatchKey string) ([]
 	if artistMatchKey == "" {
 		return nil, nil
 	}
-	rows, err := s.read.QueryContext(ctx,
+	rows, err := s.rdb().QueryContext(ctx,
 		itemSelect+" WHERE pi.kind = 'track' AND t.artist_id = "+artistByKeySQL, artistMatchKey)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
@@ -126,7 +126,7 @@ func (s *Store) ItemsByBookIdent(ctx context.Context, mbid, asin, isbn string) (
 	if mbid == "" && asin == "" && isbn == "" {
 		return nil, nil
 	}
-	rows, err := s.read.QueryContext(ctx,
+	rows, err := s.rdb().QueryContext(ctx,
 		itemSelect+` WHERE pi.kind = 'book' AND (
 			 (? <> '' AND bk.mbid = ? COLLATE NOCASE)
 		  OR (? <> '' AND bk.asin = ? COLLATE NOCASE)
@@ -146,7 +146,7 @@ func (s *Store) ItemsByAuthorKey(ctx context.Context, authorMatchKey string) ([]
 	if authorMatchKey == "" {
 		return nil, nil
 	}
-	rows, err := s.read.QueryContext(ctx,
+	rows, err := s.rdb().QueryContext(ctx,
 		itemSelect+" WHERE pi.kind = 'book' AND bk.author_id = "+artistByKeySQL, authorMatchKey)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
@@ -190,7 +190,7 @@ func (s *Store) ItemIdentities(ctx context.Context, pids []model.PID) (map[model
 		for i, pid := range chunk {
 			args[i] = string(pid)
 		}
-		rows, err := s.read.QueryContext(ctx, identitySelect+" WHERE pi.pid IN "+placeholders(len(chunk)), args...)
+		rows, err := s.rdb().QueryContext(ctx, identitySelect+" WHERE pi.pid IN "+placeholders(len(chunk)), args...)
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
@@ -282,7 +282,7 @@ WHERE ct.term IN ` + placeholders(len(terms)) + `
 GROUP BY ct.file_id
 HAVING shared >= ?
 ORDER BY shared DESC`
-	rows, err := s.read.QueryContext(ctx, stmt, args...)
+	rows, err := s.rdb().QueryContext(ctx, stmt, args...)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}

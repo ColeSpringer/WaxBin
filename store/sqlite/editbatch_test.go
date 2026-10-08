@@ -32,7 +32,7 @@ func TestEditItemsFieldsPerItemMaps(t *testing.T) {
 	}{p1: {"Opener", 1}, p2: {"Closer", 9}} {
 		var title string
 		var no int
-		if err := st.read.QueryRowContext(ctx,
+		if err := st.rdb().QueryRowContext(ctx,
 			`SELECT pi.title, t.track_no FROM playable_item pi JOIN track t ON t.item_id=pi.id WHERE pi.pid=?`,
 			string(pid)).Scan(&title, &no); err != nil {
 			t.Fatalf("read %s: %v", pid, err)
@@ -62,7 +62,7 @@ func TestEditItemsFieldsAtomic(t *testing.T) {
 		t.Fatalf("bad field = %v, want CodeInvalid", err)
 	}
 	var title string
-	if err := st.read.QueryRowContext(ctx,
+	if err := st.rdb().QueryRowContext(ctx,
 		"SELECT title FROM playable_item WHERE pid=?", string(p1)).Scan(&title); err != nil {
 		t.Fatal(err)
 	}
@@ -77,7 +77,7 @@ func TestEditItemsFieldsAtomic(t *testing.T) {
 	if !waxerr.Is(err, waxerr.CodeNotFound) {
 		t.Fatalf("missing pid = %v, want CodeNotFound", err)
 	}
-	if err := st.read.QueryRowContext(ctx,
+	if err := st.rdb().QueryRowContext(ctx,
 		"SELECT title FROM playable_item WHERE pid=?", string(p1)).Scan(&title); err != nil {
 		t.Fatal(err)
 	}
@@ -113,8 +113,8 @@ func TestEditItemsFieldsSkipLocked(t *testing.T) {
 		t.Fatalf("edited=%v skipped=%v, want p2 edited, p1 skipped", res.Edited, res.Skipped)
 	}
 	var g1, g2 string
-	st.read.QueryRowContext(ctx, "SELECT t.genre FROM track t JOIN playable_item pi ON pi.id=t.item_id WHERE pi.pid=?", string(p1)).Scan(&g1)
-	st.read.QueryRowContext(ctx, "SELECT t.genre FROM track t JOIN playable_item pi ON pi.id=t.item_id WHERE pi.pid=?", string(p2)).Scan(&g2)
+	st.rdb().QueryRowContext(ctx, "SELECT t.genre FROM track t JOIN playable_item pi ON pi.id=t.item_id WHERE pi.pid=?", string(p1)).Scan(&g1)
+	st.rdb().QueryRowContext(ctx, "SELECT t.genre FROM track t JOIN playable_item pi ON pi.id=t.item_id WHERE pi.pid=?", string(p2)).Scan(&g2)
 	if g1 != "Locked" || g2 != "Blues" {
 		t.Errorf("genres = %q/%q, want Locked/Blues", g1, g2)
 	}
@@ -168,7 +168,7 @@ func TestEditItemsFieldsMixedKinds(t *testing.T) {
 	// The track credit and the book author were the same entity, and both moved, so
 	// it was rewritten in place rather than split.
 	var name, gotPID string
-	if err := st.read.QueryRowContext(ctx,
+	if err := st.rdb().QueryRowContext(ctx,
 		"SELECT name, pid FROM artist WHERE id=?", alphaID).Scan(&name, &gotPID); err != nil {
 		t.Fatalf("read artist: %v", err)
 	}
@@ -180,12 +180,12 @@ func TestEditItemsFieldsMixedKinds(t *testing.T) {
 		t.Errorf("shared book author_id = %d, want the kept entity %d", id, alphaID)
 	}
 	var artist string
-	if err := st.read.QueryRowContext(ctx,
+	if err := st.rdb().QueryRowContext(ctx,
 		"SELECT t.artist FROM track t JOIN playable_item pi ON pi.id=t.item_id WHERE pi.pid=?", string(p1)).Scan(&artist); err != nil {
 		t.Fatal(err)
 	}
 	var author, isbn string
-	if err := st.read.QueryRowContext(ctx,
+	if err := st.rdb().QueryRowContext(ctx,
 		"SELECT author, isbn FROM book b JOIN playable_item pi ON pi.id=b.item_id WHERE pi.pid=?", string(bres.ItemPID)).Scan(&author, &isbn); err != nil {
 		t.Fatal(err)
 	}

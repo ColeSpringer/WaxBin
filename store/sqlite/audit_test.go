@@ -48,7 +48,7 @@ func TestDuplicateArtistsByMBID(t *testing.T) {
 		path: "/lib/b/2.flac", essence: "e2", content: "c2", title: "Two", artist: "weezer band", album: "B",
 	})
 	// Enrichment resolved both heuristic rows to one MBID (a collision left for merge).
-	if _, err := st.write.ExecContext(ctx, "UPDATE artist SET mbid='mb-weezer' WHERE name IN ('Weezer','weezer band')"); err != nil {
+	if _, err := st.wdb().ExecContext(ctx, "UPDATE artist SET mbid='mb-weezer' WHERE name IN ('Weezer','weezer band')"); err != nil {
 		t.Fatal(err)
 	}
 	sets, err := st.DuplicateArtists(ctx)
@@ -80,7 +80,7 @@ func TestDuplicateAlbumsSurvivorHasMostTracks(t *testing.T) {
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/a1/2.flac", essence: "e2", content: "c2", title: "Two", artist: "A", albumArt: "A", album: "Hits"})
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/a2/1.flac", essence: "e3", content: "c3", title: "Three", artist: "A", albumArt: "A", album: "Hits"})
 	// Enrichment resolved both album rows to one release id (the collision merge fixes).
-	if _, err := st.write.ExecContext(ctx, "UPDATE album SET mbid='mb-hits'"); err != nil {
+	if _, err := st.wdb().ExecContext(ctx, "UPDATE album SET mbid='mb-hits'"); err != nil {
 		t.Fatal(err)
 	}
 	sets, err := st.DuplicateAlbums(ctx)
@@ -265,7 +265,7 @@ func TestDuplicateAlbumsByMBIDPutsTheLiveAlbumFirst(t *testing.T) {
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	replacedRipFixture(t, st, lib.ID)
-	if _, err := st.write.ExecContext(ctx, "UPDATE album SET mbid = 'eeeeeeee-0000-4000-8000-000000000001' WHERE match_key LIKE '%hits flac' OR match_key LIKE '%a hits'"); err != nil {
+	if _, err := st.wdb().ExecContext(ctx, "UPDATE album SET mbid = 'eeeeeeee-0000-4000-8000-000000000001' WHERE match_key LIKE '%hits flac' OR match_key LIKE '%a hits'"); err != nil {
 		t.Fatal(err)
 	}
 	sets, err := st.DuplicateAlbums(ctx)
@@ -292,7 +292,7 @@ func TestDuplicateAlbumsNameSetLeavesOutTheIDPairsLoser(t *testing.T) {
 		putTrack(t, st, lib.ID, trackSpec{path: folder + "/" + n + ".flac", essence: "o" + n, content: "oc" + n,
 			title: "T" + n, artist: "A", albumArt: "A", album: "Hits"})
 	}
-	if _, err := st.write.ExecContext(ctx, "UPDATE album SET mbid = 'ffffffff-0000-4000-8000-000000000001' WHERE match_key NOT LIKE '%rip'"); err != nil {
+	if _, err := st.wdb().ExecContext(ctx, "UPDATE album SET mbid = 'ffffffff-0000-4000-8000-000000000001' WHERE match_key NOT LIKE '%rip'"); err != nil {
 		t.Fatal(err)
 	}
 	sets, err := st.DuplicateAlbums(ctx)
@@ -325,7 +325,7 @@ func TestDuplicateAlbumsByNameReadsAGroupIDFromItsColumn(t *testing.T) {
 		artist: "A", albumArt: "A", album: "Greatest Hits", mbRelease: "bbbbbbbb-0000-4000-8000-000000000009"})
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/A/GH Two/1.flac", essence: "e2", content: "c2", title: "Two",
 		artist: "A", albumArt: "A", album: "Greatest Hits", mbReleaseGroup: "cccccccc-0000-4000-8000-000000000009"})
-	if _, err := st.write.ExecContext(ctx, `UPDATE release_group SET mbid = 'cccccccc-0000-4000-8000-000000000008'
+	if _, err := st.wdb().ExecContext(ctx, `UPDATE release_group SET mbid = 'cccccccc-0000-4000-8000-000000000008'
 		WHERE match_key NOT LIKE 'mbid:%'`); err != nil {
 		t.Fatal(err)
 	}
@@ -516,14 +516,14 @@ func TestCountItemsMissingReplayGainExcludesPodcasts(t *testing.T) {
 	// A downloaded podcast episode lives in the internal podcast library, which the
 	// analyze pass skips, so it must not be counted as missing ReplayGain. That
 	// finding would be unfixable.
-	res, err := st.write.ExecContext(ctx,
+	res, err := st.wdb().ExecContext(ctx,
 		"INSERT INTO library(pid, root, display_root, mode, profile, created_at) VALUES (?,?,?,'podcast','waxbin-native',1)",
 		string(model.NewPID()), []byte("/pod"), "/pod")
 	if err != nil {
 		t.Fatal(err)
 	}
 	podLib, _ := res.LastInsertId()
-	if _, err := st.write.ExecContext(ctx,
+	if _, err := st.wdb().ExecContext(ctx,
 		`INSERT INTO file(pid, library_id, path, display_path, rel_path, kind, size, mtime_ns,
 			content_hash, essence_hash, scan_state, first_seen, last_seen)
 		 VALUES (?,?,?,?,?, 'audio', 1, 1, 'pc', 'pe', 'indexed', 1, 1)`,
@@ -693,20 +693,20 @@ func TestDuplicateEntitiesByEffectiveMBID(t *testing.T) {
 		path: "/lib/Band/Album/01.flac", essence: "e1", content: "c1", title: "One",
 		artist: "Band", album: "Album",
 	})
-	if _, err := st.write.ExecContext(ctx,
+	if _, err := st.wdb().ExecContext(ctx,
 		"UPDATE album SET mbid=? WHERE title='Album'", relMBID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.write.ExecContext(ctx,
+	if _, err := st.wdb().ExecContext(ctx,
 		"UPDATE release_group SET mbid=? WHERE title='Album'", rgMBID); err != nil {
 		t.Fatal(err)
 	}
 	// The mbid-keyed twin a pre-adoption build would have forked.
-	if _, err := st.write.ExecContext(ctx, `INSERT INTO release_group(pid, title, sort_key, type, match_key)
+	if _, err := st.wdb().ExecContext(ctx, `INSERT INTO release_group(pid, title, sort_key, type, match_key)
 		VALUES ('rg-twin','Album','album','album',?)`, "mbid:"+rgMBID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.write.ExecContext(ctx, `INSERT INTO album(pid, title, sort_key, match_key)
+	if _, err := st.wdb().ExecContext(ctx, `INSERT INTO album(pid, title, sort_key, match_key)
 		VALUES ('al-twin','Album','album',?)`, "mbid:"+relMBID); err != nil {
 		t.Fatal(err)
 	}

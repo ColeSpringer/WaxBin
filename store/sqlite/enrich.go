@@ -227,7 +227,7 @@ func (s *Store) ArtistsNeedingEnrichment(ctx context.Context, opts model.EnrichQ
 		WHERE a.id > ? AND ` + enrichBacksFilter(enrichArtistBacksItems, ids) + ` AND ` + notEnriched(model.EnrichArtistType, "a.id", opts) + scopeClause + `
 		ORDER BY a.id LIMIT ?`
 	args := append(append([]any{afterID}, scopeArgs...), limitOr(limit))
-	rows, err := s.read.QueryContext(ctx, stmt, args...)
+	rows, err := s.rdb().QueryContext(ctx, stmt, args...)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
@@ -281,7 +281,7 @@ func (s *Store) ReleaseGroupsNeedingEnrichment(ctx context.Context, opts model.E
 		WHERE rg.id > ? AND ` + enrichBacksFilter(enrichRGBacksItems, ids) + ` AND ` + notEnriched(model.EnrichReleaseGroupType, "rg.id", opts) + scopeClause + `
 		ORDER BY rg.id LIMIT ?`
 	args := append(append([]any{afterID}, scopeArgs...), limitOr(limit))
-	rows, err := s.read.QueryContext(ctx, stmt, args...)
+	rows, err := s.rdb().QueryContext(ctx, stmt, args...)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
@@ -323,7 +323,7 @@ func (s *Store) BooksNeedingEnrichment(ctx context.Context, opts model.EnrichQue
 		WHERE b.item_id > ? AND b.mbid IS NOT NULL AND b.mbid <> '' AND ` + notEnriched(model.EnrichBookType, "b.item_id", opts) + scopeClause + `
 		ORDER BY b.item_id LIMIT ?`
 	args := append(append([]any{afterID}, scopeArgs...), limitOr(limit))
-	rows, err := s.read.QueryContext(ctx, stmt, args...)
+	rows, err := s.rdb().QueryContext(ctx, stmt, args...)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
@@ -368,7 +368,7 @@ func (s *Store) AlbumsNeedingReleaseMatch(ctx context.Context, opts model.Enrich
 		  AND ` + notEnriched(model.EnrichAlbumType, "al.id", opts) + scopeClause + `
 		ORDER BY al.id LIMIT ?`
 	args := append(append([]any{afterID}, scopeArgs...), limitOr(limit))
-	rows, err := s.read.QueryContext(ctx, stmt, args...)
+	rows, err := s.rdb().QueryContext(ctx, stmt, args...)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
@@ -486,7 +486,7 @@ func (s *Store) CountEntitiesNeedingEnrichment(ctx context.Context, q model.Enri
 	var total int
 	for _, cq := range queries {
 		var n int
-		if err := s.read.QueryRowContext(ctx, cq.stmt, cq.args...).Scan(&n); err != nil {
+		if err := s.rdb().QueryRowContext(ctx, cq.stmt, cq.args...).Scan(&n); err != nil {
 			return 0, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		total += n
@@ -977,7 +977,7 @@ func (s *Store) AlbumsNeedingArt(ctx context.Context, opts model.EnrichQueueOpti
 		  AND ` + albumArtNeededPredicate(slots, opts) + scopeClause + `
 		ORDER BY al.id LIMIT ?`
 	args := append(append([]any{afterID}, scopeArgs...), limitOr(limit))
-	rows, err := s.read.QueryContext(ctx, stmt, args...)
+	rows, err := s.rdb().QueryContext(ctx, stmt, args...)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
@@ -1098,7 +1098,7 @@ func (s *Store) ArtistsNeedingArtBackfill(ctx context.Context, opts model.Enrich
 		  AND ` + artistArtNeededPredicate(slots, opts) + scopeClause + `
 		ORDER BY a.id LIMIT ?`
 	args := append(append([]any{afterID}, scopeArgs...), limitOr(limit))
-	rows, err := s.read.QueryContext(ctx, stmt, args...)
+	rows, err := s.rdb().QueryContext(ctx, stmt, args...)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
@@ -1316,7 +1316,7 @@ func (s *Store) ReleaseGroupsNeedingArt(ctx context.Context, opts model.EnrichQu
 		  AND ` + groupArtNeededPredicate(slots, opts) + scopeClause + `
 		ORDER BY rg.id LIMIT ?`
 	args := append(append([]any{afterID}, scopeArgs...), limitOr(limit))
-	rows, err := s.read.QueryContext(ctx, stmt, args...)
+	rows, err := s.rdb().QueryContext(ctx, stmt, args...)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
@@ -1761,7 +1761,7 @@ func (s *Store) ItemsNeedingLyrics(ctx context.Context, opts model.EnrichQueueOp
 		  AND ` + notEnriched(enrichEntityLyrics, "pi.id", opts) + scopeClause + `
 		ORDER BY pi.id LIMIT ?`
 	args := append(append([]any{afterID}, scopeArgs...), limitOr(limit))
-	rows, err := s.read.QueryContext(ctx, stmt, args...)
+	rows, err := s.rdb().QueryContext(ctx, stmt, args...)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
@@ -1884,7 +1884,7 @@ const (
 func (s *Store) ExpireDeferredLookups(ctx context.Context, cutoff int64) (int64, error) {
 	const op = "store.ExpireDeferredLookups"
 	var owed int
-	if err := s.read.QueryRowContext(ctx, owedLookupsExist).Scan(&owed); err != nil {
+	if err := s.rdb().QueryRowContext(ctx, owedLookupsExist).Scan(&owed); err != nil {
 		return 0, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
 	if owed == 0 {
@@ -1924,7 +1924,7 @@ func (s *Store) ExpiredMissesExist(ctx context.Context, cutoff int64) (bool, err
 		return false, nil
 	}
 	var found int
-	err := s.read.QueryRowContext(ctx,
+	err := s.rdb().QueryRowContext(ctx,
 		"SELECT EXISTS(SELECT 1 FROM entity_enrichment WHERE owed = 0 AND matched = 0 AND enriched_at <= ?)",
 		cutoff).Scan(&found)
 	if err != nil {
@@ -1936,7 +1936,7 @@ func (s *Store) ExpiredMissesExist(ctx context.Context, cutoff int64) (bool, err
 // EnrichmentCacheGet returns a cached provider payload by key.
 func (s *Store) EnrichmentCacheGet(ctx context.Context, key string) ([]byte, bool, error) {
 	var payload []byte
-	err := s.read.QueryRowContext(ctx, "SELECT payload FROM enrichment_cache WHERE cache_key = ?", key).Scan(&payload)
+	err := s.rdb().QueryRowContext(ctx, "SELECT payload FROM enrichment_cache WHERE cache_key = ?", key).Scan(&payload)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, false, nil
 	}
@@ -1967,7 +1967,7 @@ func (s *Store) EnrichmentCoverage(ctx context.Context) (model.EnrichmentCoverag
 	// backfills, the two fields walks) are fill-when-empty side channels, and the WHERE
 	// excludes them; the lyrics marker is read again below, per track. An identity owed a
 	// rider still matched, so it counts.
-	rows, err := s.read.QueryContext(ctx,
+	rows, err := s.rdb().QueryContext(ctx,
 		`SELECT entity_type, COUNT(*), COALESCE(SUM(matched),0) FROM entity_enrichment
 		 WHERE entity_type IN ('artist','release_group','book') GROUP BY entity_type`)
 	if err != nil {
@@ -1995,7 +1995,7 @@ func (s *Store) EnrichmentCoverage(ctx context.Context) (model.EnrichmentCoverag
 	}
 	// The denominator is every present track, not the lyrics phase's own queue, which
 	// also wants a title and an artist.
-	if err := s.read.QueryRowContext(ctx,
+	if err := s.rdb().QueryRowContext(ctx,
 		`SELECT COUNT(*), COUNT(ly.item_id),
 		        COALESCE(SUM(CASE WHEN ly.item_id IS NULL AND ee.owed = 0 AND ee.matched = 0 THEN 1 ELSE 0 END), 0)
 		 FROM playable_item pi
@@ -2017,7 +2017,7 @@ func (s *Store) EnrichScopeForItem(ctx context.Context, itemPID model.PID) (*mod
 	const op = "store.EnrichScopeForItem"
 	var itemID int64
 	var kind string
-	err := s.read.QueryRowContext(ctx,
+	err := s.rdb().QueryRowContext(ctx,
 		"SELECT id, kind FROM playable_item WHERE pid = ?", string(itemPID)).Scan(&itemID, &kind)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, waxerr.New(waxerr.CodeNotFound, op, "no such item: "+string(itemPID))
@@ -2029,7 +2029,7 @@ func (s *Store) EnrichScopeForItem(ctx context.Context, itemPID model.PID) (*mod
 	switch model.Kind(kind) {
 	case model.KindTrack:
 		var artistID, albumArtistID, albumID sql.NullInt64
-		err := s.read.QueryRowContext(ctx,
+		err := s.rdb().QueryRowContext(ctx,
 			"SELECT artist_id, album_artist_id, album_id FROM track WHERE item_id = ?", itemID).
 			Scan(&artistID, &albumArtistID, &albumID)
 		if err != nil {
@@ -2046,7 +2046,7 @@ func (s *Store) EnrichScopeForItem(ctx context.Context, itemPID model.PID) (*mod
 		if albumID.Valid {
 			scope.AlbumIDs = append(scope.AlbumIDs, albumID.Int64)
 			var rgID sql.NullInt64
-			err := s.read.QueryRowContext(ctx,
+			err := s.rdb().QueryRowContext(ctx,
 				"SELECT release_group_id FROM album WHERE id = ?", albumID.Int64).Scan(&rgID)
 			if err != nil && !errors.Is(err, sql.ErrNoRows) {
 				return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
@@ -2058,7 +2058,7 @@ func (s *Store) EnrichScopeForItem(ctx context.Context, itemPID model.PID) (*mod
 		scope.LyricsItemIDs = append(scope.LyricsItemIDs, itemID)
 		scope.FieldsItemIDs = append(scope.FieldsItemIDs, itemID)
 	case model.KindBook:
-		rows, err := s.read.QueryContext(ctx,
+		rows, err := s.rdb().QueryContext(ctx,
 			"SELECT DISTINCT artist_id FROM item_contributor WHERE item_id = ? ORDER BY artist_id", itemID)
 		if err != nil {
 			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
@@ -2094,7 +2094,7 @@ func (s *Store) EnrichScopeForEntity(ctx context.Context, kind read.EntityKind, 
 	switch kind {
 	case read.EntityArtist:
 		var id int64
-		err := s.read.QueryRowContext(ctx, "SELECT id FROM artist WHERE pid = ?", string(pid)).Scan(&id)
+		err := s.rdb().QueryRowContext(ctx, "SELECT id FROM artist WHERE pid = ?", string(pid)).Scan(&id)
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, waxerr.New(waxerr.CodeNotFound, op, "no such artist: "+string(pid))
 		}
@@ -2104,7 +2104,7 @@ func (s *Store) EnrichScopeForEntity(ctx context.Context, kind read.EntityKind, 
 		scope.ArtistIDs = append(scope.ArtistIDs, id)
 	case read.EntityReleaseGroup:
 		var id int64
-		err := s.read.QueryRowContext(ctx, "SELECT id FROM release_group WHERE pid = ?", string(pid)).Scan(&id)
+		err := s.rdb().QueryRowContext(ctx, "SELECT id FROM release_group WHERE pid = ?", string(pid)).Scan(&id)
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, waxerr.New(waxerr.CodeNotFound, op, "no such release group: "+string(pid))
 		}
@@ -2115,7 +2115,7 @@ func (s *Store) EnrichScopeForEntity(ctx context.Context, kind read.EntityKind, 
 	case read.EntityAlbum:
 		var id int64
 		var rgID sql.NullInt64
-		err := s.read.QueryRowContext(ctx,
+		err := s.rdb().QueryRowContext(ctx,
 			"SELECT id, release_group_id FROM album WHERE pid = ?", string(pid)).Scan(&id, &rgID)
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, waxerr.New(waxerr.CodeNotFound, op, "no such album: "+string(pid))
@@ -2303,7 +2303,7 @@ func (s *Store) EnrichmentWriteback(ctx context.Context, scope *model.EnrichScop
 func (s *Store) enrichmentWriteback(ctx context.Context, scope *model.EnrichScope, readOnly bool) ([]model.EnrichedTagRow, error) {
 	const op = "store.EnrichmentWriteback"
 	clause, args := enrichWriteScopeClause(scope, "pi.id", "t.album_id")
-	rows, err := s.read.QueryContext(ctx, strings.Replace(enrichedTagSelect, "/*SCOPE*/", clause, 1),
+	rows, err := s.rdb().QueryContext(ctx, strings.Replace(enrichedTagSelect, "/*SCOPE*/", clause, 1),
 		append([]any{readOnly}, args...)...)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
@@ -2437,7 +2437,7 @@ func (s *Store) ItemsNeedingFields(ctx context.Context, opts model.EnrichQueueOp
 		return nil, waxerr.New(waxerr.CodeInvalid, op, "no fields walk for kind "+string(kind))
 	}
 	args := append(append([]any{afterID}, scopeArgs...), limitOr(limit))
-	rows, err := s.read.QueryContext(ctx, stmt, args...)
+	rows, err := s.rdb().QueryContext(ctx, stmt, args...)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
@@ -2671,7 +2671,7 @@ func (s *Store) AlbumsNeedingFields(ctx context.Context, opts model.EnrichQueueO
 		  AND ` + notEnriched(enrichEntityAlbumFields, "al.id", opts) + scopeClause + `
 		ORDER BY al.id LIMIT ?`
 	args := append(append([]any{afterID}, scopeArgs...), limitOr(limit))
-	rows, err := s.read.QueryContext(ctx, stmt, args...)
+	rows, err := s.rdb().QueryContext(ctx, stmt, args...)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
@@ -2842,7 +2842,7 @@ func (s *Store) enrichedAlbumLabelFiles(ctx context.Context, scope *model.Enrich
 	const op = "store.EnrichedAlbumLabelFiles"
 	clause, args := enrichWriteScopeClause(scope, "pi.id", "al.id")
 	args = append([]any{readOnly}, args...)
-	rows, err := s.read.QueryContext(ctx, `SELECT DISTINCT al.id, f.pid, f.library_id, f.path, f.size, f.mtime_ns,
+	rows, err := s.rdb().QueryContext(ctx, `SELECT DISTINCT al.id, f.pid, f.library_id, f.path, f.size, f.mtime_ns,
 			COALESCE(al.label,''), lab.updated_at,
 			CASE WHEN `+fileSharedOrVirtualExpr+` THEN 1 ELSE 0 END
 		FROM entity_curation lab

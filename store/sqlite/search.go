@@ -233,7 +233,7 @@ func (s *Store) Search(ctx context.Context, queryStr string, opt read.SearchOpti
 // tie-broken by pid so equal-score rows come back in a stable, deterministic order.
 func (s *Store) searchMatches(ctx context.Context, match string, limit, maxCandidates int, libIDs []int64, states []model.ItemState, g *searchGroups) error {
 	stmt, args, cap := searchStmt(match, limit, maxCandidates, libIDs, states)
-	rows, err := s.read.QueryContext(ctx, stmt, args...)
+	rows, err := s.rdb().QueryContext(ctx, stmt, args...)
 	if err != nil {
 		return err
 	}
@@ -399,7 +399,7 @@ func (s *Store) searchItemsBySortKey(ctx context.Context, key string, limit, max
 	if maxCandidates > 0 && maxCandidates < cap {
 		cap = maxCandidates
 	}
-	rows, err := s.read.QueryContext(ctx, itemsBySortKeyQ(narrow), append(append([]any{key}, narrowArgs...), cap+1)...)
+	rows, err := s.rdb().QueryContext(ctx, itemsBySortKeyQ(narrow), append(append([]any{key}, narrowArgs...), cap+1)...)
 	if err != nil {
 		return err
 	}
@@ -515,7 +515,7 @@ const albumSubtitle = `COALESCE((SELECT COALESCE(NULLIF(t.album_artist,''), t.ar
 
 // searchEntities reads (pid, title, subtitle) entity hits.
 func (s *Store) searchEntities(ctx context.Context, q string, args ...any) ([]read.SearchHit, error) {
-	rows, err := s.read.QueryContext(ctx, q, args...)
+	rows, err := s.rdb().QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -581,7 +581,7 @@ func (s *Store) searchTranscripts(ctx context.Context, match string, limit, maxC
 		 LIMIT ?`
 		args = append(narrowArgs, match, maxCandidates, limit+len(seen))
 	}
-	rows, err := s.read.QueryContext(ctx, stmt, args...)
+	rows, err := s.rdb().QueryContext(ctx, stmt, args...)
 	if err != nil {
 		return waxerr.Wrap(waxerr.CodeIO, op, err)
 	}

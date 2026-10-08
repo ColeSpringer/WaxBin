@@ -18,7 +18,7 @@ func bookEditFixture(t *testing.T) (*Store, model.PID) {
 		series: "The Series", seq: "1", genres: []string{"Fantasy"}, year: 2010,
 	})
 	var pid string
-	if err := st.read.QueryRowContext(context.Background(),
+	if err := st.rdb().QueryRowContext(context.Background(),
 		"SELECT pid FROM playable_item WHERE kind='book' LIMIT 1").Scan(&pid); err != nil {
 		t.Fatalf("read book pid: %v", err)
 	}
@@ -34,7 +34,7 @@ func TestEditBookSubtitleAndProvenance(t *testing.T) {
 		t.Fatalf("edit subtitle: %v", err)
 	}
 	var subtitle string
-	if err := st.read.QueryRowContext(ctx,
+	if err := st.rdb().QueryRowContext(ctx,
 		"SELECT b.subtitle FROM book b JOIN playable_item pi ON pi.id=b.item_id WHERE pi.pid=?", string(pid)).Scan(&subtitle); err != nil {
 		t.Fatalf("read subtitle: %v", err)
 	}
@@ -67,7 +67,7 @@ func TestEditBookAuthorReResolvesContributor(t *testing.T) {
 
 	// A Mary Writer artist entity exists and is the book's linked author contributor.
 	var name string
-	if err := st.read.QueryRowContext(ctx, `SELECT a.name FROM item_contributor ic
+	if err := st.rdb().QueryRowContext(ctx, `SELECT a.name FROM item_contributor ic
 		JOIN artist a ON a.id = ic.artist_id
 		JOIN playable_item pi ON pi.id = ic.item_id
 		WHERE pi.pid=? AND ic.role='author'`, string(pid)).Scan(&name); err != nil {
@@ -79,7 +79,7 @@ func TestEditBookAuthorReResolvesContributor(t *testing.T) {
 
 	// The narrator contributor is preserved across an author-only edit.
 	var narr string
-	if err := st.read.QueryRowContext(ctx, `SELECT a.name FROM item_contributor ic
+	if err := st.rdb().QueryRowContext(ctx, `SELECT a.name FROM item_contributor ic
 		JOIN artist a ON a.id = ic.artist_id
 		JOIN playable_item pi ON pi.id = ic.item_id
 		WHERE pi.pid=? AND ic.role='narrator'`, string(pid)).Scan(&narr); err != nil {

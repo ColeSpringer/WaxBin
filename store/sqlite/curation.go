@@ -583,11 +583,11 @@ func (s *Store) ArtLocked(ctx context.Context, entityType model.ArtEntity, pid m
 	if !role.Valid() {
 		return false, waxerr.New(waxerr.CodeInvalid, op, "unknown art role: "+string(role))
 	}
-	entityID, err := artEntityIDTx(ctx, s.read, entityType, pid, op)
+	entityID, err := artEntityIDTx(ctx, s.rdb(), entityType, pid, op)
 	if err != nil {
 		return false, err
 	}
-	locked, err := artFillBlockedTx(ctx, s.read, entityType, entityID, role)
+	locked, err := artFillBlockedTx(ctx, s.rdb(), entityType, entityID, role)
 	if err != nil {
 		return false, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}

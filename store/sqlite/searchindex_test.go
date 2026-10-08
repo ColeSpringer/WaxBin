@@ -101,7 +101,7 @@ func TestRebuildSearchIndexRepairsDrift(t *testing.T) {
 		{"DELETE FROM search_fts WHERE rowid = ?", []any{lostID}},
 		{"INSERT INTO search_fts(rowid, kind, title) VALUES (999999, 'track', 'orphan words')", nil},
 	} {
-		if _, err := st.write.ExecContext(ctx, q.stmt, q.args...); err != nil {
+		if _, err := st.wdb().ExecContext(ctx, q.stmt, q.args...); err != nil {
 			t.Fatalf("%s: %v", q.stmt, err)
 		}
 	}
@@ -135,13 +135,13 @@ func TestRebuildSearchIndexSpansBatches(t *testing.T) {
 	st, _ := entityFixture(t)
 	ctx := context.Background()
 	const n = sortKeyBatch + 25
-	if _, err := st.write.ExecContext(ctx, `
+	if _, err := st.wdb().ExecContext(ctx, `
 		WITH RECURSIVE seq(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM seq WHERE i < ?)
 		INSERT INTO playable_item(pid, kind, state, title, sort_key, created_at, updated_at)
 		SELECT 'pid' || i, 'track', 'present', 'Title ' || i, 'title ' || i, 1, 1 FROM seq`, n); err != nil {
 		t.Fatalf("seed %d items: %v", n, err)
 	}
-	if _, err := st.write.ExecContext(ctx,
+	if _, err := st.wdb().ExecContext(ctx,
 		"INSERT INTO track(item_id, artist) SELECT id, 'Batch Artist' FROM playable_item"); err != nil {
 		t.Fatalf("seed tracks: %v", err)
 	}

@@ -81,7 +81,7 @@ func TestItemViewEntityPIDs(t *testing.T) {
 		t.Fatalf("upsert feed: %v", err)
 	}
 	var epPID model.PID
-	if err := st.read.QueryRowContext(ctx, "SELECT pid FROM playable_item WHERE kind='episode'").Scan(&epPID); err != nil {
+	if err := st.rdb().QueryRowContext(ctx, "SELECT pid FROM playable_item WHERE kind='episode'").Scan(&epPID); err != nil {
 		t.Fatalf("episode pid: %v", err)
 	}
 	epView, err := st.ItemByPID(ctx, epPID)
@@ -163,7 +163,7 @@ func TestItemViewReleaseGroupPID(t *testing.T) {
 
 	putFeed(t, st, "http://cast.example/f", "Ep1")
 	var epPID model.PID
-	if err := st.read.QueryRowContext(ctx, "SELECT pid FROM playable_item WHERE kind='episode'").Scan(&epPID); err != nil {
+	if err := st.rdb().QueryRowContext(ctx, "SELECT pid FROM playable_item WHERE kind='episode'").Scan(&epPID); err != nil {
 		t.Fatalf("episode pid: %v", err)
 	}
 	epView, err := st.ItemByPID(ctx, epPID)
@@ -204,7 +204,7 @@ func TestItemViewExplicit(t *testing.T) {
 	}
 
 	pids := []model.PID{tr.ItemPID, bk.ItemPID}
-	rows, err := st.read.QueryContext(ctx, "SELECT pid FROM playable_item WHERE kind='episode'")
+	rows, err := st.rdb().QueryContext(ctx, "SELECT pid FROM playable_item WHERE kind='episode'")
 	if err != nil {
 		t.Fatalf("episode pids: %v", err)
 	}
@@ -415,7 +415,7 @@ func TestItemViewLibraryPID(t *testing.T) {
 	setFileSize(t, st, "/lib2/2.flac", 100)
 	putFeed(t, st, "http://cast.example/f", "Ep1")
 	var epPID model.PID
-	if err := st.read.QueryRowContext(ctx, "SELECT pid FROM playable_item WHERE kind='episode'").Scan(&epPID); err != nil {
+	if err := st.rdb().QueryRowContext(ctx, "SELECT pid FROM playable_item WHERE kind='episode'").Scan(&epPID); err != nil {
 		t.Fatalf("episode pid: %v", err)
 	}
 

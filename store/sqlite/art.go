@@ -317,7 +317,7 @@ func (s *Store) examineArt(ctx context.Context, img *model.ArtImage) (examinedAr
 	if e, ok := s.examined.get(cp.Hash, cp.Attribution); ok {
 		return e, nil
 	}
-	e, found, err := resizedArt(ctx, s.read, &cp)
+	e, found, err := resizedArt(ctx, s.rdb(), &cp)
 	if err != nil {
 		return examinedArt{}, err
 	}
@@ -906,7 +906,7 @@ func (s *Store) ArtRoles(ctx context.Context, ref model.EntityRef) ([]model.ArtR
 	if err != nil {
 		return nil, err
 	}
-	rows, err := s.read.QueryContext(ctx,
+	rows, err := s.rdb().QueryContext(ctx,
 		`SELECT m.role, s.format, s.width, s.height, s.hash,
 		        m.source, m.provider, m.source_url, m.updated_at
 		 FROM art_map m JOIN art_source s ON s.hash = m.source_hash
@@ -988,11 +988,11 @@ func (s *Store) artLockRows(ctx context.Context, entityType model.ArtEntity, ent
 		err  error
 	)
 	if artLockIsItemScoped(entityType) {
-		rows, err = s.read.QueryContext(ctx,
+		rows, err = s.rdb().QueryContext(ctx,
 			`SELECT field, locked, source, COALESCE(provider,''), updated_at FROM field_provenance
 			 WHERE item_id = ? AND (field = 'art' OR field LIKE 'art.%')`, entityID)
 	} else {
-		rows, err = s.read.QueryContext(ctx,
+		rows, err = s.rdb().QueryContext(ctx,
 			`SELECT field, locked, source, COALESCE(provider,''), updated_at FROM entity_curation
 			 WHERE entity_type = ? AND entity_id = ? AND (field = 'art' OR field LIKE 'art.%')`,
 			string(entityType), entityID)
@@ -1057,7 +1057,7 @@ func (s *Store) generateThumb(ctx context.Context, hash string, box int,
 	var data []byte
 	var format string
 	var w, h int
-	err := s.read.QueryRowContext(ctx,
+	err := s.rdb().QueryRowContext(ctx,
 		"SELECT data, format, width, height FROM thumb_cache WHERE source_hash = ? AND size = ?",
 		hash, box).Scan(&data, &format, &w, &h)
 	if err == nil {
@@ -1111,7 +1111,7 @@ func (s *Store) generateThumb(ctx context.Context, hash string, box int,
 // deliberately not its data: the blob's overflow pages stay untouched, which is what
 // makes the metadata-only read cheap.
 func (s *Store) artSourceMeta(ctx context.Context, hash, op string) (format string, w, h, size int, err error) {
-	err = s.read.QueryRowContext(ctx,
+	err = s.rdb().QueryRowContext(ctx,
 		"SELECT format, width, height, size FROM art_source WHERE hash = ?", hash).Scan(&format, &w, &h, &size)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", 0, 0, 0, waxerr.New(waxerr.CodeNotFound, op, "art source missing: "+hash)
@@ -1125,7 +1125,7 @@ func (s *Store) artSourceMeta(ctx context.Context, hash, op string) (format stri
 // artSourceData loads a source image's bytes by hash.
 func (s *Store) artSourceData(ctx context.Context, hash, op string) ([]byte, error) {
 	var data []byte
-	err := s.read.QueryRowContext(ctx,
+	err := s.rdb().QueryRowContext(ctx,
 		"SELECT data FROM art_source WHERE hash = ?", hash).Scan(&data)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, waxerr.New(waxerr.CodeNotFound, op, "art source missing: "+hash)
@@ -1174,7 +1174,7 @@ func (s *Store) artInChain(ctx context.Context, chain []artLevel, role model.Art
 		// that follows it.
 		var h artHit
 		var src string
-		qerr := s.read.QueryRowContext(ctx,
+		qerr := s.rdb().QueryRowContext(ctx,
 			"SELECT source_hash, source, provider, source_url, updated_at FROM art_map"+
 				" WHERE entity_type = ? AND entity_id = ? AND role = ?",
 			lv.typ, lv.id, string(role)).Scan(&h.hash, &src, &h.provider, &h.sourceURL, &h.updatedAt)
@@ -1187,7 +1187,7 @@ func (s *Store) artInChain(ctx context.Context, chain []artLevel, role model.Art
 		}
 		if lv.typ == string(model.ArtAlbum) && role == model.ArtRoleFront {
 			var d artHit
-			derr := s.read.QueryRowContext(ctx,
+			derr := s.rdb().QueryRowContext(ctx,
 				`SELECT tm.source_hash, tm.source, tm.provider, tm.source_url, tm.updated_at
 				 FROM art_map tm JOIN track t ON t.item_id = tm.entity_id
 				 WHERE tm.entity_type = 'track' AND tm.role = 'front' AND t.album_id = ?
@@ -1266,7 +1266,7 @@ func (s *Store) artChain(ctx context.Context, ref model.EntityRef) ([]artLevel, 
 func (s *Store) episodeArtChain(ctx context.Context, pid model.PID) ([]artLevel, error) {
 	const op = "store.ResolveArt"
 	var itemID, podcastID int64
-	err := s.read.QueryRowContext(ctx,
+	err := s.rdb().QueryRowContext(ctx,
 		`SELECT pi.id, ep.podcast_id FROM playable_item pi
 		 JOIN episode ep ON ep.item_id = pi.id WHERE pi.pid = ?`, string(pid)).Scan(&itemID, &podcastID)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -1295,7 +1295,7 @@ func (s *Store) trackArtChain(ctx context.Context, pid model.PID) ([]artLevel, e
 	var itemID int64
 	var kind string
 	var albumID, albumArtistID, artistID sql.NullInt64
-	err := s.read.QueryRowContext(ctx,
+	err := s.rdb().QueryRowContext(ctx,
 		`SELECT pi.id, pi.kind, t.album_id, t.album_artist_id, t.artist_id
 		 FROM playable_item pi LEFT JOIN track t ON t.item_id = pi.id WHERE pi.pid = ?`, string(pid)).
 		Scan(&itemID, &kind, &albumID, &albumArtistID, &artistID)
@@ -1357,7 +1357,7 @@ func (s *Store) albumArtChain(ctx context.Context, albumID int64) ([]artLevel, e
 func (s *Store) releaseGroupArtChain(ctx context.Context, rgID int64) ([]artLevel, error) {
 	chain := []artLevel{{string(model.ArtReleaseGroup), rgID}}
 	var artistID sql.NullInt64
-	if err := s.read.QueryRowContext(ctx,
+	if err := s.rdb().QueryRowContext(ctx,
 		"SELECT primary_artist_id FROM release_group WHERE id = ?", rgID).Scan(&artistID); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return nil, waxerr.Wrap(waxerr.CodeIO, "store.ResolveArt", err)
 	}
@@ -1371,7 +1371,7 @@ func (s *Store) releaseGroupArtChain(ctx context.Context, rgID int64) ([]artLeve
 // id (each 0 when absent).
 func (s *Store) albumParents(ctx context.Context, albumID int64) (rgID, artistID int64, err error) {
 	var rg sql.NullInt64
-	if err := s.read.QueryRowContext(ctx,
+	if err := s.rdb().QueryRowContext(ctx,
 		"SELECT release_group_id FROM album WHERE id = ?", albumID).Scan(&rg); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return 0, 0, waxerr.Wrap(waxerr.CodeIO, "store.ResolveArt", err)
 	}
@@ -1379,7 +1379,7 @@ func (s *Store) albumParents(ctx context.Context, albumID int64) (rgID, artistID
 		return 0, 0, nil
 	}
 	var artist sql.NullInt64
-	if err := s.read.QueryRowContext(ctx,
+	if err := s.rdb().QueryRowContext(ctx,
 		"SELECT primary_artist_id FROM release_group WHERE id = ?", rg.Int64).Scan(&artist); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return rg.Int64, 0, waxerr.Wrap(waxerr.CodeIO, "store.ResolveArt", err)
 	}
@@ -1392,7 +1392,7 @@ func (s *Store) albumParents(ctx context.Context, albumID int64) (rgID, artistID
 // firstItemGenre returns the item's lowest-id genre, or 0 when it has none.
 func (s *Store) firstItemGenre(ctx context.Context, itemID int64) int64 {
 	var gid int64
-	err := s.read.QueryRowContext(ctx,
+	err := s.rdb().QueryRowContext(ctx,
 		"SELECT genre_id FROM item_genre WHERE item_id = ? ORDER BY genre_id LIMIT 1", itemID).Scan(&gid)
 	if err != nil {
 		return 0
@@ -1403,7 +1403,7 @@ func (s *Store) firstItemGenre(ctx context.Context, itemID int64) int64 {
 // idByPID resolves an entity pid to its rowid in the named table.
 func (s *Store) idByPID(ctx context.Context, table string, pid model.PID, op string) (int64, error) {
 	var id int64
-	err := s.read.QueryRowContext(ctx, "SELECT id FROM "+table+" WHERE pid = ?", string(pid)).Scan(&id)
+	err := s.rdb().QueryRowContext(ctx, "SELECT id FROM "+table+" WHERE pid = ?", string(pid)).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, waxerr.New(waxerr.CodeNotFound, op, "no such "+table+": "+string(pid))
 	}

@@ -107,7 +107,7 @@ func (s *Store) EntityMemberFiles(ctx context.Context, et model.MergeEntity, ent
 		return nil, waxerr.New(waxerr.CodeUnsupported, op, "no member-file fan-out for a "+string(et)+" entity")
 	}
 	var id int64
-	err := s.read.QueryRowContext(ctx, "SELECT id FROM "+table+" WHERE pid = ?", string(entityPID)).Scan(&id)
+	err := s.rdb().QueryRowContext(ctx, "SELECT id FROM "+table+" WHERE pid = ?", string(entityPID)).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, waxerr.New(waxerr.CodeNotFound, op, "no such "+string(et)+": "+string(entityPID))
 	}
@@ -116,7 +116,7 @@ func (s *Store) EntityMemberFiles(ctx context.Context, et model.MergeEntity, ent
 	}
 
 	// DISTINCT collapses a file that backs several members to one row.
-	rows, err := s.read.QueryContext(ctx,
+	rows, err := s.rdb().QueryContext(ctx,
 		"SELECT DISTINCT f.pid, f.path, f.display_path, itf.position "+entityMemberFilesFrom(et), id)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)

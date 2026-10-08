@@ -307,7 +307,7 @@ func keysOf(m map[string]model.ScopedFile) []string {
 func itemState(t *testing.T, st *Store, pid model.PID) string {
 	t.Helper()
 	var s string
-	if err := st.read.QueryRowContext(context.Background(),
+	if err := st.rdb().QueryRowContext(context.Background(),
 		"SELECT state FROM playable_item WHERE pid = ?", string(pid)).Scan(&s); err != nil {
 		t.Fatalf("item state: %v", err)
 	}

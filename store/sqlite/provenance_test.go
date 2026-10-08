@@ -11,7 +11,7 @@ import (
 func itemPID(t *testing.T, st *Store) model.PID {
 	t.Helper()
 	var pid string
-	if err := st.read.QueryRowContext(context.Background(),
+	if err := st.rdb().QueryRowContext(context.Background(),
 		"SELECT pid FROM playable_item LIMIT 1").Scan(&pid); err != nil {
 		t.Fatalf("read item pid: %v", err)
 	}
@@ -193,7 +193,7 @@ func TestSetFieldProvenanceReattributesWholly(t *testing.T) {
 	}
 	var source, provider string
 	var locked int
-	if err := st.read.QueryRowContext(ctx,
+	if err := st.rdb().QueryRowContext(ctx,
 		"SELECT source, COALESCE(provider,''), locked FROM field_provenance WHERE field='genre'").
 		Scan(&source, &provider, &locked); err != nil {
 		t.Fatalf("read row: %v", err)

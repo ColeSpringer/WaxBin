@@ -121,7 +121,7 @@ func (s *Store) LyricsByItem(ctx context.Context, itemPID model.PID) (*model.Lyr
 	var synced int
 	var updatedAt int64
 	var unsynced, lines sql.NullString
-	err := s.read.QueryRowContext(ctx,
+	err := s.rdb().QueryRowContext(ctx,
 		`SELECT ly.source, ly.provider, ly.synced, ly.unsynced, ly.lines, ly.updated_at
 		 FROM lyrics ly JOIN playable_item pi ON pi.id = ly.item_id
 		 WHERE pi.pid = ?`, string(itemPID)).Scan(&source, &provider, &synced, &unsynced, &lines, &updatedAt)

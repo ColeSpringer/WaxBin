@@ -18,7 +18,7 @@ import (
 // trackComposerRow reads a track's composer, its sort spelling and the key beside it.
 func trackComposerRow(t *testing.T, st *Store, pid model.PID) (composer, spelling, key string) {
 	t.Helper()
-	if err := st.read.QueryRowContext(context.Background(),
+	if err := st.rdb().QueryRowContext(context.Background(),
 		"SELECT composer, composer_sort, composer_sort_key FROM track t JOIN playable_item pi ON pi.id=t.item_id WHERE pi.pid=?",
 		string(pid)).Scan(&composer, &spelling, &key); err != nil {
 		t.Fatalf("read composer row: %v", err)
@@ -29,7 +29,7 @@ func trackComposerRow(t *testing.T, st *Store, pid model.PID) (composer, spellin
 // bookAuthorRow reads a book's author, its sort spelling and the key beside it.
 func bookAuthorRow(t *testing.T, st *Store, pid model.PID) (author, spelling, key string) {
 	t.Helper()
-	if err := st.read.QueryRowContext(context.Background(),
+	if err := st.rdb().QueryRowContext(context.Background(),
 		"SELECT author, author_sort, author_sort_key FROM book b JOIN playable_item pi ON pi.id=b.item_id WHERE pi.pid=?",
 		string(pid)).Scan(&author, &spelling, &key); err != nil {
 		t.Fatalf("read author row: %v", err)
@@ -262,7 +262,7 @@ func TestScanPreservesLockedSortNames(t *testing.T) {
 func lib1ID(t *testing.T, st *Store) int64 {
 	t.Helper()
 	var id int64
-	if err := st.read.QueryRowContext(context.Background(), "SELECT id FROM library LIMIT 1").Scan(&id); err != nil {
+	if err := st.rdb().QueryRowContext(context.Background(), "SELECT id FROM library LIMIT 1").Scan(&id); err != nil {
 		t.Fatalf("library id: %v", err)
 	}
 	return id

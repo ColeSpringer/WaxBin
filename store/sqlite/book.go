@@ -1263,7 +1263,7 @@ func (s *Store) BookByPID(ctx context.Context, pid model.PID) (*model.BookDetail
 	var seriesPID sql.NullString
 	var abridged sql.NullInt64
 	var bookItemID int64
-	if err := s.read.QueryRowContext(ctx,
+	if err := s.rdb().QueryRowContext(ctx,
 		`SELECT pi.id, b.subtitle, b.series_seq, b.publisher, b.asin, b.isbn, b.edition, b.abridged,
 			b.description, srs.pid
 		 FROM playable_item pi JOIN book b ON b.item_id = pi.id
@@ -1326,7 +1326,7 @@ func (s *Store) BookByPID(ctx context.Context, pid model.PID) (*model.BookDetail
 // credited position.
 func (s *Store) bookContributors(ctx context.Context, bookItemID int64) ([]model.Contributor, error) {
 	const op = "store.BookByPID"
-	rows, err := s.read.QueryContext(ctx,
+	rows, err := s.rdb().QueryContext(ctx,
 		`SELECT a.pid, a.name, ic.role, ic.position
 		 FROM item_contributor ic JOIN artist a ON a.id = ic.artist_id
 		 WHERE ic.item_id = ? ORDER BY ic.role, ic.position`, bookItemID)
@@ -1367,7 +1367,7 @@ type bookPart struct {
 // path, so an unnumbered set ("p2", "p10") sorts naturally rather than
 // lexicographically (which would place "p10" before "p2" and corrupt the timeline).
 func (s *Store) bookParts(ctx context.Context, bookItemID int64) ([]bookPart, error) {
-	return bookPartsQ(ctx, s.read, bookItemID)
+	return bookPartsQ(ctx, s.rdb(), bookItemID)
 }
 
 // bookPartsQ is bookParts over an explicit queryer, so the user-chapter write
@@ -1431,7 +1431,7 @@ func (s *Store) bookChapters(ctx context.Context, bookItemID int64, parts []book
 	// walk the parts in reading order. Iterating parts (not the chapter rows) is what
 	// lets a part with no chapters still advance the cumulative book-timeline offset,
 	// and it avoids a per-part round trip on a heavily split book.
-	rows, err := s.read.QueryContext(ctx,
+	rows, err := s.rdb().QueryContext(ctx,
 		`SELECT file_id, title, start_ms, end_ms, source FROM chapter
 		 WHERE book_item_id = ? ORDER BY position, start_ms`, bookItemID)
 	if err != nil {
@@ -1606,7 +1606,7 @@ func (s *Store) BooksInSeries(ctx context.Context, seriesPID model.PID) ([]*mode
 	if err != nil {
 		return nil, err
 	}
-	rows, err := s.read.QueryContext(ctx,
+	rows, err := s.rdb().QueryContext(ctx,
 		itemSelect+" WHERE bk.series_id = ? ORDER BY bk.series_seq_sort, pi.sort_key, pi.pid", seriesID)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
@@ -1651,7 +1651,7 @@ func (s *Store) ItemFiles(ctx context.Context, pid model.PID) ([]model.ItemFileR
 			LibraryPID: p.libraryPID, Virtual: p.virtual,
 		}
 	}
-	rows, err := s.read.QueryContext(ctx, `SELECT f.pid, f.path, f.display_path, itf.position, l.pid, itf.start_frames IS NOT NULL
+	rows, err := s.rdb().QueryContext(ctx, `SELECT f.pid, f.path, f.display_path, itf.position, l.pid, itf.start_frames IS NOT NULL
 		FROM item_file itf JOIN file f ON f.id = itf.file_id JOIN library l ON l.id = f.library_id
 		WHERE itf.item_id = ? AND itf.role = 'alternate' ORDER BY itf.position, f.id`, itemID)
 	if err != nil {
@@ -1675,7 +1675,7 @@ func (s *Store) ItemFiles(ctx context.Context, pid model.PID) ([]model.ItemFileR
 func (s *Store) itemIDKindByPID(ctx context.Context, pid model.PID, op string) (int64, string, error) {
 	var id int64
 	var kind string
-	err := s.read.QueryRowContext(ctx, "SELECT id, kind FROM playable_item WHERE pid = ?", string(pid)).Scan(&id, &kind)
+	err := s.rdb().QueryRowContext(ctx, "SELECT id, kind FROM playable_item WHERE pid = ?", string(pid)).Scan(&id, &kind)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, "", waxerr.New(waxerr.CodeNotFound, op, "no such item: "+string(pid))
 	}
@@ -1690,7 +1690,7 @@ func (s *Store) itemIDKindByPID(ctx context.Context, pid model.PID, op string) (
 func (s *Store) BookByKey(ctx context.Context, libraryID int64, key string) (*model.ItemView, []model.ItemFileRef, error) {
 	const op = "store.BookByKey"
 	var pid string
-	err := s.read.QueryRowContext(ctx, `SELECT pi.pid FROM playable_item pi
+	err := s.rdb().QueryRowContext(ctx, `SELECT pi.pid FROM playable_item pi
 		JOIN item_file itf ON itf.item_id = pi.id AND itf.role = 'primary'
 		JOIN file f ON f.id = itf.file_id
 		WHERE pi.kind = 'book' AND pi.identity_key = ? AND f.library_id = ? LIMIT 1`, key, libraryID).Scan(&pid)

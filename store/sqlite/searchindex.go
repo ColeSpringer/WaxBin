@@ -211,7 +211,7 @@ func (s *Store) RebuildSearchIndex(ctx context.Context) (int, error) {
 
 	const orphanQ = "FROM search_fts WHERE rowid NOT IN (SELECT id FROM playable_item)"
 	var orphans int64
-	if err := s.read.QueryRowContext(ctx, "SELECT COUNT(*) "+orphanQ).Scan(&orphans); err != nil {
+	if err := s.rdb().QueryRowContext(ctx, "SELECT COUNT(*) "+orphanQ).Scan(&orphans); err != nil {
 		return written, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
 	if orphans > 0 {
@@ -235,7 +235,7 @@ func (s *Store) RebuildSearchIndex(ctx context.Context) (int, error) {
 // state builds, all read in one transaction so each item is compared against one
 // state of the catalog.
 func (s *Store) staleSearchRows(ctx context.Context, after int64) (batch, stale []searchItem, err error) {
-	tx, err := s.read.BeginTx(ctx, nil)
+	tx, err := s.rdb().BeginTx(ctx, nil)
 	if err != nil {
 		return nil, nil, err
 	}

@@ -13,7 +13,7 @@ import (
 // is preserved across the vacuum.
 func (s *Store) Vacuum(ctx context.Context) error {
 	const op = "store.Vacuum"
-	if s.readOnly || s.write == nil {
+	if s.readOnly {
 		return waxerr.New(waxerr.CodeUnsupported, op, "library opened read-only")
 	}
 	s.wmu.Lock()
@@ -21,7 +21,7 @@ func (s *Store) Vacuum(ctx context.Context) error {
 	if s.closed {
 		return waxerr.New(waxerr.CodeUnsupported, op, "store is closed")
 	}
-	if _, err := s.write.ExecContext(ctx, "VACUUM"); err != nil {
+	if _, err := s.wdb().ExecContext(ctx, "VACUUM"); err != nil {
 		return waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
 	return nil
@@ -32,7 +32,7 @@ func (s *Store) Vacuum(ctx context.Context) error {
 // message is a real corruption finding. It is read-only.
 func (s *Store) IntegrityCheck(ctx context.Context) ([]string, error) {
 	const op = "store.IntegrityCheck"
-	rows, err := s.read.QueryContext(ctx, "PRAGMA integrity_check")
+	rows, err := s.rdb().QueryContext(ctx, "PRAGMA integrity_check")
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}

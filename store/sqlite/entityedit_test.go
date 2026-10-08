@@ -13,7 +13,7 @@ import (
 func entityPIDByCol(t *testing.T, st *Store, table, col, val string) model.PID {
 	t.Helper()
 	var pid string
-	if err := st.read.QueryRowContext(context.Background(),
+	if err := st.rdb().QueryRowContext(context.Background(),
 		"SELECT pid FROM "+table+" WHERE "+col+" = ?", val).Scan(&pid); err != nil {
 		t.Fatalf("no %s with %s=%q: %v", table, col, val, err)
 	}
@@ -23,7 +23,7 @@ func entityPIDByCol(t *testing.T, st *Store, table, col, val string) model.PID {
 func entityIDByCol(t *testing.T, st *Store, table, col, val string) int64 {
 	t.Helper()
 	var id int64
-	if err := st.read.QueryRowContext(context.Background(),
+	if err := st.rdb().QueryRowContext(context.Background(),
 		"SELECT id FROM "+table+" WHERE "+col+" = ?", val).Scan(&id); err != nil {
 		t.Fatalf("no %s with %s=%q: %v", table, col, val, err)
 	}
@@ -47,7 +47,7 @@ func TestEditEntityAlbumIdentifiers(t *testing.T) {
 	}
 
 	var barcode, catalog, label string
-	if err := st.read.QueryRowContext(ctx,
+	if err := st.rdb().QueryRowContext(ctx,
 		"SELECT COALESCE(barcode,''), COALESCE(catalog_number,''), COALESCE(label,'') FROM album WHERE pid=?",
 		string(albumPID)).Scan(&barcode, &catalog, &label); err != nil {
 		t.Fatalf("read album cols: %v", err)
@@ -106,7 +106,7 @@ func TestScanPopulatesAlbumIdentifiers(t *testing.T) {
 		t.Fatalf("put: %v", err)
 	}
 	var barcode, label, catalog string
-	if err := st.read.QueryRowContext(ctx,
+	if err := st.rdb().QueryRowContext(ctx,
 		"SELECT COALESCE(barcode,''), COALESCE(label,''), COALESCE(catalog_number,'') FROM album WHERE title='Album'").
 		Scan(&barcode, &label, &catalog); err != nil {
 		t.Fatalf("read album: %v", err)
@@ -134,7 +134,7 @@ func TestEditEntitySortOverride(t *testing.T) {
 		t.Fatalf("edit sort: %v", err)
 	}
 	var sortKey string
-	if err := st.read.QueryRowContext(ctx, "SELECT sort_key FROM artist WHERE pid=?", string(artistPID)).Scan(&sortKey); err != nil {
+	if err := st.rdb().QueryRowContext(ctx, "SELECT sort_key FROM artist WHERE pid=?", string(artistPID)).Scan(&sortKey); err != nil {
 		t.Fatalf("read sort_key: %v", err)
 	}
 	if want := model.SortKey("Davis, Miles"); sortKey != want {
@@ -155,7 +155,7 @@ func TestEditEntitySortOverride(t *testing.T) {
 		map[string]string{"sort": ""}, model.Attribution{Source: model.SourceUser}, model.LockOf(false), true); err != nil {
 		t.Fatalf("clear sort: %v", err)
 	}
-	if err := st.read.QueryRowContext(ctx, "SELECT sort_key FROM artist WHERE pid=?", string(artistPID)).Scan(&sortKey); err != nil {
+	if err := st.rdb().QueryRowContext(ctx, "SELECT sort_key FROM artist WHERE pid=?", string(artistPID)).Scan(&sortKey); err != nil {
 		t.Fatalf("read sort_key: %v", err)
 	}
 	if want := model.SortKey("Miles Davis"); sortKey != want {
@@ -187,7 +187,7 @@ func TestEnrichRespectsReleaseGroupTypeLock(t *testing.T) {
 		t.Fatalf("enrich: %v", err)
 	}
 	var typ string
-	if err := st.read.QueryRowContext(ctx, "SELECT COALESCE(type,'') FROM release_group WHERE id=?", rgID).Scan(&typ); err != nil {
+	if err := st.rdb().QueryRowContext(ctx, "SELECT COALESCE(type,'') FROM release_group WHERE id=?", rgID).Scan(&typ); err != nil {
 		t.Fatalf("read type: %v", err)
 	}
 	if typ != "ep" {
@@ -225,7 +225,7 @@ func TestEnrichRespectsArtistMBIDLock(t *testing.T) {
 		t.Fatalf("enrich: %v", err)
 	}
 	var mbid string
-	if err := st.read.QueryRowContext(ctx, "SELECT COALESCE(mbid,'') FROM artist WHERE id=?", artistID).Scan(&mbid); err != nil {
+	if err := st.rdb().QueryRowContext(ctx, "SELECT COALESCE(mbid,'') FROM artist WHERE id=?", artistID).Scan(&mbid); err != nil {
 		t.Fatalf("read mbid: %v", err)
 	}
 	if mbid != "" {
@@ -1108,7 +1108,7 @@ func TestEntityEditClearMBIDSkipsArchivedRepresentative(t *testing.T) {
 	// Dropping the file row is what archiving leaves behind; these members carry no
 	// duration, so the maintained rollups stay where the scan put them.
 	lowest := scalarInt(t, st, "SELECT MIN(item_id) FROM track WHERE album_id=?", albumID)
-	if _, err := st.write.ExecContext(ctx, "DELETE FROM item_file WHERE item_id=?", lowest); err != nil {
+	if _, err := st.wdb().ExecContext(ctx, "DELETE FROM item_file WHERE item_id=?", lowest); err != nil {
 		t.Fatalf("archive the lowest member: %v", err)
 	}
 

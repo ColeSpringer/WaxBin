@@ -96,6 +96,59 @@ func TestGrammarUnbalancedErrors(t *testing.T) {
 	}
 }
 
+// TestGrammarPadWidthIsCapped: a zero-pad width past what a path segment holds renders
+// at that size rather than up to a megabyte per token. A pad on a text field stays
+// ignored, and an unknown field is still named as unknown.
+func TestGrammarPadWidthIsCapped(t *testing.T) {
+	t.Parallel()
+	f := map[string]fieldVal{"track": {n: 3, isNum: true}, "title": {s: "Song"}}
+	for _, tmpl := range []string{"{track:0255}", "{track:0256}", "{track:01000000}"} {
+		if got := render(t, tmpl, f); len(got) != 255 || !strings.HasSuffix(got, "03") {
+			t.Errorf("%s: got %d bytes, want 255 ending in 03", tmpl, len(got))
+		}
+	}
+	if got := render(t, "{title:0300}", f); got != "Song" {
+		t.Errorf("a pad on a text field: got %q, want Song", got)
+	}
+	if _, err := renderTemplate("{nope:0300}", f); err == nil || !strings.Contains(err.Error(), "unknown template field {nope}") {
+		t.Errorf("an unknown field with a pad: err = %v, want it named as unknown", err)
+	}
+	p := nativeProfile
+	p.Name = "wide"
+	p.Music = "{track:01000000}/{title:0300}.{ext}"
+	if err := p.Validate(); err != nil {
+		t.Errorf("Validate = %v, want wide pads to load", err)
+	}
+}
+
+// TestGrammarGroupDepthIsBounded: groups nest 32 deep and no deeper. Before the bound, a
+// template of megabytes of '<' overflowed the goroutine stack, which kills the process.
+func TestGrammarGroupDepthIsBounded(t *testing.T) {
+	t.Parallel()
+	nest := func(n int, inner string) string {
+		return strings.Repeat("<", n) + inner + strings.Repeat(">", n)
+	}
+	f := map[string]fieldVal{"a": {s: "A"}}
+	if got := render(t, nest(32, "{a}"), f); got != "A" {
+		t.Fatalf("32 nested groups: got %q want A", got)
+	}
+	for _, tc := range []struct{ name, tmpl string }{
+		{"33 nested groups", nest(33, "{a}")},
+		{"16 MiB of '<'", strings.Repeat("<", 16<<20)},
+	} {
+		_, err := renderTemplate(tc.tmpl, f)
+		if !waxerr.Is(err, waxerr.CodeInvalid) || !strings.Contains(err.Error(), "nest deeper than 32") {
+			t.Errorf("%s: err = %v, want CodeInvalid naming the 32-deep limit", tc.name, err)
+		}
+	}
+	p := nativeProfile
+	p.Name = "deep"
+	p.Music = nest(33, "{title}")
+	if err := p.Validate(); !waxerr.Is(err, waxerr.CodeInvalid) || !strings.Contains(err.Error(), "nest") {
+		t.Errorf("Validate = %v, want CodeInvalid about nesting", err)
+	}
+}
+
 func TestNativeMusicTemplate(t *testing.T) {
 	t.Parallel()
 	p, _ := ProfileByName("waxbin-native")

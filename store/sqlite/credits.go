@@ -634,7 +634,7 @@ func contributorArtistIDsForRole(ctx context.Context, tx *sql.Tx, itemID int64, 
 // order. It reads through the artist entity so each credit carries the artist's pid.
 func (s *Store) ItemCredits(ctx context.Context, itemPID model.PID) ([]model.Contributor, error) {
 	const op = "store.ItemCredits"
-	rows, err := s.read.QueryContext(ctx, `SELECT a.pid, a.name, ic.role, ic.position
+	rows, err := s.rdb().QueryContext(ctx, `SELECT a.pid, a.name, ic.role, ic.position
 		FROM item_contributor ic
 		JOIN artist a ON a.id = ic.artist_id
 		JOIN playable_item pi ON pi.id = ic.item_id

@@ -15,7 +15,7 @@ func trashOneFile(t *testing.T, st *Store, libID int64, path, essence string) mo
 	ctx := context.Background()
 	putTrack(t, st, libID, trackSpec{path: path, essence: essence, content: essence + "c", title: path, artist: "A"})
 	var filePID model.PID
-	if err := st.read.QueryRowContext(ctx, "SELECT pid FROM file WHERE path=?", []byte(path)).Scan(&filePID); err != nil {
+	if err := st.rdb().QueryRowContext(ctx, "SELECT pid FROM file WHERE path=?", []byte(path)).Scan(&filePID); err != nil {
 		t.Fatalf("file pid: %v", err)
 	}
 	tpidres, err := st.TrashFile(ctx, model.TrashFileInput{
@@ -47,7 +47,7 @@ func hasItemUpdate(changes []model.Change, pid model.PID) bool {
 func trashRowCount(t *testing.T, st *Store, pid model.PID) int {
 	t.Helper()
 	var n int
-	if err := st.read.QueryRowContext(context.Background(),
+	if err := st.rdb().QueryRowContext(context.Background(),
 		"SELECT COUNT(*) FROM trash WHERE pid = ?", string(pid)).Scan(&n); err != nil {
 		t.Fatalf("trash row count: %v", err)
 	}
@@ -146,7 +146,7 @@ func TestPurgeEmitsItemDelta(t *testing.T) {
 		st, lib := entityFixture(t)
 		ctx := context.Background()
 		entry := trashOneFile(t, st, lib.ID, "/lib/a.mp3", "pd2")
-		if _, err := st.write.ExecContext(ctx,
+		if _, err := st.wdb().ExecContext(ctx,
 			"DELETE FROM playable_item WHERE pid = ?", string(entry.ItemPID)); err != nil {
 			t.Fatalf("tombstone the item: %v", err)
 		}
@@ -169,7 +169,7 @@ func TestPurgeEmitsItemDelta(t *testing.T) {
 		st, _ := entityFixture(t)
 		ctx := context.Background()
 		tpid := model.NewPID()
-		if _, err := st.write.ExecContext(ctx,
+		if _, err := st.wdb().ExecContext(ctx,
 			`INSERT INTO trash (pid, item_pid, orig_path, orig_display, trash_path, trash_display,
 				reason, size, trashed_at) VALUES (?,'',?,?,?,?,'user',1,1)`,
 			string(tpid), []byte("/lib/x.mp3"), "/lib/x.mp3", []byte("/lib/t/x.mp3"), "/lib/t/x.mp3"); err != nil {

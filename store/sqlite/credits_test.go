@@ -37,7 +37,7 @@ func TestSetItemCreditsMusicRoles(t *testing.T) {
 
 	// Composer denormalization uses "; ".
 	var composer string
-	if err := st.read.QueryRowContext(ctx,
+	if err := st.rdb().QueryRowContext(ctx,
 		"SELECT composer FROM track t JOIN playable_item pi ON pi.id=t.item_id WHERE pi.pid=?", string(pid)).Scan(&composer); err != nil {
 		t.Fatalf("read composer: %v", err)
 	}
@@ -143,7 +143,7 @@ func TestSetItemCreditsDedupAndCount(t *testing.T) {
 		t.Fatalf("composer credit rows = %d, want 1", n)
 	}
 	var composer string
-	if err := st.read.QueryRowContext(ctx,
+	if err := st.rdb().QueryRowContext(ctx,
 		"SELECT composer FROM track t JOIN playable_item pi ON pi.id=t.item_id WHERE pi.pid=?", string(pid)).Scan(&composer); err != nil {
 		t.Fatalf("read: %v", err)
 	}
@@ -213,7 +213,7 @@ func TestSetCreditsArtistRenamesSingleRefArtistInPlace(t *testing.T) {
 		t.Fatalf("artist rows = %d, want 1 (renamed in place)", n)
 	}
 	var name, matchKey, gotPID string
-	if err := st.read.QueryRowContext(ctx, "SELECT name, match_key, pid FROM artist WHERE id=?", artistID).
+	if err := st.rdb().QueryRowContext(ctx, "SELECT name, match_key, pid FROM artist WHERE id=?", artistID).
 		Scan(&name, &matchKey, &gotPID); err != nil {
 		t.Fatalf("read artist: %v", err)
 	}
@@ -280,7 +280,7 @@ func TestSetCreditsAuthorRenamesInPlace(t *testing.T) {
 		t.Fatalf("old author rows = %d, want 0 (renamed in place)", n)
 	}
 	var name, matchKey, gotPID string
-	if err := st.read.QueryRowContext(ctx, "SELECT name, match_key, pid FROM artist WHERE id=?", artistID).
+	if err := st.rdb().QueryRowContext(ctx, "SELECT name, match_key, pid FROM artist WHERE id=?", artistID).
 		Scan(&name, &matchKey, &gotPID); err != nil {
 		t.Fatalf("read artist: %v", err)
 	}
@@ -374,7 +374,7 @@ func TestSetCreditsTwoAuthorsRenamesOntoFirst(t *testing.T) {
 	}
 
 	var name, matchKey, gotPID string
-	if err := st.read.QueryRowContext(ctx, "SELECT name, match_key, pid FROM artist WHERE id=?", janeID).
+	if err := st.rdb().QueryRowContext(ctx, "SELECT name, match_key, pid FROM artist WHERE id=?", janeID).
 		Scan(&name, &matchKey, &gotPID); err != nil {
 		t.Fatalf("read artist: %v", err)
 	}
@@ -422,7 +422,7 @@ func TestSetCreditsAmpersandNameStaysWhole(t *testing.T) {
 		t.Errorf("rows named after a partial split = %d, want 0", c)
 	}
 	var name, matchKey, gotPID string
-	if err := st.read.QueryRowContext(ctx, "SELECT name, match_key, pid FROM artist WHERE id=?", janeID).
+	if err := st.rdb().QueryRowContext(ctx, "SELECT name, match_key, pid FROM artist WHERE id=?", janeID).
 		Scan(&name, &matchKey, &gotPID); err != nil {
 		t.Fatalf("read artist: %v", err)
 	}
@@ -458,7 +458,7 @@ func TestSetCreditsTwoArtistsRenamesOntoFirst(t *testing.T) {
 	}
 
 	var name, matchKey, gotPID string
-	if err := st.read.QueryRowContext(ctx, "SELECT name, match_key, pid FROM artist WHERE id=?", alphaID).
+	if err := st.rdb().QueryRowContext(ctx, "SELECT name, match_key, pid FROM artist WHERE id=?", alphaID).
 		Scan(&name, &matchKey, &gotPID); err != nil {
 		t.Fatalf("read artist: %v", err)
 	}
@@ -564,7 +564,7 @@ func TestSetItemCreditsBatchCoveredRenameLandsInPlace(t *testing.T) {
 		t.Fatalf("artist rows = %d, want 1 (renamed in place, nothing split off)", n)
 	}
 	var name, matchKey, gotPID string
-	if err := st.read.QueryRowContext(ctx, "SELECT name, match_key, pid FROM artist WHERE id=?", alphaID).
+	if err := st.rdb().QueryRowContext(ctx, "SELECT name, match_key, pid FROM artist WHERE id=?", alphaID).
 		Scan(&name, &matchKey, &gotPID); err != nil {
 		t.Fatalf("read artist: %v", err)
 	}
@@ -615,7 +615,7 @@ func TestSetItemCreditsBatchCoverageComparesTarget(t *testing.T) {
 
 	// Shared is credited on S1 too, and S1 moves to Beta, so its rename is refused.
 	var name, gotPID string
-	if err := st.read.QueryRowContext(ctx, "SELECT name, pid FROM artist WHERE id=?", sharedID).
+	if err := st.rdb().QueryRowContext(ctx, "SELECT name, pid FROM artist WHERE id=?", sharedID).
 		Scan(&name, &gotPID); err != nil {
 		t.Fatalf("read Shared: %v", err)
 	}
@@ -674,7 +674,7 @@ func TestSetItemCreditsBatchContributorRoleCardinality(t *testing.T) {
 		t.Fatalf("rename producer: %v", err)
 	}
 	var name, gotPID string
-	if err := st.read.QueryRowContext(ctx, "SELECT name, pid FROM artist WHERE id=?", soloID).
+	if err := st.rdb().QueryRowContext(ctx, "SELECT name, pid FROM artist WHERE id=?", soloID).
 		Scan(&name, &gotPID); err != nil {
 		t.Fatalf("read producer: %v", err)
 	}
@@ -715,7 +715,7 @@ func TestSetItemCreditsBatchTwoRolesOneItem(t *testing.T) {
 		wantPID  model.PID
 	}{{janeID, "Janet Author", janePID}, {nedID, "Nina Narrator", nedPID}} {
 		var name, gotPID string
-		if err := st.read.QueryRowContext(ctx, "SELECT name, pid FROM artist WHERE id=?", c.id).
+		if err := st.rdb().QueryRowContext(ctx, "SELECT name, pid FROM artist WHERE id=?", c.id).
 			Scan(&name, &gotPID); err != nil {
 			t.Fatalf("read artist %d: %v", c.id, err)
 		}
@@ -753,7 +753,7 @@ func TestSetItemCreditsBatchFoldBackIntoSiblingRoleBlocksRename(t *testing.T) {
 	}
 
 	var name, gotPID string
-	if err := st.read.QueryRowContext(ctx, "SELECT name, pid FROM artist WHERE id=?", janeID).
+	if err := st.rdb().QueryRowContext(ctx, "SELECT name, pid FROM artist WHERE id=?", janeID).
 		Scan(&name, &gotPID); err != nil {
 		t.Fatalf("read Jane: %v", err)
 	}

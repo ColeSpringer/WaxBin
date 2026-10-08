@@ -396,18 +396,18 @@ func (s *Store) playStateWrite(ctx context.Context, op string, userPID, itemPID 
 // special-case "no row yet".
 func (s *Store) PlayStateFor(ctx context.Context, userPID, itemPID model.PID) (*model.PlayState, error) {
 	const op = "store.PlayStateFor"
-	userID, err := userIDByPID(ctx, s.read, userPID, op)
+	userID, err := userIDByPID(ctx, s.rdb(), userPID, op)
 	if err != nil {
 		return nil, err
 	}
-	itemID, err := itemIDByPIDRead(ctx, s.read, itemPID, op)
+	itemID, err := itemIDByPIDRead(ctx, s.rdb(), itemPID, op)
 	if err != nil {
 		return nil, err
 	}
 	st := &model.PlayState{UserPID: userPID, ItemPID: itemPID}
 	var played, finished int
 	var rating, starredAt, lastPlayed, lastProgress, ratingChanged, starredChanged, playedChanged, updatedAt sql.NullInt64
-	err = s.read.QueryRowContext(ctx,
+	err = s.rdb().QueryRowContext(ctx,
 		`SELECT position_ms, played, finished, play_count, rating, starred_at, last_played_at,
 		        last_progress_at, rating_changed_at, starred_changed_at, played_changed_at, updated_at
 		 FROM play_state WHERE user_id = ? AND item_id = ?`, userID, itemID).
@@ -451,7 +451,7 @@ func (s *Store) PlayStatesForItems(ctx context.Context, itemPIDs []model.PID) (m
 		}
 		// Each item's rows land wholly inside its own chunk, so the per-item user
 		// order below holds across the whole batch.
-		rows, err := s.read.QueryContext(ctx,
+		rows, err := s.rdb().QueryContext(ctx,
 			`SELECT u.pid, pi.pid, ps.position_ms, ps.played, ps.finished, ps.play_count,
 			        ps.rating, ps.starred_at, ps.last_played_at, ps.last_progress_at,
 			        ps.rating_changed_at, ps.starred_changed_at, ps.played_changed_at, ps.updated_at
@@ -523,15 +523,15 @@ func (s *Store) AddBookmark(ctx context.Context, userPID, itemPID model.PID, pos
 // Bookmarks lists a user's bookmarks for an item, earliest position first.
 func (s *Store) Bookmarks(ctx context.Context, userPID, itemPID model.PID) ([]model.Bookmark, error) {
 	const op = "store.Bookmarks"
-	userID, err := userIDByPID(ctx, s.read, userPID, op)
+	userID, err := userIDByPID(ctx, s.rdb(), userPID, op)
 	if err != nil {
 		return nil, err
 	}
-	itemID, err := itemIDByPIDRead(ctx, s.read, itemPID, op)
+	itemID, err := itemIDByPIDRead(ctx, s.rdb(), itemPID, op)
 	if err != nil {
 		return nil, err
 	}
-	rows, err := s.read.QueryContext(ctx,
+	rows, err := s.rdb().QueryContext(ctx,
 		"SELECT pid, position_ms, label, created_at FROM bookmark WHERE user_id=? AND item_id=? ORDER BY position_ms",
 		userID, itemID)
 	if err != nil {
@@ -599,11 +599,11 @@ func (s *Store) SetQueue(ctx context.Context, userPID model.PID, itemPIDs []mode
 // Queue returns a user's play queue in order as item views.
 func (s *Store) Queue(ctx context.Context, userPID model.PID) ([]*model.ItemView, error) {
 	const op = "store.Queue"
-	userID, err := userIDByPID(ctx, s.read, userPID, op)
+	userID, err := userIDByPID(ctx, s.rdb(), userPID, op)
 	if err != nil {
 		return nil, err
 	}
-	rows, err := s.read.QueryContext(ctx,
+	rows, err := s.rdb().QueryContext(ctx,
 		itemSelect+" JOIN play_queue q ON q.item_id = pi.id WHERE q.user_id = ? ORDER BY q.position", userID)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)

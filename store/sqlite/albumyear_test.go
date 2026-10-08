@@ -186,7 +186,7 @@ func TestVerifyReportsAlbumYearDrift(t *testing.T) {
 	st, lib := entityFixture(t)
 	ctx := context.Background()
 	putMalibu(t, st, lib.ID)
-	if _, err := st.write.ExecContext(ctx, "UPDATE album SET year = 1900"); err != nil {
+	if _, err := st.wdb().ExecContext(ctx, "UPDATE album SET year = 1900"); err != nil {
 		t.Fatalf("set the year by hand: %v", err)
 	}
 	rep, err := st.VerifyDerived(ctx)
@@ -352,7 +352,7 @@ func TestAlbumYearClearsWithItsMembers(t *testing.T) {
 		t.Errorf("album year after its member's year was cleared = %q, want none", got)
 	}
 
-	if _, err := st.write.ExecContext(ctx, "UPDATE album SET year = 1900 WHERE title = 'Venice'"); err != nil {
+	if _, err := st.wdb().ExecContext(ctx, "UPDATE album SET year = 1900 WHERE title = 'Venice'"); err != nil {
 		t.Fatal(err)
 	}
 	rep, err := st.VerifyDerived(ctx)

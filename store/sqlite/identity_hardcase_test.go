@@ -12,7 +12,7 @@ import (
 func countRows(t *testing.T, st *Store, table string) int {
 	t.Helper()
 	var n int
-	if err := st.read.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM "+table).Scan(&n); err != nil {
+	if err := st.rdb().QueryRowContext(context.Background(), "SELECT COUNT(*) FROM "+table).Scan(&n); err != nil {
 		t.Fatalf("count %s: %v", table, err)
 	}
 	return n
@@ -45,7 +45,7 @@ func TestVariousArtistsCompilationGroups(t *testing.T) {
 	}
 	// The release group is anchored on the Various Artists album-artist entity.
 	var rgArtist string
-	if err := st.read.QueryRowContext(context.Background(),
+	if err := st.rdb().QueryRowContext(context.Background(),
 		`SELECT a.name FROM release_group rg JOIN artist a ON a.id = rg.primary_artist_id`).Scan(&rgArtist); err != nil {
 		t.Fatal(err)
 	}

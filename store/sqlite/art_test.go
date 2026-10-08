@@ -87,7 +87,7 @@ func TestResolveArtOriginalAndThumbnail(t *testing.T) {
 
 	// A second request hits the cache; verify a thumb_cache row exists.
 	var n int
-	if err := st.read.QueryRowContext(ctx,
+	if err := st.rdb().QueryRowContext(ctx,
 		"SELECT COUNT(*) FROM thumb_cache WHERE source_hash = ? AND size = 48", cover.Hash).Scan(&n); err != nil {
 		t.Fatalf("count thumbs: %v", err)
 	}
@@ -141,7 +141,7 @@ func TestArtAttachedWithoutAudioChange(t *testing.T) {
 func albumPID(t *testing.T, st *Store) model.PID {
 	t.Helper()
 	var pid model.PID
-	if err := st.read.QueryRowContext(context.Background(), "SELECT pid FROM album LIMIT 1").Scan(&pid); err != nil {
+	if err := st.rdb().QueryRowContext(context.Background(), "SELECT pid FROM album LIMIT 1").Scan(&pid); err != nil {
 		t.Fatalf("album pid: %v", err)
 	}
 	return pid
@@ -218,7 +218,7 @@ func TestAlbumArtNotStaleAfterTrackDeparts(t *testing.T) {
 	putArt(t, st, lib.ID, "/lib/x/1.flac", "e1", "c1", "X", coverA)
 	putArt(t, st, lib.ID, "/lib/x/2.flac", "e2", "c2", "X", coverB)
 	var xPID model.PID
-	if err := st.read.QueryRowContext(ctx, "SELECT pid FROM album WHERE title = 'X'").Scan(&xPID); err != nil {
+	if err := st.rdb().QueryRowContext(ctx, "SELECT pid FROM album WHERE title = 'X'").Scan(&xPID); err != nil {
 		t.Fatalf("album X pid: %v", err)
 	}
 	if got, err := st.ResolveArt(ctx, model.EntityRef{Type: model.ArtAlbum, PID: xPID}, model.ArtRoleFront, 0); err != nil || got.SourceHash != coverA.Hash {
@@ -299,10 +299,10 @@ func TestGCArtRemovesOrphans(t *testing.T) {
 
 	// Simulate the backing entities vanishing without art cleanup (white-box: this
 	// is what a future delete primitive must not leave behind).
-	if _, err := st.write.ExecContext(ctx, "DELETE FROM playable_item"); err != nil {
+	if _, err := st.wdb().ExecContext(ctx, "DELETE FROM playable_item"); err != nil {
 		t.Fatalf("delete items: %v", err)
 	}
-	if _, err := st.write.ExecContext(ctx, "DELETE FROM album"); err != nil {
+	if _, err := st.wdb().ExecContext(ctx, "DELETE FROM album"); err != nil {
 		t.Fatalf("delete albums: %v", err)
 	}
 
@@ -560,7 +560,7 @@ func TestImageBytesComeLast(t *testing.T) {
 	st, _ := entityFixture(t)
 	for _, table := range []string{"art_source", "thumb_cache"} {
 		var last string
-		if err := st.read.QueryRowContext(context.Background(),
+		if err := st.rdb().QueryRowContext(context.Background(),
 			"SELECT name FROM pragma_table_info(?) ORDER BY cid DESC LIMIT 1", table).Scan(&last); err != nil {
 			t.Fatalf("%s columns: %v", table, err)
 		}

@@ -12,7 +12,7 @@ import (
 func itemID(t *testing.T, st *Store, title string) int64 {
 	t.Helper()
 	var id int64
-	if err := st.read.QueryRowContext(context.Background(),
+	if err := st.rdb().QueryRowContext(context.Background(),
 		"SELECT id FROM playable_item WHERE title = ?", title).Scan(&id); err != nil {
 		t.Fatalf("item %q: %v", title, err)
 	}
@@ -22,7 +22,7 @@ func itemID(t *testing.T, st *Store, title string) int64 {
 func defaultUserID(t *testing.T, st *Store) int64 {
 	t.Helper()
 	var id int64
-	if err := st.read.QueryRowContext(context.Background(),
+	if err := st.rdb().QueryRowContext(context.Background(),
 		"SELECT id FROM user ORDER BY id LIMIT 1").Scan(&id); err != nil {
 		t.Fatalf("default user: %v", err)
 	}
@@ -48,7 +48,7 @@ func TestYearInReview(t *testing.T) {
 	in2025 := time.Date(2025, 6, 1, 12, 0, 0, 0, time.UTC).UnixNano()
 	in2024 := time.Date(2024, 6, 1, 12, 0, 0, 0, time.UTC).UnixNano()
 	seed := func(item, started, ms int64) {
-		if _, err := st.write.ExecContext(ctx,
+		if _, err := st.wdb().ExecContext(ctx,
 			"INSERT INTO play_session(pid, user_id, item_id, started_at, ended_at, ms_played, client) VALUES (?,?,?,?,?,?,'test')",
 			string(model.NewPID()), uid, item, started, started+ms, ms); err != nil {
 			t.Fatal(err)
@@ -61,7 +61,7 @@ func TestYearInReview(t *testing.T) {
 
 	// A podcast-episode session in-year must NOT count toward the music/book recap
 	// (episodes lack the artist/genre entities the top lists key on).
-	res, err := st.write.ExecContext(ctx,
+	res, err := st.wdb().ExecContext(ctx,
 		`INSERT INTO playable_item(pid,kind,state,title,sort_key,identity_key,created_at,updated_at)
 		 VALUES (?,?,?,?,?,?,?,?)`,
 		string(model.NewPID()), "episode", "present", "Some Episode", "some episode", "ep:x", in2025, in2025)
@@ -155,7 +155,7 @@ func TestPruneChangeLog(t *testing.T) {
 		t.Error("prune deleted nothing despite many rows")
 	}
 	var remaining int
-	if err := st.read.QueryRowContext(ctx, "SELECT COUNT(*) FROM change_log").Scan(&remaining); err != nil {
+	if err := st.rdb().QueryRowContext(ctx, "SELECT COUNT(*) FROM change_log").Scan(&remaining); err != nil {
 		t.Fatal(err)
 	}
 	if remaining != 2 {

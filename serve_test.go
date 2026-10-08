@@ -1160,6 +1160,13 @@ func TestMaintenanceHandoffReopen(t *testing.T) {
 	if n := suspends.Load(); n != 1 {
 		t.Fatalf("suspend hook fired %d times before the foreground open, want once", n)
 	}
+	// Between the hooks the host's own calls are refused alike, reads included.
+	if _, err := lib.Users(ctx); !waxerr.Is(err, waxerr.CodeUnsupported) {
+		t.Errorf("a read during the hand-off: err %v, want CodeUnsupported", err)
+	}
+	if _, err := lib.DataVersion(ctx); !waxerr.Is(err, waxerr.CodeUnsupported) {
+		t.Errorf("data version during the hand-off: err %v, want CodeUnsupported", err)
+	}
 
 	// A direct read-write open now succeeds, proving the lock was released.
 	lib2, err := waxbin.Open(ctx, waxbin.Options{

@@ -26,7 +26,7 @@ func TestEditNormalizesISRC(t *testing.T) {
 		t.Fatalf("edit: %v", err)
 	}
 	var isrc string
-	if err := st.read.QueryRowContext(ctx,
+	if err := st.rdb().QueryRowContext(ctx,
 		"SELECT t.isrc FROM track t JOIN playable_item pi ON pi.id=t.item_id WHERE pi.pid=?",
 		string(res.ItemPID)).Scan(&isrc); err != nil {
 		t.Fatalf("read isrc: %v", err)
@@ -53,7 +53,7 @@ func TestEditNormalizesISRC(t *testing.T) {
 		t.Errorf("malformed isrc = %v, want CodeInvalid", err)
 	}
 	// The prior value survived the rejected edit.
-	if err := st.read.QueryRowContext(ctx,
+	if err := st.rdb().QueryRowContext(ctx,
 		"SELECT t.isrc FROM track t JOIN playable_item pi ON pi.id=t.item_id WHERE pi.pid=?",
 		string(res.ItemPID)).Scan(&isrc); err != nil || isrc != "USRC17700001" {
 		t.Errorf("isrc after rejected edit = %q (err %v), want USRC17700001", isrc, err)
@@ -64,7 +64,7 @@ func TestEditNormalizesISRC(t *testing.T) {
 		model.Attribution{Source: model.SourceUser}, model.LockOf(true), true); err != nil {
 		t.Fatalf("clear: %v", err)
 	}
-	if err := st.read.QueryRowContext(ctx,
+	if err := st.rdb().QueryRowContext(ctx,
 		"SELECT t.isrc FROM track t JOIN playable_item pi ON pi.id=t.item_id WHERE pi.pid=?",
 		string(res.ItemPID)).Scan(&isrc); err != nil || isrc != "" {
 		t.Errorf("isrc after clear = %q (err %v), want empty", isrc, err)
@@ -89,7 +89,7 @@ func TestEditNormalizesBookIdentifiers(t *testing.T) {
 		t.Fatalf("edit: %v", err)
 	}
 	var isbn, asin string
-	if err := st.read.QueryRowContext(ctx,
+	if err := st.rdb().QueryRowContext(ctx,
 		"SELECT isbn, asin FROM book b JOIN playable_item pi ON pi.id=b.item_id WHERE pi.pid=?",
 		string(res.ItemPID)).Scan(&isbn, &asin); err != nil {
 		t.Fatalf("read book: %v", err)
@@ -105,7 +105,7 @@ func TestEditNormalizesBookIdentifiers(t *testing.T) {
 		t.Fatalf("malformed isbn = %v, want CodeInvalid", err)
 	}
 	var publisher string
-	if err := st.read.QueryRowContext(ctx,
+	if err := st.rdb().QueryRowContext(ctx,
 		"SELECT publisher FROM book b JOIN playable_item pi ON pi.id=b.item_id WHERE pi.pid=?",
 		string(res.ItemPID)).Scan(&publisher); err != nil || publisher != "" {
 		t.Errorf("publisher = %q (err %v), want empty: the malformed isbn must reject the whole edit", publisher, err)
@@ -128,7 +128,7 @@ func TestEntityEditNormalizesBarcode(t *testing.T) {
 		t.Fatalf("edit: %v", err)
 	}
 	var barcode string
-	if err := st.read.QueryRowContext(ctx,
+	if err := st.rdb().QueryRowContext(ctx,
 		"SELECT COALESCE(barcode,'') FROM album WHERE pid=?", string(albumPID)).Scan(&barcode); err != nil {
 		t.Fatalf("read barcode: %v", err)
 	}
@@ -163,7 +163,7 @@ func TestBookEnrichmentSkipsInvalidIdentifier(t *testing.T) {
 		title: "Memoir", author: "Jane Author", durationMS: 100,
 	})
 	var itemID int64
-	if err := st.read.QueryRowContext(ctx,
+	if err := st.rdb().QueryRowContext(ctx,
 		"SELECT id FROM playable_item WHERE pid=?", string(res.ItemPID)).Scan(&itemID); err != nil {
 		t.Fatal(err)
 	}
@@ -181,7 +181,7 @@ func TestBookEnrichmentSkipsInvalidIdentifier(t *testing.T) {
 	}
 
 	var isbn, asin, publisher string
-	if err := st.read.QueryRowContext(ctx,
+	if err := st.rdb().QueryRowContext(ctx,
 		"SELECT isbn, asin, publisher FROM book WHERE item_id=?", itemID).Scan(&isbn, &asin, &publisher); err != nil {
 		t.Fatalf("read book: %v", err)
 	}

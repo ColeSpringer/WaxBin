@@ -11,7 +11,7 @@ import (
 func storedKey(t *testing.T, st *Store, query string, args ...any) string {
 	t.Helper()
 	var got string
-	if err := st.read.QueryRowContext(context.Background(), query, args...).Scan(&got); err != nil {
+	if err := st.rdb().QueryRowContext(context.Background(), query, args...).Scan(&got); err != nil {
 		t.Fatalf("read key (%s): %v", query, err)
 	}
 	return got
@@ -20,7 +20,7 @@ func storedKey(t *testing.T, st *Store, query string, args ...any) string {
 // changesSince returns the (entity_type, pid) of every delta appended after seq.
 func changesSince(t *testing.T, st *Store, seq int64) [][2]string {
 	t.Helper()
-	rows, err := st.read.QueryContext(context.Background(),
+	rows, err := st.rdb().QueryContext(context.Background(),
 		"SELECT entity_type, entity_pid FROM change_log WHERE seq > ? ORDER BY seq", seq)
 	if err != nil {
 		t.Fatalf("read change_log: %v", err)
@@ -55,7 +55,7 @@ func TestRefreshSortKeysClearsDrift(t *testing.T) {
 		"UPDATE genre SET sort_key = 'WRONG'",
 		"UPDATE playable_item SET sort_key = 'WRONG'",
 	} {
-		if _, err := st.write.ExecContext(ctx, stmt); err != nil {
+		if _, err := st.wdb().ExecContext(ctx, stmt); err != nil {
 			t.Fatalf("corrupt (%s): %v", stmt, err)
 		}
 	}
@@ -105,7 +105,7 @@ func TestRefreshSortKeysFolds(t *testing.T) {
 		artist: "Édith Piaf", album: "Éternelle", genre: "Chanson",
 	})
 	// What the pre-folding implementation stored: lowercased, codepoint-ordered.
-	if _, err := st.write.ExecContext(ctx,
+	if _, err := st.wdb().ExecContext(ctx,
 		"UPDATE artist SET sort_key = 'édith piaf' WHERE name = 'Édith Piaf'"); err != nil {
 		t.Fatal(err)
 	}
@@ -140,7 +140,7 @@ func TestRefreshSortKeysUsesCuratedOverride(t *testing.T) {
 		t.Fatalf("a curated override should not read as drift, got %d", rep.SortKeyDrift)
 	}
 
-	if _, err := st.write.ExecContext(ctx, "UPDATE artist SET sort_key = 'WRONG'"); err != nil {
+	if _, err := st.wdb().ExecContext(ctx, "UPDATE artist SET sort_key = 'WRONG'"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := st.RefreshSortKeys(ctx); err != nil {
@@ -188,7 +188,7 @@ func TestSortKeysAreRecomputedFromSpellings(t *testing.T) {
 		"UPDATE track SET artist_sort_key = 'stale', composer_sort_key = 'stale'",
 		"UPDATE book SET author_sort_key = 'stale'",
 	} {
-		if _, err := st.write.ExecContext(ctx, q); err != nil {
+		if _, err := st.wdb().ExecContext(ctx, q); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -235,11 +235,11 @@ func TestRefreshSortKeysCoversAliasAndSeriesSeq(t *testing.T) {
 		author: "Tolkien", series: "Middle-earth", seq: "2",
 	})
 	artistPID := storedKey(t, st, "SELECT pid FROM artist WHERE name = 'Édith Piaf'")
-	if _, err := st.write.ExecContext(ctx, `INSERT INTO artist_alias(artist_id, name, sort_key, is_primary)
+	if _, err := st.wdb().ExecContext(ctx, `INSERT INTO artist_alias(artist_id, name, sort_key, is_primary)
 		SELECT id, 'Piaf, Édith', 'piaf, édith', 0 FROM artist WHERE pid = ?`, artistPID); err != nil {
 		t.Fatalf("seed alias: %v", err)
 	}
-	if _, err := st.write.ExecContext(ctx, "UPDATE book SET series_seq_sort = 'WRONG'"); err != nil {
+	if _, err := st.wdb().ExecContext(ctx, "UPDATE book SET series_seq_sort = 'WRONG'"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -286,7 +286,7 @@ func TestRefreshSortKeysEmitsDeltas(t *testing.T) {
 	seedTwoTracks(t, st, lib.ID)
 
 	before, _ := st.LatestChangeSeq(ctx)
-	if _, err := st.write.ExecContext(ctx, "UPDATE artist SET sort_key = 'WRONG'"); err != nil {
+	if _, err := st.wdb().ExecContext(ctx, "UPDATE artist SET sort_key = 'WRONG'"); err != nil {
 		t.Fatal(err)
 	}
 	if n, err := st.RefreshSortKeys(ctx); err != nil || n != 1 {
@@ -316,7 +316,7 @@ func TestRefreshSortKeysSpansBatches(t *testing.T) {
 	st, _ := entityFixture(t)
 	ctx := context.Background()
 	const n = sortKeyBatch + 25
-	if _, err := st.write.ExecContext(ctx, `
+	if _, err := st.wdb().ExecContext(ctx, `
 		WITH RECURSIVE seq(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM seq WHERE i < ?)
 		INSERT INTO artist(pid, name, sort_key, match_key)
 		SELECT 'pid' || i, 'Édith ' || i, 'WRONG', 'edith ' || i FROM seq`, n); err != nil {
@@ -332,7 +332,7 @@ func TestRefreshSortKeysSpansBatches(t *testing.T) {
 		t.Errorf("rewrote %d rows, want all %d (the run crosses %d, the batch size)", rewritten, n, sortKeyBatch)
 	}
 	var stale int
-	if err := st.read.QueryRowContext(ctx, "SELECT COUNT(*) FROM artist WHERE sort_key = 'WRONG'").Scan(&stale); err != nil {
+	if err := st.rdb().QueryRowContext(ctx, "SELECT COUNT(*) FROM artist WHERE sort_key = 'WRONG'").Scan(&stale); err != nil {
 		t.Fatal(err)
 	}
 	if stale != 0 {

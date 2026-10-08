@@ -33,7 +33,7 @@ func (s *Store) recoverOrganize(ctx context.Context) (int, error) {
 	// open does not run a write transaction (which would bump data_version for no
 	// reason on every startup).
 	var pendingCount int
-	if err := s.read.QueryRowContext(ctx,
+	if err := s.rdb().QueryRowContext(ctx,
 		"SELECT COUNT(*) FROM organize_journal WHERE state = 'planned'").Scan(&pendingCount); err != nil {
 		return 0, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
@@ -125,7 +125,7 @@ func pathHeldByAnotherTx(ctx context.Context, tx *sql.Tx, path []byte, fileID in
 // file row is gone. The item is the one the file backs, its primary edge first.
 func (s *Store) OrganizeJournalByJob(ctx context.Context, jobPID model.PID) ([]model.OrganizeMove, error) {
 	const op = "store.OrganizeJournalByJob"
-	rows, err := s.read.QueryContext(ctx, `
+	rows, err := s.rdb().QueryContext(ctx, `
 		SELECT jo.kind, jo.src, jo.dst, COALESCE(f.pid, ''), f.path, l.root,
 			COALESCE((SELECT pi.pid FROM item_file e JOIN playable_item pi ON pi.id = e.item_id
 				WHERE e.file_id = f.id ORDER BY e.role = 'primary' DESC, pi.id LIMIT 1), '')
@@ -158,7 +158,7 @@ func (s *Store) OrganizeJournalByJob(ctx context.Context, jobPID model.PID) ([]m
 func (s *Store) OrganizeJobMoved(ctx context.Context, jobPID model.PID) (bool, error) {
 	const op = "store.OrganizeJobMoved"
 	var moved bool
-	if err := s.read.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM organize_journal
+	if err := s.rdb().QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM organize_journal
 		WHERE job_pid = ? AND kind = 'file' AND state = 'committed')`, string(jobPID)).Scan(&moved); err != nil {
 		return false, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
@@ -179,7 +179,7 @@ func (s *Store) OrganizeHistory(ctx context.Context, limit int) ([]model.Organiz
 		q += " LIMIT ?"
 		args = append(args, limit)
 	}
-	rows, err := s.read.QueryContext(ctx, q, args...)
+	rows, err := s.rdb().QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}

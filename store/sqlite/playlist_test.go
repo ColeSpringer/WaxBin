@@ -280,7 +280,7 @@ func staticPlaylist(t *testing.T, st *Store, name string, members ...model.PID) 
 // playlistPositions reads a playlist's stored positions in listing order.
 func playlistPositions(t *testing.T, st *Store, pl model.PID) []int {
 	t.Helper()
-	rows, err := st.read.QueryContext(context.Background(), `SELECT pli.position FROM playlist_item pli
+	rows, err := st.rdb().QueryContext(context.Background(), `SELECT pli.position FROM playlist_item pli
 		JOIN playlist p ON p.id = pli.playlist_id WHERE p.pid = ? ORDER BY pli.position`, string(pl))
 	if err != nil {
 		t.Fatalf("positions: %v", err)
@@ -580,7 +580,7 @@ func TestPlaylistPositionDriftIsReportedAndCompacted(t *testing.T) {
 	p := playlistTracks(t, st, lib.ID, "A", "B", "C")
 	sparse := staticPlaylist(t, st, "Sparse", p...)
 	dense := staticPlaylist(t, st, "Dense", p...)
-	if _, err := st.write.ExecContext(ctx, `UPDATE playlist_item SET position = CASE position
+	if _, err := st.wdb().ExecContext(ctx, `UPDATE playlist_item SET position = CASE position
 		WHEN 0 THEN -3 WHEN 1 THEN 4 ELSE 10 END
 		WHERE playlist_id = (SELECT id FROM playlist WHERE pid = ?)`, string(sparse)); err != nil {
 		t.Fatalf("spread the positions: %v", err)
@@ -737,12 +737,12 @@ func TestCompactPlaylistRenumbersAnyPositions(t *testing.T) {
 	p := playlistTracks(t, st, lib.ID, "A", "B", "C")
 	for _, shape := range [][]int{{0, 1, 2}, {1, 2, 3}, {2, 3, 9}, {-2, -1, 0}, {-3, 4, 10}, {-9, -8, -7}, {5, 6, 7}} {
 		pl := staticPlaylist(t, st, "P", p...)
-		if _, err := st.write.ExecContext(ctx, `UPDATE playlist_item SET position = position + 1000
+		if _, err := st.wdb().ExecContext(ctx, `UPDATE playlist_item SET position = position + 1000
 			WHERE playlist_id = (SELECT id FROM playlist WHERE pid = ?)`, string(pl)); err != nil {
 			t.Fatalf("lift: %v", err)
 		}
 		for i, pos := range shape {
-			if _, err := st.write.ExecContext(ctx, `UPDATE playlist_item SET position = ?
+			if _, err := st.wdb().ExecContext(ctx, `UPDATE playlist_item SET position = ?
 				WHERE playlist_id = (SELECT id FROM playlist WHERE pid = ?) AND position = ?`, pos, string(pl), 1000+i); err != nil {
 				t.Fatalf("shape %v: %v", shape, err)
 			}
@@ -996,7 +996,7 @@ func TestAddPlaylistItemsClosesOldGaps(t *testing.T) {
 	p := playlistTracks(t, st, lib.ID, "A", "B", "C", "D")
 	pl := staticPlaylist(t, st, "P", p[0], p[1], p[2])
 	for _, q := range []string{"position + 1000", "(position - 1000) * 3 + 1"} {
-		if _, err := st.write.ExecContext(ctx, `UPDATE playlist_item SET position = `+q+`
+		if _, err := st.wdb().ExecContext(ctx, `UPDATE playlist_item SET position = `+q+`
 			WHERE playlist_id = (SELECT id FROM playlist WHERE pid = ?)`, string(pl)); err != nil {
 			t.Fatalf("spread the positions: %v", err)
 		}

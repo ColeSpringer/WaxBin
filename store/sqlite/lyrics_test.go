@@ -149,16 +149,16 @@ func TestCoverageCountsHeldLyrics(t *testing.T) {
 	cleared, clearedPID := track("Cleared", nil)
 	apply(model.LyricsEnrichment{ItemID: cleared, PID: clearedPID, Matched: true, Provider: "lrclib",
 		Lyrics: &model.Lyrics{Source: model.SourceEnrichment, Provider: "lrclib", Unsynced: "since removed"}})
-	if _, err := st.write.ExecContext(ctx, "DELETE FROM lyrics WHERE item_id = ?", cleared); err != nil {
+	if _, err := st.wdb().ExecContext(ctx, "DELETE FROM lyrics WHERE item_id = ?", cleared); err != nil {
 		t.Fatalf("remove lyrics: %v", err)
 	}
 	track("Unasked", nil)
 	gone, _ := track("Gone", &model.Lyrics{Source: model.SourceSidecar, Unsynced: "still held"})
-	if _, err := st.write.ExecContext(ctx, "UPDATE playable_item SET state = 'missing' WHERE id = ?", gone); err != nil {
+	if _, err := st.wdb().ExecContext(ctx, "UPDATE playable_item SET state = 'missing' WHERE id = ?", gone); err != nil {
 		t.Fatalf("mark missing: %v", err)
 	}
 	putBook(t, st, lib.ID, bookSpec{path: "/lib/b.m4b", essence: "eb", content: "cb", title: "Spoken", author: "Au"})
-	if _, err := st.write.ExecContext(ctx,
+	if _, err := st.wdb().ExecContext(ctx,
 		"INSERT INTO lyrics(item_id, source, unsynced, updated_at) VALUES (?, 'user', 'a transcript', 1)",
 		itemID(t, st, "Spoken")); err != nil {
 		t.Fatalf("book lyrics: %v", err)

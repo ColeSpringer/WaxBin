@@ -379,7 +379,7 @@ func virtualTracksForFile(ctx context.Context, tx *sql.Tx, fileID int64) (map[st
 // rip to one whole-file track.
 func (s *Store) VirtualTracksForPath(ctx context.Context, path []byte) ([]model.VirtualTrack, error) {
 	const op = "store.VirtualTracksForPath"
-	rows, err := s.read.QueryContext(ctx, `SELECT COALESCE(pi.identity_key,''), pi.title, COALESCE(t.artist,''), COALESCE(t.album,''),
+	rows, err := s.rdb().QueryContext(ctx, `SELECT COALESCE(pi.identity_key,''), pi.title, COALESCE(t.artist,''), COALESCE(t.album,''),
 			COALESCE(t.album_artist,''), COALESCE(t.genre,''), COALESCE(t.track_no,0), COALESCE(t.year,0),
 			itf.start_frames, COALESCE(itf.end_frames,0)
 		FROM file f
@@ -415,7 +415,7 @@ func (s *Store) VirtualTracksForPath(ctx context.Context, path []byte) ([]model.
 // items playing a window of it; a file every item plays whole returns none.
 func (s *Store) RipTracks(ctx context.Context, filePID model.PID) ([]model.ItemRef, error) {
 	const op = "store.RipTracks"
-	rows, err := s.read.QueryContext(ctx, `SELECT pi.pid, pi.title, pi.kind
+	rows, err := s.rdb().QueryContext(ctx, `SELECT pi.pid, pi.title, pi.kind
 		FROM file f JOIN item_file itf ON itf.file_id = f.id AND itf.start_frames IS NOT NULL
 		JOIN playable_item pi ON pi.id = itf.item_id
 		WHERE f.pid = ? ORDER BY itf.start_frames, pi.id`, string(filePID))

@@ -48,7 +48,7 @@ func TestVerifyDetectsStaleRollups(t *testing.T) {
 	// Simulate a missed maintenance path by deleting the rollup rows directly; the
 	// check must flag the now-missing rows as drift.
 	for _, tbl := range []string{"artist_rollup", "genre_rollup", "release_group_rollup"} {
-		if _, err := st.write.ExecContext(ctx, "DELETE FROM "+tbl); err != nil {
+		if _, err := st.wdb().ExecContext(ctx, "DELETE FROM "+tbl); err != nil {
 			t.Fatalf("delete %s: %v", tbl, err)
 		}
 	}
@@ -81,7 +81,7 @@ func TestVerifyDetectsCorruptedRollup(t *testing.T) {
 		t.Fatalf("refresh: %v", err)
 	}
 	// Corrupt a stored rollup directly; the recompute no longer agrees.
-	if _, err := st.write.ExecContext(ctx, "UPDATE artist_rollup SET track_count = 99"); err != nil {
+	if _, err := st.wdb().ExecContext(ctx, "UPDATE artist_rollup SET track_count = 99"); err != nil {
 		t.Fatalf("corrupt: %v", err)
 	}
 	rep, err := st.VerifyDerived(ctx)
@@ -99,7 +99,7 @@ func TestVerifyDetectsSortKeyDrift(t *testing.T) {
 	ctx := context.Background()
 	seedTwoTracks(t, st, lib.ID)
 	_ = st.RefreshRollups(ctx)
-	if _, err := st.write.ExecContext(ctx, "UPDATE artist SET sort_key = 'WRONG' WHERE name='Radiohead'"); err != nil {
+	if _, err := st.wdb().ExecContext(ctx, "UPDATE artist SET sort_key = 'WRONG' WHERE name='Radiohead'"); err != nil {
 		t.Fatalf("corrupt sort key: %v", err)
 	}
 	rep, err := st.VerifyDerived(ctx)
@@ -117,7 +117,7 @@ func TestVerifyDetectsFTSGap(t *testing.T) {
 	ctx := context.Background()
 	seedTwoTracks(t, st, lib.ID)
 	_ = st.RefreshRollups(ctx)
-	if _, err := st.write.ExecContext(ctx, "DELETE FROM search_fts WHERE rowid = (SELECT MIN(id) FROM playable_item)"); err != nil {
+	if _, err := st.wdb().ExecContext(ctx, "DELETE FROM search_fts WHERE rowid = (SELECT MIN(id) FROM playable_item)"); err != nil {
 		t.Fatalf("delete fts: %v", err)
 	}
 	rep, err := st.VerifyDerived(ctx)

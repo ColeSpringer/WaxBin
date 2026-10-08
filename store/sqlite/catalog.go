@@ -108,7 +108,7 @@ func (s *Store) EnsureLibrary(ctx context.Context, lib *model.Library) (*model.L
 // path rule where it folds case (libraryByRootDB), so a re-cased Windows root finds
 // the library it names rather than reporting no such root.
 func (s *Store) LibraryByRoot(ctx context.Context, root []byte) (*model.Library, error) {
-	lib, err := libraryByRootDB(ctx, s.read, root)
+	lib, err := libraryByRootDB(ctx, s.rdb(), root)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, "store.LibraryByRoot", err)
 	}
@@ -120,7 +120,7 @@ func (s *Store) LibraryByRoot(ctx context.Context, root []byte) (*model.Library,
 
 // Libraries lists all registered libraries.
 func (s *Store) Libraries(ctx context.Context) ([]*model.Library, error) {
-	out, err := librariesDB(ctx, s.read)
+	out, err := librariesDB(ctx, s.rdb())
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, "store.Libraries", err)
 	}
@@ -233,7 +233,7 @@ func (s *Store) RemoveLibrary(ctx context.Context, libPID model.PID, beat func(d
 
 func (s *Store) removeLibrary(ctx context.Context, libPID model.PID, batch int, beat func(done, total int) error) (*model.RemoveRootReport, []model.PromotedFile, error) {
 	const op = "store.RemoveLibrary"
-	lib, err := scanLibrary(s.read.QueryRowContext(ctx, librarySelect+" WHERE pid = ?", string(libPID)))
+	lib, err := scanLibrary(s.rdb().QueryRowContext(ctx, librarySelect+" WHERE pid = ?", string(libPID)))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil, waxerr.New(waxerr.CodeNotFound, op, "no such library: "+string(libPID))
 	}
@@ -312,7 +312,7 @@ func (s *Store) removeLibrary(ctx context.Context, libPID model.PID, batch int, 
 func (s *Store) LibraryReadOnly(ctx context.Context, id int64) (bool, error) {
 	const op = "store.LibraryReadOnly"
 	var ro bool
-	err := s.read.QueryRowContext(ctx, "SELECT read_only FROM library WHERE id = ?", id).Scan(&ro)
+	err := s.rdb().QueryRowContext(ctx, "SELECT read_only FROM library WHERE id = ?", id).Scan(&ro)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, waxerr.New(waxerr.CodeNotFound, op, fmt.Sprintf("no such library: %d", id))
 	}
@@ -333,7 +333,7 @@ func (s *Store) libraryIDsByPIDs(ctx context.Context, pids []model.PID, op strin
 	out := make([]int64, 0, len(pids))
 	for _, pid := range pids {
 		var id int64
-		err := s.read.QueryRowContext(ctx, "SELECT id FROM library WHERE pid = ?", string(pid)).Scan(&id)
+		err := s.rdb().QueryRowContext(ctx, "SELECT id FROM library WHERE pid = ?", string(pid)).Scan(&id)
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, waxerr.New(waxerr.CodeNotFound, op, "no such library: "+string(pid))
 		}
@@ -788,7 +788,7 @@ func (s *Store) queryItems(ctx context.Context, q query.Query, userPID model.PID
 	if err != nil {
 		return nil, err
 	}
-	rows, err := s.read.QueryContext(ctx, stmt, args...)
+	rows, err := s.rdb().QueryContext(ctx, stmt, args...)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
@@ -999,7 +999,7 @@ func (s *Store) CountItems(ctx context.Context, q query.Query, userPID model.PID
 	// leadArgs (the join user id, or empty) precedes the WHERE args.
 	args := append(leadArgs, c.Args...)
 	var n int
-	if err := s.read.QueryRowContext(ctx, stmt, args...).Scan(&n); err != nil {
+	if err := s.rdb().QueryRowContext(ctx, stmt, args...).Scan(&n); err != nil {
 		return 0, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
 	return n, nil
@@ -1008,7 +1008,7 @@ func (s *Store) CountItems(ctx context.Context, q query.Query, userPID model.PID
 // ItemByPID returns a single item view by public id.
 func (s *Store) ItemByPID(ctx context.Context, pid model.PID) (*model.ItemView, error) {
 	const op = "store.ItemByPID"
-	v, err := scanItemView(s.rstmts.queryRowContext(ctx, s.read, itemSelect+" WHERE pi.pid = ?", string(pid)))
+	v, err := scanItemView(s.rstmts.queryRowContext(ctx, s.rdb(), itemSelect+" WHERE pi.pid = ?", string(pid)))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, waxerr.New(waxerr.CodeNotFound, op, "no such item: "+string(pid))
 	}
@@ -1037,7 +1037,7 @@ func (s *Store) ItemsByPIDs(ctx context.Context, pids []model.PID) ([]*model.Ite
 		for i, pid := range chunk {
 			args[i] = string(pid)
 		}
-		rows, err := s.read.QueryContext(ctx, itemSelect+" WHERE pi.pid IN "+placeholders(len(chunk)), args...)
+		rows, err := s.rdb().QueryContext(ctx, itemSelect+" WHERE pi.pid IN "+placeholders(len(chunk)), args...)
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
@@ -1068,7 +1068,7 @@ func (s *Store) ItemsByPIDs(ctx context.Context, pids []model.PID) ([]*model.Ite
 
 // FileByPath returns the file at the given raw path, or CodeNotFound.
 func (s *Store) FileByPath(ctx context.Context, path []byte) (*model.File, error) {
-	f, err := fileByPathDB(ctx, s.read, path)
+	f, err := fileByPathDB(ctx, s.rdb(), path)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, "store.FileByPath", err)
 	}
@@ -1080,7 +1080,7 @@ func (s *Store) FileByPath(ctx context.Context, path []byte) (*model.File, error
 
 // FileByPID returns a file (with its quality fields) by public id, or CodeNotFound.
 func (s *Store) FileByPID(ctx context.Context, pid model.PID) (*model.File, error) {
-	row := s.read.QueryRowContext(ctx, fileSelect+" WHERE pid = ?", string(pid))
+	row := s.rdb().QueryRowContext(ctx, fileSelect+" WHERE pid = ?", string(pid))
 	f, err := scanFile(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, waxerr.New(waxerr.CodeNotFound, "store.FileByPID", "no file with that pid")
@@ -1097,7 +1097,7 @@ func (s *Store) FileByPID(ctx context.Context, pid model.PID) (*model.File, erro
 // front with this instead of one file lookup per item.
 func (s *Store) FileQualitiesByItem(ctx context.Context) (map[model.PID]model.File, error) {
 	const op = "store.FileQualitiesByItem"
-	rows, err := s.read.QueryContext(ctx, `SELECT pi.pid, f.codec, f.bitrate, f.sample_rate, f.bit_depth
+	rows, err := s.rdb().QueryContext(ctx, `SELECT pi.pid, f.codec, f.bitrate, f.sample_rate, f.bit_depth
 		FROM playable_item pi
 		JOIN item_file if2 ON if2.item_id = pi.id AND if2.role = 'primary'
 		JOIN file f ON f.id = if2.file_id
@@ -1124,7 +1124,7 @@ func (s *Store) FileQualitiesByItem(ctx context.Context) (map[model.PID]model.Fi
 
 // FileByEssence returns a file by essence hash (first match), or CodeNotFound.
 func (s *Store) FileByEssence(ctx context.Context, essence string) (*model.File, error) {
-	row := s.read.QueryRowContext(ctx, fileSelect+" WHERE essence_hash = ? LIMIT 1", essence)
+	row := s.rdb().QueryRowContext(ctx, fileSelect+" WHERE essence_hash = ? LIMIT 1", essence)
 	f, err := scanFile(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, waxerr.New(waxerr.CodeNotFound, "store.FileByEssence", "no file with that essence")
@@ -1270,7 +1270,7 @@ func fileIDByPIDRead(ctx context.Context, q queryer, pid model.PID, op string) (
 // consumer never read).
 func (s *Store) ChangesSince(ctx context.Context, seq int64) ([]model.Change, error) {
 	const op = "store.ChangesSince"
-	rows, err := s.read.QueryContext(ctx,
+	rows, err := s.rdb().QueryContext(ctx,
 		"SELECT seq, ts, entity_type, entity_pid, op FROM change_log WHERE seq > ? ORDER BY seq LIMIT 1000", seq)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
@@ -1293,7 +1293,7 @@ func (s *Store) ChangesSince(ctx context.Context, seq int64) ([]model.Change, er
 		// Pruning removes a prefix, so the rows after seq are gone only when seq sits
 		// below the oldest one left.
 		var oldest int64
-		if err := s.read.QueryRowContext(ctx, "SELECT MIN(seq) FROM change_log").Scan(&oldest); err != nil {
+		if err := s.rdb().QueryRowContext(ctx, "SELECT MIN(seq) FROM change_log").Scan(&oldest); err != nil {
 			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		if seq+1 < oldest {
@@ -1319,7 +1319,7 @@ func (s *Store) ChangesSince(ctx context.Context, seq int64) ([]model.Change, er
 // LatestChangeSeq returns the highest change_log seq (0 if empty).
 func (s *Store) LatestChangeSeq(ctx context.Context) (int64, error) {
 	var seq int64
-	if err := s.read.QueryRowContext(ctx,
+	if err := s.rdb().QueryRowContext(ctx,
 		"SELECT COALESCE(MAX(seq), 0) FROM change_log").Scan(&seq); err != nil {
 		return 0, waxerr.Wrap(waxerr.CodeIO, "store.LatestChangeSeq", err)
 	}

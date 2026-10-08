@@ -28,7 +28,7 @@ func (s *Store) FilesNeedingAnalysis(ctx context.Context, algoVersion int, after
 	stmt += " ORDER BY rel_path, id LIMIT ?"
 	args = append(args, limit)
 
-	rows, err := s.read.QueryContext(ctx, stmt, args...)
+	rows, err := s.rdb().QueryContext(ctx, stmt, args...)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
@@ -80,7 +80,7 @@ const sameAudioAlternateExpr = `EXISTS (SELECT 1 FROM item_file sa
 // real progress ratio.
 func (s *Store) CountFilesNeedingAnalysis(ctx context.Context, algoVersion int) (int, error) {
 	var n int
-	if err := s.read.QueryRowContext(ctx,
+	if err := s.rdb().QueryRowContext(ctx,
 		"SELECT COUNT(*) FROM file WHERE "+needsAnalysisPredicate, algoVersion).Scan(&n); err != nil {
 		return 0, waxerr.Wrap(waxerr.CodeIO, "store.CountFilesNeedingAnalysis", err)
 	}
@@ -190,7 +190,7 @@ func (s *Store) PutAnalysis(ctx context.Context, in model.AnalysisInput) error {
 func (s *Store) ClearFingerprintFallbacks(ctx context.Context) error {
 	const op = "store.ClearFingerprintFallbacks"
 	var held bool
-	if err := s.read.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM file_diagnostic WHERE code = ?)",
+	if err := s.rdb().QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM file_diagnostic WHERE code = ?)",
 		string(model.DiagFingerprintFallback)).Scan(&held); err != nil {
 		return waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
@@ -281,7 +281,7 @@ WHERE qt.file_id = (SELECT id FROM file WHERE pid = ?)
 GROUP BY ct.file_id
 HAVING shared >= ?
 ORDER BY shared DESC`
-	rows, err := s.read.QueryContext(ctx, stmt, string(filePID), minShared)
+	rows, err := s.rdb().QueryContext(ctx, stmt, string(filePID), minShared)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
@@ -304,7 +304,7 @@ ORDER BY shared DESC`
 func (s *Store) LoadFingerprint(ctx context.Context, filePID model.PID) ([]byte, error) {
 	const op = "store.LoadFingerprint"
 	var fp []byte
-	err := s.read.QueryRowContext(ctx,
+	err := s.rdb().QueryRowContext(ctx,
 		"SELECT fp FROM fingerprint WHERE file_id = (SELECT id FROM file WHERE pid = ?)", string(filePID)).Scan(&fp)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, waxerr.New(waxerr.CodeNotFound, op, "file not analyzed: "+string(filePID))
@@ -319,7 +319,7 @@ func (s *Store) LoadFingerprint(ctx context.Context, filePID model.PID) ([]byte,
 // and the consistency check).
 func (s *Store) CountFingerprints(ctx context.Context) (int, error) {
 	var n int
-	if err := s.read.QueryRowContext(ctx, "SELECT COUNT(*) FROM fingerprint").Scan(&n); err != nil {
+	if err := s.rdb().QueryRowContext(ctx, "SELECT COUNT(*) FROM fingerprint").Scan(&n); err != nil {
 		return 0, waxerr.Wrap(waxerr.CodeIO, "store.CountFingerprints", err)
 	}
 	return n, nil

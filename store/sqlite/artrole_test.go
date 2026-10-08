@@ -349,10 +349,10 @@ func TestGCArtMultiRole(t *testing.T) {
 	}
 
 	// The entity vanishes without art cleanup; both roles' sources become orphans.
-	if _, err := st.write.ExecContext(ctx, "DELETE FROM playable_item"); err != nil {
+	if _, err := st.wdb().ExecContext(ctx, "DELETE FROM playable_item"); err != nil {
 		t.Fatalf("delete items: %v", err)
 	}
-	if _, err := st.write.ExecContext(ctx, "DELETE FROM album"); err != nil {
+	if _, err := st.wdb().ExecContext(ctx, "DELETE FROM album"); err != nil {
 		t.Fatalf("delete albums: %v", err)
 	}
 	sources, _, err := st.GCArt(ctx)
@@ -374,13 +374,13 @@ func TestVerifyCountsPodcastArtLive(t *testing.T) {
 
 	// A minimal podcast row to hang feed art on (the sync machinery is not under
 	// test here).
-	if _, err := st.write.ExecContext(ctx, `INSERT INTO podcast
+	if _, err := st.wdb().ExecContext(ctx, `INSERT INTO podcast
 		(pid, feed_url, identity_key, title, sort_key, created_at, updated_at)
 		VALUES ('pod1','https://x.test/feed','feed:https://x.test/feed','Show','show',1,1)`); err != nil {
 		t.Fatalf("insert podcast: %v", err)
 	}
 	var podID int64
-	if err := st.read.QueryRowContext(ctx, "SELECT id FROM podcast WHERE pid='pod1'").Scan(&podID); err != nil {
+	if err := st.rdb().QueryRowContext(ctx, "SELECT id FROM podcast WHERE pid='pod1'").Scan(&podID); err != nil {
 		t.Fatalf("podcast id: %v", err)
 	}
 	seedArt(t, st, "hashPodCover", "podcast", podID)
@@ -397,7 +397,7 @@ func TestVerifyCountsPodcastArtLive(t *testing.T) {
 		t.Errorf("GCArt reclaimed %d sources (err %v), want 0 for a live podcast cover", sources, err)
 	}
 	// Once the show is gone, both verify and GC flip together.
-	if _, err := st.write.ExecContext(ctx, "DELETE FROM podcast"); err != nil {
+	if _, err := st.wdb().ExecContext(ctx, "DELETE FROM podcast"); err != nil {
 		t.Fatalf("delete podcast: %v", err)
 	}
 	rep, _ = st.VerifyDerived(ctx)

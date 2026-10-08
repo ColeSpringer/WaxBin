@@ -34,7 +34,7 @@ func TestStmtCacheReusesAndEvicts(t *testing.T) {
 	c := &stmtCache{limit: 2}
 	get := func(q string) *cachedStmt {
 		t.Helper()
-		e, err := c.acquire(ctx, st.read, q)
+		e, err := c.acquire(ctx, st.rdb(), q)
 		if err != nil {
 			t.Fatalf("acquire %q: %v", q, err)
 		}
@@ -81,7 +81,7 @@ func TestStmtCacheFollowsTheReadPool(t *testing.T) {
 	}
 	defer other.Close()
 	var c stmtCache
-	first, err := c.acquire(ctx, st.read, "SELECT 1")
+	first, err := c.acquire(ctx, st.rdb(), "SELECT 1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,7 +101,7 @@ func TestStmtCacheFollowsTheReadPool(t *testing.T) {
 		t.Fatal(err)
 	}
 	c.release(second)
-	if _, err := c.acquire(ctx, st.read, "SELECT 1"); err == nil {
+	if _, err := c.acquire(ctx, st.rdb(), "SELECT 1"); err == nil {
 		t.Error("the pool the cache moved away from was served")
 	}
 }
@@ -151,7 +151,7 @@ func TestStmtCacheUnderConcurrentReaders(t *testing.T) {
 			for i := range 200 {
 				k := (g + i) % 6
 				var got int
-				if err := c.queryRowContext(ctx, st.read, fmt.Sprintf("SELECT %d", k)).Scan(&got); err != nil || got != k {
+				if err := c.queryRowContext(ctx, st.rdb(), fmt.Sprintf("SELECT %d", k)).Scan(&got); err != nil || got != k {
 					t.Errorf("SELECT %d = %d (err %v)", k, got, err)
 					return
 				}

@@ -14,7 +14,7 @@ import (
 func entityPID(t *testing.T, st *Store, table, name string) model.PID {
 	t.Helper()
 	var pid string
-	err := st.read.QueryRowContext(context.Background(),
+	err := st.rdb().QueryRowContext(context.Background(),
 		"SELECT pid FROM "+table+" WHERE name = ?", name).Scan(&pid)
 	if err != nil {
 		t.Fatalf("no %s named %q: %v", table, name, err)
@@ -25,7 +25,7 @@ func entityPID(t *testing.T, st *Store, table, name string) model.PID {
 func entityExists(t *testing.T, st *Store, table, name string) bool {
 	t.Helper()
 	var n int
-	if err := st.read.QueryRowContext(context.Background(),
+	if err := st.rdb().QueryRowContext(context.Background(),
 		"SELECT COUNT(*) FROM "+table+" WHERE name = ?", name).Scan(&n); err != nil {
 		t.Fatalf("count %s %q: %v", table, name, err)
 	}
@@ -66,7 +66,7 @@ func TestMergeArtists(t *testing.T) {
 	}
 	// The loser's name is preserved as an alias so the old spelling resolves.
 	var aliases int
-	if err := st.read.QueryRowContext(ctx,
+	if err := st.rdb().QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM artist_alias al JOIN artist a ON a.id = al.artist_id
 		 WHERE a.name = 'The Beatles' AND al.name = 'Beatles'`).Scan(&aliases); err != nil {
 		t.Fatal(err)
@@ -97,10 +97,10 @@ func TestMergeArtistsUnionsMBIDAndEnrichmentMarker(t *testing.T) {
 
 	// Give the loser an MBID + a matched enrichment marker; the survivor has neither.
 	// A direct write seeds the fixture state (the enrichment pass is not under test).
-	if _, err := st.write.ExecContext(ctx, "UPDATE artist SET mbid='mbid-x' WHERE name='Nirvana (US)'"); err != nil {
+	if _, err := st.wdb().ExecContext(ctx, "UPDATE artist SET mbid='mbid-x' WHERE name='Nirvana (US)'"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.write.ExecContext(ctx,
+	if _, err := st.wdb().ExecContext(ctx,
 		"INSERT INTO entity_enrichment(entity_type, entity_id, provider, matched, mbid, enriched_at) SELECT 'artist', id, 'musicbrainz', 1, 'mbid-x', 1 FROM artist WHERE name='Nirvana (US)'"); err != nil {
 		t.Fatal(err)
 	}
@@ -109,14 +109,14 @@ func TestMergeArtistsUnionsMBIDAndEnrichmentMarker(t *testing.T) {
 		t.Fatalf("merge: %v", err)
 	}
 	var mbid string
-	if err := st.read.QueryRowContext(ctx, "SELECT COALESCE(mbid,'') FROM artist WHERE name='Nirvana'").Scan(&mbid); err != nil {
+	if err := st.rdb().QueryRowContext(ctx, "SELECT COALESCE(mbid,'') FROM artist WHERE name='Nirvana'").Scan(&mbid); err != nil {
 		t.Fatal(err)
 	}
 	if mbid != "mbid-x" {
 		t.Errorf("survivor mbid = %q, want inherited mbid-x", mbid)
 	}
 	var marked int
-	if err := st.read.QueryRowContext(ctx,
+	if err := st.rdb().QueryRowContext(ctx,
 		"SELECT matched FROM entity_enrichment ee JOIN artist a ON a.id=ee.entity_id AND ee.entity_type='artist' WHERE a.name='Nirvana'").Scan(&marked); err != nil {
 		t.Fatalf("survivor should inherit enrichment marker: %v", err)
 	}
@@ -141,7 +141,7 @@ func TestMergeCarriesAnOwedLookup(t *testing.T) {
 	})
 	survivor := entityPID(t, st, "artist", "Nirvana")
 	loser := entityPID(t, st, "artist", "Nirvana (US)")
-	if _, err := st.write.ExecContext(ctx,
+	if _, err := st.wdb().ExecContext(ctx,
 		"INSERT INTO entity_enrichment(entity_type, entity_id, provider, matched, mbid, enriched_at, owed) SELECT 'artist', id, 'musicbrainz', 1, 'mbid-x', 1, 1 FROM artist WHERE name='Nirvana (US)'"); err != nil {
 		t.Fatal(err)
 	}
@@ -149,7 +149,7 @@ func TestMergeCarriesAnOwedLookup(t *testing.T) {
 		t.Fatalf("merge: %v", err)
 	}
 	var owed int
-	if err := st.read.QueryRowContext(ctx,
+	if err := st.rdb().QueryRowContext(ctx,
 		"SELECT owed FROM entity_enrichment ee JOIN artist a ON a.id=ee.entity_id AND ee.entity_type='artist' WHERE a.name='Nirvana'").Scan(&owed); err != nil {
 		t.Fatalf("survivor should inherit the marker: %v", err)
 	}
@@ -176,7 +176,7 @@ func TestMergeAlbumUnionsEnrichmentMarker(t *testing.T) {
 	})
 	// Album match keys embed the folder and artist, so these are two album rows.
 	var survivor, loser string
-	if err := st.read.QueryRowContext(ctx,
+	if err := st.rdb().QueryRowContext(ctx,
 		"SELECT MIN(pid), MAX(pid) FROM album").Scan(&survivor, &loser); err != nil {
 		t.Fatal(err)
 	}
@@ -185,7 +185,7 @@ func TestMergeAlbumUnionsEnrichmentMarker(t *testing.T) {
 	}
 
 	// The loser was searched and matched; the survivor was never looked up.
-	if _, err := st.write.ExecContext(ctx,
+	if _, err := st.wdb().ExecContext(ctx,
 		`INSERT INTO entity_enrichment(entity_type, entity_id, provider, matched, mbid, enriched_at)
 		 SELECT 'album', id, 'musicbrainz', 1, 'rel-x', 1 FROM album WHERE pid = ?`, loser); err != nil {
 		t.Fatal(err)
@@ -195,7 +195,7 @@ func TestMergeAlbumUnionsEnrichmentMarker(t *testing.T) {
 		t.Fatalf("merge: %v", err)
 	}
 	var matched int
-	if err := st.read.QueryRowContext(ctx,
+	if err := st.rdb().QueryRowContext(ctx,
 		`SELECT matched FROM entity_enrichment ee JOIN album al ON al.id = ee.entity_id
 		 WHERE ee.entity_type = 'album' AND al.pid = ?`, survivor).Scan(&matched); err != nil {
 		t.Fatalf("survivor should inherit the album enrichment marker: %v", err)
@@ -204,7 +204,7 @@ func TestMergeAlbumUnionsEnrichmentMarker(t *testing.T) {
 		t.Errorf("survivor album marker matched = %d, want 1", matched)
 	}
 	var stranded int
-	if err := st.read.QueryRowContext(ctx,
+	if err := st.rdb().QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM entity_enrichment ee
 		 WHERE ee.entity_type = 'album' AND NOT EXISTS (SELECT 1 FROM album al WHERE al.id = ee.entity_id)`).
 		Scan(&stranded); err != nil {
@@ -236,7 +236,7 @@ func TestMergeGenresDedupsSharedItems(t *testing.T) {
 	}
 	// The track still has exactly one genre link (to the survivor).
 	var links int
-	if err := st.read.QueryRowContext(ctx, "SELECT COUNT(*) FROM item_genre").Scan(&links); err != nil {
+	if err := st.rdb().QueryRowContext(ctx, "SELECT COUNT(*) FROM item_genre").Scan(&links); err != nil {
 		t.Fatal(err)
 	}
 	if links != 1 {
@@ -265,7 +265,7 @@ func TestMergeAlbumsAcrossReleaseGroups(t *testing.T) {
 	})
 	// Album match keys embed the folder + artist, so these are two album rows.
 	var survivor, loser string
-	rows, err := st.read.QueryContext(ctx, "SELECT pid FROM album ORDER BY id")
+	rows, err := st.rdb().QueryContext(ctx, "SELECT pid FROM album ORDER BY id")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -294,7 +294,7 @@ func TestMergeAlbumsAcrossReleaseGroups(t *testing.T) {
 		t.Errorf("children = %d, want 1 track re-pointed", rep.Children)
 	}
 	var albums int
-	if err := st.read.QueryRowContext(ctx, "SELECT COUNT(*) FROM album").Scan(&albums); err != nil {
+	if err := st.rdb().QueryRowContext(ctx, "SELECT COUNT(*) FROM album").Scan(&albums); err != nil {
 		t.Fatal(err)
 	}
 	if albums != 1 {
@@ -309,7 +309,7 @@ func TestMergeAlbumsAcrossReleaseGroups(t *testing.T) {
 func artistID(t *testing.T, st *Store, name string) int64 {
 	t.Helper()
 	var id int64
-	if err := st.read.QueryRowContext(context.Background(),
+	if err := st.rdb().QueryRowContext(context.Background(),
 		"SELECT id FROM artist WHERE name = ?", name).Scan(&id); err != nil {
 		t.Fatalf("artist %q: %v", name, err)
 	}
@@ -320,12 +320,12 @@ func artistID(t *testing.T, st *Store, name string) int64 {
 func seedArt(t *testing.T, st *Store, hash, entityType string, entityID int64) {
 	t.Helper()
 	ctx := context.Background()
-	if _, err := st.write.ExecContext(ctx,
+	if _, err := st.wdb().ExecContext(ctx,
 		"INSERT OR IGNORE INTO art_source(hash, format, size, data, created_at) VALUES (?,?,?,?,1)",
 		hash, "jpeg", 3, []byte("img")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.write.ExecContext(ctx,
+	if _, err := st.wdb().ExecContext(ctx,
 		"INSERT INTO art_map(entity_type, entity_id, source_hash, role, source, updated_at) VALUES (?,?,?,'front','tag',1)",
 		entityType, entityID, hash); err != nil {
 		t.Fatal(err)
@@ -334,7 +334,7 @@ func seedArt(t *testing.T, st *Store, hash, entityType string, entityID int64) {
 
 func artHashes(t *testing.T, st *Store, entityType string, entityID int64) []string {
 	t.Helper()
-	rows, err := st.read.QueryContext(context.Background(),
+	rows, err := st.rdb().QueryContext(context.Background(),
 		"SELECT source_hash FROM art_map WHERE entity_type = ? AND entity_id = ? ORDER BY source_hash",
 		entityType, entityID)
 	if err != nil {
@@ -404,12 +404,12 @@ func TestMergeArtistInheritsArtWhenSurvivorHasNone(t *testing.T) {
 func seedArtRole(t *testing.T, st *Store, hash, entityType string, entityID int64, role string) {
 	t.Helper()
 	ctx := context.Background()
-	if _, err := st.write.ExecContext(ctx,
+	if _, err := st.wdb().ExecContext(ctx,
 		"INSERT OR IGNORE INTO art_source(hash, format, size, data, created_at) VALUES (?,?,?,?,1)",
 		hash, "jpeg", 3, []byte("img")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.write.ExecContext(ctx,
+	if _, err := st.wdb().ExecContext(ctx,
 		"INSERT INTO art_map(entity_type, entity_id, source_hash, role, source, updated_at) VALUES (?,?,?,?,'tag',1)",
 		entityType, entityID, hash, role); err != nil {
 		t.Fatal(err)
@@ -493,7 +493,7 @@ func TestMergeCarriesRoleArtLocks(t *testing.T) {
 // seedRoleLock writes an entity_curation row for one art field in the given lock state.
 func seedRoleLock(t *testing.T, st *Store, entityType string, entityID int64, field string, locked bool) {
 	t.Helper()
-	if _, err := st.write.ExecContext(context.Background(),
+	if _, err := st.wdb().ExecContext(context.Background(),
 		`INSERT INTO entity_curation(entity_type, entity_id, field, source, locked, updated_at)
 		 VALUES (?,?,?,'user',?,1)`, entityType, entityID, field, boolInt(locked)); err != nil {
 		t.Fatal(err)
@@ -516,7 +516,7 @@ func TestMergePreservesUnrelatedSelfLoop(t *testing.T) {
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/c/3.flac", essence: "e3", content: "c3", title: "Three", artist: "Cartist", album: "C"})
 	cID := artistID(t, st, "Cartist")
 	// A pre-existing self-loop on an UNRELATED artist (bad enrichment data).
-	if _, err := st.write.ExecContext(ctx,
+	if _, err := st.wdb().ExecContext(ctx,
 		"INSERT INTO artist_relation(src_id, dst_id, kind) VALUES (?,?,'similar')", cID, cID); err != nil {
 		t.Fatal(err)
 	}
@@ -525,7 +525,7 @@ func TestMergePreservesUnrelatedSelfLoop(t *testing.T) {
 		t.Fatalf("merge: %v", err)
 	}
 	var n int
-	if err := st.read.QueryRowContext(ctx,
+	if err := st.rdb().QueryRowContext(ctx,
 		"SELECT COUNT(*) FROM artist_relation WHERE src_id = ? AND dst_id = ?", cID, cID).Scan(&n); err != nil {
 		t.Fatal(err)
 	}
@@ -560,7 +560,7 @@ func TestMergeEmitsPerItemChangeLog(t *testing.T) {
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/a/1.flac", essence: "e1", content: "c1", title: "LoserSong", artist: "Beatles", album: "A"})
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/b/2.flac", essence: "e2", content: "c2", title: "SurvSong", artist: "The Beatles", album: "B"})
 	var itemPID string
-	if err := st.read.QueryRowContext(ctx, "SELECT pid FROM playable_item WHERE title = 'LoserSong'").Scan(&itemPID); err != nil {
+	if err := st.rdb().QueryRowContext(ctx, "SELECT pid FROM playable_item WHERE title = 'LoserSong'").Scan(&itemPID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := st.MergeEntity(ctx, model.MergeArtist,
@@ -570,7 +570,7 @@ func TestMergeEmitsPerItemChangeLog(t *testing.T) {
 	// The re-pointed track's item-to-artist association changed, so a delta-sync
 	// consumer must see a per-item update.
 	var n int
-	if err := st.read.QueryRowContext(ctx,
+	if err := st.rdb().QueryRowContext(ctx,
 		"SELECT COUNT(*) FROM change_log WHERE entity_type = 'item' AND op = 'update' AND entity_pid = ?",
 		itemPID).Scan(&n); err != nil {
 		t.Fatal(err)
@@ -587,21 +587,21 @@ func TestMergeReleaseGroupUnionsType(t *testing.T) {
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/a/1.flac", essence: "e1", content: "c1", title: "One", artist: "A", albumArt: "A", album: "SurvRG"})
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/b/2.flac", essence: "e2", content: "c2", title: "Two", artist: "B", albumArt: "B", album: "LoseRG"})
 	// The loser release group carries a specific type; the survivor has the default.
-	if _, err := st.write.ExecContext(ctx, "UPDATE release_group SET type='compilation' WHERE title='LoseRG'"); err != nil {
+	if _, err := st.wdb().ExecContext(ctx, "UPDATE release_group SET type='compilation' WHERE title='LoseRG'"); err != nil {
 		t.Fatal(err)
 	}
 	var survivorRG, loserRG string
-	if err := st.read.QueryRowContext(ctx, "SELECT pid FROM release_group WHERE title='SurvRG'").Scan(&survivorRG); err != nil {
+	if err := st.rdb().QueryRowContext(ctx, "SELECT pid FROM release_group WHERE title='SurvRG'").Scan(&survivorRG); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.read.QueryRowContext(ctx, "SELECT pid FROM release_group WHERE title='LoseRG'").Scan(&loserRG); err != nil {
+	if err := st.rdb().QueryRowContext(ctx, "SELECT pid FROM release_group WHERE title='LoseRG'").Scan(&loserRG); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := st.MergeEntity(ctx, model.MergeReleaseGroup, model.PID(survivorRG), model.PID(loserRG)); err != nil {
 		t.Fatalf("merge: %v", err)
 	}
 	var typ string
-	if err := st.read.QueryRowContext(ctx, "SELECT type FROM release_group WHERE pid = ?", survivorRG).Scan(&typ); err != nil {
+	if err := st.rdb().QueryRowContext(ctx, "SELECT type FROM release_group WHERE pid = ?", survivorRG).Scan(&typ); err != nil {
 		t.Fatal(err)
 	}
 	if typ != "compilation" {
@@ -624,7 +624,7 @@ func TestMergeDropsLoserAuxMarker(t *testing.T) {
 		t.Helper()
 		var id int64
 		var pid string
-		if err := st.read.QueryRowContext(ctx,
+		if err := st.rdb().QueryRowContext(ctx,
 			"SELECT id, pid FROM release_group WHERE title = ?", title).Scan(&id, &pid); err != nil {
 			t.Fatalf("no release group titled %q: %v", title, err)
 		}
@@ -849,7 +849,7 @@ func TestMergeAlbumDropsFieldsMarker(t *testing.T) {
 		t.Helper()
 		var id int64
 		var pid string
-		if err := st.read.QueryRowContext(ctx,
+		if err := st.rdb().QueryRowContext(ctx,
 			"SELECT id, pid FROM album WHERE title = ?", title).Scan(&id, &pid); err != nil {
 			t.Fatalf("no album titled %q: %v", title, err)
 		}

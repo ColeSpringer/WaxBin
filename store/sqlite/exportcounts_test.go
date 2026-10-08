@@ -22,7 +22,7 @@ func TestExportCounts(t *testing.T) {
 	}
 	putFeed(t, st, "http://cast.example/f", "Ep1")
 	var episode string
-	if err := st.read.QueryRowContext(ctx, "SELECT pid FROM playable_item WHERE kind = 'episode'").Scan(&episode); err != nil {
+	if err := st.rdb().QueryRowContext(ctx, "SELECT pid FROM playable_item WHERE kind = 'episode'").Scan(&episode); err != nil {
 		t.Fatal(err)
 	}
 	for _, pid := range []model.PID{track, model.PID(episode)} {

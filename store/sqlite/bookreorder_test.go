@@ -142,7 +142,7 @@ func TestARipJoiningALargerBookLeavesItUnfinished(t *testing.T) {
 	if _, err := st.PutScannedVirtualTracks(ctx, in); err != nil {
 		t.Fatal(err)
 	}
-	rows, err := st.read.QueryContext(ctx, "SELECT pid FROM playable_item WHERE kind = 'track'")
+	rows, err := st.rdb().QueryContext(ctx, "SELECT pid FROM playable_item WHERE kind = 'track'")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -300,10 +300,10 @@ func TestAPlaceMovedOntoATrackDatesItsRow(t *testing.T) {
 	id := func(pid model.PID) int64 {
 		return int64(scalarInt(t, st, "SELECT id FROM playable_item WHERE pid = ?", string(pid)))
 	}
-	if _, err := st.write.ExecContext(ctx, "UPDATE play_state SET updated_at = 100, last_progress_at = 100 WHERE item_id = ?", id(track)); err != nil {
+	if _, err := st.wdb().ExecContext(ctx, "UPDATE play_state SET updated_at = 100, last_progress_at = 100 WHERE item_id = ?", id(track)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.write.ExecContext(ctx, "UPDATE play_state SET updated_at = 200, last_progress_at = 200 WHERE item_id = ?", id(whole)); err != nil {
+	if _, err := st.wdb().ExecContext(ctx, "UPDATE play_state SET updated_at = 200, last_progress_at = 200 WHERE item_id = ?", id(whole)); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.writeTx(ctx, func(tx *sql.Tx) error {
@@ -312,7 +312,7 @@ func TestAPlaceMovedOntoATrackDatesItsRow(t *testing.T) {
 		t.Fatal(err)
 	}
 	var pos, updated, finished int64
-	if err := st.read.QueryRowContext(ctx, "SELECT position_ms, updated_at, finished FROM play_state WHERE item_id = ?", id(track)).
+	if err := st.rdb().QueryRowContext(ctx, "SELECT position_ms, updated_at, finished FROM play_state WHERE item_id = ?", id(track)).
 		Scan(&pos, &updated, &finished); err != nil {
 		t.Fatal(err)
 	}

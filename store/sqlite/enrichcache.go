@@ -25,7 +25,7 @@ const enrichCacheExemptPrefix = "caa:"
 // rather than the payload, the same reason ThumbCacheStats gives.
 func (s *Store) EnrichmentCacheStats(ctx context.Context) (*model.EnrichmentCacheReport, error) {
 	const op = "store.EnrichmentCacheStats"
-	rows, err := s.read.QueryContext(ctx, "SELECT cache_key, LENGTH(payload), fetched_at FROM enrichment_cache")
+	rows, err := s.rdb().QueryContext(ctx, "SELECT cache_key, LENGTH(payload), fetched_at FROM enrichment_cache")
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}

@@ -17,7 +17,7 @@ func (s *Store) LoudnessByItem(ctx context.Context, itemPID model.PID) (*model.L
 	const op = "store.LoudnessByItem"
 	var l model.Loudness
 	var integrated, trackGain, trackPeak, albumGain, albumPeak sql.NullFloat64
-	err := s.read.QueryRowContext(ctx, `SELECT l.integrated_lufs, l.track_gain_db, l.track_peak, l.album_gain_db, l.album_peak
+	err := s.rdb().QueryRowContext(ctx, `SELECT l.integrated_lufs, l.track_gain_db, l.track_peak, l.album_gain_db, l.album_peak
 		FROM loudness l
 		JOIN file f ON f.id = l.file_id AND f.essence_hash = l.essence_hash
 		JOIN item_file pf ON pf.file_id = l.file_id AND pf.role = 'primary'
@@ -38,7 +38,7 @@ func (s *Store) LoudnessByItem(ctx context.Context, itemPID model.PID) (*model.L
 // doctor's ReplayGain coverage. Stale rows awaiting re-analysis are excluded.
 func (s *Store) CountLoudness(ctx context.Context) (int, error) {
 	var n int
-	if err := s.read.QueryRowContext(ctx,
+	if err := s.rdb().QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM loudness l JOIN file f ON f.id = l.file_id AND f.essence_hash = l.essence_hash`).
 		Scan(&n); err != nil {
 		return 0, waxerr.Wrap(waxerr.CodeIO, "store.CountLoudness", err)
@@ -53,7 +53,7 @@ func (s *Store) CountLoudness(ctx context.Context) (int, error) {
 // standalone track has a NULL album gain, so HasAlbum=false).
 func (s *Store) ReplayGainWriteback(ctx context.Context) ([]model.ReplayGainRow, error) {
 	const op = "store.ReplayGainWriteback"
-	rows, err := s.read.QueryContext(ctx, `SELECT f.pid, f.library_id, f.path, COALESCE(f.container,''), COALESCE(f.codec,''),
+	rows, err := s.rdb().QueryContext(ctx, `SELECT f.pid, f.library_id, f.path, COALESCE(f.container,''), COALESCE(f.codec,''),
 			f.size, f.mtime_ns, l.track_gain_db, COALESCE(l.track_peak, 0), l.album_gain_db, COALESCE(l.album_peak, 0)
 		FROM loudness l
 		JOIN file f ON f.id = l.file_id AND f.essence_hash = l.essence_hash
@@ -89,7 +89,7 @@ func (s *Store) ReplayGainWriteback(ctx context.Context) ([]model.ReplayGainRow,
 func (s *Store) LoadPeaksForFile(ctx context.Context, filePID model.PID) (*model.PeaksData, error) {
 	const op = "store.LoadPeaksForFile"
 	var pk model.PeaksData
-	err := s.read.QueryRowContext(ctx, `SELECT p.version, p.bucket_count, p.data, p.frames, p.sample_rate
+	err := s.rdb().QueryRowContext(ctx, `SELECT p.version, p.bucket_count, p.data, p.frames, p.sample_rate
 		FROM peaks p
 		JOIN file f ON f.id = p.file_id AND f.essence_hash = p.essence_hash
 		WHERE f.pid = ?`, string(filePID)).Scan(&pk.Version, &pk.Buckets, &pk.Data, &pk.Frames, &pk.SampleRate)
@@ -126,7 +126,7 @@ func (s *Store) LoadPeaksForItem(ctx context.Context, itemPID model.PID) ([]mode
 	if err != nil {
 		return nil, err
 	}
-	rows, err := s.read.QueryContext(ctx, `SELECT p.file_id, p.version, p.bucket_count, p.data, p.frames, p.sample_rate
+	rows, err := s.rdb().QueryContext(ctx, `SELECT p.file_id, p.version, p.bucket_count, p.data, p.frames, p.sample_rate
 		FROM peaks p
 		JOIN file f ON f.id = p.file_id AND f.essence_hash = p.essence_hash
 		JOIN item_file itf ON itf.file_id = p.file_id
@@ -166,7 +166,7 @@ func (s *Store) LoadPeaksForItem(ctx context.Context, itemPID model.PID) ([]mode
 func (s *Store) LoadPeaks(ctx context.Context, itemPID model.PID) (*model.PeaksData, error) {
 	const op = "store.LoadPeaks"
 	var pk model.PeaksData
-	err := s.read.QueryRowContext(ctx, `SELECT p.version, p.bucket_count, p.data, p.frames, p.sample_rate
+	err := s.rdb().QueryRowContext(ctx, `SELECT p.version, p.bucket_count, p.data, p.frames, p.sample_rate
 		FROM peaks p
 		JOIN file f ON f.id = p.file_id AND f.essence_hash = p.essence_hash
 		JOIN item_file pf ON pf.file_id = p.file_id AND pf.role = 'primary'
@@ -190,7 +190,7 @@ func (s *Store) RefreshAlbumGain(ctx context.Context) error {
 
 	// No write transaction is needed when the catalog has no loudness rows.
 	var n int
-	if err := s.read.QueryRowContext(ctx, "SELECT COUNT(*) FROM loudness").Scan(&n); err != nil {
+	if err := s.rdb().QueryRowContext(ctx, "SELECT COUNT(*) FROM loudness").Scan(&n); err != nil {
 		return waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
 	if n == 0 {
@@ -200,7 +200,7 @@ func (s *Store) RefreshAlbumGain(ctx context.Context) error {
 	// Read every current loudness row, plus its album membership and existing
 	// album gain. Rows with a NULL album_id are included so tracks that left an
 	// album get cleared.
-	rows, err := s.read.QueryContext(ctx, `SELECT l.file_id, pi.pid, t.album_id,
+	rows, err := s.rdb().QueryContext(ctx, `SELECT l.file_id, pi.pid, t.album_id,
 			l.track_gain_db, COALESCE(l.track_peak,0), COALESCE(f.duration_ms,0),
 			l.album_gain_db, l.album_peak
 		FROM loudness l

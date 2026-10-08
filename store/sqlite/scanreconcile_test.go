@@ -45,7 +45,7 @@ func moveFixtureAt(t *testing.T, first, second string) (*Store, *model.Library, 
 	if _, err := st.SetEntityStar(ctx, "", model.MergeAlbum, albPID, true, nil); err != nil {
 		t.Fatalf("seed star: %v", err)
 	}
-	if _, err := st.write.ExecContext(ctx, `INSERT INTO entity_enrichment(entity_type, entity_id, provider, matched, mbid, enriched_at)
+	if _, err := st.wdb().ExecContext(ctx, `INSERT INTO entity_enrichment(entity_type, entity_id, provider, matched, mbid, enriched_at)
 		VALUES ('release_group', ?, 'musicbrainz', 1, NULL, 1)`, rgID); err != nil {
 		t.Fatalf("seed marker: %v", err)
 	}
@@ -413,13 +413,13 @@ func TestScanAlbumArtistRetagIntoEstablishedAlbumKeepsGroupPID(t *testing.T) {
 	}
 	// Re-point the old group's primary artist onto a row no frame references, then
 	// repair the rollups so the retag starts from a clean slate.
-	if _, err := st.write.ExecContext(ctx,
+	if _, err := st.wdb().ExecContext(ctx,
 		"INSERT INTO artist(pid, name, sort_key, match_key) VALUES (?,?,?,?)",
 		string(model.NewPID()), "Gamma", model.SortKey("Gamma"), identity.MatchKey("Gamma")); err != nil {
 		t.Fatalf("seed canonical artist: %v", err)
 	}
 	gammaID := scalarInt(t, st, "SELECT id FROM artist WHERE name='Gamma'")
-	if _, err := st.write.ExecContext(ctx,
+	if _, err := st.wdb().ExecContext(ctx,
 		"UPDATE release_group SET primary_artist_id=? WHERE id=?", gammaID, rgID); err != nil {
 		t.Fatalf("re-point primary artist: %v", err)
 	}
@@ -664,7 +664,7 @@ func sameFolderAlbum(t *testing.T, st *Store, lib *model.Library) (albumID, rgID
 // id lands without a re-key, so the row keeps the heuristic key a scan computes for it.
 func setEntityMBIDColumn(t *testing.T, st *Store, table string, id int, mbid string) {
 	t.Helper()
-	if _, err := st.write.ExecContext(context.Background(),
+	if _, err := st.wdb().ExecContext(context.Background(),
 		"UPDATE "+table+" SET mbid=? WHERE id=?", mbid, id); err != nil {
 		t.Fatalf("set %s mbid: %v", table, err)
 	}

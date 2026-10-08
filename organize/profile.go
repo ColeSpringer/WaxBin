@@ -93,7 +93,8 @@ type ProfileSet struct {
 
 // Validate checks that p can lay out every media kind: it has a name, and each
 // template is present and parses against the known fields. A bad template
-// (unbalanced groups or braces, an unknown field) is CodeInvalid.
+// (unbalanced groups or braces, groups nested too deep, an unknown field) is
+// CodeInvalid.
 func (p Profile) Validate() error {
 	const op = "organize.Validate"
 	if p.Name == "" {
@@ -121,8 +122,8 @@ func (p Profile) Validate() error {
 // NewProfileSet validates each custom profile's templates and returns a set that
 // resolves them ahead of the built-ins. A custom profile with the same name as a
 // built-in overrides it; an empty template field inherits the built-in's. A bad
-// template (unbalanced groups/braces, unknown field) is rejected here so the
-// failure surfaces at config load, not at the first organize.
+// template (unbalanced groups/braces, groups nested too deep, an unknown field) is
+// rejected here so the failure surfaces at config load, not at the first organize.
 func NewProfileSet(custom []Profile) (*ProfileSet, error) {
 	set := &ProfileSet{byName: make(map[string]Profile, len(builtins)+len(custom))}
 	for name, p := range builtins {

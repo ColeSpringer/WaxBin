@@ -4,8 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"os"
-	"time"
 
+	"github.com/colespringer/waxbin/internal/lockwait"
 	"github.com/colespringer/waxbin/waxerr"
 	"github.com/gofrs/flock"
 )
@@ -96,33 +96,21 @@ func ProbeWriteLock(dbPath string) error {
 	return fl.Unlock()
 }
 
-// acquireWriteLockRetry is acquireWriteLock with bounded exponential backoff over
-// a live-owner conflict. It exists for the maintenance-mode reopen: as a hand-off
-// ends, a foreground process may still be releasing the flock, so the daemon must
-// wait that transient hold out rather than fail its reopen. A persistently held
-// lock still surfaces the CodeConflict (naming the owner); a non-conflict error is
-// terminal immediately; ctx cancellation aborts the wait.
+// acquireWriteLockRetry is acquireWriteLock waiting out a live-owner conflict with
+// lockwait.Retry. It exists for the maintenance-mode reopen: as a hand-off ends, a
+// foreground process may still be releasing the flock, so the daemon must wait that
+// transient hold out rather than fail its reopen.
 func acquireWriteLockRetry(ctx context.Context, lockPath, owner, ipcSocket string) (*writeLock, error) {
-	const maxAttempts = 60
-	const maxBackoff = 250 * time.Millisecond
-	backoff := 5 * time.Millisecond
-	for attempt := 0; ; attempt++ {
-		lock, err := acquireWriteLock(lockPath, owner, ipcSocket, nowNS())
-		if err == nil {
-			return lock, nil
-		}
-		if !waxerr.Is(err, waxerr.CodeConflict) || attempt >= maxAttempts {
-			return nil, err
-		}
-		select {
-		case <-ctx.Done():
-			return nil, waxerr.FromContext("sqlite.acquireWriteLockRetry", ctx.Err(), waxerr.CodeConflict)
-		case <-time.After(backoff):
-		}
-		if backoff < maxBackoff {
-			backoff *= 2
-		}
+	var lock *writeLock
+	err := lockwait.Retry(ctx, "sqlite.acquireWriteLockRetry", func() error {
+		var err error
+		lock, err = acquireWriteLock(lockPath, owner, ipcSocket, nowNS())
+		return err
+	})
+	if err != nil {
+		return nil, err
 	}
+	return lock, nil
 }
 
 // ReadOwnerInfo reads the owner record for the lockfile at lockPath without

@@ -213,11 +213,11 @@ func (s *Store) SetFieldProvenance(ctx context.Context, itemPID model.PID, field
 // since the value is bytes.
 func (s *Store) FieldProvenance(ctx context.Context, itemPID model.PID) ([]model.FieldProvenance, error) {
 	const op = "store.FieldProvenance"
-	itemID, err := itemIDByPIDRead(ctx, s.read, itemPID, op)
+	itemID, err := itemIDByPIDRead(ctx, s.rdb(), itemPID, op)
 	if err != nil {
 		return nil, err
 	}
-	rows, err := s.read.QueryContext(ctx, `SELECT fp.field, fp.source, fp.locked,
+	rows, err := s.rdb().QueryContext(ctx, `SELECT fp.field, fp.source, fp.locked,
 		COALESCE(fp.value,''), COALESCE(fp.provider,''), fp.updated_at
 		FROM field_provenance fp WHERE fp.item_id = ? ORDER BY fp.field`, itemID)
 	if err != nil {
@@ -262,7 +262,7 @@ func (s *Store) overlayArtifact(ctx context.Context, itemPID model.PID, itemID i
 	const op = "store.FieldProvenance"
 	var source string
 	fp := model.FieldProvenance{ItemPID: itemPID, Field: field}
-	err := s.read.QueryRowContext(ctx, q, itemID).Scan(&source, &fp.Provider, &fp.SourceURL, &fp.UpdatedAt)
+	err := s.rdb().QueryRowContext(ctx, q, itemID).Scan(&source, &fp.Provider, &fp.SourceURL, &fp.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return rows, nil
 	}
@@ -285,7 +285,7 @@ func (s *Store) overlayArtifact(ctx context.Context, itemPID model.PID, itemID i
 // field. A credit and the field it fills are both in it when either is locked. An item
 // with no locks returns an empty (non-nil) map.
 func (s *Store) LockedFields(ctx context.Context, itemPID model.PID) (map[string]bool, error) {
-	rows, err := s.read.QueryContext(ctx, `SELECT fp.field
+	rows, err := s.rdb().QueryContext(ctx, `SELECT fp.field
 		FROM field_provenance fp JOIN playable_item pi ON pi.id = fp.item_id
 		WHERE pi.pid = ? AND fp.locked = 1`, string(itemPID))
 	if err != nil {
@@ -311,7 +311,7 @@ func (s *Store) LockedFields(ctx context.Context, itemPID model.PID) (map[string
 func (s *Store) IsFieldLocked(ctx context.Context, itemPID model.PID, field string) (bool, error) {
 	spellings := lockSpellings(field)
 	var locked bool
-	err := s.read.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1
+	err := s.rdb().QueryRowContext(ctx, `SELECT EXISTS(SELECT 1
 		FROM field_provenance fp JOIN playable_item pi ON pi.id = fp.item_id
 		WHERE pi.pid = ? AND fp.locked = 1 AND fp.field IN `+placeholders(len(spellings))+`)`,
 		append([]any{string(itemPID)}, anySlice(spellings)...)...).Scan(&locked)

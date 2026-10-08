@@ -13,7 +13,7 @@ import (
 // episodePIDsByTitle reads the pids of a feed's episodes keyed by title.
 func episodePIDsByTitle(t *testing.T, st *Store) map[string]model.PID {
 	t.Helper()
-	rows, err := st.read.QueryContext(context.Background(),
+	rows, err := st.rdb().QueryContext(context.Background(),
 		"SELECT pi.title, pi.pid FROM playable_item pi WHERE pi.kind = 'episode'")
 	if err != nil {
 		t.Fatal(err)

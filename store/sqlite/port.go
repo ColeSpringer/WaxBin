@@ -48,7 +48,7 @@ func (s *Store) SetSecret(ctx context.Context, key, value string) error {
 func (s *Store) GetSecret(ctx context.Context, key string) (string, error) {
 	const op = "store.GetSecret"
 	var v string
-	err := s.read.QueryRowContext(ctx, "SELECT value FROM secret WHERE key = ?", key).Scan(&v)
+	err := s.rdb().QueryRowContext(ctx, "SELECT value FROM secret WHERE key = ?", key).Scan(&v)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", waxerr.New(waxerr.CodeNotFound, op, "no such secret: "+key)
 	}
@@ -82,7 +82,7 @@ func (s *Store) BackupTo(ctx context.Context, dest string) error {
 	if strings.TrimSpace(dest) == "" {
 		return waxerr.New(waxerr.CodeInvalid, op, "empty backup destination")
 	}
-	if _, err := s.read.ExecContext(ctx, "VACUUM INTO ?", dest); err != nil {
+	if _, err := s.rdb().ExecContext(ctx, "VACUUM INTO ?", dest); err != nil {
 		return waxerr.Wrapf(waxerr.CodeIO, op, err, "backing up to %s", dest)
 	}
 	// The backup carries the secret table, so restrict it like the live catalog.
@@ -94,7 +94,7 @@ func (s *Store) BackupTo(ctx context.Context, dest string) error {
 // the logical export. It is ordered for a stable export.
 func (s *Store) AllPlayStates(ctx context.Context) ([]model.PlayState, error) {
 	const op = "store.AllPlayStates"
-	rows, err := s.read.QueryContext(ctx, `
+	rows, err := s.rdb().QueryContext(ctx, `
 		SELECT u.pid, pi.pid, ps.position_ms, ps.played, ps.finished, ps.play_count,
 		       ps.rating, ps.starred_at, ps.last_played_at, ps.last_progress_at,
 		       ps.rating_changed_at, ps.starred_changed_at, ps.played_changed_at, ps.updated_at
@@ -135,7 +135,7 @@ func (s *Store) AllPlayStates(ctx context.Context) ([]model.PlayState, error) {
 func (s *Store) ExportCounts(ctx context.Context) (read.ExportCounts, error) {
 	const op = "store.ExportCounts"
 	var c read.ExportCounts
-	err := s.read.QueryRowContext(ctx, `
+	err := s.rdb().QueryRowContext(ctx, `
 		SELECT (SELECT COUNT(*) FROM library WHERE mode != ?),
 		       (SELECT COUNT(*) FROM playable_item WHERE kind != ?),
 		       (SELECT COUNT(*) FROM play_state ps JOIN playable_item pi ON pi.id = ps.item_id WHERE pi.kind != ?),
@@ -153,7 +153,7 @@ func (s *Store) ExportCounts(ctx context.Context) (read.ExportCounts, error) {
 // item. It mirrors ItemCredits' join.
 func (s *Store) ExportCredits(ctx context.Context, keep func(itemPID model.PID) bool, each func(itemPID model.PID, c model.Contributor) error) error {
 	const op = "store.ExportCredits"
-	rows, err := s.read.QueryContext(ctx, `SELECT pi.pid, a.pid, a.name, ic.role, ic.position
+	rows, err := s.rdb().QueryContext(ctx, `SELECT pi.pid, a.pid, a.name, ic.role, ic.position
 		FROM item_contributor ic
 		JOIN playable_item pi ON pi.id = ic.item_id
 		JOIN artist a ON a.id = ic.artist_id
@@ -192,7 +192,7 @@ func (s *Store) ExportCredits(ctx context.Context, keep func(itemPID model.PID) 
 // than with the catalog.
 func (s *Store) ExportSessions(ctx context.Context, keep func(itemPID model.PID) bool, counted func(n int) error, each func(model.PlaySession) error) error {
 	const op = "store.ExportSessions"
-	conn, err := s.read.Conn(ctx)
+	conn, err := s.rdb().Conn(ctx)
 	if err != nil {
 		return waxerr.Wrap(waxerr.CodeIO, op, err)
 	}

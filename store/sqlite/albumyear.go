@@ -47,7 +47,7 @@ func (s *Store) AlbumYears(ctx context.Context, pids []model.PID) (map[model.PID
 		for i, p := range chunk {
 			args[i] = string(p)
 		}
-		rows, err := s.read.QueryContext(ctx,
+		rows, err := s.rdb().QueryContext(ctx,
 			"SELECT pid, year FROM album WHERE year > 0 AND pid IN "+placeholders(len(chunk)), args...)
 		if err != nil {
 			return err

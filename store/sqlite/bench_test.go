@@ -158,7 +158,7 @@ func BenchmarkRefreshSortKeys(b *testing.B) {
 		if err != nil {
 			b.Fatal(err)
 		}
-		if _, err := st.write.ExecContext(ctx, `
+		if _, err := st.wdb().ExecContext(ctx, `
 			WITH RECURSIVE seq(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM seq WHERE i < ?)
 			INSERT INTO artist(pid, name, sort_key, match_key)
 			SELECT 'pid' || i, 'Édith ' || i, 'WRONG', 'edith ' || i FROM seq`, n); err != nil {

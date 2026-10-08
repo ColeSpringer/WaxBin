@@ -108,7 +108,7 @@ func (s *Store) albumNameDupSets(ctx context.Context) ([]model.DuplicateSet, err
 		JOIN artist ar ON ar.id = rg.primary_artist_id)
 		WHERE n > 0
 		ORDER BY n DESC, pid`
-	rows, err := s.read.QueryContext(ctx, q)
+	rows, err := s.rdb().QueryContext(ctx, q)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, "store.audit", err)
 	}
@@ -212,7 +212,7 @@ func effectiveMBIDDupQuery(table, count string) string {
 // (groupKey, pid, name, trackCount); the survivor (first member) is the highest
 // track count within a group, so re-pointing moves the fewest children.
 func (s *Store) scanDupSets(ctx context.Context, q string, et model.MergeEntity, reason string) ([]model.DuplicateSet, error) {
-	rows, err := s.read.QueryContext(ctx, q)
+	rows, err := s.rdb().QueryContext(ctx, q)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, "store.audit", err)
 	}
@@ -253,7 +253,7 @@ func (s *Store) SplitAlbums(ctx context.Context) ([]model.SplitAlbum, error) {
 			GROUP BY 1 HAVING COUNT(DISTINCT t.album_id) > 1)
 		GROUP BY 1, al.id
 		ORDER BY 1, COUNT(*) DESC, al.pid`
-	rows, err := s.read.QueryContext(ctx, q)
+	rows, err := s.rdb().QueryContext(ctx, q)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, "store.SplitAlbums", err)
 	}
@@ -307,7 +307,7 @@ func (s *Store) InconsistentAlbums(ctx context.Context) ([]model.AlbumIssue, err
 		GROUP BY al.id)
 		WHERE comps > 1 OR discs > 1 OR years > 1 OR repeats > 0
 		ORDER BY sort_key`
-	rows, err := s.read.QueryContext(ctx, q)
+	rows, err := s.rdb().QueryContext(ctx, q)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, "store.InconsistentAlbums", err)
 	}
@@ -381,13 +381,13 @@ const itemsMissingArtWhere = `
 // unique, so ordering by it alone returns a different subset run to run.
 func (s *Store) sampleItemRefs(ctx context.Context, op, where string, limit int) ([]model.ItemRef, int, error) {
 	var total int
-	if err := s.read.QueryRowContext(ctx, "SELECT COUNT(*) "+where).Scan(&total); err != nil {
+	if err := s.rdb().QueryRowContext(ctx, "SELECT COUNT(*) "+where).Scan(&total); err != nil {
 		return nil, 0, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
 	if total == 0 || limit <= 0 {
 		return nil, total, nil
 	}
-	rows, err := s.read.QueryContext(ctx,
+	rows, err := s.rdb().QueryContext(ctx,
 		"SELECT pi.pid, pi.title, pi.kind "+where+" ORDER BY pi.sort_key, pi.pid LIMIT ?", limit)
 	if err != nil {
 		return nil, 0, waxerr.Wrap(waxerr.CodeIO, op, err)
@@ -456,7 +456,7 @@ func (s *Store) ItemsMissingMBID(ctx context.Context, limit int) ([]model.ItemRe
 // every track/book file, so the audit reports it at info severity.
 func (s *Store) CountItemsMissingReplayGain(ctx context.Context) (int, error) {
 	var n int
-	err := s.read.QueryRowContext(ctx, `SELECT COUNT(*) FROM file
+	err := s.rdb().QueryRowContext(ctx, `SELECT COUNT(*) FROM file
 		WHERE file.kind = 'audio' AND file.essence_hash IS NOT NULL
 		  AND file.library_id NOT IN (SELECT id FROM library WHERE mode = 'podcast')
 		  AND NOT `+sameAudioAlternateExpr+`
@@ -489,7 +489,7 @@ func (s *Store) CountItemsMissingReplayGain(ctx context.Context) (int, error) {
 // backs, the primary edge first should a stray second edge exist. The file itself is
 // still audited with no item, and every finding still carries its path.
 func (s *Store) AuditFiles(ctx context.Context) ([]model.AuditFileInfo, error) {
-	rows, err := s.read.QueryContext(ctx, `SELECT f.pid, f.path, f.display_path, f.kind, f.content_hash,
+	rows, err := s.rdb().QueryContext(ctx, `SELECT f.pid, f.path, f.display_path, f.kind, f.content_hash,
 			COALESCE((SELECT pi.pid FROM item_file if2 JOIN playable_item pi ON pi.id = if2.item_id
 				WHERE if2.file_id = f.id AND if2.start_frames IS NULL
 				ORDER BY if2.role = 'primary' DESC, if2.item_id LIMIT 1), '')
@@ -555,7 +555,7 @@ const filesDurationMismatchWhere = `
 func (s *Store) FilesDurationMismatch(ctx context.Context, limit, offset int) ([]model.FileDurationMismatch, int, error) {
 	const op = "store.FilesDurationMismatch"
 	var total int
-	if err := s.read.QueryRowContext(ctx, "SELECT COUNT(*) "+filesDurationMismatchWhere).Scan(&total); err != nil {
+	if err := s.rdb().QueryRowContext(ctx, "SELECT COUNT(*) "+filesDurationMismatchWhere).Scan(&total); err != nil {
 		return nil, 0, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
 	if total == 0 || offset >= total {
@@ -564,7 +564,7 @@ func (s *Store) FilesDurationMismatch(ctx context.Context, limit, offset int) ([
 	if limit <= 0 {
 		limit = -1 // SQLite reads a negative LIMIT as none, and OFFSET needs one
 	}
-	rows, err := s.read.QueryContext(ctx,
+	rows, err := s.rdb().QueryContext(ctx,
 		"SELECT f.pid, f.display_path, f.duration_ms, p.frames * 1000 / p.sample_rate "+
 			filesDurationMismatchWhere+" ORDER BY f.display_path, f.pid LIMIT ? OFFSET ?", limit, max(offset, 0))
 	if err != nil {

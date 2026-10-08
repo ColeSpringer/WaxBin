@@ -289,7 +289,7 @@ func TestBooksInSeriesOrdering(t *testing.T) {
 	}
 
 	var seriesPID model.PID
-	if err := st.read.QueryRowContext(ctx, "SELECT pid FROM series WHERE name = 'Saga'").Scan(&seriesPID); err != nil {
+	if err := st.rdb().QueryRowContext(ctx, "SELECT pid FROM series WHERE name = 'Saga'").Scan(&seriesPID); err != nil {
 		t.Fatalf("series pid: %v", err)
 	}
 	books, err := st.BooksInSeries(ctx, seriesPID)
@@ -349,7 +349,7 @@ func TestBookSearchAndFacet(t *testing.T) {
 func mustItemPID(t *testing.T, st *Store, title string) model.PID {
 	t.Helper()
 	var pid model.PID
-	if err := st.read.QueryRowContext(context.Background(),
+	if err := st.rdb().QueryRowContext(context.Background(),
 		"SELECT pid FROM playable_item WHERE title = ?", title).Scan(&pid); err != nil {
 		t.Fatalf("item pid for %q: %v", title, err)
 	}
@@ -684,7 +684,7 @@ func TestRefreshRollupsRepairsBookDuration(t *testing.T) {
 		path: "/lib/b/p1.mp3", essence: "rr1", content: "rc1", title: "Tome", author: "Auth",
 		asin: "RR", position: 1, durationMS: 1000,
 	})
-	if _, err := st.write.ExecContext(ctx,
+	if _, err := st.wdb().ExecContext(ctx,
 		"UPDATE book SET total_duration_ms = 999999 WHERE item_id = (SELECT id FROM playable_item WHERE pid = ?)",
 		string(r.ItemPID)); err != nil {
 		t.Fatalf("stage the drift: %v", err)
@@ -860,7 +860,7 @@ func TestTrashDetachEmitsItemUpdate(t *testing.T) {
 		asin: "BTD", position: 2, durationMS: 2000,
 	})
 	var p2pid model.PID
-	if err := st.read.QueryRowContext(ctx, "SELECT pid FROM file WHERE path = ?", []byte("/lib/b/p2.mp3")).Scan(&p2pid); err != nil {
+	if err := st.rdb().QueryRowContext(ctx, "SELECT pid FROM file WHERE path = ?", []byte("/lib/b/p2.mp3")).Scan(&p2pid); err != nil {
 		t.Fatalf("p2 pid: %v", err)
 	}
 	seq, _ := st.LatestChangeSeq(ctx)
@@ -1622,7 +1622,7 @@ func TestBookPartYieldsToABetterEncodingOnDisk(t *testing.T) {
 // listBooks returns the pids of the catalog's books.
 func listBooks(t *testing.T, st *Store) []model.PID {
 	t.Helper()
-	rows, err := st.read.QueryContext(context.Background(), "SELECT pid FROM playable_item WHERE kind = 'book' ORDER BY id")
+	rows, err := st.rdb().QueryContext(context.Background(), "SELECT pid FROM playable_item WHERE kind = 'book' ORDER BY id")
 	if err != nil {
 		t.Fatal(err)
 	}

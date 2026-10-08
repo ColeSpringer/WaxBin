@@ -66,13 +66,13 @@ func catalogShape(t *testing.T, st *Store) string {
 	if err != nil {
 		t.Fatalf("version: %v", err)
 	}
-	stamp, err := baselineStamp(ctx, st.read)
+	stamp, err := baselineStamp(ctx, st.rdb())
 	if err != nil {
 		t.Fatalf("baseline: %v", err)
 	}
 	fmt.Fprintf(&b, "version=%d baseline=%d\n", version, stamp)
 
-	rows, err := st.read.QueryContext(ctx,
+	rows, err := st.rdb().QueryContext(ctx,
 		"SELECT type, name, IFNULL(sql, '') FROM sqlite_master ORDER BY type, name")
 	if err != nil {
 		t.Fatalf("sqlite_master: %v", err)
@@ -96,7 +96,7 @@ func catalogShape(t *testing.T, st *Store) string {
 	sort.Strings(tables)
 	for _, name := range tables {
 		var n int64
-		if err := st.read.QueryRowContext(ctx, `SELECT COUNT(*) FROM "`+name+`"`).Scan(&n); err != nil {
+		if err := st.rdb().QueryRowContext(ctx, `SELECT COUNT(*) FROM "`+name+`"`).Scan(&n); err != nil {
 			t.Fatalf("count %s: %v", name, err)
 		}
 		fmt.Fprintf(&b, "rows %s %d\n", name, n)

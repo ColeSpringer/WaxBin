@@ -86,7 +86,7 @@ func TestEditAlbumRenamesInPlace(t *testing.T) {
 	if _, err := st.SetEntityStar(ctx, "", model.MergeAlbum, albPID, true, nil); err != nil {
 		t.Fatalf("seed star: %v", err)
 	}
-	if _, err := st.write.ExecContext(ctx, `INSERT INTO entity_enrichment(entity_type, entity_id, provider, matched, mbid, enriched_at)
+	if _, err := st.wdb().ExecContext(ctx, `INSERT INTO entity_enrichment(entity_type, entity_id, provider, matched, mbid, enriched_at)
 		VALUES ('release_group', ?, 'musicbrainz', 1, NULL, 1)`, rgID); err != nil {
 		t.Fatalf("seed marker: %v", err)
 	}
@@ -112,7 +112,7 @@ func TestEditAlbumRenamesInPlace(t *testing.T) {
 		t.Fatalf("album match_key = %q, want %q", k, wantAlbumKey)
 	}
 	var title, sortKey string
-	if err := st.read.QueryRowContext(ctx, "SELECT title, sort_key FROM album").Scan(&title, &sortKey); err != nil {
+	if err := st.rdb().QueryRowContext(ctx, "SELECT title, sort_key FROM album").Scan(&title, &sortKey); err != nil {
 		t.Fatalf("read album: %v", err)
 	}
 	if title != "Renamed" || sortKey != model.SortKey("Renamed") {
@@ -125,7 +125,7 @@ func TestEditAlbumRenamesInPlace(t *testing.T) {
 		t.Fatalf("rg pid changed")
 	}
 	var rgTitle, rgKey string
-	if err := st.read.QueryRowContext(ctx, "SELECT title, match_key FROM release_group").Scan(&rgTitle, &rgKey); err != nil {
+	if err := st.rdb().QueryRowContext(ctx, "SELECT title, match_key FROM release_group").Scan(&rgTitle, &rgKey); err != nil {
 		t.Fatalf("read rg: %v", err)
 	}
 	if rgTitle != "Renamed" || rgKey != wantRGKey {
@@ -175,7 +175,7 @@ func TestEditAlbumRenameRequeuesUnmatchedRG(t *testing.T) {
 	st, _, pids := renameFixture(t)
 	ctx := context.Background()
 	rgID := scalarInt(t, st, "SELECT id FROM release_group")
-	if _, err := st.write.ExecContext(ctx, `INSERT INTO entity_enrichment(entity_type, entity_id, provider, matched, mbid, enriched_at)
+	if _, err := st.wdb().ExecContext(ctx, `INSERT INTO entity_enrichment(entity_type, entity_id, provider, matched, mbid, enriched_at)
 		VALUES ('release_group', ?, 'musicbrainz', 0, NULL, 1)`, rgID); err != nil {
 		t.Fatalf("seed marker: %v", err)
 	}
@@ -606,7 +606,7 @@ func TestEditArtistWholeSetRenamesInPlace(t *testing.T) {
 	if _, err := st.SetEntityStar(ctx, "", model.MergeArtist, artPID, true, nil); err != nil {
 		t.Fatalf("seed star: %v", err)
 	}
-	if _, err := st.write.ExecContext(ctx, `INSERT INTO entity_enrichment(entity_type, entity_id, provider, matched, mbid, enriched_at)
+	if _, err := st.wdb().ExecContext(ctx, `INSERT INTO entity_enrichment(entity_type, entity_id, provider, matched, mbid, enriched_at)
 		VALUES ('artist', ?, 'musicbrainz', 0, NULL, 1)`, artistID); err != nil {
 		t.Fatalf("seed marker: %v", err)
 	}
@@ -621,7 +621,7 @@ func TestEditArtistWholeSetRenamesInPlace(t *testing.T) {
 		t.Fatalf("artist rows = %d, want 1 (renamed in place)", n)
 	}
 	var name, matchKey, gotPID string
-	if err := st.read.QueryRowContext(ctx, "SELECT name, match_key, pid FROM artist WHERE id=?", artistID).
+	if err := st.rdb().QueryRowContext(ctx, "SELECT name, match_key, pid FROM artist WHERE id=?", artistID).
 		Scan(&name, &matchKey, &gotPID); err != nil {
 		t.Fatalf("read artist: %v", err)
 	}
@@ -676,7 +676,7 @@ func TestEditArtistEmptyAlbumArtistMovesWholeChain(t *testing.T) {
 	artistID := scalarInt(t, st, "SELECT id FROM artist")
 	rgID := scalarInt(t, st, "SELECT id FROM release_group")
 	albumID := scalarInt(t, st, "SELECT id FROM album")
-	if _, err := st.write.ExecContext(ctx, `INSERT INTO entity_enrichment(entity_type, entity_id, provider, matched, mbid, enriched_at)
+	if _, err := st.wdb().ExecContext(ctx, `INSERT INTO entity_enrichment(entity_type, entity_id, provider, matched, mbid, enriched_at)
 		VALUES ('artist', ?, 'musicbrainz', 1, NULL, 1)`, artistID); err != nil {
 		t.Fatalf("seed marker: %v", err)
 	}
@@ -878,7 +878,7 @@ func TestEditBatchSecondaryCreditMovesWithItsField(t *testing.T) {
 		t.Fatalf("artist rows = %d, want 2 (Alpha kept, Guest renamed in place)", n)
 	}
 	var name, gotPID string
-	if err := st.read.QueryRowContext(ctx, "SELECT name, pid FROM artist WHERE id=?", guestID).
+	if err := st.rdb().QueryRowContext(ctx, "SELECT name, pid FROM artist WHERE id=?", guestID).
 		Scan(&name, &gotPID); err != nil {
 		t.Fatalf("read Guest: %v", err)
 	}
@@ -1190,7 +1190,7 @@ func TestEditArchivedAlbumFallsBackToSplit(t *testing.T) {
 	ctx := context.Background()
 	albumID := scalarInt(t, st, "SELECT id FROM album")
 	key0 := scalarStr(t, st, "SELECT match_key FROM album WHERE id=?", albumID)
-	if _, err := st.write.ExecContext(ctx, "DELETE FROM item_file"); err != nil {
+	if _, err := st.wdb().ExecContext(ctx, "DELETE FROM item_file"); err != nil {
 		t.Fatalf("archive members: %v", err)
 	}
 
@@ -1221,7 +1221,7 @@ func TestEditArtistCaseOnlyRespellKeepsMarker(t *testing.T) {
 	})
 	pid := model.PID(scalarStr(t, st, "SELECT pid FROM playable_item WHERE title='S'"))
 	artistID := scalarInt(t, st, "SELECT id FROM artist")
-	if _, err := st.write.ExecContext(ctx, `INSERT INTO entity_enrichment(entity_type, entity_id, provider, matched, mbid, enriched_at)
+	if _, err := st.wdb().ExecContext(ctx, `INSERT INTO entity_enrichment(entity_type, entity_id, provider, matched, mbid, enriched_at)
 		VALUES ('artist', ?, 'musicbrainz', 0, NULL, 1)`, artistID); err != nil {
 		t.Fatalf("seed marker: %v", err)
 	}

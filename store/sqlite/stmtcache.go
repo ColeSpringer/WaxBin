@@ -22,11 +22,11 @@ const stmtCacheMax = 32
 // cached statement again on each pool connection that first runs it.
 //
 // Past the limit the least recently used statement goes, closed once no reader holds
-// it. Reopen swaps the read pool and tells the cache (swap), which drops the old pool's
-// statements; a reader still holding the old pool runs its query there directly rather
-// than disturbing the cache. The lock is held neither while waiting for a connection,
-// since a reader releasing its statement may be holding one, nor while a statement
-// closes.
+// it. Reopen publishes a new read pool and tells the cache (swap), which drops the old
+// pool's statements; a reader still holding the old pool runs its query there directly
+// rather than disturbing the cache. The lock is held neither while waiting for a
+// connection, since a reader releasing its statement may be holding one, nor while a
+// statement closes.
 type stmtCache struct {
 	limit int // 0 means stmtCacheMax
 	mu    sync.Mutex
@@ -126,7 +126,7 @@ func (c *stmtCache) acquire(ctx context.Context, db *sql.DB, query string) (*cac
 var errForeignPool = errors.New("statement cache: the pool is not the one it holds")
 
 // swap points the cache at a new read pool, dropping the statements prepared on the old
-// one. Reopen calls it where it swaps the pool.
+// one. Reopen calls it where it publishes the new pool.
 func (c *stmtCache) swap(db *sql.DB) {
 	c.mu.Lock()
 	stale := c.dropLocked(nil)

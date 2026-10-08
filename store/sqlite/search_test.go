@@ -1162,7 +1162,7 @@ func TestEnrichmentGenreFillRebuildsTheSearchRow(t *testing.T) {
 		title: "Alison", artist: "Slowdive", album: "Souvlaki", albumArt: "Slowdive"})
 	var rgID int64
 	var rgPID string
-	if err := st.read.QueryRowContext(ctx, `SELECT rg.id, rg.pid FROM release_group rg
+	if err := st.rdb().QueryRowContext(ctx, `SELECT rg.id, rg.pid FROM release_group rg
 		JOIN album al ON al.release_group_id = rg.id JOIN track t ON t.album_id = al.id`).Scan(&rgID, &rgPID); err != nil {
 		t.Fatalf("read release group: %v", err)
 	}

@@ -121,7 +121,7 @@ func trackSpecInput(libID int64, s trackSpec) model.PutScannedTrackInput {
 func scalarInt(t *testing.T, st *Store, q string, args ...any) int {
 	t.Helper()
 	var n int
-	if err := st.read.QueryRowContext(context.Background(), q, args...).Scan(&n); err != nil {
+	if err := st.rdb().QueryRowContext(context.Background(), q, args...).Scan(&n); err != nil {
 		t.Fatalf("query %q: %v", q, err)
 	}
 	return n
@@ -219,7 +219,7 @@ func TestMusicColumnsPersist(t *testing.T) {
 	})
 	var composer string
 	var compilation int
-	if err := st.read.QueryRowContext(context.Background(),
+	if err := st.rdb().QueryRowContext(context.Background(),
 		"SELECT composer, compilation FROM track LIMIT 1").Scan(&composer, &compilation); err != nil {
 		t.Fatalf("read track columns: %v", err)
 	}
@@ -308,7 +308,7 @@ func TestGenreMatchKeyDedup(t *testing.T) {
 		t.Errorf("genre count = %d, want 1 (Hip-Hop == hip hop)", n)
 	}
 	var display string
-	if err := st.read.QueryRowContext(context.Background(),
+	if err := st.rdb().QueryRowContext(context.Background(),
 		"SELECT name FROM genre LIMIT 1").Scan(&display); err != nil {
 		t.Fatal(err)
 	}
@@ -336,7 +336,7 @@ func TestRetagReplacesGenreLinks(t *testing.T) {
 		t.Errorf("item_genre after retag = %d, want 1", n)
 	}
 	var name string
-	if err := st.read.QueryRowContext(context.Background(),
+	if err := st.rdb().QueryRowContext(context.Background(),
 		`SELECT g.name FROM item_genre ig JOIN genre g ON g.id=ig.genre_id`).Scan(&name); err != nil {
 		t.Fatal(err)
 	}
@@ -401,7 +401,7 @@ func TestRefreshRollups(t *testing.T) {
 
 	var tracks, rgs int
 	var dur int64
-	if err := st.read.QueryRowContext(ctx, `SELECT ar.track_count, ar.release_group_count, ar.total_duration_ms
+	if err := st.rdb().QueryRowContext(ctx, `SELECT ar.track_count, ar.release_group_count, ar.total_duration_ms
 		FROM artist_rollup ar JOIN artist a ON a.id=ar.artist_id WHERE a.name='Radiohead'`).
 		Scan(&tracks, &rgs, &dur); err != nil {
 		t.Fatalf("read artist_rollup: %v", err)
@@ -412,7 +412,7 @@ func TestRefreshRollups(t *testing.T) {
 
 	var gTracks int
 	var gDur int64
-	if err := st.read.QueryRowContext(ctx, `SELECT track_count, total_duration_ms
+	if err := st.rdb().QueryRowContext(ctx, `SELECT track_count, total_duration_ms
 		FROM genre_rollup gr JOIN genre g ON g.id=gr.genre_id WHERE g.name='Rock'`).
 		Scan(&gTracks, &gDur); err != nil {
 		t.Fatalf("read genre_rollup: %v", err)
@@ -456,7 +456,7 @@ func TestNoopRescanSkipsEntityWork(t *testing.T) {
 		artist: "Radiohead", album: "OK Computer", genre: "Rock",
 	}
 	putTrack(t, st, lib.ID, spec)
-	if _, err := st.write.ExecContext(ctx, "DELETE FROM search_fts"); err != nil {
+	if _, err := st.wdb().ExecContext(ctx, "DELETE FROM search_fts"); err != nil {
 		t.Fatalf("delete fts: %v", err)
 	}
 
@@ -589,7 +589,7 @@ func TestArtistMBIDBackfillRespectsLock(t *testing.T) {
 func artistMBID(t *testing.T, st *Store, name string) string {
 	t.Helper()
 	var mbid string
-	if err := st.read.QueryRowContext(context.Background(),
+	if err := st.rdb().QueryRowContext(context.Background(),
 		"SELECT COALESCE(mbid,'') FROM artist WHERE name = ?", name).Scan(&mbid); err != nil {
 		t.Fatalf("read artist %q mbid: %v", name, err)
 	}
@@ -757,7 +757,7 @@ func TestMBIDAdoptionFoldsTagCasing(t *testing.T) {
 		artist: "Band", album: "Album",
 	})
 	albumPID := scalarStr(t, st, "SELECT pid FROM album WHERE title='Album'")
-	if _, err := st.write.ExecContext(ctx, "UPDATE album SET mbid=? WHERE pid=?", relMBID, albumPID); err != nil {
+	if _, err := st.wdb().ExecContext(ctx, "UPDATE album SET mbid=? WHERE pid=?", relMBID, albumPID); err != nil {
 		t.Fatal(err)
 	}
 	putTrack(t, st, lib.ID, trackSpec{
@@ -789,7 +789,7 @@ func TestAdoptedMemberSurvivesAnEdit(t *testing.T) {
 		artist: "Band", album: "Album",
 	})
 	albumPID := scalarStr(t, st, "SELECT pid FROM album")
-	if _, err := st.write.ExecContext(ctx, "UPDATE album SET mbid=? WHERE pid=?", relMBID, albumPID); err != nil {
+	if _, err := st.wdb().ExecContext(ctx, "UPDATE album SET mbid=? WHERE pid=?", relMBID, albumPID); err != nil {
 		t.Fatal(err)
 	}
 	// A member in another folder, joined to that album only through the id in its file.
@@ -841,7 +841,7 @@ func TestAlbumKeyAnchorsOnALibraryRootNamedLikeADisc(t *testing.T) {
 
 	var albums int
 	var key string
-	if err := st.read.QueryRowContext(ctx, "SELECT COUNT(*), MIN(match_key) FROM album").Scan(&albums, &key); err != nil {
+	if err := st.rdb().QueryRowContext(ctx, "SELECT COUNT(*), MIN(match_key) FROM album").Scan(&albums, &key); err != nil {
 		t.Fatalf("albums: %v", err)
 	}
 	if albums != 1 {

@@ -3,14 +3,21 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"testing/synctest"
+	"time"
 
 	"github.com/colespringer/waxbin/model"
+	"github.com/colespringer/waxbin/read"
 	"github.com/colespringer/waxbin/waxerr"
 )
 
@@ -116,7 +123,7 @@ func TestLatestChangeSeqEmptyFeed(t *testing.T) {
 		t.Fatalf("open: %v", err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
-	if _, err := st.write.ExecContext(ctx, "DELETE FROM change_log"); err != nil {
+	if _, err := st.wdb().ExecContext(ctx, "DELETE FROM change_log"); err != nil {
 		t.Fatalf("drain the feed: %v", err)
 	}
 
@@ -159,6 +166,56 @@ func TestDataVersionMovesAcrossAReopen(t *testing.T) {
 		again, err := st.DataVersion(ctx)
 		if err != nil || again != after {
 			t.Errorf("round %d: data version with nothing written = %d (err %v), want it to hold at %d", round, again, err, after)
+		}
+	}
+}
+
+// TestReadsRunThroughAReopen: reads and a writer keep running while the store is suspended
+// and reopened under them. They may fail while it is down, but none may race the reopen
+// (the race detector judges that) and all of them answer once it is back.
+func TestReadsRunThroughAReopen(t *testing.T) {
+	t.Parallel()
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	pid := putTrack(t, st, lib.ID, trackSpec{path: "/lib/a.flac", essence: "ea", content: "ca",
+		title: "A", artist: "X", album: "Al"}).ItemPID
+	var users atomic.Int64
+	calls := []func() error{
+		func() error { _, err := st.LatestChangeSeq(ctx); return err },
+		func() error { _, err := st.DataVersion(ctx); return err },
+		func() error { _, err := st.ItemByPID(ctx, pid); return err },
+		func() error { _, err := st.BrowsePage(ctx, read.ListRecentlyAdded, read.BrowseOptions{}); return err },
+		func() error { _, err := st.CreateUser(ctx, "u"+strconv.FormatInt(users.Add(1), 10)); return err },
+	}
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	for _, call := range calls {
+		wg.Go(func() {
+			tick := time.NewTicker(time.Millisecond)
+			defer tick.Stop()
+			for {
+				select {
+				case <-stop:
+					return
+				case <-tick.C:
+					_ = call()
+				}
+			}
+		})
+	}
+	for range 5 {
+		if err := st.Suspend(); err != nil {
+			t.Fatalf("suspend: %v", err)
+		}
+		if _, err := st.Reopen(ctx); err != nil {
+			t.Fatalf("reopen: %v", err)
+		}
+	}
+	close(stop)
+	wg.Wait()
+	for i, call := range calls {
+		if err := call(); err != nil {
+			t.Errorf("call %d after the last reopen: %v", i, err)
 		}
 	}
 }
@@ -275,7 +332,7 @@ func TestChangesSinceBehindThePrunedFeedIsNotFound(t *testing.T) {
 		t.Fatalf("prune: %v", err)
 	}
 	var oldest int64
-	if err := st.read.QueryRowContext(ctx, "SELECT MIN(seq) FROM change_log").Scan(&oldest); err != nil {
+	if err := st.rdb().QueryRowContext(ctx, "SELECT MIN(seq) FROM change_log").Scan(&oldest); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := st.ChangesSince(ctx, oldest-2); !waxerr.Is(err, waxerr.CodeNotFound) {
@@ -373,7 +430,7 @@ func TestReopenNoticesAnotherCatalog(t *testing.T) {
 		},
 		"rewound": func(t *testing.T, path string) {
 			foreground(t, path, func(fg *Store) {
-				if _, err := fg.write.ExecContext(ctx, "DELETE FROM change_log WHERE seq = (SELECT MAX(seq) FROM change_log)"); err != nil {
+				if _, err := fg.wdb().ExecContext(ctx, "DELETE FROM change_log WHERE seq = (SELECT MAX(seq) FROM change_log)"); err != nil {
 					t.Fatal(err)
 				}
 			})
@@ -421,7 +478,7 @@ func TestFailedReopenKeepsSubscribersAndTheVerdict(t *testing.T) {
 		t.Fatal(err)
 	}
 	foreground(t, path, func(fg *Store) {
-		if _, err := fg.write.ExecContext(ctx, "INSERT INTO schema_migrations(version, name, applied_at) VALUES (999, 'future', 0)"); err != nil {
+		if _, err := fg.wdb().ExecContext(ctx, "INSERT INTO schema_migrations(version, name, applied_at) VALUES (999, 'future', 0)"); err != nil {
 			t.Fatal(err)
 		}
 	})
@@ -492,5 +549,343 @@ func TestRepeatedSuspendKeepsItsMark(t *testing.T) {
 	}
 	if got := drain(ch); len(got) != 1 || got[0].EntityType != "library" {
 		t.Fatalf("published = %+v, want the foreground's row", got)
+	}
+}
+
+// TestDataVersionRefusesWhileSuspended: during a hand-off DataVersion answers the way a
+// write does, and after the reopen it answers again, moved from where it stood.
+func TestDataVersionRefusesWhileSuspended(t *testing.T) {
+	t.Parallel()
+	st, _ := entityFixture(t)
+	ctx := context.Background()
+	before, err := st.DataVersion(ctx)
+	if err != nil {
+		t.Fatalf("data version: %v", err)
+	}
+	if err := st.Suspend(); err != nil {
+		t.Fatalf("suspend: %v", err)
+	}
+	if _, err := st.DataVersion(ctx); !waxerr.Is(err, waxerr.CodeUnsupported) {
+		t.Errorf("data version while suspended: err %v, want CodeUnsupported", err)
+	}
+	if _, err := st.Reopen(ctx); err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	if after, err := st.DataVersion(ctx); err != nil || after == before {
+		t.Errorf("data version after the reopen = %d (err %v), want it moved from %d", after, err, before)
+	}
+}
+
+// TestReadsRefuseWhileClosed: a suspended or closed store answers a read the way it
+// answers a write, whichever way the read reaches the pool.
+func TestReadsRefuseWhileClosed(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	for _, how := range []string{"suspended", "closed"} {
+		st, lib := entityFixture(t)
+		pid := putTrack(t, st, lib.ID, trackSpec{path: "/lib/a.flac", essence: "ea", content: "ca",
+			title: "A", artist: "X", album: "Al"}).ItemPID
+		if _, err := st.ItemByPID(ctx, pid); err != nil {
+			t.Fatalf("item: %v", err)
+		}
+		shut := st.Suspend
+		if how == "closed" {
+			shut = st.Close
+		}
+		if err := shut(); err != nil {
+			t.Fatalf("%s: %v", how, err)
+		}
+		_, seqErr := st.LatestChangeSeq(ctx)
+		_, itemErr := st.ItemByPID(ctx, pid)
+		_, browseErr := st.BrowsePage(ctx, read.ListRecentlyAdded, read.BrowseOptions{})
+		_, statsErr := st.ThumbCacheStats(ctx)
+		sessionsErr := st.ExportSessions(ctx, func(model.PID) bool { return true },
+			func(int) error { return nil }, func(model.PlaySession) error { return nil })
+		for name, err := range map[string]error{
+			"LatestChangeSeq": seqErr, "ItemByPID": itemErr, "BrowsePage": browseErr,
+			"ThumbCacheStats": statsErr, "ExportSessions": sessionsErr,
+		} {
+			if !waxerr.Is(err, waxerr.CodeUnsupported) {
+				t.Errorf("%s store: %s = %v, want CodeUnsupported", how, name, err)
+			}
+		}
+	}
+}
+
+// TestCloseInsideASynctestBubble: a store opened and closed inside a synctest bubble
+// leaves no goroutine of its own behind there, so the bubble can end. The scenario runs
+// in a child process, where its close is the first one, since only the first close in a
+// process would start a lazily built closedGen.
+func TestCloseInsideASynctestBubble(t *testing.T) {
+	t.Parallel()
+	if os.Getenv("WAXBIN_BUBBLE_CHILD") == "" {
+		cmd := exec.Command(os.Args[0], "-test.run=^TestCloseInsideASynctestBubble$", "-test.count=1")
+		cmd.Env = append(os.Environ(), "WAXBIN_BUBBLE_CHILD=1")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("child: %v\n%s", err, out)
+		}
+		return
+	}
+	path := filepath.Join(t.TempDir(), "c.db")
+	synctest.Test(t, func(t *testing.T) {
+		st, err := Open(context.Background(), OpenOptions{Path: path, Owner: "test"})
+		if err != nil {
+			t.Fatalf("open: %v", err)
+		}
+		if err := st.Close(); err != nil {
+			t.Fatalf("close: %v", err)
+		}
+	})
+}
+
+// TestDataVersionRefusesOnAClosedReadOnlyStore: a closed read-only store answers as
+// closed even once a restore has renamed another catalog over its path.
+func TestDataVersionRefusesOnAClosedReadOnlyStore(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	path := seedCatalog(t, filepath.Join(t.TempDir(), "c.db"))
+	w, err := Open(ctx, OpenOptions{Path: path, Owner: "test"})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	ro, err := Open(ctx, OpenOptions{Path: path, ReadOnly: true})
+	if err != nil {
+		t.Fatalf("open read-only: %v", err)
+	}
+	if err := ro.Close(); err != nil {
+		t.Fatal(err)
+	}
+	blob, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path+".new", blob, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(path+".new", path); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ro.DataVersion(ctx); !waxerr.Is(err, waxerr.CodeUnsupported) {
+		t.Errorf("data version on a closed read-only store = %v, want CodeUnsupported", err)
+	}
+}
+
+// TestConcurrentReopensAgree: two reopens of one suspended store both succeed, and only
+// one of them does the reopening.
+func TestConcurrentReopensAgree(t *testing.T) {
+	t.Parallel()
+	st, _, _ := suspendedStore(t)
+	results := make(chan ReopenResult, 2)
+	var wg sync.WaitGroup
+	for range 2 {
+		wg.Go(func() {
+			res, err := st.Reopen(context.Background())
+			if err != nil {
+				t.Errorf("reopen: %v", err)
+			}
+			results <- res
+		})
+	}
+	wg.Wait()
+	close(results)
+	reopened := 0
+	for res := range results {
+		if res.Reopened {
+			reopened++
+		}
+	}
+	if reopened != 1 {
+		t.Errorf("%d of two concurrent reopens reported reopening the store, want 1", reopened)
+	}
+}
+
+// reopenBehindALock starts a reopen of st while a foreground store holds the lock at
+// path, and returns once that reopen holds handoffMu, waiting out the lock. It returns
+// the foreground store and the reopen's result.
+func reopenBehindALock(t *testing.T, st *Store, path string) (*Store, <-chan error) {
+	t.Helper()
+	fg, err := Open(context.Background(), OpenOptions{Path: path, Owner: "foreground"})
+	if err != nil {
+		t.Fatalf("foreground open: %v", err)
+	}
+	t.Cleanup(func() { _ = fg.Close() })
+	reopened := make(chan error, 1)
+	go func() { _, err := st.Reopen(context.Background()); reopened <- err }()
+	for deadline := time.Now().Add(10 * time.Second); st.handoffMu.TryLock(); time.Sleep(time.Millisecond) {
+		st.handoffMu.Unlock()
+		if time.Now().After(deadline) {
+			t.Fatal("the reopen never started")
+		}
+	}
+	return fg, reopened
+}
+
+// TestSuspendWaitsForAReopenInFlight: a suspend made while a reopen waits for the lock
+// takes effect after that reopen, so the store ends suspended with a mark of its own and
+// the lock free, rather than reopened behind the call that suspended it.
+func TestSuspendWaitsForAReopenInFlight(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	st, path, _ := suspendedStore(t)
+	fg, reopened := reopenBehindALock(t, st, path)
+	suspended := make(chan error, 1)
+	go func() { suspended <- st.Suspend() }()
+	var err error
+	returned := false
+	select {
+	case err = <-suspended:
+		returned = true
+	case <-time.After(100 * time.Millisecond):
+	}
+	if err := fg.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-reopened; err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	if !returned {
+		err = <-suspended
+	}
+	if err != nil {
+		t.Fatalf("suspend: %v", err)
+	}
+	if _, err := st.LatestChangeSeq(ctx); !waxerr.Is(err, waxerr.CodeUnsupported) {
+		t.Errorf("a read after the suspend = %v, want the store closed", err)
+	}
+	next, err := Open(ctx, OpenOptions{Path: path, Owner: "next"})
+	if err != nil {
+		t.Fatalf("open after the suspend: %v, want the lock free", err)
+	}
+	if err := next.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if res, err := st.Reopen(ctx); err != nil || !res.Reopened || res.Replaced {
+		t.Errorf("reopen after the suspend = %+v (err %v), want the same catalog reopened", res, err)
+	}
+}
+
+// TestCloseStopsAReopenInFlight: a close made while a reopen waits out a held lock stops
+// that reopen rather than waiting behind it, even when the reopen's own context cannot
+// end, and leaves the store closed and the lock free.
+func TestCloseStopsAReopenInFlight(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	st, path, _ := suspendedStore(t)
+	fg, reopened := reopenBehindALock(t, st, path)
+	if err := st.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if err := <-reopened; !waxerr.Is(err, waxerr.CodeCanceled) {
+		t.Errorf("the reopen the close overtook = %v, want CodeCanceled", err)
+	}
+	if err := fg.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.LatestChangeSeq(ctx); !waxerr.Is(err, waxerr.CodeUnsupported) {
+		t.Errorf("a read after the close = %v, want the store closed", err)
+	}
+	next, err := Open(ctx, OpenOptions{Path: path, Owner: "next"})
+	if err != nil {
+		t.Fatalf("open after the close: %v, want the lock free", err)
+	}
+	if err := next.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestSuspendWaitsForAReadToFinish: a suspend keeps the write lock until the reads it
+// found running have let go of the catalog file, and gives up with a warning on one that
+// outlives the bound, letting the lock go then.
+func TestSuspendWaitsForAReadToFinish(t *testing.T) {
+	// Not parallel: it sets settleBound, which every store reads.
+	old := settleBound
+	t.Cleanup(func() { settleBound = old })
+	ctx := context.Background()
+	logs := &warnRecorder{}
+	path := seedCatalog(t, filepath.Join(t.TempDir(), "c.db"))
+	st, err := Open(ctx, OpenOptions{Path: path, Owner: "test", Logger: slog.New(logs)})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	// The WAL is emptied first so the read holds no WAL snapshot, which the suspend's
+	// checkpoint would wait out by itself.
+	openRead := func() *sql.Rows {
+		t.Helper()
+		if _, err := st.wdb().ExecContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
+			t.Fatal(err)
+		}
+		rows, err := st.rdb().QueryContext(ctx, "SELECT seq FROM change_log")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return rows
+	}
+	lockFree := func() bool {
+		t.Helper()
+		l, err := acquireWriteLock(path+".waxlock", "other", "", nowNS())
+		if waxerr.Is(err, waxerr.CodeConflict) {
+			return false
+		}
+		if err != nil {
+			t.Fatalf("probe the lock: %v", err)
+		}
+		_ = l.release()
+		return true
+	}
+
+	settleBound = time.Minute
+	pool := st.rdb()
+	rows := openRead()
+	done := make(chan error, 1)
+	go func() { done <- st.Suspend() }()
+	select {
+	case err := <-done:
+		t.Fatalf("suspend returned (err %v) while a read still held its connection", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	if lockFree() {
+		t.Error("the write lock was free while a read still held the catalog file")
+	}
+	rows.Close()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("suspend: %v", err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("suspend did not return once the read finished")
+	}
+	if n := pool.Stats().OpenConnections; n != 0 {
+		t.Errorf("read connections open after the suspend = %d, want 0", n)
+	}
+	if !lockFree() {
+		t.Error("the write lock was still held after the suspend")
+	}
+	if n := logs.count("still open"); n != 0 {
+		t.Errorf("%d warnings about connections left open, want none for a read that finished in time", n)
+	}
+
+	settleBound = 50 * time.Millisecond
+	if _, err := st.Reopen(ctx); err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	pool = st.rdb()
+	rows = openRead()
+	defer rows.Close()
+	if err := st.Suspend(); err != nil {
+		t.Fatalf("suspend: %v", err)
+	}
+	if n := pool.Stats().OpenConnections; n != 1 {
+		t.Errorf("read connections open after giving up = %d, want the one still reading", n)
+	}
+	if !lockFree() {
+		t.Error("the write lock was still held after the suspend gave up on the read")
+	}
+	if n := logs.count("still open"); n != 1 {
+		t.Errorf("%d warnings about connections left open, want one for the read left running", n)
 	}
 }

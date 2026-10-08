@@ -30,7 +30,7 @@ func TestEditPlainFieldAndProvenance(t *testing.T) {
 	}
 
 	var comment string
-	if err := st.read.QueryRowContext(ctx,
+	if err := st.rdb().QueryRowContext(ctx,
 		"SELECT comment FROM track t JOIN playable_item pi ON pi.id=t.item_id WHERE pi.pid=?", string(pid)).Scan(&comment); err != nil {
 		t.Fatalf("read comment: %v", err)
 	}
@@ -71,7 +71,7 @@ func TestEditTitleRebuildsFTSAndSortKey(t *testing.T) {
 
 	// sort_key follows the new title.
 	var sortKey string
-	if err := st.read.QueryRowContext(ctx, "SELECT sort_key FROM playable_item WHERE pid=?", string(pid)).Scan(&sortKey); err != nil {
+	if err := st.rdb().QueryRowContext(ctx, "SELECT sort_key FROM playable_item WHERE pid=?", string(pid)).Scan(&sortKey); err != nil {
 		t.Fatalf("read sort_key: %v", err)
 	}
 	if want := model.SortKey("Renamed Song"); sortKey != want {
@@ -112,7 +112,7 @@ func TestEditArtistReResolvesEntitiesAndRollups(t *testing.T) {
 
 	// A new Beta artist exists and the track's FK points at it.
 	var artistName string
-	if err := st.read.QueryRowContext(ctx, `SELECT a.name FROM artist a
+	if err := st.rdb().QueryRowContext(ctx, `SELECT a.name FROM artist a
 		JOIN track t ON t.artist_id = a.id
 		JOIN playable_item pi ON pi.id = t.item_id WHERE pi.pid=?`, string(pid)).Scan(&artistName); err != nil {
 		t.Fatalf("read artist entity: %v", err)
@@ -181,7 +181,7 @@ func TestEditGenreUpdatesLinksAndVerifyClean(t *testing.T) {
 
 	// item_genre now links Jazz and Blues, not Rock.
 	names := map[string]bool{}
-	rows, err := st.read.QueryContext(ctx, `SELECT g.name FROM item_genre ig
+	rows, err := st.rdb().QueryContext(ctx, `SELECT g.name FROM item_genre ig
 		JOIN genre g ON g.id = ig.genre_id
 		JOIN playable_item pi ON pi.id = ig.item_id WHERE pi.pid=?`, string(pid))
 	if err != nil {
@@ -289,7 +289,7 @@ func TestEditTrimsValueEverywhere(t *testing.T) {
 	}
 	// The resolved artist entity name is trimmed (and matches the column).
 	var name string
-	if err := st.read.QueryRowContext(ctx, `SELECT a.name FROM artist a
+	if err := st.rdb().QueryRowContext(ctx, `SELECT a.name FROM artist a
 		JOIN track t ON t.artist_id = a.id
 		JOIN playable_item pi ON pi.id = t.item_id WHERE pi.pid=?`, string(pid)).Scan(&name); err != nil {
 		t.Fatalf("read entity: %v", err)
@@ -406,7 +406,7 @@ func TestFileSharedOrVirtual(t *testing.T) {
 	putTrack(t, st, lib.ID, trackSpec{path: "/lib/a/1.flac", essence: "e1", content: "c1", title: "S", artist: "X", album: "A"})
 
 	var filePID string
-	if err := st.read.QueryRowContext(ctx, "SELECT pid FROM file LIMIT 1").Scan(&filePID); err != nil {
+	if err := st.rdb().QueryRowContext(ctx, "SELECT pid FROM file LIMIT 1").Scan(&filePID); err != nil {
 		t.Fatalf("read file pid: %v", err)
 	}
 	// A normal single-item file is not shared.
@@ -420,15 +420,15 @@ func TestFileSharedOrVirtual(t *testing.T) {
 
 	// Give the file an offset-bearing edge to a second item, which makes it virtual.
 	var fileID int64
-	_ = st.read.QueryRowContext(ctx, "SELECT id FROM file WHERE pid=?", filePID).Scan(&fileID)
-	_, err = st.write.ExecContext(ctx, `INSERT INTO playable_item(pid, kind, state, title, sort_key, identity_key, created_at, updated_at)
+	_ = st.rdb().QueryRowContext(ctx, "SELECT id FROM file WHERE pid=?", filePID).Scan(&fileID)
+	_, err = st.wdb().ExecContext(ctx, `INSERT INTO playable_item(pid, kind, state, title, sort_key, identity_key, created_at, updated_at)
 		VALUES ('01J0VIRTUAL00000000000000','track','present','V','v','virt:1',1,1)`)
 	if err != nil {
 		t.Fatalf("insert virtual item: %v", err)
 	}
 	var vid int64
-	_ = st.read.QueryRowContext(ctx, "SELECT id FROM playable_item WHERE pid='01J0VIRTUAL00000000000000'").Scan(&vid)
-	if _, err := st.write.ExecContext(ctx,
+	_ = st.rdb().QueryRowContext(ctx, "SELECT id FROM playable_item WHERE pid='01J0VIRTUAL00000000000000'").Scan(&vid)
+	if _, err := st.wdb().ExecContext(ctx,
 		"INSERT INTO item_file(item_id, file_id, role, position, start_frames, end_frames) VALUES (?,?,'primary',0,0,75)", vid, fileID); err != nil {
 		t.Fatalf("insert virtual edge: %v", err)
 	}
@@ -454,7 +454,7 @@ func TestEditCarriesTheCallersAttribution(t *testing.T) {
 		t.Fatalf("stamped edit: %v", err)
 	}
 	var source, provider string
-	if err := st.read.QueryRowContext(ctx,
+	if err := st.rdb().QueryRowContext(ctx,
 		"SELECT source, COALESCE(provider,'') FROM field_provenance WHERE field='comment'").
 		Scan(&source, &provider); err != nil {
 		t.Fatalf("read provenance: %v", err)
@@ -468,7 +468,7 @@ func TestEditCarriesTheCallersAttribution(t *testing.T) {
 	if err := st.EditItemField(ctx, pid, "comment", "typed", model.Attribution{}, model.LockOf(false), false); err != nil {
 		t.Fatalf("unstamped edit: %v", err)
 	}
-	if err := st.read.QueryRowContext(ctx,
+	if err := st.rdb().QueryRowContext(ctx,
 		"SELECT source, COALESCE(provider,'') FROM field_provenance WHERE field='comment'").
 		Scan(&source, &provider); err != nil {
 		t.Fatalf("read provenance: %v", err)
@@ -519,7 +519,7 @@ func TestEditWithLockUnchangedLeavesTheLockStanding(t *testing.T) {
 		t.Errorf("locked = %d after an unchanged-lock edit, want the lock still standing", n)
 	}
 	var value string
-	if err := st.read.QueryRowContext(ctx,
+	if err := st.rdb().QueryRowContext(ctx,
 		"SELECT COALESCE(value,'') FROM field_provenance WHERE field='comment'").Scan(&value); err != nil {
 		t.Fatalf("read value: %v", err)
 	}

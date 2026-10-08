@@ -45,7 +45,7 @@ func (s *Store) LoadScopedFileIndex(ctx context.Context, libraryID int64, scopeP
 	// track or book part has one edge, so the grouping is a no-op for them.
 	fq += " GROUP BY f.id"
 
-	rows, err := s.read.QueryContext(ctx, fq, args...)
+	rows, err := s.rdb().QueryContext(ctx, fq, args...)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
@@ -86,7 +86,7 @@ func (s *Store) LoadScopedFileIndex(ctx context.Context, libraryID int64, scopeP
 			aargs = append(aargs, hi)
 		}
 	}
-	arows, err := s.read.QueryContext(ctx, aq, aargs...)
+	arows, err := s.rdb().QueryContext(ctx, aq, aargs...)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}

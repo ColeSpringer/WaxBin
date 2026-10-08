@@ -191,18 +191,18 @@ func (s *Store) EntityPlayState(ctx context.Context, userPID model.PID, kind mod
 	if !kind.Starrable() {
 		return nil, waxerr.New(waxerr.CodeInvalid, op, "entity type carries no per-user state: "+string(kind))
 	}
-	userID, err := userIDByPID(ctx, s.read, userPID, op)
+	userID, err := userIDByPID(ctx, s.rdb(), userPID, op)
 	if err != nil {
 		return nil, err
 	}
 	table := string(kind) // a validated whitelist value, never user text
-	entityID, err := entityIDByPID(ctx, s.read, table, entityPID, op)
+	entityID, err := entityIDByPID(ctx, s.rdb(), table, entityPID, op)
 	if err != nil {
 		return nil, err
 	}
 	st := &model.EntityPlayState{Kind: kind, UserPID: userPID, EntityPID: entityPID}
 	var rating, starredAt, ratingChanged, starredChanged, updatedAt sql.NullInt64
-	err = s.read.QueryRowContext(ctx,
+	err = s.rdb().QueryRowContext(ctx,
 		`SELECT rating, starred_at, rating_changed_at, starred_changed_at, updated_at
 		 FROM entity_play_state WHERE user_id = ? AND entity_type = ? AND entity_id = ?`,
 		userID, table, entityID).
@@ -231,12 +231,12 @@ func (s *Store) StarredEntities(ctx context.Context, userPID model.PID, kind mod
 	if !kind.Starrable() {
 		return nil, waxerr.New(waxerr.CodeInvalid, op, "entity type carries no per-user state: "+string(kind))
 	}
-	userID, err := userIDByPID(ctx, s.read, userPID, op)
+	userID, err := userIDByPID(ctx, s.rdb(), userPID, op)
 	if err != nil {
 		return nil, err
 	}
 	table := string(kind) // a validated whitelist value, never user text
-	rows, err := s.read.QueryContext(ctx,
+	rows, err := s.rdb().QueryContext(ctx,
 		`SELECT e.pid, eps.rating, eps.starred_at, eps.rating_changed_at, eps.starred_changed_at, eps.updated_at
 		 FROM entity_play_state eps JOIN `+table+` e ON e.id = eps.entity_id
 		 WHERE eps.user_id = ? AND eps.entity_type = ? AND eps.starred_at IS NOT NULL

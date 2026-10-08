@@ -183,7 +183,7 @@ func TestNeedsAnalysisTracksMeasurementCompletion(t *testing.T) {
 	}
 
 	// New audio in the same file: the old measurement covers essence that is gone.
-	if _, err := st.write.ExecContext(ctx,
+	if _, err := st.wdb().ExecContext(ctx,
 		"UPDATE file SET essence_hash = ? WHERE pid = ?", "eb2", string(broken)); err != nil {
 		t.Fatalf("re-essence: %v", err)
 	}
@@ -220,7 +220,7 @@ func TestVersionBumpDoesNotSettleOnAFailedRemeasure(t *testing.T) {
 	loudnessRows := func() int {
 		t.Helper()
 		var n int
-		if err := st.read.QueryRowContext(ctx, "SELECT COUNT(*) FROM loudness").Scan(&n); err != nil {
+		if err := st.rdb().QueryRowContext(ctx, "SELECT COUNT(*) FROM loudness").Scan(&n); err != nil {
 			t.Fatalf("count loudness: %v", err)
 		}
 		return n
@@ -281,7 +281,7 @@ func TestVersionBumpClearsLoudnessOnCompletedEmptyRemeasure(t *testing.T) {
 	loudnessRows := func() int {
 		t.Helper()
 		var n int
-		if err := st.read.QueryRowContext(ctx, "SELECT COUNT(*) FROM loudness").Scan(&n); err != nil {
+		if err := st.rdb().QueryRowContext(ctx, "SELECT COUNT(*) FROM loudness").Scan(&n); err != nil {
 			t.Fatalf("count loudness: %v", err)
 		}
 		return n

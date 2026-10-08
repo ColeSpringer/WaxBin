@@ -233,20 +233,20 @@ func TestRelocateLibraryRootMovesEveryStoredPath(t *testing.T) {
 		t.Fatalf("relocate: %v", err)
 	}
 	var gonesrc, gonedst []byte
-	if err := st.read.QueryRowContext(ctx, "SELECT src, dst FROM organize_journal WHERE pid = ? AND file_id IS NULL", string(gjpid)).Scan(&gonesrc, &gonedst); err != nil {
+	if err := st.rdb().QueryRowContext(ctx, "SELECT src, dst FROM organize_journal WHERE pid = ? AND file_id IS NULL", string(gjpid)).Scan(&gonesrc, &gonedst); err != nil {
 		t.Fatal(err)
 	}
 	if string(gonesrc) != filepath.Join(newRoot, "b.mp3") || string(gonedst) != filepath.Join(newRoot, "Artist", "b.mp3") {
 		t.Errorf("the deleted file's journal move = %s -> %s, want it under %s", gonesrc, gonedst, newRoot)
 	}
 	var jsrc, jdst, aux []byte
-	if err := st.read.QueryRowContext(ctx, "SELECT src, dst FROM organize_journal WHERE pid = ?", string(jpid)).Scan(&jsrc, &jdst); err != nil {
+	if err := st.rdb().QueryRowContext(ctx, "SELECT src, dst FROM organize_journal WHERE pid = ?", string(jpid)).Scan(&jsrc, &jdst); err != nil {
 		t.Fatal(err)
 	}
 	if string(jsrc) != filepath.Join(newRoot, "a.mp3") || string(jdst) != filepath.Join(newRoot, "Artist", "a.mp3") {
 		t.Errorf("journal move = %s -> %s, want it under %s", jsrc, jdst, newRoot)
 	}
-	if err := st.read.QueryRowContext(ctx, "SELECT path FROM file_aux_state WHERE kind = 'lrc'").Scan(&aux); err != nil {
+	if err := st.rdb().QueryRowContext(ctx, "SELECT path FROM file_aux_state WHERE kind = 'lrc'").Scan(&aux); err != nil {
 		t.Fatal(err)
 	}
 	if string(aux) != filepath.Join(newRoot, "a.lrc") {

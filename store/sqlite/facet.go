@@ -269,7 +269,7 @@ func (s *Store) Facet(ctx context.Context, q query.Query, g read.GroupBy, order 
 	// than "no such user", which would send them after the wrong argument.
 	var userID int64
 	if g.UserScoped() {
-		id, uerr := userIDByPID(ctx, s.read, userPID, op)
+		id, uerr := userIDByPID(ctx, s.rdb(), userPID, op)
 		if uerr != nil {
 			return nil, uerr
 		}
@@ -319,7 +319,7 @@ func (s *Store) Facet(ctx context.Context, q query.Query, g read.GroupBy, order 
 	if limitClause != "" {
 		args = append(args, limit)
 	}
-	rows, err := s.read.QueryContext(ctx, stmt, args...)
+	rows, err := s.rdb().QueryContext(ctx, stmt, args...)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
@@ -355,7 +355,7 @@ func (s *Store) Facet(ctx context.Context, q query.Query, g read.GroupBy, order 
 // once (COUNT(DISTINCT item_id)). Keys are stored canonical, so no folding is needed.
 func (s *Store) TagKeys(ctx context.Context) ([]read.TagKeyCount, error) {
 	const op = "store.TagKeys"
-	rows, err := s.read.QueryContext(ctx,
+	rows, err := s.rdb().QueryContext(ctx,
 		"SELECT key, COUNT(DISTINCT item_id) AS n FROM item_tag GROUP BY key ORDER BY n DESC, key")
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
@@ -389,7 +389,7 @@ func (s *Store) QueryPage(ctx context.Context, q query.Query, cursor read.Cursor
 	if err != nil {
 		return nil, err
 	}
-	rows, err := s.rstmts.queryContext(ctx, s.read, stmt, args...)
+	rows, err := s.rstmts.queryContext(ctx, s.rdb(), stmt, args...)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}

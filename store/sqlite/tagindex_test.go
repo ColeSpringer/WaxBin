@@ -10,7 +10,7 @@ import (
 // queryPlan returns the EXPLAIN QUERY PLAN text for a statement, one node per line.
 func queryPlan(t *testing.T, st *Store, stmt string, args ...any) string {
 	t.Helper()
-	rows, err := st.read.QueryContext(context.Background(), "EXPLAIN QUERY PLAN "+stmt, args...)
+	rows, err := st.rdb().QueryContext(context.Background(), "EXPLAIN QUERY PLAN "+stmt, args...)
 	if err != nil {
 		t.Fatalf("explain: %v", err)
 	}

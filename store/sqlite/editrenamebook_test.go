@@ -40,7 +40,7 @@ func TestEditBookAuthorRenamesArtistInPlace(t *testing.T) {
 		t.Fatalf("old author rows = %d, want 0 (renamed in place)", n)
 	}
 	var name, matchKey, gotPID string
-	if err := st.read.QueryRowContext(ctx, "SELECT name, match_key, pid FROM artist WHERE id=?", artistID).
+	if err := st.rdb().QueryRowContext(ctx, "SELECT name, match_key, pid FROM artist WHERE id=?", artistID).
 		Scan(&name, &matchKey, &gotPID); err != nil {
 		t.Fatalf("read artist: %v", err)
 	}
@@ -173,7 +173,7 @@ func TestBookAuthorRenameBlockedByIncomingNarrator(t *testing.T) {
 	}
 
 	var name, matchKey, gotPID string
-	if err := st.read.QueryRowContext(ctx, "SELECT name, match_key, pid FROM artist WHERE id=?", janeID).
+	if err := st.rdb().QueryRowContext(ctx, "SELECT name, match_key, pid FROM artist WHERE id=?", janeID).
 		Scan(&name, &matchKey, &gotPID); err != nil {
 		t.Fatalf("read artist: %v", err)
 	}
@@ -329,7 +329,7 @@ func TestEditBookSeriesRenamesInPlace(t *testing.T) {
 		t.Fatalf("series rows = %d, want 1 (renamed in place)", n)
 	}
 	var name, matchKey, sortKey, gotPID string
-	if err := st.read.QueryRowContext(ctx,
+	if err := st.rdb().QueryRowContext(ctx,
 		"SELECT name, match_key, sort_key, pid FROM series WHERE id=?", seriesID).
 		Scan(&name, &matchKey, &sortKey, &gotPID); err != nil {
 		t.Fatalf("read series: %v", err)
@@ -380,7 +380,7 @@ func TestSeriesRenameSplitsOnPartialCoverage(t *testing.T) {
 		t.Fatalf("series rows = %d, want 2 (split)", n)
 	}
 	var name, gotPID string
-	if err := st.read.QueryRowContext(ctx,
+	if err := st.rdb().QueryRowContext(ctx,
 		"SELECT name, pid FROM series WHERE id=?", seriesID).Scan(&name, &gotPID); err != nil {
 		t.Fatalf("read series: %v", err)
 	}
@@ -433,7 +433,7 @@ func TestSeriesRenameSkipsWhenBatchReintroducesName(t *testing.T) {
 	}
 
 	var name, gotPID string
-	if err := st.read.QueryRowContext(ctx,
+	if err := st.rdb().QueryRowContext(ctx,
 		"SELECT name, pid FROM series WHERE id=?", duneID).Scan(&name, &gotPID); err != nil {
 		t.Fatalf("read series: %v", err)
 	}

@@ -177,7 +177,7 @@ func (s *Store) diagnosticFilterSQL(ctx context.Context, filter model.Diagnostic
 		args = append(args, ids[0])
 	}
 	if filter.FilePID != "" {
-		id, err := fileIDByPIDRead(ctx, s.read, filter.FilePID, op)
+		id, err := fileIDByPIDRead(ctx, s.rdb(), filter.FilePID, op)
 		if err != nil {
 			return "", nil, err
 		}
@@ -185,7 +185,7 @@ func (s *Store) diagnosticFilterSQL(ctx context.Context, filter model.Diagnostic
 		args = append(args, id)
 	}
 	if filter.ItemPID != "" {
-		id, err := itemIDByPIDRead(ctx, s.read, filter.ItemPID, op)
+		id, err := itemIDByPIDRead(ctx, s.rdb(), filter.ItemPID, op)
 		if err != nil {
 			return "", nil, err
 		}
@@ -225,7 +225,7 @@ func (s *Store) FileDiagnostics(ctx context.Context, filter model.DiagnosticFilt
 		stmt += " LIMIT -1 OFFSET ?" // SQLite requires a LIMIT before OFFSET
 		args = append(args, filter.Offset)
 	}
-	rows, err := s.read.QueryContext(ctx, stmt, args...)
+	rows, err := s.rdb().QueryContext(ctx, stmt, args...)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
@@ -268,7 +268,7 @@ func (s *Store) DiagnosticSummary(ctx context.Context, filter model.DiagnosticFi
 		FROM file_diagnostic d JOIN file f ON f.id = d.file_id` + where + `
 		GROUP BY d.origin, d.code, d.severity
 		ORDER BY CASE d.severity WHEN 'error' THEN 0 WHEN 'warn' THEN 1 ELSE 2 END, d.origin, d.code`
-	rows, err := s.read.QueryContext(ctx, stmt, args...)
+	rows, err := s.rdb().QueryContext(ctx, stmt, args...)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
@@ -295,7 +295,7 @@ func (s *Store) DiagnosticSummary(ctx context.Context, filter model.DiagnosticFi
 // file_diagnostic's primary key leads with file_id, so the check costs two index lookups.
 func (s *Store) hasFileDiagnostics(ctx context.Context, filePID model.PID, origin model.DiagnosticOrigin) (bool, error) {
 	var n int
-	err := s.read.QueryRowContext(ctx, `SELECT EXISTS(
+	err := s.rdb().QueryRowContext(ctx, `SELECT EXISTS(
 		SELECT 1 FROM file_diagnostic d JOIN file f ON f.id = d.file_id
 		WHERE f.pid = ? AND d.origin = ? AND d.code <> ?)`,
 		string(filePID), string(origin), string(model.DiagTagWriteOwed)).Scan(&n)
@@ -319,7 +319,7 @@ func (s *Store) hasFileDiagnostics(ctx context.Context, filePID model.PID, origi
 func (s *Store) CountFileDiagnostics(ctx context.Context) (int, error) {
 	const op = "store.CountFileDiagnostics"
 	var n int
-	if err := s.read.QueryRowContext(ctx, "SELECT COUNT(*) FROM file_diagnostic d JOIN file f ON f.id = d.file_id WHERE "+
+	if err := s.rdb().QueryRowContext(ctx, "SELECT COUNT(*) FROM file_diagnostic d JOIN file f ON f.id = d.file_id WHERE "+
 		diagnosticCurrent).Scan(&n); err != nil {
 		return 0, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
@@ -337,7 +337,7 @@ func (s *Store) CountFileDiagnostics(ctx context.Context) (int, error) {
 // replaces, re-reading and re-hashing every file on disk.
 func (s *Store) DiagnosticCoverage(ctx context.Context) (stale, total int, err error) {
 	const op = "store.DiagnosticCoverage"
-	err = s.read.QueryRowContext(ctx, `SELECT
+	err = s.rdb().QueryRowContext(ctx, `SELECT
 		COUNT(*) FILTER (WHERE diag_version < ?), COUNT(*)
 		FROM file WHERE kind = ?`, currentDiagVersion, string(model.FileAudio)).Scan(&stale, &total)
 	if err != nil {

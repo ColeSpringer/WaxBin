@@ -153,7 +153,7 @@ func TestABoundedCoverIsMatchedWithoutDecoding(t *testing.T) {
 	// Bytes that only claim to be a wide picture: a path that decoded first would store
 	// them as they are, so the memo answering is what proves it was read first.
 	raw := []byte("not a picture, whatever the carrier says")
-	if _, err := st.write.ExecContext(ctx, "INSERT INTO art_resized(from_hash, hash) VALUES (?, ?)",
+	if _, err := st.wdb().ExecContext(ctx, "INSERT INTO art_resized(from_hash, hash) VALUES (?, ?)",
 		art.Hash(raw), small.SourceHash); err != nil {
 		t.Fatalf("plant the memo: %v", err)
 	}
@@ -198,7 +198,7 @@ func TestUserArtIsBounded(t *testing.T) {
 	if n := scalarInt(t, st, owedQ, string(model.DiagTagWriteOwed)); n == 0 {
 		t.Fatal("the first set owed the file no write-back")
 	}
-	if _, err := st.write.ExecContext(ctx, "DELETE FROM file_diagnostic WHERE code = ?", string(model.DiagTagWriteOwed)); err != nil {
+	if _, err := st.wdb().ExecContext(ctx, "DELETE FROM file_diagnostic WHERE code = ?", string(model.DiagTagWriteOwed)); err != nil {
 		t.Fatal(err)
 	}
 	set()

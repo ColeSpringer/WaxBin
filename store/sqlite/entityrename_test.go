@@ -500,7 +500,7 @@ func TestRenameEntityRefusesSplitAcrossFolders(t *testing.T) {
 	}
 	// The release id keys the album today, so the rename would drop to the heuristic keys
 	// the two folders compute and land the members apart.
-	if _, err := st.write.ExecContext(ctx,
+	if _, err := st.wdb().ExecContext(ctx,
 		"UPDATE album SET match_key='al:rg:band\x1falbum\x1f\x1f\x1flib band album' WHERE pid=?",
 		string(albumPID)); err != nil {
 		t.Fatal(err)
@@ -645,7 +645,7 @@ func TestRenameArtistRefusedWhenPrePassDeclines(t *testing.T) {
 	pid := entityPID(t, st, "artist", "Alpha")
 	// Gamma's group now names Alpha as its primary artist, a reference no member of the
 	// rename touches.
-	if _, err := st.write.ExecContext(ctx, `UPDATE release_group
+	if _, err := st.wdb().ExecContext(ctx, `UPDATE release_group
 		SET primary_artist_id = (SELECT id FROM artist WHERE pid = ?)
 		WHERE title = 'Other'`, string(pid)); err != nil {
 		t.Fatal(err)

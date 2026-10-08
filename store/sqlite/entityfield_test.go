@@ -16,7 +16,7 @@ import (
 func scalarStr(t *testing.T, st *Store, q string, args ...any) string {
 	t.Helper()
 	var s string
-	if err := st.read.QueryRowContext(context.Background(), q, args...).Scan(&s); err != nil {
+	if err := st.rdb().QueryRowContext(context.Background(), q, args...).Scan(&s); err != nil {
 		t.Fatalf("query %q: %v", q, err)
 	}
 	return s
@@ -452,7 +452,7 @@ func explainPlan(t *testing.T, st *Store, stmt string, args ...any) string {
 // whole plan.
 func explainPlanLines(t *testing.T, st *Store, stmt string, args ...any) []string {
 	t.Helper()
-	rows, err := st.read.QueryContext(context.Background(), "EXPLAIN QUERY PLAN "+stmt, args...)
+	rows, err := st.rdb().QueryContext(context.Background(), "EXPLAIN QUERY PLAN "+stmt, args...)
 	if err != nil {
 		t.Fatalf("explain: %v", err)
 	}
@@ -1087,7 +1087,7 @@ func TestPresenceFieldPlansSeekIndexes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}
-	rows, err := st.read.QueryContext(ctx, "EXPLAIN QUERY PLAN "+itemSelect+" WHERE "+c.Where, c.Args...)
+	rows, err := st.rdb().QueryContext(ctx, "EXPLAIN QUERY PLAN "+itemSelect+" WHERE "+c.Where, c.Args...)
 	if err != nil {
 		t.Fatalf("explain: %v", err)
 	}

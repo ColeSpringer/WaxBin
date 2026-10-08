@@ -195,7 +195,7 @@ func TestFoldedKeysNameTheirSurvivors(t *testing.T) {
 	albumOf := func(item model.PID) (model.PID, string) {
 		t.Helper()
 		var pid, key string
-		if err := st.read.QueryRowContext(ctx, `SELECT al.pid, al.match_key FROM album al JOIN track t ON t.album_id = al.id
+		if err := st.rdb().QueryRowContext(ctx, `SELECT al.pid, al.match_key FROM album al JOIN track t ON t.album_id = al.id
 			JOIN playable_item pi ON pi.id = t.item_id WHERE pi.pid = ?`, string(item)).Scan(&pid, &key); err != nil {
 			t.Fatal(err)
 		}

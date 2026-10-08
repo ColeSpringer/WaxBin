@@ -827,14 +827,14 @@ func (s *Store) EntityCuration(ctx context.Context, entityType model.MergeEntity
 		return nil, waxerr.New(waxerr.CodeUnsupported, op, "entity curation is not supported for a "+string(entityType)+" entity")
 	}
 	var entityID int64
-	err := s.read.QueryRowContext(ctx, "SELECT id FROM "+table+" WHERE pid = ?", string(entityPID)).Scan(&entityID)
+	err := s.rdb().QueryRowContext(ctx, "SELECT id FROM "+table+" WHERE pid = ?", string(entityPID)).Scan(&entityID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, waxerr.New(waxerr.CodeNotFound, op, "no such "+string(entityType)+": "+string(entityPID))
 	}
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
-	rows, err := s.read.QueryContext(ctx, `SELECT field, source, COALESCE(provider,''), locked,
+	rows, err := s.rdb().QueryContext(ctx, `SELECT field, source, COALESCE(provider,''), locked,
 		COALESCE(value,''), updated_at
 		FROM entity_curation WHERE entity_type = ? AND entity_id = ? ORDER BY field`,
 		string(entityType), entityID)

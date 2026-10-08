@@ -72,7 +72,7 @@ func (s *Store) KindTargets(ctx context.Context, pids []model.PID) ([]model.Kind
 	for _, pid := range pids {
 		t := model.KindTarget{ItemPID: pid}
 		var id int64
-		err := s.read.QueryRowContext(ctx, `SELECT pi.id, pi.kind,
+		err := s.rdb().QueryRowContext(ctx, `SELECT pi.id, pi.kind,
 			EXISTS(SELECT 1 FROM field_provenance fp WHERE fp.item_id = pi.id AND fp.field = 'kind' AND fp.locked = 1)
 			FROM playable_item pi WHERE pi.pid = ?`, string(pid)).Scan(&id, &t.Kind, &t.KindLocked)
 		if errors.Is(err, sql.ErrNoRows) {
@@ -81,7 +81,7 @@ func (s *Store) KindTargets(ctx context.Context, pids []model.PID) ([]model.Kind
 		if err != nil {
 			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
-		rows, err := s.read.QueryContext(ctx, `SELECT f.pid, f.path, f.display_path, COALESCE(f.essence_hash, ''),
+		rows, err := s.rdb().QueryContext(ctx, `SELECT f.pid, f.path, f.display_path, COALESCE(f.essence_hash, ''),
 				COALESCE(f.codec, ''), COALESCE(f.duration_ms, 0), itf.role,
 				itf.position, f.library_id, itf.start_frames IS NOT NULL OR itf.end_frames IS NOT NULL,
 				EXISTS(SELECT 1 FROM item_file o WHERE o.file_id = f.id AND o.item_id <> itf.item_id),
@@ -196,7 +196,7 @@ func (s *Store) FollowFile(ctx context.Context, filePID, anchorPID model.PID) (m
 func (s *Store) WholeFileOwner(ctx context.Context, filePID model.PID) (model.PID, error) {
 	const op = "store.WholeFileOwner"
 	var pid model.PID
-	err := s.read.QueryRowContext(ctx, `SELECT pi.pid FROM file f
+	err := s.rdb().QueryRowContext(ctx, `SELECT pi.pid FROM file f
 		JOIN item_file itf ON itf.file_id = f.id AND itf.start_frames IS NULL
 		JOIN playable_item pi ON pi.id = itf.item_id
 		WHERE f.pid = ? ORDER BY itf.role = 'alternate', itf.item_id LIMIT 1`, string(filePID)).Scan(&pid)
@@ -264,7 +264,7 @@ func (s *Store) FileStanding(ctx context.Context, libraryID int64, path []byte, 
 		if essence == "" && i%2 == 1 {
 			continue
 		}
-		st, err := scanStanding(s.read.QueryRowContext(ctx, l.q, l.args...))
+		st, err := scanStanding(s.rdb().QueryRowContext(ctx, l.q, l.args...))
 		if !errors.Is(err, sql.ErrNoRows) {
 			return st, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
@@ -284,7 +284,7 @@ const folderStandingQ = `SELECT ` + standingCols + standingFrom + `
 func (s *Store) FolderStanding(ctx context.Context, libraryID int64, root, folder string) ([]model.FileStanding, error) {
 	const op = "store.FolderStanding"
 	lo := []byte(folder + string(filepath.Separator))
-	rows, err := s.read.QueryContext(ctx, folderStandingQ, libraryID, lo, prefixUpperBound(lo))
+	rows, err := s.rdb().QueryContext(ctx, folderStandingQ, libraryID, lo, prefixUpperBound(lo))
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}

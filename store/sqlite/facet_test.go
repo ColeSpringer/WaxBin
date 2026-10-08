@@ -124,7 +124,7 @@ func TestFacetByAlbum(t *testing.T) {
 // what separates [No Release Group] from [Non-Album].
 func detachReleaseGroup(t *testing.T, st *Store, albumTitle string) {
 	t.Helper()
-	res, err := st.write.ExecContext(context.Background(),
+	res, err := st.wdb().ExecContext(context.Background(),
 		"UPDATE album SET release_group_id = NULL WHERE title = ?", albumTitle)
 	if err != nil {
 		t.Fatalf("detach release group from %q: %v", albumTitle, err)

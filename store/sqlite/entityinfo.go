@@ -36,13 +36,13 @@ func (s *Store) EntityByPID(ctx context.Context, kind read.EntityKind, pid model
 	var err error
 	switch kind {
 	case read.EntityArtist:
-		err = s.read.QueryRowContext(ctx, `SELECT a.id, a.name, a.sort_key, COALESCE(a.mbid,''),
+		err = s.rdb().QueryRowContext(ctx, `SELECT a.id, a.name, a.sort_key, COALESCE(a.mbid,''),
 			COALESCE(ar.track_count,0), COALESCE(ar.release_group_count,0), COALESCE(ar.total_duration_ms,0)
 			FROM artist a LEFT JOIN artist_rollup ar ON ar.artist_id = a.id
 			WHERE a.pid = ?`, string(pid)).
 			Scan(&id, &info.Name, &info.SortKey, &info.MBID, &info.ItemCount, &info.ReleaseGroupCount, &info.TotalDurationMS)
 	case read.EntityReleaseGroup:
-		err = s.read.QueryRowContext(ctx, `SELECT rg.id, rg.title, rg.sort_key, COALESCE(rg.mbid,''),
+		err = s.rdb().QueryRowContext(ctx, `SELECT rg.id, rg.title, rg.sort_key, COALESCE(rg.mbid,''),
 			COALESCE(rg.type,''), COALESCE(pa.pid,''),
 			COALESCE(rr.track_count,0), COALESCE(rr.total_duration_ms,0)
 			FROM release_group rg
@@ -51,7 +51,7 @@ func (s *Store) EntityByPID(ctx context.Context, kind read.EntityKind, pid model
 			WHERE rg.pid = ?`, string(pid)).
 			Scan(&id, &info.Name, &info.SortKey, &info.MBID, &info.Type, &artistPID, &info.ItemCount, &info.TotalDurationMS)
 	case read.EntityAlbum:
-		err = s.read.QueryRowContext(ctx, `SELECT al.id, al.title, al.sort_key, COALESCE(al.mbid,''),
+		err = s.rdb().QueryRowContext(ctx, `SELECT al.id, al.title, al.sort_key, COALESCE(al.mbid,''),
 			COALESCE(al.year,0), COALESCE(rg.pid,''),
 			COALESCE(al.barcode,''), COALESCE(al.label,''), COALESCE(al.catalog_number,''),
 			COALESCE(al.media,''), COALESCE(al.country,'')
@@ -60,13 +60,13 @@ func (s *Store) EntityByPID(ctx context.Context, kind read.EntityKind, pid model
 			Scan(&id, &info.Name, &info.SortKey, &info.MBID, &info.Year, &rgPID,
 				&info.Barcode, &info.Label, &info.CatalogNumber, &info.Media, &info.Country)
 	case read.EntityGenre:
-		err = s.read.QueryRowContext(ctx, `SELECT g.id, g.name, g.sort_key,
+		err = s.rdb().QueryRowContext(ctx, `SELECT g.id, g.name, g.sort_key,
 			COALESCE(gr.track_count,0), COALESCE(gr.total_duration_ms,0)
 			FROM genre g LEFT JOIN genre_rollup gr ON gr.genre_id = g.id
 			WHERE g.pid = ?`, string(pid)).
 			Scan(&id, &info.Name, &info.SortKey, &info.ItemCount, &info.TotalDurationMS)
 	case read.EntitySeries:
-		err = s.read.QueryRowContext(ctx,
+		err = s.rdb().QueryRowContext(ctx,
 			"SELECT srs.id, srs.name, srs.sort_key FROM series srs WHERE srs.pid = ?",
 			string(pid)).
 			Scan(&id, &info.Name, &info.SortKey)
@@ -81,14 +81,14 @@ func (s *Store) EntityByPID(ctx context.Context, kind read.EntityKind, pid model
 
 	switch kind {
 	case read.EntityAlbum:
-		err = s.read.QueryRowContext(ctx, `SELECT COUNT(DISTINCT t.item_id), COALESCE(SUM(`+itemEffectiveDurationExpr+`),0)
+		err = s.rdb().QueryRowContext(ctx, `SELECT COUNT(DISTINCT t.item_id), COALESCE(SUM(`+itemEffectiveDurationExpr+`),0)
 			FROM track t
 			LEFT JOIN item_file pf ON pf.item_id = t.item_id AND pf.role = 'primary'
 			LEFT JOIN file f ON f.id = pf.file_id
 			WHERE t.album_id = ?`, id).
 			Scan(&info.ItemCount, &info.TotalDurationMS)
 	case read.EntitySeries:
-		err = s.read.QueryRowContext(ctx,
+		err = s.rdb().QueryRowContext(ctx,
 			"SELECT COUNT(*), COALESCE(SUM(bk.total_duration_ms),0) FROM book bk WHERE bk.series_id = ?", id).
 			Scan(&info.ItemCount, &info.TotalDurationMS)
 	}
@@ -173,7 +173,7 @@ func (s *Store) EntityPage(ctx context.Context, kind read.EntityKind, cursor rea
 	stmt += " ORDER BY sort_key, pid LIMIT ?"
 	args = append(args, limit+1) // one extra to detect a further page
 
-	rows, err := s.read.QueryContext(ctx, stmt, args...)
+	rows, err := s.rdb().QueryContext(ctx, stmt, args...)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
@@ -256,7 +256,7 @@ func entityMemberSource(kind read.EntityKind) (from, idExpr string) {
 // items' primary backing files, in library order.
 func (s *Store) entityLibraryPIDs(ctx context.Context, kind read.EntityKind, id int64, op string) ([]model.PID, error) {
 	from, idExpr := entityMemberSource(kind)
-	rows, err := s.read.QueryContext(ctx,
+	rows, err := s.rdb().QueryContext(ctx,
 		"SELECT l.pid"+from+" JOIN library l ON l.id = f.library_id WHERE "+idExpr+" = ? GROUP BY l.id ORDER BY l.id", id)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
@@ -352,7 +352,7 @@ func (s *Store) FilePIDsByPath(ctx context.Context, paths [][]byte) (map[string]
 		for i, p := range chunk {
 			args[i] = p
 		}
-		rows, err := s.read.QueryContext(ctx, "SELECT path, pid FROM file WHERE path IN "+placeholders(len(chunk)), args...)
+		rows, err := s.rdb().QueryContext(ctx, "SELECT path, pid FROM file WHERE path IN "+placeholders(len(chunk)), args...)
 		if err != nil {
 			return err
 		}
@@ -390,7 +390,7 @@ func (s *Store) namesByKey(ctx context.Context, op, stmt string, keys []string) 
 		for i, k := range chunk {
 			args[i] = k
 		}
-		rows, err := s.read.QueryContext(ctx, stmt+placeholders(len(chunk)), args...)
+		rows, err := s.rdb().QueryContext(ctx, stmt+placeholders(len(chunk)), args...)
 		if err != nil {
 			return err
 		}
@@ -551,7 +551,7 @@ func (s *Store) entityBaseBatch(ctx context.Context, kind read.EntityKind, chunk
 		}
 	}
 
-	rows, err := s.read.QueryContext(ctx, stmt, args...)
+	rows, err := s.rdb().QueryContext(ctx, stmt, args...)
 	if err != nil {
 		return nil, nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
@@ -604,7 +604,7 @@ func (s *Store) entityLiveCountsBatch(ctx context.Context, kind read.EntityKind,
 	for i, id := range ids {
 		args[i] = id
 	}
-	rows, err := s.read.QueryContext(ctx, stmt, args...)
+	rows, err := s.rdb().QueryContext(ctx, stmt, args...)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
@@ -634,7 +634,7 @@ func (s *Store) entityLibraryPIDsBatch(ctx context.Context, kind read.EntityKind
 	for i, id := range ids {
 		args[i] = id
 	}
-	rows, err := s.read.QueryContext(ctx,
+	rows, err := s.rdb().QueryContext(ctx,
 		"SELECT "+idExpr+" AS eid, l.pid"+from+
 			" JOIN library l ON l.id = f.library_id WHERE "+idExpr+" IN "+placeholders(len(ids))+
 			" GROUP BY eid, l.id ORDER BY eid, l.id", args...)

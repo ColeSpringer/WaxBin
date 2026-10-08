@@ -340,7 +340,7 @@ func TestUserStateJoinIndexSeek(t *testing.T) {
 	t.Parallel()
 	st, _ := userStateFixture(t)
 	ctx := context.Background()
-	uid, err := userIDByPID(ctx, st.read, "", "test")
+	uid, err := userIDByPID(ctx, st.rdb(), "", "test")
 	if err != nil {
 		t.Fatalf("resolve default user: %v", err)
 	}
@@ -348,7 +348,7 @@ func TestUserStateJoinIndexSeek(t *testing.T) {
 	// The exact join + a per-user predicate the store emits.
 	stmt := "EXPLAIN QUERY PLAN SELECT COUNT(*)" + itemJoins + userStateJoinClause +
 		" WHERE COALESCE(ps.play_count, 0) > 0"
-	rows, err := st.read.QueryContext(ctx, stmt, uid)
+	rows, err := st.rdb().QueryContext(ctx, stmt, uid)
 	if err != nil {
 		t.Fatalf("explain: %v", err)
 	}

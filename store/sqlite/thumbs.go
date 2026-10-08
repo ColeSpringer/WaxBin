@@ -22,7 +22,7 @@ import (
 // from art_source's own size column for the same reason.
 func (s *Store) ThumbCacheStats(ctx context.Context) (*model.ThumbCacheReport, error) {
 	const op = "store.ThumbCacheStats"
-	tx, err := s.read.BeginTx(ctx, nil)
+	tx, err := s.rdb().BeginTx(ctx, nil)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}

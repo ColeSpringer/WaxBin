@@ -122,7 +122,7 @@ func TestPodcasting20IdenticalReSyncIsSilent(t *testing.T) {
 			"SELECT id FROM podcast_person ORDER BY id",
 			"SELECT rowid FROM episode_soundbite ORDER BY rowid",
 		} {
-			rows, err := st.read.QueryContext(ctx, q)
+			rows, err := st.rdb().QueryContext(ctx, q)
 			if err != nil {
 				t.Fatalf("rowids: %v", err)
 			}
@@ -238,7 +238,7 @@ func TestPodcasting20RemoveLeavesNoOrphans(t *testing.T) {
 		"SELECT COUNT(*) FROM episode_soundbite",
 	} {
 		var n int
-		if err := st.read.QueryRowContext(ctx, q).Scan(&n); err != nil {
+		if err := st.rdb().QueryRowContext(ctx, q).Scan(&n); err != nil {
 			t.Fatalf("count: %v", err)
 		}
 		if n != 0 {

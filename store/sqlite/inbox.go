@@ -54,7 +54,7 @@ func (s *Store) UpdateImportBatch(ctx context.Context, b *model.ImportBatch) err
 // filenames; it scans the file table, which is fine for an import-sized batch.
 func (s *Store) DisplayPathExistsFold(ctx context.Context, displayPath string) (bool, error) {
 	var exists int
-	err := s.read.QueryRowContext(ctx,
+	err := s.rdb().QueryRowContext(ctx,
 		"SELECT EXISTS(SELECT 1 FROM file WHERE display_path = ? COLLATE NOCASE)", displayPath).Scan(&exists)
 	if err != nil {
 		return false, waxerr.Wrap(waxerr.CodeIO, "store.DisplayPathExistsFold", err)
@@ -73,7 +73,7 @@ func (s *Store) ImportBatches(ctx context.Context, limit int) ([]*model.ImportBa
 		q += " LIMIT ?"
 		args = append(args, limit)
 	}
-	rows, err := s.read.QueryContext(ctx, q, args...)
+	rows, err := s.rdb().QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}

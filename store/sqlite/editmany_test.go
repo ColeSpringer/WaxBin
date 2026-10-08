@@ -20,7 +20,7 @@ func twoTrackFixture(t *testing.T) (*Store, *model.Library, model.PID, model.PID
 		path: "/lib/B/1/01.flac", essence: "e2", content: "c2",
 		title: "Two", artist: "Beta", albumArt: "Beta", album: "Second", genre: "Rock",
 	})
-	rows, err := st.read.QueryContext(context.Background(),
+	rows, err := st.rdb().QueryContext(context.Background(),
 		"SELECT pid FROM playable_item WHERE kind='track' ORDER BY id")
 	if err != nil {
 		t.Fatalf("pids: %v", err)
@@ -59,7 +59,7 @@ func TestEditManyFieldsApplies(t *testing.T) {
 	}
 	for _, pid := range []model.PID{p1, p2} {
 		var genre string
-		if err := st.read.QueryRowContext(ctx,
+		if err := st.rdb().QueryRowContext(ctx,
 			"SELECT t.genre FROM track t JOIN playable_item pi ON pi.id=t.item_id WHERE pi.pid=?", string(pid)).Scan(&genre); err != nil {
 			t.Fatalf("read %s: %v", pid, err)
 		}
@@ -85,7 +85,7 @@ func TestEditManyFieldsAtomicOnKindMismatch(t *testing.T) {
 		title: "The Book", author: "Jane Author",
 	})
 	var bpid string
-	if err := st.read.QueryRowContext(ctx, "SELECT pid FROM playable_item WHERE kind='book' LIMIT 1").Scan(&bpid); err != nil {
+	if err := st.rdb().QueryRowContext(ctx, "SELECT pid FROM playable_item WHERE kind='book' LIMIT 1").Scan(&bpid); err != nil {
 		t.Fatalf("book pid: %v", err)
 	}
 	_, err := st.EditManyFields(ctx, []model.PID{model.PID(bpid), p1}, map[string]string{"publisher": "X"},
@@ -95,7 +95,7 @@ func TestEditManyFieldsAtomicOnKindMismatch(t *testing.T) {
 	}
 	// The book's publisher was NOT written (rolled back).
 	var publisher string
-	if err := st.read.QueryRowContext(ctx,
+	if err := st.rdb().QueryRowContext(ctx,
 		"SELECT publisher FROM book b JOIN playable_item pi ON pi.id=b.item_id WHERE pi.pid=?", bpid).Scan(&publisher); err != nil {
 		t.Fatalf("read publisher: %v", err)
 	}
@@ -127,7 +127,7 @@ func TestEditManyFieldsSkipLocked(t *testing.T) {
 	}
 	// p1's locked genre is untouched.
 	var g1 string
-	if err := st.read.QueryRowContext(ctx,
+	if err := st.rdb().QueryRowContext(ctx,
 		"SELECT t.genre FROM track t JOIN playable_item pi ON pi.id=t.item_id WHERE pi.pid=?", string(p1)).Scan(&g1); err != nil {
 		t.Fatalf("read p1: %v", err)
 	}

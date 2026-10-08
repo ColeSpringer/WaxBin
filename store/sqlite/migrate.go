@@ -35,7 +35,7 @@ type migration struct {
 // refused if it was built from a different one (see baseline.go).
 func (s *Store) migrate(ctx context.Context) error {
 	const op = "store.migrate"
-	if _, err := s.write.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (
+	if _, err := s.wdb().ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (
 		version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at INTEGER NOT NULL)`); err != nil {
 		return waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
@@ -59,7 +59,7 @@ func (s *Store) migrate(ctx context.Context) error {
 	// AllowStaleBaseline deliberately does not reach here: the write path is where a
 	// missing column costs data.
 	if current > 0 {
-		got, err := baselineStamp(ctx, s.write)
+		got, err := baselineStamp(ctx, s.wdb())
 		if err != nil {
 			return err
 		}
@@ -84,7 +84,7 @@ func (s *Store) migrate(ctx context.Context) error {
 
 	if current > 0 {
 		backup := fmt.Sprintf("%s.pre-migrate-%d.bak", s.path, current)
-		if _, err := s.write.ExecContext(ctx, "VACUUM INTO ?", backup); err != nil {
+		if _, err := s.wdb().ExecContext(ctx, "VACUUM INTO ?", backup); err != nil {
 			return waxerr.Wrapf(waxerr.CodeIO, op, err, "backing up to %s before migrate", backup)
 		}
 		// The pre-migrate backup carries the secret table, so restrict it like the
@@ -126,7 +126,7 @@ func (s *Store) migrate(ctx context.Context) error {
 // told to run `waxbin init` rather than reported as the stamp mismatch it also is.
 func (s *Store) verifyReadable(ctx context.Context) error {
 	var v int
-	err := s.read.QueryRowContext(ctx,
+	err := s.rdb().QueryRowContext(ctx,
 		"SELECT COALESCE(MAX(version), 0) FROM schema_migrations").Scan(&v)
 	if err != nil {
 		// A missing schema_migrations table means an uninitialized DB; any other
@@ -147,7 +147,7 @@ func (s *Store) verifyReadable(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	got, err := baselineStamp(ctx, s.read)
+	got, err := baselineStamp(ctx, s.rdb())
 	if err != nil {
 		return err
 	}
@@ -168,7 +168,7 @@ func (s *Store) verifyReadable(ctx context.Context) error {
 // against an older catalog does not fail on a table from a pending migration.
 func (s *Store) CatalogVersion(ctx context.Context) (int, error) {
 	var v int
-	err := s.read.QueryRowContext(ctx,
+	err := s.rdb().QueryRowContext(ctx,
 		"SELECT COALESCE(MAX(version), 0) FROM schema_migrations").Scan(&v)
 	if err != nil {
 		if strings.Contains(err.Error(), "no such table") {
@@ -181,7 +181,7 @@ func (s *Store) CatalogVersion(ctx context.Context) (int, error) {
 
 func (s *Store) currentVersion(ctx context.Context) (int, error) {
 	var v int
-	if err := s.write.QueryRowContext(ctx,
+	if err := s.wdb().QueryRowContext(ctx,
 		"SELECT COALESCE(MAX(version), 0) FROM schema_migrations").Scan(&v); err != nil {
 		return 0, waxerr.Wrap(waxerr.CodeIO, "store.migrate", err)
 	}

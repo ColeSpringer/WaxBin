@@ -36,7 +36,7 @@ func TestGCOrphans(t *testing.T) {
 	}
 
 	// Delete the item (cascades its track), orphaning the artist/album/release_group.
-	if _, err := st.write.ExecContext(ctx, "DELETE FROM playable_item WHERE pid = ?", string(r.ItemPID)); err != nil {
+	if _, err := st.wdb().ExecContext(ctx, "DELETE FROM playable_item WHERE pid = ?", string(r.ItemPID)); err != nil {
 		t.Fatalf("delete item: %v", err)
 	}
 
@@ -88,7 +88,7 @@ func TestOrphanRGSweepDropsAuxMarker(t *testing.T) {
 	})
 	var rgID int64
 	var rgPID string
-	if err := st.read.QueryRowContext(ctx, "SELECT id, pid FROM release_group").Scan(&rgID, &rgPID); err != nil {
+	if err := st.rdb().QueryRowContext(ctx, "SELECT id, pid FROM release_group").Scan(&rgID, &rgPID); err != nil {
 		t.Fatalf("resolve release group: %v", err)
 	}
 	if err := st.ApplyReleaseGroupArtBackfill(ctx,
@@ -99,7 +99,7 @@ func TestOrphanRGSweepDropsAuxMarker(t *testing.T) {
 	// rowid, so it is swept here too.
 	var albumID int64
 	var albumPID string
-	if err := st.read.QueryRowContext(ctx, "SELECT id, pid FROM album").Scan(&albumID, &albumPID); err != nil {
+	if err := st.rdb().QueryRowContext(ctx, "SELECT id, pid FROM album").Scan(&albumID, &albumPID); err != nil {
 		t.Fatalf("resolve album: %v", err)
 	}
 	if err := st.ApplyAlbumFields(ctx,
@@ -139,7 +139,7 @@ func TestGCOrphansEmitsDeltas(t *testing.T) {
 	r := putTrack(t, st, lib.ID, trackSpec{
 		path: "/lib/A/Al/1.flac", essence: "e1", content: "c1", title: "T", artist: "A", album: "Al",
 	})
-	if _, err := st.write.ExecContext(ctx, "DELETE FROM playable_item WHERE pid = ?", string(r.ItemPID)); err != nil {
+	if _, err := st.wdb().ExecContext(ctx, "DELETE FROM playable_item WHERE pid = ?", string(r.ItemPID)); err != nil {
 		t.Fatal(err)
 	}
 	before, _ := st.LatestChangeSeq(ctx)
@@ -152,7 +152,7 @@ func TestGCOrphansEmitsDeltas(t *testing.T) {
 	}
 	// The deltas are typed deletes for the swept entity kinds.
 	var artistDeletes int
-	if err := st.read.QueryRowContext(ctx,
+	if err := st.rdb().QueryRowContext(ctx,
 		"SELECT COUNT(*) FROM change_log WHERE entity_type = 'artist' AND op = 'delete'").Scan(&artistDeletes); err != nil {
 		t.Fatal(err)
 	}

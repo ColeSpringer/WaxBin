@@ -251,7 +251,7 @@ func TestSetEntityArtDurableAlbum(t *testing.T) {
 		title: "One", artist: "Alpha", albumArt: "Alpha", album: "One",
 	})
 	var albumPID string
-	if err := st.read.QueryRowContext(ctx, "SELECT pid FROM album LIMIT 1").Scan(&albumPID); err != nil {
+	if err := st.rdb().QueryRowContext(ctx, "SELECT pid FROM album LIMIT 1").Scan(&albumPID); err != nil {
 		t.Fatalf("album pid: %v", err)
 	}
 
@@ -268,7 +268,7 @@ func TestSetEntityArtDurableAlbum(t *testing.T) {
 	}
 	// A durable album row exists (not just track-derived).
 	var n int
-	if err := st.read.QueryRowContext(ctx,
+	if err := st.rdb().QueryRowContext(ctx,
 		"SELECT COUNT(*) FROM art_map WHERE entity_type='album'").Scan(&n); err != nil {
 		t.Fatalf("count: %v", err)
 	}
@@ -291,7 +291,7 @@ func TestSetItemChaptersSurvivesScan(t *testing.T) {
 		chapters: []model.Chapter{{Position: 0, Title: "Scanned Ch", FileStartMS: 0}},
 	})
 	var bpid string
-	if err := st.read.QueryRowContext(ctx, "SELECT pid FROM playable_item WHERE kind='book' LIMIT 1").Scan(&bpid); err != nil {
+	if err := st.rdb().QueryRowContext(ctx, "SELECT pid FROM playable_item WHERE kind='book' LIMIT 1").Scan(&bpid); err != nil {
 		t.Fatalf("book pid: %v", err)
 	}
 	pid := model.PID(bpid)
@@ -374,7 +374,7 @@ func TestSetItemChaptersMultiFileRoundTrip(t *testing.T) {
 	}
 	// Boundary start lands in the part it opens: chapter Three is backed by part 3.
 	var p3pid model.PID
-	if err := st.read.QueryRowContext(ctx, "SELECT pid FROM file WHERE path=?", []byte("/lib/mb/p3.m4b")).Scan(&p3pid); err != nil {
+	if err := st.rdb().QueryRowContext(ctx, "SELECT pid FROM file WHERE path=?", []byte("/lib/mb/p3.m4b")).Scan(&p3pid); err != nil {
 		t.Fatalf("p3 pid: %v", err)
 	}
 	if got[2].FilePID != p3pid {
@@ -492,7 +492,7 @@ func TestSetItemChaptersShrinkClearsUncoveredParts(t *testing.T) {
 		t.Fatalf("after shrink = %v (end %d), want just Only ending at 6000", startTitles(got), got[0].EndMS)
 	}
 	var stray int
-	if err := st.read.QueryRowContext(ctx,
+	if err := st.rdb().QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM chapter c JOIN item_file itf ON itf.file_id = c.file_id AND itf.item_id = c.book_item_id
 		 WHERE c.source='user' AND itf.position > 1`).Scan(&stray); err != nil {
 		t.Fatalf("stray count: %v", err)
@@ -566,7 +566,7 @@ func TestSetItemChaptersZeroDurationPartKeepsTimeline(t *testing.T) {
 		t.Fatalf("zero-duration part collapsed the timeline: %v", startTitles(got))
 	}
 	var p2pid model.PID
-	if err := st.read.QueryRowContext(ctx, "SELECT pid FROM file WHERE path=?", []byte("/lib/zb/p2.m4b")).Scan(&p2pid); err != nil {
+	if err := st.rdb().QueryRowContext(ctx, "SELECT pid FROM file WHERE path=?", []byte("/lib/zb/p2.m4b")).Scan(&p2pid); err != nil {
 		t.Fatalf("p2 pid: %v", err)
 	}
 	if got[1].FilePID != p2pid {
@@ -594,10 +594,10 @@ func TestSetItemChaptersMapsAgainstDisplayedSource(t *testing.T) {
 	})
 	pid := r1.ItemPID
 	var itemID, fileID int64
-	if err := st.read.QueryRowContext(ctx, "SELECT id FROM playable_item WHERE pid=?", string(pid)).Scan(&itemID); err != nil {
+	if err := st.rdb().QueryRowContext(ctx, "SELECT id FROM playable_item WHERE pid=?", string(pid)).Scan(&itemID); err != nil {
 		t.Fatalf("item id: %v", err)
 	}
-	if err := st.read.QueryRowContext(ctx, "SELECT id FROM file WHERE path=?", []byte("/lib/ds/p1.m4b")).Scan(&fileID); err != nil {
+	if err := st.rdb().QueryRowContext(ctx, "SELECT id FROM file WHERE path=?", []byte("/lib/ds/p1.m4b")).Scan(&fileID); err != nil {
 		t.Fatalf("file id: %v", err)
 	}
 	if err := st.writeTx(ctx, func(tx *sql.Tx) error {
@@ -625,7 +625,7 @@ func TestSetItemChaptersMapsAgainstDisplayedSource(t *testing.T) {
 		t.Fatalf("split diverged from the displayed timeline: %v (end %d)", startTitles(got), got[1].EndMS)
 	}
 	var p2pid model.PID
-	if err := st.read.QueryRowContext(ctx, "SELECT pid FROM file WHERE path=?", []byte("/lib/ds/p2.m4b")).Scan(&p2pid); err != nil {
+	if err := st.rdb().QueryRowContext(ctx, "SELECT pid FROM file WHERE path=?", []byte("/lib/ds/p2.m4b")).Scan(&p2pid); err != nil {
 		t.Fatalf("p2 pid: %v", err)
 	}
 	if got[1].FilePID != p2pid {

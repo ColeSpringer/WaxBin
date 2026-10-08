@@ -406,13 +406,13 @@ const userStateJoinClause = " LEFT JOIN play_state ps ON ps.item_id = pi.id AND 
 func (s *Store) userStateJoin(ctx context.Context, c *query.Compiled, userPID model.PID, op string) (clause string, leadArgs []any, err error) {
 	if !c.NeedsUser {
 		if userPID != "" {
-			if _, err := userIDByPID(ctx, s.read, userPID, op); err != nil {
+			if _, err := userIDByPID(ctx, s.rdb(), userPID, op); err != nil {
 				return "", nil, err
 			}
 		}
 		return "", nil, nil
 	}
-	uid, err := userIDByPID(ctx, s.read, userPID, op)
+	uid, err := userIDByPID(ctx, s.rdb(), userPID, op)
 	if err != nil {
 		return "", nil, err
 	}

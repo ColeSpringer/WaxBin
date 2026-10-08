@@ -164,7 +164,7 @@ func TestQueryShuffleSortsNarrowRows(t *testing.T) {
 	}
 
 	var order []string
-	rows, err := st.read.QueryContext(ctx, "SELECT title FROM playable_item ORDER BY wb_shuffle(42, pid), pid")
+	rows, err := st.rdb().QueryContext(ctx, "SELECT title FROM playable_item ORDER BY wb_shuffle(42, pid), pid")
 	if err != nil {
 		t.Fatalf("seed order: %v", err)
 	}

@@ -54,6 +54,7 @@ func FuzzRenderTemplate(f *testing.F) {
 		"{artist}/{album} ({year})/{track:02} - {title}",
 		"{disc?}{track}", "<{missing}>literal", "}}}{{{", "{unterminated",
 		"<><<>>", "{track:99}", "{}", "{artist", "artist}", "{a}<{b}<{c}>>",
+		strings.Repeat("<", 40), "{track:01000000}",
 	} {
 		f.Add(s)
 	}

@@ -68,7 +68,7 @@ func (s *Store) CreateUser(ctx context.Context, name string) (*model.User, error
 
 // Users lists all users, the default first then by name.
 func (s *Store) Users(ctx context.Context) ([]*model.User, error) {
-	rows, err := s.read.QueryContext(ctx,
+	rows, err := s.rdb().QueryContext(ctx,
 		"SELECT id, pid, name, is_default, created_at FROM user ORDER BY is_default DESC, name")
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, "store.Users", err)
@@ -90,7 +90,7 @@ func (s *Store) UserByPID(ctx context.Context, pid model.PID) (*model.User, erro
 	if pid == "" {
 		return s.DefaultUser(ctx)
 	}
-	u, err := scanUser(s.read.QueryRowContext(ctx,
+	u, err := scanUser(s.rdb().QueryRowContext(ctx,
 		"SELECT id, pid, name, is_default, created_at FROM user WHERE pid = ?", string(pid)))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, waxerr.New(waxerr.CodeNotFound, "store.UserByPID", "no such user: "+string(pid))
@@ -103,7 +103,7 @@ func (s *Store) UserByPID(ctx context.Context, pid model.PID) (*model.User, erro
 
 // DefaultUser returns the seeded default user.
 func (s *Store) DefaultUser(ctx context.Context) (*model.User, error) {
-	u, err := scanUser(s.read.QueryRowContext(ctx,
+	u, err := scanUser(s.rdb().QueryRowContext(ctx,
 		"SELECT id, pid, name, is_default, created_at FROM user WHERE is_default = 1 LIMIT 1"))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, waxerr.New(waxerr.CodeNotFound, "store.DefaultUser", "no default user")

@@ -46,7 +46,7 @@ func scanPodcast(sc rowScanner) (*model.Podcast, error) {
 // Podcasts lists subscribed podcasts, sorted by title.
 func (s *Store) Podcasts(ctx context.Context) ([]*model.Podcast, error) {
 	const op = "store.Podcasts"
-	rows, err := s.read.QueryContext(ctx, podcastSelect+" ORDER BY p.sort_key, p.pid")
+	rows, err := s.rdb().QueryContext(ctx, podcastSelect+" ORDER BY p.sort_key, p.pid")
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
@@ -66,14 +66,14 @@ func (s *Store) Podcasts(ctx context.Context) ([]*model.Podcast, error) {
 // credits (a detail-only load; Podcasts, the list read, leaves them empty).
 func (s *Store) PodcastByPID(ctx context.Context, pid model.PID) (*model.Podcast, error) {
 	const op = "store.PodcastByPID"
-	p, err := scanPodcast(s.read.QueryRowContext(ctx, podcastSelect+" WHERE p.pid = ?", string(pid)))
+	p, err := scanPodcast(s.rdb().QueryRowContext(ctx, podcastSelect+" WHERE p.pid = ?", string(pid)))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, waxerr.New(waxerr.CodeNotFound, op, "no such podcast: "+string(pid))
 	}
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
-	persons, err := queryPersons(ctx, s.read,
+	persons, err := queryPersons(ctx, s.rdb(),
 		"SELECT name, role, grp, img, href FROM podcast_person WHERE podcast_id = ? AND item_id IS NULL ORDER BY position",
 		p.ID)
 	if err != nil {
@@ -128,7 +128,7 @@ func querySoundbites(ctx context.Context, q queryer, stmt string, args ...any) (
 // validators, retention policy, and stored auth user before re-fetching.
 func (s *Store) PodcastByIdentity(ctx context.Context, key string) (*model.Podcast, error) {
 	const op = "store.PodcastByIdentity"
-	p, err := scanPodcast(s.read.QueryRowContext(ctx, podcastSelect+" WHERE p.identity_key = ?", key))
+	p, err := scanPodcast(s.rdb().QueryRowContext(ctx, podcastSelect+" WHERE p.identity_key = ?", key))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, waxerr.New(waxerr.CodeNotFound, op, "no podcast with that identity")
 	}
@@ -142,7 +142,7 @@ func (s *Store) PodcastByIdentity(ctx context.Context, key string) (*model.Podca
 // feedRowWhere), or CodeNotFound when it would create one.
 func (s *Store) PodcastForFeed(ctx context.Context, feedURL, key string) (*model.Podcast, error) {
 	const op = "store.PodcastForFeed"
-	p, err := scanPodcast(s.read.QueryRowContext(ctx, podcastSelect+feedRowWhere, feedURL, key, feedURL))
+	p, err := scanPodcast(s.rdb().QueryRowContext(ctx, podcastSelect+feedRowWhere, feedURL, key, feedURL))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, waxerr.New(waxerr.CodeNotFound, op, "no podcast for that feed")
 	}
@@ -208,7 +208,7 @@ func (s *Store) EpisodesByPodcast(ctx context.Context, podcastPID model.PID, lim
 		stmt += " LIMIT ?"
 		args = append(args, limit)
 	}
-	rows, err := s.read.QueryContext(ctx, stmt, args...)
+	rows, err := s.rdb().QueryContext(ctx, stmt, args...)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
@@ -232,7 +232,7 @@ func (s *Store) EpisodeChapters(ctx context.Context, pid model.PID) ([]model.Cha
 	const op = "store.EpisodeChapters"
 	var itemID, fileID, dur int64
 	var fpid string
-	err := s.read.QueryRowContext(ctx, `SELECT pi.id, f.id, f.pid, COALESCE(f.duration_ms, 0)
+	err := s.rdb().QueryRowContext(ctx, `SELECT pi.id, f.id, f.pid, COALESCE(f.duration_ms, 0)
 		FROM playable_item pi
 		JOIN item_file pf ON pf.item_id = pi.id AND pf.role = 'primary'
 		JOIN file f ON f.id = pf.file_id
@@ -255,7 +255,7 @@ func (s *Store) EpisodeMeta(ctx context.Context, pid model.PID) (*model.Episode,
 }
 
 func (s *Store) episodeRow(ctx context.Context, pid model.PID, op string) (*model.Episode, error) {
-	e, err := scanEpisode(s.read.QueryRowContext(ctx, episodeSelect+" WHERE pi.pid = ?", string(pid)))
+	e, err := scanEpisode(s.rdb().QueryRowContext(ctx, episodeSelect+" WHERE pi.pid = ?", string(pid)))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, waxerr.New(waxerr.CodeNotFound, op, "no such episode: "+string(pid))
 	}
@@ -279,7 +279,7 @@ func (s *Store) EpisodesByPIDs(ctx context.Context, pids []model.PID) ([]*model.
 		for i, pid := range chunk {
 			args[i] = string(pid)
 		}
-		rows, err := s.read.QueryContext(ctx, episodeSelect+" WHERE pi.pid IN "+placeholders(len(chunk)), args...)
+		rows, err := s.rdb().QueryContext(ctx, episodeSelect+" WHERE pi.pid IN "+placeholders(len(chunk)), args...)
 		if err != nil {
 			return err
 		}
@@ -321,13 +321,13 @@ func (s *Store) EpisodeByPID(ctx context.Context, pid model.PID) (*model.Episode
 
 	// The Podcasting 2.0 extras are detail-only loads, keeping the list reads to
 	// their single query.
-	d.Persons, err = queryPersons(ctx, s.read, `SELECT pp.name, pp.role, pp.grp, pp.img, pp.href
+	d.Persons, err = queryPersons(ctx, s.rdb(), `SELECT pp.name, pp.role, pp.grp, pp.img, pp.href
 		FROM podcast_person pp JOIN playable_item pi ON pi.id = pp.item_id
 		WHERE pi.pid = ? ORDER BY pp.position`, string(pid))
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
-	d.Soundbites, err = querySoundbites(ctx, s.read, `SELECT sb.start_ms, sb.duration_ms, sb.title
+	d.Soundbites, err = querySoundbites(ctx, s.rdb(), `SELECT sb.start_ms, sb.duration_ms, sb.title
 		FROM episode_soundbite sb JOIN playable_item pi ON pi.id = sb.item_id
 		WHERE pi.pid = ? ORDER BY sb.position`, string(pid))
 	if err != nil {
@@ -349,7 +349,7 @@ func (s *Store) TranscriptByEpisode(ctx context.Context, pid model.PID) (*model.
 		return nil, waxerr.New(waxerr.CodeInvalid, op, "item is not an episode: "+string(pid))
 	}
 	tr := &model.Transcript{EpisodePID: pid}
-	err = s.read.QueryRowContext(ctx,
+	err = s.rdb().QueryRowContext(ctx,
 		"SELECT format, body, source_url, created_at FROM episode_transcript WHERE item_id = ?", itemID).
 		Scan(&tr.Format, &tr.Body, &tr.SourceURL, &tr.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -372,7 +372,7 @@ func (s *Store) TranscriptByEpisode(ctx context.Context, pid model.PID) (*model.
 // so "keep newest N" never reclaims the newest same-date file and keeps an older one.
 func (s *Store) DownloadedEpisodes(ctx context.Context, podcastPID model.PID) ([]*model.Episode, error) {
 	const op = "store.DownloadedEpisodes"
-	rows, err := s.read.QueryContext(ctx,
+	rows, err := s.rdb().QueryContext(ctx,
 		episodeSelect+" WHERE p.pid = ? AND pi.state = 'present' AND COALESCE(e.pinned,0) = 0"+
 			" ORDER BY COALESCE(e.pub_date, 0) DESC, pi.pid ASC",
 		string(podcastPID))

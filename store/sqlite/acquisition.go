@@ -372,7 +372,7 @@ func (s *Store) AcquisitionByItem(ctx context.Context, itemPID model.PID) (*mode
 	const op = "store.AcquisitionByItem"
 	var a model.Acquisition
 	var st string
-	err := s.read.QueryRowContext(ctx, `SELECT acq.source_type, acq.source_url, acq.source_id,
+	err := s.rdb().QueryRowContext(ctx, `SELECT acq.source_type, acq.source_url, acq.source_id,
 		acq.provider, acq.provider_version, acq.acquired_at, acq.options_json
 		FROM acquisition acq JOIN playable_item pi ON pi.id = acq.item_id
 		WHERE pi.pid = ?`, string(itemPID)).Scan(&st, &a.SourceURL, &a.SourceID,

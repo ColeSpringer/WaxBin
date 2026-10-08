@@ -314,7 +314,7 @@ func (s *Store) TrashEntries(ctx context.Context, includeRestored bool, trashedB
 		q += " LIMIT ?"
 		args = append(args, limit)
 	}
-	rows, err := s.read.QueryContext(ctx, q, args...)
+	rows, err := s.rdb().QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
@@ -333,7 +333,7 @@ func (s *Store) TrashEntries(ctx context.Context, includeRestored bool, trashedB
 // ActiveTrashByPID returns an un-restored trash entry, or CodeNotFound.
 func (s *Store) ActiveTrashByPID(ctx context.Context, trashPID model.PID) (*model.TrashEntry, error) {
 	const op = "store.ActiveTrashByPID"
-	row := s.read.QueryRowContext(ctx,
+	row := s.rdb().QueryRowContext(ctx,
 		"SELECT "+trashCols+" FROM trash WHERE pid = ? AND restored_at IS NULL", string(trashPID))
 	e, err := scanTrashEntry(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -376,7 +376,7 @@ func (s *Store) ActiveTrashForItems(ctx context.Context, itemPIDs []model.PID) (
 		if len(args) == 0 {
 			return nil
 		}
-		rows, err := s.read.QueryContext(ctx,
+		rows, err := s.rdb().QueryContext(ctx,
 			"SELECT "+trashCols+" FROM trash WHERE restored_at IS NULL AND item_pid IN "+
 				placeholders(len(args))+" ORDER BY item_pid, trashed_at DESC", args...)
 		if err != nil {

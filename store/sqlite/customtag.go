@@ -174,11 +174,11 @@ func writeItemTagTx(ctx context.Context, tx *sql.Tx, itemID int64, key string, v
 // tags, which returns an empty slice), matching FieldProvenance and EntityCuration.
 func (s *Store) ItemTags(ctx context.Context, itemPID model.PID) ([]model.ItemTag, error) {
 	const op = "store.ItemTags"
-	itemID, err := itemIDByPIDRead(ctx, s.read, itemPID, op)
+	itemID, err := itemIDByPIDRead(ctx, s.rdb(), itemPID, op)
 	if err != nil {
 		return nil, err
 	}
-	rows, err := s.read.QueryContext(ctx,
+	rows, err := s.rdb().QueryContext(ctx,
 		"SELECT key, value FROM item_tag WHERE item_id = ? ORDER BY key, position", itemID)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
@@ -448,7 +448,7 @@ func itemCustomTagText(ctx context.Context, q queryer, itemID int64) (string, er
 // --fix reclaims them here.
 func (s *Store) strandedTagKeys(ctx context.Context) (keys, fields, owed []string, err error) {
 	read := func(q string, args []any, stranded func(string) bool) ([]string, error) {
-		rows, err := s.read.QueryContext(ctx, q, args...)
+		rows, err := s.rdb().QueryContext(ctx, q, args...)
 		if err != nil {
 			return nil, err
 		}
@@ -501,7 +501,7 @@ func (s *Store) countStrandedTagKeyRows(ctx context.Context) (int, error) {
 	n := 0
 	count := func(q string, args ...any) error {
 		var c int
-		if err := s.read.QueryRowContext(ctx, q, args...).Scan(&c); err != nil {
+		if err := s.rdb().QueryRowContext(ctx, q, args...).Scan(&c); err != nil {
 			return err
 		}
 		n += c

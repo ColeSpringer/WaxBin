@@ -12,7 +12,7 @@ import (
 func sortCols(t *testing.T, st *Store, pid model.PID, table, spelling, key string) (string, string) {
 	t.Helper()
 	var sp, k string
-	if err := st.read.QueryRowContext(context.Background(),
+	if err := st.rdb().QueryRowContext(context.Background(),
 		"SELECT "+spelling+", "+key+" FROM "+table+" x JOIN playable_item pi ON pi.id = x.item_id WHERE pi.pid = ?",
 		string(pid)).Scan(&sp, &k); err != nil {
 		t.Fatalf("read %s.%s: %v", table, spelling, err)

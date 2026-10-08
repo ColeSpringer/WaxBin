@@ -51,7 +51,7 @@ func TestTheOwedSweepInstantSeparatesPasses(t *testing.T) {
 		var n int
 		q := "SELECT COUNT(*) FROM (SELECT ? AS id) x WHERE " +
 			notEnriched(enrichEntityLyrics, "x.id", model.EnrichQueueOptions{Sweep: model.SweepDeferred, DeferredBefore: asOf})
-		if err := st.read.QueryRowContext(ctx, q, id).Scan(&n); err != nil {
+		if err := st.rdb().QueryRowContext(ctx, q, id).Scan(&n); err != nil {
 			t.Fatalf("owed sweep: %v", err)
 		}
 		return n == 1
@@ -131,19 +131,19 @@ func TestOwedLookupsStayOutOfTheMissSweeps(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("settle: %v", err)
 	}
-	if _, err := st.write.ExecContext(ctx, "UPDATE entity_enrichment SET enriched_at = 1"); err != nil {
+	if _, err := st.wdb().ExecContext(ctx, "UPDATE entity_enrichment SET enriched_at = 1"); err != nil {
 		t.Fatalf("backdate: %v", err)
 	}
 	oweLyrics(t, st, recent)
 	var cutoff int64
-	if err := st.read.QueryRowContext(ctx, "SELECT enriched_at - 1 FROM entity_enrichment WHERE entity_id = ?", recent).Scan(&cutoff); err != nil {
+	if err := st.rdb().QueryRowContext(ctx, "SELECT enriched_at - 1 FROM entity_enrichment WHERE entity_id = ?", recent).Scan(&cutoff); err != nil {
 		t.Fatalf("read the recent stamp: %v", err)
 	}
 	selected := func(opts model.EnrichQueueOptions) []int64 {
 		t.Helper()
 		q := "SELECT id FROM (SELECT 1 AS id UNION ALL SELECT 2 UNION ALL SELECT 3 UNION ALL SELECT 4) x WHERE " +
 			notEnriched(enrichEntityLyrics, "x.id", opts) + " ORDER BY id"
-		rows, err := st.read.QueryContext(ctx, q)
+		rows, err := st.rdb().QueryContext(ctx, q)
 		if err != nil {
 			t.Fatalf("sweep: %v", err)
 		}
@@ -177,7 +177,7 @@ func TestOwedLookupsStayOutOfTheMissSweeps(t *testing.T) {
 		}
 	}
 
-	if _, err := st.write.ExecContext(ctx, "DELETE FROM entity_enrichment WHERE entity_id = ?", miss); err != nil {
+	if _, err := st.wdb().ExecContext(ctx, "DELETE FROM entity_enrichment WHERE entity_id = ?", miss); err != nil {
 		t.Fatalf("drop the miss: %v", err)
 	}
 	if due, err := st.ExpiredMissesExist(ctx, cutoff); err != nil || due {

@@ -46,7 +46,7 @@ func (s *Store) Stats(ctx context.Context, userPID model.PID, topN int) (*read.S
 			(SELECT 1 FROM item_genre ig WHERE ig.genre_id = g.id)`},
 	}
 	for _, c := range counts {
-		if err := s.read.QueryRowContext(ctx, c.q).Scan(c.dst); err != nil {
+		if err := s.rdb().QueryRowContext(ctx, c.q).Scan(c.dst); err != nil {
 			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 	}
@@ -55,7 +55,7 @@ func (s *Store) Stats(ctx context.Context, userPID model.PID, topN int) (*read.S
 	// reflects full running times.
 	// Podcast episodes are excluded to match the track/book item counts above (they
 	// are a separate medium surfaced via the podcast commands, not the music totals).
-	if err := s.read.QueryRowContext(ctx,
+	if err := s.rdb().QueryRowContext(ctx,
 		`SELECT COALESCE(SUM(`+itemEffectiveDurationExpr+`), 0) FROM item_file pf
 		 JOIN file f ON f.id = pf.file_id
 		 JOIN playable_item pi ON pi.id = pf.item_id
@@ -96,17 +96,17 @@ func (s *Store) Stats(ctx context.Context, userPID model.PID, topN int) (*read.S
 func (s *Store) playStats(ctx context.Context, userPID model.PID, topN int) (read.PlayStats, error) {
 	const op = "store.Stats"
 	var ps read.PlayStats
-	userID, err := userIDByPID(ctx, s.read, userPID, op)
+	userID, err := userIDByPID(ctx, s.rdb(), userPID, op)
 	if err != nil {
 		return ps, err
 	}
 	var name string
-	if err := s.read.QueryRowContext(ctx, "SELECT name FROM user WHERE id = ?", userID).Scan(&name); err != nil {
+	if err := s.rdb().QueryRowContext(ctx, "SELECT name FROM user WHERE id = ?", userID).Scan(&name); err != nil {
 		return ps, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
 	ps.User = name
 
-	if err := s.read.QueryRowContext(ctx, `SELECT
+	if err := s.rdb().QueryRowContext(ctx, `SELECT
 		COALESCE(SUM(play_count), 0),
 		COALESCE(SUM(CASE WHEN finished = 1 THEN 1 ELSE 0 END), 0),
 		COALESCE(SUM(CASE WHEN starred_at IS NOT NULL THEN 1 ELSE 0 END), 0)
@@ -116,7 +116,7 @@ func (s *Store) playStats(ctx context.Context, userPID model.PID, topN int) (rea
 
 	// COALESCE the LEFT JOINed artist with the book author, so a played audiobook
 	// shows its author rather than a blank artist (a book has no track row).
-	rows, err := s.read.QueryContext(ctx, `SELECT pi.pid, pi.title,
+	rows, err := s.rdb().QueryContext(ctx, `SELECT pi.pid, pi.title,
 		COALESCE(NULLIF(t.artist,''), bk.author, ''), p.play_count
 		FROM play_state p
 		JOIN playable_item pi ON pi.id = p.item_id
@@ -152,12 +152,12 @@ func (s *Store) YearInReview(ctx context.Context, userPID model.PID, year, topN 
 	if topN <= 0 {
 		topN = 10
 	}
-	userID, err := userIDByPID(ctx, s.read, userPID, op)
+	userID, err := userIDByPID(ctx, s.rdb(), userPID, op)
 	if err != nil {
 		return nil, err
 	}
 	var name string
-	if err := s.read.QueryRowContext(ctx, "SELECT name FROM user WHERE id = ?", userID).Scan(&name); err != nil {
+	if err := s.rdb().QueryRowContext(ctx, "SELECT name FROM user WHERE id = ?", userID).Scan(&name); err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
 	lo := time.Date(year, 1, 1, 0, 0, 0, 0, time.UTC).UnixNano()
@@ -168,7 +168,7 @@ func (s *Store) YearInReview(ctx context.Context, userPID model.PID, year, topN 
 	// every figure (totals AND the top lists, which key on the artist/genre entities
 	// episodes lack) is consistent with the catalog Stats, which also excludes episodes.
 	var msPlayed int64
-	if err := s.read.QueryRowContext(ctx,
+	if err := s.rdb().QueryRowContext(ctx,
 		`SELECT COUNT(*), COALESCE(SUM(ps.ms_played),0), COUNT(DISTINCT ps.item_id)
 		 FROM play_session ps JOIN playable_item pi ON pi.id = ps.item_id
 		 WHERE ps.user_id = ? AND ps.started_at >= ? AND ps.started_at < ? AND pi.kind IN ('track','book')`,
@@ -177,7 +177,7 @@ func (s *Store) YearInReview(ctx context.Context, userPID model.PID, year, topN 
 	}
 	yr.MinutesPlayed = msPlayed / 60000
 
-	if err := s.read.QueryRowContext(ctx,
+	if err := s.rdb().QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM playable_item WHERE kind IN ('track','book')
 		 AND created_at >= ? AND created_at < ?`, lo, hi).Scan(&yr.NewInLibrary); err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
@@ -206,7 +206,7 @@ func (s *Store) YearInReview(ctx context.Context, userPID model.PID, year, topN 
 		return nil, err
 	}
 
-	rows, err := s.read.QueryContext(ctx, `SELECT pi.pid, pi.title,
+	rows, err := s.rdb().QueryContext(ctx, `SELECT pi.pid, pi.title,
 		COALESCE(NULLIF(t.artist,''), bk.author, ''), COUNT(*)
 		FROM play_session ps
 		JOIN playable_item pi ON pi.id = ps.item_id
@@ -230,7 +230,7 @@ func (s *Store) YearInReview(ctx context.Context, userPID model.PID, year, topN 
 
 // yearBuckets runs a (pid, name, count) aggregation and returns display buckets.
 func (s *Store) yearBuckets(ctx context.Context, q string, args ...any) ([]read.Bucket, error) {
-	rows, err := s.read.QueryContext(ctx, q, args...)
+	rows, err := s.rdb().QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, "store.YearInReview", err)
 	}

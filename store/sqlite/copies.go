@@ -905,7 +905,7 @@ func (s *Store) FileOwner(ctx context.Context, filePID model.PID) (model.PID, mo
 	const op = "store.FileOwner"
 	var item model.PID
 	ref := model.ItemFileRef{FilePID: filePID}
-	err := s.read.QueryRowContext(ctx, `SELECT f.path, f.display_path, COALESCE(pi.pid, ''), COALESCE(itf.role, ''),
+	err := s.rdb().QueryRowContext(ctx, `SELECT f.path, f.display_path, COALESCE(pi.pid, ''), COALESCE(itf.role, ''),
 			COALESCE(itf.position, 0)
 		FROM file f LEFT JOIN item_file itf ON itf.file_id = f.id LEFT JOIN playable_item pi ON pi.id = itf.item_id
 		WHERE f.pid = ? ORDER BY itf.role = 'primary' DESC, itf.item_id LIMIT 1`, string(filePID)).
@@ -924,7 +924,7 @@ func (s *Store) FileOwner(ctx context.Context, filePID model.PID) (model.PID, mo
 // audio of one of the item's parts is the same audio, and otherwise another encoding.
 func (s *Store) ItemsWithCopies(ctx context.Context) ([]model.ItemCopies, error) {
 	const op = "store.ItemsWithCopies"
-	rows, err := s.read.QueryContext(ctx, `SELECT pi.id, pi.pid, pi.kind, pi.title,
+	rows, err := s.rdb().QueryContext(ctx, `SELECT pi.id, pi.pid, pi.kind, pi.title,
 			COALESCE(NULLIF(t.artist, ''), bk.author, ''),
 			f.pid, l.pid, f.display_path, f.size, itf.role, COALESCE(f.essence_hash, ''),
 			COALESCE(f.codec, ''), COALESCE(f.bitrate, 0), COALESCE(f.sample_rate, 0), COALESCE(f.bit_depth, 0)

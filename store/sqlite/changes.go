@@ -66,7 +66,7 @@ func (s *Store) hasSubscribers() bool {
 // to subscribers. Sends are non-blocking: a full channel means that listener is
 // behind and must full-resync, so dropping is correct.
 func (s *Store) publishSince(ctx context.Context, preSeq int64) {
-	rows, err := s.write.QueryContext(ctx,
+	rows, err := s.wdb().QueryContext(ctx,
 		"SELECT seq, ts, entity_type, entity_pid, op FROM change_log WHERE seq > ? ORDER BY seq", preSeq)
 	if err != nil {
 		s.log.Warn("change publish read", "err", err)
@@ -113,7 +113,7 @@ func (s *Store) publishSince(ctx context.Context, preSeq int64) {
 // connection, captured before a transaction so publishSince can find its rows.
 func (s *Store) maxChangeSeq(ctx context.Context) int64 {
 	var seq int64
-	_ = s.write.QueryRowContext(ctx, "SELECT COALESCE(MAX(seq), 0) FROM change_log").Scan(&seq)
+	_ = s.wdb().QueryRowContext(ctx, "SELECT COALESCE(MAX(seq), 0) FROM change_log").Scan(&seq)
 	return seq
 }
 
@@ -127,9 +127,12 @@ func (s *Store) maxChangeSeq(ctx context.Context) int64 {
 // On a read-only store it first checks that the catalog file is still the one it
 // opened, and returns CodeNotFound when a restore renamed another file over the path
 // or the path is gone: this handle can only ever read the old file, so it has to be
-// reopened.
+// reopened. A closed or suspended store answers CodeUnsupported, as a write does.
 func (s *Store) DataVersion(ctx context.Context) (int64, error) {
 	const op = "store.DataVersion"
+	if s.suspended.Load() {
+		return 0, waxerr.New(waxerr.CodeUnsupported, op, "store is closed")
+	}
 	if s.roFile != nil {
 		if fi, err := os.Stat(s.path); err != nil || !os.SameFile(s.roFile, fi) {
 			return 0, waxerr.New(waxerr.CodeNotFound, op, "catalog file was replaced; reopen this handle")
@@ -138,7 +141,7 @@ func (s *Store) DataVersion(ctx context.Context) (int64, error) {
 	s.dvMu.Lock()
 	defer s.dvMu.Unlock()
 	if s.dvConn == nil {
-		conn, err := s.read.Conn(ctx)
+		conn, err := s.rdb().Conn(ctx)
 		if err != nil {
 			return 0, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}

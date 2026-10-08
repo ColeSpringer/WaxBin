@@ -26,7 +26,7 @@ func TestEditTrackScalarIdentifiers(t *testing.T) {
 
 	var isrc, mbid string
 	var comp int
-	if err := st.read.QueryRowContext(ctx,
+	if err := st.rdb().QueryRowContext(ctx,
 		"SELECT isrc, mbid, compilation FROM track t JOIN playable_item pi ON pi.id=t.item_id WHERE pi.pid=?",
 		string(pid)).Scan(&isrc, &mbid, &comp); err != nil {
 		t.Fatalf("read track: %v", err)
@@ -54,7 +54,7 @@ func TestEditTrackBPM(t *testing.T) {
 		t.Fatalf("set bpm: %v", err)
 	}
 	var bpm int
-	if err := st.read.QueryRowContext(ctx,
+	if err := st.rdb().QueryRowContext(ctx,
 		"SELECT bpm FROM track t JOIN playable_item pi ON pi.id=t.item_id WHERE pi.pid=?",
 		string(pid)).Scan(&bpm); err != nil {
 		t.Fatalf("read bpm: %v", err)
@@ -81,7 +81,7 @@ func TestEditTrackBPM(t *testing.T) {
 		t.Fatalf("clear bpm: %v", err)
 	}
 	var stored sql.NullInt64
-	if err := st.read.QueryRowContext(ctx,
+	if err := st.rdb().QueryRowContext(ctx,
 		"SELECT bpm FROM track t JOIN playable_item pi ON pi.id=t.item_id WHERE pi.pid=?",
 		string(pid)).Scan(&stored); err != nil {
 		t.Fatalf("read cleared bpm: %v", err)
@@ -135,7 +135,7 @@ func TestEditTrackCompilationClear(t *testing.T) {
 		t.Fatalf("clear compilation: %v", err)
 	}
 	var comp int
-	if err := st.read.QueryRowContext(ctx,
+	if err := st.rdb().QueryRowContext(ctx,
 		"SELECT compilation FROM track t JOIN playable_item pi ON pi.id=t.item_id WHERE pi.pid=?",
 		string(pid)).Scan(&comp); err != nil {
 		t.Fatalf("read: %v", err)
@@ -180,7 +180,7 @@ func TestEditBookScalarFields(t *testing.T) {
 	}
 
 	var asin, isbn, publisher, edition, description, mbid string
-	if err := st.read.QueryRowContext(ctx,
+	if err := st.rdb().QueryRowContext(ctx,
 		`SELECT asin, isbn, publisher, edition, description, COALESCE(mbid,'')
 		 FROM book b JOIN playable_item pi ON pi.id=b.item_id WHERE pi.pid=?`,
 		string(pid)).Scan(&asin, &isbn, &publisher, &edition, &description, &mbid); err != nil {

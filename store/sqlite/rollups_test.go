@@ -12,7 +12,7 @@ func rollupTrackCount(t *testing.T, st *Store, table, joinTable, nameCol, name s
 	q := "SELECT r.track_count FROM " + table + " r JOIN " + joinTable +
 		" e ON e.id = r." + idColFor(table) + " WHERE e." + nameCol + " = ?"
 	var n int
-	if err := st.read.QueryRowContext(context.Background(), q, name).Scan(&n); err != nil {
+	if err := st.rdb().QueryRowContext(context.Background(), q, name).Scan(&n); err != nil {
 		t.Fatalf("read %s for %q: %v", table, name, err)
 	}
 	return n

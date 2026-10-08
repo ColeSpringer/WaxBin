@@ -98,7 +98,7 @@ func (s *Store) ListJobs(ctx context.Context, limit int) ([]*model.Job, error) {
 	if limit <= 0 {
 		limit = 100
 	}
-	rows, err := s.read.QueryContext(ctx, jobSelect+" ORDER BY id DESC LIMIT ?", limit)
+	rows, err := s.rdb().QueryContext(ctx, jobSelect+" ORDER BY id DESC LIMIT ?", limit)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, "store.ListJobs", err)
 	}
@@ -116,7 +116,7 @@ func (s *Store) ListJobs(ctx context.Context, limit int) ([]*model.Job, error) {
 
 // JobByPID returns a single job by public id.
 func (s *Store) JobByPID(ctx context.Context, pid model.PID) (*model.Job, error) {
-	j, err := scanJob(s.read.QueryRowContext(ctx, jobSelect+" WHERE pid = ?", string(pid)))
+	j, err := scanJob(s.rdb().QueryRowContext(ctx, jobSelect+" WHERE pid = ?", string(pid)))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, waxerr.New(waxerr.CodeNotFound, "store.JobByPID", "no such job: "+string(pid))
 	}
@@ -133,7 +133,7 @@ func (s *Store) JobByPID(ctx context.Context, pid model.PID) (*model.Job, error)
 // running row here means a live in-process job.
 func (s *Store) HasRunningJob(ctx context.Context) (bool, error) {
 	var exists int
-	err := s.read.QueryRowContext(ctx,
+	err := s.rdb().QueryRowContext(ctx,
 		"SELECT EXISTS(SELECT 1 FROM job WHERE state = ?)", string(model.JobRunning)).Scan(&exists)
 	if err != nil {
 		return false, waxerr.Wrap(waxerr.CodeIO, "store.HasRunningJob", err)

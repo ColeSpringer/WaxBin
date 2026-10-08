@@ -8,6 +8,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"fmt"
 	"io"
@@ -56,16 +57,25 @@ type OpenOptions struct {
 // Store is the SQLite-backed catalog. It is safe for concurrent use: writes go
 // through the single coordinated write connection; reads use a connection pool.
 type Store struct {
-	path   string
-	opt    OpenOptions // normalized open options, retained so Reopen rebuilds the same DSNs
-	read   *sql.DB     // read pool (reopened in place by Reopen)
-	write  *sql.DB     // single write connection (nil when read-only)
-	wmu    sync.Mutex  // serializes write transactions; also guards closed
-	closed bool        // guarded by wmu
+	path string
+	opt  OpenOptions // normalized open options, retained so Reopen rebuilds the same DSNs
+	// gen is the connection set in use, read through rdb and wdb. Reopen publishes a new
+	// one whole, so a reader never sees half of a reopen, and a suspend or close publishes
+	// closedGen.
+	gen    atomic.Pointer[generation]
+	wmu    sync.Mutex // serializes write transactions; also guards closed
+	closed bool       // guarded by wmu
+	// handoffMu serializes Suspend, Close and Reopen, so a call made while a reopen runs
+	// takes effect after it.
+	handoffMu sync.Mutex
+	// stopMu guards closing, the Close calls waiting for handoffMu, and stopReopen, which
+	// cancels the Reopen in flight, so a Close never waits out a reopen's lock retry.
+	stopMu     sync.Mutex
+	closing    int
+	stopReopen context.CancelCauseFunc
 	// suspended mirrors closed for the work a method does ahead of its transaction, which
 	// runs off wmu.
 	suspended atomic.Bool
-	lock      *writeLock // held advisory lock (nil when read-only)
 	readOnly  bool
 	// allowStale warns instead of refusing on a baseline mismatch; read-only opens
 	// only (migrate never consults it).
@@ -103,6 +113,80 @@ type Store struct {
 	// mark is what Suspend left for Reopen to compare against, kept until a reopen
 	// succeeds. wmu guards it.
 	mark *suspendMark
+}
+
+// generation is one set of connections an open or a reopen took together: the pools and
+// the write lock. A suspend or close takes the set down as a whole.
+type generation struct {
+	read  *sql.DB
+	write *sql.DB    // nil when read-only
+	lock  *writeLock // nil when read-only
+}
+
+func (g *generation) closePools() error {
+	var errs []error
+	if g.write != nil {
+		errs = append(errs, g.write.Close())
+	}
+	return errors.Join(append(errs, g.read.Close())...)
+}
+
+// closedGen is what a suspended or closed store publishes in place of its connections:
+// one handle that refuses every call with the CodeUnsupported a write gets, so a read
+// during a hand-off is told the store is closed rather than failing as I/O. It is built
+// at package init, so the goroutine its pool runs never belongs to a synctest bubble.
+var closedGen = func() *generation {
+	db := sql.OpenDB(refusing{})
+	return &generation{read: db, write: db}
+}()
+
+// refusing is the connector behind closedGen's handle.
+type refusing struct{}
+
+func (refusing) Connect(context.Context) (driver.Conn, error) { return nil, errStoreClosed() }
+func (refusing) Driver() driver.Driver                        { return refusing{} }
+func (refusing) Open(string) (driver.Conn, error)             { return nil, errStoreClosed() }
+
+func errStoreClosed() error { return waxerr.New(waxerr.CodeUnsupported, "sqlite", "store is closed") }
+
+// rdb is the read pool.
+func (s *Store) rdb() *sql.DB { return s.gen.Load().read }
+
+// wdb is the single write connection, nil while a read-only store is open.
+func (s *Store) wdb() *sql.DB { return s.gen.Load().write }
+
+// settle waits up to bound for g's connections to close, polling the pools, and returns
+// how many are still open. A closed pool closes an in-use connection when its user
+// releases it, so this is the wait for the reads still running on g.
+func (g *generation) settle(bound time.Duration) int {
+	deadline := time.Now().Add(bound)
+	for {
+		n := g.read.Stats().OpenConnections
+		if g.write != nil {
+			n += g.write.Stats().OpenConnections
+		}
+		if n == 0 || !time.Now().Before(deadline) {
+			return n
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// openPools opens the write connection and the read pool over lock, releasing the lock
+// when either fails.
+func (s *Store) openPools(ctx context.Context, op string, lock *writeLock) (*generation, error) {
+	w, err := openDB(ctx, rwDSN(s.opt), 1)
+	if err != nil {
+		_ = lock.release()
+		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	r, err := openDB(ctx, readDSN(s.opt), s.opt.ReadPoolSize)
+	if err != nil {
+		_ = w.Close()
+		_ = lock.release()
+		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	return &generation{read: r, write: w, lock: lock}, nil
 }
 
 // suspendMark records the catalog a suspend closed: its file, and the change feed's
@@ -168,11 +252,11 @@ func Open(ctx context.Context, opt OpenOptions) (*Store, error) {
 		// the file at the path is the one being opened.
 		_ = os.SameFile(fi, fi)
 		s.roFile = fi
-		rdb, err := openDB(ctx, roDSN(opt), opt.ReadPoolSize)
+		r, err := openDB(ctx, roDSN(opt), opt.ReadPoolSize)
 		if err != nil {
 			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
-		s.read = rdb
+		s.gen.Store(&generation{read: r})
 		if err := s.verifyReadable(ctx); err != nil {
 			_ = s.Close()
 			return nil, err
@@ -184,21 +268,11 @@ func Open(ctx context.Context, opt OpenOptions) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	s.lock = lock
-
-	wdb, err := openDB(ctx, rwDSN(opt), 1)
+	g, err := s.openPools(ctx, op, lock)
 	if err != nil {
-		_ = lock.release()
-		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+		return nil, err
 	}
-	s.write = wdb
-
-	rdb, err := openDB(ctx, readDSN(opt), opt.ReadPoolSize)
-	if err != nil {
-		_ = s.Close()
-		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
-	}
-	s.read = rdb
+	s.gen.Store(g)
 
 	if err := s.migrate(ctx); err != nil {
 		_ = s.Close()
@@ -240,24 +314,50 @@ func Open(ctx context.Context, opt OpenOptions) (*Store, error) {
 // Close releases the read/write connections and the advisory lock, and closes
 // in-process change listeners so their range loops terminate. It first attempts a
 // WAL checkpoint so the main DB file is self-contained for backups and read-only
-// consumers.
-func (s *Store) Close() error { return s.teardown(true) }
+// consumers. A read still running keeps its connection until it finishes: the
+// checkpoint waits for one holding data it has not copied yet, up to the busy timeout,
+// and Close then waits up to two seconds for the rest before it lets the lock go, so the
+// catalog file is normally closed when another owner can take it. A Reopen in flight is
+// stopped first, rather than waited out.
+func (s *Store) Close() error {
+	s.stopMu.Lock()
+	s.closing++
+	if s.stopReopen != nil {
+		s.stopReopen(errClosing)
+	}
+	s.stopMu.Unlock()
+	s.handoffMu.Lock()
+	defer s.handoffMu.Unlock()
+	s.stopMu.Lock()
+	s.closing--
+	s.stopMu.Unlock()
+	return s.teardown(true)
+}
+
+// errClosing is the cause a Close cancels a reopen in flight with.
+var errClosing = errors.New("the store is closing")
 
 // Suspend is Close for a maintenance-mode hand-off: it checkpoints, releases the
-// lock, and closes the connections, but KEEPS the in-process change subscribers
+// lock, and closes the connections, but keeps the in-process change subscribers
 // registered so an embedder's subscription survives the hand-off and resumes
 // delivering after Reopen. (A full Close would close those channels, terminating
 // the embedder's range loop with no way to re-establish it.) It also records the file
 // and the feed's head, for Reopen to tell the same catalog from a replaced one.
-func (s *Store) Suspend() error { return s.teardown(false) }
+func (s *Store) Suspend() error {
+	s.handoffMu.Lock()
+	defer s.handoffMu.Unlock()
+	return s.teardown(false)
+}
 
 // teardown closes the store, optionally closing change subscribers. closeSubs is
-// true for a full Close and false for a maintenance Suspend.
+// true for a full Close and false for a maintenance Suspend. The caller holds
+// handoffMu.
 func (s *Store) teardown(closeSubs bool) error {
 	// Mark closed under wmu so an in-flight writeTx (which holds wmu for its whole
 	// duration and checks closed) cannot be mid-transaction here; checkpoint while
-	// still holding it. The connection fields are not nil'd; a racing reader hits
-	// a closed *sql.DB and gets an error rather than a nil-pointer dereference.
+	// still holding it. A reader that took the old pool before the swap below runs on it
+	// until the pools close (its snapshot can hold the checkpoint up), and one that comes
+	// in after the swap gets closedGen's refusal.
 	s.wmu.Lock()
 	if s.closed {
 		// A suspended store keeps its subscribers and its mark, so a Close now still has
@@ -273,11 +373,12 @@ func (s *Store) teardown(closeSubs bool) error {
 	}
 	s.closed = true
 	s.suspended.Store(true)
-	if s.write != nil {
+	g := s.gen.Swap(closedGen)
+	if g.write != nil {
 		if !closeSubs && s.mark == nil {
-			s.mark = s.markLocked()
+			s.mark = s.markLocked(g.write)
 		}
-		_, _ = s.write.ExecContext(context.Background(), "PRAGMA wal_checkpoint(TRUNCATE)")
+		_, _ = g.write.ExecContext(context.Background(), "PRAGMA wal_checkpoint(TRUNCATE)")
 	}
 	s.wmu.Unlock()
 
@@ -285,39 +386,59 @@ func (s *Store) teardown(closeSubs bool) error {
 		// Close in-process change listeners so their range loops terminate.
 		s.closeSubscribers()
 	}
-	// The pinned data_version connection is drawn from the read pool; drop it either
-	// way. DataVersion re-pins a fresh one lazily after a reopen.
+	// The pools close first, so DataVersion cannot pin another connection, and then the
+	// pinned one is released to its closed pool, which closes it. DataVersion re-pins a
+	// fresh one lazily after a reopen. Reads still running hold the catalog file open
+	// until they finish, so the lock goes only after them: another owner that finds it
+	// free can replace the file.
+	err := g.closePools()
 	s.closeDataVersionConn()
-
-	var errs []error
-	if s.write != nil {
-		errs = append(errs, s.write.Close())
+	if n := g.settle(settleBound); n > 0 {
+		s.log.Warn("catalog connections still open after closing the store", "open", n, "waited", settleBound)
 	}
-	if s.read != nil {
-		errs = append(errs, s.read.Close())
-	}
-	if s.lock != nil {
-		errs = append(errs, s.lock.release())
-	}
-	return errors.Join(errs...)
+	return errors.Join(err, g.lock.release())
 }
+
+// settleBound is how long a suspend or a close waits for the reads still running on the
+// closed pools to finish.
+var settleBound = 2 * time.Second
 
 // Reopen re-acquires the write lock and reopens the connections of a Store that
 // was Closed for a maintenance-mode hand-off, restoring it in place so every
 // subsystem that still holds this *Store keeps working. It is the inverse of Close
 // for the read-write path; a read-only store cannot be reopened this way, and a
-// store that is already open is a no-op.
+// store that is already open is a no-op. A Suspend or another Reopen made while it
+// runs waits for it to finish; a Close stops it, and it returns CodeCanceled.
 //
 // The lock re-acquire retries with bounded backoff because a foreground process
 // may still be releasing the flock as the hand-off ends. migrate runs again so a
 // restore/rebuild that replaced the DB file mid-hand-off is brought current; the
 // rest mirrors Open's read-write reconciliation. The result says whether it reopened
 // and whether the catalog is still the one Suspend closed (see ReopenResult).
-func (s *Store) Reopen(ctx context.Context) (ReopenResult, error) {
+func (s *Store) Reopen(ctx context.Context) (_ ReopenResult, err error) {
 	const op = "store.Reopen"
 	if s.readOnly {
 		return ReopenResult{}, waxerr.New(waxerr.CodeUnsupported, op, "a read-only store cannot be reopened")
 	}
+	s.handoffMu.Lock()
+	defer s.handoffMu.Unlock()
+	ctx, stop := context.WithCancelCause(ctx)
+	defer stop(nil)
+	s.stopMu.Lock()
+	if s.closing > 0 {
+		s.stopMu.Unlock()
+		return ReopenResult{}, waxerr.New(waxerr.CodeCanceled, op, errClosing.Error())
+	}
+	s.stopReopen = stop
+	s.stopMu.Unlock()
+	defer func() {
+		s.stopMu.Lock()
+		s.stopReopen = nil
+		s.stopMu.Unlock()
+		if err != nil && context.Cause(ctx) == errClosing {
+			err = waxerr.Classify(waxerr.CodeCanceled, op, err)
+		}
+	}()
 	s.wmu.Lock()
 	closed := s.closed
 	s.wmu.Unlock()
@@ -331,30 +452,14 @@ func (s *Store) Reopen(ctx context.Context) (ReopenResult, error) {
 	if err != nil {
 		return ReopenResult{}, err
 	}
-	wdb, err := openDB(ctx, rwDSN(s.opt), 1)
+	g, err := s.openPools(ctx, op, lock)
 	if err != nil {
-		_ = lock.release()
-		return ReopenResult{}, waxerr.Wrap(waxerr.CodeIO, op, err)
-	}
-	rdb, err := openDB(ctx, readDSN(s.opt), s.opt.ReadPoolSize)
-	if err != nil {
-		_ = wdb.Close()
-		_ = lock.release()
-		return ReopenResult{}, waxerr.Wrap(waxerr.CodeIO, op, err)
+		return ReopenResult{}, err
 	}
 
 	s.wmu.Lock()
-	if !s.closed {
-		// Raced with a concurrent Reopen/Open that already restored the store; drop
-		// the connections and lock we just took.
-		s.wmu.Unlock()
-		_ = rdb.Close()
-		_ = wdb.Close()
-		_ = lock.release()
-		return ReopenResult{}, nil
-	}
-	s.lock, s.write, s.read = lock, wdb, rdb
-	s.rstmts.swap(rdb)
+	s.gen.Store(g)
+	s.rstmts.swap(g.read)
 	replaced := s.catchUpLocked(ctx)
 	s.closed = false
 	s.suspended.Store(false)
@@ -364,23 +469,23 @@ func (s *Store) Reopen(ctx context.Context) (ReopenResult, error) {
 	// failure the half-restored store is suspended again, keeping its subscribers and
 	// the mark, so a later Reopen can still finish the job.
 	if err := s.migrate(ctx); err != nil {
-		_ = s.Suspend()
+		_ = s.teardown(false)
 		return ReopenResult{}, err
 	}
 	if n, err := s.ReclaimOrphans(ctx, nowNS()); err != nil {
-		_ = s.Suspend()
+		_ = s.teardown(false)
 		return ReopenResult{}, err
 	} else if n > 0 {
 		s.log.Info("reclaimed orphaned jobs on reopen", "count", n)
 	}
 	if n, err := s.recoverOrganize(ctx); err != nil {
-		_ = s.Suspend()
+		_ = s.teardown(false)
 		return ReopenResult{}, err
 	} else if n > 0 {
 		s.log.Info("recovered interrupted organize moves on reopen", "count", n)
 	}
 	if err := s.ensureDefaultUser(ctx); err != nil {
-		_ = s.Suspend()
+		_ = s.teardown(false)
 		return ReopenResult{}, err
 	}
 	s.wmu.Lock()
@@ -389,10 +494,11 @@ func (s *Store) Reopen(ctx context.Context) (ReopenResult, error) {
 	return ReopenResult{Reopened: true, Replaced: replaced}, nil
 }
 
-// markLocked records the catalog a suspend is about to close. The caller holds wmu.
-func (s *Store) markLocked() *suspendMark {
+// markLocked records the catalog a suspend is about to close, read over its write
+// connection w. The caller holds wmu.
+func (s *Store) markLocked(w *sql.DB) *suspendMark {
 	m := &suspendMark{head: -1}
-	if err := s.write.QueryRowContext(context.Background(),
+	if err := w.QueryRowContext(context.Background(),
 		"SELECT COALESCE(MAX(seq), 0) FROM change_log").Scan(&m.head); err != nil {
 		m.head = -1
 	}
@@ -433,7 +539,7 @@ func (s *Store) replacedSince(ctx context.Context, m *suspendMark) bool {
 		return true
 	}
 	var head, oldest int64
-	if err := s.write.QueryRowContext(ctx,
+	if err := s.wdb().QueryRowContext(ctx,
 		"SELECT COALESCE(MAX(seq), 0), COALESCE(MIN(seq), 0) FROM change_log").Scan(&head, &oldest); err != nil {
 		return true
 	}
@@ -480,7 +586,7 @@ func (s *Store) writable() error {
 }
 
 func (s *Store) writeTx(ctx context.Context, fn func(*sql.Tx) error) error {
-	if s.readOnly || s.write == nil {
+	if s.readOnly {
 		return waxerr.New(waxerr.CodeUnsupported, "store.writeTx", "library opened read-only")
 	}
 	s.wmu.Lock()
@@ -498,7 +604,7 @@ func (s *Store) writeTx(ctx context.Context, fn func(*sql.Tx) error) error {
 		preSeq = s.maxChangeSeq(ctx)
 	}
 
-	tx, err := s.write.BeginTx(ctx, nil)
+	tx, err := s.wdb().BeginTx(ctx, nil)
 	if err != nil {
 		return waxerr.Wrap(waxerr.CodeIO, "store.writeTx", err)
 	}

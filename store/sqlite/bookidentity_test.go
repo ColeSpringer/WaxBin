@@ -16,7 +16,7 @@ import (
 // identity_key. That gap is what adoptBookItemByASINTx exists to close.
 func setBookASIN(t *testing.T, st *Store, pid model.PID, asin string) {
 	t.Helper()
-	if _, err := st.write.ExecContext(context.Background(),
+	if _, err := st.wdb().ExecContext(context.Background(),
 		"UPDATE book SET asin = ? WHERE item_id = (SELECT id FROM playable_item WHERE pid = ?)",
 		asin, string(pid)); err != nil {
 		t.Fatalf("set asin: %v", err)
@@ -26,7 +26,7 @@ func setBookASIN(t *testing.T, st *Store, pid model.PID, asin string) {
 // setBookISBN fills book.isbn the way BookEnrichment does, key column included.
 func setBookISBN(t *testing.T, st *Store, pid model.PID, isbn string) {
 	t.Helper()
-	if _, err := st.write.ExecContext(context.Background(),
+	if _, err := st.wdb().ExecContext(context.Background(),
 		`UPDATE book SET isbn = ?, isbn_key = ?
 		 WHERE item_id = (SELECT id FROM playable_item WHERE pid = ?)`,
 		isbn, identity.ISBNKey(isbn), string(pid)); err != nil {
@@ -365,7 +365,7 @@ func TestVerifyCatchesISBNKeyDrift(t *testing.T) {
 	})
 	assertVerifyClean(t, st)
 
-	if _, err := st.write.ExecContext(context.Background(),
+	if _, err := st.wdb().ExecContext(context.Background(),
 		"UPDATE book SET isbn = ? WHERE item_id = (SELECT id FROM playable_item WHERE pid = ?)",
 		"978-0-306-40615-7", string(book.ItemPID)); err != nil {
 		t.Fatalf("skew the raw column: %v", err)

@@ -514,7 +514,7 @@ func TestEntityStateSeriesOrphanNoOp(t *testing.T) {
 	ctx := context.Background()
 	// A series with no book is an orphan; it carries no entity_play_state row.
 	pid := model.NewPID()
-	if _, err := st.write.ExecContext(ctx,
+	if _, err := st.wdb().ExecContext(ctx,
 		"INSERT INTO series(pid, name, sort_key, match_key) VALUES (?,?,?,?)",
 		string(pid), "Orphan Series", model.SortKey("Orphan Series"), "orphan-series"); err != nil {
 		t.Fatalf("insert series: %v", err)

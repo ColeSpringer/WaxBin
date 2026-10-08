@@ -12,7 +12,7 @@ import (
 func identityKeyOf(t *testing.T, st *Store, pid model.PID) string {
 	t.Helper()
 	var k string
-	if err := st.read.QueryRow("SELECT COALESCE(identity_key,'') FROM playable_item WHERE pid = ?", string(pid)).Scan(&k); err != nil {
+	if err := st.rdb().QueryRow("SELECT COALESCE(identity_key,'') FROM playable_item WHERE pid = ?", string(pid)).Scan(&k); err != nil {
 		t.Fatalf("read identity key: %v", err)
 	}
 	return k

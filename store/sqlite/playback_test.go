@@ -180,7 +180,7 @@ func TestSessions(t *testing.T) {
 	}
 	var msPlayed int64
 	var ended sql.NullInt64
-	if err := st.read.QueryRowContext(ctx,
+	if err := st.rdb().QueryRowContext(ctx,
 		"SELECT ms_played, ended_at FROM play_session WHERE pid = ?", string(sess)).Scan(&msPlayed, &ended); err != nil {
 		t.Fatal(err)
 	}
@@ -195,7 +195,7 @@ func TestSessions(t *testing.T) {
 	}
 	var msAgain int64
 	var endedAgain sql.NullInt64
-	if err := st.read.QueryRowContext(ctx,
+	if err := st.rdb().QueryRowContext(ctx,
 		"SELECT ms_played, ended_at FROM play_session WHERE pid = ?", string(sess)).Scan(&msAgain, &endedAgain); err != nil {
 		t.Fatal(err)
 	}
@@ -225,7 +225,7 @@ func TestRecordSession(t *testing.T) {
 	}
 	row := func(pid model.PID) (startedAt, endedAt, msPlayed int64, client string) {
 		t.Helper()
-		if err := st.read.QueryRowContext(ctx,
+		if err := st.rdb().QueryRowContext(ctx,
 			"SELECT started_at, ended_at, ms_played, client FROM play_session WHERE pid = ?", string(pid)).
 			Scan(&startedAt, &endedAt, &msPlayed, &client); err != nil {
 			t.Fatal(err)

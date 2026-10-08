@@ -95,14 +95,14 @@ func (s *Store) VerifyDerived(ctx context.Context) (*DerivedReport, error) {
 		{&rep.OrphanThumbnails, "SELECT COUNT(*) FROM thumb_cache WHERE source_hash NOT IN (" + liveArtSourceQ + ")"},
 	}
 	for _, c := range checks {
-		if err := s.read.QueryRowContext(ctx, c.stmt).Scan(c.dst); err != nil {
+		if err := s.rdb().QueryRowContext(ctx, c.stmt).Scan(c.dst); err != nil {
 			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 	}
 	// Stands apart from the table above because it is the one check with bound
 	// arguments: the reserved key set lives in Go, not in the schema.
 	q, args := reservedTagProvenanceQuery("SELECT COUNT(*)")
-	if err := s.read.QueryRowContext(ctx, q, args...).Scan(&rep.OrphanReservedTagProvenance); err != nil {
+	if err := s.rdb().QueryRowContext(ctx, q, args...).Scan(&rep.OrphanReservedTagProvenance); err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
 	stranded, err := s.countStrandedTagKeyRows(ctx)
@@ -129,7 +129,7 @@ func (s *Store) VerifyDerived(ctx context.Context) (*DerivedReport, error) {
 // the raw column. It reads the same rows the repair rewrites (bookISBNKeyMoves), so the
 // two cannot disagree; refreshAllISBNKeysTx is the repair.
 func (s *Store) bookISBNKeyDrift(ctx context.Context) (int, error) {
-	moves, err := bookISBNKeyMoves(ctx, s.read)
+	moves, err := bookISBNKeyMoves(ctx, s.rdb())
 	if err != nil {
 		return 0, waxerr.Wrap(waxerr.CodeIO, "store.VerifyDerived", err)
 	}
@@ -151,7 +151,7 @@ func (s *Store) sortKeyDrift(ctx context.Context) (int, error) {
 	total := 0
 	for _, src := range sortKeySources {
 		q, args := src.query("")
-		rows, err := s.read.QueryContext(ctx, q, args...)
+		rows, err := s.rdb().QueryContext(ctx, q, args...)
 		if err != nil {
 			return 0, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}

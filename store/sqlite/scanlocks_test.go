@@ -64,7 +64,7 @@ func TestScanForcePreservesLockedBPM(t *testing.T) {
 	readBPM := func() int {
 		t.Helper()
 		var bpm int
-		if err := st.read.QueryRowContext(ctx,
+		if err := st.rdb().QueryRowContext(ctx,
 			"SELECT COALESCE(t.bpm,0) FROM track t JOIN playable_item pi ON pi.id=t.item_id WHERE pi.pid=?",
 			string(pid)).Scan(&bpm); err != nil {
 			t.Fatalf("read bpm: %v", err)
@@ -108,7 +108,7 @@ func TestScanForcePreservesLockedTrackFields(t *testing.T) {
 	rescanTrack(t, st, lib.ID, forced, true)
 
 	var title, artist, genre, isrc, artistEntity string
-	if err := st.read.QueryRowContext(ctx, `
+	if err := st.rdb().QueryRowContext(ctx, `
 		SELECT pi.title, t.artist, t.genre, t.isrc, COALESCE(a.name,'')
 		FROM playable_item pi JOIN track t ON t.item_id=pi.id
 		LEFT JOIN artist a ON a.id=t.artist_id WHERE pi.pid=?`, string(pid)).
@@ -124,7 +124,7 @@ func TestScanForcePreservesLockedTrackFields(t *testing.T) {
 	}
 	// The genre link points at the curated genre, not the re-derived one.
 	var genreName string
-	if err := st.read.QueryRowContext(ctx, `SELECT g.name FROM item_genre ig JOIN genre g ON g.id=ig.genre_id
+	if err := st.rdb().QueryRowContext(ctx, `SELECT g.name FROM item_genre ig JOIN genre g ON g.id=ig.genre_id
 		JOIN playable_item pi ON pi.id=ig.item_id WHERE pi.pid=?`, string(pid)).Scan(&genreName); err != nil {
 		t.Fatalf("read genre link: %v", err)
 	}
@@ -140,7 +140,7 @@ func TestScanForcePreservesLockedTrackFields(t *testing.T) {
 	ignore := orig
 	ignore.content = "c3"
 	rescanTrack(t, st, lib.ID, ignore, false)
-	if err := st.read.QueryRowContext(ctx,
+	if err := st.rdb().QueryRowContext(ctx,
 		"SELECT pi.title, t.artist, t.genre FROM playable_item pi JOIN track t ON t.item_id=pi.id WHERE pi.pid=?",
 		string(pid)).Scan(&title, &artist, &genre); err != nil {
 		t.Fatalf("read after ignore-locks: %v", err)
@@ -171,7 +171,7 @@ func TestScanForcePreservesLockedCredits(t *testing.T) {
 	forced.content = "c2"
 	rescanTrack(t, st, lib.ID, forced, true)
 	var composer string
-	if err := st.read.QueryRowContext(ctx,
+	if err := st.rdb().QueryRowContext(ctx,
 		"SELECT composer FROM track t JOIN playable_item pi ON pi.id=t.item_id WHERE pi.pid=?", string(tpid)).Scan(&composer); err != nil {
 		t.Fatalf("read composer: %v", err)
 	}
@@ -187,7 +187,7 @@ func TestScanForcePreservesLockedCredits(t *testing.T) {
 		title: "The Book", author: "Jane Author", narrators: []string{"Ned Narrator"},
 	})
 	var bpid string
-	if err := st.read.QueryRowContext(ctx, "SELECT pid FROM playable_item WHERE kind='book' LIMIT 1").Scan(&bpid); err != nil {
+	if err := st.rdb().QueryRowContext(ctx, "SELECT pid FROM playable_item WHERE kind='book' LIMIT 1").Scan(&bpid); err != nil {
 		t.Fatalf("book pid: %v", err)
 	}
 	if _, _, err := st.SetItemCredits(ctx, model.PID(bpid), model.RoleTranslator, []string{"Terry Translator"}, model.Attribution{Source: model.SourceUser}, model.LockOf(true), false, false); err != nil {
@@ -220,7 +220,7 @@ func TestScanForcePreservesLockedBookFields(t *testing.T) {
 		series: "The Series", seq: "1", genres: []string{"Fantasy"}, year: 2010,
 	})
 	var pid string
-	if err := st.read.QueryRowContext(ctx, "SELECT pid FROM playable_item WHERE kind='book' LIMIT 1").Scan(&pid); err != nil {
+	if err := st.rdb().QueryRowContext(ctx, "SELECT pid FROM playable_item WHERE kind='book' LIMIT 1").Scan(&pid); err != nil {
 		t.Fatalf("book pid: %v", err)
 	}
 	bpid := model.PID(pid)
@@ -241,7 +241,7 @@ func TestScanForcePreservesLockedBookFields(t *testing.T) {
 		t.Fatalf("locked author not preserved: %q", v.Artist)
 	}
 	var publisher string
-	if err := st.read.QueryRowContext(ctx,
+	if err := st.rdb().QueryRowContext(ctx,
 		"SELECT publisher FROM book b JOIN playable_item pi ON pi.id=b.item_id WHERE pi.pid=?", pid).Scan(&publisher); err != nil {
 		t.Fatalf("read publisher: %v", err)
 	}
@@ -306,7 +306,7 @@ func provenanceRows(t *testing.T, st *Store, pid model.PID, field string) int {
 
 func itemGenreNames(t *testing.T, st *Store, pid model.PID) []string {
 	t.Helper()
-	rows, err := st.read.QueryContext(context.Background(), `SELECT g.name FROM item_genre ig
+	rows, err := st.rdb().QueryContext(context.Background(), `SELECT g.name FROM item_genre ig
 		JOIN genre g ON g.id = ig.genre_id JOIN playable_item pi ON pi.id = ig.item_id
 		WHERE pi.pid = ? ORDER BY g.name`, string(pid))
 	if err != nil {
@@ -327,7 +327,7 @@ func itemGenreNames(t *testing.T, st *Store, pid model.PID) []string {
 func trackColumn(t *testing.T, st *Store, pid model.PID, col string) string {
 	t.Helper()
 	var v string
-	if err := st.read.QueryRowContext(context.Background(), "SELECT COALESCE(t."+col+", '') FROM track t "+
+	if err := st.rdb().QueryRowContext(context.Background(), "SELECT COALESCE(t."+col+", '') FROM track t "+
 		"JOIN playable_item pi ON pi.id = t.item_id WHERE pi.pid = ?", string(pid)).Scan(&v); err != nil {
 		t.Fatalf("read track.%s: %v", col, err)
 	}
@@ -443,7 +443,7 @@ func TestForcedRescanHealsStaleProvenance(t *testing.T) {
 	if err := st.EditItemField(ctx, pid, "genre", "Hip Hop", model.Attribution{Source: model.SourceUser}, model.LockUnchanged, false); err != nil {
 		t.Fatalf("edit genre: %v", err)
 	}
-	if _, err := st.write.ExecContext(ctx, `UPDATE track SET genre = 'Hip-Hop/Rap'
+	if _, err := st.wdb().ExecContext(ctx, `UPDATE track SET genre = 'Hip-Hop/Rap'
 		WHERE item_id = (SELECT id FROM playable_item WHERE pid = ?)`, string(pid)); err != nil {
 		t.Fatalf("stage the stale column: %v", err)
 	}
@@ -563,7 +563,7 @@ func TestForcedRescanRederivesBookTitle(t *testing.T) {
 	res := putBook(t, st, lib.ID, spec)
 
 	var title, ftsTitle string
-	if err := st.read.QueryRowContext(ctx, `SELECT pi.title, f.title FROM playable_item pi
+	if err := st.rdb().QueryRowContext(ctx, `SELECT pi.title, f.title FROM playable_item pi
 		JOIN search_fts f ON f.rowid = pi.id WHERE pi.pid = ?`, string(pid)).Scan(&title, &ftsTitle); err != nil {
 		t.Fatalf("read title: %v", err)
 	}
@@ -751,7 +751,7 @@ func TestContentChangedBookRescanRetiresReDerivedProvenance(t *testing.T) {
 
 	itemID := int64(scalarInt(t, st, "SELECT id FROM playable_item WHERE pid = ?", string(pid)))
 	var fileNarrator string
-	if err := st.read.QueryRowContext(ctx, "SELECT narrator FROM book WHERE item_id = ?", itemID).Scan(&fileNarrator); err != nil {
+	if err := st.rdb().QueryRowContext(ctx, "SELECT narrator FROM book WHERE item_id = ?", itemID).Scan(&fileNarrator); err != nil {
 		t.Fatalf("narrator: %v", err)
 	}
 	if err := st.EditItemField(ctx, pid, "narrator", "Other Reader", user, model.LockUnchanged, false); err != nil {
@@ -777,7 +777,7 @@ func TestContentChangedBookRescanRetiresReDerivedProvenance(t *testing.T) {
 	out := putBook(t, st, lib.ID, spec)
 
 	var narrator, publisher, subtitle string
-	if err := st.read.QueryRowContext(ctx, "SELECT narrator, publisher, subtitle FROM book WHERE item_id = ?", itemID).
+	if err := st.rdb().QueryRowContext(ctx, "SELECT narrator, publisher, subtitle FROM book WHERE item_id = ?", itemID).
 		Scan(&narrator, &publisher, &subtitle); err != nil {
 		t.Fatalf("book row: %v", err)
 	}
@@ -971,7 +971,7 @@ func TestValuelessProvenanceIsNoClaim(t *testing.T) {
 	spec := trackSpec{path: "/lib/A/One/01.flac", essence: "e1", content: "c1",
 		title: "Song", artist: "Alpha", albumArt: "Alpha", album: "One", genre: "Rock"}
 	pid := putTrack(t, st, lib.ID, spec).ItemPID
-	if _, err := st.write.ExecContext(ctx, `INSERT INTO field_provenance(item_id, field, source, provider, locked, updated_at)
+	if _, err := st.wdb().ExecContext(ctx, `INSERT INTO field_provenance(item_id, field, source, provider, locked, updated_at)
 		VALUES ((SELECT id FROM playable_item WHERE pid = ?), 'genre', 'enrichment', 'mb', 0, 1)`, string(pid)); err != nil {
 		t.Fatalf("stage the fill's row: %v", err)
 	}
@@ -998,10 +998,10 @@ func TestValuelessEnrichmentRowRetiresWithItsDrift(t *testing.T) {
 	spec := trackSpec{path: "/lib/A/One/01.flac", essence: "e1", content: "c1",
 		title: "Song", artist: "Alpha", albumArt: "Alpha", album: "One"}
 	res := putTrack(t, st, lib.ID, spec)
-	if _, err := st.write.ExecContext(ctx, "UPDATE track SET genre = 'Rock' WHERE item_id = (SELECT id FROM playable_item WHERE pid = ?)", string(res.ItemPID)); err != nil {
+	if _, err := st.wdb().ExecContext(ctx, "UPDATE track SET genre = 'Rock' WHERE item_id = (SELECT id FROM playable_item WHERE pid = ?)", string(res.ItemPID)); err != nil {
 		t.Fatalf("stage the filled column: %v", err)
 	}
-	if _, err := st.write.ExecContext(ctx, `INSERT INTO field_provenance(item_id, field, source, provider, locked, updated_at)
+	if _, err := st.wdb().ExecContext(ctx, `INSERT INTO field_provenance(item_id, field, source, provider, locked, updated_at)
 		VALUES ((SELECT id FROM playable_item WHERE pid = ?), 'genre', 'enrichment', 'mb', 0, 1)`, string(res.ItemPID)); err != nil {
 		t.Fatalf("stage the fill's row: %v", err)
 	}

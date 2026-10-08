@@ -121,7 +121,7 @@ func TestAnUnchangedRescanLeavesReleaseYearAlone(t *testing.T) {
 	book := bookSpec{path: "/lib/bk.m4b", essence: "eb", content: "cb", title: "Book", author: "Author", year: 2015}
 	putBook(t, st, lib.ID, book)
 
-	if _, err := st.write.ExecContext(ctx, `CREATE TABLE release_year_writes(n INTEGER);
+	if _, err := st.wdb().ExecContext(ctx, `CREATE TABLE release_year_writes(n INTEGER);
 		CREATE TRIGGER count_release_year AFTER UPDATE OF release_year ON playable_item
 		WHEN new.release_year <> old.release_year
 		BEGIN INSERT INTO release_year_writes VALUES (1); END`); err != nil {
@@ -152,7 +152,7 @@ func TestVerifyReportsAndRepairsReleaseYearDrift(t *testing.T) {
 	pid := putTrack(t, st, lib.ID, trackSpec{path: "/lib/Al/1.flac", essence: "e1", content: "c1",
 		title: "Song", artist: "X", album: "Al", year: 1997}).ItemPID
 	putFeedSpec(t, st, "http://cast.example/f", false, epSpec{title: "Ep", pubNS: 1_000_000_000, year: 2010})
-	if _, err := st.write.ExecContext(ctx, "UPDATE playable_item SET release_year = 1900"); err != nil {
+	if _, err := st.wdb().ExecContext(ctx, "UPDATE playable_item SET release_year = 1900"); err != nil {
 		t.Fatalf("break the years by hand: %v", err)
 	}
 	rep, err := st.VerifyDerived(ctx)
@@ -185,7 +185,7 @@ func TestRefreshRollupsRepairsISBNKeys(t *testing.T) {
 	ctx := context.Background()
 	putBook(t, st, lib.ID, bookSpec{path: "/lib/bk.m4b", essence: "eb", content: "cb",
 		title: "Book", author: "Author", isbn: "978-0-306-40615-7"})
-	if _, err := st.write.ExecContext(ctx, "UPDATE book SET isbn_key = 'stale'"); err != nil {
+	if _, err := st.wdb().ExecContext(ctx, "UPDATE book SET isbn_key = 'stale'"); err != nil {
 		t.Fatalf("break the key by hand: %v", err)
 	}
 	if rep, err := st.VerifyDerived(ctx); err != nil || rep.BookISBNKeyDrift != 1 {

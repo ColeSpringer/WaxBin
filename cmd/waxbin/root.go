@@ -13,6 +13,7 @@ import (
 
 	"github.com/colespringer/waxbin"
 	"github.com/colespringer/waxbin/config"
+	"github.com/colespringer/waxbin/internal/lockwait"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/proxy"
 	"github.com/colespringer/waxbin/waxerr"
@@ -430,46 +431,20 @@ func beginMaintenance(ctx context.Context, sock string) (*proxy.Client, error) {
 	return px, nil
 }
 
-// openReadWriteRetry opens the catalog read-write, retrying a transient conflict
-// with bounded exponential backoff to cover the flock hand-off race after a server
-// releases the lock. The server releases the flock synchronously before answering
-// maintenance-begin, but a heavy WAL checkpoint or a loaded filesystem can delay
-// when the lock is observably free, so the wait is generous (a few seconds) rather
-// than a fixed 200ms that could fail a slow hand-off. It mirrors the daemon-side
-// acquireWriteLockRetry so both ends of the hand-off tolerate the same lag.
+// openReadWriteRetry opens the catalog read-write, waiting out the moment after a
+// server releases the lock in which the flock can still show held. The server releases
+// it synchronously before answering maintenance-begin, but a heavy WAL checkpoint or a
+// loaded filesystem can delay when the lock is observably free. It waits with
+// lockwait.Retry, as the server does to take the lock back, so both ends of the hand-off
+// tolerate the same lag.
 func openReadWriteRetry(ctx context.Context, opts waxbin.Options) (*waxbin.Library, error) {
 	var lib *waxbin.Library
-	err := retryConflict(ctx, func() error {
+	err := lockwait.Retry(ctx, "cli.openReadWrite", func() error {
 		var err error
 		lib, err = waxbin.Open(ctx, opts)
 		return err
 	})
 	return lib, err
-}
-
-// retryConflict runs try until it stops returning CodeConflict, with the bounded
-// backoff openReadWriteRetry describes.
-func retryConflict(ctx context.Context, try func() error) error {
-	const maxAttempts = 40
-	const maxBackoff = 200 * time.Millisecond
-	backoff := 5 * time.Millisecond
-	for attempt := 0; ; attempt++ {
-		err := try()
-		if err == nil {
-			return nil
-		}
-		if !waxerr.Is(err, waxerr.CodeConflict) || attempt >= maxAttempts {
-			return err
-		}
-		select {
-		case <-ctx.Done():
-			return waxerr.FromContext("cli.openReadWrite", ctx.Err(), waxerr.CodeConflict)
-		case <-time.After(backoff):
-		}
-		if backoff < maxBackoff {
-			backoff *= 2
-		}
-	}
 }
 
 // cleanup ends any in-progress maintenance hand-off, telling the server to reopen.

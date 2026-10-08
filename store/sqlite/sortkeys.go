@@ -180,11 +180,11 @@ func (s *Store) RefreshSortKeys(ctx context.Context) (int, error) {
 }
 
 // recomputeSortKeys streams one source table and queues the rows whose key moved.
-// s.read and s.write are separate handles, so rows stream from one while updates
-// commit on the other and only a bounded batch is ever buffered.
+// The read pool and the write connection are separate handles, so rows stream from one
+// while updates commit on the other and only a bounded batch is ever buffered.
 func (s *Store) recomputeSortKeys(ctx context.Context, p *sortKeyPatch, src sortKeySource) error {
 	q, args := src.query("t." + src.idCol + ", " + src.pidExpr + ", ")
-	rows, err := s.read.QueryContext(ctx, q, args...)
+	rows, err := s.rdb().QueryContext(ctx, q, args...)
 	if err != nil {
 		return waxerr.Wrap(waxerr.CodeIO, p.op, err)
 	}
