@@ -64,7 +64,7 @@ exit codes (`waxbin exit-codes`).
 | **Curation & editing** | `edit` (incl. `--batch`), `entity` (incl. `entity rename [--write-back]`), `credit` (incl. `--batch`), `tag`/`tag keys`, `lyrics set`, `chapters`, `art set` (incl. `--role`), `art lock`/`art unlock` (incl. `--role`), `detach [--write-back]`, `kind --to book\|track [--write-back]` |
 | **Ingest / organize** | `inbox`, `import`, `organize`, `profiles` |
 | **Deletion / repair** | `trash`, `rm [--permanent] [--file]` (a file's sidecars go with it, and a folder it empties is removed), `mark-missing [--force]`, `merge`, `audit`, `diagnostics`, `upgrade` |
-| **Portability** | `backup`, `restore`, `export`, `manifest`, `rebuild` |
+| **Portability** | `backup` (incl. `--redact-secrets`, `--no-thumbnails`), `restore`, `export`, `manifest`, `rebuild` |
 | **Playlists / podcasts** | `playlist`, `smartplaylist`, `podcast`, `opml` |
 | **Enrichment** | `enrich` (MusicBrainz + Cover Art Archive, which need a contact; optional AcoustID; incl. `--item`/`--entity`/`--phase`/`--force-phase`; per-release album art; misses re-asked after `enrichment.retry_misses_after_days`; a failed lookup stays queued for the next pass; an injected provider can also fill role-tagged and artist art, and its passes run without a contact) |
 | **Maintenance** | `db verify [--fix]`, `db vacuum [--integrity]`, `db thumbs [--older-than/--max-bytes]`, `db enrich-cache [--older-than/--max-bytes]`, `db migrate`, `db reset --yes`, `user`, `state` |
@@ -122,7 +122,7 @@ SIGTERM).
 - `waxbin upgrade` groups alt encodings of the same recording (by fingerprint, or held
   by one item), ranks each group by quality, and marks the keeper.
 - `waxbin db verify --fix` repairs derived-data drift (the search index, rollups, album
-  years, sort keys, playlist positions) and reclaims orphaned art. `waxbin db vacuum` GCs and compacts the database.
+  and release years, sort keys, playlist positions) and reclaims orphaned art. `waxbin db vacuum` GCs and compacts the database.
 - `waxbin stats --year 2025` prints a per-user listening year-in-review.
 
 ### Curation & editing

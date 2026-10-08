@@ -79,7 +79,7 @@ func TestEditAlbumRenamesInPlace(t *testing.T) {
 		t.Fatalf("seed curation: %v", err)
 	}
 	cover := testPNG(t, 64, 64)
-	if err := st.SetEntityArt(ctx, model.ArtAlbum, albPID, model.ArtRoleFront, cover.Data, "",
+	if _, err := st.SetEntityArt(ctx, model.ArtAlbum, albPID, model.ArtRoleFront, cover.Data, "",
 		model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("seed art: %v", err)
 	}
@@ -327,7 +327,7 @@ func TestEditAlbumCollisionMergesIntoIncumbent(t *testing.T) {
 		t.Fatalf("seed incumbent curation: %v", err)
 	}
 	cover := testPNG(t, 64, 64)
-	if err := st.SetEntityArt(ctx, model.ArtAlbum, bPID, model.ArtRoleFront, cover.Data, "",
+	if _, err := st.SetEntityArt(ctx, model.ArtAlbum, bPID, model.ArtRoleFront, cover.Data, "",
 		model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("seed incumbent art: %v", err)
 	}

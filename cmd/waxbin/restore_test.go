@@ -17,6 +17,7 @@ import (
 	"github.com/colespringer/waxbin/internal/testaudio"
 	"github.com/colespringer/waxbin/internal/testsock"
 	"github.com/colespringer/waxbin/model"
+	"github.com/colespringer/waxbin/port"
 	"github.com/colespringer/waxbin/proxy"
 	"github.com/colespringer/waxbin/waxerr"
 )
@@ -49,7 +50,7 @@ func backupWithUser(t *testing.T, name string) string {
 		t.Fatalf("create user: %v", err)
 	}
 	backup := filepath.Join(t.TempDir(), "backup.db")
-	if err := lib.Backup(ctx, backup, false); err != nil {
+	if err := lib.Backup(ctx, backup, port.BackupOptions{}); err != nil {
 		t.Fatalf("backup: %v", err)
 	}
 	return backup
@@ -268,7 +269,7 @@ func TestRestoreRelocatesOnlyToAFolder(t *testing.T) {
 		t.Fatal(err)
 	}
 	backup := filepath.Join(t.TempDir(), "backup.db")
-	if err := lib.Backup(ctx, backup, false); err != nil {
+	if err := lib.Backup(ctx, backup, port.BackupOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	if err := lib.Close(); err != nil {

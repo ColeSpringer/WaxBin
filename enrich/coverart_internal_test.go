@@ -19,6 +19,8 @@ func TestReleaseMBIDFromURL(t *testing.T) {
 	}{
 		{"archive download item", req,
 			"https://archive.org/download/mbid-" + release + "/mbid-" + release + "-123.jpg", release},
+		{"thumbnail item", req,
+			"https://archive.org/download/mbid-" + release + "/mbid-" + release + "-123_thumb1200.jpg", release},
 		{"mirror item path", req,
 			"https://ia800.us.archive.org/0/items/mbid-" + release + "/mbid-" + release + "-123.jpg", release},
 		{"uppercase folds", req,

@@ -130,25 +130,24 @@ func TestSizedResolveRungsAboveSourceAgree(t *testing.T) {
 }
 
 // TestSizedResolveIgnoresUnderstatedStoredDimensions is why the rung goes through as
-// it is rather than clamped to the stored dimensions. storableArt keeps a producer's
-// own values and fills only what it left zero, so a row can name a size smaller than
-// its bytes really are. Clamping to that figure would answer a large request with a
-// small picture and cache it under the small rung, where nothing would ever correct it.
+// it is rather than clamped to the stored dimensions. The store measures every picture
+// it examines, so a row understating its bytes no longer comes from a producer; one is
+// made here by hand, as an older catalog or a stray edit could leave it. Clamping to
+// that figure would answer a large request with a small picture and cache it under the
+// small rung, where nothing would ever correct it.
 func TestSizedResolveIgnoresUnderstatedStoredDimensions(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	st, dbPath, lib := openStoreAt(t)
 	raw := sizedCover(t, "tiff", 800, 800)
-
-	// All four fields filled, so storableArt hands the carrier back without deriving the
-	// real dimensions from the bytes.
 	pid := putCoveredTrack(t, st, lib.ID, "/lib/u.flac", "ess-u", "Understated", "U",
-		&model.ArtImage{
-			Data: raw, Hash: "understated", Format: "tiff", Width: 100, Height: 100,
-			Attribution: model.Attribution{Source: model.SourceTag},
-		})
+		&model.ArtImage{Data: raw, Format: "tiff", Attribution: model.Attribution{Source: model.SourceTag}})
 
 	db := roConn(t, dbPath)
+	hash, _, _, _, _ := storedArt(t, db, "track", itemRowID(t, db, pid))
+	if _, err := writeConn(t, dbPath).ExecContext(ctx, "UPDATE art_source SET width = 100, height = 100 WHERE hash = ?", hash); err != nil {
+		t.Fatalf("understate the row by hand: %v", err)
+	}
 	if _, _, w, h, _ := storedArt(t, db, "track", itemRowID(t, db, pid)); w != 100 || h != 100 {
 		t.Fatalf("stored dimensions = %dx%d, want the understated 100x100 this test is about", w, h)
 	}

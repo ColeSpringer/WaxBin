@@ -86,7 +86,7 @@ func newCAAMock(t *testing.T, art []byte) (*httptest.Server, *int) {
 	t.Helper()
 	hits := new(int)
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/release-group/wywh-mbid/front" {
+		if r.URL.Path == "/release-group/wywh-mbid/front-1200" {
 			*hits++
 			w.Header().Set("Content-Type", "image/png")
 			_, _ = w.Write(art)
@@ -723,7 +723,7 @@ func TestCoverArtProvenanceRecordsProviderAndURL(t *testing.T) {
 	if got := scalarStr(t, db, fmt.Sprintf(q, "provider")); got != "coverartarchive" {
 		t.Errorf("fetched cover provider = %q, want coverartarchive", got)
 	}
-	want := caa.URL + "/release-group/wywh-mbid/front"
+	want := caa.URL + "/release-group/wywh-mbid/front-1200"
 	if got := scalarStr(t, db, fmt.Sprintf(q, "source_url")); got != want {
 		t.Errorf("fetched cover source_url = %q, want the stable request URL %q", got, want)
 	}
@@ -739,7 +739,7 @@ func TestLockedCoverIsNotFetched(t *testing.T) {
 	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
 
 	rgPID := scalarStr(t, roDB(t, dbPath), "SELECT pid FROM release_group WHERE title='Wish You Were Here'")
-	if err := st.SetEntityArt(ctx, model.ArtReleaseGroup, model.PID(rgPID), model.ArtRoleFront, pngBytes(t), "", model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
+	if _, err := st.SetEntityArt(ctx, model.ArtReleaseGroup, model.PID(rgPID), model.ArtRoleFront, pngBytes(t), "", model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
 		t.Fatalf("SetEntityArt: %v", err)
 	}
 

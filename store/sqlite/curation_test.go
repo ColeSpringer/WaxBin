@@ -58,12 +58,12 @@ func TestSetArtFormatHint(t *testing.T) {
 	attr := model.Attribution{Source: model.SourceUser}
 
 	// Nobody can name it: refused, and the refusal is the caller's error.
-	if err := st.SetItemArt(ctx, pid, model.ArtRoleBack, unnameableImage(1), "", attr, model.LockUnchanged, false); !waxerr.Is(err, waxerr.CodeInvalid) {
+	if _, err := st.SetItemArt(ctx, pid, model.ArtRoleBack, unnameableImage(1), "", attr, model.LockUnchanged, false); !waxerr.Is(err, waxerr.CodeInvalid) {
 		t.Fatalf("unnamed unnameable set = %v, want CodeInvalid", err)
 	}
 
 	// The caller names it: stored under the name it gave.
-	if err := st.SetItemArt(ctx, pid, model.ArtRoleBack, unnameableImage(1), "jxl", attr, model.LockUnchanged, false); err != nil {
+	if _, err := st.SetItemArt(ctx, pid, model.ArtRoleBack, unnameableImage(1), "jxl", attr, model.LockUnchanged, false); err != nil {
 		t.Fatalf("set with format hint: %v", err)
 	}
 	if got := roleFormat(t, st, model.ArtTrack, pid, model.ArtRoleBack); got != "jxl" {
@@ -71,7 +71,7 @@ func TestSetArtFormatHint(t *testing.T) {
 	}
 
 	// The bytes name themselves: the hint loses rather than relabelling the picture.
-	if err := st.SetItemArt(ctx, pid, model.ArtRoleDisc, tinyPNG(t), "jxl", attr, model.LockUnchanged, false); err != nil {
+	if _, err := st.SetItemArt(ctx, pid, model.ArtRoleDisc, tinyPNG(t), "jxl", attr, model.LockUnchanged, false); err != nil {
 		t.Fatalf("set png with a wrong hint: %v", err)
 	}
 	if got := roleFormat(t, st, model.ArtTrack, pid, model.ArtRoleDisc); got != "png" {
@@ -81,7 +81,7 @@ func TestSetArtFormatHint(t *testing.T) {
 	// A real BMP needs no hint at all now that the decoder is registered, and it gets
 	// the dimensions a hint could never supply. This is the case the hint used to exist
 	// for, and the reason it is a rescue rather than the main path.
-	if err := st.SetItemArt(ctx, pid, model.ArtRoleBackground, bmpFixture(t, 9, 6), "", attr, model.LockUnchanged, false); err != nil {
+	if _, err := st.SetItemArt(ctx, pid, model.ArtRoleBackground, bmpFixture(t, 9, 6), "", attr, model.LockUnchanged, false); err != nil {
 		t.Fatalf("set bmp with no hint: %v", err)
 	}
 	if got := roleFormat(t, st, model.ArtTrack, pid, model.ArtRoleBackground); got != "bmp" {
@@ -90,10 +90,10 @@ func TestSetArtFormatHint(t *testing.T) {
 
 	// The entity path is the same code, and the one WaxDeck reported against.
 	al := albumPID(t, st)
-	if err := st.SetEntityArt(ctx, model.ArtAlbum, al, model.ArtRoleFront, unnameableImage(2), "", attr, model.LockUnchanged, false); !waxerr.Is(err, waxerr.CodeInvalid) {
+	if _, err := st.SetEntityArt(ctx, model.ArtAlbum, al, model.ArtRoleFront, unnameableImage(2), "", attr, model.LockUnchanged, false); !waxerr.Is(err, waxerr.CodeInvalid) {
 		t.Fatalf("unnamed entity set = %v, want CodeInvalid", err)
 	}
-	if err := st.SetEntityArt(ctx, model.ArtAlbum, al, model.ArtRoleFront, unnameableImage(2), "image/jxl", attr, model.LockUnchanged, false); err != nil {
+	if _, err := st.SetEntityArt(ctx, model.ArtAlbum, al, model.ArtRoleFront, unnameableImage(2), "image/jxl", attr, model.LockUnchanged, false); err != nil {
 		t.Fatalf("set entity art with format hint: %v", err)
 	}
 	if got := roleFormat(t, st, model.ArtAlbum, al, model.ArtRoleFront); got != "jxl" {
@@ -183,7 +183,7 @@ func TestSetItemArtAndLockSurvivesScan(t *testing.T) {
 	pid := itemPID(t, st)
 
 	user := tinyPNG(t)
-	if err := st.SetItemArt(ctx, pid, model.ArtRoleFront, user, "", model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
+	if _, err := st.SetItemArt(ctx, pid, model.ArtRoleFront, user, "", model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
 		t.Fatalf("set art: %v", err)
 	}
 	blob, err := st.ResolveArt(ctx, model.EntityRef{Type: model.ArtTrack, PID: pid}, model.ArtRoleFront, 0)
@@ -205,7 +205,7 @@ func TestSetItemArtAndLockSurvivesScan(t *testing.T) {
 	}
 
 	// Locked SetItemArt without force is refused.
-	if err := st.SetItemArt(ctx, pid, model.ArtRoleFront, tinyPNG(t), "", model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); !waxerr.Is(err, waxerr.CodeLocked) {
+	if _, err := st.SetItemArt(ctx, pid, model.ArtRoleFront, tinyPNG(t), "", model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); !waxerr.Is(err, waxerr.CodeLocked) {
 		t.Fatalf("set locked art = %v, want CodeLocked", err)
 	}
 }
@@ -256,7 +256,7 @@ func TestSetEntityArtDurableAlbum(t *testing.T) {
 	}
 
 	img := tinyPNG(t)
-	if err := st.SetEntityArt(ctx, model.ArtAlbum, model.PID(albumPID), model.ArtRoleFront, img, "", model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
+	if _, err := st.SetEntityArt(ctx, model.ArtAlbum, model.PID(albumPID), model.ArtRoleFront, img, "", model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("set album art: %v", err)
 	}
 	blob, err := st.ResolveArt(ctx, model.EntityRef{Type: model.ArtAlbum, PID: model.PID(albumPID)}, model.ArtRoleFront, 0)

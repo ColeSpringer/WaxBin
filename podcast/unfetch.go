@@ -44,11 +44,10 @@ func (s *Service) Unfetch(ctx context.Context, episodePID model.PID) (*UnfetchRe
 
 func (s *Service) unfetch(ctx context.Context, episodePID model.PID) (*UnfetchResult, error) {
 	const op = "podcast.Unfetch"
-	d, err := s.store.EpisodeByPID(ctx, episodePID)
+	ep, err := s.store.EpisodeMeta(ctx, episodePID)
 	if err != nil {
 		return nil, err
 	}
-	ep := d.Episode
 	res := &UnfetchResult{EpisodePID: episodePID}
 	// FilePID, not DisplayPath: the primary file edge is what DropEpisodeFile acts
 	// on, so keying off the path would leave an episode whose file row carries no

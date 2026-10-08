@@ -28,6 +28,10 @@ type browseSpec struct {
 	orderExpr string
 	orderInt  bool
 	desc      bool
+	// narrow marks an order no index holds whole, so the statement sorts each row's id
+	// and order value in a subquery and reads the item view for the page's rows only. A
+	// narrow spec's own join and filter read pi and nothing of the item joins.
+	narrow bool
 	// userID is the resolved play_state user, set only by the play-derived specs
 	// (which have to resolve it to build their join). A filtered browse reuses it
 	// instead of resolving the same pid a second time for the query's user join.
@@ -56,7 +60,13 @@ func (s *Store) BrowsePage(ctx context.Context, list read.DiscoveryList, opt rea
 		return nil, err
 	}
 
-	rows, err := s.read.QueryContext(ctx, stmt, args...)
+	var rows *sql.Rows
+	if list == read.ListRandom {
+		// A shuffle inlines its seed, so its text is new for every seed.
+		rows, err = s.read.QueryContext(ctx, stmt, args...)
+	} else {
+		rows, err = s.rstmts.queryContext(ctx, s.read, stmt, args...)
+	}
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
@@ -114,15 +124,22 @@ func (s *Store) browseStmt(ctx context.Context, list read.DiscoveryList, opt rea
 	// would lead all of these, leadArgs included. Today only random varies and it
 	// inlines its seed.
 	//
-	// The capacity covers every segment plus the trailing three: a keyset cursor's two
-	// binds and the limit. Sized up front like Facet's, which assembles the same
-	// four-segment shape.
-	args := make([]any, 0, len(leadArgs)+len(spec.joinArgs)+len(spec.whereArgs)+len(compiled.args)+3)
+	// The capacity covers every segment plus a keyset cursor's two binds. Sized up front
+	// like Facet's, which assembles the same four-segment shape. The limit is written
+	// into the text rather than bound: SQLite plans with a bound LIMIT's value, so binding
+	// one makes a cached statement prepare again on every run.
+	args := make([]any, 0, len(leadArgs)+len(spec.joinArgs)+len(spec.whereArgs)+len(compiled.args)+2)
 	args = append(args, leadArgs...)
 	args = append(args, spec.joinArgs...)
 	where := andWhere(andWhere(spec.where, compiled.where), compiled.entityWhere)
 	args = append(args, spec.whereArgs...)
 	args = append(args, compiled.args...)
+	from := itemJoins
+	if spec.narrow && compiled.where == "" && compiled.entityWhere == "" && userJoin == "" {
+		// The caller filters nothing, so the sort leaves the item joins out: item_file's
+		// join is not provably one row, and SQLite would otherwise probe it for every row.
+		from = " FROM playable_item pi"
+	}
 	if opt.Cursor != "" {
 		ord, pid, ok := opt.Cursor.Decode()
 		if !ok {
@@ -146,19 +163,35 @@ func (s *Store) browseStmt(ctx context.Context, list read.DiscoveryList, opt rea
 	}
 
 	var sb strings.Builder
-	sb.WriteString("SELECT ")
+	if spec.narrow {
+		sb.WriteString("SELECT w.ord, ")
+		sb.WriteString(itemViewCols)
+		sb.WriteString(" FROM (SELECT pi.id, pi.pid, ")
+	} else {
+		sb.WriteString("SELECT ")
+	}
 	sb.WriteString(spec.orderExpr)
-	sb.WriteString(" AS ord, ")
-	sb.WriteString(itemViewCols)
-	sb.WriteString(itemJoins)
+	sb.WriteString(" AS ord")
+	if !spec.narrow {
+		sb.WriteString(", ")
+		sb.WriteString(itemViewCols)
+	}
+	sb.WriteString(from)
 	sb.WriteString(userJoin)
 	sb.WriteString(spec.join)
 	if where != "" {
 		sb.WriteString(" WHERE ")
 		sb.WriteString(where)
 	}
-	fmt.Fprintf(&sb, " ORDER BY ord %s, pi.pid %s LIMIT ?", dir, dir)
-	args = append(args, limit+1) // one extra row signals a further page
+	// One extra row signals a further page.
+	fmt.Fprintf(&sb, " ORDER BY ord %s, pi.pid %s LIMIT %d", dir, dir, limit+1)
+	if spec.narrow {
+		// Every placeholder sits in the subquery, so the args keep their order. Ordering
+		// by the subquery's own columns lets SQLite take its rows in the order it sorted.
+		sb.WriteString(") w JOIN playable_item pi ON pi.id = w.id")
+		sb.WriteString(itemSubJoins)
+		fmt.Fprintf(&sb, " ORDER BY w.ord %s, w.pid %s", dir, dir)
+	}
 	return sb.String(), args, nil
 }
 
@@ -242,13 +275,14 @@ func (s *Store) browseSpecFor(ctx context.Context, list read.DiscoveryList, opt 
 	case read.ListRecentlyAdded:
 		return browseSpec{orderExpr: "pi.created_at", orderInt: true, desc: true}, nil
 	case read.ListNewest:
-		// COALESCE to 0 sorts an undated item last under DESC and keeps the keyset
-		// column non-NULL. Episodes are excluded because ep.year is yearOf(pub_date),
-		// not a release year: every episode of a year would tie here, and
-		// recent-episodes orders the same rows by the full date.
+		// release_year is 0 for an undated item, which sorts it last. Episodes are
+		// excluded because ep.year is yearOf(pub_date), not a release year: every
+		// episode of a year would tie here, and recent-episodes orders the same rows by
+		// the full date. The filter is also what lets the plan use item_release_year,
+		// a partial index over the same rows.
 		return browseSpec{
 			where:     notEpisodes,
-			orderExpr: "COALESCE(" + itemYearExpr + ", 0)",
+			orderExpr: "pi.release_year",
 			orderInt:  true,
 			desc:      true,
 		}, nil
@@ -290,7 +324,7 @@ func (s *Store) browseSpecFor(ctx context.Context, list read.DiscoveryList, opt 
 	case read.ListRandom:
 		// The seed is an int we control, so inlining it as a literal is injection-safe
 		// and lets the identical expression appear in SELECT, ORDER BY, and the keyset.
-		return browseSpec{orderExpr: fmt.Sprintf("wb_shuffle(%d, pi.pid)", opt.Seed), orderInt: true}, nil
+		return browseSpec{orderExpr: fmt.Sprintf("wb_shuffle(%d, pi.pid)", opt.Seed), orderInt: true, narrow: true}, nil
 	case read.ListMostPlayed, read.ListRecentlyPlayed, read.ListStarred, read.ListInProgress:
 		return s.playBrowseSpec(ctx, list, opt.UserPID, op)
 	}
@@ -322,7 +356,10 @@ func (s *Store) playBrowseSpec(ctx context.Context, list read.DiscoveryList, use
 	}
 	switch list {
 	case read.ListMostPlayed:
+		// Play counts tie by the thousand, and the pid that breaks a tie is in no
+		// play_state index, so the ties are sorted as narrow rows.
 		spec.where, spec.orderExpr = "bps.play_count > 0", "bps.play_count"
+		spec.narrow = true
 	case read.ListRecentlyPlayed:
 		spec.where, spec.orderExpr = "bps.last_played_at IS NOT NULL", "bps.last_played_at"
 	case read.ListStarred:

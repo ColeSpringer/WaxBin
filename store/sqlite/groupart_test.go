@@ -254,7 +254,7 @@ func TestGroupArtMarkerClearsOnAFrontClear(t *testing.T) {
 
 	setRGArt(t, st, pid("FrontCleared"), model.ArtRoleFront, "front")
 	mark()
-	if err := st.SetEntityArt(ctx, model.ArtReleaseGroup, pid("FrontCleared"), model.ArtRoleFront, nil, "",
+	if _, err := st.SetEntityArt(ctx, model.ArtReleaseGroup, pid("FrontCleared"), model.ArtRoleFront, nil, "",
 		model.Attribution{Source: model.SourceUser}, model.LockUnchanged, false); err != nil {
 		t.Fatalf("clear front: %v", err)
 	}
@@ -265,7 +265,7 @@ func TestGroupArtMarkerClearsOnAFrontClear(t *testing.T) {
 
 	setRGArt(t, st, pid("FrontCleared"), model.ArtRoleFront, "front-again")
 	mark()
-	if err := st.SetEntityArt(ctx, model.ArtReleaseGroup, pid("FrontCleared"), model.ArtRoleFront, nil, "",
+	if _, err := st.SetEntityArt(ctx, model.ArtReleaseGroup, pid("FrontCleared"), model.ArtRoleFront, nil, "",
 		model.Attribution{Source: model.SourceUser}, model.LockOn, false); err != nil {
 		t.Fatalf("clear and lock front: %v", err)
 	}

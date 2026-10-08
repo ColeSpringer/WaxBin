@@ -591,6 +591,7 @@ func driftParts(d model.DerivedDrift) []string {
 	addPart(d.BookDurationDrift, "book-duration")
 	addPart(d.BookISBNKeyDrift, "book-isbn-key")
 	addPart(d.AlbumYearDrift, "album-year")
+	addPart(d.ReleaseYearDrift, "release-year")
 	return p
 }
 

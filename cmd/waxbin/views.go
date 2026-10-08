@@ -591,6 +591,7 @@ type derivedView struct {
 	BookDurationDrift       int `json:"bookDurationDrift"`
 	BookISBNKeyDrift        int `json:"bookIsbnKeyDrift"`
 	AlbumYearDrift          int `json:"albumYearDrift"`
+	ReleaseYearDrift        int `json:"releaseYearDrift"`
 	PlaylistPositionDrift   int `json:"playlistPositionDrift"`
 	OrphanArtSources        int `json:"orphanArtSources"`
 	OrphanThumbnails        int `json:"orphanThumbnails"`
@@ -613,8 +614,9 @@ func toDerivedView(r *sqlite.DerivedReport) derivedView {
 		ArtistRollupDrift: r.ArtistRollupDrift, GenreRollupDrift: r.GenreRollupDrift,
 		ReleaseGroupRollupDrift: r.ReleaseGroupRollupDrift, SortKeyDrift: r.SortKeyDrift,
 		BookDurationDrift: r.BookDurationDrift, BookISBNKeyDrift: r.BookISBNKeyDrift,
-		AlbumYearDrift: r.AlbumYearDrift, PlaylistPositionDrift: r.PlaylistPositionDrift,
-		OrphanArtSources: r.OrphanArtSources, OrphanThumbnails: r.OrphanThumbnails,
+		AlbumYearDrift: r.AlbumYearDrift, ReleaseYearDrift: r.ReleaseYearDrift,
+		PlaylistPositionDrift: r.PlaylistPositionDrift, OrphanArtSources: r.OrphanArtSources,
+		OrphanThumbnails:            r.OrphanThumbnails,
 		OrphanReservedTagProvenance: r.OrphanReservedTagProvenance,
 		StrandedTagKeyRows:          r.StrandedTagKeyRows,
 		Consistent:                  r.Consistent(),

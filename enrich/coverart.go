@@ -71,10 +71,15 @@ type fetched struct {
 	notModified      bool
 }
 
-// frontCover fetches one entity's front cover, conditionally when ifNoneMatch is set,
-// or reports CodeNotFound when it has none. rung is the archive path segment:
-// "release-group" for the group's cover, or "release" for the specific pressing's own.
-// The caller decodes and hashes the bytes.
+// frontCover fetches one entity's front cover at the archive's 1200 pixel rung, or the
+// original when the archive holds no thumbnail for it, conditionally when ifNoneMatch is
+// set, or reports CodeNotFound when the entity has no front at all. rung is the archive
+// path segment: "release-group" for the group's cover, or "release" for the specific
+// pressing's own. The caller decodes and hashes the bytes.
+//
+// The 1200 rung is the largest the archive renders and a fraction of an original's
+// bytes. A 404 there does not say whether the entity
+// has no cover or no thumbnail, so an entity with no cover costs two requests.
 //
 // The request URL is the citation, not the archive.org object netsafe followed the
 // redirect to: it is stable and names the entity, while the redirect target is an
@@ -84,7 +89,15 @@ func (c *coverArt) frontCover(ctx context.Context, rung, mbid, ifNoneMatch strin
 	if mbid == "" {
 		return fetched{}, waxerr.New(waxerr.CodeNotFound, "enrich.coverart", "no mbid")
 	}
-	reqURL := c.baseURL + "/" + rung + "/" + url.PathEscape(mbid) + "/front"
+	base := c.baseURL + "/" + rung + "/" + url.PathEscape(mbid)
+	f, err := c.fetchFront(ctx, base+"/front-1200", ifNoneMatch)
+	if waxerr.Is(err, waxerr.CodeNotFound) {
+		f, err = c.fetchFront(ctx, base+"/front", ifNoneMatch)
+	}
+	return f, err
+}
+
+func (c *coverArt) fetchFront(ctx context.Context, reqURL, ifNoneMatch string) (fetched, error) {
 	resp, err := c.client.Do(ctx, netsafe.Request{
 		URL:         reqURL,
 		AcceptMIME:  coverMIME,
@@ -199,6 +212,13 @@ func (p *caaProvider) Enrich(ctx context.Context, req Request) (*Candidate, erro
 		return nil, nil
 	}
 	data, srcURL := f.data, f.reqURL
+	// The catalog bounds what it stores (art.MaxSourceDim), so the bytes are bounded here
+	// first and the record below names the hash the catalog will hold, which is what the
+	// comparisons against GroupFrontHash rest on. A picture that will not decode goes
+	// over as it is, the way an exotic image does.
+	if out, _, err := art.Bound(f.data); err == nil {
+		data = out
+	}
 	// gatherArt stamps Source and Provider on the winner; the URL is the provider's
 	// to report, since only it knows where it fetched.
 	// An ISOBMFF cover (AVIF/HEIC) has no pure-Go decoder, so it describes with a

@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/colespringer/waxbin"
+	"github.com/colespringer/waxbin/art"
 	"github.com/colespringer/waxbin/internal/testaudio"
 	"github.com/colespringer/waxbin/meta"
 	"github.com/colespringer/waxbin/model"
@@ -497,4 +498,105 @@ func TestWriteBackPaysBothSpellingsOfAColumn(t *testing.T) {
 			t.Errorf("owed after the credit write-back = %v, want none", got)
 		}
 	})
+}
+
+// bigCoverPNG is a textured picture over art.MaxSourceDim, distinct per seed.
+func bigCoverPNG(t *testing.T, seed uint32) []byte {
+	t.Helper()
+	w, h := art.MaxSourceDim+200, (art.MaxSourceDim+200)/2
+	img := image.NewRGBA(image.Rect(0, 0, w, h))
+	for y := range h {
+		for x := range w {
+			seed ^= seed << 13
+			seed ^= seed >> 17
+			seed ^= seed << 5
+			i := img.PixOffset(x, y)
+			img.Pix[i] = uint8(x*255/w) + uint8(seed&7)
+			img.Pix[i+1] = uint8(y*255/h) + uint8((seed>>8)&7)
+			img.Pix[i+2] = 64 + uint8((seed>>16)&7)
+			img.Pix[i+3] = 255
+		}
+	}
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatalf("png: %v", err)
+	}
+	return buf.Bytes()
+}
+
+// TestArtWriteBackEmbedsTheBoundedCover: the write-back embeds the cover the catalog
+// holds, which for an oversized picture is the scaled copy, so the file and the catalog
+// agree byte for byte and the owed write is paid.
+func TestArtWriteBackEmbedsTheBoundedCover(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	lib, root, one, _ := twoMemberAlbum(t, ctx, nil)
+	if err := lib.SetItemArt(ctx, one, "", bigCoverPNG(t, 1), waxbin.ArtEditOptions{WriteBack: true}); err != nil {
+		t.Fatalf("set with write-back: %v", err)
+	}
+	blob, err := lib.ResolveArt(ctx, model.EntityRef{Type: model.ArtTrack, PID: one}, model.ArtRoleFront, 0)
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if _, w, _, err := art.Probe(blob.Bytes); err != nil || w != art.MaxSourceDim {
+		t.Fatalf("the catalog holds a cover %d wide (err %v), want %d", w, err, art.MaxSourceDim)
+	}
+	fm, err := meta.NewReader().Read(ctx, filepath.Join(root, "One.mp3"))
+	if err != nil {
+		t.Fatalf("re-read the file: %v", err)
+	}
+	if fm.CoverArt == nil || !bytes.Equal(fm.CoverArt.Data, blob.Bytes) {
+		t.Errorf("the file embeds %d bytes, want the catalog's %d-byte cover", len(fm.CoverArt.Data), len(blob.Bytes))
+	}
+	if got := owedOn(t, ctx, lib, one); len(got) != 0 {
+		t.Errorf("owed after the write-back = %v, want none", got)
+	}
+}
+
+// TestOwedArtSettlesWhenTheFileCarriesAnOversizedCover: a locked, catalog-only cover is
+// owed until the file carries it. The file may come to carry the very original the
+// person chose, which the catalog scaled, or the catalog's own bytes; a scan settles the
+// debt either way.
+func TestOwedArtSettlesWhenTheFileCarriesAnOversizedCover(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	lib, root, one, _ := twoMemberAlbum(t, ctx, nil)
+	original := bigCoverPNG(t, 7)
+	if err := lib.SetItemArt(ctx, one, "", original, waxbin.ArtEditOptions{Lock: model.LockOn}); err != nil {
+		t.Fatalf("set a locked cover: %v", err)
+	}
+	if got := owedOn(t, ctx, lib, one); !slices.Equal(got, []string{"art"}) {
+		t.Fatalf("owed after a catalog-only set = %v, want [art]", got)
+	}
+	// Another tool embeds the original the person chose.
+	if _, err := meta.NewWriter().ApplyPicture(ctx, filepath.Join(root, "One.mp3"), meta.PictureEdit{Data: original}); err != nil {
+		t.Fatalf("embed the original: %v", err)
+	}
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if got := owedOn(t, ctx, lib, one); len(got) != 0 {
+		t.Fatalf("owed once the file carries the original = %v, want none", got)
+	}
+
+	// Another locked cover, and this time the file gets the catalog's own bytes.
+	if err := lib.SetItemArt(ctx, one, "", bigCoverPNG(t, 9), waxbin.ArtEditOptions{Lock: model.LockOn, Force: true}); err != nil {
+		t.Fatalf("set another locked cover: %v", err)
+	}
+	if got := owedOn(t, ctx, lib, one); !slices.Equal(got, []string{"art"}) {
+		t.Fatalf("owed after the second set = %v, want [art]", got)
+	}
+	blob, err := lib.ResolveArt(ctx, model.EntityRef{Type: model.ArtTrack, PID: one}, model.ArtRoleFront, 0)
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if _, err := meta.NewWriter().ApplyPicture(ctx, filepath.Join(root, "One.mp3"), meta.PictureEdit{Data: blob.Bytes}); err != nil {
+		t.Fatalf("embed the catalog's bytes: %v", err)
+	}
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if got := owedOn(t, ctx, lib, one); len(got) != 0 {
+		t.Errorf("owed once the file carries the catalog's bytes = %v, want none", got)
+	}
 }

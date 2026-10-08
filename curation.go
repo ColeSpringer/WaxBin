@@ -106,14 +106,15 @@ func (l *Library) SetItemArt(ctx context.Context, itemPID model.PID, role model.
 		return waxerr.New(waxerr.CodeInvalid, "waxbin.SetItemArt",
 			"write-back embeds only the front cover; set role "+string(role)+" without --write-back")
 	}
-	if err := l.store.SetItemArt(ctx, itemPID, role, raw, art.NormalizeFormat(opts.Format),
-		opts.Attribution(), opts.Lock, opts.Force); err != nil {
+	stored, err := l.store.SetItemArt(ctx, itemPID, role, raw, art.NormalizeFormat(opts.Format),
+		opts.Attribution(), opts.Lock, opts.Force)
+	if err != nil {
 		return err
 	}
 	if !opts.WriteBack {
 		return nil
 	}
-	return l.writeBackItemArt(ctx, itemPID, raw)
+	return l.writeBackItemArt(ctx, itemPID, stored)
 }
 
 // SetEntityArt sets a durable image on a non-item entity (album, artist, release
@@ -146,14 +147,15 @@ func (l *Library) SetEntityArt(ctx context.Context, entityType model.ArtEntity, 
 		return waxerr.New(waxerr.CodeInvalid, "waxbin.SetEntityArt",
 			"write-back embeds only the front cover; set role "+string(role)+" without --write-back")
 	}
-	if err := l.store.SetEntityArt(ctx, entityType, entityPID, role, raw, art.NormalizeFormat(opts.Format),
-		opts.Attribution(), opts.Lock, opts.Force); err != nil {
+	stored, err := l.store.SetEntityArt(ctx, entityType, entityPID, role, raw, art.NormalizeFormat(opts.Format),
+		opts.Attribution(), opts.Lock, opts.Force)
+	if err != nil {
 		return err
 	}
-	if !opts.WriteBack {
+	if !opts.WriteBack || entityType != model.ArtAlbum {
 		return nil
 	}
-	return l.writeBackEntityArt(ctx, entityType, entityPID, raw)
+	return l.writeBackEntityArt(ctx, entityType, entityPID, stored)
 }
 
 // ArtLocked reports whether an entity's slot in one role is held against an automatic
@@ -180,11 +182,12 @@ func (l *Library) SetArtLock(ctx context.Context, entityType model.ArtEntity, en
 	return l.store.SetArtLock(ctx, entityType, entityPID, role, lock)
 }
 
-// writeBackItemArt embeds (or clears) a committed item cover into the item's backing
-// file. It runs after the catalog edit committed, so a refusal or failure is reported as
-// a *WriteBackError rather than a hard error.
-func (l *Library) writeBackItemArt(ctx context.Context, itemPID model.PID, raw []byte) error {
-	edits := artEditDesc(raw)
+// writeBackItemArt embeds (or clears) the cover the catalog now holds for an item, the
+// bytes its set handed back, into its backing file. It runs after the catalog edit
+// committed, so a refusal or failure is reported as a *WriteBackError rather than a hard
+// error.
+func (l *Library) writeBackItemArt(ctx context.Context, itemPID model.PID, cover []byte) error {
+	edits := artEditDesc(cover)
 	// Embed into every backing file, not just the primary part: a multi-file audiobook
 	// keeps the same cover in each part by convention, so writing only the primary would
 	// leave the other parts showing a stale cover to an external player. A track or a
@@ -197,24 +200,21 @@ func (l *Library) writeBackItemArt(ctx context.Context, itemPID model.PID, raw [
 		return (&WriteBackError{ItemPID: itemPID, Edits: edits}).noFiles()
 	}
 	return l.writeBackPicture(ctx, "waxbin.SetItemArt", itemPID, edits, files,
-		meta.PictureEdit{Clear: len(raw) == 0, Data: raw}, model.OwedArt)
+		meta.PictureEdit{Clear: len(cover) == 0, Data: cover}, model.OwedArt)
 }
 
-// writeBackEntityArt fans a committed album cover across every member track's file. Only
-// album covers fan out to disk (each album track embeds the cover); an artist, release
+// writeBackEntityArt fans a committed album cover, the bytes its set handed back, across
+// every member track's file. SetEntityArt calls it for an album alone: an artist, release
 // group, genre, podcast, or playlist cover stays durable in the catalog with no on-disk
-// target, so write-back for those is a no-op.
-func (l *Library) writeBackEntityArt(ctx context.Context, entityType model.ArtEntity, entityPID model.PID, raw []byte) error {
-	if entityType != model.ArtAlbum {
-		return nil
-	}
-	edits := artEditDesc(raw)
+// target.
+func (l *Library) writeBackEntityArt(ctx context.Context, entityType model.ArtEntity, entityPID model.PID, cover []byte) error {
+	edits := artEditDesc(cover)
 	files, err := l.store.EntityMemberFiles(ctx, model.MergeAlbum, entityPID)
 	if err != nil {
 		return writeBackSetupFailure(entityPID, edits, err)
 	}
 	return l.writeBackPicture(ctx, "waxbin.SetEntityArt", entityPID, edits, files,
-		meta.PictureEdit{Clear: len(raw) == 0, Data: raw}, model.OwedAlbumArt)
+		meta.PictureEdit{Clear: len(cover) == 0, Data: cover}, model.OwedAlbumArt)
 }
 
 // writeBackPicture applies a cover embed/clear across files through the shared

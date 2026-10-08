@@ -519,7 +519,7 @@ func TestAlbumArtDoesNotOverwriteACuratedCover(t *testing.T) {
 
 	editionTrack(t, st, lib.ID, "ess-a", "Curated", 1, model.Track{Media: "CD"})
 	pid := model.PID(scalarQueryStr(t, db, "SELECT pid FROM album WHERE title='Curated'"))
-	if err := st.SetEntityArt(ctx, model.ArtAlbum, pid, model.ArtRoleFront, pngFixture(), "", model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
+	if _, err := st.SetEntityArt(ctx, model.ArtAlbum, pid, model.ArtRoleFront, pngFixture(), "", model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("SetEntityArt: %v", err)
 	}
 	before := scalarQueryStr(t, db, `SELECT am.source_hash FROM art_map am
@@ -817,7 +817,7 @@ func TestUndoKeepsACuratedCover(t *testing.T) {
 	id := albumIDByTitle(t, db, "Curated")
 	pid := model.PID(scalarQueryStr(t, db, "SELECT pid FROM album WHERE title='Curated'"))
 	setEntityMBID(t, st, model.MergeAlbum, string(pid), relTestOneMBID, false)
-	if err := st.SetEntityArt(ctx, model.ArtAlbum, pid, model.ArtRoleFront, pngFixture(), "",
+	if _, err := st.SetEntityArt(ctx, model.ArtAlbum, pid, model.ArtRoleFront, pngFixture(), "",
 		model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("SetEntityArt: %v", err)
 	}

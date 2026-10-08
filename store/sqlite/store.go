@@ -56,14 +56,17 @@ type OpenOptions struct {
 // Store is the SQLite-backed catalog. It is safe for concurrent use: writes go
 // through the single coordinated write connection; reads use a connection pool.
 type Store struct {
-	path     string
-	opt      OpenOptions // normalized open options, retained so Reopen rebuilds the same DSNs
-	read     *sql.DB     // read pool (reopened in place by Reopen)
-	write    *sql.DB     // single write connection (nil when read-only)
-	wmu      sync.Mutex  // serializes write transactions; also guards closed
-	closed   bool        // guarded by wmu
-	lock     *writeLock  // held advisory lock (nil when read-only)
-	readOnly bool
+	path   string
+	opt    OpenOptions // normalized open options, retained so Reopen rebuilds the same DSNs
+	read   *sql.DB     // read pool (reopened in place by Reopen)
+	write  *sql.DB     // single write connection (nil when read-only)
+	wmu    sync.Mutex  // serializes write transactions; also guards closed
+	closed bool        // guarded by wmu
+	// suspended mirrors closed for the work a method does ahead of its transaction, which
+	// runs off wmu.
+	suspended atomic.Bool
+	lock      *writeLock // held advisory lock (nil when read-only)
+	readOnly  bool
 	// allowStale warns instead of refusing on a baseline mismatch; read-only opens
 	// only (migrate never consults it).
 	allowStale bool
@@ -72,6 +75,10 @@ type Store struct {
 
 	cipher      model.SecretCipher // seals/opens secret-table values (nil = plaintext)
 	cipherKeyID string             // key/epoch label stamped into a sealed value
+
+	rstmts stmtCache // prepared hot reads on the read pool
+
+	examined examinedMem // the oversized pictures examined lately, see art.go
 
 	thumbMem    *thumbCache  // in-process cache of generated thumbnails (see art.go)
 	thumbFail   *thumbCache  // in-process record of sources that failed to generate
@@ -265,6 +272,7 @@ func (s *Store) teardown(closeSubs bool) error {
 		return nil
 	}
 	s.closed = true
+	s.suspended.Store(true)
 	if s.write != nil {
 		if !closeSubs && s.mark == nil {
 			s.mark = s.markLocked()
@@ -346,8 +354,10 @@ func (s *Store) Reopen(ctx context.Context) (ReopenResult, error) {
 		return ReopenResult{}, nil
 	}
 	s.lock, s.write, s.read = lock, wdb, rdb
+	s.rstmts.swap(rdb)
 	replaced := s.catchUpLocked(ctx)
 	s.closed = false
+	s.suspended.Store(false)
 	s.wmu.Unlock()
 
 	// The store is open again; run the same post-open reconciliation as Open. On any
@@ -457,6 +467,18 @@ func (s *Store) OwnerInfo() (OwnerInfo, error) {
 // writeTx runs fn inside a single serialized write transaction. It is the only
 // path that mutates the database (the write-coordinator). fn must not retain the
 // *sql.Tx beyond the call.
+// writable is writeTx's refusal, for the work a method does ahead of its transaction, so
+// a read-only or closed store answers a caller the same way whatever that work was.
+func (s *Store) writable() error {
+	if s.readOnly {
+		return waxerr.New(waxerr.CodeUnsupported, "store.writeTx", "library opened read-only")
+	}
+	if s.suspended.Load() {
+		return waxerr.New(waxerr.CodeUnsupported, "store.writeTx", "store is closed")
+	}
+	return nil
+}
+
 func (s *Store) writeTx(ctx context.Context, fn func(*sql.Tx) error) error {
 	if s.readOnly || s.write == nil {
 		return waxerr.New(waxerr.CodeUnsupported, "store.writeTx", "library opened read-only")

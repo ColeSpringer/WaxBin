@@ -21,8 +21,9 @@ const (
 
 // itemYearExpr is an item's effective release year: a track's, else a book's, else an
 // episode's (derived from its pub date). Shared by the year field, itemViewCols, and
-// the newest/by-year specs so they cannot disagree. The year facet deliberately does
-// not use it; see GroupYear.
+// the by-year spec so they cannot disagree; newest orders by playable_item.release_year,
+// the same year without the episode's, which db verify checks. The year facet
+// deliberately does not use it; see GroupYear.
 const itemYearExpr = "COALESCE(t.year, bk.year, ep.year)"
 
 // itemArtSlotExpr selects the art_map entity_type slot an item's own art lives

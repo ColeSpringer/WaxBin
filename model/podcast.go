@@ -100,19 +100,20 @@ type Episode struct {
 	Downloaded  bool
 	FilePID     PID
 	DisplayPath string
-	CreatedAt   int64
-	UpdatedAt   int64
+	// HasTranscript reports whether a transcript of the episode is stored.
+	HasTranscript bool
+	CreatedAt     int64
+	UpdatedAt     int64
 }
 
-// EpisodeDetail is the full read shape for one episode: the episode plus its
-// resolved play state, any stored chapters, and its Podcasting 2.0 extras.
-// Persons and Soundbites are detail-only so list reads stay one query.
+// EpisodeDetail is the full read shape for one episode: the episode plus any stored
+// chapters and its Podcasting 2.0 extras. Persons and Soundbites are detail-only so
+// list reads stay one query.
 type EpisodeDetail struct {
-	Episode       *Episode
-	HasTranscript bool
-	Chapters      []Chapter
-	Persons       []FeedPerson
-	Soundbites    []FeedSoundbite
+	Episode    *Episode
+	Chapters   []Chapter
+	Persons    []FeedPerson
+	Soundbites []FeedSoundbite
 }
 
 // FeedPerson is one <podcast:person> credit, at the channel (show) or item

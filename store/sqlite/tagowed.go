@@ -172,7 +172,7 @@ type scanSettle struct {
 	bookRederived       bool                // upsertBook rewrote the book's unlocked fields
 	preserveLocks       bool                // a locked field kept its catalog value
 	derived             []string            // fields the file's tags do not state (PutScannedTrackInput.Derived)
-	cover               *model.ArtImage     // the scanned cover; the file's own when Source is tag
+	cover               examinedArt         // the scanned cover; the file's own when Source is tag
 	acquisitionRecorded bool                // the put recorded an acquisition from the tags
 	fileTags            map[string][]string // the file's custom tags
 	tagsReplaced        []string            // the custom tag keys the put took from this file
@@ -378,9 +378,12 @@ func bookFileAgrees(col string, file, stored model.Book) bool {
 
 // owedCoverPaidTx reports whether a put paid an owed cover: on every file once the item's
 // front came from disk (a tag or a sidecar, so the curated cover is gone), or on this
-// one when its own embedded picture is the front the catalog holds. A cleared front and
-// a file with no embedded picture agree too.
-func owedCoverPaidTx(ctx context.Context, tx *sql.Tx, itemID int64, scanned *model.ArtImage) (all, here bool, err error) {
+// one when its own embedded picture is the front the catalog holds. scanned is the
+// picture as the catalog keeps it, examined ahead of the write, so an oversized picture
+// the catalog scaled compares by its stored hash whether the file carries the stored
+// bytes or the arrival they were scaled from. A cleared front and a file with no
+// embedded picture agree too.
+func owedCoverPaidTx(ctx context.Context, tx *sql.Tx, itemID int64, scanned examinedArt) (all, here bool, err error) {
 	var hash, source string
 	err = tx.QueryRowContext(ctx, `SELECT source_hash, source FROM art_map
 		WHERE entity_type = 'track' AND entity_id = ? AND role = 'front'`, itemID).Scan(&hash, &source)
@@ -391,8 +394,8 @@ func owedCoverPaidTx(ctx context.Context, tx *sql.Tx, itemID int64, scanned *mod
 		return true, false, nil
 	}
 	embedded := ""
-	if scanned != nil && scanned.Source == model.SourceTag {
-		embedded = storableArt(scanned).Hash
+	if scanned.present() && scanned.img.Source == model.SourceTag {
+		embedded = scanned.img.Hash
 	}
 	return false, embedded == hash, nil
 }

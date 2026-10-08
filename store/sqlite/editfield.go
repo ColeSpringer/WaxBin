@@ -589,6 +589,9 @@ func editTrackFieldsTx(ctx context.Context, tx *sql.Tx, log logger, itemID int64
 		if err := upsertTrack(ctx, tx, itemID, tr); err != nil {
 			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
+		if err := setReleaseYearTx(ctx, tx, itemID, tr.Year); err != nil {
+			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
 	}
 	if editedYear {
 		if err := affected.collectAlbumOf(ctx, tx, itemID); err != nil {
@@ -684,6 +687,9 @@ func editBookFieldsTx(ctx context.Context, tx *sql.Tx, itemID int64, fields []st
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		if err := upsertBook(ctx, tx, itemID, b, affected); err != nil {
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		if err := setReleaseYearTx(ctx, tx, itemID, b.Year); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		if err := affected.collect(ctx, tx, itemID); err != nil {

@@ -1514,7 +1514,7 @@ func TestRestoreUnderMaintenanceServesTheRestoredCatalog(t *testing.T) {
 		t.Fatalf("b's podcast library row = %d, want 3", id)
 	}
 	backup := filepath.Join(t.TempDir(), "backup.db")
-	if err := libB.Backup(ctx, backup, false); err != nil {
+	if err := libB.Backup(ctx, backup, port.BackupOptions{}); err != nil {
 		t.Fatalf("backup b: %v", err)
 	}
 	if err := libB.Close(); err != nil {

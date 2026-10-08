@@ -762,7 +762,7 @@ func TestApplyReleaseGroupEnrichmentAuxRoles(t *testing.T) {
 	rgPID := scalarQueryStr(t, db, "SELECT pid FROM release_group")
 
 	// A hand-set back cover already in place.
-	if err := st.SetEntityArt(ctx, model.ArtReleaseGroup, model.PID(rgPID), model.ArtRoleBack,
+	if _, err := st.SetEntityArt(ctx, model.ArtReleaseGroup, model.PID(rgPID), model.ArtRoleBack,
 		[]byte("user-back"), "png", model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("seed user back: %v", err)
 	}
@@ -918,7 +918,7 @@ func auxRGMBID(n int) string {
 // `art set` does.
 func setRGArt(t *testing.T, st *sqlite.Store, pid model.PID, role model.ArtRole, data string) {
 	t.Helper()
-	err := st.SetEntityArt(context.Background(), model.ArtReleaseGroup, pid, role,
+	_, err := st.SetEntityArt(context.Background(), model.ArtReleaseGroup, pid, role,
 		[]byte(data), "png", model.Attribution{Source: model.SourceUser}, model.LockOf(false), false)
 	if err != nil {
 		t.Fatalf("set %s art: %v", role, err)
@@ -1170,7 +1170,7 @@ func TestGroupArtMarkerClearsOnAuxClear(t *testing.T) {
 
 	setRGArt(t, st, pid, model.ArtRoleBack, "back-image")
 	markGroupArt(t, st, id, pid)
-	if err := st.SetEntityArt(ctx, model.ArtReleaseGroup, pid, model.ArtRoleBack, nil, "",
+	if _, err := st.SetEntityArt(ctx, model.ArtReleaseGroup, pid, model.ArtRoleBack, nil, "",
 		model.Attribution{Source: model.SourceUser}, model.LockOff, false); err != nil {
 		t.Fatalf("clear back: %v", err)
 	}
@@ -1180,7 +1180,7 @@ func TestGroupArtMarkerClearsOnAuxClear(t *testing.T) {
 
 	setRGArt(t, st, pid, model.ArtRoleDisc, "disc-image")
 	markGroupArt(t, st, id, pid)
-	if err := st.SetEntityArt(ctx, model.ArtReleaseGroup, pid, model.ArtRoleDisc, nil, "",
+	if _, err := st.SetEntityArt(ctx, model.ArtReleaseGroup, pid, model.ArtRoleDisc, nil, "",
 		model.Attribution{Source: model.SourceUser}, model.LockOn, false); err != nil {
 		t.Fatalf("clear and lock disc: %v", err)
 	}
@@ -1192,7 +1192,7 @@ func TestGroupArtMarkerClearsOnAuxClear(t *testing.T) {
 	// drops the marker the way --no-lock does.
 	setRGArt(t, st, pid, model.ArtRoleBooklet, "booklet-image")
 	markGroupArt(t, st, id, pid)
-	if err := st.SetEntityArt(ctx, model.ArtReleaseGroup, pid, model.ArtRoleBooklet, nil, "",
+	if _, err := st.SetEntityArt(ctx, model.ArtReleaseGroup, pid, model.ArtRoleBooklet, nil, "",
 		model.Attribution{Source: model.SourceUser}, model.LockUnchanged, false); err != nil {
 		t.Fatalf("clear booklet leaving its lock alone: %v", err)
 	}
@@ -1208,7 +1208,7 @@ func TestGroupArtMarkerClearsOnAuxClear(t *testing.T) {
 		t.Fatalf("lock whole art: %v", err)
 	}
 	markGroupArt(t, st, id, pid)
-	if err := st.SetEntityArt(ctx, model.ArtReleaseGroup, pid, model.ArtRoleBackground, nil, "",
+	if _, err := st.SetEntityArt(ctx, model.ArtReleaseGroup, pid, model.ArtRoleBackground, nil, "",
 		model.Attribution{Source: model.SourceUser}, model.LockUnchanged, false); err != nil {
 		t.Fatalf("clear background under the whole lock: %v", err)
 	}
@@ -1220,14 +1220,14 @@ func TestGroupArtMarkerClearsOnAuxClear(t *testing.T) {
 	// every role not held by its own lock. Both sets need force, since the whole lock
 	// taken just above is also what refuses them.
 	markGroupArt(t, st, id, pid)
-	if err := st.SetEntityArt(ctx, model.ArtReleaseGroup, pid, model.ArtRoleFront, []byte("kept-front"), "png",
+	if _, err := st.SetEntityArt(ctx, model.ArtReleaseGroup, pid, model.ArtRoleFront, []byte("kept-front"), "png",
 		model.Attribution{Source: model.SourceUser}, model.LockUnchanged, true); err != nil {
 		t.Fatalf("set front leaving the lock alone: %v", err)
 	}
 	if n := markers(); n != 1 {
 		t.Errorf("markers after a front set that left the lock standing = %d, want it kept", n)
 	}
-	if err := st.SetEntityArt(ctx, model.ArtReleaseGroup, pid, model.ArtRoleFront, []byte("freed-front"), "png",
+	if _, err := st.SetEntityArt(ctx, model.ArtReleaseGroup, pid, model.ArtRoleFront, []byte("freed-front"), "png",
 		model.Attribution{Source: model.SourceUser}, model.LockOff, true); err != nil {
 		t.Fatalf("set front with --no-lock: %v", err)
 	}
@@ -2737,12 +2737,12 @@ func TestAlbumArtMarkerLifecycle(t *testing.T) {
 	editionTrack(t, st, lib.ID, "ess-clear", "Cleared", 1, model.Track{Barcode: "0724382955528"})
 	clearID := albumIDByTitle(t, db, "Cleared")
 	clearPID := model.PID(scalarQueryStr(t, db, "SELECT pid FROM album WHERE title='Cleared'"))
-	if err := st.SetEntityArt(ctx, model.ArtAlbum, clearPID, model.ArtRoleFront, pngFixture(), "",
+	if _, err := st.SetEntityArt(ctx, model.ArtAlbum, clearPID, model.ArtRoleFront, pngFixture(), "",
 		model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("set album art: %v", err)
 	}
 	mark("Cleared")
-	if err := st.SetEntityArt(ctx, model.ArtAlbum, clearPID, model.ArtRoleFront, nil, "",
+	if _, err := st.SetEntityArt(ctx, model.ArtAlbum, clearPID, model.ArtRoleFront, nil, "",
 		model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("clear album art: %v", err)
 	}
@@ -2773,7 +2773,7 @@ func TestAlbumArtMarkerLifecycle(t *testing.T) {
 	editionTrackWithCover(t, st, lib.ID, "ess-memb", "Member", 1,
 		model.Track{Barcode: "0724383024124"}, pngFixture())
 	membID := mark("Member")
-	if err := st.SetEntityArt(ctx, model.ArtTrack, trackFrontPID("Member"), model.ArtRoleFront, nil, "",
+	if _, err := st.SetEntityArt(ctx, model.ArtTrack, trackFrontPID("Member"), model.ArtRoleFront, nil, "",
 		model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("clear track art through SetEntityArt: %v", err)
 	}
@@ -2787,7 +2787,7 @@ func TestAlbumArtMarkerLifecycle(t *testing.T) {
 	editionTrackWithCover(t, st, lib.ID, "ess-item", "ItemSurface", 1,
 		model.Track{Barcode: "0724383024148"}, pngFixture())
 	itemID := mark("ItemSurface")
-	if err := st.SetItemArt(ctx, trackFrontPID("ItemSurface"), model.ArtRoleFront, nil, "",
+	if _, err := st.SetItemArt(ctx, trackFrontPID("ItemSurface"), model.ArtRoleFront, nil, "",
 		model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("clear track art through SetItemArt: %v", err)
 	}
@@ -3055,7 +3055,7 @@ func TestAlbumsNeedingArtCarriesTheGroupFrontHash(t *testing.T) {
 		t.Errorf("with an enrichment front: hash %q, want group-front", tgt.GroupFrontHash)
 	}
 
-	if err := st.SetEntityArt(ctx, model.ArtReleaseGroup, rgPID, model.ArtRoleFront, pngFixture(), "",
+	if _, err := st.SetEntityArt(ctx, model.ArtReleaseGroup, rgPID, model.ArtRoleFront, pngFixture(), "",
 		model.Attribution{Source: model.SourceUser}, model.LockOff, false); err != nil {
 		t.Fatalf("hand-set the group front: %v", err)
 	}
@@ -3097,7 +3097,7 @@ func TestReleaseGroupsNeedingEnrichmentCarriesTheGroupFrontHash(t *testing.T) {
 		t.Errorf("with an enrichment front: hash %q, want group-front", tgt.GroupFrontHash)
 	}
 
-	if err := st.SetEntityArt(ctx, model.ArtReleaseGroup, rgPID, model.ArtRoleFront, pngFixture(), "",
+	if _, err := st.SetEntityArt(ctx, model.ArtReleaseGroup, rgPID, model.ArtRoleFront, pngFixture(), "",
 		model.Attribution{Source: model.SourceUser}, model.LockOff, false); err != nil {
 		t.Fatalf("hand-set the group front: %v", err)
 	}

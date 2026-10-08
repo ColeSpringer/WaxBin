@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -36,6 +37,46 @@ func TestDBVerifyReportsAndFixesAlbumYearDrift(t *testing.T) {
 	}
 	if n, err := verify(); n != 1 || err == nil {
 		t.Fatalf("db verify = %d drift (err %v), want 1 and a failure", n, err)
+	}
+	if n, err := verify("--fix"); n != 0 || err != nil {
+		t.Fatalf("db verify --fix = %d drift (err %v), want 0 and success", n, err)
+	}
+}
+
+// TestDBVerifyReportsAndFixesReleaseYearDrift: a release year newest orders by that is
+// not the item's year is reported by `db verify`, which fails, and --fix puts it right.
+func TestDBVerifyReportsAndFixesReleaseYearDrift(t *testing.T) {
+	db, root, _ := creditCLIFixture(t)
+	raw, err := sql.Open("sqlite", "file:"+db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = raw.Close() })
+	if _, err := raw.Exec("UPDATE playable_item SET release_year = 1900"); err != nil {
+		t.Fatalf("set the release year by hand: %v", err)
+	}
+	_ = raw.Close()
+
+	verify := func(args ...string) (int, error) {
+		t.Helper()
+		out, err := runCLIJSON(t, db, root, append([]string{"db", "verify"}, args...)...)
+		var env struct {
+			Data struct {
+				ReleaseYearDrift int `json:"releaseYearDrift"`
+			} `json:"data"`
+		}
+		if jerr := json.Unmarshal([]byte(out), &env); jerr != nil {
+			t.Fatalf("db verify %v printed %q: %v", args, out, jerr)
+		}
+		return env.Data.ReleaseYearDrift, err
+	}
+	n, err := verify()
+	if n != 1 || err == nil {
+		t.Fatalf("db verify = %d drift (err %v), want 1 and a failure", n, err)
+	}
+	// A rescan does not rewrite an unchanged book, so --fix is the remedy to name.
+	if !strings.Contains(err.Error(), "--fix") || strings.Contains(err.Error(), "re-scan") {
+		t.Errorf("db verify's verdict = %q, want --fix as the remedy", err)
 	}
 	if n, err := verify("--fix"); n != 0 || err != nil {
 		t.Fatalf("db verify --fix = %d drift (err %v), want 0 and success", n, err)

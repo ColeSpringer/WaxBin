@@ -3,6 +3,8 @@ package sqlite_test
 import (
 	"bytes"
 	"context"
+	"image"
+	"image/png"
 	"testing"
 
 	"github.com/colespringer/waxbin/art"
@@ -87,7 +89,10 @@ func TestSizedResolveSeparatesDistinctRungs(t *testing.T) {
 //
 // The source is deliberately longer than the top rung, so the rung request really
 // resamples. It is a long thin strip rather than a square so the fixture stays cheap:
-// fitDimensions measures the longest side, which is all this turns on.
+// fitDimensions measures the longest side, which is all this turns on. A flat strip is
+// leaner as it arrived than any scaled copy of it, so the bound keeps it over the top
+// rung, which the test checks before relying on it; a source the bound does shrink is
+// TestResolveAtTheTopRungServesABoundedSourceWhole's case.
 func TestResolveAboveTheLadderIsServedAsAsked(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -98,6 +103,9 @@ func TestResolveAboveTheLadderIsServedAsAsked(t *testing.T) {
 	pid := putCoveredTrack(t, st, lib.ID, "/lib/w.flac", "ess-w", "Wide", "W",
 		stamped(t, sizedCoverPNG(t, top+352, 40), model.SourceTag, "", ""))
 	ref := model.EntityRef{Type: model.ArtTrack, PID: pid}
+	if prov, err := st.ArtProvenance(ctx, ref, model.ArtRoleFront); err != nil || prov.Width != top+352 {
+		t.Fatalf("stored source = %+v (err %v), want the lean strip kept %d wide", prov, err, top+352)
+	}
 
 	atTop, err := st.ResolveArt(ctx, ref, model.ArtRoleFront, top)
 	if err != nil {
@@ -123,6 +131,62 @@ func TestResolveAboveTheLadderIsServedAsAsked(t *testing.T) {
 	}
 	if n := scalarInt64(t, roConn(t, dbPath), thumbSizes); n != int64(top) {
 		t.Errorf("cached rungs = %d, want only the top rung %d", n, top)
+	}
+}
+
+// texturedStripPNG is a strip with a photograph's texture, which a scaled copy shrinks.
+func texturedStripPNG(t *testing.T, w, h int) []byte {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, w, h))
+	seed := uint32(1234567)
+	for y := range h {
+		for x := range w {
+			seed ^= seed << 13
+			seed ^= seed >> 17
+			seed ^= seed << 5
+			i := img.PixOffset(x, y)
+			img.Pix[i] = uint8(x*255/w) + uint8(seed&7)
+			img.Pix[i+1] = 80 + uint8((seed>>8)&7)
+			img.Pix[i+2] = 160 + uint8((seed>>16)&7)
+			img.Pix[i+3] = 255
+		}
+	}
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatalf("encode png: %v", err)
+	}
+	return buf.Bytes()
+}
+
+// TestResolveAtTheTopRungServesABoundedSourceWhole: a source the bound scaled sits within
+// art.MaxSourceDim, under the top rung, so the top rung and anything above it serve it
+// whole and generate nothing.
+func TestResolveAtTheTopRungServesABoundedSourceWhole(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	st, dbPath, lib := openStoreAt(t)
+
+	rungs := art.Rungs()
+	top := rungs[len(rungs)-1]
+	if top <= art.MaxSourceDim {
+		t.Fatalf("the top rung %d is within the source bound %d, so this test's premise is gone", top, art.MaxSourceDim)
+	}
+	pid := putCoveredTrack(t, st, lib.ID, "/lib/t.flac", "ess-t", "Textured", "T",
+		stamped(t, texturedStripPNG(t, top+352, 60), model.SourceTag, "", ""))
+	ref := model.EntityRef{Type: model.ArtTrack, PID: pid}
+
+	for _, box := range []int{top, top * 2} {
+		got, err := st.ResolveArt(ctx, ref, model.ArtRoleFront, box)
+		if err != nil {
+			t.Fatalf("resolve at %d: %v", box, err)
+		}
+		if got.Thumbnail || got.Width != art.MaxSourceDim || got.Box != box {
+			t.Errorf("at box %d = %dx%d thumbnail=%v box=%d, want the stored %d-wide source whole at that box",
+				box, got.Width, got.Height, got.Thumbnail, got.Box, art.MaxSourceDim)
+		}
+	}
+	if n := scalarInt64(t, roConn(t, dbPath), "SELECT COUNT(*) FROM thumb_cache"); n != 0 {
+		t.Errorf("cached thumbnails = %d, want none generated", n)
 	}
 }
 

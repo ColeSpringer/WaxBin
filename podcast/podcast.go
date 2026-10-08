@@ -43,6 +43,8 @@ type Store interface {
 	PodcastByPID(ctx context.Context, pid model.PID) (*model.Podcast, error)
 	PodcastForFeed(ctx context.Context, feedURL, key string) (*model.Podcast, error)
 	EpisodesByPodcast(ctx context.Context, pid model.PID, limit int) ([]*model.Episode, error)
+	EpisodesByPIDs(ctx context.Context, pids []model.PID) ([]*model.Episode, error)
+	EpisodeMeta(ctx context.Context, pid model.PID) (*model.Episode, error)
 	EpisodeByPID(ctx context.Context, pid model.PID) (*model.EpisodeDetail, error)
 	DownloadedEpisodes(ctx context.Context, pid model.PID) ([]*model.Episode, error)
 	AttachEpisodeFile(ctx context.Context, in model.AttachEpisodeFileInput) (model.PID, error)
@@ -542,6 +544,12 @@ func (s *Service) Get(ctx context.Context, pid model.PID) (*model.Podcast, error
 // Episodes lists a podcast's episodes, newest first (limit 0 = all).
 func (s *Service) Episodes(ctx context.Context, pid model.PID, limit int) ([]*model.Episode, error) {
 	return s.store.EpisodesByPodcast(ctx, pid, limit)
+}
+
+// EpisodesByPIDs returns the episodes named by pids in request order, each once,
+// leaving out a pid that is no episode.
+func (s *Service) EpisodesByPIDs(ctx context.Context, pids []model.PID) ([]*model.Episode, error) {
+	return s.store.EpisodesByPIDs(ctx, pids)
 }
 
 // Episode returns one episode's detail.

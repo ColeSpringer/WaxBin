@@ -164,7 +164,7 @@ func TestPodcastEndToEnd(t *testing.T) {
 	if !d1.Episode.Downloaded || d1.Episode.State != model.StatePresent {
 		t.Fatalf("ep1 should be present/downloaded after download: %+v", d1.Episode)
 	}
-	if !d1.HasTranscript {
+	if !d1.Episode.HasTranscript {
 		t.Fatal("ep1 should have a stored transcript")
 	}
 

@@ -4047,18 +4047,15 @@ func (l *Library) writeBackAcquisition(ctx context.Context, op string, itemPID m
 	return l.writeBackItemTags(ctx, op, itemPID, edits, []string{model.OwedAcquisition})
 }
 
-// Backup writes a self-contained byte copy of the catalog to dest. The copy
-// contains every table, including the secret table; with redact, secrets are
-// stripped from the copy while the live catalog is untouched. A full backup is
-// the disaster-recovery artifact.
-func (l *Library) Backup(ctx context.Context, dest string, redact bool) error {
+// Backup writes a self-contained byte copy of the catalog to dest. The copy contains
+// every table, the secret table included, less what opts leaves out (secrets for a
+// copy that will leave the host, thumbnails to make it smaller); the live catalog is
+// untouched. A full backup is the disaster-recovery artifact.
+func (l *Library) Backup(ctx context.Context, dest string, opts port.BackupOptions) error {
 	if err := l.store.BackupTo(ctx, dest); err != nil {
 		return err
 	}
-	if redact {
-		return port.RedactBackupFile(ctx, dest)
-	}
-	return nil
+	return port.TrimBackupFile(ctx, dest, opts)
 }
 
 // Export writes a versioned logical JSON export of catalog metadata, critical

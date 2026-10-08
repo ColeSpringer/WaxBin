@@ -551,3 +551,21 @@ func TestThumbFlightReleasesTheKeyOnPanic(t *testing.T) {
 		t.Fatal("a later call for the same rung is waiting on one that panicked")
 	}
 }
+
+// TestImageBytesComeLast: the image tables keep their bytes in the last column, so a read
+// of the small columns behind them (the thumbnail census and the age prune read
+// created_at) stops before a row's overflow pages instead of walking them.
+func TestImageBytesComeLast(t *testing.T) {
+	t.Parallel()
+	st, _ := entityFixture(t)
+	for _, table := range []string{"art_source", "thumb_cache"} {
+		var last string
+		if err := st.read.QueryRowContext(context.Background(),
+			"SELECT name FROM pragma_table_info(?) ORDER BY cid DESC LIMIT 1", table).Scan(&last); err != nil {
+			t.Fatalf("%s columns: %v", table, err)
+		}
+		if last != "data" {
+			t.Errorf("%s ends with %q, want the image bytes (data) last", table, last)
+		}
+	}
+}

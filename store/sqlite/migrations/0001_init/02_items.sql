@@ -7,11 +7,21 @@ CREATE TABLE playable_item (
   title        TEXT    NOT NULL,
   sort_key     TEXT    NOT NULL,
   identity_key TEXT,                     -- entity-identity key (package identity)
+  -- The track's or book's year, 0 when it has none and for an episode, kept here so the
+  -- newest list walks an index; upsertTrack and upsertBook write it beside the year.
+  release_year INTEGER NOT NULL DEFAULT 0,
   created_at   INTEGER NOT NULL,
   updated_at   INTEGER NOT NULL
 );
-CREATE INDEX item_kind ON playable_item(kind);
 CREATE INDEX item_sort ON playable_item(sort_key);
+-- The recently-added and newest orders, the pid tiebreak included, so a page is a walk.
+-- A list scoped to one kind walks the kind-led twin of its order, which a lookup by kind
+-- alone also uses.
+CREATE INDEX item_created ON playable_item(created_at, pid);
+CREATE INDEX item_release_year ON playable_item(release_year, pid) WHERE kind <> 'episode';
+CREATE INDEX item_kind_sort ON playable_item(kind, sort_key);
+CREATE INDEX item_kind_created ON playable_item(kind, created_at, pid);
+CREATE INDEX item_kind_release_year ON playable_item(kind, release_year, pid) WHERE kind <> 'episode';
 -- One logical item per (kind, identity_key); NULL keys are exempt.
 CREATE UNIQUE INDEX item_identity ON playable_item(kind, identity_key)
   WHERE identity_key IS NOT NULL;

@@ -315,33 +315,35 @@ func nonUserChapterExtentsTx(ctx context.Context, tx *sql.Tx, itemID int64) (map
 //
 // format is the caller's own name for the picture, used only when the bytes cannot name
 // themselves (see probeArtImage). It is ignored on a clear.
-func (s *Store) SetItemArt(ctx context.Context, itemPID model.PID, role model.ArtRole, raw []byte, format string, attr model.Attribution, lock model.LockChange, force bool) error {
+func (s *Store) SetItemArt(ctx context.Context, itemPID model.PID, role model.ArtRole, raw []byte, format string, attr model.Attribution, lock model.LockChange, force bool) ([]byte, error) {
 	const op = "store.SetItemArt"
 	if role == "" {
 		role = model.ArtRoleFront
 	}
 	if !role.Valid() {
-		return waxerr.New(waxerr.CodeInvalid, op, "unknown art role: "+string(role))
+		return nil, waxerr.New(waxerr.CodeInvalid, op, "unknown art role: "+string(role))
 	}
 	if err := checkLockChange(lock, op); err != nil {
-		return err
+		return nil, err
 	}
 	// Up front, not left to the inner write: a clear carries no image for the art_map
 	// writer to check, and the attribution still reaches the lock row.
 	attr = attr.OrUser()
 	if err := checkAttribution(attr, attr.ValidForArt, op); err != nil {
-		return err
+		return nil, err
 	}
-	var img *model.ArtImage
+	var pic examinedArt
 	if len(raw) > 0 {
 		i, err := probeArtImage(raw, format, attr)
 		if err != nil {
-			return waxerr.Wrap(waxerr.CodeInvalid, op, err)
+			return nil, waxerr.Wrap(waxerr.CodeInvalid, op, err)
 		}
-		img = i
+		if pic, err = s.examineArt(ctx, i); err != nil {
+			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
 	}
 	lockField := artRoleLockField(role)
-	return s.writeTx(ctx, func(tx *sql.Tx) error {
+	err := s.writeTx(ctx, func(tx *sql.Tx) error {
 		itemID, kind, err := itemIDKindByPIDTx(ctx, tx, itemPID, op)
 		if err != nil {
 			return err
@@ -360,12 +362,12 @@ func (s *Store) SetItemArt(ctx context.Context, itemPID model.PID, role model.Ar
 		}
 		// One path for set and clear: replace this role's mapping (a nil image just
 		// deletes it). A cleared role's orphaned source becomes GC-able.
-		if err := setFrontOwingTx(ctx, tx, "track", itemID, string(role), img, func() error {
+		if err := setFrontOwingTx(ctx, tx, "track", itemID, string(role), pic, func() error {
 			return noteOwedItemTx(ctx, tx, itemID, kind, []string{model.OwedArt})
 		}); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
-		if img == nil && lockField == "art" {
+		if !pic.present() && lockField == "art" {
 			if err := memberFrontClearedTx(ctx, tx, itemID); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
@@ -377,6 +379,13 @@ func (s *Store) SetItemArt(ctx context.Context, itemPID model.PID, role model.Ar
 		}
 		return appendChange(ctx, tx, "item", itemPID, model.OpUpdate)
 	})
+	if err != nil {
+		return nil, err
+	}
+	if pic.present() {
+		return pic.img.Data, nil
+	}
+	return nil, nil
 }
 
 // memberFrontClearedTx re-opens an album's front half after one of its tracks loses its
@@ -432,34 +441,36 @@ func memberFrontClearedTx(ctx context.Context, tx *sql.Tx, itemID int64) error {
 //
 // format carries the same meaning it does on SetItemArt: the caller's own name for a
 // picture the bytes cannot name, ignored on a clear.
-func (s *Store) SetEntityArt(ctx context.Context, entityType model.ArtEntity, entityPID model.PID, role model.ArtRole, raw []byte, format string, attr model.Attribution, lock model.LockChange, force bool) error {
+func (s *Store) SetEntityArt(ctx context.Context, entityType model.ArtEntity, entityPID model.PID, role model.ArtRole, raw []byte, format string, attr model.Attribution, lock model.LockChange, force bool) ([]byte, error) {
 	const op = "store.SetEntityArt"
 	if !entityType.Valid() {
-		return waxerr.New(waxerr.CodeInvalid, op, "unknown art entity type: "+string(entityType))
+		return nil, waxerr.New(waxerr.CodeInvalid, op, "unknown art entity type: "+string(entityType))
 	}
 	if role == "" {
 		role = model.ArtRoleFront
 	}
 	if !role.Valid() {
-		return waxerr.New(waxerr.CodeInvalid, op, "unknown art role: "+string(role))
+		return nil, waxerr.New(waxerr.CodeInvalid, op, "unknown art role: "+string(role))
 	}
 	if err := checkLockChange(lock, op); err != nil {
-		return err
+		return nil, err
 	}
 	// See SetItemArt: the clear path has no image to carry the check.
 	attr = attr.OrUser()
 	if err := checkAttribution(attr, attr.ValidForArt, op); err != nil {
-		return err
+		return nil, err
 	}
-	var img *model.ArtImage
+	var pic examinedArt
 	if len(raw) > 0 {
 		i, err := probeArtImage(raw, format, attr)
 		if err != nil {
-			return waxerr.Wrap(waxerr.CodeInvalid, op, err)
+			return nil, waxerr.Wrap(waxerr.CodeInvalid, op, err)
 		}
-		img = i
+		if pic, err = s.examineArt(ctx, i); err != nil {
+			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
 	}
-	return s.writeTx(ctx, func(tx *sql.Tx) error {
+	err := s.writeTx(ctx, func(tx *sql.Tx) error {
 		entityID, err := artEntityIDTx(ctx, tx, entityType, entityPID, op)
 		if err != nil {
 			return err
@@ -489,7 +500,7 @@ func (s *Store) SetEntityArt(ctx context.Context, entityType model.ArtEntity, en
 				return noteOwedMembersTx(ctx, tx, model.MergeAlbum, entityID, []string{model.OwedAlbumArt})
 			}
 		}
-		if err := setFrontOwingTx(ctx, tx, string(entityType), entityID, string(role), img, owe); err != nil {
+		if err := setFrontOwingTx(ctx, tx, string(entityType), entityID, string(role), pic, owe); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		if lock != model.LockUnchanged {
@@ -516,7 +527,7 @@ func (s *Store) SetEntityArt(ctx context.Context, entityType model.ArtEntity, en
 			switch {
 			case artRoleLockField(role) == "art" && lock == model.LockOff:
 				err = deleteArtBackfillMarkerTx(ctx, tx, entityType, entityID)
-			case img == nil:
+			case !pic.present():
 				var blocked bool
 				if blocked, err = artFillBlockedTx(ctx, tx, entityType, entityID, role); err == nil && !blocked {
 					err = deleteArtBackfillHalfTx(ctx, tx, entityType, entityID, role)
@@ -526,7 +537,7 @@ func (s *Store) SetEntityArt(ctx context.Context, entityType model.ArtEntity, en
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 		}
-		if entityType == model.ArtTrack && img == nil && artRoleLockField(role) == "art" {
+		if entityType == model.ArtTrack && !pic.present() && artRoleLockField(role) == "art" {
 			if err := memberFrontClearedTx(ctx, tx, entityID); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
@@ -538,6 +549,13 @@ func (s *Store) SetEntityArt(ctx context.Context, entityType model.ArtEntity, en
 		}
 		return appendChange(ctx, tx, string(entityType), entityPID, model.OpUpdate)
 	})
+	if err != nil {
+		return nil, err
+	}
+	if pic.present() {
+		return pic.img.Data, nil
+	}
+	return nil, nil
 }
 
 // ArtLocked reports whether an art entity's slot in one role is pinned against the
@@ -685,9 +703,10 @@ func (s *Store) SetArtLock(ctx context.Context, entityType model.ArtEntity, pid 
 // setFrontOwingTx is setEntityArtRoleTx for an edit surface: when the role is the front
 // and the picture it maps to changes, owe runs, recording the cover as owed to the files a
 // write-back embeds it in. A nil owe owes nothing.
-func setFrontOwingTx(ctx context.Context, tx *sql.Tx, entityType string, entityID int64, role string, img *model.ArtImage, owe func() error) error {
+func setFrontOwingTx(ctx context.Context, tx *sql.Tx, entityType string, entityID int64, role string, pic examinedArt, owe func() error) error {
 	if role != string(model.ArtRoleFront) || owe == nil {
-		return setEntityArtRoleTx(ctx, tx, entityType, entityID, role, img)
+		_, err := setEntityArtRoleTx(ctx, tx, entityType, entityID, role, pic)
+		return err
 	}
 	var prior string
 	err := tx.QueryRowContext(ctx, "SELECT source_hash FROM art_map WHERE entity_type = ? AND entity_id = ? AND role = ?",
@@ -695,12 +714,9 @@ func setFrontOwingTx(ctx context.Context, tx *sql.Tx, entityType string, entityI
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
-	if err := setEntityArtRoleTx(ctx, tx, entityType, entityID, role, img); err != nil {
+	hash, err := setEntityArtRoleTx(ctx, tx, entityType, entityID, role, pic)
+	if err != nil {
 		return err
-	}
-	var hash string
-	if s := storableArt(img); s != nil {
-		hash = s.Hash
 	}
 	if hash == prior {
 		return nil
@@ -709,28 +725,29 @@ func setFrontOwingTx(ctx context.Context, tx *sql.Tx, entityType string, entityI
 }
 
 // setEntityArtRoleTx replaces one (entity, role) art mapping, storing the source, its
-// provenance, and leaving the entity's other roles intact. A nil image clears the role.
-// It is where an unstorable image is refused rather than stored, and where an
-// undescribed one is completed from its own bytes. It replaces the row unconditionally,
-// so a deliberate set always re-attributes; the automatic ingests come through
-// attachEntityArtTxChanged, which re-points only on a differing hash and re-attributes
-// in place otherwise. Those two are the only writers of an art_map row's attribution,
-// and both run it through checkArtImage first.
-func setEntityArtRoleTx(ctx context.Context, tx *sql.Tx, entityType string, entityID int64, role string, img *model.ArtImage) error {
-	img = storableArt(img)
-	if err := checkArtImage(img, entityType, role); err != nil {
-		return err
+// provenance, and leaving the entity's other roles intact. An empty carrier clears the
+// role. It takes an examined picture, so everything it stores went through examineArt
+// first, and it is where an unstorable image is refused rather than stored. It replaces
+// the row unconditionally, so a deliberate set always re-attributes; the automatic
+// ingests come through attachEntityArtTxChanged, which re-points only on a differing hash
+// and re-attributes in place otherwise. Those two are the only writers of an art_map
+// row's attribution, and both run it through checkArtImage first. It reports the hash it
+// mapped, empty for a clear.
+func setEntityArtRoleTx(ctx context.Context, tx *sql.Tx, entityType string, entityID int64, role string, pic examinedArt) (string, error) {
+	if err := checkArtImage(pic.img, entityType, role); err != nil {
+		return "", err
 	}
 	if _, err := tx.ExecContext(ctx,
 		"DELETE FROM art_map WHERE entity_type=? AND entity_id=? AND role=?", entityType, entityID, role); err != nil {
-		return err
+		return "", err
 	}
-	if img == nil {
-		return nil
+	if !pic.present() {
+		return "", nil
 	}
-	if err := insertArtSourceTx(ctx, tx, img); err != nil {
-		return err
+	if err := insertArtSourceTx(ctx, tx, pic); err != nil {
+		return "", err
 	}
+	img := pic.img
 	// A plain INSERT, not OR IGNORE: the DELETE above already removed the only primary
 	// key this can collide with, so the IGNORE has nothing left to absorb except a
 	// genuine failure (a missing art_source under foreign_keys=ON, a rejected value).
@@ -740,7 +757,7 @@ func setEntityArtRoleTx(ctx context.Context, tx *sql.Tx, entityType string, enti
 		`INSERT INTO art_map(entity_type, entity_id, source_hash, role, source, provider, source_url, updated_at)
 		 VALUES (?,?,?,?,?,?,?,?)`,
 		entityType, entityID, img.Hash, role, string(img.Source), img.Provider, img.SourceURL, nowNS())
-	return err
+	return img.Hash, err
 }
 
 // checkArtImage refuses an image an art_map row cannot hold: an attribution outside the
@@ -1012,8 +1029,8 @@ func itemIDForArtSlotTx(ctx context.Context, q queryer, slot model.ArtEntity, pi
 // is locked and preserveLock is set (a scan/enrich pass must not overwrite a user
 // cover). It goes through artFillBlockedTx, the one gate every automatic art writer
 // shares, so a track's lock is read from the table it is written to.
-func attachArtRespectingLockTx(ctx context.Context, tx *sql.Tx, itemID int64, img *model.ArtImage, preserveLock bool) (bool, error) {
-	if preserveLock && img != nil && len(img.Data) > 0 {
+func attachArtRespectingLockTx(ctx context.Context, tx *sql.Tx, itemID int64, pic examinedArt, preserveLock bool) (bool, error) {
+	if preserveLock && pic.present() {
 		locked, err := artFillBlockedTx(ctx, tx, model.ArtTrack, itemID, model.ArtRoleFront)
 		if err != nil {
 			return false, err
@@ -1022,5 +1039,5 @@ func attachArtRespectingLockTx(ctx context.Context, tx *sql.Tx, itemID int64, im
 			return false, nil
 		}
 	}
-	return attachArtTxChanged(ctx, tx, itemID, img)
+	return attachArtTxChanged(ctx, tx, itemID, pic)
 }

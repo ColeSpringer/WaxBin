@@ -66,8 +66,8 @@ func TestRefreshSortKeysClearsDrift(t *testing.T) {
 	if rep.SortKeyDrift != 6 { // 2 items, artist, album, release group, genre
 		t.Fatalf("sort-key drift = %d, want 6", rep.SortKeyDrift)
 	}
-	if !rep.SortKeyDriftOnly() {
-		t.Errorf("stale keys should be the only inconsistency: %+v", rep)
+	if rep.Consistent() {
+		t.Errorf("stale keys left the report consistent: %+v", rep)
 	}
 
 	n, err := st.RefreshSortKeys(ctx)

@@ -108,16 +108,33 @@ CREATE TABLE lyrics (
 );
 
 -- The art resolution store: a content-addressed store of source images (dedup
--- by hash, so the one album cover embedded in every track is stored once).
+-- by hash, so the one album cover embedded in every track is stored once). A source is
+-- kept as it arrived unless its longest side exceeded art.MaxSourceDim and a copy scaled
+-- to fit was smaller, in which case the stored bytes are that copy and art_resized below
+-- remembers which arriving bytes they stand for. The bytes come last here and in
+-- thumb_cache, so a read of the columns before them stops short of the row's overflow
+-- pages.
 CREATE TABLE art_source (
-  hash       TEXT    PRIMARY KEY,         -- content hash of the image bytes
+  hash       TEXT    PRIMARY KEY,         -- content hash of the stored bytes
   format     TEXT    NOT NULL,            -- jpeg|png|webp|gif|...
   width      INTEGER NOT NULL DEFAULT 0,
   height     INTEGER NOT NULL DEFAULT 0,
   size       INTEGER NOT NULL,            -- byte length of data
-  data       BLOB    NOT NULL,
-  created_at INTEGER NOT NULL
+  created_at INTEGER NOT NULL,
+  data       BLOB    NOT NULL
 );
+
+-- The pictures the bound examined: the hash of the bytes as they arrived, against the
+-- source they are stored as. An ingest looks an oversized picture up here before it
+-- decodes anything, so the cover embedded in each of an album's tracks is scaled once
+-- and a rescan of a changed file costs no decode. An oversized picture kept as it
+-- arrived maps to itself, so it is not decoded again either. A source within the bound
+-- has no row, since its stored bytes are the arriving ones. Rows go with their source.
+CREATE TABLE art_resized (
+  from_hash TEXT PRIMARY KEY,                                           -- hash of the arriving bytes
+  hash      TEXT NOT NULL REFERENCES art_source(hash) ON DELETE CASCADE -- the stored source
+);
+CREATE INDEX art_resized_hash ON art_resized(hash);
 
 -- Polymorphic entity art map: entity_type selects which table entity_id refers
 -- to, so there is no single FK to enforce. An entity holds at most one image
@@ -164,7 +181,7 @@ CREATE TABLE thumb_cache (
   format      TEXT    NOT NULL,           -- jpeg|png
   width       INTEGER NOT NULL,
   height      INTEGER NOT NULL,
-  data        BLOB    NOT NULL,
   created_at  INTEGER NOT NULL,
+  data        BLOB    NOT NULL,
   PRIMARY KEY (source_hash, size)
 );

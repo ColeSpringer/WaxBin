@@ -366,14 +366,14 @@ func newDBVerifyCmd(g *globals) *cobra.Command {
 	var resorted, reindexed int
 	cmd := &cobra.Command{
 		Use:   "verify",
-		Short: "Check derived data (FTS, rollups, sort keys, book durations, album years, playlist positions) against the source rows",
+		Short: "Check derived data (FTS, rollups, sort keys, book durations and ISBN keys, album and release years, playlist positions) against the source rows",
 		Long: "Runs the derived-data consistency check: the writer-maintained FTS, " +
-			"rollups, generated sort keys, book durations, album years and playlist " +
-			"positions are compared against a fresh recompute from the source rows. " +
-			"Reports drift; --fix recomputes the maintained rollups, " +
-			"book durations and album years, renumbers playlist positions, refolds stale " +
-			"sort keys and rebuilds stale search rows first. Exits non-zero when any drift " +
-			"remains.",
+			"rollups, generated sort keys, book durations and ISBN keys, album and release " +
+			"years and playlist positions are compared against a fresh recompute from the " +
+			"source rows. Reports drift; --fix recomputes the maintained rollups, book " +
+			"durations and ISBN keys, and album and release years, renumbers playlist " +
+			"positions, refolds stale sort keys and rebuilds stale search rows first. Exits " +
+			"non-zero when any drift remains.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			// --fix recomputes rollups and reclaims orphaned art, so it needs the
 			// write lock; a plain verify is read-only and runs alongside a writer.
@@ -426,13 +426,8 @@ func newDBVerifyCmd(g *globals) *cobra.Command {
 
 			var verdict error
 			if !rep.Consistent() {
-				// Only --fix rewrites a sort key, so do not offer a re-scan when that is
-				// all that drifted.
-				msg := "derived data is inconsistent; re-run with --fix or re-scan"
-				if rep.SortKeyDriftOnly() {
-					msg = "sort keys are stale; re-run with --fix (a re-scan cannot rewrite them)"
-				}
-				verdict = waxerr.New(waxerr.CodeInvalid, "db verify", msg)
+				// A rescan rewrites only what changed on disk, so --fix is the remedy.
+				verdict = waxerr.New(waxerr.CodeInvalid, "db verify", "derived data is inconsistent; re-run with --fix")
 			}
 			if g.jsonOut {
 				view := toDerivedView(rep)
@@ -453,6 +448,7 @@ func newDBVerifyCmd(g *globals) *cobra.Command {
 				fmt.Fprintf(w, "book-duration drift:      %d\n", rep.BookDurationDrift)
 				fmt.Fprintf(w, "book-isbn-key drift:      %d\n", rep.BookISBNKeyDrift)
 				fmt.Fprintf(w, "album-year drift:         %d\n", rep.AlbumYearDrift)
+				fmt.Fprintf(w, "release-year drift:       %d\n", rep.ReleaseYearDrift)
 				fmt.Fprintf(w, "playlist-position drift:  %d\n", rep.PlaylistPositionDrift)
 				fmt.Fprintf(w, "orphan art sources:       %d\n", rep.OrphanArtSources)
 				fmt.Fprintf(w, "orphan thumbnails:        %d\n", rep.OrphanThumbnails)
@@ -479,6 +475,6 @@ func newDBVerifyCmd(g *globals) *cobra.Command {
 			return verdict
 		},
 	}
-	cmd.Flags().BoolVar(&fix, "fix", false, "recompute rollups, book durations and album years, renumber playlist positions, refold stale sort keys, reclaim orphaned art and tag provenance, and rebuild stale search rows before verifying (takes the write lock)")
+	cmd.Flags().BoolVar(&fix, "fix", false, "recompute rollups, book durations and ISBN keys, and album and release years, renumber playlist positions, refold stale sort keys, reclaim orphaned art and tag provenance, and rebuild stale search rows before verifying (takes the write lock)")
 	return cmd
 }

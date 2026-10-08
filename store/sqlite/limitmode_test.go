@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/colespringer/waxbin/identity"
@@ -110,6 +111,84 @@ func TestQueryLimitRandomSeeded(t *testing.T) {
 	if len(orders) < len(seeds)-1 {
 		t.Errorf("seeds %v produced %d distinct orders, want at least %d; the seed is not "+
 			"choosing the permutation", seeds, len(orders), len(seeds)-1)
+	}
+}
+
+// TestQueryShuffleSortsNarrowRows: a seeded draw and a seeded budget fill sort each
+// row's id and shuffle value in a subquery and read the item view for the rows they
+// return, so the cost of a draw is not the cost of reading every match whole. With no
+// filter the subquery reads playable_item alone. The draws are the seed's order.
+func TestQueryShuffleSortsNarrowRows(t *testing.T) {
+	t.Parallel()
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	limitFixture(t, st, lib.ID)
+	draw := query.New(query.EntityItems).Limit(4).Offset(1).LimitBy(query.LimitRandom).Seed(42).Build()
+	hour := query.New(query.EntityItems).Limit(60).LimitBy(query.LimitMinutes).Seed(42).Build()
+	for name, q := range map[string]query.Query{
+		"draw": draw,
+		"filtered draw": query.New(query.EntityItems).Limit(4).Offset(1).LimitBy(query.LimitRandom).Seed(42).
+			Where("artist", query.OpIs, "X").Build(),
+		"budget":    hour,
+		"megabytes": query.New(query.EntityItems).Limit(60).LimitBy(query.LimitMegabytes).Seed(42).Build(),
+	} {
+		stmt, args, _, err := st.queryItemsStmt(ctx, q, "", false, "test")
+		if err != nil {
+			t.Fatalf("%s: stmt: %v", name, err)
+		}
+		nodes := explainPlanTree(t, st, stmt, args...)
+		sorted := -1
+		for _, n := range nodes {
+			if n.detail == "USE TEMP B-TREE FOR ORDER BY" {
+				sorted = subqueryOf(nodes, n)
+				break
+			}
+		}
+		if sorted <= 0 {
+			t.Fatalf("%s: the shuffle's sort is not inside a subquery:\n%v", name, nodes)
+		}
+		for _, n := range nodes {
+			if strings.HasPrefix(n.detail, "USE TEMP B-TREE") && subqueryOf(nodes, n) != sorted {
+				t.Errorf("%s: the drawn rows are sorted again outside the subquery (%s):\n%v", name, n.detail, nodes)
+			}
+			if subqueryOf(nodes, n) != sorted {
+				continue
+			}
+			if strings.HasPrefix(n.detail, "CORRELATED SCALAR SUBQUERY") {
+				t.Errorf("%s: the sorted subquery reads the item view (%s):\n%v", name, n.detail, nodes)
+			}
+			if q.Where == nil && strings.HasPrefix(n.detail, "SEARCH pf") {
+				t.Errorf("%s: the unfiltered subquery probes item_file:\n%v", name, nodes)
+			}
+		}
+	}
+
+	var order []string
+	rows, err := st.read.QueryContext(ctx, "SELECT title FROM playable_item ORDER BY wb_shuffle(42, pid), pid")
+	if err != nil {
+		t.Fatalf("seed order: %v", err)
+	}
+	for rows.Next() {
+		var title string
+		if err := rows.Scan(&title); err != nil {
+			t.Fatal(err)
+		}
+		order = append(order, title)
+	}
+	rows.Close()
+	items, err := st.QueryItems(ctx, draw, "")
+	if err != nil {
+		t.Fatalf("draw: %v", err)
+	}
+	if got := titlesOf(items); !equalStrings(got, order[1:5]) {
+		t.Errorf("seeded draw = %v, want the seed's order past one %v", got, order[1:5])
+	}
+	if len(items) > 0 && (items[0].Artist != "X" || items[0].LibraryPID != lib.PID) {
+		t.Errorf("drawn item = %+v, want a whole item view", items[0])
+	}
+	// Six one-minute tracks fill an hour in the seed's order.
+	if items, err := st.QueryItems(ctx, hour, ""); err != nil || !equalStrings(titlesOf(items), order) {
+		t.Errorf("seeded hour = %v (err %v), want the seed's order %v", titlesOf(items), err, order)
 	}
 }
 

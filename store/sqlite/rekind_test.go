@@ -74,7 +74,7 @@ func TestRekindTrackToBookKeepsTheItem(t *testing.T) {
 	if _, _, err := st.SetItemTag(ctx, pid, "MOOD", []string{"calm"}, model.Attribution{}, model.LockOn, false); err != nil {
 		t.Fatalf("custom tag: %v", err)
 	}
-	if err := st.SetItemArt(ctx, pid, model.ArtRoleFront, tinyPNG(t), "png", model.Attribution{}, model.LockUnchanged, false); err != nil {
+	if _, err := st.SetItemArt(ctx, pid, model.ArtRoleFront, tinyPNG(t), "png", model.Attribution{}, model.LockUnchanged, false); err != nil {
 		t.Fatalf("art: %v", err)
 	}
 	for field, value := range map[string]string{"album": "Edited Album", "mbid": "4e2b1b2a-0000-4000-8000-000000000001", "title": "Edited"} {

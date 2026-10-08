@@ -73,7 +73,11 @@ func (s *Store) UpsertFeed(ctx context.Context, in model.UpsertFeedInput) (*mode
 		return nil, waxerr.New(waxerr.CodeInvalid, op, "feed has no identity (no guid or url)")
 	}
 	res := &model.UpsertFeedResult{}
-	err := s.writeTx(ctx, func(tx *sql.Tx) error {
+	image, err := s.examineArt(ctx, in.Image)
+	if err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	err = s.writeTx(ctx, func(tx *sql.Tx) error {
 		now := nowNS()
 		up, err := upsertPodcast(ctx, tx, in, now, true)
 		if err != nil {
@@ -83,7 +87,7 @@ func (s *Store) UpsertFeed(ctx context.Context, in model.UpsertFeedInput) (*mode
 
 		// Ingest the feed image onto the podcast entity (idempotent on hash), unless the
 		// user chose this show's cover: the feed re-points on every image-URL change.
-		if _, err := attachEntityArtUnlessLockedTx(ctx, tx, model.ArtPodcast, up.id, in.Image); err != nil {
+		if _, err := attachEntityArtUnlessLockedTx(ctx, tx, model.ArtPodcast, up.id, image); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 
@@ -183,7 +187,11 @@ func (s *Store) UpsertShow(ctx context.Context, in model.UpsertShowInput) (model
 	}
 	var pid model.PID
 	var created bool
-	err := s.writeTx(ctx, func(tx *sql.Tx) error {
+	image, err := s.examineArt(ctx, in.Image)
+	if err != nil {
+		return "", false, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	err = s.writeTx(ctx, func(tx *sql.Tx) error {
 		now := nowNS()
 		fi := model.UpsertFeedInput{
 			FeedURL: in.FeedURL, IdentityKey: in.IdentityKey, SourceType: in.SourceType,
@@ -202,7 +210,7 @@ func (s *Store) UpsertShow(ctx context.Context, in model.UpsertShowInput) (model
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 		}
-		if _, err := attachEntityArtUnlessLockedTx(ctx, tx, model.ArtPodcast, up.id, in.Image); err != nil {
+		if _, err := attachEntityArtUnlessLockedTx(ctx, tx, model.ArtPodcast, up.id, image); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		// Same gate as UpsertFeed: an identical re-upsert stays silent.
@@ -924,7 +932,11 @@ func (s *Store) PutEpisodeChapters(ctx context.Context, episodePID model.PID, ch
 func (s *Store) AttachEpisodeFile(ctx context.Context, in model.AttachEpisodeFileInput) (model.PID, error) {
 	const op = "store.AttachEpisodeFile"
 	var filePID model.PID
-	err := s.writeTx(ctx, func(tx *sql.Tx) error {
+	image, err := s.examineArt(ctx, in.Image)
+	if err != nil {
+		return "", waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	err = s.writeTx(ctx, func(tx *sql.Tx) error {
 		itemID, kind, err := s.itemIDKindByPIDTx(ctx, tx, in.EpisodePID, op)
 		if err != nil {
 			return err
@@ -959,7 +971,7 @@ func (s *Store) AttachEpisodeFile(ctx context.Context, in model.AttachEpisodeFil
 		// Guarded like the show cover: a download re-attaches the episode image every
 		// time, so an unguarded attach would let the machine through a lock that already
 		// refuses the user.
-		if _, err := attachEntityArtUnlessLockedTx(ctx, tx, model.ArtEpisode, itemID, in.Image); err != nil {
+		if _, err := attachEntityArtUnlessLockedTx(ctx, tx, model.ArtEpisode, itemID, image); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
 		if err := appendChange(ctx, tx, "file", filePID, model.OpCreate); err != nil {

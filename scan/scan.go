@@ -1779,13 +1779,14 @@ func (c *artCache) dirCoverObs(dir string) *model.AuxObservation { return c.reso
 // available to serve, while a corrupt or placeholder embedded picture does not
 // shadow a valid cover.jpg next to the file.
 func resolveCover(path string, embedded *model.ArtImage, cache *artCache) *model.ArtImage {
-	// finalizeArt also returns true for an exotic (AVIF/HEIC) embedded image that was
-	// only recognized by its magic bytes, not decoded, so its dimensions stay 0 until an
-	// external decoder runs. Require real decoded dimensions (Width > 0) here so such an
-	// image does not shadow a decodable cover.jpg beside the file. It is still kept by
-	// the last-resort branch below.
-	if embedded != nil && finalizeArt(embedded) && embedded.Width > 0 {
-		return embedded // decodable embedded cover with known dimensions
+	// finalizeArt also recognizes an exotic (AVIF/HEIC) embedded image by its magic
+	// bytes alone, carrying whatever dimensions its container declared. Only a picture a
+	// decoder here read wins at this point, so such an image does not shadow a decodable
+	// cover.jpg beside the file. It is still kept by the last-resort branch below.
+	if embedded != nil {
+		if recognized, decoded := finalizeArt(embedded); recognized && decoded {
+			return embedded
+		}
 	}
 	for _, d := range cache.coverDirs(path) {
 		if dir := cache.dirCover(d); dir != nil {
@@ -1835,7 +1836,7 @@ func findDirCover(dir string) (*model.ArtImage, string) {
 			continue
 		}
 		img := &model.ArtImage{Data: data, Attribution: model.Attribution{Source: model.SourceSidecar}}
-		if finalizeArt(img) {
+		if recognized, _ := finalizeArt(img); recognized {
 			return img, full
 		}
 	}
@@ -1866,26 +1867,30 @@ func coverStat(dir string) *model.AuxObservation {
 }
 
 // finalizeArt fills an image's content hash and, when the bytes are recognized, its
-// format and pixel dimensions. It reports whether they were. The hash is always set, so
-// undecodable bytes can still be stored as a last resort, but a recognized cover is
-// preferred over one that is not. An AVIF/HEIC cover counts as recognized on its magic
-// alone, which keeps a cover.avif from being skipped as unreadable even though its
-// dimensions stay unknown. Empty bytes return false.
+// format and pixel dimensions. It reports whether they were recognized, and whether a
+// decoder here read them, which is what separates a picture the catalog can draw from
+// one it can only hold. The hash is always set, so undecodable bytes can still be stored
+// as a last resort. An AVIF/HEIC cover counts as recognized on its magic alone, which
+// keeps a cover.avif from being skipped as unreadable; its dimensions stay whatever the
+// container declared, since the decoders have none to offer. Empty bytes return false.
 //
 // Bytes nothing here recognizes keep whatever format they arrived with: an embedded BMP
 // or TIFF picture has no pure-Go decoder, but its own tag frame's MIME already named it,
 // and that is the only description the stored cover will ever have.
-func finalizeArt(img *model.ArtImage) bool {
+func finalizeArt(img *model.ArtImage) (recognized, decoded bool) {
 	if img == nil || len(img.Data) == 0 {
-		return false
+		return false, false
 	}
 	info := art.Describe(img.Data)
 	img.Hash = info.Hash
 	if info.Format == "" {
-		return false
+		return false, false
 	}
-	img.Format, img.Width, img.Height = info.Format, info.Width, info.Height
-	return true
+	img.Format = info.Format
+	if info.Width != 0 {
+		img.Width, img.Height = info.Width, info.Height
+	}
+	return true, info.Width != 0
 }
 
 // unsupportedFormat reports whether the reader gave up on this file's container.

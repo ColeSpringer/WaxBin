@@ -352,7 +352,11 @@ func (s *Store) libraryIDsByPIDs(ctx context.Context, pids []model.PID, op strin
 func (s *Store) PutScannedTrack(ctx context.Context, in model.PutScannedTrackInput) (*model.ScanItemResult, error) {
 	const op = "store.PutScannedTrack"
 	res := &model.ScanItemResult{}
-	err := s.writeTx(ctx, func(tx *sql.Tx) error {
+	cover, err := s.examineArt(ctx, in.CoverArt)
+	if err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	err = s.writeTx(ctx, func(tx *sql.Tx) error {
 		now := nowNS()
 
 		// One resolution of the item key serves the relink, the overlay and the item
@@ -455,7 +459,7 @@ func (s *Store) PutScannedTrack(ctx context.Context, in model.PutScannedTrackInp
 					if primary, err = primaryFileTx(ctx, tx, prior.itemID); err != nil {
 						return waxerr.Wrap(waxerr.CodeIO, op, err)
 					}
-					return s.attachCopyTx(ctx, tx, in, fileID, filePID, prior.itemID, primary, fileTitle, fileTrack, res, now)
+					return s.attachCopyTx(ctx, tx, in, fileID, filePID, prior.itemID, primary, fileTitle, fileTrack, res, now, cover)
 				}
 			}
 			if primary != nil && primary.fileID != fileID {
@@ -464,7 +468,7 @@ func (s *Store) PutScannedTrack(ctx context.Context, in model.PutScannedTrackInp
 					return waxerr.Wrap(waxerr.CodeIO, op, err)
 				}
 				if !better {
-					return s.attachCopyTx(ctx, tx, in, fileID, filePID, prior.itemID, primary, fileTitle, fileTrack, res, now)
+					return s.attachCopyTx(ctx, tx, in, fileID, filePID, prior.itemID, primary, fileTitle, fileTrack, res, now, cover)
 				}
 				if err := demoteToAlternateTx(ctx, tx, prior.itemID, primary.fileID); err != nil {
 					return waxerr.Wrap(waxerr.CodeIO, op, err)
@@ -477,7 +481,7 @@ func (s *Store) PutScannedTrack(ctx context.Context, in model.PutScannedTrackInp
 		if prior != nil {
 			known.id = prior.itemID
 		}
-		itemID, itemPID, created, stateChanged, priorTitle, err := upsertItem(ctx, tx, s.log, in.Item, bookAdoptKey{}, now, in.PreferredItemPID, known)
+		itemID, itemPID, created, stateChanged, priorTitle, err := upsertItem(ctx, tx, s.log, in.Item, in.Track.Year, bookAdoptKey{}, now, in.PreferredItemPID, known)
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
@@ -554,7 +558,7 @@ func (s *Store) PutScannedTrack(ctx context.Context, in model.PutScannedTrackInp
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
-		artChanged, err := attachArtRespectingLockTx(ctx, tx, itemID, in.CoverArt, in.PreserveLocks)
+		artChanged, err := attachArtRespectingLockTx(ctx, tx, itemID, cover, in.PreserveLocks)
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
@@ -600,7 +604,7 @@ func (s *Store) PutScannedTrack(ctx context.Context, in model.PutScannedTrackInp
 		if err := settleOwedByScanTx(ctx, tx, fileID, itemID, scanSettle{
 			fileTitle: fileTitle, title: in.Item.Title, fileTrack: fileTrack, track: in.Track,
 			preserveLocks: in.PreserveLocks, derived: in.Derived,
-			cover: in.CoverArt, acquisitionRecorded: acqAdded,
+			cover: cover, acquisitionRecorded: acqAdded,
 			fileTags: in.CustomTags, tagsReplaced: tagsReplaced,
 		}); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
@@ -775,100 +779,18 @@ func (s *Store) QueryItemsByPrimary(ctx context.Context, q query.Query, userPID 
 
 func (s *Store) queryItems(ctx context.Context, q query.Query, userPID model.PID, byPrimary bool) ([]*model.ItemView, error) {
 	const op = "store.QueryItems"
-	fm, ok := fieldMapFor(q.Entity)
-	if !ok {
-		return nil, waxerr.New(waxerr.CodeInvalid, op, "unsupported query entity: "+string(q.Entity))
-	}
-	if byPrimary {
-		fm = primaryLibraryFields{fm}
-	}
-	c, err := query.Compile(q, fm)
+	stmt, args, c, err := s.queryItemsStmt(ctx, q, userPID, byPrimary, op)
 	if err != nil {
 		return nil, err
 	}
-	userJoin, leadArgs, err := s.userStateJoin(ctx, c, userPID, op)
-	if err != nil {
-		return nil, err
-	}
-
-	megabytes := c.LimitMode == query.LimitMegabytes
-	budget := megabytes || c.LimitMode == query.LimitMinutes
-
-	var sb strings.Builder
-	if megabytes {
-		// The megabytes budget needs the item's total byte cost, which is not an
-		// ItemView column. Widen only this statement's SELECT (the budget scan
-		// appends the matching dest explicitly) rather than touching the shared
-		// itemViewCols/itemViewDests pair every other reader scans. The cost sums
-		// all parts, not just the primary: a multi-file book transfers every part,
-		// so pricing only part one would overflow a device budget. An alternate is
-		// another copy of the same audio, which a device holds once.
-		sb.WriteString("SELECT " + itemViewCols +
-			", (SELECT COALESCE(SUM(szf.size),0) FROM item_file szif JOIN file szf ON szf.id = szif.file_id" +
-			" WHERE szif.item_id = pi.id AND szif.role IN ('primary', 'part'))" +
-			itemJoins)
-	} else {
-		sb.WriteString(itemSelect)
-	}
-	sb.WriteString(userJoin)
-	// leadArgs carries the join's user id (or is empty) and precedes the query args.
-	args := append(leadArgs, c.Args...)
-	where := andWhere(c.Where, entityPredicate(q.Entity))
-	if where != "" {
-		sb.WriteString(" WHERE ")
-		sb.WriteString(where)
-	}
-	// Random mode compiles with no Sorts, and a budget mode with empty Sorts and a
-	// non-zero seed shuffles the fill order; both order by the deterministic
-	// wb_shuffle hash. Browse has to inline its seed as a literal so the identical
-	// expression can repeat in SELECT, ORDER BY, and the keyset WHERE, but here
-	// the expression appears only in the ORDER BY, so the seed binds as a normal
-	// positional arg (after the WHERE args, before LIMIT/OFFSET, matching clause
-	// order). Everything else keeps the query's own order, defaulting to the
-	// canonical sort_key order.
-	switch {
-	case c.LimitMode == query.LimitRandom, budget && c.OrderBy == "" && c.LimitSeed != 0:
-		seed := c.LimitSeed
-		if seed == 0 {
-			seed = time.Now().UnixNano() // a fresh draw per evaluation
-		}
-		sb.WriteString(" ORDER BY wb_shuffle(?, pi.pid), pi.pid")
-		args = append(args, seed)
-	case c.OrderBy != "":
-		sb.WriteString(" ORDER BY ")
-		sb.WriteString(c.OrderBy)
-		sb.WriteString(", pi.pid")
-	default:
-		sb.WriteString(" ORDER BY pi.sort_key, pi.pid")
-	}
-	if budget {
-		// A budget mode caps by accumulation below, never by SQL LIMIT; only the
-		// offset stays in SQL, skipping rows before any budget accounting.
-		if c.Offset > 0 {
-			sb.WriteString(" LIMIT -1 OFFSET ?") // SQLite requires a LIMIT before OFFSET
-			args = append(args, c.Offset)
-		}
-	} else {
-		if c.Limit > 0 {
-			sb.WriteString(" LIMIT ?")
-			args = append(args, c.Limit)
-		} else if c.Offset > 0 {
-			sb.WriteString(" LIMIT -1") // SQLite requires a LIMIT before OFFSET
-		}
-		if c.Offset > 0 {
-			sb.WriteString(" OFFSET ?")
-			args = append(args, c.Offset)
-		}
-	}
-
-	rows, err := s.read.QueryContext(ctx, sb.String(), args...)
+	rows, err := s.read.QueryContext(ctx, stmt, args...)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
 	defer rows.Close()
 
-	if budget {
-		return s.scanBudgetItems(rows, c, megabytes, op)
+	if c.LimitMode == query.LimitMegabytes || c.LimitMode == query.LimitMinutes {
+		return s.scanBudgetItems(rows, c, c.LimitMode == query.LimitMegabytes, op)
 	}
 
 	var out []*model.ItemView
@@ -880,6 +802,102 @@ func (s *Store) queryItems(ctx context.Context, q query.Query, userPID model.PID
 		out = append(out, v)
 	}
 	return out, rows.Err()
+}
+
+// queryItemsStmt assembles queryItems' statement and bind args, split out so the plan
+// tests EXPLAIN the real statement.
+func (s *Store) queryItemsStmt(ctx context.Context, q query.Query, userPID model.PID, byPrimary bool, op string) (string, []any, *query.Compiled, error) {
+	fm, ok := fieldMapFor(q.Entity)
+	if !ok {
+		return "", nil, nil, waxerr.New(waxerr.CodeInvalid, op, "unsupported query entity: "+string(q.Entity))
+	}
+	if byPrimary {
+		fm = primaryLibraryFields{fm}
+	}
+	c, err := query.Compile(q, fm)
+	if err != nil {
+		return "", nil, nil, err
+	}
+	userJoin, leadArgs, err := s.userStateJoin(ctx, c, userPID, op)
+	if err != nil {
+		return "", nil, nil, err
+	}
+
+	megabytes := c.LimitMode == query.LimitMegabytes
+	budget := megabytes || c.LimitMode == query.LimitMinutes
+	// Random mode compiles with no Sorts, and a budget mode with empty Sorts and a
+	// non-zero seed shuffles the fill order; both order by the deterministic wb_shuffle
+	// hash. No index holds that order, so the rows are sorted by id and hash in a
+	// subquery and the item view is read for the rows the caller takes, as browse's
+	// random list does. The seed is an int64 formatted here, so inlining it is safe.
+	// Everything else keeps the query's own order, defaulting to the canonical
+	// sort_key order.
+	shuffled := c.LimitMode == query.LimitRandom || budget && c.OrderBy == "" && c.LimitSeed != 0
+
+	cols := itemViewCols
+	if megabytes {
+		// The megabytes budget needs the item's total byte cost, which is not an
+		// ItemView column. Widen only this statement's SELECT (the budget scan
+		// appends the matching dest explicitly) rather than touching the shared
+		// itemViewCols/itemViewDests pair every other reader scans. The cost sums
+		// all parts, not just the primary: a multi-file book transfers every part,
+		// so pricing only part one would overflow a device budget. An alternate is
+		// another copy of the same audio, which a device holds once.
+		cols += ", (SELECT COALESCE(SUM(szf.size),0) FROM item_file szif JOIN file szf ON szf.id = szif.file_id" +
+			" WHERE szif.item_id = pi.id AND szif.role IN ('primary', 'part'))"
+	}
+	where := andWhere(c.Where, entityPredicate(q.Entity))
+	// leadArgs carries the join's user id (or is empty) and precedes the query args.
+	args := append(leadArgs, c.Args...)
+
+	var sb strings.Builder
+	if shuffled {
+		seed := c.LimitSeed
+		if seed == 0 {
+			seed = time.Now().UnixNano() // a fresh draw per evaluation
+		}
+		from := itemJoins
+		if where == "" && userJoin == "" {
+			from = " FROM playable_item pi" // see browseStmt
+		}
+		fmt.Fprintf(&sb, "SELECT %s FROM (SELECT pi.id, pi.pid, wb_shuffle(%d, pi.pid) AS ord%s", cols, seed, from)
+	} else {
+		sb.WriteString("SELECT " + cols + itemJoins)
+	}
+	sb.WriteString(userJoin)
+	if where != "" {
+		sb.WriteString(" WHERE ")
+		sb.WriteString(where)
+	}
+	switch {
+	case shuffled:
+		sb.WriteString(" ORDER BY ord, pi.pid")
+	case c.OrderBy != "":
+		sb.WriteString(" ORDER BY ")
+		sb.WriteString(c.OrderBy)
+		sb.WriteString(", pi.pid")
+	default:
+		sb.WriteString(" ORDER BY pi.sort_key, pi.pid")
+	}
+	// A budget mode caps by accumulation below, never by SQL LIMIT; only the offset
+	// stays in SQL, skipping rows before any budget accounting. A shuffle's subquery
+	// carries a LIMIT whatever the mode, since SQLite folds a subquery without one into
+	// the outer join and sorts the whole view again.
+	switch {
+	case c.Limit > 0 && !budget:
+		sb.WriteString(" LIMIT ?")
+		args = append(args, c.Limit)
+	case c.Offset > 0 || shuffled:
+		sb.WriteString(" LIMIT -1") // SQLite requires a LIMIT before OFFSET
+	}
+	if c.Offset > 0 {
+		sb.WriteString(" OFFSET ?")
+		args = append(args, c.Offset)
+	}
+	if shuffled {
+		sb.WriteString(") w JOIN playable_item pi ON pi.id = w.id" + itemSubJoins + " ORDER BY w.ord, w.pid")
+	}
+	return sb.String(), args, c, nil
 }
 
 // scanBudgetItems fills a minutes/megabytes budget from ordered rows: each row's
@@ -985,8 +1003,7 @@ func (s *Store) CountItems(ctx context.Context, q query.Query, userPID model.PID
 // ItemByPID returns a single item view by public id.
 func (s *Store) ItemByPID(ctx context.Context, pid model.PID) (*model.ItemView, error) {
 	const op = "store.ItemByPID"
-	row := s.read.QueryRowContext(ctx, itemSelect+" WHERE pi.pid = ?", string(pid))
-	v, err := scanItemView(row)
+	v, err := scanItemView(s.rstmts.queryRowContext(ctx, s.read, itemSelect+" WHERE pi.pid = ?", string(pid)))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, waxerr.New(waxerr.CodeNotFound, op, "no such item: "+string(pid))
 	}

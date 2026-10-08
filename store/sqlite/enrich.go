@@ -625,6 +625,14 @@ func insertRelationsTx(ctx context.Context, tx *sql.Tx, srcID int64, rels []mode
 // landed) rather than on the match. The genre fill emits its own per-item deltas.
 func (s *Store) ApplyReleaseGroupEnrichment(ctx context.Context, in model.ReleaseGroupEnrichment) error {
 	const op = "store.ApplyReleaseGroupEnrichment"
+	pic, err := s.examineArt(ctx, in.Art)
+	if err != nil {
+		return waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	auxPics, err := s.examineAux(ctx, in.AuxArt)
+	if err != nil {
+		return waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
 	return s.writeAliveTx(ctx, op, "release_group", in.ReleaseGroupID, func(tx *sql.Tx) error {
 		if !in.Matched {
 			return s.settleMarkerTx(ctx, tx, model.EnrichReleaseGroupType, in.ReleaseGroupID, enrichProviderMusicBrainz, false, in.Incomplete, in.Unasked, "")
@@ -668,11 +676,11 @@ func (s *Store) ApplyReleaseGroupEnrichment(ctx context.Context, in model.Releas
 		}
 		// Reads identically to the release_group.type guard above: a user who chose this
 		// group's cover keeps it, forced run or not.
-		front, err := attachEntityArtUnlessLockedTx(ctx, tx, model.ArtReleaseGroup, in.ReleaseGroupID, in.Art)
+		front, err := attachEntityArtUnlessLockedTx(ctx, tx, model.ArtReleaseGroup, in.ReleaseGroupID, pic)
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
-		aux, err := fillEntityAuxArtTx(ctx, tx, model.ArtReleaseGroup, in.ReleaseGroupID, in.AuxArt)
+		aux, err := fillEntityAuxArtTx(ctx, tx, model.ArtReleaseGroup, in.ReleaseGroupID, auxPics)
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
@@ -1011,7 +1019,14 @@ func (s *Store) AlbumsNeedingArt(ctx context.Context, opts model.EnrichQueueOpti
 // album.
 func (s *Store) ApplyAlbumArtBackfill(ctx context.Context, in model.AlbumArtBackfill) error {
 	const op = "store.ApplyAlbumArtBackfill"
-	aux := carriedAuxArt(model.ArtAlbum, in.AuxArt)
+	pic, err := s.examineArt(ctx, in.Art)
+	if err != nil {
+		return waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	aux, err := s.examineAux(ctx, carriedAuxArt(model.ArtAlbum, in.AuxArt))
+	if err != nil {
+		return waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
 	return s.writeAliveTx(ctx, op, "album", in.AlbumID, func(tx *sql.Tx) error {
 		var wrote int
 		frontMatched := in.Art != nil || in.FrontFromGroup
@@ -1037,7 +1052,7 @@ func (s *Store) ApplyAlbumArtBackfill(ctx context.Context, in model.AlbumArtBack
 			// same guards drop already does.
 		}
 		if in.Art != nil {
-			changed, err := fillAlbumArtTx(ctx, tx, in.AlbumID, in.Art)
+			changed, err := fillAlbumArtTx(ctx, tx, in.AlbumID, pic)
 			if err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
@@ -1121,7 +1136,14 @@ func (s *Store) ArtistsNeedingArtBackfill(ctx context.Context, opts model.Enrich
 // at all, as at the album rung.
 func (s *Store) ApplyArtistArtBackfill(ctx context.Context, in model.ArtistArtBackfill) error {
 	const op = "store.ApplyArtistArtBackfill"
-	aux := carriedAuxArt(model.ArtArtist, in.AuxArt)
+	pic, err := s.examineArt(ctx, in.Art)
+	if err != nil {
+		return waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	aux, err := s.examineAux(ctx, carriedAuxArt(model.ArtArtist, in.AuxArt))
+	if err != nil {
+		return waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
 	return s.writeAliveTx(ctx, op, "artist", in.ArtistID, func(tx *sql.Tx) error {
 		var wrote int
 		if in.Art != nil {
@@ -1134,7 +1156,7 @@ func (s *Store) ApplyArtistArtBackfill(ctx context.Context, in model.ArtistArtBa
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 			if !held && !blocked {
-				changed, err := attachEntityArtTxChanged(ctx, tx, string(model.ArtArtist), in.ArtistID, in.Art)
+				changed, err := attachEntityArtTxChanged(ctx, tx, string(model.ArtArtist), in.ArtistID, pic)
 				if err != nil {
 					return waxerr.Wrap(waxerr.CodeIO, op, err)
 				}
@@ -1332,7 +1354,14 @@ func (s *Store) ReleaseGroupsNeedingArt(ctx context.Context, opts model.EnrichQu
 // vanished rowid gets nothing at all, as at the album rung.
 func (s *Store) ApplyReleaseGroupArtBackfill(ctx context.Context, in model.ReleaseGroupArtBackfill) error {
 	const op = "store.ApplyReleaseGroupArtBackfill"
-	aux := carriedAuxArt(model.ArtReleaseGroup, in.AuxArt)
+	pic, err := s.examineArt(ctx, in.Art)
+	if err != nil {
+		return waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	aux, err := s.examineAux(ctx, carriedAuxArt(model.ArtReleaseGroup, in.AuxArt))
+	if err != nil {
+		return waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
 	return s.writeAliveTx(ctx, op, "release_group", in.ReleaseGroupID, func(tx *sql.Tx) error {
 		var wrote int
 		if in.Art != nil {
@@ -1345,7 +1374,7 @@ func (s *Store) ApplyReleaseGroupArtBackfill(ctx context.Context, in model.Relea
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 			if !held && !blocked {
-				changed, err := attachEntityArtTxChanged(ctx, tx, string(model.ArtReleaseGroup), in.ReleaseGroupID, in.Art)
+				changed, err := attachEntityArtTxChanged(ctx, tx, string(model.ArtReleaseGroup), in.ReleaseGroupID, pic)
 				if err != nil {
 					return waxerr.Wrap(waxerr.CodeIO, op, err)
 				}

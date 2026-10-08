@@ -34,7 +34,7 @@ func artistArtFixture(t *testing.T, names ...string) (*sqlite.Store, func(string
 // setArtistArt stores one artist art role from raw bytes, the way a user's `art set` does.
 func setArtistArt(t *testing.T, st *sqlite.Store, pid model.PID, role model.ArtRole, data string) {
 	t.Helper()
-	if err := st.SetEntityArt(context.Background(), model.ArtArtist, pid, role,
+	if _, err := st.SetEntityArt(context.Background(), model.ArtArtist, pid, role,
 		[]byte(data), "png", model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("set %s art: %v", role, err)
 	}
@@ -219,7 +219,7 @@ func TestArtistArtMarkersDropOnNewEvidence(t *testing.T) {
 
 	setArtistArt(t, st, pid("Cleared"), model.ArtRoleFront, "front")
 	mark("Cleared")
-	if err := st.SetEntityArt(ctx, model.ArtArtist, pid("Cleared"), model.ArtRoleFront, nil, "",
+	if _, err := st.SetEntityArt(ctx, model.ArtArtist, pid("Cleared"), model.ArtRoleFront, nil, "",
 		model.Attribution{Source: model.SourceUser}, model.LockUnchanged, false); err != nil {
 		t.Fatalf("clear front: %v", err)
 	}
@@ -345,7 +345,7 @@ func TestAClearDropsOnlyItsOwnHalf(t *testing.T) {
 	user := model.Attribution{Source: model.SourceUser}
 	clear := func(role model.ArtRole) {
 		t.Helper()
-		if err := st.SetEntityArt(ctx, model.ArtArtist, pid("Cleared"), role, nil, "", user, model.LockUnchanged, false); err != nil {
+		if _, err := st.SetEntityArt(ctx, model.ArtArtist, pid("Cleared"), role, nil, "", user, model.LockUnchanged, false); err != nil {
 			t.Fatalf("clear %s: %v", role, err)
 		}
 	}

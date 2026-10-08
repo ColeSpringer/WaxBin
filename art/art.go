@@ -11,6 +11,7 @@ package art
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"image"
@@ -240,13 +241,105 @@ func Thumbnail(src []byte, maxDim int) (out []byte, format string, w, h int, err
 	if maxDim <= 0 {
 		return nil, "", 0, 0, fmt.Errorf("thumbnail: non-positive max dimension %d", maxDim)
 	}
+	dst, srcFormat, err := fit(src, maxDim)
+	if err != nil {
+		return nil, "", 0, 0, err
+	}
+	format = "png"
+	if srcFormat == "jpeg" {
+		format = "jpeg"
+	}
+	if out, err = encode(dst, format, jpegQuality); err != nil {
+		return nil, "", 0, 0, err
+	}
+	return out, format, dst.Rect.Dx(), dst.Rect.Dy(), nil
+}
+
+// MaxSourceDim is the longest side, in pixels, past which a source image the catalog
+// keeps is scaled to fit, when that makes it smaller. A 3000 pixel original from an
+// archive or a feed is several megabytes a catalog would otherwise copy into every
+// backup and embed in every member file a write-back reaches, and nothing draws it at
+// that size.
+const MaxSourceDim = 2000
+
+// MaxDecodePixels is the largest frame a picture is decoded at. The decoders allocate
+// the whole frame, and a small file can claim a huge one (a PNG of zeros compresses a
+// thousand to one), so a picture past this is kept as it arrived and served unscaled.
+// It sits above the largest cover anyone scans (a 600 dpi sleeve is 52 megapixels) so
+// such a picture is bounded and thumbnailed like any other.
+const MaxDecodePixels = 80_000_000
+
+// sourceJPEGQuality is the quality a bounded source is re-encoded at, above the
+// thumbnail setting because it is the picture every thumbnail is cut from.
+const sourceJPEGQuality = 90
+
+// Bound returns the bytes the catalog keeps for an image: data itself when its longest
+// side is within MaxSourceDim, when its frame is past MaxDecodePixels, or when nothing
+// here can read it; otherwise a copy scaled to fit, as a JPEG or a PNG, whichever is
+// smaller, a picture with transparency always a PNG. The copy is kept only when it is
+// smaller than the arrival, since the bound is about bytes: a lean JPEG just over the
+// limit stays as it is. It reports whether it scaled. A picture that probes but will
+// not decode is an error, since the bytes claim to be an image and something is wrong
+// with them.
+//
+// A scaled copy is turned the way the arrival's EXIF orientation says, and carries the
+// pixels alone: a colour profile and a GIF's later frames go with the arrival, as they
+// always did in a thumbnail.
+func Bound(data []byte) (out []byte, bounded bool, err error) {
+	_, w, h, err := Probe(data)
+	if err != nil || (w <= MaxSourceDim && h <= MaxSourceDim) || w*h > MaxDecodePixels {
+		return data, false, nil
+	}
+	dst, srcFormat, err := fit(data, MaxSourceDim)
+	if err != nil {
+		return nil, false, err
+	}
+	opaque := dst.Opaque()
+	var best []byte
+	if opaque {
+		if best, err = encode(dst, "jpeg", sourceJPEGQuality); err != nil {
+			return nil, false, err
+		}
+	}
+	if srcFormat != "jpeg" || !opaque {
+		asPNG, err := encode(dst, "png", 0)
+		if err != nil {
+			return nil, false, err
+		}
+		if best == nil || len(asPNG) < len(best) {
+			best = asPNG
+		}
+	}
+	if len(best) >= len(data) {
+		return data, false, nil
+	}
+	return best, true, nil
+}
+
+// fit decodes src, turns it the way a JPEG's EXIF orientation says, and draws it scaled
+// to fit a maxDim box, never upscaled, reporting the format it decoded from. A frame
+// past MaxDecodePixels is refused before any decode. A source several times the box is
+// first averaged down in whole blocks: the resampler's working memory grows with the
+// source's height times the box's width, which for a 9000 pixel picture is over half a
+// gigabyte, while the blocks leave it at most twice the box.
+func fit(src []byte, maxDim int) (*image.RGBA, string, error) {
+	if cfg, _, err := image.DecodeConfig(bytes.NewReader(src)); err == nil && cfg.Width*cfg.Height > MaxDecodePixels {
+		return nil, "", fmt.Errorf("image %dx%d is past the decode ceiling of %d pixels", cfg.Width, cfg.Height, MaxDecodePixels)
+	}
 	img, srcFormat, err := image.Decode(bytes.NewReader(src))
 	if err != nil {
-		return nil, "", 0, 0, fmt.Errorf("decoding image: %w", err)
+		return nil, "", fmt.Errorf("decoding image: %w", err)
 	}
 	b := img.Bounds()
+	if k := reduceFactor(max(b.Dx(), b.Dy()), maxDim); k > 1 {
+		img = boxReduce(img, k)
+		b = img.Bounds()
+	}
+	if srcFormat == "jpeg" {
+		img = orient(img, orientation(src))
+		b = img.Bounds()
+	}
 	tw, th := fitDimensions(b.Dx(), b.Dy(), maxDim)
-
 	dst := image.NewRGBA(image.Rect(0, 0, tw, th))
 	if tw == b.Dx() && th == b.Dy() {
 		// Same size in and out, which is every box at or above the source's own longest
@@ -256,20 +349,167 @@ func Thumbnail(src []byte, maxDim int) (out []byte, format string, w, h int, err
 	} else {
 		xdraw.CatmullRom.Scale(dst, dst.Bounds(), img, b, xdraw.Over, nil)
 	}
+	return dst, srcFormat, nil
+}
 
-	var buf bytes.Buffer
-	outFormat := "png"
-	if srcFormat == "jpeg" {
-		outFormat = "jpeg"
-		if err := jpeg.Encode(&buf, dst, &jpeg.Options{Quality: jpegQuality}); err != nil {
-			return nil, "", 0, 0, fmt.Errorf("encoding jpeg thumbnail: %w", err)
-		}
-	} else {
-		if err := png.Encode(&buf, dst); err != nil {
-			return nil, "", 0, 0, fmt.Errorf("encoding png thumbnail: %w", err)
+// reduceFactor is the whole-block reduction applied before resampling a source whose
+// longest side is long into a maxDim box: none under twice the box, and otherwise the
+// factor that leaves the resampler between one and two times the box.
+func reduceFactor(long, maxDim int) int {
+	if long <= 2*maxDim {
+		return 1
+	}
+	return (long + 2*maxDim - 1) / (2 * maxDim)
+}
+
+// boxReduce averages each k by k block of img into one pixel, the blocks along the
+// right and bottom edges being whatever remains there.
+func boxReduce(img image.Image, k int) *image.RGBA {
+	b := img.Bounds()
+	w, h := (b.Dx()+k-1)/k, (b.Dy()+k-1)/k
+	dst := image.NewRGBA(image.Rect(0, 0, w, h))
+	for y := range h {
+		y0, y1 := b.Min.Y+y*k, min(b.Min.Y+(y+1)*k, b.Max.Y)
+		for x := range w {
+			x0, x1 := b.Min.X+x*k, min(b.Min.X+(x+1)*k, b.Max.X)
+			var r, g, bl, a, n uint64
+			for sy := y0; sy < y1; sy++ {
+				for sx := x0; sx < x1; sx++ {
+					pr, pg, pb, pa := img.At(sx, sy).RGBA()
+					r, g, bl, a, n = r+uint64(pr), g+uint64(pg), bl+uint64(pb), a+uint64(pa), n+1
+				}
+			}
+			i := dst.PixOffset(x, y)
+			dst.Pix[i], dst.Pix[i+1], dst.Pix[i+2], dst.Pix[i+3] = uint8(r/n>>8), uint8(g/n>>8), uint8(bl/n>>8), uint8(a/n>>8)
 		}
 	}
-	return buf.Bytes(), outFormat, tw, th, nil
+	return dst
+}
+
+// orientation reads a JPEG's EXIF orientation, 1 to 8, and answers 1 for a picture that
+// carries none or one that cannot be read.
+func orientation(data []byte) int {
+	if len(data) < 4 || data[0] != 0xFF || data[1] != 0xD8 {
+		return 1
+	}
+	for i := 2; i+4 <= len(data); {
+		if data[i] != 0xFF {
+			return 1
+		}
+		marker := data[i+1]
+		switch {
+		case marker == 0xFF:
+			i++ // fill byte
+			continue
+		case marker == 0xD8 || marker == 0x01 || (marker >= 0xD0 && marker <= 0xD7):
+			i += 2 // a marker with no segment
+			continue
+		case marker == 0xDA || marker == 0xD9:
+			return 1 // the image data begins; the metadata segments are behind us
+		}
+		n := int(data[i+2])<<8 | int(data[i+3])
+		if n < 2 || i+2+n > len(data) {
+			return 1
+		}
+		if marker == 0xE1 {
+			if o := exifOrientation(data[i+4 : i+2+n]); o != 0 {
+				return o
+			}
+		}
+		i += 2 + n
+	}
+	return 1
+}
+
+// exifOrientation reads the Orientation tag out of an APP1 payload, 0 when it has none.
+func exifOrientation(seg []byte) int {
+	if len(seg) < 14 || string(seg[:6]) != "Exif\x00\x00" {
+		return 0
+	}
+	t := seg[6:]
+	var bo binary.ByteOrder
+	switch string(t[:2]) {
+	case "II":
+		bo = binary.LittleEndian
+	case "MM":
+		bo = binary.BigEndian
+	default:
+		return 0
+	}
+	if bo.Uint16(t[2:4]) != 42 {
+		return 0
+	}
+	off := int(bo.Uint32(t[4:8]))
+	if off < 8 || off+2 > len(t) {
+		return 0
+	}
+	n := int(bo.Uint16(t[off : off+2]))
+	for e := range n {
+		p := off + 2 + e*12
+		if p+12 > len(t) {
+			return 0
+		}
+		if bo.Uint16(t[p:p+2]) != 0x0112 || bo.Uint16(t[p+2:p+4]) != 3 {
+			continue
+		}
+		if o := int(bo.Uint16(t[p+8 : p+10])); o >= 1 && o <= 8 {
+			return o
+		}
+		return 0
+	}
+	return 0
+}
+
+// orient turns img the way EXIF orientation o says it is to be shown.
+func orient(img image.Image, o int) image.Image {
+	if o <= 1 || o > 8 {
+		return img
+	}
+	b := img.Bounds()
+	w, h := b.Dx(), b.Dy()
+	dw, dh := w, h
+	if o >= 5 {
+		dw, dh = h, w
+	}
+	dst := image.NewRGBA(image.Rect(0, 0, dw, dh))
+	for y := range dh {
+		for x := range dw {
+			var sx, sy int
+			switch o {
+			case 2:
+				sx, sy = w-1-x, y
+			case 3:
+				sx, sy = w-1-x, h-1-y
+			case 4:
+				sx, sy = x, h-1-y
+			case 5:
+				sx, sy = y, x
+			case 6:
+				sx, sy = y, h-1-x
+			case 7:
+				sx, sy = w-1-y, h-1-x
+			case 8:
+				sx, sy = w-1-y, x
+			}
+			dst.Set(x, y, img.At(b.Min.X+sx, b.Min.Y+sy))
+		}
+	}
+	return dst
+}
+
+// encode writes dst as a JPEG at quality, or as a PNG for any other format.
+func encode(dst *image.RGBA, format string, quality int) ([]byte, error) {
+	var buf bytes.Buffer
+	if format == "jpeg" {
+		if err := jpeg.Encode(&buf, dst, &jpeg.Options{Quality: quality}); err != nil {
+			return nil, fmt.Errorf("encoding jpeg: %w", err)
+		}
+		return buf.Bytes(), nil
+	}
+	if err := png.Encode(&buf, dst); err != nil {
+		return nil, fmt.Errorf("encoding png: %w", err)
+	}
+	return buf.Bytes(), nil
 }
 
 // fitDimensions returns the largest width x height that fits in a maxDim box while

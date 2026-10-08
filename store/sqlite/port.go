@@ -75,8 +75,8 @@ func (s *Store) DeleteSecret(ctx context.Context, key string) error {
 // BackupTo writes a self-contained byte copy of the catalog to dest via
 // VACUUM INTO (which captures committed state and works on a read-only source, so
 // a backup can run concurrently with a writer). The copy contains every table,
-// the secret table included; use port.RedactBackupFile to strip secrets from a
-// copy meant to leave the host.
+// the secret table included; port.TrimBackupFile strips secrets from a copy meant
+// to leave the host, and thumbnails from one meant to be small.
 func (s *Store) BackupTo(ctx context.Context, dest string) error {
 	const op = "store.BackupTo"
 	if strings.TrimSpace(dest) == "" {

@@ -12,6 +12,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/colespringer/waxbin/art"
 	"github.com/colespringer/waxbin/enrich"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/store/sqlite"
@@ -43,6 +44,7 @@ type caaMock struct {
 	art          []byte
 	coverRelease string
 	etag         string
+	thumbnails   bool // whether the archive renders the 1200 rung; off, only the originals answer
 	// group and release count front requests, images the downloads that carried bytes.
 	group, release, images int
 }
@@ -51,6 +53,12 @@ func (m *caaMock) hits() (group, release, images int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.group, m.release, m.images
+}
+
+func (m *caaMock) setThumbnails(on bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.thumbnails = on
 }
 
 func (m *caaMock) set(coverRelease, etag string, art []byte) {
@@ -62,21 +70,30 @@ func (m *caaMock) set(coverRelease, etag string, art []byte) {
 	}
 }
 
-// newRedirectingCAAMock builds the mock: /release-group/<g>/front and /release/<r>/front
-// both 307 into /download/mbid-<id>/mbid-<id>-1.jpg, which serves the bytes with an ETag
-// and answers 304 to a matching If-None-Match.
+// newRedirectingCAAMock builds the mock: /release-group/<g>/front-1200 and
+// /release/<r>/front-1200 both 307 into /download/mbid-<id>/mbid-<id>-1_thumb1200.jpg,
+// which serves the bytes with an ETag and answers 304 to a matching If-None-Match. The
+// originals are not served, so a request for one is a wrong turn, until setThumbnails(false)
+// plays an archive with no 1200 rung, which serves the originals alone.
 func newRedirectingCAAMock(t *testing.T, art []byte, coverRelease string) (string, *caaMock) {
 	t.Helper()
-	m := &caaMock{art: art, coverRelease: coverRelease, etag: `"v1"`}
+	m := &caaMock{art: art, coverRelease: coverRelease, etag: `"v1"`, thumbnails: true}
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		m.mu.Lock()
 		defer m.mu.Unlock()
 		p := r.URL.Path
 		switch {
-		case strings.HasPrefix(p, "/release-group/") && strings.HasSuffix(p, "/front"):
+		case strings.HasPrefix(p, "/release-group/") && strings.HasSuffix(p, "/front-1200") && m.thumbnails:
+			m.group++
+			http.Redirect(w, r, "/download/mbid-"+m.coverRelease+"/mbid-"+m.coverRelease+"-1_thumb1200.jpg", http.StatusTemporaryRedirect)
+		case strings.HasPrefix(p, "/release/") && strings.HasSuffix(p, "/front-1200") && m.thumbnails:
+			m.release++
+			id := strings.TrimSuffix(strings.TrimPrefix(p, "/release/"), "/front-1200")
+			http.Redirect(w, r, "/download/mbid-"+id+"/mbid-"+id+"-1_thumb1200.jpg", http.StatusTemporaryRedirect)
+		case strings.HasPrefix(p, "/release-group/") && strings.HasSuffix(p, "/front") && !m.thumbnails:
 			m.group++
 			http.Redirect(w, r, "/download/mbid-"+m.coverRelease+"/mbid-"+m.coverRelease+"-1.jpg", http.StatusTemporaryRedirect)
-		case strings.HasPrefix(p, "/release/") && strings.HasSuffix(p, "/front"):
+		case strings.HasPrefix(p, "/release/") && strings.HasSuffix(p, "/front") && !m.thumbnails:
 			m.release++
 			id := strings.TrimSuffix(strings.TrimPrefix(p, "/release/"), "/front")
 			http.Redirect(w, r, "/download/mbid-"+id+"/mbid-"+id+"-1.jpg", http.StatusTemporaryRedirect)
@@ -226,11 +243,11 @@ func TestAlbumArtDoesNotReuseWhenTheGroupFrontChangedUnderTheRecord(t *testing.T
 	db := roDB(t, dbPath)
 	rgPID := model.PID(scalarStr(t, db, "SELECT pid FROM release_group WHERE title='Wish You Were Here'"))
 	alPID := model.PID(scalarStr(t, db, "SELECT pid FROM album WHERE title='Wish You Were Here'"))
-	if err := st.SetEntityArt(ctx, model.ArtReleaseGroup, rgPID, model.ArtRoleFront, otherPNG(t), "",
+	if _, err := st.SetEntityArt(ctx, model.ArtReleaseGroup, rgPID, model.ArtRoleFront, otherPNG(t), "",
 		model.Attribution{Source: model.SourceEnrichment, Provider: "coverartarchive"}, model.LockOf(false), false); err != nil {
 		t.Fatalf("replace the group front: %v", err)
 	}
-	if err := st.SetEntityArt(ctx, model.ArtAlbum, alPID, model.ArtRoleFront, nil, "",
+	if _, err := st.SetEntityArt(ctx, model.ArtAlbum, alPID, model.ArtRoleFront, nil, "",
 		model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("clear the album front: %v", err)
 	}
@@ -256,7 +273,7 @@ func TestAlbumArtDoesNotReuseAHandSetGroupCover(t *testing.T) {
 	seedWYWH(t, st, lib.ID, "ess-a", edGBMBID)
 
 	rgPID := model.PID(scalarStr(t, roDB(t, dbPath), "SELECT pid FROM release_group WHERE title='Wish You Were Here'"))
-	if err := st.SetEntityArt(ctx, model.ArtReleaseGroup, rgPID, model.ArtRoleFront, otherPNG(t), "",
+	if _, err := st.SetEntityArt(ctx, model.ArtReleaseGroup, rgPID, model.ArtRoleFront, otherPNG(t), "",
 		model.Attribution{Source: model.SourceUser}, model.LockOf(true), false); err != nil {
 		t.Fatalf("hand-set the group front: %v", err)
 	}
@@ -291,7 +308,7 @@ func TestAlbumArtReuseIgnoresForce(t *testing.T) {
 		t.Fatalf("first Run: %v", err)
 	}
 	alPID := model.PID(scalarStr(t, roDB(t, dbPath), "SELECT pid FROM album WHERE title='Wish You Were Here'"))
-	if err := st.SetEntityArt(ctx, model.ArtAlbum, alPID, model.ArtRoleFront, nil, "",
+	if _, err := st.SetEntityArt(ctx, model.ArtAlbum, alPID, model.ArtRoleFront, nil, "",
 		model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("clear the album front: %v", err)
 	}
@@ -422,7 +439,7 @@ func TestForcedGroupFetchIsUnconditionalForAHandSetFront(t *testing.T) {
 		t.Fatalf("first Run: %v", err)
 	}
 	rgPID := model.PID(scalarStr(t, roDB(t, dbPath), "SELECT pid FROM release_group WHERE title='Wish You Were Here'"))
-	if err := st.SetEntityArt(ctx, model.ArtReleaseGroup, rgPID, model.ArtRoleFront, otherPNG(t), "",
+	if _, err := st.SetEntityArt(ctx, model.ArtReleaseGroup, rgPID, model.ArtRoleFront, otherPNG(t), "",
 		model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("hand-set the group front: %v", err)
 	}
@@ -432,5 +449,57 @@ func TestForcedGroupFetchIsUnconditionalForAHandSetFront(t *testing.T) {
 	}
 	if _, _, images := hits.hits(); images != 2 {
 		t.Errorf("images downloaded = %d, want 2 (no validator was sent)", images)
+	}
+}
+
+// TestForcedGroupFetchIsConditionalForABoundedCover: the record names the bytes the
+// catalog stored, so a cover the catalog bounded still turns a forced re-fetch into a
+// request with no download.
+func TestForcedGroupFetchIsConditionalForABoundedCover(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	st, dbPath, lib := openStore(t)
+	seedWYWH(t, st, lib.ID, "ess-a", edGBMBID)
+
+	caa, hits := newRedirectingCAAMock(t, bigPNG(t), edGBMBID)
+	svc := albumArtService(st, newRelMock(t, "[]").server.URL, caa)
+	if _, err := svc.Run(ctx, enrich.RunOptions{}, nil); err != nil {
+		t.Fatalf("first Run: %v", err)
+	}
+	if w := scalarInt(t, roDB(t, dbPath), `SELECT s.width FROM art_source s JOIN art_map am ON am.source_hash = s.hash
+		WHERE am.entity_type = 'release_group'`); w != art.MaxSourceDim {
+		t.Fatalf("stored group front is %d wide, want %d", w, art.MaxSourceDim)
+	}
+	if _, err := svc.Run(ctx, enrich.RunOptions{ForcePhases: []model.EnrichPhase{model.EnrichPhaseReleaseGroup}}, nil); err != nil {
+		t.Fatalf("forced Run: %v", err)
+	}
+	if _, _, images := hits.hits(); images != 1 {
+		t.Errorf("images downloaded = %d, want the first one alone (the archive answered 304)", images)
+	}
+}
+
+// TestForcedGroupFetchIsConditionalThroughTheFallback: when the archive holds no 1200
+// rung the original is fetched, and its validator makes the forced re-fetch conditional
+// just the same.
+func TestForcedGroupFetchIsConditionalThroughTheFallback(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	st, _, lib := openStore(t)
+	seedWYWH(t, st, lib.ID, "ess-a", edGBMBID)
+
+	caa, hits := newRedirectingCAAMock(t, pngBytes(t), edGBMBID)
+	hits.setThumbnails(false)
+	svc := albumArtService(st, newRelMock(t, "[]").server.URL, caa)
+	if _, err := svc.Run(ctx, enrich.RunOptions{}, nil); err != nil {
+		t.Fatalf("first Run: %v", err)
+	}
+	if _, _, images := hits.hits(); images != 1 {
+		t.Fatalf("first run downloaded %d images, want 1 through the fallback", images)
+	}
+	if _, err := svc.Run(ctx, enrich.RunOptions{ForcePhases: []model.EnrichPhase{model.EnrichPhaseReleaseGroup}}, nil); err != nil {
+		t.Fatalf("forced Run: %v", err)
+	}
+	if _, _, images := hits.hits(); images != 1 {
+		t.Errorf("images downloaded = %d, want the first one alone (the original answered 304)", images)
 	}
 }

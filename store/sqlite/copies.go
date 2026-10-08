@@ -430,7 +430,7 @@ func dropCopyDiagnosticsTx(ctx context.Context, tx *sql.Tx, fileID int64) error 
 // A missing item the file belongs to is present again, its primary being on disk. The
 // item emits one update when the edge is new or it came back.
 func (s *Store) attachCopyTx(ctx context.Context, tx *sql.Tx, in model.PutScannedTrackInput, fileID int64, filePID model.PID,
-	itemID int64, primary *standingPrimary, fileTitle string, fileTrack model.Track, res *model.ScanItemResult, now int64) error {
+	itemID int64, primary *standingPrimary, fileTitle string, fileTrack model.Track, res *model.ScanItemResult, now int64, cover examinedArt) error {
 	const op = "store.PutScannedTrack"
 	var itemPID model.PID
 	if err := tx.QueryRowContext(ctx, "SELECT pid FROM playable_item WHERE id = ?", itemID).Scan(&itemPID); err != nil {
@@ -478,7 +478,7 @@ func (s *Store) attachCopyTx(ctx context.Context, tx *sql.Tx, in model.PutScanne
 	}
 	if err := settleOwedByScanTx(ctx, tx, fileID, itemID, scanSettle{
 		fileTitle: fileTitle, title: curTitle, fileTrack: fileTrack, track: cur,
-		preserveLocks: in.PreserveLocks, derived: in.Derived, cover: in.CoverArt, fileTags: in.CustomTags,
+		preserveLocks: in.PreserveLocks, derived: in.Derived, cover: cover, fileTags: in.CustomTags,
 	}); err != nil {
 		return waxerr.Wrap(waxerr.CodeIO, op, err)
 	}

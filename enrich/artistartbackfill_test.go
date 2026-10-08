@@ -103,7 +103,7 @@ func TestArtistArtBackfillQueuesAnEmptyAuxSlot(t *testing.T) {
 	st, dbPath, lib := openStore(t)
 	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
 	pid := model.PID(scalarStr(t, roDB(t, dbPath), "SELECT pid FROM artist WHERE name='Pink Floyd'"))
-	if err := st.SetEntityArt(ctx, model.ArtArtist, pid, model.ArtRoleFront, pngBytes(t), "",
+	if _, err := st.SetEntityArt(ctx, model.ArtArtist, pid, model.ArtRoleFront, pngBytes(t), "",
 		model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("set the artist's front: %v", err)
 	}

@@ -751,7 +751,7 @@ func TestEntityEditClearRGMBIDTakesBackEnrichmentArt(t *testing.T) {
 
 	seedArt := func(t *testing.T, st *Store, rgPID model.PID, rgID int64) {
 		t.Helper()
-		if err := st.SetEntityArt(ctx, model.ArtReleaseGroup, rgPID, model.ArtRoleBack,
+		if _, err := st.SetEntityArt(ctx, model.ArtReleaseGroup, rgPID, model.ArtRoleBack,
 			[]byte("user-back"), "png", model.Attribution{Source: model.SourceUser},
 			model.LockOf(false), false); err != nil {
 			t.Fatalf("seed user back: %v", err)
@@ -818,7 +818,7 @@ func TestEntityEditMBIDCorrectionTakesBackEnrichmentArt(t *testing.T) {
 
 	t.Run("release group", func(t *testing.T) {
 		st, rgPID, rgID := rgArtFixture(t, rgMBID)
-		if err := st.SetEntityArt(ctx, model.ArtReleaseGroup, rgPID, model.ArtRoleBack,
+		if _, err := st.SetEntityArt(ctx, model.ArtReleaseGroup, rgPID, model.ArtRoleBack,
 			[]byte("user-back"), "png", user, model.LockOf(false), false); err != nil {
 			t.Fatalf("seed user back: %v", err)
 		}

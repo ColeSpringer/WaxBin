@@ -41,7 +41,11 @@ type rowScanner interface {
 // facet.go's album and releaseGroup specs read alb and rg instead of joining their
 // own, so this join cannot be made conditional. itemCountSelect and portable.go's
 // identitySelect pay one PK seek for a column they never read.
-const itemJoins = ` FROM playable_item pi
+const itemJoins = ` FROM playable_item pi` + itemSubJoins
+
+// itemSubJoins is itemJoins after its FROM, for a statement that reaches pi through a
+// join of its own.
+const itemSubJoins = `
 	LEFT JOIN track t ON t.item_id = pi.id
 	LEFT JOIN book bk ON bk.item_id = pi.id
 	LEFT JOIN series srs ON srs.id = bk.series_id
@@ -562,7 +566,9 @@ func adoptBookItemByEditionTx(ctx context.Context, tx *sql.Tx, identityKey strin
 // enrichment-derived ASIN or ISBN joins the standing book rather than forking a new one,
 // and by its edition column for the same reason. See adoptBookItemByIdentTx. A non-nil
 // known is the put's earlier resolution of the key (resolvedItem), used in its place.
-func upsertItem(ctx context.Context, tx *sql.Tx, log logger, item model.PlayableItem, adopt bookAdoptKey, now int64, preferredPID model.PID, known *resolvedItem) (id int64, pid model.PID, created, stateChanged bool, priorTitle string, err error) {
+// releaseYear is the track's or book's year, 0 for an episode, kept on the item row for
+// the newest list; it rides on the row's write rather than costing a statement of its own.
+func upsertItem(ctx context.Context, tx *sql.Tx, log logger, item model.PlayableItem, releaseYear int, adopt bookAdoptKey, now int64, preferredPID model.PID, known *resolvedItem) (id int64, pid model.PID, created, stateChanged bool, priorTitle string, err error) {
 	if item.IdentityKey != "" {
 		var rid int64
 		var rpid, curState, curTitle string
@@ -591,8 +597,8 @@ func upsertItem(ctx context.Context, tx *sql.Tx, log logger, item model.Playable
 		switch {
 		case qerr == nil:
 			if _, uerr := tx.ExecContext(ctx,
-				"UPDATE playable_item SET title=?, sort_key=?, state=?, updated_at=? WHERE id=?",
-				item.Title, item.SortKey, string(item.State), now, rid); uerr != nil {
+				"UPDATE playable_item SET title=?, sort_key=?, state=?, release_year=?, updated_at=? WHERE id=?",
+				item.Title, item.SortKey, string(item.State), releaseYear, now, rid); uerr != nil {
 				return 0, "", false, false, "", uerr
 			}
 			return rid, model.PID(rpid), false, curState != string(item.State), curTitle, nil
@@ -617,10 +623,10 @@ func upsertItem(ctx context.Context, tx *sql.Tx, log logger, item model.Playable
 		}
 	}
 	r, ierr := tx.ExecContext(ctx, `INSERT INTO playable_item
-		(pid, kind, state, title, sort_key, identity_key, created_at, updated_at)
-		VALUES (?,?,?,?,?,?,?,?)`,
+		(pid, kind, state, title, sort_key, identity_key, release_year, created_at, updated_at)
+		VALUES (?,?,?,?,?,?,?,?,?)`,
 		string(newPID), string(item.Kind), string(item.State), item.Title, item.SortKey,
-		nullStr(item.IdentityKey), now, now)
+		nullStr(item.IdentityKey), releaseYear, now, now)
 	if ierr != nil {
 		return 0, "", false, false, "", ierr
 	}

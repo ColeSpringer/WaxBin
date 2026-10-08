@@ -166,18 +166,17 @@ const episodeSelect = `SELECT pi.pid, pi.title, pi.state, p.pid, p.title,
 	LEFT JOIN item_file pf ON pf.item_id = pi.id AND pf.role = 'primary'
 	LEFT JOIN file f ON f.id = pf.file_id`
 
-func scanEpisode(sc rowScanner) (*model.Episode, bool, error) {
+func scanEpisode(sc rowScanner) (*model.Episode, error) {
 	var e model.Episode
 	var state, epType string
 	var pubDate, year, season, episodeNo, durMS, fileDurMS sql.NullInt64
 	var fpid, fdisp sql.NullString
-	var hasTranscript bool
 	if err := sc.Scan(&e.PID, &e.Title, &state, &e.PodcastPID, &e.PodcastTitle,
 		&e.GUID, &e.Description, &e.Link, &pubDate, &year, &season, &episodeNo, &epType,
 		&durMS, &e.Explicit, &e.EnclosureURL, &e.EnclosureType, &e.EnclosureSize,
 		&e.TranscriptURL, &e.TranscriptType, &e.ChaptersURL, &e.ImageURL, &e.Pinned, &e.CreatedAt, &e.UpdatedAt,
-		&fpid, &fdisp, &fileDurMS, &hasTranscript); err != nil {
-		return nil, false, err
+		&fpid, &fdisp, &fileDurMS, &e.HasTranscript); err != nil {
+		return nil, err
 	}
 	e.State = model.ItemState(state)
 	e.EpisodeType = model.EpisodeType(epType)
@@ -193,7 +192,7 @@ func scanEpisode(sc rowScanner) (*model.Episode, bool, error) {
 	e.FilePID = model.PID(fpid.String)
 	e.DisplayPath = fdisp.String
 	e.Downloaded = e.State == model.StatePresent && fpid.Valid
-	return &e, hasTranscript, nil
+	return &e, nil
 }
 
 // EpisodesByPodcast lists a podcast's episodes, newest publication first (undated
@@ -216,7 +215,7 @@ func (s *Store) EpisodesByPodcast(ctx context.Context, podcastPID model.PID, lim
 	defer rows.Close()
 	var out []*model.Episode
 	for rows.Next() {
-		e, _, err := scanEpisode(rows)
+		e, err := scanEpisode(rows)
 		if err != nil {
 			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
@@ -225,7 +224,6 @@ func (s *Store) EpisodesByPodcast(ctx context.Context, podcastPID model.PID, lim
 	return out, rows.Err()
 }
 
-// EpisodeByPID returns one episode by public id, with HasTranscript set.
 // EpisodeChapters returns a downloaded episode's chapters in timeline order,
 // preferring the podcast:chapters JSON source over any embedded chapters. It reuses
 // the book chapter timeline over the episode's single backing file. An episode with
@@ -250,20 +248,76 @@ func (s *Store) EpisodeChapters(ctx context.Context, pid model.PID) ([]model.Cha
 	return chs, err
 }
 
-func (s *Store) EpisodeByPID(ctx context.Context, pid model.PID) (*model.EpisodeDetail, error) {
-	const op = "store.EpisodeByPID"
-	e, hasTranscript, err := scanEpisode(s.read.QueryRowContext(ctx, episodeSelect+" WHERE pi.pid = ?", string(pid)))
+// EpisodeMeta returns one episode's row by public id, in one statement, for an
+// operation that needs nothing of its detail. A pid that is no episode is CodeNotFound.
+func (s *Store) EpisodeMeta(ctx context.Context, pid model.PID) (*model.Episode, error) {
+	return s.episodeRow(ctx, pid, "store.EpisodeMeta")
+}
+
+func (s *Store) episodeRow(ctx context.Context, pid model.PID, op string) (*model.Episode, error) {
+	e, err := scanEpisode(s.read.QueryRowContext(ctx, episodeSelect+" WHERE pi.pid = ?", string(pid)))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, waxerr.New(waxerr.CodeNotFound, op, "no such episode: "+string(pid))
 	}
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
+	return e, nil
+}
+
+// EpisodesByPIDs returns the episodes named by pids in request order, each once. A pid
+// that is no episode (an unknown one, a track) is left out.
+func (s *Store) EpisodesByPIDs(ctx context.Context, pids []model.PID) ([]*model.Episode, error) {
+	const op = "store.EpisodesByPIDs"
+	if len(pids) == 0 {
+		return nil, nil
+	}
+	unique := uniquePIDs(pids)
+	byPID := make(map[model.PID]*model.Episode, len(unique))
+	err := chunkSlice(unique, idBatchSize, func(chunk []model.PID) error {
+		args := make([]any, len(chunk))
+		for i, pid := range chunk {
+			args[i] = string(pid)
+		}
+		rows, err := s.read.QueryContext(ctx, episodeSelect+" WHERE pi.pid IN "+placeholders(len(chunk)), args...)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			e, err := scanEpisode(rows)
+			if err != nil {
+				return err
+			}
+			byPID[e.PID] = e
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	out := make([]*model.Episode, 0, len(unique))
+	for _, pid := range unique {
+		if e, ok := byPID[pid]; ok {
+			out = append(out, e)
+		}
+	}
+	return out, nil
+}
+
+// EpisodeByPID returns one episode's detail by public id: its row, chapters, persons and
+// soundbites.
+func (s *Store) EpisodeByPID(ctx context.Context, pid model.PID) (*model.EpisodeDetail, error) {
+	const op = "store.EpisodeByPID"
+	e, err := s.episodeRow(ctx, pid, op)
+	if err != nil {
+		return nil, err
+	}
 	chapters, err := s.EpisodeChapters(ctx, pid)
 	if err != nil {
 		return nil, err
 	}
-	d := &model.EpisodeDetail{Episode: e, HasTranscript: hasTranscript, Chapters: chapters}
+	d := &model.EpisodeDetail{Episode: e, Chapters: chapters}
 
 	// The Podcasting 2.0 extras are detail-only loads, keeping the list reads to
 	// their single query.
@@ -328,7 +382,7 @@ func (s *Store) DownloadedEpisodes(ctx context.Context, podcastPID model.PID) ([
 	defer rows.Close()
 	var out []*model.Episode
 	for rows.Next() {
-		e, _, err := scanEpisode(rows)
+		e, err := scanEpisode(rows)
 		if err != nil {
 			return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 		}

@@ -33,12 +33,19 @@ func benchStore(tb testing.TB) (*Store, *model.Library) {
 // artists, 200 albums, 5 genres) so the read benchmarks exercise real grouping.
 func benchInsert(tb testing.TB, st *Store, libID int64, i int) {
 	tb.Helper()
+	if _, err := st.PutScannedTrack(context.Background(), benchTrack(libID, i)); err != nil {
+		tb.Fatal(err)
+	}
+}
+
+// benchTrack is the i-th synthetic track benchInsert puts.
+func benchTrack(libID int64, i int) model.PutScannedTrackInput {
 	artist := fmt.Sprintf("Artist %d", i%50)
 	album := fmt.Sprintf("Album %d", i%200)
 	genre := []string{"Rock", "Jazz", "Pop", "Electronic", "Classical"}[i%5]
 	path := fmt.Sprintf("/lib/%d/%d.flac", i%200, i)
 	title := fmt.Sprintf("Track %d", i)
-	in := model.PutScannedTrackInput{
+	return model.PutScannedTrackInput{
 		LibraryID: libID,
 		File: model.File{
 			Path: []byte(path), DisplayPath: path, RelPath: fmt.Appendf(nil, "%d.flac", i),
@@ -53,9 +60,6 @@ func benchInsert(tb testing.TB, st *Store, libID int64, i int) {
 			Artist: artist, ArtistSort: model.SortKey(artist), Album: album, AlbumArtist: artist,
 			Genre: genre, Genres: []string{genre}, Year: 2000 + i%20,
 		},
-	}
-	if _, err := st.PutScannedTrack(context.Background(), in); err != nil {
-		tb.Fatal(err)
 	}
 }
 
@@ -112,6 +116,18 @@ func BenchmarkBrowseNewestAtScale(b *testing.B) {
 	populate(b, st, lib.ID, benchScale)
 	for b.Loop() {
 		if _, err := st.BrowsePage(context.Background(), read.ListNewest, read.BrowseOptions{Limit: 50}); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// BenchmarkBrowseRandomAtScale measures a shuffled page at scale, the one list that
+// sorts the catalog rather than walking an index.
+func BenchmarkBrowseRandomAtScale(b *testing.B) {
+	st, lib := benchStore(b)
+	populate(b, st, lib.ID, benchScale)
+	for b.Loop() {
+		if _, err := st.BrowsePage(context.Background(), read.ListRandom, read.BrowseOptions{Limit: 50, Seed: 42}); err != nil {
 			b.Fatal(err)
 		}
 	}

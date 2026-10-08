@@ -47,15 +47,15 @@ func (s *Service) PutTranscript(ctx context.Context, in model.PutTranscriptInput
 // to be downloaded, which covers a streamed-never-downloaded episode.
 func (s *Service) FetchTranscript(ctx context.Context, episodePID model.PID) error {
 	const op = "podcast.FetchTranscript"
-	d, err := s.store.EpisodeByPID(ctx, episodePID)
+	ep, err := s.store.EpisodeMeta(ctx, episodePID)
 	if err != nil {
 		return err
 	}
-	url := strings.TrimSpace(d.Episode.TranscriptURL)
+	url := strings.TrimSpace(ep.TranscriptURL)
 	if url == "" {
 		return waxerr.New(waxerr.CodeInvalid, op, "episode declares no transcript url")
 	}
-	return s.fetchAndStoreTranscript(ctx, episodePID, url, d.Episode.TranscriptType)
+	return s.fetchAndStoreTranscript(ctx, episodePID, url, ep.TranscriptType)
 }
 
 // Transcript returns an episode's stored transcript (CodeNotFound when none is

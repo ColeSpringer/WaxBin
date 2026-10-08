@@ -275,3 +275,22 @@ func TestAnalyzeResultReportsTheFingerprintPath(t *testing.T) {
 		t.Errorf("partial line = %q, want the 3 partial reads kept", got)
 	}
 }
+
+// TestEpisodeViewsCarryTheTranscriptFlag: a listed episode says whether a transcript is
+// stored, as the detail view always did, under the same key.
+func TestEpisodeViewsCarryTheTranscriptFlag(t *testing.T) {
+	t.Parallel()
+	ep := &model.Episode{PID: "e1", Title: "One", State: model.StatePresent, HasTranscript: true}
+	for name, v := range map[string]any{
+		"list":   toEpisodeViews([]*model.Episode{ep})[0],
+		"detail": toEpisodeDetailView(&model.EpisodeDetail{Episode: ep}),
+	} {
+		b, err := json.Marshal(v)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(b), `"hasTranscript":true`) {
+			t.Errorf("%s view = %s, want hasTranscript true", name, b)
+		}
+	}
+}

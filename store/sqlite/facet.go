@@ -382,59 +382,14 @@ const defaultPageSize = 100
 // malformed cursor is rejected rather than silently restarting.
 func (s *Store) QueryPage(ctx context.Context, q query.Query, cursor read.Cursor, limit int, desc bool, userPID model.PID) (*read.Page, error) {
 	const op = "store.QueryPage"
-	fm, ok := fieldMapFor(q.Entity)
-	if !ok {
-		return nil, waxerr.New(waxerr.CodeInvalid, op, "unsupported query entity: "+string(q.Entity))
-	}
-	c, err := query.Compile(q, fm)
-	if err != nil {
-		return nil, err
-	}
-	userJoin, leadArgs, err := s.userStateJoin(ctx, c, userPID, op)
-	if err != nil {
-		return nil, err
-	}
 	if limit <= 0 {
 		limit = defaultPageSize
 	}
-
-	// leadArgs (the join user id, or empty) leads the args: its ON clause precedes
-	// WHERE and the keyset comparison.
-	args := append(leadArgs, c.Args...)
-	where := andWhere(c.Where, entityPredicate(q.Entity))
-	cmp := ">"
-	order := "ASC"
-	if desc {
-		cmp, order = "<", "DESC"
+	stmt, args, err := s.queryPageStmt(ctx, q, cursor, limit, desc, userPID, op)
+	if err != nil {
+		return nil, err
 	}
-	if cursor != "" {
-		sk, pid, decodeOK := cursor.Decode()
-		if !decodeOK {
-			return nil, waxerr.New(waxerr.CodeInvalid, op, "malformed page cursor")
-		}
-		// SQLite row-value comparison: (a, b) > (x, y) is exactly
-		// a > x OR (a = x AND b > y), but the planner can drive it off an index
-		// directly, and it needs only two binds.
-		keyset := fmt.Sprintf("(pi.sort_key, pi.pid) %s (?, ?)", cmp)
-		if where != "" {
-			where = "(" + where + ") AND " + keyset
-		} else {
-			where = keyset
-		}
-		args = append(args, sk, string(pid))
-	}
-
-	var sb strings.Builder
-	sb.WriteString(pageItemSelect)
-	sb.WriteString(userJoin)
-	if where != "" {
-		sb.WriteString(" WHERE ")
-		sb.WriteString(where)
-	}
-	fmt.Fprintf(&sb, " ORDER BY pi.sort_key %s, pi.pid %s LIMIT ?", order, order)
-	args = append(args, limit+1) // fetch one extra to detect a further page
-
-	rows, err := s.read.QueryContext(ctx, sb.String(), args...)
+	rows, err := s.rstmts.queryContext(ctx, s.read, stmt, args...)
 	if err != nil {
 		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
@@ -462,4 +417,58 @@ func (s *Store) QueryPage(ctx context.Context, q query.Query, cursor read.Cursor
 		page.Next = read.EncodeCursor(sortKeys[limit-1], page.Items[limit-1].PID)
 	}
 	return page, nil
+}
+
+// queryPageStmt assembles QueryPage's statement and bind args. The limit is written into
+// the text, as browseStmt writes its own.
+func (s *Store) queryPageStmt(ctx context.Context, q query.Query, cursor read.Cursor, limit int, desc bool, userPID model.PID, op string) (string, []any, error) {
+	fm, ok := fieldMapFor(q.Entity)
+	if !ok {
+		return "", nil, waxerr.New(waxerr.CodeInvalid, op, "unsupported query entity: "+string(q.Entity))
+	}
+	c, err := query.Compile(q, fm)
+	if err != nil {
+		return "", nil, err
+	}
+	userJoin, leadArgs, err := s.userStateJoin(ctx, c, userPID, op)
+	if err != nil {
+		return "", nil, err
+	}
+
+	// leadArgs (the join user id, or empty) leads the args: its ON clause precedes
+	// WHERE and the keyset comparison.
+	args := append(leadArgs, c.Args...)
+	where := andWhere(c.Where, entityPredicate(q.Entity))
+	cmp := ">"
+	order := "ASC"
+	if desc {
+		cmp, order = "<", "DESC"
+	}
+	if cursor != "" {
+		sk, pid, decodeOK := cursor.Decode()
+		if !decodeOK {
+			return "", nil, waxerr.New(waxerr.CodeInvalid, op, "malformed page cursor")
+		}
+		// SQLite row-value comparison: (a, b) > (x, y) is exactly
+		// a > x OR (a = x AND b > y), but the planner can drive it off an index
+		// directly, and it needs only two binds.
+		keyset := fmt.Sprintf("(pi.sort_key, pi.pid) %s (?, ?)", cmp)
+		if where != "" {
+			where = "(" + where + ") AND " + keyset
+		} else {
+			where = keyset
+		}
+		args = append(args, sk, string(pid))
+	}
+
+	var sb strings.Builder
+	sb.WriteString(pageItemSelect)
+	sb.WriteString(userJoin)
+	if where != "" {
+		sb.WriteString(" WHERE ")
+		sb.WriteString(where)
+	}
+	// Fetch one extra to detect a further page.
+	fmt.Fprintf(&sb, " ORDER BY pi.sort_key %s, pi.pid %s LIMIT %d", order, order, limit+1)
+	return sb.String(), args, nil
 }

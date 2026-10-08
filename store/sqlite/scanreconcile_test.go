@@ -38,7 +38,7 @@ func moveFixtureAt(t *testing.T, first, second string) (*Store, *model.Library, 
 		model.Attribution{Source: model.SourceUser}, model.LockOn, false); err != nil {
 		t.Fatalf("seed curation: %v", err)
 	}
-	if err := st.SetEntityArt(ctx, model.ArtAlbum, albPID, model.ArtRoleFront, testPNG(t, 64, 64).Data, "",
+	if _, err := st.SetEntityArt(ctx, model.ArtAlbum, albPID, model.ArtRoleFront, testPNG(t, 64, 64).Data, "",
 		model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("seed art: %v", err)
 	}
@@ -137,7 +137,7 @@ func TestScanMoveIntoEstablishedAlbumMergesAttachments(t *testing.T) {
 	destID := scalarInt(t, st, "SELECT id FROM album WHERE id<>?", oldID)
 	destPID := model.PID(scalarStr(t, st, "SELECT pid FROM album WHERE id=?", destID))
 	destCover := testPNG(t, 32, 32)
-	if err := st.SetEntityArt(ctx, model.ArtAlbum, destPID, model.ArtRoleFront, destCover.Data, "",
+	if _, err := st.SetEntityArt(ctx, model.ArtAlbum, destPID, model.ArtRoleFront, destCover.Data, "",
 		model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("seed destination art: %v", err)
 	}
@@ -407,7 +407,7 @@ func TestScanAlbumArtistRetagIntoEstablishedAlbumKeepsGroupPID(t *testing.T) {
 	destID := scalarInt(t, st, "SELECT id FROM album WHERE id<>?", albumID)
 	destPID := model.PID(scalarStr(t, st, "SELECT pid FROM album WHERE id=?", destID))
 	destCover := testPNG(t, 32, 32)
-	if err := st.SetEntityArt(ctx, model.ArtAlbum, destPID, model.ArtRoleFront, destCover.Data, "",
+	if _, err := st.SetEntityArt(ctx, model.ArtAlbum, destPID, model.ArtRoleFront, destCover.Data, "",
 		model.Attribution{Source: model.SourceUser}, model.LockOf(false), false); err != nil {
 		t.Fatalf("seed destination art: %v", err)
 	}

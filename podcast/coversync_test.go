@@ -15,6 +15,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/colespringer/waxbin/art"
 	"github.com/colespringer/waxbin/meta"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/podcast"
@@ -165,7 +166,7 @@ func TestSyncSkipsFetchWhileCoverLocked(t *testing.T) {
 
 	// A user cover, locked. Nothing about the feed changes from here on.
 	user := testPNGBytes(t, 8, 8)
-	if err := f.store.SetEntityArt(ctx, model.ArtPodcast, pid, model.ArtRoleFront, user, "", model.Attribution{Source: model.SourceUser}, model.LockOf(true), true); err != nil {
+	if _, err := f.store.SetEntityArt(ctx, model.ArtPodcast, pid, model.ArtRoleFront, user, "", model.Attribution{Source: model.SourceUser}, model.LockOf(true), true); err != nil {
 		t.Fatalf("set user cover: %v", err)
 	}
 	locked := f.coverHash(t, pid)
@@ -212,7 +213,7 @@ func TestSyncRefillsClearedCover(t *testing.T) {
 	}
 
 	// Cleared without a lock, so nothing but the compare decides what happens next.
-	if err := f.store.SetEntityArt(ctx, model.ArtPodcast, pid, model.ArtRoleFront, nil, "", model.Attribution{Source: model.SourceUser}, model.LockOf(false), true); err != nil {
+	if _, err := f.store.SetEntityArt(ctx, model.ArtPodcast, pid, model.ArtRoleFront, nil, "", model.Attribution{Source: model.SourceUser}, model.LockOf(false), true); err != nil {
 		t.Fatalf("clear cover: %v", err)
 	}
 	if f.coverHash(t, pid) != "" {
@@ -278,7 +279,7 @@ func TestReAddSkipsFetchWhileCoverLocked(t *testing.T) {
 	}
 
 	user := testPNGBytes(t, 8, 8)
-	if err := f.store.SetEntityArt(ctx, model.ArtPodcast, pid, model.ArtRoleFront, user, "", model.Attribution{Source: model.SourceUser}, model.LockOf(true), true); err != nil {
+	if _, err := f.store.SetEntityArt(ctx, model.ArtPodcast, pid, model.ArtRoleFront, user, "", model.Attribution{Source: model.SourceUser}, model.LockOf(true), true); err != nil {
 		t.Fatalf("set user cover: %v", err)
 	}
 	locked := f.coverHash(t, pid)
@@ -304,7 +305,7 @@ func TestReAddUnderANewGUIDSkipsFetchWhileCoverLocked(t *testing.T) {
 	f := newCoverFixture(t)
 	pid := f.subscribe(t)
 	user := testPNGBytes(t, 8, 8)
-	if err := f.store.SetEntityArt(ctx, model.ArtPodcast, pid, model.ArtRoleFront, user, "", model.Attribution{Source: model.SourceUser}, model.LockOf(true), true); err != nil {
+	if _, err := f.store.SetEntityArt(ctx, model.ArtPodcast, pid, model.ArtRoleFront, user, "", model.Attribution{Source: model.SourceUser}, model.LockOf(true), true); err != nil {
 		t.Fatalf("set user cover: %v", err)
 	}
 
@@ -410,5 +411,26 @@ func TestSyncDiscardsMisdeclaredImage(t *testing.T) {
 	}
 	if f.coverHash(t, pid) == "" {
 		t.Error("the show did not heal once the host served a real image")
+	}
+}
+
+// TestSyncBoundsAnOversizedChannelImage: a channel image over art.MaxSourceDim is stored
+// fitted to it, and the next sync, seeing the same URL, fetches nothing.
+func TestSyncBoundsAnOversizedChannelImage(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	f := newCoverFixture(t)
+	f.setImage(testPNGBytes(t, art.MaxSourceDim+200, (art.MaxSourceDim+200)/2), "image/png")
+
+	pid := f.subscribe(t)
+	roles, err := f.store.ArtRoles(ctx, model.EntityRef{Type: model.ArtPodcast, PID: pid})
+	if err != nil || len(roles) != 1 || roles[0].Width != art.MaxSourceDim || roles[0].Height != art.MaxSourceDim/2 {
+		t.Fatalf("art roles = %+v (err %v), want one front %dx%d", roles, err, art.MaxSourceDim, art.MaxSourceDim/2)
+	}
+	if _, err := f.svc.Sync(ctx, pid); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	if got := f.imageHits(); got != 1 {
+		t.Errorf("image requests after a no-op sync = %d, want 1", got)
 	}
 }

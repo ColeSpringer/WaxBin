@@ -225,8 +225,8 @@ func (c *thumbCall) result() (*model.ArtBlob, error) {
 // (keyed by the item id) and reports whether the mapping changed, for the
 // music/audiobook write paths that emit a delta only on a real change. See
 // attachEntityArtTxChanged for the shared body.
-func attachArtTxChanged(ctx context.Context, tx *sql.Tx, itemID int64, img *model.ArtImage) (bool, error) {
-	return attachEntityArtTxChanged(ctx, tx, "track", itemID, img)
+func attachArtTxChanged(ctx context.Context, tx *sql.Tx, itemID int64, pic examinedArt) (bool, error) {
+	return attachEntityArtTxChanged(ctx, tx, "track", itemID, pic)
 }
 
 // storableArt fills whatever an ingest carrier left empty from the bytes it already
@@ -259,16 +259,173 @@ func storableArt(img *model.ArtImage) *model.ArtImage {
 	return &cp
 }
 
-// insertArtSourceTx dedups a decoded/probed cover into the content-addressed
-// art_source store (keyed by content hash), a no-op when the source is already
-// present. It is the single art-blob writer shared by the front-cover attach and the
-// role-scoped entity-art set.
-func insertArtSourceTx(ctx context.Context, tx *sql.Tx, img *model.ArtImage) error {
-	_, err := tx.ExecContext(ctx,
+// insertArtSourceTx dedups an examined picture into the content-addressed art_source
+// store (keyed by content hash), a no-op when the source is already present, and records
+// the arrival an oversized picture was scaled from. It is the single art-blob writer,
+// called from setEntityArtRoleTx.
+func insertArtSourceTx(ctx context.Context, tx *sql.Tx, pic examinedArt) error {
+	img := pic.img
+	if _, err := tx.ExecContext(ctx,
 		`INSERT OR IGNORE INTO art_source(hash, format, width, height, size, data, created_at)
 		 VALUES (?,?,?,?,?,?,?)`,
-		img.Hash, img.Format, img.Width, img.Height, len(img.Data), img.Data, nowNS())
+		img.Hash, img.Format, img.Width, img.Height, len(img.Data), img.Data, nowNS()); err != nil {
+		return err
+	}
+	if pic.from == "" {
+		return nil
+	}
+	_, err := tx.ExecContext(ctx, "INSERT OR IGNORE INTO art_resized(from_hash, hash) VALUES (?, ?)", pic.from, img.Hash)
 	return err
+}
+
+// examinedArt is a picture as the catalog keeps it. Store.examineArt makes one ahead of
+// a write, which is the one place a picture is decoded, and the writers inside a
+// transaction take nothing else, so a method cannot carry a picture into its
+// transaction without examining it first. from is the arriving bytes' hash when the
+// picture arrived over art.MaxSourceDim, recorded against the stored source
+// (art_resized) so the same arrival is matched without another decode; it is empty for
+// a picture that arrived within the bound. The zero value is no picture.
+type examinedArt struct {
+	img  *model.ArtImage
+	from string
+}
+
+// present reports whether the carrier holds a picture.
+func (e examinedArt) present() bool { return e.img != nil && len(e.img.Data) > 0 }
+
+// examineArt decides what the catalog keeps for a picture, off the write lock. A
+// picture within art.MaxSourceDim is kept as it arrived. An oversized one is answered
+// from the pictures examined lately in this process, then from art_resized on the read
+// pool, and otherwise decided by boundArrival. The bytes name their own size; a
+// producer's dimensions stand only for a picture no decoder here reads. It refuses what
+// writeTx would, so a closed or read-only store answers the same way whatever the
+// picture's size.
+func (s *Store) examineArt(ctx context.Context, img *model.ArtImage) (examinedArt, error) {
+	if img == nil || len(img.Data) == 0 {
+		return examinedArt{}, nil
+	}
+	if err := s.writable(); err != nil {
+		return examinedArt{}, err
+	}
+	cp := *storableArt(img)
+	if _, w, h, err := art.Probe(cp.Data); err == nil {
+		cp.Width, cp.Height = w, h
+	}
+	if cp.Width <= art.MaxSourceDim && cp.Height <= art.MaxSourceDim {
+		return examinedArt{img: &cp}, nil
+	}
+	if e, ok := s.examined.get(cp.Hash, cp.Attribution); ok {
+		return e, nil
+	}
+	e, found, err := resizedArt(ctx, s.read, &cp)
+	if err != nil {
+		return examinedArt{}, err
+	}
+	if !found {
+		e = boundArrival(&cp)
+	}
+	s.examined.put(e)
+	return e, nil
+}
+
+// examineAux is examineArt over a set of role-tagged pictures.
+func (s *Store) examineAux(ctx context.Context, aux map[model.ArtRole]*model.ArtImage) (map[model.ArtRole]examinedArt, error) {
+	if len(aux) == 0 {
+		return nil, nil
+	}
+	out := make(map[model.ArtRole]examinedArt, len(aux))
+	for role, img := range aux {
+		e, err := s.examineArt(ctx, img)
+		if err != nil {
+			return nil, err
+		}
+		out[role] = e
+	}
+	return out, nil
+}
+
+// examinedMemMax is how many oversized arrivals examinedMem keeps: an album's worth of
+// distinct covers.
+const examinedMemMax = 8
+
+// examinedMem remembers the last few oversized pictures this process examined, keyed by
+// the arriving bytes' hash, for the arrivals that reach no write and so leave no
+// art_resized row: a copy's cover, or the cover of an item whose art is locked. Without
+// it every rescan of such a file decoded the picture again. The attribution is the
+// arrival's, not the first examiner's, so it is dropped on the way in and restored on
+// the way out.
+type examinedMem struct {
+	mu    sync.Mutex
+	byKey map[string]*list.Element
+	lru   list.List // examinedArt, most recently used first
+}
+
+func (m *examinedMem) get(from string, attr model.Attribution) (examinedArt, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	el, ok := m.byKey[from]
+	if !ok {
+		return examinedArt{}, false
+	}
+	m.lru.MoveToFront(el)
+	e := el.Value.(examinedArt)
+	img := *e.img
+	img.Attribution = attr
+	return examinedArt{img: &img, from: e.from}, true
+}
+
+func (m *examinedMem) put(e examinedArt) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if el, ok := m.byKey[e.from]; ok {
+		m.lru.MoveToFront(el)
+		return
+	}
+	if m.byKey == nil {
+		m.byKey = map[string]*list.Element{}
+	}
+	img := *e.img
+	img.Attribution = model.Attribution{}
+	m.byKey[e.from] = m.lru.PushFront(examinedArt{img: &img, from: e.from})
+	for m.lru.Len() > examinedMemMax {
+		last := m.lru.Back()
+		delete(m.byKey, last.Value.(examinedArt).from)
+		m.lru.Remove(last)
+	}
+}
+
+// resizedArt answers an oversized arrival from art_resized: the stored source, bytes
+// and all, under the arrival's attribution. The bytes come along because every writer
+// reads a picture off its carrier, and loading them costs one read of a source the
+// catalog already holds.
+func resizedArt(ctx context.Context, q queryer, img *model.ArtImage) (examinedArt, bool, error) {
+	stored := &model.ArtImage{Attribution: img.Attribution}
+	err := q.QueryRowContext(ctx,
+		`SELECT s.hash, s.format, s.width, s.height, s.data FROM art_resized r
+		 JOIN art_source s ON s.hash = r.hash WHERE r.from_hash = ?`, img.Hash).
+		Scan(&stored.Hash, &stored.Format, &stored.Width, &stored.Height, &stored.Data)
+	if errors.Is(err, sql.ErrNoRows) {
+		return examinedArt{}, false, nil
+	}
+	if err != nil {
+		return examinedArt{}, false, err
+	}
+	return examinedArt{img: stored, from: img.Hash}, true, nil
+}
+
+// boundArrival decides what the catalog keeps for an oversized arrival (art.Bound) and
+// marks the result with the arrival's hash. Bytes that will not decode, or that a scaled
+// copy would not shrink, are kept as they arrived, marked all the same so the next
+// arrival is not decoded again. The producer's carrier is left untouched.
+func boundArrival(img *model.ArtImage) examinedArt {
+	cp := *img
+	out, bounded, err := art.Bound(img.Data)
+	if err != nil || !bounded {
+		return examinedArt{img: &cp, from: img.Hash}
+	}
+	info := art.Describe(out)
+	cp.Data, cp.Hash, cp.Format, cp.Width, cp.Height = out, info.Hash, info.Format, info.Width, info.Height
+	return examinedArt{img: &cp, from: img.Hash}
 }
 
 // attachEntityArtTxChanged dedups a front-cover image into the content-addressed art
@@ -288,16 +445,14 @@ func insertArtSourceTx(ctx context.Context, tx *sql.Tx, img *model.ArtImage) err
 // carrying bytes is always stored, with anything it left undescribed filled from those
 // bytes. It touches the front role alone, so a re-sync cannot clobber a user's
 // back/booklet.
-func attachEntityArtTxChanged(ctx context.Context, tx *sql.Tx, entityType string, entityID int64, img *model.ArtImage) (bool, error) {
-	if img == nil || len(img.Data) == 0 {
+func attachEntityArtTxChanged(ctx context.Context, tx *sql.Tx, entityType string, entityID int64, pic examinedArt) (bool, error) {
+	if !pic.present() {
 		return false, nil
 	}
-	// Before the hash comparison below, so an undescribed cover matching the stored one
-	// re-attributes in place rather than being read as a different picture. The
-	// attribution is checked here too: the same-hash branch below writes it without
-	// going through setEntityArtRoleTx, so this is the guard for that path.
-	img = storableArt(img)
-	if err := checkArtImage(img, entityType, string(model.ArtRoleFront)); err != nil {
+	// The attribution is checked here as well as in setEntityArtRoleTx: the same-hash
+	// branch below writes it without going through there, so this is the guard for that
+	// path.
+	if err := checkArtImage(pic.img, entityType, string(model.ArtRoleFront)); err != nil {
 		return false, err
 	}
 	var curHash sql.NullString
@@ -306,18 +461,18 @@ func attachEntityArtTxChanged(ctx context.Context, tx *sql.Tx, entityType string
 		entityType, entityID).Scan(&curHash); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return false, err
 	}
-	if curHash.Valid && curHash.String == img.Hash {
+	if curHash.Valid && curHash.String == pic.img.Hash {
 		// The same picture, possibly from a new origin: a feed that rotated its image
 		// URL, or a cover that was a sidecar and is now embedded in the tags. Refresh
 		// the attribution in place rather than leaving a dead URL on the row, and still
 		// report no change, since the image the entity shows did not move. The UPDATE
 		// is conditional, so a genuine no-op rescan writes nothing at all.
-		return false, refreshArtProvenanceTx(ctx, tx, entityType, entityID, string(model.ArtRoleFront), img)
+		return false, refreshArtProvenanceTx(ctx, tx, entityType, entityID, string(model.ArtRoleFront), pic.img)
 	}
 	// Re-point this entity's front cover through the shared slot writer; an entity
 	// has exactly one image per role. When the old cover loses its last referencing
 	// map row it becomes an orphaned source for GCArt.
-	if err := setEntityArtRoleTx(ctx, tx, entityType, entityID, string(model.ArtRoleFront), img); err != nil {
+	if _, err := setEntityArtRoleTx(ctx, tx, entityType, entityID, string(model.ArtRoleFront), pic); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -338,15 +493,15 @@ func attachEntityArtTxChanged(ctx context.Context, tx *sql.Tx, entityType string
 // The lock, not the provenance, is what governs the write. Provenance stays purely
 // descriptive, so a future producer that legitimately stamps "user" cannot quietly
 // change who is allowed to overwrite what.
-func attachEntityArtUnlessLockedTx(ctx context.Context, tx *sql.Tx, entityType model.ArtEntity, entityID int64, img *model.ArtImage) (bool, error) {
-	if img == nil || len(img.Data) == 0 {
+func attachEntityArtUnlessLockedTx(ctx context.Context, tx *sql.Tx, entityType model.ArtEntity, entityID int64, pic examinedArt) (bool, error) {
+	if !pic.present() {
 		return false, nil
 	}
 	locked, err := artFillBlockedTx(ctx, tx, entityType, entityID, model.ArtRoleFront)
 	if err != nil || locked {
 		return false, err
 	}
-	return attachEntityArtTxChanged(ctx, tx, string(entityType), entityID, img)
+	return attachEntityArtTxChanged(ctx, tx, string(entityType), entityID, pic)
 }
 
 // fillEntityAuxArtTx applies enrichment's non-front role images to one entity,
@@ -374,7 +529,7 @@ func attachEntityArtUnlessLockedTx(ctx context.Context, tx *sql.Tx, entityType m
 // It reports how many slots actually took an image. A caller whose whole reason to run
 // was the fill (an art backfill pass) needs that to decide whether anything about the
 // entity changed; the callers that fill art on the way past something else ignore it.
-func fillEntityAuxArtTx(ctx context.Context, tx *sql.Tx, entityType model.ArtEntity, entityID int64, aux map[model.ArtRole]*model.ArtImage) (int, error) {
+func fillEntityAuxArtTx(ctx context.Context, tx *sql.Tx, entityType model.ArtEntity, entityID int64, aux map[model.ArtRole]examinedArt) (int, error) {
 	if len(aux) == 0 {
 		return 0, nil
 	}
@@ -390,8 +545,8 @@ func fillEntityAuxArtTx(ctx context.Context, tx *sql.Tx, entityType model.ArtEnt
 	wrote := 0
 	for _, r := range roles {
 		role := model.ArtRole(r)
-		img := aux[role]
-		if role == model.ArtRoleFront || !role.Valid() || img == nil || len(img.Data) == 0 {
+		pic := aux[role]
+		if role == model.ArtRoleFront || !role.Valid() || !pic.present() {
 			continue
 		}
 		locked, err := artRoleLockedTx(ctx, tx, entityType, entityID, role)
@@ -410,7 +565,7 @@ func fillEntityAuxArtTx(ctx context.Context, tx *sql.Tx, entityType model.ArtEnt
 		if n > 0 {
 			continue
 		}
-		if err := setEntityArtRoleTx(ctx, tx, string(entityType), entityID, r, img); err != nil {
+		if _, err := setEntityArtRoleTx(ctx, tx, string(entityType), entityID, r, pic); err != nil {
 			return wrote, err
 		}
 		wrote++
@@ -450,12 +605,12 @@ func refreshArtProvenanceTx(ctx context.Context, tx *sql.Tx, entityType string, 
 // should follow a retag. It does use that helper to do the writing, so its caller can
 // tell an image that landed from one the guards dropped, which is what an entity delta
 // rides on.
-func fillAlbumArtTx(ctx context.Context, tx *sql.Tx, albumID int64, img *model.ArtImage) (bool, error) {
+func fillAlbumArtTx(ctx context.Context, tx *sql.Tx, albumID int64, pic examinedArt) (bool, error) {
 	open, err := albumFrontOpenTx(ctx, tx, albumID)
 	if err != nil || !open {
 		return false, err
 	}
-	return attachEntityArtTxChanged(ctx, tx, string(model.ArtAlbum), albumID, img)
+	return attachEntityArtTxChanged(ctx, tx, string(model.ArtAlbum), albumID, pic)
 }
 
 // albumFrontOpenTx reports whether an enrichment front may land on the album: it
@@ -600,9 +755,10 @@ func (s *Store) ResolveArt(ctx context.Context, ref model.EntityRef, role model.
 		}, nil
 	}
 
-	// Original requested: serve the source. Nothing above this point has loaded it,
-	// which is what keeps a grid of cached thumbnails from reading a full-size image
-	// out of blob storage per cover and discarding it.
+	// Original requested: serve the source as stored, which is the arriving picture
+	// scaled to fit art.MaxSourceDim when that made it smaller. Nothing above this point has
+	// loaded it, which is what keeps a grid of cached thumbnails from reading a
+	// full-size image out of blob storage per cover and discarding it.
 	if box <= 0 {
 		return source(ctx)
 	}

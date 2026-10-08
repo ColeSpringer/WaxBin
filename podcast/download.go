@@ -42,11 +42,10 @@ func (s *Service) Download(ctx context.Context, episodePID model.PID) (*Download
 	if strings.TrimSpace(s.cfg.Dir) == "" {
 		return nil, waxerr.New(waxerr.CodeInvalid, op, "no podcast download directory configured")
 	}
-	d, err := s.store.EpisodeByPID(ctx, episodePID)
+	ep, err := s.store.EpisodeMeta(ctx, episodePID)
 	if err != nil {
 		return nil, err
 	}
-	ep := d.Episode
 	if strings.TrimSpace(ep.EnclosureURL) == "" {
 		return nil, waxerr.New(waxerr.CodeInvalid, op, "episode has no enclosure to download")
 	}
@@ -294,11 +293,11 @@ func (s *Service) ImportEpisodeFile(ctx context.Context, episodePID model.PID, s
 	if strings.TrimSpace(s.cfg.Dir) == "" {
 		return nil, waxerr.New(waxerr.CodeInvalid, op, "no podcast download directory configured")
 	}
-	d, err := s.store.EpisodeByPID(ctx, episodePID)
+	ep, err := s.store.EpisodeMeta(ctx, episodePID)
 	if err != nil {
 		return nil, err
 	}
-	pod, err := s.store.PodcastByPID(ctx, d.Episode.PodcastPID)
+	pod, err := s.store.PodcastByPID(ctx, ep.PodcastPID)
 	if err != nil {
 		return nil, err
 	}
@@ -324,7 +323,7 @@ func (s *Service) ImportEpisodeFile(ctx context.Context, episodePID model.PID, s
 	// stays within the filesystem segment limit rather than failing with ENAMETOOLONG.
 	dst := filepath.Join(folder, string(episodePID)+"-"+capFilename(netsafe.SafeFilename(filepath.Base(srcPath), "episode"), 120))
 	// Fetched above the lease region, like Download's: it is a bounded-but-slow HTTP GET.
-	image := s.fetchImage(ctx, d.Episode.ImageURL)
+	image := s.fetchImage(ctx, ep.ImageURL)
 
 	// Both leases, in the fixed fs-mutate then podcast-fs order: this is the one verb
 	// that moves a file out of an arbitrary source path (which may sit in a user

@@ -726,7 +726,7 @@ func TestGroupRefreshLeavesTheAuxProvidersToTheBackfill(t *testing.T) {
 	seedTrack(t, st, lib.ID, "/lib/a.mp3", "ess-a", "Shine On", "Pink Floyd", "Wish You Were Here")
 	rgPID := model.PID(scalarStr(t, roDB(t, dbPath), "SELECT pid FROM release_group"))
 	for _, role := range append([]model.ArtRole{model.ArtRoleFront}, model.AuxArtRoles()...) {
-		if err := st.SetEntityArt(ctx, model.ArtReleaseGroup, rgPID, role, pngBytes(t), "png",
+		if _, err := st.SetEntityArt(ctx, model.ArtReleaseGroup, rgPID, role, pngBytes(t), "png",
 			model.Attribution{Source: model.SourceUser}, model.LockUnchanged, false); err != nil {
 			t.Fatalf("set %s: %v", role, err)
 		}

@@ -25,7 +25,11 @@ import (
 func (s *Store) PutScannedBook(ctx context.Context, in model.PutScannedBookInput) (*model.ScanItemResult, error) {
 	const op = "store.PutScannedBook"
 	res := &model.ScanItemResult{}
-	err := s.writeTx(ctx, func(tx *sql.Tx) error {
+	cover, err := s.examineArt(ctx, in.CoverArt)
+	if err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	err = s.writeTx(ctx, func(tx *sql.Tx) error {
 		now := nowNS()
 
 		// One resolution of the book key serves the relink, the overlay and the item write,
@@ -89,7 +93,7 @@ func (s *Store) PutScannedBook(ctx context.Context, in model.PutScannedBookInput
 		// restore the book's original identity; identity stays essence-first, so a taken or
 		// invalid hint falls back to a fresh PID. Parts of one book share the stamp: the
 		// first to create the item adopts it, the rest join it by book key.
-		itemID, itemPID, created, stateChanged, priorTitle, err := upsertItem(ctx, tx, s.log, in.Item, bookAdoptKey{author: in.Book.Author, title: in.Item.Title}, now, in.PreferredItemPID, key)
+		itemID, itemPID, created, stateChanged, priorTitle, err := upsertItem(ctx, tx, s.log, in.Item, in.Book.Year, bookAdoptKey{author: in.Book.Author, title: in.Item.Title}, now, in.PreferredItemPID, key)
 		if err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
 		}
@@ -209,7 +213,7 @@ func (s *Store) PutScannedBook(ctx context.Context, in model.PutScannedBookInput
 		// A copy of a part still on disk adds nothing to the book: no metadata, chapters,
 		// cover or acquisition, only its own file row and the alternate edge.
 		if role == alternateRole {
-			return s.attachBookCopyTx(ctx, tx, in, fileID, filePID, itemID, itemPID, link, stateChanged, fileTitle, title, fileBook, affected, res, now)
+			return s.attachBookCopyTx(ctx, tx, in, fileID, filePID, itemID, itemPID, link, stateChanged, fileTitle, title, fileBook, affected, res, now, cover)
 		}
 
 		// Custom tags are owned by the primary part, like the book's other metadata.
@@ -291,7 +295,7 @@ func (s *Store) PutScannedBook(ctx context.Context, in model.PutScannedBookInput
 		// changed flag feeds the item delta so a cover-only change is not silent.
 		artChanged := false
 		if ownsMeta {
-			c, err := attachArtRespectingLockTx(ctx, tx, itemID, in.CoverArt, in.PreserveLocks)
+			c, err := attachArtRespectingLockTx(ctx, tx, itemID, cover, in.PreserveLocks)
 			if err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
@@ -312,7 +316,7 @@ func (s *Store) PutScannedBook(ctx context.Context, in model.PutScannedBookInput
 		if err := settleOwedByScanTx(ctx, tx, fileID, itemID, scanSettle{
 			isBook: true, fileTitle: fileTitle, title: title, fileBook: fileBook,
 			bookRederived: rewrite, preserveLocks: in.PreserveLocks, derived: in.Derived,
-			cover: in.CoverArt, acquisitionRecorded: acqAdded,
+			cover: cover, acquisitionRecorded: acqAdded,
 			fileTags: in.CustomTags, tagsReplaced: tagsReplaced,
 		}); err != nil {
 			return waxerr.Wrap(waxerr.CodeIO, op, err)
@@ -864,7 +868,7 @@ func partEncodingTx(ctx context.Context, tx *sql.Tx, bookItemID, fileID int64, p
 // settled against the stored book. The book emits an update when the edge changed or
 // the put brought it back from missing (stateChanged).
 func (s *Store) attachBookCopyTx(ctx context.Context, tx *sql.Tx, in model.PutScannedBookInput, fileID int64, filePID model.PID,
-	itemID int64, itemPID model.PID, link *bookLink, stateChanged bool, fileTitle, title string, fileBook model.Book, affected *affectedRollups, res *model.ScanItemResult, now int64) error {
+	itemID int64, itemPID model.PID, link *bookLink, stateChanged bool, fileTitle, title string, fileBook model.Book, affected *affectedRollups, res *model.ScanItemResult, now int64, cover examinedArt) error {
 	const op = "store.PutScannedBook"
 	res.AttachedAsCopy, res.Joined = true, link.changed
 	d := model.FileDiagnostic{Code: model.DiagDuplicateCopy, Severity: model.SeverityInfo}
@@ -898,7 +902,7 @@ func (s *Store) attachBookCopyTx(ctx context.Context, tx *sql.Tx, in model.PutSc
 	}
 	if err := settleOwedByScanTx(ctx, tx, fileID, itemID, scanSettle{
 		isBook: true, fileTitle: fileTitle, title: title, fileBook: fileBook,
-		preserveLocks: in.PreserveLocks, derived: in.Derived, cover: in.CoverArt, fileTags: in.CustomTags,
+		preserveLocks: in.PreserveLocks, derived: in.Derived, cover: cover, fileTags: in.CustomTags,
 	}); err != nil {
 		return waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
@@ -950,6 +954,54 @@ func refreshAllBookDurations(ctx context.Context, tx *sql.Tx) error {
 	_, err := tx.ExecContext(ctx,
 		"UPDATE book SET total_duration_ms = "+fmt.Sprintf(bookEffectiveDurationSum, "book.item_id"))
 	return err
+}
+
+// isbnKeyMove is a book whose stored isbn_key is not the key its ISBN folds to, with the
+// key it should hold.
+type isbnKeyMove struct {
+	id  int64
+	key string
+}
+
+// bookISBNKeyMoves lists the books whose isbn_key has drifted from identity.ISBNKey of
+// their ISBN. Like the sort keys the key is generated in Go, so the comparison streams
+// rather than running in SQL, and only rows with something in either column are read.
+// The drift check counts these and the repair writes them, from this one query.
+func bookISBNKeyMoves(ctx context.Context, q queryer) ([]isbnKeyMove, error) {
+	rows, err := q.QueryContext(ctx, "SELECT item_id, isbn, isbn_key FROM book WHERE isbn <> '' OR isbn_key <> ''")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var moves []isbnKeyMove
+	for rows.Next() {
+		var id int64
+		var isbn, key string
+		if err := rows.Scan(&id, &isbn, &key); err != nil {
+			return nil, err
+		}
+		if want := identity.ISBNKey(isbn); want != key {
+			moves = append(moves, isbnKeyMove{id, want})
+		}
+	}
+	return moves, rows.Err()
+}
+
+// refreshAllISBNKeysTx sets each drifted book's isbn_key to identity.ISBNKey of its ISBN,
+// the repair for the drift VerifyDerived reports. A rescan rewrites the key only for a
+// book whose file changed. Nothing an item view shows reads the key, so no delta is
+// emitted.
+func refreshAllISBNKeysTx(ctx context.Context, tx *sql.Tx) error {
+	moves, err := bookISBNKeyMoves(ctx, tx)
+	if err != nil {
+		return err
+	}
+	for _, m := range moves {
+		if _, err := tx.ExecContext(ctx, "UPDATE book SET isbn_key = ? WHERE item_id = ?", m.key, m.id); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // chapterSourceRank orders chapter sources by precedence (lower wins). A remote

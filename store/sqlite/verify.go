@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/colespringer/waxbin/identity"
 	"github.com/colespringer/waxbin/model"
 	"github.com/colespringer/waxbin/waxerr"
 )
@@ -24,6 +23,7 @@ type DerivedReport struct {
 	BookDurationDrift       int // books whose stored total_duration_ms != summed parts
 	BookISBNKeyDrift        int // books whose stored isbn_key != identity.ISBNKey(isbn)
 	AlbumYearDrift          int // albums whose year != their members' most common year
+	ReleaseYearDrift        int // items whose release_year != their track's or book's year
 	// Static playlists whose positions are not 0..n-1. Informational: an index resolves
 	// by rank, so such a gap changes nothing a reader sees; --fix renumbers it.
 	PlaylistPositionDrift int
@@ -47,21 +47,10 @@ type DerivedReport struct {
 // course; Reclaimable reports those. Playlist position gaps are excluded too (see
 // PlaylistPositionDrift).
 func (r DerivedReport) Consistent() bool {
-	return r.SortKeyDrift == 0 && r.consistentApartFromSortKeys()
-}
-
-// SortKeyDriftOnly reports whether stale sort keys are the only inconsistency, so
-// `db verify` can recommend --fix and nothing else: re-scanning repairs the other
-// kinds of drift but never rewrites a sort key.
-func (r DerivedReport) SortKeyDriftOnly() bool {
-	return r.SortKeyDrift > 0 && r.consistentApartFromSortKeys()
-}
-
-func (r DerivedReport) consistentApartFromSortKeys() bool {
-	return r.ItemsMissingFTS == 0 && r.OrphanFTSRows == 0 &&
+	return r.SortKeyDrift == 0 && r.ItemsMissingFTS == 0 && r.OrphanFTSRows == 0 &&
 		r.ArtistRollupDrift == 0 && r.GenreRollupDrift == 0 &&
 		r.ReleaseGroupRollupDrift == 0 && r.BookDurationDrift == 0 &&
-		r.BookISBNKeyDrift == 0 && r.AlbumYearDrift == 0
+		r.BookISBNKeyDrift == 0 && r.AlbumYearDrift == 0 && r.ReleaseYearDrift == 0
 }
 
 // Reclaimable reports whether `db verify --fix` would reclaim space: orphaned art
@@ -98,6 +87,7 @@ func (s *Store) VerifyDerived(ctx context.Context) (*DerivedReport, error) {
 		// The same query refreshAlbumYearsTx repairs from, so the check and the repair
 		// cannot disagree.
 		{&rep.AlbumYearDrift, "SELECT COUNT(*) FROM (" + strings.Replace(albumYearDriftQ, "/*FILTER*/", "", 1) + ")"},
+		{&rep.ReleaseYearDrift, releaseYearDriftQ},
 		{&rep.PlaylistPositionDrift, "SELECT COUNT(*) FROM (" + playlistPositionDriftQ + ")"},
 		// A map row pointing at a deleted entity does not count as a reference here,
 		// matching GCArt, which removes the stale map before deleting the source.
@@ -136,28 +126,14 @@ func (s *Store) VerifyDerived(ctx context.Context) (*DerivedReport, error) {
 }
 
 // bookISBNKeyDrift counts books whose stored isbn_key does not match recomputing it from
-// the raw column. Like the sort keys it is generated in Go, so the comparison streams
-// rather than running in SQL, and only rows with something in either column are read. A
-// rescan rewrites the pair through upsertBook, which is the repair.
+// the raw column. It reads the same rows the repair rewrites (bookISBNKeyMoves), so the
+// two cannot disagree; refreshAllISBNKeysTx is the repair.
 func (s *Store) bookISBNKeyDrift(ctx context.Context) (int, error) {
-	const op = "store.VerifyDerived"
-	rows, err := s.read.QueryContext(ctx,
-		"SELECT isbn, isbn_key FROM book WHERE isbn <> '' OR isbn_key <> ''")
+	moves, err := bookISBNKeyMoves(ctx, s.read)
 	if err != nil {
-		return 0, waxerr.Wrap(waxerr.CodeIO, op, err)
+		return 0, waxerr.Wrap(waxerr.CodeIO, "store.VerifyDerived", err)
 	}
-	defer rows.Close()
-	drift := 0
-	for rows.Next() {
-		var isbn, key string
-		if err := rows.Scan(&isbn, &key); err != nil {
-			return 0, waxerr.Wrap(waxerr.CodeIO, op, err)
-		}
-		if identity.ISBNKey(isbn) != key {
-			drift++
-		}
-	}
-	return drift, waxerr.Wrap(waxerr.CodeIO, op, rows.Err())
+	return len(moves), nil
 }
 
 // sortKeyDrift counts rows whose stored sort key differs from regenerating it. It

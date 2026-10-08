@@ -29,7 +29,7 @@ func TestRenameEntityAlbumKeepsRow(t *testing.T) {
 	if _, err := st.SetEntityStar(ctx, "", model.MergeAlbum, albumPID, true, nil); err != nil {
 		t.Fatalf("star: %v", err)
 	}
-	if err := st.SetEntityArt(ctx, model.ArtAlbum, albumPID, model.ArtRoleFront, tinyPNG(t), "image/png",
+	if _, err := st.SetEntityArt(ctx, model.ArtAlbum, albumPID, model.ArtRoleFront, tinyPNG(t), "image/png",
 		model.Attribution{}, model.LockOn, false); err != nil {
 		t.Fatalf("art: %v", err)
 	}

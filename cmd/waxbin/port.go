@@ -13,14 +13,15 @@ import (
 )
 
 func newBackupCmd(g *globals) *cobra.Command {
-	var redact bool
+	var opts port.BackupOptions
 	cmd := &cobra.Command{
 		Use:   "backup <dest.db>",
 		Short: "Write a full byte-copy backup of the catalog",
 		Long: "Writes a self-contained copy of the catalog (the disaster-recovery " +
 			"artifact). The copy contains the secret table; pass --redact-secrets to strip " +
-			"credentials from a copy that will leave the host. Runs read-only, so it is safe " +
-			"alongside a writer.",
+			"credentials from a copy that will leave the host. --no-thumbnails leaves out the " +
+			"generated thumbnails, which the catalog makes again on demand, so the copy is " +
+			"smaller. Runs read-only, so it is safe alongside a writer.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			lib, _, err := g.openRead(cmd)
@@ -28,28 +29,34 @@ func newBackupCmd(g *globals) *cobra.Command {
 				return err
 			}
 			defer lib.Close()
-			if err := lib.Backup(ctx(cmd), args[0], redact); err != nil {
+			if err := lib.Backup(ctx(cmd), args[0], opts); err != nil {
 				return err
 			}
 			if g.jsonOut {
 				return printJSON(cmd, struct {
-					Dest     string `json:"dest"`
-					Redacted bool   `json:"redacted"`
-				}{args[0], redact})
+					Dest              string `json:"dest"`
+					Redacted          bool   `json:"redacted"`
+					ThumbnailsOmitted bool   `json:"thumbnailsOmitted"`
+				}{args[0], opts.RedactSecrets, opts.OmitThumbnails})
 			}
-			fmt.Fprintf(out(cmd), "Backed up catalog to %s%s\n", args[0], redactNote(redact))
+			fmt.Fprintf(out(cmd), "Backed up catalog to %s%s\n", args[0], backupNote(opts))
 			return nil
 		},
 	}
-	cmd.Flags().BoolVar(&redact, "redact-secrets", false, "strip the secret table from the backup copy")
+	cmd.Flags().BoolVar(&opts.RedactSecrets, "redact-secrets", false, "strip the secret table from the backup copy")
+	cmd.Flags().BoolVar(&opts.OmitThumbnails, "no-thumbnails", false, "leave the generated thumbnails out of the backup copy")
 	return cmd
 }
 
-func redactNote(redact bool) string {
-	if redact {
-		return " (secrets redacted)"
+func backupNote(opts port.BackupOptions) string {
+	note := " (contains secrets; protect like the catalog"
+	if opts.RedactSecrets {
+		note = " (secrets redacted"
 	}
-	return " (contains secrets; protect like the catalog)"
+	if opts.OmitThumbnails {
+		note += "; thumbnails left out"
+	}
+	return note + ")"
 }
 
 func newRestoreCmd(g *globals) *cobra.Command {

@@ -170,7 +170,7 @@ func newPodcastEpisodeCmd(g *globals) *cobra.Command {
 				}
 				fmt.Fprintf(w, "people:     %s\n", strings.Join(labels, ", "))
 			}
-			fmt.Fprintf(w, "transcript: %s\n", yesNo(d.HasTranscript))
+			fmt.Fprintf(w, "transcript: %s\n", yesNo(d.Episode.HasTranscript))
 			if len(d.Soundbites) > 0 {
 				fmt.Fprintln(w, "soundbites:")
 				for _, b := range d.Soundbites {
@@ -684,18 +684,19 @@ func sourceLabel(st model.SourceType) string {
 }
 
 type episodeView struct {
-	PID          model.PID `json:"pid"`
-	Title        string    `json:"title"`
-	Podcast      string    `json:"podcast,omitempty"`
-	GUID         string    `json:"guid,omitempty"`
-	Published    string    `json:"published,omitempty"`
-	Season       int       `json:"season,omitempty"`
-	EpisodeNo    int       `json:"episode,omitempty"`
-	Type         string    `json:"type,omitempty"`
-	DurationMS   int64     `json:"durationMs,omitempty"`
-	State        string    `json:"state"`
-	Downloaded   bool      `json:"downloaded"`
-	EnclosureURL string    `json:"enclosureUrl,omitempty"`
+	PID           model.PID `json:"pid"`
+	Title         string    `json:"title"`
+	Podcast       string    `json:"podcast,omitempty"`
+	GUID          string    `json:"guid,omitempty"`
+	Published     string    `json:"published,omitempty"`
+	Season        int       `json:"season,omitempty"`
+	EpisodeNo     int       `json:"episode,omitempty"`
+	Type          string    `json:"type,omitempty"`
+	DurationMS    int64     `json:"durationMs,omitempty"`
+	State         string    `json:"state"`
+	Downloaded    bool      `json:"downloaded"`
+	HasTranscript bool      `json:"hasTranscript"`
+	EnclosureURL  string    `json:"enclosureUrl,omitempty"`
 }
 
 func toEpisodeView(e *model.Episode) episodeView {
@@ -703,7 +704,7 @@ func toEpisodeView(e *model.Episode) episodeView {
 		PID: e.PID, Title: e.Title, Podcast: e.PodcastTitle, GUID: e.GUID,
 		Published: pubDateLabel(e.PubDateNS), Season: e.Season, EpisodeNo: e.EpisodeNo,
 		Type: string(e.EpisodeType), DurationMS: e.DurationMS, State: string(e.State),
-		Downloaded: e.Downloaded, EnclosureURL: e.EnclosureURL,
+		Downloaded: e.Downloaded, HasTranscript: e.HasTranscript, EnclosureURL: e.EnclosureURL,
 	}
 }
 
@@ -716,13 +717,12 @@ func toEpisodeViews(eps []*model.Episode) []episodeView {
 }
 
 // episodeDetailView is the JSON shape for one episode's full detail: the list
-// fields plus the Podcasting 2.0 extras, chapters, and transcript state.
+// fields plus the Podcasting 2.0 extras and chapters.
 type episodeDetailView struct {
 	episodeView
-	HasTranscript bool            `json:"hasTranscript"`
-	Persons       []personView    `json:"persons,omitempty"`
-	Soundbites    []soundbiteView `json:"soundbites,omitempty"`
-	Chapters      []chapterView   `json:"chapters,omitempty"`
+	Persons    []personView    `json:"persons,omitempty"`
+	Soundbites []soundbiteView `json:"soundbites,omitempty"`
+	Chapters   []chapterView   `json:"chapters,omitempty"`
 }
 
 type soundbiteView struct {
@@ -733,10 +733,9 @@ type soundbiteView struct {
 
 func toEpisodeDetailView(d *model.EpisodeDetail) episodeDetailView {
 	v := episodeDetailView{
-		episodeView:   toEpisodeView(d.Episode),
-		HasTranscript: d.HasTranscript,
-		Persons:       personViews(d.Persons),
-		Chapters:      chapterViews(d.Chapters),
+		episodeView: toEpisodeView(d.Episode),
+		Persons:     personViews(d.Persons),
+		Chapters:    chapterViews(d.Chapters),
 	}
 	for _, b := range d.Soundbites {
 		v.Soundbites = append(v.Soundbites, soundbiteView{StartMS: b.StartMS, DurationMS: b.DurationMS, Title: b.Title})

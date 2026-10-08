@@ -338,21 +338,55 @@ func ReadSnapshot(r io.Reader) (*Snapshot, error) {
 	return &snap, nil
 }
 
-// RedactBackupFile strips the secret table from a backup copy and VACUUMs so the
-// removed bytes do not linger in free pages. A backup from a schema without the
-// secret table is a clean no-op.
-func RedactBackupFile(ctx context.Context, path string) error {
-	const op = "port.RedactBackupFile"
+// BackupOptions says what a backup copy leaves out; the zero value copies everything.
+type BackupOptions struct {
+	// RedactSecrets strips the secret table, for a copy that will leave the host.
+	RedactSecrets bool
+	// OmitThumbnails drops the generated thumbnails, which a restored catalog makes
+	// again on demand, so the copy carries the original images alone.
+	OmitThumbnails bool
+}
+
+// TrimBackupFile strips what opts leaves out from a backup copy, then VACUUMs once so
+// the removed bytes do not linger in free pages. A table the backup's schema lacks is
+// skipped, and a copy with nothing to strip is left alone. A copy the trim fails on is
+// removed, since it may still hold what it was to lose.
+func TrimBackupFile(ctx context.Context, path string, opts BackupOptions) (err error) {
+	const op = "port.TrimBackupFile"
+	var tables []string
+	if opts.RedactSecrets {
+		tables = append(tables, "secret")
+	}
+	if opts.OmitThumbnails {
+		tables = append(tables, "thumb_cache")
+	}
+	if len(tables) == 0 {
+		return nil
+	}
 	db, err := sql.Open("sqlite", "file:"+path)
 	if err != nil {
 		return waxerr.Wrap(waxerr.CodeIO, op, err)
 	}
-	defer db.Close()
-	if _, err := db.ExecContext(ctx, "DELETE FROM secret"); err != nil {
-		if strings.Contains(err.Error(), "no such table") {
-			return nil
+	defer func() {
+		_ = db.Close()
+		if err != nil {
+			for _, p := range []string{path, path + "-journal", path + "-wal", path + "-shm"} {
+				_ = os.Remove(p)
+			}
 		}
-		return waxerr.Wrap(waxerr.CodeIO, op, err)
+	}()
+	trimmed := false
+	for _, table := range tables {
+		if _, err := db.ExecContext(ctx, "DELETE FROM "+table); err != nil {
+			if strings.Contains(err.Error(), "no such table") {
+				continue
+			}
+			return waxerr.Wrap(waxerr.CodeIO, op, err)
+		}
+		trimmed = true
+	}
+	if !trimmed {
+		return nil
 	}
 	if _, err := db.ExecContext(ctx, "VACUUM"); err != nil {
 		return waxerr.Wrap(waxerr.CodeIO, op, err)

@@ -6,6 +6,8 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"image"
+	"image/png"
 	"io"
 	"io/fs"
 	"os"
@@ -1477,10 +1479,10 @@ func TestBackupRedactAndRestore(t *testing.T) {
 
 	plain := filepath.Join(t.TempDir(), "plain.db")
 	redacted := filepath.Join(t.TempDir(), "redacted.db")
-	if err := lib.Backup(ctx, plain, false); err != nil {
+	if err := lib.Backup(ctx, plain, port.BackupOptions{}); err != nil {
 		t.Fatalf("backup: %v", err)
 	}
-	if err := lib.Backup(ctx, redacted, true); err != nil {
+	if err := lib.Backup(ctx, redacted, port.BackupOptions{RedactSecrets: true}); err != nil {
 		t.Fatalf("redacted backup: %v", err)
 	}
 	if n := secretCount(t, plain); n != 1 {
@@ -1488,6 +1490,11 @@ func TestBackupRedactAndRestore(t *testing.T) {
 	}
 	if n := secretCount(t, redacted); n != 0 {
 		t.Fatalf("redacted backup secret count = %d, want 0", n)
+	}
+	// A deleted row's bytes stay in its page until the copy is rebuilt, so the redaction
+	// is only real if the copy's file no longer holds the value anywhere.
+	if !fileHolds(t, plain, "token-123") || fileHolds(t, redacted, "token-123") {
+		t.Fatal("the redacted backup still holds the secret's bytes")
 	}
 
 	if err := lib.Close(); err != nil {
@@ -1522,6 +1529,96 @@ func TestBackupRedactAndRestore(t *testing.T) {
 	moved, _ := rlib.Query(ctx, query.New(query.EntityItems).Build(), "")
 	if len(moved) != 1 || !strings.HasPrefix(moved[0].DisplayPath, newRoot) {
 		t.Fatalf("relocate did not re-point file paths: %q (want prefix %q)", moved[0].DisplayPath, newRoot)
+	}
+}
+
+// TestBackupWithoutThumbnails: a backup can leave out the generated thumbnails, which a
+// restored catalog makes again on demand. With secrets redacted as well, the copy holds
+// neither, nor any of the secret's bytes.
+func TestBackupWithoutThumbnails(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := t.TempDir()
+	db := filepath.Join(t.TempDir(), "catalog.db")
+	writeFile(t, filepath.Join(root, "a.mp3"), testaudio.BuildMP3("Song", "Artist", "Album", 1))
+	var cover bytes.Buffer
+	if err := png.Encode(&cover, image.NewRGBA(image.Rect(0, 0, 400, 400))); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(root, "cover.png"), cover.Bytes())
+
+	lib := openManaged(t, ctx, db, root)
+	if _, err := lib.Scan(ctx, waxbin.ScanRequest{}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	items, err := lib.Query(ctx, query.New(query.EntityItems).Build(), "")
+	if err != nil || len(items) != 1 {
+		t.Fatalf("query: %d items (err %v)", len(items), err)
+	}
+	ref := model.EntityRef{Type: model.ArtTrack, PID: items[0].PID}
+	if blob, err := lib.ResolveArt(ctx, ref, model.ArtRoleFront, 100); err != nil || !blob.Thumbnail {
+		t.Fatalf("resolve a thumbnail: %+v (err %v)", blob, err)
+	}
+	if err := lib.SetSecret(ctx, "musicbrainz", "token-123"); err != nil {
+		t.Fatalf("set secret: %v", err)
+	}
+
+	full := filepath.Join(t.TempDir(), "full.db")
+	lean := filepath.Join(t.TempDir(), "lean.db")
+	if err := lib.Backup(ctx, full, port.BackupOptions{}); err != nil {
+		t.Fatalf("backup: %v", err)
+	}
+	if err := lib.Backup(ctx, lean, port.BackupOptions{RedactSecrets: true, OmitThumbnails: true}); err != nil {
+		t.Fatalf("lean backup: %v", err)
+	}
+	count := func(path, q string) int {
+		t.Helper()
+		raw, err := sql.Open("sqlite", "file:"+path+"?mode=ro")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer raw.Close()
+		var n int
+		if err := raw.QueryRow(q).Scan(&n); err != nil {
+			t.Fatalf("%s in %s: %v", q, path, err)
+		}
+		return n
+	}
+	for _, c := range []struct {
+		path, q string
+		want    int
+	}{
+		{full, "SELECT COUNT(*) FROM thumb_cache", 1},
+		{full, "SELECT COUNT(*) FROM secret", 1},
+		{lean, "SELECT COUNT(*) FROM thumb_cache", 0},
+		{lean, "SELECT COUNT(*) FROM secret", 0},
+		{lean, "SELECT COUNT(*) FROM art_source", 1},
+	} {
+		if n := count(c.path, c.q); n != c.want {
+			t.Errorf("%s in %s = %d, want %d", c.q, filepath.Base(c.path), n, c.want)
+		}
+	}
+	if fileHolds(t, lean, "token-123") {
+		t.Error("the lean backup still holds the secret's bytes")
+	}
+	if err := lib.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	restored := filepath.Join(t.TempDir(), "restored.db")
+	if err := port.Restore(ctx, lean, restored, false); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	rlib, err := waxbin.Open(ctx, waxbin.Options{DBPath: restored})
+	if err != nil {
+		t.Fatalf("open restored: %v", err)
+	}
+	defer rlib.Close()
+	if blob, err := rlib.ResolveArt(ctx, ref, model.ArtRoleFront, 100); err != nil || !blob.Thumbnail {
+		t.Fatalf("restored thumbnail: %+v (err %v)", blob, err)
+	}
+	if stats, err := rlib.ThumbCacheStats(ctx); err != nil || stats.Rows != 1 {
+		t.Fatalf("restored thumbnail cache = %+v (err %v), want the one made again", stats, err)
 	}
 }
 
@@ -1693,7 +1790,7 @@ func TestRestoreReplacesAtomically(t *testing.T) {
 		t.Fatalf("scan A: %v", err)
 	}
 	backup := filepath.Join(t.TempDir(), "backup.db")
-	if err := libA.Backup(ctx, backup, false); err != nil {
+	if err := libA.Backup(ctx, backup, port.BackupOptions{}); err != nil {
 		t.Fatalf("backup: %v", err)
 	}
 	_ = libA.Close()
@@ -1775,6 +1872,16 @@ func TestInboxQuarantinesCaseCollision(t *testing.T) {
 }
 
 // secretCount reads the number of rows in a backup's secret table.
+// fileHolds reports whether the bytes of the file at path contain text.
+func fileHolds(t *testing.T, path, text string) bool {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return bytes.Contains(raw, []byte(text))
+}
+
 func secretCount(t *testing.T, dbPath string) int {
 	t.Helper()
 	raw, err := sql.Open("sqlite", "file:"+dbPath+"?mode=ro")

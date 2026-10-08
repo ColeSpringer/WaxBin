@@ -245,6 +245,20 @@ func TestAuditAlbumYearDriftIsError(t *testing.T) {
 	}
 }
 
+// TestAuditReleaseYearDriftIsError: a release year newest orders by that is not the
+// item's year is derived-data drift, named in the finding.
+func TestAuditReleaseYearDriftIsError(t *testing.T) {
+	t.Parallel()
+	st := &fakeStore{drift: model.DerivedDrift{ReleaseYearDrift: 3}}
+	rep, err := New(st, nil, nil, nil).Run(context.Background(), Config{Only: []model.AuditCheck{model.CheckDerivedData}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Errors() != 1 || !strings.Contains(rep.Findings[0].Message, "3 release-year") {
+		t.Fatalf("findings = %+v, want one error naming 3 release-year drift", rep.Findings)
+	}
+}
+
 func TestAuditFileChecks(t *testing.T) {
 	st := &fakeStore{files: []model.AuditFileInfo{
 		{PID: "f1", Path: []byte("/lib/al/song.flac"), DisplayPath: "/lib/al/song.flac", Kind: model.FileAudio},

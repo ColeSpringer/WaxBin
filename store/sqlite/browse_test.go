@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -117,23 +118,71 @@ func TestRecentEpisodesPlanUsesPubDateIndex(t *testing.T) {
 		}
 	}
 
-	// The control that makes the assertion above mean anything. recently-added has no
-	// index to walk (playable_item indexes kind, sort_key, and the partial
-	// identity_key, not created_at), so it scans and full-sorts, and its plan carries
-	// the bare "USE TEMP B-TREE FOR ORDER BY" verbatim. Without this, the !Contains
-	// check on recent-episodes could be passing because SQLite never emits that exact
-	// wording at all rather than because the new list avoids it.
-	//
-	// A failure here is informative either way: recently-added gained an index and is
-	// no longer the vocabulary's floor (update this and the comment), or SQLite
-	// reworded its plan output and the check above needs the new string.
-	stmt, args, err := st.browseStmt(ctx, read.ListRecentlyAdded, read.BrowseOptions{}, 50, "test")
+	// The control that makes the assertion above mean anything. random orders by a
+	// hash no index holds, so its plan carries the bare "USE TEMP B-TREE FOR ORDER BY"
+	// verbatim. Without this, the !Contains check on recent-episodes could be passing
+	// because SQLite never emits that exact wording at all rather than because the new
+	// list avoids it. A failure here means SQLite reworded its plan output and the
+	// checks need the new string.
+	stmt, args, err := st.browseStmt(ctx, read.ListRandom, read.BrowseOptions{Seed: 7}, 50, "test")
 	if err != nil {
-		t.Fatalf("recently-added stmt: %v", err)
+		t.Fatalf("random stmt: %v", err)
 	}
 	if plan := explainPlan(t, st, stmt, args...); !strings.Contains(plan, "USE TEMP B-TREE FOR ORDER BY") {
-		t.Errorf("recently-added no longer emits the bare full-sort string, so the "+
+		t.Errorf("random no longer emits the bare full-sort string, so the "+
 			"recent-episodes assertion above is no longer known to discriminate:\n%s", plan)
+	}
+}
+
+// TestRecencyListsWalkTheirIndexes: recently-added and newest page by walking an index
+// that holds the whole order, the pid tiebreak included, so neither sorts the catalog
+// (the bare "FOR ORDER BY") nor the rows of one order value ("FOR LAST TERM"), however
+// the page is filtered.
+func TestRecencyListsWalkTheirIndexes(t *testing.T) {
+	t.Parallel()
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	putTrack(t, st, lib.ID, trackSpec{path: "/lib/t.flac", essence: "et", content: "ct",
+		title: "A Track", artist: "X", album: "Al", year: 2001})
+	putBook(t, st, lib.ID, bookSpec{path: "/lib/b.m4b", essence: "eb", content: "cb",
+		title: "A Book", author: "Author", year: 2010})
+
+	starred := query.New(query.EntityItems).Where("starred", query.OpIs, 1).Build()
+	tracks := query.New(query.EntityItems).Where("kind", query.OpIs, "track").Build()
+	for _, list := range []struct {
+		list          read.DiscoveryList
+		index, scoped string
+		ord           string
+	}{
+		{read.ListRecentlyAdded, "item_created", "item_kind_created", "4000000000"},
+		{read.ListNewest, "item_release_year", "item_kind_release_year", "2001"},
+	} {
+		for _, tc := range []struct {
+			name   string
+			opt    read.BrowseOptions
+			scoped bool
+		}{
+			{"head", read.BrowseOptions{}, false},
+			{"cursor-bound", read.BrowseOptions{Cursor: read.EncodeCursor(list.ord, "01ARZ3NDEKTSV4RRFFQ69G5FAV")}, false},
+			{"per-user filter", read.BrowseOptions{Query: starred}, false},
+			{"kind is track", read.BrowseOptions{Query: tracks}, true},
+		} {
+			stmt, args, err := st.browseStmt(ctx, list.list, tc.opt, 50, "test")
+			if err != nil {
+				t.Fatalf("%s %s: browse stmt: %v", list.list, tc.name, err)
+			}
+			plan := explainPlan(t, st, stmt, args...)
+			index := list.index
+			if tc.scoped {
+				index = list.scoped
+			}
+			if !regexp.MustCompile(`INDEX ` + index + `\b`).MatchString(plan) {
+				t.Errorf("%s %s does not walk %s:\n%s", list.list, tc.name, index, plan)
+			}
+			if strings.Contains(plan, "USE TEMP B-TREE FOR ORDER BY") || strings.Contains(plan, "FOR LAST TERM") {
+				t.Errorf("%s %s sorts instead of walking the index:\n%s", list.list, tc.name, plan)
+			}
+		}
 	}
 }
 
@@ -208,6 +257,192 @@ func TestBrowseRandomStableSeed(t *testing.T) {
 	// And a shuffle must not be the plain collation order.
 	if strings.Join(first, ",") == "A,B,C,D,E,F,G,H,I,J" {
 		t.Errorf("seed 42 returned collation order, not a shuffle: %v", first)
+	}
+}
+
+// planNode is one EXPLAIN QUERY PLAN row, with the parent it nests under.
+type planNode struct {
+	id, parent int
+	detail     string
+}
+
+func explainPlanTree(t *testing.T, st *Store, stmt string, args ...any) []planNode {
+	t.Helper()
+	rows, err := st.read.QueryContext(context.Background(), "EXPLAIN QUERY PLAN "+stmt, args...)
+	if err != nil {
+		t.Fatalf("explain: %v", err)
+	}
+	defer rows.Close()
+	var nodes []planNode
+	for rows.Next() {
+		var n planNode
+		var notused int
+		if err := rows.Scan(&n.id, &n.parent, &notused, &n.detail); err != nil {
+			t.Fatalf("scan plan row: %v", err)
+		}
+		nodes = append(nodes, n)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("plan rows: %v", err)
+	}
+	return nodes
+}
+
+// subqueryOf returns the id of the nearest subquery (a co-routine or a materialized
+// view) node n runs inside, or 0 when it runs at the top level.
+func subqueryOf(nodes []planNode, n planNode) int {
+	byID := map[int]planNode{}
+	for _, x := range nodes {
+		byID[x.id] = x
+	}
+	for p, ok := byID[n.parent]; ok; p, ok = byID[p.parent] {
+		if strings.HasPrefix(p.detail, "CO-ROUTINE") || strings.HasPrefix(p.detail, "MATERIALIZE") {
+			return p.id
+		}
+	}
+	return 0
+}
+
+// TestBrowseRandomSortsNarrowRows: a shuffle has no index to walk, so its sort runs in a
+// subquery over each row's id and order value, and the item view (its per-row artist and
+// library probes included) is read for the page's rows only; with nothing to filter on,
+// the subquery reads playable_item alone. The pages are the seed's order either way.
+func TestBrowseRandomSortsNarrowRows(t *testing.T) {
+	t.Parallel()
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	for _, c := range "ABCDEFGHIJ" {
+		s := string(c)
+		putTrack(t, st, lib.ID, trackSpec{path: "/lib/" + s + ".flac", essence: "e" + s, content: "c" + s,
+			title: s, artist: "X", albumArt: "X", album: "Al"})
+	}
+	starred := query.New(query.EntityItems).Where("starred", query.OpIs, 0).Build()
+	for name, opt := range map[string]read.BrowseOptions{
+		"head":            {Seed: 42},
+		"cursor-bound":    {Seed: 42, Cursor: read.EncodeCursor("12345", "01ARZ3NDEKTSV4RRFFQ69G5FAV")},
+		"per-user filter": {Seed: 42, Query: starred},
+	} {
+		filtered := opt.Query.Where != nil
+		stmt, args, err := st.browseStmt(ctx, read.ListRandom, opt, 50, "test")
+		if err != nil {
+			t.Fatalf("%s: browse stmt: %v", name, err)
+		}
+		nodes := explainPlanTree(t, st, stmt, args...)
+		sorted := -1
+		for _, n := range nodes {
+			if n.detail == "USE TEMP B-TREE FOR ORDER BY" {
+				sorted = subqueryOf(nodes, n)
+				break
+			}
+		}
+		if sorted <= 0 {
+			t.Fatalf("%s: the shuffle's sort is not inside a subquery:\n%v", name, nodes)
+		}
+		for _, n := range nodes {
+			if strings.HasPrefix(n.detail, "CORRELATED SCALAR SUBQUERY") && subqueryOf(nodes, n) == sorted {
+				t.Errorf("%s: the sorted subquery reads the item view (%s):\n%v", name, n.detail, nodes)
+			}
+			if !filtered && strings.HasPrefix(n.detail, "SEARCH pf") && subqueryOf(nodes, n) == sorted {
+				t.Errorf("%s: the unfiltered subquery probes item_file:\n%v", name, nodes)
+			}
+			if strings.HasPrefix(n.detail, "USE TEMP B-TREE") && subqueryOf(nodes, n) != sorted {
+				t.Errorf("%s: the page's rows are sorted again outside the subquery (%s):\n%v", name, n.detail, nodes)
+			}
+		}
+	}
+
+	var want []string
+	rows, err := st.read.QueryContext(ctx, "SELECT title FROM playable_item ORDER BY wb_shuffle(42, pid), pid")
+	if err != nil {
+		t.Fatalf("seed order: %v", err)
+	}
+	for rows.Next() {
+		var title string
+		if err := rows.Scan(&title); err != nil {
+			t.Fatal(err)
+		}
+		want = append(want, title)
+	}
+	rows.Close()
+	if got := drainBrowse(t, st, read.ListRandom, read.BrowseOptions{Seed: 42}, 3); strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("random seed 42 = %v, want the seed's order %v", got, want)
+	}
+	page, err := st.BrowsePage(ctx, read.ListRandom, read.BrowseOptions{Seed: 42, Limit: 1})
+	if err != nil || len(page.Items) != 1 || page.Items[0].Artist != "X" || page.Items[0].LibraryPID != lib.PID {
+		t.Fatalf("random page = %+v (err %v), want one whole item view", page, err)
+	}
+}
+
+// TestBrowseMostPlayedSortsTiesAsNarrowRows: play counts tie by the thousand and no
+// play_state index holds the pid that breaks a tie, so most-played sorts its ties in a
+// subquery over narrow rows, reading the item view for the page alone, and the pages
+// still run count first, then pid, both descending.
+func TestBrowseMostPlayedSortsTiesAsNarrowRows(t *testing.T) {
+	t.Parallel()
+	st, lib := entityFixture(t)
+	ctx := context.Background()
+	for i, title := range []string{"A", "B", "C", "D", "E", "F"} {
+		pid := putTrack(t, st, lib.ID, trackSpec{path: "/lib/" + title + ".flac", essence: "e" + title,
+			content: "c" + title, title: title, artist: "X", albumArt: "X", album: "Al"}).ItemPID
+		for range 1 + i/4 {
+			if err := st.MarkPlayed(ctx, "", pid, false, nil); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	starred := query.New(query.EntityItems).Where("starred", query.OpIs, 0).Build()
+	for name, opt := range map[string]read.BrowseOptions{
+		"head":            {},
+		"cursor-bound":    {Cursor: read.EncodeCursor("1", "01ARZ3NDEKTSV4RRFFQ69G5FAV")},
+		"per-user filter": {Query: starred},
+	} {
+		stmt, args, err := st.browseStmt(ctx, read.ListMostPlayed, opt, 50, "test")
+		if err != nil {
+			t.Fatalf("%s: browse stmt: %v", name, err)
+		}
+		nodes := explainPlanTree(t, st, stmt, args...)
+		sorted := -1
+		for _, n := range nodes {
+			if strings.HasPrefix(n.detail, "USE TEMP B-TREE") {
+				if sorted = subqueryOf(nodes, n); sorted <= 0 {
+					t.Fatalf("%s: the ties are sorted outside a subquery:\n%v", name, nodes)
+				}
+			}
+		}
+		walked := false
+		for _, n := range nodes {
+			if subqueryOf(nodes, n) != sorted {
+				continue
+			}
+			walked = walked || strings.Contains(n.detail, "play_state_played")
+			if strings.HasPrefix(n.detail, "CORRELATED SCALAR SUBQUERY") {
+				t.Errorf("%s: the sorted subquery reads the item view (%s):\n%v", name, n.detail, nodes)
+			}
+			if opt.Query.Where == nil && strings.HasPrefix(n.detail, "SEARCH pf") {
+				t.Errorf("%s: the unfiltered subquery probes item_file:\n%v", name, nodes)
+			}
+		}
+		if sorted <= 0 || !walked {
+			t.Errorf("%s: the subquery does not walk play_state_played:\n%v", name, nodes)
+		}
+	}
+
+	var want []string
+	rows, err := st.read.QueryContext(ctx, `SELECT pi.title FROM play_state ps JOIN playable_item pi ON pi.id = ps.item_id
+		WHERE ps.play_count > 0 ORDER BY ps.play_count DESC, pi.pid DESC`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows.Next() {
+		var title string
+		if err := rows.Scan(&title); err != nil {
+			t.Fatal(err)
+		}
+		want = append(want, title)
+	}
+	rows.Close()
+	if got := drainBrowse(t, st, read.ListMostPlayed, read.BrowseOptions{}, 2); strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("most-played paged by 2 = %v, want %v", got, want)
 	}
 }
 
@@ -576,9 +811,9 @@ func TestEpisodeScopeAcrossReadSurfaces(t *testing.T) {
 
 // TestBrowseKindScoped pins the primitive the CLI's --kind flag rides on: any
 // discovery list narrows to one media type through the shared filter engine, with
-// the list keeping its own ordering. This is what makes an unscoped newest, which
-// spans every kind and so leads with podcast episodes on a podcast-heavy catalog,
-// a default rather than the only option.
+// the list keeping its own ordering. This is what makes an unscoped recently-added,
+// which spans every kind and so leads with podcast episodes on a podcast-heavy
+// catalog, a default rather than the only option.
 func TestBrowseKindScoped(t *testing.T) {
 	t.Parallel()
 	st, lib := entityFixture(t)

@@ -184,6 +184,7 @@ type DerivedDrift struct {
 	BookDurationDrift       int
 	BookISBNKeyDrift        int
 	AlbumYearDrift          int
+	ReleaseYearDrift        int
 }
 
 // Consistent reports whether the derived data is drift-free.
@@ -191,7 +192,8 @@ func (d DerivedDrift) Consistent() bool {
 	return d.ItemsMissingFTS == 0 && d.OrphanFTSRows == 0 &&
 		d.ArtistRollupDrift == 0 && d.GenreRollupDrift == 0 &&
 		d.ReleaseGroupRollupDrift == 0 && d.SortKeyDrift == 0 &&
-		d.BookDurationDrift == 0 && d.BookISBNKeyDrift == 0 && d.AlbumYearDrift == 0
+		d.BookDurationDrift == 0 && d.BookISBNKeyDrift == 0 && d.AlbumYearDrift == 0 &&
+		d.ReleaseYearDrift == 0
 }
 
 // CopyReason says why a file is an alternate of its item.

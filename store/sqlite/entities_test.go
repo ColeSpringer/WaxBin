@@ -672,7 +672,7 @@ func TestMBIDAdoptionJoinsEnrichedEntity(t *testing.T) {
 	if _, err := st.SetEntityStar(ctx, "", model.MergeAlbum, albumPID, true, nil); err != nil {
 		t.Fatalf("star album: %v", err)
 	}
-	if err := st.SetEntityArt(ctx, model.ArtAlbum, albumPID, model.ArtRoleFront, tinyPNG(t), "image/png",
+	if _, err := st.SetEntityArt(ctx, model.ArtAlbum, albumPID, model.ArtRoleFront, tinyPNG(t), "image/png",
 		model.Attribution{}, model.LockUnchanged, false); err != nil {
 		t.Fatalf("set album art: %v", err)
 	}

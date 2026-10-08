@@ -28,7 +28,11 @@ import (
 func (s *Store) PutScannedVirtualTracks(ctx context.Context, in model.PutScannedVirtualTracksInput) (*model.ScanItemResult, error) {
 	const op = "store.PutScannedVirtualTracks"
 	res := &model.ScanItemResult{}
-	err := s.writeTx(ctx, func(tx *sql.Tx) error {
+	cover, err := s.examineArt(ctx, in.CoverArt)
+	if err != nil {
+		return nil, waxerr.Wrap(waxerr.CodeIO, op, err)
+	}
+	err = s.writeTx(ctx, func(tx *sql.Tx) error {
 		now := nowNS()
 
 		// Each track's key is resolved once, for the relink (a relinked rip may be one
@@ -229,7 +233,7 @@ func (s *Store) PutScannedVirtualTracks(ctx context.Context, in model.PutScanned
 				continue
 			}
 
-			itemID, itemPID, created, _, priorTitle, err := upsertItem(ctx, tx, s.log, vt.Item, bookAdoptKey{}, now, "", keys[vt.Item.IdentityKey])
+			itemID, itemPID, created, _, priorTitle, err := upsertItem(ctx, tx, s.log, vt.Item, vt.Track.Year, bookAdoptKey{}, now, "", keys[vt.Item.IdentityKey])
 			if err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
@@ -270,7 +274,7 @@ func (s *Store) PutScannedVirtualTracks(ctx context.Context, in model.PutScanned
 			// with its album art. It respects a locked cover like the whole-file scan
 			// paths do (catalog.go, book.go), so re-reading the .cue does not undo a
 			// chosen cover on one of its tracks.
-			if _, err := attachArtRespectingLockTx(ctx, tx, itemID, in.CoverArt, in.PreserveLocks); err != nil {
+			if _, err := attachArtRespectingLockTx(ctx, tx, itemID, cover, in.PreserveLocks); err != nil {
 				return waxerr.Wrap(waxerr.CodeIO, op, err)
 			}
 			// Origin provenance from the file's tags, recorded per track when absent.
